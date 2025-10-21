@@ -1,0 +1,166 @@
+# app/bank_citi_crawler.py
+
+# 표준 라이브러리
+import logging
+
+# 서드파티 라이브러리
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from sqlalchemy.orm import Session
+from webdriver_manager.chrome import ChromeDriverManager
+
+# 로컬 애플리케이션
+from app import crud
+from app.database import SessionLocal
+
+BANK_NAME = 'citi'
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
+
+CITI_MIBANK_CODE = '027'
+
+CITI_BANK_URL = 'https://www.citibank.co.kr/FxdExrt0100.act'
+SECOND_CITI_BANK_URL = 'https://www.citibank.co.kr/FxdExrtFxrt0100.act'   # 주말에는 아예 안됨
+MIBANK_CITI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + CITI_MIBANK_CODE
+
+PAIRS = ['usd-krw', 'jpy-krw', 'eur-krw']
+CURRENCY_TEXTS = ['USD', 'JPY', 'EUR']
+
+CITI_BANK_SELECTORS = {     # 아래 selector의 국가 순서가 계속 바뀐다
+    '1st': '#content > ul > li:nth-child(1) > div', # 미국(USD)1,393.50하락-5.95
+    '2nd': '#content > ul > li:nth-child(2) > div', # 중국(CNY)195.72하락-0.83
+    '3rd': '#content > ul > li:nth-child(3) > div', # 유럽(EUR)1,641.12하락-2.53
+    '4th': '#content > ul > li:nth-child(4) > div' # 일본(JPY)942.64하락-3.16
+}
+AFTER_CITI_BANK_SELECTORS = 'div:nth-child(2) > span'
+
+SECOND_CITI_BANK_SELECTORS = {
+    'usd-krw': '#tab01 > table > tbody > tr:nth-child(1) > td:nth-child(2)',
+    'jpy-krw': '#tab01 > table > tbody > tr:nth-child(2) > td:nth-child(2)',
+    'eur-krw': '#tab01 > table > tbody > tr:nth-child(3) > td:nth-child(2)',
+    # 'cny-krw': '',
+}
+
+MIBANK_SELECTORS = {
+    'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
+    'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
+    'eur-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(4) > td.right.counter.rollsty01',
+    # 'cny-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(1) > td.right.counter.rollsty01',
+}
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Cache-Control': 'max-age=0'
+}
+
+def crawl_and_save_citi_bank_exchange_rates():
+    """씨티은행 환율 크롤링"""
+    db = SessionLocal()
+    try:
+        crawl_and_save_citi_first_routine(CITI_BANK_URL, CITI_BANK_SELECTORS, db)
+    except Exception as e:
+        logger.exception("CITI_BANK_URL 크롤링 실패", extra={"url": CITI_BANK_URL})
+        try:
+            logger.info("SECOND_CITI_BANK_URL 시도")
+            crawl_and_save_routine(SECOND_CITI_BANK_URL, SECOND_CITI_BANK_SELECTORS, db)
+        except Exception as e:
+            logger.exception("SECOND_CITI_BANK_URL 크롤링 실패", extra={"url": SECOND_CITI_BANK_URL})
+            try:
+                logger.info("MIBANK_CITI_URL 시도")
+                crawl_and_save_routine(MIBANK_CITI_URL, MIBANK_SELECTORS, db)
+            except Exception as e:
+                logger.exception("MIBANK_CITI_URL 크롤링 실패", extra={"url": MIBANK_CITI_URL})
+                error_msg = f"모든 URL 실패: {str(e)[:100]}"
+                logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+    finally:
+        db.close()    
+
+
+def crawl_and_save_citi_first_routine(url: str, selectors: dict, db: Session) -> int:
+    """시티은행 첫번째 크롤링 루틴 (변경 개수 반환)"""
+    current_rates = {}
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        for order, selector in selectors.items():
+            item = soup.select_one(selector)    # 미국(USD)1,393.50하락-5.95
+
+            if not item:
+                logger.warning(f"⚠️ SELECTOR 오류: {order}", extra={"order": order, "selector": selector, "bank": BANK_NAME})
+                continue
+
+            for index, currency in enumerate(CURRENCY_TEXTS):   # 환율찾아 매칭 'USD', 'JPY', 'EUR'
+                if currency in item.get_text(): # 문자열 검색 - 'item.get_text()`가 curency를 포함하는지
+                    rate_element = item.select_one(AFTER_CITI_BANK_SELECTORS)   # 1,393.50  ⬅ 환율만 가져오기
+                    if not rate_element:
+                        logger.warning(f"⚠️ SELECTOR 오류: {order}", extra={"order": order, "selector": f"{selector}{AFTER_CITI_BANK_SELECTORS}", "bank": BANK_NAME})
+                        continue
+                    rate_text = rate_element.get_text(strip=True).replace(',', '')
+
+                    try:
+                        current_rate = float(rate_text)
+                        current_rates[PAIRS[index]] = current_rate
+                    except ValueError:
+                        logger.warning(f"⚠️ 유효하지 않은 환율: {order}", extra={"order": order, "rate_text": rate_text, "bank": BANK_NAME})
+                        continue
+
+    except Exception as e:
+        logger.exception("⚠️ URL 오류", extra={"url": url, "bank": BANK_NAME})
+        raise
+
+    # db 저장
+    if current_rates:
+        return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+    else:
+        raise Exception(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception")
+
+
+def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
+    """크롤링 + DB 저장 루틴 (변경 개수 반환)"""
+    current_rates = {}
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        for pair, selector in selectors.items():
+            rate_element = soup.select_one(selector)
+
+            if not rate_element:
+                logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
+                continue
+
+            rate_text = rate_element.get_text(strip=True).replace(',', '')
+
+            try:
+                current_rate = float(rate_text)
+                current_rates[pair] = current_rate
+            except ValueError:
+                logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
+                continue
+
+    except Exception as e:
+        logger.exception("⚠️ URL 오류", extra={"url": url, "bank": BANK_NAME})
+        raise
+
+    # db 저장
+    if current_rates:
+        return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+    else:
+        raise Exception(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception")

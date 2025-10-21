@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>관리자 대시보드</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            line-height: 1.6;
+        }
+
+        /* 헤더 */
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 0.75rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .header-buttons {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .refresh-btn {
+            background: #238636;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: #2ea043;
+        }
+
+        .refresh-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .auto-refresh-toggle {
+            background: #161b22;
+            color: #58a6ff;
+            border: 2px dashed #30363d;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .auto-refresh-toggle.active {
+            background: #1f6feb;
+            border: 2px solid #1f6feb;
+            border-style: solid;
+            color: white;
+        }
+
+        .auto-refresh-toggle:hover {
+            border-color: #58a6ff;
+            background: #21262d;
+        }
+
+        /* 컨테이너 */
+        .container {
+            padding: 1rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        /* 대시보드 카드 */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 1rem;
+        }
+
+        .card-label {
+            font-size: 0.875rem;
+            color: #8b949e;
+            margin-bottom: 0.5rem;
+        }
+
+        .card-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #58a6ff;
+        }
+
+        .card-subvalue {
+            font-size: 1rem;
+            font-weight: 500;
+            color: #8b949e;
+            margin-top: 0.25rem;
+        }
+
+        .card.error .card-value {
+            color: #f85149;
+        }
+
+        .card.warning .card-value {
+            color: #d29922;
+        }
+
+        /* 크롤러 뱃지 */
+        .section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 1.5rem 0 0.75rem;
+            color: #c9d1d9;
+        }
+
+        .crawler-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .crawler-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .crawler-badge:hover {
+            background: #21262d;
+            border-color: #58a6ff;
+        }
+
+        .crawler-badge.active {
+            background: #1f6feb;
+            border-color: #1f6feb;
+            color: white;
+        }
+
+        .crawler-badge.has-errors {
+            border-color: #f85149;
+        }
+
+        .badge-name {
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-count {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 1.5rem;
+            height: 1.5rem;
+            padding: 0 0.35rem;
+            background: #21262d;
+            color: #c9d1d9;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+
+        .crawler-badge.has-errors .badge-count {
+            background: #f85149;
+            color: white;
+        }
+
+        /* 탭 */
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .tab-btn {
+            background: transparent;
+            color: #8b949e;
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover {
+            color: #c9d1d9;
+        }
+
+        .tab-btn.active {
+            color: #58a6ff;
+            border-bottom-color: #58a6ff;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* 로그 필터 */
+        .log-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .log-filters select,
+        .log-filters input {
+            background: #161b22;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .log-filters input {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        /* 로그 컨테이너 */
+        .log-summary {
+            font-size: 0.875rem;
+            color: #8b949e;
+            margin-bottom: 0.75rem;
+        }
+
+        .logs-container {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-left: 3px solid transparent;
+            border-radius: 6px;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+        }
+
+        .log-entry.ERROR { border-left-color: #f85149; }
+        .log-entry.WARNING { border-left-color: #d29922; }
+        .log-entry.INFO { border-left-color: #58a6ff; }
+        .log-entry.DEBUG { border-left-color: #8b949e; }
+
+        .log-header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+            color: #8b949e;
+        }
+
+        .log-level {
+            display: inline-block;
+            padding: 0.125rem 0.5rem;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.75rem;
+        }
+
+        .log-level.ERROR { background: rgba(248, 81, 73, 0.2); color: #f85149; }
+        .log-level.WARNING { background: rgba(210, 153, 34, 0.2); color: #d29922; }
+        .log-level.INFO { background: rgba(88, 166, 255, 0.2); color: #58a6ff; }
+        .log-level.DEBUG { background: rgba(139, 148, 158, 0.2); color: #8b949e; }
+
+        .log-message {
+            color: #c9d1d9;
+            margin-bottom: 0.5rem;
+            word-break: break-word;
+        }
+
+        .log-metadata {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background: #0d1117;
+            border-radius: 4px;
+            font-size: 0.75rem;
+        }
+
+        .meta-item {
+            color: #8b949e;
+        }
+
+        .meta-value {
+            color: #58a6ff;
+            font-weight: 600;
+        }
+
+        .stacktrace {
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background: rgba(248, 81, 73, 0.1);
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-size: 0.75rem;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .stacktrace.expanded {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .toggle-trace {
+            cursor: pointer;
+            color: #58a6ff;
+            text-decoration: underline;
+            user-select: none;
+            font-size: 0.75rem;
+        }
+
+        /* 스크롤바 */
+        .logs-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .logs-container::-webkit-scrollbar-track {
+            background: #161b22;
+        }
+
+        .logs-container::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 4px;
+        }
+
+        .logs-container::-webkit-scrollbar-thumb:hover {
+            background: #484f58;
+        }
+
+        /* 모바일 최적화 */
+        @media (max-width: 768px) {
+            .container {
+                padding: 0.5rem;
+            }
+
+            .dashboard-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 0.5rem;
+            }
+
+            .card {
+                padding: 0.75rem;
+            }
+
+            .card-value {
+                font-size: 1.25rem;
+            }
+
+            .logs-container {
+                max-height: 400px;
+            }
+        }
+
+        /* 로딩 상태 */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #8b949e;
+        }
+    </style>
+</head>
+<body>
+    <!-- 헤더 -->
+    <div class="header">
+        <h1>🎛️ 관리자 대시보드</h1>
+        <div class="header-buttons">
+            <button class="auto-refresh-toggle active" id="auto-refresh-toggle" onclick="toggleAutoRefresh()">
+                ⏸️ 자동 새로고침: ON
+            </button>
+            <button class="refresh-btn" id="refresh-btn" onclick="loadDashboard()">🔄 새로고침</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- 대시보드 카드 -->
+        <div class="dashboard-grid">
+            <div class="card">
+                <div class="card-label">WebSocket 연결</div>
+                <div class="card-value" id="ws-count">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">메모리 사용</div>
+                <div class="card-value" id="memory">-</div>
+                <div class="card-subvalue" id="db-size">DB: -</div>
+            </div>
+            <div class="card">
+                <div class="card-label">브로드캐스트</div>
+                <div class="card-value" id="broadcast-success">-</div>
+                <div class="card-subvalue" id="broadcast-interval">평균 주기: -</div>
+            </div>
+            <div class="card">
+                <div class="card-label">서버 상태</div>
+                <div class="card-value" id="uptime">-</div>
+                <div class="card-subvalue" id="mode">모드: -</div>
+            </div>
+            <div class="card" id="error-card">
+                <div class="card-label">에러+경고 (최근 1시간)</div>
+                <div class="card-value" id="errors">-</div>
+            </div>
+        </div>
+
+        <!-- 크롤러 상태 -->
+        <h2 class="section-title">🤖 크롤러 상태 (최근 1시간)</h2>
+        <div class="crawler-badges" id="crawler-badges">
+            <!-- 동적 생성 -->
+        </div>
+
+        <!-- 로그 -->
+        <h2 class="section-title">📋 로그</h2>
+
+        <!-- 탭 -->
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('realtime')">🖥️ 실시간 모니터링</button>
+            <button class="tab-btn" onclick="switchTab('errors')">⚠️ 에러 추적</button>
+        </div>
+
+        <!-- 실시간 모니터링 탭 (app.log) -->
+        <div class="tab-content active" id="tab-realtime">
+            <div class="log-filters">
+                <input type="text" id="realtime-keyword" placeholder="🔍 키워드 검색..." onkeyup="filterRealtimeLogs()">
+            </div>
+            <div class="log-summary" id="realtime-summary">-</div>
+            <div class="logs-container" id="realtime-container">
+                <div class="loading">로딩 중...</div>
+            </div>
+        </div>
+
+        <!-- 에러 추적 탭 (error.log) -->
+        <div class="tab-content" id="tab-errors">
+            <div class="log-filters">
+                <select id="error-hours" onchange="loadErrorLogs()">
+                    <option value="1" selected>최근 1시간</option>
+                    <option value="24">최근 24시간</option>
+                    <option value="168">최근 7일</option>
+                </select>
+                <select id="error-level" onchange="loadErrorLogs()">
+                    <option value="">전체 레벨</option>
+                    <option value="ERROR">ERROR만</option>
+                    <option value="WARNING">WARNING만</option>
+                </select>
+                <select id="error-bank" onchange="loadErrorLogs()">
+                    <option value="">전체 은행</option>
+                    <option value="investing">INV</option>
+                    <option value="kb">KB</option>
+                    <option value="hana">하나</option>
+                    <option value="shinhan">신한</option>
+                    <option value="woori">우리</option>
+                    <option value="ibk">IBK</option>
+                    <option value="nh">NH</option>
+                    <option value="sc">SC</option>
+                    <option value="bs">부산</option>
+                    <option value="citi">씨티</option>
+                </select>
+                <input type="text" id="error-keyword" placeholder="🔍 키워드 검색..." onkeyup="filterErrorLogs()">
+            </div>
+            <div class="log-summary" id="error-summary">-</div>
+            <div class="logs-container" id="error-container">
+                <div class="loading">로딩 중...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ========================================
+        // 전역 변수
+        // ========================================
+        let dashboardData = null;
+        let realtimeLogs = [];
+        let errorLogs = [];
+        let selectedCrawler = null;
+        let autoRefreshEnabled = true;
+        let autoRefreshTimer = null;
+        let currentTab = 'realtime';
+
+        const BANK_ORDER = ['investing', 'kb', 'hana', 'shinhan', 'woori', 'ibk', 'nh', 'sc', 'bs', 'citi'];
+        const BANK_NAMES = {
+            'investing': 'INV',
+            'kb': 'KB',
+            'hana': '하나',
+            'shinhan': '신한',
+            'woori': '우리',
+            'ibk': 'IBK',
+            'nh': 'NH',
+            'sc': 'SC',
+            'bs': '부산',
+            'citi': '씨티'
+        };
+
+        // ========================================
+        // 유틸리티 함수
+        // ========================================
+        function formatUptime(seconds) {
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+
+            if (days > 0) {
+                return `${days}일 ${hours}시간`;
+            } else if (hours > 0) {
+                return `${hours}시간 ${minutes}분`;
+            } else {
+                return `${minutes}분`;
+            }
+        }
+
+        // ========================================
+        // 초기화
+        // ========================================
+        document.addEventListener('DOMContentLoaded', () => {
+            loadDashboard();
+            startAutoRefresh();
+        });
+
+        function startAutoRefresh() {
+            if (autoRefreshTimer) {
+                clearInterval(autoRefreshTimer);
+            }
+            if (autoRefreshEnabled) {
+                autoRefreshTimer = setInterval(loadDashboard, 30000);
+            }
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            const btn = document.getElementById('auto-refresh-toggle');
+
+            if (autoRefreshEnabled) {
+                btn.classList.add('active');
+                btn.textContent = '⏸️ 자동 새로고침: ON';
+                startAutoRefresh();
+            } else {
+                btn.classList.remove('active');
+                btn.textContent = '▶️ 자동 새로고침: OFF';
+                if (autoRefreshTimer) {
+                    clearInterval(autoRefreshTimer);
+                    autoRefreshTimer = null;
+                }
+            }
+        }
+
+        // ========================================
+        // 탭 전환
+        // ========================================
+        function switchTab(tab) {
+            currentTab = tab;
+
+            // 탭 버튼 활성화
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // 탭 콘텐츠 표시
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(`tab-${tab}`).classList.add('active');
+
+            // 해당 탭의 로그 로드
+            if (tab === 'realtime') {
+                loadRealtimeLogs();
+            } else {
+                loadErrorLogs();
+            }
+        }
+
+        // ========================================
+        // 대시보드 로드
+        // ========================================
+        async function loadDashboard() {
+            const btn = document.getElementById('refresh-btn');
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/admin/api/dashboard');
+                dashboardData = await res.json();
+
+                // 대시보드 카드 업데이트
+                document.getElementById('ws-count').textContent = dashboardData.system.websocket_connections;
+                document.getElementById('memory').textContent = `${dashboardData.system.memory_mb}MB (${dashboardData.system.memory_percent}%)`;
+                document.getElementById('db-size').textContent = `DB: ${dashboardData.system.db_size_mb}MB`;
+
+                // 브로드캐스트 통계
+                document.getElementById('broadcast-success').textContent = `${dashboardData.broadcast.success_rate}%`;
+                document.getElementById('broadcast-interval').textContent = `평균 주기: ${dashboardData.broadcast.avg_interval}초`;
+
+                // 서버 상태
+                document.getElementById('uptime').textContent = formatUptime(dashboardData.system.uptime_seconds);
+                document.getElementById('mode').textContent = `모드: ${dashboardData.system.current_mode}`;
+
+                // 에러 카운트
+                document.getElementById('errors').textContent = dashboardData.errors_1h;
+
+                // 에러 카드 색상 변경
+                const errorCard = document.getElementById('error-card');
+                if (dashboardData.errors_1h > 0) {
+                    errorCard.classList.add('error');
+                } else {
+                    errorCard.classList.remove('error');
+                }
+
+                // 크롤러 뱃지 업데이트
+                updateCrawlerBadges();
+
+                // 현재 활성 탭의 로그 로드
+                if (currentTab === 'realtime') {
+                    loadRealtimeLogs();
+                } else {
+                    loadErrorLogs();
+                }
+
+            } catch (err) {
+                console.error('대시보드 로드 실패:', err);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // ========================================
+        // 크롤러 뱃지 업데이트
+        // ========================================
+        function updateCrawlerBadges() {
+            if (!dashboardData || !dashboardData.crawlers) return;
+
+            const container = document.getElementById('crawler-badges');
+            const crawlersMap = {};
+            dashboardData.crawlers.forEach(c => {
+                crawlersMap[c.name] = c;
+            });
+
+            container.innerHTML = BANK_ORDER.map(name => {
+                const crawler = crawlersMap[name];
+                if (!crawler) return '';
+
+                const hasErrors = crawler.error_count > 0;
+                const activeClass = selectedCrawler === name ? 'active' : '';
+                const errorClass = hasErrors ? 'has-errors' : '';
+
+                return `
+                    <div class="crawler-badge ${activeClass} ${errorClass}" onclick="filterByCrawler('${name}')">
+                        <span class="badge-name">${BANK_NAMES[name]}</span>
+                        <span class="badge-count">${crawler.error_count}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // ========================================
+        // 크롤러 필터
+        // ========================================
+        function filterByCrawler(crawler) {
+            if (selectedCrawler === crawler) {
+                selectedCrawler = null;
+            } else {
+                selectedCrawler = crawler;
+            }
+
+            updateCrawlerBadges();
+
+            // 현재 탭의 로그 리로드
+            if (currentTab === 'realtime') {
+                loadRealtimeLogs();
+            }
+        }
+
+        // ========================================
+        // 실시간 모니터링 로그 로드 (app.log)
+        // ========================================
+        async function loadRealtimeLogs() {
+            try {
+                let url = `/admin/api/logs?log_type=app&limit=300&hours=1`;
+                if (selectedCrawler) {
+                    url += `&bank=${selectedCrawler}`;
+                }
+
+                const res = await fetch(url);
+                const data = await res.json();
+
+                realtimeLogs = data.logs;
+                filterRealtimeLogs();
+
+            } catch (err) {
+                console.error('실시간 로그 로드 실패:', err);
+            }
+        }
+
+        // ========================================
+        // 에러 추적 로그 로드 (error.log)
+        // ========================================
+        async function loadErrorLogs() {
+            try {
+                const hours = document.getElementById('error-hours').value;
+                const level = document.getElementById('error-level').value;
+                const bank = document.getElementById('error-bank').value;
+
+                let url = `/admin/api/logs?log_type=error&limit=10000&hours=${hours}`;
+                if (level) url += `&level=${level}`;
+                if (bank) url += `&bank=${bank}`;
+
+                const res = await fetch(url);
+                const data = await res.json();
+
+                errorLogs = data.logs;
+                filterErrorLogs();
+
+            } catch (err) {
+                console.error('에러 로그 로드 실패:', err);
+            }
+        }
+
+        // ========================================
+        // 실시간 로그 필터링 및 렌더링
+        // ========================================
+        function filterRealtimeLogs() {
+            const keyword = document.getElementById('realtime-keyword').value.toLowerCase();
+
+            let filtered = realtimeLogs.filter(log => {
+                if (keyword && !JSON.stringify(log).toLowerCase().includes(keyword)) {
+                    return false;
+                }
+                return true;
+            });
+
+            renderLogs(filtered, 'realtime-container');
+
+            // 요약 업데이트
+            let summary = `${filtered.length}개 로그 (최근 1시간)`;
+            if (selectedCrawler) {
+                const crawler = dashboardData.crawlers.find(c => c.name === selectedCrawler);
+                if (crawler) {
+                    summary = `${BANK_NAMES[selectedCrawler]} - 로그 ${filtered.length}개, 에러 ${crawler.error_count}건 (최근 1시간)`;
+                }
+            }
+            document.getElementById('realtime-summary').textContent = summary;
+        }
+
+        // ========================================
+        // 에러 로그 필터링 및 렌더링
+        // ========================================
+        function filterErrorLogs() {
+            const keyword = document.getElementById('error-keyword').value.toLowerCase();
+
+            let filtered = errorLogs.filter(log => {
+                if (keyword && !JSON.stringify(log).toLowerCase().includes(keyword)) {
+                    return false;
+                }
+                return true;
+            });
+
+            renderLogs(filtered, 'error-container');
+
+            // 요약 업데이트
+            const hours = document.getElementById('error-hours').value;
+            const level = document.getElementById('error-level').value;
+            const bank = document.getElementById('error-bank').value;
+
+            let timeText = hours === '1' ? '최근 1시간' : hours === '24' ? '최근 24시간' : '최근 7일';
+            let levelText = level ? ` (${level})` : '';
+            let bankText = bank ? ` - ${BANK_NAMES[bank]}` : '';
+
+            document.getElementById('error-summary').textContent =
+                `${filtered.length}개 에러/경고${levelText}${bankText} (${timeText})`;
+        }
+
+        // ========================================
+        // 로그 렌더링
+        // ========================================
+        function renderLogs(logs, containerId) {
+            const container = document.getElementById(containerId);
+
+            if (logs.length === 0) {
+                container.innerHTML = '<div class="loading">로그가 없습니다.</div>';
+                return;
+            }
+
+            container.innerHTML = logs.map((log, idx) => {
+                // 메타데이터
+                let metadata = '';
+                const metaFields = ['bank', 'pair', 'old_rate', 'new_rate', 'change', 'rate', 'url', 'selector'];
+                const metaItems = [];
+
+                metaFields.forEach(field => {
+                    if (log[field] !== undefined && log[field] !== null) {
+                        metaItems.push(`<span class="meta-item">${field}: <span class="meta-value">${log[field]}</span></span>`);
+                    }
+                });
+
+                if (metaItems.length > 0) {
+                    metadata = `<div class="log-metadata">${metaItems.join('')}</div>`;
+                }
+
+                // 스택 트레이스
+                let stacktrace = '';
+                if (log.exc_info) {
+                    const traceId = `${containerId}-trace-${idx}`;
+                    stacktrace = `
+                        <span class="toggle-trace" onclick="toggleTrace('${traceId}')">📋 스택 트레이스 보기</span>
+                        <div class="stacktrace" id="${traceId}">${log.exc_info}</div>
+                    `;
+                }
+
+                return `
+                    <div class="log-entry ${log.level || ''}">
+                        <div class="log-header">
+                            <strong>${log.timestamp || ''}</strong>
+                            <span class="log-level ${log.level || ''}">${log.level || ''}</span>
+                            <span>${log.logger || ''}</span>
+                        </div>
+                        <div class="log-message">${log.message || ''}</div>
+                        ${metadata}
+                        ${stacktrace}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // ========================================
+        // 스택 트레이스 토글
+        // ========================================
+        function toggleTrace(traceId) {
+            const trace = document.getElementById(traceId);
+            trace.classList.toggle('expanded');
+        }
+    </script>
+</body>
+</html>

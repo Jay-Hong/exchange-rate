@@ -1,0 +1,27 @@
+# 웹 프레임워크
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
+python-multipart>=0.0.12,<1.0.0
+jinja2>=3.1.4,<4.0.0
+
+# 데이터베이스
+sqlalchemy>=2.0.43,<3.0.0
+
+# 크롤링
+requests>=2.32.3,<3.0.0
+beautifulsoup4>=4.12.3,<5.0.0
+
+# 스케줄링
+apscheduler>=3.10.4,<4.0.0
+
+# 타임존 (항상 최신 권장)
+pytz>=2024.2
+
+# 로깅
+python-json-logger>=2.0.7,<3.0.0
+
+# 환경 변수 관리
+python-dotenv>=1.0.1,<2.0.0
+
+# 시스템 모니터링
+psutil>=7.0.0
