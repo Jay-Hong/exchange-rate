@@ -17,6 +17,7 @@
 
 **글로벌 MCP** (`~/.claude.json`, user scope):
 - **context7**: 라이브러리 문서 조회 (모든 프로젝트 공통)
+- **github**: GitHub 저장소 관리 (Docker 기반, 설치 방법은 `~/.claude/CLAUDE.md` 참고)
 
 **프로젝트별 MCP** (`~/.claude.json`, local scope):
 - **sqlite**: `data/exchange_rates.db` 접근 (DB 쿼리 실행)
