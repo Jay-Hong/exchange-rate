@@ -20,15 +20,7 @@ from app.database import SessionLocal
 
 BANK_NAME = 'hana'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-HANA_MIBANK_CODE = '005'
-
 HANA_BANK_URL = 'https://www.hanabank.com/cms/rate/wpfxd651_01i_01.do?pbldDvCd=0'
-SECOND_HANA_BANK_URL = 'https://www.kebhana.com/cont/mall/mall15/mall1501/index.jsp'
-MIBANK_HANA_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + HANA_MIBANK_CODE
-
 HANA_BANK_SELECTORS = {
     # '미국 USD': 'div.printdiv > table > tbody > tr:nth-child(1) > td.tc > a > u',
     'usd-krw': 'div.printdiv > table > tbody > tr:nth-child(1) > td:nth-child(9)',
@@ -37,6 +29,7 @@ HANA_BANK_SELECTORS = {
     # 'cny-krw': 'div.printdiv > table > tbody > tr:nth-child(4) > td:nth-child(9)',
 }
 
+SECOND_HANA_BANK_URL = 'https://www.kebhana.com/cont/mall/mall15/mall1501/index.jsp'
 SECOND_HANA_BANK_SELECTORS = {
     # '미국 USD': 'div.printdiv > table > tbody > tr:nth-child(1) > td.tc > a > u',
     'usd-krw': '#searchContentDiv > div.printdiv > table > tbody > tr:nth-child(1) > td:nth-child(9)',
@@ -45,6 +38,8 @@ SECOND_HANA_BANK_SELECTORS = {
     # 'cny-krw': 'div.printdiv > table > tbody > tr:nth-child(4) > td:nth-child(9)',
 }
 
+MIBANK_HANA_CODE = '005'
+MIBANK_HANA_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_HANA_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -64,6 +59,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_hana_bank_exchange_rates():
     """하나은행 환율 크롤링"""

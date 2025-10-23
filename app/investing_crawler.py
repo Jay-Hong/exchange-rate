@@ -12,15 +12,11 @@ from sqlalchemy.orm import Session
 from app import crud
 from app.database import SessionLocal
 
-# 로거 설정
-logger = logging.getLogger("exchange_rate.crawler.investing")
-
 # 크롤러 이름
 CRAWLER_NAME = "investing"
 
 FIRST_INVESTING_URL = 'https://kr.investing.com/currencies/exchange-rates-table'              # Main
 SECOND_INVESTING_URL = 'https://sslfxrates.investing.com/index_exchange.php?force_lang=18'    # API
-
 INVESTING_SELECTORS = {
     'usd-krw': '#last_12_28',
     'jpy-krw': '#last_2_28',
@@ -29,7 +25,6 @@ INVESTING_SELECTORS = {
     # 'TES-EST' : '#exchange_rates_1 > thead > tr > th.left.first'
 }
 SCALED_CURRENCY_PAIRS = {"jpy-krw": 100}
-
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -43,6 +38,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger("exchange_rate.crawler.investing")
 
 def crawl_and_save_investing_exchange_rates():
     """Investing.com 환율 크롤링"""

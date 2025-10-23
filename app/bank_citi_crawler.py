@@ -20,18 +20,7 @@ from app.database import SessionLocal
 
 BANK_NAME = 'citi'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-CITI_MIBANK_CODE = '027'
-
 CITI_BANK_URL = 'https://www.citibank.co.kr/FxdExrt0100.act'
-SECOND_CITI_BANK_URL = 'https://www.citibank.co.kr/FxdExrtFxrt0100.act'   # 주말에는 아예 안됨
-MIBANK_CITI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + CITI_MIBANK_CODE
-
-PAIRS = ['usd-krw', 'jpy-krw', 'eur-krw']
-CURRENCY_TEXTS = ['USD', 'JPY', 'EUR']
-
 CITI_BANK_SELECTORS = {     # 아래 selector의 국가 순서가 계속 바뀐다
     '1st': '#content > ul > li:nth-child(1) > div', # 미국(USD)1,393.50하락-5.95
     '2nd': '#content > ul > li:nth-child(2) > div', # 중국(CNY)195.72하락-0.83
@@ -39,7 +28,10 @@ CITI_BANK_SELECTORS = {     # 아래 selector의 국가 순서가 계속 바뀐�
     '4th': '#content > ul > li:nth-child(4) > div' # 일본(JPY)942.64하락-3.16
 }
 AFTER_CITI_BANK_SELECTORS = 'div:nth-child(2) > span'
+PAIRS = ['usd-krw', 'jpy-krw', 'eur-krw']
+CURRENCY_TEXTS = ['USD', 'JPY', 'EUR']
 
+SECOND_CITI_BANK_URL = 'https://www.citibank.co.kr/FxdExrtFxrt0100.act'   # 주말에는 아예 안됨
 SECOND_CITI_BANK_SELECTORS = {
     'usd-krw': '#tab01 > table > tbody > tr:nth-child(1) > td:nth-child(2)',
     'jpy-krw': '#tab01 > table > tbody > tr:nth-child(2) > td:nth-child(2)',
@@ -47,6 +39,8 @@ SECOND_CITI_BANK_SELECTORS = {
     # 'cny-krw': '',
 }
 
+MIBANK_CITI_CODE = '027'
+MIBANK_CITI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_CITI_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -66,6 +60,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_citi_bank_exchange_rates():
     """씨티은행 환율 크롤링"""

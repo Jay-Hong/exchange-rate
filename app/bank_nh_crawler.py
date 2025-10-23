@@ -20,17 +20,9 @@ from app.database import SessionLocal
 
 BANK_NAME = 'nh'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-NH_MIBANK_CODE = '011'
-
 NH_BANK_URL = 'https://branch.nonghyup.com/servlet/content/ip/ef/IPEF0002M.thtml'   # 메인 페이지로 우회하여 환율페이지 접속
 # SECOND_NH_BANK_URL = 'https://branch.nonghyup.com/servlet/IPEFP0011I.view'    # 25/9/20 현재 URL 직접 접근시 크롤링 불가 (환율정보 제공X)
-MIBANK_NH_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + NH_MIBANK_CODE
-
 NH_MAIN_TO_EXCHANGE_RATES_PAGE = "#content_load_section > div.sec.sec_02.bg_sec_darkgray.pdt60.pdb36 > div > ul > li:nth-child(1) > dl > dd > ul > li:nth-child(2) > a > span"
-
 NH_BANK_SELECTORS = {
     'usd-krw': '#result > div > table.tb_col.tb_pd5.t_center > tbody > tr:nth-child(1) > td:nth-child(9)',
     'jpy-krw': '#result > div > table.tb_col.tb_pd5.t_center > tbody > tr:nth-child(2) > td:nth-child(9)',
@@ -38,6 +30,8 @@ NH_BANK_SELECTORS = {
     # 'cny-krw': '#result > div > table.tb_col.tb_pd5.t_center > tbody > tr:nth-child(4) > td:nth-child(9)',
 }
 
+MIBANK_NH_CODE = '011'
+MIBANK_NH_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_NH_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -57,6 +51,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_nh_bank_exchange_rates():
     """농협은행 환율 크롤링"""

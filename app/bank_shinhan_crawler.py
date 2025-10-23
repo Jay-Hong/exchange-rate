@@ -20,15 +20,7 @@ from app.database import SessionLocal
 
 BANK_NAME = 'shinhan'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-SHINHAN_MIBANK_CODE = '088'
-
 SHINHAN_BANK_URL = 'https://bank.shinhan.com/rib/easy/index.jsp#210501000000'
-SECOND_SHINHAN_BANK_URL = 'https://bank.shinhan.com/index.jsp#020501010100'
-MIBANK_SHINHAN_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + SHINHAN_MIBANK_CODE
-
 SHINHAN_BANK_SELECTORS = {
     'usd-krw': '#grd_list_1_cell_0_6 > nobr',
     'jpy-krw': '#grd_list_1_cell_1_6 > nobr',
@@ -36,6 +28,7 @@ SHINHAN_BANK_SELECTORS = {
     # 'cny-krw': '#grd_list_1_cell_11_6 > nobr',
 }
 
+SECOND_SHINHAN_BANK_URL = 'https://bank.shinhan.com/index.jsp#020501010100'
 SECOND_SHINHAN_BANK_SELECTORS = {
     'usd-krw': '#grd_list_1_cell_0_2 > nobr',
     'jpy-krw': '#grd_list_1_cell_1_2 > nobr',
@@ -43,6 +36,8 @@ SECOND_SHINHAN_BANK_SELECTORS = {
     # 'cny-krw': '#grd_list_1_cell_11_2 > nobr',
 }
 
+MIBANK_SHINHAN_CODE = '088'
+MIBANK_SHINHAN_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_SHINHAN_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -63,6 +58,8 @@ HEADERS = {
     'Cache-Control': 'max-age=0'
 }
 
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_shinhan_bank_exchange_rates():
     """신한은행 환율 크롤링"""
@@ -98,7 +95,7 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
     current_rates = {}
     try:
         driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, 5)
+        wait = WebDriverWait(driver, 10)
 
         for pair, selector in selectors.items():
             try:

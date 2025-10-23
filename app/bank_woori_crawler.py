@@ -22,21 +22,7 @@ from app.database import SessionLocal
 
 BANK_NAME = 'woori'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-WOORI_MIBANK_CODE = '020'
-MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
-
-# 우리은행 날짜 선택 selector (년/월/일 select 박스)
-YEAR_SELECTOR = "#SELECT_DATE_601Y"
-MONTH_SELECTOR = "#SELECT_DATE_601M"
-DAY_SELECTOR = "#SELECT_DATE_601D"
-
 WOORI_BANK_URL = 'https://m.wooribank.com/mw/mws?withyou=MWFCE0005'
-SECOND_WOORI_BANK_URL = 'https://spib.wooribank.com/pib/Dream?withyou=CMCOM0184'    # 자정이후, 주말에는 날짜변경 후 조회
-MIBANK_KB_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + WOORI_MIBANK_CODE
-
 WOORI_BANK_SELECTORS = {
     'usd-krw': 'body > div.wrap > div.conts-wrap.p1 > div.list-wrap > ul > li:nth-child(1) > a > dl > div:nth-child(2) > dd > span',
     'jpy-krw': 'body > div.wrap > div.conts-wrap.p1 > div.list-wrap > ul > li:nth-child(2) > a > dl > div:nth-child(2) > dd > span',
@@ -44,13 +30,21 @@ WOORI_BANK_SELECTORS = {
     # 'cny-krw': 'body > div.wrap > div.conts-wrap.p1 > div.list-wrap > ul > li:nth-child(8) > a > dl > div:nth-child(2) > dd > span',
 }
 
+SECOND_WOORI_BANK_URL = 'https://spib.wooribank.com/pib/Dream?withyou=CMCOM0184'    # 자정이후, 주말에는 날짜변경 후 조회
 SECOND_WOORI_BANK_SELECTORS = {
     'usd-krw': '#fxprint > table > tbody > tr:nth-child(1) > td:nth-child(9)',
     'jpy-krw': '#fxprint > table > tbody > tr:nth-child(2) > td:nth-child(9)',
     'eur-krw': '#fxprint > table > tbody > tr:nth-child(3) > td:nth-child(9)',
     # 'cny-krw': '#fxprint > table > tbody > tr:nth-child(8) > td:nth-child(9)',
 }
+MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
+# 우리은행 날짜 선택 selector (년/월/일 select 박스)
+YEAR_SELECTOR = "#SELECT_DATE_601Y"
+MONTH_SELECTOR = "#SELECT_DATE_601M"
+DAY_SELECTOR = "#SELECT_DATE_601D"
 
+MIBANK_WOORI_CODE = '020'
+MIBANK_KB_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_WOORI_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -70,6 +64,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_woori_bank_exchange_rates():
     """우리은행 환율 크롤링"""

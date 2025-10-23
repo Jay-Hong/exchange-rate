@@ -13,15 +13,9 @@ from app import crud
 from app.database import SessionLocal
 
 BANK_NAME = 'kb'
-KB_MIBANK_CODE = '004'
-
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 KB_BANK_URL = 'https://obank.kbstar.com/quics?chgCompId=b101827&page=C101423'
 SECOND_KB_BANK_URL = 'https://obank.kbstar.com/quics?page=C101423'
-MIBANK_KB_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + KB_MIBANK_CODE
-
 KB_BANK_SELECTORS = {   # SECOND_KB_BANK_SELECTORS 도 같음
     'usd-krw': '#inqueryTable > table:nth-child(2) > tbody > tr:nth-child(1) > td:nth-child(3)',
     'jpy-krw': '#inqueryTable > table:nth-child(2) > tbody > tr:nth-child(2) > td:nth-child(3)',
@@ -29,6 +23,8 @@ KB_BANK_SELECTORS = {   # SECOND_KB_BANK_SELECTORS 도 같음
     # 'cny-krw': '#inqueryTable > table:nth-child(2) > tbody > tr:nth-child(10) > td:nth-child(3)',
 }
 
+MIBANK_KB_CODE = '004'
+MIBANK_KB_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_KB_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -48,6 +44,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_kb_bank_exchange_rates():
     """KB국민은행 환율 크롤링"""

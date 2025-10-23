@@ -100,24 +100,24 @@ timestamp  DATETIME (KST)
 ### 영업시간 자동 감지
 
 - **IN 모드**: 월요일 04:00 ~ 토요일 07:59
-  - 크롤링 주기: 5-33초 (소스별 상이)
+  - 크롤링 주기: 4.4-33.3초 (소스별 상이)
 - **OUT 모드**: 그 외 시간
-  - 크롤링 주기: 50-330초 (IN 모드의 10배)
+  - 크롤링 주기: 44-333초 (IN 모드의 10배)
 
 ### 크롤러 실행 주기 (IN 모드 기준)
 
 ```python
 BANK_TASKS = [
-    ("investing", 5초),
-    ("hana", 7초),
-    ("kb", 8초),
-    ("woori", 11초),
-    ("ibk", 29초),
-    ("bs", 27초),
-    ("citi", 28초),
+    ("investing", 4.4초),
+    ("kb", 7.9초),
+    ("hana", 7.3초),
     ("shinhan", 31초),
-    ("nh", 32초),
-    ("sc", 33초),
+    ("woori", 23.3초),
+    ("ibk", 29.1초),
+    ("nh", 32.7초),
+    ("sc", 33.3초),
+    ("bs", 27.7초),
+    ("citi", 28.5초),
 ]
 ```
 
@@ -390,7 +390,7 @@ logger.info("✅ WebSocket 연결 성공", extra={"connections": count})
 
 **로테이션**: 각 파일 10MB, 최대 5개 백업 (총 ~20MB, 기존 50MB의 40%)
 
-**자동 삭제**: 7일 이상 된 백업 파일(.log.1, .log.2 등)은 매일 자정에 자동 삭제 (scheduler.py → log_cleaner.py)
+**자동 삭제**: 10일 이상 된 백업 파일(.log.1, .log.2 등)은 매일 새벽 4에 자동 삭제 (scheduler.py → log_cleaner.py)
 
 **개선 효과** (2025-10-14):
 - ✅ **디스크 사용량 66% 감소** (146MB → ~50MB)
@@ -479,63 +479,6 @@ stats = get_log_stats(hours=24)
   - limit=300일 때 빠른 크롤러가 슬롯을 독점하는 문제 해결
 - 기본 limit: 100 → **300개** (약 5-10분치 로그)
 - 관리자 페이지에서도 300개 표시 (스크롤 가능, 부하 미미)
-
-### 코딩 스타일 가이드
-
-#### Import 순서 (PEP 8 준수)
-
-**기본 원칙**:
-1. 모든 import는 **파일 상단**에 작성 (원칙)
-2. 3개 그룹으로 분리 (각 그룹 사이 빈 줄 1개)
-3. 각 그룹 내에서 알파벳 순 정렬
-
-**표준 순서**:
-```python
-# 1. 표준 라이브러리
-import asyncio
-from datetime import datetime
-from typing import List, Dict
-
-# 2. 서드파티 라이브러리
-from fastapi import FastAPI
-from pytz import timezone
-from sqlalchemy.orm import Session
-
-# 3. 로컬 애플리케이션
-from app import models, crud
-from app.database import SessionLocal
-```
-
-**함수 내부 import 허용 조건** (다음 경우에만):
-
-1. **순환 참조 방지**
-   ```python
-   def some_function():
-       from app.module_b import something  # A ↔ B 순환 참조 방지
-   ```
-
-2. **성능 최적화** (무거운 라이브러리 + 거의 호출되지 않는 함수)
-   ```python
-   def monthly_report():  # 월 1회만 호출
-       import pandas as pd  # pandas는 import에 ~1초 소요
-       import matplotlib.pyplot as plt
-   ```
-   - 조건: import 시간 > 0.5초 AND 호출 빈도 < 주 1회
-
-3. **조건부/선택적 의존성** (특정 환경에서만 필요)
-   ```python
-   def windows_only_function():
-       if os.name == 'nt':
-           import winreg  # Windows에서만 사용
-   ```
-
-4. **동적 로딩/플러그인** (런타임에 모듈 결정)
-   ```python
-   def get_crawler(name):
-       module = importlib.import_module(f"app.{name}_crawler")
-   ```
-
-**중요**: 함수 내부 import 사용 시 **반드시 주석으로 이유 명시**
 
 ## 보안 고려사항
 

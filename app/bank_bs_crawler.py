@@ -20,21 +20,14 @@ from app.database import SessionLocal
 
 BANK_NAME = 'bs'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-BS_MIBANK_CODE = '032'
-
 BS_BANK_URL = 'https://ibank.busanbank.co.kr/ib20/mnu/PEBFRX006001001'
-SECOND_BS_BANK_URL = 'https://m.busanbank.co.kr/ib20/mnu/MWPFRX4000FRX20'   # 페이지가 존재하지 않습니다 (크롤링시)
-MIBANK_BS_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + BS_MIBANK_CODE
-
 BS_BANK_SELECTORS = {
     'usd-krw': '#resultTable > tbody > tr:nth-child(1) > td:nth-child(2)',
     'jpy-krw': '#resultTable > tbody > tr:nth-child(2) > td:nth-child(2)',
     'eur-krw': '#resultTable > tbody > tr:nth-child(3) > td:nth-child(2)',
 }
 
+SECOND_BS_BANK_URL = 'https://m.busanbank.co.kr/ib20/mnu/MWPFRX4000FRX20'   # 페이지가 존재하지 않습니다 (크롤링시)
 SECOND_BS_BANK_SELECTORS = {
     'usd-krw': '#MWPFRX420000V00M_contents > div.ctg_frx.acc__wrap > div.info_wrap.type_full.fnAccoInfo > div:nth-child(1) > button > span:nth-child(2)',
     'jpy-krw': '#MWPFRX420000V00M_contents > div.ctg_frx.acc__wrap > div.info_wrap.type_full.fnAccoInfo > div:nth-child(2) > button > span:nth-child(2)',
@@ -42,6 +35,8 @@ SECOND_BS_BANK_SELECTORS = {
     # 'cny-krw': '#MWPFRX420000V00M_contents > div.ctg_frx.acc__wrap > div.info_wrap.type_full.fnAccoInfo > div:nth-child(4) > button > span:nth-child(2)',
 }
 
+MIBANK_BS_CODE = '032'
+MIBANK_BS_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_BS_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -61,6 +56,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_bs_bank_exchange_rates():
     """부산은행 환율 크롤링"""

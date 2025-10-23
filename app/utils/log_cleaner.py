@@ -9,7 +9,7 @@ from app.config import LOG_DIR
 
 logger = logging.getLogger("exchange_rate.utils.log_cleaner")
 
-def cleanup_old_log_files(days: int = 7):
+def cleanup_old_log_files(days: int = 10):
     """
     오래된 로그 백업 파일 삭제
 

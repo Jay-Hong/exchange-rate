@@ -153,7 +153,7 @@ async def broadcast_rates():
                 else:
                     # 통계 기록 (스킵)
                     broadcast_stats.record_skip(reason="no_changes")
-                    logger.debug("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
+                    logger.info("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
 
             except Exception as e:
                 # 통계 기록 (실패)

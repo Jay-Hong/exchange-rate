@@ -35,16 +35,16 @@ scheduler = BackgroundScheduler(timezone=KST)
 # 순서: investing → kb → hana → shinhan → woori → ibk → nh → sc → bs → citi
 # (index.html DEFAULT_BANK_ORDER와 일관성 유지)
 BANK_TASKS = [
-    ("investing", investing_crawler.crawl_and_save_investing_exchange_rates, 5),
-    ("kb", bank_kb_crawler.crawl_and_save_kb_bank_exchange_rates, 8),
-    ("hana", bank_hana_crawler.crawl_and_save_hana_bank_exchange_rates, 7),
+    ("investing", investing_crawler.crawl_and_save_investing_exchange_rates, 4.4),
+    ("kb", bank_kb_crawler.crawl_and_save_kb_bank_exchange_rates, 7.9),
+    ("hana", bank_hana_crawler.crawl_and_save_hana_bank_exchange_rates, 7.3),
     ("shinhan", bank_shinhan_crawler.crawl_and_save_shinhan_bank_exchange_rates, 31),
-    ("woori", bank_woori_crawler.crawl_and_save_woori_bank_exchange_rates, 11),
-    ("ibk", bank_ibk_crawler.crawl_and_save_ibk_bank_exchange_rates, 29),
-    ("nh", bank_nh_crawler.crawl_and_save_nh_bank_exchange_rates, 32),
-    ("sc", bank_sc_crawler.crawl_and_save_sc_bank_exchange_rates, 33),
-    ("bs", bank_bs_crawler.crawl_and_save_bs_bank_exchange_rates, 27),
-    ("citi", bank_citi_crawler.crawl_and_save_citi_bank_exchange_rates, 28),
+    ("woori", bank_woori_crawler.crawl_and_save_woori_bank_exchange_rates, 23.3),
+    ("ibk", bank_ibk_crawler.crawl_and_save_ibk_bank_exchange_rates, 29.1),
+    ("nh", bank_nh_crawler.crawl_and_save_nh_bank_exchange_rates, 32.7),
+    ("sc", bank_sc_crawler.crawl_and_save_sc_bank_exchange_rates, 33.3),
+    ("bs", bank_bs_crawler.crawl_and_save_bs_bank_exchange_rates, 27.7),
+    ("citi", bank_citi_crawler.crawl_and_save_citi_bank_exchange_rates, 28.5),
 ]
 
 # 현재 모드 상태 저장
@@ -105,11 +105,11 @@ def cleanup_old_bank_data():
         db.close()
 
 def cleanup_old_log_files():
-    """오래된 로그 백업 파일 삭제 (7일 이상)"""
+    """오래된 로그 백업 파일 삭제 (10일 이상)"""
     from app.utils.log_cleaner import cleanup_old_log_files as cleanup_logs
 
     try:
-        cleanup_logs(days=7)
+        cleanup_logs(days=10)
     except Exception as e:
         logger.error("❌ 로그 파일 정리 실패", exc_info=True)
 
@@ -118,11 +118,11 @@ def start_scheduler():
     # 제어 작업: 1분마다 모드 확인
     scheduler.add_job(control_job, IntervalTrigger(minutes=1, timezone=KST), id="control_job")
 
-    # 은행 데이터 정리: 매주 일요일 새벽 3시
-    scheduler.add_job(cleanup_old_bank_data, CronTrigger(day_of_week='sun', hour=3, minute=0, timezone=KST), id="cleanup_old_bank_data")
+    # 로그 파일 정리: 매일 새벽 4시
+    scheduler.add_job(cleanup_old_log_files, CronTrigger(hour=4, minute=0, timezone=KST), id="cleanup_old_log_files")
 
-    # 로그 파일 정리: 매일 자정
-    scheduler.add_job(cleanup_old_log_files, CronTrigger(hour=0, minute=0, timezone=KST), id="cleanup_old_log_files")
+    # 은행 데이터 정리: 매일 새벽 3시
+    scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=0, timezone=KST), id="cleanup_old_bank_data")
 
     # 시작 시 즉시 모드 판별 및 등록
     control_job()

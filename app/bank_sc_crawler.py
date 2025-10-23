@@ -3,7 +3,6 @@
 # 표준 라이브러리
 import datetime
 import logging
-import time
 
 # 서드파티 라이브러리
 import requests
@@ -23,33 +22,26 @@ from app.database import SessionLocal
 
 BANK_NAME = 'sc'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-SC_MIBANK_CODE = '023'
-MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
-
-# SC제일은행 날짜 선택 selector (년/월/일 select 박스)
-YEAR_SELECTOR = "#_CUR_YEAR"
-MONTH_SELECTOR = "#_CUR_MONTH"
-DAY_SELECTOR = "#_CUR_DAY"
-SUBMIT_BUTTON_SELECTOR = "input[type='button'][value='조회 시작일']"  # 녹색 조회 버튼
-
-SC_BANK_URL = 'https://www.standardchartered.co.kr/np/kr/pl/et/ExchangeRateP1.jsp'            # 자정이후, 주말에는 날짜변경 후 조회
-SECOND_SC_BANK_URL = 'https://www.standardchartered.co.kr/np/kr/pl/pn/ForeignExchange.jsp'    # 자정이후, 주말에는 안됨
-MIBANK_SC_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + SC_MIBANK_CODE
-
-#Test selector ID : #STATENAME
-SC_BANK_SELECTOR = '#TMP_RATE' # usd-krw, jpy-krw, eru-krw 모두 selector 같음 (2,3,4번째 값)
-SC_BANK_PAIRS = ['usd-krw', 'jpy-krw', 'eur-krw']
-
-SECOND_SC_BANK_SELECTORS = {
+SC_BANK_URL = 'https://www.standardchartered.co.kr/np/kr/pl/pn/ForeignExchange.jsp'    # 자정이후, 주말에는 환율정보 제공안함
+SC_BANK_SELECTORS = {
     'usd-krw': '#tdUSD',
     'jpy-krw': '#tdJPY',
     'eur-krw': '#tdEUR',
     # 'cny-krw': 'tdCNY',
 }
 
+SECOND_SC_BANK_URL = 'https://www.standardchartered.co.kr/np/kr/pl/et/ExchangeRateP1.jsp'   # 자정이후, 주말에는 날짜변경 후 조회
+SECOND_SC_BANK_SELECTOR = '#TMP_RATE' # usd-krw, jpy-krw, eru-krw 모두 selector 같음 (2,3,4번째 값)
+SECOND_SC_BANK_PAIRS = ['usd-krw', 'jpy-krw', 'eur-krw']
+MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
+# SC제일은행 날짜 선택 selector (년/월/일 select 박스)
+YEAR_SELECTOR = "#_CUR_YEAR"
+MONTH_SELECTOR = "#_CUR_MONTH"
+DAY_SELECTOR = "#_CUR_DAY"
+SUBMIT_BUTTON_SELECTOR = "input[type='button'][value='조회 시작일']"  # 녹색 조회 버튼
+
+MIBANK_SC_CODE = '023'
+MIBANK_SC_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_SC_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -70,18 +62,23 @@ HEADERS = {
     'Cache-Control': 'max-age=0'
 }
 
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
+
 def crawl_and_save_sc_bank_exchange_rates():
     """SC제일은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        crawl_and_save_sc_first_routine_selenium(SC_BANK_URL, SC_BANK_SELECTOR, db)
+        crawl_and_save_routine_selenium(SC_BANK_URL, SC_BANK_SELECTORS, db)
     except Exception as e:
-        logger.exception("SC_BANK_URL 크롤링 실패", extra={"url": SC_BANK_URL})
+        # 아래를 logger.exception으로 하지 않은이유 : 자정 이후/주말에는 이 URL이 안됨
+        logger.info("SC_BANK_URL 크롤링 실패", extra={"url": SECOND_SC_BANK_URL})
         try:
             logger.info("SECOND_SC_BANK_URL 시도")
-            crawl_and_save_routine_selenium(SECOND_SC_BANK_URL, SECOND_SC_BANK_SELECTORS, db)
+            # 아래를 두번째로 시도하는 이유 : Main으로 두었을때 가끔 환율조회가 안되어 - '#TMP_RATE' selector가 하나만 나타나 - 전날 환율이 저장 됨
+            crawl_and_save_sc_first_routine_selenium(SECOND_SC_BANK_URL, SECOND_SC_BANK_SELECTOR, db)
         except Exception as e:
-            logger.exception("SECOND_SC_BANK_URL 크롤링 실패", extra={"url": SECOND_SC_BANK_URL})
+            logger.exception("SECOND_SC_BANK_URL 크롤링 실패", extra={"url": SC_BANK_URL})
             try:
                 logger.info("MIBANK_SC_URL 시도")
                 crawl_and_save_routine(MIBANK_SC_URL, MIBANK_SELECTORS, db)
@@ -167,10 +164,10 @@ def crawl_current_date_rates(driver, wait, selector: str) -> dict:
                 rate_text = rate_element.text.strip().replace(',', '')
                 try:
                     current_rate = float(rate_text)
-                    current_rates[SC_BANK_PAIRS[index-1]] = current_rate
+                    current_rates[SECOND_SC_BANK_PAIRS[index-1]] = current_rate
                 except ValueError:
-                    logger.warning(f"⚠️ 유효하지 않은 환율: {SC_BANK_PAIRS[index-1]}",
-                        extra={"pair": SC_BANK_PAIRS[index-1], "rate_text": rate_text, "bank": BANK_NAME})
+                    logger.warning(f"⚠️ 유효하지 않은 환율: {SECOND_SC_BANK_PAIRS[index-1]}",
+                        extra={"pair": SECOND_SC_BANK_PAIRS[index-1], "rate_text": rate_text, "bank": BANK_NAME})
                     continue
     except Exception as e:
         logger.warning(f"⚠️ SELECTOR 오류: {selector}", extra={"selector": selector, "bank": BANK_NAME})
@@ -297,7 +294,8 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:
-            logger.error(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception",
+            # 아래를 logger.exception으로 하지 않은이유 : 자정 이후/주말에는 이 URL이 안됨
+            logger.info(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception",
                 extra={"url": url, "bank": BANK_NAME, "selectors": list(selectors.keys()), "error": error_msg})
         else:
             logger.exception("⚠️ URL 접속 또는 처리 오류",

@@ -22,24 +22,18 @@ from app.database import SessionLocal
 
 BANK_NAME = 'ibk'
 
-# 로거 설정
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
-
-IBK_MIBANK_CODE = '003'
-MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
-
 IBK_BANK_URL = 'https://www.ibk.co.kr/fxtr/excRateList.ibk'    # 자정이후, 주말에는 Selenium으로 날짜변경 후 조회
-MIBANK_IBK_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + IBK_MIBANK_CODE
-
-INPUT_SELECTOR = "#inDate"
-
 IBK_BANK_SELECTORS = {
     'usd-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(1) > td:nth-child(3)',
     'jpy-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(2) > td:nth-child(3)',
     'eur-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(3) > td:nth-child(3)',
     # '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(4) > td:nth-child(3)',
 }
+INPUT_SELECTOR = "#inDate"
+MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
 
+MIBANK_IBK_CODE = '003'
+MIBANK_IBK_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_IBK_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -59,6 +53,9 @@ HEADERS = {
     'Sec-Fetch-Site': 'none',
     'Cache-Control': 'max-age=0'
 }
+
+# 로거 설정
+logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_ibk_bank_exchange_rates():
     """기업은행 환율 크롤링"""
