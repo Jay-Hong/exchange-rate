@@ -78,67 +78,32 @@
 
 #### KB국민은행 (`app/crawlers/kb.py`)
 
-**특징**:
-- 3개 폴백 URL (obank 2개 + mibank 1개)
-- requests만으로 크롤링 가능
+**핵심 로직:**
+- 3개 폴백 URL (obank 메인 → obank 서브 → mibank)
+- requests + BeautifulSoup만으로 크롤링
 
-**주요 코드**:
-```python
-# 폴백 전략 (51-67줄)
-try:
-    crawl_and_save_routine(KB_BANK_URL, KB_BANK_SELECTORS, db)
-except:
-    try:
-        crawl_and_save_routine(SECOND_KB_BANK_URL, KB_BANK_SELECTORS, db)
-    except:
-        crawl_and_save_routine(MIBANK_KB_URL, MIBANK_SELECTORS, db)
-```
-
-**주의사항**:
-- 메인 URL 실패 시 자동으로 폴백 URL 시도
-- Selector가 주기적으로 변경될 수 있음 (은행 웹사이트 개편 시)
+**주의사항:**
+- Selector 변경 빈번 (월 1회 확인 권장)
 
 ---
 
 #### 씨티은행 (`app/crawlers/citi.py`)
 
-**특징**:
-- **국가 순서가 동적으로 변경됨** (USD, JPY, EUR 위치가 매번 바뀜)
-- 문자열 검색으로 통화 매칭
+**핵심 로직:**
+- 국가 순서 동적 변경 → 문자열 검색으로 통화 매칭 ("USD", "JPY", "EUR" 텍스트 검색)
 
-**주요 코드**:
-```python
-# 통화 매칭 (94-107줄)
-for index, currency in enumerate(CURRENCY_TEXTS):  # ['USD', 'JPY', 'EUR']
-    if currency in item.get_text():  # 문자열 검색
-        rate_element = item.select_one(AFTER_CITI_BANK_SELECTORS)
-        current_rate = parse_rate_text(rate_text)
-        current_rates[PAIRS[index]] = current_rate  # 올바른 pair에 할당
-```
-
-**주의사항**:
-- Selector 순서에 의존하지 않고 **문자열 검색** 사용
-- 국가명(USD, JPY, EUR)이 변경되면 크롤링 실패
+**주의사항:**
+- Selector 순서 의존 금지
 
 ---
 
 #### Investing.com (`app/crawlers/investing.py`)
 
-**특징**:
-- JPY-KRW는 **100엔당 원화**로 표시 (스케일링 필요)
+**핵심 로직:**
+- JPY-KRW 스케일링 (100엔당 원화 → 1엔당 원화로 변환)
 
-**주요 코드**:
-```python
-# JPY 스케일링 (77-80줄)
-current_rate = parse_rate_text(rate_text)
-if pair in SCALED_CURRENCY_PAIRS:  # {"jpy-krw": 100}
-    current_rate *= SCALED_CURRENCY_PAIRS[pair]
-current_rates[pair] = current_rate
-```
-
-**주의사항**:
-- JPY만 100배 스케일링 (1엔 → 100엔)
-- 다른 통화 추가 시 스케일링 여부 확인 필요
+**주의사항:**
+- JPY만 ×100 스케일링, 다른 통화 추가 시 확인 필요
 
 ---
 
@@ -146,49 +111,22 @@ current_rates[pair] = current_rate
 
 #### 신한은행 (`app/crawlers/shinhan.py`)
 
-**특징**:
-- JavaScript 렌더링 필요 (정적 HTML 불가)
+**핵심 로직:**
+- JavaScript 렌더링 필요 → Selenium 필수
 - 표준 Selenium 패턴 (특수 로직 없음)
 
-**주요 코드**:
-```python
-# 표준 Selenium 패턴 (78-98줄)
-driver = create_selenium_driver()
-driver.get(url)
-wait = WebDriverWait(driver, 10)
-
-for pair, selector in selectors.items():
-    rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-    rate_text = rate_element.text.strip()
-    current_rate = parse_rate_text(rate_text)
-```
-
-**주의사항**:
-- 폴백 URL도 모두 Selenium 사용
-- ChromeDriver 버전 호환성 확인 필요
+**주의사항:**
+- ChromeDriver 버전 호환성 확인 (분기 1회)
 
 ---
 
 #### 하나은행 (`app/crawlers/hana.py`)
 
-**특징**:
-- **iframe 내부에 환율 데이터** 존재
-- iframe 전환 필수
+**핵심 로직:**
+- iframe 내부 데이터 → `driver.switch_to.frame()` 필수
 
-**주요 코드**:
-```python
-# iframe 전환 (139-140줄)
-iframe = wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
-driver.switch_to.frame(iframe)  # ⚠️ 중요: iframe 전환 후 크롤링
-
-# 이후 표준 Selenium 패턴
-for pair, selector in selectors.items():
-    rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-```
-
-**주의사항**:
-- iframe 전환 없이 크롤링 시 Selector 찾지 못함
-- 메인 URL은 requests, 폴백 URL은 Selenium + iframe
+**주의사항:**
+- iframe 전환 없으면 Selector 찾기 실패
 
 ---
 
@@ -196,203 +134,68 @@ for pair, selector in selectors.items():
 
 #### NH 농협은행 (`app/crawlers/nh.py`) ⭐⭐
 
-**특징**:
-- **메인 페이지 접속 → 클릭 → 환율 페이지 이동**
-- 직접 환율 페이지 URL 접근 불가 (환율 정보 미제공)
+**핵심 로직:**
+- 메인 페이지 접속 → 링크 클릭 → 환율 페이지 이동
 
-**주요 코드**:
-```python
-# 클릭 이동 (86-91줄)
-driver.get(NH_BANK_URL)  # 메인 페이지 접속
-wait = WebDriverWait(driver, 5)
-
-# 환율 페이지 링크 클릭
-element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, NH_MAIN_TO_EXCHANGE_RATES_PAGE)))
-element.click()  # ⚠️ 클릭 후 환율 페이지 로드
-
-# 이후 표준 Selenium 패턴
-for pair, selector in selectors.items():
-    rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-```
-
-**주의사항**:
-- 메인 페이지 구조 변경 시 Selector 업데이트 필요
-- 클릭 후 페이지 로드 대기 시간 조정 가능 (현재 5초)
+**주의사항:**
+- 메인 페이지 링크 Selector 변경 감지 (월 1회)
 
 ---
 
 #### IBK 기업은행 (`app/crawlers/ibk.py`) ⭐⭐⭐
 
-**특징**:
-- **하이브리드 전략**: requests 먼저 시도 → 실패 시 Selenium
-- 자정/주말: 날짜를 **input 태그에 직접 입력** (Keys.ENTER)
+**핵심 로직:**
+- 하이브리드: requests 시도 → 실패 시 Selenium 전환
+- 날짜 input 태그 직접 입력 (`send_keys()` + `Keys.ENTER`)
 
-**주요 코드**:
-```python
-# 하이브리드 전략 (64-71줄)
-if try_crawl_with_requests(db):  # 1차: requests (빠른 경로)
-    logger.debug(f"✅ {BANK_NAME} Requests 크롤링 성공")
-    return
-
-# 2차: Selenium (날짜 변경 필요)
-logger.info(f"➡️ {BANK_NAME} Selenium으로 전환 (환율 데이터 없음)")
-crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
-
-# 날짜 변경 (171-179줄)
-selected_date = selected_date - datetime.timedelta(days=1)
-input_element.clear()
-input_element.send_keys(selected_date.strftime('%Y.%m.%d'))  # ⚠️ 직접 입력
-input_element.send_keys(Keys.ENTER)  # ⚠️ Enter로 제출
-```
-
-**주의사항**:
-- 평일 영업시간: requests로 빠르게 크롤링
-- 자정/주말: Selenium으로 전환 (날짜 변경 필요)
-- MAX_DAYS_LOOKBACK (12일) 제한
+**주의사항:**
+- 평일 영업시간: requests (빠름)
+- 자정/주말: Selenium (날짜 변경)
+- MAX_DAYS_LOOKBACK 12일
 
 ---
 
 #### Woori 우리은행 (`app/crawlers/woori.py`) ⭐⭐⭐⭐
 
-**특징**:
-- **AJAX 응답 감지**: 테이블 행 개수 변화로 페이지 갱신 확인
-- 날짜 선택: **년/월/일 select 박스** 각각 선택
+**핵심 로직:**
+- AJAX 감지: 테이블 행 개수 변화 대기
+- 년/월/일 select 박스 각각 선택
 
-**주요 코드**:
-```python
-# 데이터 유무 판단 (154-165줄)
-tr_elements = driver.find_elements(By.CSS_SELECTOR, '#fxprint > table > tbody > tr')
-row_count = len(tr_elements)
-
-if row_count > 1:  # 행이 2개 이상이면 데이터 있음
-    current_rates = crawl_woori_current_date_rates(driver, wait, selectors)
-else:
-    # 과거 날짜 조회
-    current_rates = crawl_woori_past_date_rates(driver, wait, selectors)
-
-# 년/월/일 select 박스 (258-270줄)
-year_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, YEAR_SELECTOR))))
-month_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, MONTH_SELECTOR))))
-day_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DAY_SELECTOR))))
-
-year_select.select_by_value(str(selected_date.year))
-month_select.select_by_value(f"{selected_date.month:02d}")
-day_select.select_by_value(f"{selected_date.day:02d}")
-
-# AJAX 응답 감지 (272-283줄)
-old_row_count = len(driver.find_elements(By.CSS_SELECTOR, '#fxprint > table > tbody > tr'))
-submit_button.click()
-
-# ⚠️ 테이블 행 개수 변화 대기 (AJAX 응답 완료 확인)
-WebDriverWait(driver, 3).until(
-    lambda d: len(d.find_elements(By.CSS_SELECTOR, '#fxprint > table > tbody > tr')) != old_row_count
-)
-```
-
-**주의사항**:
-- 테이블 행 개수로 데이터 유무 판단 (1개=헤더만, 2개 이상=데이터 있음)
-- AJAX 응답 대기 없이 크롤링 시 이전 데이터 읽을 수 있음
-- select 박스의 value 형식 변경 시 크롤링 실패 (현재: "2025", "01", "01")
+**주의사항:**
+- 행 개수: 1개(헤더만) = 데이터 없음, 2개+ = 정상
+- AJAX 대기 없으면 이전 데이터 오독
+- select value 형식 변경 주의 ("2025", "01", "01")
 
 ---
 
 #### SC 제일은행 (`app/crawlers/sc.py`) ⭐⭐⭐⭐
 
-**특징**:
-- **AJAX 응답 감지**: #TMP_RATE 개수로 데이터 유무 판단
-- **Alert 처리**: 자정/주말 메시지 자동 수락
+**핵심 로직:**
+- **AJAX 감지**: #TMP_RATE 개수 변화로 페이지 갱신 확인
+- **Alert 처리**: 조회 버튼 클릭 직후 1회 (자정/주말 "0회차" 메시지)
+- **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (12일) 순회
 
-**주요 코드**:
-```python
-# Alert 처리 (112-118줄)
-try:
-    alert = driver.switch_to.alert
-    alert_text = alert.text
-    logger.debug(f"Alert 감지: {alert_text}")
-    alert.accept()  # ⚠️ Alert 수락
-except Exception:
-    pass  # Alert 없으면 무시
+**주의사항:**
+- Alert 미처리 시 크롤링 중단 → `driver.switch_to.alert.accept()` 필수
+- #TMP_RATE 개수 1개 = 데이터 없음, 2개 이상 = 정상 데이터
+- 날짜 변경 후 AJAX 대기 없으면 이전 데이터 오독
 
-# #TMP_RATE 개수로 데이터 유무 판단 (122-132줄)
-rate_elements = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
-element_count = len(rate_elements)
-
-if element_count > 1:  # 여러 개 = 평일 영업시간
-    current_rates = crawl_current_date_rates(driver, wait, selector)
-else:  # 1개만 = 자정/주말
-    current_rates = crawl_past_date_rates(driver, wait, selector)
-
-# AJAX 응답 감지 (239-250줄)
-old_count = len(driver.find_elements(By.CSS_SELECTOR, selector))
-submit_button.click()
-
-# ⚠️ #TMP_RATE 개수 변화 대기 (AJAX 응답 완료 확인)
-WebDriverWait(driver, 3).until(
-    lambda d: len(d.find_elements(By.CSS_SELECTOR, selector)) != old_count
-)
-```
-
-**주의사항**:
-- Alert 미처리 시 크롤링 중단
-- #TMP_RATE가 1개만 있을 때는 의미 없는 값 (무시 필요)
-- AJAX 응답 대기 없이 크롤링 시 이전 데이터 읽을 수 있음
+**상세 코드:** `app/crawlers/sc.py:209-292` (crawl_past_date_rates 함수)
+**최근 리팩토링:** 2025-10-26 (Alert 처리 단일화, 126줄 → 83줄)
 
 ---
 
 ## 트러블슈팅
 
-### 🔍 일반적인 문제
+### 자주 발생하는 문제 (FAQ)
 
-#### 1. Selector 오류 (가장 빈번)
-
-**증상**:
-```
-⚠️ SELECTOR 오류: usd-krw
-```
-
-**원인**:
-- 은행 웹사이트 구조 변경 (가장 흔함)
-- 폴백 URL의 Selector가 메인 URL과 다름
-
-**해결**:
-1. 브라우저 개발자 도구에서 새 Selector 확인
-2. 크롤러 파일의 `SELECTORS` 딕셔너리 업데이트
-3. 폴백 URL의 Selector도 확인 필요
-
-#### 2. Selenium Timeout
-
-**증상**:
-```
-selenium.common.exceptions.TimeoutException
-```
-
-**원인**:
-- 페이지 로딩이 느림
-- JavaScript 렌더링 지연
-- Selector가 잘못됨
-
-**해결**:
-```python
-# SELENIUM_WAIT_TIMEOUT 증가 (현재 5초)
-wait = WebDriverWait(driver, 10)  # 5초 → 10초
-```
-
-#### 3. 날짜 변경 실패 (IBK, Woori, SC)
-
-**증상**:
-```
-⚠️ 날짜 변경 실패
-```
-
-**원인**:
-- select 박스 value 형식 변경
-- input 태그 속성 변경
-- AJAX 응답 대기 시간 부족
-
-**해결**:
-1. select 박스 value 형식 확인 (년: "2025", 월: "01", 일: "01")
-2. AJAX 대기 시간 증가 (3초 → 5초)
-3. 브라우저 개발자 도구로 네트워크 탭 확인
+| 문제 | 증상 | 해결 |
+|------|------|------|
+| **Selector 오류** | `⚠️ SELECTOR 오류: usd-krw` | 개발자 도구로 새 Selector 확인 → `SELECTORS` 딕셔너리 업데이트 |
+| **Selenium Timeout** | `TimeoutException` | WebDriverWait 시간 증가 (5초 → 10초) 또는 Selector 재확인 |
+| **날짜 변경 실패** | `⚠️ 날짜 변경 실패` | select value 형식 확인 ("2025", "01", "01"), AJAX 대기 시간 증가 |
+| **Alert 미처리** | 크롤링 중단 | `driver.switch_to.alert.accept()` 추가 |
+| **AJAX 응답 안 기다림** | 이전 데이터 읽기 | WebDriverWait로 요소 개수/속성 변화 감지 추가 |
 
 ---
 

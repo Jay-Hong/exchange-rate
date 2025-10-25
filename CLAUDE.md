@@ -124,23 +124,10 @@ BANK_TASKS = [
 
 ## 크롤러 구조
 
-### 공통 패턴
+**공통 패턴:**
+- 2-3개 폴백 URL, CSS Selector 기반, 변경 시에만 DB 저장
 
-1. 2-3개 폴백 URL 지원 (1차 실패 시 자동 전환)
-2. CSS Selector 기반 환율 추출
-3. 마지막 레코드와 비교 → 변경 시만 DB 저장
-4. 타임아웃: 10초 (requests), 5초 (Selenium WebDriverWait)
-
-### 예시 (bank_kb_crawler.py)
-
-```python
-# Primary URL
-KB_BANK_URL = 'https://obank.kbstar.com/...'
-# Fallback URL 1
-SECOND_KB_BANK_URL = 'https://obank.kbstar.com/...'
-# Fallback URL 2
-MIBANK_KB_URL = 'https://www.mibank.me/...'
-```
+**상세 가이드:** [CRAWLERS.md](CRAWLERS.md) (각 은행별 특수 로직, 트러블슈팅)
 
 ## API 엔드포인트
 
@@ -266,251 +253,40 @@ F06_GitHub/
 
 ## 주요 로직
 
-### 중복 방지 INSERT (crud.py)
+**중복 방지 INSERT**: 마지막 레코드와 비교, 변경 시에만 저장 (`crud.py`)
 
-```python
-last_record = db.query(BankExchangeRate)
-    .filter(bank == bank_name, currency == pair)
-    .order_by(id.desc())
-    .first()
+**WebSocket 브로드캐스트**: 10초 주기, 통계 수집, 전체 환율 전송 (`main.py`)
 
-if last_record is None or last_record.rate != current_rate:
-    # INSERT
-```
-
-### WebSocket 브로드캐스트 (main.py)
-
-```python
-async def broadcast_rates():
-    while True:
-        await asyncio.sleep(10)
-        all_rates = crud.get_all_rates_flat(db)
-
-        # 통계 수집
-        data_size_bytes = len(json.dumps(message, ensure_ascii=False).encode('utf-8'))
-        broadcast_stats.record_success(
-            data_size_bytes=data_size_bytes,
-            rate_count=len(all_rates)
-        )
-
-        await manager.broadcast({"type": "rates", "data": all_rates})
-```
-
-### 브로드캐스트 통계 수집 (broadcast_stats.py)
-
-```python
-class BroadcastStats:
-    def record_success(self, data_size_bytes: int, rate_count: int):
-        """성공적인 브로드캐스트 기록"""
-        # 히스토리 저장 (그래프용)
-        self.broadcast_history.append({
-            "timestamp": now.isoformat(),
-            "status": "success",
-            "interval": interval,
-            "data_size_kb": round(data_size_bytes / 1024, 2),
-            "rate_count": rate_count
-        })
-        self.total_success += 1
-
-    def get_stats(self) -> Dict:
-        """관리자 페이지용 통계 반환"""
-        # 성공률, 평균 주기, 평균 크기, 건강 상태 등 계산
-        return {
-            "success_rate": round(success_rate, 2),
-            "avg_interval": round(avg_interval, 1),
-            "broadcasts_per_hour": round(broadcasts_per_hour, 1),
-            "status": self._get_health_status()  # healthy/warning/critical
-        }
-```
+**브로드캐스트 통계**: 성공률, 평균 주기, 건강 상태 추적 (`admin/stats.py`)
 
 ## 개발 가이드라인
 
-### 크롤러 추가 시
+**크롤러 추가**: [CRAWLERS.md](CRAWLERS.md) "새 은행 추가 가이드" 참고
 
-1. `app/crawlers/new_bank.py` 생성
-2. `BANK_NAME`, `SELECTORS`, `URL` 정의
-3. 공통 함수 재사용:
-   ```python
-   from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
-   from app.crawlers.utils import parse_rate_text, create_selenium_driver
-   ```
-4. `app/crawlers/__init__.py`에 추가:
-   ```python
-   from app.crawlers.new_bank import crawl_and_save_new_bank_exchange_rates
-   ```
-5. `scheduler.py`의 `BANK_TASKS`에 추가:
-   ```python
-   from app.crawlers import new_bank
-   # ...
-   ("new_bank", new_bank.crawl_and_save_new_bank_exchange_rates, 10.0)
-   ```
-
-### DB 마이그레이션
-
-- SQLAlchemy `Base.metadata.create_all()` 자동 실행
-- 스키마 변경 시 Alembic 사용 권장 (TODO)
+**DB 마이그레이션**: SQLAlchemy 자동 생성, 변경 시 Alembic 권장
 
 ### 로깅 시스템
 
-> ✅ **개선 완료** (2025-10): 타임존 일관성, LOG_LEVEL 활용, exception() 강화, 백엔드 bank 필터링
+**구조화된 로깅**: JSON 형식, KST 타임존, exception() 강화
 
-#### 로거 사용법
+**파일**:
+- `app.log` - 모든 운영 로그 (INFO+, 크롤러 포함)
+- `error.log` - 에러/경고만 (WARNING+)
 
-**모든 파일에서 표준 로거 사용 (print문 사용 금지)**:
+**환경 설정** (`.env`):
+- `ENV`: development (컬러) / production (JSON)
+- `LOG_LEVEL`: DEBUG / INFO / WARNING / ERROR
 
+**로거 사용**:
 ```python
-import logging
-
-# 일반 모듈
-logger = logging.getLogger("exchange_rate.main")  # main.py
-logger = logging.getLogger("exchange_rate.scheduler")  # scheduler.py
-logger = logging.getLogger("exchange_rate.db")  # crud.py
-
-# 크롤러
-logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")  # 크롤러
+logger = logging.getLogger("exchange_rate.crawler.kb")
+logger.info("⚡️ 환율 변경", extra={"pair": "usd-krw", "rate": 1340.5})
+logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 ```
 
-**로그 레벨 가이드**:
-- `logger.debug()` - 내부 상태 (📼 [유지], DB 저장 성공 등) - 개발 환경에서만 기록
-- `logger.info()` - 정상 이벤트 (신규/변경 감지, 브로드캐스트, 모드 전환)
-- `logger.warning()` - 복구 가능한 문제 (SELECTOR 오류, 폴백 URL 사용)
-- `logger.error()` - 복구 불가능한 오류 (크롤러 1개 완전 실패, API 오류)
-- `logger.critical()` - 시스템 중단 수준 장애 (DB 연결 실패, 모든 크롤러 실패)
-- `logger.exception()` - **예외 발생 시 필수** (자동으로 스택 트레이스 포함)
+**관리**: 로테이션 10MB, 백업 5개, 10일 자동 삭제
 
-**중요**: except 블록에서는 **반드시 logger.exception()** 사용 (logger.error() 대신)
-
-**구조화된 로그 (extra 필드)**:
-```python
-# 환율 변경
-logger.info(f"⚡️ [변경] {pair}: {old} → {new}",
-    extra={"pair": pair, "old_rate": old, "new_rate": new, "change": diff})
-
-# 크롤링 실패
-logger.exception("URL 크롤링 실패", extra={"url": url, "bank": BANK_NAME})
-
-# WebSocket 연결
-logger.info("✅ WebSocket 연결 성공", extra={"connections": count})
-```
-
-**중요**: `extra` 필드의 내용은 JSON 로그에서 **최상위 레벨**에 저장됩니다.
-```json
-{
-  "message": "⚡️ [변경] usd-krw: 1340.5 → 1341.0",
-  "timestamp": "2025-10-07T14:29:07",
-  "level": "INFO",
-  "logger": "exchange_rate.db",
-  "pair": "usd-krw",
-  "old_rate": 1340.5,
-  "new_rate": 1341.0,
-  "change": 0.5,
-  "bank": "kb"
-}
-```
-
-#### 로그 파일
-
-**🎯 2개 파일 사용:**
-
-- **app.log** - 모든 운영 로그 (INFO 이상), JSON 형식, KST 타임존
-  - 포함: 일반 동작, 환율 변경, 브로드캐스트, **크롤러 활동** 등
-  - 용도: 전체 시스템 모니터링, 관리자 페이지 메인 로그
-
-- **error.log** - 에러/경고만 (WARNING 이상), JSON 형식, KST 타임존
-  - 포함: SELECTOR 오류, URL 오류, 크롤링 실패, 시스템 오류
-  - 용도: 문제 발생 시 빠른 확인, 알림 트리거
-
-**로테이션**: 각 파일 10MB, 최대 5개 백업 (총 ~20MB, 기존 50MB의 40%)
-
-**자동 삭제**: 10일 이상 된 백업 파일(.log.1, .log.2 등)은 매일 새벽 4에 자동 삭제 (scheduler.py → log_cleaner.py)
-
-**개선 효과** (2025-10-14):
-- ✅ **디스크 사용량 66% 감소** (146MB → ~50MB)
-- ✅ **파일 수 75% 감소** (최대 24개 → 6개)
-- ✅ **중복 제거**: 크롤러 에러 1건 = 3곳 기록 → 2곳 기록
-- ✅ **관리 단순화**: 관리자 페이지 필터링으로 크롤러 로그 확인 가능
-- ✅ **AWS 프리티어 친화적**: 디스크 절약 (한 달 로그 ~400MB 예상)
-
-**이전 주요 개선 사항** (2025-10):
-- ✅ 타임존 일관성: 모든 로그에 KST 명시
-- ✅ LOG_LEVEL 환경 변수 활용
-- ✅ exception() 사용 강화 (모든 크롤러 except 블록)
-- ✅ 콘솔 출력도 LOG_LEVEL 따름
-
-#### 환경 설정 (.env)
-
-**ENV** - 환경 구분:
-- `development`: 개발 환경
-  - 콘솔: 컬러 출력 (가독성 좋음)
-  - 파일: **app.log, error.log만 생성** (2개)
-- `production`: 운영 환경
-  - 콘솔: JSON 출력 (로그 수집 도구에 적합)
-  - 파일: **app.log, error.log만 생성** (2개, 동일)
-
-**LOG_LEVEL** - 로그 레벨 제어 (**콘솔 + 파일 모두 적용**):
-- `DEBUG`: 모든 로그 출력 (개발 중 상세 디버깅 - 권장)
-  - 콘솔, app.log에서 DEBUG 로그 확인 가능 (크롤러 포함)
-- `INFO`: 일반 정보 이상만 (기본값, 운영 환경 권장)
-  - DEBUG 로그 무시, 환율 변경/브로드캐스트 등만 표시
-- `WARNING`: 경고 이상만 (운영 환경 최적화)
-  - SELECTOR 오류, URL 오류 등만 표시
-- `ERROR`: 에러만 (긴급 상황만 추적)
-  - 크롤링 실패, 시스템 오류만 표시
-
-**권장 조합**:
-```bash
-# 로컬 개발 중 (DEBUG 로그 필요)
-ENV=development
-LOG_LEVEL=DEBUG
-
-# 테스트/스테이징 (INFO만 충분)
-ENV=development
-LOG_LEVEL=INFO
-
-# 운영 서버 (INFO 또는 WARNING)
-ENV=production
-LOG_LEVEL=INFO  # 또는 WARNING
-```
-
-**확인 방법**:
-- **콘솔**: 터미널 출력으로 즉시 확인 (컬러 또는 JSON)
-- **파일**: `logs/app.log` (모든 로그), `logs/error.log` (에러/경고만)
-- **관리자 페이지**: `http://localhost:8000/admin` → 로그 뷰어 (app/error 선택)
-
-**기타 설정**:
-```bash
-# 관리자 페이지
-ADMIN_PASSWORD=admin1234     # 실제 운영 시 강력한 비밀번호로 변경
-
-# 텔레그램 (Phase 2에서 활성화)
-TELEGRAM_ENABLED=false       # Phase 2에서 true로 변경
-TELEGRAM_BOT_TOKEN=your_token
-TELEGRAM_CHAT_ID=your_chat_id
-```
-
-#### 로그 조회 (관리자용)
-
-```python
-from app.utils.log_reader import read_logs, get_log_stats
-
-# 최근 24시간 에러 로그 300개 (기본값)
-logs = read_logs(log_type="error", level="ERROR", limit=300, hours=24)
-
-# 특정 은행 로그만 조회 (백엔드 필터링 - 효율적)
-kb_logs = read_logs(log_type="app", bank="kb", limit=300, hours=1)
-shinhan_logs = read_logs(log_type="app", bank="shinhan", limit=300, hours=1)
-
-# 통계 조회
-stats = get_log_stats(hours=24)
-# {"total": 1500, "by_level": {"INFO": 1200, ...}, "errors_last_hour": 3}
-```
-
-**최근 개선사항 (2025-10-15)**:
-- ✅ **백엔드 bank 필터링 추가**: 서버에서 은행별 로그 필터링 (메모리/CPU 효율적)
-  - 크롤링 주기가 긴 은행(신한, IBK, NH, 부산, 씨티)의 로그도 안정적으로 표시
-  - limit=300일 때 빠른 크롤러가 슬롯을 독점하는 문제 해결
-- 기본 limit: 100 → **300개** (약 5-10분치 로그)
-- 관리자 페이지에서도 300개 표시 (스크롤 가능, 부하 미미)
+**상세 가이드**: `app/logging.py`, `app/admin/log_reader.py`
 
 ## 보안 고려사항
 
@@ -521,173 +297,26 @@ stats = get_log_stats(hours=24)
 
 ## 관리자 페이지 (/admin)
 
-### Phase 1: 심플 대시보드 ✅ 완료 (2025-10-17 재설계)
-
-> **설계 철학**: AWS 프리티어 친화적, API 호출 최소화, 모바일/데스크탑 모두 지원
-
-**아키텍처 개선** (2025-10-17):
-- ✅ **통합 API 도입**: 4개 API를 1개로 통합 (`/admin/api/dashboard`) → API 호출 75% 감소
-- ✅ **코드 단순화**: admin.html 1,288줄 → 615줄 (52% 감소), JavaScript 500줄 이하
-- ✅ **크롤러 상태 중심 설계**: 에러 개수를 뱃지로 표시, 클릭 시 해당 크롤러 로그만 표시
-- ✅ **여백 제거**: 정보 밀도 극대화, 모바일에서도 스크롤 최소화
+### Phase 1: 심플 대시보드 ✅ 완료 (2025-10-17)
 
 **핵심 기능**:
-- **4개 대시보드 카드**: WebSocket 연결, 메모리, 브로드캐스트, 에러
-- **크롤러 상태 뱃지**: 각 크롤러별 에러 개수 표시 (클릭 시 로그 필터링)
-- **로그 뷰어 (2개 탭)**:
-  - 🖥️ **실시간 모니터링** (app.log): 300개, 1시간 고정, 크롤러 배지 필터링
-  - ⚠️ **에러 추적** (error.log): 10,000개, 1시간/24시간/7일, 레벨/은행 필터
-- **자동 새로고침**: 30초마다 통합 API 호출 1회
+- 4개 대시보드 카드 (WebSocket, 메모리, 브로드캐스트, 에러)
+- 크롤러 상태 뱃지 (에러 개수, 클릭 시 로그 필터링)
+- 로그 뷰어 2개 탭 (실시간 모니터링, 에러 추적)
+- 자동 새로고침 30초
 
-**보안**: HTTP Basic Authentication
+**접속**: `http://localhost:8000/admin` (admin / .env의 ADMIN_PASSWORD)
 
-### Phase 2: 제어 & 관리 (사용자 500명+)
-- **크롤러 제어판**
-  - 개별 크롤러 재시작/일시정지
-  - 크롤링 주기 임시 조정
-  - 강제 재크롤링 (캐시 무시)
-- **데이터 관리**
-  - 은행 데이터 수동 정리 (10일 → N일 조정)
-  - DB VACUUM 수동 실행
-  - 데이터베이스 백업 다운로드
-- **통계 & 분석**
-  - 크롤러별 성공률 그래프 (Chart.js)
-  - API 엔드포인트 호출 통계
-  - 환율 변동 히트맵
-- **설정 관리**
-  - 텔레그램 알림 ON/OFF (UI)
-  - 로그 레벨 동적 변경 (재시작 없이)
-  - WebSocket 브로드캐스트 주기 조정
+**기술**: Vanilla JS, HTTP Basic Auth, 통합 API (`/admin/api/dashboard`)
 
-### Phase 3: 자동화 & 고급 기능 (운영 성숙 단계)
-- **실시간 알림 시스템**
-  - 조건별 알림 (크롤러 실패 3회 연속 → 텔레그램)
-  - 임계치 설정 (메모리 80% → 이메일)
-  - 알림 히스토리 관리
-- **환율 이상치 감지**
-  - 급격한 환율 변동 감지 (5분 내 3% 이상)
-  - 은행 간 환율 차이 알림 (5원 이상)
-  - 이상치 패턴 학습 (ML)
-- **실시간 대시보드**
-  - WebSocket 기반 실시간 업데이트
-  - 크롤러 상태 실시간 변경 반영
-  - 환율 변동 실시간 차트
+### Phase 2-3: 고급 기능 (사용자 500명+)
+- 크롤러 제어 (재시작, 주기 조정)
+- 통계 & 분석 (Chart.js, 성공률 그래프)
+- 실시간 알림, 환율 이상치 감지 (ML)
 
-### 사용법
-
-#### 접속
-
-```
-URL: http://localhost:8000/admin
-계정: admin / .env의 ADMIN_PASSWORD (기본: admin1234)
-```
-
-#### API 엔드포인트 (HTTP Basic Auth 필요)
-
-```
-GET  /admin                  - 관리자 대시보드 페이지
-GET  /admin/api/dashboard    - 통합 대시보드 API (시스템/브로드캐스트/크롤러 상태)
-GET  /admin/api/logs         - 로그 조회 (bank 필터링 지원)
-GET  /admin/api/download-logs - 로그 다운로드
-```
-
-#### 기술 스택
-
-- **UI**: Vanilla CSS (여백 제거, 정보 밀도 극대화)
-- **JS**: Vanilla JavaScript (~400줄, Fetch API)
-- **차트**: Chart.js (Phase 2+)
-- **인증**: HTTP Basic Auth
-
-#### 자동 새로고침
-
-30초마다 `/admin/api/dashboard` 호출 1회
-
-## 코드 리팩토링 (2025-10-25 완료)
-
-### ✅ Phase 1: 크롤러 공통 부분 중앙화 (2025-10-25 오전)
-
-**문제점**:
-- HEADERS, Selenium Options가 10개 크롤러에 중복 (110줄+)
-- 환율 파싱 로직 중복 (`rate_text.replace(',', '')` 10곳)
-- Selenium 드라이버 생성 로직 중복 (5개 크롤러)
-
-**해결책**:
-1. **`app/constants/crawler_constants.py`** (공통 상수)
-   - HEADERS, SELENIUM_OPTIONS, DEFAULT_TIMEOUT 등
-   - 변경 시 1곳만 수정 (10개 파일 → 1개 파일)
-
-2. **`app/utils/crawler_utils.py`** (공통 함수)
-   - `parse_rate_text(text)` - 쉼표 제거 + float 변환
-   - `create_selenium_driver()` - 표준 Selenium 드라이버 생성
-   - 중복 코드 80줄 감소
-
-**효과**:
-- 총 코드 라인 25% 감소 (~1,200줄 → ~900줄)
-- 유지보수성 향상 (HEADERS 변경 시 1곳만 수정)
-- 가독성 향상 (각 크롤러 15-20줄 감소)
-
-**중요**: 각 크롤러의 **특수 로직은 유지** (독립성 보장)
-- NH: 클릭 이동, IBK: 날짜 input 입력
-- Woori/SC: AJAX 감지, Hana: iframe 전환
-- → 통합하지 않고 **공통 부분만 추출** (Easy to change)
-
-### ✅ Phase 2: 도메인 기반 폴더 구조 리팩토링 (2025-10-25 오후)
-
-**문제점**:
-- app/ 폴더에 크롤러 10개 파일이 분산 (27개 파일, 복잡도 ↑)
-- utils/ 폴더에 서로 다른 도메인 파일 혼재 (역할 불명확)
-- 파일명 중복 (`crawler_constants.py`, `crawler_utils.py` - "crawler" 2번 반복)
-
-**해결책**:
-1. **도메인별 폴더 분리**
-   ```
-   app/crawlers/     - 크롤러 도메인 (10개 크롤러 + constants + utils)
-   app/admin/        - 관리자 도메인 (로그, 통계, 유지보수)
-   app/notifications/ - 알림 도메인 (텔레그램 등)
-   ```
-
-2. **파일명 간결화**
-   ```
-   logging_config.py → logging.py
-   crawler_constants.py → constants.py (crawlers/ 폴더 내)
-   crawler_utils.py → utils.py (crawlers/ 폴더 내)
-   broadcast_stats.py → stats.py (admin/ 폴더 내)
-   telegram_handler.py → telegram.py (notifications/ 폴더 내)
-   ```
-
-3. **빈 폴더 제거**
-   - `app/constants/`, `app/utils/` 폴더 완전 삭제
-
-**효과**:
-- app/ 최상위 파일: 27개 → 13개 (52% 감소)
-- 응집도 향상: 도메인별 파일 그룹화
-- Import 경로 명확화:
-  ```python
-  # Before (중복, 불명확)
-  from app.constants.crawler_constants import HEADERS
-  from app.utils.crawler_utils import parse_rate_text
-
-  # After (간결, 명확)
-  from app.crawlers.constants import HEADERS
-  from app.crawlers.utils import parse_rate_text
-  ```
-- 확장성: 새 크롤러 추가 시 `crawlers/` 폴더에만 추가
-
----
 
 ## 향후 개선 사항
 
-1. **비동기 크롤링** (httpx + asyncio)
-2. ~~**구조화된 로깅**~~ ✅ **완료** (JSON 형식, 파일 로테이션, 크롤러별 로거, 자동 삭제)
-3. ~~**관리자 페이지**~~ ✅ **Phase 1 완료** (모니터링, 로그 통계, 고급 필터링, 다운로드)
-4. ~~**프로젝트 구조 리팩토링**~~ ✅ **완료** (2025-10-25)
-   - Phase 1: 크롤러 공통 부분 중앙화 (공통 상수/함수 추출)
-   - Phase 2: 도메인 기반 폴더 구조 (crawlers/, admin/, notifications/)
-5. **알림 시스템 고도화** (📋 계획 중 - [ADR-003](DECISIONS.md#adr-003-알림-시스템---websocket-vs-push-notification) 참고)
-   - Phase 2: 맞춤형 WebSocket 알림 (사용자 200명+)
-   - Phase 3: Push Notification (앱 꺼져 있을 때 알림, 사용자 500명+)
-   - Phase 4: 고급 알림 (ML 기반 예측, 사용자 1,000명+)
-6. **모니터링** (Prometheus + Grafana)
-7. **Docker 컨테이너화**
-8. **CI/CD** (GitHub Actions)
-9. **유닛 테스트** (pytest)
+- ✅ 구조화된 로깅, 관리자 페이지, 도메인 기반 구조
+- 📋 알림 시스템 고도화 ([ADR-003](DECISIONS.md#adr-003-알림-시스템---websocket-vs-push-notification))
+- 🔜 비동기 크롤링, Docker, 모니터링, CI/CD, 유닛 테스트

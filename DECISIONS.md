@@ -4,6 +4,43 @@
 
 ---
 
+## ADR 작성 정책
+
+### ✅ 무엇을 기록하는가?
+
+**기록해야 할 것 (Architecture Decision):**
+- 기술 스택 선택 (Python vs Node.js, SQLite vs PostgreSQL)
+- 아키텍처 패턴 (모놀리식 vs 마이크로서비스)
+- 인프라 결정 (Docker, AWS 제약 대응)
+- 트레이드오프가 명확한 결정 (성능 vs 복잡도, 비용 vs 확장성)
+
+**기록하지 말아야 할 것 (Implementation Detail):**
+- 구체적인 코드 최적화 (함수 리팩토링, 변수명 변경)
+- 버그 수정 과정
+- 특정 라이브러리 사용법
+- 상세한 설정 파일 내용
+
+### 📋 작성 기준 (4가지 질문)
+
+1. **비가역성**: 나중에 쉽게 바꾸기 어려운 결정인가?
+2. **영향 범위**: 시스템 전체 또는 주요 컴포넌트에 영향을 주는가?
+3. **대안 존재**: 2개 이상의 선택지가 있었는가?
+4. **장기 유지**: 6개월 후에도 이 결정의 맥락을 알아야 하는가?
+
+→ **4개 모두 YES면 ADR 작성, 그렇지 않으면 별도 문서 또는 커밋 메시지**
+
+### 📌 예시
+
+| 내용 | ADR 필요 | 이유 | 대신 기록할 곳 |
+|------|---------|------|--------------|
+| WebSocket 구현 - Python vs Node.js | ✅ YES | 기술 스택 선택, 비가역적 | - |
+| Docker Compose 채택 | ✅ YES | 인프라 아키텍처 결정 | - |
+| IBK 크롤러 날짜 input 처리 | ❌ NO | 구현 세부사항 | CRAWLERS.md |
+| 관리자 페이지 통합 API | ❌ NO | 코드 리팩토링 | Git 커밋 |
+| 로그 파일 4개→2개 | ✅ YES | 시스템 설계 변경 | ADR-004 |
+
+---
+
 ## ADR-001: WebSocket 구현 - Python FastAPI vs Node.js
 
 **날짜:** 2025-10-11
@@ -445,7 +482,7 @@ POST /api/device/register     - 디바이스 토큰 등록
 
 ---
 
-## ADR-005: 로그 시스템 단순화 (4개→2개)
+## ADR-004: 로그 시스템 단순화 (4개→2개)
 
 **날짜:** 2025-10-14
 **상태:** ✅ 완료 (Completed)
@@ -482,23 +519,21 @@ POST /api/device/register     - 디바이스 토큰 등록
 
 ---
 
-## ADR-009: Docker Compose 기반 배포 아키텍처
+## ADR-005: Docker Compose 기반 배포 아키텍처
 
 **날짜:** 2025-10-21
 **상태:** 📋 설계 완료, 구현 대기
 
 ### 상황
 
-**현재 배포 환경:**
-- 개발: 로컬 Python + SQLite
-- 운영: AWS EC2 t2.micro (1GB RAM, 프리티어)
-- 배포 방식: 수동 배포 (rsync, git pull)
+**현재:**
+- AWS EC2 t2.micro (1GB RAM, 프리티어)
+- 수동 배포 (rsync, git pull)
 
-**향후 확장 요구사항:**
-- 사용자 증가에 따른 단계적 확장 (200명 → 1,000명+)
-- SQLite → PostgreSQL 전환 (사용자 500명+)
-- Redis 캐싱 도입 (성능 개선)
-- Nginx Reverse Proxy (보안, SSL, 로드 밸런싱)
+**확장 요구사항:**
+- 단계적 확장 (200명 → 1,000명+)
+- SQLite → PostgreSQL 전환
+- Redis 캐싱, Nginx Reverse Proxy
 
 ### 결정
 
@@ -514,330 +549,61 @@ Phase 3: + 서비스 분리 (크롤러/앱)         (1,000명+)
 
 #### 1. 대안 검토
 
-| 대안 | 장점 | 단점 | 채택 여부 |
-|------|------|------|----------|
-| **Docker Compose (단계별)** | - 점진적 확장<br>- 메모리 최적화<br>- 무중단 마이그레이션<br>- 프리티어 친화적 | - 초기 학습 곡선<br>- 설정 파일 복잡도 | ✅ 채택 |
-| 수동 배포 (현재) | - 단순함 | - 확장 어려움<br>- PostgreSQL 전환 복잡<br>- 의존성 관리 어려움 | ❌ 기각 |
-| Kubernetes | - 자동 스케일링<br>- 최고 확장성 | - 메모리 1GB+ 필요<br>- 복잡도 매우 높음<br>- Over-engineering | ❌ 기각 |
-| Docker Swarm | - K8s보다 단순 | - 여전히 복잡<br>- 단일 서버에서 불필요 | ❌ 기각 |
+| 대안 | 장점 | 단점 | 채택 |
+|------|------|------|------|
+| **Docker Compose** | 점진적 확장, 메모리 최적화, 무중단 마이그레이션 | 초기 학습 곡선 | ✅ |
+| 수동 배포 | 단순 | 확장 어려움, PostgreSQL 전환 복잡 | ❌ |
+| Kubernetes | 자동 스케일링 | 메모리 1GB+ 필요, Over-engineering | ❌ |
 
 #### 2. AWS 프리티어 메모리 최적화
 
-**Phase 1 메모리 할당 (총 ~315MB):**
-```yaml
-nginx:     32MB   (0.1 CPU)
-fastapi:   600MB  (0.9 CPU)
-시스템:    100MB
-여유:      ~635MB
-```
-
-**Phase 2 메모리 할당 (총 ~565MB):**
-```yaml
-nginx:     32MB
-fastapi:   600MB
-postgres:  200MB  (shared_buffers=64MB)
-redis:     96MB   (maxmemory=64mb)
-시스템:    100MB
-여유:      ~385MB
-```
-
-→ t2.micro(1GB)에서 안정적 운영 가능
-
-**Phase 3: t3.small(2GB) 이상 권장**
-
-#### 3. 단계별 확장 전략
-
-**Phase 1 → Phase 2 마이그레이션:**
-```bash
-# 무중단 전환
-1. PostgreSQL 컨테이너 시작
-2. SQLite → PostgreSQL 데이터 마이그레이션 (백그라운드)
-3. FastAPI 재시작 (새 DB 연결)
-4. 검증 후 SQLite 제거
-
-# 실행 명령
-docker-compose -f docker-compose.yml -f docker-compose.phase2.yml up -d
-./scripts/migrate-to-postgres.sh
-```
-
-**설정 파일 오버라이드 방식:**
-- `docker-compose.yml` - Phase 1 기본 설정
-- `docker-compose.phase2.yml` - Phase 2 추가 설정 (PostgreSQL, Redis)
-- `docker-compose.phase3.yml` - Phase 3 추가 설정 (서비스 분리)
-
-#### 4. 보안 강화
-
-**네트워크 분리:**
-```yaml
-networks:
-  frontend:   # Nginx ↔ FastAPI
-  backend:    # FastAPI ↔ Redis
-  database:   # FastAPI ↔ PostgreSQL (내부 전용)
-```
-
-**포트 노출 전략:**
-- Nginx만 외부 노출 (80, 443)
-- FastAPI, PostgreSQL, Redis는 내부 네트워크만
-- SSL/TLS 종료 (Let's Encrypt)
-
-#### 5. 리소스 제한
-
-**OOM Killer 우선순위:**
-```yaml
-fastapi:     oom_score_adj: -500  # 보호
-nginx:       oom_score_adj: -300
-postgres:    oom_score_adj: -400
-redis:       oom_score_adj: 100   # 필요 시 먼저 종료
-```
-
-**메모리 한계:**
-```yaml
-services:
-  fastapi:
-    deploy:
-      resources:
-        limits:
-          memory: 600M
-        reservations:
-          memory: 300M
-```
-
-### 파일 구조
-
-```
-F06_GitHub/
-├── docker-compose.yml              # Phase 1
-├── docker-compose.phase2.yml       # Phase 2
-├── docker-compose.phase3.yml       # Phase 3
-├── Dockerfile                      # FastAPI
-├── .dockerignore
-├── nginx/
-│   ├── Dockerfile
-│   └── conf.d/
-│       ├── phase1.conf
-│       ├── phase2.conf
-│       └── phase3.conf
-├── postgres/
-│   ├── init/
-│   └── conf/
-├── scripts/
-│   ├── deploy.sh
-│   ├── migrate-to-postgres.sh
-│   ├── backup-db.sh
-│   └── ssl-renew.sh
-└── volumes/
-    ├── sqlite-data/
-    ├── postgres-data/
-    ├── redis-data/
-    └── logs/
-```
-
-### 구현 예시
-
-#### docker-compose.yml (Phase 1)
-
-```yaml
-version: '3.8'
-
-services:
-  nginx:
-    build: ./nginx
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./static:/var/www/static:ro
-      - ./volumes/ssl:/etc/letsencrypt:ro
-    networks:
-      - frontend
-    depends_on:
-      fastapi:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: '0.1'
-          memory: 32M
-
-  fastapi:
-    build: .
-    env_file: .env
-    environment:
-      - DATABASE_URL=sqlite:////data/exchange_rates.db
-    volumes:
-      - ./volumes/sqlite-data:/data
-      - ./volumes/logs/app:/app/logs
-    expose:
-      - "8000"
-    networks:
-      - frontend
-    deploy:
-      resources:
-        limits:
-          cpus: '0.9'
-          memory: 600M
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-
-networks:
-  frontend:
-    driver: bridge
-```
-
-#### docker-compose.phase2.yml (PostgreSQL + Redis 추가)
-
-```yaml
-version: '3.8'
-
-services:
-  fastapi:
-    environment:
-      - DATABASE_URL=postgresql://user:${DB_PASSWORD}@postgres:5432/exchange_db
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - frontend
-      - backend
-      - database
-
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
-    command: postgres -c shared_buffers=64MB -c max_connections=20
-    expose:
-      - "5432"
-    networks:
-      - database
-    deploy:
-      resources:
-        limits:
-          memory: 200M
-
-  redis:
-    image: redis:7-alpine
-    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis-data:/data
-    expose:
-      - "6379"
-    networks:
-      - backend
-    deploy:
-      resources:
-        limits:
-          memory: 96M
-
-networks:
-  backend:
-    driver: bridge
-  database:
-    driver: bridge
-    internal: true  # 외부 접근 차단
-
-volumes:
-  postgres-data:
-  redis-data:
-```
-
-### 결과
-
-#### 1. 메모리 효율성
-
 | Phase | 메모리 사용 | t2.micro 적합성 | 비용 |
 |-------|------------|----------------|------|
-| Phase 1 | ~315MB | ✅ 여유 635MB | $0 |
-| Phase 2 | ~565MB | ✅ 여유 385MB | $0 |
-| Phase 3 | ~845MB | ⚠️ 여유 105MB | ~$15/월 (t3.small) |
+| Phase 1 | ~315MB (nginx 32MB + fastapi 600MB) | ✅ 여유 635MB | $0 |
+| Phase 2 | ~565MB (+ postgres 200MB + redis 96MB) | ✅ 여유 385MB | $0 |
+| Phase 3 | ~845MB (+ 크롤러 분리 150MB) | ⚠️ 여유 105MB | $15/월 (t3.small) |
 
-#### 2. 확장성
+→ **Phase 1, 2는 프리티어에서 안정적 운영 가능**
 
-**수평 확장 (Phase 3):**
-```yaml
-# FastAPI 2개 인스턴스
-fastapi-1:
-  replicas: 1
-fastapi-2:
-  replicas: 1
+#### 3. 단계별 전환 전략
 
-# Nginx 로드 밸런싱
-upstream fastapi_backend {
-    server fastapi-1:8000;
-    server fastapi-2:8000;
-}
-```
-
-#### 3. 운영 편의성
-
-**배포:**
+**무중단 마이그레이션 (Phase 1 → 2):**
 ```bash
-# 초기 배포
-docker-compose up -d
-
-# Phase 2로 업그레이드
+docker-compose -f docker-compose.yml -f docker-compose.phase2.yml up -d postgres
+./scripts/migrate-to-postgres.sh  # 백그라운드 데이터 마이그레이션
 docker-compose -f docker-compose.yml -f docker-compose.phase2.yml up -d
-
-# 로그 확인
-docker-compose logs -f fastapi
 ```
 
-**백업:**
-```bash
-# SQLite
-./scripts/backup-db.sh
-
-# PostgreSQL
-docker-compose exec postgres pg_dump -U user > backup.sql
-```
+**설정 오버라이드:**
+- `docker-compose.yml` - Phase 1 기본
+- `docker-compose.phase2.yml` - PostgreSQL + Redis 추가
+- `docker-compose.phase3.yml` - 서비스 분리
 
 ### 트레이드오프
 
 **장점:**
-- ✅ AWS 프리티어에서 안정적 운영
-- ✅ 단계적 확장 (사용자 증가에 따라)
-- ✅ 무중단 마이그레이션 지원
-- ✅ 보안 강화 (네트워크 분리)
-- ✅ 재현 가능한 환경 (로컬/운영 동일)
-- ✅ 의존성 관리 간소화
+- ✅ 프리티어 친화적 (Phase 1-2)
+- ✅ 무중단 확장
+- ✅ 보안 강화 (네트워크 분리, Nginx만 외부 노출)
+- ✅ 재현 가능한 환경
 
 **단점:**
-- ⚠️ Docker 학습 곡선 (초기 투자)
-- ⚠️ 설정 파일 관리 필요 (3-4개)
-- ⚠️ 디스크 공간 사용 증가 (~2GB, 이미지 포함)
-
-### 향후 개선 가능성
-
-**Phase 2+:**
-- Prometheus + Grafana 모니터링
-- 자동 백업 (cron)
-- CI/CD (GitHub Actions)
-
-**Phase 3+:**
-- Docker Swarm or Kubernetes (사용자 5,000명+)
-- CDN 도입 (CloudFront)
-- Multi-region 배포
+- ⚠️ Docker 학습 필요
+- ⚠️ 설정 파일 관리 (3-4개)
+- ⚠️ 디스크 사용 증가 (~2GB)
 
 ### 참고 문서
 
-상세 구현 가이드: [DOCKER.md](DOCKER.md)
+**상세 구현 가이드:** [DOCKER.md](DOCKER.md)
+- 파일 구조, docker-compose.yml 전체 예시
+- Nginx, PostgreSQL, Redis 설정
+- 배포 명령어, 트러블슈팅
 
 ---
 
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
-- 2025-10-13: ADR-004 추가 (IBK 크롤러 성능 최적화)
-- 2025-10-14: ADR-005 추가 (로그 시스템 단순화)
-- 2025-10-14: ADR-006 추가 (메모리 기반 크롤러 상태 관리)
-- 2025-10-15: ADR-007 추가 (백엔드 bank 필터링)
-- 2025-10-17: ADR-008 추가 (관리자 페이지 재설계 - 통합 API & 심플 대시보드)
-- 2025-10-21: ADR-009 추가 (Docker Compose 기반 배포 아키텍처)
-- 2025-10-25: 문서 간소화 (ADR-006 삭제, ADR-005 축약 228줄→35줄)
+- 2025-10-14: ADR-004 작성 (로그 시스템 단순화)
+- 2025-10-21: ADR-005 작성 (Docker Compose 기반 배포)
+- 2025-10-26: ADR 작성 정책 추가
