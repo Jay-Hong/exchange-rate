@@ -1,4 +1,4 @@
-# app/investing_crawler.py
+# app/crawlers/investing.py
 
 # 표준 라이브러리
 import logging
@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
+from app.crawlers.utils import parse_rate_text
 
 # 크롤러 이름
 CRAWLER_NAME = "investing"
@@ -25,19 +27,6 @@ INVESTING_SELECTORS = {
     # 'TES-EST' : '#exchange_rates_1 > thead > tr > th.left.first'
 }
 SCALED_CURRENCY_PAIRS = {"jpy-krw": 100}
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Cache-Control': 'max-age=0'
-}
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.crawler.investing")
@@ -71,7 +60,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     """
     current_rates = {}
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -82,10 +71,10 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
                 logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector})
                 continue
 
-            rate_text = rate_element.get_text(strip=True).replace(',', '')
+            rate_text = rate_element.get_text(strip=True)
 
             try:
-                current_rate = float(rate_text)
+                current_rate = parse_rate_text(rate_text)
                 if pair in SCALED_CURRENCY_PAIRS:
                     current_rate *= SCALED_CURRENCY_PAIRS[pair]
                 current_rates[pair] = current_rate

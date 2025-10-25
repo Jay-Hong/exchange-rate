@@ -1,4 +1,4 @@
-# app/bank_ibk_crawler.py
+# app/crawlers/ibk.py
 
 # 표준 라이브러리
 import datetime
@@ -19,6 +19,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
+from app.crawlers.utils import parse_rate_text, create_selenium_driver
 
 BANK_NAME = 'ibk'
 
@@ -41,18 +43,6 @@ MIBANK_SELECTORS = {
     # 'cny-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(1) > td.right.counter.rollsty01',
 }
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Cache-Control': 'max-age=0'
-}
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
@@ -88,7 +78,7 @@ def try_crawl_with_requests(db: Session) -> bool:
     Returns: 성공 여부 (True: 성공, False: 실패)
     """
     try:
-        response = requests.get(IBK_BANK_URL, headers=HEADERS, timeout=5)
+        response = requests.get(IBK_BANK_URL, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -107,13 +97,13 @@ def try_crawl_with_requests(db: Session) -> bool:
                     extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
                 continue
 
-            rate_text = rate_element.get_text(strip=True).replace(',', '')
+            rate_text = rate_element.get_text(strip=True)
             if not rate_text or rate_text == '-':
                 logger.debug(f"IBK 환율 데이터 없음: {pair} (빈 값 또는 '-')")
                 continue
 
             try:
-                current_rate = float(rate_text)
+                current_rate = parse_rate_text(rate_text)
                 current_rates[pair] = current_rate
             except ValueError:
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}",
@@ -135,11 +125,7 @@ def try_crawl_with_requests(db: Session) -> bool:
 
 def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) -> int:
     """IBK 전용 Selenium 크롤링 + DB 저장 루틴 (변경 개수 반환)"""
-    headlessoptions = webdriver.ChromeOptions()
-    headlessoptions.add_argument("--headless=new");headlessoptions.add_argument("--window-size=1280x720")
-    headlessoptions.add_argument("--disable-gpu");headlessoptions.add_argument("--disable-dev-shm-usage");headlessoptions.add_argument("--lang=ko_KR")
-    headlessoptions.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=headlessoptions)
+    driver = create_selenium_driver()
 
     current_rates = {}
     try:
@@ -155,12 +141,12 @@ def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) 
                 for pair, selector in IBK_BANK_SELECTORS.items():
                     try:
                         rate_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                        rate_text = rate_element.text.strip().replace(',', '')
+                        rate_text = rate_element.text.strip()
                     except Exception as e:
                         logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
                         continue
                     try:
-                        current_rate = float(rate_text)
+                        current_rate = parse_rate_text(rate_text)
                         current_rates[pair] = current_rate
                     except ValueError:
                         logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
@@ -201,7 +187,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     """크롤링 + DB 저장 루틴 (변경 개수 반환)"""
     current_rates = {}
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -212,10 +198,10 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
                 logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
                 continue
 
-            rate_text = rate_element.get_text(strip=True).replace(',', '')
+            rate_text = rate_element.get_text(strip=True)
 
             try:
-                current_rate = float(rate_text)
+                current_rate = parse_rate_text(rate_text)
                 current_rates[pair] = current_rate
             except ValueError:
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})

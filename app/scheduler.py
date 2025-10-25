@@ -11,16 +11,16 @@ from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 
 # 로컬 애플리케이션
-from app import investing_crawler
-from app import bank_hana_crawler
-from app import bank_kb_crawler
-from app import bank_shinhan_crawler
-from app import bank_woori_crawler
-from app import bank_ibk_crawler
-from app import bank_nh_crawler
-from app import bank_sc_crawler
-from app import bank_bs_crawler
-from app import bank_citi_crawler
+from app.crawlers import investing
+from app.crawlers import hana
+from app.crawlers import kb
+from app.crawlers import shinhan
+from app.crawlers import woori
+from app.crawlers import ibk
+from app.crawlers import nh
+from app.crawlers import sc
+from app.crawlers import bs
+from app.crawlers import citi
 from app import crud
 from app.database import SessionLocal
 
@@ -35,16 +35,16 @@ scheduler = BackgroundScheduler(timezone=KST)
 # 순서: investing → kb → hana → shinhan → woori → ibk → nh → sc → bs → citi
 # (index.html DEFAULT_BANK_ORDER와 일관성 유지)
 BANK_TASKS = [
-    ("investing", investing_crawler.crawl_and_save_investing_exchange_rates, 4.4),
-    ("kb", bank_kb_crawler.crawl_and_save_kb_bank_exchange_rates, 7.9),
-    ("hana", bank_hana_crawler.crawl_and_save_hana_bank_exchange_rates, 7.3),
-    ("shinhan", bank_shinhan_crawler.crawl_and_save_shinhan_bank_exchange_rates, 31),
-    ("woori", bank_woori_crawler.crawl_and_save_woori_bank_exchange_rates, 23.3),
-    ("ibk", bank_ibk_crawler.crawl_and_save_ibk_bank_exchange_rates, 29.1),
-    ("nh", bank_nh_crawler.crawl_and_save_nh_bank_exchange_rates, 32.7),
-    ("sc", bank_sc_crawler.crawl_and_save_sc_bank_exchange_rates, 33.3),
-    ("bs", bank_bs_crawler.crawl_and_save_bs_bank_exchange_rates, 27.7),
-    ("citi", bank_citi_crawler.crawl_and_save_citi_bank_exchange_rates, 28.5),
+    ("investing", investing.crawl_and_save_investing_exchange_rates, 4.4),
+    ("kb", kb.crawl_and_save_kb_bank_exchange_rates, 7.9),
+    ("hana", hana.crawl_and_save_hana_bank_exchange_rates, 7.3),
+    ("shinhan", shinhan.crawl_and_save_shinhan_bank_exchange_rates, 31),
+    ("woori", woori.crawl_and_save_woori_bank_exchange_rates, 23.3),
+    ("ibk", ibk.crawl_and_save_ibk_bank_exchange_rates, 29.1),
+    ("nh", nh.crawl_and_save_nh_bank_exchange_rates, 32.7),
+    ("sc", sc.crawl_and_save_sc_bank_exchange_rates, 33.3),
+    ("bs", bs.crawl_and_save_bs_bank_exchange_rates, 27.7),
+    ("citi", citi.crawl_and_save_citi_bank_exchange_rates, 28.5),
 ]
 
 # 현재 모드 상태 저장
@@ -106,7 +106,7 @@ def cleanup_old_bank_data():
 
 def cleanup_old_log_files():
     """오래된 로그 백업 파일 삭제 (10일 이상)"""
-    from app.utils.log_cleaner import cleanup_old_log_files as cleanup_logs
+    from app.admin.log_cleaner import cleanup_old_log_files as cleanup_logs
 
     try:
         cleanup_logs(days=10)

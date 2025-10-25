@@ -1,4 +1,4 @@
-# app/logging_config.py
+# app/logging.py
 
 import logging
 import logging.handlers

@@ -1,4 +1,4 @@
-# app/bank_kb_crawler.py
+# app/crawlers/kb.py
 
 # 표준 라이브러리
 import logging
@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
+from app.crawlers.utils import parse_rate_text
 
 BANK_NAME = 'kb'
 
@@ -30,19 +32,6 @@ MIBANK_SELECTORS = {
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
     'eur-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(4) > td.right.counter.rollsty01',
     # 'cny-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(1) > td.right.counter.rollsty01',
-}
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Cache-Control': 'max-age=0'
 }
 
 # 로거 설정
@@ -71,7 +60,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     """크롤링 + DB 저장 루틴 (변경 개수 반환)"""
     current_rates = {}
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -82,10 +71,10 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
                 logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
                 continue
 
-            rate_text = rate_element.get_text(strip=True).replace(',', '')
+            rate_text = rate_element.get_text(strip=True)
 
             try:
-                current_rate = float(rate_text)
+                current_rate = parse_rate_text(rate_text)
                 current_rates[pair] = current_rate
             except ValueError:
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})

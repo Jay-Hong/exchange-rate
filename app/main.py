@@ -22,7 +22,7 @@ import secrets
 # 로컬 애플리케이션
 from app import models, schemas, crud, scheduler
 from app.database import engine, SessionLocal, Base
-from app.utils.broadcast_stats import broadcast_stats
+from app.admin.stats import broadcast_stats
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.main")
@@ -382,7 +382,7 @@ def get_dashboard():
     broadcast_status = broadcast_stats.get_stats()
 
     # ===== 로그 기반 에러 카운트 (최근 1시간, ERROR + WARNING) =====
-    from app.utils.log_reader import read_logs
+    from app.admin.log_reader import read_logs
 
     # 한 번만 로그를 읽어서 모든 크롤러 에러 카운트
     all_error_logs = read_logs(log_type="app", hours=1, limit=10000)
@@ -431,7 +431,7 @@ def get_admin_logs(
     bank: str = None
 ):
     """로그 조회 (백엔드 필터링 지원)"""
-    from app.utils.log_reader import read_logs
+    from app.admin.log_reader import read_logs
 
     logs = read_logs(log_type=log_type, level=level, limit=limit, hours=hours, bank=bank)
     return {"logs": logs, "total": len(logs)}
@@ -447,7 +447,7 @@ def download_logs(
 ):
     """로그 파일 다운로드"""
     from fastapi.responses import FileResponse
-    from app.utils.log_reader import read_logs
+    from app.admin.log_reader import read_logs
     from app.config import LOG_DIR
     import tempfile
     import json

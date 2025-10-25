@@ -1,4 +1,4 @@
-# app/utils/telegram_handler.py
+# app/notifications/telegram.py
 
 import logging
 import os

@@ -1,4 +1,4 @@
-# app/utils/log_reader.py
+# app/admin/log_reader.py
 
 import json
 import logging

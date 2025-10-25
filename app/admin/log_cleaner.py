@@ -1,4 +1,4 @@
-# app/utils/log_cleaner.py
+# app/admin/log_cleaner.py
 
 import logging
 import os

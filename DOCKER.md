@@ -360,28 +360,10 @@ services:
 
 ### 메모리 부족 대응 전략
 
-```python
-# app/scheduler.py에 추가
-import psutil
-
-def monitor_memory_usage():
-    """메모리 사용량 모니터링 및 자동 조절"""
-    mem_percent = psutil.virtual_memory().percent
-
-    if mem_percent > 85:
-        # 메모리 위험 수준 - OUT 모드 강제 전환
-        switch_to_out_mode()
-        logger.critical(f"메모리 위험 ({mem_percent}%) - OUT 모드 강제 전환")
-
-    elif mem_percent > 75:
-        # 메모리 높음 - 크롤링 주기 50% 증가
-        adjust_crawling_intervals(multiplier=1.5)
-        logger.warning(f"메모리 높음 ({mem_percent}%) - 크롤링 주기 증가")
-
-    elif mem_percent < 60:
-        # 정상 - 원래 주기로 복귀
-        restore_normal_intervals()
-```
+- 메모리 85% 이상: OUT 모드 강제 전환 (크롤링 주기 10배)
+- 메모리 75-85%: 크롤링 주기 50% 증가
+- 메모리 60% 이하: 정상 주기 복귀
+- 구현: `app/scheduler.py`에 `psutil` 기반 모니터링 추가
 
 ### OOM Killer 우선순위 조정
 

@@ -1,3 +1,3 @@
-from app.logging_config import logger
+from app.logging import logger
 
 __all__ = ["logger"]
