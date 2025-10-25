@@ -52,6 +52,9 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Claude Code
+.claude/settings.local.json
+
 # 기타
 .pytest_cache/
 .coverage
