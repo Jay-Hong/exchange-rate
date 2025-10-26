@@ -317,6 +317,27 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 ## 문서 관리 가이드라인
 
+### 자동 Reminder (CRITICAL) 🚨
+
+**IMPORTANT:** 다음 조건에 해당하는 코드 변경 후, **반드시** 사용자에게 질문하세요:
+
+> "문서 업데이트 확인을 위해 `/docs-check`를 실행하시겠습니까?"
+
+**트리거 조건:**
+- `app/crawlers/*.py` 파일 수정 (크롤러 로직)
+- `app/models.py`, `app/schemas.py` 수정 (DB 스키마)
+- 새 기능 추가 (feat: 커밋)
+- 주요 리팩토링 (refactor: 커밋)
+- 새 은행/통화 추가
+
+**사용자 응답:**
+- "Yes" / "Okay" → `/docs-check` 실행
+- "No" / "나중에" → 건너뜀 (명시적 선택, 기록)
+
+**중요**: 이 Reminder는 **선택 사항이 아닙니다**. 위 조건에 해당하면 항상 물어보세요.
+
+---
+
 ### 문서 역할 정의
 
 이 프로젝트는 **3개의 주요 문서**로 구성되어 있으며, 각각 명확한 역할이 있습니다:
@@ -406,12 +427,18 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 ---
 
-### 자동화 워크플로우 (Claude Code)
+### /docs-check Slash Command 사용법
 
-**코드 변경 감지 시 자동 프로세스:**
+코드 변경 후 문서 업데이트가 필요한지 자동으로 확인하는 명령어입니다.
 
+**실행:**
 ```
-1. 변경된 파일 분석
+사용자: "/docs-check"
+```
+
+**자동 프로세스:**
+```
+1. 변경된 파일 분석 (git diff)
    ↓
 2. 관련 문서 체크리스트 제시
    ↓
@@ -419,26 +446,33 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
    ↓
 4. 자동 문서 업데이트
    ↓
-5. Git 커밋 제안
+5. 변경사항 요약
 ```
 
-**예시 (오늘의 woori 리팩토링):**
-
+**예시 (IBK 크롤러 리팩토링):**
 ```
-📄 문서 업데이트 필요
+사용자: "IBK 크롤러 Selenium 재시도 로직 추가 완료"
+Claude: (코드 수정 완료)
+        "문서 업데이트 확인을 위해 /docs-check를 실행하시겠습니까?"
+사용자: "Yes"
+Claude: (체크리스트 실행)
 
-변경: app/crawlers/woori.py 리팩토링
+        📄 문서 업데이트 분석 결과:
 
-✅ CRAWLERS.md 업데이트 필요:
-- woori 섹션에 SC 방식 적용 사실 추가
-- 과거 조회 로직 상세 설명
-- 최근 리팩토링 날짜 기록
+        ✅ CRAWLERS.md 업데이트 필요:
+        - IBK 섹션에 Selenium 3회 재시도 로직 추가
+        - MIBANK 조건부 실행 설명 추가
+        - 최근 리팩토링 날짜 기록 (2025-10-26)
 
-❌ DECISIONS.md 불필요: 구현 세부사항
-❌ CLAUDE.md 불필요: 크롤러 세부사항 위임됨
+        ❌ DECISIONS.md 불필요: 구현 세부사항
+        ❌ CLAUDE.md 불필요: 은행 개수 변경 없음
 
-지금 업데이트할까요?
+        진행하시겠습니까?
+사용자: "Okay"
+Claude: (CRAWLERS.md 업데이트 → 변경사항 요약)
 ```
+
+**파일 위치:** `.claude/commands/docs-check.md`
 
 ---
 
