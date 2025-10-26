@@ -6,13 +6,10 @@ import logging
 # 서드파티 라이브러리
 import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from sqlalchemy.orm import Session
-# from webdriver_manager.chrome import ChromeDriverManager
 
 # 로컬 애플리케이션
 from app import crud
