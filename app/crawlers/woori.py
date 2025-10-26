@@ -3,6 +3,7 @@
 # 표준 라이브러리
 import datetime
 import logging
+import time
 
 # 서드파티 라이브러리
 import requests
@@ -201,24 +202,51 @@ def crawl_woori_current_date_rates(driver, wait, selectors: dict) -> dict:
 
 
 def crawl_woori_past_date_rates(driver, wait, selectors: dict) -> dict:
-    """과거 날짜 환율 크롤링 (자정 이후/주말)
+    """과거 날짜 환율 크롤링 (어제부터 시작)
 
-    최대 MAX_DAYS_LOOKBACK일까지 과거로 이동하며 환율 조회
-    우리은행은 년/월/일 select 박스를 각각 선택하는 방식
-    SC 크롤러 방식 적용: WebDriverWait로 페이지 로드 자동 감지, Alert 없음
+    호출 조건: 오늘 날짜에 테이블 행 1개만 존재 (데이터 없음)
+    동작: 어제(today-1)부터 최대 MAX_DAYS_LOOKBACK일 전까지 순회
+    SC 크롤러 방식 완전 적용: 루프 시작 시 무조건 -1일, Alert 없음
     """
     current_rates = {}
     selected_date = datetime.date.today()
 
     for i in range(MAX_DAYS_LOOKBACK):
+        # 어제부터 과거로 이동 (오늘은 이미 parent에서 확인)
+        selected_date = selected_date - datetime.timedelta(days=1)
+        logger.info(f"📅 날짜 변경 {selected_date.strftime('%Y.%m.%d')}",
+            extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME})
+
         try:
-            # ✅ 핵심: 테이블 행 개수로 데이터 유무 판단 (WebDriverWait)
+            # 1. 날짜 선택 (년/월/일 select 박스)
+            year_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, YEAR_SELECTOR))))
+            year_select.select_by_value(str(selected_date.year))
+
+            month_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, MONTH_SELECTOR))))
+            month_select.select_by_value(f"{selected_date.month:02d}")
+
+            day_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DAY_SELECTOR))))
+            day_select.select_by_value(f"{selected_date.day:02d}")
+
+            logger.debug(f"📅 날짜 선택 완료: {selected_date.strftime('%Y.%m.%d')}", extra={"bank": BANK_NAME})
+
+            # 2. 조회 버튼 클릭
+            submit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#searchSubmit")))
+            logger.debug(f"🖱️ 조회 버튼 클릭", extra={"bank": BANK_NAME})
+            submit_button.click()
+            
+            time.sleep(0.5)  # Table이 뜨기까지 짧은 대기
+
+            # 3. AJAX 대기: 테이블이 다시 로드될 때까지 대기
+            logger.debug(f"⏳ AJAX 응답 대기 중...", extra={"bank": BANK_NAME})
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, '#fxprint')))
 
+            # 4. 테이블 행 개수로 데이터 유무 확인
             tr_elements = driver.find_elements(By.CSS_SELECTOR, '#fxprint > table > tbody > tr')
             row_count = len(tr_elements)
+            logger.debug(f"✅ AJAX 응답 완료 (테이블 행 {row_count}개)", extra={"bank": BANK_NAME})
 
-            # 행이 2개 이상이면 데이터 있음
+            # 5. 환율 크롤링
             if row_count > 1:
                 current_rates = crawl_woori_current_date_rates(driver, wait, selectors)
 
@@ -227,50 +255,20 @@ def crawl_woori_past_date_rates(driver, wait, selectors: dict) -> dict:
                         extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME, "row_count": row_count})
                     break  # 성공하면 종료
                 else:
-                    raise Exception("환율 데이터 없음")
+                    # 크롤링 실패 → 다음 날짜로
+                    logger.debug(f"⚠️ {BANK_NAME} 환율 크롤링 실패 - 다음 날짜로",
+                        extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME})
+                    continue
             else:
                 # 행이 1개 이하면 데이터 없음 → 다음 날짜로
                 logger.debug(f"⚠️ {BANK_NAME} 환율 데이터 없음 (테이블 행 {row_count}개) - 다음 날짜로",
                     extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME, "row_count": row_count})
-                raise Exception("환율 데이터 없음")
+                continue
 
         except Exception as e:
-            # 현재 날짜에 환율이 없으면 1일 전으로 이동
-            selected_date = selected_date - datetime.timedelta(days=1)
-            logger.info(f"📅 날짜 변경 {selected_date.strftime('%Y.%m.%d')}",
-                extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME})
-
-            try:
-                # 년/월/일 select 박스에서 날짜 선택
-                year_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, YEAR_SELECTOR))))
-                month_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, MONTH_SELECTOR))))
-                day_select = Select(wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DAY_SELECTOR))))
-
-                # 년도 선택 (value로 선택, 4자리: "2025")
-                year_select.select_by_value(str(selected_date.year))
-
-                # 월 선택 (value로 선택, 2자리: "01"~"12")
-                month_select.select_by_value(f"{selected_date.month:02d}")
-
-                # 일 선택 (value로 선택, 2자리: "01"~"31")
-                day_select.select_by_value(f"{selected_date.day:02d}")
-
-                # ✅ 클릭 전 테이블 행 개수 저장 (AJAX 응답 감지용)
-                old_row_count = len(driver.find_elements(By.CSS_SELECTOR, '#fxprint > table > tbody > tr'))
-
-                # "조회" 버튼 클릭 (input 태그, id="searchSubmit")
-                submit_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#searchSubmit")))
-                submit_button.click()
-
-                # ⭐ 테이블 행 개수 변화 감지: 페이지가 갱신될 때까지 대기 (AJAX 응답 완료)
-                # 최대 3초 대기 (일반적으로 1-2초 내 완료)
-                WebDriverWait(driver, 3).until(
-                    lambda d: len(d.find_elements(By.CSS_SELECTOR, '#fxprint > table > tbody > tr')) != old_row_count
-                )
-
-            except Exception as e:
-                logger.warning(f"⚠️ 날짜 변경 실패",
-                    extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME, "error": str(e)})
-                break
+            # 날짜 변경 실패 시에도 다음 날짜 계속 시도
+            logger.warning(f"⚠️ 날짜 변경 또는 조회 실패 - 다음 날짜 시도",
+                extra={"date": selected_date.strftime('%Y.%m.%d'), "bank": BANK_NAME, "error": str(e)[:100]})
+            continue
 
     return current_rates
