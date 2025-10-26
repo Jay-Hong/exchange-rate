@@ -3,24 +3,22 @@
 # 표준 라이브러리
 import datetime
 import logging
+import time
 
 # 서드파티 라이브러리
 import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from sqlalchemy.orm import Session
-from webdriver_manager.chrome import ChromeDriverManager
 
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
-from app.crawlers.utils import parse_rate_text, create_selenium_driver
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
 
 BANK_NAME = 'ibk'
 
@@ -56,19 +54,41 @@ def crawl_and_save_ibk_bank_exchange_rates():
             logger.debug(f"✅ {BANK_NAME} Requests 크롤링 성공")
             return
 
-        # 2차 시도: Selenium (날짜 변경 필요 - 자정/공휴일)
+        # 2차 시도: Selenium (날짜 변경 필요 - 자정/공휴일) - 최대 3회 재시도
         logger.info(f"➡️ {BANK_NAME} Selenium으로 전환 (환율 데이터 없음)")
-        crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
+        for attempt in range(3):
+            try:
+                crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
+                logger.info(f"✅ {BANK_NAME} Selenium 성공 (시도 {attempt+1}/3)")
+                return  # 성공 시 종료
+            except Exception as e:
+                logger.warning(f"⚠️ {BANK_NAME} Selenium 실패 (시도 {attempt+1}/3): {str(e)[:50]}")
+                if attempt < 2:  # 마지막 시도 전이면
+                    time.sleep(2)  # 2초 대기 후 재시도
+                else:
+                    raise  # 3회 실패 시 예외 발생
 
     except Exception as e:
         logger.exception("IBK_BANK_URL 크롤링 실패", extra={"url": IBK_BANK_URL})
-        try:
-            logger.info("MIBANK_IBK_URL 시도")
-            crawl_and_save_routine(MIBANK_IBK_URL, MIBANK_SELECTORS, db)
-        except Exception as e:
-            logger.exception("MIBANK_IBK_URL 크롤링 실패", extra={"url": MIBANK_IBK_URL})
-            error_msg = f"모든 URL 실패: {str(e)[:100]}"
-            logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+
+        # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함 ← Selenium 3회 재시도로 커버)
+        if is_mibank_rate_reliable():
+            try:
+                logger.info("MIBANK_IBK_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                crawl_and_save_routine(MIBANK_IBK_URL, MIBANK_SELECTORS, db)
+            except Exception as e2:
+                logger.exception("MIBANK_IBK_URL 크롤링 실패", extra={"url": MIBANK_IBK_URL})
+                error_msg = f"모든 URL 실패: {str(e2)[:100]}"
+                logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+        else:
+            logger.warning(
+                f"⏰ {BANK_NAME} 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
+                extra={
+                    "reason": "is_mibank_rate_reliable & selenium failed",
+                    "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
+                }
+            )
+            # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 IBK 환율 표시
     finally:
         db.close()    
 

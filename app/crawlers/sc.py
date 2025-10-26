@@ -8,20 +8,17 @@ import time
 # 서드파티 라이브러리
 import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
 from sqlalchemy.orm import Session
-from webdriver_manager.chrome import ChromeDriverManager
 
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
-from app.crawlers.utils import parse_rate_text, create_selenium_driver
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
 
 BANK_NAME = 'sc'
 
@@ -70,13 +67,25 @@ def crawl_and_save_sc_bank_exchange_rates():
             crawl_and_save_sc_second_routine_selenium(SECOND_SC_BANK_URL, SECOND_SC_BANK_SELECTOR, db)
         except Exception as e:
             logger.exception("SECOND_SC_BANK_URL 크롤링 실패", extra={"url": SC_BANK_URL})
-            try:
-                logger.info("MIBANK_SC_URL 시도")
-                crawl_and_save_routine(MIBANK_SC_URL, MIBANK_SELECTORS, db)
-            except Exception as e:
-                logger.exception("MIBANK_SC_URL 크롤링 실패", extra={"url": MIBANK_SC_URL})
-                error_msg = f"모든 URL 실패: {str(e)[:100]}"
-                logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+
+            # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
+            if is_mibank_rate_reliable():
+                try:
+                    logger.info("MIBANK_SC_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                    crawl_and_save_routine(MIBANK_SC_URL, MIBANK_SELECTORS, db)
+                except Exception as e2:
+                    logger.exception("MIBANK_SC_URL 크롤링 실패", extra={"url": MIBANK_SC_URL})
+                    error_msg = f"모든 URL 실패: {str(e2)[:100]}"
+                    logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+            else:
+                logger.warning(
+                    f"⏰ {BANK_NAME} 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
+                    extra={
+                        "reason": "is_mibank_rate_reliable & selenium failed",
+                        "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
+                    }
+                )
+                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 SC 환율 표시
     finally:
         db.close()    
 

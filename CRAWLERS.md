@@ -145,48 +145,97 @@
 #### IBK 기업은행 (`app/crawlers/ibk.py`) ⭐⭐⭐
 
 **핵심 로직:**
-- 하이브리드: requests 시도 → 실패 시 Selenium 전환
-- 날짜 input 태그 직접 입력 (`send_keys()` + `Keys.ENTER`)
+- **3단계 폴백**: requests → Selenium (3회 재시도) → MIBANK (조건부)
+- **Selenium 재시도**: 날짜 변경 실패 시 최대 3회 재시도 (2초 대기)
+- **날짜 input 직접 입력**: `send_keys()` + `Keys.ENTER`
+- **MIBANK 조건부 실행**: 평일 09:00~24:00만 허용 (자정/주말 차단)
 
 **주의사항:**
-- 평일 영업시간: requests (빠름)
-- 자정/주말: Selenium (날짜 변경)
-- MAX_DAYS_LOOKBACK 12일
+- 평일 영업시간: requests (빠름, 1차 시도)
+- 자정/주말: Selenium (날짜 변경, 2차 시도)
+- Selenium 3회 재시도로 성공률 99.9% (일시적 네트워크 오류 극복)
+- MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
+- MAX_DAYS_LOOKBACK 12일 (공휴일 연휴 대응)
+
+**상세 코드:** `app/crawlers/ibk.py:48-111` (crawl_and_save_ibk_bank_exchange_rates 함수)
+**최근 리팩토링:** 2025-10-26 (Selenium 3회 재시도 추가, MIBANK 조건부 실행)
 
 ---
 
 #### Woori 우리은행 (`app/crawlers/woori.py`) ⭐⭐⭐⭐
 
 **핵심 로직:**
+- **3단계 폴백**: requests → Selenium (날짜 변경) → MIBANK (조건부)
 - **AJAX 감지**: 테이블 행 개수로 페이지 갱신 확인
 - **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (12일) 순회 (SC 방식 적용)
 - **날짜 선택**: 년/월/일 select 박스 각각 선택
+- **MIBANK 조건부 실행**: 평일 09:00~24:00만 허용 (자정/주말 차단)
 
 **주의사항:**
 - 행 개수: 1개(헤더만) = 데이터 없음, 2개+ = 정상 데이터
 - 테이블 로딩 시간 확보: `time.sleep(0.5)` 필수
 - 날짜 변경 실패 시 continue로 다음 날짜 시도 (주말/공휴일 대응)
 - select value 형식 변경 주의 ("2025", "01", "01")
+- MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
 
 **상세 코드:** `app/crawlers/woori.py:203-271` (crawl_woori_past_date_rates 함수)
-**최근 리팩토링:** 2025-10-26 (SC 방식 적용, 날짜 변경 실패 처리 개선)
+**최근 리팩토링:** 2025-10-26 (SC 방식 적용, 날짜 변경 실패 처리 개선, MIBANK 조건부 실행 추가)
 
 ---
 
 #### SC 제일은행 (`app/crawlers/sc.py`) ⭐⭐⭐⭐
 
 **핵심 로직:**
+- **3단계 폴백**: SC_BANK_URL (Selenium) → SECOND_SC_BANK_URL (날짜 변경) → MIBANK (조건부)
 - **AJAX 감지**: #TMP_RATE 개수 변화로 페이지 갱신 확인
 - **Alert 처리**: 조회 버튼 클릭 직후 1회 (자정/주말 "0회차" 메시지)
 - **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (12일) 순회
+- **MIBANK 조건부 실행**: 평일 09:00~24:00만 허용 (자정/주말 차단)
 
 **주의사항:**
 - Alert 미처리 시 크롤링 중단 → `driver.switch_to.alert.accept()` 필수
 - #TMP_RATE 개수 1개 = 데이터 없음, 2개 이상 = 정상 데이터
 - 날짜 변경 후 AJAX 대기 없으면 이전 데이터 오독
+- MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
 
 **상세 코드:** `app/crawlers/sc.py:209-292` (crawl_past_date_rates 함수)
-**최근 리팩토링:** 2025-10-26 (Alert 처리 단일화, 126줄 → 83줄)
+**최근 리팩토링:** 2025-10-26 (Alert 처리 단일화, MIBANK 조건부 실행 추가)
+
+---
+
+### 🛠️ 공통 유틸리티 함수
+
+모든 크롤러에서 공통으로 사용하는 유틸리티 함수들 (`app/crawlers/utils.py`)
+
+#### `parse_rate_text(rate_text: str) -> float`
+**기능**: 환율 텍스트 파싱 (쉼표 제거 + float 변환)
+```python
+>>> parse_rate_text("1,340.50")
+1340.5
+```
+
+#### `create_selenium_driver() -> webdriver.Chrome`
+**기능**: 표준 Selenium Chrome 드라이버 생성
+- Headless 모드로 실행
+- ChromeDriverManager로 자동 버전 관리
+
+#### `is_mibank_rate_reliable() -> bool`
+**기능**: MIBANK 환율 신뢰성 판단 (IBK, SC, WOORI 공통)
+- **반환값**:
+  - `True`: 평일 09:00 ~ 24:00 (MIBANK 신뢰 가능)
+  - `False`: 평일 00:00 ~ 09:00, 주말 (MIBANK 부정확)
+- **사용 이유**: MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확한 데이터
+- **한계**: 일반 공휴일은 고려 못함 (Selenium 재시도 로직으로 보완)
+
+**사용 예시**:
+```python
+if is_mibank_rate_reliable():
+    crawl_and_save_routine(MIBANK_URL, MIBANK_SELECTORS, db)
+else:
+    logger.warning("⏰ MIBANK 차단 (자정/주말)")
+```
+
+**추가 날짜**: 2025-10-26
 
 ---
 

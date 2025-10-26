@@ -8,20 +8,17 @@ import time
 # 서드파티 라이브러리
 import requests
 from bs4 import BeautifulSoup
-from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.select import Select
 from sqlalchemy.orm import Session
-from webdriver_manager.chrome import ChromeDriverManager
 
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
-from app.crawlers.utils import parse_rate_text, create_selenium_driver
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
 
 BANK_NAME = 'woori'
 
@@ -47,7 +44,7 @@ MONTH_SELECTOR = "#SELECT_DATE_601M"
 DAY_SELECTOR = "#SELECT_DATE_601D"
 
 MIBANK_WOORI_CODE = '020'
-MIBANK_KB_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_WOORI_CODE
+MIBANK_WOORI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_WOORI_CODE
 MIBANK_SELECTORS = {
     'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
     'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
@@ -71,13 +68,25 @@ def crawl_and_save_woori_bank_exchange_rates():
             crawl_and_save_woori_routine_selenium(SECOND_WOORI_BANK_URL, SECOND_WOORI_BANK_SELECTORS, db)
         except Exception as e:
             logger.exception("SECOND_WOORI_BANK_URL 크롤링 실패", extra={"url": SECOND_WOORI_BANK_URL})
-            try:
-                logger.info("MIBANK_WOORI_URL 시도")
-                crawl_and_save_routine(MIBANK_KB_URL, MIBANK_SELECTORS, db)
-            except Exception as e:
-                logger.exception("MIBANK_WOORI_URL 크롤링 실패", extra={"url": MIBANK_KB_URL})
-                error_msg = f"모든 URL 실패: {str(e)[:100]}"
-                logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+
+            # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
+            if is_mibank_rate_reliable():
+                try:
+                    logger.info("MIBANK_WOORI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                    crawl_and_save_routine(MIBANK_WOORI_URL, MIBANK_SELECTORS, db)
+                except Exception as e2:
+                    logger.exception("MIBANK_WOORI_URL 크롤링 실패", extra={"url": MIBANK_WOORI_URL})
+                    error_msg = f"모든 URL 실패: {str(e2)[:100]}"
+                    logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+            else:
+                logger.warning(
+                    f"⏰ {BANK_NAME} 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
+                    extra={
+                        "reason": "is_mibank_rate_reliable & selenium failed",
+                        "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
+                    }
+                )
+                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 WOORI 환율 표시
     finally:
         db.close()    
 
