@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
-from app.crawlers.utils import parse_rate_text, create_selenium_driver
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
+from app.crawlers.utils import parse_rate_text
 
 BANK_NAME = 'citi'
 

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
 
 BANK_NAME = 'woori'
@@ -80,7 +80,7 @@ def crawl_and_save_woori_bank_exchange_rates():
                     logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
             else:
                 logger.warning(
-                    f"⏰ {BANK_NAME} 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
+                    f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
                     extra={
                         "reason": "is_mibank_rate_reliable & selenium failed",
                         "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
@@ -138,7 +138,7 @@ def crawl_and_save_woori_routine_selenium(url: str, selectors: dict, db: Session
     current_rates = {}
     try:
         driver.get(url)
-        wait = WebDriverWait(driver, 3)
+        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
         # 현재 날짜 환율 확인 (테이블 행 개수로 판단)
         # 자정/주말: 테이블 행 1개(헤더만), 평일 영업시간: 여러 개(데이터 포함)

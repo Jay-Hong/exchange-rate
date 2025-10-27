@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
 from app.crawlers.utils import parse_rate_text, create_selenium_driver
 
 BANK_NAME = 'hana'
@@ -115,7 +115,7 @@ def crawl_and_save_hana_routine_selenium(url: str, selectors: dict, db: Session)
     current_rates = {}
     try:
         driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, 5)
+        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
         # iframe이 있다면 먼저 전환
         iframe = wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))

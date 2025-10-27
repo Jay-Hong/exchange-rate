@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_OPTIONS
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
 
 BANK_NAME = 'sc'
@@ -79,7 +79,7 @@ def crawl_and_save_sc_bank_exchange_rates():
                     logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
             else:
                 logger.warning(
-                    f"⏰ {BANK_NAME} 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
+                    f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
                     extra={
                         "reason": "is_mibank_rate_reliable & selenium failed",
                         "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
@@ -97,7 +97,7 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
     current_rates = {}
     try:
         driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, 5)
+        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
         for pair, selector in selectors.items():
             try:
@@ -146,7 +146,7 @@ def crawl_and_save_sc_second_routine_selenium(url: str, selector: str, db: Sessi
     current_rates = {}
     try:
         driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, 3)
+        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
         # Alert 처리 (자정 이후/주말에 뜨는 메시지)
         try:
