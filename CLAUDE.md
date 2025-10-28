@@ -101,7 +101,7 @@ timestamp  DATETIME (KST)
 ### 영업시간 자동 감지
 
 - **IN 모드**: 월요일 04:00 ~ 토요일 07:59
-  - 크롤링 주기: 4.4-33.3초 (소스별 상이)
+  - 크롤링 주기: 4.9-33.3초 (소스별 상이)
 - **OUT 모드**: 그 외 시간
   - 크롤링 주기: 44-333초 (IN 모드의 10배)
 
@@ -109,7 +109,7 @@ timestamp  DATETIME (KST)
 
 ```python
 BANK_TASKS = [
-    ("investing", 4.4초),
+    ("investing", 4.9초),
     ("kb", 7.9초),
     ("hana", 7.3초),
     ("shinhan", 31초),

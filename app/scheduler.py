@@ -35,7 +35,7 @@ scheduler = BackgroundScheduler(timezone=KST)
 # 순서: investing → kb → hana → shinhan → woori → ibk → nh → sc → bs → citi
 # (index.html DEFAULT_BANK_ORDER와 일관성 유지)
 BANK_TASKS = [
-    ("investing", investing.crawl_and_save_investing_exchange_rates, 4.4),
+    ("investing", investing.crawl_and_save_investing_exchange_rates, 4.9),
     ("kb", kb.crawl_and_save_kb_bank_exchange_rates, 7.9),
     ("hana", hana.crawl_and_save_hana_bank_exchange_rates, 7.3),
     ("shinhan", shinhan.crawl_and_save_shinhan_bank_exchange_rates, 31),
@@ -74,7 +74,9 @@ def switch_jobs(mode: str):
         scheduler.add_job(
             func,
             IntervalTrigger(seconds=interval, timezone=KST),
-            id=f"task_{name}"
+            id=f"task_{name}",
+            max_instances=1,          # 중복 실행 방지 (명시적 표시)
+            misfire_grace_time=70     # 70초 이상 지연 시 건너뛰기 (2회 주기 여유)
         )
     logger.info(f"=== {mode} 모드로 전환됨 ===", extra={"mode": mode, "jobs_count": len(scheduler.get_jobs())})
 

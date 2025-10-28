@@ -338,7 +338,7 @@ def crawl_and_save_<은행코드>_bank_exchange_rates():
 from app.crawlers import investing, kb, <은행코드>
 
 BANK_TASKS = [
-    ("investing", investing.crawl_and_save_investing_exchange_rates, 4.4),
+    ("investing", investing.crawl_and_save_investing_exchange_rates, 4.9),
     ("kb", kb.crawl_and_save_kb_bank_exchange_rates, 7.9),
     # ... 기존 은행들
     ("<은행코드>", <은행코드>.crawl_and_save_<은행코드>_bank_exchange_rates, <주기>),  # ⬅️ 추가
