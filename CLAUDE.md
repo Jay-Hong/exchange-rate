@@ -198,7 +198,7 @@ BANK_TASKS = [
 ## 파일 구조
 
 ```
-F06_GitHub/
+exchange-rate/
 ├── app/
 │   ├── __init__.py          # 로거 export
 │   ├── config.py            # 환경 설정 (ENV, LOG_LEVEL, 텔레그램 등)

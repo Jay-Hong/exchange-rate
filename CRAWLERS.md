@@ -349,7 +349,7 @@ BANK_TASKS = [
 
 ```bash
 # 1. Import 테스트
-cd /Users/jay/Downloads/Projects/FXi/F06_GitHub
+cd /Users/jay/Downloads/Projects/FXi/exchange-rate
 python3 -c "from app.crawlers import <은행코드>"
 
 # 2. 크롤링 테스트 (수동 실행)

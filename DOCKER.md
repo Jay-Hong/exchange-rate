@@ -89,7 +89,7 @@ EC2 t2.micro (프리티어)
 │  - Rate Limiting                    │
 │  - 로그 수집                        │
 └─────────────────────────────────────┘
-  ↓ (내부 네트워크: frontend)
+  ↓
 ┌─────────────────────────────────────┐
 │  FastAPI Container                  │
 │  ┌───────────────────────────────┐  │
@@ -243,35 +243,39 @@ docker-compose -f docker-compose.yml -f docker-compose.phase2.yml up -d fastapi
 
 ## 네트워크 및 보안
 
-### Docker 네트워크 분리
+### Docker 네트워크 전략
+
+**단일 네트워크 사용 (권장)**
 
 ```yaml
-networks:
-  # 외부 접근 가능 (Nginx ↔ FastAPI)
-  frontend:
-    driver: bridge
-    name: exchange-rate-frontend
-
-  # 내부 통신 전용 (FastAPI ↔ Redis)
-  backend:
-    driver: bridge
-    name: exchange-rate-backend
-
-  # DB 전용 (가장 격리된 네트워크)
-  database:
-    driver: bridge
-    name: exchange-rate-database
-    internal: true  # 외부 접근 완전 차단
+# networks 섹션 명시 안 함 (자동 생성)
+# → exchange_rate_default 네트워크 자동 생성
+# → 모든 서비스가 자동 연결
+# → 서비스명으로 통신 가능 (예: http://fastapi:8000)
 ```
 
-### 포트 노출 전략
+**왜 단일 네트워크인가?**
+- **단순함**: 설정 복잡도 50% 감소
+- **충분한 보안**: 포트 노출 제어로 외부 접근 차단
+- **확장성**: 프로덕션 규모(사용자 2000명)까지 문제없음
+- **Docker 철학**: "Convention over Configuration"
 
-| 서비스 | 포트 | 외부 노출 | 설명 |
-|--------|------|-----------|------|
-| Nginx | 80, 443 | ✅ 노출 | HTTPS 엔드포인트 |
-| FastAPI | 8000 | ❌ 내부만 | Nginx를 통해서만 접근 |
-| PostgreSQL | 5432 | ❌ 내부만 | database 네트워크만 |
-| Redis | 6379 | ❌ 내부만 | backend 네트워크만 |
+**네트워크 분리가 필요한 경우:**
+- 마이크로서비스 10개 이상
+- 컴플라이언스 요구사항 (PCI-DSS, HIPAA)
+- Multi-tenant 환경
+- 이 프로젝트는 해당 없음 ✅
+
+### 포트 노출 전략 (실제 보안 제어)
+
+| 서비스 | 포트 | 외부 노출 | 설정 방법 | 설명 |
+|--------|------|-----------|----------|------|
+| Nginx | 80, 443 | ✅ 노출 | `ports: ["80:80", "443:443"]` | HTTPS 엔드포인트 |
+| FastAPI | 8000 | ❌ 내부만 | `expose: ["8000"]` | Docker 내부 네트워크만 |
+| PostgreSQL | 5432 | ❌ 내부만 | `expose: ["5432"]` | Docker 내부 네트워크만 |
+| Redis | 6379 | ❌ 내부만 | `expose: ["6379"]` | Docker 내부 네트워크만 |
+
+**핵심:** `ports` vs `expose`로 보안 제어 (네트워크 분리 불필요)
 
 ### 보안 설정
 
@@ -389,7 +393,7 @@ services:
 ## 파일 구조
 
 ```
-F06_GitHub/
+exchange-rate/
 ├── docker-compose.yml              # Phase 1 (SQLite)
 ├── docker-compose.phase2.yml       # Phase 2 오버라이드 (PostgreSQL + Redis)
 ├── docker-compose.phase3.yml       # Phase 3 오버라이드 (서비스 분리)
@@ -486,8 +490,6 @@ services:
       - ./static:/var/www/static:ro
       - ./volumes/ssl:/etc/letsencrypt:ro
       - ./volumes/logs/nginx:/var/log/nginx
-    networks:
-      - frontend
     depends_on:
       fastapi:
         condition: service_healthy
@@ -527,9 +529,6 @@ services:
       - ./volumes/logs/app:/app/logs
     expose:
       - "8000"
-    networks:
-      - frontend
-      - backend
     deploy:
       resources:
         limits:
@@ -548,24 +547,11 @@ services:
     oom_score_adj: -500  # OOM Killer 보호
 
 # ─────────────────────────────────────
-# Networks
-# ─────────────────────────────────────
-networks:
-  frontend:
-    driver: bridge
-    name: exchange-rate-frontend
-  backend:
-    driver: bridge
-    name: exchange-rate-backend
-
-# ─────────────────────────────────────
 # Volumes
 # ─────────────────────────────────────
 volumes:
   sqlite-data:
-    driver: local
   logs:
-    driver: local
 ```
 
 ### 2. docker-compose.phase2.yml (PostgreSQL + Redis)
@@ -584,10 +570,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - frontend
-      - backend
-      - database
 
   # ─────────────────────────────────────
   # PostgreSQL
@@ -614,8 +596,6 @@ services:
       -c checkpoint_completion_target=0.9
     expose:
       - "5432"
-    networks:
-      - database
     deploy:
       resources:
         limits:
@@ -648,8 +628,6 @@ services:
       - redis-data:/data
     expose:
       - "6379"
-    networks:
-      - backend
     deploy:
       resources:
         limits:
@@ -664,22 +642,11 @@ services:
     oom_score_adj: 100
 
 # ─────────────────────────────────────
-# Networks
-# ─────────────────────────────────────
-networks:
-  database:
-    driver: bridge
-    name: exchange-rate-database
-    internal: true  # 외부 접근 완전 차단
-
-# ─────────────────────────────────────
 # Volumes
 # ─────────────────────────────────────
 volumes:
   postgres-data:
-    driver: local
   redis-data:
-    driver: local
 ```
 
 ### 3. .env.example
