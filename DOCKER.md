@@ -470,8 +470,6 @@ exchange-rate/
 ### 1. docker-compose.yml (Phase 1)
 
 ```yaml
-version: '3.8'
-
 services:
   # ─────────────────────────────────────
   # Nginx (Reverse Proxy)
@@ -557,8 +555,6 @@ volumes:
 ### 2. docker-compose.phase2.yml (PostgreSQL + Redis)
 
 ```yaml
-version: '3.8'
-
 services:
   # FastAPI 설정 오버라이드
   fastapi:

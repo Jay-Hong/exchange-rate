@@ -54,7 +54,7 @@
 - **DB**: SQLite (초기) → PostgreSQL (500명 이상 시)
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (BackgroundScheduler)
-- **크롤링**: requests + BeautifulSoup4
+- **크롤링**: requests + BeautifulSoup4, Selenium
 
 ### 프론트엔드
 
@@ -103,7 +103,7 @@ timestamp  DATETIME (KST)
 - **IN 모드**: 월요일 04:00 ~ 토요일 07:59
   - 크롤링 주기: 4.9-33.3초 (소스별 상이)
 - **OUT 모드**: 그 외 시간
-  - 크롤링 주기: 44-333초 (IN 모드의 10배)
+  - 크롤링 주기: 49-333초 (IN 모드의 10배)
 
 ### 크롤러 실행 주기 (IN 모드 기준)
 
@@ -241,8 +241,9 @@ exchange-rate/
 │   ├── app.log              # 모든 운영 로그 (INFO+, 크롤러 포함)
 │   └── error.log            # 에러/경고만 (WARNING+)
 ├── static/                  # 은행 아이콘
-├── templates/
-│   └── index.html           # 웹 대시보드 (관리자용)
+├── templates/               # 관리자 웹 UI (순수 HTML+JS, Jinja2 미사용)
+│   ├── index.html           # 메인 대시보드 (API 확인)
+│   └── admin.html           # 관리자 페이지
 ├── .env                     # 환경 변수 (git 제외)
 ├── .gitignore               # Git 제외 파일
 ├── requirements.txt         # Python 패키지
@@ -250,6 +251,9 @@ exchange-rate/
 ├── CRAWLERS.md              # 크롤러 특수 로직 가이드
 └── DECISIONS.md             # 아키텍처 의사결정 기록 (ADR)
 ```
+
+> 💡 **구조 설계 원칙**: API-first 서비스 (모바일 앱이 메인, 웹은 관리자 전용)
+> **확장성**: React 전환 시 `frontend/` 폴더 추가만 하면 됨 (Backend/Frontend 약한 결합)
 
 ## 주요 로직
 
