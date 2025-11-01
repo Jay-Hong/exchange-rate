@@ -34,12 +34,14 @@ ENV/
 # 로그 파일
 logs/
 *.log
+volumes/  # Docker Bind Mount 로그
 
 # 데이터베이스
 *.db
 *.db-journal
 *.sqlite
 *.sqlite3
+data/*.backup*  # DB 백업 파일
 
 # IDE
 .vscode/

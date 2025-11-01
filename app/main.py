@@ -363,8 +363,18 @@ def get_dashboard():
 
     # ===== 시스템 상태 =====
     memory = psutil.virtual_memory()
-    db_path = BASE_DIR / "data" / "exchange_rates.db"
-    db_size_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0
+
+    # DATABASE_URL에서 실제 DB 경로 추출 (Docker/로컬 환경 모두 호환)
+    from app.database import DATABASE_URL
+    from pathlib import Path as PathLib
+
+    db_size_mb = 0
+    if DATABASE_URL and "sqlite:///" in DATABASE_URL:
+        # sqlite:///경로 → 경로 추출 (sqlite:/// 제거)
+        db_file_path = DATABASE_URL.replace("sqlite:///", "")
+        db_path = PathLib(db_file_path)
+        db_size_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0
+
     process = psutil.Process()
     uptime_seconds = time.time() - process.create_time()
     current_mode = scheduler.current_mode or "UNKNOWN"
