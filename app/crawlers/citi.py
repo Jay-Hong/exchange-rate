@@ -76,7 +76,7 @@ def crawl_and_save_citi_first_routine(url: str, selectors: dict, db: Session) ->
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
 
         for order, selector in selectors.items():
             item = soup.select_one(selector)    # 미국(USD)1,393.50하락-5.95
@@ -117,7 +117,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
 
         for pair, selector in selectors.items():
             rate_element = soup.select_one(selector)

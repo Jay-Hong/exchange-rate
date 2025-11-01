@@ -75,7 +75,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
 
         for pair, selector in selectors.items():
             rate_element = soup.select_one(selector)

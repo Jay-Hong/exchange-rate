@@ -11,7 +11,6 @@
 # 서드파티 라이브러리
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 # 로컬 애플리케이션
 from app.crawlers.constants import SELENIUM_OPTIONS
@@ -40,14 +39,14 @@ def parse_rate_text(rate_text: str) -> float:
 
 def create_selenium_driver():
     """
-    표준 Selenium Chrome 드라이버 생성
+    표준 Selenium Chrome 드라이버 생성 (Chromium 사용)
 
     Returns:
         webdriver.Chrome 인스턴스
 
     Notes:
         - Headless 모드로 실행
-        - ChromeDriverManager로 자동 버전 관리
+        - Docker에서 시스템 Chromium/ChromeDriver 사용
         - SELENIUM_OPTIONS 상수에서 옵션 로드
 
     Examples:
@@ -55,14 +54,35 @@ def create_selenium_driver():
         >>> driver.get("https://example.com")
         >>> driver.quit()
     """
+    import os
+
     options = webdriver.ChromeOptions()
+
+    # Chromium 바이너리 경로 설정 (Docker 환경)
+    chromium_bin = os.getenv('CHROME_BIN', '/usr/bin/chromium')
+    if os.path.exists(chromium_bin):
+        options.binary_location = chromium_bin
+
+    # 옵션 추가
     for arg in SELENIUM_OPTIONS:
         options.add_argument(arg)
 
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+    # ChromeDriver 경로 (Docker 환경)
+    chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
+
+    # Service 생성 (webdriver-manager 제거)
+    if os.path.exists(chromedriver_path):
+        service = Service(chromedriver_path)
+    else:
+        # 로컬 개발 환경 폴백 (webdriver-manager 사용)
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(ChromeDriverManager().install())
+        except ImportError:
+            # webdriver-manager 없으면 기본 경로
+            service = Service()
+
+    return webdriver.Chrome(service=service, options=options)
 
 
 def is_mibank_rate_reliable() -> bool:

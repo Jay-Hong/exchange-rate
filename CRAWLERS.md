@@ -1,6 +1,6 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2025-10-26
+> 📅 **마지막 업데이트**: 2025-10-31
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
 
 ## 목차
@@ -265,6 +265,16 @@ else:
 | **IBK** | 날짜 input 형식 변경 | 월 1회 |
 | **Woori** | select 박스 value 형식 | 월 1회 |
 | **SC** | Alert 메시지 내용 변경 | 월 1회 |
+
+---
+
+### 환경 설정 문제
+
+| 문제 | 증상 | 원인 | 해결 |
+|------|------|------|------|
+| **Brotli 압축 해제 실패** | investing 크롤러만 Docker에서 실패 (로컬은 정상) | `brotli` 패키지 미설치 → requests가 br 압축 미지원 | `requirements.txt`에 `brotli>=1.0.9` 추가 ✅ |
+
+**배경**: investing.com은 Brotli(br) 압축을 우선 사용하며, requests 라이브러리는 `brotli` 패키지가 없으면 br 압축을 해제할 수 없습니다. 로컬 환경(Anaconda)에는 다른 패키지 의존성으로 brotli가 설치되어 있었지만, Docker 환경에는 명시하지 않으면 설치되지 않습니다.
 
 ---
 

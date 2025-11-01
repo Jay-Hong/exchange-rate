@@ -100,7 +100,7 @@ def try_crawl_with_requests(db: Session) -> bool:
     try:
         response = requests.get(IBK_BANK_URL, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
 
         # Selector 존재 여부 및 데이터 유효성 확인 (아래 구문 없으면 자정 이후와 주말에는 경고 계속 뜰 것)
         test_element = soup.select_one(IBK_BANK_SELECTORS['usd-krw'])
@@ -209,7 +209,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
 
         for pair, selector in selectors.items():
             rate_element = soup.select_one(selector)

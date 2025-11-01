@@ -26,11 +26,14 @@ HEADERS = {
 # Selenium Chrome Options (모든 Selenium 크롤러 공통)
 SELENIUM_OPTIONS = [
     "--headless=new",
-    "--window-size=1280x720",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
+    "--no-sandbox",                    # Docker 필수 (sandbox 비활성화)
+    "--disable-setuid-sandbox",        # Docker 필수 (권한 문제 해결)
+    "--disable-dev-shm-usage",         # /dev/shm 용량 부족 방지
+    "--disable-gpu",                   # GPU 비활성화
+    "--window-size=1920,1080",         # 창 크기
+    "--disable-blink-features=AutomationControlled",  # 봇 감지 방지
     "--lang=ko_KR",
-    "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
 # Timeout 설정
