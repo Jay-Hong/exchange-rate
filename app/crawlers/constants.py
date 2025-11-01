@@ -25,7 +25,7 @@ HEADERS = {
 
 # Selenium Chrome Options (모든 Selenium 크롤러 공통)
 SELENIUM_OPTIONS = [
-    "--headless=new",
+    "--headless=new",                  # 최신 headless 모드
     "--no-sandbox",                    # Docker 필수 (sandbox 비활성화)
     "--disable-setuid-sandbox",        # Docker 필수 (권한 문제 해결)
     "--disable-dev-shm-usage",         # /dev/shm 용량 부족 방지
@@ -33,7 +33,17 @@ SELENIUM_OPTIONS = [
     "--window-size=1920,1080",         # 창 크기
     "--disable-blink-features=AutomationControlled",  # 봇 감지 방지
     "--lang=ko_KR",
-    "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # 프로세스 최적화 (zombie 방지)
+    "--disable-software-rasterizer",   # GPU 렌더링 프로세스 감소
+    "--disable-extensions",            # Extension 프로세스 제거
+    "--disable-background-networking", # Background 프로세스 감소
+    "--disable-default-apps",          # 기본 앱 비활성화
+    "--disable-sync",                  # 동기화 프로세스 제거
+    "--metrics-recording-only",        # 불필요한 통계 수집 프로세스 제거
+    "--no-first-run",                  # 초기 실행 프로세스 제거
+    "--disable-breakpad",              # 크래시 리포터 비활성화
+    "--disable-component-extensions-with-background-pages"  # 백그라운드 확장 프로세스 제거
 ]
 
 # Timeout 설정

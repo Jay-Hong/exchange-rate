@@ -25,6 +25,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # 헬스체크용
     curl \
+    # Zombie 프로세스 정리용 init 시스템
+    tini \
     # Chromium (오픈소스, ARM64 지원)
     chromium \
     chromium-driver \
@@ -85,6 +87,9 @@ EXPOSE 8000
 # 헬스체크
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:8000/health || exit 1
+
+# tini를 PID 1로 실행 (zombie 프로세스 reaping)
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # 실행
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
