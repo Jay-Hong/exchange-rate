@@ -1,0 +1,88 @@
+# ═════════════════════════════════════════════════════════════
+# Exchange Rate Service - Phase 1 (SQLite)
+# ═════════════════════════════════════════════════════════════
+# 목적: AWS 프리티어(t2.micro, 1GB RAM)에서 안정적 운영
+# 메모리: ~315MB (Nginx 32MB + FastAPI 600MB 제한)
+# 배포: docker-compose up -d
+# ═════════════════════════════════════════════════════════════
+
+services:
+  # ─────────────────────────────────────
+  # Nginx (Reverse Proxy)
+  # ─────────────────────────────────────
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: exchange-rate-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./static:/var/www/static:ro
+      - ./volumes/logs/nginx:/var/log/nginx
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 32M
+        reservations:
+          cpus: '0.05'
+          memory: 16M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ─────────────────────────────────────
+  # FastAPI (App + Crawler + SQLite + Selenium)
+  # ─────────────────────────────────────
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: exchange-rate-app
+    env_file:
+      - .env
+    environment:
+      - ENV=${ENV:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=sqlite:////data/exchange_rates.db
+    volumes:
+      - ./data:/data
+      - ./volumes/logs/app:/app/logs
+    expose:
+      - "8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.9'
+          memory: 600M
+        reservations:
+          cpus: '0.5'
+          memory: 300M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    oom_score_adj: -500  # OOM Killer 보호 (가장 마지막에 종료)
+    # Chrome headless용 공유 메모리 크기
+    shm_size: 512mb
+
+# ─────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────
+# Bind Mount 사용으로 Named Volume 불필요
+# volumes:
+#   sqlite-data:
+#     driver: local
