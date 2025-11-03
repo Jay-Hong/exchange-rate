@@ -31,9 +31,16 @@ logger = logging.getLogger("exchange_rate.scheduler")
 KST = timezone('Asia/Seoul')
 scheduler = BackgroundScheduler(timezone=KST)
 
-# === 은행별 기본 주기(초) 정의 ===
+# ═════════════════════════════════════════════════════════════
+# 은행별 기본 주기(초) 정의
+# ═════════════════════════════════════════════════════════════
 # 순서: investing → kb → hana → shinhan → woori → ibk → nh → sc → bs → citi
 # (index.html DEFAULT_BANK_ORDER와 일관성 유지)
+#
+# Selenium 동시 실행 제어:
+# - utils.py의 selenium_driver_context()가 자동으로 최대 2개 제한
+# - 크롤러 코드 수정 불필요 (폴백 로직 유지)
+# ─────────────────────────────────────────────────────────────
 BANK_TASKS = [
     ("investing", investing.crawl_and_save_investing_exchange_rates, 4.9),
     ("kb", kb.crawl_and_save_kb_bank_exchange_rates, 7.9),
@@ -76,7 +83,7 @@ def switch_jobs(mode: str):
             IntervalTrigger(seconds=interval, timezone=KST),
             id=f"task_{name}",
             max_instances=1,          # 중복 실행 방지 (명시적 표시)
-            misfire_grace_time=70     # 70초 이상 지연 시 건너뛰기 (2회 주기 여유)
+            misfire_grace_time=30     # 30초 이상 지연 시 건너뛰기 (작업 적체 방지)
         )
     logger.info(f"=== {mode} 모드로 전환됨 ===", extra={"mode": mode, "jobs_count": len(scheduler.get_jobs())})
 

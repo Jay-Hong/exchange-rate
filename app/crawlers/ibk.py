@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
-from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context, is_mibank_rate_reliable
 
 BANK_NAME = 'ibk'
 
@@ -145,51 +145,54 @@ def try_crawl_with_requests(db: Session) -> bool:
 
 def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) -> int:
     """IBK 전용 Selenium 크롤링 + DB 저장 루틴 (변경 개수 반환)"""
-    driver = create_selenium_driver()
-
     current_rates = {}
     try:
-        driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
+        with selenium_driver_context() as driver:
+            driver.get(url) # url 오류면 여기서 에러남
+            wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
-        selected_date = datetime.date.today()
+            selected_date = datetime.date.today()
 
-        for i in range(MAX_DAYS_LOOKBACK):
-            try:
-                input_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, INPUT_SELECTOR)))
-                test_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, IBK_BANK_SELECTORS['usd-krw'])))
-                for pair, selector in IBK_BANK_SELECTORS.items():
-                    try:
-                        rate_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                        rate_text = rate_element.text.strip()
-                    except Exception as e:
-                        logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
-                        continue
-                    try:
-                        current_rate = parse_rate_text(rate_text)
-                        current_rates[pair] = current_rate
-                    except ValueError:
-                        logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
-                        continue
-                break   # 크롤링 되면 종료
-
-            except Exception as e:
-                selected_date = selected_date - datetime.timedelta(days=1)
-                logger.info(f"📅 날짜 변경 {selected_date.strftime('%Y.%m.%d')}", extra={"selector": INPUT_SELECTOR, "bank": BANK_NAME})
+            for i in range(MAX_DAYS_LOOKBACK):
                 try:
-                    input_element.clear()
-                    input_element.send_keys(selected_date.strftime('%Y.%m.%d'))
-                    input_element.send_keys(Keys.ENTER)
+                    input_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, INPUT_SELECTOR)))
+                    test_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, IBK_BANK_SELECTORS['usd-krw'])))
+                    for pair, selector in IBK_BANK_SELECTORS.items():
+                        try:
+                            rate_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                            rate_text = rate_element.text.strip()
+                        except Exception as e:
+                            logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
+                            continue
+                        try:
+                            current_rate = parse_rate_text(rate_text)
+                            current_rates[pair] = current_rate
+                        except ValueError:
+                            logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
+                            continue
+                    break   # 크롤링 되면 종료
+
                 except Exception as e:
-                    logger.warning(f"⚠️ 날짜 변경 실패", extra={"selector": INPUT_SELECTOR, "bank": BANK_NAME})
-                    break
+                    selected_date = selected_date - datetime.timedelta(days=1)
+                    logger.info(f"📅 날짜 변경 {selected_date.strftime('%Y.%m.%d')}", extra={"selector": INPUT_SELECTOR, "bank": BANK_NAME})
+                    try:
+                        input_element.clear()
+                        input_element.send_keys(selected_date.strftime('%Y.%m.%d'))
+                        input_element.send_keys(Keys.ENTER)
+                    except Exception as e:
+                        logger.warning(f"⚠️ 날짜 변경 실패", extra={"selector": INPUT_SELECTOR, "bank": BANK_NAME})
+                        break
 
-        # db 저장
-        if current_rates:
-            return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
-        else:
-            raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
+            # db 저장
+            if current_rates:
+                return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+            else:
+                raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
+    except RuntimeError:
+        # 세마포어 획득 실패 → 폴백 URL로
+        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
+        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:
@@ -199,8 +202,6 @@ def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) 
             logger.exception("⚠️ URL 접속 또는 처리 오류",
                 extra={"url": url, "bank": BANK_NAME, "error": error_msg})
         raise
-    finally:
-        driver.quit()
 
 
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:

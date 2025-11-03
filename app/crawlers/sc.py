@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
-from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable, selenium_driver_context
 
 BANK_NAME = 'sc'
 
@@ -92,35 +92,38 @@ def crawl_and_save_sc_bank_exchange_rates():
 
 def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> int:
     """Selenium 크롤링 + DB 저장 루틴 (변경 개수 반환)"""
-    driver = create_selenium_driver()
-
     current_rates = {}
     try:
-        driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
+        with selenium_driver_context() as driver:
+            driver.get(url) # url 오류면 여기서 에러남
+            wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
-        for pair, selector in selectors.items():
-            try:
-                rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-                rate_text = rate_element.text.strip()
-            except Exception as e:
-                logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
-                continue
+            for pair, selector in selectors.items():
+                try:
+                    rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                    rate_text = rate_element.text.strip()
+                except Exception as e:
+                    logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
+                    continue
 
-            try:
-                current_rate = parse_rate_text(rate_text)
-                current_rates[pair] = current_rate
-            except ValueError:
-                # 아래를 logger.warning으로 하지 않은이유 : 자정 이후/주말에는 이 URL이 안됨
-                logger.info(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
-                continue
+                try:
+                    current_rate = parse_rate_text(rate_text)
+                    current_rates[pair] = current_rate
+                except ValueError:
+                    # 아래를 logger.warning으로 하지 않은이유 : 자정 이후/주말에는 이 URL이 안됨
+                    logger.info(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
+                    continue
 
-        # db 저장
-        if current_rates:
-            return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
-        else:
-            raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
+            # db 저장
+            if current_rates:
+                return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+            else:
+                raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
+    except RuntimeError:
+        # 세마포어 획득 실패 → 폴백 URL로
+        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
+        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:
@@ -131,8 +134,6 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
             logger.exception("⚠️ URL 접속 또는 처리 오류",
                 extra={"url": url, "bank": BANK_NAME, "error": error_msg})
         raise
-    finally:
-        driver.quit()
 
 
 # SC제일은행 전용함수 for "https://www.standardchartered.co.kr/np/kr/pl/et/ExchangeRateP1.jsp"
@@ -141,46 +142,49 @@ def crawl_and_save_sc_second_routine_selenium(url: str, selector: str, db: Sessi
 
     - 자정 이후/주말: #TMP_RATE selector 하나만 있거나 없음 → 과거 날짜로 조회 (최대 12일)
     """
-    driver = create_selenium_driver()
-
     current_rates = {}
     try:
-        driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
+        with selenium_driver_context() as driver:
+            driver.get(url) # url 오류면 여기서 에러남
+            wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
 
-        # Alert 처리 (자정 이후/주말에 뜨는 메시지)
-        try:
-            alert = driver.switch_to.alert
-            alert_text = alert.text
-            logger.debug(f"Alert 감지: {alert_text}", extra={"bank": BANK_NAME})
-            alert.accept()
-        except Exception:
-            pass  # Alert 없으면 무시
+            # Alert 처리 (자정 이후/주말에 뜨는 메시지)
+            try:
+                alert = driver.switch_to.alert
+                alert_text = alert.text
+                logger.debug(f"Alert 감지: {alert_text}", extra={"bank": BANK_NAME})
+                alert.accept()
+            except Exception:
+                pass  # Alert 없으면 무시
 
-        # #TMP_RATE selector 존재 여부 및 개수 확인
-        try:
-            rate_elements = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
-            element_count = len(rate_elements)
+            # #TMP_RATE selector 존재 여부 및 개수 확인
+            try:
+                rate_elements = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
+                element_count = len(rate_elements)
 
-            # 여러 개 존재하면 평일 영업시간 → 현재 날짜 환율 크롤링
-            if element_count > 1:
-                logger.debug(f"✅ {BANK_NAME} 현재 날짜 환율 존재 (요소 {element_count}개)", extra={"bank": BANK_NAME, "element_count": element_count})
-                current_rates = crawl_current_date_rates(driver, wait, selector)
-            else:
-                # 1개만 있으면 자정 이후/주말 → 과거 날짜로 조회
-                logger.info(f"📅 {BANK_NAME} 과거 날짜 조회 시작 (#TMP_RATE 1개만 존재 - 자정/주말)", extra={"bank": BANK_NAME})
+                # 여러 개 존재하면 평일 영업시간 → 현재 날짜 환율 크롤링
+                if element_count > 1:
+                    logger.debug(f"✅ {BANK_NAME} 현재 날짜 환율 존재 (요소 {element_count}개)", extra={"bank": BANK_NAME, "element_count": element_count})
+                    current_rates = crawl_current_date_rates(driver, wait, selector)
+                else:
+                    # 1개만 있으면 자정 이후/주말 → 과거 날짜로 조회
+                    logger.info(f"📅 {BANK_NAME} 과거 날짜 조회 시작 (#TMP_RATE 1개만 존재 - 자정/주말)", extra={"bank": BANK_NAME})
+                    current_rates = crawl_past_date_rates(driver, wait, selector)
+
+            except Exception as e:
+                # Selector가 아예 없으면 과거 날짜로 조회
+                logger.info(f"📅 {BANK_NAME} 과거 날짜 조회 시작 (현재 날짜 환율 없음)", extra={"bank": BANK_NAME})
                 current_rates = crawl_past_date_rates(driver, wait, selector)
+            # db 저장
+            if current_rates:
+                return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+            else:
+                raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
-        except Exception as e:
-            # Selector가 아예 없으면 과거 날짜로 조회
-            logger.info(f"📅 {BANK_NAME} 과거 날짜 조회 시작 (현재 날짜 환율 없음)", extra={"bank": BANK_NAME})
-            current_rates = crawl_past_date_rates(driver, wait, selector)
-        # db 저장
-        if current_rates:
-            return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
-        else:
-            raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
-
+    except RuntimeError:
+        # 세마포어 획득 실패 → 폴백 URL로
+        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
+        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:
@@ -190,8 +194,6 @@ def crawl_and_save_sc_second_routine_selenium(url: str, selector: str, db: Sessi
             logger.exception("⚠️ URL 접속 또는 처리 오류",
                 extra={"url": url, "bank": BANK_NAME, "error": error_msg})
         raise
-    finally:
-        driver.quit()
 
 
 def crawl_current_date_rates(driver, wait, selector: str) -> dict:

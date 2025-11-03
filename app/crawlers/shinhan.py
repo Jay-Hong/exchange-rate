@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_LONG
-from app.crawlers.utils import parse_rate_text, create_selenium_driver
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context
 
 BANK_NAME = 'shinhan'
 
@@ -72,34 +72,37 @@ def crawl_and_save_shinhan_bank_exchange_rates():
 
 def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> int:
     """Selenium 크롤링 + DB 저장 루틴 (변경 개수 반환)"""
-    driver = create_selenium_driver()
-
     current_rates = {}
     try:
-        driver.get(url) # url 오류면 여기서 에러남
-        wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT_LONG)
+        with selenium_driver_context() as driver:
+            driver.get(url) # url 오류면 여기서 에러남
+            wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT_LONG)
 
-        for pair, selector in selectors.items():
-            try:
-                rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-                rate_text = rate_element.text.strip()
-            except Exception as e:
-                logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
-                continue
+            for pair, selector in selectors.items():
+                try:
+                    rate_element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                    rate_text = rate_element.text.strip()
+                except Exception as e:
+                    logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
+                    continue
 
-            try:
-                current_rate = parse_rate_text(rate_text)
-                current_rates[pair] = current_rate
-            except ValueError:
-                logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
-                continue
+                try:
+                    current_rate = parse_rate_text(rate_text)
+                    current_rates[pair] = current_rate
+                except ValueError:
+                    logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
+                    continue
 
-        # db 저장
-        if current_rates:
-            return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
-        else:
-            raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
+            # db 저장
+            if current_rates:
+                return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+            else:
+                raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
+    except RuntimeError:
+        # 세마포어 획득 실패 → 폴백 URL로
+        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
+        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:
@@ -109,8 +112,6 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
             logger.exception("⚠️ URL 접속 또는 처리 오류",
                 extra={"url": url, "bank": BANK_NAME, "error": error_msg})
         raise
-    finally:
-        driver.quit()
 
 
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
