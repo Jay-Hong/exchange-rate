@@ -64,7 +64,7 @@ services:
       resources:
         limits:
           cpus: '0.9'
-          memory: 600M
+          memory: 700M  # 600M → 700M (Chrome 최적화 후 여유 확보)
         reservations:
           cpus: '0.5'
           memory: 300M
@@ -76,8 +76,8 @@ services:
       retries: 3
       start_period: 40s
     oom_score_adj: -500  # OOM Killer 보호 (가장 마지막에 종료)
-    # Chrome headless용 공유 메모리 크기
-    shm_size: 512mb
+    # Chrome headless용 공유 메모리 (--disable-dev-shm-usage 사용으로 최소화)
+    shm_size: 64mb  # 512mb → 64mb (메모리 절약)
 
 # ─────────────────────────────────────
 # Volumes

@@ -39,14 +39,15 @@ def parse_rate_text(rate_text: str) -> float:
 
 def create_selenium_driver():
     """
-    표준 Selenium Chrome 드라이버 생성 (Chromium 사용)
+    표준 Selenium Chrome 드라이버 생성 (Google Chrome 사용)
 
     Returns:
         webdriver.Chrome 인스턴스
 
     Notes:
         - Headless 모드로 실행
-        - Docker에서 시스템 Chromium/ChromeDriver 사용
+        - Docker: Google Chrome (AMD64 최적화)
+        - 로컬: webdriver-manager 자동 설치
         - SELENIUM_OPTIONS 상수에서 옵션 로드
 
     Examples:
@@ -58,20 +59,33 @@ def create_selenium_driver():
 
     options = webdriver.ChromeOptions()
 
-    # Chromium 바이너리 경로 설정 (Docker 환경)
-    chromium_bin = os.getenv('CHROME_BIN', '/usr/bin/chromium')
-    if os.path.exists(chromium_bin):
-        options.binary_location = chromium_bin
+    # Chrome 바이너리 경로 자동 감지
+    chrome_bin = os.getenv('CHROME_BIN')
+    if not chrome_bin:
+        # 환경변수 없으면 자동 탐색 (Google Chrome 우선)
+        for path in ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/google-chrome-stable']:
+            if os.path.exists(path):
+                chrome_bin = path
+                break
+
+    if chrome_bin and os.path.exists(chrome_bin):
+        options.binary_location = chrome_bin
 
     # 옵션 추가
     for arg in SELENIUM_OPTIONS:
         options.add_argument(arg)
 
-    # ChromeDriver 경로 (Docker 환경)
-    chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
+    # ChromeDriver 경로 자동 감지
+    chromedriver_path = os.getenv('CHROMEDRIVER_PATH')
+    if not chromedriver_path:
+        # 환경변수 없으면 자동 탐색
+        for path in ['/usr/local/bin/chromedriver', '/usr/bin/chromedriver']:
+            if os.path.exists(path):
+                chromedriver_path = path
+                break
 
-    # Service 생성 (webdriver-manager 제거)
-    if os.path.exists(chromedriver_path):
+    # Service 생성
+    if chromedriver_path and os.path.exists(chromedriver_path):
         service = Service(chromedriver_path)
     else:
         # 로컬 개발 환경 폴백 (webdriver-manager 사용)
