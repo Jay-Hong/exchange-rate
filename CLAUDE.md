@@ -168,7 +168,7 @@ BANK_TASKS = [
 
 ### 현재 환경
 
-- **AWS 프리티어**: t2.micro (1 vCPU, 1GB RAM)
+- **AWS 프리티어**: t2.micro (1 vCPU, 1GB RAM) , Ubuntu 24.04.3 LTS , 64비트(x86) = x86_64 = AMD64 아키텍처
 - **DB 크기**: 5.4MB (SQLite)
 - **동시 접속**: 최대 ~100명 (WebSocket)
 
