@@ -22,7 +22,7 @@ FROM python:3.13-slim
 WORKDIR /app
 
 # ═════════════════════════════════════════════════════════════
-# Google Chrome + 의존성 설치 (AMD64/x86_64 전용 최적화)
+# Google Chrome + ChromeDriver 설치 (AMD64/x86_64 전용 최적화)
 # ═════════════════════════════════════════════════════════════
 # AWS 프리티어 t2.micro (1GB RAM) 최적화:
 # - Chromium 대비 메모리 30% 절약 (70-90MB/인스턴스)
@@ -52,22 +52,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxdamage1 \
         libxrandr2 \
         xdg-utils \
-    # 설치 도구 제거 (이미지 크기 감소)
-    && apt-get purge -y --auto-remove wget gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# ═════════════════════════════════════════════════════════════
-# ChromeDriver 설치 (Chrome 버전 자동 매칭)
-# ═════════════════════════════════════════════════════════════
-RUN CHROME_VERSION=$(google-chrome --version | sed 's/Google Chrome //; s/\.[0-9]*$//') \
-    && echo "📦 Chrome 버전: ${CHROME_VERSION}" \
+    # ChromeDriver 설치 (Chrome 버전 자동 매칭 - storage.googleapis.com 사용)
+    && CHROME_VERSION=$(google-chrome-stable --version | awk '{print $3}' | cut -d. -f1) \
+    && echo "📦 Chrome 메이저 버전: ${CHROME_VERSION}" \
     && CHROMEDRIVER_VERSION=$(curl -sS "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_VERSION}") \
     && echo "📦 ChromeDriver 버전: ${CHROMEDRIVER_VERSION}" \
-    && curl -sS -o /tmp/chromedriver-linux64.zip "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" \
+    && DOWNLOAD_URL="https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" \
+    && echo "📦 다운로드 URL: ${DOWNLOAD_URL}" \
+    && curl -fSL -o /tmp/chromedriver-linux64.zip "${DOWNLOAD_URL}" \
     && unzip -j /tmp/chromedriver-linux64.zip chromedriver-linux64/chromedriver -d /usr/local/bin/ \
     && rm /tmp/chromedriver-linux64.zip \
     && chmod +x /usr/local/bin/chromedriver \
-    && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)"
+    && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)" \
+    # 설치 도구 제거 (이미지 크기 감소)
+    && apt-get purge -y --auto-remove wget gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 # 타임존 설정 (KST)
 RUN ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
