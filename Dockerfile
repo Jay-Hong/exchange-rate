@@ -63,10 +63,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && unzip -j /tmp/chromedriver-linux64.zip chromedriver-linux64/chromedriver -d /usr/local/bin/ \
     && rm /tmp/chromedriver-linux64.zip \
     && chmod +x /usr/local/bin/chromedriver \
-    && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)"
+    && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)" \
+    # Chrome을 수동 설치로 마크 (자동 제거 방지)
+    && apt-mark manual google-chrome-stable
 
-# 빌드 도구 정리 (별도 레이어로 분리하여 Chrome 유지)
-RUN apt-get purge -y wget gnupg unzip \
+# 빌드 도구 정리 (wget, unzip만 제거, gnupg는 Chrome 서명 키 때문에 유지)
+RUN apt-get purge -y wget unzip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
