@@ -63,9 +63,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && unzip -j /tmp/chromedriver-linux64.zip chromedriver-linux64/chromedriver -d /usr/local/bin/ \
     && rm /tmp/chromedriver-linux64.zip \
     && chmod +x /usr/local/bin/chromedriver \
-    && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)" \
-    # 설치 도구만 제거 (Chrome/의존성은 유지)
-    && apt-get purge -y wget gnupg \
+    && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)"
+
+# 빌드 도구 정리 (별도 레이어로 분리하여 Chrome 유지)
+RUN apt-get purge -y wget gnupg unzip \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
