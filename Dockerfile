@@ -64,8 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm /tmp/chromedriver-linux64.zip \
     && chmod +x /usr/local/bin/chromedriver \
     && echo "✅ ChromeDriver 설치 완료: $(chromedriver --version)" \
-    # 설치 도구 제거 (이미지 크기 감소)
-    && apt-get purge -y --auto-remove wget gnupg \
+    # 설치 도구만 제거 (Chrome/의존성은 유지)
+    && apt-get purge -y wget gnupg \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # 타임존 설정 (KST)
