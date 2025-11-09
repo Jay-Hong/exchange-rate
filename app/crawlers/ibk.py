@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_SHORT
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context, is_mibank_rate_reliable
 
 BANK_NAME = 'ibk'
@@ -149,7 +149,7 @@ def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) 
     try:
         with selenium_driver_context() as driver:
             driver.get(url) # url 오류면 여기서 에러남
-            wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT)
+            wait = WebDriverWait(driver, SELENIUM_WAIT_TIMEOUT_SHORT)
 
             selected_date = datetime.date.today()
 
