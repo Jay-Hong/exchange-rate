@@ -4,10 +4,24 @@
 
 실시간 은행 간 환율 차이 비교 서비스 (인베스팅 기준 환율 포함)
 
-> 💡 **아키텍처 의사결정 기록:** 주요 기술 선택과 그 근거는 [DECISIONS.md](DECISIONS.md)를 참고하세요.
-> 🐳 **Docker 배포 가이드:** AWS 배포 및 확장 전략은 [DOCKER.md](DOCKER.md)를 참고하세요.
-> 🕷️ **크롤러 특수 로직 가이드:** 각 은행별 크롤링 방식과 특수 로직은 [CRAWLERS.md](CRAWLERS.md)를 참고하세요.
-> 📚 **공통 개발 가이드:** MCP 설정, 코딩 스타일 등은 [~/.claude/CLAUDE.md](file:///Users/jay/.claude/CLAUDE.md)를 참고하세요.
+### 📚 주요 문서 가이드
+
+**핵심 가이드:**
+> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR)
+> 🕷️ **크롤러 구현:** [CRAWLERS.md](CRAWLERS.md) - 각 은행별 크롤링 방식과 특수 로직
+> 📝 **변경 이력:** [CHANGELOG.md](CHANGELOG.md) - 버전별 변경사항 및 마이그레이션 가이드
+
+**배포 및 운영:**
+> 🐳 **Docker 아키텍처:** [DOCKER.md](DOCKER.md) - Docker Compose 구조 및 확장 전략
+> 🚀 **AWS 배포:** [DEPLOYMENT.md](DEPLOYMENT.md) - EC2 인스턴스 설정 및 실전 배포 절차
+> 🔄 **재부팅 절차:** [REBOOT_CHECKLIST.md](REBOOT_CHECKLIST.md) - 재부팅 후 검증 체크리스트
+
+**유지보수 기록:**
+> 🔧 **2025-11-06:** [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md) - AsyncIO Queue 도입 (Semaphore 경합 제거)
+> 🔧 **2025-11-05:** [MAINTENANCE_2025-11-05.md](MAINTENANCE_2025-11-05.md) - 성능 개선 및 모니터링 시스템 구축
+
+**글로벌 가이드:**
+> 📚 **공통 개발 규칙:** [~/.claude/CLAUDE.md](file:///Users/jay/.claude/CLAUDE.md) - MCP 설정, 코딩 스타일, Git Convention
 
 ## MCP (Model Context Protocol) 설정
 
@@ -98,6 +112,16 @@ timestamp  DATETIME (KST)
 
 ## 스케줄링 시스템
 
+> 💡 **최근 개선:** Queue Blocking 방지 + 클로저 버그 수정 (2025-11-09)
+> 📖 **상세 기록:** [MAINTENANCE_2025-11-09.md](MAINTENANCE_2025-11-09.md)
+> - Non-blocking Queue Put (APScheduler 멈춤 방지)
+> - Factory 함수 패턴 (Selenium 크롤러 정상 실행)
+> - Queue 크기 증가 (20 → 50) + 모니터링 (10초마다)
+
+> 🔖 **이전 개선:**
+> - Priority Queue + Timeout (2025-11-08) - [MAINTENANCE_2025-11-08.md](MAINTENANCE_2025-11-08.md), [ADR-007](DECISIONS.md#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout)
+> - AsyncIO Queue 순차 실행 (2025-11-06) - [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md), [ADR-006](DECISIONS.md#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue)
+
 ### 영업시간 자동 감지
 
 - **IN 모드**: 월요일 04:00 ~ 토요일 07:59
@@ -105,20 +129,41 @@ timestamp  DATETIME (KST)
 - **OUT 모드**: 그 외 시간
   - 크롤링 주기: 49-333초 (IN 모드의 10배)
 
+### 크롤러 아키텍처 (2025-11-09 최종)
+
+**스케줄러:** APScheduler (AsyncIOScheduler)
+
+**실행 방식:**
+- **Group A (Request 기반)**: 동시 실행 (경량, 메모리 부담 적음)
+  - investing, kb, woori, bs, citi
+  - APScheduler 직접 실행
+- **Group B (Selenium 기반)**: AsyncIO PriorityQueue 순차 실행 (메모리 집약)
+  - hana, shinhan, ibk, nh, sc
+  - **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → ibk → nh → sc → shinhan)
+  - **개별 타임아웃**: 크롤러별 맞춤형 타임아웃 (60-120초)
+  - **자동 재시도**: 실패 시 우선순위 +1000으로 재실행
+  - **Non-blocking Queue**: put_nowait()으로 APScheduler 멈춤 방지 (2025-11-09)
+  - **Queue 크기**: 50 (최악 시나리오 대비) + 10초마다 모니터링 (2025-11-09)
+
 ### 크롤러 실행 주기 (IN 모드 기준)
 
 ```python
-BANK_TASKS = [
+# Group A: Request 기반 (동시 실행)
+REQUEST_BASED_TASKS = [
     ("investing", 4.9초),
     ("kb", 7.9초),
+    ("woori", 23.3초),
+    ("bs", 27.7초),
+    ("citi", 28.5초),
+]
+
+# Group B: Selenium 기반 (Queue 순차 처리)
+SELENIUM_BASED_TASKS = [
     ("hana", 7.3초),
     ("shinhan", 31초),
-    ("woori", 23.3초),
     ("ibk", 29.1초),
     ("nh", 32.7초),
     ("sc", 33.3초),
-    ("bs", 27.7초),
-    ("citi", 28.5초),
 ]
 ```
 
@@ -180,6 +225,70 @@ BANK_TASKS = [
 4. **WebSocket 주기 동적 조절** (5-10초)
 5. **EC2 인스턴스 업그레이드** (t3.small 이상)
 
+## Docker 배포 및 관리
+
+### 코드 변경 후 Docker 재배포 절차
+
+#### 일상적인 코드 변경 (권장)
+```bash
+# 변경된 부분만 재빌드하고 컨테이너 재시작
+docker compose up -d --build
+
+# 로그 확인
+docker compose logs -f
+```
+
+#### 캐시 문제 발생 시 클린 빌드
+```bash
+# 1. 컨테이너 중지 및 제거
+docker compose down
+
+# 2. 캐시 없이 완전 재빌드
+docker compose build --no-cache
+
+# 3. 컨테이너 시작
+docker compose up -d
+
+# 4. 로그 확인
+docker compose logs -f
+```
+
+#### 완전 초기화 (개발 환경 리셋)
+```bash
+# 1. 컨테이너 및 볼륨 제거 (주의: 데이터 삭제됨)
+docker compose down -v
+
+# 2. 모든 Docker 리소스 정리
+docker system prune -a -f
+
+# 3. 재빌드 및 시작
+docker compose up -d --build
+
+# 4. 로그 확인
+docker compose logs -f
+```
+
+### 유용한 Docker 명령어
+
+#### 정리 작업
+```bash
+# 중지된 컨테이너만 제거
+docker container prune -f
+
+# 사용하지 않는 이미지 제거
+docker image prune -f
+
+# 빌드 캐시 제거
+docker builder prune -f
+```
+
+### 배포 시 주의사항
+
+1. **볼륨 유지**: `docker compose down -v`는 데이터베이스 데이터까지 삭제하므로 신중하게 사용
+2. **캐시 활용**: `--no-cache`는 빌드 시간이 오래 걸리므로 문제가 있을 때만 사용
+3. **로그 확인**: 배포 후 반드시 로그를 확인하여 정상 작동 여부 체크
+4. **단계적 접근**: 간단한 명령어부터 시도하고, 문제가 있을 때만 전체 클린 빌드 수행
+
 ## 크롤링 리스크 대응
 
 ### 문제점
@@ -229,7 +338,8 @@ exchange-rate/
 │   │   ├── __init__.py
 │   │   ├── log_reader.py    # 로그 조회 (관리자 페이지용, 백엔드 bank 필터링)
 │   │   ├── log_cleaner.py   # 오래된 로그 파일 자동 삭제
-│   │   └── stats.py         # WebSocket 브로드캐스트 통계 수집
+│   │   ├── stats.py         # WebSocket 브로드캐스트 통계 수집
+│   │   └── monitor.py       # 시스템 모니터링 (메모리, CPU, Chrome 프로세스) - 2025-11-05 추가
 │   │
 │   └── notifications/       # 알림 도메인 (2025-10-25 리팩토링)
 │       ├── __init__.py
@@ -249,7 +359,9 @@ exchange-rate/
 ├── requirements.txt         # Python 패키지
 ├── CLAUDE.md                # 이 파일 (프로젝트 가이드)
 ├── CRAWLERS.md              # 크롤러 특수 로직 가이드
-└── DECISIONS.md             # 아키텍처 의사결정 기록 (ADR)
+├── DECISIONS.md             # 아키텍처 의사결정 기록 (ADR)
+├── MAINTENANCE_2025-11-05.md # 성능 개선 및 모니터링 시스템 구축 작업 기록
+└── REBOOT_CHECKLIST.md      # 재부팅 후 검증 절차 가이드
 ```
 
 > 💡 **구조 설계 원칙**: API-first 서비스 (모바일 앱이 메인, 웹은 관리자 전용)
@@ -313,6 +425,28 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 **기술**: Vanilla JS, HTTP Basic Auth, 통합 API (`/admin/api/dashboard`)
 
+### Phase 1.5: 모니터링 시스템 강화 ✅ 완료 (2025-11-05)
+
+**배경**: 시간이 지날수록 시스템이 느려지는 문제 해결
+
+**추가된 기능**:
+- **Chrome 프로세스 모니터링 카드**: 프로세스 개수 + 메모리 사용량 실시간 표시
+- **자동 정리 시스템**: 좀비 Chrome 프로세스 1분마다 자동 정리 (3분 이상 실행된 것)
+- **리소스 모니터링**: 메모리/CPU 사용량 5분마다 자동 수집 및 히스토리 저장 (5시간)
+- **임계값 알림**: 메모리 70% 이상, Chrome 프로세스 3개 이상 시 경고
+
+**모니터링 API**:
+- `GET /admin/api/monitor/current` - 현재 시스템 상태
+- `GET /admin/api/monitor/history?hours=1` - 시간별 히스토리 (Chart.js용)
+
+**핵심 개선사항**:
+- `app/crawlers/utils.py`: driver.quit() 실패 시 강제 종료
+- `app/scheduler.py`: 좀비 프로세스 정리 + 모니터링 통계 수집
+- `app/admin/monitor.py`: 시스템 모니터링 모듈 (신규)
+- `app/main.py`: WebSocket 연결 관리 안정화
+
+**상세 내역**: [MAINTENANCE_2025-11-05.md](MAINTENANCE_2025-11-05.md)
+
 ### Phase 2-3: 고급 기능 (사용자 500명+)
 - 크롤러 제어 (재시작, 주기 조정)
 - 통계 & 분석 (Chart.js, 성공률 그래프)
@@ -352,131 +486,13 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 | **CRAWLERS.md** | 크롤러 구현 세부사항 | 크롤링 로직 변경, 특수 로직 추가, 주의사항 발견 | SC 방식 적용, Alert 처리 변경 |
 | **DECISIONS.md** | 아키텍처 의사결정 (ADR) | 기술 선택, 트레이드오프 결정 (4가지 기준 충족) | WebSocket vs Node.js, Docker 채택 |
 
-### 코드 변경 시 문서 업데이트 체크리스트
+### 문서 업데이트 기준 (간략)
 
-**모든 중요한 코드 변경 후 다음 질문에 답하기:**
+**CRAWLERS.md**: 크롤러 로직 변경, 특수 로직 추가, 트러블슈팅 패턴
+**DECISIONS.md**: 아키텍처 결정 (ADR 4가지 기준: 비가역성, 영향 범위, 대안 존재, 장기 유지)
+**CLAUDE.md**: 은행/통화 개수 변경, DB 스키마 변경, 기술 스택 변경
 
-#### ✅ CRAWLERS.md 업데이트 필요?
-
-다음 중 **하나라도 YES**면 업데이트:
-
-- [ ] 크롤러 로직 변경 (날짜 조회, AJAX 처리, Selenium 전환 등)
-- [ ] 새 특수 로직 추가 (Alert, iframe, time.sleep 등)
-- [ ] 트러블슈팅 패턴 발견 (Selector 오류, Timeout 해결책 등)
-- [ ] 크롤러 난이도 변경 (⭐ 개수)
-- [ ] 주의사항 추가/변경
-
-**예시:**
-- ✅ woori 크롤러 SC 방식 적용 (2025-10-26)
-- ✅ SC Alert 처리 단일화 (2025-10-26)
-- ❌ Selector 값만 변경 (문서 불필요, Git 커밋만)
-
-**업데이트 항목:**
-- 해당 은행 섹션 상세 설명 추가
-- "최근 리팩토링" 날짜 기록
-- "상세 코드" 위치 추가 (파일명:라인)
-- 마지막 업데이트 날짜 변경
-
----
-
-#### ✅ DECISIONS.md 업데이트 필요? (ADR 4가지 기준)
-
-**모두 YES**면 ADR 작성:
-
-1. [ ] **비가역성**: 나중에 쉽게 바꾸기 어려운가?
-2. [ ] **영향 범위**: 시스템 전체/주요 컴포넌트에 영향?
-3. [ ] **대안 존재**: 2개 이상의 선택지가 있었는가?
-4. [ ] **장기 유지**: 6개월 후에도 맥락을 알아야 하는가?
-
-**예시:**
-- ✅ WebSocket vs Node.js 선택 (ADR-001)
-- ✅ SQLite → PostgreSQL 전환 계획 (ADR-005)
-- ❌ woori 크롤러 리팩토링 (구현 세부사항)
-
-**ADR 작성 형식:**
-```markdown
-## ADR-XXX: [제목]
-
-**날짜:** YYYY-MM-DD
-**상태:** 수락됨 / 거부됨 / 계획됨
-
-### 상황
-[배경 설명]
-
-### 결정
-[무엇을 결정했는가]
-
-### 근거
-[왜 이렇게 결정했는가]
-
-### 결과
-[장점, 단점, 향후 재검토 시점]
-```
-
----
-
-#### ✅ CLAUDE.md 업데이트 필요?
-
-다음 중 **하나라도 YES**면 업데이트:
-
-- [ ] 지원 은행 개수 변경 (9개 → 10개)
-- [ ] 지원 통화 추가 (CNY-KRW 등)
-- [ ] 데이터베이스 스키마 변경
-- [ ] 핵심 아키텍처 변경 (WebSocket 제거 등)
-- [ ] 기술 스택 변경 (FastAPI → Flask 등)
-
-**예시:**
-- ✅ 새 은행 추가 (9개 → 10개)
-- ❌ 크롤러 로직 변경 (CRAWLERS.md로 위임)
-
----
-
-### /docs-check Slash Command 사용법
-
-코드 변경 후 문서 업데이트가 필요한지 자동으로 확인하는 명령어입니다.
-
-**실행:**
-```
-사용자: "/docs-check"
-```
-
-**자동 프로세스:**
-```
-1. 변경된 파일 분석 (git diff)
-   ↓
-2. 관련 문서 체크리스트 제시
-   ↓
-3. 사용자 승인
-   ↓
-4. 자동 문서 업데이트
-   ↓
-5. 변경사항 요약
-```
-
-**예시 (IBK 크롤러 리팩토링):**
-```
-사용자: "IBK 크롤러 Selenium 재시도 로직 추가 완료"
-Claude: (코드 수정 완료)
-        "문서 업데이트 확인을 위해 /docs-check를 실행하시겠습니까?"
-사용자: "Yes"
-Claude: (체크리스트 실행)
-
-        📄 문서 업데이트 분석 결과:
-
-        ✅ CRAWLERS.md 업데이트 필요:
-        - IBK 섹션에 Selenium 3회 재시도 로직 추가
-        - MIBANK 조건부 실행 설명 추가
-        - 최근 리팩토링 날짜 기록 (2025-10-26)
-
-        ❌ DECISIONS.md 불필요: 구현 세부사항
-        ❌ CLAUDE.md 불필요: 은행 개수 변경 없음
-
-        진행하시겠습니까?
-사용자: "Okay"
-Claude: (CRAWLERS.md 업데이트 → 변경사항 요약)
-```
-
-**파일 위치:** `.claude/commands/docs-check.md`
+**도구**: `/docs-check` - 변경된 파일 분석 후 자동으로 문서 업데이트 체크리스트 제시
 
 ---
 
