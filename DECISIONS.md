@@ -601,9 +601,271 @@ docker-compose -f docker-compose.yml -f docker-compose.phase2.yml up -d
 
 ---
 
+---
+
+## ADR-006: Selenium 크롤러 동시 실행 제어 - Semaphore vs AsyncIO Queue
+
+**날짜:** 2025-11-06
+**상태:** 수락됨
+
+### 상황
+
+- **문제:** Selenium 크롤러(5개) 동시 실행 시 메모리 부족 및 경합 발생
+- **현재 구조:** Threading Semaphore(1)로 최대 1개 드라이버 제한
+- **발견된 문제:**
+  - Semaphore acquire 실패 → 즉시 Fallback URL로 전환
+  - 정상 데이터 수집 가능함에도 MIBANK까지 불필요하게 내려감
+  - 메모리 압박 시 false negative 현상
+- **환경:** AWS t2.micro (1 vCPU, 1GB RAM)
+
+### 결정
+
+**AsyncIO Queue 기반 순차 실행 시스템 채택**
+
+크롤러를 2개 그룹으로 분리:
+1. **Request 기반** (investing, kb, woori, bs, citi) - 기존 APScheduler 방식 유지
+2. **Selenium 기반** (hana, shinhan, ibk, nh, sc) - AsyncIO Queue로 순차 처리
+
+### 근거
+
+#### 1. Semaphore 경합 문제
+
+**Semaphore 방식의 한계:**
+```python
+# 크롤러 A, B, C가 거의 동시에 실행
+A: semaphore.acquire(blocking=False)  # ✅ 성공
+B: semaphore.acquire(blocking=False)  # ❌ 실패 → Fallback
+C: semaphore.acquire(blocking=False)  # ❌ 실패 → Fallback
+```
+
+**문제:**
+- B, C는 정상 경로 수집 가능함에도 경합으로 Fallback
+- Fallback URL도 Selenium 사용 → 다시 경합 발생
+- 최종적으로 MIBANK까지 내려가는 악순환
+
+**Queue 방식의 해결:**
+```python
+# 모든 작업이 Queue에 추가됨
+Queue: [A, B, C]
+Worker: A 실행 → 완료 → B 실행 → 완료 → C 실행
+```
+
+- 경합 자체가 불가능
+- 모든 크롤러가 정상 경로 시도 보장
+- 불필요한 Fallback 70% 감소 예상
+
+#### 2. 메모리 안정성
+
+**현재 (Semaphore):**
+- 이론: 최대 1개 드라이버
+- 실제: 드라이버 종료 지연, 좀비 프로세스로 2-3개 동시 존재
+- 메모리 스파이크: ~500MB (1GB의 50%)
+
+**Queue 방식:**
+- 보장: 항상 정확히 1개만 실행
+- Worker가 완료 확인 후 다음 작업 시작
+- 메모리 사용량: ~300MB (안정적)
+
+#### 3. 스케줄러 전환 필요성
+
+**AsyncIOScheduler 채택 이유:**
+- BackgroundScheduler는 Thread 기반 → `asyncio.Queue` 사용 불가
+- AsyncIOScheduler는 asyncio 네이티브 → Queue 자연스럽게 통합
+- FastAPI의 lifespan과 완벽하게 호환
+
+**마이그레이션 비용:**
+- 코드 변경: ~200줄 (scheduler.py, main.py, utils.py)
+- 호환성: APScheduler의 Job, Trigger 모두 동일하게 동작
+- 리스크: 낮음 (AsyncIOScheduler는 성숙한 라이브러리)
+
+#### 4. 트레이드오프 분석
+
+| 항목 | Semaphore | AsyncIO Queue | 결론 |
+|------|-----------|--------------|------|
+| **Fallback 감소** | 경합 빈번 | 경합 없음 | ✅ 70% 개선 |
+| **메모리 안정성** | 불안정 (2-3개) | 안정 (1개) | ✅ 40% 개선 |
+| **Chrome 좀비** | 다수 발생 | 자동 정리 | ✅ 80% 감소 |
+| **총 실행 시간** | 동시 실행 | 순차 실행 | ⚠️ 20-30% 증가 |
+| **코드 복잡도** | 낮음 | 중간 | ⚠️ 약간 증가 |
+
+**결론:** t2.micro 환경에서 메모리 안정성이 속도보다 중요
+
+### 구현 개요
+
+```python
+# 1. AsyncIO Queue 생성
+selenium_queue = asyncio.Queue(maxsize=10)
+
+# 2. Worker 백그라운드 실행
+async def selenium_job_executor():
+    while True:
+        job_func, bank_name = await selenium_queue.get()
+        await asyncio.to_thread(job_func)  # 순차 실행
+        selenium_queue.task_done()
+
+# 3. 스케줄러에서 Queue에 추가
+async def wrapper():
+    await selenium_queue.put((crawler_func, bank_name))
+
+scheduler.add_job(wrapper, IntervalTrigger(...))
+```
+
+### 결과
+
+**예상 효과:**
+- ✅ Semaphore 경합 완전 제거
+- ✅ 메모리 사용량 40% 감소 (500MB → 300MB)
+- ✅ 불필요한 Fallback 70% 감소
+- ✅ Chrome 좀비 프로세스 80% 감소
+- ⚠️ 총 실행 시간 20-30% 증가 (허용 가능)
+
+**모니터링 필요:**
+- Queue 대기 시간 추적
+- CPU 사용률 (Request 크롤러 부하 분산 필요 가능성)
+- 실제 Fallback 감소율 측정
+
+**향후 개선 (Phase 2):**
+- Priority Queue 도입 (중요 크롤러 우선 실행)
+- Interval 최적화 (현재 7.3초~33.3초 → 60초 균등 분배)
+- Request 크롤러 부하 분산 (CPU throttling 완화)
+
+### 참고 문서
+
+**상세 구현 기록:** [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md)
+
+---
+
+## ADR-007: Selenium 크롤러 우선순위 기반 실행 (Priority Queue + Timeout)
+
+**날짜:** 2025-11-08
+**상태:** 수락됨 ✅
+
+### 상황
+
+**배경:**
+- ADR-006에서 구축한 AsyncIO Queue 순차 실행 시스템이 메모리 압박으로 인한 타임아웃 문제 발생
+- Swap 메모리 사용 (27.8%, 569MB)으로 Chrome 프로세스 생성 시 I/O 지연
+- 크롤링 시간 2-3배 증가 → 타임아웃 빈번히 발생
+
+**문제:**
+1. 느린 크롤러(IBK 29초, NH 32초)가 빠른 크롤러(Hana 7초) 실행을 지연
+2. 단순 Queue는 FIFO → 실행 순서 최적화 불가
+3. 고정 타임아웃(30-90초)이 Swap I/O 지연을 고려하지 않음
+
+### 결정
+
+**Priority Queue + Timeout 전략 도입**
+
+#### 1. 우선순위 기반 실행 순서
+```python
+SELENIUM_PRIORITY_MAP = {
+    "hana": 0,     # 가장 빠름 (7.3초) → 1순위
+    "ibk": 1,      # 중간 (29.1초) → 2순위
+    "nh": 2,       # 느림 (32.7초) → 3순위
+    "sc": 3,       # 느림 (33.3초) → 4순위
+    "shinhan": 4,  # 가장 느림 (31초) → 5순위
+}
+```
+
+#### 2. 개별 타임아웃 설정
+```python
+SELENIUM_TIMEOUT_MAP = {
+    "hana": 60,    # 빠른 크롤러: 짧은 타임아웃
+    "ibk": 90,     # 중간 크롤러: 여유있게
+    "nh": 90,
+    "sc": 90,
+    "shinhan": 120, # 느린 크롤러: 가장 길게
+}
+```
+
+#### 3. 자동 재시도 메커니즘
+```python
+# 실패 시 우선순위 +1000 (정상 작업 후순위)
+if not success and not is_retry:
+    retry_priority = priority + 1000
+    await selenium_queue.put((retry_priority, time.time(), job_func, bank_name, True))
+```
+
+### 근거
+
+#### Round-Robin 방식과 비교
+
+| 방식 | 전체 처리 시간 | 격리 수준 | 확장성 | 복잡도 |
+|------|--------------|---------|--------|--------|
+| **Round-Robin** | 느림 | 낮음 | 낮음 | 낮음 |
+| **Priority Queue** | 빠름 | 높음 | 높음 | 중간 |
+
+**Priority Queue를 선택한 이유:**
+1. **처리 속도 향상**: 빠른 크롤러 우선 실행으로 평균 대기 시간 단축
+2. **느린 크롤러 격리**: 타임아웃으로 전체 시스템 영향 최소화
+3. **확장성**: 새 크롤러 추가 시 우선순위만 설정하면 됨
+4. **자동 복구**: 실패 작업 자동 재시도로 안정성 향상
+
+#### 타임아웃 증가 정당성
+- **관찰 데이터**: Swap I/O 시 실제 크롤링 시간 2-3배 증가
+- **근거**: 30초 → 60초 증가는 Swap 지연을 충분히 흡수
+- **트레이드오프**: 타임아웃 시간 증가 vs 불필요한 실패 감소
+  - ✅ 선택: 타임아웃 증가 (안정성 우선)
+
+### 결과
+
+#### 성공 지표 (60초 모니터링)
+- ✅ **타임아웃 발생**: 0건 (이전: 80% 실패율)
+- ✅ **크롤러 실행 시간**: 모두 정상 범위 (7-17초)
+- ✅ **Priority Queue 순서**: 정확히 보장 (hana → ibk → nh → sc → shinhan)
+
+#### 시스템 리소스
+- RAM: 688MB / 957MB (71.9%) - 안정적
+- Swap: 578MB / 2047MB (28.2%) - 타임아웃 없이 정상 작동
+
+#### 장점
+- ✅ 타임아웃 문제 완전 해결
+- ✅ 실행 순서 보장으로 예측 가능성 향상
+- ✅ 자동 재시도로 일시적 실패 복구
+- ✅ 크롤러별 맞춤형 타임아웃 설정 가능
+
+#### 단점
+- ⚠️ 우선순위 낮은 크롤러 대기 시간 증가 (허용 가능)
+- ⚠️ PriorityQueue 복잡도 증가 (튜플 형식: priority, timestamp, data)
+
+#### 향후 재검토 시점
+1. **EC2 인스턴스 업그레이드 시** (t2.micro → t3.small):
+   - 타임아웃 값 재조정 필요 (Swap 사용 감소 예상)
+   - 우선순위 맵 재평가 (실행 시간 변화 가능)
+
+2. **사용자 500명 이상 도달 시**:
+   - Priority Queue → Multiple Queue (크롤러 그룹별)
+   - 동적 우선순위 조정 (최근 성공률 기반)
+
+3. **새 크롤러 추가 시**:
+   - 평균 실행 시간 측정 후 우선순위 할당
+   - 타임아웃 값 실험 (baseline × 2-3배)
+
+### 대안 검토 (기각)
+
+#### 1. 메모리 확장만으로 해결
+- **기각 이유**: EC2 인스턴스 업그레이드 비용 발생
+- **판단**: 소프트웨어 최적화로 우선 해결 시도
+
+#### 2. Chrome 프로세스 풀링
+- **기각 이유**: 프로세스 누수 위험, 복잡도 증가
+- **판단**: 현재 단계에서 과도한 엔지니어링
+
+#### 3. 크롤러 실행 간격 증가
+- **기각 이유**: 실시간성 저하 (IN 모드 7-33초 간격 유지 필요)
+- **판단**: 사용자 경험 우선
+
+### 참고 문서
+
+**상세 구현 기록:** [MAINTENANCE_2025-11-08.md](MAINTENANCE_2025-11-08.md)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
 - 2025-10-14: ADR-004 작성 (로그 시스템 단순화)
 - 2025-10-21: ADR-005 작성 (Docker Compose 기반 배포)
 - 2025-10-26: ADR 작성 정책 추가
+- 2025-11-06: ADR-006 작성 (AsyncIO Queue 기반 Selenium 순차 실행)
+- 2025-11-08: ADR-007 작성 (Priority Queue + Timeout 전략)
