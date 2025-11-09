@@ -64,7 +64,7 @@ services:
       resources:
         limits:
           cpus: '0.9'
-          memory: 700M  # 600M → 700M (Chrome 최적화 후 여유 확보)
+          memory: 800M  # 700M → 800M (좀비 프로세스 정리 로직 추가로 여유 확보)
         reservations:
           cpus: '0.5'
           memory: 300M

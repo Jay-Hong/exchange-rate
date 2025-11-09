@@ -453,6 +453,11 @@
                 <div class="card-label">에러+경고 (최근 1시간)</div>
                 <div class="card-value" id="errors">-</div>
             </div>
+            <div class="card">
+                <div class="card-label">Chrome 프로세스</div>
+                <div class="card-value" id="chrome-count">-</div>
+                <div class="card-subvalue" id="chrome-memory">메모리: -</div>
+            </div>
         </div>
 
         <!-- 크롤러 상태 -->
@@ -651,6 +656,9 @@
                     errorCard.classList.remove('error');
                 }
 
+                // Chrome 프로세스 모니터링 (비동기 호출)
+                loadChromeMonitoring();
+
                 // 크롤러 뱃지 업데이트
                 updateCrawlerBadges();
 
@@ -665,6 +673,28 @@
                 console.error('대시보드 로드 실패:', err);
             } finally {
                 btn.disabled = false;
+            }
+        }
+
+        // ========================================
+        // Chrome 프로세스 모니터링
+        // ========================================
+        async function loadChromeMonitoring() {
+            try {
+                const res = await fetch('/admin/api/monitor/current');
+                const data = await res.json();
+
+                if (data.chrome) {
+                    const count = data.chrome.count || 0;
+                    const memoryMb = data.chrome.total_memory_mb || 0;
+
+                    document.getElementById('chrome-count').textContent = `${count}개`;
+                    document.getElementById('chrome-memory').textContent = `메모리: ${memoryMb.toFixed(1)}MB`;
+                }
+            } catch (err) {
+                console.error('Chrome 모니터링 로드 실패:', err);
+                document.getElementById('chrome-count').textContent = 'N/A';
+                document.getElementById('chrome-memory').textContent = '메모리: N/A';
             }
         }
 
