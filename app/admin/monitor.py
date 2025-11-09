@@ -31,8 +31,8 @@ class SystemMonitor:
         # 임계값 설정
         self.MEMORY_WARNING_PERCENT = 70  # 메모리 70% 이상 경고
         self.MEMORY_CRITICAL_PERCENT = 85  # 메모리 85% 이상 위험
-        self.CHROME_MAX_PROCESSES = 4  # Chrome 프로세스 최대 개수
-        self.CHROME_WARNING_PROCESSES = 3  # Chrome 프로세스 경고 개수
+        self.CHROME_WARNING_PROCESSES = 15  # Chrome 프로세스 경고 (1.5-2개 인스턴스)
+        self.CHROME_MAX_PROCESSES = 25  # Chrome 프로세스 위험 (3개+ 인스턴스, 알림)
 
     def get_memory_stats(self) -> Dict[str, Any]:
         """메모리 사용량 통계"""
