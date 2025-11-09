@@ -26,7 +26,7 @@ LOG_FILES = {
 # 로그 파일 로테이션 설정
 LOG_ROTATION = {
     "maxBytes": 10 * 1024 * 1024,  # 10MB
-    "backupCount": 5,               # 총 50MB (약 5-10일분)
+    "backupCount": 3,               # 총 30MB (5→3 감소, 디스크 I/O 절약)
     "encoding": "utf-8"
 }
 

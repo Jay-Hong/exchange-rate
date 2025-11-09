@@ -12,7 +12,6 @@
 # 표준 라이브러리
 import logging
 from contextlib import contextmanager
-from threading import Semaphore
 
 # 서드파티 라이브러리
 from selenium import webdriver
@@ -25,13 +24,13 @@ from app.crawlers.constants import SELENIUM_OPTIONS, SELENIUM_DRIVER_TIMEOUT
 logger = logging.getLogger("exchange_rate.crawler")
 
 # ═════════════════════════════════════════════════════════════
-# Selenium 동시 실행 제어 (AWS 프리티어 메모리 최적화)
+# Selenium 순차 실행 (AsyncIO Queue 기반)
 # ═════════════════════════════════════════════════════════════
-# 글로벌 세마포어: 최대 2개의 Selenium 드라이버만 동시 실행
-# - 4개 동시 실행 시: 280-360MB
-# - 2개 제한 시: 140-180MB (50% 절약)
+# 변경 사항 (2025-11-06):
+# - Semaphore 제거 → AsyncIO Queue로 완전 대체
+# - scheduler.py의 selenium_job_executor()가 1개씩 순차 처리
+# - 경합 없음 → 불필요한 Fallback 제거, 메모리 안정
 # ─────────────────────────────────────────────────────────────
-_selenium_semaphore = Semaphore(2)
 
 
 def parse_rate_text(rate_text: str) -> float:
@@ -120,45 +119,25 @@ def create_selenium_driver():
 @contextmanager
 def selenium_driver_context():
     """
-    Selenium 드라이버 컨텍스트 매니저 (세마포어 자동 관리)
+    Selenium 드라이버 컨텍스트 매니저 (AsyncIO Queue 기반 순차 실행)
 
-    최대 2개의 Selenium 드라이버만 동시 실행을 보장하며,
-    세마포어 획득/해제와 드라이버 생성/종료를 자동으로 관리합니다.
+    드라이버 생성/종료를 자동으로 관리합니다.
+    동시 실행 제어는 scheduler.py의 selenium_job_executor()가 담당합니다.
 
     Usage:
-        try:
-            with selenium_driver_context() as driver:
-                driver.get("https://example.com")
-                element = driver.find_element(By.ID, "rate")
-                rate = element.text
-        except RuntimeError:
-            # 세마포어 획득 실패 → Request 폴백으로
-            logger.warning("Selenium 사용 불가, Request 폴백")
-        except Exception as e:
-            # 크롤링 실패
-            logger.error("Selenium 크롤링 실패", exc_info=True)
+        with selenium_driver_context() as driver:
+            driver.get("https://example.com")
+            element = driver.find_element(By.ID, "rate")
+            rate = element.text
 
     Yields:
         webdriver.Chrome: Selenium Chrome 드라이버 인스턴스
 
-    Raises:
-        RuntimeError: 세마포어 획득 실패 (이미 2개 실행 중)
-
     Notes:
-        - 세마포어는 논블로킹 모드로 획득 시도
-        - 획득 실패 시 즉시 RuntimeError 발생 (대기하지 않음)
-        - 정상 종료/에러 발생 모두 자동으로 세마포어 해제
+        - AsyncIO Queue가 순차 처리 보장 (Semaphore 불필요)
         - driver.quit() 자동 호출 (메모리 누수 방지)
+        - 좀비 프로세스 강제 종료 로직 포함
     """
-    # 세마포어 획득 시도 (논블로킹)
-    acquired = _selenium_semaphore.acquire(blocking=False)
-    if not acquired:
-        logger.warning(
-            "⏸️ Selenium 세마포어 획득 실패 (최대 2개 실행 중)",
-            extra={"max_instances": 2}
-        )
-        raise RuntimeError("Selenium semaphore unavailable - max 2 instances running")
-
     driver = None
     try:
         # 드라이버 생성
@@ -168,28 +147,52 @@ def selenium_driver_context():
         driver.set_page_load_timeout(SELENIUM_DRIVER_TIMEOUT)  # 페이지 로드 60초
         driver.set_script_timeout(SELENIUM_DRIVER_TIMEOUT)     # 스크립트 실행 60초
 
-        logger.debug("✅ Selenium 드라이버 생성 성공 (세마포어 획득, timeout 60초)")
+        logger.debug(f"✅ Selenium 드라이버 생성 성공 (timeout {SELENIUM_DRIVER_TIMEOUT}초)")
         yield driver
 
     except Exception as e:
         # 드라이버 생성 실패 또는 크롤링 에러
-        logger.error(
-            "❌ Selenium 드라이버 에러",
-            exc_info=True
-        )
+        logger.error("❌ Selenium 드라이버 에러", exc_info=True)
         raise
 
     finally:
-        # 항상 실행: 드라이버 종료 + 세마포어 해제
+        # 항상 실행: 드라이버 종료
         if driver:
             try:
                 driver.quit()
                 logger.debug("✅ Selenium 드라이버 종료 완료")
             except Exception as e:
-                logger.error("⚠️ Selenium 드라이버 종료 실패", exc_info=True)
+                logger.error("⚠️ Selenium 드라이버 종료 실패, 강제 종료 시도", exc_info=True)
 
-        _selenium_semaphore.release()
-        logger.debug("✅ Selenium 세마포어 해제")
+                # driver.quit() 실패 시 Chrome 프로세스 강제 종료 (좀비 프로세스 방지)
+                try:
+                    # 함수 내부 import (psutil은 무거운 라이브러리, 에러 시에만 로드)
+                    import psutil
+                    import os
+
+                    current_process = psutil.Process(os.getpid())
+                    killed_count = 0
+
+                    # 현재 Python 프로세스의 모든 자식 프로세스 중 Chrome 관련 프로세스 강제 종료
+                    for child in current_process.children(recursive=True):
+                        try:
+                            if any(name in child.name().lower() for name in ['chrome', 'chromedriver']):
+                                child.kill()
+                                child.wait(timeout=3)  # 종료 대기 (최대 3초)
+                                killed_count += 1
+                                logger.warning(f"🔨 좀비 프로세스 강제 종료: {child.name()} (PID: {child.pid})")
+                        except psutil.TimeoutExpired:
+                            # 3초 내 종료 안 되면 강제 종료
+                            child.kill()
+                            logger.warning(f"⚡ 좀비 프로세스 강제 kill: {child.name()} (PID: {child.pid})")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            # 이미 종료되었거나 권한 없음
+                            pass
+
+                    if killed_count > 0:
+                        logger.info(f"🧹 강제 종료 완료: {killed_count}개 프로세스")
+                except Exception as cleanup_error:
+                    logger.error("⚠️ 프로세스 강제 종료 실패", exc_info=True)
 
 
 def is_mibank_rate_reliable() -> bool:

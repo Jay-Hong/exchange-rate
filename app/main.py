@@ -63,13 +63,17 @@ class ConnectionManager:
         logger.info("✅ WebSocket 연결 성공", extra={"connections": len(self.active_connections)})
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info("❌ WebSocket 연결 해제", extra={"connections": len(self.active_connections)})
+        try:
+            self.active_connections.remove(websocket)
+            logger.info("❌ WebSocket 연결 해제", extra={"connections": len(self.active_connections)})
+        except ValueError:
+            logger.warning("⚠️ 이미 제거된 WebSocket 연결 시도", extra={"connections": len(self.active_connections)})
 
     async def broadcast(self, message: dict):
         """모든 연결된 클라이언트에게 메시지 전송"""
         disconnected = []
-        for connection in self.active_connections:
+        # 리스트 복사본으로 순회 (순회 중 수정 방지)
+        for connection in self.active_connections[:]:
             try:
                 await connection.send_json(message)
             except Exception as e:
@@ -78,7 +82,11 @@ class ConnectionManager:
 
         # 실패한 연결 제거
         for conn in disconnected:
-            self.active_connections.remove(conn)
+            try:
+                self.active_connections.remove(conn)
+            except ValueError:
+                # 이미 제거됨 (disconnect()에서 제거된 경우)
+                pass
 
 manager = ConnectionManager()
 
@@ -89,12 +97,26 @@ last_broadcast_time = None
 async def lifespan(app: FastAPI):
     # Startup code
     logger.info("🚀 FastAPI 서버 시작", extra={"env": os.getenv("ENV", "development")})
+
+    # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
+    scheduler.init_selenium_queue()
+
+    # 스케줄러 시작 (Queue를 사용하는 작업 포함)
     scheduler.start_scheduler()
+
     # WebSocket 브로드캐스트 백그라운드 태스크 시작
     asyncio.create_task(broadcast_rates())
+
     yield
+
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
+
+    # Selenium Queue Worker 종료
+    await scheduler.shutdown_selenium_queue()
+
+    # 스케줄러 종료
+    scheduler.scheduler.shutdown()
 
 async def broadcast_rates():
     """10초마다 변경사항 체크 후 모든 클라이언트에게 환율 데이터 전송"""
@@ -476,5 +498,19 @@ def download_logs(
         filename=f"{log_type}_{datetime.now().strftime('%Y%m%d')}.log",
         media_type='application/octet-stream'
     )
+
+
+@app.get("/admin/api/monitor/current", dependencies=[Depends(verify_admin)])
+def get_current_monitor_stats():
+    """현재 시스템 모니터링 상태 조회"""
+    from app.admin.monitor import system_monitor
+    return system_monitor.get_current_stats()
+
+
+@app.get("/admin/api/monitor/history", dependencies=[Depends(verify_admin)])
+def get_monitor_history(hours: int = 1):
+    """시간별 모니터링 히스토리 조회 (Chart.js용)"""
+    from app.admin.monitor import system_monitor
+    return system_monitor.get_history(hours=hours)
 
 
