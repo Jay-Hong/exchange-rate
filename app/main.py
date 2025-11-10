@@ -514,3 +514,28 @@ def get_monitor_history(hours: int = 1):
     return system_monitor.get_history(hours=hours)
 
 
+@app.get("/admin/api/crawler/stats", dependencies=[Depends(verify_admin)])
+def get_crawler_stats():
+    """
+    크롤러별 통계 조회 (성공/실패/소요시간)
+
+    Returns:
+        {
+            "investing": {
+                "bank": "investing",
+                "success_count": 150,
+                "fail_count": 2,
+                "total_duration": 245.3,
+                "avg_duration": 1.6,
+                "success_rate": 98.7,
+                "last_success_at": "2025-11-10T14:30:00",
+                "last_fail_at": null,
+                "last_duration": 1.5
+            },
+            ...
+        }
+    """
+    from app.admin.crawler_stats import crawler_stats
+    return crawler_stats.get_stats()
+
+

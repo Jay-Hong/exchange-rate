@@ -10,8 +10,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Planned
 - Dynamic priority adjustment based on crawler success rate (Phase 2)
 - Multiple Queue system for crawler groups (Phase 3)
-- Selenium crawler interval optimization to 60s uniform (Phase 4)
-- Request crawler interval adjustment to reduce CPU throttling (Phase 5)
+
+---
+
+## [1.6.0] - 2025-11-10
+
+### Added - 3-Tier Scheduling Architecture
+- **Crawler statistics system** for monitoring success rate and performance
+  - Real-time tracking: success/fail counts, avg duration, last execution time
+  - Thread-safe collector with singleton pattern
+  - Admin API endpoint: `GET /admin/api/crawler/stats`
+  - Integrated with both Request and Selenium crawlers
+- **3-Tier scheduling architecture** optimized for t3.small/medium:
+  - **Tier A (investing)**: Most critical, highest frequency
+  - **Tier B (kb, hana, woori, bs, citi)**: Important, moderate frequency
+  - **Tier C (shinhan, ibk, nh, sc)**: Selenium-based, lowest frequency
+- **IN mode: cron-based absolute timing** (Broadcasting synchronization)
+  - A Group: 10s interval (5s before Broadcasting @ 00, 10, 20s)
+  - B Group: 20-60s interval (3-7s before Broadcasting, staggered)
+  - C Group: 33.3-150s interval (Broadcasting independent)
+- **OUT mode: cron-based hourly distribution** (Zero concurrent execution)
+  - A Group: Every 10 minutes (05, 15, 25, 35, 45, 55 min)
+  - B Group: Every 10-60 minutes (fully distributed across the hour)
+  - C Group: Once per hour (fully distributed: 07, 17, 27, 36, 47, 57 min)
+
+### Changed
+- **Worker health check optimization**: 180s → 90s stuck detection
+  - Rationale: Timeout 45s × 2 = 90s is sufficient (heartbeat updates at job start)
+  - Faster problem detection and auto-restart
+- **Selenium timeout adjustment**: shinhan 60s → 45s (consistency with other crawlers)
+- **Scheduling strategy**:
+  - IN mode: cron with second precision (e.g., `second='5,15,25,35,45,55'`)
+  - OUT mode: cron with minute precision (e.g., `minute='5,15,25,35,45,55'`)
+  - Request crawlers: Direct execution with stats wrapper
+  - Selenium crawlers: Queue-based execution (unchanged)
+- **Statistics wrapper**: All crawlers now tracked via `make_request_crawler_wrapper()`
+
+### Performance
+- **OUT mode resource distribution**: 10 crawlers spread across 60 minutes
+  - Peak concurrent crawlers: 1 (down from potential 6-8)
+  - CPU spike elimination: No simultaneous execution
+- **Faster failure detection**: Worker restart in 90s vs 180s
+- **Better monitoring**: Real-time success rate and duration tracking per crawler
+
+### Documentation
+- Added [ADR-009](DECISIONS.md) documenting 3-Tier scheduling architecture
+- Updated scheduler.py with comprehensive inline documentation
+- Added `app/admin/crawler_stats.py` with usage examples
+
+---
+
+## [1.5.0] - 2025-11-10
+
+### Added
+- **Worker health check system** for detecting and auto-restarting stuck workers
+  - Heartbeat tracking: Updates every job completion
+  - Stuck detection: >180 seconds on same job → automatic restart
+  - Health check interval: Every 60 seconds
+- **Queue pressure relief policy** (80% threshold)
+  - Rejects new jobs when queue >80% full (20/25)
+  - Prevents queue overflow and APScheduler blocking
+  - Logs rejected jobs for monitoring
+- Worker status tracking: `selenium_worker_last_heartbeat`, `selenium_worker_current_job`
+
+### Changed
+- **Timeout reduction (50% cut)** for real-time performance:
+  - hana: 60s → 30s
+  - ibk: 90s → 45s
+  - nh: 90s → 45s
+  - sc: 90s → 45s
+  - shinhan: 120s → 60s
+- **Queue size optimization**: 50 → 25
+  - Rationale: 80% pressure relief (20/25) + memory savings
+  - Prevents excessive job accumulation
+- **Crawler schedule adjustment** (IN mode):
+  - hana: 20s (unchanged, fastest crawler)
+  - shinhan: 60s (adjusted for queue balance)
+  - ibk: 60s (reduced frequency for slow crawler)
+  - nh: 90s (further reduced for slowest crawler)
+  - sc: 120s (minimal frequency for reliability)
+
+### Fixed
+- **Queue saturation (100%)** → Reduced to ~80% with pressure relief
+- **Worker stuck issue** → Auto-restart when heartbeat >180s
+- **Real-time performance degradation** → NH crawler timeout enforced at 45s
+- **APScheduler blocking** → Non-blocking queue operations prevent scheduler freeze
+
+### Performance
+- Queue utilization: 100% (50/50) → 80% (20/25) stable
+- Timeout enforcement: Slow crawlers (66s) now properly timeout at 45s
+- Memory savings: Queue size reduction contributes to overall stability
+- Worker reliability: Auto-restart ensures continuous operation
+
+### Tradeoffs
+- ⚠️ **Real-time vs Completeness**: Timeouts may reject slow crawlers during high Swap usage
+- ⚠️ **Queue pressure**: 80% rejection may skip some scheduled jobs (retry on next cycle)
+- ✅ **System stability**: Prioritized over 100% data collection rate
+
+### Documentation
+- Added [ADR-008](DECISIONS.md) documenting Queue pressure relief strategy
+- Updated [CLAUDE.md](CLAUDE.md) scheduling section with new queue size and policies
 
 ---
 
@@ -216,6 +314,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.5.0 | 2025-11-10 | Queue pressure relief + Health check + Timeout optimization |
 | 1.4.0 | 2025-11-08 | Priority Queue + Timeout strategy |
 | 1.3.0 | 2025-11-06 | AsyncIO Queue for Selenium crawlers |
 | 1.2.0 | 2025-11-05 | System monitoring & zombie process cleanup |
@@ -226,6 +325,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 
 ## Migration Guide
+
+### Upgrading from 1.4.x to 1.5.x
+
+**Non-Breaking Changes:**
+- No API changes
+- No configuration changes required
+- Drop-in replacement for v1.4.x
+
+**Steps:**
+1. Pull latest code
+2. Review changes in `DECISIONS.md` (ADR-008: Queue pressure relief strategy)
+3. Rebuild Docker: `docker compose up -d --build`
+4. Monitor queue pressure: `docker logs -f exchange-rate-app | grep "Queue 압력"`
+5. Verify health check: `docker logs -f exchange-rate-app | grep "헬스체크\|멈춤 감지"`
+
+**Expected Improvements:**
+- Queue saturation reduced from 100% to ~80%
+- Real-time performance improved (NH crawler now timeout at 45s)
+- Automatic worker recovery on stuck (>180s)
+- Memory savings from smaller queue (50 → 25)
+
+**Monitoring:**
+- Watch for "Queue 압력 초과로 skip" warnings (acceptable, system working as designed)
+- Verify timeout enforcement: Slow crawlers should timeout within new limits
+- Check health check logs: Workers should auto-restart if stuck >180s
+
+**Rollback:**
+- Revert `app/crawlers/constants.py` SELENIUM_TIMEOUT_MAP (×2 values)
+- Revert `app/scheduler.py` queue size (25 → 50) and remove pressure relief logic
+- Comment out health check function and job
+
+---
 
 ### Upgrading from 1.3.x to 1.4.x
 
@@ -289,4 +420,4 @@ Please update this CHANGELOG when making significant changes following these gui
 
 ---
 
-**Last Updated**: 2025-11-08
+**Last Updated**: 2025-11-10

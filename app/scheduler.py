@@ -27,6 +27,7 @@ from app.crawlers import citi
 from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
 from app import crud
 from app.database import SessionLocal
+from app.admin.crawler_stats import crawler_stats
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.scheduler")
@@ -40,50 +41,84 @@ scheduler = AsyncIOScheduler(timezone=KST)
 # ═════════════════════════════════════════════════════════════
 # v1 (2025-11-06): Queue로 Semaphore 경합 제거 → 메모리 안정화
 # v2 (2025-11-08): PriorityQueue + 타임아웃 → 느린 크롤러 격리
+# v3 (2025-11-10): Worker 헬스체크 + 자동 재시작 → 무한 블로킹 방지
 # - 우선순위: 빠른 크롤러(hana) → 느린 크롤러(shinhan)
-# - 타임아웃: 각 크롤러별 타임아웃 설정 (30~90초)
+# - 타임아웃: 각 크롤러별 타임아웃 설정 (60~120초)
 # - 재시도: 실패 시 낮은 우선순위로 1회 재시도
+# - 헬스체크: 3분 이상 같은 작업 처리 시 Worker 강제 재시작
 # ─────────────────────────────────────────────────────────────
 selenium_queue: asyncio.PriorityQueue = None
 selenium_worker_task: asyncio.Task = None
+selenium_worker_last_heartbeat: float = time.time()
+selenium_worker_current_job: str = None
 
 # ═════════════════════════════════════════════════════════════
-# 크롤러 그룹 정의 (Request vs. Selenium)
+# 크롤러 그룹 정의 (2025-11-10 재설계)
 # ═════════════════════════════════════════════════════════════
-# Group A: Request 기반 (경량, 동시 실행 가능)
-# - investing, kb, woori, bs, citi
-# - 기존 APScheduler 방식 유지
+# t3.small/medium 환경 최적화를 위한 3-Tier 스케줄링
 #
-# Group B: Selenium 기반 (무거움, Queue 순차 처리)
-# - hana, shinhan, ibk, nh, sc
-# - AsyncIO Queue로 1개씩 순차 실행 (Semaphore 경합 제거)
+# A Group: investing (순수 Request)
+#   - 가장 중요한 기준 환율
+#   - IN: 10초마다 (Broadcasting 5초 전)
+#   - OUT: 10분마다 (매시간 05, 15, 25, 35, 45, 55분)
+#
+# B Group: Request 기반 (일부 하이브리드 폴백)
+#   - kb, hana: 중요, 빈도 높음
+#     - IN: 20초마다 (Broadcasting 7초 전, 서로 10초 엇갈림)
+#     - OUT: 10분마다 (kb: 03,13,23..., hana: 00,10,20...)
+#   - woori, bs, citi: 일반, 빈도 낮음
+#     - IN: 60초마다 (Broadcasting 3초 전, 20초씩 엇갈림)
+#     - OUT: 60분마다 (woori: 17분, bs: 37분, citi: 57분)
+#   - 하이브리드: hana, woori, bs는 Request → Selenium 폴백 가능
+#
+# C Group: Selenium 기반 (Queue 순차 처리)
+#   - shinhan, ibk, nh, sc
+#   - IN: interval (33.3 ~ 150초, Broadcasting 독립)
+#   - OUT: cron (60분마다, 완전 분산)
+#   - ibk는 Request → Selenium 하이브리드 (시간대 체크)
 # ─────────────────────────────────────────────────────────────
-REQUEST_BASED_TASKS = [
-    ("investing", investing.crawl_and_save_investing_exchange_rates, 4.9),
-    ("kb", kb.crawl_and_save_kb_bank_exchange_rates, 7.9),
-    ("woori", woori.crawl_and_save_woori_bank_exchange_rates, 23.3),
-    ("bs", bs.crawl_and_save_bs_bank_exchange_rates, 27.7),
-    ("citi", citi.crawl_and_save_citi_bank_exchange_rates, 28.5),
-]
-
-SELENIUM_BASED_TASKS = [
-    ("hana", hana.crawl_and_save_hana_bank_exchange_rates, 7.3),
-    ("shinhan", shinhan.crawl_and_save_shinhan_bank_exchange_rates, 31),
-    ("ibk", ibk.crawl_and_save_ibk_bank_exchange_rates, 29.1),
-    ("nh", nh.crawl_and_save_nh_bank_exchange_rates, 32.7),
-    ("sc", sc.crawl_and_save_sc_bank_exchange_rates, 33.3),
-]
 
 # 현재 모드 상태 저장
 current_mode = None
 
 
 # ═════════════════════════════════════════════════════════════
-# 타임아웃 래퍼 (느린 크롤러 격리)
+# 크롤러 Wrapper (통계 수집)
+# ═════════════════════════════════════════════════════════════
+def make_request_crawler_wrapper(bank_name: str, job_func: Callable):
+    """
+    Request 기반 크롤러 wrapper (통계 수집)
+
+    Args:
+        bank_name: 은행 이름
+        job_func: 크롤러 함수
+
+    Returns:
+        wrapper 함수 (APScheduler가 호출)
+    """
+    def wrapper():
+        start_time = time.time()
+        try:
+            job_func()
+            duration = time.time() - start_time
+            crawler_stats.record_success(bank_name, duration)
+            logger.debug(f"✅ [{bank_name}] 완료 ({duration:.2f}초)")
+        except Exception as e:
+            duration = time.time() - start_time
+            crawler_stats.record_failure(bank_name)
+            logger.exception(f"❌ [{bank_name}] 실패 ({duration:.2f}초)", extra={"bank": bank_name, "error": str(e)})
+
+    wrapper.__name__ = f"request_wrapper_{bank_name}"
+    wrapper.__qualname__ = wrapper.__name__
+    return wrapper
+
+
+# ═════════════════════════════════════════════════════════════
+# 타임아웃 래퍼 (느린 크롤러 격리 + 통계 수집)
 # ═════════════════════════════════════════════════════════════
 async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
     """
-    타임아웃 제어 래퍼 함수
+    타임아웃 제어 래퍼 함수 (통계 수집 포함)
 
     Args:
         job_func: 크롤러 함수
@@ -93,9 +128,9 @@ async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
         bool: 성공 시 True, 실패/타임아웃 시 False
     """
     timeout = SELENIUM_TIMEOUT_MAP.get(bank_name, 60)
+    start_time = time.time()
 
     try:
-        start_time = time.time()
         logger.info(f"⚡ [{bank_name}] Selenium 크롤링 시작 (타임아웃: {timeout}초)")
 
         # asyncio.wait_for로 타임아웃 제어
@@ -105,10 +140,13 @@ async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
         )
 
         elapsed = time.time() - start_time
+        crawler_stats.record_success(bank_name, elapsed)
         logger.info(f"✅ [{bank_name}] 완료 ({elapsed:.2f}초)")
         return True
 
     except asyncio.TimeoutError:
+        elapsed = time.time() - start_time
+        crawler_stats.record_failure(bank_name)
         logger.warning(
             f"⏱️ [{bank_name}] 타임아웃 ({timeout}초 초과) - 다음 작업으로 진행",
             extra={"bank": bank_name, "timeout": timeout}
@@ -116,6 +154,8 @@ async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
         return False
 
     except Exception as e:
+        elapsed = time.time() - start_time
+        crawler_stats.record_failure(bank_name)
         logger.exception(f"❌ [{bank_name}] 실행 실패", extra={"error": str(e)})
         return False
 
@@ -124,8 +164,8 @@ async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
 # AsyncIO PriorityQueue Worker (Selenium 크롤러 순차 실행)
 # ═════════════════════════════════════════════════════════════
 async def selenium_job_executor():
-    """우선순위 Queue Worker (타임아웃 + 재시도 로직)"""
-    global selenium_queue
+    """우선순위 Queue Worker (타임아웃 + 재시도 로직 + 헬스체크)"""
+    global selenium_queue, selenium_worker_last_heartbeat, selenium_worker_current_job
     logger.info("🔧 Selenium Priority Queue Worker 시작")
 
     while True:
@@ -134,12 +174,20 @@ async def selenium_job_executor():
             # 튜플: (priority, timestamp, job_func, bank_name, is_retry)
             priority, timestamp, job_func, bank_name, is_retry = await selenium_queue.get()
 
+            # 헬스체크 업데이트
+            selenium_worker_last_heartbeat = time.time()
+            selenium_worker_current_job = bank_name
+
             logger.info(
                 f"🔄 [{bank_name}] Queue 처리 시작 (우선순위: {priority}, 재시도: {is_retry})"
             )
 
             # 타임아웃 포함 실행
             success = await execute_with_timeout(job_func, bank_name)
+
+            # 작업 완료 후 헬스체크 업데이트
+            selenium_worker_last_heartbeat = time.time()
+            selenium_worker_current_job = None
 
             # 실패 시 재시도 (최대 1회)
             if not success and not is_retry:
@@ -157,9 +205,12 @@ async def selenium_job_executor():
 
         except asyncio.CancelledError:
             logger.info("🛑 Selenium Priority Queue Worker 중단")
+            selenium_worker_current_job = None
             break
         except Exception as e:
             logger.exception("Selenium Queue Worker 오류", extra={"error": str(e)})
+            selenium_worker_last_heartbeat = time.time()
+            selenium_worker_current_job = None
 
 
 def enqueue_selenium_job(job_func: Callable, bank_name: str):
@@ -168,9 +219,22 @@ def enqueue_selenium_job(job_func: Callable, bank_name: str):
 
     Notes:
         - put_nowait() 사용으로 APScheduler event loop blocking 방지
+        - Queue 80% 초과 시 작업 추가 거부 (압력 완화)
         - Queue 포화 시 조용히 skip (다음 스케줄에서 재시도)
     """
     global selenium_queue
+
+    # Queue 압력 완화: 80% 초과 시 새 작업 거부
+    current_size = selenium_queue.qsize()
+    max_size = 25
+    usage_percent = (current_size / max_size) * 100
+
+    if current_size >= 20:  # 80% 초과 (20/25)
+        logger.warning(
+            f"🚫 [{bank_name}] Queue 압력 초과로 skip ({current_size}/{max_size}, {usage_percent:.0f}%) - 다음 스케줄에서 재시도",
+            extra={"bank": bank_name, "queue_size": current_size, "usage_percent": usage_percent}
+        )
+        return
 
     priority = SELENIUM_PRIORITY_MAP.get(bank_name, 999)  # 기본값: 낮은 우선순위
 
@@ -188,14 +252,14 @@ def enqueue_selenium_job(job_func: Callable, bank_name: str):
         # Non-blocking put - Queue 가득 차면 즉시 예외 발생
         selenium_queue.put_nowait(item)
         logger.debug(
-            f"📥 [{bank_name}] Priority Queue 추가 (우선순위: {priority}, 대기: {selenium_queue.qsize()}/50)"
+            f"📥 [{bank_name}] Priority Queue 추가 (우선순위: {priority}, 대기: {current_size + 1}/{max_size})"
         )
     except asyncio.QueueFull:
         # Queue 포화 시 조용히 skip
-        # 다음 스케줄(7.3~33.3초 후)에서 자동으로 재시도됨
+        # 다음 스케줄에서 자동으로 재시도됨
         logger.warning(
-            f"⚠️ [{bank_name}] Queue 포화로 skip (size: {selenium_queue.qsize()}/50) - 다음 스케줄에서 재시도",
-            extra={"bank": bank_name, "queue_size": selenium_queue.qsize()}
+            f"⚠️ [{bank_name}] Queue 포화로 skip (size: {current_size}/{max_size}) - 다음 스케줄에서 재시도",
+            extra={"bank": bank_name, "queue_size": current_size}
         )
 
 
@@ -203,10 +267,10 @@ def init_selenium_queue():
     """FastAPI 시작 시 Priority Queue 초기화"""
     global selenium_queue, selenium_worker_task
 
-    # asyncio.Queue → asyncio.PriorityQueue 변경
-    # maxsize: 재시도까지 고려 + Queue 포화 방지를 위해 50으로 증가
-    # 최악 시나리오: 120초 동안 약 30개 추가 가능 → 여유를 두고 50 설정
-    selenium_queue = asyncio.PriorityQueue(maxsize=50)
+    # [2025-11-10] Queue 크기 최적화: 50 → 25
+    # - 80% 압력 완화 정책(20개)을 고려하면 25면 충분
+    # - 메모리 절약 + 과도한 작업 누적 방지
+    selenium_queue = asyncio.PriorityQueue(maxsize=25)
 
     # Worker 시작 (백그라운드에서 계속 실행)
     loop = asyncio.get_event_loop()
@@ -263,41 +327,189 @@ def make_selenium_job_wrapper(bank_name: str, job_func: Callable):
 
 
 def switch_jobs(mode: str):
-    """모드에 따라 작업 재등록 (Request vs. Selenium 분리)"""
+    """
+    모드에 따라 작업 재등록 (IN: cron 절대 시간, OUT: cron 시간 단위)
+
+    [2025-11-10 재설계]
+    - IN 모드: cron 절대 시간 동기화 (Broadcasting 동기화)
+    - OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개)
+    - Queue: C Group만 사용 (Selenium 전용)
+    """
     # 기존 작업 제거
     for job in scheduler.get_jobs():
         if job.id.startswith("task_"):
             scheduler.remove_job(job.id)
 
-    # Group A: Request 기반 크롤러 (기존 방식)
-    for name, func, base_interval in REQUEST_BASED_TASKS:
-        interval = base_interval if mode == "IN" else base_interval * 10
+    if mode == "IN":
+        # ═════════════════════════════════════════════════════════════
+        # IN 모드: cron 절대 시간 동기화 (Broadcasting 00, 10, 20초)
+        # ═════════════════════════════════════════════════════════════
+
+        # A Group: investing (5초 전)
         scheduler.add_job(
-            func,
-            IntervalTrigger(seconds=interval, timezone=KST),
-            id=f"task_{name}",
-            max_instances=1,          # 중복 실행 방지
-            misfire_grace_time=25     # 25초 이상 지연 시 건너뛰기
+            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+            CronTrigger(second='5,15,25,35,45,55', timezone=KST),
+            id='task_investing',
+            max_instances=1,
+            misfire_grace_time=5
         )
 
-    # Group B: Selenium 기반 크롤러 (Queue 방식)
-    for name, func, base_interval in SELENIUM_BASED_TASKS:
-        interval = base_interval if mode == "IN" else base_interval * 10
-
+        # B Group: kb, hana (7초 전, 10초 엇갈림)
         scheduler.add_job(
-            make_selenium_job_wrapper(name, func),  # Factory 함수로 고유 wrapper 생성
-            IntervalTrigger(seconds=interval, timezone=KST),
-            id=f"task_{name}",
-            max_instances=1,          # 중복 실행 방지
-            misfire_grace_time=25     # 25초 이상 지연 시 건너뛰기
+            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+            CronTrigger(second='3,23,43', timezone=KST),
+            id='task_kb',
+            max_instances=1,
+            misfire_grace_time=10
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(second='13,33,53', timezone=KST),
+            id='task_hana',
+            max_instances=1,
+            misfire_grace_time=10
+        )
+
+        # B Group: woori, bs, citi (3초 전, 20초씩 엇갈림)
+        scheduler.add_job(
+            make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(minute='*', second='17', timezone=KST),
+            id='task_woori',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(minute='*', second='37', timezone=KST),
+            id='task_bs',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+            CronTrigger(minute='*', second='57', timezone=KST),
+            id='task_citi',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+
+        # C Group: Selenium (Queue 순차 처리, Broadcasting 독립)
+        scheduler.add_job(
+            make_selenium_job_wrapper('shinhan', shinhan.crawl_and_save_shinhan_bank_exchange_rates),
+            IntervalTrigger(seconds=33.3, timezone=KST),
+            id='task_shinhan',
+            max_instances=1,
+            misfire_grace_time=25
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('ibk', ibk.crawl_and_save_ibk_bank_exchange_rates),  # 하이브리드 (내부 시간대 체크)
+            IntervalTrigger(seconds=55.5, timezone=KST),
+            id='task_ibk',
+            max_instances=1,
+            misfire_grace_time=25
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('nh', nh.crawl_and_save_nh_bank_exchange_rates),
+            IntervalTrigger(seconds=90, timezone=KST),
+            id='task_nh',
+            max_instances=1,
+            misfire_grace_time=60
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('sc', sc.crawl_and_save_sc_bank_exchange_rates),
+            IntervalTrigger(seconds=150, timezone=KST),
+            id='task_sc',
+            max_instances=1,
+            misfire_grace_time=90
+        )
+
+    else:  # OUT 모드
+        # ═════════════════════════════════════════════════════════════
+        # OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개)
+        # ═════════════════════════════════════════════════════════════
+
+        # A Group: investing (10분마다)
+        scheduler.add_job(
+            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+            CronTrigger(minute='5,15,25,35,45,55', second='0', timezone=KST),
+            id='task_investing',
+            max_instances=1,
+            misfire_grace_time=300
+        )
+
+        # B Group: kb, hana (10분마다)
+        scheduler.add_job(
+            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+            CronTrigger(minute='3,13,23,33,43,53', second='0', timezone=KST),
+            id='task_kb',
+            max_instances=1,
+            misfire_grace_time=300
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),
+            CronTrigger(minute='0,10,20,30,40,50', second='0', timezone=KST),
+            id='task_hana',
+            max_instances=1,
+            misfire_grace_time=300
+        )
+
+        # B Group: woori, bs, citi (60분마다)
+        scheduler.add_job(
+            make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),
+            CronTrigger(minute='17', second='0', timezone=KST),
+            id='task_woori',
+            max_instances=1,
+            misfire_grace_time=1800
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
+            CronTrigger(minute='37', second='0', timezone=KST),
+            id='task_bs',
+            max_instances=1,
+            misfire_grace_time=1800
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+            CronTrigger(minute='57', second='0', timezone=KST),
+            id='task_citi',
+            max_instances=1,
+            misfire_grace_time=1800
+        )
+
+        # C Group: Selenium (60분마다, 완전 분산)
+        scheduler.add_job(
+            make_selenium_job_wrapper('shinhan', shinhan.crawl_and_save_shinhan_bank_exchange_rates),
+            CronTrigger(minute='27', second='0', timezone=KST),
+            id='task_shinhan',
+            max_instances=1,
+            misfire_grace_time=1800
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('ibk', ibk.crawl_and_save_ibk_bank_exchange_rates),
+            CronTrigger(minute='47', second='0', timezone=KST),
+            id='task_ibk',
+            max_instances=1,
+            misfire_grace_time=1800
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('nh', nh.crawl_and_save_nh_bank_exchange_rates),
+            CronTrigger(minute='7', second='0', timezone=KST),
+            id='task_nh',
+            max_instances=1,
+            misfire_grace_time=1800
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('sc', sc.crawl_and_save_sc_bank_exchange_rates),
+            CronTrigger(minute='36', second='0', timezone=KST),
+            id='task_sc',
+            max_instances=1,
+            misfire_grace_time=1800
         )
 
     logger.info(
         f"=== {mode} 모드로 전환됨 ===",
         extra={
             "mode": mode,
-            "request_tasks": len(REQUEST_BASED_TASKS),
-            "selenium_tasks": len(SELENIUM_BASED_TASKS),
             "total_jobs": len(scheduler.get_jobs())
         }
     )
@@ -394,11 +606,11 @@ def report_queue_status():
 
     try:
         size = selenium_queue.qsize()
-        max_size = 50
+        max_size = 25  # [2025-11-10] 50 → 25
         usage_percent = (size / max_size) * 100
 
         # 정상 상태: DEBUG 레벨
-        if size < 40:  # 80% 미만
+        if size < 20:  # 80% 미만 (20/25)
             logger.debug(
                 f"📊 [Queue] size={size}/{max_size}, usage={usage_percent:.1f}%"
             )
@@ -422,9 +634,83 @@ def record_monitoring_stats():
         logger.error("❌ 모니터링 통계 기록 실패", exc_info=True)
 
 
+async def check_worker_health():
+    """
+    Selenium Worker 헬스체크 (1분마다)
+
+    Worker가 90초 이상 같은 작업을 처리하고 있으면 stuck 상태로 판단하여 재시작
+
+    Note:
+        - asyncio.wait_for()는 blocking thread를 kill할 수 없음
+        - Worker가 Selenium에서 무한 대기 시 thread는 계속 살아있음
+        - Worker Task를 cancel하고 재시작하면 Queue는 유지되고 Worker만 재생성됨
+        - 작업 시작 시 heartbeat 업데이트 → 90초 타임아웃으로도 충분 (타임아웃 45초 × 2배 여유)
+    """
+    global selenium_worker_task, selenium_worker_last_heartbeat, selenium_worker_current_job, selenium_queue
+
+    try:
+        if selenium_worker_task is None or selenium_queue is None:
+            return
+
+        # 헬스체크: 마지막 heartbeat로부터 경과 시간 확인
+        elapsed = time.time() - selenium_worker_last_heartbeat
+        max_job_time = 90  # 90초 (가장 긴 타임아웃 45초 × 2배 여유)
+
+        if elapsed > max_job_time:
+            current_job = selenium_worker_current_job or "unknown"
+            logger.error(
+                f"🚨 Selenium Worker 멈춤 감지: {current_job} 작업이 {int(elapsed)}초 동안 완료 안됨 (최대: {max_job_time}초)",
+                extra={
+                    "stuck_job": current_job,
+                    "elapsed_seconds": int(elapsed),
+                    "queue_size": selenium_queue.qsize(),
+                    "action": "worker_restart"
+                }
+            )
+
+            # Worker Task 강제 취소
+            selenium_worker_task.cancel()
+            try:
+                await selenium_worker_task
+            except asyncio.CancelledError:
+                pass
+
+            # Worker 재시작
+            loop = asyncio.get_event_loop()
+            selenium_worker_task = loop.create_task(selenium_job_executor())
+            selenium_worker_last_heartbeat = time.time()
+            selenium_worker_current_job = None
+
+            logger.warning(
+                f"✅ Selenium Worker 재시작 완료 (Queue 크기: {selenium_queue.qsize()}/25)",
+                extra={"queue_size": selenium_queue.qsize()}
+            )
+        else:
+            # 정상 상태
+            if selenium_worker_current_job:
+                logger.debug(
+                    f"💓 Worker 정상: [{selenium_worker_current_job}] 처리 중 ({int(elapsed)}초)",
+                    extra={"current_job": selenium_worker_current_job, "elapsed": int(elapsed)}
+                )
+            else:
+                logger.debug(f"💓 Worker 정상: 대기 중")
+
+    except Exception as e:
+        logger.error("❌ Worker 헬스체크 실패", exc_info=True)
+
+
 def start_scheduler():
     # 제어 작업: 1분마다 모드 확인
     scheduler.add_job(control_job, IntervalTrigger(minutes=1, timezone=KST), id="control_job")
+
+    # Worker 헬스체크: 1분마다 (멈춤 감지 + 자동 재시작)
+    scheduler.add_job(
+        check_worker_health,
+        IntervalTrigger(minutes=1, timezone=KST),
+        id="worker_health_check",
+        coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
+        max_instances=1  # 동시 실행 방지
+    )
 
     # Queue 상태 모니터링: 10초마다 (포화 감지)
     scheduler.add_job(

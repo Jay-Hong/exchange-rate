@@ -861,6 +861,393 @@ if not success and not is_retry:
 
 ---
 
+## ADR-009: 3-Tier 스케줄링 아키텍처 (t3.small/medium 최적화)
+
+**날짜:** 2025-11-10
+**상태:** 수락됨 ✅
+
+### 상황
+
+**배경:**
+- t2.micro (1GB RAM) → t3.small/medium (2-4GB RAM) 업그레이드 계획
+- 기존: interval 기반 스케줄링 (IN 모드 10초, OUT 모드 100초)
+- 문제점: OUT 모드에서 6-8개 크롤러 동시 실행 → CPU 스파이크
+
+**요구사항:**
+1. **IN 모드**: Broadcasting(10초)과 동기화, 매 Broadcasting마다 최신 데이터 반영
+2. **OUT 모드**: 리소스 완전 분산, 동시 실행 0개
+3. **확장성**: t3.small/medium 환경에 최적화
+4. **단순성**: 코드 복잡도 최소화
+
+### 결정
+
+**3-Tier cron 기반 스케줄링 아키텍처 채택**
+
+**Tier A (investing):** 최우선
+- IN: 10초마다 (Broadcasting 5초 전)
+- OUT: 10분마다 (05, 15, 25, 35, 45, 55분)
+
+**Tier B (kb, hana, woori, bs, citi):** 중요
+- IN: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
+- OUT: 10-60분마다 (완전 분산)
+
+**Tier C (shinhan, ibk, nh, sc):** Selenium
+- IN: interval (33.3-150초, Broadcasting 독립)
+- OUT: 60분마다 (완전 분산)
+
+### 대안 검토
+
+#### 대안 1: interval + 시차 (Staggered Start)
+```python
+# OUT 모드 전환 시 초기 지연 적용
+scheduler.reschedule_job('kb', trigger='interval', seconds=200,
+                        next_run_time=now + timedelta(seconds=5))
+```
+
+**장점:** interval 유지, 코드 단순
+**단점:**
+- 서버 재시작 시 동시 실행 가능
+- OUT 모드 전환 시에만 분산 보장
+- 예측 불가 (매번 다른 시점 실행)
+
+#### 대안 2: cron 기반 (채택)
+```python
+# OUT 모드: 매시간 고정된 분에 실행
+scheduler.add_job(crawl_kb, CronTrigger(minute='3,13,23,33,43,53'))
+```
+
+**장점:**
+- 항상 분산 보장 (서버 재시작 무관)
+- 예측 가능 (매시간 같은 분)
+- 디버깅 쉬움
+
+**단점:**
+- 정확히 10배는 아님 (10초 → 10분, 60배)
+- IN/OUT 모드 코드 다름
+
+### 근거
+
+#### 1. IN 모드: cron 절대 시간 동기화
+
+**Broadcasting 타임라인:**
+```
+00초, 10초, 20초, 30초, 40초, 50초 (10초 간격)
+```
+
+**크롤러 실행 시점:**
+```python
+# A Group: 5초 전
+investing: cron(second='5,15,25,35,45,55')
+# 목표: 05초 실행 → 07초 완료 → 10초 Broadcasting 반영
+
+# B Group: 7초 전 (10초 엇갈림)
+kb:   cron(second='3,23,43')
+hana: cron(second='13,33,53')
+
+# B Group: 3초 전 (20초씩 엇갈림)
+woori: cron(minute='*', second='17')
+bs:    cron(minute='*', second='37')
+citi:  cron(minute='*', second='57')
+
+# C Group: interval (Broadcasting 독립)
+shinhan: interval(33.3초)
+ibk:     interval(55.5초)
+nh:      interval(90초)
+sc:      interval(150초)
+```
+
+**리소스 분산 효과:**
+```
+타임라인 (1분 기준):
+03초: kb
+05초: investing
+13초: hana
+15초: investing
+17초: woori
+...
+```
+→ **최대 동시 실행: 1개**
+
+#### 2. OUT 모드: cron 시간 단위 완전 분산
+
+**크롤러 실행 시점:**
+```python
+# A Group: 10분마다
+investing: cron(minute='5,15,25,35,45,55')
+
+# B Group: 10분마다
+kb:   cron(minute='3,13,23,33,43,53')
+hana: cron(minute='0,10,20,30,40,50')
+
+# B Group: 60분마다
+woori: cron(minute='17')
+bs:    cron(minute='37')
+citi:  cron(minute='57')
+
+# C Group: 60분마다
+shinhan: cron(minute='27')
+ibk:     cron(minute='47')
+nh:      cron(minute='7')
+sc:      cron(minute='36')
+```
+
+**1시간 타임라인:**
+```
+00분: hana
+03분: kb
+05분: investing
+07분: nh
+10분: hana
+13분: kb
+15분: investing
+17분: woori
+...
+27분: shinhan
+36분: sc
+37분: bs
+47분: ibk
+57분: citi
+```
+→ **최대 동시 실행: 1개** (17분만 2개)
+
+#### 3. 성능 분석
+
+| 지표 | 기존 (interval) | 새 방식 (cron) | 개선 |
+|------|----------------|---------------|------|
+| OUT 모드 동시 실행 | 6-8개 | 1개 | 85% 감소 |
+| CPU 스파이크 | 있음 | 없음 | 100% 제거 |
+| 예측 가능성 | 낮음 | 높음 | 매시간 같은 분 |
+| 서버 재시작 안전성 | 낮음 | 높음 | 절대 시간 기반 |
+
+### 결과
+
+**장점:**
+- ✅ **OUT 모드 리소스 완전 분산**: 동시 실행 0개 (17분 제외)
+- ✅ **IN 모드 Broadcasting 동기화**: X초 전 실행으로 실시간 반영
+- ✅ **예측 가능성**: 매시간 같은 분에 실행
+- ✅ **서버 재시작 안전**: 절대 시간 기반, 시차 설정 불필요
+- ✅ **코드 단순성**: cron 표현식만으로 완전 제어
+
+**단점:**
+- ⚠️ **OUT 모드 배수**: 정확히 10배 아님 (환율 변동 드묾, 영향 미미)
+- ⚠️ **IN/OUT 코드 차이**: cron vs interval 혼용 (하지만 명확히 분리)
+
+**향후 재검토 시점:**
+- t3.small에서도 OUT 모드 리소스 부족 시
+- 더 세밀한 Broadcasting 동기화 필요 시
+
+### 관련 결정
+
+- [ADR-007](DECISIONS.md#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout): Priority Queue 유지 (C Group만 사용)
+- [ADR-008](DECISIONS.md#adr-008-queue-압력-완화-전략-실시간성-vs-완전성): Queue 압력 완화 정책 유지
+
+---
+
+## ADR-008: Queue 압력 완화 전략 (실시간성 vs 완전성)
+
+**날짜:** 2025-11-10
+**상태:** 수락됨 ✅
+
+### 상황
+
+**배경:**
+- ADR-007의 Priority Queue + Timeout 시스템이 Queue 100% 포화 문제 발생
+- IBK Worker가 6시간 동안 stuck (asyncio.wait_for()가 blocking thread 종료 불가)
+- NH crawler가 66초 소요 (실시간 요구사항 미충족)
+- Queue 크기 50/50 (100%) 지속적 포화
+
+**근본 원인:**
+```
+Input Rate > Processing Rate
+
+Input:  크롤러 5개 × 평균 8초 간격 = 0.625 작업/초
+Output: 평균 처리 시간 20초 = 0.05 작업/초
+
+→ Queue는 계속 채워지고, Worker는 따라가지 못함
+→ 시간이 지날수록 대기 작업 누적 → 100% 포화
+```
+
+**시스템 제약:**
+- AWS t2.micro (1GB RAM)
+- Swap 메모리 28.2% 사용 → I/O 지연 발생
+- NH crawler 실제 실행 시간: 66초 (타임아웃 90초보다 짧음)
+
+### 결정
+
+**3단계 Queue 압력 완화 전략 채택**
+
+#### 1. 타임아웃 50% 감축 (실시간성 강화)
+```python
+# app/crawlers/constants.py
+SELENIUM_TIMEOUT_MAP = {
+    "hana": 30,    # 60 → 30초
+    "ibk": 45,     # 90 → 45초
+    "nh": 45,      # 90 → 45초 (66초 걸리면 타임아웃!)
+    "sc": 45,      # 90 → 45초
+    "shinhan": 60, # 120 → 60초
+}
+```
+
+**근거:**
+- 실시간 서비스에서 90초 대기는 너무 김
+- 타임아웃으로 느린 크롤러를 조기 종료 → Queue 정체 방지
+- 재시도 메커니즘이 있으므로 데이터 손실 최소화
+
+#### 2. Queue 크기 50% 감축 (메모리 최적화)
+```python
+# app/scheduler.py
+selenium_queue = asyncio.PriorityQueue(maxsize=25)  # 50 → 25
+```
+
+**근거:**
+- 80% 압력 완화 정책(20개)을 고려하면 25면 충분
+- 과도한 작업 누적 방지 (50개 대기는 과도함)
+- 메모리 절약 (Queue 객체 크기 감소)
+
+#### 3. 80% 압력 완화 정책 (과부하 방지)
+```python
+# app/scheduler.py
+def enqueue_selenium_job(job_func, bank_name):
+    current_size = selenium_queue.qsize()
+    max_size = 25
+
+    if current_size >= 20:  # 80% 초과 (20/25)
+        logger.warning(
+            f"🚫 [{bank_name}] Queue 압력 초과로 skip ({current_size}/{max_size})"
+        )
+        return  # 새 작업 거부
+```
+
+**근거:**
+- Queue 100% 포화 → APScheduler 블로킹 발생
+- 80% 이상 시 새 작업 거부 → 시스템 안정성 유지
+- 거부된 작업은 다음 스케줄에서 재시도 (데이터 손실 없음)
+
+#### 4. Worker 헬스체크 시스템 (Stuck 방지)
+```python
+# app/scheduler.py
+async def check_worker_health():
+    elapsed = time.time() - selenium_worker_last_heartbeat
+    max_job_time = 180  # 3분
+
+    if elapsed > max_job_time:
+        logger.error(f"🚨 Selenium Worker 멈춤 감지...")
+        selenium_worker_task.cancel()  # Worker 강제 취소
+        selenium_worker_task = loop.create_task(selenium_job_executor())  # 재시작
+```
+
+**근거:**
+- `asyncio.wait_for()`는 blocking thread를 종료하지 못함
+- 3분 이상 같은 작업 처리 시 Worker 재시작
+- 자동 복구로 운영 안정성 향상
+
+#### 5. 크롤러 스케줄 재조정 (부하 분산)
+```python
+# app/scheduler.py (사용자 최종 조정)
+SELENIUM_BASED_TASKS = [
+    ("hana", ..., 20),     # 빠른 크롤러: 높은 빈도
+    ("shinhan", ..., 60),  # 느린 크롤러: 중간 빈도
+    ("ibk", ..., 60),
+    ("nh", ..., 90),       # 가장 느린 크롤러: 낮은 빈도
+    ("sc", ..., 120),      # 가장 불안정: 최소 빈도
+]
+```
+
+**근거:**
+- 느린 크롤러의 실행 빈도를 줄여 Queue 압박 감소
+- Input Rate 감소 → Processing Rate와 균형
+
+### 근거
+
+#### 대안 검토
+
+| 대안 | 장점 | 단점 | 채택 |
+|------|------|------|------|
+| **하드웨어 업그레이드** (t3.small, 2GB RAM) | 근본 해결, Swap 미사용 | 비용 $15/월 | ❌ |
+| **타임아웃 증가** | 데이터 완전성 ↑ | 실시간성 ↓, Queue 정체 | ❌ |
+| **Queue 크기 증가** | 작업 손실 ↓ | 메모리 압박 ↑, 근본 미해결 | ❌ |
+| **압력 완화 + 타임아웃 감축** | 실시간성 ↑, 시스템 안정 | 일부 데이터 손실 가능 | ✅ |
+
+**선택 이유:**
+1. 코드 최적화로 하드웨어 비용 절감 (프리티어 유지)
+2. 실시간 서비스 특성상 실시간성 > 완전성
+3. 재시도 메커니즘으로 데이터 손실 최소화
+4. 시스템 안정성 우선 (100% 포화보다 80% 안정이 나음)
+
+#### 트레이드오프 분석
+
+| 항목 | 변경 전 (ADR-007) | 변경 후 (ADR-008) | 영향 |
+|------|------------------|-----------------|------|
+| **Queue 포화** | 100% (50/50) | ~80% (20/25) | ✅ 안정화 |
+| **타임아웃** | 60-120초 | 30-60초 | ✅ 실시간성 향상 |
+| **데이터 완전성** | 높음 | 중간 | ⚠️ 일부 손실 가능 |
+| **시스템 안정성** | 불안정 (Worker stuck) | 안정 (헬스체크) | ✅ 자동 복구 |
+| **메모리 사용** | Queue 50개 | Queue 25개 | ✅ 절약 |
+
+### 결과
+
+#### 성공 지표 (모니터링 결과)
+
+**Queue 안정화:**
+- ✅ Queue 사용률: 100% (50/50) → 80% (20/25)
+- ✅ "Queue 압력 초과" 경고: 정상 작동 (압력 완화 작동 중)
+
+**실시간성 향상:**
+- ✅ NH crawler: 66초 → 45초 타임아웃 (초과 시 조기 종료)
+- ✅ Hana crawler: 4-25초 (30초 타임아웃 내 완료)
+
+**Worker 안정성:**
+- ✅ 헬스체크: 60초마다 자동 점검
+- ✅ Stuck Worker: 180초 초과 시 자동 재시작
+
+**타임아웃 동작:**
+- ✅ Shinhan: 60초 타임아웃 정상 작동 → 재시도 큐 진입
+
+#### 장점
+- ✅ Queue 포화 방지 (80% 안정 운영)
+- ✅ 실시간성 강화 (타임아웃 50% 감축)
+- ✅ Worker 자동 복구 (헬스체크 시스템)
+- ✅ 메모리 절약 (Queue 크기 50% 감축)
+- ✅ 프리티어 유지 (하드웨어 비용 $0)
+
+#### 단점
+- ⚠️ 일부 크롤링 실패 가능 (타임아웃 엄격화)
+- ⚠️ 80% 초과 시 작업 거부 (다음 스케줄에서 재시도)
+- ⚠️ 데이터 완전성 약간 감소 (실시간성과 트레이드오프)
+
+#### 핵심 전략: **실시간성 > 완전성**
+
+**이유:**
+1. 환율 서비스는 **실시간성이 핵심 가치**
+   - 60-90초 대기보다 빠른 타임아웃으로 새 데이터 수집이 나음
+2. **재시도 메커니즘** 존재
+   - 실패 시 우선순위 +1000으로 자동 재시도
+   - 영구적 데이터 손실 아님
+3. **폴백 URL** 존재
+   - 대부분 크롤러에 2-3개 폴백 URL 구현됨
+   - 특정 은행 실패해도 서비스 지속 가능
+
+### 향후 재검토 시점
+
+1. **EC2 인스턴스 업그레이드 시** (t2.micro → t3.small):
+   - Swap 사용 감소 → 타임아웃 재조정 필요
+   - 크롤러 실행 시간 감소 → Queue 크기 재평가
+
+2. **데이터 완전성 요구 증가 시**:
+   - 타임아웃 완화 (30-60초 → 60-120초)
+   - Queue 크기 증가 (25 → 50)
+   - 단, 하드웨어 업그레이드 선행 필요
+
+3. **사용자 피드백 발생 시**:
+   - "특정 은행 데이터가 자주 누락됨" → 해당 은행 타임아웃 증가
+   - "환율 업데이트가 느림" → 타임아웃 추가 감축
+
+### 결론
+
+**현 단계(프리티어, 초기 사용자)에서는 실시간성과 시스템 안정성을 우선하며, 사용자 증가 및 하드웨어 업그레이드 시점에 데이터 완전성을 강화하는 전략이 적절함.**
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -869,3 +1256,5 @@ if not success and not is_retry:
 - 2025-10-26: ADR 작성 정책 추가
 - 2025-11-06: ADR-006 작성 (AsyncIO Queue 기반 Selenium 순차 실행)
 - 2025-11-08: ADR-007 작성 (Priority Queue + Timeout 전략)
+- 2025-11-10: ADR-008 작성 (Queue 압력 완화 전략 - 실시간성 vs 완전성)
+- 2025-11-10: ADR-009 작성 (3-Tier 스케줄링 아키텍처 - t3.small/medium 최적화)

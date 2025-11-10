@@ -112,13 +112,16 @@ timestamp  DATETIME (KST)
 
 ## 스케줄링 시스템
 
-> 💡 **최근 개선:** Queue Blocking 방지 + 클로저 버그 수정 (2025-11-09)
-> 📖 **상세 기록:** [MAINTENANCE_2025-11-09.md](MAINTENANCE_2025-11-09.md)
-> - Non-blocking Queue Put (APScheduler 멈춤 방지)
-> - Factory 함수 패턴 (Selenium 크롤러 정상 실행)
-> - Queue 크기 증가 (20 → 50) + 모니터링 (10초마다)
+> 💡 **최근 개선:** Queue 압력 완화 + 실시간성 강화 (2025-11-10)
+> 📖 **상세 기록:** [ADR-008](DECISIONS.md#adr-008-queue-압력-완화-전략-실시간성-vs-완전성)
+> - 타임아웃 50% 감축 (실시간성 우선)
+> - Queue 크기 최적화 (50 → 25)
+> - 80% 압력 완화 정책 (20/25 초과 시 작업 거부)
+> - Worker 헬스체크 시스템 (180초 stuck 자동 재시작)
+> - 크롤러 스케줄 재조정 (느린 크롤러 빈도 감소)
 
 > 🔖 **이전 개선:**
+> - Queue Blocking 방지 (2025-11-09) - [MAINTENANCE_2025-11-09.md](MAINTENANCE_2025-11-09.md)
 > - Priority Queue + Timeout (2025-11-08) - [MAINTENANCE_2025-11-08.md](MAINTENANCE_2025-11-08.md), [ADR-007](DECISIONS.md#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout)
 > - AsyncIO Queue 순차 실행 (2025-11-06) - [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md), [ADR-006](DECISIONS.md#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue)
 
@@ -129,7 +132,7 @@ timestamp  DATETIME (KST)
 - **OUT 모드**: 그 외 시간
   - 크롤링 주기: 49-333초 (IN 모드의 10배)
 
-### 크롤러 아키텍처 (2025-11-09 최종)
+### 크롤러 아키텍처 (2025-11-10 최종)
 
 **스케줄러:** APScheduler (AsyncIOScheduler)
 
@@ -140,10 +143,12 @@ timestamp  DATETIME (KST)
 - **Group B (Selenium 기반)**: AsyncIO PriorityQueue 순차 실행 (메모리 집약)
   - hana, shinhan, ibk, nh, sc
   - **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → ibk → nh → sc → shinhan)
-  - **개별 타임아웃**: 크롤러별 맞춤형 타임아웃 (60-120초)
+  - **개별 타임아웃**: 크롤러별 맞춤형 타임아웃 (30-60초, 실시간성 우선)
   - **자동 재시도**: 실패 시 우선순위 +1000으로 재실행
-  - **Non-blocking Queue**: put_nowait()으로 APScheduler 멈춤 방지 (2025-11-09)
-  - **Queue 크기**: 50 (최악 시나리오 대비) + 10초마다 모니터링 (2025-11-09)
+  - **Non-blocking Queue**: put_nowait()으로 APScheduler 멈춤 방지
+  - **Queue 크기**: 25 (메모리 최적화)
+  - **압력 완화**: 80% (20/25) 초과 시 새 작업 거부
+  - **헬스체크**: 60초마다 Worker 상태 점검, 180초 stuck 시 자동 재시작
 
 ### 크롤러 실행 주기 (IN 모드 기준)
 
@@ -158,14 +163,29 @@ REQUEST_BASED_TASKS = [
 ]
 
 # Group B: Selenium 기반 (Queue 순차 처리)
+# [2025-11-10] Queue 압력 완화를 위한 주기 재조정
 SELENIUM_BASED_TASKS = [
-    ("hana", 7.3초),
-    ("shinhan", 31초),
-    ("ibk", 29.1초),
-    ("nh", 32.7초),
-    ("sc", 33.3초),
+    ("hana", 20초),      # 빠른 크롤러: 높은 빈도
+    ("shinhan", 60초),   # 느린 크롤러: 중간 빈도
+    ("ibk", 60초),       # 느린 크롤러: 중간 빈도
+    ("nh", 90초),        # 가장 느린 크롤러: 낮은 빈도
+    ("sc", 120초),       # 가장 불안정: 최소 빈도
 ]
+
+# 크롤러별 타임아웃 (실시간성 강화)
+SELENIUM_TIMEOUT_MAP = {
+    "hana": 30초,    # 빠른 크롤러: 짧은 타임아웃
+    "ibk": 45초,     # 중간 크롤러: 여유 타임아웃
+    "nh": 45초,      # 느린 크롤러: 66초 걸리면 타임아웃!
+    "sc": 45초,
+    "shinhan": 60초, # 가장 느린 크롤러: 가장 긴 타임아웃
+}
 ```
+
+**설계 원칙:**
+- **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
+- **압력 완화**: Queue 80% 초과 시 새 작업 거부 → 시스템 안정성 유지
+- **자동 복구**: Worker stuck 시 자동 재시작, 실패 작업 자동 재시도
 
 ## 크롤러 구조
 
