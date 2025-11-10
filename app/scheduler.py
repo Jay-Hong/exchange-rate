@@ -345,49 +345,49 @@ def switch_jobs(mode: str):
         # IN 모드: cron 절대 시간 동기화 (Broadcasting 00, 10, 20초)
         # ═════════════════════════════════════════════════════════════
 
-        # A Group: investing (5초 전)
+        # A Group: investing (3초 전)
         scheduler.add_job(
             make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(second='5,15,25,35,45,55', timezone=KST),
+            CronTrigger(second='7,17,27,37,47,57', timezone=KST),
             id='task_investing',
             max_instances=1,
             misfire_grace_time=5
         )
 
-        # B Group: kb, hana (7초 전, 10초 엇갈림)
+        # B Group: kb, hana (5초 전, 10초 엇갈림)
         scheduler.add_job(
             make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(second='3,23,43', timezone=KST),
+            CronTrigger(second='5,25,45', timezone=KST),
             id='task_kb',
             max_instances=1,
             misfire_grace_time=10
         )
         scheduler.add_job(
             make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(second='13,33,53', timezone=KST),
+            CronTrigger(second='15,35,55', timezone=KST),
             id='task_hana',
             max_instances=1,
             misfire_grace_time=10
         )
 
-        # B Group: woori, bs, citi (3초 전, 20초씩 엇갈림)
+        # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
         scheduler.add_job(
             make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='17', timezone=KST),
+            CronTrigger(minute='*', second='13', timezone=KST),
             id='task_woori',
             max_instances=1,
             misfire_grace_time=30
         )
         scheduler.add_job(
             make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='37', timezone=KST),
+            CronTrigger(minute='*', second='33', timezone=KST),
             id='task_bs',
             max_instances=1,
             misfire_grace_time=30
         )
         scheduler.add_job(
             make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='*', second='57', timezone=KST),
+            CronTrigger(minute='*', second='53', timezone=KST),
             id='task_citi',
             max_instances=1,
             misfire_grace_time=30
@@ -396,7 +396,7 @@ def switch_jobs(mode: str):
         # C Group: Selenium (Queue 순차 처리, Broadcasting 독립)
         scheduler.add_job(
             make_selenium_job_wrapper('shinhan', shinhan.crawl_and_save_shinhan_bank_exchange_rates),
-            IntervalTrigger(seconds=33.3, timezone=KST),
+            IntervalTrigger(seconds=38.3, timezone=KST),
             id='task_shinhan',
             max_instances=1,
             misfire_grace_time=25
@@ -431,7 +431,7 @@ def switch_jobs(mode: str):
         # A Group: investing (10분마다)
         scheduler.add_job(
             make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(minute='5,15,25,35,45,55', second='0', timezone=KST),
+            CronTrigger(minute='7,17,27,37,47,57', second='0', timezone=KST),
             id='task_investing',
             max_instances=1,
             misfire_grace_time=300
@@ -440,7 +440,7 @@ def switch_jobs(mode: str):
         # B Group: kb, hana (10분마다)
         scheduler.add_job(
             make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(minute='3,13,23,33,43,53', second='0', timezone=KST),
+            CronTrigger(minute='5,15,25,35,45,55', second='0', timezone=KST),
             id='task_kb',
             max_instances=1,
             misfire_grace_time=300
@@ -456,21 +456,21 @@ def switch_jobs(mode: str):
         # B Group: woori, bs, citi (60분마다)
         scheduler.add_job(
             make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),
-            CronTrigger(minute='17', second='0', timezone=KST),
+            CronTrigger(minute='13', second='0', timezone=KST),
             id='task_woori',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
             make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
-            CronTrigger(minute='37', second='0', timezone=KST),
+            CronTrigger(minute='33', second='0', timezone=KST),
             id='task_bs',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
             make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='57', second='0', timezone=KST),
+            CronTrigger(minute='53', second='0', timezone=KST),
             id='task_citi',
             max_instances=1,
             misfire_grace_time=1800
@@ -479,21 +479,21 @@ def switch_jobs(mode: str):
         # C Group: Selenium (60분마다, 완전 분산)
         scheduler.add_job(
             make_selenium_job_wrapper('shinhan', shinhan.crawl_and_save_shinhan_bank_exchange_rates),
-            CronTrigger(minute='27', second='0', timezone=KST),
+            CronTrigger(minute='23', second='0', timezone=KST),
             id='task_shinhan',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
             make_selenium_job_wrapper('ibk', ibk.crawl_and_save_ibk_bank_exchange_rates),
-            CronTrigger(minute='47', second='0', timezone=KST),
+            CronTrigger(minute='43', second='0', timezone=KST),
             id='task_ibk',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
             make_selenium_job_wrapper('nh', nh.crawl_and_save_nh_bank_exchange_rates),
-            CronTrigger(minute='7', second='0', timezone=KST),
+            CronTrigger(minute='3', second='0', timezone=KST),
             id='task_nh',
             max_instances=1,
             misfire_grace_time=1800
@@ -606,7 +606,7 @@ def report_queue_status():
 
     try:
         size = selenium_queue.qsize()
-        max_size = 25  # [2025-11-10] 50 → 25
+        max_size = 25
         usage_percent = (size / max_size) * 100
 
         # 정상 상태: DEBUG 레벨
@@ -712,10 +712,10 @@ def start_scheduler():
         max_instances=1  # 동시 실행 방지
     )
 
-    # Queue 상태 모니터링: 10초마다 (포화 감지)
+    # Queue 상태 모니터링: 30초마다 (포화 감지)
     scheduler.add_job(
         report_queue_status,
-        IntervalTrigger(seconds=10, timezone=KST),
+        IntervalTrigger(seconds=30, timezone=KST),
         id="queue_status",
         coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
         max_instances=1  # 동시 실행 방지

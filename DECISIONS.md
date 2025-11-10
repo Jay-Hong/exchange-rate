@@ -884,46 +884,16 @@ if not success and not is_retry:
 **3-Tier cron 기반 스케줄링 아키텍처 채택**
 
 **Tier A (investing):** 최우선
-- IN: 10초마다 (Broadcasting 5초 전)
-- OUT: 10분마다 (05, 15, 25, 35, 45, 55분)
+- IN: 10초마다 (Broadcasting 3초 전)
+- OUT: 10분마다 (07, 17, 27, 37, 47, 57분)
 
 **Tier B (kb, hana, woori, bs, citi):** 중요
 - IN: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
 - OUT: 10-60분마다 (완전 분산)
 
 **Tier C (shinhan, ibk, nh, sc):** Selenium
-- IN: interval (33.3-150초, Broadcasting 독립)
+- IN: interval (38.3-150초, Broadcasting 독립)
 - OUT: 60분마다 (완전 분산)
-
-### 대안 검토
-
-#### 대안 1: interval + 시차 (Staggered Start)
-```python
-# OUT 모드 전환 시 초기 지연 적용
-scheduler.reschedule_job('kb', trigger='interval', seconds=200,
-                        next_run_time=now + timedelta(seconds=5))
-```
-
-**장점:** interval 유지, 코드 단순
-**단점:**
-- 서버 재시작 시 동시 실행 가능
-- OUT 모드 전환 시에만 분산 보장
-- 예측 불가 (매번 다른 시점 실행)
-
-#### 대안 2: cron 기반 (채택)
-```python
-# OUT 모드: 매시간 고정된 분에 실행
-scheduler.add_job(crawl_kb, CronTrigger(minute='3,13,23,33,43,53'))
-```
-
-**장점:**
-- 항상 분산 보장 (서버 재시작 무관)
-- 예측 가능 (매시간 같은 분)
-- 디버깅 쉬움
-
-**단점:**
-- 정확히 10배는 아님 (10초 → 10분, 60배)
-- IN/OUT 모드 코드 다름
 
 ### 근거
 
@@ -936,21 +906,21 @@ scheduler.add_job(crawl_kb, CronTrigger(minute='3,13,23,33,43,53'))
 
 **크롤러 실행 시점:**
 ```python
-# A Group: 5초 전
-investing: cron(second='5,15,25,35,45,55')
-# 목표: 05초 실행 → 07초 완료 → 10초 Broadcasting 반영
+# A Group: 3초 전
+investing: cron(second='7,17,27,37,47,57')
+# 목표: 07초 실행 → 09초 완료 → 10초 Broadcasting 반영
 
-# B Group: 7초 전 (10초 엇갈림)
-kb:   cron(second='3,23,43')
-hana: cron(second='13,33,53')
+# B Group: 5초 전 (10초 엇갈림)
+kb:   cron(second='5,25,45')
+hana: cron(second='15,35,55')
 
-# B Group: 3초 전 (20초씩 엇갈림)
-woori: cron(minute='*', second='17')
-bs:    cron(minute='*', second='37')
-citi:  cron(minute='*', second='57')
+# B Group: 7초 전 (20초씩 엇갈림)
+woori: cron(minute='*', second='13')
+bs:    cron(minute='*', second='33')
+citi:  cron(minute='*', second='53')
 
 # C Group: interval (Broadcasting 독립)
-shinhan: interval(33.3초)
+shinhan: interval(38.3초)
 ibk:     interval(55.5초)
 nh:      interval(90초)
 sc:      interval(150초)
@@ -959,11 +929,11 @@ sc:      interval(150초)
 **리소스 분산 효과:**
 ```
 타임라인 (1분 기준):
-03초: kb
-05초: investing
-13초: hana
-15초: investing
-17초: woori
+05초: kb
+07초: investing
+13초: woori
+15초: haba
+17초: investing
 ...
 ```
 → **최대 동시 실행: 1개**
@@ -973,42 +943,53 @@ sc:      interval(150초)
 **크롤러 실행 시점:**
 ```python
 # A Group: 10분마다
-investing: cron(minute='5,15,25,35,45,55')
+investing: cron(minute='7,17,27,37,47,57')
 
 # B Group: 10분마다
-kb:   cron(minute='3,13,23,33,43,53')
+kb:   cron(minute='5,15,25,35,45,55')
 hana: cron(minute='0,10,20,30,40,50')
 
 # B Group: 60분마다
-woori: cron(minute='17')
-bs:    cron(minute='37')
-citi:  cron(minute='57')
+woori: cron(minute='13')
+bs:    cron(minute='33')
+citi:  cron(minute='53')
 
 # C Group: 60분마다
-shinhan: cron(minute='27')
-ibk:     cron(minute='47')
-nh:      cron(minute='7')
+shinhan: cron(minute='23')
+ibk:     cron(minute='43')
+nh:      cron(minute='3')
 sc:      cron(minute='36')
 ```
 
 **1시간 타임라인:**
 ```
 00분: hana
-03분: kb
-05분: investing
-07분: nh
+03분: nh
+05분: kb
+07분: investing
 10분: hana
-13분: kb
-15분: investing
-17분: woori
-...
-27분: shinhan
+13분: woori
+15분: kb
+17분: investing
+20분: hana
+23분: shinhan
+25분: kb
+27분: investing
+30분: hana
+33분: bs
+35분: kb
 36분: sc
-37분: bs
-47분: ibk
-57분: citi
+37분: investing
+40분: hana
+43분: ibk
+45분: kb
+47분: investing
+50분: hana
+53분: citi
+55분: kb
+57분: investing
 ```
-→ **최대 동시 실행: 1개** (17분만 2개)
+→ **최대 동시 실행: 1개**
 
 #### 3. 성능 분석
 
@@ -1022,7 +1003,7 @@ sc:      cron(minute='36')
 ### 결과
 
 **장점:**
-- ✅ **OUT 모드 리소스 완전 분산**: 동시 실행 0개 (17분 제외)
+- ✅ **OUT 모드 리소스 완전 분산**: 동시 실행 0개
 - ✅ **IN 모드 Broadcasting 동기화**: X초 전 실행으로 실시간 반영
 - ✅ **예측 가능성**: 매시간 같은 분에 실행
 - ✅ **서버 재시작 안전**: 절대 시간 기반, 시차 설정 불필요
@@ -1080,11 +1061,11 @@ Output: 평균 처리 시간 20초 = 0.05 작업/초
 ```python
 # app/crawlers/constants.py
 SELENIUM_TIMEOUT_MAP = {
-    "hana": 30,    # 60 → 30초
-    "ibk": 45,     # 90 → 45초
-    "nh": 45,      # 90 → 45초 (66초 걸리면 타임아웃!)
-    "sc": 45,      # 90 → 45초
-    "shinhan": 60, # 120 → 60초
+    "hana": 30,    # 실시간성 우선
+    "shinhan": 45,
+    "nh": 45,
+    "ibk": 45,
+    "sc": 45,
 }
 ```
 

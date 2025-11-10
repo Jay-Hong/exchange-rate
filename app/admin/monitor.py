@@ -137,14 +137,6 @@ class SystemMonitor:
             self._check_thresholds(memory_stats, chrome_stats)
 
             # [2025-11-08 이전] DEBUG 레벨 로깅 (관리자 페이지 히스토리 미표시)
-            # logger.debug(
-            #     "📊 모니터링 통계 기록",
-            #     extra={
-            #         "memory_percent": memory_stats.get("percent"),
-            #         "cpu_percent": cpu_stats.get("percent"),
-            #         "chrome_count": chrome_stats.get("count"),
-            #     }
-            # )
             # [2025-11-08] INFO 레벨로 변경 (관리자 페이지 Chart.js 히스토리 활성화)
             logger.info(
                 "📊 모니터링 통계 기록",
