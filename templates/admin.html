@@ -460,6 +460,13 @@
             </div>
         </div>
 
+        <!-- 크롤러 통계 -->
+        <h2 class="section-title">📊 크롤러 통계 (실시간)</h2>
+        <div class="dashboard-grid" id="crawler-stats-grid">
+            <!-- 동적 생성 -->
+            <div class="loading">통계 로딩 중...</div>
+        </div>
+
         <!-- 크롤러 상태 -->
         <h2 class="section-title">🤖 크롤러 상태 (최근 1시간)</h2>
         <div class="crawler-badges" id="crawler-badges">
@@ -659,6 +666,9 @@
                 // Chrome 프로세스 모니터링 (비동기 호출)
                 loadChromeMonitoring();
 
+                // 크롤러 통계 로드 (비동기 호출)
+                loadCrawlerStats();
+
                 // 크롤러 뱃지 업데이트
                 updateCrawlerBadges();
 
@@ -695,6 +705,53 @@
                 console.error('Chrome 모니터링 로드 실패:', err);
                 document.getElementById('chrome-count').textContent = 'N/A';
                 document.getElementById('chrome-memory').textContent = '메모리: N/A';
+            }
+        }
+
+        // ========================================
+        // 크롤러 통계 로드
+        // ========================================
+        async function loadCrawlerStats() {
+            try {
+                const res = await fetch('/admin/api/crawler/stats');
+                const stats = await res.json();
+
+                const container = document.getElementById('crawler-stats-grid');
+
+                // 통계가 없으면 메시지 표시
+                if (Object.keys(stats).length === 0) {
+                    container.innerHTML = '<div class="loading">아직 크롤러가 실행되지 않았습니다.</div>';
+                    return;
+                }
+
+                // 은행 순서대로 정렬하여 카드 생성
+                const sortedBanks = BANK_ORDER.filter(bank => stats[bank]);
+
+                container.innerHTML = sortedBanks.map(bank => {
+                    const stat = stats[bank];
+                    const successRate = stat.success_rate || 0;
+                    const avgDuration = stat.avg_duration || 0;
+
+                    // 성공률에 따른 카드 색상
+                    let cardClass = 'card';
+                    if (successRate < 80) {
+                        cardClass += ' error';
+                    } else if (successRate < 95) {
+                        cardClass += ' warning';
+                    }
+
+                    return `
+                        <div class="${cardClass}">
+                            <div class="card-label">${BANK_NAMES[bank]}</div>
+                            <div class="card-value">${successRate}%</div>
+                            <div class="card-subvalue">평균: ${avgDuration}초 | 성공: ${stat.success_count}회</div>
+                        </div>
+                    `;
+                }).join('');
+
+            } catch (err) {
+                console.error('크롤러 통계 로드 실패:', err);
+                document.getElementById('crawler-stats-grid').innerHTML = '<div class="loading">통계 로드 실패</div>';
             }
         }
 
