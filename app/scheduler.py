@@ -357,14 +357,14 @@ def switch_jobs(mode: str):
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         scheduler.add_job(
             make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(second='5,25,45', timezone=KST),
+            CronTrigger(second='15,35,55', timezone=KST),
             id='task_kb',
             max_instances=1,
             misfire_grace_time=10
         )
         scheduler.add_job(
             make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(second='15,35,55', timezone=KST),
+            CronTrigger(second='5,25,45', timezone=KST),
             id='task_hana',
             max_instances=1,
             misfire_grace_time=10

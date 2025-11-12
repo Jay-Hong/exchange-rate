@@ -167,8 +167,8 @@ scheduler.add_job(
 - **특징**: 중요도 높음, 빈도 높음
 - **실행 방식**: Request 기반 (일부 하이브리드 폴백)
 - **IN 모드**: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
-  - kb: `cron(second='5,25,45')`
-  - hana: `cron(second='15,35,55')`
+  - kb: `cron(second='15,35,55')`
+  - hana: `cron(second='5,25,45')`
   - woori: `cron(minute='*', second='13')`
   - bs: `cron(minute='*', second='33')`
   - citi: `cron(minute='*', second='53')`
@@ -206,25 +206,25 @@ scheduler.add_job(
 
 ```
 00초: Broadcasting
-05초: kb
+05초: hana
 07초: investing
 10초: Broadcasting
 13초: woori
-15초: hana
+15초: kb
 17초: investing
 20초: Broadcasting
-25초: kb
+25초: hana
 27초: investing
 30초: Broadcasting
 33초: bs
-35초: hana
+35초: kb
 37초: investing
 40초: Broadcasting
-45초: kb
+45초: hana
 47초: investing
 50초: Broadcasting
 53초: citi
-55초: hana
+55초: kb
 57초: investing
 ```
 
