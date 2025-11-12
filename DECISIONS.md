@@ -1229,6 +1229,144 @@ SELENIUM_BASED_TASKS = [
 
 ---
 
+## ADR-010: WebSocket Broadcasting 스케줄링 방식
+
+**날짜:** 2025-11-12
+**상태:** 수락됨 ✅
+
+### 상황
+
+**배경:**
+- ADR-009에서 3-Tier 스케줄링 아키텍처 설계
+- 전제조건: "WebSocket Broadcasting이 매분 00, 10, 20, 30, 40, 50초에 정확히 실행"
+- 크롤러들은 Broadcasting 기준으로 X초 전에 실행 (A Group: 3초 전, B Group: 5-7초 전)
+
+**문제:**
+- 기존 Broadcasting 구현: `asyncio.sleep(10)` 무한 루프
+- 서버 시작 시점에 따라 부정확한 시간에 실행 (예: 03, 13, 23초 또는 05, 15, 25초)
+- **크롤러 동기화 불가능**: Broadcasting이 언제 실행될지 예측 불가능
+
+**예시:**
+```python
+# 기존 구현 (main.py)
+async def broadcast_rates():
+    while True:
+        await asyncio.sleep(10)  # 서버 시작 시점 기준 상대적 시간
+        # 브로드캐스트 로직
+```
+
+서버 시작: 14:25:03 → Broadcasting: 14:25:13, 14:25:23, 14:25:33, ...
+서버 시작: 14:25:07 → Broadcasting: 14:25:17, 14:25:27, 14:25:37, ...
+
+→ **ADR-009의 전제조건 미충족**
+
+### 결정
+
+**APScheduler cron job으로 Broadcasting 스케줄링**
+
+```python
+# scheduler.py
+from app.main import broadcast_rates_once
+
+scheduler.add_job(
+    broadcast_rates_once,  # async 함수 직접 등록
+    CronTrigger(second='0,10,20,30,40,50', timezone=KST),
+    id="websocket_broadcast",
+    max_instances=1,
+    misfire_grace_time=5
+)
+```
+
+```python
+# main.py
+async def broadcast_rates_once():
+    """환율 데이터 한 번 브로드캐스트 (APScheduler에서 매분 00, 10, 20, 30, 40, 50초에 호출)"""
+    if not manager.active_connections:
+        return
+
+    # 변경사항 체크 후 브로드캐스트
+    # ...
+```
+
+### 근거
+
+#### 1. APScheduler cron job (채택)
+
+**장점:**
+- ✅ **정확한 시간 보장**: cron 표현식으로 절대 시간 지정
+- ✅ **크롤러와 일관성**: 모든 스케줄링이 APScheduler로 통일
+- ✅ **ADR-009 전제조건 충족**: 크롤러 동기화 가능
+- ✅ **코드 단순성**: 크롤러와 동일한 패턴
+
+**단점:**
+- ⚠️ APScheduler 의존성 증가 (이미 사용 중이므로 영향 없음)
+
+#### 2. asyncio.sleep(10) 무한 루프 (기존)
+
+**장점:**
+- ✅ 구현 간단
+- ✅ 외부 의존성 없음
+
+**단점:**
+- ❌ **부정확한 시간**: 서버 시작 시점에 의존
+- ❌ **크롤러 동기화 불가**: 예측 불가능한 실행 시점
+- ❌ **ADR-009 위반**: 전제조건 미충족
+
+#### 3. 동적 sleep 계산
+
+다음 00, 10, 20, 30, 40, 50초까지 남은 시간을 계산하여 sleep:
+
+```python
+async def broadcast_rates():
+    while True:
+        now = datetime.now(KST)
+        target_seconds = [0, 10, 20, 30, 40, 50]
+        # 다음 target까지 sleep 시간 계산
+        sleep_duration = calculate_sleep(now, target_seconds)
+        await asyncio.sleep(sleep_duration)
+        # 브로드캐스트
+```
+
+**장점:**
+- ✅ 정확한 시간 (약간의 오차 가능)
+- ✅ 기존 asyncio task 구조 유지
+
+**단점:**
+- ❌ **복잡도 증가**: sleep 계산 로직 추가
+- ❌ **오차 누적 가능**: sleep 시간이 정확하지 않으면 오차 누적
+- ❌ **검증 어려움**: 계산 로직 테스트 필요
+- ❌ **크롤러와 패턴 불일치**: 크롤러는 cron, Broadcasting은 동적 계산
+
+### 결과
+
+**장점:**
+- ✅ **ADR-009 전제조건 충족**: 크롤러 동기화 가능
+- ✅ **정확한 시간**: 매분 00, 10, 20, 30, 40, 50초 정확히 실행
+- ✅ **코드 일관성**: 크롤러와 동일한 스케줄링 패턴
+- ✅ **유지보수성**: 모든 스케줄링 로직이 `scheduler.py`에 집중
+
+**단점:**
+- 없음 (이미 APScheduler 사용 중)
+
+**검증 결과 (2025-11-12):**
+```
+01:26:40 - Running job "broadcast_rates_once" ✅
+01:26:50 - Running job "broadcast_rates_once" ✅
+01:27:00 - Running job "broadcast_rates_once" ✅
+01:27:10 - Running job "broadcast_rates_once" ✅
+```
+
+**향후 재검토 시점:**
+- APScheduler를 다른 스케줄러로 교체 시
+- Broadcasting 주기 변경 시 (10초 → 5초 등)
+
+### 관련 결정
+
+- [ADR-009](#adr-009-3-tier-스케줄링-아키텍처-t3smallmedium-최적화): Broadcasting 동기화 전제조건
+- [ADR-001](#adr-001-websocket-구현---python-fastapi-vs-nodejs): WebSocket 구현 방식
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -1239,3 +1377,4 @@ SELENIUM_BASED_TASKS = [
 - 2025-11-08: ADR-007 작성 (Priority Queue + Timeout 전략)
 - 2025-11-10: ADR-008 작성 (Queue 압력 완화 전략 - 실시간성 vs 완전성)
 - 2025-11-10: ADR-009 작성 (3-Tier 스케줄링 아키텍처 - t3.small/medium 최적화)
+- 2025-11-12: ADR-010 작성 (WebSocket Broadcasting 스케줄링 방식 - asyncio.sleep vs APScheduler cron)

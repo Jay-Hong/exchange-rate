@@ -101,11 +101,10 @@ async def lifespan(app: FastAPI):
     # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
     scheduler.init_selenium_queue()
 
-    # 스케줄러 시작 (Queue를 사용하는 작업 포함)
+    # 스케줄러 시작 (Queue를 사용하는 작업 + WebSocket Broadcasting 포함)
     scheduler.start_scheduler()
 
-    # WebSocket 브로드캐스트 백그라운드 태스크 시작
-    asyncio.create_task(broadcast_rates())
+    # ✅ Broadcasting은 APScheduler에서 자동 실행 (매분 00, 10, 20, 30, 40, 50초)
 
     yield
 
@@ -118,71 +117,80 @@ async def lifespan(app: FastAPI):
     # 스케줄러 종료
     scheduler.scheduler.shutdown()
 
-async def broadcast_rates():
-    """10초마다 변경사항 체크 후 모든 클라이언트에게 환율 데이터 전송"""
+async def broadcast_rates_once():
+    """
+    환율 데이터 한 번 브로드캐스트 (APScheduler에서 매분 00, 10, 20, 30, 40, 50초에 호출)
+
+    Notes:
+        - 변경사항이 있을 때만 실제 전송
+        - 연결된 클라이언트가 없으면 스킵
+        - 통계 자동 수집 (성공/실패/스킵)
+    """
     global last_broadcast_time
 
-    while True:
-        await asyncio.sleep(10)  # 10초 대기
+    if not manager.active_connections:
+        logger.debug("⏸️ WebSocket 연결 없음 - 브로드캐스트 스킵")
+        return
 
-        if manager.active_connections:
-            db = SessionLocal()
-            try:
-                # 변경사항 체크 (초경량 쿼리)
-                has_changes = crud.has_changes_since(db, last_broadcast_time)
+    db = SessionLocal()
+    try:
+        # 변경사항 체크 (초경량 쿼리)
+        has_changes = crud.has_changes_since(db, last_broadcast_time)
 
-                if has_changes or last_broadcast_time is None:
-                    # 변경이 있을 때만 브로드캐스트
-                    all_rates = crud.get_all_rates_flat(db=db)
+        if has_changes or last_broadcast_time is None:
+            # 변경이 있을 때만 브로드캐스트
+            all_rates = crud.get_all_rates_flat(db=db)
 
-                    # 메타데이터 생성
-                    currencies = list(set(rate["currency"] for rate in all_rates))
-                    banks = list(set(rate["bank"] for rate in all_rates))
+            # 메타데이터 생성
+            currencies = list(set(rate["currency"] for rate in all_rates))
+            banks = list(set(rate["bank"] for rate in all_rates))
 
-                    current_time = datetime.now().astimezone().isoformat()
+            current_time = datetime.now().astimezone().isoformat()
 
-                    # 통일된 메시지 형식
-                    message = {
-                        "type": "rates",
-                        "data": {
-                            "rates": all_rates,
-                            "metadata": {
-                                "updated_at": current_time,
-                                "currencies": sorted(currencies),
-                                "banks": sorted(banks),
-                                "total_count": len(all_rates)
-                            }
-                        }
+            # 통일된 메시지 형식
+            message = {
+                "type": "rates",
+                "data": {
+                    "rates": all_rates,
+                    "metadata": {
+                        "updated_at": current_time,
+                        "currencies": sorted(currencies),
+                        "banks": sorted(banks),
+                        "total_count": len(all_rates)
                     }
+                }
+            }
 
-                    # 데이터 크기 계산 (통계용)
-                    data_size_bytes = len(json.dumps(message, ensure_ascii=False).encode('utf-8'))
+            # 데이터 크기 계산 (통계용)
+            data_size_bytes = len(json.dumps(message, ensure_ascii=False).encode('utf-8'))
 
-                    # 브로드캐스트
-                    await manager.broadcast(message)
+            # 브로드캐스트
+            await manager.broadcast(message)
 
-                    # 마지막 브로드캐스트 시간 업데이트
-                    KST = timezone('Asia/Seoul')
-                    last_broadcast_time = datetime.now(KST)
+            # 마지막 브로드캐스트 시간 업데이트
+            KST = timezone('Asia/Seoul')
+            last_broadcast_time = datetime.now(KST)
 
-                    # 통계 기록 (성공)
-                    broadcast_stats.record_success(
-                        data_size_bytes=data_size_bytes,
-                        rate_count=len(all_rates)
-                    )
+            # 통계 기록 (성공)
+            broadcast_stats.record_success(
+                data_size_bytes=data_size_bytes,
+                rate_count=len(all_rates)
+            )
 
-                    logger.info("📡 환율 데이터 브로드캐스트 완료", extra={"rate_count": len(all_rates), "connections": len(manager.active_connections)})
-                else:
-                    # 통계 기록 (스킵)
-                    broadcast_stats.record_skip(reason="no_changes")
-                    logger.info("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
+            logger.info("📡 환율 데이터 브로드캐스트 완료", extra={"rate_count": len(all_rates), "connections": len(manager.active_connections)})
+        else:
+            # 통계 기록 (스킵)
+            broadcast_stats.record_skip(reason="no_changes")
+            logger.debug("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
 
-            except Exception as e:
-                # 통계 기록 (실패)
-                broadcast_stats.record_failure(error_message=str(e))
-                logger.error("❌ 브로드캐스트 오류", exc_info=True, extra={"connections": len(manager.active_connections)})
-            finally:
-                db.close()
+    except Exception as e:
+        # 통계 기록 (실패)
+        broadcast_stats.record_failure(error_message=str(e))
+        logger.error("❌ 브로드캐스트 오류", exc_info=True, extra={"connections": len(manager.active_connections)})
+    finally:
+        db.close()
+
+
 
 app = FastAPI(lifespan=lifespan)
 

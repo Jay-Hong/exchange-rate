@@ -78,7 +78,7 @@
 
 ### 실시간 통신
 
-- WebSocket (10초 주기 브로드캐스트)
+- WebSocket (매분 00, 10, 20, 30, 40, 50초 정확한 시간 브로드캐스트)
 - Ping/Pong 하트비트 (30초)
 
 ## 데이터베이스 스키마
@@ -112,79 +112,133 @@ timestamp  DATETIME (KST)
 
 ## 스케줄링 시스템
 
-> 💡 **최근 개선:** Queue 압력 완화 + 실시간성 강화 (2025-11-10)
-> 📖 **상세 기록:** [ADR-008](DECISIONS.md#adr-008-queue-압력-완화-전략-실시간성-vs-완전성)
-> - 타임아웃 50% 감축 (실시간성 우선)
-> - Queue 크기 최적화 (50 → 25)
-> - 80% 압력 완화 정책 (20/25 초과 시 작업 거부)
-> - Worker 헬스체크 시스템 (180초 stuck 자동 재시작)
-> - 크롤러 스케줄 재조정 (느린 크롤러 빈도 감소)
+> 💡 **최신 아키텍처:** 3-Tier 스케줄링 + Broadcasting 동기화 (2025-11-12)
+> 📖 **상세 기록:**
+> - [ADR-010](DECISIONS.md#adr-010-websocket-broadcasting-스케줄링-방식) - Broadcasting APScheduler cron job 전환
+> - [ADR-009](DECISIONS.md#adr-009-3-tier-스케줄링-아키텍처-t3smallmedium-최적화) - 3-Tier 크롤러 스케줄링
+> - [ADR-008](DECISIONS.md#adr-008-queue-압력-완화-전략-실시간성-vs-완전성) - Queue 압력 완화 + 실시간성 강화
 
 > 🔖 **이전 개선:**
-> - Queue Blocking 방지 (2025-11-09) - [MAINTENANCE_2025-11-09.md](MAINTENANCE_2025-11-09.md)
-> - Priority Queue + Timeout (2025-11-08) - [MAINTENANCE_2025-11-08.md](MAINTENANCE_2025-11-08.md), [ADR-007](DECISIONS.md#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout)
-> - AsyncIO Queue 순차 실행 (2025-11-06) - [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md), [ADR-006](DECISIONS.md#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue)
+> - Priority Queue + Timeout (2025-11-08) - [ADR-007](DECISIONS.md#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout)
+> - AsyncIO Queue 순차 실행 (2025-11-06) - [ADR-006](DECISIONS.md#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue)
 
 ### 영업시간 자동 감지
 
 - **IN 모드**: 월요일 04:00 ~ 토요일 07:59
-  - 크롤링 주기: 4.9-33.3초 (소스별 상이)
+  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
+  - 크롤러: cron 절대 시간 동기화 (Broadcasting 기준)
 - **OUT 모드**: 그 외 시간
-  - 크롤링 주기: 49-333초 (IN 모드의 10배)
+  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
+  - 크롤러: cron 시간 단위 (완전 분산, 동시 실행 0개)
 
-### 크롤러 아키텍처 (2025-11-10 최종)
+### 스케줄링 아키텍처 (2025-11-12 최종)
 
 **스케줄러:** APScheduler (AsyncIOScheduler)
 
-**실행 방식:**
-- **Group A (Request 기반)**: 동시 실행 (경량, 메모리 부담 적음)
-  - investing, kb, woori, bs, citi
-  - APScheduler 직접 실행
-- **Group B (Selenium 기반)**: AsyncIO PriorityQueue 순차 실행 (메모리 집약)
-  - hana, shinhan, ibk, nh, sc
-  - **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → ibk → nh → sc → shinhan)
-  - **개별 타임아웃**: 크롤러별 맞춤형 타임아웃 (30-60초, 실시간성 우선)
-  - **자동 재시도**: 실패 시 우선순위 +1000으로 재실행
-  - **Non-blocking Queue**: put_nowait()으로 APScheduler 멈춤 방지
-  - **Queue 크기**: 25 (메모리 최적화)
-  - **압력 완화**: 80% (20/25) 초과 시 새 작업 거부
-  - **헬스체크**: 60초마다 Worker 상태 점검, 180초 stuck 시 자동 재시작
+#### 1. WebSocket Broadcasting
 
-### 크롤러 실행 주기 (IN 모드 기준)
+**실행 시점:** 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
 
 ```python
-# Group A: Request 기반 (동시 실행)
-REQUEST_BASED_TASKS = [
-    ("investing", 4.9초),
-    ("kb", 7.9초),
-    ("woori", 23.3초),
-    ("bs", 27.7초),
-    ("citi", 28.5초),
-]
-
-# Group B: Selenium 기반 (Queue 순차 처리)
-# [2025-11-10] Queue 압력 완화를 위한 주기 재조정
-SELENIUM_BASED_TASKS = [
-    ("hana", 20초),      # 빠른 크롤러: 높은 빈도
-    ("shinhan", 60초),   # 느린 크롤러: 중간 빈도
-    ("ibk", 60초),       # 느린 크롤러: 중간 빈도
-    ("nh", 90초),        # 가장 느린 크롤러: 낮은 빈도
-    ("sc", 120초),       # 가장 불안정: 최소 빈도
-]
-
-# 크롤러별 타임아웃 (실시간성 강화)
-SELENIUM_TIMEOUT_MAP = {
-    "hana": 30초,
-    "shinhan": 45초,
-    "nh": 45초,
-    "ibk": 45초,
-    "sc": 45초,
-}
+# scheduler.py
+scheduler.add_job(
+    broadcast_rates_once,  # async 함수 직접 등록
+    CronTrigger(second='0,10,20,30,40,50', timezone=KST),
+    id="websocket_broadcast"
+)
 ```
 
 **설계 원칙:**
+- APScheduler cron job으로 정확한 시간 보장
+- 크롤러 동기화의 기준 시간
+- 변경사항 있을 때만 실제 전송
+
+#### 2. 3-Tier 크롤러 아키텍처
+
+**Tier A (investing):** 기준 환율, 최우선
+- **특징**: 가장 중요한 데이터, 빠른 응답
+- **실행 방식**: Request 기반 (requests 라이브러리)
+- **IN 모드**: 10초마다 (Broadcasting 3초 전)
+  - `cron(second='7,17,27,37,47,57')`
+- **OUT 모드**: 10분마다
+  - `cron(minute='7,17,27,37,47,57', second='0')`
+
+**Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
+- **특징**: 중요도 높음, 빈도 높음
+- **실행 방식**: Request 기반 (일부 하이브리드 폴백)
+- **IN 모드**: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
+  - kb: `cron(second='5,25,45')`
+  - hana: `cron(second='15,35,55')`
+  - woori: `cron(minute='*', second='13')`
+  - bs: `cron(minute='*', second='33')`
+  - citi: `cron(minute='*', second='53')`
+- **OUT 모드**: 10-60분마다 (완전 분산)
+  - kb: `cron(minute='5,15,25,35,45,55')`
+  - hana: `cron(minute='0,10,20,30,40,50')`
+  - woori: `cron(minute='13')`
+  - bs: `cron(minute='33')`
+  - citi: `cron(minute='53')`
+
+**Tier C (shinhan, ibk, nh, sc):** Selenium, 순차 처리
+- **특징**: 메모리 집약적, 느림
+- **실행 방식**: AsyncIO PriorityQueue 순차 실행
+- **IN 모드**: interval (Broadcasting 독립)
+  - shinhan: `interval(38.3초)`
+  - ibk: `interval(55.5초)`
+  - nh: `interval(90초)`
+  - sc: `interval(150초)`
+- **OUT 모드**: 60분마다 (완전 분산)
+  - shinhan: `cron(minute='23')`
+  - ibk: `cron(minute='43')`
+  - nh: `cron(minute='3')`
+  - sc: `cron(minute='36')`
+
+**Selenium Queue 관리:**
+- **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → ibk → nh → sc → shinhan)
+- **개별 타임아웃**: 크롤러별 맞춤형 (30-45초, 실시간성 우선)
+- **자동 재시도**: 실패 시 우선순위 +1000으로 재실행
+- **Non-blocking Queue**: put_nowait()으로 APScheduler 멈춤 방지
+- **Queue 크기**: 25 (메모리 최적화)
+- **압력 완화**: 80% (20/25) 초과 시 새 작업 거부
+- **헬스체크**: 60초마다 Worker 상태 점검, 90초 stuck 시 자동 재시작
+
+### IN 모드 타임라인 (1분 기준)
+
+```
+00초: Broadcasting
+05초: kb
+07초: investing
+10초: Broadcasting
+13초: woori
+15초: hana
+17초: investing
+20초: Broadcasting
+25초: kb
+27초: investing
+30초: Broadcasting
+33초: bs
+35초: hana
+37초: investing
+40초: Broadcasting
+45초: kb
+47초: investing
+50초: Broadcasting
+53초: citi
+55초: hana
+57초: investing
+```
+
+**특징:**
+- Broadcasting 직전(3-7초)에 크롤러 실행 → 최신 데이터 반영
+- 최대 동시 실행: 1-2개 (Request 기반 크롤러만)
+- Selenium 크롤러는 Queue 순차 처리
+
+### 설계 원칙
+
+- **Broadcasting 동기화**: 크롤러가 Broadcasting X초 전에 실행 → 실시간 반영
 - **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
-- **압력 완화**: Queue 80% 초과 시 새 작업 거부 → 시스템 안정성 유지
+- **리소스 분산**: OUT 모드 동시 실행 0개 → CPU 스파이크 제거
+- **예측 가능성**: cron 절대 시간 → 매시간 같은 패턴
 - **자동 복구**: Worker stuck 시 자동 재시작, 실패 작업 자동 재시도
 
 ## 크롤러 구조
@@ -198,7 +252,7 @@ SELENIUM_TIMEOUT_MAP = {
 
 ### WebSocket
 
-- `WS /ws` - 실시간 환율 스트리밍 (10초 주기)
+- `WS /ws` - 실시간 환율 스트리밍 (매분 00, 10, 20, 30, 40, 50초)
 
 ### REST API (폴백용)
 
@@ -391,7 +445,7 @@ exchange-rate/
 
 **중복 방지 INSERT**: 마지막 레코드와 비교, 변경 시에만 저장 (`crud.py`)
 
-**WebSocket 브로드캐스트**: 10초 주기, 통계 수집, 전체 환율 전송 (`main.py`)
+**WebSocket 브로드캐스트**: 매분 00, 10, 20, 30, 40, 50초 정확한 시간, APScheduler cron job, 변경사항 있을 때만 전송 (`main.py`, `scheduler.py`)
 
 **브로드캐스트 통계**: 성공률, 평균 주기, 건강 상태 추적 (`admin/stats.py`)
 

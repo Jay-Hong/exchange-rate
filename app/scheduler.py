@@ -700,6 +700,26 @@ async def check_worker_health():
 
 
 def start_scheduler():
+    # ═════════════════════════════════════════════════════════════
+    # WebSocket Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
+    # ═════════════════════════════════════════════════════════════
+    # [2025-11-12] ADR-009 전제조건 구현: 크롤러 동기화 기준 시간
+    # - IN 모드 크롤러들은 Broadcasting 기준으로 스케줄링됨
+    # - A Group: 3초 전 (07,17,27,37,47,57초)
+    # - B Group: 5초 또는 7초 전
+    # - C Group: Broadcasting 독립 (interval)
+    # ─────────────────────────────────────────────────────────────
+    # Note: AsyncIOScheduler는 async 함수를 직접 등록 가능
+    from app.main import broadcast_rates_once  # 순환 import 방지 (함수 내부 import)
+
+    scheduler.add_job(
+        broadcast_rates_once,  # async 함수 직접 등록
+        CronTrigger(second='0,10,20,30,40,50', timezone=KST),
+        id="websocket_broadcast",
+        max_instances=1,
+        misfire_grace_time=5
+    )
+
     # 제어 작업: 1분마다 모드 확인
     scheduler.add_job(control_job, IntervalTrigger(minutes=1, timezone=KST), id="control_job")
 
