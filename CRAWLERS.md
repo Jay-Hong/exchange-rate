@@ -1,7 +1,8 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2025-10-31
+> 📅 **마지막 업데이트**: 2025-11-14
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
+> 🆕 **최근 변경**: Hana/Woori Selenium 폴백 subprocess 격리 ([ADR-012](DECISIONS.md#adr-012-selenium-폴백-subprocess-격리-chrome-프로세스-좀비화-방지))
 
 ## 목차
 - [개요](#개요)
@@ -45,30 +46,32 @@
 
 ### 🔧 Group B: 기본 Selenium (동적 컨텐츠)
 
-| 은행 | 파일 | 특징 | 특수 로직 |
+| 은행 | 파일 | 특징 | 실행 방식 |
 |------|------|------|-----------|
-| **신한** | `app/crawlers/shinhan.py` | Selenium 필수 | 없음 (표준 Selenium) |
-| **하나** | `app/crawlers/hana.py` | iframe 전환 필수 | iframe 접근 (`driver.switch_to.frame()`) |
+| **신한** | `app/crawlers/shinhan.py` | Selenium 필수 | AsyncIO Queue + subprocess |
+| **하나** | `app/crawlers/hana.py` | iframe 전환 필수 | Request → Selenium subprocess 폴백 |
 
 **공통점**:
 - JavaScript 렌더링 필요
 - `WebDriverWait` + `EC.element_to_be_clickable()` 사용
+- **subprocess 격리**: 모든 Selenium 실행이 subprocess로 격리 (Chrome 좀비화 방지)
 
 ---
 
 ### ⚙️ Group C: 복잡한 특수 로직
 
-| 은행 | 파일 | 난이도 | 특수 로직 |
+| 은행 | 파일 | 난이도 | 실행 방식 |
 |------|------|--------|-----------|
-| **NH (농협)** | `app/crawlers/nh.py` | ⭐⭐ | 메인 페이지 클릭 → 환율 페이지 이동 |
-| **IBK (기업)** | `app/crawlers/ibk.py` | ⭐⭐⭐ | requests → Selenium 전환 + 날짜 input 입력 |
-| **Woori (우리)** | `app/crawlers/woori.py` | ⭐⭐⭐⭐ | AJAX 감지 (테이블 행 개수) + 년/월/일 select 박스 |
-| **SC (제일)** | `app/crawlers/sc.py` | ⭐⭐⭐⭐ | AJAX 감지 (#TMP_RATE 개수) + Alert 처리 |
+| **NH (농협)** | `app/crawlers/nh.py` | ⭐⭐ | AsyncIO Queue + subprocess |
+| **IBK (기업)** | `app/crawlers/ibk.py` | ⭐⭐⭐ | Request → Selenium subprocess 폴백 (3회 재시도) |
+| **Woori (우리)** | `app/crawlers/woori.py` | ⭐⭐⭐⭐ | Request → Selenium subprocess 폴백 (날짜 변경) |
+| **SC (제일)** | `app/crawlers/sc.py` | ⭐⭐⭐⭐ | AsyncIO Queue + subprocess |
 
 **공통점**:
-- 영업시간 외 날짜 변경 필요
+- 영업시간 외 날짜 변경 필요 (IBK, Woori, SC)
 - AJAX 응답 감지 (페이지 갱신 대기)
 - MAX_DAYS_LOOKBACK (최대 10일) 과거 조회 (constants.py 중앙 관리)
+- **subprocess 격리**: 모든 Selenium 실행이 subprocess로 격리 (Chrome 좀비화 방지)
 
 ---
 
@@ -113,20 +116,31 @@
 
 **핵심 로직:**
 - JavaScript 렌더링 필요 → Selenium 필수
+- **AsyncIO Queue + subprocess**: 순차 실행 보장, Chrome 좀비화 방지
 - 표준 Selenium 패턴 (특수 로직 없음)
 
 **주의사항:**
 - ChromeDriver 버전 호환성 확인 (분기 1회)
+- subprocess로 격리 실행 (45초 타임아웃)
+
+**상세 코드:** `app/crawlers/shinhan.py`
+**실행 방식:** `runner.py` 통해 subprocess 생성 → scheduler.py Queue에서 순차 처리
 
 ---
 
 #### 하나은행 (`app/crawlers/hana.py`)
 
 **핵심 로직:**
-- iframe 내부 데이터 → `driver.switch_to.frame()` 필수
+- **3단계 폴백**: requests → **Selenium subprocess** → MIBANK
+- **Selenium 격리**: subprocess로 실행하여 Chrome 프로세스 좀비화 방지
+- **iframe 전환**: `driver.switch_to.frame()` 필수 (Selenium 폴백 시)
 
 **주의사항:**
 - iframe 전환 없으면 Selector 찾기 실패
+- Selenium 폴백은 subprocess로 격리 실행 (45초 타임아웃)
+
+**상세 코드:** `app/crawlers/hana.py:54-132` (subprocess fallback 포함)
+**최근 리팩토링:** 2025-11-14 (Selenium 폴백 subprocess 격리)
 
 ---
 
@@ -136,9 +150,14 @@
 
 **핵심 로직:**
 - 메인 페이지 접속 → 링크 클릭 → 환율 페이지 이동
+- **AsyncIO Queue + subprocess**: 순차 실행 보장, Chrome 좀비화 방지
 
 **주의사항:**
 - 메인 페이지 링크 Selector 변경 감지 (월 1회)
+- subprocess로 격리 실행 (45초 타임아웃)
+
+**상세 코드:** `app/crawlers/nh.py`
+**실행 방식:** `runner.py` 통해 subprocess 생성 → scheduler.py Queue에서 순차 처리
 
 ---
 
@@ -165,7 +184,8 @@
 #### Woori 우리은행 (`app/crawlers/woori.py`) ⭐⭐⭐⭐
 
 **핵심 로직:**
-- **3단계 폴백**: requests → Selenium (날짜 변경) → MIBANK (조건부)
+- **3단계 폴백**: requests → **Selenium subprocess** (날짜 변경) → MIBANK (조건부)
+- **Selenium 격리**: subprocess로 실행하여 Chrome 프로세스 좀비화 방지
 - **AJAX 감지**: 테이블 행 개수로 페이지 갱신 확인
 - **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (10일) 순회 (SC 방식 적용)
 - **날짜 선택**: 년/월/일 select 박스 각각 선택
@@ -177,15 +197,19 @@
 - 날짜 변경 실패 시 continue로 다음 날짜 시도 (주말/공휴일 대응)
 - select value 형식 변경 주의 ("2025", "01", "01")
 - MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
+- Selenium 폴백은 subprocess로 격리 실행 (45초 타임아웃)
 
-**상세 코드:** `app/crawlers/woori.py:203-271` (crawl_woori_past_date_rates 함수)
-**최근 리팩토링:** 2025-10-26 (SC 방식 적용, 날짜 변경 실패 처리 개선, MIBANK 조건부 실행 추가)
+**상세 코드:** `app/crawlers/woori.py:59-148` (subprocess fallback 포함), `woori.py:212-282` (crawl_woori_past_date_rates 함수)
+**최근 리팩토링:**
+- 2025-10-26: SC 방식 적용, 날짜 변경 실패 처리 개선, MIBANK 조건부 실행 추가
+- 2025-11-14: Selenium 폴백 subprocess 격리 ([ADR-012](DECISIONS.md#adr-012-selenium-폴백-subprocess-격리-chrome-프로세스-좀비화-방지))
 
 ---
 
 #### SC 제일은행 (`app/crawlers/sc.py`) ⭐⭐⭐⭐
 
 **핵심 로직:**
+- **AsyncIO Queue + subprocess**: 순차 실행 보장, Chrome 좀비화 방지
 - **3단계 폴백**: SC_BANK_URL (Selenium) → SECOND_SC_BANK_URL (날짜 변경) → MIBANK (조건부)
 - **AJAX 감지**: #TMP_RATE 개수 변화로 페이지 갱신 확인
 - **Alert 처리**: 조회 버튼 클릭 직후 1회 (자정/주말 "0회차" 메시지)
@@ -197,8 +221,10 @@
 - #TMP_RATE 개수 1개 = 데이터 없음, 2개 이상 = 정상 데이터
 - 날짜 변경 후 AJAX 대기 없으면 이전 데이터 오독
 - MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
+- subprocess로 격리 실행 (45초 타임아웃)
 
 **상세 코드:** `app/crawlers/sc.py:209-292` (crawl_past_date_rates 함수)
+**실행 방식:** `runner.py` 통해 subprocess 생성 → scheduler.py Queue에서 순차 처리
 **최근 리팩토링:** 2025-10-26 (Alert 처리 단일화, MIBANK 조건부 실행 추가)
 
 ---

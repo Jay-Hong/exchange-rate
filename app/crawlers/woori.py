@@ -3,6 +3,7 @@
 # 표준 라이브러리
 import datetime
 import logging
+import sys
 import time
 
 # 서드파티 라이브러리
@@ -56,15 +57,18 @@ MIBANK_SELECTORS = {
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_woori_bank_exchange_rates():
-    """우리은행 환율 크롤링"""
+    """우리은행 환율 크롤링 (Request → Selenium subprocess 폴백)"""
     db = SessionLocal()
     try:
+        # 1차 시도: Request 기반 (빠름)
         crawl_and_save_routine(WOORI_BANK_URL, WOORI_BANK_SELECTORS, db)
     except Exception as e:
         logger.exception("WOORI_BANK_URL 크롤링 실패", extra={"url": WOORI_BANK_URL})
         try:
-            logger.info("SECOND_WOORI_BANK_URL 시도")
-            crawl_and_save_woori_routine_selenium(SECOND_WOORI_BANK_URL, SECOND_WOORI_BANK_SELECTORS, db)
+            # 2차 시도: Selenium → subprocess로 격리 실행 (타임아웃 보장)
+            logger.info("SECOND_WOORI_BANK_URL 시도 (Selenium subprocess)")
+            _run_selenium_subprocess_fallback('woori_selenium', timeout=45)
+            logger.info("✅ Selenium subprocess 성공")
         except Exception as e:
             logger.exception("SECOND_WOORI_BANK_URL 크롤링 실패", extra={"url": SECOND_WOORI_BANK_URL})
 
@@ -86,6 +90,60 @@ def crawl_and_save_woori_bank_exchange_rates():
                     }
                 )
                 # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 WOORI 환율 표시
+    finally:
+        db.close()
+
+
+def _run_selenium_subprocess_fallback(subprocess_name: str, timeout: int):
+    """
+    Selenium 폴백을 subprocess로 실행 (동기 함수)
+
+    Args:
+        subprocess_name: runner.py의 CRAWLER_MAP 키 (예: 'woori_selenium')
+        timeout: 타임아웃 (초)
+
+    Raises:
+        RuntimeError: subprocess 실패 시
+    """
+    import subprocess
+
+    try:
+        # subprocess 실행 (타임아웃 제어)
+        result = subprocess.run(
+            [sys.executable, "-m", "app.crawlers.runner", subprocess_name],
+            capture_output=True,
+            timeout=timeout,
+            text=True
+        )
+
+        # Exit code 확인
+        if result.returncode == 0:
+            logger.debug(f"✅ Selenium subprocess 성공: {subprocess_name}")
+        else:
+            stderr = result.stderr[:500] if result.stderr else "No error output"
+            logger.error(f"❌ Selenium subprocess 실패 (exit code: {result.returncode}): {stderr}")
+            raise RuntimeError(f"Selenium subprocess failed with exit code {result.returncode}")
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"⏱️ Selenium subprocess 타임아웃 ({timeout}초): {subprocess_name}")
+        raise RuntimeError(f"Selenium subprocess timeout after {timeout}s")
+    except Exception as e:
+        logger.exception(f"❌ Selenium subprocess 실행 오류: {subprocess_name}")
+        raise
+
+
+def crawl_and_save_woori_routine_selenium_entrypoint():
+    """
+    Selenium 폴백 엔트리포인트 (subprocess에서 호출)
+
+    Notes:
+        - runner.py에서 호출됨
+        - DB 세션 자체 생성 및 관리
+        - 독립 프로세스이므로 타임아웃 시 Chrome 포함 전체 종료
+    """
+    db = SessionLocal()
+    try:
+        return crawl_and_save_woori_routine_selenium(SECOND_WOORI_BANK_URL, SECOND_WOORI_BANK_SELECTORS, db)
     finally:
         db.close()    
 

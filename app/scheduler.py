@@ -3,6 +3,7 @@
 # 표준 라이브러리
 import asyncio
 import logging
+import sys
 import time
 from datetime import datetime
 from typing import Callable
@@ -17,13 +18,10 @@ from pytz import timezone
 from app.crawlers import investing
 from app.crawlers import hana
 from app.crawlers import kb
-from app.crawlers import shinhan
 from app.crawlers import woori
-from app.crawlers import ibk
-from app.crawlers import nh
-from app.crawlers import sc
 from app.crawlers import bs
 from app.crawlers import citi
+# Selenium 크롤러(shinhan, ibk, nh, sc)는 subprocess로 실행되므로 import 불필요
 from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
 from app import crud
 from app.database import SessionLocal
@@ -126,47 +124,84 @@ def make_request_crawler_wrapper(bank_name: str, job_func: Callable):
 # ═════════════════════════════════════════════════════════════
 # 타임아웃 래퍼 (느린 크롤러 격리 + 통계 수집)
 # ═════════════════════════════════════════════════════════════
-async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
+async def execute_with_timeout(bank_name: str) -> bool:
     """
-    타임아웃 제어 래퍼 함수 (통계 수집 포함)
+    Subprocess 기반 타임아웃 제어 래퍼 함수
 
     Args:
-        job_func: 크롤러 함수
         bank_name: 은행 이름
 
     Returns:
         bool: 성공 시 True, 실패/타임아웃 시 False
+
+    Notes:
+        - asyncio.create_subprocess_exec()로 크롤러를 독립 프로세스에서 실행
+        - 타임아웃 시 proc.kill()로 Chrome 포함 전체 프로세스 강제 종료
+        - driver.quit() 실행 여부와 무관하게 프로세스 정리 보장
+        - event loop blocking 없음 (완전 격리)
     """
     timeout = SELENIUM_TIMEOUT_MAP.get(bank_name, 45)
     start_time = time.time()
 
     try:
-        logger.info(f"⚡ [{bank_name}] Selenium 크롤링 시작 (타임아웃: {timeout}초)")
+        logger.info(f"⚡ [{bank_name}] subprocess 크롤링 시작 (타임아웃: {timeout}초)")
 
-        # asyncio.wait_for로 타임아웃 제어
-        await asyncio.wait_for(
-            asyncio.to_thread(job_func),
-            timeout=timeout
+        # subprocess 생성 (app.crawlers.runner 실행)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "app.crawlers.runner", bank_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
 
+        # 타임아웃 제어
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+
         elapsed = time.time() - start_time
-        crawler_stats.record_success(bank_name, elapsed)
-        logger.info(f"✅ [{bank_name}] 완료 ({elapsed:.2f}초)")
-        return True
+
+        # exit code 확인
+        if proc.returncode == 0:
+            crawler_stats.record_success(bank_name, elapsed)
+            logger.info(f"✅ [{bank_name}] subprocess 완료 ({elapsed:.2f}초)")
+            return True
+        else:
+            crawler_stats.record_failure(bank_name)
+            # stderr 캡처 (디버깅용)
+            stderr = await proc.stderr.read()
+            logger.error(
+                f"❌ [{bank_name}] subprocess 실패 (exit code: {proc.returncode})",
+                extra={"bank": bank_name, "exit_code": proc.returncode, "stderr": stderr.decode()[:500]}
+            )
+            return False
 
     except asyncio.TimeoutError:
         elapsed = time.time() - start_time
         crawler_stats.record_failure(bank_name)
+
+        # 프로세스 강제 종료 (Chrome 포함)
         logger.warning(
-            f"⏱️ [{bank_name}] 타임아웃 ({timeout}초 초과) - 다음 작업으로 진행",
+            f"⏱️ [{bank_name}] subprocess 타임아웃 ({timeout}초 초과) - 프로세스 강제 종료",
             extra={"bank": bank_name, "timeout": timeout}
         )
+
+        proc.kill()
+        await proc.wait()  # 종료 대기
+
+        logger.info(f"🔪 [{bank_name}] subprocess killed (Chrome 포함 전체 정리)")
         return False
 
     except Exception as e:
         elapsed = time.time() - start_time
         crawler_stats.record_failure(bank_name)
-        logger.exception(f"❌ [{bank_name}] 실행 실패", extra={"error": str(e)})
+        logger.exception(f"❌ [{bank_name}] subprocess 실행 실패", extra={"error": str(e)})
+
+        # 프로세스가 살아있으면 정리
+        try:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+        except:
+            pass
+
         return False
 
 
@@ -181,8 +216,8 @@ async def selenium_job_executor():
     while True:
         try:
             # PriorityQueue에서 작업 가져오기 (blocking)
-            # 튜플: (priority, timestamp, job_func, bank_name, is_retry)
-            priority, timestamp, job_func, bank_name, is_retry = await selenium_queue.get()
+            # 튜플: (priority, timestamp, bank_name, is_retry)
+            priority, timestamp, bank_name, is_retry = await selenium_queue.get()
 
             # 헬스체크 업데이트
             selenium_worker_last_heartbeat = time.time()
@@ -192,8 +227,8 @@ async def selenium_job_executor():
                 f"🔄 [{bank_name}] Queue 처리 시작 (우선순위: {priority}, 재시도: {is_retry})"
             )
 
-            # 타임아웃 포함 실행
-            success = await execute_with_timeout(job_func, bank_name)
+            # subprocess 기반 실행 (타임아웃 제어)
+            success = await execute_with_timeout(bank_name)
 
             # 작업 완료 후 헬스체크 업데이트
             selenium_worker_last_heartbeat = time.time()
@@ -205,7 +240,6 @@ async def selenium_job_executor():
                 await selenium_queue.put((
                     retry_priority,
                     time.time(),
-                    job_func,
                     bank_name,
                     True  # 재시도 플래그
                 ))
@@ -242,18 +276,22 @@ def is_bank_in_queue(bank_name: str) -> bool:
 
     # PriorityQueue 내부 list 순회 (_queue는 private attribute이지만 접근 가능)
     for item in selenium_queue._queue:
-        # item = (priority, timestamp, job_func, bank_name, is_retry)
-        _, _, _, item_bank_name, _ = item
+        # item = (priority, timestamp, bank_name, is_retry)
+        _, _, item_bank_name, _ = item
         if item_bank_name == bank_name:
             return True
     return False
 
 
-def enqueue_selenium_job(job_func: Callable, bank_name: str):
+def enqueue_selenium_job(bank_name: str):
     """
-    Selenium 작업을 우선순위 Queue에 non-blocking 방식으로 추가
+    Selenium 작업을 우선순위 Queue에 non-blocking 방식으로 추가 (subprocess 기반)
+
+    Args:
+        bank_name: 은행 이름 (runner.py에 전달됨)
 
     Notes:
+        - subprocess 격리: job_func 대신 bank_name만 전달
         - 중복 방지: Worker 처리 중 + Queue 대기 중 체크
         - put_nowait() 사용으로 APScheduler event loop blocking 방지
         - Queue 80% 초과 시 작업 추가 거부 (압력 완화)
@@ -297,11 +335,10 @@ def enqueue_selenium_job(job_func: Callable, bank_name: str):
     priority = SELENIUM_PRIORITY_MAP.get(bank_name, 999)  # 기본값: 낮은 우선순위
 
     # PriorityQueue는 튜플의 첫 번째 요소로 정렬
-    # (priority, timestamp, job_func, bank_name, is_retry)
+    # (priority, timestamp, bank_name, is_retry)
     item = (
         priority,
         time.time(),  # 동일 우선순위 내에서 FIFO 보장
-        job_func,
         bank_name,
         False  # 첫 실행
     )
@@ -359,24 +396,24 @@ def is_in_time(now: datetime) -> bool:
         (weekday == 5 and hour < 8)
     )
 
-def make_selenium_job_wrapper(bank_name: str, job_func: Callable):
+def make_selenium_job_wrapper(bank_name: str):
     """
-    각 Selenium 크롤러마다 고유한 wrapper 함수 생성 (클로저 버그 해결)
+    각 Selenium 크롤러마다 고유한 wrapper 함수 생성 (subprocess 기반)
 
     Args:
-        bank_name: 은행 이름
-        job_func: 크롤러 함수
+        bank_name: 은행 이름 (runner.py에 전달됨)
 
     Returns:
         고유한 wrapper 함수 객체 (APScheduler가 구별 가능)
 
     Notes:
+        - subprocess 격리: job_func 불필요, bank_name만 전달
         - __name__, __qualname__ 설정으로 APScheduler가 각 job을 구별
         - for loop 안에서 직접 wrapper 정의 시 모든 wrapper가 같은 이름을 가짐
         - enqueue는 동기 non-blocking이므로 즉시 반환 (event loop blocking 방지)
     """
     def wrapper():
-        enqueue_selenium_job(job_func, bank_name)
+        enqueue_selenium_job(bank_name)
 
     # APScheduler가 함수를 구별할 수 있도록 고유 이름 설정
     wrapper.__name__ = f"selenium_wrapper_{bank_name}"
@@ -453,28 +490,28 @@ def switch_jobs(mode: str):
 
         # C Group: Selenium (Queue 순차 처리, Broadcasting 독립)
         scheduler.add_job(
-            make_selenium_job_wrapper('shinhan', shinhan.crawl_and_save_shinhan_bank_exchange_rates),
+            make_selenium_job_wrapper('shinhan'),
             IntervalTrigger(seconds=38.3, timezone=KST),
             id='task_shinhan',
             max_instances=1,
             misfire_grace_time=25
         )
         scheduler.add_job(
-            make_selenium_job_wrapper('ibk', ibk.crawl_and_save_ibk_bank_exchange_rates),  # 하이브리드 (내부 시간대 체크)
+            make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
             IntervalTrigger(seconds=55.5, timezone=KST),
             id='task_ibk',
             max_instances=1,
             misfire_grace_time=25
         )
         scheduler.add_job(
-            make_selenium_job_wrapper('nh', nh.crawl_and_save_nh_bank_exchange_rates),
+            make_selenium_job_wrapper('nh'),
             IntervalTrigger(seconds=90, timezone=KST),
             id='task_nh',
             max_instances=1,
             misfire_grace_time=60
         )
         scheduler.add_job(
-            make_selenium_job_wrapper('sc', sc.crawl_and_save_sc_bank_exchange_rates),
+            make_selenium_job_wrapper('sc'),
             IntervalTrigger(seconds=150, timezone=KST),
             id='task_sc',
             max_instances=1,
@@ -536,28 +573,28 @@ def switch_jobs(mode: str):
 
         # C Group: Selenium (60분마다, 완전 분산)
         scheduler.add_job(
-            make_selenium_job_wrapper('shinhan', shinhan.crawl_and_save_shinhan_bank_exchange_rates),
+            make_selenium_job_wrapper('shinhan'),
             CronTrigger(minute='23', second='0', timezone=KST),
             id='task_shinhan',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
-            make_selenium_job_wrapper('ibk', ibk.crawl_and_save_ibk_bank_exchange_rates),
+            make_selenium_job_wrapper('ibk'),
             CronTrigger(minute='43', second='0', timezone=KST),
             id='task_ibk',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
-            make_selenium_job_wrapper('nh', nh.crawl_and_save_nh_bank_exchange_rates),
+            make_selenium_job_wrapper('nh'),
             CronTrigger(minute='3', second='0', timezone=KST),
             id='task_nh',
             max_instances=1,
             misfire_grace_time=1800
         )
         scheduler.add_job(
-            make_selenium_job_wrapper('sc', sc.crawl_and_save_sc_bank_exchange_rates),
+            make_selenium_job_wrapper('sc'),
             CronTrigger(minute='36', second='0', timezone=KST),
             id='task_sc',
             max_instances=1,
@@ -672,7 +709,7 @@ def report_queue_status():
         # _queue는 private attribute이지만 asyncio.PriorityQueue에서 접근 가능한 유일한 방법
         waiting_jobs = []
         for item in selenium_queue._queue:
-            priority, timestamp, _, bank_name, is_retry = item
+            priority, timestamp, bank_name, is_retry = item
             waiting_jobs.append({
                 "bank": bank_name,
                 "priority": priority,

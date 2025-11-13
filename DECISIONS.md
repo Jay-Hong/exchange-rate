@@ -1501,6 +1501,271 @@ for second in ['3', '23', '43']:
 
 ---
 
+## ADR-012: Selenium 폴백 subprocess 격리 (Chrome 프로세스 좀비화 방지)
+
+**날짜:** 2025-11-14
+**상태:** 수락됨
+
+### 상황
+
+**Phase 1: Queue 기반 Selenium 크롤러 (이전 세션에서 완료)**
+- **날짜:** 2025-11-14 03:22 KST
+- **대상:** shinhan, ibk, nh, sc (순수 Selenium 크롤러)
+- **해결:** `asyncio.create_subprocess_exec()` 기반 subprocess 격리
+- **결과:** Chrome 프로세스 20개 누적 문제 해결
+- **참고:** [ADR-007](#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout)
+
+**Phase 2: Selenium 폴백 크롤러 (현재 세션)**
+- **날짜:** 2025-11-14 04:20 KST
+- **발견:** hana/woori도 Selenium 폴백을 APScheduler thread에서 직접 실행
+- **위험:** 동일한 구조적 문제 - Thread blocking 시 `driver.quit()` 미실행
+- **기존 구조:**
+  ```python
+  # hana.py (APScheduler thread에서 실행)
+  def crawl_hana():
+      try:
+          request_crawl()  # Request 실패
+      except:
+          driver = create_selenium_driver()  # Selenium 폴백
+          driver.get(url)  # <- blocking 시 멈춤
+      finally:
+          driver.quit()  # <- 도달 못함
+  ```
+
+### 결정
+
+**나머지 Selenium 폴백도 subprocess로 격리 실행**
+- hana/woori의 2차 폴백(Selenium)을 subprocess로 전환
+- 1차(Request), 3차(MIBANK)는 그대로 유지 (성능 우선)
+
+### 대안 검토
+
+#### Option 1: Selenium 폴백 subprocess 격리 ✅ 채택
+
+**구조:**
+```python
+# hana.py
+def crawl_hana():
+    try:
+        request_crawl()  # 1차: Request
+    except:
+        subprocess.run(
+            ["python", "-m", "app.crawlers.runner", "hana_selenium"],
+            timeout=45  # 타임아웃 보장
+        )
+```
+
+**장점:**
+- ✅ Request 성능 유지 (빠름)
+- ✅ Selenium만 subprocess 격리 (안전)
+- ✅ 타임아웃 보장 (`proc.kill()`)
+- ✅ 기존 인프라 재활용 (runner.py, execute_with_timeout)
+
+**단점:**
+- ⚠️ subprocess 오버헤드 (1-2초)
+- ⚠️ 코드 수정 필요 (3개 파일)
+
+#### Option 2: hana/woori 전체를 Selenium Queue에 추가
+
+**구조:**
+```python
+def crawl_hana():
+    try:
+        request_crawl()
+    except:
+        enqueue_selenium_job('hana')  # Queue 추가
+```
+
+**장점:**
+- ✅ 순차 실행 보장
+- ✅ 우선순위 관리 가능
+
+**단점:**
+- ❌ Queue 압력 증가
+- ❌ 대기 시간 발생 (실시간성 저하)
+- ❌ Request + Queue 혼합 복잡도
+
+#### Option 3: Thread timeout wrapper
+
+**구조:**
+```python
+with ThreadPoolExecutor() as executor:
+    future = executor.submit(selenium_crawl)
+    future.result(timeout=45)
+```
+
+**장점:**
+- ✅ 코드 수정 최소화
+
+**단점:**
+- ❌ Thread kill 불가능 (Python 한계)
+- ❌ Chrome 프로세스 여전히 좀비화
+- ❌ Thread pool 고갈 위험
+
+### 근거
+
+#### 1. Python Thread 한계
+
+**Thread blocking 시나리오:**
+```
+1. APScheduler thread 시작
+2. Chrome 생성 (PID 1234)
+3. driver.get(url) → 네트워크 응답 대기
+4. 60초 경과... thread 계속 blocking
+5. finally 블록 도달 못함
+6. Chrome(PID 1234) 좀비화
+```
+
+**Python의 구조적 한계:**
+- Thread 강제 종료 불가능 (GIL 설계)
+- blocking된 thread는 영원히 대기
+- `driver.quit()` 미실행 → Chrome 프로세스 고아
+
+#### 2. Subprocess 격리의 안전성
+
+**Subprocess 타임아웃 시나리오:**
+```
+1. Main thread: subprocess 생성 (PID 1000)
+2. Subprocess: Chrome 생성 (PID 1234)
+3. Subprocess: driver.get(url) 대기
+4. 45초 경과
+5. Main thread: subprocess.TimeoutExpired 감지
+6. Main thread: proc.kill() 호출
+7. OS: Subprocess(PID 1000) 종료 → Chrome(PID 1234) 함께 종료
+8. 완전 정리 완료 ✅
+```
+
+**핵심 차이:**
+- ✅ Subprocess는 OS 레벨 강제 종료 가능
+- ✅ 자식 프로세스(Chrome) 함께 종료 (프로세스 트리)
+- ✅ `driver.quit()` 실행 여부 무관
+
+#### 3. 성능 vs 안정성 트레이드오프
+
+**Request 유지 장점:**
+- ⚡ 빠른 응답 (0.5초)
+- 💰 낮은 리소스 사용
+- 🎯 대부분 성공 (90%+)
+
+**Selenium 폴백 필요성:**
+- 🛡️ 안정성 보장 (Request 실패 시)
+- 🔄 자동 복구 (타임아웃 보장)
+- 📊 드물게 사용 (10% 미만)
+
+→ **Request 성능 + Selenium 안전성 동시 확보**
+
+### 구현 세부사항
+
+#### 1. runner.py 확장
+
+```python
+CRAWLER_MAP = {
+    # 기존 Queue 기반
+    'shinhan': shinhan.crawl_and_save_shinhan_bank_exchange_rates,
+    'ibk': ibk.crawl_and_save_ibk_bank_exchange_rates,
+    'nh': nh.crawl_and_save_nh_bank_exchange_rates,
+    'sc': sc.crawl_and_save_sc_bank_exchange_rates,
+
+    # 신규 폴백 엔트리포인트
+    'hana_selenium': hana.crawl_and_save_hana_routine_selenium_entrypoint,
+    'woori_selenium': woori.crawl_and_save_woori_routine_selenium_entrypoint,
+}
+```
+
+#### 2. hana.py/woori.py 수정
+
+```python
+def crawl_and_save_hana_bank_exchange_rates():
+    try:
+        # 1차: Request (빠름)
+        crawl_and_save_routine(HANA_BANK_URL, HANA_BANK_SELECTORS, db)
+    except:
+        # 2차: Selenium subprocess (안전)
+        _run_selenium_subprocess_fallback('hana_selenium', timeout=45)
+    except:
+        # 3차: MIBANK Request (최종 폴백)
+        crawl_and_save_routine(MIBANK_HANA_URL, MIBANK_SELECTORS, db)
+
+def _run_selenium_subprocess_fallback(name: str, timeout: int):
+    result = subprocess.run(
+        [sys.executable, "-m", "app.crawlers.runner", name],
+        capture_output=True,
+        timeout=timeout
+    )
+```
+
+#### 3. 엔트리포인트 추가
+
+```python
+def crawl_and_save_hana_routine_selenium_entrypoint():
+    """subprocess 엔트리포인트 (DB 자체 관리)"""
+    db = SessionLocal()
+    try:
+        return crawl_and_save_hana_routine_selenium(
+            SECOND_HANA_BANK_URL,
+            SECOND_HANA_BANK_SELECTORS,
+            db
+        )
+    finally:
+        db.close()
+```
+
+### 검증 결과
+
+**Manual Test:**
+```
+✅ hana_selenium subprocess 정상 실행 (1분 51초)
+✅ Chrome 프로세스 완전 정리 (0개 남음)
+✅ Container: healthy
+```
+
+**Production Logs (15분):**
+```
+✅ nh, sc, shinhan, ibk 타임아웃 작동 확인
+✅ "subprocess killed (Chrome 포함 전체 정리)" 로그 확인
+✅ Chrome 프로세스 수: 0-1개 (정상 범위)
+```
+
+### 결과
+
+**모든 Selenium 크롤러 subprocess 격리 완료:**
+- **Phase 1 (이전)**: shinhan, ibk, nh, sc → AsyncIO Queue + subprocess
+- **Phase 2 (현재)**: hana_selenium, woori_selenium → 동기 subprocess fallback
+
+**최종 아키텍처:**
+```
+크롤러 유형별 Selenium 실행 방식
+├─ Queue 기반 (순수 Selenium)
+│  ├─ shinhan: AsyncIO subprocess (38초마다)
+│  ├─ ibk: AsyncIO subprocess (55초마다)
+│  ├─ nh: AsyncIO subprocess (90초마다)
+│  └─ sc: AsyncIO subprocess (150초마다)
+│
+└─ 폴백 기반 (하이브리드)
+   ├─ hana: Request → 실패 시 subprocess → MIBANK
+   └─ woori: Request → 실패 시 subprocess → MIBANK
+
+공통: runner.py 엔트리포인트, 45초 타임아웃, proc.kill() 보장
+```
+
+**안정성 개선:**
+- ✅ 모든 Selenium 실행이 subprocess 격리
+- ✅ Chrome 프로세스 누적 위험 완전 제거
+- ✅ 타임아웃 보장 (45초, OS 레벨 강제 종료)
+- ✅ Request 성능 유지 (하이브리드 크롤러)
+
+**향후 재검토 시점:**
+- kb, bs, citi에서 Selenium 폴백 추가 시 (동일 패턴 적용)
+- 폴백 사용 빈도 증가로 성능 이슈 발생 시
+
+### 관련 결정
+
+- [ADR-011](#adr-011-selenium-timeout-최적화---race-condition-제거): Timeout 최적화
+- [ADR-007](#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout): Subprocess 기반 격리
+- [ADR-006](#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue): Queue 순차 실행
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -1513,3 +1778,4 @@ for second in ['3', '23', '43']:
 - 2025-11-10: ADR-009 작성 (3-Tier 스케줄링 아키텍처 - t3.small/medium 최적화)
 - 2025-11-12: ADR-010 작성 (WebSocket Broadcasting 스케줄링 방식 - asyncio.sleep vs APScheduler cron)
 - 2025-11-13: ADR-011 작성 (Selenium Timeout 최적화 - Race Condition 제거)
+- 2025-11-14: ADR-012 작성 (Selenium 폴백 subprocess 격리 - Chrome 프로세스 좀비화 방지)
