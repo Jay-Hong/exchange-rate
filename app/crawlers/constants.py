@@ -79,12 +79,19 @@ DEFAULT_TIMEOUT = 10  # requests timeout (초)
 SELENIUM_WAIT_TIMEOUT = 5  # WebDriverWait timeout (초)
 SELENIUM_WAIT_TIMEOUT_SHORT = 3  # WebDriverWait timeout (초, 짧은 대기)
 SELENIUM_WAIT_TIMEOUT_LONG = 10  # WebDriverWait timeout (초, 긴 대기)
-SELENIUM_DRIVER_TIMEOUT = 60  # Selenium 드라이버 전체 타임아웃 (초)
+SELENIUM_DRIVER_TIMEOUT = 42  # Selenium 드라이버 전체 타임아웃 (초)
+
+# ═════════════════════════════════════════════════════════════
+# 크롤러 과거 데이터 조회 설정
+# ═════════════════════════════════════════════════════════════
+# IBK, SC, Woori 크롤러는 공휴일/주말 대비를 위해 과거 날짜 조회
+# 은행 데이터 보관 정책(10일)과 일치하도록 설정
+MAX_DAYS_LOOKBACK = 10  # 최대 조회 가능한 과거 날짜 수 (12→10 감소)
 
 # ═════════════════════════════════════════════════════════════
 # Chrome 프로세스 수명 제한 (좀비 프로세스 방지)
 # ═════════════════════════════════════════════════════════════
-CHROME_MAX_LIFETIME_SECONDS = 180  # Chrome 프로세스 최대 수명: 3분 (300→180 감소)
+CHROME_MAX_LIFETIME_SECONDS = 60  # Chrome 프로세스 최대 수명: 1분 (180→60 감소)
 CHROME_CLEANUP_INTERVAL_MINUTES = 1  # 좀비 프로세스 정리 주기: 1분 (3→1 감소)
 
 # ═════════════════════════════════════════════════════════════
@@ -108,7 +115,7 @@ SELENIUM_PRIORITY_MAP = {
 # - 느린 크롤러는 타임아웃으로 조기 종료 → Queue 정체 방지
 # - 실패 시 재시도 메커니즘으로 데이터 손실 방지
 SELENIUM_TIMEOUT_MAP = {
-    "hana": 30,    # 실시간성 우선
+    "hana": 45,    # 스케줄러 타임아웃 통일
     "shinhan": 45,
     "nh": 45,
     "ibk": 45,

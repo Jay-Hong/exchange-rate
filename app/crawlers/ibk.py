@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_SHORT
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_SHORT, MAX_DAYS_LOOKBACK
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context, is_mibank_rate_reliable
 
 BANK_NAME = 'ibk'
@@ -30,7 +30,6 @@ IBK_BANK_SELECTORS = {
     # '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(4) > td:nth-child(3)',
 }
 INPUT_SELECTOR = "#inDate"
-MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
 
 MIBANK_IBK_CODE = '003'
 MIBANK_IBK_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_IBK_CODE

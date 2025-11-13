@@ -1367,6 +1367,140 @@ async def broadcast_rates():
 
 ---
 
+## ADR-011: Selenium Timeout 최적화 - Race Condition 제거
+
+**날짜:** 2025-11-13
+**상태:** 수락됨
+
+### 상황
+
+Selenium 크롤러에서 timeout race condition 발생:
+- **Selenium timeout (60초)** > **Scheduler timeout (45초)** → 15초 좀비 프로세스 윈도우 발생
+- Worker health check가 60초마다 실행 → stuck 감지 지연 (최대 60초)
+- Chrome 프로세스 수명이 180초로 너무 길어 메모리 누적
+
+**문제점:**
+1. Selenium이 타임아웃되기 전에 Scheduler가 먼저 종료 → Chrome 프로세스 고아화
+2. Health check 주기가 길어 stuck worker 감지 지연
+3. Chrome 프로세스가 오래 살아남아 메모리 압박
+
+### 선택지
+
+#### 옵션 1: Selenium timeout을 Scheduler timeout보다 짧게 설정
+
+**변경사항:**
+```python
+# constants.py
+SELENIUM_DRIVER_TIMEOUT = 42  # 60→42 (3초 안전 버퍼)
+SELENIUM_TIMEOUT_MAP = {
+    "hana": 45,    # 30→45 (통일)
+    "shinhan": 45, # 45 (유지)
+    "nh": 45,      # 45 (유지)
+    "ibk": 45,     # 45 (유지)
+    "sc": 45,      # 45 (유지)
+}
+CHROME_MAX_LIFETIME_SECONDS = 60  # 180→60
+```
+
+**장점:**
+- ✅ Race condition 완전 제거 (Selenium 42초 < Scheduler 45초)
+- ✅ 3초 안전 버퍼로 확실한 종료 순서 보장
+- ✅ Chrome 프로세스 수명 단축 (180→60초) → 메모리 효율 개선
+
+**단점:**
+- ❌ 느린 크롤러(SC, NH)는 타임아웃으로 실패 가능 → 재시도 메커니즘으로 커버
+
+#### 옵션 2: Scheduler timeout을 Selenium보다 길게 설정
+
+**변경사항:**
+```python
+SELENIUM_TIMEOUT_MAP = {"all": 60}  # 유지
+# scheduler.py에서 모든 timeout을 70초로 증가
+```
+
+**장점:**
+- ✅ 기존 Selenium timeout 유지 (크롤러 안정성)
+
+**단점:**
+- ❌ Queue 정체 심화 (하나의 slow job이 70초 동안 Queue 점유)
+- ❌ 실시간성 저하 (ADR-008 실시간성 우선 원칙 위배)
+- ❌ 메모리 압박 증가 (Chrome 프로세스가 더 오래 살아남음)
+
+#### 옵션 3: IntervalTrigger → CronTrigger (Health Check 강화)
+
+**변경사항:**
+```python
+# scheduler.py
+# 60초마다 1회 → 매분 03/23/43초 (20초 간격, 3회)
+for second in ['3', '23', '43']:
+    scheduler.add_job(
+        check_worker_health,
+        CronTrigger(second=second, timezone=KST),
+        id=f"worker_health_check_{second}"
+    )
+```
+
+**장점:**
+- ✅ Stuck 감지 시간 67% 개선 (60초 → 20초)
+- ✅ Time drift 방지 (CronTrigger는 절대 시간 기준)
+- ✅ Chrome cleanup과 동시 실행 (리소스 관리 일관성)
+
+**단점:**
+- 없음 (기존 IntervalTrigger 완전 대체)
+
+### 결정
+
+**옵션 1 + 옵션 3 조합 채택**
+
+**이유:**
+1. **Race condition 제거**: Selenium 42초 < Scheduler 45초 → 확실한 종료 순서
+2. **실시간성 우선**: ADR-008 원칙 준수, 빠른 실패로 Queue 흐름 유지
+3. **Stuck 감지 강화**: 60초 → 20초 (67% 개선)
+4. **메모리 효율**: Chrome 180초 → 60초, 좀비 프로세스 신속 정리
+5. **이중 안전장치**: Health check에서 Worker 재시작 전 cleanup 실행
+
+**트레이드오프:**
+- 느린 크롤러 타임아웃 증가 → 재시도 메커니즘으로 데이터 손실 방지
+- 실시간성(빠른 응답) > 완전성(모든 크롤러 성공)
+
+**검증 지표 (기대 효과):**
+```
+[Before]
+- 좀비 Chrome: 1-3개 상시 존재
+- Stuck 감지: 60초 평균
+- 타임아웃: 불확실한 종료 순서
+
+[After]
+- 좀비 Chrome: 0개 (20초마다 cleanup)
+- Stuck 감지: 20초 평균 (67% 개선)
+- 타임아웃: 확실한 종료 순서 (42 < 45)
+```
+
+### 결과
+
+**성능 개선:**
+- Race condition 완전 제거
+- Worker health check 주기 3배 증가
+- Chrome 프로세스 수명 3분의 1로 단축
+- Stuck worker 감지 시간 67% 개선
+
+**시스템 안정성:**
+- 타임아웃 순서 명확화로 좀비 프로세스 방지
+- CronTrigger로 time drift 제거
+- 이중 안전장치 (health check + cleanup)
+
+**향후 재검토 시점:**
+- 크롤러 성능 개선으로 45초 내 완료 가능 시 (timeout 추가 단축 고려)
+- Queue 압력이 완화되어 여유가 생길 시 (timeout 증가 고려)
+
+### 관련 결정
+
+- [ADR-008](#adr-008-queue-압력-완화-전략-실시간성-vs-완전성): 실시간성 우선 원칙
+- [ADR-007](#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout): Timeout 전략
+- [ADR-006](#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue): Queue 기반 순차 실행
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -1378,3 +1512,4 @@ async def broadcast_rates():
 - 2025-11-10: ADR-008 작성 (Queue 압력 완화 전략 - 실시간성 vs 완전성)
 - 2025-11-10: ADR-009 작성 (3-Tier 스케줄링 아키텍처 - t3.small/medium 최적화)
 - 2025-11-12: ADR-010 작성 (WebSocket Broadcasting 스케줄링 방식 - asyncio.sleep vs APScheduler cron)
+- 2025-11-13: ADR-011 작성 (Selenium Timeout 최적화 - Race Condition 제거)

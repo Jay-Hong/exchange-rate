@@ -68,7 +68,7 @@
 **공통점**:
 - 영업시간 외 날짜 변경 필요
 - AJAX 응답 감지 (페이지 갱신 대기)
-- MAX_DAYS_LOOKBACK (최대 12일) 과거 조회
+- MAX_DAYS_LOOKBACK (최대 10일) 과거 조회 (constants.py 중앙 관리)
 
 ---
 
@@ -155,7 +155,7 @@
 - 자정/주말: Selenium (날짜 변경, 2차 시도)
 - Selenium 3회 재시도로 성공률 99.9% (일시적 네트워크 오류 극복)
 - MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
-- MAX_DAYS_LOOKBACK 12일 (공휴일 연휴 대응)
+- MAX_DAYS_LOOKBACK 10일 (공휴일 연휴 대응, constants.py 중앙 관리)
 
 **상세 코드:** `app/crawlers/ibk.py:48-111` (crawl_and_save_ibk_bank_exchange_rates 함수)
 **최근 리팩토링:** 2025-10-26 (Selenium 3회 재시도 추가, MIBANK 조건부 실행)
@@ -167,7 +167,7 @@
 **핵심 로직:**
 - **3단계 폴백**: requests → Selenium (날짜 변경) → MIBANK (조건부)
 - **AJAX 감지**: 테이블 행 개수로 페이지 갱신 확인
-- **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (12일) 순회 (SC 방식 적용)
+- **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (10일) 순회 (SC 방식 적용)
 - **날짜 선택**: 년/월/일 select 박스 각각 선택
 - **MIBANK 조건부 실행**: 평일 09:00~24:00만 허용 (자정/주말 차단)
 
@@ -189,7 +189,7 @@
 - **3단계 폴백**: SC_BANK_URL (Selenium) → SECOND_SC_BANK_URL (날짜 변경) → MIBANK (조건부)
 - **AJAX 감지**: #TMP_RATE 개수 변화로 페이지 갱신 확인
 - **Alert 처리**: 조회 버튼 클릭 직후 1회 (자정/주말 "0회차" 메시지)
-- **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (12일) 순회
+- **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (10일) 순회
 - **MIBANK 조건부 실행**: 평일 09:00~24:00만 허용 (자정/주말 차단)
 
 **주의사항:**

@@ -52,6 +52,16 @@ selenium_worker_task: asyncio.Task = None
 selenium_worker_last_heartbeat: float = time.time()
 selenium_worker_current_job: str = None
 
+# Queue 상태 캐시 (admin 페이지용)
+queue_status_cache = {
+    "size": 0,
+    "max_size": 25,
+    "usage_percent": 0.0,
+    "current_job": None,
+    "waiting_jobs": [],
+    "updated_at": None
+}
+
 # ═════════════════════════════════════════════════════════════
 # 크롤러 그룹 정의 (2025-11-10 재설계)
 # ═════════════════════════════════════════════════════════════
@@ -127,7 +137,7 @@ async def execute_with_timeout(job_func: Callable, bank_name: str) -> bool:
     Returns:
         bool: 성공 시 True, 실패/타임아웃 시 False
     """
-    timeout = SELENIUM_TIMEOUT_MAP.get(bank_name, 60)
+    timeout = SELENIUM_TIMEOUT_MAP.get(bank_name, 45)
     start_time = time.time()
 
     try:
@@ -213,18 +223,66 @@ async def selenium_job_executor():
             selenium_worker_current_job = None
 
 
+def is_bank_in_queue(bank_name: str) -> bool:
+    """
+    Queue에 특정 은행 작업이 이미 대기 중인지 확인
+
+    Args:
+        bank_name: 확인할 은행 이름
+
+    Returns:
+        True: Queue에 이미 대기 중, False: 없음
+
+    Notes:
+        - PriorityQueue.queue는 내부 list이므로 순회 가능
+        - Python list iteration은 thread-safe
+        - O(n) 복잡도지만 n≤25이므로 무시 가능 (~0.00001초)
+    """
+    global selenium_queue
+
+    # PriorityQueue 내부 list 순회 (_queue는 private attribute이지만 접근 가능)
+    for item in selenium_queue._queue:
+        # item = (priority, timestamp, job_func, bank_name, is_retry)
+        _, _, _, item_bank_name, _ = item
+        if item_bank_name == bank_name:
+            return True
+    return False
+
+
 def enqueue_selenium_job(job_func: Callable, bank_name: str):
     """
     Selenium 작업을 우선순위 Queue에 non-blocking 방식으로 추가
 
     Notes:
+        - 중복 방지: Worker 처리 중 + Queue 대기 중 체크
         - put_nowait() 사용으로 APScheduler event loop blocking 방지
         - Queue 80% 초과 시 작업 추가 거부 (압력 완화)
         - Queue 포화 시 조용히 skip (다음 스케줄에서 재시도)
     """
-    global selenium_queue
+    global selenium_queue, selenium_worker_current_job
 
-    # Queue 압력 완화: 80% 초과 시 새 작업 거부
+    # ═════════════════════════════════════════════════════════════
+    # 1. 중복 작업 방지
+    # ═════════════════════════════════════════════════════════════
+    # 1-1. Worker가 현재 처리 중인지 확인
+    if selenium_worker_current_job == bank_name:
+        logger.debug(
+            f"🔄 [{bank_name}] Worker 처리 중, skip (중복 방지)",
+            extra={"bank": bank_name, "reason": "worker_processing"}
+        )
+        return
+
+    # 1-2. Queue에 이미 대기 중인지 확인
+    if is_bank_in_queue(bank_name):
+        logger.debug(
+            f"🔄 [{bank_name}] Queue에 이미 대기 중, skip (중복 방지)",
+            extra={"bank": bank_name, "reason": "already_in_queue"}
+        )
+        return
+
+    # ═════════════════════════════════════════════════════════════
+    # 2. Queue 압력 완화
+    # ═════════════════════════════════════════════════════════════
     current_size = selenium_queue.qsize()
     max_size = 25
     usage_percent = (current_size / max_size) * 100
@@ -592,14 +650,15 @@ def cleanup_zombie_chrome_processes():
 
 def report_queue_status():
     """
-    Selenium Priority Queue 상태 모니터링 (10초마다)
+    Selenium Priority Queue 상태 모니터링 (10초마다) + admin 페이지용 캐시 업데이트
 
     Notes:
         - Queue 사용률 추적
         - 80% 이상 포화 시 경고
         - 성능 튜닝 및 문제 진단에 활용
+        - admin 페이지에서 실시간 Queue 상태 표시
     """
-    global selenium_queue
+    global selenium_queue, selenium_worker_current_job, queue_status_cache
 
     if selenium_queue is None:
         return
@@ -609,16 +668,41 @@ def report_queue_status():
         max_size = 25
         usage_percent = (size / max_size) * 100
 
-        # 정상 상태: DEBUG 레벨
-        if size < 20:  # 80% 미만 (20/25)
+        # 대기 중인 작업 목록 수집 (admin 페이지용)
+        # _queue는 private attribute이지만 asyncio.PriorityQueue에서 접근 가능한 유일한 방법
+        waiting_jobs = []
+        for item in selenium_queue._queue:
+            priority, timestamp, _, bank_name, is_retry = item
+            waiting_jobs.append({
+                "bank": bank_name,
+                "priority": priority,
+                "is_retry": is_retry,
+                "waiting_seconds": int(time.time() - timestamp)
+            })
+
+        # 캐시 업데이트 (admin 페이지에서 조회)
+        queue_status_cache.update({
+            "size": size,
+            "max_size": max_size,
+            "usage_percent": round(usage_percent, 1),
+            "current_job": selenium_worker_current_job,
+            "waiting_jobs": waiting_jobs,
+            "updated_at": datetime.now(KST).isoformat()
+        })
+
+        # 로그 출력 (기존 로직 유지)
+        if size == 0:
+            logger.debug("📊 [Queue] 비어있음")
+        elif size < 20:  # 80% 미만 (20/25)
+            banks = [job["bank"] for job in waiting_jobs]
             logger.debug(
-                f"📊 [Queue] size={size}/{max_size}, usage={usage_percent:.1f}%"
+                f"📊 [Queue] {size}/{max_size} ({usage_percent:.1f}%) | 대기: {banks}"
             )
-        # 경고 상태: WARNING 레벨
-        else:
+        else:  # 경고 상태
+            banks = [job["bank"] for job in waiting_jobs]
             logger.warning(
-                f"⚠️ [Queue] 포화 임박: {size}/{max_size} ({usage_percent:.1f}%)",
-                extra={"queue_size": size, "usage_percent": usage_percent}
+                f"⚠️ [Queue] 포화 임박: {size}/{max_size} ({usage_percent:.1f}%) | 대기: {banks}",
+                extra={"queue_size": size, "usage_percent": usage_percent, "waiting_banks": banks}
             )
 
     except Exception as e:
@@ -636,15 +720,16 @@ def record_monitoring_stats():
 
 async def check_worker_health():
     """
-    Selenium Worker 헬스체크 (1분마다)
+    Selenium Worker 헬스체크 (매분 03, 23, 43초)
 
-    Worker가 90초 이상 같은 작업을 처리하고 있으면 stuck 상태로 판단하여 재시작
+    Worker가 60초 이상 같은 작업을 처리하고 있으면 stuck 상태로 판단하여 재시작
 
     Note:
         - asyncio.wait_for()는 blocking thread를 kill할 수 없음
         - Worker가 Selenium에서 무한 대기 시 thread는 계속 살아있음
         - Worker Task를 cancel하고 재시작하면 Queue는 유지되고 Worker만 재생성됨
-        - 작업 시작 시 heartbeat 업데이트 → 90초 타임아웃으로도 충분 (타임아웃 45초 × 2배 여유)
+        - 작업 시작 시 heartbeat 업데이트 → 60초 임계값 (cleanup과 동일)
+        - 스케줄러에서 cleanup 먼저 실행 → Chrome 정리 후 health check
     """
     global selenium_worker_task, selenium_worker_last_heartbeat, selenium_worker_current_job, selenium_queue
 
@@ -654,7 +739,7 @@ async def check_worker_health():
 
         # 헬스체크: 마지막 heartbeat로부터 경과 시간 확인
         elapsed = time.time() - selenium_worker_last_heartbeat
-        max_job_time = 90  # 90초 (가장 긴 타임아웃 45초 × 2배 여유)
+        max_job_time = 60  # 60초 (cleanup과 동일한 임계값)
 
         if elapsed > max_job_time:
             current_job = selenium_worker_current_job or "unknown"
@@ -667,6 +752,9 @@ async def check_worker_health():
                     "action": "worker_restart"
                 }
             )
+
+            # ✅ 이중 안전장치: Worker 재시작 전에 Chrome 프로세스 무조건 정리
+            await cleanup_zombie_chrome_processes()
 
             # Worker Task 강제 취소
             selenium_worker_task.cancel()
@@ -723,34 +811,42 @@ def start_scheduler():
     # 제어 작업: 1분마다 모드 확인
     scheduler.add_job(control_job, IntervalTrigger(minutes=1, timezone=KST), id="control_job")
 
-    # Worker 헬스체크: 1분마다 (멈춤 감지 + 자동 재시작)
-    scheduler.add_job(
-        check_worker_health,
-        IntervalTrigger(minutes=1, timezone=KST),
-        id="worker_health_check",
-        coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
-        max_instances=1  # 동시 실행 방지
-    )
-
-    # Queue 상태 모니터링: 30초마다 (포화 감지)
+    # Queue 상태 모니터링: 10초마다 (포화 감지)
     scheduler.add_job(
         report_queue_status,
-        IntervalTrigger(seconds=30, timezone=KST),
+        IntervalTrigger(seconds=10, timezone=KST),
         id="queue_status",
         coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
         max_instances=1  # 동시 실행 방지
     )
 
-    # 좀비 Chrome 프로세스 정리: 1분마다 (메모리 누수 방지)
-    from app.crawlers.constants import CHROME_CLEANUP_INTERVAL_MINUTES
-    scheduler.add_job(
-        cleanup_zombie_chrome_processes,
-        IntervalTrigger(minutes=CHROME_CLEANUP_INTERVAL_MINUTES, timezone=KST),
-        id="cleanup_zombie_chrome",
-        coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
-        max_instances=1,  # 동시 실행 방지
-        misfire_grace_time=180  # Misfire 허용 시간: 3분 (놓쳐도 실행)
-    )
+    # ═════════════════════════════════════════════════════════════
+    # Chrome 정리 + Worker 헬스체크: 매분 03, 23, 43초 (20초 균등 간격)
+    # ═════════════════════════════════════════════════════════════
+    # - cleanup 먼저 실행 → 60초+ Chrome 프로세스 정리
+    # - health check 직후 실행 → Worker stuck 감지 (최대 20초 지연)
+    # - cleanup 비용: ~0.004초 (Chrome 20개 기준), 무시 가능
+    # - Worker 재시작 시 cleanup 한 번 더 호출 (이중 안전장치)
+    # ─────────────────────────────────────────────────────────────
+    for second in ['3', '23', '43']:
+        # 1. Chrome 정리 먼저
+        scheduler.add_job(
+            cleanup_zombie_chrome_processes,
+            CronTrigger(second=second, timezone=KST),
+            id=f"cleanup_zombie_chrome_{second}",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=180
+        )
+
+        # 2. Worker 헬스체크 (cleanup 직후)
+        scheduler.add_job(
+            check_worker_health,
+            CronTrigger(second=second, timezone=KST),
+            id=f"worker_health_check_{second}",
+            coalesce=True,
+            max_instances=1
+        )
 
     # 시스템 모니터링: 5분마다 (리소스 추적)
     scheduler.add_job(

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT, MAX_DAYS_LOOKBACK
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable
 
 BANK_NAME = 'woori'
@@ -37,7 +37,6 @@ SECOND_WOORI_BANK_SELECTORS = {
     'eur-krw': '#fxprint > table > tbody > tr:nth-child(3) > td:nth-child(9)',
     # 'cny-krw': '#fxprint > table > tbody > tr:nth-child(8) > td:nth-child(9)',
 }
-MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
 # 우리은행 날짜 선택 selector (년/월/일 select 박스)
 YEAR_SELECTOR = "#SELECT_DATE_601Y"
 MONTH_SELECTOR = "#SELECT_DATE_601M"

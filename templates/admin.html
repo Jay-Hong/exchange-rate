@@ -136,6 +136,39 @@
             color: #d29922;
         }
 
+        /* Queue 카드 추가 스타일 */
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .card-body {
+            padding-top: 0.5rem;
+        }
+
+        /* Queue 대기 작업 뱃지 */
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.85em;
+            font-weight: 500;
+            margin-right: 0.3rem;
+            margin-bottom: 0.3rem;
+        }
+
+        .badge-normal {
+            background: #1f6feb;
+            color: white;
+        }
+
+        .badge-retry {
+            background: #d29922;
+            color: white;
+        }
+
         /* 크롤러 뱃지 */
         .section-title {
             font-size: 1rem;
@@ -467,6 +500,41 @@
             <div class="loading">통계 로딩 중...</div>
         </div>
 
+        <!-- Selenium Priority Queue -->
+        <h2 class="section-title">🔧 Selenium Priority Queue</h2>
+        <div class="card">
+            <div class="card-header">
+                <h3 style="margin: 0; font-size: 1.1em;">Queue 상태</h3>
+                <span id="queue-updated" style="font-size: 0.85em; color: #666;">-</span>
+            </div>
+            <div class="card-body" style="padding-top: 15px;">
+                <div class="dashboard-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px;">
+                    <div class="stat-item">
+                        <div style="font-size: 0.9em; color: #666; margin-bottom: 5px;">Queue 크기</div>
+                        <div style="font-size: 1.5em; font-weight: bold;">
+                            <span id="queue-size">0</span>/<span id="queue-max">25</span>
+                        </div>
+                    </div>
+                    <div class="stat-item">
+                        <div style="font-size: 0.9em; color: #666; margin-bottom: 5px;">사용률</div>
+                        <div style="font-size: 1.5em; font-weight: bold;" id="queue-usage">0%</div>
+                    </div>
+                    <div class="stat-item">
+                        <div style="font-size: 0.9em; color: #666; margin-bottom: 5px;">현재 처리</div>
+                        <div style="font-size: 1.2em; font-weight: bold;" id="queue-current">대기 중</div>
+                    </div>
+                </div>
+
+                <!-- 대기 중인 작업 목록 -->
+                <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #e0e0e0;">
+                    <strong style="font-size: 0.95em;">대기 작업:</strong>
+                    <div id="queue-jobs-list" style="margin-top: 8px; min-height: 24px;">
+                        <span style="color: #666;">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- 크롤러 상태 -->
         <h2 class="section-title">🤖 크롤러 상태 (최근 1시간)</h2>
         <div class="crawler-badges" id="crawler-badges">
@@ -666,6 +734,9 @@
                 // Chrome 프로세스 모니터링 (비동기 호출)
                 loadChromeMonitoring();
 
+                // Selenium Queue 상태 로드 (비동기 호출)
+                loadQueueStatus();
+
                 // 크롤러 통계 로드 (비동기 호출)
                 loadCrawlerStats();
 
@@ -705,6 +776,61 @@
                 console.error('Chrome 모니터링 로드 실패:', err);
                 document.getElementById('chrome-count').textContent = 'N/A';
                 document.getElementById('chrome-memory').textContent = '메모리: N/A';
+            }
+        }
+
+        // ========================================
+        // Selenium Queue 상태 로드
+        // ========================================
+        async function loadQueueStatus() {
+            try {
+                const res = await fetch('/admin/api/queue-status');
+                const data = await res.json();
+
+                // Queue 크기 및 사용률
+                document.getElementById('queue-size').textContent = data.size || 0;
+                document.getElementById('queue-max').textContent = data.max_size || 25;
+                document.getElementById('queue-usage').textContent = `${data.usage_percent || 0}%`;
+
+                // 사용률에 따라 색상 변경
+                const usageElem = document.getElementById('queue-usage');
+                if (data.usage_percent >= 80) {
+                    usageElem.style.color = '#e74c3c';  // 빨강 (경고)
+                } else if (data.usage_percent >= 60) {
+                    usageElem.style.color = '#f39c12';  // 주황 (주의)
+                } else {
+                    usageElem.style.color = '#27ae60';  // 녹색 (정상)
+                }
+
+                // 현재 처리 중인 작업
+                document.getElementById('queue-current').textContent = data.current_job || '대기 중';
+
+                // 대기 작업 목록
+                const jobsListElem = document.getElementById('queue-jobs-list');
+                if (!data.waiting_jobs || data.waiting_jobs.length === 0) {
+                    jobsListElem.innerHTML = '<span style="color: #666;">없음</span>';
+                } else {
+                    const jobsHtml = data.waiting_jobs.map(job => {
+                        const badgeClass = job.is_retry ? 'badge badge-retry' : 'badge badge-normal';
+                        return `<span class="${badgeClass}">${job.bank} (${job.waiting_seconds}초)</span>`;
+                    }).join(' ');
+                    jobsListElem.innerHTML = jobsHtml;
+                }
+
+                // 업데이트 시간
+                if (data.updated_at) {
+                    const updateTime = new Date(data.updated_at).toLocaleTimeString('ko-KR');
+                    document.getElementById('queue-updated').textContent = `업데이트: ${updateTime}`;
+                } else {
+                    document.getElementById('queue-updated').textContent = '-';
+                }
+
+            } catch (err) {
+                console.error('Queue 상태 로드 실패:', err);
+                document.getElementById('queue-size').textContent = 'N/A';
+                document.getElementById('queue-usage').textContent = 'N/A';
+                document.getElementById('queue-current').textContent = 'N/A';
+                document.getElementById('queue-jobs-list').innerHTML = '<span style="color: #e74c3c;">로드 실패</span>';
             }
         }
 

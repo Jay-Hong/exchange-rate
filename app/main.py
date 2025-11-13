@@ -547,3 +547,30 @@ def get_crawler_stats():
     return crawler_stats.get_stats()
 
 
+@app.get("/admin/api/queue-status", dependencies=[Depends(verify_admin)])
+def get_queue_status():
+    """
+    Selenium Priority Queue 상태 조회
+
+    Returns:
+        {
+            "size": 3,
+            "max_size": 25,
+            "usage_percent": 12.0,
+            "current_job": "shinhan",
+            "waiting_jobs": [
+                {
+                    "bank": "ibk",
+                    "priority": 3,
+                    "is_retry": false,
+                    "waiting_seconds": 5
+                },
+                ...
+            ],
+            "updated_at": "2025-11-13T21:30:15+09:00"
+        }
+    """
+    from app.scheduler import queue_status_cache
+    return queue_status_cache
+
+

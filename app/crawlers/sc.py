@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT
+from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT, MAX_DAYS_LOOKBACK
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable, selenium_driver_context
 
 BANK_NAME = 'sc'
@@ -33,7 +33,6 @@ SC_BANK_SELECTORS = {
 SECOND_SC_BANK_URL = 'https://www.standardchartered.co.kr/np/kr/pl/et/ExchangeRateP1.jsp'   # 자정이후, 주말에는 날짜변경 후 조회
 SECOND_SC_BANK_SELECTOR = '#TMP_RATE' # usd-krw, jpy-krw, eru-krw 모두 selector 같음 (2,3,4번째 값)
 SECOND_SC_BANK_PAIRS = ['usd-krw', 'jpy-krw', 'eur-krw']
-MAX_DAYS_LOOKBACK = 12  # 최대 조회 가능한 과거 날짜 수
 # SC제일은행 날짜 선택 selector (년/월/일 select 박스)
 YEAR_SELECTOR = "#_CUR_YEAR"
 MONTH_SELECTOR = "#_CUR_MONTH"
