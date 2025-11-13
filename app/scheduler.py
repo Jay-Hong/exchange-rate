@@ -808,8 +808,12 @@ def start_scheduler():
         misfire_grace_time=5
     )
 
-    # 제어 작업: 1분마다 모드 확인
-    scheduler.add_job(control_job, IntervalTrigger(minutes=1, timezone=KST), id="control_job")
+    # 제어 작업: 매시 0분 1초 모드 확인 (모드 전환은 정시에만 발생)
+    scheduler.add_job(
+        control_job,
+        CronTrigger(minute='0', second='1', timezone=KST),
+        id="control_job"
+    )
 
     # Queue 상태 모니터링: 10초마다 (포화 감지)
     scheduler.add_job(
