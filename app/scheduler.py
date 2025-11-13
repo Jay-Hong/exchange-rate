@@ -50,7 +50,13 @@ selenium_worker_task: asyncio.Task = None
 selenium_worker_last_heartbeat: float = time.time()
 selenium_worker_current_job: str = None
 
+# ═════════════════════════════════════════════════════════════
 # Queue 상태 캐시 (admin 페이지용)
+# ═════════════════════════════════════════════════════════════
+# Thread-safe: dict.update()는 GIL에 의해 atomic 보장
+# 읽기: admin API (GET /admin/api/queue-status)
+# 쓰기: report_queue_status() - 10초마다 1회 (line 688)
+# ─────────────────────────────────────────────────────────────
 queue_status_cache = {
     "size": 0,
     "max_size": 25,
@@ -72,11 +78,11 @@ queue_status_cache = {
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
-#     - IN: 20초마다 (Broadcasting 7초 전, 서로 10초 엇갈림)
-#     - OUT: 10분마다 (kb: 03,13,23..., hana: 00,10,20...)
+#     - IN: 20초마다 (Broadcasting 5초 전, 서로 10초 엇갈림)
+#     - OUT: 10분마다 (kb: 05,15,25..., hana: 00,10,20...)
 #   - woori, bs, citi: 일반, 빈도 낮음
-#     - IN: 60초마다 (Broadcasting 3초 전, 20초씩 엇갈림)
-#     - OUT: 60분마다 (woori: 17분, bs: 37분, citi: 57분)
+#     - IN: 60초마다 (Broadcasting 7초 전, 20초씩 엇갈림)
+#     - OUT: 60분마다 (woori: 13분, bs: 33분, citi: 53분)
 #   - 하이브리드: hana, woori, bs는 Request → Selenium 폴백 가능
 #
 # C Group: Selenium 기반 (Queue 순차 처리)
@@ -646,7 +652,7 @@ def cleanup_old_log_files():
 
 
 def cleanup_zombie_chrome_processes():
-    """좀비 Chrome 프로세스 정리 (3분 이상 실행된 프로세스 강제 종료)"""
+    """좀비 Chrome 프로세스 정리 (60초 이상 실행된 프로세스 강제 종료)"""
     try:
         # 함수 내부 import (psutil은 무거운 라이브러리, 필요 시에만 로드)
         import psutil
@@ -762,11 +768,10 @@ async def check_worker_health():
     Worker가 60초 이상 같은 작업을 처리하고 있으면 stuck 상태로 판단하여 재시작
 
     Note:
-        - asyncio.wait_for()는 blocking thread를 kill할 수 없음
-        - Worker가 Selenium에서 무한 대기 시 thread는 계속 살아있음
         - Worker Task를 cancel하고 재시작하면 Queue는 유지되고 Worker만 재생성됨
         - 작업 시작 시 heartbeat 업데이트 → 60초 임계값 (cleanup과 동일)
-        - 스케줄러에서 cleanup 먼저 실행 → Chrome 정리 후 health check
+        - Worker 재시작 시 cleanup을 무조건 호출 (794번 줄 이중 안전장치)
+        - subprocess 기반이므로 proc.kill()로 Chrome 포함 전체 프로세스 강제 종료 가능
     """
     global selenium_worker_task, selenium_worker_last_heartbeat, selenium_worker_current_job, selenium_queue
 
@@ -791,7 +796,7 @@ async def check_worker_health():
             )
 
             # ✅ 이중 안전장치: Worker 재시작 전에 Chrome 프로세스 무조건 정리
-            await cleanup_zombie_chrome_processes()
+            cleanup_zombie_chrome_processes()
 
             # Worker Task 강제 취소
             selenium_worker_task.cancel()

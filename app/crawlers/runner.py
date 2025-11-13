@@ -33,13 +33,14 @@ from app.crawlers import (
 
 # 크롤러 함수 매핑 (Selenium 기반만)
 CRAWLER_MAP = {
-    # 순수 Selenium 크롤러
+    # 순수 Selenium 크롤러 (scheduler.py에서 enqueue_selenium_job으로 호출)
     'shinhan': shinhan.crawl_and_save_shinhan_bank_exchange_rates,
     'ibk': ibk.crawl_and_save_ibk_bank_exchange_rates,
     'nh': nh.crawl_and_save_nh_bank_exchange_rates,
     'sc': sc.crawl_and_save_sc_bank_exchange_rates,
 
-    # Selenium 폴백 엔트리포인트 (hana, woori)
+    # Selenium 폴백 엔트리포인트 (현재 미사용, 향후 직접 호출용)
+    # hana, woori는 scheduler.py에서 Request 기반으로 등록되고 내부에서 자체 폴백
     'hana_selenium': hana.crawl_and_save_hana_routine_selenium_entrypoint,
     'woori_selenium': woori.crawl_and_save_woori_routine_selenium_entrypoint,
 }
