@@ -768,9 +768,10 @@ async def check_worker_health():
     Worker가 60초 이상 같은 작업을 처리하고 있으면 stuck 상태로 판단하여 재시작
 
     Note:
+        - Worker가 Queue 대기 중(current_job=None)일 때는 정상 상태로 간주
+        - 실제로 작업 처리 중일 때만 타임아웃 체크 (60초 임계값)
         - Worker Task를 cancel하고 재시작하면 Queue는 유지되고 Worker만 재생성됨
-        - 작업 시작 시 heartbeat 업데이트 → 60초 임계값 (cleanup과 동일)
-        - Worker 재시작 시 cleanup을 무조건 호출 (794번 줄 이중 안전장치)
+        - Worker 재시작 시 cleanup을 무조건 호출 (이중 안전장치)
         - subprocess 기반이므로 proc.kill()로 Chrome 포함 전체 프로세스 강제 종료 가능
     """
     global selenium_worker_task, selenium_worker_last_heartbeat, selenium_worker_current_job, selenium_queue
@@ -779,16 +780,24 @@ async def check_worker_health():
         if selenium_worker_task is None or selenium_queue is None:
             return
 
-        # 헬스체크: 마지막 heartbeat로부터 경과 시간 확인
+        # ═════════════════════════════════════════════════════════════
+        # Worker가 Queue 대기 중일 때는 정상 상태 (작업 없음)
+        # ═════════════════════════════════════════════════════════════
+        if selenium_worker_current_job is None:
+            logger.debug(f"💓 Worker 정상: Queue 대기 중 (작업 없음)")
+            return
+
+        # ═════════════════════════════════════════════════════════════
+        # 작업 처리 중일 때만 타임아웃 체크
+        # ═════════════════════════════════════════════════════════════
         elapsed = time.time() - selenium_worker_last_heartbeat
         max_job_time = 60  # 60초 (cleanup과 동일한 임계값)
 
         if elapsed > max_job_time:
-            current_job = selenium_worker_current_job or "unknown"
             logger.error(
-                f"🚨 Selenium Worker 멈춤 감지: {current_job} 작업이 {int(elapsed)}초 동안 완료 안됨 (최대: {max_job_time}초)",
+                f"🚨 Selenium Worker 멈춤 감지: {selenium_worker_current_job} 작업이 {int(elapsed)}초 동안 완료 안됨 (최대: {max_job_time}초)",
                 extra={
-                    "stuck_job": current_job,
+                    "stuck_job": selenium_worker_current_job,
                     "elapsed_seconds": int(elapsed),
                     "queue_size": selenium_queue.qsize(),
                     "action": "worker_restart"
@@ -816,14 +825,11 @@ async def check_worker_health():
                 extra={"queue_size": selenium_queue.qsize()}
             )
         else:
-            # 정상 상태
-            if selenium_worker_current_job:
-                logger.debug(
-                    f"💓 Worker 정상: [{selenium_worker_current_job}] 처리 중 ({int(elapsed)}초)",
-                    extra={"current_job": selenium_worker_current_job, "elapsed": int(elapsed)}
-                )
-            else:
-                logger.debug(f"💓 Worker 정상: 대기 중")
+            # 정상 상태 (작업 처리 중)
+            logger.debug(
+                f"💓 Worker 정상: [{selenium_worker_current_job}] 처리 중 ({int(elapsed)}초)",
+                extra={"current_job": selenium_worker_current_job, "elapsed": int(elapsed)}
+            )
 
     except Exception as e:
         logger.error("❌ Worker 헬스체크 실패", exc_info=True)
