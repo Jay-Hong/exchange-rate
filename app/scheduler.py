@@ -67,29 +67,59 @@ queue_status_cache = {
 }
 
 # ═════════════════════════════════════════════════════════════
-# 크롤러 그룹 정의 (2025-11-10 재설계)
+# 크롤러 그룹 정의 (2025-11-16 재설계 - 4단계 모드)
 # ═════════════════════════════════════════════════════════════
-# t3.small/medium 환경 최적화를 위한 3-Tier 스케줄링
+# 환율 고시 스케줄 기반 최적화 + 시스템 부하 분산
+#
+# 모드 분류:
+#   - IN: 월~금 08:00~24:00 (영업시간, 전체 크롤러 활성)
+#   - BREAK1: 화~토 00:00~03:00 (심야, shinhan/sc 제외)
+#   - BREAK2: 월 04:00~08:00, 화~금 03:00~08:00, 토 03:00~07:59 (개장 준비, woori/ibk/shinhan/sc 제외)
+#   - OUT: 토 08:00 ~ 월 03:59 (주말, 5개 은행만 유지)
+#
+# 각 은행 환율 고시 스케줄 (실제 운영 시간):
+#   - investing: 월 06:00 ~ 토 06:00 (외환 시장 글로벌 운영)
+#   - kb: 평일 08:30 ~ 익일(토 포함) 05:00
+#   - hana: 평일 08:30 ~ 익일(토 포함) 06:00 (주말 중 가끔 변동)
+#   - shinhan: 평일 08:00 ~ 당일 24:00 (자정 종료)
+#   - woori: 평일 08:30 ~ 익일 02:30
+#   - ibk: 평일 08:30 ~ 익일 02:30
+#   - nh: 평일 08:40 ~ 당일 24:00 (자정 이후/주말 가끔 고시)
+#   - sc: 평일 09:00 ~ 당일 24:00 (자정 종료)
+#   - bs: 평일 08:10 ~ 당일 24:00 (일요일 넘어갈 때 가끔 고시)
+#   - citi: 평일 09:00 ~ 익일(토 포함) 06:00
 #
 # A Group: investing (순수 Request)
 #   - 가장 중요한 기준 환율
-#   - IN: 10초마다 (Broadcasting 5초 전)
-#   - OUT: 10분마다 (매시간 05, 15, 25, 35, 45, 55분)
+#   - IN/BREAK1/BREAK2: 10초마다 (Broadcasting 3초 전)
+#   - OUT: 10분마다 (매시간 7,17,27,37,47,57분)
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
-#     - IN: 20초마다 (Broadcasting 5초 전, 서로 10초 엇갈림)
-#     - OUT: 10분마다 (kb: 05,15,25..., hana: 00,10,20...)
+#     - IN/BREAK1/BREAK2: 20초마다 (Broadcasting 5초 전, 서로 10초 엇갈림)
+#     - OUT: 10분마다 (kb: 5,15,25..., hana: 0,10,20...)
 #   - woori, bs, citi: 일반, 빈도 낮음
-#     - IN: 60초마다 (Broadcasting 7초 전, 20초씩 엇갈림)
-#     - OUT: 60분마다 (woori: 13분, bs: 33분, citi: 53분)
-#   - 하이브리드: hana, woori, bs는 Request → Selenium 폴백 가능
+#     - IN: 60초마다 (우선순위: woori(53초) > bs(33초) > citi(13초))
+#       * woori 우선순위 높음: 같은 1분 내 늦게 크롤링 → 사용자 표시 시간이 실제 변경 시간과 유사
+#     - BREAK1: woori(53초), bs(33초), citi(13초) 유지
+#     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 02:30 고시 종료)
+#     - OUT: bs만 유지 (60분마다, 33분)
+#   - 하이브리드: hana, woori, bs, citi는 Request → Selenium 폴백
 #
 # C Group: Selenium 기반 (Queue 순차 처리)
 #   - shinhan, ibk, nh, sc
-#   - IN: interval (33.3 ~ 150초, Broadcasting 독립)
-#   - OUT: cron (60분마다, 완전 분산)
-#   - ibk는 Request → Selenium 하이브리드 (시간대 체크)
+#   - 시스템 부하 감소 전략: Request(mibank) → Selenium 폴백 순서
+#     * shinhan, nh, sc: 항상 Request 먼저 시도
+#     * ibk: IN 모드(08:30~) Request 우선, BREAK1(00:00~03:00) Selenium만 사용
+#   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
+#   - BREAK1: ibk(34초), nh(54초)만 유지 (shinhan/sc는 자정 고시 종료)
+#   - BREAK2: nh(54초)만 유지 (ibk는 02:30 종료, shinhan/sc는 자정 종료)
+#   - OUT: nh(3분)만 유지 (자정 이후/주말 가끔 고시)
+#
+# BREAK1/BREAK2/OUT 모드 크롤러 축소 근거:
+#   - 환율 고시 종료 시간 이후 크롤러 제거 (리소스 절약)
+#   - 실제 운영 데이터 추적 관찰로 변동 없음 확인
+#   - Queue 압력 완화: Request 우선 전략으로 Selenium 사용 최소화
 # ─────────────────────────────────────────────────────────────
 
 # 현재 모드 상태 저장
@@ -391,16 +421,34 @@ async def shutdown_selenium_queue():
         logger.info("✅ Selenium Queue Worker 종료 완료")
 
 
-def is_in_time(now: datetime) -> bool:
-    """월요일 04:00 ~ 토요일 07:59 구간인지 판별"""
+def get_market_mode(now: datetime) -> str:
+    """
+    현재 시간대의 시장 모드 반환 (4단계 세분화)
+
+    Returns:
+        "OUT": 주말 (토 08:00 ~ 월 04:00)
+        "BREAK1": 자정~03시 (화~토 00:00~03:00)
+        "BREAK2": 03~08시 (월 04:00~08:00, 화~토 03:00~08:00)
+        "IN": 영업시간 (월~금 08:00~24:00)
+    """
     weekday = now.weekday()  # 월=0, 화=1 ... 일=6
     hour = now.hour
 
-    return (
-        (weekday == 0 and hour >= 4) or
-        (weekday in [1, 2, 3, 4]) or
-        (weekday == 5 and hour < 8)
-    )
+    # OUT: 토요일 08:00 이후, 일요일 전체, 월요일 04:00 전
+    if (weekday == 5 and hour >= 8) or (weekday == 6) or (weekday == 0 and hour < 4):
+        return "OUT"
+
+    # IN 모드 시간대 내에서 세분화
+    # BREAK1: 00:00~03:00 (화~토)
+    if hour < 3:
+        return "BREAK1"
+
+    # BREAK2: 03:00~08:00 (월 04:00~, 화~금 전체, 토 ~07:59)
+    if hour < 8:
+        return "BREAK2"
+
+    # IN: 나머지 (08:00~24:00)
+    return "IN"
 
 def make_selenium_job_wrapper(bank_name: str):
     """
@@ -429,11 +477,13 @@ def make_selenium_job_wrapper(bank_name: str):
 
 def switch_jobs(mode: str):
     """
-    모드에 따라 작업 재등록 (IN: cron 절대 시간, OUT: cron 시간 단위)
+    모드에 따라 작업 재등록 (4단계 세분화)
 
-    [2025-11-10 재설계]
-    - IN 모드: cron 절대 시간 동기화 (Broadcasting 동기화)
-    - OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개)
+    [2025-11-16 재설계]
+    - IN 모드: cron 절대 시간 동기화 (Broadcasting 동기화) - 월~금 08:00~24:00
+    - BREAK1 모드: 자정~03시 (화~토 00:00~03:00) - IN과 동일 스케줄
+    - BREAK2 모드: 03~08시 (월 04:00~08:00, 화~토 03:00~08:00) - IN과 동일 스케줄
+    - OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개) - 주말
     - Queue: C Group만 사용 (Selenium 전용)
     """
     # 기존 작업 제거
@@ -474,7 +524,7 @@ def switch_jobs(mode: str):
         # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
         scheduler.add_job(
             make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='13', timezone=KST),
+            CronTrigger(minute='*', second='53', timezone=KST),
             id='task_woori',
             max_instances=1,
             misfire_grace_time=30
@@ -488,51 +538,200 @@ def switch_jobs(mode: str):
         )
         scheduler.add_job(
             make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='*', second='53', timezone=KST),
+            CronTrigger(minute='*', second='13', timezone=KST),
             id='task_citi',
             max_instances=1,
             misfire_grace_time=30
         )
 
-        # C Group: Selenium (Queue 순차 처리, Broadcasting 독립)
+        # C Group: Selenium
         scheduler.add_job(
             make_selenium_job_wrapper('shinhan'),
-            IntervalTrigger(seconds=38.3, timezone=KST),
+            # IntervalTrigger(seconds=38.3, timezone=KST),
+            CronTrigger(minute='*', second='18', timezone=KST),
             id='task_shinhan',
             max_instances=1,
-            misfire_grace_time=25
+            # misfire_grace_time=25
+            misfire_grace_time=30
         )
         scheduler.add_job(
             make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
-            IntervalTrigger(seconds=55.5, timezone=KST),
+            # IntervalTrigger(seconds=55.5, timezone=KST),
+            CronTrigger(minute='*', second='34', timezone=KST),
             id='task_ibk',
             max_instances=1,
-            misfire_grace_time=25
+            # misfire_grace_time=25
+            misfire_grace_time=30
         )
         scheduler.add_job(
             make_selenium_job_wrapper('nh'),
-            IntervalTrigger(seconds=90, timezone=KST),
+            # IntervalTrigger(seconds=90, timezone=KST),
+            CronTrigger(minute='*', second='54', timezone=KST),
             id='task_nh',
             max_instances=1,
-            misfire_grace_time=60
+            # misfire_grace_time=60
+            misfire_grace_time=30
         )
         scheduler.add_job(
             make_selenium_job_wrapper('sc'),
-            IntervalTrigger(seconds=150, timezone=KST),
+            # IntervalTrigger(seconds=150, timezone=KST),
+            CronTrigger(minute='*', second='58', timezone=KST),
             id='task_sc',
             max_instances=1,
-            misfire_grace_time=90
+            # misfire_grace_time=90
+            misfire_grace_time=30
         )
 
-    else:  # OUT 모드
+    elif mode == "BREAK1":
         # ═════════════════════════════════════════════════════════════
-        # OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개)
+        # BREAK1 모드: 심야 시간대 (화~토 00:00~03:00)
         # ═════════════════════════════════════════════════════════════
+        # 제외 크롤러: shinhan, sc (자정에 환율 고시 종료)
+        # 유지 크롤러: investing, kb, hana, woori, bs, citi, ibk, nh (8개)
+        # ibk는 Selenium만 사용 (Request는 08:30 이후 가능)
+
+        # A Group: investing (3초 전)
+        scheduler.add_job(
+            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+            CronTrigger(second='7,17,27,37,47,57', timezone=KST),
+            id='task_investing',
+            max_instances=1,
+            misfire_grace_time=5
+        )
+
+        # B Group: kb, hana (5초 전, 10초 엇갈림)
+        scheduler.add_job(
+            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+            CronTrigger(second='15,35,55', timezone=KST),
+            id='task_kb',
+            max_instances=1,
+            misfire_grace_time=10
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(second='5,25,45', timezone=KST),
+            id='task_hana',
+            max_instances=1,
+            misfire_grace_time=10
+        )
+
+        # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
+        scheduler.add_job(
+            make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(minute='*', second='53', timezone=KST),
+            id='task_woori',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(minute='*', second='33', timezone=KST),
+            id='task_bs',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+            CronTrigger(minute='*', second='13', timezone=KST),
+            id='task_citi',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+
+        # C Group: Selenium
+        scheduler.add_job(
+            make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
+            # IntervalTrigger(seconds=55.5, timezone=KST),
+            CronTrigger(minute='*', second='34', timezone=KST),
+            id='task_ibk',
+            max_instances=1,
+            # misfire_grace_time=25
+            misfire_grace_time=30
+        )
+        scheduler.add_job(
+            make_selenium_job_wrapper('nh'),
+            # IntervalTrigger(seconds=90, timezone=KST),
+            CronTrigger(minute='*', second='54', timezone=KST),
+            id='task_nh',
+            max_instances=1,
+            # misfire_grace_time=60
+            misfire_grace_time=30
+        )
+
+    elif mode == "BREAK2":
+        # ═════════════════════════════════════════════════════════════
+        # BREAK2 모드: 개장 준비 시간대 (월 04:00~08:00, 화~토 03:00~08:00)
+        # ═════════════════════════════════════════════════════════════
+        # 제외 크롤러: woori, ibk (02:30 고시 종료), shinhan, sc (자정 종료)
+        # 유지 크롤러: investing, kb, hana, bs, citi, nh (6개)
+        # 08:30부터 대부분 은행 개장 준비 시작
+
+        # A Group: investing (3초 전)
+        scheduler.add_job(
+            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+            CronTrigger(second='7,17,27,37,47,57', timezone=KST),
+            id='task_investing',
+            max_instances=1,
+            misfire_grace_time=5
+        )
+
+        # B Group: kb, hana (5초 전, 10초 엇갈림)
+        scheduler.add_job(
+            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+            CronTrigger(second='15,35,55', timezone=KST),
+            id='task_kb',
+            max_instances=1,
+            misfire_grace_time=10
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(second='5,25,45', timezone=KST),
+            id='task_hana',
+            max_instances=1,
+            misfire_grace_time=10
+        )
+
+        # B Group: woori, bs, citi (7초 전)
+        scheduler.add_job(
+            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+            CronTrigger(minute='*', second='33', timezone=KST),
+            id='task_bs',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+        scheduler.add_job(
+            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+            CronTrigger(minute='*', second='13', timezone=KST),
+            id='task_citi',
+            max_instances=1,
+            misfire_grace_time=30
+        )
+
+        # C Group: Selenium
+        scheduler.add_job(
+            make_selenium_job_wrapper('nh'),
+            # IntervalTrigger(seconds=90, timezone=KST),
+            CronTrigger(minute='*', second='54', timezone=KST),
+            id='task_nh',
+            max_instances=1,
+            # misfire_grace_time=60
+            misfire_grace_time=30
+        )
+
+    elif mode == "OUT":
+        # ═════════════════════════════════════════════════════════════
+        # OUT 모드: 주말 시간대 (토 08:00 ~ 월 04:00)
+        # ═════════════════════════════════════════════════════════════
+        # 제외 크롤러: woori, ibk, shinhan, sc, citi (주말 환율 고시 없음)
+        # 유지 크롤러: investing, kb, hana, bs, nh (5개)
+        # - hana: 주말 중 가끔 변동
+        # - bs, nh: 일요일 넘어갈 때 가끔 고시
+        # 완전 분산 스케줄 (동시 실행 0개, 리소스 최소화)
 
         # A Group: investing (10분마다)
         scheduler.add_job(
             make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(minute='7,17,27,37,47,57', second='0', timezone=KST),
+            CronTrigger(minute='7,17,27,37,47,57', second='45', timezone=KST),
             id='task_investing',
             max_instances=1,
             misfire_grace_time=300
@@ -541,14 +740,14 @@ def switch_jobs(mode: str):
         # B Group: kb, hana (10분마다)
         scheduler.add_job(
             make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(minute='5,15,25,35,45,55', second='0', timezone=KST),
+            CronTrigger(minute='5,15,25,35,45,55', second='45', timezone=KST),
             id='task_kb',
             max_instances=1,
             misfire_grace_time=300
         )
         scheduler.add_job(
             make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),
-            CronTrigger(minute='0,10,20,30,40,50', second='0', timezone=KST),
+            CronTrigger(minute='0,10,20,30,40,50', second='45', timezone=KST),
             id='task_hana',
             max_instances=1,
             misfire_grace_time=300
@@ -556,53 +755,18 @@ def switch_jobs(mode: str):
 
         # B Group: woori, bs, citi (60분마다)
         scheduler.add_job(
-            make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),
-            CronTrigger(minute='13', second='0', timezone=KST),
-            id='task_woori',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
-        scheduler.add_job(
             make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
-            CronTrigger(minute='33', second='0', timezone=KST),
+            CronTrigger(minute='33', second='45', timezone=KST),
             id='task_bs',
             max_instances=1,
             misfire_grace_time=1800
         )
-        scheduler.add_job(
-            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='53', second='0', timezone=KST),
-            id='task_citi',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
 
-        # C Group: Selenium (60분마다, 완전 분산)
-        scheduler.add_job(
-            make_selenium_job_wrapper('shinhan'),
-            CronTrigger(minute='23', second='0', timezone=KST),
-            id='task_shinhan',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('ibk'),
-            CronTrigger(minute='43', second='0', timezone=KST),
-            id='task_ibk',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
+        # C Group: Selenium (60분마다)
         scheduler.add_job(
             make_selenium_job_wrapper('nh'),
-            CronTrigger(minute='3', second='0', timezone=KST),
+            CronTrigger(minute='3', second='45', timezone=KST),
             id='task_nh',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('sc'),
-            CronTrigger(minute='36', second='0', timezone=KST),
-            id='task_sc',
             max_instances=1,
             misfire_grace_time=1800
         )
@@ -616,10 +780,10 @@ def switch_jobs(mode: str):
     )
 
 def control_job():
-    """현재 시간대에 따라 모드 전환"""
+    """현재 시간대에 따라 모드 전환 (4단계: IN, BREAK1, BREAK2, OUT)"""
     global current_mode
     now = datetime.now(KST)
-    new_mode = "IN" if is_in_time(now) else "OUT"
+    new_mode = get_market_mode(now)
 
     if new_mode != current_mode:
         switch_jobs(new_mode)
@@ -839,8 +1003,8 @@ def start_scheduler():
     # ═════════════════════════════════════════════════════════════
     # WebSocket Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
     # ═════════════════════════════════════════════════════════════
-    # [2025-11-12] ADR-009 전제조건 구현: 크롤러 동기화 기준 시간
-    # - IN 모드 크롤러들은 Broadcasting 기준으로 스케줄링됨
+    # [2025-11-16] 4단계 모드 크롤러 동기화 기준 시간
+    # - IN/BREAK1/BREAK2 모드 크롤러들은 Broadcasting 기준으로 스케줄링됨
     # - A Group: 3초 전 (07,17,27,37,47,57초)
     # - B Group: 5초 또는 7초 전
     # - C Group: Broadcasting 독립 (interval)
@@ -856,7 +1020,8 @@ def start_scheduler():
         misfire_grace_time=5
     )
 
-    # 제어 작업: 매시 0분 1초 모드 확인 (모드 전환은 정시에만 발생)
+    # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
+    # - 모드 전환 시점: 00:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 08:00 (OUT), 월 04:00 (BREAK2)
     scheduler.add_job(
         control_job,
         CronTrigger(minute='0', second='1', timezone=KST),
@@ -910,10 +1075,10 @@ def start_scheduler():
     )
 
     # 로그 파일 정리: 매일 새벽 4시
-    scheduler.add_job(cleanup_old_log_files, CronTrigger(hour=4, minute=0, timezone=KST), id="cleanup_old_log_files")
+    scheduler.add_job(cleanup_old_log_files, CronTrigger(hour=3, minute=29, second=1, timezone=KST), id="cleanup_old_log_files")
 
     # 은행 데이터 정리: 매일 새벽 3시
-    scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=0, timezone=KST), id="cleanup_old_bank_data")
+    scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=30, second=1, timezone=KST), id="cleanup_old_bank_data")
 
     # 시작 시 즉시 모드 판별 및 등록
     control_job()

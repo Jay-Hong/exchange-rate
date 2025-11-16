@@ -197,7 +197,7 @@ def selenium_driver_context():
 
 def is_mibank_rate_reliable() -> bool:
     """
-    MIBANK의 IBK, SC, WOORI 은행 환율이 신뢰할 만한지 여부 판단
+    MIBANK 환율의 신뢰성 판단 (시간대별 조건부 실행)
 
     MIBANK는 평일 자정 이후 및 주말에는 영업일 마지막 환율(자정 직전)을
     제공하므로, 해당 시간대에는 부정확한 데이터로 간주합니다.
@@ -208,7 +208,8 @@ def is_mibank_rate_reliable() -> bool:
 
     Notes:
         - 주말이 아닌 일반 공휴일은 고려하지 못함
-        - IBK, SC, WOORI 크롤러에서 공통 사용
+        - BS, CITI, IBK, WOORI 크롤러에서 사용 (4개)
+        - KB, HANA, SC, SHINHAN, NH는 조건 없이 항상 mibank 시도 (5개)
         - Selenium 재시도 로직과 조합하여 공휴일 대응
 
     Examples:

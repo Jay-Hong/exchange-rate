@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT, MAX_DAYS_LOOKBACK
-from app.crawlers.utils import parse_rate_text, create_selenium_driver, is_mibank_rate_reliable, selenium_driver_context
+from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context
 
 BANK_NAME = 'sc'
 

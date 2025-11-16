@@ -112,8 +112,9 @@ timestamp  DATETIME (KST)
 
 ## 스케줄링 시스템
 
-> 💡 **최신 아키텍처:** 3-Tier 스케줄링 + Broadcasting 동기화 (2025-11-12)
+> 💡 **최신 아키텍처:** 4단계 모드 + 환율 고시 스케줄 기반 최적화 (2025-11-16)
 > 📖 **상세 기록:**
+> - [ADR-011](DECISIONS.md#adr-011-4단계-모드-환율-고시-스케줄-기반-최적화) - 4단계 모드 도입 (IN, BREAK1, BREAK2, OUT)
 > - [ADR-010](DECISIONS.md#adr-010-websocket-broadcasting-스케줄링-방식) - Broadcasting APScheduler cron job 전환
 > - [ADR-009](DECISIONS.md#adr-009-3-tier-스케줄링-아키텍처-t3smallmedium-최적화) - 3-Tier 크롤러 스케줄링
 > - [ADR-008](DECISIONS.md#adr-008-queue-압력-완화-전략-실시간성-vs-완전성) - Queue 압력 완화 + 실시간성 강화
@@ -122,22 +123,51 @@ timestamp  DATETIME (KST)
 > - Priority Queue + Timeout (2025-11-08) - [ADR-007](DECISIONS.md#adr-007-selenium-크롤러-우선순위-기반-실행-priority-queue--timeout)
 > - AsyncIO Queue 순차 실행 (2025-11-06) - [ADR-006](DECISIONS.md#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue)
 
-### 영업시간 자동 감지
+### 4단계 모드 자동 전환
 
-- **IN 모드**: 월요일 04:00 ~ 토요일 07:59
+- **IN 모드**: 월~금 08:00~24:00 (영업시간, 전체 크롤러 활성)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
   - 크롤러: cron 절대 시간 동기화 (Broadcasting 기준)
-- **OUT 모드**: 그 외 시간
+  - 10개 은행 전체 크롤링
+
+- **BREAK1 모드**: 화~토 00:00~03:00 (심야, 8개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
+  - 제외: shinhan, sc (자정에 환율 고시 종료)
+  - 유지: investing, kb, hana, woori, bs, citi, ibk, nh
+
+- **BREAK2 모드**: 월 04:00~08:00, 화~금 03:00~08:00, 토 03:00~07:59 (개장 준비, 6개 크롤러)
+  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
+  - 제외: woori, ibk (02:30 고시 종료), shinhan, sc (자정 종료)
+  - 유지: investing, kb, hana, bs, citi, nh
+
+- **OUT 모드**: 토 08:00 ~ 월 04:00 (주말, 5개 크롤러)
+  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
+  - 제외: woori, ibk, shinhan, sc, citi (주말 고시 없음)
+  - 유지: investing, kb, hana, bs, nh (주말 가끔 변동)
   - 크롤러: cron 시간 단위 (완전 분산, 동시 실행 0개)
 
-### 스케줄링 아키텍처 (2025-11-12 최종)
+### 은행별 환율 고시 스케줄
+
+| 은행 | 고시 시작 | 고시 종료 | 특이사항 |
+|------|----------|----------|---------|
+| **investing** | 월 06:00 | 토 06:00 | 외환 시장 글로벌 운영 |
+| **kb** | 평일 08:30 | 익일(토 포함) 05:00 | - |
+| **hana** | 평일 08:30 | 익일(토 포함) 06:00 | 주말 중 가끔 변동 |
+| **shinhan** | 평일 08:00 | 당일 24:00 | 자정 종료 |
+| **woori** | 평일 08:30 | 익일 02:30 | - |
+| **ibk** | 평일 08:30 | 익일 02:30 | - |
+| **nh** | 평일 08:40 | 당일 24:00 | 자정 이후/주말 가끔 고시 |
+| **sc** | 평일 09:00 | 당일 24:00 | 자정 종료 |
+| **bs** | 평일 08:10 | 당일 24:00 | 일요일 넘어갈 때 가끔 고시 |
+| **citi** | 평일 09:00 | 익일(토 포함) 06:00 | - |
+
+### 스케줄링 아키텍처 (2025-11-16 최종)
 
 **스케줄러:** APScheduler (AsyncIOScheduler)
 
 #### 1. WebSocket Broadcasting
 
-**실행 시점:** 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
+**실행 시점:** 매분 00, 10, 20, 30, 40, 50초 (정확한 시간, 모든 모드 동일)
 
 ```python
 # scheduler.py
@@ -153,47 +183,46 @@ scheduler.add_job(
 - 크롤러 동기화의 기준 시간
 - 변경사항 있을 때만 실제 전송
 
-#### 2. 3-Tier 크롤러 아키텍처
+#### 2. 3-Tier 크롤러 아키텍처 (4단계 모드)
 
 **Tier A (investing):** 기준 환율, 최우선
 - **특징**: 가장 중요한 데이터, 빠른 응답
 - **실행 방식**: Request 기반 (requests 라이브러리)
-- **IN 모드**: 10초마다 (Broadcasting 3초 전)
+- **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 3초 전)
   - `cron(second='7,17,27,37,47,57')`
-- **OUT 모드**: 10분마다
-  - `cron(minute='7,17,27,37,47,57', second='0')`
+- **OUT**: 10분마다
+  - `cron(minute='7,17,27,37,47,57', second='45')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
-- **실행 방식**: Request 기반 (일부 하이브리드 폴백)
-- **IN 모드**: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
+- **실행 방식**: Request 기반 (하이브리드 폴백: Request → Selenium)
+- **IN/BREAK1/BREAK2**: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
   - kb: `cron(second='15,35,55')`
   - hana: `cron(second='5,25,45')`
-  - woori: `cron(minute='*', second='13')`
+  - woori: `cron(minute='*', second='53')` (우선순위 높음, 늦게 크롤링)
   - bs: `cron(minute='*', second='33')`
-  - citi: `cron(minute='*', second='53')`
-- **OUT 모드**: 10-60분마다 (완전 분산)
-  - kb: `cron(minute='5,15,25,35,45,55')`
-  - hana: `cron(minute='0,10,20,30,40,50')`
-  - woori: `cron(minute='13')`
-  - bs: `cron(minute='33')`
-  - citi: `cron(minute='53')`
+  - citi: `cron(minute='*', second='13')`
+- **BREAK1**: woori, bs, citi 유지 (kb, hana도 유지)
+- **BREAK2**: bs, citi만 유지 (woori 02:30 종료)
+- **OUT**: bs만 유지 (60분마다, 33분 45초)
 
 **Tier C (shinhan, ibk, nh, sc):** Selenium, 순차 처리
-- **특징**: 메모리 집약적, 느림
+- **특징**: 메모리 집약적, Request→Selenium 폴백으로 부하 감소
 - **실행 방식**: AsyncIO PriorityQueue 순차 실행
-- **IN 모드**: interval (Broadcasting 독립)
-  - shinhan: `interval(38.3초)`
-  - ibk: `interval(55.5초)`
-  - nh: `interval(90초)`
-  - sc: `interval(150초)`
-- **OUT 모드**: 60분마다 (완전 분산)
-  - shinhan: `cron(minute='23')`
-  - ibk: `cron(minute='43')`
-  - nh: `cron(minute='3')`
-  - sc: `cron(minute='36')`
+- **부하 감소 전략**: Request(mibank) 먼저 시도 → 실패 시 Selenium 폴백
+  - shinhan, nh, sc: 항상 Request 우선
+  - ibk: IN 모드(08:30~) Request 우선, BREAK1(00:00~03:00) Selenium만 사용
+- **IN**: 매분 cron (Interval → Cron 전환으로 예측 가능성 향상)
+  - shinhan: `cron(minute='*', second='18')`
+  - ibk: `cron(minute='*', second='34')`
+  - nh: `cron(minute='*', second='54')`
+  - sc: `cron(minute='*', second='58')`
+- **BREAK1**: ibk(34초), nh(54초)만 유지 (shinhan/sc 자정 종료)
+- **BREAK2**: nh(54초)만 유지 (ibk 02:30 종료)
+- **OUT**: nh(3분 45초)만 유지 (자정 이후/주말 가끔 고시)
 
 **Selenium Queue 관리:**
+- **Request 우선 전략**: Queue 압력 대폭 감소 (대부분 Request 성공)
 - **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → ibk → nh → sc → shinhan)
 - **개별 타임아웃**: 크롤러별 45초 통일 (실시간성 우선)
 - **자동 재시도**: 실패 시 우선순위 +1000으로 재실행
@@ -210,33 +239,40 @@ scheduler.add_job(
 05초: hana
 07초: investing
 10초: Broadcasting
-13초: woori
+13초: citi
 15초: kb
 17초: investing
+18초: shinhan (Selenium Queue)
 20초: Broadcasting
 25초: hana
 27초: investing
 30초: Broadcasting
 33초: bs
+34초: ibk (Selenium Queue)
 35초: kb
 37초: investing
 40초: Broadcasting
 45초: hana
 47초: investing
 50초: Broadcasting
-53초: citi
+53초: woori (우선순위 높음)
+54초: nh (Selenium Queue)
 55초: kb
 57초: investing
+58초: sc (Selenium Queue)
 ```
 
 **특징:**
-- Broadcasting 직전(3-7초)에 크롤러 실행 → 최신 데이터 반영
+- Broadcasting 직전(3-7초)에 Request 크롤러 실행 → 최신 데이터 반영
+- woori는 citi보다 우선순위 높음: 53초 실행 → 사용자 표시 시간이 실제 변경 시간과 유사
+- Selenium 크롤러는 Queue 순차 처리 (Request 먼저 시도)
 - 최대 동시 실행: 1-2개 (Request 기반 크롤러만)
-- Selenium 크롤러는 Queue 순차 처리
 
 ### 설계 원칙
 
+- **환율 고시 스케줄 기반**: 은행별 실제 운영 시간에 맞춰 크롤러 활성화/비활성화
 - **Broadcasting 동기화**: 크롤러가 Broadcasting X초 전에 실행 → 실시간 반영
+- **Request 우선 전략**: Selenium 크롤러도 Request(mibank) 먼저 시도 → Queue 압력 감소
 - **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
 - **리소스 분산**: OUT 모드 동시 실행 0개 → CPU 스파이크 제거
 - **예측 가능성**: cron 절대 시간 → 매시간 같은 패턴

@@ -1,11 +1,14 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2025-11-14
+> 📅 **마지막 업데이트**: 2025-11-16
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
-> 🆕 **최근 변경**: Hana/Woori Selenium 폴백 subprocess 격리 ([ADR-012](DECISIONS.md#adr-012-selenium-폴백-subprocess-격리-chrome-프로세스-좀비화-방지))
+> 🆕 **최근 변경**:
+> - 4단계 모드 환율 고시 스케줄 기반 최적화 ([ADR-011](DECISIONS.md#adr-011-4단계-모드-환율-고시-스케줄-기반-최적화))
+> - NH/신한/SC 크롤러 Request→Selenium 폴백 순서 변경 (시스템 부하 감소)
 
 ## 목차
 - [개요](#개요)
+- [환율 고시 스케줄](#환율-고시-스케줄)
 - [크롤러 분류](#크롤러-분류)
 - [상세 가이드](#상세-가이드)
 - [트러블슈팅](#트러블슈팅)
@@ -15,7 +18,7 @@
 
 ## 개요
 
-각 은행 웹사이트의 **구조와 특성**에 따라 크롤링 방식이 다릅니다. 이 문서는 각 크롤러의 특수 로직과 주의사항을 정리합니다.
+각 은행 웹사이트의 **구조와 특성**, 그리고 **환율 고시 시간**에 따라 크롤링 방식과 스케줄이 다릅니다. 이 문서는 각 크롤러의 특수 로직, 환율 고시 시간, 그리고 주의사항을 정리합니다.
 
 ### 왜 통합하지 않았나?
 
@@ -26,52 +29,93 @@
 
 ---
 
+## 환율 고시 스케줄
+
+각 은행의 실제 환율 고시 운영 시간 (실제 데이터 추적 관찰 결과):
+
+| 은행 | 고시 시작 | 고시 종료 | BREAK1<br>(00:00~03:00) | BREAK2<br>(03:00~08:00) | OUT<br>(주말) |
+|------|----------|----------|------------------------|------------------------|--------------|
+| **investing** | 월 06:00 | 토 06:00 | ✅ | ✅ | ✅ |
+| **kb** | 평일 08:30 | 익일(토 포함) 05:00 | ✅ | ✅ | ✅ |
+| **hana** | 평일 08:30 | 익일(토 포함) 06:00 | ✅ | ✅ | ✅ (주말 가끔 변동) |
+| **shinhan** | 평일 08:00 | 당일 24:00 | ❌ (자정 종료) | ❌ | ❌ |
+| **woori** | 평일 08:30 | 익일 02:30 | ✅ | ❌ (02:30 종료) | ❌ |
+| **ibk** | 평일 08:30 | 익일 02:30 | ✅ | ❌ (02:30 종료) | ❌ |
+| **nh** | 평일 08:40 | 당일 24:00 | ✅ | ✅ | ✅ (가끔 고시) |
+| **sc** | 평일 09:00 | 당일 24:00 | ❌ (자정 종료) | ❌ | ❌ |
+| **bs** | 평일 08:10 | 당일 24:00 | ✅ | ✅ | ✅ (일요일 가끔) |
+| **citi** | 평일 09:00 | 익일(토 포함) 06:00 | ✅ | ✅ | ❌ |
+
+**크롤러 활성화 기준:**
+- ✅: 해당 시간대에 환율 고시 있음 → 크롤러 활성
+- ❌: 환율 고시 없음 → 크롤러 비활성 (리소스 절약)
+
+---
+
 ## 크롤러 분류
 
-### 📦 Group A: 표준 Requests (간단)
+### 📦 Group A: 순수 Request (Selenium 없음)
 
-| 은행 | 파일 | 특징 | 폴백 URL |
-|------|------|------|----------|
-| **KB국민** | `app/crawlers/kb.py` | requests + BeautifulSoup | 3개 (메인 → 서브 → mibank) |
-| **부산** | `app/crawlers/bs.py` | requests + BeautifulSoup | 3개 |
-| **씨티** | `app/crawlers/citi.py` | 국가 순서 동적 변경 처리 | 3개 |
-| **Investing** | `app/crawlers/investing.py` | JPY 스케일링 (×100) | 2개 |
+| 은행 | 파일 | 폴백 순서 | mibank 조건 |
+|------|------|----------|------------|
+| **Investing** | `app/crawlers/investing.py` | 메인 → 서브 | - |
+| **KB국민** | `app/crawlers/kb.py` | 메인 → 서브 → mibank | 조건 없음 (항상 시도) |
+| **부산** | `app/crawlers/bs.py` | 부산은행 → mibank | 평일 09:00~24:00만 허용 |
+| **씨티** | `app/crawlers/citi.py` | 씨티 메인 → 씨티 서브 → mibank | 평일 09:00~24:00만 허용 |
 
 **공통점**:
 - `requests.get()` + `BeautifulSoup` 사용
+- **Selenium 없음** (가장 빠르고 가벼움)
 - 정적 HTML 파싱
-- 폴백 URL 2-3개 지원
+
+**mibank 사용 패턴:**
+- **조건부 사용 (BS, CITI)**: `is_mibank_rate_reliable()` 함수로 시간대 체크 (평일 09:00~24:00만 허용)
+- **조건 없이 사용 (KB)**: 항상 mibank 시도
+- **배경**: mibank는 자정~09:00, 주말에는 영업일 마지막 환율(자정 직전)을 제공하여 부정확할 수 있음
 
 ---
 
-### 🔧 Group B: 기본 Selenium (동적 컨텐츠)
+### 🔧 Group B: 하이브리드 Request → Selenium 폴백
 
-| 은행 | 파일 | 특징 | 실행 방식 |
-|------|------|------|-----------|
-| **신한** | `app/crawlers/shinhan.py` | Selenium 필수 | AsyncIO Queue + subprocess |
-| **하나** | `app/crawlers/hana.py` | iframe 전환 필수 | Request → Selenium subprocess 폴백 |
+| 은행 | 파일 | 폴백 순서 | mibank 조건 |
+|------|------|----------|------------|
+| **하나** | `app/crawlers/hana.py` | Request → Selenium subprocess → mibank | 조건 없음 (항상 시도) |
+| **우리** | `app/crawlers/woori.py` | Request → Selenium subprocess → mibank | 평일 09:00~24:00만 허용 |
 
 **공통점**:
-- JavaScript 렌더링 필요
-- `WebDriverWait` + `EC.element_to_be_clickable()` 사용
-- **subprocess 격리**: 모든 Selenium 실행이 subprocess로 격리 (Chrome 좀비화 방지)
+- **Request 우선**: 빠른 응답 (80~90% 성공)
+- **Selenium 폴백**: Request 실패 시 자동 전환
+- **subprocess 격리**: Selenium 실행 시 Chrome 좀비화 방지
+- **시스템 부하 감소**: Request가 대부분 성공하므로 Queue 압력 최소화
+
+**mibank 사용 패턴:**
+- **조건부 사용 (WOORI)**: `is_mibank_rate_reliable()` 함수로 시간대 체크 (평일 09:00~24:00만 허용)
+- **조건 없이 사용 (HANA)**: 항상 mibank 시도 (3차 폴백)
 
 ---
 
-### ⚙️ Group C: 복잡한 특수 로직
+### ⚙️ Group C: Selenium Queue (Request 먼저 시도, 2025-11-16 변경)
 
-| 은행 | 파일 | 난이도 | 실행 방식 |
-|------|------|--------|-----------|
-| **NH (농협)** | `app/crawlers/nh.py` | ⭐⭐ | AsyncIO Queue + subprocess |
-| **IBK (기업)** | `app/crawlers/ibk.py` | ⭐⭐⭐ | Request → Selenium subprocess 폴백 (3회 재시도) |
-| **Woori (우리)** | `app/crawlers/woori.py` | ⭐⭐⭐⭐ | Request → Selenium subprocess 폴백 (날짜 변경) |
-| **SC (제일)** | `app/crawlers/sc.py` | ⭐⭐⭐⭐ | AsyncIO Queue + subprocess |
+| 은행 | 파일 | 폴백 순서 | mibank 조건 |
+|------|------|----------|------------|
+| **신한** | `app/crawlers/shinhan.py` | Request(mibank) → Selenium subprocess | 조건 없음 (항상 시도) |
+| **NH** | `app/crawlers/nh.py` | Request(mibank) → Selenium subprocess | 조건 없음 (항상 시도) |
+| **SC** | `app/crawlers/sc.py` | Request(mibank) → Selenium subprocess | 조건 없음 (항상 시도) |
+| **IBK** | `app/crawlers/ibk.py` | Request(mibank, 조건부) → Selenium subprocess | 평일 09:00~24:00만 허용 |
 
 **공통점**:
-- 영업시간 외 날짜 변경 필요 (IBK, Woori, SC)
-- AJAX 응답 감지 (페이지 갱신 대기)
-- MAX_DAYS_LOOKBACK (최대 10일) 과거 조회 (constants.py 중앙 관리)
-- **subprocess 격리**: 모든 Selenium 실행이 subprocess로 격리 (Chrome 좀비화 방지)
+- **Request(mibank) 우선**: 2025-11-16 변경, 시스템 부하 대폭 감소
+- **Selenium 폴백**: Request 실패 시 자동 전환
+- **AsyncIO Queue**: 순차 실행 (메모리 제어)
+- **subprocess 격리**: 모든 Selenium 실행이 subprocess로 격리
+- **영업시간 외 날짜 변경**: IBK, SC, Woori는 날짜 변경 로직 필요
+- **MAX_DAYS_LOOKBACK**: 최대 10일 과거 조회 (constants.py 중앙 관리)
+
+**mibank 조건부 사용 (IBK):**
+- `is_mibank_rate_reliable()` 함수로 시간대 체크 (평일 09:00~24:00만 허용)
+- **IN 모드 (08:30~24:00)**: Request(mibank) 우선 → Selenium 폴백
+- **BREAK1 모드 (00:00~03:00)**: Selenium만 사용 (mibank 차단)
+- **BREAK2/OUT 모드**: 크롤러 비활성 (02:30 고시 종료)
 
 ---
 
@@ -131,9 +175,10 @@
 #### 하나은행 (`app/crawlers/hana.py`)
 
 **핵심 로직:**
-- **3단계 폴백**: requests → **Selenium subprocess** → MIBANK
+- **3단계 폴백**: requests → **Selenium subprocess** → mibank
 - **Selenium 격리**: subprocess로 실행하여 Chrome 프로세스 좀비화 방지
 - **iframe 전환**: `driver.switch_to.frame()` 필수 (Selenium 폴백 시)
+- **mibank 최종 폴백**: 조건 없이 항상 시도
 
 **주의사항:**
 - iframe 전환 없으면 Selector 찾기 실패
@@ -209,23 +254,24 @@
 #### SC 제일은행 (`app/crawlers/sc.py`) ⭐⭐⭐⭐
 
 **핵심 로직:**
-- **AsyncIO Queue + subprocess**: 순차 실행 보장, Chrome 좀비화 방지
-- **3단계 폴백**: SC_BANK_URL (Selenium) → SECOND_SC_BANK_URL (날짜 변경) → MIBANK (조건부)
+- **3단계 폴백**: Request(mibank) → Selenium (SC_BANK_URL) → Selenium 날짜 변경 (SECOND_SC_BANK_URL)
+- **MIBANK 우선**: 조건 없이 항상 mibank를 먼저 시도 (2025-11-16 변경)
+- **AsyncIO Queue + subprocess**: Selenium 순차 실행 보장, Chrome 좀비화 방지
 - **AJAX 감지**: #TMP_RATE 개수 변화로 페이지 갱신 확인
 - **Alert 처리**: 조회 버튼 클릭 직후 1회 (자정/주말 "0회차" 메시지)
 - **과거 조회**: 어제부터 MAX_DAYS_LOOKBACK (10일) 순회
-- **MIBANK 조건부 실행**: 평일 09:00~24:00만 허용 (자정/주말 차단)
 
 **주의사항:**
 - Alert 미처리 시 크롤링 중단 → `driver.switch_to.alert.accept()` 필수
 - #TMP_RATE 개수 1개 = 데이터 없음, 2개 이상 = 정상 데이터
 - 날짜 변경 후 AJAX 대기 없으면 이전 데이터 오독
-- MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
 - subprocess로 격리 실행 (45초 타임아웃)
 
 **상세 코드:** `app/crawlers/sc.py:209-292` (crawl_past_date_rates 함수)
 **실행 방식:** `runner.py` 통해 subprocess 생성 → scheduler.py Queue에서 순차 처리
-**최근 리팩토링:** 2025-10-26 (Alert 처리 단일화, MIBANK 조건부 실행 추가)
+**최근 리팩토링:**
+- 2025-11-16: Request(mibank) 우선 전략 적용 ([ADR-013](DECISIONS.md#adr-013-4단계-모드-환율-고시-스케줄-기반-최적화))
+- 2025-10-26: Alert 처리 단일화
 
 ---
 
@@ -246,15 +292,18 @@
 - ChromeDriverManager로 자동 버전 관리
 
 #### `is_mibank_rate_reliable() -> bool`
-**기능**: MIBANK 환율 신뢰성 판단 (IBK, SC, WOORI 공통)
+**기능**: MIBANK 환율 신뢰성 판단 (시간대별 조건부 실행)
 - **반환값**:
   - `True`: 평일 09:00 ~ 24:00 (MIBANK 신뢰 가능)
   - `False`: 평일 00:00 ~ 09:00, 주말 (MIBANK 부정확)
 - **사용 이유**: MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확한 데이터
 - **한계**: 일반 공휴일은 고려 못함 (Selenium 재시도 로직으로 보완)
+- **사용 크롤러**: BS, CITI, IBK, WOORI (4개)
+- **미사용 크롤러**: KB, HANA, SC, SHINHAN, NH (조건 없이 항상 mibank 시도)
 
 **사용 예시**:
 ```python
+# BS, CITI, IBK, WOORI 크롤러에서 사용
 if is_mibank_rate_reliable():
     crawl_and_save_routine(MIBANK_URL, MIBANK_SELECTORS, db)
 else:
