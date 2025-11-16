@@ -46,12 +46,12 @@ def crawl_and_save_nh_bank_exchange_rates():
     """농협은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        logger.info("MIBANK_NH_URL 시도")
+        logger.info(f"MIBANK_NH_URL 시도", extra={"bank": BANK_NAME})
         crawl_and_save_routine(MIBANK_NH_URL, MIBANK_SELECTORS, db)
     except Exception as e:
         logger.exception("MIBANK_NH_URL 크롤링 실패", extra={"url": MIBANK_NH_URL})
         try:
-            logger.info("NH_BANK_URL 시도")
+            logger.info(f"NH_BANK_URL 시도", extra={"bank": BANK_NAME})
             crawl_and_save_nh_routine_selenium(NH_BANK_URL, NH_BANK_SELECTORS, db)
         except Exception as e:
             logger.exception("NH_BANK_URL 크롤링 실패", extra={"url": NH_BANK_URL})

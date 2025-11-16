@@ -42,14 +42,20 @@ def crawl_and_save_kb_bank_exchange_rates():
     db = SessionLocal()
 
     try:
+        logger.info(f"KB_BANK_URL 시도", extra={"bank": BANK_NAME})
         crawl_and_save_routine(KB_BANK_URL, KB_BANK_SELECTORS, db)
     except Exception as e:
+        logger.exception("KB_BANK_URL 크롤링 실패", extra={"url": KB_BANK_URL})
         try:
+            logger.info(f"SECOND_KB_BANK_URL 시도", extra={"bank": BANK_NAME})
             crawl_and_save_routine(SECOND_KB_BANK_URL, KB_BANK_SELECTORS, db)
         except Exception as e2:
+            logger.exception("SECOND_KB_BANK_URL 크롤링 실패", extra={"url": SECOND_KB_BANK_URL})
             try:
+                logger.info(f"MIBANK_KB_URL 시도", extra={"bank": BANK_NAME})
                 crawl_and_save_routine(MIBANK_KB_URL, MIBANK_SELECTORS, db)
             except Exception as e3:
+                logger.exception("MIBANK_KB_URL 크롤링 실패", extra={"url": MIBANK_KB_URL})
                 error_msg = f"모든 URL 실패: {str(e3)[:100]}"
                 logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
     finally:

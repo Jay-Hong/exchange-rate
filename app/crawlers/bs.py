@@ -47,6 +47,7 @@ def crawl_and_save_bs_bank_exchange_rates():
     """부산은행 환율 크롤링"""
     db = SessionLocal()
     try:
+        logger.info(f"BS_BANK_URL 시도", extra={"bank": BANK_NAME})
         crawl_and_save_routine(BS_BANK_URL, BS_BANK_SELECTORS, db)
     except Exception as e:
         logger.exception("BS_BANK_URL 크롤링 실패", extra={"url": BS_BANK_URL})
@@ -54,7 +55,7 @@ def crawl_and_save_bs_bank_exchange_rates():
         # 2차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
         if is_mibank_rate_reliable():
             try:
-                logger.info("MIBANK_BS_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                logger.info(f"HANAMIBANK_BS_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)", extra={"bank": BANK_NAME})
                 crawl_and_save_routine(MIBANK_BS_URL, MIBANK_SELECTORS, db)
             except Exception as e2:
                 logger.exception("MIBANK_BS_URL 크롤링 실패", extra={"url": MIBANK_BS_URL})

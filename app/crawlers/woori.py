@@ -60,13 +60,14 @@ def crawl_and_save_woori_bank_exchange_rates():
     """우리은행 환율 크롤링 (Request → Selenium subprocess 폴백)"""
     db = SessionLocal()
     try:
+        logger.info(f"WOORI_BANK_URL 시도", extra={"bank": BANK_NAME})
         # 1차 시도: Request 기반 (빠름)
         crawl_and_save_routine(WOORI_BANK_URL, WOORI_BANK_SELECTORS, db)
     except Exception as e:
         logger.exception("WOORI_BANK_URL 크롤링 실패", extra={"url": WOORI_BANK_URL})
         try:
             # 2차 시도: Selenium → subprocess로 격리 실행 (타임아웃 보장)
-            logger.info("SECOND_WOORI_BANK_URL 시도 (Selenium subprocess)")
+            logger.info(f"SECOND_WOORI_BANK_URL 시도 (Selenium subprocess)", extra={"bank": BANK_NAME})
             _run_selenium_subprocess_fallback('woori_selenium', timeout=45)
             logger.info("✅ Selenium subprocess 성공")
         except Exception as e:
@@ -75,7 +76,7 @@ def crawl_and_save_woori_bank_exchange_rates():
             # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
             if is_mibank_rate_reliable():
                 try:
-                    logger.info("MIBANK_WOORI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                    logger.info(f"MIBANK_WOORI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)", extra={"bank": BANK_NAME})
                     crawl_and_save_routine(MIBANK_WOORI_URL, MIBANK_SELECTORS, db)
                 except Exception as e2:
                     logger.exception("MIBANK_WOORI_URL 크롤링 실패", extra={"url": MIBANK_WOORI_URL})

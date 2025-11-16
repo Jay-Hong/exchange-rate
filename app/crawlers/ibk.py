@@ -54,7 +54,7 @@ def crawl_and_save_ibk_bank_exchange_rates():
             return
 
         # 2차 시도: Selenium (날짜 변경 필요 - 자정/공휴일) - 최대 3회 재시도
-        logger.info(f"➡️ {BANK_NAME} Selenium으로 전환 (환율 데이터 없음)")
+        logger.info(f"➡️ {BANK_NAME} Selenium으로 전환 (환율 데이터 없음)", extra={"bank": BANK_NAME})
         for attempt in range(3):
             try:
                 crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
@@ -73,7 +73,7 @@ def crawl_and_save_ibk_bank_exchange_rates():
         # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함 ← Selenium 3회 재시도로 커버)
         if is_mibank_rate_reliable():
             try:
-                logger.info("MIBANK_IBK_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                logger.info(f"MIBANK_IBK_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)", extra={"bank": BANK_NAME})
                 crawl_and_save_routine(MIBANK_IBK_URL, MIBANK_SELECTORS, db)
             except Exception as e2:
                 logger.exception("MIBANK_IBK_URL 크롤링 실패", extra={"url": MIBANK_IBK_URL})
@@ -97,6 +97,7 @@ def try_crawl_with_requests(db: Session) -> bool:
     Returns: 성공 여부 (True: 성공, False: 실패)
     """
     try:
+        logger.info(f"IBK_BANK_URL 시도", extra={"bank": BANK_NAME})
         response = requests.get(IBK_BANK_URL, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')

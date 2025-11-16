@@ -51,17 +51,17 @@ def crawl_and_save_shinhan_bank_exchange_rates():
     """신한은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        logger.info("MIBANK_SHINHAN_URL 시도")
+        logger.info(f"MIBANK_SHINHAN_URL 시도", extra={"bank": BANK_NAME})
         crawl_and_save_routine(MIBANK_SHINHAN_URL, MIBANK_SELECTORS, db)
     except Exception as e:
-        logger.exception("MIBANK_SHINHAN_URL 크롤링 실패", extra={"url": MIBANK_SELECTORS})
+        logger.exception("MIBANK_SHINHAN_URL 크롤링 실패", extra={"url": MIBANK_SHINHAN_URL})
         try:
-            logger.info("SHINHAN_BANK_URL 시도")
+            logger.info(f"SHINHAN_BANK_URL 시도", extra={"bank": BANK_NAME})
             crawl_and_save_routine_selenium(SHINHAN_BANK_URL, SHINHAN_BANK_SELECTORS, db)
         except Exception as e:
             logger.exception("SHINHAN_BANK_URL 크롤링 실패", extra={"url": SHINHAN_BANK_URL})
             try:
-                logger.info("SECOND_SHINHAN_BANK_URL 시도")
+                logger.info(f"SECOND_SHINHAN_BANK_URL 시도", extra={"bank": BANK_NAME})
                 crawl_and_save_routine_selenium(SECOND_SHINHAN_BANK_URL, SECOND_SHINHAN_BANK_SELECTORS, db)
             except Exception as e:
                 logger.exception("SECOND_SHINHAN_BANK_URL 크롤링 실패", extra={"url": SECOND_SHINHAN_BANK_URL})

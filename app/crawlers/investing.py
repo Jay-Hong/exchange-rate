@@ -36,14 +36,16 @@ def crawl_and_save_investing_exchange_rates():
     db = SessionLocal()
 
     try:
+        logger.info(f"FIRST_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
         crawl_and_save_routine(FIRST_INVESTING_URL, INVESTING_SELECTORS, db)
 
     except Exception as e:
-        # 첫 번째 URL 실패 → 두 번째 URL 시도
+        logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": FIRST_INVESTING_URL})
         try:
+            logger.info(f"SECOND_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
             crawl_and_save_routine(SECOND_INVESTING_URL, INVESTING_SELECTORS, db)
         except Exception as e2:
-            # 두 번째 URL도 실패 → 에러 기록
+            logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": SECOND_INVESTING_URL})
             error_msg = f"모든 URL 실패: {str(e2)[:100]}"
             logger.exception("❌ Investing 크롤링 실패 (모든 URL)", extra={"error": error_msg})
 

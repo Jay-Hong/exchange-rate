@@ -54,20 +54,21 @@ def crawl_and_save_hana_bank_exchange_rates():
     """하나은행 환율 크롤링 (Request → Selenium subprocess 폴백)"""
     db = SessionLocal()
     try:
+        logger.info(f"HANA_BANK_URL 시도", extra={"bank": BANK_NAME})
         # 1차 시도: Request 기반 (빠름)
         crawl_and_save_routine(HANA_BANK_URL, HANA_BANK_SELECTORS, db)
     except Exception as e:
         logger.exception("HANA_BANK_URL 크롤링 실패", extra={"url": HANA_BANK_URL})
         try:
             # 2차 시도: Selenium → subprocess로 격리 실행 (타임아웃 보장)
-            logger.info("SECOND_HANA_BANK_URL 시도 (Selenium subprocess)")
+            logger.info(f"SECOND_HANA_BANK_URL 시도 (Selenium subprocess)", extra={"bank": BANK_NAME})
             _run_selenium_subprocess_fallback('hana_selenium', timeout=45)
             logger.info("✅ Selenium subprocess 성공")
         except Exception as e:
             logger.exception("SECOND_HANA_BANK_URL 크롤링 실패", extra={"url": SECOND_HANA_BANK_URL})
             try:
                 # 3차 시도: MIBANK (Request 기반)
-                logger.info("MIBANK_HANA_URL 시도")
+                logger.info(f"MIBANK_HANA_URL 시도", extra={"bank": BANK_NAME})
                 crawl_and_save_routine(MIBANK_HANA_URL, MIBANK_SELECTORS, db)
             except Exception as e:
                 logger.exception("MIBANK_HANA_URL 크롤링 실패", extra={"url": MIBANK_HANA_URL})

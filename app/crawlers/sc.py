@@ -56,7 +56,7 @@ def crawl_and_save_sc_bank_exchange_rates():
     """SC제일은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        logger.info("MIBANK_SC_URL 시도")
+        logger.info(f"MIBANK_SC_URL 시도", extra={"bank": BANK_NAME})
         crawl_and_save_routine(MIBANK_SC_URL, MIBANK_SELECTORS, db)
         
     except Exception as e:
@@ -68,7 +68,7 @@ def crawl_and_save_sc_bank_exchange_rates():
         except Exception as e:
             logger.exception("SC_BANK_URL 크롤링 실패", extra={"url": SC_BANK_URL})
             try:
-                logger.info("SECOND_SC_BANK_URL 시도")
+                logger.info(f"SECOND_SC_BANK_URL 시도", extra={"bank": BANK_NAME})
                 # 아래를 나중에시도하는 이유 : Main으로 두었을때 가끔 환율조회가 안되어 - '#TMP_RATE' selector가 하나만 나타나 - 전날 환율이 저장 됨
                 crawl_and_save_sc_second_routine_selenium(SECOND_SC_BANK_URL, SECOND_SC_BANK_SELECTOR, db)
             except Exception as e2:
