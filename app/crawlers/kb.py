@@ -53,7 +53,7 @@ def crawl_and_save_kb_bank_exchange_rates():
                 error_msg = f"모든 URL 실패: {str(e3)[:100]}"
                 logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
     finally:
-        db.close()    
+        db.close()
 
 
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:

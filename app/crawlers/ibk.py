@@ -89,7 +89,7 @@ def crawl_and_save_ibk_bank_exchange_rates():
             )
             # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 IBK 환율 표시
     finally:
-        db.close()    
+        db.close()
 
 
 def try_crawl_with_requests(db: Session) -> bool:
@@ -188,10 +188,6 @@ def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) 
             else:
                 raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
-    except RuntimeError:
-        # 세마포어 획득 실패 → 폴백 URL로
-        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
-        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:

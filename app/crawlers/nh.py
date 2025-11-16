@@ -46,18 +46,19 @@ def crawl_and_save_nh_bank_exchange_rates():
     """농협은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        crawl_and_save_nh_routine_selenium(NH_BANK_URL, NH_BANK_SELECTORS, db)
+        logger.info("MIBANK_NH_URL 시도")
+        crawl_and_save_routine(MIBANK_NH_URL, MIBANK_SELECTORS, db)
     except Exception as e:
-        logger.exception("NH_BANK_URL 크롤링 실패", extra={"url": NH_BANK_URL})
+        logger.exception("MIBANK_NH_URL 크롤링 실패", extra={"url": MIBANK_NH_URL})
         try:
-            logger.info("MIBANK_NH_URL 시도")
-            crawl_and_save_routine(MIBANK_NH_URL, MIBANK_SELECTORS, db)
+            logger.info("NH_BANK_URL 시도")
+            crawl_and_save_nh_routine_selenium(NH_BANK_URL, NH_BANK_SELECTORS, db)
         except Exception as e:
-            logger.exception("MIBANK_NH_URL 크롤링 실패", extra={"url": MIBANK_NH_URL})
+            logger.exception("NH_BANK_URL 크롤링 실패", extra={"url": NH_BANK_URL})
             error_msg = f"모든 URL 실패: {str(e)[:100]}"
             logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
     finally:
-        db.close()    
+        db.close()
 
 
 def crawl_and_save_nh_routine_selenium(url: str, selectors: dict, db: Session) -> int:
@@ -93,10 +94,6 @@ def crawl_and_save_nh_routine_selenium(url: str, selectors: dict, db: Session) -
             else:
                 raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
-    except RuntimeError:
-        # 세마포어 획득 실패 → 폴백 URL로
-        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
-        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:

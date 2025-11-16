@@ -56,37 +56,27 @@ def crawl_and_save_sc_bank_exchange_rates():
     """SC제일은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        crawl_and_save_routine_selenium(SC_BANK_URL, SC_BANK_SELECTORS, db)
+        logger.info("MIBANK_SC_URL 시도")
+        crawl_and_save_routine(MIBANK_SC_URL, MIBANK_SELECTORS, db)
+        
     except Exception as e:
-        # 아래를 logger.exception으로 하지 않은이유 : 자정 이후/주말에는 이 URL이 안됨
-        logger.info("SC_BANK_URL 크롤링 실패", extra={"url": SECOND_SC_BANK_URL})
+        logger.info("MIBANK_SC_URL 크롤링 실패", extra={"url": MIBANK_SC_URL})
         try:
-            logger.info("SECOND_SC_BANK_URL 시도")
-            # 아래를 두번째로 시도하는 이유 : Main으로 두었을때 가끔 환율조회가 안되어 - '#TMP_RATE' selector가 하나만 나타나 - 전날 환율이 저장 됨
-            crawl_and_save_sc_second_routine_selenium(SECOND_SC_BANK_URL, SECOND_SC_BANK_SELECTOR, db)
+            # 아래를 logger.exception으로 하지 않은이유 : 자정 이후/주말에는 이 URL이 안됨
+            logger.info("SC_BANK_URL 시도")
+            crawl_and_save_routine_selenium(SC_BANK_URL, SC_BANK_SELECTORS, db)
         except Exception as e:
-            logger.exception("SECOND_SC_BANK_URL 크롤링 실패", extra={"url": SC_BANK_URL})
-
-            # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
-            if is_mibank_rate_reliable():
-                try:
-                    logger.info("MIBANK_SC_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
-                    crawl_and_save_routine(MIBANK_SC_URL, MIBANK_SELECTORS, db)
-                except Exception as e2:
-                    logger.exception("MIBANK_SC_URL 크롤링 실패", extra={"url": MIBANK_SC_URL})
-                    error_msg = f"모든 URL 실패: {str(e2)[:100]}"
-                    logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
-            else:
-                logger.warning(
-                    f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
-                    extra={
-                        "reason": "is_mibank_rate_reliable & selenium failed",
-                        "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
-                    }
-                )
-                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 SC 환율 표시
+            logger.exception("SC_BANK_URL 크롤링 실패", extra={"url": SC_BANK_URL})
+            try:
+                logger.info("SECOND_SC_BANK_URL 시도")
+                # 아래를 나중에시도하는 이유 : Main으로 두었을때 가끔 환율조회가 안되어 - '#TMP_RATE' selector가 하나만 나타나 - 전날 환율이 저장 됨
+                crawl_and_save_sc_second_routine_selenium(SECOND_SC_BANK_URL, SECOND_SC_BANK_SELECTOR, db)
+            except Exception as e2:
+                logger.exception("SECOND_SC_BANK_URL 크롤링 실패", extra={"url": SECOND_SC_BANK_URL})
+                error_msg = f"모든 URL 실패: {str(e2)[:100]}"
+                logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
     finally:
-        db.close()    
+        db.close()
 
 
 def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> int:
@@ -119,10 +109,6 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
             else:
                 raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
-    except RuntimeError:
-        # 세마포어 획득 실패 → 폴백 URL로
-        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
-        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:
@@ -180,10 +166,6 @@ def crawl_and_save_sc_second_routine_selenium(url: str, selector: str, db: Sessi
             else:
                 raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
 
-    except RuntimeError:
-        # 세마포어 획득 실패 → 폴백 URL로
-        logger.warning(f"⏸️ Selenium 세마포어 busy, 폴백 URL 시도", extra={"url": url, "bank": BANK_NAME})
-        raise
     except Exception as e:
         error_msg = str(e)
         if "환율 데이터 추출 실패" in error_msg:

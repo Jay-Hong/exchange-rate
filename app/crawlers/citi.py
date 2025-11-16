@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
-from app.crawlers.utils import parse_rate_text
+from app.crawlers.utils import parse_rate_text, is_mibank_rate_reliable
 
 BANK_NAME = 'citi'
 
@@ -54,20 +54,33 @@ def crawl_and_save_citi_bank_exchange_rates():
         crawl_and_save_citi_first_routine(CITI_BANK_URL, CITI_BANK_SELECTORS, db)
     except Exception as e:
         logger.exception("CITI_BANK_URL 크롤링 실패", extra={"url": CITI_BANK_URL})
+        
         try:
             logger.info("SECOND_CITI_BANK_URL 시도")
             crawl_and_save_routine(SECOND_CITI_BANK_URL, SECOND_CITI_BANK_SELECTORS, db)
         except Exception as e:
             logger.exception("SECOND_CITI_BANK_URL 크롤링 실패", extra={"url": SECOND_CITI_BANK_URL})
-            try:
-                logger.info("MIBANK_CITI_URL 시도")
-                crawl_and_save_routine(MIBANK_CITI_URL, MIBANK_SELECTORS, db)
-            except Exception as e:
-                logger.exception("MIBANK_CITI_URL 크롤링 실패", extra={"url": MIBANK_CITI_URL})
-                error_msg = f"모든 URL 실패: {str(e)[:100]}"
-                logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+            
+            # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
+            if is_mibank_rate_reliable():
+                try:
+                    logger.info("MIBANK_CITI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)")
+                    crawl_and_save_routine(MIBANK_CITI_URL, MIBANK_SELECTORS, db)
+                except Exception as e:
+                    logger.exception("MIBANK_CITI_URL 크롤링 실패", extra={"url": MIBANK_CITI_URL})
+                    error_msg = f"모든 URL 실패: {str(e)[:100]}"
+                    logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+            else:
+                logger.warning(
+                    f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말)",
+                    extra={
+                        "reason": "is_mibank_rate_reliable failed",
+                        "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
+                    }
+                )
+                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 BS 환율 표시
     finally:
-        db.close()    
+        db.close()
 
 
 def crawl_and_save_citi_first_routine(url: str, selectors: dict, db: Session) -> int:

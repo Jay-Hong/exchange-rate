@@ -48,7 +48,7 @@ def crawl_and_save_investing_exchange_rates():
             logger.exception("❌ Investing 크롤링 실패 (모든 URL)", extra={"error": error_msg})
 
     finally:
-        db.close()    
+        db.close()
 
 
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:

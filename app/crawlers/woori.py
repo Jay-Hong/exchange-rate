@@ -145,7 +145,7 @@ def crawl_and_save_woori_routine_selenium_entrypoint():
     try:
         return crawl_and_save_woori_routine_selenium(SECOND_WOORI_BANK_URL, SECOND_WOORI_BANK_SELECTORS, db)
     finally:
-        db.close()    
+        db.close()
 
 
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
