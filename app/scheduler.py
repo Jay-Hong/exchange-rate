@@ -1074,10 +1074,10 @@ def start_scheduler():
         max_instances=1  # 동시 실행 방지
     )
 
-    # 로그 파일 정리: 매일 새벽 4시
+    # 로그 파일 정리: 매일 새벽 03:29:01시
     scheduler.add_job(cleanup_old_log_files, CronTrigger(hour=3, minute=29, second=1, timezone=KST), id="cleanup_old_log_files")
 
-    # 은행 데이터 정리: 매일 새벽 3시
+    # 은행 데이터 정리: 매일 새벽 03:30:01시
     scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=30, second=1, timezone=KST), id="cleanup_old_bank_data")
 
     # 시작 시 즉시 모드 판별 및 등록

@@ -69,6 +69,8 @@
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (BackgroundScheduler)
 - **크롤링**: requests + BeautifulSoup4, Selenium
+- **SSL/TLS**: Let's Encrypt (Certbot 자동 갱신, 90일 주기)
+- **리버스 프록시**: Nginx (HTTPS, HTTP/2, wss://)
 
 ### 프론트엔드
 
@@ -78,8 +80,11 @@
 
 ### 실시간 통신
 
-- WebSocket (매분 00, 10, 20, 30, 40, 50초 정확한 시간 브로드캐스트)
-- Ping/Pong 하트비트 (30초)
+- **프로토콜**: WebSocket Secure (wss://)
+- **도메인**: https://fxi.n-e.kr
+- **브로드캐스트**: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
+- **하트비트**: Ping/Pong (30초)
+- **암호화**: TLS 1.2 & 1.3
 
 ## 데이터베이스 스키마
 
@@ -517,10 +522,13 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 ## 보안 고려사항
 
-- [ ] HTTPS 강제 (Let's Encrypt)
-- [ ] CORS 설정 (특정 도메인만 허용)
-- [ ] API Rate Limiting
+- [x] **HTTPS/SSL 적용** (Let's Encrypt, 2025-11-17)
+  - 도메인: `fxi.n-e.kr`
+  - 자동 갱신: Systemd Timer (매일 KST 04:30, 05:30)
+  - TLS 1.2 & 1.3, HSTS 헤더 (1년)
 - [x] **민감 정보 환경 변수화** (python-dotenv, .env 파일)
+- [ ] CORS 설정 (특정 도메인만 허용)
+- [ ] API Rate Limiting (현재: Nginx 3 req/s)
 
 ## 관리자 페이지 (/admin)
 

@@ -1522,6 +1522,142 @@ CronTrigger(minute='*', second='18', timezone=KST)  # 매분 18초 정확히
 
 ---
 
+## ADR-014: HTTPS/SSL 도입 (Let's Encrypt)
+
+**날짜:** 2025-11-17
+**상태:** 수락됨
+
+### 상황
+
+iOS ATS(App Transport Security)로 인해 HTTP WebSocket(`ws://`)이 차단되어 네이티브 앱에서 실시간 통신이 불가능한 상황. 또한 HTTP 프로토콜 사용 시 다음과 같은 보안 문제 발생:
+- 관리자 페이지 Basic Auth 비밀번호 평문 노출
+- 환율 데이터 중간자 공격(Man-in-the-Middle) 취약성
+- 브라우저 보안 경고 표시
+
+### 고려 사항
+
+**1. Let's Encrypt (무료 SSL)**
+- ✅ 무료, 자동 갱신 (90일 주기)
+- ✅ 모든 브라우저/OS 신뢰
+- ✅ Certbot으로 자동화 가능
+- ⚠️ Rate Limit (도메인당 주 50개)
+- ⚠️ 90일마다 갱신 필요 (자동화 필수)
+
+**2. Cloudflare Tunnel**
+- ✅ 무료, 자동 HTTPS
+- ✅ DDoS 보호, CDN 포함
+- ✅ 도메인 자동 제공
+- ❌ Cloudflare 플랫폼 종속성
+- ❌ WebSocket 지연 증가 가능성
+- ❌ Origin 서버 제어권 제한
+
+**3. 자체 서명 인증서 (Self-Signed)**
+- ✅ 즉시 사용 가능
+- ✅ 비용 없음
+- ❌ 브라우저 경고 표시 ("연결이 안전하지 않음")
+- ❌ iOS ATS 차단 (앱에서 사용 불가)
+- ❌ 사용자 신뢰도 하락
+
+**4. 유료 SSL 인증서**
+- ✅ 1~3년 유효기간 (갱신 주기 길음)
+- ✅ Extended Validation 옵션
+- ❌ 연간 비용 ($50~300)
+- ❌ 수동 갱신 필요
+
+---
+
+### 결정
+
+**Let's Encrypt + Certbot 자동 갱신 채택**
+
+**근거:**
+1. **iOS/Android 필수 요구사항**: ATS 정책으로 HTTPS 필수
+2. **무료 + 신뢰성**: 업계 표준, 전 세계 수백만 사이트 사용
+3. **자동 갱신**: Systemd Timer로 완전 자동화 (유지보수 부담 없음)
+4. **독립성**: 외부 플랫폼 종속성 없음 (Cloudflare vs Let's Encrypt)
+
+### 구현 세부사항
+
+**도메인:**
+- `fxi.n-e.kr` (기존 `fxi.kro.kr`은 Rate Limit 초과)
+
+**인증서:**
+- Let's Encrypt (90일 유효)
+- `/etc/letsencrypt/live/fxi.n-e.kr/fullchain.pem`
+- `/etc/letsencrypt/live/fxi.n-e.kr/privkey.pem`
+
+**자동 갱신:**
+- Systemd Timer: 매일 KST 04:30, 05:30 검사
+- 만료 30일 전부터 갱신 시작
+- Deploy Hook: 갱신 성공 시 Nginx 자동 재시작
+
+**Nginx 설정:**
+- HTTP (포트 80): HTTPS로 301 리다이렉트
+- HTTPS (포트 443): TLS 1.2 & 1.3
+- ACME Challenge: `/.well-known/acme-challenge/` 경로 (갱신용)
+- HSTS 헤더: 1년, includeSubDomains
+
+**Docker 배포:**
+- 포트: 80, 443 노출
+- 볼륨 마운트: `/etc/letsencrypt` (호스트 → 컨테이너)
+- WebSocket: `wss://` 지원 (X-Forwarded-Proto: https)
+
+### 트레이드오프
+
+| 항목 | HTTP (Before) | HTTPS (After) |
+|------|---------------|---------------|
+| **iOS 앱** | ❌ 작동 불가 (ATS 차단) | ✅ 정상 작동 |
+| **보안** | ❌ 평문 전송 | ✅ 암호화 |
+| **브라우저 경고** | ⚠️ "안전하지 않음" | ✅ 표시 없음 |
+| **유지보수** | 간단 | 90일 자동 갱신 |
+| **비용** | 무료 | 무료 |
+| **복잡도** | 낮음 | 중간 (Certbot 설정) |
+
+### 성능 영향
+
+**Before (HTTP):**
+- 암호화 오버헤드: 없음
+- WebSocket: `ws://`
+- 연결 속도: 빠름
+
+**After (HTTPS):**
+- TLS Handshake: +50~100ms (최초 연결)
+- WebSocket: `wss://` (암호화)
+- HTTP/2 지원: ✅ (다중 요청 최적화)
+- 체감 성능 변화: 거의 없음 (현대 CPU의 AES-NI 가속)
+
+### 모니터링 & 유지보수
+
+**자동 갱신 검증:**
+```bash
+# 갱신 테스트
+sudo certbot renew --dry-run
+
+# 다음 실행 시간 확인
+sudo systemctl list-timers certbot.timer
+
+# 갱신 로그 확인
+sudo tail -f /var/log/letsencrypt/letsencrypt.log
+sudo tail -f /var/log/certbot-renewal.log
+```
+
+**알림:**
+- Let's Encrypt: 만료 20일 전 이메일 알림
+- 갱신 실패 시: Systemd journald 로그 기록
+
+### 향후 재검토 시점
+
+- 트래픽 급증 시 (CDN 필요성 검토 → Cloudflare)
+- 다중 도메인 필요 시 (와일드카드 인증서)
+- Extended Validation 필요 시 (기업 인증)
+
+### 관련 결정
+
+- [ADR-001](#adr-001-websocket-구현---python-fastapi-vs-nodejs): WebSocket 구현 (wss:// 지원)
+- [ADR-005](#adr-005-배포-방식---docker-compose-vs-kubernetes): Docker 배포 (인증서 볼륨 마운트)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -1536,3 +1672,4 @@ CronTrigger(minute='*', second='18', timezone=KST)  # 매분 18초 정확히
 - 2025-11-13: ADR-011 작성 (Selenium Timeout 최적화 - Race Condition 제거)
 - 2025-11-14: ADR-012 작성 (Selenium 폴백 subprocess 격리 - Chrome 프로세스 좀비화 방지)
 - 2025-11-16: ADR-013 작성 (4단계 모드 - 환율 고시 스케줄 기반 최적화)
+- 2025-11-17: ADR-014 작성 (HTTPS/SSL 도입 - Let's Encrypt vs Cloudflare vs Self-Signed)
