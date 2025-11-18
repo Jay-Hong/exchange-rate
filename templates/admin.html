@@ -175,6 +175,9 @@
             font-weight: 600;
             margin: 1.5rem 0 0.75rem;
             color: #c9d1d9;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .crawler-badges {
@@ -182,6 +185,20 @@
             flex-wrap: wrap;
             gap: 0.5rem;
             margin-bottom: 1.5rem;
+        }
+
+        /* 크롤러 상태 섹션 Sticky (데스크톱만) */
+        @media (min-width: 1024px) {
+            .crawler-status-section {
+                position: sticky;
+                top: 58px; /* 헤더 높이 */
+                z-index: 50;
+                background: #0d1117;
+                padding-top: 0.5rem;
+                padding-bottom: 0.5rem;
+                border-bottom: 1px solid #30363d;
+                margin-bottom: 0.5rem;
+            }
         }
 
         .crawler-badge {
@@ -273,12 +290,46 @@
             display: block;
         }
 
+        /* 로그 섹션 */
+        .log-section {
+            position: relative;
+        }
+
+        .fullscreen-btn {
+            background: #161b22;
+            color: #58a6ff;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .fullscreen-btn:hover {
+            background: #21262d;
+            border-color: #58a6ff;
+        }
+
         /* 로그 필터 */
         .log-filters {
             display: flex;
             flex-wrap: wrap;
             gap: 0.5rem;
             margin-bottom: 1rem;
+        }
+
+        /* 로그 필터 Sticky (데스크톱만) */
+        @media (min-width: 1024px) {
+            .log-filters {
+                position: sticky;
+                top: calc(58px + 80px); /* 헤더 + 크롤러 섹션 */
+                z-index: 40;
+                background: #0d1117;
+                padding: 0.75rem 0;
+                border-bottom: 1px solid #30363d;
+            }
         }
 
         .log-filters select,
@@ -306,6 +357,39 @@
         .logs-container {
             max-height: 600px;
             overflow-y: auto;
+        }
+
+        /* 데스크톱: viewport 기준 높이 확장 */
+        @media (min-width: 1024px) {
+            .logs-container {
+                max-height: calc(100vh - 400px);
+                min-height: 500px;
+            }
+        }
+
+        /* 전체 화면 모드 */
+        body.fullscreen-mode .container > *:not(.log-section) {
+            display: none !important;
+        }
+
+        body.fullscreen-mode .log-section {
+            position: fixed;
+            top: 58px; /* 헤더 높이 */
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 1000;
+            background: #0d1117;
+            padding: 1rem;
+            overflow: hidden;
+        }
+
+        body.fullscreen-mode .logs-container {
+            max-height: calc(100vh - 200px);
+        }
+
+        body.fullscreen-mode .log-filters {
+            position: static;
         }
 
         .log-entry {
@@ -451,7 +535,7 @@
 <body>
     <!-- 헤더 -->
     <div class="header">
-        <h1>🎛️ 관리자 대시보드</h1>
+        <h1>🎛️ 관리자</h1>
         <div class="header-buttons">
             <button class="auto-refresh-toggle active" id="auto-refresh-toggle" onclick="toggleAutoRefresh()">
                 ⏸️ 자동 새로고침: ON
@@ -535,14 +619,22 @@
             </div>
         </div>
 
-        <!-- 크롤러 상태 -->
-        <h2 class="section-title">🤖 크롤러 상태 (최근 1시간)</h2>
-        <div class="crawler-badges" id="crawler-badges">
-            <!-- 동적 생성 -->
+        <!-- 크롤러 상태 (Sticky) -->
+        <div class="crawler-status-section">
+            <h2 class="section-title">🤖 크롤러 상태 (최근 1시간)</h2>
+            <div class="crawler-badges" id="crawler-badges">
+                <!-- 동적 생성 -->
+            </div>
         </div>
 
         <!-- 로그 -->
-        <h2 class="section-title">📋 로그</h2>
+        <div class="log-section">
+            <h2 class="section-title">
+                <span>📋 로그</span>
+                <button class="fullscreen-btn" onclick="toggleFullscreen()">
+                    <span id="fullscreen-icon">🖥️</span> <span id="fullscreen-text">전체 화면</span>
+                </button>
+            </h2>
 
         <!-- 탭 -->
         <div class="tabs">
@@ -594,6 +686,7 @@
                 <div class="loading">로딩 중...</div>
             </div>
         </div>
+        </div> <!-- log-section -->
     </div>
 
     <script>
@@ -671,6 +764,25 @@
                     clearInterval(autoRefreshTimer);
                     autoRefreshTimer = null;
                 }
+            }
+        }
+
+        // ========================================
+        // 전체 화면 토글
+        // ========================================
+        function toggleFullscreen() {
+            const body = document.body;
+            const icon = document.getElementById('fullscreen-icon');
+            const text = document.getElementById('fullscreen-text');
+
+            if (body.classList.contains('fullscreen-mode')) {
+                body.classList.remove('fullscreen-mode');
+                icon.textContent = '🖥️';
+                text.textContent = '전체 화면';
+            } else {
+                body.classList.add('fullscreen-mode');
+                icon.textContent = '❌';
+                text.textContent = '닫기';
             }
         }
 
