@@ -72,20 +72,20 @@ queue_status_cache = {
 # 환율 고시 스케줄 기반 최적화 + 시스템 부하 분산
 #
 # 모드 분류:
-#   - IN: 월~금 08:00~24:00 (영업시간, 전체 크롤러 활성)
-#   - BREAK1: 화~토 00:00~03:00 (심야, shinhan/sc 제외)
-#   - BREAK2: 월 04:00~08:00, 화~금 03:00~08:00, 토 03:00~07:59 (개장 준비, woori/ibk/shinhan/sc 제외)
+#   - IN: 월~금 08:00~24:00 + 화~토 00:00~01:00 (영업시간 + 심야 1시간, 전체 크롤러 활성)
+#   - BREAK1: 화~토 01:00~03:00 (심야, shinhan/sc 제외)
+#   - BREAK2: 월 04:00~08:00, 화~토 03:00~08:00 (고시 마무리, woori/ibk/shinhan/sc 제외)
 #   - OUT: 토 08:00 ~ 월 03:59 (주말, 5개 은행만 유지)
 #
 # 각 은행 환율 고시 스케줄 (실제 운영 시간):
 #   - investing: 월 06:00 ~ 토 06:00 (외환 시장 글로벌 운영)
 #   - kb: 평일 08:30 ~ 익일(토 포함) 05:00
 #   - hana: 평일 08:30 ~ 익일(토 포함) 06:00 (주말 중 가끔 변동)
-#   - shinhan: 평일 08:00 ~ 당일 24:00 (자정 종료)
+#   - shinhan: 평일 08:00 ~ 당일 24:00 (자정 종료, mibank 딜레이 고려해 01:00까지 크롤링)
 #   - woori: 평일 08:30 ~ 익일 02:30
 #   - ibk: 평일 08:30 ~ 익일 02:30
 #   - nh: 평일 08:40 ~ 당일 24:00 (자정 이후/주말 가끔 고시)
-#   - sc: 평일 09:00 ~ 당일 24:00 (자정 종료)
+#   - sc: 평일 09:00 ~ 당일 24:00 (자정 종료, mibank 딜레이 고려해 01:00까지 크롤링)
 #   - bs: 평일 08:10 ~ 당일 24:00 (일요일 넘어갈 때 가끔 고시)
 #   - citi: 평일 09:00 ~ 익일(토 포함) 06:00
 #
@@ -109,11 +109,11 @@ queue_status_cache = {
 # C Group: Selenium 기반 (Queue 순차 처리)
 #   - shinhan, ibk, nh, sc
 #   - 시스템 부하 감소 전략: Request(mibank) → Selenium 폴백 순서
-#     * shinhan, nh, sc: 항상 Request 먼저 시도
-#     * ibk: IN 모드(08:30~) Request 우선, BREAK1(00:00~03:00) Selenium만 사용
-#   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
-#   - BREAK1: ibk(34초), nh(54초)만 유지 (shinhan/sc는 자정 고시 종료)
-#   - BREAK2: nh(54초)만 유지 (ibk는 02:30 종료, shinhan/sc는 자정 종료)
+#     * shinhan, nh, sc: 항상 Request 먼저 시도 (자정 종료지만 mibank 딜레이 고려해 01:00까지 크롤링)
+#     * ibk: IN 모드(08:30~24:00) Request 우선, 00:00~03:00 Selenium만 사용 (날짜 변경 필요)
+#   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초) + 화~토 00:00~01:00 포함
+#   - BREAK1: ibk(34초), nh(54초)만 유지 (shinhan/sc는 01:00에 크롤링 중단)
+#   - BREAK2: nh(54초)만 유지 (ibk는 03:00 종료, shinhan/sc는 01:00 종료)
 #   - OUT: nh(3분)만 유지 (자정 이후/주말 가끔 고시)
 #
 # BREAK1/BREAK2/OUT 모드 크롤러 축소 근거:
@@ -427,9 +427,14 @@ def get_market_mode(now: datetime) -> str:
 
     Returns:
         "OUT": 주말 (토 08:00 ~ 월 04:00)
-        "BREAK1": 자정~03시 (화~토 00:00~03:00)
-        "BREAK2": 03~08시 (월 04:00~08:00, 화~토 03:00~08:00)
-        "IN": 영업시간 (월~금 08:00~24:00)
+        "BREAK1": 심야 (화~토 01:00~03:00)
+        "BREAK2": 고시 마무리 (월 04:00~08:00, 화~토 03:00~08:00)
+        "IN": 영업시간 (월~금 08:00~24:00 + 화~토 00:00~01:00)
+
+    Note:
+        - 화~토 00:00~01:00은 IN 모드로 처리됨 (mibank 딜레이 고려)
+        - shinhan/sc는 자정 종료지만 mibank 딜레이로 마지막 고시 누락 방지
+        - ibk는 00:00부터 Selenium만 사용 (날짜 변경 필요, Request 불가)
     """
     weekday = now.weekday()  # 월=0, 화=1 ... 일=6
     hour = now.hour
@@ -439,12 +444,12 @@ def get_market_mode(now: datetime) -> str:
         return "OUT"
 
     # IN 모드 시간대 내에서 세분화
-    # BREAK1: 00:00~03:00 (화~토)
-    if hour < 3:
+    # BREAK1: 01:00~03:00 (화~토)
+    if 1 <= hour < 3:
         return "BREAK1"
 
     # BREAK2: 03:00~08:00 (월 04:00~, 화~금 전체, 토 ~07:59)
-    if hour < 8:
+    if 3 <= hour < 8:
         return "BREAK2"
 
     # IN: 나머지 (08:00~24:00)
@@ -584,11 +589,11 @@ def switch_jobs(mode: str):
 
     elif mode == "BREAK1":
         # ═════════════════════════════════════════════════════════════
-        # BREAK1 모드: 심야 시간대 (화~토 00:00~03:00)
+        # BREAK1 모드: 심야 시간대 (화~토 01:00~03:00)
         # ═════════════════════════════════════════════════════════════
-        # 제외 크롤러: shinhan, sc (자정에 환율 고시 종료)
+        # 제외 크롤러: shinhan, sc (01:00에 크롤링 중단, mibank 딜레이 커버 완료)
         # 유지 크롤러: investing, kb, hana, woori, bs, citi, ibk, nh (8개)
-        # ibk는 Selenium만 사용 (Request는 08:30 이후 가능)
+        # ibk는 Selenium만 사용 (00:00부터 날짜 변경으로 Request 불가)
 
         # A Group: investing (3초 전)
         scheduler.add_job(
@@ -660,11 +665,11 @@ def switch_jobs(mode: str):
 
     elif mode == "BREAK2":
         # ═════════════════════════════════════════════════════════════
-        # BREAK2 모드: 개장 준비 시간대 (월 04:00~08:00, 화~토 03:00~08:00)
+        # BREAK2 모드: 고시 마무리 시간대 (월 04:00~08:00, 화~토 03:00~08:00)
         # ═════════════════════════════════════════════════════════════
-        # 제외 크롤러: woori, ibk (02:30 고시 종료), shinhan, sc (자정 종료)
+        # 제외 크롤러: woori, ibk (03:00 종료, 실제 02:30 + 30분 여유), shinhan, sc (01:00 종료)
         # 유지 크롤러: investing, kb, hana, bs, citi, nh (6개)
-        # 08:30부터 대부분 은행 개장 준비 시작
+        # 08:00~09:00부터 은행 개장 준비하며 새 환율 고시 시작
 
         # A Group: investing (3초 전)
         scheduler.add_job(
@@ -1021,7 +1026,7 @@ def start_scheduler():
     )
 
     # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
-    # - 모드 전환 시점: 00:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 08:00 (OUT), 월 04:00 (BREAK2)
+    # - 모드 전환 시점: 01:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 08:00 (OUT), 월 04:00 (BREAK2)
     scheduler.add_job(
         control_job,
         CronTrigger(minute='0', second='1', timezone=KST),

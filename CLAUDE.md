@@ -130,19 +130,21 @@ timestamp  DATETIME (KST)
 
 ### 4단계 모드 자동 전환
 
-- **IN 모드**: 월~금 08:00~24:00 (영업시간, 전체 크롤러 활성)
+- **IN 모드**: 월~금 08:00~24:00 + 화~토 00:00~01:00 (영업시간 + 심야 1시간, 전체 크롤러 활성)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
   - 크롤러: cron 절대 시간 동기화 (Broadcasting 기준)
   - 10개 은행 전체 크롤링
+  - shinhan/sc는 자정 종료지만 mibank 딜레이로 01:00까지 크롤링
 
-- **BREAK1 모드**: 화~토 00:00~03:00 (심야, 8개 크롤러)
+- **BREAK1 모드**: 화~토 01:00~03:00 (심야, 8개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
-  - 제외: shinhan, sc (자정에 환율 고시 종료)
+  - 제외: shinhan, sc (01:00에 크롤링 중단, mibank 딜레이 커버 완료)
   - 유지: investing, kb, hana, woori, bs, citi, ibk, nh
+  - ibk는 00:00부터 Selenium만 사용 (날짜 변경 필요, Request 불가)
 
-- **BREAK2 모드**: 월 04:00~08:00, 화~금 03:00~08:00, 토 03:00~07:59 (개장 준비, 6개 크롤러)
+- **BREAK2 모드**: 월 04:00~08:00, 화~금 03:00~08:00, 토 03:00~07:59 (고시 마무리, 6개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
-  - 제외: woori, ibk (02:30 고시 종료), shinhan, sc (자정 종료)
+  - 제외: woori, ibk (03:00 종료, 실제 02:30 + 30분 여유), shinhan, sc (01:00 종료)
   - 유지: investing, kb, hana, bs, citi, nh
 
 - **OUT 모드**: 토 08:00 ~ 월 04:00 (주말, 5개 크롤러)
@@ -158,11 +160,11 @@ timestamp  DATETIME (KST)
 | **investing** | 월 06:00 | 토 06:00 | 외환 시장 글로벌 운영 |
 | **kb** | 평일 08:30 | 익일(토 포함) 05:00 | - |
 | **hana** | 평일 08:30 | 익일(토 포함) 06:00 | 주말 중 가끔 변동 |
-| **shinhan** | 평일 08:00 | 당일 24:00 | 자정 종료 |
+| **shinhan** | 평일 08:00 | 당일 24:00 | 자정 종료, mibank 딜레이 고려해 01:00까지 크롤링 |
 | **woori** | 평일 08:30 | 익일 02:30 | - |
-| **ibk** | 평일 08:30 | 익일 02:30 | - |
+| **ibk** | 평일 08:30 | 익일 02:30 | 00:00부터 Selenium만 사용 (날짜 변경 필요), 03:00까지 크롤링 (30분 여유) |
 | **nh** | 평일 08:40 | 당일 24:00 | 자정 이후/주말 가끔 고시 |
-| **sc** | 평일 09:00 | 당일 24:00 | 자정 종료 |
+| **sc** | 평일 09:00 | 당일 24:00 | 자정 종료, mibank 딜레이 고려해 01:00까지 크롤링 |
 | **bs** | 평일 08:10 | 당일 24:00 | 일요일 넘어갈 때 가끔 고시 |
 | **citi** | 평일 09:00 | 익일(토 포함) 06:00 | - |
 
@@ -215,15 +217,11 @@ scheduler.add_job(
 - **특징**: 메모리 집약적, Request→Selenium 폴백으로 부하 감소
 - **실행 방식**: AsyncIO PriorityQueue 순차 실행
 - **부하 감소 전략**: Request(mibank) 먼저 시도 → 실패 시 Selenium 폴백
-  - shinhan, nh, sc: 항상 Request 우선
-  - ibk: IN 모드(08:30~) Request 우선, BREAK1(00:00~03:00) Selenium만 사용
-- **IN**: 매분 cron (Interval → Cron 전환으로 예측 가능성 향상)
-  - shinhan: `cron(minute='*', second='18')`
-  - ibk: `cron(minute='*', second='34')`
-  - nh: `cron(minute='*', second='54')`
-  - sc: `cron(minute='*', second='58')`
-- **BREAK1**: ibk(34초), nh(54초)만 유지 (shinhan/sc 자정 종료)
-- **BREAK2**: nh(54초)만 유지 (ibk 02:30 종료)
+  - shinhan, nh, sc: 항상 Request 우선 (자정 종료지만 mibank 딜레이 고려해 01:00까지 크롤링)
+  - ibk: IN 모드(08:30~24:00) Request 우선, 00:00~03:00 Selenium만 사용 (날짜 변경 필요)
+- **IN**: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초) + 화~토 00:00~01:00 포함
+- **BREAK1**: ibk(34초), nh(54초)만 유지 (shinhan/sc는 01:00에 크롤링 중단)
+- **BREAK2**: nh(54초)만 유지 (ibk는 03:00 종료, shinhan/sc는 01:00 종료)
 - **OUT**: nh(3분 45초)만 유지 (자정 이후/주말 가끔 고시)
 
 **Selenium Queue 관리:**
@@ -276,6 +274,7 @@ scheduler.add_job(
 ### 설계 원칙
 
 - **환율 고시 스케줄 기반**: 은행별 실제 운영 시간에 맞춰 크롤러 활성화/비활성화
+- **mibank 딜레이 고려**: shinhan/sc 자정 종료지만 01:00까지 크롤링 (마지막 고시 누락 방지)
 - **Broadcasting 동기화**: 크롤러가 Broadcasting X초 전에 실행 → 실시간 반영
 - **Request 우선 전략**: Selenium 크롤러도 Request(mibank) 먼저 시도 → Queue 압력 감소
 - **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
