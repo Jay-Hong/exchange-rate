@@ -1029,7 +1029,7 @@ def start_scheduler():
     # - 모드 전환 시점: 01:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 08:00 (OUT), 월 04:00 (BREAK2)
     scheduler.add_job(
         control_job,
-        CronTrigger(minute='0', second='1', timezone=KST),
+        CronTrigger(second='1', timezone=KST),
         id="control_job"
     )
 
