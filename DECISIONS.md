@@ -1347,7 +1347,7 @@ def crawl_hana_bank():
 
 **실제 환율 고시 스케줄 추적 결과:**
 - 일부 은행은 자정에 환율 고시 종료 (shinhan, sc)
-- 일부 은행은 02:30에 종료 (woori, ibk)
+- 일부 은행은 02:30±에 종료 (woori 02:45, ibk 02:05)
 - 일부 은행은 주말에도 가끔 변동 (hana, bs, nh)
 
 ### 고려 사항
@@ -1377,22 +1377,22 @@ def crawl_hana_bank():
 
 ### 4단계 모드 정의
 
-**IN 모드: 월~금 08:00~24:00 (영업시간)**
+**IN 모드: 월~금 08:00~20:59 (영업시간)**
 - 모든 크롤러 활성 (10개 은행)
 - 가장 빈번한 크롤링
 - Broadcasting: 매분 00, 10, 20, 30, 40, 50초
 
-**BREAK1 모드: 화~토 00:00~03:00 (심야)**
-- 제외: shinhan, sc (자정에 환율 고시 종료)
-- 유지: investing, kb, hana, woori, bs, citi, ibk, nh (8개)
+**BREAK1 모드: 월~금 21:00~23:59, 화~토 00:00~02:59 (심야)**
+- 제외: sc (21:00 종료)
+- 유지: investing, kb, hana, woori, bs, citi, ibk, nh, shinhan (9개)
 - Broadcasting: 동일 (매분 00, 10, 20, 30, 40, 50초)
 
-**BREAK2 모드: 월 04:00~08:00, 화~금 03:00~08:00, 토 03:00~07:59 (개장 준비)**
-- 제외: woori, ibk (02:30 고시 종료), shinhan, sc (자정 종료)
+**BREAK2 모드: 월 06:00~07:59, 화~토 03:00~07:59 (개장 준비)**
+- 제외: woori (02:45 종료), ibk (02:05 종료), shinhan (02:30 종료), sc (20:30 종료)
 - 유지: investing, kb, hana, bs, citi, nh (6개)
 - Broadcasting: 동일
 
-**OUT 모드: 토 08:00 ~ 월 04:00 (주말)**
+**OUT 모드: 토 07:00 ~ 월 05:59 (주말)**
 - 제외: woori, ibk, shinhan, sc, citi (주말 고시 없음)
 - 유지: investing, kb, hana, bs, nh (5개)
 - Broadcasting: 동일
@@ -1405,11 +1405,11 @@ def crawl_hana_bank():
 | **investing** | 월 06:00 | 토 06:00 | ✅ | ✅ | ✅ |
 | **kb** | 평일 08:30 | 익일(토 포함) 05:00 | ✅ | ✅ | ✅ |
 | **hana** | 평일 08:30 | 익일(토 포함) 06:00 | ✅ | ✅ | ✅ |
-| **shinhan** | 평일 08:00 | 당일 24:00 | ❌ | ❌ | ❌ |
-| **woori** | 평일 08:30 | 익일 02:30 | ✅ | ❌ | ❌ |
-| **ibk** | 평일 08:30 | 익일 02:30 | ✅ | ❌ | ❌ |
+| **shinhan** | 평일 08:19 | 익일 02:30 | ✅ | ❌ | ❌ |
+| **woori** | 평일 08:30 | 익일 02:45 | ✅ | ❌ | ❌ |
+| **ibk** | 평일 08:30 | 익일 02:05 | ✅ | ❌ | ❌ |
 | **nh** | 평일 08:40 | 당일 24:00 | ✅ | ✅ | ✅ |
-| **sc** | 평일 09:00 | 당일 24:00 | ❌ | ❌ | ❌ |
+| **sc** | 평일 09:00 | 당일 20:30 | ❌ | ❌ | ❌ |
 | **bs** | 평일 08:10 | 당일 24:00 | ✅ | ✅ | ✅ |
 | **citi** | 평일 09:00 | 익일(토 포함) 06:00 | ✅ | ✅ | ❌ |
 
@@ -1422,7 +1422,7 @@ def crawl_hana_bank():
 
 **Selenium 크롤러 Request 우선 전략 (2025-11-16):**
 - shinhan, nh, sc: Request(mibank) → Selenium 폴백
-- ibk: IN 모드(08:30~) Request 우선, BREAK1(00:00~03:00) Selenium만
+- ibk: IN 모드(08:30~) Request 우선, BREAK1 구간 중 00:00~02:59은 Selenium만 사용 (날짜 변경 필요)
 - 목적: Queue 압력 대폭 감소 (대부분 Request 성공)
 
 ### 구현 상세
@@ -1433,19 +1433,21 @@ def get_market_mode(now: datetime) -> str:
     weekday = now.weekday()  # 월=0, 화=1 ... 일=6
     hour = now.hour
 
-    # OUT: 토 08:00 ~ 월 04:00
-    if (weekday == 5 and hour >= 8) or (weekday == 6) or (weekday == 0 and hour < 4):
+    # OUT: 토 07:00 ~ 월 05:59
+    if (weekday == 5 and hour >= 7) or (weekday == 6) or (weekday == 0 and hour < 6):
         return "OUT"
 
-    # BREAK1: 00:00~03:00 (화~토)
-    if hour < 3:
+    # BREAK1: 월~금 21:00~23:59, 화~토 00:00~02:59
+    if 0 <= weekday <= 4 and 21 <= hour:
+        return "BREAK1"
+    if 1 <= weekday <= 5 and hour < 3:
         return "BREAK1"
 
-    # BREAK2: 03:00~08:00
-    if hour < 8:
+    # BREAK2: 03:00~07:59
+    if 3 <= hour < 8:
         return "BREAK2"
 
-    # IN: 08:00~24:00
+    # IN: 08:00~20:59
     return "IN"
 ```
 
@@ -1501,14 +1503,14 @@ CronTrigger(minute='*', second='18', timezone=KST)  # 매분 18초 정확히
 
 **Before (2단계):**
 - 일일 크롤링: ~8,600회
-- 심야 시간대 (00:00~03:00): IN과 동일 (10개 은행)
+- 심야 시간대 (21:00~02:59): IN과 동일 (10개 은행)
 - 리소스 낭비: 고시 없는 은행도 크롤링
 
 **After (4단계):**
 - 일일 크롤링: ~5,200회 (40% 감소)
-- BREAK1 (00:00~03:00): 8개 은행
-- BREAK2 (03:00~08:00): 6개 은행
-- OUT (주말): 5개 은행
+- BREAK1 (21:00~02:59): 9개 은행 (sc 제외)
+- BREAK2 (03:00~07:59): 6개 은행
+- OUT (토 07:00~월 05:59): 5개 은행
 
 ### 향후 재검토 시점
 
