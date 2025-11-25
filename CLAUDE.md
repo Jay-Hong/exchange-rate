@@ -25,18 +25,18 @@
 
 ## MCP (Model Context Protocol) 설정
 
-> 💡 **MCP 설정 가이드**: `~/.claude/CLAUDE.md` 참고 (Scope 3가지, 명령어, 트러블슈팅 등)
-> ⚠️ **주의**: project scope (`.claude/mcp.json`) 대신 **local scope** 사용 (안정성)
+> 💡 **MCP 전체 가이드**: `~/.claude/CLAUDE.md` 참고 (설치/삭제 명령어, Context 최적화 전략)
+> ⚠️ **Context Window 최적화**: 필요한 MCP만 설치, 작업 완료 후 삭제 권장 (세션 재시작 필수)
 
-### 이 프로젝트의 MCP 구성
+### 이 프로젝트에서 사용 가능한 MCP
 
-**글로벌 MCP** (`~/.claude.json`, user scope):
-- **context7**: 라이브러리 문서 조회 (모든 프로젝트 공통)
-- **github**: GitHub 저장소 관리 (Docker 기반, 설치 방법은 `~/.claude/CLAUDE.md` 참고)
+**기본 유지 권장**:
+- **context7**: 라이브러리 문서 조회 (2개 도구, 경량)
+- **filesystem**: 프로젝트 파일 탐색 (13개 도구)
 
-**프로젝트별 MCP** (`~/.claude.json`, local scope):
-- **sqlite**: `data/exchange_rates.db` 접근 (DB 쿼리 실행)
-- **filesystem**: 프로젝트 디렉토리 접근 (파일 탐색)
+**필요시 설치**:
+- **sqlite**: DB 쿼리 실행 (`data/exchange_rates.db`)
+- **github**: PR/Issue 작업 (62개 도구, 토큰 많음 - 사용 후 삭제 권장)
 
 ## 목표 사용자
 
