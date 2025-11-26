@@ -582,6 +582,44 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - `app/main.py`: Queue 상태 API 엔드포인트 추가
 - `templates/admin.html`: Queue 모니터링 카드 및 실시간 업데이트
 
+### Phase 1.7: Redis 브로드캐스트 캐시 & 부하 테스트 ✅ 완료 (2025-11-27)
+
+**배경**: WebSocket 초기 접속 최적화 및 변경 감지 시스템 구축
+
+**추가된 기능**:
+- **Redis 브로드캐스트 캐시**: 초기 접속 시 DB 대신 Redis 캐시로 즉시 데이터 전송
+  - Cache key: `broadcast:latest` (3.6KB JSON)
+  - Memory: 1.14MB stable (1.14% of 100MB)
+  - Circuit Breaker: 5 failures → 30s timeout → auto-recovery
+- **변경 감지 시스템**: JSON 비교로 실제 변경 시에만 브로드캐스트
+  - "⏸️ 변경사항 없음" vs "📡 브로드캐스트 완료" 구분 로깅
+  - 대역폭 최적화: 변경 없으면 전송 스킵
+- **Redis 모니터링 카드**: 실시간 메모리, 키 개수, Circuit 상태 표시
+- **부하 테스트 프레임워크**: 50명 동시 접속 검증 완료
+  - `load_test.py`: WebSocket 클라이언트 (연결 시간, 지연, 수신 카운트)
+  - `monitor_server.sh`: 서버 리소스 모니터링
+  - [LOAD_TEST_GUIDE.md](LOAD_TEST_GUIDE.md): 테스트 시나리오 및 성공 기준
+  - [LOAD_TEST_REPORT_2025-11-27.md](LOAD_TEST_REPORT_2025-11-27.md): 프로덕션 검증 결과
+
+**버그 수정**:
+- Broadcasting `updated_at` 타임스탬프 문제 (항상 다른 값 생성)
+  - `datetime.now()` → DB의 실제 최신 `max(rate["timestamp"])` 사용
+  - 변경 감지 정확도 100% 달성
+
+**테스트 결과** (50명 동시 접속):
+- 연결 안정성: 0 재연결, 0 에러
+- 메시지 일관성: 모든 클라이언트 동일 개수 수신
+- 서버 리소스: FastAPI 26%, Redis 1.14%
+- 변경 감지: 15/18 스킵 (83% 대역폭 절약)
+
+**모니터링 API**:
+- `GET /admin/api/redis-status` - Redis 메모리, 키, Circuit 상태 조회
+
+**핵심 개선사항**:
+- `app/main.py`: Broadcasting 버그 수정, Redis 상태 API, 변경 감지 로직
+- `app/cache.py`: Circuit Breaker 기반 Redis 클라이언트
+- `templates/admin.html`: Redis 모니터링 카드 추가
+
 ### Phase 2-3: 고급 기능 (사용자 500명+)
 - 크롤러 제어 (재시작, 주기 조정)
 - 통계 & 분석 (Chart.js, 성공률 그래프)
@@ -634,5 +672,6 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 ## 향후 개선 사항
 
 - ✅ 구조화된 로깅, 관리자 페이지, 도메인 기반 구조
+- ✅ Redis 브로드캐스트 캐시, 변경 감지 시스템 (Phase 1.7)
 - 📋 알림 시스템 고도화 ([ADR-003](DECISIONS.md#adr-003-알림-시스템---websocket-vs-push-notification))
 - 🔜 비동기 크롤링, Docker, 모니터링, CI/CD, 유닛 테스트
