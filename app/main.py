@@ -97,14 +97,18 @@ def build_rates_payload(db: SessionLocal) -> dict:
     currencies = list(set(rate["currency"] for rate in all_rates))
     banks = list(set(rate["bank"] for rate in all_rates))
 
-    current_time = datetime.now().astimezone().isoformat()
+    # DB 데이터의 실제 최신 timestamp 사용 (변경 감지 정확성)
+    latest_timestamp = max(
+        (rate["timestamp"] for rate in all_rates),
+        default=datetime.now().astimezone().isoformat()
+    )
 
     return {
         "type": "rates",
         "data": {
             "rates": all_rates,
             "metadata": {
-                "updated_at": current_time,
+                "updated_at": latest_timestamp,
                 "currencies": sorted(currencies),
                 "banks": sorted(banks),
                 "total_count": len(all_rates),
@@ -174,15 +178,15 @@ async def broadcast_rates_once():
                 )
 
                 logger.info(
-                    "📡 환율 데이터 브로드캐스트 완료",
+                    "📡 환율 데이터 브로드캐스트 & 🅾️ Redis 업데이트 완료",
                     extra={"rate_count": len(payload["data"]["rates"]), "connections": len(manager.active_connections)},
                 )
             else:
                 broadcast_stats.record_skip(reason="no_connections")
-                logger.debug("📡 Redis 업데이트만 수행 (활성 연결 없음)")
+                logger.info("🅾️ Redis 업데이트만 수행 (활성 연결 없음)")
         else:
             broadcast_stats.record_skip(reason="no_changes")
-            logger.debug("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
+            logger.info("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
 
     except Exception as e:
         broadcast_stats.record_failure(error_message=str(e))
@@ -568,4 +572,79 @@ def get_queue_status():
     """
     from app.scheduler import queue_status_cache
     return queue_status_cache
+
+
+@app.get("/admin/api/redis-status", dependencies=[Depends(verify_admin)])
+async def get_redis_status():
+    """
+    Redis 메모리 및 상태 조회 (Phase 1.7)
+
+    Returns:
+        {
+            "status": "connected" | "disconnected" | "circuit-open" | "error",
+            "memory_human": "1.16M",
+            "memory_bytes": 1216720,
+            "maxmemory_bytes": 104857600,
+            "usage_percent": 1.16,
+            "keys": 2,
+            "circuit_state": "closed"
+        }
+    """
+    from app.cache import redis_cache
+
+    # Redis 클라이언트 없음
+    if not redis_cache.client:
+        return {
+            "status": "disconnected",
+            "memory_human": "N/A",
+            "memory_bytes": 0,
+            "maxmemory_bytes": 104857600,  # 100MB (docker-compose.yml 설정)
+            "usage_percent": 0.0,
+            "keys": 0,
+            "circuit_state": redis_cache.circuit.state
+        }
+
+    # Circuit Breaker 열림
+    if redis_cache.circuit.state == "open":
+        return {
+            "status": "circuit-open",
+            "memory_human": "N/A",
+            "memory_bytes": 0,
+            "maxmemory_bytes": 104857600,
+            "usage_percent": 0.0,
+            "keys": 0,
+            "circuit_state": "open",
+            "circuit_until": redis_cache.circuit.open_until.isoformat() if redis_cache.circuit.open_until else None
+        }
+
+    # Redis 정보 조회
+    try:
+        info = await redis_cache.client.info("memory")
+        dbsize = await redis_cache.client.dbsize()
+
+        used_memory = info.get("used_memory", 0)
+        maxmemory = info.get("maxmemory", 104857600)
+        usage_percent = round(used_memory / maxmemory * 100, 2) if maxmemory > 0 else 0.0
+
+        return {
+            "status": "connected",
+            "memory_human": info.get("used_memory_human", "N/A"),
+            "memory_bytes": used_memory,
+            "maxmemory_bytes": maxmemory,
+            "usage_percent": usage_percent,
+            "keys": dbsize,
+            "circuit_state": redis_cache.circuit.state
+        }
+    except Exception as e:
+        logger.error("Redis 상태 조회 실패", exc_info=True)
+        return {
+            "status": "error",
+            "memory_human": "Error",
+            "memory_bytes": 0,
+            "maxmemory_bytes": 104857600,
+            "usage_percent": 0.0,
+            "keys": 0,
+            "circuit_state": redis_cache.circuit.state,
+            "error": str(e)
+        }
 

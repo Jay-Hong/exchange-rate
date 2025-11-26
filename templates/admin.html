@@ -575,6 +575,12 @@
                 <div class="card-value" id="chrome-count">-</div>
                 <div class="card-subvalue" id="chrome-memory">메모리: -</div>
             </div>
+            <div class="card" id="redis-card">
+                <div class="card-label">Redis 캐시</div>
+                <div class="card-value" id="redis-memory">-</div>
+                <div class="card-subvalue" id="redis-usage">-</div>
+                <div class="card-subvalue" id="redis-keys">Keys: -</div>
+            </div>
         </div>
 
         <!-- 크롤러 통계 -->
@@ -846,6 +852,9 @@
                 // Chrome 프로세스 모니터링 (비동기 호출)
                 loadChromeMonitoring();
 
+                // Redis 캐시 상태 로드 (비동기 호출)
+                loadRedisStatus();
+
                 // Selenium Queue 상태 로드 (비동기 호출)
                 loadQueueStatus();
 
@@ -888,6 +897,52 @@
                 console.error('Chrome 모니터링 로드 실패:', err);
                 document.getElementById('chrome-count').textContent = 'N/A';
                 document.getElementById('chrome-memory').textContent = '메모리: N/A';
+            }
+        }
+
+        // ========================================
+        // Redis 캐시 모니터링 (Phase 1.7)
+        // ========================================
+        async function loadRedisStatus() {
+            const card = document.getElementById('redis-card');
+            try {
+                const res = await fetch('/admin/api/redis-status');
+                const data = await res.json();
+
+                const memoryEl = document.getElementById('redis-memory');
+                const usageEl = document.getElementById('redis-usage');
+                const keysEl = document.getElementById('redis-keys');
+
+                if (data.status === 'connected') {
+                    memoryEl.textContent = data.memory_human;
+                    usageEl.textContent = `${data.usage_percent}% / 100MB`;
+                    keysEl.textContent = `Keys: ${data.keys}`;
+                    card.classList.remove('error', 'warning');
+                } else if (data.status === 'circuit-open') {
+                    memoryEl.textContent = '회로차단기 열림';
+                    usageEl.textContent = `재시도 대기 중`;
+                    keysEl.textContent = `Circuit: OPEN`;
+                    card.classList.add('warning');
+                    card.classList.remove('error');
+                } else if (data.status === 'disconnected') {
+                    memoryEl.textContent = '연결 안 됨';
+                    usageEl.textContent = 'Redis 시작 필요';
+                    keysEl.textContent = 'Keys: -';
+                    card.classList.add('error');
+                    card.classList.remove('warning');
+                } else {
+                    memoryEl.textContent = 'Error';
+                    usageEl.textContent = data.error || '조회 실패';
+                    keysEl.textContent = 'Keys: -';
+                    card.classList.add('error');
+                    card.classList.remove('warning');
+                }
+            } catch (err) {
+                console.error('Redis 상태 로드 실패:', err);
+                document.getElementById('redis-memory').textContent = 'N/A';
+                document.getElementById('redis-usage').textContent = 'API 오류';
+                document.getElementById('redis-keys').textContent = 'Keys: -';
+                card.classList.add('error');
             }
         }
 

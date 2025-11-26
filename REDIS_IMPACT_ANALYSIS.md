@@ -323,11 +323,18 @@ RDS CPU:
 DB 크기: 동일 (55-105MB)
 쿼리 빈도: DB 읽기 대부분 캐시로 전가
 
-Redis 메모리 사용 (추정):
-- broadcast:latest: ~3KB
+Redis 메모리 사용 (Phase 1 실측, 2025-11-26):
+- broadcast:latest: 3.6KB (30개 환율 JSON)
+- circuit:redis: ~1KB
+- Redis 오버헤드: ~930KB (Alpine 기본)
+- 총: ~1.2MB (maxmemory 100MB의 1.2%)
+
+Redis 메모리 사용 (Phase 2 예상):
+- broadcast:latest: 3.6KB (동일)
 - rate:* Hash: ~10KB (30개 통화-은행 쌍)
-- 기타: ~10KB
-- 총: ~30-50KB (매우 경량)
+- circuit:redis: ~1KB
+- Redis 오버헤드: ~950KB
+- 총: ~1.2MB (증가 미미)
 
 RDS CPU: WebSocket/Broadcasting 부하만 남음
 크레딧 관리: 개선 (읽기 부하 감소)
@@ -404,7 +411,7 @@ EC2 메모리 여유: 충분 (1GB 중 여유 500MB+)
 | WebSocket 초기 접속 | 0.5-1.5ms | Redis GET, JSON 직렬화 재사용 |
 | RDS 쿼리 빈도 | 0.001 qps (변경 시만) | DB 읽기 대부분 제거 |
 | Connection Pool | 2-5개 | 읽기 부하 감소 |
-| Redis 메모리 | 30-50KB | 매우 경량 |
+| Redis 메모리 | ~1.2MB (실측) | Phase 1: 1.2MB, Phase 2: 1.2MB (증가 미미) |
 
 ### 6.4 핵심 효과 (추정)
 
