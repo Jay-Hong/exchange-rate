@@ -646,14 +646,21 @@ server {
 
 ### 10. Redis 캐싱
 
-**목적**: DB 부하 90% 감소, 응답 속도 3배
+**목적**: DB 부하 감소, 응답 속도 개선 (실측 필요)
 
-#### 10.1 ElastiCache for Redis
+#### 10.1 Redis 설치 옵션
 
-**스펙**:
+**옵션 A: EC2에 Redis 설치 (권장)**
+- Docker Compose로 설치
+- 추가 비용: $0
+- 메모리: 100MB (추정)
+- 관리: 간단 (docker-compose)
+
+**옵션 B: ElastiCache for Redis (확장 시)**
+- **⚠️ 주의**: ElastiCache는 프리티어 대상 아님
 - cache.t3.micro (0.5GB RAM)
-- 무료 티어: 12개월
-- 비용 (이후): $11/월
+- 비용: $11/월 (첫 달부터)
+- 관리형 서비스 (고가용성)
 
 #### 10.2 캐싱 전략
 
@@ -811,7 +818,7 @@ async def get_latest_rates(db: Session):
 - [ ] 성능 비교 테스트
 
 **Day 26-28: Redis 캐싱**
-- [ ] ElastiCache Redis 인스턴스 생성
+- [ ] Redis 설치 (EC2 Docker 또는 ElastiCache, 옵션 A 권장)
 - [ ] 캐싱 레이어 구현
 - [ ] 성능 측정 (Before/After)
 
