@@ -15,6 +15,7 @@ brotli>=1.0.9,<2.0.0  # Brotli(br) 압축 지원 - investing.com 필수 (Docker 
 
 # 스케줄링
 apscheduler>=3.10.4,<4.0.0
+redis>=5.0.0
 
 # 타임존 (항상 최신 권장)
 pytz>=2024.2

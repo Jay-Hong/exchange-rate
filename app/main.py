@@ -23,6 +23,7 @@ import secrets
 from app import models, schemas, crud, scheduler
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
+from app.cache import redis_cache, BROADCAST_CACHE_KEY
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.main")
@@ -90,13 +91,49 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# 마지막 브로드캐스트 시간 추적 (변경 감지용)
-last_broadcast_time = None
+def build_rates_payload(db: SessionLocal) -> dict:
+    """DB에서 최신 환율을 조회해 표준 메시지 포맷으로 반환."""
+    all_rates = crud.get_all_rates_flat(db=db)
+    currencies = list(set(rate["currency"] for rate in all_rates))
+    banks = list(set(rate["bank"] for rate in all_rates))
+
+    current_time = datetime.now().astimezone().isoformat()
+
+    return {
+        "type": "rates",
+        "data": {
+            "rates": all_rates,
+            "metadata": {
+                "updated_at": current_time,
+                "currencies": sorted(currencies),
+                "banks": sorted(banks),
+                "total_count": len(all_rates),
+            },
+        },
+    }
+
+
+async def warmup_broadcast_cache():
+    """서버 시작 시 DB→Redis 워밍업 (캐시 미스 방지)."""
+    db = SessionLocal()
+    try:
+        payload = build_rates_payload(db)
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        await redis_cache.set(BROADCAST_CACHE_KEY, payload_json)
+        logger.info("✅ Redis 브로드캐스트 캐시 워밍업 완료", extra={"rate_count": len(payload["data"]["rates"])})
+    except Exception:
+        logger.warning("⚠️ Redis 워밍업 실패 (DB 폴백 유지)", exc_info=True)
+    finally:
+        db.close()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup code
     logger.info("🚀 FastAPI 서버 시작", extra={"env": os.getenv("ENV", "development")})
+
+    # Redis 연결 및 워밍업 (브로드캐스트 캐시)
+    await redis_cache.connect()
+    await warmup_broadcast_cache()
 
     # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
     scheduler.init_selenium_queue()
@@ -118,73 +155,36 @@ async def lifespan(app: FastAPI):
     scheduler.scheduler.shutdown()
 
 async def broadcast_rates_once():
-    """
-    환율 데이터 한 번 브로드캐스트 (APScheduler에서 매분 00, 10, 20, 30, 40, 50초에 호출)
-
-    Notes:
-        - 변경사항이 있을 때만 실제 전송
-        - 연결된 클라이언트가 없으면 스킵
-        - 통계 자동 수집 (성공/실패/스킵)
-    """
-    global last_broadcast_time
-
-    if not manager.active_connections:
-        logger.debug("⏸️ WebSocket 연결 없음 - 브로드캐스트 스킵")
-        return
-
+    """브로드캐스트 표준 흐름 (Redis 캐시 + 변경 감지 + 조건부 전송)."""
     db = SessionLocal()
     try:
-        # 변경사항 체크 (초경량 쿼리)
-        has_changes = crud.has_changes_since(db, last_broadcast_time)
+        cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
+        payload = build_rates_payload(db)
+        new_json = json.dumps(payload, ensure_ascii=False)
 
-        if has_changes or last_broadcast_time is None:
-            # 변경이 있을 때만 브로드캐스트
-            all_rates = crud.get_all_rates_flat(db=db)
+        if new_json != cached_json:
+            await redis_cache.set(BROADCAST_CACHE_KEY, new_json)
 
-            # 메타데이터 생성
-            currencies = list(set(rate["currency"] for rate in all_rates))
-            banks = list(set(rate["bank"] for rate in all_rates))
+            if manager.active_connections:
+                await manager.broadcast(payload)
 
-            current_time = datetime.now().astimezone().isoformat()
+                broadcast_stats.record_success(
+                    data_size_bytes=len(new_json.encode("utf-8")),
+                    rate_count=len(payload["data"]["rates"]),
+                )
 
-            # 통일된 메시지 형식
-            message = {
-                "type": "rates",
-                "data": {
-                    "rates": all_rates,
-                    "metadata": {
-                        "updated_at": current_time,
-                        "currencies": sorted(currencies),
-                        "banks": sorted(banks),
-                        "total_count": len(all_rates)
-                    }
-                }
-            }
-
-            # 데이터 크기 계산 (통계용)
-            data_size_bytes = len(json.dumps(message, ensure_ascii=False).encode('utf-8'))
-
-            # 브로드캐스트
-            await manager.broadcast(message)
-
-            # 마지막 브로드캐스트 시간 업데이트
-            KST = timezone('Asia/Seoul')
-            last_broadcast_time = datetime.now(KST)
-
-            # 통계 기록 (성공)
-            broadcast_stats.record_success(
-                data_size_bytes=data_size_bytes,
-                rate_count=len(all_rates)
-            )
-
-            logger.info("📡 환율 데이터 브로드캐스트 완료", extra={"rate_count": len(all_rates), "connections": len(manager.active_connections)})
+                logger.info(
+                    "📡 환율 데이터 브로드캐스트 완료",
+                    extra={"rate_count": len(payload["data"]["rates"]), "connections": len(manager.active_connections)},
+                )
+            else:
+                broadcast_stats.record_skip(reason="no_connections")
+                logger.debug("📡 Redis 업데이트만 수행 (활성 연결 없음)")
         else:
-            # 통계 기록 (스킵)
             broadcast_stats.record_skip(reason="no_changes")
             logger.debug("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
 
     except Exception as e:
-        # 통계 기록 (실패)
         broadcast_stats.record_failure(error_message=str(e))
         logger.error("❌ 브로드캐스트 오류", exc_info=True, extra={"connections": len(manager.active_connections)})
     finally:
@@ -212,33 +212,29 @@ async def websocket_endpoint(websocket: WebSocket):
     """실시간 환율 데이터 스트리밍"""
     await manager.connect(websocket)
     
-    # 연결 직후 즉시 현재 데이터 전송
     db = SessionLocal()
     try:
-        all_rates = crud.get_all_rates_flat(db=db)
-        currencies = list(set(rate["currency"] for rate in all_rates))
-        banks = list(set(rate["bank"] for rate in all_rates))
+        cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
 
-        current_time = datetime.now().astimezone().isoformat()
-        
-        # 통일된 메시지 형식
-        initial_message = {
-            "type": "rates",
-            "data": {
-                "rates": all_rates,
-                "metadata": {
-                    "updated_at": current_time,
-                    "currencies": sorted(currencies),
-                    "banks": sorted(banks),
-                    "total_count": len(all_rates)
-                }
-            }
-        }
-        
-        await websocket.send_json(initial_message)
-        logger.info("📨 초기 데이터 전송 완료", extra={"rate_count": len(all_rates)})
+        if cached_json:
+            await websocket.send_text(cached_json)
+            logger.info("📨 Redis 캐시로 초기 데이터 전송", extra={"connections": len(manager.active_connections)})
+        else:
+            initial_payload = build_rates_payload(db)
+            await websocket.send_json(initial_payload)
 
-    except Exception as e:
+            # 캐시 미스 시 Redis에 채워 넣기 (TTL 없음)
+            try:
+                await redis_cache.set(
+                    BROADCAST_CACHE_KEY,
+                    json.dumps(initial_payload, ensure_ascii=False),
+                )
+            except Exception:
+                logger.debug("Redis 캐시 적재 실패 (초기 전송 후)", exc_info=True)
+
+            logger.info("📨 DB 폴백으로 초기 데이터 전송", extra={"rate_count": len(initial_payload["data"]["rates"] )})
+
+    except Exception:
         logger.error("❌ 초기 데이터 전송 오류", exc_info=True)
     finally:
         db.close()
@@ -572,5 +568,4 @@ def get_queue_status():
     """
     from app.scheduler import queue_status_cache
     return queue_status_cache
-
 

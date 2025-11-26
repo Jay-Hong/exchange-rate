@@ -8,6 +8,27 @@
 
 services:
   # ─────────────────────────────────────
+  # Redis (Cache)
+  # ─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: exchange-rate-redis
+    command: redis-server --appendonly yes --maxmemory 100mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+      - ./volumes/logs/redis:/data/logs
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli -a $$REDIS_PASSWORD ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────
   # Nginx (Reverse Proxy + HTTPS)
   # ─────────────────────────────────────
   nginx:
@@ -59,9 +80,14 @@ services:
       - ENV=${ENV:-production}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DATABASE_URL=sqlite:////data/exchange_rates.db
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     volumes:
       - ./data:/data
       - ./volumes/logs/app:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
     expose:
       - "8000"
     deploy:
@@ -86,7 +112,5 @@ services:
 # ─────────────────────────────────────
 # Volumes
 # ─────────────────────────────────────
-# Bind Mount 사용으로 Named Volume 불필요
-# volumes:
-#   sqlite-data:
-#     driver: local
+volumes:
+  redis_data:
