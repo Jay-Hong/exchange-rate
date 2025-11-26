@@ -34,7 +34,8 @@ class LoadTester:
 
         # 통계 수집
         self.initial_connection_times = []  # 초기 접속 시간
-        self.message_delays = []  # 메시지 지연 시간
+        self.message_delays = []  # 메시지 지연 시간 (broadcast_at 기준)
+        self.db_to_broadcast_delays = []  # DB 저장 → 브로드캐스트 전송 지연
         self.message_counts = defaultdict(int)  # 클라이언트별 수신 개수
         self.reconnect_counts = defaultdict(int)  # 재연결 횟수
         self.errors = []  # 에러 목록
@@ -71,14 +72,23 @@ class LoadTester:
                             # 메시지 수신 카운트
                             self.message_counts[client_id] += 1
 
-                            # 서버 전송 시각 추출 (metadata.updated_at)
+                            # 서버 타임스탬프 추출 및 지연 시간 계산
                             if data.get("type") == "rates" and "data" in data:
-                                server_time_str = data["data"]["metadata"].get("updated_at")
-                                if server_time_str:
-                                    # ISO 8601 파싱 (예: 2025-11-27T01:15:30+09:00)
-                                    server_time = datetime.fromisoformat(server_time_str).timestamp()
-                                    delay = (receive_time - server_time) * 1000
+                                metadata = data["data"]["metadata"]
+
+                                # broadcast_at: 브로드캐스트 전송 시각 (실제 지연)
+                                broadcast_time_str = metadata.get("broadcast_at")
+                                if broadcast_time_str:
+                                    broadcast_time = datetime.fromisoformat(broadcast_time_str).timestamp()
+                                    delay = (receive_time - broadcast_time) * 1000
                                     self.message_delays.append(delay)
+
+                                # updated_at vs broadcast_at: DB 저장 → 전송 지연
+                                updated_time_str = metadata.get("updated_at")
+                                if updated_time_str and broadcast_time_str:
+                                    updated_time = datetime.fromisoformat(updated_time_str).timestamp()
+                                    db_to_broadcast = (broadcast_time - updated_time) * 1000
+                                    self.db_to_broadcast_delays.append(db_to_broadcast)
 
                         except json.JSONDecodeError:
                             self.errors.append(f"Client {client_id}: JSON 파싱 실패")
@@ -175,11 +185,19 @@ class LoadTester:
 
         # 2. 메시지 지연 시간
         if self.message_delays:
-            print("\n2️⃣  메시지 지연 시간 (서버 전송 → 클라이언트 수신)")
+            print("\n2️⃣  메시지 지연 시간 (broadcast_at → 클라이언트 수신)")
             print(f"   평균: {statistics.mean(self.message_delays):.1f}ms")
             print(f"   중앙값: {statistics.median(self.message_delays):.1f}ms")
             print(f"   최소: {min(self.message_delays):.1f}ms")
             print(f"   최대: {max(self.message_delays):.1f}ms")
+
+        # 2-1. DB 저장 → 브로드캐스트 전송 지연
+        if self.db_to_broadcast_delays:
+            print("\n2️⃣ -1 DB 저장 → 브로드캐스트 전송 지연 (updated_at → broadcast_at)")
+            print(f"   평균: {statistics.mean(self.db_to_broadcast_delays):.1f}ms")
+            print(f"   중앙값: {statistics.median(self.db_to_broadcast_delays):.1f}ms")
+            print(f"   최소: {min(self.db_to_broadcast_delays):.1f}ms")
+            print(f"   최대: {max(self.db_to_broadcast_delays):.1f}ms")
 
         # 3. 수신 개수 (누락 확인)
         expected_broadcasts = self.duration // 10
