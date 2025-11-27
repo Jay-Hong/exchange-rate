@@ -374,3 +374,103 @@ def has_changes_since(db: Session, since_time: Optional[datetime]) -> bool:
 
 # 대량의 테이블 데이터 삭제 후, DB 재 정렬
 # VACUUM;
+
+
+# ═════════════════════════════════════════════════════════════
+# 크롤러 설정 관리 (Phase 1.8)
+# ═════════════════════════════════════════════════════════════
+
+def init_crawler_config(db: Session) -> None:
+    """
+    crawler_config 테이블 초기화 (서버 시작 시 1회 실행)
+
+    Notes:
+        - 모든 크롤러를 enabled=True로 초기화
+        - 이미 존재하는 경우 skip (멱등성 보장)
+    """
+    # 모든 크롤러 이름 정의
+    CRAWLER_NAMES = [
+        'investing', 'kb', 'hana', 'shinhan', 'woori',
+        'ibk', 'nh', 'sc', 'bs', 'citi'
+    ]
+
+    for crawler_name in CRAWLER_NAMES:
+        # 이미 존재하는지 확인
+        existing = db.query(models.CrawlerConfig).filter(
+            models.CrawlerConfig.crawler_name == crawler_name
+        ).first()
+
+        if not existing:
+            # 신규 생성 (기본값: enabled=True)
+            config = models.CrawlerConfig(
+                crawler_name=crawler_name,
+                enabled=True,
+                updated_at=models.get_kst_now()
+            )
+            db.add(config)
+            logger.info(f"✅ 크롤러 설정 초기화: {crawler_name} (enabled=True)")
+
+    db.commit()
+    logger.info("✅ crawler_config 테이블 초기화 완료")
+
+
+def get_all_crawler_configs(db: Session) -> List[Dict[str, Any]]:
+    """
+    모든 크롤러 설정 조회 (관리자 API용)
+
+    Returns:
+        [
+            {
+                "crawler_name": "investing",
+                "enabled": True,
+                "updated_at": "2025-11-27T10:30:00+09:00"
+            },
+            ...
+        ]
+    """
+    configs = db.query(models.CrawlerConfig).order_by(models.CrawlerConfig.crawler_name).all()
+
+    return [
+        {
+            "crawler_name": config.crawler_name,
+            "enabled": config.enabled,
+            "updated_at": config.updated_at.astimezone().isoformat()
+        }
+        for config in configs
+    ]
+
+
+def update_crawler_config(db: Session, crawler_name: str, enabled: bool) -> bool:
+    """
+    크롤러 설정 업데이트 (토글 API용)
+
+    Args:
+        db: 데이터베이스 세션
+        crawler_name: 크롤러 이름
+        enabled: 활성화 상태
+
+    Returns:
+        성공 시 True, 실패 시 False
+
+    Raises:
+        ValueError: 존재하지 않는 크롤러 이름
+    """
+    config = db.query(models.CrawlerConfig).filter(
+        models.CrawlerConfig.crawler_name == crawler_name
+    ).first()
+
+    if not config:
+        raise ValueError(f"Invalid crawler name: {crawler_name}")
+
+    config.enabled = enabled
+    config.updated_at = models.get_kst_now()
+
+    db.commit()
+
+    action = "활성화" if enabled else "비활성화"
+    logger.info(
+        f"✅ 크롤러 설정 업데이트: {crawler_name} → {action}",
+        extra={"crawler": crawler_name, "enabled": enabled}
+    )
+
+    return True

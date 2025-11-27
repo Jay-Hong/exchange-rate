@@ -127,6 +127,112 @@ current_mode = None
 
 
 # ═════════════════════════════════════════════════════════════
+# 크롤러 설정 관리자 (Phase 1.8)
+# ═════════════════════════════════════════════════════════════
+class CrawlerManager:
+    """
+    크롤러 설정 관리자 (In-memory 캐시 + DB 동기화)
+
+    Features:
+        - In-memory 캐시로 빠른 조회 (< 0.001ms)
+        - DB 영속성 보장
+        - switch_jobs() 통합 제어
+    """
+
+    def __init__(self):
+        self.config_cache: dict[str, bool] = {}  # {crawler_name: enabled}
+
+    def load_config(self, db):
+        """
+        DB에서 설정을 읽어 In-memory 캐시 초기화
+
+        Notes:
+            - start_scheduler() 내부에서 1회 호출
+            - 서버 재시작 시 DB 상태 복원
+        """
+        try:
+            configs = crud.get_all_crawler_configs(db)
+
+            for config in configs:
+                self.config_cache[config["crawler_name"]] = config["enabled"]
+
+            logger.info(
+                "✅ CrawlerManager 캐시 로드 완료",
+                extra={"count": len(configs)}
+            )
+        except Exception as e:
+            logger.error("❌ CrawlerManager 캐시 로드 실패", exc_info=True)
+            # 폴백: 모든 크롤러 활성화
+            self.config_cache = {}
+
+    def is_enabled(self, crawler_name: str) -> bool:
+        """
+        크롤러 활성화 여부 조회 (In-memory 캐시)
+
+        Args:
+            crawler_name: 크롤러 이름
+
+        Returns:
+            활성화 여부 (캐시 미스 시 기본값 True)
+
+        Notes:
+            - switch_jobs() 내부에서 매번 호출
+            - 성능: < 0.001ms (dict lookup)
+        """
+        return self.config_cache.get(crawler_name, True)
+
+    def toggle_crawler(self, crawler_name: str, enabled: bool):
+        """
+        크롤러 토글 (관리자 API에서 호출)
+
+        Steps:
+            1. DB 업데이트 (crud.update_crawler_config)
+            2. In-memory 캐시 업데이트
+            3. switch_jobs() 재실행 → APScheduler job 재등록
+
+        Args:
+            crawler_name: 크롤러 이름
+            enabled: 활성화 상태
+
+        Raises:
+            ValueError: 존재하지 않는 크롤러 이름
+        """
+        # Validation: 유효한 크롤러 이름인지 체크
+        VALID_CRAWLERS = [
+            'investing', 'kb', 'hana', 'shinhan', 'woori',
+            'ibk', 'nh', 'sc', 'bs', 'citi'
+        ]
+
+        if crawler_name not in VALID_CRAWLERS:
+            raise ValueError(f"Invalid crawler name: {crawler_name}")
+
+        # 1. DB 업데이트
+        db = SessionLocal()
+        try:
+            crud.update_crawler_config(db, crawler_name, enabled)
+        finally:
+            db.close()
+
+        # 2. In-memory 캐시 업데이트
+        self.config_cache[crawler_name] = enabled
+
+        # 3. switch_jobs() 재실행 (현재 모드 유지)
+        global current_mode
+        if current_mode:
+            switch_jobs(current_mode)
+
+            action = "활성화" if enabled else "비활성화"
+            logger.info(
+                f"✅ 크롤러 토글 완료: {crawler_name} → {action} (현재 모드: {current_mode})",
+                extra={"crawler": crawler_name, "enabled": enabled, "mode": current_mode}
+            )
+
+
+# 전역 인스턴스 생성
+crawler_manager = CrawlerManager()
+
+
+# ═════════════════════════════════════════════════════════════
 # 크롤러 Wrapper (통계 수집)
 # ═════════════════════════════════════════════════════════════
 def make_request_crawler_wrapper(bank_name: str, job_func: Callable):
@@ -484,7 +590,7 @@ def make_selenium_job_wrapper(bank_name: str):
 
 def switch_jobs(mode: str):
     """
-    모드에 따라 작업 재등록 (4단계 세분화)
+    모드에 따라 작업 재등록 (4단계 세분화 + 크롤러 토글 통합)
 
     [2025-11-16 재설계]
     - IN 모드: cron 절대 시간 동기화 (Broadcasting 동기화) - 월~금 08:00~20:59
@@ -492,7 +598,13 @@ def switch_jobs(mode: str):
     - BREAK2 모드: 03~07시 (월 06:00~07:59, 화~토 03:00~07:59) - ibk/shinhan/sc/woori 제외
     - OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개) - 토 07:00 ~ 월 05:59
     - Queue: C Group만 사용 (Selenium 전용)
+
+    [2025-11-27 Phase 1.8: 크롤러 토글]
+    - 각 크롤러 등록 전에 crawler_manager.is_enabled() 체크
+    - enabled=False인 크롤러는 job 등록 skip
     """
+    global crawler_manager
+
     # 기존 작업 제거
     for job in scheduler.get_jobs():
         if job.id.startswith("task_"):
@@ -504,90 +616,126 @@ def switch_jobs(mode: str):
         # ═════════════════════════════════════════════════════════════
 
         # A Group: investing (3초 전)
-        scheduler.add_job(
-            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(second='7,17,27,37,47,57', timezone=KST),
-            id='task_investing',
-            max_instances=1,
-            misfire_grace_time=5
-        )
+        if crawler_manager.is_enabled('investing'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+                CronTrigger(second='7,17,27,37,47,57', timezone=KST),
+                id='task_investing',
+                max_instances=1,
+                misfire_grace_time=5
+            )
+        else:
+            logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         # B Group: kb, hana (5초 전, 10초 엇갈림)
-        scheduler.add_job(
-            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(second='15,35,55', timezone=KST),
-            id='task_kb',
-            max_instances=1,
-            misfire_grace_time=10
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(second='5,25,45', timezone=KST),
-            id='task_hana',
-            max_instances=1,
-            misfire_grace_time=10
-        )
+        if crawler_manager.is_enabled('kb'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+                CronTrigger(second='15,35,55', timezone=KST),
+                id='task_kb',
+                max_instances=1,
+                misfire_grace_time=10
+            )
+        else:
+            logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('hana'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(second='5,25,45', timezone=KST),
+                id='task_hana',
+                max_instances=1,
+                misfire_grace_time=10
+            )
+        else:
+            logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
-        scheduler.add_job(
-            make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='53', timezone=KST),
-            id='task_woori',
-            max_instances=1,
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='33', timezone=KST),
-            id='task_bs',
-            max_instances=1,
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='*', second='13', timezone=KST),
-            id='task_citi',
-            max_instances=1,
-            misfire_grace_time=30
-        )
+        if crawler_manager.is_enabled('woori'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(minute='*', second='53', timezone=KST),
+                id='task_woori',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [woori] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('bs'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(minute='*', second='33', timezone=KST),
+                id='task_bs',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('citi'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+                CronTrigger(minute='*', second='13', timezone=KST),
+                id='task_citi',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [citi] 비활성화 상태 - job 등록 스킵")
 
         # C Group: Selenium
-        scheduler.add_job(
-            make_selenium_job_wrapper('shinhan'),
-            # IntervalTrigger(seconds=38.3, timezone=KST),
-            CronTrigger(minute='*', second='18', timezone=KST),
-            id='task_shinhan',
-            max_instances=1,
-            # misfire_grace_time=25
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
-            # IntervalTrigger(seconds=55.5, timezone=KST),
-            CronTrigger(minute='*', second='34', timezone=KST),
-            id='task_ibk',
-            max_instances=1,
-            # misfire_grace_time=25
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('nh'),
-            # IntervalTrigger(seconds=90, timezone=KST),
-            CronTrigger(minute='*', second='54', timezone=KST),
-            id='task_nh',
-            max_instances=1,
-            # misfire_grace_time=60
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('sc'),
-            # IntervalTrigger(seconds=150, timezone=KST),
-            CronTrigger(minute='*', second='58', timezone=KST),
-            id='task_sc',
-            max_instances=1,
-            # misfire_grace_time=90
-            misfire_grace_time=30
-        )
+        if crawler_manager.is_enabled('shinhan'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('shinhan'),
+                # IntervalTrigger(seconds=38.3, timezone=KST),
+                CronTrigger(minute='*', second='18', timezone=KST),
+                id='task_shinhan',
+                max_instances=1,
+                # misfire_grace_time=25
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [shinhan] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('ibk'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
+                # IntervalTrigger(seconds=55.5, timezone=KST),
+                CronTrigger(minute='*', second='34', timezone=KST),
+                id='task_ibk',
+                max_instances=1,
+                # misfire_grace_time=25
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [ibk] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('nh'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('nh'),
+                # IntervalTrigger(seconds=90, timezone=KST),
+                CronTrigger(minute='*', second='54', timezone=KST),
+                id='task_nh',
+                max_instances=1,
+                # misfire_grace_time=60
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('sc'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('sc'),
+                # IntervalTrigger(seconds=150, timezone=KST),
+                CronTrigger(minute='*', second='58', timezone=KST),
+                id='task_sc',
+                max_instances=1,
+                # misfire_grace_time=90
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [sc] 비활성화 상태 - job 등록 스킵")
 
     elif mode == "BREAK1":
         # ═════════════════════════════════════════════════════════════
@@ -598,81 +746,113 @@ def switch_jobs(mode: str):
         # ibk는 00:00부터 Selenium만 사용 (날짜 변경 필요, Request 불가)
 
         # A Group: investing (3초 전)
-        scheduler.add_job(
-            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(second='7,17,27,37,47,57', timezone=KST),
-            id='task_investing',
-            max_instances=1,
-            misfire_grace_time=5
-        )
+        if crawler_manager.is_enabled('investing'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+                CronTrigger(second='7,17,27,37,47,57', timezone=KST),
+                id='task_investing',
+                max_instances=1,
+                misfire_grace_time=5
+            )
+        else:
+            logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         # B Group: kb, hana (5초 전, 10초 엇갈림)
-        scheduler.add_job(
-            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(second='15,35,55', timezone=KST),
-            id='task_kb',
-            max_instances=1,
-            misfire_grace_time=10
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(second='5,25,45', timezone=KST),
-            id='task_hana',
-            max_instances=1,
-            misfire_grace_time=10
-        )
+        if crawler_manager.is_enabled('kb'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+                CronTrigger(second='15,35,55', timezone=KST),
+                id='task_kb',
+                max_instances=1,
+                misfire_grace_time=10
+            )
+        else:
+            logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('hana'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(second='5,25,45', timezone=KST),
+                id='task_hana',
+                max_instances=1,
+                misfire_grace_time=10
+            )
+        else:
+            logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
-        scheduler.add_job(
-            make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='53', timezone=KST),
-            id='task_woori',
-            max_instances=1,
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='33', timezone=KST),
-            id='task_bs',
-            max_instances=1,
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='*', second='13', timezone=KST),
-            id='task_citi',
-            max_instances=1,
-            misfire_grace_time=30
-        )
+        if crawler_manager.is_enabled('woori'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(minute='*', second='53', timezone=KST),
+                id='task_woori',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [woori] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('bs'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(minute='*', second='33', timezone=KST),
+                id='task_bs',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('citi'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+                CronTrigger(minute='*', second='13', timezone=KST),
+                id='task_citi',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [citi] 비활성화 상태 - job 등록 스킵")
 
         # C Group: Selenium
-        scheduler.add_job(
-            make_selenium_job_wrapper('shinhan'),
-            # IntervalTrigger(seconds=38.3, timezone=KST),
-            CronTrigger(minute='*', second='18', timezone=KST),
-            id='task_shinhan',
-            max_instances=1,
-            # misfire_grace_time=25
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
-            # IntervalTrigger(seconds=55.5, timezone=KST),
-            CronTrigger(minute='*', second='34', timezone=KST),
-            id='task_ibk',
-            max_instances=1,
-            # misfire_grace_time=25
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_selenium_job_wrapper('nh'),
-            # IntervalTrigger(seconds=90, timezone=KST),
-            CronTrigger(minute='*', second='54', timezone=KST),
-            id='task_nh',
-            max_instances=1,
-            # misfire_grace_time=60
-            misfire_grace_time=30
-        )
+        if crawler_manager.is_enabled('shinhan'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('shinhan'),
+                # IntervalTrigger(seconds=38.3, timezone=KST),
+                CronTrigger(minute='*', second='18', timezone=KST),
+                id='task_shinhan',
+                max_instances=1,
+                # misfire_grace_time=25
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [shinhan] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('ibk'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
+                # IntervalTrigger(seconds=55.5, timezone=KST),
+                CronTrigger(minute='*', second='34', timezone=KST),
+                id='task_ibk',
+                max_instances=1,
+                # misfire_grace_time=25
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [ibk] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('nh'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('nh'),
+                # IntervalTrigger(seconds=90, timezone=KST),
+                CronTrigger(minute='*', second='54', timezone=KST),
+                id='task_nh',
+                max_instances=1,
+                # misfire_grace_time=60
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
 
     elif mode == "BREAK2":
         # ═════════════════════════════════════════════════════════════
@@ -683,56 +863,76 @@ def switch_jobs(mode: str):
         # 08:00~09:00부터 은행 개장 준비하며 새 환율 고시 시작
 
         # A Group: investing (3초 전)
-        scheduler.add_job(
-            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(second='7,17,27,37,47,57', timezone=KST),
-            id='task_investing',
-            max_instances=1,
-            misfire_grace_time=5
-        )
+        if crawler_manager.is_enabled('investing'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+                CronTrigger(second='7,17,27,37,47,57', timezone=KST),
+                id='task_investing',
+                max_instances=1,
+                misfire_grace_time=5
+            )
+        else:
+            logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         # B Group: kb, hana (5초 전, 10초 엇갈림)
-        scheduler.add_job(
-            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(second='15,35,55', timezone=KST),
-            id='task_kb',
-            max_instances=1,
-            misfire_grace_time=10
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(second='5,25,45', timezone=KST),
-            id='task_hana',
-            max_instances=1,
-            misfire_grace_time=10
-        )
+        if crawler_manager.is_enabled('kb'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+                CronTrigger(second='15,35,55', timezone=KST),
+                id='task_kb',
+                max_instances=1,
+                misfire_grace_time=10
+            )
+        else:
+            logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('hana'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(second='5,25,45', timezone=KST),
+                id='task_hana',
+                max_instances=1,
+                misfire_grace_time=10
+            )
+        else:
+            logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi (7초 전)
-        scheduler.add_job(
-            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-            CronTrigger(minute='*', second='33', timezone=KST),
-            id='task_bs',
-            max_instances=1,
-            misfire_grace_time=30
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
-            CronTrigger(minute='*', second='13', timezone=KST),
-            id='task_citi',
-            max_instances=1,
-            misfire_grace_time=30
-        )
+        if crawler_manager.is_enabled('bs'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
+                CronTrigger(minute='*', second='33', timezone=KST),
+                id='task_bs',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('citi'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
+                CronTrigger(minute='*', second='13', timezone=KST),
+                id='task_citi',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [citi] 비활성화 상태 - job 등록 스킵")
 
         # C Group: Selenium
-        scheduler.add_job(
-            make_selenium_job_wrapper('nh'),
-            # IntervalTrigger(seconds=90, timezone=KST),
-            CronTrigger(minute='*', second='54', timezone=KST),
-            id='task_nh',
-            max_instances=1,
-            # misfire_grace_time=60
-            misfire_grace_time=30
-        )
+        if crawler_manager.is_enabled('nh'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('nh'),
+                # IntervalTrigger(seconds=90, timezone=KST),
+                CronTrigger(minute='*', second='54', timezone=KST),
+                id='task_nh',
+                max_instances=1,
+                # misfire_grace_time=60
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
 
     elif mode == "OUT":
         # ═════════════════════════════════════════════════════════════
@@ -745,47 +945,63 @@ def switch_jobs(mode: str):
         # 완전 분산 스케줄 (동시 실행 0개, 리소스 최소화)
 
         # A Group: investing (10분마다)
-        scheduler.add_job(
-            make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-            CronTrigger(minute='7,17,27,37,47,57', second='45', timezone=KST),
-            id='task_investing',
-            max_instances=1,
-            misfire_grace_time=300
-        )
+        if crawler_manager.is_enabled('investing'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
+                CronTrigger(minute='7,17,27,37,47,57', second='45', timezone=KST),
+                id='task_investing',
+                max_instances=1,
+                misfire_grace_time=300
+            )
+        else:
+            logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         # B Group: kb, hana (10분마다)
-        scheduler.add_job(
-            make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-            CronTrigger(minute='5,15,25,35,45,55', second='45', timezone=KST),
-            id='task_kb',
-            max_instances=1,
-            misfire_grace_time=300
-        )
-        scheduler.add_job(
-            make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),
-            CronTrigger(minute='0,10,20,30,40,50', second='45', timezone=KST),
-            id='task_hana',
-            max_instances=1,
-            misfire_grace_time=300
-        )
+        if crawler_manager.is_enabled('kb'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
+                CronTrigger(minute='5,15,25,35,45,55', second='45', timezone=KST),
+                id='task_kb',
+                max_instances=1,
+                misfire_grace_time=300
+            )
+        else:
+            logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
+
+        if crawler_manager.is_enabled('hana'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),
+                CronTrigger(minute='0,10,20,30,40,50', second='45', timezone=KST),
+                id='task_hana',
+                max_instances=1,
+                misfire_grace_time=300
+            )
+        else:
+            logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi (60분마다)
-        scheduler.add_job(
-            make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
-            CronTrigger(minute='33', second='45', timezone=KST),
-            id='task_bs',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
+        if crawler_manager.is_enabled('bs'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
+                CronTrigger(minute='33', second='45', timezone=KST),
+                id='task_bs',
+                max_instances=1,
+                misfire_grace_time=1800
+            )
+        else:
+            logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
 
         # C Group: Selenium (60분마다)
-        scheduler.add_job(
-            make_selenium_job_wrapper('nh'),
-            CronTrigger(minute='3', second='45', timezone=KST),
-            id='task_nh',
-            max_instances=1,
-            misfire_grace_time=1800
-        )
+        if crawler_manager.is_enabled('nh'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('nh'),
+                CronTrigger(minute='3', second='45', timezone=KST),
+                id='task_nh',
+                max_instances=1,
+                misfire_grace_time=1800
+            )
+        else:
+            logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
 
     logger.info(
         f"=== {mode} 모드로 전환됨 ===",
@@ -1016,6 +1232,20 @@ async def check_worker_health():
 
 
 def start_scheduler():
+    global crawler_manager
+
+    # ═════════════════════════════════════════════════════════════
+    # CrawlerManager 초기화 (DB 로드) - Phase 1.8
+    # ═════════════════════════════════════════════════════════════
+    db = SessionLocal()
+    try:
+        crawler_manager.load_config(db)
+        logger.info("✅ CrawlerManager 초기화 완료", extra={"config_count": len(crawler_manager.config_cache)})
+    except Exception as e:
+        logger.error("❌ CrawlerManager 초기화 실패", exc_info=True)
+    finally:
+        db.close()
+
     # ═════════════════════════════════════════════════════════════
     # WebSocket Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
     # ═════════════════════════════════════════════════════════════

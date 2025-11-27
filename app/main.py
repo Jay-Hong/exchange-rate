@@ -139,6 +139,16 @@ async def lifespan(app: FastAPI):
     await redis_cache.connect()
     await warmup_broadcast_cache()
 
+    # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
+    db = SessionLocal()
+    try:
+        crud.init_crawler_config(db)
+        logger.info("✅ Crawler Config 초기화 완료", extra={"table": "crawler_config"})
+    except Exception as e:
+        logger.error("❌ Crawler Config 초기화 실패", exc_info=True)
+    finally:
+        db.close()
+
     # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
     scheduler.init_selenium_queue()
 
@@ -651,4 +661,73 @@ async def get_redis_status():
             "circuit_state": redis_cache.circuit.state,
             "error": str(e)
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Crawler Toggle API (Phase 1.8)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/api/crawler-config", dependencies=[Depends(verify_admin)])
+async def get_crawler_config():
+    """
+    크롤러 활성화/비활성화 설정 조회 (Phase 1.8)
+
+    Returns:
+        {
+            "status": "success",
+            "configs": [
+                {"crawler_name": "investing", "enabled": true, "updated_at": "2025-11-27T10:00:00+09:00"},
+                {"crawler_name": "kb", "enabled": false, "updated_at": "2025-11-27T10:00:00+09:00"},
+                ...
+            ]
+        }
+    """
+    db = SessionLocal()
+    try:
+        configs = crud.get_all_crawler_configs(db)
+        return {"status": "success", "configs": configs}
+    except Exception as e:
+        logger.error("크롤러 설정 조회 실패", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+@app.post("/admin/api/crawler-config", dependencies=[Depends(verify_admin)])
+async def toggle_crawler(request: Request):
+    """
+    크롤러 활성화/비활성화 토글 (Phase 1.8)
+
+    Body:
+        {
+            "crawler_name": "kb",
+            "enabled": false
+        }
+
+    Returns:
+        {
+            "status": "success",
+            "message": "kb 크롤러가 비활성화되었습니다"
+        }
+    """
+    from app.scheduler import crawler_manager
+
+    data = await request.json()
+    crawler_name = data.get("crawler_name")
+    enabled = data.get("enabled")
+
+    if not crawler_name or enabled is None:
+        raise HTTPException(status_code=400, detail="crawler_name과 enabled 필드가 필요합니다")
+
+    try:
+        crawler_manager.toggle_crawler(crawler_name, enabled)
+        return {
+            "status": "success",
+            "message": f"{crawler_name} 크롤러가 {'활성화' if enabled else '비활성화'}되었습니다"
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"크롤러 토글 실패: {crawler_name}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 

@@ -530,6 +530,86 @@
             padding: 2rem;
             color: #8b949e;
         }
+
+        /* Toggle Switch (Phase 1.8) - Dark Theme */
+        .crawler-toggle-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 15px;
+            background: #21262d;
+            border-radius: 8px;
+            border: 1px solid #30363d;
+            transition: background 0.2s;
+        }
+
+        .crawler-toggle-item:hover {
+            background: #2d333b;
+        }
+
+        .crawler-toggle-item.disabled {
+            background: #2d2a24;
+            border-color: #d29922;
+        }
+
+        .crawler-name {
+            font-weight: 600;
+            font-size: 0.95em;
+            color: #c9d1d9;
+        }
+
+        .toggle-switch {
+            position: relative;
+            width: 50px;
+            height: 26px;
+            flex-shrink: 0;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #161b22;
+            transition: 0.3s;
+            border-radius: 26px;
+            border: 1px solid #30363d;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #6e7681;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: #238636;
+            border-color: #2ea043;
+        }
+
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(24px);
+            background-color: #ffffff;
+        }
+
+        .toggle-switch input:disabled + .toggle-slider {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -588,6 +668,21 @@
         <div class="dashboard-grid" id="crawler-stats-grid">
             <!-- 동적 생성 -->
             <div class="loading">통계 로딩 중...</div>
+        </div>
+
+        <!-- Crawler Toggle (Phase 1.8) -->
+        <h2 class="section-title">🎚️ Crawler Toggle (Phase 1.8)</h2>
+        <div class="card">
+            <div class="card-header">
+                <h3 style="margin: 0; font-size: 1.1em;">크롤러 활성화/비활성화</h3>
+                <span id="crawler-config-updated" style="font-size: 0.85em; color: #666;">-</span>
+            </div>
+            <div class="card-body" style="padding-top: 15px;">
+                <div id="crawler-toggle-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px;">
+                    <!-- 동적 생성 -->
+                    <div class="loading">설정 로딩 중...</div>
+                </div>
+            </div>
         </div>
 
         <!-- Selenium Priority Queue -->
@@ -857,6 +952,9 @@
 
                 // Selenium Queue 상태 로드 (비동기 호출)
                 loadQueueStatus();
+
+                // Crawler Toggle 설정 로드 (Phase 1.8, 비동기 호출)
+                loadCrawlerConfig();
 
                 // 크롤러 통계 로드 (비동기 호출)
                 loadCrawlerStats();
@@ -1252,6 +1350,85 @@
         function toggleTrace(traceId) {
             const trace = document.getElementById(traceId);
             trace.classList.toggle('expanded');
+        }
+
+        // ========================================
+        // Crawler Toggle (Phase 1.8)
+        // ========================================
+        async function loadCrawlerConfig() {
+            try {
+                const response = await fetch('/admin/api/crawler-config');
+
+                if (!response.ok) throw new Error('Failed to fetch crawler config');
+
+                const data = await response.json();
+
+                // 타임스탬프 업데이트
+                document.getElementById('crawler-config-updated').textContent =
+                    new Date().toLocaleTimeString('ko-KR');
+
+                // 토글 스위치 렌더링
+                const grid = document.getElementById('crawler-toggle-grid');
+                if (data.configs && data.configs.length > 0) {
+                    grid.innerHTML = data.configs.map(config => `
+                        <div class="crawler-toggle-item ${!config.enabled ? 'disabled' : ''}">
+                            <span class="crawler-name">${config.crawler_name.toUpperCase()}</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox"
+                                       ${config.enabled ? 'checked' : ''}
+                                       onchange="toggleCrawler('${config.crawler_name}', this.checked)"
+                                       id="toggle-${config.crawler_name}">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    `).join('');
+                } else {
+                    grid.innerHTML = '<div class="loading">설정이 없습니다</div>';
+                }
+            } catch (error) {
+                console.error('크롤러 설정 로드 실패:', error);
+                document.getElementById('crawler-toggle-grid').innerHTML =
+                    '<div class="loading" style="color: #dc3545;">⚠️ 로드 실패</div>';
+            }
+        }
+
+        async function toggleCrawler(crawlerName, enabled) {
+            try {
+                // UI 즉시 비활성화 (중복 클릭 방지)
+                const toggleInput = document.getElementById(`toggle-${crawlerName}`);
+                toggleInput.disabled = true;
+
+                const response = await fetch('/admin/api/crawler-config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        crawler_name: crawlerName,
+                        enabled: enabled
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Toggle failed');
+                }
+
+                const data = await response.json();
+
+                // 성공 메시지 표시 (선택사항)
+                console.log(data.message);
+
+                // 설정 새로고침
+                await loadCrawlerConfig();
+
+            } catch (error) {
+                console.error('크롤러 토글 실패:', error);
+                alert(`토글 실패: ${error.message}`);
+
+                // 실패 시 원래 상태로 되돌림
+                await loadCrawlerConfig();
+            }
         }
     </script>
 </body>
