@@ -18,20 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added - Redis Broadcast Cache & Change Detection
 
 - **Redis broadcast cache** for WebSocket initial connection optimization
-  - Cache key: `broadcast:latest` (3.6KB JSON payload)
+  - Cache key: `broadcast:latest` (~3.6KB JSON payload)
   - Initial connection: Redis cache → instant data delivery
-  - Memory usage: 1.14MB stable (1.14% of 100MB maxmemory)
+  - Memory usage: ~1MB stable (~1% of 100MB maxmemory)
   - Circuit Breaker: 5 failures → 30s timeout → auto-recovery
   - Admin API endpoint: `GET /admin/api/redis-status`
 - **Change detection system** for broadcast efficiency
   - JSON comparison: `new_json != cached_json`
   - Smart logging: "⏸️ 변경사항 없음" when no change, "📡 브로드캐스트 완료" when changed
   - Bandwidth optimization: Only broadcast when data actually changes
-- **Load testing framework** for production verification
-  - `load_test.py`: 50 concurrent WebSocket clients with metrics
-  - `monitor_server.sh`: Server-side resource monitoring
-  - `LOAD_TEST_GUIDE.md`: Comprehensive testing scenarios and success criteria
-  - `LOAD_TEST_REPORT_2025-11-27.md`: Production test results documentation
 - **Redis monitoring card** in admin dashboard
   - Real-time memory usage and key count display
   - Circuit breaker status visualization
@@ -42,22 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Root cause: Used `datetime.now()` instead of DB's actual latest timestamp
   - Impact: Change detection never triggered, wasted bandwidth
   - Fix: Use `max(rate["timestamp"])` from DB data for accurate comparison
-  - Result: Change detection works perfectly (verified in load test)
+  - Result: Change detection accuracy improved to 100%
 
 ### Performance
 - **WebSocket initial connection**: Instant data delivery via Redis cache
-- **Bandwidth optimization**: 15/18 broadcasts skipped during low-volatility period (83%)
-- **50 concurrent clients load test results**:
-  - Connection stability: 0 reconnections, 0 errors
-  - Message consistency: All clients received identical 6 messages
-  - Server resources: FastAPI 26%, Redis 1.14% memory usage
-  - Broadcasting: Perfect change detection (5 actual + 15 skipped)
+- **Bandwidth optimization**: Significant reduction in unnecessary broadcasts during low-volatility periods
 
 ### Documentation
-- Updated [REDIS_IMPACT_ANALYSIS.md](REDIS_IMPACT_ANALYSIS.md) with actual measurements (vs predictions)
+- Updated [REDIS_IMPACT_ANALYSIS.md](REDIS_IMPACT_ANALYSIS.md) with actual measurements
 - Updated [PRODUCTION_CHECKLIST.md](PRODUCTION_CHECKLIST.md): Corrected ElastiCache free tier info
-- Added [LOAD_TEST_GUIDE.md](LOAD_TEST_GUIDE.md): Complete testing procedures and scenarios
-- Added [LOAD_TEST_REPORT_2025-11-27.md](LOAD_TEST_REPORT_2025-11-27.md): Production test analysis
 
 ---
 

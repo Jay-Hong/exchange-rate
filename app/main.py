@@ -170,20 +170,7 @@ async def broadcast_rates_once():
             await redis_cache.set(BROADCAST_CACHE_KEY, new_json)
 
             if manager.active_connections:
-                # 브로드캐스트 전송 시각 추가 (지연 시간 정확한 측정용)
-                broadcast_at = datetime.now().astimezone().isoformat()
-                payload_with_broadcast_time = {
-                    **payload,
-                    "data": {
-                        **payload["data"],
-                        "metadata": {
-                            **payload["data"]["metadata"],
-                            "broadcast_at": broadcast_at,
-                        }
-                    }
-                }
-
-                await manager.broadcast(payload_with_broadcast_time)
+                await manager.broadcast(payload)
 
                 broadcast_stats.record_success(
                     data_size_bytes=len(new_json.encode("utf-8")),
@@ -232,23 +219,20 @@ async def websocket_endpoint(websocket: WebSocket):
     db = SessionLocal()
     try:
         cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
-        broadcast_at = datetime.now().astimezone().isoformat()
 
         if cached_json:
-            # Redis 캐시 데이터에 broadcast_at 추가
+            # Redis 캐시 데이터 전송
             cached_payload = json.loads(cached_json)
-            cached_payload["data"]["metadata"]["broadcast_at"] = broadcast_at
             await websocket.send_json(cached_payload)
             logger.info("📨 Redis 캐시로 초기 데이터 전송", extra={"connections": len(manager.active_connections)})
         else:
-            # DB 폴백 데이터에 broadcast_at 추가
+            # DB 폴백 데이터 전송
             initial_payload = build_rates_payload(db)
-            initial_payload["data"]["metadata"]["broadcast_at"] = broadcast_at
             await websocket.send_json(initial_payload)
 
-            # 캐시 미스 시 Redis에 채워 넣기 (broadcast_at 제외한 원본 저장)
+            # 캐시 미스 시 Redis에 채워 넣기
             try:
-                cache_payload = build_rates_payload(db)  # broadcast_at 없는 원본
+                cache_payload = build_rates_payload(db)
                 await redis_cache.set(
                     BROADCAST_CACHE_KEY,
                     json.dumps(cache_payload, ensure_ascii=False),
