@@ -66,7 +66,7 @@ def main():
         sys.exit(2)
 
     try:
-        logger.info(f"🚀 [{bank_name}] subprocess 크롤링 시작")
+        logger.info(f"⏳ [{bank_name}] subprocess 크롤링 시작")
 
         # 크롤러 실행 (DB 연결은 크롤러 내부에서 자체 관리)
         crawler_func()

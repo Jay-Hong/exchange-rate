@@ -180,7 +180,7 @@ async def execute_with_timeout(bank_name: str) -> bool:
     start_time = time.time()
 
     try:
-        logger.info(f"⚡ [{bank_name}] subprocess 크롤링 시작 (타임아웃: {timeout}초)")
+        logger.info(f"⏳ [{bank_name}] subprocess 크롤링 시작 (타임아웃: {timeout}초)")
 
         # subprocess 생성 (app.crawlers.runner 실행)
         proc = await asyncio.create_subprocess_exec(
