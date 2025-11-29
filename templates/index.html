@@ -1346,6 +1346,13 @@
         // 페이지 떠날 때 정리
         window.addEventListener('beforeunload', stopPulsing);
 
+        // KST 24시간제 시간 라벨 (0~23, 앞자리 0 제거)
+        const formatHourKST = (ts) => {
+            const d = new Date(ts);
+            const hour = (d.getUTCHours() + 9) % 24; // KST = UTC+9, DST 없음
+            return String(hour);
+        };
+
         // 그래프 로드 함수
         async function loadGraph(currency) {
             try {
@@ -1356,16 +1363,55 @@
 
                 const data = await res.json();
 
+                // 24시간 윈도우 설정 (KST 기준)
+                const now = Date.now();
+                const windowStart = now - 24 * 60 * 60 * 1000;
+
+                const normalizeSeries = (points) => {
+                    if (!points || points.length === 0) return [];
+
+                    // Unix(sec) → ms, 정렬 보장
+                    const sorted = points
+                        .map(([ts, rate]) => [ts * 1000, rate])
+                        .sort((a, b) => a[0] - b[0]);
+
+                    const result = [];
+                    let lastBeforeStart = null;
+
+                    for (const [t, r] of sorted) {
+                        if (t <= windowStart) {
+                            lastBeforeStart = [windowStart, r];
+                        }
+                        if (t >= windowStart && t <= now) {
+                            result.push([t, r]);
+                        }
+                    }
+
+                    if (lastBeforeStart) {
+                        // 윈도우 시작점에 마지막 값을 캡
+                        result.unshift(lastBeforeStart);
+                    }
+
+                    const lastPoint = result[result.length - 1] || sorted[sorted.length - 1];
+                    if (lastPoint && lastPoint[0] < now) {
+                        // 최신 값이 오래됐다면 현재 시각까지 수평선 유지
+                        result.push([now, lastPoint[1]]);
+                    }
+
+                    return result;
+                };
+
                 const datasets = Object.entries(data.sources).map(([source, sourceData]) => {
-                    const points = [
-                        ...sourceData.day.map(([ts, rate]) => ({ x: ts * 1000, y: rate })),
-                        ...sourceData.recent.map(([ts, rate]) => ({ x: ts * 1000, y: rate }))
-                    ];
+                    const rawPoints = [...sourceData.day, ...sourceData.recent];
+                    const normalized = normalizeSeries(rawPoints);
+
+                    const points = normalized.map(([ts, rate]) => ({ x: ts, y: rate }));
 
                     const colors = {
-                        investing: 'rgb(75, 192, 192)',
-                        kb: 'rgb(255, 99, 132)',
-                        hana: 'rgb(54, 162, 235)'
+                        // 막대 그래프 색상과 통일
+                        investing: '#8fa4c3',   // 한 단계 더 밝게
+                        kb: '#ffb200',
+                        hana: '#009792'
                     };
 
                     return {
@@ -1378,6 +1424,14 @@
                         tension: 0.1
                     };
                 });
+
+                // Y축 패딩을 위해 전체 min/max 계산 (0.5 KRW 여유)
+                const allY = datasets.flatMap(ds => ds.data.map(p => p.y)).filter(v => Number.isFinite(v));
+                const yPadding = 0.5;
+                const yMin = allY.length ? Math.min(...allY) : 0;
+                const yMax = allY.length ? Math.max(...allY) : 1;
+                const suggestedMin = yMin - yPadding;
+                const suggestedMax = yMax + yPadding;
 
                 // 에러 오버레이 제거 (성공 시)
                 const errorOverlay = document.getElementById('graph-error-overlay');
@@ -1421,19 +1475,26 @@
                                 time: {
                                     unit: 'hour',
                                     displayFormats: {
-                                        hour: 'HH:mm'
+                                        hour: 'HH'
                                     }
                                 },
+                                min: windowStart,
+                                max: now,
                                 title: {
                                     display: true,
                                     text: '시간 (KST)',
                                     color: '#e0e0e0'
                                 },
                                 ticks: {
-                                    color: '#bdc3c7'
+                                    color: '#bdc3c7',
+                                    callback: (value) => formatHourKST(value)
                                 },
                                 grid: {
-                                    color: '#444'
+                                    color: (ctx) => {
+                                        const hour = (new Date(ctx.tick.value).getUTCHours() + 9) % 24;
+                                        return hour === 0 ? '#777' : '#444';
+                                    },
+                                    lineWidth: 1
                                 }
                             },
                             y: {
@@ -1448,8 +1509,14 @@
                                     },
                                     color: '#bdc3c7'
                                 },
+                                suggestedMin: suggestedMin,
+                                suggestedMax: suggestedMax,
                                 grid: {
-                                    color: '#444'
+                                    color: (ctx) => {
+                                        const isInt = Math.abs(ctx.tick.value - Math.round(ctx.tick.value)) < 1e-6;
+                                        return isInt ? '#777' : '#444';
+                                    },
+                                    lineWidth: 1
                                 }
                             }
                         }
@@ -1494,10 +1561,13 @@
 
         // 그래프 재시도 (에러 오버레이 제거 후 재로드)
         function retryLoadGraph(currency) {
-            const errorOverlay = document.getElementById('graph-error-overlay');
-            if (errorOverlay) {
-                errorOverlay.remove();
-            }
+                const errorOverlay = document.getElementById('graph-error-overlay');
+                if (errorOverlay) {
+                    errorOverlay.remove();
+                }
+
+                // 선택 통화 드롭다운도 서버 응답과 맞춤
+                document.getElementById('graph-currency').value = currency;
             loadGraph(currency);
         }
 
