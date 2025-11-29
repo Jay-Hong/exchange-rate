@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
 # 서드파티 라이브러리
@@ -99,7 +99,7 @@ _memory_cache = {}
 _cache_timestamps = {}
 _db_query_timestamps = {}
 
-KST = timezone(timedelta(hours=9))
+KST = timezone("Asia/Seoul")
 
 def build_rates_payload(db: SessionLocal) -> dict:
     """DB에서 최신 환율을 조회해 표준 메시지 포맷으로 반환."""

@@ -101,13 +101,13 @@ def refresh_graph_cache():
     """
     # Redis 동기 클라이언트
     import redis as sync_redis
-    from app.config import REDIS_URL
+    from app.config import REDIS_URL, REDIS_PASSWORD
 
     redis_client = None
     try:
-        # password는 REDIS_URL에 포함되어 있으므로 별도 인자 불필요
         redis_client = sync_redis.from_url(
             REDIS_URL,
+            password=REDIS_PASSWORD or None,
             decode_responses=True
         )
         redis_client.ping()

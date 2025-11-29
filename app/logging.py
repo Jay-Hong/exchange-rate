@@ -111,3 +111,7 @@ def setup_logging():
 
 # 로거 인스턴스 생성
 logger = setup_logging()
+
+
+def get_logger(name: str):
+    return logging.getLogger(name)
