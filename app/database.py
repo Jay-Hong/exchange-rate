@@ -2,6 +2,7 @@
 
 # 표준 라이브러리
 import os
+from contextlib import contextmanager
 
 # 서드파티 라이브러리
 from sqlalchemy import create_engine
@@ -27,3 +28,23 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+@contextmanager
+def get_db_context():
+    """
+    DB 세션 Context Manager (연결 누수 방지)
+
+    Usage:
+        with get_db_context() as db:
+            result = db.execute(query)
+
+    Notes:
+        - Phase 1A: 그래프 API에서 DB 연결 누수 방지용
+        - 자동으로 close() 호출 보장
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

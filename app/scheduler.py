@@ -1326,6 +1326,25 @@ def start_scheduler():
     # 은행 데이터 정리: 매일 새벽 03:30:01시
     scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=30, second=1, timezone=KST), id="cleanup_old_bank_data")
 
+    # ═════════════════════════════════════════════════════════════
+    # 그래프 캐시 갱신: 매분 03초 (Phase 1A)
+    # ═════════════════════════════════════════════════════════════
+    # - Redis에 24시간 그래프 데이터 저장
+    # - TTL 120초, 매분 갱신으로 신선도 유지
+    # - 3개 통화 × 3개 소스 = 9개 데이터셋
+    # ─────────────────────────────────────────────────────────────
+    from app.admin.graph_cache import refresh_graph_cache
+
+    scheduler.add_job(
+        refresh_graph_cache,
+        CronTrigger(second='3', timezone=KST),
+        id="graph_cache_refresh",
+        max_instances=1,
+        coalesce=True
+    )
+
+    logger.info("✅ 그래프 캐시 갱신 스케줄 등록 (매분 03초)")
+
     # 시작 시 즉시 모드 판별 및 등록
     control_job()
 

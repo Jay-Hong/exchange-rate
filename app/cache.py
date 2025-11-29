@@ -22,11 +22,9 @@ from typing import Optional, Any
 
 import redis.asyncio as redis
 
-logger = logging.getLogger("exchange_rate.cache")
+from app.config import REDIS_URL, REDIS_PASSWORD
 
-# 환경 변수
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None 변환
+logger = logging.getLogger("exchange_rate.cache")
 
 # 키 상수
 BROADCAST_CACHE_KEY = "broadcast:latest"

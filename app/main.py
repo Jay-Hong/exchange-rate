@@ -5,8 +5,9 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 
 # 서드파티 라이브러리
@@ -90,6 +91,15 @@ class ConnectionManager:
                 pass
 
 manager = ConnectionManager()
+
+# ═════════════════════════════════════════════════════════════
+# 그래프 API 인메모리 캐시 (Tier 2 Fallback) - Phase 1A
+# ═════════════════════════════════════════════════════════════
+_memory_cache = {}
+_cache_timestamps = {}
+_db_query_timestamps = {}
+
+KST = timezone(timedelta(hours=9))
 
 def build_rates_payload(db: SessionLocal) -> dict:
     """DB에서 최신 환율을 조회해 표준 메시지 포맷으로 반환."""
@@ -730,4 +740,176 @@ async def toggle_crawler(request: Request):
     except Exception as e:
         logger.error(f"크롤러 토글 실패: {crawler_name}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═════════════════════════════════════════════════════════════
+# 그래프 API (Phase 1A) - 계층적 Fallback 전략
+# ═════════════════════════════════════════════════════════════
+@app.get("/api/graph/{currency}")
+async def get_graph_data(currency: str):
+    """
+    24시간 그래프 데이터 반환 (계층적 Fallback)
+
+    Args:
+        currency: "usd-krw" | "jpy-krw" | "eur-krw"
+
+    Returns:
+        {
+            "pair": "usd-krw",
+            "as_of": "2025-11-29T14:59:45+09:00",
+            "sources": {
+                "investing": {"recent": [[ts, rate], ...], "day": [...]},
+                "kb": {...},
+                "hana": {...}
+            }
+        }
+
+    Fallback 순서:
+        1. Redis 캐시 (120초 TTL)
+        2. 인메모리 캐시 (60초 TTL)
+        3. DB 조회 (Rate Limiting: 10초에 1번)
+        4. 503 Service Unavailable
+    """
+    if currency not in ["usd-krw", "jpy-krw", "eur-krw"]:
+        raise HTTPException(status_code=400, detail="Invalid currency pair")
+
+    now = time.time()
+
+    # Tier 1: Redis 캐시
+    redis = await redis_cache.client if redis_cache.client else None
+    cache_key = f"graph:{currency}"
+
+    if redis:
+        try:
+            cached = await redis_cache.get(cache_key)
+            if cached:
+                cache_obj = json.loads(cached)
+
+                logger.info(
+                    f"✅ Redis 캐시 히트",
+                    extra={"currency": currency, "tier": "redis"}
+                )
+
+                return {
+                    "pair": currency,
+                    "as_of": datetime.fromtimestamp(
+                        cache_obj["data_timestamp"],
+                        tz=KST
+                    ).isoformat(),
+                    "sources": cache_obj["data"]
+                }
+        except Exception as e:
+            logger.warning(f"Redis 조회 실패: {e}")
+
+    # Tier 2: 인메모리 캐시 (60초 TTL)
+    if currency in _memory_cache:
+        cache_age = now - _cache_timestamps.get(currency, 0)
+
+        if cache_age < 60:
+            logger.info(
+                f"✅ 메모리 캐시 히트",
+                extra={"currency": currency, "cache_age": cache_age, "tier": "memory"}
+            )
+
+            response = _memory_cache[currency].copy()
+            return response
+        else:
+            del _memory_cache[currency]
+            del _cache_timestamps[currency]
+
+    # Tier 3: DB 직접 조회 (Rate Limiting)
+    logger.warning(
+        f"⚠️ 캐시 미스, DB 조회 시도",
+        extra={"currency": currency, "tier": "database"}
+    )
+
+    last_db_query = _db_query_timestamps.get(currency, 0)
+    time_since_last = now - last_db_query
+
+    if time_since_last < 10:
+        logger.error(
+            f"❌ DB 조회 Rate Limit",
+            extra={
+                "currency": currency,
+                "time_since_last": time_since_last,
+                "retry_after": 10 - time_since_last
+            }
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Service temporarily unavailable",
+                "reason": "Cache refresh in progress",
+                "retry_after": int(10 - time_since_last)
+            }
+        )
+
+    _db_query_timestamps[currency] = now
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        import asyncio
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop = asyncio.get_event_loop()
+
+        def _fetch_graph():
+            from app.admin.graph_cache import fetch_recent_1h, fetch_day_23h
+
+            sources_data = {}
+            max_timestamp = 0
+
+            for source in ["investing", "kb", "hana"]:
+                recent = fetch_recent_1h(source, currency)
+                day = fetch_day_23h(source, currency)
+
+                # 실제 데이터 최신 시간 추적 (recent + day 모두 확인)
+                if recent and recent[-1][0] > max_timestamp:
+                    max_timestamp = recent[-1][0]
+                if day and day[-1][0] > max_timestamp:
+                    max_timestamp = day[-1][0]
+
+                sources_data[source] = {
+                    "recent": recent,
+                    "day": day
+                }
+
+            return sources_data, max_timestamp
+
+        sources_data, max_timestamp = await loop.run_in_executor(executor, _fetch_graph)
+
+        response = {
+            "pair": currency,
+            "as_of": datetime.fromtimestamp(max_timestamp, tz=KST).isoformat(),
+            "sources": sources_data
+        }
+
+        # 인메모리 캐시 저장
+        _memory_cache[currency] = response.copy()
+        _cache_timestamps[currency] = now
+
+        # 메모리 캐시 크기 제한 (최대 3개)
+        if len(_memory_cache) > 3:
+            oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
+            del _memory_cache[oldest_key]
+            del _cache_timestamps[oldest_key]
+
+        logger.info(
+            f"✅ DB 조회 성공",
+            extra={"currency": currency, "data_timestamp": max_timestamp}
+        )
+
+        return response
+
+    except Exception as e:
+        logger.exception(f"❌ DB 조회 실패", extra={"currency": currency})
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Service temporarily unavailable",
+                "reason": "Database query failed"
+            }
+        )
 
