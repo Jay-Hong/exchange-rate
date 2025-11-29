@@ -454,13 +454,78 @@
             border-radius: 20px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.6);
         }
-        
+
+        /* 24시간 그래프 (Phase 1A) */
+        .graph-panel {
+            background: #1e1e1e;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+        }
+
+        .graph-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+
+        .graph-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #ffffff;
+        }
+
+        #graph-currency {
+            background: #2c2c2c;
+            color: #e0e0e0;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        #graph-currency:hover {
+            background: #3498db;
+            border-color: #3498db;
+        }
+
+        .graph-container {
+            position: relative;
+            height: 400px;
+            width: 100%;
+            background: #2c2c2c;
+            border-radius: 10px;
+            padding: 10px;
+        }
+
+        #graph-error-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(44, 44, 44, 0.98);
+            border-radius: 10px;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
         @media (max-width: 499px) {
             .settings-content {
                 grid-template-columns: 1fr;
             }
         }
     </style>
+
+    <!-- Chart.js 라이브러리 (Phase 1A 그래프 기능) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 </head>
 <body>
     <div class="container">
@@ -502,10 +567,25 @@
         
         <!-- 로딩 표시 -->
         <div id="loading" class="loading">환율 데이터를 불러오는 중...</div>
-        
+
         <!-- 에러 메시지 -->
         <div id="error-message" class="error-message" style="display: none;"></div>
-        
+
+        <!-- 24시간 그래프 (Phase 1A) -->
+        <div class="graph-panel" id="graph-panel" style="display: none;">
+            <div class="graph-header">
+                <div class="graph-title">📈 24시간 환율 그래프</div>
+                <select id="graph-currency">
+                    <option value="usd-krw">USD-KRW</option>
+                    <option value="jpy-krw">JPY-KRW</option>
+                    <option value="eur-krw">EUR-KRW</option>
+                </select>
+            </div>
+            <div class="graph-container">
+                <canvas id="rateChart"></canvas>
+            </div>
+        </div>
+
         <!-- 환율 데이터 컨테이너 -->
         <div id="exchange-rates-container"></div>
     </div>
@@ -858,7 +938,32 @@
                             currentData = message.data;
                             updateUI(message.data);
                             updateStatus('success', message.data.metadata.updated_at);
-                            
+
+                            // 그래프 실시간 업데이트 (Phase 1A)
+                            if (rateChart && message.data.rates) {
+                                const now = Date.now();
+
+                                message.data.rates.forEach(rate => {
+                                    const source = rate.bank;
+                                    const dataset = rateChart.data.datasets.find(d =>
+                                        d.label.toLowerCase() === source
+                                    );
+
+                                    if (dataset) {
+                                        dataset.data.push({ x: now, y: rate.rate });
+
+                                        // 슬라이딩 윈도우 (최대 240개 유지 - 24시간 + 여유)
+                                        if (dataset.data.length > 240) {
+                                            dataset.data.shift();
+                                        }
+                                    }
+                                });
+
+                                if (!pulsingActive) {
+                                    rateChart.update('none');
+                                }
+                            }
+
                             setTimeout(restoreScrollPosition, 50);
                             break;
                             
@@ -1154,6 +1259,267 @@
             });
             
             console.log('✅ 초기화 완료 - 설정:', userSettings);
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        // 24시간 환율 그래프 (Phase 1A)
+        // ═══════════════════════════════════════════════════════════
+        let rateChart = null;
+        let pulsingInterval = null;
+        let pulsingActive = false;
+
+        // Pulsing Dot 플러그인 (setInterval 방식, 200ms = 5fps)
+        const pulsingDotPlugin = {
+            id: 'pulsingDot',
+            afterDatasetsDraw(chart) {
+                const ctx = chart.ctx;
+                const now = Date.now();
+
+                if (!currentData || !currentData.rates) return;
+
+                let hasRecentUpdate = false;
+
+                chart.data.datasets.forEach((dataset, i) => {
+                    const source = dataset.label.toLowerCase();
+                    const latestRate = currentData.rates.find(r => r.bank === source);
+
+                    if (!latestRate) return;
+
+                    const lastUpdate = new Date(latestRate.timestamp).getTime();
+                    if (now - lastUpdate > 300000) return;  // 5분 초과 스킵
+
+                    hasRecentUpdate = true;
+
+                    const meta = chart.getDatasetMeta(i);
+                    const lastPoint = meta.data[meta.data.length - 1];
+                    if (!lastPoint) return;
+
+                    const x = lastPoint.x;
+                    const y = lastPoint.y;
+
+                    // Pulsing 크기 계산
+                    const pulse = Math.sin(now / 200) * 2 + 6;
+
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.arc(x, y, pulse, 0, Math.PI * 2);
+                    ctx.fillStyle = dataset.borderColor + '40';
+                    ctx.fill();
+
+                    ctx.beginPath();
+                    ctx.arc(x, y, 4, 0, Math.PI * 2);
+                    ctx.fillStyle = dataset.borderColor;
+                    ctx.fill();
+                    ctx.restore();
+                });
+
+                // 5분 내 변화가 있으면 애니메이션 시작
+                if (hasRecentUpdate && !pulsingActive) {
+                    startPulsing(chart);
+                } else if (!hasRecentUpdate && pulsingActive) {
+                    stopPulsing();
+                }
+            }
+        };
+
+        function startPulsing(chart) {
+            if (pulsingInterval) return;
+
+            pulsingActive = true;
+
+            // 200ms(5fps)마다 차트 업데이트
+            pulsingInterval = setInterval(() => {
+                if (chart) {
+                    chart.update('none');
+                }
+            }, 200);
+        }
+
+        function stopPulsing() {
+            if (pulsingInterval) {
+                clearInterval(pulsingInterval);
+                pulsingInterval = null;
+                pulsingActive = false;
+            }
+        }
+
+        // 페이지 떠날 때 정리
+        window.addEventListener('beforeunload', stopPulsing);
+
+        // 그래프 로드 함수
+        async function loadGraph(currency) {
+            try {
+                const res = await fetch(`/api/graph/${currency}`);
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+
+                const data = await res.json();
+
+                const datasets = Object.entries(data.sources).map(([source, sourceData]) => {
+                    const points = [
+                        ...sourceData.day.map(([ts, rate]) => ({ x: ts * 1000, y: rate })),
+                        ...sourceData.recent.map(([ts, rate]) => ({ x: ts * 1000, y: rate }))
+                    ];
+
+                    const colors = {
+                        investing: 'rgb(75, 192, 192)',
+                        kb: 'rgb(255, 99, 132)',
+                        hana: 'rgb(54, 162, 235)'
+                    };
+
+                    return {
+                        label: source.toUpperCase(),
+                        data: points,
+                        borderColor: colors[source],
+                        backgroundColor: colors[source] + '20',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.1
+                    };
+                });
+
+                // 에러 오버레이 제거 (성공 시)
+                const errorOverlay = document.getElementById('graph-error-overlay');
+                if (errorOverlay) {
+                    errorOverlay.remove();
+                }
+
+                if (rateChart) {
+                    rateChart.destroy();
+                }
+
+                const ctx = document.getElementById('rateChart').getContext('2d');
+                rateChart = new Chart(ctx, {
+                    type: 'line',
+                    data: { datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'top',
+                                labels: {
+                                    color: '#e0e0e0'
+                                }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: {
+                                    unit: 'hour',
+                                    displayFormats: {
+                                        hour: 'HH:mm'
+                                    }
+                                },
+                                title: {
+                                    display: true,
+                                    text: '시간 (KST)',
+                                    color: '#e0e0e0'
+                                },
+                                ticks: {
+                                    color: '#bdc3c7'
+                                },
+                                grid: {
+                                    color: '#444'
+                                }
+                            },
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: '환율 (KRW)',
+                                    color: '#e0e0e0'
+                                },
+                                ticks: {
+                                    callback: function(value) {
+                                        return value.toFixed(2);
+                                    },
+                                    color: '#bdc3c7'
+                                },
+                                grid: {
+                                    color: '#444'
+                                }
+                            }
+                        }
+                    },
+                    plugins: [pulsingDotPlugin]
+                });
+
+                // 그래프 패널 표시
+                document.getElementById('graph-panel').style.display = 'block';
+
+                // 드롭다운 값 동기화 (프로그래밍적 변경 시 UX 일관성)
+                document.getElementById('graph-currency').value = currency;
+
+                console.log(`✅ 그래프 로드 완료: ${currency}, as_of: ${data.as_of}`);
+
+            } catch (error) {
+                console.error('❌ 그래프 로드 실패:', error);
+
+                // 에러 오버레이 표시 (DOM 구조 유지, 캔버스 보존)
+                const graphPanel = document.getElementById('graph-panel');
+                graphPanel.style.display = 'block';
+
+                let errorOverlay = document.getElementById('graph-error-overlay');
+                if (!errorOverlay) {
+                    errorOverlay = document.createElement('div');
+                    errorOverlay.id = 'graph-error-overlay';
+                    document.querySelector('.graph-container').appendChild(errorOverlay);
+                }
+
+                errorOverlay.innerHTML = `
+                    <div style="text-align: center; padding: 40px 20px;">
+                        <div style="font-size: 3rem; margin-bottom: 15px;">📉</div>
+                        <div style="font-size: 1.2rem; color: #e74c3c; margin-bottom: 10px; font-weight: bold;">그래프 로드 실패</div>
+                        <div style="font-size: 0.9rem; color: #bdc3c7; margin-bottom: 25px;">네트워크 오류 또는 서버 문제가 발생했습니다.</div>
+                        <button onclick="retryLoadGraph('${currency}')" style="background: #3498db; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 0.95rem; cursor: pointer; transition: background 0.3s;">
+                            🔄 다시 시도
+                        </button>
+                    </div>
+                `;
+            }
+        }
+
+        // 그래프 재시도 (에러 오버레이 제거 후 재로드)
+        function retryLoadGraph(currency) {
+            const errorOverlay = document.getElementById('graph-error-overlay');
+            if (errorOverlay) {
+                errorOverlay.remove();
+            }
+            loadGraph(currency);
+        }
+
+        // 통화 변경 이벤트
+        document.getElementById('graph-currency').addEventListener('change', (e) => {
+            loadGraph(e.target.value);
+        });
+
+        // 초기 로드 (페이지 로드 후)
+        document.addEventListener('DOMContentLoaded', () => {
+            // 1초 대기 후 그래프 로드 (WebSocket 연결 후)
+            setTimeout(() => {
+                loadGraph('usd-krw');
+            }, 1000);
+        });
+
+        // 백그라운드 복귀 시 새로고침
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && rateChart) {
+                const currentCurrency = document.getElementById('graph-currency').value;
+                loadGraph(currentCurrency);
+            }
         });
     </script>
 </body>
