@@ -102,15 +102,12 @@ def refresh_graph_cache():
     # Redis 동기 클라이언트
     import redis as sync_redis
     from app.config import REDIS_URL
-    import os
 
-    # REDIS_URL 파싱 (password 처리)
-    redis_password = os.getenv("REDIS_PASSWORD") or None
-
+    redis_client = None
     try:
+        # password는 REDIS_URL에 포함되어 있으므로 별도 인자 불필요
         redis_client = sync_redis.from_url(
             REDIS_URL,
-            password=redis_password,
             decode_responses=True
         )
         redis_client.ping()
@@ -118,54 +115,59 @@ def refresh_graph_cache():
         logger.warning(f"Redis 연결 실패: {e}")
         return
 
-    currencies = ["usd-krw", "jpy-krw", "eur-krw"]
-    sources = ["investing", "kb", "hana"]
+    try:
+        currencies = ["usd-krw", "jpy-krw", "eur-krw"]
+        sources = ["investing", "kb", "hana"]
 
-    for currency in currencies:
-        try:
-            graph_data = {}
-            max_timestamp = 0
+        for currency in currencies:
+            try:
+                graph_data = {}
+                max_timestamp = 0
 
-            for source in sources:
-                recent = fetch_recent_1h(source, currency)
-                day = fetch_day_23h(source, currency)
+                for source in sources:
+                    recent = fetch_recent_1h(source, currency)
+                    day = fetch_day_23h(source, currency)
 
-                # 실제 데이터 최신 시간 추적 (recent + day 모두 확인)
-                if recent and recent[-1][0] > max_timestamp:
-                    max_timestamp = recent[-1][0]
-                if day and day[-1][0] > max_timestamp:
-                    max_timestamp = day[-1][0]
+                    # 실제 데이터 최신 시간 추적 (recent + day 모두 확인)
+                    if recent and recent[-1][0] > max_timestamp:
+                        max_timestamp = recent[-1][0]
+                    if day and day[-1][0] > max_timestamp:
+                        max_timestamp = day[-1][0]
 
-                graph_data[source] = {
-                    "recent": recent,
-                    "day": day
-                }
+                    graph_data[source] = {
+                        "recent": recent,
+                        "day": day
+                    }
 
-            # Redis 저장 (메타데이터 포함)
-            cache_value = {
-                "data": graph_data,
-                "data_timestamp": max_timestamp,
-                "cached_at": int(time.time())
-            }
-
-            cache_key = f"graph:{currency}"
-            redis_client.setex(
-                cache_key,
-                120,  # TTL 120초 (2분)
-                json.dumps(cache_value)
-            )
-
-            logger.debug(
-                f"✅ 그래프 캐시 갱신",
-                extra={
-                    "currency": currency,
+                # Redis 저장 (메타데이터 포함)
+                cache_value = {
+                    "data": graph_data,
                     "data_timestamp": max_timestamp,
-                    "cached_at": cache_value["cached_at"]
+                    "cached_at": int(time.time())
                 }
-            )
 
-        except Exception as e:
-            logger.exception(
-                f"그래프 캐시 갱신 실패",
-                extra={"currency": currency}
-            )
+                cache_key = f"graph:{currency}"
+                redis_client.setex(
+                    cache_key,
+                    120,  # TTL 120초 (2분)
+                    json.dumps(cache_value)
+                )
+
+                logger.debug(
+                    f"✅ 그래프 캐시 갱신",
+                    extra={
+                        "currency": currency,
+                        "data_timestamp": max_timestamp,
+                        "cached_at": cache_value["cached_at"]
+                    }
+                )
+
+            except Exception as e:
+                logger.exception(
+                    f"그래프 캐시 갱신 실패",
+                    extra={"currency": currency}
+                )
+    finally:
+        # 연결 누수 방지 (Critical)
+        if redis_client:
+            redis_client.close()

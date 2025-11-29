@@ -776,7 +776,7 @@ async def get_graph_data(currency: str):
     now = time.time()
 
     # Tier 1: Redis 캐시
-    redis = await redis_cache.client if redis_cache.client else None
+    redis = redis_cache.client  # await 제거 (client는 속성, 코루틴 아님)
     cache_key = f"graph:{currency}"
 
     if redis:
@@ -877,30 +877,34 @@ async def get_graph_data(currency: str):
 
             return sources_data, max_timestamp
 
-        sources_data, max_timestamp = await loop.run_in_executor(executor, _fetch_graph)
+        try:
+            sources_data, max_timestamp = await loop.run_in_executor(executor, _fetch_graph)
 
-        response = {
-            "pair": currency,
-            "as_of": datetime.fromtimestamp(max_timestamp, tz=KST).isoformat(),
-            "sources": sources_data
-        }
+            response = {
+                "pair": currency,
+                "as_of": datetime.fromtimestamp(max_timestamp, tz=KST).isoformat(),
+                "sources": sources_data
+            }
 
-        # 인메모리 캐시 저장
-        _memory_cache[currency] = response.copy()
-        _cache_timestamps[currency] = now
+            # 인메모리 캐시 저장
+            _memory_cache[currency] = response.copy()
+            _cache_timestamps[currency] = now
 
-        # 메모리 캐시 크기 제한 (최대 3개)
-        if len(_memory_cache) > 3:
-            oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
-            del _memory_cache[oldest_key]
-            del _cache_timestamps[oldest_key]
+            # 메모리 캐시 크기 제한 (최대 3개)
+            if len(_memory_cache) > 3:
+                oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
+                del _memory_cache[oldest_key]
+                del _cache_timestamps[oldest_key]
 
-        logger.info(
-            f"✅ DB 조회 성공",
-            extra={"currency": currency, "data_timestamp": max_timestamp}
-        )
+            logger.info(
+                f"✅ DB 조회 성공",
+                extra={"currency": currency, "data_timestamp": max_timestamp}
+            )
 
-        return response
+            return response
+        finally:
+            # 스레드 누수 방지 (Critical)
+            executor.shutdown(wait=False)
 
     except Exception as e:
         logger.exception(f"❌ DB 조회 실패", extra={"currency": currency})

@@ -741,17 +741,17 @@ async def get_graph_data(currency: str):
         )
 ```
 
-### scheduler.py (동기 모드)
+### scheduler.py (AsyncIO 모드)
 
 ```python
 # 기존 파일 수정
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.admin.graph_cache import refresh_graph_cache
 
-# 스케줄러 초기화 (Background 모드)
-scheduler = BackgroundScheduler(timezone=KST)
+# 스케줄러 초기화 (AsyncIO 모드)
+scheduler = AsyncIOScheduler(timezone=KST)
 
 # 그래프 캐시 갱신 (매분 03초)
 scheduler.add_job(
@@ -1087,17 +1087,19 @@ for i in range(100):
 # 연결 누수 없어야 함
 ```
 
-#### Step 1A.3: Async 제거 (0.4일)
-**파일**: `app/admin/graph_cache.py`, `app/scheduler.py`
+#### Step 1A.3: 동기 함수로 변경 (0.4일)
+**파일**: `app/admin/graph_cache.py`
 
 **작업 내용**:
-- `async def` → `def` 변경
-- APScheduler AsyncIO → Background 모드
+- `async def` → `def` 변경 (SQLite 호환)
 - Redis 동기 클라이언트 사용
+- AsyncIOScheduler의 기본 executor에서 실행
 
 **검증 방법**:
 - 로그 확인: 매분 03초 갱신 확인
 - 이벤트 루프 블로킹 없는지 확인
+
+**Note**: scheduler.py는 AsyncIOScheduler 유지 (동기 함수도 실행 가능)
 
 ---
 
@@ -1304,7 +1306,7 @@ curl http://localhost:8000/api/graph/usd-krw  # 2번 → 503 에러 (Rate Limit)
 | **백엔드** | Python 3.x, FastAPI |
 | **DB** | SQLite (현재) → PostgreSQL (확장 시) |
 | **캐시** | Redis (비동기 + 동기 클라이언트) |
-| **스케줄러** | APScheduler (BackgroundScheduler) |
+| **스케줄러** | APScheduler (AsyncIOScheduler) |
 | **프론트엔드** | Chart.js 4, Vanilla JS |
 | **모바일** | iOS Charts, MPAndroidChart (Phase 3) |
 
