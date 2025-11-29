@@ -370,6 +370,10 @@ app/
 ├── main.py                  # 수정 (API 엔드포인트 + Fallback)
 ├── scheduler.py             # 수정 (백그라운드 워커 등록)
 └── ...
+
+templates/
+├── index.html               # 수정 (24시간 그래프 추가, 막대 그래프 위쪽)
+└── admin.html               # 기존 (변경 없음)
 ```
 
 ### database.py (Context Manager 추가)
@@ -769,9 +773,11 @@ logger.info("✅ 그래프 캐시 갱신 스케줄 등록 (매분 03초)")
 
 ## 7. 프론트엔드 구현
 
-### templates/admin.html (웹 관리자 페이지)
+### templates/index.html (메인 페이지)
 
-#### HTML 카드 추가
+**위치**: 각 환율쌍 막대 그래프 가장 위쪽
+
+#### HTML 그래프 섹션 추가
 
 ```html
 <div class="card">
@@ -1122,11 +1128,12 @@ redis-cli
 ```
 
 #### Step 1B.2: Pulsing Dot setInterval 방식 (0.5일)
-**파일**: `templates/admin.html`
+**파일**: `templates/index.html`
 
 **작업 내용**:
 - `setInterval 200ms` 사용
 - `startPulsing()`, `stopPulsing()` 함수 구현
+- **위치**: 각 환율쌍 막대 그래프 위쪽에 그래프 추가
 
 **검증 방법**:
 - 브라우저 개발자 도구: CPU 사용량 < 5%
@@ -1156,19 +1163,18 @@ curl http://localhost:8000/api/graph/usd-krw  # 2번 → 503 에러 (Rate Limit)
 ### Phase 1C: 안전성 개선 (0.5일)
 
 #### Step 1C.1: WebSocket 핸들러 안전성 (0.2일)
-**파일**: `templates/admin.html`
+**파일**: `templates/index.html`
 
 **작업 내용**:
 - `setupGraphWebSocket()` 함수
 - null 체크 추가
 - try-catch 에러 핸들링
 
-#### Step 1C.2: 30초 새로고침 제거 (0.1일)
-**파일**: `templates/admin.html`
+#### Step 1C.2: 백그라운드 복귀 시 새로고침 (0.1일)
+**파일**: `templates/index.html`
 
 **작업 내용**:
-- `setInterval 30초` 제거
-- `visibilitychange` 이벤트로 대체
+- `visibilitychange` 이벤트로 백그라운드 복귀 시 그래프 새로고침
 
 #### Step 1C.3: 문서 업데이트 (0.2일)
 **파일**: `GRAPH_FEATURE.md`
