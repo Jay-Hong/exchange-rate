@@ -697,6 +697,7 @@
             });
         }
 
+        
         function drawGraph(data) {
             if (!data || !data.sources) return;
 
@@ -709,83 +710,86 @@
                 hana: '#00a7a0'
             };
 
-            const upColor = '#e74c3c';
-            const downColor = '#3498db';
-            const upFill = 'rgba(231,76,60,0.55)';
-            const downFill = 'rgba(52,152,219,0.55)';
-
             const datasets = [];
             const allY = [];
             const allX = [];
 
-            Object.entries(data.sources).forEach(([source, series]) => {
-                let mode = graphModes[source] || 'line';
-                if (mode === 'off') return;
-                if (!series || series.length === 0) return;
+            const activeEntries = Object.entries(data.sources).filter(([source, series]) => {
+                const mode = graphModes[source] || 'line';
+                return mode !== 'off' && Array.isArray(series) && series.length;
+            });
 
+            if (activeEntries.length === 0) return;
+
+            const singleMode = activeEntries.length === 1;
+            const seriesMap = {};
+
+            activeEntries.forEach(([source, series]) => {
                 const candleSeries = buildSeriesForChart(series);
-                const lineSeries = candleSeries.map(p => ({ x: p.x, y: p.close }));
-
+                seriesMap[source] = candleSeries;
                 candleSeries.forEach(p => {
                     allY.push(p.hi, p.lo);
                     allX.push(p.x);
                 });
+            });
 
-                if (mode === 'candle') {
-                    const bodyData = candleSeries.map(p => {
-                        let hi = p.hi;
-                        let lo = p.lo;
-                        const span = hi - lo;
-                        const minSpan = 0.05;
-                        if (span < minSpan) {
-                            const mid = (hi + lo) / 2;
-                            lo = mid - minSpan / 2;
-                            hi = mid + minSpan / 2;
-                        }
-                        return {
-                            x: p.x,
-                            y: [lo, hi],
-                            close: p.close,
-                            prevClose: p.prevClose ?? p.close,
-                            hiOrig: p.hi,
-                            loOrig: p.lo
-                        };
+            activeEntries.forEach(([source]) => {
+                const candleSeries = seriesMap[source];
+                const closeSeries = candleSeries.map(p => ({ x: p.x, y: p.close }));
+
+                if (singleMode) {
+                    const hiSeries = candleSeries.map(p => ({ x: p.x, y: p.hi }));
+                    const loSeries = candleSeries.map(p => ({ x: p.x, y: p.lo }));
+                    const light = colors[source] + '55';
+
+                    datasets.push({
+                        label: `${source.toUpperCase()} HIGH`,
+                        data: hiSeries,
+                        type: 'line',
+                        borderColor: light,
+                        backgroundColor: light,
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        fill: false,
+                        _band: true
                     });
 
-                    const pickColor = (ctx) => {
-                        const raw = ctx.raw || {};
-                        const close = raw.close;
-                        const prev = raw.prevClose ?? close;
-                        return close >= prev ? upColor : downColor;
-                    };
+                    datasets.push({
+                        label: `${source.toUpperCase()} LOW`,
+                        data: loSeries,
+                        type: 'line',
+                        borderColor: light,
+                        backgroundColor: light,
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        fill: '-1',
+                        _band: true
+                    });
 
                     datasets.push({
                         label: source.toUpperCase(),
-                        data: bodyData,
-                        type: 'bar',
-                        parsing: { xAxisKey: 'x', yAxisKey: 'y' },
-                        borderColor: pickColor,
-                        backgroundColor: pickColor,
-                        borderWidth: 0,
-                        borderRadius: 1,
-                        barThickness: 4,
-                        categoryPercentage: 0.55,
-                        barPercentage: 0.45,
-                        order: 1,
-                        _candle: true,
-                        borderColor: (ctx) => pickColor(ctx),
-                        backgroundColor: (ctx) => pickColor(ctx)
+                        data: closeSeries,
+                        type: 'line',
+                        borderColor: colors[source],
+                        backgroundColor: colors[source] + '33',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.2,
+                        fill: false
                     });
                 } else {
                     datasets.push({
                         label: source.toUpperCase(),
-                        data: lineSeries,
+                        data: closeSeries,
                         type: 'line',
                         borderColor: colors[source],
                         backgroundColor: colors[source] + '20',
                         borderWidth: 2,
                         pointRadius: 0,
-                        tension: 0.1
+                        tension: 0.1,
+                        fill: false
                     });
                 }
             });
@@ -799,15 +803,10 @@
             const yUpper = yMax + margin;
             const xMin = allX.length ? Math.min(...allX) : windowStart;
 
-            // 에러 오버레이 제거 (성공 시)
             const errorOverlay = document.getElementById('graph-error-overlay');
-            if (errorOverlay) {
-                errorOverlay.remove();
-            }
+            if (errorOverlay) errorOverlay.remove();
 
-            if (rateChart) {
-                rateChart.destroy();
-            }
+            if (rateChart) rateChart.destroy();
 
             const ctx = document.getElementById('rateChart').getContext('2d');
             rateChart = new Chart(ctx, {
@@ -816,63 +815,32 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'index',
-                        intersect: false
-                    },
+                    interaction: { mode: 'index', intersect: false },
                     plugins: {
                         legend: {
                             position: 'top',
                             labels: {
-                                color: '#e0e0e0'
-                            },
-                            labels: {
                                 color: '#e0e0e0',
                                 filter: (item, data) => {
                                     const ds = data.datasets[item.datasetIndex];
-                                    return !ds._skipLegend;
+                                    return !ds._band;
                                 }
                             }
                         },
                         tooltip: {
                             callbacks: {
-                                label: function(context) {
-                                    const raw = context.raw;
-                                    const ds = context.dataset;
-                                    if (ds._candle && raw && raw.y) {
-                                        const high = (raw.hiOrig ?? raw.y[1]).toFixed(2);
-                                        const low = (raw.loOrig ?? raw.y[0]).toFixed(2);
-                                        const close = (raw.close ?? raw.y[1]).toFixed(2);
-                                        const prev = raw.prevClose ?? raw.close ?? raw.y[0];
-                                        const delta = close - prev;
-                                        const deltaText = `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
-                                        return `${ds.label}: H ${high} / L ${low} / C ${close} (${deltaText})`;
-                                    }
-                                    return `${ds.label}: ${context.parsed.y.toFixed(2)}`;
-                                }
+                                label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}`
                             }
                         }
                     },
                     scales: {
                         x: {
                             type: 'time',
-                            time: {
-                                unit: 'hour',
-                                displayFormats: {
-                                    hour: 'HH'
-                                }
-                            },
+                            time: { unit: 'hour', displayFormats: { hour: 'HH' } },
                             min: xMin,
                             max: now,
-                            title: {
-                                display: true,
-                                text: '시간 (KST)',
-                                color: '#e0e0e0'
-                            },
-                            ticks: {
-                                color: '#bdc3c7',
-                                callback: (value) => formatHourKST(value)
-                            },
+                            title: { display: true, text: '시간 (KST)', color: '#e0e0e0' },
+                            ticks: { color: '#bdc3c7', callback: (value) => formatHourKST(value) },
                             grid: {
                                 color: (ctx) => {
                                     if (!ctx || !ctx.tick || ctx.tick.value === undefined) return '#444';
@@ -883,17 +851,8 @@
                             }
                         },
                         y: {
-                            title: {
-                                display: true,
-                                text: '환율 (KRW)',
-                                color: '#e0e0e0'
-                            },
-                            ticks: {
-                                callback: function(value) {
-                                    return value.toFixed(2);
-                                },
-                                color: '#bdc3c7'
-                            },
+                            title: { display: true, text: '환율 (KRW)', color: '#e0e0e0' },
+                            ticks: { callback: (value) => value.toFixed(2), color: '#bdc3c7' },
                             beginAtZero: false,
                             min: yLower,
                             max: yUpper,
@@ -911,18 +870,13 @@
                 plugins: []
             });
 
-            // 그래프 패널 표시
             document.getElementById('graph-panel').style.display = 'block';
-
-            // 드롭다운 값 동기화
             document.getElementById('graph-currency').value = data.pair;
-
             renderGraphToggleButtons();
-
             console.log(`✅ 그래프 렌더 완료: ${data.pair}, as_of: ${data.as_of}`);
         }
-        
-        const loadingEl = document.getElementById('loading');
+
+const loadingEl = document.getElementById('loading');
         const errorEl = document.getElementById('error-message');
         const containerEl = document.getElementById('exchange-rates-container');
         const statusEl = document.getElementById('connection-status');
@@ -954,7 +908,9 @@
             if (saved) {
                 try {
                     const parsed = JSON.parse(saved);
-                    graphModes = { ...graphModes, ...parsed };
+                    Object.entries(parsed).forEach(([k, v]) => {
+                        graphModes[k] = (v === 'off') ? 'off' : 'line';
+                    });
                 } catch (_) {
                     /* ignore */
                 }
@@ -1026,32 +982,8 @@
 
         function handleGraphToggle(bank) {
             const current = graphModes[bank] || 'line';
-            const visibleBanks = GRAPH_BANKS.filter(b => graphModes[b] !== 'off');
-            const isOnly = visibleBanks.length === 1 && visibleBanks[0] === bank;
+            graphModes[bank] = current === 'off' ? 'line' : 'off';
 
-            if (isOnly) {
-                if (current === 'line') {
-                    graphModes[bank] = 'candle';
-                } else if (current === 'candle') {
-                    graphModes[bank] = 'line';
-                } else {
-                    graphModes[bank] = 'line';
-                }
-            } else {
-                graphModes[bank] = current === 'off' ? 'line' : 'off';
-            }
-
-            // 다른 버튼을 켠 경우, 복수 선택 상태에서는 모든 캔들을 선으로 되돌림
-            const nowVisible = GRAPH_BANKS.filter(b => graphModes[b] !== 'off');
-            if (nowVisible.length > 1) {
-                nowVisible.forEach(b => {
-                    if (graphModes[b] === 'candle') {
-                        graphModes[b] = 'line';
-                    }
-                });
-            }
-
-            // 모든 그래프가 off가 되는 상황 방지
             if (!GRAPH_BANKS.some(b => graphModes[b] !== 'off')) {
                 graphModes[bank] = 'line';
             }
@@ -1059,7 +991,6 @@
             saveGraphModes();
             renderGraphToggleButtons();
 
-            // 현재 그래프 다시 그리기
             const currentCurrency = document.getElementById('graph-currency').value;
             if (window._latestGraphData && window._latestGraphData.pair === currentCurrency) {
                 drawGraph(window._latestGraphData);
@@ -1173,8 +1104,6 @@
                 const label = bank.toUpperCase();
                 if (mode === 'line') {
                     btn.textContent = `${label} · 선`;
-                } else if (mode === 'candle') {
-                    btn.textContent = `${label} · 캔들`;
                 } else {
                     btn.textContent = `${label} · 숨김`;
                 }
