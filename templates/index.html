@@ -828,8 +828,34 @@
                             }
                         },
                         tooltip: {
+                            filter: (tooltipItem) => {
+                                return !tooltipItem.dataset._band;
+                            },
                             callbacks: {
-                                label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}`
+                                label: (ctx) => {
+                                    const ds = ctx.dataset;
+                                    if (ds._band) return null;
+
+                                    // Single mode: Range 정보 추가
+                                    if (singleMode && ctx.dataIndex < seriesMap[Object.keys(seriesMap)[0]].length) {
+                                        const point = seriesMap[Object.keys(seriesMap)[0]][ctx.dataIndex];
+                                        return [
+                                            `${ds.label}: ${ctx.parsed.y.toFixed(2)}`,
+                                            `Range: ${point.lo.toFixed(2)} - ${point.hi.toFixed(2)}`
+                                        ];
+                                    }
+
+                                    return `${ds.label}: ${ctx.parsed.y.toFixed(2)}`;
+                                },
+                                labelColor: (ctx) => {
+                                    if (ctx.dataset._band) {
+                                        return { borderColor: 'transparent', backgroundColor: 'transparent' };
+                                    }
+                                    return {
+                                        borderColor: ctx.dataset.borderColor,
+                                        backgroundColor: ctx.dataset.borderColor
+                                    };
+                                }
                             }
                         }
                     },
@@ -1103,7 +1129,7 @@ const loadingEl = document.getElementById('loading');
                 btn.classList.add(mode);
                 const label = bank.toUpperCase();
                 if (mode === 'line') {
-                    btn.textContent = `${label} · 선`;
+                    btn.textContent = `${label} · 선택`;
                 } else {
                     btn.textContent = `${label} · 숨김`;
                 }
