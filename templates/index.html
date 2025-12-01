@@ -477,6 +477,49 @@
             color: #ffffff;
         }
 
+        .graph-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .graph-toggle-group {
+            display: flex;
+            gap: 6px;
+        }
+
+        .graph-toggle {
+            border: 1px solid #444;
+            background: #1f1f1f;
+            color: #e0e0e0;
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 76px;
+        }
+
+        .graph-toggle:hover {
+            border-color: #777;
+            transform: translateY(-1px);
+        }
+
+        .graph-toggle.line {
+            border-color: #3498db;
+            box-shadow: 0 0 0 1px rgba(52,152,219,0.4);
+        }
+
+        .graph-toggle.candle {
+            border-color: #f39c12;
+            box-shadow: 0 0 0 1px rgba(243,156,18,0.5);
+            background: #2c2a1f;
+        }
+
+        .graph-toggle.off {
+            opacity: 0.4;
+        }
+
         #graph-currency {
             background: #2c2c2c;
             color: #e0e0e0;
@@ -495,7 +538,7 @@
 
         .graph-container {
             position: relative;
-            height: 400px;
+            height: 264px; /* 기존 400px의 약 2/3 높이 */
             width: 100%;
             background: #2c2c2c;
             border-radius: 10px;
@@ -521,6 +564,7 @@
                 grid-template-columns: 1fr;
             }
         }
+
     </style>
 
     <!-- Chart.js 라이브러리 (Phase 1A 그래프 기능) -->
@@ -575,11 +619,18 @@
         <div class="graph-panel" id="graph-panel" style="display: none;">
             <div class="graph-header">
                 <div class="graph-title">📈 24시간 환율 그래프</div>
-                <select id="graph-currency">
-                    <option value="usd-krw">USD-KRW</option>
-                    <option value="jpy-krw">JPY-KRW</option>
-                    <option value="eur-krw">EUR-KRW</option>
-                </select>
+                <div class="graph-actions">
+                    <div class="graph-toggle-group" id="graph-toggle-group">
+                        <button class="graph-toggle" data-bank="investing">INVESTING</button>
+                        <button class="graph-toggle" data-bank="kb">KB</button>
+                        <button class="graph-toggle" data-bank="hana">HANA</button>
+                    </div>
+                    <select id="graph-currency">
+                        <option value="usd-krw">USD-KRW</option>
+                        <option value="jpy-krw">JPY-KRW</option>
+                        <option value="eur-krw">EUR-KRW</option>
+                    </select>
+                </div>
             </div>
             <div class="graph-container">
                 <canvas id="rateChart"></canvas>
@@ -593,6 +644,8 @@
     <script>
         // 전역 변수 및 설정
         let currentData = null;
+        let currentGraphCurrency = 'usd-krw';
+        let latestGraphData = null;
         let ws = null;
         let reconnectAttempts = 0;
         let maxReconnectAttempts = 5;
@@ -621,6 +674,253 @@
             sortType: 'custom',
             bankOrder: [...DEFAULT_BANK_ORDER]
         };
+
+        const GRAPH_BANKS = ['investing', 'kb', 'hana'];
+        let graphModes = {
+            investing: 'line',
+            kb: 'line',
+            hana: 'line'
+        };
+
+        function buildSeriesForChart(series) {
+            let prevClose = null;
+            return series.map(([ts, hi, lo, close]) => {
+                const point = {
+                    x: ts * 1000,
+                    hi,
+                    lo,
+                    close,
+                    prevClose
+                };
+                prevClose = close;
+                return point;
+            });
+        }
+
+        function drawGraph(data) {
+            if (!data || !data.sources) return;
+
+            const now = Date.now();
+            const windowStart = now - 24 * 60 * 60 * 1000;
+
+            const colors = {
+                investing: '#9db6d8',
+                kb: '#ffb200',
+                hana: '#00a7a0'
+            };
+
+            const upColor = '#e74c3c';
+            const downColor = '#3498db';
+            const upFill = 'rgba(231,76,60,0.55)';
+            const downFill = 'rgba(52,152,219,0.55)';
+
+            const datasets = [];
+            const allY = [];
+            const allX = [];
+
+            Object.entries(data.sources).forEach(([source, series]) => {
+                let mode = graphModes[source] || 'line';
+                if (mode === 'off') return;
+                if (!series || series.length === 0) return;
+
+                const candleSeries = buildSeriesForChart(series);
+                const lineSeries = candleSeries.map(p => ({ x: p.x, y: p.close }));
+
+                candleSeries.forEach(p => {
+                    allY.push(p.hi, p.lo);
+                    allX.push(p.x);
+                });
+
+                if (mode === 'candle') {
+                    const bodyData = candleSeries.map(p => {
+                        let hi = p.hi;
+                        let lo = p.lo;
+                        const span = hi - lo;
+                        const minSpan = 0.05;
+                        if (span < minSpan) {
+                            const mid = (hi + lo) / 2;
+                            lo = mid - minSpan / 2;
+                            hi = mid + minSpan / 2;
+                        }
+                        return {
+                            x: p.x,
+                            y: [lo, hi],
+                            close: p.close,
+                            prevClose: p.prevClose ?? p.close,
+                            hiOrig: p.hi,
+                            loOrig: p.lo
+                        };
+                    });
+
+                    const pickColor = (ctx) => {
+                        const raw = ctx.raw || {};
+                        const close = raw.close;
+                        const prev = raw.prevClose ?? close;
+                        return close >= prev ? upColor : downColor;
+                    };
+
+                    datasets.push({
+                        label: source.toUpperCase(),
+                        data: bodyData,
+                        type: 'bar',
+                        parsing: { xAxisKey: 'x', yAxisKey: 'y' },
+                        borderColor: pickColor,
+                        backgroundColor: pickColor,
+                        borderWidth: 0,
+                        borderRadius: 1,
+                        barThickness: 4,
+                        categoryPercentage: 0.55,
+                        barPercentage: 0.45,
+                        order: 1,
+                        _candle: true,
+                        borderColor: (ctx) => pickColor(ctx),
+                        backgroundColor: (ctx) => pickColor(ctx)
+                    });
+                } else {
+                    datasets.push({
+                        label: source.toUpperCase(),
+                        data: lineSeries,
+                        type: 'line',
+                        borderColor: colors[source],
+                        backgroundColor: colors[source] + '20',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        tension: 0.1
+                    });
+                }
+            });
+
+            const yPadding = 0.5;
+            const yMin = allY.length ? Math.min(...allY) : 0;
+            const yMax = allY.length ? Math.max(...allY) : 1;
+            const range = yMax - yMin;
+            const margin = Math.max(0.3, range * 0.05);
+            const yLower = yMin - margin;
+            const yUpper = yMax + margin;
+            const xMin = allX.length ? Math.min(...allX) : windowStart;
+
+            // 에러 오버레이 제거 (성공 시)
+            const errorOverlay = document.getElementById('graph-error-overlay');
+            if (errorOverlay) {
+                errorOverlay.remove();
+            }
+
+            if (rateChart) {
+                rateChart.destroy();
+            }
+
+            const ctx = document.getElementById('rateChart').getContext('2d');
+            rateChart = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: {
+                                color: '#e0e0e0'
+                            },
+                            labels: {
+                                color: '#e0e0e0',
+                                filter: (item, data) => {
+                                    const ds = data.datasets[item.datasetIndex];
+                                    return !ds._skipLegend;
+                                }
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const raw = context.raw;
+                                    const ds = context.dataset;
+                                    if (ds._candle && raw && raw.y) {
+                                        const high = (raw.hiOrig ?? raw.y[1]).toFixed(2);
+                                        const low = (raw.loOrig ?? raw.y[0]).toFixed(2);
+                                        const close = (raw.close ?? raw.y[1]).toFixed(2);
+                                        const prev = raw.prevClose ?? raw.close ?? raw.y[0];
+                                        const delta = close - prev;
+                                        const deltaText = `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
+                                        return `${ds.label}: H ${high} / L ${low} / C ${close} (${deltaText})`;
+                                    }
+                                    return `${ds.label}: ${context.parsed.y.toFixed(2)}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'hour',
+                                displayFormats: {
+                                    hour: 'HH'
+                                }
+                            },
+                            min: xMin,
+                            max: now,
+                            title: {
+                                display: true,
+                                text: '시간 (KST)',
+                                color: '#e0e0e0'
+                            },
+                            ticks: {
+                                color: '#bdc3c7',
+                                callback: (value) => formatHourKST(value)
+                            },
+                            grid: {
+                                color: (ctx) => {
+                                    if (!ctx || !ctx.tick || ctx.tick.value === undefined) return '#444';
+                                    const hour = (new Date(ctx.tick.value).getUTCHours() + 9) % 24;
+                                    return hour === 0 ? '#777' : '#444';
+                                },
+                                lineWidth: 1
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: '환율 (KRW)',
+                                color: '#e0e0e0'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return value.toFixed(2);
+                                },
+                                color: '#bdc3c7'
+                            },
+                            beginAtZero: false,
+                            min: yLower,
+                            max: yUpper,
+                            grid: {
+                                color: (ctx) => {
+                                    if (!ctx || !ctx.tick || typeof ctx.tick.value !== 'number') return '#444';
+                                    const isInt = Math.abs(ctx.tick.value - Math.round(ctx.tick.value)) < 1e-6;
+                                    return isInt ? '#777' : '#444';
+                                },
+                                lineWidth: 1
+                            }
+                        }
+                    }
+                },
+                plugins: []
+            });
+
+            // 그래프 패널 표시
+            document.getElementById('graph-panel').style.display = 'block';
+
+            // 드롭다운 값 동기화
+            document.getElementById('graph-currency').value = data.pair;
+
+            renderGraphToggleButtons();
+
+            console.log(`✅ 그래프 렌더 완료: ${data.pair}, as_of: ${data.as_of}`);
+        }
         
         const loadingEl = document.getElementById('loading');
         const errorEl = document.getElementById('error-message');
@@ -647,6 +947,22 @@
                     bankOrder: savedSettings.bankOrder || [...DEFAULT_BANK_ORDER]
                 };
             }
+        }
+
+        function loadGraphModes() {
+            const saved = localStorage.getItem('graphModes');
+            if (saved) {
+                try {
+                    const parsed = JSON.parse(saved);
+                    graphModes = { ...graphModes, ...parsed };
+                } catch (_) {
+                    /* ignore */
+                }
+            }
+        }
+
+        function saveGraphModes() {
+            localStorage.setItem('graphModes', JSON.stringify(graphModes));
         }
         
         function saveUserSettings() {
@@ -706,6 +1022,50 @@
                 btn.style.background = '#34495e';
                 btn.style.transition = 'all 0.3s ease';
             }, 1500);
+        }
+
+        function handleGraphToggle(bank) {
+            const current = graphModes[bank] || 'line';
+            const visibleBanks = GRAPH_BANKS.filter(b => graphModes[b] !== 'off');
+            const isOnly = visibleBanks.length === 1 && visibleBanks[0] === bank;
+
+            if (isOnly) {
+                if (current === 'line') {
+                    graphModes[bank] = 'candle';
+                } else if (current === 'candle') {
+                    graphModes[bank] = 'line';
+                } else {
+                    graphModes[bank] = 'line';
+                }
+            } else {
+                graphModes[bank] = current === 'off' ? 'line' : 'off';
+            }
+
+            // 다른 버튼을 켠 경우, 복수 선택 상태에서는 모든 캔들을 선으로 되돌림
+            const nowVisible = GRAPH_BANKS.filter(b => graphModes[b] !== 'off');
+            if (nowVisible.length > 1) {
+                nowVisible.forEach(b => {
+                    if (graphModes[b] === 'candle') {
+                        graphModes[b] = 'line';
+                    }
+                });
+            }
+
+            // 모든 그래프가 off가 되는 상황 방지
+            if (!GRAPH_BANKS.some(b => graphModes[b] !== 'off')) {
+                graphModes[bank] = 'line';
+            }
+
+            saveGraphModes();
+            renderGraphToggleButtons();
+
+            // 현재 그래프 다시 그리기
+            const currentCurrency = document.getElementById('graph-currency').value;
+            if (window._latestGraphData && window._latestGraphData.pair === currentCurrency) {
+                drawGraph(window._latestGraphData);
+            } else {
+                loadGraph(currentCurrency);
+            }
         }
         
         function createBankCheckboxes(availableBanks) {
@@ -799,6 +1159,37 @@
                 }, { passive: true });
                 
                 bankCheckboxesEl.appendChild(checkboxItem);
+            });
+        }
+
+        function renderGraphToggleButtons() {
+            const group = document.getElementById('graph-toggle-group');
+            if (!group) return;
+            group.querySelectorAll('.graph-toggle').forEach(btn => {
+                const bank = btn.dataset.bank;
+                const mode = graphModes[bank] || 'line';
+                btn.classList.remove('line', 'candle', 'off');
+                btn.classList.add(mode);
+                const label = bank.toUpperCase();
+                if (mode === 'line') {
+                    btn.textContent = `${label} · 선`;
+                } else if (mode === 'candle') {
+                    btn.textContent = `${label} · 캔들`;
+                } else {
+                    btn.textContent = `${label} · 숨김`;
+                }
+            });
+        }
+
+        function initializeGraphToggles() {
+            renderGraphToggleButtons();
+            const group = document.getElementById('graph-toggle-group');
+            if (!group) return;
+            group.addEventListener('click', (e) => {
+                const target = e.target.closest('.graph-toggle');
+                if (!target) return;
+                const bank = target.dataset.bank;
+                handleGraphToggle(bank);
             });
         }
         
@@ -944,12 +1335,13 @@
                                 const now = Date.now();
 
                                 message.data.rates.forEach(rate => {
+                                    if (rate.currency !== currentGraphCurrency) return;
                                     const source = rate.bank;
                                     const dataset = rateChart.data.datasets.find(d =>
                                         d.label.toLowerCase() === source
                                     );
 
-                                    if (dataset) {
+                                    if (dataset && dataset.type === 'line') {
                                         dataset.data.push({ x: now, y: rate.rate });
 
                                         // 슬라이딩 윈도우 (최대 240개 유지 - 24시간 + 여유)
@@ -959,9 +1351,7 @@
                                     }
                                 });
 
-                                if (!pulsingActive) {
-                                    rateChart.update('none');
-                                }
+                                rateChart.update('none');
                             }
 
                             setTimeout(restoreScrollPosition, 50);
@@ -1241,9 +1631,11 @@
         
         document.addEventListener('DOMContentLoaded', function() {
             console.log('📄 페이지 로드 완료, 초기화 시작');
-            
+
             loadUserSettings();
+            loadGraphModes();
             initializeSettingsPanel();
+            initializeGraphToggles();
             
             document.querySelector(`input[name="sort-type"][value="${userSettings.sortType}"]`).checked = true;
             
@@ -1257,7 +1649,7 @@
                     clearInterval(pingInterval);
                 }
             });
-            
+
             console.log('✅ 초기화 완료 - 설정:', userSettings);
         });
 
@@ -1265,86 +1657,6 @@
         // 24시간 환율 그래프 (Phase 1A)
         // ═══════════════════════════════════════════════════════════
         let rateChart = null;
-        let pulsingInterval = null;
-        let pulsingActive = false;
-
-        // Pulsing Dot 플러그인 (setInterval 방식, 200ms = 5fps)
-        const pulsingDotPlugin = {
-            id: 'pulsingDot',
-            afterDatasetsDraw(chart) {
-                const ctx = chart.ctx;
-                const now = Date.now();
-
-                if (!currentData || !currentData.rates) return;
-
-                let hasRecentUpdate = false;
-
-                chart.data.datasets.forEach((dataset, i) => {
-                    const source = dataset.label.toLowerCase();
-                    const latestRate = currentData.rates.find(r => r.bank === source);
-
-                    if (!latestRate) return;
-
-                    const lastUpdate = new Date(latestRate.timestamp).getTime();
-                    if (now - lastUpdate > 300000) return;  // 5분 초과 스킵
-
-                    hasRecentUpdate = true;
-
-                    const meta = chart.getDatasetMeta(i);
-                    const lastPoint = meta.data[meta.data.length - 1];
-                    if (!lastPoint) return;
-
-                    const x = lastPoint.x;
-                    const y = lastPoint.y;
-
-                    // Pulsing 크기 계산
-                    const pulse = Math.sin(now / 200) * 2 + 6;
-
-                    ctx.save();
-                    ctx.beginPath();
-                    ctx.arc(x, y, pulse, 0, Math.PI * 2);
-                    ctx.fillStyle = dataset.borderColor + '40';
-                    ctx.fill();
-
-                    ctx.beginPath();
-                    ctx.arc(x, y, 4, 0, Math.PI * 2);
-                    ctx.fillStyle = dataset.borderColor;
-                    ctx.fill();
-                    ctx.restore();
-                });
-
-                // 5분 내 변화가 있으면 애니메이션 시작
-                if (hasRecentUpdate && !pulsingActive) {
-                    startPulsing(chart);
-                } else if (!hasRecentUpdate && pulsingActive) {
-                    stopPulsing();
-                }
-            }
-        };
-
-        function startPulsing(chart) {
-            if (pulsingInterval) return;
-
-            pulsingActive = true;
-
-            // 200ms(5fps)마다 차트 업데이트
-            pulsingInterval = setInterval(() => {
-                if (chart) {
-                    chart.update('none');
-                }
-            }, 200);
-        }
-
-        function stopPulsing() {
-            if (pulsingInterval) {
-                clearInterval(pulsingInterval);
-                pulsingInterval = null;
-                pulsingActive = false;
-            }
-        }
-
-        // 페이지 떠날 때 정리
-        window.addEventListener('beforeunload', stopPulsing);
 
         // KST 24시간제 시간 라벨 (0~23, 앞자리 0 제거)
         const formatHourKST = (ts) => {
@@ -1362,175 +1674,10 @@
                 }
 
                 const data = await res.json();
-
-                // 24시간 윈도우 설정 (KST 기준)
-                const now = Date.now();
-                const windowStart = now - 24 * 60 * 60 * 1000;
-
-                const normalizeSeries = (points) => {
-                    if (!points || points.length === 0) return [];
-
-                    // Unix(sec) → ms, 정렬 보장
-                    const sorted = points
-                        .map(([ts, rate]) => [ts * 1000, rate])
-                        .sort((a, b) => a[0] - b[0]);
-
-                    const result = [];
-                    let lastBeforeStart = null;
-
-                    for (const [t, r] of sorted) {
-                        if (t <= windowStart) {
-                            lastBeforeStart = [windowStart, r];
-                        }
-                        if (t >= windowStart && t <= now) {
-                            result.push([t, r]);
-                        }
-                    }
-
-                    if (lastBeforeStart) {
-                        // 윈도우 시작점에 마지막 값을 캡
-                        result.unshift(lastBeforeStart);
-                    }
-
-                    const lastPoint = result[result.length - 1] || sorted[sorted.length - 1];
-                    if (lastPoint && lastPoint[0] < now) {
-                        // 최신 값이 오래됐다면 현재 시각까지 수평선 유지
-                        result.push([now, lastPoint[1]]);
-                    }
-
-                    return result;
-                };
-
-                const datasets = Object.entries(data.sources).map(([source, sourceData]) => {
-                    const rawPoints = [...sourceData.day, ...sourceData.recent];
-                    const normalized = normalizeSeries(rawPoints);
-
-                    const points = normalized.map(([ts, rate]) => ({ x: ts, y: rate }));
-
-                    const colors = {
-                        // 막대 그래프 색상과 통일
-                        investing: '#8fa4c3',   // 한 단계 더 밝게
-                        kb: '#ffb200',
-                        hana: '#009792'
-                    };
-
-                    return {
-                        label: source.toUpperCase(),
-                        data: points,
-                        borderColor: colors[source],
-                        backgroundColor: colors[source] + '20',
-                        borderWidth: 2,
-                        pointRadius: 0,
-                        tension: 0.1
-                    };
-                });
-
-                // Y축 패딩을 위해 전체 min/max 계산 (0.5 KRW 여유)
-                const allY = datasets.flatMap(ds => ds.data.map(p => p.y)).filter(v => Number.isFinite(v));
-                const yPadding = 0.5;
-                const yMin = allY.length ? Math.min(...allY) : 0;
-                const yMax = allY.length ? Math.max(...allY) : 1;
-                const suggestedMin = yMin - yPadding;
-                const suggestedMax = yMax + yPadding;
-
-                // 에러 오버레이 제거 (성공 시)
-                const errorOverlay = document.getElementById('graph-error-overlay');
-                if (errorOverlay) {
-                    errorOverlay.remove();
-                }
-
-                if (rateChart) {
-                    rateChart.destroy();
-                }
-
-                const ctx = document.getElementById('rateChart').getContext('2d');
-                rateChart = new Chart(ctx, {
-                    type: 'line',
-                    data: { datasets },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        interaction: {
-                            mode: 'index',
-                            intersect: false
-                        },
-                        plugins: {
-                            legend: {
-                                position: 'top',
-                                labels: {
-                                    color: '#e0e0e0'
-                                }
-                            },
-                            tooltip: {
-                                callbacks: {
-                                    label: function(context) {
-                                        return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}`;
-                                    }
-                                }
-                            }
-                        },
-                        scales: {
-                            x: {
-                                type: 'time',
-                                time: {
-                                    unit: 'hour',
-                                    displayFormats: {
-                                        hour: 'HH'
-                                    }
-                                },
-                                min: windowStart,
-                                max: now,
-                                title: {
-                                    display: true,
-                                    text: '시간 (KST)',
-                                    color: '#e0e0e0'
-                                },
-                                ticks: {
-                                    color: '#bdc3c7',
-                                    callback: (value) => formatHourKST(value)
-                                },
-                                grid: {
-                                    color: (ctx) => {
-                                        const hour = (new Date(ctx.tick.value).getUTCHours() + 9) % 24;
-                                        return hour === 0 ? '#777' : '#444';
-                                    },
-                                    lineWidth: 1
-                                }
-                            },
-                            y: {
-                                title: {
-                                    display: true,
-                                    text: '환율 (KRW)',
-                                    color: '#e0e0e0'
-                                },
-                                ticks: {
-                                    callback: function(value) {
-                                        return value.toFixed(2);
-                                    },
-                                    color: '#bdc3c7'
-                                },
-                                suggestedMin: suggestedMin,
-                                suggestedMax: suggestedMax,
-                                grid: {
-                                    color: (ctx) => {
-                                        const isInt = Math.abs(ctx.tick.value - Math.round(ctx.tick.value)) < 1e-6;
-                                        return isInt ? '#777' : '#444';
-                                    },
-                                    lineWidth: 1
-                                }
-                            }
-                        }
-                    },
-                    plugins: [pulsingDotPlugin]
-                });
-
-                // 그래프 패널 표시
-                document.getElementById('graph-panel').style.display = 'block';
-
-                // 드롭다운 값 동기화 (프로그래밍적 변경 시 UX 일관성)
-                document.getElementById('graph-currency').value = currency;
-
-                console.log(`✅ 그래프 로드 완료: ${currency}, as_of: ${data.as_of}`);
+                currentGraphCurrency = currency;
+                latestGraphData = data;
+                window._latestGraphData = data;
+                drawGraph(data);
 
             } catch (error) {
                 console.error('❌ 그래프 로드 실패:', error);

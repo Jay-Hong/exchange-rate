@@ -758,9 +758,9 @@ async def get_graph_data(currency: str):
             "pair": "usd-krw",
             "as_of": "2025-11-29T14:59:45+09:00",
             "sources": {
-                "investing": {"recent": [[ts, rate], ...], "day": [...]},
-                "kb": {...},
-                "hana": {...}
+                "investing": [[ts, max, min, close], ...],
+                "kb": [...],
+                "hana": [...]
             }
         }
 
@@ -855,25 +855,16 @@ async def get_graph_data(currency: str):
         loop = asyncio.get_event_loop()
 
         def _fetch_graph():
-            from app.admin.graph_cache import fetch_recent_1h, fetch_day_23h
+            from app.admin.graph_cache import build_graph_series
 
             sources_data = {}
             max_timestamp = 0
 
             for source in ["investing", "kb", "hana"]:
-                recent = fetch_recent_1h(source, currency)
-                day = fetch_day_23h(source, currency)
-
-                # 실제 데이터 최신 시간 추적 (recent + day 모두 확인)
-                if recent and recent[-1][0] > max_timestamp:
-                    max_timestamp = recent[-1][0]
-                if day and day[-1][0] > max_timestamp:
-                    max_timestamp = day[-1][0]
-
-                sources_data[source] = {
-                    "recent": recent,
-                    "day": day
-                }
+                series, latest_ts = build_graph_series(source, currency)
+                sources_data[source] = series
+                if latest_ts > max_timestamp:
+                    max_timestamp = latest_ts
 
             return sources_data, max_timestamp
 
@@ -916,4 +907,3 @@ async def get_graph_data(currency: str):
                 "reason": "Database query failed"
             }
         )
-
