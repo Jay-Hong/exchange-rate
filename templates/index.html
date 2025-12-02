@@ -626,7 +626,7 @@
                         <button class="graph-toggle" data-bank="hana">HANA</button>
                     </div>
                     <select id="graph-currency">
-                        <option value="usd-krw">USD-KRW</option>
+                        <option value="usd-krw" selected>USD-KRW</option>
                         <option value="jpy-krw">JPY-KRW</option>
                         <option value="eur-krw">EUR-KRW</option>
                     </select>
@@ -650,6 +650,13 @@
         let reconnectAttempts = 0;
         let maxReconnectAttempts = 5;
         let reconnectDelay = 2000;
+
+        // 그래프 데이터 캐시 (3개 통화)
+        const graphData = {
+            'usd-krw': null,
+            'jpy-krw': null,
+            'eur-krw': null
+        };
         let scrollPosition = 0;
         let pingInterval = null;
         
@@ -700,6 +707,9 @@
         
         function drawGraph(data) {
             if (!data || !data.sources) return;
+
+            const pair = data.pair || currentGraphCurrency || 'usd-krw';
+            currentGraphCurrency = pair;
 
             const now = Date.now();
             const windowStart = now - 24 * 60 * 60 * 1000;
@@ -897,9 +907,9 @@
             });
 
             document.getElementById('graph-panel').style.display = 'block';
-            document.getElementById('graph-currency').value = data.pair;
+            document.getElementById('graph-currency').value = pair;
             renderGraphToggleButtons();
-            console.log(`✅ 그래프 렌더 완료: ${data.pair}, as_of: ${data.as_of}`);
+            console.log(`✅ 그래프 렌더 완료: ${pair}, as_of: ${data.as_of}`);
         }
 
 const loadingEl = document.getElementById('loading');
@@ -1017,9 +1027,11 @@ const loadingEl = document.getElementById('loading');
             saveGraphModes();
             renderGraphToggleButtons();
 
-            const currentCurrency = document.getElementById('graph-currency').value;
-            if (window._latestGraphData && window._latestGraphData.pair === currentCurrency) {
-                drawGraph(window._latestGraphData);
+            const currentCurrency = currentGraphCurrency;
+
+            // 캐시 확인 후 즉시 렌더링
+            if (graphData[currentCurrency]) {
+                drawGraph({sources: graphData[currentCurrency]});
             } else {
                 loadGraph(currentCurrency);
             }
@@ -1261,7 +1273,49 @@ const loadingEl = document.getElementById('loading');
                     }
                 }, 30000);
             };
-            
+
+            // 그래프 버킷 업데이트 함수 (WebSocket용)
+            function updateAllGraphBuckets(buckets) {
+                if (!buckets) return;
+
+                for (const [currency, sources] of Object.entries(buckets)) {
+                    // 해당 통화가 아직 로드 안 됐으면 스킵
+                    if (!graphData[currency]) continue;
+
+                    for (const [source, bucket] of Object.entries(sources)) {
+                        const series = graphData[currency][source];
+                        if (!series || series.length === 0) continue;
+
+                        const lastBucket = series[series.length - 1];
+                        const bucketTs = bucket.bucket_ts;
+
+                        if (lastBucket[0] === bucketTs) {
+                            // 현재 버킷 업데이트
+                            series[series.length - 1] = [
+                                bucketTs,
+                                bucket.max,
+                                bucket.min,
+                                bucket.close
+                            ];
+                        } else if (bucketTs > lastBucket[0]) {
+                            // 새 버킷 추가
+                            series.push([bucketTs, bucket.max, bucket.min, bucket.close]);
+
+                            // 24시간 윈도우 유지
+                            const cutoff = Math.floor(Date.now() / 1000) - 86400;
+                            while (series.length && series[0][0] < cutoff) {
+                                series.shift();
+                            }
+                        }
+                    }
+                }
+
+                // 현재 표시 중인 통화만 재렌더링
+                if (currentGraphCurrency && graphData[currentGraphCurrency]) {
+                    drawGraph({pair: currentGraphCurrency, sources: graphData[currentGraphCurrency]});
+                }
+            }
+
             ws.onmessage = function(event) {
                 try {
                     const message = JSON.parse(event.data);
@@ -1285,28 +1339,9 @@ const loadingEl = document.getElementById('loading');
                             updateUI(message.data);
                             updateStatus('success', message.data.metadata.updated_at);
 
-                            // 그래프 실시간 업데이트 (Phase 1A)
-                            if (rateChart && message.data.rates) {
-                                const now = Date.now();
-
-                                message.data.rates.forEach(rate => {
-                                    if (rate.currency !== currentGraphCurrency) return;
-                                    const source = rate.bank;
-                                    const dataset = rateChart.data.datasets.find(d =>
-                                        d.label.toLowerCase() === source
-                                    );
-
-                                    if (dataset && dataset.type === 'line') {
-                                        dataset.data.push({ x: now, y: rate.rate });
-
-                                        // 슬라이딩 윈도우 (최대 240개 유지 - 24시간 + 여유)
-                                        if (dataset.data.length > 240) {
-                                            dataset.data.shift();
-                                        }
-                                    }
-                                });
-
-                                rateChart.update('none');
+                            // 그래프 버킷 업데이트 (WebSocket 통합)
+                            if (message.graph_buckets) {
+                                updateAllGraphBuckets(message.graph_buckets);
                             }
 
                             setTimeout(restoreScrollPosition, 50);
@@ -1620,19 +1655,45 @@ const loadingEl = document.getElementById('loading');
             return String(hour);
         };
 
-        // 그래프 로드 함수
+        // 데이터 갭 감지 (15분 이상 갭이 있으면 풀 리프레시)
+        function detectDataGap(currency) {
+            const cached = graphData[currency];
+            if (!cached || !cached.investing || cached.investing.length === 0) {
+                return true;  // 캐시 없음
+            }
+
+            const lastBucket = cached.investing[cached.investing.length - 1][0];
+            const now = Math.floor(Date.now() / 1000);
+            const gap = now - lastBucket;
+
+            return gap > 900;  // 15분 이상 갭
+        }
+
+        // 그래프 로드 함수 (Lazy Loading + 갭 감지)
         async function loadGraph(currency) {
             try {
-                const res = await fetch(`/api/graph/${currency}`);
-                if (!res.ok) {
-                    throw new Error(`HTTP ${res.status}`);
+                const needsFullLoad = !graphData[currency] || detectDataGap(currency);
+
+                if (needsFullLoad) {
+                    // 풀 로드
+                    const res = await fetch(`/api/graph/${currency}`);
+                    if (!res.ok) {
+                        throw new Error(`HTTP ${res.status}`);
+                    }
+
+                    const data = await res.json();
+                    graphData[currency] = data.sources;  // 캐시 저장
+
+                    console.log(`📥 초기 데이터 로드: ${currency}`);
+                } else {
+                    // 캐시 사용
+                    console.log(`⚡ 캐시 사용: ${currency}`);
                 }
 
-                const data = await res.json();
                 currentGraphCurrency = currency;
-                latestGraphData = data;
-                window._latestGraphData = data;
-                drawGraph(data);
+                latestGraphData = {pair: currency, sources: graphData[currency]};
+                window._latestGraphData = latestGraphData;
+                drawGraph(latestGraphData);
 
             } catch (error) {
                 console.error('❌ 그래프 로드 실패:', error);

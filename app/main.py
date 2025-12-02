@@ -178,6 +178,43 @@ async def lifespan(app: FastAPI):
     # 스케줄러 종료
     scheduler.scheduler.shutdown()
 
+async def build_graph_buckets() -> dict:
+    """
+    모든 통화의 마지막 그래프 버킷 반환 (WebSocket용)
+
+    Returns:
+        {
+            "usd-krw": {"investing": {...}, "kb": {...}, "hana": {...}},
+            "jpy-krw": {...},
+            "eur-krw": {...}
+        }
+    """
+    graph_buckets = {}
+
+    for currency in ["usd-krw", "jpy-krw", "eur-krw"]:
+        cache_key = f"graph:{currency}"
+        try:
+            cached = await redis_cache.get(cache_key)
+            if cached:
+                data = json.loads(cached)
+                graph_buckets[currency] = {}
+
+                for source, series in data["data"].items():
+                    if series and len(series) > 0:
+                        last_bucket = series[-1]  # [ts, max, min, close]
+                        graph_buckets[currency][source] = {
+                            "bucket_ts": last_bucket[0],
+                            "max": last_bucket[1],
+                            "min": last_bucket[2],
+                            "close": last_bucket[3]
+                        }
+        except Exception as e:
+            logger.warning(f"그래프 버킷 조회 실패: {currency}", extra={"error": str(e)})
+            continue
+
+    return graph_buckets
+
+
 async def broadcast_rates_once():
     """브로드캐스트 표준 흐름 (Redis 캐시 + 변경 감지 + 조건부 전송)."""
     db = SessionLocal()
@@ -190,16 +227,25 @@ async def broadcast_rates_once():
             await redis_cache.set(BROADCAST_CACHE_KEY, new_json)
 
             if manager.active_connections:
+                # 그래프 버킷 추가 (실시간 환율 변경 시에만)
+                graph_buckets = await build_graph_buckets()
+                if graph_buckets:
+                    payload["graph_buckets"] = graph_buckets
+
                 await manager.broadcast(payload)
 
                 broadcast_stats.record_success(
-                    data_size_bytes=len(new_json.encode("utf-8")),
+                    data_size_bytes=len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
                     rate_count=len(payload["data"]["rates"]),
                 )
 
                 logger.info(
                     "📡 환율 데이터 브로드캐스트 & 🅾️ Redis 업데이트 완료",
-                    extra={"rate_count": len(payload["data"]["rates"]), "connections": len(manager.active_connections)},
+                    extra={
+                        "rate_count": len(payload["data"]["rates"]),
+                        "connections": len(manager.active_connections),
+                        "graph_buckets": len(graph_buckets)
+                    },
                 )
             else:
                 broadcast_stats.record_skip(reason="no_connections")
