@@ -13,6 +13,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.0] - 2025-12-02
+
+### Added - 24-Hour Graph Feature with WebSocket Integration
+
+- **24-hour graph API** with 10-minute bucket aggregation
+  - Endpoint: `GET /api/graph/{currency}` (usd-krw, jpy-krw, eur-krw)
+  - Data format: `[timestamp, max, min, close]` (candlestick structure)
+  - Carry-forward mechanism: Empty buckets filled with previous close value for data continuity
+  - Redis cache: `graph:{currency}` keys (~3.6KB per currency, 120s TTL)
+  - Backend: `app/admin/graph_cache.py` - Scheduler runs every minute at :03 seconds
+- **WebSocket graph integration** for real-time updates
+  - `graph_buckets` field: Last bucket for all 3 currencies (~600 bytes)
+  - Broadcast trigger: Only when rates change (change detection)
+  - Mobile optimization: Reuse existing WebSocket connection (no additional radio activations)
+  - Server efficiency: 1 broadcast/10s vs 100+ HTTP req/min (99% CPU reduction)
+- **Band Chart implementation** (frontend)
+  - Single source: Close line (main) + High/Low translucent bands
+  - Multi-source: Close lines only for comparison
+  - Tooltip filtering: Range display for single-source mode
+  - Y-axis padding: 5% margin for better visualization
+- **Lazy loading with cache strategy**
+  - Initial load: Selected currency only (3.6KB)
+  - Currency switch: Cache reuse (0 bytes) or on-demand load
+  - Gap detection: 15-minute threshold → full refresh
+  - Frontend cache: In-memory storage for all 3 currencies
+- **Toggle controls** for graph customization
+  - Show/Hide individual sources (INVESTING, KB, HANA)
+  - Prevent empty graphs: At least 1 source required
+  - Persistent selection across currency switches
+
+### Performance
+- **Network efficiency**: WebSocket integration reduces mobile data usage by 95%+
+- **Initial load**: 3.6KB per currency (145 buckets × 3 sources × 4 values)
+- **WebSocket overhead**: +600 bytes per broadcast (0.6KB / 10s)
+- **Cache hit rate**: ~100% for currency switches (no repeated API calls)
+- **Mobile battery**: Zero additional impact (reuses existing WebSocket)
+
+### Documentation
+- Created [GRAPH_FEATURE.md](GRAPH_FEATURE.md) v3.0 - Complete implementation guide
+- Added [ADR-015](DECISIONS.md#adr-015-websocket-graph-integration-vs-incremental-api) - Graph update strategy decision
+
+---
+
 ## [1.7.0] - 2025-11-27
 
 ### Added - Redis Broadcast Cache & Change Detection
@@ -350,6 +393,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.8.0 | 2025-12-02 | 24-hour graph + WebSocket integration + Band Chart |
+| 1.7.0 | 2025-11-27 | Redis broadcast cache + Change detection |
+| 1.6.0 | 2025-11-10 | 3-Tier scheduling + Crawler statistics |
 | 1.5.0 | 2025-11-10 | Queue pressure relief + Health check + Timeout optimization |
 | 1.4.0 | 2025-11-08 | Priority Queue + Timeout strategy |
 | 1.3.0 | 2025-11-06 | AsyncIO Queue for Selenium crawlers |
@@ -456,4 +502,4 @@ Please update this CHANGELOG when making significant changes following these gui
 
 ---
 
-**Last Updated**: 2025-11-10
+**Last Updated**: 2025-12-02

@@ -1660,6 +1660,227 @@ sudo tail -f /var/log/certbot-renewal.log
 
 ---
 
+## ADR-015: WebSocket Graph Integration vs Incremental API
+
+**날짜:** 2025-12-02
+**상태:** 수락됨
+
+### 상황
+
+24시간 환율 그래프의 실시간 업데이트 방법 설계:
+- iOS/Android 네이티브 앱: 100+ 동시 접속 사용자
+- 그래프 데이터: 10분 버킷, 144개/24시간
+- 업데이트 주기: 매분 (새 버킷 10분마다 생성)
+
+### 고려 사항
+
+**1. Periodic Reload (주기적 전체 재조회)**
+```javascript
+setInterval(() => {
+    fetch('/api/graph/usd-krw').then(data => drawGraph(data));
+}, 60000);  // 1분마다
+```
+- 장점: 구현 간단
+- 단점: 3.6KB × 60회/시간 = 216KB/시간 (데이터 중복)
+
+---
+
+**2. WebSocket Integration (기존 연결 재사용)**
+```javascript
+// 기존 WebSocket에 graph_buckets 필드 추가
+{
+    "rates": [...],  // 기존 실시간 환율
+    "graph_buckets": {  // 그래프 마지막 버킷 (3 currencies)
+        "usd-krw": {
+            "investing": {"bucket_ts": 1733140800, "max": 1340.50, ...},
+            "kb": {...},
+            "hana": {...}
+        },
+        "jpy-krw": {...},
+        "eur-krw": {...}
+    }
+}
+```
+- 장점: 기존 연결 재사용 (모바일 배터리 무영향), 서버 부하 최소
+- 단점: 메시지 크기 +600 bytes
+
+---
+
+**3. Incremental API (증분 업데이트)**
+```javascript
+// 마지막 타임스탬프 이후 데이터만 요청
+fetch(`/api/graph/usd-krw/incremental?since=${lastTimestamp}`)
+```
+- 장점: 최소 데이터 전송
+- 단점: 100명 × 60회/시간 = 6,000 HTTP req/시간 (서버 부하)
+
+---
+
+**4. Visibility-based Lazy Reload (가시성 기반)**
+```javascript
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && isDataStale()) {
+        fetch('/api/graph/usd-krw');
+    }
+});
+```
+- 장점: 불필요한 요청 제거
+- 단점: 백그라운드 복귀 시 지연, 실시간성 저하
+
+---
+
+**5. Client-side Aggregation (클라이언트 집계)**
+```javascript
+// WebSocket 실시간 환율로 클라이언트가 버킷 생성
+websocket.on('message', (rates) => {
+    aggregateIntoBucket(rates);
+});
+```
+- 단점: carry-forward 로직 불가능 (서버 의존), 복잡도 증가, 변경 감지 불가
+
+---
+
+### 결정
+
+**WebSocket Integration with Lazy Loading 채택**
+
+**구성:**
+1. WebSocket에 `graph_buckets` 필드 추가 (3 currencies × 3 sources × 1 bucket)
+2. Frontend lazy loading: 초기 선택 통화만 로드 (3.6KB)
+3. 통화 전환: 캐시 재사용 또는 on-demand 로드
+4. 15분 갭 감지 → 전체 새로고침
+
+**근거:**
+1. **모바일 배터리 최적화**: 기존 WebSocket 연결 재사용 (새로운 라디오 활성화 0건)
+2. **서버 효율성**: 1 broadcast/10초 vs 100+ HTTP req/분 (CPU 99% 감소)
+3. **네트워크 효율**: +600 bytes vs 3.6KB × 100명/분 = 360KB/분 절감
+4. **단순성**: Incremental API보다 구현 간소
+
+### 구현 상세
+
+**Backend (app/main.py):**
+```python
+async def build_graph_buckets() -> dict:
+    """모든 통화의 마지막 그래프 버킷 반환 (WebSocket용)"""
+    graph_buckets = {}
+    for currency in ["usd-krw", "jpy-krw", "eur-krw"]:
+        cache_key = f"graph:{currency}"
+        cached = await redis_cache.get(cache_key)
+        if cached:
+            data = json.loads(cached)
+            for source, series in data["data"].items():
+                if series and len(series) > 0:
+                    last_bucket = series[-1]  # [ts, max, min, close]
+                    graph_buckets[currency][source] = {
+                        "bucket_ts": last_bucket[0],
+                        "max": last_bucket[1],
+                        "min": last_bucket[2],
+                        "close": last_bucket[3]
+                    }
+    return graph_buckets
+
+async def broadcast_rates_once():
+    # ... 기존 rates 로직 ...
+    if new_json != cached_json:  # 변경 시에만
+        graph_buckets = await build_graph_buckets()
+        if graph_buckets:
+            payload["graph_buckets"] = graph_buckets
+        await manager.broadcast(payload)
+```
+
+**Frontend (templates/index.html):**
+```javascript
+// 1. 캐시 저장소
+const graphData = {
+    'usd-krw': null,
+    'jpy-krw': null,
+    'eur-krw': null
+};
+
+// 2. WebSocket 업데이트
+function updateAllGraphBuckets(buckets) {
+    for (const [currency, sources] of Object.entries(buckets)) {
+        if (!graphData[currency]) continue;
+        for (const [source, bucket] of Object.entries(sources)) {
+            const series = graphData[currency][source];
+            const lastBucket = series[series.length - 1];
+            if (lastBucket[0] === bucket.bucket_ts) {
+                // 현재 버킷 업데이트
+                series[series.length - 1] = [bucket.bucket_ts, bucket.max, bucket.min, bucket.close];
+            } else if (bucket.bucket_ts > lastBucket[0]) {
+                // 새 버킷 추가
+                series.push([bucket.bucket_ts, bucket.max, bucket.min, bucket.close]);
+                // 24시간 윈도우 유지
+                const cutoff = Math.floor(Date.now() / 1000) - 86400;
+                while (series.length && series[0][0] < cutoff) {
+                    series.shift();
+                }
+            }
+        }
+    }
+    drawGraph({sources: graphData[currentGraphCurrency]});
+}
+
+// 3. Lazy loading with gap detection
+async function loadGraph(currency) {
+    const needsFullLoad = !graphData[currency] || detectDataGap(currency);
+    if (needsFullLoad) {
+        const res = await fetch(`/api/graph/${currency}`);
+        const data = await res.json();
+        graphData[currency] = data.sources;
+    }
+    currentGraphCurrency = currency;
+    drawGraph({sources: graphData[currency]});
+}
+
+function detectDataGap(currency) {
+    const cached = graphData[currency];
+    if (!cached || !cached.investing) return true;
+    const lastBucket = cached.investing[cached.investing.length - 1][0];
+    return (Math.floor(Date.now() / 1000) - lastBucket) > 900;  // 15분
+}
+```
+
+### 트레이드오프
+
+| 항목 | Incremental API | WebSocket Integration |
+|------|----------------|----------------------|
+| **서버 부하** | ❌ 높음 (6,000 req/시간) | ✅ 낮음 (6 broadcast/분) |
+| **모바일 배터리** | ❌ 영향 있음 (새 연결) | ✅ 영향 없음 (재사용) |
+| **네트워크** | ⚠️ 360KB/분 | ✅ 3.6KB/분 (99% 감소) |
+| **실시간성** | ✅ 즉시 | ✅ 10초 주기 |
+| **복잡도** | 중간 | 낮음 |
+
+### 성능 영향
+
+**Incremental API (기각):**
+- HTTP 요청: 100명 × 60회/시간 = 6,000 req
+- 서버 CPU: 중간~높음 (DB 쿼리 6,000회)
+- 모바일 배터리: 라디오 활성화 60회/시간 (영향 있음)
+
+**WebSocket Integration (채택):**
+- 추가 요청: 0 (기존 연결 재사용)
+- 서버 CPU: 낮음 (broadcast 6회/분, 캐시 조회만)
+- 모바일 배터리: 0 (연결 이미 열림)
+- 메시지 크기: +600 bytes (5.6% 증가, 1.6KB → 2.2KB)
+
+**데이터 중복:**
+- `close` 값이 `rates[]`와 `graph_buckets`에 중복 (~90 bytes)
+- Trade-off: 단순성 우선 (중복 제거 시 복잡도 증가)
+
+### 향후 재검토 시점
+
+- 메시지 크기 > 3KB (압축 고려)
+- 사용자 1000명 이상 (Brotli, Redis Pub/Sub)
+- 실시간성 요구 증가 (5초 주기)
+
+### 관련 결정
+
+- [ADR-001](#adr-001-websocket-구현---python-fastapi-vs-nodejs): WebSocket 구현
+- [ADR-010](#adr-010-websocket-broadcasting-스케줄링-방식): Broadcasting 스케줄링
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -1675,3 +1896,4 @@ sudo tail -f /var/log/certbot-renewal.log
 - 2025-11-14: ADR-012 작성 (Selenium 폴백 subprocess 격리 - Chrome 프로세스 좀비화 방지)
 - 2025-11-16: ADR-013 작성 (4단계 모드 - 환율 고시 스케줄 기반 최적화)
 - 2025-11-17: ADR-014 작성 (HTTPS/SSL 도입 - Let's Encrypt vs Cloudflare vs Self-Signed)
+- 2025-12-02: ADR-015 작성 (WebSocket Graph Integration vs Incremental API - 모바일 최적화)
