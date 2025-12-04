@@ -10,6 +10,7 @@
 > 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR)
 > 🕷️ **크롤러 구현:** [CRAWLERS.md](CRAWLERS.md) - 각 은행별 크롤링 방식과 특수 로직
 > 📝 **변경 이력:** [CHANGELOG.md](CHANGELOG.md) - 버전별 변경사항 및 마이그레이션 가이드
+> 🔔 **알림 & 구독:** [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md) - 푸시 알림, 인증, 구독 관리 가이드
 
 **배포 및 운영:**
 > 🐳 **Docker 아키텍처:** [DOCKER.md](DOCKER.md) - Docker Compose 구조 및 확장 전략
@@ -46,8 +47,14 @@
 
 ## 핵심 아키텍처
 
-```
+```text
+[개발/테스트]
 크롤러(10개) → Scheduler → SQLite → WebSocket(10초) → 클라이언트
+
+[서비스 환경]
+크롤러(10개) → Scheduler → RDS PostgreSQL → WebSocket(10초) → 클라이언트
+                                    ↓
+                          Firebase Auth + FCM → 푸시 알림
 ```
 
 ### 데이터 소스
@@ -65,9 +72,9 @@
 
 - **언어**: Python 3.x
 - **웹 프레임워크**: FastAPI
-- **DB**: SQLite (초기) → PostgreSQL (500명 이상 시)
+- **DB**: SQLite (개발/테스트) → AWS RDS PostgreSQL (서비스 시작 시)
 - **ORM**: SQLAlchemy
-- **스케줄러**: APScheduler (BackgroundScheduler)
+- **스케줄러**: APScheduler (AsyncIOScheduler)
 - **크롤링**: requests + BeautifulSoup4, Selenium
 - **SSL/TLS**: Let's Encrypt (Certbot 자동 갱신, 90일 주기)
 - **리버스 프록시**: Nginx (HTTPS, HTTP/2, wss://)
@@ -108,6 +115,25 @@ timestamp  DATETIME (KST)
 
 -- 복합 인덱스: (bank, currency, timestamp)
 ```
+
+### crawler_config (Phase 1.8)
+
+```sql
+id            INTEGER PRIMARY KEY
+crawler_name  TEXT (UNIQUE, INDEX)
+enabled       BOOLEAN (DEFAULT: TRUE)
+updated_at    DATETIME (KST)
+
+-- 크롤러 활성화/비활성화 설정 (관리자 페이지에서 제어)
+```
+
+### 알림 관련 테이블 (서비스 환경, 예정)
+
+> 상세 스키마: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md#필요한-db-테이블-rds-postgresql)
+
+- `user_devices` - FCM Device Token 저장 (user_id, device_token, platform)
+- `notification_settings` - 알림 조건 설정 (bank, currency, condition, threshold)
+- `notification_logs` - 알림 발송 히스토리 (중복 방지)
 
 ## 데이터 관리 정책
 
@@ -302,6 +328,15 @@ scheduler.add_job(
 - `GET /api/banks/{pair}` - 모든 은행 특정 통화
 - `GET /health` - 헬스체크
 
+### 알림 API (예정)
+
+> 상세 스키마: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md#-개인화-알림-동작-흐름)
+
+- `POST /api/register-device` - FCM Device Token 등록 (Firebase ID Token 검증 필수)
+- `POST /api/notification-settings` - 알림 설정 저장/수정
+- `GET /api/notification-settings` - 사용자 알림 설정 조회
+- `DELETE /api/notification-settings/{id}` - 알림 설정 삭제
+
 ### 응답 형식
 
 ```json
@@ -325,19 +360,55 @@ scheduler.add_job(
 
 ## 인프라 제약사항
 
-### 현재 환경
+### 현재 환경 (개발/테스트)
 
-- **AWS 프리티어**: t2.micro (1 vCPU, 1GB RAM) , Ubuntu 24.04.3 LTS , 64비트(x86) = x86_64 = AMD64 아키텍처
+- **EC2**: AWS 프리티어 t2.micro (1 vCPU, 1GB RAM)
+- **DB**: SQLite (로컬 파일)
+- **OS**: Ubuntu 24.04.3 LTS, 64비트(x86) = x86_64 = AMD64 아키텍처
 - **DB 크기**: 5.4MB (SQLite)
 - **동시 접속**: 최대 ~100명 (WebSocket)
 
-### 확장 계획 (사용자 500명 이상 시)
+### 서비스 환경 (예정)
 
-1. **PostgreSQL 전환** (동시성 개선)
-2. **Redis 캐시 도입** (최신 환율 캐싱)
-3. **변경 감지 시스템** (변경 시에만 WebSocket 전송)
-4. **WebSocket 주기 동적 조절** (5-10초)
-5. **EC2 인스턴스 업그레이드** (t3.small 이상)
+**인프라 구성:**
+
+```text
+AWS Cloud (서울 리전)
+├── VPC (같은 네트워크)
+│   ├── EC2 t3.small (2 vCPU, 2GB RAM)
+│   │   └── FastAPI + 크롤러 + Redis (Docker)
+│   └── RDS PostgreSQL db.t4g.micro (프리티어)
+│       └── 환율 데이터 + 사용자 데이터
+│
+└── 외부 서비스
+    ├── Firebase Auth (로그인, 무료)
+    └── Firebase FCM (푸시 알림, 무료)
+```
+
+**AWS RDS PostgreSQL 프리티어:**
+
+- **인스턴스**: db.t4g.micro (2 vCPU, 1GB RAM, ARM64)
+- **스토리지**: 20GB SSD (gp2)
+- **기간**: 12개월 무료 (AWS 첫 가입 후)
+- **네트워크**: 같은 VPC 내 통신 (지연 1-3ms, 비용 $0)
+- **12개월 후 비용**: ~$15/월
+
+**비용 예상:**
+
+| 항목 | Phase 1 (12개월) | Phase 2 (12개월 후) |
+|------|-----------------|-------------------|
+| EC2 t3.small | $15/월 | $15/월 |
+| RDS db.t4g.micro | $0 (프리티어) | ~$15/월 |
+| Firebase Auth/FCM | $0 | $0 |
+| **합계** | **$15/월** | **$30/월** |
+
+### 확장 계획 (사용자 1,000명 이상 시)
+
+1. ✅ **PostgreSQL 전환** → RDS 프리티어로 해결
+2. ✅ **Redis 캐시 도입** → Phase 1.7 완료 (EC2 Docker)
+3. ✅ **변경 감지 시스템** → Phase 1.7 완료
+4. **EC2 업그레이드** (t3.small → t3.medium, 필요 시)
+5. **RDS 업그레이드** (db.t4g.micro → db.t4g.small, 필요 시)
 
 ## Docker 배포 및 관리
 
@@ -430,13 +501,15 @@ exchange-rate/
 │   ├── models.py            # SQLAlchemy ORM 모델
 │   ├── schemas.py           # Pydantic 스키마
 │   ├── crud.py              # DB CRUD 로직
+│   ├── cache.py             # Redis 클라이언트 (Circuit Breaker) - Phase 1.7
 │   ├── main.py              # FastAPI 서버, WebSocket
-│   ├── scheduler.py         # APScheduler, IN/OUT 모드 전환
+│   ├── scheduler.py         # APScheduler, 4단계 모드 전환
 │   │
 │   ├── crawlers/            # 크롤러 도메인 (2025-10-25 리팩토링)
 │   │   ├── __init__.py
 │   │   ├── constants.py     # 크롤러 공통 상수 (HEADERS, SELENIUM_OPTIONS, TIMEOUT)
 │   │   ├── utils.py         # 크롤러 공통 함수 (parse_rate_text, create_selenium_driver)
+│   │   ├── runner.py        # Selenium 크롤러 subprocess runner
 │   │   ├── investing.py     # Investing.com 크롤러
 │   │   ├── kb.py            # KB은행 크롤러
 │   │   ├── hana.py          # 하나은행 크롤러
@@ -453,7 +526,9 @@ exchange-rate/
 │   │   ├── log_reader.py    # 로그 조회 (관리자 페이지용, 백엔드 bank 필터링)
 │   │   ├── log_cleaner.py   # 오래된 로그 파일 자동 삭제
 │   │   ├── stats.py         # WebSocket 브로드캐스트 통계 수집
-│   │   └── monitor.py       # 시스템 모니터링 (메모리, CPU, Chrome 프로세스) - 2025-11-05 추가
+│   │   ├── crawler_stats.py # 크롤러 통계 수집 (성공률, 실행시간)
+│   │   ├── monitor.py       # 시스템 모니터링 (메모리, CPU, Chrome) - Phase 1.5
+│   │   └── graph_cache.py   # 그래프 데이터 Redis 캐시 - Phase 1A
 │   │
 │   └── notifications/       # 알림 도메인 (2025-10-25 리팩토링)
 │       ├── __init__.py
@@ -474,8 +549,12 @@ exchange-rate/
 ├── CLAUDE.md                # 이 파일 (프로젝트 가이드)
 ├── CRAWLERS.md              # 크롤러 특수 로직 가이드
 ├── DECISIONS.md             # 아키텍처 의사결정 기록 (ADR)
-├── MAINTENANCE_2025-11-05.md # 성능 개선 및 모니터링 시스템 구축 작업 기록
-└── REBOOT_CHECKLIST.md      # 재부팅 후 검증 절차 가이드
+├── CHANGELOG.md             # 버전별 변경사항 및 마이그레이션 가이드
+├── DOCKER.md                # Docker Compose 구조 및 확장 전략
+├── DEPLOYMENT.md            # EC2 인스턴스 설정 및 실전 배포 절차
+├── REBOOT_CHECKLIST.md      # 재부팅 후 검증 절차 가이드
+├── MAINTENANCE_2025-11-05.md # 성능 개선 및 모니터링 시스템 구축
+└── MAINTENANCE_2025-11-06.md # AsyncIO Queue 도입 (Semaphore 경합 제거)
 ```
 
 > 💡 **구조 설계 원칙**: API-first 서비스 (모바일 앱이 메인, 웹은 관리자 전용)

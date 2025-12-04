@@ -1881,6 +1881,126 @@ function detectDataGap(currency) {
 
 ---
 
+## ADR-016: 인증/알림 인프라 - AWS RDS + Firebase Auth + FCM
+
+**날짜:** 2025-12-05
+**상태:** 수락됨
+
+### 상황
+
+개인화 환율 알림 기능 구현을 위해 다음 인프라 결정이 필요:
+1. **데이터베이스**: 사용자 정보, 알림 설정 저장
+2. **인증 시스템**: 사용자 로그인, 크로스 플랫폼 동기화
+3. **푸시 알림**: iOS/Android 앱으로 알림 전송
+
+### 고려 사항
+
+#### 1. DB 선택
+
+| 옵션 | 비용 (초기) | 비용 (12개월 후) | 네트워크 지연 |
+|------|-----------|-----------------|-------------|
+| **AWS RDS PostgreSQL** | $0 (프리티어) | ~$15/월 | 1-3ms (같은 VPC) |
+| Supabase PostgreSQL | $0 (500MB) | $25/월 (Pro) | 5-15ms (원격) |
+| EC2 내 PostgreSQL Docker | $0 | $0 (EC2 포함) | <1ms (localhost) |
+
+#### 2. Auth 선택
+
+| 옵션 | 비용 | FCM 통합 | SDK 성숙도 |
+|------|------|---------|----------|
+| **Firebase Auth** | 무료 (50k MAU) | 완벽 (같은 Firebase) | 매우 성숙 |
+| Supabase Auth | 무료 (50k MAU) | 별도 설정 필요 | 성장 중 |
+| 자체 구현 | $0 | 별도 구현 | - |
+
+#### 3. Push 알림 선택
+
+| 옵션 | 비용 | iOS/Android |
+|------|------|-------------|
+| **Firebase FCM** | 무료 무제한 | 통합 지원 (APNs 래핑) |
+| OneSignal | 무료 (10k MAU) | 통합 지원 |
+| 직접 APNs/FCM | $0 | 별도 구현 |
+
+### 결정
+
+**AWS RDS PostgreSQL + Firebase Auth + FCM 채택**
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ AWS Cloud (서울 리전)                                │
+│  ┌──────────────────────────────────────────────┐  │
+│  │ VPC (같은 네트워크, 지연 1-3ms)                │  │
+│  │  EC2 t3.small ←→ RDS db.t4g.micro            │  │
+│  │  (FastAPI)        (PostgreSQL)                │  │
+│  └──────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+              ↓↑ (외부 서비스)
+┌─────────────────────────────────────────────────────┐
+│ Firebase (Google Cloud)                              │
+│ ├── Firebase Auth (로그인)                           │
+│ └── FCM (푸시 알림)                                  │
+└─────────────────────────────────────────────────────┘
+```
+
+**근거:**
+
+1. **비용 최적화**: RDS 프리티어 12개월 무료 ($300+ 절감)
+2. **네트워크 지연 최소화**: 같은 VPC 내 1-3ms (Supabase 5-15ms 대비)
+3. **기존 인프라 활용**: AWS EC2 이미 사용 중 (VPC, Security Group 재사용)
+4. **FCM 통합 용이**: Firebase Auth + FCM이 같은 Firebase 프로젝트
+5. **db.t4g.micro 선택**: ARM64 기반, x86 대비 20% 저렴 (~$15/월)
+
+### 트레이드오프
+
+**장점:**
+- 초기 12개월: $15/월 (EC2만), 이후 $30/월
+- 네트워크 지연 최소 (실시간 환율 서비스에 중요)
+- AWS 관리형 서비스 (백업, 패치 자동)
+- Firebase SDK 성숙도 높음 (iOS/Android 통합 쉬움)
+
+**단점:**
+- 12개월 후 RDS 비용 발생 (~$15/월)
+- Firebase 벤더 락인 (Auth만 해당, DB는 AWS)
+- Auth/Push와 DB가 다른 벤더 (관리 분산)
+
+### 보안 고려사항
+
+**ID Token 서버 검증 필수:**
+```text
+[클라이언트]
+    ↓ Authorization: Bearer <Firebase ID Token>
+[FastAPI 서버]
+    ↓ Firebase Admin SDK로 토큰 검증
+    ↓ 검증 성공 시 토큰에서 user_id 추출
+    ↓ 검증 실패 시 401 Unauthorized
+```
+
+- 클라이언트가 보낸 user_id를 **절대 신뢰하지 않음**
+- 서버가 ID Token 검증 후 **직접 user_id 추출** (스푸핑 방지)
+
+### 비용 예상
+
+| Phase | 기간 | EC2 | RDS | Auth/FCM | 합계 |
+|-------|------|-----|-----|----------|------|
+| **1** | 서비스 시작 ~ 12개월 | $15/월 | $0 | $0 | **$15/월** |
+| **2** | 12개월 이후 | $15/월 | ~$15/월 | $0 | **$30/월** |
+| **3** | 1,000명+ | $30/월 | ~$25/월 | $0 | **$55/월** |
+
+### 향후 재검토 시점
+
+- Firebase Auth MAU 50k 초과 시 (비용 발생)
+- RDS 프리티어 종료 후 비용 검토
+- 사용자 5,000명 이상 시 Supabase 자체 호스팅 검토
+
+### 관련 결정
+
+- [ADR-001](#adr-001-websocket-구현---python-fastapi-vs-nodejs): WebSocket 구현
+- [ADR-003](#adr-003-알림-시스템---websocket-vs-push-notification): 알림 시스템
+
+### 상세 문서
+
+- [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md): 전체 구현 가이드, DB 스키마, API 명세
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -1897,3 +2017,4 @@ function detectDataGap(currency) {
 - 2025-11-16: ADR-013 작성 (4단계 모드 - 환율 고시 스케줄 기반 최적화)
 - 2025-11-17: ADR-014 작성 (HTTPS/SSL 도입 - Let's Encrypt vs Cloudflare vs Self-Signed)
 - 2025-12-02: ADR-015 작성 (WebSocket Graph Integration vs Incremental API - 모바일 최적화)
+- 2025-12-05: ADR-016 작성 (인증/알림 인프라 - AWS RDS + Firebase Auth + FCM)
