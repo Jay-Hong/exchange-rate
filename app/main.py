@@ -197,17 +197,20 @@ async def build_graph_buckets() -> dict:
             cached = await redis_cache.get(cache_key)
             if cached:
                 data = json.loads(cached)
-                graph_buckets[currency] = {}
+                currency_data = {}
 
-                for source, series in data["data"].items():
+                for source, series in (data.get("data") or {}).items():
                     if series and len(series) > 0:
                         last_bucket = series[-1]  # [ts, max, min, close]
-                        graph_buckets[currency][source] = {
+                        currency_data[source] = {
                             "bucket_ts": last_bucket[0],
                             "max": last_bucket[1],
                             "min": last_bucket[2],
                             "close": last_bucket[3]
                         }
+
+                if currency_data:
+                    graph_buckets[currency] = currency_data
         except Exception as e:
             logger.warning(f"그래프 버킷 조회 실패: {currency}", extra={"error": str(e)})
             continue
@@ -229,7 +232,9 @@ async def broadcast_rates_once():
             if manager.active_connections:
                 # 그래프 버킷 추가 (실시간 환율 변경 시에만)
                 graph_buckets = await build_graph_buckets()
-                if graph_buckets:
+                total_graph_sources = sum(len(sources) for sources in graph_buckets.values())
+
+                if total_graph_sources:
                     payload["graph_buckets"] = graph_buckets
 
                 await manager.broadcast(payload)
@@ -244,7 +249,8 @@ async def broadcast_rates_once():
                     extra={
                         "rate_count": len(payload["data"]["rates"]),
                         "connections": len(manager.active_connections),
-                        "graph_buckets": len(graph_buckets)
+                        "graph_currencies": len(graph_buckets),
+                        "graph_sources": total_graph_sources
                     },
                 )
             else:
