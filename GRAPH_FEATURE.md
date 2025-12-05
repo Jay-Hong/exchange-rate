@@ -621,7 +621,7 @@ function drawGraph(data) {
 **목표**: Swift Charts로 24시간 그래프 구현
 
 **세부 작업**:
-1. Swift Charts 통합 (iOS 16+)
+1. Swift Charts 통합 (iOS 17+)
 2. `/api/graph/{currency}` API 호출
 3. WebSocket `graph_buckets` 수신 → 실시간 업데이트
 4. 단일/다중 모드 전환 (Band Chart / Line Chart)
