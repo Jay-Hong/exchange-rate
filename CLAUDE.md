@@ -165,7 +165,7 @@ updated_at    DATETIME (KST)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: sc
   - 유지: investing, kb, hana, woori, shinhan, bs, citi, ibk, nh
-  - ibk는 00:00부터 Selenium만 사용 (날짜 변경 필요, Request 불가)
+  - ibk는 00:00~00:05 스킵 (자정 전환기), 00:05부터 Selenium만 사용
 
 - **BREAK2 모드**: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, 6개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
@@ -187,7 +187,7 @@ updated_at    DATETIME (KST)
 | **hana** | 평일 08:30 | 익일 06:00 | 주말 중 가끔 변동 |
 | **shinhan** | 평일 08:19 | 익일 02:30 | - |
 | **woori** | 평일 08:30 | 익일 02:45 | - |
-| **ibk** | 평일 08:30 | 익일 02:05 | 00:00부터 Selenium만 사용 (날짜 변경 필요), 03:00까지 크롤링 (55분 여유) |
+| **ibk** | 평일 08:30 | 익일 02:05 | 00:00~00:05 스킵 (자정 전환기), 00:05부터 Selenium만 사용 |
 | **nh** | 평일 08:40 | 당일 24:00 | 자정 이후/주말 가끔 고시 |
 | **sc** | 평일 09:00 | 당일 20:30 | - |
 | **bs** | 평일 08:10 | 당일 24:00 | 일요일 넘어갈 때 가끔 고시 |
@@ -243,7 +243,7 @@ scheduler.add_job(
 - **실행 방식**: AsyncIO PriorityQueue 순차 실행
 - **부하 감소 전략**: Request(mibank) 먼저 시도 → 실패 시 Selenium 폴백
   - shinhan, nh, sc: 항상 Request 우선
-  - ibk: IN 모드(08:30~20:59) Request 우선, 00:00~02:59 Selenium만 사용 (날짜 변경 필요)
+  - ibk: IN 모드(08:30~20:59) Request 우선, 00:00~00:05 스킵 (자정 전환기), 00:05~02:59 Selenium만 사용
 - **IN**: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
 - **BREAK1**: ibk(34초), nh(54초), shinhan(18초) 유지 (sc는 21:00에 크롤링 중단)
 - **BREAK2**: nh(54초)만 유지 (ibk는 02:05 종료, shinhan은 02:30 종료, sc는 21:00 종료)

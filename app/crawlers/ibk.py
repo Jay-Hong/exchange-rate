@@ -8,6 +8,7 @@ import time
 # 서드파티 라이브러리
 import requests
 from bs4 import BeautifulSoup
+from pytz import timezone
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
@@ -19,6 +20,9 @@ from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_SHORT, MAX_DAYS_LOOKBACK
 from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context, is_mibank_rate_reliable
+
+# 한국 시간대
+KST = timezone('Asia/Seoul')
 
 BANK_NAME = 'ibk'
 
@@ -46,6 +50,30 @@ logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 def crawl_and_save_ibk_bank_exchange_rates():
     """기업은행 환율 크롤링"""
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 자정 전환기 스킵 (00:00~00:05)
+    # ═══════════════════════════════════════════════════════════════════
+    # 문제: 자정 직후 Selenium 날짜 변경 시 UI 불안정
+    #   - 45초 타임아웃 발생
+    #   - 캘린더가 랜덤한 날짜까지 이동하여 잘못된 환율 수집
+    # 해결: 가장 불안정한 5분간 크롤링 스킵
+    #   - 이 시간대 환율 변경 가능성 ≈ 0%
+    #   - 마지막 정상 환율 유지 (클라이언트가 재사용)
+    # ───────────────────────────────────────────────────────────────────
+    now = datetime.datetime.now(KST)
+    if now.hour == 0 and now.minute < 5:
+        logger.info(
+            "⏸️ IBK 자정 전환기 스킵 (00:00~00:05)",
+            extra={
+                "bank": BANK_NAME,
+                "reason": "midnight_transition_skip",
+                "time": now.strftime("%H:%M:%S"),
+                "action": "DB 마지막 환율 유지"
+            }
+        )
+        return  # 아무것도 안 함 → 이전 값 유지
+
     db = SessionLocal()
     try:
         # 1차 시도: Requests (빠른 경로 - 평일 영업시간)
