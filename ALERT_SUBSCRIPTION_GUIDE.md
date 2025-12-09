@@ -117,22 +117,110 @@
 
 ### Phase 4: RDS PostgreSQL 마이그레이션
 
-**시점**: 출시 2주 전
+**시점**: 첫 외부 사용자의 FCM/알림 데이터가 DB에 기록되기 전
+
+> ⚠️ **중요**: 외부 베타 시작 전에 반드시 RDS로 전환해야 합니다.
+> 내부 테스트 데이터는 드롭하고 새로 시작합니다 (아래 절차 참고).
 
 | 작업 | 설명 |
 |------|------|
 | RDS 인스턴스 생성 | db.t4g.micro (프리티어, ARM64) |
 | VPC 설정 | EC2와 같은 네트워크 |
-| Alembic 마이그레이션 실행 | 스키마 생성 |
-| 데이터 이전 | SQLite → PostgreSQL |
+| Alembic 마이그레이션 실행 | 빈 스키마 생성 (SQLite 이관 안 함) |
 | EC2 업그레이드 | t2.micro → t3.small |
-| 통합 테스트 | 전체 플로우 검증 |
+| 통합 리허설 | Alembic 업/다운, E2E 테스트 ([리허설 절차](#-통합-리허설-체크리스트) 참고) |
+| 내부 테스터 안내 | 앱 재설치 공지 발송 |
 
 **비용**: EC2 $15/월 + RDS $0 (프리티어 12개월)
 
+#### 🔄 전환 전략: 데이터 드롭 방식
+
+**기본 전략 (권장)**: Phase 2-3 개발 중 SQLite 사용, Phase 4에서 RDS로 전환 시 내부 테스트 데이터 드롭
+
+```text
+왜 데이터를 드롭하는가?
+├── 내부 테스터 데이터 (10-20명): 복구 비용보다 재설치가 간단
+├── 프리티어 12개월 최대 활용: 실제 서비스 시작 시점부터 시작
+├── 깔끔한 시작: 테스트 중 발생한 더미 데이터 제거
+└── Firebase Auth uid는 유지됨 (재로그인 불필요)
+```
+
+**대안 (엄격)**: Phase 2 시작 전 RDS 전환 → 모든 개발을 PostgreSQL에서 진행
+- 장점: 환경 차이 없음
+- 단점: 프리티어 조기 소모, 로컬 개발 복잡
+
+#### 📋 데이터 드롭 절차
+
+**1. 서버 측 작업**
+
+```bash
+# 1. EC2 업그레이드 (t2.micro → t3.small)
+# AWS 콘솔에서 인스턴스 유형 변경
+
+# 2. RDS PostgreSQL 생성 (새 DB, SQLite 이관 안 함)
+# AWS 콘솔에서 db.t4g.micro 생성
+
+# 3. 환경변수 변경
+# .env
+DATABASE_URL=postgresql://user:pass@rds-endpoint:5432/fxi
+
+# 4. Alembic 마이그레이션 (빈 스키마 생성)
+alembic upgrade head
+
+# 5. Docker 재배포
+docker compose up -d --build
+```
+
+**2. 내부 테스터 공지 (템플릿)**
+
+```text
+[FXi 베타 테스트 안내]
+
+외부 베타 전환을 위해 서버가 업그레이드됩니다.
+
+📱 필요한 조치:
+1. 기존 FXi 앱 삭제
+2. 테스트플라이트에서 최신 버전 재설치
+3. 다시 로그인 (Firebase 계정 유지됨)
+
+⚠️ 기존 알림 설정은 초기화됩니다.
+새 버전에서 다시 설정해 주세요.
+
+적용 일시: YYYY-MM-DD HH:MM
+문의: [연락처]
+```
+
+**3. 영향 범위**
+
+| 항목 | 드롭 여부 | 복구 방법 |
+|------|----------|----------|
+| Firebase Auth uid | ❌ 유지 | Firebase 서버에 저장 |
+| FCM device_token | ✅ 드롭 | 앱 재설치 시 자동 재발급 |
+| notification_settings | ✅ 드롭 | 사용자가 다시 설정 |
+| notification_logs | ✅ 드롭 | 히스토리 초기화 |
+| 환율 데이터 | ⚠️ 선택 | 필요 시 SQLite에서 이관 |
+
 ---
 
-### Phase 5: Android 개발
+### Phase 5: 베타 + iOS 출시
+
+**목표**: 테스트플라이트 베타 → 앱스토어 출시
+
+| 작업 | 설명 |
+|------|------|
+| 테스트플라이트 외부 베타 | 외부 테스터 피드백 수집 (1-2주) |
+| 버그 수정 및 안정화 | 크래시 프리 세션 > 99% 목표 |
+| 앱스토어 심사 제출 | 스크린샷, 설명, 개인정보처리방침 |
+| 로그 기반 알람 구현 | 알림 실패율 모니터링 (선택) |
+
+**완료 게이트**:
+- 앱스토어 심사 승인
+- 크래시 프리 세션 > 99%
+- 주요 버그 0건
+
+---
+
+### Phase 6: Android 개발
 
 **목표**: 크로스 플랫폼 완성
 
@@ -143,29 +231,48 @@
 | Revenue Cat SDK | 구독 동기화 자동 처리 |
 | Google Play Billing | Revenue Cat이 처리 |
 
+**완료 게이트**:
+- Play 스토어 심사 승인
+- iOS ↔ Android 크로스 플랫폼 동기화 확인
+
 ---
 
 ### 타임라인 요약
 
 ```text
-[현재]
-   └── t2.micro + SQLite (API 운영 중)
-
-[Phase 1] iOS MVP
-   └── 기존 인프라 유지
+[현재] Phase 1 완료
+   └── t2.micro + SQLite, iOS MVP 완성
 
 [Phase 2] Firebase Auth + FCM
-   └── 서버 API 추가, Alembic 준비
+   └── 서버 API 추가, 알림 기능, Alembic 준비
 
 [Phase 3] Revenue Cat
    └── 구독 시스템 완성
 
-[Phase 4] RDS 마이그레이션 (출시 2주 전)
-   └── t3.small + RDS PostgreSQL
+[Phase 4] RDS 마이그레이션
+   └── 첫 외부 사용자 기록 전 전환
 
-[Phase 5] Android
+[Phase 5] 베타 + iOS 출시
+   └── 테스트플라이트 → 앱스토어
+
+[Phase 6] Android
    └── 크로스 플랫폼 완성
 ```
+
+---
+
+### 📊 Phase 매핑 표
+
+> **참고**: 로드맵과 체크리스트의 Phase 번호가 1:1로 매핑됩니다.
+
+| Phase | 목표 | 주요 작업 | 완료 게이트 | 인프라 |
+|-------|------|----------|-------------|--------|
+| 1 | iOS MVP ✅ | UI, API 연동, WebSocket | 앱 기본 기능 동작 | t2.micro + SQLite |
+| 2 | Firebase Auth + FCM | 로그인, 푸시 알림, 알림 API | 푸시 알림 E2E 성공, 구조화 로그 준비 | t2.micro + SQLite |
+| 3 | Revenue Cat | 구독 결제, 유료 기능 | 구매 → 권한 반영 ≤ 1분 | t2.micro + SQLite |
+| 4 | RDS 마이그레이션 | DB 전환, 인프라 업그레이드 | Alembic 성공, 통합 E2E 통과 | t3.small + RDS |
+| 5 | 베타 + iOS 출시 | 테스트플라이트, QA, 심사 | 앱스토어 승인, 크래시 프리 > 99% | t3.small + RDS |
+| 6 | Android | Kotlin UI, SDK 통합 | Play 스토어 승인 | t3.small + RDS |
 
 ---
 
@@ -645,55 +752,87 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 ### 📋 구현 체크리스트
 
-#### Phase 1: DB 마이그레이션 (서비스 시작 시)
+> **참고**: Phase 번호는 위 [Phase 매핑 표](#-phase-매핑-표)와 1:1 대응됩니다.
 
-- [ ] AWS RDS PostgreSQL 인스턴스 생성 (db.t4g.micro)
-- [ ] SQLite → PostgreSQL 데이터 마이그레이션
-- [ ] DATABASE_URL 환경변수 변경
-- [ ] SQLAlchemy 연결 테스트
+#### Phase 1: iOS MVP ✅ 완료
 
-#### Phase 2: 인증 & 알림 시스템
+- [x] UI/UX 구현 (환율 비교, 그래프, 은행 목록)
+- [x] REST API 연동
+- [x] WebSocket 실시간 업데이트
 
-- [ ] Firebase 프로젝트 생성
+#### Phase 2: Firebase Auth + FCM
+
+- [ ] Firebase 프로젝트 생성 (FXi)
+- [ ] APNs 설정 (.p8 키)
 - [ ] Firebase Auth 설정 (이메일/소셜 로그인)
 - [ ] FCM 설정 및 서버 키 발급
-- [ ] user_devices, notification_settings 테이블 생성
-- [ ] FastAPI 알림 API 구현 (/api/register-device, /api/notification-settings)
-- [ ] CRUD 변화 감지 → FCM 전송 로직 구현
-
-#### Phase 3: 모바일 앱 통합
-
 - [ ] iOS 앱에 Firebase Auth SDK 통합
 - [ ] iOS 앱에 FCM SDK 통합
-- [ ] Android 앱에 Firebase Auth SDK 통합
-- [ ] Android 앱에 FCM SDK 통합
+- [ ] 서버: Firebase Admin SDK 설치
+- [ ] 서버: Alembic으로 user_devices, notification_settings 테이블 생성
+- [ ] 서버: /api/register-device API 구현
+- [ ] 서버: /api/notification-settings API 구현
+- [ ] 서버: CRUD 변화 감지 → FCM 전송 로직 구현
+- [ ] 알림 품질 게이트 통과 ([상세](#-알림-품질-게이트))
+- [ ] Alembic 마이그레이션 스크립트 준비 (PostgreSQL용)
 
-#### Phase 4: 구독 관리 (Revenue Cat)
+#### Phase 3: Revenue Cat
 
 - [x] Revenue Cat 도입 결정
 - [ ] Revenue Cat 계정 생성 및 앱 등록
-- [ ] iOS/Android 앱에 Revenue Cat SDK 통합
+- [ ] iOS 앱에 Revenue Cat SDK 통합
 - [ ] 유료 기능 설계 (프리미엄 알림 등)
+- [ ] Firebase uid ↔ Revenue Cat 연동
+
+#### Phase 4: RDS 마이그레이션
+
+- [ ] 로컬 스테이징 리허설 통과 ([체크리스트](#-통합-리허설-체크리스트))
+- [ ] EC2 t2.micro → t3.small 업그레이드
+- [ ] RDS PostgreSQL 인스턴스 생성 (db.t4g.micro)
+- [ ] VPC 설정 (EC2와 같은 네트워크)
+- [ ] Alembic 마이그레이션 실행 (빈 스키마)
+- [ ] DATABASE_URL 환경변수 변경
+- [ ] 내부 테스터 앱 재설치 공지 발송 ([템플릿](#-데이터-드롭-절차))
+- [ ] 통합 E2E 테스트 통과
+
+#### Phase 5: 베타 + iOS 출시
+
+- [ ] 테스트플라이트 외부 베타 배포
+- [ ] 베타 피드백 수집 및 버그 수정
+- [ ] 크래시 프리 세션 > 99% 확인
+- [ ] 앱스토어 심사 제출
+- [ ] 앱스토어 승인
+- [ ] (선택) 로그 기반 알람 구현
+
+#### Phase 6: Android 개발
+
+- [ ] Kotlin + Jetpack Compose UI 구현
+- [ ] Firebase Auth SDK 통합
+- [ ] FCM SDK 통합
+- [ ] Revenue Cat SDK 통합
 - [ ] 크로스 플랫폼 구독 동기화 테스트
+- [ ] Play 스토어 심사 제출 및 승인
 
 ---
 
 ### 💡 비용 전략 (확정)
 
+> **참고**: 아래 "비용 단계"는 구현 Phase와 다릅니다. 서비스 운영 기간 기준입니다.
+
 ```text
-Phase 1 (서비스 시작 ~ 12개월):
+비용 단계 1 (서비스 시작 ~ 12개월):
 ├── EC2 t3.small: $15/월
 ├── RDS db.t4g.micro: $0 (프리티어)
 ├── Firebase Auth/FCM: $0
 └── 합계: $15/월
 
-Phase 2 (12개월 후):
+비용 단계 2 (12개월 후):
 ├── EC2 t3.small: $15/월
 ├── RDS db.t4g.micro: ~$15/월
 ├── Firebase Auth/FCM: $0
 └── 합계: $30/월
 
-Phase 3 (1,000명+):
+비용 단계 3 (1,000명+):
 ├── EC2 t3.medium: $30/월
 ├── RDS db.t4g.small: ~$25/월
 ├── Firebase Auth/FCM: $0
@@ -702,10 +841,240 @@ Phase 3 (1,000명+):
 
 ---
 
+## 🧪 통합 리허설 체크리스트
+
+> **목적**: RDS 전환 전 프로덕션 환경과 동일한 조건에서 검증
+> **시점**: Phase 4 (RDS 마이그레이션) 시작 전
+
+### 로컬 스테이징 환경 구성
+
+프로덕션 이미지/환경변수와 동일하게 로컬에서 테스트합니다.
+
+> **환경변수 파일**: `.env.staging`은 프로덕션 `.env`와 동일한 키 세트를 사용하고, 값만 스테이징용으로 변경합니다.
+
+```yaml
+# docker-compose.staging.yml
+version: '3.8'
+services:
+  app:
+    build: .
+    platform: linux/amd64  # M1 Mac에서도 x86 에뮬레이션
+    environment:
+      - ENV=staging
+      - DATABASE_URL=postgresql://postgres:dev@postgres:5432/fxi
+      - REDIS_URL=redis://redis:6379
+      # 프로덕션 .env와 동일한 키 사용
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=fxi
+      - POSTGRES_PASSWORD=dev
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+```
+
+### 리허설 체크리스트
+
+```bash
+# 1. 스테이징 환경 실행
+docker-compose -f docker-compose.staging.yml up -d --build
+
+# 2. Alembic 마이그레이션 테스트
+alembic upgrade head
+alembic downgrade -1  # 롤백 테스트
+alembic upgrade head  # 다시 업그레이드
+```
+
+| 항목 | 테스트 내용 | 통과 기준 |
+|------|------------|----------|
+| ✅ Alembic 업그레이드 | `alembic upgrade head` | 에러 없이 완료 |
+| ✅ Alembic 롤백 | `alembic downgrade -1` | 에러 없이 롤백 |
+| ✅ 크롤러 동시 INSERT | 10개 크롤러 동시 실행 | UNIQUE 충돌 없음 |
+| ✅ WebSocket 브로드캐스트 | 환율 데이터 실시간 전송 | 클라이언트 수신 확인 |
+| ✅ 알림 E2E | 조건 충족 → FCM 전송 | 푸시 알림 수신 (실 토큰 1회) |
+| ✅ Redis 캐시 | 브로드캐스트 캐시 동작 | Circuit Breaker 정상 |
+
+### 환경 차이 주의사항
+
+| 차이점 | 로컬 | 프로덕션 | 대응 |
+|--------|------|----------|------|
+| CPU 아키텍처 | M1 Mac (ARM) | EC2 (x86) | `--platform linux/amd64` |
+| TLS | 없음 | Let's Encrypt | 스테이징에서는 HTTP |
+| 네트워크 지연 | localhost | VPC 1-3ms | 실제 영향 미미 |
+
+---
+
+## 🔔 알림 품질 게이트
+
+> **목적**: 알림 서비스의 최소 품질 보증
+> **적용 시점**: Phase 2 (Firebase Auth + FCM) 구현 시
+
+### 1. 멱등성 (중복 알림 방지)
+
+**방식**: `triggered` 플래그로 단일 조건 기준 중복 방지
+
+```python
+# notification_settings 테이블
+class NotificationSetting(Base):
+    __tablename__ = "notification_settings"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False)
+    bank = Column(String, nullable=False)
+    currency = Column(String, nullable=False)
+    condition = Column(String, nullable=False)  # 'greater_than', 'less_than'
+    threshold = Column(Float, nullable=False)
+    enabled = Column(Boolean, default=True)
+
+    # 멱등성 필드
+    triggered = Column(Boolean, default=False)  # 조건 충족 여부
+    last_notified_at = Column(DateTime, nullable=True)
+    last_notified_rate = Column(Float, nullable=True)
+```
+
+```python
+# 알림 로직
+async def check_and_notify(bank: str, currency: str, new_rate: float):
+    settings = await get_notification_settings(bank, currency)
+
+    for s in settings:
+        condition_met = (
+            (s.condition == 'greater_than' and new_rate >= s.threshold) or
+            (s.condition == 'less_than' and new_rate <= s.threshold)
+        )
+
+        if condition_met and not s.triggered:
+            # 알림 발송
+            await send_fcm_notification(s.user_id, bank, currency, new_rate)
+            s.triggered = True
+            s.last_notified_at = datetime.now()
+            s.last_notified_rate = new_rate
+        elif not condition_met:
+            # 조건 미충족 시 리셋 (다음 충족 시 다시 알림)
+            s.triggered = False
+
+        await db.commit()
+```
+
+> **확장 계획**: 다중 조건/프리미엄 기능 추가 시 `triggered` 플래그를 별도 테이블 (`notification_states`)로 분리하거나, `notification_logs` 기반 멱등성으로 전환 검토
+
+### 2. 재시도 정책
+
+**방식**: 선형 재시도 (1초, 2초) + 토큰 오류 시 즉시 삭제
+
+```python
+async def send_fcm_with_retry(
+    token: str,
+    message: messaging.Message,
+    max_retries: int = 2
+) -> bool:
+    delays = [1, 2]  # 초
+
+    for attempt in range(max_retries + 1):
+        try:
+            messaging.send(message)
+            return True
+        except FirebaseError as e:
+            error_code = e.code
+
+            # 토큰 오류: 재시도 무의미, 즉시 삭제
+            if error_code in ['UNREGISTERED', 'INVALID_ARGUMENT']:
+                await delete_device_token(token)
+                logger.warning("무효 토큰 삭제", extra={
+                    "token": token[:20] + "...",
+                    "error_code": error_code
+                })
+                return False
+
+            # 서버 오류: 재시도
+            if attempt < max_retries:
+                await asyncio.sleep(delays[attempt])
+            else:
+                logger.error("FCM 전송 실패", extra={
+                    "token": token[:20] + "...",
+                    "error_code": error_code,
+                    "attempts": attempt + 1
+                })
+                return False
+
+    return False
+```
+
+### 3. 구조화 로그 (관측 가능성)
+
+**필수 필드**: `event`, `success`, `latency_ms`, `error_code`
+
+```python
+import time
+from app import logger
+
+async def send_notification_with_logging(user_id: str, bank: str, currency: str, rate: float):
+    start = time.time()
+    success = False
+    error_code = None
+
+    try:
+        # FCM 전송 로직
+        await send_fcm_notification(user_id, bank, currency, rate)
+        success = True
+    except FirebaseError as e:
+        error_code = e.code
+    finally:
+        latency_ms = (time.time() - start) * 1000
+
+        logger.info("FCM 알림 발송", extra={
+            "event": "fcm_send",
+            "user_id": user_id,
+            "bank": bank,
+            "currency": currency,
+            "rate": rate,
+            "success": success,
+            "latency_ms": round(latency_ms, 2),
+            "error_code": error_code
+        })
+```
+
+**로그 기반 분석 (Phase 5 이후)**:
+
+```bash
+# 실패율 확인
+grep '"event": "fcm_send"' logs/app.log | \
+  jq 'select(.success == false)' | wc -l
+
+# 평균 지연 확인
+grep '"event": "fcm_send"' logs/app.log | \
+  jq '.latency_ms' | awk '{sum+=$1; count++} END {print sum/count}'
+
+# 에러 코드별 카운트
+grep '"event": "fcm_send"' logs/app.log | \
+  jq 'select(.error_code != null) | .error_code' | sort | uniq -c
+```
+
+### 완료 게이트 (Phase 2)
+
+| 항목 | 테스트 | 통과 기준 |
+|------|--------|----------|
+| ✅ 유효 토큰 알림 | 조건 충족 시 푸시 수신 | 10초 내 수신 |
+| ✅ 무효 토큰 처리 | 잘못된 토큰으로 전송 | 자동 삭제 확인 |
+| ✅ 중복 알림 방지 | 같은 조건 연속 충족 | 알림 1회만 발송 |
+| ✅ 조건 리셋 | 미충족 → 재충족 | 새 알림 발송 |
+| ✅ 구조화 로그 | 로그 파일 확인 | 필수 필드 포함 |
+
+---
+
 ## 🔧 기기 토큰 정리 전략 (구현 예정)
 
 > **목적**: FCM device_token 관리 및 정리 전략 (구현 시점에 최종 결정)
-> **상태**: 📋 검토 완료, 구현 대기
+> **상태**: 📋 검토 완료, 구현 대기 → **알림 품질 게이트에 통합됨**
 
 ### 문제 상황
 
@@ -845,5 +1214,6 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ---
 
-**마지막 업데이트**: 2025-12-05
+**마지막 업데이트**: 2025-12-09
 **결정 완료**: AWS RDS PostgreSQL + Firebase Auth + FCM
+**문서 개선**: Phase 번호 통일, 전환 전략/드롭 절차/리허설/품질 게이트 추가
