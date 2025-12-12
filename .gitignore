@@ -57,6 +57,11 @@ Thumbs.db
 # Claude Code
 .claude/settings.local.json
 
+# Firebase (서비스 계정 키 - 절대 커밋 금지)
+firebase-service-account.json
+*-firebase-adminsdk-*.json
+*.p8
+
 # 기타
 .pytest_cache/
 .coverage

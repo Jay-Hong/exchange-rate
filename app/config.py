@@ -40,3 +40,10 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# Firebase 설정 (Phase 2 - FCM 푸시 알림)
+# Firebase Console > 프로젝트 설정 > 서비스 계정 > 새 비공개 키 생성
+FIREBASE_CREDENTIALS_PATH = os.getenv(
+    "FIREBASE_CREDENTIALS_PATH",
+    str(BASE_DIR / "firebase-service-account.json")
+)

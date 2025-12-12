@@ -25,6 +25,7 @@ from app import models, schemas, crud, scheduler
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
+from app.notifications.fcm import init_firebase, is_firebase_initialized
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.main")
@@ -148,6 +149,12 @@ async def lifespan(app: FastAPI):
     # Redis 연결 및 워밍업 (브로드캐스트 캐시)
     await redis_cache.connect()
     await warmup_broadcast_cache()
+
+    # Firebase Admin SDK 초기화 (Phase 2 - FCM)
+    if init_firebase():
+        logger.info("✅ Firebase Admin SDK 초기화 완료")
+    else:
+        logger.warning("⚠️ Firebase Admin SDK 초기화 실패 (FCM 비활성화)")
 
     # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
     db = SessionLocal()
@@ -959,3 +966,309 @@ async def get_graph_data(currency: str):
                 "reason": "Database query failed"
             }
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 2: Firebase Auth + FCM 알림 API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def verify_firebase_token(request: Request) -> str:
+    """
+    Firebase ID Token 검증 및 user_id 추출
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+
+    Returns:
+        user_id (Firebase uid)
+
+    Raises:
+        HTTPException 401: 인증 실패
+    """
+    from firebase_admin import auth
+
+    if not is_firebase_initialized():
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase not initialized"
+        )
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header"
+        )
+
+    token = auth_header.replace("Bearer ", "")
+
+    try:
+        decoded_token = auth.verify_id_token(token)
+        user_id = decoded_token["uid"]
+        return user_id
+    except auth.ExpiredIdTokenError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except auth.InvalidIdTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        logger.warning("Firebase 토큰 검증 실패", extra={"error": str(e)})
+        raise HTTPException(status_code=401, detail="Token verification failed")
+
+
+@app.post("/api/register-device", response_model=schemas.RegisterDeviceResponse)
+async def register_device(
+    request: Request,
+    body: schemas.RegisterDeviceRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    FCM Device Token 등록
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+
+    Body:
+        {
+            "device_token": "FCM_TOKEN_HERE",
+            "platform": "ios" | "android"
+        }
+
+    Returns:
+        {
+            "success": true,
+            "message": "Device registered successfully",
+            "device_id": 123
+        }
+    """
+    user_id = await verify_firebase_token(request)
+
+    try:
+        device = crud.register_device(
+            db=db,
+            user_id=user_id,
+            device_token=body.device_token,
+            platform=body.platform
+        )
+
+        logger.info(
+            "📱 디바이스 등록",
+            extra={
+                "event": "device_register",
+                "user_id": user_id,
+                "platform": body.platform,
+                "device_id": device.id
+            }
+        )
+
+        return schemas.RegisterDeviceResponse(
+            success=True,
+            message="Device registered successfully",
+            device_id=device.id
+        )
+
+    except Exception as e:
+        logger.error("디바이스 등록 실패", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/register-device")
+async def unregister_device(
+    request: Request,
+    device_token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    FCM Device Token 삭제 (로그아웃 시)
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+
+    Query:
+        device_token: FCM Device Token
+    """
+    user_id = await verify_firebase_token(request)
+
+    deleted = crud.delete_device(db=db, user_id=user_id, device_token=device_token)
+
+    if deleted:
+        logger.info("📱 디바이스 삭제", extra={"user_id": user_id})
+        return {"success": True, "message": "Device unregistered"}
+    else:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+
+@app.post("/api/notification-settings", response_model=schemas.NotificationSettingResponse)
+async def create_notification_setting(
+    request: Request,
+    body: schemas.NotificationSettingRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    알림 설정 생성
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+
+    Body:
+        {
+            "bank": "hana",
+            "currency": "usd-krw",
+            "condition": "greater_than",
+            "threshold": 1475.0
+        }
+    """
+    user_id = await verify_firebase_token(request)
+
+    # 유효한 은행/통화 검증
+    valid_banks = ["investing", "kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs", "citi"]
+    valid_currencies = ["usd-krw", "jpy-krw", "eur-krw"]
+
+    if body.bank not in valid_banks:
+        raise HTTPException(status_code=400, detail=f"Invalid bank: {body.bank}")
+    if body.currency not in valid_currencies:
+        raise HTTPException(status_code=400, detail=f"Invalid currency: {body.currency}")
+
+    try:
+        setting = crud.create_notification_setting(
+            db=db,
+            user_id=user_id,
+            bank=body.bank,
+            currency=body.currency,
+            condition=body.condition,
+            threshold=body.threshold
+        )
+
+        logger.info(
+            "🔔 알림 설정 생성",
+            extra={
+                "event": "notification_setting_create",
+                "user_id": user_id,
+                "bank": body.bank,
+                "currency": body.currency,
+                "condition": body.condition,
+                "threshold": body.threshold
+            }
+        )
+
+        return schemas.NotificationSettingResponse(
+            id=setting.id,
+            bank=setting.bank,
+            currency=setting.currency,
+            condition=setting.condition,
+            threshold=setting.threshold,
+            enabled=setting.enabled,
+            triggered=setting.triggered,
+            created_at=setting.created_at.isoformat()
+        )
+
+    except Exception as e:
+        logger.error("알림 설정 생성 실패", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/notification-settings", response_model=schemas.NotificationSettingsListResponse)
+async def get_notification_settings(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    사용자의 알림 설정 목록 조회
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+    """
+    user_id = await verify_firebase_token(request)
+
+    settings = crud.get_notification_settings(db=db, user_id=user_id)
+
+    return schemas.NotificationSettingsListResponse(
+        settings=[
+            schemas.NotificationSettingResponse(
+                id=s.id,
+                bank=s.bank,
+                currency=s.currency,
+                condition=s.condition,
+                threshold=s.threshold,
+                enabled=s.enabled,
+                triggered=s.triggered,
+                created_at=s.created_at.isoformat()
+            )
+            for s in settings
+        ],
+        total_count=len(settings)
+    )
+
+
+@app.put("/api/notification-settings/{setting_id}", response_model=schemas.NotificationSettingResponse)
+async def update_notification_setting(
+    request: Request,
+    setting_id: int,
+    body: schemas.NotificationSettingUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    알림 설정 수정
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+    """
+    user_id = await verify_firebase_token(request)
+
+    setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
+
+    if not setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+
+    updated = crud.update_notification_setting(
+        db=db,
+        setting_id=setting_id,
+        user_id=user_id,
+        enabled=body.enabled,
+        condition=body.condition,
+        threshold=body.threshold
+    )
+
+    logger.info(
+        "🔔 알림 설정 수정",
+        extra={"event": "notification_setting_update", "setting_id": setting_id}
+    )
+
+    return schemas.NotificationSettingResponse(
+        id=updated.id,
+        bank=updated.bank,
+        currency=updated.currency,
+        condition=updated.condition,
+        threshold=updated.threshold,
+        enabled=updated.enabled,
+        triggered=updated.triggered,
+        created_at=updated.created_at.isoformat()
+    )
+
+
+@app.delete("/api/notification-settings/{setting_id}", response_model=schemas.DeleteResponse)
+async def delete_notification_setting(
+    request: Request,
+    setting_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    알림 설정 삭제
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+    """
+    user_id = await verify_firebase_token(request)
+
+    setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
+
+    if not setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+
+    crud.delete_notification_setting(db=db, setting_id=setting_id, user_id=user_id)
+
+    logger.info(
+        "🔔 알림 설정 삭제",
+        extra={"event": "notification_setting_delete", "setting_id": setting_id}
+    )
+
+    return schemas.DeleteResponse(success=True, message="Setting deleted")

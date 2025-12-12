@@ -2,10 +2,10 @@
 
 # 표준 라이브러리
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 # 서드파티 라이브러리
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BankExchangeRateResponse(BaseModel):
@@ -46,3 +46,64 @@ class ExchangeRatesResponse(BaseModel):
     """
     rates: List[ExchangeRateItem]
     metadata: ExchangeRateMetadata
+
+
+# ============================================================
+# Phase 2: Firebase Auth + FCM 알림 스키마
+# ============================================================
+
+class RegisterDeviceRequest(BaseModel):
+    """디바이스 등록 요청"""
+    device_token: str = Field(..., min_length=10, description="FCM Device Token")
+    platform: Literal["ios", "android"] = Field(..., description="플랫폼")
+
+
+class RegisterDeviceResponse(BaseModel):
+    """디바이스 등록 응답"""
+    success: bool
+    message: str
+    device_id: Optional[int] = None
+
+
+class NotificationSettingRequest(BaseModel):
+    """알림 설정 요청"""
+    bank: str = Field(..., min_length=1, description="은행 코드 (예: hana, kb)")
+    currency: str = Field(..., min_length=1, description="통화쌍 (예: usd-krw)")
+    condition: Literal["greater_than", "less_than"] = Field(
+        ..., description="조건 (greater_than: 이상, less_than: 이하)"
+    )
+    threshold: float = Field(..., gt=0, description="임계값")
+
+
+class NotificationSettingResponse(BaseModel):
+    """알림 설정 응답"""
+    id: int
+    bank: str
+    currency: str
+    condition: str
+    threshold: float
+    enabled: bool
+    triggered: bool
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationSettingsListResponse(BaseModel):
+    """알림 설정 목록 응답"""
+    settings: List[NotificationSettingResponse]
+    total_count: int
+
+
+class NotificationSettingUpdateRequest(BaseModel):
+    """알림 설정 수정 요청"""
+    enabled: Optional[bool] = None
+    condition: Optional[Literal["greater_than", "less_than"]] = None
+    threshold: Optional[float] = Field(None, gt=0)
+
+
+class DeleteResponse(BaseModel):
+    """삭제 응답"""
+    success: bool
+    message: str

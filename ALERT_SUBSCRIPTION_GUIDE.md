@@ -90,13 +90,79 @@
 | 작업 | 설명 |
 |------|------|
 | Firebase 프로젝트 생성 | FXi 전용 새 프로젝트 |
-| APNs 설정 | 기존 .p8 키 재사용 (Team-wide) |
+| APNs 키 생성 | `.p8` 키 생성 (Sandbox & Production, Team Scoped) |
+| Firebase에 iOS 앱 등록 | Bundle ID 등록, `GoogleService-Info.plist` 다운로드 |
+| APNs 키 Firebase 등록 | 개발/프로덕션 APNs 인증 키 업로드 |
+| Google 로그인 설정 | 프로젝트 공개용 이름, 지원 이메일 설정 |
+| Apple 로그인 설정 | App ID, 서비스 ID, Sign in with Apple 키 생성 |
+| Firebase OAuth 설정 | 서비스 ID, 팀 ID, 비공개 키 등록 (Android용) |
 | iOS Firebase Auth SDK | 로그인/회원가입 구현 |
 | iOS FCM SDK | Device Token 등록 |
 | 서버 API 구현 | `/api/register-device`, `/api/notification-settings` |
 | Alembic 설정 | DB 마이그레이션 스크립트 준비 |
 
 **인프라**: t2.micro + SQLite (개발 계속)
+
+#### 🔑 생성되는 키/파일 목록
+
+| 파일 | 용도 | 비고 |
+|------|------|------|
+| `AuthKey_XXXXXXXX.p8` (APNs) | 푸시 알림 | Firebase Cloud Messaging에 등록 |
+| `AuthKey_YYYYYYYY.p8` (Sign in with Apple) | Apple 로그인 | Firebase OAuth에 등록 (Android용) |
+| `GoogleService-Info.plist` | iOS Firebase 설정 | Google 로그인 활성화 후 재다운로드 필요 |
+
+#### 📝 Apple Developer 설정 상세
+
+##### 1. APNs 키 생성 (Keys)
+
+- Key Name: 범용적 이름 권장 (예: `APNs Auth Key`)
+- Environment: `Sandbox & Production` (개발+프로덕션 모두 지원)
+- Key Restriction: `Team Scoped (All Topics)` (모든 앱에서 재사용 가능)
+
+##### 2. App ID 설정 (Identifiers > App IDs)
+
+- Bundle ID와 동일하게 등록
+- Capabilities: `Push Notifications`, `Sign in with Apple` 활성화
+- Sign in with Apple: `Enable as a primary App ID` 선택
+
+##### 3. 서비스 ID 생성 (Identifiers > Services IDs) - Android Apple 로그인용
+
+- Identifier: `{Bundle ID}.signin` 형식 권장
+- Sign in with Apple 활성화 후 Configure:
+  - Primary App ID: 위에서 만든 App ID 선택
+  - Domains: `{project-id}.firebaseapp.com`
+  - Return URLs: `https://{project-id}.firebaseapp.com/__/auth/handler`
+
+##### 4. Sign in with Apple 키 생성 (Keys) - APNs 키와 별도
+
+- Key Name: `Sign in with Apple Key`
+- Sign in with Apple 체크 → Configure → Primary App ID 선택
+
+#### 🔥 Firebase Console 설정 상세
+
+##### 1. iOS 앱 등록
+
+- Bundle ID 입력 → `GoogleService-Info.plist` 다운로드
+
+##### 2. APNs 키 업로드 (프로젝트 설정 > Cloud Messaging)
+
+- 개발/프로덕션 APNs 인증 키에 동일한 `.p8` 파일 업로드
+- Key ID, Team ID 입력
+
+##### 3. Google 로그인 활성화 (Authentication > Sign-in method)
+
+- 프로젝트 공개용 이름: 앱 이름 (예: `환율아이`)
+- 프로젝트 지원 이메일: 운영자 이메일
+- ⚠️ 활성화 후 `GoogleService-Info.plist` **재다운로드 필요**
+
+##### 4. Apple 로그인 활성화 (Authentication > Sign-in method)
+
+- iOS 네이티브: 단순 활성화만 하면 됨
+- Android용 OAuth 설정 (크로스 플랫폼 구독 동기화 필요 시):
+  - 서비스 ID: `{Bundle ID}.signin`
+  - Apple 팀 ID: Apple Developer 계정의 Team ID
+  - 키 ID: Sign in with Apple 키의 Key ID
+  - 비공개 키: `.p8` 파일 내용 붙여넣기
 
 ---
 
@@ -762,17 +828,37 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 #### Phase 2: Firebase Auth + FCM
 
-- [ ] Firebase 프로젝트 생성 (FXi)
-- [ ] APNs 설정 (.p8 키)
-- [ ] Firebase Auth 설정 (이메일/소셜 로그인)
-- [ ] FCM 설정 및 서버 키 발급
-- [ ] iOS 앱에 Firebase Auth SDK 통합
-- [ ] iOS 앱에 FCM SDK 통합
-- [ ] 서버: Firebase Admin SDK 설치
-- [ ] 서버: Alembic으로 user_devices, notification_settings 테이블 생성
-- [ ] 서버: /api/register-device API 구현
-- [ ] 서버: /api/notification-settings API 구현
-- [ ] 서버: CRUD 변화 감지 → FCM 전송 로직 구현
+**Apple Developer 설정:**
+
+- [x] APNs 키 생성 (.p8, Sandbox & Production, Team Scoped)
+- [x] App ID 등록 (Push Notifications, Sign in with Apple 활성화)
+- [x] 서비스 ID 생성 (Android Apple 로그인용)
+- [x] Sign in with Apple 키 생성 (.p8, APNs 키와 별도)
+
+**Firebase Console 설정:**
+
+- [x] Firebase 프로젝트 생성 (FXi)
+- [x] iOS 앱 등록 + GoogleService-Info.plist 다운로드
+- [x] APNs 키 업로드 (개발/프로덕션)
+- [x] Google 로그인 활성화 + GoogleService-Info.plist 재다운로드
+- [x] Apple 로그인 활성화 + OAuth 설정 (Android용)
+
+**iOS 앱 작업:**
+
+- [x] Xcode에 Firebase SDK 추가 (SPM)
+- [x] GoogleService-Info.plist 프로젝트에 추가
+- [x] Capabilities 설정 (Push Notifications, Sign in with Apple)
+- [x] Firebase Auth SDK 통합 (Google + Apple 로그인) - `AuthService.swift`
+- [x] FCM SDK 통합 (Device Token 등록) - `PushNotificationService.swift`
+- [ ] 로그인 UI 구현
+
+**서버 작업:**
+
+- [x] Firebase Admin SDK 설치 (`firebase-admin>=6.5.0`)
+- [x] user_devices, notification_settings, notification_logs 테이블 생성
+- [x] /api/register-device API 구현 (토큰 소유권 이전 로직 포함)
+- [x] /api/notification-settings API 구현 (중복 방지, triggered 재설정)
+- [x] CRUD 변화 감지 → FCM 전송 로직 구현
 - [ ] 알림 품질 게이트 통과 ([상세](#-알림-품질-게이트))
 - [ ] Alembic 마이그레이션 스크립트 준비 (PostgreSQL용)
 
@@ -1214,6 +1300,6 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ---
 
-**마지막 업데이트**: 2025-12-09
+**마지막 업데이트**: 2025-12-11
 **결정 완료**: AWS RDS PostgreSQL + Firebase Auth + FCM
-**문서 개선**: Phase 번호 통일, 전환 전략/드롭 절차/리허설/품질 게이트 추가
+**문서 개선**: Phase 2 상세 가이드 추가 (Apple Developer/Firebase Console 설정 절차)
