@@ -710,7 +710,7 @@ def create_notification_setting(
         user_id: Firebase Auth user_id
         bank: 은행 코드 (예: 'hana', 'kb')
         currency: 통화쌍 (예: 'usd-krw')
-        condition: 'greater_than' or 'less_than'
+        condition: 'above' or 'below'
         threshold: 임계값
 
     Returns:
@@ -961,9 +961,9 @@ def get_triggered_settings_for_rate(
 
     for setting in settings:
         condition_met = False
-        if setting.condition == "greater_than" and rate >= setting.threshold:
+        if setting.condition == "above" and rate >= setting.threshold:
             condition_met = True
-        elif setting.condition == "less_than" and rate <= setting.threshold:
+        elif setting.condition == "below" and rate <= setting.threshold:
             condition_met = True
 
         if condition_met:
@@ -1026,6 +1026,44 @@ def mark_setting_triggered(
             "알림 설정 triggered 표시",
             extra={"setting_id": setting_id, "rate": rate}
         )
+
+
+def reset_notification_setting(
+    db: Session,
+    setting_id: int,
+    user_id: str
+) -> Optional[models.NotificationSetting]:
+    """
+    알림 설정을 리셋 (triggered=false, last_notified_at=null)
+
+    사용자가 '다시 받기' 요청 시 호출.
+
+    Args:
+        db: 데이터베이스 세션
+        setting_id: NotificationSetting ID
+        user_id: Firebase Auth user_id (소유권 확인용)
+
+    Returns:
+        리셋된 NotificationSetting 객체, 없으면 None
+    """
+    setting = db.query(models.NotificationSetting).filter(
+        models.NotificationSetting.id == setting_id,
+        models.NotificationSetting.user_id == user_id
+    ).first()
+
+    if setting:
+        setting.triggered = False
+        setting.last_notified_at = None
+        setting.last_notified_rate = None
+        db.commit()
+        db.refresh(setting)
+
+        logger.info(
+            "🔄 알림 설정 리셋",
+            extra={"setting_id": setting_id, "user_id": user_id}
+        )
+
+    return setting
 
 
 def create_notification_log(
@@ -1128,7 +1166,7 @@ def process_rate_alerts(
                 else:
                     title = f"🏦 {bank.upper()} 환율 알림"
 
-                condition_text = "이상" if setting.condition == "greater_than" else "이하"
+                condition_text = "이상" if setting.condition == "above" else "이하"
                 body = (
                     f"{currency.upper()} {setting.threshold:,.2f}원 {condition_text} 도달\n"
                     f"현재: {rate:,.2f}원"

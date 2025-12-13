@@ -75,7 +75,7 @@ class NotificationSetting(Base):
     user_id = Column(String, nullable=False, index=True)
     bank = Column(String, nullable=False)  # 'hana', 'kb', etc.
     currency = Column(String, nullable=False)  # 'usd-krw', etc.
-    condition = Column(String, nullable=False)  # 'greater_than', 'less_than'
+    condition = Column(String, nullable=False)  # 'above', 'below'
     threshold = Column(Float, nullable=False)
     enabled = Column(Boolean, default=True)
     # 멱등성 필드 (중복 알림 방지)

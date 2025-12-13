@@ -8,7 +8,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # 서드파티 라이브러리
 from fastapi import FastAPI, Request, HTTPException, Depends, WebSocket, WebSocketDisconnect, status
@@ -1015,6 +1015,29 @@ async def verify_firebase_token(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Token verification failed")
 
 
+def build_notification_setting_response(setting: models.NotificationSetting) -> schemas.NotificationSettingResponse:
+    """
+    NotificationSetting DB 모델을 API 응답으로 변환
+
+    필드 매핑:
+    - enabled → is_enabled
+    - last_notified_at → triggered_at
+    """
+    return schemas.NotificationSettingResponse(
+        id=setting.id,
+        user_id=setting.user_id,
+        bank=setting.bank,
+        currency=setting.currency,
+        condition=setting.condition,
+        threshold=setting.threshold,
+        is_enabled=setting.enabled,
+        triggered=setting.triggered,
+        created_at=setting.created_at.isoformat() if setting.created_at else None,
+        updated_at=setting.updated_at.isoformat() if setting.updated_at else None,
+        triggered_at=setting.last_notified_at.isoformat() if setting.last_notified_at else None
+    )
+
+
 @app.post("/api/register-device", response_model=schemas.RegisterDeviceResponse)
 async def register_device(
     request: Request,
@@ -1113,28 +1136,22 @@ async def create_notification_setting(
         {
             "bank": "hana",
             "currency": "usd-krw",
-            "condition": "greater_than",
+            "condition": "above",
             "threshold": 1475.0
         }
+
+    Note:
+        bank, currency, condition은 Enum으로 자동 검증됨
     """
     user_id = await verify_firebase_token(request)
-
-    # 유효한 은행/통화 검증
-    valid_banks = ["investing", "kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs", "citi"]
-    valid_currencies = ["usd-krw", "jpy-krw", "eur-krw"]
-
-    if body.bank not in valid_banks:
-        raise HTTPException(status_code=400, detail=f"Invalid bank: {body.bank}")
-    if body.currency not in valid_currencies:
-        raise HTTPException(status_code=400, detail=f"Invalid currency: {body.currency}")
 
     try:
         setting = crud.create_notification_setting(
             db=db,
             user_id=user_id,
-            bank=body.bank,
-            currency=body.currency,
-            condition=body.condition,
+            bank=body.bank.value,
+            currency=body.currency.value,
+            condition=body.condition.value,
             threshold=body.threshold
         )
 
@@ -1143,23 +1160,14 @@ async def create_notification_setting(
             extra={
                 "event": "notification_setting_create",
                 "user_id": user_id,
-                "bank": body.bank,
-                "currency": body.currency,
-                "condition": body.condition,
+                "bank": body.bank.value,
+                "currency": body.currency.value,
+                "condition": body.condition.value,
                 "threshold": body.threshold
             }
         )
 
-        return schemas.NotificationSettingResponse(
-            id=setting.id,
-            bank=setting.bank,
-            currency=setting.currency,
-            condition=setting.condition,
-            threshold=setting.threshold,
-            enabled=setting.enabled,
-            triggered=setting.triggered,
-            created_at=setting.created_at.isoformat()
-        )
+        return build_notification_setting_response(setting)
 
     except Exception as e:
         logger.error("알림 설정 생성 실패", exc_info=True)
@@ -1169,6 +1177,7 @@ async def create_notification_setting(
 @app.get("/api/notification-settings", response_model=schemas.NotificationSettingsListResponse)
 async def get_notification_settings(
     request: Request,
+    currency: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -1176,25 +1185,20 @@ async def get_notification_settings(
 
     Headers:
         Authorization: Bearer <Firebase ID Token>
+
+    Query Parameters:
+        currency: 통화쌍 필터 (선택, 예: usd-krw)
     """
     user_id = await verify_firebase_token(request)
 
     settings = crud.get_notification_settings(db=db, user_id=user_id)
 
+    # currency 필터링 (선택)
+    if currency:
+        settings = [s for s in settings if s.currency == currency]
+
     return schemas.NotificationSettingsListResponse(
-        settings=[
-            schemas.NotificationSettingResponse(
-                id=s.id,
-                bank=s.bank,
-                currency=s.currency,
-                condition=s.condition,
-                threshold=s.threshold,
-                enabled=s.enabled,
-                triggered=s.triggered,
-                created_at=s.created_at.isoformat()
-            )
-            for s in settings
-        ],
+        settings=[build_notification_setting_response(s) for s in settings],
         total_count=len(settings)
     )
 
@@ -1207,10 +1211,15 @@ async def update_notification_setting(
     db: Session = Depends(get_db)
 ):
     """
-    알림 설정 수정
+    알림 설정 수정 (토글 포함)
 
     Headers:
         Authorization: Bearer <Firebase ID Token>
+
+    Body:
+        is_enabled: 활성화 여부 (선택)
+        condition: 조건 (선택, above/below)
+        threshold: 임계값 (선택)
     """
     user_id = await verify_firebase_token(request)
 
@@ -1219,12 +1228,15 @@ async def update_notification_setting(
     if not setting:
         raise HTTPException(status_code=404, detail="Setting not found")
 
+    # condition enum을 문자열로 변환 (None이면 None 유지)
+    condition_value = body.condition.value if body.condition else None
+
     updated = crud.update_notification_setting(
         db=db,
         setting_id=setting_id,
         user_id=user_id,
-        enabled=body.enabled,
-        condition=body.condition,
+        enabled=body.is_enabled,
+        condition=condition_value,
         threshold=body.threshold
     )
 
@@ -1233,16 +1245,7 @@ async def update_notification_setting(
         extra={"event": "notification_setting_update", "setting_id": setting_id}
     )
 
-    return schemas.NotificationSettingResponse(
-        id=updated.id,
-        bank=updated.bank,
-        currency=updated.currency,
-        condition=updated.condition,
-        threshold=updated.threshold,
-        enabled=updated.enabled,
-        triggered=updated.triggered,
-        created_at=updated.created_at.isoformat()
-    )
+    return build_notification_setting_response(updated)
 
 
 @app.delete("/api/notification-settings/{setting_id}", response_model=schemas.DeleteResponse)
@@ -1272,3 +1275,40 @@ async def delete_notification_setting(
     )
 
     return schemas.DeleteResponse(success=True, message="Setting deleted")
+
+
+@app.patch("/api/notification-settings/{setting_id}/reset", response_model=schemas.ResetResponse)
+async def reset_notification_setting(
+    request: Request,
+    setting_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    알림 설정 리셋 (triggered=false, triggered_at=null)
+
+    '다시 받기' 기능: 이미 발송된 알림을 재활성화
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+    """
+    user_id = await verify_firebase_token(request)
+
+    setting = crud.reset_notification_setting(
+        db=db,
+        setting_id=setting_id,
+        user_id=user_id
+    )
+
+    if not setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+
+    logger.info(
+        "🔄 알림 설정 리셋",
+        extra={"event": "notification_setting_reset", "setting_id": setting_id}
+    )
+
+    return schemas.ResetResponse(
+        success=True,
+        message="Setting reset successfully",
+        setting=build_notification_setting_response(setting)
+    )

@@ -2,10 +2,42 @@
 
 # 표준 라이브러리
 from datetime import datetime
+from enum import Enum
 from typing import Optional, List, Literal
 
 # 서드파티 라이브러리
 from pydantic import BaseModel, Field
+
+
+# ============================================================
+# Phase 2: Enums for validation
+# ============================================================
+
+class BankEnum(str, Enum):
+    """허용된 은행 코드"""
+    INVESTING = "investing"
+    KB = "kb"
+    HANA = "hana"
+    SHINHAN = "shinhan"
+    WOORI = "woori"
+    IBK = "ibk"
+    NH = "nh"
+    SC = "sc"
+    BS = "bs"
+    CITI = "citi"
+
+
+class CurrencyEnum(str, Enum):
+    """허용된 통화쌍"""
+    USD_KRW = "usd-krw"
+    JPY_KRW = "jpy-krw"
+    EUR_KRW = "eur-krw"
+
+
+class ConditionEnum(str, Enum):
+    """알림 조건"""
+    ABOVE = "above"  # 이상
+    BELOW = "below"  # 이하
 
 
 class BankExchangeRateResponse(BaseModel):
@@ -67,24 +99,25 @@ class RegisterDeviceResponse(BaseModel):
 
 class NotificationSettingRequest(BaseModel):
     """알림 설정 요청"""
-    bank: str = Field(..., min_length=1, description="은행 코드 (예: hana, kb)")
-    currency: str = Field(..., min_length=1, description="통화쌍 (예: usd-krw)")
-    condition: Literal["greater_than", "less_than"] = Field(
-        ..., description="조건 (greater_than: 이상, less_than: 이하)"
-    )
-    threshold: float = Field(..., gt=0, description="임계값")
+    bank: BankEnum = Field(..., description="은행 코드")
+    currency: CurrencyEnum = Field(..., description="통화쌍")
+    condition: ConditionEnum = Field(..., description="조건 (above: 이상, below: 이하)")
+    threshold: float = Field(..., gt=0, description="목표 환율")
 
 
 class NotificationSettingResponse(BaseModel):
     """알림 설정 응답"""
     id: int
+    user_id: str
     bank: str
     currency: str
-    condition: str
+    condition: str  # "above" or "below"
     threshold: float
-    enabled: bool
+    is_enabled: bool  # 활성화 여부
     triggered: bool
-    created_at: str
+    created_at: str  # ISO 8601
+    updated_at: Optional[str] = None  # ISO 8601
+    triggered_at: Optional[str] = None  # ISO 8601, 발송 시간
 
     class Config:
         from_attributes = True
@@ -97,9 +130,9 @@ class NotificationSettingsListResponse(BaseModel):
 
 
 class NotificationSettingUpdateRequest(BaseModel):
-    """알림 설정 수정 요청"""
-    enabled: Optional[bool] = None
-    condition: Optional[Literal["greater_than", "less_than"]] = None
+    """알림 설정 수정 요청 (토글 포함)"""
+    is_enabled: Optional[bool] = None  # 활성화 여부
+    condition: Optional[ConditionEnum] = None
     threshold: Optional[float] = Field(None, gt=0)
 
 
@@ -107,3 +140,10 @@ class DeleteResponse(BaseModel):
     """삭제 응답"""
     success: bool
     message: str
+
+
+class ResetResponse(BaseModel):
+    """리셋 응답"""
+    success: bool
+    message: str
+    setting: Optional[NotificationSettingResponse] = None
