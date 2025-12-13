@@ -532,7 +532,7 @@ def register_device(
     platform: str
 ) -> models.UserDevice:
     """
-    사용자 기기 등록 (FCM Device Token)
+    사용자 기기 등록 (FCM Device Token) - UPSERT 방식
 
     Args:
         db: 데이터베이스 세션
@@ -545,62 +545,50 @@ def register_device(
 
     Notes:
         - device_token은 전역 유니크 (한 토큰 = 한 사용자)
-        - 다른 user_id로 같은 토큰 등록 시 기존 것 삭제 후 재등록
-        - 토큰 탈취 방지: 로그인한 사용자가 토큰 소유권 가져감
-        - 단일 트랜잭션으로 원자성 보장
+        - UPSERT: 토큰 존재 시 user_id/platform/updated_at 갱신
+        - 다른 계정으로 로그인 시 자동으로 소유권 이전
     """
+    # SQLite UPSERT용 import
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     try:
-        transferred_from = None
-
-        # 1. 다른 사용자가 같은 토큰을 가지고 있는지 확인 (소유권 이전)
-        other_device = db.query(models.UserDevice).filter(
-            models.UserDevice.device_token == device_token,
-            models.UserDevice.user_id != user_id
-        ).first()
-
-        if other_device:
-            # 다른 사용자의 토큰 삭제 (새 사용자가 소유권 가져감)
-            transferred_from = other_device.user_id
-            db.delete(other_device)
-
-        # 2. 현재 사용자의 기존 디바이스 조회
+        # 소유권 이전 로깅용: 기존 소유자 확인
         existing = db.query(models.UserDevice).filter(
-            models.UserDevice.user_id == user_id,
             models.UserDevice.device_token == device_token
         ).first()
 
-        if existing:
-            # 기존 레코드 업데이트 (platform 변경 가능)
-            existing.platform = platform
-            existing.updated_at = models.get_kst_now()
-            db.commit()
-            db.refresh(existing)
+        transferred_from = None
+        if existing and existing.user_id != user_id:
+            transferred_from = existing.user_id
 
-            if transferred_from:
-                logger.warning(
-                    "토큰 소유권 이전",
-                    extra={
-                        "old_user": transferred_from[:8] + "...",
-                        "new_user": user_id[:8] + "...",
-                        "token": device_token[:20] + "..."
-                    }
-                )
-            logger.info(
-                "기기 토큰 업데이트",
-                extra={"user_id": user_id[:8] + "...", "platform": platform}
-            )
-            return existing
-
-        # 3. 새 디바이스 등록
-        device = models.UserDevice(
+        # UPSERT: INSERT OR UPDATE on device_token conflict
+        now = models.get_kst_now()
+        stmt = sqlite_insert(models.UserDevice).values(
             user_id=user_id,
             device_token=device_token,
-            platform=platform
+            platform=platform,
+            created_at=now,
+            updated_at=now
         )
-        db.add(device)
-        db.commit()
-        db.refresh(device)
 
+        stmt = stmt.on_conflict_do_update(
+            index_elements=['device_token'],
+            set_={
+                'user_id': user_id,
+                'platform': platform,
+                'updated_at': now
+            }
+        )
+
+        db.execute(stmt)
+        db.commit()
+
+        # 결과 조회
+        device = db.query(models.UserDevice).filter(
+            models.UserDevice.device_token == device_token
+        ).first()
+
+        # 로깅
         if transferred_from:
             logger.warning(
                 "토큰 소유권 이전",
@@ -610,10 +598,21 @@ def register_device(
                     "token": device_token[:20] + "..."
                 }
             )
-        logger.info(
-            "새 기기 등록",
-            extra={"user_id": user_id[:8] + "...", "platform": platform, "device_id": device.id}
-        )
+            logger.info(
+                "기기 토큰 업데이트 (소유권 이전)",
+                extra={"user_id": user_id[:8] + "...", "platform": platform}
+            )
+        elif existing:
+            logger.info(
+                "기기 토큰 업데이트",
+                extra={"user_id": user_id[:8] + "...", "platform": platform}
+            )
+        else:
+            logger.info(
+                "새 기기 등록",
+                extra={"user_id": user_id[:8] + "...", "platform": platform, "device_id": device.id}
+            )
+
         return device
 
     except Exception as e:
