@@ -17,6 +17,34 @@ from app import models
 # 로거 설정
 logger = logging.getLogger("exchange_rate.db")
 
+# 알림 메시지용 한글 매핑
+BANK_NAMES_KR = {
+    "investing": "인베스팅",
+    "kb": "국민은행",
+    "hana": "하나은행",
+    "shinhan": "신한은행",
+    "woori": "우리은행",
+    "ibk": "IBK기업은행",
+    "nh": "NH농협",
+    "sc": "SC제일은행",
+    "bs": "부산은행",
+    "citi": "씨티은행",
+}
+
+CURRENCY_NAMES_KR = {
+    "usd-krw": "달러",
+    "jpy-krw": "엔화",
+    "eur-krw": "유로",
+}
+
+
+def format_threshold(value: float) -> str:
+    """목표값 포맷: 소수점 이하 불필요한 0 제거 (1475.00 → 1475, 1475.50 → 1475.5)"""
+    formatted = f"{value:.2f}"
+    if '.' in formatted:
+        formatted = formatted.rstrip('0').rstrip('.')
+    return formatted
+
 
 def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
     """
@@ -1164,16 +1192,18 @@ def process_rate_alerts(
                 user_id = item["user_id"]
 
                 # 알림 메시지 생성
-                if bank == "investing":
-                    title = "📈 시장 환율 알림"
-                else:
-                    title = f"🏦 {bank.upper()} 환율 알림"
+                bank_kr = BANK_NAMES_KR.get(bank, bank.upper())
+                currency_kr = CURRENCY_NAMES_KR.get(currency, currency.upper())
+                icon = "📈" if setting.condition == "above" else "📉"
 
+                title = f"{icon}  {bank_kr}  {currency_kr}"
+
+                condition_arrow = "↑" if setting.condition == "above" else "↓"
                 condition_text = "이상" if setting.condition == "above" else "이하"
-                body = (
-                    f"{currency.upper()} {setting.threshold:,.2f}원 {condition_text} 도달\n"
-                    f"현재: {rate:,.2f}원"
-                )
+                threshold_str = format_threshold(setting.threshold)
+                rate_str = f"{rate:.2f}"
+
+                body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
 
                 # data payload (앱에서 처리용)
                 data = {
