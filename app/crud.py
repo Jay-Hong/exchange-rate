@@ -732,6 +732,8 @@ def create_notification_setting(
         # 기존 설정 활성화 및 triggered 초기화 (재알림 가능하도록)
         existing.enabled = True
         existing.triggered = False
+        existing.last_notified_at = None
+        existing.last_notified_rate = None
         existing.updated_at = models.get_kst_now()
         db.commit()
         db.refresh(existing)
@@ -860,9 +862,11 @@ def update_notification_setting(
             should_reset_triggered = True
         setting.threshold = threshold
 
-    # triggered 초기화 (재알림 가능)
+    # triggered 초기화 (재알림 가능) - last_notified_* 도 함께 초기화
     if should_reset_triggered:
         setting.triggered = False
+        setting.last_notified_at = None
+        setting.last_notified_rate = None
         logger.info(
             "알림 설정 재활성화 (조건 변경)",
             extra={"setting_id": setting_id, "triggered_reset": True}
