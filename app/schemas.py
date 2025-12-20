@@ -140,10 +140,3 @@ class DeleteResponse(BaseModel):
     """삭제 응답"""
     success: bool
     message: str
-
-
-class ResetResponse(BaseModel):
-    """리셋 응답"""
-    success: bool
-    message: str
-    setting: Optional[NotificationSettingResponse] = None

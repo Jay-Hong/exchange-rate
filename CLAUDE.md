@@ -328,14 +328,20 @@ scheduler.add_job(
 - `GET /api/banks/{pair}` - 모든 은행 특정 통화
 - `GET /health` - 헬스체크
 
-### 알림 API (예정)
+### 알림 API
 
 > 상세 스키마: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md#-개인화-알림-동작-흐름)
 
 - `POST /api/register-device` - FCM Device Token 등록 (Firebase ID Token 검증 필수)
-- `POST /api/notification-settings` - 알림 설정 저장/수정
+- `POST /api/notification-settings` - 알림 설정 생성
 - `GET /api/notification-settings` - 사용자 알림 설정 조회
+- `PUT /api/notification-settings/{id}` - 알림 설정 수정 (토글 ON/OFF)
 - `DELETE /api/notification-settings/{id}` - 알림 설정 삭제
+
+**1회성 알림 동작:**
+
+- 알림 발송 시 자동 비활성화 (`enabled=false, triggered=true`)
+- 사용자가 토글 ON (`PUT {is_enabled: true}`) → 자동 초기화 (`enabled=true, triggered=false`)
 
 ### 응답 형식
 

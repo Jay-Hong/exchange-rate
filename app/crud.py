@@ -1049,52 +1049,15 @@ def mark_setting_triggered(
 
     if setting:
         setting.triggered = True
+        setting.enabled = False  # 알림 발송 후 자동 비활성화 (1회성 알림)
         setting.last_notified_at = models.get_kst_now()
         setting.last_notified_rate = rate
         db.commit()
 
         logger.info(
-            "알림 설정 triggered 표시",
-            extra={"setting_id": setting_id, "rate": rate}
+            "알림 발송 완료 (자동 비활성화)",
+            extra={"setting_id": setting_id, "rate": rate, "enabled": False}
         )
-
-
-def reset_notification_setting(
-    db: Session,
-    setting_id: int,
-    user_id: str
-) -> Optional[models.NotificationSetting]:
-    """
-    알림 설정을 리셋 (triggered=false, last_notified_at=null)
-
-    사용자가 '다시 받기' 요청 시 호출.
-
-    Args:
-        db: 데이터베이스 세션
-        setting_id: NotificationSetting ID
-        user_id: Firebase Auth user_id (소유권 확인용)
-
-    Returns:
-        리셋된 NotificationSetting 객체, 없으면 None
-    """
-    setting = db.query(models.NotificationSetting).filter(
-        models.NotificationSetting.id == setting_id,
-        models.NotificationSetting.user_id == user_id
-    ).first()
-
-    if setting:
-        setting.triggered = False
-        setting.last_notified_at = None
-        setting.last_notified_rate = None
-        db.commit()
-        db.refresh(setting)
-
-        logger.info(
-            "🔄 알림 설정 리셋",
-            extra={"setting_id": setting_id, "user_id": user_id}
-        )
-
-    return setting
 
 
 def create_notification_log(
