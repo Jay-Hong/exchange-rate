@@ -1211,15 +1211,20 @@ async def update_notification_setting(
     db: Session = Depends(get_db)
 ):
     """
-    알림 설정 수정 (토글 포함)
+    알림 설정 수정 (PUT - 부분 업데이트 지원)
 
     Headers:
         Authorization: Bearer <Firebase ID Token>
 
-    Body:
-        is_enabled: 활성화 여부 (선택)
-        condition: 조건 (선택, above/below)
-        threshold: 임계값 (선택)
+    Body (모두 선택):
+        bank: 은행 코드 (BankEnum)
+        condition: 조건 (above/below)
+        threshold: 임계값
+        is_enabled: 활성화 여부 (토글)
+
+    Notes:
+        - bank, condition, threshold 중 실제로 값이 변경되면 triggered 초기화
+        - is_enabled: False→True 전환 시에도 triggered 초기화
     """
     user_id = await verify_firebase_token(request)
 
@@ -1228,16 +1233,18 @@ async def update_notification_setting(
     if not setting:
         raise HTTPException(status_code=404, detail="Setting not found")
 
-    # condition enum을 문자열로 변환 (None이면 None 유지)
+    # enum을 문자열로 변환 (None이면 None 유지)
+    bank_value = body.bank.value if body.bank else None
     condition_value = body.condition.value if body.condition else None
 
     updated = crud.update_notification_setting(
         db=db,
         setting_id=setting_id,
         user_id=user_id,
-        enabled=body.is_enabled,
+        bank=bank_value,
         condition=condition_value,
-        threshold=body.threshold
+        threshold=body.threshold,
+        enabled=body.is_enabled
     )
 
     logger.info(

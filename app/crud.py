@@ -846,49 +846,65 @@ def update_notification_setting(
     db: Session,
     setting_id: int,
     user_id: str,
-    enabled: Optional[bool] = None,
+    bank: Optional[str] = None,
     condition: Optional[str] = None,
-    threshold: Optional[float] = None
+    threshold: Optional[float] = None,
+    enabled: Optional[bool] = None
 ) -> Optional[models.NotificationSetting]:
     """
-    알림 설정 수정
+    알림 설정 수정 (PUT - 부분 업데이트)
 
     Args:
         db: 데이터베이스 세션
         setting_id: NotificationSetting ID
         user_id: Firebase Auth user_id (소유권 검증용)
-        enabled: 활성화 상태 (선택)
+        bank: 은행 코드 (선택)
         condition: 조건 (선택)
         threshold: 임계값 (선택)
+        enabled: 활성화 상태 (선택)
 
     Returns:
         수정된 NotificationSetting 객체 (없거나 권한 없으면 None)
+
+    Notes:
+        - bank, condition, threshold 중 실제로 값이 변경되면 triggered 초기화
+        - enabled: False→True 전환 시에도 triggered 초기화
+        - is_enabled는 기존 값 유지 (자동 활성화 안 함)
     """
     setting = get_notification_setting_by_id(db, setting_id, user_id)
     if not setting:
         return None
 
-    # 재알림 조건: 조건 변경 시 triggered 초기화 (재발송 가능)
+    # 재알림 조건: 실제 값이 변경될 때만 triggered 초기화
     should_reset_triggered = False
 
-    # 변경사항 적용
+    # bank 변경 감지 및 적용
+    if bank is not None:
+        if bank != setting.bank:
+            should_reset_triggered = True
+            logger.debug(f"bank 변경: {setting.bank} → {bank}")
+        setting.bank = bank
+
+    # condition 변경 감지 및 적용
+    if condition is not None:
+        if condition != setting.condition:
+            should_reset_triggered = True
+            logger.debug(f"condition 변경: {setting.condition} → {condition}")
+        setting.condition = condition
+
+    # threshold 변경 감지 및 적용
+    if threshold is not None:
+        if threshold != setting.threshold:
+            should_reset_triggered = True
+            logger.debug(f"threshold 변경: {setting.threshold} → {threshold}")
+        setting.threshold = threshold
+
+    # enabled 변경 (토글)
     if enabled is not None:
-        # enabled: False→True 전환 시 재알림 가능하도록
+        # False→True 전환 시 재알림 가능하도록
         if enabled and not setting.enabled:
             should_reset_triggered = True
         setting.enabled = enabled
-
-    if condition is not None:
-        # condition 변경 시 재알림
-        if condition != setting.condition:
-            should_reset_triggered = True
-        setting.condition = condition
-
-    if threshold is not None:
-        # threshold 변경 시 재알림
-        if threshold != setting.threshold:
-            should_reset_triggered = True
-        setting.threshold = threshold
 
     # triggered 초기화 (재알림 가능) - last_notified_* 도 함께 초기화
     if should_reset_triggered:
@@ -908,9 +924,10 @@ def update_notification_setting(
         "알림 설정 수정",
         extra={
             "setting_id": setting_id,
-            "enabled": setting.enabled,
+            "bank": setting.bank,
             "condition": setting.condition,
             "threshold": setting.threshold,
+            "enabled": setting.enabled,
             "triggered": setting.triggered
         }
     )

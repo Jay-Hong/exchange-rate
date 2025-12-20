@@ -130,10 +130,11 @@ class NotificationSettingsListResponse(BaseModel):
 
 
 class NotificationSettingUpdateRequest(BaseModel):
-    """알림 설정 수정 요청 (토글 포함)"""
-    is_enabled: Optional[bool] = None  # 활성화 여부
-    condition: Optional[ConditionEnum] = None
-    threshold: Optional[float] = Field(None, gt=0)
+    """알림 설정 수정 요청 (PUT - 부분 업데이트 지원)"""
+    bank: Optional[BankEnum] = None  # 은행 변경
+    condition: Optional[ConditionEnum] = None  # 조건 변경
+    threshold: Optional[float] = Field(None, gt=0)  # 임계값 변경
+    is_enabled: Optional[bool] = None  # 활성화 여부 (토글)
 
 
 class DeleteResponse(BaseModel):
