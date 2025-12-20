@@ -127,12 +127,12 @@ updated_at    DATETIME (KST)
 -- 크롤러 활성화/비활성화 설정 (관리자 페이지에서 제어)
 ```
 
-### 알림 관련 테이블 (서비스 환경, 예정)
+### 알림 관련 테이블 (Phase 2, 구현 완료)
 
 > 상세 스키마: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md#필요한-db-테이블-rds-postgresql)
 
 - `user_devices` - FCM Device Token 저장 (user_id, device_token, platform)
-- `notification_settings` - 알림 조건 설정 (bank, currency, condition, threshold)
+- `notification_settings` - 알림 조건 설정 (bank, currency, condition, threshold, enabled, triggered)
 - `notification_logs` - 알림 발송 히스토리 (중복 방지)
 
 ## 데이터 관리 정책
@@ -538,7 +538,8 @@ exchange-rate/
 │   │
 │   └── notifications/       # 알림 도메인 (2025-10-25 리팩토링)
 │       ├── __init__.py
-│       └── telegram.py      # 텔레그램 알림 (Phase 2용)
+│       ├── fcm.py           # Firebase Cloud Messaging 푸시 알림 (Phase 2)
+│       └── telegram.py      # 텔레그램 알림 (관리자 알림용)
 │
 ├── data/
 │   └── exchange_rates.db    # SQLite DB
@@ -694,10 +695,45 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - `app/cache.py`: Circuit Breaker 기반 Redis 클라이언트
 - `templates/admin.html`: Redis 모니터링 카드 추가
 
-### Phase 2-3: 고급 기능 (사용자 500명+)
-- 크롤러 제어 (재시작, 주기 조정)
+### Phase 1.8: 크롤러 제어 ✅ 완료 (2025-12-02)
+
+**배경**: 특정 크롤러의 일시적 비활성화 필요 (은행 사이트 점검, 차단 대응)
+
+**추가된 기능**:
+- **크롤러 활성화/비활성화**: 관리자 페이지에서 개별 크롤러 토글
+- **crawler_config 테이블**: 크롤러별 enabled 상태 저장
+- **실시간 반영**: 토글 즉시 스케줄러에 반영
+
+**관련 스키마**: `crawler_config` 테이블 (CLAUDE.md 데이터베이스 스키마 참조)
+
+### Phase 2: FCM 푸시 알림 ✅ 완료 (2025-12-21)
+
+**배경**: 앱 종료 상태에서도 환율 알림 필요 ([ADR-003](DECISIONS.md#adr-003-알림-시스템---websocket-vs-push-notification))
+
+**추가된 기능**:
+- **Firebase Auth 연동**: ID Token 검증으로 사용자 인증
+- **FCM Device Token 관리**: 디바이스별 푸시 토큰 저장
+- **알림 설정 API**: 목표 환율 도달 시 푸시 알림 발송
+- **1회성 알림**: 발송 후 자동 비활성화, 토글 ON으로 재활성화
+
+**알림 API**:
+- `POST /api/register-device` - FCM Device Token 등록
+- `POST /api/notification-settings` - 알림 설정 생성
+- `GET /api/notification-settings` - 알림 설정 조회
+- `PUT /api/notification-settings/{id}` - 알림 설정 수정/토글
+- `DELETE /api/notification-settings/{id}` - 알림 설정 삭제
+
+**핵심 파일**:
+- `app/notifications/fcm.py`: Firebase Admin SDK 초기화, 푸시 발송
+- `app/crud.py`: 알림 설정 CRUD (mark_setting_triggered 등)
+- `app/main.py`: 알림 API 엔드포인트
+
+**상세 가이드**: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md)
+
+### Phase 3: 고급 기능 (사용자 500명+, 예정)
 - 통계 & 분석 (Chart.js, 성공률 그래프)
-- 실시간 알림, 환율 이상치 감지 (ML)
+- 환율 이상치 감지 (ML)
+- 다중 알림 조건 지원
 
 
 ## 문서 관리 가이드라인
@@ -747,5 +783,5 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 - ✅ 구조화된 로깅, 관리자 페이지, 도메인 기반 구조
 - ✅ Redis 브로드캐스트 캐시, 변경 감지 시스템 (Phase 1.7)
-- 📋 알림 시스템 고도화 ([ADR-003](DECISIONS.md#adr-003-알림-시스템---websocket-vs-push-notification))
-- 🔜 비동기 크롤링, Docker, 모니터링, CI/CD, 유닛 테스트
+- ✅ FCM 푸시 알림, Firebase Auth 연동 (Phase 2)
+- 🔜 CI/CD, 유닛 테스트, PostgreSQL 전환 (서비스 런칭 시)
