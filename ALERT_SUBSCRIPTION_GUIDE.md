@@ -396,7 +396,7 @@ docker compose up -d --build
     Body: {
         "bank": "hana",
         "currency": "usd-krw",
-        "condition": "greater_than",
+        "condition": "above",
         "threshold": 1475.0
     }
     ↓
@@ -404,9 +404,9 @@ docker compose up -d --build
     ↓
 [RDS PostgreSQL에 저장]
     Table: notification_settings
-    | user_id | bank | currency | condition     | threshold |
-    |---------|------|----------|---------------|-----------|
-    | abc123  | hana | usd-krw  | greater_than  | 1475.0    |
+    | user_id | bank | currency | condition | threshold | enabled | triggered |
+    |---------|------|----------|-----------|-----------|---------|-----------|
+    | abc123  | hana | usd-krw  | above     | 1475.0    | true    | false     |
 ```
 
 **보안 핵심:** 클라이언트는 user_id를 보내지 않음. 서버가 ID Token에서 직접 추출.
@@ -454,7 +454,7 @@ CREATE TABLE notification_settings (
     user_id TEXT NOT NULL,
     bank TEXT NOT NULL,               -- 'hana', 'kb', etc.
     currency TEXT NOT NULL,           -- 'usd-krw', etc.
-    condition TEXT NOT NULL,          -- 'greater_than', 'less_than'
+    condition TEXT NOT NULL,          -- 'above', 'below'
     threshold REAL NOT NULL,          -- 1475.0
     enabled BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT NOW()
@@ -850,7 +850,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 - [x] Capabilities 설정 (Push Notifications, Sign in with Apple)
 - [x] Firebase Auth SDK 통합 (Google + Apple 로그인) - `AuthService.swift`
 - [x] FCM SDK 통합 (Device Token 등록) - `PushNotificationService.swift`
-- [ ] 로그인 UI 구현
+- [x] 로그인 UI 구현
 
 **서버 작업:**
 
@@ -1017,7 +1017,7 @@ class NotificationSetting(Base):
     user_id = Column(String, nullable=False)
     bank = Column(String, nullable=False)
     currency = Column(String, nullable=False)
-    condition = Column(String, nullable=False)  # 'greater_than', 'less_than'
+    condition = Column(String, nullable=False)  # 'above', 'below'
     threshold = Column(Float, nullable=False)
     enabled = Column(Boolean, default=True)
 
@@ -1028,28 +1028,35 @@ class NotificationSetting(Base):
 ```
 
 ```python
-# 알림 로직
+# 알림 로직 (1회성 알림)
 async def check_and_notify(bank: str, currency: str, new_rate: float):
     settings = await get_notification_settings(bank, currency)
 
     for s in settings:
+        # enabled=False 또는 triggered=True면 스킵
+        if not s.enabled or s.triggered:
+            continue
+
         condition_met = (
-            (s.condition == 'greater_than' and new_rate >= s.threshold) or
-            (s.condition == 'less_than' and new_rate <= s.threshold)
+            (s.condition == 'above' and new_rate >= s.threshold) or
+            (s.condition == 'below' and new_rate <= s.threshold)
         )
 
-        if condition_met and not s.triggered:
+        if condition_met:
             # 알림 발송
             await send_fcm_notification(s.user_id, bank, currency, new_rate)
+            # 1회성 알림: 자동 비활성화
             s.triggered = True
+            s.enabled = False  # ← 핵심: 발송 후 자동 비활성화
             s.last_notified_at = datetime.now()
             s.last_notified_rate = new_rate
-        elif not condition_met:
-            # 조건 미충족 시 리셋 (다음 충족 시 다시 알림)
-            s.triggered = False
-
-        await db.commit()
+            await db.commit()
 ```
+
+**1회성 알림 동작:**
+- 알림 발송 시: `triggered=True`, `enabled=False` (자동 비활성화)
+- 재알림 받으려면: 사용자가 토글 ON (`PUT /api/notification-settings/{id}` with `is_enabled: true`)
+- 토글 ON 시: `triggered=False`, `enabled=True`로 초기화
 
 > **확장 계획**: 다중 조건/프리미엄 기능 추가 시 `triggered` 플래그를 별도 테이블 (`notification_states`)로 분리하거나, `notification_logs` 기반 멱등성으로 전환 검토
 
@@ -1300,6 +1307,6 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ---
 
-**마지막 업데이트**: 2025-12-11
+**마지막 업데이트**: 2025-12-21
 **결정 완료**: AWS RDS PostgreSQL + Firebase Auth + FCM
-**문서 개선**: Phase 2 상세 가이드 추가 (Apple Developer/Firebase Console 설정 절차)
+**최근 변경**: 1회성 알림 동작 반영 (발송 후 자동 비활성화, 토글 ON으로 재활성화)
