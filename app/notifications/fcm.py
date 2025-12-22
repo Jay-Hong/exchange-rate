@@ -66,17 +66,37 @@ async def send_fcm_notification(
     max_retries: int = 2
 ) -> tuple[bool, Optional[str]]:
     """
-    FCM 푸시 알림 전송 (재시도 정책 포함)
+    단일 기기에 FCM 푸시 알림 전송 (재시도 정책 포함)
+
+    현재 미사용. 향후 다음 용도로 사용 예정:
+    - 개별 사용자 알림 (계정 관련, 구독 만료 D-3 등)
+    - 관리자가 특정 사용자에게 1:1 메시지 발송
+    - FastAPI async 엔드포인트에서 직접 호출
+
+    사용 예시:
+        @app.post("/api/admin/notify-user/{user_id}")
+        async def notify_user(user_id: str):
+            token = get_user_fcm_token(user_id)
+            success, error = await send_fcm_notification(
+                token=token,
+                title="구독 알림",
+                body="프리미엄 구독이 3일 후 만료됩니다.",
+                data={"type": "subscription_expiry"}
+            )
+            if error in ['UNREGISTERED', 'INVALID_ARGUMENT']:
+                delete_invalid_token(user_id)
+            return {"success": success}
 
     Args:
-        token: FCM Device Token
+        token: FCM Device Token (단일)
         title: 알림 제목
         body: 알림 내용
         data: 추가 데이터 (선택)
-        max_retries: 최대 재시도 횟수
+        max_retries: 최대 재시도 횟수 (서버 오류 시)
 
     Returns:
         (성공 여부, 에러 코드 또는 None)
+        에러 코드: UNREGISTERED, INVALID_ARGUMENT, NOT_FOUND (무효 토큰)
     """
     if not _firebase_initialized:
         if not init_firebase():
@@ -98,7 +118,6 @@ async def send_fcm_notification(
                         body=body,
                     ),
                     sound="default",
-                    badge=1,
                 )
             )
         ),
@@ -199,10 +218,36 @@ async def send_fcm_multicast(
     data: Optional[dict] = None
 ) -> dict:
     """
-    여러 기기에 FCM 알림 일괄 전송
+    여러 기기에 FCM 알림 일괄 전송 (async 버전)
+
+    현재 미사용. 향후 다음 용도로 사용 예정:
+    - 관리자 공지 발송 (앱 업데이트, 이벤트 안내)
+    - FastAPI async 엔드포인트에서 다수 사용자에게 알림
+    - Firebase Console 대신 API로 공지 발송 시
+
+    Note:
+        Firebase API 제한으로 1회 호출당 최대 500개 토큰만 허용.
+        500명 초과 시 배치 처리 필요:
+            for i in range(0, len(all_tokens), 500):
+                await send_fcm_multicast(all_tokens[i:i+500], ...)
+
+    사용 예시:
+        @app.post("/api/admin/broadcast")
+        async def broadcast(title: str, body: str):
+            tokens = get_all_active_tokens()  # DB에서 조회
+            result = await send_fcm_multicast(
+                tokens=tokens[:500],  # 최대 500개
+                title=title,
+                body=body,
+                data={"type": "announcement"}
+            )
+            # 무효 토큰 정리
+            if result["failed_tokens"]:
+                delete_invalid_tokens(result["failed_tokens"])
+            return result
 
     Args:
-        tokens: FCM Device Token 목록 (최대 500개)
+        tokens: FCM Device Token 목록 (Firebase API 제한: 최대 500개)
         title: 알림 제목
         body: 알림 내용
         data: 추가 데이터 (선택)
@@ -211,7 +256,7 @@ async def send_fcm_multicast(
         {
             "success_count": int,
             "failure_count": int,
-            "failed_tokens": list[str]  # 무효 토큰 목록
+            "failed_tokens": list[str]  # 무효 토큰 목록 (삭제 대상)
         }
     """
     if not _firebase_initialized:
@@ -311,13 +356,18 @@ def send_fcm_multicast_sync(
     data: Optional[dict] = None
 ) -> dict:
     """
-    여러 기기에 FCM 알림 일괄 전송 (동기 버전)
+    여러 기기에 FCM 알림 일괄 전송 (동기 버전) - 현재 사용 중
 
-    크롤러의 환율 저장 함수에서 호출되므로 동기로 실행.
-    Firebase Admin SDK의 messaging.send_each_for_multicast()는 원래 동기 함수.
+    환율 변동 알림에 사용. 크롤러(동기 함수)에서 호출되므로 동기로 실행.
+    crud.py의 process_rate_alerts()에서 호출됨.
+
+    Note:
+        Firebase API 제한으로 1회 호출당 최대 500개 토큰만 허용.
+        현재 서비스 규모(200-500명)에서는 문제없음.
+        500명 초과 시 crud.py에서 배치 처리 구현 필요.
 
     Args:
-        tokens: FCM Device Token 목록 (최대 500개)
+        tokens: FCM Device Token 목록 (Firebase API 제한: 최대 500개)
         title: 알림 제목
         body: 알림 내용
         data: 추가 데이터 (선택)
