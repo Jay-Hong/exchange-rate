@@ -1141,14 +1141,14 @@ def process_rate_alerts(
         발송된 알림 수
     """
     # 순환 참조 방지를 위해 함수 내부에서 import
-    from app.notifications.fcm import send_fcm_multicast_sync, is_firebase_initialized
+    from app.notifications.fcm import send_fcm_multicast_sync, init_firebase
 
     if not changed_rates:
         return 0
 
-    # Firebase 초기화 안 됐으면 스킵
-    if not is_firebase_initialized():
-        logger.debug("Firebase 미초기화 - 알림 스킵")
+    # Firebase 초기화 시도 (subprocess에서도 초기화 필요)
+    if not init_firebase():
+        logger.debug("Firebase 초기화 실패 - 알림 스킵")
         return 0
 
     sent_count = 0
