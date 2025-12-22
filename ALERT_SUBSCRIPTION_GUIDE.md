@@ -859,8 +859,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 - [x] /api/register-device API 구현 (토큰 소유권 이전 로직 포함)
 - [x] /api/notification-settings API 구현 (중복 방지, triggered 재설정)
 - [x] CRUD 변화 감지 → FCM 전송 로직 구현
-- [ ] 알림 품질 게이트 통과 ([상세](#-알림-품질-게이트))
-- [ ] Alembic 마이그레이션 스크립트 준비 (PostgreSQL용)
+- [x] 알림 품질 게이트 통과 ([상세](#-알림-품질-게이트))
 
 #### Phase 3: Revenue Cat
 
@@ -876,7 +875,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 - [ ] EC2 t2.micro → t3.small 업그레이드
 - [ ] RDS PostgreSQL 인스턴스 생성 (db.t4g.micro)
 - [ ] VPC 설정 (EC2와 같은 네트워크)
-- [ ] Alembic 마이그레이션 실행 (빈 스키마)
+- [ ] Alembic 마이그레이션 스크립트 준비 및 실행 (빈 스키마)
 - [ ] DATABASE_URL 환경변수 변경
 - [ ] 내부 테스터 앱 재설치 공지 발송 ([템플릿](#-데이터-드롭-절차))
 - [ ] 통합 E2E 테스트 통과
