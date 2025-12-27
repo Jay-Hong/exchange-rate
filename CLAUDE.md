@@ -11,6 +11,7 @@
 > 🕷️ **크롤러 구현:** [CRAWLERS.md](CRAWLERS.md) - 각 은행별 크롤링 방식과 특수 로직
 > 📝 **변경 이력:** [CHANGELOG.md](CHANGELOG.md) - 버전별 변경사항 및 마이그레이션 가이드
 > 🔔 **알림 & 구독:** [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md) - 푸시 알림, 인증, 구독 관리 가이드
+> 💳 **RevenueCat 서버 사이드:** [REVENUECAT_SERVER_SIDE.md](REVENUECAT_SERVER_SIDE.md) - 구독 검증, Webhook, 캐시 정책
 
 **배포 및 운영:**
 > 🐳 **Docker 아키텍처:** [DOCKER.md](DOCKER.md) - Docker Compose 구조 및 확장 전략

@@ -26,6 +26,8 @@ from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
 from app.notifications.fcm import init_firebase, is_firebase_initialized
+from app.subscription import verify_premium
+from app.webhooks import router as webhooks_router
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.main")
@@ -279,6 +281,9 @@ app = FastAPI(lifespan=lifespan)
 
 # 정적 파일 서비스 (은행 아이콘 이미지)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Webhook 라우터
+app.include_router(webhooks_router)
 
 # Dependency (DB 세션 연결)
 def get_db():
@@ -1145,6 +1150,12 @@ async def create_notification_setting(
     """
     user_id = await verify_firebase_token(request)
 
+    if not await verify_premium(user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Premium subscription required"
+        )
+
     try:
         setting = crud.create_notification_setting(
             db=db,
@@ -1191,6 +1202,9 @@ async def get_notification_settings(
     """
     user_id = await verify_firebase_token(request)
 
+    if not await verify_premium(user_id):
+        return schemas.NotificationSettingsListResponse(settings=[], total_count=0)
+
     settings = crud.get_notification_settings(db=db, user_id=user_id)
 
     # currency 필터링 (선택)
@@ -1227,6 +1241,12 @@ async def update_notification_setting(
         - is_enabled: False→True 전환 시에도 triggered 초기화
     """
     user_id = await verify_firebase_token(request)
+
+    if not await verify_premium(user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Premium subscription required"
+        )
 
     setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
 
@@ -1268,6 +1288,12 @@ async def delete_notification_setting(
         Authorization: Bearer <Firebase ID Token>
     """
     user_id = await verify_firebase_token(request)
+
+    if not await verify_premium(user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Premium subscription required"
+        )
 
     setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
 

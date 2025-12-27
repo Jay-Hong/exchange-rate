@@ -47,3 +47,7 @@ FIREBASE_CREDENTIALS_PATH = os.getenv(
     "FIREBASE_CREDENTIALS_PATH",
     str(BASE_DIR / "firebase-service-account.json")
 )
+
+# RevenueCat 설정 (Phase 3 - 서버 사이드 구독 검증)
+REVENUECAT_API_KEY = os.getenv("REVENUECAT_API_KEY", "")
+REVENUECAT_WEBHOOK_AUTH_KEY = os.getenv("REVENUECAT_WEBHOOK_AUTH_KEY", "")

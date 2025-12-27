@@ -2,7 +2,7 @@
 
 > **목적**: 환율 알림 서비스와 크로스 플랫폼 구독 관리 구현을 위한 기술 선택지 비교
 > **작성일**: 2025-12-03
-> **상태**: ✅ **결정됨** (2025-12-05)
+> **상태**: ✅ **결정됨** (Phase 2: 2025-12-05, Phase 3: 2025-12-23)
 
 ---
 
@@ -10,41 +10,49 @@
 
 1. [결정된 아키텍처](#-결정된-아키텍처)
 2. [구현 로드맵](#️-구현-로드맵)
-3. [개인화 알림 동작 흐름](#-개인화-알림-동작-흐름)
-4. [환율 알림 서비스 구현 방법](#1-환율-알림-서비스-구현-방법)
-5. [크로스 플랫폼 구독 관리 방법](#2-크로스-플랫폼-구독-관리-방법)
-6. [비용 비교 시나리오](#3-비용-비교-시나리오)
-7. [구현 난이도 및 기간](#4-구현-난이도-및-기간)
-8. [다음 단계](#5-다음-단계)
+3. [Phase 3 상세 계획: 구독 시스템](#-phase-3-상세-계획-구독-시스템-구현)
+4. [개인화 알림 동작 흐름](#-개인화-알림-동작-흐름)
+5. [환율 알림 서비스 구현 방법](#1-환율-알림-서비스-구현-방법)
+6. [크로스 플랫폼 구독 관리 방법](#2-크로스-플랫폼-구독-관리-방법)
+7. [비용 비교 시나리오](#3-비용-비교-시나리오)
+8. [구현 난이도 및 기간](#4-구현-난이도-및-기간)
+9. [다음 단계](#5-다음-단계)
 
 ---
 
 ## 🎯 결정된 아키텍처
 
-### 최종 선택: AWS RDS PostgreSQL + Firebase Auth + FCM
+### 최종 선택: AWS RDS PostgreSQL + Firebase Auth + FCM + RevenueCat
 
 ```text
 ┌─────────────────────────────────────────────────────┐
 │ AWS Cloud (서울 리전)                                │
-│                                                      │
+│                                                     │
 │  ┌──────────────────────────────────────────────┐  │
-│  │ VPC (같은 네트워크, 지연 1-3ms)                │  │
-│  │                                               │  │
-│  │  ┌─────────────────┐    ┌─────────────────┐ │  │
-│  │  │ EC2 t3.small    │←→ │ RDS PostgreSQL  │ │  │
-│  │  │                  │    │ db.t4g.micro    │ │  │
+│  │ VPC (같은 네트워크, 지연 1-3ms)                 │  │
+│  │                                              │  │
+│  │  ┌─────────────────┐    ┌──────────────────┐ │  │
+│  │  │ EC2 t3.small    │ ←→ │ RDS PostgreSQL   │ │  │
+│  │  │                 │    │ db.t4g.micro     │ │  │
 │  │  │ ├── FastAPI     │    │                  │ │  │
-│  │  │ ├── 크롤러 (10개)│    │ ├── 환율 데이터  │ │  │
+│  │  │ ├── 크롤러 (10개)│    │ ├── 환율 데이터   │ │  │
 │  │  │ ├── WebSocket   │    │ ├── user_devices │ │  │
 │  │  │ └── Redis       │    │ └── notifications│ │  │
-│  │  └─────────────────┘    └─────────────────┘ │  │
+│  │  └─────────────────┘    └──────────────────┘ │  │
 │  └──────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
               ↓↑ (외부 서비스)
 ┌─────────────────────────────────────────────────────┐
-│ Firebase (Google Cloud)                              │
+│ Firebase (Google Cloud)                             │
 │ ├── Firebase Auth (로그인) - 무료 50k MAU           │
-│ └── FCM (푸시 알림) - 무료 무제한                    │
+│ └── FCM (푸시 알림) - 무료 무제한                   │
+└─────────────────────────────────────────────────────┘
+              ↓↑ (구독 관리)
+┌─────────────────────────────────────────────────────┐
+│ RevenueCat                                          │
+│ ├── iOS/Android 구독 통합 관리                      │
+│ ├── 영수증 검증 + 크로스플랫폼 동기화               │
+│ └── 무료 $2,500 MTR까지                            │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -55,6 +63,7 @@
 | **DB** | AWS RDS PostgreSQL | 프리티어 12개월, 같은 VPC 지연 1-3ms |
 | **Auth** | Firebase Auth | FCM과 자연스러운 통합, 무료 |
 | **Push** | Firebase FCM | 무료 무제한, iOS/Android 통합 |
+| **구독** | RevenueCat | 영수증 검증 자동화, 크로스플랫폼 동기화 |
 | **인스턴스** | db.t4g.micro | ARM64, 20% 저렴 (~$15/월) |
 
 ### 비용 요약
@@ -166,18 +175,1293 @@
 
 ---
 
-### Phase 3: Revenue Cat 통합
+### Phase 3: RevenueCat 통합
 
 **목표**: 구독 결제 시스템 구축
 
 | 작업 | 설명 |
 |------|------|
-| Revenue Cat 계정 생성 | 앱 등록, 상품 설정 |
+| RevenueCat 계정 생성 | 앱 등록, 상품 설정 |
 | iOS SDK 통합 | 구독 구매 플로우 |
 | 유료 기능 설계 | 프리미엄 알림 (다중 조건, 빈도 등) |
-| Firebase ↔ Revenue Cat 연동 | uid 기반 사용자 식별 |
+| Firebase ↔ RevenueCat 연동 | uid 기반 사용자 식별 |
 
 **비용**: $2,500 MTR까지 무료
+
+---
+
+## 💳 Phase 3 상세 계획: 구독 시스템 구현
+
+> **결정일**: 2025-12-23
+> **상태**: ✅ Phase 3 구현 완료
+> **설정 완료일**: 2025-12-25
+> **iOS 구현 완료**: 2025-12-27
+> **서버 구현 완료**: 2025-12-27
+
+### 1. 가격 구조 (확정)
+
+| 플랜 | 가격 | 무료 체험 | 전략적 의도 |
+|------|------|----------|-------------|
+| **월간** | 12,000원 | ❌ 없음 | 확신 있는 사용자, 즉시 결제 |
+| **연간** | 99,000원 (월 8,250원) | ✅ 7일 | 체험 후 결정, 31% 할인 |
+
+> **⚠️ 7일 무료 체험 자격 제한 (Apple Introductory Offers)**:
+> - 구독 그룹당 **1회만** 제공 (이전 구독자, 해지 후 재가입 시 제외)
+> - 가족 공유 멤버 중 이미 체험한 사람이 있으면 제외될 수 있음
+> - 자격 여부는 `Package.storeProduct.introductoryDiscount`로 확인
+
+**가격 결정 근거:**
+
+1. **카카오톡 환율 알림 서비스 벤치마크**: 월 10,000원에 100~200명 유료 사용자 운영 중
+2. **FXi 기능 우위**: 9개 은행 + 3개 통화, 실시간 비교 UI, 24시간 그래프, 맞춤 알림
+3. **경쟁 없음**: 앱스토어에 유사한 실시간 환율 비교 앱 부재 (블루오션)
+4. **타깃 사용자**: 환전 투자자 - 가치 느끼면 "싸다"고 인식
+
+**구조의 전략적 의도:**
+
+```
+사용자 A (확신 있음, 급함)
+→ "체험 필요 없어, 바로 쓸래" → 월간 12,000원
+
+사용자 B (가치 확인 필요)
+→ "써봐야 알겠어" → 연간 7일 체험 → 해지 안 함 → 99,000원 (자동 결제)
+
+사용자 C (가격 민감)
+→ "월간은 체험도 없고..." → 연간 선택 → 월 8,250원으로 더 저렴
+
+결과: 대부분 연간으로 유도 → 안정적 수익
+```
+
+**예상 구독 비율:**
+
+| 시나리오 | 월간 | 연간 |
+|----------|------|------|
+| 보수적 | 30% | 70% |
+| 예상 | 20% | 80% |
+| 낙관적 | 10% | 90% |
+
+### 2. 매출 시뮬레이션
+
+**초기 목표**: 100~200명 유료 구독자
+
+| 구독자 수 | 월간 20% | 연간 80% | 월 매출 | 연 매출 |
+|-----------|----------|----------|---------|---------|
+| 100명 | 20명 × 12,000 | 80명 × 8,250 | 약 90만원 | 약 1,080만원 |
+| 150명 | 30명 × 12,000 | 120명 × 8,250 | 약 135만원 | 약 1,620만원 |
+| 200명 | 40명 × 12,000 | 160명 × 8,250 | 약 180만원 | 약 2,160만원 |
+
+> **참고**: 연간 구독은 월 환산 금액(8,250원)으로 계산. 실제로는 99,000원 일시불 결제.
+
+### 3. App Store Connect 상품 설정
+
+#### 3.1 구독 그룹 생성
+
+```
+App Store Connect → 앱 → 구독 → 구독 그룹 생성
+
+그룹 이름: "FXi Premium"
+참조 이름: fxi_premium_group
+```
+
+#### 3.2 구독 상품 등록
+
+**월간 구독 (무료 체험 없음):**
+
+| 항목 | 값 |
+|------|------|
+| 참조 이름 | FXi Premium Monthly |
+| 제품 ID | `fxi_premium_monthly` |
+| 구독 기간 | 1개월 |
+| 가격 | ₩12,000 (App Store Connect에서 해당 가격대 선택) |
+| 프로모션 오퍼 | 없음 |
+| Introductory Offer | **없음** |
+
+**연간 구독 (7일 무료 체험):**
+
+| 항목 | 값 |
+|------|------|
+| 참조 이름 | FXi Premium Yearly |
+| 제품 ID | `fxi_premium_yearly` |
+| 구독 기간 | 1년 |
+| 가격 | ₩99,000 (App Store Connect에서 해당 가격대 선택) |
+| Introductory Offer | **Free Trial, 7일** |
+
+> **참고**: App Store Connect의 가격 Tier는 지역별/시기별로 변경될 수 있습니다. 정확한 가격은 App Store Connect에서 직접 확인하세요.
+
+#### 3.3 Introductory Offer 설정 (연간만)
+
+```
+구독 상품 → Introductory Offers → Add Introductory Offer
+
+Type: Free Trial
+Duration: 7 days
+```
+
+> **iOS 동작**: 무료 체험 종료 24시간 전까지 해지하지 않으면 자동 결제
+
+### 4. RevenueCat 설정 ✅ 완료
+
+#### 4.0 설정된 값 요약 (2025-12-25)
+
+```
+App Store Connect
+├── 앱 이름: 환율아이 - 환율 비교 및 환율 알림
+├── Bundle ID: com.Jay.FXi
+├── SKU: FXi
+├── Apple ID: 6756925102
+├── Products: fxi_premium_monthly (₩12,000), fxi_premium_yearly (₩99,000 + 7일 체험)
+└── S2S Notification: RevenueCat URL 설정 완료
+
+RevenueCat
+├── Public API Key: appl_vCSLuclmGEWwPxjNAsiYIkJWrGH
+├── App ID: appee70d03c62
+├── Entitlement: premium (entlf9414cb78d)
+├── Offering: default (ofrngee045641c8)
+├── In-App Purchase Key: SubscriptionKey_3BB353KJ2L.p8
+└── Products:
+    ├── fxi_premium_monthly (prodb09e9930b3)
+    └── fxi_premium_yearly (prodff25b87b75)
+```
+
+#### 4.1 계정 및 프로젝트 생성 ✅
+
+1. https://app.revenuecat.com/signup 에서 계정 생성
+2. 새 프로젝트 생성: "FXi" (또는 "환율아이")
+3. iOS 앱 추가:
+   - Bundle ID: `com.Jay.FXi`
+   - In-App Purchase Key (.p8 파일) 업로드
+
+#### 4.2 Products 등록 ✅
+
+RevenueCat → Products → New Product
+
+| Identifier | Store | Product ID |
+|------------|-------|------------|
+| `fxi_premium_monthly` | App Store | `fxi_premium_monthly` |
+| `fxi_premium_yearly` | App Store | `fxi_premium_yearly` |
+
+#### 4.3 Entitlements 생성 ✅
+
+```
+RevenueCat → Entitlements → New Entitlement
+
+Identifier: premium
+Display Name: 프리미엄 구독 권한
+Associated Products: fxi_premium_monthly, fxi_premium_yearly
+```
+
+#### 4.4 Offerings 설정 ✅
+
+```
+RevenueCat → Offerings → default
+
+Packages:
+├── $rc_monthly → fxi_premium_monthly (월간 구독)
+└── $rc_annual → fxi_premium_yearly (연간 구독)
+```
+
+### 5. iOS SDK 연동 ✅ 완료
+
+> **iOS 최소 버전**: iOS 17.0 (StoreKit 2 완전 지원)
+> **구현 완료**: 2025-12-27 (상세: `~/Downloads/Projects/FXi/ios/CLAUDE.md`)
+
+#### 5.1 SDK 설치 (Swift Package Manager)
+
+```
+Xcode → File → Add Package Dependencies
+URL: https://github.com/RevenueCat/purchases-ios
+Version: 5.0.0 이상
+```
+
+#### 5.2 SDK 초기화 (AppDelegate.swift)
+
+```swift
+import RevenueCat
+
+func application(_ application: UIApplication,
+                 didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+
+    // 1. Firebase 초기화 (기존)
+    FirebaseApp.configure()
+
+    // 2. RevenueCat 초기화
+    #if DEBUG
+    Purchases.logLevel = .debug
+    #endif
+
+    Purchases.configure(
+        with: Configuration.Builder(withAPIKey: "appl_vCSLuclmGEWwPxjNAsiYIkJWrGH")
+            .with(storeKitVersion: .storeKit2)
+            .build()
+    )
+
+    // 3. AuthService 설정 (기존)
+    AuthService.shared.configure()
+
+    return true
+}
+```
+
+#### 5.3 Firebase UID 연동 (AuthService.swift)
+
+> **중요**: RevenueCat `logIn()` 완료 후 반드시 `SubscriptionManager.shared.onAuthCompleted()` 호출해야 합니다.
+> 이 호출이 없으면 기존 구독자도 Paywall을 잠깐 볼 수 있습니다. (Section 7.5 참조)
+
+```swift
+import RevenueCat
+
+// setupAuthStateListener() 내부 수정
+private func setupAuthStateListener() {
+    authStateHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+
+            if let user = user {
+                // ✅ RevenueCat에 Firebase UID로 로그인
+                do {
+                    let result = try await Purchases.shared.logIn(user.uid)
+                    print("RevenueCat 로그인: \(result.customerInfo.originalAppUserId)")
+
+                    // 사용자 속성 설정 (선택)
+                    if let email = user.email {
+                        Purchases.shared.attribution.setEmail(email)
+                    }
+                    if let name = user.displayName {
+                        Purchases.shared.attribution.setDisplayName(name)
+                    }
+
+                    // ✅ 구독 상태 로드 완료 알림 (Paywall 깜빡임 방지)
+                    SubscriptionManager.shared.onAuthCompleted()
+                } catch {
+                    print("RevenueCat 로그인 실패: \(error)")
+                    // 실패해도 로딩 상태 해제 (빈 상태로 진행)
+                    SubscriptionManager.shared.onAuthCompleted()
+                }
+
+                // 기존 로직...
+                let provider = self.determineProvider(from: user)
+                self.authState = .signedIn(user: UserInfo(...))
+
+            } else {
+                // ✅ RevenueCat 로그아웃
+                do {
+                    let _ = try await Purchases.shared.logOut()
+                } catch {
+                    print("RevenueCat 로그아웃 실패: \(error)")
+                }
+
+                // ✅ 구독 상태 초기화
+                SubscriptionManager.shared.onAuthSignedOut()
+                self.authState = .signedOut
+            }
+        }
+    }
+}
+```
+
+#### 5.4 SubscriptionManager 서비스 (신규 파일)
+
+**파일**: `ios/FXi/Services/SubscriptionManager.swift`
+
+> **주의**: 반드시 `isLoadingInitial` + `onAuthCompleted()` 패턴을 사용해야 합니다.
+> 이 패턴 없이 init에서 customerInfo를 로드하면 기존 구독자도 Paywall을 잠깐 볼 수 있습니다.
+
+```swift
+import Foundation
+import RevenueCat
+import Observation
+
+@MainActor
+@Observable
+final class SubscriptionManager {
+    // MARK: - Singleton
+
+    static let shared = SubscriptionManager()
+
+    // MARK: - Properties
+
+    private(set) var customerInfo: CustomerInfo?
+    private(set) var offerings: Offerings?
+    private(set) var isPremium: Bool = false
+    private(set) var isLoading: Bool = false
+
+    /// 초기 로딩 상태 (Firebase Auth + RevenueCat logIn 완료 전)
+    /// RootView에서 이 값이 true인 동안 로딩 화면 표시 → Paywall 깜빡임 방지
+    private(set) var isLoadingInitial: Bool = true
+
+    // MARK: - Init
+
+    private init() {
+        // ⚠️ init에서 customerInfo 로드하지 않음
+        // AuthService에서 logIn 완료 후 onAuthCompleted() 호출
+        subscribeToCustomerInfoStream()
+    }
+
+    private func subscribeToCustomerInfoStream() {
+        Task {
+            for await info in Purchases.shared.customerInfoStream {
+                self.customerInfo = info
+                self.isPremium = info.entitlements["premium"]?.isActive == true
+            }
+        }
+    }
+
+    // MARK: - Auth Integration
+
+    /// AuthService에서 Firebase Auth + RevenueCat logIn 완료 후 호출
+    func onAuthCompleted() {
+        Task {
+            do {
+                // 이 시점에는 이미 Purchases.shared.logIn(uid)가 완료됨
+                let info = try await Purchases.shared.customerInfo()
+                self.customerInfo = info
+                self.isPremium = info.entitlements["premium"]?.isActive == true
+            } catch {
+                print("구독 상태 로드 실패: \(error)")
+            }
+            self.isLoadingInitial = false
+        }
+    }
+
+    /// 로그아웃 시 호출 (상태 초기화)
+    func onAuthSignedOut() {
+        self.customerInfo = nil
+        self.isPremium = false
+        self.isLoadingInitial = true
+    }
+
+    // MARK: - Offerings
+
+    func loadOfferings() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            offerings = try await Purchases.shared.offerings()
+        } catch {
+            print("Offerings 로드 실패: \(error)")
+        }
+    }
+
+    // MARK: - Purchase
+
+    func purchase(_ package: Package) async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        let result = try await Purchases.shared.purchase(package: package)
+        customerInfo = result.customerInfo
+    }
+
+    // MARK: - Restore
+
+    func restorePurchases() async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        customerInfo = try await Purchases.shared.restorePurchases()
+    }
+
+    // MARK: - Helpers
+
+    var monthlyPackage: Package? {
+        offerings?.current?.package(identifier: "$rc_monthly")
+    }
+
+    var annualPackage: Package? {
+        offerings?.current?.package(identifier: "$rc_annual")
+    }
+}
+```
+
+### 5.5 서버사이드 Entitlement 검증 (Premium API 보호) ✅ 완료
+
+> **중요**: 클라이언트 Paywall만으로는 불충분. 비구독자가 API 직접 호출 시 우회 가능.
+> **구현 완료**: 2025-12-27 (상세: `REVENUECAT_SERVER_SIDE.md`)
+
+#### Premium-Gated 엔드포인트
+
+| 엔드포인트 | 비구독자 | 구독자 | 비고 |
+| --------- | ------- | ----- | ---- |
+| `POST /api/notification-settings` | ❌ 403 Forbidden | ✅ 허용 | 알림 설정 생성 |
+| `PUT /api/notification-settings/{id}` | ❌ 403 Forbidden | ✅ 허용 | 알림 설정 수정 |
+| `DELETE /api/notification-settings/{id}` | ❌ 403 Forbidden | ✅ 허용 | 알림 설정 삭제 |
+| `GET /api/notification-settings` | ✅ 빈 목록 | ✅ 설정 목록 | 조회만 허용 |
+| `GET /api/rates`, `WS /ws` | ✅ 허용 | ✅ 허용 | 아래 참고 |
+
+> **API vs Locked Preview 정책:**
+>
+> - **서버 API**: `/api/rates`, `WS /ws`는 비구독자에게도 **열려 있음** (기술적으로 접근 가능)
+> - **클라이언트 UX**: Locked Preview 화면에서는 **샘플 데이터만 표시** (API 호출하지 않음)
+> - **이유**: 서버 복잡도 최소화 + iOS 심사/테스트 용이 + 일반 사용자의 API 직접 호출 가능성 극히 낮음
+> - **결론**: 구독 유도는 클라이언트 UX로 처리, 서버는 알림 설정 API만 게이팅
+
+#### Phase 3 MVP: 요청 시 검증 (Request-Time Verification)
+
+> 📖 **구현 상세**: [REVENUECAT_SERVER_SIDE.md](REVENUECAT_SERVER_SIDE.md) 참조
+
+핵심 요약:
+- `verify_premium()`으로 Premium 게이팅 적용
+- 200/404만 캐시, 4xx/5xx 미캐시
+- LRU 1000명 + TTL 5분 + Stale 1시간
+
+    # 4. API 오류 시: stale 캐시가 있으면 사용 (유료 사용자 보호)
+    if cached_value is not None:
+        logger.info(
+            "API 오류, stale 캐시 사용",
+            extra={"user_id": user_id, "stale_value": cached_value}
+        )
+        return cached_value
+
+    # 5. 캐시도 없고 API도 실패 → False (어쩔 수 없음)
+    return is_premium
+```
+
+#### API 엔드포인트에 적용
+
+```python
+# app/main.py
+from app.subscription import verify_premium
+
+@app.post("/api/notification-settings")
+async def create_notification_setting(
+    request: NotificationSettingCreate,
+    user_id: str = Depends(get_current_user_id)  # Firebase ID Token 검증
+):
+    # ✅ Premium 검증 추가
+    if not await verify_premium(user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Premium subscription required"
+        )
+
+    # 기존 로직...
+    return await crud.create_notification_setting(db, user_id, request)
+```
+
+#### 확장: Webhook 기반 캐싱 ✅ 구현 완료
+
+> **보안 필수**: Webhook 엔드포인트는 반드시 Authorization 헤더 검증을 해야 합니다.
+> 검증 없이는 누구나 가짜 이벤트를 보내 구독 상태를 조작할 수 있습니다.
+
+> 📖 **구현 상세**: [REVENUECAT_SERVER_SIDE.md](REVENUECAT_SERVER_SIDE.md) 참조
+
+**RevenueCat Webhook 설정 (완료):**
+
+1. RevenueCat Dashboard → Integrations → Webhooks → FXi(Active) [Add new configuration]
+2. Webhook URL: `https://fxi.n-e.kr/webhooks/revenuecat`
+3. Authorization: Dashboard에 설정한 값과 `.env`의 `REVENUECAT_WEBHOOK_AUTH_KEY`를 동일하게 맞춤
+
+> **현재 상태**: 요청 시 검증 (5분 캐시) + Webhook 캐시 무효화 모두 구현됨.
+
+### 6. Paywall UI 설계
+
+#### 6.1 Paywall 화면 구조
+
+```
+┌─────────────────────────────────────┐
+│           FXi Premium               │
+│              👑                     │
+│                                     │
+│      은행별 현재 환율비교의 모든 것        │
+│                                     │
+├─────────────────────────────────────┤
+│ ✓ 9개 은행 환율 비교                    │
+│ ✓ USD, JPY, EUR 환율                 │
+│ ✓ 맞춤 푸시 알림                       │
+│ ✓ 24시간 추이 그래프                    │
+├─────────────────────────────────────┤
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │ 연간 구독 (추천)               │   │
+│  │ ₩99,000/년 (월 ₩8,250)       │   │
+│  │ 7일 무료 체험                  │   │
+│  │ [31% 할인]                   │   │
+│  └─────────────────────────────┘   │
+│                                    │
+│  ┌─────────────────────────────┐   │
+│  │ 월간 구독                     │   │
+│  │ ₩12,000/월                   │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│         구매 복원                     │
+│                                     │
+│  [필수 약관 문구 - 아래 참조]            │
+└─────────────────────────────────────┘
+```
+
+#### 6.2 핵심 UI 요소
+
+1. **연간 우선 배치**: 무료 체험이 있는 연간을 상단에, 더 크게 표시
+2. **할인율 강조**: "31% 할인" 뱃지로 가치 인식
+3. **무료 체험 강조**: "7일 무료 체험" 명시 (월간에는 없음)
+4. **약관 명시**: App Store 심사 통과를 위한 필수 문구
+
+#### 6.3 필수 약관 문구 (App Review 필수)
+
+Paywall 하단에 반드시 포함해야 하는 문구:
+
+```
+• 결제는 구매 확인 시 Apple ID 계정으로 청구됩니다.
+• 현재 기간 종료 최소 24시간 전에 자동 갱신을 해지하지 않으면 구독이 자동으로 갱신됩니다.
+• 갱신 비용은 현재 기간 종료 전 24시간 이내에 계정으로 청구됩니다.
+• 구독은 구매 후 설정 > Apple ID > 구독에서 관리하거나 해지할 수 있습니다.
+• 무료 체험 기간 중 구독을 구매하면 남은 무료 체험 기간은 소멸됩니다.
+
+[이용약관] [개인정보처리방침]
+```
+
+> **중요**: 이 문구가 없거나 불완전하면 App Review에서 리젝될 수 있습니다.
+
+### 7. 사용자 흐름: 온보딩 + Locked Preview
+
+#### 7.1 전체 앱 플로우
+
+```
+[앱 실행] → [스플래시] → [로그인 (Firebase Auth)]
+                              ↓
+                    [구독 상태 로딩]
+                              ↓
+                    [상태 확인 완료?]
+                              ↓
+              ┌───────────────┴───────────────┐
+              ↓                               ↓
+    [구독 중] → [메인 화면]         [미구독 + 첫 방문?]
+                                              ↓
+                                    ┌─────────┴─────────┐
+                                    ↓                   ↓
+                          [Yes] → [온보딩 3장]    [No] → [Locked Preview]
+                                        ↓                    ↓
+                                  [Paywall]            [Paywall Sheet]
+                                        ↓                    ↓
+                              [구독 완료] → [메인 화면]
+```
+
+#### 7.2 온보딩 화면 (첫 방문 사용자용)
+
+**목적**: 구독 가치를 시각적으로 전달 → Paywall 전환율 향상
+
+```
+┌─────────────────────────────────────┐
+│                                     │
+│   [슬라이드 1/3]                      │
+│                                     │
+│         📊                          │
+│   9개 은행 환율 비교                    │
+│                                     │
+│   KB, 하나, 신한, 우리, IBK, NH,       │
+│   SC제일, 부산, 씨티 환율을              │
+│   한눈에 비교하세요                     │
+│                                     │
+│         ● ○ ○                       │
+│                                     │
+│      [다음] →                        │
+│                                     │
+└─────────────────────────────────────┘
+
+┌─────────────────────────────────────┐
+│                                     │
+│   [슬라이드 2/3]                      │
+│                                     │
+│         📈                          │
+│   24시간 추이 그래프                    │
+│                                     │
+│   언제 환율이 올랐는지,                  │
+│   언제 떨어졌는지 한눈에!                │
+│                                     │
+│         ○ ● ○                       │
+│                                     │
+│      [다음] →                        │
+│                                     │
+└─────────────────────────────────────┘
+
+┌─────────────────────────────────────┐
+│                                     │
+│   [슬라이드 3/3]                      │
+│                                     │
+│         🔔                          │
+│   맞춤 푸시 알림                       │
+│                                     │
+│   "하나은행 USD 1475원 이상"            │
+│   목표 환율 도달 시 알림 수신             │
+│                                     │
+│         ○ ○ ●                       │
+│                                     │
+│      [시작하기] →                     │
+│                                     │
+└─────────────────────────────────────┘
+```
+
+**구현 포인트:**
+- `@AppStorage("hasCompletedOnboarding")` 플래그로 첫 방문 구분
+- 온보딩 완료 시 Paywall 자동 표시
+- 스킵 버튼 없음 (3장만 보면 됨)
+
+#### 7.3 Locked Preview 화면 (재방문 미구독 사용자용)
+
+**목적**: 앱 강제 종료 대신, 앱의 가치를 **애니메이션 샘플 데이터**로 시각적으로 전달
+
+> **결정**: 실제 환율 데이터 대신 **애니메이션 샘플 데이터** 사용
+>
+> - 실제 데이터 노출 시 구독 동기 감소 우려
+> - 애니메이션이 있는 샘플 화면이 더 흥미롭고 구독 전환에 효과적
+
+```
+┌───────────────────────────────────────────────┐
+│  ┌─────────────────────────────────────────┐  │
+│  │  ⚠️ 예시 화면입니다                      │  │  ← 상단 배너
+│  └─────────────────────────────────────────┘  │
+│                                               │
+│  ┌─────────────────────────────────────────┐  │
+│  │  🔔 KB 1,385.50 이하 알림               │  │  ← 샘플 알림 팝업
+│  │  목표 환율에 도달하면 알려드립니다        │  │    (8초마다 표시)
+│  └─────────────────────────────────────────┘  │
+│                                               │
+│  USD-KRW                                      │
+│  ┌──────────────────────────────────────┐     │
+│  │ 🏛️ 인베스팅  1,385.50 ◀━━━━━━━━━━━━ │     │  ← 바 애니메이션
+│  └──────────────────────────────────────┘     │    (3초마다 변동)
+│  ┌───────────────────────────────────┐        │
+│  │ 🏦 KB       1,386.20  +0.70 ◀━━━━━│        │
+│  └───────────────────────────────────┘        │
+│  ┌────────────────────────────────┐           │
+│  │ 🏦 하나     1,384.80  -0.70 ◀━━│           │
+│  └────────────────────────────────┘           │
+│  ┌─────────────────────────────────┐          │
+│  │ 🏦 신한     1,385.90  +0.40 ◀━━━│          │
+│  └─────────────────────────────────┘          │
+│        ... (blur overlay)                     │
+│                                               │
+│  ┌─────────────────────────────────────────┐  │
+│  │  🔒 프리미엄 구독으로                    │  │  ← 잠금 오버레이
+│  │     은행별 환율 확인하기                  │  │
+│  │                                         │  │
+│  │  [ 구독하고 전체 기능 사용하기 ]          │  │  ← CTA 버튼
+│  └─────────────────────────────────────────┘  │
+│                                               │
+└───────────────────────────────────────────────┘
+```
+
+**핵심 애니메이션:**
+
+1. **바 그래프 애니메이션** (3초마다)
+   - 샘플 환율 값이 소폭 변동 (±0.10 ~ ±0.50)
+   - 숫자 롤링 애니메이션 (`AnimatableNumberText` 패턴 재사용)
+   - 바 너비 변화 + 펄스 효과
+   - 방향 표시 (▲/▼) 잠깐 표시 후 차이값으로 전환
+
+2. **샘플 알림 팝업** (8초마다)
+   - 상단에서 슬라이드 다운 → 3초 유지 → 페이드 아웃
+   - 랜덤 은행 + 목표 환율 표시
+   - "알림 기능이 이렇게 동작합니다" 시각적 데모
+
+3. **하단 Blur + 오버레이**
+   - 4개 은행 이후 점진적 blur 처리
+   - CTA 버튼으로 Paywall 유도
+
+**장점:**
+
+- iOS 심사 거절 위험 없음 (앱 강제 종료 없음)
+- 애니메이션이 사용자 시선 유지 → 체류 시간 증가
+- 알림 기능 데모 → "이 알림이 필요하다" 욕구 자극
+- 앱 UI에서 실제 API 호출 생략, 샘플만 표시 → 구독 동기 유지
+  - (참고: API 자체는 열려있으나 클라이언트에서 호출하지 않음, Section 5.5 참조)
+
+#### 7.3.1 LockedPreviewView.swift 구현
+
+```swift
+import SwiftUI
+
+/// 비구독자용 애니메이션 샘플 화면
+struct LockedPreviewView: View {
+    @Binding var showPaywall: Bool
+
+    // MARK: - Sample Data
+
+    /// 샘플 환율 데이터 (애니메이션용)
+    @State private var sampleRates: [SampleRate] = SampleRate.initial
+
+    /// 샘플 알림 표시 여부
+    @State private var showSampleNotification = false
+    @State private var currentNotification: SampleNotification?
+
+    /// 애니메이션 타이머
+    @State private var rateAnimationTimer: Timer?
+    @State private var notificationTimer: Timer?
+
+    var body: some View {
+        ZStack {
+            AppColors.background
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                // 상단 배너
+                sampleBanner
+
+                // 샘플 알림 팝업 (애니메이션)
+                if showSampleNotification, let notification = currentNotification {
+                    sampleNotificationBanner(notification)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .zIndex(1)
+                }
+
+                // 메인 콘텐츠 (샘플 환율 바)
+                ScrollView {
+                    VStack(spacing: 12) {
+                        sampleRatesSection
+
+                        // 하단 blur 영역
+                        blurredSection
+                    }
+                    .padding()
+                }
+
+                // 잠금 오버레이 + CTA
+                premiumOverlay
+            }
+        }
+        .onAppear {
+            startAnimations()
+        }
+        .onDisappear {
+            stopAnimations()
+        }
+    }
+
+    // MARK: - Sample Banner
+
+    private var sampleBanner: some View {
+        HStack {
+            Image(systemName: "info.circle.fill")
+                .foregroundColor(.orange)
+            Text("예시 화면입니다")
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(AppColors.primaryText)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.15))
+    }
+
+    // MARK: - Sample Notification Banner
+
+    private func sampleNotificationBanner(_ notification: SampleNotification) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "bell.fill")
+                .font(.title3)
+                .foregroundColor(.orange)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(notification.bankName) \(notification.formattedRate) 이하 알림")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(AppColors.primaryText)
+
+                Text("목표 환율에 도달하면 알려드립니다")
+                    .font(.caption)
+                    .foregroundColor(AppColors.secondaryText)
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(AppColors.cardBackground)
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    // MARK: - Sample Rates Section
+
+    private var sampleRatesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("USD-KRW")
+                .font(.headline)
+                .foregroundColor(AppColors.primaryText)
+
+            ForEach(sampleRates.prefix(4)) { rate in
+                SampleRateBarView(rate: rate)
+            }
+        }
+        .padding()
+        .background(AppColors.cardBackground)
+        .cornerRadius(12)
+    }
+
+    // MARK: - Blurred Section
+
+    private var blurredSection: some View {
+        VStack(spacing: 8) {
+            ForEach(0..<3, id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(AppColors.inputBackground)
+                    .frame(height: 36)
+            }
+        }
+        .padding()
+        .background(AppColors.cardBackground)
+        .cornerRadius(12)
+        .blur(radius: 8)
+        .overlay(
+            Text("더 많은 은행 환율...")
+                .font(.caption)
+                .foregroundColor(AppColors.secondaryText)
+        )
+    }
+
+    // MARK: - Premium Overlay
+
+    private var premiumOverlay: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Image(systemName: "lock.fill")
+                    .font(.title2)
+                Text("프리미엄 구독으로\n은행별 환율 확인하기")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+            }
+            .foregroundColor(AppColors.primaryText)
+
+            Button {
+                showPaywall = true
+            } label: {
+                Text("구독하고 전체 기능 사용하기")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.accentColor)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal, 24)
+        }
+        .padding(.vertical, 24)
+        .background(
+            LinearGradient(
+                colors: [AppColors.background.opacity(0), AppColors.background],
+                startPoint: .top,
+                endPoint: .center
+            )
+        )
+    }
+
+    // MARK: - Animation Control
+
+    private func startAnimations() {
+        // 바 그래프 애니메이션 (3초마다)
+        rateAnimationTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
+            withAnimation(.easeInOut(duration: 1.0)) {
+                sampleRates = sampleRates.map { $0.randomized() }
+            }
+        }
+
+        // 샘플 알림 애니메이션 (8초마다)
+        notificationTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { _ in
+            currentNotification = SampleNotification.random()
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                showSampleNotification = true
+            }
+
+            // 3초 후 숨김
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    showSampleNotification = false
+                }
+            }
+        }
+
+        // 첫 알림 2초 후 표시
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            notificationTimer?.fire()
+        }
+    }
+
+    private func stopAnimations() {
+        rateAnimationTimer?.invalidate()
+        notificationTimer?.invalidate()
+    }
+}
+```
+
+#### 7.3.2 샘플 데이터 모델
+
+```swift
+// MARK: - Sample Data Models
+
+struct SampleRate: Identifiable {
+    let id = UUID()
+    let bank: Bank
+    var rate: Double
+    var diff: Double
+
+    func randomized() -> SampleRate {
+        let change = Double.random(in: -0.50...0.50)
+        let newRate = rate + change
+        let newDiff = diff + change
+        return SampleRate(bank: bank, rate: newRate, diff: newDiff)
+    }
+
+    static let initial: [SampleRate] = [
+        SampleRate(bank: .investing, rate: 1385.50, diff: 0),
+        SampleRate(bank: .kb, rate: 1386.20, diff: 0.70),
+        SampleRate(bank: .hana, rate: 1384.80, diff: -0.70),
+        SampleRate(bank: .shinhan, rate: 1385.90, diff: 0.40)
+    ]
+}
+
+struct SampleNotification {
+    let bankName: String
+    let targetRate: Double
+
+    var formattedRate: String {
+        String(format: "%.2f", targetRate)
+    }
+
+    static func random() -> SampleNotification {
+        let banks = ["KB", "하나", "신한", "우리", "농협"]
+        let rates = [1380.0, 1385.0, 1390.0, 1375.0, 1395.0]
+        return SampleNotification(
+            bankName: banks.randomElement()!,
+            targetRate: rates.randomElement()!
+        )
+    }
+}
+```
+
+#### 7.3.3 샘플 환율 바 뷰
+
+```swift
+// MARK: - Sample Rate Bar View
+
+/// 샘플 환율 바 (애니메이션 지원, RateBarView 패턴 참조)
+struct SampleRateBarView: View {
+    let rate: SampleRate
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // 은행 아이콘 + 이름
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(rate.bank.color)
+                    .frame(width: 24, height: 24)
+                    .overlay(
+                        Text(rate.bank.shortName.prefix(1))
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                    )
+
+                Text(rate.bank.shortName)
+                    .font(.subheadline)
+                    .foregroundColor(AppColors.primaryText)
+                    .frame(width: 50, alignment: .leading)
+            }
+
+            Spacer()
+
+            // 환율 (애니메이션)
+            Text(String(format: "%.2f", rate.rate))
+                .font(.body)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+
+            // 차이값 (기준 제외)
+            if rate.bank != .investing {
+                Text(String(format: "%+.2f", rate.diff))
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(rate.diff > 0 ? AppColors.positive : AppColors.negative)
+                    .monospacedDigit()
+                    .frame(width: 50, alignment: .trailing)
+                    .contentTransition(.numericText())
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(rate.bank.color.opacity(0.8))
+                .scaleEffect(x: barWidthScale, y: 1, anchor: .leading)
+        )
+        .animation(.easeInOut(duration: 1.0), value: rate.rate)
+    }
+
+    /// 바 너비 비율 (환율 기반)
+    private var barWidthScale: CGFloat {
+        let normalized = (rate.rate - 1380) / 20  // 1380~1400 범위
+        return 0.5 + normalized * 0.5  // 50%~100%
+    }
+}
+```
+
+#### 7.4 RootView 수정 (FXiApp.swift)
+
+```swift
+struct RootView: View {
+    @Environment(AuthService.self) private var authService
+    @State private var subscriptionManager = SubscriptionManager.shared
+    @State private var showPaywall = false
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
+    var body: some View {
+        Group {
+            switch authService.authState {
+            case .unknown:
+                splashView
+
+            case .signedOut:
+                LoginView()
+
+            case .signedIn:
+                // 구독 상태 로딩 중: 로딩 화면 (기존 구독자 Paywall 깜빡임 방지)
+                if subscriptionManager.isLoadingInitial {
+                    loadingView
+                } else if subscriptionManager.isPremium {
+                    // ✅ 구독 중: 메인 화면
+                    ContentView()
+                } else if !hasCompletedOnboarding {
+                    // ❌ 미구독 + 첫 방문: 온보딩
+                    OnboardingView(onComplete: {
+                        hasCompletedOnboarding = true
+                        showPaywall = true
+                    })
+                } else {
+                    // ❌ 미구독 + 재방문: Locked Preview
+                    LockedPreviewView(showPaywall: $showPaywall)
+                }
+            }
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+        }
+        .animation(.easeInOut(duration: 0.3), value: authService.authState)
+        .animation(.easeInOut(duration: 0.3), value: subscriptionManager.isPremium)
+    }
+
+    private var loadingView: some View {
+        ZStack {
+            AppColors.background
+                .ignoresSafeArea()
+            ProgressView()
+                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+        }
+    }
+}
+```
+
+#### 7.5 SubscriptionManager 로딩 상태 추가
+
+> **주의**: 반드시 Firebase Auth logIn 완료 후 구독 상태를 확인해야 합니다.
+> 익명 customerInfo를 먼저 로드하면 기존 구독자도 Paywall을 잠깐 볼 수 있습니다.
+
+```swift
+@MainActor
+@Observable
+final class SubscriptionManager {
+    static let shared = SubscriptionManager()
+
+    private(set) var customerInfo: CustomerInfo?
+    private(set) var offerings: Offerings?
+    private(set) var isPremium: Bool = false
+    private(set) var isLoading: Bool = false
+
+    /// 초기 로딩 상태 (Firebase Auth + RevenueCat logIn 완료 전)
+    private(set) var isLoadingInitial: Bool = true
+
+    private init() {
+        // ⚠️ init에서 customerInfo 로드하지 않음
+        // AuthService에서 logIn 완료 후 onAuthCompleted() 호출
+        subscribeToCustomerInfoStream()
+    }
+
+    /// AuthService에서 Firebase Auth + RevenueCat logIn 완료 후 호출
+    func onAuthCompleted() {
+        Task {
+            do {
+                // 이 시점에는 이미 Purchases.shared.logIn(uid)가 완료됨
+                let info = try await Purchases.shared.customerInfo()
+                self.customerInfo = info
+                self.isPremium = info.entitlements["premium"]?.isActive == true
+            } catch {
+                print("구독 상태 로드 실패: \(error)")
+            }
+            self.isLoadingInitial = false
+        }
+    }
+
+    /// 로그아웃 시 호출 (상태 초기화)
+    func onAuthSignedOut() {
+        self.customerInfo = nil
+        self.isPremium = false
+        self.isLoadingInitial = true
+    }
+
+    private func subscribeToCustomerInfoStream() {
+        Task {
+            for await info in Purchases.shared.customerInfoStream {
+                self.customerInfo = info
+                self.isPremium = info.entitlements["premium"]?.isActive == true
+            }
+        }
+    }
+
+    // ... loadOfferings, purchase, restore 등 기존 메서드 ...
+}
+```
+
+#### 7.6 AuthService 수정 (SubscriptionManager 연동)
+
+```swift
+// AuthService.swift - setupAuthStateListener() 수정
+private func setupAuthStateListener() {
+    authStateHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+
+            if let user = user {
+                // 1. RevenueCat에 Firebase UID로 로그인
+                do {
+                    let result = try await Purchases.shared.logIn(user.uid)
+                    print("RevenueCat 로그인: \(result.customerInfo.originalAppUserId)")
+
+                    // 2. ✅ SubscriptionManager에 로그인 완료 알림
+                    SubscriptionManager.shared.onAuthCompleted()
+
+                } catch {
+                    print("RevenueCat 로그인 실패: \(error)")
+                    // 실패해도 isLoadingInitial = false로 전환
+                    SubscriptionManager.shared.onAuthCompleted()
+                }
+
+                // 기존 로직...
+                self.authState = .signedIn(user: UserInfo(...))
+
+            } else {
+                // RevenueCat 로그아웃
+                do {
+                    let _ = try await Purchases.shared.logOut()
+                } catch {
+                    print("RevenueCat 로그아웃 실패: \(error)")
+                }
+
+                // ✅ SubscriptionManager 상태 초기화
+                SubscriptionManager.shared.onAuthSignedOut()
+
+                self.authState = .signedOut
+            }
+        }
+    }
+}
+```
+
+**핵심 개선:**
+- `isLoadingInitial`: Firebase Auth + RevenueCat logIn 완료 후에만 false로 전환
+- `onAuthCompleted()`: AuthService에서 명시적으로 호출 → 타이밍 보장
+- 기존 구독자가 Paywall/온보딩을 잠깐 보는 문제 해결
+
+### 8. 무료 체험 전환 최적화
+
+#### 8.1 체험 기간 중 푸시 알림 (선택)
+
+> **⚠️ 마케팅 푸시 주의사항**:
+> 아래 메시지는 환율 알림이 아닌 **마케팅/리텐션 목적**입니다.
+> 사용자가 "환율 알림"만 동의한 경우 별도 **마케팅 푸시 동의**가 필요합니다.
+> 미동의 시 App Review 리젝 또는 사용자 불만 가능성 있음.
+
+```
+Day 1: "아침 9시에 환율을 확인해보세요. 은행별 차이가 한눈에 보입니다."
+Day 4: "체험 3일 남았습니다. 맞춤 알림을 설정해보셨나요?"
+Day 6: "내일 체험이 종료됩니다. 구독하시면 끊김 없이 계속 이용하실 수 있습니다."
+```
+
+> **주의**: Day 7에는 푸시 보내지 않음. 자동 결제 유도 (해지 리마인드 방지).
+> **권장**: Phase 3 MVP에서는 이 기능 구현하지 않음. 마케팅 옵트인 시스템 구축 후 도입 검토.
+
+#### 8.2 iOS 자동 결제 동작
+
+1. 사용자가 "연간 구독 시작" 탭 → Face ID/Touch ID 인증 → **결제 정보 등록됨**
+2. 7일 무료 체험 시작
+3. 체험 종료 **24시간 전**까지 해지 안 하면 → **99,000원 자동 결제**
+4. Apple이 체험 종료 전 시스템 알림 발송 (설정 > Apple ID > 구독)
+
+### 9. 마케팅 전략
+
+#### 9.1 잠재 사용자 풀
+
+| 채널 | 규모 | 특성 |
+|------|------|------|
+| 카카오톡 오픈채팅방 A | ~800명 | 환전 투자 관심자 |
+| 카카오톡 오픈채팅방 B | ~800명 | 중복 있음 |
+| **추정 순 사용자** | ~1,000~1,200명 | 10~15% 유료 전환 기대 |
+
+#### 9.2 바이럴 전략
+
+```
+1. 자연스러운 공유: "이 앱 써봤는데 좋더라"
+2. 스크린샷 각인 효과: 메인화면 은행별 막대그래프
+3. 인베스팅 먹통 시 가치 극대화: "아침 9시에 인베스팅 안 될 때 이거 씀"
+```
+
+#### 9.3 앱스토어 ASO
+
+**키워드**: 환율, 실시간 환율, 은행 환율, 환율 비교, 환전, 달러 환율
+
+**스크린샷**: 은행별 비교 UI, 그래프, 알림 설정 화면
+
+### 10. 성공 지표 (KPI)
+
+| 지표 | 목표 | 측정 방법 |
+|------|------|----------|
+| **무료 체험 시작** | 300~500명 | RevenueCat Dashboard |
+| **체험→유료 전환율** | 40~50% | 자동 결제 (해지 안 함) |
+| **유료 구독자** | 100~200명 | RevenueCat Dashboard |
+| **연간 구독 비율** | 70~80% | 월간 대비 연간 비율 |
+| **월간 이탈률** | < 10% | RevenueCat Churn Rate |
+| **평균 LTV** | > 50,000원 | RevenueCat Analytics |
+
+### 11. 구현 체크리스트 (Phase 3)
+
+#### App Store Connect
+
+- [ ] 구독 그룹 "FXi Premium" 생성
+- [ ] 월간 상품 등록 (`fxi_premium_monthly`, ₩12,000)
+- [ ] 연간 상품 등록 (`fxi_premium_yearly`, ₩99,000, 7일 무료 체험)
+- [ ] App Store Connect Shared Secret 복사
+
+#### RevenueCat
+
+- [ ] RevenueCat 계정 생성
+- [ ] iOS 앱 등록 (Bundle ID, Shared Secret)
+- [ ] Products 등록 (월간, 연간)
+- [ ] Entitlements 생성 ("premium")
+- [ ] Offerings 설정 ("default")
+- [ ] Public API Key 복사
+
+#### iOS 앱
+
+- [ ] RevenueCat SDK 설치 (SPM)
+- [ ] AppDelegate에서 SDK 초기화
+- [ ] AuthService에 RevenueCat 로그인/로그아웃 연동
+- [ ] SubscriptionManager 서비스 구현
+- [ ] PaywallView UI 구현
+- [ ] RootView에 Hard Paywall 적용
+- [ ] 구매 복원 기능 구현
+- [ ] 약관 링크 추가 (개인정보처리방침, 이용약관)
+
+#### 테스트
+
+- [ ] Sandbox 테스터 계정 생성
+- [ ] 월간 구독 테스트 (체험 없이 바로 결제)
+- [ ] 연간 구독 테스트 (7일 체험 → 자동 결제)
+- [ ] 구매 복원 테스트
+- [ ] 구독 해지 테스트
+
+---
 
 ---
 
@@ -294,8 +1578,8 @@ docker compose up -d --build
 |------|------|
 | Kotlin + Jetpack Compose | UI 구현 |
 | Firebase Auth/FCM SDK | iOS와 동일 플로우 |
-| Revenue Cat SDK | 구독 동기화 자동 처리 |
-| Google Play Billing | Revenue Cat이 처리 |
+| RevenueCat SDK | 구독 동기화 자동 처리 |
+| Google Play Billing | RevenueCat이 처리 |
 
 **완료 게이트**:
 - Play 스토어 심사 승인
@@ -312,7 +1596,7 @@ docker compose up -d --build
 [Phase 2] Firebase Auth + FCM
    └── 서버 API 추가, 알림 기능, Alembic 준비
 
-[Phase 3] Revenue Cat
+[Phase 3] RevenueCat
    └── 구독 시스템 완성
 
 [Phase 4] RDS 마이그레이션
@@ -335,7 +1619,7 @@ docker compose up -d --build
 |-------|------|----------|-------------|--------|
 | 1 | iOS MVP ✅ | UI, API 연동, WebSocket | 앱 기본 기능 동작 | t2.micro + SQLite |
 | 2 | Firebase Auth + FCM | 로그인, 푸시 알림, 알림 API | 푸시 알림 E2E 성공, 구조화 로그 준비 | t2.micro + SQLite |
-| 3 | Revenue Cat | 구독 결제, 유료 기능 | 구매 → 권한 반영 ≤ 1분 | t2.micro + SQLite |
+| 3 | RevenueCat | 구독 결제, 유료 기능 | 구매 → 권한 반영 ≤ 1분 | t2.micro + SQLite |
 | 4 | RDS 마이그레이션 | DB 전환, 인프라 업그레이드 | Alembic 성공, 통합 E2E 통과 | t3.small + RDS |
 | 5 | 베타 + iOS 출시 | 테스트플라이트, QA, 심사 | 앱스토어 승인, 크래시 프리 > 99% | t3.small + RDS |
 | 6 | Android | Kotlin UI, SDK 통합 | Play 스토어 승인 | t3.small + RDS |
@@ -595,20 +1879,20 @@ iOS에서 구독 → Android에서 로그인 → 자동 동기화 (다시 결제
 구독 관리 = 사용자 인증 + 영수증 검증 + 크로스 플랫폼 동기화
 
 1. 사용자 인증: Firebase Auth 또는 Supabase Auth
-2. 영수증 검증: Revenue Cat 또는 자체 구현
+2. 영수증 검증: RevenueCat 또는 자체 구현
 3. 동기화: 서버 기준으로 user_id로 구독 상태 관리
 ```
 
 ---
 
-### Option A: Firebase Auth + Revenue Cat ⭐
+### Option A: Firebase Auth + RevenueCat ⭐
 
 **아키텍처:**
 ```
 [iOS/Android 앱]
     ↓ Firebase Auth 로그인 → user_id 획득
-    ↓ Revenue Cat에 user_id 연결
-[Revenue Cat]
+    ↓ RevenueCat에 user_id 연결
+[RevenueCat]
     ↓ 영수증 검증 (iOS/Android)
     ↓ 크로스 플랫폼 자동 동기화 ✅
 [서버] (선택적) Webhook으로 구독 상태 저장
@@ -619,7 +1903,7 @@ iOS에서 구독 → Android에서 로그인 → 자동 동기화 (다시 결제
 // iOS
 FirebaseAuth.auth().signIn(...) { result in
     let userId = result?.user.uid
-    Purchases.shared.logIn(userId) { ... }  // Revenue Cat 연결
+    Purchases.shared.logIn(userId) { ... }  // RevenueCat 연결
 }
 
 // Android (같은 user_id로 자동 동기화!)
@@ -642,20 +1926,20 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 ---
 
-### Option B: Supabase Auth + Revenue Cat ⭐
+### Option B: Supabase Auth + RevenueCat ⭐
 
 **아키텍처:**
 ```
 [iOS/Android 앱]
     ↓ Supabase Auth 로그인 → user_id 획득
-    ↓ Revenue Cat에 user_id 연결
-[Revenue Cat]
+    ↓ RevenueCat에 user_id 연결
+[RevenueCat]
     ↓ 영수증 검증 + 크로스 플랫폼 동기화 ✅
 ```
 
 **Firebase와의 차이점:**
 - Auth만 Supabase로 변경
-- Revenue Cat 사용법은 동일
+- RevenueCat 사용법은 동일
 
 **장단점:**
 | 항목 | 평가 |
@@ -692,20 +1976,20 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 **장단점:**
 | 항목 | 평가 |
 |------|------|
-| 비용 | ✅ Revenue Cat 매출 1% 절약 |
+| 비용 | ✅ RevenueCat 매출 1% 절약 |
 | 완전 제어 | ✅ 모든 로직 커스터마이징 |
 | 구현 난이도 | ❌ 매우 높음 (3-4주) |
 | 유지보수 | ❌ Apple/Google API 변경 대응 필요 |
-| 실질 비용 | ⚠️ 개발 + 유지보수 고려 시 Revenue Cat보다 비쌈 |
+| 실질 비용 | ⚠️ 개발 + 유지보수 고려 시 RevenueCat보다 비쌈 |
 
 ---
 
 ### 구독 관리 방법 비교표
 
-| 항목 | Firebase + Revenue Cat | Supabase + Revenue Cat | 자체 구현 |
+| 항목 | Firebase + RevenueCat | Supabase + RevenueCat | 자체 구현 |
 |------|----------------------|----------------------|----------|
 | **인증** | Firebase Auth | Supabase Auth | 직접 구현 |
-| **영수증 검증** | Revenue Cat | Revenue Cat | 직접 구현 |
+| **영수증 검증** | RevenueCat | RevenueCat | 직접 구현 |
 | **크로스 플랫폼** | ✅ 자동 | ✅ 자동 | ⚠️ 수동 |
 | **환불/취소** | ✅ 자동 | ✅ 자동 | ❌ 수동 |
 | **구현 시간** | 1주 | 1주 | 3-4주 |
@@ -723,7 +2007,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 ### 시나리오 1: 초기 (사용자 500명, 월 매출 $1,000)
 
-| 항목 | Firebase + Revenue Cat | Supabase + Revenue Cat | 자체 구현 |
+| 항목 | Firebase + RevenueCat | Supabase + RevenueCat | 자체 구현 |
 |------|----------------------|----------------------|----------|
 | 인증 | $0 (무료) | $0 (무료) | $0 |
 | DB | $0 (Firestore 무료) | $0 (PostgreSQL 500MB) | $0 (SQLite) |
@@ -738,7 +2022,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 ### 시나리오 2: 성장 (사용자 1,000명, 월 매출 $10,000)
 
-| 항목 | Firebase + Revenue Cat | Supabase + Revenue Cat | 자체 구현 |
+| 항목 | Firebase + RevenueCat | Supabase + RevenueCat | 자체 구현 |
 |------|----------------------|----------------------|----------|
 | 인증 | $0 | $0 | $0 |
 | DB | $15 (Firestore) | $25 (PostgreSQL Pro 8GB) | $25 (RDS t3.micro) |
@@ -755,7 +2039,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 ### 시나리오 3: 대규모 (사용자 5,000명, 월 매출 $100,000)
 
-| 항목 | Firebase + Revenue Cat | Supabase + Revenue Cat | Supabase 자체 호스팅 |
+| 항목 | Firebase + RevenueCat | Supabase + RevenueCat | Supabase 자체 호스팅 |
 |------|----------------------|----------------------|-------------------|
 | 인증 | $55 (50k MAU 초과) | $25 | $0 (자체) |
 | DB | $100 (Firestore) | $100 | $30 (RDS t3.small) |
@@ -764,7 +2048,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 | 서버 | - | - | $35 (EC2 t3.medium) |
 | **월 합계** | **$1,155** | **$1,125** | **$1,065** |
 
-**결론:** **Supabase + Revenue Cat이 가장 저렴** ($1,125/월)
+**결론:** **Supabase + RevenueCat이 가장 저렴** ($1,125/월)
 
 ---
 
@@ -785,8 +2069,8 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 | 방법 | 난이도 | 개발 기간 | 유지보수 |
 |------|-------|----------|---------|
-| Firebase + Revenue Cat | ⭐ (매우 쉬움) | 1주 | 매우 낮음 |
-| Supabase + Revenue Cat | ⭐ (매우 쉬움) | 1주 | 매우 낮음 |
+| Firebase + RevenueCat | ⭐ (매우 쉬움) | 1주 | 매우 낮음 |
+| Supabase + RevenueCat | ⭐ (매우 쉬움) | 1주 | 매우 낮음 |
 | 자체 구현 | ⭐⭐⭐⭐⭐ (매우 어려움) | 3-4주 | 매우 높음 |
 
 ---
@@ -804,7 +2088,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 
 #### B. 구독 관리 방식
 
-- [x] **Firebase Auth + Revenue Cat** 선택
+- [x] **Firebase Auth + RevenueCat** 선택
   - 이유: Firebase uid와 자연스러운 통합, 크로스 플랫폼 자동 동기화
   - 비용: 월 매출 $2,500 이하 무료, 이후 매출의 1%
 
@@ -861,13 +2145,13 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 - [x] CRUD 변화 감지 → FCM 전송 로직 구현
 - [x] 알림 품질 게이트 통과 ([상세](#-알림-품질-게이트))
 
-#### Phase 3: Revenue Cat
+#### Phase 3: RevenueCat
 
-- [x] Revenue Cat 도입 결정
-- [ ] Revenue Cat 계정 생성 및 앱 등록
-- [ ] iOS 앱에 Revenue Cat SDK 통합
+- [x] RevenueCat 도입 결정
+- [ ] RevenueCat 계정 생성 및 앱 등록
+- [ ] iOS 앱에 RevenueCat SDK 통합
 - [ ] 유료 기능 설계 (프리미엄 알림 등)
-- [ ] Firebase uid ↔ Revenue Cat 연동
+- [ ] Firebase uid ↔ RevenueCat 연동
 
 #### Phase 4: RDS 마이그레이션
 
@@ -894,7 +2178,7 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 - [ ] Kotlin + Jetpack Compose UI 구현
 - [ ] Firebase Auth SDK 통합
 - [ ] FCM SDK 통합
-- [ ] Revenue Cat SDK 통합
+- [ ] RevenueCat SDK 통합
 - [ ] 크로스 플랫폼 구독 동기화 테스트
 - [ ] Play 스토어 심사 제출 및 승인
 
@@ -1281,6 +2565,47 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ---
 
+## 테스트 체크리스트
+
+서버 사이드 구독 검증 로직 구현 시 검증해야 할 핵심 케이스입니다.
+
+### Webhook 서명 검증
+
+| 케이스 | 입력 | 기대 결과 |
+|--------|------|----------|
+| 유효한 서명 | 올바른 HMAC-SHA256 | 200 OK, 이벤트 처리 |
+| 잘못된 서명 | 변조된 signature | 401 Unauthorized |
+| 헤더 누락 | X-RevenueCat-Signature 없음 | 401 Unauthorized |
+| Secret 미설정 | 환경변수 누락 | 로그 에러, 검증 실패 |
+
+### Stale 캐시 동작
+
+| 케이스 | 캐시 상태 | API 결과 | 기대 동작 |
+|--------|----------|---------|----------|
+| 신선한 캐시 | TTL 내 | - | 캐시값 반환 (API 호출 없음) |
+| Stale + API 성공 | TTL 만료 | 200 OK | 새 값 반환, 캐시 갱신 |
+| Stale + API 오류 | TTL 만료 | 5xx/timeout | **stale 값 반환** (유료 사용자 보호) |
+| 캐시 없음 + API 오류 | 없음 | 5xx/timeout | False 반환 (보수적 처리) |
+| Stale TTL 초과 | 1시간 초과 | - | 캐시 삭제됨, 새로 조회 |
+
+### 캐시 무효화
+
+| 케이스 | 트리거 | 기대 동작 |
+|--------|-------|----------|
+| 구독 구매 | INITIAL_PURCHASE Webhook | `invalidate_user_cache()` 호출 → 다음 `verify_premium()`에서 API 재조회 |
+| 구독 갱신 | RENEWAL Webhook | 캐시 무효화 → 최신 상태 반영 |
+| 구독 만료 | EXPIRATION Webhook | 캐시 무효화 → 즉시 접근 차단 |
+| 구독 취소 | CANCELLATION Webhook | 캐시 무효화 → 즉시 접근 차단 |
+
+### LRU 캐시 경계
+
+| 케이스 | 조건 | 기대 동작 |
+|--------|------|----------|
+| 캐시 가득 참 | 1000명 초과 | 가장 오래된 항목 제거 (LRU) |
+| 동시 접근 | 여러 요청 동시 | 스레드 안전 (Lock) |
+
+---
+
 ## 참고 자료
 
 ### Firebase 관련
@@ -1294,7 +2619,7 @@ ON CONFLICT (device_token) DO UPDATE SET
 - Edge Functions: https://supabase.com/docs/guides/functions
 - Pricing: https://supabase.com/pricing
 
-### Revenue Cat 관련
+### RevenueCat 관련
 - 공식 문서: https://www.revenuecat.com/docs
 - Pricing: https://www.revenuecat.com/pricing
 - Firebase 통합: https://www.revenuecat.com/docs/firebase-integration
@@ -1306,6 +2631,6 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ---
 
-**마지막 업데이트**: 2025-12-21
-**결정 완료**: AWS RDS PostgreSQL + Firebase Auth + FCM
-**최근 변경**: 1회성 알림 동작 반영 (발송 후 자동 비활성화, 토글 ON으로 재활성화)
+**마지막 업데이트**: 2025-12-27
+**결정 완료**: AWS RDS PostgreSQL + Firebase Auth + FCM + RevenueCat
+**최근 변경**: Phase 3 구현 완료 (iOS SDK 연동 + 서버 사이드 검증 + Webhook), TestFlight 테스트 대기
