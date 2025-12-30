@@ -117,6 +117,16 @@ async def _check_revenuecat_entitlement(user_id: str) -> tuple[bool, bool]:
             entitlements = data.get("subscriber", {}).get("entitlements", {})
             premium = entitlements.get("premium")
 
+            # 🔍 디버그 로깅
+            logger.info(
+                "🔍 RevenueCat 구독 상태 확인",
+                extra={
+                    "user_id": user_id[:8] + "...",
+                    "entitlements_keys": list(entitlements.keys()),
+                    "has_premium": premium is not None,
+                }
+            )
+
             if not premium:
                 return (False, True)  # 구독 없음 (정상 확인)
 
@@ -135,12 +145,15 @@ async def _check_revenuecat_entitlement(user_id: str) -> tuple[bool, bool]:
 
         if response.status_code == 404:
             # ✅ 사용자 없음: 새 사용자, "비구독"으로 캐시 OK
+            logger.info(
+                "🔍 RevenueCat 사용자 없음 (404)",
+                extra={"user_id": user_id[:8] + "..."}
+            )
             return (False, True)
 
         # ❌ 4xx/5xx 오류: 캐시하지 않음 (일시적 장애 가능성)
         logger.warning(
-            "RevenueCat API 응답 오류",
-            extra={"status": response.status_code, "user_id": user_id},
+            f"🔍 RevenueCat API 응답 오류: status={response.status_code}, user={user_id[:8]}..., body={response.text[:200]}"
         )
         return (False, False)
 
