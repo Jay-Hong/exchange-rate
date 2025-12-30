@@ -103,6 +103,7 @@ class NotificationSettingRequest(BaseModel):
     currency: CurrencyEnum = Field(..., description="통화쌍")
     condition: ConditionEnum = Field(..., description="조건 (above: 이상, below: 이하)")
     threshold: float = Field(..., gt=0, description="목표 환율")
+    is_enabled: bool = Field(default=True, description="활성화 여부 (기본: True)")
 
 
 class NotificationSettingResponse(BaseModel):

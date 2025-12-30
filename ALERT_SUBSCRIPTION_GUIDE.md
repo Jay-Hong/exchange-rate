@@ -1674,6 +1674,7 @@ docker compose up -d --build
     - 은행: 하나은행
     - 통화: USD
     - 조건: 1475원 이상
+    - 활성화: ON (또는 OFF로 생성 가능)
     ↓
 [서버에 저장: POST /api/notification-settings]
     Headers: { "Authorization": "Bearer <Firebase ID Token>" }  ← 필수!
@@ -1681,7 +1682,8 @@ docker compose up -d --build
         "bank": "hana",
         "currency": "usd-krw",
         "condition": "above",
-        "threshold": 1475.0
+        "threshold": 1475.0,
+        "is_enabled": true
     }
     ↓
 [서버에서 ID Token 검증 → user_id 추출: "abc123"]
@@ -1692,6 +1694,16 @@ docker compose up -d --build
     |---------|------|----------|-----------|-----------|---------|-----------|
     | abc123  | hana | usd-krw  | above     | 1475.0    | true    | false     |
 ```
+
+**is_enabled 필드:**
+- 타입: `bool` (기본값 `true`, 생략 가능)
+- `null` 전송 시 422 에러 (Pydantic 유효성 검사 실패)
+
+**중복 처리 정책:**
+- 동일 조건 (bank + currency + condition + threshold) 알림 존재 시:
+  - 새로 생성하지 않고 기존 설정의 `enabled` 상태만 업데이트
+  - `is_enabled=true` → `triggered=false` 초기화 (재알림 가능)
+  - `is_enabled=false` → `triggered` 유지 ("발송됨" 상태 보존)
 
 **보안 핵심:** 클라이언트는 user_id를 보내지 않음. 서버가 ID Token에서 직접 추출.
 

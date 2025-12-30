@@ -1142,11 +1142,15 @@ async def create_notification_setting(
             "bank": "hana",
             "currency": "usd-krw",
             "condition": "above",
-            "threshold": 1475.0
+            "threshold": 1475.0,
+            "is_enabled": true
         }
 
     Note:
-        bank, currency, condition은 Enum으로 자동 검증됨
+        - bank, currency, condition은 Enum으로 자동 검증됨
+        - is_enabled 생략 시 기본값 true
+        - 동일 조건(bank, currency, condition, threshold)의 알림이 이미 있으면
+          기존 설정의 enabled 상태만 업데이트 (중복 생성 방지)
     """
     user_id = await verify_firebase_token(request)
 
@@ -1163,7 +1167,8 @@ async def create_notification_setting(
             bank=body.bank.value,
             currency=body.currency.value,
             condition=body.condition.value,
-            threshold=body.threshold
+            threshold=body.threshold,
+            is_enabled=body.is_enabled
         )
 
         logger.info(
@@ -1174,7 +1179,8 @@ async def create_notification_setting(
                 "bank": body.bank.value,
                 "currency": body.currency.value,
                 "condition": body.condition.value,
-                "threshold": body.threshold
+                "threshold": body.threshold,
+                "is_enabled": body.is_enabled
             }
         )
 

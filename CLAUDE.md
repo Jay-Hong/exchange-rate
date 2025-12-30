@@ -339,6 +339,29 @@ scheduler.add_job(
 - `PUT /api/notification-settings/{id}` - 알림 설정 수정 (토글 ON/OFF)
 - `DELETE /api/notification-settings/{id}` - 알림 설정 삭제
 
+**알림 생성 요청 (POST):**
+
+```json
+{
+  "bank": "hana",
+  "currency": "usd-krw",
+  "condition": "above",
+  "threshold": 1475.0,
+  "is_enabled": true
+}
+```
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `is_enabled` | `bool` | 선택 | 활성화 여부 (기본값 `true`, `null` 전송 시 422 에러) |
+
+**중복 처리 정책:**
+
+- 동일 조건 (bank + currency + condition + threshold) 알림 존재 시:
+  - 새로 생성하지 않고 기존 설정의 `enabled` 상태만 업데이트
+  - `is_enabled=true` → `triggered=false` 초기화 (재알림 가능)
+  - `is_enabled=false` → `triggered` 유지 ("발송됨" 상태 보존)
+
 **1회성 알림 동작:**
 
 - 알림 발송 시 자동 비활성화 (`enabled=false, triggered=true`)

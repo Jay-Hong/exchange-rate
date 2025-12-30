@@ -727,7 +727,8 @@ def create_notification_setting(
     bank: str,
     currency: str,
     condition: str,
-    threshold: float
+    threshold: float,
+    is_enabled: bool = True
 ) -> models.NotificationSetting:
     """
     알림 설정 생성 (중복 방지)
@@ -739,13 +740,16 @@ def create_notification_setting(
         currency: 통화쌍 (예: 'usd-krw')
         condition: 'above' or 'below'
         threshold: 임계값
+        is_enabled: 활성화 여부 (기본: True)
 
     Returns:
         NotificationSetting 객체
 
     Notes:
         - 같은 (user_id, bank, currency, condition, threshold) 조합이 있으면
-          기존 설정을 활성화하고 반환 (중복 푸시 방지)
+          기존 설정을 업데이트하고 반환 (중복 푸시 방지)
+        - is_enabled=True로 재활성화할 때만 triggered 초기화 (재알림 가능)
+        - is_enabled=False면 triggered 유지 ("발송됨" 상태 보존)
     """
     # 중복 체크: 같은 조건의 알림 설정이 있는지 확인
     existing = db.query(models.NotificationSetting).filter(
@@ -757,21 +761,27 @@ def create_notification_setting(
     ).first()
 
     if existing:
-        # 기존 설정 활성화 및 triggered 초기화 (재알림 가능하도록)
-        existing.enabled = True
-        existing.triggered = False
-        existing.last_notified_at = None
-        existing.last_notified_rate = None
+        # 기존 설정 업데이트
+        existing.enabled = is_enabled
+        if is_enabled:
+            # True로 재활성화할 때만 triggered 초기화 (재알림 가능)
+            existing.triggered = False
+            existing.last_notified_at = None
+            existing.last_notified_rate = None
+        # False면 triggered 유지 ("발송됨" 상태 보존)
         existing.updated_at = models.get_kst_now()
         db.commit()
         db.refresh(existing)
+        action = "알림 설정 재활성화 (중복)" if is_enabled else "알림 설정 비활성화 (중복)"
         logger.info(
-            "알림 설정 재활성화 (중복)",
+            action,
             extra={
                 "user_id": user_id[:8] + "...",
                 "setting_id": existing.id,
                 "bank": bank,
-                "currency": currency
+                "currency": currency,
+                "is_enabled": is_enabled,
+                "triggered_reset": is_enabled
             }
         )
         return existing
@@ -783,7 +793,7 @@ def create_notification_setting(
         currency=currency,
         condition=condition,
         threshold=threshold,
-        enabled=True,
+        enabled=is_enabled,
         triggered=False
     )
     db.add(setting)
@@ -798,6 +808,7 @@ def create_notification_setting(
             "currency": currency,
             "condition": condition,
             "threshold": threshold,
+            "is_enabled": is_enabled,
             "setting_id": setting.id
         }
     )
