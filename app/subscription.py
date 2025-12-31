@@ -3,6 +3,7 @@
 # 표준 라이브러리
 from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
+from enum import Enum
 import logging
 from typing import Optional
 
@@ -20,6 +21,7 @@ REVENUECAT_API_URL = "https://api.revenuecat.com/v1"
 CACHE_MAX_SIZE = 1000
 CACHE_TTL = timedelta(minutes=5)
 CACHE_STALE_TTL = timedelta(hours=1)
+PENDING_TTL = timedelta(seconds=12)
 
 
 class EntitlementCache:
@@ -73,6 +75,36 @@ class EntitlementCache:
 _cache = EntitlementCache()
 
 
+class PendingCache:
+    """구독 상태 확인 중(pending) TTL 캐시."""
+
+    def __init__(self):
+        self._cache: dict[str, datetime] = {}
+
+    def state(self, user_id: str) -> str:
+        expires_at = self._cache.get(user_id)
+        if not expires_at:
+            return "none"
+        if datetime.now(timezone.utc) <= expires_at:
+            return "active"
+        return "expired"
+
+    def mark(self, user_id: str) -> None:
+        self._cache[user_id] = datetime.now(timezone.utc) + PENDING_TTL
+
+    def clear(self, user_id: str) -> None:
+        self._cache.pop(user_id, None)
+
+
+_pending = PendingCache()
+
+
+class PremiumStatus(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    PENDING = "pending"
+
+
 def invalidate_user_cache(user_id: str) -> None:
     """
     사용자 캐시 무효화 (Webhook에서 호출).
@@ -83,6 +115,7 @@ def invalidate_user_cache(user_id: str) -> None:
     if not user_id:
         return
     _cache.invalidate(user_id)
+    _pending.clear(user_id)
 
 
 async def _check_revenuecat_entitlement(user_id: str) -> tuple[bool, bool]:
@@ -150,33 +183,52 @@ async def _check_revenuecat_entitlement(user_id: str) -> tuple[bool, bool]:
         return (False, False)
 
 
-async def verify_premium(user_id: str) -> bool:
+async def verify_premium_status(user_id: str) -> PremiumStatus:
     """
-    Premium 구독 여부 확인 (5분 캐시, LRU 1000명, Stale fallback).
+    Premium 구독 상태 확인 (5분 캐시, LRU 1000명, Stale fallback).
 
     Stale cache 정책으로 장애 시에도 기존 유료 사용자 보호:
     - 신선한 캐시 → 즉시 반환
     - Stale 캐시 + API 성공 → 새 값 반환 및 캐시 갱신
     - Stale 캐시 + API 오류 → stale 값 반환 (유료 사용자 보호)
-    - 캐시 없음 + API 오류 → False 반환 (어쩔 수 없음)
+    - 캐시 없음 + API 오류 → PENDING (재시도 필요)
     """
     if not user_id:
-        return False
+        return PremiumStatus.INACTIVE
 
     # 1. 캐시 확인
     cached_value, is_fresh = _cache.get(user_id)
 
     # 신선한 캐시가 있으면 즉시 반환
     if cached_value is not None and is_fresh:
-        return cached_value
+        return PremiumStatus.ACTIVE if cached_value else PremiumStatus.INACTIVE
 
     # 2. RevenueCat API 호출 (캐시 없거나 stale인 경우)
     is_premium, should_cache = await _check_revenuecat_entitlement(user_id)
 
     # 3. API 성공 시 캐시 갱신
     if should_cache:
-        _cache.set(user_id, is_premium)
-        return is_premium
+        if is_premium:
+            _pending.clear(user_id)
+            _cache.set(user_id, True)
+            return PremiumStatus.ACTIVE
+
+        # is_premium == False
+        if cached_value is not None:
+            _pending.clear(user_id)
+            _cache.set(user_id, False)
+            return PremiumStatus.INACTIVE
+
+        pending_state = _pending.state(user_id)
+        if pending_state == "active":
+            return PremiumStatus.PENDING
+        if pending_state == "expired":
+            _pending.clear(user_id)
+            _cache.set(user_id, False)
+            return PremiumStatus.INACTIVE
+
+        _pending.mark(user_id)
+        return PremiumStatus.PENDING
 
     # 4. API 오류 시: stale 캐시가 있으면 사용 (유료 사용자 보호)
     if cached_value is not None:
@@ -184,14 +236,22 @@ async def verify_premium(user_id: str) -> bool:
             "API 오류, stale 캐시 사용",
             extra={"user_id": user_id, "stale_value": cached_value},
         )
-        return cached_value
+        return PremiumStatus.ACTIVE if cached_value else PremiumStatus.INACTIVE
 
-    # 5. 캐시도 없고 API도 실패 → False (어쩔 수 없음)
-    return is_premium
+    # 5. 캐시도 없고 API도 실패 → PENDING
+    if _pending.state(user_id) == "none":
+        _pending.mark(user_id)
+    return PremiumStatus.PENDING
+
+
+async def verify_premium(user_id: str) -> bool:
+    return await verify_premium_status(user_id) == PremiumStatus.ACTIVE
 
 
 __all__ = [
     "verify_premium",
+    "verify_premium_status",
+    "PremiumStatus",
     "invalidate_user_cache",
     "EntitlementCache",
 ]

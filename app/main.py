@@ -26,11 +26,13 @@ from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
 from app.notifications.fcm import init_firebase, is_firebase_initialized
-from app.subscription import verify_premium
+from app.subscription import verify_premium_status, PremiumStatus
 from app.webhooks import router as webhooks_router
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.main")
+
+PENDING_RETRY_AFTER_SECONDS = "5"
 
 # HTTP Basic Auth 설정
 security = HTTPBasic()
@@ -49,6 +51,27 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
+
+
+async def require_premium(user_id: str, allow_empty: bool) -> bool:
+    premium_status = await verify_premium_status(user_id)
+
+    if premium_status == PremiumStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Subscription status pending. Retry later.",
+            headers={"Retry-After": PENDING_RETRY_AFTER_SECONDS},
+        )
+
+    if premium_status == PremiumStatus.INACTIVE:
+        if allow_empty:
+            return False
+        raise HTTPException(
+            status_code=403,
+            detail="Premium subscription required",
+        )
+
+    return True
 
 
 # DB 테이블 생성
@@ -1154,11 +1177,7 @@ async def create_notification_setting(
     """
     user_id = await verify_firebase_token(request)
 
-    if not await verify_premium(user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Premium subscription required"
-        )
+    await require_premium(user_id, allow_empty=False)
 
     try:
         setting = crud.create_notification_setting(
@@ -1208,7 +1227,7 @@ async def get_notification_settings(
     """
     user_id = await verify_firebase_token(request)
 
-    if not await verify_premium(user_id):
+    if not await require_premium(user_id, allow_empty=True):
         return schemas.NotificationSettingsListResponse(settings=[], total_count=0)
 
     settings = crud.get_notification_settings(db=db, user_id=user_id)
@@ -1248,11 +1267,7 @@ async def update_notification_setting(
     """
     user_id = await verify_firebase_token(request)
 
-    if not await verify_premium(user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Premium subscription required"
-        )
+    await require_premium(user_id, allow_empty=False)
 
     setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
 
@@ -1295,11 +1310,7 @@ async def delete_notification_setting(
     """
     user_id = await verify_firebase_token(request)
 
-    if not await verify_premium(user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Premium subscription required"
-        )
+    await require_premium(user_id, allow_empty=False)
 
     setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
 
