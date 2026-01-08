@@ -589,6 +589,8 @@ final class SubscriptionManager {
 | `GET /api/notification-settings` | ✅ 빈 목록 | ✅ 설정 목록 | 조회만 허용 |
 | `GET /api/rates`, `WS /ws` | ✅ 허용 | ✅ 허용 | 아래 참고 |
 
+> 💡 **계정 삭제**: `DELETE /api/user/me` 호출 시 해당 사용자의 알림 데이터(`notification_settings`, `notification_logs`, `user_devices`)가 함께 삭제됩니다.
+
 > **API vs Locked Preview 정책:**
 >
 > - **서버 API**: `/api/rates`, `WS /ws`는 비구독자에게도 **열려 있음** (기술적으로 접근 가능)

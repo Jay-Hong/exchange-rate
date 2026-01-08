@@ -252,7 +252,7 @@ scheduler.add_job(
 
 **Selenium Queue 관리:**
 - **Request 우선 전략**: Queue 압력 대폭 감소 (대부분 Request 성공)
-- **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → ibk → nh → sc → shinhan)
+- **우선순위 기반 실행**: 빠른 크롤러 우선 (hana → shinhan → nh → ibk → sc)
 - **개별 타임아웃**: 크롤러별 45초 통일 (실시간성 우선)
 - **자동 재시도**: 실패 시 우선순위 +1000으로 재실행
 - **중복 작업 방지**: Worker 처리 중 + Queue 대기 중 체크
@@ -328,6 +328,14 @@ scheduler.add_job(
 - `GET /api/investing/{pair}` - Investing.com 특정 통화
 - `GET /api/banks/{pair}` - 모든 은행 특정 통화
 - `GET /health` - 헬스체크
+
+### 계정 API (Apple App Store 5.1.1(v) 준수)
+
+- `DELETE /api/user/me` - 사용자 계정 데이터 삭제 (Firebase ID Token 필요)
+  - 삭제 대상: `notification_logs`, `notification_settings`, `user_devices`
+  - 응답: `204 No Content`
+  - 오류: `401`(토큰 만료/무효/철회), `500`(서버 처리 오류), `503`(Firebase 연결 오류)
+  - 클라이언트 권장: 401 시 재인증 후 재시도, 서버 삭제 완료 후 Firebase Auth 삭제
 
 ### 알림 API
 
@@ -624,7 +632,7 @@ logger.info("⚡️ 환율 변경", extra={"pair": "usd-krw", "rate": 1340.5})
 logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 ```
 
-**관리**: 로테이션 10MB, 백업 5개, 10일 자동 삭제
+**관리**: 로테이션 10MB, 백업 3개, 10일 자동 삭제
 
 **상세 가이드**: `app/logging.py`, `app/admin/log_reader.py`
 

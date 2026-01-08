@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.9.0] - 2026-01-08
+
+### Added - Account Deletion API (Apple App Store 5.1.1(v) Compliance)
+
+- **Account deletion endpoint**: `DELETE /api/user/me`
+  - Deletes all user data: `notification_logs`, `notification_settings`, `user_devices`
+  - Response: `204 No Content` on success
+  - Security: `check_revoked=True` for destructive operations
+- **Enhanced Firebase token verification**
+  - New parameter: `check_revoked` for revoked token detection
+  - New error handling: `RevokedIdTokenError` → 401, `CertificateFetchError` → 503
+  - Network error handling: `TransportError`, `RequestException` → 503
 
 ### Planned
 - Dynamic priority adjustment based on crawler success rate (Phase 2)
@@ -393,6 +404,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.9.0 | 2026-01-08 | Account Deletion API (Apple App Store 5.1.1(v) Compliance) |
 | 1.8.0 | 2025-12-02 | 24-hour graph + WebSocket integration + Band Chart |
 | 1.7.0 | 2025-11-27 | Redis broadcast cache + Change detection |
 | 1.6.0 | 2025-11-10 | 3-Tier scheduling + Crawler statistics |
@@ -502,4 +514,4 @@ Please update this CHANGELOG when making significant changes following these gui
 
 ---
 
-**Last Updated**: 2025-12-02
+**Last Updated**: 2026-01-09

@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional
 
 # 서드파티 라이브러리
 from fastapi import FastAPI, Request, HTTPException, Depends, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -1000,20 +1000,27 @@ async def get_graph_data(currency: str):
 # Phase 2: Firebase Auth + FCM 알림 API
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def verify_firebase_token(request: Request) -> str:
+async def verify_firebase_token(request: Request, check_revoked: bool = False) -> str:
     """
     Firebase ID Token 검증 및 user_id 추출
 
     Headers:
         Authorization: Bearer <Firebase ID Token>
 
+    Args:
+        request: FastAPI Request 객체
+        check_revoked: True면 revoke된 토큰도 차단 (파괴적 작업에 권장)
+
     Returns:
         user_id (Firebase uid)
 
     Raises:
-        HTTPException 401: 인증 실패
+        HTTPException 401: 인증 실패 (만료, 무효, revoke 포함)
+        HTTPException 503: Firebase 미초기화
     """
     from firebase_admin import auth
+    from google.auth import exceptions as google_auth_exceptions
+    import requests
 
     if not is_firebase_initialized():
         raise HTTPException(
@@ -1031,13 +1038,21 @@ async def verify_firebase_token(request: Request) -> str:
     token = auth_header.replace("Bearer ", "")
 
     try:
-        decoded_token = auth.verify_id_token(token)
+        decoded_token = auth.verify_id_token(token, check_revoked=check_revoked)
         user_id = decoded_token["uid"]
         return user_id
+    except auth.RevokedIdTokenError:
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     except auth.ExpiredIdTokenError:
         raise HTTPException(status_code=401, detail="Token expired")
     except auth.InvalidIdTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    except auth.CertificateFetchError as e:
+        logger.warning("Firebase 인증서 조회 실패", extra={"error": str(e)})
+        raise HTTPException(status_code=503, detail="Firebase auth unavailable")
+    except (google_auth_exceptions.TransportError, requests.exceptions.RequestException) as e:
+        logger.warning("Firebase 네트워크 오류", extra={"error": str(e)})
+        raise HTTPException(status_code=503, detail="Firebase auth unavailable")
     except Exception as e:
         logger.warning("Firebase 토큰 검증 실패", extra={"error": str(e)})
         raise HTTPException(status_code=401, detail="Token verification failed")
@@ -1325,3 +1340,82 @@ async def delete_notification_setting(
     )
 
     return schemas.DeleteResponse(success=True, message="Setting deleted")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 계정 삭제 API (Apple App Store 5.1.1(v) 준수)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.delete("/api/user/me", status_code=204)
+async def delete_user_account(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    사용자 계정 삭제 (모든 관련 데이터 삭제)
+
+    Apple App Store 가이드라인 5.1.1(v) 준수를 위한 계정 삭제 API.
+    해당 user_id와 연결된 모든 FXi 서버 데이터를 삭제합니다.
+
+    삭제 대상:
+    - NotificationLog: 알림 발송 기록
+    - NotificationSetting: 환율 알림 설정
+    - UserDevice: FCM 토큰 (푸시 알림용)
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+
+    Returns:
+        204 No Content: 삭제 성공
+
+    Raises:
+        401: Firebase 토큰 검증 실패
+        500: 데이터베이스 오류
+
+    Note:
+        - 구독 상태와 무관하게 삭제 가능 (require_premium 호출 안 함)
+        - iOS에서 Firebase Auth 삭제 전에 호출해야 함
+        - check_revoked=True로 revoke된 토큰 차단 (보안 강화)
+    """
+    # 파괴적 작업이므로 revoke된 토큰도 차단
+    user_id = await verify_firebase_token(request, check_revoked=True)
+
+    try:
+        # 삭제 순서: 외래 키 의존성 없으므로 순서 무관하나, 로그 먼저 삭제
+        deleted_logs = db.query(models.NotificationLog).filter(
+            models.NotificationLog.user_id == user_id
+        ).delete(synchronize_session=False)
+
+        deleted_settings = db.query(models.NotificationSetting).filter(
+            models.NotificationSetting.user_id == user_id
+        ).delete(synchronize_session=False)
+
+        deleted_devices = db.query(models.UserDevice).filter(
+            models.UserDevice.user_id == user_id
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+        logger.info(
+            "🗑️ 계정 삭제 완료",
+            extra={
+                "event": "account_deletion",
+                "user_id": user_id[:8] + "...",  # 보안: UID 일부만 로깅
+                "deleted_logs": deleted_logs,
+                "deleted_settings": deleted_settings,
+                "deleted_devices": deleted_devices
+            }
+        )
+
+        return Response(status_code=204)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            "❌ 계정 삭제 실패",
+            extra={"event": "account_deletion_failed", "error": str(e)}
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete user data"
+        )

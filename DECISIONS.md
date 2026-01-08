@@ -476,9 +476,9 @@ scheduler.add_job(
 **PriorityQueue + 개별 타임아웃 채택**
 
 **근거:**
-1. **실시간성 우선**: 빠른 크롤러(hana, ibk)가 먼저 실행
+1. **실시간성 우선**: 빠른 크롤러(hana, shinhan)가 먼저 실행
 2. **메모리 유지**: Worker 1개 유지 (동시 Chrome 1개)
-3. **느린 크롤러 격리**: sc, shinhan은 타임아웃으로 빠르게 실패
+3. **느린 크롤러 격리**: ibk, sc는 타임아웃으로 빠르게 실패
 
 ### 구현 상세
 
@@ -488,11 +488,11 @@ selenium_queue = asyncio.PriorityQueue()
 
 # 우선순위 설정 (낮을수록 높은 우선순위)
 SELENIUM_PRIORITY_MAP = {
-    "hana": 1,     # 가장 빠름 (Request 폴백 있음)
-    "ibk": 2,
-    "nh": 3,
-    "sc": 4,
-    "shinhan": 5   # 가장 느림
+    "hana": 0,     # 가장 빠름 (Request 폴백 있음)
+    "shinhan": 1,  # 빠름
+    "nh": 2,       # 중간
+    "ibk": 3,      # 느림
+    "sc": 4        # 가장 느림
 }
 
 # Queue에 추가
@@ -546,12 +546,12 @@ Queue: [sc(150초), shinhan(38초), ibk(55초)]
 
 **PriorityQueue + Timeout:**
 ```
-Queue: [sc(우선순위 4), shinhan(5), ibk(2)]
-00:00 - ibk 시작 (우선순위 2, 가장 높음)
-00:45 - ibk 완료
-00:45 - sc 시작 (우선순위 4)
-01:30 - sc 타임아웃 (45초) → 실패 처리 → 재시도 Queue 추가
-01:30 - shinhan 시작
+Queue: [sc(우선순위 4), shinhan(1), ibk(3)]
+00:00 - shinhan 시작 (우선순위 1, 가장 높음)
+00:45 - shinhan 완료
+00:45 - ibk 시작 (우선순위 3)
+01:30 - ibk 타임아웃 (45초) → 실패 처리 → 재시도 Queue 추가
+01:30 - sc 시작
 ```
 
 ### 트레이드오프

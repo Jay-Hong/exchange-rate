@@ -63,7 +63,7 @@ Secret API Key는 자동 생성되지 않으며, 아래 절차로 직접 생성�
 - 캐시 가능한 응답: 200, 404만 캐시
 - 캐시 불가 응답: 4xx/5xx (401, 429 포함)
 - API 오류 + 캐시 존재: stale 값 반환 (유료 사용자 보호)
-- API 오류 + 캐시 없음: False 반환 (어쩔 수 없음)
+- API 오류 + 캐시 없음: PENDING 반환 → 503 + `Retry-After: 5초` (API 정상화 후 pending TTL 12초 만료 시 INACTIVE)
 
 주의:
 - 캐시는 프로세스 로컬이다. 현재 Docker는 `--workers 1` 고정이지만,
@@ -118,11 +118,14 @@ RevenueCat 응답에서 `subscriber.entitlements.premium`을 조회한다.
   - `get(user_id) -> (value|None, is_fresh)`
   - `set(user_id, is_premium)`
   - `invalidate(user_id)`
-- `verify_premium(user_id) -> bool`
+- `verify_premium_status(user_id) -> PremiumStatus`
   - 캐시 조회
   - 없거나 stale이면 RevenueCat API 호출
   - 200/404만 캐시, 4xx/5xx는 캐시하지 않음
-  - API 실패 시 stale 값 fallback
+  - API 실패 + stale 캐시 → stale 값 반환 (유료 사용자 보호)
+  - API 실패 + 캐시 없음 → PENDING 반환 (API 정상화 후 TTL 만료 시 INACTIVE)
+- `verify_premium(user_id) -> bool`
+  - `verify_premium_status` 래퍼 (ACTIVE면 True)
 - `invalidate_user_cache(user_id)`
   - Webhook에서 호출
 
