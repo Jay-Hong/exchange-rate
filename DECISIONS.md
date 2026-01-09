@@ -2001,6 +2001,155 @@ function detectDataGap(currency) {
 
 ---
 
+## ADR-017: MIBANK 환율 파싱 - Position 기반 vs Currency-Code 기반
+
+**날짜:** 2026-01-10
+**상태:** 수락됨
+
+### 상황
+
+MIBANK 환율 데이터 파싱 시 **잘못된 환율이 저장되는 버그** 발생:
+- 위치 기반(position-based) CSS Selector 사용: `tr:nth-child(1)`, `tr:nth-child(2)`, ...
+- MIBANK 테이블의 통화 순서가 변경되면 USD 환율에 다른 통화 값이 저장됨
+- 9개 은행 크롤러 모두 동일한 방식으로 영향받음
+
+### 고려 사항
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **Position 기반** (기존) | 구현 간단, CSS Selector만으로 추출 | 테이블 순서 변경 시 잘못된 데이터 저장 |
+| **Currency-Code 기반** (채택) | 순서 변경에 안전, 명시적 통화 매칭 | 파싱 로직 복잡도 증가 |
+| **개별 수정** | 최소 변경 | 9개 크롤러 각각 수정 필요, 일관성 없음 |
+
+### 결정
+
+**Currency-Code 기반 파싱 + 3단계 검증 시스템 도입**
+
+**핵심 변경:**
+
+1. **통화 코드 추출**: `href="...?currency=USD"` 파라미터에서 통화 코드 추출
+2. **매매기준율 컬럼**: 마지막 셀(Last Cell)을 매매기준율로 사용
+3. **공통 함수 중앙화**: `app/crawlers/utils.py`에 `crawl_mibank_rates()` 추가
+4. **공통 상수**: `app/crawlers/constants.py`에 `MIBANK_REQUIRED_CODES/PAIRS/RANGES` 추가
+
+**3단계 검증 시스템:**
+
+```
+1. 완전성 검증 (Completeness)
+   - USD/JPY/EUR 3개 필수 통화 누락 시 실패
+   - require_all=True 옵션으로 제어
+
+2. 절대 범위 검증 (Absolute Range)
+   - USD: 1,000~2,000원
+   - JPY: 600~1,400원 (100엔당)
+   - EUR: 1,100~2,200원
+   - 범위 초과 시 ValueError
+
+3. 동적 변동률 검증 (Deviation Check)
+   - 이전 저장값과 비교 (시간 gap 고려)
+   - soft_fail: 경고 후 저장 (마지막 폴백) 또는 Selenium 재검증
+   - hard_fail: 저장 보류
+```
+
+**은행별 적용 패턴:**
+
+| 패턴 | 은행 | mibank 위치 | soft_fail 처리 |
+|------|------|------------|----------------|
+| **Primary MIBANK** | SC, NH, Shinhan | 1차 시도 | Selenium 재검증 |
+| **Last Fallback** | IBK, BS, Citi, Woori, KB, Hana | 마지막 폴백 | 경고 후 저장 |
+
+**Timezone 버그 수정:**
+
+```python
+# 문제: timezone-naive timestamp와 aware timestamp 비교 시 오류
+# 해결: KST localize 후 차이 계산
+if prev_ts.tzinfo is None:
+    prev_ts = kst.localize(prev_ts)
+gap_minutes = (now - prev_ts).total_seconds() / 60
+```
+
+### 구현 상세
+
+**새 공통 함수 (`app/crawlers/utils.py`):**
+
+```python
+def crawl_mibank_rates(
+    url: str,
+    bank_name: str,
+    required_codes: tuple = ("USD", "JPY", "EUR"),
+    require_all: bool = True,
+) -> dict:
+    """통화코드 기반 MIBANK 환율 크롤링"""
+
+def validate_rate_ranges(rates: dict, ranges: dict):
+    """절대 범위 검증"""
+
+def evaluate_rate_deviation(rates: dict, last_rates_info: dict, now):
+    """동적 변동률 검증 (soft/hard fail)"""
+
+def get_dynamic_thresholds(minutes_gap: float) -> tuple:
+    """시간 gap에 따른 동적 threshold 반환"""
+```
+
+**은행별 얇은 래퍼 패턴:**
+
+```python
+# 예: app/crawlers/sc.py
+def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
+    rates = crawl_mibank_rates(MIBANK_SC_URL, BANK_NAME, ...)
+    validate_rate_ranges(rates, MIBANK_RATE_RANGES)
+    last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, ...)
+    eval_result = evaluate_rate_deviation(rates, last_info, models.get_kst_now())
+    return rates, eval_result
+```
+
+**DB 조회 유틸 추가 (`app/crud.py`):**
+
+```python
+def get_last_bank_rates_with_ts(db, bank_name, pairs) -> dict:
+    """은행별 마지막 환율 + 타임스탬프 조회"""
+```
+
+### 트레이드오프
+
+**장점:**
+- 테이블 순서 변경에 100% 안전
+- 잘못된 데이터 저장 원천 차단 (3단계 검증)
+- 9개 크롤러 일관된 로직 적용
+- 공통 함수로 유지보수성 향상
+
+**단점:**
+- 파싱 로직 복잡도 증가 (href 파싱 + 코드 매칭)
+- 검증 단계로 인한 미세한 성능 오버헤드
+- 기존 MIBANK_SELECTORS 코드 제거 필요
+
+### 코드 정리
+
+**삭제된 코드:**
+- 9개 크롤러의 `MIBANK_SELECTORS` 딕셔너리 전체 삭제
+
+**DEPRECATED 표시된 함수:**
+- `sc.py`: `crawl_and_save_routine()` (Selenium 전용, requests 미사용)
+- `nh.py`: `crawl_and_save_routine()` (Selenium 전용)
+- `shinhan.py`: `crawl_and_save_routine()` (SPA 페이지, Selenium 필수)
+- `ibk.py`: `crawl_and_save_routine()` (`try_crawl_with_requests()`로 대체)
+
+### 향후 재검토 시점
+
+- MIBANK 웹사이트 구조 변경 시 (href 파라미터명 변경 등)
+- 새 통화 추가 시 (CNY 등) - `MIBANK_REQUIRED_CODES` 확장
+
+### 관련 결정
+
+- [ADR-006](#adr-006-selenium-크롤러-동시-실행-제어---semaphore-vs-asyncio-queue): Selenium Queue 순차 실행
+- [ADR-013](#adr-013-4단계-모드-환율-고시-스케줄-기반-최적화): 4단계 모드 스케줄링
+
+### 상세 문서
+
+- [CRAWLERS.md](CRAWLERS.md): 크롤러별 mibank 사용 패턴 (조건부/무조건)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2018,3 +2167,4 @@ function detectDataGap(currency) {
 - 2025-11-17: ADR-014 작성 (HTTPS/SSL 도입 - Let's Encrypt vs Cloudflare vs Self-Signed)
 - 2025-12-02: ADR-015 작성 (WebSocket Graph Integration vs Incremental API - 모바일 최적화)
 - 2025-12-05: ADR-016 작성 (인증/알림 인프라 - AWS RDS + Firebase Auth + FCM)
+- 2026-01-10: ADR-017 작성 (MIBANK 환율 파싱 - Currency-Code 기반 + 3단계 검증)

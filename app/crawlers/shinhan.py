@@ -12,10 +12,23 @@ from selenium.webdriver.support import expected_conditions as EC
 from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
-from app import crud
+from app import crud, models
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_LONG
-from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context
+from app.crawlers.constants import (
+    DEFAULT_TIMEOUT,
+    HEADERS,
+    MIBANK_RATE_RANGES,
+    MIBANK_REQUIRED_CODES,
+    MIBANK_REQUIRED_PAIRS,
+    SELENIUM_WAIT_TIMEOUT_LONG,
+)
+from app.crawlers.utils import (
+    crawl_mibank_rates,
+    evaluate_rate_deviation,
+    parse_rate_text,
+    selenium_driver_context,
+    validate_rate_ranges,
+)
 
 BANK_NAME = 'shinhan'
 
@@ -37,31 +50,69 @@ SECOND_SHINHAN_BANK_SELECTORS = {
 
 MIBANK_SHINHAN_CODE = '088'
 MIBANK_SHINHAN_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_SHINHAN_CODE
-MIBANK_SELECTORS = {
-    'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
-    'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
-    'eur-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(4) > td.right.counter.rollsty01',
-    # 'cny-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(1) > td.right.counter.rollsty01',
-}
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
+
+def _crawl_mibank_shinhan(db: Session) -> tuple[dict, dict]:
+    rates = crawl_mibank_rates(
+        MIBANK_SHINHAN_URL,
+        BANK_NAME,
+        required_codes=MIBANK_REQUIRED_CODES,
+        require_all=True,
+    )
+
+    validate_rate_ranges(rates, MIBANK_RATE_RANGES)
+
+    last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
+    eval_result = evaluate_rate_deviation(rates, last_info, models.get_kst_now())
+    return rates, eval_result
+
 
 def crawl_and_save_shinhan_bank_exchange_rates():
     """신한은행 환율 크롤링"""
     db = SessionLocal()
     try:
-        logger.info(f"MIBANK_SHINHAN_URL 시도", extra={"bank": BANK_NAME})
-        crawl_and_save_routine(MIBANK_SHINHAN_URL, MIBANK_SELECTORS, db)
+        logger.info("MIBANK_SHINHAN_URL 시도", extra={"bank": BANK_NAME})
+        rates, eval_result = _crawl_mibank_shinhan(db)
+
+        if eval_result["soft_fail"]:
+            logger.warning(
+                "mibank 변동률 의심 → Selenium 재검증",
+                extra={"bank": BANK_NAME, "details": eval_result["details"]},
+            )
+            try:
+                crawl_and_save_routine_selenium(SHINHAN_BANK_URL, SHINHAN_BANK_SELECTORS, db)
+                return
+            except Exception as e:
+                try:
+                    crawl_and_save_routine_selenium(SECOND_SHINHAN_BANK_URL, SECOND_SHINHAN_BANK_SELECTORS, db)
+                    return
+                except Exception as e2:
+                    logger.warning(
+                        "Selenium 재검증 실패",
+                        extra={"bank": BANK_NAME, "error": str(e2)[:100]},
+                    )
+                    if eval_result["hard_fail"]:
+                        logger.error(
+                            "mibank hard_fail + Selenium 실패 → 저장 보류",
+                            extra={"bank": BANK_NAME},
+                        )
+                        return
+
+        crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
     except Exception as e:
-        logger.exception("MIBANK_SHINHAN_URL 크롤링 실패", extra={"url": MIBANK_SHINHAN_URL})
+        logger.exception(
+            "MIBANK_SHINHAN_URL 크롤링 실패",
+            extra={"url": MIBANK_SHINHAN_URL, "error": str(e)[:100]},
+        )
         try:
-            logger.info(f"SHINHAN_BANK_URL 시도", extra={"bank": BANK_NAME})
+            logger.info("SHINHAN_BANK_URL 시도", extra={"bank": BANK_NAME})
             crawl_and_save_routine_selenium(SHINHAN_BANK_URL, SHINHAN_BANK_SELECTORS, db)
         except Exception as e:
             logger.exception("SHINHAN_BANK_URL 크롤링 실패", extra={"url": SHINHAN_BANK_URL})
             try:
-                logger.info(f"SECOND_SHINHAN_BANK_URL 시도", extra={"bank": BANK_NAME})
+                logger.info("SECOND_SHINHAN_BANK_URL 시도", extra={"bank": BANK_NAME})
                 crawl_and_save_routine_selenium(SECOND_SHINHAN_BANK_URL, SECOND_SHINHAN_BANK_SELECTORS, db)
             except Exception as e:
                 logger.exception("SECOND_SHINHAN_BANK_URL 크롤링 실패", extra={"url": SECOND_SHINHAN_BANK_URL})
@@ -111,6 +162,12 @@ def crawl_and_save_routine_selenium(url: str, selectors: dict, db: Session) -> i
         raise
 
 
+# ─────────────────────────────────────────────────────────────
+# [DEPRECATED] 아래 함수는 현재 사용되지 않음
+# - 신한은행은 Selenium 전용 크롤러 (crawl_and_save_routine_selenium 사용)
+# - SPA 기반 페이지로 JavaScript 렌더링 필요 → requests 불가
+# - 추후 삭제 예정
+# ─────────────────────────────────────────────────────────────
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     """크롤링 + DB 저장 루틴 (변경 개수 반환)"""
     current_rates = {}

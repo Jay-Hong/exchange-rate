@@ -12,13 +12,23 @@
 # 표준 라이브러리
 import logging
 from contextlib import contextmanager
+from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 # 서드파티 라이브러리
+import requests
+from bs4 import BeautifulSoup
+from pytz import timezone
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 
 # 로컬 애플리케이션
-from app.crawlers.constants import SELENIUM_OPTIONS, SELENIUM_DRIVER_TIMEOUT
+from app.crawlers.constants import (
+    DEFAULT_TIMEOUT,
+    HEADERS,
+    SELENIUM_DRIVER_TIMEOUT,
+    SELENIUM_OPTIONS,
+)
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.crawler")
@@ -228,3 +238,141 @@ def is_mibank_rate_reliable() -> bool:
     hour = now.hour
 
     return (weekday in [0, 1, 2, 3, 4] and hour > 9)
+
+
+MIBANK_TABLE_SELECTOR = "div.box_contents1 table tbody"
+MIBANK_RATE_CELL_SELECTOR = "td.right.counter.rollsty01"
+MIBANK_DEFAULT_REQUIRED_CODES = ("USD", "JPY", "EUR")
+
+
+def _extract_mibank_currency_code(row) -> Optional[str]:
+    link = row.select_one('a[href*="currency="]')
+    if not link:
+        return None
+    href = link.get("href", "")
+    code = parse_qs(urlparse(href).query).get("currency", [None])[0]
+    return code.upper() if code else None
+
+
+def _extract_mibank_rate_text(row) -> Optional[str]:
+    cells = row.select(MIBANK_RATE_CELL_SELECTOR)
+    if not cells:
+        return None
+    # Last cell = base rate column on mibank
+    text = cells[-1].get_text(strip=True)
+    return text if text and text != "-" else None
+
+
+def crawl_mibank_rates(
+    url: str,
+    bank_name: str,
+    required_codes: tuple = MIBANK_DEFAULT_REQUIRED_CODES,
+    require_all: bool = True,
+) -> dict:
+    """
+    Crawl mibank rates using currency code from href query params.
+    """
+    response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    tbody = soup.select_one(MIBANK_TABLE_SELECTOR)
+    if not tbody:
+        raise RuntimeError("mibank 테이블을 찾을 수 없음")
+
+    required_set = {code.upper() for code in required_codes}
+    found_codes = []
+    current_rates = {}
+
+    for row in tbody.find_all("tr"):
+        code = _extract_mibank_currency_code(row)
+        if not code:
+            continue
+        found_codes.append(code)
+        if code not in required_set:
+            continue
+
+        rate_text = _extract_mibank_rate_text(row)
+        if not rate_text:
+            continue
+        current_rates[f"{code.lower()}-krw"] = parse_rate_text(rate_text)
+
+    logger.debug(
+        "mibank 수집 통화",
+        extra={"bank": bank_name, "found": found_codes, "captured": list(current_rates.keys())},
+    )
+
+    if require_all:
+        missing = [
+            f"{code.lower()}-krw"
+            for code in required_codes
+            if f"{code.lower()}-krw" not in current_rates
+        ]
+        if missing:
+            raise RuntimeError(f"mibank 필수 통화 누락: {missing}")
+
+    return current_rates
+
+
+def validate_rate_ranges(rates: dict, ranges: dict):
+    """
+    Validate rates are within absolute range.
+    """
+    for pair, rate in rates.items():
+        if pair not in ranges:
+            continue
+        low, high = ranges[pair]
+        if rate < low or rate > high:
+            raise ValueError(f"환율 범위 초과: {pair}={rate} ({low}~{high})")
+
+
+def get_dynamic_thresholds(minutes_gap: float) -> tuple:
+    if minutes_gap <= 10:
+        return 0.08, 0.20
+    if minutes_gap <= 60:
+        return 0.12, 0.25
+    if minutes_gap <= 180:
+        return 0.20, 0.30
+    return 0.30, 0.40
+
+
+def evaluate_rate_deviation(rates: dict, last_rates_info: dict, now):
+    """
+    Returns dict with soft/hard fail flags and details.
+    """
+    soft_fail = False
+    hard_fail = False
+    details = {}
+    kst = timezone('Asia/Seoul')
+
+    for pair, rate in rates.items():
+        last_info = last_rates_info.get(pair, {})
+        prev_rate = last_info.get("rate")
+        prev_ts = last_info.get("timestamp")
+
+        if not prev_rate or not prev_ts:
+            continue
+
+        # timezone-naive → KST 변환 (DB 저장값이 naive인 경우)
+        if prev_ts.tzinfo is None:
+            prev_ts = kst.localize(prev_ts)
+
+        gap_minutes = (now - prev_ts).total_seconds() / 60
+        soft_thr, hard_thr = get_dynamic_thresholds(gap_minutes)
+        pct_change = abs(rate - prev_rate) / prev_rate
+
+        details[pair] = {
+            "prev": prev_rate,
+            "now": rate,
+            "pct": pct_change,
+            "gap_min": gap_minutes,
+            "soft_thr": soft_thr,
+            "hard_thr": hard_thr,
+        }
+
+        if pct_change > soft_thr:
+            soft_fail = True
+        if pct_change > hard_thr:
+            hard_fail = True
+
+    return {"soft_fail": soft_fail, "hard_fail": hard_fail, "details": details}

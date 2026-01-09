@@ -9,10 +9,22 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
-from app import crud
+from app import crud, models
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
-from app.crawlers.utils import parse_rate_text, is_mibank_rate_reliable
+from app.crawlers.constants import (
+    DEFAULT_TIMEOUT,
+    HEADERS,
+    MIBANK_RATE_RANGES,
+    MIBANK_REQUIRED_CODES,
+    MIBANK_REQUIRED_PAIRS,
+)
+from app.crawlers.utils import (
+    crawl_mibank_rates,
+    evaluate_rate_deviation,
+    is_mibank_rate_reliable,
+    parse_rate_text,
+    validate_rate_ranges,
+)
 
 BANK_NAME = 'citi'
 
@@ -37,15 +49,25 @@ SECOND_CITI_BANK_SELECTORS = {
 
 MIBANK_CITI_CODE = '027'
 MIBANK_CITI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_CITI_CODE
-MIBANK_SELECTORS = {
-    'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
-    'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
-    'eur-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(4) > td.right.counter.rollsty01',
-    # 'cny-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(1) > td.right.counter.rollsty01',
-}
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
+
+
+def _crawl_mibank_citi(db: Session) -> tuple[dict, dict]:
+    rates = crawl_mibank_rates(
+        MIBANK_CITI_URL,
+        BANK_NAME,
+        required_codes=MIBANK_REQUIRED_CODES,
+        require_all=True,
+    )
+
+    validate_rate_ranges(rates, MIBANK_RATE_RANGES)
+
+    last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
+    eval_result = evaluate_rate_deviation(rates, last_info, models.get_kst_now())
+    return rates, eval_result
+
 
 def crawl_and_save_citi_bank_exchange_rates():
     """씨티은행 환율 크롤링"""
@@ -65,12 +87,28 @@ def crawl_and_save_citi_bank_exchange_rates():
             # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
             if is_mibank_rate_reliable():
                 try:
-                    logger.info(f"MIBANK_CITI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)", extra={"bank": BANK_NAME})
-                    crawl_and_save_routine(MIBANK_CITI_URL, MIBANK_SELECTORS, db)
-                except Exception as e:
+                    logger.info(
+                        "MIBANK_CITI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)",
+                        extra={"bank": BANK_NAME},
+                    )
+                    rates, eval_result = _crawl_mibank_citi(db)
+
+                    if eval_result["hard_fail"]:
+                        logger.error(
+                            "mibank hard_fail → 저장 보류",
+                            extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                        )
+                    else:
+                        if eval_result["soft_fail"]:
+                            logger.warning(
+                                "mibank soft_fail → 마지막 폴백이므로 저장",
+                                extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                            )
+                        crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
+                except Exception as e3:
                     logger.exception("MIBANK_CITI_URL 크롤링 실패", extra={"url": MIBANK_CITI_URL})
-                    error_msg = f"모든 URL 실패: {str(e)[:100]}"
-                    logger.exception(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+                    error_msg = f"모든 URL 실패: {str(e3)[:100]}"
+                    logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
             else:
                 logger.warning(
                     f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말)",
@@ -79,7 +117,7 @@ def crawl_and_save_citi_bank_exchange_rates():
                         "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
                     }
                 )
-                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 BS 환율 표시
+                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 CITI 환율 표시
     finally:
         db.close()
 

@@ -16,10 +16,25 @@ from selenium.webdriver.support import expected_conditions as EC
 from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
-from app import crud
+from app import crud, models
 from app.database import SessionLocal
-from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT, SELENIUM_WAIT_TIMEOUT_SHORT, MAX_DAYS_LOOKBACK
-from app.crawlers.utils import parse_rate_text, create_selenium_driver, selenium_driver_context, is_mibank_rate_reliable
+from app.crawlers.constants import (
+    DEFAULT_TIMEOUT,
+    HEADERS,
+    MAX_DAYS_LOOKBACK,
+    MIBANK_RATE_RANGES,
+    MIBANK_REQUIRED_CODES,
+    MIBANK_REQUIRED_PAIRS,
+    SELENIUM_WAIT_TIMEOUT_SHORT,
+)
+from app.crawlers.utils import (
+    crawl_mibank_rates,
+    evaluate_rate_deviation,
+    is_mibank_rate_reliable,
+    parse_rate_text,
+    selenium_driver_context,
+    validate_rate_ranges,
+)
 
 # 한국 시간대
 KST = timezone('Asia/Seoul')
@@ -37,16 +52,24 @@ INPUT_SELECTOR = "#inDate"
 
 MIBANK_IBK_CODE = '003'
 MIBANK_IBK_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_IBK_CODE
-MIBANK_SELECTORS = {
-    'usd-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(3) > td.right.counter.rollsty01',
-    'jpy-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(2) > td.right.counter.rollsty01',
-    'eur-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(4) > td.right.counter.rollsty01',
-    # 'cny-krw': 'body > div.container_sub_banks_saving > div.right_contents > div.box_contents1 > table > tbody > tr:nth-child(1) > td.right.counter.rollsty01',
-}
 
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
+
+def _crawl_mibank_ibk(db: Session) -> tuple[dict, dict]:
+    rates = crawl_mibank_rates(
+        MIBANK_IBK_URL,
+        BANK_NAME,
+        required_codes=MIBANK_REQUIRED_CODES,
+        require_all=True,
+    )
+
+    validate_rate_ranges(rates, MIBANK_RATE_RANGES)
+
+    last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
+    eval_result = evaluate_rate_deviation(rates, last_info, models.get_kst_now())
+    return rates, eval_result
 
 def crawl_and_save_ibk_bank_exchange_rates():
     """기업은행 환율 크롤링"""
@@ -101,8 +124,24 @@ def crawl_and_save_ibk_bank_exchange_rates():
         # 3차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함 ← Selenium 3회 재시도로 커버)
         if is_mibank_rate_reliable():
             try:
-                logger.info(f"MIBANK_IBK_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)", extra={"bank": BANK_NAME})
-                crawl_and_save_routine(MIBANK_IBK_URL, MIBANK_SELECTORS, db)
+                logger.info(
+                    "MIBANK_IBK_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)",
+                    extra={"bank": BANK_NAME},
+                )
+                rates, eval_result = _crawl_mibank_ibk(db)
+
+                if eval_result["hard_fail"]:
+                    logger.error(
+                        "mibank hard_fail → 저장 보류",
+                        extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                    )
+                else:
+                    if eval_result["soft_fail"]:
+                        logger.warning(
+                            "mibank soft_fail → 마지막 폴백이므로 저장",
+                            extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                        )
+                    crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
             except Exception as e2:
                 logger.exception("MIBANK_IBK_URL 크롤링 실패", extra={"url": MIBANK_IBK_URL})
                 error_msg = f"모든 URL 실패: {str(e2)[:100]}"
@@ -228,6 +267,12 @@ def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) 
         raise
 
 
+# ─────────────────────────────────────────────────────────────
+# [DEPRECATED] 아래 함수는 현재 사용되지 않음
+# - IBK는 try_crawl_with_requests() 함수로 대체됨 (데이터 유효성 검사 강화)
+# - 자정/주말 환율 없음 처리 로직이 추가된 새 함수 사용
+# - 추후 삭제 예정
+# ─────────────────────────────────────────────────────────────
 def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     """크롤링 + DB 저장 루틴 (변경 개수 반환)"""
     current_rates = {}

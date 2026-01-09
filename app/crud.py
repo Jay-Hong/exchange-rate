@@ -121,6 +121,29 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
     return new_records_count
 
 
+def get_last_bank_rates_with_ts(db: Session, bank_name: str, pairs: List[str]) -> Dict[str, Dict[str, Optional[Any]]]:
+    """
+    Returns a map like:
+    {
+        "usd-krw": {"rate": 1440.0, "timestamp": datetime},
+        ...
+    }
+    """
+    results: Dict[str, Dict[str, Optional[Any]]] = {}
+    for pair in pairs:
+        last_record = (
+            db.query(models.BankExchangeRate)
+            .filter(and_(models.BankExchangeRate.bank == bank_name, models.BankExchangeRate.currency == pair))
+            .order_by(models.BankExchangeRate.id.desc())
+            .first()
+        )
+        results[pair] = {
+            "rate": last_record.rate if last_record else None,
+            "timestamp": last_record.timestamp if last_record else None,
+        }
+    return results
+
+
 def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
     """
     Investing 환율 DB 저장 + 알림 조건 체크

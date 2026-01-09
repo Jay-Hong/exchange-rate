@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-01-10
+
+### Changed - MIBANK Parsing Logic Overhaul (Currency-Code Based)
+
+- **Currency-code based parsing**: Extract currency from `href="...?currency=USD"` instead of position-based `tr:nth-child(N)`
+  - Immune to table row order changes
+  - Uses last cell (매매기준율) for rate extraction
+  - See [ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반)
+
+- **3-layer validation system** for data integrity:
+  1. **Completeness check**: USD/JPY/EUR all required (`require_all=True`)
+  2. **Absolute range check**: USD 1,000~2,000, JPY 600~1,400, EUR 1,100~2,200
+  3. **Deviation check**: Dynamic thresholds based on time gap (soft_fail/hard_fail)
+
+- **New utility functions** (`app/crawlers/utils.py`):
+  - `crawl_mibank_rates()`: Currency-code based MIBANK crawling
+  - `validate_rate_ranges()`: Absolute range validation
+  - `evaluate_rate_deviation()`: Dynamic deviation check with soft/hard fail
+  - `get_dynamic_thresholds()`: Time-gap based threshold calculator
+
+- **Bank-specific wrapper pattern** (`_crawl_mibank_{bank}()`):
+  - All 9 crawlers now use standardized MIBANK wrapper functions
+  - Encapsulates: crawling → range validation → deviation check
+
+- **New DB utility** (`app/crud.py`):
+  - `get_last_bank_rates_with_ts()`: Fetch last rate + timestamp for deviation check
+
+- **Common constants** (`app/crawlers/constants.py`):
+  - `MIBANK_REQUIRED_CODES`: ("USD", "JPY", "EUR")
+  - `MIBANK_REQUIRED_PAIRS`: ("usd-krw", "jpy-krw", "eur-krw")
+  - `MIBANK_RATE_RANGES`: Absolute range limits per currency
+
+### Fixed
+
+- **Timezone-naive timestamp bug**: DB timestamps without timezone info caused incorrect deviation calculations
+  - Fix: KST localize before comparison (`kst.localize(prev_ts)`)
+
+### Removed
+
+- **MIBANK_SELECTORS**: Deleted from all 9 crawlers (dead code after currency-code parsing)
+
+### Deprecated
+
+- **`crawl_and_save_routine()`** in 4 crawlers marked with `[DEPRECATED]` comment:
+  - `sc.py`: Selenium-only crawler, requests not applicable
+  - `nh.py`: Selenium-only crawler, requires page click navigation
+  - `shinhan.py`: SPA page, requires JavaScript rendering
+  - `ibk.py`: Replaced by `try_crawl_with_requests()` with enhanced validation
+
+### Documentation
+
+- Added [ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반): MIBANK parsing architecture decision
+- Updated [CRAWLERS.md](CRAWLERS.md): New utility functions and wrapper pattern documentation
+
+---
+
 ## [1.9.0] - 2026-01-08
 
 ### Added - Account Deletion API (Apple App Store 5.1.1(v) Compliance)
@@ -404,6 +460,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.10.0 | 2026-01-10 | MIBANK Currency-Code parsing + 3-layer validation |
 | 1.9.0 | 2026-01-08 | Account Deletion API (Apple App Store 5.1.1(v) Compliance) |
 | 1.8.0 | 2025-12-02 | 24-hour graph + WebSocket integration + Band Chart |
 | 1.7.0 | 2025-11-27 | Redis broadcast cache + Change detection |

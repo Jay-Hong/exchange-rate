@@ -1,10 +1,11 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2025-12-10
+> 📅 **마지막 업데이트**: 2026-01-10
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
 > 🆕 **최근 변경**:
-> - IBK 크롤러 자정 전환기 스킵 (00:00~00:05) 추가
-> - 4단계 모드 환율 고시 스케줄 기반 최적화 ([ADR-011](DECISIONS.md#adr-011-4단계-모드-환율-고시-스케줄-기반-최적화))
+> - MIBANK 파싱 로직 전면 개편: Currency-Code 기반 + 3단계 검증 ([ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반))
+> - 9개 은행 크롤러 `_crawl_mibank_*()` 래퍼 패턴 적용
+> - 미사용 함수 `[DEPRECATED]` 주석 표시 (sc, nh, shinhan, ibk)
 
 ## 목차
 - [개요](#개요)
@@ -305,6 +306,66 @@
 - Headless 모드로 실행
 - ChromeDriverManager로 자동 버전 관리
 
+#### `crawl_mibank_rates()` ⭐ NEW (2026-01-10)
+**기능**: Currency-Code 기반 MIBANK 환율 크롤링 ([ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반))
+
+```python
+def crawl_mibank_rates(
+    url: str,
+    bank_name: str,
+    required_codes: tuple = ("USD", "JPY", "EUR"),
+    require_all: bool = True,
+) -> dict:
+    """
+    통화코드 기반 MIBANK 환율 크롤링
+
+    - href="...?currency=USD" 파라미터에서 통화 코드 추출
+    - 마지막 셀(매매기준율) 사용
+    - require_all=True: 필수 통화 누락 시 RuntimeError
+    """
+```
+
+**사용 예시**:
+```python
+rates = crawl_mibank_rates(MIBANK_KB_URL, "kb", required_codes=("USD", "JPY", "EUR"))
+# returns: {"usd-krw": 1340.5, "jpy-krw": 920.3, "eur-krw": 1450.2}
+```
+
+#### `validate_rate_ranges()` ⭐ NEW (2026-01-10)
+**기능**: 절대 범위 검증
+```python
+def validate_rate_ranges(rates: dict, ranges: dict):
+    """
+    환율이 절대 범위 내인지 검증
+    - USD: 1,000~2,000원
+    - JPY: 600~1,400원 (100엔당)
+    - EUR: 1,100~2,200원
+    """
+```
+
+#### `evaluate_rate_deviation()` ⭐ NEW (2026-01-10)
+**기능**: 동적 변동률 검증 (soft/hard fail)
+```python
+def evaluate_rate_deviation(rates: dict, last_rates_info: dict, now) -> dict:
+    """
+    이전 저장값과 비교하여 변동률 검증
+
+    Returns:
+        {"soft_fail": bool, "hard_fail": bool, "details": {...}}
+
+    - soft_fail: 경고 후 저장 (마지막 폴백) 또는 Selenium 재검증
+    - hard_fail: 저장 보류 (데이터 신뢰 불가)
+    """
+```
+
+**변동률 threshold (시간 gap 기준)**:
+| 시간 gap | soft_fail | hard_fail |
+|----------|-----------|-----------|
+| ≤10분 | 8% | 20% |
+| ≤60분 | 12% | 25% |
+| ≤180분 | 20% | 30% |
+| >180분 | 30% | 40% |
+
 #### `is_mibank_rate_reliable() -> bool`
 **기능**: MIBANK 환율 신뢰성 판단 (시간대별 조건부 실행)
 - **반환값**:
@@ -313,18 +374,36 @@
 - **사용 이유**: MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확한 데이터
 - **한계**: 일반 공휴일은 고려 못함 (Selenium 재시도 로직으로 보완)
 - **사용 크롤러**: BS, CITI, IBK, WOORI (4개)
+  - 이유: 자정 이후/주말에 MIBANK 환율이 실제 은행 환율과 다른 경우가 많음
 - **미사용 크롤러**: KB, HANA, SC, SHINHAN, NH (조건 없이 항상 mibank 시도)
+  - KB, HANA: 운영 관측상 MIBANK 환율이 자정/주말에도 비교적 정확함
+  - SC, SHINHAN, NH: Primary MIBANK 패턴 (soft_fail 시 Selenium 재검증 가능)
 
 **사용 예시**:
 ```python
 # BS, CITI, IBK, WOORI 크롤러에서 사용
 if is_mibank_rate_reliable():
-    crawl_and_save_routine(MIBANK_URL, MIBANK_SELECTORS, db)
+    rates, eval_result = _crawl_mibank_bs(db)
 else:
     logger.warning("⏰ MIBANK 차단 (자정/주말)")
 ```
 
-**추가 날짜**: 2025-10-26
+### 🏦 은행별 MIBANK 래퍼 패턴 ⭐ NEW (2026-01-10)
+
+각 크롤러에서 `_crawl_mibank_{bank}()` 래퍼 함수를 사용하여 MIBANK 크롤링 + 검증을 캡슐화합니다.
+
+```python
+# 예: app/crawlers/sc.py
+def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
+    """SC제일은행 MIBANK 크롤링 + 검증"""
+    rates = crawl_mibank_rates(MIBANK_SC_URL, BANK_NAME, required_codes=MIBANK_REQUIRED_CODES)
+    validate_rate_ranges(rates, MIBANK_RATE_RANGES)
+    last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
+    eval_result = evaluate_rate_deviation(rates, last_info, models.get_kst_now())
+    return rates, eval_result
+```
+
+**적용된 크롤러**: SC, NH, Shinhan, IBK, BS, Citi, Woori, KB, Hana (9개 전체)
 
 ---
 
