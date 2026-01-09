@@ -376,27 +376,39 @@ Version: 5.0.0 이상
 #### 5.2 SDK 초기화 (AppDelegate.swift)
 
 ```swift
+import FirebaseCore
+import FirebaseCrashlytics
 import RevenueCat
 
 func application(_ application: UIApplication,
                  didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
 
-    // 1. Firebase 초기화 (기존)
+    // 1. Firebase 초기화
     FirebaseApp.configure()
 
-    // 2. RevenueCat 초기화
+    // 2. (선택) Crashlytics 설정
+    #if DEBUG
+    Crashlytics.crashlytics().setCrashlyticsCollectionEnabled(false)
+    #else
+    Crashlytics.crashlytics().setCrashlyticsCollectionEnabled(true)
+    #endif
+
+    // 3. RevenueCat 초기화
     #if DEBUG
     Purchases.logLevel = .debug
     #endif
 
     Purchases.configure(
-        with: Configuration.Builder(withAPIKey: "appl_vCSLuclmGEWwPxjNAsiYIkJWrGH")
+        with: Configuration.Builder(withAPIKey: RevenueCatConfig.publicAPIKey)
             .with(storeKitVersion: .storeKit2)
             .build()
     )
 
-    // 3. AuthService 설정 (기존)
+    // 4. AuthService 설정
     AuthService.shared.configure()
+
+    // 5. PushNotificationService 설정
+    PushNotificationService.shared.configure()
 
     return true
 }
@@ -459,18 +471,20 @@ private func setupAuthStateListener() {
 }
 ```
 
-#### 5.4 SubscriptionManager 서비스 (신규 파일)
+#### 5.4 SubscriptionManager 서비스
 
 **파일**: `ios/FXi/Services/SubscriptionManager.swift`
 
 > **주의**: 반드시 `isLoadingInitial` + `onAuthCompleted()` 패턴을 사용해야 합니다.
 > 이 패턴 없이 init에서 customerInfo를 로드하면 기존 구독자도 Paywall을 잠깐 볼 수 있습니다.
+> **참고**: 실제 구현 파일 참조 - `ios/FXi/Services/SubscriptionManager.swift`
 
 ```swift
 import Foundation
 import RevenueCat
 import Observation
 
+/// RevenueCat 구독 상태 관리
 @MainActor
 @Observable
 final class SubscriptionManager {
@@ -489,6 +503,15 @@ final class SubscriptionManager {
     /// RootView에서 이 값이 true인 동안 로딩 화면 표시 → Paywall 깜빡임 방지
     private(set) var isLoadingInitial: Bool = true
 
+    /// 무료 체험 자격 여부 (이전에 체험한 사용자는 false)
+    private(set) var isEligibleForIntro: Bool = false
+
+    /// 오퍼링 로드 에러
+    private(set) var offeringsError: Error?
+
+    /// 진행 중인 오퍼링 로드 태스크 (중복 호출 시 공유)
+    private var offeringsTask: Task<Void, Never>?
+
     // MARK: - Init
 
     private init() {
@@ -501,7 +524,7 @@ final class SubscriptionManager {
         Task {
             for await info in Purchases.shared.customerInfoStream {
                 self.customerInfo = info
-                self.isPremium = info.entitlements["premium"]?.isActive == true
+                self.isPremium = info.entitlements[RevenueCatConfig.premiumEntitlement]?.isActive == true
             }
         }
     }
@@ -515,7 +538,12 @@ final class SubscriptionManager {
                 // 이 시점에는 이미 Purchases.shared.logIn(uid)가 완료됨
                 let info = try await Purchases.shared.customerInfo()
                 self.customerInfo = info
-                self.isPremium = info.entitlements["premium"]?.isActive == true
+                self.isPremium = info.entitlements[RevenueCatConfig.premiumEntitlement]?.isActive == true
+
+                // 프리미엄 + 알림 권한 이미 승인 → 푸시 토큰 재등록 (기존 알림 유지)
+                if self.isPremium {
+                    await rehydratePushTokenIfNeeded()
+                }
             } catch {
                 print("구독 상태 로드 실패: \(error)")
             }
@@ -523,34 +551,97 @@ final class SubscriptionManager {
         }
     }
 
+    /// 기존 알림 유지를 위한 푸시 토큰 재등록
+    /// - 앱 재시작 후 또는 프리미엄 전환 시 호출
+    /// - 알림 권한이 이미 승인된 상태에서만 실행
+    func rehydratePushTokenIfNeeded() async {
+        await NotificationPermissionManager.shared.checkStatusAsync()
+
+        if NotificationPermissionManager.shared.hasPermission {
+            PushNotificationService.shared.shouldRegisterForPush = true
+            await PushNotificationService.shared.registerDeviceOnServer()
+        }
+    }
+
     /// 로그아웃 시 호출 (상태 초기화)
     func onAuthSignedOut() {
+        offeringsTask?.cancel()
+        offeringsTask = nil
+
         self.customerInfo = nil
+        self.offerings = nil
         self.isPremium = false
+        self.isLoading = false
         self.isLoadingInitial = true
+        self.isEligibleForIntro = false
+        self.offeringsError = nil
     }
 
     // MARK: - Offerings
 
     func loadOfferings() async {
-        isLoading = true
-        defer { isLoading = false }
-
-        do {
-            offerings = try await Purchases.shared.offerings()
-        } catch {
-            print("Offerings 로드 실패: \(error)")
+        // 이미 로딩 중인 태스크가 있으면 완료까지 대기 (중복 네트워크 호출 방지)
+        if let existingTask = offeringsTask {
+            await existingTask.value
+            return
         }
+
+        offeringsTask = Task { [weak self] in
+            guard let self else { return }
+            defer { offeringsTask = nil }
+            guard !Task.isCancelled else { return }
+
+            isLoading = true
+            offeringsError = nil
+            defer { isLoading = false }
+
+            do {
+                let loadedOfferings = try await Purchases.shared.offerings()
+                guard !Task.isCancelled else { return }
+
+                offerings = loadedOfferings
+                offeringsError = nil
+
+                // 무료 체험 자격 확인
+                if let annual = annualPackage {
+                    let eligibility = await Purchases.shared.checkTrialOrIntroDiscountEligibility(
+                        productIdentifiers: [annual.storeProduct.productIdentifier]
+                    )
+                    guard !Task.isCancelled else { return }
+
+                    let status = eligibility[annual.storeProduct.productIdentifier]?.status
+                    isEligibleForIntro = status == .eligible
+                } else {
+                    isEligibleForIntro = false
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                offeringsError = error
+                print("Offerings 로드 실패: \(error)")
+            }
+        }
+
+        await offeringsTask?.value
     }
 
     // MARK: - Purchase
 
-    func purchase(_ package: Package) async throws {
+    /// 구매 결과를 반환 (취소 시 false)
+    @discardableResult
+    func purchase(_ package: Package) async throws -> Bool {
         isLoading = true
         defer { isLoading = false }
 
         let result = try await Purchases.shared.purchase(package: package)
+
+        // 사용자 취소
+        if result.userCancelled {
+            return false
+        }
+
         customerInfo = result.customerInfo
+        isPremium = result.customerInfo.entitlements[RevenueCatConfig.premiumEntitlement]?.isActive == true
+        return true
     }
 
     // MARK: - Restore
@@ -559,18 +650,62 @@ final class SubscriptionManager {
         isLoading = true
         defer { isLoading = false }
 
-        customerInfo = try await Purchases.shared.restorePurchases()
+        let wasPremium = isPremium
+        let info = try await Purchases.shared.restorePurchases()
+        customerInfo = info
+        isPremium = info.entitlements[RevenueCatConfig.premiumEntitlement]?.isActive == true
+
+        // 이미 프리미엄이었던 경우에만 알림 갱신
+        if isPremium && wasPremium {
+            NotificationCenter.default.post(name: .alertSettingsNeedsRefresh, object: nil)
+        }
     }
 
     // MARK: - Helpers
 
     var monthlyPackage: Package? {
-        offerings?.current?.package(identifier: "$rc_monthly")
+        offerings?.current?.monthly
     }
 
     var annualPackage: Package? {
-        offerings?.current?.package(identifier: "$rc_annual")
+        offerings?.current?.annual
     }
+
+    /// 연간 구독의 무료 체험 가능 여부 (상품 설정 + 사용자 자격 모두 확인)
+    var hasIntroductoryOffer: Bool {
+        guard let annual = annualPackage else { return false }
+        return annual.storeProduct.introductoryDiscount != nil && isEligibleForIntro
+    }
+
+    /// 무료 체험 기간 텍스트 (예: "7일") - 자격 없으면 nil
+    var introductoryOfferDuration: String? {
+        guard isEligibleForIntro,
+              let annual = annualPackage,
+              let intro = annual.storeProduct.introductoryDiscount else { return nil }
+
+        let unit = intro.subscriptionPeriod.unit
+        let value = intro.subscriptionPeriod.value
+
+        switch unit {
+        case .day: return "\(value)일"
+        case .week: return "\(value * 7)일"
+        case .month: return "\(value)개월"
+        case .year: return "\(value)년"
+        @unknown default: return nil
+        }
+    }
+}
+```
+
+**RevenueCatConfig 상수** (`ios/FXi/Utils/Constants.swift`):
+
+```swift
+enum RevenueCatConfig {
+    /// Public API Key (앱에 포함해도 안전)
+    static let publicAPIKey = "appl_vCSLuclmGEWwPxjNAsiYIkJWrGH"
+
+    /// Premium Entitlement 식별자
+    static let premiumEntitlement = "premium"
 }
 ```
 
@@ -589,6 +724,9 @@ final class SubscriptionManager {
 | `GET /api/notification-settings` | ✅ 빈 목록 | ✅ 설정 목록 | 조회만 허용 |
 | `GET /api/rates`, `WS /ws` | ✅ 허용 | ✅ 허용 | 아래 참고 |
 
+> **PENDING 상태**: RevenueCat 상태 확인 중이면 503 반환 + `Retry-After: 5` 헤더 포함  
+> (신규 사용자/일시적 API 오류 시, 잠시 후 재시도 유도)
+
 > 💡 **계정 삭제**: `DELETE /api/user/me` 호출 시 해당 사용자의 알림 데이터(`notification_settings`, `notification_logs`, `user_devices`)가 함께 삭제됩니다.
 
 > **API vs Locked Preview 정책:**
@@ -603,9 +741,10 @@ final class SubscriptionManager {
 > 📖 **구현 상세**: [REVENUECAT_SERVER_SIDE.md](REVENUECAT_SERVER_SIDE.md) 참조
 
 핵심 요약:
-- `verify_premium()`으로 Premium 게이팅 적용
+- `verify_premium_status()` + `require_premium()`으로 Premium 게이팅 적용
 - 200/404만 캐시, 4xx/5xx 미캐시
 - LRU 1000명 + TTL 5분 + Stale 1시간
+- 캐시 없음 + API 오류 시 **PENDING** 반환 → 503 + Retry-After(5초)
 
     # 4. API 오류 시: stale 캐시가 있으면 사용 (유료 사용자 보호)
     if cached_value is not None:
@@ -615,30 +754,38 @@ final class SubscriptionManager {
         )
         return cached_value
 
-    # 5. 캐시도 없고 API도 실패 → False (어쩔 수 없음)
-    return is_premium
+    # 5. 캐시도 없고 API도 실패 → PENDING (재시도 필요)
+    return PremiumStatus.PENDING
 ```
 
 #### API 엔드포인트에 적용
 
 ```python
 # app/main.py
-from app.subscription import verify_premium
+# (require_premium은 main.py 상단 유틸 함수)
 
 @app.post("/api/notification-settings")
 async def create_notification_setting(
-    request: NotificationSettingCreate,
-    user_id: str = Depends(get_current_user_id)  # Firebase ID Token 검증
+    request: Request,
+    body: NotificationSettingRequest,
+    db: Session = Depends(get_db)
 ):
-    # ✅ Premium 검증 추가
-    if not await verify_premium(user_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Premium subscription required"
-        )
+    user_id = await verify_firebase_token(request)
+
+    # ✅ Premium 검증 추가 (PENDING이면 503)
+    await require_premium(user_id, allow_empty=False)
 
     # 기존 로직...
-    return await crud.create_notification_setting(db, user_id, request)
+    setting = crud.create_notification_setting(
+        db=db,
+        user_id=user_id,
+        bank=body.bank.value,
+        currency=body.currency.value,
+        condition=body.condition.value,
+        threshold=body.threshold,
+        is_enabled=body.is_enabled,
+    )
+    return build_notification_setting_response(setting)
 ```
 
 #### 확장: Webhook 기반 캐싱 ✅ 구현 완료
@@ -662,7 +809,7 @@ async def create_notification_setting(
 
 ```
 ┌─────────────────────────────────────┐
-│           FXi Premium               │
+│                                     │
 │              👑                     │
 │                                     │
 │      은행별 현재 환율비교의 모든 것        │
@@ -742,57 +889,6 @@ Paywall 하단에 반드시 포함해야 하는 문구:
 #### 7.2 온보딩 화면 (첫 방문 사용자용)
 
 **목적**: 구독 가치를 시각적으로 전달 → Paywall 전환율 향상
-
-```
-┌─────────────────────────────────────┐
-│                                     │
-│   [슬라이드 1/3]                      │
-│                                     │
-│         📊                          │
-│   9개 은행 환율 비교                    │
-│                                     │
-│   KB, 하나, 신한, 우리, IBK, NH,       │
-│   SC제일, 부산, 씨티 환율을              │
-│   한눈에 비교하세요                     │
-│                                     │
-│         ● ○ ○                       │
-│                                     │
-│      [다음] →                        │
-│                                     │
-└─────────────────────────────────────┘
-
-┌─────────────────────────────────────┐
-│                                     │
-│   [슬라이드 2/3]                      │
-│                                     │
-│         📈                          │
-│   24시간 추이 그래프                    │
-│                                     │
-│   언제 환율이 올랐는지,                  │
-│   언제 떨어졌는지 한눈에!                │
-│                                     │
-│         ○ ● ○                       │
-│                                     │
-│      [다음] →                        │
-│                                     │
-└─────────────────────────────────────┘
-
-┌─────────────────────────────────────┐
-│                                     │
-│   [슬라이드 3/3]                      │
-│                                     │
-│         🔔                          │
-│   맞춤 푸시 알림                       │
-│                                     │
-│   "하나은행 USD 1475원 이상"            │
-│   목표 환율 도달 시 알림 수신             │
-│                                     │
-│         ○ ○ ●                       │
-│                                     │
-│      [시작하기] →                     │
-│                                     │
-└─────────────────────────────────────┘
-```
 
 **구현 포인트:**
 - `@AppStorage("hasCompletedOnboarding")` 플래그로 첫 방문 구분
@@ -1658,16 +1754,17 @@ docker compose up -d --build
     ↓
 [RDS PostgreSQL에 저장]
     Table: user_devices
-    | user_id | device_token | platform | created_at |
-    |---------|--------------|----------|------------|
-    | abc123  | xyz789       | ios      | 2025-12-05 |
+    | user_id | device_token | platform | created_at | updated_at |
+    |---------|--------------|----------|------------|-----------|
+    | abc123  | xyz789       | ios      | 2025-12-05 | 2025-12-05 |
 ```
 
 **보안 핵심:**
 
 - 클라이언트가 보낸 user_id를 **절대 신뢰하지 않음**
 - 서버가 Firebase ID Token을 검증 후 **직접 user_id 추출**
-- 이렇게 해야 스푸핑 공격 방지 가능
+- device_token은 **전역 유니크** → 다른 계정 로그인 시 **소유권 자동 이전(UPSERT)** 로직
+- 이렇게 해야 스푸핑 공격 방지 + 중복 토큰 문제 방지 가능
 
 ### Step 2: 알림 설정 저장
 
@@ -1740,10 +1837,10 @@ docker compose up -d --build
 CREATE TABLE user_devices (
     id SERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,           -- Firebase Auth user_id
-    device_token TEXT NOT NULL,       -- FCM Device Token
+    device_token TEXT NOT NULL UNIQUE, -- FCM Device Token (전역 유니크)
     platform TEXT NOT NULL,           -- 'ios' or 'android'
     created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(user_id, device_token)
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- 2. 알림 설정
@@ -1755,16 +1852,23 @@ CREATE TABLE notification_settings (
     condition TEXT NOT NULL,          -- 'above', 'below'
     threshold REAL NOT NULL,          -- 1475.0
     enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT NOW()
+    triggered BOOLEAN DEFAULT FALSE,  -- 중복 알림 방지
+    last_notified_at TIMESTAMP NULL,
+    last_notified_rate REAL NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- 3. 알림 히스토리 (중복 방지)
 CREATE TABLE notification_logs (
     id SERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,
+    setting_id INTEGER NULL,          -- NotificationSetting.id (선택)
     bank TEXT NOT NULL,
     currency TEXT NOT NULL,
     rate REAL NOT NULL,
+    success BOOLEAN DEFAULT TRUE,
+    error_message TEXT NULL,
     sent_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -2162,10 +2266,10 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 #### Phase 3: RevenueCat
 
 - [x] RevenueCat 도입 결정
-- [ ] RevenueCat 계정 생성 및 앱 등록
-- [ ] iOS 앱에 RevenueCat SDK 통합
-- [ ] 유료 기능 설계 (프리미엄 알림 등)
-- [ ] Firebase uid ↔ RevenueCat 연동
+- [x] RevenueCat 계정 생성 및 앱 등록
+- [x] iOS 앱에 RevenueCat SDK 통합
+- [x] 유료 기능 설계 (프리미엄 알림 등)
+- [x] Firebase uid ↔ RevenueCat 연동
 
 #### Phase 4: RDS 마이그레이션
 
@@ -2583,13 +2687,13 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 서버 사이드 구독 검증 로직 구현 시 검증해야 할 핵심 케이스입니다.
 
-### Webhook 서명 검증
+### Webhook 인증 검증
 
 | 케이스 | 입력 | 기대 결과 |
 |--------|------|----------|
-| 유효한 서명 | 올바른 HMAC-SHA256 | 200 OK, 이벤트 처리 |
-| 잘못된 서명 | 변조된 signature | 401 Unauthorized |
-| 헤더 누락 | X-RevenueCat-Signature 없음 | 401 Unauthorized |
+| 유효한 인증 | Authorization 헤더 값이 `REVENUECAT_WEBHOOK_AUTH_KEY`와 일치 | 200 OK, 이벤트 처리 |
+| 잘못된 인증 | Authorization 값 불일치 | 401 Unauthorized |
+| 헤더 누락 | Authorization 없음 | 401 Unauthorized |
 | Secret 미설정 | 환경변수 누락 | 로그 에러, 검증 실패 |
 
 ### Stale 캐시 동작
@@ -2599,14 +2703,14 @@ ON CONFLICT (device_token) DO UPDATE SET
 | 신선한 캐시 | TTL 내 | - | 캐시값 반환 (API 호출 없음) |
 | Stale + API 성공 | TTL 만료 | 200 OK | 새 값 반환, 캐시 갱신 |
 | Stale + API 오류 | TTL 만료 | 5xx/timeout | **stale 값 반환** (유료 사용자 보호) |
-| 캐시 없음 + API 오류 | 없음 | 5xx/timeout | False 반환 (보수적 처리) |
+| 캐시 없음 + API 오류 | 없음 | 5xx/timeout | **PENDING 반환** (재시도 필요) |
 | Stale TTL 초과 | 1시간 초과 | - | 캐시 삭제됨, 새로 조회 |
 
 ### 캐시 무효화
 
 | 케이스 | 트리거 | 기대 동작 |
 |--------|-------|----------|
-| 구독 구매 | INITIAL_PURCHASE Webhook | `invalidate_user_cache()` 호출 → 다음 `verify_premium()`에서 API 재조회 |
+| 구독 구매 | INITIAL_PURCHASE Webhook | `invalidate_user_cache()` 호출 → 다음 `verify_premium_status()`에서 API 재조회 |
 | 구독 갱신 | RENEWAL Webhook | 캐시 무효화 → 최신 상태 반영 |
 | 구독 만료 | EXPIRATION Webhook | 캐시 무효화 → 즉시 접근 차단 |
 | 구독 취소 | CANCELLATION Webhook | 캐시 무효화 → 즉시 접근 차단 |
@@ -2616,7 +2720,77 @@ ON CONFLICT (device_token) DO UPDATE SET
 | 케이스 | 조건 | 기대 동작 |
 |--------|------|----------|
 | 캐시 가득 참 | 1000명 초과 | 가장 오래된 항목 제거 (LRU) |
-| 동시 접근 | 여러 요청 동시 | 스레드 안전 (Lock) |
+| 동시 접근 | 여러 요청 동시 | 단일 프로세스 전제 (Lock 없음) |
+
+---
+
+## iOS 프로젝트 파일 구조
+
+> **참고**: iOS 프로젝트 상세 가이드는 `~/Downloads/Projects/FXi/ios/CLAUDE.md` 참조
+
+```text
+ios/FXi/
+├── FXiApp.swift                    # 앱 진입점, RootView + 구독 분기
+├── AppDelegate.swift               # Firebase/RevenueCat/Push 초기화
+├── ContentView.swift               # 메인 탭 콘텐츠 (구독자 진입)
+│
+├── Utils/
+│   ├── Constants.swift             # API, RevenueCatConfig, AlertConfig, Bank, 색상 등
+│   ├── Date+Formatter.swift        # 날짜 포매터
+│   └── ...
+│
+├── Models/
+│   ├── AlertSetting.swift          # 알림 설정 모델 + API 요청/응답
+│   ├── ExchangeRate.swift          # 환율 모델
+│   └── ...
+│
+├── Services/
+│   ├── AuthService.swift           # Firebase Auth + RevenueCat 로그인 연동
+│   ├── SubscriptionManager.swift   # RevenueCat 구독 상태 관리
+│   ├── PushNotificationService.swift # FCM 토큰 관리 + 서버 등록
+│   ├── DeviceService.swift         # 디바이스 등록 API 클라이언트
+│   ├── NotificationSettingsService.swift # 알림 설정 API 클라이언트
+│   ├── NotificationPermissionManager.swift # 푸시 권한 관리
+│   └── ...
+│
+├── ViewModels/
+│   ├── AlertSettingsViewModel.swift # 알림 설정 CRUD + 재시도 로직
+│   ├── ExchangeRateViewModel.swift  # 환율 데이터 관리
+│   └── ...
+│
+└── Views/
+    ├── LoginView.swift             # 로그인 화면
+    ├── Subscription/
+    │   ├── PaywallView.swift       # 구독 결제 화면
+    │   ├── LockedPreviewView.swift # 비구독자 샘플 화면
+    │   └── Components/             # 샘플 UI 컴포넌트
+    └── Components/
+        ├── AlertSection.swift      # 알림 목록 섹션
+        ├── AlertAddSheet.swift     # 알림 추가/수정 시트
+        └── ...
+```
+
+### 핵심 서비스 파일
+
+| 파일 | 역할 | 주요 메서드 |
+|------|------|-------------|
+| `AuthService.swift` | Firebase Auth + RevenueCat 연동 | `signInWithGoogle()`, `signInWithApple()`, `signOut()` |
+| `SubscriptionManager.swift` | 구독 상태 관리 | `onAuthCompleted()`, `purchase()`, `restorePurchases()` |
+| `PushNotificationService.swift` | FCM 토큰 관리 | `registerDeviceOnServer()`, `unregisterDeviceFromServer()` |
+| `NotificationSettingsService.swift` | 알림 설정 API | `fetchSettings()`, `createSetting()`, `toggleSetting()`, `deleteSetting()` |
+| `AlertSettingsViewModel.swift` | 알림 설정 UI 상태 | `loadSettings()`, `createSetting()`, `toggleSetting()`, `deleteSetting()` |
+
+### AlertConfig 상수
+
+```swift
+// ios/FXi/Utils/Constants.swift
+enum AlertConfig {
+    /// 사용자당 최대 알림 개수
+    static let maxCount = 30
+    /// 남은 개수 표시 임계값 (이 개수 이하로 남으면 표시)
+    static let showRemainingThreshold = 3
+}
+```
 
 ---
 
@@ -2645,6 +2819,11 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ---
 
-**마지막 업데이트**: 2025-12-27
+**마지막 업데이트**: 2026-01-09
 **결정 완료**: AWS RDS PostgreSQL + Firebase Auth + FCM + RevenueCat
-**최근 변경**: Phase 3 구현 완료 (iOS SDK 연동 + 서버 사이드 검증 + Webhook), TestFlight 테스트 대기
+**최근 변경**:
+
+- 문서 업데이트: Premium 검증 PENDING/503 동작 및 코드 스니펫 실제 구현 반영
+- 문서 업데이트: Webhook Authorization 헤더 검증 방식 반영
+- 문서 업데이트: DB 스키마(user_devices, notification_settings/logs) 실제 모델 반영
+- 문서 업데이트: iOS 파일 구조 + AppDelegate 초기화 예시 정합성 개선
