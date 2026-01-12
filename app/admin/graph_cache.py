@@ -21,6 +21,20 @@ from app.logging import get_logger
 
 logger = get_logger("exchange_rate.admin.graph_cache")
 KST = timezone(timedelta(hours=9))
+
+
+def _to_utc_datetime(ts_val: object) -> datetime:
+    """DB에서 읽은 timestamp를 UTC-aware datetime으로 변환."""
+    if isinstance(ts_val, datetime):
+        dt = ts_val
+    else:
+        dt = datetime.fromisoformat(ts_val)  # type: ignore[arg-type]
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def fetch_last_point(source: str, currency: str) -> Optional[List[int]]:
     """마지막 환율 1개 반환. 문자열 파싱 후 epoch 계산."""
     with get_db_context() as db:
@@ -39,9 +53,9 @@ def fetch_last_point(source: str, currency: str) -> Optional[List[int]]:
         ).fetchone()
     if not row:
         return None
-    ts_str, rate = row
+    ts_val, rate = row
     try:
-        dt = datetime.fromisoformat(ts_str)
+        dt = _to_utc_datetime(ts_val)
         return [int(dt.timestamp()), round(float(rate), 2)]
     except Exception:
         return None
@@ -49,12 +63,14 @@ def fetch_last_point(source: str, currency: str) -> Optional[List[int]]:
 
 
 def fetch_last_before(source: str, currency: str, cutoff_ts: int) -> Optional[List[int]]:
-    """cutoff_ts(Unix, KST 기준) 이전/동일 최신 1건 반환."""
+    """cutoff_ts(Unix timestamp) 이전/동일 최신 1건 반환."""
     with get_db_context() as db:
         table = "investing_exchange_rates" if source == "investing" else "bank_exchange_rates"
         where_clause = "AND bank = :bank" if source != "investing" else ""
-        cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=KST)
+
+        cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
         cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
         row = db.execute(
             text(f"""
                 SELECT timestamp, rate
@@ -69,9 +85,9 @@ def fetch_last_before(source: str, currency: str, cutoff_ts: int) -> Optional[Li
         ).fetchone()
     if not row:
         return None
-    ts_str, rate = row
+    ts_val, rate = row
     try:
-        dt = datetime.fromisoformat(ts_str)
+        dt = _to_utc_datetime(ts_val)
         return [int(dt.timestamp()), round(float(rate), 2)]
     except Exception:
         return None
@@ -89,11 +105,15 @@ def build_graph_series(source: str, currency: str) -> Tuple[List[List[float]], i
         table = "investing_exchange_rates" if source == "investing" else "bank_exchange_rates"
         where_clause = "AND bank = :bank" if source != "investing" else ""
 
-        now_dt = datetime.now(KST)
-        window_start_dt = now_dt - timedelta(hours=24)
-        window_start_ts = int(window_start_dt.timestamp())
-        # 버킷 정렬: 10분 경계로 맞춰 시작
+        now_kst = datetime.now(KST)
+        window_start_kst = now_kst - timedelta(hours=24)
+        window_start_ts = int(window_start_kst.timestamp())
+        # 버킷 정렬: 10분 경계로 맞춰 시작 (KST 기준 유지)
         bucket_start_ts = window_start_ts - (window_start_ts % 600)
+
+        # 모든 DB에서 UTC 기준으로 쿼리
+        start_query = window_start_kst.astimezone(timezone.utc)
+        end_query = now_kst.astimezone(timezone.utc)
 
         # 윈도우 내 데이터 조회
         rows = db.execute(
@@ -108,8 +128,8 @@ def build_graph_series(source: str, currency: str) -> Tuple[List[List[float]], i
             """),
             {
                 "currency": currency,
-                "start": window_start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "end": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "start": start_query.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": end_query.strftime("%Y-%m-%d %H:%M:%S"),
                 **({"bank": source} if source != "investing" else {})
             }
         ).fetchall()
@@ -119,9 +139,9 @@ def build_graph_series(source: str, currency: str) -> Tuple[List[List[float]], i
     prev_close: Optional[float] = last_before[1] if last_before else None
 
     points: List[Tuple[int, float]] = []
-    for ts_str, rate in rows:
+    for ts_val, rate in rows:
         try:
-            dt = datetime.fromisoformat(ts_str)
+            dt = _to_utc_datetime(ts_val)
             points.append((int(dt.timestamp()), float(rate)))
         except Exception:
             continue
@@ -133,7 +153,7 @@ def build_graph_series(source: str, currency: str) -> Tuple[List[List[float]], i
     total = len(points)
 
     ts_cursor = bucket_start_ts
-    now_ts = int(now_dt.timestamp())
+    now_ts = int(now_kst.timestamp())
 
     while ts_cursor <= now_ts:
         bucket_end = ts_cursor + 600

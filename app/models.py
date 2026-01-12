@@ -1,19 +1,16 @@
 # app/models.py
 
 # 표준 라이브러리
-from datetime import datetime
-
-# 서드파티 라이브러리
-from pytz import timezone
+from datetime import datetime, timezone as dt_timezone
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Index
 
 # 로컬 애플리케이션
 from app.database import Base
 
 
-def get_kst_now():
-    kst = timezone('Asia/Seoul')
-    return datetime.now(kst)
+def get_utc_now():
+    """UTC 기준 현재 시각 (naive datetime)."""
+    return datetime.now(dt_timezone.utc).replace(tzinfo=None)
 
 
 class InvestingExchangeRate(Base):
@@ -22,7 +19,7 @@ class InvestingExchangeRate(Base):
     id = Column(Integer, primary_key=True, index=True)
     currency = Column(String, index=True)
     rate = Column(Float)
-    timestamp = Column(DateTime, default=get_kst_now)
+    timestamp = Column(DateTime, default=get_utc_now)
 
 
 class BankExchangeRate(Base):
@@ -32,7 +29,7 @@ class BankExchangeRate(Base):
     bank = Column(String, index=True)
     currency = Column(String, index=True)
     rate = Column(Float)
-    timestamp = Column(DateTime, default=get_kst_now)
+    timestamp = Column(DateTime, default=get_utc_now)
 
     __table_args__ = (
         Index('ix_bank_currency_timestamp', 'bank', 'currency', 'timestamp'),
@@ -46,7 +43,7 @@ class CrawlerConfig(Base):
     id = Column(Integer, primary_key=True, index=True)
     crawler_name = Column(String, unique=True, nullable=False, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
-    updated_at = Column(DateTime, default=get_kst_now, onupdate=get_kst_now)
+    updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
 
 
 # ============================================================
@@ -61,8 +58,8 @@ class UserDevice(Base):
     user_id = Column(String, nullable=False, index=True)  # Firebase Auth user_id
     device_token = Column(String, nullable=False, unique=True)  # FCM Device Token (전역 유니크)
     platform = Column(String, nullable=False)  # 'ios' or 'android'
-    created_at = Column(DateTime, default=get_kst_now)
-    updated_at = Column(DateTime, default=get_kst_now, onupdate=get_kst_now)
+    created_at = Column(DateTime, default=get_utc_now)
+    updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
 
     # Note: device_token이 전역 유니크이므로 복합 인덱스는 조회 최적화용으로만 유지
 
@@ -82,8 +79,8 @@ class NotificationSetting(Base):
     triggered = Column(Boolean, default=False)
     last_notified_at = Column(DateTime, nullable=True)
     last_notified_rate = Column(Float, nullable=True)
-    created_at = Column(DateTime, default=get_kst_now)
-    updated_at = Column(DateTime, default=get_kst_now, onupdate=get_kst_now)
+    created_at = Column(DateTime, default=get_utc_now)
+    updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
 
     __table_args__ = (
         Index('ix_notification_settings_bank_currency', 'bank', 'currency'),
@@ -102,4 +99,4 @@ class NotificationLog(Base):
     rate = Column(Float, nullable=False)
     success = Column(Boolean, default=True)
     error_message = Column(String, nullable=True)
-    sent_at = Column(DateTime, default=get_kst_now)
+    sent_at = Column(DateTime, default=get_utc_now)

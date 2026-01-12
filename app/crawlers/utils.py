@@ -12,13 +12,13 @@
 # 표준 라이브러리
 import logging
 from contextlib import contextmanager
+from datetime import timezone as dt_timezone
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 # 서드파티 라이브러리
 import requests
 from bs4 import BeautifulSoup
-from pytz import timezone
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 
@@ -343,7 +343,8 @@ def evaluate_rate_deviation(rates: dict, last_rates_info: dict, now):
     soft_fail = False
     hard_fail = False
     details = {}
-    kst = timezone('Asia/Seoul')
+    utc = dt_timezone.utc
+    now_utc = now.replace(tzinfo=utc) if now.tzinfo is None else now.astimezone(utc)
 
     for pair, rate in rates.items():
         last_info = last_rates_info.get(pair, {})
@@ -353,11 +354,13 @@ def evaluate_rate_deviation(rates: dict, last_rates_info: dict, now):
         if not prev_rate or not prev_ts:
             continue
 
-        # timezone-naive → KST 변환 (DB 저장값이 naive인 경우)
+        # naive datetime은 UTC로 해석
         if prev_ts.tzinfo is None:
-            prev_ts = kst.localize(prev_ts)
+            prev_ts = prev_ts.replace(tzinfo=utc)
+        else:
+            prev_ts = prev_ts.astimezone(utc)
 
-        gap_minutes = (now - prev_ts).total_seconds() / 60
+        gap_minutes = (now_utc - prev_ts).total_seconds() / 60
         soft_thr, hard_thr = get_dynamic_thresholds(gap_minutes)
         pct_change = abs(rate - prev_rate) / prev_rate
 

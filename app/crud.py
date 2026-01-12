@@ -2,11 +2,10 @@
 
 # 표준 라이브러리
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import List, Dict, Any, Optional
 
 # 서드파티 라이브러리
-from pytz import timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func, and_
@@ -44,6 +43,32 @@ def format_threshold(value: float) -> str:
     if '.' in formatted:
         formatted = formatted.rstrip('0').rstrip('.')
     return formatted
+
+
+# KST 타임존 (UTC+9)
+KST = dt_timezone(timedelta(hours=9))
+
+
+def to_kst_isoformat(dt: Optional[datetime]) -> Optional[str]:
+    """
+    DB에서 읽은 datetime을 KST ISO 8601 문자열로 변환
+
+    Args:
+        dt: datetime 객체 (naive 또는 aware)
+
+    Returns:
+        KST ISO 8601 문자열 (예: "2025-01-13T14:30:00+09:00")
+
+    Notes:
+        - DB에서 읽은 naive datetime은 UTC로 해석한다.
+        - aware datetime은 UTC로 변환 후 KST로 변환한다.
+    """
+    if dt is None:
+        return None
+    # PostgreSQL에서 naive datetime은 UTC로 저장됨
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=dt_timezone.utc)
+    return dt.astimezone(KST).isoformat()
 
 
 def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
@@ -87,7 +112,7 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
                 bank = bank_name,
                 currency = pair,
                 rate = current_rate,
-                timestamp = models.get_kst_now()
+                timestamp = models.get_utc_now()
             )
             db.add(new_entry)
             new_records_count += 1
@@ -185,7 +210,7 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
             new_entry = models.InvestingExchangeRate(
                 currency = pair,
                 rate = current_rate,
-                timestamp = models.get_kst_now()
+                timestamp = models.get_utc_now()
             )
             db.add(new_entry)
             new_records_count += 1
@@ -242,7 +267,7 @@ def select_a_latest_investing_rate_from_db(db: Session, pair: str) -> Optional[D
             "currency": record.currency,
             "bank": "investing",
             "rate": record.rate,
-            "timestamp": record.timestamp.astimezone().isoformat()  # ISO 8601 형식
+            "timestamp": to_kst_isoformat(record.timestamp)
         }
     else:
         return None
@@ -285,7 +310,7 @@ def select_latest_bank_rates_from_db(db: Session, pair: str) -> List[Dict[str, A
             "currency": record.currency,
             "bank": record.bank,
             "rate": record.rate,
-            "timestamp": record.timestamp.astimezone().isoformat()  # ISO 8601 형식
+            "timestamp": to_kst_isoformat(record.timestamp)
         }
         for record in records
     ]
@@ -398,9 +423,7 @@ def delete_old_bank_data(db: Session, days: int = 10) -> int:
     Returns:
         삭제된 레코드 개수
     """
-    KST = timezone('Asia/Seoul')
-
-    cutoff_date = datetime.now(KST) - timedelta(days=days)
+    cutoff_date = models.get_utc_now() - timedelta(days=days)
 
     deleted_count = db.query(models.BankExchangeRate).filter(
         models.BankExchangeRate.timestamp < cutoff_date
@@ -501,7 +524,7 @@ def init_crawler_config(db: Session) -> None:
             config = models.CrawlerConfig(
                 crawler_name=crawler_name,
                 enabled=True,
-                updated_at=models.get_kst_now()
+                updated_at=models.get_utc_now()
             )
             db.add(config)
             logger.info(f"✅ 크롤러 설정 초기화: {crawler_name} (enabled=True)")
@@ -530,7 +553,7 @@ def get_all_crawler_configs(db: Session) -> List[Dict[str, Any]]:
         {
             "crawler_name": config.crawler_name,
             "enabled": config.enabled,
-            "updated_at": config.updated_at.astimezone().isoformat()
+            "updated_at": to_kst_isoformat(config.updated_at)
         }
         for config in configs
     ]
@@ -559,7 +582,7 @@ def update_crawler_config(db: Session, crawler_name: str, enabled: bool) -> bool
         raise ValueError(f"Invalid crawler name: {crawler_name}")
 
     config.enabled = enabled
-    config.updated_at = models.get_kst_now()
+    config.updated_at = models.get_utc_now()
 
     db.commit()
 
@@ -619,7 +642,7 @@ def register_device(
             transferred_from = existing.user_id
 
         # UPSERT: INSERT OR UPDATE on device_token conflict
-        now = models.get_kst_now()
+        now = models.get_utc_now()
         stmt = dialect_insert(models.UserDevice).values(
             user_id=user_id,
             device_token=device_token,
@@ -798,7 +821,7 @@ def create_notification_setting(
             existing.last_notified_at = None
             existing.last_notified_rate = None
         # False면 triggered 유지 ("발송됨" 상태 보존)
-        existing.updated_at = models.get_kst_now()
+        existing.updated_at = models.get_utc_now()
         db.commit()
         db.refresh(existing)
         action = "알림 설정 재활성화 (중복)" if is_enabled else "알림 설정 비활성화 (중복)"
@@ -956,7 +979,7 @@ def update_notification_setting(
             extra={"setting_id": setting_id, "triggered_reset": True}
         )
 
-    setting.updated_at = models.get_kst_now()
+    setting.updated_at = models.get_utc_now()
     db.commit()
     db.refresh(setting)
 
@@ -1107,7 +1130,7 @@ def mark_setting_triggered(
     if setting:
         setting.triggered = True
         setting.enabled = False  # 알림 발송 후 자동 비활성화 (1회성 알림)
-        setting.last_notified_at = models.get_kst_now()
+        setting.last_notified_at = models.get_utc_now()
         setting.last_notified_rate = rate
         db.commit()
 

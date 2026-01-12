@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import List, Dict, Any, Optional
 
 # 서드파티 라이브러리
@@ -136,7 +136,7 @@ def build_rates_payload(db: SessionLocal) -> dict:
     # DB 데이터의 실제 최신 timestamp 사용 (변경 감지 정확성)
     latest_timestamp = max(
         (rate["timestamp"] for rate in all_rates),
-        default=datetime.now().astimezone().isoformat()
+        default=crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
     )
 
     return {
@@ -393,7 +393,7 @@ def get_rates_for_mobile(db: Session = Depends(get_db)):
         currencies = list(set(rate["currency"] for rate in all_rates))
         banks = list(set(rate["bank"] for rate in all_rates))
 
-        current_time = datetime.now().astimezone().isoformat()
+        current_time = crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
 
         return {
             "rates": all_rates,
@@ -410,7 +410,7 @@ def get_rates_for_mobile(db: Session = Depends(get_db)):
         return {
             "rates": [],
             "metadata": {
-                "updated_at": datetime.now().astimezone().isoformat(),
+                "updated_at": crud.to_kst_isoformat(datetime.now(dt_timezone.utc)),
                 "currencies": ["usd-krw", "jpy-krw", "eur-krw"], 
                 "banks": [],
                 "total_count": 0,
@@ -431,7 +431,7 @@ def get_rates_by_currency(currency: str, db: Session = Depends(get_db)):
         return {
             "rates": rates,
             "metadata": {
-                "updated_at": datetime.now().astimezone().isoformat(),
+                "updated_at": crud.to_kst_isoformat(datetime.now(dt_timezone.utc)),
                 "currency": currency,
                 "total_count": len(rates)
             }
@@ -1075,9 +1075,9 @@ def build_notification_setting_response(setting: models.NotificationSetting) -> 
         threshold=setting.threshold,
         is_enabled=setting.enabled,
         triggered=setting.triggered,
-        created_at=setting.created_at.isoformat() if setting.created_at else None,
-        updated_at=setting.updated_at.isoformat() if setting.updated_at else None,
-        triggered_at=setting.last_notified_at.isoformat() if setting.last_notified_at else None
+        created_at=crud.to_kst_isoformat(setting.created_at),
+        updated_at=crud.to_kst_isoformat(setting.updated_at),
+        triggered_at=crud.to_kst_isoformat(setting.last_notified_at)
     )
 
 

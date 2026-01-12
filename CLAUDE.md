@@ -102,7 +102,7 @@
 id         INTEGER PRIMARY KEY
 currency   TEXT (INDEX)
 rate       REAL
-timestamp  DATETIME (KST)
+timestamp  DATETIME (UTC)
 ```
 
 ### bank_exchange_rates
@@ -112,7 +112,7 @@ id         INTEGER PRIMARY KEY
 bank       TEXT (INDEX)
 currency   TEXT (INDEX)
 rate       REAL
-timestamp  DATETIME (KST)
+timestamp  DATETIME (UTC)
 
 -- 복합 인덱스: (bank, currency, timestamp)
 ```
@@ -123,7 +123,7 @@ timestamp  DATETIME (KST)
 id            INTEGER PRIMARY KEY
 crawler_name  TEXT (UNIQUE, INDEX)
 enabled       BOOLEAN (DEFAULT: TRUE)
-updated_at    DATETIME (KST)
+updated_at    DATETIME (UTC)
 
 -- 크롤러 활성화/비활성화 설정 (관리자 페이지에서 제어)
 ```

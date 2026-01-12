@@ -69,7 +69,7 @@ def _crawl_mibank_hana(db: Session) -> tuple[dict, dict]:
     validate_rate_ranges(rates, MIBANK_RATE_RANGES)
 
     last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
-    eval_result = evaluate_rate_deviation(rates, last_info, models.get_kst_now())
+    eval_result = evaluate_rate_deviation(rates, last_info, models.get_utc_now())
     return rates, eval_result
 
 
