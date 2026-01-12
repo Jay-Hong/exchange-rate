@@ -1,8 +1,8 @@
 # AWS EC2 배포 가이드
 
 > 💡 **목적:** 테스트 서버에서 검증된 실전 배포 절차
-> 🎯 **대상:** AWS 프리티어 t2.micro (1 vCPU, 1GB RAM)
-> ✅ **검증일:** 2025-11-02 (Ubuntu 24.04.2 LTS)
+> 🎯 **대상:** AWS t3.small (2 vCPU, 2GB RAM)
+> ✅ **검증일:** 2026-01-13 (Ubuntu 24.04 LTS)
 
 ---
 
@@ -45,7 +45,7 @@ chmod 400 ~/path/to/your-key.pem
 | 항목 | 설정 |
 |------|------|
 | **AMI** | Ubuntu 24.04 LTS (64-bit x86) |
-| **인스턴스 타입** | t2.micro (프리티어) |
+| **인스턴스 타입** | t3.small (2 vCPU, 2GB RAM) |
 | **스토리지** | 8-10GB gp3 (기본값) |
 | **키 페어** | 기존 키 페어 선택 또는 새로 생성 |
 
@@ -306,7 +306,7 @@ sudo docker inspect exchange-rate-app | grep -A 10 Health
 **일반적인 원인:**
 1. 로그 권한 에러 (위 해결법 참고)
 2. Python 패키지 설치 실패 → `sudo docker compose build --no-cache` 재빌드
-3. Selenium/Chrome 설치 실패 → 메모리 부족 (t2.micro 한계)
+3. Selenium/Chrome 설치 실패 → 메모리 부족 (t3.small에서도 고부하 시 발생)
 
 ### 6.3 메모리 부족 (OOM Killed)
 
@@ -326,8 +326,8 @@ dmesg | grep -i "out of memory"
 ```
 
 **해결:**
-- t2.micro는 1GB RAM (한계 있음)
-- 사용자 500명 이상 시 t3.small 업그레이드 권장
+- t3.small은 2GB RAM (고부하 시 한계 있음)
+- 사용자 1,000명 이상 시 t3.medium 업그레이드 권장
 - Swap 메모리 추가 (임시 방편):
   ```bash
   sudo fallocate -l 1G /swapfile
@@ -559,7 +559,7 @@ sudo docker compose restart
 
 ### 초기 배포
 
-- [ ] EC2 인스턴스 생성 (Ubuntu 24.04, t2.micro)
+- [ ] EC2 인스턴스 생성 (Ubuntu 24.04, t3.small)
 - [ ] SSH 접속 확인
 - [ ] 시스템 업데이트 (`sudo apt update && sudo apt upgrade -y`)
 - [ ] Docker 설치 및 확인 (`sudo docker --version`)
@@ -604,6 +604,6 @@ sudo docker compose restart
 
 ---
 
-**마지막 업데이트:** 2025-11-02
-**검증 환경:** AWS EC2 t2.micro, Ubuntu 24.04.2 LTS, Docker 24.x
+**마지막 업데이트:** 2026-01-13
+**검증 환경:** AWS EC2 t3.small, Ubuntu 24.04 LTS, Docker 24.x
 **작성자:** Jay (테스트 서버 배포 경험 기반)

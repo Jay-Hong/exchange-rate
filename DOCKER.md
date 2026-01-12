@@ -1,7 +1,7 @@
 # Docker Compose 아키텍처 가이드
 
 > 💡 **작성일**: 2025-10-21
-> 💡 **상태**: 설계 완료, 구현 대기
+> 💡 **상태**: 운영 중 (docker-compose + Nginx/Redis/FastAPI, DB는 외부 RDS)
 > 💡 **목적**: AWS 프리티어에서 단계적 확장 가능한 Docker Compose 구조 설계
 
 ---
@@ -9,7 +9,7 @@
 ## 📋 목차
 
 1. [개요](#개요)
-2. [AWS 프리티어 제약사항](#aws-프리티어-제약사항)
+2. [AWS t3.small 기준](#aws-t3small-기준)
 3. [단계별 아키텍처](#단계별-아키텍처)
 4. [네트워크 및 보안](#네트워크-및-보안)
 5. [리소스 최적화](#리소스-최적화)
@@ -23,11 +23,17 @@
 
 ## 개요
 
+### 현재 운영 구성 (2026-01-15)
+
+- **구성**: Nginx + FastAPI + Redis (docker-compose)
+- **DB**: 외부 RDS PostgreSQL (DATABASE_URL로 연결)
+- **도메인**: fxi.kr (HTTPS/WSS)
+
 ### 목표
 
-- AWS 프리티어(t2.micro, 1GB RAM)에서 안정적 운영
+- AWS t3.small (2GB RAM) 기준 안정적 운영
 - 단계적 확장 가능한 아키텍처 (SQLite → PostgreSQL → 서비스 분리)
-- 메모리 효율성 극대화 (1GB 한계 고려)
+- 메모리 효율성 극대화 (2GB 한계 고려)
 - 무중단 마이그레이션 지원
 
 ### 핵심 설계 원칙
@@ -40,16 +46,16 @@
 
 ---
 
-## AWS 프리티어 제약사항
+## AWS t3.small 기준
 
 ### 하드웨어 스펙
 
 ```
-EC2 t2.micro (프리티어)
-├─ CPU: 1 vCPU (가변 성능)
-├─ RAM: 1GB (실제 사용 가능 ~950MB)
-├─ Network: 제한적 (버스트 가능)
-└─ Storage: 30GB SSD (프리티어)
+EC2 t3.small
+├─ CPU: 2 vCPU
+├─ RAM: 2GB (실제 사용 가능 ~1.9GB)
+├─ Network: 최대 5Gbps
+└─ Storage: EBS (gp3/gp2)
 ```
 
 ### 메모리 소비 예측
@@ -64,17 +70,19 @@ EC2 t2.micro (프리티어)
 | **크롤러 (분리)** | - | - | ~150MB |
 | **시스템 오버헤드** | ~100MB | ~100MB | ~100MB |
 | **총 메모리 사용** | **~315MB** | **~565MB** | **~845MB** |
-| **여유 메모리** | ✅ 635MB | ✅ 385MB | ⚠️ 105MB |
+| **여유 메모리** | ✅ ~1.7GB | ✅ ~1.5GB | ✅ ~1.2GB |
 
 **결론:**
-- Phase 1, 2: t2.micro에서 안정적 운영 가능
-- Phase 3: t3.small 이상 권장 (~$15/월)
+- Phase 1~3: t3.small에서 안정적 운영 가능
+- Phase 4 이상: t3.medium 이상 권장
 
 ---
 
 ## 단계별 아키텍처
 
-### Phase 1: 초기 출시 (200-500명, SQLite) ⭐️ 현재
+### Phase 1: 초기 출시 (200-500명, SQLite)
+
+> **운영 메모**: 현재는 SQLite 대신 외부 RDS를 사용 중이며, `DATABASE_URL`로 전환 가능합니다.
 
 ```
 인터넷
@@ -125,7 +133,7 @@ EC2 t2.micro (프리티어)
 
 ---
 
-### Phase 2: 중기 확장 (500-1,000명, PostgreSQL + Redis)
+### Phase 2: 중기 확장 (500-1,000명, PostgreSQL + Redis) ⭐️ 현재
 
 ```
 인터넷
@@ -235,7 +243,7 @@ docker-compose -f docker-compose.yml -f docker-compose.phase2.yml up -d fastapi
 
 **요구사항:**
 - EC2 t3.small 이상 (2GB RAM, ~$15/월)
-- 또는 t2.micro 2대 (ELB 사용)
+- 또는 t3.small 2대 + ELB
 
 **적용 시기:** 사용자 1,000명 이상
 
@@ -1249,8 +1257,8 @@ docker-compose exec postgres psql -U exchange_user -d exchange_rate_db -c "VACUU
 ### Phase 3 준비 (사용자 1,000명 도달 시)
 
 1. **EC2 인스턴스 업그레이드**
-   - [ ] t3.small으로 업그레이드 (~$15/월)
-   - [ ] 또는 t2.micro 2대 + ELB
+   - [ ] t3.medium으로 업그레이드
+   - [ ] 또는 t3.small 2대 + ELB
 
 2. **서비스 분리**
    - [ ] `Dockerfile.crawler` 작성
@@ -1276,4 +1284,4 @@ docker-compose exec postgres psql -U exchange_user -d exchange_rate_db -c "VACUU
 **작성일:** 2025-10-21
 **작성자:** Claude Code + Jay
 **버전:** 1.0.0
-**상태:** 설계 완료, 구현 대기
+**상태:** 운영 중 (docker-compose + Nginx/Redis/FastAPI, DB는 외부 RDS)

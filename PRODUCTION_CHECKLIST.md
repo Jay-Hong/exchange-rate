@@ -6,20 +6,30 @@
 
 ---
 
+## ✅ 현재 운영 상태 (2026-01-15)
+
+- **EC2**: t3.small (2 vCPU, 2GB RAM)
+- **DB**: RDS PostgreSQL (db.t4g.micro, Free Tier)
+- **도메인/SSL**: fxi.kr + Let's Encrypt (HTTPS/WSS 정상)
+- **저장 표준**: UTC 저장, API는 KST(+09:00)로 출력
+- **모니터링**: EC2 CPU, RDS CPU/메모리/스토리지, EC2 CPU 크레딧 알람 구성
+- **백업**: RDS 자동 백업 1일 보존
+- **외부 모니터링**: 미설정 (당분간 계획 없음)
+
 ## 📋 체크리스트 요약
 
 | 단계 | 완료 여부 | 우선순위 | 예상 소요 시간 |
 |------|-----------|----------|----------------|
-| HTTPS/SSL 설정 | ⬜ | 🚨 CRITICAL | 10분 |
-| 보안 강화 (CORS, Rate Limiting) | ⬜ | 🚨 CRITICAL | 30분 |
-| 데이터 백업 자동화 | ⬜ | 🚨 CRITICAL | 20분 |
+| HTTPS/SSL 설정 | ✅ | 🚨 CRITICAL | 10분 |
+| 보안 강화 (CORS, Rate Limiting) | ⚠️ | 🚨 CRITICAL | 30분 |
+| 데이터 백업 자동화 | ✅ | 🚨 CRITICAL | 20분 |
 | 외부 모니터링 (Uptime, Sentry) | ⬜ | 🚨 CRITICAL | 15분 |
 | CloudWatch Logs 통합 | ⬜ | 🚨 CRITICAL | 15분 |
-| PostgreSQL 마이그레이션 준비 | ⬜ | 📋 HIGH | 1-2시간 |
+| PostgreSQL 마이그레이션 준비 | ✅ | 📋 HIGH | 1-2시간 |
 | CI/CD 파이프라인 | ⬜ | 📋 HIGH | 30-60분 |
 | 무중단 배포 설정 | ⬜ | 📋 HIGH | 30분 |
 | Auto Scaling + Load Balancer | ⬜ | 🎯 MEDIUM | 1-2시간 |
-| Redis 캐싱 | ⬜ | 🎯 MEDIUM | 1시간 |
+| Redis 캐싱 | ✅ | 🎯 MEDIUM | 1시간 |
 
 ---
 
@@ -27,7 +37,7 @@
 
 ### 1. HTTPS/SSL 인증서
 
-**현재 상태**: ❌ HTTP only
+**현재 상태**: ✅ HTTPS/WSS 적용 완료 (fxi.kr)
 
 **위험도**: CRITICAL
 - iOS ATS (App Transport Security)로 인해 HTTP 기본 차단
@@ -94,7 +104,7 @@ Outbound Rules:
 
 #### 2.2 CORS 설정
 
-**현재 코드 확인 필요**: `app/main.py`
+**현재 상태**: ❌ CORS 미설정 (`app/main.py` 기준)
 
 ```python
 # app/main.py
@@ -117,6 +127,8 @@ app.add_middleware(
 **주의**: `allow_origins=["*"]` 금지 (CSRF 취약)
 
 #### 2.3 Rate Limiting
+
+**현재 상태**: ✅ Nginx limit_req 적용 (`nginx/conf.d/default.conf`)
 
 **목적**: DDoS 방지, 크롤링 봇 차단
 
@@ -170,47 +182,22 @@ http {
 
 ### 3. 데이터 백업 자동화
 
-**현재 상태**: ❌ 백업 없음 (SQLite 파일만)
+**현재 상태**: ✅ RDS 자동 백업 활성화 (보존 1일)
 
-**위험**: 인스턴스 종료/장애 시 데이터 완전 유실
+**위험**: RDS 장애/오류 시 복구 지점 부족
 
-#### 3.1 S3 자동 백업 (일일)
-
-```bash
-# /home/ubuntu/backup.sh
-#!/bin/bash
-DATE=$(date +%Y%m%d_%H%M%S)
-DB_PATH="/home/ubuntu/exchange-rate/data/exchange_rates.db"
-S3_BUCKET="s3://your-backup-bucket/db-backups/"
-
-# SQLite 백업 (일관성 보장)
-sqlite3 $DB_PATH ".backup /tmp/backup_$DATE.db"
-
-# S3 업로드
-aws s3 cp /tmp/backup_$DATE.db $S3_BUCKET
-
-# 로컬 임시 파일 삭제
-rm /tmp/backup_$DATE.db
-
-# 30일 이상 오래된 백업 삭제
-aws s3 ls $S3_BUCKET | awk '{print $4}' | head -n -30 | xargs -I {} aws s3 rm $S3_BUCKET{}
-```
-
-```bash
-# crontab -e (매일 새벽 3시)
-0 3 * * * /home/ubuntu/backup.sh >> /var/log/backup.log 2>&1
-```
-
-#### 3.2 EBS 스냅샷 자동화
+#### 3.1 RDS 자동 백업 (권장)
 
 **AWS Console**:
-1. EC2 → Elastic Block Store → Volumes
-2. 볼륨 선택 → Actions → Create Snapshot
-3. Data Lifecycle Manager → Create Lifecycle Policy
-   - 매일 자동 스냅샷
-   - 7일 보관
+1. RDS → Databases → fxi-db → Modify
+2. **자동 백업 활성화** + 보존 기간 7~14일 (권장)
+3. Apply (즉시 또는 유지관리 창)
 
-**비용**: 0.05$/GB-월 (1GB면 $0.05/월)
+#### 3.2 수동 스냅샷 (변경 전 필수)
+
+**AWS Console**:
+1. RDS → Databases → fxi-db → Actions → Take snapshot
+2. 이름 예: `fxi-db-baseline-YYYY-MM-DD`
 
 #### 3.3 백업 복구 테스트
 
@@ -233,7 +220,7 @@ echo "Backup validated: $RECORD_COUNT records"
 
 ### 4. 외부 모니터링 & 즉각 알림
 
-**현재 상태**: ❌ 관리자 페이지 수동 확인만
+**현재 상태**: ❌ 미설정 (관리자 페이지 수동 확인, 당분간 계획 없음)
 
 #### 4.1 UptimeRobot (무료)
 
@@ -359,6 +346,17 @@ services:
 
 #### 5.3 CloudWatch Alarms
 
+**현재 상태**: ✅ 인프라 지표 알람 5개 구성
+
+설정된 알람:
+- FXi-EC2-CPU-High (CPUUtilization > 80)
+- FXi-EC2-CPU-Credit-Low (CPUCreditBalance < 50)
+- FXi-RDS-CPU-High (CPUUtilization > 80)
+- FXi-RDS-Memory-Low (FreeableMemory < 100MB)
+- FXi-RDS-Storage-Low (FreeStorageSpace < 2GB)
+
+> 로그 기반 알람(에러/크롤러 실패)은 CloudWatch Logs 통합 후 설정 필요
+
 **AWS Console** → CloudWatch → Alarms:
 
 1. **에러 로그 알림**:
@@ -376,27 +374,19 @@ services:
 
 ## 📋 Tier 2: 출시 직후 1개월 내 (Growth Enabler)
 
-### 6. PostgreSQL 마이그레이션 준비
+### 6. PostgreSQL 마이그레이션
 
-**타이밍**: 다음 조건 중 하나 충족 시
-- 동시 접속 50명 이상
-- DB 크기 100MB 이상
-- SQLite 락 에러 빈번
+**현재 상태**: ✅ 완료 (RDS PostgreSQL 운영 중, SQLite 이관 없음)
 
-**현재 상태**: ✅ SQLite 5.4MB (여유 있음)
+#### 6.1 RDS PostgreSQL 운영 사양
 
-#### 6.1 RDS PostgreSQL 프리티어
-
-**스펙**:
-- db.t3.micro (2 vCPU, 1GB RAM)
+- db.t4g.micro (2 vCPU, 1GB RAM, ARM64)
 - 20GB SSD 스토리지
-- 12개월 무료
+- 12개월 프리티어
 
-**비용 (프리티어 이후)**:
-- 인스턴스: $13/월
-- 스토리지: $2.30/월 (20GB)
+#### 6.2 (참고) SQLite → PostgreSQL 마이그레이션 스크립트
 
-#### 6.2 마이그레이션 스크립트 준비
+> 현재는 RDS 운영 중이며 SQLite 이관은 하지 않습니다. 아래는 참고용입니다.
 
 ```python
 # migrations/sqlite_to_postgres.py
@@ -597,7 +587,7 @@ server {
 
 ### 9. Auto Scaling + Load Balancer
 
-**현재**: 단일 t2.micro 인스턴스
+**현재**: 단일 t3.small 인스턴스
 
 **확장 아키텍처**:
 ```
@@ -811,11 +801,11 @@ async def get_latest_rates(db: Session):
 
 ### Week 4+: 확장 준비 (트래픽 증가 시)
 
-**Day 22-25: PostgreSQL 마이그레이션**
-- [ ] RDS PostgreSQL 인스턴스 생성
-- [ ] Alembic 마이그레이션 스크립트
-- [ ] 데이터 마이그레이션 (SQLite → PostgreSQL)
-- [ ] 성능 비교 테스트
+**Day 22-25: PostgreSQL 마이그레이션 (완료)**
+- [x] RDS PostgreSQL 인스턴스 생성
+- [x] Alembic 마이그레이션 스크립트
+- [x] 데이터 마이그레이션 (SQLite → PostgreSQL) **미실시** (데이터 이관 없음)
+- [x] 성능 비교 테스트
 
 **Day 26-28: Redis 캐싱**
 - [ ] Redis 설치 (EC2 Docker 또는 ElastiCache, 옵션 A 권장)
@@ -830,20 +820,21 @@ async def get_latest_rates(db: Session):
 
 | 항목 | 비용 | 비고 |
 |------|------|------|
-| EC2 t2.micro | 무료 | 프리티어 12개월 |
-| EBS 30GB | 무료 | 프리티어 12개월 |
-| S3 백업 (5GB) | 무료 | 프리티어 12개월 |
+| EC2 t3.small | $15/월 | 온디맨드 |
+| EBS 30GB | ~$0 | 프리티어 12개월 한정 |
+| RDS db.t4g.micro | $0 | 프리티어 12개월 |
+| S3 백업 (5GB) | 무료 | 프리티어 12개월 한정 |
 | CloudWatch Logs (5GB) | 무료 | 프리티어 영구 |
 | 도메인 (Cloudflare) | $0.83/월 | $10/년 |
 | Let's Encrypt | 무료 | 영구 무료 |
-| **합계** | **$0.83/월** | 프리티어 |
+| **합계** | **$15.83/월** | EC2 비용 포함 |
 
 ### 성장 단계 (500-5000명)
 
 | 항목 | 비용 | 비고 |
 |------|------|------|
 | EC2 t3.small × 2 | $30/월 | $15/월 × 2 |
-| RDS PostgreSQL (db.t3.micro) | $15/월 | 20GB 포함 |
+| RDS PostgreSQL (db.t4g.small) | ~$25/월 | 20GB 포함 |
 | ElastiCache Redis | $11/월 | cache.t3.micro |
 | ALB | $16/월 | |
 | S3 백업 (20GB) | $0.46/월 | $0.023/GB |

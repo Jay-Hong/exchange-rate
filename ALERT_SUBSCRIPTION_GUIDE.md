@@ -6,6 +6,14 @@
 
 ---
 
+## ✅ 현재 운영 상태 (2026-01-13)
+
+- **EC2**: t3.small (2 vCPU, 2GB RAM)
+- **DB**: RDS PostgreSQL (db.t4g.micro, Free Tier)
+- **Redis**: EC2 Docker
+- **도메인/SSL**: fxi.kr + Let's Encrypt (HTTPS/WSS 정상)
+- **저장 표준**: UTC 저장, API는 KST(+09:00) 출력
+
 ## 📋 목차
 
 1. [결정된 아키텍처](#-결정된-아키텍처)
@@ -85,10 +93,10 @@
 | 작업 | 설명 |
 |------|------|
 | UI/UX 구현 | 환율 비교 화면, 그래프, 은행 목록 |
-| API 연동 | 현재 SQLite 기반 REST API 사용 |
+| API 연동 | RDS PostgreSQL 기반 REST API 사용 |
 | WebSocket | 실시간 환율 업데이트 |
 
-**인프라**: 기존 t2.micro + SQLite (변경 없음)
+**인프라**: t3.small + RDS PostgreSQL (운영 기준)
 
 ---
 
@@ -110,7 +118,7 @@
 | 서버 API 구현 | `/api/register-device`, `/api/notification-settings` |
 | Alembic 설정 | DB 마이그레이션 스크립트 준비 |
 
-**인프라**: t2.micro + SQLite (개발 계속)
+**인프라**: t3.small + RDS PostgreSQL (운영 기준)
 
 #### 🔑 생성되는 키/파일 목록
 
@@ -798,7 +806,7 @@ async def create_notification_setting(
 **RevenueCat Webhook 설정 (완료):**
 
 1. RevenueCat Dashboard → Integrations → Webhooks → FXi(Active) [Add new configuration]
-2. Webhook URL: `https://fxi.n-e.kr/webhooks/revenuecat`
+2. Webhook URL: `https://fxi.kr/webhooks/revenuecat`
 3. Authorization: Dashboard에 설정한 값과 `.env`의 `REVENUECAT_WEBHOOK_AUTH_KEY`를 동일하게 맞춤
 
 > **현재 상태**: 요청 시 검증 (5분 캐시) + Webhook 캐시 무효화 모두 구현됨.
@@ -1563,27 +1571,26 @@ Day 6: "내일 체험이 종료됩니다. 구독하시면 끊김 없이 계속 �
 
 ---
 
-### Phase 4: RDS PostgreSQL 마이그레이션
+### Phase 4: RDS PostgreSQL 마이그레이션 (완료)
 
-**시점**: 첫 외부 사용자의 FCM/알림 데이터가 DB에 기록되기 전
+**완료 시점**: 2026-01-13
 
-> ⚠️ **중요**: 외부 베타 시작 전에 반드시 RDS로 전환해야 합니다.
-> 내부 테스트 데이터는 드롭하고 새로 시작합니다 (아래 절차 참고).
+> ✅ **완료**: RDS 전환 및 EC2 업그레이드 완료. SQLite 데이터 이관 없음.
 
 | 작업 | 설명 |
 |------|------|
-| RDS 인스턴스 생성 | db.t4g.micro (프리티어, ARM64) |
-| VPC 설정 | EC2와 같은 네트워크 |
-| Alembic 마이그레이션 실행 | 빈 스키마 생성 (SQLite 이관 안 함) |
-| EC2 업그레이드 | t2.micro → t3.small |
-| 통합 리허설 | Alembic 업/다운, E2E 테스트 ([리허설 절차](#-통합-리허설-체크리스트) 참고) |
-| 내부 테스터 안내 | 앱 재설치 공지 발송 |
+| ✅ RDS 인스턴스 생성 | db.t4g.micro (프리티어, ARM64) |
+| ✅ VPC 설정 | EC2와 같은 네트워크 |
+| ✅ Alembic 마이그레이션 실행 | 빈 스키마 생성 (SQLite 이관 안 함) |
+| ✅ EC2 업그레이드 | t3.small |
+| ✅ 통합 리허설 | Alembic 업/다운, E2E 테스트 |
+| ✅ 내부 테스터 안내 | 앱 재설치 공지 발송 |
 
 **비용**: EC2 $15/월 + RDS $0 (프리티어 12개월)
 
 #### 🔄 전환 전략: 데이터 드롭 방식
 
-**기본 전략 (권장)**: Phase 2-3 개발 중 SQLite 사용, Phase 4에서 RDS로 전환 시 내부 테스트 데이터 드롭
+**기본 전략 (권장)**: Phase 2-3 개발 중 SQLite 사용, Phase 4에서 RDS로 전환 시 내부 테스트 데이터 드롭 (완료)
 
 ```text
 왜 데이터를 드롭하는가?
@@ -1602,10 +1609,10 @@ Day 6: "내일 체험이 종료됩니다. 구독하시면 끊김 없이 계속 �
 **1. 서버 측 작업**
 
 ```bash
-# 1. EC2 업그레이드 (t2.micro → t3.small)
+# 1. EC2 업그레이드 (t3.small 완료)
 # AWS 콘솔에서 인스턴스 유형 변경
 
-# 2. RDS PostgreSQL 생성 (새 DB, SQLite 이관 안 함)
+# 2. RDS PostgreSQL 생성 (새 DB, SQLite 이관 안 함, 완료)
 # AWS 콘솔에서 db.t4g.micro 생성
 
 # 3. 환경변수 변경
@@ -1646,19 +1653,19 @@ docker compose up -d --build
 | FCM device_token | ✅ 드롭 | 앱 재설치 시 자동 재발급 |
 | notification_settings | ✅ 드롭 | 사용자가 다시 설정 |
 | notification_logs | ✅ 드롭 | 히스토리 초기화 |
-| 환율 데이터 | ⚠️ 선택 | 필요 시 SQLite에서 이관 |
+| 환율 데이터 | ✅ 드롭 | SQLite 이관 없음 (신규 DB) |
 
 ---
 
-### Phase 5: 베타 + iOS 출시
+### Phase 5: 심사 + iOS 출시
 
-**목표**: 테스트플라이트 베타 → 앱스토어 출시
+**목표**: 앱스토어 심사 → 출시 (외부 베타 생략)
 
 | 작업 | 설명 |
 |------|------|
-| 테스트플라이트 외부 베타 | 외부 테스터 피드백 수집 (1-2주) |
+| 테스트플라이트 외부 베타 | **미진행 (생략)** |
 | 버그 수정 및 안정화 | 크래시 프리 세션 > 99% 목표 |
-| 앱스토어 심사 제출 | 스크린샷, 설명, 개인정보처리방침 |
+| 앱스토어 심사 제출 | 2026-01-15 오전 제출 완료 |
 | 로그 기반 알람 구현 | 알림 실패율 모니터링 (선택) |
 
 **완료 게이트**:
@@ -1688,8 +1695,8 @@ docker compose up -d --build
 ### 타임라인 요약
 
 ```text
-[현재] Phase 1 완료
-   └── t2.micro + SQLite, iOS MVP 완성
+[현재] Phase 4 완료
+   └── t3.small + RDS 운영 중 (UTC 저장, KST 출력)
 
 [Phase 2] Firebase Auth + FCM
    └── 서버 API 추가, 알림 기능, Alembic 준비
@@ -1698,10 +1705,10 @@ docker compose up -d --build
    └── 구독 시스템 완성
 
 [Phase 4] RDS 마이그레이션
-   └── 첫 외부 사용자 기록 전 전환
+   └── 완료 (SQLite 이관 없음)
 
-[Phase 5] 베타 + iOS 출시
-   └── 테스트플라이트 → 앱스토어
+[Phase 5] 심사 + iOS 출시
+   └── 앱스토어 심사 대기 → 출시
 
 [Phase 6] Android
    └── 크로스 플랫폼 완성
@@ -1715,11 +1722,11 @@ docker compose up -d --build
 
 | Phase | 목표 | 주요 작업 | 완료 게이트 | 인프라 |
 |-------|------|----------|-------------|--------|
-| 1 | iOS MVP ✅ | UI, API 연동, WebSocket | 앱 기본 기능 동작 | t2.micro + SQLite |
-| 2 | Firebase Auth + FCM | 로그인, 푸시 알림, 알림 API | 푸시 알림 E2E 성공, 구조화 로그 준비 | t2.micro + SQLite |
-| 3 | RevenueCat | 구독 결제, 유료 기능 | 구매 → 권한 반영 ≤ 1분 | t2.micro + SQLite |
-| 4 | RDS 마이그레이션 | DB 전환, 인프라 업그레이드 | Alembic 성공, 통합 E2E 통과 | t3.small + RDS |
-| 5 | 베타 + iOS 출시 | 테스트플라이트, QA, 심사 | 앱스토어 승인, 크래시 프리 > 99% | t3.small + RDS |
+| 1 | iOS MVP ✅ | UI, API 연동, WebSocket | 앱 기본 기능 동작 | 이전: t2.micro + SQLite |
+| 2 | Firebase Auth + FCM ✅ | 로그인, 푸시 알림, 알림 API | 푸시 알림 E2E 성공, 구조화 로그 준비 | 이전: t2.micro + SQLite |
+| 3 | RevenueCat ✅ | 구독 결제, 유료 기능 | 구매 → 권한 반영 ≤ 1분 | 이전: t2.micro + SQLite |
+| 4 | RDS 마이그레이션 ✅ | DB 전환, 인프라 업그레이드 | Alembic 성공, 통합 E2E 통과 | t3.small + RDS |
+| 5 | 심사 + iOS 출시 | 심사, QA | 앱스토어 승인, 크래시 프리 > 99% | t3.small + RDS |
 | 6 | Android | Kotlin UI, SDK 통합 | Play 스토어 승인 | t3.small + RDS |
 
 ---
@@ -1901,7 +1908,7 @@ CREATE INDEX idx_notification_settings_bank_currency
 
 **아키텍처:**
 ```
-크롤러 → SQLite/PostgreSQL → CRUD (변화 감지) → FCM → iOS/Android
+크롤러 → PostgreSQL (서비스) / SQLite (개발) → CRUD (변화 감지) → FCM → iOS/Android
 ```
 
 **구현:**
@@ -2274,20 +2281,20 @@ FirebaseAuth.getInstance().signIn(...) { result ->
 #### Phase 4: RDS 마이그레이션
 
 - [ ] 로컬 스테이징 리허설 통과 ([체크리스트](#-통합-리허설-체크리스트))
-- [ ] EC2 t2.micro → t3.small 업그레이드
-- [ ] RDS PostgreSQL 인스턴스 생성 (db.t4g.micro)
-- [ ] VPC 설정 (EC2와 같은 네트워크)
-- [ ] Alembic 마이그레이션 스크립트 준비 및 실행 (빈 스키마)
-- [ ] DATABASE_URL 환경변수 변경
-- [ ] 내부 테스터 앱 재설치 공지 발송 ([템플릿](#-데이터-드롭-절차))
-- [ ] 통합 E2E 테스트 통과
+- [x] EC2 t3.small 업그레이드 완료
+- [x] RDS PostgreSQL 인스턴스 생성 (db.t4g.micro, 운영 중)
+- [x] VPC 설정 (EC2와 같은 네트워크)
+- [x] Alembic 마이그레이션 스크립트 준비 및 실행 (운영 스키마 적용)
+- [x] DATABASE_URL 환경변수 변경 (RDS 연결)
+- [x] 내부 테스터 앱 재설치 공지 발송 (해당 없음: 개발자 단독 테스트)
+- [x] 통합 E2E 테스트 통과 (운영 서버 사용자 흐름 테스트 완료)
 
-#### Phase 5: 베타 + iOS 출시
+#### Phase 5: 심사 + iOS 출시
 
-- [ ] 테스트플라이트 외부 베타 배포
-- [ ] 베타 피드백 수집 및 버그 수정
+- [ ] 테스트플라이트 외부 베타 배포 (미진행, 생략)
+- [ ] 베타 피드백 수집 및 버그 수정 (외부 베타 생략으로 제외)
 - [ ] 크래시 프리 세션 > 99% 확인
-- [ ] 앱스토어 심사 제출
+- [x] 앱스토어 심사 제출 (2026-01-15 오전)
 - [ ] 앱스토어 승인
 - [ ] (선택) 로그 기반 알람 구현
 

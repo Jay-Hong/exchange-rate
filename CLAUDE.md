@@ -73,7 +73,7 @@
 
 - **언어**: Python 3.x
 - **웹 프레임워크**: FastAPI
-- **DB**: SQLite (개발/테스트) → AWS RDS PostgreSQL (서비스 시작 시)
+- **DB**: SQLite (개발/테스트), AWS RDS PostgreSQL (운영)
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (AsyncIOScheduler)
 - **크롤링**: requests + BeautifulSoup4, Selenium
@@ -89,7 +89,7 @@
 ### 실시간 통신
 
 - **프로토콜**: WebSocket Secure (wss://)
-- **도메인**: https://fxi.n-e.kr
+- **도메인**: https://fxi.kr
 - **브로드캐스트**: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
 - **하트비트**: Ping/Pong (30초)
 - **암호화**: TLS 1.2 & 1.3
@@ -396,17 +396,9 @@ scheduler.add_job(
 }
 ```
 
-## 인프라 제약사항
+## 인프라 환경
 
-### 현재 환경 (개발/테스트)
-
-- **EC2**: AWS 프리티어 t2.micro (1 vCPU, 1GB RAM)
-- **DB**: SQLite (로컬 파일)
-- **OS**: Ubuntu 24.04.3 LTS, 64비트(x86) = x86_64 = AMD64 아키텍처
-- **DB 크기**: 5.4MB (SQLite)
-- **동시 접속**: 최대 ~100명 (WebSocket)
-
-### 서비스 환경 (예정)
+### 현재 서비스 환경
 
 **인프라 구성:**
 
@@ -423,7 +415,13 @@ AWS Cloud (서울 리전)
     └── Firebase FCM (푸시 알림, 무료)
 ```
 
-**AWS RDS PostgreSQL 프리티어:**
+**EC2 인스턴스:**
+
+- **인스턴스**: t3.small (2 vCPU, 2GB RAM)
+- **OS**: Ubuntu 24.04 LTS (x86_64)
+- **동시 접속**: 최대 ~500명 (WebSocket)
+
+**AWS RDS PostgreSQL:**
 
 - **인스턴스**: db.t4g.micro (2 vCPU, 1GB RAM, ARM64)
 - **스토리지**: 20GB SSD (gp2)
@@ -431,7 +429,20 @@ AWS Cloud (서울 리전)
 - **네트워크**: 같은 VPC 내 통신 (지연 1-3ms, 비용 $0)
 - **12개월 후 비용**: ~$15/월
 
-**비용 예상:**
+### CloudWatch 알람
+
+| 알람 이름 | 조건 | 설명 |
+|----------|------|------|
+| FXi-EC2-CPU-High | CPUUtilization > 80% | EC2 CPU 과부하 |
+| FXi-EC2-CPU-Credit-Low | CPUCreditBalance < 50 | EC2 버스트 크레딧 부족 |
+| FXi-RDS-CPU-High | CPUUtilization > 80% | RDS CPU 과부하 |
+| FXi-RDS-Memory-Low | FreeableMemory < 100MB | RDS 메모리 부족 |
+| FXi-RDS-Storage-Low | FreeStorageSpace < 2GB | RDS 스토리지 부족 |
+
+- **SNS 주제**: `fxi-alerts` (이메일 알림)
+- **평가 기간**: 5분 내 1개 데이터 포인트
+
+### 비용 예상
 
 | 항목 | Phase 1 (12개월) | Phase 2 (12개월 후) |
 |------|-----------------|-------------------|
@@ -442,11 +453,12 @@ AWS Cloud (서울 리전)
 
 ### 확장 계획 (사용자 1,000명 이상 시)
 
-1. ✅ **PostgreSQL 전환** → RDS 프리티어로 해결
+1. ✅ **PostgreSQL 전환** → RDS 프리티어로 해결 (2026-01)
 2. ✅ **Redis 캐시 도입** → Phase 1.7 완료 (EC2 Docker)
 3. ✅ **변경 감지 시스템** → Phase 1.7 완료
-4. **EC2 업그레이드** (t3.small → t3.medium, 필요 시)
-5. **RDS 업그레이드** (db.t4g.micro → db.t4g.small, 필요 시)
+4. ✅ **CloudWatch 알람** → EC2/RDS 모니터링 설정 완료 (2026-01)
+5. **EC2 업그레이드** (t3.small → t3.medium, 필요 시)
+6. **RDS 업그레이드** (db.t4g.micro → db.t4g.small, 필요 시)
 
 ## Docker 배포 및 관리
 
@@ -639,7 +651,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 ## 보안 고려사항
 
 - [x] **HTTPS/SSL 적용** (Let's Encrypt, 2025-11-17)
-  - 도메인: `fxi.n-e.kr`
+  - 도메인: `fxi.kr`
   - 자동 갱신: Systemd Timer (매일 KST 04:30, 05:30)
   - TLS 1.2 & 1.3, HSTS 헤더 (1년)
 - [x] **민감 정보 환경 변수화** (python-dotenv, .env 파일)
@@ -816,4 +828,6 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ 구조화된 로깅, 관리자 페이지, 도메인 기반 구조
 - ✅ Redis 브로드캐스트 캐시, 변경 감지 시스템 (Phase 1.7)
 - ✅ FCM 푸시 알림, Firebase Auth 연동 (Phase 2)
-- 🔜 CI/CD, 유닛 테스트, PostgreSQL 전환 (서비스 런칭 시)
+- ✅ RDS PostgreSQL 전환 (2026-01)
+- ✅ iOS 앱스토어 제출 (2026-01-15 오전 제출, 심사 대기중)
+- 🔜 CI/CD, 유닛 테스트

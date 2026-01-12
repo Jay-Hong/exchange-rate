@@ -452,9 +452,10 @@ CREATE INDEX idx_investing_ts ON investing_exchange_rates (timestamp);
 ### 시나리오 7: 클라이언트 동시 업데이트 (우선순위: ⭐⭐)
 
 **현재 상황:**
-- **개발/테스트 단계** - 아직 프로덕션 사용자 없음
-- iOS/Android 앱 미배포 상태
-- 관리자 페이지만 존재 (개발자용)
+- **프로덕션 운영 중** - 백엔드 서비스 live
+- iOS 앱: App Store 심사 대기 (2026-01-15 제출)
+- Android 앱: 미배포 상태
+- 관리자 페이지 운영 중 (모니터링용)
 
 **해결책 (단순화):**
 **레거시 없음 → Capability Negotiation 불필요!**
