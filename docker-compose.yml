@@ -79,7 +79,7 @@ services:
     environment:
       - ENV=${ENV:-production}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - DATABASE_URL=sqlite:////data/exchange_rates.db
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////data/exchange_rates.db}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     volumes:

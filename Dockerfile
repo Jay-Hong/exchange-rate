@@ -8,6 +8,7 @@ WORKDIR /build
 # 빌드 의존성 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 패키지 설치
@@ -36,6 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
     unzip \
+    # PostgreSQL 클라이언트 라이브러리 (DB 드라이버용)
+    libpq5 \
     # Google Chrome 저장소 추가
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \

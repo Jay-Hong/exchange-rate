@@ -599,8 +599,14 @@ def register_device(
         - UPSERT: 토큰 존재 시 user_id/platform/updated_at 갱신
         - 다른 계정으로 로그인 시 자동으로 소유권 이전
     """
-    # SQLite UPSERT용 import
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    # DB Dialect에 맞는 UPSERT 선택
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+    elif dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+    else:
+        raise RuntimeError(f"지원하지 않는 DB dialect: {dialect_name}")
 
     try:
         # 소유권 이전 로깅용: 기존 소유자 확인
@@ -614,7 +620,7 @@ def register_device(
 
         # UPSERT: INSERT OR UPDATE on device_token conflict
         now = models.get_kst_now()
-        stmt = sqlite_insert(models.UserDevice).values(
+        stmt = dialect_insert(models.UserDevice).values(
             user_id=user_id,
             device_token=device_token,
             platform=platform,
