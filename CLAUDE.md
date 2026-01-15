@@ -329,6 +329,20 @@ scheduler.add_job(
 - `GET /api/banks/{pair}` - 모든 은행 특정 통화
 - `GET /health` - 헬스체크
 
+### Admin API (HTTP Basic Auth 필요)
+
+> 관리자 페이지 전용 API. `admin` / `ADMIN_PASSWORD` 인증 필요.
+
+- `GET /admin/api/dashboard` - 통합 대시보드 데이터 (시스템, 크롤러, 브로드캐스트 상태)
+- `GET /admin/api/logs` - 로그 조회 (파라미터: `log_type`, `hours`, `limit`, `bank`)
+- `GET /admin/api/crawler-config` - 크롤러 활성화 설정 조회
+- `POST /admin/api/crawler-config` - 크롤러 활성화/비활성화 토글
+- `GET /admin/api/crawler/stats` - 크롤러별 통계 (성공률, 평균 실행시간)
+- `GET /admin/api/queue-status` - Selenium Queue 상태 조회
+- `GET /admin/api/redis-status` - Redis 메모리 및 Circuit 상태
+- `GET /admin/api/monitor/current` - 현재 시스템 리소스 (메모리, CPU, Chrome)
+- `GET /admin/api/monitor/history` - 시간별 리소스 히스토리 (파라미터: `hours`)
+
 ### 계정 API (Apple App Store 5.1.1(v) 준수)
 
 - `DELETE /api/user/me` - 사용자 계정 데이터 삭제 (Firebase ID Token 필요)

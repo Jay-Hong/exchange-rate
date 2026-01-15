@@ -39,7 +39,21 @@ security = HTTPBasic()
 
 def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     """관리자 인증 확인"""
-    admin_password = os.getenv("ADMIN_PASSWORD", "admin1234")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+
+    # Production 환경에서는 ADMIN_PASSWORD 필수
+    if not admin_password:
+        env = os.getenv("ENV", "development")
+        if env == "production":
+            logger.error("🚨 ADMIN_PASSWORD 환경변수가 설정되지 않음 (production)")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Admin authentication not configured",
+            )
+        else:
+            # 개발 환경에서만 기본값 허용
+            admin_password = "admin1234"
+            logger.warning("⚠️ 기본 관리자 비밀번호 사용 중 (개발 환경 전용)")
 
     correct_username = secrets.compare_digest(credentials.username, "admin")
     correct_password = secrets.compare_digest(credentials.password, admin_password)
@@ -170,6 +184,11 @@ async def warmup_broadcast_cache():
 async def lifespan(app: FastAPI):
     # Startup code
     logger.info("🚀 FastAPI 서버 시작", extra={"env": os.getenv("ENV", "development")})
+
+    # Production 환경에서는 ADMIN_PASSWORD 필수 (서버 시작 실패)
+    if os.getenv("ENV", "development") == "production" and not os.getenv("ADMIN_PASSWORD"):
+        logger.error("🚨 ADMIN_PASSWORD 환경변수가 설정되지 않음 (production)")
+        raise RuntimeError("ADMIN_PASSWORD required in production")
 
     # Redis 연결 및 워밍업 (브로드캐스트 캐시)
     await redis_cache.connect()
@@ -498,6 +517,7 @@ def get_dashboard():
     import psutil
     import time
     from app.config import BASE_DIR
+    from sqlalchemy import text
 
     KST = timezone('Asia/Seoul')
     now = datetime.now(KST)
@@ -509,12 +529,26 @@ def get_dashboard():
     from app.database import DATABASE_URL
     from pathlib import Path as PathLib
 
-    db_size_mb = 0
+    db_size_mb = None
     if DATABASE_URL and "sqlite:///" in DATABASE_URL:
         # sqlite:///경로 → 경로 추출 (sqlite:/// 제거)
         db_file_path = DATABASE_URL.replace("sqlite:///", "")
         db_path = PathLib(db_file_path)
-        db_size_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0
+        if db_path.exists():
+            db_size_mb = round(db_path.stat().st_size / (1024 * 1024), 2)
+        else:
+            db_size_mb = 0
+    elif DATABASE_URL and DATABASE_URL.startswith("postgresql"):
+        db = SessionLocal()
+        try:
+            result = db.execute(text("SELECT pg_database_size(current_database())"))
+            size_bytes = result.scalar()
+            if size_bytes is not None:
+                db_size_mb = round(size_bytes / (1024 * 1024), 2)
+        except Exception:
+            logger.debug("PostgreSQL DB 크기 조회 실패", exc_info=True)
+        finally:
+            db.close()
 
     process = psutil.Process()
     uptime_seconds = time.time() - process.create_time()
@@ -524,7 +558,7 @@ def get_dashboard():
         "websocket_connections": len(manager.active_connections),
         "memory_mb": round(memory.used / (1024 * 1024), 1),
         "memory_percent": round(memory.percent, 1),
-        "db_size_mb": round(db_size_mb, 2),
+        "db_size_mb": db_size_mb,
         "uptime_seconds": int(uptime_seconds),
         "current_mode": current_mode
     }
