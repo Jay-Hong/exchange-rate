@@ -6,7 +6,7 @@
 
 ---
 
-## ✅ 현재 운영 상태 (2026-01-15)
+## ✅ 현재 운영 상태 (2026-01-21)
 
 - **EC2**: t3.small (2 vCPU, 2GB RAM)
 - **DB**: RDS PostgreSQL (db.t4g.micro, Free Tier)
@@ -14,6 +14,8 @@
 - **저장 표준**: UTC 저장, API는 KST(+09:00)로 출력
 - **모니터링**: EC2 CPU, RDS CPU/메모리/스토리지, EC2 CPU 크레딧 알람 구성
 - **백업**: RDS 자동 백업 1일 보존
+- **Redis 캐시**: EC2 Docker 내 운영 (broadcast:latest, graph:* 캐시)
+- **iOS 앱**: App Store 출시 완료 (2026-01-21, "환율알림 - 대한민국 주요 은행")
 - **외부 모니터링**: 미설정 (당분간 계획 없음)
 
 ## 📋 체크리스트 요약
@@ -718,14 +720,14 @@ async def get_latest_rates(db: Session):
 
 ## 🎬 추천 실행 순서 (4주 계획)
 
-### Week 1: 보안 + 모니터링 (출시 전 필수)
+### Week 1: 보안 + 모니터링 ✅ 완료
 
-**Day 1-2: HTTPS 설정**
-- [ ] 도메인 구매 (Cloudflare, $10/년)
-- [ ] Let's Encrypt 인증서 발급
-- [ ] Nginx HTTPS 리버스 프록시 설정
-- [ ] HTTP → HTTPS 리다이렉트
-- [ ] WebSocket `wss://` 테스트
+**Day 1-2: HTTPS 설정** ✅
+- [x] 도메인 fxi.kr 설정
+- [x] Let's Encrypt 인증서 발급
+- [x] Nginx HTTPS 리버스 프록시 설정
+- [x] HTTP → HTTPS 리다이렉트
+- [x] WebSocket `wss://` 테스트
 
 **Day 3-4: 보안 강화**
 - [ ] AWS Security Group 재설정
@@ -807,10 +809,10 @@ async def get_latest_rates(db: Session):
 - [x] 데이터 마이그레이션 (SQLite → PostgreSQL) **미실시** (데이터 이관 없음)
 - [x] 성능 비교 테스트
 
-**Day 26-28: Redis 캐싱**
-- [ ] Redis 설치 (EC2 Docker 또는 ElastiCache, 옵션 A 권장)
-- [ ] 캐싱 레이어 구현
-- [ ] 성능 측정 (Before/After)
+**Day 26-28: Redis 캐싱** ✅
+- [x] Redis 설치 (EC2 Docker, 옵션 A)
+- [x] 캐싱 레이어 구현 (broadcast:latest, graph:*)
+- [x] Circuit Breaker 패턴 적용
 
 ---
 
@@ -958,6 +960,6 @@ crontab -e
 
 ---
 
-**마지막 업데이트**: 2025-11-15
+**마지막 업데이트**: 2026-01-21
 **작성자**: Claude Code
-**다음 리뷰**: 출시 1주 전
+**상태**: iOS 앱스토어 출시 완료

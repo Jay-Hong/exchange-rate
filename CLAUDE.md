@@ -843,5 +843,5 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ Redis 브로드캐스트 캐시, 변경 감지 시스템 (Phase 1.7)
 - ✅ FCM 푸시 알림, Firebase Auth 연동 (Phase 2)
 - ✅ RDS PostgreSQL 전환 (2026-01)
-- ✅ iOS 앱스토어 제출 (2026-01-15 오전 제출, 심사 대기중)
+- ✅ iOS 앱스토어 출시 완료 (2026-01-21)
 - 🔜 CI/CD, 유닛 테스트

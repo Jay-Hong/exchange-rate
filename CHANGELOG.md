@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-01-21
+
+### Released - iOS App Store
+
+- **iOS 앱 출시**: App Store에 "환율알림 - 대한민국 주요 은행" 앱 게시
+- **심사 전략**: "환율 알림" 중심 포지셔닝으로 Guideline 5.1.1 통과
+- **거절→통과**: 초기 거절 사유(로그인 강제) → 알림 기능 중심 설명으로 해결
+
+### Infrastructure - Production Ready
+
+- **RDS PostgreSQL 전환**: SQLite → AWS RDS PostgreSQL (db.t4g.micro)
+  - SQLAlchemy dialect 자동 감지 (`psycopg2` 의존성 추가)
+  - 환경변수 `DATABASE_URL`로 DB 전환
+- **도메인 fxi.kr 전환**: Let's Encrypt SSL 인증서 적용 (HTTPS/WSS)
+  - TLS 1.2 & 1.3, HSTS 헤더 적용
+  - Certbot 자동 갱신 (Systemd Timer)
+- **DB 타임스탬프 UTC 통일**: 저장은 UTC, API 응답은 KST(+09:00) 변환
+- **Admin 페이지 보안 강화**: 모니터링 카드 확장 (CPU, 메모리 여유도, 브로드캐스트 건강 상태)
+- **Shinhan 주말 크롤링**: OUT 모드에서 shinhan 크롤러 유지 (토요일 아침 가끔 변동)
+
+---
+
 ## [1.10.0] - 2026-01-10
 
 ### Changed - MIBANK Parsing Logic Overhaul (Currency-Code Based)
@@ -460,6 +482,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.11.0 | 2026-01-21 | iOS 출시 + RDS PostgreSQL + 도메인 fxi.kr + Admin 보안 강화 |
 | 1.10.0 | 2026-01-10 | MIBANK Currency-Code parsing + 3-layer validation |
 | 1.9.0 | 2026-01-08 | Account Deletion API (Apple App Store 5.1.1(v) Compliance) |
 | 1.8.0 | 2025-12-02 | 24-hour graph + WebSocket integration + Band Chart |
@@ -571,4 +594,4 @@ Please update this CHANGELOG when making significant changes following these gui
 
 ---
 
-**Last Updated**: 2026-01-09
+**Last Updated**: 2026-01-21
