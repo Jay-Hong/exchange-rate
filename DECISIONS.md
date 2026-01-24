@@ -1383,18 +1383,18 @@ def crawl_hana_bank():
 - Broadcasting: 매분 00, 10, 20, 30, 40, 50초
 
 **BREAK1 모드: 월~금 21:00~23:59, 화~토 00:00~02:59 (심야)**
-- 제외: sc (21:00 종료)
+- 제외: sc (20:30 종료)
 - 유지: investing, kb, hana, woori, bs, citi, ibk, nh, shinhan (9개)
 - Broadcasting: 동일 (매분 00, 10, 20, 30, 40, 50초)
 
-**BREAK2 모드: 월 06:00~07:59, 화~토 03:00~07:59 (개장 준비)**
+**BREAK2 모드: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (개장 준비)**
 - 제외: woori (02:45 종료), ibk (02:05 종료), shinhan (02:30 종료), sc (20:30 종료)
 - 유지: investing, kb, hana, bs, citi, nh (6개)
 - Broadcasting: 동일
 
 **OUT 모드: 토 07:00 ~ 월 05:59 (주말)**
-- 제외: woori, ibk, shinhan, sc, citi (주말 고시 없음)
-- 유지: investing, kb, hana, bs, nh (5개)
+- 제외: woori, ibk, sc, citi (주말 고시 없음)
+- 유지: investing, kb, hana, bs, shinhan, nh (6개)
 - Broadcasting: 동일
 - 크롤러: 완전 분산 (동시 실행 0개)
 
@@ -1405,7 +1405,7 @@ def crawl_hana_bank():
 | **investing** | 월 06:00 | 토 06:00 | ✅ | ✅ | ✅ |
 | **kb** | 평일 08:30 | 익일(토 포함) 05:00 | ✅ | ✅ | ✅ |
 | **hana** | 평일 08:30 | 익일(토 포함) 06:00 | ✅ | ✅ | ✅ |
-| **shinhan** | 평일 08:19 | 익일 02:30 | ✅ | ❌ | ❌ |
+| **shinhan** | 평일 08:19 | 익일 02:30 | ✅ | ❌ | ✅ (토 아침 가끔) |
 | **woori** | 평일 08:30 | 익일 02:45 | ✅ | ❌ | ❌ |
 | **ibk** | 평일 08:30 | 익일 02:05 | ✅ | ❌ | ❌ |
 | **nh** | 평일 08:40 | 당일 24:00 | ✅ | ✅ | ✅ |
