@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Certbot 자동 갱신 (Systemd Timer)
 - **DB 타임스탬프 UTC 통일**: 저장은 UTC, API 응답은 KST(+09:00) 변환
 - **Admin 페이지 보안 강화**: 모니터링 카드 확장 (CPU, 메모리 여유도, 브로드캐스트 건강 상태)
-- **Shinhan 주말 크롤링**: OUT 모드에서 shinhan 크롤러 유지 (토요일 아침 가끔 변동)
+- **Shinhan 주말 크롤링**: OUT 모드에서 shinhan 크롤러 유지 (주말 중 가끔 변동)
 
 ---
 
