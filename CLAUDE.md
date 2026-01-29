@@ -19,6 +19,7 @@
 > 🔄 **재부팅 절차:** [REBOOT_CHECKLIST.md](REBOOT_CHECKLIST.md) - 재부팅 후 검증 체크리스트
 
 **유지보수 기록:**
+> 🔧 **2026-01-29:** [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) - Investing Cloudflare 403 차단 대응 (curl_cffi TLS 지문 위장)
 > 🔧 **2025-11-06:** [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md) - AsyncIO Queue 도입 (Semaphore 경합 제거)
 > 🔧 **2025-11-05:** [MAINTENANCE_2025-11-05.md](MAINTENANCE_2025-11-05.md) - 성능 개선 및 모니터링 시스템 구축
 
@@ -76,7 +77,7 @@
 - **DB**: SQLite (개발/테스트), AWS RDS PostgreSQL (운영)
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (AsyncIOScheduler)
-- **크롤링**: requests + BeautifulSoup4, Selenium
+- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing 전용, TLS 지문 위장)
 - **SSL/TLS**: Let's Encrypt (Certbot 자동 갱신, 90일 주기)
 - **리버스 프록시**: Nginx (HTTPS, HTTP/2, wss://)
 
@@ -220,7 +221,7 @@ scheduler.add_job(
 
 **Tier A (investing):** 기준 환율, 최우선
 - **특징**: 가장 중요한 데이터, 빠른 응답
-- **실행 방식**: Request 기반 (requests 라이브러리)
+- **실행 방식**: Request 기반 (curl_cffi, TLS 지문 위장으로 Cloudflare 우회)
 - **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 3초 전)
   - `cron(second='7,17,27,37,47,57')`
 - **OUT**: 10분마다
@@ -551,7 +552,8 @@ docker builder prune -f
 1. **다중 폴백 URL** (현재 구현됨)
 2. **정기적인 Selector 검증** (주 1회 권장)
 3. **크롤링 실패 알림 시스템** (TODO)
-4. **User-Agent 로테이션** (TODO)
+4. ✅ **User-Agent 로테이션** (Investing 크롤러 적용, Safari/Chrome UA 풀)
+5. ✅ **TLS 지문 위장** (curl_cffi + safari17_0, Cloudflare 우회) - [ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장)
 
 ## 파일 구조
 

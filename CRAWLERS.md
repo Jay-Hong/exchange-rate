@@ -1,8 +1,9 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2026-01-10
+> 📅 **마지막 업데이트**: 2026-01-29
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
 > 🆕 **최근 변경**:
+> - Investing 크롤러 Cloudflare 403 차단 대응: curl_cffi TLS 지문 위장 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))
 > - MIBANK 파싱 로직 전면 개편: Currency-Code 기반 + 3단계 검증 ([ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반))
 > - 9개 은행 크롤러 `_crawl_mibank_*()` 래퍼 패턴 적용
 > - 미사용 함수 `[DEPRECATED]` 주석 표시 (sc, nh, shinhan, ibk)
@@ -65,7 +66,7 @@
 | **씨티** | `app/crawlers/citi.py` | 씨티 메인 → 씨티 서브 → mibank | 평일 09:00~24:00만 허용 |
 
 **공통점**:
-- `requests.get()` + `BeautifulSoup` 사용
+- `requests.get()` + `BeautifulSoup` 사용 (Investing만 `curl_cffi` 사용, TLS 지문 위장)
 - **Selenium 없음** (가장 빠르고 가벼움)
 - 정적 HTML 파싱
 
@@ -149,9 +150,17 @@
 
 **핵심 로직:**
 - JPY-KRW 스케일링 (100엔당 원화 → 1엔당 원화로 변환)
+- **curl_cffi + TLS 지문 위장**: `safari17_0` impersonate로 Cloudflare 우회 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))
+- **Circuit Breaker**: 연속 403 시 점진적 쿨다운 (5회→1분, 10회→5분, 20회→15분)
+- **UA 로테이션**: impersonate에 맞는 UA 풀에서 랜덤 선택
+- **Jitter**: 0~2초 랜덤 딜레이 (요청 패턴 분산)
+- **로그 억제**: 차단 상태 전이 로깅 (시작=ERROR 1회, 지속=WARNING 5분마다, 해제=WARNING 1회)
 
 **주의사항:**
 - JPY만 ×100 스케일링, 다른 통화 추가 시 확인 필요
+- `curl_cffi` 미설치 시 자동으로 `requests`로 폴백 (`_USE_CFFI` 플래그)
+- `chrome131` impersonate는 Cloudflare에 의해 차단됨 → `safari17_0`만 사용
+- Cloudflare 차단 재발 시: [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) 플레이북 참고
 
 ---
 
@@ -418,6 +427,7 @@ def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
 | **날짜 변경 실패** | `⚠️ 날짜 변경 실패` | select value 형식 확인 ("2025", "01", "01"), AJAX 대기 시간 증가 |
 | **Alert 미처리** | 크롤링 중단 | `driver.switch_to.alert.accept()` 추가 |
 | **AJAX 응답 안 기다림** | 이전 데이터 읽기 | WebDriverWait로 요소 개수/속성 변화 감지 추가 |
+| **Cloudflare 403 차단** | Investing 크롤러 `InvestingForbidden` 반복 | curl_cffi impersonate 변경 또는 [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) 플레이북 참고 |
 
 ---
 

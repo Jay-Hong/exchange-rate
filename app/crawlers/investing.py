@@ -2,11 +2,20 @@
 
 # 표준 라이브러리
 import logging
+import random
+import threading
+import time
 
 # 서드파티 라이브러리
-import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
+
+try:
+    from curl_cffi import requests as cffi_requests
+    _USE_CFFI = True
+except Exception:
+    import requests as cffi_requests
+    _USE_CFFI = False
 
 # 로컬 애플리케이션
 from app import crud
@@ -28,32 +37,172 @@ INVESTING_SELECTORS = {
 }
 SCALED_CURRENCY_PAIRS = {"jpy-krw": 100}
 
+# Investing 전용 UA 풀 (전역 HEADERS는 유지)
+UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+]
+
+SAFARI_UA_POOL = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
+
+# curl_cffi TLS 지문 위장 (Cloudflare 우회 목적)
+CFFI_IMPERSONATE = "safari17_0"
+
+# Circuit breaker 상태
+_state_lock = threading.Lock()
+_consecutive_403 = 0
+_cooldown_until = 0.0
+_blocked = False
+_last_block_summary = 0.0
+
+# Jitter 설정 (초)
+JITTER_MAX_SECONDS = 2.0
+
+# 차단 상태 요약 로그 주기 (초)
+BLOCK_LOG_INTERVAL_SECONDS = 300
+
 # 로거 설정
 logger = logging.getLogger("exchange_rate.crawler.investing")
+
+class InvestingForbidden(Exception):
+    """Investing Cloudflare 403 차단"""
+
+
+def _get_cooldown_seconds(count: int) -> int:
+    if count >= 20:
+        return 15 * 60
+    if count >= 10:
+        return 5 * 60
+    if count >= 5:
+        return 60
+    return 0
+
+
+def _build_headers(impersonate: str) -> dict:
+    headers = dict(HEADERS)
+    if impersonate.startswith("safari"):
+        headers["User-Agent"] = random.choice(SAFARI_UA_POOL)
+    else:
+        headers["User-Agent"] = random.choice(UA_POOL)
+    return headers
+
+
+def _http_get(url: str, headers: dict):
+    if _USE_CFFI:
+        return cffi_requests.get(
+            url,
+            headers=headers,
+            timeout=DEFAULT_TIMEOUT,
+            impersonate=CFFI_IMPERSONATE,
+        )
+    return cffi_requests.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
+
+
+def _mark_blocked(now: float) -> None:
+    global _consecutive_403, _cooldown_until, _blocked, _last_block_summary
+    _consecutive_403 += 1
+    cooldown = _get_cooldown_seconds(_consecutive_403)
+    if cooldown:
+        _cooldown_until = max(_cooldown_until, now + cooldown)
+
+    if not _blocked:
+        logger.error(
+            "🔴 Investing 차단 시작",
+            extra={"count": _consecutive_403, "cooldown_seconds": cooldown},
+        )
+        _blocked = True
+        _last_block_summary = now
+        return
+
+    if now - _last_block_summary >= BLOCK_LOG_INTERVAL_SECONDS:
+        remaining = max(0, int(_cooldown_until - now))
+        logger.warning(
+            "⚠️ Investing 차단 지속",
+            extra={
+                "count": _consecutive_403,
+                "cooldown_seconds": cooldown,
+                "cooldown_remaining_seconds": remaining,
+            },
+        )
+        _last_block_summary = now
+
+
+def _mark_success() -> None:
+    global _consecutive_403, _cooldown_until, _blocked, _last_block_summary
+    if _blocked:
+        logger.warning("🟢 Investing 차단 해제", extra={"previous_403_count": _consecutive_403})
+    _consecutive_403 = 0
+    _cooldown_until = 0.0
+    _blocked = False
+    _last_block_summary = 0.0
+
+
+def _should_skip_due_to_cooldown(now: float) -> bool:
+    global _last_block_summary
+    if now < _cooldown_until:
+        if now - _last_block_summary >= BLOCK_LOG_INTERVAL_SECONDS:
+            remaining = max(0, int(_cooldown_until - now))
+            logger.warning(
+                "⏸️ Investing 쿨다운 중",
+                extra={"cooldown_remaining_seconds": remaining, "consecutive_403": _consecutive_403},
+            )
+            _last_block_summary = now
+        return True
+    return False
+
 
 def crawl_and_save_investing_exchange_rates():
     """Investing.com 환율 크롤링"""
     db = SessionLocal()
 
     try:
-        logger.info(f"FIRST_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
-        crawl_and_save_routine(FIRST_INVESTING_URL, INVESTING_SELECTORS, db)
+        now = time.monotonic()
+        with _state_lock:
+            if _should_skip_due_to_cooldown(now):
+                return
 
-    except Exception as e:
-        logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": FIRST_INVESTING_URL})
+        time.sleep(random.uniform(0, JITTER_MAX_SECONDS))
+
+        first_403 = False
+        second_403 = False
+
         try:
-            logger.info(f"SECOND_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
-            crawl_and_save_routine(SECOND_INVESTING_URL, INVESTING_SELECTORS, db)
+            logger.info("FIRST_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
+            crawl_and_save_routine(FIRST_INVESTING_URL, INVESTING_SELECTORS, db, headers=_build_headers(CFFI_IMPERSONATE))
+            with _state_lock:
+                _mark_success()
+            return
+        except InvestingForbidden:
+            first_403 = True
+        except Exception:
+            logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": FIRST_INVESTING_URL})
+
+        try:
+            logger.info("SECOND_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
+            crawl_and_save_routine(SECOND_INVESTING_URL, INVESTING_SELECTORS, db, headers=_build_headers(CFFI_IMPERSONATE))
+            with _state_lock:
+                _mark_success()
+            return
+        except InvestingForbidden:
+            second_403 = True
         except Exception as e2:
-            logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": SECOND_INVESTING_URL})
-            error_msg = f"모든 URL 실패: {str(e2)[:100]}"
-            logger.exception("❌ Investing 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+            logger.exception("SECOND_INVESTING_URL 크롤링 실패", extra={"url": SECOND_INVESTING_URL})
+
+        if first_403 and second_403:
+            with _state_lock:
+                _mark_blocked(time.monotonic())
+            return
 
     finally:
         db.close()
 
 
-def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
+def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict) -> int:
     """
     크롤링 + DB 저장 루틴
 
@@ -62,7 +211,9 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
     """
     current_rates = {}
     try:
-        response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
+        response = _http_get(url, headers=headers)
+        if response.status_code == 403:
+            raise InvestingForbidden(url)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -84,7 +235,9 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text})
                 continue
 
-    except Exception as e:
+    except InvestingForbidden:
+        raise
+    except Exception:
         logger.exception("⚠️ URL 오류", extra={"url": url})
         raise
 

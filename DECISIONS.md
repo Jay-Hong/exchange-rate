@@ -2150,6 +2150,93 @@ def get_last_bank_rates_with_ts(db, bank_name, pairs) -> dict:
 
 ---
 
+## ADR-018: Investing Cloudflare 차단 대응 - curl_cffi TLS 지문 위장
+
+**날짜:** 2026-01-29
+**상태:** 수락됨
+
+### 상황
+
+Investing.com 크롤러가 **Cloudflare 403 Forbidden**으로 반복 차단됨:
+- 1차 장애: 2026-01-27 23:40 ~ 2026-01-28 05:23 (약 5시간 42분)
+- 2차 장애: 2026-01-28 19:27 ~ 2026-01-29 12:33 (약 17시간)
+- User-Agent 로테이션, Jitter, Circuit Breaker 적용 후에도 차단 지속
+- **근본 원인**: Cloudflare가 TLS fingerprint(JA3/JA4)로 봇을 탐지 — HTTP 헤더와 무관
+
+> 위 시각은 로그 기준 추정값입니다.
+
+### 고려 사항
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **UA 로테이션 + Jitter** (시도) | 구현 간단, 의존성 없음 | TLS 지문 탐지에 무효 |
+| **curl_cffi** (채택) | 실제 브라우저 TLS 지문 위장, 경량 | 외부 의존성 추가 (libcurl 기반) |
+| **Selenium** | 완전한 브라우저 환경 | 메모리 300MB+, 10초 크롤링에 과잉. 또한 현재 `--disable-javascript` 옵션 사용 중이라 Cloudflare JS Challenge를 통과할 수 없음 |
+| **Proxy/IP 우회** | Cloudflare 완전 우회 | 비용 발생, 지연 증가 |
+
+### 결정
+
+**curl_cffi + safari17_0 impersonate 채택**
+
+**핵심 변경:**
+
+1. **HTTP 클라이언트 교체**: `requests` → `curl_cffi` (Investing 크롤러 전용)
+2. **TLS 지문 위장**: `impersonate="safari17_0"` (Safari 17.0의 TLS 핸드셰이크 모방)
+3. **Graceful 폴백**: `curl_cffi` 미설치 시 자동으로 `requests`로 폴백 (`_USE_CFFI` 플래그)
+4. **다른 크롤러 영향 없음**: 은행 크롤러는 기존 `requests` 유지 (Cloudflare 미사용)
+
+**impersonate 선택 과정:**
+
+```
+chrome131 → 403 (차단됨)
+safari17_0 → 200 OK (성공)
+```
+
+Safari impersonate 성공 이유(추정): Cloudflare가 Safari TLS 지문에 덜 엄격한 정책을 적용했을 가능성
+
+**부가 방어 체계 (동시 적용):**
+
+- **Circuit Breaker**: 연속 403 카운트 → 점진적 쿨다운 (5회→1분, 10회→5분, 20회→15분)
+- **UA 로테이션**: Safari/Chrome UA 풀에서 impersonate에 맞는 UA 선택
+- **Jitter**: 0~2초 랜덤 딜레이 (Broadcasting 타이밍 고려, 최대 2초 제한)
+- **로그 억제**: 상태 전이 기반 로깅 (차단시작 1회, 지속 5분마다, 해제 1회)
+
+### 트레이드오프
+
+**장점:**
+- Cloudflare 403 차단 완전 해소
+- 경량 솔루션 (Selenium 대비 메모리 1/30)
+- 기존 코드 구조 최소 변경 (`_http_get()` 래퍼 함수)
+- 폴백 안전성 (`_USE_CFFI` 플래그로 graceful degradation)
+
+**단점:**
+- 외부 C 라이브러리 의존성 (libcurl-impersonate)
+- Cloudflare가 safari17_0 지문도 차단할 경우 재대응 필요
+- Docker 이미지 크기 소폭 증가
+
+### 적용 범위
+
+- **적용**: `app/crawlers/investing.py` (Investing.com 크롤러만)
+- **미적용**: 9개 은행 크롤러 (Cloudflare 미사용, `requests` 유지)
+- **이유**: "If it ain't broke, don't fix it" — 은행 사이트는 Cloudflare를 사용하지 않으며, 불필요한 의존성 변경은 리스크
+
+### 향후 재검토 시점
+
+- Cloudflare가 `safari17_0` 지문도 차단 시 → 다른 impersonate 시도 또는 Proxy 도입
+- curl_cffi 메이저 버전 업그레이드 시 → 호환성 확인
+- 다른 크롤러에서 Cloudflare 차단 발생 시 → curl_cffi 확대 적용 검토
+
+### 관련 결정
+
+- [ADR-013](#adr-013-4단계-모드-환율-고시-스케줄-기반-최적화): 4단계 모드 스케줄링 (Jitter 2초 제한 근거)
+
+### 상세 문서
+
+- [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md): 장애 타임라인, 원인 분석, 복구 플레이북
+- [CRAWLERS.md](CRAWLERS.md): Investing 크롤러 특수 로직
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2168,3 +2255,4 @@ def get_last_bank_rates_with_ts(db, bank_name, pairs) -> dict:
 - 2025-12-02: ADR-015 작성 (WebSocket Graph Integration vs Incremental API - 모바일 최적화)
 - 2025-12-05: ADR-016 작성 (인증/알림 인프라 - AWS RDS + Firebase Auth + FCM)
 - 2026-01-10: ADR-017 작성 (MIBANK 환율 파싱 - Currency-Code 기반 + 3단계 검증)
+- 2026-01-29: ADR-018 작성 (Investing Cloudflare 차단 대응 - curl_cffi TLS 지문 위장)

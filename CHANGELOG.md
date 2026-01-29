@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] - 2026-01-29
+
+### Fixed - Investing Cloudflare 403 Block
+
+- **curl_cffi TLS 지문 위장**: `requests` → `curl_cffi` (Investing 크롤러 전용)
+  - Cloudflare JA3/JA4 TLS fingerprint 탐지 우회
+  - `impersonate="safari17_0"` (Safari 17.0 TLS 핸드셰이크 모방)
+  - `chrome131` 시도 → 403 차단, `safari17_0` → 200 OK 성공
+  - Graceful 폴백: `_USE_CFFI` 플래그로 curl_cffi 미설치 시 requests 자동 사용
+- **Circuit Breaker**: 연속 403 시 점진적 쿨다운 (5회→1분, 10회→5분, 20회→15분)
+- **UA 로테이션**: Safari/Chrome UA 풀에서 impersonate에 맞는 UA 선택
+- **Jitter**: 0~2초 랜덤 딜레이 (요청 패턴 분산, Broadcasting 타이밍 고려)
+- **로그 억제**: 상태 전이 기반 로깅 (차단시작 ERROR 1회, 지속 WARNING 5분마다, 해제 WARNING 1회)
+
+### Dependencies
+
+- Added: `curl_cffi>=0.7.4,<1.0.0` (Investing 크롤러 전용)
+
+### Documentation
+
+- Added [ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장): curl_cffi TLS 지문 위장 선택 근거
+- Created [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md): 장애 타임라인 및 복구 플레이북
+- Updated [CRAWLERS.md](CRAWLERS.md): Investing 크롤러 Cloudflare 대응 상세
+- Updated [CLAUDE.md](CLAUDE.md): 기술 스택 및 리스크 대응 현행화
+
+---
+
 ## [1.11.0] - 2026-01-21
 
 ### Released - iOS App Store
@@ -482,6 +509,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.11.1 | 2026-01-29 | Investing Cloudflare 403 대응 (curl_cffi TLS 지문 위장) |
 | 1.11.0 | 2026-01-21 | iOS 출시 + RDS PostgreSQL + 도메인 fxi.kr + Admin 보안 강화 |
 | 1.10.0 | 2026-01-10 | MIBANK Currency-Code parsing + 3-layer validation |
 | 1.9.0 | 2026-01-08 | Account Deletion API (Apple App Store 5.1.1(v) Compliance) |
@@ -594,4 +622,4 @@ Please update this CHANGELOG when making significant changes following these gui
 
 ---
 
-**Last Updated**: 2026-01-21
+**Last Updated**: 2026-01-29
