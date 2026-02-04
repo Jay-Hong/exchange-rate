@@ -58,6 +58,44 @@ def is_firebase_initialized() -> bool:
     return _firebase_initialized
 
 
+def _normalize_data_payload(
+    title: str,
+    body: str,
+    data: Optional[dict] = None
+) -> dict:
+    """
+    data 페이로드에 title/body 강제 주입 (포그라운드/백그라운드 메시지 일관성 보장)
+
+    FCM 메시지 구조:
+    - notification 페이로드: 백그라운드/종료 상태에서 시스템 트레이가 표시
+    - data 페이로드: 포그라운드에서 앱이 직접 처리
+
+    이 함수는 data에도 title/body를 포함시켜 앱 상태와 무관하게
+    동일한 메시지를 표시할 수 있도록 보장함.
+
+    Note:
+        - FCM data 페이로드의 키/값은 모두 string 타입이어야 함.
+          이 함수는 모든 키/값을 str()로 변환하여 타입 안전성 보장.
+        - title/body가 빈 문자열("")이거나 없으면 함수 인자의 기본값으로 대체됨.
+
+    Args:
+        title: 알림 제목
+        body: 알림 내용
+        data: 추가 데이터 (선택)
+
+    Returns:
+        title/body가 포함된 정규화된 data 딕셔너리 (모든 값이 string)
+    """
+    # FCM data 페이로드는 키/값 모두 string이어야 함
+    normalized = {str(k): str(v) for k, v in (data or {}).items()}
+    # title/body가 이미 있고 비어있지 않으면 덮어쓰지 않음 (caller 우선)
+    if not normalized.get("title"):
+        normalized["title"] = title
+    if not normalized.get("body"):
+        normalized["body"] = body
+    return normalized
+
+
 async def send_fcm_notification(
     token: str,
     title: str,
@@ -102,12 +140,15 @@ async def send_fcm_notification(
         if not init_firebase():
             return False, "FIREBASE_NOT_INITIALIZED"
 
+    # data 페이로드에 title/body 강제 주입 (포그라운드 메시지 일관성)
+    normalized_data = _normalize_data_payload(title, body, data)
+
     message = messaging.Message(
         notification=messaging.Notification(
             title=title,
             body=body,
         ),
-        data=data or {},
+        data=normalized_data,
         token=token,
         # iOS 설정
         apns=messaging.APNSConfig(
@@ -270,12 +311,15 @@ async def send_fcm_multicast(
     if not tokens:
         return {"success_count": 0, "failure_count": 0, "failed_tokens": []}
 
+    # data 페이로드에 title/body 강제 주입 (포그라운드 메시지 일관성)
+    normalized_data = _normalize_data_payload(title, body, data)
+
     message = messaging.MulticastMessage(
         notification=messaging.Notification(
             title=title,
             body=body,
         ),
-        data=data or {},
+        data=normalized_data,
         tokens=tokens,
         apns=messaging.APNSConfig(
             payload=messaging.APNSPayload(
@@ -390,12 +434,15 @@ def send_fcm_multicast_sync(
     if not tokens:
         return {"success_count": 0, "failure_count": 0, "failed_tokens": []}
 
+    # data 페이로드에 title/body 강제 주입 (포그라운드 메시지 일관성)
+    normalized_data = _normalize_data_payload(title, body, data)
+
     message = messaging.MulticastMessage(
         notification=messaging.Notification(
             title=title,
             body=body,
         ),
-        data=data or {},
+        data=normalized_data,
         tokens=tokens,
         apns=messaging.APNSConfig(
             payload=messaging.APNSPayload(

@@ -1249,8 +1249,11 @@ def process_rate_alerts(
                 body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
 
                 # data payload (앱에서 처리용)
+                # title/body 포함: 포그라운드에서도 동일한 메시지 표시 보장
                 data = {
                     "type": "rate_alert",
+                    "title": title,
+                    "body": body,
                     "bank": bank,
                     "currency": currency,
                     "rate": str(rate),
