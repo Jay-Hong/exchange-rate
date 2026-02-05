@@ -517,3 +517,109 @@ def send_fcm_multicast_sync(
             "failure_count": len(tokens),
             "failed_tokens": []
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# data-only FCM 발송 함수 (사일런트 동기화용)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def send_fcm_data_only(
+    tokens: list[str],
+    data: dict
+) -> dict:
+    """
+    data-only FCM 전송 (사일런트 동기화용)
+
+    notification 페이로드 없이 data만 전송하여 사용자에게 알림 배너가
+    표시되지 않도록 함. 다중 기기 알림 설정 동기화에 사용.
+
+    Note:
+        - notification/apns alert/android notification 필드 없음
+        - iOS: content_available + apns-push-type: background
+        - Android: priority high만 설정
+
+    Args:
+        tokens: FCM Device Token 목록 (Firebase API 제한: 최대 500개)
+        data: 전송할 데이터 (예: {"type": "sync_alerts"})
+
+    Returns:
+        {
+            "success_count": int,
+            "failure_count": int,
+            "failed_tokens": list[str]  # 무효 토큰 목록 (삭제 대상)
+        }
+    """
+    if not _firebase_initialized:
+        if not init_firebase():
+            return {
+                "success_count": 0,
+                "failure_count": len(tokens),
+                "failed_tokens": []
+            }
+
+    if not tokens:
+        return {"success_count": 0, "failure_count": 0, "failed_tokens": []}
+
+    # FCM data 페이로드는 키/값 모두 string이어야 함
+    normalized_data = {str(k): str(v) for k, v in data.items()}
+
+    # data-only 메시지 (notification 필드 없음 = 사일런트)
+    message = messaging.MulticastMessage(
+        data=normalized_data,
+        tokens=tokens,
+        # iOS: 사일런트 백그라운드 푸시
+        apns=messaging.APNSConfig(
+            headers={
+                "apns-priority": "5",
+                "apns-push-type": "background"
+            },
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(content_available=True)
+            )
+        ),
+        # Android: priority만 설정 (notification 없음)
+        android=messaging.AndroidConfig(priority="high")
+    )
+
+    try:
+        loop = asyncio.get_running_loop()  # Python 3.10+ 권장
+        response = await loop.run_in_executor(
+            None, messaging.send_each_for_multicast, message
+        )
+
+        failed_tokens = []
+        for idx, result in enumerate(response.responses):
+            if not result.success:
+                error_code = (
+                    result.exception.code
+                    if hasattr(result.exception, 'code')
+                    else "UNKNOWN"
+                )
+                # 무효 토큰만 수집 (삭제 대상)
+                if error_code in ['UNREGISTERED', 'INVALID_ARGUMENT', 'NOT_FOUND']:
+                    failed_tokens.append(tokens[idx])
+
+        logger.info(
+            "FCM data-only 전송 완료",
+            extra={
+                "event": "fcm_data_only",
+                "total": len(tokens),
+                "success": response.success_count,
+                "failure": response.failure_count,
+                "invalid_tokens": len(failed_tokens),
+            }
+        )
+
+        return {
+            "success_count": response.success_count,
+            "failure_count": response.failure_count,
+            "failed_tokens": failed_tokens
+        }
+
+    except Exception:
+        logger.warning("FCM data-only 전송 실패", exc_info=True)
+        return {
+            "success_count": 0,
+            "failure_count": len(tokens),
+            "failed_tokens": []
+        }

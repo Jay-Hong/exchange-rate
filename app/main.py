@@ -25,7 +25,7 @@ from app import models, schemas, crud, scheduler
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
-from app.notifications.fcm import init_firebase, is_firebase_initialized
+from app.notifications.fcm import init_firebase, is_firebase_initialized, send_fcm_data_only
 from app.subscription import verify_premium_status, PremiumStatus
 from app.webhooks import router as webhooks_router
 
@@ -86,6 +86,63 @@ async def require_premium(user_id: str, allow_empty: bool) -> bool:
         )
 
     return True
+
+
+async def notify_user_devices_sync(db: Session, user_id: str):
+    """
+    해당 사용자의 모든 기기에 sync_alerts 발송 (best-effort)
+
+    다중 기기 알림 설정 동기화를 위한 사일런트 푸시.
+    - CRUD 성공 후 호출 (응답 전에 실행됨)
+    - 실패해도 HTTP 응답에 영향 없음
+
+    Args:
+        db: 데이터베이스 세션
+        user_id: Firebase Auth user_id
+    """
+    try:
+        devices = crud.get_devices_by_user(db, user_id)
+        tokens = [d.device_token for d in devices]
+
+        if not tokens:
+            return
+
+        # 500개씩 batch 처리 (FCM API 제한)
+        FCM_BATCH_SIZE = 500
+        total_success = 0
+        total_failure = 0
+        all_failed_tokens = []
+
+        for i in range(0, len(tokens), FCM_BATCH_SIZE):
+            batch_tokens = tokens[i:i + FCM_BATCH_SIZE]
+            result = await send_fcm_data_only(
+                tokens=batch_tokens,
+                data={"type": "sync_alerts"}
+            )
+            total_success += result["success_count"]
+            total_failure += result["failure_count"]
+            all_failed_tokens.extend(result["failed_tokens"])
+
+        # 무효 토큰 일괄 삭제 (batch)
+        if all_failed_tokens:
+            db.query(models.UserDevice).filter(
+                models.UserDevice.device_token.in_(all_failed_tokens)
+            ).delete(synchronize_session=False)
+            db.commit()
+
+        logger.info(
+            "동기화 푸시 발송",
+            extra={
+                "event": "sync_alerts_sent",
+                "user_id": user_id,
+                "success": total_success,
+                "failure": total_failure,
+                "total": len(tokens)
+            }
+        )
+
+    except Exception:
+        logger.warning("동기화 푸시 실패 (무시됨)", exc_info=True)
 
 
 # DB 테이블 생성
@@ -1252,6 +1309,9 @@ async def create_notification_setting(
             }
         )
 
+        # CRUD 성공 후 best-effort 동기화 (헬퍼 내부에서 예외 처리됨)
+        await notify_user_devices_sync(db, user_id)
+
         return build_notification_setting_response(setting)
 
     except Exception as e:
@@ -1342,6 +1402,9 @@ async def update_notification_setting(
         extra={"event": "notification_setting_update", "setting_id": setting_id}
     )
 
+    # CRUD 성공 후 best-effort 동기화 (헬퍼 내부에서 예외 처리됨)
+    await notify_user_devices_sync(db, user_id)
+
     return build_notification_setting_response(updated)
 
 
@@ -1363,8 +1426,13 @@ async def delete_notification_setting(
 
     setting = crud.get_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
 
+    # 멱등성 DELETE: 이미 없으면 성공 반환 (다른 기기에서 삭제된 경우)
     if not setting:
-        raise HTTPException(status_code=404, detail="Setting not found")
+        logger.info(
+            "🔔 알림 설정 삭제 (이미 없음)",
+            extra={"event": "notification_setting_delete_idempotent", "setting_id": setting_id}
+        )
+        return schemas.DeleteResponse(success=True, message="Setting already deleted")
 
     crud.delete_notification_setting(db=db, setting_id=setting_id, user_id=user_id)
 
@@ -1372,6 +1440,9 @@ async def delete_notification_setting(
         "🔔 알림 설정 삭제",
         extra={"event": "notification_setting_delete", "setting_id": setting_id}
     )
+
+    # CRUD 성공 후 best-effort 동기화 (헬퍼 내부에서 예외 처리됨)
+    await notify_user_devices_sync(db, user_id)
 
     return schemas.DeleteResponse(success=True, message="Setting deleted")
 
