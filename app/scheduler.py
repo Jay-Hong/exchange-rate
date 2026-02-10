@@ -3,9 +3,10 @@
 # 표준 라이브러리
 import asyncio
 import logging
+import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Callable
 
 # 서드파티 라이브러리
@@ -15,6 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 
 # 로컬 애플리케이션
+from app import models
 from app.crawlers import investing
 from app.crawlers import hana
 from app.crawlers import kb
@@ -1048,6 +1050,50 @@ def cleanup_old_bank_data():
     finally:
         db.close()
 
+def cleanup_old_user_devices():
+    """
+    오래된 user_devices 정리 (Retention cleanup)
+
+    Notes:
+        - 클라이언트 old token cleanup이 실행되지 않는 엣지 케이스(로그아웃 상태 토큰 회전 등) 대비.
+        - updated_at 기준으로 일정 기간 미갱신 레코드 삭제.
+        - Retention days는 환경변수로 조절 가능.
+    """
+    raw_days = os.getenv("USER_DEVICES_RETENTION_DAYS", "90")
+    try:
+        retention_days = int(raw_days)
+    except ValueError:
+        logger.warning("⚠️ USER_DEVICES_RETENTION_DAYS 파싱 실패, 기본값 90 사용", extra={"value": raw_days})
+        retention_days = 90
+
+    # Guardrail: 지나치게 작은 값은 운영 위험이 커서 방어적으로 보정
+    if retention_days < 7:
+        logger.warning("⚠️ USER_DEVICES_RETENTION_DAYS가 너무 작음, 최소 7로 보정", extra={"value": retention_days})
+        retention_days = 7
+
+    # DB는 naive UTC datetime을 사용한다. (models.get_utc_now())
+    cutoff_utc_naive = datetime.now(dt_timezone.utc).replace(tzinfo=None) - timedelta(days=retention_days)
+
+    db = SessionLocal()
+    try:
+        deleted_count = db.query(models.UserDevice).filter(
+            models.UserDevice.updated_at < cutoff_utc_naive
+        ).delete(synchronize_session=False)
+        db.commit()
+        logger.info(
+            "🧹 user_devices retention cleanup 완료",
+            extra={
+                "deleted_count": deleted_count,
+                "retention_days": retention_days,
+                "cutoff_utc": cutoff_utc_naive.isoformat(),
+            },
+        )
+    except Exception:
+        db.rollback()
+        logger.error("❌ user_devices retention cleanup 실패", exc_info=True)
+    finally:
+        db.close()
+
 def cleanup_old_log_files():
     """오래된 로그 백업 파일 삭제 (10일 이상)"""
     from app.admin.log_cleaner import cleanup_old_log_files as cleanup_logs
@@ -1329,6 +1375,16 @@ def start_scheduler():
         id="monitoring_stats",
         coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
         max_instances=1  # 동시 실행 방지
+    )
+
+    # user_devices retention cleanup: 매일 새벽 03:20:01 (KST)
+    scheduler.add_job(
+        cleanup_old_user_devices,
+        CronTrigger(hour=3, minute=20, second=1, timezone=KST),
+        id="cleanup_old_user_devices",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
     )
 
     # 로그 파일 정리: 매일 새벽 03:29:01시
