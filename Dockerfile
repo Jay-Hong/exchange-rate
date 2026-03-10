@@ -86,6 +86,7 @@ RUN chown -R appuser:appuser /home/appuser/.local
 COPY app/ ./app/
 COPY static/ ./static/
 COPY templates/ ./templates/
+COPY scripts/ ./scripts/
 
 # 데이터 디렉토리 생성 (볼륨 마운트용)
 RUN mkdir -p /data /app/logs && \
