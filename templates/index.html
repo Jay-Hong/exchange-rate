@@ -475,6 +475,7 @@
             font-size: 1.2rem;
             font-weight: bold;
             color: #ffffff;
+            white-space: nowrap;
         }
 
         .graph-actions {
@@ -485,6 +486,7 @@
 
         .graph-toggle-group {
             display: flex;
+            flex: 1;
             gap: 6px;
         }
 
@@ -518,6 +520,46 @@
 
         .graph-toggle.off {
             opacity: 0.4;
+        }
+
+        .graph-toggle.dxy {
+            border-color: #e06060;
+            box-shadow: 0 0 0 1px rgba(224,96,96,0.4);
+        }
+
+        .graph-toggle.dxy.off {
+            opacity: 0.4;
+            box-shadow: none;
+        }
+
+        .period-tabs {
+            display: flex;
+            gap: 4px;
+            margin-top: 12px;
+        }
+
+        .period-tab {
+            flex: 1;
+            border: 1px solid #444;
+            background: #1f1f1f;
+            color: #e0e0e0;
+            padding: 8px 0;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s ease;
+        }
+
+        .period-tab.active {
+            background: #3498db;
+            border-color: #3498db;
+            color: white;
+            font-weight: bold;
+        }
+
+        .period-tab:hover:not(.active) {
+            border-color: #777;
         }
 
         #graph-currency {
@@ -615,16 +657,14 @@
         <!-- 에러 메시지 -->
         <div id="error-message" class="error-message" style="display: none;"></div>
 
-        <!-- 24시간 그래프 (Phase 1A) -->
+        <!-- 환율 그래프 (Phase 1A + Phase E) -->
         <div class="graph-panel" id="graph-panel" style="display: none;">
             <div class="graph-header">
-                <div class="graph-title">📈 24시간 환율 그래프</div>
+                <div class="graph-title">📈 환율 그래프</div>
+                <div class="graph-toggle-group" id="graph-toggle-group">
+                </div>
                 <div class="graph-actions">
-                    <div class="graph-toggle-group" id="graph-toggle-group">
-                        <button class="graph-toggle" data-bank="investing">INVESTING</button>
-                        <button class="graph-toggle" data-bank="kb">KB</button>
-                        <button class="graph-toggle" data-bank="hana">HANA</button>
-                    </div>
+                    <div id="graph-dxy-toggle"></div>
                     <select id="graph-currency">
                         <option value="usd-krw" selected>USD-KRW</option>
                         <option value="jpy-krw">JPY-KRW</option>
@@ -634,6 +674,12 @@
             </div>
             <div class="graph-container">
                 <canvas id="rateChart"></canvas>
+            </div>
+            <div class="period-tabs" id="period-tabs">
+                <button class="period-tab active" data-period="1d">1일</button>
+                <button class="period-tab" data-period="1w">1주</button>
+                <button class="period-tab" data-period="3m">3개월</button>
+                <button class="period-tab" data-period="1y">1년</button>
             </div>
         </div>
 
@@ -651,12 +697,20 @@
         let maxReconnectAttempts = 5;
         let reconnectDelay = 2000;
 
-        // 그래프 데이터 캐시 (3개 통화)
-        const graphData = {
-            'usd-krw': null,
-            'jpy-krw': null,
-            'eur-krw': null
+        // 그래프 기간/DXY 상태
+        let currentPeriod = '1d';
+        let dxyVisible = true;
+        const DXY_COLOR = '#e06060';
+
+        // 그래프 데이터 캐시 (기간별 × 통화별)
+        const graphDataCache = {
+            '1d': { 'usd-krw': null, 'jpy-krw': null, 'eur-krw': null },
+            '1w': { 'usd-krw': null, 'jpy-krw': null, 'eur-krw': null },
+            '3m': { 'usd-krw': null, 'jpy-krw': null, 'eur-krw': null },
+            '1y': { 'usd-krw': null, 'jpy-krw': null, 'eur-krw': null },
         };
+        // WebSocket 호환용 alias (1d 캐시 직접 참조)
+        const graphData = graphDataCache['1d'];
         let scrollPosition = 0;
         let pingInterval = null;
         
@@ -705,36 +759,65 @@
         }
 
         
+        // 기간별 X축 설정
+        function getTimeConfig(period) {
+            switch (period) {
+                case '1w': return { unit: 'day', displayFormats: { day: 'M/d (E)' } };
+                case '3m': return { unit: 'week', displayFormats: { week: 'M/d' } };
+                case '1y': return { unit: 'month', displayFormats: { month: 'yy.M' } };
+                default: return { unit: 'hour', displayFormats: { hour: 'HH' } };
+            }
+        }
+
+        function getXAxisLabel(period) {
+            return period === '1d' ? '시간 (KST)' : '날짜';
+        }
+
+        // 기간별 소스 라벨
+        function getSourceLabel(source, period) {
+            if (source === 'reference') return '인베스팅';
+            if (source === 'dxy') return '달러지수(DXY)';
+            return source.toUpperCase();
+        }
+
         function drawGraph(data) {
             if (!data || !data.sources) return;
 
             const pair = data.pair || currentGraphCurrency || 'usd-krw';
+            const period = data.period || currentPeriod || '1d';
             currentGraphCurrency = pair;
 
             const now = Date.now();
-            const windowStart = now - 24 * 60 * 60 * 1000;
 
             const colors = {
                 investing: '#9db6d8',
                 kb: '#ffb200',
-                hana: '#00a7a0'
+                hana: '#00a7a0',
+                reference: '#9db6d8'
             };
 
             const datasets = [];
             const allY = [];
             const allX = [];
+            const dxyYValues = [];
 
-            const activeEntries = Object.entries(data.sources).filter(([source, series]) => {
-                const mode = graphModes[source] || 'line';
-                return mode !== 'off' && Array.isArray(series) && series.length;
+            // 환율 소스 필터 (DXY 제외)
+            const rateEntries = Object.entries(data.sources).filter(([source, series]) => {
+                if (source === 'dxy') return false;
+                if (!Array.isArray(series) || !series.length) return false;
+                if (period === '1d') {
+                    const mode = graphModes[source] || 'line';
+                    return mode !== 'off';
+                }
+                return true;
             });
 
-            if (activeEntries.length === 0) return;
+            if (rateEntries.length === 0 && !(data.sources.dxy && dxyVisible)) return;
 
-            const singleMode = activeEntries.length === 1;
+            const singleMode = rateEntries.length === 1 && period === '1d';
             const seriesMap = {};
 
-            activeEntries.forEach(([source, series]) => {
+            rateEntries.forEach(([source, series]) => {
                 const candleSeries = buildSeriesForChart(series);
                 seriesMap[source] = candleSeries;
                 candleSeries.forEach(p => {
@@ -743,17 +826,20 @@
                 });
             });
 
-            activeEntries.forEach(([source]) => {
+            // 환율 데이터셋
+            rateEntries.forEach(([source]) => {
                 const candleSeries = seriesMap[source];
                 const closeSeries = candleSeries.map(p => ({ x: p.x, y: p.close }));
+                const color = colors[source] || '#9db6d8';
+                const label = getSourceLabel(source, period);
 
                 if (singleMode) {
                     const hiSeries = candleSeries.map(p => ({ x: p.x, y: p.hi }));
                     const loSeries = candleSeries.map(p => ({ x: p.x, y: p.lo }));
-                    const light = colors[source] + '55';
+                    const light = color + '55';
 
                     datasets.push({
-                        label: `${source.toUpperCase()} HIGH`,
+                        label: `${label} HIGH`,
                         data: hiSeries,
                         type: 'line',
                         borderColor: light,
@@ -762,11 +848,12 @@
                         pointRadius: 0,
                         tension: 0.2,
                         fill: false,
+                        yAxisID: 'y',
                         _band: true
                     });
 
                     datasets.push({
-                        label: `${source.toUpperCase()} LOW`,
+                        label: `${label} LOW`,
                         data: loSeries,
                         type: 'line',
                         borderColor: light,
@@ -775,48 +862,119 @@
                         pointRadius: 0,
                         tension: 0.2,
                         fill: '-1',
+                        yAxisID: 'y',
                         _band: true
                     });
 
                     datasets.push({
-                        label: source.toUpperCase(),
+                        label: label,
                         data: closeSeries,
                         type: 'line',
-                        borderColor: colors[source],
-                        backgroundColor: colors[source] + '33',
+                        borderColor: color,
+                        backgroundColor: color + '33',
                         borderWidth: 2,
                         pointRadius: 0,
                         tension: 0.2,
-                        fill: false
+                        fill: false,
+                        yAxisID: 'y'
                     });
                 } else {
                     datasets.push({
-                        label: source.toUpperCase(),
+                        label: label,
                         data: closeSeries,
                         type: 'line',
-                        borderColor: colors[source],
-                        backgroundColor: colors[source] + '20',
+                        borderColor: color,
+                        backgroundColor: color + '20',
                         borderWidth: 2,
                         pointRadius: 0,
                         tension: 0.1,
-                        fill: false
+                        fill: false,
+                        yAxisID: 'y'
                     });
                 }
             });
 
-            const yPadding = 0.5;
+            // DXY 데이터셋 (USD/KRW + dxyVisible)
+            const hasDxy = data.sources.dxy && dxyVisible && pair === 'usd-krw';
+            if (hasDxy) {
+                const dxySeries = buildSeriesForChart(data.sources.dxy);
+                const dxyCloseSeries = dxySeries.map(p => ({ x: p.x, y: p.close }));
+                dxySeries.forEach(p => {
+                    dxyYValues.push(p.hi, p.lo, p.close);
+                    allX.push(p.x);
+                });
+
+                datasets.push({
+                    label: '달러지수(DXY)',
+                    data: dxyCloseSeries,
+                    type: 'line',
+                    borderColor: DXY_COLOR,
+                    backgroundColor: DXY_COLOR + '20',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    fill: false,
+                    yAxisID: 'yDxy'
+                });
+            }
+
+            // Y축 범위 계산 (환율)
             const yMin = allY.length ? Math.min(...allY) : 0;
             const yMax = allY.length ? Math.max(...allY) : 1;
             const range = yMax - yMin;
             const margin = Math.max(0.3, range * 0.05);
             const yLower = yMin - margin;
             const yUpper = yMax + margin;
-            const xMin = allX.length ? Math.min(...allX) : windowStart;
+
+            // X축 범위
+            const xMin = allX.length ? Math.min(...allX) : now - 86400000;
+            const xMax = allX.length ? Math.max(...allX) : now;
+
+            // DXY Y축 범위
+            let dxyScaleConfig = {};
+            if (hasDxy && dxyYValues.length) {
+                const dMin = Math.min(...dxyYValues);
+                const dMax = Math.max(...dxyYValues);
+                const dRange = dMax - dMin;
+                const dMargin = Math.max(0.1, dRange * 0.05);
+                dxyScaleConfig = {
+                    yDxy: {
+                        position: 'left',
+                        title: { display: true, text: 'DXY', color: DXY_COLOR },
+                        ticks: { color: DXY_COLOR, callback: (v) => v.toFixed(1) },
+                        min: dMin - dMargin,
+                        max: dMax + dMargin,
+                        grid: { drawOnChartArea: false }
+                    }
+                };
+            }
 
             const errorOverlay = document.getElementById('graph-error-overlay');
             if (errorOverlay) errorOverlay.remove();
 
             if (rateChart) rateChart.destroy();
+
+            // X축 설정
+            const timeConfig = getTimeConfig(period);
+            const xAxisConfig = {
+                type: 'time',
+                time: timeConfig,
+                min: xMin,
+                max: period === '1d' ? now : xMax,
+                title: { display: true, text: getXAxisLabel(period), color: '#e0e0e0' },
+                ticks: { color: '#bdc3c7' },
+                grid: { color: '#444', lineWidth: 1 }
+            };
+
+            // 1d일 때만 KST 시간 포맷 + 자정 강조
+            if (period === '1d') {
+                xAxisConfig.ticks.callback = (value) => formatHourKST(value);
+                xAxisConfig.grid.color = (ctx) => {
+                    if (!ctx || !ctx.tick || ctx.tick.value === undefined) return '#444';
+                    const hour = (new Date(ctx.tick.value).getUTCHours() + 9) % 24;
+                    return hour === 0 ? '#777' : '#444';
+                };
+            }
 
             const ctx = document.getElementById('rateChart').getContext('2d');
             rateChart = new Chart(ctx, {
@@ -831,62 +989,54 @@
                             position: 'top',
                             labels: {
                                 color: '#e0e0e0',
-                                filter: (item, data) => {
-                                    const ds = data.datasets[item.datasetIndex];
+                                filter: (item, chartData) => {
+                                    const ds = chartData.datasets[item.datasetIndex];
                                     return !ds._band;
                                 }
                             }
                         },
                         tooltip: {
-                            filter: (tooltipItem) => {
-                                return !tooltipItem.dataset._band;
-                            },
+                            filter: (tooltipItem) => !tooltipItem.dataset._band,
                             callbacks: {
-                                label: (ctx) => {
-                                    const ds = ctx.dataset;
+                                label: (tooltipCtx) => {
+                                    const ds = tooltipCtx.dataset;
                                     if (ds._band) return null;
 
-                                    // Single mode: Range 정보 추가
-                                    if (singleMode && ctx.dataIndex < seriesMap[Object.keys(seriesMap)[0]].length) {
-                                        const point = seriesMap[Object.keys(seriesMap)[0]][ctx.dataIndex];
-                                        return [
-                                            `${ds.label}: ${ctx.parsed.y.toFixed(2)}`,
-                                            `Range: ${point.lo.toFixed(2)} - ${point.hi.toFixed(2)}`
-                                        ];
+                                    // DXY는 소수점 1자리
+                                    if (ds.yAxisID === 'yDxy') {
+                                        return `${ds.label}: ${tooltipCtx.parsed.y.toFixed(2)}`;
                                     }
 
-                                    return `${ds.label}: ${ctx.parsed.y.toFixed(2)}`;
+                                    // Single mode (1d, 소스 1개): Range 정보
+                                    if (singleMode) {
+                                        const firstKey = Object.keys(seriesMap)[0];
+                                        if (firstKey && tooltipCtx.dataIndex < seriesMap[firstKey].length) {
+                                            const point = seriesMap[firstKey][tooltipCtx.dataIndex];
+                                            return [
+                                                `${ds.label}: ${tooltipCtx.parsed.y.toFixed(2)}`,
+                                                `Range: ${point.lo.toFixed(2)} - ${point.hi.toFixed(2)}`
+                                            ];
+                                        }
+                                    }
+
+                                    return `${ds.label}: ${tooltipCtx.parsed.y.toFixed(2)}`;
                                 },
-                                labelColor: (ctx) => {
-                                    if (ctx.dataset._band) {
+                                labelColor: (tooltipCtx) => {
+                                    if (tooltipCtx.dataset._band) {
                                         return { borderColor: 'transparent', backgroundColor: 'transparent' };
                                     }
                                     return {
-                                        borderColor: ctx.dataset.borderColor,
-                                        backgroundColor: ctx.dataset.borderColor
+                                        borderColor: tooltipCtx.dataset.borderColor,
+                                        backgroundColor: tooltipCtx.dataset.borderColor
                                     };
                                 }
                             }
                         }
                     },
                     scales: {
-                        x: {
-                            type: 'time',
-                            time: { unit: 'hour', displayFormats: { hour: 'HH' } },
-                            min: xMin,
-                            max: now,
-                            title: { display: true, text: '시간 (KST)', color: '#e0e0e0' },
-                            ticks: { color: '#bdc3c7', callback: (value) => formatHourKST(value) },
-                            grid: {
-                                color: (ctx) => {
-                                    if (!ctx || !ctx.tick || ctx.tick.value === undefined) return '#444';
-                                    const hour = (new Date(ctx.tick.value).getUTCHours() + 9) % 24;
-                                    return hour === 0 ? '#777' : '#444';
-                                },
-                                lineWidth: 1
-                            }
-                        },
+                        x: xAxisConfig,
                         y: {
+                            position: 'right',
                             title: { display: true, text: '환율 (KRW)', color: '#e0e0e0' },
                             ticks: { callback: (value) => value.toFixed(2), color: '#bdc3c7' },
                             beginAtZero: false,
@@ -900,7 +1050,8 @@
                                 },
                                 lineWidth: 1
                             }
-                        }
+                        },
+                        ...dxyScaleConfig
                     }
                 },
                 plugins: []
@@ -909,7 +1060,7 @@
             document.getElementById('graph-panel').style.display = 'block';
             document.getElementById('graph-currency').value = pair;
             renderGraphToggleButtons();
-            console.log(`✅ 그래프 렌더 완료: ${pair}, as_of: ${data.as_of}`);
+            console.log(`✅ 그래프 렌더 완료: ${pair}, period: ${period}`);
         }
 
 const loadingEl = document.getElementById('loading');
@@ -950,6 +1101,11 @@ const loadingEl = document.getElementById('loading');
                 } catch (_) {
                     /* ignore */
                 }
+            }
+            // DXY 표시 상태 복원
+            const savedDxy = localStorage.getItem('dxyVisible');
+            if (savedDxy !== null) {
+                try { dxyVisible = JSON.parse(savedDxy); } catch (_) { /* ignore */ }
             }
         }
 
@@ -1017,6 +1173,17 @@ const loadingEl = document.getElementById('loading');
         }
 
         function handleGraphToggle(bank) {
+            if (bank === 'dxy') {
+                dxyVisible = !dxyVisible;
+                localStorage.setItem('dxyVisible', JSON.stringify(dxyVisible));
+                renderGraphToggleButtons();
+                const cached = graphDataCache[currentPeriod][currentGraphCurrency];
+                if (cached) {
+                    drawGraph({ pair: currentGraphCurrency, sources: cached, period: currentPeriod });
+                }
+                return;
+            }
+
             const current = graphModes[bank] || 'line';
             graphModes[bank] = current === 'off' ? 'line' : 'off';
 
@@ -1027,13 +1194,11 @@ const loadingEl = document.getElementById('loading');
             saveGraphModes();
             renderGraphToggleButtons();
 
-            const currentCurrency = currentGraphCurrency;
-
-            // 캐시 확인 후 즉시 렌더링
-            if (graphData[currentCurrency]) {
-                drawGraph({sources: graphData[currentCurrency]});
+            const cached = graphDataCache[currentPeriod][currentGraphCurrency];
+            if (cached) {
+                drawGraph({ pair: currentGraphCurrency, sources: cached, period: currentPeriod });
             } else {
-                loadGraph(currentCurrency);
+                loadGraph(currentGraphCurrency, currentPeriod);
             }
         }
         
@@ -1133,31 +1298,45 @@ const loadingEl = document.getElementById('loading');
 
         function renderGraphToggleButtons() {
             const group = document.getElementById('graph-toggle-group');
+            const dxyContainer = document.getElementById('graph-dxy-toggle');
             if (!group) return;
-            group.querySelectorAll('.graph-toggle').forEach(btn => {
-                const bank = btn.dataset.bank;
-                const mode = graphModes[bank] || 'line';
-                btn.classList.remove('line', 'candle', 'off');
-                btn.classList.add(mode);
-                const label = bank.toUpperCase();
-                if (mode === 'line') {
-                    btn.textContent = `${label} · 선택`;
-                } else {
-                    btn.textContent = `${label} · 숨김`;
-                }
-            });
+            group.innerHTML = '';
+            if (dxyContainer) dxyContainer.innerHTML = '';
+
+            // 1d: 개별 은행 토글 (investing, kb, hana)
+            if (currentPeriod === '1d') {
+                GRAPH_BANKS.forEach(bank => {
+                    const btn = document.createElement('button');
+                    btn.className = 'graph-toggle';
+                    btn.dataset.bank = bank;
+                    const mode = graphModes[bank] || 'line';
+                    btn.classList.add(mode === 'off' ? 'off' : 'line');
+                    btn.textContent = `${bank.toUpperCase()} · ${mode === 'off' ? '숨김' : '선택'}`;
+                    group.appendChild(btn);
+                });
+            }
+
+            // DXY 토글: USD/KRW만 (오른쪽 정렬)
+            if (currentGraphCurrency === 'usd-krw' && dxyContainer) {
+                const dxyBtn = document.createElement('button');
+                dxyBtn.className = `graph-toggle dxy ${dxyVisible ? '' : 'off'}`;
+                dxyBtn.dataset.bank = 'dxy';
+                dxyBtn.textContent = `DXY · ${dxyVisible ? '선택' : '숨김'}`;
+                dxyContainer.appendChild(dxyBtn);
+            }
         }
 
         function initializeGraphToggles() {
             renderGraphToggleButtons();
             const group = document.getElementById('graph-toggle-group');
-            if (!group) return;
-            group.addEventListener('click', (e) => {
+            const dxyContainer = document.getElementById('graph-dxy-toggle');
+            const handler = (e) => {
                 const target = e.target.closest('.graph-toggle');
                 if (!target) return;
-                const bank = target.dataset.bank;
-                handleGraphToggle(bank);
-            });
+                handleGraphToggle(target.dataset.bank);
+            };
+            if (group) group.addEventListener('click', handler);
+            if (dxyContainer) dxyContainer.addEventListener('click', handler);
         }
         
         // Drag & Drop 핸들러
@@ -1279,7 +1458,7 @@ const loadingEl = document.getElementById('loading');
                 if (!buckets) return;
 
                 for (const [currency, sources] of Object.entries(buckets)) {
-                    // 해당 통화가 아직 로드 안 됐으면 스킵
+                    // 1d 캐시만 업데이트 (WebSocket 버킷은 10분 단위)
                     if (!graphData[currency]) continue;
 
                     for (const [source, bucket] of Object.entries(sources)) {
@@ -1290,7 +1469,6 @@ const loadingEl = document.getElementById('loading');
                         const bucketTs = bucket.bucket_ts;
 
                         if (lastBucket[0] === bucketTs) {
-                            // 현재 버킷 업데이트
                             series[series.length - 1] = [
                                 bucketTs,
                                 bucket.max,
@@ -1298,10 +1476,8 @@ const loadingEl = document.getElementById('loading');
                                 bucket.close
                             ];
                         } else if (bucketTs > lastBucket[0]) {
-                            // 새 버킷 추가
                             series.push([bucketTs, bucket.max, bucket.min, bucket.close]);
 
-                            // 24시간 윈도우 유지
                             const cutoff = Math.floor(Date.now() / 1000) - 86400;
                             while (series.length && series[0][0] < cutoff) {
                                 series.shift();
@@ -1310,9 +1486,9 @@ const loadingEl = document.getElementById('loading');
                     }
                 }
 
-                // 현재 표시 중인 통화만 재렌더링
-                if (currentGraphCurrency && graphData[currentGraphCurrency]) {
-                    drawGraph({pair: currentGraphCurrency, sources: graphData[currentGraphCurrency]});
+                // 1d 기간 표시 중일 때만 재렌더링
+                if (currentPeriod === '1d' && currentGraphCurrency && graphData[currentGraphCurrency]) {
+                    drawGraph({pair: currentGraphCurrency, sources: graphData[currentGraphCurrency], period: '1d'});
                 }
             }
 
@@ -1655,50 +1831,56 @@ const loadingEl = document.getElementById('loading');
             return String(hour);
         };
 
-        // 데이터 갭 감지 (15분 이상 갭이 있으면 풀 리프레시)
-        function detectDataGap(currency) {
-            const cached = graphData[currency];
-            if (!cached || !cached.investing || cached.investing.length === 0) {
-                return true;  // 캐시 없음
-            }
+        // 데이터 갭 감지 (기간별 임계값)
+        function detectDataGap(currency, period) {
+            period = period || '1d';
+            const cached = graphDataCache[period][currency];
+            if (!cached) return true;
 
-            const lastBucket = cached.investing[cached.investing.length - 1][0];
+            const primaryKey = period === '1d' ? 'investing' : 'reference';
+            const series = cached[primaryKey];
+            if (!series || series.length === 0) return true;
+
+            const lastBucket = series[series.length - 1][0];
             const now = Math.floor(Date.now() / 1000);
             const gap = now - lastBucket;
 
-            return gap > 900;  // 15분 이상 갭
+            const GAP_THRESHOLDS = { '1d': 900, '1w': 7200, '3m': 86400, '1y': 86400 };
+            return gap > (GAP_THRESHOLDS[period] || 900);
         }
 
-        // 그래프 로드 함수 (Lazy Loading + 갭 감지)
-        async function loadGraph(currency) {
+        // 그래프 로드 함수 (기간 인식 + Lazy Loading + 갭 감지)
+        async function loadGraph(currency, period) {
+            period = period || currentPeriod || '1d';
             try {
-                const needsFullLoad = !graphData[currency] || detectDataGap(currency);
+                const needsFullLoad = !graphDataCache[period][currency] || detectDataGap(currency, period);
 
                 if (needsFullLoad) {
-                    // 풀 로드
-                    const res = await fetch(`/api/graph/${currency}`);
+                    const url = period === '1d'
+                        ? `/api/graph/${currency}`
+                        : `/api/graph/${currency}?range=${period}`;
+                    const res = await fetch(url);
                     if (!res.ok) {
                         throw new Error(`HTTP ${res.status}`);
                     }
 
                     const data = await res.json();
-                    graphData[currency] = data.sources;  // 캐시 저장
+                    graphDataCache[period][currency] = data.sources;
 
-                    console.log(`📥 초기 데이터 로드: ${currency}`);
+                    console.log(`📥 데이터 로드: ${currency} (${period})`);
                 } else {
-                    // 캐시 사용
-                    console.log(`⚡ 캐시 사용: ${currency}`);
+                    console.log(`⚡ 캐시 사용: ${currency} (${period})`);
                 }
 
                 currentGraphCurrency = currency;
-                latestGraphData = {pair: currency, sources: graphData[currency]};
+                currentPeriod = period;
+                latestGraphData = {pair: currency, sources: graphDataCache[period][currency], period: period};
                 window._latestGraphData = latestGraphData;
                 drawGraph(latestGraphData);
 
             } catch (error) {
                 console.error('❌ 그래프 로드 실패:', error);
 
-                // 에러 오버레이 표시 (DOM 구조 유지, 캔버스 보존)
                 const graphPanel = document.getElementById('graph-panel');
                 graphPanel.style.display = 'block';
 
@@ -1729,21 +1911,38 @@ const loadingEl = document.getElementById('loading');
                     errorOverlay.remove();
                 }
 
-                // 선택 통화 드롭다운도 서버 응답과 맞춤
                 document.getElementById('graph-currency').value = currency;
-            loadGraph(currency);
+            loadGraph(currency, currentPeriod);
         }
 
         // 통화 변경 이벤트
         document.getElementById('graph-currency').addEventListener('change', (e) => {
-            loadGraph(e.target.value);
+            loadGraph(e.target.value, currentPeriod);
         });
+
+        // 기간 탭 이벤트
+        function initializePeriodTabs() {
+            const tabContainer = document.getElementById('period-tabs');
+            if (!tabContainer) return;
+
+            tabContainer.addEventListener('click', (e) => {
+                const tab = e.target.closest('.period-tab');
+                if (!tab || tab.classList.contains('active')) return;
+
+                tabContainer.querySelectorAll('.period-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+
+                currentPeriod = tab.dataset.period;
+                renderGraphToggleButtons();
+                loadGraph(currentGraphCurrency, currentPeriod);
+            });
+        }
 
         // 초기 로드 (페이지 로드 후)
         document.addEventListener('DOMContentLoaded', () => {
-            // 1초 대기 후 그래프 로드 (WebSocket 연결 후)
+            initializePeriodTabs();
             setTimeout(() => {
-                loadGraph('usd-krw');
+                loadGraph('usd-krw', '1d');
             }, 1000);
         });
 
@@ -1751,7 +1950,7 @@ const loadingEl = document.getElementById('loading');
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && rateChart) {
                 const currentCurrency = document.getElementById('graph-currency').value;
-                loadGraph(currentCurrency);
+                loadGraph(currentCurrency, currentPeriod);
             }
         });
     </script>
