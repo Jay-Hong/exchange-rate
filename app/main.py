@@ -924,32 +924,44 @@ async def toggle_crawler(request: Request):
 # 그래프 API (Phase 1A) - 계층적 Fallback 전략
 # ═════════════════════════════════════════════════════════════
 @app.get("/api/graph/{currency}")
-async def get_graph_data(currency: str):
+async def get_graph_data(currency: str, range: str = "1d"):
     """
-    24시간 그래프 데이터 반환 (계층적 Fallback)
+    그래프 데이터 반환
 
     Args:
         currency: "usd-krw" | "jpy-krw" | "eur-krw"
+        range: "1d" | "1w" | "3m" | "1y" (기본값: "1d")
 
     Returns:
         {
             "pair": "usd-krw",
-            "as_of": "2025-11-29T14:59:45+09:00",
+            "period": "1d",
+            "bucket_size": "10m",
+            "as_of": "...",
             "sources": {
                 "investing": [[ts, max, min, close], ...],
-                "kb": [...],
-                "hana": [...]
+                "kb": [...], "hana": [...],
+                "dxy": [...]  // USD/KRW만
             }
         }
 
-    Fallback 순서:
+    1d Fallback 순서:
         1. Redis 캐시 (120초 TTL)
         2. 인메모리 캐시 (60초 TTL)
         3. DB 조회 (Rate Limiting: 10초에 1번)
         4. 503 Service Unavailable
+
+    1w/3m/1y: Redis lazy 캐시 → DB 조회
     """
     if currency not in ["usd-krw", "jpy-krw", "eur-krw"]:
         raise HTTPException(status_code=400, detail="Invalid currency pair")
+
+    if range not in ["1d", "1w", "3m", "1y"]:
+        raise HTTPException(status_code=400, detail="Invalid range. Use: 1d, 1w, 3m, 1y")
+
+    # 장기 그래프 (1w/3m/1y)는 별도 핸들러
+    if range != "1d":
+        return await _get_period_graph_data(currency, range)
 
     now = time.time()
 
@@ -970,6 +982,8 @@ async def get_graph_data(currency: str):
 
                 return {
                     "pair": currency,
+                    "period": "1d",
+                    "bucket_size": "10m",
                     "as_of": datetime.fromtimestamp(
                         cache_obj["data_timestamp"],
                         tz=KST
@@ -1033,7 +1047,7 @@ async def get_graph_data(currency: str):
         loop = asyncio.get_event_loop()
 
         def _fetch_graph():
-            from app.admin.graph_cache import build_graph_series
+            from app.admin.graph_cache import build_graph_series, build_dxy_graph_series
 
             sources_data = {}
             max_timestamp = 0
@@ -1044,6 +1058,14 @@ async def get_graph_data(currency: str):
                 if latest_ts > max_timestamp:
                     max_timestamp = latest_ts
 
+            # DXY는 USD/KRW만
+            if currency == "usd-krw":
+                dxy_series, dxy_ts = build_dxy_graph_series()
+                if dxy_series:
+                    sources_data["dxy"] = dxy_series
+                    if dxy_ts > max_timestamp:
+                        max_timestamp = dxy_ts
+
             return sources_data, max_timestamp
 
         try:
@@ -1051,6 +1073,8 @@ async def get_graph_data(currency: str):
 
             response = {
                 "pair": currency,
+                "period": "1d",
+                "bucket_size": "10m",
                 "as_of": datetime.fromtimestamp(max_timestamp, tz=KST).isoformat(),
                 "sources": sources_data
             }
@@ -1085,6 +1109,116 @@ async def get_graph_data(currency: str):
                 "reason": "Database query failed"
             }
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 장기 그래프 (1w/3m/1y)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 장기 그래프 캐시 (인메모리)
+_period_cache: Dict[str, dict] = {}          # key: "graph:{currency}:{range}"
+_period_cache_timestamps: Dict[str, float] = {}
+
+PERIOD_CACHE_TTL = {
+    "1w": 600,     # 10분
+    "3m": 3600,    # 1시간
+    "1y": 3600,    # 1시간
+}
+
+BUCKET_SIZE_LABELS = {
+    "1d": "10m",
+    "1w": "1h",
+    "3m": "1d",
+    "1y": "1d",
+}
+
+
+async def _get_period_graph_data(currency: str, period: str):
+    """
+    장기 그래프 데이터 반환 (1w/3m/1y).
+    Redis lazy 캐시 → 인메모리 캐시 → DB 조회.
+    """
+    cache_key = f"graph:{currency}:{period}"
+    now = time.time()
+    ttl = PERIOD_CACHE_TTL[period]
+
+    # Tier 1: Redis 캐시
+    redis = redis_cache.client
+    if redis:
+        try:
+            cached = await redis_cache.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    # Tier 2: 인메모리 캐시
+    if cache_key in _period_cache:
+        cache_age = now - _period_cache_timestamps.get(cache_key, 0)
+        if cache_age < ttl:
+            return _period_cache[cache_key]
+        else:
+            _period_cache.pop(cache_key, None)
+            _period_cache_timestamps.pop(cache_key, None)
+
+    # Tier 3: DB 조회
+    from concurrent.futures import ThreadPoolExecutor
+    import asyncio
+    from app.admin.graph_cache import (
+        build_period_exchange_series, build_period_dxy_series, PERIOD_CONFIG,
+    )
+
+    config = PERIOD_CONFIG[period]
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_event_loop()
+
+    def _fetch():
+        sources_data = {}
+        max_ts = 0
+
+        for source in config["exchange_sources"]:
+            series, latest_ts = build_period_exchange_series(source, currency, period)
+            # 장기(1w+)에서 investing은 "reference" 키로 반환
+            key = "reference" if source == "investing" and period != "1d" else source
+            sources_data[key] = series
+            if latest_ts > max_ts:
+                max_ts = latest_ts
+
+        # DXY는 USD/KRW만
+        if currency in config["dxy_currencies"]:
+            dxy_series, dxy_ts = build_period_dxy_series(period)
+            if dxy_series:
+                sources_data["dxy"] = dxy_series
+                if dxy_ts > max_ts:
+                    max_ts = dxy_ts
+
+        return sources_data, max_ts
+
+    try:
+        sources_data, max_timestamp = await loop.run_in_executor(executor, _fetch)
+
+        response = {
+            "pair": currency,
+            "period": period,
+            "bucket_size": BUCKET_SIZE_LABELS[period],
+            "as_of": datetime.fromtimestamp(max_timestamp, tz=KST).isoformat() if max_timestamp else None,
+            "sources": sources_data,
+        }
+
+        # 캐시 저장 (인메모리 + Redis)
+        _period_cache[cache_key] = response
+        _period_cache_timestamps[cache_key] = now
+
+        if redis:
+            try:
+                await redis_cache.set(cache_key, json.dumps(response), ex=ttl)
+            except Exception:
+                pass
+
+        return response
+    finally:
+        executor.shutdown(wait=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

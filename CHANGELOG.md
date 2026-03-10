@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-03-10
+
+### Added - DXY (Dollar Index) Graph Indicator
+
+- **DXY 크롤러** (`app/crawlers/dxy.py`): 달러지수 실시간 수집
+  - Primary: Investing.com (`kr.investing.com/indices/usdollar`, curl_cffi TLS 지문 위장)
+  - Fallback: Yahoo Finance (`yfinance`, ticker `DX-Y.NYB`)
+  - 전환 조건: 연속 5회 실패 OR 5분 stale → Yahoo 자동 전환
+  - Circuit Breaker: DXY 전용 (investing.py와 독립, 403 쿨다운 동일 정책)
+  - 복구: 쿨다운 해제 후 Investing 재시도, 성공 시 즉시 원소스 복귀
+- **market_index_rates 테이블**: 범용 시장 지수 데이터 모델
+  - `granularity` 컬럼: `realtime` | `hourly` | `daily` (백필과 실시간 구분)
+  - UNIQUE 제약: `(instrument, source, timestamp, granularity)`
+  - `source` 우선순위: `investing > yahoo` (ROW_NUMBER CASE WHEN)
+- **그래프 API 확장**: `/api/graph/{currency}?range=1d|1w|3m|1y`
+  - USD/KRW에만 DXY 보조지표 포함 (API key=`dxy`, UI 표시명=달러지수)
+  - 1d: 10분 버킷 (realtime only)
+  - 1w: 1시간 버킷 (realtime + hourly, lazy cache 10분 TTL)
+  - 3m/1y: 1일 버킷 (realtime + daily, lazy cache 1시간 TTL)
+- **2-part merge 전략**: 과거(daily/hourly) + 오늘(realtime) 분리 쿼리
+  - 1w 오늘: timestamp 단위 `realtime > hourly` 선택 (공존 허용)
+  - 3m/1y 오늘: realtime 있으면 daily 전체 제외 (날짜 단위 배타적)
+- **히스토리 백필 스크립트** (`scripts/backfill_history.py`)
+  - yfinance로 daily(최대 1년) + hourly(최근 7일) 사전 적재
+  - `granularity='daily'|'hourly'`로 구분 저장
+- **DB 마이그레이션 스크립트** (`scripts/migrate_market_index_granularity.py`)
+  - `granularity` 컬럼 추가, UNIQUE 인덱스 재생성
+  - PostgreSQL/SQLite 양쪽 지원, `--dry-run` 옵션
+- **스케줄러 통합**: 4단계 모드 모두 DXY 등록
+  - IN/BREAK1/BREAK2: 매분 42초
+  - OUT: 10분마다 (2분 42초)
+
+### Dependencies
+
+- Added: `yfinance` (Yahoo Finance DXY 폴백)
+
+### Migration
+
+**배포 순서** (운영 환경, 상세: [DEPLOYMENT.md](DEPLOYMENT.md#db-마이그레이션-v1120-dxy-granularity)):
+1. `git pull` → `docker compose build` (새 이미지 빌드)
+2. `docker compose run --rm fastapi python scripts/migrate_market_index_granularity.py`
+3. `docker compose up -d` (서비스 시작)
+4. `docker compose exec fastapi python scripts/backfill_history.py`
+
+### Documentation
+
+- Added [ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략): DXY granularity 기반 2-part merge 전략
+- Updated [CLAUDE.md](CLAUDE.md): DB 스키마, API, 기술 스택, 파일 구조, Phase 1A
+- Updated [CRAWLERS.md](CRAWLERS.md): Group D (시장 지수) DXY 크롤러 섹션 추가
+- Updated [DEPLOYMENT.md](DEPLOYMENT.md): granularity 마이그레이션 선행 절차
+
+---
+
 ## [1.11.1] - 2026-01-29
 
 ### Fixed - Investing Cloudflare 403 Block
@@ -509,6 +562,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 1.12.0 | 2026-03-10 | DXY 달러지수 보조지표 (Investing + Yahoo 이중 소스, granularity 2-part merge) |
 | 1.11.1 | 2026-01-29 | Investing Cloudflare 403 대응 (curl_cffi TLS 지문 위장) |
 | 1.11.0 | 2026-01-21 | iOS 출시 + RDS PostgreSQL + 도메인 fxi.kr + Admin 보안 강화 |
 | 1.10.0 | 2026-01-10 | MIBANK Currency-Code parsing + 3-layer validation |
@@ -622,4 +676,4 @@ Please update this CHANGELOG when making significant changes following these gui
 
 ---
 
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-03-10

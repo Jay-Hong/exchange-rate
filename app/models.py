@@ -36,6 +36,24 @@ class BankExchangeRate(Base):
     )
 
 
+class MarketIndexRate(Base):
+    """시장 지수 데이터 (DXY 등)"""
+    __tablename__ = "market_index_rates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    instrument = Column(String, nullable=False)  # 'dxy' (향후 다른 지수 확장 가능)
+    source = Column(String, nullable=False)  # 'investing' | 'yahoo'
+    rate = Column(Float, nullable=False)
+    timestamp = Column(DateTime, nullable=False, default=get_utc_now)
+    granularity = Column(String, nullable=False, default="realtime")  # 'realtime' | 'hourly' | 'daily'
+
+    __table_args__ = (
+        Index('ix_market_index_instrument_ts', 'instrument', 'timestamp'),
+        Index('ix_market_index_granularity', 'instrument', 'granularity', 'timestamp'),
+        Index('uq_market_index', 'instrument', 'source', 'timestamp', 'granularity', unique=True),
+    )
+
+
 class CrawlerConfig(Base):
     """크롤러 활성화/비활성화 설정 (Phase 1.8)"""
     __tablename__ = "crawler_config"

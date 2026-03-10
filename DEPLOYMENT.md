@@ -575,10 +575,37 @@ sudo docker compose restart
 ### 코드 업데이트
 
 - [ ] 코드 가져오기 (git pull 또는 scp)
+- [ ] **DB 마이그레이션 필요 시**: 새 이미지 빌드 후 마이그레이션 실행 (아래 참조)
 - [ ] 컨테이너 중지 (`sudo docker compose down`)
 - [ ] 이미지 재빌드 (`sudo docker compose build`)
 - [ ] 서비스 재시작 (`sudo docker compose up -d`)
 - [ ] 로그 확인 (`sudo docker compose logs -f fastapi`)
+
+### DB 마이그레이션 (v1.12.0+: DXY granularity)
+
+> ⚠️ **순서: 코드 pull → 이미지 빌드 → 마이그레이션 → 서비스 시작 → 백필**
+> 새 스크립트는 새 이미지에만 존재하므로, 반드시 빌드 후 `docker compose run`으로 실행합니다.
+
+```bash
+# 1. DB 백업 (RDS PostgreSQL)
+pg_dump -h <RDS-HOST> -U <USER> -d <DB> > backup_$(date +%Y%m%d).sql
+
+# 2. 코드 가져오기 + 새 이미지 빌드 (서비스는 아직 시작하지 않음)
+git pull origin master
+sudo docker compose build
+
+# 3. granularity 컬럼 추가 (dry-run으로 먼저 확인)
+sudo docker compose run --rm fastapi python scripts/migrate_market_index_granularity.py --dry-run
+
+# 4. 실제 마이그레이션 실행
+sudo docker compose run --rm fastapi python scripts/migrate_market_index_granularity.py
+
+# 5. 서비스 시작
+sudo docker compose up -d
+
+# 6. 히스토리 백필 (서비스 가동 후 실행)
+sudo docker compose exec fastapi python scripts/backfill_history.py
+```
 
 ### 일일 모니터링
 

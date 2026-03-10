@@ -2237,6 +2237,96 @@ Safari impersonate 성공 이유(추정): Cloudflare가 Safari TLS 지문에 덜
 
 ---
 
+## ADR-019: DXY 보조지표 - granularity 기반 2-part merge 전략
+
+**날짜:** 2026-03-10
+**상태:** 수락됨
+
+### 상황
+
+USD/KRW 환율 그래프에 **달러지수(DXY)**를 보조지표로 추가해야 함:
+- 실시간 크롤링 데이터(10초~1분)와 히스토리 백필 데이터(일봉/시간봉)가 공존
+- 그래프 기간별로 다른 데이터 소스 조합이 필요 (1d: realtime, 1w: realtime+hourly, 3m/1y: realtime+daily)
+- Investing.com (Primary) + Yahoo Finance (Fallback) 이중 소스 → 동일 timestamp에 중복 가능
+- 기존 `investing_exchange_rates` 테이블 구조로는 granularity 구분 불가
+
+### 고려 사항
+
+**1. 데이터 모델**
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **기존 테이블 재사용** (bank='dxy') | 코드 변경 최소 | bank_exchange_rates 스키마와 불일치, granularity 구분 불가 |
+| **별도 market_index_rates 테이블** (채택) | 범용 설계, granularity 컬럼, 향후 다른 지수 확장 가능 | 새 테이블 + 마이그레이션 필요 |
+
+**2. 기간별 데이터 병합 (2-part merge)**
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **단일 쿼리** (ROW_NUMBER) | 쿼리 1회 | 3m/1y에서 daily 00:00 + realtime 12:00이 같은 일일 버킷에 공존 → 데이터 오염 |
+| **2-part merge (과거+오늘)** (채택) | 기간별 정확한 규칙 적용 가능 | 쿼리 2회, 로직 복잡도 증가 |
+
+**3. 오늘 구간 병합 규칙 (1w vs 3m/1y 분리)**
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **통합 규칙** (date-level exclusive) | 구현 단순 | 1w에서 hourly 전체 손실 (realtime 1건만으로 hourly 23건 날아감) |
+| **1w/3m/1y 분리 규칙** (채택) | 각 기간의 버킷 크기에 맞는 최적 전략 | 분기 로직 필요 |
+
+### 결정
+
+**market_index_rates 테이블 + granularity 컬럼 + 2-part merge 전략 채택**
+
+**핵심 설계:**
+
+1. **granularity 컬럼**: `realtime` (크롤링) / `hourly` (시간봉 백필) / `daily` (일봉 백필) 3단계 분리
+2. **source 우선순위**: `investing > yahoo` (CASE WHEN ROW_NUMBER)
+3. **2-part merge**: 과거 구간 (daily/hourly) + 오늘 구간 (realtime 중심) 분리 쿼리
+
+**오늘 구간 병합 규칙:**
+
+| 기간 | 버킷 크기 | 규칙 | 이유 |
+|------|----------|------|------|
+| **1w** | 1시간 | timestamp 단위 `realtime > hourly` (공존 허용) | 같은 timestamp에서만 realtime 우선, 나머지 hourly 유지 |
+| **3m/1y** | 1일 | 날짜 단위 배타적 선택 (realtime 있으면 daily 제외) | daily 00:00과 realtime이 같은 일일 버킷에 혼재 방지 |
+
+**DXY 크롤러 이중 소스:**
+- **Primary**: Investing.com (curl_cffi TLS 지문 위장, ADR-018 재사용)
+- **Fallback**: Yahoo Finance (yfinance, 연속 5회 실패 OR 5분 stale 시 전환)
+- **Circuit Breaker**: DXY 전용 (investing.py와 독립)
+- **복구**: 쿨다운 해제 후 Investing 재시도, 성공 시 즉시 복귀
+
+**배포 순서** (비가역적):
+1. DB 마이그레이션 (granularity 컬럼 추가, UNIQUE 인덱스 재생성)
+2. 코드 배포 (새 크롤러 + API)
+3. 히스토리 백필 (yfinance daily 1년 + hourly 7일)
+
+### 트레이드오프
+
+**장점:**
+- 범용 테이블 설계로 향후 다른 시장 지수(VIX 등) 확장 가능
+- granularity 분리로 백필과 실시간 데이터 충돌 방지
+- 2-part merge로 기간별 최적 데이터 품질 보장
+- 이중 소스로 단일 소스 장애 시 자동 폴백
+
+**단점:**
+- 새 테이블 + 마이그레이션 필요 (Alembic 미사용, 수동 스크립트)
+- 2-part merge 로직 복잡도 (crud.py + graph_cache.py 양쪽 동기화 필요)
+- yfinance 의존성 추가 (Yahoo API 불안정 가능성)
+
+### 향후 재검토 시점
+
+- 다른 시장 지수 추가 시 (VIX, KOSPI 등) → instrument 확장
+- Yahoo Finance API 변경/차단 시 → 대체 폴백 소스 검토
+- 데이터 양 증가 시 → 파티셔닝 또는 아카이빙 정책
+
+### 관련 결정
+
+- [ADR-018](#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장): curl_cffi TLS 지문 위장 (DXY 크롤러에서 재사용)
+- [ADR-015](#adr-015-websocket-graph-integration-vs-incremental-api): 그래프 WebSocket 통합 (DXY도 동일 패턴)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2256,3 +2346,4 @@ Safari impersonate 성공 이유(추정): Cloudflare가 Safari TLS 지문에 덜
 - 2025-12-05: ADR-016 작성 (인증/알림 인프라 - AWS RDS + Firebase Auth + FCM)
 - 2026-01-10: ADR-017 작성 (MIBANK 환율 파싱 - Currency-Code 기반 + 3단계 검증)
 - 2026-01-29: ADR-018 작성 (Investing Cloudflare 차단 대응 - curl_cffi TLS 지문 위장)
+- 2026-03-10: ADR-019 작성 (DXY 보조지표 - granularity 기반 2-part merge 전략)

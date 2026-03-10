@@ -1,8 +1,9 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2026-01-29
+> 📅 **마지막 업데이트**: 2026-03-10
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
 > 🆕 **최근 변경**:
+> - DXY(달러지수) 크롤러 추가: Investing.com + Yahoo Finance 이중 소스 ([ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략))
 > - Investing 크롤러 Cloudflare 403 차단 대응: curl_cffi TLS 지문 위장 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))
 > - MIBANK 파싱 로직 전면 개편: Currency-Code 기반 + 3단계 검증 ([ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반))
 > - 9개 은행 크롤러 `_crawl_mibank_*()` 래퍼 패턴 적용
@@ -121,6 +122,26 @@
 
 ---
 
+### 📊 Group D: 시장 지수 (Market Index)
+
+| 지수 | 파일 | 폴백 순서 | 특이사항 |
+|------|------|----------|---------|
+| **DXY** | `app/crawlers/dxy.py` | Investing.com → Yahoo Finance | 연속 5회 실패 OR 5분 stale 시 Yahoo 전환 |
+
+**공통점**:
+- `curl_cffi` + TLS 지문 위장 (Investing, Group A의 investing.py와 동일 방식)
+- **Selenium 없음** (Request 기반)
+- 은행 환율과 다른 테이블 (`market_index_rates`) 사용
+- 그래프 보조지표 전용 (USD/KRW에만 DXY 표시)
+
+**폴백 정책:**
+- **Primary**: Investing.com (`kr.investing.com/indices/usdollar`)
+- **Fallback**: Yahoo Finance (`yfinance`, ticker: `DX-Y.NYB`)
+- **전환 조건**: 연속 5회 실패 OR 마지막 성공 후 5분 경과 (둘 중 하나)
+- **복구**: 쿨다운 해제 후 Investing 재시도, 성공 시 즉시 원소스 복귀
+
+---
+
 ## 상세 가이드
 
 ### 📦 Group A: 표준 Requests
@@ -161,6 +182,49 @@
 - `curl_cffi` 미설치 시 자동으로 `requests`로 폴백 (`_USE_CFFI` 플래그)
 - `chrome131` impersonate는 Cloudflare에 의해 차단됨 → `safari17_0`만 사용
 - Cloudflare 차단 재발 시: [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) 플레이북 참고
+
+---
+
+### 📊 Group D: 시장 지수
+
+#### DXY 달러지수 (`app/crawlers/dxy.py`) ⭐⭐
+
+**핵심 로직:**
+- **이중 소스**: Investing.com (Primary) + Yahoo Finance (Fallback)
+- **curl_cffi + TLS 지문 위장**: `safari17_0` impersonate (investing.py와 동일 방식, 독립 Circuit Breaker)
+- **CSS Selector 다중 후보**: `[data-test="instrument-price-last"]`, `#last_last` 순서 시도
+- **DXY 유효 범위**: 80.0 ~ 130.0 (이상치 필터링)
+- **Yahoo 폴백**: `yfinance` 라이브러리, ticker `DX-Y.NYB`, `fast_info.lastPrice` 사용
+- **DB 저장**: `market_index_rates` 테이블, `source='investing'|'yahoo'`, `granularity='realtime'`
+
+**폴백 전환 조건:**
+1. Investing 연속 5회 실패 (403 + 파싱 + 네트워크 모두 포함)
+2. 마지막 성공 시각이 5분 이상 stale
+→ 둘 중 하나 충족 시 Yahoo 사용
+
+**Circuit Breaker (403 전용, investing.py와 독립):**
+- 5회 연속 403 → 1분 쿨다운
+- 10회 연속 → 5분 쿨다운
+- 20회 연속 → 15분 쿨다운
+- 쿨다운 중 Investing 스킵, Yahoo 폴백 판단은 별도
+
+**복구 정책:**
+- 쿨다운 해제 후 Investing 재시도
+- Investing 성공 시 모든 카운터 즉시 초기화 (원소스 복귀)
+- Yahoo 성공은 실패 카운터를 초기화하지 않음 (Investing 복구 시도 유지)
+
+**스케줄:**
+- IN/BREAK1/BREAK2: 매분 42초 (`cron(minute='*', second='42')`)
+- OUT: 10분마다 (`cron(minute='2,12,22,32,42,52', second='42')`)
+
+**주의사항:**
+- `yfinance`는 무거운 라이브러리 → 함수 내부 import (폴백 시에만 로드)
+- `yfinance`는 timeout 직접 제어 불가 → 스케줄러 작업 타임아웃(45초)이 상위 보호
+- DXY Circuit Breaker는 investing.py와 독립 (별도 상태 변수)
+- Jitter 0~2초 적용 (Investing 요청 전)
+
+**상세 코드:** `app/crawlers/dxy.py`
+**관련 ADR:** [ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략)
 
 ---
 
@@ -428,6 +492,7 @@ def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
 | **Alert 미처리** | 크롤링 중단 | `driver.switch_to.alert.accept()` 추가 |
 | **AJAX 응답 안 기다림** | 이전 데이터 읽기 | WebDriverWait로 요소 개수/속성 변화 감지 추가 |
 | **Cloudflare 403 차단** | Investing 크롤러 `InvestingForbidden` 반복 | curl_cffi impersonate 변경 또는 [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) 플레이북 참고 |
+| **DXY Yahoo 폴백 지속** | `📦 DXY Yahoo 폴백 저장` 로그 반복 | Investing Circuit Breaker 상태 확인, 쿨다운 해제 후 자동 복구 대기 |
 
 ---
 
@@ -443,6 +508,7 @@ def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
 | **IBK** | 날짜 input 형식 변경 | 월 1회 |
 | **Woori** | select 박스 value 형식 | 월 1회 |
 | **SC** | Alert 메시지 내용 변경 | 월 1회 |
+| **DXY** | Investing CSS Selector 변경, Yahoo API 변경 | 월 1회 |
 
 ---
 
@@ -567,6 +633,6 @@ tail -f logs/app.log | grep "<은행코드>"
 
 ---
 
-**마지막 업데이트**: 2025-10-26
+**마지막 업데이트**: 2026-03-10
 **작성자**: Claude Code
 **버전**: 1.0

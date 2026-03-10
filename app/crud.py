@@ -92,7 +92,7 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
         last_record = (
             db.query(models.BankExchangeRate)
             .filter(and_(models.BankExchangeRate.bank == bank_name, models.BankExchangeRate.currency == pair))
-            .order_by(models.BankExchangeRate.id.desc())
+            .order_by(models.BankExchangeRate.timestamp.desc(), models.BankExchangeRate.id.desc())
             .first()
         )
 
@@ -159,7 +159,7 @@ def get_last_bank_rates_with_ts(db: Session, bank_name: str, pairs: List[str]) -
         last_record = (
             db.query(models.BankExchangeRate)
             .filter(and_(models.BankExchangeRate.bank == bank_name, models.BankExchangeRate.currency == pair))
-            .order_by(models.BankExchangeRate.id.desc())
+            .order_by(models.BankExchangeRate.timestamp.desc(), models.BankExchangeRate.id.desc())
             .first()
         )
         results[pair] = {
@@ -191,7 +191,7 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
         last_record = (
             db.query(models.InvestingExchangeRate)
             .filter(models.InvestingExchangeRate.currency == pair)
-            .order_by(models.InvestingExchangeRate.id.desc())
+            .order_by(models.InvestingExchangeRate.timestamp.desc(), models.InvestingExchangeRate.id.desc())
             .first()
         )
 
@@ -258,10 +258,10 @@ def select_a_latest_investing_rate_from_db(db: Session, pair: str) -> Optional[D
     record = (
         db.query(models.InvestingExchangeRate)
         .filter(models.InvestingExchangeRate.currency == pair)
-        .order_by(models.InvestingExchangeRate.id.desc())
+        .order_by(models.InvestingExchangeRate.timestamp.desc(), models.InvestingExchangeRate.id.desc())
         .first()
     )
-    
+
     if record:
         return {
             "currency": record.currency,
@@ -285,22 +285,30 @@ def select_latest_bank_rates_from_db(db: Session, pair: str) -> List[Dict[str, A
         각 은행의 최신 pair 환율 데이터 리스트 (환율 낮은 순으로 정렬)
     """
     
-    # 각 은행별로 해당 통화쌍의 최신 레코드 ID를 찾는 서브쿼리
-    subquery = (
+    # 각 은행별 최신 1건을 결정적으로 선택 (window function)
+    # timestamp DESC, id DESC로 동일 초 중복 방지
+    ranked = (
         db.query(
-            models.BankExchangeRate.bank,
-            func.max(models.BankExchangeRate.id).label("max_id")
+            models.BankExchangeRate.id,
+            func.row_number().over(
+                partition_by=models.BankExchangeRate.bank,
+                order_by=[
+                    models.BankExchangeRate.timestamp.desc(),
+                    models.BankExchangeRate.id.desc()
+                ]
+            ).label("rn")
         )
         .filter(models.BankExchangeRate.currency == pair)
-        .group_by(models.BankExchangeRate.bank)
         .subquery()
     )
 
-    # 실제 환율 데이터를 조회
+    # rn=1 (각 은행의 최신 1건)만 조회
     records = (
         db.query(models.BankExchangeRate)
-        .join(subquery, models.BankExchangeRate.id == subquery.c.max_id)
-        # .order_by(models.BankExchangeRate.bank)  # 은행명으로 정렬
+        .join(ranked, and_(
+            models.BankExchangeRate.id == ranked.c.id,
+            ranked.c.rn == 1
+        ))
         .order_by(models.BankExchangeRate.rate)  # 환율순으로 정렬 (낮은 환율부터)
         .all()
     )
@@ -466,7 +474,272 @@ def has_changes_since(db: Session, since_time: Optional[datetime]) -> bool:
     return (bank_count + investing_count) > 0
 
 
+# ═════════════════════════════════════════════════════════════
+# 시장 지수 (DXY 등) CRUD — Phase B
+# ═════════════════════════════════════════════════════════════
 
+def insert_dxy_rate_into_db(db: Session, rate: float, source: str) -> bool:
+    """
+    DXY(달러지수) DB 저장 (변경 시에만 INSERT)
+
+    Args:
+        db: 데이터베이스 세션
+        rate: DXY 값 (예: 104.52)
+        source: 데이터 소스 ('investing' | 'yahoo')
+
+    Returns:
+        True: 새 레코드 저장됨, False: 변경 없음
+    """
+    last_record = (
+        db.query(models.MarketIndexRate)
+        .filter(
+            models.MarketIndexRate.instrument == "dxy",
+            models.MarketIndexRate.granularity == "realtime",
+        )
+        .order_by(models.MarketIndexRate.timestamp.desc(), models.MarketIndexRate.id.desc())
+        .first()
+    )
+
+    if last_record is None:
+        logger.info(f"⭐️ [DXY 신규] {rate:.3f} (source={source})", extra={"instrument": "dxy", "rate": rate, "source": source, "type": "new"})
+    elif last_record.rate != rate:
+        logger.info(f"⚡️ [DXY 변경] {last_record.rate:.3f} → {rate:.3f} (source={source})", extra={"instrument": "dxy", "old_rate": last_record.rate, "new_rate": rate, "source": source, "type": "change"})
+    elif last_record.source != source:
+        # 값은 같지만 소스 전환 (예: yahoo→investing 복구) → 새 레코드 필요
+        logger.info(f"🔄 [DXY 소스 전환] {last_record.source} → {source} (rate={rate:.3f})", extra={"instrument": "dxy", "rate": rate, "old_source": last_record.source, "new_source": source, "type": "source_change"})
+    else:
+        logger.debug(f"📼 [DXY 유지] {rate:.3f} (source={source})", extra={"instrument": "dxy", "rate": rate, "source": source, "type": "unchanged"})
+        return False
+
+    new_entry = models.MarketIndexRate(
+        instrument="dxy",
+        source=source,
+        rate=rate,
+        timestamp=models.get_utc_now(),
+        granularity="realtime",
+    )
+    db.add(new_entry)
+    db.commit()
+    return True
+
+
+def get_latest_dxy_rate(db: Session) -> Optional[Dict[str, Any]]:
+    """
+    최신 DXY 값 조회 (investing 우선, yahoo 폴백)
+
+    동일 초에 investing과 yahoo가 모두 있으면 investing 우선.
+    source 우선순위: investing > yahoo (CASE WHEN 정렬)
+
+    Returns:
+        {"instrument": "dxy", "rate": 104.52, "source": "investing",
+         "timestamp": "2026-03-10T14:30:00+09:00"} 또는 None
+    """
+    from sqlalchemy import case
+
+    record = (
+        db.query(models.MarketIndexRate)
+        .filter(
+            models.MarketIndexRate.instrument == "dxy",
+            models.MarketIndexRate.granularity == "realtime",
+        )
+        .order_by(
+            models.MarketIndexRate.timestamp.desc(),
+            case(
+                (models.MarketIndexRate.source == "investing", 0),
+                else_=1
+            ),
+            models.MarketIndexRate.id.desc()
+        )
+        .first()
+    )
+
+    if record:
+        return {
+            "instrument": record.instrument,
+            "rate": record.rate,
+            "source": record.source,
+            "timestamp": to_kst_isoformat(record.timestamp)
+        }
+    return None
+
+
+def get_dxy_rates_for_period(
+    db: Session,
+    start_time: datetime,
+    end_time: Optional[datetime] = None,
+    granularities: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    기간별 DXY 데이터 조회 (그래프용, 2-part merge 전략)
+
+    graph_cache.build_period_dxy_series()와 동일한 정책:
+      - 과거 구간(오늘 UTC 00:00 이전): backfill granularity만 (daily/hourly)
+      - 오늘 구간(UTC 00:00 이후):
+        · 1w(hourly): timestamp 단위 realtime > hourly 선택 (hourly 보존)
+        · 3m/1y(daily): 날짜 단위 배타적 선택 (realtime 있으면 daily 제외)
+      → 1w는 hourly 데이터 활용, 3m/1y는 daily 00:00 오염 방지
+
+    1일 그래프(granularities=["realtime"])는 분리 없이 realtime만 조회.
+
+    동일 timestamp에 investing과 yahoo가 모두 존재하면
+    investing만 사용 (ROW_NUMBER 윈도우 함수).
+
+    Args:
+        db: 데이터베이스 세션
+        start_time: 조회 시작 시간 (UTC)
+        end_time: 조회 종료 시간 (UTC, None이면 현재)
+        granularities: 조회할 granularity 목록 (기본: ["realtime"])
+            - 1일 그래프: ["realtime"]
+            - 1주 그래프: ["realtime", "hourly"]
+            - 3달/1년 그래프: ["realtime", "daily"]
+
+    Returns:
+        [{"rate": 104.52, "source": "investing",
+          "timestamp": "2026-03-10T14:30:00+09:00"}, ...]
+        timestamp ASC 정렬 (그래프 시계열)
+    """
+    from sqlalchemy import case
+
+    if end_time is None:
+        end_time = models.get_utc_now()
+
+    if granularities is None:
+        granularities = ["realtime"]
+
+    backfill_grans = [g for g in granularities if g != "realtime"]
+    has_realtime = "realtime" in granularities
+
+    # 1일 그래프(realtime만) — 분리 불필요, 단일 쿼리
+    if not backfill_grans:
+        return _dxy_query_single(db, start_time, end_time, granularities)
+
+    # 장기 그래프 — 2-part merge
+    today_utc = end_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    all_records = []
+
+    # Part 1: 과거 구간 — backfill granularity만 (daily/hourly)
+    if start_time < today_utc:
+        past_end = min(today_utc, end_time)
+        all_records.extend(
+            _dxy_query_single(db, start_time, past_end, backfill_grans, past_exclusive_end=True)
+        )
+
+    # Part 2: 오늘 구간
+    # 1w(hourly backfill): timestamp 단위 realtime > hourly 선택 (hourly 보존)
+    # 3m/1y(daily backfill): 날짜 단위 배타적 선택 (daily 00:00 오염 방지)
+    if end_time >= today_utc:
+        use_daily_exclusion = "daily" in backfill_grans
+
+        if use_daily_exclusion and has_realtime:
+            # 3m/1y: realtime 있으면 daily 전체 제외
+            has_rt = db.query(models.MarketIndexRate.id).filter(
+                models.MarketIndexRate.instrument == "dxy",
+                models.MarketIndexRate.granularity == "realtime",
+                models.MarketIndexRate.timestamp >= today_utc,
+                models.MarketIndexRate.timestamp <= end_time,
+            ).first() is not None
+
+            today_grans = ["realtime"] if has_rt else backfill_grans
+            all_records.extend(
+                _dxy_query_single(db, today_utc, end_time, today_grans)
+            )
+        elif not use_daily_exclusion and has_realtime:
+            # 1w: realtime + hourly 공존, timestamp 단위 realtime > hourly 선택
+            today_grans = ["realtime"] + backfill_grans
+            all_records.extend(
+                _dxy_query_single(
+                    db, today_utc, end_time, today_grans,
+                    dedup_across_granularities=True,
+                )
+            )
+        else:
+            all_records.extend(
+                _dxy_query_single(db, today_utc, end_time, backfill_grans)
+            )
+
+    return all_records
+
+
+def _dxy_query_single(
+    db: Session,
+    start_time: datetime,
+    end_time: datetime,
+    granularities: List[str],
+    past_exclusive_end: bool = False,
+    dedup_across_granularities: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    DXY 단일 구간 쿼리. source dedup (investing 우선).
+
+    Args:
+        dedup_across_granularities: True면 같은 timestamp의 다른 granularity도 경쟁
+            (1w 오늘 구간: realtime > hourly timestamp 단위 선택)
+            False면 같은 (timestamp, granularity) 내에서만 source dedup
+    """
+    from sqlalchemy import case
+
+    source_priority = case(
+        (models.MarketIndexRate.source == "investing", 0),
+        else_=1
+    )
+
+    end_op = models.MarketIndexRate.timestamp < end_time if past_exclusive_end \
+        else models.MarketIndexRate.timestamp <= end_time
+
+    if dedup_across_granularities:
+        # 1w 오늘: PARTITION BY timestamp만, granularity 우선순위 포함
+        gran_priority = case(
+            (models.MarketIndexRate.granularity == "realtime", 0),
+            (models.MarketIndexRate.granularity == "hourly", 1),
+            (models.MarketIndexRate.granularity == "daily", 2),
+            else_=3
+        )
+        partition_cols = [models.MarketIndexRate.timestamp]
+        order_cols = [gran_priority, source_priority, models.MarketIndexRate.id.desc()]
+    else:
+        # 기본: PARTITION BY (timestamp, granularity), source만 dedup
+        partition_cols = [
+            models.MarketIndexRate.timestamp,
+            models.MarketIndexRate.granularity,
+        ]
+        order_cols = [source_priority, models.MarketIndexRate.id.desc()]
+
+    ranked = (
+        db.query(
+            models.MarketIndexRate.id,
+            func.row_number().over(
+                partition_by=partition_cols,
+                order_by=order_cols,
+            ).label("rn")
+        )
+        .filter(
+            models.MarketIndexRate.instrument == "dxy",
+            models.MarketIndexRate.granularity.in_(granularities),
+            models.MarketIndexRate.timestamp >= start_time,
+            end_op,
+        )
+        .subquery()
+    )
+
+    records = (
+        db.query(models.MarketIndexRate)
+        .join(ranked, and_(
+            models.MarketIndexRate.id == ranked.c.id,
+            ranked.c.rn == 1
+        ))
+        .order_by(models.MarketIndexRate.timestamp.asc())
+        .all()
+    )
+
+    return [
+        {
+            "rate": record.rate,
+            "source": record.source,
+            "timestamp": to_kst_isoformat(record.timestamp)
+        }
+        for record in records
+    ]
 
 
 # SELECT * FROM investing_exchange_rates;
@@ -510,7 +783,7 @@ def init_crawler_config(db: Session) -> None:
     # 모든 크롤러 이름 정의
     CRAWLER_NAMES = [
         'investing', 'kb', 'hana', 'shinhan', 'woori',
-        'ibk', 'nh', 'sc', 'bs', 'citi'
+        'ibk', 'nh', 'sc', 'bs', 'citi', 'dxy'
     ]
 
     for crawler_name in CRAWLER_NAMES:

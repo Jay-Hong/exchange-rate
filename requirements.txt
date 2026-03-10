@@ -34,5 +34,8 @@ python-dotenv>=1.0.1,<2.0.0
 # 시스템 모니터링
 psutil>=7.0.0
 
+# Yahoo Finance (DXY 폴백 + 히스토리 백필)
+yfinance>=0.2.40,<1.0.0
+
 # Firebase (Phase 2 - FCM 푸시 알림)
 firebase-admin>=6.5.0,<7.0.0

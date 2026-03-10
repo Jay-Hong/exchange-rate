@@ -51,10 +51,10 @@
 
 ```text
 [개발/테스트]
-크롤러(10개) → Scheduler → SQLite → WebSocket(10초) → 클라이언트
+크롤러(11개) → Scheduler → SQLite → WebSocket(10초) → 클라이언트
 
 [서비스 환경]
-크롤러(10개) → Scheduler → RDS PostgreSQL → WebSocket(10초) → 클라이언트
+크롤러(11개) → Scheduler → RDS PostgreSQL → WebSocket(10초) → 클라이언트
                                     ↓
                           Firebase Auth + FCM → 푸시 알림
 ```
@@ -62,6 +62,7 @@
 ### 데이터 소스
 
 - Investing.com (기준 환율)
+- DXY (달러지수, USD/KRW 그래프 보조지표) — Investing.com + Yahoo Finance 이중 소스
 - 9개 은행: KB, 하나, 신한, 우리, IBK, NH, SC제일, 부산, 씨티
 
 ### 지원 통화
@@ -77,7 +78,7 @@
 - **DB**: SQLite (개발/테스트), AWS RDS PostgreSQL (운영)
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (AsyncIOScheduler)
-- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing 전용, TLS 지문 위장)
+- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing/DXY 전용, TLS 지문 위장), yfinance (DXY Yahoo 폴백)
 - **SSL/TLS**: Let's Encrypt (Certbot 자동 갱신, 90일 주기)
 - **리버스 프록시**: Nginx (HTTPS, HTTP/2, wss://)
 
@@ -129,6 +130,26 @@ updated_at    DATETIME (UTC)
 -- 크롤러 활성화/비활성화 설정 (관리자 페이지에서 제어)
 ```
 
+### market_index_rates (Phase 1A)
+
+```sql
+id            INTEGER PRIMARY KEY
+instrument    TEXT NOT NULL          -- 'dxy' (향후 다른 지수 확장 가능)
+source        TEXT NOT NULL          -- 'investing' | 'yahoo'
+rate          REAL NOT NULL
+timestamp     DATETIME NOT NULL (UTC)
+granularity   TEXT NOT NULL          -- 'realtime' | 'hourly' | 'daily'
+
+-- 인덱스: (instrument, timestamp)
+-- 인덱스: (instrument, granularity, timestamp)
+-- UNIQUE: (instrument, source, timestamp, granularity)
+```
+
+**granularity 구분:**
+- `realtime`: 실시간 크롤링 데이터 (10초~1분 간격)
+- `hourly`: 시간봉 백필 데이터 (yfinance, 최근 7일)
+- `daily`: 일봉 백필 데이터 (yfinance, 최대 1년)
+
 ### 알림 관련 테이블 (Phase 2, 구현 완료)
 
 > 상세 스키마: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md#필요한-db-테이블-rds-postgresql)
@@ -141,6 +162,7 @@ updated_at    DATETIME (UTC)
 
 - **은행 데이터**: 10일분만 유지 (단기 비교용)
 - **인베스팅 데이터**: 장기 보관 (그래프/분석용)
+- **DXY 데이터**: 장기 보관 (그래프 보조지표용, daily/hourly/realtime 구분)
 - **저장 조건**: 변경사항 있을 때만 INSERT (중복 방지)
 
 ## 스케줄링 시스템
@@ -161,23 +183,23 @@ updated_at    DATETIME (UTC)
 - **IN 모드**: 월~금 08:00~20:59 (영업시간, 전체 크롤러 활성)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
   - 크롤러: cron 절대 시간 동기화 (Broadcasting 기준)
-  - 10개 은행 전체 크롤링
+  - 10개 은행 + DXY 전체 크롤링
 
-- **BREAK1 모드**: 월~금 21:00 ~ 익일 02:59 (심야, 9개 크롤러)
+- **BREAK1 모드**: 월~금 21:00 ~ 익일 02:59 (심야, 9개 크롤러 + DXY)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: sc
-  - 유지: investing, kb, hana, woori, shinhan, bs, citi, ibk, nh
+  - 유지: investing, dxy, kb, hana, woori, shinhan, bs, citi, ibk, nh
   - ibk는 00:00~00:05 스킵 (자정 전환기), 00:05부터 Selenium만 사용
 
-- **BREAK2 모드**: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, 6개 크롤러)
+- **BREAK2 모드**: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, 6개 크롤러 + DXY)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: woori (02:45 종료), ibk (02:05 종료), shinhan (02:30 종료), sc (20:30 종료)
-  - 유지: investing, kb, hana, bs, citi, nh
+  - 유지: investing, dxy, kb, hana, bs, citi, nh
 
-- **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 6개 크롤러)
+- **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 6개 크롤러 + DXY)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: woori, ibk, sc, citi (주말 고시 없음)
-  - 유지: investing, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
+  - 유지: investing, dxy, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
   - 크롤러: cron 시간 단위 (완전 분산, 동시 실행 0개)
 
 ### 은행별 환율 고시 스케줄
@@ -226,6 +248,14 @@ scheduler.add_job(
   - `cron(second='7,17,27,37,47,57')`
 - **OUT**: 10분마다
   - `cron(minute='7,17,27,37,47,57', second='45')`
+
+**Tier A+ (dxy):** 달러지수 보조지표
+- **특징**: USD/KRW 그래프 보조지표, Investing.com + Yahoo Finance 이중 소스
+- **실행 방식**: Request 기반 (curl_cffi, Investing 실패 시 yfinance 폴백)
+- **IN/BREAK1/BREAK2**: 매분 42초
+  - `cron(minute='*', second='42')`
+- **OUT**: 10분마다
+  - `cron(minute='2,12,22,32,42,52', second='42')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
@@ -282,6 +312,7 @@ scheduler.add_job(
 35초: kb
 37초: investing
 40초: Broadcasting
+42초: dxy (A+ Group)
 45초: hana
 47초: investing
 50초: Broadcasting
@@ -328,6 +359,7 @@ scheduler.add_job(
 - `GET /api/rates/{currency}` - 특정 통화쌍
 - `GET /api/investing/{pair}` - Investing.com 특정 통화
 - `GET /api/banks/{pair}` - 모든 은행 특정 통화
+- `GET /api/graph/{currency}` - 그래프 데이터 (파라미터: `range`=1d/1w/3m/1y, USD/KRW에 DXY 포함)
 - `GET /health` - 헬스체크
 
 ### Admin API (HTTP Basic Auth 필요)
@@ -585,7 +617,8 @@ exchange-rate/
 │   │   ├── nh.py            # NH농협은행 크롤러
 │   │   ├── sc.py            # SC제일은행 크롤러
 │   │   ├── bs.py            # 부산은행 크롤러
-│   │   └── citi.py          # 씨티은행 크롤러
+│   │   ├── citi.py          # 씨티은행 크롤러
+│   │   └── dxy.py           # 달러지수(DXY) 크롤러 (Investing + Yahoo 이중 소스) - Phase 1A
 │   │
 │   ├── admin/               # 관리자 도메인 (2025-10-25 리팩토링)
 │   │   ├── __init__.py
@@ -601,6 +634,9 @@ exchange-rate/
 │       ├── fcm.py           # Firebase Cloud Messaging 푸시 알림 (Phase 2)
 │       └── telegram.py      # 텔레그램 알림 (관리자 알림용)
 │
+├── scripts/
+│   ├── backfill_history.py              # DXY 히스토리 백필 (yfinance, daily/hourly)
+│   └── migrate_market_index_granularity.py  # granularity 컬럼 마이그레이션
 ├── data/
 │   └── exchange_rates.db    # SQLite DB
 ├── logs/                    # 로그 파일 (자동 생성)
@@ -766,6 +802,35 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 **관련 스키마**: `crawler_config` 테이블 (CLAUDE.md 데이터베이스 스키마 참조)
 
+### Phase 1A: DXY 그래프 보조지표 ✅ 완료 (2026-03-10)
+
+**배경**: USD/KRW 환율 그래프에 달러지수(DXY)를 보조지표로 표시 ([ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략))
+
+**추가된 기능**:
+- **DXY 크롤러**: Investing.com Primary + Yahoo Finance Fallback (이중 소스)
+  - Circuit Breaker: 연속 5회 실패 OR 5분 stale → Yahoo 자동 전환
+  - curl_cffi TLS 지문 위장 (Investing 전용)
+- **market_index_rates 테이블**: 범용 시장 지수 테이블 (granularity 컬럼)
+- **그래프 API 확장**: `/api/graph/{currency}?range=1d|1w|3m|1y`
+  - USD/KRW에만 DXY 보조지표 포함 (API key=`dxy`, UI 표시명=달러지수)
+  - 1d: 10분 버킷 (realtime), 1w: 1시간 버킷 (realtime+hourly), 3m/1y: 1일 버킷 (realtime+daily)
+- **2-part merge 전략**: 과거(daily/hourly) + 오늘(realtime) 분리 쿼리
+  - 1w 오늘: timestamp 단위 `realtime > hourly` 선택 (공존 허용)
+  - 3m/1y 오늘: realtime 있으면 daily 전체 제외 (날짜 단위 배타적)
+- **히스토리 백필 스크립트**: yfinance로 daily(1년)/hourly(7일) 데이터 사전 적재
+
+**배포 순서** (운영 환경, 상세: [DEPLOYMENT.md](DEPLOYMENT.md#db-마이그레이션-v1120-dxy-granularity)):
+1. `git pull` → `docker compose build` (새 이미지 빌드)
+2. `docker compose run --rm fastapi python scripts/migrate_market_index_granularity.py`
+3. `docker compose up -d` (서비스 시작)
+4. `docker compose exec fastapi python scripts/backfill_history.py`
+
+**핵심 파일**:
+- `app/crawlers/dxy.py`: DXY 크롤러 (Investing + Yahoo 이중 소스)
+- `app/models.py`: MarketIndexRate 모델 (granularity 컬럼)
+- `app/admin/graph_cache.py`: 그래프 시계열 구축 (2-part merge, 버킷 집계)
+- `app/crud.py`: DXY CRUD (insert, get_latest, get_for_period)
+
 ### Phase 2: FCM 푸시 알림 ✅ 완료 (2025-12-21)
 
 **배경**: 앱 종료 상태에서도 환율 알림 필요 ([ADR-003](DECISIONS.md#adr-003-알림-시스템---websocket-vs-push-notification))
@@ -846,4 +911,5 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ FCM 푸시 알림, Firebase Auth 연동 (Phase 2)
 - ✅ RDS PostgreSQL 전환 (2026-01)
 - ✅ iOS 앱스토어 출시 완료 (2026-01-21)
+- ✅ DXY 보조지표 그래프 (Phase 1A, 2026-03-10)
 - 🔜 CI/CD, 유닛 테스트
