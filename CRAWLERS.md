@@ -214,8 +214,8 @@
 - Yahoo 성공은 실패 카운터를 초기화하지 않음 (Investing 복구 시도 유지)
 
 **스케줄:**
-- IN/BREAK1/BREAK2: 매분 42초 (`cron(minute='*', second='42')`)
-- OUT: 10분마다 (`cron(minute='2,12,22,32,42,52', second='42')`)
+- IN/BREAK1/BREAK2: 10초마다 (`cron(second='4,14,24,34,44,54')`)
+- OUT: 10분마다 (`cron(minute='4,14,24,34,44,54', second='44')`)
 
 **주의사항:**
 - `yfinance`는 무거운 라이브러리 → 함수 내부 import (폴백 시에만 로드)

@@ -252,10 +252,10 @@ scheduler.add_job(
 **Tier A+ (dxy):** 달러지수 보조지표
 - **특징**: USD/KRW 그래프 보조지표, Investing.com + Yahoo Finance 이중 소스
 - **실행 방식**: Request 기반 (curl_cffi, Investing 실패 시 yfinance 폴백)
-- **IN/BREAK1/BREAK2**: 매분 42초
-  - `cron(minute='*', second='42')`
+- **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 6초 전)
+  - `cron(second='4,14,24,34,44,54')`
 - **OUT**: 10분마다
-  - `cron(minute='2,12,22,32,42,52', second='42')`
+  - `cron(minute='4,14,24,34,44,54', second='44')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
@@ -296,28 +296,31 @@ scheduler.add_job(
 
 ```
 00초: Broadcasting
+04초: dxy (A+ Group)
 05초: hana
 07초: investing
 10초: Broadcasting
 13초: citi
+14초: dxy (A+ Group)
 15초: kb
 17초: investing
 18초: shinhan (Selenium Queue)
 20초: Broadcasting
+24초: dxy (A+ Group)
 25초: hana
 27초: investing
 30초: Broadcasting
 33초: bs
-34초: ibk (Selenium Queue)
+34초: dxy + ibk (Selenium Queue)
 35초: kb
 37초: investing
 40초: Broadcasting
-42초: dxy (A+ Group)
+44초: dxy (A+ Group)
 45초: hana
 47초: investing
 50초: Broadcasting
 53초: woori (우선순위 높음)
-54초: nh (Selenium Queue)
+54초: dxy + nh (Selenium Queue)
 55초: kb
 57초: investing
 58초: sc (Selenium Queue)

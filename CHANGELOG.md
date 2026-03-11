@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **DXY 스케줄 조정**: 실시간 비교 품질 개선
+  - IN/BREAK1/BREAK2: 10초마다 (`04, 14, 24, 34, 44, 54초`)
+  - OUT: 10분마다 (`4, 14, 24, 34, 44, 54분 44초`)
+  - 브로드캐스트 정각(`00, 10, 20, 30, 40, 50초`) 유지 기준으로 재배치
+  - 주말 OUT 모드에서는 다른 크롤러 분/초 슬롯과 겹치지 않도록 분산
+
 ## [1.12.0] - 2026-03-10
 
 ### Added - DXY (Dollar Index) Graph Indicator
