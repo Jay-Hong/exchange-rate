@@ -476,6 +476,7 @@
             font-weight: bold;
             color: #ffffff;
             white-space: nowrap;
+            margin-right: 12px;
         }
 
         .graph-actions {
@@ -580,7 +581,7 @@
 
         .graph-container {
             position: relative;
-            height: 264px; /* 기존 400px의 약 2/3 높이 */
+            height: 360px;
             width: 100%;
             background: #2c2c2c;
             border-radius: 10px;
@@ -879,13 +880,14 @@
                         yAxisID: 'y'
                     });
                 } else {
+                    const isMain = source === 'investing' || source === 'reference';
                     datasets.push({
                         label: label,
                         data: closeSeries,
                         type: 'line',
                         borderColor: color,
                         backgroundColor: color + '20',
-                        borderWidth: 2,
+                        borderWidth: isMain ? 2 : 1.5,
                         pointRadius: 0,
                         tension: 0.1,
                         fill: false,
@@ -908,9 +910,9 @@
                     label: '달러지수(DXY)',
                     data: dxyCloseSeries,
                     type: 'line',
-                    borderColor: DXY_COLOR,
-                    backgroundColor: DXY_COLOR + '20',
-                    borderWidth: 2,
+                    borderColor: DXY_COLOR + 'BF',  // opacity ~0.75
+                    backgroundColor: DXY_COLOR + '15',
+                    borderWidth: 1.5,
                     pointRadius: 0,
                     tension: 0.2,
                     fill: false,
