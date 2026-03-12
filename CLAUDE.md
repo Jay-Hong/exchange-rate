@@ -62,7 +62,7 @@
 ### 데이터 소스
 
 - Investing.com (기준 환율)
-- DXY (달러지수, USD/KRW 그래프 보조지표) — Investing.com + Yahoo Finance 이중 소스
+- DXY (달러지수, USD/KRW 그래프 보조지표) — investing.py에서 환율과 동시 추출 (폴백: /currencies/us-dollar-index, Yahoo Finance)
 - 9개 은행: KB, 하나, 신한, 우리, IBK, NH, SC제일, 부산, 씨티
 
 ### 지원 통화
@@ -78,7 +78,7 @@
 - **DB**: SQLite (개발/테스트), AWS RDS PostgreSQL (운영)
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (AsyncIOScheduler)
-- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing/DXY 전용, TLS 지문 위장), yfinance (DXY Yahoo 폴백)
+- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing 전용, TLS 지문 위장), yfinance (DXY Yahoo 폴백)
 - **SSL/TLS**: Let's Encrypt (Certbot 자동 갱신, 90일 주기)
 - **리버스 프록시**: Nginx (HTTPS, HTTP/2, wss://)
 
@@ -183,23 +183,23 @@ granularity   TEXT NOT NULL          -- 'realtime' | 'hourly' | 'daily'
 - **IN 모드**: 월~금 08:00~20:59 (영업시간, 전체 크롤러 활성)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
   - 크롤러: cron 절대 시간 동기화 (Broadcasting 기준)
-  - 10개 은행 + DXY 전체 크롤링
+  - 10개 은행 전체 크롤링 (DXY는 investing 크롤러에서 동시 추출)
 
-- **BREAK1 모드**: 월~금 21:00 ~ 익일 02:59 (심야, 9개 크롤러 + DXY)
+- **BREAK1 모드**: 월~금 21:00 ~ 익일 02:59 (심야, 9개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: sc
-  - 유지: investing, dxy, kb, hana, woori, shinhan, bs, citi, ibk, nh
+  - 유지: investing, kb, hana, woori, shinhan, bs, citi, ibk, nh
   - ibk는 00:00~00:05 스킵 (자정 전환기), 00:05부터 Selenium만 사용
 
-- **BREAK2 모드**: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, 6개 크롤러 + DXY)
+- **BREAK2 모드**: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, 6개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: woori (02:45 종료), ibk (02:05 종료), shinhan (02:30 종료), sc (20:30 종료)
-  - 유지: investing, dxy, kb, hana, bs, citi, nh
+  - 유지: investing, kb, hana, bs, citi, nh
 
-- **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 6개 크롤러 + DXY)
+- **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 6개 크롤러)
   - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
   - 제외: woori, ibk, sc, citi (주말 고시 없음)
-  - 유지: investing, dxy, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
+  - 유지: investing, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
   - 크롤러: cron 시간 단위 (완전 분산, 동시 실행 0개)
 
 ### 은행별 환율 고시 스케줄
@@ -241,21 +241,14 @@ scheduler.add_job(
 
 #### 2. 3-Tier 크롤러 아키텍처 (4단계 모드)
 
-**Tier A (investing):** 기준 환율, 최우선
-- **특징**: 가장 중요한 데이터, 빠른 응답
+**Tier A (investing):** 기준 환율 + DXY, 최우선
+- **특징**: 가장 중요한 데이터, 빠른 응답. DXY(달러지수)도 동시 추출 (`#sb_last_8827`)
 - **실행 방식**: Request 기반 (curl_cffi, TLS 지문 위장으로 Cloudflare 우회)
+- **DXY 폴백**: 추출 실패 시 dxy.py 폴백 모듈 호출 (60초 쿨다운, /currencies/us-dollar-index → Yahoo Finance)
 - **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 3초 전)
   - `cron(second='7,17,27,37,47,57')`
 - **OUT**: 10분마다
   - `cron(minute='7,17,27,37,47,57', second='45')`
-
-**Tier A+ (dxy):** 달러지수 보조지표
-- **특징**: USD/KRW 그래프 보조지표, Investing.com + Yahoo Finance 이중 소스
-- **실행 방식**: Request 기반 (curl_cffi, Investing 실패 시 yfinance 폴백)
-- **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 6초 전)
-  - `cron(second='4,14,24,34,44,54')`
-- **OUT**: 10분마다
-  - `cron(minute='4,14,24,34,44,54', second='44')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
@@ -296,33 +289,29 @@ scheduler.add_job(
 
 ```
 00초: Broadcasting
-04초: dxy (A+ Group)
 05초: hana
-07초: investing
+07초: investing (+ DXY 동시 추출)
 10초: Broadcasting
 13초: citi
-14초: dxy (A+ Group)
 15초: kb
-17초: investing
+17초: investing (+ DXY 동시 추출)
 18초: shinhan (Selenium Queue)
 20초: Broadcasting
-24초: dxy (A+ Group)
 25초: hana
-27초: investing
+27초: investing (+ DXY 동시 추출)
 30초: Broadcasting
 33초: bs
-34초: dxy + ibk (Selenium Queue)
+34초: ibk (Selenium Queue)
 35초: kb
-37초: investing
+37초: investing (+ DXY 동시 추출)
 40초: Broadcasting
-44초: dxy (A+ Group)
 45초: hana
-47초: investing
+47초: investing (+ DXY 동시 추출)
 50초: Broadcasting
 53초: woori (우선순위 높음)
-54초: dxy + nh (Selenium Queue)
+54초: nh (Selenium Queue)
 55초: kb
-57초: investing
+57초: investing (+ DXY 동시 추출)
 58초: sc (Selenium Queue)
 ```
 
@@ -621,7 +610,7 @@ exchange-rate/
 │   │   ├── sc.py            # SC제일은행 크롤러
 │   │   ├── bs.py            # 부산은행 크롤러
 │   │   ├── citi.py          # 씨티은행 크롤러
-│   │   └── dxy.py           # 달러지수(DXY) 크롤러 (Investing + Yahoo 이중 소스) - Phase 1A
+│   │   └── dxy.py           # DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance) - Phase 1A
 │   │
 │   ├── admin/               # 관리자 도메인 (2025-10-25 리팩토링)
 │   │   ├── __init__.py
@@ -810,9 +799,14 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 **배경**: USD/KRW 환율 그래프에 달러지수(DXY)를 보조지표로 표시 ([ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략))
 
 **추가된 기능**:
-- **DXY 크롤러**: Investing.com Primary + Yahoo Finance Fallback (이중 소스)
-  - Circuit Breaker: 연속 5회 실패 OR 5분 stale → Yahoo 자동 전환
-  - curl_cffi TLS 지문 위장 (Investing 전용)
+- **DXY 동시 추출**: investing.py에서 exchange-rates-table의 `#sb_last_8827` 셀렉터로 환율과 함께 추출
+  - CDN stale cache 문제 해결: `/indices/usdollar` 대신 exchange-rates-table 사용 (캐시 우회)
+  - 독립 cron job 불필요 — Tier A (investing) 크롤러와 동일 타이밍
+  - `crawler_config` 테이블에 `dxy` 행 없음 (investing에 종속)
+- **DXY 폴백 모듈** (`dxy.py`): 동시 추출 실패 시 순차 폴백
+  - 2차: `/currencies/us-dollar-index` (curl_cffi)
+  - 3차: Yahoo Finance (yfinance)
+  - 60초 쿨다운: 폴백 호출 간격 제한
 - **market_index_rates 테이블**: 범용 시장 지수 테이블 (granularity 컬럼)
 - **그래프 API 확장**: `/api/graph/{currency}?range=1d|1w|3m|1y`
   - USD/KRW에만 DXY 보조지표 포함 (API key=`dxy`, UI 표시명=달러지수)
@@ -829,7 +823,8 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 4. `docker compose exec fastapi python scripts/backfill_history.py`
 
 **핵심 파일**:
-- `app/crawlers/dxy.py`: DXY 크롤러 (Investing + Yahoo 이중 소스)
+- `app/crawlers/investing.py`: DXY 동시 추출 (exchange-rates-table `#sb_last_8827`)
+- `app/crawlers/dxy.py`: DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance)
 - `app/models.py`: MarketIndexRate 모델 (granularity 컬럼)
 - `app/admin/graph_cache.py`: 그래프 시계열 구축 (2-part merge, 버킷 집계)
 - `app/crud.py`: DXY CRUD (insert, get_latest, get_for_period)

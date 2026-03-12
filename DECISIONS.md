@@ -2290,11 +2290,13 @@ USD/KRW 환율 그래프에 **달러지수(DXY)**를 보조지표로 추가해�
 | **1w** | 1시간 | timestamp 단위 `realtime > hourly` (공존 허용) | 같은 timestamp에서만 realtime 우선, 나머지 hourly 유지 |
 | **3m/1y** | 1일 | 날짜 단위 배타적 선택 (realtime 있으면 daily 제외) | daily 00:00과 realtime이 같은 일일 버킷에 혼재 방지 |
 
-**DXY 크롤러 이중 소스:**
-- **Primary**: Investing.com (curl_cffi TLS 지문 위장, ADR-018 재사용)
-- **Fallback**: Yahoo Finance (yfinance, 연속 5회 실패 OR 5분 stale 시 전환)
-- **Circuit Breaker**: DXY 전용 (investing.py와 독립)
-- **복구**: 쿨다운 해제 후 Investing 재시도, 성공 시 즉시 복귀
+**DXY 크롤러 이중 소스:** *(초기 설계 — 후속 변경은 [ADR-020](#adr-020-dxy-크롤링-아키텍처-전환--독립-크롤러에서-investing-동반-추출로) 참조)*
+
+- ~~**Primary**: Investing.com 독립 크롤러 (curl_cffi TLS 지문 위장, ADR-018 재사용)~~
+- ~~**Fallback**: Yahoo Finance (yfinance, 연속 5회 실패 OR 5분 stale 시 전환)~~
+- ~~**Circuit Breaker**: DXY 전용 (investing.py와 독립)~~
+- ~~**복구**: 쿨다운 해제 후 Investing 재시도, 성공 시 즉시 복귀~~
+- → **현재**: Investing 환율 크롤링 시 동반 추출 + 3-tier 폴백 (ADR-020)
 
 **배포 순서** (비가역적):
 1. DB 마이그레이션 (granularity 컬럼 추가, UNIQUE 인덱스 재생성)
@@ -2327,6 +2329,74 @@ USD/KRW 환율 그래프에 **달러지수(DXY)**를 보조지표로 추가해�
 
 ---
 
+## ADR-020: DXY 크롤링 아키텍처 전환 — 독립 크롤러에서 Investing 동반 추출로
+
+**날짜:** 2026-03-12
+**상태:** 수락됨
+
+### 상황
+
+DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 캐시 품질 문제**가 발생:
+- `x-cache-status: STALE` 응답이 약 40% 빈도로 발생
+- Stale 응답은 1~2시간 전 가격을 반환하여 DXY 값이 실제 대비 0.10~0.17 편차
+- 이미 10초마다 요청 중인 `exchange-rates-table` 페이지에 DXY(`#sb_last_8827`)가 존재하며, 해당 페이지는 `x-cache-status: BYPASS`로 관측됨 (range 0.005, 40회 테스트)
+- `exchange-rates-table`의 DXY는 선물/CFD 계열이지만 기존 현물 DXY와 차이 0.00~0.02 (보조지표 용도로 무의미한 차이)
+
+### 고려 사항
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **독립 DXY 크롤러 유지** (기존) | 모듈 독립성, 장애 격리 | STALE 40% 발생, 추가 HTTP 요청 2회/10초 |
+| **Investing 동반 추출** (채택) | STALE 해소, HTTP 요청 절반, 코드 삭제 | DXY가 investing.py에 종속 |
+| **Yahoo Finance 단독** | Investing 의존 제거 | 실시간성 부족 (15분 지연), API 불안정 |
+
+### 결정
+
+**DXY를 investing.py의 crawl_and_save_routine()에서 환율과 함께 추출 (추가 HTTP 요청 0)**
+
+**핵심 변경:**
+
+1. **동반 추출**: `exchange-rates-table` 페이지에서 환율 크롤링 시 DXY(`#sb_last_8827`)도 함께 파싱
+2. **DXY 전용 스케줄러 job 제거**: 4개 모드(IN/BREAK1/BREAK2/OUT) 모두에서 DXY 스케줄 삭제
+3. **dxy.py 축소**: on-demand fallback 전용 모듈로 변경
+   - 2차: `/currencies/us-dollar-index` (같은 선물/CFD 계열)
+   - 3차: Yahoo Finance (yfinance)
+4. **Fallback cooldown**: 60초 쿨다운 적용 (셀렉터 장기 파손 시 retry storm 방지)
+5. **crawler_config 정리**: `dxy` 행 자동 정리 (admin UI 잔존 방지)
+
+**Fallback 트리거 조건:**
+- `#sb_last_8827` 셀렉터 파싱 실패 시 즉시 fallback 호출
+- Fallback 내부에서 2차 → 3차 순차 시도
+
+### 트레이드오프
+
+**장점:**
+- Investing.com 요청 2회/10초 → 1회/10초 (요청량 50% 감소)
+- DXY STALE 문제 완전 해소 (BYPASS 페이지에서 추출)
+- 코드 약 350줄 삭제 (DXY 스케줄러 + 독립 크롤링 로직)
+- 스케줄러 복잡도 감소 (4개 모드에서 DXY job 관리 불필요)
+
+**단점:**
+- DXY 수집이 investing.py에 종속 (investing 차단 시 DXY도 함께 중단)
+  - **보완**: fallback 체인으로 `/currencies/us-dollar-index` → yfinance 순차 복구
+- DB `source='investing'` 통합 (1차/2차 구분은 로그의 fallback_url로만 가능)
+
+**중립:**
+- 선물/CFD 계열 DXY 사용 (기존 현물 대비 차이 0.00~0.02, 보조지표 용도로 무의미)
+
+### 향후 재검토 시점
+
+- `#sb_last_8827` 셀렉터 변경 시 → fallback URL 셀렉터도 함께 검증
+- Investing.com 장기 차단 시 → Yahoo Finance 단독 모드 검토
+- DXY 외 다른 보조지표 추가 시 → 동반 추출 패턴 재사용 여부 판단
+
+### 관련 결정
+
+- [ADR-019](#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략): DXY 보조지표 도입 (데이터 모델, 2-part merge)
+- [ADR-018](#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장): curl_cffi TLS 지문 위장 (동반 추출에서도 동일 적용)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2347,3 +2417,4 @@ USD/KRW 환율 그래프에 **달러지수(DXY)**를 보조지표로 추가해�
 - 2026-01-10: ADR-017 작성 (MIBANK 환율 파싱 - Currency-Code 기반 + 3단계 검증)
 - 2026-01-29: ADR-018 작성 (Investing Cloudflare 차단 대응 - curl_cffi TLS 지문 위장)
 - 2026-03-10: ADR-019 작성 (DXY 보조지표 - granularity 기반 2-part merge 전략)
+- 2026-03-12: ADR-020 작성 (DXY 크롤링 아키텍처 전환 — 독립 크롤러에서 Investing 동반 추출로)
