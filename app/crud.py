@@ -783,7 +783,7 @@ def init_crawler_config(db: Session) -> None:
     # 모든 크롤러 이름 정의
     CRAWLER_NAMES = [
         'investing', 'kb', 'hana', 'shinhan', 'woori',
-        'ibk', 'nh', 'sc', 'bs', 'citi', 'dxy'
+        'ibk', 'nh', 'sc', 'bs', 'citi'
     ]
 
     for crawler_name in CRAWLER_NAMES:
@@ -801,6 +801,17 @@ def init_crawler_config(db: Session) -> None:
             )
             db.add(config)
             logger.info(f"✅ 크롤러 설정 초기화: {crawler_name} (enabled=True)")
+
+    # 레거시 크롤러 행 삭제 (admin UI 잔존 방지)
+    # DXY는 investing.py에서 동반 추출로 전환되어 독립 크롤러에서 제거됨
+    RETIRED_CRAWLERS = ['dxy']
+    for retired_name in RETIRED_CRAWLERS:
+        stale = db.query(models.CrawlerConfig).filter(
+            models.CrawlerConfig.crawler_name == retired_name
+        ).first()
+        if stale:
+            logger.info(f"🗑️ 레거시 크롤러 설정 삭제: {stale.crawler_name}")
+            db.delete(stale)
 
     db.commit()
     logger.info("✅ crawler_config 테이블 초기화 완료")

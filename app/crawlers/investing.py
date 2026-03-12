@@ -37,6 +37,10 @@ INVESTING_SELECTORS = {
 }
 SCALED_CURRENCY_PAIRS = {"jpy-krw": 100}
 
+# DXY (달러지수) — exchange-rates-table에서 동반 추출
+DXY_SELECTOR = '#sb_last_8827'
+DXY_RATE_RANGE = (80.0, 130.0)
+
 # Investing 전용 UA 풀 (전역 HEADERS는 유지)
 UA_POOL = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -210,6 +214,8 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
         변경된 레코드 개수
     """
     current_rates = {}
+    dxy_rate = None
+
     try:
         response = _http_get(url, headers=headers)
         if response.status_code == 403:
@@ -235,14 +241,65 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text})
                 continue
 
+        # DXY 동반 추출 (exchange-rates-table에서만 존재)
+        dxy_element = soup.select_one(DXY_SELECTOR)
+        if dxy_element:
+            try:
+                dxy_text = dxy_element.get_text(strip=True).replace(",", "")
+                dxy_rate = float(dxy_text)
+                if not (DXY_RATE_RANGE[0] <= dxy_rate <= DXY_RATE_RANGE[1]):
+                    logger.warning("⚠️ DXY 범위 초과", extra={"rate": dxy_rate, "range": DXY_RATE_RANGE})
+                    dxy_rate = None
+            except (ValueError, AttributeError):
+                logger.warning("⚠️ DXY 파싱 실패", extra={"selector": DXY_SELECTOR})
+
     except InvestingForbidden:
         raise
     except Exception:
         logger.exception("⚠️ URL 오류", extra={"url": url})
         raise
 
-    # DB 저장 및 변경 개수 반환
+    # DB 저장: 환율
     if current_rates:
-        return crud.insert_investing_rates_into_db(db=db, current_rates=current_rates)
+        count = crud.insert_investing_rates_into_db(db=db, current_rates=current_rates)
     else:
-        raise Exception("🈚️ Investing 환율 데이터 없음")    
+        raise Exception("🈚️ Investing 환율 데이터 없음")
+
+    # DB 저장: DXY (환율 저장 성공 후)
+    if dxy_rate is not None:
+        crud.insert_dxy_rate_into_db(db=db, rate=dxy_rate, source="investing")
+    else:
+        # DXY 셀렉터가 없는 페이지 (예: sslfxrates)이거나 파싱 실패 시 폴백
+        _try_dxy_fallback(db)
+
+    return count
+
+
+def _try_dxy_fallback(db: Session) -> None:
+    """
+    DXY 1차 추출(exchange-rates-table) 실패 시 2차/3차 폴백 시도
+
+    2차: /currencies/us-dollar-index (같은 선물/CFD 상품)
+    3차: Yahoo Finance (yfinance)
+    """
+    try:
+        # 순환 참조 방지 + on-demand 호출이므로 함수 내부 import
+        from app.crawlers.dxy import fetch_dxy_from_investing_fallback, fetch_dxy_from_yahoo
+
+        # 2차: Investing.com /currencies/us-dollar-index
+        try:
+            rate = fetch_dxy_from_investing_fallback()
+            crud.insert_dxy_rate_into_db(db=db, rate=rate, source="investing")
+            logger.info("📦 DXY 2차 폴백 저장", extra={"rate": rate, "source": "investing", "fallback_url": "/currencies/us-dollar-index"})
+            return
+        except Exception:
+            logger.warning("⚠️ DXY 2차 폴백 실패", extra={"crawler": CRAWLER_NAME})
+
+        # 3차: Yahoo Finance
+        rate = fetch_dxy_from_yahoo()
+        crud.insert_dxy_rate_into_db(db=db, rate=rate, source="yahoo")
+        logger.info("📦 DXY Yahoo 폴백 저장", extra={"rate": rate})
+
+    except Exception:
+        # DXY는 보조지표 → 실패해도 환율 크롤링에 영향 없음
+        logger.warning("⚠️ DXY 전체 fallback 실패 (무시)", extra={"crawler": CRAWLER_NAME})

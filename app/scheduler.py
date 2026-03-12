@@ -23,7 +23,6 @@ from app.crawlers import kb
 from app.crawlers import woori
 from app.crawlers import bs
 from app.crawlers import citi
-from app.crawlers import dxy
 # Selenium 크롤러(shinhan, ibk, nh, sc)는 subprocess로 실행되므로 import 불필요
 from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
 from app import crud
@@ -96,11 +95,6 @@ queue_status_cache = {
 #   - 가장 중요한 기준 환율
 #   - IN/BREAK1/BREAK2: 10초마다 (Broadcasting 3초 전)
 #   - OUT: 10분마다 (매시간 7,17,27,37,47,57분)
-#
-# A+ Group: dxy (순수 Request + Yahoo 폴백)
-#   - USD/KRW 그래프 보조지표
-#   - IN/BREAK1/BREAK2: 10초마다 (Broadcasting 6초 전)
-#   - OUT: 10분마다 (매시간 4,14,24,34,44,54분 44초)
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
@@ -208,7 +202,7 @@ class CrawlerManager:
         # Validation: 유효한 크롤러 이름인지 체크
         VALID_CRAWLERS = [
             'investing', 'kb', 'hana', 'shinhan', 'woori',
-            'ibk', 'nh', 'sc', 'bs', 'citi', 'dxy'
+            'ibk', 'nh', 'sc', 'bs', 'citi'
         ]
 
         if crawler_name not in VALID_CRAWLERS:
@@ -635,18 +629,6 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
-        # A+ Group: DXY (10초마다, Broadcasting 6초 전)
-        if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
-                make_request_crawler_wrapper('dxy', dxy.crawl_and_save_dxy),
-                CronTrigger(second='4,14,24,34,44,54', timezone=KST),
-                id='task_dxy',
-                max_instances=1,
-                misfire_grace_time=10
-            )
-        else:
-            logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
-
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
@@ -777,18 +759,6 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
-        # A+ Group: DXY (10초마다, Broadcasting 6초 전)
-        if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
-                make_request_crawler_wrapper('dxy', dxy.crawl_and_save_dxy),
-                CronTrigger(second='4,14,24,34,44,54', timezone=KST),
-                id='task_dxy',
-                max_instances=1,
-                misfire_grace_time=10
-            )
-        else:
-            logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
-
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
@@ -906,18 +876,6 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
-        # A+ Group: DXY (10초마다, Broadcasting 6초 전)
-        if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
-                make_request_crawler_wrapper('dxy', dxy.crawl_and_save_dxy),
-                CronTrigger(second='4,14,24,34,44,54', timezone=KST),
-                id='task_dxy',
-                max_instances=1,
-                misfire_grace_time=10
-            )
-        else:
-            logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
-
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
@@ -999,18 +957,6 @@ def switch_jobs(mode: str):
             )
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
-
-        # A+ Group: DXY (10분마다, 4/14/24/34/44/54분 44초)
-        if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
-                make_request_crawler_wrapper('dxy', dxy.crawl_and_save_dxy),
-                CronTrigger(minute='4,14,24,34,44,54', second='44', timezone=KST),
-                id='task_dxy',
-                max_instances=1,
-                misfire_grace_time=300
-            )
-        else:
-            logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
         # B Group: kb, hana (10분마다)
         if crawler_manager.is_enabled('kb'):

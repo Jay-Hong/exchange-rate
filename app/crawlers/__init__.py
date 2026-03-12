@@ -10,7 +10,6 @@ from app.crawlers.nh import crawl_and_save_nh_bank_exchange_rates
 from app.crawlers.sc import crawl_and_save_sc_bank_exchange_rates
 from app.crawlers.bs import crawl_and_save_bs_bank_exchange_rates
 from app.crawlers.citi import crawl_and_save_citi_bank_exchange_rates
-from app.crawlers.dxy import crawl_and_save_dxy
 
 __all__ = [
     "crawl_and_save_investing_exchange_rates",
@@ -23,5 +22,4 @@ __all__ = [
     "crawl_and_save_sc_bank_exchange_rates",
     "crawl_and_save_bs_bank_exchange_rates",
     "crawl_and_save_citi_bank_exchange_rates",
-    "crawl_and_save_dxy",
 ]
