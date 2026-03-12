@@ -40,6 +40,8 @@ SCALED_CURRENCY_PAIRS = {"jpy-krw": 100}
 # DXY (달러지수) — exchange-rates-table에서 동반 추출
 DXY_SELECTOR = '#sb_last_8827'
 DXY_RATE_RANGE = (80.0, 130.0)
+DXY_FALLBACK_COOLDOWN_SECONDS = 60  # 셀렉터 실패 시 폴백 호출 간격 제한
+_dxy_fallback_last_called = 0.0     # time.monotonic() 기준
 
 # Investing 전용 UA 풀 (전역 HEADERS는 유지)
 UA_POOL = [
@@ -281,7 +283,15 @@ def _try_dxy_fallback(db: Session) -> None:
 
     2차: /currencies/us-dollar-index (같은 선물/CFD 상품)
     3차: Yahoo Finance (yfinance)
+
+    셀렉터 장기 파손 시 retry storm 방지를 위해 60초 cooldown 적용.
     """
+    global _dxy_fallback_last_called
+    now = time.monotonic()
+    if now - _dxy_fallback_last_called < DXY_FALLBACK_COOLDOWN_SECONDS:
+        return
+    _dxy_fallback_last_called = now
+
     try:
         # 순환 참조 방지 + on-demand 호출이므로 함수 내부 import
         from app.crawlers.dxy import fetch_dxy_from_investing_fallback, fetch_dxy_from_yahoo
