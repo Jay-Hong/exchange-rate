@@ -27,6 +27,19 @@ from app.logging import get_logger
 
 logger = get_logger("exchange_rate.admin.graph_cache")
 KST = timezone(timedelta(hours=9))
+_KST_OFFSET_SECONDS = 9 * 3600  # KST = UTC+9
+
+
+def _align_bucket_start(ts: int, bucket_seconds: int) -> int:
+    """
+    버킷 시작 시각 정렬.
+    - 일봉(86400초 이상): KST 00:00 경계로 정렬
+    - 시간봉/10분봉: UTC 정시 경계 (KST 오프셋이 3600의 배수이므로 결과 동일)
+    """
+    if bucket_seconds >= 86400:
+        # KST 자정 경계: ts를 KST 기준으로 변환 후 정렬, 다시 UTC로
+        return ts - ((ts + _KST_OFFSET_SECONDS) % bucket_seconds)
+    return ts - (ts % bucket_seconds)
 
 
 def _to_utc_datetime(ts_val: object) -> datetime:
@@ -286,9 +299,10 @@ def build_period_exchange_series(
         now_kst = datetime.now(KST)
         window_start_kst = now_kst - config["window"]
         window_start_ts = int(window_start_kst.timestamp())
-        bucket_start_ts = window_start_ts - (window_start_ts % bucket_seconds)
+        bucket_start_ts = _align_bucket_start(window_start_ts, bucket_seconds)
 
-        start_query = window_start_kst.astimezone(timezone.utc)
+        # 쿼리 시작점: bucket_start_ts로 확장 (첫 버킷 완전 데이터 보장)
+        query_start = datetime.fromtimestamp(bucket_start_ts, tz=timezone.utc)
         end_query = now_kst.astimezone(timezone.utc)
 
         rows = db.execute(
@@ -303,13 +317,13 @@ def build_period_exchange_series(
             """),
             {
                 "currency": currency,
-                "start": start_query.strftime("%Y-%m-%d %H:%M:%S"),
+                "start": query_start.strftime("%Y-%m-%d %H:%M:%S"),
                 "end": end_query.strftime("%Y-%m-%d %H:%M:%S"),
                 **({"bank": source} if source != "investing" else {})
             }
         ).fetchall()
 
-        # carry-forward 초기값
+        # carry-forward 초기값 (bucket_start_ts 이전에서 탐색)
         before_row = db.execute(
             text(f"""
                 SELECT rate FROM {table}
@@ -320,7 +334,7 @@ def build_period_exchange_series(
             """),
             {
                 "currency": currency,
-                "start": start_query.strftime("%Y-%m-%d %H:%M:%S"),
+                "start": query_start.strftime("%Y-%m-%d %H:%M:%S"),
                 **({"bank": source} if source != "investing" else {})
             }
         ).fetchone()
@@ -342,170 +356,135 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
     """
     장기 DXY 그래프 시리즈 (1w/3m/1y).
 
-    데이터 분리 전략 (daily/hourly + realtime 혼재 방지):
-      - 과거 구간: daily(3m/1y) 또는 hourly(1w)만 사용
-      - 오늘 구간(UTC 00:00 이후):
-        · 1w(시간봉): timestamp 단위 realtime > hourly 선택 (ROW_NUMBER)
-        · 3m/1y(일봉): 날짜 단위 배타적 선택 (realtime 있으면 daily 제외)
-      → 1w는 hourly 데이터 보존, 3m/1y는 daily 00:00 오염 방지
+    2단계 쿼리 전략 (realtime 스캔 범위 최적화):
+      1) backfill(hourly/daily)을 전체 윈도우에서 조회
+      2) realtime은 backfill 마지막 시점 이후만 조회 (gap 보충 목적)
+      → realtime이 수십만 건으로 늘어도 스캔 범위가 제한됨
+
+      같은 정확한 timestamp에 여러 granularity가 공존하면:
+        1w: hourly > realtime > daily  (시간봉 집계가 더 정확)
+        3m/1y: daily > realtime        (일봉 집계 우선)
+
+      dedup 주의사항:
+        - PARTITION BY timestamp는 정확한 timestamp 일치에만 적용됨
+        - 예: daily(00:00 UTC)와 realtime(14:30 UTC)은 timestamp가 달라 동일 버킷에 공존
+        - 이는 의도된 동작: 같은 일봉 버킷에 daily + realtime이 섞여 max/min이 더 정확해짐
 
     source 우선순위: investing > yahoo (같은 timestamp).
     """
     config = PERIOD_CONFIG[period]
     bucket_seconds = config["bucket_seconds"]
-    # realtime 외의 granularity (daily 또는 hourly)
     backfill_granularities = [g for g in config["dxy_granularities"] if g != "realtime"]
 
     with get_db_context() as db:
         now_kst = datetime.now(KST)
         window_start_kst = now_kst - config["window"]
         window_start_ts = int(window_start_kst.timestamp())
-        bucket_start_ts = window_start_ts - (window_start_ts % bucket_seconds)
+        bucket_start_ts = _align_bucket_start(window_start_ts, bucket_seconds)
 
-        start_query = window_start_kst.astimezone(timezone.utc)
+        # 쿼리 시작점: bucket_start_ts로 확장 (첫 버킷 완전 데이터 보장)
+        query_start = datetime.fromtimestamp(bucket_start_ts, tz=timezone.utc)
         end_query = now_kst.astimezone(timezone.utc)
 
-        # 오늘 UTC 00:00:00 — 이 시점 기준으로 과거/오늘 분리
-        today_utc = end_query.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_str = today_utc.strftime("%Y-%m-%d %H:%M:%S")
+        start_str = query_start.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = end_query.strftime("%Y-%m-%d %H:%M:%S")
 
+        # ── Step 1: backfill(hourly/daily) 전체 윈도우 조회 ──
         all_points: List[Tuple[int, float]] = []
+        realtime_start_str = start_str  # fallback: backfill 없으면 전체 윈도우
 
-        # Part 1: 과거 구간 — backfill granularity (daily/hourly)만
         if backfill_granularities:
-            placeholders = ", ".join(f":g{i}" for i in range(len(backfill_granularities)))
-            params = {
-                "start": start_query.strftime("%Y-%m-%d %H:%M:%S"),
-                "end": today_str,  # 오늘 미포함
-            }
+            bf_placeholders = ", ".join(f":bf{i}" for i in range(len(backfill_granularities)))
+            bf_params: Dict = {"start": start_str, "end": end_str}
             for i, g in enumerate(backfill_granularities):
-                params[f"g{i}"] = g
+                bf_params[f"bf{i}"] = g
 
-            past_rows = db.execute(
+            backfill_rows = db.execute(
                 text(f"""
                     SELECT timestamp, rate FROM (
                         SELECT timestamp, rate,
                             ROW_NUMBER() OVER (
-                                PARTITION BY timestamp, granularity
-                                ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END, id DESC
+                                PARTITION BY timestamp
+                                ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                    id DESC
                             ) AS rn
                         FROM market_index_rates
                         WHERE instrument = 'dxy'
-                          AND granularity IN ({placeholders})
+                          AND granularity IN ({bf_placeholders})
                           AND timestamp >= :start
-                          AND timestamp < :end
+                          AND timestamp <= :end
                     ) ranked
                     WHERE rn = 1
                     ORDER BY timestamp ASC
                 """),
-                params,
+                bf_params,
             ).fetchall()
 
-            for ts_val, rate in past_rows:
+            last_bf_ts: Optional[datetime] = None
+            for ts_val, rate in backfill_rows:
                 try:
                     dt = _to_utc_datetime(ts_val)
                     all_points.append((int(dt.timestamp()), float(rate)))
+                    last_bf_ts = dt
                 except Exception:
                     continue
 
-        # Part 2: 오늘 구간
-        # 1w(시간봉): timestamp 단위로 realtime > hourly 선택 (ROW_NUMBER)
-        #   → hourly 데이터 활용하면서 realtime 있는 시각은 realtime 우선
-        # 3m/1y(일봉): 날짜 단위 배타적 선택 (realtime 있으면 daily 전체 제외)
-        #   → daily 00:00 종가와 realtime 장중 틱이 같은 버킷에 섞이는 왜곡 방지
-        today_end_str = end_query.strftime("%Y-%m-%d %H:%M:%S")
-        use_daily_bucket = bucket_seconds >= 86400  # 1일 이상 버킷
+            # realtime 시작점: backfill 마지막 시점 이후
+            if last_bf_ts is not None:
+                realtime_start_str = last_bf_ts.strftime("%Y-%m-%d %H:%M:%S")
 
-        if use_daily_bucket:
-            # 3m/1y: 날짜 단위 배타적 선택
-            has_realtime_today = db.execute(
-                text("""
-                    SELECT 1 FROM market_index_rates
-                    WHERE instrument = 'dxy'
-                      AND granularity = 'realtime'
-                      AND timestamp >= :today
-                      AND timestamp <= :end
-                    LIMIT 1
-                """),
-                {"today": today_str, "end": today_end_str},
-            ).fetchone() is not None
-
-            today_grans = ["realtime"] if has_realtime_today else backfill_granularities
-        else:
-            # 1w: timestamp 단위 우선순위 (realtime + hourly 공존 허용)
-            today_grans = ["realtime"] + backfill_granularities
-
-        today_placeholders = ", ".join(f":tg{i}" for i in range(len(today_grans)))
-        today_params = {
-            "today": today_str,
-            "end": today_end_str,
-        }
-        for i, g in enumerate(today_grans):
-            today_params[f"tg{i}"] = g
-
-        # 1w: granularity 우선순위 (realtime > hourly > daily) + source 우선순위
-        # 3m/1y: source 우선순위만 (단일 granularity이므로)
-        if not use_daily_bucket and len(today_grans) > 1:
-            order_clause = """
-                                CASE granularity
-                                    WHEN 'realtime' THEN 0
-                                    WHEN 'hourly' THEN 1
-                                    WHEN 'daily' THEN 2
-                                    ELSE 3
-                                END,
-                                CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
-                                id DESC"""
-        else:
-            order_clause = "CASE WHEN source = 'investing' THEN 0 ELSE 1 END, id DESC"
-
-        today_rows = db.execute(
-            text(f"""
+        # ── Step 2: realtime은 backfill 끊긴 이후만 조회 ──
+        rt_rows = db.execute(
+            text("""
                 SELECT timestamp, rate FROM (
                     SELECT timestamp, rate,
                         ROW_NUMBER() OVER (
                             PARTITION BY timestamp
-                            ORDER BY {order_clause}
+                            ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                id DESC
                         ) AS rn
                     FROM market_index_rates
                     WHERE instrument = 'dxy'
-                      AND granularity IN ({today_placeholders})
-                      AND timestamp >= :today
+                      AND granularity = 'realtime'
+                      AND timestamp > :rt_start
                       AND timestamp <= :end
                 ) ranked
                 WHERE rn = 1
                 ORDER BY timestamp ASC
             """),
-            today_params,
+            {"rt_start": realtime_start_str, "end": end_str},
         ).fetchall()
 
-        for ts_val, rate in today_rows:
+        for ts_val, rate in rt_rows:
             try:
                 dt = _to_utc_datetime(ts_val)
                 all_points.append((int(dt.timestamp()), float(rate)))
             except Exception:
                 continue
 
-        # carry-forward: 윈도우 시작 직전
-        before_row = None
-        if backfill_granularities:
-            placeholders = ", ".join(f":g{i}" for i in range(len(backfill_granularities)))
-            bf_params = {"start": start_query.strftime("%Y-%m-%d %H:%M:%S")}
-            for i, g in enumerate(backfill_granularities):
-                bf_params[f"g{i}"] = g
+        # timestamp 순 정렬 (backfill + realtime 합본)
+        all_points.sort(key=lambda p: p[0])
 
-            before_row = db.execute(
-                text(f"""
-                    SELECT rate FROM market_index_rates
-                    WHERE instrument = 'dxy'
-                      AND granularity IN ({placeholders})
-                      AND timestamp < :start
-                    ORDER BY timestamp DESC,
-                        CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
-                        id DESC
-                    LIMIT 1
-                """),
-                bf_params,
-            ).fetchone()
+        # carry-forward: 윈도우 시작 직전
+        all_grans = list(set(["realtime"] + backfill_granularities))
+        gran_placeholders = ", ".join(f":g{i}" for i in range(len(all_grans)))
+        cf_params: Dict = {"start": start_str}
+        for i, g in enumerate(all_grans):
+            cf_params[f"g{i}"] = g
+
+        before_row = db.execute(
+            text(f"""
+                SELECT rate FROM market_index_rates
+                WHERE instrument = 'dxy'
+                  AND granularity IN ({gran_placeholders})
+                  AND timestamp < :start
+                ORDER BY timestamp DESC,
+                    CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                    id DESC
+                LIMIT 1
+            """),
+            cf_params,
+        ).fetchone()
 
     prev_close: Optional[float] = float(before_row[0]) if before_row else None
 
