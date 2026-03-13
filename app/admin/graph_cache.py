@@ -356,25 +356,28 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
     """
     장기 DXY 그래프 시리즈 (1w/3m/1y).
 
-    2단계 쿼리 전략 (realtime 스캔 범위 최적화):
-      1) backfill(hourly/daily)을 전체 윈도우에서 조회
-      2) realtime은 backfill 마지막 시점 이후만 조회 (gap 보충 목적)
-      → realtime이 수십만 건으로 늘어도 스캔 범위가 제한됨
+    기간별 쿼리 전략:
+      1w: full-window 전략
+        - hourly + realtime을 전체 7일 윈도우에서 모두 조회
+        - 같은 exact timestamp에서 hourly > realtime dedup (hourly가 더 정확)
+        - 7일 realtime은 ~1만건 수준이라 성능 부담 없음
+        - hourly에 gap이 있어도 realtime이 자연스럽게 보충 → carry-forward 최소화
+        - 이유: rollup 중단/배포 공백/수집 실패 시에도 그래프가 깨지지 않도록
 
-      같은 정확한 timestamp에 여러 granularity가 공존하면:
-        1w: hourly > realtime > daily  (시간봉 집계가 더 정확)
-        3m/1y: daily > realtime        (일봉 집계 우선)
+      3m/1y: 2단계 쿼리 전략 (realtime 스캔 범위 최적화)
+        - backfill(daily)을 전체 윈도우에서 조회
+        - realtime은 backfill 마지막 시점 이후만 조회 (gap 보충 목적)
+        - realtime이 수십만 건으로 늘어도 스캔 범위가 제한됨
 
-      dedup 주의사항:
-        - PARTITION BY timestamp는 정확한 timestamp 일치에만 적용됨
-        - 예: daily(00:00 UTC)와 realtime(14:30 UTC)은 timestamp가 달라 동일 버킷에 공존
-        - 이는 의도된 동작: 같은 일봉 버킷에 daily + realtime이 섞여 max/min이 더 정확해짐
+    dedup 주의사항:
+      - PARTITION BY timestamp는 정확한 timestamp 일치에만 적용됨
+      - 예: daily(00:00 UTC)와 realtime(14:30 UTC)은 timestamp가 달라 동일 버킷에 공존
+      - 이는 의도된 동작: 같은 일봉 버킷에 daily + realtime이 섞여 max/min이 더 정확해짐
 
     source 우선순위: investing > yahoo (같은 timestamp).
     """
     config = PERIOD_CONFIG[period]
     bucket_seconds = config["bucket_seconds"]
-    backfill_granularities = [g for g in config["dxy_granularities"] if g != "realtime"]
 
     with get_db_context() as db:
         now_kst = datetime.now(KST)
@@ -389,18 +392,94 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
         start_str = query_start.strftime("%Y-%m-%d %H:%M:%S")
         end_str = end_query.strftime("%Y-%m-%d %H:%M:%S")
 
-        # ── Step 1: backfill(hourly/daily) 전체 윈도우 조회 ──
         all_points: List[Tuple[int, float]] = []
-        realtime_start_str = start_str  # fallback: backfill 없으면 전체 윈도우
 
-        if backfill_granularities:
-            bf_placeholders = ", ".join(f":bf{i}" for i in range(len(backfill_granularities)))
-            bf_params: Dict = {"start": start_str, "end": end_str}
-            for i, g in enumerate(backfill_granularities):
-                bf_params[f"bf{i}"] = g
+        if period == "1w":
+            # ── 1w: full-window 전략 ──
+            # hourly + realtime을 전체 윈도우에서 조회, hourly > realtime dedup
+            all_grans = config["dxy_granularities"]  # ["realtime", "hourly"]
+            gran_placeholders = ", ".join(f":g{i}" for i in range(len(all_grans)))
+            params: Dict = {"start": start_str, "end": end_str}
+            for i, g in enumerate(all_grans):
+                params[f"g{i}"] = g
 
-            backfill_rows = db.execute(
+            rows = db.execute(
                 text(f"""
+                    SELECT timestamp, rate FROM (
+                        SELECT timestamp, rate,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY timestamp
+                                ORDER BY
+                                    CASE granularity WHEN 'hourly' THEN 0 ELSE 1 END,
+                                    CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                    id DESC
+                            ) AS rn
+                        FROM market_index_rates
+                        WHERE instrument = 'dxy'
+                          AND granularity IN ({gran_placeholders})
+                          AND timestamp >= :start
+                          AND timestamp <= :end
+                    ) ranked
+                    WHERE rn = 1
+                    ORDER BY timestamp ASC
+                """),
+                params,
+            ).fetchall()
+
+            for ts_val, rate in rows:
+                try:
+                    dt = _to_utc_datetime(ts_val)
+                    all_points.append((int(dt.timestamp()), float(rate)))
+                except Exception:
+                    continue
+        else:
+            # ── 3m/1y: 2단계 쿼리 전략 ──
+            backfill_granularities = [g for g in config["dxy_granularities"] if g != "realtime"]
+            realtime_start_str = start_str  # fallback: backfill 없으면 전체 윈도우
+
+            if backfill_granularities:
+                bf_placeholders = ", ".join(f":bf{i}" for i in range(len(backfill_granularities)))
+                bf_params: Dict = {"start": start_str, "end": end_str}
+                for i, g in enumerate(backfill_granularities):
+                    bf_params[f"bf{i}"] = g
+
+                backfill_rows = db.execute(
+                    text(f"""
+                        SELECT timestamp, rate FROM (
+                            SELECT timestamp, rate,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY timestamp
+                                    ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                        id DESC
+                                ) AS rn
+                            FROM market_index_rates
+                            WHERE instrument = 'dxy'
+                              AND granularity IN ({bf_placeholders})
+                              AND timestamp >= :start
+                              AND timestamp <= :end
+                        ) ranked
+                        WHERE rn = 1
+                        ORDER BY timestamp ASC
+                    """),
+                    bf_params,
+                ).fetchall()
+
+                last_bf_ts: Optional[datetime] = None
+                for ts_val, rate in backfill_rows:
+                    try:
+                        dt = _to_utc_datetime(ts_val)
+                        all_points.append((int(dt.timestamp()), float(rate)))
+                        last_bf_ts = dt
+                    except Exception:
+                        continue
+
+                # realtime 시작점: backfill 마지막 시점 이후
+                if last_bf_ts is not None:
+                    realtime_start_str = last_bf_ts.strftime("%Y-%m-%d %H:%M:%S")
+
+            # realtime은 backfill 끊긴 이후만 조회
+            rt_rows = db.execute(
+                text("""
                     SELECT timestamp, rate FROM (
                         SELECT timestamp, rate,
                             ROW_NUMBER() OVER (
@@ -410,73 +489,38 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                             ) AS rn
                         FROM market_index_rates
                         WHERE instrument = 'dxy'
-                          AND granularity IN ({bf_placeholders})
-                          AND timestamp >= :start
+                          AND granularity = 'realtime'
+                          AND timestamp > :rt_start
                           AND timestamp <= :end
                     ) ranked
                     WHERE rn = 1
                     ORDER BY timestamp ASC
                 """),
-                bf_params,
+                {"rt_start": realtime_start_str, "end": end_str},
             ).fetchall()
 
-            last_bf_ts: Optional[datetime] = None
-            for ts_val, rate in backfill_rows:
+            for ts_val, rate in rt_rows:
                 try:
                     dt = _to_utc_datetime(ts_val)
                     all_points.append((int(dt.timestamp()), float(rate)))
-                    last_bf_ts = dt
                 except Exception:
                     continue
 
-            # realtime 시작점: backfill 마지막 시점 이후
-            if last_bf_ts is not None:
-                realtime_start_str = last_bf_ts.strftime("%Y-%m-%d %H:%M:%S")
-
-        # ── Step 2: realtime은 backfill 끊긴 이후만 조회 ──
-        rt_rows = db.execute(
-            text("""
-                SELECT timestamp, rate FROM (
-                    SELECT timestamp, rate,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY timestamp
-                            ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
-                                id DESC
-                        ) AS rn
-                    FROM market_index_rates
-                    WHERE instrument = 'dxy'
-                      AND granularity = 'realtime'
-                      AND timestamp > :rt_start
-                      AND timestamp <= :end
-                ) ranked
-                WHERE rn = 1
-                ORDER BY timestamp ASC
-            """),
-            {"rt_start": realtime_start_str, "end": end_str},
-        ).fetchall()
-
-        for ts_val, rate in rt_rows:
-            try:
-                dt = _to_utc_datetime(ts_val)
-                all_points.append((int(dt.timestamp()), float(rate)))
-            except Exception:
-                continue
-
-        # timestamp 순 정렬 (backfill + realtime 합본)
+        # timestamp 순 정렬
         all_points.sort(key=lambda p: p[0])
 
         # carry-forward: 윈도우 시작 직전
-        all_grans = list(set(["realtime"] + backfill_granularities))
-        gran_placeholders = ", ".join(f":g{i}" for i in range(len(all_grans)))
+        all_grans_cf = list(set(config["dxy_granularities"]))
+        gran_placeholders_cf = ", ".join(f":g{i}" for i in range(len(all_grans_cf)))
         cf_params: Dict = {"start": start_str}
-        for i, g in enumerate(all_grans):
+        for i, g in enumerate(all_grans_cf):
             cf_params[f"g{i}"] = g
 
         before_row = db.execute(
             text(f"""
                 SELECT rate FROM market_index_rates
                 WHERE instrument = 'dxy'
-                  AND granularity IN ({gran_placeholders})
+                  AND granularity IN ({gran_placeholders_cf})
                   AND timestamp < :start
                 ORDER BY timestamp DESC,
                     CASE WHEN source = 'investing' THEN 0 ELSE 1 END,

@@ -12,6 +12,10 @@ DXY 실시간 데이터 → hourly/daily 집계 (rollup)
   - 일봉: 00:00 UTC 저장 (backfill 관례와 동일)
   - source 보존: realtime 원본의 실제 source를 그대로 사용 (investing/yahoo 등)
 
+수동 복구:
+  - backfill_hourly_range(): 지정 구간의 realtime → hourly 일괄 생성
+  - 스케줄러 중단/배포 공백 등으로 hourly가 비었을 때 사용
+
 market_index_rates 테이블 UNIQUE: (instrument, source, timestamp, granularity)
   → 같은 시각에 source='yahoo'(backfill)와 source='investing'(rollup) 공존 가능
   → 쿼리 시 investing 우선 dedup이 적용되어 rollup 데이터가 자동 우선
@@ -173,3 +177,92 @@ def rollup_dxy_daily():
         f"✅ DXY daily rollup: {yesterday_kst.strftime('%Y-%m-%d')}, "
         f"source={actual_source}, close={close_rate}"
     )
+
+
+# ═════════════════════════════════════════════════════════════
+# 수동 gap 복구: 지정 구간 hourly 일괄 생성
+# ═════════════════════════════════════════════════════════════
+
+def backfill_hourly_range(start_utc_str: str, end_utc_str: str) -> int:
+    """
+    지정 UTC 구간의 realtime DXY → hourly 일괄 생성.
+
+    스케줄러 중단/배포 공백 등으로 hourly가 비었을 때 수동 실행용.
+    각 정시 버킷에 대해 close(마지막 값) + 실제 source를 저장.
+    ON CONFLICT UPDATE로 idempotent.
+
+    Args:
+        start_utc_str: 시작 시각 (UTC, "2026-03-10 16:00:00") — 포함
+        end_utc_str:   종료 시각 (UTC, "2026-03-13 04:00:00") — 배타 상한
+                       (03:00~03:59 버킷까지 포함하려면 04:00:00 지정)
+
+    Returns:
+        생성된 hourly 레코드 수
+
+    Usage:
+        docker exec exchange-rate-app python3 -c "
+            from app.admin.dxy_rollup import backfill_hourly_range
+            n = backfill_hourly_range('2026-03-10 16:00:00', '2026-03-13 04:00:00')
+            print(f'Created {n} hourly records')
+        "
+    """
+    start = datetime.strptime(start_utc_str, "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=timezone.utc
+    )
+    end = datetime.strptime(end_utc_str, "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=timezone.utc
+    )
+
+    # 정시 경계로 정렬
+    bucket = start.replace(minute=0, second=0, microsecond=0)
+    if bucket < start:
+        bucket += timedelta(hours=1)
+
+    created = 0
+
+    with get_db_context() as db:
+        while bucket < end:
+            bucket_end = bucket + timedelta(hours=1)
+            b_start_str = bucket.strftime("%Y-%m-%d %H:%M:%S")
+            b_end_str = bucket_end.strftime("%Y-%m-%d %H:%M:%S")
+
+            row = db.execute(
+                text("""
+                    SELECT rate, source FROM market_index_rates
+                    WHERE instrument = 'dxy'
+                      AND granularity = 'realtime'
+                      AND timestamp >= :start
+                      AND timestamp < :end
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """),
+                {"start": b_start_str, "end": b_end_str},
+            ).fetchone()
+
+            if row:
+                close_rate = round(float(row[0]), 3)
+                actual_source = row[1]
+                record_ts = bucket.replace(tzinfo=None)
+
+                db.execute(
+                    text("""
+                        INSERT INTO market_index_rates
+                            (instrument, source, rate, timestamp, granularity)
+                        VALUES ('dxy', :source, :rate, :ts, 'hourly')
+                        ON CONFLICT (instrument, source, timestamp, granularity)
+                        DO UPDATE SET rate = :rate
+                    """),
+                    {"source": actual_source, "rate": close_rate, "ts": record_ts},
+                )
+                created += 1
+                logger.debug(
+                    f"  backfill hourly: {bucket.strftime('%Y-%m-%d %H:%M')} UTC, "
+                    f"source={actual_source}, close={close_rate}"
+                )
+
+            bucket += timedelta(hours=1)
+
+        db.commit()
+
+    logger.info(f"✅ DXY hourly backfill: {created} records created ({start_utc_str} ~ {end_utc_str})")
+    return created
