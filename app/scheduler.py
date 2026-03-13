@@ -1412,6 +1412,33 @@ def start_scheduler():
 
     logger.info("✅ 그래프 캐시 갱신 스케줄 등록 (매분 03초)")
 
+    # ═════════════════════════════════════════════════════════════
+    # DXY rollup: realtime → hourly/daily 집계
+    # ═════════════════════════════════════════════════════════════
+    # - hourly: 매시 :05분, 직전 완료 시간 집계
+    # - daily: 매일 00:05 KST, 직전 완료일 집계
+    # - idempotent (INSERT ON CONFLICT UPDATE)
+    # ─────────────────────────────────────────────────────────────
+    from app.admin.dxy_rollup import rollup_dxy_hourly, rollup_dxy_daily
+
+    scheduler.add_job(
+        rollup_dxy_hourly,
+        CronTrigger(minute=5, second=0, timezone=KST),
+        id="dxy_rollup_hourly",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        rollup_dxy_daily,
+        CronTrigger(hour=0, minute=5, second=0, timezone=KST),
+        id="dxy_rollup_daily",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    logger.info("✅ DXY rollup 스케줄 등록 (hourly=매시 :05, daily=00:05 KST)")
+
     # 시작 시 즉시 모드 판별 및 등록
     control_job()
 
