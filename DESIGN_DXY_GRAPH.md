@@ -176,6 +176,40 @@ CREATE UNIQUE INDEX uq_market_index ON market_index_rates (instrument, source, t
 #   - graph_cache.py의 2-step 쿼리에서 realtime 스캔 범위 자동 축소
 ```
 
+### 3.8 기간별 DXY 쿼리 전략 (graph_cache.py `build_period_dxy_series()`)
+
+**1w: full-window 전략**
+- hourly + realtime을 전체 7일 윈도우에서 단일 쿼리로 조회
+- `PARTITION BY timestamp`에서 hourly > realtime dedup (hourly가 더 정확)
+- 7일 realtime은 ~1만건 수준이라 성능 부담 없음
+- hourly에 gap이 있어도 realtime이 자연스럽게 보충 → carry-forward 최소화
+
+**3m/1y: daily + recent realtime tail 전략**
+- daily(backfill/rollup)를 전체 윈도우에서 조회
+- realtime은 최근 7일 tail만 겹쳐 조회 (`last_bf_ts - _DXY_DAILY_REALTIME_TAIL_DAYS`)
+- daily gap이 tail 구간에 생겨도 realtime이 자연스럽게 보충
+- realtime 전체 스캔(수십만 건) 방지
+
+**상수**: `_DXY_DAILY_REALTIME_TAIL_DAYS = 7` (graph_cache.py line 31)
+
+### 3.9 수동 gap 복구 함수 (dxy_rollup.py)
+
+스케줄러 중단/배포 공백 등으로 hourly/daily가 비었을 때 사용:
+
+```python
+# hourly gap 복구 (UTC 구간, 배타 상한)
+from app.admin.dxy_rollup import backfill_hourly_range
+n = backfill_hourly_range('2026-03-10 16:00:00', '2026-03-13 04:00:00')
+
+# daily gap 복구 (KST 날짜 구간, 배타 상한)
+from app.admin.dxy_rollup import backfill_daily_range
+n = backfill_daily_range('2026-03-11', '2026-03-13')
+```
+
+- 각 버킷의 close(마지막 값) + 실제 source를 저장
+- ON CONFLICT UPDATE로 idempotent (여러 번 실행해도 동일 결과)
+- docker exec로 실행: `docker exec exchange-rate-app python3 -c "..."`
+
 ---
 
 ## 4. 크롤러 설계 (확정)

@@ -811,15 +811,21 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - **market_index_rates 테이블**: 범용 시장 지수 테이블 (granularity 컬럼)
 - **그래프 API 확장**: `/api/graph/{currency}?range=1d|1w|3m|1y`
   - USD/KRW에만 DXY 보조지표 포함 (API key=`dxy`, UI 표시명=달러지수)
-  - 1d: 10분 버킷 (realtime), 1w: 1시간 버킷 (realtime+hourly), 3m/1y: 1일 버킷 (realtime+daily)
-- **2-part merge 전략**: 과거(daily/hourly) + 오늘(realtime) 분리 쿼리
-  - 1w 오늘: timestamp 단위 `realtime > hourly` 선택 (공존 허용)
-  - 3m/1y 오늘: realtime 있으면 daily 전체 제외 (날짜 단위 배타적)
+  - 1d: 10분 버킷 (realtime only)
+  - 1w: 1시간 버킷 — **full-window 전략** (hourly + realtime 전체 7일 조회, hourly > realtime dedup)
+  - 3m/1y: 1일 버킷 — **daily + recent realtime tail 전략** (daily 전체 + realtime 최근 7일 overlap)
+- **기간별 DXY 쿼리 전략** (graph_cache.py `build_period_dxy_series()`):
+  - 1w: 단일 쿼리, `PARTITION BY timestamp`에서 hourly > realtime 우선 → gap 있어도 realtime이 자연 보충
+  - 3m/1y: daily 전체 윈도우 조회 + realtime은 `last_bf_ts - 7일`부터만 tail 조회 (`_DXY_DAILY_REALTIME_TAIL_DAYS = 7`)
+  - 상수: `_DXY_DAILY_REALTIME_TAIL_DAYS = 7` (graph_cache.py line 31)
 - **히스토리 백필 스크립트**: yfinance로 daily(1년)/hourly(7일) 데이터 사전 적재
 - **DXY rollup 스케줄**: realtime → hourly(매시 :05) / daily(매일 00:05 KST) 자동 집계
   - 백필 종료 이후 구간을 rollup이 연속 커버 (Yahoo 재실행 불필요)
   - source 보존: 원본 realtime의 실제 source를 그대로 사용
   - idempotent: INSERT ON CONFLICT UPDATE
+- **수동 gap 복구 함수** (`app/admin/dxy_rollup.py`):
+  - `backfill_hourly_range(start_utc, end_utc)`: UTC 구간의 realtime → hourly 일괄 생성 (배타 상한)
+  - `backfill_daily_range(start_kst, end_kst)`: KST 날짜 구간의 hourly/realtime → daily 일괄 생성 (배타 상한)
 
 **배포 순서** (운영 환경, 상세: [DEPLOYMENT.md](DEPLOYMENT.md#db-마이그레이션-v1120-dxy-granularity)):
 1. `git pull` → `docker compose build` (새 이미지 빌드)

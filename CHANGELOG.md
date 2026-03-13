@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - source 보존: 원본 realtime의 실제 source를 그대로 사용
   - idempotent: INSERT ON CONFLICT UPDATE
   - 백필(1회성) 종료 이후 구간을 연속 커버
+- **수동 gap 복구 함수** (`app/admin/dxy_rollup.py`):
+  - `backfill_hourly_range()`: UTC 구간 realtime → hourly 일괄 생성
+  - `backfill_daily_range()`: KST 날짜 구간 hourly/realtime → daily 일괄 생성
+
+### Fixed
+
+- **1w DXY carry-forward 버그**: 2-part merge 전략에서 hourly gap 구간의 realtime이 누락되는 문제
+  - 원인: hourly 마지막 timestamp 이후부터만 realtime을 조회하여, gap 구간의 realtime이 스킵됨
+  - 수정: 1w를 **full-window 전략**으로 전환 (hourly + realtime 전체 7일 단일 쿼리, hourly > realtime dedup)
+  - hourly gap backfill 58건 실행 (2026-03-10 16:00 ~ 2026-03-13 04:00 UTC)
+- **3m/1y DXY carry-forward 버그**: 동일 취약점이 daily gap에서도 발생
+  - 수정: **daily + recent realtime tail 7일 overlap** 전략으로 전환 (`_DXY_DAILY_REALTIME_TAIL_DAYS = 7`)
+  - daily gap backfill 실행 (2026-03-11 ~ 2026-03-13 KST)
 
 ### Changed
 

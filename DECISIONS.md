@@ -2275,20 +2275,24 @@ USD/KRW 환율 그래프에 **달러지수(DXY)**를 보조지표로 추가해�
 
 ### 결정
 
-**market_index_rates 테이블 + granularity 컬럼 + 2-part merge 전략 채택**
+**market_index_rates 테이블 + granularity 컬럼 + 기간별 쿼리 전략 채택**
 
 **핵심 설계:**
 
-1. **granularity 컬럼**: `realtime` (크롤링) / `hourly` (시간봉 백필) / `daily` (일봉 백필) 3단계 분리
+1. **granularity 컬럼**: `realtime` (크롤링) / `hourly` (시간봉 백필/rollup) / `daily` (일봉 백필/rollup) 3단계 분리
 2. **source 우선순위**: `investing > yahoo` (CASE WHEN ROW_NUMBER)
-3. **2-part merge**: 과거 구간 (daily/hourly) + 오늘 구간 (realtime 중심) 분리 쿼리
+3. **기간별 쿼리 전략**: *(초기 2-part merge → 2026-03-13 개선)*
 
-**오늘 구간 병합 규칙:**
+**기간별 DXY 쿼리 전략 (현재):**
 
-| 기간 | 버킷 크기 | 규칙 | 이유 |
+| 기간 | 버킷 크기 | 전략 | 설명 |
 |------|----------|------|------|
-| **1w** | 1시간 | timestamp 단위 `realtime > hourly` (공존 허용) | 같은 timestamp에서만 realtime 우선, 나머지 hourly 유지 |
-| **3m/1y** | 1일 | 날짜 단위 배타적 선택 (realtime 있으면 daily 제외) | daily 00:00과 realtime이 같은 일일 버킷에 혼재 방지 |
+| **1w** | 1시간 | **full-window** | hourly + realtime 전체 7일 단일 쿼리, `hourly > realtime` dedup. gap 있어도 realtime이 자연 보충 |
+| **3m/1y** | 1일 | **daily + realtime tail 7일** | daily 전체 윈도우 + realtime 최근 7일 overlap (`_DXY_DAILY_REALTIME_TAIL_DAYS = 7`). daily gap도 realtime이 보충, 전체 realtime 스캔 방지 |
+
+> **변경 이유 (2026-03-13)**: 초기 2-part merge는 "과거(hourly/daily) + 오늘(realtime)" 분리였으나,
+> backfill 종료 ~ rollup 시작 사이의 gap 구간에서 realtime이 누락되어 carry-forward 발생.
+> 1w는 full-window로, 3m/1y는 tail overlap으로 전환하여 gap에 대한 내성을 확보.
 
 **DXY 크롤러 이중 소스:** *(초기 설계 — 후속 변경은 [ADR-020](#adr-020-dxy-크롤링-아키텍처-전환--독립-크롤러에서-investing-동반-추출로) 참조)*
 
