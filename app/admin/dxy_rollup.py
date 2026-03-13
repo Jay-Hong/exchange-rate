@@ -14,7 +14,8 @@ DXY 실시간 데이터 → hourly/daily 집계 (rollup)
 
 수동 복구:
   - backfill_hourly_range(): 지정 구간의 realtime → hourly 일괄 생성
-  - 스케줄러 중단/배포 공백 등으로 hourly가 비었을 때 사용
+  - backfill_daily_range(): 지정 KST 날짜 구간의 hourly/realtime → daily 일괄 생성
+  - 스케줄러 중단/배포 공백 등으로 hourly/daily가 비었을 때 사용
 
 market_index_rates 테이블 UNIQUE: (instrument, source, timestamp, granularity)
   → 같은 시각에 source='yahoo'(backfill)와 source='investing'(rollup) 공존 가능
@@ -265,4 +266,102 @@ def backfill_hourly_range(start_utc_str: str, end_utc_str: str) -> int:
         db.commit()
 
     logger.info(f"✅ DXY hourly backfill: {created} records created ({start_utc_str} ~ {end_utc_str})")
+    return created
+
+
+def backfill_daily_range(start_kst_date_str: str, end_kst_date_str: str) -> int:
+    """
+    지정 KST 날짜 구간의 hourly/realtime DXY → daily 일괄 생성.
+
+    Args:
+        start_kst_date_str: 시작 날짜 (KST, "2026-03-11") — 포함
+        end_kst_date_str:   종료 날짜 (KST, "2026-03-13") — 배타 상한
+
+    Returns:
+        생성된 daily 레코드 수
+
+    Usage:
+        docker exec exchange-rate-app python3 -c "
+            from app.admin.dxy_rollup import backfill_daily_range
+            n = backfill_daily_range('2026-03-11', '2026-03-13')
+            print(f'Created {n} daily records')
+        "
+    """
+    current_date = datetime.strptime(start_kst_date_str, "%Y-%m-%d").date()
+    end_date = datetime.strptime(end_kst_date_str, "%Y-%m-%d").date()
+    created = 0
+
+    with get_db_context() as db:
+        while current_date < end_date:
+            day_start_kst = datetime(
+                current_date.year,
+                current_date.month,
+                current_date.day,
+                tzinfo=KST,
+            )
+            day_end_kst = day_start_kst + timedelta(days=1)
+
+            start_str = day_start_kst.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            end_str = day_end_kst.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            record_ts = datetime(
+                current_date.year,
+                current_date.month,
+                current_date.day,
+            )
+
+            row = db.execute(
+                text("""
+                    SELECT rate, source FROM market_index_rates
+                    WHERE instrument = 'dxy'
+                      AND granularity = 'hourly'
+                      AND timestamp >= :start
+                      AND timestamp < :end
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """),
+                {"start": start_str, "end": end_str},
+            ).fetchone()
+
+            if not row:
+                row = db.execute(
+                    text("""
+                        SELECT rate, source FROM market_index_rates
+                        WHERE instrument = 'dxy'
+                          AND granularity = 'realtime'
+                          AND timestamp >= :start
+                          AND timestamp < :end
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    """),
+                    {"start": start_str, "end": end_str},
+                ).fetchone()
+
+            if row:
+                close_rate = round(float(row[0]), 3)
+                actual_source = row[1]
+
+                db.execute(
+                    text("""
+                        INSERT INTO market_index_rates
+                            (instrument, source, rate, timestamp, granularity)
+                        VALUES ('dxy', :source, :rate, :ts, 'daily')
+                        ON CONFLICT (instrument, source, timestamp, granularity)
+                        DO UPDATE SET rate = :rate
+                    """),
+                    {"source": actual_source, "rate": close_rate, "ts": record_ts},
+                )
+                created += 1
+                logger.debug(
+                    f"  backfill daily: {current_date.isoformat()} KST, "
+                    f"source={actual_source}, close={close_rate}"
+                )
+
+            current_date += timedelta(days=1)
+
+        db.commit()
+
+    logger.info(
+        f"✅ DXY daily backfill: {created} records created "
+        f"({start_kst_date_str} ~ {end_kst_date_str}, KST)"
+    )
     return created

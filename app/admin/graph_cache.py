@@ -28,6 +28,7 @@ from app.logging import get_logger
 logger = get_logger("exchange_rate.admin.graph_cache")
 KST = timezone(timedelta(hours=9))
 _KST_OFFSET_SECONDS = 9 * 3600  # KST = UTC+9
+_DXY_DAILY_REALTIME_TAIL_DAYS = 7
 
 
 def _align_bucket_start(ts: int, bucket_seconds: int) -> int:
@@ -364,9 +365,10 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
         - hourly에 gap이 있어도 realtime이 자연스럽게 보충 → carry-forward 최소화
         - 이유: rollup 중단/배포 공백/수집 실패 시에도 그래프가 깨지지 않도록
 
-      3m/1y: 2단계 쿼리 전략 (realtime 스캔 범위 최적화)
+      3m/1y: 2단계 + recent realtime tail 전략
         - backfill(daily)을 전체 윈도우에서 조회
-        - realtime은 backfill 마지막 시점 이후만 조회 (gap 보충 목적)
+        - realtime은 최근 7일 tail만 겹쳐 조회
+        - daily gap이 tail 구간에 생겨도 realtime이 자연스럽게 보충
         - realtime이 수십만 건으로 늘어도 스캔 범위가 제한됨
 
     dedup 주의사항:
@@ -435,7 +437,7 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
         else:
             # ── 3m/1y: 2단계 쿼리 전략 ──
             backfill_granularities = [g for g in config["dxy_granularities"] if g != "realtime"]
-            realtime_start_str = start_str  # fallback: backfill 없으면 전체 윈도우
+            realtime_start = query_start  # fallback: backfill 없으면 전체 윈도우
 
             if backfill_granularities:
                 bf_placeholders = ", ".join(f":bf{i}" for i in range(len(backfill_granularities)))
@@ -473,11 +475,12 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                     except Exception:
                         continue
 
-                # realtime 시작점: backfill 마지막 시점 이후
+                # 최근 tail은 daily와 겹쳐 읽어, tail 구간 daily gap도 realtime으로 보충.
                 if last_bf_ts is not None:
-                    realtime_start_str = last_bf_ts.strftime("%Y-%m-%d %H:%M:%S")
+                    tail_start = last_bf_ts - timedelta(days=_DXY_DAILY_REALTIME_TAIL_DAYS)
+                    realtime_start = max(query_start, tail_start)
 
-            # realtime은 backfill 끊긴 이후만 조회
+            # realtime은 recent tail만 조회
             rt_rows = db.execute(
                 text("""
                     SELECT timestamp, rate FROM (
@@ -496,7 +499,10 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                     WHERE rn = 1
                     ORDER BY timestamp ASC
                 """),
-                {"rt_start": realtime_start_str, "end": end_str},
+                {
+                    "rt_start": realtime_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end": end_str,
+                },
             ).fetchall()
 
             for ts_val, rate in rt_rows:
