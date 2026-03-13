@@ -619,7 +619,8 @@ exchange-rate/
 │   │   ├── stats.py         # WebSocket 브로드캐스트 통계 수집
 │   │   ├── crawler_stats.py # 크롤러 통계 수집 (성공률, 실행시간)
 │   │   ├── monitor.py       # 시스템 모니터링 (메모리, CPU, Chrome) - Phase 1.5
-│   │   └── graph_cache.py   # 그래프 데이터 Redis 캐시 - Phase 1A
+│   │   ├── graph_cache.py   # 그래프 데이터 Redis 캐시 - Phase 1A
+│   │   └── dxy_rollup.py   # DXY realtime → hourly/daily 집계 (rollup)
 │   │
 │   └── notifications/       # 알림 도메인 (2025-10-25 리팩토링)
 │       ├── __init__.py
@@ -815,6 +816,10 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
   - 1w 오늘: timestamp 단위 `realtime > hourly` 선택 (공존 허용)
   - 3m/1y 오늘: realtime 있으면 daily 전체 제외 (날짜 단위 배타적)
 - **히스토리 백필 스크립트**: yfinance로 daily(1년)/hourly(7일) 데이터 사전 적재
+- **DXY rollup 스케줄**: realtime → hourly(매시 :05) / daily(매일 00:05 KST) 자동 집계
+  - 백필 종료 이후 구간을 rollup이 연속 커버 (Yahoo 재실행 불필요)
+  - source 보존: 원본 realtime의 실제 source를 그대로 사용
+  - idempotent: INSERT ON CONFLICT UPDATE
 
 **배포 순서** (운영 환경, 상세: [DEPLOYMENT.md](DEPLOYMENT.md#db-마이그레이션-v1120-dxy-granularity)):
 1. `git pull` → `docker compose build` (새 이미지 빌드)
@@ -827,6 +832,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - `app/crawlers/dxy.py`: DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance)
 - `app/models.py`: MarketIndexRate 모델 (granularity 컬럼)
 - `app/admin/graph_cache.py`: 그래프 시계열 구축 (2-part merge, 버킷 집계)
+- `app/admin/dxy_rollup.py`: DXY realtime → hourly/daily rollup
 - `app/crud.py`: DXY CRUD (insert, get_latest, get_for_period)
 
 ### Phase 2: FCM 푸시 알림 ✅ 완료 (2025-12-21)

@@ -153,6 +153,29 @@ CREATE UNIQUE INDEX uq_market_index ON market_index_rates (instrument, source, t
 # 6. 결과 리포트 (삽입 건수, 스킵 건수, 스케일링 적용 건수)
 ```
 
+### 3.7 DXY Rollup (realtime → hourly/daily)
+
+백필은 1회성 스크립트이므로, 이후 구간의 hourly/daily 데이터는 rollup이 자동 생성합니다.
+
+```python
+# app/admin/dxy_rollup.py
+#
+# hourly: 매시 :05분 실행, 직전 완료 시간의 realtime close 집계
+# daily:  매일 00:05 KST 실행, 직전 완료일의 hourly(또는 realtime) close 집계
+#
+# :05 타이밍 근거: 정시 경계 직후 realtime 데이터가 충분히 적재된 뒤 집계
+#   (graph_cache 갱신은 매분 :03, 브로드캐스트는 :00/:10/... 정각)
+#
+# 설계 원칙:
+#   - 닫힌 버킷만 집계 (현재 진행 중인 시간/일은 제외)
+#   - INSERT ON CONFLICT UPDATE로 idempotent
+#   - source 보존: realtime 원본의 실제 source를 그대로 사용
+#
+# 효과:
+#   - 1w/3m/1y 그래프에서 backfill 종료 이후 구간도 hourly/daily 데이터 존재
+#   - graph_cache.py의 2-step 쿼리에서 realtime 스캔 범위 자동 축소
+```
+
 ---
 
 ## 4. 크롤러 설계 (확정)

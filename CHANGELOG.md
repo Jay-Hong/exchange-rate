@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **DXY rollup 스케줄** (`app/admin/dxy_rollup.py`): realtime → hourly/daily 자동 집계
+  - hourly: 매시 :05분, 직전 완료 시간의 realtime close 집계
+  - daily: 매일 00:05 KST, 직전 완료일의 hourly(또는 realtime) close 집계
+  - source 보존: 원본 realtime의 실제 source를 그대로 사용
+  - idempotent: INSERT ON CONFLICT UPDATE
+  - 백필(1회성) 종료 이후 구간을 연속 커버
+
 ### Changed
 
 - **DXY 스케줄 조정**: 실시간 비교 품질 개선
