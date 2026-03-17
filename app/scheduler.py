@@ -17,7 +17,9 @@ from pytz import timezone
 
 # 로컬 애플리케이션
 from app import models
+from app.config import DXY_MODE
 from app.crawlers import investing
+from app.crawlers import dxy_spot
 from app.crawlers import hana
 from app.crawlers import kb
 from app.crawlers import woori
@@ -202,7 +204,7 @@ class CrawlerManager:
         # Validation: 유효한 크롤러 이름인지 체크
         VALID_CRAWLERS = [
             'investing', 'kb', 'hana', 'shinhan', 'woori',
-            'ibk', 'nh', 'sc', 'bs', 'citi'
+            'ibk', 'nh', 'sc', 'bs', 'citi', 'dxy'
         ]
 
         if crawler_name not in VALID_CRAWLERS:
@@ -629,6 +631,18 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
+        if DXY_MODE == "spot_independent":
+            if crawler_manager.is_enabled('dxy'):
+                scheduler.add_job(
+                    make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
+                    CronTrigger(second='1,11,21,31,41,51', timezone=KST),
+                    id='task_dxy',
+                    max_instances=1,
+                    misfire_grace_time=5
+                )
+            else:
+                logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
+
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
@@ -759,6 +773,18 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
+        if DXY_MODE == "spot_independent":
+            if crawler_manager.is_enabled('dxy'):
+                scheduler.add_job(
+                    make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
+                    CronTrigger(second='1,11,21,31,41,51', timezone=KST),
+                    id='task_dxy',
+                    max_instances=1,
+                    misfire_grace_time=5
+                )
+            else:
+                logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
+
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
@@ -876,6 +902,18 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
+        if DXY_MODE == "spot_independent":
+            if crawler_manager.is_enabled('dxy'):
+                scheduler.add_job(
+                    make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
+                    CronTrigger(second='1,11,21,31,41,51', timezone=KST),
+                    id='task_dxy',
+                    max_instances=1,
+                    misfire_grace_time=5
+                )
+            else:
+                logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
+
         # B Group: kb, hana (5초 전, 10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
@@ -957,6 +995,18 @@ def switch_jobs(mode: str):
             )
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
+
+        if DXY_MODE == "spot_independent":
+            if crawler_manager.is_enabled('dxy'):
+                scheduler.add_job(
+                    make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
+                    CronTrigger(minute='*', second='15', timezone=KST),
+                    id='task_dxy',
+                    max_instances=1,
+                    misfire_grace_time=120
+                )
+            else:
+                logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
         # B Group: kb, hana (10분마다)
         if crawler_manager.is_enabled('kb'):

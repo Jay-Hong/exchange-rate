@@ -11,6 +11,13 @@ load_dotenv()
 ENV = os.getenv("ENV", "development")  # development, production
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG" if ENV == "development" else "INFO")
 
+# DXY 수집 모드
+# - futures_coupled: investing.py에서 exchange-rates-table과 함께 수집 (기존)
+# - spot_independent: dxy_spot.py 독립 크롤러 사용
+DXY_MODE = os.getenv("DXY_MODE", "futures_coupled").strip().lower()
+if DXY_MODE not in {"futures_coupled", "spot_independent"}:
+    DXY_MODE = "futures_coupled"
+
 # 로그 디렉토리
 BASE_DIR = Path(__file__).parent.parent
 LOG_DIR = BASE_DIR / "logs"

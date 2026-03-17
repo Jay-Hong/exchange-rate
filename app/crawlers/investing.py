@@ -19,6 +19,7 @@ except Exception:
 
 # 로컬 애플리케이션
 from app import crud
+from app.config import DXY_MODE
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
 from app.crawlers.utils import parse_rate_text
@@ -243,17 +244,18 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text})
                 continue
 
-        # DXY 동반 추출 (exchange-rates-table에서만 존재)
-        dxy_element = soup.select_one(DXY_SELECTOR)
-        if dxy_element:
-            try:
-                dxy_text = dxy_element.get_text(strip=True).replace(",", "")
-                dxy_rate = float(dxy_text)
-                if not (DXY_RATE_RANGE[0] <= dxy_rate <= DXY_RATE_RANGE[1]):
-                    logger.warning("⚠️ DXY 범위 초과", extra={"rate": dxy_rate, "range": DXY_RATE_RANGE})
-                    dxy_rate = None
-            except (ValueError, AttributeError):
-                logger.warning("⚠️ DXY 파싱 실패", extra={"selector": DXY_SELECTOR})
+        if DXY_MODE == "futures_coupled":
+            # DXY 동반 추출 (exchange-rates-table에서만 존재)
+            dxy_element = soup.select_one(DXY_SELECTOR)
+            if dxy_element:
+                try:
+                    dxy_text = dxy_element.get_text(strip=True).replace(",", "")
+                    dxy_rate = float(dxy_text)
+                    if not (DXY_RATE_RANGE[0] <= dxy_rate <= DXY_RATE_RANGE[1]):
+                        logger.warning("⚠️ DXY 범위 초과", extra={"rate": dxy_rate, "range": DXY_RATE_RANGE})
+                        dxy_rate = None
+                except (ValueError, AttributeError):
+                    logger.warning("⚠️ DXY 파싱 실패", extra={"selector": DXY_SELECTOR})
 
     except InvestingForbidden:
         raise
@@ -267,12 +269,13 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
     else:
         raise Exception("🈚️ Investing 환율 데이터 없음")
 
-    # DB 저장: DXY (환율 저장 성공 후)
-    if dxy_rate is not None:
-        crud.insert_dxy_rate_into_db(db=db, rate=dxy_rate, source="investing")
-    else:
-        # DXY 셀렉터가 없는 페이지 (예: sslfxrates)이거나 파싱 실패 시 폴백
-        _try_dxy_fallback(db)
+    if DXY_MODE == "futures_coupled":
+        # DB 저장: DXY (환율 저장 성공 후)
+        if dxy_rate is not None:
+            crud.insert_dxy_rate_into_db(db=db, rate=dxy_rate, source="investing")
+        else:
+            # DXY 셀렉터가 없는 페이지 (예: sslfxrates)이거나 파싱 실패 시 폴백
+            _try_dxy_fallback(db)
 
     return count
 
