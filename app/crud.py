@@ -36,6 +36,9 @@ CURRENCY_NAMES_KR = {
     "eur-krw": "유로",
 }
 
+# 지원 통화쌍 (고정값, DB DISTINCT 쿼리 대체)
+SUPPORTED_CURRENCY_PAIRS = ["eur-krw", "jpy-krw", "usd-krw"]
+
 
 def format_threshold(value: float) -> str:
     """목표값 포맷: 소수점 이하 불필요한 0 제거 (1475.00 → 1475, 1475.50 → 1475.5)"""
@@ -336,10 +339,7 @@ def get_all_rates_flat(db: Session) -> List[Dict[str, Any]]:
     """
     all_rates = []
     
-    # 사용 가능한 통화쌍 조회
-    pairs = get_available_currency_pairs(db)
-    if not pairs:
-        pairs = ["usd-krw", "jpy-krw", "eur-krw"]
+    pairs = SUPPORTED_CURRENCY_PAIRS
     
     for pair in pairs:
         # Investing 데이터 추가
@@ -380,44 +380,6 @@ def get_rates_by_currency(db: Session, currency: str) -> List[Dict[str, Any]]:
 
 
 # 추가 유틸리티 함수들
-
-def get_available_currency_pairs(db: Session) -> List[str]:
-    """
-    데이터베이스에 저장된 모든 통화쌍 조회
-    
-    Args:
-        db: 데이터베이스 세션
-        
-    Returns:
-        통화쌍 리스트
-    """
-    # Investing 테이블에서 통화쌍 조회
-    investing_pairs = db.query(models.InvestingExchangeRate.currency).distinct().all()
-    investing_pairs = [pair[0] for pair in investing_pairs]
-    
-    # 은행 테이블에서 통화쌍 조회
-    bank_pairs = db.query(models.BankExchangeRate.currency).distinct().all()
-    bank_pairs = [pair[0] for pair in bank_pairs]
-    
-    # 중복 제거 및 정렬
-    all_pairs = list(set(investing_pairs + bank_pairs))
-    all_pairs.sort()
-    
-    return all_pairs
-
-
-def get_available_banks(db: Session) -> List[str]:
-    """
-    데이터베이스에 저장된 모든 은행명 조회
-
-    Args:
-        db: 데이터베이스 세션
-
-    Returns:
-        은행명 리스트
-    """
-    banks = db.query(models.BankExchangeRate.bank).distinct().all()
-    return sorted([bank[0] for bank in banks])
 
 
 def delete_old_bank_data(db: Session, days: int = 10) -> int:

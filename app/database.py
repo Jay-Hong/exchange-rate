@@ -20,10 +20,17 @@ if not DATABASE_URL:
 # PostgreSQL 전환 시 (환경 변수로 설정)
 # DATABASE_URL = "postgresql://user:password@localhost:5432/mydb"
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
-)
+_is_sqlite = "sqlite" in DATABASE_URL
+
+_engine_kwargs = {}
+if _is_sqlite:
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    # PostgreSQL: 연결 풀 제한 (RDS db.t4g.micro 메모리 절약)
+    _engine_kwargs["pool_size"] = 3
+    _engine_kwargs["max_overflow"] = 2
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

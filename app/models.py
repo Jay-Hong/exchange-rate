@@ -16,7 +16,7 @@ def get_utc_now():
 class InvestingExchangeRate(Base):
     __tablename__ = 'investing_exchange_rates'
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     currency = Column(String, index=True)
     rate = Column(Float)
     timestamp = Column(DateTime, default=get_utc_now)
@@ -25,7 +25,7 @@ class InvestingExchangeRate(Base):
 class BankExchangeRate(Base):
     __tablename__ = 'bank_exchange_rates'
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     bank = Column(String, index=True)
     currency = Column(String, index=True)
     rate = Column(Float)
@@ -40,7 +40,7 @@ class MarketIndexRate(Base):
     """시장 지수 데이터 (DXY 등)"""
     __tablename__ = "market_index_rates"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     instrument = Column(String, nullable=False)  # 'dxy' (향후 다른 지수 확장 가능)
     source = Column(String, nullable=False)  # 'investing' | 'yahoo'
     rate = Column(Float, nullable=False)
@@ -58,7 +58,7 @@ class CrawlerConfig(Base):
     """크롤러 활성화/비활성화 설정 (Phase 1.8)"""
     __tablename__ = "crawler_config"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     crawler_name = Column(String, unique=True, nullable=False, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
     updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
@@ -72,7 +72,7 @@ class UserDevice(Base):
     """사용자 기기 정보 (FCM Device Token)"""
     __tablename__ = "user_devices"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     user_id = Column(String, nullable=False, index=True)  # Firebase Auth user_id
     device_token = Column(String, nullable=False, unique=True)  # FCM Device Token (전역 유니크)
     platform = Column(String, nullable=False)  # 'ios' or 'android'
@@ -86,7 +86,7 @@ class NotificationSetting(Base):
     """알림 설정"""
     __tablename__ = "notification_settings"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     user_id = Column(String, nullable=False, index=True)
     bank = Column(String, nullable=False)  # 'hana', 'kb', etc.
     currency = Column(String, nullable=False)  # 'usd-krw', etc.
@@ -109,7 +109,7 @@ class NotificationLog(Base):
     """알림 발송 히스토리"""
     __tablename__ = "notification_logs"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     user_id = Column(String, nullable=False, index=True)
     setting_id = Column(Integer, nullable=True)  # NotificationSetting.id 참조
     bank = Column(String, nullable=False)
