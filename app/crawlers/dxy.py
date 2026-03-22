@@ -117,8 +117,11 @@ def fetch_dxy_from_yahoo() -> float:
     import yfinance as yf
 
     ticker = yf.Ticker(YAHOO_DXY_TICKER)
-    # fast_info로 현재가 조회 (가장 경량)
-    price = ticker.fast_info.get("lastPrice")
+    fi = ticker.fast_info
+
+    # 정규장 종가 우선, 없으면 lastPrice 폴백
+    # (장 마감/주말에 lastPrice는 마지막 틱 값으로 정규장 종가와 다를 수 있음)
+    price = fi.get("regularMarketPreviousClose") or fi.get("lastPrice")
 
     if price is None:
         raise ValueError(f"Yahoo DXY 가격 없음 (ticker={YAHOO_DXY_TICKER})")

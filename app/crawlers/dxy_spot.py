@@ -188,6 +188,38 @@ def crawl_and_save_dxy_spot() -> None:
         except Exception:
             logger.warning("⚠️ DXY spot Investing 수집 실패", exc_info=True)
 
+        # Investing 값 보존 정책: DB에 최근 Investing 값이 있으면 Yahoo로 덮지 않음
+        # (주말/공휴일/장 마감 후 등 Investing 페이지가 stale인 구간에서
+        #  Yahoo lastPrice가 다른 시점의 값으로 덮어쓰는 것을 방지)
+        from datetime import datetime, timezone
+        from app import models
+        latest_investing = (
+            db.query(models.MarketIndexRate)
+            .filter(
+                models.MarketIndexRate.instrument == "dxy",
+                models.MarketIndexRate.granularity == "realtime",
+                models.MarketIndexRate.source == "investing",
+            )
+            .order_by(models.MarketIndexRate.timestamp.desc())
+            .first()
+        )
+        if latest_investing:
+            ts = latest_investing.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - ts).total_seconds()
+            # Investing 값이 72시간 이내면 보존
+            # (주말 최대 ~49h, 3일 연휴 ~73h — 72h로 대부분의 휴장 구간 커버)
+            if age_seconds < 72 * 3600:
+                logger.info(
+                    "🛡️ DXY Yahoo 폴백 스킵 (Investing 값 보존)",
+                    extra={
+                        "investing_rate": latest_investing.rate,
+                        "investing_age_seconds": int(age_seconds),
+                    },
+                )
+                return
+
         rate = fetch_dxy_from_yahoo()
         crud.insert_dxy_rate_into_db(db=db, rate=rate, source="yahoo")
         logger.info("📦 DXY Yahoo 폴백 저장", extra={"rate": rate, "source": "yahoo"})
