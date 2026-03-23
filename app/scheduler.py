@@ -30,6 +30,7 @@ from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
 from app import crud
 from app.database import SessionLocal
 from app.admin.crawler_stats import crawler_stats
+from app.market_mode import get_market_mode
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.scheduler")
@@ -531,41 +532,9 @@ async def shutdown_selenium_queue():
         logger.info("✅ Selenium Queue Worker 종료 완료")
 
 
-def get_market_mode(now: datetime) -> str:
-    """
-    현재 시간대의 시장 모드 반환 (4단계 세분화)
 
-    Returns:
-        "OUT": 주말 (토 07:00 ~ 월 06:00)
-        "BREAK1": 심야 (월~금 21:00 ~ 익일 03:00)
-        "BREAK2": 고시 마무리 (월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59)
-        "IN": 영업시간 (월~금 08:00~20:59)
+# get_market_mode()는 app.market_mode에서 import (순환 참조 방지)
 
-    Note:
-        - ibk는 00:00부터 Selenium만 사용 (날짜 변경 필요, Request 불가)
-    """
-    weekday = now.weekday()  # 월=0, 화=1 ... 일=6
-    hour = now.hour
-
-    # OUT: 토요일 07:00 이후, 일요일 전체, 월요일 06:00 전
-    if (weekday == 5 and hour >= 7) or (weekday == 6) or (weekday == 0 and hour < 6):
-        return "OUT"
-
-    # IN 모드 시간대 내에서 세분화
-    # BREAK1: 월~금 21:00 ~ 익일 03:00
-    # - 월~금 21:00~23:59 (당일 밤)
-    # - 화~토 00:00~02:59 (전날 밤에서 이어짐)
-    if 0 <= weekday <= 4 and 21 <= hour:  # 월~금 21:00~23:59
-        return "BREAK1"
-    elif 1 <= weekday <= 5 and hour < 3:  # 화~토 00:00~02:59
-        return "BREAK1"
-
-    # BREAK2: 03:00~07:59
-    if 3 <= hour < 8:
-        return "BREAK2"
-
-    # IN: 나머지 (기본적으로 08:00~20:59)
-    return "IN"
 
 def make_selenium_job_wrapper(bank_name: str):
     """
