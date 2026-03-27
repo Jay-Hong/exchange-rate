@@ -2401,6 +2401,69 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 
 ---
 
+## ADR-021: 환율 뉴스 피드 — Redis-only + KB/RSS 병행 수집
+
+> 📅 **작성일**: 2026-03-28
+> 🏷️ **상태**: 확정
+
+### 맥락
+
+환율 변동의 원인을 이해할 수 있는 뉴스를 앱에서 제공하려 한다. 연합인포맥스가 주요 소스이지만, RSS는 비단말 사용자 대상으로 ~2시간 딜레이가 있다.
+
+### 결정
+
+#### 1. 저장소: Redis-only (DB 불필요)
+
+- 뉴스는 8시간 윈도우의 휘발성 데이터 → TTL 기반 자동 만료
+- DB 테이블/마이그레이션/cleanup job 불필요
+- Redis ZSET(시간순 인덱스) + HASH(기사 메타) 구조
+
+**기각 대안**: PostgreSQL 저장 → 8시간 뒤 버리는 데이터에 영구 저장소는 과함
+
+#### 2. 수집: KB API + RSS 병행
+
+- **KB API** (fx.kbstar.com): 딜레이 없는 속보 소스, 5분마다 :15초
+- **RSS** (news.einfomax.co.kr): 원문 링크 + 백필, 5분마다 :45초, ETag 조건부 GET
+- nsid 기반 중복 제거, RSS 도착 시 link를 einfomax 원문으로 승격
+
+**기각 대안**: RSS만 사용 → ~2시간 딜레이로 속보성 상실
+
+#### 3. 정렬: 순수 시간순 (grouped sort 기각)
+
+- 처음에는 fx > macro_severity > macro 그룹 정렬 시도
+- 최신 macro 기사가 오래된 fx 기사 아래로 밀리는 UX 문제 발견
+- 필터가 이미 관련성을 보장하므로, 정렬에서 추가 큐레이션 불필요
+
+#### 4. content_type 분류
+
+| content_type | 설명 | 앱 동작 |
+|-------------|------|--------|
+| `external_link` | 일반 기사 | link URL 열기 |
+| `flash` | 속보 (본문 없음, `*` 접두사) | 제목만 표시 |
+| `report_pdf` | 은행 보고서 PDF 직링크 | PDF 바로 열기 |
+| `direct_text` | 직접 텍스트 (향후) | body 인라인 |
+
+#### 5. 필터 체계
+
+- `is_noise_title()`: 인사/부고 잡음 제거 (모든 소스)
+- `is_forex_relevant()`: 환율 직접 관련도 (PRIMARY + CONDITIONAL)
+- `classify_macro()`: 지정학 + 고강도/시장전파 (SEVERITY/TRANSMISSION)
+- `is_industry_impact()`: AI/반도체/대기업 + 수출/환율 영향
+
+### 영향
+
+- 새 모듈 `app/news/` (sources, filters, fetcher, kb_fetcher, upsert)
+- `app/cache.py` ZSET/HASH 메서드 확장
+- `app/schemas.py` NewsItem/NewsResponse 추가
+- `GET /api/news` 엔드포인트
+- 스케줄러 job 2개 추가 (모드 무관, 24시간 동일)
+
+### 관련 결정
+
+- [ADR-008](#adr-008-queue-압력-완화-전략-실시간성-vs-완전성): 실시간성 우선 원칙 (뉴스에도 동일 적용)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2422,3 +2485,4 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 - 2026-01-29: ADR-018 작성 (Investing Cloudflare 차단 대응 - curl_cffi TLS 지문 위장)
 - 2026-03-10: ADR-019 작성 (DXY 보조지표 - granularity 기반 2-part merge 전략)
 - 2026-03-12: ADR-020 작성 (DXY 크롤링 아키텍처 전환 — 독립 크롤러에서 Investing 동반 추출로)
+- 2026-03-28: ADR-021 작성 (환율 뉴스 피드 — Redis-only + KB/RSS 병행 수집)

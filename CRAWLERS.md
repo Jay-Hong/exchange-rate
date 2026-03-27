@@ -1,7 +1,8 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2026-03-12
+> 📅 **마지막 업데이트**: 2026-03-28
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
+> 📌 **범위**: 이 문서는 환율 크롤러(`app/crawlers/`)만 다룹니다. 뉴스 수집(`app/news/`)은 [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) 참고.
 > 🆕 **최근 변경**:
 > - DXY 수집 방식 변경: 독립 크롤러 → investing.py에서 동반 추출 (`#sb_last_8827`), dxy.py는 폴백 전용 모듈로 전환
 > - Investing 크롤러 Cloudflare 403 차단 대응: curl_cffi TLS 지문 위장 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))

@@ -352,6 +352,7 @@ scheduler.add_job(
 - `GET /api/investing/{pair}` - Investing.com 특정 통화
 - `GET /api/banks/{pair}` - 모든 은행 특정 통화
 - `GET /api/graph/{currency}` - 그래프 데이터 (파라미터: `range`=1d/1w/3m/1y, USD/KRW에 DXY 포함)
+- `GET /api/news` - 환율 관련 뉴스 (파라미터: `category`, `limit`, `hours`) — Phase 1B
 - `GET /health` - 헬스체크
 
 ### Admin API (HTTP Basic Auth 필요)
@@ -622,6 +623,14 @@ exchange-rate/
 │   │   ├── graph_cache.py   # 그래프 데이터 Redis 캐시 - Phase 1A
 │   │   └── dxy_rollup.py   # DXY realtime → hourly/daily 집계 (rollup)
 │   │
+│   ├── news/                # 뉴스 피드 도메인 (Phase 1B)
+│   │   ├── __init__.py
+│   │   ├── sources.py       # RSS 소스 정의 (NewsSource + NEWS_SOURCES)
+│   │   ├── filters.py       # 필터 시스템 (잡음/관련도/macro/severity/industry)
+│   │   ├── fetcher.py       # RSS 수집 + 파싱 + upsert + cleanup
+│   │   ├── kb_fetcher.py    # KB API 수집 (속보, [전문] PDF 추출)
+│   │   └── upsert.py        # 공통 Redis upsert (KB↔RSS 병합 규칙)
+│   │
 │   └── notifications/       # 알림 도메인 (2025-10-25 리팩토링)
 │       ├── __init__.py
 │       ├── fcm.py           # Firebase Cloud Messaging 푸시 알림 (Phase 2)
@@ -865,6 +874,38 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 **상세 가이드**: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md)
 
+### Phase 1B: 환율 뉴스 피드 ✅ 완료 (2026-03-28)
+
+**배경**: 환율 변동의 원인을 이해할 수 있는 뉴스 제공
+
+**데이터 소스**:
+- **RSS** (연합인포맥스 4개 피드): 채권/외환, 국제뉴스, 해외주식, 증권 — ~2시간 딜레이
+- **KB API** (fx.kbstar.com): 동일 인포맥스 뉴스를 딜레이 없이 제공 — 속보 소스
+
+**핵심 기능**:
+- **3단계 필터**: 잡음 제외(인사/부고) → 환율 관련도(PRIMARY/CONDITIONAL) → 매크로 드라이버(지정학/고강도/시장전파)
+- **산업 영향 필터**: AI/반도체/대기업 + 수출/환율 영향 (macro_industry)
+- **KB↔RSS 병합**: nsid 기반 upsert, RSS 유효값 우선, published_at min()
+- **content_type 분류**: `external_link`(일반 기사), `flash`(속보, 본문 없음), `report_pdf`(은행 보고서 PDF 직링크)
+- **시간순 정렬**: 순수 published_at 내림차순
+- **Redis-only 저장**: 8시간 윈도우, DB 불필요
+
+**스케줄링**:
+- KB API: 5분마다 :15초 (외환+경제 탭, 2페이지씩)
+- RSS: 5분마다 :45초 (ETag/Last-Modified 조건부 GET)
+- 모드 무관 (24시간 동일)
+
+**뉴스 API**: `GET /api/news` (파라미터: `category`, `limit`, `hours`)
+
+**핵심 파일**:
+- `app/news/sources.py`: RSS 소스 정의
+- `app/news/filters.py`: 필터 시스템 (잡음/관련도/macro/severity/industry)
+- `app/news/fetcher.py`: RSS 수집
+- `app/news/kb_fetcher.py`: KB API 수집 (flash, [전문] PDF 추출)
+- `app/news/upsert.py`: 공통 Redis upsert (KB↔RSS 병합)
+
+**구현 참고 문서**: [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) (임시, 안정화 후 삭제 예정)
+
 ### Phase 3: 고급 기능 (사용자 500명+, 예정)
 - 통계 & 분석 (Chart.js, 성공률 그래프)
 - 환율 이상치 감지 (ML)
@@ -922,4 +963,5 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ RDS PostgreSQL 전환 (2026-01)
 - ✅ iOS 앱스토어 출시 완료 (2026-01-21)
 - ✅ DXY 보조지표 그래프 (Phase 1A, 2026-03-10)
+- ✅ 환율 뉴스 피드 — RSS + KB API 병행 수집 (Phase 1B, 2026-03-28)
 - 🔜 CI/CD, 유닛 테스트

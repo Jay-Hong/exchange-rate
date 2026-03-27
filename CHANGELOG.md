@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **환율 뉴스 피드 API** (Phase 1B, `GET /api/news`):
+  - 연합인포맥스 RSS 4개 소스 + KB API (외환+경제탭) 병행 수집
+  - KB API는 RSS 대비 ~2시간 빠른 속보 소스, nsid 기반 자동 병합
+  - 3단계 필터: 잡음 제외(인사/부고) → 환율 관련도 → 매크로 드라이버(지정학/고강도/시장전파)
+  - 산업 영향 필터: AI/반도체/대기업 + 수출/환율 영향 (macro_industry)
+  - content_type 분류: `external_link`(일반), `flash`(속보), `report_pdf`(은행 보고서 PDF 직링크), `direct_text`(향후)
+  - Redis-only 저장 (8시간 윈도우, ZSET+HASH)
+  - 순수 시간순 정렬
+  - 스케줄: KB 5분마다 :15초, RSS 5분마다 :45초 (모드 무관, 24시간)
+  - 새 모듈: `app/news/` (sources, filters, fetcher, kb_fetcher, upsert)
+  - `app/cache.py` ZSET/HASH 메서드 확장 (bytes→str 디코딩 포함)
+  - `app/schemas.py` NewsItem, NewsMetadata, NewsResponse 추가
+
 - **DXY rollup 스케줄** (`app/admin/dxy_rollup.py`): realtime → hourly/daily 자동 집계
   - hourly: 매시 :05분, 직전 완료 시간의 realtime close 집계
   - daily: 매일 00:05 KST, 직전 완료일의 hourly(또는 realtime) close 집계
