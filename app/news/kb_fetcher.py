@@ -5,7 +5,6 @@
 # 표준 라이브러리
 import asyncio
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -22,10 +21,9 @@ KST = timezone(timedelta(hours=9))
 NEWS_WINDOW_HOURS = 8
 _REQUEST_TIMEOUT = 15
 
-_KB_BASE_URL = "https://fx.kbstar.com"
-_KB_PAGE_URL = f"{_KB_BASE_URL}/quics?page=C110648"
-_KB_API_URL = f"{_KB_BASE_URL}/quics?page=C110648&QAction=1253470&RType=json"
-_KB_DETAIL_URL = f"{_KB_BASE_URL}/quics?page=C110648&cc=b113988:b114074&newsUniqNo={{nsid}}&QSL=F"
+_KB_API_URL = "https://fx.kbstar.com/quics?page=C110648&QAction=1253470&RType=json"
+_KB_PAGE_URL = "https://fx.kbstar.com/quics?page=C110648"
+_KB_DETAIL_URL = "https://fx.kbstar.com/quics?page=C110648&cc=b113988:b114074&newsUniqNo={nsid}&QSL=F"
 
 _KB_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -48,7 +46,7 @@ _DEFAULT_CODE_MAP = ("loose", "global")
 async def fetch_kb_news() -> None:
     """KB API에서 최신 뉴스 수집 (스케줄러에서 5분마다 호출)"""
     try:
-        items = await _collect_kb_items()
+        items = await _fetch_kb_list()
     except Exception:
         logger.exception("KB API 수집 실패")
         return
@@ -71,7 +69,6 @@ async def fetch_kb_news() -> None:
 
         filter_level, category = item["filter_category"]
 
-        # 필터 적용
         match_type = "fx"
         if filter_level == "loose":
             fx = is_forex_relevant(title, strict=False)
@@ -79,7 +76,6 @@ async def fetch_kb_news() -> None:
             if not (fx or macro_type):
                 continue
             match_type = "fx" if fx else macro_type
-        # noise_only: 잡음 제외만 통과하면 OK
 
         link = _KB_DETAIL_URL.format(nsid=item["nsid"])
 
@@ -99,63 +95,13 @@ async def fetch_kb_news() -> None:
         logger.info("KB 뉴스 추가", extra={"added": added, "total_collected": len(items)})
 
 
-# ── 수집 로직 ─────────────────────────────────────────
+# ── 수집 ──────────────────────────────────────────────
 
-async def _collect_kb_items() -> List[dict]:
-    """대표뉴스 2건 (HTML) + AJAX 목록을 합쳐 반환. nsid 기준 dedupe."""
-
-    # 1. 초기 HTML에서 대표뉴스 nsid 추출
-    html_text = await _fetch_html()
-    featured_nsids = _parse_featured_nsids(html_text) if html_text else []
-
-    # 2. AJAX 목록 요청
-    ajax_items = await _fetch_ajax_list(featured_nsids)
-
-    # 3. 대표뉴스를 별도로 목록에 추가 (AJAX에서 제외되므로)
-    #    대표뉴스의 상세 정보는 AJAX 응답의 ARRAY_marketNewsARRAY에 포함됨
-    featured_items = _extract_featured_from_ajax(ajax_items, featured_nsids)
-
-    # 4. 합치고 nsid dedupe
-    all_items = featured_items + ajax_items
-    seen = set()
-    deduped = []
-    for item in all_items:
-        if item["nsid"] not in seen:
-            seen.add(item["nsid"])
-            deduped.append(item)
-
-    return deduped
-
-
-async def _fetch_html() -> Optional[str]:
-    """KB 메인 HTML GET — 대표뉴스 nsid 추출용"""
-
-    def _do_get():
-        resp = requests.get(
-            _KB_PAGE_URL,
-            headers={"User-Agent": _KB_HEADERS["User-Agent"]},
-            timeout=_REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.text
-
-    try:
-        return await asyncio.to_thread(_do_get)
-    except Exception:
-        logger.warning("KB HTML 페이지 수집 실패", exc_info=True)
-        return None
-
-
-def _parse_featured_nsids(html_text: str) -> List[str]:
-    """초기 HTML에서 대표뉴스 data-news-uniq-no 추출"""
-    # <a class="goDetail inner" data-news-uniq-no="AKR20260327174200016">
-    pattern = r'class="goDetail inner"[^>]*data-news-uniq-no="([^"]+)"'
-    matches = re.findall(pattern, html_text)
-    return matches[:2]  # 최대 2건
-
-
-async def _fetch_ajax_list(featured_nsids: List[str]) -> List[dict]:
-    """KB AJAX 뉴스 목록 API 호출"""
+async def _fetch_kb_list() -> List[dict]:
+    """
+    KB AJAX 뉴스 목록 API 호출.
+    rpsntNews 파라미터를 보내지 않으면 대표뉴스 2건도 목록에 포함됨.
+    """
 
     form_data = {
         "inquryDstcd": "21",
@@ -164,12 +110,6 @@ async def _fetch_ajax_list(featured_nsids: List[str]) -> List[dict]:
         "pageNo": "0",
         "newsUniqNo": "",
     }
-
-    # 대표뉴스 nsid를 전달 (AJAX 목록에서 제외하기 위한 KB 서버 로직)
-    if len(featured_nsids) >= 1:
-        form_data["rpsntNews1Uniqno"] = featured_nsids[0]
-    if len(featured_nsids) >= 2:
-        form_data["rpsntNews2Uniqno"] = featured_nsids[1]
 
     def _do_post():
         resp = requests.post(
@@ -184,25 +124,14 @@ async def _fetch_ajax_list(featured_nsids: List[str]) -> List[dict]:
     data = await asyncio.to_thread(_do_post)
 
     items_raw = data.get("msg", {}).get("servicedata", {}).get("뉴스목록ARRAY", [])
-    return [_parse_kb_item(raw) for raw in items_raw if _parse_kb_item(raw)]
 
+    items = []
+    for raw in items_raw:
+        parsed = _parse_kb_item(raw)
+        if parsed:
+            items.append(parsed)
 
-def _extract_featured_from_ajax(ajax_items: List[dict], featured_nsids: List[str]) -> List[dict]:
-    """
-    대표뉴스의 상세 정보를 AJAX 응답 내 ARRAY_marketNewsARRAY에서 추출.
-    AJAX 뉴스목록ARRAY에는 빠져있지만, ARRAY_marketNewsARRAY에는 포함되어 있을 수 있음.
-    여기서 못 찾으면 별도 상세 요청 없이 스킵 (다음 주기에 AJAX에 나타남).
-    """
-    # 이미 ajax_items에 nsid가 있으면 중복이므로 별도 처리 불필요
-    ajax_nsids = {item["nsid"] for item in ajax_items}
-    missing = [nsid for nsid in featured_nsids if nsid not in ajax_nsids]
-
-    if not missing:
-        return []
-
-    # 대표뉴스 정보가 없는 경우, 다음 주기에 자연스럽게 수집됨
-    logger.debug("KB 대표뉴스 AJAX 미포함", extra={"missing_nsids": missing})
-    return []
+    return items
 
 
 # ── 파싱 ──────────────────────────────────────────────
@@ -218,7 +147,6 @@ def _parse_kb_item(raw: dict) -> Optional[dict]:
         return None
 
     try:
-        # "20260327230322" → datetime (KST)
         published_at = datetime.strptime(write_dt_str, "%Y%m%d%H%M%S").replace(tzinfo=KST)
     except ValueError:
         return None
