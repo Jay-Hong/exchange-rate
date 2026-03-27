@@ -75,6 +75,12 @@ GEOPOLITICAL_KEYWORDS = [
     "이란", "중동", "호르무즈", "전쟁", "휴전", "종전",
 ]
 
+# 고강도 이벤트 — 지정학 키워드와 결합 시 시장 전파 키워드 없이도 통과
+SEVERITY_KEYWORDS = [
+    "폭격", "공습", "미사일", "핵", "봉쇄", "침공",
+    "격추", "전면전", "확전", "보복", "철수", "대피",
+]
+
 TRANSMISSION_KEYWORDS = [
     "유가", "원유", "달러", "환율", "원화", "엔화", "위안",
     "시장", "증시", "위험회피", "안전자산",
@@ -83,8 +89,15 @@ TRANSMISSION_KEYWORDS = [
 
 
 def is_macro_relevant(title: str) -> bool:
-    """지정학 키워드 + 시장 전파 키워드가 모두 있어야 통과."""
-    return (
-        any(kw in title for kw in GEOPOLITICAL_KEYWORDS)
-        and any(kw in title for kw in TRANSMISSION_KEYWORDS)
-    )
+    """
+    환율에 영향을 주는 지정학/매크로 이벤트 기사 판단.
+
+    통과 조건 (OR):
+    - 지정학 + 고강도 이벤트 (폭격, 봉쇄 등) → 무조건 통과
+    - 지정학 + 시장 전파 키워드 (유가, 증시 등) → 통과
+    """
+    if not any(kw in title for kw in GEOPOLITICAL_KEYWORDS):
+        return False
+    if any(kw in title for kw in SEVERITY_KEYWORDS):
+        return True
+    return any(kw in title for kw in TRANSMISSION_KEYWORDS)
