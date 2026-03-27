@@ -63,8 +63,11 @@ async def _fetch_single_source(source: NewsSource) -> None:
         if is_noise_title(title):
             continue
         if source.filter_level == "loose":
-            if not (is_forex_relevant(title, strict=False) or is_macro_relevant(title)):
+            fx = is_forex_relevant(title, strict=False)
+            macro = is_macro_relevant(title)
+            if not (fx or macro):
                 continue
+            item["match_type"] = "fx" if fx else "macro"
         if source.filter_level == "strict" and not is_forex_relevant(title, strict=True):
             continue
         filtered.append(item)
@@ -75,6 +78,9 @@ async def _fetch_single_source(source: NewsSource) -> None:
         nsid = item["nsid"]
         published_ts = item["published_at"].timestamp()
 
+        # match_type: forex는 "fx", global macro는 "macro", 나머지는 "fx"
+        match_type = item.get("match_type", "fx")
+
         await redis_cache.zadd("news:index", {nsid: published_ts})
         await redis_cache.hset_dict(f"news:item:{nsid}", {
             "title": item["title"],
@@ -82,6 +88,7 @@ async def _fetch_single_source(source: NewsSource) -> None:
             "category": source.category,
             "source": "einfomax",
             "content_type": "external_link",
+            "match_type": match_type,
             "published_at": item["published_at"].isoformat(),
         })
         await redis_cache.expire(f"news:item:{nsid}", _ITEM_TTL_SECONDS)

@@ -951,10 +951,11 @@ async def get_news(
 
     # 2. 각 nsid의 HASH 조회
     categories = {c.strip() for c in category.split(",") if c.strip()} if category else None
-    news_items = []
+    fx_items = []
+    macro_items = []
 
     for nsid in nsids:
-        if len(news_items) >= limit:
+        if len(fx_items) + len(macro_items) >= limit:
             break
 
         item = await redis_cache.hgetall(f"news:item:{nsid}")
@@ -976,7 +977,14 @@ async def get_news(
             entry["link"] = item.get("link", "")
         else:
             entry["body"] = item.get("body")
-        news_items.append(entry)
+
+        # fx 기사 먼저, macro 기사 나중 (각 그룹 내에서는 시간순 유지)
+        if item.get("match_type", "fx") == "macro":
+            macro_items.append(entry)
+        else:
+            fx_items.append(entry)
+
+    news_items = fx_items + macro_items
 
     return {
         "news": news_items,
