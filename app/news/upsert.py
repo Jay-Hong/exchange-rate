@@ -21,6 +21,7 @@ async def upsert_news_item(
     match_type: str,
     published_at: datetime,
     ingested_via: str,
+    content_type: str = "external_link",
 ) -> bool:
     """
     nsid 기준 upsert. 병합 규칙:
@@ -49,7 +50,7 @@ async def upsert_news_item(
             "link": link,
             "category": category,
             "source": "einfomax",
-            "content_type": "external_link",
+            "content_type": content_type,
             "match_type": match_type,
             "published_at": published_at.isoformat(),
             "ingested_via": ingested_via,
@@ -69,6 +70,9 @@ async def upsert_news_item(
             updates["title"] = title
         if link and link.strip():
             updates["link"] = link
+            # flash → external_link 승격 (RSS에 link가 있으면 본문 있는 기사)
+            if existing.get("content_type") == "flash":
+                updates["content_type"] = "external_link"
         if category and category.strip():
             updates["category"] = category
         if match_type == "fx":

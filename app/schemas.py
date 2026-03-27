@@ -154,7 +154,7 @@ class NewsItem(BaseModel):
     title: str
     link: Optional[str] = None       # 원문 URL (external_link일 때)
     source: str                      # einfomax, fxi, ...
-    content_type: str = "external_link"  # "external_link" | "direct_text"
+    content_type: str = "external_link"  # "external_link" | "flash" | "direct_text"
     published_at: str                # ISO 8601
     body: Optional[str] = None       # 뉴스 본문 (direct_text일 때)
 

@@ -20,6 +20,7 @@ logger = logging.getLogger("exchange_rate.news.kb")
 KST = timezone(timedelta(hours=9))
 NEWS_WINDOW_HOURS = 8
 _REQUEST_TIMEOUT = 15
+_KB_PAGES_PER_TAB = 2  # 탭당 2페이지 수집 (10건 × 2 = 20건)
 
 _KB_API_URL = "https://fx.kbstar.com/quics?page=C110648&QAction=1253470&RType=json"
 _KB_PAGE_URL = "https://fx.kbstar.com/quics?page=C110648"
@@ -31,7 +32,6 @@ _KB_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
 }
 
-# 분류코드 → (필터 수준, 내부 category)
 # 분류코드 → (필터 수준, 내부 category)
 # 외환탭(21): IS, IY, IT, 99
 # 경제탭(22): IU(증권), IT(채권), 99(기타) 등
@@ -67,6 +67,7 @@ async def fetch_kb_news() -> None:
 
     for item in items:
         title = item["title"]
+        is_flash = item["is_flash"]
         published_at = item["published_at"]
 
         if published_at < cutoff:
@@ -84,17 +85,30 @@ async def fetch_kb_news() -> None:
                 continue
             match_type = "fx" if fx else macro_type
 
-        link = _KB_DETAIL_URL.format(nsid=item["nsid"])
+        # flash 기사: link 없음, content_type="flash", 제목에서 * 제거
+        if is_flash:
+            stored = await upsert_news_item(
+                nsid=item["nsid"],
+                title=title,
+                link="",
+                category=category,
+                match_type=match_type,
+                published_at=published_at,
+                ingested_via="kb_api",
+                content_type="flash",
+            )
+        else:
+            link = _KB_DETAIL_URL.format(nsid=item["nsid"])
+            stored = await upsert_news_item(
+                nsid=item["nsid"],
+                title=title,
+                link=link,
+                category=category,
+                match_type=match_type,
+                published_at=published_at,
+                ingested_via="kb_api",
+            )
 
-        stored = await upsert_news_item(
-            nsid=item["nsid"],
-            title=title,
-            link=link,
-            category=category,
-            match_type=match_type,
-            published_at=published_at,
-            ingested_via="kb_api",
-        )
         if stored:
             added += 1
 
@@ -106,15 +120,14 @@ async def fetch_kb_news() -> None:
 
 async def _fetch_kb_all_tabs() -> List[dict]:
     """
-    KB AJAX 뉴스 외환탭 + 경제탭 모두 수집, nsid 기준 dedupe.
-    rpsntNews 파라미터를 보내지 않으면 대표뉴스도 목록에 포함됨.
+    KB AJAX 뉴스 외환탭 + 경제탭, 각 2페이지 수집. nsid 기준 dedupe.
     """
     all_items = []
     seen_nsids: set = set()
 
     for tab in _KB_TABS:
         try:
-            tab_items = await _fetch_kb_tab(tab)
+            tab_items = await _fetch_kb_tab_pages(tab)
             for item in tab_items:
                 if item["nsid"] not in seen_nsids:
                     seen_nsids.add(item["nsid"])
@@ -125,38 +138,49 @@ async def _fetch_kb_all_tabs() -> List[dict]:
     return all_items
 
 
-async def _fetch_kb_tab(inqury_dstcd: str) -> List[dict]:
-    """단일 탭 AJAX 호출"""
+async def _fetch_kb_tab_pages(inqury_dstcd: str) -> List[dict]:
+    """단일 탭 여러 페이지 수집 (cursor 기반 페이징)"""
+    all_items = []
+    cursor = ""  # finalNewsWritYMS — 빈값이면 최신부터
 
-    form_data = {
-        "inquryDstcd": inqury_dstcd,
-        "newsClsfiDstcd": "",
-        "finalNewsWritYMS": "",
-        "pageNo": "0",
-        "newsUniqNo": "",
-    }
+    for page_no in range(_KB_PAGES_PER_TAB):
+        form_data = {
+            "inquryDstcd": inqury_dstcd,
+            "newsClsfiDstcd": "",
+            "finalNewsWritYMS": cursor,
+            "pageNo": str(page_no),
+            "newsUniqNo": "",
+        }
 
-    def _do_post():
-        resp = requests.post(
-            _KB_API_URL,
-            headers=_KB_HEADERS,
-            data=form_data,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        def _do_post(fd=form_data):
+            resp = requests.post(
+                _KB_API_URL,
+                headers=_KB_HEADERS,
+                data=fd,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
-    data = await asyncio.to_thread(_do_post)
+        data = await asyncio.to_thread(_do_post)
+        servicedata = data.get("msg", {}).get("servicedata", {})
 
-    items_raw = data.get("msg", {}).get("servicedata", {}).get("뉴스목록ARRAY", [])
+        items_raw = servicedata.get("뉴스목록ARRAY", [])
+        if not items_raw:
+            break
 
-    items = []
-    for raw in items_raw:
-        parsed = _parse_kb_item(raw)
-        if parsed:
-            items.append(parsed)
+        for raw in items_raw:
+            parsed = _parse_kb_item(raw)
+            if parsed:
+                all_items.append(parsed)
 
-    return items
+        # 다음 페이지 cursor
+        next_cursor = servicedata.get("다음최종뉴스작성일시", "")
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    return all_items
 
 
 # ── 파싱 ──────────────────────────────────────────────
@@ -176,11 +200,17 @@ def _parse_kb_item(raw: dict) -> Optional[dict]:
     except ValueError:
         return None
 
+    # * 접두사 → flash 기사 (본문 없음)
+    is_flash = title.startswith("*")
+    if is_flash:
+        title = title.lstrip("*").strip()
+
     filter_level, category = KB_CODE_MAP.get(code, _DEFAULT_CODE_MAP)
 
     return {
         "nsid": nsid,
         "title": title,
         "published_at": published_at,
+        "is_flash": is_flash,
         "filter_category": (filter_level, category),
     }
