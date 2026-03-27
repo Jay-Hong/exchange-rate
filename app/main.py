@@ -947,11 +947,9 @@ async def get_news(
             "metadata": {"returned_count": 0, "window_hours": hours, "responded_at": now_iso},
         }
 
-    # 2. 전체 스캔 → fx/macro 분리 → 합친 뒤 limit 적용
+    # 2. 전체 스캔, 시간순 유지 (ZSET에서 이미 최신순으로 조회됨)
     categories = {c.strip() for c in category.split(",") if c.strip()} if category else None
-    # 정렬 그룹: fx + macro_severity (최신순) → macro (최신순, 후순위)
-    primary_items = []   # fx + macro_severity: 직접 외환 + 고강도 속보
-    secondary_items = [] # macro: 일반 매크로/증시
+    news_items = []
 
     for nsid in nsids:
         item = await redis_cache.hgetall(f"news:item:{nsid}")
@@ -974,14 +972,9 @@ async def get_news(
         else:
             entry["body"] = item.get("body")
 
-        match_type = item.get("match_type", "fx")
-        if match_type == "macro":
-            secondary_items.append(entry)
-        else:
-            # fx, macro_severity 모두 primary
-            primary_items.append(entry)
+        news_items.append(entry)
 
-    news_items = (primary_items + secondary_items)[:limit]
+    news_items = news_items[:limit]
 
     return {
         "news": news_items,
