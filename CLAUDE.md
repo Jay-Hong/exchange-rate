@@ -888,7 +888,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - **KB↔RSS 병합**: nsid 기반 upsert, RSS 유효값 우선, published_at min()
 - **content_type 분류**: `external_link`(일반 기사), `flash`(속보, 본문 없음), `report_pdf`(은행 보고서 PDF 직링크)
 - **시간순 정렬**: 순수 published_at 내림차순
-- **Redis-only 저장**: 8시간 윈도우, DB 불필요
+- **Redis-only 저장**: 10시간 윈도우, DB 불필요
 
 **스케줄링**:
 - KB API: 5분마다 :15초 (외환+경제 탭, 2페이지씩)

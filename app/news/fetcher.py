@@ -22,7 +22,7 @@ from app.news.upsert import upsert_news_item
 logger = logging.getLogger("exchange_rate.news")
 
 KST = timezone(timedelta(hours=9))
-NEWS_WINDOW_HOURS = 8
+NEWS_WINDOW_HOURS = 10
 _REQUEST_TIMEOUT = 10
 
 
@@ -178,7 +178,7 @@ def _get_text(element, tag: str) -> Optional[str]:
 # ── Cleanup ───────────────────────────────────────────
 
 async def _cleanup_old_news() -> None:
-    """8시간 이전 기사 제거 — fetch 직후 호출"""
+    """윈도우 이전 기사 제거 — fetch 직후 호출"""
     cutoff = time.time() - (NEWS_WINDOW_HOURS * 3600)
 
     stale_ids = await redis_cache.zrangebyscore("news:index", "-inf", cutoff)

@@ -20,7 +20,7 @@ GET /api/news
 | 파라미터 | 타입 | 기본값 | 범위 | 설명 |
 |---------|------|--------|------|------|
 | `limit` | int | 30 | 1~100 | 최대 반환 건수 |
-| `hours` | float | 8.0 | 0.5~24.0 | 시간 윈도우 (현재로부터 N시간 이내) |
+| `hours` | float | 10.0 | 0.5~24.0 | 시간 윈도우 (현재로부터 N시간 이내) |
 | `category` | string | 전체 | comma-separated | 카테고리 필터 (서버 내부 분류 기준, 1차 연동에서는 사용하지 않는 것을 권장) |
 
 ### 요청 예시
@@ -72,7 +72,7 @@ GET /api/news?category=forex,global
   ],
   "metadata": {
     "returned_count": 3,
-    "window_hours": 8.0,
+    "window_hours": 10.0,
     "responded_at": "2026-03-28T11:00:00.000000+09:00"
   }
 }
@@ -87,7 +87,7 @@ GET /api/news?category=forex,global
   "news": [],
   "metadata": {
     "returned_count": 0,
-    "window_hours": 8.0,
+    "window_hours": 10.0,
     "responded_at": "2026-03-28T07:00:00.000000+09:00"
   }
 }
@@ -297,7 +297,7 @@ for item in response.news:
 
 ### 일반적인 기사 수
 
-- 평일 영업시간: 15~25건 / 8시간 윈도우
+- 평일 영업시간: 15~25건 / 10시간 윈도우
 - 심야/주말: 5~10건
 
 ### content_type 전환

@@ -13,7 +13,7 @@
 
 **핵심 결정:**
 
-- 저장소: Redis-only (8시간 윈도우 휘발성 데이터, DB 불필요)
+- 저장소: Redis-only (10시간 윈도우 휘발성 데이터, DB 불필요)
 - 수집 경로: KB API (속보, ~2시간 빠름) + RSS (원문 링크 보유, 백필)
 - 정렬: 순수 시간순 (published_at 내림차순)
 - API 응답: id, title, link, source, content_type, published_at

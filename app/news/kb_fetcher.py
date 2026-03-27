@@ -19,7 +19,7 @@ from app.news.upsert import upsert_news_item
 logger = logging.getLogger("exchange_rate.news.kb")
 
 KST = timezone(timedelta(hours=9))
-NEWS_WINDOW_HOURS = 8
+NEWS_WINDOW_HOURS = 10
 _REQUEST_TIMEOUT = 15
 _KB_PAGES_PER_TAB = 2
 

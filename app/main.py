@@ -1020,7 +1020,7 @@ def _collapse_near_duplicates(items: list, gap_minutes: int = 60) -> list:
 async def get_news(
     category: Optional[str] = None,
     limit: int = 30,
-    hours: float = 8.0,
+    hours: float = 10.0,
 ):
     """환율 관련 뉴스 목록 반환 (Redis 캐시 기반)"""
     limit = max(1, min(100, limit))
