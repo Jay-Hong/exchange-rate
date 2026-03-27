@@ -96,9 +96,13 @@ async def upsert_news_item(
             updates["link"] = link
         if category and category.strip():
             updates["category"] = category
-        # match_type: KB 재수집의 최신 분류로 갱신
         if match_type:
             updates["match_type"] = match_type
+        # content_type: flash ↔ external_link 교정 (이전 배포 잔존 데이터 대응)
+        if content_type and content_type != existing.get("content_type"):
+            updates["content_type"] = content_type
+            if content_type == "flash":
+                updates["link"] = ""
 
     elif ingested_via == "rss" and has_rss:
         # ── 6. RSS 재수집: 기사 수정 대응 ──
