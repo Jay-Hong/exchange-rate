@@ -116,3 +116,36 @@ def classify_macro(title: str) -> str:
 def is_macro_relevant(title: str) -> bool:
     """하위 호환용 래퍼."""
     return classify_macro(title) != ""
+
+
+# ── 산업/수출 영향 (AI·반도체·대기업) ─────────────────
+
+INDUSTRY_TRIGGERS = [
+    # AI/반도체
+    "AI", "반도체", "HBM", "메모리", "파운드리",
+    # 한국 대형 반도체주 (코스피/수출/원화에 직접 영향)
+    "삼성전자", "SK하이닉스",
+    # 한국 반도체 영향력 큰 해외 기업
+    "엔비디아", "TSMC",
+]
+
+INDUSTRY_IMPACT = [
+    # 수출/경제 영향
+    "수출", "실적", "외국인", "코스피",
+    "무역", "공급", "수주", "매출",
+    # 환율 직접 연결
+    "달러", "환율", "원화",
+    # 시장 변동
+    "급락", "급등",
+]
+
+
+def is_industry_impact(title: str) -> bool:
+    """
+    산업/수출 영향 기사 판단.
+    트리거(AI/반도체/대기업) + 영향(수출/환율/급락) 모두 있어야 통과.
+    """
+    return (
+        any(kw in title for kw in INDUSTRY_TRIGGERS)
+        and any(kw in title for kw in INDUSTRY_IMPACT)
+    )

@@ -15,7 +15,7 @@ import requests
 
 # 로컬 애플리케이션
 from app.cache import redis_cache
-from app.news.filters import classify_macro, is_forex_relevant, is_noise_title
+from app.news.filters import classify_macro, is_forex_relevant, is_industry_impact, is_noise_title
 from app.news.sources import NEWS_SOURCES, NewsSource
 from app.news.upsert import upsert_news_item
 
@@ -68,9 +68,15 @@ async def _fetch_single_source(source: NewsSource) -> None:
         if source.filter_level == "loose":
             fx = is_forex_relevant(title, strict=False)
             macro_type = classify_macro(title)
-            if not (fx or macro_type):
+            industry = is_industry_impact(title)
+            if not (fx or macro_type or industry):
                 continue
-            match_type = "fx" if fx else macro_type
+            if fx:
+                match_type = "fx"
+            elif macro_type:
+                match_type = macro_type
+            else:
+                match_type = "macro_industry"
         elif source.filter_level == "strict":
             if not is_forex_relevant(title, strict=True):
                 continue

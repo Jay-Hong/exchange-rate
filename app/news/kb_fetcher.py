@@ -12,7 +12,7 @@ from typing import List, Optional
 import requests
 
 # 로컬 애플리케이션
-from app.news.filters import classify_macro, is_forex_relevant, is_noise_title
+from app.news.filters import classify_macro, is_forex_relevant, is_industry_impact, is_noise_title
 from app.news.upsert import upsert_news_item
 
 logger = logging.getLogger("exchange_rate.news.kb")
@@ -81,9 +81,15 @@ async def fetch_kb_news() -> None:
         if filter_level == "loose":
             fx = is_forex_relevant(title, strict=False)
             macro_type = classify_macro(title)
-            if not (fx or macro_type):
+            industry = is_industry_impact(title)
+            if not (fx or macro_type or industry):
                 continue
-            match_type = "fx" if fx else macro_type
+            if fx:
+                match_type = "fx"
+            elif macro_type:
+                match_type = macro_type
+            else:
+                match_type = "macro_industry"
 
         # flash 기사: link 없음, content_type="flash", 제목에서 * 제거
         if is_flash:
