@@ -949,8 +949,9 @@ async def get_news(
 
     # 2. 전체 스캔 → fx/macro 분리 → 합친 뒤 limit 적용
     categories = {c.strip() for c in category.split(",") if c.strip()} if category else None
-    fx_items = []
-    macro_items = []
+    # 정렬 그룹: fx + macro_severity (최신순) → macro (최신순, 후순위)
+    primary_items = []   # fx + macro_severity: 직접 외환 + 고강도 속보
+    secondary_items = [] # macro: 일반 매크로/증시
 
     for nsid in nsids:
         item = await redis_cache.hgetall(f"news:item:{nsid}")
@@ -973,13 +974,14 @@ async def get_news(
         else:
             entry["body"] = item.get("body")
 
-        if item.get("match_type", "fx").startswith("macro"):
-            macro_items.append(entry)
+        match_type = item.get("match_type", "fx")
+        if match_type == "macro":
+            secondary_items.append(entry)
         else:
-            fx_items.append(entry)
+            # fx, macro_severity 모두 primary
+            primary_items.append(entry)
 
-    # fx 먼저, macro 나중 → limit 적용
-    news_items = (fx_items + macro_items)[:limit]
+    news_items = (primary_items + secondary_items)[:limit]
 
     return {
         "news": news_items,
