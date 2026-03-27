@@ -936,10 +936,8 @@ async def get_news(
 
     cutoff_ts = time.time() - (hours * 3600)
 
-    # 1. ZSET에서 최신순으로 nsid 목록 조회
-    nsids = await redis_cache.zrevrangebyscore(
-        "news:index", "+inf", cutoff_ts, start=0, num=limit * 2,
-    )
+    # 1. ZSET에서 윈도우 내 전체 nsid 조회 (최신순)
+    nsids = await redis_cache.zrevrangebyscore("news:index", "+inf", cutoff_ts)
 
     now_iso = datetime.now(dt_timezone(timedelta(hours=9))).isoformat()
 
@@ -949,18 +947,15 @@ async def get_news(
             "metadata": {"returned_count": 0, "window_hours": hours, "responded_at": now_iso},
         }
 
-    # 2. 각 nsid의 HASH 조회
+    # 2. 전체 스캔 → fx/macro 분리 → 합친 뒤 limit 적용
     categories = {c.strip() for c in category.split(",") if c.strip()} if category else None
     fx_items = []
     macro_items = []
 
     for nsid in nsids:
-        if len(fx_items) + len(macro_items) >= limit:
-            break
-
         item = await redis_cache.hgetall(f"news:item:{nsid}")
         if not item:
-            continue  # stale index entry
+            continue
 
         if categories and item.get("category") not in categories:
             continue
@@ -978,13 +973,13 @@ async def get_news(
         else:
             entry["body"] = item.get("body")
 
-        # fx 기사 먼저, macro 기사 나중 (각 그룹 내에서는 시간순 유지)
         if item.get("match_type", "fx") == "macro":
             macro_items.append(entry)
         else:
             fx_items.append(entry)
 
-    news_items = fx_items + macro_items
+    # fx 먼저, macro 나중 → limit 적용
+    news_items = (fx_items + macro_items)[:limit]
 
     return {
         "news": news_items,
