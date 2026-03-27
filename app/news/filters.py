@@ -88,16 +88,24 @@ TRANSMISSION_KEYWORDS = [
 ]
 
 
-def is_macro_relevant(title: str) -> bool:
+def classify_macro(title: str) -> str:
     """
-    환율에 영향을 주는 지정학/매크로 이벤트 기사 판단.
+    환율에 영향을 주는 지정학/매크로 이벤트 기사 분류.
 
-    통과 조건 (OR):
-    - 지정학 + 고강도 이벤트 (폭격, 봉쇄 등) → 무조건 통과
-    - 지정학 + 시장 전파 키워드 (유가, 증시 등) → 통과
+    반환값:
+    - "macro_severity": 지정학 + 고강도 이벤트 (폭격, 봉쇄 등)
+    - "macro":          지정학 + 시장 전파 키워드 (유가, 증시 등)
+    - "":               미해당
     """
     if not any(kw in title for kw in GEOPOLITICAL_KEYWORDS):
-        return False
+        return ""
     if any(kw in title for kw in SEVERITY_KEYWORDS):
-        return True
-    return any(kw in title for kw in TRANSMISSION_KEYWORDS)
+        return "macro_severity"
+    if any(kw in title for kw in TRANSMISSION_KEYWORDS):
+        return "macro"
+    return ""
+
+
+def is_macro_relevant(title: str) -> bool:
+    """하위 호환용 래퍼."""
+    return classify_macro(title) != ""

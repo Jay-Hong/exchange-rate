@@ -973,7 +973,7 @@ async def get_news(
         else:
             entry["body"] = item.get("body")
 
-        if item.get("match_type", "fx") == "macro":
+        if item.get("match_type", "fx").startswith("macro"):
             macro_items.append(entry)
         else:
             fx_items.append(entry)
