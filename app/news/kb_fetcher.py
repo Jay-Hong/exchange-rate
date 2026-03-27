@@ -32,13 +32,20 @@ _KB_HEADERS = {
 }
 
 # 분류코드 → (필터 수준, 내부 category)
+# 분류코드 → (필터 수준, 내부 category)
+# 외환탭(21): IS, IY, IT, 99
+# 경제탭(22): IU(증권), IT(채권), 99(기타) 등
 KB_CODE_MAP = {
     "IS": ("noise_only", "forex"),
     "IY": ("noise_only", "forex"),
     "IT": ("loose", "global"),
+    "IU": ("loose", "global"),
     "99": ("loose", "global"),
 }
 _DEFAULT_CODE_MAP = ("loose", "global")
+
+# 수집 대상 탭
+_KB_TABS = ["21", "22"]  # 21=외환, 22=경제
 
 
 # ── 공개 API ──────────────────────────────────────────
@@ -46,7 +53,7 @@ _DEFAULT_CODE_MAP = ("loose", "global")
 async def fetch_kb_news() -> None:
     """KB API에서 최신 뉴스 수집 (스케줄러에서 5분마다 호출)"""
     try:
-        items = await _fetch_kb_list()
+        items = await _fetch_kb_all_tabs()
     except Exception:
         logger.exception("KB API 수집 실패")
         return
@@ -97,14 +104,32 @@ async def fetch_kb_news() -> None:
 
 # ── 수집 ──────────────────────────────────────────────
 
-async def _fetch_kb_list() -> List[dict]:
+async def _fetch_kb_all_tabs() -> List[dict]:
     """
-    KB AJAX 뉴스 목록 API 호출.
-    rpsntNews 파라미터를 보내지 않으면 대표뉴스 2건도 목록에 포함됨.
+    KB AJAX 뉴스 외환탭 + 경제탭 모두 수집, nsid 기준 dedupe.
+    rpsntNews 파라미터를 보내지 않으면 대표뉴스도 목록에 포함됨.
     """
+    all_items = []
+    seen_nsids: set = set()
+
+    for tab in _KB_TABS:
+        try:
+            tab_items = await _fetch_kb_tab(tab)
+            for item in tab_items:
+                if item["nsid"] not in seen_nsids:
+                    seen_nsids.add(item["nsid"])
+                    all_items.append(item)
+        except Exception:
+            logger.warning("KB 탭 수집 실패", exc_info=True, extra={"tab": tab})
+
+    return all_items
+
+
+async def _fetch_kb_tab(inqury_dstcd: str) -> List[dict]:
+    """단일 탭 AJAX 호출"""
 
     form_data = {
-        "inquryDstcd": "21",
+        "inquryDstcd": inqury_dstcd,
         "newsClsfiDstcd": "",
         "finalNewsWritYMS": "",
         "pageNo": "0",
