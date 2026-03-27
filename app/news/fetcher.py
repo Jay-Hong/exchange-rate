@@ -17,24 +17,24 @@ import requests
 from app.cache import redis_cache
 from app.news.filters import classify_macro, is_forex_relevant, is_noise_title
 from app.news.sources import NEWS_SOURCES, NewsSource
+from app.news.upsert import upsert_news_item
 
 logger = logging.getLogger("exchange_rate.news")
 
 KST = timezone(timedelta(hours=9))
 NEWS_WINDOW_HOURS = 8
-_ITEM_TTL_SECONDS = 24 * 3600  # 안전망 TTL
 _REQUEST_TIMEOUT = 10
 
 
 # ── 공개 API ──────────────────────────────────────────
 
 async def fetch_all_news() -> None:
-    """모든 소스에서 뉴스 수집 (스케줄러에서 5분마다 호출)"""
+    """모든 RSS 소스에서 뉴스 수집 (스케줄러에서 5분마다 호출)"""
     for source in NEWS_SOURCES:
         try:
             await _fetch_single_source(source)
         except Exception:
-            logger.exception("뉴스 수집 실패", extra={"source": source.feed_id})
+            logger.exception("RSS 뉴스 수집 실패", extra={"source": source.feed_id})
 
     await _cleanup_old_news()
 
@@ -55,44 +55,38 @@ async def _fetch_single_source(source: NewsSource) -> None:
 
     # 3. 필터링 (8h → 잡음 제외 → 소스별 환율 관련도)
     cutoff = datetime.now(KST) - timedelta(hours=NEWS_WINDOW_HOURS)
-    filtered = []
+    added = 0
+
     for item in items:
         title = item["title"]
         if item["published_at"] < cutoff:
             continue
         if is_noise_title(title):
             continue
+
+        match_type = "fx"
         if source.filter_level == "loose":
             fx = is_forex_relevant(title, strict=False)
             macro_type = classify_macro(title)
             if not (fx or macro_type):
                 continue
-            item["match_type"] = "fx" if fx else macro_type
-        if source.filter_level == "strict" and not is_forex_relevant(title, strict=True):
-            continue
-        filtered.append(item)
+            match_type = "fx" if fx else macro_type
+        elif source.filter_level == "strict":
+            if not is_forex_relevant(title, strict=True):
+                continue
 
-    # 4. Redis 저장 (항상 upsert — 기사 수정 대응)
-    added = 0
-    for item in filtered:
-        nsid = item["nsid"]
-        published_ts = item["published_at"].timestamp()
-
-        # match_type: forex는 "fx", global macro는 "macro", 나머지는 "fx"
-        match_type = item.get("match_type", "fx")
-
-        await redis_cache.zadd("news:index", {nsid: published_ts})
-        await redis_cache.hset_dict(f"news:item:{nsid}", {
-            "title": item["title"],
-            "link": item["link"],
-            "category": source.category,
-            "source": "einfomax",
-            "content_type": "external_link",
-            "match_type": match_type,
-            "published_at": item["published_at"].isoformat(),
-        })
-        await redis_cache.expire(f"news:item:{nsid}", _ITEM_TTL_SECONDS)
-        added += 1
+        # 4. upsert
+        stored = await upsert_news_item(
+            nsid=item["nsid"],
+            title=item["title"],
+            link=item["link"],
+            category=source.category,
+            match_type=match_type,
+            published_at=item["published_at"],
+            ingested_via="rss",
+        )
+        if stored:
+            added += 1
 
     # 5. ETag/Last-Modified 저장
     if new_etag:
@@ -101,11 +95,7 @@ async def _fetch_single_source(source: NewsSource) -> None:
         await redis_cache.set(f"news:last_modified:{source.feed_id}", new_last_modified, ex=3600)
 
     if added > 0:
-        logger.info("뉴스 추가", extra={
-            "source": source.feed_id,
-            "added": added,
-            "filtered_total": len(filtered),
-        })
+        logger.info("RSS 뉴스 추가", extra={"source": source.feed_id, "added": added})
 
 
 # ── 조건부 GET ────────────────────────────────────────

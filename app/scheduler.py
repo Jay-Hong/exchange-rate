@@ -1475,7 +1475,26 @@ def start_scheduler():
         coalesce=True,
     )
 
-    logger.info("✅ 뉴스 피드 수집 스케줄 등록 (5분마다 :45초)")
+    logger.info("✅ RSS 뉴스 수집 스케줄 등록 (5분마다 :45초)")
+
+    # ═════════════════════════════════════════════════════════════
+    # KB API 뉴스 수집: 5분마다, :15초 (Phase 1B-2)
+    # ═════════════════════════════════════════════════════════════
+    # - RSS보다 ~2시간 빠른 속보 소스
+    # - RSS(:45)와 30초 간격으로 분산
+    # - 인증 불필요 (공개 API)
+    # ─────────────────────────────────────────────────────────────
+    from app.news.kb_fetcher import fetch_kb_news  # 순환 import 방지
+
+    scheduler.add_job(
+        fetch_kb_news,
+        CronTrigger(minute='*/5', second='15', timezone=KST),
+        id="kb_news_fetcher",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    logger.info("✅ KB API 뉴스 수집 스케줄 등록 (5분마다 :15초)")
 
     # 시작 시 즉시 모드 판별 및 등록
     control_job()
