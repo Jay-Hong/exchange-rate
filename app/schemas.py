@@ -142,3 +142,31 @@ class DeleteResponse(BaseModel):
     """삭제 응답"""
     success: bool
     message: str
+
+
+# ============================================================
+# News: 뉴스 피드 스키마
+# ============================================================
+
+class NewsItem(BaseModel):
+    """개별 뉴스 아이템"""
+    id: str
+    title: str
+    link: Optional[str] = None       # 원문 URL (external_link일 때)
+    source: str                      # einfomax, fxi, ...
+    content_type: str = "external_link"  # "external_link" | "direct_text"
+    published_at: str                # ISO 8601
+    body: Optional[str] = None       # 뉴스 본문 (direct_text일 때)
+
+
+class NewsMetadata(BaseModel):
+    """뉴스 API 메타데이터"""
+    returned_count: int  # 이번 응답에 포함된 기사 수
+    window_hours: float
+    responded_at: str    # ISO 8601
+
+
+class NewsResponse(BaseModel):
+    """뉴스 API 응답"""
+    news: List[NewsItem]
+    metadata: NewsMetadata

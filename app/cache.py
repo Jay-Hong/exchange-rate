@@ -155,6 +155,119 @@ class RedisCache:
             await self.circuit.record_failure()
             logger.debug("Redis HSET 실패", exc_info=True, extra={"key": key, "field": field})
 
+    # ── 뉴스 피드용 확장 메서드 ──────────────────────────
+
+    async def exists(self, key: str) -> bool:
+        if not self.client or not await self.circuit.can_attempt():
+            return False
+        try:
+            result = await self.client.exists(key)
+            await self.circuit.record_success()
+            return bool(result)
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis EXISTS 실패", exc_info=True, extra={"key": key})
+            return False
+
+    async def zadd(self, key: str, mapping: dict) -> Optional[int]:
+        if not self.client or not await self.circuit.can_attempt():
+            return None
+        try:
+            result = await self.client.zadd(key, mapping)
+            await self.circuit.record_success()
+            return result
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis ZADD 실패", exc_info=True, extra={"key": key})
+            return None
+
+    async def zrangebyscore(self, key: str, min_score, max_score) -> list:
+        if not self.client or not await self.circuit.can_attempt():
+            return []
+        try:
+            result = await self.client.zrangebyscore(key, min_score, max_score)
+            await self.circuit.record_success()
+            return [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in result]
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis ZRANGEBYSCORE 실패", exc_info=True, extra={"key": key})
+            return []
+
+    async def zrevrangebyscore(self, key: str, max_score, min_score,
+                               start: int = 0, num: int = -1) -> list:
+        if not self.client or not await self.circuit.can_attempt():
+            return []
+        try:
+            result = await self.client.zrevrangebyscore(
+                key, max_score, min_score, start=start, num=num,
+            )
+            await self.circuit.record_success()
+            return [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in result]
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis ZREVRANGEBYSCORE 실패", exc_info=True, extra={"key": key})
+            return []
+
+    async def zremrangebyscore(self, key: str, min_score, max_score) -> Optional[int]:
+        if not self.client or not await self.circuit.can_attempt():
+            return None
+        try:
+            result = await self.client.zremrangebyscore(key, min_score, max_score)
+            await self.circuit.record_success()
+            return result
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis ZREMRANGEBYSCORE 실패", exc_info=True, extra={"key": key})
+            return None
+
+    async def hset_dict(self, key: str, mapping: dict) -> None:
+        if not self.client or not await self.circuit.can_attempt():
+            return
+        try:
+            await self.client.hset(key, mapping=mapping)
+            await self.circuit.record_success()
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis HSET_DICT 실패", exc_info=True, extra={"key": key})
+
+    async def hgetall(self, key: str) -> Optional[dict]:
+        if not self.client or not await self.circuit.can_attempt():
+            return None
+        try:
+            result = await self.client.hgetall(key)
+            await self.circuit.record_success()
+            if not result:
+                return None
+            return {
+                (k.decode("utf-8") if isinstance(k, bytes) else str(k)):
+                (v.decode("utf-8") if isinstance(v, bytes) else str(v))
+                for k, v in result.items()
+            }
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis HGETALL 실패", exc_info=True, extra={"key": key})
+            return None
+
+    async def expire(self, key: str, seconds: int) -> None:
+        if not self.client or not await self.circuit.can_attempt():
+            return
+        try:
+            await self.client.expire(key, seconds)
+            await self.circuit.record_success()
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis EXPIRE 실패", exc_info=True, extra={"key": key})
+
+    async def delete(self, *keys: str) -> None:
+        if not self.client or not await self.circuit.can_attempt() or not keys:
+            return
+        try:
+            await self.client.delete(*keys)
+            await self.circuit.record_success()
+        except Exception:
+            await self.circuit.record_failure()
+            logger.debug("Redis DELETE 실패", exc_info=True, extra={"keys": keys[:5]})
+
 
 redis_cache = RedisCache()
 

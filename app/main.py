@@ -921,6 +921,74 @@ async def toggle_crawler(request: Request):
 
 
 # ═════════════════════════════════════════════════════════════
+# 뉴스 API (Phase 1B)
+# ═════════════════════════════════════════════════════════════
+
+@app.get("/api/news", response_model=schemas.NewsResponse)
+async def get_news(
+    category: Optional[str] = None,
+    limit: int = 30,
+    hours: float = 8.0,
+):
+    """환율 관련 뉴스 목록 반환 (Redis 캐시 기반)"""
+    limit = max(1, min(100, limit))
+    hours = max(0.5, min(24.0, hours))
+
+    cutoff_ts = time.time() - (hours * 3600)
+
+    # 1. ZSET에서 최신순으로 nsid 목록 조회
+    nsids = await redis_cache.zrevrangebyscore(
+        "news:index", "+inf", cutoff_ts, start=0, num=limit * 2,
+    )
+
+    now_iso = datetime.now(dt_timezone(timedelta(hours=9))).isoformat()
+
+    if not nsids:
+        return {
+            "news": [],
+            "metadata": {"returned_count": 0, "window_hours": hours, "responded_at": now_iso},
+        }
+
+    # 2. 각 nsid의 HASH 조회
+    categories = {c.strip() for c in category.split(",") if c.strip()} if category else None
+    news_items = []
+
+    for nsid in nsids:
+        if len(news_items) >= limit:
+            break
+
+        item = await redis_cache.hgetall(f"news:item:{nsid}")
+        if not item:
+            continue  # stale index entry
+
+        if categories and item.get("category") not in categories:
+            continue
+
+        content_type = item.get("content_type", "external_link")
+        entry = {
+            "id": nsid,
+            "title": item.get("title", ""),
+            "source": item.get("source", ""),
+            "content_type": content_type,
+            "published_at": item.get("published_at", ""),
+        }
+        if content_type == "external_link":
+            entry["link"] = item.get("link", "")
+        else:
+            entry["body"] = item.get("body")
+        news_items.append(entry)
+
+    return {
+        "news": news_items,
+        "metadata": {
+            "returned_count": len(news_items),
+            "window_hours": hours,
+            "responded_at": now_iso,
+        },
+    }
+
+
+# ═════════════════════════════════════════════════════════════
 # 그래프 API (Phase 1A) - 계층적 Fallback 전략
 # ═════════════════════════════════════════════════════════════
 @app.get("/api/graph/{currency}")

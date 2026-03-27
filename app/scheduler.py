@@ -1458,6 +1458,25 @@ def start_scheduler():
 
     logger.info("✅ DXY rollup 스케줄 등록 (hourly=매시 :05, daily=00:05 KST)")
 
+    # ═════════════════════════════════════════════════════════════
+    # 뉴스 피드 수집: 5분마다, :45초 (Phase 1B)
+    # ═════════════════════════════════════════════════════════════
+    # - 모드 무관 (24시간 동일)
+    # - ETag/Last-Modified 조건부 GET → 변경 없으면 304 (부하 최소)
+    # - :45초 실행: 브로드캐스트(:00)와 충돌 방지
+    # ─────────────────────────────────────────────────────────────
+    from app.news.fetcher import fetch_all_news  # 순환 import 방지
+
+    scheduler.add_job(
+        fetch_all_news,
+        CronTrigger(minute='*/5', second='45', timezone=KST),
+        id="news_fetcher",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    logger.info("✅ 뉴스 피드 수집 스케줄 등록 (5분마다 :45초)")
+
     # 시작 시 즉시 모드 판별 및 등록
     control_job()
 
