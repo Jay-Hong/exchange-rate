@@ -15,7 +15,7 @@ import requests
 
 # 로컬 애플리케이션
 from app.cache import redis_cache
-from app.news.filters import is_forex_relevant, is_noise_title
+from app.news.filters import is_forex_relevant, is_macro_relevant, is_noise_title
 from app.news.sources import NEWS_SOURCES, NewsSource
 
 logger = logging.getLogger("exchange_rate.news")
@@ -62,8 +62,9 @@ async def _fetch_single_source(source: NewsSource) -> None:
             continue
         if is_noise_title(title):
             continue
-        if source.filter_level == "loose" and not is_forex_relevant(title, strict=False):
-            continue
+        if source.filter_level == "loose":
+            if not (is_forex_relevant(title, strict=False) or is_macro_relevant(title)):
+                continue
         if source.filter_level == "strict" and not is_forex_relevant(title, strict=True):
             continue
         filtered.append(item)

@@ -65,3 +65,26 @@ def is_forex_relevant(title: str, strict: bool = False) -> bool:
         if kw in title and any(r in title for r in requires):
             return True
     return False
+
+
+# ── 매크로 이벤트 드라이버 (global 전용 보조 필터) ─────
+# 환율에 영향을 주는 지정학/매크로 이벤트 기사 판별
+# 이슈 종료 시 GEOPOLITICAL_KEYWORDS만 정리하면 됨
+
+GEOPOLITICAL_KEYWORDS = [
+    "이란", "중동", "호르무즈", "전쟁", "휴전", "종전",
+]
+
+TRANSMISSION_KEYWORDS = [
+    "유가", "원유", "달러", "환율", "원화", "엔화", "위안",
+    "시장", "증시", "위험회피", "안전자산",
+    "하락", "반등", "급락", "급등",
+]
+
+
+def is_macro_relevant(title: str) -> bool:
+    """지정학 키워드 + 시장 전파 키워드가 모두 있어야 통과."""
+    return (
+        any(kw in title for kw in GEOPOLITICAL_KEYWORDS)
+        and any(kw in title for kw in TRANSMISSION_KEYWORDS)
+    )
