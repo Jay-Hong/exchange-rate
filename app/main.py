@@ -1060,7 +1060,7 @@ async def get_news(
             "published_at": item.get("published_at", ""),
         }
         if content_type in ("external_link", "report_pdf"):
-            entry["link"] = item.get("link", "")
+            entry["link"] = item.get("link") or None
         elif content_type == "direct_text":
             entry["body"] = item.get("body")
 

@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 3단계 필터: 잡음 제외(인사/부고) → 환율 관련도 → 매크로 드라이버(지정학/고강도/시장전파)
   - 산업 영향 필터: AI/반도체/대기업 + 수출/환율 영향 (macro_industry)
   - content_type 분류: `external_link`(일반), `flash`(속보), `report_pdf`(은행 보고서 PDF 직링크), `direct_text`(향후)
-  - Redis-only 저장 (8시간 윈도우, ZSET+HASH)
+  - Redis-only 저장 (10시간 윈도우, ZSET+HASH)
   - 순수 시간순 정렬
   - 스케줄: KB 5분마다 :15초, RSS 5분마다 :45초 (모드 무관, 24시간)
   - 새 모듈: `app/news/` (sources, filters, fetcher, kb_fetcher, upsert)
