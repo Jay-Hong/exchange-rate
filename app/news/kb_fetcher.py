@@ -5,8 +5,9 @@
 # 표준 라이브러리
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # 서드파티 라이브러리
 import requests
@@ -20,7 +21,7 @@ logger = logging.getLogger("exchange_rate.news.kb")
 KST = timezone(timedelta(hours=9))
 NEWS_WINDOW_HOURS = 8
 _REQUEST_TIMEOUT = 15
-_KB_PAGES_PER_TAB = 2  # 탭당 2페이지 수집 (10건 × 2 = 20건)
+_KB_PAGES_PER_TAB = 2
 
 _KB_API_URL = "https://fx.kbstar.com/quics?page=C110648&QAction=1253470&RType=json"
 _KB_PAGE_URL = "https://fx.kbstar.com/quics?page=C110648"
@@ -33,8 +34,6 @@ _KB_HEADERS = {
 }
 
 # 분류코드 → (필터 수준, 내부 category)
-# 외환탭(21): IS, IY, IT, 99
-# 경제탭(22): IU(증권), IT(채권), 99(기타) 등
 KB_CODE_MAP = {
     "IS": ("noise_only", "forex"),
     "IY": ("noise_only", "forex"),
@@ -44,8 +43,12 @@ KB_CODE_MAP = {
 }
 _DEFAULT_CODE_MAP = ("loose", "global")
 
-# 수집 대상 탭
-_KB_TABS = ["21", "22"]  # 21=외환, 22=경제
+_KB_TABS = ["21", "22"]
+
+# [전문] 보고서 PDF URL 패턴
+_REPORT_PDF_PATTERN = re.compile(
+    r'https?://rreport\.einfomax\.co\.kr/report/[^\s"<>]+\.pdf'
+)
 
 
 # ── 공개 API ──────────────────────────────────────────
@@ -68,6 +71,7 @@ async def fetch_kb_news() -> None:
     for item in items:
         title = item["title"]
         is_flash = item["is_flash"]
+        is_report = item["is_report"]
         published_at = item["published_at"]
 
         if published_at < cutoff:
@@ -91,8 +95,35 @@ async def fetch_kb_news() -> None:
             else:
                 match_type = "macro_industry"
 
-        # flash 기사: link 없음, content_type="flash", 제목에서 * 제거
-        if is_flash:
+        # [전문] 보고서: PDF 직링크 추출 시도
+        if is_report:
+            pdf_url = await _extract_report_pdf(item["nsid"])
+            if pdf_url:
+                stored = await upsert_news_item(
+                    nsid=item["nsid"],
+                    title=title,
+                    link=pdf_url,
+                    category=category,
+                    match_type=match_type,
+                    published_at=published_at,
+                    ingested_via="kb_api",
+                    content_type="report_pdf",
+                )
+            else:
+                # PDF 추출 실패 → KB 상세 링크로 fallback
+                logger.warning("보고서 PDF 추출 실패", extra={"nsid": item["nsid"], "title": title})
+                link = _KB_DETAIL_URL.format(nsid=item["nsid"])
+                stored = await upsert_news_item(
+                    nsid=item["nsid"],
+                    title=title,
+                    link=link,
+                    category=category,
+                    match_type=match_type,
+                    published_at=published_at,
+                    ingested_via="kb_api",
+                )
+        elif is_flash:
+            # flash 속보: link 없음
             stored = await upsert_news_item(
                 nsid=item["nsid"],
                 title=title,
@@ -104,6 +135,7 @@ async def fetch_kb_news() -> None:
                 content_type="flash",
             )
         else:
+            # 일반 기사: KB 상세 링크
             link = _KB_DETAIL_URL.format(nsid=item["nsid"])
             stored = await upsert_news_item(
                 nsid=item["nsid"],
@@ -122,12 +154,46 @@ async def fetch_kb_news() -> None:
         logger.info("KB 뉴스 추가", extra={"added": added, "total_collected": len(items)})
 
 
+# ── [전문] 보고서 PDF 추출 ────────────────────────────
+
+async def _extract_report_pdf(nsid: str) -> Optional[str]:
+    """KB 상세 페이지에서 rreport.einfomax.co.kr PDF URL 추출."""
+
+    detail_url = _KB_DETAIL_URL.format(nsid=nsid)
+
+    def _do_get():
+        resp = requests.get(
+            detail_url,
+            headers={"User-Agent": _KB_HEADERS["User-Agent"]},
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.text
+
+    try:
+        html = await asyncio.to_thread(_do_get)
+    except Exception:
+        logger.warning("보고서 상세 페이지 수집 실패", exc_info=True, extra={"nsid": nsid})
+        return None
+
+    # 본문에서 PDF URL 추출
+    content_match = re.search(r'id="content"[^>]*>(.*?)</div>', html, re.DOTALL)
+    if not content_match:
+        return None
+
+    body = content_match.group(1)
+    pdf_matches = _REPORT_PDF_PATTERN.findall(body)
+
+    if len(pdf_matches) == 1:
+        return pdf_matches[0]
+
+    return None
+
+
 # ── 수집 ──────────────────────────────────────────────
 
 async def _fetch_kb_all_tabs() -> List[dict]:
-    """
-    KB AJAX 뉴스 외환탭 + 경제탭, 각 2페이지 수집. nsid 기준 dedupe.
-    """
+    """KB AJAX 외환탭 + 경제탭, 각 2페이지 수집. nsid 기준 dedupe."""
     all_items = []
     seen_nsids: set = set()
 
@@ -147,7 +213,7 @@ async def _fetch_kb_all_tabs() -> List[dict]:
 async def _fetch_kb_tab_pages(inqury_dstcd: str) -> List[dict]:
     """단일 탭 여러 페이지 수집 (cursor 기반 페이징)"""
     all_items = []
-    cursor = ""  # finalNewsWritYMS — 빈값이면 최신부터
+    cursor = ""
 
     for page_no in range(_KB_PAGES_PER_TAB):
         form_data = {
@@ -180,7 +246,6 @@ async def _fetch_kb_tab_pages(inqury_dstcd: str) -> List[dict]:
             if parsed:
                 all_items.append(parsed)
 
-        # 다음 페이지 cursor
         next_cursor = servicedata.get("다음최종뉴스작성일시", "")
         if not next_cursor:
             break
@@ -211,6 +276,11 @@ def _parse_kb_item(raw: dict) -> Optional[dict]:
     if is_flash:
         title = title.lstrip("*").strip()
 
+    # [전문] 접두사 → 은행 보고서 (PDF 링크)
+    is_report = title.startswith("[전문]")
+    if is_report:
+        title = title.removeprefix("[전문]").strip()
+
     filter_level, category = KB_CODE_MAP.get(code, _DEFAULT_CODE_MAP)
 
     return {
@@ -218,5 +288,6 @@ def _parse_kb_item(raw: dict) -> Optional[dict]:
         "title": title,
         "published_at": published_at,
         "is_flash": is_flash,
+        "is_report": is_report,
         "filter_category": (filter_level, category),
     }

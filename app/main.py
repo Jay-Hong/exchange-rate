@@ -967,9 +967,9 @@ async def get_news(
             "content_type": content_type,
             "published_at": item.get("published_at", ""),
         }
-        if content_type == "external_link":
+        if content_type in ("external_link", "report_pdf"):
             entry["link"] = item.get("link", "")
-        else:
+        elif content_type == "direct_text":
             entry["body"] = item.get("body")
 
         news_items.append(entry)
