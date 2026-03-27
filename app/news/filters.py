@@ -79,6 +79,7 @@ GEOPOLITICAL_KEYWORDS = [
 SEVERITY_KEYWORDS = [
     "폭격", "공습", "미사일", "핵", "봉쇄", "침공",
     "격추", "전면전", "확전", "보복", "철수", "대피",
+    "차단", "막혔다", "되돌아가",
 ]
 
 TRANSMISSION_KEYWORDS = [
