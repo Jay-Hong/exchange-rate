@@ -119,7 +119,8 @@ KB API와 RSS 모두 동일한 `nsid` (AKR...) 체계를 사용.
 - **빈값 overwrite 방지**: RSS의 title/link/category가 null 또는 빈 문자열이면 기존 KB 값 유지
 - published_at은 소스 무관, 더 이른 값 우선 (`min(existing, incoming)`)
 - RSS가 이미 있으면 KB가 나중에 와도 덮어쓰지 않음
-- **match_type 승격**: KB에서 macro_severity로 들어왔더라도, RSS가 직접 외환(fx)으로 판별되면 fx로 승격. RSS가 fx가 아니면 기존 KB 분류 유지
+- **match_type 승격만, 강등 없음**: KB에서 macro_severity로 들어왔더라도, RSS가 직접 외환(fx)으로 판별되면 fx로 승격. RSS가 fx가 아니면 기존 KB 분류 유지. macro→fx 승격만 허용하고, fx→macro 강등은 하지 않음 (속보 우선순위 보호)
+- **RSS 정규화 보호**: RSS로 승격된 뒤 KB 재수집이 와도 title/link/category/match_type를 역행시키지 않음 (published_at min()만 허용)
 
 ### 3.3 Link 전략
 
