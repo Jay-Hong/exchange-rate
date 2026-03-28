@@ -13,12 +13,34 @@ EXCLUDE_TITLE_PREFIXES = [
 
 EXCLUDE_TITLE_KEYWORDS = [
     "신임", "선임", "임명", "전보", "승진", "이동",
+    "내정", "취임", "후임", "보임", "영입", "합류", "사임", "퇴임",
+]
+
+# 직책 이동 패턴 (직책+로) — 인사 이동 기사 감지용
+POSITION_TRANSFER_PATTERNS = [
+    "CEO로", "CFO로", "CRO로", "CIO로", "COO로", "CTO로",
+    "대표로", "원장으로", "사장으로", "회장으로", "부행장으로",
 ]
 
 STRONG_FOREX_KEYWORDS = [
     "환율", "외환", "달러-원", "달러-엔", "달러", "엔화",
     "위안", "유로", "DXY", "환시", "환위험", "환헤지",
+    "금리", "증시",
+    "국제유가", "WTI", "브렌트유",
 ]
+
+# "유가"는 "유가증권" 오탐 방지를 위해 경계 매칭 (단어 경계 또는 구두점)
+import re as _re
+_YUGA_PATTERN = _re.compile(r'(?:^|[\s\[,.:])유가(?:[\s\],.:!?]|$)')
+
+
+def _has_strong_market_keyword(title: str) -> bool:
+    """강한 시장 키워드 존재 여부 (인사 필터 보호용)"""
+    if any(kw in title for kw in STRONG_FOREX_KEYWORDS):
+        return True
+    if _YUGA_PATTERN.search(title):
+        return True
+    return False
 
 
 def is_noise_title(title: str) -> bool:
@@ -26,9 +48,17 @@ def is_noise_title(title: str) -> bool:
     if any(title.startswith(prefix) for prefix in EXCLUDE_TITLE_PREFIXES):
         return True
 
+    # 강한 시장 키워드가 있으면 인사성이어도 살림
+    if _has_strong_market_keyword(title):
+        return False
+
+    # 인사 키워드 매칭
     if any(kw in title for kw in EXCLUDE_TITLE_KEYWORDS):
-        if not any(fx in title for fx in STRONG_FOREX_KEYWORDS):
-            return True
+        return True
+
+    # 직책 이동 패턴 매칭 (CEO로, 원장으로 등)
+    if any(p in title for p in POSITION_TRANSFER_PATTERNS):
+        return True
 
     return False
 
