@@ -120,14 +120,19 @@ def is_macro_relevant(title: str) -> bool:
 
 # ── 산업/수출 영향 (AI·반도체·대기업) ─────────────────
 
-INDUSTRY_TRIGGERS = [
-    # AI/반도체
+# 산업 테마 키워드
+INDUSTRY_THEMES = [
     "AI", "반도체", "HBM", "메모리", "파운드리",
-    # 한국 대형 반도체주 (코스피/수출/원화에 직접 영향)
+]
+
+# 회사/앵커 키워드
+INDUSTRY_ANCHORS = [
     "삼성전자", "SK하이닉스",
-    # 한국 반도체 영향력 큰 해외 기업
     "엔비디아", "TSMC",
 ]
+
+# 통합 트리거 (테마 + 앵커)
+INDUSTRY_TRIGGERS = INDUSTRY_THEMES + INDUSTRY_ANCHORS
 
 INDUSTRY_IMPACT = [
     # 수출/경제 영향
@@ -142,10 +147,20 @@ INDUSTRY_IMPACT = [
 
 def is_industry_impact(title: str) -> bool:
     """
-    산업/수출 영향 기사 판단.
-    트리거(AI/반도체/대기업) + 영향(수출/환율/급락) 모두 있어야 통과.
+    산업/수출 영향 기사 판단. 통과 조건 (OR):
+    1. 트리거(any) + 영향 키워드(any) — 기존 규칙
+    2. 앵커(회사) + 테마(산업) — 투자 관점 기사 (영향 키워드 없이도 통과)
     """
-    return (
-        any(kw in title for kw in INDUSTRY_TRIGGERS)
-        and any(kw in title for kw in INDUSTRY_IMPACT)
-    )
+    has_theme = any(kw in title for kw in INDUSTRY_THEMES)
+    has_anchor = any(kw in title for kw in INDUSTRY_ANCHORS)
+    has_impact = any(kw in title for kw in INDUSTRY_IMPACT)
+
+    # 규칙 1: 트리거 + 영향 키워드
+    if (has_theme or has_anchor) and has_impact:
+        return True
+
+    # 규칙 2: 앵커 + 테마 (투자 관점, 영향 키워드 불필요)
+    if has_anchor and has_theme:
+        return True
+
+    return False
