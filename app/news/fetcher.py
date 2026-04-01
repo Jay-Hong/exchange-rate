@@ -1,6 +1,9 @@
 # app/news/fetcher.py
 
-"""RSS 뉴스 수집 → 필터 → Redis 저장 + cleanup"""
+"""RSS 뉴스 수집 → 잡음 제외 → Redis 저장 + cleanup
+
+v2: noise_only 일원화. 관련도/매크로/산업 필터 삭제.
+"""
 
 # 표준 라이브러리
 import asyncio
@@ -15,14 +18,14 @@ import requests
 
 # 로컬 애플리케이션
 from app.cache import redis_cache
-from app.news.filters import classify_macro, is_forex_relevant, is_industry_impact, is_noise_title
+from app.news.filters import is_noise_title
 from app.news.sources import NEWS_SOURCES, NewsSource
 from app.news.upsert import upsert_news_item
 
 logger = logging.getLogger("exchange_rate.news")
 
 KST = timezone(timedelta(hours=9))
-NEWS_WINDOW_HOURS = 10
+NEWS_WINDOW_HOURS = 24
 _REQUEST_TIMEOUT = 10
 
 
@@ -44,57 +47,34 @@ async def fetch_all_news() -> None:
 async def _fetch_single_source(source: NewsSource) -> None:
     """단일 RSS 피드 수집"""
 
-    # 1. 조건부 GET (ETag / Last-Modified)
     xml_text, new_etag, new_last_modified = await _conditional_get(source)
     if xml_text is None:
         logger.debug("뉴스 변경 없음 (304)", extra={"source": source.feed_id})
         return
 
-    # 2. XML 파싱
     items = _parse_rss(xml_text)
 
-    # 3. 필터링 (8h → 잡음 제외 → 소스별 환율 관련도)
     cutoff = datetime.now(KST) - timedelta(hours=NEWS_WINDOW_HOURS)
     added = 0
 
     for item in items:
-        title = item["title"]
         if item["published_at"] < cutoff:
             continue
-        if is_noise_title(title):
+        if is_noise_title(item["title"]):
             continue
 
-        match_type = "fx"
-        if source.filter_level == "loose":
-            fx = is_forex_relevant(title, strict=False)
-            macro_type = classify_macro(title)
-            industry = is_industry_impact(title)
-            if not (fx or macro_type or industry):
-                continue
-            if fx:
-                match_type = "fx"
-            elif macro_type:
-                match_type = macro_type
-            else:
-                match_type = "macro_industry"
-        elif source.filter_level == "strict":
-            if not is_forex_relevant(title, strict=True):
-                continue
-
-        # 4. upsert
         stored = await upsert_news_item(
             nsid=item["nsid"],
             title=item["title"],
             link=item["link"],
             category=source.category,
-            match_type=match_type,
             published_at=item["published_at"],
             ingested_via="rss",
         )
         if stored:
             added += 1
 
-    # 5. ETag/Last-Modified 저장
+    # ETag/Last-Modified 저장
     if new_etag:
         await redis_cache.set(f"news:etag:{source.feed_id}", new_etag, ex=3600)
     if new_last_modified:
@@ -107,7 +87,7 @@ async def _fetch_single_source(source: NewsSource) -> None:
 # ── 조건부 GET ────────────────────────────────────────
 
 async def _conditional_get(source: NewsSource) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """ETag/Last-Modified 기반 조건부 GET. 변경 없으면 (None, None, None) 반환."""
+    """ETag/Last-Modified 기반 조건부 GET."""
 
     headers = {
         "User-Agent": "FXi-NewsBot/1.0",
@@ -131,17 +111,12 @@ async def _conditional_get(source: NewsSource) -> Tuple[Optional[str], Optional[
         return None, None, None
 
     response.raise_for_status()
-
-    new_etag = response.headers.get("ETag")
-    new_last_modified = response.headers.get("Last-Modified")
-
-    return response.text, new_etag, new_last_modified
+    return response.text, response.headers.get("ETag"), response.headers.get("Last-Modified")
 
 
 # ── XML 파싱 ──────────────────────────────────────────
 
 def _parse_rss(xml_text: str) -> List[dict]:
-    """RSS XML → item 리스트 파싱"""
     root = ET.fromstring(xml_text)
     items = []
 
@@ -154,7 +129,6 @@ def _parse_rss(xml_text: str) -> List[dict]:
         if not nsid or not title or not pub_date_str:
             continue
 
-        # pubDate: "2026-03-27 19:36:10" (KST, 타임존 없음)
         published_at = datetime.strptime(pub_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
 
         items.append({
@@ -168,7 +142,6 @@ def _parse_rss(xml_text: str) -> List[dict]:
 
 
 def _get_text(element, tag: str) -> Optional[str]:
-    """XML 엘리먼트에서 텍스트 추출"""
     child = element.find(tag)
     if child is not None and child.text:
         return child.text.strip()
@@ -186,7 +159,6 @@ async def _cleanup_old_news() -> None:
         return
 
     await redis_cache.zremrangebyscore("news:index", "-inf", cutoff)
-
     keys = [f"news:item:{nsid}" for nsid in stale_ids]
     await redis_cache.delete(*keys)
 

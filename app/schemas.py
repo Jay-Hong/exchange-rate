@@ -152,11 +152,10 @@ class NewsItem(BaseModel):
     """개별 뉴스 아이템"""
     id: str
     title: str
-    link: Optional[str] = None       # 원문 URL (external_link, report_pdf일 때)
-    source: str                      # einfomax, fxi, ...
-    content_type: str = "external_link"  # "external_link" | "flash" | "report_pdf" | "direct_text"
+    link: Optional[str] = None       # 원문 URL (정상 경로에서 non-null 기대)
+    source: str                      # einfomax
+    content_type: str = "external_link"  # "external_link" | "report_pdf"
     published_at: str                # ISO 8601
-    body: Optional[str] = None       # 뉴스 본문 (direct_text일 때)
 
 
 class NewsMetadata(BaseModel):

@@ -921,50 +921,40 @@ async def toggle_crawler(request: Request):
 
 
 # ═════════════════════════════════════════════════════════════
-# 뉴스 API (Phase 1B)
+# 뉴스 API (Phase 1B v2)
 # ═════════════════════════════════════════════════════════════
 
-import re as _re
+from app.news.filters import normalize_title as _normalize_title
 
-# 초보/상보 꼬리표 + content_type 우선순위
-_TAIL_PATTERN = _re.compile(r'\s*\((상보|종합|속보|수정|1보|2보|3보)\)\s*$')
-_CONTENT_TYPE_PRIORITY = {"external_link": 3, "report_pdf": 4, "flash": 1, "direct_text": 2}
-
-
-def _normalize_title(title: str) -> str:
-    """제목 정규화 — 꼬리표 제거, HTML 엔티티 디코딩, 공백 정리"""
-    t = title.replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-    t = _TAIL_PATTERN.sub("", t)
-    return " ".join(t.split())
+_CONTENT_TYPE_PRIORITY = {"external_link": 3, "report_pdf": 4}
+_TAIL_PATTERN = __import__("re").compile(r'\((상보|종합|속보|수정|1보|2보|3보|본문없음)\)')
 
 
 def _collapse_near_duplicates(items: list, gap_minutes: int = 60) -> list:
     """
-    초보/상보 near-duplicate collapse.
-    같은 정규화 제목을 시간 클러스터로 묶고, 클러스터별 대표 1건만 남김.
-    조건: 클러스터 내 하나라도 꼬리표(상보/종합) 또는 flash가 있을 때만 collapse.
+    초보/상보 near-duplicate collapse (시간 클러스터 방식).
+    조건: 클러스터 내 꼬리표(상보/종합) 또는 is_bodyless 기사가 있을 때만 collapse.
     """
     if not items:
         return items
 
-    # Pass 1: 정규화 제목별 후보 수집
-    groups: dict = {}  # norm_title → [(index, priority, has_tail_or_flash, published_at_str)]
+    groups: dict = {}
 
     for i, item in enumerate(items):
         raw_title = item.get("title", "")
         norm = _normalize_title(raw_title)
-        ct = item.get("content_type", "")
-        ct_priority = _CONTENT_TYPE_PRIORITY.get(ct, 0)
+        ct_priority = _CONTENT_TYPE_PRIORITY.get(item.get("content_type", ""), 0)
 
         has_tail = bool(_TAIL_PATTERN.search(raw_title.replace("&quot;", '"')))
-        is_flash = ct == "flash"
+        is_bodyless = item.get("_is_bodyless", False)
 
         if has_tail:
             ct_priority += 10
 
-        groups.setdefault(norm, []).append((i, ct_priority, has_tail or is_flash, item.get("published_at", "")))
+        groups.setdefault(norm, []).append(
+            (i, ct_priority, has_tail or is_bodyless, item.get("published_at", ""))
+        )
 
-    # Pass 2: 그룹 → 시간 클러스터 → 클러스터별 대표 선택
     keep_indices: set = set()
 
     for norm, candidates in groups.items():
@@ -972,7 +962,6 @@ def _collapse_near_duplicates(items: list, gap_minutes: int = 60) -> list:
             keep_indices.add(candidates[0][0])
             continue
 
-        # 시간순 정렬
         try:
             sorted_cands = sorted(candidates, key=lambda c: c[3])
         except TypeError:
@@ -980,7 +969,6 @@ def _collapse_near_duplicates(items: list, gap_minutes: int = 60) -> list:
                 keep_indices.add(c[0])
             continue
 
-        # 인접 간격 기준으로 클러스터 분리
         clusters = [[sorted_cands[0]]]
         for c in sorted_cands[1:]:
             prev = clusters[-1][-1]
@@ -990,45 +978,39 @@ def _collapse_near_duplicates(items: list, gap_minutes: int = 60) -> list:
                 gap = abs((t_curr - t_prev).total_seconds()) / 60
             except (ValueError, TypeError):
                 gap = 0
-
             if gap <= gap_minutes:
                 clusters[-1].append(c)
             else:
                 clusters.append([c])
 
-        # 클러스터별 처리
         for cluster in clusters:
             if len(cluster) == 1:
                 keep_indices.add(cluster[0][0])
                 continue
 
-            any_tail_or_flash = any(c[2] for c in cluster)
-            if not any_tail_or_flash:
+            any_collapsible = any(c[2] for c in cluster)
+            if not any_collapsible:
                 for c in cluster:
                     keep_indices.add(c[0])
                 continue
 
-            # 우선순위 최고 1건만 유지 (동률이면 최신)
             best = max(cluster, key=lambda c: (c[1], c[3]))
             keep_indices.add(best[0])
 
-    # 원본 순서 유지
     return [items[i] for i in range(len(items)) if i in keep_indices]
 
 
 @app.get("/api/news", response_model=schemas.NewsResponse)
 async def get_news(
-    category: Optional[str] = None,
-    limit: int = 30,
-    hours: float = 10.0,
+    limit: int = 50,
+    hours: float = 24.0,
 ):
-    """환율 관련 뉴스 목록 반환 (Redis 캐시 기반)"""
+    """뉴스 목록 반환 (Redis 캐시 기반, 시간순)"""
     limit = max(1, min(100, limit))
     hours = max(0.5, min(24.0, hours))
 
     cutoff_ts = time.time() - (hours * 3600)
 
-    # 1. ZSET에서 윈도우 내 전체 nsid 조회 (최신순)
     nsids = await redis_cache.zrevrangebyscore("news:index", "+inf", cutoff_ts)
 
     now_iso = datetime.now(dt_timezone(timedelta(hours=9))).isoformat()
@@ -1039,16 +1021,11 @@ async def get_news(
             "metadata": {"returned_count": 0, "window_hours": hours, "responded_at": now_iso},
         }
 
-    # 2. 전체 스캔, 시간순 유지 (ZSET에서 이미 최신순으로 조회됨)
-    categories = {c.strip() for c in category.split(",") if c.strip()} if category else None
     news_items = []
 
     for nsid in nsids:
         item = await redis_cache.hgetall(f"news:item:{nsid}")
         if not item:
-            continue
-
-        if categories and item.get("category") not in categories:
             continue
 
         content_type = item.get("content_type", "external_link")
@@ -1058,18 +1035,30 @@ async def get_news(
             "source": item.get("source", ""),
             "content_type": content_type,
             "published_at": item.get("published_at", ""),
+            "link": item.get("link") or None,
         }
-        if content_type in ("external_link", "report_pdf"):
-            entry["link"] = item.get("link") or None
-        elif content_type == "direct_text":
-            entry["body"] = item.get("body")
+
+        # collapse용 내부 플래그 (API 응답에서 제거됨)
+        if item.get("is_bodyless") == "true":
+            entry["_is_bodyless"] = True
 
         news_items.append(entry)
 
-    # 3. 초보/상보 near-duplicate collapse (응답단에서만, 저장 데이터 유지)
     news_items = _collapse_near_duplicates(news_items)
-
     news_items = news_items[:limit]
+
+    # 내부 플래그 제거
+    for item in news_items:
+        item.pop("_is_bodyless", None)
+
+    return {
+        "news": news_items,
+        "metadata": {
+            "returned_count": len(news_items),
+            "window_hours": hours,
+            "responded_at": now_iso,
+        },
+    }
 
     return {
         "news": news_items,

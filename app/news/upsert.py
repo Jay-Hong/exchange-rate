@@ -1,6 +1,9 @@
 # app/news/upsert.py
 
-"""뉴스 Redis upsert — KB API + RSS 병합 규칙 구현"""
+"""뉴스 Redis upsert — KB API + RSS 병합 규칙
+
+v2: match_type 삭제, is_bodyless 추가.
+"""
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -10,7 +13,7 @@ from app.cache import redis_cache
 logger = logging.getLogger("exchange_rate.news")
 
 KST = timezone(timedelta(hours=9))
-_ITEM_TTL_SECONDS = 24 * 3600  # 안전망 TTL
+_ITEM_TTL_SECONDS = 48 * 3600  # 안전망 TTL (윈도우 24h의 2배)
 
 
 async def upsert_news_item(
@@ -18,24 +21,22 @@ async def upsert_news_item(
     title: str,
     link: str,
     category: str,
-    match_type: str,
     published_at: datetime,
     ingested_via: str,
     content_type: str = "external_link",
+    is_bodyless: bool = False,
 ) -> bool:
     """
     nsid 기준 upsert. 병합 규칙:
 
     1. 새 기사: 그대로 저장
-    2. KB 먼저 + RSS 나중: RSS 유효값으로 정규화 (title/link/category/match_type 승격)
-    3. RSS 먼저 + KB 나중: ingested_via 누적 + published_at min()만
-    4. RSS 이미 있는 상태에서 KB 재수집: published_at min()만 (RSS 정규화 보호)
-    5. KB만 있는 상태에서 KB 재수집: 최신 값으로 갱신
-    6. RSS 재수집: title/link/category 갱신
+    2. KB→RSS: RSS 유효값으로 정규화, is_bodyless 해제
+    3. RSS→KB: 덮어쓰지 않음
+    4. RSS有+KB재수집: RSS 보호
+    5. KB만+KB재수집: 최신값 갱신
+    6. RSS재수집: 갱신
 
-    published_at: 모든 경로에서 min(existing, incoming) 적용
-
-    Returns True if item was newly stored, False if updated/skipped.
+    Returns True if item was newly stored.
     """
     key = f"news:item:{nsid}"
     published_ts = published_at.timestamp()
@@ -44,78 +45,85 @@ async def upsert_news_item(
 
     if not existing:
         # ── 1. 새 기사 ──
-        await redis_cache.zadd("news:index", {nsid: published_ts})
-        await redis_cache.hset_dict(key, {
+        fields = {
             "title": title,
             "link": link,
             "category": category,
             "source": "einfomax",
             "content_type": content_type,
-            "match_type": match_type,
             "published_at": published_at.isoformat(),
             "ingested_via": ingested_via,
-        })
+        }
+        if is_bodyless:
+            fields["is_bodyless"] = "true"
+
+        await redis_cache.zadd("news:index", {nsid: published_ts})
+        await redis_cache.hset_dict(key, fields)
         await redis_cache.expire(key, _ITEM_TTL_SECONDS)
         return True
 
-    # 기존 기사 존재 — 병합 규칙 적용
+    # 기존 기사 존재 — 병합
     existing_via = existing.get("ingested_via", "")
     has_rss = "rss" in existing_via
     has_kb = "kb_api" in existing_via
     updates = {}
 
+    is_existing_report = existing.get("content_type") == "report_pdf"
+
     if ingested_via == "rss" and not has_rss:
-        # ── 2. KB 먼저 → RSS 나중: RSS로 정규화 ──
-        if title and title.strip():
-            updates["title"] = title
-        if link and link.strip():
-            updates["link"] = link
-            # flash → external_link 승격 (RSS에 link가 있으면 본문 있는 기사)
-            if existing.get("content_type") == "flash":
+        # ── 2. KB→RSS: RSS로 정규화 ──
+        # report_pdf는 title/link/content_type 모두 보호 (PDF 직링크가 최선의 UX)
+        if is_existing_report:
+            updates["ingested_via"] = existing_via + "+rss"
+        else:
+            if title and title.strip():
+                updates["title"] = title
+            if link and link.strip():
+                updates["link"] = link
+            if category and category.strip():
+                updates["category"] = category
+            if existing.get("is_bodyless") == "true":
+                updates["is_bodyless"] = "false"
                 updates["content_type"] = "external_link"
-        if category and category.strip():
-            updates["category"] = category
-        if match_type == "fx":
-            updates["match_type"] = "fx"
-        updates["ingested_via"] = existing_via + "+rss"
+            updates["ingested_via"] = existing_via + "+rss"
 
     elif ingested_via == "kb_api" and not has_kb:
-        # ── 3. RSS 먼저 → KB 나중: 덮어쓰지 않음 ──
+        # ── 3. RSS→KB: 덮어쓰지 않음 ──
         updates["ingested_via"] = existing_via + "+kb_api"
 
     elif ingested_via == "kb_api" and has_rss:
-        # ── 4. RSS 정규화 이후 KB 재수집: published_at min()만 허용 ──
-        # RSS로 승격된 title/link/category/match_type 보호
+        # ── 4. RSS有+KB재수집: RSS 보호 ──
         pass
 
     elif ingested_via == "kb_api" and has_kb and not has_rss:
-        # ── 5. KB만 있는 상태에서 KB 재수집: 최신 값으로 갱신 ──
-        if title and title.strip():
-            updates["title"] = title
-        if link and link.strip():
-            updates["link"] = link
-        if category and category.strip():
-            updates["category"] = category
-        if match_type:
-            updates["match_type"] = match_type
-        # content_type: flash ↔ external_link 교정 (이전 배포 잔존 데이터 대응)
-        if content_type and content_type != existing.get("content_type"):
-            updates["content_type"] = content_type
-            if content_type == "flash":
-                updates["link"] = ""
+        # ── 5. KB만+KB재수집: 갱신 ──
+        # report_pdf 보호: 재수집에서 PDF 추출 실패해도 기존 PDF 링크 유지
+        if is_existing_report and content_type != "report_pdf":
+            pass  # report_pdf → external_link 강등 방지
+        else:
+            if title and title.strip():
+                updates["title"] = title
+            if link and link.strip():
+                updates["link"] = link
+            if category and category.strip():
+                updates["category"] = category
+            if content_type and content_type != existing.get("content_type"):
+                updates["content_type"] = content_type
+            if is_bodyless:
+                updates["is_bodyless"] = "true"
+            elif existing.get("is_bodyless") == "true" and not is_bodyless:
+                updates["is_bodyless"] = "false"
 
     elif ingested_via == "rss" and has_rss:
-        # ── 6. RSS 재수집: 기사 수정 대응 ──
+        # ── 6. RSS재수집: 갱신 ──
         if title and title.strip():
             updates["title"] = title
         if link and link.strip():
             updates["link"] = link
         if category and category.strip():
             updates["category"] = category
-        if match_type == "fx" and existing.get("match_type") != "fx":
-            updates["match_type"] = "fx"
 
-    # published_at: 모든 경로에서 min(existing, incoming)
+    # published_at: 모든 경로에서 min()
     existing_ts_str = existing.get("published_at", "")
     if existing_ts_str:
         try:

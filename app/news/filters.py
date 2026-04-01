@@ -1,9 +1,14 @@
 # app/news/filters.py
 
-"""뉴스 필터 — 잡음 제외 + 환율 관련도 판단 (title 기준)"""
+"""뉴스 필터 — 잡음 제외 (title 기준)
+
+v2: noise_only 일원화. 관련도/매크로/산업 필터 삭제.
+"""
+
+import re as _re
 
 
-# ── 잡음 제외 (모든 소스 공통) ──────────────────────────
+# ── 잡음 제외 ─────────────────────────────────────────
 
 EXCLUDE_TITLE_PREFIXES = [
     "[인사]",
@@ -12,31 +17,36 @@ EXCLUDE_TITLE_PREFIXES = [
 ]
 
 EXCLUDE_TITLE_KEYWORDS = [
+    # 인사/직책 이동
     "신임", "선임", "임명", "전보", "승진", "이동",
     "내정", "취임", "후임", "보임", "영입", "합류", "사임", "퇴임",
+    # 정치 (시장 영향 키워드 없으면 제외)
+    "국민의힘", "국힘", "더불어민주당", "민주당",
+    "조국혁신당", "개혁신당",
+    "당대표", "원내대표", "총선", "대선", "선거",
 ]
 
-# 직책 이동 패턴 (직책+로) — 인사 이동 기사 감지용
+# 직책 이동 패턴 (직책+로)
 POSITION_TRANSFER_PATTERNS = [
     "CEO로", "CFO로", "CRO로", "CIO로", "COO로", "CTO로",
     "대표로", "원장으로", "사장으로", "회장으로", "부행장으로",
 ]
 
-STRONG_FOREX_KEYWORDS = [
+# 시장 키워드 보호 — 위 제외 규칙을 무력화
+STRONG_MARKET_KEYWORDS = [
     "환율", "외환", "달러-원", "달러-엔", "달러", "엔화",
     "위안", "유로", "DXY", "환시", "환위험", "환헤지",
     "금리", "증시",
     "국제유가", "WTI", "브렌트유",
 ]
 
-# "유가"는 "유가증권" 오탐 방지를 위해 경계 매칭 (단어 경계 또는 구두점)
-import re as _re
+# "유가"는 "유가증권" 오탐 방지를 위해 경계 매칭
 _YUGA_PATTERN = _re.compile(r'(?:^|[\s\[,.:])유가(?:[\s\],.:!?]|$)')
 
 
 def _has_strong_market_keyword(title: str) -> bool:
-    """강한 시장 키워드 존재 여부 (인사 필터 보호용)"""
-    if any(kw in title for kw in STRONG_FOREX_KEYWORDS):
+    """강한 시장 키워드 존재 여부 (잡음 필터 보호용)"""
+    if any(kw in title for kw in STRONG_MARKET_KEYWORDS):
         return True
     if _YUGA_PATTERN.search(title):
         return True
@@ -44,153 +54,33 @@ def _has_strong_market_keyword(title: str) -> bool:
 
 
 def is_noise_title(title: str) -> bool:
-    """인사/부고 등 잡음 기사 판단. True면 제외."""
+    """인사/부고/정치 등 잡음 기사 판단. True면 제외."""
+    # 접두사 매칭 → 즉시 제외
     if any(title.startswith(prefix) for prefix in EXCLUDE_TITLE_PREFIXES):
         return True
 
-    # 강한 시장 키워드가 있으면 인사성이어도 살림
+    # 시장 키워드가 있으면 인사/정치성이어도 살림
     if _has_strong_market_keyword(title):
         return False
 
-    # 인사 키워드 매칭
+    # 인사/정치 키워드 매칭
     if any(kw in title for kw in EXCLUDE_TITLE_KEYWORDS):
         return True
 
-    # 직책 이동 패턴 매칭 (CEO로, 원장으로 등)
+    # 직책 이동 패턴 매칭
     if any(p in title for p in POSITION_TRANSFER_PATTERNS):
         return True
 
     return False
 
 
-# ── 환율 관련도 (소스별 적용) ──────────────────────────
+# ── 제목 정규화 (near-duplicate collapse용) ────────────
 
-PRIMARY_KEYWORDS = [
-    "환율", "외환", "달러-원", "달러-엔", "엔화", "유로",
-    "위안", "환헤지", "환위험", "DXY", "외환시장",
-]
-
-CONDITIONAL_KEYWORDS = {
-    "금리": ["달러", "엔", "유로", "위안", "환율"],
-    "연준": ["달러", "환율", "외환"],
-    "Fed": ["달러", "환율", "외환"],
-    "BOJ": ["엔", "환율"],
-    "PBOC": ["위안", "환율"],
-    "ECB": ["유로", "환율"],
-}
+_TAIL_PATTERN = _re.compile(r'\s*\((상보|종합|속보|수정|1보|2보|3보|본문없음)\)\s*$')
 
 
-def is_forex_relevant(title: str, strict: bool = False) -> bool:
-    """
-    기사의 환율 관련도 판단 (title 기준).
-
-    strict=False (느슨한 필터, global용): PRIMARY + CONDITIONAL 모두 허용
-    strict=True  (엄격한 필터, stock용):  PRIMARY만 허용
-    """
-    if any(kw in title for kw in PRIMARY_KEYWORDS):
-        return True
-    if strict:
-        return False
-    for kw, requires in CONDITIONAL_KEYWORDS.items():
-        if kw in title and any(r in title for r in requires):
-            return True
-    return False
-
-
-# ── 매크로 이벤트 드라이버 (global 전용 보조 필터) ─────
-# 환율에 영향을 주는 지정학/매크로 이벤트 기사 판별
-# 이슈 종료 시 GEOPOLITICAL_KEYWORDS에서 시의성 키워드만 정리
-
-GEOPOLITICAL_KEYWORDS = [
-    # 범용 (영구 유지)
-    "전쟁", "휴전", "종전",
-    # 시의성 (이슈 종료 시 정리)
-    "이란", "중동", "호르무즈",
-    "트럼프",
-]
-
-# 고강도 이벤트 — 지정학 키워드와 결합 시 시장 전파 키워드 없이도 통과
-SEVERITY_KEYWORDS = [
-    "폭격", "공습", "미사일", "핵", "봉쇄", "침공",
-    "격추", "전면전", "확전", "보복", "철수", "대피",
-    "차단", "막혔다", "되돌아가", "공격",
-]
-
-TRANSMISSION_KEYWORDS = [
-    "유가", "원유", "브렌트유", "WTI",
-    "달러", "환율", "원화", "엔화", "위안",
-    "시장", "증시", "위험회피", "안전자산",
-    "하락", "반등", "급락", "급등",
-    "협상", "데드라인",
-]
-
-
-def classify_macro(title: str) -> str:
-    """
-    환율에 영향을 주는 지정학/매크로 이벤트 기사 분류.
-
-    반환값:
-    - "macro_severity": 지정학 + 고강도 이벤트 (폭격, 봉쇄 등)
-    - "macro":          지정학 + 시장 전파 키워드 (유가, 증시 등)
-    - "":               미해당
-    """
-    if not any(kw in title for kw in GEOPOLITICAL_KEYWORDS):
-        return ""
-    if any(kw in title for kw in SEVERITY_KEYWORDS):
-        return "macro_severity"
-    if any(kw in title for kw in TRANSMISSION_KEYWORDS):
-        return "macro"
-    return ""
-
-
-def is_macro_relevant(title: str) -> bool:
-    """하위 호환용 래퍼."""
-    return classify_macro(title) != ""
-
-
-# ── 산업/수출 영향 (AI·반도체·대기업) ─────────────────
-
-# 산업 테마 키워드
-INDUSTRY_THEMES = [
-    "AI", "반도체", "HBM", "메모리", "파운드리",
-]
-
-# 회사/앵커 키워드
-INDUSTRY_ANCHORS = [
-    "삼성전자", "SK하이닉스",
-    "엔비디아", "TSMC",
-]
-
-# 통합 트리거 (테마 + 앵커)
-INDUSTRY_TRIGGERS = INDUSTRY_THEMES + INDUSTRY_ANCHORS
-
-INDUSTRY_IMPACT = [
-    # 수출/경제 영향
-    "수출", "실적", "외국인", "코스피",
-    "무역", "공급", "수주", "매출",
-    # 환율 직접 연결
-    "달러", "환율", "원화",
-    # 시장 변동
-    "급락", "급등",
-]
-
-
-def is_industry_impact(title: str) -> bool:
-    """
-    산업/수출 영향 기사 판단. 통과 조건 (OR):
-    1. 트리거(any) + 영향 키워드(any) — 기존 규칙
-    2. 앵커(회사) + 테마(산업) — 투자 관점 기사 (영향 키워드 없이도 통과)
-    """
-    has_theme = any(kw in title for kw in INDUSTRY_THEMES)
-    has_anchor = any(kw in title for kw in INDUSTRY_ANCHORS)
-    has_impact = any(kw in title for kw in INDUSTRY_IMPACT)
-
-    # 규칙 1: 트리거 + 영향 키워드
-    if (has_theme or has_anchor) and has_impact:
-        return True
-
-    # 규칙 2: 앵커 + 테마 (투자 관점, 영향 키워드 불필요)
-    if has_anchor and has_theme:
-        return True
-
-    return False
+def normalize_title(title: str) -> str:
+    """제목 정규화 — 꼬리표/본문없음 제거, HTML 엔티티 디코딩, 공백 정리"""
+    t = title.replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    t = _TAIL_PATTERN.sub("", t)
+    return " ".join(t.split())
