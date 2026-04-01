@@ -2414,11 +2414,11 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 
 #### 1. 저장소: Redis-only (DB 불필요)
 
-- 뉴스는 8시간 윈도우의 휘발성 데이터 → TTL 기반 자동 만료
+- 뉴스는 24시간 윈도우의 휘발성 데이터 → TTL 기반 자동 만료
 - DB 테이블/마이그레이션/cleanup job 불필요
 - Redis ZSET(시간순 인덱스) + HASH(기사 메타) 구조
 
-**기각 대안**: PostgreSQL 저장 → 8시간 뒤 버리는 데이터에 영구 저장소는 과함
+**기각 대안**: PostgreSQL 저장 → 24시간 뒤 버리는 데이터에 영구 저장소는 과함
 
 #### 2. 수집: KB API + RSS 병행
 
@@ -2434,21 +2434,21 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 - 최신 macro 기사가 오래된 fx 기사 아래로 밀리는 UX 문제 발견
 - 필터가 이미 관련성을 보장하므로, 정렬에서 추가 큐레이션 불필요
 
-#### 4. content_type 분류
+#### 4. content_type 분류 (v2 단순화)
 
 | content_type | 설명 | 앱 동작 |
 |-------------|------|--------|
-| `external_link` | 일반 기사 | link URL 열기 |
-| `flash` | 속보 (본문 없음, `*` 접두사) | 제목만 표시 |
-| `report_pdf` | 은행 보고서 PDF 직링크 | PDF 바로 열기 |
-| `direct_text` | 직접 텍스트 (향후) | body 인라인 |
+| `external_link` | 일반 기사 + `*` 속보 (제목에 "(본문없음)" 추가) | link URL 열기 |
+| `report_pdf` | 은행 보고서 PDF 직링크 (`[전문]` 접두사) | 외부 브라우저로 PDF 열기 |
 
-#### 5. 필터 체계
+> v1에서 `flash`, `direct_text`를 사용했으나 v2에서 삭제.
 
-- `is_noise_title()`: 인사/부고 잡음 제거 (모든 소스)
-- `is_forex_relevant()`: 환율 직접 관련도 (PRIMARY + CONDITIONAL)
-- `classify_macro()`: 지정학 + 고강도/시장전파 (SEVERITY/TRANSMISSION)
-- `is_industry_impact()`: AI/반도체/대기업 + 수출/환율 영향
+#### 5. 필터 체계 (v2 단순화)
+
+- 모든 소스 `noise_only` 일원화 (관련도/매크로/산업 필터 삭제)
+- `is_noise_title()`: 인사/부고/정치 잡음 제거
+- 정치 키워드: 국민의힘, 민주당, 조국혁신당, 선거, 총선, 대선 등
+- 시장 키워드 보호: 환율, 달러, 금리, 증시 등이 있으면 제외 안 함
 
 ### 영향
 
@@ -2486,3 +2486,4 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 - 2026-03-10: ADR-019 작성 (DXY 보조지표 - granularity 기반 2-part merge 전략)
 - 2026-03-12: ADR-020 작성 (DXY 크롤링 아키텍처 전환 — 독립 크롤러에서 Investing 동반 추출로)
 - 2026-03-28: ADR-021 작성 (환율 뉴스 피드 — Redis-only + KB/RSS 병행 수집)
+- 2026-04-01: ADR-021 개정 (v2 단순화 — noise_only 일원화, 24h 윈도우, match_type/flash/category 삭제)
