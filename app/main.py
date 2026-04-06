@@ -1002,7 +1002,7 @@ def _collapse_near_duplicates(items: list, gap_minutes: int = 60) -> list:
 
 @app.get("/api/news", response_model=schemas.NewsResponse)
 async def get_news(
-    limit: int = 50,
+    limit: int = 100,
     hours: float = 24.0,
 ):
     """뉴스 목록 반환 (Redis 캐시 기반, 시간순)"""

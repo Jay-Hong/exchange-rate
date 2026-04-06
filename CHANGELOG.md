@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `[전문]` 기사: KB 상세에서 PDF URL 추출, report_pdf로 분류
   - 초보/상보 near-duplicate collapse (시간 클러스터 방식)
   - Redis-only 저장 (24시간 윈도우, ZSET+HASH)
-  - 순수 시간순 정렬, 기본 limit=50, hours=24
+  - 순수 시간순 정렬, 기본 limit=100, hours=24
   - 스케줄: KB 5분마다 :15초, RSS 5분마다 :45초 (모드 무관)
   - 새 모듈: `app/news/` (sources, filters, fetcher, kb_fetcher, upsert)
   - `app/cache.py` ZSET/HASH 메서드 확장 (bytes→str 디코딩 포함)

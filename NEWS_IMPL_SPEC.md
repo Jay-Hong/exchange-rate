@@ -14,7 +14,7 @@
 **v2 핵심 변경: 대폭 단순화**
 
 - 모든 소스 `noise_only` 일원화 (관련도/매크로/산업 필터 삭제)
-- 윈도우 24시간, 기본 limit 50, 기본 hours 24.0
+- 윈도우 24시간, 기본 limit 100, 기본 hours 24.0
 - match_type 완전 삭제
 - 공개 category 파라미터 삭제
 - flash content_type 삭제 → 제목에 "(본문없음)" + link 유지
@@ -184,7 +184,7 @@ GET /api/news?hours=12
 
 | 파라미터 | 타입 | 기본값 | 범위 |
 |---------|------|--------|------|
-| `limit` | int | 50 | 1~100 (범위 초과 시 clamp) |
+| `limit` | int | 100 | 1~100 (범위 초과 시 clamp) |
 | `hours` | float | 24.0 | 0.5~24.0 (범위 초과 시 clamp) |
 
 > `category` 파라미터 삭제 (v2).
