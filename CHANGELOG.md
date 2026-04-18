@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `crud.get_latest_dxy_rate()` 기반 (realtime granularity, investing > yahoo 우선순위)
   - 초기 연결 메시지 + 후속 broadcast 모두 포함 (`build_rates_payload()` 경유 Redis 캐시 기록)
   - 10초 해상도 live — 기존 `graph_buckets.dxy`(1분 bucket 집계)와 경로 분리
+  - broadcast 트리거 조건 확장: rates 또는 DXY 변화 어느 쪽이든 발화 (`build_rates_payload()` 전체 JSON 비교)
   - `insert_dxy_rate_into_db()`의 rate/source dedup 덕에 timestamp-only broadcast 폭증 없음
   - REST `/api/rates`는 별도 응답 로직이라 스키마 무변
   - 하위 호환: 구 iOS 앱은 Codable이 unknown `indices` 필드를 자동 무시
