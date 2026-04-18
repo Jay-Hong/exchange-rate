@@ -368,7 +368,53 @@ GET /api/graph/{currency}?range=1d|1w|3m|1y
 
 ### 6.3 WebSocket 변경사항
 
-1일 그래프용 마지막 버켓만 전송 (기존 구조 유지 + DXY 추가):
+DXY는 WebSocket payload에서 **두 경로로 병행 제공**됩니다. 역할이 분리되어 있으므로 둘 다 유지.
+
+#### 6.3.1 Live tick 경로 (`data.indices.dxy`)
+
+**목적**: 10초 해상도 realtime 값 제공 (환율 `rates`와 동급의 live tail 역할).
+
+**데이터 소스**: `crud.get_latest_dxy_rate(db)` — realtime granularity의 가장 최근 레코드 1건. `investing > yahoo` 우선순위.
+
+**Payload**:
+
+```json
+{
+  "data": {
+    "rates": [...],
+    "indices": {
+      "dxy": {
+        "rate": 99.234,
+        "timestamp": "2026-04-18T09:07:45.189537+09:00",
+        "source": "investing"
+      }
+    },
+    "metadata": {...}
+  }
+}
+```
+
+**포함 조건**:
+
+- `build_rates_payload()` 내부에서 생성되므로 **Redis `BROADCAST_CACHE_KEY`에도 기록**됨
+- 따라서 WebSocket **초기 연결 메시지에도 포함**됨 (초기 메시지가 Redis 캐시를 그대로 송신)
+- 후속 broadcast에도 매번 포함
+
+**Broadcast 트리거 영향**:
+
+- 기존에는 `rates` 변화만이 broadcast 발화 조건이었음
+- `indices.dxy`가 payload에 들어간 뒤로는 `rates` **또는** `indices.dxy` 변화 어느 쪽이든 broadcast 발화
+- `insert_dxy_rate_into_db()`가 rate/source 변경 시에만 레코드를 남기므로 timestamp-only 불필요 broadcast 폭증 없음
+
+**하위 호환**: 구 iOS 앱은 `ExchangeRateResponse`에 `indices` 필드가 없어 Codable이 unknown field를 자동 무시 → 기존 동작 그대로.
+
+#### 6.3.2 Graph bucket 경로 (`graph_buckets`)
+
+**목적**: 10분 버킷 집계 히스토리 (차트 line/area 렌더링용).
+
+**갱신 주기**: 매분 :03초 Redis `graph:{currency}` refresh 기준 (브로드캐스트는 10초 주기지만 내용물은 1분 해상도).
+
+**Payload** (기존 구조 유지 + DXY 추가):
 
 ```json
 {
@@ -389,9 +435,15 @@ GET /api/graph/{currency}?range=1d|1w|3m|1y
 }
 ```
 
+**포함 조건**:
+
+- `broadcast_rates_once()`에서 `build_rates_payload()` 이후 append되므로 **Redis 캐시에는 기록되지 않음**
+- 따라서 WebSocket **초기 연결 메시지에는 포함되지 않음** (후속 broadcast부터 실림)
+
 > JPY/EUR의 graph_buckets에는 DXY 미포함
 > 장기 그래프 데이터는 WebSocket에 포함하지 않음
 > DXY 버켓 추가로 인한 payload 증가: ~50바이트 (200명 규모에서 무시 가능)
+> Live tick(6.3.1)과 graph bucket(6.3.2)은 서로 다른 해상도/갱신 주기/캐시 경로이므로 양쪽 모두 유지
 
 ### 6.4 캐시 전략
 

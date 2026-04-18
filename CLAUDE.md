@@ -237,7 +237,7 @@ scheduler.add_job(
 **설계 원칙:**
 - APScheduler cron job으로 정확한 시간 보장
 - 크롤러 동기화의 기준 시간
-- 변경사항 있을 때만 실제 전송
+- 변경사항 있을 때만 실제 전송 — trigger 조건: `rates` 또는 `indices.dxy` (DXY live tick) 변화 어느 쪽이든 발화 (`build_rates_payload()`의 JSON 전체 비교)
 
 #### 2. 3-Tier 크롤러 아키텍처 (4단계 모드)
 
@@ -344,6 +344,27 @@ scheduler.add_job(
 ### WebSocket
 
 - `WS /ws` - 실시간 환율 스트리밍 (매분 00, 10, 20, 30, 40, 50초)
+
+**Payload 구조** (`build_rates_payload()` 기반):
+
+```json
+{
+  "type": "rates",
+  "data": {
+    "rates": [ /* 30개 (10 은행 × 3 통화) */ ],
+    "indices": {
+      "dxy": {"rate": 99.234, "timestamp": "2026-04-18T09:07:45.189537+09:00", "source": "investing"}
+    },
+    "metadata": {"updated_at": "...", "currencies": [...], "banks": [...], "total_count": 30}
+  },
+  "graph_buckets": { /* 후속 broadcast에만 append, 초기 메시지엔 없음 */ }
+}
+```
+
+- `data.indices.dxy` — **10초 해상도** DXY live tick. `crud.get_latest_dxy_rate()` 기반 (investing > yahoo). 초기 연결 메시지에도 포함됨 (Redis `BROADCAST_CACHE_KEY`가 `build_rates_payload` 결과 저장).
+- `graph_buckets.usd-krw.dxy` — **분당 :03초** 집계된 10분 bucket 히스토리. 후속 broadcast에서만 append (Redis 캐시 기록 이후 단계).
+- 두 경로는 해상도/갱신 주기/캐시 경로가 달라 **분리 유지**. 상세는 `DESIGN_DXY_GRAPH.md` §6.3 참조.
+- 구 iOS 앱은 `indices` 필드 미인지 시 Codable이 자동 무시 (하위 호환).
 
 ### REST API (폴백용)
 
