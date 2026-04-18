@@ -523,7 +523,7 @@ def get_rates_by_currency(currency: str, db: Session = Depends(get_db)):
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     """WebSocket 실시간 환율 비교 웹페이지 (관리자/디버깅용)"""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/favicon.ico")
@@ -559,7 +559,7 @@ def health_check():
 @app.get("/admin", response_class=HTMLResponse, dependencies=[Depends(verify_admin)])
 def admin_page(request: Request):
     """관리자 대시보드 페이지"""
-    return templates.TemplateResponse("admin.html", {"request": request})
+    return templates.TemplateResponse(request, "admin.html")
 
 
 # ===== 관리자 API 엔드포인트 =====
