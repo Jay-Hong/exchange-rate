@@ -210,17 +210,31 @@ def build_rates_payload(db: SessionLocal) -> dict:
         default=crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
     )
 
+    data_section = {
+        "rates": all_rates,
+        "metadata": {
+            "updated_at": latest_timestamp,
+            "currencies": sorted(currencies),
+            "banks": sorted(banks),
+            "total_count": len(all_rates),
+        },
+    }
+
+    # DXY live tick (investing 우선, yahoo 폴백). insert_dxy_rate_into_db가
+    # rate/source 변경 시에만 레코드를 남기므로 timestamp 변화 = 실제 값 변화.
+    latest_dxy = crud.get_latest_dxy_rate(db)
+    if latest_dxy:
+        data_section["indices"] = {
+            "dxy": {
+                "rate": latest_dxy["rate"],
+                "timestamp": latest_dxy["timestamp"],
+                "source": latest_dxy["source"],
+            }
+        }
+
     return {
         "type": "rates",
-        "data": {
-            "rates": all_rates,
-            "metadata": {
-                "updated_at": latest_timestamp,
-                "currencies": sorted(currencies),
-                "banks": sorted(banks),
-                "total_count": len(all_rates),
-            },
-        },
+        "data": data_section,
     }
 
 
