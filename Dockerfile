@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 패키지 설치
-COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+# Python 패키지 설치 (lockfile 기반 — transitive dep 포함 재현성 보장)
+COPY requirements.lock.txt .
+RUN pip install --no-cache-dir --user -r requirements.lock.txt
 
 # ─────────────────────────────────────
 # Stage 2: Runtime
