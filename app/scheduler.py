@@ -1058,11 +1058,7 @@ def cleanup_old_bank_data():
     db = SessionLocal()
     try:
         deleted_count = crud.delete_old_bank_data(db=db, days=10)
-        logger.info("🧹 은행 데이터 정리 완료", extra={"deleted_count": deleted_count, "vacuum_executed": deleted_count >= 1000})
-
-        if deleted_count >= 1000:
-            logger.info("🗜️ VACUUM 실행 완료")
-
+        logger.info("🧹 은행 데이터 정리 완료", extra={"deleted_count": deleted_count})
     except Exception as e:
         db.rollback()
         logger.error("❌ 데이터 정리 실패", exc_info=True)

@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import List, Dict, Any, Optional
 
 # 서드파티 라이브러리
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func, and_
 
@@ -401,11 +400,7 @@ def delete_old_bank_data(db: Session, days: int = 10) -> int:
 
     db.commit()
 
-    # 1000개 이상 삭제 시 VACUUM 실행
-    if deleted_count >= 1000:
-        db.execute(text("VACUUM"))
-        db.commit()
-
+    # PostgreSQL은 autovacuum이 공간 회수를 자동 처리 (SQLite 시절 수동 VACUUM 제거)
     return deleted_count
 
 
