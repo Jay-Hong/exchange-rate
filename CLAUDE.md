@@ -1031,6 +1031,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 - [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md): 제품 방향 + Decision A~F
 - [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): 백엔드 설계 + 구현 순서 + 기술 부채
+- [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md): iOS/Android 공통 클라이언트 설계 가이드 (RateSource 모델, SourceRegistry, FCM type 분기)
 
 **향후 Phase**:
 
