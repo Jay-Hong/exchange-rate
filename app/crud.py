@@ -329,52 +329,59 @@ def select_latest_bank_rates_from_db(db: Session, pair: str) -> List[Dict[str, A
 def get_all_rates_flat(db: Session) -> List[Dict[str, Any]]:
     """
     모든 환율을 플랫 배열 구조로 반환하는 함수 (모바일/AJAX용)
-    
+
     Args:
         db: 데이터베이스 세션
-        
+
     Returns:
         모든 환율 데이터가 플랫 배열로 구성된 리스트 (ISO 8601 타임스탬프 포함)
     """
     all_rates = []
-    
+
     pairs = SUPPORTED_CURRENCY_PAIRS
-    
+
     for pair in pairs:
         # Investing 데이터 추가
         investing_data = select_a_latest_investing_rate_from_db(db=db, pair=pair)
         if investing_data:
             all_rates.append(investing_data)
-        
+
         # 은행 데이터 추가
         bank_data = select_latest_bank_rates_from_db(db=db, pair=pair)
         all_rates.extend(bank_data)
-    
+
+    # USDT Phase 1: source_rates를 legacy shape로 변환해서 병합
+    all_rates.extend(get_source_rates_as_legacy_format(db=db))
+
     return all_rates
 
 
 def get_rates_by_currency(db: Session, currency: str) -> List[Dict[str, Any]]:
     """
     특정 통화쌍의 모든 환율을 플랫 배열로 반환
-    
+
     Args:
         db: 데이터베이스 세션
-        currency: 통화쌍 (예: 'usd-krw')
-        
+        currency: 통화쌍 (예: 'usd-krw', 'usdt-krw')
+
     Returns:
         해당 통화쌍의 모든 환율 데이터 (ISO 8601 타임스탬프 포함)
     """
     rates = []
-    
+
     # Investing 데이터
     investing_data = select_a_latest_investing_rate_from_db(db=db, pair=currency)
     if investing_data:
         rates.append(investing_data)
-    
+
     # 은행 데이터
     bank_data = select_latest_bank_rates_from_db(db=db, pair=currency)
     rates.extend(bank_data)
-    
+
+    # USDT Phase 1: source_rates에서 asset=currency 엔트리도 포함 (usdt-krw 등)
+    source_data = get_source_rates_as_legacy_format(db=db, asset=currency)
+    rates.extend(source_data)
+
     return rates
 
 
@@ -1570,3 +1577,168 @@ def process_rate_alerts(
             logger.exception("무효 토큰 삭제 실패", extra={"error": str(e)})
 
     return sent_count
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USDT Phase 1: source_rates CRUD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def insert_source_rate_if_changed(
+    db: Session,
+    source: str,
+    asset: str,
+    rate: float,
+) -> bool:
+    """
+    source_rates에 변경 시에만 INSERT.
+
+    기존 bank/investing 저장 패턴과 동일하게 마지막 레코드와 비교 후 변경 시만 저장.
+
+    Returns:
+        True: INSERT 수행, False: 변경 없어 스킵
+    """
+    last = (
+        db.query(models.SourceRate)
+        .filter(
+            models.SourceRate.source == source,
+            models.SourceRate.asset == asset,
+        )
+        .order_by(
+            models.SourceRate.timestamp.desc(),
+            models.SourceRate.id.desc(),
+        )
+        .first()
+    )
+
+    if last is not None and last.rate == rate:
+        return False
+
+    record = models.SourceRate(source=source, asset=asset, rate=rate)
+    db.add(record)
+    db.commit()
+    return True
+
+
+def get_latest_source_rate(
+    db: Session,
+    source: str,
+    asset: str,
+) -> Optional[Dict[str, Any]]:
+    """특정 (source, asset)의 최신 1건 조회. legacy bank/currency shape로 반환."""
+    record = (
+        db.query(models.SourceRate)
+        .filter(
+            models.SourceRate.source == source,
+            models.SourceRate.asset == asset,
+        )
+        .order_by(
+            models.SourceRate.timestamp.desc(),
+            models.SourceRate.id.desc(),
+        )
+        .first()
+    )
+
+    if record is None:
+        return None
+
+    return {
+        "currency": record.asset,
+        "bank": record.source,
+        "rate": record.rate,
+        "timestamp": to_kst_isoformat(record.timestamp),
+    }
+
+
+def get_source_rates_as_legacy_format(
+    db: Session,
+    asset: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    source_rates를 기존 bank/currency shape로 변환해서 반환.
+
+    레거시 API 호환성 어댑터. `/api/rates`, `/api/rates/{currency}`, WebSocket
+    `rates` 배열에서 호출. 각 (source, asset) 조합별 최신 1건.
+
+    반환 순서는 `source_registry`의 `sort_order` 기준 (기본 표시 순서 보장).
+    registry에 없는 소스는 방어적으로 맨 뒤에 배치.
+
+    Args:
+        db: 세션
+        asset: 지정 시 해당 asset만 반환. None이면 전체.
+
+    Returns:
+        [{"currency": asset, "bank": source, "rate": ..., "timestamp": ...}, ...]
+    """
+    # 함수 내부 import — 순환 참조 방지 (source_registry는 crud에 의존하지 않음)
+    from app import source_registry
+
+    # 각 (source, asset)별 최신 1건을 결정적으로 선택
+    query = db.query(
+        models.SourceRate.id,
+        func.row_number().over(
+            partition_by=(models.SourceRate.source, models.SourceRate.asset),
+            order_by=[
+                models.SourceRate.timestamp.desc(),
+                models.SourceRate.id.desc(),
+            ],
+        ).label("rn"),
+    )
+
+    if asset is not None:
+        query = query.filter(models.SourceRate.asset == asset)
+
+    ranked = query.subquery()
+
+    records = (
+        db.query(models.SourceRate)
+        .join(
+            ranked,
+            and_(
+                models.SourceRate.id == ranked.c.id,
+                ranked.c.rn == 1,
+            ),
+        )
+        .all()
+    )
+
+    entries = [
+        {
+            "currency": record.asset,
+            "bank": record.source,
+            "rate": record.rate,
+            "timestamp": to_kst_isoformat(record.timestamp),
+        }
+        for record in records
+    ]
+
+    # registry의 sort_order 기준 정렬 (기본 표시 순서 보장).
+    # registry에 없는 소스는 float('inf')로 맨 뒤, 내부적으로는 bank 이름으로 타이 브레이크.
+    def sort_key(entry: Dict[str, Any]) -> tuple:
+        definition = source_registry.get_source_definition(entry["bank"], entry["currency"])
+        if definition is None:
+            return (float('inf'), entry["bank"])
+        return (definition.sort_order, entry["bank"])
+
+    entries.sort(key=sort_key)
+    return entries
+
+
+def delete_old_source_rates(db: Session, days: int = 10) -> int:
+    """
+    지정된 일수 이상 지난 source_rates 데이터 삭제 (기존 bank cleanup 패턴과 동일).
+
+    Args:
+        db: 세션
+        days: 보관할 일수 (기본값: 10일)
+
+    Returns:
+        삭제된 레코드 개수
+    """
+    cutoff_date = models.get_utc_now() - timedelta(days=days)
+
+    deleted_count = db.query(models.SourceRate).filter(
+        models.SourceRate.timestamp < cutoff_date
+    ).delete()
+
+    db.commit()
+    return deleted_count

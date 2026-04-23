@@ -1065,6 +1065,19 @@ def cleanup_old_bank_data():
     finally:
         db.close()
 
+
+def cleanup_old_source_rates():
+    """10일 이상 지난 source_rates 데이터 삭제 (USDT Phase 1)."""
+    db = SessionLocal()
+    try:
+        deleted_count = crud.delete_old_source_rates(db=db, days=10)
+        logger.info("🧹 source_rates 정리 완료", extra={"deleted_count": deleted_count})
+    except Exception:
+        db.rollback()
+        logger.error("❌ source_rates 정리 실패", exc_info=True)
+    finally:
+        db.close()
+
 def cleanup_old_user_devices():
     """
     오래된 user_devices 정리 (Retention cleanup)
@@ -1407,6 +1420,29 @@ def start_scheduler():
 
     # 은행 데이터 정리: 매일 새벽 03:30:01시
     scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=30, second=1, timezone=KST), id="cleanup_old_bank_data")
+
+    # source_rates 정리: 매일 새벽 03:31:01시 (USDT Phase 1, 10일 보관)
+    scheduler.add_job(cleanup_old_source_rates, CronTrigger(hour=3, minute=31, second=1, timezone=KST), id="cleanup_old_source_rates")
+
+    # ═════════════════════════════════════════════════════════════
+    # USDT 거래소 수집: 매분 06,16,26,36,46,56초 (Broadcasting 4초 전)
+    # ═════════════════════════════════════════════════════════════
+    # - 24/7 상시 실행 (크립토는 시간 제약 없음, 모드 무관)
+    # - 단일 job에서 5개 거래소 병렬 fan-out
+    # - 변경 시에만 source_rates INSERT
+    # ─────────────────────────────────────────────────────────────
+    from app.crawlers.usdt_sources import collect_usdt_rates
+
+    scheduler.add_job(
+        collect_usdt_rates,
+        CronTrigger(second='6,16,26,36,46,56', timezone=KST),
+        id="task_usdt_sources",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=5,
+    )
+
+    logger.info("✅ USDT 수집 스케줄 등록 (매분 06,16,26,36,46,56초)")
 
     # ═════════════════════════════════════════════════════════════
     # 그래프 캐시 갱신: 매분 03초 (Phase 1A)
