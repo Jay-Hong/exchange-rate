@@ -1772,15 +1772,33 @@ def build_source_notification_setting_response(
 
 
 def _validate_phase1_source_asset(source: str, asset: str) -> None:
-    """source_registry에 등록된 phase1_enabled 조합인지 검증.
+    """Phase 1 source 알림 대상 검증.
 
-    허용 안 된 조합이면 400 Bad Request.
+    허용 대상:
+    - phase1_enabled=True
+    - category == "exchange" (거래소만)
+
+    reference 소스(investing, kb, hana)는 기존 `/api/notification-settings`를 사용해야 한다.
+    이유: process_source_rate_alerts는 usdt_sources 크롤러에서만 호출되므로,
+    reference 소스를 허용하면 생성은 되지만 발송되지 않는 "dead alert"가 된다.
+
+    derivative(KRX 등)는 Phase 2에서 별도 정책으로 허용 여부 결정.
     """
     from app import source_registry
-    if not source_registry.is_phase1_source(source, asset):
+    definition = source_registry.get_source_definition(source, asset)
+    if definition is None or not definition.phase1_enabled:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported source/asset combination: {source}:{asset}",
+        )
+    if definition.category != "exchange":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Source alerts are only supported for exchange sources in Phase 1 "
+                f"(got category={definition.category}). "
+                f"Use /api/notification-settings for bank/investing alerts."
+            ),
         )
 
 

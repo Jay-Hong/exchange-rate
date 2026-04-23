@@ -151,18 +151,25 @@ class DeleteResponse(BaseModel):
 class SourceNotificationSettingRequest(BaseModel):
     """Source 기반 알림 설정 생성 요청.
 
-    source/asset은 source_registry에 등록된 phase1_enabled 조합만 허용.
-    서버에서 source_registry.is_phase1_source()로 검증한다.
+    Phase 1 허용 대상: 거래소(category=exchange) + usdt-krw 조합만.
+    예: upbit/usdt-krw, bithumb/usdt-krw, coinone/usdt-krw, gopax/usdt-krw, korbit/usdt-krw
+
+    investing/kb/hana 같은 reference 소스는 기존 `/api/notification-settings`를 사용해야 한다.
+    Phase 1에서 reference 소스를 여기에 등록해도 발송 루프가 연결되어 있지 않아 발동되지 않는다.
+    서버에서 category=="exchange" 기준으로 400 응답.
     """
-    source: str = Field(..., min_length=1, description="소스 식별자 (예: upbit, kb)")
-    asset: str = Field(..., min_length=1, description="자산 식별자 (예: usdt-krw, usd-krw)")
+    source: str = Field(..., min_length=1, description="거래소 식별자 (upbit/bithumb/coinone/gopax/korbit)")
+    asset: str = Field(..., min_length=1, description="자산 식별자 (Phase 1: usdt-krw)")
     condition: ConditionEnum = Field(..., description="조건 (above/below)")
     threshold: float = Field(..., gt=0, description="목표 환율")
     is_enabled: bool = Field(default=True, description="활성화 여부 (기본: True)")
 
 
 class SourceNotificationSettingUpdateRequest(BaseModel):
-    """Source 기반 알림 설정 수정 요청 (PUT - 부분 업데이트)."""
+    """Source 기반 알림 설정 수정 요청 (PUT - 부분 업데이트).
+
+    source/asset 변경 시에도 Phase 1 정책(category=="exchange") 재검증된다.
+    """
     source: Optional[str] = Field(None, min_length=1)
     asset: Optional[str] = Field(None, min_length=1)
     condition: Optional[ConditionEnum] = None
