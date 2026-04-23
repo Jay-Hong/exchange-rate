@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **USDT Phase 1 data feed + source 알림 API** (2026-04-23):
+  - **거래소 5종 USDT/KRW 수집** (업비트, 빗썸, 코인원, 고팍스, 코빗)
+    - 단일 scheduler job `usdt_sources` (매분 06,16,26,36,46,56초, 24/7 상시)
+    - ThreadPoolExecutor fan-out (5개 REST API 병렬, per-source 2s timeout)
+    - 변경 시에만 INSERT 정책 (insert-if-changed)
+  - **새 테이블 3개**:
+    - `source_rates` (source + asset + rate + timestamp, 10일 보관)
+    - `source_notification_settings` (source/asset 기반 알림 설정, 기존 notification_settings와 분리)
+    - `source_notification_logs` (알림 발송 히스토리, success/error_message 포함)
+  - **신규 모듈**:
+    - `app/source_registry.py` (SourceDefinition 데이터클래스, 9개 소스 메타데이터)
+    - `app/crawlers/usdt_sources.py` (USDT 크롤러)
+  - **기존 API 확장 (신규 endpoint 없음)**:
+    - `/api/rates`: `rates` 배열에 USDT 엔트리 포함 (`currency=usdt-krw, bank=upbit/bithumb/...`)
+    - `/api/rates/{currency}`: `/api/rates/usdt-krw` 지원
+    - WebSocket `rates` 배열 자동 확장 (`build_rates_payload()` 경유)
+    - `get_source_rates_as_legacy_format()` 어댑터로 source/asset → bank/currency 변환
+    - registry sort_order 기준 정렬 (업비트 → 빗썸 → 코인원 → 고팍스 → 코빗)
+  - **신규 API** (`/api/source-notification-settings`):
+    - POST/GET/PUT/DELETE 4개 엔드포인트
+    - `is_phase1_source()` + `category=="exchange"` 서버측 검증 (dead alert 방지)
+    - reference 소스(investing/kb/hana)는 기존 `/api/notification-settings` 사용 안내
+  - **알림 발송 루프**: `process_source_rate_alerts()` (usdt_sources에서 호출)
+    - FCM payload type: `source_rate_alert` (기존 `rate_alert`와 구분)
+    - 1회성 발송 (triggered=True + enabled=False)
+    - 성공/실패 모두 `source_notification_logs` 기록
+    - 표시명은 `source_registry.display_name` 사용
+  - **계정 삭제 확장** (App Store 5.1.1(v) 컴플라이언스):
+    - `DELETE /api/user/me`에 `source_notification_settings`, `source_notification_logs` 삭제 추가
+  - **cleanup job**: `cleanup_old_source_rates` 매일 03:31 (기존 bank cleanup 패턴 재사용)
+  - **설계 문서**: `USDT_TAB_PROPOSAL.md`, `USDT_PHASE1_DESIGN.md`
+  - **하위 호환성**: 기존 iOS/Android 앱은 usdt-krw 엔트리를 currency 필터링으로 자동 제외, Codable non-optional 필드(banks/currencies)는 유지
+
 - **WebSocket DXY live tick** (`data.indices.dxy`):
   - `crud.get_latest_dxy_rate()` 기반 (realtime granularity, investing > yahoo 우선순위)
   - 초기 연결 메시지 + 후속 broadcast 모두 포함 (`build_rates_payload()` 경유 Redis 캐시 기록)
@@ -45,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **USDT scheduler job 제거 버그** (2026-04-23, `6a86c01`):
+  - 앱 시작 시 `start_scheduler`에서 `task_usdt_sources` job 등록 → 직후 `switch_jobs()`가 `task_` prefix 전체 제거
+  - mode-agnostic 상시 실행 의도였으나 첫 모드 전환 시점에 즉시 삭제됨
+  - 수정: job id `task_usdt_sources` → `usdt_sources` (prefix 분리)
+  - Docker/EC2 런타임 검증에서 발견 (로컬 유닛 테스트로는 잡히지 않음)
+- **USDT source 알림 dead alert 버그** (2026-04-23, `bc42bb4`):
+  - `_validate_phase1_source_asset()`이 `is_phase1_source()`만 검사하여 reference 소스(investing/kb/hana)도 허용
+  - 하지만 `process_source_rate_alerts`는 `usdt_sources` 크롤러에서만 호출되므로 reference 알림은 영원히 발동 안 됨 (dead alert)
+  - 수정: `category == "exchange"` 검증 추가, reference는 400 + 기존 API 안내
 - **1w DXY carry-forward 버그**: 2-part merge 전략에서 hourly gap 구간의 realtime이 누락되는 문제
   - 원인: hourly 마지막 timestamp 이후부터만 realtime을 조회하여, gap 구간의 realtime이 스킵됨
   - 수정: 1w를 **full-window 전략**으로 전환 (hourly + realtime 전체 7일 단일 쿼리, hourly > realtime dedup)

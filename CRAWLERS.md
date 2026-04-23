@@ -142,6 +142,55 @@
 - **3차**: `dxy.py` → Yahoo Finance (`yfinance`, ticker: `DX-Y.NYB`)
 - **폴백 쿨다운**: 60초 (retry storm 방지, 셀렉터 장기 파손 대비)
 
+### 🪙 Group E: 가상자산 거래소 (USDT Phase 1, 2026-04-23)
+
+| 거래소 | API 엔드포인트 | price 필드 |
+| --- | --- | --- |
+| **업비트** | `GET https://api.upbit.com/v1/ticker?markets=KRW-USDT` | `[0].trade_price` |
+| **빗썸** | `GET https://api.bithumb.com/v1/ticker?markets=KRW-USDT` | `[0].trade_price` |
+| **코인원** | `GET https://api.coinone.co.kr/public/v2/ticker_utc_new/KRW/USDT` | `tickers[0].last` |
+| **고팍스** | `GET https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker` | `price` |
+| **코빗** | `GET https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw` | `data[0].close` |
+
+**통합 크롤러**: `app/crawlers/usdt_sources.py`
+
+**특징**:
+
+- **단일 통합 크롤러**: 5개 거래소를 하나의 scheduler job(`usdt_sources`)에서 병렬 처리
+- **Fan-out**: `ThreadPoolExecutor(max_workers=5)`, 개별 timeout 2초
+- **24/7 상시 실행**: 크립토는 시간 제약 없음, 4단계 모드(IN/BREAK1/BREAK2/OUT) 무관
+- **Cron**: `second='6,16,26,36,46,56'` (Broadcasting 4초 전)
+- **공개 API**: 모든 거래소 인증 없이 REST로 조회 가능
+- **변경 시에만 INSERT**: `insert_source_rate_if_changed()` (기존 bank 크롤러 패턴 재사용)
+
+**데이터 모델**:
+
+- 은행 환율과 다른 테이블 (`source_rates`) 사용 — Decision E에 따라 기존 bank 세계와 분리
+- DB 내부: `source + asset` (예: `source="upbit"`, `asset="usdt-krw"`)
+- API 응답: `bank + currency`로 어댑터 변환 (`get_source_rates_as_legacy_format()`)
+- 정렬: `source_registry.sort_order` 기준 (업비트 → 빗썸 → 코인원 → 고팍스 → 코빗)
+
+**스케줄러 job id 주의**:
+
+- ⚠️ **`task_` prefix 사용 금지**: `switch_jobs()`가 모드 전환 시 `task_` prefix 전체 제거
+- USDT는 mode-agnostic이므로 `id="usdt_sources"`로 등록 (과거 `task_usdt_sources`에서 수정됨)
+- 해당 버그 수정 이력: `6a86c01 fix: USDT scheduler job이 모드 전환 시 제거되는 버그 수정`
+
+**장애 격리**:
+
+- 개별 거래소 실패가 전체 job을 실패시키지 않음
+- `_fetch_one()`에서 `(source, rate, error)` tuple로 결과 반환
+- 전체 실패 시 "USDT 수집 전체 실패" 로그 + 저장 스킵
+- 부분 실패 시 "USDT 일부 소스 수집 실패" warning + 성공한 소스만 저장
+
+**source_registry.py**:
+
+- 9개 소스 메타데이터 (source, asset, display_name, category, sort_order, freshness_seconds, phase1_enabled)
+- `is_phase1_source()` — 등록되고 활성화된 조합인지 검증
+- `get_source_definition()` — (source, asset) lookup
+- Phase 1 활성: 5개 거래소 + investing/kb/hana 참조값
+- Phase 2 예약: krx (phase1_enabled=False, 자리만 확보)
+
 ---
 
 ## 상세 가이드

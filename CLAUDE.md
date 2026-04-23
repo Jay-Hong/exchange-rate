@@ -64,10 +64,12 @@
 - Investing.com (기준 환율)
 - DXY (달러지수, USD/KRW 그래프 보조지표) — investing.py에서 환율과 동시 추출 (폴백: /currencies/us-dollar-index, Yahoo Finance)
 - 9개 은행: KB, 하나, 신한, 우리, IBK, NH, SC제일, 부산, 씨티
+- **가상자산 거래소 5종** (USDT/KRW, Phase 1): 업비트, 빗썸, 코인원, 고팍스, 코빗
 
 ### 지원 통화
 
 - USD-KRW, JPY-KRW, EUR-KRW
+- **USDT-KRW** (Phase 1, 가상자산 거래소 기반)
 
 ## 기술 스택
 
@@ -158,11 +160,66 @@ granularity   TEXT NOT NULL          -- 'realtime' | 'hourly' | 'daily'
 - `notification_settings` - 알림 조건 설정 (bank, currency, condition, threshold, enabled, triggered)
 - `notification_logs` - 알림 발송 히스토리 (중복 방지)
 
+### USDT Phase 1 — Source 기반 테이블 (2026-04-23)
+
+> 💡 **설계 원칙**: 기존 bank/investing 세계와 분리. DB는 `source + asset`, 레거시 API 응답 시에만 `bank + currency`로 변환 (Decision E)
+> 📖 **상세 설계**: [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md)
+
+#### source_rates (Phase 1)
+
+```sql
+id          INTEGER PRIMARY KEY
+source      TEXT NOT NULL         -- 'upbit' | 'bithumb' | 'coinone' | 'gopax' | 'korbit'
+asset       TEXT NOT NULL         -- 'usdt-krw' (Phase 2: 'usd-krw-futures' 예정)
+rate        REAL NOT NULL
+timestamp   DATETIME NOT NULL (UTC)
+
+-- 인덱스: (source, asset, timestamp)
+```
+
+#### source_notification_settings (Phase 1)
+
+```sql
+id                  INTEGER PRIMARY KEY
+user_id             TEXT NOT NULL (INDEX)
+source              TEXT NOT NULL
+asset               TEXT NOT NULL
+condition           TEXT NOT NULL         -- 'above' | 'below'
+threshold           REAL NOT NULL
+enabled             BOOLEAN DEFAULT TRUE
+triggered           BOOLEAN DEFAULT FALSE
+last_notified_at    DATETIME
+last_notified_rate  REAL
+created_at          DATETIME
+updated_at          DATETIME
+
+-- 인덱스: (source, asset)
+```
+
+#### source_notification_logs (Phase 1)
+
+```sql
+id              INTEGER PRIMARY KEY
+user_id         TEXT NOT NULL (INDEX)
+setting_id      INTEGER NULL          -- 설정 삭제 후에도 로그 유지
+source          TEXT NOT NULL
+asset           TEXT NOT NULL
+condition       TEXT NOT NULL
+threshold       REAL NOT NULL
+triggered_rate  REAL NOT NULL
+success         BOOLEAN NOT NULL
+error_message   TEXT
+sent_at         DATETIME
+```
+
+**source_registry**: 9개 소스 메타데이터는 `app/source_registry.py`의 `SourceDefinition` dataclass에서 관리 (canonical key는 DB 저장 안 함, 필요 시 `f"{source}:{asset}"`로 조합)
+
 ## 데이터 관리 정책
 
 - **은행 데이터**: 10일분만 유지 (단기 비교용)
 - **인베스팅 데이터**: 장기 보관 (그래프/분석용)
 - **DXY 데이터**: 장기 보관 (그래프 보조지표용, daily/hourly/realtime 구분)
+- **source_rates (USDT)**: 10일분만 유지 (은행 데이터와 동일 정책, Phase 2에서 rollup 추가 예정)
 - **저장 조건**: 변경사항 있을 때만 INSERT (중복 방지)
 
 ## 스케줄링 시스템
@@ -616,6 +673,7 @@ exchange-rate/
 │   ├── cache.py             # Redis 클라이언트 (Circuit Breaker) - Phase 1.7
 │   ├── main.py              # FastAPI 서버, WebSocket
 │   ├── scheduler.py         # APScheduler, 4단계 모드 전환
+│   ├── source_registry.py   # USDT Phase 1 source 메타데이터 (SourceDefinition)
 │   │
 │   ├── crawlers/            # 크롤러 도메인 (2025-10-25 리팩토링)
 │   │   ├── __init__.py
@@ -632,7 +690,8 @@ exchange-rate/
 │   │   ├── sc.py            # SC제일은행 크롤러
 │   │   ├── bs.py            # 부산은행 크롤러
 │   │   ├── citi.py          # 씨티은행 크롤러
-│   │   └── dxy.py           # DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance) - Phase 1A
+│   │   ├── dxy.py           # DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance) - Phase 1A
+│   │   └── usdt_sources.py  # USDT/KRW 5개 거래소 통합 크롤러 (Phase 1, fan-out)
 │   │
 │   ├── admin/               # 관리자 도메인 (2025-10-25 리팩토링)
 │   │   ├── __init__.py
@@ -928,6 +987,55 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - `app/news/upsert.py`: 공통 Redis upsert (KB↔RSS 병합 규칙)
 
 **구현 참고 문서**: [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) (임시, 안정화 후 삭제 예정)
+
+### USDT Phase 1: 테더 탭 백엔드 foundation ✅ 완료 (2026-04-23)
+
+**배경**: 김치프리미엄 전략(KRX 선물 매도 + USDT 매수 헷지) 사용자를 위한 거래소 간 USDT/KRW 비교
+
+**설계 원칙** (Decision E):
+
+- 기존 bank/investing 세계는 유지 (API/앱 호환성)
+- 새 source 기반 세계를 별도 도입 (`source + asset`)
+- API 표면은 `bank + currency`로 어댑터 변환 (기존 클라이언트 호환)
+
+**추가된 기능**:
+
+- **거래소 5종 수집**: 업비트, 빗썸, 코인원, 고팍스, 코빗 USDT/KRW (REST polling 10초, 24/7)
+- **새 데이터 모델**: `source_rates`, `source_notification_settings`, `source_notification_logs`
+- **기존 API 확장**: `/api/rates`, `/api/rates/usdt-krw`, WebSocket `rates` 배열에 usdt-krw 엔트리 자동 포함
+- **Source 알림 API**: `/api/source-notification-settings` (4종, 거래소 전용, reference는 400 + 기존 API 안내)
+- **10일 보관 cleanup**: 매일 03:31
+
+**알림 API**:
+
+- `POST /api/source-notification-settings` - source 기반 알림 생성 (category=exchange만 허용)
+- `GET /api/source-notification-settings` - 알림 설정 조회 (asset 필터 지원)
+- `PUT /api/source-notification-settings/{id}` - 알림 설정 수정 (source/asset 변경 시 재검증)
+- `DELETE /api/source-notification-settings/{id}` - 알림 설정 삭제 (멱등성)
+
+**핵심 파일**:
+
+- `app/source_registry.py`: SourceDefinition 데이터클래스 (9개 소스 메타데이터, canonical key는 DB 저장 안 함)
+- `app/crawlers/usdt_sources.py`: 5개 거래소 통합 크롤러 (ThreadPoolExecutor fan-out)
+- `app/models.py`: SourceRate, SourceNotificationSetting, SourceNotificationLog
+- `app/crud.py`: source CRUD + `get_source_rates_as_legacy_format` 어댑터 + `process_source_rate_alerts`
+
+**FCM payload type**: `source_rate_alert` (기존 `rate_alert`와 구분, 기존 앱은 unknown type 무시)
+
+**알려진 기술 부채**:
+
+- `metadata.banks` / `metadata.currencies` dead fields (iOS/Android에서 파싱만 되고 사용 안 됨, non-optional이라 즉시 제거 불가)
+- 상세: [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md#known-tech-debt)
+
+**설계/구현 문서**:
+
+- [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md): 제품 방향 + Decision A~F
+- [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): 백엔드 설계 + 구현 순서 + 기술 부채
+
+**향후 Phase**:
+
+- Phase 2: 테더 탭 그래프 (DXY와 동일한 rollup 전략), KRX 달러선물 (재배포 권리 확인 후)
+- Phase 3: 비교 알림 (`comparison_alerts` 스키마는 Phase 1 설계 문서에서 잠김)
 
 ### Phase 3: 고급 기능 (사용자 500명+, 예정)
 - 통계 & 분석 (Chart.js, 성공률 그래프)
