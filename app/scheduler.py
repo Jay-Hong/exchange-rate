@@ -1430,13 +1430,15 @@ def start_scheduler():
     # - 24/7 상시 실행 (크립토는 시간 제약 없음, 모드 무관)
     # - 단일 job에서 5개 거래소 병렬 fan-out
     # - 변경 시에만 source_rates INSERT
+    # - job id는 `task_` prefix를 쓰지 않는다. switch_jobs()가 모드 전환 시
+    #   `task_` prefix 모든 job을 제거하기 때문. USDT는 mode-agnostic이라 제거되면 안 됨.
     # ─────────────────────────────────────────────────────────────
     from app.crawlers.usdt_sources import collect_usdt_rates
 
     scheduler.add_job(
         collect_usdt_rates,
         CronTrigger(second='6,16,26,36,46,56', timezone=KST),
-        id="task_usdt_sources",
+        id="usdt_sources",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=5,
