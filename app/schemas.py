@@ -145,6 +145,56 @@ class DeleteResponse(BaseModel):
 
 
 # ============================================================
+# USDT Phase 1: Source 기반 알림 스키마
+# ============================================================
+
+class SourceNotificationSettingRequest(BaseModel):
+    """Source 기반 알림 설정 생성 요청.
+
+    source/asset은 source_registry에 등록된 phase1_enabled 조합만 허용.
+    서버에서 source_registry.is_phase1_source()로 검증한다.
+    """
+    source: str = Field(..., min_length=1, description="소스 식별자 (예: upbit, kb)")
+    asset: str = Field(..., min_length=1, description="자산 식별자 (예: usdt-krw, usd-krw)")
+    condition: ConditionEnum = Field(..., description="조건 (above/below)")
+    threshold: float = Field(..., gt=0, description="목표 환율")
+    is_enabled: bool = Field(default=True, description="활성화 여부 (기본: True)")
+
+
+class SourceNotificationSettingUpdateRequest(BaseModel):
+    """Source 기반 알림 설정 수정 요청 (PUT - 부분 업데이트)."""
+    source: Optional[str] = Field(None, min_length=1)
+    asset: Optional[str] = Field(None, min_length=1)
+    condition: Optional[ConditionEnum] = None
+    threshold: Optional[float] = Field(None, gt=0)
+    is_enabled: Optional[bool] = None
+
+
+class SourceNotificationSettingResponse(BaseModel):
+    """Source 기반 알림 설정 응답."""
+    id: int
+    user_id: str
+    source: str
+    asset: str
+    condition: str  # "above" or "below"
+    threshold: float
+    is_enabled: bool
+    triggered: bool
+    created_at: str  # ISO 8601
+    updated_at: Optional[str] = None
+    triggered_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SourceNotificationSettingsListResponse(BaseModel):
+    """Source 기반 알림 설정 목록 응답."""
+    settings: List[SourceNotificationSettingResponse]
+    total_count: int
+
+
+# ============================================================
 # News: 뉴스 피드 스키마
 # ============================================================
 

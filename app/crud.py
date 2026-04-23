@@ -1742,3 +1742,460 @@ def delete_old_source_rates(db: Session, days: int = 10) -> int:
 
     db.commit()
     return deleted_count
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USDT Phase 1: source_notification_settings CRUD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def create_source_notification_setting(
+    db: Session,
+    user_id: str,
+    source: str,
+    asset: str,
+    condition: str,
+    threshold: float,
+    is_enabled: bool = True,
+) -> models.SourceNotificationSetting:
+    """
+    Source 기반 알림 설정 생성 (중복 방지).
+
+    기존 NotificationSetting과 동일한 멱등성 정책을 따른다:
+    - 같은 (user_id, source, asset, condition, threshold) 조합이 있으면 기존 설정 업데이트
+    - is_enabled=True 재활성화 시 triggered 초기화 (재알림 가능)
+    - is_enabled=False면 triggered 유지 (발송됨 상태 보존)
+    """
+    existing = db.query(models.SourceNotificationSetting).filter(
+        models.SourceNotificationSetting.user_id == user_id,
+        models.SourceNotificationSetting.source == source,
+        models.SourceNotificationSetting.asset == asset,
+        models.SourceNotificationSetting.condition == condition,
+        models.SourceNotificationSetting.threshold == threshold,
+    ).first()
+
+    if existing:
+        existing.enabled = is_enabled
+        if is_enabled:
+            existing.triggered = False
+            existing.last_notified_at = None
+            existing.last_notified_rate = None
+        existing.updated_at = models.get_utc_now()
+        db.commit()
+        db.refresh(existing)
+        logger.info(
+            "source 알림 설정 재활성화 (중복)" if is_enabled else "source 알림 설정 비활성화 (중복)",
+            extra={
+                "user_id": user_id[:8] + "...",
+                "setting_id": existing.id,
+                "source": source,
+                "asset": asset,
+                "is_enabled": is_enabled,
+            },
+        )
+        return existing
+
+    setting = models.SourceNotificationSetting(
+        user_id=user_id,
+        source=source,
+        asset=asset,
+        condition=condition,
+        threshold=threshold,
+        enabled=is_enabled,
+        triggered=False,
+    )
+    db.add(setting)
+    db.commit()
+    db.refresh(setting)
+
+    logger.info(
+        "source 알림 설정 생성",
+        extra={
+            "user_id": user_id[:8] + "...",
+            "source": source,
+            "asset": asset,
+            "condition": condition,
+            "threshold": threshold,
+            "is_enabled": is_enabled,
+            "setting_id": setting.id,
+        },
+    )
+    return setting
+
+
+def get_source_notification_settings(
+    db: Session,
+    user_id: str,
+) -> List[models.SourceNotificationSetting]:
+    """사용자의 모든 source 기반 알림 설정 조회."""
+    return db.query(models.SourceNotificationSetting).filter(
+        models.SourceNotificationSetting.user_id == user_id
+    ).order_by(models.SourceNotificationSetting.created_at.desc()).all()
+
+
+def get_source_notification_setting_by_id(
+    db: Session,
+    setting_id: int,
+    user_id: str,
+) -> Optional[models.SourceNotificationSetting]:
+    """특정 source 알림 설정 조회 (소유권 검증 포함)."""
+    return db.query(models.SourceNotificationSetting).filter(
+        models.SourceNotificationSetting.id == setting_id,
+        models.SourceNotificationSetting.user_id == user_id,
+    ).first()
+
+
+def update_source_notification_setting(
+    db: Session,
+    setting_id: int,
+    user_id: str,
+    source: Optional[str] = None,
+    asset: Optional[str] = None,
+    condition: Optional[str] = None,
+    threshold: Optional[float] = None,
+    enabled: Optional[bool] = None,
+) -> Optional[models.SourceNotificationSetting]:
+    """
+    Source 기반 알림 설정 수정 (PUT - 부분 업데이트).
+
+    값이 실제로 변경된 경우에만 triggered 초기화. 기존 NotificationSetting 규칙과 동일.
+    """
+    setting = get_source_notification_setting_by_id(db, setting_id, user_id)
+    if not setting:
+        return None
+
+    should_reset_triggered = False
+
+    if source is not None:
+        if source != setting.source:
+            should_reset_triggered = True
+        setting.source = source
+
+    if asset is not None:
+        if asset != setting.asset:
+            should_reset_triggered = True
+        setting.asset = asset
+
+    if condition is not None:
+        if condition != setting.condition:
+            should_reset_triggered = True
+        setting.condition = condition
+
+    if threshold is not None:
+        if threshold != setting.threshold:
+            should_reset_triggered = True
+        setting.threshold = threshold
+
+    if enabled is not None:
+        if enabled and not setting.enabled:
+            should_reset_triggered = True
+        setting.enabled = enabled
+
+    if should_reset_triggered:
+        setting.triggered = False
+        setting.last_notified_at = None
+        setting.last_notified_rate = None
+        logger.info(
+            "source 알림 설정 재활성화 (조건 변경)",
+            extra={"setting_id": setting_id, "triggered_reset": True},
+        )
+
+    setting.updated_at = models.get_utc_now()
+    db.commit()
+    db.refresh(setting)
+
+    logger.info(
+        "source 알림 설정 수정",
+        extra={
+            "setting_id": setting_id,
+            "source": setting.source,
+            "asset": setting.asset,
+            "condition": setting.condition,
+            "threshold": setting.threshold,
+            "enabled": setting.enabled,
+            "triggered": setting.triggered,
+        },
+    )
+    return setting
+
+
+def delete_source_notification_setting(
+    db: Session,
+    setting_id: int,
+    user_id: str,
+) -> bool:
+    """Source 기반 알림 설정 삭제."""
+    deleted = db.query(models.SourceNotificationSetting).filter(
+        models.SourceNotificationSetting.id == setting_id,
+        models.SourceNotificationSetting.user_id == user_id,
+    ).delete()
+    db.commit()
+
+    if deleted:
+        logger.info(
+            "source 알림 설정 삭제",
+            extra={"setting_id": setting_id, "user_id": user_id[:8] + "..."},
+        )
+    return deleted > 0
+
+
+# ─────────────────────────────────────────────────────────────
+# Source 기반 알림 발송용 쿼리 + 처리
+# ─────────────────────────────────────────────────────────────
+
+def get_triggered_source_settings_for_rate(
+    db: Session,
+    source: str,
+    asset: str,
+    rate: float,
+) -> List[Dict[str, Any]]:
+    """특정 source/asset 환율에 대해 조건 충족된 알림 설정 목록 + devices 조회."""
+    settings = db.query(models.SourceNotificationSetting).filter(
+        models.SourceNotificationSetting.source == source,
+        models.SourceNotificationSetting.asset == asset,
+        models.SourceNotificationSetting.enabled == True,
+        models.SourceNotificationSetting.triggered == False,
+    ).all()
+
+    matched_settings = []
+    user_ids = set()
+
+    for setting in settings:
+        condition_met = False
+        if setting.condition == "above" and rate >= setting.threshold:
+            condition_met = True
+        elif setting.condition == "below" and rate <= setting.threshold:
+            condition_met = True
+
+        if condition_met:
+            matched_settings.append(setting)
+            user_ids.add(setting.user_id)
+
+    if not matched_settings:
+        return []
+
+    all_devices = db.query(models.UserDevice).filter(
+        models.UserDevice.user_id.in_(user_ids)
+    ).all()
+
+    devices_by_user: Dict[str, List[models.UserDevice]] = {}
+    for device in all_devices:
+        devices_by_user.setdefault(device.user_id, []).append(device)
+
+    results = []
+    for setting in matched_settings:
+        devices = devices_by_user.get(setting.user_id, [])
+        if devices:
+            results.append({
+                "setting": setting,
+                "devices": devices,
+                "user_id": setting.user_id,
+            })
+
+    return results
+
+
+def mark_source_setting_triggered(
+    db: Session,
+    setting_id: int,
+    rate: float,
+) -> None:
+    """Source 알림 설정을 '발송됨'으로 표시 (1회성 알림 자동 비활성화)."""
+    setting = db.query(models.SourceNotificationSetting).filter(
+        models.SourceNotificationSetting.id == setting_id
+    ).first()
+
+    if setting:
+        setting.triggered = True
+        setting.enabled = False
+        setting.last_notified_at = models.get_utc_now()
+        setting.last_notified_rate = rate
+        db.commit()
+
+        logger.info(
+            "source 알림 발송 완료 (자동 비활성화)",
+            extra={"setting_id": setting_id, "rate": rate, "enabled": False},
+        )
+
+
+def create_source_notification_log(
+    db: Session,
+    user_id: str,
+    setting_id: Optional[int],
+    source: str,
+    asset: str,
+    condition: str,
+    threshold: float,
+    triggered_rate: float,
+    success: bool,
+    error_message: Optional[str] = None,
+) -> models.SourceNotificationLog:
+    """Source 기반 알림 발송 히스토리 기록."""
+    log = models.SourceNotificationLog(
+        user_id=user_id,
+        setting_id=setting_id,
+        source=source,
+        asset=asset,
+        condition=condition,
+        threshold=threshold,
+        triggered_rate=triggered_rate,
+        success=success,
+        error_message=error_message,
+    )
+    db.add(log)
+    db.commit()
+    return log
+
+
+# Source 표시명은 app.source_registry.get_source_definition에서 얻는다.
+# BANK_NAMES_KR와 중복을 피하고 단일 진실 소스 유지.
+
+
+def process_source_rate_alerts(
+    db: Session,
+    changed_rates: List[Dict[str, Any]],
+) -> int:
+    """
+    변경된 source 환율에 대해 알림 조건 체크 및 FCM 발송.
+
+    usdt_sources.collect_usdt_rates 에서 호출된다. 기존 process_rate_alerts와
+    구조는 동일하지만 source + asset + source_registry 기반으로 동작한다.
+
+    Args:
+        changed_rates: [{"source": "upbit", "asset": "usdt-krw", "rate": 1485.0, ...}, ...]
+
+    Returns:
+        발송된 알림 수
+    """
+    from app import source_registry
+    from app.notifications.fcm import send_fcm_multicast_sync, init_firebase
+
+    if not changed_rates:
+        return 0
+
+    if not init_firebase():
+        logger.debug("Firebase 초기화 실패 - source 알림 스킵")
+        return 0
+
+    sent_count = 0
+    all_failed_tokens: List[str] = []
+
+    for rate_info in changed_rates:
+        source = rate_info.get("source") or rate_info.get("bank")
+        asset = rate_info.get("asset") or rate_info.get("currency")
+        rate = rate_info["rate"]
+
+        if source is None or asset is None:
+            continue
+
+        try:
+            triggered_items = get_triggered_source_settings_for_rate(db, source, asset, rate)
+            if not triggered_items:
+                continue
+
+            definition = source_registry.get_source_definition(source, asset)
+            source_display = definition.display_name if definition else source.upper()
+            asset_display = asset.upper()
+
+            for item in triggered_items:
+                setting = item["setting"]
+                devices = item["devices"]
+                user_id = item["user_id"]
+
+                icon = "📈" if setting.condition == "above" else "📉"
+                title = f"{icon}  {source_display}  {asset_display}"
+
+                condition_arrow = "↑" if setting.condition == "above" else "↓"
+                condition_text = "이상" if setting.condition == "above" else "이하"
+                threshold_str = format_threshold(setting.threshold)
+                rate_str = f"{rate:.2f}"
+
+                body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
+
+                # FCM data payload. 기존 앱이 모르는 type이어도 무해하게 무시할 수 있도록
+                # 필드 타입을 string으로 유지 (기존 rate_alert와 동일 컨벤션).
+                data = {
+                    "type": "source_rate_alert",
+                    "title": title,
+                    "body": body,
+                    "source": source,
+                    "asset": asset,
+                    "rate": str(rate),
+                    "threshold": str(setting.threshold),
+                    "condition": setting.condition,
+                    "setting_id": str(setting.id),
+                }
+
+                tokens = [d.device_token for d in devices]
+                result = send_fcm_multicast_sync(tokens, title, body, data)
+
+                if result["success_count"] > 0:
+                    mark_source_setting_triggered(db, setting.id, rate)
+                    sent_count += 1
+
+                    create_source_notification_log(
+                        db=db,
+                        user_id=user_id,
+                        setting_id=setting.id,
+                        source=source,
+                        asset=asset,
+                        condition=setting.condition,
+                        threshold=setting.threshold,
+                        triggered_rate=rate,
+                        success=True,
+                    )
+
+                    logger.info(
+                        "🔔 source 알림 발송",
+                        extra={
+                            "event": "source_rate_alert_sent",
+                            "source": source,
+                            "asset": asset,
+                            "rate": rate,
+                            "threshold": setting.threshold,
+                            "condition": setting.condition,
+                            "user_id": user_id[:8] + "...",
+                            "devices": len(devices),
+                            "success": result["success_count"],
+                        },
+                    )
+                else:
+                    # 발송 실패 시에도 운영 추적을 위해 로그 기록
+                    err_msg = result.get("error") or "no successful sends"
+                    create_source_notification_log(
+                        db=db,
+                        user_id=user_id,
+                        setting_id=setting.id,
+                        source=source,
+                        asset=asset,
+                        condition=setting.condition,
+                        threshold=setting.threshold,
+                        triggered_rate=rate,
+                        success=False,
+                        error_message=err_msg,
+                    )
+
+                if result["failed_tokens"]:
+                    all_failed_tokens.extend(result["failed_tokens"])
+
+        except Exception:
+            logger.exception(
+                "source 알림 처리 실패",
+                extra={"source": source, "asset": asset, "rate": rate},
+            )
+            continue
+
+    # 무효 토큰 일괄 삭제
+    if all_failed_tokens:
+        try:
+            deleted_count = db.query(models.UserDevice).filter(
+                models.UserDevice.device_token.in_(all_failed_tokens)
+            ).delete(synchronize_session=False)
+            db.commit()
+            logger.info(
+                "source 알림: 무효 토큰 일괄 삭제",
+                extra={"count": deleted_count, "tokens": len(all_failed_tokens)},
+            )
+        except Exception:
+            logger.exception("source 알림: 무효 토큰 삭제 실패")
+
+    return sent_count

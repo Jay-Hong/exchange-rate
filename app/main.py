@@ -1746,6 +1746,234 @@ async def delete_notification_setting(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# USDT Phase 1: Source 기반 알림 API (/api/source-notification-settings)
+# ═══════════════════════════════════════════════════════════════════════════════
+# - 기존 /api/notification-settings와 완전 분리된 새 API family
+# - DB: source_notification_settings 테이블 사용
+# - source/asset은 source_registry에서 검증 (phase1_enabled=True만 허용)
+
+def build_source_notification_setting_response(
+    setting: models.SourceNotificationSetting,
+) -> schemas.SourceNotificationSettingResponse:
+    """SourceNotificationSetting DB 모델을 API 응답으로 변환."""
+    return schemas.SourceNotificationSettingResponse(
+        id=setting.id,
+        user_id=setting.user_id,
+        source=setting.source,
+        asset=setting.asset,
+        condition=setting.condition,
+        threshold=setting.threshold,
+        is_enabled=setting.enabled,
+        triggered=setting.triggered,
+        created_at=crud.to_kst_isoformat(setting.created_at),
+        updated_at=crud.to_kst_isoformat(setting.updated_at),
+        triggered_at=crud.to_kst_isoformat(setting.last_notified_at),
+    )
+
+
+def _validate_phase1_source_asset(source: str, asset: str) -> None:
+    """source_registry에 등록된 phase1_enabled 조합인지 검증.
+
+    허용 안 된 조합이면 400 Bad Request.
+    """
+    from app import source_registry
+    if not source_registry.is_phase1_source(source, asset):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported source/asset combination: {source}:{asset}",
+        )
+
+
+@app.post(
+    "/api/source-notification-settings",
+    response_model=schemas.SourceNotificationSettingResponse,
+)
+async def create_source_notification_setting(
+    request: Request,
+    body: schemas.SourceNotificationSettingRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Source 기반 알림 설정 생성 (USDT Phase 1).
+
+    Headers:
+        Authorization: Bearer <Firebase ID Token>
+
+    Body:
+        {
+            "source": "upbit",
+            "asset": "usdt-krw",
+            "condition": "below",
+            "threshold": 1480.0,
+            "is_enabled": true
+        }
+
+    중복 처리:
+    - 동일 (source, asset, condition, threshold) 조합이 있으면 enabled 상태만 업데이트
+    - is_enabled=true → triggered 초기화 (재알림 가능)
+    - is_enabled=false → triggered 유지
+    """
+    user_id = await verify_firebase_token(request)
+    await require_premium(user_id, allow_empty=False)
+
+    _validate_phase1_source_asset(body.source, body.asset)
+
+    try:
+        setting = crud.create_source_notification_setting(
+            db=db,
+            user_id=user_id,
+            source=body.source,
+            asset=body.asset,
+            condition=body.condition.value,
+            threshold=body.threshold,
+            is_enabled=body.is_enabled,
+        )
+
+        logger.info(
+            "🔔 source 알림 설정 생성",
+            extra={
+                "event": "source_notification_setting_create",
+                "user_id": user_id,
+                "source": body.source,
+                "asset": body.asset,
+                "condition": body.condition.value,
+                "threshold": body.threshold,
+                "is_enabled": body.is_enabled,
+            },
+        )
+
+        await notify_user_devices_sync(db, user_id)
+        return build_source_notification_setting_response(setting)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("source 알림 설정 생성 실패", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/source-notification-settings",
+    response_model=schemas.SourceNotificationSettingsListResponse,
+)
+async def get_source_notification_settings(
+    request: Request,
+    asset: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    사용자의 source 기반 알림 설정 목록 조회.
+
+    Query Parameters:
+        asset: asset 필터 (선택, 예: usdt-krw)
+    """
+    user_id = await verify_firebase_token(request)
+
+    if not await require_premium(user_id, allow_empty=True):
+        return schemas.SourceNotificationSettingsListResponse(settings=[], total_count=0)
+
+    settings = crud.get_source_notification_settings(db=db, user_id=user_id)
+
+    if asset:
+        settings = [s for s in settings if s.asset == asset]
+
+    return schemas.SourceNotificationSettingsListResponse(
+        settings=[build_source_notification_setting_response(s) for s in settings],
+        total_count=len(settings),
+    )
+
+
+@app.put(
+    "/api/source-notification-settings/{setting_id}",
+    response_model=schemas.SourceNotificationSettingResponse,
+)
+async def update_source_notification_setting(
+    request: Request,
+    setting_id: int,
+    body: schemas.SourceNotificationSettingUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Source 기반 알림 설정 수정 (PUT - 부분 업데이트).
+
+    Body (모두 선택):
+        source, asset, condition, threshold, is_enabled
+
+    Notes:
+        - source/asset 변경 시 phase1_enabled 조합인지 검증
+        - source, asset, condition, threshold 실제 변경 시 triggered 초기화
+        - is_enabled: False→True 전환 시에도 triggered 초기화
+    """
+    user_id = await verify_firebase_token(request)
+    await require_premium(user_id, allow_empty=False)
+
+    setting = crud.get_source_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
+    if not setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+
+    # source/asset 중 하나라도 바뀌면 최종 조합을 검증
+    new_source = body.source if body.source is not None else setting.source
+    new_asset = body.asset if body.asset is not None else setting.asset
+    if body.source is not None or body.asset is not None:
+        _validate_phase1_source_asset(new_source, new_asset)
+
+    condition_value = body.condition.value if body.condition else None
+
+    updated = crud.update_source_notification_setting(
+        db=db,
+        setting_id=setting_id,
+        user_id=user_id,
+        source=body.source,
+        asset=body.asset,
+        condition=condition_value,
+        threshold=body.threshold,
+        enabled=body.is_enabled,
+    )
+
+    logger.info(
+        "🔔 source 알림 설정 수정",
+        extra={"event": "source_notification_setting_update", "setting_id": setting_id},
+    )
+
+    await notify_user_devices_sync(db, user_id)
+    return build_source_notification_setting_response(updated)
+
+
+@app.delete(
+    "/api/source-notification-settings/{setting_id}",
+    response_model=schemas.DeleteResponse,
+)
+async def delete_source_notification_setting(
+    request: Request,
+    setting_id: int,
+    db: Session = Depends(get_db),
+):
+    """Source 기반 알림 설정 삭제."""
+    user_id = await verify_firebase_token(request)
+    await require_premium(user_id, allow_empty=False)
+
+    setting = crud.get_source_notification_setting_by_id(db=db, setting_id=setting_id, user_id=user_id)
+
+    # 멱등성 DELETE
+    if not setting:
+        logger.info(
+            "🔔 source 알림 설정 삭제 (이미 없음)",
+            extra={"event": "source_notification_setting_delete_idempotent", "setting_id": setting_id},
+        )
+        return schemas.DeleteResponse(success=True, message="Setting already deleted")
+
+    crud.delete_source_notification_setting(db=db, setting_id=setting_id, user_id=user_id)
+
+    logger.info(
+        "🔔 source 알림 설정 삭제",
+        extra={"event": "source_notification_setting_delete", "setting_id": setting_id},
+    )
+
+    await notify_user_devices_sync(db, user_id)
+    return schemas.DeleteResponse(success=True, message="Setting deleted")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 계정 삭제 API (Apple App Store 5.1.1(v) 준수)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1763,6 +1991,8 @@ async def delete_user_account(
     삭제 대상:
     - NotificationLog: 알림 발송 기록
     - NotificationSetting: 환율 알림 설정
+    - SourceNotificationLog: source 기반 알림 발송 기록
+    - SourceNotificationSetting: source 기반 알림 설정
     - UserDevice: FCM 토큰 (푸시 알림용)
 
     Headers:
@@ -1793,6 +2023,15 @@ async def delete_user_account(
             models.NotificationSetting.user_id == user_id
         ).delete(synchronize_session=False)
 
+        # Source 기반 알림 (USDT Phase 1)
+        deleted_source_logs = db.query(models.SourceNotificationLog).filter(
+            models.SourceNotificationLog.user_id == user_id
+        ).delete(synchronize_session=False)
+
+        deleted_source_settings = db.query(models.SourceNotificationSetting).filter(
+            models.SourceNotificationSetting.user_id == user_id
+        ).delete(synchronize_session=False)
+
         deleted_devices = db.query(models.UserDevice).filter(
             models.UserDevice.user_id == user_id
         ).delete(synchronize_session=False)
@@ -1806,7 +2045,9 @@ async def delete_user_account(
                 "user_id": user_id[:8] + "...",  # 보안: UID 일부만 로깅
                 "deleted_logs": deleted_logs,
                 "deleted_settings": deleted_settings,
-                "deleted_devices": deleted_devices
+                "deleted_source_logs": deleted_source_logs,
+                "deleted_source_settings": deleted_source_settings,
+                "deleted_devices": deleted_devices,
             }
         )
 
