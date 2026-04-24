@@ -40,13 +40,15 @@ Phase 1의 목표는 `테더 탭 데이터 피드`를 안정적으로 추가하�
 
 ### Baseline source (클라이언트에서 처리)
 
-테더 탭의 기본 diff 계산 기준은 앱에서 `investing:usd-krw`로 두는 것을 권장한다.
+테더 탭의 기준 source는 **사용자 정렬 순서의 맨 위 항목**이다. 기존 달러/엔화/유로 탭과 동일한 방식이며, 별도 "기준 소스 변경 UI 토글"은 두지 않는다.
 
 이유:
 
-- 사용자가 앱에서 기준을 변경 가능 (UI 토글)
+- iOS `ExchangeRateViewModel.displayState` `filtered.first`, Android `BankPreference` `orderedRates.firstOrNull()` — 기존 두 앱이 이미 "맨 위 = 기준"으로 동작
+- 사용자가 원하는 source를 맨 위로 드래그하여 기준을 변경 (`BankCustomizeSheet` 패턴)
 - 서버는 원시 rate만 제공, summary/diff 계산은 클라이언트 책임
-- 이전 하이브리드 UI에서 서버가 계산하던 로직을 클라이언트로 이동
+
+기본 정렬 순서는 `SourceRegistry.sort_order` (인베스팅 → KB → 하나 → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗). 사용자 재배열 값이 저장되면 다음 세션에도 유지.
 
 ### Graph scope
 
