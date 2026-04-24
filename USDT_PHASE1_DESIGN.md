@@ -247,8 +247,78 @@ CREATE TABLE comparison_alerts (
 이 설계의 장점:
 
 - 문자열 파싱 불필요 (`"upbit:usdt-krw"` 분해 필요 없음)
-- 은행 간 비교에도 자연스럽게 확장 (`left_source=kb, left_asset=usd-krw, right_source=hana, right_asset=usd-krw`)
+- 모든 소스 타입을 동일한 방식으로 참조 (아래 "지원 조합" 참조)
 - 쿼리 시 인덱스 활용 용이
+
+### 지원 조합 (모든 소스 타입 간 자유 비교)
+
+`left_source + left_asset`과 `right_source + right_asset`은 DB 스키마상 타입 제약이 없으므로, Phase 1~2에서 수집하는 모든 소스 타입 간 비교가 가능하다. 비교 알림 관점에서는 "bank"와 "source"가 별도 세계가 아니라 **모두 동일한 `source` 값**으로 표현된다 (`kb`, `hana`, `upbit`, `investing`, `krx` 등 모두 source 식별자).
+
+| 조합 타입 | left 예시 | right 예시 | 시나리오 |
+| --- | --- | --- | --- |
+| exchange ↔ exchange | `upbit:usdt-krw` | `bithumb:usdt-krw` | 거래소 간 스프레드 |
+| exchange ↔ reference | `bithumb:usdt-krw` | `investing:usd-krw` | 김프 |
+| exchange ↔ bank | `upbit:usdt-krw` | `kb:usd-krw` | 실환전 대비 USDT 가격 |
+| **bank ↔ bank** | `kb:usd-krw` | `hana:usd-krw` | 은행 간 환율 차이 |
+| **reference ↔ bank** | `investing:usd-krw` | `kb:usd-krw` | 기준환율 대비 은행 스프레드 |
+| **exchange ↔ derivative** (Phase 2) | `bithumb:usdt-krw` | `krx:usd-krw-futures` | USDT vs KRX 선물 |
+| **bank ↔ derivative** (Phase 2) | `kb:usd-krw` | `krx:usd-krw-futures` | 은행 vs KRX 선물 |
+| **reference ↔ derivative** (Phase 2) | `investing:usd-krw` | `krx:usd-krw-futures` | 기준환율 vs 선물 |
+
+### Phase 3 구현 시 필요한 인프라 (스키마 외)
+
+**스키마가 열려 있다고 해서 구현 준비가 끝난 것은 아니다**. 다음 두 인프라가 Phase 3에서 반드시 추가되어야 한다.
+
+#### A. Unified rate lookup
+
+현재 rate 조회 경로는 3개로 분리되어 있다:
+
+- `bank_exchange_rates` → `select_latest_bank_rates_from_db()`
+- `investing_exchange_rates` → `select_a_latest_investing_rate_from_db()`
+- `source_rates` → `get_latest_source_rate()`
+
+비교 알림 평가는 `left_source+left_asset`과 `right_source+right_asset` 각각에 대해 현재 값을 조회해야 하므로, **세 테이블 모두를 투명하게 조회하는 통합 함수**가 필요하다:
+
+```python
+def get_latest_rate_unified(db, source: str, asset: str) -> Optional[float]:
+    """source+asset으로 어느 세계든 조회. 조회 순서:
+    1. source_rates (새 source 세계, usdt-krw 등)
+    2. bank_exchange_rates (source=bank, asset=currency)
+    3. investing_exchange_rates (source="investing", asset=currency)
+    4. [Phase 2] derivative/KRX 테이블 (추가 예정)
+    """
+```
+
+Phase 2에서 KRX 달러선물이 도입되면 이 함수에 KRX 조회 경로를 추가한다.
+
+#### B. Unified trigger path
+
+현재 알림 트리거 경로는 세계별로 분리되어 있다:
+
+- `bank_exchange_rates` / `investing_exchange_rates` 변경 → `process_rate_alerts()`
+- `source_rates` 변경 → `process_source_rate_alerts()`
+
+비교 알림은 **left/right 중 어느 쪽이 변해도 조건 재평가**가 필요하다. 예: "빗썸 USDT − KB USD ≥ 8원" 알림은 빗썸이 바뀌어도, KB가 바뀌어도 평가되어야 한다. 따라서 두 경로 모두에서 공통 `process_comparison_alerts()`를 호출해야 한다:
+
+```text
+bank/investing rate 변경
+  ├─ process_rate_alerts()  (기존 단일 bank 알림)
+  └─ process_comparison_alerts(changed_source, changed_asset, new_rate)  [신규]
+
+source rate 변경 (usdt_sources 크롤러)
+  ├─ process_source_rate_alerts()  (기존 단일 source 알림)
+  └─ process_comparison_alerts(changed_source, changed_asset, new_rate)  [신규]
+```
+
+`process_comparison_alerts`는 변경된 소스가 포함된 모든 활성 comparison_alert를 찾고, 반대편 소스의 현재 값을 `get_latest_rate_unified`로 조회해 조건을 평가한다.
+
+#### C. KRX (Phase 2) 도입 시 재검토 지점
+
+Phase 2에서 KRX 미국달러선물이 `source_rates` 또는 별도 테이블에 추가되면:
+
+- KRX 저장 위치에 따라 `get_latest_rate_unified` 분기 추가
+- KRX 변경 시 트리거 경로 결정 (`source_rates`라면 usdt_sources 크롤러 패턴, 별도 테이블이면 KRX 크롤러에서 직접 호출)
+- KRX 재배포 권리 문제로 KRX 참여 비교 알림의 공개 허용 여부 별도 결정 필요할 수 있음
 
 ## API Changes
 
