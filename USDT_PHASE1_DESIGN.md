@@ -320,6 +320,8 @@ Phase 2에서 KRX 미국달러선물이 `source_rates` 또는 별도 테이블�
 - KRX 변경 시 트리거 경로 결정 (`source_rates`라면 usdt_sources 크롤러 패턴, 별도 테이블이면 KRX 크롤러에서 직접 호출)
 - KRX 재배포 권리 문제로 KRX 참여 비교 알림의 공개 허용 여부 별도 결정 필요할 수 있음
 
+**구조적 권장 방향**: 기존 bank/investing 세계가 동결 상태로 유지되고 (Decision E) 새 소스는 모두 `source_rates`로 수렴하는 경로가 일관적이다. 이 가정이 유지되면 `get_latest_rate_unified`는 장기적으로 **`source_rates` + legacy tables 2갈래**만 커버하면 충분해 복잡도가 제한된다. KRX도 이 방향으로 `source_rates`에 합류하는 것을 1순위로 검토한다.
+
 ## API Changes
 
 ### 원칙: 기존 API 확장, 새 API 최소화
