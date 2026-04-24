@@ -631,6 +631,18 @@ Phase 1에서는 구현하지 않지만, 개념적 자리만 잠금.
 3. 서버에서 두 필드 제거 (`build_rates_payload`, `get_rates_for_mobile`)
 4. 또는 장기적으로 `metadata.sources`처럼 v2 필드로 대체
 
+**진행 상태** (2026-04-24 기준):
+
+| 단계 | 상태 |
+| --- | --- |
+| 서버 동결 (`LEGACY_METADATA_BANKS` 상수) | ✅ 완료 (`7c387a7`) |
+| iOS `Metadata.banks/currencies` → optional | 🔄 진행 중 (USDT Phase 1 릴리스에 묶음, 미배포) |
+| Android `RatesMetadata.banks/currencies` → nullable 또는 default | 🔜 예정 (Android USDT Phase 1 릴리스에 묶음) |
+| 두 플랫폼 확산 2~4주 | ⏳ 대기 |
+| 서버 필드 + 상수 제거 | 🔜 위 모두 충족 후 |
+
+서버 제거는 **iOS AND Android 둘 다 optional/nullable 전환 완료 + 릴리스 확산** 후에만 진행. iOS만 완료된 상태에서는 서버 제거 금지 (Android 앱 크래시).
+
 ### 2. Android `sortedByBank()` unknown bank 처리
 
 **현상**:
