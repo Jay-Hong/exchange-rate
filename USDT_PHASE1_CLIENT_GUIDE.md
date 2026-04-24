@@ -243,8 +243,12 @@ SourceRate { source, asset, rate, timestamp }
 
 **하위 호환성 유의사항**:
 
-- `metadata.banks`에 `upbit, bithumb, coinone, gopax, korbit`가 포함된다. 기존 앱은 이 필드를 읽지 않아 안전하다 (검증 완료). 새 앱도 이 필드를 **쓰지 말 것** — 대신 `SourceRegistry`와 `rates` 배열을 쓴다.
-- `metadata.currencies`에 `usdt-krw`가 포함된다. 마찬가지로 사용 안 함.
+- `metadata.banks`와 `metadata.currencies`는 **레거시 호환용 dead field**로 동결되었다.
+  - `metadata.banks`: `investing, kb, hana, shinhan, woori, ibk, nh, sc, bs, citi` (10개, 고정)
+  - `metadata.currencies`: `usd-krw, jpy-krw, eur-krw` (3개, 고정)
+  - USDT 거래소(`upbit, bithumb, coinone, gopax, korbit`)와 `usdt-krw`는 **포함되지 않는다**.
+- 이유: 이 필드는 현재 iOS/Android/웹 어디서도 사용되지 않는 dead field라서, USDT source를 섞어 넣으면 시맨틱 오염만 커진다. 미래에 필드 자체를 제거할 예정이므로 레거시 값으로 동결하는 것이 가장 안전하다.
+- 새 앱은 이 필드를 **쓰지 말 것** — 대신 `SourceRegistry`와 `rates` 배열을 참조한다. `rates` 배열에는 USDT 엔트리가 정상 포함된다.
 
 ## 알림 통합
 

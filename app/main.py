@@ -201,8 +201,12 @@ KST = timezone("Asia/Seoul")
 def build_rates_payload(db: SessionLocal) -> dict:
     """DB에서 최신 환율을 조회해 표준 메시지 포맷으로 반환."""
     all_rates = crud.get_all_rates_flat(db=db)
-    currencies = list(set(rate["currency"] for rate in all_rates))
-    banks = list(set(rate["bank"] for rate in all_rates))
+
+    # metadata.currencies/metadata.banks는 레거시 호환용 dead field.
+    # USDT 도입 후 자동 계산 로직으로는 거래소 이름이 섞여 들어가 시맨틱이 오염되므로
+    # 레거시 값으로 고정한다. 새 앱은 SourceRegistry를 직접 참조한다.
+    currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
+    banks = sorted(crud.LEGACY_METADATA_BANKS)
 
     # DB 데이터의 실제 최신 timestamp 사용 (변경 감지 정확성)
     latest_timestamp = max(
@@ -214,8 +218,8 @@ def build_rates_payload(db: SessionLocal) -> dict:
         "rates": all_rates,
         "metadata": {
             "updated_at": latest_timestamp,
-            "currencies": sorted(currencies),
-            "banks": sorted(banks),
+            "currencies": currencies,
+            "banks": banks,
             "total_count": len(all_rates),
         },
     }
@@ -480,8 +484,11 @@ def get_rates_for_mobile(db: Session = Depends(get_db)):
     """모바일 앱과 AJAX용 플랫 배열 구조 API (폴백용)"""
     try:
         all_rates = crud.get_all_rates_flat(db=db)
-        currencies = list(set(rate["currency"] for rate in all_rates))
-        banks = list(set(rate["bank"] for rate in all_rates))
+
+        # metadata.currencies/metadata.banks는 레거시 호환용 dead field.
+        # build_rates_payload와 동일한 정책으로 레거시 값 고정.
+        currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
+        banks = sorted(crud.LEGACY_METADATA_BANKS)
 
         current_time = crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
 
@@ -489,8 +496,8 @@ def get_rates_for_mobile(db: Session = Depends(get_db)):
             "rates": all_rates,
             "metadata": {
                 "updated_at": current_time,
-                "currencies": sorted(currencies),
-                "banks": sorted(banks),
+                "currencies": currencies,
+                "banks": banks,
                 "total_count": len(all_rates)
             }
         }

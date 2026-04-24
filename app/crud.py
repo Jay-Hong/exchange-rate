@@ -38,6 +38,17 @@ CURRENCY_NAMES_KR = {
 # 지원 통화쌍 (고정값, DB DISTINCT 쿼리 대체)
 SUPPORTED_CURRENCY_PAIRS = ["eur-krw", "jpy-krw", "usd-krw"]
 
+# `metadata.banks` dead field 값 고정 집합.
+# /api/rates 응답의 metadata.banks/metadata.currencies는 이제 실제 소비처가 없는
+# 레거시 호환 필드이고, USDT 도입 후 자동 계산 로직이 이 필드에 거래소 이름을
+# 섞어 넣어 시맨틱 오염을 일으켰다. 이 필드는 "레거시 값으로 동결"한다.
+# 새 앱은 SourceRegistry를 직접 참조한다. 필드 자체 제거는 iOS/Android가
+# Codable/Serializable non-optional 선언을 풀어준 이후 별도로 진행한다.
+LEGACY_METADATA_BANKS = frozenset({
+    "investing", "kb", "hana", "shinhan", "woori",
+    "ibk", "nh", "sc", "bs", "citi",
+})
+
 
 def format_threshold(value: float) -> str:
     """목표값 포맷: 소수점 이하 불필요한 0 제거 (1475.00 → 1475, 1475.50 → 1475.5)"""
