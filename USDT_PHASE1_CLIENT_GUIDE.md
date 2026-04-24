@@ -216,9 +216,9 @@ SourceRate { source, asset, rate, timestamp }
   - Android: [`BankPreference.kt:39`](../android/app/src/main/java/com/jay/fxi/domain/model/BankPreference.kt#L39) — `val referenceRate = orderedRates.firstOrNull()`
 - **사용자 커스터마이즈**: 기존 `BankCustomizeSheet` UX처럼 사용자가 소스 순서를 drag-and-drop으로 재배열. 저장된 순서가 다음 세션에도 유지.
 - **기본 순서**: `SourceRegistry.sortOrder` (인베스팅 → KB → 하나 → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗)
-- **토글 없음**:
-  - 가격 오름차순/내림차순 토글 ❌ (사용자가 직접 배열해서 해결)
-  - 기준 소스 변경 토글 ❌ (맨 위가 자동 기준)
+- **Phase 1에서 도입하지 않는 기능**:
+  - 가격 기반 동적 정렬 (오름차순/내림차순). 수동 재배열과는 별개 기능 — 가격 변동에 따라 순서가 실시간으로 바뀌는 정렬을 원한다면 추가 구현 필요. 현재 Phase 1 범위에는 포함하지 않음.
+  - 기준 소스 변경 토글. 맨 위가 자동 기준이므로 기능상 불필요 (사용자가 원하는 소스를 맨 위로 재배열하면 됨).
 - **막대 비교 UI**: 기존 환율 탭 `RateBarView` 컴포넌트 그대로 재사용
 
 **구현 포인트**:
