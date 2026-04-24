@@ -195,25 +195,39 @@ SourceRate { source, asset, rate, timestamp }
 최종 화면용 row: RateSourceDefinition + SourceRate + diff_vs_baseline
 ```
 
-### 단일 리스트 UI (Decision C 확정)
+### 단일 리스트 UI (Decision C 확정) — 기존 환율 탭 UX 완전 재사용
 
 ```text
-인베스팅  1,452.5  기준
+인베스팅  1,452.5  기준 ▲         ← 맨 위 = 자동 기준
 국민은행  1,453.2  +0.7
 하나은행  1,452.8  +0.3
 (미국달러F — Phase 2)
-업비트    1,486.0  +33.5  (막대 그래프 가장 짧게)
+업비트    1,486.0  +33.5
 빗썸      1,486.0  +33.5
 코인원    1,485.0  +32.5
 고팍스    1,485.0  +32.5
 코빗      1,487.0  +34.5
 ```
 
-- 기본 정렬: SourceRegistry.sortOrder
-- 사용자 토글:
-  - 가격 오름차순/내림차순
-  - 기준 소스 변경 (Investing → KB → 하나)
-- 막대 비교 UI는 기존 환율 탭 컴포넌트 재사용
+**동작 원칙 (기존 달러/엔화/유로 탭과 완전히 동일)**:
+
+- **맨 위 소스 = 자동 기준**. 나머지 소스는 기준 대비 차이값 표시.
+  - iOS: [`ExchangeRateViewModel.swift:126`](../ios/FXi/ViewModels/ExchangeRateViewModel.swift#L126) — `let reference = filtered.first`
+  - Android: [`BankPreference.kt:39`](../android/app/src/main/java/com/jay/fxi/domain/model/BankPreference.kt#L39) — `val referenceRate = orderedRates.firstOrNull()`
+- **사용자 커스터마이즈**: 기존 `BankCustomizeSheet` UX처럼 사용자가 소스 순서를 drag-and-drop으로 재배열. 저장된 순서가 다음 세션에도 유지.
+- **기본 순서**: `SourceRegistry.sortOrder` (인베스팅 → KB → 하나 → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗)
+- **토글 없음**:
+  - 가격 오름차순/내림차순 토글 ❌ (사용자가 직접 배열해서 해결)
+  - 기준 소스 변경 토글 ❌ (맨 위가 자동 기준)
+- **막대 비교 UI**: 기존 환율 탭 `RateBarView` 컴포넌트 그대로 재사용
+
+**구현 포인트**:
+
+- 기존 `BankPreferenceManager`를 그대로 쓸 수 없음 (Bank enum 기반, Decision E 충돌)
+- 별도 `SourcePreferenceManager` (또는 테더 탭 전용 preference) 신규 도입
+- 저장 key: canonical key (`"upbit:usdt-krw"` 등) 리스트로 순서 저장
+- 기본값: registry sort_order 순서
+- 사용자 재배열 시 해당 탭 전용 순서로 persisted
 
 ### 요약/최저/최고는 클라이언트 계산
 

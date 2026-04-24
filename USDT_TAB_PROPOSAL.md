@@ -244,7 +244,9 @@ KRX 미국달러선물은 기술보다 권리와 제공 범위가 더 큰 문제
   - 백엔드 단순화: 서버에서 summary 계산 불필요 (클라이언트에서 계산)
   - 중복 API 제거: investing/kb/hana는 기존 `/api/rates`로 이미 제공 중
 - 기본 표시 순서: `인베스팅 → 국민은행 → 하나은행 → (미국달러F) → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗`
-- 사용자가 정렬 기준과 기준 소스를 앱에서 변경 가능
+- **동작**: 기존 탭과 동일하게 **맨 위 소스가 자동 기준**, 나머지는 차이값 표시
+- **사용자 커스터마이즈**: 기존 `BankCustomizeSheet` 패턴처럼 drag-and-drop으로 순서 재배열 (기준 소스 토글/가격 정렬 토글 없음 — 사용자가 순서 직접 배치)
+- 구현 참조: iOS [`ExchangeRateViewModel.swift:126`](ios/FXi/ViewModels/ExchangeRateViewModel.swift#L126) `filtered.first`, Android [`BankPreference.kt:39`](android/app/src/main/java/com/jay/fxi/domain/model/BankPreference.kt#L39) `orderedRates.firstOrNull()`
 
 ### Decision D. Comparison alert conditions — 2-axis
 
