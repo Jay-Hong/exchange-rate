@@ -149,8 +149,8 @@
 | **업비트** | `GET https://api.upbit.com/v1/ticker?markets=KRW-USDT` | `[0].trade_price` |
 | **빗썸** | `GET https://api.bithumb.com/v1/ticker?markets=KRW-USDT` | `[0].trade_price` |
 | **코인원** | `GET https://api.coinone.co.kr/public/v2/ticker_utc_new/KRW/USDT` | `tickers[0].last` |
-| **고팍스** | `GET https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker` | `price` |
 | **코빗** | `GET https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw` | `data[0].close` |
+| **고팍스** | `GET https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker` | `price` |
 
 **통합 크롤러**: `app/crawlers/usdt_sources.py`
 

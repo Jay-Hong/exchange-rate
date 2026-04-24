@@ -110,8 +110,8 @@ class SourceDefinition:
 | `upbit` | `usdt-krw` | `exchange` | `업비트` | 50 | True |
 | `bithumb` | `usdt-krw` | `exchange` | `빗썸` | 60 | True |
 | `coinone` | `usdt-krw` | `exchange` | `코인원` | 70 | True |
-| `gopax` | `usdt-krw` | `exchange` | `고팍스` | 80 | True |
-| `korbit` | `usdt-krw` | `exchange` | `코빗` | 90 | True |
+| `korbit` | `usdt-krw` | `exchange` | `코빗` | 80 | True |
+| `gopax` | `usdt-krw` | `exchange` | `고팍스` | 90 | True |
 
 ### Recommended helpers
 

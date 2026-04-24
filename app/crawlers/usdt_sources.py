@@ -4,8 +4,8 @@ Phase 1 대상:
 - 업비트 (upbit)
 - 빗썸 (bithumb)
 - 코인원 (coinone)
-- 고팍스 (gopax)
 - 코빗 (korbit)
+- 고팍스 (gopax)
 
 설계:
 - 단일 scheduler job `task_usdt_sources`에서 5개 거래소를 병렬 fan-out
@@ -61,14 +61,6 @@ def _fetch_coinone() -> Optional[float]:
     return float(data["tickers"][0]["last"])
 
 
-def _fetch_gopax() -> Optional[float]:
-    url = "https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker"
-    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
-    return float(data["price"])
-
-
 def _fetch_korbit() -> Optional[float]:
     url = "https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw"
     response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
@@ -77,12 +69,20 @@ def _fetch_korbit() -> Optional[float]:
     return float(data["data"][0]["close"])
 
 
+def _fetch_gopax() -> Optional[float]:
+    url = "https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker"
+    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
+    response.raise_for_status()
+    data = response.json()
+    return float(data["price"])
+
+
 FETCHERS: dict[str, Callable[[], Optional[float]]] = {
     "upbit": _fetch_upbit,
     "bithumb": _fetch_bithumb,
     "coinone": _fetch_coinone,
-    "gopax": _fetch_gopax,
     "korbit": _fetch_korbit,
+    "gopax": _fetch_gopax,
 }
 
 

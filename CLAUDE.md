@@ -169,7 +169,7 @@ granularity   TEXT NOT NULL          -- 'realtime' | 'hourly' | 'daily'
 
 ```sql
 id          INTEGER PRIMARY KEY
-source      TEXT NOT NULL         -- 'upbit' | 'bithumb' | 'coinone' | 'gopax' | 'korbit'
+source      TEXT NOT NULL         -- 'upbit' | 'bithumb' | 'coinone' | 'korbit' | 'gopax'
 asset       TEXT NOT NULL         -- 'usdt-krw' (Phase 2: 'usd-krw-futures' 예정)
 rate        REAL NOT NULL
 timestamp   DATETIME NOT NULL (UTC)

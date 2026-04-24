@@ -89,8 +89,8 @@ iOS `Bank.swift`, Android `Bank.kt` 둘 다 "은행" 도메인 가정으로 작�
 업비트       upbit       usdt-krw        exchange    sort=50
 빗썸         bithumb     usdt-krw        exchange    sort=60
 코인원       coinone     usdt-krw        exchange    sort=70
-고팍스       gopax       usdt-krw        exchange    sort=80
-코빗         korbit      usdt-krw        exchange    sort=90
+코빗         korbit      usdt-krw        exchange    sort=80
+고팍스       gopax       usdt-krw        exchange    sort=90
 ```
 
 ### iOS 예시 (Swift)
@@ -124,9 +124,9 @@ enum SourceRegistry {
               category: .exchange, sortOrder: 60),
         .init(source: "coinone", asset: "usdt-krw", displayName: "코인원",
               category: .exchange, sortOrder: 70),
-        .init(source: "gopax", asset: "usdt-krw", displayName: "고팍스",
-              category: .exchange, sortOrder: 80),
         .init(source: "korbit", asset: "usdt-krw", displayName: "코빗",
+              category: .exchange, sortOrder: 80),
+        .init(source: "gopax", asset: "usdt-krw", displayName: "고팍스",
               category: .exchange, sortOrder: 90),
     ]
 
@@ -165,9 +165,9 @@ object SourceRegistry {
             RateSourceCategory.EXCHANGE, 60),
         RateSourceDefinition("coinone", "usdt-krw", "코인원",
             RateSourceCategory.EXCHANGE, 70),
-        RateSourceDefinition("gopax", "usdt-krw", "고팍스",
-            RateSourceCategory.EXCHANGE, 80),
         RateSourceDefinition("korbit", "usdt-krw", "코빗",
+            RateSourceCategory.EXCHANGE, 80),
+        RateSourceDefinition("gopax", "usdt-krw", "고팍스",
             RateSourceCategory.EXCHANGE, 90),
     )
 
@@ -260,7 +260,7 @@ SourceRate { source, asset, rate, timestamp }
 - `metadata.banks`와 `metadata.currencies`는 **레거시 호환용 dead field**로 동결되었다.
   - `metadata.banks`: `investing, kb, hana, shinhan, woori, ibk, nh, sc, bs, citi` (10개, 고정)
   - `metadata.currencies`: `usd-krw, jpy-krw, eur-krw` (3개, 고정)
-  - USDT 거래소(`upbit, bithumb, coinone, gopax, korbit`)와 `usdt-krw`는 **포함되지 않는다**.
+  - USDT 거래소(`upbit, bithumb, coinone, korbit, gopax`)와 `usdt-krw`는 **포함되지 않는다**.
 - 이유: 이 필드는 현재 iOS/Android/웹 어디서도 사용되지 않는 dead field라서, USDT source를 섞어 넣으면 시맨틱 오염만 커진다. 미래에 필드 자체를 제거할 예정이므로 레거시 값으로 동결하는 것이 가장 안전하다.
 - 새 앱은 이 필드를 **쓰지 말 것** — 대신 `SourceRegistry`와 `rates` 배열을 참조한다. `rates` 배열에는 USDT 엔트리가 정상 포함된다.
 
@@ -292,7 +292,7 @@ SourceRate { source, asset, rate, timestamp }
 
 ### 서버 검증 (category=="exchange")
 
-테더 탭 알림 생성 시 `source`가 거래소(`upbit`, `bithumb`, `coinone`, `gopax`, `korbit`)가 아니면 서버가 `400` 반환:
+테더 탭 알림 생성 시 `source`가 거래소(`upbit`, `bithumb`, `coinone`, `korbit`, `gopax`)가 아니면 서버가 `400` 반환:
 
 ```
 "Source alerts are only supported for exchange sources in Phase 1 (got category=reference).
