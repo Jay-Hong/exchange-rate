@@ -46,23 +46,24 @@ iOS `Bank.swift`, Android `Bank.kt` 둘 다 "은행" 도메인 가정으로 작�
 ### `RateSource` (공통 정의)
 
 | 필드 | 타입 | 의미 |
-|--- |--- |--- |
+| --- | --- | --- |
 | `id` | `String` | canonical key (`f"{source}:{asset}"`) |
 | `source` | `String` | `upbit` / `bithumb` / `investing` / `kb` / ... |
 | `asset` | `String` | `usdt-krw` / `usd-krw` / `jpy-krw` / ... |
 | `displayName` | `String` | 한글 표시명 (`업비트`, `인베스팅`, `국민은행`) |
 | `category` | `enum` | `.exchange` / `.reference` / `.derivative` |
 | `sortOrder` | `Int` | 기본 표시 순서 (레지스트리 기준) |
-| `freshnessSeconds` | `Int?` | stale 판정 기준 (nil = Phase 2 결정 대기) |
+
+**Stale 판정은 Phase 1에서 도입하지 않는다** (아래 "Stale 표시 정책" 섹션 참조). `freshnessSeconds` 필드는 사용하지 않는다.
 
 ### `SourceRate` (시세 데이터)
 
 | 필드 | 타입 | 의미 |
-|--- |--- |--- |
+| --- | --- | --- |
 | `source` | `String` | |
 | `asset` | `String` | |
 | `rate` | `Double` | |
-| `timestamp` | `Date` | |
+| `timestamp` | `Date` | 마지막 **값 변경** 시각 (insert-if-changed 정책 결과). UI에는 "N초 전 변동" 형태로 정보 표시. stale 판정에 사용하지 않음. |
 
 앱 내부에서 이 모델로 통일한다. 서버 응답(`bank` + `currency`)은 어댑터로 `source` + `asset`으로 변환한다.
 
@@ -80,16 +81,16 @@ iOS `Bank.swift`, Android `Bank.kt` 둘 다 "은행" 도메인 가정으로 작�
 
 서버의 [`app/source_registry.py`](app/source_registry.py)와 **같은 9개 엔트리**를 앱에 하드코딩한다. 런타임 조회 불필요 — 정적 상수로 유지.
 
-```
-인베스팅    investing   usd-krw        reference   sort=10  fresh=90
-국민은행     kb          usd-krw        reference   sort=20  fresh=300
-하나은행     hana        usd-krw        reference   sort=30  fresh=300
-미국달러F    krx         usd-krw-futures derivative sort=40  fresh=nil (Phase 2)
-업비트       upbit       usdt-krw       exchange    sort=50  fresh=35
-빗썸         bithumb     usdt-krw       exchange    sort=60  fresh=35
-코인원       coinone     usdt-krw       exchange    sort=70  fresh=35
-고팍스       gopax       usdt-krw       exchange    sort=80  fresh=35
-코빗         korbit      usdt-krw       exchange    sort=90  fresh=35
+```text
+인베스팅    investing   usd-krw         reference   sort=10
+국민은행     kb          usd-krw         reference   sort=20
+하나은행     hana        usd-krw         reference   sort=30
+미국달러F    krx         usd-krw-futures derivative  sort=40  (Phase 2, phase1_enabled=false)
+업비트       upbit       usdt-krw        exchange    sort=50
+빗썸         bithumb     usdt-krw        exchange    sort=60
+코인원       coinone     usdt-krw        exchange    sort=70
+고팍스       gopax       usdt-krw        exchange    sort=80
+코빗         korbit      usdt-krw        exchange    sort=90
 ```
 
 ### iOS 예시 (Swift)
@@ -105,7 +106,6 @@ struct RateSourceDefinition {
     let displayName: String
     let category: RateSourceCategory
     let sortOrder: Int
-    let freshnessSeconds: Int?
 
     var id: String { "\(source):\(asset)" }
 }
@@ -113,21 +113,21 @@ struct RateSourceDefinition {
 enum SourceRegistry {
     static let all: [RateSourceDefinition] = [
         .init(source: "investing", asset: "usd-krw", displayName: "인베스팅",
-              category: .reference, sortOrder: 10, freshnessSeconds: 90),
+              category: .reference, sortOrder: 10),
         .init(source: "kb", asset: "usd-krw", displayName: "국민은행",
-              category: .reference, sortOrder: 20, freshnessSeconds: 300),
+              category: .reference, sortOrder: 20),
         .init(source: "hana", asset: "usd-krw", displayName: "하나은행",
-              category: .reference, sortOrder: 30, freshnessSeconds: 300),
+              category: .reference, sortOrder: 30),
         .init(source: "upbit", asset: "usdt-krw", displayName: "업비트",
-              category: .exchange, sortOrder: 50, freshnessSeconds: 35),
+              category: .exchange, sortOrder: 50),
         .init(source: "bithumb", asset: "usdt-krw", displayName: "빗썸",
-              category: .exchange, sortOrder: 60, freshnessSeconds: 35),
+              category: .exchange, sortOrder: 60),
         .init(source: "coinone", asset: "usdt-krw", displayName: "코인원",
-              category: .exchange, sortOrder: 70, freshnessSeconds: 35),
+              category: .exchange, sortOrder: 70),
         .init(source: "gopax", asset: "usdt-krw", displayName: "고팍스",
-              category: .exchange, sortOrder: 80, freshnessSeconds: 35),
+              category: .exchange, sortOrder: 80),
         .init(source: "korbit", asset: "usdt-krw", displayName: "코빗",
-              category: .exchange, sortOrder: 90, freshnessSeconds: 35),
+              category: .exchange, sortOrder: 90),
     ]
 
     static func find(source: String, asset: String) -> RateSourceDefinition? {
@@ -147,7 +147,6 @@ data class RateSourceDefinition(
     val displayName: String,
     val category: RateSourceCategory,
     val sortOrder: Int,
-    val freshnessSeconds: Int?,
 ) {
     val id: String get() = "$source:$asset"
 }
@@ -155,21 +154,21 @@ data class RateSourceDefinition(
 object SourceRegistry {
     val all: List<RateSourceDefinition> = listOf(
         RateSourceDefinition("investing", "usd-krw", "인베스팅",
-            RateSourceCategory.REFERENCE, 10, 90),
+            RateSourceCategory.REFERENCE, 10),
         RateSourceDefinition("kb", "usd-krw", "국민은행",
-            RateSourceCategory.REFERENCE, 20, 300),
+            RateSourceCategory.REFERENCE, 20),
         RateSourceDefinition("hana", "usd-krw", "하나은행",
-            RateSourceCategory.REFERENCE, 30, 300),
+            RateSourceCategory.REFERENCE, 30),
         RateSourceDefinition("upbit", "usdt-krw", "업비트",
-            RateSourceCategory.EXCHANGE, 50, 35),
+            RateSourceCategory.EXCHANGE, 50),
         RateSourceDefinition("bithumb", "usdt-krw", "빗썸",
-            RateSourceCategory.EXCHANGE, 60, 35),
+            RateSourceCategory.EXCHANGE, 60),
         RateSourceDefinition("coinone", "usdt-krw", "코인원",
-            RateSourceCategory.EXCHANGE, 70, 35),
+            RateSourceCategory.EXCHANGE, 70),
         RateSourceDefinition("gopax", "usdt-krw", "고팍스",
-            RateSourceCategory.EXCHANGE, 80, 35),
+            RateSourceCategory.EXCHANGE, 80),
         RateSourceDefinition("korbit", "usdt-krw", "코빗",
-            RateSourceCategory.EXCHANGE, 90, 35),
+            RateSourceCategory.EXCHANGE, 90),
     )
 
     fun find(source: String, asset: String): RateSourceDefinition? =
@@ -184,7 +183,7 @@ object SourceRegistry {
 
 ## 테더 탭 데이터 흐름
 
-```
+```text
 서버 /api/rates, /ws
   ↓ 기존 Codable/Serializable (ExchangeRate { currency, bank, rate, timestamp })
 앱 레이어
@@ -193,12 +192,12 @@ SourceRate { source, asset, rate, timestamp }
   ↓ 필터
 현재 테더 탭 = asset == "usdt-krw" 인 것 (5 거래소) + reference 3개(investing/kb/hana usd-krw)
   ↓ SourceRegistry lookup
-최종 화면용 row: RateSourceDefinition + SourceRate + diff_vs_baseline + isStale
+최종 화면용 row: RateSourceDefinition + SourceRate + diff_vs_baseline
 ```
 
 ### 단일 리스트 UI (Decision C 확정)
 
-```
+```text
 인베스팅  1,452.5  기준
 국민은행  1,453.2  +0.7
 하나은행  1,452.8  +0.3
@@ -220,9 +219,20 @@ SourceRate { source, asset, rate, timestamp }
 
 서버가 안 주는 이유: 기준 소스가 사용자 선택에 따라 바뀌기 때문. 클라이언트에서 `rates.filter { asset == "usdt-krw" }`에 대해 `min`/`max`/`avg` 계산하면 끝.
 
-### Stale 판정도 클라이언트
+### Stale 표시 정책 — Phase 1에서는 도입하지 않음
 
-서버는 각 엔트리에 `timestamp`만 제공. 클라이언트가 registry의 `freshnessSeconds`와 비교해서 stale 여부를 로컬 판단.
+현재 `timestamp`는 **마지막 값 변경 시각**(insert-if-changed 정책 결과)이지 **마지막 수집 성공 시각**이 아니다. 두 개념이 다르기 때문에 단순 `now - timestamp` 비교로는 다음과 같은 오진이 발생한다:
+
+- **은행 주말 정지**: investing/kb/hana는 주말 ~48-72h 정상적으로 값 변경 없음 → stale 오판
+- **USDT 저유동성**: 5개 거래소가 동일 가격에서 수 분간 유지 → stale 오판
+
+따라서 Phase 1 클라이언트는 다음을 지킨다:
+
+- `timestamp`를 **정보 표시용**으로만 사용 (예: "마지막 변동: 5초 전", "2시간 전")
+- stale 배지, 요약값에서의 stale 제외, 회색 처리 등은 **구현하지 않는다**
+- 진짜 수집 장애는 서버 측 관리자 페이지에서 별도 탐지
+
+추후 서버에 `observed_at` 또는 `last_collection_success_at` 추적이 추가되면 그때 stale UI를 재도입한다.
 
 ## WebSocket 처리
 
@@ -321,11 +331,11 @@ struct RateSourceReference {
 
 iOS/Android 리뷰 시 다음 항목 동일한지 확인:
 
-- [ ] `RateSource` 모델 필드 8개 (id, source, asset, displayName, category, sortOrder, freshnessSeconds)
+- [ ] `RateSource` 모델 필드 (id, source, asset, displayName, category, sortOrder)
 - [ ] `RateSourceCategory` enum 3종 (exchange, reference, derivative)
 - [ ] `SourceRegistry` 9개 엔트리 (인베스팅, 국민은행, 하나은행, 업비트, 빗썸, 코인원, 고팍스, 코빗 + (미국달러F))
 - [ ] 정렬 기본값: SourceRegistry.sortOrder
-- [ ] stale 판정: `now - timestamp > freshnessSeconds`
+- [ ] stale 판정 **미구현** (Phase 1 범위 외, timestamp는 "N초 전 변동" 정보 표시용만)
 - [ ] 어댑터: `ExchangeRate.bank → SourceRate.source`, `.currency → .asset`
 - [ ] FCM `type` 분기 (rate_alert / source_rate_alert / unknown 무시)
 - [ ] 알림 API 분리 (bank vs source endpoint)

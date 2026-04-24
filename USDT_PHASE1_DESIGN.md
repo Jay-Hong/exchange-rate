@@ -73,7 +73,7 @@ Phase 1에서는 그래프 API를 구현하지 않는다.
 ### Registry goals
 
 - canonical key를 코드 상수로 관리 (내부 helper only)
-- 표시명, 분류, 정렬 순서, stale 기준을 한 곳에서 관리
+- 표시명, 분류, 정렬 순서를 한 곳에서 관리
 - 기준 정렬 순서 제공 (앱에서 기본값으로 사용)
 
 ### Recommended shape
@@ -90,28 +90,26 @@ class SourceDefinition:
     display_name: str
     category: str                        # "exchange" | "reference" | "derivative"
     sort_order: int
-    freshness_seconds: Optional[int]     # None = Phase 2에서 결정 (KRX 등)
     phase1_enabled: bool = True
 ```
 
 `canonical_key`는 dataclass 필드로 두지 않고 `f"{source}:{asset}"`로 필요 시 생성.
-`freshness_seconds=None`인 소스는 stale 판정 로직에서 건너뛰거나 Phase 2 활성화 시 값을 채운다.
 
 ### Phase 1 registry entries
 
 기본 표시 순서는 `인베스팅 → KB → 하나 → (미국달러F) → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗`.
 
-| source | asset | category | display_name | sort_order | freshness_seconds | phase1_enabled |
-| --- | --- | --- | --- | ---: | ---: | --- |
-| `investing` | `usd-krw` | `reference` | `인베스팅` | 10 | 90 | True |
-| `kb` | `usd-krw` | `reference` | `국민은행` | 20 | 300 | True |
-| `hana` | `usd-krw` | `reference` | `하나은행` | 30 | 300 | True |
-| `krx` | `usd-krw-futures` | `derivative` | `미국달러F` | 40 | `None` (Phase 2) | **False** (Phase 2) |
-| `upbit` | `usdt-krw` | `exchange` | `업비트` | 50 | 35 | True |
-| `bithumb` | `usdt-krw` | `exchange` | `빗썸` | 60 | 35 | True |
-| `coinone` | `usdt-krw` | `exchange` | `코인원` | 70 | 35 | True |
-| `gopax` | `usdt-krw` | `exchange` | `고팍스` | 80 | 35 | True |
-| `korbit` | `usdt-krw` | `exchange` | `코빗` | 90 | 35 | True |
+| source | asset | category | display_name | sort_order | phase1_enabled |
+| --- | --- | --- | --- | ---: | --- |
+| `investing` | `usd-krw` | `reference` | `인베스팅` | 10 | True |
+| `kb` | `usd-krw` | `reference` | `국민은행` | 20 | True |
+| `hana` | `usd-krw` | `reference` | `하나은행` | 30 | True |
+| `krx` | `usd-krw-futures` | `derivative` | `미국달러F` | 40 | **False** (Phase 2) |
+| `upbit` | `usdt-krw` | `exchange` | `업비트` | 50 | True |
+| `bithumb` | `usdt-krw` | `exchange` | `빗썸` | 60 | True |
+| `coinone` | `usdt-krw` | `exchange` | `코인원` | 70 | True |
+| `gopax` | `usdt-krw` | `exchange` | `고팍스` | 80 | True |
+| `korbit` | `usdt-krw` | `exchange` | `코빗` | 90 | True |
 
 ### Recommended helpers
 
@@ -399,27 +397,40 @@ Request는 `source` + `asset` 구조 사용 (레거시 호환 불필요, 새 API
 - 실패한 source 하나가 전체 job 실패를 만들지 않음
 - 성공한 source만 `insert_source_rate_if_changed`로 저장
 
-## Stale Policy
+## Stale Policy — Phase 1에서는 도입하지 않음
 
-### Exchange sources
+**이전 설계 (freshness_seconds 기반 stale 판정)는 폐기됨.**
 
-- 기준: registry의 `freshness_seconds = 35`
-- `now - updated_at > 35초`면 stale
+### 폐기 사유
 
-### Reference sources (기존 legacy 테이블 timestamp 기준)
+저장된 `timestamp` 의미와 stale 판정의 요구사항이 일치하지 않는다:
 
-- `investing:usd-krw`: 90초
-- `kb:usd-krw`: 300초
-- `hana:usd-krw`: 300초
+| 항목 | 현재 저장값 | stale 판정에 필요한 값 |
+| --- | --- | --- |
+| 의미 | 마지막 **값 변경** 시각 | 마지막 **수집 성공** 시각 |
+| 생성 조건 | insert-if-changed (가격 변동 시에만 INSERT) | 크롤링 attempt 성공 시마다 heartbeat |
 
-### Client application rules (서버가 아닌 클라이언트에서 처리)
+이 두 값의 괴리는 다음 상황에서 오진을 만든다:
 
-1. stale source도 리스트에는 표시
-2. stale 소스는 요약값(최저/최고/스프레드) 계산에서 제외
-3. baseline source가 stale이면 diff 필드는 `null`
-4. 모든 exchange가 stale면 요약 exchange 관련 필드는 `null`
+- **은행 주말 정지**: investing/kb/hana는 주말 ~48-72h 고시 없음 → 값 변경 없음 → `now - timestamp > freshness_seconds`로는 전부 stale로 오판
+- **USDT 저유동성**: 5개 거래소가 동일 가격($1.000 근처)에서 수 분간 유지 가능 → 동일 문제
+- **공통 근본 원인**: insert-if-changed 정책에서 "값이 안 바뀐 것"과 "수집이 실패한 것"을 구분할 수 없음
 
-서버는 각 엔트리에 `timestamp`만 제공하고, stale 판정은 클라이언트가 registry freshness_seconds에 따라 수행.
+### Phase 1 규칙
+
+1. 서버는 각 엔트리에 `timestamp`(마지막 값 변경 시각)만 제공
+2. 클라이언트는 UI에 타임스탬프를 **정보 표시용**으로만 사용 ("마지막 변동 N초 전")
+3. stale 배지, 요약값 계산에서의 stale 제외, diff null 처리 등은 **Phase 1 범위에서 구현하지 않는다**
+4. 진짜 수집 장애는 관리자 페이지/Telegram 알림에서 별도 탐지
+
+### 나중에 제대로 도입하려면
+
+다음 두 값을 분리 추적해야 한다:
+
+- `last_rate_change_at`: 현재 있는 값 (가격이 실제 바뀐 시점)
+- `last_collection_success_at` 또는 `observed_at`: 크롤링이 성공한 시점 (값이 안 바뀌어도 기록)
+
+이때 stale 판정은 **후자 기준**으로만 유효하다. 이 인프라가 갖춰질 때 stale 규칙과 registry 필드를 재도입한다.
 
 ## CRUD Boundary
 

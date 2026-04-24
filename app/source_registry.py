@@ -11,6 +11,13 @@
 
 Phase 1 범위: 업비트/빗썸/코인원/고팍스/코빗 USDT/KRW
 Phase 2 예정: KRX 미국달러선물 (phase1_enabled=False로 자리만 확보)
+
+Stale 판정에 대하여:
+    현재 timestamp는 "마지막 값 변경 시각" (insert-if-changed 정책 결과)이라
+    "마지막 수집 성공 시각"과 다르다. 은행 주말이나 USDT 저유동성 구간에서
+    오진이 발생하므로 Phase 1에서는 stale 판정 기능을 도입하지 않는다.
+    향후 observed_at 또는 last_collection_success_at을 별도 추적하게 되면
+    그때 stale 관련 필드를 재도입한다.
 """
 
 from dataclasses import dataclass
@@ -26,7 +33,6 @@ class SourceDefinition:
     display_name: str
     category: str                        # "exchange" | "reference" | "derivative"
     sort_order: int
-    freshness_seconds: Optional[int]     # None = Phase 2에서 결정 (KRX 등)
     phase1_enabled: bool = True
 
 
@@ -38,7 +44,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="인베스팅",
         category="reference",
         sort_order=10,
-        freshness_seconds=90,
     ),
     SourceDefinition(
         source="kb",
@@ -46,7 +51,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="국민은행",
         category="reference",
         sort_order=20,
-        freshness_seconds=300,
     ),
     SourceDefinition(
         source="hana",
@@ -54,7 +58,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="하나은행",
         category="reference",
         sort_order=30,
-        freshness_seconds=300,
     ),
     SourceDefinition(
         source="krx",
@@ -62,7 +65,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="미국달러F",
         category="derivative",
         sort_order=40,
-        freshness_seconds=None,
         phase1_enabled=False,
     ),
     SourceDefinition(
@@ -71,7 +73,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="업비트",
         category="exchange",
         sort_order=50,
-        freshness_seconds=35,
     ),
     SourceDefinition(
         source="bithumb",
@@ -79,7 +80,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="빗썸",
         category="exchange",
         sort_order=60,
-        freshness_seconds=35,
     ),
     SourceDefinition(
         source="coinone",
@@ -87,7 +87,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="코인원",
         category="exchange",
         sort_order=70,
-        freshness_seconds=35,
     ),
     SourceDefinition(
         source="gopax",
@@ -95,7 +94,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="고팍스",
         category="exchange",
         sort_order=80,
-        freshness_seconds=35,
     ),
     SourceDefinition(
         source="korbit",
@@ -103,7 +101,6 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="코빗",
         category="exchange",
         sort_order=90,
-        freshness_seconds=35,
     ),
 )
 

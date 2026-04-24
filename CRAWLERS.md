@@ -185,7 +185,7 @@
 
 **source_registry.py**:
 
-- 9개 소스 메타데이터 (source, asset, display_name, category, sort_order, freshness_seconds, phase1_enabled)
+- 9개 소스 메타데이터 (source, asset, display_name, category, sort_order, phase1_enabled)
 - `is_phase1_source()` — 등록되고 활성화된 조합인지 검증
 - `get_source_definition()` — (source, asset) lookup
 - Phase 1 활성: 5개 거래소 + investing/kb/hana 참조값
