@@ -1,8 +1,8 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.1)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.2)
 
-> 📝 **상태**: 토론용 초안 (v0.1, 2026-04-26)
+> 📝 **상태**: Phase 0 종료 조건 합의본 (v0.2, 2026-04-27)
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.1 초안 작성 — 합의된 원칙, 미정 항목, 검증 체크리스트 정리
+> 🔄 **변경 이력**: v0.2 — Phase 0 종료 조건(A) + Phase 1 PoC 평가 범위(B) + 측정 메트릭/의사결정 절차(C) minimum bar 결론형 반영. 테더 탭 데이터 topic-only 정책 명시(F 미정 추가). 정량 임계값/background 정책 전반은 후속 합의로 분리.
 
 ---
 
@@ -105,7 +105,9 @@ Investing live channel (조사 중) ─┤
 
 ```text
 fx:<pair>           # 외환 — fx:usd-krw, fx:jpy-krw, fx:eur-krw
-usdt:krw            # USDT/KRW — 5개 거래소 통합
+usdt:krw            # ⚠️ 잠정 명칭. 실제로는 multi-source 테더 탭 토픽
+                    #   (5개 거래소 USDT + Investing/KB/Hana reference + Phase 2 KRX 달러선물)
+                    #   정확한 토픽 이름과 snapshot/delta schema는 Phase 2 PR에서 확정 (미정 F)
 dxy                 # 달러지수 (보조지표)
 graph:<pair>:<range>  # 그래프 (저빈도) — graph:usd-krw:1d 등
 news                # 뉴스 피드
@@ -120,6 +122,8 @@ news                # 뉴스 피드
 - `error` — 프로토콜/구독 오류
 
 ### v1 minimal 메시지 포맷
+
+> ⚠️ 아래 메시지 예시는 v1 minimal 형식을 설명하기 위한 단순 예시다. 실제 테더 탭은 multi-source payload(5거래소 + Investing/KB/Hana + Phase 2 KRX)이며, 정확한 토픽 이름과 schema는 Phase 2 PR에서 확정한다 (미정 항목 F).
 
 서버 → 클라이언트 hello:
 ```json
@@ -317,16 +321,37 @@ WS tick 수신
 
 ### Dual-emit 원칙
 
-서버는 일정 기간 동안 **legacy 전체 broadcast + 새 topic delta를 동시 발사**:
+서버는 일정 기간 동안 **legacy 전체 broadcast + 새 topic delta를 동시 발사**.
+
+#### 채널별 데이터 범위
+
+| 채널 | 데이터 범위 |
+|---|---|
+| legacy `rates` (구버전 앱 호환) | USD/JPY/EUR + Investing/은행 9개만. **테더 탭 데이터(USDT 거래소 / KRX 달러선물)는 미포함** |
+| 새 topic delta (신 프로토콜 앱 전용) | `fx:*`, 테더 탭 토픽(잠정 `usdt:krw`, multi-source), `dxy`, `graph:*`, `news` 등 모든 토픽 |
+
+#### 발사 흐름 (예시 — FX 환율 변경 시)
 
 ```text
-거래소 tick 수신 → Redis 상태 갱신
-  ├→ legacy: build_rates_payload에 USDT 포함하여 기존 클라이언트에 전체 broadcast (구버전 앱)
-  └→ topic: usdt:krw delta로 신 프로토콜 클라이언트에만 전송 (신버전 앱)
+환율 tick 수신 → Redis 상태 갱신
+  ├→ legacy: build_rates_payload (USD/JPY/EUR + 은행 9개) 전체 broadcast (구버전 앱)
+  └→ topic: fx:usd-krw delta 등 신 프로토콜 클라이언트에만 전송 (신버전 앱)
 ```
 
-- 구버전 앱: subscribe 메시지 안 보냄 → 서버가 legacy mode로 fallback → 기존 동작 유지
-- 신버전 앱: hello 후 subscribe → 토픽별 delta만 받음
+#### 발사 흐름 (예시 — 거래소 USDT tick 시)
+
+```text
+거래소 USDT tick 수신 → Redis 상태 갱신
+  ├→ legacy: 발사하지 않음 (구버전 앱은 USDT 인지 안 됨, 죽은 데이터 회피)
+  └→ topic: 테더 탭 토픽 delta로 신 프로토콜 클라이언트에만 전송
+```
+
+- 구버전 앱: subscribe 메시지 안 보냄 → 서버가 legacy mode로 fallback → USD/JPY/EUR + 은행 9개만 수신
+- 신버전 앱: hello 후 subscribe → 토픽별 delta만 받음 (테더 탭 포함)
+
+#### 원천 데이터 재사용
+
+같은 원천 데이터는 여러 topic payload에 재사용될 수 있다. 예를 들어 KB의 usd-krw 환율 데이터(source=kb, asset=usd-krw)는 legacy 달러 탭 호환 payload에도 포함되고, 테더 탭 topic의 비교 기준(reference)으로도 포함될 수 있다. 이는 **데이터 저장 경로 공유이지, legacy 채널에 테더 탭 데이터를 추가한다는 의미가 아니다.**
 
 ### 레거시 제거 기준
 
@@ -338,23 +363,29 @@ WS tick 수신
 
 → **양쪽 플랫폼이 모두 1% 미만일 때만** 제거. 한쪽만 1% 미만이면 보류.
 
-### 추가 고려 (미정 항목)
+### Phase 2 이후 검토 항목
 
-- iOS background에서 WebSocket 유지 정책 (iOS는 background WS가 까다로움 — push-only fallback?)
-- 1초 broadcast의 모바일 배터리 영향
-- 앱 cold start 시 snapshot 수신 흐름 (현재 단일 캐시 → 토픽별 분리)
-- 최소 지원 버전 정책 도입 여부 ("v2.0 이상만 지원" 라인 그어 레거시 부담 감축)
+> ⚠️ 아래는 Phase 1 진입 minimum bar 밖. 미정 항목 B에서 후속 합의 대상으로 분류.
+
+- iOS background에서 WebSocket 유지 정책 (iOS는 background WS가 까다로움 — push-only fallback?) — Phase 2 이후 검토
+- 1초 broadcast의 모바일 배터리 영향 — Phase 2 신 프로토콜 PoC부터 본격 측정
+- 앱 cold start 시 snapshot 수신 흐름 (현재 단일 캐시 → 토픽별 분리) — Phase 2 토픽 라우팅 도입 시 함께 결정
+- 최소 지원 버전 정책 도입 여부 ("v2.0 이상만 지원" 라인 그어 레거시 부담 감축) — 별도 정책 결정
 
 ---
 
 ## 12. 단계별 마이그레이션
 
-### Phase 0 — 계획 및 합의 (현재)
+### Phase 0 — 계획 및 합의 (완료)
 
-- ✅ 본 문서 (REALTIME_ARCHITECTURE_PLAN.md) v0.1 작성
-- ⏳ 미정 항목 합의 (5개 항목, 16번 섹션 참조)
-- ⏳ 거래소 WS endpoint 검증 (7번 섹션 체크리스트)
-- ⏳ Phase 1 진입 종료 조건 합의 (미정 항목 A)
+- ✅ 본 문서 (REALTIME_ARCHITECTURE_PLAN.md) v0.1 초안 → v0.2 합의본
+- ✅ Phase 1 진입 종료 조건 합의 (미정 항목 A — minimum bar 결론형)
+- ✅ Phase 1 PoC 평가 범위 minimum bar 합의 (미정 항목 B — foreground 한정)
+- ✅ Phase 1 측정 메트릭 + 의사결정 절차 합의 (미정 항목 C — 정량 임계값 제외)
+- ⏳ 거래소 WS endpoint 검증 (7번 섹션 체크리스트, Phase 2 직전)
+- ⏳ Phase 2 도입 시점에 새 미정 항목 F 합의 (테더 탭 topic 이름 + schema)
+
+> v0.2 commit 시점부터 **Phase 1 코드 설계/구현 작업 진입 가능**. 운영 배포 조건은 아니며 Phase 1 PR에서 계측/롤백/배포 절차를 별도 확인.
 
 ### Phase 1 — 1초 Broadcast PoC + 측정
 
@@ -374,8 +405,16 @@ WS tick 수신
 - broadcast skip 비율 (변경 없음으로 스킵된 비율)
 - EC2 CPU/메모리 추이
 
-**채택/롤백 기준** (미정 — 16번 섹션):
-- 예: p99 DB latency < 100ms, EC2 CPU < 60%, RDS pool < 70% 등 → 임계값 합의 필요
+**측정 범위 / 배포 정책** (v0.2 합의):
+- foreground 실시간 화면 기준으로 평가. background WS 유지는 Phase 1 성공 기준에서 제외 (미정 B 결론)
+- 1주 측정은 운영 환경에서 진행하되, 배포 범위와 시간대는 Phase 1 PR에서 결정
+- 배포 우선순위: **짧은 시간대 cron 차등 → 필요 시 관리자 한정 → (Phase 2 토픽 라우팅 이후) 소수 클라이언트**
+- background 상태는 기존 FCM 푸시 + 앱 재진입 시 snapshot 동기화 그대로 유지
+- 모바일 트래픽/처리 시간 기본 모니터링은 Phase 1, 본격 배터리 측정은 Phase 2부터
+
+**채택/롤백 기준** (정량 임계값은 사후 합의):
+- 1주 측정 데이터 기반으로 유지/롤백/event-driven 전환/임계값 운영 SLO 등록 여부 결정 (미정 C 결론)
+- 후보 임계값(추정): p99 DB latency < 100ms, EC2 CPU < 60%, RDS pool < 70% — 측정 후 실측 데이터로 확정
 
 ### Phase 2 — 업비트 WS PoC + Topic 프로토콜 v1
 
@@ -384,9 +423,11 @@ WS tick 수신
 **작업**:
 1. v1 minimal 토픽 프로토콜 구현 (hello/subscribe/snapshot/delta)
 2. 업비트 1개 거래소 WebSocket collector 구현
-3. dual-emit: 업비트 tick은 (a) legacy `rates` 배열, (b) `usdt:krw` topic 양쪽 발사
-4. iOS/Android 신 프로토콜 클라이언트 PoC
-5. snapshot 캐시 토픽별 분리
+3. **테더 탭 topic 이름 + snapshot/delta schema 확정** (미정 F 해결): multi-source payload (5거래소 USDT + Investing/KB/Hana reference + Phase 2 KRX 달러선물). 후보 방향: `source + asset + category` 기반 배열. category 예: `reference` / `derivative` / `exchange`.
+4. **백엔드 `get_all_rates_flat`에서 USDT legacy 병합 제거** ([crud.py:340](app/crud.py#L340), [crud.py:365](app/crud.py#L365)) — 테더 탭 데이터는 새 topic으로만 발사. legacy `rates`에는 USD/JPY/EUR + Investing/은행 9개만 유지.
+5. dual-emit 발사: 거래소 tick은 새 topic으로만 (legacy 미발사). FX/은행 tick은 legacy + 새 topic 양쪽 발사.
+6. iOS/Android 신 프로토콜 클라이언트 PoC — 테더 탭 데이터를 새 topic 구독으로 수신 (현재 `rates` 배열에서 USDT 받는 테스트 코드 수정)
+7. snapshot 캐시 토픽별 분리
 
 **검증 항목**:
 - 업비트 WS endpoint 검증 체크리스트 (7번)
@@ -491,39 +532,76 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 
 ## 16. 미정 항목
 
-> ⚠️ Phase 1 진입 전에 합의 필요한 항목들. 라벨 순서는 **합의 진행 우선순위**(메타 → 범위 → 측정 → 후속)로 정렬.
+> ⚠️ A/B/C는 v0.2에서 minimum bar 결론형으로 닫힘. 정량 임계값/background 정책 전반은 후속. F는 Phase 2 직전 합의. D/E는 Phase 3+ 합의.
+> 라벨 순서는 **합의 진행 우선순위**(메타 → 범위 → 측정 → 후속)로 정렬.
 
-### A. Phase 0 종료 조건 (Phase 1 진입 시점)
+### A. Phase 0 종료 조건 (Phase 1 진입 시점) — ✅ minimum bar 합의 (v0.2)
 
-- 본 문서가 어디까지 commit되어야 Phase 1 코드 작업 시작?
-- 미정 항목 B, C 합의가 선행되어야 하는가?
+- **v0.2 commit 시점부터 Phase 1 코드 설계/구현 작업에 진입할 수 있다.** 단, 운영 배포 조건은 아니며 Phase 1 PR에서 계측/롤백/배포 절차를 별도 확인한다.
+- Phase 1 진입 전 최소 합의는 B의 PoC 평가 범위 + C의 측정 항목/의사결정 절차로 한정한다.
+- C의 정량 임계값과 B의 background 정책 전반은 후속 합의로 남긴다.
 
-### B. 모바일 클라이언트 영향
+### B. 모바일 클라이언트 영향 — ✅ minimum bar 합의 (v0.2)
 
-- iOS background에서 WebSocket 유지 정책
-  - foreground only / background ping-pong / push-only fallback?
-- 1초 broadcast 시 모바일 배터리 영향 측정 방법
+**v0.2 합의 (Phase 1 PoC 평가 범위)**:
+
+- Phase 1 PoC는 **foreground 실시간 화면 기준**으로 평가한다.
+- iOS/Android **background WS 유지는 Phase 1 성공 기준에 포함하지 않는다.**
+- background 상태는 기존 **FCM 푸시 + 앱 재진입 시 snapshot 동기화**를 그대로 유지한다.
+- Phase 1은 모바일 트래픽/처리 시간 기본 모니터링까지만 한다.
+- 본격 배터리 영향 측정은 Phase 2 신 프로토콜 PoC부터 시작한다.
+
+**🟡 후속 합의 대상** (Phase 2 이후):
+
+- iOS background WebSocket 유지 정책 (foreground only / background ping-pong / push-only fallback)
+- 1초 broadcast 시 모바일 배터리 영향 측정 방법론
 - 앱 cold start 시 snapshot 수신 흐름 (단일 캐시 → 토픽별 분리)
 - 최소 지원 버전 정책 도입 여부
 
-### C. Phase 1 PoC 측정 메트릭 임계값
+### C. Phase 1 PoC 측정 메트릭 — ✅ minimum bar 합의 (v0.2)
 
-채택/롤백 기준이 정량 합의되어야 종료 조건이 명확해짐. 후보:
+**v0.2 합의 (측정 항목 + 의사결정 절차)**:
 
-- p99 DB latency: 100ms? 200ms?
-- EC2 CPU 5분 평균: 60%? 70%?
-- RDS connection pool: 60%? 70%?
+- **정량 임계값은 v0.2에서 확정하지 않는다** — 측정 데이터 없이 추측으로 박으면 의미 없음.
+- 측정 항목 (12번 Phase 1 섹션과 동일): broadcast 1회당 DB SELECT latency (p50, p99) / `build_rates_payload` JSON 직렬화 + diff 비교 시간 / 직렬 vs 병렬 send_json 시간 / RDS connection pool 사용률 / broadcast skip 비율 / EC2 CPU/메모리 추이 / 모바일 트래픽·처리 시간 기본 모니터링.
+- **PoC 운영 기간**: 1주.
+- **의사결정 절차**: 1주 측정 데이터로 유지 / 롤백 / event-driven 전환 / 정량 임계값 운영 SLO 등록 여부를 결정한다.
+- **배포 정책**: 1주 측정은 운영 환경에서 진행하되, 배포 범위/시간대는 Phase 1 PR에서 결정. 우선순위는 **짧은 시간대 cron 차등 → 필요 시 관리자 한정 → (Phase 2 토픽 라우팅 이후) 소수 클라이언트**.
 
-### D. Graph 토픽 push 빈도
+**🟡 후속 합의 대상** (1주 측정 후):
+
+- p99 DB latency 임계값 (후보: 100ms? 200ms?)
+- EC2 CPU 5분 평균 임계값 (후보: 60%? 70%?)
+- RDS connection pool 임계값 (후보: 60%? 70%?)
+
+### D. Graph 토픽 push 빈도 — 🟡 Phase 3 직전 합의
 
 - 1d / 1w / 3m / 1y 각 range별 push 빈도
 - 후보: 분 단위? range 별 다른 빈도? (예: 1d는 1분, 1y는 1시간)
 
-### E. 알림 평가 정량 정책
+### E. 알림 평가 정량 정책 — 🟡 Phase 3 직전 합의
 
 - `last_notified_at` 윈도우 (재발송 차단 시간)
   - 후보: 5분 / 30분 / 1시간
 - DB 저장 정책 — tick 모두 vs 1초 last vs 1초 OHLC
+
+### F. 테더 탭 topic 이름 + snapshot/delta schema — 🟡 Phase 2 PR 합의
+
+> ⚠️ 테더 탭은 단순 `usdt:krw`가 아니라 multi-source 탭이다. v0.1의 `usdt:krw` 명칭은 잠정.
+
+**미정 항목**:
+
+- 토픽 이름 — 후보: `tab:tether` (직관적이지만 UI 결합), `market:tether-premium` (도메인 중심이지만 길다). Phase 2 PR에서 클라이언트 구현과 함께 결정.
+- snapshot/delta payload schema — 후보 방향: `source + asset + category` 기반 배열 구조.
+  - 예시:
+    - investing / usd-krw / reference
+    - kb / usd-krw / reference
+    - hana / usd-krw / reference
+    - krx / usd-krw-futures / derivative (Phase 2 새 source)
+    - upbit / usdt-krw / exchange
+    - bithumb / usdt-krw / exchange
+    - ... (5거래소)
+- category 분류 정합성 검증 — [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md), [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md)와 일관성 확인 필요.
 
 ---
 
@@ -535,7 +613,8 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - ADR-XXX: Broadcasting 1초 cron 전환 (Phase 1 측정 결과 반영)
 - ADR-XXX: 거래소 USDT — REST polling → WebSocket 전환
 - ADR-XXX: 알림 평가 흐름 분리 (DB 동기 → Redis 비동기)
-- ADR-XXX: Legacy + Topic dual-emit 마이그레이션 패턴
+- ADR-XXX: Legacy + Topic dual-emit 마이그레이션 패턴 — 테더 탭 데이터는 topic-only, legacy `rates`는 USD/JPY/EUR + Investing/은행 9개로 한정
+- ADR-XXX: 테더 탭 multi-source topic 이름 + payload schema 확정 (source + asset + category 모델)
 - ADR-XXX: 그래프 토픽 분리 (실시간 tick과 별도)
 - ADR-XXX: (선택) Investing 실시간 채널 전환 — 발견 시 별도 ADR
 
@@ -544,30 +623,40 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 ## 18. 변경 이력
 
 - **v0.1** (2026-04-26): 초안 작성. 합의된 원칙, 미정 항목, 검증 체크리스트, 단계별 마이그레이션 정리.
+- **v0.2** (2026-04-27): Phase 0 종료 조건 합의본.
+  - 미정 항목 A/B/C minimum bar 결론형 반영 (정량 임계값/background 정책 전반은 후속).
+  - v0.2 commit = Phase 1 코드 설계/구현 진입 가능 (운영 배포 조건 아님).
+  - 테더 탭 데이터 topic-only 정책 명시: legacy `rates`는 USD/JPY/EUR + Investing/은행 9개로 한정, 테더 탭 multi-source payload는 새 topic 전용.
+  - 새 미정 항목 F 추가 (테더 탭 topic 이름 + schema 확정 — Phase 2 PR).
+  - 5번 섹션 `usdt:krw`는 잠정 명칭 표시.
+  - 11번 섹션에 "원천 데이터 재사용" 문단 추가 (KB usd-krw 예시).
 
 ---
 
 ## 부록: 합의 요약 (한눈에 보기)
 
-✅ **합의된 것**:
+✅ **합의된 것** (v0.1 + v0.2):
 - v1 목표: 서버 tick 수신 후 1초 이내 화면 반영
 - 거래소 UI: 200~500ms debounce
 - 알림: debounce 없이 모든 tick 평가 + last_notified_at 중복 방지
 - 프로토콜: v1 minimal hello/subscribe/snapshot/delta + protocol_version
-- 마이그레이션: legacy + topic dual-emit
+- 마이그레이션: legacy + topic dual-emit. **단 dual-emit 범위는 USD/JPY/EUR + Investing/은행 9개에 한정. 테더 탭 데이터(USDT 거래소 + KRX 달러선물)는 topic-only**
+- 같은 원천 데이터는 여러 topic payload에 재사용 가능 — 데이터 저장 경로 공유와 채널 분리는 별개
 - 레거시 제거: iOS/Android 양쪽 활성 구버전 < 1% **그리고** 최소 6개월 경과
 - 그래프: 실시간 tick과 분리된 저빈도 토픽
-- Phase 1: 1초 broadcast PoC + 병렬 전송 + 계측
-- Phase 2: 업비트 WS PoC + dual-emit (토픽 명세도 함께 검증)
+- Phase 0 (v0.2 합의): A/B/C minimum bar 결론형. v0.2 commit = Phase 1 **코드 설계/구현 진입** (운영 배포 조건 아님)
+- Phase 1: 1초 broadcast PoC + 병렬 전송 + 1주 계측. foreground 한정. 배포 범위/시간대는 Phase 1 PR에서 결정
+- Phase 2: 업비트 WS PoC + 토픽 프로토콜 + 테더 탭 topic 이름/schema 확정 + 백엔드 USDT legacy 분리
 - DB는 실시간 전달 경로에서 분리, Redis가 latest state hot path
-- iOS/Android 양쪽 운영 중이므로 양 플랫폼 모두 dual-emit 호환 필수
+- iOS/Android 양쪽 운영 중이므로 양 플랫폼 모두 dual-emit 호환 필수 (USD/JPY/EUR + 은행 9개 한정)
 
-🟡 **미정 항목** (16번 섹션, 합의 진행 우선순위 순):
-- A. Phase 0 종료 조건 (Phase 1 진입 시점)
-- B. 모바일 클라이언트 영향 (iOS background WS, 배터리)
-- C. Phase 1 측정 메트릭 임계값
-- D. 그래프 토픽 push 빈도
-- E. 알림 평가 정량 (last_notified_at 윈도우, DB 저장 정책)
+🟡 **후속 합의 항목** (16번 섹션, 합의 진행 우선순위 순):
+- A. ✅ Phase 0 종료 조건 — minimum bar 합의 완료 (v0.2)
+- B. ✅ 모바일 영향 minimum bar 합의 완료 (v0.2). 🟡 background 정책 전반은 Phase 2 이후
+- C. ✅ 측정 항목 + 절차 합의 완료 (v0.2). 🟡 정량 임계값은 1주 측정 후
+- D. 🟡 그래프 토픽 push 빈도 — Phase 3 직전
+- E. 🟡 알림 평가 정량 (last_notified_at 윈도우, DB 저장 정책) — Phase 3 직전
+- F. 🟡 테더 탭 topic 이름 + snapshot/delta schema — Phase 2 PR에서 확정
 
 🔧 **검증 체크리스트** (7번 섹션):
 - 거래소 5종 WebSocket endpoint 검증 (Phase 2 직전)
