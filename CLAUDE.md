@@ -1095,5 +1095,6 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ RDS PostgreSQL 전환 (2026-01)
 - ✅ iOS 앱스토어 출시 완료 (2026-01-21)
 - ✅ DXY 보조지표 그래프 (Phase 1A, 2026-03-10)
+- ✅ Android 출시 완료 (2026-03-13)
 - ✅ 환율 뉴스 피드 — RSS + KB API 병행 수집, noise_only 24h (Phase 1B, 2026-03-28)
 - 🔜 CI/CD, 유닛 테스트
