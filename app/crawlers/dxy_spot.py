@@ -7,6 +7,11 @@ Primary: /indices/usdollar 의 __NEXT_DATA__
 Fallback1: 같은 페이지의 CSS selector
 Fallback2: Yahoo Finance
 
+Yahoo fallback 시간 가드:
+- ICE DX 주간 세션 OFF 구간에는 Yahoo 저장 차단
+- 일요일 18:00 ET 이전, 금요일 17:00 ET 이후, 토요일 전체
+- 화~금 일일 휴장(17:00~20:00 ET)은 아직 차단하지 않음
+
 Yahoo fallback 보존 정책 (market mode 기반):
 - OUT 모드 (주말): 72h 이내 Investing DB 값 존재 시 Yahoo 차단
 - IN/BREAK 모드: 아래 두 조건이 모두 충족될 때만 Yahoo 차단 (하나라도 깨지면 Yahoo 허용)
@@ -24,6 +29,7 @@ import logging
 import random
 from datetime import datetime, timezone
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
 
 # 서드파티 라이브러리
 from bs4 import BeautifulSoup
@@ -63,12 +69,15 @@ SAFARI_UA_POOL = [
 ]
 
 # --- Yahoo fallback 보존 정책 상수 ---
+NY = ZoneInfo("America/New_York")
+
 IN_SUCCESS_GRACE_SECONDS = 15 * 60       # IN 모드: 15분
 BREAK_SUCCESS_GRACE_SECONDS = 30 * 60    # BREAK 모드: 30분
 OUT_PRESERVE_SECONDS = 72 * 3600         # OUT 모드: 72시간
 
 IN_FAILURE_THRESHOLD = 3                 # IN 모드: 연속 3회 실패
 BREAK_FAILURE_THRESHOLD = 5              # BREAK 모드: 연속 5회 실패
+DXY_YAHOO_DIFF_THRESHOLD = 0.07          # Yahoo 저장 전 마지막 Investing 값과 허용 차이
 
 # --- 프로세스 메모리 상태 변수 ---
 _last_source_ts_ms = 0                                      # spot primary stale 판정용
@@ -133,6 +142,28 @@ def _fresh_age_seconds(now_utc: datetime, db=None) -> float:
 
 
 # --- Yahoo fallback 허용 판정 ---
+
+def _is_dxy_weekly_session_open(now_utc: datetime) -> bool:
+    """
+    DXY Yahoo fallback 저장을 허용할 주간 세션인지 판정.
+
+    기준은 ICE DX 주간 단위 세션(일 18:00 ET ~ 금 17:00 ET)이다.
+    DST/표준시는 America/New_York ZoneInfo가 자동 처리한다.
+
+    의도적으로 화~금 일일 휴장(17:00~20:00 ET)은 차단하지 않는다.
+    운영 DXY 피드가 해당 시간대에도 갱신된 관측이 있어 별도 검증 전까지
+    주말/주간 휴장 구간만 막는다.
+    """
+    now_ny = now_utc.astimezone(NY)
+    weekday = now_ny.weekday()  # Monday=0 ... Sunday=6
+
+    if weekday == 6 and now_ny.hour < 18:
+        return False
+    if weekday == 4 and now_ny.hour >= 17:
+        return False
+    if weekday == 5:
+        return False
+    return True
 
 def _should_use_yahoo_fallback(
     *,
@@ -224,6 +255,16 @@ def _try_yahoo_fallback(db, now_utc: datetime) -> None:
     """
     from app import crud, models
 
+    if not _is_dxy_weekly_session_open(now_utc):
+        logger.info(
+            "🛡️ DXY Yahoo 폴백 차단 (DXY 주간 세션 OFF)",
+            extra={
+                "now_utc": now_utc.isoformat(),
+                "now_ny": now_utc.astimezone(NY).isoformat(),
+            },
+        )
+        return
+
     now_kst = now_utc.astimezone(KST)
     mode = get_market_mode(now_kst)
 
@@ -255,6 +296,31 @@ def _try_yahoo_fallback(db, now_utc: datetime) -> None:
         return
 
     rate = fetch_dxy_from_yahoo()
+    if latest_investing is not None:
+        investing_age_seconds = meta.get("investing_rate_age_seconds")
+        diff_guard_grace_seconds = (
+            IN_SUCCESS_GRACE_SECONDS if mode == "IN" else BREAK_SUCCESS_GRACE_SECONDS
+        )
+
+        if (
+            investing_age_seconds is not None
+            and investing_age_seconds <= diff_guard_grace_seconds
+        ):
+            diff = abs(rate - latest_investing.rate)
+            if diff > DXY_YAHOO_DIFF_THRESHOLD:
+                logger.info(
+                    "🛡️ DXY Yahoo 임계값 초과 — 저장 보류",
+                    extra={
+                        **meta,
+                        "yahoo_rate": rate,
+                        "investing_rate": latest_investing.rate,
+                        "diff": round(diff, 4),
+                        "threshold": DXY_YAHOO_DIFF_THRESHOLD,
+                        "diff_guard_grace_seconds": diff_guard_grace_seconds,
+                    },
+                )
+                return
+
     crud.insert_dxy_rate_into_db(db=db, rate=rate, source="yahoo")
     logger.info(
         "📦 DXY Yahoo 폴백 저장",

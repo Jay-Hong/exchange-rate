@@ -2471,6 +2471,66 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 
 ---
 
+## ADR-022: DXY Yahoo fallback 시간/가격/fresh-age 가드 정책
+
+> 📅 **작성일**: 2026-04-27
+> 🏷️ **상태**: 확정
+
+### 맥락
+
+DXY 운영 피드(`dxy_spot.py`)는 Investing의 `/indices/usdollar`를 1차 소스로 쓰고, 실패 시 Yahoo Finance를 최후 폴백으로 호출한다. Yahoo 폴백이 두 가지 시나리오에서 그래프를 왜곡했다:
+
+1. **시장 마감 후 Yahoo 끼어듦**: 2026-04-27 06:00:12 KST(ICE DX 주간 개장 07:00 KST 직전) Yahoo 98.51 저장. 정상 운영 피드 첫 적재는 07:00:04 — 시장이 안 열린 60분 동안 Yahoo 값이 그래프에 잔존. 직전 Investing 값과 차이는 0.02라 단순 가격 가드로 못 잡힘.
+2. **마감 직후 stale 점프**: Yahoo의 `regularMarketPreviousClose`가 ICE 정산종가(예: 금요일 98.80)를 반환. Investing 마지막 live tick과 차이가 0.27까지 벌어져 Saturday 그래프 점프 발생.
+
+### 결정
+
+3중 가드를 `_try_yahoo_fallback()`에 적용:
+
+#### 1. 시간 가드 (ICE DX 주간 세션)
+
+- `_is_dxy_weekly_session_open(now_utc)` 신규 함수
+- ICE DX 선물 주간 세션(NY 일 18:00 ~ 금 17:00 ET) OFF 시 Yahoo 저장 차단
+  - 토 06:00 KST DST 이후
+  - 일 종일
+  - 월 07:00 KST DST 이전
+- DST/표준시는 `ZoneInfo("America/New_York")`이 자동 처리
+- 화~금 일일 휴장(17:00~20:00 ET, KST 06:00~09:00 DST)는 의도적으로 차단 안 함 — 운영 피드가 갱신되는 사례가 관측됨
+
+#### 2. 가격 차이 가드
+
+- 상수 `DXY_YAHOO_DIFF_THRESHOLD = 0.07`
+- `abs(yahoo_rate - latest_investing.rate) > 0.07`이면 저장 보류
+- 정상 분포 max(0.06) 직바깥 안전마진. 4/22 dual log + 4/27 평일 측정 기반.
+
+#### 3. Fresh-age 조건 (가격 가드 한정)
+
+- 가격 차이 가드는 **latest_investing이 fresh일 때만** 적용
+- fresh 기준: 모드별 grace (IN: 15분, BREAK: 30분)
+- Investing이 stale(예: 1시간 장애)일 때 Yahoo는 유일 대체 소스이므로, 가격 차이만으로 가드하면 그래프가 끊김 → fresh 조건으로 우회
+
+### 영향
+
+- 시장 시간 안의 Yahoo outlier 차단됨 (weekend Friday close 점프)
+- 시장 마감 후 Yahoo 끼어듦 차단됨 (4/27 06:00 케이스)
+- Investing 장애 시 Yahoo가 정상적으로 데이터 보충 가능
+- 가드 순서: 시간 가드(진입 직후) → 기존 mode 보존 정책 → Yahoo fetch → fresh + 가격 가드 → 저장
+
+### 기각 대안
+
+| 대안 | 기각 사유 |
+|---|---|
+| 가격 가드만 (fresh 조건 없음) | Investing 장애 시 정상 Yahoo도 차단 — 그래프 끊김 |
+| Yahoo `lastPrice` 우선으로 전환 | weekend stuck은 lastPrice도 마지막 값 고정이라 동일 발생 |
+| Yahoo 완전 제거 | DXY 단일 장애 시 보충 수단 사라짐 |
+| TradingView로 fallback 교체 | undocumented endpoint + ToS 회색지대, 데이터 신뢰성 미검증 |
+
+### 관련 결정
+
+- [ADR-020](#adr-020-dxy-크롤링-아키텍처-전환--독립-크롤러에서-investing-동반-추출로): DXY 운영 피드를 Investing primary로 전환 — 이 가드는 그 후속 보강
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2494,3 +2554,4 @@ DXY 전용 페이지(`/indices/usdollar`) 크롤링 시 **Investing.com CDN의 �
 - 2026-03-12: ADR-020 작성 (DXY 크롤링 아키텍처 전환 — 독립 크롤러에서 Investing 동반 추출로)
 - 2026-03-28: ADR-021 작성 (환율 뉴스 피드 — Redis-only + KB/RSS 병행 수집)
 - 2026-04-01: ADR-021 개정 (v2 단순화 — noise_only 일원화, 24h 윈도우, match_type/flash/category 삭제)
+- 2026-04-27: ADR-022 작성 (DXY Yahoo fallback 시간/가격/fresh-age 가드 정책)

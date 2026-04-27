@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **DXY Yahoo fallback 가드 강화** (2026-04-27, ADR-022):
+  - ICE DX 주간 세션 OFF (토 06:00~월 07:00 KST DST) Yahoo 저장 차단 (`_is_dxy_weekly_session_open`)
+  - Yahoo 값과 마지막 Investing 값 차이 `0.07` 초과 시 저장 보류
+  - 단, latest_investing이 fresh일 때만 가격 가드 적용 (mode별 grace: IN 15분 / BREAK 30분)
+  - 4/27 06:00 KST 케이스(시장 개장 전 Yahoo 끼어듦) 및 weekend Friday close 점프 모두 차단됨
+  - DST/표준시는 `ZoneInfo("America/New_York")`이 자동 처리
+
 - **MIBANK URL/DOM 변경 대응** (2026-04-27):
   - 구 URL `https://www.mibank.me/exchange/bank/index.php?search_code=...`가 `https://exchange.mibank.me/bank`로 리다이렉트되며 은행 코드가 유실되는 문제 수정
   - 9개 MIBANK 사용 크롤러 URL을 `https://exchange.mibank.me/bank?bank_cd=...` 형식으로 변경
