@@ -59,7 +59,7 @@ MONTH_SELECTOR = "#SELECT_DATE_601M"
 DAY_SELECTOR = "#SELECT_DATE_601D"
 
 MIBANK_WOORI_CODE = '020'
-MIBANK_WOORI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_WOORI_CODE
+MIBANK_WOORI_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_WOORI_CODE
 
 
 # 로거 설정

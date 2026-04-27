@@ -48,7 +48,7 @@ SECOND_CITI_BANK_SELECTORS = {
 }
 
 MIBANK_CITI_CODE = '027'
-MIBANK_CITI_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_CITI_CODE
+MIBANK_CITI_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_CITI_CODE
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")

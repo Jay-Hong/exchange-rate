@@ -52,7 +52,7 @@ SECOND_HANA_BANK_SELECTORS = {
 }
 
 MIBANK_HANA_CODE = '005'
-MIBANK_HANA_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_HANA_CODE
+MIBANK_HANA_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_HANA_CODE
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")

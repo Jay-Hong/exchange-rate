@@ -11,6 +11,7 @@
 
 # 표준 라이브러리
 import logging
+import re
 from contextlib import contextmanager
 from datetime import timezone as dt_timezone
 from typing import Optional
@@ -240,22 +241,60 @@ def is_mibank_rate_reliable() -> bool:
     return (weekday in [0, 1, 2, 3, 4] and hour > 9)
 
 
-MIBANK_TABLE_SELECTOR = "div.box_contents1 table tbody"
-MIBANK_RATE_CELL_SELECTOR = "td.right.counter.rollsty01"
+MIBANK_TABLE_SELECTORS = (
+    "div.box_contents1 table tbody",
+    "table.main_table.content tbody",
+)
+MIBANK_RATE_CELL_SELECTORS = (
+    "td.right.counter.rollsty01",
+    "span.counter",
+)
 MIBANK_DEFAULT_REQUIRED_CODES = ("USD", "JPY", "EUR")
 
 
 def _extract_mibank_currency_code(row) -> Optional[str]:
     link = row.select_one('a[href*="currency="]')
-    if not link:
+    if link:
+        href = link.get("href", "")
+        code = parse_qs(urlparse(href).query).get("currency", [None])[0]
+        if code:
+            return code.upper()
+
+    flag = row.select_one('img[src*="flag_"]')
+    if not flag:
         return None
-    href = link.get("href", "")
-    code = parse_qs(urlparse(href).query).get("currency", [None])[0]
+    src = flag.get("src", "")
+    match = re.search(r"flag_([a-z]{3})(?:_|\.)", src, re.IGNORECASE)
+    code = match.group(1) if match else None
     return code.upper() if code else None
 
 
-def _extract_mibank_rate_text(row) -> Optional[str]:
-    cells = row.select(MIBANK_RATE_CELL_SELECTOR)
+def _get_mibank_base_rate_column_index(tbody) -> Optional[int]:
+    table = tbody.find_parent("table")
+    header_row = table.select_one("thead tr") if table else None
+    if not header_row:
+        return None
+
+    for index, cell in enumerate(header_row.find_all(["th", "td"], recursive=False)):
+        if "기준환율" in cell.get_text(" ", strip=True):
+            return index
+    return None
+
+
+def _extract_mibank_rate_text(row, base_rate_column_index: Optional[int] = None) -> Optional[str]:
+    if base_rate_column_index is not None:
+        cells = row.find_all("td", recursive=False)
+        if base_rate_column_index < len(cells):
+            cell = cells[base_rate_column_index]
+            counter = cell.select_one("span.counter")
+            text = counter.get_text(strip=True) if counter else cell.get_text(strip=True)
+            return text if text and text != "-" else None
+
+    cells = []
+    for selector in MIBANK_RATE_CELL_SELECTORS:
+        cells = row.select(selector)
+        if cells:
+            break
     if not cells:
         return None
     # Last cell = base rate column on mibank
@@ -276,10 +315,15 @@ def crawl_mibank_rates(
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    tbody = soup.select_one(MIBANK_TABLE_SELECTOR)
+    tbody = None
+    for selector in MIBANK_TABLE_SELECTORS:
+        tbody = soup.select_one(selector)
+        if tbody:
+            break
     if not tbody:
         raise RuntimeError("mibank 테이블을 찾을 수 없음")
 
+    base_rate_column_index = _get_mibank_base_rate_column_index(tbody)
     required_set = {code.upper() for code in required_codes}
     found_codes = []
     current_rates = {}
@@ -292,7 +336,7 @@ def crawl_mibank_rates(
         if code not in required_set:
             continue
 
-        rate_text = _extract_mibank_rate_text(row)
+        rate_text = _extract_mibank_rate_text(row, base_rate_column_index)
         if not rate_text:
             continue
         current_rates[f"{code.lower()}-krw"] = parse_rate_text(rate_text)

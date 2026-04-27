@@ -37,7 +37,7 @@ KB_BANK_SELECTORS = {   # SECOND_KB_BANK_SELECTORS 도 같음
 }
 
 MIBANK_KB_CODE = '004'
-MIBANK_KB_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_KB_CODE
+MIBANK_KB_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_KB_CODE
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")

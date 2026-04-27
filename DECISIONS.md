@@ -2032,6 +2032,13 @@ MIBANK 환율 데이터 파싱 시 **잘못된 환율이 저장되는 버그** �
 3. **공통 함수 중앙화**: `app/crawlers/utils.py`에 `crawl_mibank_rates()` 추가
 4. **공통 상수**: `app/crawlers/constants.py`에 `MIBANK_REQUIRED_CODES/PAIRS/RANGES` 추가
 
+**2026-04-27 MIBANK URL/DOM 변경 대응 업데이트:**
+
+- URL 형식: `https://www.mibank.me/exchange/bank/index.php?search_code=088` → `https://exchange.mibank.me/bank?bank_cd=088`
+- 신 DOM 통화 코드 추출: `flag_usd_*.png` 형태의 국기 이미지 파일명 사용
+- 기준환율 추출: `기준환율(원)` 헤더 컬럼 인덱스를 찾아 해당 셀을 사용
+- 구 DOM 호환성: `href`의 `currency=USD` 파라미터와 마지막 환율 셀 fallback은 유지
+
 **3단계 검증 시스템:**
 
 ```

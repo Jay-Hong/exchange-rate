@@ -1,9 +1,10 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2026-03-28
+> 📅 **마지막 업데이트**: 2026-04-27
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
 > 📌 **범위**: 이 문서는 환율 크롤러(`app/crawlers/`)만 다룹니다. 뉴스 수집(`app/news/`)은 [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) 참고.
 > 🆕 **최근 변경**:
+> - MIBANK URL/DOM 변경 대응: `exchange.mibank.me/bank?bank_cd=` 형식 + `table.main_table.content` 파싱 ([MAINTENANCE_2026-04-27.md](MAINTENANCE_2026-04-27.md))
 > - DXY 수집 방식 변경: 독립 크롤러 → investing.py에서 동반 추출 (`#sb_last_8827`), dxy.py는 폴백 전용 모듈로 전환
 > - Investing 크롤러 Cloudflare 403 차단 대응: curl_cffi TLS 지문 위장 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))
 > - MIBANK 파싱 로직 전면 개편: Currency-Code 기반 + 3단계 검증 ([ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반))
@@ -436,6 +437,11 @@
 #### `crawl_mibank_rates()` ⭐ NEW (2026-01-10)
 **기능**: Currency-Code 기반 MIBANK 환율 크롤링 ([ADR-017](DECISIONS.md#adr-017-mibank-환율-파싱---position-기반-vs-currency-code-기반))
 
+**현재 URL 형식 (2026-04-27):**
+```python
+MIBANK_SHINHAN_URL = "https://exchange.mibank.me/bank?bank_cd=088"
+```
+
 ```python
 def crawl_mibank_rates(
     url: str,
@@ -446,8 +452,10 @@ def crawl_mibank_rates(
     """
     통화코드 기반 MIBANK 환율 크롤링
 
-    - href="...?currency=USD" 파라미터에서 통화 코드 추출
-    - 마지막 셀(매매기준율) 사용
+    - 신 DOM: flag 이미지 파일명(flag_usd_*.png)에서 통화 코드 추출
+    - 구 DOM 호환: href="...?currency=USD" 파라미터에서 통화 코드 추출
+    - 기준환율(원) 헤더 컬럼을 찾아 해당 셀 사용
+    - 헤더를 찾지 못하면 마지막 환율 셀로 fallback
     - require_all=True: 필수 통화 누락 시 RuntimeError
     """
 ```
@@ -546,6 +554,7 @@ def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
 | **Alert 미처리** | 크롤링 중단 | `driver.switch_to.alert.accept()` 추가 |
 | **AJAX 응답 안 기다림** | 이전 데이터 읽기 | WebDriverWait로 요소 개수/속성 변화 감지 추가 |
 | **Cloudflare 403 차단** | Investing 크롤러 `InvestingForbidden` 반복 | curl_cffi impersonate 변경 또는 [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) 플레이북 참고 |
+| **MIBANK 첫 시도 실패** | `mibank 테이블을 찾을 수 없음`, `mibank 필수 통화 누락`, 신한/NH/SC가 Selenium fallback 반복 | URL이 `https://exchange.mibank.me/bank?bank_cd=<은행코드>` 형식인지 확인하고, `table.main_table.content` / `flag_<code>_*.png` DOM 구조 변경 여부 점검. 상세: [MAINTENANCE_2026-04-27.md](MAINTENANCE_2026-04-27.md) |
 | **DXY 폴백 지속** | `📦 DXY 2차 폴백 저장` 또는 `📦 DXY Yahoo 폴백 저장` 로그 반복 | 1차 셀렉터(`#sb_last_8827`) 유효성 확인, 60초 쿨다운 후 자동 재시도 |
 
 ---

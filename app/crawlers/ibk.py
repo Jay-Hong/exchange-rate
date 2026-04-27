@@ -51,7 +51,7 @@ IBK_BANK_SELECTORS = {
 INPUT_SELECTOR = "#inDate"
 
 MIBANK_IBK_CODE = '003'
-MIBANK_IBK_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_IBK_CODE
+MIBANK_IBK_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_IBK_CODE
 
 
 # 로거 설정

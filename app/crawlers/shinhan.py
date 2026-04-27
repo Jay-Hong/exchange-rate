@@ -49,7 +49,7 @@ SECOND_SHINHAN_BANK_SELECTORS = {
 }
 
 MIBANK_SHINHAN_CODE = '088'
-MIBANK_SHINHAN_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_SHINHAN_CODE
+MIBANK_SHINHAN_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_SHINHAN_CODE
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")

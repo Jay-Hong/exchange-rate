@@ -44,7 +44,7 @@ BS_BANK_SELECTORS = {
 # }
 
 MIBANK_BS_CODE = '032'
-MIBANK_BS_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_BS_CODE
+MIBANK_BS_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_BS_CODE
 
 # 로거 설정
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")

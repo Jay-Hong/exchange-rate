@@ -19,6 +19,7 @@
 > 🔄 **재부팅 절차:** [REBOOT_CHECKLIST.md](REBOOT_CHECKLIST.md) - 재부팅 후 검증 체크리스트
 
 **유지보수 기록:**
+> 🔧 **2026-04-27:** [MAINTENANCE_2026-04-27.md](MAINTENANCE_2026-04-27.md) - MIBANK URL/DOM 변경 대응 (bank_cd URL, 기준환율 헤더 기반 파싱)
 > 🔧 **2026-01-29:** [MAINTENANCE_2026-01-29.md](MAINTENANCE_2026-01-29.md) - Investing Cloudflare 403 차단 대응 (curl_cffi TLS 지문 위장)
 > 🔧 **2025-11-06:** [MAINTENANCE_2025-11-06.md](MAINTENANCE_2025-11-06.md) - AsyncIO Queue 도입 (Semaphore 경합 제거)
 > 🔧 **2025-11-05:** [MAINTENANCE_2025-11-05.md](MAINTENANCE_2025-11-05.md) - 성능 개선 및 모니터링 시스템 구축

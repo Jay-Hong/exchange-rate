@@ -43,7 +43,7 @@ NH_BANK_SELECTORS = {
 }
 
 MIBANK_NH_CODE = '011'
-MIBANK_NH_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_NH_CODE
+MIBANK_NH_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_NH_CODE
 
 
 # 로거 설정

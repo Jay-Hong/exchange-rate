@@ -55,7 +55,7 @@ DAY_SELECTOR = "#_CUR_DAY"
 SUBMIT_BUTTON_SELECTOR = "input[type='button'][value='조회 시작일']"  # 녹색 조회 버튼
 
 MIBANK_SC_CODE = '023'
-MIBANK_SC_URL = 'https://www.mibank.me/exchange/bank/index.php?search_code=' + MIBANK_SC_CODE
+MIBANK_SC_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_SC_CODE
 
 
 # 로거 설정

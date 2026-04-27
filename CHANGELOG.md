@@ -78,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MIBANK URL/DOM 변경 대응** (2026-04-27):
+  - 구 URL `https://www.mibank.me/exchange/bank/index.php?search_code=...`가 `https://exchange.mibank.me/bank`로 리다이렉트되며 은행 코드가 유실되는 문제 수정
+  - 9개 MIBANK 사용 크롤러 URL을 `https://exchange.mibank.me/bank?bank_cd=...` 형식으로 변경
+  - 새 DOM(`table.main_table.content`) 지원: `flag_<code>_*.png`에서 통화 코드 추출, `기준환율(원)` 헤더 컬럼 기반 환율 추출
+  - 신한/NH/SC의 MIBANK 1차 실패 → Selenium fallback 반복 부하 완화
+  - Created [MAINTENANCE_2026-04-27.md](MAINTENANCE_2026-04-27.md): 장애 원인, 검증 절차, 복구 플레이북
 - **USDT scheduler job 제거 버그** (2026-04-23, `6a86c01`):
   - 앱 시작 시 `start_scheduler`에서 `task_usdt_sources` job 등록 → 직후 `switch_jobs()`가 `task_` prefix 전체 제거
   - mode-agnostic 상시 실행 의도였으나 첫 모드 전환 시점에 즉시 삭제됨
