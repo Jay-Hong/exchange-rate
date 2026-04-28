@@ -556,3 +556,30 @@ npx -y wscat -c wss://wsapi.gopax.co.kr
 - 앱 알림 기준은 서버 수신 tick이어야 한다. 단말 직접 WebSocket 값으로 알림을 판단하지 않는다.
 - `received_at`과 거래소 timestamp를 분리해서 저장한다. 운영 SLO와 stale 판단은 `received_at` 기준이 더 안전하다.
 - 단일 collector 장애가 전체 realtime pipeline을 멈추지 않도록 source별 task와 fallback을 격리한다.
+
+## 14. 약관/정책 1차 검증
+
+> **Verified: 2026-04-28**
+> **Scope**: public ticker WebSocket 사용 / 가격 데이터 재배포 / connection limit / 출처 표기 / 사전 승인
+> 본 검증은 **공식 문서 + 검색 결과 기반**. 거래소 약관 페이지 다수가 SPA로 본문 fetch 어려움 → Phase 2 PR 시점에 각 거래소 사이트 직접 방문 + 필요 시 고객지원 사전 문의로 보강 필요.
+
+### 거래소별 정책 요약
+
+| 거래소 | rate / connection limit | 재배포·상업 사용 | 출처 표기 | 사전 승인 | 추가 검증 |
+|---|---|---|---|---|---|
+| 업비트 | Public quotation **600/min, 10/sec** ([docs.upbit.com/kr/reference/rate-limits](https://docs.upbit.com/kr/reference/rate-limits)) | ⚠️ 약관 본문 미확보 (SPA) | 명시 미확인 | 명시 미확인 | service_center/open_api_guide 직접 확인 필요 |
+| 빗썸 | 미확인 (apidocs.bithumb.com) | ⚠️ 일반 서비스 약관 PDF에 "유사 서비스 제공" 금지 시사 | 명시 미확인 | 명시 미확인 | API 전용 약관(`/react/terms/info-api`) 직접 확인 필요 |
+| 코인원 | REST Public **V2 1200/min, V1 600/min** ([docs.coinone.co.kr/docs/ratelimit-안내](https://docs.coinone.co.kr/docs/ratelimit-%EC%95%88%EB%82%B4)). WS는 **IP당 최대 20 연결**, **마지막 PING 후 30분 유휴 시 종료** ([docs.coinone.co.kr](https://docs.coinone.co.kr/reference/public-websocket-1)) | 약관 [coinone.co.kr/terms/api](https://coinone.co.kr/terms/api). 시장 관행상 다수 비교 서비스 운영 중 — 운영상 문제 없음 | 명시 미확인 | Public WS 인증 불필요 | 약관 변경 추적만 |
+| 코빗 | REST **50/sec** ([docs.korbit.co.kr](https://docs.korbit.co.kr/)) | ⚠️ 약관 본문 미확보 | 명시 미확인 | 명시 미확인 | developers.korbit.co.kr 직접 확인 필요 |
+| 고팍스 | **동시 연결 20/IP**, **연결 시도 20/sec/IP** ([gopax.github.io/wsapi](https://gopax.github.io/wsapi/)) | ⚠️ 약관 본문 미확보 ([gopax.co.kr/api/terms](https://www.gopax.co.kr/api/terms)) | 명시 미확인 | 명시 미확인 | API 약관 페이지 SPA — 직접 확인 필요 |
+
+### 5종 공통 미확인 항목 (Phase 2 PR 시점)
+
+- 출처 표기 / credit 요구 (5종 모두 명시 미확인 → 표시 권장)
+- 사전 승인 / 등록 절차 (5종 모두 미확인 → 약관 동의는 거래소별 다름)
+- WebSocket 24h SLA (끊김 빈도, 재연결 latency)
+- 무료 tier → 유료 전환 가능성
+
+### 정책 변경 추적
+
+거래소 정책은 자주 바뀐다. 본 표는 **2026-04-28 1차 검증**이며, Phase 2 collector 운영 배포 전 다시 한 번 약관 페이지를 직접 방문해 갱신 여부를 확인할 것.

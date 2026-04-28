@@ -251,7 +251,8 @@ tick:usdt:bithumb → ...
 
 - [x] **빗썸 WebSocket 실제 연결 smoke test** — 한국 빗썸(`ws-api.bithumb.com`)에서 `KRW-USDT` snapshot/realtime `trade_price` 수신 확인 (2026-04-28)
 - [ ] **업비트 / 빗썸 / 코빗 heartbeat 정책** — 공식 명세 없으면 5~30초 client PING 보내며 idle timeout 파악
-- [ ] **무료 tier 약관** 5종 모두 재확인 (이용약관 변경 가능성)
+- [x] **약관/정책 1차 검증 완료** (2026-04-28) — 상세 표는 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §14](USDT_EXCHANGE_WEBSOCKET_GUIDE.md#14-약관정책-1차-검증). 시장 관행상 5종 모두 비교 서비스 운영 가능 확인
+- [ ] 5종 약관 페이지(SPA) 직접 방문 + 미확인 항목(출처 표기·사전 승인) 보강 — Phase 2 PR 시점
 - [ ] **24시간 실 연결 SLA 모니터링** — 끊김 빈도, 재연결 latency, 메시지 누락률 측정 (Phase 2 코드 작업 시점)
 - [x] **코인원 ticker WS payload 필드명** — `wss://stream.coinone.co.kr`, DEFAULT 포맷 `data.last` 수신 확인 (2026-04-28)
 
@@ -718,5 +719,6 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 
 🔧 **검증 체크리스트** (7번 섹션):
 - 거래소 5종 WebSocket endpoint **1차 검증 완료** (v0.4) + **빗썸/코인원 wscat smoke test 완료** (v0.5, 2026-04-28). 상세 구현 가이드: [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)
-- 잔여: 업비트/빗썸/코빗 heartbeat 정책, 24h SLA, 5종 무료 tier 약관 — Phase 2 PR 시점
+- 약관/정책 1차 검증 완료 (2026-04-28) — 상세: [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §14](USDT_EXCHANGE_WEBSOCKET_GUIDE.md#14-약관정책-1차-검증). 시장 관행상 5종 모두 비교 서비스 운영 가능
+- 잔여: 업비트/빗썸/코빗 heartbeat 정책, 24h SLA, 5종 약관 미확인 항목 보강 — Phase 2 PR 시점
 - Investing 실시간 채널 DevTools 조사 (Phase 4 직전)
