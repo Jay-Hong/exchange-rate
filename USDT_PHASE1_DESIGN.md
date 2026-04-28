@@ -19,6 +19,7 @@ Phase 1의 목표는 `테더 탭 데이터 피드`를 안정적으로 추가하�
 이번 단계에서 구현하지 않는 범위:
 
 - KRX 미국달러선물 (Phase 2)
+- DXY 선물(`dxy_futures`) 조회/그래프/rollup/테더 탭 연결
 - 테더 그래프 API (`/api/graph/usdt-krw`) (Phase 2)
 - 비교 알림 구현 (Phase 3, 스키마만 잠금)
 - 반복형 알림
@@ -577,6 +578,8 @@ Phase 1에서는 구현하지 않지만 스키마 구조만 잠금.
 ## KRX USD Futures — Phase 2 Skeleton
 
 Phase 1에서는 구현하지 않지만, 개념적 자리만 잠금.
+
+참고: `market_index_rates.instrument='dxy_futures'`는 Investing 계열 미국달러지수 선물을 raw로 축적하는 보조 데이터다. 현재는 수집/저장만 수행하며, 테더 탭에서 KRX 미국달러선물과 함께 표시하기 위한 조회 API, 그래프 API, rollup 연결은 Phase 2에서 별도 설계한다.
 
 - 저장 위치: `source_rates`
 - source: `krx`

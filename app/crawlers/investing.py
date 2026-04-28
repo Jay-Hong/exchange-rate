@@ -19,7 +19,6 @@ except Exception:
 
 # 로컬 애플리케이션
 from app import crud
-from app.config import DXY_MODE
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
 from app.crawlers.utils import parse_rate_text
@@ -38,10 +37,11 @@ INVESTING_SELECTORS = {
 }
 SCALED_CURRENCY_PAIRS = {"jpy-krw": 100}
 
-# DXY (달러지수) — exchange-rates-table에서 동반 추출
+# 미국달러지수 선물 — exchange-rates-table에서 환율과 함께 추출
+DXY_FUTURES_INSTRUMENT = "dxy_futures"
 DXY_SELECTOR = '#sb_last_8827'
 DXY_RATE_RANGE = (80.0, 130.0)
-DXY_FALLBACK_COOLDOWN_SECONDS = 60  # 셀렉터 실패 시 폴백 호출 간격 제한
+DXY_FUTURES_FALLBACK_COOLDOWN_SECONDS = 60  # 셀렉터 실패 시 폴백 호출 간격 제한
 _dxy_fallback_last_called = 0.0     # time.monotonic() 기준
 
 # Investing 전용 UA 풀 (전역 HEADERS는 유지)
@@ -217,7 +217,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
         변경된 레코드 개수
     """
     current_rates = {}
-    dxy_rate = None
+    dxy_futures_rate = None
 
     try:
         response = _http_get(url, headers=headers)
@@ -244,18 +244,17 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text})
                 continue
 
-        if DXY_MODE == "futures_coupled":
-            # DXY 동반 추출 (exchange-rates-table에서만 존재)
-            dxy_element = soup.select_one(DXY_SELECTOR)
-            if dxy_element:
-                try:
-                    dxy_text = dxy_element.get_text(strip=True).replace(",", "")
-                    dxy_rate = float(dxy_text)
-                    if not (DXY_RATE_RANGE[0] <= dxy_rate <= DXY_RATE_RANGE[1]):
-                        logger.warning("⚠️ DXY 범위 초과", extra={"rate": dxy_rate, "range": DXY_RATE_RANGE})
-                        dxy_rate = None
-                except (ValueError, AttributeError):
-                    logger.warning("⚠️ DXY 파싱 실패", extra={"selector": DXY_SELECTOR})
+        # 미국달러지수 선물 동반 추출 (exchange-rates-table에서만 존재)
+        dxy_element = soup.select_one(DXY_SELECTOR)
+        if dxy_element:
+            try:
+                dxy_text = dxy_element.get_text(strip=True).replace(",", "")
+                dxy_futures_rate = float(dxy_text)
+                if not (DXY_RATE_RANGE[0] <= dxy_futures_rate <= DXY_RATE_RANGE[1]):
+                    logger.warning("⚠️ DXY 선물 범위 초과", extra={"rate": dxy_futures_rate, "range": DXY_RATE_RANGE})
+                    dxy_futures_rate = None
+            except (ValueError, AttributeError):
+                logger.warning("⚠️ DXY 선물 파싱 실패", extra={"selector": DXY_SELECTOR})
 
     except InvestingForbidden:
         raise
@@ -269,50 +268,57 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
     else:
         raise Exception("🈚️ Investing 환율 데이터 없음")
 
-    if DXY_MODE == "futures_coupled":
-        # DB 저장: DXY (환율 저장 성공 후)
-        if dxy_rate is not None:
-            crud.insert_dxy_rate_into_db(db=db, rate=dxy_rate, source="investing")
-        else:
-            # DXY 셀렉터가 없는 페이지 (예: sslfxrates)이거나 파싱 실패 시 폴백
-            _try_dxy_fallback(db)
+    # DB 저장: 미국달러지수 선물 (환율 저장 성공 후)
+    if dxy_futures_rate is not None:
+        crud.insert_market_index_rate_into_db(
+            db=db,
+            instrument=DXY_FUTURES_INSTRUMENT,
+            rate=dxy_futures_rate,
+            source="investing",
+        )
+    else:
+        # DXY 선물 셀렉터가 없는 페이지 (예: sslfxrates)이거나 파싱 실패 시 폴백
+        _try_dxy_futures_fallback(db)
 
     return count
 
 
-def _try_dxy_fallback(db: Session) -> None:
+def _try_dxy_futures_fallback(db: Session) -> None:
     """
-    DXY 1차 추출(exchange-rates-table) 실패 시 2차/3차 폴백 시도
+    미국달러지수 선물 1차 추출(exchange-rates-table) 실패 시 Investing 폴백 시도.
 
-    2차: /currencies/us-dollar-index (같은 선물/CFD 상품)
-    3차: Yahoo Finance (yfinance)
+    폴백: /currencies/us-dollar-index (같은 선물/CFD 계열)
 
     셀렉터 장기 파손 시 retry storm 방지를 위해 60초 cooldown 적용.
+    Yahoo Finance는 현물/운영 DXY 계열이므로 선물 저장에는 사용하지 않는다.
     """
     global _dxy_fallback_last_called
     now = time.monotonic()
-    if now - _dxy_fallback_last_called < DXY_FALLBACK_COOLDOWN_SECONDS:
+    if now - _dxy_fallback_last_called < DXY_FUTURES_FALLBACK_COOLDOWN_SECONDS:
         return
     _dxy_fallback_last_called = now
 
     try:
         # 순환 참조 방지 + on-demand 호출이므로 함수 내부 import
-        from app.crawlers.dxy import fetch_dxy_from_investing_fallback, fetch_dxy_from_yahoo
+        from app.crawlers.dxy import fetch_dxy_from_investing_fallback
 
-        # 2차: Investing.com /currencies/us-dollar-index
-        try:
-            rate = fetch_dxy_from_investing_fallback()
-            crud.insert_dxy_rate_into_db(db=db, rate=rate, source="investing")
-            logger.info("📦 DXY 2차 폴백 저장", extra={"rate": rate, "source": "investing", "fallback_url": "/currencies/us-dollar-index"})
-            return
-        except Exception:
-            logger.warning("⚠️ DXY 2차 폴백 실패", extra={"crawler": CRAWLER_NAME})
-
-        # 3차: Yahoo Finance
-        rate = fetch_dxy_from_yahoo()
-        crud.insert_dxy_rate_into_db(db=db, rate=rate, source="yahoo")
-        logger.info("📦 DXY Yahoo 폴백 저장", extra={"rate": rate})
+        rate = fetch_dxy_from_investing_fallback()
+        crud.insert_market_index_rate_into_db(
+            db=db,
+            instrument=DXY_FUTURES_INSTRUMENT,
+            rate=rate,
+            source="investing",
+        )
+        logger.info(
+            "📦 DXY 선물 폴백 저장",
+            extra={
+                "instrument": DXY_FUTURES_INSTRUMENT,
+                "rate": rate,
+                "source": "investing",
+                "fallback_url": "/currencies/us-dollar-index",
+            },
+        )
 
     except Exception:
-        # DXY는 보조지표 → 실패해도 환율 크롤링에 영향 없음
-        logger.warning("⚠️ DXY 전체 fallback 실패 (무시)", extra={"crawler": CRAWLER_NAME})
+        # DXY 선물은 보조지표 → 실패해도 환율 크롤링에 영향 없음
+        logger.warning("⚠️ DXY 선물 fallback 실패 (무시)", extra={"crawler": CRAWLER_NAME})

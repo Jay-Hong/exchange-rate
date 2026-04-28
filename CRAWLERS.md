@@ -128,20 +128,20 @@
 
 | 지수 | 수집 방식 | 폴백 순서 | 특이사항 |
 |------|----------|----------|---------|
-| **DXY** | `investing.py`에서 동반 추출 | 1차: `#sb_last_8827` (exchange-rates-table) → 2차: `/currencies/us-dollar-index` → 3차: Yahoo Finance | 독립 스케줄 없음, investing 크롤러에 편승 |
+| **미국 달러지수(DXY)** | `dxy_spot.py` 독립 운영 피드 | 1차: `/indices/usdollar` `__NEXT_DATA__` → 2차: 같은 페이지 CSS → 3차: Yahoo Finance | 현물/운영 DXY, `instrument='dxy'`, Yahoo는 시간/가격 가드 후 저장 |
+| **미국달러지수 선물** | `investing.py`에서 환율과 동반 추출 | 1차: `#sb_last_8827` (exchange-rates-table) → 2차: `/currencies/us-dollar-index` | 선물/CFD 계열, `instrument='dxy_futures'`, Yahoo 미사용 |
 
 **특징**:
-- **독립 크롤러 아님**: investing.py의 exchange-rates-table 크롤링 시 DXY를 함께 추출
-- `dxy.py`는 2차/3차 폴백 함수만 제공하는 유틸리티 모듈
-- investing.py의 기존 Circuit Breaker를 공유 (별도 Circuit Breaker 없음)
+- **DXY 현물/운영 피드**: `dxy_spot.py`가 독립 스케줄로 수집
+- **DXY 선물**: `investing.py`의 exchange-rates-table 크롤링 시 환율과 함께 추출
+- `dxy.py`는 Yahoo 현물 폴백과 Investing 선물 폴백 함수를 제공하는 유틸리티 모듈
 - 은행 환율과 다른 테이블 (`market_index_rates`) 사용
-- 그래프 보조지표 전용 (USD/KRW에만 DXY 표시)
+- 현물과 선물은 `instrument='dxy'|'dxy_futures'`로 분리 저장
 
 **폴백 정책:**
-- **1차 (Primary)**: `investing.py` → exchange-rates-table 페이지에서 `#sb_last_8827` 셀렉터로 추출
-- **2차**: `dxy.py` → `/currencies/us-dollar-index` (같은 선물/CFD 상품)
-- **3차**: `dxy.py` → Yahoo Finance (`yfinance`, ticker: `DX-Y.NYB`)
-- **폴백 쿨다운**: 60초 (retry storm 방지, 셀렉터 장기 파손 대비)
+- **DXY 현물/운영 피드**: Yahoo fallback 저장 전 ICE DX 주간 세션 OFF 차단 + 마지막 Investing 값과 0.07 초과 차이 차단
+- **DXY 선물**: Yahoo를 사용하지 않고 Investing 계열 페이지만 사용
+- **선물 폴백 쿨다운**: 60초 (retry storm 방지, 셀렉터 장기 파손 대비)
 
 ### 🪙 Group E: 가상자산 거래소 (USDT Phase 1, 2026-04-23)
 
@@ -239,46 +239,75 @@
 
 ### 📊 Group D: 시장 지수
 
-#### DXY 달러지수 (수집: `investing.py`, 폴백: `dxy.py`) ⭐⭐
+#### 미국 달러지수(DXY) / 미국달러지수 선물 ⭐⭐
 
 **아키텍처:**
-- **독립 크롤러 아님**: investing.py의 exchange-rates-table 크롤링 시 DXY를 동반 추출
-- **dxy.py는 폴백 전용**: `fetch_dxy_from_investing_fallback()` (2차), `fetch_dxy_from_yahoo()` (3차)
-- **독립 스케줄러 작업 없음**: investing 크롤러 스케줄에 편승
+- **DXY 현물/운영 피드**: `dxy_spot.py`가 `/indices/usdollar` 페이지를 독립 수집해 `instrument='dxy'`로 저장
+- **DXY 선물**: `investing.py`가 exchange-rates-table의 `#sb_last_8827`를 환율과 함께 추출해 `instrument='dxy_futures'`로 저장
+- **dxy.py는 유틸리티 모듈**: `fetch_dxy_from_yahoo()`는 현물 Yahoo fallback, `fetch_dxy_from_investing_fallback()`은 선물/CFD 계열 fallback에서 사용
 
 **변경 배경:**
-- 기존 독립 크롤러가 사용하던 `/indices/usdollar` 페이지는 CDN stale cache 문제로 ~40% 확률로 오래된 데이터 반환
-- exchange-rates-table 페이지는 관측상 BYPASS 캐시로 응답하여 상대적으로 안정적인 데이터 제공
-- 동일 HTTP 요청에서 환율 + DXY를 함께 추출하여 네트워크 비용 절감
+- `/indices/usdollar` 운영 피드는 별도 DXY 현물/운영 지표로 유지
+- exchange-rates-table의 `#sb_last_8827` 값은 현물 DXY와 섞지 않고 미국달러지수 선물 계열로 별도 보존
+- 향후 테더 탭에서 KRX 미국달러 선물과 함께 비교 그래프로 사용할 수 있도록 DB 계층에서 분리
 
 **핵심 로직:**
-- **1차 (Primary)**: investing.py → `#sb_last_8827` 셀렉터로 exchange-rates-table에서 추출
-- **2차 (Fallback)**: dxy.py → `/currencies/us-dollar-index` (curl_cffi + TLS 지문 위장)
-- **3차 (Fallback)**: dxy.py → Yahoo Finance (`yfinance`, ticker `DX-Y.NYB`, `fast_info.lastPrice`)
+- **DXY 현물 Primary**: `dxy_spot.py` → `/indices/usdollar` `__NEXT_DATA__`
+- **DXY 현물 CSS Fallback**: 같은 페이지의 `[data-test="instrument-price-last"]`
+- **DXY 현물 Yahoo Fallback**: `dxy.py` → Yahoo Finance (`yfinance`, ticker `DX-Y.NYB`, `regularMarketPreviousClose` 우선)
+- **DXY 선물 Primary**: `investing.py` → `#sb_last_8827`
+- **DXY 선물 Fallback**: `dxy.py` → `/currencies/us-dollar-index`
 - **DXY 유효 범위**: 80.0 ~ 130.0 (이상치 필터링)
-- **DB 저장**: `market_index_rates` 테이블, `source='investing'|'yahoo'`, `granularity='realtime'`
+- **DB 저장**: `market_index_rates` 테이블, `instrument='dxy'|'dxy_futures'`, `source='investing'|'yahoo'`, `granularity='realtime'`
 
 **폴백 트리거 조건:**
-- 1차 셀렉터(`#sb_last_8827`)가 없는 페이지 (예: sslfxrates API 폴백 시) 또는 파싱 실패
-- investing.py의 `_try_dxy_fallback()` 함수가 2차 → 3차 순서로 시도
+- **DXY 현물**: primary source timestamp 정지, CSS 파싱 실패, hard failure 등에서 `_try_yahoo_fallback()` 실행
+- **DXY 선물**: `#sb_last_8827`가 없는 페이지(예: sslfxrates API 폴백) 또는 파싱 실패 시 `_try_dxy_futures_fallback()` 실행
 
-**폴백 쿨다운 (60초):**
+**DXY 현물 Yahoo 저장 가드:**
+- **시간 가드**: ICE DX 주간 세션 OFF 구간에는 Yahoo 저장 차단
+  - 금요일 17:00 ET 이후, 토요일 전체, 일요일 18:00 ET 이전
+  - DST/표준시는 `ZoneInfo("America/New_York")`로 자동 처리
+  - 화~금 일일 휴장(17:00~20:00 ET)은 운영 피드 갱신 관측이 있어 아직 차단하지 않음
+- **가격 가드**: 마지막 Investing DXY가 fresh일 때만 Yahoo 값과 비교하고, 차이가 `0.07` 초과면 저장 보류
+  - IN: 마지막 Investing 값이 15분 이내일 때만 적용
+  - BREAK1/BREAK2: 마지막 Investing 값이 30분 이내일 때만 적용
+  - Investing 값이 오래 멈춘 경우 Yahoo가 유일한 대체 소스일 수 있으므로 가격 가드를 건너뜀
+
+**DXY 선물 폴백 쿨다운 (60초):**
 - 셀렉터 장기 파손 시 retry storm 방지
 - 60초 이내 재호출 무시 (`time.monotonic()` 기준)
 - Circuit Breaker 별도 없음 → investing.py의 기존 Circuit Breaker를 공유
+- Yahoo Finance는 현물/운영 DXY 계열이므로 선물 저장에는 사용하지 않음
 
 **스케줄:**
-- 독립 스케줄 없음 (investing 크롤러와 동일 주기로 실행)
-- IN/BREAK1/BREAK2: investing 10초마다 실행 시 DXY도 함께 추출
-- OUT: investing 10분마다 실행 시 DXY도 함께 추출
+- **DXY 현물**: 독립 스케줄 실행 (`crawler_config.dxy`로 활성/비활성 제어)
+  - IN/BREAK1/BREAK2: 10초마다
+  - OUT: 1분마다
+- **DXY 선물**: investing 크롤러와 동일 주기로 실행
+  - IN/BREAK1/BREAK2: investing 10초마다 실행 시 선물도 함께 추출
+  - OUT: investing 10분마다 실행 시 선물도 함께 추출
+- **보관기간**: `dxy`, `dxy_futures` realtime 원본은 30일 보관, hourly/daily rollup은 3m/1y 그래프 보존을 위해 정리 대상에서 제외
+
+**dxy_futures 현재 상태:**
+- ✅ 데이터 수집 + DB 저장 (`instrument='dxy_futures'`)
+- ❌ 최신값 조회 API, 그래프 API, rollup, 테더 탭 연결은 후속 작업
+- ❌ 알림/표시명/source_registry 등록 없음
+
+**dxy_futures 운영 단위:**
+- 독립 크롤러가 아니라 `investing` 크롤러의 부가 수집값
+- 활성화/비활성화는 `crawler_config.investing`을 따름 (별도 `crawler_config.dxy_futures` 없음)
+- 정상 경로는 같은 HTTP 요청·응답에서 환율 + DXY 선물을 동시에 추출
+- 셀렉터 실패 시에만 `/currencies/us-dollar-index` 별도 폴백 요청 (60초 쿨다운)
+- 향후 테더 탭에서 1급 데이터화하면 독립 config/스케줄/모니터링을 재검토
 
 **주의사항:**
-- `dxy.py`의 두 함수는 on-demand 호출이므로 함수 내부 import 사용
-- `yfinance`는 무거운 라이브러리 → 3차 폴백 시에만 로드
+- `dxy.py`의 함수들은 on-demand 호출이므로 함수 내부 import 사용
+- `yfinance`는 무거운 라이브러리 → DXY 현물 Yahoo fallback 시에만 로드
 - `yfinance`는 timeout 직접 제어 불가 → 스케줄러 작업 타임아웃(45초)이 상위 보호
-- 2차 폴백 URL(`/currencies/us-dollar-index`)은 CDN stale cache 위험 있으나, 1차 실패 시 차선으로 충분
+- 선물 폴백 URL(`/currencies/us-dollar-index`)은 CDN stale cache 위험 있으나, 1차 실패 시 차선으로만 사용
 
-**상세 코드:** `app/crawlers/investing.py` (1차 추출 + 폴백 호출), `app/crawlers/dxy.py` (2차/3차 폴백)
+**상세 코드:** `app/crawlers/dxy_spot.py` (현물/운영 DXY), `app/crawlers/investing.py` (미국달러지수 선물), `app/crawlers/dxy.py` (공용 폴백 유틸리티)
 **관련 ADR:** [ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략)
 
 ---

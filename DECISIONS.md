@@ -2527,7 +2527,8 @@ DXY 운영 피드(`dxy_spot.py`)는 Investing의 `/indices/usdollar`를 1차 소
 
 ### 관련 결정
 
-- [ADR-020](#adr-020-dxy-크롤링-아키텍처-전환--독립-크롤러에서-investing-동반-추출로): DXY 운영 피드를 Investing primary로 전환 — 이 가드는 그 후속 보강
+- [ADR-020](#adr-020): DXY 운영 피드를 Investing primary로 전환 — 이 가드는 그 후속 보강
+- [ADR-024](#adr-024-미국달러지수-선물-분리-저장--dxy_mode-제거): 같은 라운드 데이터 모델 변경
 
 ---
 
@@ -2598,6 +2599,81 @@ RDS 20GB 무료 tier 대비 0.3% 미만. 디스크 부담 없음.
 ### 관련 결정
 
 - [ADR-019](#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략): granularity 기반 그래프 전략 — 이 정책이 hourly/daily 보존 근거
+- [ADR-024](#adr-024-미국달러지수-선물-분리-저장--dxy_mode-제거): 같은 라운드, dxy_futures에도 같은 보관 정책 적용
+
+---
+
+## ADR-024: 미국달러지수 선물 분리 저장 + DXY_MODE 제거
+
+> 📅 **작성일**: 2026-04-27
+> 🏷️ **상태**: 확정 (ADR-020 부분 supersede)
+
+### 맥락
+
+향후 테더 탭에서 KRX 미국달러 선물과 비교 그래프를 그릴 계획이 있다(REALTIME_ARCHITECTURE_PLAN.md). 그러려면 ICE DX 선물 데이터를 별도로 축적해야 한다.
+
+ADR-020에서는 Investing의 `exchange-rates-table` `#sb_last_8827`을 현물 DXY와 동일한 `instrument='dxy'`로 저장했다. 그러나 이 셀은 사실 선물/CFD 계열이므로, 현물(`/indices/usdollar` 기반 spot)과 섞여 있던 것을 분리할 시점이다.
+
+또한 `DXY_MODE` 환경변수(`futures_coupled` vs `spot_independent`)는 원래 둘 중 하나를 DXY로 쓸지 고르는 toggle이었으나, 이제 둘 다 별도 instrument로 저장하므로 의미를 잃었다. 잘못 설정되거나 .env가 비면 task_dxy가 등록되지 않아 현물 DXY 수집이 끊기는 회귀 위험만 남는 잔재.
+
+### 결정
+
+#### 1. 데이터 모델 분리
+
+- 현물/운영 DXY: `instrument='dxy'` (기존)
+- 미국달러지수 선물: `instrument='dxy_futures'` (신규)
+- 같은 `market_index_rates` 테이블, 다른 instrument 값
+- DB 스키마 변경 없음 (instrument 컬럼 활용)
+
+#### 2. 수집 방식
+
+- **dxy** (현물): `dxy_spot.py` 독립 크롤러 (`/indices/usdollar`) — 변경 없음
+- **dxy_futures**: `investing.py` **부가 수집** — exchange-rates-table 환율 fetch와 같은 HTTP 응답에서 `#sb_last_8827` 추출. 추가 네트워크 비용 0
+  - 셀렉터 실패 시 `/currencies/us-dollar-index` 별도 폴백 (60초 쿨다운)
+  - Yahoo는 선물 저장에 사용 안 함 (다른 시점 데이터 노이즈 방지)
+
+#### 3. crawler_config 단위
+
+- dxy_futures는 별도 `crawler_config` 엔트리 없음
+- 활성화/비활성화는 `crawler_config.investing` 토글에 종속 (같은 fetch 단위)
+- 향후 dxy_futures가 1급 데이터화(독립 모니터링/주기/장애 대응)되면 별도 등록 검토
+
+#### 4. DXY_MODE 제거
+
+- `app/config.py`에서 상수 제거
+- `app/scheduler.py` import + 4곳 분기 제거 — `task_dxy`는 항상 등록 (crawler_config.dxy 토글만 적용)
+- 운영 EC2 `.env`의 `DXY_MODE` 라인은 무해하지만 정리 권장
+
+#### 5. 공용 저장 함수
+
+- `crud.insert_market_index_rate_into_db(instrument, rate, source, granularity)` 일반화
+- 기존 `insert_dxy_rate_into_db()`는 `instrument='dxy'` wrapper로 호환 유지
+
+### 영향
+
+- 새 데이터 시리즈 축적 시작
+- 현재 단계: **수집 + DB 저장만 완료**
+  - 후속 작업: 최신값 조회 API, 그래프 API, rollup(hourly/daily), 테더 탭 연결, `source_registry` 등록, 알림/표시명
+- ADR-020 결정(선물/현물 동반 추출 + 단일 instrument)은 부분 supersede:
+  - 현물은 ADR-020 이후 spot_independent 모드로 이미 분리됨
+  - 선물은 이번 ADR로 분리 저장
+- DXY_MODE 환경변수 회귀 위험 제거
+
+### 기각 대안
+
+| 대안 | 기각 사유 |
+|---|---|
+| `MarketIndexRate`에 `contract_type` 컬럼 추가 | 스키마 마이그레이션 필요, instrument 활용으로 충분 |
+| 별도 테이블 `dxy_futures_rates` | 그래프 쿼리 합병 복잡, 현 모델로 일반화 가능 |
+| Yahoo도 선물 폴백에 사용 | Yahoo는 ICE 선물 시간과 다른 시점일 가능성, 노이즈 우려 |
+| `crawler_config.dxy_futures` 별도 등록 | 같은 fetch 단위라 분리 의미 없음 (raw 축적 단계) |
+| DXY_MODE 기본값만 변경 (잔재 유지) | 잔재 자체가 회귀 위험, 잘못 설정 시 task_dxy 미등록 |
+
+### 관련 결정
+
+- [ADR-020](#adr-020-dxy-크롤링-아키텍처-전환--독립-크롤러에서-investing-동반-추출로): 이전 DXY 크롤링 아키텍처 — 부분 supersede됨
+- [ADR-022](#adr-022-dxy-yahoo-fallback-시간가격fresh-age-가드-정책): 같은 라운드 Yahoo fallback 가드
+- [ADR-023](#adr-023-데이터-보관-정책-30일-통일-banksource_ratesdxy-realtime): 같은 라운드 보관 정책 — dxy_futures도 동일 적용
 
 ---
 
@@ -2626,3 +2702,4 @@ RDS 20GB 무료 tier 대비 0.3% 미만. 디스크 부담 없음.
 - 2026-04-01: ADR-021 개정 (v2 단순화 — noise_only 일원화, 24h 윈도우, match_type/flash/category 삭제)
 - 2026-04-27: ADR-022 작성 (DXY Yahoo fallback 시간/가격/fresh-age 가드 정책)
 - 2026-04-27: ADR-023 작성 (데이터 보관 정책 30일 통일 — bank/source_rates/DXY realtime)
+- 2026-04-27: ADR-024 작성 (미국달러지수 선물 분리 저장 + DXY_MODE 제거)

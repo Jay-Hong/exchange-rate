@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **미국달러지수 선물 분리 저장** (2026-04-27, ADR-024):
+  - `instrument='dxy_futures'`로 별도 저장 (`market_index_rates` 테이블)
+  - exchange-rates-table `#sb_last_8827`을 환율과 동시 추출 (추가 HTTP 요청 0)
+  - 폴백: `/currencies/us-dollar-index` (60초 쿨다운)
+  - 향후 테더 탭의 KRX USD 선물 비교 그래프 준비
+  - 현재는 raw 수집/저장만 완료 — 조회/그래프/rollup/테더 탭 연결은 후속 작업
+  - 활성화/비활성화는 `crawler_config.investing` 토글에 종속 (별도 등록 없음)
+
 - **USDT Phase 1 data feed + source 알림 API** (2026-04-23):
   - **거래소 5종 USDT/KRW 수집** (업비트, 빗썸, 코인원, 고팍스, 코빗)
     - 단일 scheduler job `usdt_sources` (매분 06,16,26,36,46,56초, 24/7 상시)
@@ -117,6 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - DXY hourly/daily rollup은 삭제 안 함 — 3m/1y 그래프 보존
   - `crud.delete_old_market_index_rates(days=30, granularities=None)` 신규 (default `["realtime"]`)
   - 매일 03:30~03:32 KST 순차 cleanup
+
+- **DXY_MODE 환경변수 제거** (2026-04-27, ADR-024):
+  - 현물(`dxy`)과 선물(`dxy_futures`) 둘 다 별도 저장하는 구조로 toggle 의미 상실
+  - `app/config.py`에서 상수 제거, `app/scheduler.py`에서 import + 4곳 분기 제거
+  - `task_dxy`는 항상 등록 — `crawler_config.dxy` 토글만 적용
+  - 운영 EC2 `.env`의 `DXY_MODE` 라인은 무해하지만 정리 권장
 
 - **DXY 스케줄 조정**: 실시간 비교 품질 개선
   - IN/BREAK1/BREAK2: 10초마다 (`04, 14, 24, 34, 44, 54초`)

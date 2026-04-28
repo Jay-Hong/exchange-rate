@@ -1,13 +1,10 @@
 # app/crawlers/dxy.py
 
 """
-DXY(달러지수) 폴백 모듈
+DXY(미국 달러지수) 폴백 유틸리티
 
-Primary 수집은 investing.py에서 exchange-rates-table과 함께 처리.
-이 모듈은 1차 실패 시 on-demand 호출되는 2차/3차 폴백을 담당.
-
-2차: /currencies/us-dollar-index (같은 선물/CFD 계열)
-3차: Yahoo Finance (yfinance, DX-Y.NYB)
+- `fetch_dxy_from_investing_fallback()`: 미국달러지수 선물/CFD 계열 폴백
+- `fetch_dxy_from_yahoo()`: 현물/운영 DXY Yahoo fallback
 """
 
 # 표준 라이브러리
@@ -29,7 +26,7 @@ from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
 # 크롤러 이름
 CRAWLER_NAME = "dxy"
 
-# 2차 폴백 URL (같은 선물/CFD 상품)
+# 미국달러지수 선물/CFD 계열 폴백 URL
 DXY_FALLBACK_URL = "https://kr.investing.com/currencies/us-dollar-index"
 DXY_FALLBACK_SELECTORS = [
     '[data-test="instrument-price-last"]',
@@ -56,7 +53,7 @@ logger = logging.getLogger("exchange_rate.crawler.dxy")
 
 def fetch_dxy_from_investing_fallback() -> float:
     """
-    2차 폴백: /currencies/us-dollar-index에서 DXY 파싱
+    Investing 폴백: /currencies/us-dollar-index에서 미국달러지수 선물/CFD 계열 값 파싱
 
     Raises:
         ValueError: 유효한 값 파싱 실패

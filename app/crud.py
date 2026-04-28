@@ -453,14 +453,23 @@ def has_changes_since(db: Session, since_time: Optional[datetime]) -> bool:
 # 시장 지수 (DXY 등) CRUD — Phase B
 # ═════════════════════════════════════════════════════════════
 
-def insert_dxy_rate_into_db(db: Session, rate: float, source: str) -> bool:
+def insert_market_index_rate_into_db(
+    db: Session,
+    *,
+    instrument: str,
+    rate: float,
+    source: str,
+    granularity: str = "realtime",
+) -> bool:
     """
-    DXY(달러지수) DB 저장 (변경 시에만 INSERT)
+    시장 지수 DB 저장 (변경 시에만 INSERT)
 
     Args:
         db: 데이터베이스 세션
-        rate: DXY 값 (예: 104.52)
+        instrument: 지수 식별자 ('dxy' | 'dxy_futures')
+        rate: 지수 값 (예: 104.52)
         source: 데이터 소스 ('investing' | 'yahoo')
+        granularity: 저장 해상도 ('realtime' | 'hourly' | 'daily')
 
     Returns:
         True: 새 레코드 저장됨, False: 변경 없음
@@ -468,34 +477,49 @@ def insert_dxy_rate_into_db(db: Session, rate: float, source: str) -> bool:
     last_record = (
         db.query(models.MarketIndexRate)
         .filter(
-            models.MarketIndexRate.instrument == "dxy",
-            models.MarketIndexRate.granularity == "realtime",
+            models.MarketIndexRate.instrument == instrument,
+            models.MarketIndexRate.granularity == granularity,
         )
         .order_by(models.MarketIndexRate.timestamp.desc(), models.MarketIndexRate.id.desc())
         .first()
     )
 
     if last_record is None:
-        logger.info(f"⭐️ [DXY 신규] {rate:.3f} (source={source})", extra={"instrument": "dxy", "rate": rate, "source": source, "type": "new"})
+        logger.info(f"⭐️ [{instrument} 신규] {rate:.3f} (source={source})", extra={"instrument": instrument, "rate": rate, "source": source, "type": "new"})
     elif last_record.rate != rate:
-        logger.info(f"⚡️ [DXY 변경] {last_record.rate:.3f} → {rate:.3f} (source={source})", extra={"instrument": "dxy", "old_rate": last_record.rate, "new_rate": rate, "source": source, "type": "change"})
+        logger.info(f"⚡️ [{instrument} 변경] {last_record.rate:.3f} → {rate:.3f} (source={source})", extra={"instrument": instrument, "old_rate": last_record.rate, "new_rate": rate, "source": source, "type": "change"})
     elif last_record.source != source:
         # 값은 같지만 소스 전환 (예: yahoo→investing 복구) → 새 레코드 필요
-        logger.info(f"🔄 [DXY 소스 전환] {last_record.source} → {source} (rate={rate:.3f})", extra={"instrument": "dxy", "rate": rate, "old_source": last_record.source, "new_source": source, "type": "source_change"})
+        logger.info(f"🔄 [{instrument} 소스 전환] {last_record.source} → {source} (rate={rate:.3f})", extra={"instrument": instrument, "rate": rate, "old_source": last_record.source, "new_source": source, "type": "source_change"})
     else:
-        logger.debug(f"📼 [DXY 유지] {rate:.3f} (source={source})", extra={"instrument": "dxy", "rate": rate, "source": source, "type": "unchanged"})
+        logger.debug(f"📼 [{instrument} 유지] {rate:.3f} (source={source})", extra={"instrument": instrument, "rate": rate, "source": source, "type": "unchanged"})
         return False
 
     new_entry = models.MarketIndexRate(
-        instrument="dxy",
+        instrument=instrument,
         source=source,
         rate=rate,
         timestamp=models.get_utc_now(),
-        granularity="realtime",
+        granularity=granularity,
     )
     db.add(new_entry)
     db.commit()
     return True
+
+
+def insert_dxy_rate_into_db(db: Session, rate: float, source: str) -> bool:
+    """
+    DXY(미국 달러지수) DB 저장 (변경 시에만 INSERT).
+
+    현물/운영 DXY는 instrument='dxy'로 저장한다.
+    미국달러지수 선물은 insert_market_index_rate_into_db(..., instrument='dxy_futures')를 사용한다.
+    """
+    return insert_market_index_rate_into_db(
+        db=db,
+        instrument="dxy",
+        rate=rate,
+        source=source,
+    )
 
 
 def get_latest_dxy_rate(db: Session) -> Optional[Dict[str, Any]]:
