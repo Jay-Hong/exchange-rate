@@ -10,6 +10,8 @@ DXY(미국 달러지수) 폴백 유틸리티
 
 # 표준 라이브러리
 import logging
+import math
+from typing import Optional
 
 # 서드파티 라이브러리
 from bs4 import BeautifulSoup
@@ -162,31 +164,82 @@ def fetch_dxy_from_cnbc() -> float:
     return rate
 
 
+def _coerce_valid_dxy_price(value) -> Optional[float]:
+    """
+    Yahoo path가 반환한 값을 DXY 유효 가격으로 변환.
+
+    None / NaN / 숫자 변환 실패 / 범위 초과는 모두 None 반환.
+    `or` 연산자가 NaN을 truthy로 취급하는 이슈를 회피하기 위해
+    각 단계에서 명시적으로 NaN 검사.
+    """
+    if value is None:
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(price):
+        return None
+    if not (DXY_RATE_RANGE[0] <= price <= DXY_RATE_RANGE[1]):
+        return None
+    return price
+
+
 def fetch_dxy_from_yahoo() -> float:
     """
-    최후 폴백: Yahoo Finance에서 DXY 현재가 조회 (10분 stale 한계)
+    최후 폴백: Yahoo Finance에서 DXY 현재가 조회 (10분 stale 한계).
+
+    yfinance 0.2.x의 `fast_info` 한정 NaN 회귀 대응으로 다단계 fallback.
+    각 단계에서 None / NaN / 범위 초과는 거르고 다음 단계 진행.
+
+    단계:
+      1. fast_info — 4개 필드 (HTTP 0회, 캐시)
+      2. ticker.info — regularMarketPrice / regularMarketPreviousClose (HTTP 1회)
+      3. ticker.history(1d, 1m) 마지막 non-NaN close — 최후 보루
 
     Returns:
-        DXY 현재가 (예: 104.52)
+        DXY 현재가 (예: 98.56)
 
     Raises:
-        ValueError: 유효한 값을 가져올 수 없음
+        ValueError: 모든 path에서 유효한 값을 얻지 못한 경우
     """
     # 무거운 라이브러리이므로 함수 내부에서 import (폴백 시에만 로드)
     import yfinance as yf
 
     ticker = yf.Ticker(YAHOO_DXY_TICKER)
+
+    # 1단계: fast_info (HTTP 0회, 가벼운 path)
     fi = ticker.fast_info
+    for key in ("regularMarketPreviousClose", "lastPrice",
+                "regularMarketPrice", "previousClose"):
+        try:
+            raw = fi.get(key)
+        except Exception:
+            continue
+        price = _coerce_valid_dxy_price(raw)
+        if price is not None:
+            return price
 
-    # 정규장 종가 우선, 없으면 lastPrice 폴백
-    # (장 마감/주말에 lastPrice는 마지막 틱 값으로 정규장 종가와 다를 수 있음)
-    price = fi.get("regularMarketPreviousClose") or fi.get("lastPrice")
+    # 2단계: ticker.info (HTTP 1회)
+    try:
+        info = ticker.info
+        for key in ("regularMarketPrice", "regularMarketPreviousClose"):
+            price = _coerce_valid_dxy_price(info.get(key))
+            if price is not None:
+                return price
+    except Exception:
+        pass  # info 호출 실패 → history로
 
-    if price is None:
-        raise ValueError(f"Yahoo DXY 가격 없음 (ticker={YAHOO_DXY_TICKER})")
+    # 3단계: history(1d, 1m) 마지막 non-NaN close (최후 보루)
+    try:
+        hist = ticker.history(period="1d", interval="1m")
+        if not hist.empty:
+            non_nan = hist["Close"].dropna()
+            if not non_nan.empty:
+                price = _coerce_valid_dxy_price(non_nan.iloc[-1])
+                if price is not None:
+                    return price
+    except Exception:
+        pass
 
-    rate = float(price)
-    if not (DXY_RATE_RANGE[0] <= rate <= DXY_RATE_RANGE[1]):
-        raise ValueError(f"Yahoo DXY 범위 초과: {rate}")
-
-    return rate
+    raise ValueError(f"Yahoo DXY 모든 path 실패 (ticker={YAHOO_DXY_TICKER})")

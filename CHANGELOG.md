@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Yahoo DXY fallback yfinance fast_info NaN 회귀 대응** (2026-04-28):
+  - yfinance 0.2.66의 `fast_info.regularMarketPreviousClose`가 NaN 반환하여 fallback이 항상 실패하던 문제 수정
+  - `or` 연산자가 NaN을 truthy로 취급하던 latent bug 노출 (1ec2c8d 이후 잠재)
+  - 다단계 fallback 도입: fast_info 4개 필드 → `ticker.info` → `history(1d, 1m)` 최후 보루
+  - `_coerce_valid_dxy_price()` 헬퍼로 None/NaN/숫자변환실패/범위초과 모두 단일 검증
+  - ADR-025로 Yahoo는 이미 최후 보루(2순위)로 격하되어 운영 영향은 격리된 상태였음
+
 - **DXY Yahoo fallback 가드 강화** (2026-04-27, ADR-022):
   - ICE DX 주간 세션 OFF (토 06:00~월 07:00 KST DST) Yahoo 저장 차단 (`_is_dxy_weekly_session_open`)
   - Yahoo 값과 마지막 Investing 값 차이 `0.07` 초과 시 저장 보류
