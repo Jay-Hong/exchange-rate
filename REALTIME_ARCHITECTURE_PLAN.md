@@ -1,8 +1,8 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.3)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.4)
 
-> 📝 **상태**: Phase 0 종료 + 테더 탭 그래프 보조지표 정책 합의본 (v0.3, 2026-04-27)
+> 📝 **상태**: 거래소 5종 WebSocket endpoint 1차 검증 완료 (v0.4, 2026-04-28)
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.3 — 달러 탭은 DXY 현물 그래프 유지, 테더 탭은 KRX 미국달러선물(가격 리스트 + 그래프 라인 후보) + DXY 선물지수(그래프 보조지표 후보)로 분류. dxy_futures rollup/API 작업을 Phase 2 작업 항목에 추가. DXY 토픽 이름/schema 분리는 F 미정 항목에 흡수.
+> 🔄 **변경 이력**: v0.4 — 7번 섹션 거래소 5종 WS endpoint/symbol/subscribe/heartbeat/REST fallback 1차 문서 검증. 잔여 항목(빗썸 실 연결, 24시간 SLA, payload 필드 정밀)은 Phase 2 PR 시점 검증으로 명시.
 
 ---
 
@@ -226,15 +226,33 @@ tick:usdt:bithumb → ...
 - [ ] 끊김 빈도 SLA (24시간 모니터링 후 기록)
 - [ ] 무료 tier 변경 가능성 (이용약관 확인)
 
-### 거래소 5종
+### 거래소 5종 (1차 문서 검증 완료, 2026-04-28)
 
-| 거래소 | 검증 상태 | endpoint | 비고 |
-|--------|----------|----------|------|
-| 업비트 (upbit) | 미검증 | TBD | 1순위 PoC 대상 |
-| 빗썸 (bithumb) | 미검증 | TBD | |
-| 코인원 (coinone) | 미검증 | TBD | |
-| 코빗 (korbit) | 미검증 | TBD | |
-| 고팍스 (gopax) | 미검증 | TBD | 거래량 가장 적음, 마지막 |
+> v0.4: 공식 문서 + 검색 기반 1차 검증. **24시간 실 연결 SLA 측정은 Phase 2 직전에 별도** (코드 작업 동반).
+
+| 거래소 | 상태 | endpoint | symbol | subscribe | heartbeat | ticker price 필드 | REST fallback |
+|---|---|---|---|---|---|---|---|
+| 업비트 (upbit) | ✅ 1차 검증 | `wss://api.upbit.com/websocket/v1` | `KRW-USDT` | `[{"ticket":"<uuid>"},{"type":"ticker","codes":["KRW-USDT"]}]` | 명시 미발견 (실무: idle ~120초, 주기 PING 권장) | `trade_price` | `GET https://api.upbit.com/v1/ticker?markets=KRW-USDT` |
+| 빗썸 (bithumb) | 🟡 부분 검증 | `wss://ws-api.bithumb.com/websocket/v1` | `KRW-USDT` (업비트 호환 추정) | 업비트와 동일 호환 추정 — **24h 실 연결 검증 필요** | 미확인 | `trade_price` (REST 동일 추정) | `GET https://api.bithumb.com/v1/ticker?markets=KRW-USDT` |
+| 코인원 (coinone) | ✅ 1차 검증 | `wss://public-ws-api.coinone.co.kr` | `productCurrency=USDT, priceCurrency=KRW` | `{"requestType":"SUBSCRIBE","body":{"channel":"TICKER","topic":{"priceCurrency":"KRW","productCurrency":"USDT","timezone":"RELATIVE"}}}` | `{"requestType":"PING"}` 명시 | `tickers[0].last` (REST 기준, WS payload 필드 추가 검증 필요) | `GET https://api.coinone.co.kr/public/v2/ticker_utc_new/KRW/USDT` |
+| 코빗 (korbit) | ✅ 1차 검증 | `wss://ws-api.korbit.co.kr/v2/public` | `usdt_krw` | `[{"method":"subscribe","type":"ticker","symbols":["usdt_krw"]}]` | 명시 미발견 (REST는 50 req/s, WS 별도) | `close` | `GET https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw` |
+| 고팍스 (gopax) | ✅ 1차 검증 | `wss://wsapi.gopax.co.kr` | `USDT-KRW` | `{"n":"SubscribeToTickers","o":{}}` | primus `"primus::ping::<ts>"` 30초 주기 (서버→클라), pong 응답 30초 내 필수 | `last` | `GET https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker` |
+
+### 거래소 검증 요약
+
+- **인증**: 5종 모두 public ticker 채널 무인증 ✓
+- **USDT/KRW 직접 ticker**: 5종 모두 직접 채널 존재 (orderbook 계산 불필요) ✓
+- **메시지 포맷**: 모두 JSON 텍스트
+- **표준 편차 — heartbeat**: 고팍스만 정확한 30초 ping/pong 명세, 코인원은 명시적 PING command, 나머지(업비트/빗썸/코빗)는 미명시 → Phase 2 PR에서 keep-alive 정책 별도 결정
+- **연결 한계 (코덱스 권고 검증 항목)**: 고팍스 동시 연결 20개/IP 명시. 나머지는 미명시 (Phase 2 PR에서 24시간 모니터링)
+
+### 잔여 검증 (Phase 2 직전 또는 Phase 2 PR 안에서)
+
+- [ ] **빗썸 WebSocket 실제 연결 테스트** — 한국 빗썸(`ws-api.bithumb.com`)의 ticker 페이로드 필드/heartbeat 미확정. 업비트 호환 가설 검증 필요
+- [ ] **업비트 / 빗썸 / 코빗 heartbeat 정책** — 공식 명세 없으면 5~30초 client PING 보내며 idle timeout 파악
+- [ ] **무료 tier 약관** 5종 모두 재확인 (이용약관 변경 가능성)
+- [ ] **24시간 실 연결 SLA 모니터링** — 끊김 빈도, 재연결 latency, 메시지 누락률 측정 (Phase 2 코드 작업 시점)
+- [ ] **코인원 ticker WS payload 정확한 필드명** — REST는 `last`인데 WS payload는 다를 수 있음 (실 메시지 캡처 필요)
 
 ---
 
@@ -647,6 +665,12 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
   - 새 미정 항목 F 추가 (테더 탭 topic 이름 + schema 확정 — Phase 2 PR).
   - 5번 섹션 `usdt:krw`는 잠정 명칭 표시.
   - 11번 섹션에 "원천 데이터 재사용" 문단 추가 (KB usd-krw 예시).
+- **v0.4** (2026-04-28): 거래소 5종 WebSocket endpoint 1차 문서 검증.
+  - 7번 섹션 표를 endpoint / symbol / subscribe / heartbeat / ticker price 필드 / REST fallback 7개 컬럼으로 확장.
+  - 업비트/코인원/코빗/고팍스 ✅ 1차 검증, 빗썸 🟡 부분 검증 (실 연결 검증 필요).
+  - 인증 무필요(5종 공통), USDT/KRW 직접 채널 존재(5종 공통) 확인.
+  - 잔여 검증 항목: 빗썸 실 연결, 업비트/빗썸/코빗 heartbeat 정책, 24시간 SLA, 코인원 WS payload 필드, 무료 tier 약관.
+  - 코드 변경 없음. PR1/PR2와 독립적으로 Phase 2 직전까지 점진 보강.
 - **v0.3** (2026-04-27): 테더 탭 그래프 보조지표 정책 합의.
   - 달러 탭은 기존 DXY 현물(`instrument='dxy'`) 그래프 유지.
   - 테더 탭은 KRX 미국달러선물을 가격 리스트 + 그래프 라인 후보로 둔다.
@@ -686,5 +710,6 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - F. 🟡 테더 탭 topic 이름 + snapshot/delta schema + DXY 토픽 분리/통합 — Phase 2 PR에서 확정
 
 🔧 **검증 체크리스트** (7번 섹션):
-- 거래소 5종 WebSocket endpoint 검증 (Phase 2 직전)
+- 거래소 5종 WebSocket endpoint **1차 문서 검증 완료** (v0.4, 2026-04-28) — 4종 ✅, 빗썸 🟡 부분
+- 잔여: 빗썸 실 연결, heartbeat 정책 3종, 24h SLA, 코인원 WS payload 필드 정밀 — Phase 2 PR 시점
 - Investing 실시간 채널 DevTools 조사 (Phase 4 직전)
