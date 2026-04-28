@@ -1,8 +1,8 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.2)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.3)
 
-> 📝 **상태**: Phase 0 종료 조건 합의본 (v0.2, 2026-04-27)
+> 📝 **상태**: Phase 0 종료 + 테더 탭 그래프 보조지표 정책 합의본 (v0.3, 2026-04-27)
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.2 — Phase 0 종료 조건(A) + Phase 1 PoC 평가 범위(B) + 측정 메트릭/의사결정 절차(C) minimum bar 결론형 반영. 테더 탭 데이터 topic-only 정책 명시(F 미정 추가). 정량 임계값/background 정책 전반은 후속 합의로 분리.
+> 🔄 **변경 이력**: v0.3 — 달러 탭은 DXY 현물 그래프 유지, 테더 탭은 KRX 미국달러선물(가격 리스트 + 그래프 라인 후보) + DXY 선물지수(그래프 보조지표 후보)로 분류. dxy_futures rollup/API 작업을 Phase 2 작업 항목에 추가. DXY 토픽 이름/schema 분리는 F 미정 항목에 흡수.
 
 ---
 
@@ -108,7 +108,10 @@ fx:<pair>           # 외환 — fx:usd-krw, fx:jpy-krw, fx:eur-krw
 usdt:krw            # ⚠️ 잠정 명칭. 실제로는 multi-source 테더 탭 토픽
                     #   (5개 거래소 USDT + Investing/KB/Hana reference + Phase 2 KRX 달러선물)
                     #   정확한 토픽 이름과 snapshot/delta schema는 Phase 2 PR에서 확정 (미정 F)
-dxy                 # 달러지수 (보조지표)
+dxy                 # ⚠️ 잠정 명칭. 달러지수 보조지표.
+                    #   현물(`dxy`)은 달러 탭, 선물(`dxy_futures`)은 테더 탭 그래프 보조지표.
+                    #   토픽 분리(`dxy:spot`/`dxy:futures`) vs 단일 토픽 instrument 분기는
+                    #   Phase 2 PR에서 결정 (미정 F).
 graph:<pair>:<range>  # 그래프 (저빈도) — graph:usd-krw:1d 등
 news                # 뉴스 피드
 ```
@@ -265,7 +268,8 @@ PoC 단계에서 1번 → 2번 → 3번 순으로 시도. 모든 단계에서 **
 | 거래소 USDT tick | 변경 시 INSERT (10초 polling) | 1초당 최대 1 row 또는 1초 OHLC 압축 (정책 미정 → 미정 항목) |
 | Investing 환율 | 변경 시 INSERT | 동일 (변경 빈도 낮아 그대로) |
 | 은행 환율 | 변경 시 INSERT | 동일 |
-| DXY | realtime + hourly + daily rollup | 동일 |
+| DXY 현물 (`instrument='dxy'`) | realtime + hourly + daily rollup | 동일 (달러 탭 그래프 보조지표) |
+| DXY 선물 (`instrument='dxy_futures'`) | realtime 저장만 (rollup 없음) | **rollup 추가 필요** — 테더 탭 그래프 보조지표 노출 전 dxy_futures hourly/daily rollup + 조회 API 작업 (Phase 2 작업 항목) |
 
 ### 그래프 정책
 
@@ -423,11 +427,14 @@ WS tick 수신
 **작업**:
 1. v1 minimal 토픽 프로토콜 구현 (hello/subscribe/snapshot/delta)
 2. 업비트 1개 거래소 WebSocket collector 구현
-3. **테더 탭 topic 이름 + snapshot/delta schema 확정** (미정 F 해결): multi-source payload (5거래소 USDT + Investing/KB/Hana reference + Phase 2 KRX 달러선물). 후보 방향: `source + asset + category` 기반 배열. category 예: `reference` / `derivative` / `exchange`.
-4. **백엔드 `get_all_rates_flat`에서 USDT legacy 병합 제거** ([crud.py:340](app/crud.py#L340), [crud.py:365](app/crud.py#L365)) — 테더 탭 데이터는 새 topic으로만 발사. legacy `rates`에는 USD/JPY/EUR + Investing/은행 9개만 유지.
-5. dual-emit 발사: 거래소 tick은 새 topic으로만 (legacy 미발사). FX/은행 tick은 legacy + 새 topic 양쪽 발사.
-6. iOS/Android 신 프로토콜 클라이언트 PoC — 테더 탭 데이터를 새 topic 구독으로 수신 (현재 `rates` 배열에서 USDT 받는 테스트 코드 수정)
-7. snapshot 캐시 토픽별 분리
+3. **테더 탭 topic 이름 + snapshot/delta schema 확정** (미정 F 해결): multi-source payload (5거래소 USDT + Investing/KB/Hana reference + KRX 달러선물). 후보 방향: `source + asset + category` 기반 배열. category 예: `reference` / `derivative` / `exchange`.
+4. **DXY 토픽 분리 vs 단일 토픽 instrument 분기 결정** (미정 F의 일부): DXY 현물은 달러 탭 보조지표, 선물은 테더 탭 그래프 보조지표 — 두 화면이 같은 토픽 공유할지 분리할지.
+5. **백엔드 `get_all_rates_flat`에서 USDT legacy 병합 제거** ([crud.py:340](app/crud.py#L340), [crud.py:365](app/crud.py#L365)) — 테더 탭 데이터는 새 topic으로만 발사. legacy `rates`에는 USD/JPY/EUR + Investing/은행 9개만 유지.
+6. **dxy_futures hourly/daily rollup 추가** ([dxy_rollup.py](app/admin/dxy_rollup.py) — 현재 `instrument='dxy'`만 집계. 30일 보관 정책상 dxy_futures 장기 그래프 데이터 손실 방지 위해 rollup 필수). instrument 파라미터화 또는 dxy_futures 전용 함수.
+7. **market_index 범용 그래프 API** (또는 dxy_futures 전용 그래프 API) — 테더 탭 그래프 payload에 DXY 선물지수 보조지표 포함 가능하도록.
+8. dual-emit 발사: 거래소 tick은 새 topic으로만 (legacy 미발사). FX/은행 tick은 legacy + 새 topic 양쪽 발사.
+9. iOS/Android 신 프로토콜 클라이언트 PoC — 테더 탭 데이터를 새 topic 구독으로 수신 (현재 `rates` 배열에서 USDT 받는 테스트 코드 수정)
+10. snapshot 캐시 토픽별 분리
 
 **검증 항목**:
 - 업비트 WS endpoint 검증 체크리스트 (7번)
@@ -585,9 +592,10 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
   - 후보: 5분 / 30분 / 1시간
 - DB 저장 정책 — tick 모두 vs 1초 last vs 1초 OHLC
 
-### F. 테더 탭 topic 이름 + snapshot/delta schema — 🟡 Phase 2 PR 합의
+### F. 테더 탭 topic 이름 + snapshot/delta schema + DXY 토픽 분리 — 🟡 Phase 2 PR 합의
 
 > ⚠️ 테더 탭은 단순 `usdt:krw`가 아니라 multi-source 탭이다. v0.1의 `usdt:krw` 명칭은 잠정.
+> v0.3에서 KRX 달러선물(가격 리스트 + 그래프 라인 후보)과 DXY 선물지수(그래프 보조지표 후보)가 결정되면서, DXY 토픽 분리 결정도 이 항목에 흡수.
 
 **미정 항목**:
 
@@ -597,11 +605,18 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
     - investing / usd-krw / reference
     - kb / usd-krw / reference
     - hana / usd-krw / reference
-    - krx / usd-krw-futures / derivative (Phase 2 새 source)
+    - krx / usd-krw-futures / derivative
     - upbit / usdt-krw / exchange
     - bithumb / usdt-krw / exchange
     - ... (5거래소)
 - category 분류 정합성 검증 — [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md), [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md)와 일관성 확인 필요.
+- **DXY 선물지수 보조지표 처리 방식** (v0.3 추가):
+  - DXY 현물(`instrument='dxy'`) = 달러 탭 그래프 보조지표 (기존)
+  - DXY 선물(`instrument='dxy_futures'`) = 테더 탭 그래프 보조지표 (v0.3 결정)
+  - 옵션 X: 토픽을 `dxy:spot` / `dxy:futures`로 분리 — 명확하지만 토픽 수 증가
+  - 옵션 Y: `dxy` 단일 토픽 안에 instrument 필드로 분기 — 토픽 수 적지만 클라이언트 필터링 부담
+  - 옵션 Z: DXY 선물지수를 테더 탭 토픽 payload에 보조지표로 흡수 (별도 DXY 토픽 분리 안 함)
+  - Phase 2 PR에서 토픽 schema와 함께 결정.
 
 ---
 
@@ -615,6 +630,8 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - ADR-XXX: 알림 평가 흐름 분리 (DB 동기 → Redis 비동기)
 - ADR-XXX: Legacy + Topic dual-emit 마이그레이션 패턴 — 테더 탭 데이터는 topic-only, legacy `rates`는 USD/JPY/EUR + Investing/은행 9개로 한정
 - ADR-XXX: 테더 탭 multi-source topic 이름 + payload schema 확정 (source + asset + category 모델)
+- ADR-XXX: DXY 화면 분리 — 달러 탭은 현물(`dxy`), 테더 탭은 선물(`dxy_futures`) 그래프 보조지표
+- ADR-XXX: dxy_futures hourly/daily rollup + market_index 그래프 API 확장 (Phase 2 작업)
 - ADR-XXX: 그래프 토픽 분리 (실시간 tick과 별도)
 - ADR-XXX: (선택) Investing 실시간 채널 전환 — 발견 시 별도 ADR
 
@@ -630,12 +647,20 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
   - 새 미정 항목 F 추가 (테더 탭 topic 이름 + schema 확정 — Phase 2 PR).
   - 5번 섹션 `usdt:krw`는 잠정 명칭 표시.
   - 11번 섹션에 "원천 데이터 재사용" 문단 추가 (KB usd-krw 예시).
+- **v0.3** (2026-04-27): 테더 탭 그래프 보조지표 정책 합의.
+  - 달러 탭은 기존 DXY 현물(`instrument='dxy'`) 그래프 유지.
+  - 테더 탭은 KRX 미국달러선물을 가격 리스트 + 그래프 라인 후보로 둔다.
+  - 테더 탭은 DXY 선물지수(`instrument='dxy_futures'`)를 그래프 보조지표 후보로 둔다.
+  - dxy_futures rollup/API 작업을 Phase 2 작업 항목에 추가 ([dxy_rollup.py](app/admin/dxy_rollup.py)는 현재 instrument='dxy'만 집계 — 30일 보관 정책상 장기 그래프 데이터 손실 방지 위해 rollup 필수).
+  - 5번 섹션 `dxy` 토픽 주석 보강 (현물/선물 분리 미정).
+  - 9번 DB 저장 정책 표에 DXY 현물/선물 분리 표기.
+  - F 미정 항목에 DXY 토픽 분리/통합 결정 흡수 (옵션 X/Y/Z, Phase 2 PR에서 결정).
 
 ---
 
 ## 부록: 합의 요약 (한눈에 보기)
 
-✅ **합의된 것** (v0.1 + v0.2):
+✅ **합의된 것** (v0.1 + v0.2 + v0.3):
 - v1 목표: 서버 tick 수신 후 1초 이내 화면 반영
 - 거래소 UI: 200~500ms debounce
 - 알림: debounce 없이 모든 tick 평가 + last_notified_at 중복 방지
@@ -644,9 +669,11 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - 같은 원천 데이터는 여러 topic payload에 재사용 가능 — 데이터 저장 경로 공유와 채널 분리는 별개
 - 레거시 제거: iOS/Android 양쪽 활성 구버전 < 1% **그리고** 최소 6개월 경과
 - 그래프: 실시간 tick과 분리된 저빈도 토픽
+- **DXY 화면 분리 (v0.3)**: 달러 탭 = DXY 현물(`dxy`) 그래프 유지. 테더 탭 = DXY 선물(`dxy_futures`) 그래프 보조지표 후보. 토픽 분리/통합 결정은 F에 흡수 (Phase 2 PR)
+- **dxy_futures rollup/API 작업 (v0.3)**: Phase 2 작업 항목 추가. 30일 보관 정책상 장기 그래프 데이터 손실 방지 위해 rollup 필수
 - Phase 0 (v0.2 합의): A/B/C minimum bar 결론형. v0.2 commit = Phase 1 **코드 설계/구현 진입** (운영 배포 조건 아님)
 - Phase 1: 1초 broadcast PoC + 병렬 전송 + 1주 계측. foreground 한정. 배포 범위/시간대는 Phase 1 PR에서 결정
-- Phase 2: 업비트 WS PoC + 토픽 프로토콜 + 테더 탭 topic 이름/schema 확정 + 백엔드 USDT legacy 분리
+- Phase 2: 업비트 WS PoC + 토픽 프로토콜 + 테더 탭 topic 이름/schema 확정 + 백엔드 USDT legacy 분리 + dxy_futures rollup/API 추가
 - DB는 실시간 전달 경로에서 분리, Redis가 latest state hot path
 - iOS/Android 양쪽 운영 중이므로 양 플랫폼 모두 dual-emit 호환 필수 (USD/JPY/EUR + 은행 9개 한정)
 
@@ -656,7 +683,7 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - C. ✅ 측정 항목 + 절차 합의 완료 (v0.2). 🟡 정량 임계값은 1주 측정 후
 - D. 🟡 그래프 토픽 push 빈도 — Phase 3 직전
 - E. 🟡 알림 평가 정량 (last_notified_at 윈도우, DB 저장 정책) — Phase 3 직전
-- F. 🟡 테더 탭 topic 이름 + snapshot/delta schema — Phase 2 PR에서 확정
+- F. 🟡 테더 탭 topic 이름 + snapshot/delta schema + DXY 토픽 분리/통합 — Phase 2 PR에서 확정
 
 🔧 **검증 체크리스트** (7번 섹션):
 - 거래소 5종 WebSocket endpoint 검증 (Phase 2 직전)
