@@ -399,13 +399,13 @@ def get_rates_by_currency(db: Session, currency: str) -> List[Dict[str, Any]]:
 # 추가 유틸리티 함수들
 
 
-def delete_old_bank_data(db: Session, days: int = 10) -> int:
+def delete_old_bank_data(db: Session, days: int = 30) -> int:
     """
     지정된 일수 이상 지난 은행 환율 데이터 삭제
 
     Args:
         db: 데이터베이스 세션
-        days: 보관할 일수 (기본값: 10일)
+        days: 보관할 일수 (기본값: 30일)
 
     Returns:
         삭제된 레코드 개수
@@ -1734,13 +1734,13 @@ def get_source_rates_as_legacy_format(
     return entries
 
 
-def delete_old_source_rates(db: Session, days: int = 10) -> int:
+def delete_old_source_rates(db: Session, days: int = 30) -> int:
     """
     지정된 일수 이상 지난 source_rates 데이터 삭제 (기존 bank cleanup 패턴과 동일).
 
     Args:
         db: 세션
-        days: 보관할 일수 (기본값: 10일)
+        days: 보관할 일수 (기본값: 30일)
 
     Returns:
         삭제된 레코드 개수
@@ -1750,6 +1750,32 @@ def delete_old_source_rates(db: Session, days: int = 10) -> int:
     deleted_count = db.query(models.SourceRate).filter(
         models.SourceRate.timestamp < cutoff_date
     ).delete()
+
+    db.commit()
+    return deleted_count
+
+
+def delete_old_market_index_rates(
+    db: Session,
+    days: int = 30,
+    instruments: Optional[List[str]] = None,
+    granularities: Optional[List[str]] = None,
+) -> int:
+    """
+    지정된 일수 이상 지난 시장 지수 데이터 삭제.
+
+    기본 대상은 현물/운영 DXY와 미국달러지수 선물의 realtime 원본이다.
+    hourly/daily rollup은 3m/1y 그래프 보존을 위해 기본 정리 대상에서 제외한다.
+    """
+    cutoff_date = models.get_utc_now() - timedelta(days=days)
+    target_instruments = instruments or ["dxy", "dxy_futures"]
+    target_granularities = granularities or ["realtime"]
+
+    deleted_count = db.query(models.MarketIndexRate).filter(
+        models.MarketIndexRate.instrument.in_(target_instruments),
+        models.MarketIndexRate.granularity.in_(target_granularities),
+        models.MarketIndexRate.timestamp < cutoff_date,
+    ).delete(synchronize_session=False)
 
     db.commit()
     return deleted_count

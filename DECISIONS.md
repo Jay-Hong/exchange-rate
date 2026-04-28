@@ -2531,6 +2531,76 @@ DXY 운영 피드(`dxy_spot.py`)는 Investing의 `/indices/usdollar`를 1차 소
 
 ---
 
+## ADR-023: 데이터 보관 정책 30일 통일 (bank/source_rates/DXY realtime)
+
+> 📅 **작성일**: 2026-04-27
+> 🏷️ **상태**: 확정
+
+### 맥락
+
+기존 보관 정책이 테이블별로 달랐다:
+- 은행 환율(`bank_exchange_rates`): 10일
+- USDT 거래소 가격(`source_rates`): 10일
+- DXY(`market_index_rates`): 장기 보관 (cleanup 함수 없음)
+
+dxy_futures(미국달러지수 선물) 추가 시점에 정책을 통일하면서 DXY raw 데이터의 무한 누적 문제도 함께 해결할 필요가 있었다.
+
+### 결정
+
+#### 1. 30일 통일
+
+- 은행 환율: 10일 → **30일**
+- USDT 거래소 가격: 10일 → **30일**
+- DXY 현물/선물 realtime: **30일** (신규 cleanup)
+
+#### 2. DXY rollup 보존 (granularity 별 정책)
+
+- `realtime` granularity: 30일 cap
+- `hourly`/`daily` rollup: **삭제 안 함** (장기 그래프 보존)
+- 이유: 3m/1y 그래프는 daily 데이터가 90일/365일 필요. realtime 30일 cap은 1d/1w 그래프 윈도우(24h, 7일)에 영향 없음.
+
+#### 3. 구현
+
+- `crud.delete_old_market_index_rates(days=30, granularities=None)` 신규
+  - default `granularities=["realtime"]` — hourly/daily는 호출자가 명시해야 삭제
+- `app/scheduler.py` 상수: `BANK_RETENTION_DAYS=30`, `SOURCE_RATE_RETENTION_DAYS=30`, `MARKET_INDEX_RETENTION_DAYS=30`
+- 매일 03:30~03:32 KST 순차 실행
+
+### 영향
+
+| 테이블 | 변경 전 | 변경 후 | 디스크 (≈100B/row) |
+|---|---|---|---|
+| bank_exchange_rates | 10일 | 30일 | 3x ≈ 4MB |
+| source_rates | 10일 | 30일 | 3x ≈ 40MB |
+| market_index_rates (realtime) | 무한 | 30일 | ≈ 12MB cap |
+| market_index_rates (hourly) | 무한 | 무한 | 1.7MB/년 |
+| market_index_rates (daily) | 무한 | 무한 | 73KB/년 |
+
+RDS 20GB 무료 tier 대비 0.3% 미만. 디스크 부담 없음.
+
+#### 그래프 일관성
+
+| 기간 | 사용 granularity | 윈도우 | 30일 cap 영향 |
+|---|---|---|---|
+| 1d | realtime | 24h | 안전 |
+| 1w | realtime + hourly | 7일 | 안전 |
+| 3m | daily + realtime tail (7일) | 90일 | daily 보존으로 안전 |
+| 1y | daily + realtime tail (7일) | 365일 | daily 보존으로 안전 |
+
+### 기각 대안
+
+| 대안 | 기각 사유 |
+|---|---|
+| 모든 granularity 30일 cap | 3m/1y 그래프 깨짐 (daily 90일/365일 필요) |
+| 90일 통일 | 디스크 과적, 가치 낮음 |
+| 테이블별 다른 cap 유지 | 정책 복잡도 ↑, 운영 일관성 ↓ |
+
+### 관련 결정
+
+- [ADR-019](#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략): granularity 기반 그래프 전략 — 이 정책이 hourly/daily 보존 근거
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2555,3 +2625,4 @@ DXY 운영 피드(`dxy_spot.py`)는 Investing의 `/indices/usdollar`를 1차 소
 - 2026-03-28: ADR-021 작성 (환율 뉴스 피드 — Redis-only + KB/RSS 병행 수집)
 - 2026-04-01: ADR-021 개정 (v2 단순화 — noise_only 일원화, 24h 윈도우, match_type/flash/category 삭제)
 - 2026-04-27: ADR-022 작성 (DXY Yahoo fallback 시간/가격/fresh-age 가드 정책)
+- 2026-04-27: ADR-023 작성 (데이터 보관 정책 30일 통일 — bank/source_rates/DXY realtime)

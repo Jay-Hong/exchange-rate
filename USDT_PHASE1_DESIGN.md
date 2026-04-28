@@ -152,9 +152,9 @@ ON source_rates (source, asset, timestamp);
 
 ### Retention policy
 
-- raw 데이터는 **10일** 보관 (기존 은행 데이터 보존 정책과 동일)
-- 10일 이상 오래된 행은 기존 cleanup job 패턴에 맞춰 자동 삭제
-- Phase 2에서 장기 그래프가 필요해지면 raw retention을 늘리지 않고 DXY와 동일한 rollup 전략 (realtime → hourly → daily) 적용
+- raw 데이터는 **30일** 보관 (은행 데이터 보존 정책과 동일)
+- 30일 이상 오래된 행은 기존 cleanup job 패턴에 맞춰 자동 삭제
+- Phase 2에서 장기 그래프가 필요해지면 30일 raw 데이터 또는 별도 rollup 전략을 검토
 
 ### 2. `source_notification_settings`
 
@@ -524,7 +524,7 @@ Request는 `source` + `asset` 구조 사용 (레거시 호환 불필요, 새 API
 - `insert_source_rate_if_changed(db, source, asset, rate) -> bool`
 - `get_latest_source_rate(db, source, asset) -> dict | None`
 - `get_latest_source_rates(db) -> list[dict]`
-- `delete_old_source_rates(db, days=10) -> int`
+- `delete_old_source_rates(db, days=30) -> int`
 
 #### `source_notification_settings`
 
@@ -666,8 +666,8 @@ Phase 1에서는 구현하지 않지만, 개념적 자리만 잠금.
 4. `crud.py`에 source 기반 CRUD + `get_source_rates_as_legacy_format` + `delete_old_source_rates` + alert 처리 추가
 5. `crud.py`의 `get_all_rates_flat()`, `get_rates_by_currency()`에 source_rates 병합 로직 추가
 6. `app/crawlers/usdt_sources.py` + 수집 scheduler job 추가 (`task_usdt_sources`)
-7. **source_rates cleanup scheduler job 추가** (기존 `cleanup_old_bank_data` 패턴 재사용, 10일 초과 데이터 매일 삭제)
+7. **source_rates cleanup scheduler job 추가** (기존 `cleanup_old_bank_data` 패턴 재사용, 30일 초과 데이터 매일 삭제)
 8. `/api/source-notification-settings` 추가
 9. WebSocket payload 변경 없음 (기존 `rates` 배열 자동 확장)
 10. 통합 테스트: `/api/rates`, `/api/rates/usdt-krw`, WebSocket `rates` 배열에 USDT 포함 확인
-11. 운영 검증: cleanup job이 10일 초과 데이터를 실제로 삭제하는지 확인
+11. 운영 검증: cleanup job이 30일 초과 데이터를 실제로 삭제하는지 확인

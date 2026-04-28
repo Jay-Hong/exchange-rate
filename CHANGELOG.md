@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - ThreadPoolExecutor fan-out (5개 REST API 병렬, per-source 2s timeout)
     - 변경 시에만 INSERT 정책 (insert-if-changed)
   - **새 테이블 3개**:
-    - `source_rates` (source + asset + rate + timestamp, 10일 보관)
+    - `source_rates` (source + asset + rate + timestamp, 30일 보관)
     - `source_notification_settings` (source/asset 기반 알림 설정, 기존 notification_settings와 분리)
     - `source_notification_logs` (알림 발송 히스토리, success/error_message 포함)
   - **신규 모듈**:
@@ -109,6 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - daily gap backfill 실행 (2026-03-11 ~ 2026-03-13 KST)
 
 ### Changed
+
+- **데이터 보관 정책 30일 통일** (2026-04-27, ADR-023):
+  - 은행 환율(`bank_exchange_rates`): 10일 → 30일
+  - USDT 거래소 가격(`source_rates`): 10일 → 30일
+  - DXY 현물/선물 realtime(`market_index_rates`): 30일 (신규 cleanup)
+  - DXY hourly/daily rollup은 삭제 안 함 — 3m/1y 그래프 보존
+  - `crud.delete_old_market_index_rates(days=30, granularities=None)` 신규 (default `["realtime"]`)
+  - 매일 03:30~03:32 KST 순차 cleanup
 
 - **DXY 스케줄 조정**: 실시간 비교 품질 개선
   - IN/BREAK1/BREAK2: 10초마다 (`04, 14, 24, 34, 44, 54초`)

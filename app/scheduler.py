@@ -39,6 +39,10 @@ logger = logging.getLogger("exchange_rate.scheduler")
 KST = timezone('Asia/Seoul')
 scheduler = AsyncIOScheduler(timezone=KST)
 
+BANK_RETENTION_DAYS = 30
+SOURCE_RATE_RETENTION_DAYS = 30
+MARKET_INDEX_RETENTION_DAYS = 30
+
 # ═════════════════════════════════════════════════════════════
 # AsyncIO PriorityQueue 기반 Selenium 크롤러 순차 실행 시스템
 # ═════════════════════════════════════════════════════════════
@@ -1054,11 +1058,14 @@ def control_job():
         current_mode = new_mode
 
 def cleanup_old_bank_data():
-    """10일 이상 지난 은행 환율 데이터 삭제"""
+    """30일 이상 지난 은행 환율 데이터 삭제"""
     db = SessionLocal()
     try:
-        deleted_count = crud.delete_old_bank_data(db=db, days=10)
-        logger.info("🧹 은행 데이터 정리 완료", extra={"deleted_count": deleted_count})
+        deleted_count = crud.delete_old_bank_data(db=db, days=BANK_RETENTION_DAYS)
+        logger.info(
+            "🧹 은행 데이터 정리 완료",
+            extra={"deleted_count": deleted_count, "retention_days": BANK_RETENTION_DAYS},
+        )
     except Exception as e:
         db.rollback()
         logger.error("❌ 데이터 정리 실패", exc_info=True)
@@ -1067,14 +1074,33 @@ def cleanup_old_bank_data():
 
 
 def cleanup_old_source_rates():
-    """10일 이상 지난 source_rates 데이터 삭제 (USDT Phase 1)."""
+    """30일 이상 지난 source_rates 데이터 삭제 (USDT Phase 1)."""
     db = SessionLocal()
     try:
-        deleted_count = crud.delete_old_source_rates(db=db, days=10)
-        logger.info("🧹 source_rates 정리 완료", extra={"deleted_count": deleted_count})
+        deleted_count = crud.delete_old_source_rates(db=db, days=SOURCE_RATE_RETENTION_DAYS)
+        logger.info(
+            "🧹 source_rates 정리 완료",
+            extra={"deleted_count": deleted_count, "retention_days": SOURCE_RATE_RETENTION_DAYS},
+        )
     except Exception:
         db.rollback()
         logger.error("❌ source_rates 정리 실패", exc_info=True)
+    finally:
+        db.close()
+
+
+def cleanup_old_market_index_rates():
+    """30일 이상 지난 DXY 현물/선물 realtime 시장지수 데이터 삭제."""
+    db = SessionLocal()
+    try:
+        deleted_count = crud.delete_old_market_index_rates(db=db, days=MARKET_INDEX_RETENTION_DAYS)
+        logger.info(
+            "🧹 시장지수 데이터 정리 완료",
+            extra={"deleted_count": deleted_count, "retention_days": MARKET_INDEX_RETENTION_DAYS},
+        )
+    except Exception:
+        db.rollback()
+        logger.error("❌ 시장지수 데이터 정리 실패", exc_info=True)
     finally:
         db.close()
 
@@ -1421,8 +1447,11 @@ def start_scheduler():
     # 은행 데이터 정리: 매일 새벽 03:30:01시
     scheduler.add_job(cleanup_old_bank_data, CronTrigger(hour=3, minute=30, second=1, timezone=KST), id="cleanup_old_bank_data")
 
-    # source_rates 정리: 매일 새벽 03:31:01시 (USDT Phase 1, 10일 보관)
+    # source_rates 정리: 매일 새벽 03:31:01시 (USDT Phase 1, 30일 보관)
     scheduler.add_job(cleanup_old_source_rates, CronTrigger(hour=3, minute=31, second=1, timezone=KST), id="cleanup_old_source_rates")
+
+    # 시장지수 정리: 매일 새벽 03:32:01시 (DXY 현물/선물 realtime, 30일 보관)
+    scheduler.add_job(cleanup_old_market_index_rates, CronTrigger(hour=3, minute=32, second=1, timezone=KST), id="cleanup_old_market_index_rates")
 
     # ═════════════════════════════════════════════════════════════
     # USDT 거래소 수집: 매분 06,16,26,36,46,56초 (Broadcasting 4초 전)

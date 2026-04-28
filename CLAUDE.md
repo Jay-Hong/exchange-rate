@@ -220,10 +220,10 @@ sent_at         DATETIME
 
 ## 데이터 관리 정책
 
-- **은행 데이터**: 10일분만 유지 (단기 비교용)
+- **은행 데이터**: 30일분만 유지 (단기 비교용)
 - **인베스팅 데이터**: 장기 보관 (그래프/분석용)
-- **DXY 데이터**: 장기 보관 (그래프 보조지표용, daily/hourly/realtime 구분)
-- **source_rates (USDT)**: 10일분만 유지 (은행 데이터와 동일 정책, Phase 2에서 rollup 추가 예정)
+- **DXY 데이터**: realtime 원본은 30일분만 유지 (`dxy`, `dxy_futures` 모두 `market_index_rates`에 저장), hourly/daily rollup은 장기 그래프 보존
+- **source_rates (USDT)**: 30일분만 유지 (은행 데이터와 동일 정책)
 - **저장 조건**: 변경사항 있을 때만 INSERT (중복 방지)
 
 ## 스케줄링 시스템
@@ -1008,7 +1008,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - **새 데이터 모델**: `source_rates`, `source_notification_settings`, `source_notification_logs`
 - **기존 API 확장**: `/api/rates`, `/api/rates/usdt-krw`, WebSocket `rates` 배열에 usdt-krw 엔트리 자동 포함
 - **Source 알림 API**: `/api/source-notification-settings` (4종, 거래소 전용, reference는 400 + 기존 API 안내)
-- **10일 보관 cleanup**: 매일 03:31
+- **30일 보관 cleanup**: 매일 03:31
 
 **알림 API**:
 
