@@ -232,7 +232,7 @@ def build_dxy_graph_series() -> Tuple[List[List[float]], int]:
                     SELECT timestamp, rate,
                         ROW_NUMBER() OVER (
                             PARTITION BY timestamp
-                            ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END, id DESC
+                            ORDER BY CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END, id DESC
                         ) AS rn
                     FROM market_index_rates
                     WHERE instrument = 'dxy'
@@ -257,7 +257,7 @@ def build_dxy_graph_series() -> Tuple[List[List[float]], int]:
                   AND granularity = 'realtime'
                   AND timestamp < :start
                 ORDER BY timestamp DESC,
-                    CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                    CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END,
                     id DESC
                 LIMIT 1
             """),
@@ -413,7 +413,7 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                                 PARTITION BY timestamp
                                 ORDER BY
                                     CASE granularity WHEN 'hourly' THEN 0 ELSE 1 END,
-                                    CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                    CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END,
                                     id DESC
                             ) AS rn
                         FROM market_index_rates
@@ -451,7 +451,7 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                             SELECT timestamp, rate,
                                 ROW_NUMBER() OVER (
                                     PARTITION BY timestamp
-                                    ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                    ORDER BY CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END,
                                         id DESC
                                 ) AS rn
                             FROM market_index_rates
@@ -487,7 +487,7 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                         SELECT timestamp, rate,
                             ROW_NUMBER() OVER (
                                 PARTITION BY timestamp
-                                ORDER BY CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                                ORDER BY CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END,
                                     id DESC
                             ) AS rn
                         FROM market_index_rates
@@ -529,7 +529,7 @@ def build_period_dxy_series(period: str) -> Tuple[List[List[float]], int]:
                   AND granularity IN ({gran_placeholders_cf})
                   AND timestamp < :start
                 ORDER BY timestamp DESC,
-                    CASE WHEN source = 'investing' THEN 0 ELSE 1 END,
+                    CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END,
                     id DESC
                 LIMIT 1
             """),

@@ -524,10 +524,10 @@ def insert_dxy_rate_into_db(db: Session, rate: float, source: str) -> bool:
 
 def get_latest_dxy_rate(db: Session) -> Optional[Dict[str, Any]]:
     """
-    최신 DXY 값 조회 (investing 우선, yahoo 폴백)
+    최신 DXY 값 조회 (investing 최우선, cnbc 차순위, yahoo 최후)
 
-    동일 초에 investing과 yahoo가 모두 있으면 investing 우선.
-    source 우선순위: investing > yahoo (CASE WHEN 정렬)
+    동일 timestamp에 여러 source가 있으면 investing > cnbc > yahoo 순서로 선택.
+    source 우선순위: investing > cnbc > yahoo (CASE WHEN 정렬, ADR-025)
 
     Returns:
         {"instrument": "dxy", "rate": 104.52, "source": "investing",
@@ -545,7 +545,8 @@ def get_latest_dxy_rate(db: Session) -> Optional[Dict[str, Any]]:
             models.MarketIndexRate.timestamp.desc(),
             case(
                 (models.MarketIndexRate.source == "investing", 0),
-                else_=1
+                (models.MarketIndexRate.source == "cnbc", 1),
+                else_=2
             ),
             models.MarketIndexRate.id.desc()
         )
@@ -680,7 +681,8 @@ def _dxy_query_single(
 
     source_priority = case(
         (models.MarketIndexRate.source == "investing", 0),
-        else_=1
+        (models.MarketIndexRate.source == "cnbc", 1),
+        else_=2
     )
 
     end_op = models.MarketIndexRate.timestamp < end_time if past_exclusive_end \

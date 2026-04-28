@@ -43,7 +43,7 @@ except Exception:
 
 # 로컬 애플리케이션
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
-from app.crawlers.dxy import fetch_dxy_from_yahoo
+from app.crawlers.dxy import fetch_dxy_from_cnbc, fetch_dxy_from_yahoo
 from app.market_mode import get_market_mode, KST
 
 # 크롤러 이름
@@ -245,19 +245,33 @@ def _should_use_yahoo_fallback(
         return True, meta
 
 
-# --- Yahoo fallback 실행 (공용 헬퍼) ---
+# --- 외부 fallback 실행 (공용 헬퍼) ---
 
-def _try_yahoo_fallback(db, now_utc: datetime) -> None:
+# 외부 fallback chain: (source 이름, fetch 함수)
+# 우선순위: CNBC(신선) > Yahoo(10분 stale, 최후 보루)
+# 정책:
+#   - 시간 가드 / mode 보존 정책 / fresh-age diff guard 모두 공통 적용
+#   - chain 내 한 source가 fetch 성공 + diff guard 차단 → 이후 source도 차단
+#     (fresh Investing 기준 outlier 신호로 간주)
+#   - chain 내 한 source가 fetch 실패 → 다음 source로 진행
+_FALLBACK_CHAIN = [
+    ("cnbc", fetch_dxy_from_cnbc),
+    ("yahoo", fetch_dxy_from_yahoo),
+]
+
+
+def _try_external_fallback(db, now_utc: datetime) -> None:
     """
-    Yahoo fallback 시도 (market mode 기반 보존 정책 적용).
+    외부 fallback chain 시도 (CNBC > Yahoo).
 
+    market mode 기반 보존 정책 + 시간 가드 + fresh-age 기반 diff guard 적용.
     hard failure 경로와 silent stale 경로에서 공용으로 호출.
     """
     from app import crud, models
 
     if not _is_dxy_weekly_session_open(now_utc):
         logger.info(
-            "🛡️ DXY Yahoo 폴백 차단 (DXY 주간 세션 OFF)",
+            "🛡️ DXY 외부 폴백 차단 (DXY 주간 세션 OFF)",
             extra={
                 "now_utc": now_utc.isoformat(),
                 "now_ny": now_utc.astimezone(NY).isoformat(),
@@ -287,7 +301,7 @@ def _try_yahoo_fallback(db, now_utc: datetime) -> None:
 
     if not use_yahoo:
         logger.info(
-            "🛡️ DXY Yahoo 폴백 스킵 (Investing 값 보존)",
+            "🛡️ DXY 외부 폴백 스킵 (Investing 값 보존)",
             extra={
                 **meta,
                 "investing_rate": latest_investing.rate if latest_investing else None,
@@ -295,37 +309,61 @@ def _try_yahoo_fallback(db, now_utc: datetime) -> None:
         )
         return
 
-    rate = fetch_dxy_from_yahoo()
-    if latest_investing is not None:
-        investing_age_seconds = meta.get("investing_rate_age_seconds")
-        diff_guard_grace_seconds = (
-            IN_SUCCESS_GRACE_SECONDS if mode == "IN" else BREAK_SUCCESS_GRACE_SECONDS
-        )
-
-        if (
-            investing_age_seconds is not None
-            and investing_age_seconds <= diff_guard_grace_seconds
-        ):
-            diff = abs(rate - latest_investing.rate)
-            if diff > DXY_YAHOO_DIFF_THRESHOLD:
-                logger.info(
-                    "🛡️ DXY Yahoo 임계값 초과 — 저장 보류",
-                    extra={
-                        **meta,
-                        "yahoo_rate": rate,
-                        "investing_rate": latest_investing.rate,
-                        "diff": round(diff, 4),
-                        "threshold": DXY_YAHOO_DIFF_THRESHOLD,
-                        "diff_guard_grace_seconds": diff_guard_grace_seconds,
-                    },
-                )
-                return
-
-    crud.insert_dxy_rate_into_db(db=db, rate=rate, source="yahoo")
-    logger.info(
-        "📦 DXY Yahoo 폴백 저장",
-        extra={**meta, "rate": rate, "source": "yahoo"},
+    diff_guard_grace_seconds = (
+        IN_SUCCESS_GRACE_SECONDS if mode == "IN" else BREAK_SUCCESS_GRACE_SECONDS
     )
+
+    for source_name, fetch_fn in _FALLBACK_CHAIN:
+        try:
+            rate = fetch_fn()
+        except Exception as exc:
+            logger.warning(
+                f"⚠️ DXY {source_name} 폴백 fetch 실패",
+                extra={**meta, "fallback_source": source_name, "error": str(exc)},
+            )
+            continue  # 다음 source 시도
+
+        # diff guard: latest_investing fresh일 때만 적용
+        if latest_investing is not None:
+            investing_age_seconds = meta.get("investing_rate_age_seconds")
+            if (
+                investing_age_seconds is not None
+                and investing_age_seconds <= diff_guard_grace_seconds
+            ):
+                diff = abs(rate - latest_investing.rate)
+                if diff > DXY_YAHOO_DIFF_THRESHOLD:
+                    logger.info(
+                        f"🛡️ DXY {source_name} 임계값 초과 — chain 전체 저장 보류",
+                        extra={
+                            **meta,
+                            "fallback_source": source_name,
+                            "fetched_rate": rate,
+                            "investing_rate": latest_investing.rate,
+                            "diff": round(diff, 4),
+                            "threshold": DXY_YAHOO_DIFF_THRESHOLD,
+                            "diff_guard_grace_seconds": diff_guard_grace_seconds,
+                        },
+                    )
+                    # 외부값이 fresh Investing과 충돌 → 다음 source도 outlier 가능성 → chain 종료
+                    return
+
+        # 저장 성공 → chain 종료 (Yahoo까지 안 감)
+        crud.insert_dxy_rate_into_db(db=db, rate=rate, source=source_name)
+        logger.info(
+            f"📦 DXY {source_name} 폴백 저장",
+            extra={**meta, "rate": rate, "source": source_name, "fallback_source": source_name},
+        )
+        return
+
+    # chain 전체 실패
+    logger.warning(
+        "⚠️ DXY 외부 폴백 chain 전체 실패",
+        extra={**meta, "tried_sources": [s for s, _ in _FALLBACK_CHAIN]},
+    )
+
+
+# 하위 호환: 기존 호출 위치는 유지
+_try_yahoo_fallback = _try_external_fallback
 
 
 # --- HTTP / 파싱 헬퍼 ---

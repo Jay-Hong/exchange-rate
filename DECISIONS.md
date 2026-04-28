@@ -2677,6 +2677,92 @@ ADR-020에서는 Investing의 `exchange-rates-table` `#sb_last_8827`을 현물 D
 
 ---
 
+## ADR-025: DXY 현물 외부 fallback 체인 — CNBC 추가 + Yahoo 격하
+
+> 📅 **작성일**: 2026-04-28
+> 🏷️ **상태**: 확정 (ADR-022 후속 강화)
+
+### 맥락
+
+ADR-022에서 Yahoo fallback에 시간 가드 + 가격 가드 + fresh-age 조건을 추가했지만, **Yahoo의 근본 한계 자체는 그대로**였다:
+- 운영 EC2 평일 30샘플 측정에서 Yahoo `regularMarketPreviousClose`의 source data 신선도 median = **601.8초 (10분 stale)**
+- p95는 ~99분 stale — 즉 5%의 시간은 1시간 이상 옛 값을 반환
+- 가드는 outlier를 차단할 뿐, "더 신선한 fallback"을 제공하진 않음
+
+같은 측정에서 **CNBC `.DXY` quote endpoint**가 다음 특성을 보임:
+- HTTP 200, latency median 326ms
+- "ICE U.S. Dollar Index" 명시 (출처 안전성)
+- Investing primary와 차이 median 0.006 (거의 동일)
+- 인증 불필요, JSON 깔끔, ToS 비교적 안전 (자사 사이트 quote endpoint)
+
+### 결정
+
+#### 1. 외부 fallback chain 도입
+
+기존 단일(Yahoo)에서 chain으로 일반화:
+```
+1차: Investing /indices/usdollar __NEXT_DATA__   [primary, 변경 없음]
+2차: Investing /indices/usdollar CSS              [primary fallback, 변경 없음]
+3차: CNBC .DXY                                    [NEW, 외부 fallback 1순위]
+4차: Yahoo Finance                                [최후 보루로 격하]
+```
+
+#### 2. 공통 가드 정책 적용 (CNBC도 Yahoo와 동일)
+
+- **시간 가드**: ICE DX 주간 세션 OFF 시 chain 전체 차단
+- **mode 보존 정책**: IN/BREAK/OUT 모드별 grace + failure threshold
+- **fresh-age diff guard**: latest_investing이 fresh일 때만 0.07 임계값 적용
+- 모든 가드는 ADR-022와 동일
+
+#### 3. ⭐ Chain 내 diff guard 차단 시 후속 source도 차단
+
+Chain의 한 source가 fetch 성공했지만 가격 가드에 걸리면, **다음 source(Yahoo)도 시도하지 않음**.
+
+이유:
+- 외부값(CNBC)이 fresh Investing과 0.07 이상 차이난다는 건 **outlier 신호**
+- Yahoo는 더 stale(10분 지연) → 더 outlier일 가능성 높음
+- chain 전체 종료가 안전 (Investing이 fresh하니 DXY 데이터는 멈추지 않음)
+
+단, **fetch 실패는 다음 source로 진행**. 가드 차단(외부값 자체 의심)과 fetch 실패(네트워크 등 일시 장애)는 명확히 구분.
+
+#### 4. 우선순위 일관성 (DB 조회/그래프)
+
+DB에 `source='cnbc'` 들어오면 기존 조회/그래프 로직이 무시하지 않도록 우선순위 수정:
+- `crud.get_latest_dxy_rate()`: `case((investing, 0), (cnbc, 1), else_=2)`
+- `app/admin/graph_cache.py` 6곳: `CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END`
+- 결과: Investing > CNBC > Yahoo 우선순위 일관 적용
+
+#### 5. 운영 메타 필드 유지
+
+`_try_yahoo_fallback → _try_external_fallback` 리팩토링 시 기존 로그 필드 유지:
+- `mode`, `last_fresh_age_seconds`, `investing_rate_age_seconds`, `consecutive_failures`, `last_fresh_source`, `investing_rate`, `diff`, `threshold`
+- 신규: `fallback_source` (값: `"cnbc" | "yahoo"`) — 어느 폴백이 발동했는지 즉시 식별
+
+기존 호출 위치 호환을 위해 `_try_yahoo_fallback = _try_external_fallback` alias 유지.
+
+### 영향
+
+- Yahoo fallback 발동 빈도 감소 (CNBC가 먼저 잡음)
+- weekend/마감 후 stale 위험 감소 — CNBC도 시간 가드 적용으로 같은 보호
+- DB `source` 컬럼에 새 값 `'cnbc'` 추가 (스키마 변경 없음)
+- 운영 모니터링: `source='cnbc'` 적재 빈도/비율 관찰 → 며칠 후 가치 정량 확인
+
+### 기각 대안
+
+| 대안 | 기각 사유 |
+|---|---|
+| TradingView TVC:DXY를 fallback에 포함 | undocumented endpoint + ToS 회색지대, 시간대 stale 편차 미검증 (validate_dxy_candidates.py 측정 누적 후 재검토) |
+| CNBC fetch 실패 시에도 Yahoo 차단 | fetch 실패와 outlier는 다른 신호 — 일시 장애로 Yahoo까지 차단하면 데이터 끊김 |
+| CNBC를 Investing primary 위치로 격상 | Investing primary는 운영 검증된 신뢰 소스, 변경 위험 큼 |
+| Yahoo 완전 제거 | DXY 단일 fallback이 사라지면 CNBC 차단 시 Yahoo 없이 데이터 끊김. 이중 안전망 유지 |
+
+### 관련 결정
+
+- [ADR-022](#adr-022-dxy-yahoo-fallback-시간가격fresh-age-가드-정책): 시간/가격/fresh-age 가드 — CNBC도 동일 적용
+- [ADR-024](#adr-024-미국달러지수-선물-분리-저장--dxy_mode-제거): 같은 시점 운영 검증으로 CNBC가 더 신선한 후보임을 확인
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2703,3 +2789,4 @@ ADR-020에서는 Investing의 `exchange-rates-table` `#sb_last_8827`을 현물 D
 - 2026-04-27: ADR-022 작성 (DXY Yahoo fallback 시간/가격/fresh-age 가드 정책)
 - 2026-04-27: ADR-023 작성 (데이터 보관 정책 30일 통일 — bank/source_rates/DXY realtime)
 - 2026-04-27: ADR-024 작성 (미국달러지수 선물 분리 저장 + DXY_MODE 제거)
+- 2026-04-28: ADR-025 작성 (DXY 현물 외부 fallback 체인 — CNBC 추가 + Yahoo 격하)

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DXY 현물 CNBC 외부 fallback 추가** (2026-04-28, ADR-025):
+  - 외부 fallback chain: CNBC `.DXY` (1순위) → Yahoo Finance (최후 보루)
+  - `app/crawlers/dxy.py`에 `fetch_dxy_from_cnbc()` 추가 (ICE U.S. Dollar Index 공개 quote endpoint)
+  - 운영 측정상 Yahoo의 10분 stale 한계를 줄이는 효과 (CNBC는 Investing와 차이 median 0.006)
+  - 같은 시간 가드 + fresh-age diff guard 적용 (ADR-022 정책 그대로)
+  - chain 내 한 source가 diff guard로 차단되면 다음 source(Yahoo)도 시도하지 않음 (외부값 자체 outlier 신호로 간주)
+  - chain 내 fetch 실패는 다음 source로 진행 (네트워크 일시 장애 vs outlier 구분)
+
 - **미국달러지수 선물 분리 저장** (2026-04-27, ADR-024):
   - `instrument='dxy_futures'`로 별도 저장 (`market_index_rates` 테이블)
   - exchange-rates-table `#sb_last_8827`을 환율과 동시 추출 (추가 HTTP 요청 0)

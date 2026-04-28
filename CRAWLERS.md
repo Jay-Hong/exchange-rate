@@ -128,18 +128,22 @@
 
 | 지수 | 수집 방식 | 폴백 순서 | 특이사항 |
 |------|----------|----------|---------|
-| **미국 달러지수(DXY)** | `dxy_spot.py` 독립 운영 피드 | 1차: `/indices/usdollar` `__NEXT_DATA__` → 2차: 같은 페이지 CSS → 3차: Yahoo Finance | 현물/운영 DXY, `instrument='dxy'`, Yahoo는 시간/가격 가드 후 저장 |
+| **미국 달러지수(DXY)** | `dxy_spot.py` 독립 운영 피드 | 1차: `/indices/usdollar` `__NEXT_DATA__` → 2차: 같은 페이지 CSS → 3차: CNBC `.DXY` → 4차: Yahoo Finance | 현물/운영 DXY, `instrument='dxy'`, 외부 폴백(CNBC/Yahoo)은 시간/가격/fresh-age 가드 후 저장 |
 | **미국달러지수 선물** | `investing.py`에서 환율과 동반 추출 | 1차: `#sb_last_8827` (exchange-rates-table) → 2차: `/currencies/us-dollar-index` | 선물/CFD 계열, `instrument='dxy_futures'`, Yahoo 미사용 |
 
 **특징**:
 - **DXY 현물/운영 피드**: `dxy_spot.py`가 독립 스케줄로 수집
 - **DXY 선물**: `investing.py`의 exchange-rates-table 크롤링 시 환율과 함께 추출
-- `dxy.py`는 Yahoo 현물 폴백과 Investing 선물 폴백 함수를 제공하는 유틸리티 모듈
+- `dxy.py`는 CNBC/Yahoo 현물 폴백과 Investing 선물 폴백 함수를 제공하는 유틸리티 모듈
 - 은행 환율과 다른 테이블 (`market_index_rates`) 사용
 - 현물과 선물은 `instrument='dxy'|'dxy_futures'`로 분리 저장
+- DB `source` 컬럼 우선순위: `investing > cnbc > yahoo` (그래프/조회 dedup 적용)
 
 **폴백 정책:**
-- **DXY 현물/운영 피드**: Yahoo fallback 저장 전 ICE DX 주간 세션 OFF 차단 + 마지막 Investing 값과 0.07 초과 차이 차단
+- **DXY 현물/운영 피드**: 외부 폴백(CNBC → Yahoo) 저장 전 공통 가드 적용
+  - ICE DX 주간 세션 OFF 시 chain 전체 차단
+  - 마지막 Investing 값이 fresh일 때 0.07 초과 차이면 chain 전체 보류 (외부값 자체 outlier 신호로 간주)
+  - chain 내 fetch 실패는 다음 source로 진행 (네트워크 장애 vs outlier 구분)
 - **DXY 선물**: Yahoo를 사용하지 않고 Investing 계열 페이지만 사용
 - **선물 폴백 쿨다운**: 60초 (retry storm 방지, 셀렉터 장기 파손 대비)
 
@@ -244,7 +248,7 @@
 **아키텍처:**
 - **DXY 현물/운영 피드**: `dxy_spot.py`가 `/indices/usdollar` 페이지를 독립 수집해 `instrument='dxy'`로 저장
 - **DXY 선물**: `investing.py`가 exchange-rates-table의 `#sb_last_8827`를 환율과 함께 추출해 `instrument='dxy_futures'`로 저장
-- **dxy.py는 유틸리티 모듈**: `fetch_dxy_from_yahoo()`는 현물 Yahoo fallback, `fetch_dxy_from_investing_fallback()`은 선물/CFD 계열 fallback에서 사용
+- **dxy.py는 유틸리티 모듈**: `fetch_dxy_from_cnbc()` / `fetch_dxy_from_yahoo()`는 현물 외부 fallback, `fetch_dxy_from_investing_fallback()`은 선물/CFD 계열 fallback에서 사용
 
 **변경 배경:**
 - `/indices/usdollar` 운영 피드는 별도 DXY 현물/운영 지표로 유지
@@ -254,25 +258,32 @@
 **핵심 로직:**
 - **DXY 현물 Primary**: `dxy_spot.py` → `/indices/usdollar` `__NEXT_DATA__`
 - **DXY 현물 CSS Fallback**: 같은 페이지의 `[data-test="instrument-price-last"]`
-- **DXY 현물 Yahoo Fallback**: `dxy.py` → Yahoo Finance (`yfinance`, ticker `DX-Y.NYB`, `regularMarketPreviousClose` 우선)
+- **DXY 현물 외부 Fallback (chain)**: `_try_external_fallback()`이 CNBC → Yahoo 순서로 시도
+  - 1순위 CNBC: `dxy.py` → `https://quote.cnbc.com/.../symbol?symbols=.DXY` (ICE U.S. Dollar Index 공개 quote endpoint)
+  - 2순위 Yahoo: `dxy.py` → Yahoo Finance (`yfinance`, ticker `DX-Y.NYB`, `regularMarketPreviousClose` 우선, 10분 stale 한계)
 - **DXY 선물 Primary**: `investing.py` → `#sb_last_8827`
 - **DXY 선물 Fallback**: `dxy.py` → `/currencies/us-dollar-index`
 - **DXY 유효 범위**: 80.0 ~ 130.0 (이상치 필터링)
-- **DB 저장**: `market_index_rates` 테이블, `instrument='dxy'|'dxy_futures'`, `source='investing'|'yahoo'`, `granularity='realtime'`
+- **DB 저장**: `market_index_rates` 테이블, `instrument='dxy'|'dxy_futures'`, `source='investing'|'cnbc'|'yahoo'`, `granularity='realtime'`
+- **DB 우선순위 (조회/그래프 dedup)**: `investing > cnbc > yahoo` — `crud.get_latest_dxy_rate()` + `app/admin/graph_cache.py`의 `CASE WHEN source = 'investing' THEN 0 WHEN source = 'cnbc' THEN 1 ELSE 2 END`
 
 **폴백 트리거 조건:**
-- **DXY 현물**: primary source timestamp 정지, CSS 파싱 실패, hard failure 등에서 `_try_yahoo_fallback()` 실행
+- **DXY 현물**: primary source timestamp 정지, CSS 파싱 실패, hard failure 등에서 `_try_external_fallback()` 실행 (기존 `_try_yahoo_fallback`은 alias로 호환)
 - **DXY 선물**: `#sb_last_8827`가 없는 페이지(예: sslfxrates API 폴백) 또는 파싱 실패 시 `_try_dxy_futures_fallback()` 실행
 
-**DXY 현물 Yahoo 저장 가드:**
-- **시간 가드**: ICE DX 주간 세션 OFF 구간에는 Yahoo 저장 차단
+**DXY 현물 외부 fallback 저장 가드 (CNBC/Yahoo 공통 적용):**
+- **시간 가드**: ICE DX 주간 세션 OFF 구간에는 chain 전체 차단
   - 금요일 17:00 ET 이후, 토요일 전체, 일요일 18:00 ET 이전
   - DST/표준시는 `ZoneInfo("America/New_York")`로 자동 처리
   - 화~금 일일 휴장(17:00~20:00 ET)은 운영 피드 갱신 관측이 있어 아직 차단하지 않음
-- **가격 가드**: 마지막 Investing DXY가 fresh일 때만 Yahoo 값과 비교하고, 차이가 `0.07` 초과면 저장 보류
+- **가격 가드**: 마지막 Investing DXY가 fresh일 때만 외부값과 비교하고, 차이가 `0.07` 초과면 chain 전체 보류
   - IN: 마지막 Investing 값이 15분 이내일 때만 적용
   - BREAK1/BREAK2: 마지막 Investing 값이 30분 이내일 때만 적용
-  - Investing 값이 오래 멈춘 경우 Yahoo가 유일한 대체 소스일 수 있으므로 가격 가드를 건너뜀
+  - Investing 값이 오래 멈춘 경우 외부값이 유일한 대체일 수 있으므로 가격 가드를 건너뜀
+- **chain 정책**:
+  - chain 내 한 source(예: CNBC)가 fetch 성공 + 가격 가드 차단 → 다음 source(Yahoo)도 시도하지 않음 (외부값 자체가 fresh Investing과 충돌하는 outlier 신호)
+  - chain 내 한 source가 fetch 실패(네트워크 등) → 다음 source로 진행
+  - 한 source 저장 성공 → chain 즉시 종료
 
 **DXY 선물 폴백 쿨다운 (60초):**
 - 셀렉터 장기 파손 시 retry storm 방지
@@ -305,10 +316,11 @@
 - `dxy.py`의 함수들은 on-demand 호출이므로 함수 내부 import 사용
 - `yfinance`는 무거운 라이브러리 → DXY 현물 Yahoo fallback 시에만 로드
 - `yfinance`는 timeout 직접 제어 불가 → 스케줄러 작업 타임아웃(45초)이 상위 보호
+- CNBC quote endpoint는 5초 timeout 사용 (빠른 응답이라 짧게 설정)
 - 선물 폴백 URL(`/currencies/us-dollar-index`)은 CDN stale cache 위험 있으나, 1차 실패 시 차선으로만 사용
 
-**상세 코드:** `app/crawlers/dxy_spot.py` (현물/운영 DXY), `app/crawlers/investing.py` (미국달러지수 선물), `app/crawlers/dxy.py` (공용 폴백 유틸리티)
-**관련 ADR:** [ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략)
+**상세 코드:** `app/crawlers/dxy_spot.py` (현물/운영 DXY + 외부 fallback chain), `app/crawlers/investing.py` (미국달러지수 선물), `app/crawlers/dxy.py` (공용 폴백 유틸리티 — CNBC/Yahoo/Investing)
+**관련 ADR:** [ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략), [ADR-022](DECISIONS.md#adr-022-dxy-yahoo-fallback-시간가격fresh-age-가드-정책), [ADR-024](DECISIONS.md#adr-024-미국달러지수-선물-분리-저장--dxy_mode-제거), [ADR-025](DECISIONS.md#adr-025-dxy-현물-외부-fallback-체인--cnbc-추가--yahoo-격하)
 
 ---
 
