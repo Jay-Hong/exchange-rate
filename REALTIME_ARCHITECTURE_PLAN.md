@@ -1,8 +1,8 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.4)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.5)
 
-> 📝 **상태**: 거래소 5종 WebSocket endpoint 1차 검증 완료 (v0.4, 2026-04-28)
+> 📝 **상태**: 거래소 5종 WS 1차 검증 + 빗썸/코인원 smoke test + 구현 가이드 분리 (v0.5, 2026-04-28)
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.4 — 7번 섹션 거래소 5종 WS endpoint/symbol/subscribe/heartbeat/REST fallback 1차 문서 검증. 잔여 항목(빗썸 실 연결, 24시간 SLA, payload 필드 정밀)은 Phase 2 PR 시점 검증으로 명시.
+> 🔄 **변경 이력**: v0.5 — 빗썸/코인원 wscat smoke test 완료, 코인원 endpoint 정정(`stream.coinone.co.kr`), 고팍스 전체 ticker 필터링 명시. 상세 구현 가이드는 별도 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)로 분리. 잔여는 heartbeat 정책 3종 + 24h SLA + 무료 tier 약관.
 
 ---
 
@@ -228,31 +228,32 @@ tick:usdt:bithumb → ...
 
 ### 거래소 5종 (1차 문서 검증 완료, 2026-04-28)
 
-> v0.4: 공식 문서 + 검색 기반 1차 검증. **24시간 실 연결 SLA 측정은 Phase 2 직전에 별도** (코드 작업 동반).
+> v0.4: 공식 문서 + 일부 실연결 smoke test 기반 1차 검증. 상세 구현 가이드는 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)를 따른다. **24시간 실 연결 SLA 측정은 Phase 2 직전에 별도** (코드 작업 동반).
 
 | 거래소 | 상태 | endpoint | symbol | subscribe | heartbeat | ticker price 필드 | REST fallback |
 |---|---|---|---|---|---|---|---|
 | 업비트 (upbit) | ✅ 1차 검증 | `wss://api.upbit.com/websocket/v1` | `KRW-USDT` | `[{"ticket":"<uuid>"},{"type":"ticker","codes":["KRW-USDT"]}]` | 명시 미발견 (실무: idle ~120초, 주기 PING 권장) | `trade_price` | `GET https://api.upbit.com/v1/ticker?markets=KRW-USDT` |
-| 빗썸 (bithumb) | 🟡 부분 검증 | `wss://ws-api.bithumb.com/websocket/v1` | `KRW-USDT` (업비트 호환 추정) | 업비트와 동일 호환 추정 — **24h 실 연결 검증 필요** | 미확인 | `trade_price` (REST 동일 추정) | `GET https://api.bithumb.com/v1/ticker?markets=KRW-USDT` |
-| 코인원 (coinone) | ✅ 1차 검증 | `wss://public-ws-api.coinone.co.kr` | `productCurrency=USDT, priceCurrency=KRW` | `{"requestType":"SUBSCRIBE","body":{"channel":"TICKER","topic":{"priceCurrency":"KRW","productCurrency":"USDT","timezone":"RELATIVE"}}}` | `{"requestType":"PING"}` 명시 | `tickers[0].last` (REST 기준, WS payload 필드 추가 검증 필요) | `GET https://api.coinone.co.kr/public/v2/ticker_utc_new/KRW/USDT` |
+| 빗썸 (bithumb) | ✅ 실연결 smoke test | `wss://ws-api.bithumb.com/websocket/v1` | `KRW-USDT` | `[{"ticket":"<uuid>"},{"type":"ticker","codes":["KRW-USDT"]},{"format":"DEFAULT"}]` | 미확인 (주기 PING 권장) | `trade_price` | `GET https://api.bithumb.com/v1/ticker?markets=KRW-USDT` |
+| 코인원 (coinone) | ✅ 실연결 smoke test | `wss://stream.coinone.co.kr` | `quote_currency=KRW, target_currency=USDT` | `{"request_type":"SUBSCRIBE","channel":"TICKER","topic":{"quote_currency":"KRW","target_currency":"USDT"}}` | `{"request_type":"PING"}` | `data.last` | `GET https://api.coinone.co.kr/public/v2/ticker_utc_new/KRW/USDT` |
 | 코빗 (korbit) | ✅ 1차 검증 | `wss://ws-api.korbit.co.kr/v2/public` | `usdt_krw` | `[{"method":"subscribe","type":"ticker","symbols":["usdt_krw"]}]` | 명시 미발견 (REST는 50 req/s, WS 별도) | `close` | `GET https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw` |
 | 고팍스 (gopax) | ✅ 1차 검증 | `wss://wsapi.gopax.co.kr` | `USDT-KRW` | `{"n":"SubscribeToTickers","o":{}}` | primus `"primus::ping::<ts>"` 30초 주기 (서버→클라), pong 응답 30초 내 필수 | `last` | `GET https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker` |
 
 ### 거래소 검증 요약
 
 - **인증**: 5종 모두 public ticker 채널 무인증 ✓
-- **USDT/KRW 직접 ticker**: 5종 모두 직접 채널 존재 (orderbook 계산 불필요) ✓
+- **USDT/KRW 단독 구독**: 업비트/빗썸/코인원/코빗 가능. 고팍스 ticker는 전체 구독 후 `USDT-KRW` 필터링 필요.
+- **가격 산출**: 5종 모두 ticker 현재가 필드가 있어 orderbook mid price 계산 불필요.
 - **메시지 포맷**: 모두 JSON 텍스트
 - **표준 편차 — heartbeat**: 고팍스만 정확한 30초 ping/pong 명세, 코인원은 명시적 PING command, 나머지(업비트/빗썸/코빗)는 미명시 → Phase 2 PR에서 keep-alive 정책 별도 결정
 - **연결 한계 (코덱스 권고 검증 항목)**: 고팍스 동시 연결 20개/IP 명시. 나머지는 미명시 (Phase 2 PR에서 24시간 모니터링)
 
 ### 잔여 검증 (Phase 2 직전 또는 Phase 2 PR 안에서)
 
-- [ ] **빗썸 WebSocket 실제 연결 테스트** — 한국 빗썸(`ws-api.bithumb.com`)의 ticker 페이로드 필드/heartbeat 미확정. 업비트 호환 가설 검증 필요
+- [x] **빗썸 WebSocket 실제 연결 smoke test** — 한국 빗썸(`ws-api.bithumb.com`)에서 `KRW-USDT` snapshot/realtime `trade_price` 수신 확인 (2026-04-28)
 - [ ] **업비트 / 빗썸 / 코빗 heartbeat 정책** — 공식 명세 없으면 5~30초 client PING 보내며 idle timeout 파악
 - [ ] **무료 tier 약관** 5종 모두 재확인 (이용약관 변경 가능성)
 - [ ] **24시간 실 연결 SLA 모니터링** — 끊김 빈도, 재연결 latency, 메시지 누락률 측정 (Phase 2 코드 작업 시점)
-- [ ] **코인원 ticker WS payload 정확한 필드명** — REST는 `last`인데 WS payload는 다를 수 있음 (실 메시지 캡처 필요)
+- [x] **코인원 ticker WS payload 필드명** — `wss://stream.coinone.co.kr`, DEFAULT 포맷 `data.last` 수신 확인 (2026-04-28)
 
 ---
 
@@ -665,11 +666,17 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
   - 새 미정 항목 F 추가 (테더 탭 topic 이름 + schema 확정 — Phase 2 PR).
   - 5번 섹션 `usdt:krw`는 잠정 명칭 표시.
   - 11번 섹션에 "원천 데이터 재사용" 문단 추가 (KB usd-krw 예시).
+- **v0.5** (2026-04-28): 빗썸/코인원 wscat smoke test 완료 + 구현 가이드 분리.
+  - 빗썸 `ws-api.bithumb.com/websocket/v1` `KRW-USDT` snapshot/realtime `trade_price` 실수신 확인.
+  - 코인원 endpoint 정정 — 공식 문서 기준 `wss://stream.coinone.co.kr` (이전 `public-ws-api.coinone.co.kr`은 낡음). subscribe 포맷도 `request_type/quote_currency/target_currency`로 갱신.
+  - 코인원 WS payload `data.last` 필드 확정.
+  - 고팍스 ticker 전체 구독 후 `USDT-KRW` 필터링 필요 명시 (다른 거래소는 단독 구독 가능).
+  - 상세 구현 가이드는 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)로 분리 — 백엔드 collector 정규화 모델, Redis latest state, 응답 파싱 예시, smoke test 명령 포함.
+  - 잔여 검증: 업비트/빗썸/코빗 heartbeat 정책, 24h SLA, 5종 무료 tier 약관.
 - **v0.4** (2026-04-28): 거래소 5종 WebSocket endpoint 1차 문서 검증.
   - 7번 섹션 표를 endpoint / symbol / subscribe / heartbeat / ticker price 필드 / REST fallback 7개 컬럼으로 확장.
-  - 업비트/코인원/코빗/고팍스 ✅ 1차 검증, 빗썸 🟡 부분 검증 (실 연결 검증 필요).
+  - 업비트/코인원/코빗/고팍스 ✅ 1차 검증, 빗썸 🟡 부분 검증 (v0.4 시점 상태 — v0.5에서 빗썸/코인원 wscat smoke test 완료로 갱신).
   - 인증 무필요(5종 공통), USDT/KRW 직접 채널 존재(5종 공통) 확인.
-  - 잔여 검증 항목: 빗썸 실 연결, 업비트/빗썸/코빗 heartbeat 정책, 24시간 SLA, 코인원 WS payload 필드, 무료 tier 약관.
   - 코드 변경 없음. PR1/PR2와 독립적으로 Phase 2 직전까지 점진 보강.
 - **v0.3** (2026-04-27): 테더 탭 그래프 보조지표 정책 합의.
   - 달러 탭은 기존 DXY 현물(`instrument='dxy'`) 그래프 유지.
@@ -710,6 +717,6 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - F. 🟡 테더 탭 topic 이름 + snapshot/delta schema + DXY 토픽 분리/통합 — Phase 2 PR에서 확정
 
 🔧 **검증 체크리스트** (7번 섹션):
-- 거래소 5종 WebSocket endpoint **1차 문서 검증 완료** (v0.4, 2026-04-28) — 4종 ✅, 빗썸 🟡 부분
-- 잔여: 빗썸 실 연결, heartbeat 정책 3종, 24h SLA, 코인원 WS payload 필드 정밀 — Phase 2 PR 시점
+- 거래소 5종 WebSocket endpoint **1차 검증 완료** (v0.4) + **빗썸/코인원 wscat smoke test 완료** (v0.5, 2026-04-28). 상세 구현 가이드: [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)
+- 잔여: 업비트/빗썸/코빗 heartbeat 정책, 24h SLA, 5종 무료 tier 약관 — Phase 2 PR 시점
 - Investing 실시간 채널 DevTools 조사 (Phase 4 직전)

@@ -26,6 +26,7 @@
 
 **계획/설계 문서:**
 > ⚡ **실시간 아키텍처:** [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) - 1초 broadcast, 거래소 WebSocket, 구독 기반 라우팅 전환 계획
+> 🔌 **USDT 거래소 WebSocket:** [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) - 업비트/빗썸/코인원/코빗/고팍스 ticker 구독 및 정규화 가이드
 
 **글로벌 가이드:**
 > 📚 **공통 개발 규칙:** [~/.claude/CLAUDE.md](file:///Users/jay/.claude/CLAUDE.md) - MCP 설정, 코딩 스타일, Git Convention
