@@ -168,24 +168,51 @@ class ConnectionManager:
         except ValueError:
             logger.warning("⚠️ 이미 제거된 WebSocket 연결 시도", extra={"connections": len(self.active_connections)})
 
-    async def broadcast(self, message: dict):
-        """모든 연결된 클라이언트에게 메시지 전송"""
-        disconnected = []
-        # 리스트 복사본으로 순회 (순회 중 수정 방지)
-        for connection in self.active_connections[:]:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.warning("⚠️ 전송 실패", exc_info=True)
-                disconnected.append(connection)
+    async def broadcast(self, message: dict, send_timeout: float = 5.0):
+        """모든 연결된 클라이언트에게 메시지 병렬 전송 (PR1: 직렬 → asyncio.gather + timeout).
 
-        # 실패한 연결 제거
-        for conn in disconnected:
+        Args:
+            message: 전송할 JSON-serializable 메시지
+            send_timeout: 클라이언트별 send_json 타임아웃 (초). 느린 클라이언트가 다른
+                          전송을 지연시키지 않도록 격리.
+
+        NOTE (PR2): 1초 broadcast 전환 시 5.0초 default는 misfire 유발 가능.
+        broadcast cron이 1초인데 send_timeout이 5초면 max_instances=1 + misfire_grace_time=5
+        제약상 다음 4번의 cron이 누락된다. PR2에서 `BROADCAST_SEND_TIMEOUT_SECONDS`
+        환경변수로 분리하고 1초 모드에서는 0.5~0.8초로 단축할 것.
+        """
+        # 리스트 복사본으로 스냅샷 (순회 중 수정 방지)
+        connections = self.active_connections[:]
+        if not connections:
+            return
+
+        async def _send_to(conn: WebSocket):
+            try:
+                await asyncio.wait_for(conn.send_json(message), timeout=send_timeout)
+                return None
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ 전송 타임아웃", extra={"timeout_sec": send_timeout})
+                return conn
+            except Exception:
+                logger.warning("⚠️ 전송 실패", exc_info=True)
+                return conn
+
+        results = await asyncio.gather(*[_send_to(c) for c in connections])
+
+        # 실패한 연결 제거 (timeout/예외 모두 동일 처리)
+        failed = [r for r in results if r is not None]
+        for conn in failed:
             try:
                 self.active_connections.remove(conn)
             except ValueError:
                 # 이미 제거됨 (disconnect()에서 제거된 경우)
                 pass
+
+        if failed:
+            logger.warning(
+                "⚠️ 일부 전송 실패 (병렬 broadcast)",
+                extra={"failed": len(failed), "total": len(connections)},
+            )
 
 manager = ConnectionManager()
 
@@ -345,30 +372,57 @@ async def build_graph_buckets() -> dict:
 
 
 async def broadcast_rates_once():
-    """브로드캐스트 표준 흐름 (Redis 캐시 + 변경 감지 + 조건부 전송)."""
-    db = SessionLocal()
-    try:
-        cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
-        payload = build_rates_payload(db)
-        new_json = json.dumps(payload, ensure_ascii=False)
+    """브로드캐스트 표준 흐름 (Redis 캐시 + 변경 감지 + 조건부 전송).
 
-        if new_json != cached_json:
+    PR1 계측: 단계별 raw duration을 logger extra로 남긴다 (외부 분석 도구에서 p50/p99 집계).
+    """
+    db = SessionLocal()
+    timings: Dict[str, float] = {}
+    try:
+        # 1a) Redis cache read
+        t0 = time.perf_counter()
+        cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
+        timings["redis_get_ms"] = (time.perf_counter() - t0) * 1000
+
+        # 1b) payload build (DB SELECT + 직렬화 객체 구성)
+        t1 = time.perf_counter()
+        payload = build_rates_payload(db)
+        timings["payload_build_ms"] = (time.perf_counter() - t1) * 1000
+
+        # 2) JSON serialize + diff
+        t2 = time.perf_counter()
+        new_json = json.dumps(payload, ensure_ascii=False)
+        is_changed = new_json != cached_json
+        timings["serialize_diff_ms"] = (time.perf_counter() - t2) * 1000
+
+        if is_changed:
             await redis_cache.set(BROADCAST_CACHE_KEY, new_json)
 
             if manager.active_connections:
-                # 그래프 버킷 추가 (실시간 환율 변경 시에만)
+                # 3) build_graph_buckets
+                t3 = time.perf_counter()
                 graph_buckets = await build_graph_buckets()
+                timings["build_graph_buckets_ms"] = (time.perf_counter() - t3) * 1000
                 total_graph_sources = sum(len(sources) for sources in graph_buckets.values())
 
                 if total_graph_sources:
                     payload["graph_buckets"] = graph_buckets
 
+                # 4) manager.broadcast send (병렬)
+                t4 = time.perf_counter()
                 await manager.broadcast(payload)
+                timings["broadcast_send_ms"] = (time.perf_counter() - t4) * 1000
+
+                # 5) payload bytes
+                payload_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
                 broadcast_stats.record_success(
-                    data_size_bytes=len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+                    data_size_bytes=payload_bytes,
                     rate_count=len(payload["data"]["rates"]),
                 )
+
+                # 6) SQLAlchemy pool 상태 (가능한 경우만 — QueuePool에 한해 집계됨)
+                pool_status = _get_pool_status()
 
                 logger.info(
                     "📡 환율 데이터 브로드캐스트 & 🅾️ Redis 업데이트 완료",
@@ -376,21 +430,51 @@ async def broadcast_rates_once():
                         "rate_count": len(payload["data"]["rates"]),
                         "connections": len(manager.active_connections),
                         "graph_currencies": len(graph_buckets),
-                        "graph_sources": total_graph_sources
+                        "graph_sources": total_graph_sources,
+                        "payload_bytes": payload_bytes,
+                        **timings,
+                        **pool_status,
                     },
                 )
             else:
                 broadcast_stats.record_skip(reason="no_connections")
-                logger.info("🅾️ Redis 업데이트만 수행 (활성 연결 없음)")
+                logger.info(
+                    "🅾️ Redis 업데이트만 수행 (활성 연결 없음)",
+                    extra={"skip_reason": "no_connections", **timings},
+                )
         else:
             broadcast_stats.record_skip(reason="no_changes")
-            logger.info("⏸️ 변경사항 없음 - 브로드캐스트 스킵")
+            logger.info(
+                "⏸️ 변경사항 없음 - 브로드캐스트 스킵",
+                extra={"skip_reason": "no_changes", **timings},
+            )
 
     except Exception as e:
         broadcast_stats.record_failure(error_message=str(e))
-        logger.error("❌ 브로드캐스트 오류", exc_info=True, extra={"connections": len(manager.active_connections)})
+        logger.error(
+            "❌ 브로드캐스트 오류",
+            exc_info=True,
+            extra={"connections": len(manager.active_connections), **timings},
+        )
     finally:
         db.close()
+
+
+def _get_pool_status() -> Dict[str, Any]:
+    """SQLAlchemy connection pool 상태를 dict로 반환.
+
+    QueuePool 외에는 일부 메서드가 없을 수 있으므로 안전하게 처리.
+    """
+    pool = engine.pool
+    status: Dict[str, Any] = {}
+    for attr in ("size", "checkedin", "checkedout", "overflow"):
+        getter = getattr(pool, attr, None)
+        if callable(getter):
+            try:
+                status[f"pool_{attr}"] = getter()
+            except Exception:
+                pass
+    return status
 
 
 
