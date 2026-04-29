@@ -139,7 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 시간대 패턴: KST 14~18시 신선(8s), 07~08시 stale(1500~4300s) — 운영에서 예측 불가
   - TV ≈ CNBC (median 0.00 차이, max 0.05) — 같은 origin 의심, sanity check 가치도 제한적
   - 결정: Investing → CNBC → Yahoo chain 그대로 유지 (ADR-025 그대로)
-  - 측정 데이터 보존: `volumes/logs/app/dxy_tv_*_20260428.jsonl` (운영 EC2)
+  - 원본 측정 데이터는 운영 서버 정리 완료 — 핵심 통계와 결론만 CHANGELOG에 보존
   - 별도 ADR 작성 안 함 — ADR-025의 부산물 결정으로 CHANGELOG에 기록
 
 - **DXY fallback 관측성 개선** (2026-04-29):
