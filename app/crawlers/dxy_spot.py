@@ -270,11 +270,12 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
     from app import crud, models
 
     if not _is_dxy_weekly_session_open(now_utc):
+        now_ny = now_utc.astimezone(NY)
         logger.info(
-            "🛡️ DXY 외부 폴백 차단 (DXY 주간 세션 OFF)",
+            f"🛡️ DXY 외부 폴백 차단 (주간 세션 OFF, ny={now_ny.strftime('%Y-%m-%d %H:%M:%S')} {now_ny.strftime('%a')})",
             extra={
                 "now_utc": now_utc.isoformat(),
-                "now_ny": now_utc.astimezone(NY).isoformat(),
+                "now_ny": now_ny.isoformat(),
             },
         )
         return
@@ -301,7 +302,12 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
 
     if not use_yahoo:
         logger.info(
-            "🛡️ DXY 외부 폴백 스킵 (Investing 값 보존)",
+            f"🛡️ DXY 외부 폴백 스킵 (Investing 값 보존, "
+            f"reason={meta.get('reason')}, "
+            f"mode={meta.get('mode')}, "
+            f"fresh_age={meta.get('last_fresh_age_seconds')}s, "
+            f"failures={meta.get('consecutive_failures')}, "
+            f"investing_age={meta.get('investing_rate_age_seconds')}s)",
             extra={
                 **meta,
                 "investing_rate": latest_investing.rate if latest_investing else None,
@@ -318,7 +324,9 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
             rate = fetch_fn()
         except Exception as exc:
             logger.warning(
-                f"⚠️ DXY {source_name} 폴백 fetch 실패",
+                f"⚠️ DXY {source_name} 폴백 fetch 실패 "
+                f"(mode={meta.get('mode')}, failures={meta.get('consecutive_failures')}, "
+                f"err={type(exc).__name__}: {str(exc)[:120]})",
                 extra={**meta, "fallback_source": source_name, "error": str(exc)},
             )
             continue  # 다음 source 시도
@@ -333,7 +341,10 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
                 diff = abs(rate - latest_investing.rate)
                 if diff > DXY_YAHOO_DIFF_THRESHOLD:
                     logger.info(
-                        f"🛡️ DXY {source_name} 임계값 초과 — chain 전체 저장 보류",
+                        f"🛡️ DXY {source_name} 임계값 초과 — chain 전체 저장 보류 "
+                        f"(rate={rate}, inv={latest_investing.rate}, "
+                        f"diff={round(diff, 4)}, threshold={DXY_YAHOO_DIFF_THRESHOLD}, "
+                        f"inv_age={investing_age_seconds}s, mode={mode})",
                         extra={
                             **meta,
                             "fallback_source": source_name,
@@ -350,14 +361,19 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
         # 저장 성공 → chain 종료 (Yahoo까지 안 감)
         crud.insert_dxy_rate_into_db(db=db, rate=rate, source=source_name)
         logger.info(
-            f"📦 DXY {source_name} 폴백 저장",
+            f"📦 DXY {source_name} 폴백 저장 "
+            f"(rate={rate}, mode={meta.get('mode')}, "
+            f"fresh_age={meta.get('last_fresh_age_seconds')}s, "
+            f"failures={meta.get('consecutive_failures')})",
             extra={**meta, "rate": rate, "source": source_name, "fallback_source": source_name},
         )
         return
 
     # chain 전체 실패
     logger.warning(
-        "⚠️ DXY 외부 폴백 chain 전체 실패",
+        f"⚠️ DXY 외부 폴백 chain 전체 실패 "
+        f"(tried={[s for s, _ in _FALLBACK_CHAIN]}, mode={meta.get('mode')}, "
+        f"failures={meta.get('consecutive_failures')})",
         extra={**meta, "tried_sources": [s for s, _ in _FALLBACK_CHAIN]},
     )
 

@@ -133,6 +133,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **TradingView TVC:DXY 운영 통합 보류** (2026-04-29):
+  - 4-28~29 약 24h 측정 (1,236 unique samples) 결과 production fallback 부적합 결론
+  - TV `delay_sec`: p50=338s, p95=2009s, max 약 1시간 43분 (시간대별 변동 극심)
+  - 시간대 패턴: KST 14~18시 신선(8s), 07~08시 stale(1500~4300s) — 운영에서 예측 불가
+  - TV ≈ CNBC (median 0.00 차이, max 0.05) — 같은 origin 의심, sanity check 가치도 제한적
+  - 결정: Investing → CNBC → Yahoo chain 그대로 유지 (ADR-025 그대로)
+  - 측정 데이터 보존: `volumes/logs/app/dxy_tv_*_20260428.jsonl` (운영 EC2)
+  - 별도 ADR 작성 안 함 — ADR-025의 부산물 결정으로 CHANGELOG에 기록
+
+- **DXY fallback 관측성 개선** (2026-04-29):
+  - `_try_external_fallback()`의 6개 logger 메시지에 핵심 메타 인라인 (reason / mode / fresh_age / failures / source / diff / threshold)
+  - 운영 grep 한 줄로 chain 분기/카운터/age 즉시 분석 가능
+  - extra dict는 그대로 유지 (JSON 분석 도구 호환)
+  - fallback 정책/threshold는 변경 없음 — 관측성만 강화
+  - 4-28 운영 분석에서 39회 transient failure의 정확한 분기 추적이 어려웠던 문제 해소
+
 - **데이터 보관 정책 30일 통일** (2026-04-27, ADR-023):
   - 은행 환율(`bank_exchange_rates`): 10일 → 30일
   - USDT 거래소 가격(`source_rates`): 10일 → 30일
