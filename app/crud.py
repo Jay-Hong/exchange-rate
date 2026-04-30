@@ -2,8 +2,9 @@
 
 # 표준 라이브러리
 import logging
+import time
 from datetime import datetime, timedelta, timezone as dt_timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # 서드파티 라이브러리
 from sqlalchemy.orm import Session
@@ -365,6 +366,67 @@ def get_all_rates_flat(db: Session) -> List[Dict[str, Any]]:
     all_rates.extend(get_source_rates_as_legacy_format(db=db))
 
     return all_rates
+
+
+def get_all_rates_flat_with_timings(db: Session) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """get_all_rates_flat의 분해 계측 변형. (rates, timings) tuple을 반환한다.
+
+    payload_build_ms 내부에서 어느 단계가 spike를 만드는지 식별하기 위한 일시적 계측.
+    동작 결과(rates)는 get_all_rates_flat과 동일하다.
+
+    Returns:
+        all_rates: get_all_rates_flat과 동일한 플랫 배열
+        timings: {
+            investing_total_ms: 모든 pair의 investing 조회 합계
+            bank_total_ms: 모든 pair의 bank 조회 합계
+            source_rates_legacy_ms: source_rates → legacy shape 변환 시간
+            pair_timings: per-pair (investing+bank) 시간 dict
+            pair_count, investing_rows, bank_rows, source_rows
+        }
+    """
+    all_rates: List[Dict[str, Any]] = []
+    pairs = SUPPORTED_CURRENCY_PAIRS
+
+    pair_timings: Dict[str, float] = {}
+    investing_total = 0.0
+    bank_total = 0.0
+    investing_rows = 0
+    bank_rows = 0
+
+    for pair in pairs:
+        pair_t0 = time.perf_counter()
+
+        t0 = time.perf_counter()
+        investing_data = select_a_latest_investing_rate_from_db(db=db, pair=pair)
+        investing_total += time.perf_counter() - t0
+        if investing_data:
+            all_rates.append(investing_data)
+            investing_rows += 1
+
+        t1 = time.perf_counter()
+        bank_data = select_latest_bank_rates_from_db(db=db, pair=pair)
+        bank_total += time.perf_counter() - t1
+        all_rates.extend(bank_data)
+        bank_rows += len(bank_data)
+
+        pair_timings[pair] = round((time.perf_counter() - pair_t0) * 1000, 2)
+
+    t2 = time.perf_counter()
+    source_rates = get_source_rates_as_legacy_format(db=db)
+    source_rates_legacy_ms = (time.perf_counter() - t2) * 1000
+    all_rates.extend(source_rates)
+
+    timings = {
+        "investing_total_ms": round(investing_total * 1000, 2),
+        "bank_total_ms": round(bank_total * 1000, 2),
+        "source_rates_legacy_ms": round(source_rates_legacy_ms, 2),
+        "pair_timings": pair_timings,
+        "pair_count": len(pairs),
+        "investing_rows": investing_rows,
+        "bank_rows": bank_rows,
+        "source_rows": len(source_rates),
+    }
+    return all_rates, timings
 
 
 def get_rates_by_currency(db: Session, currency: str) -> List[Dict[str, Any]]:

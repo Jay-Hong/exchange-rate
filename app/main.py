@@ -269,6 +269,49 @@ def build_rates_payload(db: SessionLocal) -> dict:
     }
 
 
+def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
+    """build_rates_payload의 분해 계측 변형. (payload, timings) tuple 반환.
+
+    broadcast_rates_once 전용. 다른 호출자(warmup, websocket connect 등)는 기존
+    build_rates_payload를 그대로 사용한다 (회귀 위험 제거).
+    """
+    all_rates, query_timings = crud.get_all_rates_flat_with_timings(db=db)
+
+    currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
+    banks = sorted(crud.LEGACY_METADATA_BANKS)
+
+    latest_timestamp = max(
+        (rate["timestamp"] for rate in all_rates),
+        default=crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
+    )
+
+    data_section = {
+        "rates": all_rates,
+        "metadata": {
+            "updated_at": latest_timestamp,
+            "currencies": currencies,
+            "banks": banks,
+            "total_count": len(all_rates),
+        },
+    }
+
+    latest_dxy = crud.get_latest_dxy_rate(db)
+    if latest_dxy:
+        data_section["indices"] = {
+            "dxy": {
+                "rate": latest_dxy["rate"],
+                "timestamp": latest_dxy["timestamp"],
+                "source": latest_dxy["source"],
+            }
+        }
+
+    payload = {
+        "type": "rates",
+        "data": data_section,
+    }
+    return payload, query_timings
+
+
 async def warmup_broadcast_cache():
     """서버 시작 시 DB→Redis 워밍업 (캐시 미스 방지)."""
     db = SessionLocal()
@@ -385,9 +428,11 @@ async def broadcast_rates_once():
         timings["redis_get_ms"] = (time.perf_counter() - t0) * 1000
 
         # 1b) payload build (DB SELECT + 직렬화 객체 구성)
+        # 분해 계측: investing/bank/source_rates_legacy 단계별 timing을 함께 받는다.
         t1 = time.perf_counter()
-        payload = build_rates_payload(db)
+        payload, query_timings = build_rates_payload_with_timings(db)
         timings["payload_build_ms"] = (time.perf_counter() - t1) * 1000
+        timings.update(query_timings)
 
         # 2) JSON serialize + diff
         t2 = time.perf_counter()
