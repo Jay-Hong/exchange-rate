@@ -68,6 +68,20 @@ INDEXES = [
         "columns_pg": "(currency, bank, timestamp DESC, id DESC)",
         "columns_sqlite": "(currency, bank, timestamp DESC, id DESC)",
     },
+    # source_rates latest 조회용 (USDT 5거래소 legacy 변환)
+    # 추가 배경: bank/investing 인덱스 적용 후 1h+ 안정 구간에서
+    #   source_rates_legacy_ms max 1422ms spike 발견.
+    # EXPLAIN ANALYZE: 현재 쿼리(window function)가 55k row 전체 정렬 +
+    #   external merge disk spill 2288kB.
+    #   기존 ix_source_rates_source_asset_ts(source, asset, timestamp)는
+    #   timestamp ASC + id 부재라 정렬 회피 못함.
+    # 새 인덱스 (source, asset, timestamp DESC, id DESC)가 PARTITION BY/ORDER BY와 정확 일치.
+    {
+        "name": "ix_source_rates_source_asset_ts_id",
+        "table": "source_rates",
+        "columns_pg": "(source, asset, timestamp DESC, id DESC)",
+        "columns_sqlite": "(source, asset, timestamp DESC, id DESC)",
+    },
 ]
 
 
