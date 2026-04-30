@@ -1,8 +1,8 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.5)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.6)
 
-> 📝 **상태**: 거래소 5종 WS 1차 검증 + 빗썸/코인원 smoke test + 구현 가이드 분리 (v0.5, 2026-04-28)
+> 📝 **상태**: Phase 1 운영 진입 + PR2 window 임시 PoC 성공 (v0.6, 2026-05-01)
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.5 — 빗썸/코인원 wscat smoke test 완료, 코인원 endpoint 정정(`stream.coinone.co.kr`), 고팍스 전체 ticker 필터링 명시. 상세 구현 가이드는 별도 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)로 분리. 잔여는 heartbeat 정책 3종 + 24h SLA + 무료 tier 약관.
+> 🔄 **변경 이력**: v0.6 — PR1 baseline → Phase 1.5 분해 계측 → latest 조회 인덱스 3종 + bank VACUUM ANALYZE 적용 → PR2 BROADCAST_MODE 인프라 + 임시 window PoC 성공. 2026-04-30 20:00-20:17 KST window PoC에서 payload_build_ms p99 302ms / send timeout 0건 / misfire 0건 확인. Investing 403 플래핑은 PR2와 무관(외부 변동성)으로 분리.
 
 ---
 
@@ -659,6 +659,14 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 
 ## 18. 변경 이력
 
+- **v0.6** (2026-05-01): Phase 1 운영 진입 + PR2 window 임시 PoC 성공.
+  - **Phase 1.5 분해 계측 추가** (`get_all_rates_flat_with_timings`): payload_build_ms 단계별 timing(investing/bank/source_rates_legacy) 식별. 24h baseline에서 spike 주범이 bank/investing/source 쿼리임을 확인.
+  - **latest 조회 인덱스 3종 적용**: `ix_investing_currency_ts_id`, `ix_bank_currency_bank_ts_id`, `ix_source_rates_source_asset_ts_id`. 각각 (currency/source, asset, timestamp DESC, id DESC). EXPLAIN ANALYZE 기준: investing 59ms→0.076ms, source_rates 162ms→27ms (Seq Scan + disk spill 회피).
+  - **bank VACUUM ANALYZE**: 새 인덱스 직후 visibility map 갱신 → Heap Fetches 16041→0, EXPLAIN 15ms→8ms.
+  - **PR2 BROADCAST_MODE 인프라 (`9009aac`)**: `BROADCAST_MODE=normal|fast|window`, `BROADCAST_FAST_HOURS`, `BROADCAST_SEND_TIMEOUT_SECONDS`, `BROADCAST_FAST_SEND_TIMEOUT_SECONDS`. broadcast cron `'0,10,20,30,40,50'` → `'*'` + 함수 첫 줄 mode/second 분기 + DB 조회 전 early return. apscheduler.executors.default logger를 WARNING으로 낮춰 매초 INFO 폭증 차단(`dfbab83`).
+  - **PR2 임시 window PoC** (2026-04-30 20:00-20:17 KST, fast 17분): payload_build_ms p99 302ms / max 792ms, bank_total_ms p99 170ms, source_rates_legacy_ms p99 73ms, broadcast_send_ms max 2.3ms, **send timeout/failure 0건, misfire 0건**. 1초 cron + 0.5초 send_timeout 조합이 정각 spike 시간대(20:00, 20:15)에서도 안정 동작 확인.
+  - **Investing 403 플래핑은 PR2와 무관**: window 전/중/후 3구간 비교(분당 정규화) 결과 차단 시작 빈도가 0.43/0.65/0.65/min — normal 복귀 후에도 동일. 외부 Cloudflare 변동성으로 분리. CNBC fallback (ADR-025) 0.17→0.45/min로 정상 작동.
+  - **다음 단계**: 새벽 02:00-04:00 KST 본 운영 PoC (`BROADCAST_MODE=window`, `BROADCAST_FAST_HOURS=2-4`). 1주 측정 후 정량 임계값 운영 SLO 등록 또는 fast 전환/event-driven 결정 (미정 C 사후 합의).
 - **v0.1** (2026-04-26): 초안 작성. 합의된 원칙, 미정 항목, 검증 체크리스트, 단계별 마이그레이션 정리.
 - **v0.2** (2026-04-27): Phase 0 종료 조건 합의본.
   - 미정 항목 A/B/C minimum bar 결론형 반영 (정량 임계값/background 정책 전반은 후속).
@@ -691,6 +699,15 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 ---
 
 ## 부록: 합의 요약 (한눈에 보기)
+
+✅ **운영 진입 상태** (v0.6, 2026-05-01):
+- **Phase 1 코드 배포 완료** (PR1 broadcast 병렬화 + 계측 / Phase 1.5 분해 계측 / 인덱스 3종 + bank VACUUM / PR2 BROADCAST_MODE 인프라)
+- **PR2 window mode 임시 PoC 성공** (2026-04-30 20:00-20:17 KST). payload_build_ms p99 302ms / max 792ms, send timeout 0, misfire 0
+- **운영 기본값**: `BROADCAST_MODE=normal`, `BROADCAST_FAST_HOURS=2-4` (코드 default 그대로 .env 명시)
+- **다음 운영 PoC**: 새벽 02:00-04:00 KST window. 1주 측정으로 정량 SLO 결정
+
+🟡 **PR2와 분리된 후속 이슈**:
+- **Investing 403 플래핑**: window 시작 전/중/후 차단 빈도가 0.43/0.65/0.65/min로 동일 → PR2 무관, 외부 Cloudflare 변동성. CNBC fallback (ADR-025) 정상 작동 중이라 운영 영향 작음. ADR-018/025 강화는 별도 트랙
 
 ✅ **합의된 것** (v0.1 + v0.2 + v0.3):
 - v1 목표: 서버 tick 수신 후 1초 이내 화면 반영
