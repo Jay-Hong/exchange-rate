@@ -101,6 +101,7 @@ def main():
             print(f"  {sql};")
         return
 
+    failures = []
     with engine.connect() as conn:
         if is_postgres:
             # CONCURRENTLY는 트랜잭션 밖에서만 가능
@@ -111,7 +112,14 @@ def main():
                 conn.execute(text(sql))
                 print(f"  Created (or exists): {name}")
             except Exception as e:
-                print(f"  Skip: {name} ({e})")
+                # 성능 개선용 필수 인덱스라 실패를 숨기지 않는다.
+                # IF NOT EXISTS로 두 번째 실행은 silent OK이므로 이 분기는 권한·디스크·락
+                # 등 진짜 실패 케이스만 잡는다.
+                print(f"  FAILED: {name} ({e})")
+                failures.append(name)
+
+    if failures:
+        raise SystemExit(f"Failed indexes: {', '.join(failures)}")
 
     print("Done.")
 
