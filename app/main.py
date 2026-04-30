@@ -174,12 +174,9 @@ class ConnectionManager:
         Args:
             message: 전송할 JSON-serializable 메시지
             send_timeout: 클라이언트별 send_json 타임아웃 (초). 느린 클라이언트가 다른
-                          전송을 지연시키지 않도록 격리.
-
-        NOTE (PR2): 1초 broadcast 전환 시 5.0초 default는 misfire 유발 가능.
-        broadcast cron이 1초인데 send_timeout이 5초면 max_instances=1 + misfire_grace_time=5
-        제약상 다음 4번의 cron이 누락된다. PR2에서 `BROADCAST_SEND_TIMEOUT_SECONDS`
-        환경변수로 분리하고 1초 모드에서는 0.5~0.8초로 단축할 것.
+                          전송을 지연시키지 않도록 격리. PR2부터 mode별로 다른 값을
+                          호출자(`broadcast_rates_once`)에서 결정해 전달
+                          (normal 5.0초 / fast·window 0.5초).
         """
         # 리스트 복사본으로 스냅샷 (순회 중 수정 방지)
         connections = self.active_connections[:]
@@ -224,6 +221,85 @@ _cache_timestamps = {}
 _db_query_timestamps = {}
 
 KST = timezone("Asia/Seoul")
+
+# ═════════════════════════════════════════════════════════════
+# Broadcast Mode (PR2) — 1초 broadcast PoC + window 모드
+# ═════════════════════════════════════════════════════════════
+# scheduler는 cron='*'로 매초 wake-up하지만, broadcast_rates_once 첫 줄에서
+# mode + second 체크로 DB 조회 전 즉시 return.
+#
+# normal: second ∈ {0,10,20,30,40,50}만 실행 (기존 10초 cron과 동일 동작)
+# fast:   모든 second 매초 실행
+# window: BROADCAST_FAST_HOURS 안이면 매초, 밖이면 normal과 동일
+#
+# NOTE (cleanup): 30일 보관 정책 도입(2026-04-28, ADR-023) 직후라 현재
+# bank/source의 30일 초과 row가 0건 → 03:20-03:32 cleanup 부하 거의 없음.
+# 5월 중순 이후 30일 데이터 누적되면 cleanup 시간대 영향 재평가 필요.
+BROADCAST_MODE = os.environ.get("BROADCAST_MODE", "normal").strip().lower()
+BROADCAST_SEND_TIMEOUT_SECONDS = float(os.environ.get("BROADCAST_SEND_TIMEOUT_SECONDS", "5.0"))
+BROADCAST_FAST_SEND_TIMEOUT_SECONDS = float(os.environ.get("BROADCAST_FAST_SEND_TIMEOUT_SECONDS", "0.5"))
+NORMAL_INTERVAL_SECONDS = {0, 10, 20, 30, 40, 50}
+
+
+def _parse_fast_hours(env_value: str) -> tuple:
+    """`BROADCAST_FAST_HOURS=2-4` → (2, 4) 형태 파싱. KST [start, end) 의미.
+
+    잘못된 입력은 default (2, 4)로 fallback. 운영 안전 우선.
+    """
+    try:
+        start_str, end_str = env_value.split("-", 1)
+        start = int(start_str.strip())
+        end = int(end_str.strip())
+        if 0 <= start < end <= 24:
+            return (start, end)
+    except Exception:
+        pass
+    return (2, 4)
+
+
+BROADCAST_FAST_HOURS = _parse_fast_hours(os.environ.get("BROADCAST_FAST_HOURS", "2-4"))
+
+
+def _is_in_fast_window(now_kst: datetime) -> bool:
+    """현재 시간이 BROADCAST_FAST_HOURS 윈도우 안인지."""
+    return BROADCAST_FAST_HOURS[0] <= now_kst.hour < BROADCAST_FAST_HOURS[1]
+
+
+def _should_run_broadcast(now_kst: datetime) -> tuple:
+    """broadcast 실행 여부 결정. (run, skip_reason) 반환.
+
+    Returns:
+        (True, None): 실행
+        (False, 'normal_interval'): normal 모드 + 10초 슬롯 외 → skip
+        (False, 'outside_window'): window 모드 + fast hour 밖 + 10초 슬롯 외 → skip
+    """
+    sec = now_kst.second
+    if BROADCAST_MODE == "fast":
+        return (True, None)
+    if BROADCAST_MODE == "window":
+        if _is_in_fast_window(now_kst):
+            return (True, None)
+        # window 밖이면 normal처럼 10초 슬롯만
+        if sec in NORMAL_INTERVAL_SECONDS:
+            return (True, None)
+        return (False, "outside_window")
+    # normal (default)
+    if sec in NORMAL_INTERVAL_SECONDS:
+        return (True, None)
+    return (False, "normal_interval")
+
+
+def _resolved_send_timeout(now_kst: datetime) -> float:
+    """현재 시점에서 적용할 send_timeout 결정.
+
+    fast 모드 또는 window 모드 + fast hour 안에서는 짧은 timeout.
+    그 외에는 기본 timeout.
+    """
+    if BROADCAST_MODE == "fast":
+        return BROADCAST_FAST_SEND_TIMEOUT_SECONDS
+    if BROADCAST_MODE == "window" and _is_in_fast_window(now_kst):
+        return BROADCAST_FAST_SEND_TIMEOUT_SECONDS
+    return BROADCAST_SEND_TIMEOUT_SECONDS
 
 def build_rates_payload(db: SessionLocal) -> dict:
     """DB에서 최신 환율을 조회해 표준 메시지 포맷으로 반환."""
@@ -418,9 +494,29 @@ async def broadcast_rates_once():
     """브로드캐스트 표준 흐름 (Redis 캐시 + 변경 감지 + 조건부 전송).
 
     PR1 계측: 단계별 raw duration을 logger extra로 남긴다 (외부 분석 도구에서 p50/p99 집계).
+    PR2 mode: BROADCAST_MODE에 따라 normal/fast/window 분기. 첫 줄 second 체크로
+    DB 조회 전 early return하여 normal 모드에서 기존 10초 동작과 동등.
     """
+    # PR2: mode + second + window 분기 (DB 조회 전 early return)
+    now_kst = datetime.now(KST)
+    should_run, skip_reason = _should_run_broadcast(now_kst)
+    if not should_run:
+        # normal_interval / outside_window — INFO 로그 안 남김 (매초 wake-up이라 폭증 회피)
+        broadcast_stats.record_skip(reason=skip_reason)
+        return
+
     db = SessionLocal()
     timings: Dict[str, float] = {}
+    job_start = time.perf_counter()
+    send_timeout = _resolved_send_timeout(now_kst)
+    in_fast_window = (BROADCAST_MODE == "fast") or (
+        BROADCAST_MODE == "window" and _is_in_fast_window(now_kst)
+    )
+    mode_meta = {
+        "broadcast_mode": BROADCAST_MODE,
+        "in_fast_window": in_fast_window,
+        "send_timeout_sec": send_timeout,
+    }
     try:
         # 1a) Redis cache read
         t0 = time.perf_counter()
@@ -453,9 +549,9 @@ async def broadcast_rates_once():
                 if total_graph_sources:
                     payload["graph_buckets"] = graph_buckets
 
-                # 4) manager.broadcast send (병렬)
+                # 4) manager.broadcast send (병렬, mode별 timeout)
                 t4 = time.perf_counter()
-                await manager.broadcast(payload)
+                await manager.broadcast(payload, send_timeout=send_timeout)
                 timings["broadcast_send_ms"] = (time.perf_counter() - t4) * 1000
 
                 # 5) payload bytes
@@ -469,6 +565,7 @@ async def broadcast_rates_once():
                 # 6) SQLAlchemy pool 상태 (가능한 경우만 — QueuePool에 한해 집계됨)
                 pool_status = _get_pool_status()
 
+                timings["job_duration_ms"] = (time.perf_counter() - job_start) * 1000
                 logger.info(
                     "📡 환율 데이터 브로드캐스트 & 🅾️ Redis 업데이트 완료",
                     extra={
@@ -477,21 +574,24 @@ async def broadcast_rates_once():
                         "graph_currencies": len(graph_buckets),
                         "graph_sources": total_graph_sources,
                         "payload_bytes": payload_bytes,
+                        **mode_meta,
                         **timings,
                         **pool_status,
                     },
                 )
             else:
                 broadcast_stats.record_skip(reason="no_connections")
+                timings["job_duration_ms"] = (time.perf_counter() - job_start) * 1000
                 logger.info(
                     "🅾️ Redis 업데이트만 수행 (활성 연결 없음)",
-                    extra={"skip_reason": "no_connections", **timings},
+                    extra={"skip_reason": "no_connections", **mode_meta, **timings},
                 )
         else:
             broadcast_stats.record_skip(reason="no_changes")
+            timings["job_duration_ms"] = (time.perf_counter() - job_start) * 1000
             logger.info(
                 "⏸️ 변경사항 없음 - 브로드캐스트 스킵",
-                extra={"skip_reason": "no_changes", **timings},
+                extra={"skip_reason": "no_changes", **mode_meta, **timings},
             )
 
     except Exception as e:
@@ -499,7 +599,7 @@ async def broadcast_rates_once():
         logger.error(
             "❌ 브로드캐스트 오류",
             exc_info=True,
-            extra={"connections": len(manager.active_connections), **timings},
+            extra={"connections": len(manager.active_connections), **mode_meta, **timings},
         )
     finally:
         db.close()

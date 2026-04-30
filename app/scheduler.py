@@ -1364,9 +1364,12 @@ def start_scheduler():
     # Note: AsyncIOScheduler는 async 함수를 직접 등록 가능
     from app.main import broadcast_rates_once  # 순환 import 방지 (함수 내부 import)
 
+    # PR2: 매초 wake-up + main.py broadcast_rates_once 첫 줄에서 mode/second 분기 + early return.
+    # normal 모드(default) 기본 동작은 기존 10초 cron과 정확히 동등 — DB 조회 빈도 회귀 0.
+    # window/fast 모드 진입 시에만 매초 broadcast 실행. mode 전환은 BROADCAST_MODE env 변경 + 재시작.
     scheduler.add_job(
         broadcast_rates_once,  # async 함수 직접 등록
-        CronTrigger(second='0,10,20,30,40,50', timezone=KST),
+        CronTrigger(second='*', timezone=KST),
         id="websocket_broadcast",
         max_instances=1,
         misfire_grace_time=5
