@@ -107,6 +107,12 @@ def setup_logging():
     error_handler.setFormatter(CustomJsonFormatter())
     root_logger.addHandler(error_handler)
 
+    # PR2: broadcast cron='*' (매초 wake-up) 변경으로 apscheduler.executors.default가
+    # 매초 "Running job" + "executed successfully" INFO 2줄 출력 → 하루 ~172,800 lines.
+    # 분석 노이즈 + 디스크 폭증 방지 위해 WARNING으로 낮춘다.
+    # ERROR/WARNING (실제 misfire / job 실패)는 그대로 기록됨.
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+
     return logging.getLogger("exchange_rate")
 
 # 로거 인스턴스 생성
