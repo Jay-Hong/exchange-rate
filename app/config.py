@@ -43,6 +43,11 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 # stale 판정은 mirrored_at 기준 interval * 2 초 초과 (latest_rates_cache.is_stale).
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
+if LATEST_MIRROR_INTERVAL_SECONDS < 1:
+    raise ValueError(
+        f"LATEST_MIRROR_INTERVAL_SECONDS must be >= 1 (got {LATEST_MIRROR_INTERVAL_SECONDS}). "
+        "Silent floor 대신 startup 시 명시 실패 (Crash Early)."
+    )
 
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"

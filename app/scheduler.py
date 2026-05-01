@@ -27,6 +27,7 @@ from app.crawlers import citi
 # Selenium 크롤러(shinhan, ibk, nh, sc)는 subprocess로 실행되므로 import 불필요
 from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
 from app import crud
+from app.config import LATEST_MIRROR_INTERVAL_SECONDS, REDIS_LATEST_ENABLED
 from app.database import SessionLocal
 from app.admin.crawler_stats import crawler_stats
 from app.market_mode import get_market_mode
@@ -1374,6 +1375,21 @@ def start_scheduler():
         max_instances=1,
         misfire_grace_time=5
     )
+
+    # PR3: Redis latest mirror job (REDIS_LATEST_ENABLED=true 시)
+    # broadcast가 매초 DB SELECT를 실행하지 않도록 mirror가 LATEST_MIRROR_INTERVAL_SECONDS
+    # 주기로 DB latest를 Redis로 동기화. 호출 함수는 latest_rates_cache.mirror_latest_rates_once
+    # (no-arg async wrapper). env=false default라 코드 배포만으론 운영 영향 0.
+    if REDIS_LATEST_ENABLED:
+        from app.latest_rates_cache import mirror_latest_rates_once  # 함수 내부 import (broadcast_rates_once 패턴)
+        scheduler.add_job(
+            mirror_latest_rates_once,
+            IntervalTrigger(seconds=LATEST_MIRROR_INTERVAL_SECONDS, timezone=KST),
+            id="latest_mirror",
+            max_instances=1,
+            coalesce=True,  # Misfire 시 밀린 실행을 1번으로 합치기
+            misfire_grace_time=LATEST_MIRROR_INTERVAL_SECONDS,
+        )
 
     # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
     # - 모드 전환 시점: 21:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 07:00 (OUT 시작), 월 06:00 (OUT 종료 → BREAK2)

@@ -25,6 +25,8 @@ from app import models, schemas, crud, scheduler
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
+from app.config import REDIS_LATEST_ENABLED
+from app.latest_rates_cache import warmup_latest_rates
 from app.notifications.fcm import init_firebase, is_firebase_initialized, send_fcm_data_only
 from app.subscription import verify_premium_status, PremiumStatus
 from app.webhooks import router as webhooks_router
@@ -414,6 +416,12 @@ async def lifespan(app: FastAPI):
     # Redis 연결 및 워밍업 (브로드캐스트 캐시)
     await redis_cache.connect()
     await warmup_broadcast_cache()
+
+    # PR3: Redis latest mirror warmup (REDIS_LATEST_ENABLED=true 시)
+    # broadcast Redis-first 경로가 첫 호출부터 데이터 있도록 startup에 1회 적재.
+    # 실패해도 broadcast는 DB fallback으로 동작 → 앱 시작은 막지 않음.
+    if REDIS_LATEST_ENABLED:
+        await warmup_latest_rates()
 
     # Firebase Admin SDK 초기화 (Phase 2 - FCM)
     if init_firebase():
