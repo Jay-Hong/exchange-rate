@@ -36,6 +36,14 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None 변환
 
+# Redis-first broadcast (PR3 - latest mirror)
+# REDIS_LATEST_ENABLED: PR3 활성화 토글. default OFF로 코드 배포 후 운영 영향 없이 들어가고,
+# 운영에서 env=true로 canary 활성화. guardrail 위반 시 env=false로 즉시 rollback 가능.
+# LATEST_MIRROR_INTERVAL_SECONDS: mirror job 주기 (초). PoC 후 1/3/5초 sweet spot 비교 가능.
+# stale 판정은 mirrored_at 기준 interval * 2 초 초과 (latest_rates_cache.is_stale).
+REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
+LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
+
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
