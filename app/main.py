@@ -26,7 +26,7 @@ from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
 from app.config import REDIS_LATEST_ENABLED
-from app.latest_rates_cache import warmup_latest_rates
+from app.latest_rates_cache import fetch_rates_from_redis, warmup_latest_rates
 from app.notifications.fcm import init_firebase, is_firebase_initialized, send_fcm_data_only
 from app.subscription import verify_premium_status, PremiumStatus
 from app.webhooks import router as webhooks_router
@@ -390,6 +390,49 @@ def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
     return payload, query_timings
 
 
+def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> dict:
+    """Redis에서 받은 rates list로 build_rates_payload와 동일 shape 조립 (PR3 Step 4).
+
+    DXY/indices는 PR3 A안에 따라 기존 DB 조회 유지 (mirror 범위 외, broadcast hot
+    path 부담 미미한 1 row 조회). metadata는 build_rates_payload 패턴 그대로.
+
+    rates 인자 출처는 fetch_rates_from_redis()의 반환값 — get_all_rates_flat과
+    동일한 legacy shape: [{currency, bank, rate, timestamp}, ...].
+    """
+    currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
+    banks = sorted(crud.LEGACY_METADATA_BANKS)
+
+    latest_timestamp = max(
+        (rate["timestamp"] for rate in rates),
+        default=crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
+    )
+
+    data_section = {
+        "rates": rates,
+        "metadata": {
+            "updated_at": latest_timestamp,
+            "currencies": currencies,
+            "banks": banks,
+            "total_count": len(rates),
+        },
+    }
+
+    latest_dxy = crud.get_latest_dxy_rate(db)
+    if latest_dxy:
+        data_section["indices"] = {
+            "dxy": {
+                "rate": latest_dxy["rate"],
+                "timestamp": latest_dxy["timestamp"],
+                "source": latest_dxy["source"],
+            }
+        }
+
+    return {
+        "type": "rates",
+        "data": data_section,
+    }
+
+
 async def warmup_broadcast_cache():
     """서버 시작 시 DB→Redis 워밍업 (캐시 미스 방지)."""
     db = SessionLocal()
@@ -531,10 +574,25 @@ async def broadcast_rates_once():
         cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
         timings["redis_get_ms"] = (time.perf_counter() - t0) * 1000
 
-        # 1b) payload build (DB SELECT + 직렬화 객체 구성)
-        # 분해 계측: investing/bank/source_rates_legacy 단계별 timing을 함께 받는다.
+        # 1b) payload build (PR3: Redis-first 분기 + DB fallback)
+        # REDIS_LATEST_ENABLED=true 시 fetch_rates_from_redis 시도 → 성공이면 rates를
+        # Redis에서 가져오고 DXY/metadata만 DB call (A안). 실패 시 기존 DB 경로 fallback.
+        # latest_source / mirror_age_ms / fallback_reason은 timings extra로 노출 →
+        # analyzer가 redis_hit_rate, mirror staleness, fallback 분포 집계.
         t1 = time.perf_counter()
-        payload, query_timings = build_rates_payload_with_timings(db)
+        if REDIS_LATEST_ENABLED:
+            redis_rates, redis_meta = await fetch_rates_from_redis()
+            if redis_rates is not None:
+                payload = _assemble_payload_from_rates(db, redis_rates)
+                timings["latest_source"] = "redis"
+                timings["mirror_age_ms"] = redis_meta["mirror_age_ms"]
+                query_timings = {}
+            else:
+                payload, query_timings = build_rates_payload_with_timings(db)
+                timings["latest_source"] = "db_fallback"
+                timings["fallback_reason"] = redis_meta["fallback_reason"]
+        else:
+            payload, query_timings = build_rates_payload_with_timings(db)
         timings["payload_build_ms"] = (time.perf_counter() - t1) * 1000
         timings.update(query_timings)
 
