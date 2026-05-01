@@ -7,8 +7,9 @@ DB가 ground truth, Redis는 mirror view. broadcast hot path가 매초 DB SELECT
 실행하지 않도록 mirror job이 주기적으로 DB latest를 Redis에 동기화하고,
 broadcast는 Redis JSON을 읽는다.
 
-이 commit은 PR3 Step 1 — key helper / value serialize·deserialize / stale 판정만.
-warmup / mirror_latest_rates_once / build_rates_payload_from_redis 는 다음 commit.
+PR3 Step 2 시점 구현: key helper / value serialize·deserialize / stale 판정 /
+mirror core / warmup·mirror_once wrapper. broadcast Redis-first read path
+(build_rates_payload_from_redis)는 다음 step.
 
 설계 합의: REALTIME_ARCHITECTURE_PLAN.md §12 Phase 2 PR3 참고.
 """
@@ -16,10 +17,18 @@ warmup / mirror_latest_rates_once / build_rates_payload_from_redis 는 다음 co
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Union
 
+from sqlalchemy.orm import Session
+
+from app import crud
+from app.cache import redis_cache
 from app.config import LATEST_MIRROR_INTERVAL_SECONDS
+from app.database import SessionLocal
+
+logger = logging.getLogger("exchange_rate.latest_rates_cache")
 
 # KST는 모듈 자기완결 (외부 의존 회피)
 _KST = timezone(timedelta(hours=9))
@@ -105,14 +114,155 @@ def is_stale(
 
     stale 기준: now - mirrored_at > interval * STALE_RATIO
 
+    naive datetime 입력 시 True 반환 (stale로 간주 → fallback DB read 유도).
+    deserialize_value가 이미 naive를 거르지만 외부 직접 호출 방어용.
+    silent KST 부여 대신 stale 처리 — TypeError로 broadcast 깨지는 것보다 안전.
+
     Args:
-        mirrored_at: mirror가 갱신한 시각 (timezone-aware datetime)
+        mirrored_at: mirror가 갱신한 시각 (timezone-aware datetime 권장)
         interval_seconds: mirror 주기 (None이면 LATEST_MIRROR_INTERVAL_SECONDS env)
     """
+    if mirrored_at.tzinfo is None:
+        return True
     if interval_seconds is None:
         interval_seconds = LATEST_MIRROR_INTERVAL_SECONDS
     age_seconds = (datetime.now(_KST) - mirrored_at).total_seconds()
     return age_seconds > interval_seconds * STALE_RATIO
+
+
+# ── Redis write helper (private) ──────────────────────────────
+
+
+async def _set_latest(key: str, value: str) -> bool:
+    """Redis SET with success/failure tracking.
+
+    cache.py wrapper(redis_cache.set)는 None만 반환해 성공/실패 구분 불가하므로
+    PR3 내부에서 client + circuit을 직접 다룬다. cache.py 공용 API는 그대로 둠.
+
+    Returns:
+        True: write 성공
+        False: client 미연결 / circuit_open / 예외 발생
+    """
+    if not redis_cache.client or not await redis_cache.circuit.can_attempt():
+        return False
+    try:
+        await redis_cache.client.set(key, value)
+        await redis_cache.circuit.record_success()
+        return True
+    except Exception:
+        await redis_cache.circuit.record_failure()
+        logger.debug("Redis SET 실패 (latest mirror)", exc_info=True, extra={"key": key})
+        return False
+
+
+# ── Mirror core + wrappers ────────────────────────────────────
+
+
+async def _mirror_all_latest(db: Session) -> Dict[str, int]:
+    """DB latest를 Redis로 적재하는 core. warmup과 mirror_once가 공유.
+
+    invariant:
+        attempted_total = loaded_total + failed
+        loaded_total    = bank + investing + source
+
+    DB에서 받은 record만 시도 — hardcoded expected count 없음. 운영에서 은행 추가/
+    제거 또는 일부 데이터 누락 시 attempted_total이 자연스럽게 반영됨.
+
+    Returns:
+        stats dict ({attempted_total, loaded_total, bank, investing, source, failed})
+    """
+    stats: Dict[str, int] = {
+        "attempted_total": 0,
+        "loaded_total": 0,
+        "bank": 0,
+        "investing": 0,
+        "source": 0,
+        "failed": 0,
+    }
+    mirrored_at = datetime.now(_KST)
+
+    for pair in crud.SUPPORTED_CURRENCY_PAIRS:
+        # investing — 단일 source, currency당 0~1 record
+        inv = crud.select_a_latest_investing_rate_from_db(db, pair)
+        if inv:
+            stats["attempted_total"] += 1
+            value = serialize_value(inv["rate"], inv["timestamp"], mirrored_at)
+            if await _set_latest(latest_key_investing(inv["currency"]), value):
+                stats["loaded_total"] += 1
+                stats["investing"] += 1
+            else:
+                stats["failed"] += 1
+
+        # bank — currency당 N개 은행
+        for record in crud.select_latest_bank_rates_from_db(db, pair):
+            stats["attempted_total"] += 1
+            value = serialize_value(record["rate"], record["timestamp"], mirrored_at)
+            if await _set_latest(latest_key_bank(record["bank"], record["currency"]), value):
+                stats["loaded_total"] += 1
+                stats["bank"] += 1
+            else:
+                stats["failed"] += 1
+
+    # source — 5 거래소 × 1 asset (asset=None: 전체)
+    # legacy adapter shape: {currency: asset, bank: source, rate, timestamp}
+    for record in crud.get_source_rates_as_legacy_format(db):
+        stats["attempted_total"] += 1
+        value = serialize_value(record["rate"], record["timestamp"], mirrored_at)
+        if await _set_latest(latest_key_source(record["bank"], record["currency"]), value):
+            stats["loaded_total"] += 1
+            stats["source"] += 1
+        else:
+            stats["failed"] += 1
+
+    return stats
+
+
+async def warmup_latest_rates() -> Optional[Dict[str, int]]:
+    """앱 시작 시 1회 호출 — DB latest를 Redis에 모두 적재.
+
+    FastAPI lifespan startup에서 호출 (Step 3에서 연결). 이 commit에선 호출처 없음.
+    실패해도 broadcast가 DB fallback으로 동작하므로 앱 시작 자체는 막지 않는다.
+
+    Returns:
+        성공 시 stats dict, 예외 시 None (수동 smoke test/디버깅용).
+        scheduler/lifespan에선 반환값 무시 가능.
+    """
+    db = SessionLocal()
+    try:
+        stats = await _mirror_all_latest(db)
+        logger.info("✅ Redis latest mirror warmup 완료", extra=stats)
+        return stats
+    except Exception:
+        logger.exception("❌ Redis latest mirror warmup 실패")
+        return None
+    finally:
+        db.close()
+
+
+async def mirror_latest_rates_once() -> Optional[Dict[str, int]]:
+    """Scheduler IntervalTrigger 주기 호출 — DB latest를 Redis로 갱신.
+
+    매 LATEST_MIRROR_INTERVAL_SECONDS마다 호출 (Step 3에서 scheduler 등록).
+    이 commit에선 호출처 없음. 매 주기 INFO 폭증 회피를 위해 정상 시 DEBUG,
+    실패가 있으면 WARNING으로 가시화.
+
+    Returns:
+        성공 시 stats dict, 예외 시 None (수동 smoke test/디버깅용).
+        scheduler에선 반환값 무시 가능.
+    """
+    db = SessionLocal()
+    try:
+        stats = await _mirror_all_latest(db)
+        if stats["failed"] > 0:
+            logger.warning("⚠️ Redis latest mirror 일부 실패", extra=stats)
+        else:
+            logger.debug("Redis latest mirror 갱신", extra=stats)
+        return stats
+    except Exception:
+        logger.exception("❌ Redis latest mirror 갱신 실패")
+        return None
+    finally:
+        db.close()
 
 
 __all__ = [
@@ -123,4 +273,6 @@ __all__ = [
     "serialize_value",
     "deserialize_value",
     "is_stale",
+    "warmup_latest_rates",
+    "mirror_latest_rates_once",
 ]
