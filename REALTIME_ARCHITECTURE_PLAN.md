@@ -1,8 +1,9 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.6)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.7)
 
-> 📝 **상태**: Phase 1 운영 진입 + PR2 window 임시 PoC 성공 (v0.6, 2026-05-01)
+> 📝 **상태**: 24h fast PoC 진행 중 (15:53 KST~) + spike 원인 식별 완료 + Phase 2 PR3(Redis-first broadcast) 설계 합의 (v0.7, 2026-05-01)
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.6 — PR1 baseline → Phase 1.5 분해 계측 → latest 조회 인덱스 3종 + bank VACUUM ANALYZE 적용 → PR2 BROADCAST_MODE 인프라 + 임시 window PoC 성공. 2026-04-30 20:00-20:17 KST window PoC에서 payload_build_ms p99 302ms / send timeout 0건 / misfire 0건 확인. Investing 403 플래핑은 PR2와 무관(외부 변동성)으로 분리.
+> 🔄 **변경 이력**: v0.7 — 24h fast window PoC(2026-05-01 15:53~) 진행 중. Performance Insights + EXPLAIN ANALYZE 분석에서 16:00 spike 확대 구간(8분 PI window) 기준 wait event가 CPU 단일로 관측되고 LWLock/Lock/IO:WalSync wait 0건 확인. 같은 구간 PI Top SQL에서 bank+source latest SELECT가 부하의 대부분(bank 0.21 + source 0.15 AAS = 0.36)을 차지. Phase 2 작업 순서 재배열: **PR3(Redis-first broadcast)를 첫 PR로 격상**. PR3 설계 완전 합의(env / Redis schema / stale 판정 / fallback reason / 모듈 구조 / metric). cache.py·crud.py 변경 0, 신규 `app/latest_rates_cache.py` 모듈 분리. 자세한 설계는 12.Phase 2 섹션의 PR3 서브섹션 참고.
+> 🔄 **이전 변경**: v0.6 — Phase 1 운영 진입 + PR2 window 임시 PoC 성공 (2026-04-30 20:00-20:17 KST). payload_build_ms p99 302ms / send timeout 0건 / misfire 0건. Investing 403 플래핑은 PR2 무관(외부 변동성)으로 분리.
 
 ---
 
@@ -440,13 +441,123 @@ WS tick 수신
 - 1주 측정 데이터 기반으로 유지/롤백/event-driven 전환/임계값 운영 SLO 등록 여부 결정 (미정 C 결론)
 - 후보 임계값(추정): p99 DB latency < 100ms, EC2 CPU < 60%, RDS pool < 70% — 측정 후 실측 데이터로 확정
 
-### Phase 2 — 업비트 WS PoC + Topic 프로토콜 v1
+### Phase 2 — Redis-first broadcast (PR3) → 업비트 WS PoC + Topic 프로토콜 v1 (PR4+)
+
+> v0.7 (2026-05-01): Phase 1 fast PoC 결과 — broadcast hot path가 DB latest SELECT 실행 비용에 직접 묶여 정각/15/30/45분 :00초 spike가 발생 (19:00 KST 측정 기준 누적 3.35h: payload_build_ms p99 약 387ms / max 1305ms, job_duration ≥1s 약 3.59건/h). Performance Insights "상위 대기" 16:00 spike 확대 구간(8분 PI window)에서 wait event가 CPU 단일로 관측되고 LWLock/Lock/IO:WalSync wait 0건 확인. 같은 구간 Top SQL에서 bank+source latest SELECT가 부하 대부분 차지(bank 0.21 + source 0.15 AAS = 0.36). Redis-first broadcast 전환은 성능 개선이 아니라 **사용자 경로의 DB tail 의존성을 구조적으로 해제**하는 작업이라 Phase 2의 첫 PR로 격상.
+
+**Phase 2 PR 의존성 그래프**:
+
+| PR | 내용 | 의존성 | 위험도 |
+| --- | --- | --- | --- |
+| **PR3** (NEW) | Redis-first broadcast (mirror + warmup + fallback) | 없음 (가장 먼저) | 낮음 (env OFF default + 분기 추가) |
+| PR4 | crawler 저장 성공 후 Redis write (mirror 보조 + latency 0초) | PR3 | 중간 (16개+ 크롤러) |
+| PR5 | USDT WS collector가 같은 latest path에 write | PR3, PR4 | 중간 (신규 모듈) |
+| PR6+ | 토픽 프로토콜 v1, 테더 탭 topic 이름/schema, dual-emit, dxy_futures rollup, snapshot 토픽 분리, alert/graph 분리 | PR5 | 큼 (다수 모듈) |
+
+#### PR3: Redis-first broadcast (Phase 2 첫 PR, v0.7 합의)
+
+**목적**: broadcast가 매초 DB latest SELECT를 실행하지 않도록 Redis mirror layer를 도입. 사용자 경로(broadcast send)를 DB CPU tail에서 분리.
+
+**환경 변수** (단일 토글 + interval):
+
+```bash
+REDIS_LATEST_ENABLED=false       # PR3 활성화 토글 (default OFF, canary로 점진 활성화)
+LATEST_MIRROR_INTERVAL_SECONDS=3 # mirror 주기 (PoC 후 1/3/5초 비교로 sweet spot 확정)
+```
+
+**Redis schema** (key는 helper 함수로 중앙화):
+
+```text
+helper:
+- latest_key_bank(bank, currency)    → latest:bank:{bank}:{currency}
+- latest_key_source(source, asset)   → latest:source:{source}:{asset}
+- latest_key_investing(currency)     → latest:investing:{currency}
+
+value (JSON):
+{
+  "rate": 1340.5,
+  "timestamp": "2026-05-01T19:00:00+09:00",  // 환율 발생 시각 (UI 표시)
+  "mirrored_at": "2026-05-01T19:23:45+09:00" // mirror가 갱신한 시각 (stale 판정용)
+}
+```
+
+**Stale 판정**: `now - mirrored_at > LATEST_MIRROR_INTERVAL_SECONDS * 2` (interval=3 기준 6초 초과 시 stale). ratio=2는 코드 상수로 시작, 운영에서 조정 필요해지면 env로 분리.
+
+**Fallback reason** (4가지 분류 — analyzer 집계 기준):
+
+- `redis_miss`: key 없음 (warmup 직후 또는 신규 데이터)
+- `redis_stale`: mirrored_at 6초 초과 (mirror job 정체 또는 정지)
+- `redis_error`: Redis 명령 실패 (네트워크/timeout)
+- `circuit_open`: Circuit Breaker open 상태 (5 failures → 30s timeout)
+
+> circuit_open은 cache.py 기존 wrapper가 None만 반환하므로 redis_miss와 자동 구분 안 됨. PR3 helper에서 호출 **전** `redis_cache.circuit.can_attempt()` 명시 체크 또는 `(value, reason)` tuple 패턴으로 처리. cache.py 공용 API는 건드리지 않음.
+
+**모듈 구조** (단일 책임 분리):
+
+```text
+app/latest_rates_cache.py (NEW)
+  - latest key helper × 3
+  - value serialize/deserialize
+  - warmup_latest_rates()             # FastAPI lifespan startup 1회 호출
+  - mirror_latest_rates_once()        # scheduler IntervalTrigger 주기 호출
+  - build_rates_payload_from_redis()  # Redis-first read + DB fallback
+  - private (value, reason) helper    # circuit_open/miss/stale/error 구분
+                                       # redis_cache.client + circuit 직접 사용
+
+app/main.py (변경)
+  - lifespan startup에 warmup_latest_rates() 호출
+  - broadcast_rates_once의 build_rates_payload 호출 직전 REDIS_LATEST_ENABLED 분기
+  - timings에 latest_source / mirror_age_ms / fallback_reason 추가
+
+app/scheduler.py (변경)
+  - REDIS_LATEST_ENABLED=true일 때 mirror job 등록 (IntervalTrigger)
+  - max_instances=1, coalesce=True
+
+app/config.py (변경)
+  - REDIS_LATEST_ENABLED, LATEST_MIRROR_INTERVAL_SECONDS env 추가
+
+scripts/analyze_broadcast_metrics.py (변경)
+  - METRICS에 mirror_age_ms 추가
+  - 신규 분류기: classify_latest_source(redis|db_fallback)
+  - 신규 출력: latest_source 분포, fallback_reason 카운트, mirror_age 통계
+```
+
+**변경하지 않는 파일** (SRP / 회귀 위험 0):
+
+- `app/cache.py` — Redis primitive + Circuit Breaker 단일 책임 유지
+- `app/crud.py` — 기존 latest 조회 함수(`select_latest_bank_rates_from_db`, `select_a_latest_investing_rate_from_db`, `get_source_rates_as_legacy_format`) 그대로 재사용
+- `app/admin/stats.py` — PR3 1차 범위 외 (logger extra + analyzer로 충분, 화면 반영은 후속 PR)
+- `templates/admin.html` — 후속 PR
+
+**Redis namespace 의미 분리** (운영 문서):
+
+- `broadcast:latest`: broadcast 전체 payload (변경 감지 diff용, Phase 1.7부터 운영). PR3 도입 후에도 유지.
+- `latest:*`: 개별 rate mirror (PR3 신규). broadcast 입력 데이터.
+
+**측정 지표** (PR3 전후 비교):
+
+| 지표 | 현재 (fast baseline) | PR3 후 목표 |
+| --- | --- | --- |
+| payload_build_ms p99 | 387ms | <50ms |
+| payload_build_ms max | 1305ms | <100ms |
+| broadcast max_instances/h | 1.79 | 0 |
+| job_duration ≥1s/h | 3.59 | <0.1 |
+| PI Top SQL bank+source AAS | 0.36 (16:00 spike) | ~0 |
+| `fallback_rate` (%) | N/A | <1% |
+| `mirror_age_ms` p99 | N/A | < interval * 2 (≤6초) |
+| send timeout / pool overflow | 0 | **0 유지** |
+
+**Rollback 경로**: env `REDIS_LATEST_ENABLED=false`로 즉시 복귀 (코드 변경 없음). 가드레일 위반 시 (fallback_rate >5%, send timeout >0, broadcast max_instances 시간당 >3 지속) 자동 복귀 검토.
+
+**미래 승격 옵션**: latest_rates_cache.py 내부 private `(value, reason)` helper는 PR3 단일 사용처. alert path가 Redis-first 전환되는 등 두 번째 사용처 발생 시 cache.py 공용 메서드(`get_with_reason()`)로 승격 (Rule of Three).
+
+#### Phase 2 기존 작업 (PR4~)
 
 **목적**: 토픽 명세와 dual-emit 인프라를 PoC 단계에서 함께 검증.
 
 **작업**:
 1. v1 minimal 토픽 프로토콜 구현 (hello/subscribe/snapshot/delta)
-2. 업비트 1개 거래소 WebSocket collector 구현
+2. 업비트 1개 거래소 WebSocket collector 구현 — PR3의 `latest:source:upbit:usdt-krw` path에 직접 write
 3. **테더 탭 topic 이름 + snapshot/delta schema 확정** (미정 F 해결): multi-source payload (5거래소 USDT + Investing/KB/Hana reference + KRX 달러선물). 후보 방향: `source + asset + category` 기반 배열. category 예: `reference` / `derivative` / `exchange`.
 4. **DXY 토픽 분리 vs 단일 토픽 instrument 분기 결정** (미정 F의 일부): DXY 현물은 달러 탭 보조지표, 선물은 테더 탭 그래프 보조지표 — 두 화면이 같은 토픽 공유할지 분리할지.
 5. **백엔드 `get_all_rates_flat`에서 USDT legacy 병합 제거** ([crud.py:340](app/crud.py#L340), [crud.py:365](app/crud.py#L365)) — 테더 탭 데이터는 새 topic으로만 발사. legacy `rates`에는 USD/JPY/EUR + Investing/은행 9개만 유지.
@@ -659,6 +770,16 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 
 ## 18. 변경 이력
 
+- **v0.7** (2026-05-01): 24h fast PoC 진행 중 (15:53 KST~) + spike 원인 식별 완료 + Phase 2 PR3 설계 합의.
+  - **24h fast window PoC 진입** (`BROADCAST_MODE=window`, `BROADCAST_FAST_HOURS=0-24`, 15:53:54 KST 시작). 노동절(2026-05-01 금) + 주말 트래픽 적은 구간 활용한 본 운영 PoC. **19:00 KST 체크포인트 기준 누적 3.35h** 가드레일 통과: broadcast misfire 약 1.79/h (임계값 3/h의 60%, 전반/후반 →유지), send timeout 0건, pool overflow 0건, 전반/후반 payload_build_ms p99 392→367ms 약간 개선.
+  - **spike 원인 — 16:00 spike 확대 구간 기준 CPU 단일 관측** (Performance Insights "상위 대기" 16:00 spike 구간 8분 window에서 CPU 0.39 AAS 단일, LWLock:BufferContent / Lock:transactionid / IO:WalSync 모두 wait 0건). 같은 구간 PI Top SQL에서 broadcast bank/source latest SELECT가 부하 대부분 차지 (bank 0.21 + source 0.15 AAS = 0.36). 좁은 구간 관측이라 다른 spike 시점에서도 동일 패턴인지는 PR3 적용 후 비교로 검증.
+  - **CloudWatch 가설 추가 기각** (3시간 평균 + 1분 해상도 zoom 기준): WriteIOPS 3.23/s + DiskQueueDepth ≈0 + EBSIOBalance 100% + BurstBalance 99.6% → I/O 포화/burst credit 고갈 모두 기각. DBLoadCPU 단독 spike(DBLoadNonCPU ≈0) → I/O 아닌 CPU 부하 우세. DatabaseConnections 3 안정 → pool 경합 기각.
+  - **EXPLAIN ANALYZE로 실제 SQL baseline 확정**: bank window function 15ms (Index Only Scan + Run Condition `rn ≤ 1` 최적화), investing latest 0.078ms, source_rates window function 30ms. 합계 ~78ms baseline = 정상 broadcast p50과 일치. spike 800ms+는 MVCC visibility check + buffer access CPU 비용 등 시스템 경합 영역으로 추정 (다른 spike 시점 동일 패턴 여부는 PR3 적용 후 비교로 검증). 코드 자체는 효율적이라 parameter tuning(work_mem 등)으로 해결 어려움.
+  - **PR3(Redis-first broadcast)를 Phase 2 첫 PR로 격상**: 단일 PR + env OFF default + canary 활성화 패턴 (PR2 BROADCAST_MODE 패턴 일관). 단일 env `REDIS_LATEST_ENABLED=false` 토글 + `LATEST_MIRROR_INTERVAL_SECONDS=3` interval. Redis schema는 helper 함수 3개로 중앙화 (`latest_key_bank/source/investing`), value 최소(`{rate, timestamp, mirrored_at}`), stale 판정 `now - mirrored_at > interval * 2`, fallback reason 4분류(redis_miss/redis_stale/redis_error/circuit_open).
+  - **PR3 모듈 구조 합의**: 신규 `app/latest_rates_cache.py` 모듈 (latest 도메인 격리). cache.py·crud.py·admin/stats.py·admin.html 변경 없음. main.py(분기 + lifespan warmup), scheduler.py(mirror job 등록), config.py(env), analyzer(metric 집계)만 변경. circuit_open은 PR3 helper에서 호출 전 `redis_cache.circuit.can_attempt()` 명시 체크 또는 `(value, reason)` tuple 패턴으로 처리 (cache.py 공용 API 안 건드림). 미래 다른 모듈 동일 패턴 필요 시 cache.py로 승격(Rule of Three).
+  - **PR4/5/6+ 후속 순서 합의**: PR4 crawler 저장 후 Redis write → PR5 USDT WS collector가 같은 latest path → PR6+ 토픽 분리/dual-emit/dxy_futures rollup/alert·graph 분리.
+  - **Investing 403 플래핑 PR2/PR3 무관 재확인**: 외부 Cloudflare 변동성 별도 트랙 유지. CNBC fallback (ADR-025) 정상 작동.
+  - **다음 단계**: 24h PoC 종료(2026-05-02 토 16:00 KST 전후) → 주말 모니터링 → 2026-05-04 (월) PR3 구현 시작 (5/5 어린이날 공휴일 후 5/6 수부터 본격). PR3 구현 시 fast 유지하여 PR3 전후 baseline 비교.
 - **v0.6** (2026-05-01): Phase 1 운영 진입 + PR2 window 임시 PoC 성공.
   - **Phase 1.5 분해 계측 추가** (`get_all_rates_flat_with_timings`): payload_build_ms 단계별 timing(investing/bank/source_rates_legacy) 식별. 24h baseline에서 spike 주범이 bank/investing/source 쿼리임을 확인.
   - **latest 조회 인덱스 3종 적용**: `ix_investing_currency_ts_id`, `ix_bank_currency_bank_ts_id`, `ix_source_rates_source_asset_ts_id`. 각각 (currency/source, asset, timestamp DESC, id DESC). EXPLAIN ANALYZE 기준: investing 59ms→0.076ms, source_rates 162ms→27ms (Seq Scan + disk spill 회피).
@@ -700,14 +821,16 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 
 ## 부록: 합의 요약 (한눈에 보기)
 
-✅ **운영 진입 상태** (v0.6, 2026-05-01):
-- **Phase 1 코드 배포 완료** (PR1 broadcast 병렬화 + 계측 / Phase 1.5 분해 계측 / 인덱스 3종 + bank VACUUM / PR2 BROADCAST_MODE 인프라)
-- **PR2 window mode 임시 PoC 성공** (2026-04-30 20:00-20:17 KST). payload_build_ms p99 302ms / max 792ms, send timeout 0, misfire 0
-- **운영 기본값**: `BROADCAST_MODE=normal`, `BROADCAST_FAST_HOURS=2-4` (코드 default 그대로 .env 명시)
-- **다음 운영 PoC**: 새벽 02:00-04:00 KST window. 1주 측정으로 정량 SLO 결정
+✅ **운영 진입 상태** (v0.7, 2026-05-01):
 
-🟡 **PR2와 분리된 후속 이슈**:
-- **Investing 403 플래핑**: window 시작 전/중/후 차단 빈도가 0.43/0.65/0.65/min로 동일 → PR2 무관, 외부 Cloudflare 변동성. CNBC fallback (ADR-025) 정상 작동 중이라 운영 영향 작음. ADR-018/025 강화는 별도 트랙
+- **24h fast PoC 진행 중** (15:53 KST 시작, 노동절+주말 트래픽 적은 구간). `BROADCAST_MODE=window`, `BROADCAST_FAST_HOURS=0-24`. **19:00 KST 체크포인트 기준 누적 3.35h** 가드레일 통과 (broadcast misfire 약 1.79/h, send timeout 0, pool overflow 0)
+- **spike 원인 — 16:00 spike 확대 구간 기준 CPU 단일 관측** (PI 상위 대기 16:00 8분 window에서 CPU 0.39 AAS 단일, LWLock/Lock/IO:WalSync wait 0). 같은 구간 Top SQL에서 bank+source latest SELECT가 부하 대부분 차지(bank 0.21 + source 0.15 AAS = 0.36). EXPLAIN baseline ~78ms vs spike 800ms+는 시스템 경합 영역 (MVCC visibility + buffer access CPU 비용 추정, 다른 spike 시점 동일 패턴 여부는 PR3 후 검증)
+- **PR3(Redis-first broadcast) Phase 2 첫 PR로 격상 + 설계 완전 합의**: 단일 PR + env OFF default + canary 활성화. 신규 `app/latest_rates_cache.py` 모듈 분리, cache.py·crud.py 변경 0. 자세한 명세는 12.Phase 2 § PR3 참고
+- **다음 단계**: 24h PoC 종료(5/2 토 16:00 KST) → 주말 모니터링 → 5/4 (월) PR3 구현 시작 (5/5 어린이날 공휴일 후 5/6 수~)
+
+🟡 **PR2/PR3와 분리된 후속 이슈**:
+
+- **Investing 403 플래핑**: 외부 Cloudflare 변동성 별도 트랙. CNBC fallback (ADR-025) 정상 작동 중이라 운영 영향 작음. ADR-018/025 강화는 별도 트랙
 
 ✅ **합의된 것** (v0.1 + v0.2 + v0.3):
 - v1 목표: 서버 tick 수신 후 1초 이내 화면 반영
