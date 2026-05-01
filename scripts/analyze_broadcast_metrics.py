@@ -58,7 +58,13 @@ METRICS = [
     "serialize_diff_ms",
     "build_graph_buckets_ms",
     "broadcast_send_ms",
+    # PR3 — Redis-first read path (mirror cycle freshness, latest:index 기준)
+    "mirror_age_ms",
 ]
+
+# PR3 — fallback reason 분류 (broadcast_rates_once의 timings extra와 일치).
+# 과거 PR1/PR2 로그에는 fallback_reason 필드가 없어 Counter가 자연스럽게 0건 처리.
+FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_open"]
 
 
 def parse_iso(s: str) -> datetime:
@@ -82,6 +88,21 @@ def classify_skip_reason(rec: Dict[str, Any]) -> str:
     if "브로드캐스트 완료" in msg or "Redis 업데이트 완료" in msg:
         return "sent"
     return "other"
+
+
+def classify_latest_source(rec: Dict[str, Any]) -> str:
+    """PR3 timings.latest_source 분류. 과거 PR1/PR2 로그 호환을 위해 'none' 반환.
+
+    - 'redis': broadcast가 Redis-first path로 rates 조립 (PR3 success)
+    - 'db_fallback': Redis miss/stale/error/circuit_open으로 DB fallback (PR3)
+    - 'none': latest_source 필드 자체 없음 (PR1/PR2 로그 또는 REDIS_LATEST_ENABLED=false)
+    """
+    src = rec.get("latest_source")
+    if src == "redis":
+        return "redis"
+    if src == "db_fallback":
+        return "db_fallback"
+    return "none"
 
 
 def percentile(arr: List[float], p: float) -> float:
@@ -194,6 +215,45 @@ def format_table(records: List[Dict[str, Any]], top: int, since: datetime, until
                 f"{s['p95']:8.2f}  {s['p99']:8.2f}  {s['max']:9.2f}"
             )
 
+    # PR3 — latest_source 분포 + fallback_reason 카운트.
+    # 과거 PR1/PR2 로그(latest_source 필드 없음)는 'none'으로 분류 → PR3 전후
+    # 비교 시 'none' 비율로 PR3 적용 시점 파악 가능.
+    latest_bucket = Counter(classify_latest_source(r) for r in records)
+    pr3_active = (latest_bucket["redis"] + latest_bucket["db_fallback"]) > 0
+    if pr3_active:
+        lines.append("")
+        lines.append("[PR3 latest_source 분포]")
+        total_pr3 = sum(latest_bucket.values()) or 1
+        for k in ("redis", "db_fallback", "none"):
+            v = latest_bucket.get(k, 0)
+            lines.append(f"  {k:15s}: {v:6d} ({v*100/total_pr3:.1f}%)")
+        # redis_hit_rate: PR3 적용 records (redis + db_fallback) 중 redis 비율
+        pr3_records = latest_bucket["redis"] + latest_bucket["db_fallback"]
+        if pr3_records > 0:
+            hit_rate = latest_bucket["redis"] * 100 / pr3_records
+            lines.append(
+                f"  redis_hit_rate (PR3 records 한정): {hit_rate:.2f}% "
+                f"({latest_bucket['redis']}/{pr3_records})"
+            )
+
+        fallback_bucket = Counter()
+        for r in records:
+            reason = r.get("fallback_reason")
+            if reason:
+                fallback_bucket[reason] += 1
+        if fallback_bucket:
+            lines.append("")
+            lines.append("[PR3 fallback_reason 분포]")
+            fb_total = sum(fallback_bucket.values()) or 1
+            for k in FALLBACK_REASONS:
+                v = fallback_bucket.get(k, 0)
+                if v > 0:
+                    lines.append(f"  {k:15s}: {v:6d} ({v*100/fb_total:.1f}%)")
+            # 분류기 외 reason도 노출 (방어)
+            unknown = {k: v for k, v in fallback_bucket.items() if k not in FALLBACK_REASONS}
+            for k, v in sorted(unknown.items(), key=lambda x: -x[1]):
+                lines.append(f"  {k:15s}: {v:6d} ({v*100/fb_total:.1f}%) [unknown]")
+
     big = sorted(
         [r for r in records if isinstance(r.get("payload_build_ms"), (int, float))],
         key=lambda r: -r["payload_build_ms"],
@@ -231,6 +291,18 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
     pair_data = collect_pair_timings(records)
     pair_results = {p: metric_stats(vals) for p, vals in pair_data.items()}
 
+    # PR3 — latest_source 분포 + fallback_reason 카운트 + redis_hit_rate
+    latest_bucket = Counter(classify_latest_source(r) for r in records)
+    fallback_bucket = Counter()
+    for r in records:
+        reason = r.get("fallback_reason")
+        if reason:
+            fallback_bucket[reason] += 1
+    pr3_records = latest_bucket["redis"] + latest_bucket["db_fallback"]
+    redis_hit_rate = (
+        latest_bucket["redis"] * 100 / pr3_records if pr3_records > 0 else None
+    )
+
     big = sorted(
         [r for r in records if isinstance(r.get("payload_build_ms"), (int, float))],
         key=lambda r: -r["payload_build_ms"],
@@ -244,6 +316,10 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
             "source_rates_legacy_ms": r.get("source_rates_legacy_ms"),
             "redis_get_ms": r.get("redis_get_ms"),
             "broadcast_send_ms": r.get("broadcast_send_ms"),
+            # PR3 필드 (없으면 None — 과거 로그 호환)
+            "latest_source": r.get("latest_source"),
+            "fallback_reason": r.get("fallback_reason"),
+            "mirror_age_ms": r.get("mirror_age_ms"),
         }
         for r in big
     ]
@@ -258,6 +334,13 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
             "skip_reason": dict(skip_bucket),
             "metrics": metric_results,
             "pair_timings": pair_results,
+            # PR3 신규 (과거 로그 호환: latest_source 없으면 'none' 카운트만)
+            "pr3": {
+                "latest_source": dict(latest_bucket),
+                "fallback_reason": dict(fallback_bucket),
+                "redis_hit_rate_percent": redis_hit_rate,
+                "pr3_records": pr3_records,
+            },
             "top_spikes": top_spikes,
         },
         ensure_ascii=False,
