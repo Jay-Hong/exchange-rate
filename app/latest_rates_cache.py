@@ -421,19 +421,57 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
         return None, meta
 
-    # 4. listed data keys GET → 모두 raw 수집 (decode는 별도 단계로 분리 측정)
+    # 4. listed data keys MGET → 1 round-trip + 1 await yield (PR4)
+    # PR3.5 측정에서 35 sequential async GET wall-clock이 long tail 주범으로 식별됨
+    # (per-key 평균 0.4ms → spike 시 17ms+, :16초 96.4% 집중 — mirror cycle interleaving).
+    # MGET 1회로 round-trip 35→1, await 지점 35→1, mirror SET 끼어들 기회 35→1.
+    # _get_latest_with_reason()이 해주던 client/circuit 체크는 PR4에서 직접 처리.
     t_data_get0 = time.perf_counter()
-    raw_pairs: List[Tuple[str, Any]] = []
-    for key in index["keys"]:
-        raw_v, reason_v = await _get_latest_with_reason(key)
-        if reason_v is not None:
-            meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
-            meta["latest_source"] = "db_fallback"
-            meta["fallback_reason"] = reason_v
-            meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-            return None, meta
-        raw_pairs.append((key, raw_v))
+    keys = index["keys"]
+
+    if not redis_cache.client:
+        meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "redis_error"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
+    if not await redis_cache.circuit.can_attempt():
+        meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "circuit_open"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
+
+    try:
+        raw_values = await redis_cache.client.mget(keys)
+        await redis_cache.circuit.record_success()
+    except Exception:
+        await redis_cache.circuit.record_failure()
+        meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "redis_error"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
+
+    # mget은 keys와 같은 길이 list 반환해야 정상 (Redis spec)
+    if len(raw_values) != len(keys):
+        meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "redis_error"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
+
+    # 일부 None — 정책 유지: 1건이라도 누락 → 전체 fallback (PR3 stale와 일관)
+    if any(v is None for v in raw_values):
+        meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "redis_miss"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
+
+    raw_pairs: List[Tuple[str, Any]] = list(zip(keys, raw_values))
     meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+    meta["latest_data_get_mode"] = "mget"  # PR4 indicator (analyzer numeric 미포함)
 
     # 5. decode + key→rate 변환
     t_decode0 = time.perf_counter()
