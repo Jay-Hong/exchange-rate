@@ -379,6 +379,11 @@ def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
     t_dxy0 = time.perf_counter()
     latest_dxy = crud.get_latest_dxy_rate(db)
     query_timings["dxy_query_ms"] = (time.perf_counter() - t_dxy0) * 1000
+    # PR5 fix: rates fallback path에서도 dxy_path 기록 (analyzer 4-state 일관성).
+    # 이 함수는 case 1 (rates Redis 실패 → 전체 DB)에서만 호출되며, DXY 결과에
+    # 따라 db_fallback / missing 분류. analyzer가 이 레코드를 'none'으로 잘못
+    # 분류하지 않도록.
+    query_timings["dxy_path"] = "db_fallback" if latest_dxy else "missing"
 
     if latest_dxy:
         data_section["indices"] = {

@@ -423,9 +423,9 @@ async def warmup_latest_rates() -> Optional[Dict[str, Any]]:
     db = SessionLocal()
     try:
         stats = await _mirror_all_latest(db)
-        if stats["failed"] > 0 or not stats["index_updated"]:
+        if stats["failed"] > 0 or not stats["index_updated"] or stats["dxy_failed"] > 0:
             logger.warning(
-                "⚠️ Redis latest mirror warmup 일부 실패 또는 index 미갱신",
+                "⚠️ Redis latest mirror warmup 일부 실패 또는 index/DXY 미갱신",
                 extra=stats,
             )
         else:
@@ -616,9 +616,9 @@ async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:
     db = SessionLocal()
     try:
         stats = await _mirror_all_latest(db)
-        if stats["failed"] > 0 or not stats["index_updated"]:
+        if stats["failed"] > 0 or not stats["index_updated"] or stats["dxy_failed"] > 0:
             logger.warning(
-                "⚠️ Redis latest mirror 일부 실패 또는 index 미갱신",
+                "⚠️ Redis latest mirror 일부 실패 또는 index/DXY 미갱신",
                 extra=stats,
             )
         else:
