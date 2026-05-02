@@ -352,6 +352,9 @@ def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
 
     broadcast_rates_once 전용. 다른 호출자(warmup, websocket connect 등)는 기존
     build_rates_payload를 그대로 사용한다 (회귀 위험 제거).
+
+    PR5: DXY DB 조회 시간을 dxy_query_ms로 query_timings에 포함 — rates Redis
+    실패로 전체 DB fallback 타는 case에서도 DXY 비용이 동일 의미로 집계되도록.
     """
     all_rates, query_timings = crud.get_all_rates_flat_with_timings(db=db)
 
@@ -373,7 +376,10 @@ def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
         },
     }
 
+    t_dxy0 = time.perf_counter()
     latest_dxy = crud.get_latest_dxy_rate(db)
+    query_timings["dxy_query_ms"] = (time.perf_counter() - t_dxy0) * 1000
+
     if latest_dxy:
         data_section["indices"] = {
             "dxy": {
@@ -390,21 +396,24 @@ def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
     return payload, query_timings
 
 
-def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> tuple:
-    """Redis에서 받은 rates list로 build_rates_payload와 동일 shape 조립 (PR3 Step 4).
+def _assemble_payload_from_rates(db: SessionLocal, rates: list, redis_dxy: Optional[dict]) -> tuple:
+    """Redis에서 받은 rates + DXY로 build_rates_payload와 동일 shape 조립 (PR5).
 
-    DXY/indices는 PR3 A안에 따라 기존 DB 조회 유지 (mirror 범위 외, broadcast hot
-    path 부담 미미한 1 row 조회). metadata는 build_rates_payload 패턴 그대로.
-
-    PR3.5 분해 계측: dxy_query_ms를 별도 반환 — payload_assemble_ms 안의
-    DXY DB 조회 비용을 분리해 long tail 원인 식별에 활용.
+    DXY-only fallback (PR5):
+    - redis_dxy 있음 → indices.dxy = redis_dxy (DB 조회 안 함, dxy_query_ms 미측정)
+    - redis_dxy 없음 → DB fallback (DXY-only). 성공 시 indices.dxy, 실패 시 indices 생략.
+    - rates 자체는 항상 Redis (호출자가 보장)
 
     rates 인자 출처는 fetch_rates_from_redis()의 반환값 — get_all_rates_flat과
     동일한 legacy shape: [{currency, bank, rate, timestamp}, ...].
+    redis_dxy 인자는 fetch_rates_from_redis()의 반환값 — {rate, timestamp, source} 또는 None.
 
     Returns:
-        (payload, dxy_query_ms): payload는 build_rates_payload와 동일 shape,
-        dxy_query_ms는 crud.get_latest_dxy_rate 측정 시간.
+        (payload, dxy_path, dxy_query_ms_or_None):
+        - payload: build_rates_payload와 동일 shape
+        - dxy_path: 'redis' / 'db_fallback' / 'missing' (3-state)
+        - dxy_query_ms_or_None: DB DXY fallback 시도 시 측정값, Redis 성공 시 None
+          (None이면 timings에 미기록 — analyzer n 급감으로 PR5 효과 가시화)
     """
     currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
     banks = sorted(crud.LEGACY_METADATA_BANKS)
@@ -424,24 +433,40 @@ def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> tuple:
         },
     }
 
-    t_dxy0 = time.perf_counter()
-    latest_dxy = crud.get_latest_dxy_rate(db)
-    dxy_query_ms = (time.perf_counter() - t_dxy0) * 1000
-
-    if latest_dxy:
+    if redis_dxy is not None:
+        # case 2: DXY Redis 성공 — DB call 없음, dxy_query_ms 미기록
         data_section["indices"] = {
             "dxy": {
-                "rate": latest_dxy["rate"],
-                "timestamp": latest_dxy["timestamp"],
-                "source": latest_dxy["source"],
+                "rate": redis_dxy["rate"],
+                "timestamp": redis_dxy["timestamp"],
+                "source": redis_dxy["source"],
             }
         }
+        dxy_path = "redis"
+        dxy_query_ms: Optional[float] = None
+    else:
+        # case 3/4: DXY Redis 실패 → DB fallback (DXY-only)
+        t_dxy0 = time.perf_counter()
+        latest_dxy = crud.get_latest_dxy_rate(db)
+        dxy_query_ms = (time.perf_counter() - t_dxy0) * 1000
+        if latest_dxy:
+            data_section["indices"] = {
+                "dxy": {
+                    "rate": latest_dxy["rate"],
+                    "timestamp": latest_dxy["timestamp"],
+                    "source": latest_dxy["source"],
+                }
+            }
+            dxy_path = "db_fallback"
+        else:
+            # DB도 없으면 indices 키 자체 생략 (기존 build_rates_payload 동작)
+            dxy_path = "missing"
 
     payload = {
         "type": "rates",
         "data": data_section,
     }
-    return payload, dxy_query_ms
+    return payload, dxy_path, dxy_query_ms
 
 
 async def warmup_broadcast_cache():
@@ -585,27 +610,34 @@ async def broadcast_rates_once():
         cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
         timings["redis_get_ms"] = (time.perf_counter() - t0) * 1000
 
-        # 1b) payload build (PR3: Redis-first 분기 + DB fallback)
-        # REDIS_LATEST_ENABLED=true 시 fetch_rates_from_redis 시도 → 성공이면 rates를
-        # Redis에서 가져오고 DXY/metadata만 DB call (A안). 실패 시 기존 DB 경로 fallback.
-        # PR3.5 분해 계측: redis_meta(단계별 timing) + payload_assemble_ms +
-        # dxy_query_ms + payload_build_unmeasured_ms로 long tail 원인 식별.
+        # 1b) payload build (PR3: Redis-first 분기 + DB fallback, PR5: DXY mirror + DXY-only fallback)
+        # REDIS_LATEST_ENABLED=true 시 fetch_rates_from_redis 시도 → rates 성공이면
+        # Redis path. DXY는 redis_dxy로 별도 (PR5: rates 성공이어도 DXY Redis 실패 시 DB-only fallback).
+        # rates 실패는 기존 build_rates_payload_with_timings (PR5: DXY DB 시간도 dxy_query_ms 포함).
         t1 = time.perf_counter()
         if REDIS_LATEST_ENABLED:
-            redis_rates, redis_meta = await fetch_rates_from_redis()
-            # success/fallback 모두 단계별 timing이 redis_meta에 포함됨 (PR3.5)
+            redis_rates, redis_dxy, redis_meta = await fetch_rates_from_redis()
+            # success/fallback 모두 단계별 timing이 redis_meta에 포함 (PR3.5 + PR5 latest_dxy_*)
             timings.update(redis_meta)
             if redis_rates is not None:
-                # Redis success — _assemble_payload_from_rates 시간을 별도 측정
+                # rates Redis success — DXY는 redis_dxy 또는 DB fallback (PR5)
                 t_assemble0 = time.perf_counter()
-                payload, dxy_query_ms = _assemble_payload_from_rates(db, redis_rates)
+                payload, dxy_path, dxy_query_ms = _assemble_payload_from_rates(
+                    db, redis_rates, redis_dxy
+                )
                 payload_assemble_ms = (time.perf_counter() - t_assemble0) * 1000
                 timings["payload_assemble_ms"] = payload_assemble_ms
-                timings["dxy_query_ms"] = dxy_query_ms
-                timings["payload_assemble_without_dxy_ms"] = payload_assemble_ms - dxy_query_ms
+                timings["dxy_path"] = dxy_path
+                # PR5: dxy_query_ms는 DB fallback 시에만 기록 (Redis 성공 시 미기록 → analyzer n 급감)
+                if dxy_query_ms is not None:
+                    timings["dxy_query_ms"] = dxy_query_ms
+                    timings["payload_assemble_without_dxy_ms"] = payload_assemble_ms - dxy_query_ms
+                else:
+                    # Redis 성공 path는 assemble 거의 전부가 metadata 조립 (DXY DB call 없음)
+                    timings["payload_assemble_without_dxy_ms"] = payload_assemble_ms
                 query_timings = {}
             else:
-                # Redis fallback — 기존 DB 경로
+                # rates Redis fallback — 전체 DB path (build_rates_payload_with_timings가 dxy_query_ms 포함)
                 payload, query_timings = build_rates_payload_with_timings(db)
         else:
             payload, query_timings = build_rates_payload_with_timings(db)

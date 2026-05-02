@@ -43,6 +43,12 @@ STALE_RATIO = 2
 # fetch path는 이걸 single source of truth로 사용 (각 data key의 mirrored_at 재검증 X).
 LATEST_INDEX_KEY = "latest:index"
 
+# DXY는 latest:index와 분리해서 관리한다 (PR5).
+# 이유: rates는 atomic snapshot이지만 DXY는 독립 optional indices field.
+# DXY 적재 실패가 latest:index 갱신을 막아 rates fallback 전체를 유발하면 안 된다
+# (DXY-only fallback 보존). DXY 자체는 단일 key로 충분.
+LATEST_DXY_KEY = "latest:dxy:current"
+
 
 # ── Key helpers ──────────────────────────────────────────────
 
@@ -204,6 +210,45 @@ def serialize_index(keys: List[str], mirrored_at: datetime) -> str:
     }, ensure_ascii=False)
 
 
+def serialize_dxy_value(rate: float, timestamp: str, source: str, mirrored_at: datetime) -> str:
+    """DXY value JSON 직렬화 (PR5). source 필드 포함 (rates와 다른 schema).
+
+    DXY는 indices.dxy.source가 'investing'/'cnbc'/'yahoo' 등 실제 데이터 출처라
+    payload shape에 포함된다. rates serialize_value()는 source 미지원이라 별도 함수.
+    """
+    payload = {
+        "rate": rate,
+        "timestamp": timestamp,
+        "source": source,
+        "mirrored_at": mirrored_at.isoformat(),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def deserialize_dxy_value(raw: Union[str, bytes]) -> Optional[Dict[str, Any]]:
+    """DXY raw → dict. mirrored_at은 timezone-aware datetime으로 변환 (PR5).
+
+    parse 실패 / mirrored_at naive / source 누락 → None (호출자가 redis_error 분류).
+    """
+    try:
+        data = json.loads(raw)
+        parsed_at = datetime.fromisoformat(data["mirrored_at"])
+        if parsed_at.tzinfo is None:
+            return None
+        # source 필수 (rates와 다른 점)
+        source = data["source"]
+        if not isinstance(source, str):
+            return None
+        return {
+            "rate": float(data["rate"]),
+            "timestamp": data["timestamp"],
+            "source": source,
+            "mirrored_at": parsed_at,
+        }
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def deserialize_index(raw: Union[str, bytes]) -> Optional[Dict[str, Any]]:
     """latest:index raw → dict. mirrored_at은 timezone-aware datetime으로 변환.
 
@@ -288,6 +333,10 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
         "source": 0,
         "failed": 0,
         "index_updated": False,
+        # PR5 — DXY는 별도 카테고리 (latest:index 분리, rates invariant 영향 없음)
+        "dxy_attempted": 0,
+        "dxy_loaded": 0,
+        "dxy_failed": 0,
     }
     mirrored_at = datetime.now(_KST)
     loaded_keys: List[str] = []  # 적재 성공 data key만 추적 (latest:index의 keys 값)
@@ -338,6 +387,22 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
         if await _set_latest(LATEST_INDEX_KEY, index_value):
             stats["index_updated"] = True
 
+    # PR5 — DXY mirror (별도 카테고리, latest:index 무관)
+    # rates 적재 성공 여부와 독립적으로 시도. 실패해도 rates fallback 유발 X.
+    dxy_record = crud.get_latest_dxy_rate(db)
+    if dxy_record:
+        stats["dxy_attempted"] += 1
+        dxy_value = serialize_dxy_value(
+            dxy_record["rate"],
+            dxy_record["timestamp"],
+            dxy_record["source"],
+            mirrored_at,
+        )
+        if await _set_latest(LATEST_DXY_KEY, dxy_value):
+            stats["dxy_loaded"] += 1
+        else:
+            stats["dxy_failed"] += 1
+
     return stats
 
 
@@ -373,11 +438,17 @@ async def warmup_latest_rates() -> Optional[Dict[str, Any]]:
         db.close()
 
 
-async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
-    """broadcast Redis-first read path. latest:index 기반 rates list 구성.
+async def fetch_rates_from_redis() -> Tuple[
+    Optional[List[Dict[str, Any]]],
+    Optional[Dict[str, Any]],
+    Dict[str, Any],
+]:
+    """broadcast Redis-first read path. latest:index 기반 rates + DXY 함께 fetch.
 
-    main.py를 import하지 않고 (순환 회피) Redis read만 책임. 실패 시 reason과
-    함께 None을 반환해 호출자(broadcast_rates_once)가 DB fallback을 트리거한다.
+    main.py를 import하지 않고 (순환 회피) Redis read만 책임. rates 실패 시
+    rates=None을 반환해 호출자(broadcast_rates_once)가 DB fallback을 트리거.
+    DXY는 독립 fetch — DXY Redis 실패가 rates fallback을 유발하지 않음 (PR5
+    DXY-only fallback). DB fallback 결과는 호출자(main._assemble_payload)가 결정.
 
     cycle freshness는 latest:index.mirrored_at 단일 source로 판단 (모든 data key가
     같은 cycle에서 적재되므로 개별 mirrored_at 재검증 불필요).
@@ -386,10 +457,15 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
     소요되거나 실패했는지(index_get / parse / data_get / decode) 식별 가능.
 
     Returns:
-        성공: (rates_list, meta) — meta는 latest_source='redis' + 단계별 timing +
-              mirror_age_ms + latest_key_count
-        실패: (None, meta) — meta는 latest_source='db_fallback' + fallback_reason +
-              실패 지점까지 측정된 timing
+        (rates, redis_dxy, meta)
+        - rates: rates list 또는 None (rates fallback 시)
+        - redis_dxy: Redis DXY dict (성공) 또는 None (Redis 실패 — DB fallback은 호출자가)
+        - meta:
+            * latest_source = 'redis' or 'db_fallback' (rates 기준)
+            * fallback_reason (rates Redis 실패 시) — rates 전용
+            * latest_dxy_get_ms (DXY Redis GET 시도 시간)
+            * latest_dxy_fallback_reason (DXY Redis 실패 시) — DXY 전용
+            * 단계별 timing (index/parse/data_get/decode/fetch_total/key_count/mirror_age)
     """
     fetch_t0 = time.perf_counter()
     meta: Dict[str, Any] = {}
@@ -402,7 +478,7 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = reason
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     # 2. index parse (mirrored_at tz-aware 검증 포함)
     t_parse0 = time.perf_counter()
@@ -412,14 +488,14 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "redis_error"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     # 3. cycle freshness 판정 (single source of truth)
     if is_stale(index["mirrored_at"]):
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "redis_stale"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     # 4. listed data keys MGET → 1 round-trip + 1 await yield (PR4)
     # PR3.5 측정에서 35 sequential async GET wall-clock이 long tail 주범으로 식별됨
@@ -434,13 +510,13 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "redis_error"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
     if not await redis_cache.circuit.can_attempt():
         meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "circuit_open"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     try:
         raw_values = await redis_cache.client.mget(keys)
@@ -451,7 +527,7 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "redis_error"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     # mget은 keys와 같은 길이 list 반환해야 정상 (Redis spec)
     if len(raw_values) != len(keys):
@@ -459,7 +535,7 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "redis_error"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     # 일부 None — 정책 유지: 1건이라도 누락 → 전체 fallback (PR3 stale와 일관)
     if any(v is None for v in raw_values):
@@ -467,7 +543,7 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
         meta["latest_source"] = "db_fallback"
         meta["fallback_reason"] = "redis_miss"
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, meta
+        return None, None, meta
 
     raw_pairs: List[Tuple[str, Any]] = list(zip(keys, raw_values))
     meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
@@ -483,24 +559,46 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
             meta["latest_source"] = "db_fallback"
             meta["fallback_reason"] = "redis_error"
             meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-            return None, meta
+            return None, None, meta
         rate_record = _key_to_rate_record(key, parsed)
         if rate_record is None:
             meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
             meta["latest_source"] = "db_fallback"
             meta["fallback_reason"] = "redis_error"
             meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-            return None, meta
+            return None, None, meta
         rates.append(rate_record)
     meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
 
-    # 6. 성공 메타 — mirror_age_ms (cycle freshness) + key_count + 전체 시간
+    # 6. rates 성공 메타 — mirror_age_ms (cycle freshness) + key_count
     mirror_age_ms = int((datetime.now(_KST) - index["mirrored_at"]).total_seconds() * 1000)
     meta["latest_source"] = "redis"
     meta["mirror_age_ms"] = mirror_age_ms
     meta["latest_key_count"] = len(rates)
+
+    # 7. DXY Redis fetch (PR5) — rates와 독립. DXY 실패는 rates fallback 안 만듦.
+    # DB fallback 시도는 호출자(_assemble_payload_from_rates)가 결정. fetch는 Redis만 책임.
+    redis_dxy: Optional[Dict[str, Any]] = None
+    t_dxy_get0 = time.perf_counter()
+    raw_dxy, dxy_reason = await _get_latest_with_reason(LATEST_DXY_KEY)
+    meta["latest_dxy_get_ms"] = (time.perf_counter() - t_dxy_get0) * 1000
+    if dxy_reason is not None:
+        meta["latest_dxy_fallback_reason"] = dxy_reason
+    else:
+        parsed_dxy = deserialize_dxy_value(raw_dxy)
+        if parsed_dxy is None:
+            meta["latest_dxy_fallback_reason"] = "redis_error"
+        elif is_stale(parsed_dxy["mirrored_at"]):
+            meta["latest_dxy_fallback_reason"] = "redis_stale"
+        else:
+            redis_dxy = {
+                "rate": parsed_dxy["rate"],
+                "timestamp": parsed_dxy["timestamp"],
+                "source": parsed_dxy["source"],
+            }
+
     meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-    return rates, meta
+    return rates, redis_dxy, meta
 
 
 async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:
@@ -536,6 +634,7 @@ async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:
 __all__ = [
     "STALE_RATIO",
     "LATEST_INDEX_KEY",
+    "LATEST_DXY_KEY",
     "latest_key_bank",
     "latest_key_source",
     "latest_key_investing",
@@ -543,6 +642,8 @@ __all__ = [
     "deserialize_value",
     "serialize_index",
     "deserialize_index",
+    "serialize_dxy_value",
+    "deserialize_dxy_value",
     "is_stale",
     "fetch_rates_from_redis",
     "warmup_latest_rates",

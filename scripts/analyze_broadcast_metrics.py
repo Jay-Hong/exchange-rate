@@ -72,7 +72,14 @@ METRICS = [
     "dxy_query_ms",
     "payload_assemble_without_dxy_ms",
     "payload_build_unmeasured_ms",
+    # PR5 — DXY mirror (Redis DXY GET 시간). DB DXY 조회는 dxy_query_ms 그대로 유지
+    # — Redis 성공 시 미기록이라 PR5 후 dxy_query_ms n 급감으로 효과 가시화.
+    "latest_dxy_get_ms",
 ]
+
+# PR5 — DXY 전용 fallback reason 분류 (rates fallback_reason과 분리).
+# 과거 로그(필드 없음)는 Counter가 자연 제외.
+DXY_FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_open"]
 
 # PR3 — fallback reason 분류 (broadcast_rates_once의 timings extra와 일치).
 # 과거 PR1/PR2 로그에는 fallback_reason 필드가 없어 Counter가 자연스럽게 0건 처리.
@@ -114,6 +121,20 @@ def classify_latest_source(rec: Dict[str, Any]) -> str:
         return "redis"
     if src == "db_fallback":
         return "db_fallback"
+    return "none"
+
+
+def classify_dxy_path(rec: Dict[str, Any]) -> str:
+    """PR5 timings.dxy_path 분류 (DXY mirror cache 경로).
+
+    - 'redis': DXY Redis 성공 (PR5 success)
+    - 'db_fallback': DXY Redis 실패 → DB fallback 성공 (DXY-only, rates는 영향 없음)
+    - 'missing': DXY Redis 실패 + DB도 없음 → indices 키 생략
+    - 'none': dxy_path 필드 자체 없음 (PR4 이전 로그 또는 rates fallback path)
+    """
+    p = rec.get("dxy_path")
+    if p in ("redis", "db_fallback", "missing"):
+        return p
     return "none"
 
 
@@ -255,7 +276,7 @@ def format_table(records: List[Dict[str, Any]], top: int, since: datetime, until
                 fallback_bucket[reason] += 1
         if fallback_bucket:
             lines.append("")
-            lines.append("[PR3 fallback_reason 분포]")
+            lines.append("[PR3 fallback_reason 분포] (rates Redis fallback 전용)")
             fb_total = sum(fallback_bucket.values()) or 1
             for k in FALLBACK_REASONS:
                 v = fallback_bucket.get(k, 0)
@@ -265,6 +286,39 @@ def format_table(records: List[Dict[str, Any]], top: int, since: datetime, until
             unknown = {k: v for k, v in fallback_bucket.items() if k not in FALLBACK_REASONS}
             for k, v in sorted(unknown.items(), key=lambda x: -x[1]):
                 lines.append(f"  {k:15s}: {v:6d} ({v*100/fb_total:.1f}%) [unknown]")
+
+    # PR5 — DXY path 분포 + DXY fallback reason (rates와 분리)
+    dxy_bucket = Counter(classify_dxy_path(r) for r in records)
+    pr5_active = (dxy_bucket["redis"] + dxy_bucket["db_fallback"] + dxy_bucket["missing"]) > 0
+    if pr5_active:
+        lines.append("")
+        lines.append("[PR5 dxy_path 분포]")
+        total_dxy = sum(dxy_bucket.values()) or 1
+        for k in ("redis", "db_fallback", "missing", "none"):
+            v = dxy_bucket.get(k, 0)
+            lines.append(f"  {k:15s}: {v:6d} ({v*100/total_dxy:.1f}%)")
+        # dxy_redis_hit_rate: PR5 records (redis + db_fallback + missing) 중 redis 비율
+        pr5_records = dxy_bucket["redis"] + dxy_bucket["db_fallback"] + dxy_bucket["missing"]
+        if pr5_records > 0:
+            hit_rate = dxy_bucket["redis"] * 100 / pr5_records
+            lines.append(
+                f"  dxy_redis_hit_rate (PR5 records 한정): {hit_rate:.2f}% "
+                f"({dxy_bucket['redis']}/{pr5_records})"
+            )
+
+        dxy_fb_bucket = Counter()
+        for r in records:
+            reason = r.get("latest_dxy_fallback_reason")
+            if reason:
+                dxy_fb_bucket[reason] += 1
+        if dxy_fb_bucket:
+            lines.append("")
+            lines.append("[PR5 latest_dxy_fallback_reason 분포] (DXY-only fallback)")
+            dxy_fb_total = sum(dxy_fb_bucket.values()) or 1
+            for k in DXY_FALLBACK_REASONS:
+                v = dxy_fb_bucket.get(k, 0)
+                if v > 0:
+                    lines.append(f"  {k:15s}: {v:6d} ({v*100/dxy_fb_total:.1f}%)")
 
     big = sorted(
         [r for r in records if isinstance(r.get("payload_build_ms"), (int, float))],
@@ -315,6 +369,18 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
         latest_bucket["redis"] * 100 / pr3_records if pr3_records > 0 else None
     )
 
+    # PR5 — dxy_path 분포 + latest_dxy_fallback_reason + dxy_redis_hit_rate
+    dxy_bucket = Counter(classify_dxy_path(r) for r in records)
+    dxy_fb_bucket = Counter()
+    for r in records:
+        reason = r.get("latest_dxy_fallback_reason")
+        if reason:
+            dxy_fb_bucket[reason] += 1
+    pr5_records = dxy_bucket["redis"] + dxy_bucket["db_fallback"] + dxy_bucket["missing"]
+    dxy_redis_hit_rate = (
+        dxy_bucket["redis"] * 100 / pr5_records if pr5_records > 0 else None
+    )
+
     big = sorted(
         [r for r in records if isinstance(r.get("payload_build_ms"), (int, float))],
         key=lambda r: -r["payload_build_ms"],
@@ -332,6 +398,10 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
             "latest_source": r.get("latest_source"),
             "fallback_reason": r.get("fallback_reason"),
             "mirror_age_ms": r.get("mirror_age_ms"),
+            # PR5 필드
+            "dxy_path": r.get("dxy_path"),
+            "latest_dxy_fallback_reason": r.get("latest_dxy_fallback_reason"),
+            "latest_dxy_get_ms": r.get("latest_dxy_get_ms"),
         }
         for r in big
     ]
@@ -352,6 +422,13 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
                 "fallback_reason": dict(fallback_bucket),
                 "redis_hit_rate_percent": redis_hit_rate,
                 "pr3_records": pr3_records,
+            },
+            # PR5 신규 (DXY mirror — rates와 분리. 과거 로그는 dxy_path 'none' 카운트)
+            "pr5": {
+                "dxy_path": dict(dxy_bucket),
+                "latest_dxy_fallback_reason": dict(dxy_fb_bucket),
+                "dxy_redis_hit_rate_percent": dxy_redis_hit_rate,
+                "pr5_records": pr5_records,
             },
             "top_spikes": top_spikes,
         },
