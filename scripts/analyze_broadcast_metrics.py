@@ -60,6 +60,18 @@ METRICS = [
     "broadcast_send_ms",
     # PR3 — Redis-first read path (mirror cycle freshness, latest:index 기준)
     "mirror_age_ms",
+    # PR3.5 — fetch_rates_from_redis 단계별 분해 + assemble/dxy/unmeasured.
+    # 과거 PR1/PR2/PR3 로그(필드 없음)는 metric_stats가 자동 제외 (n=0).
+    "latest_fetch_total_ms",
+    "latest_index_get_ms",
+    "latest_index_parse_ms",
+    "latest_data_get_ms",
+    "latest_decode_ms",
+    "latest_key_count",
+    "payload_assemble_ms",
+    "dxy_query_ms",
+    "payload_assemble_without_dxy_ms",
+    "payload_build_unmeasured_ms",
 ]
 
 # PR3 — fallback reason 분류 (broadcast_rates_once의 timings extra와 일치).

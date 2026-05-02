@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -381,44 +382,87 @@ async def fetch_rates_from_redis() -> Tuple[Optional[List[Dict[str, Any]]], Dict
     cycle freshness는 latest:index.mirrored_at 단일 source로 판단 (모든 data key가
     같은 cycle에서 적재되므로 개별 mirrored_at 재검증 불필요).
 
+    PR3.5 분해 계측: 성공/실패 모두 meta에 단계별 timing 포함 — 어디서 시간이
+    소요되거나 실패했는지(index_get / parse / data_get / decode) 식별 가능.
+
     Returns:
-        성공: (rates_list, {'latest_source': 'redis', 'mirror_age_ms': int})
-        실패: (None, {'fallback_reason': 'redis_miss'|'redis_stale'|'redis_error'|'circuit_open'})
+        성공: (rates_list, meta) — meta는 latest_source='redis' + 단계별 timing +
+              mirror_age_ms + latest_key_count
+        실패: (None, meta) — meta는 latest_source='db_fallback' + fallback_reason +
+              실패 지점까지 측정된 timing
     """
+    fetch_t0 = time.perf_counter()
+    meta: Dict[str, Any] = {}
+
     # 1. latest:index 읽기
+    t_index_get0 = time.perf_counter()
     raw_index, reason = await _get_latest_with_reason(LATEST_INDEX_KEY)
+    meta["latest_index_get_ms"] = (time.perf_counter() - t_index_get0) * 1000
     if reason is not None:
-        return None, {"fallback_reason": reason}
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = reason
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
 
     # 2. index parse (mirrored_at tz-aware 검증 포함)
+    t_parse0 = time.perf_counter()
     index = deserialize_index(raw_index)
+    meta["latest_index_parse_ms"] = (time.perf_counter() - t_parse0) * 1000
     if index is None:
-        return None, {"fallback_reason": "redis_error"}
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "redis_error"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
 
     # 3. cycle freshness 판정 (single source of truth)
     if is_stale(index["mirrored_at"]):
-        return None, {"fallback_reason": "redis_stale"}
+        meta["latest_source"] = "db_fallback"
+        meta["fallback_reason"] = "redis_stale"
+        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+        return None, meta
 
-    # 4. listed data keys GET → rates list 구성. 1건 실패라도 전체 fallback.
-    rates: List[Dict[str, Any]] = []
+    # 4. listed data keys GET → 모두 raw 수집 (decode는 별도 단계로 분리 측정)
+    t_data_get0 = time.perf_counter()
+    raw_pairs: List[Tuple[str, Any]] = []
     for key in index["keys"]:
         raw_v, reason_v = await _get_latest_with_reason(key)
         if reason_v is not None:
-            return None, {"fallback_reason": reason_v}
+            meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+            meta["latest_source"] = "db_fallback"
+            meta["fallback_reason"] = reason_v
+            meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+            return None, meta
+        raw_pairs.append((key, raw_v))
+    meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
+
+    # 5. decode + key→rate 변환
+    t_decode0 = time.perf_counter()
+    rates: List[Dict[str, Any]] = []
+    for key, raw_v in raw_pairs:
         parsed = deserialize_value(raw_v)
         if parsed is None:
-            return None, {"fallback_reason": "redis_error"}
+            meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
+            meta["latest_source"] = "db_fallback"
+            meta["fallback_reason"] = "redis_error"
+            meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+            return None, meta
         rate_record = _key_to_rate_record(key, parsed)
         if rate_record is None:
-            return None, {"fallback_reason": "redis_error"}
+            meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
+            meta["latest_source"] = "db_fallback"
+            meta["fallback_reason"] = "redis_error"
+            meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+            return None, meta
         rates.append(rate_record)
+    meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
 
-    # 5. mirror_age_ms — index.mirrored_at 기준 (cycle freshness)
+    # 6. 성공 메타 — mirror_age_ms (cycle freshness) + key_count + 전체 시간
     mirror_age_ms = int((datetime.now(_KST) - index["mirrored_at"]).total_seconds() * 1000)
-    return rates, {
-        "latest_source": "redis",
-        "mirror_age_ms": mirror_age_ms,
-    }
+    meta["latest_source"] = "redis"
+    meta["mirror_age_ms"] = mirror_age_ms
+    meta["latest_key_count"] = len(rates)
+    meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+    return rates, meta
 
 
 async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:

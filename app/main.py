@@ -390,14 +390,21 @@ def build_rates_payload_with_timings(db: SessionLocal) -> tuple:
     return payload, query_timings
 
 
-def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> dict:
+def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> tuple:
     """Redis에서 받은 rates list로 build_rates_payload와 동일 shape 조립 (PR3 Step 4).
 
     DXY/indices는 PR3 A안에 따라 기존 DB 조회 유지 (mirror 범위 외, broadcast hot
     path 부담 미미한 1 row 조회). metadata는 build_rates_payload 패턴 그대로.
 
+    PR3.5 분해 계측: dxy_query_ms를 별도 반환 — payload_assemble_ms 안의
+    DXY DB 조회 비용을 분리해 long tail 원인 식별에 활용.
+
     rates 인자 출처는 fetch_rates_from_redis()의 반환값 — get_all_rates_flat과
     동일한 legacy shape: [{currency, bank, rate, timestamp}, ...].
+
+    Returns:
+        (payload, dxy_query_ms): payload는 build_rates_payload와 동일 shape,
+        dxy_query_ms는 crud.get_latest_dxy_rate 측정 시간.
     """
     currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
     banks = sorted(crud.LEGACY_METADATA_BANKS)
@@ -417,7 +424,10 @@ def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> dict:
         },
     }
 
+    t_dxy0 = time.perf_counter()
     latest_dxy = crud.get_latest_dxy_rate(db)
+    dxy_query_ms = (time.perf_counter() - t_dxy0) * 1000
+
     if latest_dxy:
         data_section["indices"] = {
             "dxy": {
@@ -427,10 +437,11 @@ def _assemble_payload_from_rates(db: SessionLocal, rates: list) -> dict:
             }
         }
 
-    return {
+    payload = {
         "type": "rates",
         "data": data_section,
     }
+    return payload, dxy_query_ms
 
 
 async def warmup_broadcast_cache():
@@ -577,24 +588,38 @@ async def broadcast_rates_once():
         # 1b) payload build (PR3: Redis-first 분기 + DB fallback)
         # REDIS_LATEST_ENABLED=true 시 fetch_rates_from_redis 시도 → 성공이면 rates를
         # Redis에서 가져오고 DXY/metadata만 DB call (A안). 실패 시 기존 DB 경로 fallback.
-        # latest_source / mirror_age_ms / fallback_reason은 timings extra로 노출 →
-        # analyzer가 redis_hit_rate, mirror staleness, fallback 분포 집계.
+        # PR3.5 분해 계측: redis_meta(단계별 timing) + payload_assemble_ms +
+        # dxy_query_ms + payload_build_unmeasured_ms로 long tail 원인 식별.
         t1 = time.perf_counter()
         if REDIS_LATEST_ENABLED:
             redis_rates, redis_meta = await fetch_rates_from_redis()
+            # success/fallback 모두 단계별 timing이 redis_meta에 포함됨 (PR3.5)
+            timings.update(redis_meta)
             if redis_rates is not None:
-                payload = _assemble_payload_from_rates(db, redis_rates)
-                timings["latest_source"] = "redis"
-                timings["mirror_age_ms"] = redis_meta["mirror_age_ms"]
+                # Redis success — _assemble_payload_from_rates 시간을 별도 측정
+                t_assemble0 = time.perf_counter()
+                payload, dxy_query_ms = _assemble_payload_from_rates(db, redis_rates)
+                payload_assemble_ms = (time.perf_counter() - t_assemble0) * 1000
+                timings["payload_assemble_ms"] = payload_assemble_ms
+                timings["dxy_query_ms"] = dxy_query_ms
+                timings["payload_assemble_without_dxy_ms"] = payload_assemble_ms - dxy_query_ms
                 query_timings = {}
             else:
+                # Redis fallback — 기존 DB 경로
                 payload, query_timings = build_rates_payload_with_timings(db)
-                timings["latest_source"] = "db_fallback"
-                timings["fallback_reason"] = redis_meta["fallback_reason"]
         else:
             payload, query_timings = build_rates_payload_with_timings(db)
         timings["payload_build_ms"] = (time.perf_counter() - t1) * 1000
         timings.update(query_timings)
+
+        # PR3.5 unmeasured: payload_build_ms 안에서 측정되지 않은 시간 (Redis success
+        # path에 한해 의미). 큰 값이면 event loop blocking 또는 코루틴 재개 지연 신호.
+        if "latest_fetch_total_ms" in timings and "payload_assemble_ms" in timings:
+            timings["payload_build_unmeasured_ms"] = (
+                timings["payload_build_ms"]
+                - timings["latest_fetch_total_ms"]
+                - timings["payload_assemble_ms"]
+            )
 
         # 2) JSON serialize + diff
         t2 = time.perf_counter()
