@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from sqlalchemy.orm import Session
 
-from app import crud
+from app import config, crud
 from app.cache import redis_cache
 from app.config import LATEST_MIRROR_INTERVAL_SECONDS
 from app.database import SessionLocal
@@ -308,6 +308,25 @@ def _key_to_rate_record(key: str, parsed: Dict[str, Any]) -> Optional[Dict[str, 
 # ── Mirror core + wrappers ────────────────────────────────────
 
 
+def should_include_source_in_latest(source: str, asset: str) -> bool:
+    """Mirror가 broadcast latest:index에 포함할 source/asset인지 결정 (PR6b-2a).
+
+    PR6 KRX 미국달러선물의 broadcast 노출 토글 — KRX_BROADCAST_INCLUDE
+    default false. KRX usd-krw-futures는 토글 false 시 mirror skip
+    → broadcast rates 배열에 등장 X (앱 호환성 검증 전 안전 차단).
+
+    scope: source="krx" + asset="usd-krw-futures" 한정. KRX의 다른
+    asset이나 다른 source는 토글 무관 (기존 mirror 동작 유지).
+
+    Returns:
+        True — mirror 포함 (default 동작)
+        False — KRX usd-krw-futures이고 토글 false인 경우만
+    """
+    if source == "krx" and asset == "usd-krw-futures":
+        return config.KRX_BROADCAST_INCLUDE
+    return True
+
+
 async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
     """DB latest를 Redis로 적재하는 core. warmup과 mirror_once가 공유.
 
@@ -337,6 +356,9 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
         "dxy_attempted": 0,
         "dxy_loaded": 0,
         "dxy_failed": 0,
+        # PR6b-2a — broadcast 노출 토글로 mirror skip된 source record 카운트.
+        # invariant: source_skipped는 attempted_total에 포함 X (별도 관찰용).
+        "source_skipped": 0,
     }
     mirrored_at = datetime.now(_KST)
     loaded_keys: List[str] = []  # 적재 성공 data key만 추적 (latest:index의 keys 값)
@@ -369,9 +391,17 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
 
     # source — 5 거래소 × 1 asset (asset=None: 전체)
     # legacy adapter shape: {currency: asset, bank: source, rate, timestamp}
+    # PR6b-2a — KRX usd-krw-futures는 KRX_BROADCAST_INCLUDE=true일 때만 mirror.
+    # default false → broadcast/app 영향 0 (앱 호환성 검증 후 토글 ON).
+    # invariant: skip은 attempted_total 전 단계 → attempted = loaded + failed 유지.
     for record in crud.get_source_rates_as_legacy_format(db):
+        source = record["bank"]
+        asset = record["currency"]
+        if not should_include_source_in_latest(source, asset):
+            stats["source_skipped"] += 1
+            continue
         stats["attempted_total"] += 1
-        key = latest_key_source(record["bank"], record["currency"])
+        key = latest_key_source(source, asset)
         value = serialize_value(record["rate"], record["timestamp"], mirrored_at)
         if await _set_latest(key, value):
             stats["loaded_total"] += 1

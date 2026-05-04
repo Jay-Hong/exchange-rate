@@ -43,6 +43,12 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 # stale 판정은 mirrored_at 기준 interval * 2 초 초과 (latest_rates_cache.is_stale).
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
+
+# KRX_BROADCAST_INCLUDE: PR6 KRX 미국달러선물의 broadcast 노출 토글.
+# 저장된 KRX usd-krw-futures를 latest mirror + broadcast rates 배열에 포함할지.
+# default false — 앱 호환성 검증 전 안전 차단. canary 진입 시 단계적 ON 권장.
+# scope: source="krx" + asset="usd-krw-futures" 한정 (KRX 다른 자산은 영향 X).
+KRX_BROADCAST_INCLUDE = os.getenv("KRX_BROADCAST_INCLUDE", "false").lower() == "true"
 if LATEST_MIRROR_INTERVAL_SECONDS < 1:
     raise ValueError(
         f"LATEST_MIRROR_INTERVAL_SECONDS must be >= 1 (got {LATEST_MIRROR_INTERVAL_SECONDS}). "
