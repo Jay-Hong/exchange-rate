@@ -11,7 +11,7 @@ from __future__ import annotations
 import io
 import unittest
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
 from app.sources.kis_master import (
@@ -23,6 +23,7 @@ from app.sources.kis_master import (
     fetch_commodity_future_master,
     parse_commodity_future_master,
     resolve_front_month_usd_futures,
+    select_active_usd_futures_contract,
     select_front_month_usd_futures,
 )
 
@@ -254,6 +255,110 @@ class TestSelectFrontMonth(unittest.TestCase):
         self.assertIsNone(
             select_front_month_usd_futures(only_gold, today=date(2026, 5, 4))
         )
+
+
+# ---------------------------------------------------------------------------
+# select_active_usd_futures_contract — intraday rollover (PR6c-1)
+# ---------------------------------------------------------------------------
+
+class TestSelectActiveContract(unittest.TestCase):
+    """만기일 11:30:00 포함, 11:30:01 이후 다음 월물 rollover."""
+
+    def setUp(self):
+        self.contracts = [
+            ContractInfo("A75605", "KR4A75650007", "미국달러 F 202605",
+                         "202605", date(2026, 5, 18)),
+            ContractInfo("A75606", "KR4A75660006", "미국달러 F 202606",
+                         "202606", date(2026, 6, 15)),
+            ContractInfo("A75607", "KR4A75670005", "미국달러 F 202607",
+                         "202607", date(2026, 7, 20)),
+            # 다른 상품선물 — USD futures 후보 X
+            ContractInfo("Z00001", "KR4Z00010003", "금 F 202605",
+                         "202605", date(2026, 5, 18)),
+        ]
+
+    # 비-만기일 (5/4) → date-level과 동일
+    def test_non_expiry_day_morning(self):
+        now = datetime(2026, 5, 4, 9, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75605",
+        )
+
+    def test_non_expiry_day_evening(self):
+        """비-만기일 야간장 시간이라도 11:30 정책은 만기일에만 적용."""
+        now = datetime(2026, 5, 4, 18, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75605",
+        )
+
+    # 만기일 11:30:00까지 포함 → 만기 종목
+    def test_expiry_day_morning_keeps_front(self):
+        now = datetime(2026, 5, 18, 11, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75605",
+        )
+
+    def test_expiry_day_at_11_30_00_keeps_front(self):
+        """만기일 11:30:00 정각 — 포함 (kis_futures.get_active_session 일관)."""
+        now = datetime(2026, 5, 18, 11, 30, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75605",
+        )
+
+    # 만기일 11:30:01 이후 → 다음 월물 rollover
+    def test_expiry_day_at_11_30_01_rollover(self):
+        """만기일 11:30:01 — 즉시 다음 월물."""
+        now = datetime(2026, 5, 18, 11, 30, 1)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    def test_expiry_day_noon_rollover(self):
+        now = datetime(2026, 5, 18, 12, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    def test_expiry_day_night_session_rollover(self):
+        """만기일 18:00 야간장 — 다음 월물 (rollover 유지)."""
+        now = datetime(2026, 5, 18, 18, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    # 만기 다음날 (5/19) → date-level rollover
+    def test_day_after_expiry_uses_date_level(self):
+        now = datetime(2026, 5, 19, 9, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    # edge cases
+    def test_no_usd_futures_returns_none(self):
+        only_gold = [
+            ContractInfo("Z00001", "KR4Z00010003", "금 F 202605",
+                         "202605", date(2026, 5, 18)),
+        ]
+        now = datetime(2026, 5, 18, 12, 0, 0)
+        self.assertIsNone(select_active_usd_futures_contract(only_gold, now))
+
+    def test_expiry_after_1130_no_next_contract(self):
+        """만기일 11:30 이후 + 다음 월물 미등록 → None."""
+        single = [self.contracts[0]]  # A75605만
+        now = datetime(2026, 5, 18, 12, 0, 0)
+        self.assertIsNone(select_active_usd_futures_contract(single, now))
+
+    def test_all_contracts_expired(self):
+        now = datetime(2027, 1, 1, 9, 0, 0)
+        self.assertIsNone(select_active_usd_futures_contract(self.contracts, now))
 
 
 # ---------------------------------------------------------------------------

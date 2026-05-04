@@ -28,7 +28,7 @@ import io
 import logging
 import zipfile
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 from typing import List, Optional
 
 import requests
@@ -198,6 +198,54 @@ def select_front_month_usd_futures(
     if not candidates:
         return None
     return min(candidates, key=lambda c: c.expiry_date)
+
+
+# 만기일 정규세션 종료 시각 — kis_futures.get_active_session()과 일관.
+# 11:30:00까지 포함, 11:30:01 이후 다음 월물로 rollover.
+_EXPIRY_REGULAR_END = time(11, 30, 0)
+
+
+def select_active_usd_futures_contract(
+    contracts: List[ContractInfo],
+    now_kst: datetime,
+) -> Optional[ContractInfo]:
+    """USD/KRW 선물 중 now_kst 기준 **active한 계약** 선택 (intraday rollover).
+
+    PR6c-1 — date-level select_front_month_usd_futures의 한계 (만기일
+    11:30 이후 잘못된 종목) 보강. 운영 scheduler에서 본 함수를 직접 사용.
+
+    분기 정책 (Codex 합의):
+      - 비-만기일 → date-level select와 동일
+      - 만기일 11:30:00까지 (포함) → 만기 종목 유지
+      - 만기일 11:30:01 이후 → 다음 월물 (만기 가까운 다음 USD futures)
+        다음 월물 없으면 None.
+
+    11:30 정각 포함 정책은 kis_futures.get_active_session()의 만기일
+    정규세션 종료 시각과 일관 (CF가 11:30까지 active).
+
+    Args:
+        contracts: parse_commodity_future_master() 결과
+        now_kst: 현재 시각 (KST naive datetime)
+
+    Returns:
+        ContractInfo 또는 None (USD futures 없거나 모두 만료, 또는 만기일
+        11:30 이후 + 다음 월물 미등록).
+    """
+    today = now_kst.date()
+    # USD futures 중 today 기준 미만료 종목, 만기일 빠른 순 정렬
+    usd_futures = sorted(
+        [c for c in contracts if c.is_usd_krw_futures() and c.expiry_date >= today],
+        key=lambda c: c.expiry_date,
+    )
+    if not usd_futures:
+        return None
+    front = usd_futures[0]
+    # 만기일 11:30:01 이후 → 다음 월물
+    if front.expiry_date == today and now_kst.time() > _EXPIRY_REGULAR_END:
+        if len(usd_futures) >= 2:
+            return usd_futures[1]
+        return None  # 다음 월물 미등록 — caller가 fallback 처리
+    return front
 
 
 def resolve_front_month_usd_futures(
