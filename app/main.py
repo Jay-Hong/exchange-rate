@@ -531,10 +531,17 @@ async def lifespan(app: FastAPI):
 
     # ✅ Broadcasting은 APScheduler에서 자동 실행 (매분 00, 10, 20, 30, 40, 50초)
 
+    # PR6c-2b — KRX 미국달러선물 client (background bootstrap, 즉시 return)
+    # KRX_FUTURES_ENABLED=false 또는 어떤 단계 실패도 startup 영향 0.
+    await scheduler.start_krx_futures_client()
+
     yield
 
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
+
+    # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
+    await scheduler.shutdown_krx_futures_client()
 
     # Selenium Queue Worker 종료
     await scheduler.shutdown_selenium_queue()

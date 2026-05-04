@@ -26,7 +26,7 @@ from app.crawlers import bs
 from app.crawlers import citi
 # Selenium 크롤러(shinhan, ibk, nh, sc)는 subprocess로 실행되므로 import 불필요
 from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
-from app import crud
+from app import config, crud
 from app.config import LATEST_MIRROR_INTERVAL_SECONDS, REDIS_LATEST_ENABLED
 from app.database import SessionLocal
 from app.admin.crawler_stats import crawler_stats
@@ -1578,3 +1578,143 @@ def start_scheduler():
 
     # 스케줄러 시작
     scheduler.start()
+
+
+# =============================================================================
+# PR6c-2b — KRX 미국달러선물 lifecycle (KRX optional source 원칙)
+# =============================================================================
+# main.py lifespan은 호출만 (start_scheduler() 패턴 일관). 실제 lifecycle은
+# 본 모듈에 집중. failure isolation: 모든 단계 실패가 다른 startup/shutdown
+# 영향 0. background bootstrap으로 main.py blocking 방지.
+
+# 모듈 globals — Optional, 시작 전 None
+krx_bootstrap_task = None  # 비동기 bootstrap 추적 (shutdown cancel 용)
+krx_futures_client = None  # KisFuturesClient 인스턴스
+krx_futures_task = None    # client.start() 실행 중인 task
+
+
+async def _run_krx_futures_client(client):
+    """KisFuturesClient.start() wrapper — task crash 시 logger.exception.
+
+    그냥 create_task만 두면 task 예외가 'Task exception was never retrieved'
+    경고로만 남고 가시성 떨어짐. 본 wrapper로 broad exception 잡고 명시
+    로깅. CancelledError는 propagate (shutdown 정상 흐름).
+    """
+    try:
+        await client.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[krx] KisFuturesClient task crashed")
+
+
+async def start_krx_futures_client():
+    """KRX client startup — main.py lifespan blocking 방지 위해 즉시 return.
+
+    실제 bootstrap (fetch + select + client 시작)은 background task에서.
+    중복 호출 방지 (testing/재시작/수동 호출 시 중복 task 방지).
+    """
+    global krx_bootstrap_task
+
+    if not config.KRX_FUTURES_ENABLED:
+        logger.info("[krx] KRX_FUTURES_ENABLED=false, skip start")
+        return
+
+    # 중복 start 방지 — bootstrap 또는 client task 이미 진행 중이면 skip
+    if krx_bootstrap_task is not None and not krx_bootstrap_task.done():
+        logger.debug("[krx] bootstrap 진행 중, 중복 start 무시")
+        return
+    if krx_futures_task is not None and not krx_futures_task.done():
+        logger.debug("[krx] client task 진행 중, 중복 start 무시")
+        return
+
+    # background bootstrap — main.py lifespan 즉시 진행
+    krx_bootstrap_task = asyncio.create_task(_bootstrap_krx_futures_client())
+
+
+async def _bootstrap_krx_futures_client():
+    """background bootstrap — fetch + select + client 시작.
+
+    main.py lifespan과 분리. 실패 시 logger.warning/exception + KRX만 비활성.
+    """
+    global krx_futures_client, krx_futures_task
+
+    # 함수 내부 import — 순환 참조 방지 + 운영 미연결 시점 import 영향 0
+    from app.crawlers.krx_kis import (
+        KisApprovalManager,
+        KisFuturesClient,
+        KrxDbWriter,
+    )
+    from app.sources.kis_master import (
+        fetch_commodity_future_master,
+        parse_commodity_future_master,
+        select_active_usd_futures_contract,
+    )
+
+    try:
+        # fetch timeout 짧게 — KRX 막혀도 빠르게 비활성 (KRX optional 원칙)
+        raw = await asyncio.to_thread(fetch_commodity_future_master, timeout=5)
+        contracts = await asyncio.to_thread(parse_commodity_future_master, raw)
+        now_kst = datetime.now(KST).replace(tzinfo=None)
+        resolved = select_active_usd_futures_contract(contracts, now_kst)
+        if resolved is None:
+            logger.warning("[krx] active USD futures contract 없음, KRX 비활성")
+            return
+
+        app_key = os.getenv("KIS_APP_KEY")
+        app_secret = os.getenv("KIS_APP_SECRET")
+        if not app_key or not app_secret:
+            logger.warning("[krx] KIS_APP_KEY/SECRET 미설정, KRX 비활성")
+            return
+
+        approval = KisApprovalManager(app_key=app_key, app_secret=app_secret)
+        client = KisFuturesClient(approval, contract=resolved)
+        client.add_tick_handler(KrxDbWriter())
+
+        krx_futures_client = client
+        krx_futures_task = asyncio.create_task(_run_krx_futures_client(client))
+        logger.info(
+            "[krx] KisFuturesClient 시작 — contract=%s expiry=%s",
+            resolved.short_code, resolved.expiry_date.isoformat(),
+        )
+    except Exception:
+        logger.exception("[krx] bootstrap 실패 (격리)")
+        krx_futures_client = None
+        krx_futures_task = None
+
+
+async def shutdown_krx_futures_client():
+    """KRX client + bootstrap 안전 종료.
+
+    bootstrap 진행 중에 shutdown 호출되면 bootstrap도 cancel.
+    """
+    global krx_bootstrap_task, krx_futures_client, krx_futures_task
+
+    # bootstrap 진행 중이면 먼저 cancel
+    if krx_bootstrap_task is not None and not krx_bootstrap_task.done():
+        krx_bootstrap_task.cancel()
+        try:
+            await krx_bootstrap_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[krx] bootstrap cancel 실패")
+    krx_bootstrap_task = None
+
+    if krx_futures_client is not None:
+        try:
+            await krx_futures_client.stop()
+        except Exception:
+            logger.exception("[krx] client.stop() 실패")
+
+    if krx_futures_task is not None and not krx_futures_task.done():
+        krx_futures_task.cancel()
+        try:
+            await krx_futures_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[krx] task await 실패")
+
+    krx_futures_client = None
+    krx_futures_task = None
