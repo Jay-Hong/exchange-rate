@@ -1,9 +1,17 @@
-"""KIS WebSocket smoke test — KRX USD futures candidate.
+"""KIS WebSocket smoke test — KRX USD futures (주간/야간 자동 감지).
 
 Read-only one-off script for PR6 research. It verifies:
   1. WebSocket approval key can be loaded or issued.
   2. KIS WebSocket can connect.
-  3. Commodity futures conclusion/quote subscriptions are accepted or rejected.
+  3. Active KRX session 기준 TR 자동 선택 + 구독 success/tick 수신.
+
+Session 자동 감지 (app.sources.kis_futures.get_active_session):
+  CF (주간 정규세션 08:30-15:45) → H0CFCNT0/H0CFASP0
+  CM (야간세션 17:50-06:00, 시작일 기준) → H0MFCNT0/H0MFASP0
+  None (휴장) → 구독 안 함, "market closed" 출력 후 종료
+
+PR6 운영 코드와 같은 decision logic 사용 — 잘못된 TR 구독으로 인한
+"subscribe success but no tick" 혼동 방지.
 
 The market may be closed, so receiving live ticks is not required for success.
 Secrets and approval keys are never printed.
@@ -15,7 +23,9 @@ import asyncio
 import json
 import os
 import stat
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +33,30 @@ import requests
 import websockets
 from dotenv import load_dotenv
 
+# scripts/ 에서 app/ 패키지 import 가능하게 project root 추가
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from app.sources.kis_futures import get_active_session  # noqa: E402
+
 KIS_PROD_HOST = "https://openapi.koreainvestment.com:9443"
 KIS_WS_URL = "ws://ops.koreainvestment.com:21000/tryitout"
 APPROVAL_CACHE_PATH = Path(".cache/kis_ws_approval.json")
 TR_KEY = "A75605"  # 미국달러 F 202605, fo_com_code.mst
+
+# Session 자동 감지로 선택할 TR 매핑.
+# 주간 H0CFxxxx (commodity futures), 야간 H0MFxxxx (krx night futures).
+SESSION_TR_MAP = {
+    "CF": [
+        ("H0CFCNT0", "commodity futures conclusion"),
+        ("H0CFASP0", "commodity futures quote"),
+    ],
+    "CM": [
+        ("H0MFCNT0", "krx night futures conclusion"),
+        ("H0MFASP0", "krx night futures quote"),
+    ],
+}
 
 
 def load_env() -> dict[str, str]:
@@ -140,10 +170,18 @@ def summarize_raw(raw: str) -> str:
 
 
 async def run_ws(approval_key: str) -> None:
-    subscriptions = [
-        ("H0CFCNT0", TR_KEY, "commodity futures conclusion"),
-        ("H0CFASP0", TR_KEY, "commodity futures quote"),
-    ]
+    # Session 자동 감지 — PR6 운영 코드와 동일 decision logic.
+    # KIS 시간은 KST. 로컬/EC2/Docker timezone 의존성 제거 위해 명시.
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    session = get_active_session(now)
+    print(f"[ws] active session: {session} (KST {now.strftime('%Y-%m-%d %H:%M:%S')})")
+    if session is None:
+        print("[ws] market closed — 구독 생략, 종료")
+        return
+    subscriptions = [(tr_id, TR_KEY, label) for tr_id, label in SESSION_TR_MAP[session]]
+
     print(f"[ws] connect {KIS_WS_URL}")
     async with websockets.connect(KIS_WS_URL, ping_interval=None, open_timeout=10) as ws:
         print("[ws] OK — connected")
