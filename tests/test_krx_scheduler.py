@@ -1,4 +1,4 @@
-"""PR6c-2b — KRX scheduler lifecycle 단위 테스트.
+"""KRX scheduler lifecycle 단위 테스트.
 
 start_krx_futures_client / _bootstrap_krx_futures_client /
 shutdown_krx_futures_client + 모듈 globals (krx_bootstrap_task /
@@ -134,7 +134,12 @@ class TestBootstrapKrxFuturesClient(unittest.IsolatedAsyncioTestCase):
         _reset_scheduler_krx_globals()
 
     async def test_fetch_failure_isolated(self):
-        """fetch 실패 → logger.exception + globals None 유지."""
+        """fetch 실패 → logger.exception (resolve 실패) + globals None 유지.
+
+        PR6c-2c refactor 후: resolve_active_krx_futures_contract가 raise
+        하면 _bootstrap의 inner try/except가 잡고 "active contract resolve
+        실패 (격리)" 로깅 — globals 정리.
+        """
         with patch(
             "app.crawlers.krx_kis.KisApprovalManager"
         ), patch(
@@ -144,7 +149,7 @@ class TestBootstrapKrxFuturesClient(unittest.IsolatedAsyncioTestCase):
             await scheduler._bootstrap_krx_futures_client()
         self.assertIsNone(scheduler.krx_futures_client)
         self.assertIsNone(scheduler.krx_futures_task)
-        self.assertTrue(any("bootstrap 실패" in m for m in cm.output))
+        self.assertTrue(any("resolve 실패" in m for m in cm.output))
 
     async def test_no_active_contract_returns_warning(self):
         """select 결과 None → warning + globals None."""
@@ -226,6 +231,140 @@ class TestBootstrapKrxFuturesClient(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("KisFuturesClient 시작" in m for m in cm.output))
         # add_tick_handler가 KrxDbWriter로 호출됨
         mock_client_instance.add_tick_handler.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# resolve_active_krx_futures_contract — side-effect free helper (PR6c-2c)
+# ---------------------------------------------------------------------------
+
+class TestResolveActiveContract(unittest.IsolatedAsyncioTestCase):
+    """side-effect free contract resolver — globals 변경 X, logging X.
+
+    raise on failure — caller가 try/except + 로깅 책임.
+    """
+
+    def setUp(self):
+        _reset_scheduler_krx_globals()
+
+    def tearDown(self):
+        _reset_scheduler_krx_globals()
+
+    async def test_normal_returns_contract(self):
+        """contracts에 USD futures 있으면 ContractInfo 반환."""
+        resolved = _make_resolved_contract()
+        with patch(
+            "app.sources.kis_master.fetch_commodity_future_master",
+            return_value=b"dummy",
+        ), patch(
+            "app.sources.kis_master.parse_commodity_future_master",
+            return_value=[resolved],
+        ), patch(
+            "app.sources.kis_master.select_active_usd_futures_contract",
+            return_value=resolved,
+        ):
+            result = await scheduler.resolve_active_krx_futures_contract()
+        self.assertEqual(result.short_code, "A75605")
+
+    async def test_returns_none_when_no_active_contract(self):
+        """select 결과 None → None 반환 (raise X)."""
+        with patch(
+            "app.sources.kis_master.fetch_commodity_future_master",
+            return_value=b"dummy",
+        ), patch(
+            "app.sources.kis_master.parse_commodity_future_master",
+            return_value=[],
+        ), patch(
+            "app.sources.kis_master.select_active_usd_futures_contract",
+            return_value=None,
+        ):
+            result = await scheduler.resolve_active_krx_futures_contract()
+        self.assertIsNone(result)
+
+    async def test_raises_on_fetch_failure(self):
+        """fetch 실패 → raise (caller가 try/except + logging)."""
+        with patch(
+            "app.sources.kis_master.fetch_commodity_future_master",
+            side_effect=RuntimeError("network error"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await scheduler.resolve_active_krx_futures_contract()
+
+    async def test_no_globals_side_effect(self):
+        """resolve는 side-effect free — globals 변경 X."""
+        resolved = _make_resolved_contract()
+        with patch(
+            "app.sources.kis_master.fetch_commodity_future_master",
+            return_value=b"dummy",
+        ), patch(
+            "app.sources.kis_master.parse_commodity_future_master",
+            return_value=[resolved],
+        ), patch(
+            "app.sources.kis_master.select_active_usd_futures_contract",
+            return_value=resolved,
+        ):
+            await scheduler.resolve_active_krx_futures_contract()
+        # globals 그대로
+        self.assertIsNone(scheduler.krx_bootstrap_task)
+        self.assertIsNone(scheduler.krx_futures_client)
+        self.assertIsNone(scheduler.krx_futures_task)
+
+
+# ---------------------------------------------------------------------------
+# bootstrap finally cleanup — current task 일치 시 globals None
+# ---------------------------------------------------------------------------
+
+class TestBootstrapFinallyCleanup(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        _reset_scheduler_krx_globals()
+
+    def tearDown(self):
+        _reset_scheduler_krx_globals()
+
+    async def test_cleanup_when_current_task_matches(self):
+        """bootstrap이 background task로 실행 → 종료 시 globals 정리."""
+        # bootstrap 실패 시나리오 (resolve 실패) — finally 블록 도달
+        with patch(
+            "app.scheduler.resolve_active_krx_futures_contract",
+            side_effect=RuntimeError("network error"),
+        ), self.assertLogs("exchange_rate.scheduler", level="ERROR"):
+            # start_krx_futures_client → background task 생성
+            with patch.object(config, "KRX_FUTURES_ENABLED", True):
+                await scheduler.start_krx_futures_client()
+                bootstrap_task = scheduler.krx_bootstrap_task
+                self.assertIsNotNone(bootstrap_task)
+                # bootstrap 완료 대기
+                await bootstrap_task
+            # finally에서 current_task() is krx_bootstrap_task 매칭 → None
+            self.assertIsNone(scheduler.krx_bootstrap_task)
+
+    async def test_no_cleanup_when_called_directly(self):
+        """_bootstrap을 직접 호출 (current_task != krx_bootstrap_task) →
+        global 변경 X (다른 task의 bootstrap 참조 보존)."""
+        # 다른 task가 globals 점유 중
+        async def fake_bootstrap_other():
+            await asyncio.sleep(10)
+
+        other_task = asyncio.create_task(fake_bootstrap_other())
+        scheduler.krx_bootstrap_task = other_task
+
+        # _bootstrap을 직접 호출 (run as current task, but krx_bootstrap_task is `other_task`)
+        with patch(
+            "app.scheduler.resolve_active_krx_futures_contract",
+            side_effect=RuntimeError("network error"),
+        ), self.assertLogs("exchange_rate.scheduler", level="ERROR"):
+            await scheduler._bootstrap_krx_futures_client()
+
+        # current_task != krx_bootstrap_task (other_task) → 정리 X
+        self.assertIs(scheduler.krx_bootstrap_task, other_task)
+
+        # cleanup
+        other_task.cancel()
+        try:
+            await other_task
+        except asyncio.CancelledError:
+            pass
+        scheduler.krx_bootstrap_task = None
 
 
 # ---------------------------------------------------------------------------

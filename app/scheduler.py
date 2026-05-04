@@ -1581,7 +1581,7 @@ def start_scheduler():
 
 
 # =============================================================================
-# PR6c-2b — KRX 미국달러선물 lifecycle (KRX optional source 원칙)
+# KRX 미국달러선물 lifecycle (KRX optional source 원칙)
 # =============================================================================
 # main.py lifespan은 호출만 (start_scheduler() 패턴 일관). 실제 lifecycle은
 # 본 모듈에 집중. failure isolation: 모든 단계 실패가 다른 startup/shutdown
@@ -1632,31 +1632,60 @@ async def start_krx_futures_client():
     krx_bootstrap_task = asyncio.create_task(_bootstrap_krx_futures_client())
 
 
-async def _bootstrap_krx_futures_client():
-    """background bootstrap — fetch + select + client 시작.
+async def resolve_active_krx_futures_contract():
+    """현재 active한 KRX 미국달러선물 contract를 계산해서 반환 (PR6c-2c).
 
-    main.py lifespan과 분리. 실패 시 logger.warning/exception + KRX만 비활성.
+    Side-effect free — globals 변경 X, logging X. 호출자가 결과로 client
+    생성 또는 contract 비교 결정. 실패 시 raise (caller가 try/except 처리).
+
+    fetch + parse + select_active_usd_futures_contract 통합. fetch timeout
+    5초로 짧게 — KRX 막혀도 빠르게 caller에 신호.
+
+    추후 (PR6c-2d 또는 5/18 관찰 후) 세션 boundary 자동 재시작 시점에
+    재사용 가능 — 같은 helper로 contract 변경 감지.
+
+    Returns:
+        ContractInfo 또는 None (contracts 0개 또는 모두 만료).
+
+    Raises:
+        Any exception from fetch/parse — caller가 logging/fallback 책임.
     """
-    global krx_futures_client, krx_futures_task
-
     # 함수 내부 import — 순환 참조 방지 + 운영 미연결 시점 import 영향 0
-    from app.crawlers.krx_kis import (
-        KisApprovalManager,
-        KisFuturesClient,
-        KrxDbWriter,
-    )
     from app.sources.kis_master import (
         fetch_commodity_future_master,
         parse_commodity_future_master,
         select_active_usd_futures_contract,
     )
 
+    raw = await asyncio.to_thread(fetch_commodity_future_master, timeout=5)
+    contracts = await asyncio.to_thread(parse_commodity_future_master, raw)
+    now_kst = datetime.now(KST).replace(tzinfo=None)
+    return select_active_usd_futures_contract(contracts, now_kst)
+
+
+async def _bootstrap_krx_futures_client():
+    """background bootstrap — resolve + client 시작.
+
+    main.py lifespan과 분리. 실패 시 logger.warning/exception + KRX만 비활성.
+    finally 블록에서 자기 자신이 krx_bootstrap_task일 때만 cleanup —
+    shutdown 경합 / 직접 호출 시 엉뚱한 task 참조 지우지 X.
+    """
+    global krx_bootstrap_task, krx_futures_client, krx_futures_task
+
+    # 함수 내부 import — 순환 참조 방지
+    from app.crawlers.krx_kis import (
+        KisApprovalManager,
+        KisFuturesClient,
+        KrxDbWriter,
+    )
+
     try:
-        # fetch timeout 짧게 — KRX 막혀도 빠르게 비활성 (KRX optional 원칙)
-        raw = await asyncio.to_thread(fetch_commodity_future_master, timeout=5)
-        contracts = await asyncio.to_thread(parse_commodity_future_master, raw)
-        now_kst = datetime.now(KST).replace(tzinfo=None)
-        resolved = select_active_usd_futures_contract(contracts, now_kst)
+        try:
+            resolved = await resolve_active_krx_futures_contract()
+        except Exception:
+            logger.exception("[krx] active contract resolve 실패 (격리)")
+            return
+
         if resolved is None:
             logger.warning("[krx] active USD futures contract 없음, KRX 비활성")
             return
@@ -1681,6 +1710,12 @@ async def _bootstrap_krx_futures_client():
         logger.exception("[krx] bootstrap 실패 (격리)")
         krx_futures_client = None
         krx_futures_task = None
+    finally:
+        # PR6c-2c — bootstrap 종료 시점 cleanup. current task가 자기 자신
+        # (= krx_bootstrap_task)일 때만 globals 정리. shutdown 경합 / 직접
+        # 호출 시 엉뚱한 task 참조 지우지 X.
+        if asyncio.current_task() is krx_bootstrap_task:
+            krx_bootstrap_task = None
 
 
 async def shutdown_krx_futures_client():
