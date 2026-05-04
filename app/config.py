@@ -44,6 +44,12 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
 
+# KRX_FUTURES_ENABLED: PR6 KRX 미국달러선물 수집/저장 자체 토글.
+# default false — scheduler 등록되어도 client.start() 호출 안 함.
+# false 시 WebSocket 연결, DB 저장, mirror 모두 X (KRX 완전 비활성).
+# canary 진입 시 ON. KRX 장애/중단 시 false로 전체 격리 가능.
+KRX_FUTURES_ENABLED = os.getenv("KRX_FUTURES_ENABLED", "false").lower() == "true"
+
 # KRX_BROADCAST_INCLUDE: PR6 KRX 미국달러선물의 broadcast 노출 토글.
 # 저장된 KRX usd-krw-futures를 latest mirror + broadcast rates 배열에 포함할지.
 # default false — 앱 호환성 검증 전 안전 차단. canary 진입 시 단계적 ON 권장.

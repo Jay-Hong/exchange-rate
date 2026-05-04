@@ -18,7 +18,7 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.crawlers.krx_kis import (
     APPROVAL_REFRESH_MARGIN_SEC,
@@ -26,6 +26,7 @@ from app.crawlers.krx_kis import (
     CONTRACT_MONTH_STATIC,
     KisApprovalManager,
     KisFuturesClient,
+    KrxDbWriter,
     PARSER_DISPATCH,
     RECONNECT_BACKOFF_SEQ,
     RECONNECT_BACKOFF_TAIL,
@@ -486,6 +487,158 @@ class TestSubMessage(unittest.TestCase):
         self.assertEqual(parsed["header"]["tr_type"], "1")
         self.assertEqual(parsed["body"]["input"]["tr_id"], "H0CFCNT0")
         self.assertEqual(parsed["body"]["input"]["tr_key"], "A75605")
+
+
+# ---------------------------------------------------------------------------
+# KrxDbWriter (PR6b-2b) — 1초 window debounce + insert-if-changed + to_thread
+# ---------------------------------------------------------------------------
+
+class TestKrxDbWriter(unittest.IsolatedAsyncioTestCase):
+    """KRX DB writer handler — 1초 window의 last tick만 insert-if-changed."""
+
+    def _make_payload(self, price: str = "1468.50", market_time: str = "180332") -> dict:
+        return {
+            "source": "krx",
+            "asset": "usd-krw-futures",
+            "session": "CM",
+            "contract_code": "A75605",
+            "contract_month": "202605",
+            "expires_on": "2026-05-18",
+            "price": price,
+            "market_time": market_time,
+            "received_at": "2026-05-04T18:03:32",
+            "tr_id": "H0MFCNT0",
+            "status": "normal",
+        }
+
+    async def test_single_tick_flushes_after_window(self):
+        """단일 tick → window 만료 후 1회 DB write."""
+        writer = KrxDbWriter(window_sec=0.05)  # 짧은 window for fast test
+        payload = self._make_payload()
+
+        with patch("app.crawlers.krx_kis.KrxDbWriter._sync_db_write") as mock_db:
+            await writer(payload)
+            self.assertIsNotNone(writer._timer)
+            await writer._timer  # window 만료 대기
+            mock_db.assert_called_once_with(payload)
+
+    async def test_multiple_ticks_in_window_flushes_last_only(self):
+        """window 안 여러 tick → last 1건만 flush (debounce)."""
+        writer = KrxDbWriter(window_sec=0.1)
+        first = self._make_payload(price="1468.30")
+        second = self._make_payload(price="1468.40")
+        third = self._make_payload(price="1468.50")  # last
+
+        with patch("app.crawlers.krx_kis.KrxDbWriter._sync_db_write") as mock_db:
+            await writer(first)
+            await writer(second)
+            await writer(third)
+            await writer._timer
+            mock_db.assert_called_once()
+            # last tick (third)만 flush
+            called_payload = mock_db.call_args[0][0]
+            self.assertEqual(called_payload["price"], "1468.50")
+
+    async def test_window_renewal_after_flush(self):
+        """window 만료 후 새 tick → 새 timer 시작."""
+        writer = KrxDbWriter(window_sec=0.05)
+        first = self._make_payload(price="1468.30")
+        second = self._make_payload(price="1468.40")
+
+        with patch("app.crawlers.krx_kis.KrxDbWriter._sync_db_write") as mock_db:
+            await writer(first)
+            await writer._timer  # 첫 window flush
+            await writer(second)
+            await writer._timer  # 두 번째 window flush
+            self.assertEqual(mock_db.call_count, 2)
+            second_call_payload = mock_db.call_args_list[1][0][0]
+            self.assertEqual(second_call_payload["price"], "1468.40")
+
+    async def test_db_write_failure_isolated(self):
+        """DB write 예외 → logger.warning + propagate X (KRX optional 격리)."""
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        with patch(
+            "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+            side_effect=RuntimeError("DB connection lost"),
+        ), self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            await writer(payload)
+            await writer._timer  # 예외 발생 대기 (raise X — 격리)
+        self.assertTrue(any("DB write failed" in m for m in cm.output))
+
+    async def test_to_thread_used(self):
+        """sync DB 호출이 asyncio.to_thread로 격리되는지 — event loop 차단 방지."""
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        # asyncio.to_thread를 patch — 호출 검증
+        with patch(
+            "app.crawlers.krx_kis.asyncio.to_thread",
+            new_callable=AsyncMock,
+        ) as mock_to_thread:
+            await writer(payload)
+            await writer._timer
+            mock_to_thread.assert_called_once()
+            # 첫 인자가 _sync_db_write 함수
+            self.assertEqual(
+                mock_to_thread.call_args[0][0],
+                KrxDbWriter._sync_db_write,
+            )
+
+    async def test_no_tick_no_flush(self):
+        """tick 없으면 flush 호출 X."""
+        writer = KrxDbWriter(window_sec=0.05)
+        # _last_tick None 상태에서 직접 _flush_after_window 호출
+        with patch("app.crawlers.krx_kis.KrxDbWriter._sync_db_write") as mock_db:
+            await writer._flush_after_window()
+            mock_db.assert_not_called()
+
+    async def test_tick_during_db_write_creates_new_timer(self):
+        """DB write 진행 중 들어온 tick → finally에서 새 timer 예약 (race 방지).
+
+        Codex PR6b-2b race 보정 검증.
+        """
+        writer = KrxDbWriter(window_sec=0.01)
+        first = self._make_payload(price="1468.30")
+        second = self._make_payload(price="1468.40")
+        db_calls = []
+
+        def db_write_simulating_concurrent_tick(tick):
+            """DB write 함수 — 첫 호출 시 새 tick이 들어왔다고 시뮬레이션."""
+            db_calls.append(tick)
+            if len(db_calls) == 1:
+                # 첫 write 진행 중 새 tick 도착 (race 시나리오)
+                writer._last_tick = second
+
+        with patch(
+            "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+            side_effect=db_write_simulating_concurrent_tick,
+        ):
+            await writer(first)
+            await writer._timer  # 첫 flush 완료 (finally에서 새 timer 예약됨)
+            # 새 timer는 self._timer에 할당되어 있음
+            self.assertIsNotNone(writer._timer)
+            await writer._timer  # 새 timer로 second flush 완료
+            # second tick이 누락되지 않고 저장됨
+            self.assertEqual(len(db_calls), 2)
+            self.assertEqual(db_calls[1]["price"], "1468.40")
+
+    async def test_no_new_timer_when_no_tick_during_write(self):
+        """DB write 종료 시 _last_tick None이면 새 timer 예약 X."""
+        writer = KrxDbWriter(window_sec=0.01)
+        payload = self._make_payload()
+        old_timer_done = []
+
+        with patch("app.crawlers.krx_kis.KrxDbWriter._sync_db_write"):
+            await writer(payload)
+            old_timer = writer._timer
+            await writer._timer  # flush 완료, _last_tick None 유지
+            old_timer_done.append(old_timer.done())
+            # finally 후 _timer가 같은 (done) timer 또는 None
+            # 정확히는 같은 timer 유지 (finally 블록이 새 task 안 만듦)
+            self.assertTrue(writer._timer.done())
+        self.assertTrue(old_timer_done[0])
 
 
 if __name__ == "__main__":

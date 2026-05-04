@@ -461,6 +461,95 @@ class KisFuturesClient:
 
 
 # ---------------------------------------------------------------------------
+# KrxDbWriter — DB write debouncer (PR6b-2b)
+# ---------------------------------------------------------------------------
+
+class KrxDbWriter:
+    """KRX 체결 tick → source_rates DB write (1초 window debounce + insert-if-changed).
+
+    REALTIME_ARCHITECTURE_PLAN.md DB writer 정책 (line 88-93):
+    매 tick INSERT X, 1초 window의 last 값만 → source_rates 폭증 방지.
+    USDT Phase 1 insert-if-changed 정책과 일관 (가격 변동 없으면 0건 INSERT).
+
+    asyncio loop 차단 방지:
+      sync SQLAlchemy 호출은 asyncio.to_thread로 격리.
+      DB session은 to_thread 내부의 새 thread에서 get_db_context()로 짧게.
+
+    failure isolation (KRX optional source 원칙):
+      DB write 실패는 logger.warning으로 가시화하되 propagate X —
+      tick 수신 loop / 다른 handler 영향 0.
+
+    race 방지 (PR6b-2b Codex 보정):
+      DB write (to_thread) 진행 중 새 tick 들어오면 _last_tick 갱신.
+      그러나 _timer는 아직 done X 라 __call__이 새 timer 안 만듦.
+      write 종료 후 finally 블록에서 _last_tick 재확인하고 새 timer
+      예약 — 누락 방지.
+
+    PR6b-2b 한정: handler 클래스만 정의. scheduler 등록은 PR6c.
+    """
+
+    def __init__(self, *, window_sec: float = 1.0) -> None:
+        self._window_sec = window_sec
+        self._last_tick: Optional[Dict[str, Any]] = None
+        self._timer: Optional[asyncio.Task] = None
+
+    async def __call__(self, payload: Dict[str, Any]) -> None:
+        """Tick handler — KisFuturesClient fanout에서 호출.
+
+        매 tick의 last 값만 유지, 1초 window timer 시작/유지.
+        """
+        self._last_tick = payload
+        if self._timer is None or self._timer.done():
+            self._timer = asyncio.create_task(self._flush_after_window())
+
+    async def _flush_after_window(self) -> None:
+        """window 만료 후 last tick을 DB에 insert-if-changed.
+
+        DB write (to_thread) 진행 중 새 tick이 들어오면 finally 블록에서
+        새 timer 예약 — race 방지 (PR6b-2b Codex 보정).
+        """
+        await asyncio.sleep(self._window_sec)
+        tick = self._last_tick
+        self._last_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except Exception as e:
+            # KRX optional 원칙 — 격리. propagate X.
+            logger.warning(
+                "[krx_db_writer] DB write failed (격리): %s: %s",
+                type(e).__name__, e,
+            )
+        finally:
+            # DB write 진행 중 들어온 tick 처리 — 새 window 예약.
+            # finally 블록은 같은 코루틴 frame 안 — 다른 코루틴 race X
+            # (await 없는 sync 영역). __call__이 _timer.done() 체크하기
+            # 전에 새 task 할당 완료.
+            if self._last_tick is not None:
+                self._timer = asyncio.create_task(self._flush_after_window())
+
+    @staticmethod
+    def _sync_db_write(tick: Dict[str, Any]) -> None:
+        """sync DB 호출 — to_thread 내부에서 실행.
+
+        SessionLocal은 thread-local이라 새 thread에서 새 session 열고 닫기.
+        crud.insert_source_rate_if_changed는 내부에서 db.commit() 호출.
+        """
+        # 함수 내부 import — to_thread만 import 비용, 모듈 로드 영향 X.
+        from app import crud
+        from app.database import get_db_context
+
+        with get_db_context() as db:
+            crud.insert_source_rate_if_changed(
+                db=db,
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=float(tick["price"]),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Factory — env 기반 client 생성 (운영 진입 시 PR6c에서 사용)
 # ---------------------------------------------------------------------------
 
