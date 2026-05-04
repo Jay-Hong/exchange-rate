@@ -47,6 +47,7 @@ from app.sources.kis_futures import (
     parse_h0mfasp0_payload,
     parse_h0mfcnt0_payload,
 )
+from app.sources.kis_master import ContractInfo
 
 logger = logging.getLogger(__name__)
 
@@ -258,12 +259,42 @@ class KisFuturesClient:
     탐지 후 WebSocket 시작. None 세션이면 대기 (sleep + 주기 체크).
     """
 
-    def __init__(self, approval_manager: KisApprovalManager) -> None:
+    def __init__(
+        self,
+        approval_manager: KisApprovalManager,
+        *,
+        contract: Optional[ContractInfo] = None,
+    ) -> None:
+        """KIS futures WebSocket client.
+
+        Args:
+            approval_manager: approval_key cache/refresh helper.
+            contract: 구독 대상 종목 (PR6c-2a). None이면 PR6a static
+                (A75605, 2026-05-18 만기) — 단위 테스트 / 운영 미연결용.
+                운영 진입 (PR6c-2b)에서는 select_active_usd_futures_contract
+                결과 주입.
+        """
         self._approval = approval_manager
+        self._contract = contract or self._default_contract()
         self._tick_handlers: List[TickHandler] = []
         self._status: str = "normal"
         self._last_tick_at: Optional[float] = None
         self._stop = asyncio.Event()
+
+    @staticmethod
+    def _default_contract() -> ContractInfo:
+        """PR6a static fallback — TR_KEY_STATIC 등 모듈 상수 사용.
+
+        PR6c-2b 운영 진입 시점에는 외부에서 select_active_usd_futures_contract
+        결과 주입. 본 default는 단위 테스트 / 운영 미연결 시점 호환용.
+        """
+        return ContractInfo(
+            short_code=TR_KEY_STATIC,
+            standard_code="KR4A75650007",  # PR6a static (KIS smoke 검증값)
+            name="미국달러 F 202605",
+            contract_month=CONTRACT_MONTH_STATIC,
+            expiry_date=CONTRACT_EXPIRES_ON_STATIC,
+        )
 
     @property
     def status(self) -> str:
@@ -336,9 +367,10 @@ class KisFuturesClient:
             KIS_WS_URL, ping_interval=None, open_timeout=10
         ) as ws:
             logger.info("[kis_ws] connected, session=%s", session)
+            tr_key = self._contract.short_code  # PR6c-2a: 동적 contract
             for tr_id in SESSION_TR_MAP[session]:
-                await ws.send(self._sub_message(approval_key, tr_id, TR_KEY_STATIC))
-                logger.info("[kis_ws] subscribed tr_id=%s key=%s", tr_id, TR_KEY_STATIC)
+                await ws.send(self._sub_message(approval_key, tr_id, tr_key))
+                logger.info("[kis_ws] subscribed tr_id=%s key=%s", tr_id, tr_key)
 
             self._set_status("normal")
 
@@ -434,11 +466,17 @@ class KisFuturesClient:
             logger.warning("[kis_ws] parser returned None tr_id=%s", tr_id)
             return
 
+        # PR6c-2a: client에 주입된 contract metadata를 명시 전달.
+        # make_normalized_payload default는 PR6a static이지만, 운영 client는
+        # 동적 contract 사용 (만기 후 다음 월물 등).
         payload = make_normalized_payload(
             parsed,
             session=session,
             tr_id=tr_id,
             received_at_kst=datetime.now(KST).replace(tzinfo=None),
+            contract_code=self._contract.short_code,
+            contract_month=self._contract.contract_month,
+            expires_on=self._contract.expiry_date,
         )
         await self._fanout(payload)
 

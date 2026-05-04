@@ -16,7 +16,7 @@ import stat
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,6 +35,7 @@ from app.crawlers.krx_kis import (
     TR_KEY_STATIC,
     make_normalized_payload,
 )
+from app.sources.kis_master import ContractInfo
 from app.sources.kis_futures import (
     parse_h0cfcnt0_payload,
     parse_h0mfasp0_payload,
@@ -487,6 +488,124 @@ class TestSubMessage(unittest.TestCase):
         self.assertEqual(parsed["header"]["tr_type"], "1")
         self.assertEqual(parsed["body"]["input"]["tr_id"], "H0CFCNT0")
         self.assertEqual(parsed["body"]["input"]["tr_key"], "A75605")
+
+
+# ---------------------------------------------------------------------------
+# Contract injection (PR6c-2a) — KisFuturesClient에 동적 contract 주입
+# ---------------------------------------------------------------------------
+
+class TestContractInjection(unittest.IsolatedAsyncioTestCase):
+    """KisFuturesClient에 custom ContractInfo 주입 시 tr_key/payload 동적 사용.
+
+    PR6a static fallback (TR_KEY_STATIC = A75605)에서 PR6c-2b 운영 진입
+    시점에 select_active_usd_futures_contract 결과 주입 가능하게 보강.
+    """
+
+    def setUp(self):
+        # 다음 만기 월물 (rollover 시나리오) 가정
+        self.next_month_contract = ContractInfo(
+            short_code="A75606",
+            standard_code="KR4A75660006",
+            name="미국달러 F 202606",
+            contract_month="202606",
+            expiry_date=date(2026, 6, 15),
+        )
+
+    def test_default_contract_is_pr6a_static(self):
+        """contract 미주입 → PR6a static fallback (A75605, 5/18 만기)."""
+        client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager)
+        )
+        self.assertEqual(client._contract.short_code, TR_KEY_STATIC)
+        self.assertEqual(client._contract.contract_month, CONTRACT_MONTH_STATIC)
+        self.assertEqual(client._contract.expiry_date, CONTRACT_EXPIRES_ON_STATIC)
+
+    def test_custom_contract_used_in_subscribe(self):
+        """custom contract 주입 → _sub_message에서 tr_key 동적 사용.
+
+        실제 _run_session은 WebSocket connect 필요 — _sub_message만 직접
+        호출하여 tr_key 인자가 contract.short_code인지 검증 (구조 단위 검증).
+        """
+        client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager),
+            contract=self.next_month_contract,
+        )
+        # client._contract가 주입된 그대로
+        self.assertEqual(client._contract.short_code, "A75606")
+        self.assertEqual(client._contract.contract_month, "202606")
+
+        # _sub_message는 staticmethod라 직접 호출 + 동적 tr_key 검증
+        msg = client._sub_message("test_key", "H0CFCNT0", client._contract.short_code)
+        parsed = json.loads(msg)
+        self.assertEqual(parsed["body"]["input"]["tr_key"], "A75606")
+
+    async def test_dispatch_tick_uses_custom_contract_metadata(self):
+        """custom contract 주입 → _dispatch_tick fanout payload 동적 metadata."""
+        client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager),
+            contract=self.next_month_contract,
+        )
+        called = []
+
+        async def handler(payload):
+            called.append(payload)
+
+        client.add_tick_handler(handler)
+        # 야간 체결 raw (어제 smoke 샘플)
+        raw = "^".join([
+            "A75606", "180332", "6.30", "2", "0.43", "1500.00",
+            "1500.50", "1501.00", "1499.50", "1", "100", "1000000",
+        ] + ["0"] * 37)
+        await client._dispatch_tick("H0MFCNT0", raw, "CM")
+
+        self.assertEqual(len(called), 1)
+        payload = called[0]
+        # contract metadata가 주입된 contract와 일치
+        self.assertEqual(payload["contract_code"], "A75606")
+        self.assertEqual(payload["contract_month"], "202606")
+        self.assertEqual(payload["expires_on"], "2026-06-15")
+        # parsed 가격은 raw 그대로
+        self.assertEqual(payload["price"], "1500.00")
+
+    async def test_connect_and_listen_passes_contract_short_code_to_sub_message(self):
+        """회귀 방지: _connect_and_listen이 _sub_message에 self._contract.short_code 전달.
+
+        Codex 권고 — "내가 넘긴 값이 메시지에 들어간다"가 아닌 "실제 connect 흐름에서
+        contract.short_code가 사용되는지" 검증. 누군가 _run_session에서 client._contract
+        대신 다른 source 잘못 쓰면 본 테스트가 잡음.
+        """
+        client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager),
+            contract=self.next_month_contract,
+        )
+        # stop 미리 설정 — subscribe만 하고 while loop에서 즉시 return
+        client._stop.set()
+
+        # WebSocket connect를 async context manager mock
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=asyncio.TimeoutError)
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect.__aexit__ = AsyncMock(return_value=None)
+
+        # _sub_message spy
+        sub_msg_spy = MagicMock(return_value='{"test": "msg"}')
+
+        with patch("app.crawlers.krx_kis.websockets.connect", return_value=mock_connect), \
+             patch.object(KisFuturesClient, "_sub_message", side_effect=sub_msg_spy), \
+             self.assertLogs("app.crawlers.krx_kis", level="INFO"):
+            await client._connect_and_listen("CM", "test_approval")
+
+        # _sub_message 호출 검증 — CM session에서 H0MFCNT0/H0MFASP0 두 번
+        self.assertEqual(sub_msg_spy.call_count, 2)
+        # 모든 호출의 tr_key 인자가 "A75606" (주입된 contract.short_code)
+        for call in sub_msg_spy.call_args_list:
+            args = call[0]  # (approval_key, tr_id, tr_key)
+            self.assertEqual(
+                args[2], "A75606",
+                f"_sub_message tr_key={args[2]} expected A75606 (contract.short_code)",
+            )
 
 
 # ---------------------------------------------------------------------------
