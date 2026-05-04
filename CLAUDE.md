@@ -1077,6 +1077,47 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - Phase 2: 테더 탭 그래프 (DXY와 동일한 rollup 전략), KRX 달러선물 (재배포 권리 확인 후)
 - Phase 3: 비교 알림 (`comparison_alerts` 스키마는 Phase 1 설계 문서에서 잠김)
 
+### KRX 미국달러선물 (KIS Open API) — PR6 사전 골격 ⚙️ 진행 중 (2026-05-04 시점)
+
+**배경**: 김치프리미엄 전략 사용자가 거래소 USDT 외에 KRX 미국달러선물(USDF) 호가/체결도 함께 보고자 함. 기준 만기 종목 단축코드 예: A75605 (2026-05-18 만기, KIS master로 동적 resolve).
+
+**핵심 원칙 — KRX optional source**: 서버/앱의 baseline 서비스(은행 + investing + USDT)는 KRX 없이 항상 정상 동작. KRX는 선택적 데이터 소스로 격리되며, 어느 단계의 실패도 다른 startup/shutdown/broadcast 경로에 영향 없음.
+
+**격리 토글 (env)**:
+
+| Env | Default | Scope |
+| --- | --- | --- |
+| `KIS_APP_KEY` / `KIS_APP_SECRET` | 미설정 | 미설정 시 bootstrap warning 후 격리 (다른 서비스 영향 X) |
+| `KRX_FUTURES_ENABLED` | `false` | WebSocket 연결 / 신규 DB 저장 (수집 lifecycle) |
+| `KRX_BROADCAST_INCLUDE` | `false` | mirror `latest:index` 포함 + broadcast `rates` 노출 |
+
+**Canary 단계** (env 토글로 단계적 활성화):
+
+1. **Stage 0 (현재)**: `KRX_FUTURES_ENABLED=false`. 코드는 배포되어 있으나 lifecycle 자체가 비활성. 운영 영향 0.
+2. **Stage 1 — DB 저장만**: `KRX_FUTURES_ENABLED=true` + `KRX_BROADCAST_INCLUDE=false`. KIS WebSocket → DB(`source_rates`)까지만. mirror가 broadcast가 읽는 `latest:index`에 KRX key를 포함시키지 않음 → broadcast 노출 X (Redis `latest:source:krx:*` data key 잔존 여부와 무관 — `latest:index`가 게이트). KRX tick 정상성 + DB write throughput을 24h 관찰.
+3. **Stage 2 — broadcast 노출**: `KRX_BROADCAST_INCLUDE=true` 추가. mirror cycle이 KRX latest data key를 갱신하고 `latest:index`에 포함시켜 broadcast rates 배열에 `source="krx", asset="usd-krw-futures"` 등장. 클라이언트 호환성 검증 후 활성화.
+4. **롤백**: 어느 단계에서든 KRX 장애 / KIS API 점검 / 데이터 이상 발견 시 해당 토글 `false`로 격리. 환경변수 변경 후 process restart 필요 (config는 import 시 1회 읽기). restart 후 visible effect: `KRX_FUTURES_ENABLED=false`는 즉시 lifecycle 미시작 (수집 중단), `KRX_BROADCAST_INCLUDE=false`는 다음 정상 mirror cycle (≤3초)에 `latest:index`에서 KRX key 제외 (broadcast 미노출).
+
+**현재 구현 상태 (PR6 ~ PR6c-2c)**:
+
+- ✅ KIS WebSocket adapter (H0CFCNT0/H0CFASP0 주간, H0MFCNT0/H0MFASP0 야간) + 호가 tick fanout 차단 + PINGPONG 처리
+- ✅ KisApprovalManager (approval_key cache + 만료 5분 마진 + asyncio.Lock)
+- ✅ 만기 자동 resolve: `select_active_usd_futures_contract` (KIS 상품 마스터 cp949 fixed-width 파싱, 만기일 정규세션 11:30:00 inclusive 기준 intraday rollover)
+- ✅ KrxDbWriter (1초 window debounce + insert-if-changed + asyncio.to_thread DB write + race-prevention finally)
+- ✅ Latest mirror skip 분기 (`KRX_BROADCAST_INCLUDE=false`일 때 broadcast index에서 제외)
+- ✅ Scheduler lifecycle: `start_krx_futures_client` / `_bootstrap_krx_futures_client` / `shutdown_krx_futures_client` (background bootstrap → main.py lifespan blocking 방지, current-task 매칭 finally cleanup)
+- ⏸ 세션 boundary 자동 재시작 (cron) — 5/18 만기일 운영 관찰 후 결정 (검증되지 않은 시각 미투입)
+- ⏸ REST snapshot/fallback (PR6d) — WebSocket 끊김 시 분당 1회 REST quote로 latest 보전, ADR-027 작성 예정
+
+**핵심 파일**:
+
+- `app/sources/kis_master.py`: 상품 마스터 fetcher + ContractInfo + active contract resolver
+- `app/sources/kis_futures.py`: H0CFxxx0/H0MFxxx0 column spec + payload parser + session/holiday helpers
+- `app/crawlers/krx_kis.py`: KisApprovalManager + KisFuturesClient + KrxDbWriter
+- `app/scheduler.py`: KRX lifecycle helpers (`resolve_active_krx_futures_contract` side-effect free + bootstrap/shutdown)
+- `app/latest_rates_cache.py`: `should_include_source_in_latest()` 분기 (KRX broadcast 토글)
+- `tests/test_krx_kis.py`, `tests/test_krx_scheduler.py`: 격리/회귀 검증
+
 ### Phase 3: 고급 기능 (사용자 500명+, 예정)
 - 통계 & 분석 (Chart.js, 성공률 그래프)
 - 환율 이상치 감지 (ML)
