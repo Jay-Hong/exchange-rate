@@ -1081,6 +1081,8 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 **배경**: 김치프리미엄 전략 사용자가 거래소 USDT 외에 KRX 미국달러선물(USDF) 호가/체결도 함께 보고자 함. 기준 만기 종목 단축코드 예: A75605 (2026-05-18 만기, KIS master로 동적 resolve).
 
+**운영 진입 절차**: [KRX_CANARY.md](KRX_CANARY.md) — Stage 0/1/2 단계별 env, 검증 명령(SQL/Redis), 24h baseline 지표, 5/18 만기 관찰 시나리오, rollback 절차, Stage 2 진입 조건 체크리스트.
+
 **핵심 원칙 — KRX optional source**: 서버/앱의 baseline 서비스(은행 + investing + USDT)는 KRX 없이 항상 정상 동작. KRX는 선택적 데이터 소스로 격리되며, 어느 단계의 실패도 다른 startup/shutdown/broadcast 경로에 영향 없음.
 
 **격리 토글 (env)**:
