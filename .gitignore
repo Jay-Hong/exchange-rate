@@ -35,6 +35,7 @@ ENV/
 logs/
 *.log
 volumes/  # Docker Bind Mount 로그
+.cache/
 
 # 데이터베이스
 *.db

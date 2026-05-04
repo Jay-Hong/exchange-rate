@@ -1,8 +1,9 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.7)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.8 draft)
 
-> 📝 **상태**: 24h fast PoC 진행 중 (15:53 KST~) + spike 원인 식별 완료 + Phase 2 PR3(Redis-first broadcast) 설계 합의 (v0.7, 2026-05-01)
+> 📝 **상태 (v0.8 draft, 2026-05-04)**: PR3-PR5 구현/배포/24h+IN mode 측정 완료 — broadcast hot path DB-free 달성. ADR-026 / CHANGELOG / 본 문서 PR3 섹션에 최종 수치 반영 완료. 후속은 영업시간 Redis read jitter 진단과 PR6(KRX futures / USDT WebSocket) 영역.
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
-> 🔄 **변경 이력**: v0.7 — 24h fast window PoC(2026-05-01 15:53~) 진행 중. Performance Insights + EXPLAIN ANALYZE 분석에서 16:00 spike 확대 구간(8분 PI window) 기준 wait event가 CPU 단일로 관측되고 LWLock/Lock/IO:WalSync wait 0건 확인. 같은 구간 PI Top SQL에서 bank+source latest SELECT가 부하의 대부분(bank 0.21 + source 0.15 AAS = 0.36)을 차지. Phase 2 작업 순서 재배열: **PR3(Redis-first broadcast)를 첫 PR로 격상**. PR3 설계 완전 합의(env / Redis schema / stale 판정 / fallback reason / 모듈 구조 / metric). cache.py·crud.py 변경 0, 신규 `app/latest_rates_cache.py` 모듈 분리. 자세한 설계는 12.Phase 2 섹션의 PR3 서브섹션 참고.
+> 🔄 **변경 이력**: v0.8 — PR3 Step 1-5 + PR3.5 (계측) + PR4 (MGET) + PR5 (DXY mirror) 시퀀스 완료 (2026-05-03). broadcast hot path에서 rates + DXY spot DB SELECT 제거. PR5 24h 관측(n=31495)에서 rates/DXY Redis hit 100%, dxy_query_ms 0건, payload_build_ms p99 30.25ms 확인. IN mode 30분 관측(n=1801)은 p99 75.97ms로 영업시간 Redis read wall-clock jitter 증가를 확인했지만 DB fallback/DXY fallback은 0건. ADR-026 / CHANGELOG / 본문 PR3 섹션에 최종 수치 반영 완료.
+> 🔄 **이전 변경**: v0.7 — 24h fast window PoC(2026-05-01 15:53~) 진행 중. Performance Insights + EXPLAIN ANALYZE 분석에서 16:00 spike 확대 구간(8분 PI window) 기준 wait event가 CPU 단일로 관측되고 LWLock/Lock/IO:WalSync wait 0건 확인. 같은 구간 PI Top SQL에서 bank+source latest SELECT가 부하의 대부분(bank 0.21 + source 0.15 AAS = 0.36)을 차지. Phase 2 작업 순서 재배열: **PR3(Redis-first broadcast)를 첫 PR로 격상**. PR3 설계 완전 합의(env / Redis schema / stale 판정 / fallback reason / 모듈 구조 / metric). cache.py·crud.py 변경 0, 신규 `app/latest_rates_cache.py` 모듈 분리. 자세한 설계는 12.Phase 2 섹션의 PR3 서브섹션 참고.
 > 🔄 **이전 변경**: v0.6 — Phase 1 운영 진입 + PR2 window 임시 PoC 성공 (2026-04-30 20:00-20:17 KST). payload_build_ms p99 302ms / send timeout 0건 / misfire 0건. Investing 403 플래핑은 PR2 무관(외부 변동성)으로 분리.
 
 ---
@@ -449,12 +450,24 @@ WS tick 수신
 
 | PR | 내용 | 의존성 | 위험도 |
 | --- | --- | --- | --- |
-| **PR3** (NEW) | Redis-first broadcast (mirror + warmup + fallback) | 없음 (가장 먼저) | 낮음 (env OFF default + 분기 추가) |
-| PR4 | crawler 저장 성공 후 Redis write (mirror 보조 + latency 0초) | PR3 | 중간 (16개+ 크롤러) |
-| PR5 | USDT WS collector가 같은 latest path에 write | PR3, PR4 | 중간 (신규 모듈) |
+| **PR3** (✅ 완료, 2026-05-04, ADR-026) | Redis-first broadcast (mirror + warmup + fallback) + PR3.5 분해 계측 + PR4 MGET + PR5 DXY mirror | 없음 (가장 먼저) | 낮음 (env OFF default + 분기 추가) |
+| PR4 (재정의 영역) | crawler 저장 성공 후 Redis write (mirror 보조 + latency 0초) | PR3 | 중간 (16개+ 크롤러). 정당화 보류 — mirror_age p99 정상이라 즉시 정당화 X (ADR-026 한계 분석 참조) |
+| PR5 (재정의 영역) | USDT WS collector가 같은 latest path에 write | PR3, PR4 | 중간 (신규 모듈) |
 | PR6+ | 토픽 프로토콜 v1, 테더 탭 topic 이름/schema, dual-emit, dxy_futures rollup, snapshot 토픽 분리, alert/graph 분리 | PR5 | 큼 (다수 모듈) |
 
-#### PR3: Redis-first broadcast (Phase 2 첫 PR, v0.7 합의)
+> 📝 **PR 라벨 차이 안내**: 위 표는 v0.7 합의 시점 계획. 실제 진행은 PR3 → PR3.5 (분해 계측) → PR4 (MGET) → PR5 (DXY mirror) 시퀀스로 broadcast hot path DB-free 달성에 집중. "crawler write-through"는 위 표의 PR4 의미였으나, ADR-026 한계 분석에서 즉시 정당성 약함 — 후속 PR 영역으로 보류.
+
+#### PR3: Redis-first broadcast (✅ 완료 — ADR-026)
+
+> ✅ **2026-05-04 완료** — PR3 → PR3.5 (분해 계측) → PR4 (MGET 1회 통합) → PR5 (DXY mirror) 시퀀스로 broadcast hot path DB-free 달성. 측정 결과는 [ADR-026](DECISIONS.md#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성) 본문 참조.
+>
+> **핵심 결과** (PR5 24h 누적, n=31495):
+> - payload_build_ms p99 **30.25ms** (PR3.5 baseline 195ms → 6.4× 가속)
+> - rates Redis-first hit 100%, DXY Redis-first hit 100%
+> - dxy_query_ms count 1827 → **0** (broadcast hot path DB 조회 제거)
+> - mirror_age_ms p99 2301ms (3초 ceiling 안정)
+>
+> **운영 한계 (IN mode)**: 영업시간 outlier 비율 ~4× 증가 (Redis read wall-clock jitter, DB 경합 아님). 후속 진단 영역.
 
 **목적**: broadcast가 매초 DB latest SELECT를 실행하지 않도록 Redis mirror layer를 도입. 사용자 경로(broadcast send)를 DB CPU tail에서 분리.
 

@@ -2763,6 +2763,120 @@ DB에 `source='cnbc'` 들어오면 기존 조회/그래프 로직이 무시하�
 
 ---
 
+## ADR-026: Redis-first broadcast hot path — latest mirror + DXY mirror로 DB-free 달성
+
+> 📅 **작성일**: 2026-05-04
+> 🏷️ **상태**: 확정 (PR3-PR5 시리즈 측정 완료)
+
+### 맥락
+
+24h fast PoC (2026-05-01 15:53 KST~) 측정에서 매초 broadcast가 DB latest SELECT (rates + DXY)에 직접 묶여 있어 정각 spike + Performance Insights에서 wait event가 CPU 단일로 관측되고 LWLock/Lock/IO:WalSync 0건. 같은 구간 PI Top SQL에서 bank+source latest SELECT가 부하의 대부분(bank 0.21 + source 0.15 AAS = 0.36)을 차지.
+
+EC2 t3.small + RDS db.t4g.micro에서 broadcast hot path가 DB CPU에 직접 종속된 구조. 사용자 영향은 정각 spike(payload_build_ms p99 ~340-390ms / max ~1.3초 추정) + 매분 정각 정체.
+
+이 시점에 broadcast 사용자 경로만 떼어내 Redis layer로 분리할 필요가 명확. 옵션:
+- (A) DB SELECT 유지 + 캐시 추가 (status quo 보강)
+- (B) WebSocket push 직접 (event-driven, broadcast topic protocol 결정 선행 필요)
+- (C) Redis latest mirror layer (이 ADR)
+
+### 결정
+
+#### 1. PR3 — Redis latest mirror + Redis-first broadcast read
+
+- 신규 모듈 `app/latest_rates_cache.py` (cache.py·crud.py 변경 0)
+- mirror cycle: APScheduler IntervalTrigger 3초
+- key 구조:
+  - `latest:bank:{bank}:{currency}` — 은행 환율
+  - `latest:source:{source}:{asset}` — USDT 거래소
+  - `latest:investing:{currency}` — Investing 기준
+  - `latest:index` — atomic snapshot 제어 키 (mirror 일관성 보장)
+- value: `{rate, timestamp, mirrored_at}` JSON
+- broadcast: `fetch_rates_from_redis()`로 Redis 직접 read → 실패 시 DB fallback
+- 신규 env: `REDIS_LATEST_ENABLED` (단일 토글) + `LATEST_MIRROR_INTERVAL_SECONDS` (mirror 주기, PoC 후 1/3/5초 비교 영역)
+- 신규 메트릭: `latest_source` (redis/db_fallback), `mirror_age_ms`, `fallback_reason` (redis_miss/redis_stale/redis_error/circuit_open)
+
+#### 2. PR3.5 — 분해 계측
+
+- broadcast 내부 단계별 timing 추가 (`latest_index_get_ms`, `latest_index_parse_ms`, `latest_data_get_ms`, `latest_decode_ms`, `payload_assemble_ms`, `payload_assemble_without_dxy_ms`, `payload_build_unmeasured_ms`)
+- 잔존 long tail 원인 식별 목적 (PR3에서도 ~195ms p99 / 611ms max 잔존)
+
+#### 3. PR4 — MGET 1회로 통합
+
+- `fetch_rates_from_redis()` 내부 35 sequential GET → 1 MGET
+- 분해 계측에서 latest_data_get_ms가 dominant contributor였음 — MGET으로 RTT 1회로 축소
+
+#### 4. PR5 — DXY mirror + DXY-only fallback
+
+- 추가 키: `latest:dxy:current` (mirror cycle 동일 3초)
+- DXY-only fallback 패턴: rates Redis 성공 + DXY Redis 실패 시 **DXY만** DB 조회 (rates 재조회 없음)
+- 신규 메트릭: `dxy_path` (redis/db_fallback/missing), `latest_dxy_get_ms`, `latest_dxy_fallback_reason`
+- DXY mirror 부분 실패도 WARNING 트리거 (`dxy_failed > 0`)
+
+### 영향 — 측정 결과 (직접 검증)
+
+baseline 명확히 구분:
+
+| stage | 측정 윈도우 | n | p99 (ms) | max (ms) | DB hot path | 출처 |
+|---|---|---|---|---|---|---|
+| PR3 이전 baseline | (참고) | — | ~340~390 | ~1300 | rates+DXY DB SELECT | Codex 보고 (직접 검증 미실시) |
+| PR3.5 baseline | 30분 | 1853 | 195 | 611 | rates Redis-first / DXY DB | 직접 측정 |
+| PR4 후 30분 | 30분 | 1827 | 86.39 | 229.47 | rates Redis-first 100%, DXY DB 조회 유지 | 직접 측정 |
+| PR5 30분 | 30분 | 1871 | 35.77 | 109.61 | rates+DXY 모두 Redis-first 100%, dxy_query_ms n=0 | 직접 측정 |
+| **PR5 24h 누적** | 24h | **31495** | **30.25** | 415.14 | **DB hot path 0건** | 직접 측정 |
+| PR5 IN mode 30분 | 09:00-09:30 KST | 1801 | 75.97 | 835.45 | DB hot path 0건 | 직접 측정 |
+
+핵심 효과:
+- **DB hot path 100% → 0%** (rates + DXY 모두 Redis-first hit 100%, n=31495+1801)
+- **PR3.5 → PR5 24h: p99 195 → 30.25 (6.4× 가속)**
+- **dxy_query_ms count: 1827 → 0** (PR4 → PR5)
+- redis_hit_rate (rates + DXY): 100% (24h 누적 + IN mode 모두)
+
+### 한계 / 운영 환경 (IN mode)
+
+영업시간 IN mode (2026-05-04 09:00-09:30 KST 30분 측정)에서 outlier 비율 증가:
+- ≥300ms 비율: weekend 24h 0.029% → IN mode 0.111% (~4× 증가)
+- p99: weekend 30.25ms → IN mode 75.97ms (~2.5× 증가)
+- mirror_age p99: weekend 2301ms / IN mode 2398ms (정상, 3초 ceiling 이내)
+- mirror_age max: weekend 3477ms / IN mode 4314ms (각각 1건씩 ceiling 1회 초과)
+
+원인 분석 (row-level):
+- top spike row가 latest_index_get_ms 또는 latest_data_get_ms 단일 step dominant (예: pb 835ms 중 idx 762ms)
+- co-spike (2개 이상 step 동시 spike): weekend 7.5h 0건, IN mode 30분 1건 (n=1801 중 1건이라 통계 신호 약함)
+- 결론: **Redis read wall-clock jitter가 영업시간에 확장**되는 패턴
+- DB 경합 / DXY fallback은 주요 원인으로 보기 어려움 (mirror_age p99 정상, redis hit 100%). mirror cycle은 p99 기준 안정이나 max 기준 1회성 지연이 있어 운영 신호 누적 후 재평가.
+
+### 트레이드오프
+
+- mirror cycle 3초 = 사용자가 받는 데이터의 max age 약 2.4~2.5초 (실측 mirror_age p99)
+- DB 부하: mirror SELECT 분당 20회 (3초 주기 기준) — 무시할 수준
+- 운영 복잡도: Redis 추가 의존 + fallback 경로 + Circuit Breaker 가시화
+- mirror cycle 1회 누락 outlier (ceiling 4314ms 1건) — 24h+30min에 1~2건 수준
+
+### 후속 PR 정당성 (현재 즉시 정당화 X)
+
+- **crawler write-through** (REALTIME_ARCHITECTURE_PLAN.md PR4 원래 계획): mirror_age p99 정상이라 즉시 정당화 X. 정당화 신호: mirror_age p99 ≥ 3초 또는 사용자 UX 피드백
+- **Redis 진단** (SLOWLOG / cgroup CPU / pipeline 통합): IN mode jitter 원인 추적용. 정당화 신호: IN mode outlier 비율 추가 증가 또는 사용자 영향 가시화
+- **mirror cycle 조정**: 1/3/5초 비교는 운영 신호 누적 후 결정 (현재 3초 안정)
+
+### 기각 대안
+
+| 대안 | 기각 사유 |
+|---|---|
+| (A) DB SELECT 유지 + 캐시 추가 | 정각 spike + DB CPU 종속 미해결 |
+| (B) WebSocket push 직접 (event-driven) | 큰 변경, broadcast topic protocol 결정 선행 필요 |
+| crawler write-through 즉시 (mirror 우회) | 16개+ 크롤러 변경 + 분산 일관성 부담, mirror로 충분히 해결 |
+| mirror cycle 1초 | broadcast와 1:1 → mirror 의미 약화 + jitter 시 stale 비율 급증 |
+| mirror cycle 5~10초 | UX max age 5~10초 stale 가능성 |
+| latest:* 캐시를 cache.py 공용 모듈로 통합 | 도메인 격리(Redis latest layer)가 더 명확 + 회귀 위험 분리 |
+
+### 관련 결정
+
+- [ADR-008](#adr-008-queue-압력-완화-전략-실시간성-vs-완전성): broadcast 실시간성 강화 시리즈
+- [ADR-010](#adr-010-websocket-broadcasting-스케줄링-방식): broadcast cron 전환 — Phase 2 같은 시리즈
+- [REALTIME_ARCHITECTURE_PLAN.md v0.8](REALTIME_ARCHITECTURE_PLAN.md): PR3-PR5 설계 + 측정 결과 본문
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2790,3 +2904,4 @@ DB에 `source='cnbc'` 들어오면 기존 조회/그래프 로직이 무시하�
 - 2026-04-27: ADR-023 작성 (데이터 보관 정책 30일 통일 — bank/source_rates/DXY realtime)
 - 2026-04-27: ADR-024 작성 (미국달러지수 선물 분리 저장 + DXY_MODE 제거)
 - 2026-04-28: ADR-025 작성 (DXY 현물 외부 fallback 체인 — CNBC 추가 + Yahoo 격하)
+- 2026-05-04: ADR-026 작성 (Redis-first broadcast hot path — latest mirror + DXY mirror로 DB-free 달성)

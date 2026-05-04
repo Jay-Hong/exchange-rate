@@ -59,10 +59,15 @@
 크롤러(11개) → Scheduler → SQLite → WebSocket(10초) → 클라이언트
 
 [서비스 환경]
-크롤러(11개) → Scheduler → RDS PostgreSQL → WebSocket(10초) → 클라이언트
+크롤러(11개) → Scheduler → RDS PostgreSQL → WebSocket(1초) → 클라이언트
+                              ↓                ↑
+                    Redis latest mirror (3초)  ── broadcast Redis-first read (PR3-PR5, ADR-026)
                                     ↓
                           Firebase Auth + FCM → 푸시 알림
 ```
+
+> **broadcast 데이터 흐름** (PR5 완료, 2026-05-04):
+> 크롤러가 DB에 저장 → mirror cycle 3초마다 DB latest를 Redis로 복사 (`latest:bank:*`, `latest:source:*`, `latest:investing:*`, `latest:dxy:current`) → broadcast 매초 Redis 직접 read → Redis 실패 시 DB fallback. broadcast hot path는 DB-free (rates + DXY 모두). 자세한 내용은 [ADR-026](DECISIONS.md#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성).
 
 ### 데이터 소스
 
@@ -676,6 +681,7 @@ exchange-rate/
 │   ├── schemas.py           # Pydantic 스키마
 │   ├── crud.py              # DB CRUD 로직
 │   ├── cache.py             # Redis 클라이언트 (Circuit Breaker) - Phase 1.7
+│   ├── latest_rates_cache.py # Redis latest mirror layer (PR3-PR5, ADR-026)
 │   ├── main.py              # FastAPI 서버, WebSocket
 │   ├── scheduler.py         # APScheduler, 4단계 모드 전환
 │   ├── source_registry.py   # USDT Phase 1 source 메타데이터 (SourceDefinition)
@@ -888,6 +894,34 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - **실시간 반영**: 토글 즉시 스케줄러에 반영
 
 **관련 스키마**: `crawler_config` 테이블 (CLAUDE.md 데이터베이스 스키마 참조)
+
+### Phase 1.9: Redis-first broadcast hot path ✅ 완료 (2026-05-04)
+
+**배경**: 매초 broadcast가 DB latest SELECT (rates + DXY)에 직접 묶여 정각 spike 발생 ([ADR-026](DECISIONS.md#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성))
+
+**추가된 기능**:
+- **신규 모듈** `app/latest_rates_cache.py`: Redis latest mirror layer
+- **mirror keys**: `latest:bank:{bank}:{currency}`, `latest:source:{source}:{asset}`, `latest:investing:{currency}`, `latest:dxy:current`
+- **제어 key**: `latest:index` (atomic snapshot 일관성)
+- **mirror cycle**: APScheduler IntervalTrigger 3초
+- **broadcast Redis-first read**: `fetch_rates_from_redis()` (MGET 1회 통합)
+- **DXY mirror + DXY-only fallback** (PR5): rates 성공 + DXY 실패 시 DXY만 DB
+- **신규 env**: `REDIS_LATEST_ENABLED`, `LATEST_MIRROR_INTERVAL_SECONDS`
+- **신규 메트릭**: `latest_source` / `mirror_age_ms` / `latest_index_get_ms` / `latest_data_get_ms` / `latest_decode_ms` / `latest_dxy_get_ms` / `dxy_path` / `latest_dxy_fallback_reason` / `payload_assemble_ms` / `payload_assemble_without_dxy_ms` / `payload_build_unmeasured_ms`
+
+**측정 결과** (PR5 24h 누적, n=31495):
+- payload_build_ms p99 **30.25ms** (PR3.5 baseline 195ms → 6.4× 가속)
+- DB hot path **100% → 0%** (rates + DXY 모두 Redis-first hit 100%)
+- dxy_query_ms count **1827 → 0**
+- mirror_age_ms p99 2301ms (3초 ceiling 안정)
+- 영업시간 IN mode (n=1801): p99 75.97ms (Redis read jitter ~2.5×, DB 경합 아님)
+
+**핵심 파일**:
+- `app/latest_rates_cache.py` (신규, mirror + Redis-first read + DXY mirror)
+- `app/main.py` (broadcast hot path Redis-first 분기 + 분해 계측)
+- `app/scheduler.py` (mirror job 등록)
+- `app/config.py` (env)
+- `scripts/analyze_broadcast_metrics.py` (메트릭 집계)
 
 ### Phase 1A: DXY 그래프 보조지표 ✅ 완료 (2026-03-10)
 

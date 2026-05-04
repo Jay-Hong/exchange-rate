@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Redis-first broadcast hot path** (2026-05-04, ADR-026, PR3-PR5):
+  - 신규 모듈 `app/latest_rates_cache.py` — Redis latest mirror layer (cache.py·crud.py 변경 0)
+  - mirror keys: `latest:bank:{bank}:{currency}`, `latest:source:{source}:{asset}`, `latest:investing:{currency}`, `latest:dxy:current`
+  - 제어 key: `latest:index` (atomic snapshot 일관성 보장)
+  - mirror cycle: APScheduler IntervalTrigger 3초
+  - DXY mirror 추가 (PR5) — broadcast hot path에서 DXY DB SELECT 제거
+  - DXY-only fallback 패턴 (rates Redis 성공 + DXY Redis 실패 시 DXY만 DB)
+  - 신규 env: `REDIS_LATEST_ENABLED`, `LATEST_MIRROR_INTERVAL_SECONDS`
+  - 신규 메트릭: `latest_source` / `mirror_age_ms` / `latest_index_get_ms` / `latest_data_get_ms` / `latest_decode_ms` / `latest_dxy_get_ms` / `dxy_path` / `latest_dxy_fallback_reason` / `payload_assemble_ms` / `payload_assemble_without_dxy_ms` / `payload_build_unmeasured_ms`
+  - `fetch_rates_from_redis()` 35 sequential GET → MGET 1회 통합 (PR4)
+  - `scripts/analyze_broadcast_metrics.py` PR3-PR5 메트릭 집계 추가
+
 - **DXY 현물 CNBC 외부 fallback 추가** (2026-04-28, ADR-025):
   - 외부 fallback chain: CNBC `.DXY` (1순위) → Yahoo Finance (최후 보루)
   - `app/crawlers/dxy.py`에 `fetch_dxy_from_cnbc()` 추가 (ICE U.S. Dollar Index 공개 quote endpoint)
@@ -91,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **수동 gap 복구 함수** (`app/admin/dxy_rollup.py`):
   - `backfill_hourly_range()`: UTC 구간 realtime → hourly 일괄 생성
   - `backfill_daily_range()`: KST 날짜 구간 hourly/realtime → daily 일괄 생성
+
+### Performance
+
+- **broadcast `payload_build_ms` p99 195ms → 30.25ms** (PR5 24h 측정, n=31495, 6.4× 가속)
+  - PR3.5 baseline 30분: p99 195ms / max 611ms
+  - PR4 30분: p99 86.39ms / max 229.47ms
+  - PR5 30분: p99 35.77ms / max 109.61ms
+  - **PR5 24h 누적**: p99 30.25ms / max 415.14ms / ≥300ms outlier 0.029%
+  - PR5 IN mode 30분 (영업시간 09:00-09:30): p99 75.97ms / max 835.45ms / ≥300ms 0.111% (영업시간 Redis read jitter ~2.5×)
+- **DB hot path 100% → 0%** (rates + DXY 모두 Redis-first hit 100%, n=31495+1801)
+- **`dxy_query_ms` count: 1827 → 0** (broadcast hot path DB 조회 제거)
+- 운영 한계: 영업시간 Redis read wall-clock jitter (DB 경합/DXY fallback은 주요 원인으로 보기 어려움, 후속 진단 영역)
 
 ### Fixed
 
