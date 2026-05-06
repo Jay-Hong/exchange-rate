@@ -33,6 +33,7 @@ import logging
 import os
 import time
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -372,6 +373,10 @@ class KisFuturesClient:
                 await ws.send(self._sub_message(approval_key, tr_id, tr_key))
                 logger.info("[kis_ws] subscribed tr_id=%s key=%s", tr_id, tr_key)
 
+            # PR6e — 새 WebSocket 세션 관찰 시작점. 이전 세션 마지막 tick의
+            # _last_tick_at carry-over로 인한 즉시 stale 전이 차단 (60초 grace).
+            # 60초 안에 첫 tick 안 들어오면 line 384-389 체크가 stale 정상 감지.
+            self._last_tick_at = time.time()
             self._set_status("normal")
 
             while not self._stop.is_set():
@@ -573,17 +578,24 @@ class KrxDbWriter:
 
         SessionLocal은 thread-local이라 새 thread에서 새 session 열고 닫기.
         crud.insert_source_rate_if_changed는 내부에서 db.commit() 호출.
+
+        PR6e — KIS payload string에 "1457.40007441" 같은 8자리 정밀도가
+        포함되어 들어오므로, KRX USD 미국달러선물 tick size(0.1 KRW)로
+        정규화. Decimal(str).quantize는 IEEE float 잔차 없이 정확한
+        십진수 라운딩 (`Decimal(float)` 패턴은 IEEE 잔차 carry-over 위험).
         """
         # 함수 내부 import — to_thread만 import 비용, 모듈 로드 영향 X.
         from app import crud
         from app.database import get_db_context
+
+        normalized_rate = float(Decimal(tick["price"]).quantize(Decimal("0.1")))
 
         with get_db_context() as db:
             crud.insert_source_rate_if_changed(
                 db=db,
                 source=tick["source"],
                 asset=tick["asset"],
-                rate=float(tick["price"]),
+                rate=normalized_rate,
             )
 
 

@@ -759,6 +759,123 @@ class TestKrxDbWriter(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(writer._timer.done())
         self.assertTrue(old_timer_done[0])
 
+    # PR6e — rate 정규화 (KIS payload 8자리 정밀도 → KRX tick 0.1 KRW)
+
+    def test_sync_db_write_normalizes_8digit_to_one_decimal_a(self):
+        """1457.40007441 → DB write rate=1457.4 (Decimal.quantize 정규화)."""
+        payload = self._make_payload(price="1457.40007441")
+        with patch("app.crud.insert_source_rate_if_changed") as mock_insert, \
+             patch("app.database.get_db_context"):
+            KrxDbWriter._sync_db_write(payload)
+            mock_insert.assert_called_once()
+            kwargs = mock_insert.call_args.kwargs
+            self.assertEqual(kwargs["rate"], 1457.4)
+            self.assertEqual(kwargs["source"], "krx")
+            self.assertEqual(kwargs["asset"], "usd-krw-futures")
+
+    def test_sync_db_write_normalizes_8digit_to_one_decimal_b(self):
+        """1455.80009883 → DB write rate=1455.8."""
+        payload = self._make_payload(price="1455.80009883")
+        with patch("app.crud.insert_source_rate_if_changed") as mock_insert, \
+             patch("app.database.get_db_context"):
+            KrxDbWriter._sync_db_write(payload)
+            kwargs = mock_insert.call_args.kwargs
+            self.assertEqual(kwargs["rate"], 1455.8)
+
+
+# ---------------------------------------------------------------------------
+# PR6e — stale carry-over 차단 (subscribe 후 _last_tick_at reset)
+# ---------------------------------------------------------------------------
+
+class TestStaleCarryOverReset(unittest.IsolatedAsyncioTestCase):
+    """_connect_and_listen subscribe 직후 _last_tick_at = time.time() reset 검증.
+
+    배경: 5/6 08:30 KST CF 첫 진입 시 5/5 06:00 마지막 tick의 _last_tick_at
+    (~26h 전)이 carry-over → 첫 stale check가 즉시 stale 전이 → 2초 후
+    첫 tick 도착으로 normal 자동 복구. baseline 서비스 영향 0이지만 의미적
+    으로 stale 아님. PR6e fix로 carry-over 차단.
+    """
+
+    async def test_carry_over_does_not_trigger_immediate_stale(self):
+        """ancient _last_tick_at(26h 전)도 subscribe 후 reset → 첫 stale check stale 안 됨."""
+        client = KisFuturesClient(approval_manager=MagicMock(spec=KisApprovalManager))
+
+        # carry-over 시나리오: 26h 전 마지막 tick
+        ancient = time.time() - 26 * 3600
+        client._last_tick_at = ancient
+
+        # recv 한 번 timeout → 그 후 stop으로 loop 빠져나오게
+        recv_calls = [0]
+
+        async def recv_side_effect():
+            recv_calls[0] += 1
+            if recv_calls[0] >= 2:
+                client._stop.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=recv_side_effect)
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.crawlers.krx_kis.websockets.connect", return_value=mock_connect), \
+             patch("app.crawlers.krx_kis.get_active_session", return_value="CM"), \
+             self.assertLogs("app.crawlers.krx_kis", level="INFO"):
+            await client._connect_and_listen("CM", "test_key")
+
+        # _last_tick_at이 ancient에서 fresh로 reset됨 (subscribe 직후)
+        self.assertGreater(
+            client._last_tick_at, ancient + 25 * 3600,
+            "subscribe 후 _last_tick_at이 reset되어야 (carry-over 차단)",
+        )
+        self.assertLess(time.time() - client._last_tick_at, 5)
+        # status는 normal 유지 — carry-over로 stale 가지 않음
+        self.assertEqual(
+            client._status, "normal",
+            "carry-over _last_tick_at이 reset되어 stale 전이 발생 X",
+        )
+
+    async def test_60s_no_tick_after_subscribe_still_goes_stale(self):
+        """subscribe 후 60s+ tick 무수신 → stale 정상 감지 (회귀 방지).
+
+        PR6e의 _last_tick_at = time.time() reset이 기존 stale 감지(line 384-389)를
+        깨지 않는지 검증. 시간 흐름은 _last_tick_at 강제 변경으로 시뮬레이션.
+        get_active_session은 항상 "CM" 반환하도록 patch (실제 wall-clock이
+        active session 외 시점이어도 테스트 안정).
+        """
+        client = KisFuturesClient(approval_manager=MagicMock(spec=KisApprovalManager))
+
+        recv_calls = [0]
+
+        async def recv_side_effect():
+            recv_calls[0] += 1
+            if recv_calls[0] == 1:
+                # 첫 timeout 후 시간 흐름 시뮬레이션 — _last_tick_at을 STALE 임계 초과로
+                client._last_tick_at = time.time() - (STALE_AFTER_SEC + 40)
+            elif recv_calls[0] >= 2:
+                client._stop.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=recv_side_effect)
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.crawlers.krx_kis.websockets.connect", return_value=mock_connect), \
+             patch("app.crawlers.krx_kis.get_active_session", return_value="CM"), \
+             self.assertLogs("app.crawlers.krx_kis", level="INFO"):
+            await client._connect_and_listen("CM", "test_key")
+
+        # 두 번째 iteration의 stale check가 트리거 → status stale
+        self.assertEqual(
+            client._status, "stale",
+            "subscribe 후 60s+ tick 무수신 시 stale 정상 감지되어야 (회귀 방지)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
