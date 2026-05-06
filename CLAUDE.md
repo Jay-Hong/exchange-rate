@@ -7,7 +7,7 @@
 ### 📚 주요 문서 가이드
 
 **핵심 가이드:**
-> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR)
+> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR). **최신: ADR-027 (KRX REST/stale 정책 초안), ADR-028 (Topic-only Tether/KRX + legacy FX dual-emit 계약)**
 > 🕷️ **크롤러 구현:** [CRAWLERS.md](CRAWLERS.md) - 각 은행별 크롤링 방식과 특수 로직
 > 📝 **변경 이력:** [CHANGELOG.md](CHANGELOG.md) - 버전별 변경사항 및 마이그레이션 가이드
 > 🔔 **알림 & 구독:** [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md) - 푸시 알림, 인증, 구독 관리 가이드
@@ -25,8 +25,14 @@
 > 🔧 **2025-11-05:** [MAINTENANCE_2025-11-05.md](MAINTENANCE_2025-11-05.md) - 성능 개선 및 모니터링 시스템 구축
 
 **계획/설계 문서:**
-> ⚡ **실시간 아키텍처:** [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) - 1초 broadcast, 거래소 WebSocket, 구독 기반 라우팅 전환 계획
-> 🔌 **USDT 거래소 WebSocket:** [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) - 업비트/빗썸/코인원/코빗/고팍스 ticker 구독 및 정규화 가이드
+> ⚡ **실시간 아키텍처:** [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) - **서비스 계약 source of truth**. 1초 broadcast / 거래소 WebSocket / 구독 기반 라우팅 / dual-emit 전략. topic-only Tether/KRX + legacy FX dual-emit 계약 명시.
+> 🔌 **USDT 거래소 WebSocket:** [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) - 업비트/빗썸/코인원/코빗/고팍스 ticker 구독 및 정규화 가이드 (collector 측, emit 모델과 독립)
+
+**USDT / KRX 도메인 문서** (Phase Z-1 status 정리, 2026-05-06):
+> 📋 **KRX Stage 1 운영:** [KRX_CANARY.md](KRX_CANARY.md) - **현재 운영 중**. Stage 0/1/2 runbook, SQL/Redis 검증 명령, 24h baseline 지표, 5/18 만기 관찰 시나리오, rollback 절차
+> 📜 **USDT 탭 초기 제안서:** [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md) - **Historical proposal (rollout superseded)**. 제품 방향성/Decision A~F는 참고 유효, "기존 WebSocket에 usdt-krw 포함" rollout은 폐기
+> 🧱 **USDT Phase 1 백엔드 설계:** [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md) - **source/asset 도메인 모델 유효 (source_rates / SourceRegistry / 알림 정책)**. legacy `/api/rates` + WebSocket `rates` 통합 rollout은 superseded — 데이터 수신 계약은 [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) + [ADR-028](DECISIONS.md) 따름
+> 📱 **USDT iOS/Android 가이드:** [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md) - **RateSource / 어댑터 / SourceRegistry 모델 참고용**. 데이터 수신 방식(`/api/rates`, `/ws` `rates` 배열)은 V2 protocol(`REALTIME_V2_CLIENT_GUIDE.md`, Phase Z-2 신설 예정)로 대체 예정
 
 **글로벌 가이드:**
 > 📚 **공통 개발 규칙:** [~/.claude/CLAUDE.md](file:///Users/jay/.claude/CLAUDE.md) - MCP 설정, 코딩 스타일, Git Convention

@@ -2992,7 +2992,9 @@ Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket �
 - KRX_CANARY.md Stage 2 조건에 topic protocol 의존성 추가
 - CHANGELOG.md Changed 항목 추가
 
-**Phase Z-2 — 코드 분리 (별도 PR, baseline + 5/18 만기 관찰 후 시작)**:
+**Phase Z-2 — 코드 분리 + 문서 정리 (별도 PR, baseline + 5/18 만기 관찰 후 시작)**:
+
+코드 작업:
 
 - `app/main.py` `build_rates_payload`에서 `get_all_rates_flat()` 결과를 currency 화이트리스트(USD/JPY/EUR)로 한정
 - WebSocket hello / subscribe / unsubscribe 메시지 schema 설계 + 구현
@@ -3000,9 +3002,18 @@ Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket �
 - snapshot vs delta 구분 + snapshot 토픽별 분리
 - ConnectionManager에 subscribe 상태 관리
 - broadcast 분기: 구버전(미 subscribe) = legacy / 신버전(subscribe 메시지 보낸 클라이언트) = topic delta
-- iOS/Android V2 클라이언트 가이드 작성 (USDT_PHASE1_CLIENT_GUIDE 후속)
 - KRX는 처음부터 topic-only로 Stage 2 진입 (legacy 통합 단계 건너뜀)
 - `/api/rates/usdt-krw` debug/compat 유지 vs 제거 결정 (별도 ADR 또는 본 ADR 후속 amend)
+
+문서 정리 (코드 작업과 동시 진행, Phase Z-1 status 라벨에서 본격 통폐합으로 전환):
+
+- **`REALTIME_V2_CLIENT_GUIDE.md` 신설** — iOS/Android V2 클라이언트 가이드. hello/subscribe/snapshot/delta 프로토콜 + 탭별 topic 구독 방식. 기존 `USDT_PHASE1_CLIENT_GUIDE.md`의 RateSource / 어댑터 / SourceRegistry 패턴 흡수
+- **`SOURCE_ASSET_MODEL.md` 신설** — `USDT_PHASE1_DESIGN.md`에서 백엔드 도메인 모델만 추출 (`source_rates` 스키마 / SourceRegistry / 알림 모델 / comparison alert 설계). 백엔드 단일 진리 source
+- **`USDT_TAB_PROPOSAL.md`** → `archived/` 이동 (역사적 제안서. 모델/방향은 SOURCE_ASSET_MODEL.md에 흡수됨)
+- **`USDT_PHASE1_DESIGN.md`** → `archived/` 이동 (도메인 모델 SOURCE_ASSET_MODEL.md로 추출 후)
+- **`USDT_PHASE1_CLIENT_GUIDE.md`** → `archived/` 이동 (REALTIME_V2_CLIENT_GUIDE.md 대체 후)
+- **`KRX_CANARY.md` → `KRX_OPERATIONS.md`** 이름 변경 검토 (Stage 2 진입 후 일반 운영 runbook으로 격상 시점)
+- CLAUDE.md "USDT / KRX 도메인 문서" 섹션 정리 (archive된 문서 참조 제거 + 새 문서 참조 추가)
 
 **Phase Z-3 — legacy 제거 (6개월+, 사용자 통계 기반)**:
 
