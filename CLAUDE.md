@@ -37,6 +37,16 @@
 **글로벌 가이드:**
 > 📚 **공통 개발 규칙:** [~/.claude/CLAUDE.md](file:///Users/jay/.claude/CLAUDE.md) - MCP 설정, 코딩 스타일, Git Convention
 
+### 코드/문서 변경 검증 게이트 (2026-05-06)
+
+최근 KRX/USDT 문서 정합 및 PR6d 작업에서 회상 기반 단정, commit message와 diff 불일치, env/config 정의 후 사용처 연결 누락이 반복됐다. 신규 사례를 메모리에 계속 추가하는 대신, 이 리포에서는 큰 코드/문서 변경 후 아래 절차를 표준 게이트로 적용한다.
+
+1. **Diff와 self-claim 1:1 대조**: commit/push 전 `git diff --stat`와 `git diff`를 직접 보고, commit body 또는 최종 보고에 적는 변경 항목이 실제 diff에 모두 들어 있는지 확인한다.
+2. **Env/config 사용처 확인**: env/config 변수를 추가하거나 의미를 바꾸면 `rg <ENV_NAME>`로 정의와 사용처를 함께 확인한다. 의도적으로 아직 사용하지 않는 값은 commit body에 "현재 사용처 없음, PR<X>에서 사용 예정"이라고 명시한다.
+3. **Caveat 후속 적용**: 문서/코드에 "검증 필요", "unresolved", "Stage 2 전 확인" 같은 caveat을 추가했다면, 다음 단계 진입 전에 처리하거나 명시적으로 보류 결정한다.
+4. **외부 검토 표준화**: 큰 문서 계약 변경, 운영 runbook, env/config, REST/WebSocket endpoint 작업은 다른 에이전트(Codex/Claude 등) 검토를 표준 단계로 둔다. 검토 결과 반영 후 commit/push한다.
+5. **자동화는 중기 과제**: pre-commit/commit-msg hook은 이 절차가 안정된 뒤 별도 작업으로 도입한다. 지금은 의식적 검증 게이트로 먼저 적용한다.
+
 ## MCP (Model Context Protocol) 설정
 
 > 💡 **MCP 전체 가이드**: `~/.claude/CLAUDE.md` 참고 (설치/삭제 명령어, Context 최적화 전략)
