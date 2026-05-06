@@ -1310,6 +1310,99 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
         """ADR-027 PR6d-2a Test matrix 5번째 (admin endpoint 분기) — 운영 검증으로 분리."""
         pass
 
+    def test_get_metrics_includes_iso_timestamps(self):
+        """PR6d-2a follow-up — lifecycle / last_*_at에 epoch + KST ISO 둘 다."""
+        m = self.client.get_metrics()
+        # lifecycle: started_at은 항상 존재 (init 시점 epoch float)
+        self.assertIsInstance(m["lifecycle"]["started_at"], float)
+        self.assertIsInstance(m["lifecycle"]["started_at_kst"], str)
+        # ISO 형식 sanity check (datetime.fromisoformat 파싱 가능)
+        from datetime import datetime as dt
+        parsed = dt.fromisoformat(m["lifecycle"]["started_at_kst"])
+        self.assertIsNotNone(parsed.tzinfo)
+
+        # connected_at은 None (아직 connect 안 함)
+        self.assertIsNone(m["lifecycle"]["connected_at"])
+        self.assertIsNone(m["lifecycle"]["connected_at_kst"])
+
+        # last_*_at도 None (tick 0건)
+        self.assertIsNone(m["last_frame_at"])
+        self.assertIsNone(m["last_frame_at_kst"])
+        self.assertIsNone(m["last_trade_frame_at"])
+        self.assertIsNone(m["last_trade_frame_at_kst"])
+        self.assertIsNone(m["last_quote_frame_at"])
+        self.assertIsNone(m["last_quote_frame_at_kst"])
+
+    async def test_get_metrics_iso_after_tick(self):
+        """tick 1건 도착 후 last_frame_at + ISO 둘 다 채워짐."""
+        cnt_raw = "^".join([
+            "A75605", "180332", "0", "0", "0", "1468.0",
+        ] + ["0"] * 43)
+        await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
+
+        m = self.client.get_metrics()
+        self.assertIsNotNone(m["last_frame_at"])
+        self.assertIsNotNone(m["last_frame_at_kst"])
+        self.assertIsNotNone(m["last_trade_frame_at"])
+        self.assertIsNotNone(m["last_trade_frame_at_kst"])
+        # 호가 tick 안 옴 → quote_at은 None
+        self.assertIsNone(m["last_quote_frame_at"])
+        self.assertIsNone(m["last_quote_frame_at_kst"])
+        # ISO 파싱 가능
+        from datetime import datetime as dt
+        parsed = dt.fromisoformat(m["last_frame_at_kst"])
+        self.assertIsNotNone(parsed.tzinfo)
+
+    async def test_summary_log_skipped_during_no_active_session(self):
+        """active_session=None일 때 _summary_log_loop emit 안 함 (noise 방지).
+
+        실제 `_summary_log_loop()` 호출 + asyncio.sleep patch (60s → 0.05s)로
+        wrap 흉내 없이 회귀 방지 — Codex 외부 검토 정정 (PR6d-2a follow-up).
+        """
+        self.client._active_session = None
+        self.client._frame_count_total = 100
+
+        original_sleep = asyncio.sleep
+
+        async def fast_sleep(t):
+            await original_sleep(0.05 if t == 60 else t)
+
+        with patch("app.crawlers.krx_kis.asyncio.sleep", side_effect=fast_sleep), \
+             self.assertNoLogs("app.crawlers.krx_kis", level="INFO"):
+            task = asyncio.create_task(self.client._summary_log_loop())
+            # 첫 iteration 후 cancel — active_session=None 분기에서 emit 없이 continue
+            await asyncio.sleep(0.1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def test_summary_log_emits_during_active_session(self):
+        """active_session 설정된 상태에서 summary log loop이 INFO emit."""
+        # _summary_log_loop의 sleep을 0.05s로 축소 + 1회 iteration 후 cancel
+        self.client._active_session = "CM"
+        self.client._frame_count_total = 50
+
+        original_sleep = asyncio.sleep
+
+        async def fast_sleep(t):
+            # 60s → 0.05s
+            await original_sleep(0.05 if t == 60 else t)
+
+        with patch("app.crawlers.krx_kis.asyncio.sleep", side_effect=fast_sleep), \
+             self.assertLogs("app.crawlers.krx_kis", level="INFO") as cm:
+            task = asyncio.create_task(self.client._summary_log_loop())
+            # 첫 iteration 후 cancel
+            await asyncio.sleep(0.1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # metrics summary 1줄 출력 확인
+        self.assertTrue(any("[kis_ws] metrics session=CM" in m for m in cm.output))
+
     async def test_max_gap_sec_tracks_largest_inter_tick_gap(self):
         """max_gap_sec — 두 tick 사이 가장 긴 gap 추적 (전체/체결/호가)."""
         cnt_raw = "^".join([

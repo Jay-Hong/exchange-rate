@@ -205,6 +205,40 @@ GROUP BY hour
 ORDER BY hour;
 ```
 
+**`/admin/api/krx-status` 운영 검증 (PR6d-2a, ADR-027):**
+
+PR6d-2a admin endpoint의 분기 동작은 단위 테스트가 `main.py`의 `firebase_admin` + lifespan side effect 회피 어려움으로 skip 처리됨. 운영 배포 후 admin 페이지 직접 호출로 cover:
+
+```bash
+# admin auth 적용 (verify_admin dependency 재사용).
+# ADMIN_PASSWORD는 운영 .env의 값. 호스트는 운영 도메인 fxi.kr (또는 EC2 직접 접속이면 localhost:8000).
+curl -u admin:"$ADMIN_PASSWORD" https://fxi.kr/admin/api/krx-status | jq .
+
+# 분기 검증:
+# 1. KRX_FUTURES_ENABLED=false → {"enabled": false, "started": false, "reason": "..."}
+# 2. enabled=true + bootstrap 미완 → {"enabled": true, "started": false, "reason": "client 미생성..."}
+# 3. enabled=true + client present → {"enabled": true, "started": true, "client": {...metrics}}
+```
+
+기대 (active session 중):
+
+- `client.status` = "normal"
+- `client.active_session` = "CF" 또는 "CM"
+- `client.last_frame_age_sec` < 5 (frame 활발 수신)
+- `client.counters.frame_total` 시간에 따라 증가
+- `client.counters.status_transitions.stale` = 0 또는 매우 낮음
+
+baseline 수집 명령 (분당 1회 polling 권장 — 24~48h 후 PR6d-2b 진입 데이터):
+
+```bash
+# ADMIN_PASSWORD는 .env에서 export 후 사용. 호스트는 운영 도메인 fxi.kr.
+while true; do
+  curl -s -u admin:"$ADMIN_PASSWORD" https://fxi.kr/admin/api/krx-status \
+    | jq '.client | {status, active_session, last_frame_age_sec, frame_count: .counters.frame_total, max_gap: .max_gap_sec.total}'
+  sleep 60
+done
+```
+
 ---
 
 ## 5/18 만기일 특별 관찰 (현재 자동 rollover 미구현)

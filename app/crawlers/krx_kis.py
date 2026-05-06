@@ -592,10 +592,25 @@ class KisFuturesClient:
             return "<=60s"
         return ">60s"
 
+    @staticmethod
+    def _epoch_to_kst_iso(epoch: Optional[float]) -> Optional[str]:
+        """epoch float → KST ISO timestamp (PR6d-2a follow-up fix).
+
+        admin 페이지 / 운영자 가독성 위해 ISO 형식 노출. None은 그대로 유지.
+        """
+        if epoch is None:
+            return None
+        return datetime.fromtimestamp(epoch, tz=KST).isoformat()
+
     def get_metrics(self) -> Dict[str, Any]:
-        """현재 metric state snapshot (PR6d-2a, ADR-027).
+        """현재 metric state snapshot (PR6d-2a + follow-up fix, ADR-027).
 
         admin endpoint / summary log / 테스트에서 호출. read-only.
+
+        timestamp 노출 정책:
+        - 모든 lifecycle / last_*_at은 epoch + KST ISO 둘 다 제공
+        - epoch는 backward compat (기존 클라이언트), ISO는 admin 페이지 가독성
+        - age 필드는 그대로 유지 (호환성)
         """
         now = time.time()
         return {
@@ -608,15 +623,23 @@ class KisFuturesClient:
             },
             "lifecycle": {
                 "started_at": self._started_at,
+                "started_at_kst": self._epoch_to_kst_iso(self._started_at),
                 "connected_at": self._connected_at,
+                "connected_at_kst": self._epoch_to_kst_iso(self._connected_at),
                 "uptime_sec": int(now - self._started_at),
             },
+            "last_frame_at": self._last_tick_at,
+            "last_frame_at_kst": self._epoch_to_kst_iso(self._last_tick_at),
             "last_frame_age_sec": (
                 int(now - self._last_tick_at) if self._last_tick_at else None
             ),
+            "last_trade_frame_at": self._last_trade_frame_at,
+            "last_trade_frame_at_kst": self._epoch_to_kst_iso(self._last_trade_frame_at),
             "last_trade_frame_age_sec": (
                 int(now - self._last_trade_frame_at) if self._last_trade_frame_at else None
             ),
+            "last_quote_frame_at": self._last_quote_frame_at,
+            "last_quote_frame_at_kst": self._epoch_to_kst_iso(self._last_quote_frame_at),
             "last_quote_frame_age_sec": (
                 int(now - self._last_quote_frame_at) if self._last_quote_frame_at else None
             ),
@@ -669,19 +692,76 @@ class KisFuturesClient:
         """메인 루프 — active session 동안 WebSocket 유지, 변경 시 재연결.
 
         세션 None (휴장/break) 동안엔 30초마다 재체크.
+
+        PR6d-2a follow-up: 60초마다 summary log task를 background에서 함께 실행.
+        active session 중에만 INFO 1줄 출력 (휴장 중에는 noise 방지로 skip).
         """
+        # PR6d-2a follow-up — summary log background task. start() 동일 lifetime.
+        summary_task = asyncio.create_task(self._summary_log_loop())
+        try:
+            while not self._stop.is_set():
+                now = datetime.now(KST).replace(tzinfo=None)
+                session = get_active_session(now)
+                if session is None:
+                    logger.debug("[kis_ws] no active session, sleep 30s")
+                    self._set_status("normal")  # 휴장은 stale 아님
+                    self._active_session = None  # PR6d-2a — 휴장 metric 반영
+                    await asyncio.sleep(30)
+                    continue
+                await self._run_session(session)
+            # PR6d-2a — stop 시 active_session 정리
+            self._active_session = None
+        finally:
+            summary_task.cancel()
+            try:
+                await summary_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _summary_log_loop(self) -> None:
+        """PR6d-2a follow-up — active session 중 60초마다 metric summary INFO 1줄.
+
+        baseline 자동 수집 (Docker logs 기반 24~48h grep). 휴장/break 중에는
+        noise 방지로 skip — 운영자가 logs에서 baseline window 분리하기 쉬움.
+
+        Caveat (2026-05-06 외부 검토):
+            active session 진입 직후 첫 summary log의 frames_per_min은 직전
+            60초 전체 기준이라 active 상태였던 시간만의 rate가 아닐 수 있다.
+            예: 휴장 중 50초 + active 10초이면 active만의 rate는 더 높음.
+            baseline 분석 시 첫 summary log는 caveat 또는 무시 권장. 24~48h
+            누적 데이터로 보면 무시 가능 수준.
+        """
+        prev_frame_total = self._frame_count_total
+        prev_at = time.time()
         while not self._stop.is_set():
-            now = datetime.now(KST).replace(tzinfo=None)
-            session = get_active_session(now)
-            if session is None:
-                logger.debug("[kis_ws] no active session, sleep 30s")
-                self._set_status("normal")  # 휴장은 stale 아님
-                self._active_session = None  # PR6d-2a — 휴장 metric 반영
-                await asyncio.sleep(30)
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                return
+            # active session 중에만 emit
+            if self._active_session is None:
+                # 휴장 중 — counter baseline reset (다음 active 진입 시 정확한 분당 계산)
+                prev_frame_total = self._frame_count_total
+                prev_at = time.time()
                 continue
-            await self._run_session(session)
-        # PR6d-2a — stop 시 active_session 정리
-        self._active_session = None
+            now = time.time()
+            elapsed = max(now - prev_at, 1e-9)
+            frames_in_window = self._frame_count_total - prev_frame_total
+            frames_per_min = int(round(frames_in_window * 60 / elapsed))
+            prev_frame_total = self._frame_count_total
+            prev_at = now
+            m = self.get_metrics()
+            logger.info(
+                "[kis_ws] metrics session=%s status=%s frames_per_min=%d "
+                "frame_age=%s trade_age=%s quote_age=%s "
+                "max_total_gap=%.1f max_trade_gap=%.1f max_quote_gap=%.1f "
+                "stale_transitions=%d reconnect_attempts=%d",
+                m["active_session"], m["status"], frames_per_min,
+                m["last_frame_age_sec"], m["last_trade_frame_age_sec"], m["last_quote_frame_age_sec"],
+                m["max_gap_sec"]["total"], m["max_gap_sec"]["trade"], m["max_gap_sec"]["quote"],
+                m["counters"]["status_transitions"]["stale"],
+                m["counters"]["reconnect_attempt"],
+            )
 
     async def stop(self) -> None:
         self._stop.set()

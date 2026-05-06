@@ -3065,6 +3065,19 @@ DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2a에서는
 - 60초 summary log가 active session 중에만 출력
 - Stage 1 invariant 유지 (`latest:index` KRX 0개)
 - PR6d-2b 진입 전 최소 24~48h raw frame metric 축적
+- admin endpoint 호출 분기(enabled=false / client=None / client present)는 운영 배포 후 admin 페이지 실호출로 검증 (단위 테스트는 `main.py`의 `firebase_admin` 의존 + lifespan side effect로 skip 처리)
+- summary log baseline 해석 caveat: **active session 진입 직후 첫 summary log의 `frames_per_min`은 직전 60초 전체 기준**이라 active 상태였던 시간만의 rate가 아닐 수 있다. 예: 휴장 50초 + active 10초이면 active만의 rate는 더 높음. 첫 summary log는 caveat 또는 무시. 24~48h 누적 데이터에서는 무시 가능 수준 (Codex 외부 검토 2026-05-06)
+
+### 658ea27 구현 vs PR6d-2a 계획 차이 (2026-05-06, follow-up fix 예정)
+
+PR6d-2a 초안 구현(commit 658ea27, 2026-05-06)은 metric state 골격은 박혔지만 본 ADR 계획과 다음 4가지 차이가 있다. follow-up fix commit으로 보강 예정 (외부 검토 + GO 후 진행, 검증 게이트 7a57665 적용):
+
+| # | ADR 계획 | 658ea27 구현 | follow-up fix 방향 |
+|---|---|---|---|
+| 1 | `started_at` / `connected_at` KST ISO timestamp | epoch float | epoch + ISO 둘 다 반환 (호환성) |
+| 2 | `last_frame_at` / `last_trade_frame_at` / `last_quote_frame_at` ISO timestamp | age만 (`last_*_age_sec`), timestamp 부재 | ISO timestamp 추가, age 필드 유지 |
+| 3 | active session 중 60초 summary log | 미구현 | 별도 asyncio task로 `start()` 안에 추가 |
+| 4 | admin endpoint 단위 테스트 | skip (`firebase_admin` + lifespan side effect) | skip 유지, KRX_CANARY.md 운영 검증 항목으로 명시 |
 
 ### Stage 1에서 이미 확인된 운영 신호
 
@@ -3157,6 +3170,13 @@ DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2a에서는
 - broadcast 분기: 구버전(미 subscribe) = legacy / 신버전(subscribe 메시지 보낸 클라이언트) = topic delta
 - KRX는 처음부터 topic-only로 Stage 2 진입 (legacy 통합 단계 건너뜀)
 - `/api/rates/usdt-krw` debug/compat 유지 vs 제거 결정 (별도 ADR 또는 본 ADR 후속 amend)
+- **`app/crawlers/krx_kis.py` 모듈 분리** (현재 900+ lines, PR6d 시리즈로 비대):
+  - `app/sources/kis_futures.py`에 REST quote 응답 정규화 흡수 (현재 `parse_*_payload`만)
+  - `app/sources/kis_auth.py` 신설 — `KisApprovalManager` + `KisAccessTokenManager` 이전 (token/approval lifecycle)
+  - `app/sources/kis_rest.py` 신설 — `fetch_kis_futures_quote` 등 REST helper 이전
+  - `app/crawlers/krx_kis.py`는 WebSocket lifecycle (`KisFuturesClient`) + DB writer (`KrxDbWriter`) + metric만
+  - 기준: **stateless adapter는 sources / stateful client·lifecycle은 crawlers** (현재 분류 정합 유지)
+  - 즉시 refactor 아님. Phase Z-2 코드 분리 사이클에 포함
 
 문서 정리 (코드 작업과 동시 진행, Phase Z-1 status 라벨에서 본격 통폐합으로 전환):
 
