@@ -21,9 +21,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.crawlers.krx_kis import (
+    ACCESS_TOKEN_REFRESH_MARGIN_SEC,
     APPROVAL_REFRESH_MARGIN_SEC,
     CONTRACT_EXPIRES_ON_STATIC,
     CONTRACT_MONTH_STATIC,
+    KIS_PROD_HOST,
+    KIS_REST_QUOTE_PATH,
+    KIS_REST_QUOTE_TR_ID,
+    KisAccessTokenManager,
     KisApprovalManager,
     KisFuturesClient,
     KrxDbWriter,
@@ -33,6 +38,7 @@ from app.crawlers.krx_kis import (
     SESSION_TR_MAP,
     STALE_AFTER_SEC,
     TR_KEY_STATIC,
+    fetch_kis_futures_quote,
     make_normalized_payload,
 )
 from app.sources.kis_master import ContractInfo
@@ -875,6 +881,245 @@ class TestStaleCarryOverReset(unittest.IsolatedAsyncioTestCase):
             client._status, "stale",
             "subscribe 후 60s+ tick 무수신 시 stale 정상 감지되어야 (회귀 방지)",
         )
+
+
+# ---------------------------------------------------------------------------
+# PR6d-1 — KisAccessTokenManager (REST access_token 발급/캐시)
+# ---------------------------------------------------------------------------
+
+class TestAccessTokenManagerCache(unittest.TestCase):
+    """KisAccessTokenManager cache 로딩/검증/저장 — KisApprovalManager 패턴."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.cache_path = Path(self.tmpdir) / "kis_access_token.json"
+        self.mgr = KisAccessTokenManager(
+            app_key="test_key", app_secret="test_secret", cache_path=self.cache_path,
+        )
+
+    def tearDown(self):
+        if self.cache_path.exists():
+            self.cache_path.unlink()
+        Path(self.tmpdir).rmdir()
+
+    def test_load_cache_missing(self):
+        self.assertIsNone(self.mgr._load_cache())
+
+    def test_load_cache_corrupt(self):
+        self.cache_path.write_text("{invalid json")
+        with self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            self.assertIsNone(self.mgr._load_cache())
+        self.assertTrue(any("캐시 읽기 실패" in m for m in cm.output))
+
+    def test_save_cache_chmod_600(self):
+        payload = {
+            "access_token": "tok123",
+            "expires_at_epoch": time.time() + 86400,
+            "created_at_epoch": time.time(),
+        }
+        self.mgr._save_cache(payload)
+        self.assertTrue(self.cache_path.exists())
+        mode = stat.S_IMODE(self.cache_path.stat().st_mode)
+        self.assertEqual(mode, 0o600)
+        loaded = json.loads(self.cache_path.read_text())
+        self.assertEqual(loaded["access_token"], "tok123")
+
+    def test_is_fresh_within_margin_returns_false(self):
+        cached = {"expires_at_epoch": time.time() + ACCESS_TOKEN_REFRESH_MARGIN_SEC - 10}
+        self.assertFalse(self.mgr._is_fresh(cached))
+
+    def test_is_fresh_well_before_margin_returns_true(self):
+        cached = {"expires_at_epoch": time.time() + 7200}
+        self.assertTrue(self.mgr._is_fresh(cached))
+
+    def test_is_still_valid_not_expired(self):
+        cached = {"expires_at_epoch": time.time() + 60}
+        self.assertTrue(self.mgr._is_still_valid(cached))
+
+    def test_is_still_valid_expired(self):
+        cached = {"expires_at_epoch": time.time() - 10}
+        self.assertFalse(self.mgr._is_still_valid(cached))
+
+
+class TestAccessTokenManagerGetToken(unittest.IsolatedAsyncioTestCase):
+    """KisAccessTokenManager get_access_token — 발급 / 캐시 hit / fallback."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.cache_path = Path(self.tmpdir) / "kis_access_token.json"
+        self.mgr = KisAccessTokenManager(
+            app_key="test_key", app_secret="test_secret", cache_path=self.cache_path,
+        )
+
+    def tearDown(self):
+        if self.cache_path.exists():
+            self.cache_path.unlink()
+        Path(self.tmpdir).rmdir()
+
+    async def test_returns_cached_when_fresh(self):
+        """fresh cache 있으면 새 발급 안 함."""
+        self.cache_path.write_text(json.dumps({
+            "access_token": "cached_tok",
+            "expires_at_epoch": time.time() + 86400,
+            "created_at_epoch": time.time(),
+        }))
+        with patch.object(self.mgr, "_issue_new") as mock_issue:
+            result = await self.mgr.get_access_token()
+        self.assertEqual(result, "cached_tok")
+        mock_issue.assert_not_called()
+
+    async def test_issues_new_when_near_expiry(self):
+        """만료 임박 cache → 새 발급."""
+        self.cache_path.write_text(json.dumps({
+            "access_token": "old_tok",
+            "expires_at_epoch": time.time() + 60,  # 만료 1분 남음 (마진 5분 미만)
+            "created_at_epoch": time.time(),
+        }))
+        with patch.object(
+            self.mgr, "_issue_new",
+            return_value={
+                "access_token": "new_tok",
+                "expires_at_epoch": time.time() + 86400,
+                "created_at_epoch": time.time(),
+            },
+        ):
+            result = await self.mgr.get_access_token()
+        self.assertEqual(result, "new_tok")
+
+    async def test_falls_back_to_cache_when_issue_fails(self):
+        """발급 실패 + valid cache → cache fallback (KRX optional 격리)."""
+        self.cache_path.write_text(json.dumps({
+            "access_token": "fallback_tok",
+            "expires_at_epoch": time.time() + 60,  # not fresh, 하지만 still_valid
+            "created_at_epoch": time.time(),
+        }))
+        with patch.object(
+            self.mgr, "_issue_new", side_effect=RuntimeError("KIS API down"),
+        ), self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            result = await self.mgr.get_access_token()
+        self.assertEqual(result, "fallback_tok")
+        self.assertTrue(any("발급 실패" in m for m in cm.output))
+
+
+# ---------------------------------------------------------------------------
+# PR6d-1 — fetch_kis_futures_quote (REST snapshot helper)
+# ---------------------------------------------------------------------------
+
+class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
+    """REST inquire-price helper — token 사용 / output parse / 실패 처리."""
+
+    def setUp(self):
+        self.contract = ContractInfo(
+            short_code="A75605",
+            standard_code="KR4A75650007",
+            name="미국달러 F 202605",
+            contract_month="202605",
+            expiry_date=date(2026, 5, 18),
+        )
+        self.token_mgr = MagicMock(spec=KisAccessTokenManager)
+        self.token_mgr.get_access_token = AsyncMock(return_value="test_token")
+        self.token_mgr._app_key = "test_key"
+        self.token_mgr._app_secret = "test_secret"
+
+    async def test_normal_returns_normalized_payload(self):
+        """rt_cd=0 + output 정상 → normalized dict 반환."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "정상처리되었습니다.",
+            "output": {
+                "futs_prpr": "1457.40007441",
+                "futs_shrn_iscd": "A75605",
+            },
+        }
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response):
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["source"], "krx")
+        self.assertEqual(result["asset"], "usd-krw-futures")
+        self.assertEqual(result["contract_code"], "A75605")
+        self.assertEqual(result["contract_month"], "202605")
+        self.assertEqual(result["expires_on"], "2026-05-18")
+        # raw price 그대로 (호출자가 Decimal 정규화)
+        self.assertEqual(result["price"], "1457.40007441")
+        self.assertIn("received_at", result)
+
+    async def test_rt_cd_error_returns_none(self):
+        """rt_cd != 0 → None + warning 로그."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "1",
+            "msg_cd": "EGW00123",
+            "msg1": "Some error",
+        }
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
+             self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(any("inquire-price rt_cd=1" in m for m in cm.output))
+
+    async def test_missing_output_returns_none(self):
+        """output dict 부재 → None + warning."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"rt_cd": "0"}  # no output
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
+             self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(any("output dict 부재" in m for m in cm.output))
+
+    async def test_missing_price_field_returns_none(self):
+        """output dict는 있지만 futs_prpr/prpr 없음 → None + warning."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "output": {"futs_shrn_iscd": "A75605"},  # no price field
+        }
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
+             self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(any("futs_prpr/prpr 필드 부재" in m for m in cm.output))
+
+    async def test_uses_correct_endpoint_and_headers(self):
+        """endpoint / Bearer token / appkey / tr_id / params 올바르게 전달."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "output": {"futs_prpr": "1450.0"},
+        }
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response) as mock_get:
+            await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        mock_get.assert_called_once()
+        call_kwargs = mock_get.call_args.kwargs
+        # URL: KIS_PROD_HOST + KIS_REST_QUOTE_PATH
+        self.assertEqual(mock_get.call_args.args[0], f"{KIS_PROD_HOST}{KIS_REST_QUOTE_PATH}")
+        # Bearer token + appkey + appsecret + tr_id
+        headers = call_kwargs["headers"]
+        self.assertEqual(headers["authorization"], "Bearer test_token")
+        self.assertEqual(headers["appkey"], "test_key")
+        self.assertEqual(headers["appsecret"], "test_secret")
+        self.assertEqual(headers["tr_id"], KIS_REST_QUOTE_TR_ID)
+        # params: FID_INPUT_ISCD = contract.short_code
+        params = call_kwargs["params"]
+        self.assertEqual(params["FID_COND_MRKT_DIV_CODE"], "F")
+        self.assertEqual(params["FID_INPUT_ISCD"], "A75605")
 
 
 if __name__ == "__main__":

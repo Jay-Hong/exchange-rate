@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 import requests
 import websockets
 
+from app import config
 from app.sources.kis_futures import (
     get_active_session,
     parse_h0cfasp0_payload,
@@ -66,6 +67,13 @@ APPROVAL_CACHE_PATH = Path(".cache/kis_ws_approval.json")
 
 # approval_key 만료 5분 전 갱신 (race condition 방지 마진).
 APPROVAL_REFRESH_MARGIN_SEC = 300
+
+# PR6d-1 — REST access_token 캐시 위치 (smoke script와 공유).
+# WebSocket approval_key와 별도 토큰 (REST API 전용, 24h 유효).
+ACCESS_TOKEN_CACHE_PATH = Path(".cache/kis_access_token.json")
+
+# access_token 만료 5분 전 갱신 (approval_key와 같은 race 방지 정책).
+ACCESS_TOKEN_REFRESH_MARGIN_SEC = 300
 
 # A75605 static canary (2026-05-18 만기). PR6b/c 전 마스터 기반 resolver 필수.
 # TODO(PR6b): front-month contract resolver — fo_com_code.mst 기반 자동 선택.
@@ -93,8 +101,8 @@ PARSER_DISPATCH = {
 RECONNECT_BACKOFF_SEQ = (1, 2, 4, 8, 16, 30)
 RECONNECT_BACKOFF_TAIL = 30
 
-# stale 전환 임계 — Codex 권고 60s 미수신.
-STALE_AFTER_SEC = 60
+# stale 전환 임계 — default 60s, env로 조정 가능 (PR6d-1).
+STALE_AFTER_SEC = config.KRX_STALE_SEC
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +244,230 @@ class KisApprovalManager:
             self._cache_path.chmod(0o600)
         except OSError as e:
             logger.warning("[kis_approval] chmod 600 실패: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# REST access token (PR6d-1) — KIS REST API용 별도 토큰
+# ---------------------------------------------------------------------------
+# WebSocket approval_key와 다른 토큰 체계:
+#   approval_key: WebSocket 핸드셰이크용 (KisApprovalManager)
+#   access_token: REST API Bearer 인증용 (KisAccessTokenManager, 24h 유효)
+# 캐시는 smoke script(scripts/kis_smoke.py)와 동일 형식·경로 공유.
+
+class KisAccessTokenManager:
+    """KIS REST access_token 발급/캐시 관리 (PR6d-1).
+
+    KisApprovalManager와 같은 패턴 (lock + cache + refresh margin + fallback)
+    이지만 endpoint와 cache 위치만 다르다.
+
+    - endpoint: POST /oauth2/tokenP
+    - cache: .cache/kis_access_token.json
+    - 토큰 응답 필드: access_token / expires_in (보통 86400=24h)
+    - smoke script와 호환 (cache 형식 동일, expires_at_text 추가 필드는 무시)
+
+    failure isolation: 발급 실패 시 valid한 cached 토큰이 있으면 fallback.
+    """
+
+    def __init__(
+        self,
+        *,
+        app_key: str,
+        app_secret: str,
+        cache_path: Path = ACCESS_TOKEN_CACHE_PATH,
+    ) -> None:
+        self._app_key = app_key
+        self._app_secret = app_secret
+        self._cache_path = cache_path
+        self._lock = asyncio.Lock()
+
+    async def get_access_token(self) -> str:
+        """현재 valid한 access_token 반환. 만료 임박 시 자동 갱신."""
+        async with self._lock:
+            cached = self._load_cache()
+            if cached and self._is_fresh(cached):
+                return cached["access_token"]
+
+            try:
+                # KIS REST 호출은 동기 requests. asyncio 이벤트 루프 블로킹
+                # 회피를 위해 to_thread로 실행 (KisApprovalManager와 동일 패턴).
+                new_token = await asyncio.to_thread(self._issue_new)
+                self._save_cache(new_token)
+                return new_token["access_token"]
+            except Exception as e:
+                logger.warning(
+                    "[kis_token] 발급 실패 — 기존 캐시 fallback 시도: %s: %s",
+                    type(e).__name__, e,
+                )
+                if cached and self._is_still_valid(cached):
+                    return cached["access_token"]
+                raise
+
+    def _load_cache(self) -> Optional[Dict[str, Any]]:
+        if not self._cache_path.exists():
+            return None
+        try:
+            return json.loads(self._cache_path.read_text())
+        except Exception as e:
+            logger.warning("[kis_token] 캐시 읽기 실패: %s: %s", type(e).__name__, e)
+            return None
+
+    def _is_fresh(self, cached: Dict[str, Any]) -> bool:
+        """만료 마진(5분) 이상 남아 있으면 True."""
+        exp = float(cached.get("expires_at_epoch") or 0)
+        return exp > time.time() + ACCESS_TOKEN_REFRESH_MARGIN_SEC
+
+    def _is_still_valid(self, cached: Dict[str, Any]) -> bool:
+        """만료 시각 자체는 안 지났으면 True (발급 실패 fallback 용)."""
+        exp = float(cached.get("expires_at_epoch") or 0)
+        return exp > time.time()
+
+    def _issue_new(self) -> Dict[str, Any]:
+        """KIS REST: POST /oauth2/tokenP — smoke script와 동일 endpoint."""
+        url = f"{KIS_PROD_HOST}/oauth2/tokenP"
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": self._app_key,
+            "appsecret": self._app_secret,
+        }
+        r = requests.post(url, json=body, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError(
+                f"access_token missing: rt_cd={data.get('rt_cd')} "
+                f"msg_cd={data.get('msg_cd')} msg1={data.get('msg1')}"
+            )
+        # KIS access_token 만료: 응답의 expires_in (초). 보통 86400=24h.
+        expires_in = int(data.get("expires_in") or 86400)
+        now = time.time()
+        return {
+            "access_token": token,
+            "expires_at_epoch": now + expires_in,
+            "created_at_epoch": now,
+        }
+
+    def _save_cache(self, payload: Dict[str, Any]) -> None:
+        self._cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        try:
+            self._cache_path.chmod(0o600)
+        except OSError as e:
+            logger.warning("[kis_token] chmod 600 실패: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# REST quote snapshot helper (PR6d-1)
+# ---------------------------------------------------------------------------
+# WebSocket stale 동안 보조 snapshot 경로 (ADR-027 원칙: WebSocket primary /
+# REST bounded fallback probe). 호출자는 stale gating + cooldown 정책으로
+# REST 호출 빈도를 제한 (PR6d-2 stale orchestration 영역).
+
+KIS_REST_QUOTE_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
+
+# tr_id: KIS 예제 inquire_price.py 기본값 (지수선물용)이지만 미국달러선물에도
+# 동일 endpoint 사용. Stage 2 진입 전 운영 검증 필요.
+KIS_REST_QUOTE_TR_ID = "FHMIF10000000"
+
+
+async def fetch_kis_futures_quote(
+    *,
+    contract: ContractInfo,
+    token_manager: KisAccessTokenManager,
+    timeout: float = 5.0,
+) -> Optional[Dict[str, Any]]:
+    """KIS REST inquire-price 호출로 KRX 미국달러선물 snapshot 가져오기.
+
+    PR6d-1: helper만 제공. stale gating / cooldown / 결과 처리는 PR6d-2.
+
+    Args:
+        contract: ContractInfo (short_code 사용 — 예: A75605)
+        token_manager: 발급/캐시된 access_token 제공
+        timeout: HTTP 요청 timeout (초). 기본 5초
+
+    Returns:
+        성공 시 normalized dict:
+            {
+                "source": "krx",
+                "asset": "usd-krw-futures",
+                "contract_code": "A75605",
+                "contract_month": "202605",
+                "expires_on": "2026-05-18",
+                "price": "1457.4",  # str (raw KIS payload, 호출자가 정규화)
+                "received_at": "2026-05-06T10:30:00+09:00",
+                "raw_rt_cd": "0",
+            }
+        rt_cd != "0"이거나 응답 형식 이상 시 None (호출자가 처리).
+
+    실패 모드:
+        - access_token 발급 실패 → token_manager.get_access_token() 예외 propagate
+        - HTTP 오류 → requests 예외 propagate
+        - rt_cd != "0" → None 반환 (logger.warning 기록)
+        - output dict 부재 → None 반환 (logger.warning 기록)
+
+    스레드 안전성:
+        async wrapper지만 requests는 sync. asyncio.to_thread로 실행하므로
+        이벤트 루프 블로킹 없음 (KisApprovalManager._issue_new와 동일 패턴).
+    """
+    token = await token_manager.get_access_token()
+
+    headers = {
+        "Content-Type": "application/json",
+        "authorization": f"Bearer {token}",
+        "appkey": token_manager._app_key,
+        "appsecret": token_manager._app_secret,
+        "tr_id": KIS_REST_QUOTE_TR_ID,
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "F",
+        "FID_INPUT_ISCD": contract.short_code,
+    }
+    url = f"{KIS_PROD_HOST}{KIS_REST_QUOTE_PATH}"
+
+    def _sync_call() -> Dict[str, Any]:
+        r = requests.get(url, headers=headers, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+
+    data = await asyncio.to_thread(_sync_call)
+
+    rt_cd = data.get("rt_cd")
+    if rt_cd != "0":
+        logger.warning(
+            "[kis_rest] inquire-price rt_cd=%s msg_cd=%s msg1=%s",
+            rt_cd, data.get("msg_cd"), data.get("msg1"),
+        )
+        return None
+
+    # KIS 응답: output 또는 output1/output2/output3 (TR/계좌별 다름)
+    output = (
+        data.get("output")
+        or data.get("output1")
+        or data.get("output2")
+    )
+    if not isinstance(output, dict):
+        logger.warning(
+            "[kis_rest] output dict 부재. top-level keys: %s",
+            sorted(data.keys()),
+        )
+        return None
+
+    price = output.get("futs_prpr") or output.get("prpr")
+    if not price:
+        logger.warning("[kis_rest] futs_prpr/prpr 필드 부재. output keys: %s",
+                       sorted(output.keys()))
+        return None
+
+    return {
+        "source": "krx",
+        "asset": "usd-krw-futures",
+        "contract_code": contract.short_code,
+        "contract_month": contract.contract_month,
+        "expires_on": contract.expiry_date.isoformat(),
+        "price": str(price),  # raw KIS string. 호출자가 Decimal 정규화
+        "received_at": datetime.now(KST).isoformat(),
+        "raw_rt_cd": rt_cd,
+    }
 
 
 # ---------------------------------------------------------------------------

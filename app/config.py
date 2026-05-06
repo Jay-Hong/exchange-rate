@@ -55,6 +55,35 @@ KRX_FUTURES_ENABLED = os.getenv("KRX_FUTURES_ENABLED", "false").lower() == "true
 # default false — 앱 호환성 검증 전 안전 차단. canary 진입 시 단계적 ON 권장.
 # scope: source="krx" + asset="usd-krw-futures" 한정 (KRX 다른 자산은 영향 X).
 KRX_BROADCAST_INCLUDE = os.getenv("KRX_BROADCAST_INCLUDE", "false").lower() == "true"
+
+# PR6d-1: KRX_REST_FALLBACK_ENABLED — REST snapshot/fallback 경로 토글.
+# default false — PR6d 코드 배포해도 helper가 호출되지 않아 운영 영향 0.
+# Stage 1에서 토글 ON 시 fallback orchestration이 stale 동안 REST 호출 (사용자
+# 노출은 KRX_BROADCAST_INCLUDE=false라 0). Stage 2 진입 전 운영 검증용.
+# REST = WebSocket 대체가 아니라 stale 동안의 bounded fallback probe (ADR-027).
+KRX_REST_FALLBACK_ENABLED = os.getenv("KRX_REST_FALLBACK_ENABLED", "false").lower() == "true"
+
+# PR6d-1: stale 임계값 (초). _last_tick_at 후 N초 무응답이면 stale 전이.
+# 기본 60s = 코드 상수 STALE_AFTER_SEC와 동일. 5/8 baseline + raw frame metric
+# (PR6d-2) 후 조정. CM 저거래량 별도 임계값(KRX_STALE_SEC_CM)은 baseline 후 결정.
+KRX_STALE_SEC = int(os.getenv("KRX_STALE_SEC", "60"))
+
+# PR6d-1: REST 호출 cooldown (초). status 복귀 cooldown 아님 — REST 호출 중복
+# 방지용 (stale 지속 중에는 cooldown마다 1회). status 복귀는 frame 1건 즉시.
+KRX_REST_COOLDOWN_SEC = int(os.getenv("KRX_REST_COOLDOWN_SEC", "30"))
+
+if KRX_STALE_SEC < 1:
+    raise ValueError(
+        f"KRX_STALE_SEC must be >= 1 (got {KRX_STALE_SEC}). "
+        "0 이하이면 KRX WebSocket stale 판정이 즉시/무한 전이될 수 있다."
+    )
+
+if KRX_REST_COOLDOWN_SEC < 1:
+    raise ValueError(
+        f"KRX_REST_COOLDOWN_SEC must be >= 1 (got {KRX_REST_COOLDOWN_SEC}). "
+        "REST fallback retry storm 방지를 위해 양수만 허용한다."
+    )
+
 if LATEST_MIRROR_INTERVAL_SECONDS < 1:
     raise ValueError(
         f"LATEST_MIRROR_INTERVAL_SECONDS must be >= 1 (got {LATEST_MIRROR_INTERVAL_SECONDS}). "
