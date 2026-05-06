@@ -2900,20 +2900,86 @@ Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket �
 ### 원칙
 
 1. **KRX optional source 유지**: KRX 실패는 baseline 서비스(은행 + investing + USDT + DXY)와 FastAPI startup/shutdown에 영향 0이어야 한다.
-2. **WebSocket 우선**: 정상 영업 active session에서는 WebSocket tick을 primary source로 유지한다.
-3. **REST는 fallback/snapshot 보조 경로**: WebSocket 정상 중에는 REST 호출을 최소화하고, stale/재시작/수동 검증 시점에만 사용한다.
-4. **Stage 2 전 stale 노출 방지**: WebSocket latest가 stale이면 `latest:index`에 KRX를 포함하지 않거나, 별도 status를 명시하지 않는 한 broadcast에 노출하지 않는다.
+2. **WebSocket primary / REST bounded fallback probe** (2026-05-06 명시):
+   > WebSocket remains primary. REST snapshot is not a replacement mode; it is a bounded fallback probe used only while WebSocket frame silence exceeds stale threshold. Any valid WebSocket frame immediately restores WebSocket as primary.
+
+   - WebSocket이 항상 primary source. REST는 대체 모드가 아니라 stale 동안만의 보조 snapshot 경로.
+   - **WebSocket status 복귀**: frame 1건 도착 즉시 `normal` (cooldown 무관 — 코드 [krx_kis.py:454-455](app/crawlers/krx_kis.py#L454-L455)의 자동 stale → normal transition 그대로 활용).
+   - **REST 호출 cooldown**: REST 호출에만 적용 (중복 폭주 방지). status 복귀를 cooldown으로 늦추지 X.
+3. **Stage 2 전 stale 노출 방지**: WebSocket latest가 stale이면 topic publish에서 KRX를 제외한다. (Stage 2 노출 채널은 [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit) 합의대로 topic 채널이며 legacy `rates`가 아님.)
+4. **DB row gap ≠ raw frame gap** (2026-05-06 명시): DB는 `insert_source_rate_if_changed` + 1초 window debounce 정책상 가격 변동 시에만 INSERT. WebSocket frame은 가격 무변동 시에도 호가 frame(H0xASP0)이 계속 도착해 `_last_tick_at`을 갱신 → stale 임계값 baseline은 **raw frame age**이고 DB row gap이 아니다. DB row gap은 throughput / 가격 변동성 / 저장 부하 지표로만 사용.
 5. **검증되지 않은 cron 시각은 코드에 박지 않음**: 마스터 갱신 시각, 만기일 11:30 이후 KIS WebSocket 동작, 다음 월물 subscribe 가능 시점은 운영 관찰 후 결정한다.
 
 ### 결정 후보 (Stage 1 데이터로 확정 예정)
 
 | 항목 | 후보 | 현재 판단 |
 |---|---|---|
-| REST snapshot 호출 주기 | WebSocket 정상 시 0회 / active session 중 주기 보조 / stale 시에만 호출 | 초안: 정상 시 0회, stale trigger 시 호출 |
-| Stale 임계값 | 30초 / 60초 / 세션별 동적 | 코드 상수 `STALE_AFTER_SEC=60`을 기준 후보로 유지, 5/6~5/8 baseline으로 조정 |
-| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | 초안: DB 저장까지 수행해 provenance 유지, topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
-| REST 실패 시 정책 | KRX topic publish 제외 / 마지막 값 유지 / stale status 동반 | 초안: Stage 2 topic에서는 KRX publish 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
+| Stale 임계값 (`KRX_STALE_SEC`) | 30s / **60s** / 세션별 동적 (CF 60s + CM 90~120s 분리) | 코드 상수 `STALE_AFTER_SEC=60` 기준값 유지. 5/8 baseline + PR6d-2 raw frame metric 후 CM 분리 여부 결정 |
+| REST snapshot 호출 주기 | WebSocket 정상 시 0회 / active session 중 주기 보조 / stale 시에만 호출 | **stale trigger 시에만 호출** (WebSocket 정상 시 0회) |
+| **REST → WebSocket 복귀 기준** | frame 1건 즉시 / N초 hysteresis / reconnect 명시 | **frame 1건 도착 즉시 normal** (코드 자동 transition 그대로). cooldown 무관 |
+| **REST 호출 cooldown (`KRX_REST_COOLDOWN_SEC`)** | 0s / 30s / 60s | **30s** 후보 (중복 폭주 방지, status 복귀에는 적용 X) |
+| **stale 지속 시 REST 재호출 주기** | 호출 후 재호출 X / cooldown마다 1회 / 적응형 | **cooldown마다 1회** 후보 |
+| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | DB 저장까지 수행해 provenance 유지. topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
+| REST 실패 시 정책 | KRX topic publish 제외 / 마지막 값 유지 / stale status 동반 | Stage 2 topic에서는 KRX publish 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
 | 만기일 rollover | cron / session boundary resolve / 수동 restart | 2026-05-18 관찰 후 결정. 현재 자동 contract 교체 없음 |
+
+### 초기 정책값 (PR6d-1 진입 시 env 후보)
+
+| Env | 초기값 | 비고 |
+|---|---|---|
+| `KRX_REST_FALLBACK_ENABLED` | `false` (default) | PR6d 코드 배포해도 default false면 fallback logic 미호출. Stage 1 안에서 별도 토글로 검증 가능 (KRX_BROADCAST_INCLUDE=false 상태라 사용자 노출 0) |
+| `KRX_STALE_SEC` | `60` | 코드 기존 상수와 동일. 5/8 baseline + raw frame metric 후 조정 |
+| `KRX_REST_COOLDOWN_SEC` | `30` | REST 호출 cooldown. status 복귀와 무관 |
+| (미래) `KRX_STALE_SEC_CF` / `_CM` | 미설정 | CM 저거래량 false stale 검증 후 분리 결정 |
+
+### Tentative baseline (5/4 23:46 ~ 5/6 19:13 KST, 약 43.4h)
+
+> ⚠️ **데이터 caveat**: (1) 2026-05-06은 평소보다 **환율 변동폭이 큰 날** (일중 1469 → 1444.6, -24 KRW 하락 중) — DB inter-row gap이 평소보다 짧게 측정될 수 있음. (2) 2026-05-05 어린이날 휴장 포함 → 평일 baseline으로는 제한적. (3) 아래 DB row gap은 **stale 임계값 근거가 아님** — 가격 변동 없으면 INSERT 0건이라 자연 max gap 길어짐. **stale 임계값의 진짜 baseline은 PR6d-2 raw frame metric에서 수집 예정**. 5/7~5/8 평일 + 5/9~5/10 주말 데이터 추가 후 재검토.
+
+**DB throughput / 변동성:**
+
+- 누적 8195 rows (PR6e 배포 5/6 11:19:57 KST 기준 pre/post 분리)
+- 가격 범위 1444.6 ~ 1478.1 (33.5 KRW = 약 2.3% 변동, **변동폭 큰 날**)
+- 시간당 INSERT: 1 ~ 1280 (변동성 비례)
+- 야간세션(CM): 시간당 ~57~303 (5/4 야간) / 363~1157 (5/5 야간, 변동폭 큰 날 영향)
+- 정규세션(CF): 시간당 191~1280 (5/6 09시 hour 1280 peak, 변동성 최대 시간대)
+
+**Inter-row gap 분포 (DB row 기준 — stale 근거 아님):**
+
+| 세션 | gap 표본 | avg | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|---|
+| CF | 1417 | 11.43s | 2.60s | 54.49s | **156.80s** | **631.40s (10분+)** |
+| CM | 6775 | 5.19s | 2.78s | 16.99s | 39.02s | 116.07s |
+
+→ CF p99 156.8s / max 631.4s는 점심시간/저거래량 시간 가격 무변동 자연 현상. raw frame은 호가가 들어와 silence 짧을 가능성 높지만 PR6d-2 metric 없이는 미검증.
+
+**0.1 정규화 (PR6e 효과):**
+
+| Phase | rows | off_tick |
+|---|---|---|
+| pre-PR6e (5/4 23:47 ~ 5/6 11:19 KST) | 3812 | 2891 (75.8%) |
+| post-PR6e (5/6 11:19:58 ~) | 4383 | **0 (100% 정규화)** |
+
+→ PR6e fix 운영 검증 100% 정합. pre-PR6e 8자리 잔차는 30일 retention으로 자연 정리 (6/3 03:31~).
+
+**경고 신호:**
+
+- WARNING / ERROR / status 전이 로그 0건 (Stage 1 + PR6e 운영 안정)
+- 세션 boundary 2회 통과 (5/5 06:00 CM→None, 5/6 15:45 CF→None) 모두 정시 + 깔끔 (PR6e carry-over fix 검증됨)
+
+### PR6d-2에서 추가할 raw frame / fallback metric
+
+DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2에서는 WebSocket frame 수신 layer에서 다음 metric을 별도로 수집한다.
+
+| Metric | 기준 | 용도 |
+|---|---|---|
+| `last_frame_age_sec` | 전체 frame (`H0CFCNT0`, `H0MFCNT0`, `H0CFASP0`, `H0MFASP0`) | 실제 stale trigger baseline |
+| `last_trade_frame_age_sec` | 체결 frame (`H0CFCNT0`, `H0MFCNT0`) | 체결/가격 변동성 baseline |
+| `last_quote_frame_age_sec` | 호가 frame (`H0CFASP0`, `H0MFASP0`) | WebSocket liveness / 야간 false stale 검증 |
+| `stale_transition_count` | `normal ↔ stale` status 전이 | flap / false stale 감지 |
+| `rest_fallback_call_count` | REST fallback 호출 | fallback 발생 빈도 |
+| `rest_fallback_success_count` | REST fallback 성공 | KIS REST 안정성 |
+| `rest_fallback_error_count` | REST fallback 실패 | 장애율 / retry 정책 검증 |
 
 ### Stage 1에서 이미 확인된 운영 신호
 
