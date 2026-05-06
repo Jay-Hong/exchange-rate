@@ -12,11 +12,11 @@
 2. **Stage 1은 "DB 저장 관찰" 목적**: broadcast 노출 X. 앱/사용자 가시 영향 0.
 3. **실행 중 contract 자동 교체 없음** (현재 미구현). bootstrap 시 `select_active_usd_futures_contract()`로 1회 resolve 후 client lifecycle 동안 불변.
 4. **5/18 만기일 관찰 = 자동 rollover 검증 X / 자동 rollover 설계용 데이터 수집**: 11:30 이후 client 상태, tick 끊김 패턴, 수동 restart 시 다음 월물 잡힘 여부 등.
-5. **두 토글 모두 process restart 필요**: `app/config.py`가 import 시 1회 `os.getenv` 읽기 → hot-reload 안 됨. env 변경 후 `docker compose restart fastapi` 또는 동등 절차.
+5. **두 토글 모두 process 재생성 필요**: `app/config.py`가 import 시 1회 `os.getenv` 읽기 → hot-reload 안 됨. `.env` 변경 후에는 `docker compose up -d fastapi`처럼 컨테이너를 재생성해야 env_file이 다시 반영된다 (`docker compose restart fastapi`는 기존 컨테이너 stop/start라 `.env` 변경을 반영하지 않음).
 
 ---
 
-## Stage 0 — 현재 (운영 영향 0)
+## Stage 0 — 비활성 baseline (운영 영향 0)
 
 **상태 확인 명령 (변경 X, 사전 검증만):**
 
@@ -67,13 +67,13 @@ KRX_BROADCAST_INCLUDE=false   # broadcast 노출 X (Stage 2에서 true)
 # REDIS_LATEST_ENABLED=<운영 현재값 그대로>
 ```
 
-**2. process restart:**
+**2. process 재생성:**
 
 ```bash
-docker compose restart fastapi
+docker compose up -d fastapi
 ```
 
-**3. restart 직후 검증 (5분 이내):**
+**3. 재생성 직후 검증 (5분 이내):**
 
 > ⚠️ 아래 검증은 **KRX active session 중**일 때만 즉시 성립합니다. KRX active session: 정규 평일 08:30~15:45 (CF) / 야간 평일 17:50~익일 06:00 (CM). 그 외(15:45~17:50 break / 새벽 06:00~08:30 / 주말 / 만기일 11:30 이후)에 restart하면 `[krx] KisFuturesClient 시작` 로그까지는 보이지만 `[kis_ws] connected` / `subscribed` / approval cache 파일 / `source_rates` KRX row는 다음 active session 진입 전까지 부재가 **정상 동작**입니다 (`KisFuturesClient.start()`의 메인 루프가 session=None 시 30초 sleep loop만 돌고 approval/connect/subscribe/DB write 호출 X).
 
@@ -248,7 +248,7 @@ ORDER BY hour;
 ```bash
 # 운영 .env에서 KRX_FUTURES_ENABLED=false로 변경
 # (.env.example 참고)
-docker compose restart fastapi
+docker compose up -d fastapi
 ```
 
 **검증:**
@@ -258,10 +258,10 @@ docker compose logs fastapi --since 2m | grep -E '\[krx\]'
 # 기대: "[krx] KRX_FUTURES_ENABLED=false, skip start" 1줄
 ```
 
-**효과 (process restart 후 기준):**
+**효과 (process 재생성 후 기준):**
 
-- restart 후 신규 KRX tick 수집 / DB insert 중단 (lifecycle 미시작)
-- restart 전까지는 기존 client가 계속 동작 — env 변경만으로 즉시 멈추지 않음 (config 1회 read 정책)
+- 재생성 후 신규 KRX tick 수집 / DB insert 중단 (lifecycle 미시작)
+- 재생성 전까지는 기존 client가 계속 동작 — `.env` 변경만으로 즉시 멈추지 않음 (config 1회 read + Docker Compose env_file 재로드 정책)
 - 기존 `source_rates` 레코드는 유지 (수동 정리 필요 시 별도)
 - broadcast / latest:index는 이미 Stage 1에서 KRX 미포함 → 사용자 가시 영향 0
 

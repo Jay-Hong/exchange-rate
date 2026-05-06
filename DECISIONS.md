@@ -2877,6 +2877,67 @@ baseline 명확히 구분:
 
 ---
 
+## ADR-027: KRX 미국달러선물 Stage 2 진입 전 REST snapshot/fallback + stale 정책 (초안)
+
+> 📅 **작성일**: 2026-05-06
+> 🏷️ **상태**: 초안 (Stage 1 canary 운영 데이터 수집 중, 수치 미확정)
+
+### 맥락
+
+PR6 시리즈로 KRX 미국달러선물(`source="krx", asset="usd-krw-futures"`)을 선택적 데이터 소스로 추가했다.
+
+현재 운영 상태:
+- Stage 1 canary 활성: `KRX_FUTURES_ENABLED=true`, `KRX_BROADCAST_INCLUDE=false`
+- KIS WebSocket → `source_rates` DB 저장까지 동작
+- `latest:index`에는 KRX key를 넣지 않아 broadcast/app 노출 없음
+- 2026-05-05 어린이날 휴장 후 2026-05-06 08:30 CF 정규세션 재진입 확인
+- PR6e로 새 row rate를 0.1 KRW tick으로 정규화하고, 세션 경계 `_last_tick_at` carry-over에 따른 불필요한 stale 전이를 차단
+
+Stage 2에서 `KRX_BROADCAST_INCLUDE=true`를 켜면 KRX가 `latest:index`와 broadcast `rates` 배열에 등장한다. 이때 WebSocket 단절, KIS approval 장애, 휴장/세션 break, 만기일 contract rollover가 사용자 화면에 stale 또는 잘못된 값으로 노출될 수 있으므로 REST snapshot/fallback 및 stale 정책이 필요하다.
+
+### 원칙
+
+1. **KRX optional source 유지**: KRX 실패는 baseline 서비스(은행 + investing + USDT + DXY)와 FastAPI startup/shutdown에 영향 0이어야 한다.
+2. **WebSocket 우선**: 정상 영업 active session에서는 WebSocket tick을 primary source로 유지한다.
+3. **REST는 fallback/snapshot 보조 경로**: WebSocket 정상 중에는 REST 호출을 최소화하고, stale/재시작/수동 검증 시점에만 사용한다.
+4. **Stage 2 전 stale 노출 방지**: WebSocket latest가 stale이면 `latest:index`에 KRX를 포함하지 않거나, 별도 status를 명시하지 않는 한 broadcast에 노출하지 않는다.
+5. **검증되지 않은 cron 시각은 코드에 박지 않음**: 마스터 갱신 시각, 만기일 11:30 이후 KIS WebSocket 동작, 다음 월물 subscribe 가능 시점은 운영 관찰 후 결정한다.
+
+### 결정 후보 (Stage 1 데이터로 확정 예정)
+
+| 항목 | 후보 | 현재 판단 |
+|---|---|---|
+| REST snapshot 호출 주기 | WebSocket 정상 시 0회 / active session 중 주기 보조 / stale 시에만 호출 | 초안: 정상 시 0회, stale trigger 시 호출 |
+| Stale 임계값 | 30초 / 60초 / 세션별 동적 | 코드 상수 `STALE_AFTER_SEC=60`을 기준 후보로 유지, 5/6~5/8 baseline으로 조정 |
+| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / Redis latest만 갱신 | 초안: DB 저장까지 수행해 provenance 유지, broadcast mirror는 기존 path 재사용 |
+| REST 실패 시 정책 | KRX를 `latest:index`에서 제외 / 마지막 값 유지 / stale status 동반 | 초안: Stage 2에서는 KRX 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
+| 만기일 rollover | cron / session boundary resolve / 수동 restart | 2026-05-18 관찰 후 결정. 현재 자동 contract 교체 없음 |
+
+### Stage 1에서 이미 확인된 운영 신호
+
+- 2026-05-04 23:46 KST: CM 야간세션 `H0MFCNT0` / `H0MFASP0` subscribe success
+- 2026-05-05 06:00 KST: CM session boundary 정상 종료
+- 2026-05-05 어린이날 휴장: 세션 없음이 정상
+- 2026-05-06 08:30 KST: CF 정규세션 `H0CFCNT0` / `H0CFASP0` subscribe success
+- Stage 1 invariant 유지: `latest:index` 내 `latest:source:krx:*` 0개
+- PR6e 배포 후 신규 KRX DB row는 0.1 KRW tick으로 정규화됨
+
+### Stage 2 진입 전 필수 조건
+
+- 5/6~5/8 평일 baseline에서 reconnect / stale / DB write warning 패턴 확인
+- 2026-05-18 만기일 11:30 전후 WebSocket 끊김/무응답/재구독 패턴 관찰
+- REST snapshot helper 구현 및 KIS REST token cache 정책 확정
+- KRX stale 시 `latest:index` 제외 또는 status 표현 정책 확정
+- iOS/Android가 unknown `source="krx", asset="usd-krw-futures"`를 안전하게 처리하는지 확인
+
+### 관련 문서
+
+- [KRX_CANARY.md](KRX_CANARY.md): Stage 1/2 runbook, SQL/Redis 검증 명령, 만기일 관찰 시나리오
+- [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): `latest:index` 기반 Redis-first broadcast hot path
+- [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): `source_rates` 기반 source/asset 모델
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -2905,3 +2966,4 @@ baseline 명확히 구분:
 - 2026-04-27: ADR-024 작성 (미국달러지수 선물 분리 저장 + DXY_MODE 제거)
 - 2026-04-28: ADR-025 작성 (DXY 현물 외부 fallback 체인 — CNBC 추가 + Yahoo 격하)
 - 2026-05-04: ADR-026 작성 (Redis-first broadcast hot path — latest mirror + DXY mirror로 DB-free 달성)
+- 2026-05-06: ADR-027 초안 작성 (KRX 미국달러선물 Stage 2 전 REST snapshot/fallback + stale 정책)

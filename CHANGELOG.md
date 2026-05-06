@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **KRX 미국달러선물 Stage 1 canary** (2026-05-06, PR6 시리즈, ADR-027 초안):
+  - KIS Open API WebSocket 기반 KRX 미국달러선물 수집 경로 추가 (`source="krx"`, `asset="usd-krw-futures"`)
+  - 주간 CF TR: `H0CFCNT0` / `H0CFASP0`, 야간 CM TR: `H0MFCNT0` / `H0MFASP0`
+  - KIS approval_key cache + 만료 5분 마진 + asyncio.Lock 기반 중복 발급 방지
+  - KIS 상품선물 master (`fo_com_code.mst`) 기반 active contract resolve + 만기일 11:30:00 inclusive intraday rollover helper
+  - `KrxDbWriter`: 1초 window debounce + `insert_source_rate_if_changed` + `asyncio.to_thread` DB write 격리
+  - KRX optional source 토글: `KRX_FUTURES_ENABLED`(수집 lifecycle), `KRX_BROADCAST_INCLUDE`(Redis `latest:index` / broadcast 노출)
+  - Stage 1 운영: DB(`source_rates`) 저장만 활성화, `KRX_BROADCAST_INCLUDE=false`로 broadcast/app 노출 차단
+  - `KRX_CANARY.md`: Stage 0/1/2 runbook, SQL/Redis 검증 명령, 24h baseline 지표, 5/18 만기 관찰 시나리오
+  - `ADR-027` 초안: Stage 2 진입 전 REST snapshot/fallback + stale 정책 결정 항목 정리
+
 - **Redis-first broadcast hot path** (2026-05-04, ADR-026, PR3-PR5):
   - 신규 모듈 `app/latest_rates_cache.py` — Redis latest mirror layer (cache.py·crud.py 변경 0)
   - mirror keys: `latest:bank:{bank}:{currency}`, `latest:source:{source}:{asset}`, `latest:investing:{currency}`, `latest:dxy:current`
@@ -117,6 +128,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 운영 한계: 영업시간 Redis read wall-clock jitter (DB 경합/DXY fallback은 주요 원인으로 보기 어려움, 후속 진단 영역)
 
 ### Fixed
+
+- **KRX Stage 1 운영 보강 (PR6e)**:
+  - 새 WebSocket subscribe 직후 `_last_tick_at`을 reset해 세션 경계 통과 후 이전 세션 tick timestamp가 즉시 stale 전이를 유발하는 문제 차단
+  - KIS WebSocket raw price의 미세 십진 잔차를 저장 전 0.1 KRW tick으로 정규화 (`Decimal(...).quantize(Decimal("0.1"))`)
+  - 운영 배포 후 신규 KRX row는 0.1 단위로 저장되고, `latest:index` KRX 미포함 Stage 1 invariant 유지
 
 - **Yahoo DXY fallback yfinance fast_info NaN 회귀 대응** (2026-04-28):
   - yfinance 0.2.66의 `fast_info.regularMarketPreviousClose`가 NaN 반환하여 fallback이 항상 실패하던 문제 수정
