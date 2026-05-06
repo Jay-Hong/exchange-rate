@@ -25,6 +25,7 @@ from app import models, schemas, crud, scheduler
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
+from app import config
 from app.config import REDIS_LATEST_ENABLED
 from app.latest_rates_cache import fetch_rates_from_redis, warmup_latest_rates
 from app.notifications.fcm import init_firebase, is_firebase_initialized, send_fcm_data_only
@@ -1234,6 +1235,51 @@ async def get_redis_status():
             "circuit_state": redis_cache.circuit.state,
             "error": str(e)
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KRX Status API (PR6d-2a, ADR-027) — raw frame metric / status observability
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/api/krx-status", dependencies=[Depends(verify_admin)])
+async def get_krx_status():
+    """KRX 미국달러선물 WebSocket client 상태 / metric 조회 (PR6d-2a).
+
+    KisFuturesClient.get_metrics() 결과를 그대로 반환. client가 None
+    (KRX_FUTURES_ENABLED=false 또는 bootstrap 미완)이면 enabled / started /
+    reason 정도만 반환. read-only — 호출자가 polling해도 안전.
+
+    Returns (client present):
+        {"enabled": true, "client": {"status", "active_session", "contract",
+         "lifecycle", "last_*_age_sec", "counters", "gap_buckets", "max_gap_sec"}}
+
+    Returns (client absent):
+        {"enabled": false, "started": false, "reason": "..."}
+
+    ADR-027 PR6d-2a 계획 — REST fallback / topic publish / Stage 2 노출 변경 X.
+    """
+    from app import scheduler
+
+    if not config.KRX_FUTURES_ENABLED:
+        return {
+            "enabled": False,
+            "started": False,
+            "reason": "KRX_FUTURES_ENABLED=false (lifecycle 비활성)",
+        }
+
+    client = getattr(scheduler, "krx_futures_client", None)
+    if client is None:
+        return {
+            "enabled": True,
+            "started": False,
+            "reason": "client 미생성 — bootstrap 진행 중이거나 실패 (logs 확인)",
+        }
+
+    return {
+        "enabled": True,
+        "started": True,
+        "client": client.get_metrics(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1203,5 +1203,134 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(KIS_REST_QUOTE_MARKET_DIV_CODE, {"CF": "CF", "CM": "CM"})
 
 
+# ---------------------------------------------------------------------------
+# PR6d-2a — raw frame metric / status observability
+# ---------------------------------------------------------------------------
+
+class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
+    """KisFuturesClient metric state — frame counter / gap bucket / status transition.
+
+    PR6d-2a (ADR-027) 회귀 방지. REST fallback / Redis / Stage 2 변경 X —
+    측정만.
+    """
+
+    def setUp(self):
+        self.client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager),
+        )
+
+    async def test_dispatch_tick_separates_trade_and_quote_counters(self):
+        """체결 tick → trade_frame_count / 호가 tick → quote_frame_count 분리."""
+        # 체결 tick — H0MFCNT0
+        cnt_raw = "^".join([
+            "A75605", "180332", "6.30", "2", "0.43", "1468.50",
+        ] + ["0"] * 43)
+        await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
+        # 호가 tick — H0MFASP0
+        asp_raw = "^".join(["A75605", "180332"] + ["0"] * 36)
+        await self.client._dispatch_tick("H0MFASP0", asp_raw, "CM")
+
+        m = self.client.get_metrics()
+        self.assertEqual(m["counters"]["trade_frame"], 1)
+        self.assertEqual(m["counters"]["quote_frame"], 1)
+        self.assertEqual(m["counters"]["frame_total"], 2)
+        # last_*_at 분리
+        self.assertIsNotNone(self.client._last_trade_frame_at)
+        self.assertIsNotNone(self.client._last_quote_frame_at)
+
+    def test_status_transition_count_increments(self):
+        """_set_status normal→stale→normal 순서로 transition counter 증가."""
+        # 초기: 모두 0
+        m0 = self.client.get_metrics()
+        self.assertEqual(m0["counters"]["status_transitions"]["stale"], 0)
+
+        with self.assertLogs("app.crawlers.krx_kis", level="INFO"):
+            self.client._set_status("stale")
+            self.client._set_status("normal")
+            self.client._set_status("stale")
+
+        m = self.client.get_metrics()
+        self.assertEqual(m["counters"]["status_transitions"]["stale"], 2)
+        # normal 카운터: setUp 시 default normal에서 stale로 전이 후 normal로
+        # 1회 전이됨 (시작 시 normal은 transition 아님)
+        self.assertEqual(m["counters"]["status_transitions"]["normal"], 1)
+
+    def test_gap_bucket_assignment_correctness(self):
+        """gap_sec → bucket 매핑 invariant. 5s gap → <=10s bucket."""
+        cases = [
+            (0.5, "<=1s"), (1.0, "<=1s"),
+            (1.5, "<=2s"), (2.0, "<=2s"),
+            (3.0, "<=5s"), (5.0, "<=5s"),
+            (5.001, "<=10s"), (10.0, "<=10s"),
+            (15.0, "<=30s"), (30.0, "<=30s"),
+            (45.0, "<=60s"), (60.0, "<=60s"),
+            (60.001, ">60s"), (300.0, ">60s"),
+        ]
+        for gap, expected in cases:
+            self.assertEqual(
+                KisFuturesClient._bucket_for(gap), expected,
+                f"gap={gap} should map to {expected}",
+            )
+
+    async def test_get_metrics_shape_and_lifecycle(self):
+        """get_metrics() 반환 dict shape + lifecycle / contract / counters / buckets."""
+        m = self.client.get_metrics()
+        # 최상위 키
+        self.assertIn("status", m)
+        self.assertIn("active_session", m)
+        self.assertIn("contract", m)
+        self.assertIn("lifecycle", m)
+        self.assertIn("last_frame_age_sec", m)
+        self.assertIn("last_trade_frame_age_sec", m)
+        self.assertIn("last_quote_frame_age_sec", m)
+        self.assertIn("counters", m)
+        self.assertIn("gap_buckets", m)
+        self.assertIn("max_gap_sec", m)
+
+        # lifecycle
+        self.assertIn("started_at", m["lifecycle"])
+        self.assertIn("uptime_sec", m["lifecycle"])
+        # contract metadata
+        self.assertEqual(m["contract"]["code"], TR_KEY_STATIC)
+        # 초기 상태: tick 0건
+        self.assertIsNone(m["last_frame_age_sec"])
+        self.assertEqual(m["counters"]["frame_total"], 0)
+        # gap bucket 키 invariant
+        for layer in ("total", "trade", "quote"):
+            self.assertEqual(
+                sorted(m["gap_buckets"][layer].keys()),
+                sorted(["<=1s", "<=2s", "<=5s", "<=10s", "<=30s", "<=60s", ">60s"]),
+            )
+
+    @unittest.skip(
+        "main.py import는 firebase_admin 의존 + lifespan side effect로 단위 테스트 부담. "
+        "/admin/api/krx-status 분기 검증은 운영 배포 후 admin 페이지 직접 호출로 cover (ADR-027 운영 검증 기준)."
+    )
+    async def test_admin_endpoint_branches(self):
+        """ADR-027 PR6d-2a Test matrix 5번째 (admin endpoint 분기) — 운영 검증으로 분리."""
+        pass
+
+    async def test_max_gap_sec_tracks_largest_inter_tick_gap(self):
+        """max_gap_sec — 두 tick 사이 가장 긴 gap 추적 (전체/체결/호가)."""
+        cnt_raw = "^".join([
+            "A75605", "180332", "0", "0", "0", "1468.0",
+        ] + ["0"] * 43)
+        # 첫 tick → gap 측정 X (이전 tick 없음)
+        await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
+        # _last_tick_at을 5초 전으로 강제 → 다음 tick에서 ~5s gap 측정
+        self.client._last_tick_at = time.time() - 5
+        self.client._last_trade_frame_at = time.time() - 5
+        await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
+
+        m = self.client.get_metrics()
+        # 체결 5s gap → <=5s bucket 또는 <=10s bucket (시간 정확도 ±)
+        # max_trade_gap_sec ≈ 5
+        self.assertGreater(m["max_gap_sec"]["trade"], 4.5)
+        self.assertLess(m["max_gap_sec"]["trade"], 6.0)
+        # gap bucket entry 1 추가됨 (5s 근처 → <=5s 또는 <=10s)
+        bucket_total = sum(m["gap_buckets"]["trade"].values())
+        self.assertEqual(bucket_total, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -535,6 +535,113 @@ class KisFuturesClient:
         self._last_tick_at: Optional[float] = None
         self._stop = asyncio.Event()
 
+        # PR6d-2a — raw frame metric state (silence 측정용, fallback 호출 X)
+        # ADR-027 PR6d-2a 계획 참조
+        now = time.time()
+        self._started_at: float = now
+        self._connected_at: Optional[float] = None
+        self._active_session: Optional[str] = None
+        # frame counters (체결/호가 분리 — user 우려 야간 false stale 검증용)
+        self._frame_count_total: int = 0
+        self._trade_frame_count: int = 0  # H0CFCNT0 / H0MFCNT0
+        self._quote_frame_count: int = 0  # H0CFASP0 / H0MFASP0
+        self._system_frame_count: int = 0
+        self._malformed_frame_count: int = 0
+        self._unknown_tr_id_count: int = 0
+        # frame age tracking (분리)
+        self._last_trade_frame_at: Optional[float] = None
+        self._last_quote_frame_at: Optional[float] = None
+        # status transition counters
+        self._status_transition_count: Dict[str, int] = {
+            "normal": 0, "reconnecting": 0, "stale": 0,
+        }
+        # reconnect attempt count (누적)
+        self._reconnect_attempt_count: int = 0
+        # gap buckets (전체/체결/호가 각각). boundary는 ADR-027 후보 그대로
+        # 운영 분포 보고 boundary 조정 예정 (PR6d-2a 배포 후 baseline 분석)
+        self._gap_buckets_total: Dict[str, int] = self._init_gap_buckets()
+        self._gap_buckets_trade: Dict[str, int] = self._init_gap_buckets()
+        self._gap_buckets_quote: Dict[str, int] = self._init_gap_buckets()
+        # max gap (전체/체결/호가). 단순 max만 추적. p50/p95/p99는 외부 분석.
+        self._max_frame_gap_sec: float = 0.0
+        self._max_trade_gap_sec: float = 0.0
+        self._max_quote_gap_sec: float = 0.0
+
+    @staticmethod
+    def _init_gap_buckets() -> Dict[str, int]:
+        """gap bucket dict. ADR-027 후보 boundary."""
+        return {
+            "<=1s": 0, "<=2s": 0, "<=5s": 0, "<=10s": 0,
+            "<=30s": 0, "<=60s": 0, ">60s": 0,
+        }
+
+    @staticmethod
+    def _bucket_for(gap_sec: float) -> str:
+        """gap_sec을 bucket 라벨로 매핑."""
+        if gap_sec <= 1:
+            return "<=1s"
+        if gap_sec <= 2:
+            return "<=2s"
+        if gap_sec <= 5:
+            return "<=5s"
+        if gap_sec <= 10:
+            return "<=10s"
+        if gap_sec <= 30:
+            return "<=30s"
+        if gap_sec <= 60:
+            return "<=60s"
+        return ">60s"
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """현재 metric state snapshot (PR6d-2a, ADR-027).
+
+        admin endpoint / summary log / 테스트에서 호출. read-only.
+        """
+        now = time.time()
+        return {
+            "status": self._status,
+            "active_session": self._active_session,
+            "contract": {
+                "code": self._contract.short_code,
+                "month": self._contract.contract_month,
+                "expires_on": self._contract.expiry_date.isoformat(),
+            },
+            "lifecycle": {
+                "started_at": self._started_at,
+                "connected_at": self._connected_at,
+                "uptime_sec": int(now - self._started_at),
+            },
+            "last_frame_age_sec": (
+                int(now - self._last_tick_at) if self._last_tick_at else None
+            ),
+            "last_trade_frame_age_sec": (
+                int(now - self._last_trade_frame_at) if self._last_trade_frame_at else None
+            ),
+            "last_quote_frame_age_sec": (
+                int(now - self._last_quote_frame_at) if self._last_quote_frame_at else None
+            ),
+            "counters": {
+                "frame_total": self._frame_count_total,
+                "trade_frame": self._trade_frame_count,
+                "quote_frame": self._quote_frame_count,
+                "system_frame": self._system_frame_count,
+                "malformed_frame": self._malformed_frame_count,
+                "unknown_tr_id": self._unknown_tr_id_count,
+                "reconnect_attempt": self._reconnect_attempt_count,
+                "status_transitions": dict(self._status_transition_count),
+            },
+            "gap_buckets": {
+                "total": dict(self._gap_buckets_total),
+                "trade": dict(self._gap_buckets_trade),
+                "quote": dict(self._gap_buckets_quote),
+            },
+            "max_gap_sec": {
+                "total": self._max_frame_gap_sec,
+                "trade": self._max_trade_gap_sec,
+                "quote": self._max_quote_gap_sec,
+            },
+        }
+
     @staticmethod
     def _default_contract() -> ContractInfo:
         """PR6a static fallback — TR_KEY_STATIC 등 모듈 상수 사용.
@@ -569,9 +676,12 @@ class KisFuturesClient:
             if session is None:
                 logger.debug("[kis_ws] no active session, sleep 30s")
                 self._set_status("normal")  # 휴장은 stale 아님
+                self._active_session = None  # PR6d-2a — 휴장 metric 반영
                 await asyncio.sleep(30)
                 continue
             await self._run_session(session)
+        # PR6d-2a — stop 시 active_session 정리
+        self._active_session = None
 
     async def stop(self) -> None:
         self._stop.set()
@@ -593,6 +703,7 @@ class KisFuturesClient:
                 attempt = 0  # 정상 종료 (세션 변경 등) 시 reset
             except Exception as e:
                 attempt += 1
+                self._reconnect_attempt_count += 1  # PR6d-2a — reconnect baseline
                 self._set_status("reconnecting")
                 backoff = self._compute_backoff(attempt)
                 logger.warning(
@@ -614,6 +725,9 @@ class KisFuturesClient:
         if self._status != new_status:
             logger.info("[kis_ws] status %s → %s", self._status, new_status)
             self._status = new_status
+            # PR6d-2a — status transition counter (flap / false stale 감지용)
+            if new_status in self._status_transition_count:
+                self._status_transition_count[new_status] += 1
 
     async def _connect_and_listen(self, session: str, approval_key: str) -> None:
         """WebSocket 연결 + subscribe + recv loop. 예외 시 caller가 reconnect."""
@@ -622,6 +736,9 @@ class KisFuturesClient:
         ) as ws:
             logger.info("[kis_ws] connected, session=%s", session)
             tr_key = self._contract.short_code  # PR6c-2a: 동적 contract
+            # PR6d-2a — lifecycle metric (connected_at + active_session)
+            self._connected_at = time.time()
+            self._active_session = session
             for tr_id in SESSION_TR_MAP[session]:
                 await ws.send(self._sub_message(approval_key, tr_id, tr_key))
                 logger.info("[kis_ws] subscribed tr_id=%s key=%s", tr_id, tr_key)
@@ -684,11 +801,13 @@ class KisFuturesClient:
             parts = raw.split("|", 3)
             if len(parts) < 4:
                 logger.warning("[kis_ws] malformed tick frame: %r", raw[:120])
+                self._malformed_frame_count += 1  # PR6d-2a
                 return
             tr_id, _count, data = parts[1], parts[2], parts[3]
             await self._dispatch_tick(tr_id, data, session)
         else:
             # system message (subscribe success/PINGPONG/error 등)
+            self._system_frame_count += 1  # PR6d-2a
             try:
                 msg = json.loads(raw)
                 header = msg.get("header") or {}
@@ -705,17 +824,50 @@ class KisFuturesClient:
         parser = PARSER_DISPATCH.get(tr_id)
         if parser is None:
             logger.warning("[kis_ws] unknown tr_id: %s", tr_id)
+            self._unknown_tr_id_count += 1
             return
 
-        # last_tick_at 갱신은 tick 종류 무관 (호가/체결 둘 다 연결 정상 신호)
-        self._last_tick_at = time.time()
+        # PR6d-2a — raw frame metric 갱신 (체결/호가 분리, gap bucket).
+        # last_tick_at 갱신은 tick 종류 무관 (호가/체결 둘 다 연결 정상 신호).
+        now = time.time()
+        prev_tick_at = self._last_tick_at
+        self._last_tick_at = now
+        self._frame_count_total += 1
+
+        # 전체 frame gap 측정
+        if prev_tick_at is not None:
+            gap_total = now - prev_tick_at
+            if gap_total > self._max_frame_gap_sec:
+                self._max_frame_gap_sec = gap_total
+            self._gap_buckets_total[self._bucket_for(gap_total)] += 1
+
+        # 체결/호가 분리 측정
+        is_trade = tr_id in ("H0CFCNT0", "H0MFCNT0")
+        is_quote = tr_id in ("H0CFASP0", "H0MFASP0")
+        if is_trade:
+            self._trade_frame_count += 1
+            if self._last_trade_frame_at is not None:
+                gap = now - self._last_trade_frame_at
+                if gap > self._max_trade_gap_sec:
+                    self._max_trade_gap_sec = gap
+                self._gap_buckets_trade[self._bucket_for(gap)] += 1
+            self._last_trade_frame_at = now
+        elif is_quote:
+            self._quote_frame_count += 1
+            if self._last_quote_frame_at is not None:
+                gap = now - self._last_quote_frame_at
+                if gap > self._max_quote_gap_sec:
+                    self._max_quote_gap_sec = gap
+                self._gap_buckets_quote[self._bucket_for(gap)] += 1
+            self._last_quote_frame_at = now
+
         if self._status != "normal":
             self._set_status("normal")
 
         # PR6a: 체결 tick (H0CFCNT0/H0MFCNT0)만 fanout. 호가 (H0CFASP0/H0MFASP0)는
         # 매도호가1을 대표값으로 잘못 저장할 위험 + 체결보다 19× 빈도라 latest를
         # 매도호가로 덮어쓰기 — 호가 데이터 필요 시 별도 path 도입.
-        if tr_id in ("H0CFASP0", "H0MFASP0"):
+        if is_quote:
             logger.debug("[kis_ws] quote tick ignored (PR6a fanout): tr_id=%s", tr_id)
             return
 
