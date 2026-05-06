@@ -1,6 +1,24 @@
-# 실시간 아키텍처 마이그레이션 플랜 (v0.8 draft)
+# 실시간 아키텍처 마이그레이션 플랜 (v0.9 draft)
 
-> 📝 **상태 (v0.8 draft, 2026-05-04)**: PR3-PR5 구현/배포/24h+IN mode 측정 완료 — broadcast hot path DB-free 달성. ADR-026 / CHANGELOG / 본 문서 PR3 섹션에 최종 수치 반영 완료. 후속은 영업시간 Redis read jitter 진단과 PR6(KRX futures / USDT WebSocket) 영역.
+> 🔖 **단일 진리 source 명시 (2026-05-06)**:
+>
+> 본 문서는 **서비스 출시 계약**에 대한 단일 진리 source다. 본문 §2 "현재 구조"는 **현재 구현된 백엔드 경로**를 묘사하고, §4 이후 "목표 구조" / §5 Topic 설계 / §11 dual-emit 전략 등은 **서비스 출시 계약**을 정의한다. 둘은 **서로 다른 계층**이므로 본 문서를 읽을 때 항상 "현재 구현(legacy compat)" vs "목표 계약(topic-only/dual-emit)" 구분 필요.
+>
+> **핵심 운영 사실 (2026-05-06)**:
+> - 운영 앱(iOS 2026-01-21 / Android 2026-03-13 출시)에는 **테더 탭 없음**
+> - 백엔드 USDT 5거래소 / KRX 미국달러선물 수집은 운영 진행 중
+> - **현재 구현은 USDT를 legacy `rates` 배열에 포함**시킨 상태 — 이는 iOS dev/test 단계의 임시 모델 (test-era compatibility 경로)
+> - **서비스 출시 계약 = topic-only Tether/KRX + legacy FX dual-emit** ([DECISIONS.md ADR-028](DECISIONS.md))
+>
+> **계약 요약**:
+> - legacy `rates` 채널 = USD/JPY/EUR + Investing/은행 9개 한정. **테더 탭 데이터(USDT/KRX) 미포함**
+> - 새 topic 채널 = `fx:*` / 테더 탭 토픽 / `krx:*` / `dxy` / `graph:*` / `news`
+> - dual-emit 범위 = 환율 탭 데이터에만 (legacy + topic 둘 다). 테더/KRX는 topic만 발사
+>
+> 관련 ADR: [ADR-026](DECISIONS.md) (Redis-first hot path) / [ADR-027](DECISIONS.md) (KRX REST/stale 정책) / [ADR-028](DECISIONS.md) (Topic-only Tether/KRX + legacy FX dual-emit)
+>
+> 📝 **상태 (v0.9 draft, 2026-05-06)**: PR6 Stage 1 canary 진행 중 (KRX_BROADCAST_INCLUDE=false). PR6e 운영 보강 적용. 본 문서를 단일 진리 source로 명시 + ADR-028 신설로 topic-only/dual-emit 계약 고정.
+> 📝 **이전 상태 (v0.8 draft, 2026-05-04)**: PR3-PR5 구현/배포/24h+IN mode 측정 완료 — broadcast hot path DB-free 달성. ADR-026 / CHANGELOG / 본 문서 PR3 섹션에 최종 수치 반영 완료. 후속은 영업시간 Redis read jitter 진단과 PR6(KRX futures / USDT WebSocket) 영역.
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
 > 🔄 **변경 이력**: v0.8 — PR3 Step 1-5 + PR3.5 (계측) + PR4 (MGET) + PR5 (DXY mirror) 시퀀스 완료 (2026-05-03). broadcast hot path에서 rates + DXY spot DB SELECT 제거. PR5 24h 관측(n=31495)에서 rates/DXY Redis hit 100%, dxy_query_ms 0건, payload_build_ms p99 30.25ms 확인. IN mode 30분 관측(n=1801)은 p99 75.97ms로 영업시간 Redis read wall-clock jitter 증가를 확인했지만 DB fallback/DXY fallback은 0건. ADR-026 / CHANGELOG / 본문 PR3 섹션에 최종 수치 반영 완료.
 > 🔄 **이전 변경**: v0.7 — 24h fast window PoC(2026-05-01 15:53~) 진행 중. Performance Insights + EXPLAIN ANALYZE 분석에서 16:00 spike 확대 구간(8분 PI window) 기준 wait event가 CPU 단일로 관측되고 LWLock/Lock/IO:WalSync wait 0건 확인. 같은 구간 PI Top SQL에서 bank+source latest SELECT가 부하의 대부분(bank 0.21 + source 0.15 AAS = 0.36)을 차지. Phase 2 작업 순서 재배열: **PR3(Redis-first broadcast)를 첫 PR로 격상**. PR3 설계 완전 합의(env / Redis schema / stale 판정 / fallback reason / 모듈 구조 / metric). cache.py·crud.py 변경 0, 신규 `app/latest_rates_cache.py` 모듈 분리. 자세한 설계는 12.Phase 2 섹션의 PR3 서브섹션 참고.
@@ -772,7 +790,7 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 - ADR-XXX: Broadcasting 1초 cron 전환 (Phase 1 측정 결과 반영)
 - ADR-XXX: 거래소 USDT — REST polling → WebSocket 전환
 - ADR-XXX: 알림 평가 흐름 분리 (DB 동기 → Redis 비동기)
-- ADR-XXX: Legacy + Topic dual-emit 마이그레이션 패턴 — 테더 탭 데이터는 topic-only, legacy `rates`는 USD/JPY/EUR + Investing/은행 9개로 한정
+- ADR-028: Legacy + Topic dual-emit 마이그레이션 패턴 — 테더 탭 데이터는 topic-only, legacy `rates`는 USD/JPY/EUR + Investing/은행 9개로 한정
 - ADR-XXX: 테더 탭 multi-source topic 이름 + payload schema 확정 (source + asset + category 모델)
 - ADR-XXX: DXY 화면 분리 — 달러 탭은 현물(`dxy`), 테더 탭은 선물(`dxy_futures`) 그래프 보조지표
 - ADR-XXX: dxy_futures hourly/daily rollup + market_index 그래프 API 확장 (Phase 2 작업)

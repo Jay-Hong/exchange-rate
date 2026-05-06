@@ -1027,23 +1027,30 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 **구현 참고 문서**: [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) (임시, 안정화 후 삭제 예정)
 
-### USDT Phase 1: 테더 탭 백엔드 foundation ✅ 완료 (2026-04-23)
+### USDT Phase 1: 테더 탭 백엔드 foundation ✅ 백엔드 완료 / 서비스 미출시 (2026-04-23 구현, 2026-05-06 status 갱신)
+
+> ⚠️ **운영 현실 (2026-05-06)**: 백엔드 수집/저장/알림 API는 완료. 운영 앱(iOS 2026-01-21 / Android 2026-03-13)에는 **테더 탭 없음**. 아래 "기존 API 확장 (legacy 통합)" 항목은 iOS dev/test 단계의 임시 모델이고 **서비스 출시 계약이 아니다**. 서비스 계약은 **topic-only**다 ([ADR-028](DECISIONS.md) / [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md)).
 
 **배경**: 김치프리미엄 전략(KRX 선물 매도 + USDT 매수 헷지) 사용자를 위한 거래소 간 USDT/KRW 비교
 
-**설계 원칙** (Decision E):
+**설계 원칙** (Decision E — 백엔드 도메인 모델만 유효):
 
 - 기존 bank/investing 세계는 유지 (API/앱 호환성)
 - 새 source 기반 세계를 별도 도입 (`source + asset`)
-- API 표면은 `bank + currency`로 어댑터 변환 (기존 클라이언트 호환)
+- ⚠️ "API 표면은 `bank + currency`로 어댑터 변환" 부분은 iOS test-era 임시 결정. 서비스 출시 계약은 topic-only
 
-**추가된 기능**:
+**추가된 기능 (백엔드)**:
 
 - **거래소 5종 수집**: 업비트, 빗썸, 코인원, 고팍스, 코빗 USDT/KRW (REST polling 10초, 24/7)
 - **새 데이터 모델**: `source_rates`, `source_notification_settings`, `source_notification_logs`
-- **기존 API 확장**: `/api/rates`, `/api/rates/usdt-krw`, WebSocket `rates` 배열에 usdt-krw 엔트리 자동 포함
 - **Source 알림 API**: `/api/source-notification-settings` (4종, 거래소 전용, reference는 400 + 기존 API 안내)
 - **30일 보관 cleanup**: 매일 03:31
+
+**legacy compatibility 경로 (test-era, 서비스 계약 아님)**:
+
+- `/api/rates`, `/api/rates/usdt-krw`, WebSocket `rates` 배열에 usdt-krw 엔트리 자동 포함 — iOS dev/test 단계에서 추가됨
+- 운영 앱이 테더 탭을 갖지 않으므로 사용자 영향 0
+- 토픽 프로토콜 v1 도입 시 legacy `rates`에서 USDT 분리 예정 (별도 PR — Phase Z-2)
 
 **알림 API**:
 
@@ -1097,7 +1104,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 1. **Stage 0 — 비활성 baseline**: `KRX_FUTURES_ENABLED=false`. 코드는 배포되어 있으나 lifecycle 자체가 비활성. 운영 영향 0.
 2. **Stage 1 — DB 저장만 (현재)**: `KRX_FUTURES_ENABLED=true` + `KRX_BROADCAST_INCLUDE=false`. KIS WebSocket → DB(`source_rates`)까지만. mirror가 broadcast가 읽는 `latest:index`에 KRX key를 포함시키지 않음 → broadcast 노출 X (Redis `latest:source:krx:*` data key 잔존 여부와 무관 — `latest:index`가 게이트). KRX tick 정상성 + DB write throughput을 24h 관찰.
-3. **Stage 2 — broadcast 노출**: `KRX_BROADCAST_INCLUDE=true` 추가. mirror cycle이 KRX latest data key를 갱신하고 `latest:index`에 포함시켜 broadcast rates 배열에 `source="krx", asset="usd-krw-futures"` 등장. 클라이언트 호환성 검증 후 활성화.
+3. **Stage 2 — topic 노출** ([ADR-028](DECISIONS.md) 합의 후 재정의됨, 2026-05-06): `KRX_BROADCAST_INCLUDE=true`는 **legacy `rates` 배열 노출이 아니라 topic 채널 발사 트리거**로 의미 재정의. KRX 데이터는 새 topic protocol(예: `krx:usd-krw-futures`)로만 발사하고 legacy `rates` 배열에는 미포함. topic protocol v1 도입(별도 PR — Phase Z-2 영역) 완료 후 활성화. 단순 토글로 legacy `rates`에 KRX 노출은 새 계약 위반이라 진행하지 않음.
 4. **롤백**: 어느 단계에서든 KRX 장애 / KIS API 점검 / 데이터 이상 발견 시 해당 토글 `false`로 격리. 환경변수 변경 후 process 재생성 필요 (config는 import 시 1회 읽기, `docker compose restart`는 env_file 변경을 반영하지 않음). `docker compose up -d fastapi` 후 visible effect: `KRX_FUTURES_ENABLED=false`는 즉시 lifecycle 미시작 (수집 중단), `KRX_BROADCAST_INCLUDE=false`는 다음 정상 mirror cycle (≤3초)에 `latest:index`에서 KRX key 제외 (broadcast 미노출).
 
 **현재 구현/운영 상태 (PR6 ~ PR6e)**:

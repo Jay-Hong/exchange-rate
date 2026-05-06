@@ -61,7 +61,7 @@ docker compose logs fastapi --since 5m | grep -E '\[krx\]'
 KIS_APP_KEY=<발급받은 KIS App Key>
 KIS_APP_SECRET=<발급받은 KIS App Secret>
 KRX_FUTURES_ENABLED=true
-KRX_BROADCAST_INCLUDE=false   # broadcast 노출 X (Stage 2에서 true)
+KRX_BROADCAST_INCLUDE=false   # broadcast 노출 X (Stage 2 topic protocol 도입 후 true)
 
 # 기존 운영 토글은 변경 X
 # REDIS_LATEST_ENABLED=<운영 현재값 그대로>
@@ -269,15 +269,17 @@ docker compose logs fastapi --since 2m | grep -E '\[krx\]'
 
 ## Stage 2 진입 조건 (체크리스트)
 
-> Stage 2 = `KRX_BROADCAST_INCLUDE=true` 추가. broadcast `rates` 배열에 `source="krx", asset="usd-krw-futures"` 등장.
+> ⚠️ **Stage 2 의미 재정의 (2026-05-06, [ADR-028](DECISIONS.md))**: Stage 2 = **topic 채널 발사** (legacy `rates` 배열 노출 X). KRX는 새 topic protocol로만 노출. `KRX_BROADCAST_INCLUDE=true`는 legacy `rates` 통합이 아니라 topic 발사 트리거로 재해석 (코드 분리는 Phase Z-2 영역). 단순 토글로 legacy `rates`에 KRX 노출은 새 계약 위반.
 
 진입 **전** 모두 충족되어야 함:
 
 - [ ] Stage 1을 24h+ 운영, 위 baseline 지표 수집 완료
 - [ ] 5/18 만기 관찰 데이터 확보 (위 시나리오 1~3)
-- [ ] PR6d (REST snapshot/fallback) 구현 완료 — broadcast 노출 시 stale 방지 안전장치 필수
+- [ ] PR6d (REST snapshot/fallback) 구현 완료 — topic 노출 시 stale 방지 안전장치 필수
 - [ ] PR6c-2d (자동 rollover) 또는 동등 운영 절차(수동 restart cron) 결정 완료
-- [ ] iOS/Android 클라이언트가 `source="krx", asset="usd-krw-futures"` 처리 검증 완료 (모르는 source 무시 또는 표시)
+- [ ] **topic protocol v1 도입 완료 (Phase Z-2 영역)** — WebSocket subscribe + topic delta dispatch 인프라
+- [ ] **ADR-028 (Topic-only Tether/KRX + legacy FX dual-emit) 결정 적용 완료**
+- [ ] iOS/Android 클라이언트가 새 topic protocol에서 `source="krx", asset="usd-krw-futures"` 처리 검증 완료
 - [ ] ADR-027 (REST fallback 정책) 작성 완료
 
 ---

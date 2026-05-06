@@ -173,6 +173,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **USDT/KRX 서비스 출시 계약 재정의** (2026-05-06, [ADR-028](DECISIONS.md#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit)):
+  - **이전 가정 (USDT Phase 1, 2026-04-23)**: USDT 5거래소 + (Stage 2 시) KRX 미국달러선물을 legacy `/api/rates` + WebSocket `rates` 배열에 어댑터 변환 통합 (Decision E)
+  - **재정의 (2026-05-06)**: USDT 거래소 + KRX = **topic-only** (legacy `rates` 미포함). legacy `rates` 채널 = USD/JPY/EUR + Investing/은행 9개 한정. dual-emit은 환율 탭 데이터에만 적용
+  - **재정의 사유**: 운영 앱(iOS 2026-01-21 / Android 2026-03-13)에 테더 탭 없음 → 현재 USDT의 legacy `rates` 포함은 iOS dev/test 단계의 임시 모델. [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) v0.8 합의에 정합
+  - **현재 백엔드 구현은 보존**: USDT legacy 통합 경로(`/api/rates/usdt-krw`, WebSocket `rates`에 USDT 포함)는 그대로 운영 중. 코드 분리는 Phase Z-2 (별도 PR, 5/8 baseline + 5/18 만기 관찰 후 시작) 영역
+  - **PR6 KRX `KRX_BROADCAST_INCLUDE` 토글 의미 재해석**: 기존 "legacy `rates` 통합 트리거" → "topic 발사 트리거". Stage 2 진입은 topic protocol v1 도입 후
+  - 영향 받은 문서: [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md) (superseded), [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md) (부분 superseded), [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md) (데이터 수신 방식 superseded), [CLAUDE.md](CLAUDE.md) USDT/KRX 섹션, [KRX_CANARY.md](KRX_CANARY.md) Stage 2 조건, [DECISIONS.md ADR-027](DECISIONS.md#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) Stage 2 채널
+
 - **TradingView TVC:DXY 운영 통합 보류** (2026-04-29):
   - 4-28~29 약 24h 측정 (1,236 unique samples) 결과 production fallback 부적합 결론
   - TV `delay_sec`: p50=338s, p95=2009s, max 약 1시간 43분 (시간대별 변동 극심)

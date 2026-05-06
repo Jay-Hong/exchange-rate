@@ -1,7 +1,24 @@
 # USDT Phase 1 Design
 
-> Status: design locked, ready for implementation
-> Updated: 2026-04-23
+> ⚠️ **부분 Superseded (2026-05-06 갱신)**
+>
+> 이 문서의 다음 항목은 **iOS dev/test 단계의 임시 구현 모델**이며 **서비스 출시 계약이 아니다**:
+> - "기존 `/api/rates`, `/api/rates/{currency}`, WebSocket `rates` 배열에 `usdt-krw` 엔트리 포함"
+> - "기존 WebSocket에 usdt-krw 포함" 류의 rollout 방식
+>
+> 위 항목들은 **구현된 legacy/test compatibility 경로**이지만, 운영 앱(iOS 2026-01-21 / Android 2026-03-13 출시)에는 아직 테더 탭이 없고, 서비스 rollout 계약은 **topic-only**다.
+>
+> **본 문서의 다음 설계는 여전히 유효** (Phase 1 백엔드 구현의 단일 진리):
+> - `source_rates` 테이블 + source/asset 도메인 모델
+> - source registry 구조
+> - source 기반 단일 소스 알림 (`source_notification_settings` / `source_notification_logs`)
+> - comparison alert 설계 (Phase 3)
+> - Decision A~F 의사결정
+>
+> 데이터 수신 방식/rollout 계약은 [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) + [DECISIONS.md ADR-028](DECISIONS.md) 참조.
+>
+> Status: 부분 superseded (백엔드 모델/스키마 유효, 클라이언트 rollout 계약 갱신)
+> Updated: 2026-04-23 (원본); 2026-05-06 (status 갱신)
 > Related: [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md)
 
 ## Goal

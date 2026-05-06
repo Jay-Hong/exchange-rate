@@ -1,7 +1,29 @@
 # USDT Phase 1 — iOS/Android 클라이언트 구현 가이드
 
-> Status: design guide (iOS/Android 구현 전 설계 기준)
-> Updated: 2026-04-23
+> ⚠️ **Superseded — 데이터 수신 방식 부분 폐기 (2026-05-06 갱신)**
+>
+> 이 가이드는 USDT Phase 1 백엔드 구현 직후 작성되었다. 본문에서 가정한 **데이터 수신 방식은 legacy 통합 모델(`/api/rates` + `/ws` `rates` 배열에 USDT 포함)** 기반이고, 이는 **iOS dev/test 단계의 임시 모델**이다.
+>
+> **서비스 출시 계약 (현재 합의)**:
+> - USDT 거래소 / KRX 미국달러선물 = **topic-only** (legacy `rates` 배열 미포함)
+> - dual-emit 범위 = 환율 탭 데이터에만 (테더/KRX는 topic만 발사)
+>
+> 새 topic protocol 도입 후 본 가이드는 V2 클라이언트 가이드로 대체될 예정.
+>
+> **본 가이드의 다음 항목은 여전히 참고 유효**:
+> - `RateSource` 모델 (`source` + `asset` + `category` + `displayName`)
+> - 어댑터 패턴 (서버 응답 → 내부 모델 변환)
+> - SourceRegistry 구조
+> - 표시 정책 (sortOrder, displayName, currency formatting)
+>
+> **본 가이드의 다음 항목은 V2 protocol 도입 후 재작성**:
+> - "기존 `/api/rates` 응답은 호환성 때문에 `bank + currency`로 내려오므로 어댑터로 변환"
+> - "/ws `rates` 배열에서 USDT 수신" 가정
+>
+> 단일 진리 source: [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) + [DECISIONS.md ADR-028](DECISIONS.md)
+>
+> Status: 부분 superseded (도메인 모델 참고 유효, 데이터 수신 방식 V2 protocol로 대체 예정)
+> Updated: 2026-04-23 (원본); 2026-05-06 (status 갱신)
 > Related: [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md), [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md)
 
 ## 이 문서의 목적

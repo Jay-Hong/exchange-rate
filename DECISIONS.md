@@ -2893,7 +2893,9 @@ PR6 시리즈로 KRX 미국달러선물(`source="krx", asset="usd-krw-futures"`)
 - 2026-05-05 어린이날 휴장 후 2026-05-06 08:30 CF 정규세션 재진입 확인
 - PR6e로 새 row rate를 0.1 KRW tick으로 정규화하고, 세션 경계 `_last_tick_at` carry-over에 따른 불필요한 stale 전이를 차단
 
-Stage 2에서 `KRX_BROADCAST_INCLUDE=true`를 켜면 KRX가 `latest:index`와 broadcast `rates` 배열에 등장한다. 이때 WebSocket 단절, KIS approval 장애, 휴장/세션 break, 만기일 contract rollover가 사용자 화면에 stale 또는 잘못된 값으로 노출될 수 있으므로 REST snapshot/fallback 및 stale 정책이 필요하다.
+Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket 단절, KIS approval 장애, 휴장/세션 break, 만기일 contract rollover가 사용자 화면에 stale 또는 잘못된 값으로 노출될 수 있으므로 REST snapshot/fallback 및 stale 정책이 필요하다.
+
+> ⚠️ **Stage 2 노출 채널 재정의 (2026-05-06, [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit) 합의)**: Stage 2 진입 시 KRX 노출은 **legacy `rates` 배열이 아니라 새 topic 채널** (예: `krx:usd-krw-futures`). `KRX_BROADCAST_INCLUDE=true`는 legacy 통합 트리거가 아니라 topic 발사 트리거로 의미 재정의. 본 ADR-027의 fallback/stale 정책은 topic 채널 기준으로 적용한다 (legacy `rates`에 KRX 등장은 새 계약 위반이라 진행하지 않음).
 
 ### 원칙
 
@@ -2909,8 +2911,8 @@ Stage 2에서 `KRX_BROADCAST_INCLUDE=true`를 켜면 KRX가 `latest:index`와 br
 |---|---|---|
 | REST snapshot 호출 주기 | WebSocket 정상 시 0회 / active session 중 주기 보조 / stale 시에만 호출 | 초안: 정상 시 0회, stale trigger 시 호출 |
 | Stale 임계값 | 30초 / 60초 / 세션별 동적 | 코드 상수 `STALE_AFTER_SEC=60`을 기준 후보로 유지, 5/6~5/8 baseline으로 조정 |
-| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / Redis latest만 갱신 | 초안: DB 저장까지 수행해 provenance 유지, broadcast mirror는 기존 path 재사용 |
-| REST 실패 시 정책 | KRX를 `latest:index`에서 제외 / 마지막 값 유지 / stale status 동반 | 초안: Stage 2에서는 KRX 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
+| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | 초안: DB 저장까지 수행해 provenance 유지, topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
+| REST 실패 시 정책 | KRX topic publish 제외 / 마지막 값 유지 / stale status 동반 | 초안: Stage 2 topic에서는 KRX publish 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
 | 만기일 rollover | cron / session boundary resolve / 수동 restart | 2026-05-18 관찰 후 결정. 현재 자동 contract 교체 없음 |
 
 ### Stage 1에서 이미 확인된 운영 신호
@@ -2934,7 +2936,93 @@ Stage 2에서 `KRX_BROADCAST_INCLUDE=true`를 켜면 KRX가 `latest:index`와 br
 
 - [KRX_CANARY.md](KRX_CANARY.md): Stage 1/2 runbook, SQL/Redis 검증 명령, 만기일 관찰 시나리오
 - [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): `latest:index` 기반 Redis-first broadcast hot path
+- [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit): KRX/USDT topic-only 노출 + legacy FX dual-emit 계약
 - [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): `source_rates` 기반 source/asset 모델
+
+---
+
+## ADR-028: Topic-only Tether/KRX + legacy FX dual-emit
+
+> 📅 **작성일**: 2026-05-06
+> 🏷️ **상태**: 합의 (서비스 출시 계약 — 코드 분리는 Phase Z-2 영역)
+
+### 맥락
+
+[REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) v0.8(2026-05-04 합의)에서 "USDT 거래소 / KRX 미국달러선물은 topic-only" 원칙이 정의됐지만, 그 이전 작업(USDT Phase 1, 2026-04-23)에서 USDT 5거래소를 legacy `/api/rates` + WebSocket `rates` 배열에 통합하는 어댑터 경로(Decision E)가 구현되어 운영 중이다.
+
+운영 사실:
+- iOS(2026-01-21) / Android(2026-03-13) 출시 앱에는 **테더 탭 없음** — 즉 USDT가 legacy `rates`에 흘러도 사용자 영향 0
+- 백엔드 USDT 5거래소 + KRX 미국달러선물 수집은 정상 진행 중
+- WebSocket subscribe 인프라는 미구현 — 모든 클라이언트가 같은 broadcast 받음
+- PR6 KRX는 `KRX_BROADCAST_INCLUDE` 토글이 legacy `rates` 통합 의미로 작성되어 있어 [ADR-027](#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안)과 모순 (Stage 2 broadcast 노출이 legacy 통합 가정)
+- USDT_PHASE1 시리즈 문서(TAB_PROPOSAL / DESIGN / CLIENT_GUIDE)는 모두 legacy 통합 모델 가정
+
+이 모순을 해소하지 않고 Stage 2 / 테더 탭 출시로 진행하면 (1) legacy `rates` 대역폭이 USDT/KRX까지 포함해 비대해지고, (2) topic 기반 selective subscription의 "필요한 것만 받음" 목표가 폐기되며, (3) 새 클라이언트가 legacy 어댑터에 묶여 향후 V2 protocol 도입 시 마이그레이션 부담이 커진다.
+
+### 결정
+
+**서비스 출시 계약**:
+
+1. **legacy `rates` 채널 데이터 범위**: USD/JPY/EUR + Investing/은행 9개 한정. **USDT 거래소 / KRX 미국달러선물은 미포함.**
+2. **새 topic 채널**: `fx:*` (외환), 테더 탭 토픽 (잠정 `usdt:krw` multi-source), `krx:*` (KRX 미국달러선물), `dxy`, `graph:*`, `news` 등.
+3. **dual-emit 범위**:
+   - 환율 탭 데이터(USD/JPY/EUR + 은행 9개): legacy `rates` + topic delta **양쪽 발사**
+   - 테더 탭 데이터(USDT 5거래소): topic delta만 발사
+   - KRX 데이터(`source="krx"`, `asset="usd-krw-futures"`): topic delta만 발사
+4. **legacy 제거 기준**: iOS/Android 양쪽 활성 구버전 < 1% 동시 도달 + 6개월 경과 시점에 legacy `rates` 전체 폐기 후보 ([REALTIME_ARCHITECTURE_PLAN.md §11](REALTIME_ARCHITECTURE_PLAN.md) 정책 유지).
+
+**현재 구현 vs 계약**:
+
+| 영역 | 현재 구현 (test-era compatibility) | 서비스 계약 (목표) |
+| --- | --- | --- |
+| `/api/rates` | USDT 어댑터 변환으로 `bank+currency` 응답에 USDT 포함 | USD/JPY/EUR + 은행 9개만. USDT는 별도 endpoint(미정) 또는 topic |
+| `/api/rates/usdt-krw` | USDT를 `bank+currency`로 응답 | debug/compat 유지 vs 제거 별도 결정 (Phase Z-2) |
+| WebSocket `rates` 배열 | USDT + (Stage 2 시) KRX 포함 가능 | USD/JPY/EUR + 은행 9개만 |
+| WebSocket subscribe | 미구현 (전체 broadcast) | hello + subscribe + topic delta dispatch |
+| KRX `KRX_BROADCAST_INCLUDE` | legacy `rates` 통합 토글 (현재 코드 의미) | topic 발사 트리거로 재해석 (코드 분리는 Phase Z-2) |
+
+### 단계 (Phase Z)
+
+**Phase Z-1 — 문서 정합 (코드 변경 0, 본 ADR 작성 시점)**:
+
+- REALTIME_ARCHITECTURE_PLAN.md를 단일 진리 source로 명시 + "현재 구현 vs 목표 계약" 분리
+- USDT_PHASE1 시리즈 (TAB_PROPOSAL / DESIGN / CLIENT_GUIDE)에 superseded notice
+- CLAUDE.md USDT Phase 1 / KRX 섹션을 운영 현실로 정정
+- ADR-027의 "Stage 2 broadcast 노출" 표현을 "topic 노출"로 재해석
+- KRX_CANARY.md Stage 2 조건에 topic protocol 의존성 추가
+- CHANGELOG.md Changed 항목 추가
+
+**Phase Z-2 — 코드 분리 (별도 PR, baseline + 5/18 만기 관찰 후 시작)**:
+
+- `app/main.py` `build_rates_payload`에서 `get_all_rates_flat()` 결과를 currency 화이트리스트(USD/JPY/EUR)로 한정
+- WebSocket hello / subscribe / unsubscribe 메시지 schema 설계 + 구현
+- topic delta payload schema (`fx:*`, 테더 탭, `krx:*`, `dxy`, `graph:*`, `news`)
+- snapshot vs delta 구분 + snapshot 토픽별 분리
+- ConnectionManager에 subscribe 상태 관리
+- broadcast 분기: 구버전(미 subscribe) = legacy / 신버전(subscribe 메시지 보낸 클라이언트) = topic delta
+- iOS/Android V2 클라이언트 가이드 작성 (USDT_PHASE1_CLIENT_GUIDE 후속)
+- KRX는 처음부터 topic-only로 Stage 2 진입 (legacy 통합 단계 건너뜀)
+- `/api/rates/usdt-krw` debug/compat 유지 vs 제거 결정 (별도 ADR 또는 본 ADR 후속 amend)
+
+**Phase Z-3 — legacy 제거 (6개월+, 사용자 통계 기반)**:
+
+- 활성 구버전 < 1% 양쪽 플랫폼 도달 + 6개월 경과 시 legacy `rates` 채널 폐기 후보
+- 폐기 결정 시 별도 ADR
+
+### 위험과 완화
+
+- **Phase Z-2 코드 분리 중 회귀 위험**: legacy `rates`에서 USDT 분리 시 운영 앱(테더 탭 없음)에 영향 0이지만, `/api/rates/usdt-krw` 호출자가 있을 수 있음 → 분리 전 traffic 확인 + grace period
+- **topic protocol 도입 비용**: WebSocket subscribe 인프라 + 클라이언트 가이드 + dual-emit + snapshot 분리 — Phase Z-2 작업량 큼 (2-4주)
+- **KRX Stage 2 진입 지연**: topic protocol v1 도입 완료 전까지 KRX 사용자 노출 불가. 5/18 만기 관찰은 Stage 1(topic-only 격리 상태)에서도 가능
+
+### 관련 문서
+
+- [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md): topic 라우팅 + dual-emit 전체 plan (단일 진리 source)
+- [ADR-027](#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안): KRX REST/stale 정책 (topic 채널 기준 적용)
+- [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md): USDT 탭 초기 제안서 (rollout 방식 superseded)
+- [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): 백엔드 도메인 모델 유효 / legacy 통합은 superseded
+- [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md): 데이터 수신 방식은 V2 protocol로 대체 예정
+- [KRX_CANARY.md](KRX_CANARY.md): Stage 2 진입 조건에 topic protocol 의존성 명시
 
 ---
 

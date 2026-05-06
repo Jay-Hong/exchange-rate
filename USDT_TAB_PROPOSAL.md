@@ -1,7 +1,20 @@
 # USDT Tab Proposal
 
-> Status: design locked, ready for implementation
-> Updated: 2026-04-23
+> ⚠️ **Superseded — 역사적 제안서 (2026-04-23 기준)**
+>
+> 이 문서는 USDT 탭 도입 초기 제안서다. 본문에 기재된 rollout 방식(특히 "기존 WebSocket에 usdt-krw 포함")은 **iOS dev/test 단계의 임시 모델**이며, **서비스 출시 계약이 아니다**. 운영 앱(iOS 2026-01-21 출시 / Android 2026-03-13 출시)에는 아직 테더 탭이 없다.
+>
+> 현재 합의된 서비스 계약 (2026-05-06):
+> - USDT 거래소 / KRX 미국달러선물 = **topic-only** (legacy `rates` 배열 미포함)
+> - legacy `rates` = USD/JPY/EUR + Investing/은행 9개로 한정
+> - dual-emit 범위 = 환율 탭 데이터에만 (테더/KRX는 topic만 발사)
+>
+> 단일 진리 source: [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md), [DECISIONS.md ADR-028](DECISIONS.md)
+>
+> 본 문서의 source/asset 도메인 모델 / Decision A~F 제품 방향성은 참고 유효. 데이터 수신 방식/rollout phase는 위 문서 따름.
+>
+> Status: superseded (rollout 방식 폐기, 모델/방향 참고 유효)
+> Updated: 2026-04-23 (rollout); 2026-05-06 (status 갱신)
 > Phase 1 design: [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md)
 
 ## Goal
