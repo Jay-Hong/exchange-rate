@@ -2997,19 +2997,74 @@ PR6d-1 운영 배포 후, 현재 helper(`FHMIF10000000` + `/uapi/domestic-future
 - WARNING / ERROR / status 전이 로그 0건 (Stage 1 + PR6e 운영 안정)
 - 세션 boundary 2회 통과 (5/5 06:00 CM→None, 5/6 15:45 CF→None) 모두 정시 + 깔끔 (PR6e carry-over fix 검증됨)
 
-### PR6d-2에서 추가할 raw frame / fallback metric
+### PR6d-2a 계획 — raw frame metric / status observability
 
-DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2에서는 WebSocket frame 수신 layer에서 다음 metric을 별도로 수집한다.
+DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2a에서는 WebSocket frame 수신 layer의 silence를 먼저 측정한다. 이 단계는 **관측성만 추가**하며, REST fallback 실행 / Redis 변경 / topic publish / Stage 2 노출 / stale 임계값 변경은 하지 않는다.
+
+**목표:**
+
+- 전체 frame silence가 실제로 60초 임계값에 얼마나 근접하는지 측정
+- 체결 frame과 호가 frame을 분리해 야간 저거래량 false stale 위험 검증
+- status 전이와 reconnect 패턴을 수치화해 PR6d-2b fallback orchestration 입력으로 사용
+- Stage 1 invariant 유지 (`latest:index` KRX 0개, 사용자 노출 0)
+
+**비범위 (PR6d-2b 이후):**
+
+- REST fallback 호출 / cooldown orchestration
+- REST fallback dry-run counter (`rest_fallback_call_count`, success/error count)
+- Redis latest / topic publish gating
+- `KRX_REST_FALLBACK_ENABLED=true` 운영 활성
+- stale threshold 변경 (`KRX_STALE_SEC` 조정)
+
+**Metric schema (KisFuturesClient.get_metrics() 후보):**
 
 | Metric | 기준 | 용도 |
 |---|---|---|
+| `status` | `normal` / `reconnecting` / `stale` | 현재 WebSocket 상태 |
+| `contract_code`, `contract_month`, `expires_on` | active contract metadata | 만기/rollover 관찰 |
+| `active_session` | `CF` / `CM` / `null` | 세션별 baseline 분리 |
+| `started_at`, `connected_at` | KST ISO timestamp | lifecycle 추적 |
+| `last_frame_at`, `last_trade_frame_at`, `last_quote_frame_at` | KST ISO timestamp 또는 null | silence 원인 분리 |
 | `last_frame_age_sec` | 전체 frame (`H0CFCNT0`, `H0MFCNT0`, `H0CFASP0`, `H0MFASP0`) | 실제 stale trigger baseline |
 | `last_trade_frame_age_sec` | 체결 frame (`H0CFCNT0`, `H0MFCNT0`) | 체결/가격 변동성 baseline |
 | `last_quote_frame_age_sec` | 호가 frame (`H0CFASP0`, `H0MFASP0`) | WebSocket liveness / 야간 false stale 검증 |
-| `stale_transition_count` | `normal ↔ stale` status 전이 | flap / false stale 감지 |
-| `rest_fallback_call_count` | REST fallback 호출 | fallback 발생 빈도 |
-| `rest_fallback_success_count` | REST fallback 성공 | KIS REST 안정성 |
-| `rest_fallback_error_count` | REST fallback 실패 | 장애율 / retry 정책 검증 |
+| `frame_count_total`, `trade_frame_count`, `quote_frame_count`, `system_frame_count` | frame type별 counter | frames_per_min / 활동량 계산 |
+| `malformed_frame_count`, `unknown_tr_id_count` | parse/unknown guard | provider payload 이상 감지 |
+| `stale_transition_count`, `normal_transition_count`, `reconnecting_transition_count` | `_set_status()` 전이 | flap / reconnect 상태 baseline |
+| `reconnect_attempt_count` | `_run_session` exception path | 연결 안정성 baseline |
+
+**Gap bucket 후보:**
+
+전체 / 체결 / 호가 각각 `<=1s`, `<=2s`, `<=5s`, `<=10s`, `<=30s`, `<=60s`, `>60s` bucket counter를 둔다. boundary는 PR6d-2a 운영 데이터 수집 후 5/8 baseline에서 조정 가능하다.
+
+**Admin endpoint 후보:**
+
+- `GET /admin/api/krx-status` (기존 `verify_admin` dependency 재사용)
+- `scheduler.krx_futures_client.get_metrics()` 반환
+- client 없음/비활성 시 `{enabled, started: false, reason}` 형태로 반환
+
+**Summary log 후보:**
+
+- active session 중에만 60초마다 INFO 1줄
+- logger 후보: 기존 `app.crawlers.krx_kis` 또는 별도 `exchange_rate.krx.metrics` (구현 중 선택)
+- 필드: `session`, `status`, `frames_per_min`, `frame_age`, `trade_age`, `quote_age`, `max_frame_gap`, `stale_transition_count`, `reconnect_attempt_count`
+- 휴장/break 중에는 로그 생략 (노이즈 방지)
+
+**Test matrix:**
+
+- 체결/호가 frame counter가 분리 증가
+- status transition count가 `_set_status()` 전이 때만 증가
+- gap bucket assignment (`5s` gap → `<=10s` bucket 등)
+- `get_metrics()` 반환 shape 및 age 계산
+- admin endpoint: auth 적용 + client 없음 / client 있음 분기
+
+**운영 검증 기준:**
+
+- 배포 후 KRX WebSocket 재연결 정상 (`connected`, `subscribed`, status 이상 전이 없음)
+- `/admin/api/krx-status`에서 active session 중 `last_frame_age_sec`가 낮게 유지
+- 60초 summary log가 active session 중에만 출력
+- Stage 1 invariant 유지 (`latest:index` KRX 0개)
+- PR6d-2b 진입 전 최소 24~48h raw frame metric 축적
 
 ### Stage 1에서 이미 확인된 운영 신호
 
