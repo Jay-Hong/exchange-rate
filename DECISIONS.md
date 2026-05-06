@@ -2947,6 +2947,17 @@ PR6d-1 운영 배포 후, 현재 helper(`FHMIF10000000` + `/uapi/domestic-future
 
 따라서 PR6d-2 stale orchestration은 **상품선물용 REST endpoint/TR 재확정 전에는 REST fallback을 전제로 진행하지 않는다**. endpoint를 찾지 못하면 WebSocket stale 시 topic publish 제외 + reconnect 중심 정책으로 ADR-027을 재조정한다.
 
+**추가 endpoint 조사 (2026-05-06, 공식 KIS 샘플 + 운영 smoke):**
+
+- KIS 공식 API portal의 `[국내선물옵션] 기본시세` 목록은 선물옵션 시세/시세호가/기간별시세/분봉조회/전광판 계열이고, `[국내선물옵션] 실시간시세`에만 `상품선물 실시간호가` / `상품선물 실시간체결가`가 별도 존재.
+- KIS 공식 GitHub 샘플 tree 기준 `commodity_futures_realtime_conclusion` / `commodity_futures_realtime_quote`는 WebSocket 샘플만 존재. 상품선물 REST current quote 샘플은 확인되지 않음.
+- `inquire-asking-price` (`FHMIF10010000`) + `FID_COND_MRKT_DIV_CODE=F` + `A75605` 운영 smoke 결과: `rt_cd=0`이지만 `output1={}`, `output2={}`.
+- `inquire-time-fuopchartprice` (`FHKIF03020200`) + `A75605` 운영 smoke 결과: `rt_cd=0`이지만 `output1={}`, `output2=[]`.
+- `inquire-daily-fuopchartprice` (`FHKIF03020100`) + `A75605` 운영 smoke 결과: `rt_cd=0`이지만 `output1={}`, `output2=[]`.
+- `display-board-futures` (`FHPIF05030200`)는 `MKI`/empty 조건에서 지수선물 board만 반환했고, `A75605` / `미국달러` row는 없음.
+
+현재까지 확인된 공식/운영 근거로는 KIS REST 기반 USD futures snapshot 경로가 없다. PR6d-2 기본 방향은 **REST fallback 없는 WebSocket primary + stale 시 topic publish 제외 + reconnect/metric 중심**으로 재검토한다. 상품선물 REST endpoint가 추후 공식 문서/지원 답변으로 확인되면 별도 PR6d-1c에서 helper를 재활성화한다.
+
 ### Tentative baseline (5/4 23:46 ~ 5/6 19:13 KST, 약 43.4h)
 
 > ⚠️ **데이터 caveat**: (1) 2026-05-06은 평소보다 **환율 변동폭이 큰 날** (일중 1469 → 1444.6, -24 KRW 하락 중) — DB inter-row gap이 평소보다 짧게 측정될 수 있음. (2) 2026-05-05 어린이날 휴장 포함 → 평일 baseline으로는 제한적. (3) 아래 DB row gap은 **stale 임계값 근거가 아님** — 가격 변동 없으면 INSERT 0건이라 자연 max gap 길어짐. **stale 임계값의 진짜 baseline은 PR6d-2 raw frame metric에서 수집 예정**. 5/7~5/8 평일 + 5/9~5/10 주말 데이터 추가 후 재검토.
