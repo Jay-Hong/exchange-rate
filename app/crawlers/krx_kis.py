@@ -365,8 +365,10 @@ class KisAccessTokenManager:
 
 KIS_REST_QUOTE_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
 
-# tr_id: KIS 예제 inquire_price.py 기본값 (지수선물용)이지만 미국달러선물에도
-# 동일 endpoint 사용. Stage 2 진입 전 운영 검증 필요.
+# KIS 공식 inquire_price.py 지수선물 샘플값.
+# 2026-05-06 운영 smoke에서 A75605(미국달러선물)를 이 endpoint/TR로 조회하면
+# USD futures 가격이 아니라 KOSPI/KOSPI200 지수 출력(bstp_nmix_prpr)만 반환됐다.
+# PR6d-2 fallback orchestration 전에 상품선물용 REST endpoint/TR 재확정 필요.
 KIS_REST_QUOTE_TR_ID = "FHMIF10000000"
 
 
@@ -376,9 +378,13 @@ async def fetch_kis_futures_quote(
     token_manager: KisAccessTokenManager,
     timeout: float = 5.0,
 ) -> Optional[Dict[str, Any]]:
-    """KIS REST inquire-price 호출로 KRX 미국달러선물 snapshot 가져오기.
+    """KIS REST inquire-price helper.
 
     PR6d-1: helper만 제공. stale gating / cooldown / 결과 처리는 PR6d-2.
+    2026-05-06 운영 smoke 기준, 현재 path/TR은 access_token과 호출 경로는
+    정상이나 A75605 USD futures price를 반환하지 않는다. 지수 출력만 오는
+    응답은 price field 부재로 None 처리하며, 상품선물용 REST endpoint/TR을
+    찾기 전에는 fallback source로 활성화하지 않는다.
 
     Args:
         contract: ContractInfo (short_code 사용 — 예: A75605)

@@ -1094,6 +1094,35 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertTrue(any("futs_prpr/prpr 필드 부재" in m for m in cm.output))
 
+    async def test_index_market_response_is_not_usd_futures_quote(self):
+        """운영 smoke 형태의 지수 출력(bstp_nmix_prpr)은 KRX USD futures로 쓰지 않는다."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "msg_cd": "MCA00000",
+            "msg1": "정상처리되었습니다.",
+            "output1": {},
+            "output2": {
+                "bstp_cls_code": "0001",
+                "hts_kor_isnm": "종합",
+                "bstp_nmix_prpr": "7384.56",
+            },
+            "output3": {
+                "bstp_cls_code": "2001",
+                "hts_kor_isnm": "KOSPI200",
+                "bstp_nmix_prpr": "1129.63",
+            },
+        }
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
+             self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(any("futs_prpr/prpr 필드 부재" in m for m in cm.output))
+        self.assertTrue(any("bstp_nmix_prpr" in m for m in cm.output))
+
     async def test_uses_correct_endpoint_and_headers(self):
         """endpoint / Bearer token / appkey / tr_id / params 올바르게 전달."""
         mock_response = MagicMock()
