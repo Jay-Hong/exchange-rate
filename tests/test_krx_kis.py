@@ -27,6 +27,7 @@ from app.crawlers.krx_kis import (
     CONTRACT_MONTH_STATIC,
     KIS_PROD_HOST,
     KIS_REST_QUOTE_PATH,
+    KIS_REST_QUOTE_MARKET_DIV_CODE,
     KIS_REST_QUOTE_TR_ID,
     KisAccessTokenManager,
     KisApprovalManager,
@@ -1022,7 +1023,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         self.token_mgr._app_secret = "test_secret"
 
     async def test_normal_returns_normalized_payload(self):
-        """rt_cd=0 + output 정상 → normalized dict 반환."""
+        """rt_cd=0 + output 정상 → normalized dict 반환 (CF market code)."""
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "rt_cd": "0",
@@ -1036,7 +1037,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         mock_response.raise_for_status = MagicMock()
         with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response):
             result = await fetch_kis_futures_quote(
-                contract=self.contract, token_manager=self.token_mgr,
+                contract=self.contract, token_manager=self.token_mgr, session="CF",
             )
         self.assertIsNotNone(result)
         self.assertEqual(result["source"], "krx")
@@ -1044,9 +1045,59 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["contract_code"], "A75605")
         self.assertEqual(result["contract_month"], "202605")
         self.assertEqual(result["expires_on"], "2026-05-18")
+        self.assertEqual(result["session"], "CF")
+        self.assertEqual(result["market_div_code"], "CF")
         # raw price 그대로 (호출자가 Decimal 정규화)
         self.assertEqual(result["price"], "1457.40007441")
         self.assertIn("received_at", result)
+
+    async def test_cm_session_uses_cm_market_code(self):
+        """야간세션(CM)은 FID_COND_MRKT_DIV_CODE=CM으로 조회."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "output1": {
+                "futs_prpr": "1447.70",
+                "hts_kor_isnm": "미국달러 F 202605",
+            },
+        }
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response) as mock_get:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr, session="CM",
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["price"], "1447.70")
+        self.assertEqual(result["session"], "CM")
+        self.assertEqual(result["market_div_code"], "CM")
+        self.assertEqual(mock_get.call_args.kwargs["params"]["FID_COND_MRKT_DIV_CODE"], "CM")
+
+    async def test_none_session_uses_active_session(self):
+        """session 미지정 시 현재 active session 판정으로 market code 선택."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"rt_cd": "0", "output1": {"futs_prpr": "1450.0"}}
+        mock_response.raise_for_status = MagicMock()
+        with patch("app.crawlers.krx_kis.get_active_session", return_value="CM"), \
+             patch("app.crawlers.krx_kis.requests.get", return_value=mock_response) as mock_get:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["session"], "CM")
+        self.assertEqual(mock_get.call_args.kwargs["params"]["FID_COND_MRKT_DIV_CODE"], "CM")
+
+    async def test_no_active_session_returns_none_without_token_or_http(self):
+        """휴장/break 중에는 REST snapshot을 호출하지 않는다."""
+        with patch("app.crawlers.krx_kis.get_active_session", return_value=None), \
+             patch("app.crawlers.krx_kis.requests.get") as mock_get, \
+             self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
+            result = await fetch_kis_futures_quote(
+                contract=self.contract, token_manager=self.token_mgr,
+            )
+        self.assertIsNone(result)
+        self.token_mgr.get_access_token.assert_not_awaited()
+        mock_get.assert_not_called()
+        self.assertTrue(any("active session 부재" in m for m in cm.output))
 
     async def test_rt_cd_error_returns_none(self):
         """rt_cd != 0 → None + warning 로그."""
@@ -1060,7 +1111,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
              self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
             result = await fetch_kis_futures_quote(
-                contract=self.contract, token_manager=self.token_mgr,
+                contract=self.contract, token_manager=self.token_mgr, session="CF",
             )
         self.assertIsNone(result)
         self.assertTrue(any("inquire-price rt_cd=1" in m for m in cm.output))
@@ -1073,7 +1124,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
              self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
             result = await fetch_kis_futures_quote(
-                contract=self.contract, token_manager=self.token_mgr,
+                contract=self.contract, token_manager=self.token_mgr, session="CF",
             )
         self.assertIsNone(result)
         self.assertTrue(any("output dict 부재" in m for m in cm.output))
@@ -1089,7 +1140,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
              self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
             result = await fetch_kis_futures_quote(
-                contract=self.contract, token_manager=self.token_mgr,
+                contract=self.contract, token_manager=self.token_mgr, session="CF",
             )
         self.assertIsNone(result)
         self.assertTrue(any("futs_prpr/prpr 필드 부재" in m for m in cm.output))
@@ -1117,7 +1168,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response), \
              self.assertLogs("app.crawlers.krx_kis", level="WARNING") as cm:
             result = await fetch_kis_futures_quote(
-                contract=self.contract, token_manager=self.token_mgr,
+                contract=self.contract, token_manager=self.token_mgr, session="CF",
             )
         self.assertIsNone(result)
         self.assertTrue(any("futs_prpr/prpr 필드 부재" in m for m in cm.output))
@@ -1133,7 +1184,7 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         mock_response.raise_for_status = MagicMock()
         with patch("app.crawlers.krx_kis.requests.get", return_value=mock_response) as mock_get:
             await fetch_kis_futures_quote(
-                contract=self.contract, token_manager=self.token_mgr,
+                contract=self.contract, token_manager=self.token_mgr, session="CF",
             )
         mock_get.assert_called_once()
         call_kwargs = mock_get.call_args.kwargs
@@ -1145,10 +1196,11 @@ class TestFetchKisFuturesQuote(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["appkey"], "test_key")
         self.assertEqual(headers["appsecret"], "test_secret")
         self.assertEqual(headers["tr_id"], KIS_REST_QUOTE_TR_ID)
-        # params: FID_INPUT_ISCD = contract.short_code
+        # params: 상품선물 정규세션 market code + contract.short_code
         params = call_kwargs["params"]
-        self.assertEqual(params["FID_COND_MRKT_DIV_CODE"], "F")
+        self.assertEqual(params["FID_COND_MRKT_DIV_CODE"], "CF")
         self.assertEqual(params["FID_INPUT_ISCD"], "A75605")
+        self.assertEqual(KIS_REST_QUOTE_MARKET_DIV_CODE, {"CF": "CF", "CM": "CM"})
 
 
 if __name__ == "__main__":

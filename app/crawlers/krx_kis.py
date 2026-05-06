@@ -35,7 +35,7 @@ import time
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
 import requests
@@ -365,30 +365,34 @@ class KisAccessTokenManager:
 
 KIS_REST_QUOTE_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
 
-# KIS 공식 inquire_price.py 지수선물 샘플값.
-# 2026-05-06 운영 smoke에서 A75605(미국달러선물)를 이 endpoint/TR로 조회하면
-# USD futures 가격이 아니라 KOSPI/KOSPI200 지수 출력(bstp_nmix_prpr)만 반환됐다.
-# PR6d-2 fallback orchestration 전에 상품선물용 REST endpoint/TR 재확정 필요.
+# KIS 공식 inquire_price.py는 지수선물 샘플(FID_COND_MRKT_DIV_CODE=F)만
+# 보여주지만, 2026-05-06 운영 smoke에서 상품선물 market code(CF/CM)를
+# 쓰면 A75605 미국달러선물 output1.futs_prpr가 정상 반환됨을 확인했다.
 KIS_REST_QUOTE_TR_ID = "FHMIF10000000"
+KIS_REST_QUOTE_MARKET_DIV_CODE: Dict[str, str] = {
+    "CF": "CF",  # 상품선물 정규세션
+    "CM": "CM",  # 상품선물 야간세션
+}
 
 
 async def fetch_kis_futures_quote(
     *,
     contract: ContractInfo,
     token_manager: KisAccessTokenManager,
+    session: Optional[Literal["CF", "CM"]] = None,
     timeout: float = 5.0,
 ) -> Optional[Dict[str, Any]]:
-    """KIS REST inquire-price helper.
+    """KIS REST inquire-price helper for KRX USD futures.
 
     PR6d-1: helper만 제공. stale gating / cooldown / 결과 처리는 PR6d-2.
-    2026-05-06 운영 smoke 기준, 현재 path/TR은 access_token과 호출 경로는
-    정상이나 A75605 USD futures price를 반환하지 않는다. 지수 출력만 오는
-    응답은 price field 부재로 None 처리하며, 상품선물용 REST endpoint/TR을
-    찾기 전에는 fallback source로 활성화하지 않는다.
+    2026-05-06 운영 smoke 기준, path/TR은 지수선물 샘플과 동일하지만
+    FID_COND_MRKT_DIV_CODE를 CF/CM으로 분기해야 A75605 USD futures price가
+    output1.futs_prpr로 반환된다.
 
     Args:
         contract: ContractInfo (short_code 사용 — 예: A75605)
         token_manager: 발급/캐시된 access_token 제공
+        session: "CF" 또는 "CM". None이면 현재 KST 기준 active session 자동 판정
         timeout: HTTP 요청 timeout (초). 기본 5초
 
     Returns:
@@ -400,6 +404,8 @@ async def fetch_kis_futures_quote(
                 "contract_month": "202605",
                 "expires_on": "2026-05-18",
                 "price": "1457.4",  # str (raw KIS payload, 호출자가 정규화)
+                "session": "CM",
+                "market_div_code": "CM",
                 "received_at": "2026-05-06T10:30:00+09:00",
                 "raw_rt_cd": "0",
             }
@@ -415,6 +421,13 @@ async def fetch_kis_futures_quote(
         async wrapper지만 requests는 sync. asyncio.to_thread로 실행하므로
         이벤트 루프 블로킹 없음 (KisApprovalManager._issue_new와 동일 패턴).
     """
+    if session is None:
+        session = get_active_session(datetime.now(KST))
+    if session not in KIS_REST_QUOTE_MARKET_DIV_CODE:
+        logger.warning("[kis_rest] active session 부재 — quote snapshot skip")
+        return None
+
+    market_div_code = KIS_REST_QUOTE_MARKET_DIV_CODE[session]
     token = await token_manager.get_access_token()
 
     headers = {
@@ -425,7 +438,7 @@ async def fetch_kis_futures_quote(
         "tr_id": KIS_REST_QUOTE_TR_ID,
     }
     params = {
-        "FID_COND_MRKT_DIV_CODE": "F",
+        "FID_COND_MRKT_DIV_CODE": market_div_code,
         "FID_INPUT_ISCD": contract.short_code,
     }
     url = f"{KIS_PROD_HOST}{KIS_REST_QUOTE_PATH}"
@@ -471,6 +484,8 @@ async def fetch_kis_futures_quote(
         "contract_month": contract.contract_month,
         "expires_on": contract.expiry_date.isoformat(),
         "price": str(price),  # raw KIS string. 호출자가 Decimal 정규화
+        "session": session,
+        "market_div_code": market_div_code,
         "received_at": datetime.now(KST).isoformat(),
         "raw_rt_cd": rt_cd,
     }

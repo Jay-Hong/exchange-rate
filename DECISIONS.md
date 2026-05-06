@@ -2921,7 +2921,7 @@ Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket �
 | **stale 지속 시 REST 재호출 주기** | 호출 후 재호출 X / cooldown마다 1회 / 적응형 | **cooldown마다 1회** 후보 |
 | REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | DB 저장까지 수행해 provenance 유지. topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
 | REST 실패 시 정책 | KRX topic publish 제외 / 마지막 값 유지 / stale status 동반 | Stage 2 topic에서는 KRX publish 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
-| **REST quote endpoint/TR** | KIS 상품선물 REST endpoint 재조사 / REST 없이 WebSocket stale 제외 정책 | **unresolved**. 2026-05-06 smoke에서 `FHMIF10000000` + `/inquire-price`는 A75605 USD futures 가격이 아니라 지수 출력 반환 |
+| **REST quote endpoint/TR** | KIS 상품선물 REST endpoint 재조사 / REST 없이 WebSocket stale 제외 정책 | **resolved**. `FHMIF10000000` + `/inquire-price` 유지, `FID_COND_MRKT_DIV_CODE`를 세션별 `CF`/`CM`으로 분기해야 A75605 USD futures `output1.futs_prpr` 반환 |
 | 만기일 rollover | cron / session boundary resolve / 수동 restart | 2026-05-18 관찰 후 결정. 현재 자동 contract 교체 없음 |
 
 ### 초기 정책값 (PR6d-1 진입 시 env 후보)
@@ -2945,7 +2945,7 @@ PR6d-1 운영 배포 후, 현재 helper(`FHMIF10000000` + `/uapi/domestic-future
 | 실제 응답 | `output2.bstp_nmix_prpr=7384.56` / `output3.bstp_nmix_prpr=1129.63` 등 KOSPI/KOSPI200 지수 출력 |
 | 판단 | access token/cache 경로는 검증 완료. quote endpoint/TR은 지수선물 샘플 경로이며, A75605 USD futures snapshot source로는 미검증이 아니라 현재 smoke 기준 부적합 |
 
-따라서 PR6d-2 stale orchestration은 **상품선물용 REST endpoint/TR 재확정 전에는 REST fallback을 전제로 진행하지 않는다**. endpoint를 찾지 못하면 WebSocket stale 시 topic publish 제외 + reconnect 중심 정책으로 ADR-027을 재조정한다.
+따라서 단순 `FID_COND_MRKT_DIV_CODE=F`는 USD futures fallback에 사용할 수 없다.
 
 **추가 endpoint 조사 (2026-05-06, 공식 KIS 샘플 + 운영 smoke):**
 
@@ -2955,8 +2955,12 @@ PR6d-1 운영 배포 후, 현재 helper(`FHMIF10000000` + `/uapi/domestic-future
 - `inquire-time-fuopchartprice` (`FHKIF03020200`) + `A75605` 운영 smoke 결과: `rt_cd=0`이지만 `output1={}`, `output2=[]`.
 - `inquire-daily-fuopchartprice` (`FHKIF03020100`) + `A75605` 운영 smoke 결과: `rt_cd=0`이지만 `output1={}`, `output2=[]`.
 - `display-board-futures` (`FHPIF05030200`)는 `MKI`/empty 조건에서 지수선물 board만 반환했고, `A75605` / `미국달러` row는 없음.
+- 이후 같은 `inquire-price` endpoint/TR에서 `FID_COND_MRKT_DIV_CODE`만 세션별 상품선물 코드로 바꿔 운영 smoke:
+  - `CF` (정규 상품선물): `output1.futs_prpr=1453.900`, `hts_kor_isnm='미국달러 F 202605'`
+  - `CM` (야간 상품선물): `output1.futs_prpr=1447.70`, `hts_kor_isnm='미국달러 F 202605'`
+  - `JF` (주식선물 후보): USD futures price 부재
 
-현재까지 확인된 공식/운영 근거로는 KIS REST 기반 USD futures snapshot 경로가 없다. PR6d-2 기본 방향은 **REST fallback 없는 WebSocket primary + stale 시 topic publish 제외 + reconnect/metric 중심**으로 재검토한다. 상품선물 REST endpoint가 추후 공식 문서/지원 답변으로 확인되면 별도 PR6d-1c에서 helper를 재활성화한다.
+결론: KIS REST 기반 USD futures snapshot 경로는 **`/uapi/domestic-futureoption/v1/quotations/inquire-price` + `tr_id=FHMIF10000000` + 세션별 `FID_COND_MRKT_DIV_CODE=CF/CM`**이다. PR6d-2 fallback orchestration은 이 session-aware mapping을 전제로 진행 가능하다. 휴장/break 중에는 active session이 없으므로 REST snapshot도 호출하지 않는다.
 
 ### Tentative baseline (5/4 23:46 ~ 5/6 19:13 KST, 약 43.4h)
 
@@ -3022,7 +3026,7 @@ DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2에서는 
 - 2026-05-18 만기일 11:30 전후 WebSocket 끊김/무응답/재구독 패턴 관찰
 - REST snapshot helper 구현 및 KIS REST token cache 정책 확정
   - 2026-05-06 smoke 기준 access_token/cache는 검증 완료
-  - USD futures quote endpoint/TR은 unresolved (`FHMIF10000000` + `/inquire-price`는 A75605 가격이 아니라 지수 출력 반환)
+  - USD futures quote endpoint/TR은 resolved: `FHMIF10000000` + `/inquire-price` + `FID_COND_MRKT_DIV_CODE=CF/CM` session-aware 분기
 - KRX stale 시 `latest:index` 제외 또는 status 표현 정책 확정
 - iOS/Android가 unknown `source="krx", asset="usd-krw-futures"`를 안전하게 처리하는지 확인
 
