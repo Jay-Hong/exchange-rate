@@ -3067,6 +3067,7 @@ DB row gap은 stale 임계값의 직접 근거가 아니므로, PR6d-2a에서는
 - PR6d-2b 진입 전 최소 24~48h raw frame metric 축적
 - admin endpoint 호출 분기(enabled=false / client=None / client present)는 운영 배포 후 admin 페이지 실호출로 검증 (단위 테스트는 `main.py`의 `firebase_admin` 의존 + lifespan side effect로 skip 처리)
 - summary log baseline 해석 caveat: **active session 진입 직후 첫 summary log의 `frames_per_min`은 직전 60초 전체 기준**이라 active 상태였던 시간만의 rate가 아닐 수 있다. 예: 휴장 50초 + active 10초이면 active만의 rate는 더 높음. 첫 summary log는 caveat 또는 무시. 24~48h 누적 데이터에서는 무시 가능 수준 (Codex 외부 검토 2026-05-06)
+- **active-session gap metric 해석 caveat (2026-05-07 fix)**: 5/7 운영 baseline에서 `max_*_gap_sec`이 9000초대(세션 break 2.5h)로 잡히는 오염 발견. 이 fix 이전(`5/7 fix commit` 이전) 데이터는 lifetime metric이라 session break가 섞임 → baseline 해석 시 무의미. **fix 이후부터 `max_*_gap_sec` / `gap_buckets` / `last_*_at`는 current active session 기준으로만 의미**. 새 active session subscribe 직후 + 휴장 진입 시 reset됨. lifetime counter(`frame_count_total`, `status_transition_count` 등)는 reset되지 않고 그대로 누적.
 
 ### 658ea27 구현 vs PR6d-2a 계획 차이 (2026-05-06, follow-up fix 예정)
 

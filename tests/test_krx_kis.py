@@ -1425,5 +1425,185 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bucket_total, 1)
 
 
+# ---------------------------------------------------------------------------
+# PR6d-2a follow-up (2026-05-07) — active-session gap metric reset
+# session break(예: CM 06:00 종료 → CF 08:30 진입, 2.5h)가 max_*_gap_sec에
+# 9000초대 오염값으로 잡히는 문제 fix. lifetime counter는 유지.
+# ---------------------------------------------------------------------------
+
+class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
+    """_reset_active_session_gap_metrics() — boundary 오염 제거 + PR6e 호환."""
+
+    def setUp(self):
+        self.client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager),
+        )
+
+    def test_session_reset_clears_active_metrics(self):
+        """reset 후 max_*_gap=0 / last_*_at=None / buckets 초기화."""
+        # 오염값 시뮬레이션
+        self.client._last_tick_at = time.time()
+        self.client._last_trade_frame_at = time.time() - 100
+        self.client._last_quote_frame_at = time.time() - 50
+        self.client._max_frame_gap_sec = 9001.0  # 세션 break 오염값
+        self.client._max_trade_gap_sec = 9899.0
+        self.client._max_quote_gap_sec = 9001.0
+        self.client._gap_buckets_total = {"<=1s": 5, "<=2s": 0, "<=5s": 0,
+                                          "<=10s": 0, "<=30s": 0, "<=60s": 0,
+                                          ">60s": 3}
+
+        self.client._reset_active_session_gap_metrics()
+
+        # 모두 reset
+        self.assertIsNone(self.client._last_tick_at)
+        self.assertIsNone(self.client._last_trade_frame_at)
+        self.assertIsNone(self.client._last_quote_frame_at)
+        self.assertEqual(self.client._max_frame_gap_sec, 0.0)
+        self.assertEqual(self.client._max_trade_gap_sec, 0.0)
+        self.assertEqual(self.client._max_quote_gap_sec, 0.0)
+        # buckets 초기화 — 모두 0
+        for layer in (self.client._gap_buckets_total,
+                      self.client._gap_buckets_trade,
+                      self.client._gap_buckets_quote):
+            self.assertEqual(sum(layer.values()), 0)
+
+    def test_session_reset_preserves_lifetime_counters(self):
+        """lifetime counters는 reset 안 됨 (frame_total, status_transitions 등)."""
+        # 누적 카운터 시뮬레이션
+        self.client._frame_count_total = 12345
+        self.client._trade_frame_count = 678
+        self.client._quote_frame_count = 11000
+        self.client._system_frame_count = 100
+        self.client._malformed_frame_count = 2
+        self.client._unknown_tr_id_count = 1
+        self.client._status_transition_count = {
+            "normal": 5, "reconnecting": 3, "stale": 2,
+        }
+        self.client._reconnect_attempt_count = 4
+
+        self.client._reset_active_session_gap_metrics()
+
+        # lifetime은 그대로
+        self.assertEqual(self.client._frame_count_total, 12345)
+        self.assertEqual(self.client._trade_frame_count, 678)
+        self.assertEqual(self.client._quote_frame_count, 11000)
+        self.assertEqual(self.client._system_frame_count, 100)
+        self.assertEqual(self.client._malformed_frame_count, 2)
+        self.assertEqual(self.client._unknown_tr_id_count, 1)
+        self.assertEqual(self.client._status_transition_count["stale"], 2)
+        self.assertEqual(self.client._status_transition_count["normal"], 5)
+        self.assertEqual(self.client._reconnect_attempt_count, 4)
+
+    async def test_subscribe_resets_then_pr6e_grace_set(self):
+        """⚠️ 핵심 회귀 방지: subscribe 후 reset → _last_tick_at = time.time() 순서.
+
+        만약 reset만 하고 grace 설정 안 하면 PR6e carry-over fix가 깨진다
+        (_last_tick_at=None은 falsy → stale check skip → 60s grace 의미 없음).
+        실제 _connect_and_listen 흐름이 이 순서를 지키는지 검증.
+        """
+        # ancient _last_tick_at 시뮬레이션 (이전 세션 carry-over)
+        ancient = time.time() - 26 * 3600
+        self.client._last_tick_at = ancient
+        self.client._max_frame_gap_sec = 9001.0  # 오염값
+
+        client = self.client
+        client._stop.set()  # subscribe만 하고 즉시 빠져나오게
+
+        recv_calls = [0]
+
+        async def recv_side_effect():
+            recv_calls[0] += 1
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=recv_side_effect)
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.crawlers.krx_kis.websockets.connect", return_value=mock_connect), \
+             patch("app.crawlers.krx_kis.get_active_session", return_value="CM"), \
+             self.assertLogs("app.crawlers.krx_kis", level="INFO"):
+            await client._connect_and_listen("CM", "test_key")
+
+        # reset 후 _last_tick_at은 time.time()으로 grace 설정됨 (None 아님)
+        self.assertIsNotNone(client._last_tick_at, "PR6e grace가 깨졌음")
+        self.assertGreater(
+            client._last_tick_at, ancient + 25 * 3600,
+            "ancient carry-over가 reset되지 않음",
+        )
+        self.assertLess(time.time() - client._last_tick_at, 5)
+        # max_gap 오염값 제거됨
+        self.assertEqual(client._max_frame_gap_sec, 0.0)
+
+    async def test_session_boundary_clears_gap_for_next_session(self):
+        """첫 session에서 9000s gap이 다음 session max에 남지 않음 (시뮬레이션)."""
+        # 첫 session 활동 시뮬레이션 — 큰 gap 누적
+        self.client._max_frame_gap_sec = 9001.0
+        self.client._max_trade_gap_sec = 9899.0
+        self.client._max_quote_gap_sec = 9001.0
+        self.client._gap_buckets_total[">60s"] = 5  # 오염값 bucket
+
+        # session boundary 진입 (휴장) → reset
+        self.client._reset_active_session_gap_metrics()
+
+        # 다음 session 시뮬레이션 — 5초 gap 한 번
+        self.client._last_tick_at = time.time() - 5
+        cnt_raw = "^".join([
+            "A75605", "180332", "0", "0", "0", "1468.0",
+        ] + ["0"] * 43)
+        await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
+
+        # 다음 session max는 5s 근처 (9000s 잔존 X)
+        self.assertGreater(self.client._max_frame_gap_sec, 4.5)
+        self.assertLess(self.client._max_frame_gap_sec, 6.0)
+        # >60s bucket은 reset 후 0이어야 함 (5s gap이라 <=5s 또는 <=10s)
+        self.assertEqual(self.client._gap_buckets_total[">60s"], 0)
+
+    async def test_no_active_session_resets_metrics(self):
+        """start() 휴장 분기 실제 경로 검증 — get_active_session=None 시 reset 호출.
+
+        Codex 외부 검토 정정 (2026-05-07): helper 직접 호출은 회귀 방지 0
+        (start() 분기에서 reset 호출이 빠져도 통과). 실제 start() 흐름에서
+        휴장 분기 진입 시 reset이 호출되는지 검증해야 회귀 방지.
+
+        구현: get_active_session patch + asyncio.sleep 빠르게 + _stop으로
+        한 iteration 후 종료.
+        """
+        # 오염값 + 카운터 누적 (휴장 진입 전 상태 시뮬레이션)
+        self.client._max_frame_gap_sec = 9001.0
+        self.client._max_trade_gap_sec = 9899.0
+        self.client._frame_count_total = 100
+
+        original_sleep = asyncio.sleep
+
+        async def fast_sleep(t):
+            # start()의 30s sleep을 짧게, summary_log_loop의 60s도 짧게
+            await original_sleep(0.05 if t in (30, 60) else t)
+
+        async def stop_after_iteration():
+            # 첫 iteration 후 stop 신호
+            await original_sleep(0.15)
+            self.client._stop.set()
+
+        with patch("app.crawlers.krx_kis.get_active_session", return_value=None), \
+             patch("app.crawlers.krx_kis.asyncio.sleep", side_effect=fast_sleep):
+            stop_task = asyncio.create_task(stop_after_iteration())
+            await self.client.start()
+            await stop_task
+
+        # 휴장 분기에서 reset 호출됨 → max_gap 0
+        self.assertEqual(
+            self.client._max_frame_gap_sec, 0.0,
+            "start() 휴장 분기에서 _reset_active_session_gap_metrics() 호출 안 됨",
+        )
+        self.assertEqual(self.client._max_trade_gap_sec, 0.0)
+        # lifetime은 유지
+        self.assertEqual(self.client._frame_count_total, 100)
+        # active_session도 None으로 정리됨
+        self.assertIsNone(self.client._active_session)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

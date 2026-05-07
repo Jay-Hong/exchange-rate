@@ -602,6 +602,37 @@ class KisFuturesClient:
             return None
         return datetime.fromtimestamp(epoch, tz=KST).isoformat()
 
+    def _reset_active_session_gap_metrics(self) -> None:
+        """새 active session 시작 / 휴장 진입 시 active-session gap metric reset.
+
+        2026-05-07 외부 검토(Codex)에서 발견된 metric 오염 fix:
+        세션 break(예: CM 06:00 종료 → CF 08:30 진입, 2.5h)가
+        `max_*_gap_sec`에 9000초대 오염값으로 잡힘 → baseline 무의미.
+
+        reset 대상 (active session 기준 metric만):
+        - `_last_tick_at`, `_last_trade_frame_at`, `_last_quote_frame_at`
+        - `_max_frame_gap_sec`, `_max_trade_gap_sec`, `_max_quote_gap_sec`
+        - `_gap_buckets_total`, `_gap_buckets_trade`, `_gap_buckets_quote`
+
+        유지 대상 (lifetime counters):
+        - `_frame_count_total`, `_trade_frame_count`, `_quote_frame_count`
+        - `_system_frame_count`, `_malformed_frame_count`, `_unknown_tr_id_count`
+        - `_status_transition_count`, `_reconnect_attempt_count`
+
+        ⚠️ 주의 (Codex 외부 검토): `_last_tick_at = None`은 PR6e carry-over
+        fix(60s grace)를 깨뜨린다. 호출자는 reset 직후 반드시
+        `_last_tick_at = time.time()`으로 grace start를 설정해야 한다.
+        """
+        self._last_tick_at = None
+        self._last_trade_frame_at = None
+        self._last_quote_frame_at = None
+        self._max_frame_gap_sec = 0.0
+        self._max_trade_gap_sec = 0.0
+        self._max_quote_gap_sec = 0.0
+        self._gap_buckets_total = self._init_gap_buckets()
+        self._gap_buckets_trade = self._init_gap_buckets()
+        self._gap_buckets_quote = self._init_gap_buckets()
+
     def get_metrics(self) -> Dict[str, Any]:
         """현재 metric state snapshot (PR6d-2a + follow-up fix, ADR-027).
 
@@ -706,6 +737,9 @@ class KisFuturesClient:
                     logger.debug("[kis_ws] no active session, sleep 30s")
                     self._set_status("normal")  # 휴장은 stale 아님
                     self._active_session = None  # PR6d-2a — 휴장 metric 반영
+                    # PR6d-2a follow-up — 휴장 진입 시 active-session gap
+                    # metric reset. break 시간이 다음 session에 섞이지 않게 함.
+                    self._reset_active_session_gap_metrics()
                     await asyncio.sleep(30)
                     continue
                 await self._run_session(session)
@@ -822,6 +856,13 @@ class KisFuturesClient:
             for tr_id in SESSION_TR_MAP[session]:
                 await ws.send(self._sub_message(approval_key, tr_id, tr_key))
                 logger.info("[kis_ws] subscribed tr_id=%s key=%s", tr_id, tr_key)
+
+            # PR6d-2a follow-up (2026-05-07) — active-session gap metric reset.
+            # 세션 break 오염값(예: max_*_gap_sec=9000s)이 다음 active session
+            # baseline에 섞이지 않도록 reset. lifetime counters는 유지.
+            # ⚠️ 순서 중요: reset → _last_tick_at = time.time() (PR6e grace
+            # 보존). reset만 하면 _last_tick_at=None이라 carry-over fix 깨짐.
+            self._reset_active_session_gap_metrics()
 
             # PR6e — 새 WebSocket 세션 관찰 시작점. 이전 세션 마지막 tick의
             # _last_tick_at carry-over로 인한 즉시 stale 전이 차단 (60초 grace).

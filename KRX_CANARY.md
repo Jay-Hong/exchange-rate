@@ -239,6 +239,8 @@ while true; do
 done
 ```
 
+> ⚠️ **active-session gap metric 해석 caveat (2026-05-07 fix)**: `max_*_gap_sec` / `gap_buckets` / `last_*_at`는 **current active session 기준**으로만 의미를 갖는다. 5/7 fix commit 이전 데이터에는 세션 break(2.5h~)가 섞여 9000초대 오염값으로 잡혔다. fix 이후 새 active session subscribe 직후 + 휴장 진입 시 reset되어 깨끗한 baseline. lifetime counter(`frame_count_total`, `status_transition_count`, `reconnect_attempt_count`)는 reset되지 않고 그대로 누적되므로 baseline 해석 시 분리해 본다.
+
 ---
 
 ## 5/18 만기일 특별 관찰 (현재 자동 rollover 미구현)
