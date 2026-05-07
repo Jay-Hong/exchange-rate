@@ -29,7 +29,7 @@ import logging
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -299,3 +299,45 @@ def resolve_front_month_usd_futures(
     else:
         logger.warning("[kis_master] no front-month USD futures found")
     return selected
+
+
+# ---------------------------------------------------------------------------
+# Observation helper (PR6c-2d-3 follow-up, 2026-05-08)
+# ---------------------------------------------------------------------------
+
+
+def extract_commodity_future_master_observation(
+    row: str,
+) -> Optional[Dict[str, Any]]:
+    """fixed-width row → 관찰용 메타데이터 (mmsc_cls_code 포함).
+
+    PR6c-2d-3 follow-up — `scripts/observe_kis_master.py` 전용 관찰 helper.
+    운영 ContractInfo / `parse_commodity_future_master`는 변경 X.
+    fixed-width offset 지식을 한 곳에 수렴해 script-vs-parser 드리프트 차단.
+
+    Args:
+        row: cp949 디코드된 fixed-width 한 줄.
+
+    Returns:
+        dict {short_code, name, mmsc_cls_code} or None.
+        - row 길이 < 55: None
+        - short_code 빈 칸: None
+        - mmsc_cls_code 빈 칸 또는 tail < 9: 필드 None (dict는 반환)
+
+    Note:
+        mmsc_cls_code 위치는 row[55:].lstrip() 기준 [8:9].
+        KIS 공식 샘플 `domestic_commodity_future_code.py`의 월물구분코드와 일관.
+    """
+    if len(row) < 55:
+        return None
+    short_code = row[2:11].strip()
+    if not short_code:
+        return None
+    name = row[23:55].strip()
+    tail = row[55:].lstrip()
+    mmsc_cls_code = tail[8:9].strip() if len(tail) >= 9 else ""
+    return {
+        "short_code": short_code,
+        "name": name,
+        "mmsc_cls_code": mmsc_cls_code if mmsc_cls_code else None,
+    }
