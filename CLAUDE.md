@@ -1133,14 +1133,14 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 - ✅ KIS WebSocket adapter (H0CFCNT0/H0CFASP0 주간, H0MFCNT0/H0MFASP0 야간) + 호가 tick fanout 차단 + PINGPONG 처리
 - ✅ KisApprovalManager (approval_key cache + 만료 5분 마진 + asyncio.Lock)
-- ✅ 만기 자동 resolve: `select_active_usd_futures_contract` (KIS 상품 마스터 cp949 fixed-width 파싱, 만기일 정규세션 11:30:00 inclusive 기준 intraday rollover)
+- ✅ 만기 자동 resolve: `select_active_usd_futures_contract` (KIS 상품 마스터 cp949 fixed-width 파싱). **PR6c-2d-1 (2026-05-07)**: swap point를 만기일 11:30:00 → **만기일 07:00 KST**로 변경 (사용자 대표 월물 선제 전환, 거래 관행 + 06:00 boundary race 회피)
 - ✅ KrxDbWriter (1초 window debounce + insert-if-changed + asyncio.to_thread DB write + race-prevention finally)
 - ✅ PR6e 운영 보강: 새 WebSocket subscribe 직후 `_last_tick_at` reset으로 세션 경계 stale carry-over 차단, KRX 저장 rate는 `Decimal(...).quantize(Decimal("0.1"))`로 0.1 KRW tick 정규화
 - ✅ Latest mirror skip 분기 (`KRX_BROADCAST_INCLUDE=false`일 때 broadcast index에서 제외)
 - ✅ Scheduler lifecycle: `start_krx_futures_client` / `_bootstrap_krx_futures_client` / `shutdown_krx_futures_client` (background bootstrap → main.py lifespan blocking 방지, current-task 매칭 finally cleanup)
+- ✅ **PR6c-2d-1 자동 contract reconcile (2026-05-07, 5/18 임시 안전모드)**: APScheduler 5분 cron `_reconcile_krx_futures_contract`. 동작: resolve → current contract 비교 → 다르면 shutdown + start. 안전장치: 만기 차이 > 45일 점프 의심 보류 / resolve 실패 격리 / None 처리. 5/18 통과 후 hybrid (06:01 + boundary)로 축소 검토 예정 (PR6c-2d-5 후보).
 - ✅ 운영 Stage 1: `KRX_FUTURES_ENABLED=true`, `KRX_BROADCAST_INCLUDE=false`로 KIS WebSocket → DB 저장만 활성화. `latest:index` KRX key 0개로 broadcast/app 노출 없음.
-- ⏸ 세션 boundary 자동 재시작 (cron) — 5/18 만기일 운영 관찰 후 결정 (검증되지 않은 시각 미투입)
-- ⏸ REST snapshot/fallback (PR6d) — WebSocket 끊김 시 최신성 보전 정책. [ADR-027](DECISIONS.md#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) 초안 작성, 5/6~5/8 평일 baseline + 5/18 만기 관찰 후 수치 확정 예정
+- ⏸ REST snapshot/fallback (PR6d-2b) — WebSocket 끊김 시 최신성 보전 정책. [ADR-027](DECISIONS.md#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) 초안 작성, 5/6~5/8 평일 baseline + 5/18 만기 관찰 후 수치 확정 예정. PR6c-2d-1 자동 rollover로 만기 layer는 분리됨.
 
 **핵심 파일**:
 

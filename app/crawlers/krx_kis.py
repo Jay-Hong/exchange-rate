@@ -422,7 +422,8 @@ async def fetch_kis_futures_quote(
         이벤트 루프 블로킹 없음 (KisApprovalManager._issue_new와 동일 패턴).
     """
     if session is None:
-        session = get_active_session(datetime.now(KST))
+        # PR6c-2d-1: contract-aware session 판정 (next month 운영 시 정상 15:45 종료)
+        session = get_active_session(datetime.now(KST), contract.expiry_date)
     if session not in KIS_REST_QUOTE_MARKET_DIV_CODE:
         logger.warning("[kis_rest] active session 부재 — quote snapshot skip")
         return None
@@ -732,7 +733,8 @@ class KisFuturesClient:
         try:
             while not self._stop.is_set():
                 now = datetime.now(KST).replace(tzinfo=None)
-                session = get_active_session(now)
+                # PR6c-2d-1: contract-aware — next month 운영 시 만기일 정상 15:45 종료
+                session = get_active_session(now, self._contract.expiry_date)
                 if session is None:
                     logger.debug("[kis_ws] no active session, sleep 30s")
                     self._set_status("normal")  # 휴장은 stale 아님
@@ -805,7 +807,8 @@ class KisFuturesClient:
         attempt = 0
         while not self._stop.is_set():
             now = datetime.now(KST).replace(tzinfo=None)
-            current_session = get_active_session(now)
+            # PR6c-2d-1: contract-aware session 판정
+            current_session = get_active_session(now, self._contract.expiry_date)
             if current_session != session:
                 logger.info("[kis_ws] session changed %s → %s, exit loop", session, current_session)
                 return
@@ -871,9 +874,9 @@ class KisFuturesClient:
             self._set_status("normal")
 
             while not self._stop.is_set():
-                # 세션 boundary 도달 체크 (15:45 / 06:00 등)
+                # 세션 boundary 도달 체크 (15:45 / 06:00 등). PR6c-2d-1: contract-aware.
                 now = datetime.now(KST).replace(tzinfo=None)
-                if get_active_session(now) != session:
+                if get_active_session(now, self._contract.expiry_date) != session:
                     logger.info("[kis_ws] session boundary reached, disconnect")
                     return
 

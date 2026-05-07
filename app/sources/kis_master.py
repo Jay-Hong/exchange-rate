@@ -200,9 +200,10 @@ def select_front_month_usd_futures(
     return min(candidates, key=lambda c: c.expiry_date)
 
 
-# 만기일 정규세션 종료 시각 — kis_futures.get_active_session()과 일관.
-# 11:30:00까지 포함, 11:30:01 이후 다음 월물로 rollover.
-_EXPIRY_REGULAR_END = time(11, 30, 0)
+# 만기일 user-facing rollover swap point — 07:00 KST.
+# 거래소 만기 시각(11:30)이 아니라 사용자 대표 월물 전환 시점.
+# 06:00 야간장 종료 boundary와 분리하기 위해 07:00 채택 (PR6c-2d-1, 2026-05-07).
+_USER_FACING_SWAP_TIME = time(7, 0, 0)
 
 
 def select_active_usd_futures_contract(
@@ -212,27 +213,33 @@ def select_active_usd_futures_contract(
     """USD/KRW 선물 중 now_kst 기준 **active한 계약** 선택 (intraday rollover).
 
     PR6c-1 — date-level select_front_month_usd_futures의 한계 (만기일
-    11:30 이후 잘못된 종목) 보강. 운영 scheduler에서 본 함수를 직접 사용.
+    잘못된 종목) 보강. 운영 scheduler에서 본 함수를 직접 사용.
 
-    분기 정책 (Codex 합의):
-      - 비-만기일 → date-level select와 동일
-      - 만기일 11:30:00까지 (포함) → 만기 종목 유지
-      - 만기일 11:30:01 이후 → 다음 월물 (만기 가까운 다음 USD futures)
+    분기 정책 (PR6c-2d-1, 2026-05-07 변경):
+      - 비-만기일 → 가장 빠른 만기 USD futures
+      - 만기일 swap_point(07:00 KST) 이전 → 만기 종목 유지 (만기 직전 야간장 종료까지)
+      - 만기일 swap_point 이상 → 다음 월물 (user-facing 선제 전환)
         다음 월물 없으면 None.
 
-    11:30 정각 포함 정책은 kis_futures.get_active_session()의 만기일
-    정규세션 종료 시각과 일관 (CF가 11:30까지 active).
+    이전 정책 (PR6c-1): 만기일 11:30:00까지 만기 종목, 11:30:01 이후 다음.
+    변경 동기:
+      - 사용자 대표 월물은 만기 직전 영업일 야간장 종료 후 전환이 거래 관행
+      - 11:30 정확도 race 회피 (boundary 정리, summary log, scheduler tick 겹침)
+      - 07:00은 휴장(06:00~08:30) 한가운데 → KRX 이벤트 없음
+      - 08:30 정규장 시작 시 이미 새 월물 client 준비 완료
+
+    07:00 정각은 next 분류 (`now_kst >= swap_point`).
 
     Args:
         contracts: parse_commodity_future_master() 결과
         now_kst: 현재 시각 (KST naive datetime)
 
     Returns:
-        ContractInfo 또는 None (USD futures 없거나 모두 만료, 또는 만기일
-        11:30 이후 + 다음 월물 미등록).
+        ContractInfo 또는 None (USD futures 없거나 모두 만료, 또는 swap_point
+        이후 + 다음 월물 미등록).
     """
     today = now_kst.date()
-    # USD futures 중 today 기준 미만료 종목, 만기일 빠른 순 정렬
+    # USD futures 중 today 기준 미만료 종목 (만기일 자체 포함), 만기 빠른 순
     usd_futures = sorted(
         [c for c in contracts if c.is_usd_krw_futures() and c.expiry_date >= today],
         key=lambda c: c.expiry_date,
@@ -240,8 +247,8 @@ def select_active_usd_futures_contract(
     if not usd_futures:
         return None
     front = usd_futures[0]
-    # 만기일 11:30:01 이후 → 다음 월물
-    if front.expiry_date == today and now_kst.time() > _EXPIRY_REGULAR_END:
+    swap_point = datetime.combine(front.expiry_date, _USER_FACING_SWAP_TIME)
+    if now_kst >= swap_point:
         if len(usd_futures) >= 2:
             return usd_futures[1]
         return None  # 다음 월물 미등록 — caller가 fallback 처리

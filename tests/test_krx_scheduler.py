@@ -417,5 +417,206 @@ class TestShutdownKrxFuturesClient(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(scheduler.krx_futures_task)
 
 
+# ---------------------------------------------------------------------------
+# _reconcile_krx_futures_contract — PR6c-2d-1 5분 reconcile
+# ---------------------------------------------------------------------------
+
+class TestReconcileKrxFuturesContract(unittest.IsolatedAsyncioTestCase):
+    """PR6c-2d-1 — 5분 contract reconcile 단위 테스트.
+
+    동작 검증:
+      - KRX_FUTURES_ENABLED=false → 즉시 return
+      - resolve 실패 → 격리 (예외 propagate X)
+      - resolve None → warning + no-op
+      - client None + bootstrap_task 없음 → _bootstrap_krx_futures_client(resolved_override=)
+      - client None + bootstrap_task 진행 중 → skip (race guard, Codex 3회차 권고)
+      - 같은 contract → no-op
+      - 점프 의심 (만기 45일 차이 초과) → 보류
+      - 정상 rollover → shutdown + _bootstrap_krx_futures_client(resolved_override=)
+        (Codex Issue 2: 두 번째 resolve 회피)
+    """
+
+    def setUp(self):
+        _reset_scheduler_krx_globals()
+
+    def tearDown(self):
+        _reset_scheduler_krx_globals()
+
+    async def test_skips_when_disabled(self):
+        """KRX_FUTURES_ENABLED=false → 아무 호출 X."""
+        with patch.object(config, "KRX_FUTURES_ENABLED", False), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract", new=AsyncMock()) as mock_resolve, \
+             patch.object(scheduler, "start_krx_futures_client", new=AsyncMock()) as mock_start, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown:
+            await scheduler._reconcile_krx_futures_contract()
+        mock_resolve.assert_not_called()
+        mock_start.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    async def test_resolve_failure_isolated(self):
+        """resolve 예외 → exception 캐치, 기존 client 유지."""
+        existing = MagicMock()
+        existing._contract = _make_resolved_contract()
+        scheduler.krx_futures_client = existing
+
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(side_effect=RuntimeError("master fetch fail"))), \
+             patch.object(scheduler, "start_krx_futures_client", new=AsyncMock()) as mock_start, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown, \
+             self.assertLogs("exchange_rate.scheduler", level="ERROR"):
+            await scheduler._reconcile_krx_futures_contract()
+
+        # 기존 client 유지
+        self.assertIs(scheduler.krx_futures_client, existing)
+        mock_start.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    async def test_resolved_none_keeps_client(self):
+        """resolve None → warning + 기존 client 유지."""
+        existing = MagicMock()
+        existing._contract = _make_resolved_contract()
+        scheduler.krx_futures_client = existing
+
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(return_value=None)), \
+             patch.object(scheduler, "start_krx_futures_client", new=AsyncMock()) as mock_start, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown, \
+             self.assertLogs("exchange_rate.scheduler", level="WARNING"):
+            await scheduler._reconcile_krx_futures_contract()
+
+        self.assertIs(scheduler.krx_futures_client, existing)
+        mock_start.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    async def test_no_op_when_same_contract(self):
+        """resolved == current → no-op (대부분 케이스)."""
+        existing = MagicMock()
+        existing._contract = _make_resolved_contract()  # A75605
+        scheduler.krx_futures_client = existing
+
+        same = _make_resolved_contract()
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(return_value=same)), \
+             patch.object(scheduler, "start_krx_futures_client", new=AsyncMock()) as mock_start, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown:
+            await scheduler._reconcile_krx_futures_contract()
+
+        mock_start.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    async def test_bootstrap_when_client_is_none(self):
+        """client None + resolved 정상 → _bootstrap_krx_futures_client(resolved_override=)."""
+        scheduler.krx_futures_client = None
+
+        resolved = _make_resolved_contract()
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(return_value=resolved)), \
+             patch.object(scheduler, "_bootstrap_krx_futures_client", new=AsyncMock()) as mock_boot, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown:
+            await scheduler._reconcile_krx_futures_contract()
+
+        # PR6c-2d-1 amend: bootstrap을 resolved_override와 함께 직접 호출 (Codex Issue 2)
+        mock_boot.assert_awaited_once_with(resolved_override=resolved)
+        mock_shutdown.assert_not_called()
+
+    async def test_skips_when_bootstrap_in_progress(self):
+        """client None인데 lifespan bootstrap_task 진행 중 → skip (Codex 3회차 가드).
+
+        main.py lifespan에서 만든 bootstrap_task가 아직 완료 전인데 5분 reconcile이
+        발화하면 중복 client 생성 위험. krx_bootstrap_task가 not done이면 skip.
+        """
+        scheduler.krx_futures_client = None
+
+        # 진행 중 bootstrap task 시뮬레이션 — 영원히 안 끝나는 task
+        async def slow_bootstrap():
+            await asyncio.sleep(60)
+
+        scheduler.krx_bootstrap_task = asyncio.create_task(slow_bootstrap())
+
+        resolved = _make_resolved_contract()
+        try:
+            with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+                 patch.object(scheduler, "resolve_active_krx_futures_contract",
+                              new=AsyncMock(return_value=resolved)), \
+                 patch.object(scheduler, "_bootstrap_krx_futures_client", new=AsyncMock()) as mock_boot, \
+                 patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown:
+                await scheduler._reconcile_krx_futures_contract()
+
+            # bootstrap 진행 중이라 reconcile은 skip — 새 bootstrap 안 띄움
+            mock_boot.assert_not_called()
+            mock_shutdown.assert_not_called()
+        finally:
+            scheduler.krx_bootstrap_task.cancel()
+            try:
+                await scheduler.krx_bootstrap_task
+            except asyncio.CancelledError:
+                pass
+
+    async def test_normal_rollover_calls_shutdown_then_bootstrap(self):
+        """resolved != current + 만기 1개월 차이 → shutdown + bootstrap(resolved_override=)."""
+        existing = MagicMock()
+        existing._contract = _make_resolved_contract()  # A75605, 5/18 만기
+        scheduler.krx_futures_client = existing
+
+        next_month = ContractInfo(
+            short_code="A75606",
+            standard_code="KR4A75660006",
+            name="미국달러 F 202606",
+            contract_month="202606",
+            expiry_date=date(2026, 6, 15),  # 28일 차이
+        )
+
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(return_value=next_month)), \
+             patch.object(scheduler, "_bootstrap_krx_futures_client", new=AsyncMock()) as mock_boot, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown, \
+             self.assertLogs("exchange_rate.scheduler", level="INFO") as log_cm:
+            await scheduler._reconcile_krx_futures_contract()
+
+        mock_shutdown.assert_awaited_once()
+        # PR6c-2d-1 amend: 두 번째 resolve 회피 — resolved를 직접 넘김 (Codex Issue 2)
+        mock_boot.assert_awaited_once_with(resolved_override=next_month)
+        # rollover 로그 검증
+        self.assertTrue(
+            any("rollover A75605/202605 → A75606/202606" in m for m in log_cm.output),
+            f"rollover info log 부재: {log_cm.output}",
+        )
+
+    async def test_jump_protection_skips_rollover(self):
+        """resolved 만기가 current 만기보다 45일 초과 차이 → 보류."""
+        existing = MagicMock()
+        existing._contract = _make_resolved_contract()  # A75605, 5/18 만기
+        scheduler.krx_futures_client = existing
+
+        far_future = ContractInfo(
+            short_code="A75607",
+            standard_code="KR4A75670005",
+            name="미국달러 F 202607",
+            contract_month="202607",
+            expiry_date=date(2026, 7, 20),  # 63일 차이 > 45일
+        )
+
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(return_value=far_future)), \
+             patch.object(scheduler, "_bootstrap_krx_futures_client", new=AsyncMock()) as mock_boot, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()) as mock_shutdown, \
+             self.assertLogs("exchange_rate.scheduler", level="WARNING") as log_cm:
+            await scheduler._reconcile_krx_futures_contract()
+
+        # rollover 보류 — shutdown / bootstrap 호출 X
+        mock_shutdown.assert_not_called()
+        mock_boot.assert_not_called()
+        self.assertTrue(
+            any("점프 의심" in m for m in log_cm.output),
+            f"점프 의심 warning 부재: {log_cm.output}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -364,6 +364,106 @@ class TestActiveSession(unittest.TestCase):
         now = datetime(2026, 5, 18, 18, 30, 0)
         self.assertEqual(get_active_session(now), "CM")
 
+    # --- contract-aware (PR6c-2d-1 amend, Codex Issue 1 fix) ---
+
+    def test_expiry_day_noon_with_expiring_contract_none(self):
+        """5/18 12:00 + contract.expiry_date=5/18 (expiring) → None (11:30 종료 적용)."""
+        now = datetime(2026, 5, 18, 12, 0, 0)
+        self.assertIsNone(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18))
+        )
+
+    def test_expiry_day_noon_with_next_month_active(self):
+        """5/18 12:00 + contract.expiry_date=6/15 (next month, A75606 운영) → CF.
+
+        BLOCKING bug fix: PR6c-2d-1이 07:00에 next month로 swap한 후
+        만기일 11:30~15:45 동안 disconnect되는 문제 차단.
+        """
+        now = datetime(2026, 5, 18, 12, 0, 0)
+        self.assertEqual(
+            get_active_session(now, contract_expiry_date=date(2026, 6, 15)),
+            "CF",
+        )
+
+    def test_expiry_day_at_15_45_with_next_month_active(self):
+        """5/18 15:45 + next month (6/15) → CF (정상 정규장 종료 시각, 포함)."""
+        now = datetime(2026, 5, 18, 15, 45, 0)
+        self.assertEqual(
+            get_active_session(now, contract_expiry_date=date(2026, 6, 15)),
+            "CF",
+        )
+
+    def test_expiry_day_at_11_30_01_with_expiring_contract(self):
+        """5/18 11:30:01 + expiring (5/18) → None (만기 종료 직후)."""
+        now = datetime(2026, 5, 18, 11, 30, 1)
+        self.assertIsNone(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18))
+        )
+
+    def test_expiry_day_at_11_30_with_expiring_contract_active(self):
+        """5/18 11:30:00 + expiring (5/18) → CF (종료 시각 inclusive)."""
+        now = datetime(2026, 5, 18, 11, 30, 0)
+        self.assertEqual(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18)),
+            "CF",
+        )
+
+    def test_non_expiry_day_with_any_contract(self):
+        """5/4 (만기 아님) + 어떤 contract든 → 정규세션 정상 15:45 종료."""
+        now = datetime(2026, 5, 4, 14, 0, 0)
+        # contract.expiry_date != today 케이스
+        self.assertEqual(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18)),
+            "CF",
+        )
+
+    def test_legacy_none_contract_uses_calendar(self):
+        """contract_expiry_date=None → 기존 캘린더 기반 (만기일 11:30 적용)."""
+        now = datetime(2026, 5, 18, 12, 0, 0)
+        self.assertIsNone(get_active_session(now, contract_expiry_date=None))
+
+    # --- Codex Issue 3 fix: expiring contract 11:30 이후 전체 세션 차단 ---
+
+    def test_expiry_day_night_with_expiring_contract_none(self):
+        """5/18 18:30 + expiring (5/18) → None (만기 종목 야간장 없음).
+
+        Codex Issue 3 BLOCKING fix: contract-aware 정규세션 분기만 처리하고
+        야간세션 분기를 빠뜨리면 만기 종목이 야간장 active로 잘못 판단됨.
+        """
+        now = datetime(2026, 5, 18, 18, 30, 0)
+        self.assertIsNone(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18))
+        )
+
+    def test_expired_contract_returns_none(self):
+        """5/19 09:00 + expired (5/18) → None (만기 지난 종목)."""
+        now = datetime(2026, 5, 19, 9, 0, 0)
+        self.assertIsNone(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18))
+        )
+
+    def test_expiry_day_night_with_next_month_active(self):
+        """5/18 18:30 + next month (6/15) → CM (정상 야간장)."""
+        now = datetime(2026, 5, 18, 18, 30, 0)
+        self.assertEqual(
+            get_active_session(now, contract_expiry_date=date(2026, 6, 15)),
+            "CM",
+        )
+
+    def test_expiry_day_dawn_with_expiring_not_blocked_by_amend(self):
+        """5/18 05:30 + expiring (5/18) — 11:30 이전이라 expiring 차단 미적용.
+
+        만기일 05:30은 정책상 만기 종목 정상 거래 가능 시간 (전 영업일 시작
+        야간장이 이어진 구간). 5/18 케이스는 5/17 일요일 시작 야간장이 없어
+        결과적으로 None이지만, 의도는 "11:30 이전은 amend 차단 X"임을 검증.
+        """
+        now = datetime(2026, 5, 18, 5, 30, 0)
+        # 11:30 이전이라 amend의 early return 안 함 → 야간 분기로 들어감
+        # 5/17 일요일이라 not business_day → 자연스럽게 None
+        self.assertIsNone(
+            get_active_session(now, contract_expiry_date=date(2026, 5, 18))
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

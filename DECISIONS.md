@@ -2922,7 +2922,7 @@ Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket �
 | REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | DB 저장까지 수행해 provenance 유지. topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
 | REST 실패 시 정책 | KRX topic publish 제외 / 마지막 값 유지 / stale status 동반 | Stage 2 topic에서는 KRX publish 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
 | **REST quote endpoint/TR** | KIS 상품선물 REST endpoint 재조사 / REST 없이 WebSocket stale 제외 정책 | **resolved**. `FHMIF10000000` + `/inquire-price` 유지, `FID_COND_MRKT_DIV_CODE`를 세션별 `CF`/`CM`으로 분기해야 A75605 USD futures `output1.futs_prpr` 반환 |
-| 만기일 rollover | cron / session boundary resolve / 수동 restart | 2026-05-18 관찰 후 결정. 현재 자동 contract 교체 없음 |
+| 만기일 rollover | cron / session boundary resolve / 수동 restart | **PR6c-2d-1 (2026-05-07) 결정**: 만기일 07:00 KST swap + 5분 reconcile cron (임시 안전모드). 5/18 검증 통과 후 hybrid (06:01 daily + session boundary)로 축소 검토 (PR6c-2d-5 후보). 자세한 내용은 본 ADR 하단 "PR6c-2d-1 amend" 절 참조 |
 
 ### 초기 정책값 (PR6d-1 진입 시 env 후보)
 
@@ -3105,6 +3105,53 @@ PR6d-2a 초안 구현(commit 658ea27, 2026-05-06)은 metric state 골격은 박�
 - [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): `latest:index` 기반 Redis-first broadcast hot path
 - [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit): KRX/USDT topic-only 노출 + legacy FX dual-emit 계약
 - [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): `source_rates` 기반 source/asset 모델
+
+### PR6c-2d-1 amend (2026-05-07): 자동 rollover 정책 추가
+
+**배경**: 5/18 만기 직전, 자동 rollover 미구현 시 만기 종목 client가 silence 또는 잘못된 종목 운영 위험. 5/18 관찰을 정책 결정용 → 검증용으로 격상하기 위한 사전 구현.
+
+**결정**:
+
+- **User-facing swap point: 만기일 07:00 KST**.
+  - 거래소 만기 시각(11:30)이 아니라 사용자 대표 월물 전환 시점.
+  - 만기 직전 영업일 야간장(=만기일 새벽 06:00) 종료 후 swap.
+  - 06:00 yatime boundary와 분리 (07:00은 휴장 한가운데).
+  - 거래 관행 준수 (전문 트레이더는 만기 전 다음 월물로 이동).
+
+- **5분 reconcile 임시 안전모드**: APScheduler IntervalTrigger 5분마다 `_reconcile_krx_futures_contract()` 실행.
+  - 동작: resolve → 현재 client contract 비교 → 다르면 shutdown + start
+  - 안전장치: 만기 차이 > 45일 점프 의심 보류 / resolve 실패 격리 / None 처리 / 같은 contract no-op
+  - **임시성**: 5/18 통과 후 hybrid (06:01 daily + session boundary)로 축소 검토 (PR6c-2d-5 후보)
+
+**사전 검증 (2026-05-07 retrospective)**:
+
+- A75604 (만기 17일 후 + KIS master 제거 상태) REST 조회: rt_cd=0이지만 `futs_prpr/prpr` 부재, `bstp_*` (지수형) keys 응답.
+- helper의 `futs_prpr/prpr 부재` 검사가 None 반환으로 만기/제거 종목 자동 차단 — 안전 규칙 작동 확인.
+- A75606 (다음 6월물, 만기 5주+ 전): 이미 정상 quote 응답 + 가격 1448.00 → 선제 swap 안전.
+- A75605 vs A75606 베이시스 0.04% (1448.60 vs 1448.00, 만기 1주일 전 자연 수렴).
+- 단, "만기 종목은 항상 지수형 응답으로 바뀐다"는 일반 규칙으로 단정 X — 1건 단일 시점 관측, master 제거 시점과 만기 시점 분리 미관측. 안전 규칙은 "rt_cd=0이어도 price field 검증 필수" 형태로 문서화.
+
+**범위 외 (별도 PR)**:
+
+- mmsc_cls_code 파서 + 5/18 ad-hoc 관찰 스크립트 → PR6c-2d-3
+- admin status에 rollover metric → PR6c-2d-2
+- 가격/contract metadata mismatch 처리 (07:00~08:30 휴장 구간 latest 가격은 옛 월물) → broadcast layer (Phase Z-2)
+- Hybrid scheduler (5분 cron 축소) → PR6c-2d-5
+
+**테스트**: `tests/test_kis_master.py::TestSelectActiveContract` (15 케이스, 07:00 swap inclusive 분기 검증) + `tests/test_krx_scheduler.py::TestReconcileKrxFuturesContract` (7 케이스, KRX_FUTURES_ENABLED gate / resolve 실패 / None / no-op / bootstrap / 정상 rollover / 점프 보호) + `tests/test_kis_futures.py::TestActiveSession` (7 추가 케이스, contract-aware session 분기 검증).
+
+**Codex 외부 검토 amend (2026-05-07)**:
+
+1. **BLOCKING — contract-aware `get_active_session`**: 기존 함수가 `is_expiry_day(today)` 캘린더 기반으로 만기일 11:30 종료를 적용. PR6c-2d-1이 07:00에 next month로 swap한 후에도 같은 함수가 호출되어 11:30~15:45 동안 A75606이 disconnect되는 버그.
+   - 수정: `get_active_session(now, contract_expiry_date=None)` signature 변경.
+   - `contract_expiry_date == today`만 11:30 종료 적용, 다르면(next month) 정상 15:45.
+   - `contract_expiry_date=None`은 legacy 호환 (기존 캘린더 동작 유지).
+   - 운영 호출 4곳 (krx_kis.py 426/737/811/879) 모두 `self._contract.expiry_date` 또는 `contract.expiry_date` 전달.
+
+2. **Reliability — reconcile 시 두 번째 resolve 회피**: 기존 reconcile은 shutdown 후 `start_krx_futures_client()` 호출 → `_bootstrap_krx_futures_client()`가 다시 resolve. 두 번째 resolve 실패 시 5분간 KRX outage.
+   - 수정: `_bootstrap_krx_futures_client(resolved_override=None)` signature 변경.
+   - reconcile에서 `_bootstrap_krx_futures_client(resolved_override=resolved)` 직접 호출.
+   - 두 번째 resolve 회피 + race 차단 + 동일 contract 보장.
 
 ---
 

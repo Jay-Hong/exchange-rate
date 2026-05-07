@@ -262,7 +262,13 @@ class TestSelectFrontMonth(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestSelectActiveContract(unittest.TestCase):
-    """만기일 11:30:00 포함, 11:30:01 이후 다음 월물 rollover."""
+    """PR6c-2d-1 — 만기일 07:00 KST swap point. 사용자 대표 월물 선제 전환.
+
+    이전 정책 (PR6c-1): 만기일 11:30:00까지 만기 종목, 11:30:01 이후 다음.
+    새 정책 (2026-05-07): 만기일 07:00:00 이상이면 다음 월물.
+    동기: 만기 직전 영업일 야간장 종료 후 사용자 대표 월물 전환 +
+    06:00 boundary race 회피 (07:00 휴장 한가운데).
+    """
 
     def setUp(self):
         self.contracts = [
@@ -277,7 +283,7 @@ class TestSelectActiveContract(unittest.TestCase):
                          "202605", date(2026, 5, 18)),
         ]
 
-    # 비-만기일 (5/4) → date-level과 동일
+    # 비-만기일 → 가장 빠른 만기 USD futures
     def test_non_expiry_day_morning(self):
         now = datetime(2026, 5, 4, 9, 0, 0)
         self.assertEqual(
@@ -286,33 +292,66 @@ class TestSelectActiveContract(unittest.TestCase):
         )
 
     def test_non_expiry_day_evening(self):
-        """비-만기일 야간장 시간이라도 11:30 정책은 만기일에만 적용."""
+        """비-만기일 야간장 — swap 정책은 만기일에만 적용."""
         now = datetime(2026, 5, 4, 18, 0, 0)
         self.assertEqual(
             select_active_usd_futures_contract(self.contracts, now).short_code,
             "A75605",
         )
 
-    # 만기일 11:30:00까지 포함 → 만기 종목
-    def test_expiry_day_morning_keeps_front(self):
-        now = datetime(2026, 5, 18, 11, 0, 0)
+    def test_expiry_eve_late_night_keeps_front(self):
+        """만기 전날 23:59 — swap point 미도달, 만기 종목 유지."""
+        now = datetime(2026, 5, 17, 23, 59, 59)
         self.assertEqual(
             select_active_usd_futures_contract(self.contracts, now).short_code,
             "A75605",
         )
 
-    def test_expiry_day_at_11_30_00_keeps_front(self):
-        """만기일 11:30:00 정각 — 포함 (kis_futures.get_active_session 일관)."""
+    # 만기일 swap_point(07:00) 이전 → 만기 종목 유지
+    def test_expiry_day_at_06_00_keeps_front(self):
+        """만기일 06:00 정각 — 야간장 종료 시각, swap_point 미도달."""
+        now = datetime(2026, 5, 18, 6, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75605",
+        )
+
+    def test_expiry_day_at_06_59_keeps_front(self):
+        """만기일 06:59:59 — swap_point 1초 전, 만기 종목 유지."""
+        now = datetime(2026, 5, 18, 6, 59, 59)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75605",
+        )
+
+    # 만기일 swap_point(07:00) 정각 이상 → 다음 월물 (inclusive)
+    def test_expiry_day_at_07_00_swaps(self):
+        """만기일 07:00:00 정각 — swap_point inclusive, 다음 월물."""
+        now = datetime(2026, 5, 18, 7, 0, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    def test_expiry_day_at_07_00_01_after_swap(self):
+        """만기일 07:00:01 — swap 직후."""
+        now = datetime(2026, 5, 18, 7, 0, 1)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    def test_expiry_day_at_08_30_after_swap(self):
+        """만기일 08:30 — CF 정규장 시작, 이미 다음 월물."""
+        now = datetime(2026, 5, 18, 8, 30, 0)
+        self.assertEqual(
+            select_active_usd_futures_contract(self.contracts, now).short_code,
+            "A75606",
+        )
+
+    def test_expiry_day_at_11_30_after_swap(self):
+        """만기일 11:30 — 거래소 만기 종료 시각이지만 우리는 이미 다음 월물."""
         now = datetime(2026, 5, 18, 11, 30, 0)
-        self.assertEqual(
-            select_active_usd_futures_contract(self.contracts, now).short_code,
-            "A75605",
-        )
-
-    # 만기일 11:30:01 이후 → 다음 월물 rollover
-    def test_expiry_day_at_11_30_01_rollover(self):
-        """만기일 11:30:01 — 즉시 다음 월물."""
-        now = datetime(2026, 5, 18, 11, 30, 1)
         self.assertEqual(
             select_active_usd_futures_contract(self.contracts, now).short_code,
             "A75606",
@@ -326,14 +365,14 @@ class TestSelectActiveContract(unittest.TestCase):
         )
 
     def test_expiry_day_night_session_rollover(self):
-        """만기일 18:00 야간장 — 다음 월물 (rollover 유지)."""
+        """만기일 18:00 야간장 — 다음 월물."""
         now = datetime(2026, 5, 18, 18, 0, 0)
         self.assertEqual(
             select_active_usd_futures_contract(self.contracts, now).short_code,
             "A75606",
         )
 
-    # 만기 다음날 (5/19) → date-level rollover
+    # 만기 다음날 (5/19) → 다음 월물 (만기 종목 자동 제외)
     def test_day_after_expiry_uses_date_level(self):
         now = datetime(2026, 5, 19, 9, 0, 0)
         self.assertEqual(
@@ -350,8 +389,8 @@ class TestSelectActiveContract(unittest.TestCase):
         now = datetime(2026, 5, 18, 12, 0, 0)
         self.assertIsNone(select_active_usd_futures_contract(only_gold, now))
 
-    def test_expiry_after_1130_no_next_contract(self):
-        """만기일 11:30 이후 + 다음 월물 미등록 → None."""
+    def test_after_swap_no_next_contract(self):
+        """만기일 swap_point 이후 + 다음 월물 미등록 → None."""
         single = [self.contracts[0]]  # A75605만
         now = datetime(2026, 5, 18, 12, 0, 0)
         self.assertIsNone(select_active_usd_futures_contract(single, now))

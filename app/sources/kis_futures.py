@@ -315,20 +315,62 @@ _NIGHT_START = time(17, 50)
 _NIGHT_END = time(6, 0)
 
 
-def get_active_session(now: datetime) -> Optional[Literal["CF", "CM"]]:
+def get_active_session(
+    now: datetime,
+    contract_expiry_date: Optional[date] = None,
+) -> Optional[Literal["CF", "CM"]]:
     """현재 시점에 active한 KRX 미국달러선물 세션 반환.
 
+    Args:
+        now: 현재 시각 (KST naive datetime)
+        contract_expiry_date: **운영 중인 contract의 만기일** (PR6c-2d-1 amend, 2026-05-07).
+            - None: legacy 호환. is_expiry_day(today) 캘린더 기반 판정 (보수적 fallback).
+            - today와 같음: 만기일 정규세션 11:30 종료 적용 (expiring 월물).
+              + Codex Issue 3 fix: 11:30 이후는 정규/야간 모두 차단 (만기 종목 야간 거래 없음).
+            - today와 다름 (next month 등): 정규세션 15:45 + 정상 야간세션.
+            - today보다 과거 (expired): 모든 세션 차단 (Codex Issue 3 fix).
+
+        contract-aware 추가 동기 (PR6c-2d-1):
+        - manual rollover로 next month로 swap한 client에 대해 calendar-based
+          `is_expiry_day(today)`가 True여서 11:30 종료 잘못 적용 → 11:30~15:45
+          A75606 disconnect 버그 차단 (Issue 1).
+        - reconcile 누락/실패 시 expiring contract가 잔존하면 만기일 야간장(17:50~)에
+          subscribe 시도해 만기 종목 spurious frame 위험 → 11:30 이후 전 세션 차단 (Issue 3).
+
     Returns:
-        "CF" — 주간 정규세션 active (만기일 11:30 종료 반영)
-        "CM" — 야간세션 active ("시작일 기준" 정책)
-        None — 휴장 (영업일 외 / 정규/야간 사이 break / 야간 시작일이 휴일)
+        "CF" — 주간 정규세션 active (만기일 종료 시각은 contract_expiry_date 기준)
+        "CM" — 야간세션 active (시작일 기준 정책 + contract_expiry_date 차단:
+               expiring contract는 만기일 11:30 이후 차단, 만기 지난 종목은 항상 차단.
+               next month / 미래 만기 / legacy None은 시작일 기준만 적용)
+        None — 휴장 또는 contract 만료 후
     """
     today = now.date()
     t = now.time()
 
+    # 0. expiring contract 전체 세션 차단 (PR6c-2d-1 amend, Codex Issue 3 fix)
+    #    만기 후 / 만기일 11:30 이후의 expiring 종목은 정규/야간 모두 거래 없음
+    #    (만기일 05:30 같은 만기일 새벽 야간장은 차단 X — 만기일 11:30 이전이고
+    #    실제로는 전 영업일 시작 야간장이 이어진 구간)
+    if contract_expiry_date is not None:
+        if contract_expiry_date < today:
+            # 만기 지난 종목 (master 잔존 또는 reconcile 누락 시) — 모든 세션 차단
+            return None
+        if contract_expiry_date == today and t > _REGULAR_EXPIRY_END:
+            # 만기일 11:30 이후 — 정규세션 종료 + 야간장 거래 없음 (만기 종목)
+            return None
+
     # 1. 주간 정규세션 (영업일 + 정규시간)
     if is_krx_business_day(today):
-        regular_end = _REGULAR_EXPIRY_END if is_expiry_day(today) else _REGULAR_END
+        # 만기일 종료 시각 결정 — contract-aware (PR6c-2d-1 amend)
+        if contract_expiry_date is None:
+            # legacy: 캘린더 기반 (next month 운영 시 부정확하지만 보수적)
+            regular_end = _REGULAR_EXPIRY_END if is_expiry_day(today) else _REGULAR_END
+        elif contract_expiry_date == today:
+            # 만기 당일 contract → 11:30 종료 (위 0번에서 11:30 이후는 이미 차단)
+            regular_end = _REGULAR_EXPIRY_END
+        else:
+            # next month (또는 미래 만기) → 정상 15:45 종료
+            regular_end = _REGULAR_END
         if _REGULAR_START <= t <= regular_end:
             return "CF"
 

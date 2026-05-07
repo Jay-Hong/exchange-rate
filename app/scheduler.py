@@ -1391,6 +1391,20 @@ def start_scheduler():
             misfire_grace_time=LATEST_MIRROR_INTERVAL_SECONDS,
         )
 
+    # PR6c-2d-1: KRX active contract reconcile (5/18 임시 안전모드).
+    # 5분마다 master resolve → 현재 client contract 비교 → 다르면 rollover.
+    # config.KRX_FUTURES_ENABLED=false 시 함수 내부에서 즉시 return.
+    # 5/18 만기 통과 후 hybrid (06:01 + boundary)로 축소 검토 (PR6c-2d-5 후보).
+    if config.KRX_FUTURES_ENABLED:
+        scheduler.add_job(
+            _reconcile_krx_futures_contract,
+            IntervalTrigger(minutes=5, timezone=KST),
+            id="krx_contract_reconcile",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+
     # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
     # - 모드 전환 시점: 21:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 07:00 (OUT 시작), 월 06:00 (OUT 종료 → BREAK2)
     scheduler.add_job(
@@ -1663,12 +1677,19 @@ async def resolve_active_krx_futures_contract():
     return select_active_usd_futures_contract(contracts, now_kst)
 
 
-async def _bootstrap_krx_futures_client():
+async def _bootstrap_krx_futures_client(resolved_override=None):
     """background bootstrap — resolve + client 시작.
 
     main.py lifespan과 분리. 실패 시 logger.warning/exception + KRX만 비활성.
     finally 블록에서 자기 자신이 krx_bootstrap_task일 때만 cleanup —
     shutdown 경합 / 직접 호출 시 엉뚱한 task 참조 지우지 X.
+
+    PR6c-2d-1 amend (2026-05-07): resolved_override 인자 추가.
+    reconcile에서 이미 resolve한 contract를 직접 넘기면 두 번째 resolve를
+    회피해 race + reliability 향상 (Codex 검토 Issue 2).
+
+    Args:
+        resolved_override: 이미 resolve된 ContractInfo. None이면 자체 resolve.
     """
     global krx_bootstrap_task, krx_futures_client, krx_futures_task
 
@@ -1680,11 +1701,14 @@ async def _bootstrap_krx_futures_client():
     )
 
     try:
-        try:
-            resolved = await resolve_active_krx_futures_contract()
-        except Exception:
-            logger.exception("[krx] active contract resolve 실패 (격리)")
-            return
+        if resolved_override is not None:
+            resolved = resolved_override
+        else:
+            try:
+                resolved = await resolve_active_krx_futures_contract()
+            except Exception:
+                logger.exception("[krx] active contract resolve 실패 (격리)")
+                return
 
         if resolved is None:
             logger.warning("[krx] active USD futures contract 없음, KRX 비활성")
@@ -1753,3 +1777,98 @@ async def shutdown_krx_futures_client():
 
     krx_futures_client = None
     krx_futures_task = None
+
+
+# ─────────────────────────────────────────────────────────────
+# PR6c-2d-1 — Active contract reconcile (5/18 임시 안전모드)
+# ─────────────────────────────────────────────────────────────
+# 5분마다 active KRX USD futures contract 재계산 + client 비교.
+# 다르면 shutdown + start로 새 contract 적용 (rollover).
+#
+# 5/18 만기 통과 후 hybrid (06:01 daily + session boundary)로 축소
+# 검토 (PR6c-2d-5 후보). 영구 정책 아님 — 임시 안전모드.
+# ─────────────────────────────────────────────────────────────
+async def _reconcile_krx_futures_contract():
+    """5분 주기 contract reconcile (PR6c-2d-1).
+
+    동작:
+      1. KRX_FUTURES_ENABLED=false → 즉시 return
+      2. resolve_active_krx_futures_contract() 호출 (실패 격리)
+      3. resolved is None → warning + 기존 client 유지
+      4. krx_futures_client is None → _bootstrap_krx_futures_client(resolved_override=resolved)
+      5. resolved.short_code == current.short_code → no-op
+      6. 만기 차이 > 45일 또는 < 0 → 점프 의심 warning + 보류
+      7. 정상 rollover → shutdown + _bootstrap_krx_futures_client(resolved_override=resolved)
+         (Codex Issue 2 fix: 두 번째 resolve 회피)
+
+    실패 격리: resolve / shutdown / start 실패 시 logger.exception + return.
+    KRX outage 발생해도 다른 시스템 영향 0 (config.KRX_FUTURES_ENABLED 토글).
+
+    5/18 만기 검증용. 통과 후 hybrid로 축소 검토.
+    """
+    if not config.KRX_FUTURES_ENABLED:
+        return
+
+    try:
+        resolved = await resolve_active_krx_futures_contract()
+    except Exception:
+        logger.exception("[krx] reconcile resolve 실패 (격리)")
+        return
+
+    if resolved is None:
+        logger.warning(
+            "[krx] reconcile: active USD futures contract 없음 — 수동 개입 필요"
+        )
+        return
+
+    # 1. client 없으면 bootstrap 시도 (격리된 재시작 후 복구 경로)
+    # 이미 resolve한 결과를 직접 사용 (Codex Issue 2 — 두 번째 resolve 회피)
+    if krx_futures_client is None:
+        # PR6c-2d-1 amend (Codex 3회차 권고): main.py lifespan bootstrap이 진행 중이면 skip.
+        # 5분 cron interval vs bootstrap 수초라 실제 race 가능성 낮지만 견고성 위해 가드.
+        if krx_bootstrap_task is not None and not krx_bootstrap_task.done():
+            logger.debug("[krx] reconcile: bootstrap 진행 중, skip (race 방지)")
+            return
+        logger.info(
+            "[krx] reconcile: client 없음 — bootstrap 시도 (resolved=%s)",
+            resolved.short_code,
+        )
+        await _bootstrap_krx_futures_client(resolved_override=resolved)
+        return
+
+    current = krx_futures_client._contract
+
+    # 2. 같은 contract → no-op (대부분 케이스)
+    if resolved.short_code == current.short_code:
+        return
+
+    # 3. 점프 방지 — 만기 45일 이상 차이 또는 역행은 master 데이터 오류 의심
+    expiry_diff = (resolved.expiry_date - current.expiry_date).days
+    if expiry_diff > 45 or expiry_diff < 0:
+        logger.warning(
+            "[krx] reconcile 점프 의심 %s/%s → %s/%s (만기 %d일 차이) — 보류",
+            current.short_code, current.contract_month,
+            resolved.short_code, resolved.contract_month,
+            expiry_diff,
+        )
+        return
+
+    # 4. 정상 rollover
+    logger.info(
+        "[krx] rollover %s/%s → %s/%s reason=scheduled",
+        current.short_code, current.contract_month,
+        resolved.short_code, resolved.contract_month,
+    )
+
+    try:
+        await shutdown_krx_futures_client()
+    except Exception:
+        logger.exception("[krx] reconcile shutdown 실패")
+        return
+
+    # PR6c-2d-1 amend (Codex Issue 2): resolved를 직접 넘겨 두 번째 resolve 회피.
+    # 두 번째 resolve가 실패하면 기존 client 이미 shutdown됐고 새 client도 못 뜸 → 5분간 KRX outage.
+    try:
+        await _bootstrap_krx_futures_client(resolved_override=resolved)
+    except Exception:
+        logger.exception("[krx] reconcile bootstrap 실패")

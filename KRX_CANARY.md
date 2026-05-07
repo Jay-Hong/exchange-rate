@@ -243,37 +243,91 @@ done
 
 ---
 
-## 5/18 만기일 특별 관찰 (현재 자동 rollover 미구현)
+## Rollover 정책 (PR6c-2d-1, 2026-05-07)
 
-**컨텍스트:** A75605 = 2026-05-18 만기. 정규세션 11:30 종료 후 client는 만료 contract를 그대로 가진 채 reconnect 시도하거나 silent close 상태로 머물게 됨 — 자동 rollover/재구독 코드 없음.
+**User-facing swap point: 만기일 07:00 KST** (거래소 만기 11:30이 아님).
 
-**관찰 시나리오 (수동 데이터 수집):**
+- 만기 직전 영업일 야간장(=만기일 새벽 06:00) 종료 후 swap
+- 06:00 야간장 boundary와 분리 (07:00은 휴장 한가운데, KRX 이벤트 없음)
+- 08:30 정규장 시작 시 새 contract client 준비 완료 상태
+- 사용자 거래 관행 준수 (전문 트레이더는 만기 전 다음 월물로 이동)
 
-1. **5/18 11:30 직전 (예: 11:25~11:30)**:
-   - tick 들어오는지 확인 (정상 영업)
-   - `SELECT max(timestamp) FROM source_rates WHERE source='krx'` 분 단위 polling
+**자동 reconcile (5/18 임시 안전모드):**
 
-2. **5/18 11:30 직후 (예: 11:30~12:00)**:
-   - tick 끊김 패턴 — 즉시 끊김 / 일정 시간 후 끊김 / 혼합
-   - WebSocket 상태: `[kis_ws]` 로그에서 disconnect / reconnect 시도 / 무한 backoff 등 어떤 패턴인지
-   - client status 간접 확인: `[kis_ws] status %s → %s` 전이 로그로만 추적 가능 (`_status` 직접 expose하는 admin endpoint/shell 없음). 기대 전이 예: `normal → reconnecting → stale`
+- APScheduler cron 5분마다 `_reconcile_krx_futures_contract()` 실행
+- 동작: resolve → 현재 client contract 비교 → 다르면 shutdown + bootstrap(resolved_override=)
+- 안전장치: 만기 차이 > 45일 점프 의심 보류 / resolve 실패 격리 / None 처리
+- `KRX_FUTURES_ENABLED=true`일 때만 cron 등록
+- **임시 안전모드** — 5/18 통과 후 hybrid (06:01 daily + session boundary)로 축소 검토 (PR6c-2d-5 후보)
 
-3. **만기일 후 (예: 5/19 영업 시작 시)**:
-   - 만료 contract A75605에 더 이상 tick 없음 (KIS 측 종목 제거)
-   - 수동 `docker compose restart fastapi` 실행
-   - restart 후 `select_active_usd_futures_contract()`가 다음 월물(예: 6월물 단축코드)로 잡히는지 확인:
+**Contract-aware session 판정 (Codex 외부 검토 amend):**
 
-     ```bash
-     docker compose logs fastapi --since 1m | grep -E '\[kis_ws\] subscribed'
-     # 기대: subscribed tr_id=H0CFCNT0 key=<6월물 단축코드>
-     ```
+- `get_active_session(now, contract_expiry_date)` — contract.expiry_date를 인자로 받음
+- expiring 월물 (today == expiry): 만기일 정규세션 11:30 종료 적용
+- next month (today != expiry): 정상 15:45 종료 (rollover 후 11:30~15:45 disconnect 차단)
+- legacy 호환: contract_expiry_date=None 시 캘린더 기반 fallback
 
-   - SQL로 신규 월물 데이터 적재 확인
+**예상 timeline (5/18 만기, A75605 → A75606):**
 
-4. **수집된 데이터로 PR6c-2d / PR6d 설계 결정**:
-   - 자동 rollover trigger를 cron으로 할지 vs WebSocket 상태 감지로 할지
-   - REST snapshot fallback 임계값 (staleness N초)
-   - rollover 시점 (만기일 11:30:00 정확히 vs 다음 영업일 시작 시)
+| 시각 | reconcile 동작 | client 상태 |
+|---|---|---|
+| 5/15 금 17:00 ~ 5/16 토 06:00 | resolve=A75605, no-op | A75605 야간장 운영 |
+| 5/16 토 ~ 5/17 일 | resolve=A75605, no-op | client offline (휴장) |
+| 5/18 월 06:55 cron | resolve=A75605, no-op | offline |
+| **5/18 월 07:00 cron** | **resolve=A75606, rollover 발화** | A75605 → A75606 restart |
+| 5/18 월 07:00 ~ 08:30 | A75606 client connect 시도, frame X (휴장) | A75606 idle |
+| 5/18 월 08:30 CF 시작 | A75606 정상 | A75606 frames 수신 |
+
+---
+
+## 5/18 만기일 검증 관찰 (자동 rollover 검증용)
+
+**자동 rollover 구현 (PR6c-2d-1) 검증 + 옵션 관찰 항목.**
+
+**핵심 검증 (rollover 동작):**
+
+1. **5/18 월 07:00 ~ 07:05 사이 cron 발화**:
+   ```bash
+   docker compose logs fastapi --since "2026-05-18T06:55+09:00" | grep -E '\[krx\] (rollover|reconcile)'
+   # 기대: [krx] rollover A75605/202605 → A75606/202606 reason=scheduled
+   # 기대: [krx] KisFuturesClient 시작 — contract=A75606 expiry=2026-06-15
+   ```
+
+2. **5/18 월 08:30 정규장 시작 시 새 contract subscribe 성공**:
+   ```bash
+   docker compose logs fastapi --since "2026-05-18T08:25+09:00" | grep -E '\[kis_ws\] subscribed'
+   # 기대: subscribed tr_id=H0CFCNT0/H0CFASP0 key=A75606
+   ```
+
+3. **DB에 새 월물 데이터 적재**:
+   ```sql
+   SELECT MIN(timestamp), COUNT(*) FROM source_rates 
+   WHERE source='krx' AND timestamp >= '2026-05-18 00:00:00';
+   -- 기대: 첫 row가 5/18 08:30 직후 + 행 수 정상 증가
+   ```
+
+**옵션 관찰 (KIS 측 동작 패턴):**
+
+4. **A75605 (옛 만기) silence 패턴** (수동, 별도 ad-hoc 스크립트 권장):
+   - 5/18 07:00 swap 이후에도 별도 client로 A75605 subscribe 유지하면 어떤 frame 패턴인가
+   - 11:30 만기 종료 시점의 끊김 / disconnect / reconnect 시도 패턴
+   - 본 운영 client에는 영향 없음 (이미 A75606 운영 중)
+
+5. **KIS master file `mmsc_cls_code` 변경 timing**:
+   - 5/18 매시간 master 다운로드 → A75605 존재 / A75606 mmsc_cls_code 추적
+   - 가설 검증: (a) 11:30 직후 즉시 / (b) 익일 갱신 / (c) 며칠 후 batch
+   - 별도 ad-hoc 스크립트 (운영 코드 contamination 0)
+
+6. **REST inquire-price 응답 변화 timing**:
+   - A75605에 대한 KIS REST 호출 응답 형식 변화 시점 추적
+   - 2026-05-07 사전 검증 (A75604 만기 17일 후 + master 제거 상태): rt_cd=0이어도 `futs_prpr` 부재, `bstp_*` (지수형) keys 응답. helper의 `futs_prpr/prpr 부재` 검사가 None 차단으로 안전.
+   - 5/18 11:30 직후 A75605에 대한 응답 변화 시점 측정 (만기 정확한 시점 vs master 제거 시점 분리)
+
+**수집된 데이터로 후속 결정:**
+
+- PR6c-2d-5 (hybrid scheduler 전환): 5/18 swap이 5분 cron으로 안전하게 통과 확인 시 06:01 + boundary 기반으로 축소
+- PR6d-2b (REST fallback): stale 임계값, session-end grace, reconnect 동반 조건, cooldown
+- 점프 보호 임계값 (현재 45일) 적정성
 
 ---
 
