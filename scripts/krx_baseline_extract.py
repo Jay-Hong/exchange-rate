@@ -14,6 +14,14 @@ Docker log의 `[kis_ws] metrics` 라인을 파싱해 session/status/gap 통계 �
     python scripts/krx_baseline_extract.py --since 2026-05-08T00:00 --until 2026-05-08T23:59 app.log
 
 v1 범위: log-only. admin API snapshot merge / gap_buckets / frame breakdown은 v2.
+
+v1.1 추가 (Codex 권고, 2026-05-08):
+- status 전이 로그 (`normal → stale` / `stale → normal`) 직접 파싱
+  → cumulative counter delta의 시간 지연 한계 해결 (휴장 동안 summary 안 찍히면
+  CM 마지막 stale이 다음 active session 첫 summary로 밀림)
+- 6 sub-session 분류: CF/CM × OPEN_AUCTION / CONTINUOUS / CLOSE_AUCTION
+  단일가 구간(10분) 별도 라벨링 → PR6d-2b session-end grace 자료
+  출처: KRX FICC 파생상품 개편 후 일반 거래일 시간표 (특수일/만기일 예외)
 """
 from __future__ import annotations
 
@@ -42,6 +50,98 @@ LOG_LINE_RE = re.compile(
     r"stale_transitions=(?P<st>\d+)\s+"
     r"reconnect_attempts=(?P<rc>\d+)"
 )
+
+
+# v1.1 — status 전이 로그 파서 (`[kis_ws] status normal → stale` 등)
+# cumulative counter delta보다 정확한 stale 발화/복구 시각.
+STATUS_TRANSITION_RE = re.compile(
+    r"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+    r".*?\[kis_ws\] status (?P<from_status>\w+) → (?P<to_status>\w+)"
+)
+
+
+# v1.1 — KRX 일반 거래일 sub-session 시간 (KRX FICC 개편 후 자료 기반)
+# 만기일/특수일 예외 — caveat은 KRX_CANARY runbook에 명시
+_CF_OPEN_AUCTION_END = time(8, 45)     # 시가 단일가 종료
+_CF_CLOSE_AUCTION_START = time(15, 35)  # 종가 단일가 시작
+_CF_END = time(15, 45)
+_CM_OPEN_AUCTION_END = time(18, 0)      # 야간 시가 단일가 종료
+_CM_CLOSE_AUCTION_START = time(5, 50)   # 야간 종가 단일가 시작 (다음날 새벽)
+_CM_END = time(6, 0)
+
+
+@dataclass
+class StatusTransition:
+    """status 전이 1건 (v1.1 추가)."""
+    ts: datetime
+    from_status: str
+    to_status: str
+
+
+def parse_status_transition(line: str) -> Optional[StatusTransition]:
+    """`[kis_ws] status X → Y` 라인 파싱. 비매칭 시 None."""
+    m = STATUS_TRANSITION_RE.search(line)
+    if not m:
+        return None
+    return StatusTransition(
+        ts=datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M:%S"),
+        from_status=m.group("from_status"),
+        to_status=m.group("to_status"),
+    )
+
+
+def classify_sub_session(ts: datetime, session: str) -> str:
+    """일반 거래일 sub-session 분류 (KRX FICC 자료 기반).
+
+    Returns:
+        "CF_OPEN_AUCTION" / "CF_CONTINUOUS" / "CF_CLOSE_AUCTION"
+        "CM_OPEN_AUCTION" / "CM_CONTINUOUS" / "CM_CLOSE_AUCTION"
+        "UNKNOWN" (session이 CF/CM 아니거나 시간이 정의 외)
+
+    만기일은 거래시간 단축 (08:45~11:30) — v1.1은 일반 거래일만.
+    """
+    t = ts.time()
+    if session == "CF":
+        if t < _CF_OPEN_AUCTION_END:
+            return "CF_OPEN_AUCTION"
+        if t < _CF_CLOSE_AUCTION_START:
+            return "CF_CONTINUOUS"
+        if t <= _CF_END:
+            return "CF_CLOSE_AUCTION"
+        return "UNKNOWN"
+    if session == "CM":
+        # 야간: 17:50~18:00 (open auction), 18:00~05:50 (continuous), 05:50~06:00 (close auction)
+        if t >= time(17, 50):
+            if t < _CM_OPEN_AUCTION_END:
+                return "CM_OPEN_AUCTION"
+            return "CM_CONTINUOUS"  # 18:00~23:59
+        if t < _CM_CLOSE_AUCTION_START:
+            return "CM_CONTINUOUS"  # 00:00~05:50
+        if t <= _CM_END:
+            return "CM_CLOSE_AUCTION"  # 05:50~06:00
+        return "UNKNOWN"
+    return "UNKNOWN"
+
+
+def pair_stale_transitions(
+    transitions: List[StatusTransition],
+) -> List[Tuple[StatusTransition, Optional[StatusTransition]]]:
+    """`normal → stale` 와 다음 `stale → normal` 페어링.
+
+    Returns:
+        list of (start, end_or_None). end가 None이면 미복구 (윈도우 끝까지 stale).
+    """
+    pairs: List[Tuple[StatusTransition, Optional[StatusTransition]]] = []
+    pending_start: Optional[StatusTransition] = None
+    for tr in transitions:
+        if tr.to_status == "stale":
+            pending_start = tr
+        elif tr.from_status == "stale" and pending_start is not None:
+            pairs.append((pending_start, tr))
+            pending_start = None
+    if pending_start is not None:
+        pairs.append((pending_start, None))
+    return pairs
 
 
 @dataclass
@@ -98,6 +198,10 @@ def session_end_minutes(ts: datetime, session: str) -> Optional[int]:
 
     Returns:
         정수 분. CF=15:45, CM=다음날 06:00 (또는 같은 날 06:00). 미지원 session은 None.
+
+    Note:
+        2분 미만 정밀도가 필요한 출력에는 format_session_end_delta() 사용.
+        (int 절삭으로 39초 → 0분 표시되는 오해 차단, Codex 권고)
     """
     if session == "CF":
         end = datetime.combine(ts.date(), time(15, 45))
@@ -111,6 +215,59 @@ def session_end_minutes(ts: datetime, session: str) -> Optional[int]:
         return None
     delta_sec = (end - ts).total_seconds()
     return int(delta_sec / 60)
+
+
+def format_session_end_delta(ts: datetime, session: str) -> Optional[str]:
+    """v1.1 — session_end 까지 남은 시간 표시 (2분 미만은 초 단위).
+
+    `int(delta_sec / 60)`만 사용하면 39초가 "0분"으로 잘려 분석자가 "종료 시점
+    이후/동시"로 오해 가능 (Codex 권고). 2분 (120s) 미만은 초 단위로.
+
+    Returns:
+        "session_end -39s" / "session_end -4 min" / "session_end -32 min" 등.
+        미지원 session은 None.
+    """
+    if session == "CF":
+        end = datetime.combine(ts.date(), time(15, 45))
+    elif session == "CM":
+        if ts.time() >= time(17, 50):
+            end = datetime.combine(ts.date() + timedelta(days=1), time(6, 0))
+        else:
+            end = datetime.combine(ts.date(), time(6, 0))
+    else:
+        return None
+    delta_sec = (end - ts).total_seconds()
+    if delta_sec < 0:
+        return f"session_end +{int(-delta_sec)}s"  # 종료 후 (이론상 발생 X)
+    if delta_sec < 120:
+        return f"session_end -{int(delta_sec)}s"
+    return f"session_end -{int(delta_sec / 60)} min"
+
+
+def session_at_ts(
+    ts: datetime,
+    metric_rows: List["MetricRow"],
+) -> str:
+    """status 전이 시점의 session 추정 (v1.1, Codex 권고).
+
+    1순위: ts 이전 가장 가까운 metric row의 session (인접 추정 — 정확)
+    2순위: timestamp 기반 직접 분류 (metric row가 ts 이전에 없을 때 fallback)
+
+    timestamp fallback 분류:
+        08:30~15:45 → CF
+        17:50~23:59 또는 00:00~06:00 → CM
+        그 외 (휴장 break) → "UNKNOWN"
+    """
+    candidates = [r for r in metric_rows if r.ts <= ts]
+    if candidates:
+        return candidates[-1].session
+    # fallback — timestamp 직접 분류 (휴장 경계 보호)
+    t = ts.time()
+    if time(8, 30) <= t <= time(15, 45):
+        return "CF"
+    if t >= time(17, 50) or t <= time(6, 0):
+        return "CM"
+    return "UNKNOWN"
 
 
 def percentile(data: List[float], p: float) -> float:
@@ -219,16 +376,24 @@ def main() -> int:
         f = sys.stdin
 
     rows: List[MetricRow] = []
+    transitions: List[StatusTransition] = []
     try:
         for line in f:
             r = parse_log_line(line)
-            if r is None:
-                continue
-            if since and r.ts < since:
-                continue
-            if until and r.ts > until:
-                continue
-            rows.append(r)
+            if r is not None:
+                if since and r.ts < since:
+                    pass
+                elif until and r.ts > until:
+                    pass
+                else:
+                    rows.append(r)
+            tr = parse_status_transition(line)
+            if tr is not None:
+                if since and tr.ts < since:
+                    continue
+                if until and tr.ts > until:
+                    continue
+                transitions.append(tr)
     finally:
         if args.logfile:
             f.close()
@@ -248,25 +413,44 @@ def main() -> int:
         for line in summarize_session(session_rows, f"  {label}"):
             print(line)
 
-    # Status transitions — stale events (cumulative counter delta)
-    stale_events = extract_counter_events(rows, "stale_transitions")
-    print(f"\nStatus transitions:")
-    print(f"  stale events: {len(stale_events)}건")
-    for ts, session, delta, cur, r in stale_events:
-        end_min = session_end_minutes(ts, session)
-        end_str = f"session_end -{end_min} min" if end_min is not None else "session N/A"
-        qa = r.quote_age if r.quote_age is not None else "None"
+    # v1.1 — Status transitions from log (정확한 시각 + 지속시간)
+    stale_pairs = pair_stale_transitions(transitions)
+    print(f"\nStatus transitions (status log 기준 — 정확):")
+    print(f"  stale events: {len(stale_pairs)}건")
+    rows_by_ts = sorted(rows, key=lambda r: r.ts)
+
+    for start, end in stale_pairs:
+        session = session_at_ts(start.ts, rows_by_ts)
+        sub = classify_sub_session(start.ts, session)
+        end_str = format_session_end_delta(start.ts, session) or "session N/A"
+        if end is not None:
+            duration = (end.ts - start.ts).total_seconds()
+            print(
+                f"    [{start.ts.strftime('%Y-%m-%d %H:%M:%S')} → "
+                f"{end.ts.strftime('%H:%M:%S')}, {duration:.0f}s] "
+                f"{sub} ({end_str})"
+            )
+        else:
+            print(
+                f"    [{start.ts.strftime('%Y-%m-%d %H:%M:%S')} → 미복구] "
+                f"{sub} ({end_str})"
+            )
+
+    # cumulative counter는 보조 cross-check
+    cum_stale = extract_counter_events(rows, "stale_transitions")
+    if len(cum_stale) != len(stale_pairs):
         print(
-            f"    [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {session} ({end_str})  "
-            f"quote_age={qa} reconnects={r.reconnect_attempts}"
+            f"  (참고: cumulative stale_transitions delta={len(cum_stale)}, "
+            f"transition log 기준={len(stale_pairs)} — 차이 시 transition log가 정확)"
         )
 
-    # Reconnect events (cumulative counter delta)
+    # Reconnect events (cumulative counter delta — reconnect 전용 status 로그 별도 X)
     rc_events = extract_counter_events(rows, "reconnect_attempts")
     print(f"\n  reconnect events: {len(rc_events)}건")
     for ts, session, delta, cur, r in rc_events:
+        sub = classify_sub_session(ts, session)
         print(
-            f"    [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {session} "
+            f"    [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {sub} "
             f"attempt={cur} (Δ={delta})"
         )
 
