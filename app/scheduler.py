@@ -1695,6 +1695,7 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
 
     # 함수 내부 import — 순환 참조 방지
     from app.crawlers.krx_kis import (
+        KisAccessTokenManager,
         KisApprovalManager,
         KisFuturesClient,
         KrxDbWriter,
@@ -1721,7 +1722,12 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
             return
 
         approval = KisApprovalManager(app_key=app_key, app_secret=app_secret)
-        client = KisFuturesClient(approval, contract=resolved)
+        # PR6d-2b Stage B: REST fallback access_token manager (env=false default라
+        # 만들어 두지만 실제 호출은 KRX_REST_FALLBACK_ENABLED=true 활성화 시점만)
+        token_manager = KisAccessTokenManager(app_key=app_key, app_secret=app_secret)
+        client = KisFuturesClient(
+            approval, contract=resolved, access_token_manager=token_manager,
+        )
         client.add_tick_handler(KrxDbWriter())
 
         krx_futures_client = client

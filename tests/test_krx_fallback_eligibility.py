@@ -273,5 +273,183 @@ class TestSetStatusTriggersEvaluation(unittest.TestCase):
         self.assertEqual(client._fallback_counters["evaluated"], 0)
 
 
+# ---------------------------------------------------------------------------
+# Stage B — _invoke_rest_fallback (env=true 시 REST 호출, Codex 권고 6 cases)
+# ---------------------------------------------------------------------------
+
+import asyncio
+from unittest.mock import AsyncMock
+
+
+def _make_client_with_token() -> KisFuturesClient:
+    contract = ContractInfo(
+        short_code="A75605",
+        standard_code="KR4A75650007",
+        name="미국달러 F 202605",
+        contract_month="202605",
+        expiry_date=date(2026, 5, 18),
+    )
+    approval = MagicMock()
+    token_manager = MagicMock()  # KisAccessTokenManager mock
+    return KisFuturesClient(
+        approval, contract=contract, access_token_manager=token_manager,
+    )
+
+
+class TestStageBInvokeRestFallback(unittest.IsolatedAsyncioTestCase):
+    """Stage B — eligible 시 REST 호출 경로. env=false default 유지."""
+
+    async def test_invoke_rest_success_increments_counter(self):
+        """fetch 성공 → rest_success +1."""
+        client = _make_client_with_token()
+        client._active_session = "CF"
+        mock_result = {
+            "price": "1450.5", "session": "CF", "contract_code": "A75605",
+        }
+        with patch(
+            "app.crawlers.krx_kis.fetch_kis_futures_quote",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            await client._invoke_rest_fallback()
+        self.assertEqual(client._fallback_counters["rest_success"], 1)
+        self.assertEqual(client._fallback_counters["rest_error"], 0)
+
+    async def test_invoke_rest_none_increments_error(self):
+        """fetch None 반환 → rest_error +1."""
+        client = _make_client_with_token()
+        client._active_session = "CF"
+        with patch(
+            "app.crawlers.krx_kis.fetch_kis_futures_quote",
+            new=AsyncMock(return_value=None),
+        ):
+            await client._invoke_rest_fallback()
+        self.assertEqual(client._fallback_counters["rest_error"], 1)
+        self.assertEqual(client._fallback_counters["rest_success"], 0)
+
+    async def test_invoke_rest_exception_increments_error(self):
+        """fetch raise → rest_error +1 (예외 propagate X)."""
+        client = _make_client_with_token()
+        client._active_session = "CF"
+        with patch(
+            "app.crawlers.krx_kis.fetch_kis_futures_quote",
+            new=AsyncMock(side_effect=ConnectionError("network")),
+        ):
+            await client._invoke_rest_fallback()
+        self.assertEqual(client._fallback_counters["rest_error"], 1)
+
+    async def test_invoke_rest_skipped_when_no_token_manager(self):
+        """access_token_manager None (Stage A 호환) → rest_error + skip log."""
+        contract = ContractInfo(
+            short_code="A75605", standard_code="KR4A75650007",
+            name="미국달러 F 202605", contract_month="202605",
+            expiry_date=date(2026, 5, 18),
+        )
+        client = KisFuturesClient(MagicMock(), contract=contract)
+        # access_token_manager 미주입
+        await client._invoke_rest_fallback()
+        self.assertEqual(client._fallback_counters["rest_error"], 1)
+
+
+class TestStageBEligibleTriggersTask(unittest.IsolatedAsyncioTestCase):
+    """eligible 분기에서 env=true 시 task 생성, env=false 시 task 생성 X."""
+
+    @staticmethod
+    def _kst_epoch(year: int, month: int, day: int, h: int, m: int = 0) -> float:
+        from datetime import timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        return datetime(year, month, day, h, m).replace(tzinfo=KST).timestamp()
+
+    async def test_eligible_with_env_true_creates_task(self):
+        """env=true + eligible → task 생성 + _last_fallback_at 갱신."""
+        client = _make_client_with_token()
+        ts = self._kst_epoch(2026, 5, 8, 12, 0)
+        client._last_tick_at = ts - 200
+        client._active_session = "CF"
+        client._last_fallback_at = None
+        with patch.object(config, "KRX_REST_FALLBACK_ENABLED", True), \
+             patch.object(config, "KRX_REST_FALLBACK_STALE_SEC", 120), \
+             patch.object(config, "KRX_REST_FALLBACK_SESSION_END_GRACE_MIN", 40), \
+             patch.object(config, "KRX_REST_COOLDOWN_SEC", 30), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value={"price": "1450", "session": "CF"}),
+             ):
+            decision = client._evaluate_rest_fallback(ts)
+            # task 완료 대기
+            for t in list(client._fallback_tasks):
+                await t
+        self.assertEqual(decision, "eligible")
+        self.assertEqual(client._last_fallback_at, ts)  # task 생성 직전 갱신
+        self.assertEqual(client._fallback_counters["rest_success"], 1)
+
+    async def test_eligible_with_env_false_no_task(self):
+        """env=false + eligible 도달 → task 생성 X (counter는 disabled로 분류)."""
+        # 사실 env=false면 evaluate에서 disabled로 분기되어 eligible 안 도달.
+        # 이 test는 검사 순서가 의도대로 동작하는지 확인.
+        client = _make_client_with_token()
+        ts = self._kst_epoch(2026, 5, 8, 12, 0)
+        client._last_tick_at = ts - 200
+        client._active_session = "CF"
+        client._last_fallback_at = None
+        with patch.object(config, "KRX_REST_FALLBACK_ENABLED", False), \
+             patch.object(config, "KRX_REST_FALLBACK_STALE_SEC", 120), \
+             patch.object(config, "KRX_REST_FALLBACK_SESSION_END_GRACE_MIN", 40), \
+             patch.object(config, "KRX_REST_COOLDOWN_SEC", 30):
+            decision = client._evaluate_rest_fallback(ts)
+        # 모든 다른 조건 통과 → suppressed_disabled (eligible 아님)
+        self.assertEqual(decision, "suppressed_disabled")
+        self.assertEqual(len(client._fallback_tasks), 0)
+        self.assertIsNone(client._last_fallback_at)
+
+    async def test_consecutive_eligible_cooldown_blocks_second(self):
+        """env=true 연속 eligible 평가 시 cooldown 때문에 두 번째는 차단 (Codex 추가 권고)."""
+        client = _make_client_with_token()
+        ts1 = self._kst_epoch(2026, 5, 8, 12, 0)
+        client._last_tick_at = ts1 - 200
+        client._active_session = "CF"
+        client._last_fallback_at = None
+        with patch.object(config, "KRX_REST_FALLBACK_ENABLED", True), \
+             patch.object(config, "KRX_REST_FALLBACK_STALE_SEC", 120), \
+             patch.object(config, "KRX_REST_FALLBACK_SESSION_END_GRACE_MIN", 40), \
+             patch.object(config, "KRX_REST_COOLDOWN_SEC", 30), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value={"price": "1450", "session": "CF"}),
+             ):
+            # 1차 평가 → eligible + task 생성 + _last_fallback_at = ts1
+            d1 = client._evaluate_rest_fallback(ts1)
+            # 2차 평가 (10초 후, cooldown 30s 안)
+            ts2 = ts1 + 10
+            client._last_tick_at = ts2 - 200  # 여전히 stale
+            d2 = client._evaluate_rest_fallback(ts2)
+            for t in list(client._fallback_tasks):
+                await t
+        self.assertEqual(d1, "eligible")
+        self.assertEqual(d2, "suppressed_cooldown")
+        # task 1개만 생성 (2차는 cooldown 차단)
+        self.assertEqual(client._fallback_counters["rest_success"], 1)
+
+
+class TestStageBStopCleansUpTasks(unittest.IsolatedAsyncioTestCase):
+    """stop() 시 잔여 fallback task cancel + await (Codex 1 권고)."""
+
+    async def test_stop_cancels_pending_tasks(self):
+        client = _make_client_with_token()
+
+        # 영원히 끝나지 않는 task 등록
+        async def slow():
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(slow())
+        client._fallback_tasks.add(task)
+        task.add_done_callback(client._fallback_tasks.discard)
+
+        await client.stop()
+
+        # task가 cancel되어 set이 정리됨
+        self.assertEqual(len(client._fallback_tasks), 0)
+        self.assertTrue(task.cancelled() or task.done())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3146,9 +3146,24 @@ PR6d-2a 초안 구현(commit 658ea27, 2026-05-06)은 metric state 골격은 박�
 
 - env 검증: `KRX_REST_FALLBACK_STALE_SEC < KRX_STALE_SEC`이면 ValueError (의미 모순 차단)
 
-**Stage B (5/12+ multi-day baseline 후 별도 GO)**:
+**Stage B 코드 골격 (2026-05-09 추가, env=false 유지)**:
+
+env=false default 유지 — 운영 영향 0. 코드 경로만 준비해 multi-day baseline 후 env 변경만으로 즉시 활성화 가능.
+
+구현:
+- `KisFuturesClient.__init__`에 `access_token_manager` 인자 추가 (Optional, Stage A 호환)
+- `_invoke_rest_fallback` async 메서드: `fetch_kis_futures_quote` 호출 + rest_success/rest_error counter
+- `_evaluate_rest_fallback` eligible 분기에 task 생성 (env=true일 때만)
+- `_fallback_tasks: set` lifecycle 추적 + `add_done_callback(discard)` 자동 정리 (Codex 1 권고)
+- `_last_fallback_at` 갱신을 task 생성 직전에 (Codex 2 권고 — REST hang 시 중복 task 차단)
+- `stop()`에서 잔여 fallback task cancel + await
+- `_bootstrap_krx_futures_client`에 `KisAccessTokenManager` wiring
+
+REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (Stage C).
+
+**Stage B 활성화 (5/12+ multi-day baseline 후 별도 GO)**:
 - `KRX_REST_FALLBACK_ENABLED=true` 활성화
-- eligible 시 실제 `fetch_kis_futures_quote` 호출
+- 실제 `fetch_kis_futures_quote` 호출
 - counter `rest_success` / `rest_error` 누적
 
 **Stage C (5/18 만기 통과 + multi-day eligible 빈도 확인 후)**:

@@ -520,17 +520,21 @@ class KisFuturesClient:
         approval_manager: KisApprovalManager,
         *,
         contract: Optional[ContractInfo] = None,
+        access_token_manager: Optional[KisAccessTokenManager] = None,
     ) -> None:
         """KIS futures WebSocket client.
 
         Args:
-            approval_manager: approval_key cache/refresh helper.
+            approval_manager: approval_key cache/refresh helper (WebSocket).
             contract: 구독 대상 종목 (PR6c-2a). None이면 PR6a static
                 (A75605, 2026-05-18 만기) — 단위 테스트 / 운영 미연결용.
                 운영 진입 (PR6c-2b)에서는 select_active_usd_futures_contract
                 결과 주입.
+            access_token_manager: REST API access_token cache/refresh (PR6d-2b Stage B).
+                None이면 REST fallback 비활성 (Stage A 호환). 운영 bootstrap에서 주입.
         """
         self._approval = approval_manager
+        self._access_token_manager = access_token_manager
         self._contract = contract or self._default_contract()
         self._tick_handlers: List[TickHandler] = []
         self._status: str = "normal"
@@ -583,6 +587,9 @@ class KisFuturesClient:
             "rest_error": 0,                     # REST 호출 실패 (Stage B+)
         }
         self._last_fallback_at: Optional[float] = None  # cooldown 추적
+        # PR6d-2b Stage B (Codex 1 권고): fire-and-forget task lifecycle 추적.
+        # add_done_callback(discard)으로 자동 정리 + stop()에서 잔여 cancel/await.
+        self._fallback_tasks: "set[asyncio.Task]" = set()
 
     @staticmethod
     def _init_gap_buckets() -> Dict[str, int]:
@@ -890,13 +897,74 @@ class KisFuturesClient:
             self._fallback_counters["suppressed_disabled"] += 1
             return "suppressed_disabled"
 
-        # 5. 모든 조건 통과 — eligible (Stage B+에서 실제 REST 호출)
+        # 5. 모든 조건 통과 — eligible
         self._fallback_counters["eligible"] += 1
-        # Stage A: 실제 REST 호출은 아직 X. Stage B 진입 시 여기에 fetch_kis_futures_quote 추가.
+
+        # Stage B (Codex 2 권고): env=true일 때만 실제 REST 호출 task 생성.
+        # _last_fallback_at은 task 생성 직전에 갱신 (cooldown 호출 시도 시점 기준).
+        # finally 블록 갱신 시 REST hang에서 cooldown 안 잡혀 중복 task 폭주 위험.
+        if config.KRX_REST_FALLBACK_ENABLED:
+            self._last_fallback_at = now_epoch
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # async loop 외 호출 (테스트 환경 등) — task 생성 skip
+                return "eligible"
+            task = loop.create_task(self._invoke_rest_fallback())
+            self._fallback_tasks.add(task)
+            task.add_done_callback(self._fallback_tasks.discard)
         return "eligible"
+
+    async def _invoke_rest_fallback(self) -> None:
+        """Stage B — eligible 시 REST 호출. 결과는 log/counter만 (broadcast/DB 미반영).
+
+        Stage C에서 broadcast/DB 반영 (별도 GO + V2 protocol).
+        예외/None은 모두 rest_error counter로 분류.
+        """
+        if self._access_token_manager is None:
+            # Stage A 호환 — wiring 안 됐으면 rest_error로 분류 + skip
+            self._fallback_counters["rest_error"] += 1
+            logger.warning(
+                "[kis_ws] REST fallback skip — access_token_manager 미주입 (wiring 누락)"
+            )
+            return
+        try:
+            result = await fetch_kis_futures_quote(
+                contract=self._contract,
+                token_manager=self._access_token_manager,
+                session=self._active_session,
+            )
+            if result is not None:
+                self._fallback_counters["rest_success"] += 1
+                logger.info(
+                    "[kis_ws] REST fallback success contract=%s price=%s session=%s",
+                    self._contract.short_code, result.get("price"), result.get("session"),
+                )
+            else:
+                self._fallback_counters["rest_error"] += 1
+                logger.warning(
+                    "[kis_ws] REST fallback returned None contract=%s",
+                    self._contract.short_code,
+                )
+        except Exception:
+            self._fallback_counters["rest_error"] += 1
+            logger.exception("[kis_ws] REST fallback 호출 실패")
 
     async def stop(self) -> None:
         self._stop.set()
+        # PR6d-2b Stage B (Codex 1 권고): 잔여 fallback task cancel + await.
+        # fire-and-forget task가 shutdown 시 pending warning 또는 hang 방지.
+        if self._fallback_tasks:
+            pending = list(self._fallback_tasks)
+            for t in pending:
+                if not t.done():
+                    t.cancel()
+            for t in pending:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._fallback_tasks.clear()
 
     async def _run_session(self, session: str) -> None:
         """단일 active session 동안 WebSocket 연결 유지 + reconnect."""
