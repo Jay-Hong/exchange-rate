@@ -72,10 +72,37 @@ KRX_STALE_SEC = int(os.getenv("KRX_STALE_SEC", "60"))
 # 방지용 (stale 지속 중에는 cooldown마다 1회). status 복귀는 frame 1건 즉시.
 KRX_REST_COOLDOWN_SEC = int(os.getenv("KRX_REST_COOLDOWN_SEC", "30"))
 
+# PR6d-2b: REST fallback eligibility threshold (초). status 전이 임계(KRX_STALE_SEC=60)와
+# 분리 — "stale 상태가 N초 이상 지속되어야 REST fallback eligible".
+# 5/8 baseline 기준 CM 종료 전 자연 silence max 76.1s → 120s 보수적 default.
+# Codex 합의 (2026-05-08): status stale 의미와 fallback 트리거 의미 혼동 방지 위해 별도 env.
+KRX_REST_FALLBACK_STALE_SEC = int(os.getenv("KRX_REST_FALLBACK_STALE_SEC", "120"))
+
+# PR6d-2b: session-end grace 분. session 종료 시각 -N 분부터 fallback 트리거 차단.
+# 5/8 baseline 기준 CM 종료 전 stale 4건 모두 32분 이내 cluster → 40분 default.
+# CONTINUOUS 끝부분 저유동성 + CLOSE_AUCTION 단일가 10분 모두 cover.
+KRX_REST_FALLBACK_SESSION_END_GRACE_MIN = int(
+    os.getenv("KRX_REST_FALLBACK_SESSION_END_GRACE_MIN", "40")
+)
+
 if KRX_STALE_SEC < 1:
     raise ValueError(
         f"KRX_STALE_SEC must be >= 1 (got {KRX_STALE_SEC}). "
         "0 이하이면 KRX WebSocket stale 판정이 즉시/무한 전이될 수 있다."
+    )
+
+if KRX_REST_FALLBACK_STALE_SEC < KRX_STALE_SEC:
+    raise ValueError(
+        f"KRX_REST_FALLBACK_STALE_SEC ({KRX_REST_FALLBACK_STALE_SEC}) must be >= "
+        f"KRX_STALE_SEC ({KRX_STALE_SEC}). fallback 임계가 status 전이 임계보다 "
+        "작으면 의미 모순 — status가 stale로 전이되기 전에 fallback eligible 판정."
+    )
+
+if KRX_REST_FALLBACK_SESSION_END_GRACE_MIN < 0:
+    raise ValueError(
+        f"KRX_REST_FALLBACK_SESSION_END_GRACE_MIN must be >= 0 "
+        f"(got {KRX_REST_FALLBACK_SESSION_END_GRACE_MIN}). 음수면 grace 함수가 "
+        "항상 False 반환하여 모든 stale이 fallback eligible — 운영 env 오설정 차단."
     )
 
 if KRX_REST_COOLDOWN_SEC < 1:

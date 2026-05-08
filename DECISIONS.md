@@ -3106,6 +3106,63 @@ PR6d-2a 초안 구현(commit 658ea27, 2026-05-06)은 metric state 골격은 박�
 - [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit): KRX/USDT topic-only 노출 + legacy FX dual-emit 계약
 - [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md): `source_rates` 기반 source/asset 모델
 
+### PR6d-2b Stage A amend (2026-05-08): REST fallback decision telemetry
+
+**배경**: 5/8 baseline 24h (CM 1 cycle + CF 1 cycle) 분석 결과, 60s stale 단독 fallback은 CM 종료 전 자연 silence에서 false positive 4건/일 발생. Codex 권고에 따라 multi-day 검증 + Codex incremental 접근(toggle-OFF + metrics-only) 채택.
+
+**Stage A (이번 PR — 코드만, 운영 영향 0)**:
+
+- env (default 모두 false/conservative):
+  - `KRX_REST_FALLBACK_ENABLED=false` (PR6d-1 기존)
+  - `KRX_REST_FALLBACK_STALE_SEC=120` (NEW — status 전이 임계 60s와 분리, Codex 권고)
+  - `KRX_REST_FALLBACK_SESSION_END_GRACE_MIN=40` (NEW — 5/8 baseline -32min cluster cover)
+  - `KRX_REST_COOLDOWN_SEC=30` (PR6d-1 기존)
+
+- evaluation 호출 시점 (Codex BLOCKING 1 fix):
+  - `_set_status` normal → stale 전이 직후 1회 (짧은 stale 6~15s 누락 차단)
+  - summary log loop stale 지속 중 60s cycle 1회 (긴 stale 추가 평가)
+
+- 검사 순서 (Codex BLOCKING 2 fix — env=false telemetry 의미 보존):
+  1. session_end_grace (시간 기반 차단 우선)
+  2. frame_age < threshold → below_threshold
+  3. cooldown 미경과 → cooldown
+  4. NOT enabled → disabled (마지막)
+  5. → eligible
+  의도: env=false라도 grace 구간 stale은 grace 분류로 잡혀야 telemetry 의미 (5/8 stale 4건 검증).
+
+- decision telemetry counter (8개):
+  - `evaluated` / `eligible`
+  - `suppressed_disabled` / `suppressed_below_threshold` / `suppressed_session_end_grace` / `suppressed_cooldown`
+  - `rest_success` / `rest_error` (Stage B+ 활성화 시만)
+
+- eligibility 결합 조건 (Codex 권고 — stale 단독 금지):
+  ```
+  ENABLED=true
+  AND frame_age >= STALE_SEC
+  AND NOT in_session_end_grace
+  AND cooldown_elapsed
+  → eligible (Stage B+에서 실제 REST 호출)
+  ```
+
+- env 검증: `KRX_REST_FALLBACK_STALE_SEC < KRX_STALE_SEC`이면 ValueError (의미 모순 차단)
+
+**Stage B (5/12+ multi-day baseline 후 별도 GO)**:
+- `KRX_REST_FALLBACK_ENABLED=true` 활성화
+- eligible 시 실제 `fetch_kis_futures_quote` 호출
+- counter `rest_success` / `rest_error` 누적
+
+**Stage C (5/18 만기 통과 + multi-day eligible 빈도 확인 후)**:
+- 임계값 튜닝 (env 변경 — 90s/150s 등)
+- 필요 시 reconnect 동반 별도 분기 추가 (현재 v1은 미포함)
+
+**테스트**: `tests/test_krx_fallback_eligibility.py` 14 케이스 (helper grace 7 + evaluate 7).
+
+**5/8 baseline 데이터로 Stage A 차단 검증**:
+- stale 4건 모두 (-32min/-26min/-4min/-39s) → `suppressed_session_end_grace` 차단
+- 나머지 시간 stale 0건 → evaluation 자체 발생 X
+
+---
+
 ### PR6c-2d-1 amend (2026-05-07): 자동 rollover 정책 추가
 
 **배경**: 5/18 만기 직전, 자동 rollover 미구현 시 만기 종목 client가 silence 또는 잘못된 종목 운영 위험. 5/18 관찰을 정책 결정용 → 검증용으로 격상하기 위한 사전 구현.

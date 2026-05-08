@@ -44,6 +44,7 @@ import websockets
 from app import config
 from app.sources.kis_futures import (
     get_active_session,
+    is_in_session_end_grace,
     parse_h0cfasp0_payload,
     parse_h0cfcnt0_payload,
     parse_h0mfasp0_payload,
@@ -568,6 +569,21 @@ class KisFuturesClient:
         self._max_trade_gap_sec: float = 0.0
         self._max_quote_gap_sec: float = 0.0
 
+        # PR6d-2b — REST fallback decision telemetry counters (Stage A: env=false default).
+        # 매 evaluation 1회당 +1 (summary log loop 60s cycle, status==stale일 때만).
+        # Codex 권고 (2026-05-08): "fallback 실행이 아니라 fallback decision telemetry".
+        self._fallback_counters: Dict[str, int] = {
+            "evaluated": 0,                      # 총 evaluation 횟수
+            "eligible": 0,                       # 모든 조건 통과
+            "suppressed_disabled": 0,            # env=false 차단
+            "suppressed_below_threshold": 0,     # frame_age < KRX_REST_FALLBACK_STALE_SEC
+            "suppressed_session_end_grace": 0,   # session 종료 grace 구간
+            "suppressed_cooldown": 0,            # 직전 fallback 후 cooldown
+            "rest_success": 0,                   # 실제 REST 호출 성공 (Stage B+)
+            "rest_error": 0,                     # REST 호출 실패 (Stage B+)
+        }
+        self._last_fallback_at: Optional[float] = None  # cooldown 추적
+
     @staticmethod
     def _init_gap_buckets() -> Dict[str, int]:
         """gap bucket dict. ADR-027 후보 boundary."""
@@ -684,7 +700,11 @@ class KisFuturesClient:
                 "unknown_tr_id": self._unknown_tr_id_count,
                 "reconnect_attempt": self._reconnect_attempt_count,
                 "status_transitions": dict(self._status_transition_count),
+                # PR6d-2b — REST fallback decision telemetry (Stage A)
+                "fallback": dict(self._fallback_counters),
             },
+            "fallback_last_at": self._last_fallback_at,
+            "fallback_last_at_kst": self._epoch_to_kst_iso(self._last_fallback_at),
             "gap_buckets": {
                 "total": dict(self._gap_buckets_total),
                 "trade": dict(self._gap_buckets_trade),
@@ -787,17 +807,93 @@ class KisFuturesClient:
             prev_frame_total = self._frame_count_total
             prev_at = now
             m = self.get_metrics()
+            # PR6d-2b — REST fallback evaluation (status==stale일 때만, 60s cycle 1회).
+            # Codex 권고: counter 부풀림 차단 위해 evaluation 단위는 summary cycle.
+            # Codex 2회차 minor fix: evaluation을 logger.info 앞으로 이동 — 같은 cycle의
+            # 결과가 즉시 같은 summary log에 반영되도록.
+            if self._status == "stale":
+                self._evaluate_rest_fallback(now)
+
+            # m을 evaluation 후 다시 가져옴 (counter 갱신 반영)
+            m = self.get_metrics()
+            fb = m["counters"]["fallback"]
             logger.info(
                 "[kis_ws] metrics session=%s status=%s frames_per_min=%d "
                 "frame_age=%s trade_age=%s quote_age=%s "
                 "max_total_gap=%.1f max_trade_gap=%.1f max_quote_gap=%.1f "
-                "stale_transitions=%d reconnect_attempts=%d",
+                "stale_transitions=%d reconnect_attempts=%d "
+                "fb_eval=%d fb_eligible=%d fb_grace=%d fb_below_th=%d "
+                "fb_cooldown=%d fb_disabled=%d",
                 m["active_session"], m["status"], frames_per_min,
                 m["last_frame_age_sec"], m["last_trade_frame_age_sec"], m["last_quote_frame_age_sec"],
                 m["max_gap_sec"]["total"], m["max_gap_sec"]["trade"], m["max_gap_sec"]["quote"],
                 m["counters"]["status_transitions"]["stale"],
                 m["counters"]["reconnect_attempt"],
+                fb["evaluated"], fb["eligible"], fb["suppressed_session_end_grace"],
+                fb["suppressed_below_threshold"], fb["suppressed_cooldown"], fb["suppressed_disabled"],
             )
+
+    def _evaluate_rest_fallback(self, now_epoch: float) -> str:
+        """PR6d-2b — REST fallback eligibility 평가 + counter 갱신.
+
+        Returns:
+            decision label ("eligible" / "suppressed_*"). 운영 admin/log용.
+
+        호출 시점 (Codex BLOCKING 1 fix):
+        - status normal → stale 전이 직후 (짧은 stale 6~15s 누락 차단)
+        - summary log loop stale 지속 중 1회 (긴 stale 추가 평가, 60s cycle)
+
+        검사 순서 (Codex BLOCKING 2 fix — env=false telemetry 의미 보존):
+        1. session_end_grace 차단 (시간 기반, frame_age 무관)
+        2. frame_age < KRX_REST_FALLBACK_STALE_SEC → below_threshold
+        3. cooldown 미경과 → cooldown
+        4. NOT enabled (env=false) → disabled
+        5. 모두 통과 → eligible
+
+        의도: env=false + grace 구간 stale은 suppressed_session_end_grace로
+        분류되어 "5/8 4건 grace 차단 검증" 가능. env 검사가 우선이면 모든
+        evaluation이 disabled로 묶여 telemetry 의미 X.
+
+        Stage A (env=false default): eligible 도달해도 실제 REST 호출 X.
+        Stage B+: eligible 시 fetch_kis_futures_quote 호출 (별도 GO).
+        """
+        self._fallback_counters["evaluated"] += 1
+
+        # 1. session-end grace (시간 기반 차단 우선 — Codex 권고)
+        now_kst = datetime.fromtimestamp(now_epoch, tz=KST).replace(tzinfo=None)
+        if is_in_session_end_grace(
+            now_kst,
+            self._active_session,
+            config.KRX_REST_FALLBACK_SESSION_END_GRACE_MIN,
+            self._contract.expiry_date,
+        ):
+            self._fallback_counters["suppressed_session_end_grace"] += 1
+            return "suppressed_session_end_grace"
+
+        # 2. frame_age 임계
+        frame_age = (
+            now_epoch - self._last_tick_at if self._last_tick_at else 0.0
+        )
+        if frame_age < config.KRX_REST_FALLBACK_STALE_SEC:
+            self._fallback_counters["suppressed_below_threshold"] += 1
+            return "suppressed_below_threshold"
+
+        # 3. cooldown
+        if self._last_fallback_at and (
+            now_epoch - self._last_fallback_at < config.KRX_REST_COOLDOWN_SEC
+        ):
+            self._fallback_counters["suppressed_cooldown"] += 1
+            return "suppressed_cooldown"
+
+        # 4. env (마지막 — Stage A에서 모든 다른 조건 통과 시만 disabled로 잡힘)
+        if not config.KRX_REST_FALLBACK_ENABLED:
+            self._fallback_counters["suppressed_disabled"] += 1
+            return "suppressed_disabled"
+
+        # 5. 모든 조건 통과 — eligible (Stage B+에서 실제 REST 호출)
+        self._fallback_counters["eligible"] += 1
+        # Stage A: 실제 REST 호출은 아직 X. Stage B 진입 시 여기에 fetch_kis_futures_quote 추가.
+        return "eligible"
 
     async def stop(self) -> None:
         self._stop.set()
@@ -840,11 +936,17 @@ class KisFuturesClient:
 
     def _set_status(self, new_status: str) -> None:
         if self._status != new_status:
+            prev_status = self._status
             logger.info("[kis_ws] status %s → %s", self._status, new_status)
             self._status = new_status
             # PR6d-2a — status transition counter (flap / false stale 감지용)
             if new_status in self._status_transition_count:
                 self._status_transition_count[new_status] += 1
+            # PR6d-2b BLOCKING 1 fix (Codex 검토): normal → stale 전이 시점에
+            # fallback evaluation 1회. 짧은 stale (6~15s) 누락 차단.
+            # summary loop은 60s cycle이라 transition만으로는 부족 (stale 종료 후 평가).
+            if prev_status == "normal" and new_status == "stale":
+                self._evaluate_rest_fallback(time.time())
 
     async def _connect_and_listen(self, session: str, approval_key: str) -> None:
         """WebSocket 연결 + subscribe + recv loop. 예외 시 caller가 reconnect."""

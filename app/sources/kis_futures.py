@@ -389,3 +389,39 @@ def get_active_session(
 
     # 3. 그 외 (06:00-08:30 break, 15:45-17:50 break 또는 휴장일)
     return None
+
+
+def is_in_session_end_grace(
+    now: datetime,
+    session: Optional[Literal["CF", "CM"]],
+    grace_min: int,
+    contract_expiry_date: Optional[date] = None,
+) -> bool:
+    """현재 시점이 session 종료 grace_min 분 이내인지.
+
+    PR6d-2b: REST fallback 트리거 차단 grace 구간 판정.
+    CM 종료 전 -40분(default) 자연 silence cluster (5/8 baseline 4건 모두 -32분 이내) +
+    종가 단일가 10분 cover.
+
+    Args:
+        now: KST naive datetime
+        session: "CF" / "CM" / None (휴장 시 always False)
+        grace_min: grace 분 (예: 40)
+        contract_expiry_date: 만기일 처리 (현재 v1은 무시 — 일반 거래일만)
+
+    Returns:
+        True면 grace 구간. fallback caller가 차단해야 함.
+    """
+    if session is None:
+        return False
+    if session == "CF":
+        end = datetime.combine(now.date(), _REGULAR_END)
+    elif session == "CM":
+        if now.time() >= _NIGHT_START:
+            end = datetime.combine(now.date() + timedelta(days=1), _NIGHT_END)
+        else:
+            end = datetime.combine(now.date(), _NIGHT_END)
+    else:
+        return False
+    delta = (end - now).total_seconds()
+    return 0 <= delta <= grace_min * 60
