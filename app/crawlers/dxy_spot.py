@@ -4,23 +4,24 @@
 DXY(달러지수) spot 독립 크롤러
 
 Primary: /indices/usdollar 의 __NEXT_DATA__
-Fallback1: 같은 페이지의 CSS selector
-Fallback2: Yahoo Finance
+Fallback1: 같은 페이지의 CSS selector (source는 동일하게 'investing'으로 저장)
+Fallback2 (외부 chain): CNBC `.DXY` (1순위) → Yahoo Finance `DX-Y.NYB` (최후 보루)
 
-Yahoo fallback 시간 가드:
-- ICE DX 주간 세션 OFF 구간에는 Yahoo 저장 차단
+외부 fallback 시간 가드:
+- ICE DX 주간 세션 OFF 구간에는 외부 chain 전체 차단
 - 일요일 18:00 ET 이전, 금요일 17:00 ET 이후, 토요일 전체
 - 화~금 일일 휴장(17:00~20:00 ET)은 아직 차단하지 않음
 
-Yahoo fallback 보존 정책 (market mode 기반):
-- OUT 모드 (주말): 72h 이내 Investing DB 값 존재 시 Yahoo 차단
-- IN/BREAK 모드: 아래 두 조건이 모두 충족될 때만 Yahoo 차단 (하나라도 깨지면 Yahoo 허용)
+외부 fallback 보존 정책 (market mode 기반):
+- OUT 모드 (주말): 72h 이내 Investing DB 값 존재 시 외부 chain 차단
+- IN/BREAK 모드: 아래 두 조건이 모두 충족될 때만 외부 chain 차단 (하나라도 깨지면 허용)
   - fresh 성공이 grace 이내 (IN: 15분, BREAK: 30분)
   - 연속 실패가 임계값 미만 (IN: 3회, BREAK: 5회)
 
-Yahoo 허용 경로:
+외부 chain 허용 경로:
 - hard failure: 연속 실패 >= 임계값 → 즉시 허용 (fresh age 무관, ~30초)
 - silent stale: fresh age >= grace → 허용 (failures=0이어도, 페이지는 열리지만 데이터 안 바뀜)
+- diff guard: 첫 source가 fresh Investing과 임계값 초과 → 이후 source 포함 chain 전체 저장 보류
 """
 
 # 표준 라이브러리
@@ -68,7 +69,7 @@ SAFARI_UA_POOL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
 ]
 
-# --- Yahoo fallback 보존 정책 상수 ---
+# --- 외부 fallback 보존 정책 상수 (CNBC/Yahoo chain 공용) ---
 NY = ZoneInfo("America/New_York")
 
 IN_SUCCESS_GRACE_SECONDS = 15 * 60       # IN 모드: 15분
@@ -77,7 +78,7 @@ OUT_PRESERVE_SECONDS = 72 * 3600         # OUT 모드: 72시간
 
 IN_FAILURE_THRESHOLD = 3                 # IN 모드: 연속 3회 실패
 BREAK_FAILURE_THRESHOLD = 5              # BREAK 모드: 연속 5회 실패
-DXY_YAHOO_DIFF_THRESHOLD = 0.07          # Yahoo 저장 전 마지막 Investing 값과 허용 차이
+DXY_YAHOO_DIFF_THRESHOLD = 0.07          # 외부 chain(CNBC/Yahoo) 저장 전 마지막 fresh Investing 값과 허용 차이 (이름은 Yahoo 단일 시기 하위호환)
 
 # --- 프로세스 메모리 상태 변수 ---
 _last_source_ts_ms = 0                                      # spot primary stale 판정용
@@ -141,11 +142,11 @@ def _fresh_age_seconds(now_utc: datetime, db=None) -> float:
     return (now_utc - ts).total_seconds()
 
 
-# --- Yahoo fallback 허용 판정 ---
+# --- 외부 fallback (CNBC/Yahoo chain) 허용 판정 ---
 
 def _is_dxy_weekly_session_open(now_utc: datetime) -> bool:
     """
-    DXY Yahoo fallback 저장을 허용할 주간 세션인지 판정.
+    DXY 외부 fallback (CNBC/Yahoo chain) 저장을 허용할 주간 세션인지 판정.
 
     기준은 ICE DX 주간 단위 세션(일 18:00 ET ~ 금 17:00 ET)이다.
     DST/표준시는 America/New_York ZoneInfo가 자동 처리한다.
@@ -172,7 +173,10 @@ def _should_use_yahoo_fallback(
     latest_investing_ts: Optional[datetime],
 ) -> Tuple[bool, dict]:
     """
-    Yahoo fallback을 허용할지 판정.
+    외부 fallback chain(CNBC → Yahoo) 진입 허용 여부 판정.
+
+    함수명은 하위 호환을 위해 유지(원래 Yahoo 단일 fallback 시기 명명).
+    실제 동작은 chain 전체에 대한 게이트.
 
     IN/BREAK 판정 기준은 _last_investing_fetch_ok_at (fresh success만 갱신).
     stale(주말 페이지 열림)는 실패 카운터만 리셋하고 이 시각은 갱신하지 않으므로,
@@ -228,8 +232,8 @@ def _should_use_yahoo_fallback(
 
     elif mode == "IN":
         # 장중: 15분 이내 fresh 성공 AND 연속 실패 3회 미만일 때만 보호
-        # - hard failure: failures >= 3 → Yahoo 허용
-        # - silent stale: age >= 15분 → Yahoo 허용
+        # - hard failure: failures >= 3 → 외부 chain 허용
+        # - silent stale: age >= 15분 → 외부 chain 허용
         if age < IN_SUCCESS_GRACE_SECONDS and failures < IN_FAILURE_THRESHOLD:
             meta["reason"] = "IN_protected"
             return False, meta
@@ -479,9 +483,9 @@ def crawl_and_save_dxy_spot() -> None:
     DXY spot 독립 수집 + DB 저장
 
     - Primary 성공 시 lastUpdateTime 동일 여부로 stale 판정
-    - Primary 실패 시 같은 페이지 CSS selector 폴백
-    - 최종 실패 시 Yahoo 폴백 (market mode 기반 보존 정책 적용)
-    - Silent stale 시 IN/BREAK 모드에서 grace 초과하면 Yahoo 폴백
+    - Primary 실패 시 같은 페이지 CSS selector 폴백 (source는 'investing')
+    - 최종 실패 시 외부 fallback chain (CNBC → Yahoo, market mode 기반 보존 정책 적용)
+    - Silent stale 시 IN/BREAK 모드에서 grace 초과하면 외부 chain 진입
     """
     global _last_source_ts_ms
     from app import crud
@@ -501,7 +505,7 @@ def crawl_and_save_dxy_spot() -> None:
                     # stale: 페이지는 열리지만 데이터 변화 없음
                     _mark_investing_fetch_ok()  # 실패 카운터만 리셋
 
-                    # IN/BREAK에서 silent stale이 grace 초과하면 Yahoo 판정
+                    # IN/BREAK에서 silent stale이 grace 초과하면 외부 chain 판정
                     now_kst = now_utc.astimezone(KST)
                     mode = get_market_mode(now_kst)
                     if mode != "OUT":
@@ -509,7 +513,7 @@ def crawl_and_save_dxy_spot() -> None:
                         grace = IN_SUCCESS_GRACE_SECONDS if mode == "IN" else BREAK_SUCCESS_GRACE_SECONDS
                         if fresh_age >= grace:
                             logger.warning(
-                                "⚠️ DXY silent stale 감지 (Yahoo 판정 진행)",
+                                "⚠️ DXY silent stale 감지 (외부 fallback 판정 진행)",
                                 extra={
                                     "mode": mode,
                                     "fresh_age_seconds": int(fresh_age),
@@ -553,7 +557,7 @@ def crawl_and_save_dxy_spot() -> None:
                 exc_info=True,
             )
 
-        # Hard failure → Yahoo fallback (보존 정책 적용)
+        # Hard failure → 외부 fallback chain (CNBC → Yahoo, 보존 정책 적용)
         _try_yahoo_fallback(db, now_utc)
 
     except Exception:

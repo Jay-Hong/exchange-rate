@@ -94,7 +94,8 @@
 ### 데이터 소스
 
 - Investing.com (기준 환율)
-- DXY (달러지수, USD/KRW 그래프 보조지표) — investing.py에서 환율과 동시 추출 (폴백: /currencies/us-dollar-index, Yahoo Finance)
+- DXY 현물/운영 피드 (`instrument='dxy'`, USD/KRW 그래프 보조지표) — `dxy_spot.py` 독립 크롤러 (`/indices/usdollar` `__NEXT_DATA__` → 같은 페이지 CSS → CNBC `.DXY` → Yahoo Finance)
+- DXY 선물 (`instrument='dxy_futures'`) — `investing.py`에서 환율과 동시 추출 (`#sb_last_8827`, exchange-rates-table) → `/currencies/us-dollar-index` 폴백 (Yahoo 미사용)
 - 9개 은행: KB, 하나, 신한, 우리, IBK, NH, SC제일, 부산, 씨티
 - **가상자산 거래소 5종** (USDT/KRW, Phase 1): 업비트, 빗썸, 코인원, 고팍스, 코빗
 
@@ -112,7 +113,7 @@
 - **DB**: SQLite (개발/테스트), AWS RDS PostgreSQL (운영)
 - **ORM**: SQLAlchemy
 - **스케줄러**: APScheduler (AsyncIOScheduler)
-- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing 전용, TLS 지문 위장), yfinance (DXY Yahoo 폴백)
+- **크롤링**: requests + BeautifulSoup4, Selenium, curl_cffi (Investing 전용, TLS 지문 위장), yfinance (DXY 현물 Yahoo 최후 폴백)
 - **SSL/TLS**: Let's Encrypt (Certbot 자동 갱신, 90일 주기)
 - **리버스 프록시**: Nginx (HTTPS, HTTP/2, wss://)
 
@@ -330,14 +331,23 @@ scheduler.add_job(
 
 #### 2. 3-Tier 크롤러 아키텍처 (4단계 모드)
 
-**Tier A (investing):** 기준 환율 + DXY, 최우선
-- **특징**: 가장 중요한 데이터, 빠른 응답. DXY(달러지수)도 동시 추출 (`#sb_last_8827`)
+**Tier A:** 기준 환율 + DXY, 최우선 (independent jobs)
+- **특징**: 가장 중요한 데이터, 빠른 응답
 - **실행 방식**: Request 기반 (curl_cffi, TLS 지문 위장으로 Cloudflare 우회)
-- **DXY 폴백**: 추출 실패 시 dxy.py 폴백 모듈 호출 (60초 쿨다운, /currencies/us-dollar-index → Yahoo Finance)
+
+**Tier A1 — investing (`task_investing`)**: 은행/통화 기준 환율 + DXY 선물 동반 추출
+- **DXY 선물 (`instrument='dxy_futures'`)**: 환율과 함께 `#sb_last_8827`(exchange-rates-table)을 추출. 셀렉터 실패 시 `dxy.py`의 `/currencies/us-dollar-index` 폴백 (60초 쿨다운, Yahoo 미사용)
 - **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 3초 전)
   - `cron(second='7,17,27,37,47,57')`
 - **OUT**: 10분마다
   - `cron(minute='7,17,27,37,47,57', second='45')`
+
+**Tier A2 — dxy_spot (`task_dxy`)**: DXY 현물/운영 피드 독립 크롤러
+- **DXY 현물 (`instrument='dxy'`)**: `/indices/usdollar` `__NEXT_DATA__` → 같은 페이지 CSS → 외부 chain (CNBC `.DXY` → Yahoo `DX-Y.NYB`). 외부 chain은 주간 세션 / market mode 보존 / fresh-age diff guard 적용
+- **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 9초 전, investing과 6초 엇갈림)
+  - `cron(second='1,11,21,31,41,51')`
+- **OUT**: 매분 수집 유지 (investing보다 10× 빈도)
+  - `cron(minute='*', second='15')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
@@ -378,29 +388,35 @@ scheduler.add_job(
 
 ```
 00초: Broadcasting
+01초: dxy_spot (DXY 현물)
 05초: hana
-07초: investing (+ DXY 동시 추출)
+07초: investing (+ DXY 선물 동반 추출)
 10초: Broadcasting
+11초: dxy_spot (DXY 현물)
 13초: citi
 15초: kb
-17초: investing (+ DXY 동시 추출)
+17초: investing (+ DXY 선물 동반 추출)
 18초: shinhan (Selenium Queue)
 20초: Broadcasting
+21초: dxy_spot (DXY 현물)
 25초: hana
-27초: investing (+ DXY 동시 추출)
+27초: investing (+ DXY 선물 동반 추출)
 30초: Broadcasting
+31초: dxy_spot (DXY 현물)
 33초: bs
 34초: ibk (Selenium Queue)
 35초: kb
-37초: investing (+ DXY 동시 추출)
+37초: investing (+ DXY 선물 동반 추출)
 40초: Broadcasting
+41초: dxy_spot (DXY 현물)
 45초: hana
-47초: investing (+ DXY 동시 추출)
+47초: investing (+ DXY 선물 동반 추출)
 50초: Broadcasting
+51초: dxy_spot (DXY 현물)
 53초: woori (우선순위 높음)
 54초: nh (Selenium Queue)
 55초: kb
-57초: investing (+ DXY 동시 추출)
+57초: investing (+ DXY 선물 동반 추출)
 58초: sc (Selenium Queue)
 ```
 
@@ -723,7 +739,8 @@ exchange-rate/
 │   │   ├── sc.py            # SC제일은행 크롤러
 │   │   ├── bs.py            # 부산은행 크롤러
 │   │   ├── citi.py          # 씨티은행 크롤러
-│   │   ├── dxy.py           # DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance) - Phase 1A
+│   │   ├── dxy_spot.py      # DXY 현물/운영 피드 (instrument='dxy') 독립 크롤러 — /indices/usdollar __NEXT_DATA__ → CSS → CNBC → Yahoo
+│   │   ├── dxy.py           # DXY 외부 폴백 유틸: 현물용 CNBC/Yahoo + 선물용 /currencies/us-dollar-index
 │   │   └── usdt_sources.py  # USDT/KRW 5개 거래소 통합 크롤러 (Phase 1, fan-out)
 │   │
 │   ├── admin/               # 관리자 도메인 (2025-10-25 리팩토링)
@@ -950,14 +967,17 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 **배경**: USD/KRW 환율 그래프에 달러지수(DXY)를 보조지표로 표시 ([ADR-019](DECISIONS.md#adr-019-dxy-보조지표---granularity-기반-2-part-merge-전략))
 
 **추가된 기능**:
-- **DXY 동시 추출**: investing.py에서 exchange-rates-table의 `#sb_last_8827` 셀렉터로 환율과 함께 추출
-  - CDN stale cache 문제 해결: `/indices/usdollar` 대신 exchange-rates-table 사용 (캐시 우회)
-  - 독립 cron job 불필요 — Tier A (investing) 크롤러와 동일 타이밍
-  - `crawler_config` 테이블에 `dxy` 행 없음 (investing에 종속)
-- **DXY 폴백 모듈** (`dxy.py`): 동시 추출 실패 시 순차 폴백
-  - 2차: `/currencies/us-dollar-index` (curl_cffi)
-  - 3차: Yahoo Finance (yfinance)
-  - 60초 쿨다운: 폴백 호출 간격 제한
+- **DXY 현물/운영 피드 (`instrument='dxy'`)**: `dxy_spot.py` 독립 크롤러
+  - Primary: `/indices/usdollar` `__NEXT_DATA__` (curl_cffi, TLS 지문 위장)
+  - Fallback1: 같은 페이지 CSS selector (`[data-test="instrument-price-last"]` 등) — source는 동일하게 `investing` 저장
+  - Fallback2 (외부 chain): CNBC `.DXY` (1순위) → Yahoo Finance `DX-Y.NYB` (최후 보루)
+  - 외부 chain 가드: ICE DX 주간 세션 / market mode 보존 정책 / fresh-age diff guard
+  - 독립 cron job (`task_dxy`)으로 등록 ([scheduler.py](app/scheduler.py))
+  - `crawler_config`에 `dxy` 행 사용 (관리자 페이지에서 활성/비활성 토글)
+- **DXY 선물 (`instrument='dxy_futures'`)**: `investing.py`가 환율과 동시 추출
+  - Primary: exchange-rates-table `#sb_last_8827`
+  - Fallback: `dxy.py`의 `fetch_dxy_from_investing_fallback()` → `/currencies/us-dollar-index` (60초 쿨다운)
+  - Yahoo는 미사용 (현물/운영 DXY 계열이라 선물 저장에 부적합)
 - **market_index_rates 테이블**: 범용 시장 지수 테이블 (granularity 컬럼)
 - **그래프 API 확장**: `/api/graph/{currency}?range=1d|1w|3m|1y`
   - USD/KRW에만 DXY 보조지표 포함 (API key=`dxy`, UI 표시명=달러지수)
@@ -984,8 +1004,9 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 4. `docker compose exec fastapi python scripts/backfill_history.py`
 
 **핵심 파일**:
-- `app/crawlers/investing.py`: DXY 동시 추출 (exchange-rates-table `#sb_last_8827`)
-- `app/crawlers/dxy.py`: DXY 폴백 모듈 (/currencies/us-dollar-index + Yahoo Finance)
+- `app/crawlers/dxy_spot.py`: DXY 현물/운영 피드 독립 크롤러 (`instrument='dxy'`, `/indices/usdollar` `__NEXT_DATA__` → CSS → CNBC → Yahoo)
+- `app/crawlers/investing.py`: DXY 선물 동시 추출 (`instrument='dxy_futures'`, exchange-rates-table `#sb_last_8827`)
+- `app/crawlers/dxy.py`: 외부 폴백 유틸 (현물: `fetch_dxy_from_cnbc` / `fetch_dxy_from_yahoo`, 선물: `fetch_dxy_from_investing_fallback` → `/currencies/us-dollar-index`)
 - `app/models.py`: MarketIndexRate 모델 (granularity 컬럼)
 - `app/admin/graph_cache.py`: 그래프 시계열 구축 (2-part merge, 버킷 집계)
 - `app/admin/dxy_rollup.py`: DXY realtime → hourly/daily rollup
