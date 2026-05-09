@@ -1,14 +1,14 @@
-"""Topic dispatcher 골격 (PR Z-2b Stage 1, 2026-05-10).
+"""Topic dispatcher (PR Z-2b Stage 1+2, 2026-05-10).
 
-Phase Z-2b의 backend topic 분배 인프라 — **골격만**.
+Phase Z-2b의 backend topic 분배 인프라.
 
 목적:
     USDT/KRX 등 topic-only source 출시 계약(ADR-028) 구현 준비.
-    Stage 1은 module + config flag만 — main.py 미연결.
 
 단계 분할:
-    - Stage 1 (이 모듈): TopicRegistry + publish_topic helper. 운영 영향 0.
-    - Stage 2 (별도 PR): main.py WebSocket handler에 subscribe 메시지 분기.
+    - Stage 1 (이 모듈, 완료): TopicRegistry + publish_topic helper. 운영 영향 0.
+    - Stage 2 (이 모듈 + main.py 통합): handle_client_message — WebSocket 클라이언트
+                       메시지 dispatch (ping/pong 보존, subscribe/unsubscribe 분기).
                        config.TOPIC_DISPATCHER_ENABLED=true시 register 가능.
     - Stage 3 (5/19+): publish_topic을 source data hook (crud.insert_source_rate
                        등)에 연결.
@@ -30,6 +30,7 @@ Phase Z-2b의 backend topic 분배 인프라 — **골격만**.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Set
 
@@ -145,3 +146,55 @@ async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
                 exc_info=True,
             )
     return sent
+
+
+async def handle_client_message(websocket: "WebSocket", raw_text: str) -> None:
+    """Client → server WebSocket 메시지 dispatcher (PR Z-2b Stage 2).
+
+    처리 메시지:
+      - "ping" (legacy text) → "pong" JSON 응답
+      - {"type": "subscribe", "topics": [str, ...]} (JSON) → topic 구독
+      - {"type": "unsubscribe", "topics": [str, ...]} (JSON) → topic 구독 해제
+
+    정책:
+      - FF=false면 subscribe/unsubscribe 메시지를 silently 무시 (Stage 1 docstring
+        과 일치 — register/unregister는 순수 연산이지만 호출 게이트는 Stage 2가 담당).
+      - JSON 파싱 실패 / non-dict / unknown type → 조용히 무시 (legacy/forward-compat).
+      - topics가 list[str]이 아니면 debug 로그 후 무시 (잘못된 client 보호).
+
+    main.py에 두지 않은 이유: WebSocket integration 없이 단위 테스트 가능 (firebase_admin
+    같은 main.py의 무거운 import-time 의존성 회피). topic 메시지 dispatch는 dispatcher
+    의 자연스러운 책임이며, ping/pong은 keep-alive로 같이 처리해 main.py 부담 최소화.
+    """
+    if raw_text == "ping":
+        await websocket.send_json({"type": "pong"})
+        return
+
+    try:
+        msg = json.loads(raw_text)
+    except (json.JSONDecodeError, ValueError):
+        return  # legacy text / 비-JSON 입력 — 무시
+
+    if not isinstance(msg, dict):
+        return
+
+    msg_type = msg.get("type")
+    if msg_type not in ("subscribe", "unsubscribe"):
+        return  # ping은 위에서 처리, 그 외 unknown type은 forward-compat 무시
+
+    if not config.TOPIC_DISPATCHER_ENABLED:
+        # FF=false: Stage 2 wiring 차단. registry 변경 X.
+        return
+
+    topics = msg.get("topics")
+    if not isinstance(topics, list) or not all(isinstance(t, str) for t in topics):
+        logger.debug(
+            "topic message: invalid topics payload",
+            extra={"type": msg_type, "topics_type": type(topics).__name__},
+        )
+        return
+
+    if msg_type == "subscribe":
+        registry.register(websocket, topics)
+    else:  # unsubscribe
+        registry.unregister(websocket, topics)

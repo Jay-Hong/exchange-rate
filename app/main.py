@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler
+from app import models, schemas, crud, scheduler, topic_dispatcher
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -817,12 +817,19 @@ async def websocket_endpoint(websocket: WebSocket):
         # 연결 유지 (클라이언트로부터 메시지 대기)
         while True:
             data = await websocket.receive_text()
-            # 클라이언트로부터 ping 메시지를 받으면 JSON 형식으로 pong 응답
-            if data == "ping":
-                await websocket.send_json({"type": "pong"})
+            await topic_dispatcher.handle_client_message(websocket, data)
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
         logger.info("🔌 클라이언트 연결 해제")
+    except Exception:
+        # PR Z-2b Stage 2 (Codex 권고): send_json 실패 / handler unhandled error 등
+        # 모든 비정상 경로에서도 finally로 정리. 기존엔 except WebSocketDisconnect만
+        # 잡아 다른 예외 시 connection 누락 가능성.
+        logger.exception("❌ WebSocket 메시지 처리 오류")
+    finally:
+        # PR Z-2b Stage 2: topic 구독 정리 (FF 무관 — 안전 정리, idempotent).
+        # manager.disconnect도 ValueError 자체 처리하므로 어떤 경로로 진입해도 안전.
+        topic_dispatcher.registry.remove_websocket(websocket)
+        manager.disconnect(websocket)
 
 
 # ===== REST API 엔드포인트 (폴백/초기 로드용) =====
