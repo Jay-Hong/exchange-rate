@@ -374,6 +374,76 @@ docker compose logs fastapi --since 2m | grep -E '\[krx\]'
 
 ---
 
+## PR6d-2b Stage A/B baseline 기록 (2026-05-08 ~ 5/9)
+
+> ⚠️ **운영 판단 근거 — Stage B 활성화 결정 시점에 반드시 검토.**
+> 5/8 단일 일자 baseline으로 임계값 확정하지 말 것 (5/9 데이터로 가설 깨짐).
+
+### 5/8 vs 5/9 비교
+
+| 지표 | 5/8 (금) 새벽 | 5/9 (토) 새벽 | 변동 |
+|---|---|---|---|
+| stale_transitions | 4 | **14** | 3.5× |
+| max_total_gap | 76.1s | **278.4s** | 3.6× |
+| max_quote_gap | 53s | **278.4s** | 5.3× (호가 dead) |
+| max_trade_gap | 355s | 445.3s | 1.3× |
+| fb_grace | (n/a Stage A 미배포) | 3 | grace 안 (-40min) 차단 |
+| fb_below_th | (n/a) | 19 | 짧은 stale (<120s) 차단 |
+| fb_disabled | (n/a) | **4** | **Stage B 활성화 시 REST 후보** |
+| fb_eligible | (n/a) | 0 | env=false라 0 |
+| REST 실제 호출 | 0 | 0 | env=false 정상 |
+| reconnect | 0 | 0 | 네트워크 장애 X |
+
+5/8 단일 일자에서 stale 4건 모두 -32min 이내 cluster → 40min grace로 cover. 그러나 **5/9는 distinct stale event 14건이 -213min ~ -35min 광범위 분포** (가장 이른 stale 02:26:52). max_quote_gap 278.4s는 호가도 dead (5/8의 53s 대비 5×).
+
+**fb_* counter는 evaluation count (event count 아님)** — Codex 권고 명시:
+- fallback evaluation 총 26회 (stale event 14건 + 일부 stale이 60s+ 지속 시 transition + summary cycle 중복 평가)
+- counter 분포: `fb_grace=3` / `fb_below_th=19` / `fb_disabled=4`
+- distinct event 기준 grace window(-40min ~ 종료) 안 stale은 05:23:29, 05:24:54 **2건** (counter `fb_grace=3`은 그 이벤트들이 transition + summary cycle 평가에 분산된 결과)
+- env=false라 실제 REST 호출 0
+
+**핵심 함의** (Codex 분석): "종료 1시간 반 전부터 조용했다"가 아니라 "**종료 3시간 반 전부터 조용했다**". grace 확장(40 → 240min)으로는 전 야간 차단이라 fallback 의미 X. **토요일 새벽 저유동성 전반 패턴** — session 타입별 정책 또는 Stage B 활성화 자체 신중함이 필요.
+
+### fb_* counter 운영 해석 가이드
+
+운영자가 `/admin/api/krx-status` 또는 docker logs에서 grep할 때 의미:
+
+| Counter | 의미 | 운영 해석 |
+|---|---|---|
+| `fb_eval` | 총 evaluation 횟수 | stale 발생 시점 + summary cycle 60s 1회 |
+| `fb_grace` | session-end -40min 안 차단 | **자연 silence 후보** — 정상 거래 끝물 |
+| `fb_below_th` | frame_age < 120s 차단 | **짧은 stale** — REST 호출 부적절 |
+| `fb_cooldown` | 직전 fallback 후 30s 안 | 폭주 방지 |
+| `fb_disabled` | 다른 조건 통과 + env=false | **Stage B 켰다면 REST 호출됐을 진짜 후보** ⭐ |
+| `fb_eligible` | env=true + 모든 조건 통과 | Stage B 활성 시 REST 호출 task 생성 후보 |
+| `rest_success` | REST 호출 성공 (Stage B+) | |
+| `rest_error` | REST 호출 실패 (Stage B+) | |
+
+**판단 예시** (Stage A 운영 중):
+- `fb_disabled` 매일 0~2건: env=true 시 noise 적음 → Stage B 활성화 가능
+- `fb_disabled` 일별 변동성 큼 (5/9 같이 4건 vs 5/8 0건): 추가 누적 후 결정
+- `fb_eligible` (Stage B 활성 시) > rest_success: rest_error 원인 확인 (HTTP / 토큰 / 응답 형식 / 네트워크)
+
+### Stage B 활성화 조건 (체크리스트)
+
+Stage B (`KRX_REST_FALLBACK_ENABLED=true`) 진입 전 모두 충족:
+
+- [ ] **5/12 ~ 5/14 평일 데이터 최소 2-3일 누적** (single-day 결정 금지)
+- [ ] `fb_disabled` 일별 평균 < 5건 (운영 noise 부담 작음)
+- [ ] `fb_disabled` 발생 시 `quote_age` 동반 (호가도 dead — 진짜 fallback 가치 있는 case)
+- [ ] `reconnect_attempts` 0 또는 일관 (네트워크 장애 별도 분기 필요 시 spec 추가)
+- [ ] env 변경은 별도 GO (docker compose down/up 필요 — process restart로 env 반영)
+- [ ] 활성화 후 24h 관찰 → `rest_success` / `rest_error` 분포 확인 → 임계값 튜닝
+
+### 교훈 (메타 lesson)
+
+1. **single-day baseline 금지**: 5/8만 보면 grace 40min 충분이라 단정 가능. 5/9에서 가설 깨짐. multi-day 누적 필수.
+2. **요일/거래일 특성 다름**: 5/9 (토 새벽) = 금 야간장 마지막 + 저거래량. 평일 새벽과 패턴 다를 수 있음.
+3. **Codex incremental 접근 정당화**: Stage A (env=false + telemetry only)로 위험 0 검증. Stage B 코드 골격도 env=false 유지로 활성화 timing 별도 GO. 보수적 단계가 5/9 데이터로 입증됨.
+4. **fb_disabled 가치**: 단순 "env=false 차단 카운터"가 아니라 **"Stage B 활성화 결정 자료"**. 운영 logs에서 매일 추적해야 함.
+
+---
+
 ## PR6d로 넘길 결정 항목 (Stage 1 데이터 기반)
 
 Stage 1 24h+ 데이터로 결정해야 할 정책 파라미터:
