@@ -316,7 +316,59 @@ done
 5. **KIS master file `mmsc_cls_code` 변경 timing**:
    - 5/18 매시간 master 다운로드 → A75605 존재 / A75606 mmsc_cls_code 추적
    - 가설 검증: (a) 11:30 직후 즉시 / (b) 익일 갱신 / (c) 며칠 후 batch
-   - 별도 ad-hoc 스크립트 (운영 코드 contamination 0)
+   - 별도 ad-hoc 스크립트 (운영 코드 contamination 0): `scripts/observe_kis_master.py`
+
+   **Runbook (`scripts/observe_kis_master.py`, v1 — PR6c-2d-3 follow-up, 2026-05-08):**
+
+   ```bash
+   # 1회 snapshot — 성공 시 표준출력 1줄 JSONL.
+   # fetch INFO 로그는 observe_kis_master.py가 suppress (cron append 오염 방지).
+   docker compose exec -T fastapi python scripts/observe_kis_master.py
+   # → {"timestamp": "2026-05-18T07:30:00+09:00",
+   #    "contracts": [{"short_code": "A75605", "name": "미국달러 F 202605",
+   #                   "contract_month": "202605", "mmsc_cls_code": "..."}, ...]}
+
+   # 특정 short_code만 필터 (반복 허용)
+   docker compose exec -T fastapi python scripts/observe_kis_master.py \
+     --short-code A75605 --short-code A75606
+
+   # JSONL append 누적 (manual 또는 cron)
+   docker compose exec -T fastapi python scripts/observe_kis_master.py \
+     >> /tmp/krx_master_obs.jsonl 2>> /tmp/krx_master_obs.err
+   ```
+
+   **5/18 관찰 cron 등록 (선택, host crontab — `crontab -e`):**
+
+   ```cron
+   # 5/18(월) 07:05~23:05 매시간 05분 (cron 첫 필드는 분 단위)
+   5 7-23 18 5 * cd /home/ubuntu/exchange-rate && docker compose exec -T fastapi python scripts/observe_kis_master.py >> /tmp/krx_master_obs.jsonl 2>> /tmp/krx_master_obs.err
+   # 5/19(화)~5/22(금) 매시간 05분 — master batch 갱신 가설 (b)/(c) 추적용
+   5 * 19-22 5 * cd /home/ubuntu/exchange-rate && docker compose exec -T fastapi python scripts/observe_kis_master.py >> /tmp/krx_master_obs.jsonl 2>> /tmp/krx_master_obs.err
+   ```
+
+   **분석 (jq로 timeline 추출):**
+
+   ```bash
+   # A75605/A75606 mmsc_cls_code 변화 timeline
+   jq -r '
+     .timestamp as $t
+     | .contracts[]
+     | "\($t)\t\(.short_code)\t\(.contract_month)\t\(.mmsc_cls_code)"
+   ' /tmp/krx_master_obs.jsonl | column -t -s $'\t'
+
+   # A75605가 master에서 사라진 첫 timestamp (가설 (a)/(b)/(c) 판정용)
+   jq -r '
+     select((.contracts | map(.short_code) | index("A75605")) == null)
+     | .timestamp
+   ' /tmp/krx_master_obs.jsonl | head -1
+   ```
+
+   **v1 범위 — 격리 보장:**
+   - master file 다운로드 + USD futures 메타데이터 JSONL snapshot만
+   - 운영 ContractInfo / 운영 lifecycle / DB 저장 변경 X
+   - 성공 path는 stdout 1줄 JSONL. fetch 실패는 exit 1 + stderr 출력
+   - `app.sources.kis_master` INFO 로그는 suppress해 cron append JSONL 오염 차단 (콘솔 핸들러는 stdout이지만 fetch 정상 path에서 INFO 이상 로그 미발생)
+   - mmsc_cls_code offset은 `app/sources/kis_master.extract_commodity_future_master_observation` 재사용 (드리프트 차단)
 
 6. **REST inquire-price 응답 변화 timing**:
    - A75605에 대한 KIS REST 호출 응답 형식 변화 시점 추적
