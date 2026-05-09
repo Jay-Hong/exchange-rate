@@ -117,6 +117,14 @@ if LATEST_MIRROR_INTERVAL_SECONDS < 1:
         "Silent floor 대신 startup 시 명시 실패 (Crash Early)."
     )
 
+# Phase Z-2b: Topic dispatcher 토글 (PR Z-2b Stage 1).
+# default OFF로 골격만 배포 — TopicRegistry / publish_topic 모두 import 가능하나
+# main.py WebSocket subscribe handler 미연결 (Stage 2 별도 PR).
+# Stage 1: 모듈 + flag만, 운영 영향 0.
+# Stage 2: WebSocket handler 연결 (FF=true시 subscribe 메시지 처리).
+# Stage 3: publish_topic을 실제 source data hook에 연결 (5/19+ 권장).
+TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower() == "true"
+
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
