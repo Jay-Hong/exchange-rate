@@ -7,7 +7,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
-from typing import Callable
+from typing import Any, Callable, Dict, Optional
 
 # 서드파티 라이브러리
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -1819,12 +1819,14 @@ async def _reconcile_krx_futures_contract():
         resolved = await resolve_active_krx_futures_contract()
     except Exception:
         logger.exception("[krx] reconcile resolve 실패 (격리)")
+        _record_krx_reconcile(result="resolve_error")
         return
 
     if resolved is None:
         logger.warning(
             "[krx] reconcile: active USD futures contract 없음 — 수동 개입 필요"
         )
+        _record_krx_reconcile(result="resolved_none")
         return
 
     # 1. client 없으면 bootstrap 시도 (격리된 재시작 후 복구 경로)
@@ -1834,18 +1836,32 @@ async def _reconcile_krx_futures_contract():
         # 5분 cron interval vs bootstrap 수초라 실제 race 가능성 낮지만 견고성 위해 가드.
         if krx_bootstrap_task is not None and not krx_bootstrap_task.done():
             logger.debug("[krx] reconcile: bootstrap 진행 중, skip (race 방지)")
+            _record_krx_reconcile(result="bootstrap_skipped", resolved=resolved)
             return
         logger.info(
             "[krx] reconcile: client 없음 — bootstrap 시도 (resolved=%s)",
             resolved.short_code,
         )
         await _bootstrap_krx_futures_client(resolved_override=resolved)
+        # PR6c-2d-2 fix (Codex BLOCKING): _bootstrap_krx_futures_client는 내부에서
+        # 예외 catch + krx_futures_client=None으로 끝남 (raise X). 따라서 외부
+        # try/except로는 실패 감지 불가. post-condition으로 globals 검증.
+        # PR6c-2d-2 amend (Codex 2회차): rollover branch와 동일하게 contract 일치까지
+        # 보수적으로 확인 — bootstrap_started metric 신뢰도 ↑.
+        bootstrapped = getattr(krx_futures_client, "_contract", None)
+        if bootstrapped is None or bootstrapped.short_code != resolved.short_code:
+            _record_krx_reconcile(result="bootstrap_error", resolved=resolved)
+        else:
+            _record_krx_reconcile(result="bootstrap_started", resolved=resolved)
         return
 
     current = krx_futures_client._contract
 
     # 2. 같은 contract → no-op (대부분 케이스)
+    # PR6c-2d-2 (Codex 권고): no-op도 state 기록 — admin endpoint으로 reconcile 발화 검증 가능.
+    # info log는 5분 cron × 24h = 288줄 폭증 차단 위해 추가 X (state만).
     if resolved.short_code == current.short_code:
+        _record_krx_reconcile(result="no_op", current=current, resolved=resolved)
         return
 
     # 3. 점프 방지 — 만기 45일 이상 차이 또는 역행은 master 데이터 오류 의심
@@ -1857,6 +1873,7 @@ async def _reconcile_krx_futures_contract():
             resolved.short_code, resolved.contract_month,
             expiry_diff,
         )
+        _record_krx_reconcile(result="jump_suppressed", current=current, resolved=resolved)
         return
 
     # 4. 정상 rollover
@@ -1870,11 +1887,91 @@ async def _reconcile_krx_futures_contract():
         await shutdown_krx_futures_client()
     except Exception:
         logger.exception("[krx] reconcile shutdown 실패")
+        _record_krx_reconcile(result="shutdown_error", current=current, resolved=resolved)
         return
 
     # PR6c-2d-1 amend (Codex Issue 2): resolved를 직접 넘겨 두 번째 resolve 회피.
     # 두 번째 resolve가 실패하면 기존 client 이미 shutdown됐고 새 client도 못 뜸 → 5분간 KRX outage.
-    try:
-        await _bootstrap_krx_futures_client(resolved_override=resolved)
-    except Exception:
-        logger.exception("[krx] reconcile bootstrap 실패")
+    await _bootstrap_krx_futures_client(resolved_override=resolved)
+
+    # PR6c-2d-2 fix (Codex BLOCKING): post-condition globals 검증.
+    # _bootstrap_krx_futures_client 내부 예외 catch라 raise 안 됨 → globals로 판정.
+    # rollover 성공 = krx_futures_client present + contract == resolved.
+    # 잘못 rollover로 기록되면 rollover_count 부풀어 운영 metric 신뢰도 ↓.
+    if (
+        krx_futures_client is None
+        or krx_futures_client._contract.short_code != resolved.short_code
+    ):
+        # PR6c-2d-2 amend (Codex 2회차): except 블록 밖이므로 logger.exception 사용 시
+        # sys.exc_info()=(None,None,None)이 되어 "NoneType: None" 가짜 traceback이 찍힘.
+        # 운영 로그 혼동 방지 위해 logger.error 사용.
+        logger.error("[krx] reconcile rollover bootstrap 실패")
+        _record_krx_reconcile(
+            result="bootstrap_error", current=current, resolved=resolved,
+        )
+        return
+
+    # PR6c-2d-2: 정상 rollover 완료 — count 증가
+    _record_krx_reconcile(
+        result="rollover", current=current, resolved=resolved, increment_rollover=True,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# PR6c-2d-2 — Reconcile state + admin endpoint 노출 (Codex 권고)
+# ─────────────────────────────────────────────────────────────
+
+# reconcile 마지막 실행 상태. 5/18 만기 검증 시 admin endpoint으로 reconcile이
+# 정상 발화하고 결과가 무엇인지 즉시 확인. no-op은 5분마다 발생하므로 info log는
+# 폭증 차단을 위해 추가하지 않고 state만 갱신.
+_krx_reconcile_state: Dict[str, Any] = {
+    "last_run_at_kst": None,
+    "last_result": None,
+    "last_current_contract": None,
+    "last_resolved_contract": None,
+    "rollover_count": 0,
+}
+
+
+def _contract_to_dict(contract) -> Optional[Dict[str, Any]]:
+    """ContractInfo → admin/디버깅용 dict (None 그대로 전파)."""
+    if contract is None:
+        return None
+    return {
+        "code": contract.short_code,
+        "month": contract.contract_month,
+        "expires_on": contract.expiry_date.isoformat(),
+    }
+
+
+def _record_krx_reconcile(
+    *,
+    result: str,
+    current=None,
+    resolved=None,
+    increment_rollover: bool = False,
+) -> None:
+    """reconcile branch state 기록 (PR6c-2d-2)."""
+    _krx_reconcile_state["last_run_at_kst"] = datetime.now(KST).isoformat()
+    _krx_reconcile_state["last_result"] = result
+    _krx_reconcile_state["last_current_contract"] = _contract_to_dict(current)
+    _krx_reconcile_state["last_resolved_contract"] = _contract_to_dict(resolved)
+    if increment_rollover:
+        _krx_reconcile_state["rollover_count"] += 1
+
+
+def get_krx_reconcile_status() -> Dict[str, Any]:
+    """admin endpoint용 reconcile 상태 (PR6c-2d-2).
+
+    KRX_FUTURES_ENABLED=false 또는 scheduler 초기화 전이면 job_registered=false,
+    last_* fields는 None. shape는 항상 동일 — admin UI / grep / jq 단순화.
+    """
+    job = scheduler.get_job("krx_contract_reconcile")
+    next_run_at_kst = None
+    if job is not None and job.next_run_time is not None:
+        next_run_at_kst = job.next_run_time.astimezone(KST).isoformat()
+    return {
+        "job_registered": job is not None,
+        "next_run_at_kst": next_run_at_kst,
+        **_krx_reconcile_state,
+    }

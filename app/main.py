@@ -1260,11 +1260,16 @@ async def get_krx_status():
     """
     from app import scheduler
 
+    # PR6c-2d-2 (Codex 권고): reconcile shape는 enabled/started 무관 항상 동일.
+    # admin UI / grep / jq가 단순해짐. disabled는 job_registered=false + last_*=null.
+    reconcile_status = scheduler.get_krx_reconcile_status()
+
     if not config.KRX_FUTURES_ENABLED:
         return {
             "enabled": False,
             "started": False,
             "reason": "KRX_FUTURES_ENABLED=false (lifecycle 비활성)",
+            "reconcile": reconcile_status,
         }
 
     client = getattr(scheduler, "krx_futures_client", None)
@@ -1273,12 +1278,14 @@ async def get_krx_status():
             "enabled": True,
             "started": False,
             "reason": "client 미생성 — bootstrap 진행 중이거나 실패 (logs 확인)",
+            "reconcile": reconcile_status,
         }
 
     return {
         "enabled": True,
         "started": True,
         "client": client.get_metrics(),
+        "reconcile": reconcile_status,
     }
 
 
