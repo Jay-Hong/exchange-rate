@@ -129,10 +129,36 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
 
 ### Z-2b (backend topic dispatcher)
 
-- WebSocket subscribe protocol 구현 (client `subscribe` message → topic registration)
-- topic publisher: `source_rates` 저장 시 → 해당 topic 구독자에게 발사
-- topic 채널 명명 규칙 확정 (Open Question §6.1)
-- 단위 테스트 + 운영 영향 측정
+진행 상황 (2026-05-10):
+
+- ✅ Stage 1 완료: `3f54a0c` — `app/topic_dispatcher.py` 신설 (TopicRegistry +
+  publish_topic 골격). `TOPIC_DISPATCHER_ENABLED=false` default, 운영 영향 0.
+- ✅ Stage 2 완료: `7a71a0d` — main.py WebSocket loop에 dispatcher 통합
+  (subscribe/unsubscribe 메시지 + ping/pong 보존 + try/except/finally cleanup
+  강화). FF=false라 subscribe 메시지 silently ignore.
+- ✅ Stage 3-1 완료: `adad7a6` — 순수 builder `build_tether_tab_payload`
+  (`app/usdt_topic_payload.py`). DB 의존 0, topic-agnostic, version=1 schema,
+  legacy shape 호환 입력 + topic-native 출력.
+- ✅ Stage 3-2 완료: `aeb03cc` — DB 통합 helper `load_and_build_tether_tab_payload`.
+  저장소별 dispatch (USDT/KRX → source_rates, 은행 → bank_exchange_rates,
+  Investing → investing_exchange_rates), `include_krx` 기본 False, env flag
+  미해석 (호출자 책임).
+- ⏸ Stage 3 wire-up 보류: 5/19+ (5/18 만기 통과 후) 권장 — `publish_topic`을
+  broadcast 또는 source data hook (예: `collect_usdt_rates` `changed_rates` 후처리)에
+  연결.
+
+builder/helper는 호출 경로 0이라 wire-up PR과 함께 배포해도 충분.
+
+미결정 (Stage 3 wire-up 시 결정 필요):
+
+- `include_krx` 정책: `KRX_TOPIC_INCLUDE` 신규 flag 도입 vs `KRX_BROADCAST_INCLUDE`
+  재사용 vs `KRX_FUTURES_ENABLED + 데이터 존재` 게이트
+- publish hook 위치: broadcast cycle 안 vs mirror cycle vs source 수집 직후
+  (`changed_rates` 후처리)
+- topic 활성화 flag: `TOPIC_DISPATCHER_ENABLED=true` 시점과 클라이언트 release
+  타이밍
+
+Stage 1/2/3 1차/2차 모두 `TOPIC_DISPATCHER_ENABLED=false` default 유지.
 
 ### Z-2c (USDT topic payload + migration 신호)
 
