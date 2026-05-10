@@ -143,9 +143,15 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
   저장소별 dispatch (USDT/KRX → source_rates, 은행 → bank_exchange_rates,
   Investing → investing_exchange_rates), `include_krx` 기본 False, env flag
   미해석 (호출자 책임).
-- ⏸ Stage 3 wire-up 보류: 5/19+ (5/18 만기 통과 후) 권장 — `publish_topic`을
-  broadcast 또는 source data hook (예: `collect_usdt_rates` `changed_rates` 후처리)에
-  연결.
+- ✅ Stage 3 Level 1 완료: `9215eaf` — publish wrapper
+  `publish_tether_tab_snapshot` (`app/tether_topic_publisher.py` 신규 모듈).
+  orchestration 계층 (FF + subscriber guard → builder 호출 → publish_topic
+  dispatch). hot path 미연결 (dead code). `TETHER_TOPIC = "usdt:krw"` 상수화 —
+  활성화 직전까지 자유 변경.
+- ⏸ Stage 3 Level 2 (wire-up) 보류: 5/19+ (5/18 만기 통과 후) 권장 — Level 1
+  wrapper를 hot path (collect_usdt_rates `changed_rates` 후처리 / broadcast
+  cycle / mirror cycle 중 baseline 분석 후 결정) + KRX 포함 wrapper 또는
+  매개변수 + `TOPIC_DISPATCHER_ENABLED=true` 활성화.
 
 builder/helper는 호출 경로 0이라 wire-up PR과 함께 배포해도 충분.
 
