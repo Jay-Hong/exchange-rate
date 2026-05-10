@@ -148,10 +148,20 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
   orchestration 계층 (FF + subscriber guard → builder 호출 → publish_topic
   dispatch). hot path 미연결 (dead code). `TETHER_TOPIC = "usdt:krw"` 상수화 —
   활성화 직전까지 자유 변경.
-- ⏸ Stage 3 Level 2 (wire-up) 보류: 5/19+ (5/18 만기 통과 후) 권장 — Level 1
-  wrapper를 hot path (collect_usdt_rates `changed_rates` 후처리 / broadcast
-  cycle / mirror cycle 중 baseline 분석 후 결정) + KRX 포함 wrapper 또는
-  매개변수 + `TOPIC_DISPATCHER_ENABLED=true` 활성화.
+- ✅ Stage 3 Level 2 완료: `39c6592` — broadcast cycle 임시 hook 연결.
+  `app/main.py` broadcast_rates_once의 `is_changed` 분기 안 + `manager.active_connections`
+  분기 외부 (legacy 0명이라도 topic 발화)에 `safe_publish_tether_tab_snapshot(db)`
+  호출. `app/tether_topic_publisher.py`에 격리 wrapper 추가 (예외 → False 반환 +
+  logger.exception, broadcast 영향 X). **임시 위치**: USDT WebSocket/Redis-first
+  전환 후 mirror/topic pipeline으로 이동 예정. `TOPIC_DISPATCHER_ENABLED=false`라
+  wrapper 진입은 발생하나 즉시 guard return — publish/builder 호출 효과 0.
+  - sync/async 경계 회피 근거: `collect_usdt_rates`는 sync (ThreadPoolExecutor),
+    `publish_topic`은 async. broadcast_rates_once는 async/main loop 안이라 자연 fit
+- ⏸ Stage 3 Level 3 (활성화) 보류: 5/19+ (5/18 만기 통과 후) 권장 —
+  `include_krx` 정책 결정 (`KRX_TOPIC_INCLUDE` 신규 / `KRX_BROADCAST_INCLUDE`
+  재사용 / 데이터 존재 게이트), `TOPIC_DISPATCHER_ENABLED=true` 활성화, 클라이언트
+  release 동기화. 옵션: 5/12~5/17 중 dev/test client subscribe + 짧은 FF=true 시험으로
+  실제 publish path 운영 검증.
 
 builder/helper는 호출 경로 0이라 wire-up PR과 함께 배포해도 충분.
 
