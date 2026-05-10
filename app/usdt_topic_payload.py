@@ -1,0 +1,205 @@
+"""테더 탭 topic payload builder (PR Z-2b Stage 3 준비).
+
+USDT_TOPIC_MIGRATION_PLAN §2 / ADR-028 합의된 topic-only Tether/KRX 출시 계약을
+위한 순수 builder. DB 의존 X — 호출자가 fetch한 데이터를 입력으로 받음.
+
+설계 원칙:
+    1. **topic-agnostic**: payload에 topic 필드 미생성. publish 호출자가
+       `await publish_topic("usdt:krw", payload)` 형태로 topic 이름 결정.
+    2. **legacy shape 호환 입력**: `bank/currency` 키 (legacy)와 `source/asset` 키
+       (topic-native) 둘 다 받아서 정규화. 기존 crud 함수의 반환 shape를 그대로
+       전달 가능.
+    3. **topic-native 출력**: 모든 항목은 `source/asset/display_name/rate/timestamp`
+       shape. legacy `bank/currency` 키는 출력에서 제거.
+    4. **builder 내부 정렬**: 호출자가 정렬 안 해도 builder가 보장.
+       - list 그룹 (usdt_krw, usd_krw_banks): SourceRegistry sort_order +
+         BANK_DISPLAY_ORDER fallback, 미등록은 뒤로 + 코드순.
+       - singleton 그룹 (usd_krw_reference, usd_krw_futures): expected
+         source/asset만 허용, 아니면 키 누락 (schema 무결성 보호).
+    5. **None optional 키 누락**: investing_rate / krx_futures_rate가 None이면
+       해당 그룹 키 자체 누락 (forward-compat — 클라이언트는 없는 키 무시).
+    6. **env flag 직접 해석 X**: KRX 포함 여부는 호출자(wire-up)가 결정.
+       Builder는 받은 그대로 처리.
+
+Schema (version=1):
+    {
+      "type": "snapshot",
+      "version": 1,
+      "data": {
+        "usdt_krw": [{"source", "asset", "display_name", "rate", "timestamp"}, ...],
+        "usd_krw_banks": [...],
+        "usd_krw_reference": {...},     # source="investing" + asset="usd-krw" only
+        "usd_krw_futures": {...}        # source="krx" + asset="usd-krw-futures" only (optional)
+      }
+    }
+
+참조:
+    - REALTIME_ARCHITECTURE_PLAN.md §5 (topic 채널 분리)
+    - USDT_TOPIC_MIGRATION_PLAN.md §2 (Target Contract)
+    - DECISIONS.md ADR-028 (Topic-only Tether/KRX + dual-emit FX)
+    - USDT_PHASE1_DESIGN.md (SourceRegistry / source 모델)
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.crud import BANK_DISPLAY_ORDER, _bank_display_sort_key
+from app.source_registry import get_source_definition
+
+# singleton 슬롯에 허용되는 expected (source, asset)
+_REFERENCE_EXPECTED: Tuple[str, str] = ("investing", "usd-krw")
+_FUTURES_EXPECTED: Tuple[str, str] = ("krx", "usd-krw-futures")
+
+
+def _normalize_entry(
+    raw: Dict[str, Any],
+    *,
+    fallback_source: Optional[str] = None,
+    fallback_asset: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """입력 dict를 topic-native shape로 정규화.
+
+    Args:
+        raw: 입력 dict. legacy shape ({"bank", "currency", "rate", "timestamp"}) 또는
+             topic-native ({"source", "asset", "rate", "timestamp"}) 모두 허용.
+        fallback_source: source 키와 bank 키 둘 다 없을 때 사용 (예: investing
+                         singleton에서 호출자가 단순 {"rate", "timestamp"}만 넘긴 경우).
+        fallback_asset: asset/currency 키 둘 다 없을 때 사용.
+
+    Returns:
+        {"source", "asset", "display_name", "rate", "timestamp"} 또는
+        rate/timestamp 부재 시 None.
+    """
+    source = raw.get("source") or raw.get("bank") or fallback_source
+    asset = raw.get("asset") or raw.get("currency") or fallback_asset
+    rate = raw.get("rate")
+    timestamp = raw.get("timestamp")
+
+    if source is None or asset is None or rate is None or timestamp is None:
+        return None
+
+    definition = get_source_definition(source, asset)
+    display_name = definition.display_name if definition else source
+
+    return {
+        "source": source,
+        "asset": asset,
+        "display_name": display_name,
+        "rate": rate,
+        "timestamp": timestamp,
+    }
+
+
+def _list_sort_key(entry: Dict[str, Any]) -> Tuple[int, int, str]:
+    """list 그룹 정렬 key (asset별 정책 분리, Codex 2회차 정정).
+
+    정책 (이중 정렬 체계 혼합 차단):
+        - asset="usd-krw" (은행 그룹): BANK_DISPLAY_ORDER만. SourceRegistry는
+          display_name lookup용으로만 사용 (sort에 관여 X).
+        - asset != "usd-krw" (USDT 거래소/derivative 등): SourceRegistry sort_order
+          + 미등록 fallback.
+
+    Why 분리: kb/hana는 SourceRegistry+BANK_DISPLAY_ORDER 양쪽 등록되어 두 시스템
+    상대순서가 마침 일치하지만 미래 SourceRegistry sort_order 변경 시 BANK_DISPLAY_ORDER
+    와 충돌 가능. 은행 정렬은 BANK_DISPLAY_ORDER 단일 source로 잠금.
+    """
+    source = entry["source"]
+    asset = entry["asset"]
+
+    if asset == "usd-krw":
+        # 은행 그룹 — BANK_DISPLAY_ORDER만 사용
+        bank_key = _bank_display_sort_key(source)
+        return (0, bank_key[0], bank_key[1])
+
+    # USDT/derivative 그룹 — SourceRegistry sort_order
+    definition = get_source_definition(source, asset)
+    if definition is not None:
+        return (1, definition.sort_order, source)
+
+    # 미등록: 가장 뒤 + 코드순
+    return (2, 0, source)
+
+
+def build_tether_tab_payload(
+    *,
+    usdt_rates: List[Dict[str, Any]],
+    bank_rates: List[Dict[str, Any]],
+    investing_rate: Optional[Dict[str, Any]] = None,
+    krx_futures_rate: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """테더 탭 snapshot payload 구성 (순수 함수, DB 의존 X).
+
+    Args:
+        usdt_rates: USDT/KRW 5거래소 list. legacy 또는 topic-native shape 허용.
+        bank_rates: USD/KRW 은행 list (테더 탭은 kb, hana). legacy/topic-native 허용.
+        investing_rate: USD/KRW Investing reference. legacy shape일 가능성 높음
+            (`{"bank": "investing", "currency": "usd-krw", ...}`). expected source/asset
+            아니면 키 누락.
+        krx_futures_rate: KRX 미국달러선물. expected source="krx" + asset="usd-krw-futures"
+            만 허용. None이면 키 누락. 호출자가 KRX 포함 여부 결정 (env flag 게이트는
+            호출자 책임).
+
+    Returns:
+        topic payload (topic 필드 없음 — wire-up 시점에 wrapper가 결정).
+
+    Builder 책임:
+        - bank → source / currency → asset 정규화
+        - SourceRegistry lookup으로 display_name 첨부
+        - list 그룹 정렬 (SourceRegistry sort_order + BANK_DISPLAY_ORDER fallback)
+        - singleton 그룹은 expected source/asset만 허용 + None은 키 누락
+        - rate/timestamp 부재 entry는 무시 (drop)
+    """
+    # USDT 거래소 list — legacy 가능성 낮지만 호환 유지
+    usdt_normalized: List[Dict[str, Any]] = []
+    for raw in usdt_rates:
+        normalized = _normalize_entry(raw, fallback_asset="usdt-krw")
+        if normalized is not None:
+            usdt_normalized.append(normalized)
+    usdt_normalized.sort(key=_list_sort_key)
+
+    # 은행 list — legacy shape (`bank` 키) 가능성 높음
+    bank_normalized: List[Dict[str, Any]] = []
+    for raw in bank_rates:
+        normalized = _normalize_entry(raw, fallback_asset="usd-krw")
+        if normalized is not None:
+            bank_normalized.append(normalized)
+    bank_normalized.sort(key=_list_sort_key)
+
+    data: Dict[str, Any] = {
+        "usdt_krw": usdt_normalized,
+        "usd_krw_banks": bank_normalized,
+    }
+
+    # Investing reference — singleton, expected source="investing" + asset="usd-krw"
+    if investing_rate is not None:
+        normalized = _normalize_entry(
+            investing_rate,
+            fallback_source="investing",
+            fallback_asset="usd-krw",
+        )
+        if normalized is not None and (
+            normalized["source"],
+            normalized["asset"],
+        ) == _REFERENCE_EXPECTED:
+            data["usd_krw_reference"] = normalized
+        # 그 외: 키 누락 (schema 무결성 보호)
+
+    # KRX futures — singleton, expected source="krx" + asset="usd-krw-futures"
+    if krx_futures_rate is not None:
+        normalized = _normalize_entry(
+            krx_futures_rate,
+            fallback_source="krx",
+            fallback_asset="usd-krw-futures",
+        )
+        if normalized is not None and (
+            normalized["source"],
+            normalized["asset"],
+        ) == _FUTURES_EXPECTED:
+            data["usd_krw_futures"] = normalized
+        # 그 외: 키 누락
+
+    return {
+        "type": "snapshot",
+        "version": 1,
+        "data": data,
+    }
