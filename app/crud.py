@@ -50,6 +50,20 @@ LEGACY_METADATA_BANKS = frozenset({
     "ibk", "nh", "sc", "bs", "citi",
 })
 
+# iOS/Android Bank enum과 맞춘 은행 표시순.
+# 미등록 은행은 뒤로 보내고 bank 코드순으로 fallback한다.
+BANK_DISPLAY_ORDER = [
+    "kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs", "citi",
+]
+_BANK_DISPLAY_ORDER_INDEX = {
+    bank: idx for idx, bank in enumerate(BANK_DISPLAY_ORDER)
+}
+
+
+def _bank_display_sort_key(bank: str) -> Tuple[int, str]:
+    """은행 표시순 정렬 key. 미등록 은행은 뒤쪽 + 코드순 fallback."""
+    return (_BANK_DISPLAY_ORDER_INDEX.get(bank, len(BANK_DISPLAY_ORDER)), bank)
+
 
 def format_threshold(value: float) -> str:
     """목표값 포맷: 소수점 이하 불필요한 0 제거 (1475.00 → 1475, 1475.50 → 1475.5)"""
@@ -289,14 +303,15 @@ def select_a_latest_investing_rate_from_db(db: Session, pair: str) -> Optional[D
 
 def select_latest_bank_rates_from_db(db: Session, pair: str) -> List[Dict[str, Any]]:
     """
-    특정 통화쌍의 모든 은행 최신 환율 조회 (환율순으로 정렬)
+    특정 통화쌍의 모든 은행 최신 환율 조회 (은행 표시순으로 정렬)
     
     Args:
         db: 데이터베이스 세션
         pair: 통화쌍 (예: 'usd-krw')
         
     Returns:
-        각 은행의 최신 pair 환율 데이터 리스트 (환율 낮은 순으로 정렬)
+        각 은행의 최신 pair 환율 데이터 리스트.
+        BANK_DISPLAY_ORDER 순서이며 미등록 은행은 뒤쪽 + bank 코드순 fallback.
     """
     
     # 각 은행별 최신 1건을 결정적으로 선택 (window function)
@@ -323,9 +338,9 @@ def select_latest_bank_rates_from_db(db: Session, pair: str) -> List[Dict[str, A
             models.BankExchangeRate.id == ranked.c.id,
             ranked.c.rn == 1
         ))
-        .order_by(models.BankExchangeRate.rate)  # 환율순으로 정렬 (낮은 환율부터)
         .all()
     )
+    records.sort(key=lambda record: _bank_display_sort_key(record.bank))
 
     return [
         {
