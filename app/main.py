@@ -1305,6 +1305,54 @@ async def get_krx_status():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Tether Topic Telemetry (PR Z-2b Stage 3 + Telemetry, 2026-05-10)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/api/topic-status", dependencies=[Depends(verify_admin)])
+async def get_topic_status():
+    """테더 탭 topic publish telemetry 조회.
+
+    Redis-backed counter (재배포 시 reset 안 됨). best-effort 기록이라 Redis
+    미가용 시 counter는 0/None.
+
+    Returns:
+        {
+          "enabled": bool,                       # config.TOPIC_DISPATCHER_ENABLED
+          "topic": str,                          # TETHER_TOPIC 상수
+          "subscribed_connection_count": int,    # 현재 구독자 수
+          "hook_called": int,                    # safe_publish_tether_tab_snapshot 진입
+          "skipped_disabled": int,               # FF=false 차단
+          "skipped_no_subscribers": int,         # subscriber 0 차단
+          "built": int,                          # builder 호출 성공
+          "publish_called": int,                 # publish_topic 호출
+          "publish_sent_total": int,             # publish_topic sent 누적
+          "publish_zero": int,                   # publish_topic이 0 반환
+          "error": int,                          # safe wrapper 격리 예외
+          "last_result": str | None,             # 마지막 분류
+          "last_at_kst": str | None,             # 마지막 발화 KST ISO
+          "last_error": str | None,              # 마지막 예외 (str(exc)[:500])
+        }
+    """
+    return await tether_topic_publisher.get_topic_telemetry()
+
+
+@app.post("/admin/api/topic-status/reset", dependencies=[Depends(verify_admin)])
+async def reset_topic_status():
+    """테더 탭 topic telemetry counter reset (시험 구간 분리).
+
+    DEL topic:tether:stats. Redis 미가용 시 success=false.
+
+    Returns:
+        {"success": bool, "reason": str | None}
+    """
+    success = await tether_topic_publisher.reset_topic_telemetry()
+    return {
+        "success": success,
+        "reason": None if success else "Redis 미가용 또는 circuit open / 예외",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Crawler Toggle API (Phase 1.8)
 # ═══════════════════════════════════════════════════════════════════════════════
 

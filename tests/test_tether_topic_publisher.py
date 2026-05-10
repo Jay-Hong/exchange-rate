@@ -206,5 +206,243 @@ class TestSafePublishTetherTabSnapshot(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
 
 
+class TestTopicTelemetry(unittest.IsolatedAsyncioTestCase):
+    """Redis-backed telemetry — best-effort 기록 + circuit_breaker 오염 회피.
+
+    핵심 계약:
+      - redis_cache.client raw 사용 (circuit wrapper 우회)
+      - circuit.can_attempt() 체크만, record_failure() 호출 X
+      - Redis 미가용 / circuit open / 예외 → broadcast 영향 X
+      - last_error 길이 제한 (500자)
+      - reset은 DEL key (HDEL 아님, 필드 추가 자동 적용)
+    """
+
+    async def asyncSetUp(self):
+        self._original_registry = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._original_registry
+
+    def _make_redis_mock(self, can_attempt: bool = True):
+        """redis_cache.client + circuit mock helper."""
+        client = MagicMock()
+        client.hincrby = AsyncMock()
+        client.hset = AsyncMock()
+        client.hgetall = AsyncMock(return_value={})
+        client.delete = AsyncMock()
+        circuit_mock = MagicMock()
+        circuit_mock.can_attempt = AsyncMock(return_value=can_attempt)
+        # record_failure은 telemetry가 호출하지 않아야 — mock으로 호출 검증
+        circuit_mock.record_failure = AsyncMock()
+        return client, circuit_mock
+
+    # 1) FF=false → hook_called + skipped_disabled
+    async def test_ff_false_records_skipped_disabled(self):
+        client, circuit = self._make_redis_mock()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock:
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+
+        # hook_called +1 (safe wrapper 진입), skipped_disabled +1
+        increments = [c.args[1] for c in client.hincrby.call_args_list]
+        self.assertIn("hook_called", increments)
+        self.assertIn("skipped_disabled", increments)
+        # circuit.record_failure 호출되면 안 됨 (telemetry 격리)
+        circuit.record_failure.assert_not_called()
+
+    # 2) subscriber 0 → skipped_no_subscribers
+    async def test_no_subscribers_records_skipped_no_subscribers(self):
+        client, circuit = self._make_redis_mock()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock:
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        increments = [c.args[1] for c in client.hincrby.call_args_list]
+        self.assertIn("hook_called", increments)
+        self.assertIn("skipped_no_subscribers", increments)
+
+    # 3) sent > 0 → built + publish_called + publish_sent_total
+    async def test_send_success_records_built_and_publish_total(self):
+        client, circuit = self._make_redis_mock()
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock, \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=2)):  # 2명 send 성공
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            result = await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        self.assertTrue(result)
+
+        # built / publish_called counter + publish_sent_total += 2
+        increments = [(c.args[1], c.args[2] if len(c.args) > 2 else 1)
+                       for c in client.hincrby.call_args_list]
+        increment_fields = [i[0] for i in increments]
+        self.assertIn("built", increment_fields)
+        self.assertIn("publish_called", increment_fields)
+        # publish_sent_total은 sent=2로 증가
+        sent_increments = [i[1] for i in increments if i[0] == "publish_sent_total"]
+        self.assertEqual(sum(sent_increments), 2)
+
+    # 4) sent == 0 → publish_zero
+    async def test_send_zero_records_publish_zero(self):
+        client, circuit = self._make_redis_mock()
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock, \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=0)):  # 모든 send 실패
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            result = await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        self.assertFalse(result)
+
+        increments = [c.args[1] for c in client.hincrby.call_args_list]
+        self.assertIn("publish_zero", increments)
+        self.assertIn("publish_called", increments)
+
+    # 5) exception → error + last_error 기록
+    async def test_exception_records_error_and_last_error(self):
+        client, circuit = self._make_redis_mock()
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock, \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          side_effect=RuntimeError("DB connection lost")), \
+             self.assertLogs("exchange_rate.tether_topic_publisher", level="ERROR"):
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            result = await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        self.assertFalse(result)
+
+        increments = [c.args[1] for c in client.hincrby.call_args_list]
+        self.assertIn("error", increments)
+        # last_error HSET 호출 검증 + 길이 500 이하
+        last_error_calls = [
+            c for c in client.hset.call_args_list
+            if len(c.args) >= 2 and c.args[1] == "last_error"
+        ]
+        self.assertTrue(len(last_error_calls) >= 1)
+        last_err_value = last_error_calls[0].args[2]
+        self.assertIn("RuntimeError", last_err_value)
+        self.assertIn("DB connection lost", last_err_value)
+        self.assertLessEqual(len(last_err_value), 500)
+
+    # 6) Redis 미가용 (client=None) → 예외 전파 X
+    async def test_redis_unavailable_no_propagation(self):
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock, \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            redis_mock.client = None  # Redis 미가용
+            # 예외 발생 안 해야 함, 정상 결과 반환
+            result = await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        self.assertTrue(result)  # publish는 성공, telemetry만 skip
+
+    # 7) circuit open → 예외 전파 X + record_failure 호출 X
+    async def test_circuit_open_no_propagation(self):
+        client, circuit = self._make_redis_mock(can_attempt=False)  # circuit open
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock, \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            result = await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        self.assertTrue(result)
+        # circuit open이라 hincrby 호출 0회 (telemetry skip)
+        client.hincrby.assert_not_called()
+        # record_failure 절대 호출 X (Codex 권고)
+        circuit.record_failure.assert_not_called()
+
+    # 8) Redis hincrby 예외 → broadcast 영향 X + record_failure 호출 X
+    async def test_redis_exception_no_propagation_no_record_failure(self):
+        client, circuit = self._make_redis_mock()
+        client.hincrby.side_effect = ConnectionError("Redis disconnected")
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock, \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            # telemetry 실패해도 broadcast 영향 X
+            result = await tether_topic_publisher.safe_publish_tether_tab_snapshot(MagicMock())
+        # publish는 성공했으나 telemetry 일부 실패 — wrapper는 정상 흐름
+        self.assertTrue(result)
+        # circuit.record_failure 호출 X (telemetry 격리, Codex 권고)
+        circuit.record_failure.assert_not_called()
+
+    # 9) reset → DEL key (HDEL 아님)
+    async def test_reset_uses_del_not_hdel(self):
+        client, circuit = self._make_redis_mock()
+        with patch("app.tether_topic_publisher.redis_cache") as redis_mock:
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            success = await tether_topic_publisher.reset_topic_telemetry()
+        self.assertTrue(success)
+        # DEL topic:tether:stats 호출 (HDEL 아님)
+        client.delete.assert_called_once_with("topic:tether:stats")
+
+    # 10) get_topic_telemetry — Redis 값 + base 필드 통합
+    async def test_get_telemetry_returns_combined_shape(self):
+        client, circuit = self._make_redis_mock()
+        client.hgetall = AsyncMock(return_value={
+            b"hook_called": b"123",
+            b"skipped_disabled": b"100",
+            b"built": b"23",
+            b"publish_called": b"23",
+            b"publish_sent_total": b"50",
+            b"last_result": b"sent",
+            b"last_at_kst": b"2026-05-10T20:00:00+09:00",
+        })
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.tether_topic_publisher.redis_cache") as redis_mock:
+            redis_mock.client = client
+            redis_mock.circuit = circuit
+            telemetry = await tether_topic_publisher.get_topic_telemetry()
+
+        # base 필드
+        self.assertEqual(telemetry["enabled"], True)
+        self.assertEqual(telemetry["topic"], tether_topic_publisher.TETHER_TOPIC)
+        # Redis 값
+        self.assertEqual(telemetry["hook_called"], 123)
+        self.assertEqual(telemetry["skipped_disabled"], 100)
+        self.assertEqual(telemetry["built"], 23)
+        self.assertEqual(telemetry["publish_called"], 23)
+        self.assertEqual(telemetry["publish_sent_total"], 50)
+        self.assertEqual(telemetry["last_result"], "sent")
+        # 미존재 필드는 base default
+        self.assertEqual(telemetry["error"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
