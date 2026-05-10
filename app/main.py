@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -674,6 +674,14 @@ async def broadcast_rates_once():
 
         if is_changed:
             await redis_cache.set(BROADCAST_CACHE_KEY, new_json)
+
+            # PR Z-2b Stage 3 Level 2 — 임시 async-safe topic publish hook.
+            # USDT WebSocket/Redis-first 전환 전까지의 위치. 전환 후 mirror/topic
+            # pipeline으로 이동 예정. 변경 시에만 발화 + legacy 구독자 유무 무관
+            # (topic은 별개 채널). FF=false / subscriber 0이면 publisher 내부
+            # guard로 즉시 return — builder/publish_topic 호출 0회. 예외 격리는
+            # safe_publish_tether_tab_snapshot에서 처리 (broadcast 영향 X).
+            await tether_topic_publisher.safe_publish_tether_tab_snapshot(db)
 
             if manager.active_connections:
                 # 3) build_graph_buckets

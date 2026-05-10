@@ -13,7 +13,11 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, tether_topic_publisher, topic_dispatcher
-from app.tether_topic_publisher import TETHER_TOPIC, publish_tether_tab_snapshot
+from app.tether_topic_publisher import (
+    TETHER_TOPIC,
+    publish_tether_tab_snapshot,
+    safe_publish_tether_tab_snapshot,
+)
 
 
 class TestPublishTetherTabSnapshot(unittest.IsolatedAsyncioTestCase):
@@ -128,6 +132,78 @@ class TestPublishTetherTabSnapshot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args.args[0], TETHER_TOPIC)
         # wrapper가 payload 변형 X — builder 반환 그대로 전달
         self.assertIs(call_args.args[1], builder_payload)
+
+
+class TestSafePublishTetherTabSnapshot(unittest.IsolatedAsyncioTestCase):
+    """safe_publish_tether_tab_snapshot — 예외 격리 wrapper (Level 2 hot path 호출용).
+
+    핵심 계약:
+      - 정상 path는 publish_tether_tab_snapshot 결과 그대로 반환
+      - 어떤 예외 발생해도 호출자에 propagate 안 함, False 반환
+      - 예외 시 logger.exception 호출 (운영 가시성)
+    """
+
+    async def asyncSetUp(self):
+        self._original_registry = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._original_registry
+
+    async def test_returns_inner_result_on_success(self):
+        """정상 path — publish_tether_tab_snapshot의 True/False 그대로 반환."""
+        db = MagicMock()
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            result = await safe_publish_tether_tab_snapshot(db)
+        self.assertTrue(result)
+
+    async def test_returns_false_when_inner_returns_false(self):
+        """guard 차단 시 publish_tether_tab_snapshot이 False — safe wrapper도 False."""
+        db = MagicMock()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
+            result = await safe_publish_tether_tab_snapshot(db)
+        self.assertFalse(result)
+
+    async def test_isolates_exception_from_caller(self):
+        """build/publish 단계에서 예외 발생 → False 반환 + logger.exception, 호출자 영향 X."""
+        db = MagicMock()
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [TETHER_TOPIC])
+
+        # builder가 예외 발생 시뮬레이션
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          side_effect=RuntimeError("DB connection lost")), \
+             patch.object(topic_dispatcher, "publish_topic", new=AsyncMock()), \
+             self.assertLogs("exchange_rate.tether_topic_publisher", level="ERROR") as cm:
+            # 호출자가 try/except 안 써도 예외 propagate 안 됨 — 핵심 계약
+            result = await safe_publish_tether_tab_snapshot(db)
+
+        self.assertFalse(result)
+        self.assertTrue(any("실패" in m for m in cm.output))
+
+    async def test_isolates_publish_topic_exception(self):
+        """publish_topic 단계 예외도 격리."""
+        db = MagicMock()
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(side_effect=RuntimeError("send failed"))), \
+             self.assertLogs("exchange_rate.tether_topic_publisher", level="ERROR"):
+            result = await safe_publish_tether_tab_snapshot(db)
+
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":
