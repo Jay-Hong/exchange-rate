@@ -12,7 +12,11 @@
 from __future__ import annotations
 
 import unittest
+from typing import List, Tuple
+from unittest.mock import MagicMock, patch
 
+from app import usdt_topic_payload as utp
+from app.source_registry import SourceDefinition
 from app.usdt_topic_payload import build_tether_tab_payload
 
 
@@ -321,6 +325,236 @@ class TestPartialData(unittest.TestCase):
         )
         sources = [e["source"] for e in payload["data"]["usdt_krw"]]
         self.assertEqual(sources, ["upbit"])  # bithumb drop
+
+
+# ---------------------------------------------------------------------------
+# load_and_build_tether_tab_payload — DB 통합 helper (mock-based)
+# ---------------------------------------------------------------------------
+
+
+def _usdt_def(source: str, sort_order: int) -> SourceDefinition:
+    """USDT 거래소 SourceDefinition mock helper."""
+    return SourceDefinition(
+        source=source,
+        asset="usdt-krw",
+        display_name=source,
+        category="exchange",
+        sort_order=sort_order,
+    )
+
+
+_FIVE_USDT_DEFS = [
+    _usdt_def("upbit", 50),
+    _usdt_def("bithumb", 60),
+    _usdt_def("coinone", 70),
+    _usdt_def("korbit", 80),
+    _usdt_def("gopax", 90),
+]
+
+
+def _source_rate(source: str, asset: str, rate: float, ts: str = "2026-05-10T15:00:00+09:00") -> dict:
+    """get_latest_source_rate 반환 shape (legacy bank/currency 키)."""
+    return {"currency": asset, "bank": source, "rate": rate, "timestamp": ts}
+
+
+def _bank_row(bank: str, rate: float, ts: str = "2026-05-10T15:00:00+09:00") -> dict:
+    """select_latest_bank_rates_from_db 반환 shape."""
+    return {"currency": "usd-krw", "bank": bank, "rate": rate, "timestamp": ts}
+
+
+def _investing_row(rate: float, ts: str = "2026-05-10T15:00:00+09:00") -> dict:
+    """select_a_latest_investing_rate_from_db 반환 shape."""
+    return {"currency": "usd-krw", "bank": "investing", "rate": rate, "timestamp": ts}
+
+
+class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
+    """DB 통합 helper — crud 함수 mock으로 dispatch / include_krx / 정렬 검증."""
+
+    def _patches(
+        self,
+        *,
+        usdt_rates_per_source: dict,
+        bank_rates: list,
+        investing: dict | None,
+        krx: dict | None,
+    ):
+        """공통 mock setup — context manager list 반환."""
+
+        def fake_get_latest_source_rate(db, source, asset):
+            if asset == "usdt-krw":
+                return usdt_rates_per_source.get(source)
+            if asset == "usd-krw-futures":
+                return krx
+            return None
+
+        return [
+            patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS),
+            patch.object(utp, "get_latest_source_rate", side_effect=fake_get_latest_source_rate),
+            patch.object(utp, "select_latest_bank_rates_from_db", return_value=bank_rates),
+            patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=investing),
+        ]
+
+    def _run_with(self, **kwargs):
+        """patches 적용 + helper 호출."""
+        include_krx = kwargs.pop("include_krx", False)
+        ps = self._patches(**kwargs)
+        for p in ps:
+            p.start()
+        try:
+            return utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=include_krx)
+        finally:
+            for p in ps:
+                p.stop()
+
+    # 1) 정상 (모든 데이터 + include_krx=False) → KRX 키 누락
+    def test_full_data_excludes_krx_when_include_false(self):
+        payload = self._run_with(
+            usdt_rates_per_source={
+                "upbit":   _source_rate("upbit", "usdt-krw", 1485.0),
+                "bithumb": _source_rate("bithumb", "usdt-krw", 1486.5),
+                "coinone": _source_rate("coinone", "usdt-krw", 1485.5),
+                "korbit":  _source_rate("korbit", "usdt-krw", 1484.0),
+                "gopax":   _source_rate("gopax", "usdt-krw", 1486.0),
+            },
+            bank_rates=[_bank_row("kb", 1380.0), _bank_row("hana", 1380.5)],
+            investing=_investing_row(1380.2),
+            krx=_source_rate("krx", "usd-krw-futures", 1382.0),
+            include_krx=False,
+        )
+        self.assertEqual(len(payload["data"]["usdt_krw"]), 5)
+        self.assertEqual(len(payload["data"]["usd_krw_banks"]), 2)
+        self.assertIn("usd_krw_reference", payload["data"])
+        self.assertNotIn("usd_krw_futures", payload["data"])
+
+    # 2) include_krx=True → KRX 포함
+    def test_include_krx_true_adds_krx_key(self):
+        payload = self._run_with(
+            usdt_rates_per_source={},
+            bank_rates=[],
+            investing=None,
+            krx=_source_rate("krx", "usd-krw-futures", 1382.0),
+            include_krx=True,
+        )
+        self.assertIn("usd_krw_futures", payload["data"])
+        self.assertEqual(payload["data"]["usd_krw_futures"]["source"], "krx")
+
+    # 3) USDT 일부 None (gopax 누락) → 4 entry
+    def test_usdt_partial_missing(self):
+        payload = self._run_with(
+            usdt_rates_per_source={
+                "upbit":   _source_rate("upbit", "usdt-krw", 1.0),
+                "bithumb": _source_rate("bithumb", "usdt-krw", 2.0),
+                "coinone": _source_rate("coinone", "usdt-krw", 3.0),
+                "korbit":  _source_rate("korbit", "usdt-krw", 4.0),
+                # gopax missing
+            },
+            bank_rates=[],
+            investing=None,
+            krx=None,
+        )
+        sources = [e["source"] for e in payload["data"]["usdt_krw"]]
+        self.assertEqual(sources, ["upbit", "bithumb", "coinone", "korbit"])
+
+    # 4) 은행 일부 None (kb 누락) → hana만
+    def test_bank_partial_missing(self):
+        payload = self._run_with(
+            usdt_rates_per_source={},
+            bank_rates=[_bank_row("hana", 1380.0)],  # kb missing
+            investing=None,
+            krx=None,
+        )
+        banks = [e["source"] for e in payload["data"]["usd_krw_banks"]]
+        self.assertEqual(banks, ["hana"])
+
+    # 5) Investing None → 키 누락
+    def test_investing_none_drops_reference_key(self):
+        payload = self._run_with(
+            usdt_rates_per_source={},
+            bank_rates=[],
+            investing=None,
+            krx=None,
+        )
+        self.assertNotIn("usd_krw_reference", payload["data"])
+
+    # 6) include_krx=True인데 KRX None → 키 누락
+    def test_include_krx_true_but_no_data_drops_key(self):
+        payload = self._run_with(
+            usdt_rates_per_source={},
+            bank_rates=[],
+            investing=None,
+            krx=None,
+            include_krx=True,
+        )
+        self.assertNotIn("usd_krw_futures", payload["data"])
+
+    # 7) include_krx=False시 KRX crud 호출 0회 (비용 차단)
+    def test_include_krx_false_skips_krx_query(self):
+        krx_calls: List[Tuple[str, str]] = []
+
+        def fake_get_latest_source_rate(db, source, asset):
+            krx_calls.append((source, asset))
+            return None
+
+        with patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS), \
+             patch.object(utp, "get_latest_source_rate", side_effect=fake_get_latest_source_rate), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        # USDT 5번만 호출 — KRX는 호출 0회
+        self.assertEqual(len(krx_calls), 5)
+        for source, asset in krx_calls:
+            self.assertEqual(asset, "usdt-krw")
+        self.assertNotIn(("krx", "usd-krw-futures"), krx_calls)
+
+    # 8) crud 함수 호출 횟수 검증 (5 USDT + 1 banks + 1 investing + 1 KRX when include)
+    def test_crud_call_counts_with_krx(self):
+        get_source_mock = MagicMock(return_value=None)
+        with patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS), \
+             patch.object(utp, "get_latest_source_rate", get_source_mock), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]) as bank_mock, \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None) as inv_mock:
+            utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=True)
+
+        # USDT 5 + KRX 1 = 6
+        self.assertEqual(get_source_mock.call_count, 6)
+        bank_mock.assert_called_once()
+        inv_mock.assert_called_once()
+
+    # 9) 은행 filter — shinhan 등 다른 은행이 응답에 있어도 무시 (kb/hana만 통과)
+    def test_bank_filter_ignores_non_tether_tab_banks(self):
+        payload = self._run_with(
+            usdt_rates_per_source={},
+            bank_rates=[
+                _bank_row("kb", 1380.0),
+                _bank_row("hana", 1381.0),
+                _bank_row("shinhan", 1382.0),  # filter out
+                _bank_row("woori", 1383.0),    # filter out
+            ],
+            investing=None,
+            krx=None,
+        )
+        banks = [e["source"] for e in payload["data"]["usd_krw_banks"]]
+        self.assertEqual(banks, ["kb", "hana"])
+
+    # 10) 혼합 순서 입력 (hana, shinhan, kb) → 출력 (kb, hana, 정렬 + 필터)
+    def test_mixed_order_input_produces_kb_then_hana(self):
+        """select_latest_bank_rates_from_db가 무작위 순서 반환해도 helper 출력은 안정.
+
+        TETHER_TAB_BANK_SOURCES 순서로 명시 build + builder 재정렬 이중 안전장치.
+        """
+        payload = self._run_with(
+            usdt_rates_per_source={},
+            bank_rates=[
+                _bank_row("hana", 1.0),
+                _bank_row("shinhan", 2.0),  # filter out
+                _bank_row("kb", 3.0),
+            ],
+            investing=None,
+            krx=None,
+        )
+        banks = [e["source"] for e in payload["data"]["usd_krw_banks"]]
+        self.assertEqual(banks, ["kb", "hana"])
 
 
 if __name__ == "__main__":

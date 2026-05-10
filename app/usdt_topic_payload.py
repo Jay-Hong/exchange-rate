@@ -41,14 +41,26 @@ Schema (version=1):
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from app.crud import BANK_DISPLAY_ORDER, _bank_display_sort_key
-from app.source_registry import get_source_definition
+from app.crud import (
+    _bank_display_sort_key,
+    get_latest_source_rate,
+    select_a_latest_investing_rate_from_db,
+    select_latest_bank_rates_from_db,
+)
+from app.source_registry import get_source_definition, get_usdt_exchange_entries
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 # singleton 슬롯에 허용되는 expected (source, asset)
 _REFERENCE_EXPECTED: Tuple[str, str] = ("investing", "usd-krw")
 _FUTURES_EXPECTED: Tuple[str, str] = ("krx", "usd-krw-futures")
+
+# 테더 탭에 표시할 은행 source list (kb→hana 순서). select_latest_bank_rates_from_db
+# 가 9개 은행을 반환하면 이 상수 순서로만 필터/build → helper 출력 순서 안정.
+TETHER_TAB_BANK_SOURCES: Tuple[str, ...] = ("kb", "hana")
 
 
 def _normalize_entry(
@@ -203,3 +215,67 @@ def build_tether_tab_payload(
         "version": 1,
         "data": data,
     }
+
+
+def load_and_build_tether_tab_payload(
+    db: "Session",
+    *,
+    include_krx: bool = False,
+) -> Dict[str, Any]:
+    """DB 통합 helper — 저장소별 dispatch 후 build_tether_tab_payload 호출.
+
+    저장소별 조회:
+        - USDT 5거래소 (asset=usdt-krw): SourceRegistry.get_usdt_exchange_entries()로
+          enum → get_latest_source_rate(db, source, "usdt-krw") 각각.
+          거래소 추가/제거 시 SourceRegistry만 변경하면 helper 자동 반영.
+        - 은행 (asset=usd-krw): select_latest_bank_rates_from_db(db, "usd-krw") 전체
+          반환 → TETHER_TAB_BANK_SOURCES 순서로 명시 build (출력 순서 안정).
+        - Investing (asset=usd-krw): select_a_latest_investing_rate_from_db(db, "usd-krw").
+        - KRX (asset=usd-krw-futures): include_krx=True일 때만 query.
+          False면 호출 자체 X (불필요 DB load 차단).
+
+    Args:
+        db: SQLAlchemy Session.
+        include_krx: KRX 미국달러선물 포함 여부. 기본 False — KRX는 optional canary
+            라 호출자가 명시적으로 True 줄 때만 query + payload 포함. env flag
+            (KRX_FUTURES_ENABLED 등) 해석은 helper 외부 wire-up 호출자 책임.
+
+    Returns:
+        build_tether_tab_payload 결과 (topic 필드 없음 — wire-up 호출자가 결정).
+
+    책임 경계:
+        - helper는 env flag 직접 해석 X
+        - publish 호출 X (wire-up은 별도 PR)
+        - 정렬/정규화는 build_tether_tab_payload가 단일 책임
+    """
+    # USDT — SourceRegistry로 동적 enum
+    usdt_rates: List[Dict[str, Any]] = []
+    for definition in get_usdt_exchange_entries():
+        rate = get_latest_source_rate(db, definition.source, definition.asset)
+        if rate is not None:
+            usdt_rates.append(rate)
+
+    # 은행 — TETHER_TAB_BANK_SOURCES 순서로 명시 build (Codex 권고)
+    # select_latest_bank_rates_from_db 반환 순서 변경에 영향받지 않음.
+    all_banks = select_latest_bank_rates_from_db(db, "usd-krw")
+    bank_by_source = {row["bank"]: row for row in all_banks}
+    bank_rates = [
+        bank_by_source[source]
+        for source in TETHER_TAB_BANK_SOURCES
+        if source in bank_by_source
+    ]
+
+    # Investing reference
+    investing_rate = select_a_latest_investing_rate_from_db(db, "usd-krw")
+
+    # KRX — include_krx=True일 때만 query (False면 호출 0회)
+    krx_futures_rate: Optional[Dict[str, Any]] = None
+    if include_krx:
+        krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")
+
+    return build_tether_tab_payload(
+        usdt_rates=usdt_rates,
+        bank_rates=bank_rates,
+        investing_rate=investing_rate,
+        krx_futures_rate=krx_futures_rate,
+    )
