@@ -157,6 +157,15 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
   wrapper 진입은 발생하나 즉시 guard return — publish/builder 호출 효과 0.
   - sync/async 경계 회피 근거: `collect_usdt_rates`는 sync (ThreadPoolExecutor),
     `publish_topic`은 async. broadcast_rates_once는 async/main loop 안이라 자연 fit
+- ✅ Telemetry 완료: `0330fa2` — Redis-backed counter (`topic:tether:stats` hash)
+  및 admin endpoints (`GET /admin/api/topic-status`, `POST /admin/api/topic-status/reset`).
+  best-effort 격리 (circuit_breaker 오염 X — `record_failure()` 호출 안 함),
+  재배포 후에도 counter 누적 유지.
+  - 운영 smoke 확인 (FF=false 상태): `hook_called == skipped_disabled`,
+    `built = publish_called = 0`, `error = 0`. hook은 진입하지만 guard 차단으로
+    builder/publish 비용 0.
+  - FF=true dev/test 시험 success criteria: `built > 0` / `publish_called > 0`
+    / `publish_sent_total > 0` / `error = 0`.
 - ⏸ Stage 3 Level 3 (활성화) 보류: 5/19+ (5/18 만기 통과 후) 권장 —
   `include_krx` 정책 결정 (`KRX_TOPIC_INCLUDE` 신규 / `KRX_BROADCAST_INCLUDE`
   재사용 / 데이터 존재 게이트), `TOPIC_DISPATCHER_ENABLED=true` 활성화, 클라이언트
