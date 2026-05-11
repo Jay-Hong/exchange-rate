@@ -289,15 +289,29 @@ Stage 1/2/3 1차/2차 모두 `TOPIC_DISPATCHER_ENABLED=false` default 유지.
 - Step 1 (edc62b6, 2026-05-11): `app/fx_topic_payload.py` builder + 29 tests
 - Step 2 (a2e5645, 2026-05-12): `app/fx_topic_publisher.py` orchestration +
   `config.FX_TOPIC_ENABLED` flag (default false) + 15 tests
-- Step 3 (이 commit): `main.py` broadcast hook + admin endpoints
+- Step 3 (5521cf0, 2026-05-12): `main.py` broadcast hook + admin endpoints
   - hook: `is_changed` 분기 안, `manager.active_connections` 분기 바깥
     (tether와 동일 격리 원칙)
   - `GET /admin/api/topic-status/fx` (3 topic 일괄 telemetry)
   - `POST /admin/api/topic-status/fx/reset` (3 topic 일괄 reset)
-- Step 4 (계획): FX_TOPIC_ENABLED=false 배포 — 사용자 영향 0 / builder/publish/DB
-  비용 0 / per-asset hook_called + skipped_disabled telemetry write는 발생
-  (Redis HINCRBY/HSET 작은 비용). smoke에서 counter 증가 정상.
-- Step 5 (계획, 별도 GO): FX_TOPIC_ENABLED=true 활성화 + dev subscriber smoke
+- Step 4 (5521cf0 배포 후 smoke, 2026-05-12 00:26 KST): FX_TOPIC_ENABLED=false
+  배포 검증 통과. 4 invariant 충족: hook_called=8 / skipped_disabled=8 /
+  built=publish_called=publish_sent_total=0 / error=0. builder/publish/DB
+  비용 차단 + per-asset telemetry write 발생 패턴 정상.
+- Step 5 준비 (c725b1e, 2026-05-12): `scripts/subscribe_fx_topic.py` smoke 도구
+  — 3 topic 동시 구독 + schema invariant 검증 + exit code 5분류 (silent
+  false positive 차단).
+- Step 5 활성화 (2026-05-12 00:48 KST): FX_TOPIC_ENABLED=true + force-recreate +
+  로컬 smoke 180s 실행. 결과:
+  - 3 topic 각 35회 수신 (total 105 messages, invalid=0)
+  - 각 payload: banks=9, reference=True
+  - telemetry per-topic: hook_called=40, built=publish_called=publish_sent_total=35,
+    skipped_no_subscribers=5 (smoke 종료 후 subscriber=0 broadcasts),
+    error=0, last_result transition `built` → `sent` → `skipped_no_subscribers`
+  - 수치 invariant: hook_called = built + skipped_no_subscribers = 35 + 5 = 40 ✓
+  - 결정: FX_TOPIC_ENABLED=true 유지 (단말 release 전이라 사용자 영향 0,
+    fx topic 구독자 없으면 skipped_no_subscribers로 builder 비용 차단,
+    문제 발생 시 .env로 즉시 false 복귀 가능, usdt:krw 운영 패턴과 일관)
 
 **Telemetry**:
 
