@@ -286,6 +286,121 @@ SourceRate { source, asset, rate, timestamp }
 - 이유: 이 필드는 현재 iOS/Android/웹 어디서도 사용되지 않는 dead field라서, USDT source를 섞어 넣으면 시맨틱 오염만 커진다. 미래에 필드 자체를 제거할 예정이므로 레거시 값으로 동결하는 것이 가장 안전하다.
 - 새 앱은 이 필드를 **쓰지 말 것** — 대신 `SourceRegistry`와 `rates` 배열을 참조한다. `rates` 배열에는 USDT 엔트리가 정상 포함된다.
 
+## Topic API (Phase Z-2b, REALTIME v2)
+
+테더 탭 전용 신규 채널. legacy `/ws` `rates` 배열과 **별개 채널**로 동시 운영
+(legacy는 유지). topic API는 ADR-028 "topic-only Tether/KRX" 계약 구현.
+
+### WebSocket URL / Subscribe protocol
+
+```text
+URL:       wss://fxi.kr/ws (기존 endpoint 재사용)
+Subscribe: {"type": "subscribe", "topics": ["usdt:krw"]}
+Unsubscribe: {"type": "unsubscribe", "topics": ["usdt:krw"]}
+```
+
+- Subscribe 메시지 전송 → 서버 registry 등록 → topic 변경 발생 시 snapshot 수신
+- `TOPIC_DISPATCHER_ENABLED=false` 시 subscribe 메시지는 silently ignore
+  (기존 client 호환)
+
+### Topic 이름
+
+- `usdt:krw` — 테더 탭 (USDT 5거래소 + USD/KRW 은행 + Investing reference +
+  KRX 미국달러선물 optional)
+
+### Payload top-level
+
+```jsonc
+{
+  "type": "snapshot",
+  "version": 1,
+  "data": { /* 4 groups */ }
+}
+```
+
+- `version=1`: schema version. 미래 호환 변경 시 bump
+- `type="snapshot"`: 현재 전체 상태 dump 형태. delta는 미정 (필요 시 별도 type)
+
+### Entry shape (모든 그룹 공통)
+
+```jsonc
+{
+  "source": "upbit",          // string, 데이터 공급자 식별
+  "asset": "usdt-krw",        // string, 통화쌍/상품
+  "display_name": "업비트",    // string, 한국어 표시명 (서버 SourceRegistry)
+  "rate": 1485.0,             // float, KRW
+  "timestamp": "2026-05-11T15:00:00+09:00"  // ISO8601 KST, 데이터 관측 시각
+}
+```
+
+### `data` 그룹
+
+**Required** (key는 항상 존재, list/dict는 비어있을 수 있음):
+
+| key | type | 내용 |
+| --- | --- | --- |
+| `usdt_krw` | list[entry] | USDT/KRW 5거래소 (upbit, bithumb, coinone, korbit, gopax) |
+| `usd_krw_banks` | list[entry] | USD/KRW 은행 (현재 kb, hana) |
+| `usd_krw_reference` | entry | USD/KRW Investing reference |
+
+**Optional**:
+
+| key | type | 조건 |
+| --- | --- | --- |
+| `usd_krw_futures` | entry | `KRX_TOPIC_INCLUDE=true` + KRX 데이터 존재 시만 |
+
+list 그룹은 SourceRegistry sort_order로 서버 측 정렬됨. 단말은 받은 순서 그대로
+표시하면 됨 (재정렬 불필요).
+
+### `usd_krw_futures` (KRX 미국달러선물) — Optional 처리
+
+**키 자체 부재 가능성**:
+
+- 서버 운영 `KRX_TOPIC_INCLUDE=false` (legacy `KRX_BROADCAST_INCLUDE`와는 별개 flag)
+- 또는 KRX 데이터 없음 / source/asset mismatch
+
+**구현 가이드**:
+
+- `data["usd_krw_futures"]` 존재 여부로 분기 — 미존재 시 해당 항목 미표시
+- 존재 시 일반 entry처럼 `rate` + `timestamp` 표시
+
+**Stale 처리 — 일반 source와 동일 원칙**:
+
+- 은행/Investing이 휴장/주말에 마지막 값을 그대로 표시하는 것과 같은 패턴
+- KRX 휴장 (15:45~18:00, 05:00~다음 거래일, 주말): 마지막 거래값 + timestamp 그대로 유지
+- 단말은 source별 분기 X — 일반 표시 정책 그대로 (rate + 시간)
+- `timestamp`로 사용자에게 "마지막 거래 시점" 정보 제공 가능 (선택)
+
+### 운영 모니터링
+
+`GET /admin/api/topic-status` (HTTP Basic auth):
+
+```jsonc
+{
+  "enabled": true,                          // TOPIC_DISPATCHER_ENABLED
+  "topic": "usdt:krw",
+  "krx_topic_include": true,                // KRX_TOPIC_INCLUDE (legacy와 분리)
+  "subscribed_connection_count": 2,
+  "hook_called": 12345,
+  "skipped_disabled": 0,
+  "built": 12340,
+  "publish_called": 12340,
+  "publish_sent_total": 24680,
+  "error": 0,
+  "last_result": "sent",
+  "last_at_kst": "...",
+  "last_error": null
+}
+```
+
+reset (시험 구간 분리용): `POST /admin/api/topic-status/reset`.
+
+### Schema 버전 관리
+
+- `version=1` lock-in 시점은 클라이언트 release 동기화 후.
+- 기존 키 의미 변경 금지. 새 그룹 추가는 `version` 유지 가능 (forward-compat).
+- 의미 충돌 시 새 key + `version` bump.
+
 ## 알림 통합
 
 ### FCM payload type 처리
