@@ -29,6 +29,7 @@ from app import config, crud
 from app.cache import redis_cache
 from app.config import LATEST_MIRROR_INTERVAL_SECONDS
 from app.database import SessionLocal
+from app.legacy_policy import should_include_source_in_legacy_rates
 
 logger = logging.getLogger("exchange_rate.latest_rates_cache")
 
@@ -309,22 +310,31 @@ def _key_to_rate_record(key: str, parsed: Dict[str, Any]) -> Optional[Dict[str, 
 
 
 def should_include_source_in_latest(source: str, asset: str) -> bool:
-    """Mirror가 broadcast latest:index에 포함할 source/asset인지 결정 (PR6b-2a).
+    """Legacy latest mirror exposure policy (Redis broadcast latest:* keys only).
 
-    PR6 KRX 미국달러선물의 broadcast 노출 토글 — KRX_BROADCAST_INCLUDE
-    default false. KRX usd-krw-futures는 토글 false 시 mirror skip
-    → broadcast rates 배열에 등장 X (앱 호환성 검증 전 안전 차단).
+    Mirror가 broadcast `latest:index`에 포함할 source/asset인지 결정. 이름은
+    "latest"지만 Redis cache 전체 정책이 아니라 broadcast 노출 한정 — topic API
+    경로(usdt:krw, fx:*)는 자체 builder 사용으로 본 함수 미경유 (영향 0).
 
-    scope: source="krx" + asset="usd-krw-futures" 한정. KRX의 다른
-    asset이나 다른 source는 토글 무관 (기존 mirror 동작 유지).
+    Z-2d Step 3 (2026-05-12): `legacy_policy.should_include_source_in_legacy_rates`
+    위임. REST `/api/rates*` + WebSocket DB fallback + Redis mirror seed가 모두
+    동일 allowlist 적용. cartesian product 의미: bank(9) + investing × FX(3) =
+    30 조합 True, 그 외(USDT 거래소, KRX 등) False.
+
+    Deprecated: `KRX_BROADCAST_INCLUDE` 토글은 본 함수에서 무력화됨 (Z-2d 통일
+    이후 allowlist가 단일 진실 소스). env/config 변수 자체는 별도 cleanup PR에서
+    제거 예정 — 현재 코드에서 참조하지 않음. 운영자가 토글을 True/False로 바꿔도
+    KRX usd-krw-futures는 항상 mirror skip (allowlist 미포함).
+
+    Args:
+        source: 데이터 공급자 (예: "kb", "investing", "upbit", "krx").
+        asset: 통화쌍/상품 (예: "usd-krw", "usdt-krw", "usd-krw-futures").
 
     Returns:
-        True — mirror 포함 (default 동작)
-        False — KRX usd-krw-futures이고 토글 false인 경우만
+        True — legacy 노출 대상 (mirror 포함).
+        False — topic-only source 또는 미등록 (mirror skip).
     """
-    if source == "krx" and asset == "usd-krw-futures":
-        return config.KRX_BROADCAST_INCLUDE
-    return True
+    return should_include_source_in_legacy_rates(source, asset)
 
 
 async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
