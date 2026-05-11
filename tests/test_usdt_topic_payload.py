@@ -211,26 +211,48 @@ class TestLegacyNormalization(unittest.TestCase):
         self.assertNotIn("bank", entry)
         self.assertNotIn("currency", entry)
 
-    def test_display_name_added_from_source_registry(self):
-        """SourceRegistry display_name이 항목에 자동 첨부."""
+    def test_entry_has_no_display_name_field(self):
+        """display_name 제거 (2026-05-11) — payload entry는 display_name 미포함.
+
+        단말은 자체 registry로 source→display_name lookup. 서버는 (source, asset)
+        만 식별자로 전송. 회귀 방지 negative 검증.
+        """
         payload = build_tether_tab_payload(
             usdt_rates=[_u("upbit", 1485.0)],
             bank_rates=[_bank_legacy("kb", 1380.0)],
             investing_rate=_investing_legacy(1380.2),
             krx_futures_rate=_krx(1382.0),
         )
-        self.assertEqual(payload["data"]["usdt_krw"][0]["display_name"], "업비트")
-        self.assertEqual(payload["data"]["usd_krw_banks"][0]["display_name"], "국민은행")
-        self.assertEqual(payload["data"]["usd_krw_reference"]["display_name"], "인베스팅")
-        self.assertEqual(payload["data"]["usd_krw_futures"]["display_name"], "미국달러F")
+        # 모든 entry 그룹에서 display_name 부재 확인
+        self.assertNotIn("display_name", payload["data"]["usdt_krw"][0])
+        self.assertNotIn("display_name", payload["data"]["usd_krw_banks"][0])
+        self.assertNotIn("display_name", payload["data"]["usd_krw_reference"])
+        self.assertNotIn("display_name", payload["data"]["usd_krw_futures"])
 
-    def test_unknown_source_display_name_falls_back_to_source(self):
-        """SourceRegistry 미등록 source — display_name은 source 그대로."""
+    def test_entry_keys_exactly_match_contract(self):
+        """payload entry key set은 정확히 {source, asset, rate, timestamp}."""
+        payload = build_tether_tab_payload(
+            usdt_rates=[_u("upbit", 1485.0)],
+            bank_rates=[_bank_legacy("kb", 1380.0)],
+            investing_rate=_investing_legacy(1380.2),
+            krx_futures_rate=_krx(1382.0),
+        )
+        expected_keys = {"source", "asset", "rate", "timestamp"}
+        self.assertEqual(set(payload["data"]["usdt_krw"][0].keys()), expected_keys)
+        self.assertEqual(set(payload["data"]["usd_krw_banks"][0].keys()), expected_keys)
+        self.assertEqual(set(payload["data"]["usd_krw_reference"].keys()), expected_keys)
+        self.assertEqual(set(payload["data"]["usd_krw_futures"].keys()), expected_keys)
+
+    def test_unknown_source_keeps_source_field_without_display_name(self):
+        """SourceRegistry 미등록 source도 display_name 없이 source/asset만 유지."""
         payload = build_tether_tab_payload(
             usdt_rates=[_u("newcoin", 1500.0)],
             bank_rates=[],
         )
-        self.assertEqual(payload["data"]["usdt_krw"][0]["display_name"], "newcoin")
+        entry = payload["data"]["usdt_krw"][0]
+        self.assertEqual(entry["source"], "newcoin")
+        self.assertEqual(entry["asset"], "usdt-krw")
+        self.assertNotIn("display_name", entry)
 
 
 # ---------------------------------------------------------------------------

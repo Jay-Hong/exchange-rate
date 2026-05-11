@@ -26,12 +26,15 @@ Schema (version=1):
       "type": "snapshot",
       "version": 1,
       "data": {
-        "usdt_krw": [{"source", "asset", "display_name", "rate", "timestamp"}, ...],
+        "usdt_krw": [{"source", "asset", "rate", "timestamp"}, ...],
         "usd_krw_banks": [...],
         "usd_krw_reference": {...},     # source="investing" + asset="usd-krw" only
         "usd_krw_futures": {...}        # source="krx" + asset="usd-krw-futures" only (optional)
       }
     }
+
+    Entry 식별자는 (source, asset) tuple. 단말은 자체 registry로 표시명/아이콘/
+    색상/정렬 결정 (display_name 서버 미전송, 2026-05-11 제거).
 
 참조:
     - REALTIME_ARCHITECTURE_PLAN.md §5 (topic 채널 분리)
@@ -79,8 +82,14 @@ def _normalize_entry(
         fallback_asset: asset/currency 키 둘 다 없을 때 사용.
 
     Returns:
-        {"source", "asset", "display_name", "rate", "timestamp"} 또는
-        rate/timestamp 부재 시 None.
+        {"source", "asset", "rate", "timestamp"} 또는 rate/timestamp 부재 시 None.
+
+    Note (display_name 제거, 2026-05-11):
+        Entry 식별자는 (source, asset) tuple. 서버 payload는 표시명/아이콘/색상을
+        보내지 않음. 단말은 (source, asset)로 자체 registry를 lookup해 표시명,
+        짧은 이름, 아이콘, 색상, 정렬을 결정 (iOS Constants.swift Bank enum,
+        Android Bank.kt 패턴). i18n 정책 + payload size + single source of truth
+        (client) 측면에서 단말 자체 registry가 정합.
     """
     source = raw.get("source") or raw.get("bank") or fallback_source
     asset = raw.get("asset") or raw.get("currency") or fallback_asset
@@ -90,13 +99,9 @@ def _normalize_entry(
     if source is None or asset is None or rate is None or timestamp is None:
         return None
 
-    definition = get_source_definition(source, asset)
-    display_name = definition.display_name if definition else source
-
     return {
         "source": source,
         "asset": asset,
-        "display_name": display_name,
         "rate": rate,
         "timestamp": timestamp,
     }
