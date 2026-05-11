@@ -100,9 +100,21 @@ class TopicRegistry:
 
         주의: (topic, ws) pair 수가 아니라 unique connection 수.
         ConnectionManager.active_connections와는 의미 다름 (connect는 됐지만
-        topic 미구독인 ws는 여기 안 잡힘).
+        topic 미구독인 ws는 여기 안 잡힘). multi-topic 환경에서 publisher guard로
+        쓰면 부정확 — 그땐 subscriber_count(topic) 사용.
         """
         return len(self._subscriptions)
+
+    def subscriber_count(self, topic: str) -> int:
+        """주어진 topic을 구독 중인 WebSocket connection 수 (multi-topic publisher guard용).
+
+        publish_tether_tab_snapshot 같은 topic-specific publisher가 builder 비용
+        차단에 사용. subscribed_connection_count는 multi-topic 환경에서 부정확:
+        예) 단말이 fx:usd-krw만 구독해도 subscribed_connection_count=1이라
+        usdt:krw publisher가 "구독자 있다"고 잘못 판단. subscriber_count(TETHER_TOPIC)는
+        실제 해당 topic 구독자 0이면 0 반환.
+        """
+        return len(self.get_subscribers(topic))
 
 
 # 싱글톤 — main.py / publish 호출자가 공유.

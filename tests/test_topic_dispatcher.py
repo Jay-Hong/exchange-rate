@@ -97,6 +97,43 @@ class TestTopicRegistry(unittest.TestCase):
         snap.add("hacked")
         self.assertEqual(reg.get_subscriptions(ws), {"usdt:krw"})
 
+    def test_subscriber_count_per_topic(self):
+        """subscriber_count(topic) — 각 topic별 구독자 수 (multi-topic publisher guard용).
+
+        subscribed_connection_count (전체 ws 수)와 분리. fx:usd-krw만 구독한 ws가
+        있어도 usdt:krw의 subscriber_count는 0이어야 함 (Codex 권고).
+        """
+        reg = _fresh_registry()
+        ws_a = MagicMock(name="ws_a")  # usdt:krw 구독
+        ws_b = MagicMock(name="ws_b")  # fx:usd-krw 구독
+        ws_c = MagicMock(name="ws_c")  # 둘 다 구독
+        reg.register(ws_a, ["usdt:krw"])
+        reg.register(ws_b, ["fx:usd-krw"])
+        reg.register(ws_c, ["usdt:krw", "fx:usd-krw"])
+
+        # 전체 connection 수 = 3
+        self.assertEqual(reg.subscribed_connection_count, 3)
+        # topic별 — usdt:krw는 ws_a + ws_c = 2명
+        self.assertEqual(reg.subscriber_count("usdt:krw"), 2)
+        # fx:usd-krw는 ws_b + ws_c = 2명
+        self.assertEqual(reg.subscriber_count("fx:usd-krw"), 2)
+        # 미존재 topic = 0
+        self.assertEqual(reg.subscriber_count("nonexistent:topic"), 0)
+
+    def test_subscriber_count_isolated_per_topic(self):
+        """다른 topic 구독자 있어도 해당 topic의 count는 0 (multi-topic guard 핵심)."""
+        reg = _fresh_registry()
+        ws = MagicMock()
+        # fx:usd-krw만 구독
+        reg.register(ws, ["fx:usd-krw"])
+
+        # 전체 connection은 1명이지만
+        self.assertEqual(reg.subscribed_connection_count, 1)
+        # usdt:krw subscriber는 0 (publisher가 builder 호출 차단해야 함)
+        self.assertEqual(reg.subscriber_count("usdt:krw"), 0)
+        # fx:usd-krw는 1
+        self.assertEqual(reg.subscriber_count("fx:usd-krw"), 1)
+
 
 # ---------------------------------------------------------------------------
 # publish_topic — FF 분기 + 실패 격리

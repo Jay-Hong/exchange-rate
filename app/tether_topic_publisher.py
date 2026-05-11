@@ -159,11 +159,18 @@ async def publish_tether_tab_snapshot(
     if not config.TOPIC_DISPATCHER_ENABLED:
         await _record_topic_event(result="skipped_disabled")
         return False
-    if topic_dispatcher.registry.subscribed_connection_count == 0:
+    # Multi-topic 환경에서 topic별 subscriber count 필수 (Codex 권고).
+    # subscribed_connection_count는 전체 ws 수라 fx:* 구독자가 있을 때도
+    # usdt:krw publisher를 발화시켜 builder 비용 낭비 발생.
+    if topic_dispatcher.registry.subscriber_count(TETHER_TOPIC) == 0:
         await _record_topic_event(result="skipped_no_subscribers")
         return False
 
     payload = load_and_build_tether_tab_payload(db, include_krx=include_krx)
+    # Multi-topic 환경에서 단말이 수신 메시지의 topic 식별 가능하게 top-level
+    # topic 필드 주입 (Codex 권고). builder는 topic-agnostic 유지 — publisher
+    # wrapper가 schema 책임. dispatcher.publish_topic는 전달 계층 (자동 변형 X).
+    payload["topic"] = TETHER_TOPIC
     await _record_topic_event(result="built")
 
     sent = await topic_dispatcher.publish_topic(TETHER_TOPIC, payload)
