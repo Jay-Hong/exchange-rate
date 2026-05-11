@@ -14,6 +14,9 @@ import unittest
 from app.legacy_policy import (
     LEGACY_RATE_ASSETS,
     LEGACY_RATE_SOURCES,
+    LEGACY_REMOVED_RATE_TOPICS,
+    build_legacy_removed_detail,
+    get_removed_legacy_rate_topic,
     should_include_source_in_legacy_rates,
 )
 
@@ -106,6 +109,89 @@ class TestShouldIncludeSourceInLegacyRates(unittest.TestCase):
         from app.crud import BANK_DISPLAY_ORDER
         banks_in_sources = [s for s in LEGACY_RATE_SOURCES if s != "investing"]
         self.assertEqual(banks_in_sources, BANK_DISPLAY_ORDER)
+
+
+# ---------------------------------------------------------------------------
+# Z-2d Step 4: LEGACY_REMOVED_RATE_TOPICS + helpers
+# ---------------------------------------------------------------------------
+
+class TestLegacyRemovedRateTopics(unittest.TestCase):
+    """REST /api/rates/{currency} 410 Gone 정책 — topic-only 자산은 use_topic 안내."""
+
+    def test_mapping_exact(self):
+        """LEGACY_REMOVED_RATE_TOPICS 정확 매핑 회귀 보호.
+
+        현재 두 자산 모두 usdt:krw로 안내 (KRX futures는 usdt:krw topic의 optional
+        group). 미래에 KRX 독립 topic 도입 시 value 갱신.
+        """
+        self.assertEqual(
+            LEGACY_REMOVED_RATE_TOPICS,
+            {
+                "usdt-krw": "usdt:krw",
+                "usd-krw-futures": "usdt:krw",
+            },
+        )
+
+
+class TestGetRemovedLegacyRateTopic(unittest.TestCase):
+
+    def test_usdt_krw_returns_topic(self):
+        self.assertEqual(get_removed_legacy_rate_topic("usdt-krw"), "usdt:krw")
+
+    def test_usd_krw_futures_returns_topic(self):
+        self.assertEqual(get_removed_legacy_rate_topic("usd-krw-futures"), "usdt:krw")
+
+    def test_allowed_asset_returns_none(self):
+        """LEGACY_RATE_ASSETS 통과 자산은 제거 대상 X — None 반환."""
+        for asset in LEGACY_RATE_ASSETS:
+            with self.subTest(asset=asset):
+                self.assertIsNone(get_removed_legacy_rate_topic(asset))
+
+    def test_unknown_asset_returns_none(self):
+        """미등록 자산은 제거 대상 아님 — None (기존 endpoint 동작 유지)."""
+        self.assertIsNone(get_removed_legacy_rate_topic("cny-krw"))
+        self.assertIsNone(get_removed_legacy_rate_topic("some-typo"))
+
+
+class TestBuildLegacyRemovedDetail(unittest.TestCase):
+
+    def test_usdt_krw_detail_shape(self):
+        detail = build_legacy_removed_detail("usdt-krw")
+        self.assertEqual(
+            detail,
+            {
+                "error": "legacy_rate_removed",
+                "currency": "usdt-krw",
+                "use_topic": "usdt:krw",
+            },
+        )
+
+    def test_usd_krw_futures_detail_shape(self):
+        detail = build_legacy_removed_detail("usd-krw-futures")
+        self.assertEqual(
+            detail,
+            {
+                "error": "legacy_rate_removed",
+                "currency": "usd-krw-futures",
+                "use_topic": "usdt:krw",
+            },
+        )
+
+    def test_allowed_asset_returns_none(self):
+        """LEGACY_RATE_ASSETS는 제거 대상 X — None (정상 endpoint 처리 진행)."""
+        for asset in LEGACY_RATE_ASSETS:
+            with self.subTest(asset=asset):
+                self.assertIsNone(build_legacy_removed_detail(asset))
+
+    def test_unknown_asset_returns_none(self):
+        """미등록 자산은 None (기존 endpoint 동작 유지 — 빈 list 또는 404)."""
+        self.assertIsNone(build_legacy_removed_detail("cny-krw"))
+        self.assertIsNone(build_legacy_removed_detail("some-typo"))
+
+    def test_detail_exact_keys(self):
+        """detail 응답 key set 회귀 보호 — 단말 contract."""
+        detail = build_legacy_removed_detail("usdt-krw")
+        self.assertEqual(set(detail.keys()), {"error", "currency", "use_topic"})
 
 
 if __name__ == "__main__":

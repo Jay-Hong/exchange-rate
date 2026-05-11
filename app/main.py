@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -911,10 +911,20 @@ def get_rates_for_mobile(db: Session = Depends(get_db)):
 
 @app.get("/api/rates/{currency}")
 def get_rates_by_currency(currency: str, db: Session = Depends(get_db)):
-    """특정 통화쌍의 모든 환율 조회 (모바일 앱용)"""
+    """특정 통화쌍의 모든 환율 조회 (모바일 앱용).
+
+    Z-2d Step 4: topic-only 자산(usdt-krw, usd-krw-futures)은 410 Gone +
+    use_topic 안내 — 새 단말은 topic API로 마이그레이션. 정책 상수는
+    app.legacy_policy.LEGACY_REMOVED_RATE_TOPICS 단일 진실 소스.
+    """
+    # legacy에서 제거된 asset 분기 — DB 호출 전 fail-fast
+    removed_detail = legacy_policy.build_legacy_removed_detail(currency)
+    if removed_detail is not None:
+        raise HTTPException(status_code=410, detail=removed_detail)
+
     try:
         rates = crud.get_rates_by_currency(db=db, currency=currency)
-        
+
         if not rates:
             raise HTTPException(status_code=404, detail=f"'{currency}' 통화쌍의 환율 데이터를 찾을 수 없습니다.")
 
@@ -926,7 +936,7 @@ def get_rates_by_currency(currency: str, db: Session = Depends(get_db)):
                 "total_count": len(rates)
             }
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:

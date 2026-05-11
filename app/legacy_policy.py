@@ -26,7 +26,7 @@ Redis latest mirror seed가 모두 따르는 단일 정책. topic-only source(US
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 # Public constants — 순서 안정 (BANK_DISPLAY_ORDER와 같은 list/tuple 패턴).
 # 새 통화 / 새 source 추가 시 명시 등록 필요 (fail-safe — 등록 안 하면 자동 제외).
@@ -64,3 +64,48 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
         False
     """
     return source in _LEGACY_RATE_SOURCE_SET and asset in _LEGACY_RATE_ASSET_SET
+
+
+# ─── Z-2d Step 4: REST /api/rates/{currency} 410 Gone 정책 ────────────────────
+
+# Legacy `/api/rates/{currency}` endpoint에서 영구 제거된 asset → 안내할 topic.
+# 새 단말은 topic API로 마이그레이션. 같은 topic이라도 의미가 다르면 별도 key로 분리.
+# usd-krw-futures는 현재 usdt:krw topic의 optional group(data.usd_krw_futures)이라
+# 동일 topic 안내. 미래에 KRX 독립 topic(예: krx:usd-krw-futures) 도입 시 value 갱신.
+LEGACY_REMOVED_RATE_TOPICS: Dict[str, str] = {
+    "usdt-krw": "usdt:krw",
+    "usd-krw-futures": "usdt:krw",
+}
+
+
+def get_removed_legacy_rate_topic(asset: str) -> Optional[str]:
+    """asset이 legacy에서 제거됐다면 안내할 topic 이름 반환.
+
+    Args:
+        asset: 통화쌍/상품 (예: "usdt-krw").
+
+    Returns:
+        제거된 asset이면 topic 이름 (예: "usdt:krw"), 아니면 None.
+    """
+    return LEGACY_REMOVED_RATE_TOPICS.get(asset)
+
+
+def build_legacy_removed_detail(asset: str) -> Optional[Dict[str, str]]:
+    """REST 410 응답 detail dict 빌드. None이면 정상 처리(allowed asset).
+
+    Args:
+        asset: 통화쌍/상품.
+
+    Returns:
+        제거된 asset:
+            {"error": "legacy_rate_removed", "currency": asset, "use_topic": <topic>}
+        그 외: None (호출자가 정상 응답 진행).
+    """
+    topic = get_removed_legacy_rate_topic(asset)
+    if topic is None:
+        return None
+    return {
+        "error": "legacy_rate_removed",
+        "currency": asset,
+        "use_topic": topic,
+    }
