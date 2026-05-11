@@ -314,12 +314,17 @@ Unsubscribe: {"type": "unsubscribe", "topics": ["usdt:krw"]}
 {
   "type": "snapshot",
   "version": 1,
+  "topic": "usdt:krw",
   "data": { /* 4 groups */ }
 }
 ```
 
 - `version=1`: schema version. 미래 호환 변경 시 bump
 - `type="snapshot"`: 현재 전체 상태 dump 형태. delta는 미정 (필요 시 별도 type)
+- `topic`: 송신 topic 이름. multi-topic 동시 구독 시 단말이 수신 메시지의
+  topic 식별용 (2026-05-11 추가). 단말은 `payload["topic"]`으로 분기 가능 —
+  예: `if payload["topic"] == "usdt:krw"`. builder는 여전히 topic-agnostic,
+  publisher wrapper가 schema 책임.
 
 ### Entry shape (모든 그룹 공통)
 
