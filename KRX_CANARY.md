@@ -3,6 +3,11 @@
 > 목적: KRX optional source(PR6 시리즈)의 단계적 운영 진입 절차. 운영자가 그대로 따라할 수 있는 runbook 형태.
 >
 > 관련 문서: [CLAUDE.md "KRX 미국달러선물" 섹션](CLAUDE.md), [.env.example](.env.example), [DECISIONS.md](DECISIONS.md)
+>
+> ⚠️ **Historical note (Z-2d cleanup 2026-05-12)**: 본 runbook의 `KRX_BROADCAST_INCLUDE` 참조는
+> historical context. 해당 env는 Z-2d cleanup에서 제거됨 — legacy 노출은
+> `app/legacy_policy.should_include_source_in_legacy_rates` allowlist가 단일 진실 소스.
+> KRX는 allowlist 미포함이라 자동 차단. Stage 2 topic 노출은 별도 topic protocol(ADR-028).
 
 ---
 

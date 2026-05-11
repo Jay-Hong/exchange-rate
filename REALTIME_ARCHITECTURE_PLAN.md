@@ -17,7 +17,7 @@
 >
 > 관련 ADR: [ADR-026](DECISIONS.md) (Redis-first hot path) / [ADR-027](DECISIONS.md) (KRX REST/stale 정책) / [ADR-028](DECISIONS.md) (Topic-only Tether/KRX + legacy FX dual-emit)
 >
-> 📝 **상태 (v0.9 draft, 2026-05-06)**: PR6 Stage 1 canary 진행 중 (KRX_BROADCAST_INCLUDE=false). PR6e 운영 보강 적용. 본 문서를 단일 진리 source로 명시 + ADR-028 신설로 topic-only/dual-emit 계약 고정.
+> 📝 **상태 (v0.9 draft, 2026-05-12)**: PR6 Stage 1 canary 진행 중 (`KRX_FUTURES_ENABLED=true`로 DB 저장만 활성, legacy 노출은 Z-2d legacy_policy allowlist로 차단). PR6e 운영 보강 적용. ADR-028 신설로 topic-only/dual-emit 계약 고정. Z-2d cleanup(2026-05-12)으로 `KRX_BROADCAST_INCLUDE` env 제거 — legacy 노출 정책 단일화.
 > 📝 **이전 상태 (v0.8 draft, 2026-05-04)**: PR3-PR5 구현/배포/24h+IN mode 측정 완료 — broadcast hot path DB-free 달성. ADR-026 / CHANGELOG / 본 문서 PR3 섹션에 최종 수치 반영 완료. 후속은 영업시간 Redis read jitter 진단과 PR6(KRX futures / USDT WebSocket) 영역.
 > 🎯 **목적**: 1초 단위 실시간화 + 거래소 WebSocket + 구독 기반 라우팅으로의 단계별 전환을 위한 합의 문서
 > 🔄 **변경 이력**: v0.8 — PR3 Step 1-5 + PR3.5 (계측) + PR4 (MGET) + PR5 (DXY mirror) 시퀀스 완료 (2026-05-03). broadcast hot path에서 rates + DXY spot DB SELECT 제거. PR5 24h 관측(n=31495)에서 rates/DXY Redis hit 100%, dxy_query_ms 0건, payload_build_ms p99 30.25ms 확인. IN mode 30분 관측(n=1801)은 p99 75.97ms로 영업시간 Redis read wall-clock jitter 증가를 확인했지만 DB fallback/DXY fallback은 0건. ADR-026 / CHANGELOG / 본문 PR3 섹션에 최종 수치 반영 완료.

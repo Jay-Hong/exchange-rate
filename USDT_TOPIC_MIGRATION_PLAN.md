@@ -379,10 +379,11 @@ inclusion policy 통일**. Step 1-5 완료, 운영 배포 + 통합 smoke 검증 
 - 회귀 보호 — allowed FX 응답 변경 없음
 - Topic API 격리 — usdt:krw / fx:* 모두 영향 없음 (별도 builder, legacy policy 미경유)
 
-**잔존 cleanup 작업 (별도 PR)**:
+**잔존 cleanup 작업**:
 
-- `KRX_BROADCAST_INCLUDE` env/config 변수 제거 — 현재 코드 미참조, deprecated
-  명시됨. config.py + docstring + .env(필요 시) 정리 + 관련 테스트 단순화.
+- ✅ `KRX_BROADCAST_INCLUDE` env/config 변수 제거 완료 (2026-05-12, Z-2d cleanup
+  commit). app/config.py / .env.example / test patch 정리. ADR-027 / CHANGELOG /
+  KRX_CANARY 등 historical 문서는 "removed in Z-2d cleanup" 표시로 보존.
 
 **클라이언트 영향**:
 

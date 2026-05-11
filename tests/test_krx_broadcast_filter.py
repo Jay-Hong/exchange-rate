@@ -1,14 +1,14 @@
-"""Latest mirror exposure policy 단위 테스트 (PR Z-2d Step 3 갱신).
+"""Latest mirror exposure policy 단위 테스트.
 
 Pre-Z-2d 이름은 "krx_broadcast_filter"였으나 Z-2d Step 3 통합 후 의미는
-**legacy mirror exposure policy = legacy_policy**로 일반화. 파일명은 git
-history 보존 위해 유지 (별도 rename PR 가능).
+**legacy mirror exposure policy = legacy_policy**로 일반화. Z-2d cleanup
+(2026-05-12)에서 `KRX_BROADCAST_INCLUDE` env 제거 — 더 이상 토글 관련 patch X.
+파일명은 git history 보존 위해 유지 (별도 rename PR 가능).
 
 검증:
     - should_include_source_in_latest는 legacy_policy.should_include_source_in_legacy_rates
       위임 — Cartesian product 양방향 일치 (invariant)
-    - KRX_BROADCAST_INCLUDE 토글 무력화: True/False 양쪽에서 동일 결과
-    - KRX/USDT 모두 차단 — Step 3 본질은 KRX만이 아니라 topic-only source 전체
+    - KRX/USDT 모두 차단 (legacy allowlist 미포함)
     - bank/investing FX (LEGACY allowlist 통과)는 True 유지
     - _mirror_all_latest source loop: topic-only source 모두 skip
 """
@@ -17,7 +17,6 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app import config
 from app.latest_rates_cache import (
     _mirror_all_latest,
     should_include_source_in_latest,
@@ -30,25 +29,18 @@ from app.legacy_policy import (
 
 
 # ---------------------------------------------------------------------------
-# Helper unit tests — 정책 전환 의미 명시 (Z-2d Step 3)
+# Helper unit tests — Z-2d allowlist 정책
 # ---------------------------------------------------------------------------
 
 class TestShouldIncludeSourceInLatest(unittest.TestCase):
-    """Step 3 정책 전환:
-    - 기존: KRX_BROADCAST_INCLUDE 한정 토글 + KRX 외 default True
-    - 신규: legacy_policy allowlist (bank 9 + investing × FX 3) AND. 그 외 모두 False.
+    """Z-2d 정책:
+    - legacy_policy allowlist (bank 9 + investing × FX 3) AND.
+    - 그 외 모두 False (USDT 거래소, KRX, 미등록 source/asset).
     """
 
-    def test_krx_usd_futures_blocked_regardless_of_toggle(self):
-        """KRX usd-krw-futures는 토글 True/False 무관 False (allowlist 미포함).
-
-        Pre-Z-2d: 토글이 결과 결정. Post-Z-2d: 토글 무력화 (deprecated),
-        legacy_policy allowlist가 단일 진실 소스.
-        """
-        for toggle in (True, False):
-            with self.subTest(toggle=toggle), \
-                 patch.object(config, "KRX_BROADCAST_INCLUDE", toggle):
-                self.assertFalse(should_include_source_in_latest("krx", "usd-krw-futures"))
+    def test_krx_usd_futures_blocked(self):
+        """KRX usd-krw-futures는 allowlist 미포함이라 False."""
+        self.assertFalse(should_include_source_in_latest("krx", "usd-krw-futures"))
 
     def test_krx_any_asset_blocked(self):
         """KRX source 자체가 LEGACY_RATE_SOURCES 미포함이라 asset 무관 False."""
@@ -60,7 +52,7 @@ class TestShouldIncludeSourceInLatest(unittest.TestCase):
     def test_usdt_exchanges_blocked(self):
         """USDT 거래소 (upbit/bithumb/coinone/korbit/gopax)는 모두 False.
 
-        Step 3 본질이 KRX뿐 아니라 USDT도 Redis latest mirror에서 차단.
+        KRX뿐 아니라 USDT도 Redis latest mirror에서 차단.
         """
         for source in ("upbit", "bithumb", "coinone", "korbit", "gopax"):
             with self.subTest(source=source):
@@ -89,16 +81,11 @@ class TestShouldIncludeSourceInLatest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestMirrorEqualsLegacyPolicyInvariant(unittest.TestCase):
-    """Z-2d Step 3 핵심 invariant — Redis mirror policy = legacy policy.
+    """핵심 invariant — Redis mirror policy = legacy policy.
 
-    미래에 누군가 should_include_source_in_latest에 별도 로직 추가하거나
-    KRX_BROADCAST_INCLUDE 토글을 다시 결과에 관여시키면 즉시 회귀 감지.
-
-    Cartesian product + 토글 양쪽 = 검증 조합 ~140 (test cases).
+    미래에 누군가 should_include_source_in_latest에 별도 로직 추가하면 즉시
+    회귀 감지. KRX_BROADCAST_INCLUDE는 Z-2d cleanup에서 제거됨 — 토글 patch 불요.
     """
-
-    # 토글 양쪽에서 (latest == legacy) 보장 — 토글이 결과에 관여 X
-    _TOGGLE_VALUES = (True, False)
 
     # Allowed combinations (legacy_policy True)
     _ALLOWED_COMBOS = [
@@ -128,30 +115,23 @@ class TestMirrorEqualsLegacyPolicyInvariant(unittest.TestCase):
         ("kb", "cny-krw"),
     ]
 
-    def test_invariant_allowed_combos_both_toggle(self):
-        """allowed 조합: 토글 양쪽에서 latest == legacy == True."""
-        for toggle in self._TOGGLE_VALUES:
-            for source, asset in self._ALLOWED_COMBOS:
-                with self.subTest(toggle=toggle, source=source, asset=asset), \
-                     patch.object(config, "KRX_BROADCAST_INCLUDE", toggle):
-                    latest = should_include_source_in_latest(source, asset)
-                    legacy = should_include_source_in_legacy_rates(source, asset)
-                    self.assertEqual(latest, legacy)
-                    self.assertTrue(latest)
+    def test_invariant_allowed_combos(self):
+        """allowed 조합: latest == legacy == True."""
+        for source, asset in self._ALLOWED_COMBOS:
+            with self.subTest(source=source, asset=asset):
+                latest = should_include_source_in_latest(source, asset)
+                legacy = should_include_source_in_legacy_rates(source, asset)
+                self.assertEqual(latest, legacy)
+                self.assertTrue(latest)
 
-    def test_invariant_blocked_combos_both_toggle(self):
-        """blocked 조합: 토글 양쪽에서 latest == legacy == False.
-
-        토글이 결과에 관여하지 않는다는 계약(deprecated)까지 같이 잠금.
-        """
-        for toggle in self._TOGGLE_VALUES:
-            for source, asset in self._BLOCKED_COMBOS:
-                with self.subTest(toggle=toggle, source=source, asset=asset), \
-                     patch.object(config, "KRX_BROADCAST_INCLUDE", toggle):
-                    latest = should_include_source_in_latest(source, asset)
-                    legacy = should_include_source_in_legacy_rates(source, asset)
-                    self.assertEqual(latest, legacy)
-                    self.assertFalse(latest)
+    def test_invariant_blocked_combos(self):
+        """blocked 조합: latest == legacy == False."""
+        for source, asset in self._BLOCKED_COMBOS:
+            with self.subTest(source=source, asset=asset):
+                latest = should_include_source_in_latest(source, asset)
+                legacy = should_include_source_in_legacy_rates(source, asset)
+                self.assertEqual(latest, legacy)
+                self.assertFalse(latest)
 
 
 # ---------------------------------------------------------------------------
@@ -169,16 +149,9 @@ class TestMirrorSourceSkippedInvariant(unittest.IsolatedAsyncioTestCase):
       - source_skipped는 별도 관찰 카운트 (attempted_total에 미포함)
     """
 
-    async def _run_mirror_with_records(
-        self,
-        source_records,
-        krx_toggle: bool = False,
-    ):
-        """mirror loop를 mock하여 stats 반환. krx_toggle은 deprecated — 효과 없음
-        (Z-2d Step 3 이후 invariant 검증용으로만 유지).
-        """
-        with patch.object(config, "KRX_BROADCAST_INCLUDE", krx_toggle), \
-             patch("app.latest_rates_cache.crud") as mock_crud, \
+    async def _run_mirror_with_records(self, source_records):
+        """mirror loop를 mock하여 stats 반환."""
+        with patch("app.latest_rates_cache.crud") as mock_crud, \
              patch("app.latest_rates_cache._set_latest", new_callable=AsyncMock) as mock_set:
             mock_crud.SUPPORTED_CURRENCY_PAIRS = []  # bank/investing loop skip
             mock_crud.get_all_latest_bank_rates_from_db.return_value = []
@@ -216,24 +189,6 @@ class TestMirrorSourceSkippedInvariant(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("latest:source:krx:usd-krw-futures", called_keys)
         self.assertNotIn("latest:source:upbit:usdt-krw", called_keys)
         self.assertNotIn("latest:source:bithumb:usdt-krw", called_keys)
-
-    async def test_krx_toggle_does_not_affect_mirror_decision(self):
-        """KRX_BROADCAST_INCLUDE 토글 양쪽에서 동일 결과 — 토글 무력화 검증."""
-        records = [
-            {"bank": "upbit", "currency": "usdt-krw", "rate": 1485.0,
-             "timestamp": "2026-05-12T20:00:00+09:00"},
-            {"bank": "krx", "currency": "usd-krw-futures", "rate": 1468.5,
-             "timestamp": "2026-05-12T20:00:00+09:00"},
-        ]
-        results = {}
-        for toggle in (True, False):
-            stats, _ = await self._run_mirror_with_records(records, krx_toggle=toggle)
-            results[toggle] = (stats["source_skipped"], stats["attempted_total"])
-
-        # 토글 양쪽 결과 동일
-        self.assertEqual(results[True], results[False])
-        # 양쪽 모두 2개 skip
-        self.assertEqual(results[True], (2, 0))
 
     async def test_empty_records_no_skip(self):
         """records 빈 list — skip 카운트도 0."""

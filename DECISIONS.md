@@ -2896,6 +2896,8 @@ PR6 시리즈로 KRX 미국달러선물(`source="krx", asset="usd-krw-futures"`)
 Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket 단절, KIS approval 장애, 휴장/세션 break, 만기일 contract rollover가 사용자 화면에 stale 또는 잘못된 값으로 노출될 수 있으므로 REST snapshot/fallback 및 stale 정책이 필요하다.
 
 > ⚠️ **Stage 2 노출 채널 재정의 (2026-05-06, [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit) 합의)**: Stage 2 진입 시 KRX 노출은 **legacy `rates` 배열이 아니라 새 topic 채널** (예: `krx:usd-krw-futures`). `KRX_BROADCAST_INCLUDE=true`는 legacy 통합 트리거가 아니라 topic 발사 트리거로 의미 재정의. 본 ADR-027의 fallback/stale 정책은 topic 채널 기준으로 적용한다 (legacy `rates`에 KRX 등장은 새 계약 위반이라 진행하지 않음).
+>
+> 📝 **Historical note (Z-2d cleanup 2026-05-12)**: `KRX_BROADCAST_INCLUDE` env는 Z-2d cleanup에서 제거됨. legacy 노출 정책은 `app/legacy_policy.should_include_source_in_legacy_rates` allowlist로 통일 — KRX는 미포함이라 항상 차단. 본 ADR의 historical 토글 참조는 의사결정 기록 그대로 보존 (immutable history).
 
 ### 원칙
 

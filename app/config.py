@@ -50,16 +50,17 @@ LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS",
 # canary 진입 시 ON. KRX 장애/중단 시 false로 전체 격리 가능.
 KRX_FUTURES_ENABLED = os.getenv("KRX_FUTURES_ENABLED", "false").lower() == "true"
 
-# KRX_BROADCAST_INCLUDE: PR6 KRX 미국달러선물의 broadcast 노출 토글.
-# 저장된 KRX usd-krw-futures를 latest mirror + broadcast rates 배열에 포함할지.
-# default false — 앱 호환성 검증 전 안전 차단. canary 진입 시 단계적 ON 권장.
-# scope: source="krx" + asset="usd-krw-futures" 한정 (KRX 다른 자산은 영향 X).
-KRX_BROADCAST_INCLUDE = os.getenv("KRX_BROADCAST_INCLUDE", "false").lower() == "true"
+# KRX_BROADCAST_INCLUDE: removed in Z-2d cleanup (2026-05-12).
+# 이전: KRX 미국달러선물의 broadcast latest:* 노출 토글.
+# Z-2d 통일로 legacy_policy.should_include_source_in_legacy_rates allowlist가
+# 단일 진실 소스가 됨. KRX는 allowlist 미포함이라 자동 차단 — env 토글 무의미.
+# Historical context: DECISIONS.md ADR-027, KRX_CANARY.md, CHANGELOG.md 참조.
 
 # PR6d-1: KRX_REST_FALLBACK_ENABLED — REST snapshot/fallback 경로 토글.
 # default false — PR6d 코드 배포해도 helper가 호출되지 않아 운영 영향 0.
-# Stage 1에서 토글 ON 시 fallback orchestration이 stale 동안 REST 호출 (사용자
-# 노출은 KRX_BROADCAST_INCLUDE=false라 0). Stage 2 진입 전 운영 검증용.
+# Stage 1에서 토글 ON 시 fallback orchestration이 stale 동안 REST 호출
+# (사용자 노출은 Z-2d allowlist로 0 — legacy_policy 통일).
+# Stage 2 진입 전 운영 검증용.
 # REST = WebSocket 대체가 아니라 stale 동안의 bounded fallback probe (ADR-027).
 KRX_REST_FALLBACK_ENABLED = os.getenv("KRX_REST_FALLBACK_ENABLED", "false").lower() == "true"
 
@@ -126,7 +127,7 @@ if LATEST_MIRROR_INTERVAL_SECONDS < 1:
 TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower() == "true"
 
 # Phase Z-2b Stage 3 Level 3 — 테더 topic 안 KRX 미국달러선물 포함 여부.
-# TOPIC_DISPATCHER_ENABLED와 의미 분리 (legacy KRX_BROADCAST_INCLUDE도 재사용 X):
+# TOPIC_DISPATCHER_ENABLED와 의미 분리 (제거된 legacy KRX_BROADCAST_INCLUDE 재사용 X):
 #   - TOPIC_DISPATCHER_ENABLED: topic publish 전체 on/off
 #   - KRX_TOPIC_INCLUDE: 테더 topic payload에 usd_krw_futures key 포함 여부
 # KRX만 격리 가능 — KRX 데이터 이상 시 topic 전체 끌 필요 없이 KRX만 끄고

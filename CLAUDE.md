@@ -1141,14 +1141,19 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 | --- | --- | --- |
 | `KIS_APP_KEY` / `KIS_APP_SECRET` | 미설정 | 미설정 시 bootstrap warning 후 격리 (다른 서비스 영향 X) |
 | `KRX_FUTURES_ENABLED` | `false` | WebSocket 연결 / 신규 DB 저장 (수집 lifecycle) |
-| `KRX_BROADCAST_INCLUDE` | `false` | mirror `latest:index` 포함 + broadcast `rates` 노출 |
+
+**노출 정책 (Z-2d, 2026-05-12)**: `KRX_BROADCAST_INCLUDE` env는 Z-2d cleanup에서
+제거됨. legacy `latest:index`/`/api/rates*`/WebSocket `rates` 배열 노출 여부는
+`app/legacy_policy.should_include_source_in_legacy_rates` allowlist가 단일 진실
+소스 — KRX는 allowlist 미포함이라 항상 차단. KRX는 topic-only source로
+`krx:usd-krw-futures` 같은 별도 topic 채널에서만 노출 예정 (Phase Z-2 후속 PR).
 
 **Canary 단계** (env 토글로 단계적 활성화):
 
 1. **Stage 0 — 비활성 baseline**: `KRX_FUTURES_ENABLED=false`. 코드는 배포되어 있으나 lifecycle 자체가 비활성. 운영 영향 0.
-2. **Stage 1 — DB 저장만 (현재)**: `KRX_FUTURES_ENABLED=true` + `KRX_BROADCAST_INCLUDE=false`. KIS WebSocket → DB(`source_rates`)까지만. mirror가 broadcast가 읽는 `latest:index`에 KRX key를 포함시키지 않음 → broadcast 노출 X (Redis `latest:source:krx:*` data key 잔존 여부와 무관 — `latest:index`가 게이트). KRX tick 정상성 + DB write throughput을 24h 관찰.
-3. **Stage 2 — topic 노출** ([ADR-028](DECISIONS.md) 합의 후 재정의됨, 2026-05-06): `KRX_BROADCAST_INCLUDE=true`는 **legacy `rates` 배열 노출이 아니라 topic 채널 발사 트리거**로 의미 재정의. KRX 데이터는 새 topic protocol(예: `krx:usd-krw-futures`)로만 발사하고 legacy `rates` 배열에는 미포함. topic protocol v1 도입(별도 PR — Phase Z-2 영역) 완료 후 활성화. 단순 토글로 legacy `rates`에 KRX 노출은 새 계약 위반이라 진행하지 않음.
-4. **롤백**: 어느 단계에서든 KRX 장애 / KIS API 점검 / 데이터 이상 발견 시 해당 토글 `false`로 격리. 환경변수 변경 후 process 재생성 필요 (config는 import 시 1회 읽기, `docker compose restart`는 env_file 변경을 반영하지 않음). `docker compose up -d fastapi` 후 visible effect: `KRX_FUTURES_ENABLED=false`는 즉시 lifecycle 미시작 (수집 중단), `KRX_BROADCAST_INCLUDE=false`는 다음 정상 mirror cycle (≤3초)에 `latest:index`에서 KRX key 제외 (broadcast 미노출).
+2. **Stage 1 — DB 저장만 (현재)**: `KRX_FUTURES_ENABLED=true`. KIS WebSocket → DB(`source_rates`)까지만. legacy 경로 노출은 Z-2d allowlist로 자동 차단 (KRX 미포함). KRX tick 정상성 + DB write throughput을 24h 관찰.
+3. **Stage 2 — topic 노출** ([ADR-028](DECISIONS.md) 합의 후 재정의됨, 2026-05-06): KRX 데이터는 새 topic protocol(예: `krx:usd-krw-futures`)로만 발사하고 legacy `rates` 배열에는 미포함. topic protocol v1 도입(별도 PR — Phase Z-2 영역) 완료 후 활성화. 단순 토글로 legacy `rates`에 KRX 노출은 ADR-028 위반이라 진행하지 않음.
+4. **롤백**: 어느 단계에서든 KRX 장애 / KIS API 점검 / 데이터 이상 발견 시 `KRX_FUTURES_ENABLED=false`로 격리. 환경변수 변경 후 process 재생성 필요 (config는 import 시 1회 읽기, `docker compose restart`는 env_file 변경을 반영하지 않음). `docker compose up -d fastapi` 후 visible effect: `KRX_FUTURES_ENABLED=false`는 즉시 lifecycle 미시작 (수집 중단). legacy 노출은 Z-2d allowlist로 항상 0.
 
 **현재 구현/운영 상태 (PR6 ~ PR6e)**:
 
@@ -1157,10 +1162,10 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ 만기 자동 resolve: `select_active_usd_futures_contract` (KIS 상품 마스터 cp949 fixed-width 파싱). **PR6c-2d-1 (2026-05-07)**: swap point를 만기일 11:30:00 → **만기일 07:00 KST**로 변경 (사용자 대표 월물 선제 전환, 거래 관행 + 06:00 boundary race 회피)
 - ✅ KrxDbWriter (1초 window debounce + insert-if-changed + asyncio.to_thread DB write + race-prevention finally)
 - ✅ PR6e 운영 보강: 새 WebSocket subscribe 직후 `_last_tick_at` reset으로 세션 경계 stale carry-over 차단, KRX 저장 rate는 `Decimal(...).quantize(Decimal("0.1"))`로 0.1 KRW tick 정규화
-- ✅ Latest mirror skip 분기 (`KRX_BROADCAST_INCLUDE=false`일 때 broadcast index에서 제외)
+- ✅ Latest mirror skip 분기 — Z-2d allowlist 통일 후 KRX는 항상 mirror skip (legacy_policy 단일 진실 소스)
 - ✅ Scheduler lifecycle: `start_krx_futures_client` / `_bootstrap_krx_futures_client` / `shutdown_krx_futures_client` (background bootstrap → main.py lifespan blocking 방지, current-task 매칭 finally cleanup)
 - ✅ **PR6c-2d-1 자동 contract reconcile (2026-05-07, 5/18 임시 안전모드)**: APScheduler 5분 cron `_reconcile_krx_futures_contract`. 동작: resolve → current contract 비교 → 다르면 shutdown + start. 안전장치: 만기 차이 > 45일 점프 의심 보류 / resolve 실패 격리 / None 처리. 5/18 통과 후 hybrid (06:01 + boundary)로 축소 검토 예정 (PR6c-2d-5 후보).
-- ✅ 운영 Stage 1: `KRX_FUTURES_ENABLED=true`, `KRX_BROADCAST_INCLUDE=false`로 KIS WebSocket → DB 저장만 활성화. `latest:index` KRX key 0개로 broadcast/app 노출 없음.
+- ✅ 운영 Stage 1: `KRX_FUTURES_ENABLED=true`로 KIS WebSocket → DB 저장만 활성화. legacy 노출은 Z-2d allowlist로 항상 0 (`latest:index`에 KRX key 미포함).
 - ⏸ REST snapshot/fallback (PR6d-2b) — WebSocket 끊김 시 최신성 보전 정책. [ADR-027](DECISIONS.md#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) 초안 작성, 5/6~5/8 평일 baseline + 5/18 만기 관찰 후 수치 확정 예정. PR6c-2d-1 자동 rollover로 만기 layer는 분리됨.
 
 **핵심 파일**:

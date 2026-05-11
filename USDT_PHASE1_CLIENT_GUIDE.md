@@ -374,7 +374,7 @@ list 그룹은 SourceRegistry sort_order로 서버 측 정렬됨. 단말은 받�
 
 **키 자체 부재 가능성**:
 
-- 서버 운영 `KRX_TOPIC_INCLUDE=false` (legacy `KRX_BROADCAST_INCLUDE`와는 별개 flag)
+- 서버 운영 `KRX_TOPIC_INCLUDE=false` (Z-2d cleanup 후 legacy 노출은 legacy_policy allowlist로 단일화 — 본 flag는 topic 안 KRX optional group 전용)
 - 또는 KRX 데이터 없음 / source/asset mismatch
 
 **구현 가이드**:

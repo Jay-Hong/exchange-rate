@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`KRX_BROADCAST_INCLUDE` env/config 변수** (2026-05-12, Z-2d cleanup):
+  - Z-2d (legacy exposure policy 통일)에서 `legacy_policy.should_include_source_in_legacy_rates` allowlist가 단일 진실 소스가 되며 KRX는 allowlist 미포함이라 토글 자체가 무의미해짐
+  - `app/config.py` 변수 삭제 + `.env.example` 라인 제거 + 테스트 patch 제거
+  - 운영 영향 0 — Z-2d Step 1-5(`fa978b0`~`b35da43`) 적용 이후 코드 미참조
+  - ADR-027 / KRX_CANARY.md / USDT_TOPIC_MIGRATION_PLAN.md 등 historical 문서는 의사결정 기록 보존 + "removed in Z-2d cleanup" 표시
+
 ### Added
 
 - **KRX 미국달러선물 Stage 1 canary** (2026-05-06, PR6 시리즈, ADR-027 초안):

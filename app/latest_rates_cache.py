@@ -321,10 +321,10 @@ def should_include_source_in_latest(source: str, asset: str) -> bool:
     동일 allowlist 적용. cartesian product 의미: bank(9) + investing × FX(3) =
     30 조합 True, 그 외(USDT 거래소, KRX 등) False.
 
-    Deprecated: `KRX_BROADCAST_INCLUDE` 토글은 본 함수에서 무력화됨 (Z-2d 통일
-    이후 allowlist가 단일 진실 소스). env/config 변수 자체는 별도 cleanup PR에서
-    제거 예정 — 현재 코드에서 참조하지 않음. 운영자가 토글을 True/False로 바꿔도
-    KRX usd-krw-futures는 항상 mirror skip (allowlist 미포함).
+    Removed: `KRX_BROADCAST_INCLUDE` env/config는 Z-2d cleanup(2026-05-12)에서
+    제거됨. allowlist가 단일 진실 소스 — KRX usd-krw-futures는 allowlist 미포함이라
+    항상 mirror skip. Historical context는 DECISIONS.md ADR-027, KRX_CANARY.md,
+    CHANGELOG.md 참조.
 
     Args:
         source: 데이터 공급자 (예: "kb", "investing", "upbit", "krx").
@@ -401,8 +401,10 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
 
     # source — 5 거래소 × 1 asset (asset=None: 전체)
     # legacy adapter shape: {currency: asset, bank: source, rate, timestamp}
-    # PR6b-2a — KRX usd-krw-futures는 KRX_BROADCAST_INCLUDE=true일 때만 mirror.
-    # default false → broadcast/app 영향 0 (앱 호환성 검증 후 토글 ON).
+    # Z-2d (2026-05-12) — should_include_source_in_latest가 legacy_policy allowlist
+    # 위임. topic-only source(USDT 5거래소 + KRX usd-krw-futures)는 모두 skip.
+    # Historical: PR6b-2a에서 KRX_BROADCAST_INCLUDE 토글로 KRX만 한정 차단 → Z-2d에서
+    # allowlist 통일로 일반화 + env 제거.
     # invariant: skip은 attempted_total 전 단계 → attempted = loaded + failed 유지.
     for record in crud.get_source_rates_as_legacy_format(db):
         source = record["bank"]
