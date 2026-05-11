@@ -389,6 +389,69 @@ list 그룹은 SourceRegistry sort_order로 서버 측 정렬됨. 단말은 받�
 - 단말은 source별 분기 X — 일반 표시 정책 그대로 (rate + 시간)
 - `timestamp`로 사용자에게 "마지막 거래 시점" 정보 제공 가능 (선택)
 
+### FX topic schema (Phase Z-2c 예정)
+
+새 단말이 legacy WebSocket/API를 보지 않고 모든 외환 탭을 topic API로 처리하려면
+통화별 FX topic을 사용한다. `usdt:krw`와 동일하게 top-level은
+`type/version/topic/data`, entry는 `{source, asset, rate, timestamp}` shape를 사용한다.
+
+**Topic 이름**:
+
+| topic | 탭 | asset |
+| --- | --- | --- |
+| `fx:usd-krw` | 달러 | `usd-krw` |
+| `fx:jpy-krw` | 엔화 | `jpy-krw` |
+| `fx:eur-krw` | 유로 | `eur-krw` |
+
+**Payload 예시**:
+
+```jsonc
+{
+  "type": "snapshot",
+  "version": 1,
+  "topic": "fx:usd-krw",
+  "data": {
+    "banks": [
+      {
+        "source": "kb",
+        "asset": "usd-krw",
+        "rate": 1370.5,
+        "timestamp": "2026-05-11T15:00:00+09:00"
+      }
+    ],
+    "reference": {
+      "source": "investing",
+      "asset": "usd-krw",
+      "rate": 1371.2,
+      "timestamp": "2026-05-11T15:00:00+09:00"
+    }
+  }
+}
+```
+
+**`data` 그룹**:
+
+**Required** (key는 항상 존재, list는 비어있을 수 있음):
+
+| key | type | 내용 |
+| --- | --- | --- |
+| `banks` | list[entry] | 해당 asset의 은행 고시 환율 (transient 빈 list 허용) |
+
+**Optional**:
+
+| key | type | 조건 |
+| --- | --- | --- |
+| `reference` | entry | Investing 데이터 존재 + `(source="investing", asset=<topic asset>)` 정확 일치 시만 포함. 미수집 / source-asset mismatch 시 key 자체 누락 — `usdt:krw`의 `usd_krw_reference`와 동일 정책 (`app/usdt_topic_payload.py` schema 무결성 보호 정책). 단말은 `data["reference"]` 존재 여부로 분기 |
+
+FX topic은 topic 하나가 단일 asset만 표현하므로 `usd_krw_banks` 같은 asset prefix를
+data key에 반복하지 않는다. 단말은 `payload["topic"]`으로 탭을 구분하고,
+모든 FX 탭에서 `data.banks`(+ 선택적 `data.reference`)를 같은 방식으로 처리한다.
+
+**Entry registry (FX 섹션 재확인)** — entry 식별자는 위 "Entry 식별 + 표시 정책"
+섹션과 동일하게 `(source, asset)` tuple. 따라서 단말 registry는 동일 source라도
+asset별 별도 entry가 필요하다 (예: `kb + usd-krw`, `kb + jpy-krw`, `kb + eur-krw`
+각각 별 entry). 미등록 `(source, asset)` 조합은 그대로 raw 표시 또는 무시 가능.
+
 ### 운영 모니터링
 
 `GET /admin/api/topic-status` (HTTP Basic auth):
