@@ -332,25 +332,64 @@ Stage 1/2/3 1차/2차 모두 `TOPIC_DISPATCHER_ENABLED=false` default 유지.
 - 1개 asset 예외도 `safe_publish_all_fx_snapshots`의 per-asset try/except로 격리
 - broadcast 정상 흐름 보호 — `logger.exception` + telemetry error +1 + False return
 
-### Z-2d (legacy rates에서 topic-only source 제외 — Codex 2회차 정정)
+### Z-2d (legacy rates에서 topic-only source 제외 — 운영 완료 2026-05-12)
 
-§3.1에서 발견한 정책 부재 차단. **USDT만 제거 X — topic-only source 전체 inclusion policy 도입**.
+§3.1에서 발견한 정책 부재 차단. **USDT만 제거 X — topic-only source 전체
+inclusion policy 통일**. Step 1-5 완료, 운영 배포 + 통합 smoke 검증 통과.
 
-- `should_include_source_in_legacy_rates(source, asset) -> bool` policy 함수 추가
-  - 별도 allowlist 또는 `SourceRegistry.legacy_rates_enabled` 같은 명시적 flag 기반
-  - `SourceRegistry.category` 단독 판단 금지 (category는 도메인 분류이지 노출 계약 아님)
-  - 출시 계약: legacy rates = FX/은행/Investing만. topic-only (USDT/KRX 등) 제외
-- `get_source_rates_as_legacy_format()`에 policy 적용 (crud.py:1751)
-  - 호출 3곳 (365/415/454) 자동으로 USDT/KRX 제외됨
-- `/api/rates/{currency}` USDT/KRX 분기 deprecation 또는 제거
-  - `usdt-krw`: legacy 응답에서 빈 배열 또는 410 Gone
-  - `usd-krw-futures`: 동일 (현재는 Stage 1 broadcast 미포함이지만 DB legacy path 잠재 노출 차단)
-- legacy `/api/rates` / WebSocket `rates` 경로 자체는 보존
-  - 기존 FX/은행/Investing legacy 응답은 `investing_exchange_rates` / `bank_exchange_rates` 테이블 경로 유지 (`get_source_rates_as_legacy_format` 의존 X)
-  - `get_source_rates_as_legacy_format()`는 `source_rates` 전용 어댑터 — topic-only source 제외 후 사실상 빈 결과 반환만 하게 되거나, 호출 지점에서 제거
-- 클라이언트 영향 점검:
-  - iOS/Android 운영 앱: 테더 탭 없으므로 영향 0
-  - iOS dev/test: legacy USDT 의존 시 마이그레이션 필요 (USDT_PHASE1_CLIENT_GUIDE.md 갱신)
+**Step 분할 (모두 완료)**:
+
+- Step 1 (fa978b0, 2026-05-12): `app/legacy_policy.py` + 14 tests
+  - `LEGACY_RATE_ASSETS` / `LEGACY_RATE_SOURCES` tuple 상수
+  - `should_include_source_in_legacy_rates(source, asset)` — (source, asset)
+    두 set AND allowlist. 호출자 없음 (운영 영향 0).
+- Step 2 (eee2912, 2026-05-12): `crud.get_source_rates_as_legacy_format` filter
+  - `_filter_source_entries_by_legacy_policy` private helper
+  - REST `/api/rates*` + WebSocket DB fallback + Redis mirror seed 자동 커버
+  - 현재 source_rates에는 USDT/KRX만 → filter 후 빈 list 반환
+- Step 3 (3ae837e, 2026-05-12): `latest_rates_cache.should_include_source_in_latest`
+  → `legacy_policy.should_include_source_in_legacy_rates` 단순 위임
+  - Redis fast path와 DB fallback 양쪽 정책 일관성 완성 (이중 안전망)
+  - `KRX_BROADCAST_INCLUDE` 무력화 (env/config는 별도 cleanup PR)
+  - invariant 테스트: latest == legacy in both toggle states
+- Step 4 (7d19ff5, 2026-05-12): REST `/api/rates/{currency}` 410 Gone
+  - `LEGACY_REMOVED_RATE_TOPICS` dict + `get_removed_legacy_rate_topic` +
+    `build_legacy_removed_detail` helper (Option A — main.py firebase_admin
+    의존성 회피 위해 detail builder를 legacy_policy 모듈에 배치)
+  - `/api/rates/{currency}` handler에 DB 호출 전 fail-fast 분기
+- Step 5 (배포 + 통합 smoke 2026-05-12 KST): 6항목 모두 통과
+
+**Step 5 통합 smoke 결과 (2026-05-12 KST)**:
+
+| # | 항목 | 결과 |
+| --- | --- | --- |
+| 1 | `/api/rates/usdt-krw` | HTTP 410 + `{error: legacy_rate_removed, currency: usdt-krw, use_topic: usdt:krw}` |
+| 2 | `/api/rates/usd-krw-futures` | HTTP 410 + 동일 shape, `use_topic: usdt:krw` |
+| 3 | `/api/rates/usd-krw` (회귀 보호) | HTTP 200 + 10 banks (investing + 9 banks) |
+| 4 | `/api/rates` aggregate | total=30, currencies={eur-krw, jpy-krw, usd-krw}, USDT/KRX 0건 |
+| 5 | WebSocket `/ws` legacy `rates` | total=30, 동일 shape, USDT/KRX 0건 |
+| 6 | usdt:krw + fx:* topic API | error=0, enabled=true 유지, last_result 정상 분기 |
+
+**검증된 운영 invariant**:
+
+- REST allowlist 적용 — `/api/rates` aggregate + `/api/rates/{currency}` 모두
+  topic-only source 자동 제외
+- WebSocket broadcast 일관성 — Redis fast path + DB fallback 양쪽 동일 정책
+- 410 + use_topic 안내 — 새 단말 마이그레이션 명확
+- 회귀 보호 — allowed FX 응답 변경 없음
+- Topic API 격리 — usdt:krw / fx:* 모두 영향 없음 (별도 builder, legacy policy 미경유)
+
+**잔존 cleanup 작업 (별도 PR)**:
+
+- `KRX_BROADCAST_INCLUDE` env/config 변수 제거 — 현재 코드 미참조, deprecated
+  명시됨. config.py + docstring + .env(필요 시) 정리 + 관련 테스트 단순화.
+
+**클라이언트 영향**:
+
+- iOS/Android 운영 앱: 영향 0 (테더 탭/KRX 탭 없음, legacy USDT/KRX 요청 안 함)
+- iOS dev/test (legacy USDT 의존 시): 410 받음 → topic API 마이그레이션 필요
+  (`USDT_PHASE1_CLIENT_GUIDE.md` FX/USDT topic schema 참조)
+- topic API(usdt:krw, fx:*): 영향 0 (자체 builder, 정상 운영 유지)
 
 ---
 
