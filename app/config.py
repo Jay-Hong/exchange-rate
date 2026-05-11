@@ -133,6 +133,15 @@ TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower(
 # USDT/은행/Investing은 그대로 publish 유지.
 KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
 
+# Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
+# TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
+#   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off
+#   - FX_TOPIC_ENABLED: FX 3 topic 발사 여부 (단일 flag — per-currency 분리 X)
+# default OFF로 골격만 배포 — fx_topic_publisher 모듈 import 가능하나 main.py
+# broadcast hook이 flag=true일 때만 발사. usdt:krw와는 독립 (USDT 끄지 않고
+# FX만 켜기/끄기 가능).
+FX_TOPIC_ENABLED = os.getenv("FX_TOPIC_ENABLED", "false").lower() == "true"
+
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
