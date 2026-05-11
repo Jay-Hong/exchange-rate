@@ -142,7 +142,9 @@ async def publish_tether_tab_snapshot(
 
     Guard (builder 호출 비용 차단):
         1. config.TOPIC_DISPATCHER_ENABLED=false → 즉시 False
-        2. registry.subscribed_connection_count == 0 → 즉시 False
+        2. registry.subscriber_count(TETHER_TOPIC) == 0 → 즉시 False
+           (subscribed_connection_count 아님 — multi-topic 환경에서 fx:* 구독자
+           때문에 부정확. 해당 topic 실제 구독자만 카운트.)
         둘 다 통과 시에만 load_and_build_tether_tab_payload 호출.
 
     Args:
