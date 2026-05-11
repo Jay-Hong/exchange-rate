@@ -125,6 +125,14 @@ if LATEST_MIRROR_INTERVAL_SECONDS < 1:
 # Stage 3: publish_topic을 실제 source data hook에 연결 (5/19+ 권장).
 TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower() == "true"
 
+# Phase Z-2b Stage 3 Level 3 — 테더 topic 안 KRX 미국달러선물 포함 여부.
+# TOPIC_DISPATCHER_ENABLED와 의미 분리 (legacy KRX_BROADCAST_INCLUDE도 재사용 X):
+#   - TOPIC_DISPATCHER_ENABLED: topic publish 전체 on/off
+#   - KRX_TOPIC_INCLUDE: 테더 topic payload에 usd_krw_futures key 포함 여부
+# KRX만 격리 가능 — KRX 데이터 이상 시 topic 전체 끌 필요 없이 KRX만 끄고
+# USDT/은행/Investing은 그대로 publish 유지.
+KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
+
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

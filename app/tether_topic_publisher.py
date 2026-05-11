@@ -133,7 +133,11 @@ async def _record_topic_event(
         logger.debug("topic telemetry 기록 실패 (격리, broadcast 영향 X)", exc_info=True)
 
 
-async def publish_tether_tab_snapshot(db: "Session") -> bool:
+async def publish_tether_tab_snapshot(
+    db: "Session",
+    *,
+    include_krx: bool = False,
+) -> bool:
     """테더 탭 snapshot을 TETHER_TOPIC 구독자에게 publish.
 
     Guard (builder 호출 비용 차단):
@@ -141,15 +145,16 @@ async def publish_tether_tab_snapshot(db: "Session") -> bool:
         2. registry.subscribed_connection_count == 0 → 즉시 False
         둘 다 통과 시에만 load_and_build_tether_tab_payload 호출.
 
+    Args:
+        include_krx: KRX 미국달러선물 포함 여부 (호출자 결정, env flag 미해석).
+            main.py broadcast hook은 config.KRX_TOPIC_INCLUDE를 전달.
+            기본 False — wrapper 자체는 보수 default 유지.
+
     Telemetry: 각 분기에서 _record_topic_event 호출 (best-effort, broadcast 영향 X).
 
     Returns:
         True  — guard 통과 + 1명 이상 send 성공.
         False — FF=false / subscriber 0 / 모든 send 실패.
-
-    KRX 포함:
-        Level 1은 include_krx=False 고정. KRX 포함은 5/19+ wire-up 시 별도
-        wrapper로 분리하거나 매개변수 추가 결정.
     """
     if not config.TOPIC_DISPATCHER_ENABLED:
         await _record_topic_event(result="skipped_disabled")
@@ -158,7 +163,7 @@ async def publish_tether_tab_snapshot(db: "Session") -> bool:
         await _record_topic_event(result="skipped_no_subscribers")
         return False
 
-    payload = load_and_build_tether_tab_payload(db, include_krx=False)
+    payload = load_and_build_tether_tab_payload(db, include_krx=include_krx)
     await _record_topic_event(result="built")
 
     sent = await topic_dispatcher.publish_topic(TETHER_TOPIC, payload)
@@ -182,11 +187,18 @@ async def publish_tether_tab_snapshot(db: "Session") -> bool:
     return False
 
 
-async def safe_publish_tether_tab_snapshot(db: "Session") -> bool:
+async def safe_publish_tether_tab_snapshot(
+    db: "Session",
+    *,
+    include_krx: bool = False,
+) -> bool:
     """예외 격리 wrapper — hot path 호출자가 try/except 안 써도 안전.
 
     publish_tether_tab_snapshot의 어떤 단계 예외도 False 반환 + logger.exception.
     broadcast/mirror 같은 hot path의 정상 흐름 보호 entrypoint.
+
+    Args:
+        include_krx: KRX 포함 여부 (publish_tether_tab_snapshot에 그대로 전달).
 
     Telemetry:
         진입 시 hook_called +1. 예외 시 error counter +1 + last_error 기록.
@@ -197,7 +209,7 @@ async def safe_publish_tether_tab_snapshot(db: "Session") -> bool:
     await _record_topic_event(result="hook_entered", increment_hook=True)
 
     try:
-        return await publish_tether_tab_snapshot(db)
+        return await publish_tether_tab_snapshot(db, include_krx=include_krx)
     except Exception as exc:
         logger.exception("테더 topic publish 실패 (격리, hot path 영향 X)")
         await _record_topic_event(
@@ -217,6 +229,9 @@ async def get_topic_telemetry() -> Dict[str, Any]:
     base: Dict[str, Any] = {
         "enabled": config.TOPIC_DISPATCHER_ENABLED,
         "topic": TETHER_TOPIC,
+        # PR Level 3 (Codex 권고): TOPIC_DISPATCHER_ENABLED와 분리해 KRX 포함
+        # 여부를 별도 노출. 운영 중 "topic 켜져 있으나 KRX 격리" 상태 즉시 확인.
+        "krx_topic_include": config.KRX_TOPIC_INCLUDE,
         "subscribed_connection_count": topic_dispatcher.registry.subscribed_connection_count,
     }
     # counter/last 기본값

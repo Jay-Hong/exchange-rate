@@ -681,7 +681,12 @@ async def broadcast_rates_once():
             # (topic은 별개 채널). FF=false / subscriber 0이면 publisher 내부
             # guard로 즉시 return — builder/publish_topic 호출 0회. 예외 격리는
             # safe_publish_tether_tab_snapshot에서 처리 (broadcast 영향 X).
-            await tether_topic_publisher.safe_publish_tether_tab_snapshot(db)
+            # PR Level 3: config.KRX_TOPIC_INCLUDE 전달 — wrapper는 env 미해석
+            # (호출자 책임 분리, KRX_BROADCAST_INCLUDE legacy 의미와 분리).
+            await tether_topic_publisher.safe_publish_tether_tab_snapshot(
+                db,
+                include_krx=config.KRX_TOPIC_INCLUDE,
+            )
 
             if manager.active_connections:
                 # 3) build_graph_buckets

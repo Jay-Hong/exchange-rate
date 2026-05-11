@@ -444,5 +444,85 @@ class TestTopicTelemetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(telemetry["error"], 0)
 
 
+class TestIncludeKrxParameter(unittest.IsolatedAsyncioTestCase):
+    """PR Level 3 — include_krx 매개변수 wiring 검증.
+
+    핵심 계약:
+      - publish_tether_tab_snapshot(include_krx=True) → load_and_build에 True 전달
+      - default(include_krx=False) → load_and_build에 False 전달
+      - safe_publish_tether_tab_snapshot도 동일 전달
+      - get_topic_telemetry에 krx_topic_include 필드 노출
+    """
+
+    async def asyncSetUp(self):
+        self._original_registry = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._original_registry
+
+    async def test_publish_passes_include_krx_true_to_builder(self):
+        """include_krx=True → load_and_build_tether_tab_payload에 True 전달."""
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}) as mock_build, \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            await tether_topic_publisher.publish_tether_tab_snapshot(
+                MagicMock(), include_krx=True
+            )
+
+        mock_build.assert_called_once()
+        kwargs = mock_build.call_args.kwargs
+        self.assertEqual(kwargs.get("include_krx"), True)
+
+    async def test_publish_default_passes_include_krx_false(self):
+        """default(no flag) → include_krx=False (보수 default)."""
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}) as mock_build, \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            await tether_topic_publisher.publish_tether_tab_snapshot(MagicMock())
+
+        kwargs = mock_build.call_args.kwargs
+        self.assertEqual(kwargs.get("include_krx"), False)
+
+    async def test_safe_publish_propagates_include_krx(self):
+        """safe wrapper도 include_krx를 publish_tether_tab_snapshot에 전달."""
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
+                          return_value={"type": "snapshot", "version": 1, "data": {}}) as mock_build, \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)):
+            await tether_topic_publisher.safe_publish_tether_tab_snapshot(
+                MagicMock(), include_krx=True
+            )
+
+        kwargs = mock_build.call_args.kwargs
+        self.assertEqual(kwargs.get("include_krx"), True)
+
+    async def test_get_telemetry_exposes_krx_topic_include_field(self):
+        """get_topic_telemetry 반환에 config.KRX_TOPIC_INCLUDE 노출."""
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_TOPIC_INCLUDE", True):
+            telemetry = await tether_topic_publisher.get_topic_telemetry()
+        self.assertEqual(telemetry["krx_topic_include"], True)
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_TOPIC_INCLUDE", False):
+            telemetry = await tether_topic_publisher.get_topic_telemetry()
+        self.assertEqual(telemetry["krx_topic_include"], False)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
