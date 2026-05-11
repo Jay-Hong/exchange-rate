@@ -9,8 +9,9 @@ USDT_TOPIC_MIGRATION_PLAN §2 / ADR-028 합의된 topic-only Tether/KRX 출시 �
     2. **legacy shape 호환 입력**: `bank/currency` 키 (legacy)와 `source/asset` 키
        (topic-native) 둘 다 받아서 정규화. 기존 crud 함수의 반환 shape를 그대로
        전달 가능.
-    3. **topic-native 출력**: 모든 항목은 `source/asset/display_name/rate/timestamp`
-       shape. legacy `bank/currency` 키는 출력에서 제거.
+    3. **topic-native 출력**: 모든 항목은 `source/asset/rate/timestamp` shape.
+       legacy `bank/currency` 키는 출력에서 제거. `display_name`은 서버 미전송
+       (2026-05-11 제거) — 단말이 (source, asset) tuple로 자체 registry lookup.
     4. **builder 내부 정렬**: 호출자가 정렬 안 해도 builder가 보장.
        - list 그룹 (usdt_krw, usd_krw_banks): SourceRegistry sort_order +
          BANK_DISPLAY_ORDER fallback, 미등록은 뒤로 + 코드순.
@@ -112,7 +113,7 @@ def _list_sort_key(entry: Dict[str, Any]) -> Tuple[int, int, str]:
 
     정책 (이중 정렬 체계 혼합 차단):
         - asset="usd-krw" (은행 그룹): BANK_DISPLAY_ORDER만. SourceRegistry는
-          display_name lookup용으로만 사용 (sort에 관여 X).
+          정렬에 관여 X (단말이 자체 registry로 표시명 lookup, 서버는 미사용).
         - asset != "usd-krw" (USDT 거래소/derivative 등): SourceRegistry sort_order
           + 미등록 fallback.
 
@@ -160,8 +161,8 @@ def build_tether_tab_payload(
         topic payload (topic 필드 없음 — wire-up 시점에 wrapper가 결정).
 
     Builder 책임:
-        - bank → source / currency → asset 정규화
-        - SourceRegistry lookup으로 display_name 첨부
+        - bank → source / currency → asset 정규화 (display_name 미생성 —
+          단말이 자체 registry로 표시명 lookup, 2026-05-11 제거)
         - list 그룹 정렬 (SourceRegistry sort_order + BANK_DISPLAY_ORDER fallback)
         - singleton 그룹은 expected source/asset만 허용 + None은 키 누락
         - rate/timestamp 부재 entry는 무시 (drop)
