@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -687,6 +687,14 @@ async def broadcast_rates_once():
                 db,
                 include_krx=config.KRX_TOPIC_INCLUDE,
             )
+
+            # PR Z-2c Step 3 — FX topic broadcast hook (fx:usd-krw/jpy-krw/eur-krw).
+            # tether와 같은 격리 원칙: is_changed 분기 안 + active_connections 분기
+            # 바깥. config.FX_TOPIC_ENABLED=false default → publisher 내부 guard로
+            # builder/publish/DB 호출 0회 (단 per-asset hook_called/skipped_disabled
+            # telemetry write는 발생 — Redis HINCRBY/HSET 작은 비용. 사용자 영향 0).
+            # 1개 asset 예외도 safe_publish_all_fx_snapshots가 per-asset try/except로 격리.
+            await fx_topic_publisher.safe_publish_all_fx_snapshots(db)
 
             if manager.active_connections:
                 # 3) build_graph_buckets
@@ -1354,6 +1362,69 @@ async def reset_topic_status():
     return {
         "success": success,
         "reason": None if success else "Redis 미가용 또는 circuit open / 예외",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FX Topic Telemetry (PR Z-2c Step 3, 2026-05-12)
+#
+# Routing 경계: 현재 /admin/api/topic-status 계열은 모두 static path
+# (/topic-status, /topic-status/reset, /topic-status/fx, /topic-status/fx/reset).
+# 미래에 /admin/api/topic-status/{topic} 같은 path param 추가 금지 — 'reset',
+# 'fx' 등 기존 static segment와 매칭 충돌 발생. 신규 domain group은 /topic-status/<name>
+# (예: /topic-status/krx) 패턴으로 명시 segment 추가하는 쪽이 일관.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/api/topic-status/fx", dependencies=[Depends(verify_admin)])
+async def get_fx_topic_status():
+    """FX 3 topic (fx:usd-krw/jpy-krw/eur-krw) telemetry 일괄 조회.
+
+    Redis-backed counter per topic. best-effort 기록이라 Redis 미가용 시 counter
+    는 0/None. tether endpoint(/admin/api/topic-status)와 분리 — 기존 호출자
+    영향 없음.
+
+    Returns:
+        {
+          "fx:usd-krw": {
+            "enabled": bool,                       # FX_TOPIC_ENABLED AND TOPIC_DISPATCHER_ENABLED
+            "fx_topic_enabled": bool,              # config.FX_TOPIC_ENABLED
+            "topic_dispatcher_enabled": bool,      # config.TOPIC_DISPATCHER_ENABLED
+            "topic": "fx:usd-krw",
+            "asset": "usd-krw",
+            "subscriber_count": int,               # 해당 topic 구독자 수
+            "hook_called": int, "skipped_disabled": int, "skipped_no_subscribers": int,
+            "built": int, "publish_called": int, "publish_sent_total": int,
+            "publish_zero": int, "error": int,
+            "last_result": str | None,
+            "last_at_kst": str | None,
+            "last_error": str | None,
+          },
+          "fx:jpy-krw": {...},
+          "fx:eur-krw": {...},
+        }
+    """
+    return await fx_topic_publisher.get_fx_topic_telemetry()
+
+
+@app.post("/admin/api/topic-status/fx/reset", dependencies=[Depends(verify_admin)])
+async def reset_fx_topic_status():
+    """FX 3 topic telemetry counter 일괄 reset (시험 구간 분리).
+
+    DEL topic:fx:<asset>:stats × 3. Redis 미가용 시 per-asset success=false.
+
+    Returns:
+        {
+          "results": {"usd-krw": bool, "jpy-krw": bool, "eur-krw": bool},
+          "success": bool,                       # 3개 모두 성공 시 true
+          "reason": str | None,                  # 부분/전체 실패 사유
+        }
+    """
+    results = await fx_topic_publisher.reset_fx_topic_telemetry()
+    all_ok = all(results.values())
+    return {
+        "results": results,
+        "success": all_ok,
+        "reason": None if all_ok else "Redis 미가용 또는 circuit open / 예외 (일부 또는 전체)",
     }
 
 

@@ -476,6 +476,38 @@ asset별 별도 entry가 필요하다 (예: `kb + usd-krw`, `kb + jpy-krw`, `kb 
 
 reset (시험 구간 분리용): `POST /admin/api/topic-status/reset`.
 
+**FX topic 별도 endpoint** (PR Z-2c, 3 asset 일괄 조회):
+
+`GET /admin/api/topic-status/fx`:
+
+```jsonc
+{
+  "fx:usd-krw": {
+    "enabled": false,                       // FX_TOPIC_ENABLED AND TOPIC_DISPATCHER_ENABLED
+    "fx_topic_enabled": false,              // config.FX_TOPIC_ENABLED
+    "topic_dispatcher_enabled": true,
+    "topic": "fx:usd-krw",
+    "asset": "usd-krw",
+    "subscriber_count": 0,
+    "hook_called": 0,
+    "skipped_disabled": 0,
+    "built": 0,
+    "publish_called": 0,
+    "publish_sent_total": 0,
+    "error": 0,
+    "last_result": null,
+    "last_at_kst": null,
+    "last_error": null
+  },
+  "fx:jpy-krw": { /* same shape */ },
+  "fx:eur-krw": { /* same shape */ }
+}
+```
+
+reset (3 topic 일괄): `POST /admin/api/topic-status/fx/reset` → `{"results": {asset: bool}, "success": bool, "reason": str | null}`.
+
+각 FX topic의 Redis telemetry key는 `topic:fx:<asset>:stats` (tether legacy `topic:tether:stats`와 namespace 분리). 운영자는 asset별 counter 독립 관찰 가능.
+
 ### Schema 버전 관리
 
 - `version=1` lock-in 시점은 클라이언트 release 동기화 후.

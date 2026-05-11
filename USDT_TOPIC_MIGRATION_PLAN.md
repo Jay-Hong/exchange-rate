@@ -264,6 +264,60 @@ Stage 1/2/3 1차/2차 모두 `TOPIC_DISPATCHER_ENABLED=false` default 유지.
 - 신 클라이언트가 topic 받기 시작
 - `source_rates` legacy 임시 경로는 Z-2d 전까지 유지
 
+### Z-2c-FX (FX topic for topic-only clients, 2026-05-12)
+
+새 단말이 legacy WebSocket/API 의존 없이 모든 외환 탭을 topic API로만 처리할 수
+있도록 통화별 FX topic 추가. ADR-028 dual-emit 계약 유지 (legacy WebSocket
+`rates` 배열은 그대로 운영, FX topic은 신 클라이언트용 병행 채널).
+
+**Topic 이름** (`<domain>:<asset>` 패턴):
+
+- `fx:usd-krw`
+- `fx:jpy-krw`
+- `fx:eur-krw`
+
+**Payload schema** (USDT_PHASE1_CLIENT_GUIDE.md "FX topic schema" 섹션 잠금, 8d648a3):
+
+- Top-level: `{type, version, topic, data}` — usdt:krw와 동일
+- Entry: `{source, asset, rate, timestamp}` — display_name 부재
+- `data.banks`: Required (list, transient 빈 list 허용)
+- `data.reference`: Optional (Investing 데이터 + (source, asset) 정확 일치 시만 포함)
+- single-asset topic이므로 data key에 asset prefix 미사용
+
+**Step 분할**:
+
+- Step 1 (edc62b6, 2026-05-11): `app/fx_topic_payload.py` builder + 29 tests
+- Step 2 (a2e5645, 2026-05-12): `app/fx_topic_publisher.py` orchestration +
+  `config.FX_TOPIC_ENABLED` flag (default false) + 15 tests
+- Step 3 (이 commit): `main.py` broadcast hook + admin endpoints
+  - hook: `is_changed` 분기 안, `manager.active_connections` 분기 바깥
+    (tether와 동일 격리 원칙)
+  - `GET /admin/api/topic-status/fx` (3 topic 일괄 telemetry)
+  - `POST /admin/api/topic-status/fx/reset` (3 topic 일괄 reset)
+- Step 4 (계획): FX_TOPIC_ENABLED=false 배포 — 사용자 영향 0 / builder/publish/DB
+  비용 0 / per-asset hook_called + skipped_disabled telemetry write는 발생
+  (Redis HINCRBY/HSET 작은 비용). smoke에서 counter 증가 정상.
+- Step 5 (계획, 별도 GO): FX_TOPIC_ENABLED=true 활성화 + dev subscriber smoke
+
+**Telemetry**:
+
+- per-topic Redis key: `topic:fx:<asset>:stats` (tether legacy `topic:tether:stats`와
+  namespace 분리)
+- counter: hook_called / skipped_disabled / skipped_no_subscribers / built /
+  publish_called / publish_sent_total / publish_zero / error
+- best-effort 기록: circuit.can_attempt() 체크만 (record_failure 호출 X) — core
+  Redis 경로 오염 차단
+
+**Guard 정확성 (multi-topic 환경)**:
+
+- `subscriber_count(topic)` per-topic 사용 (subscribed_connection_count 아님)
+- 다른 topic 구독자만 있을 때 해당 topic publisher는 builder 호출 0회로 skip
+
+**격리**:
+
+- 1개 asset 예외도 `safe_publish_all_fx_snapshots`의 per-asset try/except로 격리
+- broadcast 정상 흐름 보호 — `logger.exception` + telemetry error +1 + False return
+
 ### Z-2d (legacy rates에서 topic-only source 제외 — Codex 2회차 정정)
 
 §3.1에서 발견한 정책 부재 차단. **USDT만 제거 X — topic-only source 전체 inclusion policy 도입**.
