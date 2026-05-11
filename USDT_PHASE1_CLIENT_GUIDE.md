@@ -327,11 +327,24 @@ Unsubscribe: {"type": "unsubscribe", "topics": ["usdt:krw"]}
 {
   "source": "upbit",          // string, 데이터 공급자 식별
   "asset": "usdt-krw",        // string, 통화쌍/상품
-  "display_name": "업비트",    // string, 한국어 표시명 (서버 SourceRegistry)
   "rate": 1485.0,             // float, KRW
   "timestamp": "2026-05-11T15:00:00+09:00"  // ISO8601 KST, 데이터 관측 시각
 }
 ```
+
+**Entry 식별 + 표시 정책**:
+
+- Entry 식별자는 **`(source, asset)` tuple**. 같은 source가 다른 asset 가능
+  (예: 미래 `krx + usd-krw-futures` + `krx + 다른 KRX 상품`).
+- 서버 payload는 **표시명/짧은 이름/아이콘/색상/정렬을 보내지 않음** (2026-05-11
+  `display_name` 제거).
+- 단말은 `(source, asset)` tuple로 자체 registry를 lookup해 표시명, 짧은 이름,
+  아이콘, 색상, 정렬을 결정. iOS는 [`Constants.swift`](../ios/FXi/Utils/Constants.swift)
+  `Bank enum` + `RateSource`, Android는 [`Bank.kt`](../android/app/src/main/java/com/jay/fxi/domain/model/Bank.kt)
+  enum 패턴.
+- 새 source 추가 시 단말 registry 업데이트 필요 (`KRX`, USDT 거래소 등).
+- 미등록 source는 서버가 payload에 그대로 포함 — 단말이 무시하거나 source 코드
+  raw 표시 가능 (정책).
 
 ### `data` 그룹
 
