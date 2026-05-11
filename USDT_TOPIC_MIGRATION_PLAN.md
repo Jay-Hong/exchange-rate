@@ -172,6 +172,59 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
   release 동기화. 옵션: 5/12~5/17 중 dev/test client subscribe + 짧은 FF=true 시험으로
   실제 publish path 운영 검증.
 
+#### Dev/test FF=true 시험 runbook (5/12~5/17 권장)
+
+도구: `scripts/subscribe_tether_topic.py` (로컬 python websockets 기반,
+`legacy/topic/raw` 메시지 분류 + summary 출력).
+
+**서버 터미널** (ssh ubuntu@3.36.30.32, env 토글 + container recreate):
+
+```bash
+cd /home/ubuntu/exchange-rate
+sed -i 's/TOPIC_DISPATCHER_ENABLED=false/TOPIC_DISPATCHER_ENABLED=true/' .env
+docker compose up -d --force-recreate fastapi   # restart 아님 — env 재로드 필수
+```
+
+**로컬 터미널 A** (subscriber 실행, 별도 ssh 불필요 — 로컬에서 wss 접속):
+
+```bash
+python scripts/subscribe_tether_topic.py --timeout 600
+# [CONNECTED] / [SUBSCRIBED] / [LEGACY] / [TOPIC] / [SUMMARY] / [UNSUBSCRIBED]
+```
+
+**로컬 터미널 B** (subscriber 붙은 직후 reset → 시험 구간 분리):
+
+```bash
+# enabled=true 확인
+curl -s -u "admin:$ADMIN_PASSWORD" https://fxi.kr/admin/api/topic-status | jq '.enabled'
+
+# subscriber 실행 중 reset
+curl -X POST -s -u "admin:$ADMIN_PASSWORD" https://fxi.kr/admin/api/topic-status/reset
+
+# 5~10분 후 subscriber 살아있는 동안 telemetry 확인
+curl -s -u "admin:$ADMIN_PASSWORD" https://fxi.kr/admin/api/topic-status | jq
+```
+
+**시험 종료 — 서버 터미널에서 FF=false 복귀**:
+
+```bash
+sed -i 's/TOPIC_DISPATCHER_ENABLED=true/TOPIC_DISPATCHER_ENABLED=false/' .env
+docker compose up -d --force-recreate fastapi
+```
+
+Success criteria (절대값, best-effort telemetry 특성 고려):
+
+- `enabled == true`
+- `subscribed_connection_count >= 1` (subscriber 실행 중일 때만)
+- `built > 0`
+- `publish_called > 0`
+- `publish_sent_total > 0`
+- `error == 0`
+- subscriber 터미널에 `[TOPIC]` payload 수신 로그 확인
+
+상대 비교 (`hook_called >= built >= publish_called`)는 참고값으로만 — telemetry
+best-effort라 일부 Redis 호출 누락 가능, 엄밀 부등식 보장 X.
+
 builder/helper는 호출 경로 0이라 wire-up PR과 함께 배포해도 충분.
 
 미결정 (Stage 3 wire-up 시 결정 필요):
