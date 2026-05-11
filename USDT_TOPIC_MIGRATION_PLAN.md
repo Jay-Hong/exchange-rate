@@ -225,6 +225,25 @@ Success criteria (절대값, best-effort telemetry 특성 고려):
 상대 비교 (`hook_called >= built >= publish_called`)는 참고값으로만 — telemetry
 best-effort라 일부 Redis 호출 누락 가능, 엄밀 부등식 보장 X.
 
+##### 실행 결과 (2026-05-11 15:54~15:57 KST, FF=true 짧은 시험)
+
+운영 환경에서 실제 topic publish path 첫 검증 — 성공.
+
+- subscriber 1명 (`scripts/subscribe_tether_topic.py --timeout 120`)
+- telemetry: `built` / `publish_called` / `publish_sent_total` = **20 / 20 / 20** (정확 일치)
+- subscriber 수신: **`[TOPIC]` 24** / `[LEGACY]` 25 / `[RAW]` 0
+- payload `data` keys: `usdt_krw` + `usd_krw_banks` + `usd_krw_reference`
+  - `usd_krw_futures` 부재 — `include_krx=False` 정상
+- `error = 0`, `last_result = "sent"`, 운영 error 로그 0건
+- FF=false 복귀 완료 (`subscribed_connection_count=0`, `skipped_disabled` 재개)
+
+검증된 흐름:
+
+- broadcast 변경 감지 → safe_publish_tether_tab_snapshot → publish_tether_tab_snapshot
+  → load_and_build_tether_tab_payload → topic_dispatcher.publish_topic → ws.send_json
+- legacy broadcast 정상 발화 (topic publish와 별개 채널 동시 유지)
+- Telemetry Redis counter 정합 (build → publish 분기 누락 0)
+
 builder/helper는 호출 경로 0이라 wire-up PR과 함께 배포해도 충분.
 
 미결정 (Stage 3 wire-up 시 결정 필요):
