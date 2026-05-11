@@ -1763,6 +1763,31 @@ def get_latest_source_rate(
     }
 
 
+def _filter_source_entries_by_legacy_policy(
+    entries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """source_rates → legacy shape entries에서 topic-only source 제거 (Z-2d Step 2).
+
+    `legacy_policy.should_include_source_in_legacy_rates(source, asset)` 통과
+    여부로 필터링. 현재 source_rates에는 USDT(5거래소) + KRX만 저장되므로 결과는
+    빈 list. 미래에 LEGACY_RATE_SOURCES 통과 source가 source_rates에 들어가면
+    중복 위험 (bank/investing 별도 테이블에서 이미 들어옴) — 그땐 별도 dedup
+    정책 필요.
+
+    Args:
+        entries: get_source_rates_as_legacy_format이 DB에서 변환한 entry list.
+                 shape: {"currency", "bank", "rate", "timestamp"}.
+
+    Returns:
+        legacy policy 통과 entries만. 빈 list 가능.
+    """
+    from app.legacy_policy import should_include_source_in_legacy_rates
+    return [
+        e for e in entries
+        if should_include_source_in_legacy_rates(e["bank"], e["currency"])
+    ]
+
+
 def get_source_rates_as_legacy_format(
     db: Session,
     asset: Optional[str] = None,
@@ -1771,10 +1796,16 @@ def get_source_rates_as_legacy_format(
     source_rates를 기존 bank/currency shape로 변환해서 반환.
 
     레거시 API 호환성 어댑터. `/api/rates`, `/api/rates/{currency}`, WebSocket
-    `rates` 배열에서 호출. 각 (source, asset) 조합별 최신 1건.
+    `rates` 배열, Redis latest mirror seed에서 호출. 각 (source, asset) 조합별
+    최신 1건.
 
     반환 순서는 `source_registry`의 `sort_order` 기준 (기본 표시 순서 보장).
     registry에 없는 소스는 방어적으로 맨 뒤에 배치.
+
+    Z-2d (2026-05-12): `_filter_source_entries_by_legacy_policy` 적용 — topic-only
+    source(USDT/KRX)는 legacy 응답에서 제외. 통과한 source만 남음. 결과적으로
+    현재 source_rates(USDT/KRX만 저장)는 빈 list 반환 (의도된 동작 — legacy
+    노출 차단). topic API는 자체 builder 사용이라 본 함수 미경유.
 
     Args:
         db: 세션
@@ -1782,6 +1813,7 @@ def get_source_rates_as_legacy_format(
 
     Returns:
         [{"currency": asset, "bank": source, "rate": ..., "timestamp": ...}, ...]
+        legacy policy 통과 entries만.
     """
     # 함수 내부 import — 순환 참조 방지 (source_registry는 crud에 의존하지 않음)
     from app import source_registry
@@ -1824,6 +1856,11 @@ def get_source_rates_as_legacy_format(
         }
         for record in records
     ]
+
+    # Z-2d Step 2: legacy 노출 정책 적용 — topic-only source 제거.
+    # 모든 호출자(REST `/api/rates*` + WebSocket DB fallback + Redis mirror seed)가
+    # 자동 커버됨. policy 통과 source는 그대로 유지.
+    entries = _filter_source_entries_by_legacy_policy(entries)
 
     # registry의 sort_order 기준 정렬 (기본 표시 순서 보장).
     # registry에 없는 소스는 float('inf')로 맨 뒤, 내부적으로는 bank 이름으로 타이 브레이크.
