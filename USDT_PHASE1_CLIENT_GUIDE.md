@@ -291,6 +291,34 @@ SourceRate { source, asset, rate, timestamp }
 테더 탭 전용 신규 채널. legacy `/ws` `rates` 배열과 **별개 채널**로 동시 운영
 (legacy는 유지). topic API는 ADR-028 "topic-only Tether/KRX" 계약 구현.
 
+### Legacy endpoint 제거 (Phase Z-2d, 2026-05-12)
+
+**`/api/rates/{currency}` 요청 시 410 Gone 응답** (PR Z-2d Step 4):
+
+| 요청 | 응답 |
+| --- | --- |
+| `GET /api/rates/usdt-krw` | HTTP **410 Gone** + `detail.use_topic="usdt:krw"` |
+| `GET /api/rates/usd-krw-futures` | HTTP **410 Gone** + `detail.use_topic="usdt:krw"` |
+| `GET /api/rates/usd-krw` (allowed FX) | HTTP 200 (그대로) |
+
+**Detail shape**:
+
+```json
+{
+  "detail": {
+    "error": "legacy_rate_removed",
+    "currency": "usdt-krw",
+    "use_topic": "usdt:krw"
+  }
+}
+```
+
+**단말 구현 권고**:
+
+- legacy `/api/rates/{usdt-krw|usd-krw-futures}` 호출 금지 — 모두 410. `use_topic` 안내 따라 WebSocket topic subscribe로 마이그레이션.
+- legacy `/api/rates` aggregate와 WebSocket `/ws` legacy `rates` 배열도 USDT/KRX **자동 제외**됨 (Z-2d allowlist). 즉 legacy 응답을 파싱해 `currency == "usdt-krw"` entry를 찾지 못한다 — 정상 동작.
+- **단말 USDT freshness 기준은 `usdt:krw` topic payload만** 사용. legacy rates 배열의 timestamp는 USDT에 대한 신호 X.
+
 ### WebSocket URL / Subscribe protocol
 
 ```text

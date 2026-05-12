@@ -3332,6 +3332,80 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
 
 ---
 
+## ADR-029: USDT source는 mirror cycle 미경유 — direct write + read-path DB fallback
+
+**상태**: Accepted (2026-05-12, PR Z-2e B-Step 1/2 운영 검증 완료)
+
+### 맥락
+
+PR Z-2d (2026-05-12)로 legacy 노출 정책을 `legacy_policy.should_include_source_in_legacy_rates` allowlist로 통일했다. USDT 5거래소(upbit/bithumb/coinone/korbit/gopax)는 allowlist 미통과 → `latest_rates_cache.should_include_source_in_latest`가 False 반환 → mirror cycle이 USDT source를 skip한다.
+
+결과적으로 USDT는 mirror cycle의 safety repair 대상이 아니다. 그러나 usdt:krw topic은 사용자에게 노출되는 채널이라 데이터 freshness가 필요했다 — broadcast hot path는 ADR-026 mirror 기반(broadcast cycle 매초 DB 안 거침)이지만, 그건 mirror 적용 source 한정. USDT topic builder는 별도 데이터 흐름 필요.
+
+### 결정
+
+USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder Redis-first read** 조합을 사용한다.
+
+1. **Direct write (B-Step 1, `1f3ab36`)**:
+   - `app/crawlers/usdt_sources.py`가 `insert_source_rate_if_changed`가 True 반환 시 `latest_rates_cache.set_latest_source_rate_from_sync_job` 호출
+   - sync `redis.Redis` client 사용 — scheduler thread executor에 자연스러움
+   - cache.py의 `redis.asyncio.Redis`(async circuit_breaker 사용)와 격리 — broadcast/mirror Redis path 오염 방지
+   - 실패는 logger.warning + False, 호출자(crawler)에 전파 X
+
+2. **Redis-first read (B-Step 2, `6f743f0`)**:
+   - `usdt_topic_payload.load_and_build_tether_tab_payload`가 5거래소 `latest:source:*` key를 sync GET
+   - 5개 모두 hit → Redis 사용 (DB query 0회)
+   - 1개라도 miss/parse fail → `crud.get_latest_source_rates_for_topic`로 **전체 5거래소 DB fallback** (source별 mix 회피로 payload 일관성)
+   - **Stale 시간 판정 X** — USDT는 mirror 갱신 없음 → mirrored_at이 마지막 direct write 시점에 stuck. 거래 뜸한 source(gopax 등)는 정상 시장 stagnant라 자연 오래됨. is_stale 적용 시 거의 매번 fallback → Redis-first 무의미.
+
+3. **Legacy adapter 우회**: topic builder는 `crud.get_source_rates_as_legacy_format`(Z-2d filter 적용) 대신 신규 `crud.get_latest_source_rates_for_topic` 사용. legacy_policy 우회 의도 명시.
+
+### Trade-offs
+
+- **장점**:
+  - 정상 운영 시 USDT DB query 5회/cycle → 0회 (Redis-first hit)
+  - mirrored_at - timestamp ~6-7ms (mirror cycle 3초 대비 즉시)
+  - 실패 시 DB fallback 보장 — topic payload 항상 build 가능
+  - async circuit_breaker 격리 — broadcast hot path 보호
+
+- **단점 / 미해결**:
+  - **direct write 영구 실패 시 영구 stale 위험**: mirror cycle이 복구하지 않음. 일시적 Redis 장애는 read path DB fallback이 처리하지만, write 측 지속 실패는 다음 INSERT까지 latest:source key 갱신 X
+  - 거래 뜸한 source는 mirrored_at 자연 오래됨 → 운영자가 "stale인가 정상인가" 구분 어려움. **별도 telemetry 필요** (direct write 성공률, fallback 호출 빈도) — future enhancement
+
+### Alternatives 검토 (rollback 사례)
+
+**시도 1 — async client 재사용** (`887ccd1`, rollback by `82ba062`):
+- `asyncio.run(set_latest(...))` + main loop의 `redis.asyncio.Redis` client 재사용
+- 결과: event loop binding mismatch — async client는 main loop에 bound, asyncio.run의 새 loop와 호환 X
+- direct write 매번 False + `circuit.record_failure()` 누적 → mirror/broadcast Redis path 위협
+- mock 단위 test로는 발견 불가, 운영 검증으로만 노출됨
+- 교훈: event loop-bound / context-aware library는 실제 environment dry-run 필수 (D1 권장)
+
+**시도 2 — `run_coroutine_threadsafe(coro, main_loop)`**:
+- main event loop reference 보존 + scheduler thread에서 submit
+- 검토 결과: main loop reference 관리 / shutdown 순서 / timeout / deadlock 회피 등 spec 확장
+- B-Step 1 범위에서 거부 — sync client 분리가 더 단순
+
+**시도 3 (채택) — sync `redis.Redis` client 별도**:
+- cache.py async와 분리
+- scheduler thread에 자연 (redis-py sync는 internal connection pool로 thread-safe)
+- async circuit_breaker 격리
+
+### 운영 검증 (2026-05-12)
+
+- B-Step 1 운영 활성화: USDT direct write mirrored_at - timestamp **6-7ms** 확인 (upbit/bithumb 활발 거래소)
+- B-Step 2 운영 활성화: `usdt:krw` topic API error=0, DB usdt 조회 0회 (Redis 5거래소 hit), `read path DB fallback` 로그 0건
+- async cache.py circuit_breaker 미오염 — broadcast/mirror "일부 실패" warning 0건 유지
+
+### 관련 문서
+
+- [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): broadcast hot path Redis-first (mirror 기반, USDT skip 대상)
+- [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit): Topic-only USDT/KRX (legacy 제거 정책)
+- [USDT_TOPIC_MIGRATION_PLAN.md](USDT_TOPIC_MIGRATION_PLAN.md): Z-2e B-Step 1/2 작업 history
+- [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md): 단말 freshness 기준 = topic payload (legacy rates 미사용)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -3361,3 +3435,5 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
 - 2026-04-28: ADR-025 작성 (DXY 현물 외부 fallback 체인 — CNBC 추가 + Yahoo 격하)
 - 2026-05-04: ADR-026 작성 (Redis-first broadcast hot path — latest mirror + DXY mirror로 DB-free 달성)
 - 2026-05-06: ADR-027 초안 작성 (KRX 미국달러선물 Stage 2 전 REST snapshot/fallback + stale 정책)
+- 2026-05-06: ADR-028 작성 (Topic-only Tether/KRX + legacy FX dual-emit)
+- 2026-05-12: ADR-029 작성 (USDT source는 mirror cycle 미경유 — direct write + read-path DB fallback)

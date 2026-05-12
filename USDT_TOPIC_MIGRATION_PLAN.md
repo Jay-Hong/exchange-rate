@@ -392,6 +392,66 @@ inclusion policy 통일**. Step 1-5 완료, 운영 배포 + 통합 smoke 검증 
   (`USDT_PHASE1_CLIENT_GUIDE.md` FX/USDT topic schema 참조)
 - topic API(usdt:krw, fx:*): 영향 0 (자체 builder, 정상 운영 유지)
 
+### Z-2e (USDT Redis-first read/write — 운영 완료 2026-05-12)
+
+USDT는 Z-2d allowlist 미통과로 mirror cycle skip → broadcast hot path의 ADR-026
+Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB 부하를
+별도로 해결할 필요 발생. [ADR-029](DECISIONS.md#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback)로
+의사결정 기록.
+
+**Step 분할 (모두 완료)**:
+
+- B-Step 1 시도 1 (rollback): `887ccd1` → `82ba062` (revert)
+  - `asyncio.run(set_latest(...))` + main loop의 `redis.asyncio.Redis` client 재사용
+  - **실패 원인**: event loop binding mismatch — async client는 main loop bound,
+    asyncio.run의 새 loop와 호환 X
+  - **위협**: `circuit.record_failure()` 누적 → broadcast/mirror Redis path 오염
+  - 운영 mirror "일부 실패" warning 발생 → 즉시 rollback
+  - 교훈: mock 단위 test로는 event loop binding 호환성 검증 불가. 실제
+    environment dry-run 필수 (이후 D1 도입).
+
+- B-Step 1 재시도 (`1f3ab36`, 2026-05-12): sync `redis.Redis` client 별도
+  - `latest_rates_cache.set_latest_source_rate_from_sync_job` 추가
+  - scheduler thread에 자연스러운 sync client (redis-py sync는 thread-safe pool)
+  - async circuit_breaker 미사용 — broadcast/mirror Redis path 격리
+  - `_mirror_changed_source_to_redis` (crawler helper) — INSERT 성공 직후 호출
+  - D1 dry-run: 로컬 redis 컨테이너에서 4 cases 통과 후 운영 배포
+  - 운영 smoke: USDT direct write 실패 0건, `mirrored_at - timestamp` ~6-7ms
+
+- B-Step 2 (`6f743f0`, 2026-05-12): usdt:krw topic builder Redis-first read
+  - `get_latest_source_rate_from_sync_job` (sync read helper)
+  - `crud.get_latest_source_rates_for_topic` (topic 전용 raw fetcher,
+    Z-2d legacy_policy 우회 명시)
+  - `TETHER_TAB_EXCHANGE_SOURCES = ("upbit", "bithumb", "coinone", "korbit", "gopax")`
+    — usdt_topic_payload.py private 상수, builder-local 출력 순서 계약
+  - 5거래소 모두 Redis hit → DB 0회 / 1개 miss → 전체 DB fallback
+  - **Stale 시간 판정 X** — USDT는 mirror 갱신 없음, 거래 뜸한 source(gopax 등)는
+    자연 오래된 mirrored_at. is_stale 적용 시 매번 fallback → Redis-first 무의미
+  - B-Step 1 docstring/로그 메시지 정정 ("mirror cycle 복구" → "read path DB
+    fallback") — 운영자 오해 방지
+  - 운영 smoke 4 항목 통과: topic API error=0, "mirror cycle 복구" 로그 0건,
+    Redis 5거래소 hit, DB fallback 호출 0건
+
+**핵심 정책**:
+
+- USDT는 mirror cycle repair 대상 아님 (Z-2d allowlist 미통과)
+- direct write 실패 시 mirror가 복구하지 않음 — read path DB fallback이 단일 안전망
+- Redis miss/parse fail → 5거래소 전체 DB fallback (source별 mix 회피, payload 일관성)
+- async circuit_breaker 격리 — broadcast/mirror Redis path 보호
+- 자세한 의사결정 + Alternative 검토: [ADR-029](DECISIONS.md#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback)
+
+**잔존 작업 (future enhancement)**:
+
+- direct write 실패율 / fallback 호출 빈도 telemetry — mirror repair 없으므로
+  운영 모니터링이 영구 stale 감지 단일 수단
+- banks/reference/futures Redis-first 확장 (B-Step 3, 별도 phase) — 이쪽은
+  mirror cycle 기반이라 USDT와 다른 환경
+
+**클라이언트 영향**:
+
+- 운영 단말: 영향 0 (사용자-facing 변화 없음)
+- 단말 freshness 기준 = usdt:krw topic payload (legacy `rates` 배열은 Z-2d로 USDT 제외됨)
+
 ---
 
 ## 5. Deployment / KRX Baseline Constraints
