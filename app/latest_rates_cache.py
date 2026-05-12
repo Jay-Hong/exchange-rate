@@ -23,6 +23,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import redis as redis_sync  # sync client (PR Z-2e B-Step 1, scheduler thread 전용)
 from sqlalchemy.orm import Session
 
 from app import config, crud
@@ -165,6 +166,99 @@ async def _set_latest(key: str, value: str) -> bool:
     except Exception:
         await redis_cache.circuit.record_failure()
         logger.debug("Redis SET 실패 (latest mirror)", exc_info=True, extra={"key": key})
+        return False
+
+
+# ── Sync direct writer (scheduler thread, async circuit 격리) ──
+#
+# PR Z-2e B-Step 1 재시도 — 직전 시도(asyncio.run + main loop async client 재사용)는
+# event loop binding mismatch로 실패 + async circuit_breaker 오염 위협.
+# 이번 spec: sync `redis.Redis` 별도 client + async circuit_breaker 미사용 →
+# scheduler thread에 자연 + broadcast/mirror Redis path 보호.
+#
+# 사용처:
+#   - app/crawlers/usdt_sources.py: USDT INSERT 직후 best-effort direct write
+#   - 향후 KRX/bank 등 sync crawler 확장 가능
+#
+# Key/value 포맷은 mirror cycle과 동일 (latest_key_source + serialize_value).
+# 실패는 logger.warning + False 반환, mirror cycle 3초가 safety repair.
+
+
+_sync_client: Optional[redis_sync.Redis] = None  # lazy module-level
+
+
+def _get_sync_client() -> Optional[redis_sync.Redis]:
+    """lazy module-level sync Redis client.
+
+    호출 시점에 `app.config.REDIS_URL` / `REDIS_PASSWORD`를 읽음 — 테스트 친화
+    (env patch 시 `_sync_client = None` reset 후 재호출하면 새 client 생성).
+
+    Returns:
+        Redis client (성공) 또는 None (init 실패 — 로그만 남기고 호출자가 best-effort skip).
+
+    Note:
+        redis-py sync `Redis`는 internal connection pool 기반 thread-safe.
+        socket_timeout/socket_connect_timeout 1.0s — crawler hot path가 Redis
+        지연으로 막히지 않게 (worst case 5거래소 × 1초 = 5초).
+        Async circuit_breaker는 건드리지 않음 (broadcast/mirror Redis path 격리).
+    """
+    global _sync_client
+    if _sync_client is None:
+        try:
+            _sync_client = redis_sync.from_url(
+                config.REDIS_URL,
+                password=config.REDIS_PASSWORD or None,
+                decode_responses=False,
+                socket_timeout=1.0,
+                socket_connect_timeout=1.0,
+            )
+        except Exception:
+            logger.warning(
+                "Redis sync client init 실패 (best-effort, mirror cycle 복구)",
+                exc_info=True,
+            )
+            return None
+    return _sync_client
+
+
+def set_latest_source_rate_from_sync_job(
+    source: str,
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> bool:
+    """sync scheduler thread 전용 direct writer.
+
+    Args:
+        source: 데이터 공급자 (예: "upbit").
+        asset: 통화쌍 (예: "usdt-krw").
+        rate: 환율.
+        timestamp: ISO 8601 KST 문자열 (DB record.timestamp 기준).
+
+    Returns:
+        True: Redis SET 성공.
+        False: client init 실패 / SET 예외.
+
+    설계 격리:
+        - sync `redis.Redis` client 사용 (cache.py async와 분리)
+        - **async circuit_breaker 호출 X** — broadcast/mirror Redis path 오염 회피
+        - 실패는 logger.warning + False, mirror cycle 3초 safety repair에 의존
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    key = latest_key_source(source, asset)
+    mirrored_at = datetime.now(_KST)
+    value = serialize_value(rate, timestamp, mirrored_at)
+    try:
+        client.set(key, value)
+        return True
+    except Exception:
+        logger.warning(
+            "USDT sync Redis SET 실패 (best-effort, mirror cycle 복구)",
+            exc_info=True,
+            extra={"key": key},
+        )
         return False
 
 
