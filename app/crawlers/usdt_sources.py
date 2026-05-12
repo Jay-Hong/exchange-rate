@@ -24,7 +24,7 @@ import requests
 from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
-from app import crud, latest_rates_cache
+from app import crud
 from app.crawlers.constants import HEADERS
 from app.database import get_db_context
 from app.source_registry import get_usdt_exchange_entries
@@ -109,56 +109,6 @@ def _fetch_one(source: str) -> tuple[str, Optional[float], Optional[str]]:
         return (source, None, f"parse failed: {exc}")
 
 
-def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> bool:
-    """USDT direct write helper — INSERT 성공 시점에 Redis latest 갱신
-    (PR Z-2e B-Step 1 Foundation).
-
-    `insert_source_rate_if_changed`가 True 반환 직후 호출. DB에서 latest를 재조회해
-    timestamp 확보 후 `latest_rates_cache.set_latest_source_rate_from_sync_job` 호출.
-
-    Args:
-        db: SQLAlchemy session (이미 INSERT commit 완료 상태).
-        source: 거래소 식별자.
-        asset: 통화쌍 ("usdt-krw").
-
-    Returns:
-        True: Redis SET 성공.
-        False: latest 조회 실패 / Redis SET 실패.
-
-    Best-effort: 실패 시 logger.warning만. mirror cycle(3초)이 이후 cycle에서
-    safety repair → 사용자-facing 영향 0, hot path 소비자 변화 0.
-
-    `insert_source_rate_if_changed`가 시그니처(`bool` 반환) 변경 회피 위해 재조회.
-    추가 DB query 1회는 작은 비용 (INSERT 직후 같은 connection의 row 단일 lookup).
-    """
-    latest = crud.get_latest_source_rate(db, source, asset)
-    if latest is None:
-        logger.warning(
-            "USDT Redis direct write 실패 — latest 재조회 None",
-            extra={"source": source, "asset": asset},
-        )
-        return False
-    try:
-        success = latest_rates_cache.set_latest_source_rate_from_sync_job(
-            source=source,
-            asset=asset,
-            rate=latest["rate"],
-            timestamp=latest["timestamp"],
-        )
-    except Exception:
-        logger.exception(
-            "USDT Redis direct write 예외 (격리, mirror cycle 복구 의존)",
-            extra={"source": source, "asset": asset},
-        )
-        return False
-    if not success:
-        logger.warning(
-            "USDT Redis direct write False (best-effort, mirror cycle 복구 의존)",
-            extra={"source": source, "asset": asset, "rate": latest["rate"]},
-        )
-    return success
-
-
 def collect_usdt_rates() -> None:
     """스케줄러 job entry point.
 
@@ -228,10 +178,6 @@ def collect_usdt_rates() -> None:
                             "rate": rate,
                         },
                     )
-                    # PR Z-2e B-Step 1 Foundation: Redis latest 즉시 갱신
-                    # (mirror cycle 3초 bypass, 소비자는 Step 2에서 전환 예정).
-                    # 실패는 best-effort — mirror cycle이 safety repair.
-                    _mirror_changed_source_to_redis(db=db, source=source, asset=asset)
             except Exception:
                 logger.exception(
                     "USDT 저장 실패",
