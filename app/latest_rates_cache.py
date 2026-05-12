@@ -17,6 +17,7 @@ main.py는 import 안 함 (순환 회피) — DB fallback은 호출자가 처리
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -166,6 +167,77 @@ async def _set_latest(key: str, value: str) -> bool:
         await redis_cache.circuit.record_failure()
         logger.debug("Redis SET 실패 (latest mirror)", exc_info=True, extra={"key": key})
         return False
+
+
+async def set_latest_source_rate(
+    source: str,
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> bool:
+    """Direct Redis write — source latest를 mirror cycle 우회로 즉시 갱신
+    (PR Z-2e B-Step 1, 2026-05-12).
+
+    Crawler hot path가 DB INSERT 성공 직후 호출하는 public async helper.
+    mirror cycle(3초)을 기다리지 않고 Redis `latest:source:<source>:<asset>` 키를
+    바로 갱신해 후속 Redis-first 소비자(현재는 미연결, Step 2에서 topic publisher
+    read 전환 예정)가 freshness ≈ 0으로 읽을 수 있는 기반을 제공한다.
+
+    Args:
+        source: 데이터 공급자 (예: "upbit").
+        asset: 통화쌍 (예: "usdt-krw").
+        rate: 환율.
+        timestamp: ISO 8601 KST 문자열 (DB record.timestamp 기준 — mirror cycle과
+                   일관). 호출자는 INSERT 직후 `crud.get_latest_source_rate`로 재조회
+                   해 timestamp 확보.
+
+    Returns:
+        True: Redis SET 성공.
+        False: client 미연결 / circuit open / SET 실패. 호출자는 best-effort라
+               warning 로그만 남기고 mirror cycle 복구에 의존한다.
+
+    Note:
+        - `_set_latest`와 동일하게 circuit_breaker.record_success/failure 호출 —
+          진짜 Redis 장애 시그널 (telemetry-only가 아니라 실제 latest 데이터 write).
+        - sync scheduler job에서 호출 시 `set_latest_source_rate_from_sync_job` 사용.
+    """
+    key = latest_key_source(source, asset)
+    mirrored_at = datetime.now(_KST)
+    value = serialize_value(rate, timestamp, mirrored_at)
+    return await _set_latest(key, value)
+
+
+def set_latest_source_rate_from_sync_job(
+    source: str,
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> bool:
+    """sync scheduler job(예: APScheduler thread executor) 전용 wrapper.
+
+    ⚠️ 호출 금지 시나리오:
+        - async event loop이 이미 실행 중인 context (FastAPI handler, async test 등)
+        - asyncio.run은 nested loop을 허용하지 않으므로 silent failure 대신 명시적
+          RuntimeError를 raise — 운영 디버깅 시 의도 명확화.
+
+    Running loop이 없는 sync context에서만 호출 가능. APScheduler가 sync job을
+    thread executor로 처리하는 USDT crawler (`collect_usdt_rates`) 같은 경로용.
+
+    Returns:
+        async helper(`set_latest_source_rate`) 호출 결과 (True/False).
+
+    Raises:
+        RuntimeError: async event loop 안에서 호출 시.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop — safe to call asyncio.run.
+        return asyncio.run(set_latest_source_rate(source, asset, rate, timestamp))
+    raise RuntimeError(
+        "set_latest_source_rate_from_sync_job cannot be called from an active "
+        "event loop. Use set_latest_source_rate (async) instead."
+    )
 
 
 async def _get_latest_with_reason(key: str) -> Tuple[Optional[bytes], Optional[str]]:
