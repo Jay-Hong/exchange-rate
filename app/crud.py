@@ -1763,6 +1763,64 @@ def get_latest_source_rate(
     }
 
 
+def get_latest_source_rates_for_topic(
+    db: Session,
+    asset: str,
+    sources: List[str],
+) -> List[Dict[str, Any]]:
+    """Topic builder 전용 raw fetcher — Z-2d legacy_policy 적용 X (PR Z-2e B-Step 2).
+
+    **중요**: 이 함수는 USDT/KRX 같은 topic-only source를 그대로 반환한다.
+    Legacy `/api/rates*` / WebSocket fallback / Redis mirror seed 경로에서는
+    절대 호출하면 안 됨 (그 경로는 `get_source_rates_as_legacy_format`이 정책
+    통과 source만 반환한다). Topic API(usdt:krw, fx:* 등) builder만 사용.
+
+    Args:
+        db: SQLAlchemy session.
+        asset: 통화쌍/상품 (예: "usdt-krw").
+        sources: 조회할 source list — 호출자가 명시 (출력 순서도 입력 순서 보존).
+
+    Returns:
+        [{"source", "asset", "rate", "timestamp"}, ...] topic-native shape.
+        Redis read helper(`get_latest_source_rate_from_sync_job`)와 동일 shape —
+        builder normalization 단순화.
+
+        해당 (source, asset) 조합이 DB에 없으면 결과 list에서 누락 (호출자가
+        부분 결과 처리 — 정상 동작은 모든 source 존재).
+    """
+    by_source: Dict[str, models.SourceRate] = {}
+
+    # 각 (source, asset)별 최신 1건. source 인자가 작아서 N+1 비용 미세.
+    for source in sources:
+        record = (
+            db.query(models.SourceRate)
+            .filter(
+                models.SourceRate.source == source,
+                models.SourceRate.asset == asset,
+            )
+            .order_by(
+                models.SourceRate.timestamp.desc(),
+                models.SourceRate.id.desc(),
+            )
+            .first()
+        )
+        if record is not None:
+            by_source[source] = record
+
+    # 입력 sources 순서 보존
+    return [
+        {
+            "source": record.source,
+            "asset": record.asset,
+            "rate": record.rate,
+            "timestamp": to_kst_isoformat(record.timestamp),
+        }
+        for source in sources
+        for record in [by_source.get(source)]
+        if record is not None
+    ]
+
+
 def _filter_source_entries_by_legacy_policy(
     entries: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:

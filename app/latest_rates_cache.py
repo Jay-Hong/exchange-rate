@@ -181,7 +181,9 @@ async def _set_latest(key: str, value: str) -> bool:
 #   - 향후 KRX/bank 등 sync crawler 확장 가능
 #
 # Key/value 포맷은 mirror cycle과 동일 (latest_key_source + serialize_value).
-# 실패는 logger.warning + False 반환, mirror cycle 3초가 safety repair.
+# USDT source 실패는 logger.warning + False 반환. mirror cycle은 Z-2d 이후 USDT
+# source skip (legacy allowlist) — 실패 복구는 read path(B-Step 2)의 DB fallback이
+# 담당한다. (broadcast 대상 source는 mirror cycle이 여전히 safety repair.)
 
 
 _sync_client: Optional[redis_sync.Redis] = None  # lazy module-level
@@ -214,7 +216,7 @@ def _get_sync_client() -> Optional[redis_sync.Redis]:
             )
         except Exception:
             logger.warning(
-                "Redis sync client init 실패 (best-effort, mirror cycle 복구)",
+                "Redis sync client init 실패 (best-effort, read path DB fallback)",
                 exc_info=True,
             )
             return None
@@ -242,7 +244,13 @@ def set_latest_source_rate_from_sync_job(
     설계 격리:
         - sync `redis.Redis` client 사용 (cache.py async와 분리)
         - **async circuit_breaker 호출 X** — broadcast/mirror Redis path 오염 회피
-        - 실패는 logger.warning + False, mirror cycle 3초 safety repair에 의존
+        - 실패는 logger.warning + False
+
+    Miss 처리 경로 (PR Z-2e B-Step 2):
+        USDT source는 Z-2d allowlist 미통과로 mirror cycle skip. 즉 본 sync write가
+        실패해도 mirror cycle이 safety repair하지 않는다. Miss/실패는 read path
+        (`get_latest_source_rate_from_sync_job`)에서 None 감지 후 호출자가
+        DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리한다.
     """
     client = _get_sync_client()
     if client is None:
@@ -255,11 +263,65 @@ def set_latest_source_rate_from_sync_job(
         return True
     except Exception:
         logger.warning(
-            "USDT sync Redis SET 실패 (best-effort, mirror cycle 복구)",
+            "USDT sync Redis SET 실패 (best-effort, read path DB fallback)",
             exc_info=True,
             extra={"key": key},
         )
         return False
+
+
+def get_latest_source_rate_from_sync_job(
+    source: str,
+    asset: str,
+) -> Optional[Dict[str, Any]]:
+    """sync builder 전용 Redis GET — usdt:krw topic builder가 호출 (PR Z-2e B-Step 2).
+
+    설계 격리 (write helper와 동일):
+        - sync `redis.Redis` client 재사용 (`_get_sync_client`)
+        - async circuit_breaker 호출 X
+        - 실패는 logger.warning + None
+
+    **Stale 판정 X** (B-Step 2 spec):
+        USDT source는 Z-2d allowlist 미통과 → mirror cycle skip → mirrored_at은
+        마지막 direct write 시점만 반영. 거래량 적은 source(gopax 등)는 정상
+        시장 stagnant라 mirrored_at이 자연 오래된 채로 남음 — stale fallback
+        대상 X. 호출자는 Redis 값 시간 무관 사용 (DB도 어차피 같은 값).
+
+    Args:
+        source: 데이터 공급자.
+        asset: 통화쌍.
+
+    Returns:
+        {"source", "asset", "rate", "timestamp"} topic-native shape — DB fallback
+        helper(`crud.get_latest_source_rates_for_topic`)와 동일.
+        miss(key 부재) / parse fail / 예외 시 None — 호출자가 DB fallback.
+    """
+    client = _get_sync_client()
+    if client is None:
+        return None
+    key = latest_key_source(source, asset)
+    try:
+        raw = client.get(key)
+    except Exception:
+        logger.warning(
+            "sync Redis GET 실패 (best-effort, DB fallback에 의존)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return None
+    if raw is None:
+        return None
+    parsed = deserialize_value(raw)
+    if parsed is None:
+        # parse fail (mirrored_at naive 등) — None 반환, 호출자 DB fallback
+        return None
+    # topic-native shape으로 반환 — helper 인자 source/asset 그대로 부착
+    return {
+        "source": source,
+        "asset": asset,
+        "rate": parsed["rate"],
+        "timestamp": parsed["timestamp"],
+    }
 
 
 async def _get_latest_with_reason(key: str) -> Tuple[Optional[bytes], Optional[str]]:

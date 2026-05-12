@@ -400,17 +400,48 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
         investing: dict | None,
         krx: dict | None,
     ):
-        """공통 mock setup — context manager list 반환."""
+        """공통 mock setup — context manager list 반환.
+
+        PR Z-2e B-Step 2 후: USDT 5거래소는 Redis-first (get_latest_source_rate_from_sync_job)
+        → 1개라도 None이면 전체 DB fallback (get_latest_source_rates_for_topic).
+        usdt_rates_per_source(legacy shape dict)를 두 mock 모두에 자동 변환 dispatch.
+        KRX는 여전히 get_latest_source_rate(asset="usd-krw-futures") 사용.
+        """
+
+        def _to_topic_native(raw: dict | None, source: str, asset: str) -> dict | None:
+            if raw is None:
+                return None
+            return {
+                "source": raw.get("bank") or source,
+                "asset": raw.get("currency") or asset,
+                "rate": raw["rate"],
+                "timestamp": raw["timestamp"],
+            }
+
+        def fake_redis_read(source, asset):
+            # Z-2e B-Step 2: USDT Redis-first read
+            return _to_topic_native(usdt_rates_per_source.get(source), source, asset)
+
+        def fake_db_fallback(db, asset, sources):
+            # Z-2e B-Step 2: Redis 1개라도 miss 시 호출되는 topic 전용 DB fallback
+            return [
+                _to_topic_native(usdt_rates_per_source[s], s, asset)
+                for s in sources
+                if usdt_rates_per_source.get(s) is not None
+            ]
 
         def fake_get_latest_source_rate(db, source, asset):
-            if asset == "usdt-krw":
-                return usdt_rates_per_source.get(source)
+            # 새 spec에서는 USDT는 이 경로 미사용. KRX만 호출됨.
             if asset == "usd-krw-futures":
                 return krx
             return None
 
         return [
             patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS),
+            patch.object(utp, "get_latest_source_rate_from_sync_job",
+                         side_effect=fake_redis_read),
+            patch.object(utp, "get_latest_source_rates_for_topic",
+                         side_effect=fake_db_fallback),
             patch.object(utp, "get_latest_source_rate", side_effect=fake_get_latest_source_rate),
             patch.object(utp, "select_latest_bank_rates_from_db", return_value=bank_rates),
             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=investing),
@@ -510,36 +541,48 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
         self.assertNotIn("usd_krw_futures", payload["data"])
 
     # 7) include_krx=False시 KRX crud 호출 0회 (비용 차단)
+    #    PR Z-2e B-Step 2: USDT는 Redis read path, KRX는 여전히 get_latest_source_rate
     def test_include_krx_false_skips_krx_query(self):
+        # USDT Redis read 모두 None (DB fallback도 빈 list)
+        redis_mock = MagicMock(return_value=None)
+        db_fallback_mock = MagicMock(return_value=[])
         krx_calls: List[Tuple[str, str]] = []
 
         def fake_get_latest_source_rate(db, source, asset):
             krx_calls.append((source, asset))
             return None
 
-        with patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS), \
+        with patch.object(utp, "get_latest_source_rate_from_sync_job", redis_mock), \
+             patch.object(utp, "get_latest_source_rates_for_topic", db_fallback_mock), \
              patch.object(utp, "get_latest_source_rate", side_effect=fake_get_latest_source_rate), \
              patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
              patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
             utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
 
-        # USDT 5번만 호출 — KRX는 호출 0회
-        self.assertEqual(len(krx_calls), 5)
-        for source, asset in krx_calls:
-            self.assertEqual(asset, "usdt-krw")
-        self.assertNotIn(("krx", "usd-krw-futures"), krx_calls)
+        # USDT Redis read 5번 (5거래소) — 모두 None이라 DB fallback 1번 호출
+        self.assertEqual(redis_mock.call_count, 5)
+        self.assertEqual(db_fallback_mock.call_count, 1)
+        # KRX는 include_krx=False이므로 호출 0회
+        self.assertEqual(len(krx_calls), 0)
 
-    # 8) crud 함수 호출 횟수 검증 (5 USDT + 1 banks + 1 investing + 1 KRX when include)
+    # 8) crud 함수 호출 횟수 검증 (Redis 5 + DB fallback 1 + banks 1 + investing 1 + KRX 1 when include)
     def test_crud_call_counts_with_krx(self):
+        # USDT Redis read 모두 None (DB fallback 호출 유도)
+        redis_mock = MagicMock(return_value=None)
+        db_fallback_mock = MagicMock(return_value=[])
         get_source_mock = MagicMock(return_value=None)
-        with patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS), \
+        with patch.object(utp, "get_latest_source_rate_from_sync_job", redis_mock), \
+             patch.object(utp, "get_latest_source_rates_for_topic", db_fallback_mock), \
              patch.object(utp, "get_latest_source_rate", get_source_mock), \
              patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]) as bank_mock, \
              patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None) as inv_mock:
             utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=True)
 
-        # USDT 5 + KRX 1 = 6
-        self.assertEqual(get_source_mock.call_count, 6)
+        # USDT: Redis 5번 시도 + 1개라도 miss라 DB fallback 1번
+        self.assertEqual(redis_mock.call_count, 5)
+        self.assertEqual(db_fallback_mock.call_count, 1)
+        # KRX: get_latest_source_rate 1번 (asset=usd-krw-futures)
+        self.assertEqual(get_source_mock.call_count, 1)
         bank_mock.assert_called_once()
         inv_mock.assert_called_once()
 
@@ -577,6 +620,166 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
         )
         banks = [e["source"] for e in payload["data"]["usd_krw_banks"]]
         self.assertEqual(banks, ["kb", "hana"])
+
+
+# ---------------------------------------------------------------------------
+# PR Z-2e B-Step 2: Redis-first read 계약 잠금 (Codex 권고 5개)
+# ---------------------------------------------------------------------------
+
+class TestUsdtKrwRedisFirstReadContract(unittest.TestCase):
+    """usdt_krw group Redis-first read 계약 검증:
+
+    1. Redis 5개 모두 hit → DB fallback 미호출
+    2. Redis 1개 miss → 전체 fallback 호출
+    3. Redis parse fail/exception → None 취급 → 전체 fallback
+    4. fallback 결과도 Redis hit 결과와 동일 entry shape (topic-native)
+    5. get_source_rates_as_legacy_format은 이 경로에서 절대 사용 X
+    """
+
+    def test_all_redis_hit_skips_db_fallback(self):
+        """5거래소 모두 Redis hit → DB fallback 호출 0회."""
+        def fake_redis(source, asset):
+            return {"source": source, "asset": asset, "rate": 1.0,
+                    "timestamp": "2026-05-12T15:00:00+09:00"}
+
+        db_mock = MagicMock(return_value=[])
+        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+                          side_effect=fake_redis) as redis_mock, \
+             patch.object(utp, "get_latest_source_rates_for_topic", db_mock), \
+             patch.object(utp, "get_latest_source_rate", return_value=None), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            payload = utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        self.assertEqual(redis_mock.call_count, 5)
+        db_mock.assert_not_called()
+        # payload data에 5거래소 모두 포함
+        sources = sorted(e["source"] for e in payload["data"]["usdt_krw"])
+        self.assertEqual(sources, sorted(utp.TETHER_TAB_EXCHANGE_SOURCES))
+
+    def test_one_redis_miss_triggers_full_db_fallback(self):
+        """1거래소 Redis miss → 전체 5거래소 DB fallback 호출."""
+        def fake_redis(source, asset):
+            if source == "gopax":
+                return None  # 1개 miss
+            return {"source": source, "asset": asset, "rate": 1.0,
+                    "timestamp": "2026-05-12T15:00:00+09:00"}
+
+        # DB fallback이 정상 응답 4개 (gopax 누락)
+        db_fallback_result = [
+            {"source": s, "asset": "usdt-krw", "rate": 2.0,
+             "timestamp": "2026-05-12T16:00:00+09:00"}
+            for s in ("upbit", "bithumb", "coinone", "korbit")
+        ]
+        db_mock = MagicMock(return_value=db_fallback_result)
+        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+                          side_effect=fake_redis) as redis_mock, \
+             patch.object(utp, "get_latest_source_rates_for_topic", db_mock), \
+             patch.object(utp, "get_latest_source_rate", return_value=None), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            payload = utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        # Redis 5번 시도, DB fallback 1번 호출 (전체 5거래소 list 전달)
+        self.assertEqual(redis_mock.call_count, 5)
+        db_mock.assert_called_once()
+        # DB fallback 호출 인자: asset + 5거래소 list
+        call_kwargs = db_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["asset"], "usdt-krw")
+        self.assertEqual(call_kwargs["sources"], list(utp.TETHER_TAB_EXCHANGE_SOURCES))
+        # 결과는 DB fallback 4개 (Redis 결과 X)
+        rates = sorted(e["rate"] for e in payload["data"]["usdt_krw"])
+        self.assertEqual(rates, [2.0, 2.0, 2.0, 2.0])
+
+    def test_redis_exception_treated_as_miss_triggers_fallback(self):
+        """Redis exception → helper가 None 반환 → 전체 DB fallback."""
+        call_count = [0]
+
+        def fake_redis(source, asset):
+            call_count[0] += 1
+            if source == "korbit":
+                return None  # exception 시 helper가 None 반환하는 동작 시뮬
+            return {"source": source, "asset": asset, "rate": 1.0,
+                    "timestamp": "2026-05-12T15:00:00+09:00"}
+
+        db_mock = MagicMock(return_value=[
+            {"source": s, "asset": "usdt-krw", "rate": 3.0,
+             "timestamp": "2026-05-12T17:00:00+09:00"}
+            for s in utp.TETHER_TAB_EXCHANGE_SOURCES
+        ])
+        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+                          side_effect=fake_redis), \
+             patch.object(utp, "get_latest_source_rates_for_topic", db_mock), \
+             patch.object(utp, "get_latest_source_rate", return_value=None), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        # exception/parse fail 케이스도 None과 동일하게 fallback 트리거
+        db_mock.assert_called_once()
+
+    def test_fallback_entries_match_redis_shape(self):
+        """DB fallback 결과도 Redis hit 결과와 동일 topic-native entry shape.
+
+        builder normalization 입장에서 두 경로 결과 구분 불가 — 단일 shape 보장.
+        """
+        # 모두 Redis miss → DB fallback 사용
+        db_result = [
+            {"source": s, "asset": "usdt-krw", "rate": 1500.0,
+             "timestamp": "2026-05-12T18:00:00+09:00"}
+            for s in utp.TETHER_TAB_EXCHANGE_SOURCES
+        ]
+        with patch.object(utp, "get_latest_source_rate_from_sync_job", return_value=None), \
+             patch.object(utp, "get_latest_source_rates_for_topic", return_value=db_result), \
+             patch.object(utp, "get_latest_source_rate", return_value=None), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            payload = utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        # 모든 entry는 topic-native shape (source, asset, rate, timestamp), display_name 없음
+        for entry in payload["data"]["usdt_krw"]:
+            self.assertEqual(set(entry.keys()), {"source", "asset", "rate", "timestamp"})
+            self.assertNotIn("display_name", entry)
+            self.assertNotIn("bank", entry)
+            self.assertNotIn("currency", entry)
+
+    def test_does_not_use_get_source_rates_as_legacy_format(self):
+        """topic builder source에 legacy adapter(get_source_rates_as_legacy_format) 미포함.
+
+        정적 source 검사 — Z-2d legacy_policy 우회 의도라 module이 legacy adapter
+        이름을 import하거나 참조하면 안 됨. (import 시점 hook으로 모든 호출 차단.)
+        """
+        import inspect
+        src = inspect.getsource(utp)
+        self.assertNotIn(
+            "get_source_rates_as_legacy_format", src,
+            "usdt_topic_payload는 Z-2d legacy_policy 우회 위해 topic 전용 fetcher "
+            "(get_latest_source_rates_for_topic)만 사용해야 함"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TETHER_TAB_EXCHANGE_SOURCES 상수 검증
+# ---------------------------------------------------------------------------
+
+class TestExchangeSourcesConstant(unittest.TestCase):
+    """TETHER_TAB_EXCHANGE_SOURCES 상수 정합성:
+    - 5개 거래소 정확 list
+    - SourceRegistry get_usdt_exchange_entries()와 동일 set (sync 검증)
+    """
+
+    def test_exchange_sources_exact_match(self):
+        self.assertEqual(
+            utp.TETHER_TAB_EXCHANGE_SOURCES,
+            ("upbit", "bithumb", "coinone", "korbit", "gopax"),
+        )
+
+    def test_exchange_sources_matches_source_registry(self):
+        """SourceRegistry와 sync 깨지면 운영 inconsistency. 명시 상수 단일 진실 소스."""
+        from app.source_registry import get_usdt_exchange_entries
+        registry_sources = {e.source for e in get_usdt_exchange_entries()}
+        constant_sources = set(utp.TETHER_TAB_EXCHANGE_SOURCES)
+        self.assertEqual(constant_sources, registry_sources)
 
 
 if __name__ == "__main__":

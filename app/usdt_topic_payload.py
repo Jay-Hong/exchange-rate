@@ -50,9 +50,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from app.crud import (
     _bank_display_sort_key,
     get_latest_source_rate,
+    get_latest_source_rates_for_topic,
     select_a_latest_investing_rate_from_db,
     select_latest_bank_rates_from_db,
 )
+from app.latest_rates_cache import get_latest_source_rate_from_sync_job
 from app.source_registry import get_source_definition, get_usdt_exchange_entries
 
 if TYPE_CHECKING:
@@ -65,6 +67,15 @@ _FUTURES_EXPECTED: Tuple[str, str] = ("krx", "usd-krw-futures")
 # 테더 탭에 표시할 은행 source list (kb→hana 순서). select_latest_bank_rates_from_db
 # 가 9개 은행을 반환하면 이 상수 순서로만 필터/build → helper 출력 순서 안정.
 TETHER_TAB_BANK_SOURCES: Tuple[str, ...] = ("kb", "hana")
+
+# 테더 탭에 표시할 USDT 거래소 source list (PR Z-2e B-Step 2).
+# Redis-first read의 source 인자 + DB fallback 호출 시 동일 list 사용 → 출력
+# 순서 안정 + Redis miss 판정 단위와 DB fallback 단위 일관. SourceRegistry의
+# get_usdt_exchange_entries()와 정합(단위 test로 검증) — 명시 상수가 단말
+# 출력 순서 계약 단일 진실 소스.
+TETHER_TAB_EXCHANGE_SOURCES: Tuple[str, ...] = (
+    "upbit", "bithumb", "coinone", "korbit", "gopax",
+)
 
 
 def _normalize_entry(
@@ -231,14 +242,19 @@ def load_and_build_tether_tab_payload(
     """DB 통합 helper — 저장소별 dispatch 후 build_tether_tab_payload 호출.
 
     저장소별 조회:
-        - USDT 5거래소 (asset=usdt-krw): SourceRegistry.get_usdt_exchange_entries()로
-          enum → get_latest_source_rate(db, source, "usdt-krw") 각각.
-          거래소 추가/제거 시 SourceRegistry만 변경하면 helper 자동 반영.
+        - USDT 5거래소 (asset=usdt-krw): **Redis-first** (PR Z-2e B-Step 2).
+          TETHER_TAB_EXCHANGE_SOURCES 순서로 sync Redis GET (latest:source:*:usdt-krw).
+          5개 모두 hit이면 Redis 사용. 1개라도 miss/parse fail이면 전체
+          DB fallback(`get_latest_source_rates_for_topic`, legacy_policy 우회).
+          Stale 판정 X (USDT는 mirror cycle 미경유 — Z-2d allowlist).
         - 은행 (asset=usd-krw): select_latest_bank_rates_from_db(db, "usd-krw") 전체
           반환 → TETHER_TAB_BANK_SOURCES 순서로 명시 build (출력 순서 안정).
+          기존 DB read 유지 (B-Step 2 범위 외).
         - Investing (asset=usd-krw): select_a_latest_investing_rate_from_db(db, "usd-krw").
+          기존 DB read 유지 (B-Step 2 범위 외).
         - KRX (asset=usd-krw-futures): include_krx=True일 때만 query.
           False면 호출 자체 X (불필요 DB load 차단).
+          기존 DB read 유지 (B-Step 2 범위 외).
 
     Args:
         db: SQLAlchemy Session.
@@ -254,12 +270,24 @@ def load_and_build_tether_tab_payload(
         - publish 호출 X (wire-up은 별도 PR)
         - 정렬/정규화는 build_tether_tab_payload가 단일 책임
     """
-    # USDT — SourceRegistry로 동적 enum
-    usdt_rates: List[Dict[str, Any]] = []
-    for definition in get_usdt_exchange_entries():
-        rate = get_latest_source_rate(db, definition.source, definition.asset)
-        if rate is not None:
-            usdt_rates.append(rate)
+    # USDT — Redis-first read (PR Z-2e B-Step 2).
+    # 5거래소 latest:source:*:usdt-krw key 시도 → 모두 hit이면 Redis 사용,
+    # 1개라도 miss/parse fail이면 전체 DB fallback (`get_latest_source_rates_for_topic`
+    # — Z-2d legacy_policy 우회 topic 전용 fetcher).
+    # Stale 판정 X — USDT는 mirror cycle 미경유 (Z-2d allowlist), Redis 있으면
+    # 시간 무관 사용. miss 처리만 DB fallback.
+    redis_usdt_results = [
+        get_latest_source_rate_from_sync_job(source, "usdt-krw")
+        for source in TETHER_TAB_EXCHANGE_SOURCES
+    ]
+    if all(r is not None for r in redis_usdt_results):
+        # 모두 Redis hit — 그대로 사용 (topic-native shape)
+        usdt_rates: List[Dict[str, Any]] = list(redis_usdt_results)  # type: ignore[arg-type]
+    else:
+        # 1개라도 miss → 전체 DB fallback (topic 전용 fetcher, legacy_policy 우회)
+        usdt_rates = get_latest_source_rates_for_topic(
+            db, asset="usdt-krw", sources=list(TETHER_TAB_EXCHANGE_SOURCES),
+        )
 
     # 은행 — TETHER_TAB_BANK_SOURCES 순서로 명시 build (Codex 권고)
     # select_latest_bank_rates_from_db 반환 순서 변경에 영향받지 않음.

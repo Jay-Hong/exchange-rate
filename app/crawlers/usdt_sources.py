@@ -128,8 +128,11 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
         True: Redis SET 성공.
         False: latest 조회 실패 / sync helper 실패.
 
-    Best-effort: 실패는 logger.warning만. mirror cycle(3초) safety repair에 의존
-    → 사용자-facing 영향 0, async circuit_breaker 오염 X (broadcast/mirror 격리).
+    Best-effort: 실패는 logger.warning만. **USDT source는 Z-2d allowlist 미통과로
+    mirror cycle skip** — 즉 본 direct write가 실패하면 mirror cycle이 safety
+    repair하지 않는다. Miss는 B-Step 2 read path가 `get_latest_source_rate_from_sync_job`
+    None 감지 후 DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리.
+    async circuit_breaker 오염 X (broadcast/mirror 격리).
     """
     latest = crud.get_latest_source_rate(db, source, asset)
     if latest is None:
@@ -147,13 +150,13 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
         )
     except Exception:
         logger.exception(
-            "USDT Redis direct write 예외 (격리, mirror cycle 복구 의존)",
+            "USDT Redis direct write 예외 (격리, read path DB fallback에 의존)",
             extra={"source": source, "asset": asset},
         )
         return False
     if not success:
         logger.warning(
-            "USDT Redis direct write False (best-effort, mirror cycle 복구 의존)",
+            "USDT Redis direct write False (best-effort, read path DB fallback에 의존)",
             extra={"source": source, "asset": asset, "rate": latest["rate"]},
         )
     return success
@@ -230,7 +233,8 @@ def collect_usdt_rates() -> None:
                     )
                     # PR Z-2e B-Step 1 Foundation 재시도: sync Redis client로
                     # latest 즉시 갱신 (mirror cycle 3초 bypass).
-                    # 실패는 best-effort — mirror cycle이 safety repair.
+                    # 실패는 best-effort — USDT는 Z-2d로 mirror cycle 미경유.
+                    # Miss는 B-Step 2 read path가 DB fallback으로 처리.
                     _mirror_changed_source_to_redis(db=db, source=source, asset=asset)
             except Exception:
                 logger.exception(
