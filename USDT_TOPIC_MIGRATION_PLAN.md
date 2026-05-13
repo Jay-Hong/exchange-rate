@@ -485,6 +485,31 @@ Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB �
 - Server B-Step 3 (banks/reference Redis-first 확장) — direct write telemetry는
   B-Step Telemetry(2026-05-13)로 도입 완료
 
+### Z-2f (latest:index 책임 분리 — 설계 단계 2026-05-13)
+
+PR Z-2e Step 3b(`a499a08`, 2026-05-13) bank/investing direct write 운영 진입 후
+`latest:index.mirrored_at`의 freshness gate 의미가 direct write 시대와 충돌함을
+확인. broadcast Redis-first hot path가 개별 data key 갱신과 무관하게 index single
+signal에 의존하는 구조 → mirror cycle 격하/제거의 전제 조건이 막힘.
+
+[ADR-030](DECISIONS.md#adr-030-latestindex-책임-분리--freshness는-per-key-mirrored_at으로-판단)
+(Proposed, 2026-05-13)에서 옵션 C 채택. 상세 설계는 ADR-030 참조.
+
+**1차 범위**:
+
+- `latest:index`는 key membership list로 격하 (mirrored_at field는 schema 유지하되 read path에서 ignore)
+- freshness는 각 data key의 mirrored_at으로 판단 (기존 `is_stale()` 재사용)
+- 1개라도 per-key 문제 → 전체 DB fallback (보수적)
+- mirror cycle 3초 유지 (warmup/repair/keys 관리/unchanged key refresh)
+
+**비범위**:
+
+- mirror cycle interval 격하 (Z-2g 후보)
+- 부분 fallback (per-asset) — future phase
+- schema 정리 (mirrored_at field 제거)
+
+**검증 시 ADR-030 status를 Accepted로 전환**.
+
 ---
 
 ## 5. Deployment / KRX Baseline Constraints

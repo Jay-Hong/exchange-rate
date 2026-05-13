@@ -3406,6 +3406,123 @@ USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder
 
 ---
 
+## ADR-030: latest:index 책임 분리 — freshness는 per-key mirrored_at으로 판단
+
+**상태**: Proposed (2026-05-13, PR Z-2f 설계 단계)
+
+### 맥락
+
+ADR-026 (Redis-first broadcast hot path)은 `latest:index` control key의 `mirrored_at` 필드를 broadcast Redis-first read의 단일 freshness gate로 사용한다 ([app/latest_rates_cache.py:886](app/latest_rates_cache.py#L886)). mirror cycle이 3초마다 latest:index와 모든 data key를 함께 갱신하는 모델에서는 정합한 단일 시그널이다 — "한 cycle에서 모든 key가 동일한 mirrored_at으로 갱신됨"의 invariant.
+
+PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직후 `latest:bank:*` / `latest:investing:*` key를 sync Redis client로 직접 쓰는 direct write 시대에 진입했다. mirror cycle은 여전히 3초 주기로 운영되지만, 개별 data key는 mirror보다 먼저 direct write로 갱신될 수 있다.
+
+이로 인해 `latest:index.mirrored_at` 의미가 흔들리기 시작했다:
+
+1. **freshness 의미 거짓 가능성**: 개별 key만 direct write로 갱신된 상태에서 latest:index를 함께 갱신하면(옵션 A), broadcast가 "모든 key가 신선하다"고 오해. 실제로 다른 key는 mirror cycle 이전 값. 부분 갱신 + 전체 fresh 신호 = invariant 깨짐.
+
+2. **JSON read-modify-write race**: `latest:index = {"keys": [...], "mirrored_at": "..."}` 는 단일 JSON 값. direct write가 mirrored_at만 갱신하려면 GET→modify→SET 필요. mirror cycle과 동시 실행 시 keys list가 옛 값으로 덮일 가능성. Lua/WATCH-MULTI 없이는 race 회피 불가.
+
+### 결정
+
+**옵션 C 채택** — `latest:index`는 key membership list로 격하, freshness는 각 data key의 `mirrored_at`으로 판단.
+
+1. **`latest:index` 역할 재정의**:
+   - `keys` 필드: broadcast가 어떤 data key를 읽을지 알려주는 membership list (유지)
+   - `mirrored_at` 필드: 1차에서는 schema 유지하되 broadcast read path에서 **ignore** (백워드 호환, rollback 안전성)
+   - schema 정리(mirrored_at 제거)는 향후 별 PR
+
+2. **`fetch_rates_from_redis()` 분기 재작성**:
+   - index miss / parse fail → 전체 DB fallback (현 동작 유지)
+   - **index `mirrored_at` stale 판정 제거** (현 line 886 gate 삭제)
+   - MGET → 개별 data key value deserialize
+   - **per-key `is_stale()` 검사** (기존 함수 재사용, `LATEST_MIRROR_INTERVAL_SECONDS * STALE_RATIO`)
+   - 1개라도 stale / miss / parse fail → **전체 DB fallback** (보수적 1차)
+
+3. **부분 fallback은 future phase**: per-asset fallback (broken key만 DB, 나머지 Redis)은 옵션 C 안정 후 별 PR.
+
+### Trade-offs
+
+- **장점**:
+  - direct write 시대에 정합한 freshness 시맨틱
+  - 개별 key 갱신과 broadcast freshness 판정이 일치
+  - Read-modify-write race 회피 (broadcast가 index.mirrored_at 안 봄)
+  - mirror cycle interval 격하의 전제 조건 (옵션 C 안정 후 mirror 3s → 10s/30s 검토 가능)
+
+- **단점 / 제약**:
+  - broadcast read 비용 증가 (MGET 후 per-key stale 검사 추가) — 메모리 비교라 ms 수준
+  - 보수적 1차는 1개 stale도 전체 fallback → 안정 후 부분 fallback 검토 필요
+  - mirror cycle 3s 1차 유지 — 옵션 C 자체는 mirror 격하 결정 X
+
+### Alternatives 검토
+
+**옵션 A — direct write가 `latest:index.mirrored_at`만 갱신**:
+
+- 변경 폭 가장 작음 (Redis SET 1회 추가)
+- 거부 이유:
+  - freshness 시맨틱 invariant 깨짐 (위 "맥락" 참조)
+  - JSON read-modify-write race (Lua/WATCH 없으면 keys list 덮어쓰기 위험)
+
+**옵션 B — direct write가 `latest:index` 전체 atomic 재작성**:
+
+- mirror cycle 완전 격하/제거 가능
+- 거부 이유:
+  - 9 은행 + investing 동시 쓰기 race → Lua 스크립트 / WATCH/MULTI 필요
+  - 1차 구현 비용 과대, 회귀 위험 큼
+
+**옵션 C (채택) — `latest:index` membership list 격하**:
+
+- broadcast read path 변경만 필요 (write path는 mirror cycle/direct write 그대로)
+- mirror cycle 1차 유지 → safety net 보존
+- future mirror 격하 phase의 전제
+
+### Schema 호환 / Rollback 정책
+
+- `latest:index` JSON 형식 변경 X — mirror cycle은 그대로 `{"keys": [...], "mirrored_at": "..."}` write
+- broadcast read path만 `mirrored_at` field 무시
+- rollback 시 read path 옛 로직 복귀 → 기존 schema 그대로 사용, 운영 무중단
+- 백워드 호환 테스트 필수 (기존 latest:index 값으로 새 read path 정상 동작)
+
+### Telemetry / Metrics
+
+- `fallback_reason=redis_stale` (rates path)은 ADR-030 후 사실상 **deprecated** — line 886 index stale gate 자체 제거되므로 rates path에서 발생하지 않게 됨. Z-2f 이후 rates fallback은 `per_key_stale` 사용.
+- DXY는 별도 mirror key + 별도 fallback path → `latest_dxy_fallback_reason=redis_stale`은 기존 정책 그대로 유지 (ADR-030 영향 X).
+- 신규 `fallback_reason` 값:
+  - `per_key_stale`: 1개 이상 data key가 `is_stale()` 통과 못 함
+  - `per_key_miss`: 1개 이상 data key 부재
+  - `per_key_parse_fail`: 1개 이상 data key value parse 실패
+- `scripts/analyze_broadcast_metrics.py` 출력 호환성 별도 PR에서 정리
+
+### Mirror Cycle 책무 (1차 유지)
+
+- `latest:index.keys` 관리 (membership 변동 감지)
+- warmup (cold start 시 DB → Redis 적재)
+- repair (data key 누락/실패 복구)
+- unchanged key의 mirrored_at refresh (OUT 모드 / 야간 hourly crawl source 보호)
+- interval 3초 유지 — 격하는 별 phase
+
+### 후속 Phase
+
+1. **mirror cycle interval 격하** (3s → 10s/30s 단계적): per-key stale 시맨틱 안정 후
+2. **mirror cycle 역할 축소**: warmup/repair 전용으로 격하 검토
+3. **부분 DB fallback** (per-asset): 옵션 C 1차 안정 후 별 PR
+
+### 운영 검증 (예정 — Accepted 전환 조건)
+
+- `fallback_reason=redis_stale` (rates path) **소멸 — 기대값 0** (index stale gate 제거로 발생 케이스 자체 사라짐)
+- `per_key_*` fallback 빈도 측정 (기준선 형성)
+- topic/broadcast error 0 유지
+- legacy `/api/rates/usd-krw` HTTP 200 유지
+- direct write gap ms 단위 유지 (PR Z-2e Step 3b 회귀 없음)
+
+### 관련 문서
+
+- [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): Redis-first broadcast hot path (latest:index 도입 결정)
+- [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback): USDT direct write (mirror cycle 미경유)
+- [USDT_TOPIC_MIGRATION_PLAN.md Z-2f](USDT_TOPIC_MIGRATION_PLAN.md): 본 ADR 구현 PR 추적
+- [app/latest_rates_cache.py:886](app/latest_rates_cache.py#L886): 현재 freshness gate 위치
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -3437,3 +3554,4 @@ USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder
 - 2026-05-06: ADR-027 초안 작성 (KRX 미국달러선물 Stage 2 전 REST snapshot/fallback + stale 정책)
 - 2026-05-06: ADR-028 작성 (Topic-only Tether/KRX + legacy FX dual-emit)
 - 2026-05-12: ADR-029 작성 (USDT source는 mirror cycle 미경유 — direct write + read-path DB fallback)
+- 2026-05-13: ADR-030 초안 작성 (latest:index 책임 분리 — freshness는 per-key mirrored_at으로 판단, Proposed)
