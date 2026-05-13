@@ -3484,13 +3484,15 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 
 ### Telemetry / Metrics
 
-- `fallback_reason=redis_stale` (rates path)은 ADR-030 후 사실상 **deprecated** — line 886 index stale gate 자체 제거되므로 rates path에서 발생하지 않게 됨. Z-2f 이후 rates fallback은 `per_key_stale` 사용.
+- `fallback_reason=redis_stale` (rates path)은 ADR-030 후 사실상 **deprecated** — line 886 index stale gate 자체 제거되므로 rates path에서 발생하지 않게 됨. Z-2f 이후 rates path의 stale 시그널은 `per_key_stale` 사용.
 - DXY는 별도 mirror key + 별도 fallback path → `latest_dxy_fallback_reason=redis_stale`은 기존 정책 그대로 유지 (ADR-030 영향 X).
 - 신규 `fallback_reason` 값:
-  - `per_key_stale`: 1개 이상 data key가 `is_stale()` 통과 못 함
-  - `per_key_miss`: 1개 이상 data key 부재
-  - `per_key_parse_fail`: 1개 이상 data key value parse 실패
-- `scripts/analyze_broadcast_metrics.py` 출력 호환성 별도 PR에서 정리
+  - `per_key_stale`: 1개 이상 data key가 `is_stale()` 통과 못 함 (1차 신규 추가)
+- **기존 reason 유지** (rename 없음, analyzer 호환):
+  - `redis_miss`: data key 1개 이상 부재 — semantic 그대로
+  - `redis_error`: deserialize 실패 / MGET error / length mismatch / key_to_rate 변환 실패 — semantic 그대로
+  - 향후 `per_key_miss` / `per_key_parse_fail` 분리 필요 시 별 PR (metrics analyzer 호환 보강 포함)
+- `scripts/analyze_broadcast_metrics.py` 출력은 `per_key_stale` 카테고리 추가 시점에 갱신 (별 PR)
 
 ### Mirror Cycle 책무 (1차 유지)
 

@@ -842,8 +842,12 @@ async def fetch_rates_from_redis() -> Tuple[
     DXY는 독립 fetch — DXY Redis 실패가 rates fallback을 유발하지 않음 (PR5
     DXY-only fallback). DB fallback 결과는 호출자(main._assemble_payload)가 결정.
 
-    cycle freshness는 latest:index.mirrored_at 단일 source로 판단 (모든 data key가
-    같은 cycle에서 적재되므로 개별 mirrored_at 재검증 불필요).
+    cycle freshness 시맨틱 (PR Z-2f / ADR-030):
+    - `latest:index.mirrored_at`는 read path에서 ignore (membership list로 격하)
+    - 각 data key value의 `mirrored_at`을 per-key `is_stale()` 검사
+    - 1개라도 stale → `per_key_stale` reason으로 fallback (보수적 1차)
+    - 이유: bank/investing direct write 시대에 index single signal이 invariant
+      깨짐. 자세한 결정은 ADR-030 참조.
 
     PR3.5 분해 계측: 성공/실패 모두 meta에 단계별 timing 포함 — 어디서 시간이
     소요되거나 실패했는지(index_get / parse / data_get / decode) 식별 가능.
@@ -882,12 +886,9 @@ async def fetch_rates_from_redis() -> Tuple[
         meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
         return None, None, meta
 
-    # 3. cycle freshness 판정 (single source of truth)
-    if is_stale(index["mirrored_at"]):
-        meta["latest_source"] = "db_fallback"
-        meta["fallback_reason"] = "redis_stale"
-        meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-        return None, None, meta
+    # 3. (PR Z-2f / ADR-030) index.mirrored_at stale gate 제거
+    #    freshness 판정은 step 5 decode loop에서 per-key 수행
+    #    `index["mirrored_at"]`은 mirror_age_ms meta(step 6)에만 사용 — 정보용
 
     # 4. listed data keys MGET → 1 round-trip + 1 await yield (PR4)
     # PR3.5 측정에서 35 sequential async GET wall-clock이 long tail 주범으로 식별됨
@@ -941,7 +942,7 @@ async def fetch_rates_from_redis() -> Tuple[
     meta["latest_data_get_ms"] = (time.perf_counter() - t_data_get0) * 1000
     meta["latest_data_get_mode"] = "mget"  # PR4 indicator (analyzer numeric 미포함)
 
-    # 5. decode + key→rate 변환
+    # 5. decode + key→rate 변환 + per-key stale 검사 (PR Z-2f / ADR-030)
     t_decode0 = time.perf_counter()
     rates: List[Dict[str, Any]] = []
     for key, raw_v in raw_pairs:
@@ -950,6 +951,14 @@ async def fetch_rates_from_redis() -> Tuple[
             meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
             meta["latest_source"] = "db_fallback"
             meta["fallback_reason"] = "redis_error"
+            meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+            return None, None, meta
+        # PR Z-2f: 개별 data key value의 mirrored_at으로 freshness 판정
+        # 1개라도 stale → 전체 fallback (보수적 1차, ADR-030)
+        if is_stale(parsed["mirrored_at"]):
+            meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
+            meta["latest_source"] = "db_fallback"
+            meta["fallback_reason"] = "per_key_stale"
             meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
             return None, None, meta
         rate_record = _key_to_rate_record(key, parsed)
