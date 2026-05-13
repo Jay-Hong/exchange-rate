@@ -54,7 +54,11 @@ from app.crud import (
     select_a_latest_investing_rate_from_db,
     select_latest_bank_rates_from_db,
 )
-from app.latest_rates_cache import get_latest_source_rate_from_sync_job
+from app.latest_rates_cache import (
+    get_latest_bank_rate_from_sync_job,
+    get_latest_investing_rate_from_sync_job,
+    get_latest_source_rate_from_sync_job,
+)
 from app.source_registry import get_source_definition, get_usdt_exchange_entries
 
 if TYPE_CHECKING:
@@ -247,14 +251,17 @@ def load_and_build_tether_tab_payload(
           5개 모두 hit이면 Redis 사용. 1개라도 miss/parse fail이면 전체
           DB fallback(`get_latest_source_rates_for_topic`, legacy_policy 우회).
           Stale 판정 X (USDT는 mirror cycle 미경유 — Z-2d allowlist).
-        - 은행 (asset=usd-krw): select_latest_bank_rates_from_db(db, "usd-krw") 전체
-          반환 → TETHER_TAB_BANK_SOURCES 순서로 명시 build (출력 순서 안정).
-          기존 DB read 유지 (B-Step 2 범위 외).
-        - Investing (asset=usd-krw): select_a_latest_investing_rate_from_db(db, "usd-krw").
-          기존 DB read 유지 (B-Step 2 범위 외).
+        - 은행 (asset=usd-krw): **Redis-first** (PR Z-2e Step 3a). 각 bank별
+          `get_latest_bank_rate_from_sync_job` 호출 → hit이면 사용, miss/stale이면
+          그 source만 DB fallback (per-source — USDT의 group fallback과 다름,
+          banks는 각 cron 독립). DB는 lazy 조회 (Redis 1+ miss 시점에 1회).
+        - Investing (asset=usd-krw): **Redis-first** (Step 3a). 단일 fallback —
+          Redis hit이면 사용, miss/stale이면 DB fallback.
+        - bank/investing은 mirror cycle 갱신 가정 → `is_stale()` 적용 (6초 기준).
+          USDT(mirror skip)와 다른 환경 (ADR-026 vs ADR-029).
         - KRX (asset=usd-krw-futures): include_krx=True일 때만 query.
           False면 호출 자체 X (불필요 DB load 차단).
-          기존 DB read 유지 (B-Step 2 범위 외).
+          **KRX는 mirror skip + direct write 미구축 → DB query 유지** (별도 phase).
 
     Args:
         db: SQLAlchemy Session.
@@ -292,20 +299,32 @@ def load_and_build_tether_tab_payload(
             db, asset="usdt-krw", sources=list(TETHER_TAB_EXCHANGE_SOURCES),
         )
 
-    # 은행 — TETHER_TAB_BANK_SOURCES 순서로 명시 build (Codex 권고)
-    # select_latest_bank_rates_from_db 반환 순서 변경에 영향받지 않음.
-    all_banks = select_latest_bank_rates_from_db(db, "usd-krw")
-    bank_by_source = {row["bank"]: row for row in all_banks}
-    bank_rates = [
-        bank_by_source[source]
-        for source in TETHER_TAB_BANK_SOURCES
-        if source in bank_by_source
-    ]
+    # 은행 — Redis-first read (PR Z-2e Step 3a, per-source fallback)
+    # bank/investing은 mirror cycle 갱신 (Z-2d allowlist 통과) → is_stale 적용 가능.
+    # KB Redis hit + Hana miss/stale이면 Hana만 DB fallback (USDT의 group fallback과
+    # 다름 — banks는 각 cron 독립이라 per-source가 자연).
+    bank_rates: List[Dict[str, Any]] = []
+    _db_banks_loaded: Optional[Dict[str, Dict[str, Any]]] = None
+    for bank_source in TETHER_TAB_BANK_SOURCES:
+        redis_entry = get_latest_bank_rate_from_sync_job(bank_source, "usd-krw")
+        if redis_entry is not None:
+            bank_rates.append(redis_entry)
+            continue
+        # Redis miss/stale → 해당 source만 DB fallback. lazy DB 조회 (필요 시 1회).
+        if _db_banks_loaded is None:
+            all_banks_db = select_latest_bank_rates_from_db(db, "usd-krw")
+            _db_banks_loaded = {row["bank"]: row for row in all_banks_db}
+        db_row = _db_banks_loaded.get(bank_source)
+        if db_row is not None:
+            bank_rates.append(db_row)
 
-    # Investing reference
-    investing_rate = select_a_latest_investing_rate_from_db(db, "usd-krw")
+    # Investing reference — Redis-first read (단일 fallback)
+    investing_rate = get_latest_investing_rate_from_sync_job("usd-krw")
+    if investing_rate is None:
+        investing_rate = select_a_latest_investing_rate_from_db(db, "usd-krw")
 
-    # KRX — include_krx=True일 때만 query (False면 호출 0회)
+    # KRX — include_krx=True일 때만 query (False면 호출 0회).
+    # KRX는 현재 mirror skip + Redis direct write 미구축 → DB query 유지 (별도 phase).
     krx_futures_rate: Optional[Dict[str, Any]] = None
     if include_krx:
         krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")

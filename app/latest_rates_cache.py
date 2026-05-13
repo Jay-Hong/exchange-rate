@@ -337,6 +337,101 @@ def get_latest_source_rate_from_sync_job(
     }
 
 
+def get_latest_bank_rate_from_sync_job(
+    bank: str, asset: str,
+) -> Optional[Dict[str, Any]]:
+    """sync builder 전용 Redis GET — bank latest (PR Z-2e Step 3a).
+
+    USDT source(get_latest_source_rate_from_sync_job)와 달리 bank는 Z-2d allowlist
+    통과 → mirror cycle이 매 3초 latest:bank:* key를 갱신한다. 따라서 stale 판정
+    적용 (is_stale, 6초 기준). stale/miss/parse fail/error 시 None — 호출자 DB
+    fallback. async circuit_breaker 미사용 (USDT helper 패턴 일관, broadcast Redis
+    path 격리).
+
+    Args:
+        bank: 은행 식별자 (예: "kb", "hana").
+        asset: 통화쌍 (예: "usd-krw").
+
+    Returns:
+        {"source", "asset", "rate", "timestamp"} topic-native shape.
+        Stale / miss / parse fail / 예외 시 None.
+
+    Note:
+        반환 shape를 topic-native({source, asset, rate, timestamp})로 두는 이유:
+        builder의 `_normalize_entry`는 거치지만 legacy shape({bank, currency, ...})
+        변환 비용이 없어진다 (USDT helper와 일관, FX topic 재사용 시에도 정합).
+    """
+    client = _get_sync_client()
+    if client is None:
+        return None
+    key = latest_key_bank(bank, asset)
+    try:
+        raw = client.get(key)
+    except Exception:
+        logger.warning(
+            "sync Redis GET 실패 — bank (best-effort, DB fallback 의존)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return None
+    if raw is None:
+        return None
+    parsed = deserialize_value(raw)
+    if parsed is None:
+        return None
+    # bank/investing은 mirror cycle 갱신 가정 — stale 시 DB fallback
+    if is_stale(parsed["mirrored_at"]):
+        return None
+    return {
+        "source": bank,
+        "asset": asset,
+        "rate": parsed["rate"],
+        "timestamp": parsed["timestamp"],
+    }
+
+
+def get_latest_investing_rate_from_sync_job(
+    asset: str,
+) -> Optional[Dict[str, Any]]:
+    """sync builder 전용 Redis GET — Investing latest (PR Z-2e Step 3a).
+
+    bank helper와 같은 정책 (mirror cycle 갱신 가정 + is_stale 적용 + async
+    circuit 미사용). source는 "investing" 고정.
+
+    Args:
+        asset: 통화쌍 (예: "usd-krw").
+
+    Returns:
+        {"source": "investing", "asset", "rate", "timestamp"} 또는 None.
+    """
+    client = _get_sync_client()
+    if client is None:
+        return None
+    key = latest_key_investing(asset)
+    try:
+        raw = client.get(key)
+    except Exception:
+        logger.warning(
+            "sync Redis GET 실패 — investing (best-effort, DB fallback 의존)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return None
+    if raw is None:
+        return None
+    parsed = deserialize_value(raw)
+    if parsed is None:
+        return None
+    if is_stale(parsed["mirrored_at"]):
+        return None
+    return {
+        "source": "investing",
+        "asset": asset,
+        "rate": parsed["rate"],
+        "timestamp": parsed["timestamp"],
+    }
+
+
 async def _get_latest_with_reason(key: str) -> Tuple[Optional[bytes], Optional[str]]:
     """Redis GET with explicit fallback reason classification.
 

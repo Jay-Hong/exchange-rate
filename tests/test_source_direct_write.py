@@ -416,5 +416,119 @@ class TestRedisReadStatsCounters(unittest.TestCase):
         self.assertEqual(stats["per_source"]["upbit"]["redis_read_error"], 1)
 
 
+# ---------------------------------------------------------------------------
+# PR Z-2e Step 3a: bank/investing Redis-first read helper
+# ---------------------------------------------------------------------------
+
+class TestBankRedisReadHelper(unittest.TestCase):
+    """get_latest_bank_rate_from_sync_job — mirror cycle 갱신 가정 + is_stale 적용.
+
+    USDT helper와 다른 환경 (ADR-026 mirror 기반 vs ADR-029 direct write).
+    """
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+
+    def _redis_value(self, rate: float, mirrored_age_seconds: float = 0.0) -> bytes:
+        """fresh mirrored_at으로 value JSON 생성. age_seconds 증가하면 stale."""
+        from datetime import datetime, timezone, timedelta
+        import json
+        kst = timezone(timedelta(hours=9))
+        mirrored_at = datetime.now(kst) - timedelta(seconds=mirrored_age_seconds)
+        return json.dumps({
+            "rate": rate,
+            "timestamp": "2026-05-13T15:00:00+09:00",
+            "mirrored_at": mirrored_at.isoformat(),
+        }).encode("utf-8")
+
+    def test_fresh_hit_returns_entry(self):
+        from app.latest_rates_cache import get_latest_bank_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.get.return_value = self._redis_value(1370.0, mirrored_age_seconds=1.0)
+        latest_rates_cache._sync_client = fake_client
+        result = get_latest_bank_rate_from_sync_job("kb", "usd-krw")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["source"], "kb")
+        self.assertEqual(result["asset"], "usd-krw")
+        self.assertEqual(result["rate"], 1370.0)
+        fake_client.get.assert_called_once_with("latest:bank:kb:usd-krw")
+
+    def test_miss_returns_none(self):
+        from app.latest_rates_cache import get_latest_bank_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.get.return_value = None
+        latest_rates_cache._sync_client = fake_client
+        self.assertIsNone(get_latest_bank_rate_from_sync_job("kb", "usd-krw"))
+
+    def test_stale_returns_none(self):
+        """mirrored_at이 6초 초과(STALE_RATIO=2 × 3초 interval) → None."""
+        from app.latest_rates_cache import get_latest_bank_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.get.return_value = self._redis_value(1370.0, mirrored_age_seconds=10.0)
+        latest_rates_cache._sync_client = fake_client
+        self.assertIsNone(get_latest_bank_rate_from_sync_job("kb", "usd-krw"))
+
+    def test_parse_fail_returns_none(self):
+        from app.latest_rates_cache import get_latest_bank_rate_from_sync_job
+        import json
+        fake_client = MagicMock()
+        # naive datetime → deserialize_value None
+        fake_client.get.return_value = json.dumps({
+            "rate": 1.0, "timestamp": "...",
+            "mirrored_at": "2026-05-13T15:00:00",  # naive
+        }).encode("utf-8")
+        latest_rates_cache._sync_client = fake_client
+        self.assertIsNone(get_latest_bank_rate_from_sync_job("kb", "usd-krw"))
+
+    def test_exception_returns_none(self):
+        from app.latest_rates_cache import get_latest_bank_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.get.side_effect = ConnectionError("fault")
+        latest_rates_cache._sync_client = fake_client
+        with patch.object(latest_rates_cache.logger, "warning"):
+            self.assertIsNone(get_latest_bank_rate_from_sync_job("kb", "usd-krw"))
+
+
+class TestInvestingRedisReadHelper(unittest.TestCase):
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+
+    def _fresh_value(self, rate: float = 1371.0) -> bytes:
+        from datetime import datetime, timezone, timedelta
+        import json
+        kst = timezone(timedelta(hours=9))
+        return json.dumps({
+            "rate": rate,
+            "timestamp": "2026-05-13T15:00:00+09:00",
+            "mirrored_at": datetime.now(kst).isoformat(),
+        }).encode("utf-8")
+
+    def test_hit_returns_topic_native_with_source_investing(self):
+        from app.latest_rates_cache import get_latest_investing_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.get.return_value = self._fresh_value(1371.5)
+        latest_rates_cache._sync_client = fake_client
+        result = get_latest_investing_rate_from_sync_job("usd-krw")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["source"], "investing")
+        self.assertEqual(result["asset"], "usd-krw")
+        self.assertEqual(result["rate"], 1371.5)
+        fake_client.get.assert_called_once_with("latest:investing:usd-krw")
+
+    def test_miss_returns_none(self):
+        from app.latest_rates_cache import get_latest_investing_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.get.return_value = None
+        latest_rates_cache._sync_client = fake_client
+        self.assertIsNone(get_latest_investing_rate_from_sync_job("usd-krw"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
