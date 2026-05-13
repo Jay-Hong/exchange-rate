@@ -24,6 +24,7 @@ async client mismatch + circuit_breaker 오염) 정면 해결.
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone as dt_timezone
 from unittest.mock import MagicMock, patch
 
 from app import latest_rates_cache
@@ -528,6 +529,387 @@ class TestInvestingRedisReadHelper(unittest.TestCase):
         fake_client.get.return_value = None
         latest_rates_cache._sync_client = fake_client
         self.assertIsNone(get_latest_investing_rate_from_sync_job("usd-krw"))
+
+
+# ---------------------------------------------------------------------------
+# Step 3b — bank/investing direct write (set helper + crud wrapper)
+# ---------------------------------------------------------------------------
+
+
+class TestSetLatestBankRateFromSyncJob(unittest.TestCase):
+    """bank latest direct writer 단위 (PR Z-2e Step 3b)."""
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+
+    def test_calls_set_with_correct_key_and_value(self):
+        from app.latest_rates_cache import set_latest_bank_rate_from_sync_job
+        fake_client = MagicMock()
+        latest_rates_cache._sync_client = fake_client
+        result = set_latest_bank_rate_from_sync_job(
+            bank="kb",
+            asset="usd-krw",
+            rate=1371.5,
+            timestamp="2026-05-13T10:00:00+09:00",
+        )
+        self.assertTrue(result)
+        fake_client.set.assert_called_once()
+        called_args = fake_client.set.call_args.args
+        self.assertEqual(called_args[0], "latest:bank:kb:usd-krw")
+        import json
+        parsed = json.loads(called_args[1])
+        self.assertEqual(parsed["rate"], 1371.5)
+        self.assertEqual(parsed["timestamp"], "2026-05-13T10:00:00+09:00")
+        self.assertIn("mirrored_at", parsed)
+
+    def test_returns_false_when_client_init_fails(self):
+        with patch.object(latest_rates_cache.redis_sync, "from_url",
+                          side_effect=RuntimeError("init fail")), \
+             patch.object(latest_rates_cache.logger, "warning"):
+            from app.latest_rates_cache import set_latest_bank_rate_from_sync_job
+            result = set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1371.5, "2026-05-13T10:00:00+09:00"
+            )
+        self.assertFalse(result)
+
+    def test_set_exception_returns_false_and_skips_async_circuit(self):
+        from app.latest_rates_cache import set_latest_bank_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.set.side_effect = ConnectionError("redis fault")
+        latest_rates_cache._sync_client = fake_client
+        with patch.object(latest_rates_cache.redis_cache.circuit,
+                          "record_success") as mock_success, \
+             patch.object(latest_rates_cache.redis_cache.circuit,
+                          "record_failure") as mock_failure, \
+             patch.object(latest_rates_cache.logger, "warning") as mock_warn:
+            result = set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1371.5, "2026-05-13T10:00:00+09:00"
+            )
+        self.assertFalse(result)
+        mock_warn.assert_called_once()
+        # 핵심: async circuit_breaker는 호출 안 됨 (broadcast/mirror path 격리)
+        mock_success.assert_not_called()
+        mock_failure.assert_not_called()
+
+
+class TestSetLatestInvestingRateFromSyncJob(unittest.TestCase):
+    """investing latest direct writer 단위 (PR Z-2e Step 3b)."""
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+
+    def test_calls_set_with_correct_key_and_value(self):
+        from app.latest_rates_cache import set_latest_investing_rate_from_sync_job
+        fake_client = MagicMock()
+        latest_rates_cache._sync_client = fake_client
+        result = set_latest_investing_rate_from_sync_job(
+            asset="usd-krw",
+            rate=1371.5,
+            timestamp="2026-05-13T10:00:00+09:00",
+        )
+        self.assertTrue(result)
+        fake_client.set.assert_called_once()
+        called_args = fake_client.set.call_args.args
+        self.assertEqual(called_args[0], "latest:investing:usd-krw")
+        import json
+        parsed = json.loads(called_args[1])
+        self.assertEqual(parsed["rate"], 1371.5)
+        self.assertEqual(parsed["timestamp"], "2026-05-13T10:00:00+09:00")
+
+    def test_returns_false_when_client_init_fails(self):
+        with patch.object(latest_rates_cache.redis_sync, "from_url",
+                          side_effect=RuntimeError("init fail")), \
+             patch.object(latest_rates_cache.logger, "warning"):
+            from app.latest_rates_cache import set_latest_investing_rate_from_sync_job
+            result = set_latest_investing_rate_from_sync_job(
+                "usd-krw", 1371.5, "2026-05-13T10:00:00+09:00"
+            )
+        self.assertFalse(result)
+
+    def test_set_exception_returns_false_and_skips_async_circuit(self):
+        from app.latest_rates_cache import set_latest_investing_rate_from_sync_job
+        fake_client = MagicMock()
+        fake_client.set.side_effect = ConnectionError("redis fault")
+        latest_rates_cache._sync_client = fake_client
+        with patch.object(latest_rates_cache.redis_cache.circuit,
+                          "record_success") as mock_success, \
+             patch.object(latest_rates_cache.redis_cache.circuit,
+                          "record_failure") as mock_failure, \
+             patch.object(latest_rates_cache.logger, "warning") as mock_warn:
+            result = set_latest_investing_rate_from_sync_job(
+                "usd-krw", 1371.5, "2026-05-13T10:00:00+09:00"
+            )
+        self.assertFalse(result)
+        mock_warn.assert_called_once()
+        mock_success.assert_not_called()
+        mock_failure.assert_not_called()
+
+
+class TestWriteChangedBankRatesToRedis(unittest.TestCase):
+    """crud._write_changed_bank_rates_to_redis 단위 (PR Z-2e Step 3b)."""
+
+    def test_iterates_all_entries(self):
+        from app import crud
+        redis_updates = [
+            {"source": "kb", "asset": "usd-krw", "rate": 1371.0, "timestamp": "2026-05-13T10:00:00+09:00"},
+            {"source": "kb", "asset": "jpy-krw", "rate": 9.1, "timestamp": "2026-05-13T10:00:00+09:00"},
+        ]
+        with patch("app.latest_rates_cache.set_latest_bank_rate_from_sync_job") as mock_set:
+            crud._write_changed_bank_rates_to_redis(redis_updates)
+        self.assertEqual(mock_set.call_count, 2)
+        first_call = mock_set.call_args_list[0]
+        self.assertEqual(first_call.kwargs["bank"], "kb")
+        self.assertEqual(first_call.kwargs["asset"], "usd-krw")
+        self.assertEqual(first_call.kwargs["rate"], 1371.0)
+
+    def test_skips_when_empty(self):
+        from app import crud
+        with patch("app.latest_rates_cache.set_latest_bank_rate_from_sync_job") as mock_set:
+            crud._write_changed_bank_rates_to_redis([])
+        mock_set.assert_not_called()
+
+    def test_isolates_helper_exception(self):
+        """sync helper가 raise해도 다음 entry 처리 + 호출자 흐름에 영향 X."""
+        from app import crud
+        redis_updates = [
+            {"source": "kb", "asset": "usd-krw", "rate": 1371.0, "timestamp": "2026-05-13T10:00:00+09:00"},
+            {"source": "kb", "asset": "jpy-krw", "rate": 9.1, "timestamp": "2026-05-13T10:00:00+09:00"},
+        ]
+        with patch("app.latest_rates_cache.set_latest_bank_rate_from_sync_job",
+                   side_effect=[RuntimeError("boom"), True]) as mock_set, \
+             patch.object(crud.logger, "exception") as mock_log:
+            # 함수 자체가 raise하지 않아야 함
+            crud._write_changed_bank_rates_to_redis(redis_updates)
+        self.assertEqual(mock_set.call_count, 2)
+        mock_log.assert_called_once()
+
+
+class TestWriteChangedInvestingRatesToRedis(unittest.TestCase):
+    """crud._write_changed_investing_rates_to_redis 단위 (PR Z-2e Step 3b)."""
+
+    def test_iterates_all_entries(self):
+        from app import crud
+        redis_updates = [
+            {"source": "investing", "asset": "usd-krw", "rate": 1371.0, "timestamp": "2026-05-13T10:00:00+09:00"},
+            {"source": "investing", "asset": "eur-krw", "rate": 1500.0, "timestamp": "2026-05-13T10:00:00+09:00"},
+        ]
+        with patch("app.latest_rates_cache.set_latest_investing_rate_from_sync_job") as mock_set:
+            crud._write_changed_investing_rates_to_redis(redis_updates)
+        self.assertEqual(mock_set.call_count, 2)
+        first_call = mock_set.call_args_list[0]
+        self.assertEqual(first_call.kwargs["asset"], "usd-krw")
+        self.assertEqual(first_call.kwargs["rate"], 1371.0)
+
+    def test_isolates_helper_exception(self):
+        from app import crud
+        redis_updates = [
+            {"source": "investing", "asset": "usd-krw", "rate": 1371.0, "timestamp": "2026-05-13T10:00:00+09:00"},
+        ]
+        with patch("app.latest_rates_cache.set_latest_investing_rate_from_sync_job",
+                   side_effect=RuntimeError("boom")), \
+             patch.object(crud.logger, "exception"):
+            crud._write_changed_investing_rates_to_redis(redis_updates)
+
+
+class TestInsertBankRatesCallOrder(unittest.TestCase):
+    """insert_bank_rates_into_db 호출 순서 + shape 잠금 (PR Z-2e Step 3b 핵심 회귀 방지).
+
+    1) 호출 순서: db.commit() → _write_changed_bank_rates_to_redis → process_rate_alerts
+       역전 시 DB-Redis 비정합 + alert 누락 위험.
+    2) redis_updates payload: topic-native shape + DB ts 일관.
+    3) changed_rates payload: FCM shape 그대로 (timestamp leak X).
+    4) unchanged pair: commit/redis/alerts 모두 skip.
+    5) commit 실패: redis/alerts 미호출 (자연 보장이지만 invariant 잠금).
+    """
+
+    def test_commit_then_redis_then_alerts_with_shape_and_timestamp(self):
+        from app import crud
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+
+        fixed_utc_ts = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+        manager = MagicMock()
+        with patch.object(db, "commit", new=manager.commit), \
+             patch.object(crud, "_write_changed_bank_rates_to_redis",
+                          new=manager.write_redis), \
+             patch.object(crud, "process_rate_alerts",
+                          new=manager.process_alerts), \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = fixed_utc_ts
+            crud.insert_bank_rates_into_db(
+                db=db,
+                current_rates={"usd-krw": 1371.5},
+                bank_name="kb",
+            )
+        # 1) 순서 단언
+        call_names = [c[0] for c in manager.mock_calls if c[0] in ("commit", "write_redis", "process_alerts")]
+        self.assertEqual(call_names, ["commit", "write_redis", "process_alerts"])
+
+        # 2) redis_updates shape + DB ts 일관 (Codex Medium-1)
+        redis_payload = manager.write_redis.call_args.args[0]
+        self.assertEqual(redis_payload, [{
+            "source": "kb",
+            "asset": "usd-krw",
+            "rate": 1371.5,
+            "timestamp": "2026-05-13T10:00:00+09:00",  # UTC 01:00 → KST 10:00
+        }])
+
+        # 3) changed_rates FCM shape 보존 — timestamp/source leak 없음 (Codex Medium-2)
+        alerts_payload = manager.process_alerts.call_args.args[1]
+        self.assertEqual(alerts_payload, [{
+            "bank": "kb",
+            "currency": "usd-krw",
+            "rate": 1371.5,
+        }])
+
+    def test_unchanged_pair_skips_commit_redis_alerts(self):
+        """last_record.rate == current_rate → INSERT/commit/redis/alerts 모두 skip (Codex Low-3)."""
+        from app import crud
+        db = MagicMock()
+        last_record = MagicMock()
+        last_record.rate = 1371.5
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = last_record
+
+        with patch.object(crud, "_write_changed_bank_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts:
+            count = crud.insert_bank_rates_into_db(
+                db=db,
+                current_rates={"usd-krw": 1371.5},
+                bank_name="kb",
+            )
+        self.assertEqual(count, 0)
+        db.commit.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
+
+    def test_commit_failure_skips_redis_and_alerts(self):
+        """db.commit() raise → 후속 Redis write/alerts 미호출 (Codex Low-4 invariant 잠금)."""
+        from app import crud
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+        db.commit.side_effect = RuntimeError("commit failed")
+
+        with patch.object(crud, "_write_changed_bank_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            with self.assertRaises(RuntimeError):
+                crud.insert_bank_rates_into_db(
+                    db=db,
+                    current_rates={"usd-krw": 1371.5},
+                    bank_name="kb",
+                )
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
+
+    def test_redis_helper_internal_failure_does_not_block_alerts(self):
+        """sync writer가 raise해도 _write_changed_*가 내부 catch → alerts 호출 보장.
+
+        Step 3b 회귀 방지: Redis 실패가 FCM 알림 흐름을 차단하지 않아야 한다.
+        """
+        from app import crud
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+
+        with patch("app.latest_rates_cache.set_latest_bank_rate_from_sync_job",
+                   side_effect=ConnectionError("redis dead")), \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models, \
+             patch.object(crud.logger, "exception"):
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            crud.insert_bank_rates_into_db(
+                db=db,
+                current_rates={"usd-krw": 1371.5},
+                bank_name="kb",
+            )
+        mock_alerts.assert_called_once()
+
+
+class TestInsertInvestingRatesCallOrder(unittest.TestCase):
+    """insert_investing_rates_into_db 호출 순서 + shape 잠금 (PR Z-2e Step 3b)."""
+
+    def test_commit_then_redis_then_alerts_with_shape_and_timestamp(self):
+        from app import crud
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+
+        fixed_utc_ts = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+        manager = MagicMock()
+        with patch.object(db, "commit", new=manager.commit), \
+             patch.object(crud, "_write_changed_investing_rates_to_redis",
+                          new=manager.write_redis), \
+             patch.object(crud, "process_rate_alerts",
+                          new=manager.process_alerts), \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = fixed_utc_ts
+            crud.insert_investing_rates_into_db(
+                db=db,
+                current_rates={"usd-krw": 1371.5},
+            )
+        # 1) 순서 단언
+        call_names = [c[0] for c in manager.mock_calls if c[0] in ("commit", "write_redis", "process_alerts")]
+        self.assertEqual(call_names, ["commit", "write_redis", "process_alerts"])
+
+        # 2) redis_updates shape + DB ts (Codex Medium-1)
+        redis_payload = manager.write_redis.call_args.args[0]
+        self.assertEqual(redis_payload, [{
+            "source": "investing",
+            "asset": "usd-krw",
+            "rate": 1371.5,
+            "timestamp": "2026-05-13T10:00:00+09:00",
+        }])
+
+        # 3) FCM shape 보존 (Codex Medium-2) — bank="investing" 고정
+        alerts_payload = manager.process_alerts.call_args.args[1]
+        self.assertEqual(alerts_payload, [{
+            "bank": "investing",
+            "currency": "usd-krw",
+            "rate": 1371.5,
+        }])
+
+    def test_unchanged_pair_skips_commit_redis_alerts(self):
+        """last_record.rate == current_rate → 모두 skip (Codex Low-3)."""
+        from app import crud
+        db = MagicMock()
+        last_record = MagicMock()
+        last_record.rate = 1371.5
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = last_record
+
+        with patch.object(crud, "_write_changed_investing_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts:
+            count = crud.insert_investing_rates_into_db(
+                db=db,
+                current_rates={"usd-krw": 1371.5},
+            )
+        self.assertEqual(count, 0)
+        db.commit.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
+
+    def test_commit_failure_skips_redis_and_alerts(self):
+        """db.commit() raise → 후속 Redis write/alerts 미호출 (Codex Low-4 invariant 잠금)."""
+        from app import crud
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+        db.commit.side_effect = RuntimeError("commit failed")
+
+        with patch.object(crud, "_write_changed_investing_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            with self.assertRaises(RuntimeError):
+                crud.insert_investing_rates_into_db(
+                    db=db,
+                    current_rates={"usd-krw": 1371.5},
+                )
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
 
 
 if __name__ == "__main__":

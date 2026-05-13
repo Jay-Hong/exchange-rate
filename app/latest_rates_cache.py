@@ -337,6 +337,54 @@ def get_latest_source_rate_from_sync_job(
     }
 
 
+def set_latest_bank_rate_from_sync_job(
+    bank: str,
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> bool:
+    """sync scheduler thread 전용 direct writer — bank (PR Z-2e Step 3b).
+
+    `crud.insert_bank_rates_into_db`가 commit 직후 호출. broadcast hot path가
+    latest:bank:* key를 Redis-first로 읽으므로 mirror cycle 3초 bypass.
+
+    USDT writer와 다른 점: bank는 Z-2d allowlist 통과 → mirror cycle (3s)이 매
+    사이클 latest:bank:* key를 재기록한다 (safety net). 따라서 본 direct write가
+    실패해도 다음 mirror cycle이 자연 복구한다. 호출자 흐름(FCM alerts)에 영향 X.
+
+    Args:
+        bank: 은행 식별자 (예: "kb", "hana").
+        asset: 통화쌍 (예: "usd-krw").
+        rate: 환율.
+        timestamp: ISO 8601 KST 문자열 (DB record.timestamp 기준).
+
+    Returns:
+        True: Redis SET 성공.
+        False: client init 실패 / SET 예외.
+
+    설계 격리 (USDT writer와 동일):
+        - sync `redis.Redis` client 사용 (broadcast/mirror async path와 분리)
+        - **async circuit_breaker 호출 X**
+        - telemetry 미부착 (Step 3b 1st pass — direct write 안정 후 별 PR)
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    key = latest_key_bank(bank, asset)
+    mirrored_at = datetime.now(_KST)
+    value = serialize_value(rate, timestamp, mirrored_at)
+    try:
+        client.set(key, value)
+        return True
+    except Exception:
+        logger.warning(
+            "bank sync Redis SET 실패 (best-effort, mirror cycle 안전망 의존)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return False
+
+
 def get_latest_bank_rate_from_sync_job(
     bank: str, asset: str,
 ) -> Optional[Dict[str, Any]]:
@@ -388,6 +436,44 @@ def get_latest_bank_rate_from_sync_job(
         "rate": parsed["rate"],
         "timestamp": parsed["timestamp"],
     }
+
+
+def set_latest_investing_rate_from_sync_job(
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> bool:
+    """sync scheduler thread 전용 direct writer — investing (PR Z-2e Step 3b).
+
+    `crud.insert_investing_rates_into_db`가 commit 직후 호출. bank writer와 동일
+    설계 (Z-2d allowlist 통과 → mirror cycle safety net + async circuit 격리 +
+    telemetry 미부착).
+
+    Args:
+        asset: 통화쌍.
+        rate: 환율.
+        timestamp: ISO 8601 KST 문자열.
+
+    Returns:
+        True: Redis SET 성공.
+        False: client init 실패 / SET 예외.
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    key = latest_key_investing(asset)
+    mirrored_at = datetime.now(_KST)
+    value = serialize_value(rate, timestamp, mirrored_at)
+    try:
+        client.set(key, value)
+        return True
+    except Exception:
+        logger.warning(
+            "investing sync Redis SET 실패 (best-effort, mirror cycle 안전망 의존)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return False
 
 
 def get_latest_investing_rate_from_sync_job(

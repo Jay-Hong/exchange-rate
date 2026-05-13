@@ -99,19 +99,78 @@ def to_kst_isoformat(dt: Optional[datetime]) -> Optional[str]:
     return dt.astimezone(KST).isoformat()
 
 
+def _write_changed_bank_rates_to_redis(redis_updates: list) -> None:
+    """PR Z-2e Step 3b — bank latest Redis direct write (commit 직후 호출).
+
+    broadcast hot path가 latest:bank:* key를 Redis-first로 읽으므로 mirror cycle
+    3초 bypass. Z-2d allowlist 통과한 source라 본 write 실패 시 mirror cycle이
+    safety repair (3s 주기).
+
+    `redis_updates` entry shape: `{"source", "asset", "rate", "timestamp"}`
+    (topic-native). 호출자는 db.commit() 성공 후에만 이 함수를 부른다.
+
+    실패는 best-effort — 호출자(FCM alerts) 흐름에 영향 X.
+    """
+    if not redis_updates:
+        return
+    # 함수 내부 import — latest_rates_cache가 crud를 module-level로 import하므로
+    # 순환 참조 회피.
+    from app import latest_rates_cache
+    for update in redis_updates:
+        try:
+            latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                bank=update["source"],
+                asset=update["asset"],
+                rate=update["rate"],
+                timestamp=update["timestamp"],
+            )
+        except Exception:
+            logger.exception(
+                "bank Redis direct write 예외 (격리, mirror cycle 안전망 의존)",
+                extra={"bank": update["source"], "asset": update["asset"]},
+            )
+
+
+def _write_changed_investing_rates_to_redis(redis_updates: list) -> None:
+    """PR Z-2e Step 3b — investing latest Redis direct write (commit 직후).
+
+    bank helper와 동일 정책 (mirror cycle safety net 의존, best-effort 격리).
+    """
+    if not redis_updates:
+        return
+    from app import latest_rates_cache
+    for update in redis_updates:
+        try:
+            latest_rates_cache.set_latest_investing_rate_from_sync_job(
+                asset=update["asset"],
+                rate=update["rate"],
+                timestamp=update["timestamp"],
+            )
+        except Exception:
+            logger.exception(
+                "investing Redis direct write 예외 (격리, mirror cycle 안전망 의존)",
+                extra={"asset": update["asset"]},
+            )
+
+
 def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
     """
-    은행 환율 DB 저장 + 알림 조건 체크
+    은행 환율 DB 저장 + Redis direct write + 알림 조건 체크
 
     Returns:
         변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
 
     Notes:
-        환율 변경 시 알림 조건을 체크하고 FCM 발송 (process_rate_alerts)
+        - 환율 변경 시 DB INSERT (변경된 row만)
+        - commit 직후 Redis latest:bank:* key direct write (PR Z-2e Step 3b)
+        - 알림 조건 체크하고 FCM 발송 (process_rate_alerts)
+        - 호출 순서 잠금: db.commit() → Redis write → process_rate_alerts
+          (역전 시 DB-Redis 비정합 + alert 누락 위험)
     """
     logger.info(f"|                {bank_name} 환율                 |", extra={"bank": bank_name})
     new_records_count = 0
-    changed_rates = []  # 알림 처리용 변경 환율 수집
+    changed_rates = []  # 알림 처리용 (FCM shape: {bank, currency, rate})
+    redis_updates = []  # Redis direct write용 (topic-native shape: {source, asset, rate, timestamp})
 
     for pair, current_rate in current_rates.items():
         if current_rate is None:
@@ -136,11 +195,12 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
             logger.debug(f"📼 [유지] {pair}: {current_rate}", extra={"pair": pair, "rate": current_rate, "type": "unchanged", "bank": bank_name})
 
         if should_save:
+            ts = models.get_utc_now()
             new_entry = models.BankExchangeRate(
                 bank = bank_name,
                 currency = pair,
                 rate = current_rate,
-                timestamp = models.get_utc_now()
+                timestamp = ts
             )
             db.add(new_entry)
             new_records_count += 1
@@ -152,10 +212,21 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
                 "currency": pair,
                 "rate": current_rate
             })
+            # Redis direct write용 (topic-native shape)
+            redis_updates.append({
+                "source": bank_name,
+                "asset": pair,
+                "rate": current_rate,
+                "timestamp": to_kst_isoformat(ts),
+            })
 
     if new_records_count > 0:
         db.commit()
         logger.info(f"🎉 총 {new_records_count}개 {bank_name}은행의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": bank_name})
+
+        # commit 성공 후 Redis direct write — broadcast hot path latency 단축.
+        # 실패해도 mirror cycle (3s)이 safety repair, alert 흐름에 영향 X.
+        _write_changed_bank_rates_to_redis(redis_updates)
 
         # 알림 조건 체크 및 FCM 발송 (실패해도 환율 저장에 영향 없음)
         if changed_rates:
@@ -199,18 +270,22 @@ def get_last_bank_rates_with_ts(db: Session, bank_name: str, pairs: List[str]) -
 
 def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
     """
-    Investing 환율 DB 저장 + 알림 조건 체크
+    Investing 환율 DB 저장 + Redis direct write + 알림 조건 체크
 
     Returns:
         변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
 
     Notes:
-        환율 변경 시 알림 조건을 체크하고 FCM 발송 (process_rate_alerts)
-        bank 값은 "investing"으로 통일
+        - 환율 변경 시 DB INSERT
+        - commit 직후 Redis latest:investing:* key direct write (PR Z-2e Step 3b)
+        - 알림 조건 체크하고 FCM 발송 (process_rate_alerts)
+        - bank 값은 "investing"으로 통일
+        - 호출 순서 잠금: db.commit() → Redis write → process_rate_alerts
     """
     logger.info("|                Investing 환율                 |", extra={"bank": "investing"})
     new_records_count = 0
-    changed_rates = []  # 알림 처리용 변경 환율 수집
+    changed_rates = []  # 알림 처리용 (FCM shape)
+    redis_updates = []  # Redis direct write용 (topic-native shape)
 
     for pair, current_rate in current_rates.items():
         if current_rate is None:
@@ -235,10 +310,11 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
             logger.debug(f"📼 [유지] {pair}: {current_rate:.2f}", extra={"pair": pair, "rate": current_rate, "type": "unchanged", "bank": "investing"})
 
         if should_save:
+            ts = models.get_utc_now()
             new_entry = models.InvestingExchangeRate(
                 currency = pair,
                 rate = current_rate,
-                timestamp = models.get_utc_now()
+                timestamp = ts
             )
             db.add(new_entry)
             new_records_count += 1
@@ -250,10 +326,20 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
                 "currency": pair,
                 "rate": current_rate
             })
+            # Redis direct write용
+            redis_updates.append({
+                "source": "investing",
+                "asset": pair,
+                "rate": current_rate,
+                "timestamp": to_kst_isoformat(ts),
+            })
 
     if new_records_count > 0:
         db.commit()
         logger.info(f"🎉 총 {new_records_count}개 Investing의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": "investing"})
+
+        # commit 성공 후 Redis direct write — broadcast hot path latency 단축
+        _write_changed_investing_rates_to_redis(redis_updates)
 
         # 알림 조건 체크 및 FCM 발송 (실패해도 환율 저장에 영향 없음)
         if changed_rates:
