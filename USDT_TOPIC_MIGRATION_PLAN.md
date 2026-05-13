@@ -452,6 +452,32 @@ Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB �
 - 운영 단말: 영향 0 (사용자-facing 변화 없음)
 - 단말 freshness 기준 = usdt:krw topic payload (legacy `rates` 배열은 Z-2d로 USDT 제외됨)
 
+**iOS 단말 검증 완료 (2026-05-12)**:
+
+검증 단계 phase 종료 — `usdt:krw` topic 계약을 iOS 단말에서 9/9 PASS로 닫음.
+대상: DEBUG/dev 빌드. 비범위: release productization, UX polish, 알림 통합, FX 탭 topic 전환.
+
+| # | 항목 | PASS |
+| --- | --- | --- |
+| 1 | `usdt:krw` subscribe → snapshot 1회 이상 수신 | ✓ |
+| 2 | Swift Codable 매핑 — decoding error 0 | ✓ |
+| 3 | `data.usdt_krw` 5거래소 모두 list view 표시 | ✓ |
+| 4 | `data.usd_krw_banks` + `data.usd_krw_reference` 표시 | ✓ |
+| 5 | `data.usd_krw_futures` Optional 처리 정상 | ✓ |
+| 6 | legacy `/api/rates/usdt-krw` 호출 코드 grep 결과 0 | ✓ |
+| 7 | WebSocket reconnect → subscribe 재전송 → snapshot 재수신 | ✓ |
+| 8 | background → foreground 전환 시 subscribe 재시도 | ✓ |
+| 9 | unsubscribe → 추가 snapshot 미수신 | ✓ |
+
+결론: iOS DEBUG/dev 빌드 기준 `usdt:krw` topic 계약 검증 9/9 PASS. 서버-단말 계약은 검증 단계 기준 완료.
+
+후속 phase 후보 (별도 결정):
+
+- iOS productization (release 적용, UX polish, 알림 통합)
+- Android 검증 (iOS와 같은 마이그레이션 단계)
+- FX 탭 topic 전환 (`fx:*` topic — server는 활성 상태)
+- Server B-Step 3 (banks/reference Redis-first 확장) / direct write telemetry
+
 ---
 
 ## 5. Deployment / KRX Baseline Constraints
