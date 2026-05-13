@@ -344,6 +344,27 @@ class TestInvalidAssetRejected(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestLoadAndBuildIntegration(unittest.TestCase):
+    """Step 3c (2026-05-13): load_and_build_fx_topic_payload는 Redis-first로 전환됨.
+    기존 DB 경로 검증은 Redis miss(None) 강제 + DB fallback 호출로 잠금.
+    Redis helper(get_latest_bank/investing_rate_from_sync_job) mock으로 실제
+    redis:6379 접속 시도 차단 (Step 3a test pollution 학습 반영)."""
+
+    def setUp(self):
+        # Redis helper 격리 — 기본 None 반환 → DB fallback path
+        self._bank_redis_patch = patch(
+            "app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+            return_value=None,
+        )
+        self._inv_redis_patch = patch(
+            "app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+            return_value=None,
+        )
+        self._bank_redis_patch.start()
+        self._inv_redis_patch.start()
+
+    def tearDown(self):
+        self._bank_redis_patch.stop()
+        self._inv_redis_patch.stop()
 
     def test_load_and_build_calls_crud_with_asset(self):
         db = MagicMock()
@@ -357,6 +378,7 @@ class TestLoadAndBuildIntegration(unittest.TestCase):
 
             payload = load_and_build_fx_topic_payload(db, "jpy-krw")
 
+            # Redis miss 강제 → bank DB lazy 1회 + investing DB 1회
             mock_banks.assert_called_once_with(db, "jpy-krw")
             mock_ref.assert_called_once_with(db, "jpy-krw")
 
@@ -392,6 +414,159 @@ class TestLoadAndBuildIntegration(unittest.TestCase):
 
         self.assertEqual(payload["data"]["banks"], [])
         self.assertIn("reference", payload["data"])
+
+
+# ---------------------------------------------------------------------------
+# PR Z-2e Step 3c: FX topic Redis-first read 계약 (Step 3a 패턴 재사용)
+# ---------------------------------------------------------------------------
+
+class TestFxRedisFirstReadContract(unittest.TestCase):
+    """fx:* topic builder가 bank/investing helper를 Redis-first로 사용:
+
+    1. 9 banks 모두 Redis hit → bank DB 호출 X
+    2. 1 bank miss → 그 bank만 DB (lazy 1회 + per-source)
+    3. 1 bank stale (helper가 None) → 그 bank만 DB
+    4. Investing hit → investing DB 호출 X
+    5. Investing miss → investing DB fallback
+    6. 3 asset (usd-krw, jpy-krw, eur-krw) 모두 같은 helper 호출 패턴
+    """
+
+    def _native(self, source: str, asset: str, rate: float) -> dict:
+        return {"source": source, "asset": asset, "rate": rate,
+                "timestamp": "2026-05-13T15:00:00+09:00"}
+
+    def test_all_banks_redis_hit_no_db_call(self):
+        from app.crud import BANK_DISPLAY_ORDER
+
+        def fake_bank_redis(bank, asset):
+            return self._native(bank, asset, 1370.0)
+
+        bank_db_mock = MagicMock(return_value=[])
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=fake_bank_redis), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=self._native("investing", "usd-krw", 1371.0)), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db", bank_db_mock), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   return_value=None) as inv_db_mock:
+            payload = load_and_build_fx_topic_payload(MagicMock(), "usd-krw")
+
+        bank_db_mock.assert_not_called()
+        inv_db_mock.assert_not_called()
+        banks = [e["source"] for e in payload["data"]["banks"]]
+        self.assertEqual(set(banks), set(BANK_DISPLAY_ORDER))
+
+    def test_one_bank_redis_miss_lazy_db_fallback(self):
+        """1개 bank Redis miss → bank DB 1회 (lazy) — 미수신 source만 DB값 사용."""
+        def fake_bank_redis(bank, asset):
+            if bank == "shinhan":
+                return None  # miss
+            return self._native(bank, asset, 1370.0)
+
+        bank_db_mock = MagicMock(return_value=[
+            {"bank": "shinhan", "currency": "usd-krw", "rate": 1369.5, "timestamp": "..."},
+        ])
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=fake_bank_redis), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=self._native("investing", "usd-krw", 1371.0)), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db", bank_db_mock), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   return_value=None):
+            payload = load_and_build_fx_topic_payload(MagicMock(), "usd-krw")
+
+        bank_db_mock.assert_called_once()
+        banks = {e["source"]: e["rate"] for e in payload["data"]["banks"]}
+        self.assertEqual(banks["shinhan"], 1369.5)  # DB
+        self.assertEqual(banks["kb"], 1370.0)  # Redis
+
+    def test_one_bank_stale_only_that_bank_db(self):
+        """1개 bank Redis stale (helper가 None 반환) → 그 bank만 DB."""
+        def fake_bank_redis(bank, asset):
+            if bank == "woori":
+                return None  # stale
+            return self._native(bank, asset, 1370.0)
+
+        bank_db_mock = MagicMock(return_value=[
+            {"bank": "woori", "currency": "usd-krw", "rate": 1371.2, "timestamp": "..."},
+        ])
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=fake_bank_redis), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=self._native("investing", "usd-krw", 1371.0)), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db", bank_db_mock), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   return_value=None):
+            payload = load_and_build_fx_topic_payload(MagicMock(), "usd-krw")
+
+        bank_db_mock.assert_called_once()
+        banks = {e["source"]: e["rate"] for e in payload["data"]["banks"]}
+        self.assertEqual(banks["woori"], 1371.2)  # DB
+
+    def test_investing_hit_no_db_fallback(self):
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=lambda b, a: self._native(b, a, 1370.0)), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=self._native("investing", "usd-krw", 1371.5)), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db",
+                   return_value=[]), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   return_value=None) as inv_db_mock:
+            payload = load_and_build_fx_topic_payload(MagicMock(), "usd-krw")
+
+        inv_db_mock.assert_not_called()
+        self.assertEqual(payload["data"]["reference"]["rate"], 1371.5)
+
+    def test_investing_miss_triggers_db_fallback(self):
+        inv_db_mock = MagicMock(return_value={
+            "bank": "investing", "currency": "usd-krw", "rate": 1371.2,
+            "timestamp": "2026-05-13T15:00:00+09:00",
+        })
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=lambda b, a: self._native(b, a, 1370.0)), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=None), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db",
+                   return_value=[]), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   inv_db_mock):
+            payload = load_and_build_fx_topic_payload(MagicMock(), "usd-krw")
+
+        self.assertEqual(inv_db_mock.call_count, 1)
+        self.assertEqual(payload["data"]["reference"]["rate"], 1371.2)
+
+    def test_redis_first_works_for_all_three_assets(self):
+        """3 asset 각각 — helper 호출 시 asset 인자 정확 전달."""
+        bank_redis_calls: List[tuple] = []
+
+        def fake_bank_redis(bank, asset):
+            bank_redis_calls.append((bank, asset))
+            return self._native(bank, asset, 1.0)
+
+        inv_redis_calls: List[str] = []
+
+        def fake_inv_redis(asset):
+            inv_redis_calls.append(asset)
+            return self._native("investing", asset, 1.0)
+
+        for asset in ("usd-krw", "jpy-krw", "eur-krw"):
+            bank_redis_calls.clear()
+            inv_redis_calls.clear()
+            with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                       side_effect=fake_bank_redis), \
+                 patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                       side_effect=fake_inv_redis), \
+                 patch("app.fx_topic_payload.select_latest_bank_rates_from_db",
+                       return_value=[]), \
+                 patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                       return_value=None):
+                payload = load_and_build_fx_topic_payload(MagicMock(), asset)
+            # 9 banks × asset Redis 호출 + 1 investing 호출
+            self.assertEqual(len(bank_redis_calls), 9)
+            self.assertTrue(all(call[1] == asset for call in bank_redis_calls))
+            self.assertEqual(inv_redis_calls, [asset])
+            # payload entries asset 정확
+            self.assertTrue(all(e["asset"] == asset for e in payload["data"]["banks"]))
 
 
 if __name__ == "__main__":

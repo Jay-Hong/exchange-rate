@@ -48,6 +48,10 @@ from app.crud import (
     select_a_latest_investing_rate_from_db,
     select_latest_bank_rates_from_db,
 )
+from app.latest_rates_cache import (
+    get_latest_bank_rate_from_sync_job,
+    get_latest_investing_rate_from_sync_job,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -181,7 +185,13 @@ def build_fx_tab_payload(
 
 
 def load_and_build_fx_topic_payload(db: "Session", asset: str) -> Dict[str, Any]:
-    """DB에서 FX 데이터 load 후 build_fx_tab_payload 호출.
+    """DB/Redis에서 FX 데이터 load 후 build_fx_tab_payload 호출 (PR Z-2e Step 3c).
+
+    Redis-first read 정책 (Step 3a와 동일 패턴):
+    - banks: 9개 BANK_DISPLAY_ORDER 순회 — 각 bank별 sync Redis read 시도.
+      hit이면 사용, miss/stale이면 그 source만 DB fallback (per-source, lazy 1회).
+    - reference: Investing sync Redis read — hit이면 사용, miss/stale이면 DB fallback.
+    - mirror cycle 갱신 가정 (Z-2d allowlist 통과) → is_stale 적용 (helper 내부).
 
     Args:
         db: SQLAlchemy session.
@@ -195,7 +205,25 @@ def load_and_build_fx_topic_payload(db: "Session", asset: str) -> Dict[str, Any]
     """
     _validate_fx_asset(asset)
 
-    bank_rates = select_latest_bank_rates_from_db(db, asset)
-    reference = select_a_latest_investing_rate_from_db(db, asset)
+    # Banks Redis-first per-source fallback (lazy DB load)
+    bank_rates: List[Dict[str, Any]] = []
+    _db_banks_loaded: Optional[Dict[str, Dict[str, Any]]] = None
+    for bank_source in BANK_DISPLAY_ORDER:
+        redis_entry = get_latest_bank_rate_from_sync_job(bank_source, asset)
+        if redis_entry is not None:
+            bank_rates.append(redis_entry)
+            continue
+        # Redis miss/stale → DB fallback (lazy — 첫 miss 시 한 번)
+        if _db_banks_loaded is None:
+            all_banks_db = select_latest_bank_rates_from_db(db, asset)
+            _db_banks_loaded = {row["bank"]: row for row in all_banks_db}
+        db_row = _db_banks_loaded.get(bank_source)
+        if db_row is not None:
+            bank_rates.append(db_row)
+
+    # Investing reference — Redis-first 단일 fallback
+    reference = get_latest_investing_rate_from_sync_job(asset)
+    if reference is None:
+        reference = select_a_latest_investing_rate_from_db(db, asset)
 
     return build_fx_tab_payload(asset, bank_rates, reference)
