@@ -3370,7 +3370,7 @@ USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder
 
 - **단점 / 미해결**:
   - **direct write 영구 실패 시 영구 stale 위험**: mirror cycle이 복구하지 않음. 일시적 Redis 장애는 read path DB fallback이 처리하지만, write 측 지속 실패는 다음 INSERT까지 latest:source key 갱신 X
-  - 거래 뜸한 source는 mirrored_at 자연 오래됨 → 운영자가 "stale인가 정상인가" 구분 어려움. **별도 telemetry 필요** (direct write 성공률, fallback 호출 빈도) — future enhancement
+  - 거래 뜸한 source는 mirrored_at 자연 오래됨 → 운영자가 "stale인가 정상인가" 구분 어려움. **별도 telemetry 도입** (direct write 성공률, fallback 호출 빈도): B-Step Telemetry(2026-05-13)에서 `app/usdt_redis_stats.py` + `GET /admin/api/usdt-redis-stats`로 1차 계측 도입. process-bound counter(재시작 reset, `started_at` 노출). 향후 Prometheus/Redis hash 고도화는 추세 분석 필요 시점에 검토.
 
 ### Alternatives 검토 (rollback 사례)
 

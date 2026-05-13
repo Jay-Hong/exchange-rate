@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -1436,6 +1436,46 @@ async def reset_fx_topic_status():
         "success": all_ok,
         "reason": None if all_ok else "Redis 미가용 또는 circuit open / 예외 (일부 또는 전체)",
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USDT Redis-first path stats (PR Z-2e B-Step Telemetry, 2026-05-13)
+#
+# ADR-029 명시 trade-off("direct write 영구 실패 시 영구 stale 위험 — 별도
+# telemetry 필요") future enhancement를 닫는 1차 계측. process-bound counter라
+# 재시작 시 reset — started_at으로 카운터 누적 시작 시각 명시.
+# reset endpoint 미존재 (운영 실수 회피, reset_stats는 테스트 전용 모듈 함수).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/admin/api/usdt-redis-stats", dependencies=[Depends(verify_admin)])
+async def get_usdt_redis_stats():
+    """USDT Redis-first 경로(direct write + sync read + DB fallback) 계측 조회.
+
+    Returns:
+        {
+          "started_at": ISO 8601 KST,        # process 시작 시점 (counter 누적 시작)
+          "per_source": {
+            "<source>": {
+              "direct_write_success": int, "direct_write_failure": int,
+              "redis_read_hit": int, "redis_read_miss": int,
+              "redis_read_parse_fail": int, "redis_read_error": int,
+              "last_direct_write_success_at": ISO 8601 KST | None,
+              "last_redis_read_hit_at": ISO 8601 KST | None,
+            }, ...
+          },
+          "aggregate": {
+            "db_fallback_count": int,
+            "last_db_fallback_at": ISO 8601 KST | None,
+            "db_fallback_by_asset": {"usdt-krw": int, ...},
+          }
+        }
+
+    정상 운영 invariant:
+        - direct_write_success 증가, direct_write_failure ≈ 0
+        - redis_read_hit 증가, miss/parse_fail/error 낮음
+        - db_fallback_count 낮음 (Redis 모두 hit이 정상)
+    """
+    return usdt_redis_stats.get_stats()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

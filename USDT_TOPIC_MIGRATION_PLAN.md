@@ -440,12 +440,18 @@ Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB �
 - async circuit_breaker 격리 — broadcast/mirror Redis path 보호
 - 자세한 의사결정 + Alternative 검토: [ADR-029](DECISIONS.md#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback)
 
+**완료 항목**:
+
+- direct write 실패율 / Redis read hit/miss / fallback 호출 빈도 telemetry —
+  B-Step Telemetry(2026-05-13, `app/usdt_redis_stats.py` + `GET /admin/api/usdt-redis-stats`)로
+  1차 계측 도입. process-bound counter, `started_at` 노출.
+
 **잔존 작업 (future enhancement)**:
 
-- direct write 실패율 / fallback 호출 빈도 telemetry — mirror repair 없으므로
-  운영 모니터링이 영구 stale 감지 단일 수단
 - banks/reference/futures Redis-first 확장 (B-Step 3, 별도 phase) — 이쪽은
   mirror cycle 기반이라 USDT와 다른 환경
+- telemetry 고도화 (Prometheus / Redis hash 등 외부 monitoring 통합) — 추세
+  분석 필요 시점에 검토
 
 **클라이언트 영향**:
 
@@ -476,7 +482,8 @@ Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB �
 - iOS productization (release 적용, UX polish, 알림 통합)
 - Android 검증 (iOS와 같은 마이그레이션 단계)
 - FX 탭 topic 전환 (`fx:*` topic — server는 활성 상태)
-- Server B-Step 3 (banks/reference Redis-first 확장) / direct write telemetry
+- Server B-Step 3 (banks/reference Redis-first 확장) — direct write telemetry는
+  B-Step Telemetry(2026-05-13)로 도입 완료
 
 ---
 

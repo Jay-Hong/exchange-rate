@@ -782,5 +782,61 @@ class TestExchangeSourcesConstant(unittest.TestCase):
         self.assertEqual(constant_sources, registry_sources)
 
 
+# ---------------------------------------------------------------------------
+# PR Z-2e B-Step Telemetry: DB fallback counter 호출 site 검증
+# ---------------------------------------------------------------------------
+
+class TestDbFallbackStatsCounter(unittest.TestCase):
+    """load_and_build_tether_tab_payload의 DB fallback 분기에서 stats counter
+    record_db_fallback이 정확히 호출되는지 잠금.
+    """
+
+    def setUp(self):
+        from app import usdt_redis_stats
+        usdt_redis_stats.reset_stats()
+
+    def test_all_redis_hit_no_db_fallback_counter(self):
+        """5개 모두 Redis hit → db_fallback_count 증가 X."""
+        from app import usdt_redis_stats
+
+        def fake_redis(source, asset):
+            return {"source": source, "asset": asset, "rate": 1.0,
+                    "timestamp": "2026-05-12T15:00:00+09:00"}
+
+        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+                          side_effect=fake_redis), \
+             patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
+             patch.object(utp, "get_latest_source_rate", return_value=None), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        stats = usdt_redis_stats.get_stats()
+        self.assertEqual(stats["aggregate"]["db_fallback_count"], 0)
+        self.assertEqual(stats["aggregate"]["db_fallback_by_asset"], {})
+
+    def test_one_redis_miss_increments_db_fallback_counter(self):
+        """1개라도 Redis miss → db_fallback_count 1 + by_asset["usdt-krw"] 1."""
+        from app import usdt_redis_stats
+
+        def fake_redis(source, asset):
+            if source == "gopax":
+                return None
+            return {"source": source, "asset": asset, "rate": 1.0,
+                    "timestamp": "2026-05-12T15:00:00+09:00"}
+
+        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+                          side_effect=fake_redis), \
+             patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
+             patch.object(utp, "get_latest_source_rate", return_value=None), \
+             patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
+             patch.object(utp, "select_a_latest_investing_rate_from_db", return_value=None):
+            utp.load_and_build_tether_tab_payload(MagicMock(), include_krx=False)
+
+        stats = usdt_redis_stats.get_stats()
+        self.assertEqual(stats["aggregate"]["db_fallback_count"], 1)
+        self.assertEqual(stats["aggregate"]["db_fallback_by_asset"]["usdt-krw"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

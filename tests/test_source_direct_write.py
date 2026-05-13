@@ -18,7 +18,8 @@ async client mismatch + circuit_breaker 오염) 정면 해결.
 - hot path 소비자 변화 0
 - 변경 INSERT 시 best-effort sync Redis SET 추가
 - **async circuit_breaker 미사용** — broadcast/mirror Redis path 격리 보장
-- 실패 시 mirror cycle(3초)이 safety repair
+- 실패 시 read path DB fallback이 안전망 (USDT는 Z-2d allowlist 미통과로
+  mirror cycle skip — ADR-029)
 """
 from __future__ import annotations
 
@@ -275,6 +276,144 @@ class TestMirrorChangedSourceToRedis(unittest.TestCase):
             )
         self.assertFalse(result)
         mock_log.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# PR Z-2e B-Step Telemetry: 호출 site counter 증가 검증
+# ---------------------------------------------------------------------------
+
+class TestDirectWriteStatsCounters(unittest.TestCase):
+    """set_latest_source_rate_from_sync_job 호출 site에서 stats counter가 정확히
+    증가하는지 잠금. 모듈 단위 test(test_usdt_redis_stats.py)는 record_* 자체만
+    검증 — 호출 site에서 record_*가 정말 호출되는지는 별도 검증 필요.
+    """
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+        from app import usdt_redis_stats
+        usdt_redis_stats.reset_stats()
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+
+    def test_success_increments_direct_write_success(self):
+        from app import usdt_redis_stats
+        fake_client = MagicMock()
+        latest_rates_cache._sync_client = fake_client
+        set_latest_source_rate_from_sync_job(
+            "upbit", "usdt-krw", 1485.5, "2026-05-12T15:00:00+09:00"
+        )
+        stats = usdt_redis_stats.get_stats()
+        upbit = stats["per_source"]["upbit"]
+        self.assertEqual(upbit["direct_write_success"], 1)
+        self.assertEqual(upbit["direct_write_failure"], 0)
+
+    def test_client_init_failure_increments_direct_write_failure(self):
+        from app import usdt_redis_stats
+        with patch.object(latest_rates_cache.redis_sync, "from_url",
+                          side_effect=RuntimeError("init fail")), \
+             patch.object(latest_rates_cache.logger, "warning"):
+            set_latest_source_rate_from_sync_job(
+                "upbit", "usdt-krw", 1485.0, "2026-05-12T15:00:00+09:00"
+            )
+        stats = usdt_redis_stats.get_stats()
+        upbit = stats["per_source"]["upbit"]
+        self.assertEqual(upbit["direct_write_failure"], 1)
+        self.assertEqual(upbit["direct_write_success"], 0)
+
+    def test_set_exception_increments_direct_write_failure(self):
+        from app import usdt_redis_stats
+        fake_client = MagicMock()
+        fake_client.set.side_effect = ConnectionError("fault")
+        latest_rates_cache._sync_client = fake_client
+        with patch.object(latest_rates_cache.logger, "warning"):
+            set_latest_source_rate_from_sync_job(
+                "bithumb", "usdt-krw", 1486.0, "2026-05-12T15:00:00+09:00"
+            )
+        stats = usdt_redis_stats.get_stats()
+        bithumb = stats["per_source"]["bithumb"]
+        self.assertEqual(bithumb["direct_write_failure"], 1)
+
+
+class TestRedisReadStatsCounters(unittest.TestCase):
+    """get_latest_source_rate_from_sync_job 호출 site counter 검증."""
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+        from app import usdt_redis_stats
+        usdt_redis_stats.reset_stats()
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+
+    def test_hit_increments_redis_read_hit(self):
+        from app import usdt_redis_stats
+        from app.latest_rates_cache import get_latest_source_rate_from_sync_job
+        import json
+        from datetime import datetime, timezone, timedelta
+
+        kst = timezone(timedelta(hours=9))
+        fake_value = json.dumps({
+            "rate": 1485.0,
+            "timestamp": "2026-05-12T15:00:00+09:00",
+            "mirrored_at": datetime.now(kst).isoformat(),
+        })
+        fake_client = MagicMock()
+        fake_client.get.return_value = fake_value.encode("utf-8")
+        latest_rates_cache._sync_client = fake_client
+
+        result = get_latest_source_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNotNone(result)
+        stats = usdt_redis_stats.get_stats()
+        self.assertEqual(stats["per_source"]["upbit"]["redis_read_hit"], 1)
+        self.assertEqual(stats["per_source"]["upbit"]["redis_read_miss"], 0)
+
+    def test_miss_increments_redis_read_miss(self):
+        from app import usdt_redis_stats
+        from app.latest_rates_cache import get_latest_source_rate_from_sync_job
+
+        fake_client = MagicMock()
+        fake_client.get.return_value = None
+        latest_rates_cache._sync_client = fake_client
+
+        result = get_latest_source_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNone(result)
+        stats = usdt_redis_stats.get_stats()
+        self.assertEqual(stats["per_source"]["upbit"]["redis_read_miss"], 1)
+
+    def test_parse_fail_increments_redis_read_parse_fail(self):
+        from app import usdt_redis_stats
+        from app.latest_rates_cache import get_latest_source_rate_from_sync_job
+
+        # naive datetime → deserialize_value None 반환
+        import json
+        bad_value = json.dumps({
+            "rate": 1485.0,
+            "timestamp": "...",
+            "mirrored_at": "2026-05-12T15:00:00",  # naive (no tz)
+        })
+        fake_client = MagicMock()
+        fake_client.get.return_value = bad_value.encode("utf-8")
+        latest_rates_cache._sync_client = fake_client
+
+        result = get_latest_source_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNone(result)
+        stats = usdt_redis_stats.get_stats()
+        self.assertEqual(stats["per_source"]["upbit"]["redis_read_parse_fail"], 1)
+
+    def test_get_exception_increments_redis_read_error(self):
+        from app import usdt_redis_stats
+        from app.latest_rates_cache import get_latest_source_rate_from_sync_job
+
+        fake_client = MagicMock()
+        fake_client.get.side_effect = ConnectionError("fault")
+        latest_rates_cache._sync_client = fake_client
+
+        with patch.object(latest_rates_cache.logger, "warning"):
+            result = get_latest_source_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNone(result)
+        stats = usdt_redis_stats.get_stats()
+        self.assertEqual(stats["per_source"]["upbit"]["redis_read_error"], 1)
 
 
 if __name__ == "__main__":

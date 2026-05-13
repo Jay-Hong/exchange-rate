@@ -285,6 +285,9 @@ def load_and_build_tether_tab_payload(
         usdt_rates: List[Dict[str, Any]] = list(redis_usdt_results)  # type: ignore[arg-type]
     else:
         # 1개라도 miss → 전체 DB fallback (topic 전용 fetcher, legacy_policy 우회)
+        # PR Z-2e B-Step Telemetry: fallback 호출 카운트 (ADR-029 trade-off 모니터링)
+        from app import usdt_redis_stats
+        usdt_redis_stats.record_db_fallback("usdt-krw")
         usdt_rates = get_latest_source_rates_for_topic(
             db, asset="usdt-krw", sources=list(TETHER_TAB_EXCHANGE_SOURCES),
         )

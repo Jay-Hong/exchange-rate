@@ -252,16 +252,22 @@ def set_latest_source_rate_from_sync_job(
         (`get_latest_source_rate_from_sync_job`)에서 None 감지 후 호출자가
         DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리한다.
     """
+    # 모듈 내부 import — 순환 참조 회피 (usdt_redis_stats가 latest_rates_cache 의존 안 함)
+    from app import usdt_redis_stats
+
     client = _get_sync_client()
     if client is None:
+        usdt_redis_stats.record_direct_write_failure(source)
         return False
     key = latest_key_source(source, asset)
     mirrored_at = datetime.now(_KST)
     value = serialize_value(rate, timestamp, mirrored_at)
     try:
         client.set(key, value)
+        usdt_redis_stats.record_direct_write_success(source)
         return True
     except Exception:
+        usdt_redis_stats.record_direct_write_failure(source)
         logger.warning(
             "USDT sync Redis SET 실패 (best-effort, read path DB fallback)",
             exc_info=True,
@@ -296,13 +302,17 @@ def get_latest_source_rate_from_sync_job(
         helper(`crud.get_latest_source_rates_for_topic`)와 동일.
         miss(key 부재) / parse fail / 예외 시 None — 호출자가 DB fallback.
     """
+    from app import usdt_redis_stats
+
     client = _get_sync_client()
     if client is None:
+        usdt_redis_stats.record_redis_read_error(source)
         return None
     key = latest_key_source(source, asset)
     try:
         raw = client.get(key)
     except Exception:
+        usdt_redis_stats.record_redis_read_error(source)
         logger.warning(
             "sync Redis GET 실패 (best-effort, DB fallback에 의존)",
             exc_info=True,
@@ -310,11 +320,14 @@ def get_latest_source_rate_from_sync_job(
         )
         return None
     if raw is None:
+        usdt_redis_stats.record_redis_read_miss(source)
         return None
     parsed = deserialize_value(raw)
     if parsed is None:
         # parse fail (mirrored_at naive 등) — None 반환, 호출자 DB fallback
+        usdt_redis_stats.record_redis_read_parse_fail(source)
         return None
+    usdt_redis_stats.record_redis_read_hit(source)
     # topic-native shape으로 반환 — helper 인자 source/asset 그대로 부착
     return {
         "source": source,
