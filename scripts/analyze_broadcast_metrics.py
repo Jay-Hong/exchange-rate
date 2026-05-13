@@ -83,7 +83,10 @@ DXY_FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_ope
 
 # PR3 — fallback reason 분류 (broadcast_rates_once의 timings extra와 일치).
 # 과거 PR1/PR2 로그에는 fallback_reason 필드가 없어 Counter가 자연스럽게 0건 처리.
-FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_open"]
+# Z-2f(ADR-030) 후 추가: per_key_stale (개별 data key mirrored_at stale).
+# redis_stale은 Z-2f 후 rates path에서 deprecated이지만, 과거 로그 호환 및
+# rollback 대비로 분류 유지.
+FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_open", "per_key_stale"]
 
 
 def parse_iso(s: str) -> datetime:
