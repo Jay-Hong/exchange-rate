@@ -24,10 +24,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app import config, scheduler
 from app.crawlers.usdt_ws import upbit as upbit_mod
 from app.crawlers.usdt_ws.upbit import (
+    PING_INTERVAL_SEC,
+    PING_TIMEOUT_SEC,
+    RECONNECT_BACKOFF_SEQ,
+    RECONNECT_BACKOFF_TAIL,
+    STALE_AFTER_SEC,
     UPBIT_SUBSCRIBE_TICKET,
     UPBIT_TARGET_CODE,
     UPBIT_WS_URL,
     UpbitWsClient,
+    UsdtLivenessMonitor,
 )
 
 
@@ -282,6 +288,43 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1], {"type": "ticker", "codes": [UPBIT_TARGET_CODE]})
         self.assertEqual(sent[2], {"format": "DEFAULT"})
 
+    async def test_invalid_frame_does_not_increment_tick_count(self):
+        """Codex Finding 2 회귀 가드: invalid/non-ticker frame은 observe_tick X.
+
+        Liveness activity와 valid ticker metric 분리. tick_count는 valid
+        ticker frame만 집계 (gap bucket, max_frame_gap_sec 동일).
+        """
+        client = UpbitWsClient()
+
+        non_ticker = json.dumps({
+            "type": "status",  # non-ticker → ignored
+            "code": "KRW-USDT",
+            "trade_price": 1486,
+            "trade_timestamp": 1777370239843,
+        })
+        valid_ticker = json.dumps(_make_valid_ticker_dict())
+        recv_calls = [0]
+
+        async def recv_seq():
+            recv_calls[0] += 1
+            if recv_calls[0] == 1:
+                return non_ticker
+            if recv_calls[0] == 2:
+                return valid_ticker
+            client._stop_event.set()
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect):
+            await client._run_one_session()
+
+        # non-ticker (1번째) + valid (2번째) 둘 다 recv 했지만
+        # tick_count는 valid 1개만
+        self.assertEqual(client._liveness.tick_count, 1)
+        # gap bucket도 valid 첫 tick뿐이라 0 (gap 측정은 두 번째 tick부터)
+        for key, count in client._liveness.gap_buckets.items():
+            self.assertEqual(count, 0, f"non-ticker should not populate gap bucket {key}")
+
     async def test_session_processes_messages_and_stops(self):
         """N개 valid message recv → parse → stop 시 정상 종료."""
         client = UpbitWsClient()
@@ -428,6 +471,356 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
         ]
         for pattern in forbidden_calls:
             self.assertNotIn(pattern, source, f"Forbidden PR4-PR7 invocation: {pattern}")
+
+
+# ---------------------------------------------------------------------------
+# PR3 — UsdtLivenessMonitor
+# ---------------------------------------------------------------------------
+
+class TestUsdtLivenessMonitor(unittest.TestCase):
+
+    def setUp(self):
+        self.monitor = UsdtLivenessMonitor()
+
+    def test_initial_state(self):
+        self.assertEqual(self.monitor.frame_count_total, 0)
+        self.assertEqual(self.monitor.tick_count, 0)
+        self.assertEqual(self.monitor.heartbeat_count, 0)
+        self.assertIsNone(self.monitor.last_tick_at)
+        self.assertIsNone(self.monitor.last_heartbeat_at)
+        self.assertIsNone(self.monitor.last_activity_at)
+        self.assertEqual(self.monitor.max_frame_gap_sec, 0.0)
+
+    def test_observe_tick_updates_counters_and_gap(self):
+        self.monitor.observe_tick(100.0)
+        self.assertEqual(self.monitor.tick_count, 1)
+        self.assertEqual(self.monitor.frame_count_total, 1)
+        self.assertEqual(self.monitor.last_tick_at, 100.0)
+        # 첫 tick은 gap 없음
+        self.assertEqual(self.monitor.max_frame_gap_sec, 0.0)
+
+        self.monitor.observe_tick(103.5)
+        self.assertEqual(self.monitor.tick_count, 2)
+        self.assertEqual(self.monitor.last_tick_at, 103.5)
+        # gap = 3.5s → "<=5s" bucket
+        self.assertEqual(self.monitor.max_frame_gap_sec, 3.5)
+        self.assertEqual(self.monitor.gap_buckets["<=5s"], 1)
+
+    def test_observe_heartbeat_updates_separately(self):
+        self.monitor.observe_heartbeat(200.0)
+        self.assertEqual(self.monitor.heartbeat_count, 1)
+        self.assertEqual(self.monitor.frame_count_total, 1)
+        self.assertEqual(self.monitor.last_heartbeat_at, 200.0)
+        # heartbeat은 tick gap에 영향 없음
+        self.assertEqual(self.monitor.tick_count, 0)
+        self.assertIsNone(self.monitor.last_tick_at)
+
+    def test_bucket_for_boundaries(self):
+        cases = [
+            (0.5, "<=1s"), (1.0, "<=1s"),
+            (1.5, "<=2s"), (2.0, "<=2s"),
+            (3.0, "<=5s"), (5.0, "<=5s"),
+            (7.0, "<=10s"), (10.0, "<=10s"),
+            (20.0, "<=30s"), (30.0, "<=30s"),
+            (45.0, "<=60s"), (60.0, "<=60s"),
+            (61.0, ">60s"), (300.0, ">60s"),
+        ]
+        for gap, expected in cases:
+            self.assertEqual(
+                UsdtLivenessMonitor._bucket_for(gap), expected,
+                f"gap={gap} expected={expected}",
+            )
+
+    def test_reset_active_session_clears_active_state_keeps_lifetime(self):
+        self.monitor.observe_tick(100.0)
+        self.monitor.observe_tick(105.0)
+        self.monitor.observe_heartbeat(110.0)
+        # lifetime counters
+        self.assertEqual(self.monitor.tick_count, 2)
+        self.assertEqual(self.monitor.heartbeat_count, 1)
+        self.assertEqual(self.monitor.frame_count_total, 3)
+
+        self.monitor.reset_active_session()
+
+        # active session reset
+        self.assertIsNone(self.monitor.last_tick_at)
+        self.assertIsNone(self.monitor.last_heartbeat_at)
+        self.assertEqual(self.monitor.max_frame_gap_sec, 0.0)
+        self.assertEqual(self.monitor.gap_buckets["<=5s"], 0)
+        # lifetime 유지
+        self.assertEqual(self.monitor.tick_count, 2)
+        self.assertEqual(self.monitor.heartbeat_count, 1)
+        self.assertEqual(self.monitor.frame_count_total, 3)
+
+    def test_last_activity_at_max_of_tick_and_heartbeat(self):
+        # 둘 다 None
+        self.assertIsNone(self.monitor.last_activity_at)
+
+        # tick만
+        self.monitor.observe_tick(100.0)
+        self.assertEqual(self.monitor.last_activity_at, 100.0)
+
+        # heartbeat만 (tick보다 늦음)
+        self.monitor.observe_heartbeat(200.0)
+        self.assertEqual(self.monitor.last_activity_at, 200.0)
+
+        # tick이 다시 늦게
+        self.monitor.observe_tick(300.0)
+        self.assertEqual(self.monitor.last_activity_at, 300.0)
+
+        # heartbeat이 더 늦지 않음 (max 유지)
+        self.monitor.observe_heartbeat(250.0)
+        self.assertEqual(self.monitor.last_activity_at, 300.0)
+
+
+# ---------------------------------------------------------------------------
+# PR3 — Stale detection (§5 핵심 compliance)
+# ---------------------------------------------------------------------------
+
+class TestUpbitStaleDetection(unittest.TestCase):
+    """§5: stale 기준은 ticker silence가 아니라 frame/heartbeat silence."""
+
+    def setUp(self):
+        self.monitor = UsdtLivenessMonitor()
+
+    def test_is_stale_false_when_no_activity_yet(self):
+        # 초기 상태 — last_activity_at None → stale 아님 (grace 효과)
+        self.assertFalse(self.monitor.is_stale(now=100.0, threshold=STALE_AFTER_SEC))
+
+    def test_no_stale_when_heartbeat_fresh_but_ticker_silent(self):
+        """§5 핵심: ticker 5분 silent + heartbeat 10초 전 → NOT stale.
+
+        저유동성 정상 구간을 stale로 오인하면 PR7 REST fallback false positive.
+        본 케이스가 회귀 차단의 핵심.
+        """
+        self.monitor.last_tick_at = 1000.0  # tick 5분 전
+        self.monitor.last_heartbeat_at = 1290.0  # heartbeat 10초 전
+        # last_activity_at = max(1000, 1290) = 1290
+        # is_stale(1300, 30) → 1300 - 1290 = 10 ≤ 30 → False
+        self.assertFalse(self.monitor.is_stale(now=1300.0, threshold=STALE_AFTER_SEC))
+
+    def test_stale_when_both_tick_and_heartbeat_silent(self):
+        """둘 다 STALE_AFTER_SEC 초과 silence → stale."""
+        self.monitor.last_tick_at = 1000.0
+        self.monitor.last_heartbeat_at = 1000.0
+        # last_activity_at = 1000, now=1100 → 100s silence > 30s → stale
+        self.assertTrue(self.monitor.is_stale(now=1100.0, threshold=STALE_AFTER_SEC))
+
+    def test_stale_when_only_tick_present_and_silent(self):
+        """heartbeat 안 와도 tick만으로 stale 판정 가능."""
+        self.monitor.last_tick_at = 1000.0
+        self.assertTrue(self.monitor.is_stale(now=1100.0, threshold=STALE_AFTER_SEC))
+
+    def test_stale_when_only_heartbeat_present_and_silent(self):
+        """tick 안 와도 heartbeat만으로 stale 판정 가능."""
+        self.monitor.last_heartbeat_at = 1000.0
+        self.assertTrue(self.monitor.is_stale(now=1100.0, threshold=STALE_AFTER_SEC))
+
+    def test_not_stale_exactly_at_threshold(self):
+        """경계값 — silence == threshold는 stale 아님 (strict >)."""
+        self.monitor.last_tick_at = 1000.0
+        self.monitor.last_heartbeat_at = 1000.0
+        self.assertFalse(self.monitor.is_stale(now=1030.0, threshold=STALE_AFTER_SEC))
+
+
+# ---------------------------------------------------------------------------
+# PR3 — UpbitWsClient reconnect + status state machine
+# ---------------------------------------------------------------------------
+
+class TestUpbitReconnect(unittest.IsolatedAsyncioTestCase):
+
+    def test_compute_backoff_follows_sequence(self):
+        client = UpbitWsClient()
+        self.assertEqual(client._compute_backoff(1), RECONNECT_BACKOFF_SEQ[0])
+        self.assertEqual(client._compute_backoff(2), RECONNECT_BACKOFF_SEQ[1])
+        self.assertEqual(client._compute_backoff(6), RECONNECT_BACKOFF_SEQ[5])
+        # 시퀀스 초과 → tail
+        self.assertEqual(client._compute_backoff(7), RECONNECT_BACKOFF_TAIL)
+        self.assertEqual(client._compute_backoff(100), RECONNECT_BACKOFF_TAIL)
+
+    def test_set_status_transitions_and_counter(self):
+        client = UpbitWsClient()
+        self.assertEqual(client._status, "normal")
+
+        client._set_status("reconnecting")
+        self.assertEqual(client._status, "reconnecting")
+        self.assertEqual(client._status_transition_count["reconnecting"], 1)
+
+        client._set_status("normal")
+        self.assertEqual(client._status, "normal")
+        self.assertEqual(client._status_transition_count["normal"], 1)
+
+        client._set_status("stale")
+        self.assertEqual(client._status_transition_count["stale"], 1)
+
+        # 같은 status 재호출은 counter 증가 X
+        client._set_status("stale")
+        self.assertEqual(client._status_transition_count["stale"], 1)
+
+    async def test_start_reconnects_on_connection_closed(self):
+        """unexpected disconnect → backoff 후 재연결 → 두 번째 session 성공."""
+        from websockets.exceptions import ConnectionClosedError
+
+        client = UpbitWsClient()
+        session_call_count = [0]
+
+        async def fake_run_session():
+            session_call_count[0] += 1
+            if session_call_count[0] == 1:
+                # 첫 세션 — connect 실패 시뮬레이션
+                raise ConnectionClosedError(None, None)
+            # 두 번째 세션 — stop 신호 받고 정상 종료
+            client._stop_event.set()
+            return
+
+        with patch.object(client, "_run_one_session", side_effect=fake_run_session), \
+             patch.object(client, "_compute_backoff", return_value=0.01):
+            await client.start()
+
+        self.assertEqual(session_call_count[0], 2)
+        self.assertEqual(client._reconnect_attempt_count, 1)
+
+    async def test_start_stop_during_backoff_exits_cleanly(self):
+        """backoff sleep 중 stop_event 도착 → 즉시 루프 종료."""
+        from websockets.exceptions import ConnectionClosedError
+
+        client = UpbitWsClient()
+
+        async def fake_run_session():
+            raise ConnectionClosedError(None, None)
+
+        async def trigger_stop():
+            await asyncio.sleep(0.05)
+            client._stop_event.set()
+
+        # backoff 길게 (1s) 잡고 0.05s 후 stop → 즉시 종료해야
+        with patch.object(client, "_run_one_session", side_effect=fake_run_session), \
+             patch.object(client, "_compute_backoff", return_value=1.0):
+            stop_task = asyncio.create_task(trigger_stop())
+            try:
+                await asyncio.wait_for(client.start(), timeout=0.5)
+            except asyncio.TimeoutError:
+                self.fail("start() didn't exit when stop_event set during backoff")
+            await stop_task
+
+    async def test_status_reconnecting_before_backoff_starts(self):
+        """Codex Finding 1 회귀 가드: backoff sleep 진입 전 status=reconnecting.
+
+        이전 버그: except에서 attempt++/backoff 계산만 하고 status는 다음
+        iteration 진입 시 갱신 → backoff 동안 status="normal"로 남음.
+        Fix: except 진입 즉시 _set_status("reconnecting").
+        """
+        from websockets.exceptions import ConnectionClosedError
+
+        client = UpbitWsClient()
+        status_at_backoff = []
+        session_calls = [0]
+
+        async def fake_run_session():
+            session_calls[0] += 1
+            if session_calls[0] == 1:
+                raise ConnectionClosedError(None, None)
+            client._stop_event.set()
+
+        def spy_backoff(attempt):
+            # _compute_backoff 호출 시점 = except 블록 안 = status 전이 후
+            status_at_backoff.append(client._status)
+            return 0.01
+
+        with patch.object(client, "_run_one_session", side_effect=fake_run_session), \
+             patch.object(client, "_compute_backoff", side_effect=spy_backoff):
+            await client.start()
+
+        self.assertEqual(len(status_at_backoff), 1)
+        self.assertEqual(
+            status_at_backoff[0], "reconnecting",
+            "status should be 'reconnecting' when backoff is computed (before sleep)",
+        )
+
+    async def test_set_status_has_no_side_effects(self):
+        """PR3 guardrail (Codex): _set_status("stale")는 counter + log만.
+
+        REST probe / Redis / DB / alert call X. side effect 가능 메서드들이
+        호출되지 않는지 명시적 확인.
+        """
+        client = UpbitWsClient()
+        # 모든 client 메서드에 spy 부착 (있을 법한 side effect 메서드 탐색)
+        forbidden_attrs = [
+            "_invoke_rest_fallback", "_evaluate_rest_fallback",  # KRX 명명 — USDT엔 없어야
+            "_write_redis", "_write_db",
+            "_send_alert", "_evaluate_alert",
+        ]
+        for attr in forbidden_attrs:
+            self.assertFalse(
+                hasattr(client, attr),
+                f"PR3 client에는 {attr} 메서드가 없어야 함 (PR4-PR7 영역)",
+            )
+
+        # status 전이만 일어남
+        client._set_status("stale")
+        self.assertEqual(client._status, "stale")
+        self.assertEqual(client._status_transition_count["stale"], 1)
+
+
+# ---------------------------------------------------------------------------
+# PR3 — Heartbeat (explicit ping/pong observation)
+# ---------------------------------------------------------------------------
+
+class TestUpbitHeartbeat(unittest.IsolatedAsyncioTestCase):
+
+    async def test_ping_loop_observes_heartbeat_on_pong_success(self):
+        """ping → pong 도착 → observe_heartbeat 호출 (§5 준수)."""
+        client = UpbitWsClient()
+
+        pong_future: asyncio.Future = asyncio.Future()
+        pong_future.set_result(None)
+
+        mock_ws = MagicMock()
+        mock_ws.ping = AsyncMock(return_value=pong_future)
+        mock_ws.close = AsyncMock()
+
+        # PING_INTERVAL_SEC를 매우 짧게 patch (test 빠르게)
+        with patch("app.crawlers.usdt_ws.upbit.PING_INTERVAL_SEC", 0.01):
+            ping_task = asyncio.create_task(client._ping_loop(mock_ws))
+            await asyncio.sleep(0.05)  # 몇 번 ping 발생 보장
+            client._stop_event.set()
+            await ping_task
+
+        self.assertGreaterEqual(mock_ws.ping.call_count, 1)
+        self.assertGreaterEqual(client._liveness.heartbeat_count, 1)
+        self.assertIsNotNone(client._liveness.last_heartbeat_at)
+
+    async def test_ping_loop_closes_ws_on_pong_timeout(self):
+        """pong 못 받음 → ws.close() 호출 (reconnect 트리거)."""
+        client = UpbitWsClient()
+
+        # pong이 영원히 오지 않음 → wait_for timeout
+        unresolved_pong: asyncio.Future = asyncio.Future()
+        mock_ws = MagicMock()
+        mock_ws.ping = AsyncMock(return_value=unresolved_pong)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.upbit.PING_INTERVAL_SEC", 0.01), \
+             patch("app.crawlers.usdt_ws.upbit.PING_TIMEOUT_SEC", 0.02):
+            await client._ping_loop(mock_ws)
+
+        mock_ws.close.assert_awaited_once()
+        # heartbeat 관측 X (pong 실패)
+        self.assertEqual(client._liveness.heartbeat_count, 0)
+
+    async def test_ping_loop_closes_ws_on_connection_closed(self):
+        """ping 자체가 ConnectionClosed raise → ws.close() 호출."""
+        from websockets.exceptions import ConnectionClosedError
+
+        client = UpbitWsClient()
+        mock_ws = MagicMock()
+        mock_ws.ping = AsyncMock(side_effect=ConnectionClosedError(None, None))
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.upbit.PING_INTERVAL_SEC", 0.01):
+            await client._ping_loop(mock_ws)
+
+        mock_ws.close.assert_awaited_once()
 
 
 if __name__ == "__main__":
