@@ -413,7 +413,130 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - **PR5 (DB writer) 특이**: rollback 시 `source_rates` schema/data 보존 (write만 멈춤). 별도 마이그레이션 불필요.
 - **PR6 (AlertObservation) 특이**: rollback 시 기존 `process_source_rate_alerts` REST polling이 alert 처리 baseline 유지.
 
-## 13. 참조
+## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
+
+PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
+(2026-05-14, 사용자/Codex/Claude 합의 누적: 30k 알림 시나리오, 비교 알림 폭주,
+multi-process 확장, history retention)와 합의된 phase plan을 영구 기록 — PR7
+이후 같은 설계 재논의 비용 차단.
+
+### 13.1 핵심 원칙 (모든 phase 공통)
+
+- **DB는 source of truth** (settings / triggered state / log / history). 가격값
+  조회용 X.
+- **Redis는 cache/index/latest** (가격 latest / settings cache / 발송 lock /
+  threshold index). 원본 X.
+- **알림은 이벤트 보존** (Redis writer "latest 보존"과 다름). observation drop
+  금지, 짧은 threshold crossing 누락 차단.
+- **격리 원칙**: cache/DB/FCM 실패는 WS session 영향 X.
+
+### 13.2 Phase 1 (현재 — PR6 + Follow-up 1 완료)
+
+- **In-process AlertSettingsCache** (TTL=10s, `(source, asset)` bucket)
+- **CRUD invalidation** (POST/PUT/DELETE endpoint hook, [main.py](app/main.py))
+- **In-flight setting guard** (in-process atomic claim)
+- **Per-key loading guard** (TTL 만료 thundering herd 차단)
+- **Refetch source/asset/condition/threshold 재확인** (cache stale 최종 방어)
+- **DB session 3-step 분리** (refetch → FCM no-session → mark/log)
+- **Cache singleton, evaluator runtime per-instance** ([alert_evaluator.py](app/notifications/alert_evaluator.py))
+
+**적용 범위**: Upbit USDT only. 처리 규모: ~수십~수백 settings, single process.
+
+### 13.3 Phase 2 — multi-process 대비 Redis pub/sub invalidation
+
+**Trigger**: process 다중화 (worker 분리 또는 horizontal scaling).
+
+**문제**: in-process cache singleton은 process 별 독립 → CRUD invalidation이 다른
+process의 cache에 미적용 → 사용자가 알림 끄거나 변경한 후에도 다른 process는
+옛 cache로 평가.
+
+**해결**:
+- CRUD endpoint이 Redis pub/sub channel에 `(source, asset)` invalidation 메시지
+  발행
+- 각 process가 채널 구독 → 메시지 수신 시 local cache invalidate
+- pattern: `alert_settings_cache:invalidate:<source>:<asset>`
+
+**Non-scope until trigger**: Phase 1 (single-process) 동안은 도입 X.
+
+### 13.4 Phase 3 — Redis ZSET threshold index (대량 settings)
+
+**Trigger**: 사용자 ↑ + per-user alert ↑ 시점 (예: 500 user × 60 alert =
+30,000 settings).
+
+**문제**: tick마다 `(source, asset)` bucket을 in-memory iterate (현재 Phase 1).
+30k 중 ~2k이 같은 (source, asset) bucket이면 매 tick 2k 비교. 비교 자체는
+빠르지만 누적 부담.
+
+**해결**:
+- Redis Sorted Set으로 threshold index 구성:
+  ```text
+  ZSET alerts:price:upbit:usdt-krw:above  (score=threshold, value=setting_id)
+  ZSET alerts:price:upbit:usdt-krw:below  (score=threshold, value=setting_id)
+  ```
+- tick 도착 시 `ZRANGEBYSCORE` 로 threshold 조건 매칭만 fetch:
+  - above: `ZRANGEBYSCORE alerts:...:above -inf <current_price>`
+  - below: `ZRANGEBYSCORE alerts:...:below <current_price> +inf`
+- O(log N + M), M = 매칭 수 (30k → 매칭 ~10-100개)
+
+**Non-scope until trigger**: Phase 1/2 동안 in-memory bucket iterate로 충분.
+
+### 13.5 Phase 4 — Alert worker process 분리
+
+**Trigger**: WS process가 alert 평가 부담으로 throughput 영향 받는 시점.
+
+**해결**:
+- AlertObservation을 queue/Redis stream으로 alert worker에 전달
+- WS process는 enqueue만 (fire-and-forget)
+- Alert worker process가 dequeue → 평가 → FCM
+- 가로 확장 가능 (worker N대)
+
+**Non-scope until trigger**: 현재 fire-and-forget background task로 충분.
+
+### 13.6 알림 기능 확장 roadmap (Phase 1과 별도 축)
+
+| 시점 | 작업 |
+|---|---|
+| Phase B.1 PR6 (완료) | Upbit-only B1 once 정책 |
+| Phase C | KRX 알림 새 구조 적용 (USDT 검증 후) |
+| Phase D | 은행/Investing/달러/엔/유로 알림 migration (§13.7 shadow eval 참조) |
+| Phase E | 비교 알림 (`comparison_alerts`) — Redis latest snapshot 기반 multi-source |
+| 별 ADR | B2 `repeat_interval_sec` 실제 구현 (schema + API + iOS/Android UI) |
+| 별 ADR | B3 direction crossing |
+
+### 13.7 기존 알림 migration 패턴 — shadow evaluation
+
+**원칙**: 기존 노출 기능 (달러/엔/유로 가격도달 알림)은 새 구조로 즉시 교체 X.
+사용자 영향 큼.
+
+**Migration step**:
+1. 기존 알림 로직은 그대로 실제 발송 (production 동작 보존)
+2. 새 alert_evaluator 구조로 같은 입력 평가하되 **발송 X, 결과만 log**
+3. 며칠~몇 주 두 결과 비교
+4. 일치 확인 후 새 구조로 전환 (feature flag 단계적 ramp)
+
+### 13.8 History retention cleanup (별 commit)
+
+**Trigger**: `source_notification_logs` (그리고 미래 `comparison_notification_logs`)
+row 누적.
+
+**정책**:
+- 90일 또는 180일 보관 (사용자가 단말에서 조회)
+- 그 이후 cleanup job (`scheduler.py`의 `cleanup_old_*` 패턴)
+- 사용자 직접 삭제 API는 future enhancement
+
+### 13.9 사용자 우려 기록 (2026-05-14 합의 근거)
+
+| 우려 | Phase 1 처리 | 확장 시점 |
+|---|---|---|
+| tick마다 DB query 부담 | TTL=10s in-process cache | Phase 2/3 |
+| 30k 알림 처리 가능? | Redis 저장 자체는 무문제, access 패턴이 중요 | Phase 3 ZSET index |
+| 비교 알림 폭주 | Phase 1 non-scope | Phase E + Phase 3 (source/asset 인덱스 → 영향 rule만 평가) |
+| 사용자 알림 끄기 즉시 반영 | Follow-up 1 CRUD invalidation (single process) | Phase 2 (multi-process Redis pub/sub) |
+| 반복 알림 확장성 | `delivery_allowed` 분리 (interface 확장 자리 마련) | 별 ADR B2 |
+| 기존 알림 영향 | PR6에서 건드리지 X (additive) | Phase D shadow eval |
+| 히스토리 사용자 조회 | `source_notification_logs` 활용 | §13.8 retention cleanup |
+
+## 14. 참조
 
 - [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md): 거래소별 WS spec (2026-04-28 검증)
 - [USDT_TOPIC_MIGRATION_PLAN.md](USDT_TOPIC_MIGRATION_PLAN.md): Z-2 series, topic protocol 마이그레이션 history
