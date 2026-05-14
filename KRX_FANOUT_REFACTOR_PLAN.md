@@ -14,6 +14,14 @@
 - 목표 fanout 구조 정의 (`KrxLivenessMonitor` / `KrxRestFallbackController` / `KrxRedisLatestWriter` / `KrxDbWindowWriter` / `KrxAlertEvaluator`)
 - behavior-change-0 extract 후보 식별 (handler/책임 분리만, 호출 순서/조건/timing 보존)
 
+**진행 현황 (이 doc 작성 후)**:
+
+- ✅ C: KrxRedisLatestWriter 객체 분리 (commit `f5ba9bc`, 2026-05-14)
+- ✅ A-pre: liveness invariants 회귀 가드 (commit `6faa2dd`, 2026-05-14 — 5 tests)
+- ✅ A: KrxLivenessMonitor 추출 (이번 PR — `_set_status`/RestFallbackController는 client 잔류)
+- ⏸ B: KrxRestFallbackController 추출 (A 안정 후, 5/18 전 가능)
+- ⏸ D: KrxAlertEvaluator stub (Stage C 영역과 함께 검토)
+
 **5/18 후 결정 영역 (본 doc 범위 외)**:
 
 - REST fallback threshold 확정 ([ADR-027](DECISIONS.md))
@@ -144,7 +152,7 @@ WebSocket tick (KisFuturesClient)
 
 ### 5.1 5/18 전 가능 (behavior-change-0)
 
-**A. KrxLivenessMonitor 추출**:
+**A. KrxLivenessMonitor 추출** — ✅ 완료 (commit `<see master>`):
 
 - KisFuturesClient의 metric state를 `KrxLivenessMonitor` 객체에 이전 (`_last_tick_at`, `_last_*_frame_at`, gap buckets, max gap, status transition counters).
 - 외부 API 동일 (`get_metrics()` 출력 shape 100% 보존).
@@ -171,7 +179,7 @@ WebSocket tick (KisFuturesClient)
 - REST task 생성 조건 변경 X (`KRX_REST_FALLBACK_ENABLED` env 의미 동일).
 - 검증: `test_krx_fallback_eligibility.py` 통과 + counter 값 시퀀스 동일.
 
-**C. KrxRedisLatestWriter 객체 분리 (호출 위치 동일)**:
+**C. KrxRedisLatestWriter 객체 분리 (호출 위치 동일)** — ✅ 완료 (commit `f5ba9bc`):
 
 - `KrxDbWriter._sync_db_write` 내부의 *Redis write-through* 부분을 별도 `KrxRedisLatestWriter` 객체로 추출.
 - 단, **호출 위치 + timing은 ADR-031 그대로**: DB insert 성공 후, 같은 sync 컨텍스트에서 `redis_writer.write_after_db_insert(asset, rate, ts)` 위임.

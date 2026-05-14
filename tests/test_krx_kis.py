@@ -1235,8 +1235,8 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m["counters"]["quote_frame"], 1)
         self.assertEqual(m["counters"]["frame_total"], 2)
         # last_*_at 분리
-        self.assertIsNotNone(self.client._last_trade_frame_at)
-        self.assertIsNotNone(self.client._last_quote_frame_at)
+        self.assertIsNotNone(self.client._liveness.last_trade_frame_at)
+        self.assertIsNotNone(self.client._liveness.last_quote_frame_at)
 
     def test_status_transition_count_increments(self):
         """_set_status normal→stale→normal 순서로 transition counter 증가."""
@@ -1266,9 +1266,11 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
             (45.0, "<=60s"), (60.0, "<=60s"),
             (60.001, ">60s"), (300.0, ">60s"),
         ]
+        # _bucket_for는 KRX_FANOUT_REFACTOR_PLAN 5.1.A에서 KrxLivenessMonitor로 이전.
+        from app.crawlers.krx_kis import KrxLivenessMonitor
         for gap, expected in cases:
             self.assertEqual(
-                KisFuturesClient._bucket_for(gap), expected,
+                KrxLivenessMonitor._bucket_for(gap), expected,
                 f"gap={gap} should map to {expected}",
             )
 
@@ -1360,7 +1362,7 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
         wrap 흉내 없이 회귀 방지 — Codex 외부 검토 정정 (PR6d-2a follow-up).
         """
         self.client._active_session = None
-        self.client._frame_count_total = 100
+        self.client._liveness.frame_count_total = 100
 
         original_sleep = asyncio.sleep
 
@@ -1382,7 +1384,7 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
         """active_session 설정된 상태에서 summary log loop이 INFO emit."""
         # _summary_log_loop의 sleep을 0.05s로 축소 + 1회 iteration 후 cancel
         self.client._active_session = "CM"
-        self.client._frame_count_total = 50
+        self.client._liveness.frame_count_total = 50
 
         original_sleep = asyncio.sleep
 
@@ -1412,7 +1414,7 @@ class TestKisFuturesClientMetrics(unittest.IsolatedAsyncioTestCase):
         await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
         # _last_tick_at을 5초 전으로 강제 → 다음 tick에서 ~5s gap 측정
         self.client._last_tick_at = time.time() - 5
-        self.client._last_trade_frame_at = time.time() - 5
+        self.client._liveness.last_trade_frame_at = time.time() - 5
         await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
 
         m = self.client.get_metrics()
@@ -1443,12 +1445,12 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         """reset 후 max_*_gap=0 / last_*_at=None / buckets 초기화."""
         # 오염값 시뮬레이션
         self.client._last_tick_at = time.time()
-        self.client._last_trade_frame_at = time.time() - 100
-        self.client._last_quote_frame_at = time.time() - 50
-        self.client._max_frame_gap_sec = 9001.0  # 세션 break 오염값
-        self.client._max_trade_gap_sec = 9899.0
-        self.client._max_quote_gap_sec = 9001.0
-        self.client._gap_buckets_total = {"<=1s": 5, "<=2s": 0, "<=5s": 0,
+        self.client._liveness.last_trade_frame_at = time.time() - 100
+        self.client._liveness.last_quote_frame_at = time.time() - 50
+        self.client._liveness.max_frame_gap_sec = 9001.0  # 세션 break 오염값
+        self.client._liveness.max_trade_gap_sec = 9899.0
+        self.client._liveness.max_quote_gap_sec = 9001.0
+        self.client._liveness.gap_buckets_total = {"<=1s": 5, "<=2s": 0, "<=5s": 0,
                                           "<=10s": 0, "<=30s": 0, "<=60s": 0,
                                           ">60s": 3}
 
@@ -1456,26 +1458,26 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
 
         # 모두 reset
         self.assertIsNone(self.client._last_tick_at)
-        self.assertIsNone(self.client._last_trade_frame_at)
-        self.assertIsNone(self.client._last_quote_frame_at)
-        self.assertEqual(self.client._max_frame_gap_sec, 0.0)
-        self.assertEqual(self.client._max_trade_gap_sec, 0.0)
-        self.assertEqual(self.client._max_quote_gap_sec, 0.0)
+        self.assertIsNone(self.client._liveness.last_trade_frame_at)
+        self.assertIsNone(self.client._liveness.last_quote_frame_at)
+        self.assertEqual(self.client._liveness.max_frame_gap_sec, 0.0)
+        self.assertEqual(self.client._liveness.max_trade_gap_sec, 0.0)
+        self.assertEqual(self.client._liveness.max_quote_gap_sec, 0.0)
         # buckets 초기화 — 모두 0
-        for layer in (self.client._gap_buckets_total,
-                      self.client._gap_buckets_trade,
-                      self.client._gap_buckets_quote):
+        for layer in (self.client._liveness.gap_buckets_total,
+                      self.client._liveness.gap_buckets_trade,
+                      self.client._liveness.gap_buckets_quote):
             self.assertEqual(sum(layer.values()), 0)
 
     def test_session_reset_preserves_lifetime_counters(self):
         """lifetime counters는 reset 안 됨 (frame_total, status_transitions 등)."""
         # 누적 카운터 시뮬레이션
-        self.client._frame_count_total = 12345
-        self.client._trade_frame_count = 678
-        self.client._quote_frame_count = 11000
-        self.client._system_frame_count = 100
-        self.client._malformed_frame_count = 2
-        self.client._unknown_tr_id_count = 1
+        self.client._liveness.frame_count_total = 12345
+        self.client._liveness.trade_frame_count = 678
+        self.client._liveness.quote_frame_count = 11000
+        self.client._liveness.system_frame_count = 100
+        self.client._liveness.malformed_frame_count = 2
+        self.client._liveness.unknown_tr_id_count = 1
         self.client._status_transition_count = {
             "normal": 5, "reconnecting": 3, "stale": 2,
         }
@@ -1484,12 +1486,12 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         self.client._reset_active_session_gap_metrics()
 
         # lifetime은 그대로
-        self.assertEqual(self.client._frame_count_total, 12345)
-        self.assertEqual(self.client._trade_frame_count, 678)
-        self.assertEqual(self.client._quote_frame_count, 11000)
-        self.assertEqual(self.client._system_frame_count, 100)
-        self.assertEqual(self.client._malformed_frame_count, 2)
-        self.assertEqual(self.client._unknown_tr_id_count, 1)
+        self.assertEqual(self.client._liveness.frame_count_total, 12345)
+        self.assertEqual(self.client._liveness.trade_frame_count, 678)
+        self.assertEqual(self.client._liveness.quote_frame_count, 11000)
+        self.assertEqual(self.client._liveness.system_frame_count, 100)
+        self.assertEqual(self.client._liveness.malformed_frame_count, 2)
+        self.assertEqual(self.client._liveness.unknown_tr_id_count, 1)
         self.assertEqual(self.client._status_transition_count["stale"], 2)
         self.assertEqual(self.client._status_transition_count["normal"], 5)
         self.assertEqual(self.client._reconnect_attempt_count, 4)
@@ -1504,7 +1506,7 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         # ancient _last_tick_at 시뮬레이션 (이전 세션 carry-over)
         ancient = time.time() - 26 * 3600
         self.client._last_tick_at = ancient
-        self.client._max_frame_gap_sec = 9001.0  # 오염값
+        self.client._liveness.max_frame_gap_sec = 9001.0  # 오염값
 
         client = self.client
         client._stop.set()  # subscribe만 하고 즉시 빠져나오게
@@ -1535,15 +1537,15 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(time.time() - client._last_tick_at, 5)
         # max_gap 오염값 제거됨
-        self.assertEqual(client._max_frame_gap_sec, 0.0)
+        self.assertEqual(client._liveness.max_frame_gap_sec, 0.0)
 
     async def test_session_boundary_clears_gap_for_next_session(self):
         """첫 session에서 9000s gap이 다음 session max에 남지 않음 (시뮬레이션)."""
         # 첫 session 활동 시뮬레이션 — 큰 gap 누적
-        self.client._max_frame_gap_sec = 9001.0
-        self.client._max_trade_gap_sec = 9899.0
-        self.client._max_quote_gap_sec = 9001.0
-        self.client._gap_buckets_total[">60s"] = 5  # 오염값 bucket
+        self.client._liveness.max_frame_gap_sec = 9001.0
+        self.client._liveness.max_trade_gap_sec = 9899.0
+        self.client._liveness.max_quote_gap_sec = 9001.0
+        self.client._liveness.gap_buckets_total[">60s"] = 5  # 오염값 bucket
 
         # session boundary 진입 (휴장) → reset
         self.client._reset_active_session_gap_metrics()
@@ -1556,10 +1558,10 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         await self.client._dispatch_tick("H0MFCNT0", cnt_raw, "CM")
 
         # 다음 session max는 5s 근처 (9000s 잔존 X)
-        self.assertGreater(self.client._max_frame_gap_sec, 4.5)
-        self.assertLess(self.client._max_frame_gap_sec, 6.0)
+        self.assertGreater(self.client._liveness.max_frame_gap_sec, 4.5)
+        self.assertLess(self.client._liveness.max_frame_gap_sec, 6.0)
         # >60s bucket은 reset 후 0이어야 함 (5s gap이라 <=5s 또는 <=10s)
-        self.assertEqual(self.client._gap_buckets_total[">60s"], 0)
+        self.assertEqual(self.client._liveness.gap_buckets_total[">60s"], 0)
 
     async def test_no_active_session_resets_metrics(self):
         """start() 휴장 분기 실제 경로 검증 — get_active_session=None 시 reset 호출.
@@ -1572,9 +1574,9 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         한 iteration 후 종료.
         """
         # 오염값 + 카운터 누적 (휴장 진입 전 상태 시뮬레이션)
-        self.client._max_frame_gap_sec = 9001.0
-        self.client._max_trade_gap_sec = 9899.0
-        self.client._frame_count_total = 100
+        self.client._liveness.max_frame_gap_sec = 9001.0
+        self.client._liveness.max_trade_gap_sec = 9899.0
+        self.client._liveness.frame_count_total = 100
 
         original_sleep = asyncio.sleep
 
@@ -1595,12 +1597,12 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
 
         # 휴장 분기에서 reset 호출됨 → max_gap 0
         self.assertEqual(
-            self.client._max_frame_gap_sec, 0.0,
+            self.client._liveness.max_frame_gap_sec, 0.0,
             "start() 휴장 분기에서 _reset_active_session_gap_metrics() 호출 안 됨",
         )
-        self.assertEqual(self.client._max_trade_gap_sec, 0.0)
+        self.assertEqual(self.client._liveness.max_trade_gap_sec, 0.0)
         # lifetime은 유지
-        self.assertEqual(self.client._frame_count_total, 100)
+        self.assertEqual(self.client._liveness.frame_count_total, 100)
         # active_session도 None으로 정리됨
         self.assertIsNone(self.client._active_session)
 

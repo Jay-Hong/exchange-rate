@@ -510,6 +510,135 @@ async def fetch_kis_futures_quote(
 TickHandler = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
+class KrxLivenessMonitor:
+    """KRX WebSocket frame liveness state — frame counters / age timestamps / gap buckets.
+
+    KRX_FANOUT_REFACTOR_PLAN section 5.1.A 추출 (behavior-change-0).
+    KisFuturesClient에서 frame/age/gap ownership을 분리.
+
+    유지 (KisFuturesClient에 그대로):
+        - status (normal/reconnecting/stale) + transition counter
+        - `_set_status()` — RestFallbackController 결합 (PR-B 영역)
+        - `_reconnect_attempt_count`, `_active_session`, lifecycle metadata
+
+    state 분류 (reset 대상 vs lifetime):
+        - reset 대상 (active session 시작 / 휴장 진입): last_*_frame_at, gap_buckets, max_gaps
+        - lifetime (reset X): frame counters (total/trade/quote/system/malformed/unknown)
+    """
+
+    _TRADE_TR_IDS = ("H0CFCNT0", "H0MFCNT0")
+    _QUOTE_TR_IDS = ("H0CFASP0", "H0MFASP0")
+
+    def __init__(self) -> None:
+        # frame counters (lifetime)
+        self.frame_count_total: int = 0
+        self.trade_frame_count: int = 0  # H0CFCNT0 / H0MFCNT0
+        self.quote_frame_count: int = 0  # H0CFASP0 / H0MFASP0
+        self.system_frame_count: int = 0
+        self.malformed_frame_count: int = 0
+        self.unknown_tr_id_count: int = 0
+        # last frame timestamps (active session — reset 대상)
+        self.last_tick_at: Optional[float] = None
+        self.last_trade_frame_at: Optional[float] = None
+        self.last_quote_frame_at: Optional[float] = None
+        # gap buckets (active session — reset 대상)
+        self.gap_buckets_total: Dict[str, int] = self._init_gap_buckets()
+        self.gap_buckets_trade: Dict[str, int] = self._init_gap_buckets()
+        self.gap_buckets_quote: Dict[str, int] = self._init_gap_buckets()
+        # max gaps (active session — reset 대상)
+        self.max_frame_gap_sec: float = 0.0
+        self.max_trade_gap_sec: float = 0.0
+        self.max_quote_gap_sec: float = 0.0
+
+    @staticmethod
+    def _init_gap_buckets() -> Dict[str, int]:
+        """gap bucket dict. ADR-027 후보 boundary."""
+        return {
+            "<=1s": 0, "<=2s": 0, "<=5s": 0, "<=10s": 0,
+            "<=30s": 0, "<=60s": 0, ">60s": 0,
+        }
+
+    @staticmethod
+    def _bucket_for(gap_sec: float) -> str:
+        """gap_sec을 bucket 라벨로 매핑."""
+        if gap_sec <= 1:
+            return "<=1s"
+        if gap_sec <= 2:
+            return "<=2s"
+        if gap_sec <= 5:
+            return "<=5s"
+        if gap_sec <= 10:
+            return "<=10s"
+        if gap_sec <= 30:
+            return "<=30s"
+        if gap_sec <= 60:
+            return "<=60s"
+        return ">60s"
+
+    def reset_active_session(self) -> None:
+        """active session 시작 / 휴장 진입 시 active-session gap metric reset.
+
+        2026-05-07 외부 검토(Codex)에서 발견된 metric 오염 fix:
+        세션 break (예: CM 06:00 종료 → CF 08:30 진입, 2.5h) 가
+        `max_*_gap_sec`에 9000초대 오염값으로 잡힘 → baseline 무의미.
+
+        reset 대상: last_*_frame_at, max_gaps, gap_buckets (active-session 한정)
+        유지 대상: frame counters (lifetime)
+
+        ⚠️ 주의: `last_tick_at = None`은 PR6e carry-over fix(60s grace)를 깨뜨림.
+        호출자는 reset 직후 반드시 `last_tick_at = time.time()`으로 grace start
+        설정 책임. (KisFuturesClient._connect_and_listen이 호출 후 즉시 재설정.)
+        """
+        self.last_tick_at = None
+        self.last_trade_frame_at = None
+        self.last_quote_frame_at = None
+        self.max_frame_gap_sec = 0.0
+        self.max_trade_gap_sec = 0.0
+        self.max_quote_gap_sec = 0.0
+        self.gap_buckets_total = self._init_gap_buckets()
+        self.gap_buckets_trade = self._init_gap_buckets()
+        self.gap_buckets_quote = self._init_gap_buckets()
+
+    def observe_tick(self, tr_id: str, now: float) -> None:
+        """tick frame 관측 — frame/age/gap state 갱신 (`_dispatch_tick`에서 위임).
+
+        파서 성공 후 호출. unknown tr_id는 별도 (`unknown_tr_id_count += 1` 직접).
+        체결/호가 자동 분리 + gap 측정 + max gap 갱신.
+
+        Args:
+            tr_id: KIS TR ID (H0CFCNT0/H0CFASP0/H0MFCNT0/H0MFASP0).
+            now: 현재 epoch (time.time() 결과).
+        """
+        prev_tick_at = self.last_tick_at
+        self.last_tick_at = now
+        self.frame_count_total += 1
+
+        # 전체 frame gap 측정
+        if prev_tick_at is not None:
+            gap_total = now - prev_tick_at
+            if gap_total > self.max_frame_gap_sec:
+                self.max_frame_gap_sec = gap_total
+            self.gap_buckets_total[self._bucket_for(gap_total)] += 1
+
+        # 체결/호가 분리 측정
+        if tr_id in self._TRADE_TR_IDS:
+            self.trade_frame_count += 1
+            if self.last_trade_frame_at is not None:
+                gap = now - self.last_trade_frame_at
+                if gap > self.max_trade_gap_sec:
+                    self.max_trade_gap_sec = gap
+                self.gap_buckets_trade[self._bucket_for(gap)] += 1
+            self.last_trade_frame_at = now
+        elif tr_id in self._QUOTE_TR_IDS:
+            self.quote_frame_count += 1
+            if self.last_quote_frame_at is not None:
+                gap = now - self.last_quote_frame_at
+                if gap > self.max_quote_gap_sec:
+                    self.max_quote_gap_sec = gap
+                self.gap_buckets_quote[self._bucket_for(gap)] += 1
+            self.last_quote_frame_at = now
+
+
 class KisFuturesClient:
     """KRX 미국달러선물 WebSocket client.
 
@@ -548,40 +677,22 @@ class KisFuturesClient:
         self._contract = contract or self._default_contract()
         self._tick_handlers: List[TickHandler] = []
         self._status: str = "normal"
-        self._last_tick_at: Optional[float] = None
         self._stop = asyncio.Event()
 
-        # PR6d-2a — raw frame metric state (silence 측정용, fallback 호출 X)
-        # ADR-027 PR6d-2a 계획 참조
+        # PR6d-2a — raw frame metric state
+        # KRX_FANOUT_REFACTOR_PLAN 5.1.A — frame/age/gap state는 KrxLivenessMonitor로 분리.
+        # _last_tick_at은 property(backward compat shim, 아래) — 내부 access는 self._liveness.last_tick_at.
+        self._liveness = KrxLivenessMonitor()
         now = time.time()
         self._started_at: float = now
         self._connected_at: Optional[float] = None
         self._active_session: Optional[str] = None
-        # frame counters (체결/호가 분리 — user 우려 야간 false stale 검증용)
-        self._frame_count_total: int = 0
-        self._trade_frame_count: int = 0  # H0CFCNT0 / H0MFCNT0
-        self._quote_frame_count: int = 0  # H0CFASP0 / H0MFASP0
-        self._system_frame_count: int = 0
-        self._malformed_frame_count: int = 0
-        self._unknown_tr_id_count: int = 0
-        # frame age tracking (분리)
-        self._last_trade_frame_at: Optional[float] = None
-        self._last_quote_frame_at: Optional[float] = None
         # status transition counters
         self._status_transition_count: Dict[str, int] = {
             "normal": 0, "reconnecting": 0, "stale": 0,
         }
         # reconnect attempt count (누적)
         self._reconnect_attempt_count: int = 0
-        # gap buckets (전체/체결/호가 각각). boundary는 ADR-027 후보 그대로
-        # 운영 분포 보고 boundary 조정 예정 (PR6d-2a 배포 후 baseline 분석)
-        self._gap_buckets_total: Dict[str, int] = self._init_gap_buckets()
-        self._gap_buckets_trade: Dict[str, int] = self._init_gap_buckets()
-        self._gap_buckets_quote: Dict[str, int] = self._init_gap_buckets()
-        # max gap (전체/체결/호가). 단순 max만 추적. p50/p95/p99는 외부 분석.
-        self._max_frame_gap_sec: float = 0.0
-        self._max_trade_gap_sec: float = 0.0
-        self._max_quote_gap_sec: float = 0.0
 
         # PR6d-2b — REST fallback decision telemetry counters (Stage A: env=false default).
         # 매 evaluation 1회당 +1 (summary log loop 60s cycle, status==stale일 때만).
@@ -602,31 +713,6 @@ class KisFuturesClient:
         self._fallback_tasks: "set[asyncio.Task]" = set()
 
     @staticmethod
-    def _init_gap_buckets() -> Dict[str, int]:
-        """gap bucket dict. ADR-027 후보 boundary."""
-        return {
-            "<=1s": 0, "<=2s": 0, "<=5s": 0, "<=10s": 0,
-            "<=30s": 0, "<=60s": 0, ">60s": 0,
-        }
-
-    @staticmethod
-    def _bucket_for(gap_sec: float) -> str:
-        """gap_sec을 bucket 라벨로 매핑."""
-        if gap_sec <= 1:
-            return "<=1s"
-        if gap_sec <= 2:
-            return "<=2s"
-        if gap_sec <= 5:
-            return "<=5s"
-        if gap_sec <= 10:
-            return "<=10s"
-        if gap_sec <= 30:
-            return "<=30s"
-        if gap_sec <= 60:
-            return "<=60s"
-        return ">60s"
-
-    @staticmethod
     def _epoch_to_kst_iso(epoch: Optional[float]) -> Optional[str]:
         """epoch float → KST ISO timestamp (PR6d-2a follow-up fix).
 
@@ -636,36 +722,25 @@ class KisFuturesClient:
             return None
         return datetime.fromtimestamp(epoch, tz=KST).isoformat()
 
+    # ── backward compat shims (KRX_FANOUT_REFACTOR_PLAN 5.1.A) ──────────
+    # KrxLivenessMonitor 추출 후 외부(테스트 + 내부 미refactor 영역) 호환 유지.
+    # 후속 PR (refactor 진척 시) 직접 self._liveness.X 접근으로 정리 가능.
+
+    @property
+    def _last_tick_at(self) -> Optional[float]:
+        return self._liveness.last_tick_at
+
+    @_last_tick_at.setter
+    def _last_tick_at(self, value: Optional[float]) -> None:
+        self._liveness.last_tick_at = value
+
     def _reset_active_session_gap_metrics(self) -> None:
-        """새 active session 시작 / 휴장 진입 시 active-session gap metric reset.
+        """backward compat wrapper — self._liveness.reset_active_session() 위임.
 
-        2026-05-07 외부 검토(Codex)에서 발견된 metric 오염 fix:
-        세션 break(예: CM 06:00 종료 → CF 08:30 진입, 2.5h)가
-        `max_*_gap_sec`에 9000초대 오염값으로 잡힘 → baseline 무의미.
-
-        reset 대상 (active session 기준 metric만):
-        - `_last_tick_at`, `_last_trade_frame_at`, `_last_quote_frame_at`
-        - `_max_frame_gap_sec`, `_max_trade_gap_sec`, `_max_quote_gap_sec`
-        - `_gap_buckets_total`, `_gap_buckets_trade`, `_gap_buckets_quote`
-
-        유지 대상 (lifetime counters):
-        - `_frame_count_total`, `_trade_frame_count`, `_quote_frame_count`
-        - `_system_frame_count`, `_malformed_frame_count`, `_unknown_tr_id_count`
-        - `_status_transition_count`, `_reconnect_attempt_count`
-
-        ⚠️ 주의 (Codex 외부 검토): `_last_tick_at = None`은 PR6e carry-over
-        fix(60s grace)를 깨뜨린다. 호출자는 reset 직후 반드시
-        `_last_tick_at = time.time()`으로 grace start를 설정해야 한다.
+        호출자는 reset 직후 `self._last_tick_at = time.time()`으로 PR6e grace
+        start 설정 책임 (KrxLivenessMonitor.reset_active_session docstring 참조).
         """
-        self._last_tick_at = None
-        self._last_trade_frame_at = None
-        self._last_quote_frame_at = None
-        self._max_frame_gap_sec = 0.0
-        self._max_trade_gap_sec = 0.0
-        self._max_quote_gap_sec = 0.0
-        self._gap_buckets_total = self._init_gap_buckets()
-        self._gap_buckets_trade = self._init_gap_buckets()
-        self._gap_buckets_quote = self._init_gap_buckets()
+        self._liveness.reset_active_session()
 
     def get_metrics(self) -> Dict[str, Any]:
         """현재 metric state snapshot (PR6d-2a + follow-up fix, ADR-027).
@@ -693,28 +768,28 @@ class KisFuturesClient:
                 "connected_at_kst": self._epoch_to_kst_iso(self._connected_at),
                 "uptime_sec": int(now - self._started_at),
             },
-            "last_frame_at": self._last_tick_at,
-            "last_frame_at_kst": self._epoch_to_kst_iso(self._last_tick_at),
+            "last_frame_at": self._liveness.last_tick_at,
+            "last_frame_at_kst": self._epoch_to_kst_iso(self._liveness.last_tick_at),
             "last_frame_age_sec": (
-                int(now - self._last_tick_at) if self._last_tick_at else None
+                int(now - self._liveness.last_tick_at) if self._liveness.last_tick_at else None
             ),
-            "last_trade_frame_at": self._last_trade_frame_at,
-            "last_trade_frame_at_kst": self._epoch_to_kst_iso(self._last_trade_frame_at),
+            "last_trade_frame_at": self._liveness.last_trade_frame_at,
+            "last_trade_frame_at_kst": self._epoch_to_kst_iso(self._liveness.last_trade_frame_at),
             "last_trade_frame_age_sec": (
-                int(now - self._last_trade_frame_at) if self._last_trade_frame_at else None
+                int(now - self._liveness.last_trade_frame_at) if self._liveness.last_trade_frame_at else None
             ),
-            "last_quote_frame_at": self._last_quote_frame_at,
-            "last_quote_frame_at_kst": self._epoch_to_kst_iso(self._last_quote_frame_at),
+            "last_quote_frame_at": self._liveness.last_quote_frame_at,
+            "last_quote_frame_at_kst": self._epoch_to_kst_iso(self._liveness.last_quote_frame_at),
             "last_quote_frame_age_sec": (
-                int(now - self._last_quote_frame_at) if self._last_quote_frame_at else None
+                int(now - self._liveness.last_quote_frame_at) if self._liveness.last_quote_frame_at else None
             ),
             "counters": {
-                "frame_total": self._frame_count_total,
-                "trade_frame": self._trade_frame_count,
-                "quote_frame": self._quote_frame_count,
-                "system_frame": self._system_frame_count,
-                "malformed_frame": self._malformed_frame_count,
-                "unknown_tr_id": self._unknown_tr_id_count,
+                "frame_total": self._liveness.frame_count_total,
+                "trade_frame": self._liveness.trade_frame_count,
+                "quote_frame": self._liveness.quote_frame_count,
+                "system_frame": self._liveness.system_frame_count,
+                "malformed_frame": self._liveness.malformed_frame_count,
+                "unknown_tr_id": self._liveness.unknown_tr_id_count,
                 "reconnect_attempt": self._reconnect_attempt_count,
                 "status_transitions": dict(self._status_transition_count),
                 # PR6d-2b — REST fallback decision telemetry (Stage A)
@@ -723,14 +798,14 @@ class KisFuturesClient:
             "fallback_last_at": self._last_fallback_at,
             "fallback_last_at_kst": self._epoch_to_kst_iso(self._last_fallback_at),
             "gap_buckets": {
-                "total": dict(self._gap_buckets_total),
-                "trade": dict(self._gap_buckets_trade),
-                "quote": dict(self._gap_buckets_quote),
+                "total": dict(self._liveness.gap_buckets_total),
+                "trade": dict(self._liveness.gap_buckets_trade),
+                "quote": dict(self._liveness.gap_buckets_quote),
             },
             "max_gap_sec": {
-                "total": self._max_frame_gap_sec,
-                "trade": self._max_trade_gap_sec,
-                "quote": self._max_quote_gap_sec,
+                "total": self._liveness.max_frame_gap_sec,
+                "trade": self._liveness.max_trade_gap_sec,
+                "quote": self._liveness.max_quote_gap_sec,
             },
         }
 
@@ -804,7 +879,7 @@ class KisFuturesClient:
             baseline 분석 시 첫 summary log는 caveat 또는 무시 권장. 24~48h
             누적 데이터로 보면 무시 가능 수준.
         """
-        prev_frame_total = self._frame_count_total
+        prev_frame_total = self._liveness.frame_count_total
         prev_at = time.time()
         while not self._stop.is_set():
             try:
@@ -814,14 +889,14 @@ class KisFuturesClient:
             # active session 중에만 emit
             if self._active_session is None:
                 # 휴장 중 — counter baseline reset (다음 active 진입 시 정확한 분당 계산)
-                prev_frame_total = self._frame_count_total
+                prev_frame_total = self._liveness.frame_count_total
                 prev_at = time.time()
                 continue
             now = time.time()
             elapsed = max(now - prev_at, 1e-9)
-            frames_in_window = self._frame_count_total - prev_frame_total
+            frames_in_window = self._liveness.frame_count_total - prev_frame_total
             frames_per_min = int(round(frames_in_window * 60 / elapsed))
-            prev_frame_total = self._frame_count_total
+            prev_frame_total = self._liveness.frame_count_total
             prev_at = now
             m = self.get_metrics()
             # PR6d-2b — REST fallback evaluation (status==stale일 때만, 60s cycle 1회).
@@ -1105,13 +1180,13 @@ class KisFuturesClient:
             parts = raw.split("|", 3)
             if len(parts) < 4:
                 logger.warning("[kis_ws] malformed tick frame: %r", raw[:120])
-                self._malformed_frame_count += 1  # PR6d-2a
+                self._liveness.malformed_frame_count += 1  # PR6d-2a
                 return
             tr_id, _count, data = parts[1], parts[2], parts[3]
             await self._dispatch_tick(tr_id, data, session)
         else:
             # system message (subscribe success/PINGPONG/error 등)
-            self._system_frame_count += 1  # PR6d-2a
+            self._liveness.system_frame_count += 1  # PR6d-2a
             try:
                 msg = json.loads(raw)
                 header = msg.get("header") or {}
@@ -1128,42 +1203,14 @@ class KisFuturesClient:
         parser = PARSER_DISPATCH.get(tr_id)
         if parser is None:
             logger.warning("[kis_ws] unknown tr_id: %s", tr_id)
-            self._unknown_tr_id_count += 1
+            self._liveness.unknown_tr_id_count += 1
             return
 
         # PR6d-2a — raw frame metric 갱신 (체결/호가 분리, gap bucket).
+        # KRX_FANOUT_REFACTOR_PLAN 5.1.A — KrxLivenessMonitor.observe_tick 위임.
         # last_tick_at 갱신은 tick 종류 무관 (호가/체결 둘 다 연결 정상 신호).
         now = time.time()
-        prev_tick_at = self._last_tick_at
-        self._last_tick_at = now
-        self._frame_count_total += 1
-
-        # 전체 frame gap 측정
-        if prev_tick_at is not None:
-            gap_total = now - prev_tick_at
-            if gap_total > self._max_frame_gap_sec:
-                self._max_frame_gap_sec = gap_total
-            self._gap_buckets_total[self._bucket_for(gap_total)] += 1
-
-        # 체결/호가 분리 측정
-        is_trade = tr_id in ("H0CFCNT0", "H0MFCNT0")
-        is_quote = tr_id in ("H0CFASP0", "H0MFASP0")
-        if is_trade:
-            self._trade_frame_count += 1
-            if self._last_trade_frame_at is not None:
-                gap = now - self._last_trade_frame_at
-                if gap > self._max_trade_gap_sec:
-                    self._max_trade_gap_sec = gap
-                self._gap_buckets_trade[self._bucket_for(gap)] += 1
-            self._last_trade_frame_at = now
-        elif is_quote:
-            self._quote_frame_count += 1
-            if self._last_quote_frame_at is not None:
-                gap = now - self._last_quote_frame_at
-                if gap > self._max_quote_gap_sec:
-                    self._max_quote_gap_sec = gap
-                self._gap_buckets_quote[self._bucket_for(gap)] += 1
-            self._last_quote_frame_at = now
+        self._liveness.observe_tick(tr_id, now)
 
         if self._status != "normal":
             self._set_status("normal")
@@ -1171,7 +1218,7 @@ class KisFuturesClient:
         # PR6a: 체결 tick (H0CFCNT0/H0MFCNT0)만 fanout. 호가 (H0CFASP0/H0MFASP0)는
         # 매도호가1을 대표값으로 잘못 저장할 위험 + 체결보다 19× 빈도라 latest를
         # 매도호가로 덮어쓰기 — 호가 데이터 필요 시 별도 path 도입.
-        if is_quote:
+        if tr_id in ("H0CFASP0", "H0MFASP0"):
             logger.debug("[kis_ws] quote tick ignored (PR6a fanout): tr_id=%s", tr_id)
             return
 
