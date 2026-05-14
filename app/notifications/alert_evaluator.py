@@ -204,10 +204,10 @@ class AlertSettingsCache:
         self._cache[(source, asset)] = CachedBucket(settings=settings, populated_at=now)
 
     def invalidate(self, source: Optional[str] = None, asset: Optional[str] = None) -> None:
-        """Cache 항목 삭제 (CRUD invalidation 별 PR에서 사용 예정).
+        """Cache 항목 삭제.
 
-        - source/asset 모두 지정: 해당 키만 제거
-        - 둘 다 None: 전체 cache 제거
+        - source/asset 모두 지정: 해당 키만 제거 (CRUD invalidation 경로)
+        - 둘 다 None: 전체 cache 제거 (test 용도)
         """
         if source is not None and asset is not None:
             self._cache.pop((source, asset), None)
@@ -216,6 +216,38 @@ class AlertSettingsCache:
         else:
             # 일부만 지정한 경우는 정의 안 함 — 명시적으로 None/None 또는 둘 다 필요.
             raise ValueError("invalidate: source/asset 둘 다 지정 또는 둘 다 None")
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton (Settings CRUD cache invalidation, Follow-up PR)
+# ---------------------------------------------------------------------------
+#
+# API endpoint (POST/PUT/DELETE source-notification-settings)와 evaluator가
+# 같은 cache 인스턴스를 공유 — 사용자가 settings 변경 시 즉시 cache invalidate.
+# 단 evaluator runtime state (_tasks, _in_flight_settings, _loading)는
+# per-instance 유지 — cache singleton만 공유 (Codex review).
+#
+# Multi-process 환경에서는 process별로 cache 별도 존재 — Redis pub/sub
+# invalidation은 future Phase 2 (multi-process 도입 시 별 PR).
+
+_default_alert_settings_cache: AlertSettingsCache = AlertSettingsCache()
+
+
+def get_default_alert_settings_cache() -> AlertSettingsCache:
+    """Process-wide shared cache. evaluator와 API endpoint 둘 다 호출."""
+    return _default_alert_settings_cache
+
+
+def invalidate_alert_settings_cache(source: str, asset: str) -> None:
+    """Settings CRUD endpoint가 호출 — 특정 (source, asset) cache 즉시 무효화.
+
+    PUT에서 source/asset이 바뀐 경우 old + new 둘 다 호출 권장.
+    """
+    _default_alert_settings_cache.invalidate(source, asset)
+    logger.debug(
+        "[alert_evaluator] cache invalidated",
+        extra={"source": source, "asset": asset},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +271,9 @@ class UsdtAlertEvaluator:
     """
 
     def __init__(self, *, cache: Optional[AlertSettingsCache] = None) -> None:
-        self._cache = cache or AlertSettingsCache()
+        # default = module-level singleton (Settings CRUD cache invalidation
+        # 위해 API endpoint와 공유). test 시 cache=AlertSettingsCache() inject로 격리.
+        self._cache = cache if cache is not None else get_default_alert_settings_cache()
         self._tasks: set[asyncio.Task] = set()
         # In-flight setting guard — 동일 setting_id 동시 평가 시 중복 FCM 차단
         self._in_flight_settings: set[int] = set()

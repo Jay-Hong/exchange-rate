@@ -53,6 +53,8 @@ from app.notifications.alert_evaluator import (
     UsdtAlertEvaluator,
     condition_matches,
     delivery_allowed,
+    get_default_alert_settings_cache,
+    invalidate_alert_settings_cache,
 )
 
 
@@ -1567,6 +1569,13 @@ class TestAlertSettingsCache(unittest.TestCase):
 
 class TestUsdtAlertEvaluatorBasics(unittest.IsolatedAsyncioTestCase):
 
+    def setUp(self):
+        # singleton cache leak 방지 — 각 test가 fresh cache로 시작
+        get_default_alert_settings_cache().invalidate()
+
+    def tearDown(self):
+        get_default_alert_settings_cache().invalidate()
+
     async def test_schedule_returns_immediately(self):
         evaluator = UsdtAlertEvaluator()
         with patch.object(
@@ -1968,6 +1977,68 @@ class TestLoadSettingsFromDbExcludesEmptyDevices(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].setting_id, 1)
         self.assertEqual(result[0].device_tokens, ("token-A",))
+
+
+# ---------------------------------------------------------------------------
+# PR6 follow-up — Settings CRUD cache invalidation (singleton + helper)
+# ---------------------------------------------------------------------------
+
+class TestAlertSettingsCacheSingleton(unittest.TestCase):
+
+    def setUp(self):
+        # 각 test 시작 시 singleton clear
+        get_default_alert_settings_cache().invalidate()
+
+    def tearDown(self):
+        get_default_alert_settings_cache().invalidate()
+
+    def test_default_cache_is_singleton(self):
+        """get_default_alert_settings_cache는 같은 instance 반환."""
+        c1 = get_default_alert_settings_cache()
+        c2 = get_default_alert_settings_cache()
+        self.assertIs(c1, c2)
+
+    def test_default_evaluator_uses_singleton_cache(self):
+        """UsdtAlertEvaluator() 기본 cache = singleton."""
+        evaluator = UsdtAlertEvaluator()
+        self.assertIs(evaluator._cache, get_default_alert_settings_cache())
+
+    def test_custom_cache_injection_overrides_singleton(self):
+        """test 시 cache inject로 격리 가능."""
+        custom_cache = AlertSettingsCache()
+        evaluator = UsdtAlertEvaluator(cache=custom_cache)
+        self.assertIs(evaluator._cache, custom_cache)
+        self.assertIsNot(evaluator._cache, get_default_alert_settings_cache())
+
+    def test_invalidate_helper_clears_specific_key(self):
+        """invalidate_alert_settings_cache(source, asset)는 해당 key만 제거."""
+        cache = get_default_alert_settings_cache()
+        cache.put("upbit", "usdt-krw", tuple(), time.time())
+        cache.put("bithumb", "usdt-krw", tuple(), time.time())
+
+        invalidate_alert_settings_cache("upbit", "usdt-krw")
+
+        self.assertIsNone(cache.get_if_fresh("upbit", "usdt-krw", time.time()))
+        self.assertIsNotNone(cache.get_if_fresh("bithumb", "usdt-krw", time.time()))
+
+    def test_invalidate_via_helper_visible_to_evaluator(self):
+        """API endpoint (helper) → evaluator (default cache) 즉시 반영 검증."""
+        evaluator = UsdtAlertEvaluator()  # default singleton 사용
+        s = _make_cached_setting()
+        evaluator._cache.put("upbit", "usdt-krw", (s,), time.time())
+
+        # cache hit 확인
+        self.assertIsNotNone(
+            evaluator._cache.get_if_fresh("upbit", "usdt-krw", time.time())
+        )
+
+        # API endpoint이 helper 호출
+        invalidate_alert_settings_cache("upbit", "usdt-krw")
+
+        # evaluator의 cache에서도 즉시 제거 (singleton 공유)
+        self.assertIsNone(
+            evaluator._cache.get_if_fresh("upbit", "usdt-krw", time.time())
+        )
 
 
 if __name__ == "__main__":

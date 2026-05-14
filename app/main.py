@@ -2467,6 +2467,11 @@ async def create_source_notification_setting(
             is_enabled=body.is_enabled,
         )
 
+        # Settings CRUD cache invalidation (PR6 follow-up):
+        # 새 setting을 evaluator가 다음 tick부터 즉시 평가 (TTL 10s 기다리지 X).
+        from app.notifications.alert_evaluator import invalidate_alert_settings_cache
+        invalidate_alert_settings_cache(body.source, body.asset)
+
         logger.info(
             "🔔 source 알림 설정 생성",
             extra={
@@ -2549,6 +2554,10 @@ async def update_source_notification_setting(
     if not setting:
         raise HTTPException(status_code=404, detail="Setting not found")
 
+    # 옛 source/asset 캡처 (cache invalidation 위해 update 전에)
+    old_source = setting.source
+    old_asset = setting.asset
+
     # source/asset 중 하나라도 바뀌면 최종 조합을 검증
     new_source = body.source if body.source is not None else setting.source
     new_asset = body.asset if body.asset is not None else setting.asset
@@ -2567,6 +2576,15 @@ async def update_source_notification_setting(
         threshold=body.threshold,
         enabled=body.is_enabled,
     )
+
+    # Settings CRUD cache invalidation (PR6 follow-up):
+    # source/asset 변경 가능 → old + new 둘 다 invalidate (옛 cache key의
+    # 잔존 setting + 새 cache key의 다음 miss populate 보장).
+    # 같은 source/asset이면 한 번 invalidate (set으로 dedup).
+    from app.notifications.alert_evaluator import invalidate_alert_settings_cache
+    invalidate_keys = {(old_source, old_asset), (updated.source, updated.asset)}
+    for src, ast in invalidate_keys:
+        invalidate_alert_settings_cache(src, ast)
 
     logger.info(
         "🔔 source 알림 설정 수정",
@@ -2600,7 +2618,16 @@ async def delete_source_notification_setting(
         )
         return schemas.DeleteResponse(success=True, message="Setting already deleted")
 
+    # 삭제 전 source/asset 캡처 (cache invalidation 위해)
+    deleted_source = setting.source
+    deleted_asset = setting.asset
+
     crud.delete_source_notification_setting(db=db, setting_id=setting_id, user_id=user_id)
+
+    # Settings CRUD cache invalidation (PR6 follow-up):
+    # 삭제된 setting을 evaluator가 다음 tick부터 평가 후보에서 즉시 제거.
+    from app.notifications.alert_evaluator import invalidate_alert_settings_cache
+    invalidate_alert_settings_cache(deleted_source, deleted_asset)
 
     logger.info(
         "🔔 source 알림 설정 삭제",
