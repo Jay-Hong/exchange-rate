@@ -462,6 +462,23 @@ docker compose up -d fastapi
 - Next: **24h Soak 시작** (토글 유지). First 1h checkpoint at **2026-05-15 02:01 KST**
   — reconnect count / Redis saturation / alert backlog / DB row count 확인.
 
+### 2026-05-15 02:01 KST — 24h Soak 1h Checkpoint (PASS)
+
+- 측정 시각: 17:01:29 UTC (1h 0min 33sec after activation)
+- Memory/CPU: **326.7MiB / 40.84%** (limit 800M), CPU **10.58%** — 안정 (leak 징후 없음)
+- Alert evaluator backlog warning: **0** (>100 threshold 미도달)
+- Redis writer saturation: **0** (정상)
+- Reconnect count: **0** (1h 동안 WS disconnect 없음)
+- Fallback probe count: **0** (stale transition 미발생 → probe 미발화, WS 매우 안정)
+- Status 전이: **0** (normal 유지)
+- DB row 1h (asset=usdt-krw):
+  - upbit: **288 rows** (~13s/INSERT, WS 가격 감지 빈도)
+  - bithumb: 128 rows (~28s/INSERT, REST 10s polling)
+  - coinone: 63 / korbit: 17 / gopax: 21
+- 분석: Upbit 288 > 다른 REST source ~2배 — WS fresh tick 효과 검증. dual-writer
+  (WS + REST polling) additive 정상 동작.
+- Next: **2h 또는 6h checkpoint** (사용자 트리거). 24h 종료 시각 = **2026-05-16 01:01 KST**.
+
 ## 참조
 
 - [USDT_WS_DESIGN_PLAN.md](USDT_WS_DESIGN_PLAN.md) — 설계/PR 분할/long-term roadmap
