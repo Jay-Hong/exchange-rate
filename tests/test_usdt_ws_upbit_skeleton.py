@@ -20,6 +20,7 @@ import inspect
 import json
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, scheduler
@@ -39,6 +40,19 @@ from app.crawlers.usdt_ws.upbit import (
     UpbitRedisWriter,
     UpbitWsClient,
     UsdtLivenessMonitor,
+)
+from app.notifications.alert_evaluator import (
+    ALERT_CACHE_TTL_SEC,
+    ALERT_CLOSE_TIMEOUT_SEC,
+    PENDING_TASKS_WARNING_THRESHOLD,
+    AlertObservation,
+    AlertSettingsCache,
+    CachedAlertSetting,
+    CachedBucket,
+    FreshSettingSnapshot,
+    UsdtAlertEvaluator,
+    condition_matches,
+    delivery_allowed,
 )
 
 
@@ -320,9 +334,10 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
             raise asyncio.TimeoutError
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
-        # PR5: valid tick은 db_writer.schedule 트리거 → DB 연결 회피.
+        # PR5/PR6: valid tick은 db_writer + alert_evaluator 트리거 → DB 연결 회피.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
-             patch.object(UpbitDbWriter, "_sync_db_write"):
+             patch.object(UpbitDbWriter, "_sync_db_write"), \
+             patch.object(UsdtAlertEvaluator, "_load_settings_from_db", return_value=tuple()):
             await client._run_one_session()
 
         # non-ticker (1번째) + valid (2번째) 둘 다 recv 했지만
@@ -352,10 +367,12 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
 
-        # PR5: valid tick은 db_writer.schedule을 트리거 → real _sync_db_write가
-        # DB 연결 시도하지 않도록 patch (이 test는 session/parse 행위만 검증).
+        # PR5/PR6: valid tick은 db_writer.schedule + alert_evaluator.schedule
+        # 트리거 → real _sync_db_write / _load_settings_from_db가 DB 연결
+        # 시도하지 않도록 patch.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
-             patch.object(UpbitDbWriter, "_sync_db_write"):
+             patch.object(UpbitDbWriter, "_sync_db_write"), \
+             patch.object(UsdtAlertEvaluator, "_load_settings_from_db", return_value=tuple()):
             await client._run_one_session()
 
         # 두 message 처리 + 1번 TimeoutError → recv 3회 호출
@@ -436,8 +453,10 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestNoDownstreamSideEffects(unittest.TestCase):
-    """PR4: Redis writer (`set_latest_usdt_rate_from_sync_job`) 허용.
-    DB/alert/fallback은 PR5-PR7 범위라 여전히 금지.
+    """PR4: Redis writer 허용 / PR5: DB writer (insert_if_changed) 허용 /
+    PR6: alert_evaluator (AlertObservation, UsdtAlertEvaluator) 허용.
+
+    REST fallback (PR7)만 여전히 금지.
 
     docstring/comment에서 미래 PR을 참조할 수 있으므로 substring 매칭이 아닌
     `import` 라인 + 함수 호출 패턴(`<name>(`)으로 좁힘.
@@ -452,13 +471,14 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
         source = inspect.getsource(upbit_mod)
         imports = "\n".join(self._extract_import_lines(source))
         # Redis writer (PR4) — latest_rates_cache 허용
-        # DB writer (PR5) — crud + database 허용 (insert_source_rate_if_changed)
-        # 단 SourceRate 모델 직접 import는 금지 (helper 내부 사용만)
+        # DB writer (PR5) — crud + database 허용
+        # Alert evaluator (PR6) — alert_evaluator import 허용
+        #   단 SourceRate 모델 직접 import는 금지 (helper 내부 사용만)
         self.assertNotIn("SourceRate", imports)
-        # alert (PR6)
+        # alert (PR6) — fcm/process_source_rate_alerts는 evaluator 내부에서 호출
+        # upbit.py에서는 alert_evaluator import만 (위 허용)
         self.assertNotIn("process_source_rate_alerts", imports)
-        self.assertNotIn("AlertObservation", imports)
-        self.assertNotIn("from app.notifications", imports)
+        self.assertNotIn("from app.notifications.fcm", imports)
         # REST fallback (PR7)
         self.assertNotIn("aiohttp", imports)
         self.assertNotIn("requests", imports)
@@ -470,10 +490,11 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
         forbidden_calls = [
             # DB writer (PR5) — SourceRate model 직접 생성 X (helper 내부만)
             "SourceRate(",
-            # alert (PR6)
+            # alert (PR6) — evaluator 내부에서 호출, upbit.py에서는 X
             "process_source_rate_alerts(",
             "send_fcm(",
-            "AlertObservation(",
+            "send_fcm_multicast_sync(",
+            "mark_source_setting_triggered(",
             # REST fallback (PR7) — helper 호출 (HTTP client invocation)
             "aiohttp.ClientSession(",
             "requests.get(",
@@ -1092,10 +1113,11 @@ class TestUpbitSessionRedisIntegration(unittest.IsolatedAsyncioTestCase):
             raise asyncio.TimeoutError
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
-        # PR5: db_writer.schedule도 함께 mock — 이 test는 redis_writer만 검증.
+        # PR5/PR6: db_writer + alert_evaluator도 함께 mock — 이 test는 redis_writer만 검증.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
              patch.object(client._redis_writer, "schedule") as mock_schedule, \
-             patch.object(client._db_writer, "schedule"):
+             patch.object(client._db_writer, "schedule"), \
+             patch.object(client._alert_evaluator, "schedule"):
             await client._run_one_session()
 
         mock_schedule.assert_called_once()
@@ -1289,8 +1311,10 @@ class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
             raise asyncio.TimeoutError
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        # PR6: alert_evaluator도 함께 mock — 이 test는 db_writer만 검증.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
-             patch.object(client._db_writer, "schedule") as mock_schedule:
+             patch.object(client._db_writer, "schedule") as mock_schedule, \
+             patch.object(client._alert_evaluator, "schedule"):
             await client._run_one_session()
 
         mock_schedule.assert_called_once()
@@ -1333,13 +1357,13 @@ class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_close.assert_awaited_once()
 
-    async def test_session_closes_db_before_redis(self):
-        """Codex review 회귀 가드: finally 블록에서 DB close가 Redis close보다 먼저.
+    async def test_session_closes_db_alert_redis_in_order(self):
+        """Codex review 회귀 가드: finally 블록에서 close 순서 = DB → Alert → Redis.
 
         근거:
-        1. DB는 source of truth — cache(Redis) 동기화 방향과 일관.
-        2. DB close의 to_thread가 event loop 양보 → 대기 중인 Redis
-           background tasks 동시 진행 → Redis drain 후 Tn까지 reach 확률 ↑.
+        1. DB는 source of truth — alert (DB triggered state) 직후 → Redis cache 마지막.
+        2. await to_thread가 event loop 양보 → 대기 background tasks 동시 진행 →
+           후속 drain reach 확률 ↑.
         """
         client = UpbitWsClient()
         client._stop_event.set()
@@ -1347,6 +1371,9 @@ class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
 
         async def db_close_spy():
             call_order.append("db")
+
+        async def alert_close_spy(timeout=ALERT_CLOSE_TIMEOUT_SEC):
+            call_order.append("alert")
 
         async def redis_close_spy(timeout=1.0):
             call_order.append("redis")
@@ -1357,13 +1384,590 @@ class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_blocks)
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
              patch.object(client._db_writer, "close", side_effect=db_close_spy), \
+             patch.object(client._alert_evaluator, "close", side_effect=alert_close_spy), \
              patch.object(client._redis_writer, "close", side_effect=redis_close_spy):
             await client._run_one_session()
 
         self.assertEqual(
-            call_order, ["db", "redis"],
-            "DB close must run before Redis close (source-of-truth + event-loop yield)",
+            call_order, ["db", "alert", "redis"],
+            "Close order: DB (source of truth) → Alert (DB triggered state) → Redis (cache)",
         )
+
+
+# ---------------------------------------------------------------------------
+# PR6 — alert_evaluator pure helpers + cache
+# ---------------------------------------------------------------------------
+
+def _make_cached_setting(
+    setting_id: int = 1,
+    user_id: str = "user-A",
+    source: str = "upbit",
+    asset: str = "usdt-krw",
+    condition: str = "above",
+    threshold: float = 1500.0,
+    device_tokens: tuple[str, ...] = ("token-1",),
+) -> CachedAlertSetting:
+    return CachedAlertSetting(
+        setting_id=setting_id,
+        user_id=user_id,
+        source=source,
+        asset=asset,
+        condition=condition,
+        threshold=threshold,
+        device_tokens=device_tokens,
+    )
+
+
+def _make_observation(
+    source: str = "upbit",
+    asset: str = "usdt-krw",
+    rate: float = 1500.0,
+    timestamp_ms: int = 1777370239843,
+) -> AlertObservation:
+    return AlertObservation(
+        source=source, asset=asset, rate=rate,
+        timestamp_ms=timestamp_ms, kind="tick",
+    )
+
+
+def _make_snapshot(
+    setting_id: int = 1,
+    enabled: bool = True,
+    triggered: bool = False,
+    source: str = "upbit",
+    asset: str = "usdt-krw",
+    condition: str = "above",
+    threshold: float = 1500.0,
+) -> FreshSettingSnapshot:
+    return FreshSettingSnapshot(
+        setting_id=setting_id, enabled=enabled, triggered=triggered,
+        source=source, asset=asset, condition=condition, threshold=threshold,
+    )
+
+
+class TestConditionMatches(unittest.TestCase):
+
+    def test_above_strictly_below_threshold(self):
+        s = _make_cached_setting(condition="above", threshold=1500.0)
+        o = _make_observation(rate=1499.99)
+        self.assertFalse(condition_matches(s, o))
+
+    def test_above_exactly_at_threshold(self):
+        s = _make_cached_setting(condition="above", threshold=1500.0)
+        o = _make_observation(rate=1500.0)
+        self.assertTrue(condition_matches(s, o))  # >= 경계
+
+    def test_above_strictly_above_threshold(self):
+        s = _make_cached_setting(condition="above", threshold=1500.0)
+        o = _make_observation(rate=1500.01)
+        self.assertTrue(condition_matches(s, o))
+
+    def test_below_strictly_above_threshold(self):
+        s = _make_cached_setting(condition="below", threshold=1500.0)
+        o = _make_observation(rate=1500.01)
+        self.assertFalse(condition_matches(s, o))
+
+    def test_below_exactly_at_threshold(self):
+        s = _make_cached_setting(condition="below", threshold=1500.0)
+        o = _make_observation(rate=1500.0)
+        self.assertTrue(condition_matches(s, o))  # <= 경계
+
+    def test_below_strictly_below_threshold(self):
+        s = _make_cached_setting(condition="below", threshold=1500.0)
+        o = _make_observation(rate=1499.99)
+        self.assertTrue(condition_matches(s, o))
+
+
+class TestDeliveryAllowed(unittest.TestCase):
+    """PR6 once 정책: enabled and not triggered."""
+
+    def test_enabled_not_triggered_allows(self):
+        s = _make_snapshot(enabled=True, triggered=False)
+        self.assertTrue(delivery_allowed(s, datetime.now(timezone.utc)))
+
+    def test_disabled_blocks(self):
+        s = _make_snapshot(enabled=False, triggered=False)
+        self.assertFalse(delivery_allowed(s, datetime.now(timezone.utc)))
+
+    def test_triggered_blocks(self):
+        s = _make_snapshot(enabled=True, triggered=True)
+        self.assertFalse(delivery_allowed(s, datetime.now(timezone.utc)))
+
+    def test_disabled_and_triggered_blocks(self):
+        s = _make_snapshot(enabled=False, triggered=True)
+        self.assertFalse(delivery_allowed(s, datetime.now(timezone.utc)))
+
+
+class TestAlertSettingsCache(unittest.TestCase):
+
+    def test_get_if_fresh_returns_none_on_miss(self):
+        cache = AlertSettingsCache()
+        self.assertIsNone(cache.get_if_fresh("upbit", "usdt-krw", time.time()))
+
+    def test_put_then_get_within_ttl(self):
+        cache = AlertSettingsCache()
+        now = time.time()
+        s = _make_cached_setting()
+        cache.put("upbit", "usdt-krw", (s,), now)
+        bucket = cache.get_if_fresh("upbit", "usdt-krw", now + 1.0)
+        self.assertIsNotNone(bucket)
+        self.assertEqual(bucket.settings, (s,))
+
+    def test_get_returns_none_after_ttl(self):
+        cache = AlertSettingsCache()
+        now = time.time()
+        cache.put("upbit", "usdt-krw", tuple(), now)
+        # ALERT_CACHE_TTL_SEC + 1 후 expired
+        self.assertIsNone(
+            cache.get_if_fresh("upbit", "usdt-krw", now + ALERT_CACHE_TTL_SEC + 1.0)
+        )
+
+    def test_source_asset_keys_independent(self):
+        cache = AlertSettingsCache()
+        s1 = _make_cached_setting(setting_id=1, source="upbit")
+        s2 = _make_cached_setting(setting_id=2, source="bithumb")
+        now = time.time()
+        cache.put("upbit", "usdt-krw", (s1,), now)
+        cache.put("bithumb", "usdt-krw", (s2,), now)
+        self.assertEqual(cache.get_if_fresh("upbit", "usdt-krw", now).settings, (s1,))
+        self.assertEqual(cache.get_if_fresh("bithumb", "usdt-krw", now).settings, (s2,))
+
+    def test_cache_stores_frozen_dataclass_not_orm(self):
+        """ORM-free guard: cache value는 CachedAlertSetting frozen dataclass만."""
+        cache = AlertSettingsCache()
+        s = _make_cached_setting()
+        cache.put("upbit", "usdt-krw", (s,), time.time())
+        bucket = cache.get_if_fresh("upbit", "usdt-krw", time.time())
+        for item in bucket.settings:
+            self.assertIsInstance(item, CachedAlertSetting)
+            # frozen: 수정 시도 → FrozenInstanceError
+            with self.assertRaises(Exception):
+                item.threshold = 999.0
+
+    def test_invalidate_specific_key(self):
+        cache = AlertSettingsCache()
+        cache.put("upbit", "usdt-krw", tuple(), time.time())
+        cache.put("bithumb", "usdt-krw", tuple(), time.time())
+        cache.invalidate("upbit", "usdt-krw")
+        self.assertIsNone(cache.get_if_fresh("upbit", "usdt-krw", time.time()))
+        self.assertIsNotNone(cache.get_if_fresh("bithumb", "usdt-krw", time.time()))
+
+    def test_invalidate_all(self):
+        cache = AlertSettingsCache()
+        cache.put("upbit", "usdt-krw", tuple(), time.time())
+        cache.put("bithumb", "usdt-krw", tuple(), time.time())
+        cache.invalidate()
+        self.assertIsNone(cache.get_if_fresh("upbit", "usdt-krw", time.time()))
+        self.assertIsNone(cache.get_if_fresh("bithumb", "usdt-krw", time.time()))
+
+
+# ---------------------------------------------------------------------------
+# PR6 — UsdtAlertEvaluator
+# ---------------------------------------------------------------------------
+
+class TestUsdtAlertEvaluatorBasics(unittest.IsolatedAsyncioTestCase):
+
+    async def test_schedule_returns_immediately(self):
+        evaluator = UsdtAlertEvaluator()
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ):
+            start = time.time()
+            evaluator.schedule(_make_observation())
+            elapsed = time.time() - start
+            self.assertLess(elapsed, 0.01)
+            self.assertEqual(len(evaluator._tasks), 1)
+            await evaluator.close()
+
+    async def test_no_drop_when_pending_above_threshold(self):
+        """observation drop 금지 (Codex Finding 1). 100+ pending이어도 모두 task 생성."""
+        evaluator = UsdtAlertEvaluator()
+
+        # _evaluate_async를 hang 시킴 — pending tasks 누적
+        hang_event = asyncio.Event()
+        async def hang_eval(observation):
+            await hang_event.wait()
+
+        with patch.object(evaluator, "_evaluate_async", side_effect=hang_eval):
+            # 105개 observation schedule (warning threshold 100 초과)
+            for _ in range(105):
+                evaluator.schedule(_make_observation())
+
+            self.assertEqual(len(evaluator._tasks), 105)  # 모두 생성
+
+            # cleanup
+            hang_event.set()
+            await evaluator.close()
+
+    async def test_cache_hit_avoids_db_load(self):
+        """cache hit → _load_settings_from_db 호출 X (event loop dict lookup만)."""
+        evaluator = UsdtAlertEvaluator()
+        # 미리 cache populate
+        evaluator._cache.put("upbit", "usdt-krw", tuple(), time.time())
+
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ) as mock_load:
+            evaluator.schedule(_make_observation())
+            await asyncio.sleep(0.05)  # task 실행 대기
+            await evaluator.close()
+        mock_load.assert_not_called()
+
+    async def test_cache_miss_calls_db_load(self):
+        """cache miss → _load_settings_from_db 1번 호출 (via to_thread)."""
+        evaluator = UsdtAlertEvaluator()
+
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ) as mock_load:
+            evaluator.schedule(_make_observation())
+            await asyncio.sleep(0.05)
+            await evaluator.close()
+        mock_load.assert_called_once_with("upbit", "usdt-krw")
+
+    async def test_per_key_loading_guard_dedupes_concurrent_misses(self):
+        """TTL 만료 순간 동시 cache miss → DB loader 1번만 호출 (thundering herd 방지)."""
+        evaluator = UsdtAlertEvaluator()
+        call_count = [0]
+
+        def slow_load(source, asset):
+            call_count[0] += 1
+            time.sleep(0.05)  # 50ms slow load
+            return tuple()
+
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            side_effect=slow_load,
+        ):
+            # 5개 동시 schedule (모두 cache miss, 같은 key)
+            for _ in range(5):
+                evaluator.schedule(_make_observation())
+            await asyncio.sleep(0.15)  # 모두 완료 대기
+            await evaluator.close()
+
+        # 동시 5개 schedule → loader 1번만 (per-key loading guard)
+        self.assertEqual(call_count[0], 1)
+
+
+class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
+    """_send_one flow — refetch / FCM / mark / log session 분리."""
+
+    async def test_refetch_stale_skips_fcm(self):
+        """refetch에서 disabled or triggered → FCM 발송 X + skip log."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting()
+        stale_snapshot = _make_snapshot(enabled=False, triggered=False)  # disabled
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=stale_snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            return_value={"success_count": 1, "failure_count": 0, "failed_tokens": []},
+        ) as mock_fcm, patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, _make_observation())
+
+        mock_fcm.assert_not_called()
+        mock_persist.assert_not_called()
+
+    async def test_fcm_success_calls_persist(self):
+        """FCM 성공 → mark_triggered + log success (persist 호출)."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting()
+        # snapshot은 cached와 동일한 condition/threshold (no change)
+        ok_snapshot = _make_snapshot(enabled=True, triggered=False)
+        fcm_result = {"success_count": 1, "failure_count": 0, "failed_tokens": []}
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=ok_snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            return_value=fcm_result,
+        ), patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, _make_observation())
+
+        # fresh_candidate (cached와 fields 동일이면 == 성립)
+        mock_persist.assert_called_once_with(candidate, 1500.0, fcm_result)
+
+    async def test_fcm_failure_still_calls_persist_for_log(self):
+        """FCM 실패 → log failure (persist 호출). setting은 변경 X (persist 내부 처리)."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting()
+        ok_snapshot = _make_snapshot(enabled=True, triggered=False)
+        fcm_result = {"success_count": 0, "failure_count": 1, "failed_tokens": ["token-bad"]}
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=ok_snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            return_value=fcm_result,
+        ), patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, _make_observation())
+
+        mock_persist.assert_called_once_with(candidate, 1500.0, fcm_result)
+
+    async def test_refetch_threshold_change_blocks_fcm(self):
+        """Codex Finding (Medium) 회귀 가드: cached threshold match이어도 refetch
+        threshold가 변경됐고 더 이상 매치 안 하면 발송 차단.
+
+        시나리오:
+          - cached: above 1500, observation rate=1510 → cached match
+          - refetch: above 1600 (사용자가 PUT으로 변경)
+          - rate 1510 < refetch 1600 → no match → skip
+        """
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(condition="above", threshold=1500.0)
+        # refetch가 threshold=1600 반환 (사용자가 변경)
+        snapshot = _make_snapshot(
+            enabled=True, triggered=False,
+            condition="above", threshold=1600.0,
+        )
+        observation = _make_observation(rate=1510.0)
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+        ) as mock_fcm, patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, observation)
+
+        mock_fcm.assert_not_called()
+        mock_persist.assert_not_called()
+
+    async def test_refetch_condition_change_blocks_fcm(self):
+        """Codex Finding (Medium) 회귀 가드: cached condition (above) match이어도
+        refetch condition이 below로 바뀌면 발송 차단.
+
+        시나리오:
+          - cached: above 1500, rate=1510 → cached match (1510 >= 1500)
+          - refetch: below 1500 (사용자 변경)
+          - below 평가: 1510 > 1500 → no match → skip
+        """
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(condition="above", threshold=1500.0)
+        snapshot = _make_snapshot(
+            enabled=True, triggered=False,
+            condition="below", threshold=1500.0,
+        )
+        observation = _make_observation(rate=1510.0)
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+        ) as mock_fcm, patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, observation)
+
+        mock_fcm.assert_not_called()
+        mock_persist.assert_not_called()
+
+    async def test_refetch_source_change_blocks_fcm(self):
+        """Codex Finding (Medium) 회귀 가드: 사용자가 source 변경 시 발송 차단."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(source="upbit", asset="usdt-krw")
+        snapshot = _make_snapshot(
+            enabled=True, triggered=False,
+            source="bithumb", asset="usdt-krw",  # source 변경
+        )
+        observation = _make_observation(source="upbit", asset="usdt-krw")
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+        ) as mock_fcm, patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, observation)
+
+        mock_fcm.assert_not_called()
+        mock_persist.assert_not_called()
+
+    async def test_fcm_uses_fresh_threshold_in_payload(self):
+        """Codex Finding (Medium): cached와 refetch가 threshold만 다르고 둘 다
+        match이면 fresh threshold가 payload에 사용됨.
+
+        시나리오:
+          - cached: above 1500
+          - refetch: above 1400 (사용자가 threshold 낮춤)
+          - rate=1510 → cached match + refetch match
+          - FCM payload는 fresh threshold(1400) 기준이어야 함
+        """
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(condition="above", threshold=1500.0)
+        snapshot = _make_snapshot(
+            enabled=True, triggered=False,
+            condition="above", threshold=1400.0,
+        )
+        observation = _make_observation(rate=1510.0)
+        fcm_result = {"success_count": 1, "failure_count": 0, "failed_tokens": []}
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            return_value=fcm_result,
+        ), patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as mock_persist:
+            await evaluator._send_one(candidate, observation)
+
+        # persist는 fresh_candidate 기준 (threshold=1400)
+        mock_persist.assert_called_once()
+        called_candidate = mock_persist.call_args.args[0]
+        self.assertEqual(called_candidate.threshold, 1400.0)
+        self.assertEqual(called_candidate.condition, "above")
+
+
+class TestUsdtAlertEvaluatorInFlightGuard(unittest.IsolatedAsyncioTestCase):
+
+    async def test_in_flight_guard_prevents_duplicate_fcm(self):
+        """동일 setting_id 동시 observation 2번 → FCM 1번 (in-process atomic claim)."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(setting_id=42)
+
+        # cache populate으로 DB load 회피
+        evaluator._cache.put("upbit", "usdt-krw", (candidate,), time.time())
+
+        fcm_count = [0]
+        send_event = asyncio.Event()
+
+        def slow_fcm(tokens, title, body, data):
+            fcm_count[0] += 1
+            time.sleep(0.05)  # 50ms slow FCM
+            return {"success_count": 1, "failure_count": 0, "failed_tokens": []}
+
+        ok_snapshot = _make_snapshot(setting_id=42, enabled=True, triggered=False)
+
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            return_value=ok_snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            side_effect=slow_fcm,
+        ), patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ):
+            # 5개 동시 schedule (같은 setting_id 매칭 예상)
+            for rate in [1501.0, 1502.0, 1503.0, 1504.0, 1505.0]:
+                evaluator.schedule(_make_observation(rate=rate))
+            await asyncio.sleep(0.2)  # 모든 task 완료 대기
+            await evaluator.close()
+
+        # 5번 schedule이지만 in-flight guard로 FCM 1번만
+        self.assertEqual(fcm_count[0], 1)
+
+
+class TestUsdtAlertEvaluatorClose(unittest.IsolatedAsyncioTestCase):
+
+    async def test_close_drains_pending_tasks(self):
+        """close drain-first: pending alert tasks 완료 후 반환."""
+        evaluator = UsdtAlertEvaluator()
+        completed = []
+
+        async def slow_eval(observation):
+            await asyncio.sleep(0.05)
+            completed.append(observation.rate)
+
+        with patch.object(evaluator, "_evaluate_async", side_effect=slow_eval):
+            evaluator.schedule(_make_observation(rate=1.0))
+            evaluator.schedule(_make_observation(rate=2.0))
+            await evaluator.close(timeout=1.0)
+
+        # 둘 다 완료 후 close 반환
+        self.assertEqual(sorted(completed), [1.0, 2.0])
+
+    async def test_close_cancels_after_timeout(self):
+        """close timeout 초과 → cancel."""
+        evaluator = UsdtAlertEvaluator()
+
+        async def hang_eval(observation):
+            await asyncio.sleep(10)
+
+        with patch.object(evaluator, "_evaluate_async", side_effect=hang_eval):
+            evaluator.schedule(_make_observation())
+            start = time.time()
+            await evaluator.close(timeout=0.05)
+            elapsed = time.time() - start
+
+        self.assertLess(elapsed, 0.3)
+        self.assertEqual(len(evaluator._tasks), 0)
+
+    async def test_close_noop_when_no_pending(self):
+        evaluator = UsdtAlertEvaluator()
+        await evaluator.close()
+
+
+# ---------------------------------------------------------------------------
+# PR6 — load_settings_from_db excludes empty device tokens
+# ---------------------------------------------------------------------------
+
+class TestLoadSettingsFromDbExcludesEmptyDevices(unittest.TestCase):
+
+    def test_empty_device_tokens_excluded(self):
+        """cache populate 시점에 device_tokens 없는 settings 제외."""
+        from app.notifications.alert_evaluator import UsdtAlertEvaluator as Evaluator
+        from unittest.mock import MagicMock
+
+        # mock SQLAlchemy session + query result
+        mock_setting_with_devices = MagicMock(
+            id=1, user_id="user-A", source="upbit", asset="usdt-krw",
+            condition="above", threshold=1500.0, enabled=True, triggered=False,
+        )
+        mock_setting_without_devices = MagicMock(
+            id=2, user_id="user-B", source="upbit", asset="usdt-krw",
+            condition="below", threshold=1400.0, enabled=True, triggered=False,
+        )
+
+        mock_device = MagicMock(user_id="user-A", device_token="token-A")
+        # user-B는 device 없음
+
+        mock_session = MagicMock()
+        # 1st query: settings
+        # 2nd query: devices
+        query_results = [
+            [mock_setting_with_devices, mock_setting_without_devices],
+            [mock_device],
+        ]
+        query_idx = [0]
+        def make_query(model):
+            q = MagicMock()
+            q.filter.return_value = q
+            q.all.return_value = query_results[query_idx[0]]
+            query_idx[0] += 1
+            return q
+        mock_session.query.side_effect = make_query
+
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_session)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.database.get_db_context", return_value=mock_ctx):
+            result = Evaluator._load_settings_from_db("upbit", "usdt-krw")
+
+        # user-A만 포함 (device_tokens 있음), user-B 제외
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].setting_id, 1)
+        self.assertEqual(result[0].device_tokens, ("token-A",))
 
 
 if __name__ == "__main__":

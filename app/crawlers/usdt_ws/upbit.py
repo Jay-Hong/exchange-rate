@@ -75,6 +75,10 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from app import latest_rates_cache
+from app.notifications.alert_evaluator import (
+    AlertObservation,
+    UsdtAlertEvaluator,
+)
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.upbit")
 
@@ -431,6 +435,8 @@ class UpbitWsClient:
         self._redis_writer: UpbitRedisWriter = UpbitRedisWriter()
         # PR5 DB writer (1초 window debounce + insert_source_rate_if_changed)
         self._db_writer: UpbitDbWriter = UpbitDbWriter()
+        # PR6 Alert evaluator (observation-based, source-neutral helper 재사용)
+        self._alert_evaluator: UsdtAlertEvaluator = UsdtAlertEvaluator()
 
     async def start(self) -> None:
         """reconnect 루프. 단일 session crash 시 backoff 후 재시도.
@@ -684,13 +690,21 @@ class UpbitWsClient:
                             logger.info("[usdt_ws.upbit] connection closed after stop")
                             return
                         raise
-                    # valid ticker만 liveness activity + Redis/DB write schedule.
+                    # valid ticker만 liveness activity + Redis/DB/Alert schedule.
                     # invalid/non-ticker frame은 모두 X (Codex review).
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
                         self._redis_writer.schedule(tick)
                         self._db_writer.schedule(tick)
+                        observation = AlertObservation(
+                            source=tick["source"],
+                            asset=tick["asset"],
+                            rate=tick["rate"],
+                            timestamp_ms=tick["timestamp_ms"],
+                            kind="tick",
+                        )
+                        self._alert_evaluator.schedule(observation)
             finally:
                 ping_task.cancel()
                 try:
@@ -699,19 +713,24 @@ class UpbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.upbit] ping_task cleanup 실패")
-                # close 순서 = DB → Redis (Codex review):
+                # close 순서 = DB → Alert → Redis (Codex review):
                 # 1. DB가 source of truth (cache는 derived) — DB Tn 확정 후
-                #    Redis를 동기화하는 방향이 일반 원칙.
-                # 2. `await to_thread` 동안 event loop 양보 → 대기 중인 Redis
-                #    background tasks가 동시에 진행 → Redis backlog 소진 ↑ →
-                #    Redis drain 후 Tn까지 reach 확률 ↑.
+                #    triggered state(DB)를 변경하는 Alert evaluator → 마지막 Redis cache.
+                # 2. `await to_thread` 동안 event loop 양보 → 대기 중인 Redis/Alert
+                #    background tasks 동시 진행 → 후속 drain 시 reach 확률 ↑.
                 # PR5: DB writer timer cancel + pending tick 즉시 flush.
                 try:
                     await self._db_writer.close()
                 except Exception:
                     logger.exception("[usdt_ws.upbit] db_writer.close() 실패")
+                # PR6: alert evaluator pending alerts drain (timeout 5s 후 cancel).
+                # DB triggered state 변경하는 단계 — DB 직후, Redis 전.
+                try:
+                    await self._alert_evaluator.close()
+                except Exception:
+                    logger.exception("[usdt_ws.upbit] alert_evaluator.close() 실패")
                 # PR4: pending Redis writes drain (timeout 후 cancel).
-                # DB 마지막 tick 확정 후 마지막 chance로 Redis latest 동기화.
+                # DB/Alert 확정 후 마지막 chance로 Redis latest 동기화.
                 try:
                     await self._redis_writer.close()
                 except Exception:
