@@ -639,6 +639,165 @@ class KrxLivenessMonitor:
             self.last_quote_frame_at = now
 
 
+class KrxRestFallbackController:
+    """KRX REST fallback eligibility evaluator + invoke + asyncio task lifecycle.
+
+    KRX_FANOUT_REFACTOR_PLAN section 5.1.B 추출 (behavior-change-0).
+    KisFuturesClient에서 fallback counters / evaluation / REST invoke / task
+    lifecycle 책임 분리.
+
+    유지 (KisFuturesClient에 그대로):
+        - `_set_status()` — normal→stale 전이 시 `controller.evaluate()` 위임
+        - `_active_session` 갱신 (lifecycle)
+        - summary_log_loop의 60s cycle 호출 패턴
+
+    Getter 패턴 (Codex 핵심 권고):
+        - `active_session_getter`: `_invoke_rest_fallback` *실행 시점*에 read
+          (현재 동작 — session이 evaluate 시점에 freeze되지 않음)
+        - `last_tick_at_getter`: evaluate 시점 frame_age 계산 — getter 통일
+    """
+
+    def __init__(
+        self,
+        *,
+        contract: ContractInfo,
+        access_token_manager: Optional[KisAccessTokenManager],
+        active_session_getter: Callable[[], Optional[str]],
+        last_tick_at_getter: Callable[[], Optional[float]],
+    ) -> None:
+        self._contract = contract
+        self._access_token_manager = access_token_manager
+        self._get_active_session = active_session_getter
+        self._get_last_tick_at = last_tick_at_getter
+        # state — KisFuturesClient에서 이전
+        self.counters: Dict[str, int] = {
+            "evaluated": 0,
+            "eligible": 0,
+            "suppressed_disabled": 0,
+            "suppressed_below_threshold": 0,
+            "suppressed_session_end_grace": 0,
+            "suppressed_cooldown": 0,
+            "rest_success": 0,
+            "rest_error": 0,
+        }
+        self.last_fallback_at: Optional[float] = None  # cooldown 추적
+        self.tasks: "set[asyncio.Task]" = set()  # fire-and-forget task lifecycle
+
+    def evaluate(self, now_epoch: float) -> str:
+        """KRX_FANOUT_REFACTOR_PLAN 5.1.B — `_evaluate_rest_fallback` 이전.
+
+        호출 시점 / 검사 순서 / return label 모두 동일 (Codex BLOCKING 1/2 fix
+        그대로 보존). client._set_status(normal→stale) + summary_log_loop가 호출.
+
+        검사 순서 (Codex BLOCKING 2 fix):
+        1. session_end_grace 차단
+        2. frame_age < KRX_REST_FALLBACK_STALE_SEC → below_threshold
+        3. cooldown 미경과 → cooldown
+        4. NOT enabled (env=false) → disabled
+        5. 모두 통과 → eligible (env=true 시 task 생성)
+        """
+        self.counters["evaluated"] += 1
+
+        # 1. session-end grace
+        now_kst = datetime.fromtimestamp(now_epoch, tz=KST).replace(tzinfo=None)
+        if is_in_session_end_grace(
+            now_kst,
+            self._get_active_session(),
+            config.KRX_REST_FALLBACK_SESSION_END_GRACE_MIN,
+            self._contract.expiry_date,
+        ):
+            self.counters["suppressed_session_end_grace"] += 1
+            return "suppressed_session_end_grace"
+
+        # 2. frame_age 임계 (getter로 통일)
+        last_tick_at = self._get_last_tick_at()
+        frame_age = now_epoch - last_tick_at if last_tick_at else 0.0
+        if frame_age < config.KRX_REST_FALLBACK_STALE_SEC:
+            self.counters["suppressed_below_threshold"] += 1
+            return "suppressed_below_threshold"
+
+        # 3. cooldown
+        if self.last_fallback_at and (
+            now_epoch - self.last_fallback_at < config.KRX_REST_COOLDOWN_SEC
+        ):
+            self.counters["suppressed_cooldown"] += 1
+            return "suppressed_cooldown"
+
+        # 4. env
+        if not config.KRX_REST_FALLBACK_ENABLED:
+            self.counters["suppressed_disabled"] += 1
+            return "suppressed_disabled"
+
+        # 5. eligible
+        self.counters["eligible"] += 1
+
+        # Stage B: env=true일 때만 task 생성. last_fallback_at은 task 생성 직전 갱신
+        # (cooldown 호출 시도 시점 기준 — REST hang 시 중복 task 폭주 방지).
+        if config.KRX_REST_FALLBACK_ENABLED:
+            self.last_fallback_at = now_epoch
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # async loop 외 호출 (테스트 환경 등) — task 생성 skip
+                return "eligible"
+            task = loop.create_task(self._invoke_rest_fallback())
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+        return "eligible"
+
+    async def _invoke_rest_fallback(self) -> None:
+        """Stage B — eligible 시 REST 호출. 결과는 log/counter만.
+
+        ★ session은 invoke 시점에 read (evaluate 시점 freeze X — Codex 핵심 보존).
+        Stage C에서 broadcast/DB 반영 (별도 GO + V2 protocol).
+        """
+        if self._access_token_manager is None:
+            self.counters["rest_error"] += 1
+            logger.warning(
+                "[kis_ws] REST fallback skip — access_token_manager 미주입 (wiring 누락)"
+            )
+            return
+        try:
+            result = await fetch_kis_futures_quote(
+                contract=self._contract,
+                token_manager=self._access_token_manager,
+                session=self._get_active_session(),
+            )
+            if result is not None:
+                self.counters["rest_success"] += 1
+                logger.info(
+                    "[kis_ws] REST fallback success contract=%s price=%s session=%s",
+                    self._contract.short_code, result.get("price"), result.get("session"),
+                )
+            else:
+                self.counters["rest_error"] += 1
+                logger.warning(
+                    "[kis_ws] REST fallback returned None contract=%s",
+                    self._contract.short_code,
+                )
+        except Exception:
+            self.counters["rest_error"] += 1
+            logger.exception("[kis_ws] REST fallback 호출 실패")
+
+    async def cleanup_tasks(self) -> None:
+        """stop() cleanup — KisFuturesClient.stop()에서 위임.
+
+        fire-and-forget task가 shutdown 시 pending warning 또는 hang 방지.
+        기존 동작 보존: pending → cancel → await → clear.
+        """
+        if self.tasks:
+            pending = list(self.tasks)
+            for t in pending:
+                if not t.done():
+                    t.cancel()
+            for t in pending:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self.tasks.clear()
+
+
 class KisFuturesClient:
     """KRX 미국달러선물 WebSocket client.
 
@@ -694,23 +853,15 @@ class KisFuturesClient:
         # reconnect attempt count (누적)
         self._reconnect_attempt_count: int = 0
 
-        # PR6d-2b — REST fallback decision telemetry counters (Stage A: env=false default).
-        # 매 evaluation 1회당 +1 (summary log loop 60s cycle, status==stale일 때만).
-        # Codex 권고 (2026-05-08): "fallback 실행이 아니라 fallback decision telemetry".
-        self._fallback_counters: Dict[str, int] = {
-            "evaluated": 0,                      # 총 evaluation 횟수
-            "eligible": 0,                       # 모든 조건 통과
-            "suppressed_disabled": 0,            # env=false 차단
-            "suppressed_below_threshold": 0,     # frame_age < KRX_REST_FALLBACK_STALE_SEC
-            "suppressed_session_end_grace": 0,   # session 종료 grace 구간
-            "suppressed_cooldown": 0,            # 직전 fallback 후 cooldown
-            "rest_success": 0,                   # 실제 REST 호출 성공 (Stage B+)
-            "rest_error": 0,                     # REST 호출 실패 (Stage B+)
-        }
-        self._last_fallback_at: Optional[float] = None  # cooldown 추적
-        # PR6d-2b Stage B (Codex 1 권고): fire-and-forget task lifecycle 추적.
-        # add_done_callback(discard)으로 자동 정리 + stop()에서 잔여 cancel/await.
-        self._fallback_tasks: "set[asyncio.Task]" = set()
+        # PR6d-2b — REST fallback decision telemetry + invoke + task lifecycle.
+        # KRX_FANOUT_REFACTOR_PLAN 5.1.B — KrxRestFallbackController로 분리 (behavior-change-0).
+        # getter 패턴 (Codex 핵심): active_session/last_tick_at은 invoke/evaluate 시점에 read.
+        self._fallback_controller = KrxRestFallbackController(
+            contract=self._contract,
+            access_token_manager=access_token_manager,
+            active_session_getter=lambda: self._active_session,  # ★ invoke 시점 read
+            last_tick_at_getter=lambda: self._last_tick_at,  # property → liveness
+        )
 
     @staticmethod
     def _epoch_to_kst_iso(epoch: Optional[float]) -> Optional[str]:
@@ -793,10 +944,10 @@ class KisFuturesClient:
                 "reconnect_attempt": self._reconnect_attempt_count,
                 "status_transitions": dict(self._status_transition_count),
                 # PR6d-2b — REST fallback decision telemetry (Stage A)
-                "fallback": dict(self._fallback_counters),
+                "fallback": dict(self._fallback_controller.counters),
             },
-            "fallback_last_at": self._last_fallback_at,
-            "fallback_last_at_kst": self._epoch_to_kst_iso(self._last_fallback_at),
+            "fallback_last_at": self._fallback_controller.last_fallback_at,
+            "fallback_last_at_kst": self._epoch_to_kst_iso(self._fallback_controller.last_fallback_at),
             "gap_buckets": {
                 "total": dict(self._liveness.gap_buckets_total),
                 "trade": dict(self._liveness.gap_buckets_trade),
@@ -901,8 +1052,7 @@ class KisFuturesClient:
             m = self.get_metrics()
             # PR6d-2b — REST fallback evaluation (status==stale일 때만, 60s cycle 1회).
             # Codex 권고: counter 부풀림 차단 위해 evaluation 단위는 summary cycle.
-            # Codex 2회차 minor fix: evaluation을 logger.info 앞으로 이동 — 같은 cycle의
-            # 결과가 즉시 같은 summary log에 반영되도록.
+            # KRX_FANOUT_REFACTOR_PLAN 5.1.B — wrapper 경유 (behavior-change-0).
             if self._status == "stale":
                 self._evaluate_rest_fallback(now)
 
@@ -925,131 +1075,41 @@ class KisFuturesClient:
                 fb["suppressed_below_threshold"], fb["suppressed_cooldown"], fb["suppressed_disabled"],
             )
 
+    # ── PR-B backward compat shims (KRX_FANOUT_REFACTOR_PLAN 5.1.B) ─────
+    # KrxRestFallbackController 추출 후 외부(테스트 46건 + 내부 미refactor 영역) 호환.
+
+    @property
+    def _fallback_counters(self) -> Dict[str, int]:
+        return self._fallback_controller.counters
+
+    @property
+    def _last_fallback_at(self) -> Optional[float]:
+        return self._fallback_controller.last_fallback_at
+
+    @_last_fallback_at.setter
+    def _last_fallback_at(self, value: Optional[float]) -> None:
+        self._fallback_controller.last_fallback_at = value
+
+    @property
+    def _fallback_tasks(self) -> "set[asyncio.Task]":
+        return self._fallback_controller.tasks
+
     def _evaluate_rest_fallback(self, now_epoch: float) -> str:
-        """PR6d-2b — REST fallback eligibility 평가 + counter 갱신.
+        """backward compat wrapper — `self._fallback_controller.evaluate()` 위임.
 
-        Returns:
-            decision label ("eligible" / "suppressed_*"). 운영 admin/log용.
-
-        호출 시점 (Codex BLOCKING 1 fix):
-        - status normal → stale 전이 직후 (짧은 stale 6~15s 누락 차단)
-        - summary log loop stale 지속 중 1회 (긴 stale 추가 평가, 60s cycle)
-
-        검사 순서 (Codex BLOCKING 2 fix — env=false telemetry 의미 보존):
-        1. session_end_grace 차단 (시간 기반, frame_age 무관)
-        2. frame_age < KRX_REST_FALLBACK_STALE_SEC → below_threshold
-        3. cooldown 미경과 → cooldown
-        4. NOT enabled (env=false) → disabled
-        5. 모두 통과 → eligible
-
-        의도: env=false + grace 구간 stale은 suppressed_session_end_grace로
-        분류되어 "5/8 4건 grace 차단 검증" 가능. env 검사가 우선이면 모든
-        evaluation이 disabled로 묶여 telemetry 의미 X.
-
-        Stage A (env=false default): eligible 도달해도 실제 REST 호출 X.
-        Stage B+: eligible 시 fetch_kis_futures_quote 호출 (별도 GO).
+        호출 시점 / 검사 순서 / return label 모두 동일 (KrxRestFallbackController
+        내부 로직 보존). test_krx_fallback_eligibility.py 46건 호환.
         """
-        self._fallback_counters["evaluated"] += 1
-
-        # 1. session-end grace (시간 기반 차단 우선 — Codex 권고)
-        now_kst = datetime.fromtimestamp(now_epoch, tz=KST).replace(tzinfo=None)
-        if is_in_session_end_grace(
-            now_kst,
-            self._active_session,
-            config.KRX_REST_FALLBACK_SESSION_END_GRACE_MIN,
-            self._contract.expiry_date,
-        ):
-            self._fallback_counters["suppressed_session_end_grace"] += 1
-            return "suppressed_session_end_grace"
-
-        # 2. frame_age 임계
-        frame_age = (
-            now_epoch - self._last_tick_at if self._last_tick_at else 0.0
-        )
-        if frame_age < config.KRX_REST_FALLBACK_STALE_SEC:
-            self._fallback_counters["suppressed_below_threshold"] += 1
-            return "suppressed_below_threshold"
-
-        # 3. cooldown
-        if self._last_fallback_at and (
-            now_epoch - self._last_fallback_at < config.KRX_REST_COOLDOWN_SEC
-        ):
-            self._fallback_counters["suppressed_cooldown"] += 1
-            return "suppressed_cooldown"
-
-        # 4. env (마지막 — Stage A에서 모든 다른 조건 통과 시만 disabled로 잡힘)
-        if not config.KRX_REST_FALLBACK_ENABLED:
-            self._fallback_counters["suppressed_disabled"] += 1
-            return "suppressed_disabled"
-
-        # 5. 모든 조건 통과 — eligible
-        self._fallback_counters["eligible"] += 1
-
-        # Stage B (Codex 2 권고): env=true일 때만 실제 REST 호출 task 생성.
-        # _last_fallback_at은 task 생성 직전에 갱신 (cooldown 호출 시도 시점 기준).
-        # finally 블록 갱신 시 REST hang에서 cooldown 안 잡혀 중복 task 폭주 위험.
-        if config.KRX_REST_FALLBACK_ENABLED:
-            self._last_fallback_at = now_epoch
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # async loop 외 호출 (테스트 환경 등) — task 생성 skip
-                return "eligible"
-            task = loop.create_task(self._invoke_rest_fallback())
-            self._fallback_tasks.add(task)
-            task.add_done_callback(self._fallback_tasks.discard)
-        return "eligible"
+        return self._fallback_controller.evaluate(now_epoch)
 
     async def _invoke_rest_fallback(self) -> None:
-        """Stage B — eligible 시 REST 호출. 결과는 log/counter만 (broadcast/DB 미반영).
-
-        Stage C에서 broadcast/DB 반영 (별도 GO + V2 protocol).
-        예외/None은 모두 rest_error counter로 분류.
-        """
-        if self._access_token_manager is None:
-            # Stage A 호환 — wiring 안 됐으면 rest_error로 분류 + skip
-            self._fallback_counters["rest_error"] += 1
-            logger.warning(
-                "[kis_ws] REST fallback skip — access_token_manager 미주입 (wiring 누락)"
-            )
-            return
-        try:
-            result = await fetch_kis_futures_quote(
-                contract=self._contract,
-                token_manager=self._access_token_manager,
-                session=self._active_session,
-            )
-            if result is not None:
-                self._fallback_counters["rest_success"] += 1
-                logger.info(
-                    "[kis_ws] REST fallback success contract=%s price=%s session=%s",
-                    self._contract.short_code, result.get("price"), result.get("session"),
-                )
-            else:
-                self._fallback_counters["rest_error"] += 1
-                logger.warning(
-                    "[kis_ws] REST fallback returned None contract=%s",
-                    self._contract.short_code,
-                )
-        except Exception:
-            self._fallback_counters["rest_error"] += 1
-            logger.exception("[kis_ws] REST fallback 호출 실패")
+        """backward compat wrapper — controller의 _invoke_rest_fallback 위임."""
+        await self._fallback_controller._invoke_rest_fallback()
 
     async def stop(self) -> None:
         self._stop.set()
-        # PR6d-2b Stage B (Codex 1 권고): 잔여 fallback task cancel + await.
-        # fire-and-forget task가 shutdown 시 pending warning 또는 hang 방지.
-        if self._fallback_tasks:
-            pending = list(self._fallback_tasks)
-            for t in pending:
-                if not t.done():
-                    t.cancel()
-            for t in pending:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._fallback_tasks.clear()
+        # KRX_FANOUT_REFACTOR_PLAN 5.1.B — controller cleanup 위임 (pending cancel/await/clear).
+        await self._fallback_controller.cleanup_tasks()
 
     async def _run_session(self, session: str) -> None:
         """단일 active session 동안 WebSocket 연결 유지 + reconnect."""
@@ -1099,6 +1159,8 @@ class KisFuturesClient:
             # fallback evaluation 1회. 짧은 stale (6~15s) 누락 차단.
             # summary loop은 60s cycle이라 transition만으로는 부족 (stale 종료 후 평가).
             if prev_status == "normal" and new_status == "stale":
+                # KRX_FANOUT_REFACTOR_PLAN 5.1.B — wrapper 경유 (behavior-change-0,
+                # 기존 `client._evaluate_rest_fallback` patch.object 테스트 호환).
                 self._evaluate_rest_fallback(time.time())
 
     async def _connect_and_listen(self, session: str, approval_key: str) -> None:

@@ -18,8 +18,8 @@
 
 - ✅ C: KrxRedisLatestWriter 객체 분리 (commit `f5ba9bc`, 2026-05-14)
 - ✅ A-pre: liveness invariants 회귀 가드 (commit `6faa2dd`, 2026-05-14 — 5 tests)
-- ✅ A: KrxLivenessMonitor 추출 (이번 PR — `_set_status`/RestFallbackController는 client 잔류)
-- ⏸ B: KrxRestFallbackController 추출 (A 안정 후, 5/18 전 가능)
+- ✅ A: KrxLivenessMonitor 추출 (commit `eb085c1`, 2026-05-14 — `_set_status` 잔류)
+- ✅ B: KrxRestFallbackController 추출 (이번 PR — getter 패턴, wrapper 경유 behavior-change-0)
 - ⏸ D: KrxAlertEvaluator stub (Stage C 영역과 함께 검토)
 
 **5/18 후 결정 영역 (본 doc 범위 외)**:
