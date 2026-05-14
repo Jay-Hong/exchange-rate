@@ -183,29 +183,73 @@ REST 결과 반영 범위 (옵션 B 채택 시 추가 결정):
 - DB INSERT: 옵션 (insert_source_rate_if_changed 적용 시 자연 deduplication)
 - 알림 evaluation: 옵션 (REST 결과도 tick과 동등 처리 vs probe 결과는 분류만)
 
-## 6. 알림 기준 변화 옵션
+## 6. 알림 기준 변화 — B1 채택 (장기 알림 입력 모델 변경)
 
 **현재**: `_process_source_alerts_safe(db, changed_rates)` — DB INSERT 발생한 *changed_rates*만 평가.
 
+### 6.1 옵션 세분화
+
 **옵션 A — DB row 기반 유지** (변경 X):
+
 - 장점: 기존 코드 재사용, 회귀 위험 최소
 - 단점: WebSocket tick 빈도 ↑ + DB insert-if-changed 적용 시 *짧은 시간 안 임계값 통과 + 회복* 시 알림 누락
 
-**옵션 B — Tick/observation 기반**:
-- 모든 WS tick에서 알림 evaluator 호출 (DB insert 여부 무관)
-- 장점: threshold crossing 정밀도 ↑ (모든 임계값 통과 캡쳐)
-- 단점: 알림 빈도 증가 가능성, 중복 알림 방지 로직 강화 필요 (cooldown / triggered flag 등)
+**옵션 B — Tick/observation 기반** (3 sub-option):
 
-**옵션 C — Hybrid (per-tick 평가 + 가격 변화 임계값)**:
-- Tick 기반 평가 + 마지막 평가 가격과 비교
-- 미세한 가격 변동 (예: 1원 미만)은 skip
-- 옵션 B 정밀도 + 노이즈 감소
+- **B1**: tick/observation 평가 + 기존 1회성 `triggered/disabled` semantics 유지
+  - 임계값 통과 즉시 발화 + 자동 비활성
+  - 사용자 재활성화 전까지 추가 발화 X (현 spec 동일)
+  - 정밀도 ↑ (10s 사이 spike 캡쳐). **단, 같은 설정의 반복 발화는 기존 1회성 semantics로 막지만, 기존에 누락되던 crossing이 발화될 수 있어 총 발화 건수는 증가 가능** (Codex 정정 — *"알림 빈도 변화 없음"은 부정확*)
+- **B2 — 사용자 설정 반복 간격** (Codex/사용자 합의 reframing — *"cooldown 반복"은 implementer-centric 표현, 제품 spec은 사용자 설정 반복 간격*):
+  - 조건이 만족되는 동안 *사용자가 선택한 간격*으로 반복 알림을 보낸다.
+  - 지원 후보: `once`, 1m, 5m, 10m, 30m, 1h, 2h, 4h, 6h, 12h, 1d
+  - schema: `repeat_interval_sec` 필드 추가 (**`null = once`**, 정수 = 초 단위 간격)
+  - **`null = once` 설계**: 기존 알림 설정과 자연 호환 (마이그레이션 시 default null → 현 1회성 그대로 동작)
+  - 1차 Upbit canary에서는 **구현하지 않고**, 별도 ADR/PR에서 `repeat_interval_sec` 필드를 추가하는 알림 설정 모델 확장으로 처리. 은행/Investing/USDT/KRX/비교 알림 **공통 기능**으로 다룬다.
+- **B3 — Threshold direction crossing 반복**:
+  - 발화 후 가격이 임계값 반대편으로 → 다시 통과 시 재발화
+  - schema: `last_side`, `last_crossed_at` 등 추가 가능
+  - B2보다 정교, 더 복잡한 별도 기능 — 별 ADR/PR (B2 안정 후)
 
-**추천**: **옵션 B** (KRX/REALTIME_ARCHITECTURE_PLAN "알림은 모든 tick" 원칙과 일관). 단, **이는 사용자 가치 변화** — 알림 빈도/정밀도 trade-off.
+### 6.2 1차 결정 — B1 채택 (Codex 권장 wording)
 
-→ **결정 대기 (사용자 가치 영역)**:
-- A/B/C 선택?
-- B 채택 시 cooldown 정책 (per-setting / per-rate change / time-based)?
+> **1차 결정: B1 채택.**
+> 알림 평가는 DB INSERT 이벤트가 아니라 tick/observation을 입력으로 받는다.
+> 다만 기존 1회성 `triggered/disabled` semantics는 유지한다.
+>
+> 이 결정은 USDT 전용이 아니라 **장기 알림 입력 모델 변경**이다.
+> USDT Upbit canary에서 먼저 검증하고, 이후 KRX, 은행/Investing 가격 알림,
+> 비교 알림으로 확장한다.
+>
+> 단, Phase B.1 구현에서는 **공통 interface만 정의하고,
+> 실제 구현은 Upbit canary에 필요한 최소 범위**로 제한한다.
+> B2 사용자 설정 반복 간격, B3 direction-crossing 반복은 별도 사용자 요구와 ADR/PR 전까지 구현하지 않는다.
+
+### 6.3 구조 결정
+
+- **Evaluator 입력**: `AlertObservation(source, asset, rate, timestamp, kind)` data model — DB row가 아닌 *observation*
+- **source/asset normalization** (구현자 재해석 여지 차단):
+  - USDT 거래소: `source ∈ {"upbit", "bithumb", "coinone", "korbit", "gopax"}`, `asset = "usdt-krw"`
+  - KRX: `source = "krx"`, `asset = "usd-krw-futures"` (만기 contract는 별도 metadata)
+  - 은행: `source ∈ {"kb", "hana", "shinhan", ...}` (기존 `notification_settings.bank` 필드 매핑), `asset ∈ {"usd-krw", "jpy-krw", "eur-krw"}` (기존 `currency` 매핑)
+  - Investing: `source = "investing"` (기존 `bank="investing"` 매핑), `asset` 동일
+  - 비교 알림: `kind="comparison"` + source/asset 페어는 evaluator 내부 정책 (multi-source 평가 detail은 별 phase)
+- **`kind` field 의미**: observation 분류 (예: `"trade"` / `"quote"` / `"snapshot"` / `"rest_probe"`) — alert evaluator 자체는 가격 평가만, kind는 metric/log/필터 등 보조 용도
+- **DB insert는 evaluator 입력이 아니라 별도 side effect** — fanout에서 독립 handler
+- **Interface는 source-neutral**: USDT/KRX/은행/Investing/비교 알림 공통 형태 (재발명 회피)
+- **구현 범위는 canary 최소**: Upbit observation → UsdtAlertEvaluator 1개만. 다른 source는 별 phase.
+- **반복 간격 설계 (B2 확장 여지)**: evaluator interface가 *once-only를 hardcode 하지 말 것*. setting에서 `repeat_interval_sec` 읽고 분기 — 현 단계에서는 `null = once`만 분기 (1회성 spec), 미래 B2 구현 시 정수 값 분기 추가. 즉 Phase B.1에서 `repeat_interval_sec is None` 분기만 처리해도 미래 호환.
+- **B3 확장 여지**: interface에서 direction state 덧붙일 수 있도록 — *지금은 구현 X*.
+
+### 6.4 확장 순서 (이번 doc 범위 외)
+
+1. USDT Upbit canary (Phase B.1) — interface 정립 + 최소 구현 (B1 + `repeat_interval_sec is None` 분기만)
+2. USDT 5거래소 확장 (Phase B.2~B.4) — 같은 evaluator 재사용
+3. KRX (Phase C 후보) — 같은 패턴 적용
+4. 은행/Investing 가격 알림 — 같은 패턴 (운영 사용자 N명, 알림 정밀도 ↑ 체감 변화)
+5. **알림 설정 모델 `repeat_interval_sec` 확장** — 별 ADR/PR. schema (`notification_settings` + `source_notification_settings`) + API (POST/PUT request 필드) + iOS/Android client (간격 선택 UI). 4 source 공통 적용. 신규 기능 — 사용자 가치 ↑.
+6. 비교 알림 (Phase 3 후보) — interface 위에 추가 평가
+7. B3 (direction crossing) — 별 ADR/PR (B2 안정 후, 더 복잡한 기능)
 
 ## 7. DB 저장 정책 — 기존 close/last 유지
 
@@ -246,7 +290,7 @@ KRX 패턴 (`KRX_FUTURES_ENABLED`) 일관:
   - tick-to-insert 비율 측정 (대부분 tick은 동일 가격 → INSERT skip 정상)
   - 운영 DB write throughput / replication lag 등 baseline 비교
 - usdt:krw topic builder Redis-first hit (DB query 미호출)
-- 알림 옵션 B 채택 시: 알림 빈도/정밀도 baseline (cooldown 정책 효과 확인)
+- B1 (tick/observation 평가) 채택 — 알림 빈도/정밀도 baseline 측정. tick 기반으로 이전 polling에서 누락되던 crossing이 잡혀 *총 발화 건수 증가 가능* (§6.1 정정 참조). B2 (사용자 설정 반복 간격)는 canary 범위 외라 baseline 측정 항목 X.
 
 ## 9. OHLC 1차 제외 + 미래 재검토 조건
 
@@ -284,37 +328,45 @@ KRX 패턴 (`KRX_FUTURES_ENABLED`) 일관:
 - read path 분리 (latest는 Redis, 분석은 새 테이블)
 - 마이그레이션 전략 (기존 source_rates 영향 X)
 
-## 10. 결정 대기 항목 요약
+## 10. 현재 결정 (7 항목 모두 확정)
 
-본 doc 작성 시점에 *옵션 + 추천*만 제시. 구현 GO 전 사용자 결정 영역:
+Phase A 결과로 모든 결정 잠금. Phase B 구현 진입 시 본 표가 spec.
 
-| # | 항목 | 옵션 | 추천 |
-|---|---|---|---|
-| 1 | Canary 거래소 | Upbit / Bithumb / Coinone / Korbit / Gopax | **Upbit** (§4) |
-| 2 | REST fallback 정책 | A (continuous), B (silent probe), C (hybrid) | **B** + silent threshold (§5) |
-| 3 | 알림 기준 변화 | A (DB row 유지), B (tick 기반), C (hybrid) | **B** + cooldown 정책 (§6) ★ **사용자 가치 영역** |
-| 4 | DB 저장 정책 | 기존 유지 / 1초 last writer 별도 | **기존 유지** (§7) |
-| 5 | Feature flag 명명 | `USDT_WS_<EXCHANGE>_ENABLED` per-exchange | per-exchange (§8) |
-| 6 | OHLC 1차 도입 여부 | 도입 / **deferred** | deferred (§9) |
-| 7 | 공식 WS 문서 재확인 trigger | Phase A 끝 / 구현 진입 직전 | **구현 진입 직전** (§2) |
-
-★ #3 (알림 기준)은 *사용자 가치 trade-off*라 사용자 결정 영역.
+| # | 항목 | 결정 |
+|---|---|---|
+| 1 | Canary 거래소 | **Upbit** (§4) |
+| 2 | REST fallback 정책 | **옵션 B (silent probe)** + source-specific frame/heartbeat silence threshold (§5) — 거래소별 provisional, Phase B.0 재확인 후 확정 |
+| 3 | 알림 기준 변화 | **B1 채택** — tick/observation 기반 평가 + 기존 1회성 `triggered/disabled` semantics 유지 (§6). 장기 알림 입력 모델 변경. USDT canary에서 검증 후 KRX/은행/Investing/비교 알림 확장. **공통 interface만 정의, 구현은 Upbit canary 필요 최소 범위**. **B2 (사용자 설정 반복 간격, `repeat_interval_sec` 필드)**: 4 source 공통 schema/API/client 확장 — 별 ADR/PR. **B3 (direction crossing)**: B2 안정 후 별 ADR/PR. |
+| 4 | DB 저장 정책 | **기존 `insert_source_rate_if_changed` 유지** (§7) |
+| 5 | Feature flag | **per-exchange `USDT_WS_<EXCHANGE>_ENABLED`** (§8) |
+| 6 | OHLC 도입 | **Deferred** — 1차 미도입, 차트/분석 요구 명확화 시 `source_rate_windows` 새 테이블 + 별 ADR/PR (§9) |
+| 7 | 공식 WS 문서 재확인 trigger | **Phase B.0 (구현 진입 직전)** — 별 task (§2, §11) |
 
 ## 11. 구현 진입 순서 (참고 — 본 doc 범위 외)
 
 설계 GO 후 implementation phase 흐름:
 
 1. **Phase B.0**: 공식 WS 문서 재확인 (§2 + Codex 7 spec checklist). 특히 *Bithumb subscribe payload Upbit 호환성* (§4)과 *Bithumb/Korbit heartbeat 정책 명시 여부* (§5 provisional threshold) 확정 필요.
-2. **Phase B.1**: Upbit canary 구현
+2. **Phase B.1**: Upbit canary 구현 — **interface 공통 + 구현 최소 범위**:
+   - **`AlertObservation(source, asset, rate, timestamp, kind)` data model** 신설 (source-neutral, 4 source 호환 가능 shape)
+   - **base Evaluator interface** 정의 (`evaluate_observation(obs: AlertObservation)`) — B2/B3 확장 여지(repeat interval state / direction state 덧붙임)는 *interface 차원만* 검토, 구현 X
    - `UsdtWsClient` + `UsdtLivenessMonitor` + `UsdtRestFallbackController` skeleton
    - `UsdtRedisLatestWriter` (기존 `set_latest_usdt_rate_from_sync_job` 재사용)
-   - `UsdtAlertEvaluator` (옵션 B 결정 시)
+   - **`UsdtAlertEvaluator` (B1 최소 구현)** — `AlertObservation` 받음, 1회성 spec 유지, source_notification_settings 평가, 기존 `process_source_rate_alerts`와 호환 wrapper 유지 (점진 마이그레이션)
    - `USDT_WS_UPBIT_ENABLED=false` default
    - Unit tests + smoke 기준
 3. **Phase B.2**: Canary 활성화 + 24h 운영 관찰
 4. **Phase B.3**: Bithumb 확장 (Upbit 호환)
 5. **Phase B.4**: Coinone / Korbit / Gopax 순차 확장
 6. **Phase B.5**: 5거래소 모두 활성 + 기존 REST polling 격하/제거
+
+**Phase C 후보 (별 PR, 본 doc 범위 외)**:
+
+- KRX `KrxAlertEvaluator` 신설 + 기존 KRX fanout에 부착 (KRX_FANOUT_REFACTOR_PLAN 5.1.D)
+- 은행/Investing 가격 알림을 `AlertObservation` 기반 evaluator로 전환 (운영 사용자 N명 — 알림 정밀도 ↑ 체감 변화 영역)
+- **알림 설정 모델 `repeat_interval_sec` 확장 (B2 구현)** — 별 ADR/PR. schema (`notification_settings` + `source_notification_settings`) + API (POST/PUT 필드 추가) + iOS/Android client (간격 선택 UI). 4 source 공통 적용. `null = once`라 기존 알림 호환. 신규 기능 — 사용자 가치 ↑.
+- 비교 알림 (`comparison_alerts`) — 같은 evaluator 위에 multi-source 평가 추가
+- B3 (direction crossing) — B2 안정 후 별 ADR/PR
 
 ## 12. 참조
 
