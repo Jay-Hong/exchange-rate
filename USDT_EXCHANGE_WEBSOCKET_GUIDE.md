@@ -1,9 +1,11 @@
 # USDT Exchange WebSocket Guide
 
 > Status: implementation guide
-> Verified: 2026-04-28
+> Verified: **2026-05-14 (Phase B.0 re-verification — 5거래소 모두 spec 변경 없음)**
+>
+> Prior verification: 2026-04-28 (USDT_TAB_PROPOSAL Phase 1)
 > Scope: 국내 거래소 5종의 `USDT/KRW` 현재가(ticker)를 백엔드에서 WebSocket으로 수집하기 위한 가이드
-> Related: [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md), [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md), [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md)
+> Related: [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md), [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md), [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md), [USDT_WS_DESIGN_PLAN.md](USDT_WS_DESIGN_PLAN.md)
 
 ## 1. 결론
 
@@ -16,6 +18,26 @@
 | `coinone` | `wss://stream.coinone.co.kr` | 불필요 | 가능: `KRW` + `USDT` topic | `data.last` |
 | `korbit` | `wss://ws-api.korbit.co.kr/v2/public` | 불필요 | 가능: `usdt_krw` | `data.close` |
 | `gopax` | `wss://wsapi.gopax.co.kr` | 불필요 | ticker는 전체 구독만 가능 | `last` |
+
+## 1.1 Phase B.0 재확인 결과 (2026-05-14)
+
+5거래소 공식 docs 재확인 — **spec 변경 없음**. 기존 2026-04-28 verification 그대로 유효.
+
+| Source | 공식 문서 | endpoint | subscribe | price 필드 | heartbeat | rate limit | 단일 pair | 변경 |
+|---|---|---|---|---|---|---|---|---|
+| upbit | [docs.upbit.com](https://docs.upbit.com/kr/reference/websocket-ticker) | 유지 | 유지 | 유지 | 유지 | 유지 | 가능 (`KRW-USDT`) | **변경 없음** |
+| bithumb | [apidocs.bithumb.com v2.1.5](https://apidocs.bithumb.com/v2.1.5/reference/현재가-ticker) | 유지 | **Upbit 호환 유지** (`{ticket, type=ticker, codes=[KRW-USDT], format}`) | 유지 (`trade_price`) | 미명시 (provisional 30s 유지) | 미명시 | 가능 (`KRW-USDT`) | apidocs URL v1.2.0 → v2.1.5 (호환 spec, 페이지 path만 변경) |
+| coinone | [docs.coinone.co.kr](https://docs.coinone.co.kr/reference/public-websocket-ticker) | 유지 | 유지 (TICKER channel `{quote_currency:KRW, target_currency:USDT}`) | 유지 (`data.last`) | App PING 5분 명시 유지 | 20 connection/IP 유지 | 가능 | **변경 없음** |
+| korbit | [docs.korbit.co.kr](https://docs.korbit.co.kr/) | 유지 (`wss://ws-api.korbit.co.kr/v2/public`) | 유지 (`{method:subscribe, type:ticker, symbols:[usdt_krw]}`) | 유지 (`data.close`) | 미명시 (provisional 30s 유지) | "slow network 시 message drop 가능" 명시 (rate limit 수치 미명시) | 가능 (`usdt_krw`) | **변경 없음** |
+| gopax | [gopax.github.io/wsapi](https://gopax.github.io/wsapi/) | 유지 | 유지 (`{n:SubscribeToTickers, o:{}}`) | 유지 (`last`) | Primus `::ping::` 30s 유지 | 동시 연결 20/IP, 연결 시도 20/sec/IP ([gopax.github.io/wsapi](https://gopax.github.io/wsapi/)) | ✗ 전체 ticker만 (서버 필터) | **변경 없음** |
+
+**Codex critical 3 항목 확인 결과**:
+
+1. **Bithumb이 Upbit 호환 subscribe/payload 유지**: ✓ 확인. `{ticket}/{type=ticker, codes=[KRW-USDT]}/{format}` 패턴 동일. `trade_price` 필드 동일.
+2. **Bithumb/Korbit heartbeat 공식 명시 여부**: ✗ 둘 다 명시 없음 — provisional 30s threshold 유지 (USDT_WS_DESIGN_PLAN §5).
+3. **Gopax 단일 pair 구독**: ✗ 여전히 전체 ticker 구독 후 서버 필터 구조 유지.
+
+→ design plan §3 (fanout 구조) / §4 (canary 선정) / §5 (REST fallback threshold) 영향 없음. USDT_WS_DESIGN_PLAN §10 결정 그대로 Phase B.1 진입 가능.
 
 권장 구조:
 

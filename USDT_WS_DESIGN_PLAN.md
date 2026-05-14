@@ -61,27 +61,30 @@ WebSocket tick (per-exchange long-running)
 
 ## 2. 기존 가이드 기반 WebSocket 스펙 요약
 
-> ⚠️ **본 절은 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) (2026-04-28 검증본) 요약이며, 본 design doc에서 새로 공식 문서를 재검증하지 않음**. 최신 공식 확인표는 *Phase B.0 산출물* (구현 진입 직전 web 재확인 task).
+> ✅ **Phase B.0 재확인 완료 (2026-05-14)**: 5거래소 공식 docs 재확인 결과 **spec 변경 없음**. 상세는 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §1.1](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) Phase B.0 재확인 표 참조. Codex critical 3 항목(Bithumb Upbit 호환 / Bithumb/Korbit heartbeat 명시 / Gopax 단일 pair) 모두 기존 상태 유지 — design plan §3/§5 영향 없음, §10 결정 그대로 Phase B.1 진입 가능.
+>
+> 이전 검증: [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) 2026-04-28 검증본.
 
 | Source | Endpoint | Subscribe 단일 KRW-USDT | Price 필드 | Heartbeat |
 |---|---|---|---|---|
 | **upbit** | `wss://api.upbit.com/websocket/v1` | ✓ `["KRW-USDT"]` | `trade_price` | WS ping 30s |
-| **bithumb** | `wss://ws-api.bithumb.com/websocket/v1` | ✓ `["KRW-USDT"]` (Upbit 호환) | `trade_price` | WS ping 30s |
+| **bithumb** | `wss://ws-api.bithumb.com/websocket/v1` | ✓ `["KRW-USDT"]` (Upbit 호환) | `trade_price` | 미명시 (provisional 30s) |
 | **coinone** | `wss://stream.coinone.co.kr` | ✓ TICKER channel (`KRW`+`USDT`) | `data.last` | App PING 5분 (서버 30분 idle) |
-| **korbit** | `wss://ws-api.korbit.co.kr/v2/public` | ✓ `usdt_krw` | `data.close` | WS ping 30s |
+| **korbit** | `wss://ws-api.korbit.co.kr/v2/public` | ✓ `usdt_krw` | `data.close` | 미명시 (provisional 30s) |
 | **gopax** | `wss://wsapi.gopax.co.kr` | ✗ 전체 ticker 구독 (서버 필터) | `last` | Primus `::ping::` 30s |
 
 **Reconnect**: 거래소 공통 exponential backoff (1s → 2s → 4s ... 30s cap)
 
-**검증 필요 (구현 진입 시 web 재확인)**:
-- 모든 endpoint 도메인/path 변경 없음 확인
-- subscribe payload 형식 변경 없음 확인
-- price 필드 (이름/타입) 변경 없음 확인
-- heartbeat 규칙 변경 없음 확인
-- rate limit 변경 없음 확인 (특히 connection 수)
-- 재연결 권장 방식 변경 없음 확인
+**Phase B.0 재확인 완료 (2026-05-14)** — 7 spec 항목 모두 기존 상태 유지:
 
-→ 본 design doc은 2026-04-28 guide 기준 작성. **구현 진입 GO 직전에 공식 문서 재확인 step 필수** (별도 task, web search 사용).
+- endpoint 도메인/path 변경 없음 ✓
+- subscribe payload 형식 변경 없음 ✓
+- price 필드 (이름/타입) 변경 없음 ✓
+- heartbeat 규칙 변경 없음 ✓ (Bithumb/Korbit는 여전히 공식 미명시 → provisional 30s 유지)
+- rate limit 변경 없음 ✓ (Gopax 동시 연결 20/IP, 연결 시도 20/sec/IP 등 [guide §14](USDT_EXCHANGE_WEBSOCKET_GUIDE.md#14-약관정책-1차-검증) 표 동일)
+- 재연결 권장 방식 변경 없음 ✓
+
+→ 본 design doc은 2026-04-28 guide 기준 + 2026-05-14 Phase B.0 재확인. **구현이 장기간 지연(>1-2개월)되면 진입 GO 직전 한 번 더 재확인 권장** (5거래소 docs는 빈도 낮지만 endpoint/heartbeat 변경 이력 있음).
 
 ## 3. USDT용 fanout 구조 (KRX 패턴 재사용)
 
