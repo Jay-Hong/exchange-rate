@@ -350,7 +350,7 @@ Phase A 결과로 모든 결정 잠금. Phase B 구현 진입 시 본 표가 spe
 설계 GO 후 implementation phase 흐름:
 
 1. **Phase B.0**: 공식 WS 문서 재확인 (§2 + Codex 7 spec checklist). 특히 *Bithumb subscribe payload Upbit 호환성* (§4)과 *Bithumb/Korbit heartbeat 정책 명시 여부* (§5 provisional threshold) 확정 필요.
-2. **Phase B.1**: Upbit canary 구현 — **interface 공통 + 구현 최소 범위**:
+2. **Phase B.1**: Upbit canary 구현 — **interface 공통 + 구현 최소 범위**. 상세 PR 분할은 [§12 Phase B.1 PR 분할](#12-phase-b1-pr-분할-7-pr) 참조:
    - **`AlertObservation(source, asset, rate, timestamp, kind)` data model** 신설 (source-neutral, 4 source 호환 가능 shape)
    - **base Evaluator interface** 정의 (`evaluate_observation(obs: AlertObservation)`) — B2/B3 확장 여지(repeat interval state / direction state 덧붙임)는 *interface 차원만* 검토, 구현 X
    - `UsdtWsClient` + `UsdtLivenessMonitor` + `UsdtRestFallbackController` skeleton
@@ -371,7 +371,47 @@ Phase A 결과로 모든 결정 잠금. Phase B 구현 진입 시 본 표가 spe
 - 비교 알림 (`comparison_alerts`) — 같은 evaluator 위에 multi-source 평가 추가
 - B3 (direction crossing) — B2 안정 후 별 ADR/PR
 
-## 12. 참조
+## 12. Phase B.1 PR 분할 (7 PR)
+
+Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag 아래 land. Codex/Claude 합의 (2026-05-14).
+
+### 12.1 Guardrail 4종 (전 PR 공통 잠금)
+
+1. **PR4-PR5 divergence 의도적**: PR4 land 후 ~ PR5 land 전 window 동안 WS는 Redis만, 기존 REST polling ([app/crawlers/usdt_sources.py](app/crawlers/usdt_sources.py))은 DB만 write. canary OFF default 라 운영 영향 0. 코드 리뷰 시 "WS가 DB write 안 함" 의문 발생 시 본 단서 인용.
+2. **additive only**: PR1~PR7 어디서도 기존 REST polling 제거/격하 금지. polling은 baseline 안전망 유지. polling 격하/교체는 별 PR (canary Stage 4, §12.3).
+3. **per-PR smoke 기준 필수**: 표의 "Smoke 기준" column이 다음 PR code merge 진입의 1차 게이트. 단 **PR2 24h dev soak**는 *Stage 1 운영 활성화 (`USDT_WS_UPBIT_ENABLED=true`)* 진입 직전 충족 — PR3~PR7 code merge는 PR2 unit test + 단기 connect 검증으로 충분 (PR3 LivenessMonitor는 PR2 leak/race 진단 도구 역할도 가능). 24h soak의 목적은 운영 진입 전 leak/race 감지이지 dev 리듬 차단 아님.
+4. **AlertObservation source-neutral interface + Upbit-only 구현**: PR6 범위는 `AlertObservation(source, asset, rate, timestamp, kind)` dataclass + base `Evaluator` interface + `UsdtAlertEvaluator` (Upbit-only). bank/investing/KRX adapter는 PR6 범위 외 (Phase C 별 PR).
+
+### 12.2 7 PR scope/non-scope/flag/rollback/smoke
+
+| PR | Scope | Non-scope | Flag default | Rollback | Smoke 기준 |
+|---|---|---|---|---|---|
+| **PR1** | feature flag env 도입 + process lifecycle scaffolding (bootstrap/start/stop) + scheduler hook. 외부 connection 없음. | WS connect, DB/Redis write, alert, fallback | `USDT_WS_UPBIT_ENABLED=false` | env unset | flag=false 무동작 unit test + flag=true skeleton lifecycle log emit (no network) |
+| **PR2** | flag ON 시 WS connect/subscribe/parse + log only. raw tick → 정규화까지 검증. | Redis/DB write, alert, liveness, fallback | `USDT_WS_UPBIT_ENABLED=false` | env=false | **24h dev soak with flag=true**: no leak, no panic, parse rate normal vs REST polling 비교 |
+| **PR3** | LivenessMonitor + reconnect. frame/heartbeat silence detection + gap bucket structured metrics. fallback action 없음. | REST fallback trigger, Redis/DB write, alert | `USDT_WS_UPBIT_ENABLED=false` | env=false | 강제 disconnect 시 gap bucket log 발생 + reconnect 후 정상 복귀, gauge stable |
+| **PR4** | Redis latest writer. `set_latest_usdt_rate_from_sync_job` 재사용 (ADR-029 direct write). `latest:source:upbit:usdt-krw` 갱신. legacy_policy allowlist 통과 여부 확인 (정책 변경 없음). | DB write, alert, fallback, **broadcast read path / legacy_policy 변경** (기존 Z-2 infra 그대로 사용) | `USDT_WS_UPBIT_ENABLED=false` | env=false (Redis stale 데이터는 mirror_age로 자연 만료) | flag=true 시 `latest:source:upbit:usdt-krw` 값/타임스탬프 갱신 확인 + `mirror_age` 5초 이내 안정. broadcast end-to-end 반영은 Stage 1 별도 stage check (PR4 단독 범위 밖) |
+| **PR5** | DB writer. `insert_source_rate_if_changed` 호출 (§7 정책 유지). REST polling은 그대로 (additive). | alert, fallback, polling 제거 | `USDT_WS_UPBIT_ENABLED=false` | env=false (DB write만 멈춤, schema/data 보존) | DB row 증가율 baseline 측정 — 기존 REST polling row 대비 변화량 (insert-if-changed 정책 충실 검증) |
+| **PR6** | AlertObservation dataclass + base Evaluator interface (source-neutral) + UsdtAlertEvaluator (B1 최소, Upbit-only). 기존 1회성 `triggered/disabled` semantics 유지. 기존 `process_source_rate_alerts` 호환 wrapper. | KRX/bank/investing adapter, B2 (`repeat_interval_sec`), B3 (direction crossing) | `USDT_WS_UPBIT_ENABLED=false` | env=false (evaluator 호출 안 됨, 기존 REST polling이 alert 처리) | 동일 threshold/source/asset에서 WS-based trigger와 기존 REST-based trigger 결과 일치 (1회성 발화 보존) |
+| **PR7** | REST fallback controller (silent probe 옵션 B). liveness signal 기반 trigger. Redis/DB write 범위 명시 잠금. | polling 격하/제거, KRX/bank/investing fallback | `USDT_WS_UPBIT_ENABLED=false` | env=false (fallback 비활성, 기존 REST polling이 baseline) | WS 강제 종료 시 fallback probe → Redis latest stale 시간 ≤ §5 거래소별 threshold |
+
+### 12.3 Canary stage 매핑
+
+| Stage | 진입 조건 | 행동 | 운영 영향 |
+|---|---|---|---|
+| **Stage 0** | PR1~PR3 land 후 | flag default false. dev/soak에서만 flag=true. | 0 |
+| **Stage 1** | PR4~PR5 land + `USDT_WS_UPBIT_ENABLED=true` | WS → Redis (PR4) + DB (PR5) write. 기존 REST polling 유지 (additive). | 1주 운영 관찰 후 다음 단계 |
+| **Stage 2** | PR6 land + `USDT_WS_UPBIT_ENABLED=true` | alert evaluator를 WS observation으로 전환 (Upbit 한정). 1회성 trigger semantics 보존. | 알림 발화 dedup 확인 |
+| **Stage 3** | PR7 land + `USDT_WS_UPBIT_ENABLED=true` | REST fallback 활성. WS dead 시 silent probe로 Redis/DB 보전. | freshness 정책 검증 |
+| **Stage 4** | 별 PR (본 doc 범위 외) | Bithumb 확장 → Coinone/Korbit/Gopax → 기존 REST polling 격하/제거. | Phase B.3~B.5 |
+
+### 12.4 Rollback 정책 공통
+
+- **1차 수단**: env toggle `USDT_WS_UPBIT_ENABLED=false`. 모든 PR에서 즉시 격리 (lifecycle 격리 패턴, KRX `KRX_FUTURES_ENABLED` 검증 완료).
+- **2차 수단**: 코드 revert. lifecycle/skeleton 의존성 깨질 위험 있어 1차 실패 시 한정.
+- **PR5 (DB writer) 특이**: rollback 시 `source_rates` schema/data 보존 (write만 멈춤). 별도 마이그레이션 불필요.
+- **PR6 (AlertObservation) 특이**: rollback 시 기존 `process_source_rate_alerts` REST polling이 alert 처리 baseline 유지.
+
+## 13. 참조
 
 - [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md): 거래소별 WS spec (2026-04-28 검증)
 - [USDT_TOPIC_MIGRATION_PLAN.md](USDT_TOPIC_MIGRATION_PLAN.md): Z-2 series, topic protocol 마이그레이션 history
