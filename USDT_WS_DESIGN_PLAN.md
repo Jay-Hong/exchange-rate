@@ -254,18 +254,19 @@ REST 결과 반영 범위 (옵션 B 채택 시 추가 결정):
 6. 비교 알림 (Phase 3 후보) — interface 위에 추가 평가
 7. B3 (direction crossing) — 별 ADR/PR (B2 안정 후, 더 복잡한 기능)
 
-## 7. DB 저장 정책 — 기존 close/last 유지
+## 7. DB 저장 정책 — 기존 helper + 1초 window 적용
 
 [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §9](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) 권장: *"모든 tick INSERT 금지. 최소 changed 또는 1초 last 정책"*.
 
-**1차 결정**: 기존 `insert_source_rate_if_changed` **그대로 유지**.
+**결정 (PR5 구현 확정, 2026-05-14)**: 기존 `insert_source_rate_if_changed` 그대로 호출하되, WS tick은 **1초 window debounce 후 last tick만 helper에 전달**.
 
 - WebSocket tick 빈도 (Upbit 초당 다수) ≫ 10s REST polling
 - 모든 tick INSERT 금지 — DB 폭증 위험
-- 기존 `insert_source_rate_if_changed`는 가격 변경 시만 INSERT → 자연 deduplication
-- WS tick에 적용 시: 동일 가격 연속 tick → INSERT 0회 (기존 동작)
-
-→ **결정 대기**: 기존 유지 (추천)? 또는 1초 last writer 별도 도입?
+- helper 자체는 가격 변경 시만 INSERT → 자연 deduplication
+- 추가로 1초 window debounce → 동일 가격 연속 tick에서도 SELECT 비교 부담까지 절감
+- 구현: `UpbitDbWriter._flush_after_window` (KRX `KrxDbWriter` 패턴 mirror, [app/crawlers/usdt_ws/upbit.py](app/crawlers/usdt_ws/upbit.py))
+- close 시 1초 window 기다리지 않고 마지막 pending tick 즉시 flush — shutdown 마지막 tick 보장
+- helper signature / schema 변경 없음 (timestamp 자동 생성, exchange timestamp 저장은 별 PR)
 
 ## 8. Feature flag / Rollback / Smoke 기준
 
