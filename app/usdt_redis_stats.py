@@ -17,7 +17,7 @@ scope:
 
 참조:
     - DECISIONS.md ADR-029: USDT mirror skip + direct write + read-path DB fallback
-    - app/latest_rates_cache.py: set_/get_latest_source_rate_from_sync_job
+    - app/latest_rates_cache.py: set_/get_latest_usdt_rate_from_sync_job
     - app/usdt_topic_payload.py: load_and_build_tether_tab_payload DB fallback 분기
 """
 from __future__ import annotations
@@ -85,7 +85,7 @@ def _get_source_stats_locked(source: str) -> Dict[str, Any]:
 
 
 def record_direct_write_success(source: str) -> None:
-    """direct write 성공 — set_latest_source_rate_from_sync_job 호출 site."""
+    """direct write 성공 — set_latest_usdt_rate_from_sync_job 호출 site."""
     with _lock:
         stats = _get_source_stats_locked(source)
         stats["direct_write_success"] += 1
@@ -100,7 +100,7 @@ def record_direct_write_failure(source: str) -> None:
 
 
 def record_redis_read_hit(source: str) -> None:
-    """sync Redis GET hit — get_latest_source_rate_from_sync_job 성공."""
+    """sync Redis GET hit — get_latest_usdt_rate_from_sync_job 성공."""
     with _lock:
         stats = _get_source_stats_locked(source)
         stats["redis_read_hit"] += 1

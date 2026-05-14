@@ -3347,7 +3347,7 @@ PR Z-2d (2026-05-12)로 legacy 노출 정책을 `legacy_policy.should_include_so
 USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder Redis-first read** 조합을 사용한다.
 
 1. **Direct write (B-Step 1, `1f3ab36`)**:
-   - `app/crawlers/usdt_sources.py`가 `insert_source_rate_if_changed`가 True 반환 시 `latest_rates_cache.set_latest_source_rate_from_sync_job` 호출
+   - `app/crawlers/usdt_sources.py`가 `insert_source_rate_if_changed`가 True 반환 시 `latest_rates_cache.set_latest_usdt_rate_from_sync_job` 호출
    - sync `redis.Redis` client 사용 — scheduler thread executor에 자연스러움
    - cache.py의 `redis.asyncio.Redis`(async circuit_breaker 사용)와 격리 — broadcast/mirror Redis path 오염 방지
    - 실패는 logger.warning + False, 호출자(crawler)에 전파 X

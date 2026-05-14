@@ -402,7 +402,7 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
     ):
         """공통 mock setup — context manager list 반환.
 
-        PR Z-2e B-Step 2 후: USDT 5거래소는 Redis-first (get_latest_source_rate_from_sync_job)
+        PR Z-2e B-Step 2 후: USDT 5거래소는 Redis-first (get_latest_usdt_rate_from_sync_job)
         → 1개라도 None이면 전체 DB fallback (get_latest_source_rates_for_topic).
         usdt_rates_per_source(legacy shape dict)를 두 mock 모두에 자동 변환 dispatch.
         KRX는 여전히 get_latest_source_rate(asset="usd-krw-futures") 사용.
@@ -438,7 +438,7 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
 
         return [
             patch.object(utp, "get_usdt_exchange_entries", return_value=_FIVE_USDT_DEFS),
-            patch.object(utp, "get_latest_source_rate_from_sync_job",
+            patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                          side_effect=fake_redis_read),
             patch.object(utp, "get_latest_source_rates_for_topic",
                          side_effect=fake_db_fallback),
@@ -558,7 +558,7 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
             krx_calls.append((source, asset))
             return None
 
-        with patch.object(utp, "get_latest_source_rate_from_sync_job", redis_mock), \
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job", redis_mock), \
              patch.object(utp, "get_latest_source_rates_for_topic", db_fallback_mock), \
              patch.object(utp, "get_latest_source_rate", side_effect=fake_get_latest_source_rate), \
              patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
@@ -582,7 +582,7 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
         redis_mock = MagicMock(return_value=None)
         db_fallback_mock = MagicMock(return_value=[])
         get_source_mock = MagicMock(return_value=None)
-        with patch.object(utp, "get_latest_source_rate_from_sync_job", redis_mock), \
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job", redis_mock), \
              patch.object(utp, "get_latest_source_rates_for_topic", db_fallback_mock), \
              patch.object(utp, "get_latest_source_rate", get_source_mock), \
              patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]) as bank_mock, \
@@ -672,7 +672,7 @@ class TestUsdtKrwRedisFirstReadContract(unittest.TestCase):
                     "timestamp": "2026-05-12T15:00:00+09:00"}
 
         db_mock = MagicMock(return_value=[])
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=fake_redis) as redis_mock, \
              patch.object(utp, "get_latest_source_rates_for_topic", db_mock), \
              patch.object(utp, "get_latest_source_rate", return_value=None), \
@@ -701,7 +701,7 @@ class TestUsdtKrwRedisFirstReadContract(unittest.TestCase):
             for s in ("upbit", "bithumb", "coinone", "korbit")
         ]
         db_mock = MagicMock(return_value=db_fallback_result)
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=fake_redis) as redis_mock, \
              patch.object(utp, "get_latest_source_rates_for_topic", db_mock), \
              patch.object(utp, "get_latest_source_rate", return_value=None), \
@@ -736,7 +736,7 @@ class TestUsdtKrwRedisFirstReadContract(unittest.TestCase):
              "timestamp": "2026-05-12T17:00:00+09:00"}
             for s in utp.TETHER_TAB_EXCHANGE_SOURCES
         ])
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=fake_redis), \
              patch.object(utp, "get_latest_source_rates_for_topic", db_mock), \
              patch.object(utp, "get_latest_source_rate", return_value=None), \
@@ -758,7 +758,7 @@ class TestUsdtKrwRedisFirstReadContract(unittest.TestCase):
              "timestamp": "2026-05-12T18:00:00+09:00"}
             for s in utp.TETHER_TAB_EXCHANGE_SOURCES
         ]
-        with patch.object(utp, "get_latest_source_rate_from_sync_job", return_value=None), \
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job", return_value=None), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=db_result), \
              patch.object(utp, "get_latest_source_rate", return_value=None), \
              patch.object(utp, "select_latest_bank_rates_from_db", return_value=[]), \
@@ -843,7 +843,7 @@ class TestDbFallbackStatsCounter(unittest.TestCase):
             return {"source": source, "asset": asset, "rate": 1.0,
                     "timestamp": "2026-05-12T15:00:00+09:00"}
 
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=fake_redis), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_source_rate", return_value=None), \
@@ -865,7 +865,7 @@ class TestDbFallbackStatsCounter(unittest.TestCase):
             return {"source": source, "asset": asset, "rate": 1.0,
                     "timestamp": "2026-05-12T15:00:00+09:00"}
 
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=fake_redis), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_source_rate", return_value=None), \
@@ -925,7 +925,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
             return investing_redis
 
         return [
-            patch.object(utp, "get_latest_source_rate_from_sync_job",
+            patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                          side_effect=fake_usdt_redis),
             patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]),
             patch.object(utp, "get_latest_bank_rate_from_sync_job",
@@ -940,7 +940,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
     def test_all_bank_redis_hit_no_db_call(self):
         """KB/Hana 모두 Redis hit → bank DB fallback 호출 X."""
         bank_db_mock = MagicMock(return_value=[])
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=lambda s, a: self._native(s, "usdt-krw", 1.0)), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_bank_rate_from_sync_job",
@@ -968,7 +968,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
             {"bank": "kb", "currency": "usd-krw", "rate": 9999.0, "timestamp": "..."},  # 안 사용
             {"bank": "hana", "currency": "usd-krw", "rate": 1380.5, "timestamp": "..."},
         ])
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=lambda s, a: self._native(s, "usdt-krw", 1.0)), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_bank_rate_from_sync_job",
@@ -999,7 +999,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
         bank_db_mock = MagicMock(return_value=[
             {"bank": "kb", "currency": "usd-krw", "rate": 1370.0, "timestamp": "..."},
         ])
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=lambda s, a: self._native(s, "usdt-krw", 1.0)), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_bank_rate_from_sync_job",
@@ -1021,7 +1021,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
     def test_investing_hit_no_db_fallback(self):
         """Investing Redis hit → investing DB 호출 X."""
         inv_db_mock = MagicMock(return_value=None)
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=lambda s, a: self._native(s, "usdt-krw", 1.0)), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_bank_rate_from_sync_job",
@@ -1041,7 +1041,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
         inv_db_mock = MagicMock(return_value={
             "bank": "investing", "currency": "usd-krw", "rate": 1371.2, "timestamp": "..."
         })
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=lambda s, a: self._native(s, "usdt-krw", 1.0)), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_bank_rate_from_sync_job",
@@ -1063,7 +1063,7 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
             "currency": "usd-krw-futures", "bank": "krx",
             "rate": 1382.0, "timestamp": "...",
         })
-        with patch.object(utp, "get_latest_source_rate_from_sync_job",
+        with patch.object(utp, "get_latest_usdt_rate_from_sync_job",
                           side_effect=lambda s, a: self._native(s, "usdt-krw", 1.0)), \
              patch.object(utp, "get_latest_source_rates_for_topic", return_value=[]), \
              patch.object(utp, "get_latest_bank_rate_from_sync_job",

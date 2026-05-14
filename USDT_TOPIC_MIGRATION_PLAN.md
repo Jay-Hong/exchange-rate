@@ -411,7 +411,7 @@ Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB �
     environment dry-run 필수 (이후 D1 도입).
 
 - B-Step 1 재시도 (`1f3ab36`, 2026-05-12): sync `redis.Redis` client 별도
-  - `latest_rates_cache.set_latest_source_rate_from_sync_job` 추가
+  - `latest_rates_cache.set_latest_usdt_rate_from_sync_job` 추가
   - scheduler thread에 자연스러운 sync client (redis-py sync는 thread-safe pool)
   - async circuit_breaker 미사용 — broadcast/mirror Redis path 격리
   - `_mirror_changed_source_to_redis` (crawler helper) — INSERT 성공 직후 호출
@@ -419,7 +419,7 @@ Redis-first 모델 미적용. usdt:krw topic builder의 데이터 freshness/DB �
   - 운영 smoke: USDT direct write 실패 0건, `mirrored_at - timestamp` ~6-7ms
 
 - B-Step 2 (`6f743f0`, 2026-05-12): usdt:krw topic builder Redis-first read
-  - `get_latest_source_rate_from_sync_job` (sync read helper)
+  - `get_latest_usdt_rate_from_sync_job` (sync read helper)
   - `crud.get_latest_source_rates_for_topic` (topic 전용 raw fetcher,
     Z-2d legacy_policy 우회 명시)
   - `TETHER_TAB_EXCHANGE_SOURCES = ("upbit", "bithumb", "coinone", "korbit", "gopax")`

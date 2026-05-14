@@ -130,7 +130,7 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
 
     Best-effort: 실패는 logger.warning만. **USDT source는 Z-2d allowlist 미통과로
     mirror cycle skip** — 즉 본 direct write가 실패하면 mirror cycle이 safety
-    repair하지 않는다. Miss는 B-Step 2 read path가 `get_latest_source_rate_from_sync_job`
+    repair하지 않는다. Miss는 B-Step 2 read path가 `get_latest_usdt_rate_from_sync_job`
     None 감지 후 DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리.
     async circuit_breaker 오염 X (broadcast/mirror 격리).
     """
@@ -142,7 +142,7 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
         )
         return False
     try:
-        success = latest_rates_cache.set_latest_source_rate_from_sync_job(
+        success = latest_rates_cache.set_latest_usdt_rate_from_sync_job(
             source=source,
             asset=asset,
             rate=latest["rate"],

@@ -57,7 +57,7 @@ from app.crud import (
 from app.latest_rates_cache import (
     get_latest_bank_rate_from_sync_job,
     get_latest_investing_rate_from_sync_job,
-    get_latest_source_rate_from_sync_job,
+    get_latest_usdt_rate_from_sync_job,
 )
 from app.source_registry import get_source_definition, get_usdt_exchange_entries
 
@@ -284,7 +284,7 @@ def load_and_build_tether_tab_payload(
     # Stale 판정 X — USDT는 mirror cycle 미경유 (Z-2d allowlist), Redis 있으면
     # 시간 무관 사용. miss 처리만 DB fallback.
     redis_usdt_results = [
-        get_latest_source_rate_from_sync_job(source, "usdt-krw")
+        get_latest_usdt_rate_from_sync_job(source, "usdt-krw")
         for source in TETHER_TAB_EXCHANGE_SOURCES
     ]
     if all(r is not None for r in redis_usdt_results):

@@ -223,7 +223,7 @@ def _get_sync_client() -> Optional[redis_sync.Redis]:
     return _sync_client
 
 
-def set_latest_source_rate_from_sync_job(
+def set_latest_usdt_rate_from_sync_job(
     source: str,
     asset: str,
     rate: float,
@@ -249,7 +249,7 @@ def set_latest_source_rate_from_sync_job(
     Miss 처리 경로 (PR Z-2e B-Step 2):
         USDT source는 Z-2d allowlist 미통과로 mirror cycle skip. 즉 본 sync write가
         실패해도 mirror cycle이 safety repair하지 않는다. Miss/실패는 read path
-        (`get_latest_source_rate_from_sync_job`)에서 None 감지 후 호출자가
+        (`get_latest_usdt_rate_from_sync_job`)에서 None 감지 후 호출자가
         DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리한다.
     """
     # 모듈 내부 import — 순환 참조 회피 (usdt_redis_stats가 latest_rates_cache 의존 안 함)
@@ -276,7 +276,7 @@ def set_latest_source_rate_from_sync_job(
         return False
 
 
-def get_latest_source_rate_from_sync_job(
+def get_latest_usdt_rate_from_sync_job(
     source: str,
     asset: str,
 ) -> Optional[Dict[str, Any]]:
@@ -390,7 +390,7 @@ def get_latest_bank_rate_from_sync_job(
 ) -> Optional[Dict[str, Any]]:
     """sync builder 전용 Redis GET — bank latest (PR Z-2e Step 3a).
 
-    USDT source(get_latest_source_rate_from_sync_job)와 달리 bank는 Z-2d allowlist
+    USDT source(get_latest_usdt_rate_from_sync_job)와 달리 bank는 Z-2d allowlist
     통과 → mirror cycle이 매 3초 latest:bank:* key를 갱신한다. 따라서 stale 판정
     적용 (is_stale, 6초 기준). stale/miss/parse fail/error 시 None — 호출자 DB
     fallback. async circuit_breaker 미사용 (USDT helper 패턴 일관, broadcast Redis

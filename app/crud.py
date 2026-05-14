@@ -1868,7 +1868,7 @@ def get_latest_source_rates_for_topic(
 
     Returns:
         [{"source", "asset", "rate", "timestamp"}, ...] topic-native shape.
-        Redis read helper(`get_latest_source_rate_from_sync_job`)와 동일 shape —
+        Redis read helper(`get_latest_usdt_rate_from_sync_job`)와 동일 shape —
         builder normalization 단순화.
 
         해당 (source, asset) 조합이 DB에 없으면 결과 list에서 누락 (호출자가
