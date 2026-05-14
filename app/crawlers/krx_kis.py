@@ -1294,11 +1294,12 @@ class KrxDbWriter:
         십진수 라운딩 (`Decimal(float)` 패턴은 IEEE 잔차 carry-over 위험).
 
         ADR-031: DB insert 성공 시 Redis direct write 호출 (best-effort).
-        Redis write 실패는 격리 — DB writer loop / 호출자 흐름에 영향 X.
-        topic builder Redis-first read와 짝.
+        Redis write-through 책임은 `KrxRedisLatestWriter`로 위임 (PR Next-C,
+        KRX_FANOUT_REFACTOR_PLAN 5.1.C — behavior-change-0 책임 분리). 호출
+        위치/timing/예외 격리는 ADR-031 그대로 유지.
         """
         # 함수 내부 import — to_thread만 import 비용, 모듈 로드 영향 X.
-        from app import crud, latest_rates_cache
+        from app import crud
         from app.database import get_db_context
 
         normalized_rate = float(Decimal(tick["price"]).quantize(Decimal("0.1")))
@@ -1314,21 +1315,51 @@ class KrxDbWriter:
             )
             if not inserted:
                 return
-            # ADR-031: DB insert 성공 시점에 Redis direct write
-            # USDT _mirror_changed_source_to_redis 패턴 — latest 재조회로 timestamp 확보
-            try:
-                latest = crud.get_latest_source_rate(db, source, asset)
-                if latest is not None:
-                    latest_rates_cache.set_latest_krx_rate_from_sync_job(
-                        asset=asset,
-                        rate=latest["rate"],
-                        timestamp=latest["timestamp"],
-                    )
-            except Exception:
-                logger.exception(
-                    "[krx_db_writer] KRX Redis direct write 예외 (격리, DB fallback 의존)",
-                    extra={"source": source, "asset": asset},
-                )
+            # ADR-031: DB insert 성공 시점에 Redis direct write (KrxRedisLatestWriter 위임).
+            KrxRedisLatestWriter.write_after_db_insert(db, source, asset)
+
+
+class KrxRedisLatestWriter:
+    """KRX Redis latest direct write — KrxDbWriter에서 분리된 책임 (PR Next-C).
+
+    ADR-031 spec 유지 — DB insert 성공 후 같은 sync 컨텍스트에서 Redis latest
+    갱신. tick-level write가 *아님* (Stage C 영역, 별 phase).
+
+    behavior-change-0 책임 분리만 수행 (KRX_FANOUT_REFACTOR_PLAN 5.1.C):
+        - 호출 위치/timing: KrxDbWriter._sync_db_write inserted=True 분기 직후
+        - latest 재조회 방식: crud.get_latest_source_rate (USDT _mirror_changed_source_to_redis 패턴)
+        - Redis helper: latest_rates_cache.set_latest_krx_rate_from_sync_job (KRX 전용, stats 미부착)
+        - 예외 격리: writer loop 영향 X
+    """
+
+    @staticmethod
+    def write_after_db_insert(db: "Session", source: str, asset: str) -> None:
+        """DB insert 성공 직후 호출 — latest 재조회 + Redis SET.
+
+        Args:
+            db: SQLAlchemy session (DB insert commit 완료 상태).
+            source: 항상 "krx" (의미 명시 목적).
+            asset: 예 "usd-krw-futures".
+        """
+        # 함수 내부 import — to_thread 새 thread 환경에서 호출되므로 import 비용 격리.
+        # latest_rates_cache가 crud를 module-level로 import한다는 사실은 영향 X
+        # (양방향 import 아님, 단방향).
+        from app import crud, latest_rates_cache
+
+        try:
+            latest = crud.get_latest_source_rate(db, source, asset)
+            if latest is None:
+                return
+            latest_rates_cache.set_latest_krx_rate_from_sync_job(
+                asset=asset,
+                rate=latest["rate"],
+                timestamp=latest["timestamp"],
+            )
+        except Exception:
+            logger.exception(
+                "[krx_redis_latest_writer] write 예외 (격리, DB fallback 의존)",
+                extra={"source": source, "asset": asset},
+            )
 
 
 # ---------------------------------------------------------------------------

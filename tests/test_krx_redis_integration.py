@@ -352,5 +352,75 @@ class TestTetherTabPayloadKrxRedisFirst(unittest.TestCase):
         self.assertEqual(payload["data"]["usd_krw_futures"]["rate"], 1486.0)
 
 
+# ---------------------------------------------------------------------------
+# Group 5 — KrxRedisLatestWriter 단위 (PR Next-C, 책임 분리 behavior-change-0)
+# ---------------------------------------------------------------------------
+
+
+class TestKrxRedisLatestWriter(unittest.TestCase):
+    """KRX_FANOUT_REFACTOR_PLAN 5.1.C — KrxDbWriter에서 Redis write-through 책임 분리.
+
+    ADR-031 timing 시맨틱 그대로 유지 (DB insert 성공 후, 같은 sync 컨텍스트).
+    tick-level write가 *아님*. 단위 테스트 3개로 behavior-change-0 잠금.
+    """
+
+    SOURCE = "krx"
+    ASSET = "usd-krw-futures"
+
+    def test_calls_redis_helper_when_latest_found(self):
+        """latest row 있음 → set_latest_krx_rate_from_sync_job 정확 호출."""
+        from app.crawlers.krx_kis import KrxRedisLatestWriter
+
+        fake_latest = {
+            "rate": 1485.1,
+            "timestamp": "2026-05-13T15:00:00+09:00",
+        }
+        fake_db = MagicMock()
+
+        with patch("app.crud.get_latest_source_rate", return_value=fake_latest), \
+             patch("app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+                   return_value=True) as mock_redis:
+            KrxRedisLatestWriter.write_after_db_insert(fake_db, self.SOURCE, self.ASSET)
+
+        mock_redis.assert_called_once()
+        kwargs = mock_redis.call_args.kwargs
+        self.assertEqual(kwargs["asset"], self.ASSET)
+        self.assertEqual(kwargs["rate"], 1485.1)
+        self.assertEqual(kwargs["timestamp"], "2026-05-13T15:00:00+09:00")
+
+    def test_skips_redis_when_latest_is_none(self):
+        """latest row 없음 (get_latest_source_rate None 반환) → Redis helper 미호출."""
+        from app.crawlers.krx_kis import KrxRedisLatestWriter
+
+        fake_db = MagicMock()
+        with patch("app.crud.get_latest_source_rate", return_value=None), \
+             patch("app.latest_rates_cache.set_latest_krx_rate_from_sync_job") as mock_redis:
+            KrxRedisLatestWriter.write_after_db_insert(fake_db, self.SOURCE, self.ASSET)
+
+        mock_redis.assert_not_called()
+
+    def test_isolates_redis_helper_exception(self):
+        """★ Redis helper raise → 호출자로 전파 X + logger.exception 호출.
+
+        ADR-031 격리 시맨틱 유지 — DB writer loop / 호출자 흐름 영향 X.
+        """
+        from app.crawlers import krx_kis as krx_module
+        from app.crawlers.krx_kis import KrxRedisLatestWriter
+
+        fake_latest = {"rate": 1485.1, "timestamp": "2026-05-13T15:00:00+09:00"}
+        fake_db = MagicMock()
+
+        with patch("app.crud.get_latest_source_rate", return_value=fake_latest), \
+             patch("app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+                   side_effect=RuntimeError("redis dead")), \
+             patch.object(krx_module.logger, "exception") as mock_log:
+            try:
+                KrxRedisLatestWriter.write_after_db_insert(fake_db, self.SOURCE, self.ASSET)
+            except Exception:
+                self.fail("Redis helper 예외가 KrxRedisLatestWriter에서 전파됨 — 격리 실패")
+
+        mock_log.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
