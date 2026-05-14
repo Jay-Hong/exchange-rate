@@ -440,6 +440,28 @@ docker compose up -d fastapi
 
 ---
 
+## 운영 이력
+
+각 stage 진행 시 결과/시각/특이사항 누적 기록. 24h Soak / Stage 1/2/3 진입 시
+동일 형식으로 추가.
+
+### 2026-05-15 Stage 0 Dev Smoke
+
+- 실행 환경: EC2 production backend (3.36.30.32, `~/exchange-rate`)
+- 활성화 시각: 2026-05-15 01:01 KST (= 2026-05-14 16:01 UTC)
+- Commit: `e8ee834` + PR7 `17471f7` 포함 (Phase B.1 PR1~PR7 + follow-ups)
+- 결과: **PASS** (7/7)
+- WS connect/subscribed/first tick: PASS (01:01:23 first tick)
+- Redis latest mirror_age: **~4s** (<5s 기준 통과)
+- DB insert-if-changed: PASS, rate 1479.0 ↔ 1480.0 alternating, sub-second 간격 INSERT
+- Alert evaluator: no-crash, active untriggered upbit usdt-krw alerts = **0**
+- Reconnect/fallback warning: none
+- Existing REST polling: PASS (변경 로그 5건 01:01:26~01:01:46, 실패 0건)
+- Note: gopax latest 30분 stale (15:33 vs 16:03), failure log 0건 → 가격 미변동
+  추정. Upbit WS scope 외 별도 추적.
+- Next: **24h Soak 시작** (토글 유지). First 1h checkpoint at **2026-05-15 02:01 KST**
+  — reconnect count / Redis saturation / alert backlog / DB row count 확인.
+
 ## 참조
 
 - [USDT_WS_DESIGN_PLAN.md](USDT_WS_DESIGN_PLAN.md) — 설계/PR 분할/long-term roadmap
