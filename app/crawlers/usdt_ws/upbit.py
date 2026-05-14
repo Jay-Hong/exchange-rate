@@ -1,29 +1,42 @@
-"""USDT WebSocket — Upbit canary client (PR3 LivenessMonitor + reconnect).
+"""USDT WebSocket — Upbit canary client (PR4 + Redis latest writer).
 
-USDT_WS_DESIGN_PLAN §12.2 PR1~PR3 누적.
+USDT_WS_DESIGN_PLAN §12.2 PR1~PR4 누적.
 PR1: lifecycle skeleton.
 PR2: connect/subscribe/parse + log only.
-PR3: UsdtLivenessMonitor + reconnect loop + status state machine
-     + explicit ping/pong heartbeat observation (§5 frame/heartbeat
-     silence ≠ price tick silence 원칙 준수).
+PR3: UsdtLivenessMonitor + reconnect + explicit ping/pong heartbeat (§5).
+PR4: UpbitRedisWriter — tick-level Redis latest write (fire-and-forget).
 
-NO Redis (PR4), NO DB (PR5), NO alert (PR6), NO REST fallback (PR7).
+NO DB (PR5), NO alert (PR6), NO REST fallback (PR7).
 
-PR3 핵심 §5 준수:
-    - stale 판정 기준: `last_activity_at = max(last_tick_at, last_heartbeat_at)`
-    - ticker가 5분 silent 이어도 heartbeat이 30s 이내면 normal 유지
-    - heartbeat과 ticker 둘 다 silent여야 stale
-    - 저유동성 false positive 차단 (§5 핵심 nuance)
+PR4 핵심 설계 (Codex 검토):
+    - **tick-level Redis write**: KRX는 Stage C(tick-level)를 보류한 영역이지만
+      USDT는 새 build이라 behavior change 우려 없음. `latest`의 최신성 보존을
+      위해 매 valid tick마다 write (debounce 없음).
+    - **fire-and-forget background task**: recv loop가 Redis I/O에 묶이지 않음.
+      `schedule()`은 즉시 반환, 백그라운드에서 `to_thread`로 sync helper 호출.
+    - **write order 직렬화 (asyncio.Lock)**: schedule 순서 = Redis SET 순서
+      보장. 병렬 to_thread + redis-py connection pool 조합에서 발생하는
+      "old tick이 new tick을 덮음" race 차단. lock은 to_thread 완료까지 보유 →
+      latency가 누적되면 MAX_PENDING_WRITES guard로 새 schedule skip.
+    - **last-write-wins (helper 정책)**: `set_latest_usdt_rate_from_sync_job`는
+      timestamp compare 없이 SET. 본 writer 측 직렬화로 sender side order는
+      보장. REST polling과 dual-writer 시 한쪽 helper invocation order는 X —
+      timestamp compare는 별 PR.
+    - **MAX_PENDING_WRITES guard**: Redis 장애 시 task 폭증 방지 (20 in-flight 한도).
+    - **close() drain-first**: 정상 shutdown 시 pending write 보존 (1s timeout 후 cancel).
+    - **Redis 실패 격리**: helper False / exception 모두 log만, WS session 유지.
 
-PR3 guardrail (Codex 검토):
-    - `_set_status("stale")`은 counter + log만. REST probe / Redis / DB /
-      alert side effect 절대 호출 X (PR7에서 fallback trigger 추가 예정).
+PR4 non-scope 유지:
+    - DB insert (PR5)
+    - alert evaluation (PR6)
+    - REST fallback (PR7)
+    - broadcast/read path / legacy_policy 변경 (기존 Z-2 infra 그대로)
 
 KRX 패턴 mirror:
-    - `KrxLivenessMonitor` (krx_kis.py:513) — frame counters lifetime,
-      last_*_at + gap_buckets + max_gap active-session reset
-    - `_run_session` reconnect (krx_kis.py:1114) — RECONNECT_BACKOFF_SEQ + tail
-    - `ping_interval=None` + 명시 ping (krx_kis.py:1168) — heartbeat observation
+    - `KrxLivenessMonitor` (krx_kis.py:513) — frame counters + gap state
+    - `_run_session` reconnect (krx_kis.py:1114) — backoff sequence
+    - `ping_interval=None` + 명시 ping (krx_kis.py:1168) — heartbeat 관찰
+    - `_handle_message` evolve: bool → Optional[dict] (PR3 Codex 예측)
 """
 from __future__ import annotations
 
@@ -31,12 +44,17 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from app import latest_rates_cache
+
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.upbit")
+
+_KST = timezone(timedelta(hours=9))
 
 UPBIT_WS_URL = "wss://api.upbit.com/websocket/v1"
 UPBIT_SUBSCRIBE_TICKET = "fxi-usdt-upbit"
@@ -60,6 +78,10 @@ RECONNECT_BACKOFF_TAIL = 30.0
 
 # Gap bucket boundaries — KRX (krx_kis.py:556) 동일.
 _GAP_BUCKET_KEYS = ("<=1s", "<=2s", "<=5s", "<=10s", "<=30s", "<=60s", ">60s")
+
+# Redis writer guards
+MAX_PENDING_WRITES = 20   # task 폭증 안전망 (Redis 장애 시)
+REDIS_CLOSE_TIMEOUT_SEC = 1.0  # close() drain timeout — 후 강제 cancel
 
 
 class UsdtLivenessMonitor:
@@ -153,6 +175,97 @@ class UsdtLivenessMonitor:
         return now - last > threshold
 
 
+class UpbitRedisWriter:
+    """Upbit USDT/KRW Redis latest writer — tick-level, fire-and-forget.
+
+    PR4 핵심:
+        - 매 valid tick → `set_latest_usdt_rate_from_sync_job` 호출 (debounce 없음)
+        - schedule()은 background task 생성 후 즉시 반환 (recv loop 격리)
+        - asyncio.to_thread로 sync helper 호출 (event loop 비non-blocking)
+        - MAX_PENDING_WRITES 한도로 Redis 장애 시 task 폭증 차단
+        - close() drain-first, timeout 후 cancel (마지막 tick 보존)
+
+    Failure isolation:
+        - helper False 반환 / exception → log only, WS session 영향 X
+        - last-write-wins (helper 기존 정책 유지, timestamp compare는 별 PR)
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        # write order 직렬화 (Codex review): 병렬 to_thread + connection pool
+        # 조합으로 old tick이 new tick을 덮는 race 차단. lock은 to_thread
+        # 완료까지 보유 — schedule 순서 = Redis SET 순서.
+        self._write_lock: asyncio.Lock = asyncio.Lock()
+
+    def schedule(self, tick: dict) -> None:
+        """tick → background Redis write task. fire-and-forget.
+
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning.
+        Redis 장애로 task가 누적되는 시나리오 차단.
+        """
+        if len(self._tasks) >= MAX_PENDING_WRITES:
+            logger.warning(
+                "[usdt_ws.upbit] Redis write queue saturated (%d in-flight) — skip tick",
+                len(self._tasks),
+            )
+            return
+        task = asyncio.create_task(self._write_async(tick))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _write_async(self, tick: dict) -> None:
+        """sync Redis helper를 to_thread로 호출. 실패는 격리.
+
+        `_write_lock`으로 직렬화 — 동시 to_thread + connection pool 조합에서
+        발생할 수 있는 SET 순서 역전 차단 (Codex review).
+        """
+        async with self._write_lock:
+            ts_iso = datetime.fromtimestamp(tick["timestamp_ms"] / 1000, tz=_KST).isoformat()
+            try:
+                success = await asyncio.to_thread(
+                    latest_rates_cache.set_latest_usdt_rate_from_sync_job,
+                    source=tick["source"],
+                    asset=tick["asset"],
+                    rate=tick["rate"],
+                    timestamp=ts_iso,
+                )
+                if not success:
+                    logger.warning(
+                        "[usdt_ws.upbit] Redis write returned False "
+                        "(helper 내부 log 참조, WS session 유지)"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.upbit] Redis write task crashed (격리, WS session 유지)"
+                )
+
+    async def close(self, timeout: float = REDIS_CLOSE_TIMEOUT_SEC) -> None:
+        """pending writes drain — 정상 shutdown 시 마지막 tick latest 보존.
+
+        timeout (default 1s) 안에 drain 안 되면 강제 cancel (Codex review).
+        Redis hung인 경우 무한 대기 방지.
+        """
+        if not self._tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[usdt_ws.upbit] Redis writer close timeout (%ds) — cancel %d pending tasks",
+                timeout, len(self._tasks),
+            )
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        finally:
+            self._tasks.clear()
+
+
 class UpbitWsClient:
     """Upbit USDT/KRW WebSocket client (PR3 reconnect + liveness).
 
@@ -178,6 +291,8 @@ class UpbitWsClient:
             "normal": 0, "reconnecting": 0, "stale": 0,
         }
         self._reconnect_attempt_count: int = 0
+        # PR4 Redis latest writer (tick-level, fire-and-forget)
+        self._redis_writer: UpbitRedisWriter = UpbitRedisWriter()
 
     async def start(self) -> None:
         """reconnect 루프. 단일 session crash 시 backoff 후 재시도.
@@ -341,22 +456,23 @@ class UpbitWsClient:
             "timestamp_ms": ts_ms,
         }
 
-    def _handle_message(self, raw) -> bool:
-        """parse + log only. Returns True if valid ticker, False if ignored/invalid.
+    def _handle_message(self, raw) -> Optional[dict]:
+        """parse + log only. Returns normalized tick dict or None if invalid/ignored.
 
-        반환값은 caller가 `_liveness.observe_tick()` 호출 여부 결정 — invalid /
-        non-ticker frame (status / KRW-BTC / JSON parse 실패 등)을 liveness
-        activity와 분리 (Codex review). PR4/PR5/PR6 downstream은 별도 hook.
+        PR4 signature evolve (PR3 Codex 예측): bool → Optional[dict]. parsed tick을
+        caller에 반환 → recv loop가 `_redis_writer.schedule(tick)` 호출 가능.
+        non-ticker (status / KRW-BTC / JSON parse 실패 등)는 None — Liveness
+        activity / Redis write 둘 다 분리.
         """
         tick = self._parse_ticker_message(raw)
         if tick is None:
-            return False
+            return None
         if not self._first_tick_logged:
             logger.info("[usdt_ws.upbit] first tick", extra=tick)
             self._first_tick_logged = True
         else:
             logger.debug("[usdt_ws.upbit] tick", extra=tick)
-        return True
+        return tick
 
     async def _ping_loop(self, ws) -> None:
         """주기적 ping → pong 성공 시 heartbeat observation (§5 준수).
@@ -430,10 +546,12 @@ class UpbitWsClient:
                             logger.info("[usdt_ws.upbit] connection closed after stop")
                             return
                         raise
-                    # valid ticker만 liveness activity로 집계 (Codex review).
-                    # invalid/non-ticker frame은 metric 오염 방지.
-                    if self._handle_message(raw):
+                    # valid ticker만 liveness activity로 집계 + Redis write
+                    # schedule (Codex review). invalid/non-ticker frame은 둘 다 X.
+                    tick = self._handle_message(raw)
+                    if tick is not None:
                         self._liveness.observe_tick(time.time())
+                        self._redis_writer.schedule(tick)
             finally:
                 ping_task.cancel()
                 try:
@@ -442,3 +560,9 @@ class UpbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.upbit] ping_task cleanup 실패")
+                # PR4: pending Redis writes drain (timeout 후 cancel).
+                # 정상 shutdown 시 마지막 tick latest 보존.
+                try:
+                    await self._redis_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.upbit] redis_writer.close() 실패")

@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, scheduler
 from app.crawlers.usdt_ws import upbit as upbit_mod
 from app.crawlers.usdt_ws.upbit import (
+    MAX_PENDING_WRITES,
     PING_INTERVAL_SEC,
     PING_TIMEOUT_SEC,
     RECONNECT_BACKOFF_SEQ,
@@ -32,6 +34,7 @@ from app.crawlers.usdt_ws.upbit import (
     UPBIT_SUBSCRIBE_TICKET,
     UPBIT_TARGET_CODE,
     UPBIT_WS_URL,
+    UpbitRedisWriter,
     UpbitWsClient,
     UsdtLivenessMonitor,
 )
@@ -426,7 +429,8 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestNoDownstreamSideEffects(unittest.TestCase):
-    """PR2는 connect/parse/log만. Redis/DB/alert/fallback은 PR4-PR7 범위.
+    """PR4: Redis writer (`set_latest_usdt_rate_from_sync_job`) 허용.
+    DB/alert/fallback은 PR5-PR7 범위라 여전히 금지.
 
     docstring/comment에서 미래 PR을 참조할 수 있으므로 substring 매칭이 아닌
     `import` 라인 + 함수 호출 패턴(`<name>(`)으로 좁힘.
@@ -440,8 +444,8 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
     def test_upbit_module_has_no_downstream_imports(self):
         source = inspect.getsource(upbit_mod)
         imports = "\n".join(self._extract_import_lines(source))
-        # Redis writer (PR4)
-        self.assertNotIn("latest_rates_cache", imports)
+        # Redis writer (PR4) — latest_rates_cache 허용. set_latest_usdt_rate
+        # helper만 사용, 다른 helper나 mirror cycle은 X.
         # DB writer (PR5)
         self.assertNotIn("SourceRate", imports)
         self.assertNotIn("SessionLocal", imports)
@@ -459,18 +463,42 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
         """call/instantiation 패턴 — docstring 언급은 무시, 실제 호출만 검출."""
         source = inspect.getsource(upbit_mod)
         forbidden_calls = [
-            # Redis writer
-            "set_latest_usdt_rate(",
-            # DB writer
+            # DB writer (PR5)
             "insert_source_rate_if_changed(",
             "SourceRate(",
-            # alert
+            # alert (PR6)
             "process_source_rate_alerts(",
             "send_fcm(",
             "AlertObservation(",
+            # REST fallback (PR7) — helper 호출 (HTTP client invocation)
+            "aiohttp.ClientSession(",
+            "requests.get(",
+            "requests.post(",
+            "httpx.get(",
+            "httpx.post(",
         ]
         for pattern in forbidden_calls:
-            self.assertNotIn(pattern, source, f"Forbidden PR4-PR7 invocation: {pattern}")
+            self.assertNotIn(pattern, source, f"Forbidden PR5-PR7 invocation: {pattern}")
+
+    def test_upbit_module_uses_only_allowed_redis_helper(self):
+        """PR4 Redis writer는 set_latest_usdt_rate_from_sync_job만 호출.
+
+        다른 latest_rates_cache helper (set_latest_krx_*, set_latest_bank_*,
+        mirror cycle helper 등) 미사용 — USDT 외 source 오염 방지.
+        """
+        source = inspect.getsource(upbit_mod)
+        # USDT 전용 helper만 허용
+        self.assertIn("set_latest_usdt_rate_from_sync_job", source)
+        # 다른 helper는 호출 X
+        forbidden_helpers = [
+            "set_latest_krx_rate_from_sync_job(",
+            "set_latest_bank_rate_from_sync_job(",
+            "set_latest_investing_rate_from_sync_job(",
+            "warmup_latest_rates(",
+            "mirror_latest_to_redis(",
+        ]
+        for pattern in forbidden_helpers:
+            self.assertNotIn(pattern, source, f"Forbidden cross-source helper: {pattern}")
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +849,288 @@ class TestUpbitHeartbeat(unittest.IsolatedAsyncioTestCase):
             await client._ping_loop(mock_ws)
 
         mock_ws.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# PR4 — UpbitRedisWriter (tick-level Redis latest writer)
+# ---------------------------------------------------------------------------
+
+def _make_tick(rate: float = 1486.0, timestamp_ms: int = 1777370239843) -> dict:
+    return {
+        "source": "upbit",
+        "asset": "usdt-krw",
+        "rate": rate,
+        "timestamp_ms": timestamp_ms,
+    }
+
+
+class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
+
+    async def test_schedule_returns_immediately(self):
+        """schedule()은 await 없이 즉시 반환 — recv loop blocking 방지."""
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ):
+            start = time.time()
+            writer.schedule(_make_tick())
+            elapsed = time.time() - start
+
+        try:
+            self.assertLess(elapsed, 0.01, "schedule() should return synchronously")
+            self.assertEqual(len(writer._tasks), 1)
+        finally:
+            await writer.close()
+
+    async def test_write_calls_helper_with_correct_args(self):
+        """source/asset/rate/timestamp_iso 정확 전달."""
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ) as mock_helper:
+            writer.schedule(_make_tick(rate=1500.5, timestamp_ms=1777370239843))
+            await writer.close()
+
+        mock_helper.assert_called_once()
+        kwargs = mock_helper.call_args.kwargs
+        self.assertEqual(kwargs["source"], "upbit")
+        self.assertEqual(kwargs["asset"], "usdt-krw")
+        self.assertEqual(kwargs["rate"], 1500.5)
+        # timestamp_ms = 1777370239843 → KST: 2026-04-29 03:37:19.843+09:00
+        self.assertIn("2026-", kwargs["timestamp"])
+        self.assertIn("+09:00", kwargs["timestamp"])
+
+    async def test_timestamp_ms_to_kst_iso_conversion(self):
+        """epoch ms → KST ISO 8601 정확성 (sub-second 포함)."""
+        from datetime import datetime, timedelta, timezone
+
+        writer = UpbitRedisWriter()
+        # 1777370239843 ms = 1777370239.843 s = 2026-04-29 03:37:19.843 KST
+        ts_ms = 1777370239843
+        expected_dt = datetime.fromtimestamp(
+            ts_ms / 1000, tz=timezone(timedelta(hours=9))
+        )
+        expected_iso = expected_dt.isoformat()
+
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ) as mock_helper:
+            writer.schedule(_make_tick(timestamp_ms=ts_ms))
+            await writer.close()
+
+        self.assertEqual(mock_helper.call_args.kwargs["timestamp"], expected_iso)
+
+    async def test_redis_failure_does_not_raise(self):
+        """helper False 반환 → exception 없음, WS session 영향 X."""
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ):
+            writer.schedule(_make_tick())
+            # gather가 raise 안 함 (return_exceptions=True)
+            await writer.close()
+
+    async def test_redis_exception_does_not_raise(self):
+        """helper exception → 격리 (log만), close 정상 완료."""
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("redis fault"),
+        ):
+            writer.schedule(_make_tick())
+            await writer.close()  # should not raise
+
+    async def test_close_drains_pending_tasks(self):
+        """tasks가 완료될 때까지 close가 기다림 (Codex 권장 — 마지막 tick 보존)."""
+        writer = UpbitRedisWriter()
+        completed = []
+
+        def slow_helper(**kwargs):
+            time.sleep(0.05)  # 50ms
+            completed.append(kwargs["rate"])
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=slow_helper,
+        ):
+            writer.schedule(_make_tick(rate=1486.0))
+            writer.schedule(_make_tick(rate=1487.0))
+            await writer.close(timeout=1.0)
+
+        # 둘 다 완료됨 (drain 성공)
+        self.assertEqual(sorted(completed), [1486.0, 1487.0])
+        self.assertEqual(len(writer._tasks), 0)
+
+    async def test_close_cancels_after_timeout(self):
+        """drain timeout 초과 시 cancel → log warning."""
+        writer = UpbitRedisWriter()
+
+        def hang_helper(**kwargs):
+            # 0.5s만 행 — thread pool에서 background 잔존 영향 최소화.
+            # timeout 0.05s이라 cancel은 일어남 (Python sync sleep은 interrupt
+            # 안 되지만 asyncio.wait_for + return_exceptions로 즉시 종료).
+            time.sleep(0.5)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=hang_helper,
+        ):
+            writer.schedule(_make_tick())
+            start = time.time()
+            await writer.close(timeout=0.05)
+            elapsed = time.time() - start
+
+        # timeout 50ms 후 cancel 경로 진입 → 즉시 반환 (sync sleep 0.5s는
+        # background, asyncio는 더 기다리지 않음)
+        self.assertLess(elapsed, 0.3, "close should timeout within ~50ms")
+        self.assertEqual(len(writer._tasks), 0)
+
+    async def test_close_noop_when_no_pending(self):
+        """tasks 없을 때 close는 즉시 반환."""
+        writer = UpbitRedisWriter()
+        await writer.close()  # should not raise
+        self.assertEqual(len(writer._tasks), 0)
+
+    async def test_write_order_preserved_when_helper_is_slow(self):
+        """Codex Finding 회귀 가드: schedule 순서 = Redis SET 순서.
+
+        Race scenario:
+            T1 (rate=1.0) schedule → task starts, helper 50ms 소요
+            T2 (rate=2.0) schedule → task starts
+            Without lock: T2 helper (fast) completes first → Redis = 2.0,
+                then T1 (slow) completes → Redis = 1.0 (older value!)
+            With lock: T1 → T2 직렬, completion_order = [1.0, 2.0]
+        """
+        writer = UpbitRedisWriter()
+        completion_order = []
+        call_count = [0]
+
+        def helper(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # T1만 느리게
+                time.sleep(0.05)
+            completion_order.append(kwargs["rate"])
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=helper,
+        ):
+            writer.schedule(_make_tick(rate=1.0))
+            writer.schedule(_make_tick(rate=2.0))
+            await writer.close(timeout=1.0)
+
+        self.assertEqual(
+            completion_order, [1.0, 2.0],
+            "Redis SET order must match schedule order (lock serializes)",
+        )
+
+    async def test_max_pending_guard_skips_when_saturated(self):
+        """MAX_PENDING_WRITES 초과 시 schedule 거부 + log warning."""
+        writer = UpbitRedisWriter()
+        # MAX_PENDING_WRITES 만큼 hang task 채움
+        hang_event = asyncio.Event()
+
+        async def hang_write():
+            await hang_event.wait()
+
+        # 직접 _tasks에 fake task 주입 (helper mock 없이 saturation 시뮬레이션)
+        for _ in range(MAX_PENDING_WRITES):
+            writer._tasks.add(asyncio.create_task(hang_write()))
+
+        # 추가 schedule 시도 → skip
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ) as mock_helper:
+            writer.schedule(_make_tick())
+            self.assertEqual(mock_helper.call_count, 0)
+
+        # cleanup
+        hang_event.set()
+        await asyncio.gather(*list(writer._tasks), return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# PR4 — Session-level Redis writer integration
+# ---------------------------------------------------------------------------
+
+class TestUpbitSessionRedisIntegration(unittest.IsolatedAsyncioTestCase):
+
+    def _make_mock_ws(self, recv_side_effect):
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=recv_side_effect)
+        mock_ws.close = AsyncMock()
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect.__aexit__ = AsyncMock(return_value=None)
+        return mock_ws, mock_connect
+
+    async def test_session_schedules_writer_on_valid_tick(self):
+        """valid tick 도착 → _redis_writer.schedule 호출."""
+        client = UpbitWsClient()
+        valid = json.dumps(_make_valid_ticker_dict())
+        recv_calls = [0]
+
+        async def recv_seq():
+            recv_calls[0] += 1
+            if recv_calls[0] == 1:
+                return valid
+            client._stop_event.set()
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._redis_writer, "schedule") as mock_schedule:
+            await client._run_one_session()
+
+        mock_schedule.assert_called_once()
+        scheduled_tick = mock_schedule.call_args.args[0]
+        self.assertEqual(scheduled_tick["source"], "upbit")
+        self.assertEqual(scheduled_tick["asset"], "usdt-krw")
+
+    async def test_session_does_not_schedule_on_invalid_tick(self):
+        """invalid/non-ticker frame → schedule 호출 X."""
+        client = UpbitWsClient()
+        non_ticker = json.dumps({"type": "status", "code": "KRW-USDT"})
+        recv_calls = [0]
+
+        async def recv_seq():
+            recv_calls[0] += 1
+            if recv_calls[0] == 1:
+                return non_ticker
+            client._stop_event.set()
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._redis_writer, "schedule") as mock_schedule:
+            await client._run_one_session()
+
+        mock_schedule.assert_not_called()
+
+    async def test_session_closes_writer_in_finally(self):
+        """session 종료 시 _redis_writer.close 호출 (정상/예외 모두)."""
+        client = UpbitWsClient()
+        client._stop_event.set()
+
+        async def recv_blocks():
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_blocks)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._redis_writer, "close", new=AsyncMock()) as mock_close:
+            await client._run_one_session()
+
+        mock_close.assert_awaited_once()
 
 
 if __name__ == "__main__":
