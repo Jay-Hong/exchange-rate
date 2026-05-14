@@ -27,6 +27,8 @@ from app import config, scheduler
 from app.crawlers.usdt_ws import upbit as upbit_mod
 from app.crawlers.usdt_ws.upbit import (
     DB_WRITE_WINDOW_SEC,
+    FALLBACK_COOLDOWN_SEC,
+    FALLBACK_PROBE_TIMEOUT_SEC,
     MAX_PENDING_WRITES,
     PING_INTERVAL_SEC,
     PING_TIMEOUT_SEC,
@@ -38,6 +40,7 @@ from app.crawlers.usdt_ws.upbit import (
     UPBIT_WS_URL,
     UpbitDbWriter,
     UpbitRedisWriter,
+    UpbitRestFallbackController,
     UpbitWsClient,
     UsdtLivenessMonitor,
 )
@@ -1359,17 +1362,20 @@ class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_close.assert_awaited_once()
 
-    async def test_session_closes_db_alert_redis_in_order(self):
-        """Codex review 회귀 가드: finally 블록에서 close 순서 = DB → Alert → Redis.
+    async def test_session_closes_fallback_db_alert_redis_in_order(self):
+        """PR7 Codex review 회귀 가드: close 순서 = Fallback → DB → Alert → Redis.
 
         근거:
-        1. DB는 source of truth — alert (DB triggered state) 직후 → Redis cache 마지막.
-        2. await to_thread가 event loop 양보 → 대기 background tasks 동시 진행 →
-           후속 drain reach 확률 ↑.
+        - schedule 호출자 → 호출되는 writer 순서.
+        - fallback이 모든 writer를 schedule할 수 있으므로 먼저 멈춰야
+          downstream writer들이 깔끔히 drain됨.
         """
         client = UpbitWsClient()
         client._stop_event.set()
         call_order = []
+
+        async def fallback_close_spy():
+            call_order.append("fallback")
 
         async def db_close_spy():
             call_order.append("db")
@@ -1385,14 +1391,16 @@ class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_blocks)
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._fallback_controller, "close", side_effect=fallback_close_spy), \
              patch.object(client._db_writer, "close", side_effect=db_close_spy), \
              patch.object(client._alert_evaluator, "close", side_effect=alert_close_spy), \
              patch.object(client._redis_writer, "close", side_effect=redis_close_spy):
             await client._run_one_session()
 
         self.assertEqual(
-            call_order, ["db", "alert", "redis"],
-            "Close order: DB (source of truth) → Alert (DB triggered state) → Redis (cache)",
+            call_order, ["fallback", "db", "alert", "redis"],
+            "Close order: Fallback (schedule caller) → DB (source of truth) → "
+            "Alert (DB triggered state) → Redis (cache)",
         )
 
 
@@ -2039,6 +2047,324 @@ class TestAlertSettingsCacheSingleton(unittest.TestCase):
         self.assertIsNone(
             evaluator._cache.get_if_fresh("upbit", "usdt-krw", time.time())
         )
+
+
+# ---------------------------------------------------------------------------
+# PR7 — fetch_upbit_usdt_tick helper
+# ---------------------------------------------------------------------------
+
+class TestFetchUpbitUsdtTick(unittest.TestCase):
+    """thin helper for PR7 fallback — REST 응답 → normalized tick dict.
+
+    기존 _fetch_upbit()는 본 helper 재사용 (additive refactor).
+    """
+
+    def test_parses_normalized_tick_from_rest_response(self):
+        from unittest.mock import MagicMock as MM
+        from app.crawlers import usdt_sources
+
+        mock_resp = MM()
+        mock_resp.json.return_value = [{
+            "trade_price": 1485.5,
+            "trade_timestamp": 1777370239843,
+            "timestamp": 1777370240080,
+        }]
+        mock_resp.raise_for_status = MM()
+
+        with patch.object(usdt_sources.requests, "get", return_value=mock_resp):
+            tick = usdt_sources.fetch_upbit_usdt_tick()
+
+        self.assertEqual(tick, {
+            "source": "upbit",
+            "asset": "usdt-krw",
+            "rate": 1485.5,
+            "timestamp_ms": 1777370239843,  # trade_timestamp 우선
+        })
+
+    def test_uses_timestamp_when_trade_timestamp_missing(self):
+        from unittest.mock import MagicMock as MM
+        from app.crawlers import usdt_sources
+
+        mock_resp = MM()
+        mock_resp.json.return_value = [{
+            "trade_price": 1485.5,
+            "timestamp": 1777370240080,
+            # trade_timestamp 없음
+        }]
+        mock_resp.raise_for_status = MM()
+
+        with patch.object(usdt_sources.requests, "get", return_value=mock_resp):
+            tick = usdt_sources.fetch_upbit_usdt_tick()
+
+        self.assertEqual(tick["timestamp_ms"], 1777370240080)
+
+    def test_returns_none_on_request_exception(self):
+        from app.crawlers import usdt_sources
+        with patch.object(
+            usdt_sources.requests, "get",
+            side_effect=usdt_sources.requests.RequestException("timeout"),
+        ):
+            self.assertIsNone(usdt_sources.fetch_upbit_usdt_tick())
+
+    def test_returns_none_on_parse_failure(self):
+        from unittest.mock import MagicMock as MM
+        from app.crawlers import usdt_sources
+
+        mock_resp = MM()
+        mock_resp.json.return_value = []  # 빈 list — IndexError
+        mock_resp.raise_for_status = MM()
+
+        with patch.object(usdt_sources.requests, "get", return_value=mock_resp):
+            self.assertIsNone(usdt_sources.fetch_upbit_usdt_tick())
+
+    def test_returns_none_on_zero_or_negative_rate(self):
+        """Codex Finding 2 회귀 가드: rate <= 0은 fallback fanout 통과 금지
+        (PR2 _parse_ticker_message 동일 보호).
+        """
+        from unittest.mock import MagicMock as MM
+        from app.crawlers import usdt_sources
+
+        for bad_price in [0, -1, -1000.5]:
+            mock_resp = MM()
+            mock_resp.json.return_value = [{
+                "trade_price": bad_price,
+                "trade_timestamp": 1777370239843,
+            }]
+            mock_resp.raise_for_status = MM()
+            with patch.object(usdt_sources.requests, "get", return_value=mock_resp):
+                self.assertIsNone(
+                    usdt_sources.fetch_upbit_usdt_tick(),
+                    f"trade_price={bad_price} should return None",
+                )
+
+    def test_existing_fetch_upbit_uses_new_helper(self):
+        """기존 _fetch_upbit()는 fetch_upbit_usdt_tick 재사용 → rate만 반환."""
+        from app.crawlers import usdt_sources
+        with patch.object(
+            usdt_sources, "fetch_upbit_usdt_tick",
+            return_value={
+                "source": "upbit", "asset": "usdt-krw",
+                "rate": 1486.5, "timestamp_ms": 1777370239843,
+            },
+        ):
+            rate = usdt_sources._fetch_upbit()
+        self.assertEqual(rate, 1486.5)
+
+    def test_existing_fetch_upbit_returns_none_when_helper_none(self):
+        from app.crawlers import usdt_sources
+        with patch.object(usdt_sources, "fetch_upbit_usdt_tick", return_value=None):
+            self.assertIsNone(usdt_sources._fetch_upbit())
+
+
+# ---------------------------------------------------------------------------
+# PR7 — UpbitRestFallbackController
+# ---------------------------------------------------------------------------
+
+class TestUpbitRestFallbackController(unittest.IsolatedAsyncioTestCase):
+
+    def _make_controller(self):
+        redis = MagicMock()
+        redis.schedule = MagicMock()
+        db = MagicMock()
+        db.schedule = MagicMock()
+        alert = MagicMock()
+        alert.schedule = MagicMock()
+        controller = UpbitRestFallbackController(
+            redis_writer=redis, db_writer=db, alert_evaluator=alert,
+        )
+        return controller, redis, db, alert
+
+    async def test_schedule_probe_is_non_blocking(self):
+        controller, _, _, _ = self._make_controller()
+        with patch.object(
+            UpbitRestFallbackController, "_fetch_upbit_tick",
+            return_value={
+                "source": "upbit", "asset": "usdt-krw",
+                "rate": 1500.0, "timestamp_ms": 1777370239843,
+            },
+        ):
+            start = time.time()
+            controller.schedule_probe("test")
+            elapsed = time.time() - start
+
+        self.assertLess(elapsed, 0.01)
+        self.assertTrue(controller._in_flight)
+        # cleanup
+        await controller.close()
+
+    async def test_in_flight_skip(self):
+        """probe 진행 중 추가 schedule → task 추가 생성 X."""
+        controller, _, _, _ = self._make_controller()
+        controller._in_flight = True  # 강제 in-flight 상태
+
+        with patch.object(
+            UpbitRestFallbackController, "_fetch_upbit_tick",
+            return_value=None,
+        ) as mock_fetch:
+            controller.schedule_probe("test")
+            await asyncio.sleep(0.01)
+
+        mock_fetch.assert_not_called()
+
+    async def test_cooldown_skip(self):
+        """cooldown 안에 schedule → skip."""
+        controller, _, _, _ = self._make_controller()
+        controller._cooldown_until = time.time() + 100.0  # 100s cooldown
+
+        with patch.object(
+            UpbitRestFallbackController, "_fetch_upbit_tick",
+            return_value=None,
+        ) as mock_fetch:
+            controller.schedule_probe("test")
+            await asyncio.sleep(0.01)
+
+        mock_fetch.assert_not_called()
+
+    async def test_success_path_calls_all_three_writers(self):
+        """probe success → Redis/DB/Alert 모두 schedule + AlertObservation kind=rest_probe."""
+        controller, redis, db, alert = self._make_controller()
+        tick = {
+            "source": "upbit", "asset": "usdt-krw",
+            "rate": 1500.0, "timestamp_ms": 1777370239843,
+        }
+        with patch.object(
+            UpbitRestFallbackController, "_fetch_upbit_tick",
+            return_value=tick,
+        ):
+            controller.schedule_probe("stale_transition")
+            await asyncio.sleep(0.05)
+
+        redis.schedule.assert_called_once_with(tick)
+        db.schedule.assert_called_once_with(tick)
+        alert.schedule.assert_called_once()
+        observation = alert.schedule.call_args.args[0]
+        self.assertEqual(observation.source, "upbit")
+        self.assertEqual(observation.asset, "usdt-krw")
+        self.assertEqual(observation.rate, 1500.0)
+        self.assertEqual(observation.timestamp_ms, 1777370239843)
+        self.assertEqual(observation.kind, "rest_probe")
+
+    async def test_probe_failure_applies_cooldown(self):
+        """REST 실패도 cooldown 적용 — 다음 즉시 trigger 시 skip."""
+        controller, _, _, _ = self._make_controller()
+        with patch.object(
+            UpbitRestFallbackController, "_fetch_upbit_tick",
+            side_effect=RuntimeError("network fail"),
+        ):
+            controller.schedule_probe("test")
+            await asyncio.sleep(0.05)
+
+        # cooldown 적용 확인
+        self.assertGreater(controller._cooldown_until, time.time())
+        self.assertFalse(controller._in_flight)
+
+    async def test_reset_cooldown(self):
+        """reset_cooldown → _cooldown_until = 0 → 즉시 next probe 가능."""
+        controller, _, _, _ = self._make_controller()
+        controller._cooldown_until = time.time() + 100.0
+
+        controller.reset_cooldown()
+
+        self.assertEqual(controller._cooldown_until, 0.0)
+
+    async def test_close_cancels_pending_task(self):
+        """close → pending probe task cancel + await."""
+        controller, _, _, _ = self._make_controller()
+        hang_event = asyncio.Event()
+
+        async def hang_probe(reason):
+            await hang_event.wait()
+
+        # schedule_probe 직접 호출 대신 _run_probe mock
+        with patch.object(
+            UpbitRestFallbackController, "_run_probe", side_effect=hang_probe,
+        ):
+            controller.schedule_probe("test")
+            self.assertTrue(controller._in_flight)
+            # close cancel
+            await controller.close()
+
+        self.assertIsNone(controller._pending_task)
+        self.assertFalse(controller._in_flight)
+
+
+# ---------------------------------------------------------------------------
+# PR7 — UpbitWsClient fallback integration + isolation guard
+# ---------------------------------------------------------------------------
+
+class TestUpbitWsClientFallbackHook(unittest.IsolatedAsyncioTestCase):
+
+    async def test_set_status_normal_to_stale_triggers_schedule_probe(self):
+        """PR3 _set_status 확장 (PR7): normal → stale 시 schedule_probe 호출."""
+        client = UpbitWsClient()
+        with patch.object(
+            client._fallback_controller, "schedule_probe",
+        ) as mock_schedule:
+            client._set_status("stale")  # normal → stale
+
+        mock_schedule.assert_called_once_with(reason="stale_transition")
+
+    async def test_set_status_stale_to_normal_triggers_reset_cooldown(self):
+        """PR7: stale → normal 시 reset_cooldown 호출."""
+        client = UpbitWsClient()
+        client._status = "stale"  # 강제 stale 상태
+        with patch.object(
+            client._fallback_controller, "reset_cooldown",
+        ) as mock_reset:
+            client._set_status("normal")
+
+        mock_reset.assert_called_once()
+
+    async def test_set_status_reconnecting_to_normal_triggers_reset_cooldown(self):
+        """Codex Finding 1 회귀 가드: stale → reconnecting → normal 경로에서도
+        normal 복귀 시 reset_cooldown 호출.
+
+        시나리오:
+          - normal → stale (probe + cooldown 시작)
+          - WS disconnect → stale → reconnecting
+          - reconnect 성공 → reconnecting → normal
+          - 옛 cooldown이 남으면 새 outage cycle의 stale probe가 30s skip 위험
+        """
+        client = UpbitWsClient()
+        client._status = "reconnecting"  # 강제 reconnecting 상태
+        with patch.object(
+            client._fallback_controller, "reset_cooldown",
+        ) as mock_reset:
+            client._set_status("normal")
+
+        mock_reset.assert_called_once()
+
+    async def test_fallback_does_not_modify_ws_lifecycle_state(self):
+        """Codex isolation guard: fallback이 _stop_event/_status/reconnect_attempt
+        등 WS lifecycle state를 건드리지 X.
+        """
+        client = UpbitWsClient()
+        stop_before = client._stop_event.is_set()
+        status_before = client._status
+        attempts_before = client._reconnect_attempt_count
+
+        # fallback probe 시나리오 — fetch mock + downstream writer DB 호출 차단
+        # (이 test는 lifecycle state isolation만 검증, 실제 DB write 의도 X)
+        with patch.object(
+            UpbitRestFallbackController, "_fetch_upbit_tick",
+            return_value={
+                "source": "upbit", "asset": "usdt-krw",
+                "rate": 1500.0, "timestamp_ms": 1777370239843,
+            },
+        ), patch.object(UpbitDbWriter, "_sync_db_write"), \
+           patch.object(UsdtAlertEvaluator, "_load_settings_from_db", return_value=tuple()):
+            client._fallback_controller.schedule_probe("test")
+            await asyncio.sleep(0.05)
+            await client._fallback_controller.close()
+            # writer cleanup도 — pending tasks 남으면 다음 test에 영향
+            await client._redis_writer.close()
+            await client._db_writer.close()
+            await client._alert_evaluator.close()
+
+        # WS lifecycle state 변경 X
+        self.assertEqual(client._stop_event.is_set(), stop_before)
+        self.assertEqual(client._status, status_before)
+        self.assertEqual(client._reconnect_attempt_count, attempts_before)
 
 
 if __name__ == "__main__":

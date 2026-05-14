@@ -37,12 +37,49 @@ PER_SOURCE_TIMEOUT_SECONDS = 2.0
 # 검증일: 2026-04-12 (USDT_TAB_PROPOSAL.md의 Confirmed Public Crypto Endpoints)
 
 
-def _fetch_upbit() -> Optional[float]:
+def fetch_upbit_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[dict]:
+    """Upbit USDT/KRW REST ticker → normalized tick dict (PR2 parser 계약과 동일).
+
+    PR7 fallback controller (`app/crawlers/usdt_ws/upbit.py`)가 stale 감지 시
+    호출. 기존 `_fetch_upbit()` polling helper도 본 함수 재사용 (additive
+    refactor, REST polling 동작 보존).
+
+    Returns:
+        {"source": "upbit", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}
+        또는 REST/parse 실패 시 None (caller 격리).
+
+    timestamp_ms:
+        Upbit REST 응답의 `trade_timestamp` 우선, 없으면 `timestamp` 폴백
+        (PR2 _parse_ticker_message 동일 패턴, guide §3 spec). time.time() 사용
+        시 wallclock at probe execution = exchange quote time이 아님.
+    """
     url = "https://api.upbit.com/v1/ticker?markets=KRW-USDT"
-    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
-    return float(data[0]["trade_price"])
+    try:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        item = data[0]
+        rate = float(item["trade_price"])
+        # PR2 _parse_ticker_message 동일 보호 (Codex Finding 2):
+        # 0/음수 rate가 fallback fanout (Redis/DB/Alert) 통과 시 잘못된 알림 위험.
+        if rate <= 0:
+            return None
+        ts_ms = int(item.get("trade_timestamp") or item["timestamp"])
+        return {
+            "source": "upbit",
+            "asset": "usdt-krw",
+            "rate": rate,
+            "timestamp_ms": ts_ms,
+        }
+    except (requests.RequestException, KeyError, ValueError, TypeError, IndexError):
+        # caller(fallback controller / polling)가 None 처리. propagate X.
+        return None
+
+
+def _fetch_upbit() -> Optional[float]:
+    """기존 polling helper — fetch_upbit_usdt_tick 재사용 (rate만 반환)."""
+    tick = fetch_upbit_usdt_tick()
+    return tick["rate"] if tick else None
 
 
 def _fetch_bithumb() -> Optional[float]:

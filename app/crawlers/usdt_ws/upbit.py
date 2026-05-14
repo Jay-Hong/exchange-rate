@@ -114,6 +114,10 @@ REDIS_CLOSE_TIMEOUT_SEC = 1.0  # close() drain timeout — 후 강제 cancel
 # DB writer
 DB_WRITE_WINDOW_SEC = 1.0  # debounce window (KRX KrxDbWriter 동일)
 
+# PR7 REST fallback controller (옵션 B: silent probe)
+FALLBACK_COOLDOWN_SEC = 30.0      # stale 지속 중 probe 빈도 제한 (= STALE_AFTER_SEC)
+FALLBACK_PROBE_TIMEOUT_SEC = 10.0  # REST HTTP timeout
+
 
 class UsdtLivenessMonitor:
     """USDT WebSocket frame liveness state — frame/heartbeat 활동 관찰.
@@ -406,6 +410,157 @@ class UpbitDbWriter:
             )
 
 
+class UpbitRestFallbackController:
+    """Upbit REST fallback (silent probe 옵션 B, PR7).
+
+    WS frame/heartbeat silence (last_activity_at 기준) 감지 시 REST 1회 probe →
+    normalized tick → 기존 fanout (Redis/DB/Alert writer) 재사용. WS reconnect
+    loop는 그대로 유지, fallback은 freshness 보조.
+
+    Guardrails:
+        - schedule_probe()는 sync/non-blocking (`_set_status` 동기 흐름에서 호출).
+        - In-flight skip: probe 진행 중 중복 trigger 차단.
+        - Cooldown skip: 마지막 probe 종료 후 FALLBACK_COOLDOWN_SEC 미경과 시 skip
+          (stale 지속 중 폭주 방지).
+        - Probe 실패도 cooldown 적용 (REST rate limit 보호).
+        - reset_cooldown(): normal 복귀 시 호출 → 다음 stale 즉시 1회 probe 보장.
+        - REST 실패 격리: log only, WS session/reconnect 영향 X.
+        - fallback tick의 source/asset = "upbit"/"usdt-krw" (downstream 일관).
+        - AlertObservation.kind="rest_probe" (PR6 kind 필드 활용, log filter).
+
+    PR3 _set_status 확장 (PR7부터):
+        PR3에서 _set_status는 "counter + log only"였으나 PR7부터 normal→stale
+        전이 시 fallback schedule_probe 호출이 명시적으로 추가됨.
+        (test_set_status_has_no_side_effects의 forbidden_attrs는 PR7
+        `_fallback_controller`를 포함하지 않아 기존 검증 그대로 유효.)
+    """
+
+    def __init__(
+        self,
+        redis_writer: "UpbitRedisWriter",
+        db_writer: "UpbitDbWriter",
+        alert_evaluator: "UsdtAlertEvaluator",
+        *,
+        cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
+        probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
+    ) -> None:
+        self._redis_writer = redis_writer
+        self._db_writer = db_writer
+        self._alert_evaluator = alert_evaluator
+        self._cooldown_sec = cooldown_sec
+        self._probe_timeout_sec = probe_timeout_sec
+        self._in_flight: bool = False
+        self._cooldown_until: float = 0.0
+        self._pending_task: Optional[asyncio.Task] = None
+
+    def schedule_probe(self, reason: str) -> None:
+        """sync: in-flight/cooldown 체크 후 background probe task 생성. 즉시 반환.
+
+        `_set_status("stale")` 안에서 호출 — 동기 흐름이라 즉시 반환 필수.
+        Production은 항상 asyncio context 안 (recv loop / reconnect loop), 단
+        sync test에서 `_set_status` 직접 호출 시 no-loop. defensive하게 skip.
+        """
+        now = time.time()
+        if self._in_flight:
+            logger.debug(
+                "[usdt_ws.upbit.fallback] probe in-flight, skip (reason=%s)", reason,
+            )
+            return
+        if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            logger.debug(
+                "[usdt_ws.upbit.fallback] cooldown active, skip (%.1fs remaining, reason=%s)",
+                remaining, reason,
+            )
+            return
+        # Loop 체크를 coroutine 생성 전에 — no-loop 시 coroutine 미생성으로
+        # "coroutine was never awaited" warning 회피.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug(
+                "[usdt_ws.upbit.fallback] no event loop, skip probe (reason=%s)", reason,
+            )
+            return
+        self._pending_task = loop.create_task(self._run_probe(reason))
+        self._in_flight = True
+
+    def reset_cooldown(self) -> None:
+        """normal 복귀 시 호출 — cooldown clear. 다음 stale 즉시 1회 probe 보장."""
+        self._cooldown_until = 0.0
+        logger.debug("[usdt_ws.upbit.fallback] cooldown reset on normal recovery")
+
+    async def _run_probe(self, reason: str) -> None:
+        """REST probe → normalized tick → fanout (Redis/DB/Alert).
+
+        실패 시 log only + cooldown 적용 (재시도 X). WS session 영향 X.
+        """
+        try:
+            logger.info(
+                "[usdt_ws.upbit.fallback] probe start (reason=%s)", reason,
+            )
+            tick = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_upbit_tick),
+                timeout=self._probe_timeout_sec,
+            )
+            if tick is None:
+                logger.warning(
+                    "[usdt_ws.upbit.fallback] probe returned None — REST/parse 실패",
+                )
+                return
+
+            # 기존 fanout 재사용 (PR4/PR5/PR6 writer/evaluator)
+            self._redis_writer.schedule(tick)
+            self._db_writer.schedule(tick)
+            observation = AlertObservation(
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+                timestamp_ms=tick["timestamp_ms"],
+                kind="rest_probe",  # PR6 kind 필드 활용 (log/metric 구분)
+            )
+            self._alert_evaluator.schedule(observation)
+            logger.info(
+                "[usdt_ws.upbit.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
+                tick["rate"], tick["timestamp_ms"], reason,
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[usdt_ws.upbit.fallback] probe timeout (%.1fs, reason=%s)",
+                self._probe_timeout_sec, reason,
+            )
+        except Exception:
+            logger.exception(
+                "[usdt_ws.upbit.fallback] probe error (격리, reason=%s)", reason,
+            )
+        finally:
+            # 실패해도 cooldown 적용 (REST rate limit 보호).
+            self._cooldown_until = time.time() + self._cooldown_sec
+            self._in_flight = False
+
+    @staticmethod
+    def _fetch_upbit_tick() -> Optional[dict]:
+        """sync REST fetch — to_thread 내부 실행. 모듈 내부 import (순환 회피)."""
+        from app.crawlers.usdt_sources import fetch_upbit_usdt_tick
+        return fetch_upbit_usdt_tick()
+
+    async def close(self) -> None:
+        """pending probe task cancel + await. WS session 종료 시 호출."""
+        task = self._pending_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.upbit.fallback] close error")
+        self._pending_task = None
+        self._in_flight = False
+
+
 class UpbitWsClient:
     """Upbit USDT/KRW WebSocket client (PR3 reconnect + liveness).
 
@@ -437,6 +592,13 @@ class UpbitWsClient:
         self._db_writer: UpbitDbWriter = UpbitDbWriter()
         # PR6 Alert evaluator (observation-based, source-neutral helper 재사용)
         self._alert_evaluator: UsdtAlertEvaluator = UsdtAlertEvaluator()
+        # PR7 REST fallback controller (silent probe, 옵션 B). WS silence 시
+        # REST 1회 probe로 freshness 보전. 기존 fanout (Redis/DB/Alert) 재사용.
+        self._fallback_controller: UpbitRestFallbackController = UpbitRestFallbackController(
+            redis_writer=self._redis_writer,
+            db_writer=self._db_writer,
+            alert_evaluator=self._alert_evaluator,
+        )
 
     async def start(self) -> None:
         """reconnect 루프. 단일 session crash 시 backoff 후 재시도.
@@ -517,9 +679,16 @@ class UpbitWsClient:
                 logger.exception("[usdt_ws.upbit] ws.close() 실패")
 
     def _set_status(self, new_status: str) -> None:
-        """status 전이 + counter + log only (PR3 guardrail).
+        """status 전이 + counter + log + (PR7부터) fallback hook.
 
-        REST probe / Redis / DB / alert side effect 절대 호출 X (PR7에서 추가).
+        PR3 시점: counter + log only (REST probe / Redis / DB / alert side
+        effect 절대 호출 X).
+        PR7 확장: normal → stale 전이 시 fallback_controller.schedule_probe,
+        stale → normal 전이 시 fallback_controller.reset_cooldown 호출.
+        (변경 의도 명시: §5 옵션 B silent probe trigger 위치 = stale transition.)
+
+        Redis/DB/Alert direct side effect는 여전히 X — fallback controller가
+        그 경로를 schedule_probe → REST → writer.schedule로 우회하여 들어감.
         """
         if self._status == new_status:
             return
@@ -532,6 +701,14 @@ class UpbitWsClient:
             prev, new_status,
             self._liveness.gap_buckets, self._liveness.max_frame_gap_sec,
         )
+        # PR7 fallback hook (의도적 확장)
+        if prev == "normal" and new_status == "stale":
+            self._fallback_controller.schedule_probe(reason="stale_transition")
+        elif new_status == "normal":
+            # 모든 normal 복귀에서 cooldown reset (Codex Finding 1):
+            # stale → reconnecting → normal 경로에서도 reset 보장 →
+            # 새 outage cycle의 stale probe가 옛 cooldown으로 skip되지 않음.
+            self._fallback_controller.reset_cooldown()
 
     @staticmethod
     def _compute_backoff(attempt: int) -> float:
@@ -713,24 +890,26 @@ class UpbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.upbit] ping_task cleanup 실패")
-                # close 순서 = DB → Alert → Redis (Codex review):
-                # 1. DB가 source of truth (cache는 derived) — DB Tn 확정 후
-                #    triggered state(DB)를 변경하는 Alert evaluator → 마지막 Redis cache.
-                # 2. `await to_thread` 동안 event loop 양보 → 대기 중인 Redis/Alert
-                #    background tasks 동시 진행 → 후속 drain 시 reach 확률 ↑.
-                # PR5: DB writer timer cancel + pending tick 즉시 flush.
+                # close 순서 = Fallback → DB → Alert → Redis (PR7 Codex review):
+                # 원칙: schedule 호출자 → 호출되는 writer 순서. fallback이 모든
+                # writer를 schedule할 수 있으므로 먼저 멈춰야 downstream writer
+                # 들이 깔끔히 drain됨.
+                # PR7: fallback controller pending probe task cancel.
+                try:
+                    await self._fallback_controller.close()
+                except Exception:
+                    logger.exception("[usdt_ws.upbit] fallback_controller.close() 실패")
+                # PR5: DB writer (source of truth) timer cancel + pending tick 즉시 flush.
                 try:
                     await self._db_writer.close()
                 except Exception:
                     logger.exception("[usdt_ws.upbit] db_writer.close() 실패")
-                # PR6: alert evaluator pending alerts drain (timeout 5s 후 cancel).
-                # DB triggered state 변경하는 단계 — DB 직후, Redis 전.
+                # PR6: alert evaluator (DB triggered state 변경) drain (5s timeout).
                 try:
                     await self._alert_evaluator.close()
                 except Exception:
                     logger.exception("[usdt_ws.upbit] alert_evaluator.close() 실패")
-                # PR4: pending Redis writes drain (timeout 후 cancel).
-                # DB/Alert 확정 후 마지막 chance로 Redis latest 동기화.
+                # PR4: Redis writer (cache) drain — DB/Alert 확정 후 latest 동기화.
                 try:
                     await self._redis_writer.close()
                 except Exception:
