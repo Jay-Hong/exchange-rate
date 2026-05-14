@@ -536,10 +536,17 @@ async def lifespan(app: FastAPI):
     # KRX_FUTURES_ENABLED=false 또는 어떤 단계 실패도 startup 영향 0.
     await scheduler.start_krx_futures_client()
 
+    # Phase B.1 PR1 — USDT WebSocket Upbit canary skeleton.
+    # USDT_WS_UPBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+    await scheduler.start_usdt_ws_upbit_client()
+
     yield
 
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
+
+    # USDT WebSocket Upbit client 종료
+    await scheduler.shutdown_usdt_ws_upbit_client()
 
     # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
     await scheduler.shutdown_krx_futures_client()

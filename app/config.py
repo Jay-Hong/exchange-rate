@@ -50,6 +50,15 @@ LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS",
 # canary 진입 시 ON. KRX 장애/중단 시 false로 전체 격리 가능.
 KRX_FUTURES_ENABLED = os.getenv("KRX_FUTURES_ENABLED", "false").lower() == "true"
 
+# USDT_WS_UPBIT_ENABLED: Phase B.1 PR1 Upbit canary WebSocket 토글
+# (USDT_WS_DESIGN_PLAN §12).
+# default false — scheduler에 lifecycle은 등록되지만 client.start() 호출 안 함.
+# PR1 (skeleton): true → stop event 대기만, 네트워크 호출 없음.
+# PR2 이후: true → WS connect/subscribe/parse 동작.
+# Stage 1 (운영 활성화) 진입 시 ON. 장애 시 false로 USDT WS Upbit 격리.
+# 5거래소 확장은 per-exchange flag (USDT_WS_BITHUMB_ENABLED 등)으로 추가 예정.
+USDT_WS_UPBIT_ENABLED = os.getenv("USDT_WS_UPBIT_ENABLED", "false").lower() == "true"
+
 # KRX_BROADCAST_INCLUDE: removed in Z-2d cleanup (2026-05-12).
 # 이전: KRX 미국달러선물의 broadcast latest:* 노출 토글.
 # Z-2d 통일로 legacy_policy.should_include_source_in_legacy_rates allowlist가

@@ -1975,3 +1975,86 @@ def get_krx_reconcile_status() -> Dict[str, Any]:
         "next_run_at_kst": next_run_at_kst,
         **_krx_reconcile_state,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# USDT WebSocket — Upbit canary lifecycle (Phase B.1 PR1)
+# ─────────────────────────────────────────────────────────────
+# USDT_WS_DESIGN_PLAN §12 PR1 — feature flag + lifecycle scaffolding only.
+# 외부 connection / Redis / DB / alert / fallback 모두 X (PR2~PR7에서 추가).
+#
+# main.py lifespan에서 start/shutdown 호출. APScheduler job 등록 X
+# (long-running task이므로 cron 부적합).
+#
+# 5거래소 확장 (Bithumb~Gopax) 시 동일 패턴 per-source 추가 예정.
+# 현 단계는 Upbit 단독.
+# ─────────────────────────────────────────────────────────────
+
+# 모듈 globals — Optional, 시작 전 None
+usdt_ws_upbit_client = None  # UpbitWsClient 인스턴스
+usdt_ws_upbit_task = None    # client.start() 실행 중인 task
+
+
+async def _run_usdt_ws_upbit_client(client):
+    """UpbitWsClient.start() wrapper — task crash 시 logger.exception.
+
+    KRX `_run_krx_futures_client` 패턴 동일. CancelledError는 propagate.
+    """
+    try:
+        await client.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[usdt_ws.upbit] UpbitWsClient task crashed")
+
+
+async def start_usdt_ws_upbit_client():
+    """USDT WS Upbit client startup — main.py lifespan에서 호출.
+
+    USDT_WS_UPBIT_ENABLED=false 시 즉시 return (lifecycle 비활성).
+    중복 호출 방지 (test/재시작 시 중복 task 방지).
+    """
+    global usdt_ws_upbit_client, usdt_ws_upbit_task
+
+    if not config.USDT_WS_UPBIT_ENABLED:
+        logger.info("[usdt_ws.upbit] USDT_WS_UPBIT_ENABLED=false, skip start")
+        return
+
+    # 중복 start 방지 — client task 이미 진행 중이면 skip
+    if usdt_ws_upbit_task is not None and not usdt_ws_upbit_task.done():
+        logger.debug("[usdt_ws.upbit] client task 진행 중, 중복 start 무시")
+        return
+
+    # 함수 내부 import — 순환 참조 방지 + 미연결 시점 import 영향 0
+    from app.crawlers.usdt_ws.upbit import UpbitWsClient
+
+    client = UpbitWsClient()
+    usdt_ws_upbit_client = client
+    usdt_ws_upbit_task = asyncio.create_task(_run_usdt_ws_upbit_client(client))
+    logger.info("[usdt_ws.upbit] UpbitWsClient skeleton 시작 (PR1)")
+
+
+async def shutdown_usdt_ws_upbit_client():
+    """USDT WS Upbit client + task 안전 종료.
+
+    client.stop() → task cancel/await → globals 초기화.
+    """
+    global usdt_ws_upbit_client, usdt_ws_upbit_task
+
+    if usdt_ws_upbit_client is not None:
+        try:
+            await usdt_ws_upbit_client.stop()
+        except Exception:
+            logger.exception("[usdt_ws.upbit] client.stop() 실패")
+
+    if usdt_ws_upbit_task is not None and not usdt_ws_upbit_task.done():
+        usdt_ws_upbit_task.cancel()
+        try:
+            await usdt_ws_upbit_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[usdt_ws.upbit] task await 실패")
+
+    usdt_ws_upbit_client = None
+    usdt_ws_upbit_task = None
