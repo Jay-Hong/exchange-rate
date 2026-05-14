@@ -57,6 +57,7 @@ from app.crud import (
 from app.latest_rates_cache import (
     get_latest_bank_rate_from_sync_job,
     get_latest_investing_rate_from_sync_job,
+    get_latest_krx_rate_from_sync_job,
     get_latest_usdt_rate_from_sync_job,
 )
 from app.source_registry import get_source_definition, get_usdt_exchange_entries
@@ -324,10 +325,12 @@ def load_and_build_tether_tab_payload(
         investing_rate = select_a_latest_investing_rate_from_db(db, "usd-krw")
 
     # KRX — include_krx=True일 때만 query (False면 호출 0회).
-    # KRX는 현재 mirror skip + Redis direct write 미구축 → DB query 유지 (별도 phase).
+    # ADR-031: KRX Redis-first read + DB fallback. stale 가드 없음 (ADR-027 영역).
     krx_futures_rate: Optional[Dict[str, Any]] = None
     if include_krx:
-        krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")
+        krx_futures_rate = get_latest_krx_rate_from_sync_job("usd-krw-futures")
+        if krx_futures_rate is None:
+            krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")
 
     return build_tether_tab_payload(
         usdt_rates=usdt_rates,

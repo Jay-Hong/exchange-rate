@@ -3525,6 +3525,115 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 
 ---
 
+## ADR-031: KRX 미국달러선물 Redis 통합 — 1차 부채 해소 (stale/REST는 후속)
+
+**상태**: Proposed (2026-05-13, PR Z-2f 후속)
+
+### 맥락
+
+PR Z-2f([ADR-030](#adr-030-latestindex-책임-분리--freshness는-per-key-mirrored_at으로-판단)) 이후 broadcast Redis-first read path는 per-key mirrored_at 기반으로 정착. USDT는 [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback)로 Redis-first 모델 정렬. 은행/Investing은 Step 3b(`a499a08`)로 Redis-first 모델 정렬. **KRX만이 유일하게 topic-only source인데 Redis-first 모델 밖**.
+
+[app/usdt_topic_payload.py:330](app/usdt_topic_payload.py#L330):
+
+```python
+krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")  # DB query only
+```
+
+같은 파일 line 264 명시: *"KRX는 mirror skip + direct write 미구축 → DB query 유지 (별도 phase)"*. 그 phase가 본 ADR.
+
+### 결정
+
+KRX tick → Redis direct write + topic builder Redis-first read로 정렬한다. **stale/REST fallback 정책은 본 PR 범위에 포함하지 않는다** ([ADR-027](#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) 영역으로 분리).
+
+1. **KRX 전용 helper 신설** (`app/latest_rates_cache.py`):
+   - `set_latest_krx_rate_from_sync_job(asset, rate, timestamp) -> bool`
+   - `get_latest_krx_rate_from_sync_job(asset) -> Optional[Dict[str, Any]]`
+   - 둘 다 **`usdt_redis_stats` 미부착** (bank/investing helper 패턴 일관)
+
+2. **`KrxDbWriter` 변경** (`app/crawlers/krx_kis.py`):
+   - 기존 1s debounce + `insert_source_rate_if_changed` 그대로 유지
+   - DB insert 성공 시 `set_latest_krx_rate_from_sync_job` 호출 (best-effort)
+   - Redis write 실패 → `logger.warning`, writer loop 영향 X
+
+3. **Topic builder 변경** (`app/usdt_topic_payload.py:330`):
+
+   ```python
+   if include_krx:
+       krx_redis = get_latest_krx_rate_from_sync_job("usd-krw-futures")
+       if krx_redis is not None:
+           krx_futures_rate = krx_redis
+       else:
+           krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")
+   ```
+
+   - stale/age guard 없음 (1차 의식적 제외)
+
+### Telemetry 분리 — usdt_redis_stats 오염 회피
+
+기존 `set_latest_usdt_rate_from_sync_job` / `get_latest_usdt_rate_from_sync_job`(PR-A 2d5c8ad에서 rename)는 모두 `usdt_redis_stats` counter를 갱신한다 ([latest_rates_cache.py:256-330](app/latest_rates_cache.py)). KRX에서 재사용 시 `usdt_redis_stats.per_source["krx"]`가 등장 → `/admin/api/usdt-redis-stats` 시맨틱 오염.
+
+따라서 KRX는 writer/reader **양쪽 모두 전용 helper**를 둔다. 미래 KRX telemetry 필요 시점에 generic writer 분리 또는 별도 telemetry 모듈 검토 — 본 PR 범위 외.
+
+### 1차에서 의식적으로 안 하는 것
+
+- **timestamp age 기반 stale 누락**: `insert_source_rate_if_changed`라 가격 stagnant 시 DB row 안 생김 → Redis timestamp도 같이 stuck. 즉 row age는 *raw frame liveness*와 다름 (DB row gap ≠ raw frame gap). timestamp age로 stale 판단하면 저유동성 정상 상태를 false positive로 누락 → 기존 stale 관찰 장치 의도와 정면 충돌. → [ADR-027](#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) 영역.
+- **REST snapshot/fallback 결과 Redis 반영**: ADR-027 결정 시점에 진입.
+- **Tick fanout handler 분리** (RedisLatestWriter / AlertEvaluator / DbWindowWriter 3-way): 후속 ADR 영역. 1차는 KrxDbWriter 단일 handler 안에서 DB insert → Redis write 호출.
+- **KRX 알림 evaluator 연결**: fanout 패턴 정립 phase에 함께.
+
+### Trade-offs
+
+- **장점**:
+  - 마지막 비대칭 해소 — USDT/은행/Investing/KRX 모두 Redis-first 정렬
+  - topic builder의 DB query 의존 제거 (KRX hit 시 DB 0회)
+  - 작업 폭 작음 (~50 LOC code + 12 tests)
+  - ADR-027 결정 대기 안 함 — 독립 진행 가능
+
+- **단점 / 제약**:
+  - 1차에서 stale guard 없음 → KRX 시장 close 시 옛 timestamp 그대로 노출 (의도된 동작). 클라이언트가 timestamp로 판단.
+  - tick-level Redis write 아님 — `insert_source_rate_if_changed` 통과 시만 갱신 (가격 stagnant 시 mirrored_at도 stuck). tick-level은 후속 fanout phase.
+
+### Alternatives 검토
+
+**Option A — `set_latest_usdt_rate_from_sync_job` 재사용**:
+
+- 거부 이유: `usdt_redis_stats.per_source["krx"]` 등장 → telemetry 오염
+
+**Option B — timestamp age 보수 가드 (1시간 등)**:
+
+- 거부 이유: DB row gap ≠ raw frame gap. 저유동성 정상 상태 false positive 위험.
+
+**Option C — tick fanout handler 분리** (RedisLatestWriter / AlertEvaluator / DbWindowWriter):
+
+- 거부 이유 (이번 PR만): 작업 폭 큼. KRX 1차 검증과 패턴 정립을 동시 진행은 risk. 별 phase에서 정립 후 KRX/USDT/bank에 적용.
+
+**Option D (채택) — KRX 전용 helper + builder Redis-first + stale 정책 분리**:
+
+- 작업 폭 작음, stats 오염 회피, ADR-027 의존 X
+
+### 운영 검증 (예정 — Accepted 전환 조건)
+
+- `usdt:krw` topic API error 0 유지
+- KRX `latest:source:krx:usd-krw-futures` key 존재 + KRX session 중 mirrored_at 갱신 확인
+- KRX session 외(시장 close): Redis hit이어도 옛 timestamp 그대로 노출 (stale guard 없음 — 클라이언트 timestamp 판단 영역). Redis key 부재 시에만 DB fallback.
+- 기존 stale 관찰 장치(`test_krx_fallback_eligibility.py`) 동작 변경 없음 확인
+
+### 후속 Phase
+
+1. **REST snapshot/fallback 활성화 (ADR-027)**: 5/18 만기 데이터 + 평일 baseline 기반 stale threshold 확정. REST 결과를 Redis/DB/topic에 반영하는 정책 결정.
+2. **Tick fanout handler 분리**: KRX/USDT WebSocket의 tick path를 Redis/Alert/DB 3갈래로 분리. "알림 모든 tick, DB window close" 원래 계획 ([REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md)) 실현.
+3. **은행/Investing fanout 적용**: 크롤링/송출 sub-second 단축 또는 mirror cycle 제거 시점에 동일 패턴 적용.
+
+### 관련 문서
+
+- [ADR-027](#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안): KRX REST snapshot/fallback + stale 정책 (1차 범위 밖)
+- [ADR-028](#adr-028-topic-only-tetherkrx--legacy-fx-dual-emit): Topic-only 출시 계약 (KRX는 topic-only)
+- [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback): USDT mirror skip + direct write (유사 패턴)
+- [ADR-030](#adr-030-latestindex-책임-분리--freshness는-per-key-mirrored_at으로-판단): per-key freshness (전제)
+- [KRX_CANARY.md](KRX_CANARY.md): KRX Stage 1/2 운영 + Stage A/B baseline
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -3557,3 +3666,4 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 - 2026-05-06: ADR-028 작성 (Topic-only Tether/KRX + legacy FX dual-emit)
 - 2026-05-12: ADR-029 작성 (USDT source는 mirror cycle 미경유 — direct write + read-path DB fallback)
 - 2026-05-13: ADR-030 초안 작성 (latest:index 책임 분리 — freshness는 per-key mirrored_at으로 판단, Proposed)
+- 2026-05-13: ADR-031 초안 작성 (KRX 미국달러선물 Redis 통합 — 1차 부채 해소, stale/REST는 후속, Proposed)

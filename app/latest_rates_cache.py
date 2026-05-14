@@ -337,6 +337,115 @@ def get_latest_usdt_rate_from_sync_job(
     }
 
 
+# ── KRX (topic-only source, PR ADR-031) ─────────────────────────
+#
+# KRX 미국달러선물은 USDT와 같이 topic-only source이지만 시맨틱이 다르다:
+#   - USDT: 24/7 운영, 거래 뜸한 거래소 자연 stale (mirrored_at 갱신 안 됨)
+#   - KRX: active session 명확, WebSocket tick 기반, session-end 저유동성
+# 따라서 telemetry 시맨틱도 분리 — KRX는 usdt_redis_stats에 기록하지 않는다
+# (ADR-031). bank/investing writer 패턴 일관: stats 미부착, async circuit 격리.
+# stale 정책은 본 helper 범위 외 — ADR-027 영역에서 결정.
+
+
+def set_latest_krx_rate_from_sync_job(
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> bool:
+    """sync scheduler thread 전용 direct writer — KRX (PR ADR-031).
+
+    `KrxDbWriter`가 DB insert 성공 직후 호출. usdt:krw topic builder의
+    `get_latest_krx_rate_from_sync_job` Redis-first read와 짝.
+
+    USDT writer(`set_latest_usdt_rate_from_sync_job`)와 분리한 이유:
+        - USDT writer는 `usdt_redis_stats` counter를 갱신하므로 KRX 재사용 시
+          텔레메트리 시맨틱 오염 (`usdt_redis_stats.per_source["krx"]` 등장)
+        - bank/investing helper 패턴(Step 3b — stats 미부착)과 일관
+
+    Args:
+        asset: KRX asset (예: "usd-krw-futures"). source는 "krx" 고정.
+        rate: 가격.
+        timestamp: ISO 8601 KST 문자열.
+
+    Returns:
+        True: Redis SET 성공.
+        False: client init 실패 / SET 예외.
+
+    설계 격리:
+        - sync `redis.Redis` client 재사용 (`_get_sync_client`)
+        - **async circuit_breaker 호출 X**
+        - **`usdt_redis_stats` 호출 X** (KRX 전용 — 텔레메트리 분리)
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    key = latest_key_source("krx", asset)
+    mirrored_at = datetime.now(_KST)
+    value = serialize_value(rate, timestamp, mirrored_at)
+    try:
+        client.set(key, value)
+        return True
+    except Exception:
+        logger.warning(
+            "KRX sync Redis SET 실패 (best-effort, DB fallback 안전망)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return False
+
+
+def get_latest_krx_rate_from_sync_job(
+    asset: str,
+) -> Optional[Dict[str, Any]]:
+    """sync builder 전용 Redis GET — KRX latest (PR ADR-031).
+
+    usdt:krw topic builder가 호출. Redis hit이면 그대로 채택, miss/parse fail
+    시 None → 호출자(`load_and_build_tether_tab_payload`)가 DB fallback.
+
+    **Stale 판정 X** (ADR-031 1차 spec):
+        KRX는 `insert_source_rate_if_changed`라 가격 stagnant 시 DB row 없음 →
+        Redis timestamp도 마지막 변경 시점에 stuck. DB row gap ≠ raw frame gap
+        이라 timestamp age로 stale 판단 시 저유동성 정상 상태를 false positive로
+        누락 위험. session-end / REST fallback / quote_age 등은 ADR-027 영역.
+
+    Args:
+        asset: KRX asset (예: "usd-krw-futures"). source는 "krx" 고정.
+
+    Returns:
+        topic-native shape `{source, asset, rate, timestamp}` (DB
+        fallback과 동일 shape) 또는 miss/parse fail/error 시 None.
+
+    설계 격리:
+        - sync `redis.Redis` client 재사용
+        - **async circuit_breaker 호출 X**
+        - **`usdt_redis_stats` 호출 X** (KRX 전용)
+    """
+    client = _get_sync_client()
+    if client is None:
+        return None
+    key = latest_key_source("krx", asset)
+    try:
+        raw = client.get(key)
+    except Exception:
+        logger.warning(
+            "KRX sync Redis GET 실패 (best-effort, DB fallback 의존)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return None
+    if raw is None:
+        return None
+    parsed = deserialize_value(raw)
+    if parsed is None:
+        return None
+    return {
+        "source": "krx",
+        "asset": asset,
+        "rate": parsed["rate"],
+        "timestamp": parsed["timestamp"],
+    }
+
+
 def set_latest_bank_rate_from_sync_job(
     bank: str,
     asset: str,

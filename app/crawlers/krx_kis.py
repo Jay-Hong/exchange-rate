@@ -14,16 +14,26 @@ PR6a-1 범위 (이 파일):
 PR6a-1 미포함 (PR6b/c 이후):
   - REST access token helper (snapshot/fallback 시점 추가)
   - DB write (source_rates) — 1초 window + insert-if-changed 정책
-  - Redis write (latest:source:krx:usd-krw-futures) — 매 tick SET
+  - Redis write (latest:source:krx:usd-krw-futures) — ADR-031에서 도입,
+    DB insert 성공 시 호출 (tick-level은 ADR-031의 후속 phase)
   - Alert evaluator hook — 매 tick 평가
   - scheduler 등록 / crawler_config 토글
   - front-month contract resolver — 마스터 파일 (`fo_com_code.mst`) 기반
 
-운영 시 fanout 흐름 (PR6b/c 시점):
+현재 fanout 흐름 (PR6c 운영 + ADR-031 Redis 통합):
   WebSocket tick → on_tick() → callback fanout
-                                  ├─ Redis latest SET (매 tick)
-                                  ├─ Alert evaluator (매 tick 평가)
-                                  └─ DB writer debouncer (1초 window의 last)
+                                  └─ KrxDbWriter (1초 window의 last)
+                                      ├─ insert_source_rate_if_changed (DB)
+                                      └─ set_latest_krx_rate_from_sync_job (Redis,
+                                         ADR-031 — DB insert 성공 시 best-effort)
+
+미래 fanout 목표 (ADR-031 후속 phase):
+  WebSocket tick → on_tick() → callback fanout
+                                  ├─ RedisLatestWriter (매 tick)
+                                  ├─ AlertEvaluator (매 tick 평가)
+                                  └─ DbWindowWriter (1초 window의 last)
+  — REALTIME_ARCHITECTURE_PLAN "알림 모든 tick, DB window close" 원래 계획.
+  KRX/USDT/은행 모두 동일 패턴 적용은 별 phase.
 """
 from __future__ import annotations
 
@@ -1282,20 +1292,43 @@ class KrxDbWriter:
         포함되어 들어오므로, KRX USD 미국달러선물 tick size(0.1 KRW)로
         정규화. Decimal(str).quantize는 IEEE float 잔차 없이 정확한
         십진수 라운딩 (`Decimal(float)` 패턴은 IEEE 잔차 carry-over 위험).
+
+        ADR-031: DB insert 성공 시 Redis direct write 호출 (best-effort).
+        Redis write 실패는 격리 — DB writer loop / 호출자 흐름에 영향 X.
+        topic builder Redis-first read와 짝.
         """
         # 함수 내부 import — to_thread만 import 비용, 모듈 로드 영향 X.
-        from app import crud
+        from app import crud, latest_rates_cache
         from app.database import get_db_context
 
         normalized_rate = float(Decimal(tick["price"]).quantize(Decimal("0.1")))
+        source = tick["source"]
+        asset = tick["asset"]
 
         with get_db_context() as db:
-            crud.insert_source_rate_if_changed(
+            inserted = crud.insert_source_rate_if_changed(
                 db=db,
-                source=tick["source"],
-                asset=tick["asset"],
+                source=source,
+                asset=asset,
                 rate=normalized_rate,
             )
+            if not inserted:
+                return
+            # ADR-031: DB insert 성공 시점에 Redis direct write
+            # USDT _mirror_changed_source_to_redis 패턴 — latest 재조회로 timestamp 확보
+            try:
+                latest = crud.get_latest_source_rate(db, source, asset)
+                if latest is not None:
+                    latest_rates_cache.set_latest_krx_rate_from_sync_job(
+                        asset=asset,
+                        rate=latest["rate"],
+                        timestamp=latest["timestamp"],
+                    )
+            except Exception:
+                logger.exception(
+                    "[krx_db_writer] KRX Redis direct write 예외 (격리, DB fallback 의존)",
+                    extra={"source": source, "asset": asset},
+                )
 
 
 # ---------------------------------------------------------------------------
