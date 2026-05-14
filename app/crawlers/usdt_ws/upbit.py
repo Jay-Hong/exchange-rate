@@ -1,12 +1,36 @@
-"""USDT WebSocket — Upbit canary client (PR4 + Redis latest writer).
+"""USDT WebSocket — Upbit canary client (PR5 + DB writer).
 
-USDT_WS_DESIGN_PLAN §12.2 PR1~PR4 누적.
+USDT_WS_DESIGN_PLAN §12.2 PR1~PR5 누적.
 PR1: lifecycle skeleton.
 PR2: connect/subscribe/parse + log only.
 PR3: UsdtLivenessMonitor + reconnect + explicit ping/pong heartbeat (§5).
 PR4: UpbitRedisWriter — tick-level Redis latest write (fire-and-forget).
+PR5: UpbitDbWriter — 1초 window debounce + insert_source_rate_if_changed.
 
-NO DB (PR5), NO alert (PR6), NO REST fallback (PR7).
+NO alert (PR6), NO REST fallback (PR7).
+
+PR5 핵심 설계 (Codex 검토):
+    - **1초 window debounce**: tick rate ~100ms+ vs DB I/O ~10-50ms — 매 tick
+      write는 DB 부담 ↑. KRX `KrxDbWriter._flush_after_window` 패턴 mirror.
+      Redis writer (PR4)는 "latest 최신성" 목적이라 tick-level 유지,
+      DB writer는 "저장량 제어" 목적 분리.
+    - **`insert_source_rate_if_changed` signature 그대로 사용**: timestamp는
+      DB 자동 생성 (helper에 timestamp param 없음). exchange timestamp 저장
+      semantics는 schema 변경 영역 → 별 PR.
+    - **`asyncio.to_thread` 격리**: sync SQLAlchemy 호출이 event loop 막지
+      않음. `get_db_context()`로 session 생성/close가 thread 내부에서.
+    - **race handling**: flush 진행 중 새 tick 도착 시 `_pending_tick` 갱신.
+      finally 블록에서 `_pending_tick is not None`이면 새 timer 예약 →
+      마지막 tick 누락 방지 (KRX PR6b-2b Codex 보정 패턴).
+    - **close() 즉시 flush**: shutdown 시 1초 기다리지 않고 마지막 pending
+      tick 즉시 DB write. window 일관성보다 last tick 보장 우선.
+    - **Decimal 정규화 없음**: 기존 REST polling
+      (`usdt_sources.py::collect_usdt_rates`)이 정규화 안 하므로 일관성 유지.
+    - **failure isolation**: DB exception → log only, WS session 유지.
+    - **dual-writer (REST polling + WS) baseline**: PR5에서 race 해결 X.
+      `insert_source_rate_if_changed` last-row 비교가 대부분 dedup하나
+      concurrent INSERT race 가능. Stage 1 운영에서 row 증가율 측정 → 필요
+      시 별 PR.
 
 PR4 핵심 설계 (Codex 검토):
     - **tick-level Redis write**: KRX는 Stage C(tick-level)를 보류한 영역이지만
@@ -82,6 +106,9 @@ _GAP_BUCKET_KEYS = ("<=1s", "<=2s", "<=5s", "<=10s", "<=30s", "<=60s", ">60s")
 # Redis writer guards
 MAX_PENDING_WRITES = 20   # task 폭증 안전망 (Redis 장애 시)
 REDIS_CLOSE_TIMEOUT_SEC = 1.0  # close() drain timeout — 후 강제 cancel
+
+# DB writer
+DB_WRITE_WINDOW_SEC = 1.0  # debounce window (KRX KrxDbWriter 동일)
 
 
 class UsdtLivenessMonitor:
@@ -266,6 +293,115 @@ class UpbitRedisWriter:
             self._tasks.clear()
 
 
+class UpbitDbWriter:
+    """Upbit USDT/KRW DB writer — 1초 window debounce + insert_source_rate_if_changed.
+
+    KRX `KrxDbWriter` 패턴 mirror. tick rate ~100ms+ vs DB I/O ~10-50ms이라
+    매 tick INSERT는 DB 부담. window 내 마지막 tick만 helper 호출.
+
+    asyncio loop 차단 방지:
+        sync SQLAlchemy 호출은 asyncio.to_thread로 격리. DB session은
+        to_thread 내부에서 get_db_context()로 생성/close.
+
+    race 방지 (KRX PR6b-2b Codex 보정 mirror):
+        DB write (to_thread) 진행 중 새 tick 도착 → _pending_tick 갱신,
+        _timer.done() X 라 schedule()이 새 timer 안 만듦. write 종료 후
+        finally 블록에서 _pending_tick 재확인 후 새 timer 예약 — 누락 방지.
+
+    failure isolation: DB exception → log only, WS session 영향 X.
+
+    shutdown (close): pending tick 1초 기다리지 않고 즉시 flush. window
+        일관성보다 last tick 보장 우선.
+    """
+
+    def __init__(self, *, window_sec: float = DB_WRITE_WINDOW_SEC) -> None:
+        self._window_sec = window_sec
+        self._pending_tick: Optional[dict] = None
+        self._timer: Optional[asyncio.Task] = None
+
+    def schedule(self, tick: dict) -> None:
+        """tick 입력 → pending 갱신 + window timer 시작/유지. sync, 즉시 반환."""
+        self._pending_tick = tick
+        if self._timer is None or self._timer.done():
+            self._timer = asyncio.create_task(self._flush_after_window())
+
+    async def _flush_after_window(self) -> None:
+        """window 만료 → last pending tick을 helper에 전달.
+
+        write 진행 중 새 tick 도착 시 finally에서 새 timer 예약.
+        """
+        try:
+            await asyncio.sleep(self._window_sec)
+        except asyncio.CancelledError:
+            raise
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.upbit] DB write failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+        finally:
+            # write 중 들어온 tick 처리 — 새 window 예약. finally 블록은
+            # 같은 코루틴 frame 안, await 없는 sync 영역이라 다른 코루틴
+            # race X (schedule()이 _timer.done() 체크 전 새 task 할당).
+            if self._pending_tick is not None:
+                self._timer = asyncio.create_task(self._flush_after_window())
+
+    @staticmethod
+    def _sync_db_write(tick: dict) -> None:
+        """sync DB write — to_thread 내부 실행.
+
+        get_db_context()로 SessionLocal 생성/close. insert_source_rate_if_changed는
+        내부에서 commit. Decimal 정규화 없음 (REST polling
+        `usdt_sources.collect_usdt_rates`와 일관, 둘 다 float 그대로 전달).
+        """
+        # 함수 내부 import — 모듈 로드 시 DB 의존성 격리.
+        from app import crud
+        from app.database import get_db_context
+
+        with get_db_context() as db:
+            crud.insert_source_rate_if_changed(
+                db=db,
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+            )
+
+    async def close(self) -> None:
+        """shutdown 시 timer cancel + pending tick 즉시 flush.
+
+        1초 window 기다리지 않고 마지막 tick DB 저장. window 일관성보다
+        last tick 보장 우선 (shutdown은 드문 이벤트).
+        """
+        if self._timer is not None and not self._timer.done():
+            self._timer.cancel()
+            try:
+                await self._timer
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.upbit] db_writer timer cancel 실패")
+        self._timer = None
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.upbit] DB write on close failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+
+
 class UpbitWsClient:
     """Upbit USDT/KRW WebSocket client (PR3 reconnect + liveness).
 
@@ -293,6 +429,8 @@ class UpbitWsClient:
         self._reconnect_attempt_count: int = 0
         # PR4 Redis latest writer (tick-level, fire-and-forget)
         self._redis_writer: UpbitRedisWriter = UpbitRedisWriter()
+        # PR5 DB writer (1초 window debounce + insert_source_rate_if_changed)
+        self._db_writer: UpbitDbWriter = UpbitDbWriter()
 
     async def start(self) -> None:
         """reconnect 루프. 단일 session crash 시 backoff 후 재시도.
@@ -546,12 +684,13 @@ class UpbitWsClient:
                             logger.info("[usdt_ws.upbit] connection closed after stop")
                             return
                         raise
-                    # valid ticker만 liveness activity로 집계 + Redis write
-                    # schedule (Codex review). invalid/non-ticker frame은 둘 다 X.
+                    # valid ticker만 liveness activity + Redis/DB write schedule.
+                    # invalid/non-ticker frame은 모두 X (Codex review).
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
                         self._redis_writer.schedule(tick)
+                        self._db_writer.schedule(tick)
             finally:
                 ping_task.cancel()
                 try:
@@ -560,8 +699,19 @@ class UpbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.upbit] ping_task cleanup 실패")
+                # close 순서 = DB → Redis (Codex review):
+                # 1. DB가 source of truth (cache는 derived) — DB Tn 확정 후
+                #    Redis를 동기화하는 방향이 일반 원칙.
+                # 2. `await to_thread` 동안 event loop 양보 → 대기 중인 Redis
+                #    background tasks가 동시에 진행 → Redis backlog 소진 ↑ →
+                #    Redis drain 후 Tn까지 reach 확률 ↑.
+                # PR5: DB writer timer cancel + pending tick 즉시 flush.
+                try:
+                    await self._db_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.upbit] db_writer.close() 실패")
                 # PR4: pending Redis writes drain (timeout 후 cancel).
-                # 정상 shutdown 시 마지막 tick latest 보존.
+                # DB 마지막 tick 확정 후 마지막 chance로 Redis latest 동기화.
                 try:
                     await self._redis_writer.close()
                 except Exception:

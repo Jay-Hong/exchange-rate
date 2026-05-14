@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app import config, scheduler
 from app.crawlers.usdt_ws import upbit as upbit_mod
 from app.crawlers.usdt_ws.upbit import (
+    DB_WRITE_WINDOW_SEC,
     MAX_PENDING_WRITES,
     PING_INTERVAL_SEC,
     PING_TIMEOUT_SEC,
@@ -34,6 +35,7 @@ from app.crawlers.usdt_ws.upbit import (
     UPBIT_SUBSCRIBE_TICKET,
     UPBIT_TARGET_CODE,
     UPBIT_WS_URL,
+    UpbitDbWriter,
     UpbitRedisWriter,
     UpbitWsClient,
     UsdtLivenessMonitor,
@@ -318,7 +320,9 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
             raise asyncio.TimeoutError
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
-        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect):
+        # PR5: valid tick은 db_writer.schedule 트리거 → DB 연결 회피.
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(UpbitDbWriter, "_sync_db_write"):
             await client._run_one_session()
 
         # non-ticker (1번째) + valid (2번째) 둘 다 recv 했지만
@@ -348,7 +352,10 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
 
-        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect):
+        # PR5: valid tick은 db_writer.schedule을 트리거 → real _sync_db_write가
+        # DB 연결 시도하지 않도록 patch (이 test는 session/parse 행위만 검증).
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(UpbitDbWriter, "_sync_db_write"):
             await client._run_one_session()
 
         # 두 message 처리 + 1번 TimeoutError → recv 3회 호출
@@ -444,12 +451,10 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
     def test_upbit_module_has_no_downstream_imports(self):
         source = inspect.getsource(upbit_mod)
         imports = "\n".join(self._extract_import_lines(source))
-        # Redis writer (PR4) — latest_rates_cache 허용. set_latest_usdt_rate
-        # helper만 사용, 다른 helper나 mirror cycle은 X.
-        # DB writer (PR5)
+        # Redis writer (PR4) — latest_rates_cache 허용
+        # DB writer (PR5) — crud + database 허용 (insert_source_rate_if_changed)
+        # 단 SourceRate 모델 직접 import는 금지 (helper 내부 사용만)
         self.assertNotIn("SourceRate", imports)
-        self.assertNotIn("SessionLocal", imports)
-        self.assertNotIn("from app.crud", imports)
         # alert (PR6)
         self.assertNotIn("process_source_rate_alerts", imports)
         self.assertNotIn("AlertObservation", imports)
@@ -463,8 +468,7 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
         """call/instantiation 패턴 — docstring 언급은 무시, 실제 호출만 검출."""
         source = inspect.getsource(upbit_mod)
         forbidden_calls = [
-            # DB writer (PR5)
-            "insert_source_rate_if_changed(",
+            # DB writer (PR5) — SourceRate model 직접 생성 X (helper 내부만)
             "SourceRate(",
             # alert (PR6)
             "process_source_rate_alerts(",
@@ -478,7 +482,7 @@ class TestNoDownstreamSideEffects(unittest.TestCase):
             "httpx.post(",
         ]
         for pattern in forbidden_calls:
-            self.assertNotIn(pattern, source, f"Forbidden PR5-PR7 invocation: {pattern}")
+            self.assertNotIn(pattern, source, f"Forbidden PR6-PR7 invocation: {pattern}")
 
     def test_upbit_module_uses_only_allowed_redis_helper(self):
         """PR4 Redis writer는 set_latest_usdt_rate_from_sync_job만 호출.
@@ -1088,8 +1092,10 @@ class TestUpbitSessionRedisIntegration(unittest.IsolatedAsyncioTestCase):
             raise asyncio.TimeoutError
 
         mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        # PR5: db_writer.schedule도 함께 mock — 이 test는 redis_writer만 검증.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
-             patch.object(client._redis_writer, "schedule") as mock_schedule:
+             patch.object(client._redis_writer, "schedule") as mock_schedule, \
+             patch.object(client._db_writer, "schedule"):
             await client._run_one_session()
 
         mock_schedule.assert_called_once()
@@ -1131,6 +1137,233 @@ class TestUpbitSessionRedisIntegration(unittest.IsolatedAsyncioTestCase):
             await client._run_one_session()
 
         mock_close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# PR5 — UpbitDbWriter (1초 window debounce + insert_source_rate_if_changed)
+# ---------------------------------------------------------------------------
+
+class TestUpbitDbWriter(unittest.IsolatedAsyncioTestCase):
+
+    async def test_schedule_returns_immediately(self):
+        """schedule()은 sync, 즉시 반환 (recv loop blocking 방지)."""
+        writer = UpbitDbWriter(window_sec=0.01)
+        # patch 안에서 schedule + close 모두 처리 — close 시 timer 발화가
+        # 실제 _sync_db_write로 fallback해서 DB 연결 시도하는 것 방지.
+        with patch.object(writer, "_sync_db_write"):
+            start = time.time()
+            writer.schedule(_make_tick())
+            elapsed = time.time() - start
+            self.assertLess(elapsed, 0.01)
+            self.assertIsNotNone(writer._timer)
+            await writer.close()
+
+    async def test_window_flushes_last_tick_only(self):
+        """window 안 여러 tick → 마지막 tick만 helper 호출."""
+        writer = UpbitDbWriter(window_sec=0.05)
+        call_args = []
+
+        def spy(tick):
+            call_args.append(tick["rate"])
+
+        with patch.object(writer, "_sync_db_write", side_effect=spy):
+            writer.schedule(_make_tick(rate=1.0))
+            writer.schedule(_make_tick(rate=2.0))
+            writer.schedule(_make_tick(rate=3.0))
+            # window 만료 대기
+            await asyncio.sleep(0.1)
+            await writer.close()
+
+        # 마지막 tick (3.0)만 helper 호출
+        self.assertEqual(call_args, [3.0])
+
+    async def test_flush_during_write_schedules_new_timer(self):
+        """Codex 필수 test: flush 진행 중 새 tick 도착 → 새 timer 예약 → 마지막 tick 유실 X.
+
+        시나리오:
+            t=0: schedule(rate=1.0)
+            t=0.05: window 만료, _sync_db_write(rate=1.0) 시작
+            t=0.05~0.10: write 진행 중 (50ms 행)
+            t=0.07: schedule(rate=2.0) → _pending_tick 갱신, 새 timer 안 만듦
+                    (현 _timer.done() == False)
+            t=0.10: 첫 write 종료, finally에서 _pending_tick 확인 → 새 timer 예약
+            t=0.15: 새 window 만료, _sync_db_write(rate=2.0) 호출
+        """
+        writer = UpbitDbWriter(window_sec=0.05)
+        call_args = []
+
+        def slow_write(tick):
+            call_args.append(tick["rate"])
+            time.sleep(0.05)  # write 50ms 행
+
+        with patch.object(writer, "_sync_db_write", side_effect=slow_write):
+            writer.schedule(_make_tick(rate=1.0))
+            # 첫 window 만료 + write 시작 대기
+            await asyncio.sleep(0.07)
+            # 첫 write 진행 중 → 새 tick 도착
+            writer.schedule(_make_tick(rate=2.0))
+            # 첫 write 종료 + 두 번째 window flush 대기
+            await asyncio.sleep(0.15)
+            await writer.close()
+
+        # 1.0 (첫 window) + 2.0 (race handling 신규 timer) 둘 다 write
+        self.assertEqual(call_args, [1.0, 2.0])
+
+    async def test_db_exception_does_not_propagate(self):
+        """DB exception → log only, WS session 영향 X."""
+        writer = UpbitDbWriter(window_sec=0.01)
+        with patch.object(
+            writer, "_sync_db_write", side_effect=RuntimeError("DB fault")
+        ):
+            writer.schedule(_make_tick())
+            await asyncio.sleep(0.05)
+            await writer.close()  # should not raise
+
+    async def test_close_flushes_pending_tick_immediately(self):
+        """close() 시 1초 window 기다리지 않고 마지막 pending tick 즉시 flush."""
+        writer = UpbitDbWriter(window_sec=10.0)  # 긴 window
+        call_args = []
+
+        def spy(tick):
+            call_args.append(tick["rate"])
+
+        with patch.object(writer, "_sync_db_write", side_effect=spy):
+            writer.schedule(_make_tick(rate=99.0))
+            # window 만료 전 close
+            start = time.time()
+            await writer.close()
+            elapsed = time.time() - start
+
+        # 10s window이지만 close가 즉시 flush — 1초 미만
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(call_args, [99.0])
+
+    async def test_close_noop_when_no_pending(self):
+        """pending tick 없을 때 close()는 안전하게 종료."""
+        writer = UpbitDbWriter()
+        await writer.close()  # should not raise
+
+    async def test_sync_db_write_calls_helper_with_correct_args(self):
+        """_sync_db_write가 crud.insert_source_rate_if_changed에 정확한 args 전달."""
+        # session context는 mock — 실제 DB 의존성 차단
+        mock_session = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_session)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.database.get_db_context", return_value=mock_ctx), \
+             patch("app.crud.insert_source_rate_if_changed") as mock_insert:
+            UpbitDbWriter._sync_db_write(_make_tick(rate=1486.0))
+
+        mock_insert.assert_called_once_with(
+            db=mock_session,
+            source="upbit",
+            asset="usdt-krw",
+            rate=1486.0,
+        )
+
+
+class TestUpbitSessionDbIntegration(unittest.IsolatedAsyncioTestCase):
+
+    def _make_mock_ws(self, recv_side_effect):
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=recv_side_effect)
+        mock_ws.close = AsyncMock()
+        mock_connect = AsyncMock()
+        mock_connect.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect.__aexit__ = AsyncMock(return_value=None)
+        return mock_ws, mock_connect
+
+    async def test_session_schedules_db_writer_on_valid_tick(self):
+        """valid tick → _db_writer.schedule 호출."""
+        client = UpbitWsClient()
+        valid = json.dumps(_make_valid_ticker_dict())
+        recv_calls = [0]
+
+        async def recv_seq():
+            recv_calls[0] += 1
+            if recv_calls[0] == 1:
+                return valid
+            client._stop_event.set()
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._db_writer, "schedule") as mock_schedule:
+            await client._run_one_session()
+
+        mock_schedule.assert_called_once()
+        scheduled_tick = mock_schedule.call_args.args[0]
+        self.assertEqual(scheduled_tick["source"], "upbit")
+        self.assertEqual(scheduled_tick["asset"], "usdt-krw")
+
+    async def test_session_does_not_schedule_db_on_invalid_tick(self):
+        """invalid/non-ticker frame → _db_writer.schedule X."""
+        client = UpbitWsClient()
+        non_ticker = json.dumps({"type": "status", "code": "KRW-USDT"})
+        recv_calls = [0]
+
+        async def recv_seq():
+            recv_calls[0] += 1
+            if recv_calls[0] == 1:
+                return non_ticker
+            client._stop_event.set()
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_seq)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._db_writer, "schedule") as mock_schedule:
+            await client._run_one_session()
+
+        mock_schedule.assert_not_called()
+
+    async def test_session_closes_db_writer_in_finally(self):
+        """session 종료 시 _db_writer.close 호출."""
+        client = UpbitWsClient()
+        client._stop_event.set()
+
+        async def recv_blocks():
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_blocks)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._db_writer, "close", new=AsyncMock()) as mock_close:
+            await client._run_one_session()
+
+        mock_close.assert_awaited_once()
+
+    async def test_session_closes_db_before_redis(self):
+        """Codex review 회귀 가드: finally 블록에서 DB close가 Redis close보다 먼저.
+
+        근거:
+        1. DB는 source of truth — cache(Redis) 동기화 방향과 일관.
+        2. DB close의 to_thread가 event loop 양보 → 대기 중인 Redis
+           background tasks 동시 진행 → Redis drain 후 Tn까지 reach 확률 ↑.
+        """
+        client = UpbitWsClient()
+        client._stop_event.set()
+        call_order = []
+
+        async def db_close_spy():
+            call_order.append("db")
+
+        async def redis_close_spy(timeout=1.0):
+            call_order.append("redis")
+
+        async def recv_blocks():
+            raise asyncio.TimeoutError
+
+        mock_ws, mock_connect = self._make_mock_ws(recv_side_effect=recv_blocks)
+        with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
+             patch.object(client._db_writer, "close", side_effect=db_close_spy), \
+             patch.object(client._redis_writer, "close", side_effect=redis_close_spy):
+            await client._run_one_session()
+
+        self.assertEqual(
+            call_order, ["db", "redis"],
+            "DB close must run before Redis close (source-of-truth + event-loop yield)",
+        )
 
 
 if __name__ == "__main__":
