@@ -1,0 +1,359 @@
+# USDT WebSocket (Upbit Canary) Runbook
+
+Phase B.1 (PR1~PR7) 완료 후 운영 진입 절차. KRX canary 패턴 mirror.
+
+설계 문서: [USDT_WS_DESIGN_PLAN.md](USDT_WS_DESIGN_PLAN.md) (§12 PR 분할, §13 long-term roadmap)
+
+---
+
+## 핵심 원칙 (반드시 인지)
+
+- **`USDT_WS_UPBIT_ENABLED=false` default**: env 변경 없이 코드 배포 시 lifecycle 비활성, 운영 영향 0.
+- **기존 REST polling 유지** (`usdt_sources.collect_usdt_rates` 10s): WS 활성화해도 polling은 그대로. additive 원칙 (§12.1 guardrail 2).
+- **Dual-writer 의도적**: WS는 Redis writer + DB writer + Alert evaluator로 fanout. polling도 동일 fanout 호출 → 일시적으로 dual-write 발생. `insert_source_rate_if_changed`가 대부분 dedup, 잔존 race는 baseline 측정 항목.
+- **격리 원칙**: WS connection 장애 / Redis 장애 / DB 장애 / FCM 장애 모두 WS session에 전파 X. fallback probe 실패도 log only.
+- **Rollback 1차 수단**: `USDT_WS_UPBIT_ENABLED=false` env 변경 + process 재생성. 어느 stage에서든 즉시 격리 가능.
+
+---
+
+## Stage 0 — Dev Smoke (현재 단계)
+
+목적: 운영 환경 진입 전 짧은 dev 실행으로 connect/subscribe/fanout 정상 동작 확인.
+
+### 진입 절차
+
+```bash
+# 1. dev .env 편집 (운영 .env는 아직 false 유지)
+# .env 또는 .env.development
+USDT_WS_UPBIT_ENABLED=true
+
+# 2. process 재생성 (env_file은 import 시 1회 읽음 — restart로 충분 X)
+docker compose up -d fastapi
+# 또는 local uvicorn:  uvicorn app.main:app --reload
+```
+
+### 확인 명령
+
+```bash
+# (1) lifecycle log — WS connect + subscribe + first tick
+docker compose logs -f fastapi | grep "usdt_ws.upbit"
+# 기대 로그 (시작 직후 ~30초 이내):
+#   [usdt_ws.upbit] start (PR3 reconnect loop)
+#   [usdt_ws.upbit] connected url=wss://api.upbit.com/websocket/v1
+#   [usdt_ws.upbit] subscribed code=KRW-USDT ticket=fxi-usdt-upbit
+#   [usdt_ws.upbit] first tick (rate=..., timestamp_ms=...)
+
+# (2) Redis latest 갱신 (mirror_age < 5s)
+docker compose exec redis redis-cli GET latest:source:upbit:usdt-krw
+# 기대: JSON {"rate": ..., "timestamp": "...+09:00", "mirrored_at": "..."}
+#       mirrored_at이 현재 시간 대비 5초 이내
+
+# (3) DB insert-if-changed 동작 (변경된 가격에만 INSERT)
+docker compose exec postgres psql -U <user> -d <db> -c \
+  "SELECT source, asset, rate, timestamp FROM source_rates
+   WHERE source='upbit' AND asset='usdt-krw'
+   ORDER BY timestamp DESC LIMIT 10;"
+# 기대: 최근 10건이 모두 다른 rate (insert-if-changed 작동),
+#       timestamp는 1초 window 간격 또는 가격 변동 간격
+
+# (4) Alert evaluator no-crash (settings 없으면 cache empty + 무동작)
+docker compose logs fastapi | grep "alert_evaluator"
+# 기대: error/exception 없음. settings 존재 시 평가 로그.
+
+# (5) Reconnect/fallback warning 없음
+docker compose logs fastapi | grep -E "usdt_ws.upbit.*(reconnect|fallback|crashed)"
+# 기대: 정상 시 warning 없음. 일시적 reconnect는 허용.
+
+# (6) 기존 REST polling 생존 확인 (additive 유지 검증)
+# scheduler job은 10초 주기지만 로그는 가격 변경 시("⚡️ USDT 환율 변경")만
+# 출력 — 저거래량 시 로그 없을 수 있음. 따라서 생존은 아래 3가지로 종합 판단:
+#
+# (6a) 변경 로그 — 가격 변동 있는 시간대에만 출력
+docker compose logs --since=5m fastapi | grep "USDT 환율 변경" | head -5
+# 기대: 5분 안에 가격 변동 있으면 출력. 변동 없으면 0건도 정상.
+#
+# (6b) 실패 로그 부재 — polling 자체 실패는 항상 logged
+docker compose logs --since=5m fastapi | grep -E "USDT 저장 실패|source.*timeout|source.*request failed"
+# 기대: 0건. 1건 이상이면 polling 부분 실패 (특정 source).
+#
+# (6c) DB row 시점 확인 — 어떤 source든 최근 30초 안에 INSERT
+docker compose exec postgres psql -U <user> -d <db> -c \
+  "SELECT source, asset, MAX(timestamp) AS latest FROM source_rates
+   WHERE source IN ('upbit','bithumb','coinone','korbit','gopax')
+   GROUP BY source, asset ORDER BY source;"
+# 기대: upbit는 WS로 매우 fresh. 나머지 4개는 polling 주기(10s)에 따라
+#       대부분 30초 이내 latest 갱신 (가격 변동 있을 때만, 없으면 더 오래된 timestamp).
+```
+
+### Stage 0 성공 기준 (Codex 권장 6항목)
+
+- [ ] WS 연결/subscribe 성공 (log)
+- [ ] first tick INFO log 발생
+- [ ] Redis `latest:source:upbit:usdt-krw` 갱신 (mirror_age <5s)
+- [ ] DB `source_rates` insert-if-changed 정상 (rate 변경 시만 INSERT)
+- [ ] Alert evaluator no-crash (cache miss → DB query → empty 처리 OK)
+- [ ] Reconnect/fallback task warning 없음 (강제 disconnect 시나리오 외)
+- [ ] **기존 REST polling 정상 동작 유지** (확인 방법은 Stage 0 명령 §(6) 참조)
+
+### Stage 0 실패 시 rollback
+
+```bash
+# 1. 즉시 env 변경
+# .env 또는 .env.development
+USDT_WS_UPBIT_ENABLED=false
+
+# 2. process 재생성
+docker compose up -d fastapi
+
+# 3. 격리 확인
+docker compose logs --tail=20 fastapi | grep "usdt_ws.upbit"
+# 기대: "[usdt_ws.upbit] USDT_WS_UPBIT_ENABLED=false, skip start" 1줄 (시작 직후만)
+```
+
+문제 진단 (rollback 후 별도 분석):
+- WS connect 실패 → 네트워크/방화벽 → curl/wscat으로 직접 확인
+- Redis write 실패 → `set_latest_usdt_rate_from_sync_job` log + Redis 연결
+- DB write 실패 → `_sync_db_write` log + DB 연결
+- Alert evaluator crash → `app/notifications/alert_evaluator.py` 로그 + setting/device 데이터 확인
+
+---
+
+## 24h Dev Soak (Stage 1 진입 전 필수)
+
+§12.1 guardrail 3: PR2 24h soak는 운영 활성화 진입 전 leak/race 검증 목적.
+
+### 목적
+
+- 메모리 leak 없음 (RSS 안정)
+- File descriptor leak 없음 (WS task lifecycle)
+- Asyncio pending task 누적 없음 (Redis writer / Alert evaluator)
+- Reconnect 빈도 합리적 (네트워크 일시 끊김 정도, repeated 폭주 X)
+- DB row 증가율 baseline (insert-if-changed 효과)
+- FCM 발송 (test alert 존재 시) 성공률
+
+### 진입 조건
+
+- Stage 0 성공 기준 7항목 모두 ✓
+- 24h dev 환경 가용 (실제 Upbit 트래픽 받는 상태로 24h 유지 가능)
+
+### 24h 모니터링 명령 (1시간마다 check 권장)
+
+```bash
+# 메모리/프로세스
+docker stats --no-stream fastapi
+
+# Asyncio task 누수 — Redis writer / Alert evaluator pending
+# (psutil/asyncio inspection이 직접 어렵다면 log warning 카운트로 대체)
+docker compose logs --since=1h fastapi | grep -c "alert_evaluator.*backlog"
+# 기대: 0 또는 매우 적음 (>100 threshold 도달 시 warning)
+
+# Redis writer saturation
+docker compose logs --since=1h fastapi | grep -c "Redis write queue saturated"
+# 기대: 0 (정상이면 절대 발생 X)
+
+# Reconnect 빈도
+docker compose logs --since=1h fastapi | grep -c "connection closed (attempt"
+# 기대: 시간당 한 자릿수 이내
+
+# DB row 증가 — 1시간 차이
+docker compose exec postgres psql -U <user> -d <db> -c \
+  "SELECT COUNT(*) FROM source_rates
+   WHERE source='upbit' AND asset='usdt-krw'
+     AND timestamp > NOW() - INTERVAL '1 hour';"
+# 기대: 가격 변동 빈도에 비례 (insert-if-changed로 동일 rate skip)
+```
+
+### 24h 통과 기준
+
+- [ ] 메모리 RSS 안정 (시작 대비 ±20% 이내)
+- [ ] Asyncio backlog/saturation warning 0
+- [ ] Reconnect 시간당 평균 < 10회
+- [ ] DB row 증가가 가격 변동과 합리적 비례 (REST polling 대비 큰 차이 X)
+- [ ] FCM 발송 (test alert 있을 시) 성공률 > 95%
+
+---
+
+## Stage 1 — 운영 활성화 (모든 fanout 동시 active)
+
+**중요**: 현재 구현은 `USDT_WS_UPBIT_ENABLED=true` **단일 토글**로
+PR4 Redis writer + PR5 DB writer + PR6 Alert evaluator + PR7 REST fallback
+controller가 **모두 동시에 활성**됩니다. Stage 2/3는 *별도 활성화 단계가
+아니라* Stage 1 활성화 후 시간 두고 진행하는 **관찰/검증 checklist**입니다.
+
+### 진입 조건
+
+- Stage 0 Dev Smoke 7항목 통과
+- 24h Dev Soak 5항목 통과
+
+### 활성화 절차
+
+```bash
+# 운영 .env에 추가/변경
+USDT_WS_UPBIT_ENABLED=true
+
+# Process 재생성 (env_file은 import 시 1회 읽기 — restart는 X)
+docker compose up -d fastapi
+
+# 활성화 확인
+docker compose logs --tail=20 fastapi | grep "usdt_ws.upbit"
+# 기대: "[usdt_ws.upbit] UpbitWsClient skeleton 시작 (PR1)" 또는
+#       "[usdt_ws.upbit] start (PR3 reconnect loop)" 등.
+#       "skip start" 메시지는 없어야 함.
+```
+
+### Stage 1 활성화 시 동시 켜지는 fanout
+
+| 컴포넌트 | 동작 |
+|---|---|
+| WS connection (PR2) | Upbit `wss://api.upbit.com/websocket/v1` 연결 |
+| LivenessMonitor + reconnect (PR3) | frame/heartbeat 추적, reconnect backoff |
+| **Redis writer (PR4)** | 매 valid tick → `latest:source:upbit:usdt-krw` write |
+| **DB writer (PR5)** | 1초 window debounce + insert_source_rate_if_changed |
+| **Alert evaluator (PR6)** | tick → AlertObservation → FCM (settings 있을 시) |
+| **REST fallback (PR7)** | stale 감지 시 자동 probe (강제 trigger 없음) |
+
+### Stage 2/3 관찰 checklist (별도 활성화 X)
+
+Stage 2/3는 시간 두고 진행하는 관찰 단계. Stage 1 활성화 시점부터 모두 동작
+중이며, 본 checklist는 단계별 **검증 포커스**를 정의.
+
+---
+
+## Stage 2 — Alert evaluator 발화 검증 (관찰)
+
+**Stage 1 활성화 1주 baseline 통과 후 본 checklist 진행.**
+
+### Stage 2 관찰 checklist
+
+- [ ] **중복 FCM 없음**: 같은 setting_id에 대해 REST polling alert과 WS evaluator
+  alert이 모두 발화하지 않는지. `mark_source_setting_triggered`가 atomic이라
+  triggered=False → True 전환 후 다른 path는 dedup됨. log로 발화 횟수 확인:
+
+  ```bash
+  docker compose logs --since=1h fastapi | grep "alert_fcm_sent" | wc -l
+  ```
+
+- [ ] **`triggered/last_notified_*` 일관성**: 발화된 setting의 DB 상태 확인:
+
+  ```sql
+  SELECT id, source, asset, condition, threshold, triggered, last_notified_at, last_notified_rate
+  FROM source_notification_settings
+  WHERE triggered = TRUE
+  ORDER BY last_notified_at DESC LIMIT 10;
+  ```
+
+  기대: triggered=True인 모든 row가 last_notified_at + last_notified_rate 채워짐.
+
+- [ ] **Cache stale 빈도**: CRUD invalidation이 정상 동작하면 stale 발화 거의 없음.
+
+  ```bash
+  docker compose logs --since=1h fastapi | grep -c "stale cache detected"
+  ```
+
+  기대: 시간당 < 10 (사용자 settings 수정 빈도에 비례).
+
+- [ ] **Empty device_tokens 케이스**: device 없는 사용자가 setting만 등록한 경우.
+
+  ```bash
+  docker compose logs --since=1h fastapi | grep "alert_evaluator.*empty"
+  ```
+
+  기대: warning 0 (cache populate 시점에 제외 — PR6 guardrail).
+
+---
+
+## Stage 3 — Fallback probe 검증 (관찰)
+
+**Stage 2 통과 후 본 checklist 진행. 강제 disconnect 시나리오 포함.**
+
+### Stage 3 관찰 checklist
+
+- [ ] **자연 발화 관찰**: 운영 중 Upbit WS 일시 끊김 발생 시 probe 발화 확인.
+
+  ```bash
+  docker compose logs --since=24h fastapi | grep "fallback.*probe start"
+  ```
+
+  기대: 0 또는 적음 (Upbit WS 안정적이면 발화 거의 없음).
+
+- [ ] **강제 disconnect 검증** (선택, dev 환경 권장):
+  네트워크 차단 등으로 강제 disconnect → stale 감지 → probe 발화 확인.
+
+  ```bash
+  # stale → probe 발화 log
+  docker compose logs fastapi | grep -E "status normal → stale|fallback.*probe (start|success)"
+  ```
+
+  기대 순서:
+  1. `status normal → stale` (frame/heartbeat silence 30s+)
+  2. `fallback probe start (reason=stale_transition)`
+  3. `fallback probe success (rate=..., ts_ms=..., reason=stale_transition)`
+  4. cooldown 30s 동안 추가 probe 발화 없음
+  5. WS 복구 시 `status stale → normal` → `cooldown reset`
+
+- [ ] **Probe 실패 격리**: REST 실패 시 WS session 영향 없음.
+
+  ```bash
+  # Probe 실패 log
+  docker compose logs --since=24h fastapi | grep -E "fallback.*(timeout|error|None)"
+  # WS session 영향 확인 (재시작 / status 갱신 등)
+  docker compose logs --since=24h fastapi | grep "usdt_ws.upbit] start"
+  ```
+
+  기대: probe 실패 후 WS lifecycle log (start/restart 등) 추가 발생 없음.
+
+- [ ] **Cooldown reset on normal recovery**: stale → reconnecting → normal 경로에서도
+  cooldown reset 확인 (PR7 Codex Finding 1 회귀 검증).
+
+  ```bash
+  docker compose logs --since=24h fastapi | grep "cooldown reset"
+  ```
+
+---
+
+## Rollback 절차 공통
+
+```bash
+# 1차 (모든 stage 공통): env toggle
+USDT_WS_UPBIT_ENABLED=false
+docker compose up -d fastapi
+
+# 2차: 코드 revert
+git revert <commit>
+docker compose build && docker compose up -d fastapi
+
+# 데이터 보존: source_rates / source_notification_logs schema/data 유지
+# (DB writer / alert evaluator rollback 시 누락된 tick은 기존 REST polling이 baseline 처리)
+```
+
+---
+
+## 공통 관찰 지표
+
+| 항목 | 명령 | baseline |
+|---|---|---|
+| WS 연결 상태 | `grep "status .* → "` 최근 24h | 시간당 reconnect <10 |
+| Redis latest 갱신 | `redis-cli GET latest:source:upbit:usdt-krw` → mirrored_at | <5s ago |
+| DB row 증가 | source_rates COUNT 1h | 가격 변동에 비례 |
+| Alert FCM 발송 | `grep "alert_fcm_sent"` | test alert 있을 시 성공 ≥95% |
+| Cache stale 빈도 | `grep "stale cache detected"` | <10/h (CRUD invalidation 정상 시) |
+| Fallback probe 빈도 | `grep "fallback.*probe start"` | stale transition 시 1회만 |
+
+---
+
+## 참조
+
+- [USDT_WS_DESIGN_PLAN.md](USDT_WS_DESIGN_PLAN.md) — 설계/PR 분할/long-term roadmap
+- [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) — Upbit WS spec
+- [KRX_CANARY.md](KRX_CANARY.md) — 동일 패턴 runbook 참고
+
+Phase B.1 commits:
+- PR1 `9cc5079` feature flag + lifecycle skeleton
+- PR2 `7ea7670` connect/subscribe/parse + log only
+- PR3 `c4d3771` LivenessMonitor + reconnect + heartbeat
+- PR4 `4c67330` Redis latest writer
+- PR5 `f2921f5` DB writer 1초 window debounce
+- PR6 `8504100` AlertObservation + UsdtAlertEvaluator B1
+- Follow-up 1 `46d2e9a` Settings CRUD cache invalidation
+- Follow-up 2 `3a782e2` Long-term scaling roadmap doc
+- PR7 `17471f7` REST fallback controller (Phase B.1 마지막)
