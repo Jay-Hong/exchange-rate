@@ -1236,4 +1236,11 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ DXY 보조지표 그래프 (Phase 1A, 2026-03-10)
 - ✅ Android 출시 완료 (2026-03-13)
 - ✅ 환율 뉴스 피드 — RSS + KB API 병행 수집, noise_only 24h (Phase 1B, 2026-03-28)
+- ✅ Phase Z-2 series — topic protocol foundation, legacy 임시 경로 정리, USDT Redis-first 전환 ([USDT_TOPIC_MIGRATION_PLAN.md](USDT_TOPIC_MIGRATION_PLAN.md) Z-2a~Z-2e, 2026-04~05)
+- ✅ ADR-029 USDT mirror skip + direct write + read-path DB fallback (2026-05-12)
+- ✅ ADR-030 latest:index 책임 분리 — per-key freshness 전환 (Proposed, deployed 2026-05-13 `489359c` observing) ([DECISIONS.md ADR-030](DECISIONS.md))
+- ✅ ADR-031 KRX 미국달러선물 Redis 통합 — 1차 부채 해소 (Proposed, deployed 2026-05-14 `0756329` observing) ([DECISIONS.md ADR-031](DECISIONS.md), 5/18 만기 rollover는 [KRX_CANARY.md](KRX_CANARY.md))
+- ✅ KRX fanout refactor — A/B/C/A-pre 완료 (behavior-change-0), D는 Stage C와 함께 검토 ([KRX_FANOUT_REFACTOR_PLAN.md](KRX_FANOUT_REFACTOR_PLAN.md))
+- 🔜 5/18 KRX 만기 rollover 관찰 + ADR-027 REST fallback 수치 확정 → Stage C 결정
+- 🔜 USDT WebSocket primary 설계 (KRX 패턴 재사용 검토)
 - 🔜 CI/CD, 유닛 테스트

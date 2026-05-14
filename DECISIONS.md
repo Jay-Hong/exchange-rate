@@ -3408,7 +3408,19 @@ USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder
 
 ## ADR-030: latest:index 책임 분리 — freshness는 per-key mirrored_at으로 판단
 
-**상태**: Proposed (2026-05-13, PR Z-2f 설계 단계)
+**상태**: Proposed, **Deployed and observing** (2026-05-14)
+
+- 배포 commit: `489359c` (PR Z-2f, 2026-05-13 22:16 KST)
+- 즉시 smoke (Z-2f 핵심 시그널):
+  - legacy `/api/rates/usd-krw` HTTP 200, `/admin/api/topic-status` (usdt + 3 fx) error 0
+  - `fallback_reason=redis_stale` (rates path) **0건** — line 886 index stale gate 제거 후 발생 X
+  - `per_key_stale` 0건 — 모든 data key fresh, Redis-first 정상 통과
+  - Step 3b warning(`bank/investing sync Redis SET 실패`) 0건 — 회귀 가드 OK
+- **Accepted 전환 조건** (baseline 누적 후):
+  - `fallback_reason=redis_stale` (rates path) 소멸 — 기대값 0 유지
+  - `per_key_stale` fallback 빈도 측정 + 기준선 확보
+  - topic/broadcast error 0 유지
+  - DXY 별도 fallback path 영향 X 유지 (`latest_dxy_fallback_reason` 정책 그대로)
 
 ### 맥락
 
@@ -3527,7 +3539,20 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 
 ## ADR-031: KRX 미국달러선물 Redis 통합 — 1차 부채 해소 (stale/REST는 후속)
 
-**상태**: Proposed (2026-05-13, PR Z-2f 후속)
+**상태**: Proposed, **Deployed and observing** (2026-05-14)
+
+- 배포 commit: `0756329` (2026-05-14 12:53 KST, KRX 정규 세션 중)
+- 즉시 smoke: legacy /api/rates 200, usdt:krw topic error 0, KRX Redis key 존재, Step3b/Z2f warning 0
+- 결정적 증거: `latest:source:krx:usd-krw-futures` `timestamp`/`mirrored_at` gap 4ms (KRX tick → DB insert → Redis direct write 흐름 ms 단위 작동)
+- Telemetry 분리 검증: `usdt_redis_stats.per_source`에 krx 미등장 — KRX 전용 helper의 stats 분리가 운영에서 확인
+- **Stable observed 조건** (필수 — 일상 cycle 검증):
+  - KRX session 전환 1회 이상 정상 통과 (정규 → 휴식 → 야간 → 휴식)
+  - `usdt:krw` topic error 0 유지
+  - `usdt_redis_stats.per_source`에 krx 미등장 지속
+- **Accepted 조건** (Stable observed + 일회성 만기 event):
+  - 위 Stable observed 모두 충족
+  - **5/18 만기 contract rollover 통과** (PR6c-2d-1 자동 reconcile + Redis key 자연 갱신)
+  - 5/18 관찰 명령 / 체크리스트 / baseline 쿼리는 [KRX_CANARY.md](KRX_CANARY.md) 참조
 
 ### 맥락
 

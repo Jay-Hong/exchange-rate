@@ -1,26 +1,30 @@
 # KRX Fanout Refactor Plan
 
 > 📅 **작성일**: 2026-05-14
-> 🏷️ **상태**: Draft (PR Next — 문서 only)
+> 🏷️ **상태**: Active plan — A/B/C/A-pre completed, D pending
 > 📋 **문서 성격**: KRX 미국달러선물 (`app/crawlers/krx_kis.py`)의 현재 책임/시그널/Stage 상태를 정리하고 장기 fanout 구조와 정합화하기 위한 implementer-focused mapping. ADR-027의 *decision record*와 분리.
 
 ## 0. Scope & Status
 
-본 문서는 *신규 skeleton 작성*이 아니라 **이미 들어와 있는 Stage A/B 코드 + ADR-031 Redis 통합을 장기 fanout 목표와 정합화**하기 위한 mapping. 코드 변경 0인 문서 단계.
+본 문서는 *신규 skeleton 작성*이 아니라 **이미 들어와 있는 Stage A/B 코드 + ADR-031 Redis 통합을 장기 fanout 목표와 정합화**하기 위한 mapping.
 
-**5/18 전 가능 (이번 doc의 1차 범위)**:
+**5/18 전 가능 범위**:
 
 - 현재 책임/시그널/Stage 정리
 - 목표 fanout 구조 정의 (`KrxLivenessMonitor` / `KrxRestFallbackController` / `KrxRedisLatestWriter` / `KrxDbWindowWriter` / `KrxAlertEvaluator`)
-- behavior-change-0 extract 후보 식별 (handler/책임 분리만, 호출 순서/조건/timing 보존)
+- behavior-change-0 extract (handler/책임 분리만, 호출 순서/조건/timing 보존)
 
-**진행 현황 (이 doc 작성 후)**:
+**진행 현황 (2026-05-14 기준 — 모두 behavior-change-0)**:
 
-- ✅ C: KrxRedisLatestWriter 객체 분리 (commit `f5ba9bc`, 2026-05-14)
-- ✅ A-pre: liveness invariants 회귀 가드 (commit `6faa2dd`, 2026-05-14 — 5 tests)
-- ✅ A: KrxLivenessMonitor 추출 (commit `eb085c1`, 2026-05-14 — `_set_status` 잔류)
-- ✅ B: KrxRestFallbackController 추출 (이번 PR — getter 패턴, wrapper 경유 behavior-change-0)
-- ⏸ D: KrxAlertEvaluator stub (Stage C 영역과 함께 검토)
+- ✅ **A-pre**: liveness invariants 회귀 가드 (commit `6faa2dd` — 5 tests)
+- ✅ **A**: KrxLivenessMonitor 추출 (commit `eb085c1` — frame/age/gap state ownership, `_set_status`는 client 잔류)
+- ✅ **B**: KrxRestFallbackController 추출 (commit `6a5aa91` — getter 패턴 active_session/last_tick_at, wrapper 경유 behavior-change-0)
+- ✅ **C**: KrxRedisLatestWriter 객체 분리 (commit `f5ba9bc` — ADR-031 DB-insert-bound timing 보존)
+- ⏸ **D**: KrxAlertEvaluator stub — Stage C 영역(ADR-027 결정)과 함께 검토. 단독 stub은 실익 낮음.
+
+각 PR은 5 invariants + 27 fallback eligibility + KRX kis + redis integration suites 모두 unchanged GREEN 입증. 전체 회귀 604 passed 유지.
+
+**미배포 누적 (모두 behavior-change-0)**: `f5ba9bc`, `6faa2dd`, `eb085c1`, `6a5aa91`. 단독 deploy 효익 작아 다음 실제 동작 변경 PR과 묶음 권장.
 
 **5/18 후 결정 영역 (본 doc 범위 외)**:
 
@@ -152,11 +156,12 @@ WebSocket tick (KisFuturesClient)
 
 ### 5.1 5/18 전 가능 (behavior-change-0)
 
-**A. KrxLivenessMonitor 추출** — ✅ 완료 (commit `<see master>`):
+**A. KrxLivenessMonitor 추출** — ✅ 완료 (commit `eb085c1`):
 
-- KisFuturesClient의 metric state를 `KrxLivenessMonitor` 객체에 이전 (`_last_tick_at`, `_last_*_frame_at`, gap buckets, max gap, status transition counters).
-- 외부 API 동일 (`get_metrics()` 출력 shape 100% 보존).
-- 호출 순서 변경 X (`_dispatch_tick` 안에서 `liveness_monitor.observe_tick(tr_id, now)` 같은 위임).
+- KisFuturesClient의 metric state를 `KrxLivenessMonitor` 객체에 이전 (`_last_tick_at`, `_last_*_frame_at`, frame counters, gap buckets, max gap).
+- **status transition counters는 client에 잔류** (`_set_status` + `_status_transition_count`는 KrxRestFallbackController 결합 영역이라 PR-B와 묶지 않음).
+- 외부 API 동일 (`get_metrics()` 출력 shape 100% 보존, `_last_tick_at` property + `_reset_active_session_gap_metrics()` wrapper로 test 호환).
+- 호출 순서 변경 X (`_dispatch_tick` 안에서 `self._liveness.observe_tick(tr_id, now)` 위임).
 - **`_last_tick_at` multi-purpose 결합 보존 (★ 핵심 회귀 가드)** — 추출 시 다음 모든 연결점에 동일 시맨틱 유지:
   - liveness metric (`get_metrics()` `last_frame_age_sec`)
   - **PR6e grace start**: 새 WebSocket 진입 시 `_last_tick_at = time.time()` (line 1053) — carry-over로 인한 즉시 stale 전이 차단
@@ -170,14 +175,17 @@ WebSocket tick (KisFuturesClient)
   - active loop의 stale check (line 1063) 시점/조건 보존
   - reconnect path의 stale check (line 1005) 시점/조건 보존
 
-**B. KrxRestFallbackController 추출**:
+**B. KrxRestFallbackController 추출** — ✅ 완료 (commit `6a5aa91`):
 
 - `_evaluate_rest_fallback` / `_invoke_rest_fallback` / `_fallback_counters` / `_fallback_tasks` / `_last_fallback_at`을 controller로 이전.
-- KisFuturesClient는 `controller.maybe_evaluate(now, status, frame_age, session)` 같은 위임.
+- **Getter 패턴** (Codex 핵심 권고): controller 생성 시 `active_session_getter=lambda: self._active_session`, `last_tick_at_getter=lambda: self._last_tick_at` 주입. `_invoke_rest_fallback()` 내부에서 `self._get_active_session()` 호출 → session은 **invoke 시점에 read** (evaluate 시점 freeze X — 기존 line 1020 동작 보존).
+- **Wrapper 경유** (behavior-change-0): `_set_status(normal→stale)`는 client의 `self._evaluate_rest_fallback(time.time())` wrapper를 거쳐 controller.evaluate 호출. invariant test 2/3 (`patch.object(client, "_evaluate_rest_fallback")`) 호환.
 - 호출 시점 변경 X (status transition + summary_log_loop 두 진입점 그대로).
 - counter 증가 조건 변경 X (검사 순서 4단계 보존).
 - REST task 생성 조건 변경 X (`KRX_REST_FALLBACK_ENABLED` env 의미 동일).
-- 검증: `test_krx_fallback_eligibility.py` 통과 + counter 값 시퀀스 동일.
+- `stop()` cleanup: `await self._fallback_controller.cleanup_tasks()` 위임 (pending cancel/await/clear 동일).
+- Backward compat shims (5개): `_fallback_counters` / `_last_fallback_at` (get/set) / `_fallback_tasks` (property), `_evaluate_rest_fallback(ts)` / `_invoke_rest_fallback()` (method wrapper) — test 46건 unchanged.
+- 검증: `test_krx_fallback_eligibility.py` 27건 + `test_krx_liveness_invariants.py` 5건 unchanged GREEN.
 
 **C. KrxRedisLatestWriter 객체 분리 (호출 위치 동일)** — ✅ 완료 (commit `f5ba9bc`):
 
@@ -192,10 +200,13 @@ WebSocket tick (KisFuturesClient)
 - `add_tick_handler`로 future 등록 가능한 형태.
 - 검증: 코드 변경 거의 없음, smoke 영향 없음.
 
-→ A/B/C/D 모두 *behavior-change-0* 후보. PR 분리:
+→ A/B/C 모두 *behavior-change-0* 완료. 실제 PR 분리는 *각 단계 1개씩*으로 진행되어 회귀 surface 최소화:
 
-- PR1 (A+B): metric + fallback controller 추출
-- PR2 (C+D): Redis writer 객체 분리 + AlertEvaluator stub
+- PR-A-pre (`6faa2dd`): liveness invariants 회귀 가드 5 tests
+- PR-A (`eb085c1`): KrxLivenessMonitor 추출
+- PR-B (`6a5aa91`): KrxRestFallbackController 추출
+- PR-C (`f5ba9bc`): KrxRedisLatestWriter 객체 분리
+- D: Stage C 영역과 함께 검토 (단독 stub 실익 낮음)
 
 ### 5.2 5/18 후에만 가능 (Stage C 결정 영역)
 
