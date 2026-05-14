@@ -370,6 +370,7 @@ Phase A 결과로 모든 결정 잠금. Phase B 구현 진입 시 본 표가 spe
 - **알림 설정 모델 `repeat_interval_sec` 확장 (B2 구현)** — 별 ADR/PR. schema (`notification_settings` + `source_notification_settings`) + API (POST/PUT 필드 추가) + iOS/Android client (간격 선택 UI). 4 source 공통 적용. `null = once`라 기존 알림 호환. 신규 기능 — 사용자 가치 ↑.
 - 비교 알림 (`comparison_alerts`) — 같은 evaluator 위에 multi-source 평가 추가
 - B3 (direction crossing) — B2 안정 후 별 ADR/PR
+- **Post-Upbit 구조 refactor 후보**: PR4~PR7은 현재 `app/crawlers/usdt_ws/upbit.py` 위치를 유지한다. Upbit canary Stage 2 안정 후, Bithumb 확장 전에 `app/market_data/{usdt,krx,banks,investing}/...` 도메인 구조로 이동하는 별도 refactor PR을 검토한다. 이 refactor는 기능 변경 없이 import/path 정리만 수행하며, KRX/은행/Investing은 한 번에 옮기지 않고 단계적으로 이동한다.
 
 ## 12. Phase B.1 PR 분할 (7 PR)
 
