@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 만기일 11:30 expiring CF: 1차 PR scope 제외 (07:00 swap 정책으로 자연 처리). 만기일 CM 06:00은 정상 (07:00 swap 전).
   - 휴장일 skip / contract boundary capture (retry 재resolve 금지) / explicit session 파라미터.
   - 23 신규 tests + 전체 784 tests OK.
-  - 운영 영향: 0 (default `KRX_FUTURES_ENABLED=true` Stage 1 EC2 환경에서만 활성, KIS REST 호출 일 최대 6회).
+  - 배포 전 운영 영향 0. 배포 후 `KRX_FUTURES_ENABLED=true` 환경에서는 CF/CM boundary 직후 KIS REST close snapshot이 활성화되며, 호출량은 일 최대 6회.
 
 - **Phase B.2 — Tether topic publish trigger 분리** (2026-05-15, [USDT_WS_DESIGN_PLAN.md §14](USDT_WS_DESIGN_PLAN.md)):
   - 기존 `main.py broadcast_rates_once is_changed` piggyback 임시 hook → `TetherTopicTriggerController`로 분리 (Phase B.2 PR1~PR3 land, PR4 dual_shadow 대기).
@@ -136,6 +136,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **수동 gap 복구 함수** (`app/admin/dxy_rollup.py`):
   - `backfill_hourly_range()`: UTC 구간 realtime → hourly 일괄 생성
   - `backfill_daily_range()`: KST 날짜 구간 hourly/realtime → daily 일괄 생성
+
+### Removed
+
+- **`KRX_BROADCAST_INCLUDE` env/config 변수** (2026-05-12, Z-2d cleanup):
+  - Z-2d (legacy exposure policy 통일)에서 `legacy_policy.should_include_source_in_legacy_rates` allowlist가 단일 진실 소스가 되며 KRX는 allowlist 미포함이라 토글 자체가 무의미해짐
+  - `app/config.py` 변수 삭제 + `.env.example` 라인 제거 + 테스트 patch 제거
+  - 운영 영향 0 — Z-2d Step 1-5(`fa978b0`~`b35da43`) 적용 이후 코드 미참조
+  - ADR-027 / KRX_CANARY.md / USDT_TOPIC_MIGRATION_PLAN.md 등 historical 문서는 의사결정 기록 보존 + "removed in Z-2d cleanup" 표시
 
 ### Performance
 
