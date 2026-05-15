@@ -536,7 +536,162 @@ row 누적.
 | 기존 알림 영향 | PR6에서 건드리지 X (additive) | Phase D shadow eval |
 | 히스토리 사용자 조회 | `source_notification_logs` 활용 | §13.8 retention cleanup |
 
-## 14. 참조
+## 14. Phase B.2 — Tether topic publish trigger 분리
+
+Phase B.1 (PR1~PR7 + follow-ups) 완료 후 후속 작업. 현재 main.py
+`broadcast_rates_once`의 `is_changed` piggyback hook을 **임시 위치**에서
+정식 위치(USDT/KRX writer success 시점 + topic 단위 coalesce)로 이동.
+
+**진입 조건**: Phase B.1 완료 + Stage 0 Dev Smoke 통과 (`17471f7` + `1b621bf`).
+**Codex/Claude 합의 (2026-05-15, 3 라운드)**.
+
+### 14.1 문제 정의
+
+[main.py:677-696](app/main.py):
+```python
+new_json = json.dumps(payload, ensure_ascii=False)
+is_changed = new_json != cached_json   # legacy rates payload 기준
+if is_changed:
+    ...
+    await tether_topic_publisher.safe_publish_tether_tab_snapshot(...)
+```
+
+- `payload`는 **legacy rates** (USD/JPY/EUR + 은행 + Investing + DXY)
+- USDT 5거래소 / KRX 미국달러선물 변경은 `is_changed`에 반영 X
+- 결과: Upbit WebSocket이 Redis sub-second 갱신해도 단말 도달은 legacy 변경 시점에만
+- 야간 (은행 변경 거의 없음): 단말 갱신 거의 없음 (사용자 체감)
+- 코드 주석 명시: "임시 위치, USDT WebSocket/Redis-first 전환 후 mirror/topic
+  pipeline으로 이동 예정" ([tether_topic_publisher.py:21](app/tether_topic_publisher.py),
+  [USDT_TOPIC_MIGRATION_PLAN.md:155-156](USDT_TOPIC_MIGRATION_PLAN.md))
+
+### 14.2 핵심 결정
+
+**Mode-based feature flag** (boolean 두 개 조합 회피, 운영 실수 방지):
+
+```text
+TETHER_TOPIC_TRIGGER_MODE = "legacy_piggyback" | "dual_shadow" | "direct_coalesced"
+```
+
+| Mode | 동작 |
+|---|---|
+| `legacy_piggyback` (default) | 현재 — `main.py is_changed` 안에서만 publish. controller request_trigger 수신해도 noop (coalesce timer도 시작 안 함) |
+| `dual_shadow` | trigger 수집 → **coalesce window 실제 진행** (direct 모드와 동일 timing) → flush 시점에 publish call **직전 단계까지** → publish skip + telemetry 기록. **production 영향 0 + direct 전환 시 publish 빈도 정확 예측 가능** (Codex review). |
+| `direct_coalesced` | trigger 수집 → coalesce window 진행 → flush 시점에 `safe_publish_tether_tab_snapshot()` 호출. **실 publish** |
+
+**핵심**: `dual_shadow`가 단순 counter만 올리면 actual publish 빈도(coalesce 효과 반영)를 측정 못 함. coalesce timer까지 mirroring해야 direct 전환 후 실제 publish 빈도 예측 가능 (telemetry baseline 의미 확보).
+
+전환 흐름: `legacy_piggyback` → `dual_shadow` (실측 검증) → `direct_coalesced` (canary) → 안정 시 `legacy_piggyback` 격하/제거.
+
+### 14.3 TetherTopicTriggerController (`app/tether_topic_trigger.py` 신규)
+
+**책임 분리** (Phase B.1 single-responsibility 패턴):
+- `tether_topic_publisher.py` (기존): **어떻게** publish — snapshot build / schema / subscriber guard / 격리
+- `tether_topic_trigger.py` (신규): **언제** publish — coalesce window / debounce / mode 분기 / telemetry
+
+**API**:
+
+```python
+class TetherTopicTriggerController:
+    def request_trigger(self, source: str, asset: str, reason: str) -> None:
+        """sync, USDT/KRX writer success 시점에 호출.
+        
+        mode=legacy_piggyback이면 즉시 return (timer 시작 X).
+        그 외 mode: _pending_topic_trigger 갱신 + coalesce window timer 시작/유지.
+        """
+
+    async def _flush_after_window(self) -> None:
+        """coalesce window 만료 → mode 분기:
+        - dual_shadow: publish call **직전 단계까지** 진행 → publish skip + telemetry
+        - direct_coalesced: safe_publish_tether_tab_snapshot() 호출 + telemetry
+        
+        coalesce timer는 dual_shadow도 동일하게 진행 — direct 전환 시 publish 빈도
+        정확 예측 baseline 확보 (Codex review).
+        """
+
+    async def close(self, timeout: float = 1.0) -> None:
+        """shutdown drain-first (PR4 Redis writer 패턴 mirror).
+        
+        pending flush task 완료까지 대기, timeout 후 cancel. 단일 timer라
+        cleanup 단순 — gather 1개 + return_exceptions=True.
+        """
+```
+
+**Coalesce window 확정값**: `TETHER_TOPIC_TRIGGER_COALESCE_MS=500` (PR1 default). iOS 단말 latency 영향 ~500ms 추가 — sub-second 도달은 보존, 사용자 체감 빠름.
+
+**Singleton**: process-wide. topic 단위 coalesce 위해 필수. main.py lifespan에서 lifecycle 관리.
+
+**Env (PR1 확정)**:
+- `TETHER_TOPIC_TRIGGER_MODE=legacy_piggyback` (default)
+- `TETHER_TOPIC_TRIGGER_COALESCE_MS=500`
+
+### 14.4 PR 분할 (4 PR)
+
+| PR | Scope | Non-scope | Flag default | Rollback | Smoke 기준 |
+|---|---|---|---|---|---|
+| **PR1** | 설계 doc 누적 (§14) + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + `app/tether_topic_trigger.py` 신규 (`TetherTopicTriggerController` skeleton). mode=legacy_piggyback이면 `request_trigger` 즉시 return (timer 시작 X). dual_shadow / direct_coalesced 모드는 coalesce timer 모두 진행 (publish call만 차이). main.py 변경 X. lifespan close hook. | trigger 연결, USDT/KRX hook | `legacy_piggyback` | env 그대로 | (1) legacy: timer/publish 모두 0 (2) **dual_shadow: 여러 trigger → 1번 flush coalesce, publish call 0** (3) **direct: 여러 trigger → 1번 publish coalesce** (4) close: pending flush drain (5) **invalid mode / coalesce_ms 0 또는 음수 → safe default fallback 또는 validation error** |
+| **PR2** | USDT Upbit Redis write success → `controller.request_trigger("upbit", "usdt-krw", "ws_tick")`. controller 내부 mode 분기 (default legacy → noop). | KRX hook, legacy 격하 | `legacy_piggyback` | env 그대로 | dual_shadow mode 활성 시 telemetry 갱신 (trigger_count 증가 + coalesce_window 측정 + publish_skipped_dedup 증가, publish 0) |
+| **PR3** | KRX Redis write success → `controller.request_trigger("krx", "usd-krw-futures", "ws_tick")`. 동일 controller 공유. | legacy 격하 | `legacy_piggyback` | env 그대로 | KRX trigger 별도 telemetry 카운터 확인 |
+| **PR4** | `dual_shadow` telemetry 비교 (publish 빈도 / coalesce 효율 / iOS 단말 수신 latency) → `direct_coalesced` 전환 + main.py 임시 hook 격하 (mode 분기로 fallback). | iOS 클라이언트 변경 | `direct_coalesced` (canary 진입 시) | env 환원 `legacy_piggyback` | 운영 1주 stability + iOS 단말 latency 개선 측정 |
+
+### 14.5 Telemetry 누적 계획
+
+기존 `topic:tether:stats` Redis hash 활용 + 신규 카운터:
+
+- `trigger_count` (per-source: upbit/krx 등) — request_trigger 호출 횟수
+- `coalesced_count` (window 안에 dedup 된 trigger) — actual publish 빈도 측정 baseline
+- `flush_count` (mode별 flush 호출 횟수)
+  - `flush_count_dual_shadow`: dual_shadow에서 flush 진입 (publish skip 직전)
+  - `flush_count_direct`: direct_coalesced에서 flush 진입 (publish 호출 직전)
+- `publish_called_count` (direct 모드에서만 +1)
+- `publish_skipped_shadow` (dual_shadow에서 publish skip 한 횟수, flush_count_dual_shadow와 동일)
+- `publish_window_avg_ms`, `publish_window_p99_ms` (coalesce window 실측 latency)
+- `mode_active` (현재 mode 노출)
+
+**핵심**: `flush_count_dual_shadow`와 `flush_count_direct`는 같은 timing 동작 → 직접 비교 가능. dual_shadow → direct 전환 시 publish 빈도 정확 예측 (Codex review baseline).
+
+`/admin/api/topic-status` endpoint 확장 (기존 활용).
+
+### 14.6 iOS 단말 latency 측정
+
+**Phase B.2 minimum scope에서 server-side만**:
+- `publish_called_at` timestamp 측정
+- USDT Redis write timestamp ↔ publish_called_at 차이 = "trigger latency"
+
+**클라이언트 latency 측정은 별 phase**:
+- iOS / Android 코드 변경 필요 (recv timestamp 기록 + 서버로 echo)
+- topic protocol schema 확장 (server publish_ts 필드 추가)
+- Phase B.2 안정 후 별 PR
+
+### 14.7 Legacy piggyback 격하 정책
+
+main.py 임시 hook은 즉시 삭제 X. PR4에서 다음 중 선택 (PR4 진입 시 합의):
+
+- **Option A — 완전 제거**: `direct_coalesced` mode에서 안정 검증 후 main.py hook 삭제. emergency rollback은 `legacy_piggyback` mode 환원 + 새 controller가 처리.
+- **Option B — fallback 격하**: main.py hook은 mode 분기 안에서만 발화 (`legacy_piggyback` 또는 `direct_coalesced` 실패 fallback). 코드 유지 + 안전망.
+
+내 1차 추천: **Option B** (안전 우선). PR4 진입 시 telemetry 결과 보고 결정.
+
+### 14.8 Non-scope (잠금)
+
+- **FX topic trigger 변경**: `fx:usd-krw` 등 별 publisher 그대로 (FX는 legacy data 변경과 동기화 의미 있음 — 분리 보류)
+- **REST polling 제거**: §12.1 guardrail 2 (additive only) 유지
+- **iOS/Android 클라이언트 변경**: Phase B.2 minimum scope 외 (별 phase)
+- **Bithumb~Gopax WebSocket 확장**: Phase B.3 영역
+- **legacy piggyback 즉시 삭제**: PR4에서 telemetry 검증 후 결정
+- **Multi-process atomic claim** (Redis pub/sub coalesce): future Phase (Phase Z-2 Phase 2 영역)
+
+### 14.9 24h Soak 처리
+
+- Phase B.1 24h Soak는 background로 계속 유지 (Stage 0 활성화 2026-05-15 01:01 KST 이후)
+- PR1은 mode default `legacy_piggyback`이라 운영 영향 0 → 즉시 진행 가능
+- PR2/PR3도 default off → 운영 영향 0 (controller 호출만, mode 분기로 noop)
+- PR4는 24h Soak 통과 + dual_shadow telemetry 검증 후 진입 (canary)
+
+### 14.10 진입 GO 조건 (사용자 결정)
+
+위 plan으로 Phase B.2 PR1 진입. Codex 추가 보정 round 후 PR1 commit/push → EC2 배포 → PR2 진입 cycle.
+
+## 15. 참조
 
 - [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md): 거래소별 WS spec (2026-04-28 검증)
 - [USDT_TOPIC_MIGRATION_PLAN.md](USDT_TOPIC_MIGRATION_PLAN.md): Z-2 series, topic protocol 마이그레이션 history
