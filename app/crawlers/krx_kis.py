@@ -42,7 +42,7 @@ import json
 import logging
 import os
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
@@ -53,7 +53,9 @@ import websockets
 
 from app import config
 from app.sources.kis_futures import (
+    compute_close_boundary_kst,
     get_active_session,
+    is_close_snapshot_eligible,
     is_in_session_end_grace,
     parse_h0cfasp0_payload,
     parse_h0cfcnt0_payload,
@@ -863,6 +865,14 @@ class KisFuturesClient:
             last_tick_at_getter=lambda: self._last_tick_at,  # property → liveness
         )
 
+        # KRX_CLOSE_SNAPSHOT_PLAN.md (2026-05-15) — session boundary 직후
+        # REST close snapshot. access_token_manager 미주입 시 controller None
+        # (KrxRestFallbackController와 동일 패턴 — REST 비활성 환경 호환).
+        self._close_snapshot_controller: Optional[KrxCloseSnapshotController] = (
+            KrxCloseSnapshotController(token_manager=access_token_manager)
+            if access_token_manager is not None else None
+        )
+
     @staticmethod
     def _epoch_to_kst_iso(epoch: Optional[float]) -> Optional[str]:
         """epoch float → KST ISO timestamp (PR6d-2a follow-up fix).
@@ -1106,13 +1116,76 @@ class KisFuturesClient:
         """backward compat wrapper — controller의 _invoke_rest_fallback 위임."""
         await self._fallback_controller._invoke_rest_fallback()
 
+    def _maybe_schedule_close_snapshot(
+        self,
+        *,
+        ended_session: str,
+        today_kst: date,
+    ) -> None:
+        """Session 종료 감지 시점에 close snapshot schedule 요청.
+
+        KRX_CLOSE_SNAPSHOT_PLAN.md (2026-05-15):
+            - boundary 시점에 contract / session / boundary_at_kst 캡처
+            - controller가 retry sequence + DB/Redis 갱신 책임
+            - 휴장일은 is_close_snapshot_eligible(CF: today / CM: today-1)로 skip
+            - controller None (access_token_manager 미주입)이면 skip
+            - 예외는 격리 — _run_session 흐름에 영향 X
+        """
+        if self._close_snapshot_controller is None:
+            return
+        if ended_session not in ("CF", "CM"):
+            return
+        # 만기일 expiring CF 11:30 종료는 plan 1차 PR scope 제외
+        # (KRX_CLOSE_SNAPSHOT_PLAN §4.10). rollover 실패/지연으로 expiring
+        # contract가 만기일까지 잔존해도 15:45 boundary로 schedule되지 않도록 가드.
+        # CM은 만기일 06:00 시점에 07:00 swap 전이라 expiring 정상 처리 대상 — 건드리지 않음.
+        if (
+            ended_session == "CF"
+            and self._contract.expiry_date == today_kst
+        ):
+            logger.info(
+                "[krx_close_snapshot] skip (만기일 expiring CF — plan scope 제외) "
+                "today=%s expiry=%s contract=%s",
+                today_kst.isoformat(),
+                self._contract.expiry_date.isoformat(),
+                self._contract.short_code,
+            )
+            return
+        try:
+            if not is_close_snapshot_eligible(ended_session, today_kst):
+                logger.info(
+                    "[krx_close_snapshot] skip (휴장일) session=%s today=%s",
+                    ended_session, today_kst.isoformat(),
+                )
+                return
+            boundary_at_kst = compute_close_boundary_kst(ended_session, today_kst)
+            self._close_snapshot_controller.schedule_close_snapshot(
+                contract=self._contract,
+                session=ended_session,  # type: ignore[arg-type]
+                boundary_at_kst=boundary_at_kst,
+            )
+        except Exception:
+            logger.exception(
+                "[krx_close_snapshot] schedule 실패 (격리) session=%s",
+                ended_session,
+            )
+
     async def stop(self) -> None:
         self._stop.set()
         # KRX_FANOUT_REFACTOR_PLAN 5.1.B — controller cleanup 위임 (pending cancel/await/clear).
         await self._fallback_controller.cleanup_tasks()
+        # KRX_CLOSE_SNAPSHOT_PLAN.md — close snapshot pending retry drain
+        if self._close_snapshot_controller is not None:
+            await self._close_snapshot_controller.close()
 
     async def _run_session(self, session: str) -> None:
-        """단일 active session 동안 WebSocket 연결 유지 + reconnect."""
+        """단일 active session 동안 WebSocket 연결 유지 + reconnect.
+
+        KRX_CLOSE_SNAPSHOT_PLAN.md (2026-05-15): session 종료 감지 시점에
+        close snapshot controller에 schedule 요청 (boundary 시점에 contract
+        캡처 — retry 재resolve 금지). controller가 retry sequence + DB/Redis
+        갱신 책임. 예외/실패는 격리 — _run_session 흐름에 영향 X.
+        """
         attempt = 0
         while not self._stop.is_set():
             now = datetime.now(KST).replace(tzinfo=None)
@@ -1120,6 +1193,7 @@ class KisFuturesClient:
             current_session = get_active_session(now, self._contract.expiry_date)
             if current_session != session:
                 logger.info("[kis_ws] session changed %s → %s, exit loop", session, current_session)
+                self._maybe_schedule_close_snapshot(ended_session=session, today_kst=now.date())
                 return
 
             try:
@@ -1505,6 +1579,280 @@ class KrxRedisLatestWriter:
                 extra={"source": source, "asset": asset},
             )
             return False
+
+
+# ---------------------------------------------------------------------------
+# KrxCloseSnapshotController — CF 15:45 / CM 06:00 single-price close 보정
+# ---------------------------------------------------------------------------
+# KRX_CLOSE_SNAPSHOT_PLAN.md (2026-05-15 합의):
+#   - 단일가 구간 KIS 체결 tick 미발화 + boundary 즉시 disconnect → 종가 누락
+#   - REST close snapshot 1~3회 bounded 호출로 보정
+#   - Primary correctness target = Redis latest (DB는 best-effort history)
+#   - boundary timestamp 명시 생성 (now.replace 금지)
+#   - retry 시 contract/session/boundary_at 캡처 (재resolve 금지)
+#   - REST authoritative — Redis unconditional overwrite
+#   - DB insert-if-changed (가격 다름 시 INSERT, 동일 시 skip)
+#   - Sanity check ±2% — abort + next retry
+#   - 책임 분리: KrxRestFallbackController(stale-based)와 별개 controller
+
+# CF: 15:46:00 / 15:46:30 / 15:47:00 (3회, 첫 성공 시 skip)
+# CM: 06:01:00 / 06:01:30 / 06:02:00
+_CLOSE_SNAPSHOT_RETRY_DELAYS_SEC: Dict[str, List[float]] = {
+    "CF": [60.0, 90.0, 120.0],  # boundary(15:45:00) + 60s / 90s / 120s
+    "CM": [60.0, 90.0, 120.0],  # boundary(06:00:00) + 60s / 90s / 120s
+}
+
+# Sanity check threshold (±2%) — 직전 latest 대비 비합리적 차이 abort
+_CLOSE_SNAPSHOT_SANITY_PCT: float = 0.02
+
+# REST timeout (close snapshot은 stale fallback보다 길어도 OK — bounded 호출)
+_CLOSE_SNAPSHOT_REST_TIMEOUT_SEC: float = 10.0
+
+# Close timeout — shutdown drain
+_CLOSE_SNAPSHOT_CLOSE_TIMEOUT_SEC: float = 5.0
+
+
+class KrxCloseSnapshotController:
+    """Close snapshot lifecycle — session boundary → REST 1~3회 → DB/Redis.
+
+    책임:
+        - boundary 시점 contract/session/boundary_at_kst 캡처
+        - retry task lifecycle (set 관리, shutdown drain)
+        - REST 호출 (explicit session, 캡처된 contract 재사용)
+        - Sanity check (±2%) + first-success short circuit
+        - DB insert-if-changed (boundary UTC naive timestamp)
+        - Redis unconditional overwrite (boundary KST ISO timestamp)
+        - 실패 격리 (logger.warning, 다음 retry 또는 자연 복구)
+
+    KrxRestFallbackController와 책임 분리:
+        - KrxRestFallbackController: stale gating (장중 60s+ silence 보정)
+        - KrxCloseSnapshotController: session boundary trigger (세션 종료 확정)
+    """
+
+    def __init__(
+        self,
+        *,
+        token_manager: KisAccessTokenManager,
+        retry_delays_sec: Optional[Dict[str, List[float]]] = None,
+        sanity_pct: float = _CLOSE_SNAPSHOT_SANITY_PCT,
+        rest_timeout_sec: float = _CLOSE_SNAPSHOT_REST_TIMEOUT_SEC,
+    ) -> None:
+        self._token_manager = token_manager
+        self._retry_delays_sec = retry_delays_sec or _CLOSE_SNAPSHOT_RETRY_DELAYS_SEC
+        self._sanity_pct = sanity_pct
+        self._rest_timeout_sec = rest_timeout_sec
+        self._tasks: "set[asyncio.Task]" = set()
+        # baseline counter (telemetry — Redis는 후속 PR)
+        self.counters: Dict[str, int] = {
+            "scheduled": 0,
+            "attempted": 0,
+            "success": 0,
+            "sanity_aborted": 0,
+            "rest_failed": 0,
+            "exhausted": 0,
+        }
+
+    def schedule_close_snapshot(
+        self,
+        *,
+        contract: ContractInfo,
+        session: Literal["CF", "CM"],
+        boundary_at_kst: datetime,
+    ) -> None:
+        """boundary 감지 시점에 호출 (KisFuturesClient에서).
+
+        snapshot task 1개 시작. retry 시퀀스는 task 내부에서 진행.
+        """
+        self.counters["scheduled"] += 1
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "[krx_close_snapshot] no running loop — skip schedule (session=%s)",
+                session,
+            )
+            return
+        task = asyncio.create_task(
+            self._retry_sequence(
+                contract=contract,
+                session=session,
+                boundary_at_kst=boundary_at_kst,
+            )
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _retry_sequence(
+        self,
+        *,
+        contract: ContractInfo,
+        session: Literal["CF", "CM"],
+        boundary_at_kst: datetime,
+    ) -> None:
+        """3회 retry — boundary + delay 시점에 REST 호출. 첫 성공 시 break."""
+        delays = self._retry_delays_sec.get(session, [])
+        now_kst = datetime.now(KST).replace(tzinfo=None)
+        boundary_naive = boundary_at_kst.astimezone(KST).replace(tzinfo=None)
+        elapsed = (now_kst - boundary_naive).total_seconds()
+
+        for attempt, target_delay in enumerate(delays, start=1):
+            wait_sec = target_delay - elapsed
+            if wait_sec > 0:
+                try:
+                    await asyncio.sleep(wait_sec)
+                except asyncio.CancelledError:
+                    raise
+            self.counters["attempted"] += 1
+            try:
+                ok = await self._attempt_once(
+                    contract=contract,
+                    session=session,
+                    boundary_at_kst=boundary_at_kst,
+                    attempt=attempt,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[krx_close_snapshot] attempt %d 예외 (격리)", attempt,
+                )
+                self.counters["rest_failed"] += 1
+                ok = False
+            if ok:
+                self.counters["success"] += 1
+                return
+            elapsed = (datetime.now(KST).replace(tzinfo=None) - boundary_naive).total_seconds()
+
+        self.counters["exhausted"] += 1
+        logger.warning(
+            "[krx_close_snapshot] all %d attempts exhausted session=%s contract=%s",
+            len(delays), session, contract.short_code,
+        )
+
+    async def _attempt_once(
+        self,
+        *,
+        contract: ContractInfo,
+        session: Literal["CF", "CM"],
+        boundary_at_kst: datetime,
+        attempt: int,
+    ) -> bool:
+        """1회 REST 호출 → sanity → DB/Redis write.
+
+        Returns:
+            True: 정상 success (가격 다름 INSERT 또는 동일 skip, 둘 다 Redis 갱신)
+            False: REST 실패 / sanity abort / write 예외 → 다음 retry 진행
+        """
+        from app import crud, latest_rates_cache
+        from app.database import get_db_context
+
+        result = await fetch_kis_futures_quote(
+            contract=contract,
+            token_manager=self._token_manager,
+            session=session,
+            timeout=self._rest_timeout_sec,
+        )
+        if result is None:
+            self.counters["rest_failed"] += 1
+            logger.warning(
+                "[krx_close_snapshot] REST returned None attempt=%d session=%s",
+                attempt, session,
+            )
+            return False
+
+        price_str = result.get("price")
+        if not price_str:
+            self.counters["rest_failed"] += 1
+            logger.warning("[krx_close_snapshot] REST price 부재 attempt=%d", attempt)
+            return False
+
+        try:
+            rest_rate = float(Decimal(price_str).quantize(Decimal("0.1")))
+        except Exception:
+            self.counters["rest_failed"] += 1
+            logger.warning(
+                "[krx_close_snapshot] REST price 정규화 실패 price=%r", price_str,
+            )
+            return False
+
+        # Sanity check (±sanity_pct) vs 직전 DB latest
+        source = result.get("source", "krx")
+        asset = result.get("asset", "usd-krw-futures")
+
+        def _sync_write() -> bool:
+            with get_db_context() as db:
+                last = crud.get_latest_source_rate(db, source, asset)
+                if last is not None:
+                    last_rate = float(last["rate"])
+                    if last_rate > 0:
+                        diff_pct = abs(rest_rate - last_rate) / last_rate
+                        if diff_pct > self._sanity_pct:
+                            logger.warning(
+                                "[krx_close_snapshot] sanity abort: rest=%.1f last=%.1f "
+                                "diff=%.2f%% (>±%.0f%%)",
+                                rest_rate, last_rate, diff_pct * 100,
+                                self._sanity_pct * 100,
+                            )
+                            return False
+                # boundary timestamp — DB UTC naive / Redis KST ISO
+                boundary_utc_naive = boundary_at_kst.astimezone(
+                    dt_timezone.utc
+                ).replace(tzinfo=None)
+                # DB insert-if-changed (가격 동일 시 skip)
+                crud.insert_source_rate_if_changed(
+                    db=db, source=source, asset=asset,
+                    rate=rest_rate,
+                    timestamp=boundary_utc_naive,
+                )
+                # Redis unconditional overwrite (REST authoritative).
+                # bool return propagate — 본 PR primary correctness target이
+                # Redis latest이므로 SET 실패 시 attempt False → 다음 retry로 보정.
+                redis_ok = latest_rates_cache.set_latest_krx_rate_from_sync_job(
+                    asset=asset,
+                    rate=rest_rate,
+                    timestamp=boundary_at_kst.isoformat(),
+                )
+                return bool(redis_ok)
+
+        try:
+            ok = await asyncio.to_thread(_sync_write)
+        except Exception:
+            logger.exception("[krx_close_snapshot] DB/Redis write 예외 (격리)")
+            return False
+
+        if ok:
+            logger.info(
+                "[krx_close_snapshot] success session=%s contract=%s rate=%.1f "
+                "boundary=%s attempt=%d",
+                session, contract.short_code, rest_rate,
+                boundary_at_kst.isoformat(), attempt,
+            )
+        else:
+            self.counters["sanity_aborted"] += 1
+        return ok
+
+    async def close(
+        self,
+        timeout: float = _CLOSE_SNAPSHOT_CLOSE_TIMEOUT_SEC,
+    ) -> None:
+        """shutdown drain — pending retry task 완료까지 대기, timeout 후 cancel."""
+        if not self._tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[krx_close_snapshot] close timeout (%ds), cancel %d pending tasks",
+                timeout, len(self._tasks),
+            )
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        finally:
+            self._tasks.clear()
 
 
 # ---------------------------------------------------------------------------

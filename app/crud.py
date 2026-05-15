@@ -1788,11 +1788,18 @@ def insert_source_rate_if_changed(
     source: str,
     asset: str,
     rate: float,
+    timestamp: Optional[datetime] = None,
 ) -> bool:
     """
     source_rates에 변경 시에만 INSERT.
 
     기존 bank/investing 저장 패턴과 동일하게 마지막 레코드와 비교 후 변경 시만 저장.
+
+    Args:
+        timestamp: 명시 timestamp (UTC naive datetime). None이면 DB DEFAULT
+            (`models.get_utc_now`) 사용 — 기존 호출자 동작 그대로.
+            KRX close snapshot 등 의미적 boundary 시각 저장 시 명시 전달.
+            KST aware datetime 전달 금지 (`SourceRate.timestamp`는 naive).
 
     Returns:
         True: INSERT 수행, False: 변경 없어 스킵
@@ -1814,6 +1821,8 @@ def insert_source_rate_if_changed(
         return False
 
     record = models.SourceRate(source=source, asset=asset, rate=rate)
+    if timestamp is not None:
+        record.timestamp = timestamp
     db.add(record)
     db.commit()
     return True

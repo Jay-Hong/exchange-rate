@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from typing import Dict, FrozenSet, List, Literal, Optional
+from zoneinfo import ZoneInfo
 
 
 # ---------------------------------------------------------------------------
@@ -425,3 +426,73 @@ def is_in_session_end_grace(
         return False
     delta = (end - now).total_seconds()
     return 0 <= delta <= grace_min * 60
+
+
+# ---------------------------------------------------------------------------
+# Close snapshot boundary — KRX_CLOSE_SNAPSHOT_PLAN §4.2
+# ---------------------------------------------------------------------------
+
+# `now.replace(...)` 패턴 금지 — `datetime(...)`으로 명시 생성.
+# CM은 calendar day(timestamp 기준)와 business day check(today - 1) 분리.
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def compute_close_boundary_kst(
+    session: Literal["CF", "CM"],
+    today_kst: date,
+) -> datetime:
+    """Close snapshot boundary timestamp (KST aware).
+
+    Args:
+        session: "CF" (정규세션 종료 15:45) / "CM" (야간세션 종료 06:00).
+        today_kst: calendar day. CM의 경우 06:00이 찍히는 날짜 (today),
+                   business day check (today - 1)와는 분리 책임.
+
+    Returns:
+        KST aware datetime. boundary 의미적 시각 (retry 실행 시각 아님).
+
+    Notes:
+        - KRX_CLOSE_SNAPSHOT_PLAN §4.2 안전 패턴
+        - DB 저장 시 `astimezone(timezone.utc).replace(tzinfo=None)`으로 UTC naive 변환
+        - Redis 저장 시 `isoformat()`으로 KST ISO string 변환
+    """
+    if session == "CF":
+        return datetime(
+            today_kst.year, today_kst.month, today_kst.day,
+            15, 45, 0, 0,
+            tzinfo=KST,
+        )
+    if session == "CM":
+        return datetime(
+            today_kst.year, today_kst.month, today_kst.day,
+            6, 0, 0, 0,
+            tzinfo=KST,
+        )
+    raise ValueError(f"unknown session: {session!r}")
+
+
+def is_close_snapshot_eligible(
+    session: Literal["CF", "CM"],
+    today_kst: date,
+) -> bool:
+    """Close snapshot 실행 가능 여부 (휴장일 판정).
+
+    Args:
+        session: "CF" / "CM"
+        today_kst: boundary가 찍히는 calendar day
+
+    Returns:
+        True: 정상 영업일 (snapshot 실행).
+        False: 휴장일 (snapshot skip).
+
+    Notes:
+        - CF: today 자체가 영업일이어야 함
+        - CM: 야간장 시작일(today - 1)이 영업일이어야 함
+              예: 토요일 06:00 = 금요일 야간장 종료 → today=토요일이지만 정상
+    """
+    if session == "CF":
+        return is_krx_business_day(today_kst)
+    if session == "CM":
+        return is_krx_business_day(today_kst - timedelta(days=1))
+    raise ValueError(f"unknown session: {session!r}")
