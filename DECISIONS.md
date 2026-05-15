@@ -3227,6 +3227,25 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
    - reconcile에서 `_bootstrap_krx_futures_client(resolved_override=resolved)` 직접 호출.
    - 두 번째 resolve 회피 + race 차단 + 동일 contract 보장.
 
+**Follow-up: KRX close snapshot 1차 PR (2026-05-15, `c0855ff`)**:
+
+본 ADR-027 영역(KRX REST/stale 정책) 안에서 **boundary-based close snapshot**을 stale fallback과 **별도 trigger**로 분리해 1차 PR로 land. 두 path는 같은 REST endpoint(`KIS_REST_QUOTE_TR_ID`)와 helper(`fetch_kis_futures_quote`)를 공유하지만 **trigger 조건 / 책임 controller가 다름**.
+
+| 항목 | stale fallback (기존, ADR-027 본문) | close snapshot (1차 PR, c0855ff) |
+|---|---|---|
+| Trigger | 장중 60s+ silence (`status == stale`) | session boundary 도달 직후 (CF 15:45 / CM 06:00) |
+| Controller | `KrxRestFallbackController` (stale gating + cooldown) | `KrxCloseSnapshotController` (boundary capture + retry sequence) |
+| 호출 빈도 | 장중 stale 발생 시 cooldown 내 1회 | 일 최대 6회 (CF 3 + CM 3, 첫 성공 시 short circuit) |
+| 목적 | 장중 장애 보정 | 세션 종료 확정 보정 (단일가 입찰 마감 후 종가) |
+| Primary target | Redis latest + DB row (장중 데이터 연속성) | **Redis latest** (DB는 best-effort history — `KRX_CLOSE_SNAPSHOT_PLAN §4.4` ordering 한계 명시) |
+| Scope | Stage 2 진입 전 활성화 정책 | 1차 PR — default `KRX_FUTURES_ENABLED=true` Stage 1에서 즉시 활성 |
+
+**1차 PR scope 안 처리**: CF 15:45 / CM 06:00 boundary snapshot. **scope 밖**: 만기일 11:30 expiring CF (07:00 swap 정책으로 자연 처리), schema 변경 (DB ordering 일관성), Stage 2 broadcast 노출 결정 (ADR-028 topic 채널 기준).
+
+**2차 PR 후속**: WS grace drain (CF 15:45:59 / CM 06:00:59까지 listen + grace tick timestamp boundary normalize). 1차 PR 7일 운영 측정 결과 baseline 분석 후 진입 결정.
+
+상세: [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md).
+
 ---
 
 ## ADR-028: Topic-only Tether/KRX + legacy FX dual-emit

@@ -7,15 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Removed
-
-- **`KRX_BROADCAST_INCLUDE` env/config 변수** (2026-05-12, Z-2d cleanup):
-  - Z-2d (legacy exposure policy 통일)에서 `legacy_policy.should_include_source_in_legacy_rates` allowlist가 단일 진실 소스가 되며 KRX는 allowlist 미포함이라 토글 자체가 무의미해짐
-  - `app/config.py` 변수 삭제 + `.env.example` 라인 제거 + 테스트 patch 제거
-  - 운영 영향 0 — Z-2d Step 1-5(`fa978b0`~`b35da43`) 적용 이후 코드 미참조
-  - ADR-027 / KRX_CANARY.md / USDT_TOPIC_MIGRATION_PLAN.md 등 historical 문서는 의사결정 기록 보존 + "removed in Z-2d cleanup" 표시
-
 ### Added
+
+- **KRX close snapshot 1차 PR** (2026-05-15, `c0855ff`, [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md)):
+  - CF 15:45 / CM 06:00 단일가 종가 누락 보강. 운영 EC2 로그 + DB 7~14일치 실측 기반 (CF 5/7 누락, CM 1/8 누락) — Codex/Claude 8라운드 합의.
+  - `KrxCloseSnapshotController` 신규 ([app/crawlers/krx_kis.py](app/crawlers/krx_kis.py)): `KrxRestFallbackController` (stale-based)와 책임 분리, session boundary trigger.
+  - REST close snapshot 1~3회 bounded 호출 (CF: 15:46:00/15:46:30/15:47:00, CM: 06:01:00/06:01:30/06:02:00, 첫 성공 시 short circuit).
+  - boundary timestamp 분리 명시: DB는 UTC naive (`SourceRate.timestamp` 호환), Redis는 KST ISO string.
+  - Primary correctness target = Redis latest (unconditional overwrite). DB는 best-effort history — `ORDER BY timestamp DESC`가 official close를 보장하지 않음 명시 (별 PR scope).
+  - `crud.insert_source_rate_if_changed(..., timestamp: Optional[datetime] = None)` 시그니처 추가 (backward compat).
+  - boundary 명시 생성 helper (`compute_close_boundary_kst` / `is_close_snapshot_eligible`) — CM의 calendar day(today)와 business day check(today-1) 분리.
+  - Sanity check ±2% — REST 응답이 직전 latest 대비 비합리적 차이 시 abort + 다음 retry.
+  - 만기일 11:30 expiring CF: 1차 PR scope 제외 (07:00 swap 정책으로 자연 처리). 만기일 CM 06:00은 정상 (07:00 swap 전).
+  - 휴장일 skip / contract boundary capture (retry 재resolve 금지) / explicit session 파라미터.
+  - 23 신규 tests + 전체 784 tests OK.
+  - 운영 영향: 0 (default `KRX_FUTURES_ENABLED=true` Stage 1 EC2 환경에서만 활성, KIS REST 호출 일 최대 6회).
+
+- **Phase B.2 — Tether topic publish trigger 분리** (2026-05-15, [USDT_WS_DESIGN_PLAN.md §14](USDT_WS_DESIGN_PLAN.md)):
+  - 기존 `main.py broadcast_rates_once is_changed` piggyback 임시 hook → `TetherTopicTriggerController`로 분리 (Phase B.2 PR1~PR3 land, PR4 dual_shadow 대기).
+  - **PR1** (`f16d908`, 2026-05-15): controller skeleton + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + lifespan close hook. mode default `legacy_piggyback` (단말 publish 영향 0, strict noop).
+  - **PR2** (`2d6cece`, 2026-05-15): `UpbitRedisWriter._write_async` lock 밖에서 trigger 호출 + Redis-backed telemetry (`topic:tether:stats` hash에 `trigger_*` prefix counter/last fields). `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS` 상수. GC strong reference (`_telemetry_tasks` set + `add_done_callback`).
+  - **PR3** (`7c67e67`, 2026-05-15): `KrxDbWriter._sync_db_write` → `bool` return (inserted=True AND redis_write_success=True 합성). `_flush_after_window` finally 밖에서 trigger 호출 (PR2 lock 밖 패턴 mirror). `TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS` 상수. `KrxRedisLatestWriter.write_after_db_insert` bool propagate.
+  - default `legacy_piggyback` 유지 → 단말 publish 영향 0. **trigger telemetry Redis HSET은 발생** (USDT tick-level ~수만/일, KRX 1초+변경 ~수천/일). best-effort 격리 (`circuit.record_failure` 미호출).
+  - PR4 (dual_shadow → direct_coalesced canary) 대기: 24h Soak 완료 + telemetry baseline 측정 후 진입.
 
 - **KRX 미국달러선물 Stage 1 canary** (2026-05-06, PR6 시리즈, ADR-027 초안):
   - KIS Open API WebSocket 기반 KRX 미국달러선물 수집 경로 추가 (`source="krx"`, `asset="usd-krw-futures"`)
