@@ -626,12 +626,26 @@ class TetherTopicTriggerController:
 
 ### 14.4 PR 분할 (4 PR)
 
+**진행 status (2026-05-15)**:
+
+- ✅ PR1 완료 — `f16d908` (skeleton + env + lifespan close hook)
+- ✅ PR2 완료 — `2d6cece` (Upbit hook + telemetry + GC strong reference 보강)
+- ⏳ PR3 대기 (KRX Redis writer hook)
+- ⏳ PR4 대기 (dual_shadow → direct_coalesced 전환)
+
 | PR | Scope | Non-scope | Flag default | Rollback | Smoke 기준 |
 |---|---|---|---|---|---|
-| **PR1** | 설계 doc 누적 (§14) + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + `app/tether_topic_trigger.py` 신규 (`TetherTopicTriggerController` skeleton). mode=legacy_piggyback이면 `request_trigger` 즉시 return (timer 시작 X). dual_shadow / direct_coalesced 모드는 coalesce timer 모두 진행 (publish call만 차이). main.py 변경 X. lifespan close hook. | trigger 연결, USDT/KRX hook | `legacy_piggyback` | env 그대로 | (1) legacy: timer/publish 모두 0 (2) **dual_shadow: 여러 trigger → 1번 flush coalesce, publish call 0** (3) **direct: 여러 trigger → 1번 publish coalesce** (4) close: pending flush drain (5) **invalid mode / coalesce_ms 0 또는 음수 → safe default fallback 또는 validation error** |
-| **PR2** | `UpbitRedisWriter._write_async`에서 `set_latest_usdt_rate_from_sync_job` True 반환 시점 → **lock 밖**에서 `request_tether_topic_trigger("upbit", "usdt-krw", TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS)` 호출 (성공 정보 local var로 lock 안에서 저장 후 lock 밖에서 호출 — 책임 분리, Codex review). **Trigger reason은 `app/tether_topic_trigger.py`에 상수로 중앙화** (e.g., `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success"`) — reason taxonomy 단일 진실 소스, 향후 KRX/Bithumb 등 reason 추가도 같은 위치. Writer/Test는 상수 import만. Redis-backed telemetry 추가: 기존 `topic:tether:stats` hash + `trigger_*` prefix 12 field (`trigger_count`, `trigger_coalesced_count`, `trigger_flush_dual_shadow`, `trigger_flush_direct`, `trigger_publish_called`, `trigger_publish_success`, `trigger_publish_skipped_shadow`, `trigger_last_mode`, `trigger_last_source`, `trigger_last_asset`, `trigger_last_reason`, `trigger_last_window_ms`). best-effort 격리 (circuit_breaker 미오염, publisher 패턴 동일). | KRX hook (PR3), legacy 격하 (PR4), **DB session during publish refactor (PR4 진입 시 재검토)** | `legacy_piggyback` | env 그대로 | (1) helper True → trigger 호출 (2) helper False → trigger 미호출 (3) helper exception → trigger 미호출 + writer 격리 (4) default legacy mode에서도 hook 호출 안전 (controller noop) (5) trigger 예외가 Redis writer/WS에 전파 X — 모두 dual_shadow mode 활성 시 telemetry 갱신 확인 (trigger_count + coalesced + window_ms, publish 0) |
+| **PR1** ✅ `f16d908` | 설계 doc 누적 (§14) + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + `app/tether_topic_trigger.py` 신규 (`TetherTopicTriggerController` skeleton). mode=legacy_piggyback이면 `request_trigger` 즉시 return (timer 시작 X). dual_shadow / direct_coalesced 모드는 coalesce timer 모두 진행 (publish call만 차이). main.py 변경 X. lifespan close hook. | trigger 연결, USDT/KRX hook | `legacy_piggyback` | env 그대로 | (1) legacy: timer/publish 모두 0 (2) **dual_shadow: 여러 trigger → 1번 flush coalesce, publish call 0** (3) **direct: 여러 trigger → 1번 publish coalesce** (4) close: pending flush drain (5) **invalid mode / coalesce_ms 0 또는 음수 → safe default fallback 또는 validation error** |
+| **PR2** ✅ `2d6cece` | `UpbitRedisWriter._write_async`에서 `set_latest_usdt_rate_from_sync_job` True 반환 시점 → **lock 밖**에서 `request_tether_topic_trigger("upbit", "usdt-krw", TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS)` 호출 (성공 정보 local var로 lock 안에서 저장 후 lock 밖에서 호출 — 책임 분리, Codex review). **Trigger reason은 `app/tether_topic_trigger.py`에 상수로 중앙화** (e.g., `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success"`) — reason taxonomy 단일 진실 소스, 향후 KRX/Bithumb 등 reason 추가도 같은 위치. Writer/Test는 상수 import만. Redis-backed telemetry 추가: 기존 `topic:tether:stats` hash + `trigger_*` prefix 12 field (`trigger_count`, `trigger_coalesced_count`, `trigger_flush_dual_shadow`, `trigger_flush_direct`, `trigger_publish_called`, `trigger_publish_success`, `trigger_publish_skipped_shadow`, `trigger_last_mode`, `trigger_last_source`, `trigger_last_asset`, `trigger_last_reason`, `trigger_last_window_ms`). best-effort 격리 (circuit_breaker 미오염, publisher 패턴 동일). | KRX hook (PR3), legacy 격하 (PR4), **DB session during publish refactor (PR4 진입 시 재검토)** | `legacy_piggyback` | env 그대로 | (1) helper True → trigger 호출 (2) helper False → trigger 미호출 (3) helper exception → trigger 미호출 + writer 격리 (4) default legacy mode에서도 hook 호출 안전 (controller noop) (5) trigger 예외가 Redis writer/WS에 전파 X — 모두 dual_shadow mode 활성 시 telemetry 갱신 확인 (trigger_count + coalesced + window_ms, publish 0) |
 | **PR3** | KRX Redis write success → `controller.request_trigger("krx", "usd-krw-futures", "ws_tick")`. 동일 controller 공유. | legacy 격하 | `legacy_piggyback` | env 그대로 | KRX trigger 별도 telemetry 카운터 확인 |
 | **PR4** | `dual_shadow` telemetry 비교 (publish 빈도 / coalesce 효율 / iOS 단말 수신 latency) → `direct_coalesced` 전환 + main.py 임시 hook 격하 (mode 분기로 fallback). | iOS 클라이언트 변경 | `direct_coalesced` (canary 진입 시) | env 환원 `legacy_piggyback` | 운영 1주 stability + iOS 단말 latency 개선 측정 |
+
+**PR2 실측 telemetry field (구현 시 보강)**:
+
+- Counter (10, `trigger_` prefix): `request`, `skipped_legacy`, `coalesced`, `flush_dual_shadow`, `flush_direct`, `publish_called`, `publish_success`, `publish_skipped_shadow`, `no_loop`, `error`
+- Last/HSET fields: `last_result`, `last_reason`, `last_source`, `last_asset`, `last_window_ms`, `last_at_kst`, `last_error`
+- 초안 (12 field, `trigger_count` / `trigger_coalesced_count` / `trigger_last_mode` 등) 대비 일부 명칭 단순화 + `skipped_legacy` / `no_loop` / `error` / `last_result` / `last_at_kst` / `last_error` 추가 (운영 진단 보강)
+- GC strong reference 보강: module-level `_telemetry_tasks` set + `add_done_callback(discard)` (asyncio docs 권고, fire-and-forget task GC 회피)
 
 ### 14.5 Telemetry 누적 계획
 
@@ -703,6 +717,11 @@ main.py 임시 hook은 즉시 삭제 X. PR4에서 다음 중 선택 (PR4 진입 
 ### 14.10 진입 GO 조건 (사용자 결정)
 
 위 plan으로 Phase B.2 PR1 진입. Codex 추가 보정 round 후 PR1 commit/push → EC2 배포 → PR2 진입 cycle.
+
+**진행 update (2026-05-15)**:
+
+- PR1 `f16d908` + PR2 `2d6cece` commit/push 완료. EC2 배포는 24h Soak 종료 (5/16 01:01 KST 부근) + dual_shadow 활성화 직전 검토.
+- 다음 단계: PR3 (KRX Redis writer hook) read-only explore → plan 확정 → 구현. default `legacy_piggyback` 유지로 운영 영향 0 가정.
 
 ## 15. 참조
 
