@@ -74,10 +74,13 @@ from typing import Any, Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from app import latest_rates_cache
+from app import latest_rates_cache, tether_topic_trigger
 from app.notifications.alert_evaluator import (
     AlertObservation,
     UsdtAlertEvaluator,
+)
+from app.tether_topic_trigger import (
+    TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
 )
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.upbit")
@@ -253,14 +256,20 @@ class UpbitRedisWriter:
 
         `_write_lock`으로 직렬화 — 동시 to_thread + connection pool 조합에서
         발생할 수 있는 SET 순서 역전 차단 (Codex review).
+
+        PR2 (Phase B.2): Redis write 성공 시 lock 밖에서 tether topic trigger
+        호출. trigger 예외는 writer/WS session에 전파하지 않음.
         """
+        success = False
+        source = tick["source"]
+        asset = tick["asset"]
         async with self._write_lock:
             ts_iso = datetime.fromtimestamp(tick["timestamp_ms"] / 1000, tz=_KST).isoformat()
             try:
                 success = await asyncio.to_thread(
                     latest_rates_cache.set_latest_usdt_rate_from_sync_job,
-                    source=tick["source"],
-                    asset=tick["asset"],
+                    source=source,
+                    asset=asset,
                     rate=tick["rate"],
                     timestamp=ts_iso,
                 )
@@ -274,6 +283,21 @@ class UpbitRedisWriter:
             except Exception:
                 logger.exception(
                     "[usdt_ws.upbit] Redis write task crashed (격리, WS session 유지)"
+                )
+                success = False
+
+        # PR2 hook: lock 밖에서 trigger — Redis write 성공 시에만.
+        # trigger 호출 자체의 예외는 writer/WS에 전파 X (책임 분리).
+        if success:
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.upbit] tether topic trigger 호출 실패 (격리, WS session 유지)"
                 )
 
     async def close(self, timeout: float = REDIS_CLOSE_TIMEOUT_SEC) -> None:

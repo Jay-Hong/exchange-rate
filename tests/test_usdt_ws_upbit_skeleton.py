@@ -1167,6 +1167,118 @@ class TestUpbitSessionRedisIntegration(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Phase B.2 PR2 — UpbitRedisWriter → tether topic trigger hook
+# ---------------------------------------------------------------------------
+
+class TestUpbitRedisWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
+    """Regression guards for Phase B.2 PR2.
+
+    - Redis write success(True) → trigger 호출 1회
+    - Redis write False → trigger 호출 X
+    - Redis helper exception → trigger 호출 X + writer 격리
+    - Trigger 자체 예외 → writer/WS 영향 X
+    - reason 상수 (TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS) 전달
+    """
+
+    async def test_trigger_called_on_redis_write_success(self):
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            writer.schedule(_make_tick())
+            await writer.close()
+
+        mock_trigger.assert_called_once()
+        kwargs = mock_trigger.call_args.kwargs
+        self.assertEqual(kwargs["source"], "upbit")
+        self.assertEqual(kwargs["asset"], "usdt-krw")
+        self.assertEqual(kwargs["reason"], "usdt_ws_redis_write_success")
+
+    async def test_trigger_not_called_when_redis_write_returns_false(self):
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ), patch(
+            "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            writer.schedule(_make_tick())
+            await writer.close()
+
+        mock_trigger.assert_not_called()
+
+    async def test_trigger_not_called_when_redis_helper_raises(self):
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("redis fault"),
+        ), patch(
+            "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            writer.schedule(_make_tick())
+            await writer.close()  # should not raise
+
+        mock_trigger.assert_not_called()
+
+    async def test_trigger_exception_does_not_propagate_to_writer(self):
+        """trigger 호출 자체 예외 → writer/WS session 영향 X (격리)."""
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=RuntimeError("trigger boom"),
+        ) as mock_trigger:
+            writer.schedule(_make_tick())
+            # close() must not raise — trigger exception is isolated.
+            await writer.close()
+
+        mock_trigger.assert_called_once()
+        # writer task은 done 상태로 정상 종료
+        self.assertEqual(len(writer._tasks), 0)
+
+    async def test_legacy_mode_safety_via_request_tether_topic_trigger(self):
+        """legacy_piggyback 모드 — controller request_trigger가 strict noop이라
+        Redis write 후 trigger 호출이 일어나도 publish/timer 효과 0.
+        """
+        from app import tether_topic_trigger as ttt
+        from app.tether_topic_trigger import (
+            MODE_LEGACY_PIGGYBACK,
+            TetherTopicTriggerController,
+            reset_tether_topic_trigger_for_tests,
+        )
+
+        publish_mock = AsyncMock(return_value=True)
+        controller = TetherTopicTriggerController(
+            mode=MODE_LEGACY_PIGGYBACK,
+            coalesce_ms=5,
+            publish_func=publish_mock,
+        )
+        reset_tether_topic_trigger_for_tests(controller)
+        try:
+            writer = UpbitRedisWriter()
+            with patch(
+                "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+                return_value=True,
+            ):
+                writer.schedule(_make_tick())
+                await writer.close()
+            await asyncio.sleep(0.02)
+
+            self.assertEqual(controller.stats.publish_skipped_legacy, 1)
+            self.assertEqual(controller.stats.trigger_count, 0)
+            self.assertEqual(controller.pending_count, 0)
+            publish_mock.assert_not_awaited()
+        finally:
+            await controller.close(timeout=0.05)
+            reset_tether_topic_trigger_for_tests(None)
+
+
+# ---------------------------------------------------------------------------
 # PR5 — UpbitDbWriter (1초 window debounce + insert_source_rate_if_changed)
 # ---------------------------------------------------------------------------
 

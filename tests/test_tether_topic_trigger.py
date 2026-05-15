@@ -1,9 +1,9 @@
-"""Tether topic trigger controller tests (Phase B.2 PR1)."""
+"""Tether topic trigger controller tests (Phase B.2 PR1 + PR2)."""
 from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config
 from app.tether_topic_publisher import TETHER_TOPIC
@@ -11,6 +11,8 @@ from app.tether_topic_trigger import (
     MODE_DIRECT_COALESCED,
     MODE_DUAL_SHADOW,
     MODE_LEGACY_PIGGYBACK,
+    TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+    TRIGGER_COUNTER_FIELDS,
     TetherTopicTriggerController,
     get_tether_topic_trigger_controller,
     reset_tether_topic_trigger_for_tests,
@@ -124,3 +126,103 @@ class TestTetherTopicTriggerController(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(controller.mode, MODE_DUAL_SHADOW)
         self.assertEqual(controller.coalesce_ms, 25)
+
+    def test_reason_constant_value(self):
+        """reason 상수는 'usdt_ws_redis_write_success' 정확 일치."""
+        self.assertEqual(
+            TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+            "usdt_ws_redis_write_success",
+        )
+
+
+class TestTetherTriggerTelemetry(unittest.IsolatedAsyncioTestCase):
+    """Phase B.2 PR2 — Redis-backed telemetry 기록 검증.
+
+    `topic:tether:stats` hash에 `trigger_*` prefix 12 fields 기록.
+    `_record_trigger_event`을 직접 호출해 hincrby/hset 인자 정확성 검증.
+    """
+
+    async def test_record_trigger_event_writes_counter_and_last_fields(self):
+        from app import tether_topic_trigger as ttt
+
+        # redis_cache.client mock + circuit.can_attempt() True
+        mock_client = MagicMock()
+        mock_client.hincrby = AsyncMock(return_value=1)
+        mock_client.hset = AsyncMock(return_value=1)
+        mock_circuit = MagicMock()
+        mock_circuit.can_attempt = AsyncMock(return_value=True)
+
+        with patch.object(ttt.redis_cache, "client", mock_client), \
+             patch.object(ttt.redis_cache, "circuit", mock_circuit):
+            await ttt._record_trigger_event(
+                counter="publish_success",
+                last_result="publish_success",
+                last_reason="usdt_ws_redis_write_success",
+                last_source="upbit",
+                last_asset="usdt-krw",
+                last_window_ms=512.5,
+            )
+
+        # counter increment
+        mock_client.hincrby.assert_awaited_once()
+        hincrby_args = mock_client.hincrby.await_args.args
+        self.assertEqual(hincrby_args[0], "topic:tether:stats")
+        self.assertEqual(hincrby_args[1], "trigger_publish_success")
+        self.assertEqual(hincrby_args[2], 1)
+
+        # last_* fields all written with trigger_ prefix
+        hset_keys = {call.args[1] for call in mock_client.hset.await_args_list}
+        self.assertIn("trigger_last_result", hset_keys)
+        self.assertIn("trigger_last_reason", hset_keys)
+        self.assertIn("trigger_last_source", hset_keys)
+        self.assertIn("trigger_last_asset", hset_keys)
+        self.assertIn("trigger_last_window_ms", hset_keys)
+        self.assertIn("trigger_last_at_kst", hset_keys)
+
+    async def test_record_trigger_event_silent_skip_when_client_none(self):
+        from app import tether_topic_trigger as ttt
+
+        with patch.object(ttt.redis_cache, "client", None):
+            # should not raise
+            await ttt._record_trigger_event(counter="request")
+
+    async def test_record_trigger_event_silent_skip_when_circuit_open(self):
+        from app import tether_topic_trigger as ttt
+
+        mock_client = MagicMock()
+        mock_client.hincrby = AsyncMock()
+        mock_client.hset = AsyncMock()
+        mock_circuit = MagicMock()
+        mock_circuit.can_attempt = AsyncMock(return_value=False)
+
+        with patch.object(ttt.redis_cache, "client", mock_client), \
+             patch.object(ttt.redis_cache, "circuit", mock_circuit):
+            await ttt._record_trigger_event(counter="request")
+
+        mock_client.hincrby.assert_not_awaited()
+        mock_client.hset.assert_not_awaited()
+
+    async def test_record_trigger_event_isolates_redis_exception(self):
+        """Redis 예외 → 격리, broadcast/trigger 영향 X."""
+        from app import tether_topic_trigger as ttt
+
+        mock_client = MagicMock()
+        mock_client.hincrby = AsyncMock(side_effect=RuntimeError("redis down"))
+        mock_client.hset = AsyncMock()
+        mock_circuit = MagicMock()
+        mock_circuit.can_attempt = AsyncMock(return_value=True)
+
+        with patch.object(ttt.redis_cache, "client", mock_client), \
+             patch.object(ttt.redis_cache, "circuit", mock_circuit):
+            # should not raise
+            await ttt._record_trigger_event(counter="request")
+
+    def test_trigger_counter_fields_cover_all_modes(self):
+        """필수 counter 12개 모두 포함 — admin telemetry 일관성."""
+        required = {
+            "request", "skipped_legacy", "coalesced",
+            "flush_dual_shadow", "flush_direct",
+            "publish_called", "publish_success", "publish_skipped_shadow",
+            "no_loop", "error",
+        }
+        self.assertTrue(required.issubset(set(TRIGGER_COUNTER_FIELDS)))
