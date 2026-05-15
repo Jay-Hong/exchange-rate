@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -544,6 +544,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
+
+    # Phase B.2 PR1 — pending tether topic trigger flush 정리.
+    await tether_topic_trigger.shutdown_tether_topic_trigger()
 
     # USDT WebSocket Upbit client 종료
     await scheduler.shutdown_usdt_ws_upbit_client()

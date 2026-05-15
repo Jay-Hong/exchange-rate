@@ -152,6 +152,34 @@ KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
 # FX만 켜기/끄기 가능).
 FX_TOPIC_ENABLED = os.getenv("FX_TOPIC_ENABLED", "false").lower() == "true"
 
+# Phase B.2 — Tether topic direct trigger 분리.
+# default legacy_piggyback: PR1~PR3 배포해도 기존 main.py is_changed hook만 동작.
+# dual_shadow: direct trigger/coalesce는 실제처럼 수행하되 publish call만 skip.
+# direct_coalesced: coalesce window 뒤 기존 tether publisher를 직접 호출.
+TETHER_TOPIC_TRIGGER_MODE = os.getenv(
+    "TETHER_TOPIC_TRIGGER_MODE", "legacy_piggyback"
+).strip().lower()
+TETHER_TOPIC_TRIGGER_ALLOWED_MODES = (
+    "legacy_piggyback",
+    "dual_shadow",
+    "direct_coalesced",
+)
+TETHER_TOPIC_TRIGGER_COALESCE_MS = int(
+    os.getenv("TETHER_TOPIC_TRIGGER_COALESCE_MS", "500")
+)
+
+if TETHER_TOPIC_TRIGGER_MODE not in TETHER_TOPIC_TRIGGER_ALLOWED_MODES:
+    raise ValueError(
+        "TETHER_TOPIC_TRIGGER_MODE must be one of "
+        f"{TETHER_TOPIC_TRIGGER_ALLOWED_MODES} (got {TETHER_TOPIC_TRIGGER_MODE!r})."
+    )
+
+if TETHER_TOPIC_TRIGGER_COALESCE_MS < 1:
+    raise ValueError(
+        "TETHER_TOPIC_TRIGGER_COALESCE_MS must be >= 1 "
+        f"(got {TETHER_TOPIC_TRIGGER_COALESCE_MS})."
+    )
+
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
