@@ -791,6 +791,171 @@ class TestKrxDbWriter(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Phase B.2 PR3 — KrxDbWriter → tether topic trigger hook
+# ---------------------------------------------------------------------------
+
+class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
+    """PR3 regression guards — finally 밖에서 trigger 호출 (PR2 mirror).
+
+    smoke 기준 6종 검증:
+      (1) inserted=True AND redis_ok=True → trigger 호출 + 인자 검증
+      (2) inserted=False → trigger 미호출 (`_sync_db_write` False 분기)
+      (3) inserted=True AND redis_ok=False → trigger 미호출
+      (4) `_sync_db_write` exception → trigger 미호출 + writer loop 격리
+      (5) trigger 예외 → writer loop 영향 X (close 정상)
+      (6) legacy_piggyback mode 안전 (controller noop)
+    """
+
+    def _make_payload(self, price: str = "1468.50") -> dict:
+        return {
+            "source": "krx",
+            "asset": "usd-krw-futures",
+            "session": "CM",
+            "contract_code": "A75605",
+            "contract_month": "202605",
+            "expires_on": "2026-05-18",
+            "price": price,
+            "market_time": "180332",
+            "received_at": "2026-05-04T18:03:32",
+            "tr_id": "H0MFCNT0",
+            "status": "normal",
+        }
+
+    async def test_trigger_called_when_inserted_and_redis_ok(self):
+        """(1) _sync_db_write True 반환 → trigger 호출 + 인자 검증."""
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        with patch(
+            "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+            return_value=True,
+        ), patch(
+            "app.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            await writer(payload)
+            await writer._timer
+
+        mock_trigger.assert_called_once()
+        kwargs = mock_trigger.call_args.kwargs
+        self.assertEqual(kwargs["source"], "krx")
+        self.assertEqual(kwargs["asset"], "usd-krw-futures")
+        self.assertEqual(kwargs["reason"], "krx_redis_write_success")
+
+    async def test_trigger_not_called_when_inserted_false(self):
+        """(2) _sync_db_write False (inserted=False) → trigger 미호출."""
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        with patch(
+            "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+            return_value=False,
+        ), patch(
+            "app.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            await writer(payload)
+            await writer._timer
+
+        mock_trigger.assert_not_called()
+
+    async def test_trigger_not_called_when_redis_write_fails(self):
+        """(3) inserted=True AND redis_ok=False → _sync_db_write가 False → 미호출.
+
+        실제 경로: write_after_db_insert가 False return 시 _sync_db_write도 False.
+        본 test는 직접 _sync_db_write False mock으로 동일 분기 검증.
+        """
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        with patch(
+            "app.crawlers.krx_kis.KrxRedisLatestWriter.write_after_db_insert",
+            return_value=False,
+        ), patch(
+            "app.crud.insert_source_rate_if_changed",
+            return_value=True,
+        ), patch(
+            "app.database.get_db_context"
+        ), patch(
+            "app.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            await writer(payload)
+            await writer._timer
+
+        mock_trigger.assert_not_called()
+
+    async def test_trigger_not_called_when_sync_db_write_raises(self):
+        """(4) _sync_db_write exception → trigger 미호출 + writer 격리 (logger.warning)."""
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        with patch(
+            "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+            side_effect=RuntimeError("DB connection lost"),
+        ), patch(
+            "app.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger, self.assertLogs("app.crawlers.krx_kis", level="WARNING"):
+            await writer(payload)
+            await writer._timer  # 예외 격리 — raise X
+
+        mock_trigger.assert_not_called()
+
+    async def test_trigger_exception_does_not_propagate_to_writer(self):
+        """(5) trigger 자체 예외 → writer loop 영향 X (logger.exception, _timer 정상 종료)."""
+        writer = KrxDbWriter(window_sec=0.05)
+        payload = self._make_payload()
+
+        with patch(
+            "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+            return_value=True,
+        ), patch(
+            "app.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=RuntimeError("trigger boom"),
+        ) as mock_trigger:
+            await writer(payload)
+            # writer._timer는 예외 없이 종료되어야 함
+            await writer._timer
+
+        mock_trigger.assert_called_once()
+        self.assertTrue(writer._timer.done())
+
+    async def test_legacy_piggyback_mode_safety(self):
+        """(6) legacy_piggyback mode — controller request_trigger가 strict noop.
+
+        Redis write True 후 trigger 호출이 일어나도 publish/timer 효과 0.
+        """
+        from app.tether_topic_trigger import (
+            MODE_LEGACY_PIGGYBACK,
+            TetherTopicTriggerController,
+            reset_tether_topic_trigger_for_tests,
+        )
+
+        publish_mock = AsyncMock(return_value=True)
+        controller = TetherTopicTriggerController(
+            mode=MODE_LEGACY_PIGGYBACK,
+            coalesce_ms=5,
+            publish_func=publish_mock,
+        )
+        reset_tether_topic_trigger_for_tests(controller)
+        try:
+            writer = KrxDbWriter(window_sec=0.05)
+            payload = self._make_payload()
+            with patch(
+                "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
+                return_value=True,
+            ):
+                await writer(payload)
+                await writer._timer
+            await asyncio.sleep(0.02)
+
+            self.assertEqual(controller.stats.publish_skipped_legacy, 1)
+            self.assertEqual(controller.stats.trigger_count, 0)
+            self.assertEqual(controller.pending_count, 0)
+            publish_mock.assert_not_awaited()
+        finally:
+            await controller.close(timeout=0.05)
+            reset_tether_topic_trigger_for_tests(None)
+
+
+# ---------------------------------------------------------------------------
 # PR6e — stale carry-over 차단 (subscribe 후 _last_tick_at reset)
 # ---------------------------------------------------------------------------
 

@@ -47,6 +47,9 @@ DEFAULT_CLOSE_TIMEOUT_SEC = 1.0
 # Reason 상수 — 호출자가 string literal 대신 본 상수를 import해 사용.
 # Redis telemetry `last_reason` field에 기록되며 검색/집계 일관성 보장.
 TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success"
+# KRX는 "ws" prefix 미포함 — REST fallback이 동일 DB path 공유 가능 +
+# 미래 KRX tick-level Redis writer 도입 시에도 같은 reason 유지 (hook 위치만 이동).
+TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS = "krx_redis_write_success"
 
 # Redis-backed telemetry — `tether_topic_publisher`와 동일 hash 재사용
 # (운영 admin 단일 조회 지점 유지). `trigger_*` prefix로 publish counter와 분리.

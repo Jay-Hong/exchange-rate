@@ -1368,14 +1368,19 @@ class KrxDbWriter:
 
         DB write (to_thread) 진행 중 새 tick이 들어오면 finally 블록에서
         새 timer 예약 — race 방지 (PR6b-2b Codex 보정).
+
+        Phase B.2 PR3: `_sync_db_write` 반환 bool 받아 finally **밖**에서
+        tether topic trigger 호출 (PR2 lock 밖 패턴 mirror — race-prevention
+        timer 재예약 책임과 분리). trigger 예외는 격리 — writer loop 영향 X.
         """
         await asyncio.sleep(self._window_sec)
         tick = self._last_tick
         self._last_tick = None
         if tick is None:
             return
+        redis_write_success = False
         try:
-            await asyncio.to_thread(self._sync_db_write, tick)
+            redis_write_success = await asyncio.to_thread(self._sync_db_write, tick)
         except Exception as e:
             # KRX optional 원칙 — 격리. propagate X.
             logger.warning(
@@ -1390,8 +1395,26 @@ class KrxDbWriter:
             if self._last_tick is not None:
                 self._timer = asyncio.create_task(self._flush_after_window())
 
+        # Phase B.2 PR3: tether topic trigger 호출 — finally **밖** (책임 분리).
+        # Redis latest 실제 갱신 시점에만 발화 (의미적 정확성).
+        if redis_write_success:
+            from app import tether_topic_trigger
+            from app.tether_topic_trigger import (
+                TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+            )
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=tick.get("source", "krx"),
+                    asset=tick["asset"],
+                    reason=TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[krx_db_writer] tether topic trigger 호출 실패 (격리, writer loop 유지)"
+                )
+
     @staticmethod
-    def _sync_db_write(tick: Dict[str, Any]) -> None:
+    def _sync_db_write(tick: Dict[str, Any]) -> bool:
         """sync DB 호출 — to_thread 내부에서 실행.
 
         SessionLocal은 thread-local이라 새 thread에서 새 session 열고 닫기.
@@ -1406,6 +1429,10 @@ class KrxDbWriter:
         Redis write-through 책임은 `KrxRedisLatestWriter`로 위임 (PR Next-C,
         KRX_FANOUT_REFACTOR_PLAN 5.1.C — behavior-change-0 책임 분리). 호출
         위치/timing/예외 격리는 ADR-031 그대로 유지.
+
+        Phase B.2 PR3: bool return 추가. inserted=True AND Redis SET 성공일 때만
+        True. `_flush_after_window`가 main event loop 안에서 tether topic trigger
+        분기에 사용 (의미: Redis latest가 실제로 갱신된 시점만 trigger 발화).
         """
         # 함수 내부 import — to_thread만 import 비용, 모듈 로드 영향 X.
         from app import crud
@@ -1423,9 +1450,9 @@ class KrxDbWriter:
                 rate=normalized_rate,
             )
             if not inserted:
-                return
+                return False
             # ADR-031: DB insert 성공 시점에 Redis direct write (KrxRedisLatestWriter 위임).
-            KrxRedisLatestWriter.write_after_db_insert(db, source, asset)
+            return KrxRedisLatestWriter.write_after_db_insert(db, source, asset)
 
 
 class KrxRedisLatestWriter:
@@ -1442,13 +1469,21 @@ class KrxRedisLatestWriter:
     """
 
     @staticmethod
-    def write_after_db_insert(db: "Session", source: str, asset: str) -> None:
+    def write_after_db_insert(db: "Session", source: str, asset: str) -> bool:
         """DB insert 성공 직후 호출 — latest 재조회 + Redis SET.
 
         Args:
             db: SQLAlchemy session (DB insert commit 완료 상태).
             source: 항상 "krx" (의미 명시 목적).
             asset: 예 "usd-krw-futures".
+
+        Returns:
+            True: Redis SET 성공.
+            False: latest 조회 None / `set_latest_krx_rate_from_sync_job` False / 예외.
+
+        Phase B.2 PR3: bool return 추가 — `_sync_db_write`가 `inserted=True AND
+        redis_write_success=True` 합성 분기에 사용. tether topic trigger는 Redis
+        latest가 실제로 갱신된 시점에만 발화 (의미적 정확성).
         """
         # 함수 내부 import — to_thread 새 thread 환경에서 호출되므로 import 비용 격리.
         # latest_rates_cache가 crud를 module-level로 import한다는 사실은 영향 X
@@ -1458,8 +1493,8 @@ class KrxRedisLatestWriter:
         try:
             latest = crud.get_latest_source_rate(db, source, asset)
             if latest is None:
-                return
-            latest_rates_cache.set_latest_krx_rate_from_sync_job(
+                return False
+            return latest_rates_cache.set_latest_krx_rate_from_sync_job(
                 asset=asset,
                 rate=latest["rate"],
                 timestamp=latest["timestamp"],
@@ -1469,6 +1504,7 @@ class KrxRedisLatestWriter:
                 "[krx_redis_latest_writer] write 예외 (격리, DB fallback 의존)",
                 extra={"source": source, "asset": asset},
             )
+            return False
 
 
 # ---------------------------------------------------------------------------

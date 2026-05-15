@@ -710,8 +710,12 @@ main.py 임시 hook은 즉시 삭제 X. PR4에서 다음 중 선택 (PR4 진입 
 ### 14.9 24h Soak 처리
 
 - Phase B.1 24h Soak는 background로 계속 유지 (Stage 0 활성화 2026-05-15 01:01 KST 이후)
-- PR1은 mode default `legacy_piggyback`이라 운영 영향 0 → 즉시 진행 가능
-- PR2/PR3도 default off → 운영 영향 0 (controller 호출만, mode 분기로 noop)
+- PR1은 mode default `legacy_piggyback`이라 단말 publish 영향 0 → 즉시 진행 가능
+- PR2/PR3 default `legacy_piggyback`:
+  - **단말 publish 영향 0** (controller strict noop early return, publish 미발화)
+  - **단, trigger telemetry Redis HSET은 발생** (`topic:tether:stats` hash의 `trigger_skipped_legacy` counter + `trigger_last_*` fields). best-effort 격리 (`circuit.record_failure` 미호출, hot path 보호) — Redis 장애 시 silent skip.
+  - 빈도: PR2 USDT Upbit tick-level → 매 100~500ms (~수만/일 추정), PR3 KRX 1초 window + 변경 시 → 매 1초 이하 (~수천/일 추정).
+  - 의도: dual_shadow → direct_coalesced 전환 안전성 baseline 측정 (trigger 빈도 + coalesce 효율 사전 관찰).
 - PR4는 24h Soak 통과 + dual_shadow telemetry 검증 후 진입 (canary)
 
 ### 14.10 진입 GO 조건 (사용자 결정)
