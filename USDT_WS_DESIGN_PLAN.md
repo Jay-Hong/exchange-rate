@@ -22,7 +22,7 @@
 - 구현 코드 변경 (별 GO 흐름)
 - OHLC window aggregate 저장 ([§9](#9-ohlc-1차-제외--미래-재검토-조건))
 - USDT 탭 productization (iOS/Android client work — 백엔드 작업과 분리)
-- KRX 동일 패턴 적용 (별 phase)
+- KRX 동일 패턴 적용 (별도 phase)
 
 **병행**:
 - 5/18 KRX 만기 baseline 관찰 ([KRX_CANARY.md](KRX_CANARY.md))
@@ -144,7 +144,7 @@ WebSocket tick (per-exchange long-running)
 
 **Bithumb 2순위**: Upbit canary 안정 후 즉시 확장 (subscribe payload 호환). ★ "Upbit 호환" 자체도 구현 진입 직전 공식 문서 재확인 대상 (Bithumb 측 spec 변경 가능성). §11 Phase B.0 항목.
 
-**Coinone/Korbit 3-4순위**: 별도 protocol → 각자 별 PR.
+**Coinone/Korbit 3-4순위**: 별도 protocol → 각자 별도 PR.
 
 **Gopax 마지막**: 전체 ticker + 서버 필터링 + Primus ping → 가장 다른 구조, 검증 마지막에.
 
@@ -236,11 +236,11 @@ REST 결과 반영 범위 (옵션 B 채택 시 추가 결정):
   - KRX: `source = "krx"`, `asset = "usd-krw-futures"` (만기 contract는 별도 metadata)
   - 은행: `source ∈ {"kb", "hana", "shinhan", ...}` (기존 `notification_settings.bank` 필드 매핑), `asset ∈ {"usd-krw", "jpy-krw", "eur-krw"}` (기존 `currency` 매핑)
   - Investing: `source = "investing"` (기존 `bank="investing"` 매핑), `asset` 동일
-  - 비교 알림: `kind="comparison"` + source/asset 페어는 evaluator 내부 정책 (multi-source 평가 detail은 별 phase)
+  - 비교 알림: `kind="comparison"` + source/asset 페어는 evaluator 내부 정책 (multi-source 평가 detail은 별도 phase)
 - **`kind` field 의미**: observation 분류 (예: `"trade"` / `"quote"` / `"snapshot"` / `"rest_probe"`) — alert evaluator 자체는 가격 평가만, kind는 metric/log/필터 등 보조 용도
 - **DB insert는 evaluator 입력이 아니라 별도 side effect** — fanout에서 독립 handler
 - **Interface는 source-neutral**: USDT/KRX/은행/Investing/비교 알림 공통 형태 (재발명 회피)
-- **구현 범위는 canary 최소**: Upbit observation → UsdtAlertEvaluator 1개만. 다른 source는 별 phase.
+- **구현 범위는 canary 최소**: Upbit observation → UsdtAlertEvaluator 1개만. 다른 source는 별도 phase.
 - **반복 간격 설계 (B2 확장 여지)**: evaluator interface가 *once-only를 hardcode 하지 말 것*. setting에서 `repeat_interval_sec` 읽고 분기 — 현 단계에서는 `null = once`만 분기 (1회성 spec), 미래 B2 구현 시 정수 값 분기 추가. 즉 Phase B.1에서 `repeat_interval_sec is None` 분기만 처리해도 미래 호환.
 - **B3 확장 여지**: interface에서 direction state 덧붙일 수 있도록 — *지금은 구현 X*.
 
@@ -266,7 +266,7 @@ REST 결과 반영 범위 (옵션 B 채택 시 추가 결정):
 - 추가로 1초 window debounce → 동일 가격 연속 tick에서도 SELECT 비교 부담까지 절감
 - 구현: `UpbitDbWriter._flush_after_window` (KRX `KrxDbWriter` 패턴 mirror, [app/crawlers/usdt_ws/upbit.py](app/crawlers/usdt_ws/upbit.py))
 - close 시 1초 window 기다리지 않고 마지막 pending tick 즉시 flush — shutdown 마지막 tick 보장
-- helper signature / schema 변경 없음 (timestamp 자동 생성, exchange timestamp 저장은 별 PR)
+- helper signature / schema 변경 없음 (timestamp 자동 생성, exchange timestamp 저장은 별도 PR)
 
 ## 8. Feature flag / Rollback / Smoke 기준
 
@@ -364,7 +364,7 @@ Phase A 결과로 모든 결정 잠금. Phase B 구현 진입 시 본 표가 spe
 5. **Phase B.4**: Coinone / Korbit / Gopax 순차 확장
 6. **Phase B.5**: 5거래소 모두 활성 + 기존 REST polling 격하/제거
 
-**Phase C 후보 (별 PR, 본 doc 범위 외)**:
+**Phase C 후보 (별도 PR, 본 doc 범위 외)**:
 
 - KRX `KrxAlertEvaluator` 신설 + 기존 KRX fanout에 부착 (KRX_FANOUT_REFACTOR_PLAN 5.1.D)
 - 은행/Investing 가격 알림을 `AlertObservation` 기반 evaluator로 전환 (운영 사용자 N명 — 알림 정밀도 ↑ 체감 변화 영역)
@@ -380,9 +380,9 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 ### 12.1 Guardrail 4종 (전 PR 공통 잠금)
 
 1. **PR4-PR5 divergence 의도적**: PR4 land 후 ~ PR5 land 전 window 동안 WS는 Redis만, 기존 REST polling ([app/crawlers/usdt_sources.py](app/crawlers/usdt_sources.py))은 DB만 write. canary OFF default 라 운영 영향 0. 코드 리뷰 시 "WS가 DB write 안 함" 의문 발생 시 본 단서 인용.
-2. **additive only**: PR1~PR7 어디서도 기존 REST polling 제거/격하 금지. polling은 baseline 안전망 유지. polling 격하/교체는 별 PR (canary Stage 4, §12.3).
+2. **additive only**: PR1~PR7 어디서도 기존 REST polling 제거/격하 금지. polling은 baseline 안전망 유지. polling 격하/교체는 별도 PR (canary Stage 4, §12.3).
 3. **per-PR smoke 기준 필수**: 표의 "Smoke 기준" column이 다음 PR code merge 진입의 1차 게이트. 단 **PR2 24h dev soak**는 *Stage 1 운영 활성화 (`USDT_WS_UPBIT_ENABLED=true`)* 진입 직전 충족 — PR3~PR7 code merge는 PR2 unit test + 단기 connect 검증으로 충분 (PR3 LivenessMonitor는 PR2 leak/race 진단 도구 역할도 가능). 24h soak의 목적은 운영 진입 전 leak/race 감지이지 dev 리듬 차단 아님.
-4. **AlertObservation source-neutral interface + Upbit-only 구현**: PR6 범위는 `AlertObservation(source, asset, rate, timestamp, kind)` dataclass + base `Evaluator` interface + `UsdtAlertEvaluator` (Upbit-only). bank/investing/KRX adapter는 PR6 범위 외 (Phase C 별 PR).
+4. **AlertObservation source-neutral interface + Upbit-only 구현**: PR6 범위는 `AlertObservation(source, asset, rate, timestamp, kind)` dataclass + base `Evaluator` interface + `UsdtAlertEvaluator` (Upbit-only). bank/investing/KRX adapter는 PR6 범위 외 (Phase C 별도 PR).
 
 ### 12.2 7 PR scope/non-scope/flag/rollback/smoke
 
@@ -404,7 +404,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 | **Stage 1** | PR4~PR5 land + `USDT_WS_UPBIT_ENABLED=true` | WS → Redis (PR4) + DB (PR5) write. 기존 REST polling 유지 (additive). | 1주 운영 관찰 후 다음 단계 |
 | **Stage 2** | PR6 land + `USDT_WS_UPBIT_ENABLED=true` | alert evaluator를 WS observation으로 전환 (Upbit 한정). 1회성 trigger semantics 보존. | 알림 발화 dedup 확인 |
 | **Stage 3** | PR7 land + `USDT_WS_UPBIT_ENABLED=true` | REST fallback 활성. WS dead 시 silent probe로 Redis/DB 보전. | freshness 정책 검증 |
-| **Stage 4** | 별 PR (본 doc 범위 외) | Bithumb 확장 → Coinone/Korbit/Gopax → 기존 REST polling 격하/제거. | Phase B.3~B.5 |
+| **Stage 4** | 별도 PR (본 doc 범위 외) | Bithumb 확장 → Coinone/Korbit/Gopax → 기존 REST polling 격하/제거. | Phase B.3~B.5 |
 
 ### 12.4 Rollback 정책 공통
 
@@ -514,7 +514,7 @@ process의 cache에 미적용 → 사용자가 알림 끄거나 변경한 후에
 3. 며칠~몇 주 두 결과 비교
 4. 일치 확인 후 새 구조로 전환 (feature flag 단계적 ramp)
 
-### 13.8 History retention cleanup (별 commit)
+### 13.8 History retention cleanup (별도 commit)
 
 **Trigger**: `source_notification_logs` (그리고 미래 `comparison_notification_logs`)
 row 누적.
@@ -580,7 +580,9 @@ TETHER_TOPIC_TRIGGER_MODE = "legacy_piggyback" | "dual_shadow" | "direct_coalesc
 
 **핵심**: `dual_shadow`가 단순 counter만 올리면 actual publish 빈도(coalesce 효과 반영)를 측정 못 함. coalesce timer까지 mirroring해야 direct 전환 후 실제 publish 빈도 예측 가능 (telemetry baseline 의미 확보).
 
-전환 흐름: `legacy_piggyback` → `dual_shadow` (실측 검증) → `direct_coalesced` (canary) → 안정 시 `legacy_piggyback` 격하/제거.
+원안 전환 흐름: `legacy_piggyback` → `dual_shadow` (실측 검증) → `direct_coalesced` (canary) → 안정 시 `legacy_piggyback` 격하/제거.
+
+2026-05-16 운영 결정: `dual_shadow`를 건너뛰고 `direct_coalesced`로 직접 진입. 운영 App Store 단말에는 테더 탭이 없고, iOS dev 단말로 직접 검증 가능하며, direct 모드에서도 baseline counter 측정이 가능했기 때문이다. 상세 결과는 §14.11.
 
 ### 14.3 TetherTopicTriggerController (`app/tether_topic_trigger.py` 신규)
 
@@ -626,19 +628,20 @@ class TetherTopicTriggerController:
 
 ### 14.4 PR 분할 (4 PR)
 
-**진행 status (2026-05-15)**:
+**진행 status (2026-05-16)**:
 
 - ✅ PR1 완료 — `f16d908` (skeleton + env + lifespan close hook)
 - ✅ PR2 완료 — `2d6cece` (Upbit hook + telemetry + GC strong reference 보강)
-- ⏳ PR3 대기 (KRX Redis writer hook)
-- ⏳ PR4 대기 (dual_shadow → direct_coalesced 전환)
+- ✅ PR3 완료 — `7c67e67` (KRX Redis writer hook)
+- ✅ PR4 Step A 완료 — `direct_coalesced` 운영 활성화 (`2026-05-16 15:16 KST`). `dual_shadow`는 건너뜀.
+- ⏳ PR4 Step B 대기 — main.py legacy hook fallback 격하/완전 제거 결정
 
 | PR | Scope | Non-scope | Flag default | Rollback | Smoke 기준 |
 |---|---|---|---|---|---|
 | **PR1** ✅ `f16d908` | 설계 doc 누적 (§14) + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + `app/tether_topic_trigger.py` 신규 (`TetherTopicTriggerController` skeleton). mode=legacy_piggyback이면 `request_trigger` 즉시 return (timer 시작 X). dual_shadow / direct_coalesced 모드는 coalesce timer 모두 진행 (publish call만 차이). main.py 변경 X. lifespan close hook. | trigger 연결, USDT/KRX hook | `legacy_piggyback` | env 그대로 | (1) legacy: timer/publish 모두 0 (2) **dual_shadow: 여러 trigger → 1번 flush coalesce, publish call 0** (3) **direct: 여러 trigger → 1번 publish coalesce** (4) close: pending flush drain (5) **invalid mode / coalesce_ms 0 또는 음수 → safe default fallback 또는 validation error** |
 | **PR2** ✅ `2d6cece` | `UpbitRedisWriter._write_async`에서 `set_latest_usdt_rate_from_sync_job` True 반환 시점 → **lock 밖**에서 `request_tether_topic_trigger("upbit", "usdt-krw", TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS)` 호출 (성공 정보 local var로 lock 안에서 저장 후 lock 밖에서 호출 — 책임 분리, Codex review). **Trigger reason은 `app/tether_topic_trigger.py`에 상수로 중앙화** (e.g., `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success"`) — reason taxonomy 단일 진실 소스, 향후 KRX/Bithumb 등 reason 추가도 같은 위치. Writer/Test는 상수 import만. Redis-backed telemetry 추가: 기존 `topic:tether:stats` hash + `trigger_*` prefix 12 field (`trigger_count`, `trigger_coalesced_count`, `trigger_flush_dual_shadow`, `trigger_flush_direct`, `trigger_publish_called`, `trigger_publish_success`, `trigger_publish_skipped_shadow`, `trigger_last_mode`, `trigger_last_source`, `trigger_last_asset`, `trigger_last_reason`, `trigger_last_window_ms`). best-effort 격리 (circuit_breaker 미오염, publisher 패턴 동일). | KRX hook (PR3), legacy 격하 (PR4), **DB session during publish refactor (PR4 진입 시 재검토)** | `legacy_piggyback` | env 그대로 | (1) helper True → trigger 호출 (2) helper False → trigger 미호출 (3) helper exception → trigger 미호출 + writer 격리 (4) default legacy mode에서도 hook 호출 안전 (controller noop) (5) trigger 예외가 Redis writer/WS에 전파 X — 모두 dual_shadow mode 활성 시 telemetry 갱신 확인 (trigger_count + coalesced + window_ms, publish 0) |
-| **PR3** | KRX Redis write success → `request_tether_topic_trigger("krx", "usd-krw-futures", TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS)`. 호출 위치: `KrxDbWriter._flush_after_window`의 finally 블록 **밖** (race-prevention timer 재예약 책임과 분리, PR2 lock 밖 패턴 mirror). 시그니처 변경 2곳: (a) `KrxRedisLatestWriter.write_after_db_insert` → `bool` return (`set_latest_krx_rate_from_sync_job` 결과 propagate). (b) `_sync_db_write` → `bool` return (inserted=True **AND** redis_write_success=True). reason 상수 `TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS = "krx_redis_write_success"` 추가 (USDT와 달리 "ws" prefix 미포함 — KRX REST fallback이 동일 DB path 공유 가능성 + 미래 tick-level Redis writer 도입 시에도 reason 그대로 유지). **현재 hook은 DB insert 후 Redis write success 반환 지점, 미래 KRX tick-level Redis writer 도입 시 hook 위치 이동 예정 (reason 이름 유지)**. 동일 controller 공유. | legacy 격하 (PR4), KRX tick-level Redis writer (별 phase, ADR-031 Stage C 영역) | `legacy_piggyback` | env 그대로 | (1) inserted=True AND redis_ok=True → trigger 호출 + 인자 검증 (2) inserted=False → trigger 미호출 (3) inserted=True AND redis_ok=False → trigger 미호출 (4) `_sync_db_write` exception → trigger 미호출 + writer loop 격리 (5) trigger 예외 → writer loop 영향 X (6) legacy_piggyback mode에서 hook 호출 안전 (controller noop) |
-| **PR4** | `dual_shadow` telemetry 비교 (publish 빈도 / coalesce 효율 / iOS 단말 수신 latency) → `direct_coalesced` 전환 + main.py 임시 hook 격하 (mode 분기로 fallback). | iOS 클라이언트 변경 | `direct_coalesced` (canary 진입 시) | env 환원 `legacy_piggyback` | 운영 1주 stability + iOS 단말 latency 개선 측정 |
+| **PR3** ✅ `7c67e67` | KRX Redis write success → `request_tether_topic_trigger("krx", "usd-krw-futures", TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS)`. 호출 위치: `KrxDbWriter._flush_after_window`의 finally 블록 **밖** (race-prevention timer 재예약 책임과 분리, PR2 lock 밖 패턴 mirror). 시그니처 변경 2곳: (a) `KrxRedisLatestWriter.write_after_db_insert` → `bool` return (`set_latest_krx_rate_from_sync_job` 결과 propagate). (b) `_sync_db_write` → `bool` return (inserted=True **AND** redis_write_success=True). reason 상수 `TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS = "krx_redis_write_success"` 추가 (USDT와 달리 "ws" prefix 미포함 — KRX REST fallback이 동일 DB path 공유 가능성 + 미래 tick-level Redis writer 도입 시에도 reason 그대로 유지). **현재 hook은 DB insert 후 Redis write success 반환 지점, 미래 KRX tick-level Redis writer 도입 시 hook 위치 이동 예정 (reason 이름 유지)**. 동일 controller 공유. | legacy 격하 (PR4), KRX tick-level Redis writer (별도 phase, ADR-031 Stage C 영역) | `legacy_piggyback` | env 그대로 | (1) inserted=True AND redis_ok=True → trigger 호출 + 인자 검증 (2) inserted=False → trigger 미호출 (3) inserted=True AND redis_ok=False → trigger 미호출 (4) `_sync_db_write` exception → trigger 미호출 + writer loop 격리 (5) trigger 예외 → writer loop 영향 X (6) legacy_piggyback mode에서 hook 호출 안전 (controller noop) |
+| **PR4** ✅ Step A | `dual_shadow`를 건너뛰고 `direct_coalesced` 직접 진입. 근거: 운영 App Store 단말에는 테더 탭이 없고, iOS dev 단말로 직접 검증 가능하며, direct 모드에서도 baseline counter 측정 가능. Step A는 mode 전환 + 비구독/구독 path 검증. Step B는 main.py 임시 hook 격하/제거 결정. | iOS 클라이언트 변경, main.py hook 즉시 제거, 모든 source trigger 확대 | `direct_coalesced` | env 환원 `legacy_piggyback` | (1) 비구독: `trigger_publish_called == hook_called == skipped_no_subscribers` (2) 구독: `trigger_publish_success` / `built` / `publish_called` / `publish_sent_total` 증가 (3) `trigger_skipped_legacy` 정지 (4) iOS dev 단말 실시간 체감 확인 |
 
 **PR2 실측 telemetry field (구현 시 보강)**:
 
@@ -649,7 +652,7 @@ class TetherTopicTriggerController:
 
 ### 14.5 Telemetry 누적 계획
 
-**Storage**: 기존 `topic:tether:stats` Redis hash 활용 (별 key X — admin 운영 확인 포인트 단일 유지). 기존 publisher field와 명시적 구분을 위해 **모든 신규 trigger field는 `trigger_` prefix** (Codex 합의).
+**Storage**: 기존 `topic:tether:stats` Redis hash 활용 (별도 key X — admin 운영 확인 포인트 단일 유지). 기존 publisher field와 명시적 구분을 위해 **모든 신규 trigger field는 `trigger_` prefix** (Codex 합의).
 
 **도입 시점**: PR1은 in-process Stats만 (process restart 시 손실). **PR2 진입 시 Redis-backed 보강** (dual_shadow 운영 prerequisite).
 
@@ -684,25 +687,31 @@ class TetherTopicTriggerController:
 - `publish_called_at` timestamp 측정
 - USDT Redis write timestamp ↔ publish_called_at 차이 = "trigger latency"
 
-**클라이언트 latency 측정은 별 phase**:
+**클라이언트 latency 측정은 별도 phase**:
 - iOS / Android 코드 변경 필요 (recv timestamp 기록 + 서버로 echo)
 - topic protocol schema 확장 (server publish_ts 필드 추가)
-- Phase B.2 안정 후 별 PR
+- Phase B.2 안정 후 별도 PR
 
 ### 14.7 Legacy piggyback 격하 정책
 
-main.py 임시 hook은 즉시 삭제 X. PR4에서 다음 중 선택 (PR4 진입 시 합의):
+main.py 임시 hook은 즉시 삭제 X. PR4 Step B에서 다음 중 선택:
 
 - **Option A — 완전 제거**: `direct_coalesced` mode에서 안정 검증 후 main.py hook 삭제. emergency rollback은 `legacy_piggyback` mode 환원 + 새 controller가 처리.
 - **Option B — fallback 격하**: main.py hook은 mode 분기 안에서만 발화 (`legacy_piggyback` 또는 `direct_coalesced` 실패 fallback). 코드 유지 + 안전망.
 
-내 1차 추천: **Option B** (안전 우선). PR4 진입 시 telemetry 결과 보고 결정.
+**2026-05-16 합의**: 장기적으로 Option A가 목표. 단, 완전 제거 조건은 **테더 탭에 표시되는 모든 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤**로 둔다. 그 전에는 Option B fallback 격하가 더 안전하다.
+
+**Trigger 위치 일반 원칙**:
+
+- Trigger는 DB insert 자체가 아니라 **canonical Redis latest write-through 성공 지점** 이후에 둔다.
+- USDT/KRX처럼 direct write source는 writer success 직후 hook이 적절하다.
+- 은행/Investing처럼 mirror cycle 기반 source는 trigger 위치를 별도로 설계해야 한다. 단순 DB insert 직후 trigger는 Redis latest와 publish payload 시점이 어긋날 수 있다.
 
 ### 14.8 Non-scope (잠금)
 
-- **FX topic trigger 변경**: `fx:usd-krw` 등 별 publisher 그대로 (FX는 legacy data 변경과 동기화 의미 있음 — 분리 보류)
-- **REST polling 제거**: §12.1 guardrail 2 (additive only) 유지
-- **iOS/Android 클라이언트 변경**: Phase B.2 minimum scope 외 (별 phase)
+- **FX topic trigger 변경**: `fx:usd-krw` 등 별도 publisher 그대로 (FX는 legacy data 변경과 동기화 의미 있음 — 분리 보류)
+- **REST polling 제거**: §12.1 guardrail 2 (additive only) 유지. 장기적으로는 WS primary + REST fallback 전용 격하가 목표이나, silent failure/cross-validation baseline 확보 전까지 유지.
+- **iOS/Android 클라이언트 변경**: Phase B.2 minimum scope 외 (별도 phase)
 - **Bithumb~Gopax WebSocket 확장**: Phase B.3 영역
 - **legacy piggyback 즉시 삭제**: PR4에서 telemetry 검증 후 결정
 - **Multi-process atomic claim** (Redis pub/sub coalesce): future Phase (Phase Z-2 Phase 2 영역)
@@ -716,17 +725,63 @@ main.py 임시 hook은 즉시 삭제 X. PR4에서 다음 중 선택 (PR4 진입 
   - **단, trigger telemetry Redis HSET은 발생** (`topic:tether:stats` hash의 `trigger_skipped_legacy` counter + `trigger_last_*` fields). best-effort 격리 (`circuit.record_failure` 미호출, hot path 보호) — Redis 장애 시 silent skip.
   - 빈도: PR2 USDT Upbit tick-level → 매 100~500ms (~수만/일 추정), PR3 KRX 1초 window + 변경 시 → 매 1초 이하 (~수천/일 추정).
   - 의도: dual_shadow → direct_coalesced 전환 안전성 baseline 측정 (trigger 빈도 + coalesce 효율 사전 관찰).
-- PR4는 24h Soak 통과 + dual_shadow telemetry 검증 후 진입 (canary)
+- PR4 Step A는 24h Soak 통과 후 `dual_shadow` 없이 `direct_coalesced`로 직접 진입. 이유: 운영 App Store 단말에는 테더 탭이 없고, iOS dev 단말로 직접 검증 가능하며, direct 모드에서 baseline counter 측정이 가능했기 때문.
 
 ### 14.10 진입 GO 조건 (사용자 결정)
 
 위 plan으로 Phase B.2 PR1 진입. Codex 추가 보정 round 후 PR1 commit/push → EC2 배포 → PR2 진입 cycle.
 
-**진행 update (2026-05-15)**:
+**진행 update (2026-05-16)**:
 
-- PR1 `f16d908` + PR2 `2d6cece` commit/push 완료. EC2 배포는 24h Soak 종료 (5/16 01:01 KST 부근) + dual_shadow 활성화 직전 검토.
-- PR3 read-only explore 완료 + plan 확정 (4 라운드 Codex/Claude 합의). 핵심: KRX는 tick-level Redis writer 없음 → hook 위치는 `KrxDbWriter._flush_after_window`의 finally 밖. reason 이름은 `krx_redis_write_success` (ws prefix 미포함, 미래 tick-level Redis writer 도입 시에도 유지). 시그니처 2곳 변경 (`write_after_db_insert` / `_sync_db_write` → `bool`).
-- 다음 단계: PR3 구현 진입 GO 대기. default `legacy_piggyback` 유지로 운영 영향 0 가정.
+- PR1 `f16d908`, PR2 `2d6cece`, PR3 `7c67e67` commit/push + EC2 배포 완료.
+- `2026-05-16 15:16 KST`: `TETHER_TOPIC_TRIGGER_MODE=direct_coalesced` 운영 활성화.
+- `dual_shadow`는 건너뜀. 운영 단말에는 테더 탭이 없고, iOS dev 단말로 직접 검증 가능하며, direct 모드에서도 coalesce/publish baseline counter를 측정할 수 있었기 때문.
+
+### 14.11 운영 활성화 결과 (2026-05-16)
+
+**Step A — 비구독 path 검증**:
+
+- iOS dev 단말을 테더 topic 비구독 상태로 두고 `direct_coalesced` 전환.
+- `trigger_skipped_legacy` 정지 확인 (`12970` 유지).
+- `trigger_publish_called == hook_called == skipped_no_subscribers` 확인.
+  - 15:18 → 15:29 delta: `511 == 511 == 511`
+- `built`, `publish_called`, `publish_sent_total`, `trigger_publish_success` 변화 없음.
+- `trigger_last_window_ms=500.01`, coalesce 효율 약 63%, publish flush rate 약 0.77/sec.
+- warning/error 없음.
+
+**Step B — 구독 path 검증**:
+
+- iOS dev 단말에서 테더 탭 진입 후 `usdt:krw` topic 구독.
+- `trigger_publish_success`, `built`, `publish_called`, `publish_sent_total` 동시 증가 확인.
+  - 15:29 → 15:33 delta: `trigger_publish_success +43`, `built +43`, `publish_called +43`, `publish_sent_total +43`
+- `last_result=sent`, `trigger_last_result=publish_success`.
+- iOS dev 단말에서 Upbit 가격 갱신이 거의 실시간으로 체감됨.
+
+**해석 기준**:
+
+- `trigger_publish_called`는 controller가 publisher를 호출한 횟수.
+- publisher `hook_called`는 `safe_publish_tether_tab_snapshot` 진입 횟수이며 `trigger_publish_called`와 대응.
+- publisher `publish_called`와 `trigger_publish_success`는 실제 `usdt:krw` 구독자가 있을 때만 증가한다.
+
+### 14.12 장기 로드맵 합의 (2026-05-16)
+
+**공통 목표**: 신규 단말 앱은 topic 구독 모델만 사용하고, broadcast cycle은 구버전 호환용으로 유지한 뒤 장기적으로 deprecate한다.
+
+| 단계 | 목표 | 비고 |
+|---|---|---|
+| 현재 | `direct_coalesced` 활성, Upbit + KRX trigger, REST polling 유지, main.py legacy hook 유지 | iOS dev 단말 실시간 체감 검증 완료 |
+| 중기 | Bithumb/Coinone/Korbit/Gopax WS 확장, 은행/Investing trigger path 설계, main.py hook Option B fallback 격하 | 모든 테더 탭 표시 자산이 trigger source를 갖추는 방향 |
+| 장기 | 모든 표시 자산 trigger 완성 후 main.py legacy hook Option A 완전 제거. REST polling은 WS primary + REST fallback 전용으로 격하. 신규 앱은 topic-only, broadcast는 구버전 호환 후 deprecate | 완전 제거는 rollback 안전망과 구버전 단말 통계 확인 후 |
+
+**Trigger source 분류**:
+
+| Source 유형 | 현재 Redis write 패턴 | Trigger 상태 / 방향 |
+|---|---|---|
+| Upbit WS | tick-level direct SET | 구현 완료 (PR2) |
+| KRX | `KrxDbWriter` direct SET | 구현 완료 (PR3) |
+| Bithumb/Coinone/Korbit/Gopax REST | REST polling direct SET | 장기적으로 WS 전환 후 writer success hook. REST fallback 전용 전환 전까지는 별도 검토 |
+| Investing USD/KRW | mirror cycle 3초 | trigger 위치 재설계 필요 |
+| 은행 USD/KRW (KB/Hana 등) | mirror cycle 3초 | trigger 위치 재설계 필요 |
 
 ## 15. 참조
 
