@@ -76,7 +76,7 @@ WS grace drain만으로는 부족: KIS server-side 미발화 case가 다수라 �
 
 ### 4.0 구현 진입점 / Controller 구조
 
-**신규 클래스**: `KrxCloseSnapshotController` ([app/crawlers/krx_kis.py](app/crawlers/krx_kis.py) 또는 별 모듈).
+**신규 클래스**: `KrxCloseSnapshotController` ([app/crawlers/krx_kis.py](app/crawlers/krx_kis.py) 또는 별도 모듈).
 
 **책임 분리** (기존 `KrxRestFallbackController`와 분리):
 
@@ -233,7 +233,7 @@ latest_rates_cache.set_latest_krx_rate_from_sync_job(
 - REST close snapshot row는 boundary timestamp(15:45:00 / 06:00:00)로 1초 더 이른 시각.
 - 따라서 DB `ORDER BY timestamp DESC` 결과가 official close를 보장하지 않음 (WS row가 최신으로 식별 가능).
 - 본 PR은 Redis latest를 authoritative target으로 보정 — DB ORDER BY는 보조 지표.
-- DB까지 official close ordering을 보장하려면 별 PR (schema/provenance/kind column + ordering 정책 변경) 필요. 본 PR scope 밖.
+- DB까지 official close ordering을 보장하려면 별도 PR (schema/provenance/kind column + ordering 정책 변경) 필요. 본 PR scope 밖.
 
 ### 4.5 시그니처 변경
 
@@ -367,7 +367,7 @@ DB 스키마 변경 없이 메타 별도 기록:
 
 ## 8. 참조
 
-- [ADR-027](DECISIONS.md): KRX REST/stale 정책 (stale-based fallback, 본 plan은 boundary-based 별 trigger)
+- [ADR-027](DECISIONS.md): KRX REST/stale 정책 (stale-based fallback, 본 plan은 boundary-based 별도 trigger)
 - [KRX_CANARY.md](KRX_CANARY.md): 운영 runbook (PR 완료 후 확인 절차 추가)
 - [krx_kis.py](app/crawlers/krx_kis.py): KrxDbWriter / KrxRedisLatestWriter / fetch_kis_futures_quote
 - [kis_futures.py](app/sources/kis_futures.py): get_active_session / is_in_session_end_grace

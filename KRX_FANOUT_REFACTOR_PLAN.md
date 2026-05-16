@@ -237,7 +237,7 @@ WebSocket tick (KisFuturesClient)
 - (b) `KrxRedisLatestWriter`에 *호가 정보* 별도 reflection — fanout/구조 변경
 - (c) 별도 channel/topic — REALTIME_ARCHITECTURE_PLAN 영역
 
-1차 refactor는 (a)만, (b)/(c)는 별 phase.
+1차 refactor는 (a)만, (b)/(c)는 별도 phase.
 
 ### 6.2 `KrxAlertEvaluator` 위치
 
