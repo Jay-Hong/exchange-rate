@@ -3288,6 +3288,16 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
 | WebSocket subscribe | 미구현 (전체 broadcast) | hello + subscribe + topic delta dispatch |
 | KRX `KRX_BROADCAST_INCLUDE` | legacy `rates` 통합 토글 (현재 코드 의미) | topic 발사 트리거로 재해석 (코드 분리는 Phase Z-2) |
 
+**Follow-up: topic-only 장기 비전 + Phase B.2 direct 활성화 (2026-05-16 합의)**:
+
+2026-05-16에 Phase B.2 `direct_coalesced`를 운영 활성화하고 iOS dev 단말에서 `usdt:krw` topic end-to-end 실시간 수신을 확인했다. 이 결과를 바탕으로 사용자/Codex/Claude가 다음 장기 방향에 합의했다.
+
+- 신규 단말 앱은 legacy broadcast cycle이 아니라 **topic 구독 모델만** 사용한다.
+- broadcast cycle은 구버전 단말 호환용으로 유지하고, 활성 구버전 비율/기간 조건을 충족한 뒤 장기적으로 deprecate한다.
+- `main.py broadcast_rates_once is_changed` 기반 tether legacy hook은 임시 경로다. 장기적으로는 테더 탭에 표시되는 모든 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤 완전 제거한다.
+- REST polling은 단기 safety net으로 유지한다. 장기적으로는 거래소별 WebSocket primary + REST fallback 전용으로 격하한다.
+- 은행/Investing처럼 mirror cycle 기반 source는 단순 DB insert 직후 trigger가 아니라 Redis latest 정합성을 보장하는 위치를 별도로 설계한다.
+
 ### 단계 (Phase Z)
 
 **Phase Z-1 — 문서 정합 (코드 변경 0, 본 ADR 작성 시점)**:
@@ -3460,7 +3470,7 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 1. **`latest:index` 역할 재정의**:
    - `keys` 필드: broadcast가 어떤 data key를 읽을지 알려주는 membership list (유지)
    - `mirrored_at` 필드: 1차에서는 schema 유지하되 broadcast read path에서 **ignore** (백워드 호환, rollback 안전성)
-   - schema 정리(mirrored_at 제거)는 향후 별 PR
+   - schema 정리(mirrored_at 제거)는 향후 별도 PR
 
 2. **`fetch_rates_from_redis()` 분기 재작성**:
    - index miss / parse fail → 전체 DB fallback (현 동작 유지)
@@ -3469,7 +3479,7 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
    - **per-key `is_stale()` 검사** (기존 함수 재사용, `LATEST_MIRROR_INTERVAL_SECONDS * STALE_RATIO`)
    - 1개라도 stale / miss / parse fail → **전체 DB fallback** (보수적 1차)
 
-3. **부분 fallback은 future phase**: per-asset fallback (broken key만 DB, 나머지 Redis)은 옵션 C 안정 후 별 PR.
+3. **부분 fallback은 future phase**: per-asset fallback (broken key만 DB, 나머지 Redis)은 옵션 C 안정 후 별도 PR.
 
 ### Trade-offs
 
@@ -3522,8 +3532,8 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 - **기존 reason 유지** (rename 없음, analyzer 호환):
   - `redis_miss`: data key 1개 이상 부재 — semantic 그대로
   - `redis_error`: deserialize 실패 / MGET error / length mismatch / key_to_rate 변환 실패 — semantic 그대로
-  - 향후 `per_key_miss` / `per_key_parse_fail` 분리 필요 시 별 PR (metrics analyzer 호환 보강 포함)
-- `scripts/analyze_broadcast_metrics.py` 출력은 `per_key_stale` 카테고리 추가 시점에 갱신 (별 PR)
+  - 향후 `per_key_miss` / `per_key_parse_fail` 분리 필요 시 별도 PR (metrics analyzer 호환 보강 포함)
+- `scripts/analyze_broadcast_metrics.py` 출력은 `per_key_stale` 카테고리 추가 시점에 갱신 (별도 PR)
 
 ### Mirror Cycle 책무 (1차 유지)
 
@@ -3531,13 +3541,13 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 - warmup (cold start 시 DB → Redis 적재)
 - repair (data key 누락/실패 복구)
 - unchanged key의 mirrored_at refresh (OUT 모드 / 야간 hourly crawl source 보호)
-- interval 3초 유지 — 격하는 별 phase
+- interval 3초 유지 — 격하는 별도 phase
 
 ### 후속 Phase
 
 1. **mirror cycle interval 격하** (3s → 10s/30s 단계적): per-key stale 시맨틱 안정 후
 2. **mirror cycle 역할 축소**: warmup/repair 전용으로 격하 검토
-3. **부분 DB fallback** (per-asset): 옵션 C 1차 안정 후 별 PR
+3. **부분 DB fallback** (per-asset): 옵션 C 1차 안정 후 별도 PR
 
 ### 운영 검증 (예정 — Accepted 전환 조건)
 
@@ -3649,7 +3659,7 @@ KRX tick → Redis direct write + topic builder Redis-first read로 정렬한다
 
 **Option C — tick fanout handler 분리** (RedisLatestWriter / AlertEvaluator / DbWindowWriter):
 
-- 거부 이유 (이번 PR만): 작업 폭 큼. KRX 1차 검증과 패턴 정립을 동시 진행은 risk. 별 phase에서 정립 후 KRX/USDT/bank에 적용.
+- 거부 이유 (이번 PR만): 작업 폭 큼. KRX 1차 검증과 패턴 정립을 동시 진행은 risk. 별도 phase에서 정립 후 KRX/USDT/bank에 적용.
 
 **Option D (채택) — KRX 전용 helper + builder Redis-first + stale 정책 분리**:
 
