@@ -479,6 +479,59 @@ docker compose up -d fastapi
   (WS + REST polling) additive 정상 동작.
 - Next: **2h 또는 6h checkpoint** (사용자 트리거). 24h 종료 시각 = **2026-05-16 01:01 KST**.
 
+### 2026-05-16 ~07:55 KST — 24h Soak 최종 (PASS with memory caveat)
+
+- 측정 시각: ~07:55 KST (Soak 활성화 후 30h 54min, 24h 종료 시각 +6h 54min)
+- **EC2 git HEAD**: `e8ee834` (Phase B.1 PR7 마지막). **Phase B.2 PR1~PR3 + KRX close snapshot 1차 PR 미배포 상태**. 본 Soak는 Phase B.1 런타임 단독 검증.
+- 컨테이너 uptime: 31h healthy. `USDT_WS_UPBIT_ENABLED=true`, `KRX_FUTURES_ENABLED=true` 유지.
+
+**안정성 지표 (PASS)**:
+
+- Alert evaluator backlog warning: **0**
+- Redis writer saturation: **0**
+- USDT WS reconnect (Upbit-specific): **0** (24h logs에 `usdt_ws.upbit` reconnect/warning/error 자취 없음)
+- Fallback probe count: **0**
+- Status 전이: **0** (normal 유지)
+- 일반 로그에 curl_cffi HTTP 500/503/timeout 일부 있지만 **외부 크롤러 upstream 오류** (USDT WS 무관)
+
+**Redis latest 정상**:
+
+- key=`latest:source:upbit:usdt-krw`, rate=**1488.0**, timestamp=`2026-05-16T07:50:31+09:00`
+- mirrored_at=`2026-05-16T07:50:32+09:00`
+- 확인 시점 기준 mirror age **~1초**
+
+**DB row count**:
+
+| Source | 24h | 최근 1h |
+|---|---|---|
+| upbit (WS) | **7180** | 170 |
+| bithumb (REST) | 3348 | 132 |
+| coinone (REST) | 1607 | 71 |
+| gopax (REST) | 277 | 18 |
+| korbit (REST) | 305 | 14 |
+
+- Upbit 24h 7180 — REST source 대비 더 촘촘한 변경 감지. **WS fresh tick 효과 24h baseline 검증**.
+- dual-writer (WS + REST polling) additive 정상.
+
+**Memory caveat (PASS with caveat — 누수 단정 X, 추가 관찰)**:
+
+- Docker memory: 326.7 MiB (1h) → **483.1 MiB / 800 MiB limit (60.4%)** (24h+)
+- cgroup `memory.current`: ~556 MiB
+- **Python/uvicorn RSS: ~374 MiB** (실제 process memory)
+- file cache: ~207 MiB (Docker stats가 file cache 포함이라 leak 지표로 부정확)
+- 1h 시점 process restart 직후라 base usage 낮았을 가능성. 안정 운영 base는 더 높음 추정.
+- backlog/reconnect/fallback 0 + 31h healthy → leak으로 단정하지 않되 다음 24h 추가 관찰 권장.
+
+**다음 단계**:
+
+- **EC2 redeploy는 별도 GO**. 현재 origin은 `8f67c18` (Phase B.2 PR1~PR3 + KRX close snapshot 1차 PR + 관련 docs 포함).
+- 배포 후 검증 4종:
+  1. app healthy
+  2. USDT WS reconnect 없음
+  3. Redis `topic:tether:stats` hash에 `trigger_skipped_legacy` counter 증가 확인 (Phase B.2 PR2/PR3 default `legacy_piggyback` 동작 검증)
+  4. KRX close snapshot은 다음 boundary 이후 확인 (오늘 CM 06:00은 이미 지남, **다음 boundary는 월요일 5/18 CF 15:45 KST**)
+- Stage 1 진입 (1주 baseline 관찰) 시점도 별도 결정.
+
 ## 참조
 
 - [USDT_WS_DESIGN_PLAN.md](USDT_WS_DESIGN_PLAN.md) — 설계/PR 분할/long-term roadmap
