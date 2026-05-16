@@ -138,8 +138,9 @@ class TestTetherTopicTriggerController(unittest.IsolatedAsyncioTestCase):
 class TestTetherTriggerTelemetry(unittest.IsolatedAsyncioTestCase):
     """Phase B.2 PR2 — Redis-backed telemetry 기록 검증.
 
-    `topic:tether:stats` hash에 `trigger_*` prefix 12 fields 기록.
-    `_record_trigger_event`을 직접 호출해 hincrby/hset 인자 정확성 검증.
+    `topic:tether:stats` hash에 `trigger_*` prefix 10 counter + 7 last/HSET
+    fields 기록. `_record_trigger_event`을 직접 호출해 hincrby/hset 인자
+    정확성 검증.
     """
 
     async def test_record_trigger_event_writes_counter_and_last_fields(self):
@@ -218,7 +219,7 @@ class TestTetherTriggerTelemetry(unittest.IsolatedAsyncioTestCase):
             await ttt._record_trigger_event(counter="request")
 
     def test_trigger_counter_fields_cover_all_modes(self):
-        """필수 counter 12개 모두 포함 — admin telemetry 일관성."""
+        """필수 counter 10개 모두 포함 — admin telemetry 일관성."""
         required = {
             "request", "skipped_legacy", "coalesced",
             "flush_dual_shadow", "flush_direct",

@@ -639,7 +639,7 @@ class TetherTopicTriggerController:
 | PR | Scope | Non-scope | Flag default | Rollback | Smoke 기준 |
 |---|---|---|---|---|---|
 | **PR1** ✅ `f16d908` | 설계 doc 누적 (§14) + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + `app/tether_topic_trigger.py` 신규 (`TetherTopicTriggerController` skeleton). mode=legacy_piggyback이면 `request_trigger` 즉시 return (timer 시작 X). dual_shadow / direct_coalesced 모드는 coalesce timer 모두 진행 (publish call만 차이). main.py 변경 X. lifespan close hook. | trigger 연결, USDT/KRX hook | `legacy_piggyback` | env 그대로 | (1) legacy: timer/publish 모두 0 (2) **dual_shadow: 여러 trigger → 1번 flush coalesce, publish call 0** (3) **direct: 여러 trigger → 1번 publish coalesce** (4) close: pending flush drain (5) **invalid mode / coalesce_ms 0 또는 음수 → safe default fallback 또는 validation error** |
-| **PR2** ✅ `2d6cece` | `UpbitRedisWriter._write_async`에서 `set_latest_usdt_rate_from_sync_job` True 반환 시점 → **lock 밖**에서 `request_tether_topic_trigger("upbit", "usdt-krw", TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS)` 호출 (성공 정보 local var로 lock 안에서 저장 후 lock 밖에서 호출 — 책임 분리, Codex review). **Trigger reason은 `app/tether_topic_trigger.py`에 상수로 중앙화** (e.g., `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success"`) — reason taxonomy 단일 진실 소스, 향후 KRX/Bithumb 등 reason 추가도 같은 위치. Writer/Test는 상수 import만. Redis-backed telemetry 추가: 기존 `topic:tether:stats` hash + `trigger_*` prefix 12 field (`trigger_count`, `trigger_coalesced_count`, `trigger_flush_dual_shadow`, `trigger_flush_direct`, `trigger_publish_called`, `trigger_publish_success`, `trigger_publish_skipped_shadow`, `trigger_last_mode`, `trigger_last_source`, `trigger_last_asset`, `trigger_last_reason`, `trigger_last_window_ms`). best-effort 격리 (circuit_breaker 미오염, publisher 패턴 동일). | KRX hook (PR3), legacy 격하 (PR4), **DB session during publish refactor (PR4 진입 시 재검토)** | `legacy_piggyback` | env 그대로 | (1) helper True → trigger 호출 (2) helper False → trigger 미호출 (3) helper exception → trigger 미호출 + writer 격리 (4) default legacy mode에서도 hook 호출 안전 (controller noop) (5) trigger 예외가 Redis writer/WS에 전파 X — 모두 dual_shadow mode 활성 시 telemetry 갱신 확인 (trigger_count + coalesced + window_ms, publish 0) |
+| **PR2** ✅ `2d6cece` | `UpbitRedisWriter._write_async`에서 `set_latest_usdt_rate_from_sync_job` True 반환 시점 → **lock 밖**에서 `request_tether_topic_trigger("upbit", "usdt-krw", TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS)` 호출 (성공 정보 local var로 lock 안에서 저장 후 lock 밖에서 호출 — 책임 분리, Codex review). **Trigger reason은 `app/tether_topic_trigger.py`에 상수로 중앙화** (e.g., `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success"`) — reason taxonomy 단일 진실 소스, 향후 KRX/Bithumb 등 reason 추가도 같은 위치. Writer/Test는 상수 import만. Redis-backed telemetry 추가: 기존 `topic:tether:stats` hash + `trigger_*` prefix. 구현 시 보강된 실측 fields는 아래 "**PR2 실측 telemetry field**" 단락 참조 (counter 10 + last/HSET 7). best-effort 격리 (circuit_breaker 미오염, publisher 패턴 동일). | KRX hook (PR3), legacy 격하 (PR4), **DB session during publish refactor (PR4 진입 시 재검토)** | `legacy_piggyback` | env 그대로 | (1) helper True → trigger 호출 (2) helper False → trigger 미호출 (3) helper exception → trigger 미호출 + writer 격리 (4) default legacy mode에서도 hook 호출 안전 (controller noop) (5) trigger 예외가 Redis writer/WS에 전파 X — 모두 dual_shadow mode 활성 시 telemetry 갱신 확인 (`trigger_request` + `trigger_coalesced` + `trigger_last_window_ms`, publish 0) |
 | **PR3** ✅ `7c67e67` | KRX Redis write success → `request_tether_topic_trigger("krx", "usd-krw-futures", TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS)`. 호출 위치: `KrxDbWriter._flush_after_window`의 finally 블록 **밖** (race-prevention timer 재예약 책임과 분리, PR2 lock 밖 패턴 mirror). 시그니처 변경 2곳: (a) `KrxRedisLatestWriter.write_after_db_insert` → `bool` return (`set_latest_krx_rate_from_sync_job` 결과 propagate). (b) `_sync_db_write` → `bool` return (inserted=True **AND** redis_write_success=True). reason 상수 `TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS = "krx_redis_write_success"` 추가 (USDT와 달리 "ws" prefix 미포함 — KRX REST fallback이 동일 DB path 공유 가능성 + 미래 tick-level Redis writer 도입 시에도 reason 그대로 유지). **현재 hook은 DB insert 후 Redis write success 반환 지점, 미래 KRX tick-level Redis writer 도입 시 hook 위치 이동 예정 (reason 이름 유지)**. 동일 controller 공유. | legacy 격하 (PR4), KRX tick-level Redis writer (별도 phase, ADR-031 Stage C 영역) | `legacy_piggyback` | env 그대로 | (1) inserted=True AND redis_ok=True → trigger 호출 + 인자 검증 (2) inserted=False → trigger 미호출 (3) inserted=True AND redis_ok=False → trigger 미호출 (4) `_sync_db_write` exception → trigger 미호출 + writer loop 격리 (5) trigger 예외 → writer loop 영향 X (6) legacy_piggyback mode에서 hook 호출 안전 (controller noop) |
 | **PR4** ✅ Step A | `dual_shadow`를 건너뛰고 `direct_coalesced` 직접 진입. 근거: 운영 App Store 단말에는 테더 탭이 없고, iOS dev 단말로 직접 검증 가능하며, direct 모드에서도 baseline counter 측정 가능. Step A는 mode 전환 + 비구독/구독 path 검증. Step B는 main.py 임시 hook 격하/제거 결정. | iOS 클라이언트 변경, main.py hook 즉시 제거, 모든 source trigger 확대 | `direct_coalesced` | env 환원 `legacy_piggyback` | (1) 비구독: `trigger_publish_called == hook_called == skipped_no_subscribers` (2) 구독: `trigger_publish_success` / `built` / `publish_called` / `publish_sent_total` 증가 (3) `trigger_skipped_legacy` 정지 (4) iOS dev 단말 실시간 체감 확인 |
 
@@ -656,20 +656,32 @@ class TetherTopicTriggerController:
 
 **도입 시점**: PR1은 in-process Stats만 (process restart 시 손실). **PR2 진입 시 Redis-backed 보강** (dual_shadow 운영 prerequisite).
 
-**Counter fields (12개, `trigger_` prefix)**:
+**실측 telemetry fields** (구현 후 갱신, 옛 12 field 초안 대비 일부 명칭 단순화 + 운영 진단 보강):
 
-- `trigger_count` — request_trigger 호출 횟수
-- `trigger_coalesced_count` — coalesce window 안에 dedup 된 trigger 수
+**Counter fields (10개, `trigger_` prefix, `hincrby`)**:
+
+- `trigger_request` — request_trigger 호출 횟수 (옛 `trigger_count`에서 단순화)
+- `trigger_skipped_legacy` — legacy_piggyback mode strict noop 카운트 (운영 진단 보강)
+- `trigger_coalesced` — coalesce window 안에 dedup 된 trigger 수 (옛 `trigger_coalesced_count`에서 단순화)
 - `trigger_flush_dual_shadow` — dual_shadow mode flush 진입 (publish skip 직전)
 - `trigger_flush_direct` — direct_coalesced mode flush 진입 (publish 호출 직전)
 - `trigger_publish_called` — direct mode에서 publish 호출
 - `trigger_publish_success` — publish 성공 (sent > 0)
 - `trigger_publish_skipped_shadow` — dual_shadow에서 publish skip 한 횟수 (flush_dual_shadow와 동일 값)
-- `trigger_last_mode` — 현재 mode (HSET)
-- `trigger_last_source` — 최근 trigger source (HSET, e.g., "upbit")
-- `trigger_last_asset` — 최근 trigger asset (HSET, e.g., "usdt-krw")
-- `trigger_last_reason` — 최근 trigger reason (HSET, e.g., "usdt_ws_redis_write_success")
-- `trigger_last_window_ms` — 최근 coalesce window 실측 ms (HSET)
+- `trigger_no_loop` — running event loop 부재로 trigger skip 한 횟수 (sync test/startup 경로 진단)
+- `trigger_error` — flush task 예외 격리 카운트 (`circuit.record_failure` 미호출, best-effort 보존)
+
+**Last/HSET fields (7개, `trigger_` prefix, `hset`)**:
+
+- `trigger_last_result` — 최근 결과 분류 (e.g., `publish_success`, `skipped_legacy`, `publish_skipped_shadow`, `publish_zero`, `error`)
+- `trigger_last_reason` — 최근 trigger reason (e.g., `usdt_ws_redis_write_success`, `krx_redis_write_success`)
+- `trigger_last_source` — 최근 trigger source (e.g., `upbit`, `krx`)
+- `trigger_last_asset` — 최근 trigger asset (e.g., `usdt-krw`, `usd-krw-futures`)
+- `trigger_last_window_ms` — 최근 coalesce window 실측 ms
+- `trigger_last_error` — 최근 flush 예외 문자열 (길이 500 cap)
+- `trigger_last_at_kst` — 최근 telemetry 기록 시각 (KST ISO)
+
+옛 plan 초안의 `trigger_last_mode`는 process config라 매 trigger마다 변하지 않아 실측에서 제외. `trigger_count` / `trigger_coalesced_count`는 prefix 안의 `_count` suffix 중복이라 단순화.
 
 **격리 원칙** (publisher 패턴 동일):
 

@@ -16,8 +16,9 @@ Modes:
 PR2 add (2026-05-15):
     - Reason 상수 centralization (호출자가 string literal 직접 사용 금지).
     - Redis-backed telemetry — `topic:tether:stats` hash에 `trigger_*` prefix
-      12 fields 기록. circuit_breaker.record_failure() 호출 X (telemetry 실패가
-      broadcast/latest mirror 같은 core Redis 경로에 영향 미치지 않게 격리).
+      10 counter + 7 last/HSET fields 기록. circuit_breaker.record_failure() 호출
+      X (telemetry 실패가 broadcast/latest mirror 같은 core Redis 경로에 영향
+      미치지 않게 격리).
     - Hook: `UpbitRedisWriter._write_async` (PR2 callsite, lock 밖).
 """
 from __future__ import annotations
@@ -57,7 +58,9 @@ _TELEMETRY_KEY: str = "topic:tether:stats"
 _TRIGGER_PREFIX: str = "trigger_"
 _LAST_ERROR_MAX_LEN: int = 500
 
-# `trigger_*` counter 필드 — 12개 (publish 측은 prefix 없이 분리).
+# `trigger_*` counter 필드 — 10개 (publish 측은 prefix 없이 분리).
+# Last/HSET fields 7개는 _record_trigger_event 내부에서 별도 set (last_result,
+# last_reason, last_source, last_asset, last_window_ms, last_error, last_at_kst).
 TRIGGER_COUNTER_FIELDS = (
     "request",
     "skipped_legacy",
