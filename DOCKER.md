@@ -1,8 +1,16 @@
 # Docker Compose 아키텍처 가이드
 
-> 💡 **작성일**: 2025-10-21
+> 💡 **작성일**: 2025-10-21 (운영 기준 갱신: 2026-05-16)
 > 💡 **상태**: 운영 중 (docker-compose + Nginx/Redis/FastAPI, DB는 외부 RDS)
-> 💡 **목적**: AWS 프리티어에서 단계적 확장 가능한 Docker Compose 구조 설계
+> 💡 **목적**: AWS EC2 t3.small (2GB RAM) 기반 단계적 확장 가능한 Docker Compose 구조 설계
+>
+> **현재 컨테이너 메모리 cap** (`deploy.resources.limits.memory`):
+>
+> - FastAPI: 800M (좀비 Chrome 정리 + Selenium 여유)
+> - Redis: 256M (maxmemory 100M + AOF rewrite/fragmentation/buffer 여유, 7.4-alpine pin)
+> - Nginx: 32M
+>
+> 과거 t2.micro / 1GB / FastAPI 600M 표현은 historical 참고용. 현재 운영은 t3.small 기준.
 
 ---
 
@@ -39,7 +47,7 @@
 ### 핵심 설계 원칙
 
 1. **단계적 확장** - 사용자 증가에 따라 점진적으로 복잡도 증가
-2. **메모리 우선** - AWS 프리티어 1GB 제약 내 최적화
+2. **메모리 우선** - t3.small 2GB RAM 안에서 컨테이너 cap으로 안전 마진 확보 (FastAPI 800M / Redis 256M / Nginx 32M)
 3. **보안 강화** - Nginx만 외부 노출, 내부 네트워크 분리
 4. **무중단 전환** - 데이터 마이그레이션 스크립트 제공
 5. **모니터링** - 헬스체크, 리소스 제한, 로그 수집
