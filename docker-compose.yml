@@ -1,9 +1,12 @@
 # ═════════════════════════════════════════════════════════════
-# Exchange Rate Service - Phase 1 (SQLite)
+# Exchange Rate Service
 # ═════════════════════════════════════════════════════════════
-# 목적: AWS 프리티어(t2.micro, 1GB RAM)에서 안정적 운영
-# 메모리: ~315MB (Nginx 32MB + FastAPI 600MB 제한)
-# 배포: docker-compose up -d
+# 운영: AWS EC2 t3.small (2 vCPU, 2GB RAM, 서울 리전)
+# 컨테이너 메모리 cap (deploy.resources.limits.memory):
+#   - FastAPI: 800M (좀비 Chrome 정리 + Selenium 여유)
+#   - Redis:   256M (maxmemory 100M + AOF rewrite / fragmentation / buffer 여유)
+#   - Nginx:    32M
+# 배포: docker compose up -d
 # ═════════════════════════════════════════════════════════════
 
 services:
@@ -11,7 +14,10 @@ services:
   # Redis (Cache)
   # ─────────────────────────────────────
   redis:
-    image: redis:7-alpine
+    # Codex/Claude 합의 (2026-05-16): 7.4-alpine pin으로 patch lane 고정.
+    # 7-alpine은 7.x 안에서 minor drift 받음. 의도는 7.4.x patch refresh이지
+    # 7.5+ minor upgrade 아님. major(7→8)는 별 검증 PR로 분리.
+    image: redis:7.4-alpine
     container_name: exchange-rate-redis
     command: redis-server --appendonly yes --maxmemory 100mb --maxmemory-policy allkeys-lru --requirepass ${REDIS_PASSWORD}
     environment:
@@ -21,6 +27,18 @@ services:
       - ./volumes/logs/redis:/data/logs
     ports:
       - "6379:6379"
+    deploy:
+      # Redis maxmemory 100M은 application-layer eviction 한도.
+      # container memory cap은 AOF rewrite / jemalloc fragmentation /
+      # client buffer / process RSS 합산 한도. 실측 ~8M, peak 2.25M,
+      # AOF 21M이라 256M은 32배+ 여유 (보수적).
+      resources:
+        limits:
+          cpus: '0.3'
+          memory: 256M
+        reservations:
+          cpus: '0.05'
+          memory: 32M
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "sh", "-c", "redis-cli -a $$REDIS_PASSWORD ping || exit 1"]
