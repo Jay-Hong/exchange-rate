@@ -319,6 +319,8 @@ chmod 600 .env
 
 ## 리소스 최적화
 
+> ⚠️ **아래 Phase 1/Phase 2 예시는 historical 설계 진화 기록**. 현재 운영 cap은 본 문서 상단 frontmatter + 루트 [docker-compose.yml](docker-compose.yml) 기준 (FastAPI **800M** / Redis **256M** (`7.4-alpine` pin) / Nginx 32M). 예시 값(600M / 96M / `redis:7-alpine` 등)을 운영 compose에 직접 적용 금지.
+
 ### 컨테이너별 리소스 할당
 
 #### Phase 1 (SQLite)
@@ -482,6 +484,8 @@ exchange-rate/
 ---
 
 ## 설정 파일 예시
+
+> ⚠️ **아래 예시는 Phase 1/Phase 2 도입 시점 historical 가이드**. 현재 운영 compose는 루트 [docker-compose.yml](docker-compose.yml) 단일 진실 source. 예시 값(`redis:7-alpine`, FastAPI 600M, Redis 96M, postgres 200M 등)을 운영 환경에 그대로 copy-paste 금지 — 운영 cap은 본 문서 상단 frontmatter 참고.
 
 ### 1. docker-compose.yml (Phase 1)
 
@@ -1036,12 +1040,14 @@ docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
 # 컨테이너별 리소스 사용
 docker stats
 
-# 예상 출력 (Phase 2):
-# CONTAINER      CPU %   MEM USAGE / LIMIT   MEM %   NET I/O
-# nginx          0.02%   8MB / 32MB          25%     1.5MB / 800KB
-# fastapi        45%     280MB / 600MB       47%     10MB / 8MB
-# postgres       15%     120MB / 200MB       60%     5MB / 3MB
-# redis          5%      48MB / 96MB         50%     2MB / 1MB
+# 예상 출력 (현재 운영 — t3.small / 외부 RDS):
+# CONTAINER             CPU %   MEM USAGE / LIMIT    MEM %   NET I/O
+# exchange-rate-nginx   0.00%   5MB / 32MB           16%     ...
+# exchange-rate-app     3%      220MB / 800MB        28%     ...
+# exchange-rate-redis   1%      8MB / 256MB           3%     ...
+#
+# 참고: PostgreSQL은 외부 AWS RDS이라 컨테이너 미존재. DB 메모리는 RDS 인스턴스
+# (db.t4g.micro 1GB) 측에서 별도 모니터링 (CloudWatch).
 ```
 
 ### 로그 관리
