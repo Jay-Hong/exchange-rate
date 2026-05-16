@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `KrxCloseSnapshotController` 신규 ([app/crawlers/krx_kis.py](app/crawlers/krx_kis.py)): `KrxRestFallbackController` (stale-based)와 책임 분리, session boundary trigger.
   - REST close snapshot 1~3회 bounded 호출 (CF: 15:46:00/15:46:30/15:47:00, CM: 06:01:00/06:01:30/06:02:00, 첫 성공 시 short circuit).
   - boundary timestamp 분리 명시: DB는 UTC naive (`SourceRate.timestamp` 호환), Redis는 KST ISO string.
-  - Primary correctness target = Redis latest (unconditional overwrite). DB는 best-effort history — `ORDER BY timestamp DESC`가 official close를 보장하지 않음 명시 (별 PR scope).
+  - Primary correctness target = Redis latest (unconditional overwrite). DB는 best-effort history — `ORDER BY timestamp DESC`가 official close를 보장하지 않음 명시 (별도 PR scope).
   - `crud.insert_source_rate_if_changed(..., timestamp: Optional[datetime] = None)` 시그니처 추가 (backward compat).
   - boundary 명시 생성 helper (`compute_close_boundary_kst` / `is_close_snapshot_eligible`) — CM의 calendar day(today)와 business day check(today-1) 분리.
   - Sanity check ±2% — REST 응답이 직전 latest 대비 비합리적 차이 시 abort + 다음 retry.
@@ -24,12 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 배포 전 운영 영향 0. 배포 후 `KRX_FUTURES_ENABLED=true` 환경에서는 CF/CM boundary 직후 KIS REST close snapshot이 활성화되며, 호출량은 일 최대 6회.
 
 - **Phase B.2 — Tether topic publish trigger 분리** (2026-05-15, [USDT_WS_DESIGN_PLAN.md §14](USDT_WS_DESIGN_PLAN.md)):
-  - 기존 `main.py broadcast_rates_once is_changed` piggyback 임시 hook → `TetherTopicTriggerController`로 분리 (Phase B.2 PR1~PR3 land, PR4 dual_shadow 대기).
+  - 기존 `main.py broadcast_rates_once is_changed` piggyback 임시 hook → `TetherTopicTriggerController`로 분리 (Phase B.2 PR1~PR3 land, PR4 Step A `direct_coalesced` 운영 활성화).
   - **PR1** (`f16d908`, 2026-05-15): controller skeleton + env 2개 (`TETHER_TOPIC_TRIGGER_MODE`, `TETHER_TOPIC_TRIGGER_COALESCE_MS`) + lifespan close hook. mode default `legacy_piggyback` (단말 publish 영향 0, strict noop).
   - **PR2** (`2d6cece`, 2026-05-15): `UpbitRedisWriter._write_async` lock 밖에서 trigger 호출 + Redis-backed telemetry (`topic:tether:stats` hash에 `trigger_*` prefix counter/last fields). `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS` 상수. GC strong reference (`_telemetry_tasks` set + `add_done_callback`).
   - **PR3** (`7c67e67`, 2026-05-15): `KrxDbWriter._sync_db_write` → `bool` return (inserted=True AND redis_write_success=True 합성). `_flush_after_window` finally 밖에서 trigger 호출 (PR2 lock 밖 패턴 mirror). `TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS` 상수. `KrxRedisLatestWriter.write_after_db_insert` bool propagate.
   - default `legacy_piggyback` 유지 → 단말 publish 영향 0. **trigger telemetry Redis HSET은 발생** (USDT tick-level ~수만/일, KRX 1초+변경 ~수천/일). best-effort 격리 (`circuit.record_failure` 미호출).
-  - PR4 (dual_shadow → direct_coalesced canary) 대기: 24h Soak 완료 + telemetry baseline 측정 후 진입.
+  - **PR4 Step A** (2026-05-16): `dual_shadow`를 건너뛰고 `direct_coalesced` 직접 활성화. 운영 App Store 단말에는 테더 탭이 없고, iOS dev 단말로 직접 검증 가능하며, direct 모드에서도 baseline counter 측정 가능하다는 사용자/Codex/Claude 합의.
+  - 비구독 path 검증: `trigger_publish_called == hook_called == skipped_no_subscribers` (15:18→15:29 delta `511 == 511 == 511`). 구독 path 검증: `trigger_publish_success`, `built`, `publish_called`, `publish_sent_total` 동시 증가. iOS dev 단말에서 Upbit 가격 갱신이 거의 실시간으로 체감됨.
+  - 장기 방향: 모든 테더 탭 표시 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤 `main.py` legacy hook 완전 제거. 신규 단말은 topic 구독 모델만 사용하고, broadcast cycle은 구버전 호환 후 deprecate.
 
 - **KRX 미국달러선물 Stage 1 canary** (2026-05-06, PR6 시리즈, ADR-027 초안):
   - KIS Open API WebSocket 기반 KRX 미국달러선물 수집 경로 추가 (`source="krx"`, `asset="usd-krw-futures"`)

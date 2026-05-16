@@ -1241,8 +1241,9 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ ADR-030 latest:index 책임 분리 — per-key freshness 전환 (Proposed, deployed 2026-05-13 `489359c` observing) ([DECISIONS.md ADR-030](DECISIONS.md))
 - ✅ ADR-031 KRX 미국달러선물 Redis 통합 — 1차 부채 해소 (Proposed, deployed 2026-05-14 `0756329` observing) ([DECISIONS.md ADR-031](DECISIONS.md), 5/18 만기 rollover는 [KRX_CANARY.md](KRX_CANARY.md))
 - ✅ KRX fanout refactor — A/B/C/A-pre 완료 (behavior-change-0), D는 Stage C와 함께 검토 ([KRX_FANOUT_REFACTOR_PLAN.md](KRX_FANOUT_REFACTOR_PLAN.md))
-- ✅ Phase B.2 — Tether topic publish trigger 분리 (PR1~PR3, [USDT_WS_DESIGN_PLAN.md §14](USDT_WS_DESIGN_PLAN.md)). default `legacy_piggyback` 유지 — 단말 publish 영향 0, telemetry HSET만 발생. PR4 dual_shadow → direct_coalesced 전환 대기 (2026-05-15)
+- ✅ Phase B.2 — Tether topic publish trigger 분리 (PR1~PR3 + PR4 Step A, [USDT_WS_DESIGN_PLAN.md §14](USDT_WS_DESIGN_PLAN.md)). `direct_coalesced` 운영 활성화 완료(2026-05-16): 비구독 guard path + iOS dev 구독 success path 검증, Upbit 실시간 체감 확인. 다음은 main.py legacy hook fallback 격하/완전 제거 조건 정리.
 - ✅ KRX close snapshot 1차 PR — CF 15:45 / CM 06:00 단일가 종가 REST 보강 (`c0855ff`, [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md)). primary target = Redis latest (DB는 best-effort history). 7일 운영 측정 후 2차 PR WS grace drain 검토 (2026-05-15)
+- 🔜 장기 realtime roadmap — 신규 단말은 topic 구독 모델만 사용, broadcast cycle은 구버전 호환 후 deprecate. 테더 탭 모든 표시 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤 legacy hook 완전 제거. USDT REST polling은 장기적으로 WS primary + REST fallback 전용으로 격하.
 - 🔜 5/18 KRX 만기 rollover 관찰 + ADR-027 REST fallback 수치 확정 → Stage C 결정
 - 🔜 USDT WebSocket primary 설계 (KRX 패턴 재사용 검토)
 - 🔜 CI/CD, 유닛 테스트
