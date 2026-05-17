@@ -669,6 +669,16 @@ evaluation coalescing / meaningful observation**으로 표기한다. 알림에 "
   (생략 금지 조건 6개 모두 처리 필요)
 - (β) Phase 3 ZSET과 묶음 — Phase 1 단순성 유지, 30k 도달 시점에 함께 도입
 - (γ) Phase 1.5 + Phase 3 분리 land — coalescing 먼저 + ZSET은 별도
+- **(δ) 구현 방식 결정 deferred (현재 결정, 2026-05-18 사용자/코덱스 합의)** — 아래
+  trigger 중 하나가 먼저 도달하면 α/β/γ 재검토:
+  - 비교 알림 (Phase E) 실제 구현 진입
+  - 테더탭/WebSocket refactor 이후 자산별 알림 패턴 안정
+  - Bithumb canary 및 후속 거래소 telemetry 확보
+  - 알림 settings 규모가 사전 최적화 검토 기준에 도달 (예: 10k+ settings)
+
+  근거: 비교 알림 입력/trigger 방식이 Phase E 시점에 결정될 예정 + Bithumb canary
+  운영 후 실제 frame 빈도 측정 가능 + 현재 진행 작업 (테더탭/WebSocket refactor/
+  KRX rollover) 우선순위 정합. 추측 기반 결정 회피 + 실측 데이터 기반 결정.
 
 source-neutral 설계 (Upbit / Bithumb / 향후 Coinone / Korbit / Gopax + KRX + 비교
 알림 공통 helper). Bithumb (Phase B.3)도 동일 정책 자동 적용 — Upbit pattern 복제
