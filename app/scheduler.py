@@ -2116,7 +2116,7 @@ async def start_usdt_ws_bithumb_client():
     client = BithumbWsClient()
     usdt_ws_bithumb_client = client
     usdt_ws_bithumb_task = asyncio.create_task(_run_usdt_ws_bithumb_client(client))
-    logger.info("[usdt_ws.bithumb] BithumbWsClient skeleton 시작 (U2)")
+    logger.info("[usdt_ws.bithumb] BithumbWsClient task 시작")
 
 
 async def shutdown_usdt_ws_bithumb_client():
