@@ -2,12 +2,24 @@
 
 > 목적: KRX optional source(PR6 시리즈)의 단계적 운영 진입 절차. 운영자가 그대로 따라할 수 있는 runbook 형태.
 >
-> 관련 문서: [CLAUDE.md "KRX 미국달러선물" 섹션](CLAUDE.md), [.env.example](.env.example), [DECISIONS.md](DECISIONS.md)
+> 관련 문서: [CLAUDE.md "KRX 미국달러선물" 섹션](CLAUDE.md), [.env.example](.env.example), [DECISIONS.md](DECISIONS.md), [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md)
 >
 > ⚠️ **Historical note (Z-2d cleanup 2026-05-12)**: 본 runbook의 `KRX_BROADCAST_INCLUDE` 참조는
 > historical context. 해당 env는 Z-2d cleanup에서 제거됨 — legacy 노출은
 > `app/legacy_policy.should_include_source_in_legacy_rates` allowlist가 단일 진실 소스.
 > KRX는 allowlist 미포함이라 자동 차단. Stage 2 topic 노출은 별도 topic protocol(ADR-028).
+
+## 🚀 Close finalizer 2차 작업 배포 status (2026-05-17)
+
+| 항목 | 상태 |
+| --- | --- |
+| Commit | `c2fb796` (Stage 5) — 누적: 68b8702 ~ c2fb796 (Stage 1-5) |
+| EC2 deploy | 2026-05-17 17:07 KST |
+| Plan | [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md) §5 (2차 작업) |
+| Env toggle | `KRX_CLOSE_FINALIZER_ENABLED=true` (default) — `false` 시 1차 PR (c0855ff) 동작 rollback (Rollback B 참조) |
+| 검증 | 250 passed + 1 skipped |
+| 첫 실측 대기 | **2026-05-18 (월) 15:45 KST** CF close + **2026-05-19 (화) 06:00 KST** CM close |
+| Rollback | 본 문서 [Rollback 절차](#rollback-절차) Rollback B (`KRX_CLOSE_FINALIZER_ENABLED=false`) |
 
 ---
 
@@ -15,9 +27,9 @@
 
 1. **KRX optional source**: KRX 수집/노출 어느 단계의 실패도 baseline 서비스(은행 + investing + USDT) 가용성에 영향 0. 실패 격리는 env 토글 + bootstrap try/except로 보장.
 2. **Stage 1은 "DB 저장 관찰" 목적**: broadcast 노출 X. 앱/사용자 가시 영향 0.
-3. **실행 중 contract 자동 교체 없음** (현재 미구현). bootstrap 시 `select_active_usd_futures_contract()`로 1회 resolve 후 client lifecycle 동안 불변.
-4. **5/18 만기일 관찰 = 자동 rollover 검증 X / 자동 rollover 설계용 데이터 수집**: 11:30 이후 client 상태, tick 끊김 패턴, 수동 restart 시 다음 월물 잡힘 여부 등.
-5. **두 토글 모두 process 재생성 필요**: `app/config.py`가 import 시 1회 `os.getenv` 읽기 → hot-reload 안 됨. `.env` 변경 후에는 `docker compose up -d fastapi`처럼 컨테이너를 재생성해야 env_file이 다시 반영된다 (`docker compose restart fastapi`는 기존 컨테이너 stop/start라 `.env` 변경을 반영하지 않음).
+3. **실행 중 contract 자동 교체 구현됨** (PR6c-2d-1, 2026-05-07). APScheduler 5분 cron `_reconcile_krx_futures_contract`이 KIS 상품 마스터로 active contract resolve 후 현재 client contract와 비교 → 다르면 shutdown + start으로 자연 swap (만기일 07:00 KST 선제 전환 정책 포함). bootstrap 시 1회 resolve는 그대로 유지.
+4. **5/18 만기일 관찰 = 자동 rollover 첫 실측**: 07:00 swap 정상 발화 / 08:45 새 월물 정규장 시작 / 11:30 만기 시점 expiring contract WS frame 패턴 / 15:45 CF close finalizer 첫 실측.
+5. **두 토글 모두 process 재생성 필요**: `app/config.py`가 import 시 1회 `os.getenv` 읽기 → hot-reload 안 됨. `.env` 변경 후에는 `docker compose up -d --force-recreate fastapi`처럼 컨테이너를 재생성해야 env_file이 다시 반영된다 (`docker compose restart fastapi`는 기존 컨테이너 stop/start라 `.env` 변경을 반영하지 않음).
 
 ---
 
@@ -386,16 +398,82 @@ done
 - PR6d-2b (REST fallback): stale 임계값, session-end grace, reconnect 동반 조건, cooldown
 - 점프 보호 임계값 (현재 45일) 적정성
 
+### Close finalizer 첫 실측 체크리스트 (c2fb796 deploy 후, 2026-05-18 ~ 5/19)
+
+**2026-05-18 (월) 15:45 KST — CF close 첫 실측**:
+
+```bash
+# Redis latest 갱신 확인 (KrxCloseWindowWriter → Redis SET)
+docker exec exchange-rate-app python -c "
+from app import latest_rates_cache
+print(latest_rates_cache.get_latest_krx_rate_from_sync_job('usd-krw-futures'))
+"
+# 기대: timestamp이 2026-05-18T15:45:0X+09:00 (boundary 직후)
+
+# Redis captured flag SET 확인
+docker compose exec redis redis-cli GET 'close_captured:krx:CF:2026-05-18'
+# 기대: "1" (DB+Redis 모두 성공 시 SET)
+
+# DB row 확인 (unconditional INSERT)
+docker exec exchange-rate-app python -c "
+from app.database import SessionLocal
+from sqlalchemy import text
+with SessionLocal() as s:
+    rows = s.execute(text(\"\"\"
+        SELECT timestamp, rate FROM source_rates
+        WHERE source='krx' AND timestamp >= '2026-05-18 06:45:00'
+          AND timestamp < '2026-05-18 06:46:00'
+    \"\"\")).fetchall()
+    print(rows)
+"
+# 기대: 1+ row, timestamp 15:45:0X KST (UTC 06:45:0X)
+
+# 로그 확인
+docker compose logs fastapi --since "2026-05-18T15:44+09:00" --until "2026-05-18T15:47+09:00" \
+  | grep -E '\[krx_close_window\]'
+# 기대: "close saved session=CF rate=... ts=2026-05-18T15:45:0X+09:00 ..."
+```
+
+**2026-05-19 (화) 06:00 KST — CM close 첫 실측**: 동일 패턴, `CF` → `CM`, date `2026-05-19`.
+
+**Telemetry counter (5종) — `KrxCloseFinalizerStats` in-memory singleton**:
+
+`get_krx_close_finalizer_stats()`는 uvicorn 메인 프로세스의 module-level singleton이라
+`docker exec ... python -c` 같은 **새 Python 프로세스에서는 조회 불가** (별 import → 초기값 0만 보여 운영자 오도).
+
+현재 외부 조회 path 없음 — 1차 관찰은 다음 indirect signal로:
+
+- **logs**: `[krx_close_window] close saved session=... rate=... ts=...` 발화 횟수 (case A signal)
+- **logs**: `[krx_close_snapshot] WS captured ... → REST skip` vs close snapshot REST fallback 실제 호출 (stale fallback `KRX_REST_FALLBACK_ENABLED`와 별도 toggle — close snapshot은 `KRX_CLOSE_FINALIZER_ENABLED=true` 시 captured flag 부재일 때만 최대 1회 REST 호출, false 시 1차 PR 3 retry) (case B signal)
+- **logs**: `[krx_close_window] close grace window 안 N frames detected` (close_duplicate_count alert)
+- **DB**: 영업일 close window 시간(15:45:00~15:45:59 / 06:00:00~06:00:59) `source_rates` row 존재 여부
+- **Redis**: 영업일 `close_captured:krx:{CF|CM}:{kst_date}` flag SET 여부
+
+**후속 polish (3차 PR scope 후보)**:
+
+- admin API endpoint (`/admin/api/krx/close-finalizer-stats`) — 외부 조회 가능 path
+- 또는 Redis hash telemetry (`topic:krx:close_finalizer:stats`) — process restart 시 누적 유지
+
+**Case A/B/C 분포 분석** (7일 telemetry 측정 후, 2026-05-26 무렵):
+
+- case A (우리 cutoff fix): 영업일 close 시점 직후 `close saved` log 발화 + DB row + Redis flag 정상
+- case B (KIS WS 미송신): close saved log 없음 + REST fallback 발화 + Redis latest는 REST로 갱신
+- case C (dedup skip): 2차 작업 정책상 0 예상
+
+case B 비율 결과로 3차 PR scope 결정 (REST fallback 제거 검토 / 유지).
+
 ---
 
 ## Rollback 절차
+
+### Rollback A — KRX 전체 격리 (`KRX_FUTURES_ENABLED=false`)
 
 **즉시 격리 (KRX 장애 / KIS API 점검 / 데이터 이상):**
 
 ```bash
 # 운영 .env에서 KRX_FUTURES_ENABLED=false로 변경
 # (.env.example 참고)
-docker compose up -d fastapi
+docker compose up -d --force-recreate fastapi
 ```
 
 **검증:**
@@ -411,6 +489,37 @@ docker compose logs fastapi --since 2m | grep -E '\[krx\]'
 - 재생성 전까지는 기존 client가 계속 동작 — `.env` 변경만으로 즉시 멈추지 않음 (config 1회 read + Docker Compose env_file 재로드 정책)
 - 기존 `source_rates` 레코드는 유지 (수동 정리 필요 시 별도)
 - broadcast / latest:index는 이미 Stage 1에서 KRX 미포함 → 사용자 가시 영향 0
+
+### Rollback B — Close finalizer만 격하 (`KRX_CLOSE_FINALIZER_ENABLED=false`)
+
+**대상 시나리오 (2026-05-17 c2fb796 배포 이후)**:
+KRX 자체는 유지하되 close finalizer (Stage 1-5 2차 작업)만 1차 PR (c0855ff) 동작으로 rollback.
+KRX_CLOSE_SNAPSHOT_PLAN §5 정책 비활성 — KrxDbWriter close-grace skip 미진입 + KrxCloseWindowWriter early return + REST 3 retry 그대로.
+
+```bash
+cd ~/exchange-rate
+# .env 변경 (idempotent — 중복 키 차단 sed 교체 + 없으면 추가)
+grep -q '^KRX_CLOSE_FINALIZER_ENABLED=' .env \
+  && sed -i 's/^KRX_CLOSE_FINALIZER_ENABLED=.*/KRX_CLOSE_FINALIZER_ENABLED=false/' .env \
+  || echo 'KRX_CLOSE_FINALIZER_ENABLED=false' >> .env
+
+# Container 재생성 — restart는 env_file 변경 반영 X (핵심 원칙 5 참조)
+docker compose up -d --force-recreate fastapi
+```
+
+**검증:**
+
+```bash
+docker exec exchange-rate-app python -c "from app import config; print('KRX_CLOSE_FINALIZER_ENABLED =', config.KRX_CLOSE_FINALIZER_ENABLED)"
+# 기대: "KRX_CLOSE_FINALIZER_ENABLED = False"
+```
+
+**효과 (process 재생성 후 기준)**:
+
+- KrxDbWriter `_flush_after_window` close-grace skip 분기 미진입 → 일반 path로 close grace tick 처리 (insert-if-changed)
+- KrxCloseWindowWriter `__call__` early return → close grace window 안 frame 무시
+- KrxCloseSnapshotController `_retry_sequence` 3 retry 유지 (1차 PR c0855ff 동작)
+- 효과적으로 5/15 ~ 5/16 deploy 상태로 복귀
 
 ---
 

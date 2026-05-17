@@ -4,6 +4,52 @@
 > Phase B.2와 독립 트랙 (ADR-027 REST fallback 계열).
 > Codex/Claude 합의 (2026-05-15, 7라운드).
 
+## 0. Status (2026-05-17)
+
+| 단계 | 상태 | Commit | 비고 |
+| --- | --- | --- | --- |
+| 1차 PR — REST snapshot only | ✅ 완료 + 배포 (2026-05-16 EC2 11:23 KST) | `c0855ff` | §4 명세 + §4.12 11일 baseline 분석 |
+| **2차 작업 — WS-first close finalizer + REST fallback** | ✅ **구현 완료 + 배포 (2026-05-17 EC2 17:07 KST)** | **`68b8702..c2fb796`** (Stage 1-5) | §5 명세 + 외부 검토 Codex 10+ round |
+| 첫 실측 대기 | 2026-05-18 (월) 15:45 KST CF close + 2026-05-19 (화) 06:00 KST CM close | — | [KRX_CANARY.md](KRX_CANARY.md) checklist 참조 |
+| 7일 telemetry 측정 | 2026-05-19 ~ 2026-05-26 (case A/B/C 분포) | — | 결과로 3차 PR scope 결정 |
+
+**2차 작업 Stage 1-5 요약** (분할 + 외부 검토 통과):
+
+| Stage | Commit | files / +lines | 변경 핵심 |
+| --- | --- | --- | --- |
+| Stage 1 — window helpers | `68b8702` | 2 / +289 | `is_in_close_grace_window` / `is_in_single_price_window` / `compute_close_grace_end_kst` |
+| Stage 2 — Redis flag + crud unconditional | `dc678c3` | 4 / +319 | `set/get_krx_close_captured_flag` (best-effort) + `insert_source_rate_unconditional` (예외 전파, 항상 True) |
+| Stage 3 — KrxCloseWindowWriter + KrxDbWriter skip | `2ea3cde` | 3 / +957 | F1 fix (DB row 1 보장) + market_time 정책 + setUp 5중 patch (F3 fix) |
+| Stage 4 — _retry_sequence env-gated 단순화 | `e141e6a` | 3 / +356 | 3 retry → 1 + 2-step captured flag GET + F2 fix (db_ok AND redis_ok flag SET) + Codex counter invariant |
+| Stage 5 — WS grace drain + scheduler 등록 | `c2fb796` | 3 / +22 | `_connect_and_listen` +59s grace + `KrxCloseWindowWriter` handler 등록 |
+| **누적** | — | **15 files / +1943** | F1/F2/F3 모두 구조적 해결 |
+
+**검증** (관련 회귀 + 신규 tests):
+
+```bash
+python -m pytest tests/test_kis_futures_close_window.py tests/test_krx_close_captured_flag.py \
+  tests/test_crud_insert_source_rate_unconditional.py tests/test_krx_close_window_writer.py \
+  tests/test_krx_close_snapshot.py tests/test_krx_close_snapshot_controller_fallback.py \
+  tests/test_krx_kis.py tests/test_krx_scheduler.py tests/test_tether_topic_trigger.py \
+  tests/test_tether_topic_publisher.py -q
+# 250 passed, 1 skipped
+```
+
+**Rollback (Close finalizer만 격하, KRX 자체는 유지)**:
+
+```bash
+ssh -i ~/fxi-server-key-pair.pem ubuntu@3.36.30.32
+cd ~/exchange-rate
+grep -q '^KRX_CLOSE_FINALIZER_ENABLED=' .env \
+  && sed -i 's/^KRX_CLOSE_FINALIZER_ENABLED=.*/KRX_CLOSE_FINALIZER_ENABLED=false/' .env \
+  || echo 'KRX_CLOSE_FINALIZER_ENABLED=false' >> .env
+docker compose up -d --force-recreate fastapi
+```
+
+⚠️ `restart`는 env_file 변경을 반영하지 않음. **반드시 `up -d --force-recreate fastapi`** ([KRX_CANARY.md](KRX_CANARY.md) 핵심 원칙 5 참조). 효과: KrxDbWriter close-grace skip 미진입 + KrxCloseWindowWriter `__call__` early return + REST 3 retry 그대로 (1차 PR c0855ff 동작 복귀).
+
+---
+
 ## 1. 문제 정의
 
 운영 EC2 로그 + DB 7~14일치 집계 실측:

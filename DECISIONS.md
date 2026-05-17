@@ -3244,6 +3244,10 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
 
 **2차 PR 후속**: WS grace drain (CF 15:45:59 / CM 06:00:59까지 listen + grace tick timestamp boundary normalize). 1차 PR 7일 운영 측정 결과 baseline 분석 후 진입 결정.
 
+**2차 작업 완료 (2026-05-17, Stage 1-5 / `68b8702..c2fb796`)**:
+
+WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방지로 land. EC2 deploy 2026-05-17 17:07 KST. F1 (DB row 중복) / F2 (flag race) / F3 (test hang) 모두 구조적 해결. `KRX_CLOSE_FINALIZER_ENABLED` env default true, false 시 1차 PR (c0855ff) 동작 rollback. 첫 실측 2026-05-18 (월) 15:45 KST CF close / 2026-05-19 (화) 06:00 KST CM close. 7일 telemetry (`close_grace_saved` / `close_rest_fallback_used` 등) 분석 후 3차 PR scope (DB unique constraint / 종가 read API / open auction / REST fallback 제거 검토 / Stage E) 결정. 상세 + Stage 1-5 commits / 검증 / rollback은 plan 문서 §0 참조.
+
 상세: [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md).
 
 ---

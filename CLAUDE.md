@@ -1127,11 +1127,20 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - Phase 2: 테더 탭 그래프 (DXY와 동일한 rollup 전략), KRX 달러선물 (재배포 권리 확인 후)
 - Phase 3: 비교 알림 (`comparison_alerts` 스키마는 Phase 1 설계 문서에서 잠김)
 
-### KRX 미국달러선물 (KIS Open API) — PR6 Stage 1 canary 진행 중 (2026-05-06 시점)
+### KRX 미국달러선물 (KIS Open API) — Stage 1 운영 + Close finalizer 2차 작업 배포 완료 (2026-05-17)
 
 **배경**: 김치프리미엄 전략 사용자가 거래소 USDT 외에 KRX 미국달러선물(USDF) 호가/체결도 함께 보고자 함. 기준 만기 종목 단축코드 예: A75605 (2026-05-18 만기, KIS master로 동적 resolve).
 
-**운영 진입 절차**: [KRX_CANARY.md](KRX_CANARY.md) — Stage 0/1/2 단계별 env, 검증 명령(SQL/Redis), 24h baseline 지표, 5/18 만기 관찰 시나리오, rollback 절차, Stage 2 진입 조건 체크리스트.
+**최신 운영 상태 (2026-05-17 17:07 KST 기준)**:
+
+- Stage 1 (DB 저장 관찰) — 운영 중. `KRX_FUTURES_ENABLED=true`
+- **Close finalizer 2차 작업 (Stage 1-5)** — 배포 완료. `c2fb796` ([KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md) §5)
+  - WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방지
+  - F1 (DB row 중복) / F2 (flag race) / F3 (test hang) 모두 구조적 해결
+  - `KRX_CLOSE_FINALIZER_ENABLED=true` default, false 시 1차 PR (c0855ff) 동작 rollback
+  - 첫 실측: 2026-05-18 (월) 15:45 KST CF close + 2026-05-19 (화) 06:00 KST CM close
+
+**운영 진입 절차**: [KRX_CANARY.md](KRX_CANARY.md) — Stage 0/1/2 단계별 env, 검증 명령(SQL/Redis), 24h baseline 지표, 5/18 만기 관찰 시나리오, **close finalizer 첫 실측 체크리스트**, rollback 절차 (Rollback A/B), Stage 2 진입 조건 체크리스트.
 
 **핵심 원칙 — KRX optional source**: 서버/앱의 baseline 서비스(은행 + investing + USDT)는 KRX 없이 항상 정상 동작. KRX는 선택적 데이터 소스로 격리되며, 어느 단계의 실패도 다른 startup/shutdown/broadcast 경로에 영향 없음.
 
@@ -1141,6 +1150,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 | --- | --- | --- |
 | `KIS_APP_KEY` / `KIS_APP_SECRET` | 미설정 | 미설정 시 bootstrap warning 후 격리 (다른 서비스 영향 X) |
 | `KRX_FUTURES_ENABLED` | `false` | WebSocket 연결 / 신규 DB 저장 (수집 lifecycle) |
+| `KRX_CLOSE_FINALIZER_ENABLED` | `true` | Close finalizer 2차 작업 정책 (Stage 1-5, c2fb796 deploy 2026-05-17). `false` 시 1차 PR (c0855ff) 동작 rollback — KrxDbWriter close-grace skip 미진입 + KrxCloseWindowWriter early return + REST 3 retry 그대로 |
 
 **노출 정책 (Z-2d, 2026-05-12)**: `KRX_BROADCAST_INCLUDE` env는 Z-2d cleanup에서
 제거됨. legacy `latest:index`/`/api/rates*`/WebSocket `rates` 배열 노출 여부는
@@ -1243,6 +1253,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - ✅ KRX fanout refactor — A/B/C/A-pre 완료 (behavior-change-0), D는 Stage C와 함께 검토 ([KRX_FANOUT_REFACTOR_PLAN.md](KRX_FANOUT_REFACTOR_PLAN.md))
 - ✅ Phase B.2 — Tether topic publish trigger 분리 (PR1~PR3 + PR4 Step A, [USDT_WS_DESIGN_PLAN.md §14](USDT_WS_DESIGN_PLAN.md)). `direct_coalesced` 운영 활성화 완료(2026-05-16): 비구독 guard path + iOS dev 구독 success path 검증, Upbit 실시간 체감 확인. 다음은 main.py legacy hook fallback 격하/완전 제거 조건 정리.
 - ✅ KRX close snapshot 1차 PR — CF 15:45 / CM 06:00 단일가 종가 REST 보강 (`c0855ff`, [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md)). primary target = Redis latest (DB는 best-effort history). 7일 운영 측정 후 2차 PR WS grace drain 검토 (2026-05-15)
+- ✅ **KRX close finalizer 2차 작업 (Stage 1-5)** — WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방지 (`68b8702..c2fb796`, deploy 2026-05-17 17:07 KST). F1/F2/F3 구조적 해결 + Codex counter invariant. `KRX_CLOSE_FINALIZER_ENABLED` env default true. 첫 실측 2026-05-18 CF / 2026-05-19 CM. 7일 telemetry 후 3차 PR scope 결정 (DB unique / 종가 read API / open auction / REST fallback 제거 검토 / Stage E)
 - 🔜 장기 realtime roadmap — 신규 단말은 topic 구독 모델만 사용, broadcast cycle은 구버전 호환 후 deprecate. 테더 탭 모든 표시 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤 legacy hook 완전 제거. USDT REST polling은 장기적으로 WS primary + REST fallback 전용으로 격하.
 - 🔜 5/18 KRX 만기 rollover 관찰 + ADR-027 REST fallback 수치 확정 → Stage C 결정
 - 🔜 USDT WebSocket primary 설계 (KRX 패턴 재사용 검토)
