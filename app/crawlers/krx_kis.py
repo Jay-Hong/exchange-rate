@@ -1281,8 +1281,20 @@ class KisFuturesClient:
                 # 세션 boundary 도달 체크 (15:45 / 06:00 등). PR6c-2d-1: contract-aware.
                 now = datetime.now(KST).replace(tzinfo=None)
                 if get_active_session(now, self._contract.expiry_date) != session:
-                    logger.info("[kis_ws] session boundary reached, disconnect")
-                    return
+                    # KRX_CLOSE_SNAPSHOT_PLAN §5.1 Stage 5 (2026-05-17): close grace drain.
+                    # boundary 직후 60초 window 안이면 listen 유지 — KrxCloseWindowWriter가
+                    # capture할 frame을 cutoff 없이 fanout. get_active_session 의미는 변경 X
+                    # (session 종료 감지는 _run_session outer loop에서 정상 발화 + close
+                    # snapshot schedule도 그쪽에서). 본 분기는 WS recv loop만 +59초 연장.
+                    if (
+                        config.KRX_CLOSE_FINALIZER_ENABLED
+                        and is_in_close_grace_window(now, session)
+                    ):
+                        # grace 유지 — recv 계속 진행 (다음 iteration에서 재체크)
+                        pass
+                    else:
+                        logger.info("[kis_ws] session boundary reached, disconnect")
+                        return
 
                 # stale 임계 — 마지막 tick 후 60s 초과 시 status 갱신
                 if (

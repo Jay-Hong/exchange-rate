@@ -237,8 +237,9 @@ class TestBootstrapKrxFuturesClient(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(scheduler.krx_futures_client)
         self.assertIsNotNone(scheduler.krx_futures_task)
         self.assertTrue(any("KisFuturesClient 시작" in m for m in cm.output))
-        # add_tick_handler가 KrxDbWriter로 호출됨
-        mock_client_instance.add_tick_handler.assert_called_once()
+        # add_tick_handler가 KrxDbWriter + KrxCloseWindowWriter로 호출됨
+        # (Stage 5, 2026-05-17): KRX_CLOSE_FINALIZER_ENABLED default true → 2 handlers.
+        self.assertEqual(mock_client_instance.add_tick_handler.call_count, 2)
 
 
 # ---------------------------------------------------------------------------

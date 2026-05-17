@@ -1698,6 +1698,7 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
         KisAccessTokenManager,
         KisApprovalManager,
         KisFuturesClient,
+        KrxCloseWindowWriter,
         KrxDbWriter,
     )
 
@@ -1729,6 +1730,10 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
             approval, contract=resolved, access_token_manager=token_manager,
         )
         client.add_tick_handler(KrxDbWriter())
+        # KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 5 (2026-05-17): close finalizer 활성 시 등록.
+        # env false 시 KrxCloseWindowWriter.__call__이 early return이라 비활성 동작과 동일.
+        if config.KRX_CLOSE_FINALIZER_ENABLED:
+            client.add_tick_handler(KrxCloseWindowWriter())
 
         krx_futures_client = client
         krx_futures_task = asyncio.create_task(_run_krx_futures_client(client))
