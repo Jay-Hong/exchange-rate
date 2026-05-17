@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,6 +37,9 @@ from app.crawlers.usdt_ws.bithumb import (
     BITHUMB_SUBSCRIBE_TICKET,
     BITHUMB_TARGET_CODE,
     BITHUMB_WS_URL,
+    DB_WRITE_WINDOW_SEC,
+    FALLBACK_COOLDOWN_SEC,
+    FALLBACK_PROBE_TIMEOUT_SEC,
     MAX_PENDING_WRITES,
     PING_INTERVAL_SEC,
     PING_TIMEOUT_SEC,
@@ -43,7 +47,9 @@ from app.crawlers.usdt_ws.bithumb import (
     RECONNECT_BACKOFF_TAIL,
     REDIS_CLOSE_TIMEOUT_SEC,
     STALE_AFTER_SEC,
+    BithumbDbWriter,
     BithumbRedisWriter,
+    BithumbRestFallbackController,
     BithumbWsClient,
 )
 from app.tether_topic_trigger import (
@@ -759,40 +765,62 @@ class TestPingLoop(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestStaleTransition(unittest.TestCase):
-    """stale 전이 — Redis/DB/fallback X, status/log/counter만 (acceptance 4).
+    """stale 전이 — Redis/DB direct write X, fallback schedule_probe만 (U6 A7).
 
-    U5 진화 (2026-05-17): _redis_writer는 U5에서 추가됨. U4 attribute 부재 검증은
-    무효화 — 본질은 "_set_status가 직접 writer.schedule을 호출하지 않는다". U6 영역
-    (_db_writer / _fallback_controller / _alert_evaluator)은 여전히 부재 (acceptance 6).
+    Stage 진화:
+        U4: client에 redis/db/fallback attribute 자체 없음 → side-effect 자연 차단
+        U5: _redis_writer 추가, but _set_status에서 직접 schedule 호출 X
+        U6 (현재): _db_writer + _fallback_controller 추가. _set_status는
+            redis/db direct schedule X (A7), normal→stale 시 fallback schedule_probe (A7),
+            normal 복귀 시 fallback reset_cooldown (A8).
+        U7 영역: _alert_evaluator 여전히 부재.
     """
 
-    def test_set_status_stale_no_side_effects(self):
-        """_set_status('stale') → counter ++ + log emit. writer.schedule 호출 X."""
+    def test_set_status_stale_no_direct_redis_db_write(self):
+        """_set_status('stale') → Redis/DB direct write X, fallback schedule_probe만 (A7).
+
+        U6 진화: _set_status는 _fallback_controller.schedule_probe만 호출. Redis/DB는
+        직접 writer.schedule을 통하지 않고 fallback → probe → writer.schedule로 우회.
+        """
         client = BithumbWsClient()
-        # U5: _redis_writer는 추가됨 (U5 A13 lifecycle invariant)
+        # U5/U6: redis + db + fallback 추가됨
         self.assertTrue(hasattr(client, "_redis_writer"))
-        # U6 영역 attribute는 여전히 부재 (acceptance 6)
-        self.assertFalse(hasattr(client, "_db_writer"))
-        self.assertFalse(hasattr(client, "_fallback_controller"))
+        self.assertTrue(hasattr(client, "_db_writer"))
+        self.assertTrue(hasattr(client, "_fallback_controller"))
+        # U7 영역: alert evaluator 여전히 부재 (acceptance 6 U6 scope)
         self.assertFalse(hasattr(client, "_alert_evaluator"))
 
-        # _set_status가 _redis_writer.schedule 호출하지 않음 (acceptance 4 본질)
-        with patch.object(client._redis_writer, "schedule") as mock_schedule:
+        # _set_status가 redis/db에 직접 schedule하지 않음 (A7)
+        with patch.object(client._redis_writer, "schedule") as mock_redis, \
+             patch.object(client._db_writer, "schedule") as mock_db, \
+             patch.object(client._fallback_controller, "schedule_probe") as mock_probe:
             client._set_status("stale")
         self.assertEqual(client._status, "stale")
         self.assertEqual(client._status_transition_count["stale"], 1)
-        mock_schedule.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_db.assert_not_called()
+        # normal → stale 전이 시 fallback probe만 호출 (A7)
+        mock_probe.assert_called_once_with(reason="stale_transition")
 
-    def test_set_status_stale_to_normal_recovery(self):
-        """stale → normal 복귀도 동일 — counter + log만, writer.schedule 호출 X."""
+    def test_set_status_normal_recovery_resets_cooldown(self):
+        """normal 복귀 → cooldown reset 호출 (A8). Redis/DB direct write X."""
         client = BithumbWsClient()
-        with patch.object(client._redis_writer, "schedule") as mock_schedule:
-            client._set_status("stale")
+        # normal → stale (probe schedule)
+        client._set_status("stale")
+        # stale → normal (cooldown reset)
+        with patch.object(client._redis_writer, "schedule") as mock_redis, \
+             patch.object(client._db_writer, "schedule") as mock_db, \
+             patch.object(client._fallback_controller, "reset_cooldown") as mock_reset, \
+             patch.object(client._fallback_controller, "schedule_probe") as mock_probe:
             client._set_status("normal")
         self.assertEqual(client._status, "normal")
-        self.assertEqual(client._status_transition_count["stale"], 1)
         self.assertEqual(client._status_transition_count["normal"], 1)
-        mock_schedule.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_db.assert_not_called()
+        # normal 복귀 → reset_cooldown 호출 (A8)
+        mock_reset.assert_called_once()
+        # normal 복귀는 schedule_probe 호출 X (A7 stale 전이에서만)
+        mock_probe.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1184,20 +1212,21 @@ class TestInvalidFrameNoSchedule(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tick_arg["rate"], 1486.0)
 
 
-class TestNoDbNoFallbackInU5(unittest.TestCase):
-    """6 — DB writer / REST fallback / alert evaluator는 U5에서 0 (U6 영역).
+class TestNoAlertInU6(unittest.TestCase):
+    """U6 acceptance 6 — alert evaluator는 U6에서 0 (U7 영역).
 
-    client attribute로 직접 검증 — _redis_writer만 있고 나머지는 부재.
+    Stage 진화: U5에서 redis만, U6에서 db + fallback 추가, U7에서 alert 추가 예정.
     """
 
-    def test_u6_attributes_absent_in_u5(self):
+    def test_u7_attributes_absent_in_u6(self):
         client = BithumbWsClient()
-        # U5 추가됨
+        # U5/U6 추가됨
         self.assertTrue(hasattr(client, "_redis_writer"))
         self.assertIsInstance(client._redis_writer, BithumbRedisWriter)
-        # U6 영역 — 여전히 부재
-        self.assertFalse(hasattr(client, "_db_writer"))
-        self.assertFalse(hasattr(client, "_fallback_controller"))
+        # U6 추가됨
+        self.assertTrue(hasattr(client, "_db_writer"))
+        self.assertTrue(hasattr(client, "_fallback_controller"))
+        # U7 영역 — 여전히 부재
         self.assertFalse(hasattr(client, "_alert_evaluator"))
 
 
@@ -1319,6 +1348,426 @@ class TestFlagFalseInvariantU5Regression(unittest.IsolatedAsyncioTestCase):
             await scheduler.start_usdt_ws_bithumb_client()
         mock_client_cls.assert_not_called()
         mock_writer_cls.assert_not_called()
+        mock_connect.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_trigger.assert_not_called()
+        self.assertIsNone(scheduler.usdt_ws_bithumb_client)
+        self.assertIsNone(scheduler.usdt_ws_bithumb_task)
+
+
+# ---------------------------------------------------------------------------
+# Stage U6 — BithumbDbWriter + BithumbRestFallbackController + helper
+# (11 acceptance criteria, Codex 합의)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchBithumbUsdtTick(unittest.TestCase):
+    """A1, A2, A11 — normalized REST helper + wrapper 호환 + invalid guard."""
+
+    def test_normalized_shape_a1(self):
+        """A1: fetch_bithumb_usdt_tick → {source, asset, rate, timestamp_ms}."""
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "type": "ticker",
+            "code": "KRW-USDT",
+            "trade_price": 1486.0,
+            "trade_timestamp": 1777370239843,
+            "timestamp": 1777370240080,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            tick = fetch_bithumb_usdt_tick()
+        self.assertEqual(tick, {
+            "source": "bithumb",
+            "asset": "usdt-krw",
+            "rate": 1486.0,
+            "timestamp_ms": 1777370239843,
+        })
+
+    def test_fetch_bithumb_rate_only_wrapper_a2(self):
+        """A2: _fetch_bithumb()은 rate만 반환 (호환 유지)."""
+        from app.crawlers.usdt_sources import _fetch_bithumb
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "trade_price": 1490.5,
+            "trade_timestamp": 1,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            rate = _fetch_bithumb()
+        self.assertEqual(rate, 1490.5)
+
+    def test_timestamp_fallback(self):
+        """trade_timestamp 없으면 timestamp 폴백."""
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "trade_price": 1486,
+            "timestamp": 1777370240080,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            tick = fetch_bithumb_usdt_tick()
+        self.assertEqual(tick["timestamp_ms"], 1777370240080)
+
+    def test_invalid_returns_none_a11_zero(self):
+        """A11: rate=0 → None (Upbit guard mirror)."""
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{"trade_price": 0, "trade_timestamp": 1}]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            self.assertIsNone(fetch_bithumb_usdt_tick())
+
+    def test_invalid_returns_none_a11_negative(self):
+        """A11: rate<0 → None."""
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{"trade_price": -1.5, "trade_timestamp": 1}]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            self.assertIsNone(fetch_bithumb_usdt_tick())
+
+    def test_invalid_returns_none_a11_request_exception(self):
+        """A11: requests.RequestException → None."""
+        import requests as _requests
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        with patch(
+            "app.crawlers.usdt_sources.requests.get",
+            side_effect=_requests.RequestException("network down"),
+        ):
+            self.assertIsNone(fetch_bithumb_usdt_tick())
+
+    def test_invalid_returns_none_a11_parse_error(self):
+        """A11: JSON parse error / KeyError → None."""
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{}]  # KeyError on trade_price
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            self.assertIsNone(fetch_bithumb_usdt_tick())
+
+
+class TestBithumbDbWriterDebounce(unittest.IsolatedAsyncioTestCase):
+    """A3 — DB writer 1초 window debounce + close pending tick flush."""
+
+    async def test_schedule_within_window_only_last_tick_written(self):
+        """window 안 multiple schedule → 마지막 tick만 helper 호출."""
+        writer = BithumbDbWriter(window_sec=0.05)
+        written_ticks: list[dict] = []
+
+        async def fake_to_thread(func, tick):
+            written_ticks.append(tick)
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            writer.schedule(_make_valid_tick(rate=1.0, ts_ms=1))
+            writer.schedule(_make_valid_tick(rate=2.0, ts_ms=2))
+            writer.schedule(_make_valid_tick(rate=3.0, ts_ms=3))
+            await asyncio.sleep(0.1)  # window expire
+
+        self.assertEqual(len(written_ticks), 1)
+        self.assertEqual(written_ticks[0]["rate"], 3.0)
+
+    async def test_close_flushes_pending_tick(self):
+        """close → pending tick 즉시 flush (1초 기다리지 않음)."""
+        writer = BithumbDbWriter(window_sec=10.0)  # 의도적으로 길게
+        written_ticks: list[dict] = []
+
+        async def fake_to_thread(func, tick):
+            written_ticks.append(tick)
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            writer.schedule(_make_valid_tick(rate=42.0, ts_ms=1))
+            await writer.close()
+
+        # close에서 timer cancel + pending tick 즉시 flush
+        self.assertEqual(len(written_ticks), 1)
+        self.assertEqual(written_ticks[0]["rate"], 42.0)
+        self.assertIsNone(writer._pending_tick)
+
+
+class TestBithumbDbWriterFailureIsolation(unittest.IsolatedAsyncioTestCase):
+    """A4 — DB write 예외는 WS loop 전파 X."""
+
+    async def test_db_write_exception_isolated(self):
+        """to_thread raise → log only, raise propagation X."""
+        writer = BithumbDbWriter(window_sec=0.05)
+
+        async def fake_to_thread(func, tick):
+            raise RuntimeError("DB down")
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ), self.assertLogs(
+            "exchange_rate.crawler.usdt_ws.bithumb", level="WARNING",
+        ) as cm:
+            writer.schedule(_make_valid_tick())
+            await asyncio.sleep(0.1)
+
+        self.assertTrue(any("DB write failed" in m for m in cm.output))
+
+    async def test_db_write_race_prevention_pending_re_scheduled(self):
+        """write 진행 중 새 tick 도착 → finally에서 새 timer 예약 (누락 방지)."""
+        writer = BithumbDbWriter(window_sec=0.05)
+        written_ticks: list[dict] = []
+        call_count = {"n": 0}
+
+        async def fake_to_thread(func, tick):
+            call_count["n"] += 1
+            # write 진행 중 새 tick 추가
+            if call_count["n"] == 1:
+                writer.schedule(_make_valid_tick(rate=999.0, ts_ms=999))
+            written_ticks.append(tick)
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            writer.schedule(_make_valid_tick(rate=1.0, ts_ms=1))
+            await asyncio.sleep(0.2)  # 두 window cycle
+
+        self.assertEqual(call_count["n"], 2)
+        self.assertEqual(written_ticks[0]["rate"], 1.0)
+        self.assertEqual(written_ticks[1]["rate"], 999.0)
+
+
+class TestRestFallbackInFlightCooldown(unittest.IsolatedAsyncioTestCase):
+    """A5 — in-flight + cooldown guard."""
+
+    async def test_in_flight_skip(self):
+        """이미 in-flight 시 두 번째 schedule_probe 즉시 skip."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = BithumbRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+        )
+        controller._in_flight = True
+
+        with patch.object(asyncio, "get_running_loop") as mock_loop:
+            controller.schedule_probe(reason="test")
+        # in_flight True → create_task 호출 0
+        mock_loop.assert_not_called()
+
+    async def test_cooldown_skip(self):
+        """cooldown_until > now → schedule_probe skip."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = BithumbRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+        )
+        controller._cooldown_until = time.time() + 60.0  # 미래
+
+        with patch.object(asyncio, "get_running_loop") as mock_loop:
+            controller.schedule_probe(reason="test")
+        mock_loop.assert_not_called()
+
+    async def test_reset_cooldown_a8(self):
+        """A8: reset_cooldown → _cooldown_until = 0."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = BithumbRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+        )
+        controller._cooldown_until = time.time() + 60.0
+        controller.reset_cooldown()
+        self.assertEqual(controller._cooldown_until, 0.0)
+
+
+class TestRestFallbackProbeFanoutA6(unittest.IsolatedAsyncioTestCase):
+    """A6 — probe success → Redis + DB schedule, alert schedule 0 (U7 영역)."""
+
+    async def test_probe_success_fanout_to_redis_and_db_only(self):
+        """probe success → redis + db schedule. alert evaluator 자체 없음."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = BithumbRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+        )
+        tick = _make_valid_tick(rate=1500.0, ts_ms=12345)
+
+        async def fake_to_thread(func):
+            return tick
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            await controller._run_probe(reason="test")
+
+        redis_writer.schedule.assert_called_once_with(tick)
+        db_writer.schedule.assert_called_once_with(tick)
+        # alert evaluator는 controller에 없음 (U7 영역, acceptance 6)
+        self.assertFalse(hasattr(controller, "_alert_evaluator"))
+
+    async def test_probe_none_no_fanout(self):
+        """probe None 반환 (REST 실패/A11 invalid) → fanout 0."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = BithumbRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+        )
+
+        async def fake_to_thread(func):
+            return None  # A11 guard
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ), self.assertLogs(
+            "exchange_rate.crawler.usdt_ws.bithumb", level="WARNING",
+        ):
+            await controller._run_probe(reason="test")
+
+        redis_writer.schedule.assert_not_called()
+        db_writer.schedule.assert_not_called()
+
+
+class TestU6CloseOrderA9(unittest.IsolatedAsyncioTestCase):
+    """A9 — close 순서: fallback → DB → Redis (3개)."""
+
+    async def test_close_order_in_run_one_session_finally(self):
+        """_run_one_session finally → fallback → DB → Redis 순서로 close 호출."""
+        client = BithumbWsClient()
+        client._stop_event.set()  # while loop entry 0
+        ws_mock = AsyncMock()
+        ws_mock.recv = AsyncMock()
+        ws_mock.send = AsyncMock()
+        connect_mock = AsyncMock()
+        connect_mock.__aenter__ = AsyncMock(return_value=ws_mock)
+        connect_mock.__aexit__ = AsyncMock(return_value=None)
+
+        call_order: list[str] = []
+
+        async def fallback_close():
+            call_order.append("fallback")
+
+        async def db_close():
+            call_order.append("db")
+
+        async def redis_close(*args, **kwargs):
+            call_order.append("redis")
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.websockets.connect",
+            return_value=connect_mock,
+        ), patch.object(
+            client._fallback_controller, "close", side_effect=fallback_close,
+        ), patch.object(
+            client._db_writer, "close", side_effect=db_close,
+        ), patch.object(
+            client._redis_writer, "close", side_effect=redis_close,
+        ):
+            await client._run_one_session()
+
+        # 순서 검증: fallback → DB → Redis (alert 없음, 3개)
+        self.assertEqual(call_order, ["fallback", "db", "redis"])
+
+
+class TestU6ValidTickFanout(unittest.IsolatedAsyncioTestCase):
+    """U6 fanout 통합 — valid tick → Redis + DB schedule (alert 없음)."""
+
+    async def test_valid_tick_schedules_redis_and_db(self):
+        client = BithumbWsClient()
+        valid_message = json.dumps({
+            "type": "ticker",
+            "code": "KRW-USDT",
+            "trade_price": 1486,
+            "trade_timestamp": 1777370239843,
+        })
+        recv_responses = [valid_message]
+
+        async def fake_recv():
+            if recv_responses:
+                return recv_responses.pop(0)
+            client._stop_event.set()
+            await asyncio.sleep(0.001)
+            raise asyncio.TimeoutError
+
+        ws_mock = AsyncMock()
+        ws_mock.recv = fake_recv
+        ws_mock.send = AsyncMock()
+        ws_mock.ping = AsyncMock(return_value=asyncio.Future())
+        ws_mock.close = AsyncMock()
+        connect_mock = AsyncMock()
+        connect_mock.__aenter__ = AsyncMock(return_value=ws_mock)
+        connect_mock.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.websockets.connect",
+            return_value=connect_mock,
+        ), patch.object(
+            client._redis_writer, "schedule",
+        ) as mock_redis_sched, patch.object(
+            client._db_writer, "schedule",
+        ) as mock_db_sched, patch.object(
+            client._redis_writer, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._db_writer, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._fallback_controller, "close", new_callable=AsyncMock,
+        ):
+            await client._run_one_session()
+
+        # valid tick → Redis + DB 둘 다 schedule (1회씩)
+        self.assertEqual(mock_redis_sched.call_count, 1)
+        self.assertEqual(mock_db_sched.call_count, 1)
+
+
+class TestFlagFalseInvariantU6Regression(unittest.IsolatedAsyncioTestCase):
+    """A10 — flag=false → client 생성 0, network/Redis/DB/REST 0 (U6 누적 후)."""
+
+    def setUp(self):
+        _reset_scheduler_usdt_ws_bithumb_globals()
+
+    def tearDown(self):
+        _reset_scheduler_usdt_ws_bithumb_globals()
+
+    async def test_flag_false_skips_all_u6_paths(self):
+        """U6 누적 후에도 flag=false → 모든 외부 IO 0."""
+        with patch.object(config, "USDT_WS_BITHUMB_ENABLED", False), \
+             patch("app.crawlers.usdt_ws.bithumb.BithumbWsClient") as mock_client_cls, \
+             patch("app.crawlers.usdt_ws.bithumb.BithumbRedisWriter") as mock_redis_cls, \
+             patch("app.crawlers.usdt_ws.bithumb.BithumbDbWriter") as mock_db_cls, \
+             patch("app.crawlers.usdt_ws.bithumb.BithumbRestFallbackController") as mock_fb_cls, \
+             patch("app.crawlers.usdt_ws.bithumb.websockets.connect") as mock_connect, \
+             patch(
+                 "app.crawlers.usdt_ws.bithumb.latest_rates_cache.set_latest_usdt_rate_from_sync_job"
+             ) as mock_redis, \
+             patch(
+                 "app.crawlers.usdt_ws.bithumb.tether_topic_trigger.request_tether_topic_trigger"
+             ) as mock_trigger:
+            await scheduler.start_usdt_ws_bithumb_client()
+        mock_client_cls.assert_not_called()
+        mock_redis_cls.assert_not_called()
+        mock_db_cls.assert_not_called()
+        mock_fb_cls.assert_not_called()
         mock_connect.assert_not_called()
         mock_redis.assert_not_called()
         mock_trigger.assert_not_called()

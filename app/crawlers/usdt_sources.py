@@ -82,12 +82,54 @@ def _fetch_upbit() -> Optional[float]:
     return tick["rate"] if tick else None
 
 
-def _fetch_bithumb() -> Optional[float]:
+def fetch_bithumb_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[dict]:
+    """Bithumb USDT/KRW REST ticker → normalized tick dict.
+
+    Upbit `fetch_upbit_usdt_tick()` (line 40) shape mirror.
+    Phase B.3 Stage U6 (USDT_WS_DESIGN_PLAN §12.5.2): BithumbRestFallbackController가
+    WS silence 감지 시 호출. 기존 `_fetch_bithumb()` polling helper도 본 함수 재사용
+    (additive refactor, REST polling 동작 보존).
+
+    Returns:
+        {"source": "bithumb", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}
+        또는 REST/parse 실패 시 None (caller 격리).
+
+    timestamp_ms:
+        Bithumb REST 응답의 `trade_timestamp` 우선, 없으면 `timestamp` 폴백
+        (Upbit-compatible payload + WS `_parse_ticker_message` 동일 패턴).
+
+    Guard (Upbit Codex Finding 2 mirror — A11):
+        - 0/음수 rate가 fallback fanout (Redis/DB) 통과 시 잘못된 알림 위험
+        - rate <= 0 → None
+    """
     url = "https://api.bithumb.com/v1/ticker?markets=KRW-USDT"
-    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
-    return float(data[0]["trade_price"])
+    try:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        item = data[0]
+        rate = float(item["trade_price"])
+        if rate <= 0:
+            return None
+        ts_ms = int(item.get("trade_timestamp") or item["timestamp"])
+        return {
+            "source": "bithumb",
+            "asset": "usdt-krw",
+            "rate": rate,
+            "timestamp_ms": ts_ms,
+        }
+    except (requests.RequestException, KeyError, ValueError, TypeError, IndexError):
+        # caller(fallback controller / polling)가 None 처리. propagate X.
+        return None
+
+
+def _fetch_bithumb() -> Optional[float]:
+    """기존 polling helper — fetch_bithumb_usdt_tick 재사용 (rate만 반환).
+
+    A2: 기존 rate-only 호환 유지. `FETCHERS` registry는 그대로 동작.
+    """
+    tick = fetch_bithumb_usdt_tick()
+    return tick["rate"] if tick else None
 
 
 def _fetch_coinone() -> Optional[float]:
