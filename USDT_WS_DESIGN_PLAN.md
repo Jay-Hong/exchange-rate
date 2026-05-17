@@ -413,6 +413,82 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - **PR5 (DB writer) 특이**: rollback 시 `source_rates` schema/data 보존 (write만 멈춤). 별도 마이그레이션 불필요.
 - **PR6 (AlertObservation) 특이**: rollback 시 기존 `process_source_rate_alerts` REST polling이 alert 처리 baseline 유지.
 
+### 12.5 Phase B.3 — Bithumb WS 확장 (Upbit 패턴 작은 복제)
+
+> 📅 **작성일**: 2026-05-17
+> 🏷️ **상태**: 계획 잠금 (Stage U1) — 구현 (Stage U2-U6) 진입 전 외부 검토 통과
+
+#### 12.5.1 Scope
+
+**Phase B.3 = Bithumb 단독.** Coinone/Korbit/Gopax는 후속 phase 목록만 명시 (별도 phase 진입 시점 결정).
+
+**근거 — Bithumb 1순위 선정**:
+
+- Bithumb WS는 **Upbit-compatible** (USDT_EXCHANGE_WEBSOCKET_GUIDE §4 + 2026-05-17 Python websockets smoke 재확인):
+  - Endpoint만 다름: `wss://ws-api.bithumb.com/websocket/v1`
+  - Subscribe message 동일: `[{ticket}, {type=ticker, codes=["KRW-USDT"]}, {format=DEFAULT}]`
+  - Payload format 동일: `{type, code, trade_price, trade_timestamp, timestamp, stream_type}`
+  - 파싱 동일: `float(message["trade_price"])` + `int(message.get("trade_timestamp") or message.get("timestamp"))`
+  - 인증 없음 (public)
+  - Heartbeat 공식 미명시 → provisional 30s 유지 (§2.1)
+- **이식 비용 가장 낮음** — Upbit 패턴 거의 1:1 복사 + URL/ticket 명만 변경
+- Coinone/Korbit (별 protocol) / Gopax (전체 ticker + 서버 필터) 는 Bithumb 검증 후 단계적 진입
+
+#### 12.5.2 Stage U1-U6 분할
+
+> **Codex/Claude 합의 (2026-05-17)**: KRX close finalizer 큰 PR (~1100 lines) → 3 High findings → revert + 분할 재시작 학습 적용. Phase B.3은 작은 단위 stage 분할로 진입.
+
+| Stage | Scope | 변경 파일 | Tests |
+|---|---|---|---|
+| **U1** | 본 §12.5 Phase B.3 section 신설 (계획 잠금) | `USDT_WS_DESIGN_PLAN.md` | — (docs) |
+| **U2** | `USDT_WS_BITHUMB_ENABLED=false` env + `app/crawlers/usdt_ws/bithumb.py` lifecycle skeleton + scheduler hook | `app/config.py`, `app/crawlers/usdt_ws/bithumb.py` (신규), `app/scheduler.py` | skeleton lifecycle tests (flag=false 무동작 + flag=true skeleton log emit) |
+| **U3** | Bithumb WS connect/subscribe/parse + log only | `bithumb.py` | parse/connect tests |
+| **U4** | `UsdtLivenessMonitor` 재사용 + reconnect | `bithumb.py` | reconnect tests + gap bucket |
+| **U5** | `BithumbRedisWriter` + topic trigger 자동 발화 (`request_tether_topic_trigger` source-neutral) | `bithumb.py` | redis writer tests |
+| **U6** | `BithumbDbWriter` + `BithumbRestFallbackController` + **`fetch_bithumb_usdt_tick()` normalized REST helper 추가** (`_fetch_bithumb` rate-only 보강) | `bithumb.py`, `app/crawlers/usdt_sources.py` | db writer + fallback tests |
+
+**Stage 압축 (Phase B.1 7 PR → Phase B.3 6 stage)** 정당화:
+
+- Phase B.1 PR3 (LivenessMonitor) 신설 → Phase B.3 U4 재사용 (작업량 감소)
+- Phase B.1 PR4 (Redis writer) + PR3 (LivenessMonitor)을 Phase B.3에서는 U4 (reconnect) / U5 (Redis writer) 분리 유지 (작은 단위)
+- Phase B.1 PR6 (AlertObservation) 별도 stage 불필요 — source-neutral 이미 구현, Bithumb 자동 재사용
+
+**U6 보강 — normalized REST helper**:
+
+- 현재 `_fetch_bithumb()` (`app/crawlers/usdt_sources.py:85`)는 `float(data[0]["trade_price"])` rate-only 반환
+- Upbit `fetch_upbit_usdt_tick()` normalized tick helper와 비대칭 → WS path와 fallback 정규화 결과 불일치 위험
+- U6에서 `fetch_bithumb_usdt_tick()` 신설 — `{source, asset, rate, timestamp_ms}` 형태 표준 정규화 (Upbit `fetch_upbit_usdt_tick()` `app/crawlers/usdt_sources.py:40-73` shape 일치)
+- 기존 `_fetch_bithumb()`는 호환성 유지 (`fetch_bithumb_usdt_tick()` wrapping 또는 별도)
+
+#### 12.5.3 Canary 활성화 조건
+
+> ⚠️ **운영 활성화는 KRX 5/18~5/19 첫 실측 + 7일 telemetry 안정 후 별도 GO.**
+
+- `USDT_WS_BITHUMB_ENABLED=false` default — Stage U2-U6 코드 land + push 누적 시 운영 영향 0
+- **KRX 첫 실측 완료 조건**:
+  - 2026-05-18 (월) 15:45 KST CF close finalizer 정상 동작 (Redis flag SET + DB row + 로그)
+  - 2026-05-19 (화) 06:00 KST CM close finalizer 정상 동작
+  - 5/19~5/26 7일 telemetry 측정 (case A/B/C 분포)
+- KRX 안정 + 별도 deploy GO 후 `USDT_WS_BITHUMB_ENABLED=true` canary 진입
+- canary 운영 1주 관찰 후 다음 단계 (Coinone/Korbit/Gopax 또는 공통화 검토)
+
+#### 12.5.4 Rollback 정책 (Phase B.1 §12.4 패턴 재사용)
+
+- **1차 수단**: env toggle `USDT_WS_BITHUMB_ENABLED=false`. lifecycle 격리 (Upbit/KRX 검증 완료 패턴).
+- **2차 수단**: 코드 revert. lifecycle 의존성 깨질 위험 있어 1차 실패 시 한정.
+- **process 재생성 필수**: KRX_CANARY.md 핵심 원칙 5 — `docker compose restart`는 env_file 변경 반영 안 됨, **`docker compose up -d --force-recreate fastapi`** 사용.
+
+#### 12.5.5 후속 phase 목록 (Phase B.3 범위 외)
+
+| Phase | Scope | 비고 |
+|---|---|---|
+| **Phase B.4** (예정) | Coinone WS 확장 | 별 protocol — Upbit 패턴 비호환 (subscribe + payload 형식 다름) |
+| **Phase B.5** (예정) | Korbit WS 확장 | 별 protocol — symbol notation 다름 (`usdt_krw`) |
+| **Phase B.6** (예정) | Gopax WS 확장 | 전체 ticker 구독 + 서버 필터링 + Primus `::ping::` 30s (가장 다른 구조) |
+| **공통화 검토** | 거래소 base class / shared lifecycle | **Bithumb (Phase B.3) + Coinone (Phase B.4) land 후** 중복 명확해진 시점에 판단. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습). |
+
+후속 phase 진입 시점 + 순서는 Phase B.3 + Phase B.4 운영 안정 측정 후 결정.
+
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
 PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
