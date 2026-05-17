@@ -416,7 +416,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 ### 12.5 Phase B.3 — Bithumb WS 확장 (Upbit 패턴 작은 복제)
 
 > 📅 **작성일**: 2026-05-17
-> 🏷️ **상태**: 계획 잠금 (Stage U1) — 구현 (Stage U2-U6) 진입 전 외부 검토 통과
+> 🏷️ **상태**: 계획 잠금 (Stage U1) — 구현 (Stage U2-U7) 진입 전 외부 검토 통과
 
 #### 12.5.1 Scope
 
@@ -434,9 +434,11 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - **이식 비용 가장 낮음** — Upbit 패턴 거의 1:1 복사 + URL/ticket 명만 변경
 - Coinone/Korbit (별 protocol) / Gopax (전체 ticker + 서버 필터) 는 Bithumb 검증 후 단계적 진입
 
-#### 12.5.2 Stage U1-U6 분할
+#### 12.5.2 Stage U1-U7 분할
 
 > **Codex/Claude 합의 (2026-05-17)**: KRX close finalizer 큰 PR (~1100 lines) → 3 High findings → revert + 분할 재시작 학습 적용. Phase B.3은 작은 단위 stage 분할로 진입.
+>
+> **2026-05-18 보강**: 당초 6 stage에서 U7을 신설하여 7 stage로 분할. alert evaluator wiring을 U6의 DB writer / REST fallback / helper 안정 후 별도 stage로 분리 (PR 크기 관리 + U6 리뷰 표면 축소).
 
 | Stage | Scope | 변경 파일 | Tests |
 |---|---|---|---|
@@ -445,13 +447,14 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 | **U3** | Bithumb WS connect/subscribe/parse + log only | `bithumb.py` | parse/connect tests |
 | **U4** | `UsdtLivenessMonitor` 재사용 + reconnect | `bithumb.py` | reconnect tests + gap bucket |
 | **U5** | `BithumbRedisWriter` + topic trigger 자동 발화 (`request_tether_topic_trigger` source-neutral) | `bithumb.py` | redis writer tests |
-| **U6** | `BithumbDbWriter` + `BithumbRestFallbackController` + **`fetch_bithumb_usdt_tick()` normalized REST helper 추가** (`_fetch_bithumb` rate-only 보강) | `bithumb.py`, `app/crawlers/usdt_sources.py` | db writer + fallback tests |
+| **U6** | `BithumbDbWriter` + `BithumbRestFallbackController` + **`fetch_bithumb_usdt_tick()` normalized REST helper 추가** (`_fetch_bithumb` rate-only 보강). **AlertObservation 미schedule** (alert wiring은 U7) | `bithumb.py`, `app/crawlers/usdt_sources.py` | db writer + fallback tests |
+| **U7** | Bithumb alert evaluator wiring (`UsdtAlertEvaluator` 재사용). WS tick 및 REST probe 성공 결과를 `AlertObservation(source="bithumb", asset="usdt-krw", kind="tick"\|"rest_probe")`로 schedule. U6의 DB/REST/helper 안정 후 별도 stage로 진입. | `bithumb.py` | alert wiring tests + close/drain order + flag=false invariant |
 
-**Stage 압축 (Phase B.1 7 PR → Phase B.3 6 stage)** 정당화:
+**Stage 재매핑 (Phase B.1 7 PR → Phase B.3 7 stage)** 정당화:
 
 - Phase B.1 PR3 (LivenessMonitor) 신설 → Phase B.3 U4 재사용 (작업량 감소)
 - Phase B.1 PR4 (Redis writer) + PR3 (LivenessMonitor)을 Phase B.3에서는 U4 (reconnect) / U5 (Redis writer) 분리 유지 (작은 단위)
-- Phase B.1 PR6 (AlertObservation) 별도 stage 불필요 — source-neutral 이미 구현, Bithumb 자동 재사용
+- Phase B.1 PR6 (AlertObservation) — `AlertObservation` / `UsdtAlertEvaluator` interface 자체는 source-neutral로 이미 구현됨. Bithumb client wiring (`_alert_evaluator` attribute + WS tick / REST probe path schedule)은 **U7 별도 stage**로 분할 (KRX 1100 lines → revert 학습 mirror). U6 scope에서는 `AlertObservation` 미schedule — DB writer + REST fallback + REST helper 보강만.
 
 **U6 보강 — normalized REST helper**:
 
@@ -464,7 +467,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 > ⚠️ **운영 활성화는 KRX 5/18~5/19 첫 실측 + 7일 telemetry 안정 후 별도 GO.**
 
-- `USDT_WS_BITHUMB_ENABLED=false` default — Stage U2-U6 코드 land + push 누적 시 운영 영향 0
+- `USDT_WS_BITHUMB_ENABLED=false` default — Stage U2-U7 코드 land + push 누적 시 운영 영향 0
 - **KRX 첫 실측 완료 조건**:
   - 2026-05-18 (월) 15:45 KST CF close finalizer 정상 동작 (Redis flag SET + DB row + 로그)
   - 2026-05-19 (화) 06:00 KST CM close finalizer 정상 동작
@@ -575,7 +578,7 @@ process의 cache에 미적용 → 사용자가 알림 끄거나 변경한 후에
 | Phase B.1 PR6 (완료) | Upbit-only B1 once 정책 |
 | Phase C | KRX 알림 새 구조 적용 (USDT 검증 후) |
 | Phase D | 은행/Investing/달러/엔/유로 알림 migration (§13.7 shadow eval 참조) |
-| Phase E | 비교 알림 (`comparison_alerts`) — Redis latest snapshot 기반 multi-source |
+| Phase E | 비교 알림 (`comparison_alerts`) — **Redis latest snapshot 기반 multi-source** (서로 다른 source의 현재값 동시 비교 필요). **단일 가격 알림**은 §6 B1 채택대로 **tick/observation 입력** — 두 입력 모델은 별도. "Redis 중심"이 가격 latest read로 오해되지 않도록 명시. |
 | 별 ADR | B2 `repeat_interval_sec` 실제 구현 (schema + API + iOS/Android UI) |
 | 별 ADR | B3 direction crossing |
 
@@ -787,7 +790,7 @@ main.py 임시 hook은 즉시 삭제 X. PR4 Step B에서 다음 중 선택:
 - **Option A — 완전 제거**: `direct_coalesced` mode에서 안정 검증 후 main.py hook 삭제. emergency rollback은 `legacy_piggyback` mode 환원 + 새 controller가 처리.
 - **Option B — fallback 격하**: main.py hook은 mode 분기 안에서만 발화 (`legacy_piggyback` 또는 `direct_coalesced` 실패 fallback). 코드 유지 + 안전망.
 
-**2026-05-16 합의**: 장기적으로 Option A가 목표. 단, 완전 제거 조건은 **테더 탭에 표시되는 모든 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤**로 둔다. 그 전에는 Option B fallback 격하가 더 안전하다.
+**2026-05-16 합의**: 장기적으로 Option A가 목표. 단, 완전 제거 조건은 **테더 탭에 표시되는 모든 자산이 Redis latest write-through 성공 지점 기반 topic publish trigger를 갖춘 뒤**로 둔다 (여기서 trigger는 broadcast/topic publish trigger를 의미 — alert evaluator trigger와는 별개이며, alert는 §6 B1대로 tick/observation 입력을 사용한다). 그 전에는 Option B fallback 격하가 더 안전하다.
 
 **Trigger 위치 일반 원칙**:
 
