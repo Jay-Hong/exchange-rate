@@ -104,7 +104,7 @@ Investing live channel (조사 중) ─┤
                 ┌─────────────────┼──────────────────┐
                 ▼                 ▼                  ▼
          [Broadcast Router]  [Alert Evaluator]  [DB Writer]
-         (debounced)         (모든 tick 평가)    (정책 기반)
+         (debounced)         (meaningful obs.)  (정책 기반)
                 │                 │                  │
                 ▼                 ▼                  ▼
           Topic Subscriber   FCM 발송          source_rates
@@ -347,9 +347,11 @@ WS tick 수신
 
 ### 핵심 원칙
 
-- **Broadcast는 debounce하지만 알림 평가는 모든 tick 실행**
+- **Broadcast는 debounce하지만 알림은 meaningful observation을 누락하지 않는다**
   - 사용자가 임계값 통과 시점에 정확히 알림 받아야 함
   - debounce 윈도우(200ms) 안에 임계값을 한 번 통과 후 되돌아오면 UI에는 안 보이지만 알림은 잡아야 함
+  - 단, 생략 금지 조건에 해당하지 않는 동일 가격 반복 frame은 결과가 변하지 않으므로 same-rate evaluation skip 가능
+    (가격 알림 + 비교 알림 공통 정책 — 생략 금지 조건은 [USDT_WS_DESIGN_PLAN.md §13.10](USDT_WS_DESIGN_PLAN.md) 참조)
 - **last_notified_at 윈도우 정책 미정** — 동일 설정에 대한 재발송 차단 시간 (예: 5분 / 30분 / 1시간) → 미정 항목
 - **1회성 알림 동작 유지** — 발송 후 `triggered=true` 자동 비활성화, 사용자 토글 ON 시 재초기화 (현재 동작 그대로)
 
@@ -866,7 +868,7 @@ Phase 1 측정 결과로 결정. 1초 cron으로 충분하면 스킵.
 ✅ **합의된 것** (v0.1 + v0.2 + v0.3):
 - v1 목표: 서버 tick 수신 후 1초 이내 화면 반영
 - 거래소 UI: 200~500ms debounce
-- 알림: debounce 없이 모든 tick 평가 + last_notified_at 중복 방지
+- 알림: meaningful observation을 누락하지 않음 (생략 금지 조건에 해당하지 않는 동일 가격 반복 frame은 same-rate evaluation skip 가능 — 가격/비교 알림 공통, 생략 금지 조건은 [USDT_WS_DESIGN_PLAN.md §13.10](USDT_WS_DESIGN_PLAN.md) 참조) + last_notified_at 중복 방지
 - 프로토콜: v1 minimal hello/subscribe/snapshot/delta + protocol_version
 - 마이그레이션: legacy + topic dual-emit. **단 dual-emit 범위는 USD/JPY/EUR + Investing/은행 9개에 한정. 테더 탭 데이터(USDT 거래소 + KRX 달러선물)는 topic-only**
 - 같은 원천 데이터는 여러 topic payload에 재사용 가능 — 데이터 저장 경로 공유와 채널 분리는 별개

@@ -478,7 +478,7 @@ exchange WS tick
 정책:
 
 - Broadcast: 유저 화면용. 1초 debounce 또는 event-driven.
-- Alert: 조건 평가용. 모든 valid tick 평가를 원칙으로 하되, 동일 가격 반복은 source별 debounce 가능.
+- Alert: 조건 평가용. **meaningful observation/state change** 평가를 원칙으로 한다. **생략 금지 조건에 해당하지 않는** 동일 가격 반복 frame은 결과가 변하지 않으므로 **same-rate evaluation skip** 가능 (가격 알림 + 비교 알림 공통). 생략 금지 조건 (settings 변경/cache invalidation/TTL refresh/repeat due/direction crossing 전이 가능 구간 등에서는 같은 가격이라도 평가)은 [USDT_WS_DESIGN_PLAN.md §13.10](USDT_WS_DESIGN_PLAN.md) 참조. "debounce"는 알림 정책에서 시간 기반 throttle로 오해 위험이라 회피.
 - DB: 그래프/히스토리용. 모든 tick INSERT 금지. 최소 `changed` 또는 `1초 last` 정책을 별도로 둔다.
 
 ## 10. REST Fallback

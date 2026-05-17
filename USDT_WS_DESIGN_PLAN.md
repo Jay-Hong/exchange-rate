@@ -614,6 +614,65 @@ row 누적.
 | 반복 알림 확장성 | `delivery_allowed` 분리 (interface 확장 자리 마련) | 별 ADR B2 |
 | 기존 알림 영향 | PR6에서 건드리지 X (additive) | Phase D shadow eval |
 | 히스토리 사용자 조회 | `source_notification_logs` 활용 | §13.8 retention cleanup |
+| 동일 가격 반복 frame 평가 부담 | §13.10 same-rate evaluation coalescing 정책 (가격/비교 알림 공통) | Phase 3 ZSET과 별개 (보완 관계) |
+
+### 13.10 Alert evaluation coalescing — 가격 알림 + 비교 알림 공통
+
+**배경 (2026-05-18 사용자 우려 + 코덱스/Claude 검증)**: Upbit/Bithumb WS는 `type=ticker`
+구독만 하지만, ticker frame은 체결가가 변하지 않아도 들어올 수 있다. 현재 구현은
+`trade_price` 동일 여부와 무관하게 모든 valid ticker frame을 Redis latest /
+liveness / DB writer / alert evaluator에 전달한다. 500 user × 60 alert = 30k
+settings 시점이 도래하면 동일 가격 반복 frame에서 condition 비교가 누적 부담이 됨.
+
+**핵심 정책 (가격 알림 + 비교 알림 공통)**:
+
+- 알림은 DB 저장 이벤트가 아니라 **observation/state change 기반**으로 평가한다.
+- Redis latest / liveness / DB writer 입력은 **모든 valid ticker frame**을 유지한다
+  (down-stream 정책 분리 원칙).
+- 단, 알림 evaluator는 *"모든 raw frame"*이 아니라 **알림 결과가 달라질 수 있는
+  meaningful observation/state change**를 평가 대상으로 삼는다. 동일 값 반복으로
+  결과가 변하지 않는 경우 **condition evaluation coalescing** 적용 가능 (= same-rate
+  evaluation skip).
+
+**입력 모델 분리**:
+
+- **단일 가격 알림**: 개별 source의 tick/observation 입력 (§6 B1)
+- **비교 알림** (Phase E): Redis latest snapshot 기반 multi-source state 입력
+  - 비교 알림의 multi-source observation trigger 방식 (어느 source 변경이 trigger인지,
+    scheduler 기반 vs event-driven, snapshot 조합 기준)은 **Phase E 시점에 결정**.
+    현 §13.10에서는 "동일 원칙 적용" 잠금만 명시.
+
+**생략 금지 조건 (가격/비교 알림 공통, 같은 값/같은 snapshot이어도 평가)**:
+
+1. evaluator 시작 후 첫 observation
+2. settings cache miss / TTL refresh 이후
+3. settings CRUD invalidation 이후 (POST/PUT/DELETE)
+4. 새 알림 / 변경된 알림이 반영된 이후
+5. `repeat_interval_sec` due (미래 B2 — 가격 동일해도 반복 발송 시점 도래 시 재평가)
+6. direction crossing state 전이 가능 구간 (미래 B3 — 상태 전이 가능성 있으면 재평가)
+
+**용어 주의**: "debounce"는 broadcast/UI/DB writer 영역에서는 시간 기반 throttle로
+유효하게 사용되지만, 알림 정책에서는 **same-rate evaluation skip / condition
+evaluation coalescing / meaningful observation**으로 표기한다. 알림에 "debounce"
+표현은 시간 기반 throttle 오해 위험.
+
+**Phase 3 ZSET threshold index와의 관계**: 두 최적화는 별개 + 보완 관계.
+
+- §13.4 Phase 3 ZSET: **후보 settings 수**를 줄임 (`ZRANGEBYSCORE`로 임계값 매칭만 fetch)
+- §13.10 coalescing: **동일 가격 반복 frame**의 재평가 자체를 줄임
+
+같은 tick에서 ZSET fetch 후에도 동일 가격 연속이면 evaluator 진입 전 coalescing 가능.
+
+**구현 PR 결정 (별도 stage, plan 잠금 후 결정)**:
+
+- (α) Phase 1.5 즉시 적용 — 30k 도달 전 선제 방어, 단순 last-rate memoize는 위험
+  (생략 금지 조건 6개 모두 처리 필요)
+- (β) Phase 3 ZSET과 묶음 — Phase 1 단순성 유지, 30k 도달 시점에 함께 도입
+- (γ) Phase 1.5 + Phase 3 분리 land — coalescing 먼저 + ZSET은 별도
+
+source-neutral 설계 (Upbit / Bithumb / 향후 Coinone / Korbit / Gopax + KRX + 비교
+알림 공통 helper). Bithumb (Phase B.3)도 동일 정책 자동 적용 — Upbit pattern 복제
+이므로 구현 시점에 두 source 동시 적용.
 
 ## 14. Phase B.2 — Tether topic publish trigger 분리
 
