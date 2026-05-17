@@ -1783,6 +1783,38 @@ def process_rate_alerts(
 # USDT Phase 1: source_rates CRUD
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def insert_source_rate_unconditional(
+    db: Session,
+    source: str,
+    asset: str,
+    rate: float,
+    timestamp: datetime,
+) -> bool:
+    """source_rates에 unconditional INSERT — close finalizer 전용 (KRX_CLOSE_SNAPSHOT_PLAN §5.2).
+
+    `insert_source_rate_if_changed`와 동일 스타일:
+        - 내부 db.add() + db.commit()
+        - 예외는 caller로 전파 (finalizer caller가 격리 + DB/Redis/flag 성공 조건 조합 판단)
+        - 성공 시 항상 True (skip 분기 없음)
+
+    Args:
+        timestamp: 필수 (UTC naive datetime). close grace event_at_kst → UTC 변환된 값.
+            DB DEFAULT 사용 금지 — boundary 의미적 시각이 정확해야 종가 정합 보장.
+
+    Returns:
+        True: INSERT 성공.
+
+    설계:
+        - dedup 우회 (가격 동일 시에도 row 생성) — KrxDbWriter `insert_if_changed`와 분리
+        - DB unique constraint 미보장 시 race로 duplicate 가능 (3차 PR 영역)
+    """
+    record = models.SourceRate(source=source, asset=asset, rate=rate)
+    record.timestamp = timestamp
+    db.add(record)
+    db.commit()
+    return True
+
+
 def insert_source_rate_if_changed(
     db: Session,
     source: str,

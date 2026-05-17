@@ -446,6 +446,94 @@ def get_latest_krx_rate_from_sync_job(
     }
 
 
+# ---------------------------------------------------------------------------
+# KRX close finalizer race-prevention flag (KRX_CLOSE_SNAPSHOT_PLAN §5.3)
+# ---------------------------------------------------------------------------
+# Redis TTL flag `close_captured:krx:{session}:{kst_date}`:
+#   - WS close grace path (KrxCloseWindowWriter, Stage 3 예정)가 DB+Redis 양쪽
+#     성공 시 SET — close 확정 신호.
+#   - REST fallback (KrxCloseSnapshotController, Stage 4 예정)가 호출 전 GET →
+#     captured 시 skip (중복 호출 차단).
+#
+# Best-effort helper 설계 (insert_source_rate_unconditional와 contract 다름):
+#   - 예외는 logger.warning + False return (caller 영향 격리)
+#   - GET 실패 시 False default → REST 호출이 진행 (catastrophic backup 안전 default)
+#
+# TTL 1h — 다음날 자연 expire. process restart 시 idempotent.
+
+_KRX_CLOSE_CAPTURED_KEY_FMT = "close_captured:krx:{session}:{kst_date}"
+_KRX_CLOSE_CAPTURED_TTL_SEC = 3600  # 1h
+
+
+def _krx_close_captured_key(session: str, kst_date: str) -> str:
+    """KRX close captured flag Redis key.
+
+    Args:
+        session: "CF" / "CM"
+        kst_date: ISO date string (예: "2026-05-19"). CM은 boundary 06:00이 찍히는 날.
+    """
+    return _KRX_CLOSE_CAPTURED_KEY_FMT.format(session=session, kst_date=kst_date)
+
+
+def set_krx_close_captured_flag(session: str, kst_date: str) -> bool:
+    """KRX close grace path가 종가 capture 성공 시 호출 — REST fallback skip 신호.
+
+    Args:
+        session: "CF" / "CM"
+        kst_date: ISO date (boundary 찍힌 날, CM은 06:00 찍힌 날)
+
+    Returns:
+        True: SETEX 성공. False: client init 실패 또는 SETEX 예외 (best-effort 격리).
+
+    설계: sync redis client + 예외는 logger.warning + False return.
+        DB/Redis 성공 조건 조합 판단은 caller 책임 (KrxCloseWindowWriter Stage 3).
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    key = _krx_close_captured_key(session, kst_date)
+    try:
+        client.setex(key, _KRX_CLOSE_CAPTURED_TTL_SEC, "1")
+        return True
+    except Exception:
+        logger.warning(
+            "KRX close captured flag SET 실패 (best-effort, REST fallback이 중복 실행 가능)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return False
+
+
+def get_krx_close_captured_flag(session: str, kst_date: str) -> bool:
+    """KRX close captured 여부 조회 — REST fallback 호출 전 race 차단용.
+
+    Args:
+        session: "CF" / "CM"
+        kst_date: ISO date
+
+    Returns:
+        True: flag SET 됨 (WS path가 이미 capture, REST skip 권장).
+        False: flag 없음 / client init 실패 / GET 예외 (catastrophic backup default 안전).
+
+    설계: Redis 장애 시 False return — REST가 catastrophic backup 역할이라
+        오류 시 REST 호출 진행이 default가 안전 (DB unconditional INSERT 정책상
+        중복 row 발생 가능하지만 종가 누락보다 안전).
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    key = _krx_close_captured_key(session, kst_date)
+    try:
+        return client.get(key) is not None
+    except Exception:
+        logger.warning(
+            "KRX close captured flag GET 실패 (best-effort, False return → REST 호출 진행)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return False
+
+
 def set_latest_bank_rate_from_sync_job(
     bank: str,
     asset: str,
