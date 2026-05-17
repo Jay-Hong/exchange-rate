@@ -54,9 +54,12 @@ import websockets
 from app import config
 from app.sources.kis_futures import (
     compute_close_boundary_kst,
+    compute_close_grace_end_kst,
     get_active_session,
     is_close_snapshot_eligible,
+    is_in_close_grace_window,
     is_in_session_end_grace,
+    is_in_single_price_window,
     parse_h0cfasp0_payload,
     parse_h0cfcnt0_payload,
     parse_h0mfasp0_payload,
@@ -1177,6 +1180,16 @@ class KisFuturesClient:
         # KRX_CLOSE_SNAPSHOT_PLAN.md — close snapshot pending retry drain
         if self._close_snapshot_controller is not None:
             await self._close_snapshot_controller.close()
+        # KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 3 — close window writer pending flush drain.
+        # KrxCloseWindowWriter는 tick_handlers list에 등록되어 있으므로 직접 조회.
+        for handler in self._tick_handlers:
+            if isinstance(handler, KrxCloseWindowWriter):
+                try:
+                    await handler.close(timeout=5.0)
+                except Exception:
+                    logger.exception(
+                        "[kis_ws] KrxCloseWindowWriter drain failed (격리)"
+                    )
 
     async def _run_session(self, session: str) -> None:
         """단일 active session 동안 WebSocket 연결 유지 + reconnect.
@@ -1446,12 +1459,35 @@ class KrxDbWriter:
         Phase B.2 PR3: `_sync_db_write` 반환 bool 받아 finally **밖**에서
         tether topic trigger 호출 (PR2 lock 밖 패턴 mirror — race-prevention
         timer 재예약 책임과 분리). trigger 예외는 격리 — writer loop 영향 X.
+
+        KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 3 (2026-05-17): close grace window
+        (CF 15:45:00~15:45:59 / CM 06:00:00~06:00:59) 진입 시 일반 path skip —
+        KrxCloseWindowWriter가 전담 (DB row 1 보장, Plan §5.2 / Finding 1 fix).
+        env false 시 skip 분기 미진입 (1차 PR 동작 그대로 — rollback path).
         """
         await asyncio.sleep(self._window_sec)
         tick = self._last_tick
         self._last_tick = None
         if tick is None:
             return
+
+        # §5.2 Stage 3: close grace window 진입 시 일반 path skip.
+        # KrxCloseWindowWriter가 close 영역 전담 (window-end 1건 unconditional INSERT).
+        if config.KRX_CLOSE_FINALIZER_ENABLED:
+            session = tick.get("session", "")
+            received_at_iso = tick.get("received_at", "")
+            try:
+                tick_kst_naive = datetime.fromisoformat(received_at_iso)
+                if is_in_close_grace_window(tick_kst_naive, session):
+                    # close grace tick은 KrxCloseWindowWriter가 처리 — 일반 path skip
+                    # finally 블록에서 다음 tick window 재예약은 그대로 진행
+                    if self._last_tick is not None:
+                        self._timer = asyncio.create_task(self._flush_after_window())
+                    return
+            except (ValueError, TypeError):
+                # received_at 파싱 실패 시 일반 path 진행 (defensive — 회귀 안전)
+                pass
+
         redis_write_success = False
         try:
             redis_write_success = await asyncio.to_thread(self._sync_db_write, tick)
@@ -1579,6 +1615,336 @@ class KrxRedisLatestWriter:
                 extra={"source": source, "asset": asset},
             )
             return False
+
+
+# ---------------------------------------------------------------------------
+# KrxCloseFinalizer — KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 3 (2026-05-17)
+# ---------------------------------------------------------------------------
+# WS-first close finalizer. KrxDbWriter (일반 path)와 직교 책임:
+#   - KrxDbWriter: 1초 window debounce + insert-if-changed (일반 시간대)
+#                  close grace 진입 시 skip (Option A, Plan §5.2 / F1 fix)
+#   - KrxCloseWindowWriter: close grace window 전담 — window-end 1건
+#                            unconditional INSERT + Redis SET + flag SET
+#                            (DB+Redis 모두 성공 시에만 flag SET, F2 fix)
+
+
+class KrxCloseFinalizerStats:
+    """KRX close finalizer telemetry — Plan §5.5 (5 counters).
+
+    case A/B/C 분포 실측을 위한 운영 metric:
+        - case A (우리 cutoff): close_grace_saved > 0 AND close_rest_fallback_used == 0 in day
+        - case B (KIS 미송신): close_grace_saved == 0 AND close_rest_fallback_used > 0
+        - case C (dedup skip): 2차 PR 정책상 0건 예상
+
+    Process restart 시 in-memory counter 초기화 — 7일 telemetry 측정 동안
+    deploy/restart 최소화 권장. Stage 6+ 후속에서 Redis hash 영구 저장 검토.
+    """
+
+    def __init__(self) -> None:
+        self.close_grace_tick_count: int = 0
+        self.close_grace_saved: int = 0
+        self.close_rest_fallback_used: int = 0
+        self.close_duplicate_count: int = 0
+        self.single_price_window_frame_count: int = 0
+
+
+_krx_close_finalizer_stats = KrxCloseFinalizerStats()
+
+
+def get_krx_close_finalizer_stats() -> KrxCloseFinalizerStats:
+    """KrxCloseFinalizerStats singleton accessor — admin/monitor 조회용."""
+    return _krx_close_finalizer_stats
+
+
+def reset_krx_close_finalizer_stats_for_tests() -> None:
+    """Tests 전용 reset — production 경로에서 호출 금지."""
+    global _krx_close_finalizer_stats
+    _krx_close_finalizer_stats = KrxCloseFinalizerStats()
+
+
+class KrxCloseWindowWriter:
+    """KRX close grace window tick handler — window-end last candidate 1건 unconditional INSERT.
+
+    KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 3 (2026-05-17). KrxDbWriter와 직교 책임:
+        - KrxDbWriter: 1초 window debounce + insert-if-changed (일반 path,
+                       close grace 시간 skip — Option A / F1 fix)
+        - KrxCloseWindowWriter: close grace window 전담 — window-end 1건
+                                 unconditional INSERT + Redis SET + flag SET
+
+    Lifecycle (per session):
+        1. close grace window 진입 (CF 15:45:00 / CM 06:00:00 첫 frame) →
+           `_last_tick` 갱신 + window-end flush task 예약
+        2. 추가 frame 들어오면 `_last_tick` 갱신 (count++)
+        3. window 종료 시점(15:46:00 / 06:01:00 KST)에 flush task 실행 →
+           DB unconditional INSERT + Redis SET → 양쪽 성공 시 flag SET +
+           close_grace_saved counter ++ + tether topic trigger
+        4. flush 후 `_last_tick` reset
+
+    F2 fix (Finding 2, 2026-05-17 분할 단계 재시작):
+        DB INSERT 실패 또는 Redis SET 실패 시 close_captured flag SET 안 함.
+        REST fallback (KrxCloseSnapshotController, Stage 4)이 미보정 케이스를
+        실행하도록 capacity 유지.
+
+    Timestamp 정책 (Plan §5.2) — `_parse_event_at_kst` helper 참조:
+        event_at_kst = KIS payload 체결시각 (market_time HHMMSS, KIS `bsop_hour`) 우선,
+                       malformed/empty 시 `received_at` (WS frame receive 시각) fallback.
+                       market_time hour/min/sec는 received_at의 date 기준 결합.
+        DB.timestamp = event_at_kst.astimezone(UTC).replace(tzinfo=None)
+        Redis.timestamp = event_at_kst.isoformat() (KST ISO)
+
+    Single-price window (CF 15:35:00~15:44:59 / CM 05:50:00~05:59:59):
+        Close 확정 제외 — `single_price_window_frame_count` counter only.
+
+    실패 격리: DB/Redis write 예외는 logger.warning + propagate X.
+        KisFuturesClient fanout return_exceptions=True 추가 안전망.
+
+    Env: `KRX_CLOSE_FINALIZER_ENABLED=true`일 때만 동작 (false 시 `__call__` early return).
+    """
+
+    def __init__(self) -> None:
+        # session ("CF"/"CM") → 상태. 매일 새 window에서 자연 reset.
+        self._last_tick: Dict[str, Dict[str, Any]] = {}
+        self._frame_count: Dict[str, int] = {}
+        self._flush_task: Dict[str, Optional[asyncio.Task]] = {}
+
+    async def __call__(self, payload: Dict[str, Any]) -> None:
+        """Tick handler — KisFuturesClient `_fanout`에서 호출.
+
+        Close grace window 진입 시 last_tick 갱신 + window-end flush task 예약.
+        Single-price window 진입 시 telemetry counter만 ++.
+        그 외 시간대는 즉시 return (KrxDbWriter가 일반 path로 처리).
+        """
+        # 함수 내부 import — runtime env 변경 시 즉시 반영 (test patch.object 호환)
+        from app import config as _config
+        if not _config.KRX_CLOSE_FINALIZER_ENABLED:
+            return
+
+        session = payload.get("session", "")
+        if session not in ("CF", "CM"):
+            return
+
+        received_at_iso = payload.get("received_at", "")
+        try:
+            received_at_kst_naive = datetime.fromisoformat(received_at_iso)
+        except (ValueError, TypeError):
+            return  # 잘못된 timestamp — skip
+
+        # Single-price window: telemetry only
+        if is_in_single_price_window(received_at_kst_naive, session):
+            _krx_close_finalizer_stats.single_price_window_frame_count += 1
+            return
+
+        # Close grace window: last candidate 추적
+        if not is_in_close_grace_window(received_at_kst_naive, session):
+            return
+
+        _krx_close_finalizer_stats.close_grace_tick_count += 1
+        self._last_tick[session] = payload
+        self._frame_count[session] = self._frame_count.get(session, 0) + 1
+
+        # Flush task 예약 (이미 활성이면 skip — `_last_tick`은 계속 갱신됨)
+        existing = self._flush_task.get(session)
+        if existing is None or existing.done():
+            grace_end = compute_close_grace_end_kst(received_at_kst_naive, session)
+            self._flush_task[session] = asyncio.create_task(
+                self._flush_at_window_end(session, grace_end)
+            )
+
+    async def _flush_at_window_end(
+        self, session: str, grace_end_kst: datetime
+    ) -> None:
+        """Window 종료 시점까지 대기 후 last_tick unconditional INSERT + Redis SET + flag SET."""
+        KST = ZoneInfo("Asia/Seoul")
+        now_kst = datetime.now(KST)
+        sleep_sec = (grace_end_kst - now_kst).total_seconds()
+        if sleep_sec > 0:
+            await asyncio.sleep(sleep_sec)
+
+        tick = self._last_tick.pop(session, None)
+        count = self._frame_count.pop(session, 0)
+        if tick is None:
+            return
+
+        # 2 frame 이상 → close_duplicate_count ++ (이상 신호 alert)
+        if count >= 2:
+            _krx_close_finalizer_stats.close_duplicate_count += 1
+            logger.warning(
+                "[krx_close_window] close grace window 안 %d frames detected "
+                "(session=%s) — raw count 누적, last candidate 1건만 저장",
+                count, session,
+            )
+
+        try:
+            await asyncio.to_thread(self._sync_write, tick, session)
+        except Exception as e:
+            logger.warning(
+                "[krx_close_window] flush failed (격리): %s: %s",
+                type(e).__name__, e,
+            )
+
+    @staticmethod
+    def _parse_event_at_kst(tick: Dict[str, Any]) -> datetime:
+        """KIS payload market_time(HHMMSS) 우선 + received_at fallback → KST aware datetime.
+
+        Plan §5.2 event_at_kst 정책:
+            - market_time(KIS `bsop_hour`) HHMMSS 6자리 형식이면 received_at의 date에
+              market_time hour/min/sec 결합 → KST aware datetime
+            - market_time empty/malformed → received_at ISO 그대로 (KST naive → aware)
+            - received_at parse 실패 → datetime.now(KST) fallback
+
+        Args:
+            tick: make_normalized_payload 결과 (received_at ISO, market_time HHMMSS).
+
+        Returns:
+            KST aware datetime — DB는 .astimezone(UTC).replace(tzinfo=None), Redis는 .isoformat().
+        """
+        kst_tz = ZoneInfo("Asia/Seoul")
+        received_at_iso = tick.get("received_at", "")
+        try:
+            received_at_naive = datetime.fromisoformat(received_at_iso)
+        except (ValueError, TypeError):
+            received_at_naive = datetime.now(kst_tz).replace(tzinfo=None)
+
+        market_time = tick.get("market_time", "")
+        if isinstance(market_time, str) and len(market_time) == 6 and market_time.isdigit():
+            try:
+                hh = int(market_time[0:2])
+                mm = int(market_time[2:4])
+                ss = int(market_time[4:6])
+                if 0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60:
+                    return datetime(
+                        received_at_naive.year,
+                        received_at_naive.month,
+                        received_at_naive.day,
+                        hh, mm, ss, 0,
+                        tzinfo=kst_tz,
+                    )
+            except ValueError:
+                pass
+        # Fallback: received_at KST naive → aware
+        return received_at_naive.replace(tzinfo=kst_tz)
+
+    @staticmethod
+    def _sync_write(tick: Dict[str, Any], session: str) -> bool:
+        """sync DB INSERT (unconditional) + Redis SET + close_captured flag SET.
+
+        F2 fix (Plan §5.3): flag SET은 DB+Redis 모두 성공 시에만.
+        DB 실패 또는 Redis 실패 시 flag SET 안 함 → REST fallback이 보정 가능.
+
+        Returns:
+            True: DB INSERT + Redis SET 모두 성공 (close_grace_saved ++ + tether trigger).
+            False: 어느 한 쪽 실패 — flag SET 안 함.
+        """
+        from app import crud
+        from app import latest_rates_cache
+        from app import tether_topic_trigger
+        from app.tether_topic_trigger import (
+            TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+        )
+        from app.database import get_db_context
+        from decimal import InvalidOperation as _InvalidOperation
+
+        KST = ZoneInfo("Asia/Seoul")
+
+        try:
+            normalized_rate = float(Decimal(tick["price"]).quantize(Decimal("0.1")))
+        except (_InvalidOperation, KeyError, ValueError):
+            logger.warning(
+                "[krx_close_window] price parse failed (격리): %r",
+                tick.get("price"),
+            )
+            return False
+
+        source = tick.get("source", "krx")
+        asset = tick.get("asset", "usd-krw-futures")
+
+        # event_at_kst 결정 (Plan §5.2):
+        #   - KIS payload 체결시각(market_time, HHMMSS) 우선 사용
+        #   - market_time empty/malformed → received_at (WS frame receive 시각) fallback
+        # CF close(15:45)와 CM close(06:00) 모두 received_at의 KST date 기준 결합.
+        # CM 야간장이 자정 넘는 경우(예: 23:50 frame)와 close grace(06:00) 시간대는
+        # 다르므로 본 helper는 close grace 진입 후에만 호출되어 date 일관성 보장.
+        event_at_kst = KrxCloseWindowWriter._parse_event_at_kst(tick)
+
+        timestamp_utc_naive = event_at_kst.astimezone(dt_timezone.utc).replace(tzinfo=None)
+        timestamp_kst_iso = event_at_kst.isoformat()
+        kst_date_iso = event_at_kst.date().isoformat()
+
+        # DB unconditional INSERT — 예외 전파(crud helper) → 여기서 catch
+        db_ok = False
+        try:
+            with get_db_context() as db:
+                crud.insert_source_rate_unconditional(
+                    db=db,
+                    source=source,
+                    asset=asset,
+                    rate=normalized_rate,
+                    timestamp=timestamp_utc_naive,
+                )
+            db_ok = True
+        except Exception as e:
+            logger.warning(
+                "[krx_close_window] DB INSERT failed (격리, Redis 시도 계속): %s: %s",
+                type(e).__name__, e,
+            )
+
+        # Redis unconditional SET (best-effort helper, 예외 격리)
+        redis_ok = latest_rates_cache.set_latest_krx_rate_from_sync_job(
+            asset=asset,
+            rate=normalized_rate,
+            timestamp=timestamp_kst_iso,
+        )
+
+        # F2 fix: DB+Redis 모두 성공 시에만 flag SET + counter ++
+        if db_ok and redis_ok:
+            latest_rates_cache.set_krx_close_captured_flag(session, kst_date_iso)
+            _krx_close_finalizer_stats.close_grace_saved += 1
+            logger.info(
+                "[krx_close_window] close saved session=%s rate=%.1f ts=%s",
+                session, normalized_rate, timestamp_kst_iso,
+            )
+            # Tether topic trigger — KrxDbWriter pattern과 동일 (Redis write 성공 기반)
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[krx_close_window] tether topic trigger failed (격리)"
+                )
+            return True
+
+        # DB 또는 Redis 실패 — flag 미설정, REST fallback에 보정 capacity 유지
+        logger.warning(
+            "[krx_close_window] partial failure: db_ok=%s redis_ok=%s session=%s — "
+            "flag 미설정, REST fallback이 보정 진행 예정",
+            db_ok, redis_ok, session,
+        )
+        return False
+
+    async def close(self, timeout: float = 5.0) -> None:
+        """Shutdown drain — pending flush tasks 대기 후 종료.
+
+        KisFuturesClient `stop` 시 호출. timeout 초과 시 task cancel.
+        """
+        tasks = [
+            t for t in self._flush_task.values()
+            if t is not None and not t.done()
+        ]
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------

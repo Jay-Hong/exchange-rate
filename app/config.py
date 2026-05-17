@@ -143,6 +143,16 @@ TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower(
 # USDT/은행/Investing은 그대로 publish 유지.
 KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
 
+# KRX_CLOSE_FINALIZER_ENABLED: KRX_CLOSE_SNAPSHOT_PLAN §5.2/§5.3 2차 작업 토글.
+# default true — Stage 3+ 정책 (WS-first close finalizer) 활성:
+#   - KrxDbWriter close grace window 진입 시 일반 path skip (F1 fix, Plan §5.2)
+#   - KrxCloseWindowWriter: close grace window 안 last candidate 1건 unconditional
+#     INSERT + Redis SET + flag SET (DB+Redis 모두 성공 시만 — F2 fix, Plan §5.3)
+#   - Stage 4 (예정) KrxCloseSnapshotController 단순화: 3 retry → 1 + captured flag GET
+#   - Stage 5 (예정) WS listen grace drain
+# false 시 1차 PR (c0855ff) 동작 그대로 — 회귀 시 즉시 rollback path.
+KRX_CLOSE_FINALIZER_ENABLED = os.getenv("KRX_CLOSE_FINALIZER_ENABLED", "true").lower() == "true"
+
 # Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
 # TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
 #   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off
