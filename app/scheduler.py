@@ -2063,3 +2063,83 @@ async def shutdown_usdt_ws_upbit_client():
 
     usdt_ws_upbit_client = None
     usdt_ws_upbit_task = None
+
+
+# ─────────────────────────────────────────────────────────────
+# USDT WS Bithumb lifecycle (Phase B.3 Stage U2 skeleton)
+# USDT_WS_DESIGN_PLAN §12.5 (2026-05-17). Upbit 패턴 mirror.
+# Canary 활성화 조건: KRX close finalizer 5/18~5/19 첫 실측 + 7일 telemetry 안정 후 별도 deploy GO.
+# ─────────────────────────────────────────────────────────────
+
+# 모듈 globals — Optional, 시작 전 None
+usdt_ws_bithumb_client = None  # BithumbWsClient 인스턴스
+usdt_ws_bithumb_task = None    # client.start() 실행 중인 task
+
+
+async def _run_usdt_ws_bithumb_client(client):
+    """BithumbWsClient.start() wrapper — task crash 시 logger.exception.
+
+    Upbit `_run_usdt_ws_upbit_client` 패턴 동일. CancelledError는 propagate.
+    """
+    try:
+        await client.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[usdt_ws.bithumb] BithumbWsClient task crashed")
+
+
+async def start_usdt_ws_bithumb_client():
+    """USDT WS Bithumb client startup — main.py lifespan에서 호출.
+
+    USDT_WS_BITHUMB_ENABLED=false 시 즉시 return (lifecycle 비활성).
+    중복 호출 방지 (test/재시작 시 중복 task 방지).
+
+    Stage U2 acceptance (USDT_WS_DESIGN_PLAN §12.5.2 핵심):
+        flag=false 시 함수 즉시 return + BithumbWsClient 생성 X + network connect X +
+        Redis/DB writer X. 본 stage 이후 U3-U6 운영 영향 0 보장.
+    """
+    global usdt_ws_bithumb_client, usdt_ws_bithumb_task
+
+    if not config.USDT_WS_BITHUMB_ENABLED:
+        logger.info("[usdt_ws.bithumb] USDT_WS_BITHUMB_ENABLED=false, skip start")
+        return
+
+    # 중복 start 방지 — client task 이미 진행 중이면 skip
+    if usdt_ws_bithumb_task is not None and not usdt_ws_bithumb_task.done():
+        logger.debug("[usdt_ws.bithumb] client task 진행 중, 중복 start 무시")
+        return
+
+    # 함수 내부 import — 순환 참조 방지 + 미연결 시점 import 영향 0
+    from app.crawlers.usdt_ws.bithumb import BithumbWsClient
+
+    client = BithumbWsClient()
+    usdt_ws_bithumb_client = client
+    usdt_ws_bithumb_task = asyncio.create_task(_run_usdt_ws_bithumb_client(client))
+    logger.info("[usdt_ws.bithumb] BithumbWsClient skeleton 시작 (U2)")
+
+
+async def shutdown_usdt_ws_bithumb_client():
+    """USDT WS Bithumb client + task 안전 종료.
+
+    client.stop() → task cancel/await → globals 초기화.
+    """
+    global usdt_ws_bithumb_client, usdt_ws_bithumb_task
+
+    if usdt_ws_bithumb_client is not None:
+        try:
+            await usdt_ws_bithumb_client.stop()
+        except Exception:
+            logger.exception("[usdt_ws.bithumb] client.stop() 실패")
+
+    if usdt_ws_bithumb_task is not None and not usdt_ws_bithumb_task.done():
+        usdt_ws_bithumb_task.cancel()
+        try:
+            await usdt_ws_bithumb_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[usdt_ws.bithumb] task await 실패")
+
+    usdt_ws_bithumb_client = None
+    usdt_ws_bithumb_task = None

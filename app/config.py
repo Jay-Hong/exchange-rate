@@ -59,6 +59,17 @@ KRX_FUTURES_ENABLED = os.getenv("KRX_FUTURES_ENABLED", "false").lower() == "true
 # 5거래소 확장은 per-exchange flag (USDT_WS_BITHUMB_ENABLED 등)으로 추가 예정.
 USDT_WS_UPBIT_ENABLED = os.getenv("USDT_WS_UPBIT_ENABLED", "false").lower() == "true"
 
+# USDT_WS_BITHUMB_ENABLED: Phase B.3 Bithumb WS canary 토글
+# (USDT_WS_DESIGN_PLAN §12.5).
+# default false — scheduler에 lifecycle 등록되지만 client.start() 호출 안 함.
+# U2 (현재): true → stop_event 대기만, network 호출 없음.
+# U3 이후: true → WS connect/subscribe/parse 동작.
+# Canary 활성화 조건 — KRX close finalizer 5/18 CF + 5/19 CM 첫 실측 + 7일 telemetry
+# 안정 후 별도 deploy GO. 그 전까지 false default 유지 — 운영 영향 0.
+# false 시 invariant (acceptance Stage U2): start 함수 즉시 return + BithumbWsClient
+# 생성 X + network connect X + Redis/DB writer X (USDT_WS_DESIGN_PLAN §12.5.2 U2 핵심).
+USDT_WS_BITHUMB_ENABLED = os.getenv("USDT_WS_BITHUMB_ENABLED", "false").lower() == "true"
+
 # KRX_BROADCAST_INCLUDE: removed in Z-2d cleanup (2026-05-12).
 # 이전: KRX 미국달러선물의 broadcast latest:* 노출 토글.
 # Z-2d 통일로 legacy_policy.should_include_source_in_legacy_rates allowlist가
