@@ -770,36 +770,39 @@ class TestStaleTransition(unittest.TestCase):
     Stage 진화:
         U4: client에 redis/db/fallback attribute 자체 없음 → side-effect 자연 차단
         U5: _redis_writer 추가, but _set_status에서 직접 schedule 호출 X
-        U6 (현재): _db_writer + _fallback_controller 추가. _set_status는
-            redis/db direct schedule X (A7), normal→stale 시 fallback schedule_probe (A7),
-            normal 복귀 시 fallback reset_cooldown (A8).
-        U7 영역: _alert_evaluator 여전히 부재.
+        U6: _db_writer + _fallback_controller 추가. _set_status는 redis/db direct
+            schedule X, normal→stale 시 fallback schedule_probe, normal 복귀 시
+            fallback reset_cooldown.
+        U7 (현재): _alert_evaluator 추가. _set_status에서는 redis/db/alert direct
+            schedule X (fallback hook만 유지).
     """
 
-    def test_set_status_stale_no_direct_redis_db_write(self):
-        """_set_status('stale') → Redis/DB direct write X, fallback schedule_probe만 (A7).
+    def test_set_status_stale_no_direct_redis_db_alert_write(self):
+        """_set_status('stale') → Redis/DB/Alert direct schedule X, fallback schedule_probe만.
 
-        U6 진화: _set_status는 _fallback_controller.schedule_probe만 호출. Redis/DB는
-        직접 writer.schedule을 통하지 않고 fallback → probe → writer.schedule로 우회.
+        U7 진화: _set_status는 _fallback_controller.schedule_probe만 호출.
+        Redis/DB/Alert는 직접 writer.schedule을 통하지 않고 fallback → probe →
+        writer.schedule로 우회.
         """
         client = BithumbWsClient()
-        # U5/U6: redis + db + fallback 추가됨
+        # U5/U6/U7: redis + db + fallback + alert evaluator 추가됨
         self.assertTrue(hasattr(client, "_redis_writer"))
         self.assertTrue(hasattr(client, "_db_writer"))
         self.assertTrue(hasattr(client, "_fallback_controller"))
-        # U7 영역: alert evaluator 여전히 부재 (acceptance 6 U6 scope)
-        self.assertFalse(hasattr(client, "_alert_evaluator"))
+        self.assertTrue(hasattr(client, "_alert_evaluator"))
 
-        # _set_status가 redis/db에 직접 schedule하지 않음 (A7)
+        # _set_status가 redis/db/alert에 직접 schedule하지 않음
         with patch.object(client._redis_writer, "schedule") as mock_redis, \
              patch.object(client._db_writer, "schedule") as mock_db, \
+             patch.object(client._alert_evaluator, "schedule") as mock_alert, \
              patch.object(client._fallback_controller, "schedule_probe") as mock_probe:
             client._set_status("stale")
         self.assertEqual(client._status, "stale")
         self.assertEqual(client._status_transition_count["stale"], 1)
         mock_redis.assert_not_called()
         mock_db.assert_not_called()
-        # normal → stale 전이 시 fallback probe만 호출 (A7)
+        mock_alert.assert_not_called()
+        # normal → stale 전이 시 fallback probe만 호출
         mock_probe.assert_called_once_with(reason="stale_transition")
 
     def test_set_status_normal_recovery_resets_cooldown(self):
@@ -1212,22 +1215,79 @@ class TestInvalidFrameNoSchedule(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tick_arg["rate"], 1486.0)
 
 
-class TestNoAlertInU6(unittest.TestCase):
-    """U6 acceptance 6 — alert evaluator는 U6에서 0 (U7 영역).
+class TestU7Wiring(unittest.TestCase):
+    """U7 attribute wiring — UsdtAlertEvaluator 자체 instance 보유.
 
-    Stage 진화: U5에서 redis만, U6에서 db + fallback 추가, U7에서 alert 추가 예정.
+    Stage 진화: U5 redis → U6 db+fallback → U7 alert evaluator (Bithumb client
+    자체 instance, Upbit upbit.py:618 mirror).
     """
 
-    def test_u7_attributes_absent_in_u6(self):
+    def test_all_writers_and_evaluator_present_in_u7(self):
+        from app.notifications.alert_evaluator import UsdtAlertEvaluator
         client = BithumbWsClient()
-        # U5/U6 추가됨
+        # U5
         self.assertTrue(hasattr(client, "_redis_writer"))
         self.assertIsInstance(client._redis_writer, BithumbRedisWriter)
-        # U6 추가됨
+        # U6
         self.assertTrue(hasattr(client, "_db_writer"))
         self.assertTrue(hasattr(client, "_fallback_controller"))
-        # U7 영역 — 여전히 부재
-        self.assertFalse(hasattr(client, "_alert_evaluator"))
+        # U7
+        self.assertTrue(hasattr(client, "_alert_evaluator"))
+        self.assertIsInstance(client._alert_evaluator, UsdtAlertEvaluator)
+
+    def test_fallback_controller_has_alert_evaluator_injected(self):
+        """U7: BithumbRestFallbackController가 _alert_evaluator inject 받음."""
+        client = BithumbWsClient()
+        self.assertIs(
+            client._fallback_controller._alert_evaluator,
+            client._alert_evaluator,
+        )
+
+
+class TestU7AlertEvaluatorLifecycle(unittest.IsolatedAsyncioTestCase):
+    """U7 lifecycle — _alert_evaluator instance preservation across reconnect.
+
+    Codex L2: defensive lock — _alert_evaluator도 _redis_writer처럼 __init__에서
+    1회 생성, reconnect 사이 재할당 없음 (Upbit upbit.py:618 mirror).
+    """
+
+    async def test_evaluator_instance_preserved_across_sessions(self):
+        """reconnect 사이 _alert_evaluator instance 동일 (assertIs)."""
+        client = BithumbWsClient()
+        first_evaluator = client._alert_evaluator
+
+        # 첫 session — stop_event set으로 즉시 종료
+        client._stop_event.set()
+        ws_mock = AsyncMock()
+        ws_mock.recv = AsyncMock()
+        ws_mock.send = AsyncMock()
+        connect_mock = AsyncMock()
+        connect_mock.__aenter__ = AsyncMock(return_value=ws_mock)
+        connect_mock.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.websockets.connect",
+            return_value=connect_mock,
+        ), patch.object(
+            client._alert_evaluator, "close", new_callable=AsyncMock,
+        ):
+            await client._run_one_session()
+
+        # evaluator instance 동일성 — reconnect 시 재할당 없음
+        self.assertIs(client._alert_evaluator, first_evaluator)
+
+        # 두 번째 session 진입 (stop_event reset)
+        client._stop_event.clear()
+        client._stop_event.set()
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.websockets.connect",
+            return_value=connect_mock,
+        ), patch.object(
+            client._alert_evaluator, "close", new_callable=AsyncMock,
+        ):
+            await client._run_one_session()
+        # 여전히 같은 instance
+        self.assertIs(client._alert_evaluator, first_evaluator)
 
 
 class TestSessionLevelCloseAndReconnectReuse(unittest.IsolatedAsyncioTestCase):
@@ -1566,7 +1626,9 @@ class TestRestFallbackInFlightCooldown(unittest.IsolatedAsyncioTestCase):
         redis_writer = MagicMock()
         db_writer = MagicMock()
         controller = BithumbRestFallbackController(
-            redis_writer=redis_writer, db_writer=db_writer,
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=MagicMock(),
         )
         controller._in_flight = True
 
@@ -1580,7 +1642,9 @@ class TestRestFallbackInFlightCooldown(unittest.IsolatedAsyncioTestCase):
         redis_writer = MagicMock()
         db_writer = MagicMock()
         controller = BithumbRestFallbackController(
-            redis_writer=redis_writer, db_writer=db_writer,
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=MagicMock(),
         )
         controller._cooldown_until = time.time() + 60.0  # 미래
 
@@ -1593,22 +1657,30 @@ class TestRestFallbackInFlightCooldown(unittest.IsolatedAsyncioTestCase):
         redis_writer = MagicMock()
         db_writer = MagicMock()
         controller = BithumbRestFallbackController(
-            redis_writer=redis_writer, db_writer=db_writer,
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=MagicMock(),
         )
         controller._cooldown_until = time.time() + 60.0
         controller.reset_cooldown()
         self.assertEqual(controller._cooldown_until, 0.0)
 
 
-class TestRestFallbackProbeFanoutA6(unittest.IsolatedAsyncioTestCase):
-    """A6 — probe success → Redis + DB schedule, alert schedule 0 (U7 영역)."""
+class TestRestFallbackProbeFanout(unittest.IsolatedAsyncioTestCase):
+    """U7 A3 — probe success → Redis + DB + Alert schedule (3개 fanout).
 
-    async def test_probe_success_fanout_to_redis_and_db_only(self):
-        """probe success → redis + db schedule. alert evaluator 자체 없음."""
+    U6 2개 (Redis + DB) → U7 alert 추가로 3개로 진화. AlertObservation kind="rest_probe".
+    """
+
+    async def test_probe_success_fanout_to_redis_db_alert(self):
+        """probe success → redis + db + alert (kind="rest_probe") schedule."""
         redis_writer = MagicMock()
         db_writer = MagicMock()
+        alert_evaluator = MagicMock()
         controller = BithumbRestFallbackController(
-            redis_writer=redis_writer, db_writer=db_writer,
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=alert_evaluator,
         )
         tick = _make_valid_tick(rate=1500.0, ts_ms=12345)
 
@@ -1623,15 +1695,23 @@ class TestRestFallbackProbeFanoutA6(unittest.IsolatedAsyncioTestCase):
 
         redis_writer.schedule.assert_called_once_with(tick)
         db_writer.schedule.assert_called_once_with(tick)
-        # alert evaluator는 controller에 없음 (U7 영역, acceptance 6)
-        self.assertFalse(hasattr(controller, "_alert_evaluator"))
+        # U7: alert evaluator도 schedule (kind="rest_probe")
+        alert_evaluator.schedule.assert_called_once()
+        observation = alert_evaluator.schedule.call_args.args[0]
+        self.assertEqual(observation.kind, "rest_probe")
+        self.assertEqual(observation.source, "bithumb")
+        self.assertEqual(observation.rate, 1500.0)
+        self.assertEqual(observation.timestamp_ms, 12345)
 
     async def test_probe_none_no_fanout(self):
-        """probe None 반환 (REST 실패/A11 invalid) → fanout 0."""
+        """U7 A4: probe None 반환 → Redis + DB + Alert 모두 0 (fanout 미진입)."""
         redis_writer = MagicMock()
         db_writer = MagicMock()
+        alert_evaluator = MagicMock()
         controller = BithumbRestFallbackController(
-            redis_writer=redis_writer, db_writer=db_writer,
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=alert_evaluator,
         )
 
         async def fake_to_thread(func):
@@ -1647,13 +1727,17 @@ class TestRestFallbackProbeFanoutA6(unittest.IsolatedAsyncioTestCase):
 
         redis_writer.schedule.assert_not_called()
         db_writer.schedule.assert_not_called()
+        alert_evaluator.schedule.assert_not_called()
 
 
-class TestU6CloseOrderA9(unittest.IsolatedAsyncioTestCase):
-    """A9 — close 순서: fallback → DB → Redis (3개)."""
+class TestU7CloseOrderA6(unittest.IsolatedAsyncioTestCase):
+    """U7 A6 — close 순서: fallback → DB → Alert → Redis (4개, Upbit upbit.py:920-940).
+
+    U6 3개 (fallback → DB → Redis) → U7 alert 추가로 4개로 진화.
+    """
 
     async def test_close_order_in_run_one_session_finally(self):
-        """_run_one_session finally → fallback → DB → Redis 순서로 close 호출."""
+        """_run_one_session finally → fallback → DB → Alert → Redis 순서."""
         client = BithumbWsClient()
         client._stop_event.set()  # while loop entry 0
         ws_mock = AsyncMock()
@@ -1671,6 +1755,9 @@ class TestU6CloseOrderA9(unittest.IsolatedAsyncioTestCase):
         async def db_close():
             call_order.append("db")
 
+        async def alert_close(*args, **kwargs):
+            call_order.append("alert")
+
         async def redis_close(*args, **kwargs):
             call_order.append("redis")
 
@@ -1682,18 +1769,23 @@ class TestU6CloseOrderA9(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             client._db_writer, "close", side_effect=db_close,
         ), patch.object(
+            client._alert_evaluator, "close", side_effect=alert_close,
+        ), patch.object(
             client._redis_writer, "close", side_effect=redis_close,
         ):
             await client._run_one_session()
 
-        # 순서 검증: fallback → DB → Redis (alert 없음, 3개)
-        self.assertEqual(call_order, ["fallback", "db", "redis"])
+        # U7 순서 검증: fallback → DB → Alert → Redis (4개)
+        self.assertEqual(call_order, ["fallback", "db", "alert", "redis"])
 
 
-class TestU6ValidTickFanout(unittest.IsolatedAsyncioTestCase):
-    """U6 fanout 통합 — valid tick → Redis + DB schedule (alert 없음)."""
+class TestU7ValidTickFanout(unittest.IsolatedAsyncioTestCase):
+    """U7 A2 — valid tick → Redis + DB + Alert schedule (3개 fanout).
 
-    async def test_valid_tick_schedules_redis_and_db(self):
+    U6 2개 (Redis + DB) → U7 alert 추가로 3개로 진화. AlertObservation kind="tick".
+    """
+
+    async def test_valid_tick_schedules_redis_db_alert(self):
         client = BithumbWsClient()
         valid_message = json.dumps({
             "type": "ticker",
@@ -1727,21 +1819,147 @@ class TestU6ValidTickFanout(unittest.IsolatedAsyncioTestCase):
         ) as mock_redis_sched, patch.object(
             client._db_writer, "schedule",
         ) as mock_db_sched, patch.object(
+            client._alert_evaluator, "schedule",
+        ) as mock_alert_sched, patch.object(
             client._redis_writer, "close", new_callable=AsyncMock,
         ), patch.object(
             client._db_writer, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._alert_evaluator, "close", new_callable=AsyncMock,
         ), patch.object(
             client._fallback_controller, "close", new_callable=AsyncMock,
         ):
             await client._run_one_session()
 
-        # valid tick → Redis + DB 둘 다 schedule (1회씩)
+        # U7: valid tick → Redis + DB + Alert 셋 다 schedule (1회씩)
         self.assertEqual(mock_redis_sched.call_count, 1)
         self.assertEqual(mock_db_sched.call_count, 1)
+        self.assertEqual(mock_alert_sched.call_count, 1)
+        # AlertObservation kind="tick"
+        observation = mock_alert_sched.call_args.args[0]
+        self.assertEqual(observation.kind, "tick")
+        self.assertEqual(observation.source, "bithumb")
+        self.assertEqual(observation.asset, "usdt-krw")
+        self.assertEqual(observation.rate, 1486.0)
 
 
-class TestFlagFalseInvariantU6Regression(unittest.IsolatedAsyncioTestCase):
-    """A10 — flag=false → client 생성 0, network/Redis/DB/REST 0 (U6 누적 후)."""
+class TestU7InvalidFrameNoAlertSchedule(unittest.IsolatedAsyncioTestCase):
+    """U7 A4 — invalid frame → Alert schedule 0 (Redis/DB도 0, U5/U6 누적 검증)."""
+
+    async def test_invalid_frame_no_alert_schedule(self):
+        """invalid frame mix → schedule 호출 횟수 = valid frame 수만."""
+        client = BithumbWsClient()
+        valid_msg = json.dumps({
+            "type": "ticker",
+            "code": "KRW-USDT",
+            "trade_price": 1486,
+            "trade_timestamp": 1777370239843,
+        })
+        invalid_msgs = [
+            "not json",
+            json.dumps({"type": "status", "code": "KRW-USDT"}),
+            json.dumps({  # wrong code
+                "type": "ticker", "code": "KRW-BTC",
+                "trade_price": 100, "trade_timestamp": 1,
+            }),
+        ]
+        recv_responses = [*invalid_msgs, valid_msg]
+
+        async def fake_recv():
+            if recv_responses:
+                return recv_responses.pop(0)
+            client._stop_event.set()
+            await asyncio.sleep(0.001)
+            raise asyncio.TimeoutError
+
+        ws_mock = AsyncMock()
+        ws_mock.recv = fake_recv
+        ws_mock.send = AsyncMock()
+        ws_mock.ping = AsyncMock(return_value=asyncio.Future())
+        ws_mock.close = AsyncMock()
+        connect_mock = AsyncMock()
+        connect_mock.__aenter__ = AsyncMock(return_value=ws_mock)
+        connect_mock.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.websockets.connect",
+            return_value=connect_mock,
+        ), patch.object(
+            client._alert_evaluator, "schedule",
+        ) as mock_alert, patch.object(
+            client._redis_writer, "schedule",
+        ) as mock_redis, patch.object(
+            client._db_writer, "schedule",
+        ) as mock_db, patch.object(
+            client._redis_writer, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._db_writer, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._alert_evaluator, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._fallback_controller, "close", new_callable=AsyncMock,
+        ):
+            await client._run_one_session()
+
+        # invalid 3개 + valid 1개 → 각 schedule 1회만 (invalid는 schedule 진입 X)
+        self.assertEqual(mock_alert.call_count, 1)
+        self.assertEqual(mock_redis.call_count, 1)
+        self.assertEqual(mock_db.call_count, 1)
+
+
+class TestU7AlertCloseIsolation(unittest.IsolatedAsyncioTestCase):
+    """U7 A8 — alert evaluator close 예외/timeout 격리 (WS loop 전파 X)."""
+
+    async def test_alert_close_exception_isolated(self):
+        """alert_evaluator.close raise → log only, 다른 close 진행 + WS loop 전파 X."""
+        client = BithumbWsClient()
+        client._stop_event.set()  # while loop entry 0
+        ws_mock = AsyncMock()
+        ws_mock.recv = AsyncMock()
+        ws_mock.send = AsyncMock()
+        connect_mock = AsyncMock()
+        connect_mock.__aenter__ = AsyncMock(return_value=ws_mock)
+        connect_mock.__aexit__ = AsyncMock(return_value=None)
+
+        call_order: list[str] = []
+
+        async def alert_close_raises():
+            call_order.append("alert")
+            raise RuntimeError("alert close hung")
+
+        async def redis_close(*args, **kwargs):
+            call_order.append("redis")
+
+        # alert close가 raise해도 redis close는 호출되어야 함 (격리)
+        with patch(
+            "app.crawlers.usdt_ws.bithumb.websockets.connect",
+            return_value=connect_mock,
+        ), patch.object(
+            client._fallback_controller, "close",
+            new_callable=AsyncMock,
+        ), patch.object(
+            client._db_writer, "close", new_callable=AsyncMock,
+        ), patch.object(
+            client._alert_evaluator, "close", side_effect=alert_close_raises,
+        ), patch.object(
+            client._redis_writer, "close", side_effect=redis_close,
+        ), self.assertLogs(
+            "exchange_rate.crawler.usdt_ws.bithumb", level="ERROR",
+        ) as cm:
+            # WS loop에 전파 X — exception raise 없이 정상 완료
+            await client._run_one_session()
+
+        # alert close 실패 후에도 redis close 호출됨 (격리)
+        self.assertIn("alert", call_order)
+        self.assertIn("redis", call_order)
+        # alert close 실패 log 잔류
+        self.assertTrue(
+            any("alert_evaluator.close()" in m for m in cm.output)
+        )
+
+
+class TestFlagFalseInvariantU7Regression(unittest.IsolatedAsyncioTestCase):
+    """U7 A7 — flag=false → client + UsdtAlertEvaluator 생성 0, network/Redis/DB/REST/Alert 0."""
 
     def setUp(self):
         _reset_scheduler_usdt_ws_bithumb_globals()
@@ -1749,13 +1967,14 @@ class TestFlagFalseInvariantU6Regression(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         _reset_scheduler_usdt_ws_bithumb_globals()
 
-    async def test_flag_false_skips_all_u6_paths(self):
-        """U6 누적 후에도 flag=false → 모든 외부 IO 0."""
+    async def test_flag_false_skips_all_u7_paths(self):
+        """U7 누적 후에도 flag=false → 모든 외부 IO 0 + UsdtAlertEvaluator 생성 0."""
         with patch.object(config, "USDT_WS_BITHUMB_ENABLED", False), \
              patch("app.crawlers.usdt_ws.bithumb.BithumbWsClient") as mock_client_cls, \
              patch("app.crawlers.usdt_ws.bithumb.BithumbRedisWriter") as mock_redis_cls, \
              patch("app.crawlers.usdt_ws.bithumb.BithumbDbWriter") as mock_db_cls, \
              patch("app.crawlers.usdt_ws.bithumb.BithumbRestFallbackController") as mock_fb_cls, \
+             patch("app.crawlers.usdt_ws.bithumb.UsdtAlertEvaluator") as mock_eval_cls, \
              patch("app.crawlers.usdt_ws.bithumb.websockets.connect") as mock_connect, \
              patch(
                  "app.crawlers.usdt_ws.bithumb.latest_rates_cache.set_latest_usdt_rate_from_sync_job"
@@ -1768,6 +1987,7 @@ class TestFlagFalseInvariantU6Regression(unittest.IsolatedAsyncioTestCase):
         mock_redis_cls.assert_not_called()
         mock_db_cls.assert_not_called()
         mock_fb_cls.assert_not_called()
+        mock_eval_cls.assert_not_called()
         mock_connect.assert_not_called()
         mock_redis.assert_not_called()
         mock_trigger.assert_not_called()

@@ -1,8 +1,7 @@
-"""USDT WebSocket — Bithumb canary client (Phase B.3 Stage U2-U6).
+"""USDT WebSocket — Bithumb canary client (Phase B.3 Stage U2-U7).
 
-USDT_WS_DESIGN_PLAN §12.5 Phase B.3 Stage U2-U6.
-Upbit Phase B.1 PR1-PR5/PR7 패턴 작은 복제 (KRX close finalizer 분할 학습 — 큰 추상화 금지).
-U6 scope에서 alert wiring (PR6) 제외 — U7 별도 stage.
+USDT_WS_DESIGN_PLAN §12.5 Phase B.3 Stage U2-U7.
+Upbit Phase B.1 PR1-PR7 패턴 작은 복제 (KRX close finalizer 분할 학습 — 큰 추상화 금지).
 
 U2 누적 (lifecycle skeleton):
     - `_stop_event` + `_running` (network/Redis/DB import 없음)
@@ -18,38 +17,36 @@ U3 누적 (connect/subscribe/parse + log only):
 U4 누적 (UsdtLivenessMonitor 재사용 + reconnect + ping/pong heartbeat):
     - `UsdtLivenessMonitor` 재사용 (source-neutral, app/crawlers/usdt_ws/upbit.py:125)
     - `_status` + `_status_transition_count` + `_reconnect_attempt_count`
-    - `_set_status` — counter + log only (Redis/DB/fallback hook 없음, U5/U6 영역)
+    - `_set_status` — U4 당시 counter + log only (fallback hook은 U6에서 추가)
     - `_compute_backoff` — Upbit 동일 sequence (1, 2, 4, 8, 16, 30s tail)
     - `_ping_loop` — 20s ping + pong → `_liveness.observe_heartbeat` (§5 provisional 30s)
     - `_run_one_session` 확장 — liveness reset + stale check + ping_task lifecycle
     - `start` reconnect loop — Upbit PR3 backoff sequence mirror
 
-U6 (현재): BithumbDbWriter + BithumbRestFallbackController + normalized REST helper.
-    - `BithumbDbWriter` 클래스 (Upbit `UpbitDbWriter` upbit.py:328-434 복제)
-      1초 window debounce + `insert_source_rate_if_changed` helper + race-prevention timer
-    - `BithumbRestFallbackController` 클래스 (Upbit `UpbitRestFallbackController`
-      upbit.py:437-585 복제, **alert_evaluator 인자 제외** — U7 영역)
-      WS silence 감지 시 REST 1회 probe → fanout Redis + DB만 (alert 0)
-    - `fetch_bithumb_usdt_tick()` normalized REST helper (usdt_sources.py)
-      `_fetch_bithumb()` rate-only wrapper 호환 유지 (A2)
-    - `BithumbWsClient.__init__`에 `_db_writer` + `_fallback_controller` 추가
-    - `_set_status` 확장: normal→stale 시 schedule_probe, normal 복귀 시 reset_cooldown
-    - `_run_one_session` valid tick path → `db_writer.schedule(tick)` 추가
-    - `_run_one_session` finally close 순서: fallback → DB → Redis (3개, alert 없음)
+U7 (현재): UsdtAlertEvaluator wiring + AlertObservation schedule.
+    - `UsdtAlertEvaluator` (source-neutral, app/notifications/alert_evaluator.py 재사용)
+      `BithumbWsClient` 자체 instance 보유 (Upbit upbit.py:618 mirror)
+    - `BithumbRestFallbackController` `alert_evaluator` 인자 추가 (inject 방식,
+      Upbit upbit.py:621-625 mirror)
+    - `_run_one_session` valid tick path → `alert_evaluator.schedule(AlertObservation(...,
+      kind="tick"))` 추가
+    - REST fallback probe success → `alert_evaluator.schedule(AlertObservation(...,
+      kind="rest_probe"))` (Upbit upbit.py:539-546 mirror)
+    - `_run_one_session` finally close 순서: fallback → DB → Alert → Redis (4개)
+    - alert evaluator close 예외 격리 (try/except로 다른 close 호출 보호)
 
-U6 핵심 acceptance (11개, Codex 합의):
-    1. fetch_bithumb_usdt_tick() shape: {source, asset, rate, timestamp_ms}
-    2. _fetch_bithumb() 기존 rate-only 호환 유지
-    3. DB writer 1초 window debounce, close 시 pending tick 즉시 flush
-    4. DB write 예외 → WS loop 전파 X (격리)
-    5. REST fallback in-flight/cooldown guard
-    6. REST fallback success → Redis + DB schedule, alert schedule 0 (U7 영역)
-    7. stale 전이 → fallback만 schedule, Redis/DB direct write 0
-    8. normal 복귀 → cooldown reset
-    9. close 순서: fallback → DB → Redis (3개, alert 없음)
-    10. flag=false invariant: client 생성 0, network/Redis/DB/REST 0
-    11. fetch_bithumb_usdt_tick() 실패/invalid/0 이하 rate → None, fallback fanout 미호출
-        (Upbit usdt_sources.py:65-66 guard mirror)
+U7 핵심 acceptance (8개, Codex 합의):
+    1. AlertObservation kind="tick" / "rest_probe" 분기 schedule
+    2. WS valid tick → Redis + DB + Alert schedule
+    3. REST probe success → Redis + DB + Alert schedule (kind="rest_probe")
+    4. invalid frame → Alert schedule 0
+    5. fallback None (REST 실패/invalid) → Alert schedule 0 (Redis/DB도 0)
+    6. close 순서: fallback → DB → Alert → Redis (4개, Upbit upbit.py:920-940 mirror)
+    7. flag=false invariant: client + UsdtAlertEvaluator 생성 0, network/Redis/DB/
+       REST/Alert 0
+    8. alert evaluator close 예외/timeout 격리 — WS loop 전파 X
+
+U6 누적 — BithumbDbWriter + BithumbRestFallbackController + normalized REST helper.
 
 U5 누적 — BithumbRedisWriter (tick-level Redis latest write) + tether topic trigger.
     - `BithumbRedisWriter` 클래스 (Upbit `UpbitRedisWriter` upbit.py:216-325 복제,
@@ -80,10 +77,12 @@ U5 핵심 acceptance (13개, Codex 합의):
         매 `_run_one_session` finally에서 close() drain + _tasks.clear(),
         다음 reconnect session에서 같은 writer instance가 빈 pending set으로 재시작
 
-후속 stage 예정 (별도 GO):
-    U6: BithumbDbWriter (1초 window) + BithumbRestFallbackController +
-        fetch_bithumb_usdt_tick() normalized REST helper
-        ({source, asset, rate, timestamp_ms} shape — Upbit helper contract 일치)
+Phase B.3 6 stage 분할 완료 (U2-U7). 후속 phase 영역:
+    - Phase B.4 (예정): Coinone WS 확장 — 별 protocol (Upbit 패턴 비호환)
+    - Phase B.5 (예정): Korbit WS 확장
+    - Phase B.6 (예정): Gopax WS 확장
+    - 공통화 검토: Bithumb (Phase B.3) + Coinone (Phase B.4) land 후 중복 명확해진
+      시점에 base class 도입 판단 (선제 abstraction 금지 — KRX close finalizer 학습)
 
 운영 활성화 조건 (USDT_WS_DESIGN_PLAN §12.5.3):
     KRX close finalizer 5/18 CF + 5/19 CM 첫 실측 + 7일 telemetry 안정 후
@@ -104,6 +103,12 @@ from websockets.exceptions import ConnectionClosed
 from app import latest_rates_cache, tether_topic_trigger
 # UsdtLivenessMonitor 재사용 — source-neutral (Upbit 패턴 import)
 from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
+# UsdtAlertEvaluator + AlertObservation 재사용 — source-neutral (Upbit/Bithumb 공통,
+# Phase B.1 PR6 source-neutral 설계 적용).
+from app.notifications.alert_evaluator import (
+    AlertObservation,
+    UsdtAlertEvaluator,
+)
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
 )
@@ -381,36 +386,38 @@ class BithumbDbWriter:
 class BithumbRestFallbackController:
     """Bithumb REST fallback (silent probe 옵션 B).
 
-    Upbit `UpbitRestFallbackController` (upbit.py:437-585) 복제 — **alert_evaluator
-    인자 제외** (U6 scope, USDT_WS_DESIGN_PLAN §12.5.2 U6 row 명시). alert wiring은
-    U7 별도 stage.
+    Upbit `UpbitRestFallbackController` (upbit.py:437-585) 복제. U7에서 alert evaluator
+    wiring 추가 (Upbit upbit.py:621-625 inject 패턴 mirror).
 
     WS frame/heartbeat silence (last_activity_at 기준) 감지 시 REST 1회 probe →
-    normalized tick → 기존 fanout (Redis + DB writer만, alert X) 재사용. WS
-    reconnect loop는 그대로 유지, fallback은 freshness 보조.
+    normalized tick → 기존 fanout (Redis + DB + Alert) 재사용. WS reconnect loop는
+    그대로 유지, fallback은 freshness 보조.
 
     Guardrails (Upbit mirror):
         - schedule_probe()는 sync/non-blocking (_set_status 동기 흐름에서 호출).
-        - In-flight skip (A5): probe 진행 중 중복 trigger 차단.
-        - Cooldown skip (A5): 마지막 probe 종료 후 FALLBACK_COOLDOWN_SEC 미경과
-          시 skip (stale 지속 중 폭주 방지).
+        - In-flight skip: probe 진행 중 중복 trigger 차단.
+        - Cooldown skip: 마지막 probe 종료 후 FALLBACK_COOLDOWN_SEC 미경과 시 skip
+          (stale 지속 중 폭주 방지).
         - Probe 실패도 cooldown 적용 (REST rate limit 보호).
-        - reset_cooldown() (A8): normal 복귀 시 호출 → 다음 stale 즉시 1회 probe 보장.
+        - reset_cooldown(): normal 복귀 시 호출 → 다음 stale 즉시 1회 probe 보장.
         - REST 실패 격리: log only, WS session/reconnect 영향 X.
         - fallback tick의 source/asset = "bithumb"/"usdt-krw" (downstream 일관).
-        - **A6**: probe success → Redis + DB만 schedule, alert schedule 0 (U7 영역).
+        - U7 alert wiring: probe success → Redis + DB + Alert schedule.
+          AlertObservation kind="rest_probe" (log/metric 구분, Upbit PR6 mirror).
     """
 
     def __init__(
         self,
         redis_writer: "BithumbRedisWriter",
         db_writer: "BithumbDbWriter",
+        alert_evaluator: "UsdtAlertEvaluator",
         *,
         cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
         probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
     ) -> None:
         self._redis_writer = redis_writer
         self._db_writer = db_writer
+        self._alert_evaluator = alert_evaluator
         self._cooldown_sec = cooldown_sec
         self._probe_timeout_sec = probe_timeout_sec
         self._in_flight: bool = False
@@ -455,9 +462,10 @@ class BithumbRestFallbackController:
         logger.debug("[usdt_ws.bithumb.fallback] cooldown reset on normal recovery")
 
     async def _run_probe(self, reason: str) -> None:
-        """REST probe → normalized tick → fanout (Redis + DB만, alert X — A6).
+        """REST probe → normalized tick → fanout (Redis + DB + Alert).
 
         실패 시 log only + cooldown 적용 (재시도 X). WS session 영향 X.
+        U7 alert wiring: AlertObservation kind="rest_probe" schedule (Upbit upbit.py:539-546 mirror).
         """
         try:
             logger.info(
@@ -469,14 +477,21 @@ class BithumbRestFallbackController:
             )
             if tick is None:
                 logger.warning(
-                    "[usdt_ws.bithumb.fallback] probe returned None — REST/parse 실패 or invalid rate (A11)",
+                    "[usdt_ws.bithumb.fallback] probe returned None — REST/parse 실패 or invalid rate",
                 )
                 return
 
-            # 기존 fanout 재사용 (U5 Redis writer + U6 DB writer)
-            # **alert_evaluator schedule 0** (A6, U7 영역).
+            # 기존 fanout 재사용 (U5 Redis writer + U6 DB writer + U7 Alert evaluator)
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
+            observation = AlertObservation(
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+                timestamp_ms=tick["timestamp_ms"],
+                kind="rest_probe",  # U7: REST probe kind 구분 (log/metric)
+            )
+            self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.bithumb.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
                 tick["rate"], tick["timestamp_ms"], reason,
@@ -519,24 +534,32 @@ class BithumbRestFallbackController:
 
 
 class BithumbWsClient:
-    """Bithumb USDT/KRW WebSocket client — U2-U4 누적.
+    """Bithumb USDT/KRW WebSocket client — U2-U7 누적 (Phase B.3 완료).
 
-    State (U4):
+    State:
         - `_stop_event`: stop signal (asyncio.Event)
         - `_running`: 중복 start 방지 flag
         - `_ws`: active WebSocketClientProtocol (session 안에서만)
         - `_first_tick_logged`: first tick INFO log 1회 emit 후 DEBUG로 격하
-        - `_liveness`: UsdtLivenessMonitor (frame/heartbeat gap state)
+        - `_liveness`: UsdtLivenessMonitor (frame/heartbeat gap state, U4)
         - `_status`: "normal" | "reconnecting" | "stale"
         - `_status_transition_count`: status별 전이 count (telemetry)
         - `_reconnect_attempt_count`: ConnectionClosed/Exception 누적 attempt
+        - `_redis_writer`: BithumbRedisWriter (tick-level fire-and-forget, U5)
+        - `_db_writer`: BithumbDbWriter (1s window debounce, U6)
+        - `_alert_evaluator`: UsdtAlertEvaluator (observation-based, source-neutral, U7)
+        - `_fallback_controller`: BithumbRestFallbackController (silent probe, U6+U7)
 
-    U4 핵심:
-        - Reconnect loop (start) + backoff sequence
-        - ping/pong heartbeat (observe via UsdtLivenessMonitor)
-        - stale 전이 — status/log/counter only (Redis/DB/fallback 영역 X)
+    누적 capabilities:
+        - U4: Reconnect loop + backoff sequence + ping/pong heartbeat + stale 전이
+        - U5: 매 valid tick → Redis latest write (fire-and-forget) + topic trigger
+        - U6: 매 valid tick → DB writer (1s window debounce + race-prevention)
+        - U6: stale 전이 → REST fallback silent probe → fanout (Redis+DB+Alert)
+        - U7: 매 valid tick → AlertObservation schedule (kind="tick")
+        - U7: REST probe success → AlertObservation schedule (kind="rest_probe")
 
-    NO Redis/DB/topic/fallback (U5/U6에서 추가 예정).
+    close 순서 (Upbit upbit.py:920-940 mirror):
+        fallback → DB → Alert → Redis (4개, 각 try/except 격리)
     """
 
     def __init__(self) -> None:
@@ -558,12 +581,16 @@ class BithumbWsClient:
         self._redis_writer: BithumbRedisWriter = BithumbRedisWriter()
         # U6 DB writer (1s window debounce). Upbit upbit.py:616 mirror.
         self._db_writer: BithumbDbWriter = BithumbDbWriter()
-        # U6 REST fallback controller (silent probe). alert_evaluator 인자 제외 —
-        # U7 영역. Upbit upbit.py:621-625 mirror minus alert.
+        # U7 Alert evaluator (observation-based, source-neutral helper 재사용).
+        # Upbit upbit.py:618 mirror — Bithumb client 자체 instance 보유.
+        self._alert_evaluator: UsdtAlertEvaluator = UsdtAlertEvaluator()
+        # U6 REST fallback controller (silent probe).
+        # U7: alert_evaluator inject 추가 (Upbit upbit.py:621-625 mirror).
         self._fallback_controller: BithumbRestFallbackController = (
             BithumbRestFallbackController(
                 redis_writer=self._redis_writer,
                 db_writer=self._db_writer,
+                alert_evaluator=self._alert_evaluator,
             )
         )
 
@@ -656,7 +683,9 @@ class BithumbWsClient:
             normal 복귀 시 `fallback_controller.reset_cooldown` 호출 (A8).
             Redis/DB direct write는 여전히 X — fallback controller가 그 경로를
             schedule_probe → REST → writer.schedule로 우회하여 들어감.
-        U7 영역: alert evaluator hook 없음 (별도 stage).
+        U7 결정: alert evaluator hook은 `_set_status`가 아니라 `_run_one_session` 및
+            `_run_probe`에서 호출 (tick/probe path 양쪽). status 전이 자체는 alert
+            발화 trigger가 아니므로 _set_status는 fallback hook만 유지.
 
         Upbit upbit.py:728-735 mirror.
         """
@@ -766,8 +795,8 @@ class BithumbWsClient:
                             logger.info("[usdt_ws.bithumb] connection closed after stop")
                             return
                         raise
-                    # valid ticker만 liveness activity + Redis/DB writer schedule.
-                    # invalid/non-ticker frame은 모두 X (U5 acceptance 7).
+                    # valid ticker만 liveness activity + Redis/DB/Alert schedule.
+                    # invalid/non-ticker frame은 모두 X (U7 acceptance 4).
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
@@ -775,7 +804,15 @@ class BithumbWsClient:
                         self._redis_writer.schedule(tick)
                         # U6: DB writer schedule (1s window debounce, race-prevention)
                         self._db_writer.schedule(tick)
-                    # U7 영역: AlertObservation schedule (현재 미추가).
+                        # U7: AlertObservation schedule (source-neutral evaluator 재사용)
+                        observation = AlertObservation(
+                            source=tick["source"],
+                            asset=tick["asset"],
+                            rate=tick["rate"],
+                            timestamp_ms=tick["timestamp_ms"],
+                            kind="tick",  # WS tick (Upbit upbit.py:906 mirror)
+                        )
+                        self._alert_evaluator.schedule(observation)
             finally:
                 # U4 Acceptance 3: ping task cancel/await 보장.
                 ping_task.cancel()
@@ -785,10 +822,9 @@ class BithumbWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.bithumb] ping_task cleanup 실패")
-                # U6 A9 close 순서: fallback → DB → Redis. fallback이 모든 writer를
-                # schedule할 수 있으므로 먼저 멈춰야 downstream writer 들이 깔끔히 drain.
-                # (alert evaluator는 U7 영역이라 close 순서 3개만. Upbit upbit.py:920-940
-                # 4개 순서 중 alert 제외.)
+                # U7 close 순서: fallback → DB → Alert → Redis (4개, Upbit upbit.py:920-940
+                # mirror). fallback이 모든 writer를 schedule할 수 있으므로 먼저 멈춰야
+                # downstream writer 들이 깔끔히 drain. Redis는 DB/Alert 확정 후 마지막.
                 # U6 fallback controller: pending probe task cancel.
                 try:
                     await self._fallback_controller.close()
@@ -799,6 +835,12 @@ class BithumbWsClient:
                     await self._db_writer.close()
                 except Exception:
                     logger.exception("[usdt_ws.bithumb] db_writer.close() 실패")
+                # U7 Alert evaluator drain (5s timeout — FCM 보호, Upbit upbit.py:931-935 mirror).
+                # 예외 격리: WS loop에 전파 X (A7 격리).
+                try:
+                    await self._alert_evaluator.close()
+                except Exception:
+                    logger.exception("[usdt_ws.bithumb] alert_evaluator.close() 실패")
                 # U5 A13 lifecycle: session-level Redis writer close — pending tasks
                 # drain (1s) + timeout cancel → _tasks.clear(). Upbit upbit.py:938
                 # mirror. close 후에도 writer instance는 동일 (reconnect 재사용).
