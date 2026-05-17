@@ -496,3 +496,109 @@ def is_close_snapshot_eligible(
     if session == "CM":
         return is_krx_business_day(today_kst - timedelta(days=1))
     raise ValueError(f"unknown session: {session!r}")
+
+
+# ---------------------------------------------------------------------------
+# Close finalizer window helpers — KRX_CLOSE_SNAPSHOT_PLAN §5.2 (2026-05-17)
+# ---------------------------------------------------------------------------
+# Stage 1 (2026-05-17): helper functions only — pure deterministic.
+# 후속 stages에서 KrxCloseWindowWriter / WS grace drain / scheduler 통합 시 사용.
+
+# Close decision-point grace window (60s): boundary 직후 KIS frame capture 보장
+# CF close: 15:45:00 ~ 15:45:59 KST (15:46:00 exclusive)
+# CM close: 06:00:00 ~ 06:00:59 KST (06:01:00 exclusive)
+_CF_CLOSE_GRACE_START = time(15, 45, 0)
+_CF_CLOSE_GRACE_END = time(15, 46, 0)
+_CM_CLOSE_GRACE_START = time(6, 0, 0)
+_CM_CLOSE_GRACE_END = time(6, 1, 0)
+
+# Single-price auction window (close 확정 제외, telemetry only)
+# CF: 15:35:00 ~ 15:44:59 KST (10분, KRX 종가 단일가)
+# CM: 05:50:00 ~ 05:59:59 KST (10분, KRX 야간 종가 단일가)
+_CF_SINGLE_PRICE_START = time(15, 35, 0)
+_CM_SINGLE_PRICE_START = time(5, 50, 0)
+
+
+def is_in_close_grace_window(
+    now: datetime,
+    session: Optional[Literal["CF", "CM"]],
+) -> bool:
+    """Close decision-point grace window(60초)인지.
+
+    KRX_CLOSE_SNAPSHOT_PLAN §5.2 — boundary 직후 KIS frame capture 보장.
+    CF close: 15:45:00 ~ 15:45:59 KST
+    CM close: 06:00:00 ~ 06:00:59 KST
+
+    Args:
+        now: KST datetime (aware 또는 naive 모두 허용 — `.time()` 사용)
+        session: "CF" / "CM" / None (휴장 → always False)
+
+    Returns:
+        True면 close grace window 안.
+    """
+    if session is None:
+        return False
+    t = now.time()
+    if session == "CF":
+        return _CF_CLOSE_GRACE_START <= t < _CF_CLOSE_GRACE_END
+    if session == "CM":
+        return _CM_CLOSE_GRACE_START <= t < _CM_CLOSE_GRACE_END
+    return False
+
+
+def is_in_single_price_window(
+    now: datetime,
+    session: Optional[Literal["CF", "CM"]],
+) -> bool:
+    """Single-price auction window인지 (close 확정 제외, telemetry only).
+
+    KRX_CLOSE_SNAPSHOT_PLAN §5.2 — 단일가 진행 시간 frame은 잔여 echo로 분류.
+    CF: 15:35:00 ~ 15:44:59 KST
+    CM: 05:50:00 ~ 05:59:59 KST
+
+    Args:
+        now: KST datetime
+        session: "CF" / "CM" / None
+
+    Returns:
+        True면 single-price auction window 안.
+    """
+    if session is None:
+        return False
+    t = now.time()
+    if session == "CF":
+        return _CF_SINGLE_PRICE_START <= t < _CF_CLOSE_GRACE_START
+    if session == "CM":
+        return _CM_SINGLE_PRICE_START <= t < _CM_CLOSE_GRACE_START
+    return False
+
+
+def compute_close_grace_end_kst(
+    now: datetime,
+    session: Literal["CF", "CM"],
+) -> datetime:
+    """Close grace window 종료 시각 (KST aware) — 후속 stages 사용.
+
+    CF: 15:46:00 KST (15:45:59까지 listen, 15:46:00 정각에 flush)
+    CM: 06:01:00 KST
+
+    Args:
+        now: 현재 KST datetime (date 추출용; aware/naive 모두 허용)
+        session: "CF" / "CM"
+
+    Returns:
+        KST aware datetime (window 종료 정각, exclusive boundary).
+    """
+    if session == "CF":
+        return datetime(
+            now.year, now.month, now.day,
+            15, 46, 0, 0,
+            tzinfo=KST,
+        )
+    if session == "CM":
+        return datetime(
+            now.year, now.month, now.day,
+            6, 1, 0, 0,
+            tzinfo=KST,
+        )
+    raise ValueError(f"unknown session: {session!r}")
