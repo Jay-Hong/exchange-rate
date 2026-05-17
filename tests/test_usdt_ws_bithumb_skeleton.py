@@ -36,6 +36,11 @@ from app.crawlers.usdt_ws.bithumb import (
     BITHUMB_SUBSCRIBE_TICKET,
     BITHUMB_TARGET_CODE,
     BITHUMB_WS_URL,
+    PING_INTERVAL_SEC,
+    PING_TIMEOUT_SEC,
+    RECONNECT_BACKOFF_SEQ,
+    RECONNECT_BACKOFF_TAIL,
+    STALE_AFTER_SEC,
     BithumbWsClient,
 )
 
@@ -195,10 +200,17 @@ class TestBithumbWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
     """U2 skeleton: __init__ + start (stop_event 대기) + stop (set)."""
 
     async def test_init_state(self):
-        """__init__ → stop_event (not set) + running False."""
+        """__init__ → stop_event (not set) + running False + U4 state defaults."""
         client = BithumbWsClient()
         self.assertFalse(client._stop_event.is_set())
         self.assertFalse(client._running)
+        # U4 state — liveness + status + transition_count + reconnect_attempt_count
+        self.assertIsNotNone(client._liveness)
+        self.assertEqual(client._status, "normal")
+        self.assertEqual(client._status_transition_count, {
+            "normal": 0, "reconnecting": 0, "stale": 0,
+        })
+        self.assertEqual(client._reconnect_attempt_count, 0)
 
     async def test_start_waits_for_stop_event(self):
         """start → stop_event 대기 (running=True, no network).
@@ -516,6 +528,282 @@ class TestFlagFalseInvariantU3Regression(unittest.IsolatedAsyncioTestCase):
              patch("app.crawlers.usdt_ws.bithumb.BithumbWsClient") as mock_client_cls:
             await scheduler.start_usdt_ws_bithumb_client()
         mock_client_cls.assert_not_called()
+        self.assertIsNone(scheduler.usdt_ws_bithumb_client)
+        self.assertIsNone(scheduler.usdt_ws_bithumb_task)
+
+
+# ---------------------------------------------------------------------------
+# Stage U4 — _set_status / _compute_backoff / status transitions
+# ---------------------------------------------------------------------------
+
+class TestSetStatus(unittest.TestCase):
+    """_set_status — counter + log only (Redis/DB/fallback X)."""
+
+    def test_set_status_updates_counter_and_log(self):
+        """status 전이 시 counter ++ + log emit."""
+        client = BithumbWsClient()
+        # normal → reconnecting
+        client._set_status("reconnecting")
+        self.assertEqual(client._status, "reconnecting")
+        self.assertEqual(client._status_transition_count["reconnecting"], 1)
+        # reconnecting → stale
+        client._set_status("stale")
+        self.assertEqual(client._status, "stale")
+        self.assertEqual(client._status_transition_count["stale"], 1)
+        # stale → normal
+        client._set_status("normal")
+        self.assertEqual(client._status, "normal")
+        self.assertEqual(client._status_transition_count["normal"], 1)
+
+    def test_set_status_skip_when_same(self):
+        """현재 status와 같으면 counter ++ skip."""
+        client = BithumbWsClient()
+        client._set_status("normal")  # already normal
+        self.assertEqual(client._status_transition_count["normal"], 0)
+
+    def test_set_status_unknown_status_no_counter(self):
+        """알 수 없는 status — _status 갱신은 되지만 counter 증가 X."""
+        client = BithumbWsClient()
+        client._set_status("unknown")
+        self.assertEqual(client._status, "unknown")
+        # 'unknown' is not in transition_count dict → 증가 안 함
+        self.assertEqual(
+            client._status_transition_count,
+            {"normal": 0, "reconnecting": 0, "stale": 0},
+        )
+
+
+class TestComputeBackoff(unittest.TestCase):
+    """_compute_backoff — Upbit/KRX 동일 sequence."""
+
+    def test_compute_backoff_sequence(self):
+        """attempt=1..6 → SEQ, 7+ → TAIL."""
+        for i, expected in enumerate(RECONNECT_BACKOFF_SEQ, start=1):
+            self.assertEqual(BithumbWsClient._compute_backoff(i), expected)
+        # 7+ → TAIL
+        self.assertEqual(BithumbWsClient._compute_backoff(7), RECONNECT_BACKOFF_TAIL)
+        self.assertEqual(BithumbWsClient._compute_backoff(100), RECONNECT_BACKOFF_TAIL)
+
+    def test_compute_backoff_zero_or_negative(self):
+        """attempt <= 0 → SEQ[0]."""
+        self.assertEqual(BithumbWsClient._compute_backoff(0), RECONNECT_BACKOFF_SEQ[0])
+        self.assertEqual(BithumbWsClient._compute_backoff(-1), RECONNECT_BACKOFF_SEQ[0])
+
+
+# ---------------------------------------------------------------------------
+# Stage U4 — reconnect loop (acceptance 2, 6, 7) — bounded fixture
+# ---------------------------------------------------------------------------
+
+class TestReconnectLoop(unittest.IsolatedAsyncioTestCase):
+    """start() reconnect loop — bounded fixture (sleep mock + connect mock)."""
+
+    async def test_connection_closed_increments_attempt_count(self):
+        """ConnectionClosed → _reconnect_attempt_count ++ (acceptance 6).
+
+        bounded: _run_one_session이 ConnectionClosed raise → backoff (mock) →
+        stop_event set → break. attempt 1.
+        """
+        from websockets.exceptions import ConnectionClosed
+        client = BithumbWsClient()
+
+        call_count = {"n": 0}
+
+        async def fake_run_session():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # 첫 호출: ConnectionClosed raise
+                raise ConnectionClosed(None, None)
+            # 두 번째 호출 진입 직전 stop → break
+            client._stop_event.set()
+            await asyncio.sleep(0)
+
+        # backoff sleep mock (asyncio.wait_for inside backoff)
+        with patch.object(
+            BithumbWsClient, "_run_one_session", side_effect=fake_run_session,
+        ), patch("app.crawlers.usdt_ws.bithumb.websockets.connect") as mock_connect:
+            await asyncio.wait_for(client.start(), timeout=5.0)
+
+        # ConnectionClosed → attempt ++
+        self.assertEqual(client._reconnect_attempt_count, 1)
+        # status reconnecting 전이 1회
+        self.assertEqual(client._status_transition_count["reconnecting"], 1)
+        # no-network — connect mock unused (run_one_session 자체가 mock)
+        mock_connect.assert_not_called()
+
+    async def test_stop_during_backoff_breaks_immediately(self):
+        """backoff 중 stop_event 도달 → 즉시 break (acceptance 7).
+
+        backoff sleep을 wait_for(stop_event.wait(), timeout=backoff)로 구현 →
+        stop_event set 시 즉시 반응.
+        """
+        from websockets.exceptions import ConnectionClosed
+        client = BithumbWsClient()
+
+        async def fake_run_session():
+            raise ConnectionClosed(None, None)  # 매번 raise → backoff 진입
+
+        async def stop_soon():
+            await asyncio.sleep(0.01)
+            client._stop_event.set()
+
+        with patch.object(
+            BithumbWsClient, "_run_one_session", side_effect=fake_run_session,
+        ), patch("app.crawlers.usdt_ws.bithumb.websockets.connect") as mock_connect:
+            stop_task = asyncio.create_task(stop_soon())
+            await asyncio.wait_for(client.start(), timeout=5.0)
+            await stop_task
+
+        # stop_event 도달로 backoff 중 break — running False
+        self.assertFalse(client._running)
+        # attempt 1 (첫 ConnectionClosed)
+        self.assertGreaterEqual(client._reconnect_attempt_count, 1)
+        mock_connect.assert_not_called()
+
+    async def test_double_start_skipped(self):
+        """이미 running이면 두 번째 start 즉시 return (no-network)."""
+        client = BithumbWsClient()
+
+        async def fake_run_session():
+            await client._stop_event.wait()
+
+        with patch.object(
+            BithumbWsClient, "_run_one_session", side_effect=fake_run_session,
+        ), patch("app.crawlers.usdt_ws.bithumb.websockets.connect") as mock_connect:
+            task1 = asyncio.create_task(client.start())
+            await asyncio.sleep(0.01)
+            self.assertTrue(client._running)
+            # 두 번째 start — 즉시 return
+            await client.start()
+            self.assertFalse(task1.done())
+            # cleanup
+            await client.stop()
+            await asyncio.wait_for(task1, timeout=1.0)
+        mock_connect.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage U4 — ping loop (acceptance 3, 5)
+# ---------------------------------------------------------------------------
+
+class TestPingLoop(unittest.IsolatedAsyncioTestCase):
+    """_ping_loop — heartbeat observation (liveness only), session 종료 시 cancel/await."""
+
+    async def test_ping_pong_observes_heartbeat_liveness_only(self):
+        """ping → pong 성공 → _liveness.observe_heartbeat 호출. status 직접 변경 X.
+
+        acceptance 5: heartbeat/pong → liveness만.
+        """
+        client = BithumbWsClient()
+        initial_status = client._status
+
+        # ping 1회 성공 후 stop_event set (2번째 iteration entry guard에서 exit)
+        ping_call_count = {"n": 0}
+
+        async def fake_ping():
+            ping_call_count["n"] += 1
+            # ping 호출 후 stop_event set — 다음 iteration 진입 차단
+            client._stop_event.set()
+            pong_waiter = asyncio.Future()
+            pong_waiter.set_result(None)
+            return pong_waiter
+
+        async def fake_sleep(duration):
+            # 첫 PING_INTERVAL_SEC sleep은 즉시 통과해서 ping 진입.
+            # 두 번째는 entry guard에서 stop_event 감지로 exit.
+            return
+
+        ws_mock = AsyncMock()
+        ws_mock.ping = fake_ping
+
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep), \
+             patch.object(client._liveness, "observe_heartbeat") as mock_observe:
+            await client._ping_loop(ws_mock)
+
+        # ping 호출 + observe_heartbeat 호출 (status 변경은 _set_status에서만)
+        self.assertEqual(ping_call_count["n"], 1)
+        mock_observe.assert_called_once()
+        # status 직접 변경 X
+        self.assertEqual(client._status, initial_status)
+
+    async def test_ping_failure_closes_ws_and_returns(self):
+        """ping timeout → ws.close() + return (reconnect trigger은 recv loop가).
+
+        Codex L1: asyncio.wait_for global patch 제거. ws.ping이 직접 TimeoutError
+        raise하므로 `except (asyncio.TimeoutError, ConnectionClosed)` catch path
+        진입 — wait_for(pong) 단계까지 도달하지 않음.
+        """
+        client = BithumbWsClient()
+
+        async def fake_sleep(duration):
+            return  # 즉시 진행
+
+        ws_mock = AsyncMock()
+        ws_mock.ping = AsyncMock(side_effect=asyncio.TimeoutError)
+        ws_mock.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep):
+            await client._ping_loop(ws_mock)
+
+        # ws.close 호출됨 (ping 실패 path)
+        ws_mock.close.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage U4 — stale transition (acceptance 4)
+# ---------------------------------------------------------------------------
+
+class TestStaleTransition(unittest.TestCase):
+    """stale 전이 — Redis/DB/fallback X, status/log/counter만 (acceptance 4)."""
+
+    def test_set_status_stale_no_side_effects(self):
+        """_set_status('stale') → counter ++ + log emit. Redis/DB/fallback attribute 없음."""
+        client = BithumbWsClient()
+        # U4 시점: client에 redis_writer/db_writer/fallback_controller attribute 자체 없음
+        # → side-effect 자연 차단 (자기 검증)
+        self.assertFalse(hasattr(client, "_redis_writer"))
+        self.assertFalse(hasattr(client, "_db_writer"))
+        self.assertFalse(hasattr(client, "_fallback_controller"))
+        self.assertFalse(hasattr(client, "_alert_evaluator"))
+
+        client._set_status("stale")
+        self.assertEqual(client._status, "stale")
+        self.assertEqual(client._status_transition_count["stale"], 1)
+
+    def test_set_status_stale_to_normal_recovery(self):
+        """stale → normal 복귀도 동일 — counter + log만."""
+        client = BithumbWsClient()
+        client._set_status("stale")
+        client._set_status("normal")
+        self.assertEqual(client._status, "normal")
+        self.assertEqual(client._status_transition_count["stale"], 1)
+        self.assertEqual(client._status_transition_count["normal"], 1)
+
+
+# ---------------------------------------------------------------------------
+# Stage U4 — flag=false invariant 재검증 (acceptance 1, Codex 강조)
+# ---------------------------------------------------------------------------
+
+class TestFlagFalseInvariantU4Regression(unittest.IsolatedAsyncioTestCase):
+    """U4 누적 후에도 flag=false invariant 유지 검증.
+
+    Codex 강조 (Stage U4 acceptance 1): liveness/reconnect/ping 코드 추가돼도
+    flag=false에서는 BithumbWsClient 생성 자체가 없어야 함.
+    """
+
+    def setUp(self):
+        _reset_scheduler_usdt_ws_bithumb_globals()
+
+    def tearDown(self):
+        _reset_scheduler_usdt_ws_bithumb_globals()
+
+    async def test_flag_false_skips_even_after_u4_added(self):
+        """U4 코드 누적 후에도 flag=false → BithumbWsClient 생성 X + connect 0."""
+        with patch.object(config, "USDT_WS_BITHUMB_ENABLED", False), \
+             patch("app.crawlers.usdt_ws.bithumb.BithumbWsClient") as mock_client_cls, \
+             patch("app.crawlers.usdt_ws.bithumb.websockets.connect") as mock_connect:
+            await scheduler.start_usdt_ws_bithumb_client()
+        mock_client_cls.assert_not_called()
+        mock_connect.assert_not_called()
         self.assertIsNone(scheduler.usdt_ws_bithumb_client)
         self.assertIsNone(scheduler.usdt_ws_bithumb_task)
 

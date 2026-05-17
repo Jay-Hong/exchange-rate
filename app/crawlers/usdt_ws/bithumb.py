@@ -1,30 +1,39 @@
-"""USDT WebSocket — Bithumb canary client (Phase B.3 Stage U3 connect/subscribe/parse).
+"""USDT WebSocket — Bithumb canary client (Phase B.3 Stage U2-U4).
 
-USDT_WS_DESIGN_PLAN §12.5 Phase B.3 Stage U2-U3.
-Upbit Phase B.1 PR1-PR2 패턴 작은 복제 (KRX close finalizer 분할 학습 — 큰 추상화 금지).
+USDT_WS_DESIGN_PLAN §12.5 Phase B.3 Stage U2-U4.
+Upbit Phase B.1 PR1-PR3 패턴 작은 복제 (KRX close finalizer 분할 학습 — 큰 추상화 금지).
 
 U2 누적 (lifecycle skeleton):
     - `_stop_event` + `_running` (network/Redis/DB import 없음)
     - flag=false 시 scheduler가 BithumbWsClient 자체를 생성 안 함 (acceptance)
 
-U3 (현재): connect/subscribe/parse + log only.
+U3 누적 (connect/subscribe/parse + log only):
     - Bithumb WS endpoint + ticket + target code 상수
     - `_build_subscribe_payload` (Upbit-compatible)
     - `_parse_ticker_message` (Upbit-compatible payload format)
-    - `_handle_message` (parse + first_tick log + tick log, downstream IO 없음)
-    - `_run_one_session` (connect + subscribe + recv loop + parse, no reconnect)
-    - `start` (U2 stop_event 대기 → U3 single session loop)
-    - NO reconnect/liveness (U4)
-    - NO Redis/DB/topic/fallback (U5/U6)
+    - `_handle_message` (parse + first_tick log + tick log)
+    - `_run_one_session` (single connect + subscribe + recv loop)
 
-Bithumb Upbit-compatible 근거 (USDT_EXCHANGE_WEBSOCKET_GUIDE §4 +
-2026-05-17 Python websockets smoke 재확인):
-    - Subscribe message format 동일: `[{ticket}, {type=ticker, codes=["KRW-USDT"]}, {format=DEFAULT}]`
-    - Payload format 동일: `{type=ticker, code, trade_price, trade_timestamp, timestamp}`
-    - 파싱 동일: `float(trade_price)` + `int(trade_timestamp or timestamp)`
+U4 (현재): UsdtLivenessMonitor 재사용 + reconnect + ping/pong heartbeat.
+    - `UsdtLivenessMonitor` 재사용 (source-neutral, app/crawlers/usdt_ws/upbit.py:125)
+    - `_status` + `_status_transition_count` + `_reconnect_attempt_count`
+    - `_set_status` — counter + log only (Redis/DB/fallback hook 없음, U5/U6 영역)
+    - `_compute_backoff` — Upbit 동일 sequence (1, 2, 4, 8, 16, 30s tail)
+    - `_ping_loop` — 20s ping + pong → `_liveness.observe_heartbeat` (§5 provisional 30s)
+    - `_run_one_session` 확장 — liveness reset + stale check + ping_task lifecycle
+    - `start` reconnect loop — Upbit PR3 backoff sequence mirror
+
+U4 핵심 acceptance (Codex 합의):
+    1. flag=false invariant 유지 (client 생성 0, network 0)
+    2. reconnect loop bounded (테스트에서 무한 X, backoff sleep mock)
+    3. ping task session 종료 시 cancel/await (finally 블록)
+    4. stale 전이 — Redis/DB/fallback X, status/log/counter only
+    5. heartbeat/pong → liveness만 (status 직접 변경 X)
+    6. ConnectionClosed → reconnect_attempt_count ++
+    7. stop() 빠른 종료 — reconnect/ping loop stop_event 즉시 반응
+    8. live websockets.connect mock 통제 (모든 lifecycle test)
 
 후속 stage 예정 (별도 GO):
-    U4: UsdtLivenessMonitor 재사용 + reconnect + ping/pong heartbeat
     U5: BithumbRedisWriter (tick-level) + topic trigger 자동 발화
     U6: BithumbDbWriter (1초 window) + BithumbRestFallbackController +
         fetch_bithumb_usdt_tick() normalized REST helper
@@ -39,9 +48,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 import websockets
+from websockets.exceptions import ConnectionClosed
+
+# UsdtLivenessMonitor 재사용 — source-neutral (Upbit 패턴 import)
+from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.bithumb")
 
@@ -57,28 +71,55 @@ BITHUMB_TARGET_CODE = "KRW-USDT"
 # U3 recv loop timeout — Upbit 동일 (stop_event 즉시 반응 + 정상 idle 허용)
 RECV_TIMEOUT_SEC = 1.0
 
+# U4 §5 silence threshold — Bithumb heartbeat 공식 미명시 (USDT_EXCHANGE_WEBSOCKET_GUIDE
+# §4 + §1.1 Phase B.0 재확인 2026-05-14) → provisional 30s 유지 (Upbit 동일).
+STALE_AFTER_SEC = 30.0
+
+# U4 Explicit heartbeat — websockets 자동 ping/pong은 recv()로 노출 X.
+# §5 frame/heartbeat liveness 관찰 위해 직접 ping 관리 (Upbit/KRX 패턴 mirror).
+PING_INTERVAL_SEC = 20.0  # 매 20s ping (STALE_AFTER_SEC 30s 이내 회복)
+PING_TIMEOUT_SEC = 10.0   # pong 대기 시간
+
+# U4 Reconnect backoff sequence — Upbit/KRX 동일.
+RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
+RECONNECT_BACKOFF_TAIL = 30.0
+
 
 class BithumbWsClient:
-    """Bithumb USDT/KRW WebSocket client — U3 connect/subscribe/parse + log only.
+    """Bithumb USDT/KRW WebSocket client — U2-U4 누적.
 
-    State (U3):
+    State (U4):
         - `_stop_event`: stop signal (asyncio.Event)
         - `_running`: 중복 start 방지 flag
         - `_ws`: active WebSocketClientProtocol (session 안에서만)
         - `_first_tick_logged`: first tick INFO log 1회 emit 후 DEBUG로 격하
+        - `_liveness`: UsdtLivenessMonitor (frame/heartbeat gap state)
+        - `_status`: "normal" | "reconnecting" | "stale"
+        - `_status_transition_count`: status별 전이 count (telemetry)
+        - `_reconnect_attempt_count`: ConnectionClosed/Exception 누적 attempt
 
-    U3 핵심:
-        - Single-session connect + subscribe + recv loop
-        - parse + log only (downstream IO 없음)
-        - No reconnect (U4), no liveness/heartbeat (U4)
-        - No Redis/DB/topic/fallback (U5/U6)
+    U4 핵심:
+        - Reconnect loop (start) + backoff sequence
+        - ping/pong heartbeat (observe via UsdtLivenessMonitor)
+        - stale 전이 — status/log/counter only (Redis/DB/fallback 영역 X)
+
+    NO Redis/DB/topic/fallback (U5/U6에서 추가 예정).
     """
 
     def __init__(self) -> None:
+        # U2 lifecycle
         self._stop_event: asyncio.Event = asyncio.Event()
         self._running: bool = False
+        # U3 session state
         self._ws: Optional[Any] = None
         self._first_tick_logged: bool = False
+        # U4 liveness + reconnect state
+        self._liveness: UsdtLivenessMonitor = UsdtLivenessMonitor()
+        self._status: str = "normal"
+        self._status_transition_count: dict[str, int] = {
+            "normal": 0, "reconnecting": 0, "stale": 0,
+        }
+        self._reconnect_attempt_count: int = 0
 
     @staticmethod
     def _build_subscribe_payload() -> list[dict]:
@@ -92,18 +133,13 @@ class BithumbWsClient:
     def _parse_ticker_message(self, raw) -> Optional[dict]:
         """Bithumb ticker frame → normalized tick dict, None on invalid/ignore.
 
-        Accepts bytes (utf-8 JSON), str (JSON), or dict (pre-parsed for tests).
-        Normalized shape (U5+ 재사용 계약, Upbit fetch_upbit_usdt_tick contract 일치):
+        Normalized shape (Upbit fetch_upbit_usdt_tick contract 일치):
             {"source": "bithumb", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}
 
-        Bithumb payload format (Upbit-compatible, USDT_EXCHANGE_WEBSOCKET_GUIDE §4):
-            {"type": "ticker", "code": "KRW-USDT", "trade_price": <number>,
-             "trade_timestamp": <ms>, "timestamp": <ms>, "stream_type": "REALTIME"/"SNAPSHOT"}
-
         Guard (Upbit 패턴 mirror):
-            - 0/negative rate → None (잘못된 fanout 차단)
+            - 0/negative rate → None
             - timestamp missing → None
-            - type != "ticker" or code != KRW-USDT → None (다른 frame 무시)
+            - type != "ticker" or code != KRW-USDT → None
         """
         if isinstance(raw, bytes):
             try:
@@ -152,8 +188,8 @@ class BithumbWsClient:
     def _handle_message(self, raw) -> Optional[dict]:
         """parse + log only. Returns normalized tick dict or None.
 
-        U3 시점: downstream IO 없음 (Redis/DB/alert는 U5/U6).
-        non-ticker (status / 다른 code / parse 실패) → None (silent skip).
+        U4 시점: downstream IO 없음 (Redis/DB/alert는 U5/U6).
+        valid tick → liveness.observe_tick은 caller (_run_one_session)에서 호출.
         """
         tick = self._parse_ticker_message(raw)
         if tick is None:
@@ -165,11 +201,73 @@ class BithumbWsClient:
             logger.debug("[usdt_ws.bithumb] tick", extra=tick)
         return tick
 
-    async def _run_one_session(self) -> None:
-        """단일 connect → subscribe → recv loop. U3은 reconnect 없음.
+    def _set_status(self, new_status: str) -> None:
+        """status 전이 + counter + log.
 
-        Upbit `_run_one_session` PR2 시점 mirror — liveness/Redis/DB/alert/fallback 없음.
-        U4에서 reconnect + UsdtLivenessMonitor + ping/pong 추가 예정.
+        U4 시점: counter + log only.
+        Redis/DB/fallback hook은 U5/U6 영역 — 본 stage에서 호출 0 (acceptance 4).
+        """
+        if self._status == new_status:
+            return
+        prev = self._status
+        self._status = new_status
+        if new_status in self._status_transition_count:
+            self._status_transition_count[new_status] += 1
+        logger.info(
+            "[usdt_ws.bithumb] status %s → %s (gap_buckets=%s max_gap=%.2fs)",
+            prev, new_status,
+            self._liveness.gap_buckets, self._liveness.max_frame_gap_sec,
+        )
+
+    @staticmethod
+    def _compute_backoff(attempt: int) -> float:
+        """Reconnect backoff — Upbit/KRX 동일 sequence."""
+        if attempt <= 0:
+            return RECONNECT_BACKOFF_SEQ[0]
+        if attempt <= len(RECONNECT_BACKOFF_SEQ):
+            return RECONNECT_BACKOFF_SEQ[attempt - 1]
+        return RECONNECT_BACKOFF_TAIL
+
+    async def _ping_loop(self, ws) -> None:
+        """주기적 ping → pong 성공 시 heartbeat observation (§5 준수).
+
+        실패/timeout 시 ws.close() → recv loop가 ConnectionClosed 감지 →
+        start() reconnect 트리거. ping_loop 자체는 silently return.
+
+        Acceptance 5: heartbeat/pong → liveness만 (status 직접 변경 X).
+        """
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(PING_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                return
+            if self._stop_event.is_set():
+                return
+            try:
+                pong_waiter = await ws.ping()
+                await asyncio.wait_for(pong_waiter, timeout=PING_TIMEOUT_SEC)
+                self._liveness.observe_heartbeat(time.time())
+            except asyncio.CancelledError:
+                return
+            except (asyncio.TimeoutError, ConnectionClosed) as exc:
+                logger.warning(
+                    "[usdt_ws.bithumb] ping failed: %s — closing ws for reconnect",
+                    type(exc).__name__,
+                )
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+                return
+
+    async def _run_one_session(self) -> None:
+        """단일 connect → subscribe → recv loop + ping_loop background.
+
+        §5 준수: ping_interval=None (websockets auto-ping 비활성) + explicit
+        _ping_loop으로 heartbeat 직접 관찰. last_activity_at 기준 stale 판정.
+
+        Acceptance 3: ping task session 종료 시 cancel/await (finally 블록).
+        Acceptance 4: stale 전이 — status/log/counter only.
         """
         async with websockets.connect(
             BITHUMB_WS_URL,
@@ -178,6 +276,7 @@ class BithumbWsClient:
             open_timeout=10,
         ) as ws:
             self._ws = ws
+            self._liveness.reset_active_session()
             logger.info("[usdt_ws.bithumb] connected url=%s", BITHUMB_WS_URL)
             payload = self._build_subscribe_payload()
             await ws.send(json.dumps(payload))
@@ -185,50 +284,116 @@ class BithumbWsClient:
                 "[usdt_ws.bithumb] subscribed code=%s ticket=%s",
                 BITHUMB_TARGET_CODE, BITHUMB_SUBSCRIBE_TICKET,
             )
+            self._set_status("normal")
 
-            while not self._stop_event.is_set():
+            ping_task = asyncio.create_task(self._ping_loop(ws))
+            try:
+                while not self._stop_event.is_set():
+                    now = time.time()
+                    # stale check — last_activity_at (max tick/heartbeat) 기준 (§5)
+                    if self._status != "stale" and self._liveness.is_stale(now, STALE_AFTER_SEC):
+                        self._set_status("stale")
+                    elif self._status == "stale" and not self._liveness.is_stale(now, STALE_AFTER_SEC):
+                        self._set_status("normal")
+
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_SEC)
+                    except asyncio.TimeoutError:
+                        continue
+                    except ConnectionClosed:
+                        if self._stop_event.is_set():
+                            logger.info("[usdt_ws.bithumb] connection closed after stop")
+                            return
+                        raise
+                    # valid ticker만 liveness activity. invalid/non-ticker는 X.
+                    tick = self._handle_message(raw)
+                    if tick is not None:
+                        self._liveness.observe_tick(time.time())
+                    # U4: Redis/DB/alert schedule 없음 (U5/U6에서 추가).
+            finally:
+                # Acceptance 3: ping task cancel/await 보장.
+                ping_task.cancel()
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_SEC)
-                except asyncio.TimeoutError:
-                    continue
-                except websockets.ConnectionClosed:
-                    if self._stop_event.is_set():
-                        logger.info("[usdt_ws.bithumb] connection closed after stop")
-                        return
-                    raise
-                # U3: parse + log only. downstream IO는 U5/U6에서 추가.
-                self._handle_message(raw)
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("[usdt_ws.bithumb] ping_task cleanup 실패")
 
     async def start(self) -> None:
-        """U3 single-session start — connect + subscribe + recv loop.
+        """reconnect 루프. 단일 session crash 시 backoff 후 재시도.
 
-        중복 start 방지. stop_event 도달 또는 ConnectionClosed/Exception 시 종료.
-        U4에서 reconnect loop + backoff 추가 예정.
+        Acceptance 2: bounded (test에서 backoff sleep mock으로 즉시 진행).
+        Acceptance 6: ConnectionClosed → _reconnect_attempt_count ++.
+        Acceptance 7: stop_event 도달 시 빠른 종료 (wait_for + timeout 즉시 반응).
+
+        Upbit PR3 start() 패턴 mirror.
         """
         if self._running:
             logger.debug("[usdt_ws.bithumb] 이미 실행 중, 중복 start 무시")
             return
         self._running = True
-        logger.info("[usdt_ws.bithumb] start (U3 single session)")
+        logger.info("[usdt_ws.bithumb] start (U4 reconnect loop)")
+        attempt = 0
         try:
-            await self._run_one_session()
-        except asyncio.CancelledError:
-            raise
-        except websockets.ConnectionClosed as exc:
-            logger.warning("[usdt_ws.bithumb] connection closed: %s", exc)
-        except Exception as exc:
-            logger.warning(
-                "[usdt_ws.bithumb] session error: %s: %s",
-                type(exc).__name__, exc,
-            )
+            while not self._stop_event.is_set():
+                try:
+                    await self._run_one_session()
+                    if self._stop_event.is_set():
+                        break
+                    attempt = 0
+                except asyncio.CancelledError:
+                    raise
+                except ConnectionClosed as exc:
+                    if self._stop_event.is_set():
+                        break
+                    self._set_status("reconnecting")
+                    attempt += 1
+                    self._reconnect_attempt_count += 1
+                    backoff = self._compute_backoff(attempt)
+                    logger.warning(
+                        "[usdt_ws.bithumb] connection closed (attempt %d): %s — backoff %.1fs",
+                        attempt, exc, backoff,
+                    )
+                except Exception as exc:
+                    if self._stop_event.is_set():
+                        break
+                    self._set_status("reconnecting")
+                    attempt += 1
+                    self._reconnect_attempt_count += 1
+                    backoff = self._compute_backoff(attempt)
+                    logger.warning(
+                        "[usdt_ws.bithumb] session error (attempt %d): %s: %s — backoff %.1fs",
+                        attempt, type(exc).__name__, exc, backoff,
+                    )
+                else:
+                    continue  # 정상 종료 후 즉시 다음 iteration
+
+                # backoff sleep — stop_event 즉시 반응 (acceptance 7).
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=backoff,
+                    )
+                    break  # stop_event 도착
+                except asyncio.TimeoutError:
+                    pass  # backoff 완료, 다음 iteration
         finally:
             self._running = False
             self._ws = None
-            logger.info("[usdt_ws.bithumb] start exit")
+            logger.info(
+                "[usdt_ws.bithumb] start exited (reconnect_attempts=%d)",
+                self._reconnect_attempt_count,
+            )
 
     async def stop(self) -> None:
-        """stop_event set → recv loop 종료.
+        """stop_event set → reconnect loop + ping loop 종료.
 
-        idempotent — 이미 set이어도 무동작.
+        Acceptance 7: 빠른 종료 (idempotent).
+
+        Note (Codex L2): Upbit `stop()`은 `await ws.close()`도 호출하지만 Bithumb은
+        recv loop가 `RECV_TIMEOUT_SEC=1.0s`마다 깨어나 stop_event 확인 → 최대 1s
+        bound. backoff sleep도 `wait_for(stop_event.wait(), timeout=backoff)`라
+        stop_event set 시 즉시 break. 따라서 ws.close 미호출이 의도적 — 후속
+        maintainer가 Upbit parity 위해 반사적으로 ws.close 추가 금지.
         """
         self._stop_event.set()
