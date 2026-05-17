@@ -169,6 +169,21 @@ class TestInsertSourceRateTimestamp(unittest.TestCase):
 
 class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
 
+    def setUp(self):
+        """기존 1차 PR (c0855ff) 동작 검증 tests — env=false patch 유지.
+
+        Stage 4 (2026-05-17): KRX_CLOSE_FINALIZER_ENABLED=true default가
+        _retry_sequence를 1회 fallback + captured flag GET 분기로 격하시키므로
+        1차 PR 시그니처 검증용 기존 tests는 env=false로 격리.
+        Stage 4 정책은 test_krx_close_snapshot_controller_fallback.py에서 별도 검증.
+        """
+        from app import config
+        self._env_patcher = patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False)
+        self._env_patcher.start()
+
+    def tearDown(self):
+        self._env_patcher.stop()
+
     def _make_controller(
         self,
         retry_delays_sec=None,

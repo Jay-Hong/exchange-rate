@@ -2055,8 +2055,39 @@ class KrxCloseSnapshotController:
         session: Literal["CF", "CM"],
         boundary_at_kst: datetime,
     ) -> None:
-        """3회 retry — boundary + delay 시점에 REST 호출. 첫 성공 시 break."""
+        """boundary + delay 시점에 REST 호출. 첫 성공 시 break.
+
+        Stage 4 (Plan §5.3, 2026-05-17): KRX_CLOSE_FINALIZER_ENABLED=true 시
+        정책 전환 — close finalizer 단순화:
+          1. 진입부 captured flag GET → WS path가 이미 capture 시 즉시 return
+          2. delays = delays[:1] (1회 fallback만)
+          3. sleep 후 flag 재확인 → captured during wait 시 return
+          4. close_rest_fallback_used += 1 (실제 REST 호출 직전, invariant 보장)
+          5. _attempt_once 호출
+
+        env false 시 1차 PR (c0855ff) 동작 그대로 — 3 retry, flag GET 없음
+        (legacy rollback path, counter 미증가).
+
+        Invariant (env true): close_rest_fallback_used == _attempt_once.call_count
+        """
+        from app import latest_rates_cache as _latest_rates_cache
+
         delays = self._retry_delays_sec.get(session, [])
+        kst_date_iso: Optional[str] = None
+
+        # Stage 4: env-gated 정책 전환
+        if config.KRX_CLOSE_FINALIZER_ENABLED:
+            kst_date_iso = boundary_at_kst.astimezone(KST).date().isoformat()
+            # (1) 진입 시 captured flag GET — WS path가 이미 capture 시 skip
+            if _latest_rates_cache.get_krx_close_captured_flag(session, kst_date_iso):
+                logger.info(
+                    "[krx_close_snapshot] WS captured at entry → REST skip "
+                    "(session=%s date=%s)", session, kst_date_iso,
+                )
+                return
+            # (2) 1회 fallback만
+            delays = delays[:1]
+
         now_kst = datetime.now(KST).replace(tzinfo=None)
         boundary_naive = boundary_at_kst.astimezone(KST).replace(tzinfo=None)
         elapsed = (now_kst - boundary_naive).total_seconds()
@@ -2068,7 +2099,21 @@ class KrxCloseSnapshotController:
                     await asyncio.sleep(wait_sec)
                 except asyncio.CancelledError:
                     raise
+
+            # (3) env true: sleep 후 flag 재확인 — captured during wait 시 skip (counter 미증가)
+            if config.KRX_CLOSE_FINALIZER_ENABLED and kst_date_iso is not None:
+                if _latest_rates_cache.get_krx_close_captured_flag(session, kst_date_iso):
+                    logger.info(
+                        "[krx_close_snapshot] WS captured during wait → REST skip "
+                        "(session=%s attempt=%d)", session, attempt,
+                    )
+                    return
+
             self.counters["attempted"] += 1
+            # (4) env true: 실제 REST 호출 직전 counter ++ (invariant: counter == call_count)
+            if config.KRX_CLOSE_FINALIZER_ENABLED:
+                _krx_close_finalizer_stats.close_rest_fallback_used += 1
+            # (5) _attempt_once 호출
             try:
                 ok = await self._attempt_once(
                     contract=contract,
