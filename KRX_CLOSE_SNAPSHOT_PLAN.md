@@ -10,7 +10,8 @@
 | --- | --- | --- | --- |
 | 1차 PR — REST snapshot only | ✅ 완료 + 배포 (2026-05-16 EC2 11:23 KST) | `c0855ff` | §4 명세 + §4.12 11일 baseline 분석 |
 | **2차 작업 — WS-first close finalizer + REST fallback** | ✅ **구현 완료 + 배포 (2026-05-17 EC2 17:07 KST)** | **`68b8702..c2fb796`** (Stage 1-5) | §5 명세 + 외부 검토 Codex 10+ round |
-| 첫 실측 대기 | 2026-05-18 (월) 15:45 KST CF close + 2026-05-19 (화) 06:00 KST CM close | — | [KRX_CANARY.md](KRX_CANARY.md) checklist 참조 |
+| **CF 첫 실측 (2026-05-18 15:45 KST)** | ✅ **WS-first path 성공, REST fallback skip** | — | log: `[krx_close_window] close saved session=CF rate=1496.5` + `[krx_close_snapshot] WS captured at entry → REST skip`. F1/F2/F3 본 케이스 미노출 |
+| CM 첫 실측 | ⏳ Pending (2026-05-19 화 06:00 KST) | — | CF와 동일 path 검증 예정 |
 | 7일 telemetry 측정 | 2026-05-19 ~ 2026-05-26 (case A/B/C 분포) | — | 결과로 3차 PR scope 결정 |
 
 **2차 작업 Stage 1-5 요약** (분할 + 외부 검토 통과):

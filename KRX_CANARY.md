@@ -462,6 +462,64 @@ docker compose logs fastapi --since "2026-05-18T15:44+09:00" --until "2026-05-18
 
 case B 비율 결과로 3차 PR scope 결정 (REST fallback 제거 검토 / 유지).
 
+### 2026-05-18 만기일 첫 실측 결과 (CF 통과, CM/master pending)
+
+> 📅 **실측일**: 2026-05-18 (월)
+> 🏷️ **상태**: CF close finalizer + post-close A75605 관찰 + 운영 자동 rollover 모두 통과. CM close (5/19 06:00) + master batch 갱신 시점 (5/19~5/22) pending.
+
+#### 확정 결론 — 운영 정책 input
+
+1. **07:00 자체 rollover (PR6c-2d-1) 정책 타당** — 07:01:47 KST `[krx] rollover A75605/202605 → A75606/202606 reason=scheduled` 발화. A75606 (만기 2026-06-15) 운영 client 자동 재시작. 08:30 CF 정규세션 진입 시 H0CFCNT0/H0CFASP0 SUBSCRIBE SUCCESS.
+2. **KIS master는 만기 당일 17:05까지 A75605 `mmsc_cls_code=1` 유지**. 즉시 제거 가설 (a) 부정. 가설 (b) 익일 갱신 / (c) 며칠 후 batch 추적 진행 중 (5/19~5/22).
+3. **KIS REST는 만기 후에도 A75605에 대해 `rt_cd=0, futs_prpr=1505.800` stale 반환** (관찰 구간 11:31~12:10 동안 가격 + `acml_vol=7846` 고정. 12:10 이후 REST 미관찰). 응답 형식 자체는 정상 → 단순 `rt_cd == "0"` 분기로는 stale 인지 불가.
+4. **active contract 판단은 KIS master/REST 응답에 의존하면 안 됨** — 자체 calendar/expiry 정책 필요. PR6c-2d-1 만기일 07:00 KST swap이 이 위험을 정확히 회피.
+5. **CF 15:45 close finalizer (c2fb796 Stage 5) WS-first path 성공, REST fallback skip** — 첫 실측 통과. log: `[krx_close_window] close saved session=CF rate=1496.5 ts=2026-05-18T15:45:00+09:00` + `[krx_close_snapshot] WS captured at entry → REST skip`. F1/F2/F3 race 위험은 본 케이스에서 노출되지 않음 (단발 성공으로 일반 해소 단정 X).
+6. **만기월 A75605 WS post-close 관찰** (15:48~16:02 별도 observer):
+   - SUBSCRIBE SUCCESS (H0CFCNT0/H0CFASP0 `rt_cd=0 OPSP0000`)
+   - 14분간 trade/quote frame 0건
+   - 16:02:01 ConnectionClosedError (KIS가 idle close)
+   - → 만기/휴장 후 subscribe 자체는 허용, frame은 미송신
+7. **운영 중 만기월 WS subscribe는 `OPSP8996 ALREADY IN USE appkey`로 거부** — KIS는 같은 appkey 동시 connection 1개만 허용 (운영 client가 A75606 사용 중). 다음 만기 옛 월물 실시간 관찰을 원하면 별도 appkey 또는 단일 connection multi-contract subscribe 구조 필요.
+
+#### KRX 단일가 메커니즘 — 5/18 데이터로 검증
+
+세 시점 모두 동일 패턴 (10분 단일가 호가 접수 → 단일가 체결):
+
+| 시점 | 메커니즘 | 호가 접수 구간 | 단일가 체결 |
+|---|---|---|---|
+| **만기 CF 종가** (A75605) | 옛 월물 만기 처리 | 11:20:06~11:29:06 (10분, `acml_vol=7816` 고정) | **11:30:0X — 1505.800원 × 30계약** (`acml_vol` 7816 → 7846, +30) |
+| **정규 CF 종가** (A75606) | 새 월물 정규장 종료 | 15:35:49~15:44:49 (10분, `trade_age` 50→590s 증가) | **15:45:01 — 1496.5원** (운영 close finalizer capture) |
+| **야간 CM 시가** (A75606) | 새 월물 야간장 시작 | 17:50:01~17:59:49 (10분, `trade_age=None`) | **18:00:01 — 1494.7원** (DB row 18:00:01 KST `rate=1494.7`, `frames/min` 53→444 폭증) |
+
+→ 사용자 도메인 지식 (10분 호가 접수 + 단일가 체결) 실측과 일치. **5/19 06:00 CM close에도 동일 패턴 예상**: 05:50~06:00 호가 접수 → 06:00:0X 단일가 종가.
+
+#### 운영 교훈 — observer 도구 작업 중 발견 (재사용 가치)
+
+1. **EC2 host cron은 UTC 기준**: KST 시각을 cron에 그대로 넣으면 9시간 밀림. KST → UTC 변환 필수 (예: KST 11:00 → UTC 02:00 → `0 2 18 5 *`).
+2. **docker cp로 넣은 observer script는 컨테이너 recreate 시 사라짐**: docker-compose volume mount에 `./scripts` 미포함. 임시 관찰 도구는 docker cp 적절하나 영구 도구는 image rebuild + commit 필요.
+3. **host `/tmp/`와 container `/tmp/` 결과 파일 분리**: cron의 `>>` redirect는 host context, 스크립트 내부 `Path("/tmp/...")`는 container context. 결과 수집 시 둘 다 확인 필수 (`docker compose exec -T fastapi cat ...`).
+4. **KIS WS appkey 동시 connection 제한** (`OPSP8996 ALREADY IN USE appkey`): 같은 appkey로 2 connection 시도 → 두 번째 거부. 다음 만기에서 옛 월물 실시간 관찰 시 별도 appkey 또는 단일 connection multi-contract subscribe 구조 필요.
+5. **Approval cache (`.cache/kis_ws_approval.json`)는 24h 유효, contract와 무관**: 운영 client가 한 번 발급한 cache를 observer가 read-only로 재사용 가능 (해당 session 활성 동안).
+6. **KIS REST access_token은 `KRX_REST_FALLBACK_ENABLED=false`에서 운영이 발급 안 함**: observer가 자체 발급해 별도 cache (`/tmp/krx_expiry_obs/.observer_token.json`)로 격리 필요.
+7. **Secret 마스킹**: `env | grep KIS`류 명령은 secret 노출 위험. CLAUDE.md global "운영 안전성 / 보안 원칙"의 `sed` 마스킹 명령 사용 필수.
+
+#### Observer 스크립트 (재사용 자산)
+
+```text
+scripts/observe_kis_master.py  # KIS 상품 마스터 fetch (secret 무관, public URL)
+scripts/observe_kis_ws_old.py  # 옛 월물 WS subscribe (approval cache read-only)
+scripts/observe_kis_rest.py    # REST inquire-price (P1 access_token cache / P2 자체 발급)
+```
+
+다음 만기 6/18 또는 후속 만기에서 재사용 가능. 영구화 결정 시 repo commit + image rebuild.
+
+#### Pending — 추가 관찰 항목
+
+- **5/19 06:00 KST CM close finalizer 첫 실측** (예상: 05:50~06:00 호가 접수 → 06:00:0X 단일가 종가)
+- **5/19~5/22 KIS master A75605 `mmsc_cls_code` 변화 시점** (가설 b/c 확정)
+- **master 전체 dict diff** — `mmsc_cls_code` 외 `name`, `contract_month`, `last_tr_date` 등 변화 추적
+- **다음 만기 (6/18) WS multi-contract 관찰 구조** — 별도 appkey 발급 또는 단일 connection multi-contract subscribe 구조로 옛 월물 실시간 capture 가능성 검토
+
 ---
 
 ## Rollback 절차
