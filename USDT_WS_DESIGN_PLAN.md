@@ -492,6 +492,114 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 후속 phase 진입 시점 + 순서는 Phase B.3 + Phase B.4 운영 안정 측정 후 결정.
 
+### 12.6 Phase B.4 — Coinone WS 확장 (별 protocol, 2-signal 분리)
+
+> 📅 **작성일**: 2026-05-18
+> 🏷️ **상태**: 계획 잠금 (Stage C1) — 구현 (Stage C2-C7) 진입 전 외부 검토 통과
+> 🔍 **사전 검증**: Stage C0 ad-hoc smoke 완료 (2026-05-18 21:16~21:46 KST, 30분, n=501 DATA frame). 결과는 §12.6.2 인용.
+
+#### 12.6.1 Scope
+
+**Phase B.4 = Coinone 단독.** Korbit/Gopax는 후속 phase 목록만 명시 (§12.6.7).
+
+**근거 — Coinone 2순위 선정 (Phase B.3 Bithumb 다음)**:
+
+- Coinone WS는 **Upbit/Bithumb 비호환 별 protocol** ([USDT_EXCHANGE_WEBSOCKET_GUIDE.md §5](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)):
+  - Endpoint: `wss://stream.coinone.co.kr` (인증 없음, public, IP당 20 connection 제한)
+  - Subscribe message form: `{request_type, channel, topic}` (Upbit/Bithumb의 `[{ticket}, {type, codes}]` 와 다름)
+  - Payload format: `data.last` (string) / `data.timestamp` (int ms) (Upbit/Bithumb의 `trade_price` 와 다름)
+  - Heartbeat: **공식 idle 30분 방지** → 5분 PING 권장 (안전 마진 6×)
+  - 대문자 enum 필수 (`request_type=SUBSCRIBE`, `channel=TICKER`)
+- **이식 비용**: Phase B.3 (Bithumb URL/ticket 단순 mirror) 대비 큼 — 별 protocol parser + 2-signal 분리 (§12.6.3) 신규 작업
+
+#### 12.6.2 Stage C0 smoke 결과 (실측, 2026-05-18 21:16~21:46 KST)
+
+> ⚠️ **시간대 caveat**: 저녁 21시 거래 활발 시간대 sample. 새벽/주말 sparse-time silence 패턴은 §12.6.7 후속 보충 smoke 영역.
+
+| 항목 | 결과 |
+|---|---|
+| Endpoint connect | `wss://stream.coinone.co.kr` 성공 |
+| Subscribe 수락 | `TICKER` / `KRW-USDT` 정상 (SUBSCRIBED frame 수신) |
+| Frame total | 508 (CONNECTED 1 + SUBSCRIBED 1 + DATA 501 + PONG 5) |
+| Frame rate | 16.7 frame/min average (DATA only) |
+| DATA interval | median 1.40s / p95 13.34s / **max 30.00s** |
+| PING / PONG | 5분 cycle 5회 송신, 5회 수신, 누락 0 |
+| PONG latency | min 11.96ms / median 13.07ms / max 13.59ms (분포 폭 ~1.6ms) |
+| `data.last` 타입 | string (예: `"1487"`) |
+| `data.timestamp` 타입 | int ms (Unix epoch) |
+| ERROR frame | 0 (정상 운영 구간) |
+| CONNECTED `data.session_id` | UUID-like 형식 |
+
+산출물: `/tmp/coinone_ws_smoke/{raw.jsonl, summary.json, run.log}` (스크립트 `/tmp/coinone_ws_smoke.py`, untracked).
+
+#### 12.6.3 Coinone-specific 결정 사항 (Phase B.3 Bithumb 대비 추가 5개)
+
+1. **CONNECTED 프레임 처리** — handshake 직후 `{response_type: "CONNECTED", data: {session_id}}` 자동 수신. 운영 parser에서 무시(skip)하지 말고 **session_id를 logger에 첨부**해 reconnect 분석/debugging 활용.
+2. **5분 PING + PONG timeout 5s** — `{request_type: "PING"}` 송신 → `{response_type: "PONG"}` 응답. 공식 idle 30분 방지에 대한 안전 마진(6× 빈도). PONG timeout 5s는 실측 latency 13ms × ~400 margin (보수적). timeout 초과 시 reconnect 트리거.
+3. **2-signal 분리 (connection liveness vs price freshness)** — Phase B.4 핵심 설계 결정:
+   - **connection alive signal**: PONG 기반. 5분 PING cycle, timeout 5s 내 PONG 없으면 reconnect.
+   - **price freshness signal**: DATA frame age. soft threshold ~60s (provisional — sparse-time smoke 후 조정 가능) 이상 silence → REST fallback probe만 트리거, **reconnect 안 함**.
+   - 근거: C0 smoke max silence 30.00s (활발 시간대) + Coinone TICKER가 "값 변경 시 전송" 구조 → 거래 뜸할 때 DATA silence 정상 발생 가능. 단일 frame silence threshold로 reconnect 트리거 시 false reconnect 폭주 risk. (Upbit/Bithumb은 frame 빈도 잦아 통합 모델 무리 없었던 영역.)
+4. **DEFAULT format 유지** — 가독성 우선. SHORT format(`data.d` / `la` / `t`)은 Phase B.4 범위 밖 (미래 bandwidth 최적화 검토 대상).
+5. **REST fallback contract rollover check 불필요** — KRX와 달리 Coinone USDT/KRW는 만기/contract rollover 개념 없음 (source/asset 검증은 별개 — multi-pair subscribe 시 운영 parser에서 처리). REST fallback은 price freshness degradation 신호에만 사용 (`fetch_coinone_usdt_tick()` normalized helper, C6 stage 신규).
+
+#### 12.6.4 Stage 분할 — C1-C7 (Phase B.3 U1-U7 패턴 mirror)
+
+> Stage **C0 (ad-hoc smoke, 완료)**는 본 plan의 input. Stage **C1~C7** 7-stage가 작업 단위 (Phase B.3 U1~U7과 대칭).
+
+| Stage | Scope | 변경 파일 | Tests |
+|---|---|---|---|
+| **C0** | ad-hoc Coinone WS smoke 30분 (완료 2026-05-18) | `/tmp/coinone_ws_smoke.py` (untracked) | — (관찰) |
+| **C1** | 본 §12.6 Phase B.4 section 신설 (계획 잠금) | `USDT_WS_DESIGN_PLAN.md` | — (docs) |
+| **C2** | `USDT_WS_COINONE_ENABLED=false` env + `app/crawlers/usdt_ws/coinone.py` lifecycle skeleton + scheduler hook | `app/config.py`, `app/crawlers/usdt_ws/coinone.py` (신규), `app/scheduler.py` | skeleton lifecycle tests (flag=false 무동작 + flag=true skeleton log emit) |
+| **C3** | Coinone WS connect/subscribe/parse + log only — **별 protocol parser** (`request_type=SUBSCRIBE`, `data.last`/`data.timestamp` 파싱) + CONNECTED.session_id 캡처 + DEFAULT format | `coinone.py` | parse/connect tests, response_type 분기 검증 (CONNECTED/SUBSCRIBED/DATA/PONG/ERROR) |
+| **C4** | **2-signal 분리** — connection liveness (`UsdtLivenessMonitor` per-source threshold 확장 또는 Coinone 전용 monitor) + price freshness (DATA frame age 별도 signal) + **5분 PING heartbeat + 5s PONG timeout** + reconnect | `coinone.py` (+ `UsdtLivenessMonitor` 확장 검토) | liveness/freshness 분리 tests, PONG timeout tests, reconnect tests |
+| **C5** | `CoinoneRedisWriter` + topic trigger 자동 발화 (`request_tether_topic_trigger` source-neutral hook 재사용) | `coinone.py` | redis writer tests |
+| **C6** | `CoinoneDbWriter` + `CoinoneRestFallbackController` (price freshness signal trigger) + **`fetch_coinone_usdt_tick()` normalized REST helper** (`_fetch_coinone` rate-only 보강 — Phase B.3 U6 패턴 mirror) | `coinone.py`, `app/crawlers/usdt_sources.py` | db writer + fallback tests |
+| **C7** | Coinone alert evaluator wiring (`UsdtAlertEvaluator` 재사용, `AlertObservation(source="coinone", asset="usdt-krw", kind="tick"\|"rest_probe")`) | `coinone.py` | alert wiring tests + close/drain order + flag=false invariant |
+
+**Stage 정당화**:
+
+- Phase B.3 U1-U7 7-stage 패턴 mirror (C1-C7). C0 smoke는 stage 명명에서 빼서 Bithumb과 대칭 유지.
+- **C4가 가장 큰 신규 작업** — Phase B.3 U4 (`UsdtLivenessMonitor` 단순 재사용)와 달리 **2-signal 분리 + per-source threshold + application-level PING/PONG** 모두 신규. Phase B.3 → B.4 이식 비용 가장 큰 stage.
+- **C3 = 별 protocol parser**. Phase B.3 U3 (Upbit 호환 parse) 와 별도 코드 작성. CONNECTED response_type 처리 명시적 분기 추가.
+- **C5/C6/C7 = Phase B.3 U5/U6/U7 거의 1:1 mirror** — Bithumb 후 정착된 source-neutral hook (`request_tether_topic_trigger`, `UsdtAlertEvaluator`, `AlertObservation`) 재사용.
+
+#### 12.6.5 Canary 활성화 조건
+
+> ⚠️ **운영 활성화는 KRX 5/26 close finalizer 7일 telemetry 안정 + Phase B.4 C2~C7 land 안정 후 별도 GO.**
+
+- `USDT_WS_COINONE_ENABLED=false` default — Stage C2-C7 코드 land + push 누적 시 운영 영향 0
+- **선행 조건**:
+  - 2026-05-19 (화) 06:00 KST KRX CM close finalizer 정상 동작
+  - 2026-05-19 ~ 2026-05-26 KRX close finalizer 7일 telemetry 안정 (case A/B/C 분포 확인)
+  - Phase B.4 C2~C7 코드 land + 외부 검토 통과
+- 별도 deploy GO 후 `USDT_WS_COINONE_ENABLED=true` canary 진입
+- canary 운영 1주 관찰 후 다음 단계 (Korbit/Gopax 또는 공통화 검토)
+
+#### 12.6.6 Rollback 정책 (Phase B.3 §12.5.4 패턴 재사용)
+
+- **1차 수단**: env toggle `USDT_WS_COINONE_ENABLED=false`. lifecycle 격리 (Upbit/Bithumb/KRX 검증 완료 패턴).
+- **2차 수단**: 코드 revert. lifecycle 의존성 깨질 위험 있어 1차 실패 시 한정.
+- **process 재생성 필수**: `docker compose up -d --force-recreate fastapi` (env_file 변경 반영, `restart`로 부족).
+
+#### 12.6.7 후속 phase 목록 + 보충 smoke (Phase B.4 범위 외)
+
+**보충 smoke (선택사항, C1 잠금에 영향 없음)**:
+
+- **새벽/주말 sparse-time smoke** (30분, 거래 뜸한 시간대) — DATA silence 패턴 추가 검증. price freshness soft threshold (~60s provisional) 정확 값 결정. plan 뒤집을 risk 평가 — USDT/KRW 24/7 + 한국 인기 자산 baseline이지만, 5분 이상 silence 발생 여부는 sparse-time smoke로 추가 검증 필요.
+- **ERROR shape smoke** (분리 실행, ~10분) — 의도적 잘못된 subscribe로 ERROR response shape 캡처. C3 (parse) 구현 시 input.
+
+**후속 phase**:
+
+| Phase | Scope | 비고 |
+|---|---|---|
+| **Phase B.5** (예정) | Korbit WS 확장 | 별 protocol — symbol notation 다름 (`usdt_krw` 소문자, [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §6](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)) |
+| **Phase B.6** (예정) | Gopax WS 확장 | 전체 ticker 구독 + 서버 필터링 + Primus `::ping::` 30s (가장 다른 구조) |
+| **공통화 검토** | 거래소 base class / shared lifecycle | **Phase B.3 (Bithumb) + Phase B.4 (Coinone) land 후** 중복 명확해진 시점 판단. Coinone의 2-signal 분리 + per-source threshold 분기가 공통화 결정의 큰 input. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습). |
+
+후속 phase 진입 시점 + 순서는 Phase B.4 운영 안정 측정 후 결정.
+
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
 PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
