@@ -1,7 +1,7 @@
-"""USDT WS Coinone canary 단위 테스트 — Phase B.4 Stage C2-C3.
+"""USDT WS Coinone canary 단위 테스트 — Phase B.4 Stage C2-C4.
 
 USDT_WS_DESIGN_PLAN §12.6 Phase B.4.
-Bithumb Stage U2-U3 테스트 패턴 minimal 복제 (Codex 권장 — skeleton test는
+Bithumb Stage U2-U4 테스트 패턴 minimal 복제 (Codex 권장 — skeleton test는
 이후 stage 진입 시 깨질 가능성 최소화 위해 핵심 시나리오만).
 
 C2 핵심 acceptance (USDT_WS_DESIGN_PLAN §12.6.4):
@@ -15,9 +15,19 @@ C3 client behavior:
       timestamp int ms raw 유지)
     - _handle_message: response_type 분기 5+1 + log only + DATA tick return
     - _run_one_session: connect + subscribe + recv loop
-    - start: _run_one_session 단일 실행 (reconnect 없음, C4로 분리)
+    - start: _run_one_session 단일 실행 (C3 단독은 reconnect 없음)
 
-테스트 시나리오 (C2 6개 + C3 추가):
+C4 client behavior:
+    - Constants 추가: PING_INTERVAL_SEC=300 / PING_TIMEOUT_SEC=5 / STALE_AFTER_SEC=360 /
+      TICKER_FRESHNESS_WARNING_SEC=60 / RECONNECT_BACKOFF_SEQ
+    - UsdtLivenessMonitor 재사용 (source-neutral, last_activity_at = max(tick, heartbeat))
+    - 2-signal status 분리: _connection_status / _ticker_freshness_status
+    - _ping_loop: application-level PING/PONG event-based (clear → send → wait_for)
+    - _set_connection_status / _set_ticker_freshness_status: 전이 기반 1회 log (log flood 방지)
+    - _run_one_session 확장: ping_task + is_stale check + ticker freshness transition
+    - start: reconnect loop + backoff (Bithumb mirror)
+
+테스트 시나리오 (C2 6개 + C3 8개 + C4 8개 = 22 class / 50 tests):
     [C2]
     1. flag=false → CoinoneWsClient 생성 안 함
     2. flag=true → task 생성됨
@@ -25,7 +35,6 @@ C3 client behavior:
     4. shutdown 시 client/task 정리
     5. CoinoneWsClient.__init__ state
     6. CoinoneWsClient.start()이 _run_one_session 호출 + stop()으로 빠져나옴
-       (C3 정정: 원래 "start = stop_event 대기만" → "start = _run_one_session 호출")
     [C3]
     7. _build_subscribe_payload: Coinone single-dict form
     8. _parse_data_message: valid + invalid cases
@@ -35,6 +44,15 @@ C3 client behavior:
     12. _handle_message: PONG / ERROR / unknown safe log
     13. _run_one_session: subscribe send + recv → handle_message + stop_event 빠짐
     14. Scope guard: Redis/DB/Alert/REST writer import 0건
+    [C4]
+    15. ComputeBackoff: reconnect backoff sequence
+    16. SetConnectionStatus: normal/reconnecting/stale 전이 + counter + log
+    17. SetTickerFreshnessStatus: normal/warning 전이 + log throttle (transition 기반)
+    18. PongHandlerSetsEvent: _handle_message PONG → _pong_event.set()
+    19. PingLoopEventSequence: clear → send → wait_for (success + timeout)
+    20. TickerSilenceNoReconnect: UsdtLivenessMonitor is_stale heartbeat fresh False
+    21. ScopeGuardC4: Redis/DB/Alert/REST 미진입 + UsdtLivenessMonitor 의도적 import 허용
+    22. C4ConstantsExist: 5개 constants + STALE_AFTER_SEC > PING_INTERVAL_SEC
 
 실행:
     python -m unittest tests.test_usdt_ws_coinone_skeleton -v
@@ -51,7 +69,13 @@ from app.crawlers.usdt_ws.coinone import (
     COINONE_QUOTE_CURRENCY,
     COINONE_TARGET_CURRENCY,
     COINONE_WS_URL,
+    PING_INTERVAL_SEC,
+    PING_TIMEOUT_SEC,
+    RECONNECT_BACKOFF_SEQ,
+    RECONNECT_BACKOFF_TAIL,
     RECV_TIMEOUT_SEC,
+    STALE_AFTER_SEC,
+    TICKER_FRESHNESS_WARNING_SEC,
     CoinoneWsClient,
 )
 
@@ -512,16 +536,18 @@ class TestScopeGuard(unittest.TestCase):
     """
 
     def test_no_forbidden_imports(self):
-        """coinone.py module이 Redis/DB/Alert/REST/topic trigger import하지 않음."""
+        """coinone.py module이 Redis/DB/Alert/REST/topic trigger import하지 않음.
+
+        C4 update: UsdtLivenessMonitor는 source-neutral helper로 C4에서 재사용 (forbidden 제외).
+        """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
-        # C3 scope 외 요소가 module-level에 import되지 않음을 검증
+        # C5~C7 영역 import만 forbidden
         forbidden = [
             "latest_rates_cache",
             "tether_topic_trigger",
             "UsdtAlertEvaluator",
             "AlertObservation",
-            "UsdtLivenessMonitor",
             "get_db_context",
             "insert_source_rate_if_changed",
             "fetch_coinone_usdt_tick",
@@ -529,16 +555,22 @@ class TestScopeGuard(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"C3 scope 위반: '{name}' import됨 (C5~C7 영역)",
+                f"scope 위반: '{name}' import됨 (C5~C7 영역)",
             )
 
     def test_module_imports_minimal(self):
-        """module imports 최소 — asyncio + json + logging + websockets + typing only."""
+        """C4 module imports: asyncio + json + logging + time + typing + websockets + UsdtLivenessMonitor.
+
+        C4 update: time + UsdtLivenessMonitor (source-neutral 재사용) 추가됨.
+        C5~C7 영역 import는 forbidden (TestScopeGuard.test_no_forbidden_imports에서 검증).
+        본 test는 module 정상 import + 핵심 symbols 존재만 검증.
+        """
         import app.crawlers.usdt_ws.coinone as coinone_module
-        # 허용된 module-level names (constants + class)
-        # 추가 import는 import-time fail로 잡힘 — 본 test는 module 정상 import만 검증
+        # 허용된 module-level names (constants + class + 재사용 helper)
         self.assertTrue(hasattr(coinone_module, "CoinoneWsClient"))
         self.assertTrue(hasattr(coinone_module, "COINONE_WS_URL"))
+        # C4 추가: UsdtLivenessMonitor source-neutral 재사용
+        self.assertTrue(hasattr(coinone_module, "UsdtLivenessMonitor"))
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +593,236 @@ class TestFlagFalseInvariantC3Regression(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(scheduler.usdt_ws_coinone_client)
         self.assertIsNone(scheduler.usdt_ws_coinone_task)
 
+
+# ===========================================================================
+# C4 — Connection liveness (PING/PONG) + Ticker freshness telemetry +
+# 2-signal status 분리 + Reconnect loop
+# ===========================================================================
+
+class TestComputeBackoff(unittest.TestCase):
+    """C4 acceptance: reconnect backoff sequence (Bithumb/Upbit 동일)."""
+
+    def test_attempt_zero_returns_first(self):
+        self.assertEqual(CoinoneWsClient._compute_backoff(0), RECONNECT_BACKOFF_SEQ[0])
+
+    def test_within_sequence_range(self):
+        for i, expected in enumerate(RECONNECT_BACKOFF_SEQ, start=1):
+            self.assertEqual(CoinoneWsClient._compute_backoff(i), expected)
+
+    def test_beyond_sequence_returns_tail(self):
+        self.assertEqual(
+            CoinoneWsClient._compute_backoff(len(RECONNECT_BACKOFF_SEQ) + 5),
+            RECONNECT_BACKOFF_TAIL,
+        )
+
+
+class TestSetConnectionStatus(unittest.TestCase):
+    """C4 acceptance 11: _connection_status 전이 + counter + log."""
+
+    def setUp(self):
+        self.client = CoinoneWsClient()
+
+    def test_initial_state_normal(self):
+        self.assertEqual(self.client._connection_status, "normal")
+
+    def test_transition_changes_status_and_counter(self):
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            self.client._set_connection_status("reconnecting")
+        self.assertEqual(self.client._connection_status, "reconnecting")
+        self.assertEqual(self.client._status_transition_count["connection_reconnecting"], 1)
+        self.assertTrue(any("connection_status normal → reconnecting" in m for m in cm.output))
+
+    def test_no_transition_when_same_status(self):
+        """동일 status 재호출 시 counter ++ 안 됨, log emit 안 됨."""
+        # 첫 전이
+        self.client._set_connection_status("stale")
+        count_before = self.client._status_transition_count["connection_stale"]
+        # 동일 호출
+        self.client._set_connection_status("stale")
+        self.assertEqual(self.client._status_transition_count["connection_stale"], count_before)
+
+
+class TestSetTickerFreshnessStatus(unittest.TestCase):
+    """C4 acceptance 12: _ticker_freshness_status 분리 + transition 1회 log (Codex Point 1, 2)."""
+
+    def setUp(self):
+        self.client = CoinoneWsClient()
+
+    def test_initial_state_normal(self):
+        self.assertEqual(self.client._ticker_freshness_status, "normal")
+
+    def test_transition_to_warning_logs_once(self):
+        """normal → warning 전이 시 1회 log + counter."""
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            self.client._set_ticker_freshness_status("warning")
+        self.assertEqual(self.client._ticker_freshness_status, "warning")
+        self.assertEqual(self.client._status_transition_count["ticker_warning"], 1)
+        self.assertTrue(any("ticker_freshness_status normal → warning" in m for m in cm.output))
+
+    def test_no_log_flood_when_already_warning(self):
+        """warning 상태에서 재호출 시 log emit 안 됨 (Codex Point 1 — flood 방지)."""
+        # 첫 전이 (log 1회)
+        self.client._set_ticker_freshness_status("warning")
+        count_before = self.client._status_transition_count["ticker_warning"]
+        # 동일 호출 100회 — log 안 찍히고 counter 안 늘어남
+        for _ in range(100):
+            self.client._set_ticker_freshness_status("warning")
+        self.assertEqual(self.client._status_transition_count["ticker_warning"], count_before)
+
+    def test_warning_to_normal_logs_once(self):
+        """warning → normal 복귀 시에도 1회 log (DATA 수신 시점)."""
+        self.client._set_ticker_freshness_status("warning")
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            self.client._set_ticker_freshness_status("normal")
+        self.assertEqual(self.client._ticker_freshness_status, "normal")
+        self.assertTrue(any("ticker_freshness_status warning → normal" in m for m in cm.output))
+
+
+class TestPongHandlerSetsEvent(unittest.IsolatedAsyncioTestCase):
+    """C4 acceptance 2: _handle_message PONG → _pong_event.set() (Codex Point 3)."""
+
+    async def test_pong_sets_event(self):
+        client = CoinoneWsClient()
+        self.assertFalse(client._pong_event.is_set())
+        client._handle_message(json.dumps({"response_type": "PONG"}))
+        self.assertTrue(client._pong_event.is_set())
+
+
+class TestPingLoopEventSequence(unittest.IsolatedAsyncioTestCase):
+    """C4 acceptance 1-3: PING/PONG clear → send → wait_for sequence (Codex Point 3).
+
+    sleep 패치 — 5분 cycle 대기 없이 즉시 진행.
+    """
+
+    async def test_ping_send_then_pong_event_wait_success(self):
+        """PING send 후 PONG event set → observe_heartbeat 호출.
+
+        PING_INTERVAL_SEC을 짧은 값(0.01)으로 patch — asyncio.sleep mock 회피 (race ↓).
+        polling 패턴으로 ping_loop 진행 확인.
+        """
+        client = CoinoneWsClient()
+        sent_payloads = []
+
+        async def fake_send(payload):
+            sent_payloads.append(payload)
+            # PONG 응답 simulate (handle_message 호출 안 하고 직접 event set)
+            client._pong_event.set()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.PING_INTERVAL_SEC", 0.01), \
+             patch("app.crawlers.usdt_ws.coinone.PING_TIMEOUT_SEC", 0.1):
+            ping_task = asyncio.create_task(client._ping_loop(mock_ws))
+            # Polling: PING 1회 이상 보낼 때까지 (race 방지)
+            for _ in range(200):  # ~1s max (5ms × 200)
+                if len(sent_payloads) >= 1:
+                    break
+                await asyncio.sleep(0.005)
+            client._stop_event.set()
+            client._pong_event.set()  # ping_loop의 wait_for 풀어주기
+            await asyncio.wait_for(ping_task, timeout=2.0)
+
+        # PING payload 보냈는지 + observe_heartbeat 호출됐는지
+        self.assertGreaterEqual(len(sent_payloads), 1)
+        first = json.loads(sent_payloads[0])
+        self.assertEqual(first, {"request_type": "PING"})
+        # observe_heartbeat 호출되면 last_heartbeat_at 갱신됨
+        self.assertIsNotNone(client._liveness.last_heartbeat_at)
+        # ws.close 호출 안 됨 (정상 PONG)
+        mock_ws.close.assert_not_called()
+
+    async def test_pong_timeout_triggers_ws_close(self):
+        """PONG event timeout (5s) 안 옴 → ws.close() (recv loop가 ConnectionClosed → reconnect)."""
+        client = CoinoneWsClient()
+
+        async def fake_send(payload):
+            # PONG 응답 simulate 안 함 — event set 안 함 → wait_for timeout
+            return None
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.close = AsyncMock()
+
+        # PING_INTERVAL_SEC 짧게 + PING_TIMEOUT_SEC 짧게 → 빠른 timeout 발화
+        with patch("app.crawlers.usdt_ws.coinone.PING_INTERVAL_SEC", 0.01), \
+             patch("app.crawlers.usdt_ws.coinone.PING_TIMEOUT_SEC", 0.05):
+            ping_task = asyncio.create_task(client._ping_loop(mock_ws))
+            await asyncio.wait_for(ping_task, timeout=1.0)
+
+        # PONG timeout → ws.close 호출됨
+        mock_ws.close.assert_called()
+
+
+class TestTickerSilenceNoReconnect(unittest.IsolatedAsyncioTestCase):
+    """C4 acceptance 14: ticker silence alone → reconnect never (Codex 핵심 강조).
+
+    UsdtLivenessMonitor.is_stale은 heartbeat fresh면 ticker silence 무관 False.
+    """
+
+    async def test_is_stale_false_when_heartbeat_fresh(self):
+        """heartbeat이 최근이면 ticker silence 길어도 is_stale=False (재사용 monitor 검증)."""
+        client = CoinoneWsClient()
+        client._liveness.observe_heartbeat(time.time())
+        # 1시간 전 tick (ticker silence 매우 길음)
+        client._liveness.last_tick_at = time.time() - 3600.0
+        # heartbeat fresh이므로 stale 아님 (last_activity_at = max(tick, heartbeat))
+        self.assertFalse(client._liveness.is_stale(time.time(), STALE_AFTER_SEC))
+
+
+class TestScopeGuardC4(unittest.TestCase):
+    """C4 acceptance 15-16: Redis/DB/Alert/REST writer/REST probe 미진입.
+
+    Codex 강조: C4는 freshness telemetry only. C5~C7에서 추가될 import도 미진입.
+    """
+
+    def test_no_forbidden_imports_after_c4(self):
+        """coinone.py module이 C5~C7 영역 import하지 않음 (C3 scope guard 유지)."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        module_attrs = dir(coinone_module)
+        forbidden = [
+            "latest_rates_cache",
+            "tether_topic_trigger",
+            "UsdtAlertEvaluator",
+            "AlertObservation",
+            "get_db_context",
+            "insert_source_rate_if_changed",
+            "fetch_coinone_usdt_tick",
+        ]
+        for name in forbidden:
+            self.assertNotIn(
+                name, module_attrs,
+                f"C4 scope 위반: '{name}' import됨 (C5~C7 영역)",
+            )
+
+    def test_usdt_liveness_monitor_imported_for_reuse(self):
+        """UsdtLivenessMonitor는 C4에서 source-neutral 재사용 import 추가."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertTrue(hasattr(coinone_module, "UsdtLivenessMonitor"))
+
+
+class TestC4ConstantsExist(unittest.TestCase):
+    """C4 acceptance: constants 5개 정의."""
+
+    def test_ping_interval_300(self):
+        self.assertEqual(PING_INTERVAL_SEC, 300.0)
+
+    def test_ping_timeout_5(self):
+        self.assertEqual(PING_TIMEOUT_SEC, 5.0)
+
+    def test_stale_after_360(self):
+        """STALE_AFTER_SEC > PING_INTERVAL_SEC — Codex 강조 (false stale 방지)."""
+        self.assertGreater(STALE_AFTER_SEC, PING_INTERVAL_SEC)
+        self.assertEqual(STALE_AFTER_SEC, 360.0)
+
+    def test_ticker_freshness_warning_60(self):
+        """telemetry warning threshold 60s (action X, Codex Point 1)."""
+        self.assertEqual(TICKER_FRESHNESS_WARNING_SEC, 60.0)
+
+
+# time module 사용 (C4 _run_one_session test에서 필요)
+import time  # noqa: E402
 
 if __name__ == "__main__":
     unittest.main()
