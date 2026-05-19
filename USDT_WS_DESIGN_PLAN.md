@@ -118,7 +118,7 @@ WebSocket tick (per-exchange long-running)
 
 **옵션 B — 단일 manager + 5 connection**:
 - 중앙 lifecycle 관리 (start/stop 통합)
-- 단점: 거래소별 protocol 분기 manager 안에 집중 → 복잡
+- 단점: 거래소별 protocol 분기가 manager 안에 집중 → 복잡
 
 → **A 추천** (KRX `KisFuturesClient` 단일 인스턴스 패턴과 다름 — 거래소 수 + protocol 다양성 차이).
 
@@ -432,7 +432,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
   - 인증 없음 (public)
   - Heartbeat 공식 미명시 → provisional 30s 유지 (§2.1)
 - **이식 비용 가장 낮음** — Upbit 패턴 거의 1:1 복사 + URL/ticket 명만 변경
-- Coinone/Korbit (별 protocol) / Gopax (전체 ticker + 서버 필터) 는 Bithumb 검증 후 단계적 진입
+- Coinone/Korbit (별도 protocol) / Gopax (전체 ticker + 서버 필터) 는 Bithumb 검증 후 단계적 진입
 
 #### 12.5.2 Stage U1-U7 분할
 
@@ -473,7 +473,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
   - 2026-05-19 (화) 06:00 KST CM close finalizer 정상 동작
   - 5/19~5/26 7일 telemetry 측정 (case A/B/C 분포)
 - KRX 안정 + 별도 deploy GO 후 `USDT_WS_BITHUMB_ENABLED=true` canary 진입
-- canary 운영 1주 관찰 후 다음 단계 (Coinone/Korbit/Gopax 또는 공통화 검토)
+- canary 운영 1주 관찰 후 다음 단계 Phase B.4 (Coinone) / B.5 (Korbit) / B.6 (Gopax) 순차 진입. 공통화 검토는 5개 거래소 전부 land 후 별도 시점에 진행.
 
 #### 12.5.4 Rollback 정책 (Phase B.1 §12.4 패턴 재사용)
 
@@ -485,14 +485,14 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 | Phase | Scope | 비고 |
 |---|---|---|
-| **Phase B.4** (예정) | Coinone WS 확장 | 별 protocol — Upbit 패턴 비호환 (subscribe + payload 형식 다름) |
-| **Phase B.5** (예정) | Korbit WS 확장 | 별 protocol — symbol notation 다름 (`usdt_krw`) |
+| **Phase B.4** (예정) | Coinone WS 확장 | 별도 protocol — Upbit 패턴 비호환 (subscribe + payload 형식 다름) |
+| **Phase B.5** (예정) | Korbit WS 확장 | 별도 protocol — symbol notation 다름 (`usdt_krw`) |
 | **Phase B.6** (예정) | Gopax WS 확장 | 전체 ticker 구독 + 서버 필터링 + Primus `::ping::` 30s (가장 다른 구조) |
-| **공통화 검토** | 거래소 base class / shared lifecycle | **Bithumb (Phase B.3) + Coinone (Phase B.4) land 후** 중복 명확해진 시점에 판단. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습). |
+| **공통화 검토** | 거래소 base class / shared lifecycle | **Phase B.3 + B.4 + B.5 + B.6 모두 land 후 (5개 거래소 전부)** 중복 명확해진 시점에 판단. 2개만 보고 base class를 결정하면 Korbit/Gopax의 별도 protocol 차이 (symbol notation, 전체 ticker 구독 등)가 반영되지 않아 추상화가 다시 흔들릴 위험. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습). |
 
-후속 phase 진입 시점 + 순서는 Phase B.3 + Phase B.4 운영 안정 측정 후 결정.
+후속 phase 진입 시점 + 순서는 Phase B.3~B.6 운영 안정 측정 후 결정.
 
-### 12.6 Phase B.4 — Coinone WS 확장 (별 protocol, 2-signal 분리)
+### 12.6 Phase B.4 — Coinone WS 확장 (별도 protocol, 2-signal 분리)
 
 > 📅 **작성일**: 2026-05-18
 > 🏷️ **상태**: 계획 잠금 (Stage C1) — 구현 (Stage C2-C7) 진입 전 외부 검토 통과
@@ -504,13 +504,13 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 **근거 — Coinone 2순위 선정 (Phase B.3 Bithumb 다음)**:
 
-- Coinone WS는 **Upbit/Bithumb 비호환 별 protocol** ([USDT_EXCHANGE_WEBSOCKET_GUIDE.md §5](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)):
+- Coinone WS는 **Upbit/Bithumb 비호환 별도 protocol** ([USDT_EXCHANGE_WEBSOCKET_GUIDE.md §5](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)):
   - Endpoint: `wss://stream.coinone.co.kr` (인증 없음, public, IP당 20 connection 제한)
   - Subscribe message form: `{request_type, channel, topic}` (Upbit/Bithumb의 `[{ticket}, {type, codes}]` 와 다름)
   - Payload format: `data.last` (string) / `data.timestamp` (int ms) (Upbit/Bithumb의 `trade_price` 와 다름)
   - Heartbeat: **공식 idle 30분 방지** → 5분 PING 권장 (안전 마진 6×)
   - 대문자 enum 필수 (`request_type=SUBSCRIBE`, `channel=TICKER`)
-- **이식 비용**: Phase B.3 (Bithumb URL/ticket 단순 mirror) 대비 큼 — 별 protocol parser + 2-signal 분리 (§12.6.3) 신규 작업
+- **이식 비용**: Phase B.3 (Bithumb URL/ticket 단순 mirror) 대비 큼 — 별도 protocol parser + 2-signal 분리 (§12.6.3) 신규 작업
 
 #### 12.6.2 Stage C0 smoke 결과 (실측, 2026-05-18 21:16~21:46 KST)
 
@@ -552,8 +552,8 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 | **C0** | ad-hoc Coinone WS smoke 30분 (완료 2026-05-18) | `/tmp/coinone_ws_smoke.py` (untracked) | — (관찰) |
 | **C1** | 본 §12.6 Phase B.4 section 신설 (계획 잠금) | `USDT_WS_DESIGN_PLAN.md` | — (docs) |
 | **C2** | `USDT_WS_COINONE_ENABLED=false` env + `app/crawlers/usdt_ws/coinone.py` lifecycle skeleton + scheduler hook | `app/config.py`, `app/crawlers/usdt_ws/coinone.py` (신규), `app/scheduler.py` | skeleton lifecycle tests (flag=false 무동작 + flag=true skeleton log emit) |
-| **C3** | Coinone WS connect/subscribe/parse + log only — **별 protocol parser** (`request_type=SUBSCRIBE`, `data.last`/`data.timestamp` 파싱) + CONNECTED.session_id 캡처 + DEFAULT format | `coinone.py` | parse/connect tests, response_type 분기 검증 (CONNECTED/SUBSCRIBED/DATA/PONG/ERROR) |
-| **C4** | **Connection liveness** (`UsdtLivenessMonitor` **source-neutral 재사용** — `last_activity_at = max(tick, heartbeat)` 이미 2-signal 의식, 확장 없음) + **application-level PING/PONG event-based** (Coinone 별 protocol — `{"request_type":"PING"}` send + `_pong_event` Event clear→send→wait_for, 5분 cycle + 5s timeout) + **2 status 분리** (`_connection_status` / `_ticker_freshness_status`) + ticker freshness telemetry (60s warning, transition 기반 1회 log, action X) + reconnect loop (Bithumb mirror) | `coinone.py` | ping_loop event sequence / PONG timeout / status 전이 + log throttle / ticker silence no reconnect / scope guard / constants tests |
+| **C3** | Coinone WS connect/subscribe/parse + log only — **별도 protocol parser** (`request_type=SUBSCRIBE`, `data.last`/`data.timestamp` 파싱) + CONNECTED.session_id 캡처 + DEFAULT format | `coinone.py` | parse/connect tests, response_type 분기 검증 (CONNECTED/SUBSCRIBED/DATA/PONG/ERROR) |
+| **C4** | **Connection liveness** (`UsdtLivenessMonitor` **source-neutral 재사용** — `last_activity_at = max(tick, heartbeat)` 이미 2-signal 의식, 확장 없음) + **application-level PING/PONG event-based** (Coinone 별도 protocol — `{"request_type":"PING"}` send + `_pong_event` Event clear→send→wait_for, 5분 cycle + 5s timeout) + **2 status 분리** (`_connection_status` / `_ticker_freshness_status`) + ticker freshness telemetry (60s warning, transition 기반 1회 log, action X) + reconnect loop (Bithumb mirror) | `coinone.py` | ping_loop event sequence / PONG timeout / status 전이 + log throttle / ticker silence no reconnect / scope guard / constants tests |
 | **C5** | `CoinoneRedisWriter` + topic trigger 자동 발화 (`request_tether_topic_trigger` source-neutral hook 재사용) | `coinone.py` | redis writer tests |
 | **C6** | `CoinoneDbWriter` + `CoinoneRestFallbackController` (price freshness signal trigger) + **`fetch_coinone_usdt_tick()` normalized REST helper** (`_fetch_coinone` rate-only 보강 — Phase B.3 U6 패턴 mirror) | `coinone.py`, `app/crawlers/usdt_sources.py` | db writer + fallback tests |
 | **C7** | Coinone alert evaluator wiring (`UsdtAlertEvaluator` 재사용, `AlertObservation(source="coinone", asset="usdt-krw", kind="tick"\|"rest_probe")`) | `coinone.py` | alert wiring tests + close/drain order + flag=false invariant |
@@ -561,8 +561,8 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 **Stage 정당화**:
 
 - Phase B.3 U1-U7 7-stage 패턴 mirror (C1-C7). C0 smoke는 stage 명명에서 빼서 Bithumb과 대칭 유지.
-- **C4 신규성 정확화 (2026-05-19 C4 구현 시 정정)**: `UsdtLivenessMonitor`의 `last_activity_at = max(tick, heartbeat)` + `is_stale` 패턴이 이미 2-signal 의식이라 **2-signal 분리 자체는 재사용 가능** (확장 없음). C4 신규 작업은 (1) **application-level PING/PONG event-based** (Coinone 별 protocol — `{"request_type":"PING"}` send + `_pong_event` Event synchronization, Bithumb의 WS protocol `ws.ping()`과 다름), (2) **ticker freshness telemetry** (`ticker_update_age_sec` warning transition + log throttle by transition, action 미진입), (3) **2 status 분리 명시** (`_connection_status` / `_ticker_freshness_status` — Upbit/Bithumb의 통합 `_status`와 의미 충돌 회피), (4) **per-source threshold module-level constants** (`PING_INTERVAL_SEC=300` / `PING_TIMEOUT_SEC=5` / `STALE_AFTER_SEC=360` / `TICKER_FRESHNESS_WARNING_SEC=60`). Phase B.3 → B.4 이식 비용은 Bithumb U3 (Upbit 호환 단순 mirror) 대비 큼이나 monitor 자체는 재사용.
-- **C3 = 별 protocol parser**. Phase B.3 U3 (Upbit 호환 parse) 와 별도 코드 작성. CONNECTED response_type 처리 명시적 분기 추가.
+- **C4 신규성 정확화 (2026-05-19 C4 구현 시 정정)**: `UsdtLivenessMonitor`의 `last_activity_at = max(tick, heartbeat)` + `is_stale` 패턴이 이미 2-signal 의식이라 **2-signal 분리 자체는 재사용 가능** (확장 없음). C4 신규 작업은 (1) **application-level PING/PONG event-based** (Coinone 별도 protocol — `{"request_type":"PING"}` send + `_pong_event` Event synchronization, Bithumb의 WS protocol `ws.ping()`과 다름), (2) **ticker freshness telemetry** (`ticker_update_age_sec` warning transition + log throttle by transition, action 미진입), (3) **2 status 분리 명시** (`_connection_status` / `_ticker_freshness_status` — Upbit/Bithumb의 통합 `_status`와 의미 충돌 회피), (4) **per-source threshold module-level constants** (`PING_INTERVAL_SEC=300` / `PING_TIMEOUT_SEC=5` / `STALE_AFTER_SEC=360` / `TICKER_FRESHNESS_WARNING_SEC=60`). Phase B.3 → B.4 이식 비용은 Bithumb U3 (Upbit 호환 단순 mirror) 대비 큼이나 monitor 자체는 재사용.
+- **C3 = 별도 protocol parser**. Phase B.3 U3 (Upbit 호환 parse) 와 별도 코드 작성. CONNECTED response_type 처리 명시적 분기 추가.
 - **C5/C6/C7 = Phase B.3 U5/U6/U7 거의 1:1 mirror** — Bithumb 후 정착된 source-neutral hook (`request_tether_topic_trigger`, `UsdtAlertEvaluator`, `AlertObservation`) 재사용.
 
 #### 12.6.5 Canary 활성화 조건 + 운영 status
@@ -575,7 +575,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - 2026-05-19 (화) 06:00 KST KRX CM close finalizer 정상 동작
 - 2026-05-19 ~ 2026-05-26 KRX close finalizer 7일 telemetry 안정 (case A/B/C 분포 확인)
 - Phase B.4 C2~C7 코드 land + 외부 검토 통과
-- canary 운영 1주 관찰 후 다음 단계 (Korbit/Gopax 또는 공통화 검토)
+- canary 운영 1주 관찰 후 다음 단계 Phase B.5 (Korbit) / B.6 (Gopax) 순차 진입. 공통화 검토는 5개 거래소 전부 land 후 별도 시점에 진행.
 
 **활성화 결정 (2026-05-19 사용자 판단)** — KRX 5/26 telemetry 완료 전 선활성화:
 
@@ -603,7 +603,7 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 - 24h+ 운영 관찰 (sparse-time 자연 누적)
 - sparse-time max ticker_update_gap 결과로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 300s 정확값 확정 — 필요 시 별도 작은 commit (상수 1~2줄 수정)
-- 1주 운영 안정 검증 후 Phase B.5 (Korbit) 진입 또는 공통화 검토 결정
+- Coinone 24h+ 자연 누적 관찰과 **병행하여** Phase B.5 (Korbit) 준비/진입 가능. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (2개만 보고 base class 결정 시 Korbit/Gopax의 별도 protocol 차이 미반영 위험).
 
 #### 12.6.6 Rollback 정책 (Phase B.3 §12.5.4 패턴 재사용)
 
@@ -626,11 +626,11 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 | Phase | Scope | 비고 |
 |---|---|---|
-| **Phase B.5** (예정) | Korbit WS 확장 | 별 protocol — symbol notation 다름 (`usdt_krw` 소문자, [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §6](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)) |
+| **Phase B.5** (예정) | Korbit WS 확장 | 별도 protocol — symbol notation 다름 (`usdt_krw` 소문자, [USDT_EXCHANGE_WEBSOCKET_GUIDE.md §6](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)) |
 | **Phase B.6** (예정) | Gopax WS 확장 | 전체 ticker 구독 + 서버 필터링 + Primus `::ping::` 30s (가장 다른 구조) |
-| **공통화 검토** | 거래소 base class / shared lifecycle | **Phase B.3 (Bithumb) + Phase B.4 (Coinone) land 후** 중복 명확해진 시점 판단. Coinone의 2-signal 분리 + per-source threshold 분기가 공통화 결정의 큰 input. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습). |
+| **공통화 검토** | 거래소 base class / shared lifecycle | **Phase B.3 + B.4 + B.5 + B.6 모두 land 후 (5개 거래소 전부)** 중복 명확해진 시점 판단. Coinone의 2-signal 분리 + per-source threshold 분기는 큰 input이지만, Korbit/Gopax의 별도 protocol 차이 (symbol notation, 전체 ticker 구독, Primus `::ping::`)도 base class 결정의 핵심 input. 2개만 보고 결정 시 추상화 재흔들림 위험. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습). |
 
-후속 phase 진입 시점 + 순서는 Phase B.4 운영 안정 측정 후 결정.
+후속 phase 진입 시점 + 순서는 Phase B.4 운영 안정 측정 + B.5/B.6 land 후 결정.
 
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
