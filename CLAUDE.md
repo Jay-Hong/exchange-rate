@@ -628,6 +628,21 @@ AWS Cloud (서울 리전)
 
 ## Docker 배포 및 관리
 
+### 변경 종류별 절차 — force-recreate vs build 경계 (2026-05-19 lesson)
+
+> ⚠️ **Coinone canary 활성화 시 ModuleNotFoundError 사고 (2026-05-19)**: `git pull` 후
+> `docker compose up -d --force-recreate fastapi`만 실행 → image rebuild 안 되어 새 모듈
+> (`coinone.py`) 부재 → `ModuleNotFoundError: No module named 'app.crawlers.usdt_ws.coinone'`.
+> `docker compose build fastapi` 선행 후 정상 동작. **build와 force-recreate는 다른 역할**.
+
+| 변경 종류 | 절차 | 이유 |
+| --- | --- | --- |
+| **코드 변경 포함** (`.py` 등 application code) | `git pull` → `docker compose build fastapi` → `docker compose up -d --force-recreate fastapi` (또는 한 번에 `docker compose up -d --build fastapi`) | image에 새 코드를 포함시켜야 컨테이너 안에 반영. `--force-recreate`만으로는 image rebuild 안 됨 |
+| **env만 변경** (`.env` 토글 — `USDT_WS_*_ENABLED` 등) | `docker compose up -d --force-recreate fastapi` (rebuild 불필요) | env_file은 컨테이너 재생성 시 다시 읽힘. 코드 변경 0이므로 image 그대로 사용 |
+| **신규 모듈 추가 후 검증** | `docker exec exchange-rate-app python -c "from app.crawlers.usdt_ws.coinone import CoinoneWsClient; print('OK')"` import check | image rebuild 누락 시 즉시 발견 가능. 운영 lifecycle 시작 전 sanity 확인 |
+
+**`docker compose restart`는 env_file 변경을 반영하지 않음** (기존 컨테이너 stop/start만). env 변경 시 `--force-recreate` 필요. `KRX_FUTURES_ENABLED` 토글 등 운영 영향 큰 env에는 반드시 `--force-recreate`.
+
 ### 코드 변경 후 Docker 재배포 절차
 
 #### 일상적인 코드 변경 (권장)
