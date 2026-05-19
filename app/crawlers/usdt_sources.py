@@ -132,12 +132,65 @@ def _fetch_bithumb() -> Optional[float]:
     return tick["rate"] if tick else None
 
 
-def _fetch_coinone() -> Optional[float]:
+def fetch_coinone_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[dict]:
+    """Coinone USDT/KRW REST ticker → normalized tick dict.
+
+    Bithumb `fetch_bithumb_usdt_tick()` (line 85) shape mirror.
+    Phase B.4 Stage C6b (USDT_WS_DESIGN_PLAN §12.6): CoinoneRestFallbackController가
+    ticker freshness degraded (DATA frame age > 300s provisional) 시 호출.
+    기존 `_fetch_coinone()` polling helper도 본 함수 재사용 (additive refactor).
+
+    Returns:
+        {"source": "coinone", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}
+        또는 REST/parse 실패 시 None (caller 격리).
+
+    Coinone REST response shape (실측 2026-05-19):
+        {"result": "success", "tickers": [{"quote_currency": "krw", "target_currency": "usdt",
+         "timestamp": 1779179058028, "last": "1488.0", ...}]}
+        - quote/target_currency는 **소문자** ("krw"/"usdt") — REST 한정 (WS는 대문자).
+        - timestamp: epoch ms (Bithumb/Upbit과 같은 단위)
+
+    Guard:
+        - result != "success" → None
+        - quote_currency != "krw" or target_currency != "usdt" → None
+        - 0/음수 rate → None
+        - timestamp 부재 / parse 실패 → None
+    """
     url = "https://api.coinone.co.kr/public/v2/ticker_utc_new/KRW/USDT"
-    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
-    return float(data["tickers"][0]["last"])
+    try:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("result") != "success":
+            return None
+        ticker = data["tickers"][0]
+        # REST 응답의 quote/target_currency는 lowercase. case-insensitive 검증.
+        if ticker.get("quote_currency", "").lower() != "krw":
+            return None
+        if ticker.get("target_currency", "").lower() != "usdt":
+            return None
+        rate = float(ticker["last"])
+        if rate <= 0:
+            return None
+        ts_ms = int(ticker["timestamp"])
+        return {
+            "source": "coinone",
+            "asset": "usdt-krw",
+            "rate": rate,
+            "timestamp_ms": ts_ms,
+        }
+    except (requests.RequestException, KeyError, ValueError, TypeError, IndexError):
+        # caller(fallback controller / polling)가 None 처리. propagate X.
+        return None
+
+
+def _fetch_coinone() -> Optional[float]:
+    """기존 polling helper — fetch_coinone_usdt_tick 재사용 (rate만 반환).
+
+    Phase B.4 C6b: 기존 rate-only 호환 유지. `FETCHERS` registry는 그대로 동작.
+    """
+    tick = fetch_coinone_usdt_tick()
+    return tick["rate"] if tick else None
 
 
 def _fetch_korbit() -> Optional[float]:

@@ -75,6 +75,7 @@ from app.crawlers.usdt_ws.coinone import (
     RECONNECT_BACKOFF_TAIL,
     RECV_TIMEOUT_SEC,
     STALE_AFTER_SEC,
+    TICKER_FRESHNESS_DEGRADED_SEC,
     TICKER_FRESHNESS_WARNING_SEC,
     CoinoneWsClient,
 )
@@ -1400,7 +1401,11 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
 
 
 class TestScopeGuardC6a(unittest.TestCase):
-    """C6a acceptance 9: CoinoneDbWriter 의도적 + C6b~C7 영역 forbidden 유지."""
+    """C6a acceptance: CoinoneDbWriter 의도적 + C6b~C7 영역 forbidden 유지.
+
+    C6b update: CoinoneRestFallbackController 의도적 + fetch_coinone_usdt_tick lazy import (module-level 비노출).
+    C7 영역 (Alert)만 forbidden.
+    """
 
     def test_db_writer_class_present(self):
         """C6a: CoinoneDbWriter class module-level 노출."""
@@ -1409,21 +1414,494 @@ class TestScopeGuardC6a(unittest.TestCase):
         self.assertTrue(hasattr(coinone_module, "DB_WRITE_WINDOW_SEC"))
 
     def test_db_symbols_not_module_level(self):
-        """get_db_context, insert_source_rate_if_changed는 _sync_db_write 함수 내부 import.
-
-        module-level에 노출되면 안 됨 (lazy import — DB 의존성 모듈 로드 시점 격리).
-        """
+        """get_db_context, insert_source_rate_if_changed는 _sync_db_write 함수 내부 import."""
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         self.assertNotIn("get_db_context", module_attrs)
         self.assertNotIn("insert_source_rate_if_changed", module_attrs)
 
     def test_rest_alert_still_forbidden(self):
-        """C6b~C7 영역 (REST helper / Alert) 여전히 forbidden."""
+        """C7 영역 (Alert) 여전히 forbidden.
+
+        C6b update: fetch_coinone_usdt_tick은 _fetch_coinone_tick static에서 lazy import이라
+        module-level 비노출 — forbidden 검증 그대로 통과.
+        """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         for name in ["UsdtAlertEvaluator", "AlertObservation", "fetch_coinone_usdt_tick"]:
             self.assertNotIn(name, module_attrs)
+
+
+# ===========================================================================
+# C6b — fetch_coinone_usdt_tick + CoinoneRestFallbackController + DEGRADED hook
+# ===========================================================================
+
+class TestFetchCoinoneUsdtTick(unittest.TestCase):
+    """C6b acceptance: REST normalized helper (Bithumb fetch_*_usdt_tick mirror)."""
+
+    def test_valid_response_returns_normalized_tick(self):
+        from app.crawlers.usdt_sources import fetch_coinone_usdt_tick
+
+        # 실측 (2026-05-19) 기반 mock response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "result": "success",
+            "tickers": [{
+                "quote_currency": "krw",  # lowercase (실측)
+                "target_currency": "usdt",
+                "timestamp": 1779179058028,
+                "last": "1488.0",
+            }],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            tick = fetch_coinone_usdt_tick()
+
+        self.assertEqual(tick, {
+            "source": "coinone",
+            "asset": "usdt-krw",
+            "rate": 1488.0,
+            "timestamp_ms": 1779179058028,
+        })
+        self.assertIsInstance(tick["rate"], float)
+        self.assertIsInstance(tick["timestamp_ms"], int)
+
+    def test_uppercase_currency_also_accepted(self):
+        """case-insensitive 검증 — WS는 대문자, REST는 소문자라 둘 다 허용."""
+        from app.crawlers.usdt_sources import fetch_coinone_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "result": "success",
+            "tickers": [{
+                "quote_currency": "KRW",
+                "target_currency": "USDT",
+                "timestamp": 1779179058028,
+                "last": "1488.0",
+            }],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            tick = fetch_coinone_usdt_tick()
+
+        self.assertIsNotNone(tick)
+        self.assertEqual(tick["rate"], 1488.0)
+
+    def test_result_not_success_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_coinone_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "result": "error",
+            "error_code": "100",
+            "tickers": [],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            self.assertIsNone(fetch_coinone_usdt_tick())
+
+    def test_currency_mismatch_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_coinone_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "result": "success",
+            "tickers": [{
+                "quote_currency": "krw",
+                "target_currency": "btc",  # USDT 아님
+                "timestamp": 1779179058028,
+                "last": "1488.0",
+            }],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            self.assertIsNone(fetch_coinone_usdt_tick())
+
+    def test_zero_rate_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_coinone_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "result": "success",
+            "tickers": [{
+                "quote_currency": "krw",
+                "target_currency": "usdt",
+                "timestamp": 1779179058028,
+                "last": "0",
+            }],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            self.assertIsNone(fetch_coinone_usdt_tick())
+
+    def test_request_exception_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_coinone_usdt_tick
+        import requests
+
+        with patch(
+            "app.crawlers.usdt_sources.requests.get",
+            side_effect=requests.RequestException("network"),
+        ):
+            self.assertIsNone(fetch_coinone_usdt_tick())
+
+
+class TestCoinoneRestFallbackControllerScheduleProbe(unittest.IsolatedAsyncioTestCase):
+    """C6b acceptance: schedule_probe → REST → fanout (Redis + DB)."""
+
+    async def test_schedule_probe_calls_writers_on_success(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        redis_writer = CoinoneRedisWriter()
+        db_writer = CoinoneDbWriter()
+        controller = CoinoneRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            cooldown_sec=0.1,
+            probe_timeout_sec=2.0,
+        )
+
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1}
+        redis_writer.schedule = MagicMock()
+        db_writer.schedule = MagicMock()
+
+        with patch(
+            "app.crawlers.usdt_sources.fetch_coinone_usdt_tick",
+            return_value=tick,
+        ):
+            controller.schedule_probe(reason="test")
+            # probe task 실행 대기
+            for _ in range(100):
+                if not controller._in_flight:
+                    break
+                await asyncio.sleep(0.01)
+
+        redis_writer.schedule.assert_called_once_with(tick)
+        db_writer.schedule.assert_called_once_with(tick)
+
+    async def test_schedule_probe_no_writers_on_helper_none(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        redis_writer = CoinoneRedisWriter()
+        db_writer = CoinoneDbWriter()
+        controller = CoinoneRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            cooldown_sec=0.1,
+            probe_timeout_sec=2.0,
+        )
+
+        redis_writer.schedule = MagicMock()
+        db_writer.schedule = MagicMock()
+
+        with patch(
+            "app.crawlers.usdt_sources.fetch_coinone_usdt_tick",
+            return_value=None,  # REST 실패 simulate
+        ):
+            controller.schedule_probe(reason="test")
+            for _ in range(100):
+                if not controller._in_flight:
+                    break
+                await asyncio.sleep(0.01)
+
+        redis_writer.schedule.assert_not_called()
+        db_writer.schedule.assert_not_called()
+
+
+class TestCoinoneRestFallbackControllerCooldown(unittest.IsolatedAsyncioTestCase):
+    """C6b acceptance: cooldown active 시 schedule_probe skip."""
+
+    async def test_cooldown_skips_schedule(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        redis_writer = CoinoneRedisWriter()
+        db_writer = CoinoneDbWriter()
+        controller = CoinoneRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            cooldown_sec=10.0,
+            probe_timeout_sec=2.0,
+        )
+        # 인위적으로 cooldown 설정
+        controller._cooldown_until = time.time() + 10.0
+
+        redis_writer.schedule = MagicMock()
+        db_writer.schedule = MagicMock()
+
+        with patch("app.crawlers.usdt_sources.fetch_coinone_usdt_tick") as mock_fetch:
+            controller.schedule_probe(reason="cooldown_test")
+            await asyncio.sleep(0.05)
+
+        # cooldown skip → REST 호출 안 됨
+        mock_fetch.assert_not_called()
+        redis_writer.schedule.assert_not_called()
+        self.assertFalse(controller._in_flight)
+
+
+class TestCoinoneRestFallbackControllerInFlight(unittest.IsolatedAsyncioTestCase):
+    """C6b acceptance: in-flight 시 schedule_probe skip."""
+
+    async def test_in_flight_skips_schedule(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        redis_writer = CoinoneRedisWriter()
+        db_writer = CoinoneDbWriter()
+        controller = CoinoneRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            cooldown_sec=0.1,
+            probe_timeout_sec=2.0,
+        )
+
+        # 첫 probe — slow fetch로 in-flight 상태 유지
+        async def slow_fetch():
+            await asyncio.sleep(0.3)
+            return None
+
+        async def slow_run_probe(reason):
+            controller._in_flight = True
+            try:
+                await slow_fetch()
+            finally:
+                controller._in_flight = False
+                controller._cooldown_until = time.time() + controller._cooldown_sec
+
+        controller._run_probe = slow_run_probe
+
+        controller.schedule_probe(reason="first")
+        # 즉시 두 번째 schedule — in-flight skip
+        await asyncio.sleep(0.05)
+        self.assertTrue(controller._in_flight)
+        # 두 번째 schedule 호출
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="DEBUG"):
+            controller.schedule_probe(reason="second")
+        # pending_task는 첫 호출만 — 두 번째는 skip되어 새 task 안 만들어짐
+        await asyncio.sleep(0.4)
+
+
+class TestCoinoneRestFallbackControllerResetCooldown(unittest.TestCase):
+    """C6b acceptance: reset_cooldown → cooldown_until=0."""
+
+    def test_reset_cooldown_clears(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        controller = CoinoneRestFallbackController(
+            redis_writer=CoinoneRedisWriter(),
+            db_writer=CoinoneDbWriter(),
+        )
+        controller._cooldown_until = time.time() + 100.0
+        controller.reset_cooldown()
+        self.assertEqual(controller._cooldown_until, 0.0)
+
+
+class TestCoinoneRestFallbackControllerProbeFailure(unittest.IsolatedAsyncioTestCase):
+    """C6b acceptance: probe 실패도 cooldown 적용."""
+
+    async def test_probe_timeout_applies_cooldown(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        controller = CoinoneRestFallbackController(
+            redis_writer=CoinoneRedisWriter(),
+            db_writer=CoinoneDbWriter(),
+            cooldown_sec=5.0,
+            probe_timeout_sec=0.05,  # 즉시 timeout
+        )
+
+        # fetch_coinone_usdt_tick을 hang시켜 asyncio.wait_for timeout 발화
+        def hang_helper():
+            time.sleep(2.0)
+            return None
+
+        with patch("app.crawlers.usdt_sources.fetch_coinone_usdt_tick", side_effect=hang_helper):
+            controller.schedule_probe(reason="timeout_test")
+            await asyncio.sleep(0.2)
+
+        # cooldown 적용됨 (timeout 이후)
+        self.assertGreater(controller._cooldown_until, time.time())
+
+
+class TestSetTickerFreshnessStatusFallbackHook(unittest.IsolatedAsyncioTestCase):
+    """C6b acceptance: _set_ticker_freshness_status hook (degraded → schedule_probe / normal → reset_cooldown)."""
+
+    async def test_degraded_transition_schedules_probe(self):
+        client = CoinoneWsClient()
+        # _fallback_controller.schedule_probe mock
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+
+        # normal → warning (probe 호출 X)
+        client._set_ticker_freshness_status("warning")
+        client._fallback_controller.schedule_probe.assert_not_called()
+
+        # warning → degraded (probe 호출됨)
+        client._set_ticker_freshness_status("degraded")
+        client._fallback_controller.schedule_probe.assert_called_once()
+        call_kwargs = client._fallback_controller.schedule_probe.call_args
+        self.assertIn("ticker_degraded", str(call_kwargs))
+
+    async def test_normal_recovery_resets_cooldown(self):
+        client = CoinoneWsClient()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+
+        # warning → normal 복귀
+        client._set_ticker_freshness_status("warning")
+        client._set_ticker_freshness_status("normal")
+        client._fallback_controller.reset_cooldown.assert_called_once()
+
+    async def test_degraded_to_normal_resets_cooldown(self):
+        client = CoinoneWsClient()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+
+        # normal → warning → degraded → normal (degraded 복귀)
+        client._set_ticker_freshness_status("warning")
+        client._set_ticker_freshness_status("degraded")
+        client._fallback_controller.schedule_probe.assert_called_once()
+        client._fallback_controller.reset_cooldown.reset_mock()
+        client._set_ticker_freshness_status("normal")
+        client._fallback_controller.reset_cooldown.assert_called_once()
+
+
+class TestScopeGuardC6b(unittest.TestCase):
+    """C6b acceptance: CoinoneRestFallbackController 의도적 + C7 영역 (Alert) forbidden 유지."""
+
+    def test_fallback_controller_class_present(self):
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertTrue(hasattr(coinone_module, "CoinoneRestFallbackController"))
+        self.assertTrue(hasattr(coinone_module, "TICKER_FRESHNESS_DEGRADED_SEC"))
+        self.assertTrue(hasattr(coinone_module, "FALLBACK_COOLDOWN_SEC"))
+        self.assertTrue(hasattr(coinone_module, "FALLBACK_PROBE_TIMEOUT_SEC"))
+
+    def test_fetch_coinone_usdt_tick_lazy_import(self):
+        """fetch_coinone_usdt_tick은 _fetch_coinone_tick static에서 lazy import — module-level 비노출."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertNotIn("fetch_coinone_usdt_tick", dir(coinone_module))
+
+    def test_alert_evaluator_still_forbidden(self):
+        """C7 영역 (Alert) 여전히 forbidden."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        module_attrs = dir(coinone_module)
+        for name in ["UsdtAlertEvaluator", "AlertObservation"]:
+            self.assertNotIn(name, module_attrs)
+
+
+class TestC6bConstants(unittest.TestCase):
+    """C6b acceptance: provisional constants."""
+
+    def test_ticker_freshness_degraded_300(self):
+        self.assertEqual(TICKER_FRESHNESS_DEGRADED_SEC, 300.0)
+
+    def test_fallback_cooldown_equals_degraded(self):
+        """COOLDOWN_SEC = DEGRADED_SEC: probe 빈도 최대 1회/cycle."""
+        from app.crawlers.usdt_ws.coinone import FALLBACK_COOLDOWN_SEC
+        self.assertEqual(FALLBACK_COOLDOWN_SEC, TICKER_FRESHNESS_DEGRADED_SEC)
+
+    def test_degraded_threshold_greater_than_warning(self):
+        """degraded > warning — transition 순서 정합."""
+        self.assertGreater(TICKER_FRESHNESS_DEGRADED_SEC, TICKER_FRESHNESS_WARNING_SEC)
+
+
+# ---------------------------------------------------------------------------
+# C6b additional — Codex 보강
+# ---------------------------------------------------------------------------
+
+class TestRunOneSessionDegradedTransition(unittest.IsolatedAsyncioTestCase):
+    """C6b acceptance: _run_one_session에서 ticker_update_age > 300s 시 degraded transition + schedule_probe (Codex 보강).
+
+    실제 loop 경로 검증 — TestSetTickerFreshnessStatusFallbackHook (직접 호출)와 별도로
+    timing 기반 transition (last_tick_at + age check) 검증.
+    """
+
+    async def test_loop_triggers_degraded_then_schedule_probe(self):
+        client = CoinoneWsClient()
+        schedule_probe_calls = []
+        client._fallback_controller.schedule_probe = MagicMock(
+            side_effect=lambda reason: schedule_probe_calls.append(reason),
+        )
+        client._fallback_controller.reset_cooldown = MagicMock()
+        # downstream writer mocks (DB/Redis는 valid DATA path만 — 본 test는 미진입)
+        client._redis_writer.schedule = MagicMock()
+        client._db_writer.schedule = MagicMock()
+
+        # _run_one_session connect 직후 _liveness.reset_active_session()이 last_tick_at을
+        # None으로 reset하므로, reset_active_session을 no-op로 patch하고 observe_tick을
+        # ws.send (subscribe) 시점에 호출 (connect 후 + recv loop 전).
+        # _run_one_session loop의 if/elif 구조상 1 iteration당 1단계 전이:
+        # 1st iter: normal → warning, 2nd iter: warning → degraded (schedule_probe 호출).
+        client._liveness.reset_active_session = MagicMock()
+
+        async def fake_send(payload):
+            # subscribe send 시점에 last_tick_at을 400s 전으로 설정 — recv loop 진입 시
+            # ticker_update_age > 300s 조건 충족.
+            client._liveness.observe_tick(time.time() - 400.0)
+
+        # recv loop 2 iteration 후 stop_event set (1st: warning, 2nd: degraded)
+        recv_count = {"calls": 0}
+        async def fake_recv():
+            recv_count["calls"] += 1
+            if recv_count["calls"] >= 2:
+                client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # warning → degraded transition 발생 + schedule_probe 호출 (reason="ticker_degraded")
+        self.assertEqual(client._ticker_freshness_status, "degraded")
+        self.assertEqual(len(schedule_probe_calls), 1)
+        self.assertEqual(schedule_probe_calls[0], "ticker_degraded")
+
+
+class TestFetchCoinoneRateOnlyWrapper(unittest.TestCase):
+    """C6b acceptance: _fetch_coinone() rate-only wrapping (Codex 보강).
+
+    FETCHERS registry 동작 변경 (rewrite) → polling path 회귀 방지.
+    """
+
+    def test_returns_rate_when_helper_returns_tick(self):
+        """fetch_coinone_usdt_tick → tick 반환 → _fetch_coinone는 rate float만 반환."""
+        from app.crawlers.usdt_sources import _fetch_coinone
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779179058028}
+        with patch("app.crawlers.usdt_sources.fetch_coinone_usdt_tick", return_value=tick):
+            result = _fetch_coinone()
+        self.assertEqual(result, 1488.0)
+
+    def test_returns_none_when_helper_returns_none(self):
+        """fetch_coinone_usdt_tick → None (REST 실패) → _fetch_coinone도 None."""
+        from app.crawlers.usdt_sources import _fetch_coinone
+        with patch("app.crawlers.usdt_sources.fetch_coinone_usdt_tick", return_value=None):
+            result = _fetch_coinone()
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
