@@ -779,6 +779,39 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - reconnect/transition log monitoring (Coinone 12h 0건 패턴 mirror)
 - 1주 운영 안정 검증 후 Phase B.6 (Gopax) 진입 결정. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (§12.6.5/§12.6.7 결정 mirror).
 
+**활성화 직후 진단 lesson (2026-05-20)** — Redis JSON 해석 오진 사례:
+
+활성화 ~1h 30분 시점 진단에서 Korbit Redis의 `timestamp` 필드를 "WS freshness 지표"로 잘못 해석하여 rollback/restart 권장 (오진). 실제로는 정상 운영. Codex 정정으로 발견.
+
+**원인 — Redis JSON 필드 의미가 source-specific**:
+
+- Korbit `timestamp`는 `data.lastTradedAt` 기반이라 sparse-time 체결 없는 동안 정지할 수 있다 (마지막 체결 시각 유지).
+- Coinone `timestamp`는 `data.timestamp` (frame publish 시각에 가까움, `mirrored_at`과 거의 동일).
+- `mirrored_at`은 우리 system이 Redis SET한 시각 — **모든 source 일관** (WS frame 도착 시점).
+
+**WS health 진단 기준 (cross-source 일관)**:
+
+- WS health는 source별 `timestamp`가 아니라 cross-source 일관 필드인 `mirrored_at` 갱신 패턴으로 판단한다.
+- 15초 간격 GET 두 번으로 `mirrored_at` 갱신 확인 (Codex 권장 진단 명령):
+
+  ```bash
+  docker compose exec -T redis sh -lc 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" GET "latest:source:korbit:usdt-krw"'
+  sleep 15
+  docker compose exec -T redis sh -lc 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" GET "latest:source:korbit:usdt-krw"'
+  ```
+- **`docker compose exec`은 fastapi container 안에서 별도 Python process로 실행** — `from app import scheduler; scheduler.usdt_ws_korbit_client`로 globals 직접 확인 시도해도 새 process라 globals 초기 (None) 상태. **운영 중인 FastAPI process 상태와 무관**. introspection은 logs/Redis/DB로만 가능.
+
+**관찰 사례 (2026-05-20 ~05:51, 활성화 후 ~1h 30분)**:
+
+- `mirrored_at`: 05:51:45 → 05:51:55 → 05:52:14 (약 10~20초 간격으로 갱신되어 WS frame 수신과 Redis write가 정상임을 확인) ✅
+- `timestamp`: 05:51:04 → 05:51:04 (체결 없음, 정지) → 05:52:14 (체결 발생 시점 갱신) ✅
+- ERROR/transition/reconnect log 0건 ✅
+
+**추가 정상 패턴 (오진 회피)**:
+
+- `_ticker_freshness_status` transition log 0건 = frame receive 기준 freshness 정상 (lastTradedAt 정지와 무관, K4 `_liveness.observe_tick(time.time())`은 frame receive time 기준).
+- DB rows 0건 = 가격 stable + `insert_source_rate_if_changed` skip (Coinone §12.6.5 lesson과 동일 패턴).
+
 #### 12.7.6 Rollback 정책 (Phase B.4 §12.6.6 패턴 재사용)
 
 - **1차 수단**: env toggle `USDT_WS_KORBIT_ENABLED=false`. lifecycle 격리 (Upbit/Bithumb/Coinone/KRX 검증 완료 패턴).
