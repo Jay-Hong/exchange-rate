@@ -548,6 +548,10 @@ async def lifespan(app: FastAPI):
     # USDT_WS_COINONE_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
     await scheduler.start_usdt_ws_coinone_client()
 
+    # Phase B.5 Stage K2 — USDT WebSocket Korbit canary skeleton (USDT_WS_DESIGN_PLAN §12.7).
+    # USDT_WS_KORBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+    await scheduler.start_usdt_ws_korbit_client()
+
     yield
 
     # Shutdown code
@@ -564,6 +568,9 @@ async def lifespan(app: FastAPI):
 
     # USDT WebSocket Coinone client 종료 (Phase B.4 Stage C2)
     await scheduler.shutdown_usdt_ws_coinone_client()
+
+    # USDT WebSocket Korbit client 종료 (Phase B.5 Stage K2)
+    await scheduler.shutdown_usdt_ws_korbit_client()
 
     # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
     await scheduler.shutdown_krx_futures_client()

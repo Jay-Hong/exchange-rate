@@ -79,6 +79,15 @@ USDT_WS_BITHUMB_ENABLED = os.getenv("USDT_WS_BITHUMB_ENABLED", "false").lower() 
 # 생성 X + network connect X + Redis/DB writer X (USDT_WS_DESIGN_PLAN §12.6.4 C2 핵심).
 USDT_WS_COINONE_ENABLED = os.getenv("USDT_WS_COINONE_ENABLED", "false").lower() == "true"
 
+# USDT_WS_KORBIT_ENABLED: Phase B.5 Korbit WS canary 토글 (USDT_WS_DESIGN_PLAN §12.7).
+# default false — scheduler에 lifecycle 등록되지만 client.start() 호출 안 함.
+# K2 (현재): true → stop_event 대기만, network 호출 없음.
+# K3 이후: true → WS connect/subscribe/parse 동작 (list-wrap subscribe + unified status 분기).
+# Canary 활성화 조건 — Coinone canary 24h+ 안정 + K2~K7 land 안정 후 별도 deploy GO.
+# false 시 invariant (acceptance Stage K2): start 함수 즉시 return + KorbitWsClient
+# 생성 X + network connect X + Redis/DB writer X (USDT_WS_DESIGN_PLAN §12.7.4 K2 핵심).
+USDT_WS_KORBIT_ENABLED = os.getenv("USDT_WS_KORBIT_ENABLED", "false").lower() == "true"
+
 # KRX_BROADCAST_INCLUDE: removed in Z-2d cleanup (2026-05-12).
 # 이전: KRX 미국달러선물의 broadcast latest:* 노출 토글.
 # Z-2d 통일로 legacy_policy.should_include_source_in_legacy_rates allowlist가
