@@ -38,15 +38,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from websockets.exceptions import ConnectionClosed
 
 from app import config, scheduler
 from app.crawlers.usdt_ws.korbit import (
     KORBIT_SYMBOL,
     KORBIT_WS_URL,
+    PING_INTERVAL_SEC,
+    PING_TIMEOUT_SEC,
+    RECONNECT_BACKOFF_SEQ,
+    RECONNECT_BACKOFF_TAIL,
     RECV_TIMEOUT_SEC,
+    STALE_AFTER_SEC,
     SUBSCRIBE_REQUEST_ID,
+    TICKER_FRESHNESS_WARNING_SEC,
     KorbitWsClient,
 )
 
@@ -172,19 +181,29 @@ class TestKorbitWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
     """K2/K3 client lifecycle behavior."""
 
     async def test_init_state(self):
-        """__init__ → stop_event (not set) + running False + K3 session state defaults."""
+        """__init__ → stop_event + running + K3 session state + K4 liveness/2-status defaults."""
         client = KorbitWsClient()
         self.assertFalse(client._stop_event.is_set())
         self.assertFalse(client._running)
         # K3 session state
         self.assertIsNone(client._ws)
         self.assertFalse(client._first_tick_logged)
+        # K4 liveness + 2 status defaults
+        self.assertIsNotNone(client._liveness)
+        self.assertIsNone(client._liveness.last_tick_at)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
+        self.assertEqual(client._connection_status, "normal")
+        self.assertEqual(client._ticker_freshness_status, "normal")
+        self.assertEqual(client._reconnect_attempt_count, 0)
+        self.assertEqual(client._status_transition_count["connection_normal"], 0)
+        self.assertEqual(client._status_transition_count["ticker_warning"], 0)
 
-    async def test_start_calls_run_one_session_then_stop(self):
-        """K3 정정 (Coinone Codex Point 1 mirror): start → _run_one_session 호출 + stop()으로 종료.
+    async def test_start_runs_reconnect_loop_until_stop(self):
+        """K4 reconnect loop: start → _run_one_session 호출 + stop()으로 loop 종료.
 
-        K2 원본 test (start = stop_event 대기)에서 K3 정정 — start가 실제
-        _run_one_session을 호출하므로 mock으로 stop_event.wait() 대체.
+        K3 시점 의미 ("single session"): K4에서 reconnect loop 도입 후 정정.
+        fake _run_one_session이 stop_event 대기 → return → reconnect loop는
+        stop_event.is_set() 체크 후 break → start finally 정리.
         """
         client = KorbitWsClient()
 
@@ -197,7 +216,7 @@ class TestKorbitWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             self.assertFalse(task.done())
             self.assertTrue(client._running)
-            # stop 호출 → _stop_event set → fake _run_one_session 종료
+            # stop 호출 → _stop_event set → fake _run_one_session 종료 → reconnect loop break
             await client.stop()
             await asyncio.wait_for(task, timeout=1.0)
             self.assertTrue(task.done())
@@ -511,7 +530,11 @@ class TestScopeGuard(unittest.TestCase):
     """K3 acceptance: korbit.py에 Redis/DB/Alert/REST writer import 0건."""
 
     def test_no_forbidden_imports(self):
-        """korbit.py module이 Redis/DB/Alert/REST/topic trigger import하지 않음."""
+        """korbit.py module이 Redis/DB/Alert/REST/topic trigger import하지 않음.
+
+        K4 정정 (Codex blocker급): UsdtLivenessMonitor는 K4부터 의도적 import →
+        forbidden list에서 제거. 나머지 7개는 K5~K7 영역으로 유지.
+        """
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
         forbidden = [
@@ -519,7 +542,6 @@ class TestScopeGuard(unittest.TestCase):
             "tether_topic_trigger",
             "UsdtAlertEvaluator",
             "AlertObservation",
-            "UsdtLivenessMonitor",
             "get_db_context",
             "insert_source_rate_if_changed",
             "fetch_korbit_usdt_tick",
@@ -527,15 +549,17 @@ class TestScopeGuard(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"K3 scope 위반: '{name}' import됨 (K5~K7 영역)",
+                f"K4 scope 위반: '{name}' import됨 (K5~K7 영역)",
             )
 
     def test_module_imports_minimal(self):
-        """module imports 최소 — asyncio + json + logging + websockets + typing only."""
+        """module imports — asyncio + json + logging + time + typing + websockets + UsdtLivenessMonitor only."""
         import app.crawlers.usdt_ws.korbit as korbit_module
         self.assertTrue(hasattr(korbit_module, "KorbitWsClient"))
         self.assertTrue(hasattr(korbit_module, "KORBIT_WS_URL"))
         self.assertTrue(hasattr(korbit_module, "KORBIT_SYMBOL"))
+        # K4: UsdtLivenessMonitor source-neutral 재사용 (의도적 import)
+        self.assertTrue(hasattr(korbit_module, "UsdtLivenessMonitor"))
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +581,373 @@ class TestFlagFalseInvariantK3Regression(unittest.IsolatedAsyncioTestCase):
             await scheduler.start_usdt_ws_korbit_client()
         self.assertIsNone(scheduler.usdt_ws_korbit_client)
         self.assertIsNone(scheduler.usdt_ws_korbit_task)
+
+
+# ===========================================================================
+# K4 — liveness + ws.ping() Bithumb mirror + 2 status 분리 + reconnect loop
+# ===========================================================================
+
+
+class TestK4ConstantsExist(unittest.TestCase):
+    """K4 acceptance: constants 5개 정의."""
+
+    def test_ping_interval_300(self):
+        """DATA primary + PING backstop, Coinone 통일 default."""
+        self.assertEqual(PING_INTERVAL_SEC, 300.0)
+
+    def test_ping_timeout_5(self):
+        """K-2 PONG latency 13-15ms 대비 ~300배 margin."""
+        self.assertEqual(PING_TIMEOUT_SEC, 5.0)
+
+    def test_stale_after_360(self):
+        """STALE_AFTER_SEC > PING_INTERVAL_SEC (false stale 방지)."""
+        self.assertGreater(STALE_AFTER_SEC, PING_INTERVAL_SEC)
+        self.assertEqual(STALE_AFTER_SEC, 360.0)
+
+    def test_ticker_freshness_warning_30(self):
+        """K-2 10s × 3 = 30s warning threshold (log only)."""
+        self.assertEqual(TICKER_FRESHNESS_WARNING_SEC, 30.0)
+
+    def test_reconnect_backoff_sequence(self):
+        """Upbit/KRX/Bithumb 통일 sequence."""
+        self.assertEqual(RECONNECT_BACKOFF_SEQ, (1.0, 2.0, 4.0, 8.0, 16.0, 30.0))
+        self.assertEqual(RECONNECT_BACKOFF_TAIL, 30.0)
+
+
+class TestComputeBackoff(unittest.TestCase):
+    """K4 acceptance: reconnect backoff sequence (Bithumb/Upbit 동일)."""
+
+    def test_attempt_zero_returns_first(self):
+        self.assertEqual(KorbitWsClient._compute_backoff(0), RECONNECT_BACKOFF_SEQ[0])
+
+    def test_within_sequence_range(self):
+        for i, expected in enumerate(RECONNECT_BACKOFF_SEQ, start=1):
+            self.assertEqual(KorbitWsClient._compute_backoff(i), expected)
+
+    def test_beyond_sequence_returns_tail(self):
+        self.assertEqual(
+            KorbitWsClient._compute_backoff(len(RECONNECT_BACKOFF_SEQ) + 5),
+            RECONNECT_BACKOFF_TAIL,
+        )
+
+
+class TestSetConnectionStatus(unittest.TestCase):
+    """K4 acceptance: _connection_status 전이 + counter + log (Coinone C4 mirror)."""
+
+    def setUp(self):
+        self.client = KorbitWsClient()
+
+    def test_initial_state_normal(self):
+        self.assertEqual(self.client._connection_status, "normal")
+
+    def test_transition_changes_status_and_counter(self):
+        """normal → stale 전이 시 status + counter ++ + log 1회."""
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            self.client._set_connection_status("stale")
+        self.assertEqual(self.client._connection_status, "stale")
+        self.assertEqual(self.client._status_transition_count["connection_stale"], 1)
+        self.assertTrue(any("connection_status normal → stale" in m for m in cm.output))
+
+    def test_no_transition_when_same_status(self):
+        """동일 status 재호출 시 counter ++ 안 됨."""
+        self.client._set_connection_status("stale")
+        count_before = self.client._status_transition_count["connection_stale"]
+        self.client._set_connection_status("stale")
+        self.assertEqual(self.client._status_transition_count["connection_stale"], count_before)
+
+    def test_stale_to_normal_recovery_logs(self):
+        """stale → normal 양방향 전이 (Codex 강조: 양방향)."""
+        self.client._set_connection_status("stale")
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            self.client._set_connection_status("normal")
+        self.assertEqual(self.client._connection_status, "normal")
+        self.assertTrue(any("connection_status stale → normal" in m for m in cm.output))
+
+
+class TestSetTickerFreshnessStatus(unittest.TestCase):
+    """K4 acceptance: _ticker_freshness_status 분리 + transition 1회 log."""
+
+    def setUp(self):
+        self.client = KorbitWsClient()
+
+    def test_initial_state_normal(self):
+        self.assertEqual(self.client._ticker_freshness_status, "normal")
+
+    def test_transition_to_warning_logs_once(self):
+        """normal → warning 전이 시 1회 log + counter."""
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            self.client._set_ticker_freshness_status("warning")
+        self.assertEqual(self.client._ticker_freshness_status, "warning")
+        self.assertEqual(self.client._status_transition_count["ticker_warning"], 1)
+        self.assertTrue(any("ticker_freshness_status normal → warning" in m for m in cm.output))
+
+    def test_no_log_flood_when_already_warning(self):
+        """warning 상태에서 재호출 시 log emit 안 됨 (flood 방지)."""
+        self.client._set_ticker_freshness_status("warning")
+        count_before = self.client._status_transition_count["ticker_warning"]
+        for _ in range(100):
+            self.client._set_ticker_freshness_status("warning")
+        self.assertEqual(self.client._status_transition_count["ticker_warning"], count_before)
+
+
+class TestPingLoop(unittest.IsolatedAsyncioTestCase):
+    """K4 acceptance #1, #2: _ping_loop Bithumb mirror — heartbeat observe / timeout → ws.close."""
+
+    async def test_ping_pong_observes_heartbeat_liveness_only(self):
+        """ping → pong 성공 → _liveness.observe_heartbeat 호출. status 직접 변경 X."""
+        client = KorbitWsClient()
+        initial_connection_status = client._connection_status
+        initial_freshness_status = client._ticker_freshness_status
+
+        ping_call_count = {"n": 0}
+
+        async def fake_ping():
+            ping_call_count["n"] += 1
+            # ping 호출 후 stop_event set — 다음 iteration 진입 차단
+            client._stop_event.set()
+            pong_waiter = asyncio.Future()
+            pong_waiter.set_result(None)
+            return pong_waiter
+
+        async def fake_sleep(duration):
+            return  # PING_INTERVAL_SEC sleep 즉시 통과
+
+        ws_mock = AsyncMock()
+        ws_mock.ping = fake_ping
+
+        with patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep), \
+             patch.object(client._liveness, "observe_heartbeat") as mock_observe:
+            await client._ping_loop(ws_mock)
+
+        self.assertEqual(ping_call_count["n"], 1)
+        mock_observe.assert_called_once()
+        # status 직접 변경 X (status 변경은 _set_*_status에서만)
+        self.assertEqual(client._connection_status, initial_connection_status)
+        self.assertEqual(client._ticker_freshness_status, initial_freshness_status)
+
+    async def test_ping_failure_closes_ws_and_returns(self):
+        """ws.ping() 호출 자체 TimeoutError → ws.close() + return (recv loop가 ConnectionClosed → reconnect)."""
+        client = KorbitWsClient()
+
+        async def fake_sleep(duration):
+            return
+
+        ws_mock = AsyncMock()
+        ws_mock.ping = AsyncMock(side_effect=asyncio.TimeoutError)
+        ws_mock.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep):
+            await client._ping_loop(ws_mock)
+
+        ws_mock.close.assert_called()
+
+    async def test_pong_waiter_timeout_closes_ws(self):
+        """K4 acceptance core path (Codex Point 1): pong_waiter timeout → ws.close().
+
+        실제 운영 시나리오: ws.ping()은 pong_waiter Future를 정상 반환,
+        await asyncio.wait_for(pong_waiter, timeout=PING_TIMEOUT_SEC)에서 timeout 발생.
+        (vs test_ping_failure_closes_ws_and_returns의 ws.ping() 자체 timeout과 다름)
+        """
+        client = KorbitWsClient()
+
+        async def fake_sleep(duration):
+            return
+
+        async def fake_ping():
+            # pong_waiter는 절대 set되지 않는 Future — wait_for에서 timeout 유도
+            return asyncio.Future()
+
+        ws_mock = AsyncMock()
+        ws_mock.ping = fake_ping
+        ws_mock.close = AsyncMock()
+
+        # PING_TIMEOUT_SEC 짧게 patch → wait_for(pong_waiter, 0.05) timeout 빠르게 발화
+        with patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep), \
+             patch("app.crawlers.usdt_ws.korbit.PING_TIMEOUT_SEC", 0.05):
+            await client._ping_loop(ws_mock)
+
+        # wait_for(pong_waiter) timeout → ws.close() 호출됨
+        ws_mock.close.assert_called()
+
+
+class TestTickerSilenceNoReconnect(unittest.IsolatedAsyncioTestCase):
+    """K4 acceptance #7 (핵심 invariant): ticker silence + heartbeat fresh → stale/reconnect 안 됨.
+
+    last_activity_at = max(tick, heartbeat). Coinone C4 invariant mirror.
+    """
+
+    async def test_is_stale_false_when_heartbeat_fresh(self):
+        """heartbeat이 최근이면 ticker silence 길어도 is_stale=False."""
+        client = KorbitWsClient()
+        client._liveness.observe_heartbeat(time.time())
+        # 1시간 전 tick (ticker silence 매우 길음)
+        client._liveness.last_tick_at = time.time() - 3600.0
+        # heartbeat fresh이므로 stale 아님 (last_activity_at = max(tick, heartbeat))
+        self.assertFalse(client._liveness.is_stale(time.time(), STALE_AFTER_SEC))
+
+
+class TestRunOneSessionFreshnessWiring(unittest.IsolatedAsyncioTestCase):
+    """K4 acceptance #5 (Codex Point 3): _run_one_session age 로직 wiring test.
+
+    `_set_ticker_freshness_status` 직접 호출이 아니라 실제 loop 안에서
+    last_tick_at age > 30s 조건이 trigger되어 normal → warning 전이되는지 검증.
+    """
+
+    async def test_age_based_warning_transition_in_session_loop(self):
+        """recv loop에서 last_tick_at이 30s 이상 old → freshness warning 전이.
+
+        `_run_one_session`이 `_liveness.reset_active_session()` 호출하므로
+        sent_payloads 단계 (subscribe 직후, recv loop 진입 전)에서 last_tick_at을
+        old로 의도 설정 — 첫 recv iteration에서 freshness check trigger.
+        """
+        client = KorbitWsClient()
+
+        sent_payloads = []
+
+        async def fake_send(payload):
+            sent_payloads.append(payload)
+            # subscribe 직후 last_tick_at을 의도적으로 old로 설정.
+            # reset_active_session() 이후 시점이라 보존됨.
+            client._liveness.last_tick_at = time.time() - 60.0
+
+        async def fake_recv():
+            # 첫 iteration에서 freshness check 후 stop_event set
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        # ping_loop은 stop_event 즉시 감지하도록 짧은 interval
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
+             patch("app.crawlers.usdt_ws.korbit.PING_INTERVAL_SEC", 0.01):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # last_tick_at age > 30s → warning 전이 (transition count 검증)
+        self.assertEqual(client._ticker_freshness_status, "warning")
+        self.assertGreaterEqual(client._status_transition_count["ticker_warning"], 1)
+
+    async def test_freshness_warning_to_normal_on_valid_tick(self):
+        """K4 acceptance #6 (Codex Point 2): warning 상태에서 valid ticker 수신 → normal 복귀 wiring.
+
+        2-signal state machine 복구 경로 검증 — silence 감지 (normal → warning)과
+        복구 (warning → normal)는 서로 다른 리스크라 wiring 분리 검증.
+
+        `_run_one_session` 진입 시 line 437에서 `_set_ticker_freshness_status("normal")`
+        호출되어 사전 status가 reset됨. 따라서 fake_recv 안에서 warning force set
+        (session 시작 normal reset **이후** 시점) → 다음 valid ticker로 복귀 검증.
+        """
+        client = KorbitWsClient()
+
+        # valid ticker raw frame (K-2 smoke shape mirror)
+        valid_ticker_raw = json.dumps({
+            "type": "ticker",
+            "timestamp": 1779194622984,
+            "symbol": "usdt_krw",
+            "data": {"close": "1488", "lastTradedAt": 1779194593306},
+        })
+
+        async def fake_send(payload):
+            return
+
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i == 0:
+                # 첫 recv 시점 = session 시작 normal reset 이후 = warning force set 가능
+                client._ticker_freshness_status = "warning"
+                # transition_count도 직접 갱신 (실제 _set_*_status 우회 — wiring path 검증 목적)
+                client._status_transition_count["ticker_warning"] = 1
+                # valid ticker 반환 → handle_message → tick not None →
+                # _liveness.observe_tick + warning → normal 복귀 path
+                return valid_ticker_raw
+            # 두 번째 호출: stop_event set → 빠짐
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
+             patch("app.crawlers.usdt_ws.korbit.PING_INTERVAL_SEC", 0.01):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # 결과: warning → normal 복귀 path 통과.
+        # valid tick 수신 후 _set_ticker_freshness_status("normal") 호출 (warning → normal 1회 log).
+        self.assertEqual(client._ticker_freshness_status, "normal")
+        # last_tick_at이 valid tick 수신으로 갱신됨 (observe_tick 호출 검증)
+        self.assertIsNotNone(client._liveness.last_tick_at)
+        # transition count: warning 1회 (force set) + normal 1회 (session 시작 1회 + 복귀 시 normal→normal skip).
+        # 핵심 검증: warning → normal transition 발생 후 결과 normal 유지.
+        self.assertGreaterEqual(client._status_transition_count["ticker_normal"], 1)
+
+
+class TestStartReconnectLoop(unittest.IsolatedAsyncioTestCase):
+    """K4 acceptance #8: start reconnect loop with backoff (Bithumb mirror)."""
+
+    async def test_connection_closed_triggers_reconnect_with_backoff(self):
+        """ConnectionClosed → reconnect attempt ++ + _set_connection_status('reconnecting') + backoff.
+
+        backoff sequence patch (0.01s)로 빠른 진행. wait_for(stop_event.wait, timeout)는
+        timeout 발생 → 다음 iteration 진입.
+        """
+        client = KorbitWsClient()
+        run_call_count = {"n": 0}
+
+        async def fake_run_one_session():
+            run_call_count["n"] += 1
+            if run_call_count["n"] == 1:
+                # 첫 session: ConnectionClosed 발생
+                raise ConnectionClosed(None, None)
+            # 두 번째 session: stop_event 대기 → 정상 종료
+            await client._stop_event.wait()
+
+        # backoff sequence 짧게 patch — wait_for(stop_event, 0.01) timeout 빠르게 발생
+        short_backoff = (0.01,)
+        with patch.object(client, "_run_one_session", side_effect=fake_run_one_session), \
+             patch("app.crawlers.usdt_ws.korbit.RECONNECT_BACKOFF_SEQ", short_backoff), \
+             patch("app.crawlers.usdt_ws.korbit.RECONNECT_BACKOFF_TAIL", 0.01):
+            task = asyncio.create_task(client.start())
+            # 두 번째 session 진입 후 stop
+            for _ in range(200):  # ~2s max
+                if run_call_count["n"] >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            await client.stop()
+            await asyncio.wait_for(task, timeout=3.0)
+
+        self.assertGreaterEqual(run_call_count["n"], 2)
+        self.assertGreaterEqual(client._reconnect_attempt_count, 1)
+        self.assertGreaterEqual(client._status_transition_count["connection_reconnecting"], 1)
+
+    async def test_stop_event_during_backoff_breaks_loop(self):
+        """backoff 중 stop_event set → 즉시 loop break."""
+        client = KorbitWsClient()
+
+        async def fake_run_one_session():
+            raise ConnectionClosed(None, None)
+
+        # asyncio.wait_for가 stop_event.wait()를 정상 await → stop_event set 시 즉시 return
+        with patch.object(client, "_run_one_session", side_effect=fake_run_one_session):
+            task = asyncio.create_task(client.start())
+            # session 1회 실패 후 backoff 진입할 시간 확보
+            await asyncio.sleep(0.05)
+            # backoff 도중 stop
+            await client.stop()
+            await asyncio.wait_for(task, timeout=5.0)
+
+        self.assertTrue(task.done())
+        self.assertFalse(client._running)
 
 
 if __name__ == "__main__":
