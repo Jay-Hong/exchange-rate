@@ -632,6 +632,141 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 후속 phase 진입 시점 + 순서는 Phase B.4 운영 안정 측정 + B.5/B.6 land 후 결정.
 
+### 12.7 Phase B.5 — Korbit WS 확장 (Bithumb-Coinone 혼합 패턴)
+
+> 📅 **작성일**: 2026-05-19
+> 🏷️ **상태**: 계획 잠금 (Stage K1) — 구현 (Stage K2-K7) 진입 전 외부 검토 통과
+> 🔍 **사전 검증**: Stage K-2 smoke 완료 (2026-05-19 21:43~22:13 KST, 30분 valid + ~30s invalid). 결과는 §12.7.2 인용.
+
+#### 12.7.1 Scope
+
+**Phase B.5 = Korbit 단독.** Gopax는 후속 phase 목록만 명시 (§12.7.7).
+
+**근거 — Korbit 3순위 선정 (Phase B.3 Bithumb / Phase B.4 Coinone 다음)**:
+
+- Korbit WS는 **Bithumb-Coinone 혼합 패턴** ([USDT_EXCHANGE_WEBSOCKET_GUIDE.md §6](USDT_EXCHANGE_WEBSOCKET_GUIDE.md)):
+  - Endpoint: `wss://ws-api.korbit.co.kr/v2/public` (인증 없음, public)
+  - Subscribe wire format: **list-wrap** `[{requestId, method:"subscribe", type:"ticker", symbols:["usdt_krw"]}]` — Bithumb (`{op,args}`)와도 Coinone (`{request_type,channel,topic}`)와도 다른 신규 wire format
+  - Ticker payload: `{type, timestamp, symbol, snapshot, data:{close, lastTradedAt, ...}}` — Coinone과 유사하게 **별도 `data` 객체** 구조이나 필드명 다름 (`close` vs Coinone `last`, `lastTradedAt` vs Coinone `timestamp`)
+  - Heartbeat: 공식 미명시. K-2 smoke로 **WS protocol `ws.ping()` 정상 동작 확인** → Bithumb 패턴 mirror 가능 (Coinone의 app-level event-based PING 불필요)
+  - Symbol notation: `usdt_krw` 소문자 underscore (WS/REST 일관)
+- **이식 비용**: K4 liveness는 Bithumb mirror 1:1 (작음). K3 parser는 Coinone 구조 유사 + 신규 wire format. K6b helper는 Coinone과 다른 source (`lastTradedAt`). 전체 K2-K7 7-stage는 Coinone C2-C7 패턴 mirror, 단 K4가 Bithumb mirror로 축소
+
+#### 12.7.2 Stage K-2 smoke 결과 (실측, 2026-05-19 21:43~22:13 KST)
+
+> ⚠️ **시간대 caveat**: 화요일 저녁 21:43~22:13 거래 활발 시간대 sample. 새벽/주말 sparse-time silence 패턴은 §12.7.7 후속 보충 smoke 영역 (canary 자연 누적).
+
+**Valid run (30분)**:
+
+| 항목 | 결과 |
+|---|---|
+| Endpoint connect | `wss://ws-api.korbit.co.kr/v2/public` 성공 |
+| Subscribe ACK | `{status:"success", requestId:1}` — 별도 frame (ticker 직전 1회) |
+| Frame total | 214 (ACK 1 + ticker 213) |
+| `snapshot:true` first frame | 1회, offset 0.85s |
+| `snapshot` key in subsequent ticker | **누락** (key 자체 부재, false 명시 안 함) |
+| DATA interval (ticker frame) | median **10.02s** / p95 10.04s / max 10.13s / min 0.49s (snapshot 전환 직후) — **관찰 사실, 공식 보장 미확인** |
+| `data.lastTradedAt` 존재 | 213/213 (100%, missing 0건) |
+| `ws.ping()` pong_waiter | 5회 모두 정상, latency median 14.64ms (13.44~15.52ms 범위) |
+| `ws.ping()` timeout | 0 |
+| `data.close` 타입 | string (예: `"1488"`) |
+| `data.lastTradedAt` 타입 | int ms (Unix epoch) |
+| ERROR frame in valid run | 0 |
+| Decode failure | 0 |
+
+**Invalid run (별도 connection, ~30s)**:
+
+| 항목 | 결과 |
+|---|---|
+| Invalid subscribe payload | `[{requestId:999, method:"subscribe_INVALID_xyz", type:"unknown_xyz", symbols:["nonexistent_pair_xyz"]}]` |
+| Response frame | 1회: `{status:"fail", code:"INVALID_REQUEST", message:"unknown_type", requestId:999}` |
+| Connection close by server | **false** (서버가 ERROR 후 연결 유지) |
+
+**REST sample** (smoke 시작 시 1회 GET `https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw`):
+
+- Top-level keys: `["success", "data"]`
+- `data[0]` keys: `symbol, open, high, low, close, prevClose, priceChange, priceChangePercent, volume, quoteVolume, bestBidPrice, bestAskPrice, lastTradedAt`
+- **Top-level `timestamp` 필드 없음** (`rest_has_timestamp: false`)
+- `lastTradedAt: 1779194593306` (epoch ms) 존재 — REST normalized helper의 timestamp source로 사용
+
+산출물: `/tmp/korbit_ws_smoke/{raw.jsonl, summary.json, run.log}` + `/tmp/korbit_ws_smoke_invalid/{raw.jsonl, summary.json, run.log}` (스크립트 `/tmp/korbit_ws_smoke.py` + `/tmp/korbit_ws_smoke_invalid.py`, untracked).
+
+#### 12.7.3 Korbit-specific 결정 사항 (Bithumb-Coinone 혼합 패턴 5개)
+
+1. **K4 heartbeat = Bithumb mirror (WS protocol `ws.ping()`)** — K-2 smoke `ws.ping()` 5회 모두 정상 동작 확인 (median latency 14.64ms, timeout 0). Coinone의 app-level event-based PING/PONG (`{request_type:"PING"}` + `_pong_event` synchronization) **불필요**. K4 작업량이 Coinone C4 대비 대폭 축소.
+2. **K3 parser — unified ACK/ERROR shape via `status` 분기**:
+   - Subscribe ACK: `{status:"success", requestId}`
+   - Error: `{status:"fail", code, message, requestId}`
+   - Parser 분기: `if "status" in frame: handle_ack_or_error(frame)` 단일 path (CONNECTED/SUBSCRIBED/DATA 별도 frame 분기였던 Coinone과 다름)
+   - Ticker: `if frame.get("type") == "ticker" and frame.get("symbol") == "usdt_krw": parse_ticker(frame["data"])` → rate = `float(data["close"])`, timestamp = `int(data.get("lastTradedAt") or frame["timestamp"])`
+   - `snapshot` 필드는 첫 frame만 `true`, 이후 key 자체 누락 → **분기 불필요** (가격은 동일 추출)
+3. **2-signal 분리 결정 (Coinone §12.6.3 패턴 재사용)** — connection liveness vs price freshness 분리는 source-neutral 결정이므로 Korbit에도 동일 적용. 단 absolute threshold는 다름:
+   - **connection alive signal**: `ws.ping()` pong_waiter 기반. **기본값 `PING_INTERVAL_SEC=300` (Coinone/Bithumb 통일)**, `PONG_TIMEOUT_SEC=5`. canary에서 조정 가능. Korbit은 10s ticker가 꾸준하면 ticker 자체가 liveness signal 역할도 하므로 PING은 백업 성격 (ticker-stalled 상황에서만 reconnect 판단의 주요 근거).
+   - **price freshness signal**: DATA frame age. K-2 관찰 결과 **약 10초 간격 publish** (median 10.02s, p95 10.04s, max 10.13s — 30분 활발 시간대). 공식 보장 미확인이므로 provisional thresholds:
+     - `TICKER_FRESHNESS_WARNING_SEC = 30s` (10s × 3, 3회 연속 누락 시 warning, log only)
+     - `TICKER_FRESHNESS_DEGRADED_SEC = 120s` (10s × 12, REST probe trigger)
+   - **Coinone (60s/300s)와 다른 절대값**: Coinone은 "값 변경 시 push" 모델 (median 1.4s, max 30s)이라 60s/300s가 적정. Korbit은 활발 시간대 관찰상 throttled publish로 보여 더 짧은 threshold가 자연. canary sparse-time 자연 누적 후 정확값 확정.
+4. **K6b REST normalized helper — Coinone/Bithumb과 동일 contract** — REST 응답에 top-level `timestamp` 없음 (`rest_has_timestamp: false`)이지만 normalized tick contract는 source-neutral 유지. `fetch_korbit_usdt_tick()` shape: `{"source": "korbit", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}`. 내부 구현에서 `rate = float(data["data"][0]["close"])`, `timestamp_ms = int(data["data"][0]["lastTradedAt"])` (timestamp source는 `lastTradedAt` — Coinone의 top-level `timestamp` field와 source가 다르지만 contract는 동일). C6b/C7 fanout에서 source-specific 분기 회피.
+5. **`data.lastTradedAt` single source + fallback 보존** — K-2 활발 시간대 sample 213/213 모두 존재 (missing ratio 0.0). 그러나 sparse-time에서 거래 없는 동안 `lastTradedAt`이 stale 또는 null 가능성 미확정 → parser는 single source 사용하되 `int(data.get("lastTradedAt") or frame["timestamp"])` 보수적 fallback 유지.
+
+#### 12.7.4 Stage 분할 — K1-K7 (Phase B.4 C1-C7 패턴 mirror, K4 축소)
+
+> Stage **K-2 (ad-hoc smoke, 완료)**는 본 plan의 input. Stage **K1~K7** 7-stage가 작업 단위 (Phase B.4 C1~C7과 대칭).
+
+| Stage | Scope | 변경 파일 | Tests |
+|---|---|---|---|
+| **K-2** | ad-hoc Korbit WS smoke 30분 valid + ~30s invalid (완료 2026-05-19) | `/tmp/korbit_ws_smoke.py` + `/tmp/korbit_ws_smoke_invalid.py` (untracked) | — (관찰) |
+| **K1** | 본 §12.7 Phase B.5 section 신설 (계획 잠금) | `USDT_WS_DESIGN_PLAN.md` | — (docs) |
+| **K2** | `USDT_WS_KORBIT_ENABLED=false` env + `app/crawlers/usdt_ws/korbit.py` lifecycle skeleton + scheduler hook | `app/config.py`, `app/crawlers/usdt_ws/korbit.py` (신규), `app/scheduler.py` | skeleton lifecycle tests (flag=false 무동작 + flag=true skeleton log emit) |
+| **K3** | Korbit WS connect/subscribe/parse + log only — **list-wrap subscribe build** + ticker parser (`type=="ticker"` + `symbol="usdt_krw"` + `data.close` + `data.lastTradedAt`) + unified ACK/ERROR `status` 분기 + snapshot 무시 처리 | `korbit.py` | parse/connect tests, status 분기 검증 (success/fail), ACK shape, snapshot key 누락 처리 |
+| **K4** | **Connection liveness (`UsdtLivenessMonitor` source-neutral 재사용)** + **`ws.ping()` WS protocol heartbeat (Bithumb U4 mirror)** + **2 status 분리** (`_connection_status` / `_ticker_freshness_status`, Coinone C4 패턴 재사용) + ticker freshness telemetry (30s warning, transition 기반 1회 log, action X) + reconnect loop | `korbit.py` | ws.ping() pong_waiter / status 전이 + log throttle / ticker silence no reconnect / scope guard / constants tests |
+| **K5** | `KorbitRedisWriter` + topic trigger 자동 발화 (`request_tether_topic_trigger` source-neutral hook 재사용) | `korbit.py` | redis writer tests |
+| **K6** | `KorbitDbWriter` + 1s window debounce + `KorbitRestFallbackController` (price freshness signal trigger, cooldown 120s) + **`fetch_korbit_usdt_tick()` normalized REST helper** (`_fetch_korbit` rate-only 보강 — Coinone C6 패턴 mirror, contract `{source, asset, rate, timestamp_ms}` 동일 유지, 내부 timestamp source는 `data["data"][0]["lastTradedAt"]`) | `korbit.py`, `app/crawlers/usdt_sources.py` | db writer + fallback tests + REST helper shape |
+| **K7** | Korbit alert evaluator wiring (`UsdtAlertEvaluator` 재사용, `AlertObservation(source="korbit", asset="usdt-krw", kind="tick"\|"rest_probe")`) | `korbit.py` | alert wiring tests + close/drain order + flag=false invariant |
+
+**Stage 정당화**:
+
+- Phase B.4 C1-C7 7-stage 패턴 mirror (K1-K7). K-2 smoke는 stage 명명에서 빼서 Coinone과 대칭 유지.
+- **K4 신규성 정확화**: Coinone C4 대비 **대폭 축소** — application-level PING/PONG event-based 코드 (`_pong_event` synchronization, ping send/wait_for) 불필요. K-2 smoke 검증 결과 `ws.ping()` pong_waiter 5회 정상 (Bithumb U4 패턴 1:1 mirror 가능). 2-signal 분리 자체는 Coinone C4 패턴 재사용 (`UsdtLivenessMonitor`의 `last_activity_at = max(tick, heartbeat)` 이미 2-signal 의식 — 확장 없음). per-source threshold module-level constants는 Korbit 절대값으로 (`PING_INTERVAL_SEC=300` / `PING_TIMEOUT_SEC=5` / `STALE_AFTER_SEC=360` / `TICKER_FRESHNESS_WARNING_SEC=30` / `TICKER_FRESHNESS_DEGRADED_SEC=120` / `FALLBACK_COOLDOWN_SEC=120`).
+- **K3 = unified ACK/ERROR via `status` 분기 + list-wrap subscribe build**. Coinone C3 (CONNECTED/SUBSCRIBED 별도 frame 분기) 와 다른 단순한 path. wire format은 신규 작성 (list-wrap, Bithumb dict/Coinone dict 모두 비호환).
+- **K5/K6/K7 = Coinone C5/C6/C7 거의 1:1 mirror** — source-neutral hook (`request_tether_topic_trigger`, `UsdtAlertEvaluator`, `AlertObservation`) 재사용. K6의 REST normalized helper는 contract (`{source, asset, rate, timestamp_ms}`) Coinone/Bithumb과 동일 유지 — 내부 timestamp source만 `lastTradedAt` (Coinone top-level `timestamp` 대신).
+
+#### 12.7.5 Canary 활성화 조건
+
+**선행 조건** (계획 잠금 시점):
+
+- `USDT_WS_KORBIT_ENABLED=false` default — Stage K2-K7 코드 land + push 누적 시 운영 영향 0
+- Phase B.4 Coinone canary 운영 안정 (5/19 18:42 활성화 후 24h+ 자연 누적, sparse-time max ticker_update_gap 관찰 — §12.6.5)
+- Phase B.5 K2~K7 코드 land + 외부 검토 통과
+- 활성화 후 24h+ 자연 누적 → sparse-time DATA silence 패턴으로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 120s 정확값 확정 (필요 시 별도 작은 commit)
+- 1주 운영 안정 검증 후 Phase B.6 (Gopax) 진입. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (§12.6.5/§12.6.7 결정 mirror).
+
+#### 12.7.6 Rollback 정책 (Phase B.4 §12.6.6 패턴 재사용)
+
+- **1차 수단**: env toggle `USDT_WS_KORBIT_ENABLED=false`. lifecycle 격리 (Upbit/Bithumb/Coinone/KRX 검증 완료 패턴).
+- **2차 수단**: 코드 revert. lifecycle 의존성 깨질 위험 있어 1차 실패 시 한정.
+- **process 재생성 필수**: `docker compose up -d --force-recreate fastapi` (env_file 변경 반영, `restart`로 부족 — CLAUDE.md 변경 종류별 절차 표 참조).
+
+#### 12.7.7 후속 phase 목록 + 보충 smoke (Phase B.5 범위 외)
+
+**보충 smoke / 운영 관찰 (Phase B.5 land 후 자연 진행)**:
+
+- **새벽/주말 sparse-time 관찰** — 별도 ad-hoc smoke 대신 Phase B.5 canary 활성화 후 운영 데이터로 자연 누적. DATA silence 패턴 검증 + threshold 정확값 확정 input:
+  - `TICKER_FRESHNESS_WARNING_SEC = 30s` (provisional, 10s × 3)
+  - `TICKER_FRESHNESS_DEGRADED_SEC = 120s` (provisional, 10s × 12)
+  - `FALLBACK_COOLDOWN_SEC = 120s` (degraded threshold와 동일 — provisional)
+  - 둘 다 sparse-time 운영 데이터로 정확값 확정. 필요 시 상수 1~2줄 수정 별도 commit.
+- **공식 ticker publish 모델 검증** — K-2 smoke에서 "약 10초 간격 publish" 관찰됐으나 공식 보장 미확인. canary 24h+ 자연 누적에서 평일/주말 모두 동일 패턴이면 운영 안정성 강화. 만약 sparse-time에서 silence가 길어지면 threshold 조정.
+
+**후속 phase**:
+
+| Phase | Scope | 비고 |
+|---|---|---|
+| **Phase B.6** (예정) | Gopax WS 확장 | 전체 ticker 구독 + 서버 필터링 + Primus `::ping::` 30s (가장 다른 구조) |
+| **공통화 검토** | 거래소 base class / shared lifecycle | **Phase B.3 + B.4 + B.5 + B.6 모두 land 후 (5개 거래소 전부)** 중복 명확해진 시점 판단. Korbit의 unified `status` 분기 + 10s throttled publish + list-wrap subscribe는 Bithumb/Coinone과 또 다른 axis. Gopax (전체 ticker 구독 + Primus protocol) 까지 본 후 base class 결정. 선제 abstraction 금지 (KRX close finalizer 큰 PR 학습).
+
+후속 phase 진입 시점 + 순서는 Phase B.5 운영 안정 측정 + B.6 land 후 결정.
+
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
 PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
