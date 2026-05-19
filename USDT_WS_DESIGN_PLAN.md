@@ -731,15 +731,53 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - **K3 = unified ACK/ERROR via `status` 분기 + list-wrap subscribe build**. Coinone C3 (CONNECTED/SUBSCRIBED 별도 frame 분기) 와 다른 단순한 path. wire format은 신규 작성 (list-wrap, Bithumb dict/Coinone dict 모두 비호환).
 - **K5/K6/K7 = Coinone C5/C6/C7 거의 1:1 mirror** — source-neutral hook (`request_tether_topic_trigger`, `UsdtAlertEvaluator`, `AlertObservation`) 재사용. K6의 REST normalized helper는 contract (`{source, asset, rate, timestamp_ms}`) Coinone/Bithumb과 동일 유지 — 내부 timestamp source만 `lastTradedAt` (Coinone top-level `timestamp` 대신).
 
-#### 12.7.5 Canary 활성화 조건
+#### 12.7.5 Canary 활성화 조건 + 운영 status
 
-**선행 조건** (계획 잠금 시점):
+> 📅 **활성화 시점**: 2026-05-20 04:15:18 KST (Coinone canary 24h+ 미달 ~10h 시점, 2-step deploy 패턴 적용하여 선행 안정 검증 후 활성화)
+
+**원래 선행 조건** (계획 잠금 시점):
 
 - `USDT_WS_KORBIT_ENABLED=false` default — Stage K2-K7 코드 land + push 누적 시 운영 영향 0
 - Phase B.4 Coinone canary 운영 안정 (5/19 18:42 활성화 후 24h+ 자연 누적, sparse-time max ticker_update_gap 관찰 — §12.6.5)
 - Phase B.5 K2~K7 코드 land + 외부 검토 통과
 - 활성화 후 24h+ 자연 누적 → sparse-time DATA silence 패턴으로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 120s 정확값 확정 (필요 시 별도 작은 commit)
 - 1주 운영 안정 검증 후 Phase B.6 (Gopax) 진입. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (§12.6.5/§12.6.7 결정 mirror).
+
+**활성화 결정 (2026-05-20 사용자 판단)** — Coinone 24h+ 미달이지만 검증 단계 통과 후 활성화:
+
+- ✅ Step A — Coinone 10h+ 누적 운영 안정 (container Up 9h healthy / error/reconnect/transition 0건 / Redis fresh / DB last gap 46s 정상)
+- ✅ Step B — K2~K7 코드 prod deploy (git pull `9da2beb..afc6978` → docker build → force-recreate **flag=false 유지**). Import OK / ERROR 0건 / 기존 Upbit/Bithumb/Coinone 재attach 정상 / Korbit `skip start` 1줄만 (10분 안정 관찰 ERROR 0건)
+- ✅ Step C — Korbit `USDT_WS_KORBIT_ENABLED=true` 활성화 + force-recreate
+- **선활성화 근거**: (1) 2-step deploy (flag=false → flag=true) 패턴으로 import/startup regression 사전 차단 (Coinone canary 활성화 lesson 적용) (2) Coinone 10h sparse-time 안정 + Step B 10분 추가 안정 검증으로 환경 영향 0 확인 (3) 사용자 앱 영향 0 — 앱 테더 탭 미배포, backend canary side effect는 허용 범위 (4) 이상 시 즉시 rollback 가능 (`env=false` + `--force-recreate`, §12.7.6) (5) Korbit publish ~10s 모델로 sparse-time 자연 누적 가능
+
+**활성화 lesson** (Coinone §12.6.5 lesson + 2-step deploy 추가):
+
+- **2-step deploy 패턴** (Codex 권장, Coinone Canary lesson 발전):
+  1. Step B: `USDT_WS_KORBIT_ENABLED=false` 유지 + `docker compose build fastapi` + `docker compose up -d --force-recreate fastapi` — 신규 모듈 import/startup regression 사전 차단 (Coinone canary 활성화 시 `ModuleNotFoundError` 사고 패턴 회피)
+  2. 10분 안정 관찰 — 기존 Upbit/Bithumb/Coinone 재attach 정상, Korbit `skip start` 1줄만 확인
+  3. Step C: `.env`에 `USDT_WS_KORBIT_ENABLED=true` 추가 + `docker compose up -d --force-recreate fastapi`
+- **CLAUDE.md `## Docker 배포 및 관리` 변경 종류별 절차 표 일관**: 코드 변경 + env 변경 양쪽 모두 build → force-recreate
+- **Coinone canary lesson 발전형**: Coinone은 `git pull` + `force-recreate`만 시도하여 `ModuleNotFoundError` 사고 발생 → `build` 누락 발견. Korbit는 2-step deploy로 build 누락도 사전 차단.
+
+**활성화 후 초기 운영 status** (04:15:18 → ~04:16:23, ~65초):
+
+- container Up after recreate, healthy
+- Korbit sequence 1초 내 완료: KorbitWsClient task 시작 → start (K4 reconnect loop) → connected url=`wss://ws-api.korbit.co.kr/v2/public` → subscribed symbol=usdt_krw requestId=1 → subscribe ACK → first tick (K-2 smoke 시나리오 1:1 재현)
+- Coinone 재attach 정상: CoinoneWsClient task 시작 → C4 → connected (`wss://stream.coinone.co.kr`) + subscribed channel=TICKER topic=KRW/USDT + CONNECTED session_id `5317f0a9-...` (새 session) + first tick 04:15:24
+- ERROR/Traceback/ModuleNotFoundError 0건
+- Redis 4 source 모두 fresh:
+  - upbit: 1490.0 @ 04:16:22 KST (mirror_lag ~170ms)
+  - bithumb: 1489.0 @ 04:16:18 KST (mirror_lag ~250ms)
+  - coinone: 1490.0 @ 04:16:19 KST (mirror_lag ~8ms)
+  - **korbit: 1490.0 @ 04:16:13 KST (mirror_lag ~10s — K-2 관찰된 ~10초 publish cadence와 일관)**
+- Korbit DB rows last 2m: 0건 — 가격 stable (1490 고정) + `insert_source_rate_if_changed` 정상 동작. §12.6.5 Coinone lesson과 동일 (가격 미변경 시 INSERT skip)
+
+**남은 작업** (24h+ 운영 관찰 영역):
+
+- sparse-time max ticker_update_gap 결과로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 120s 정확값 확정 — 필요 시 별도 작은 commit (상수 1~2줄 수정)
+- Korbit 10초 publish 모델이 sparse-time에도 유지되는지 검증 (K-2 30분 활발 시간대 sample base, sparse-time guarantee X — Codex 강조 톤 유지)
+- reconnect/transition log monitoring (Coinone 12h 0건 패턴 mirror)
+- 1주 운영 안정 검증 후 Phase B.6 (Gopax) 진입 결정. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (§12.6.5/§12.6.7 결정 mirror).
 
 #### 12.7.6 Rollback 정책 (Phase B.4 §12.6.6 패턴 재사용)
 
