@@ -2143,3 +2143,83 @@ async def shutdown_usdt_ws_bithumb_client():
 
     usdt_ws_bithumb_client = None
     usdt_ws_bithumb_task = None
+
+
+# ─────────────────────────────────────────────────────────────
+# USDT WS Coinone lifecycle (Phase B.4 Stage C2 skeleton)
+# USDT_WS_DESIGN_PLAN §12.6 (2026-05-19). Bithumb 패턴 mirror.
+# Canary 활성화 조건: KRX close finalizer 5/26 telemetry 안정 + C2~C7 land 안정 후 별도 deploy GO.
+# ─────────────────────────────────────────────────────────────
+
+# 모듈 globals — Optional, 시작 전 None
+usdt_ws_coinone_client = None  # CoinoneWsClient 인스턴스
+usdt_ws_coinone_task = None    # client.start() 실행 중인 task
+
+
+async def _run_usdt_ws_coinone_client(client):
+    """CoinoneWsClient.start() wrapper — task crash 시 logger.exception.
+
+    Bithumb `_run_usdt_ws_bithumb_client` 패턴 동일. CancelledError는 propagate.
+    """
+    try:
+        await client.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[usdt_ws.coinone] CoinoneWsClient task crashed")
+
+
+async def start_usdt_ws_coinone_client():
+    """USDT WS Coinone client startup — main.py lifespan에서 호출.
+
+    USDT_WS_COINONE_ENABLED=false 시 즉시 return (lifecycle 비활성).
+    중복 호출 방지 (test/재시작 시 중복 task 방지).
+
+    Stage C2 acceptance (USDT_WS_DESIGN_PLAN §12.6.4 핵심):
+        flag=false 시 함수 즉시 return + CoinoneWsClient 생성 X + network connect X +
+        Redis/DB writer X. 본 stage 이후 C3-C7 운영 영향 0 보장.
+    """
+    global usdt_ws_coinone_client, usdt_ws_coinone_task
+
+    if not config.USDT_WS_COINONE_ENABLED:
+        logger.info("[usdt_ws.coinone] USDT_WS_COINONE_ENABLED=false, skip start")
+        return
+
+    # 중복 start 방지 — client task 이미 진행 중이면 skip
+    if usdt_ws_coinone_task is not None and not usdt_ws_coinone_task.done():
+        logger.debug("[usdt_ws.coinone] client task 진행 중, 중복 start 무시")
+        return
+
+    # 함수 내부 import — 순환 참조 방지 + 미연결 시점 import 영향 0
+    from app.crawlers.usdt_ws.coinone import CoinoneWsClient
+
+    client = CoinoneWsClient()
+    usdt_ws_coinone_client = client
+    usdt_ws_coinone_task = asyncio.create_task(_run_usdt_ws_coinone_client(client))
+    logger.info("[usdt_ws.coinone] CoinoneWsClient task 시작")
+
+
+async def shutdown_usdt_ws_coinone_client():
+    """USDT WS Coinone client + task 안전 종료.
+
+    client.stop() → task cancel/await → globals 초기화.
+    """
+    global usdt_ws_coinone_client, usdt_ws_coinone_task
+
+    if usdt_ws_coinone_client is not None:
+        try:
+            await usdt_ws_coinone_client.stop()
+        except Exception:
+            logger.exception("[usdt_ws.coinone] client.stop() 실패")
+
+    if usdt_ws_coinone_task is not None and not usdt_ws_coinone_task.done():
+        usdt_ws_coinone_task.cancel()
+        try:
+            await usdt_ws_coinone_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[usdt_ws.coinone] task await 실패")
+
+    usdt_ws_coinone_client = None
+    usdt_ws_coinone_task = None

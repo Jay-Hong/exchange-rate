@@ -544,6 +544,10 @@ async def lifespan(app: FastAPI):
     # USDT_WS_BITHUMB_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
     await scheduler.start_usdt_ws_bithumb_client()
 
+    # Phase B.4 Stage C2 — USDT WebSocket Coinone canary skeleton (USDT_WS_DESIGN_PLAN §12.6).
+    # USDT_WS_COINONE_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+    await scheduler.start_usdt_ws_coinone_client()
+
     yield
 
     # Shutdown code
@@ -557,6 +561,9 @@ async def lifespan(app: FastAPI):
 
     # USDT WebSocket Bithumb client 종료 (Phase B.3 Stage U2)
     await scheduler.shutdown_usdt_ws_bithumb_client()
+
+    # USDT WebSocket Coinone client 종료 (Phase B.4 Stage C2)
+    await scheduler.shutdown_usdt_ws_coinone_client()
 
     # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
     await scheduler.shutdown_krx_futures_client()

@@ -70,6 +70,15 @@ USDT_WS_UPBIT_ENABLED = os.getenv("USDT_WS_UPBIT_ENABLED", "false").lower() == "
 # 생성 X + network connect X + Redis/DB writer X (USDT_WS_DESIGN_PLAN §12.5.2 U2 핵심).
 USDT_WS_BITHUMB_ENABLED = os.getenv("USDT_WS_BITHUMB_ENABLED", "false").lower() == "true"
 
+# USDT_WS_COINONE_ENABLED: Phase B.4 Coinone WS canary 토글 (USDT_WS_DESIGN_PLAN §12.6).
+# default false — scheduler에 lifecycle 등록되지만 client.start() 호출 안 함.
+# C2 (현재): true → stop_event 대기만, network 호출 없음.
+# C3 이후: true → WS connect/subscribe/parse 동작 (별 protocol parser).
+# Canary 활성화 조건 — KRX close finalizer 5/26 telemetry 안정 + C2~C7 land 안정 후 별도 deploy GO.
+# false 시 invariant (acceptance Stage C2): start 함수 즉시 return + CoinoneWsClient
+# 생성 X + network connect X + Redis/DB writer X (USDT_WS_DESIGN_PLAN §12.6.4 C2 핵심).
+USDT_WS_COINONE_ENABLED = os.getenv("USDT_WS_COINONE_ENABLED", "false").lower() == "true"
+
 # KRX_BROADCAST_INCLUDE: removed in Z-2d cleanup (2026-05-12).
 # 이전: KRX 미국달러선물의 broadcast latest:* 노출 토글.
 # Z-2d 통일로 legacy_policy.should_include_source_in_legacy_rates allowlist가
