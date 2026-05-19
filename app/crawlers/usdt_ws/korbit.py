@@ -1,7 +1,7 @@
-"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K4).
+"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K5).
 
 USDT_WS_DESIGN_PLAN §12.7 Phase B.5.
-Coinone Stage C2-C4 + Bithumb Stage U4 패턴 혼합 mirror.
+Coinone Stage C2-C5 + Bithumb Stage U4-U5 패턴 mirror.
 
 K2 lifecycle skeleton (완료):
     - `_stop_event` + `_running`
@@ -12,23 +12,28 @@ K3 connect/subscribe/parse + log only (완료):
       (close + lastTradedAt fallback) / `_handle_message` (unified status 분기) /
       `_run_one_session` (single session) / `start` (no reconnect)
 
-K4 liveness + ws.ping() heartbeat + 2 status 분리 + reconnect loop (현재):
+K4 liveness + ws.ping() heartbeat + 2 status 분리 + reconnect loop (완료):
     - `UsdtLivenessMonitor` source-neutral 재사용 (Upbit/Bithumb/Coinone와 동일)
     - **`_ping_loop` — Bithumb explicit ping mirror**: `ws.ping()` + `wait_for(pong_waiter, timeout)` +
       성공 시 `_liveness.observe_heartbeat`. timeout/closed 시 ws.close() → recv loop가
-      ConnectionClosed → start reconnect loop. (Coinone application-level PING과 다름 —
-      K-2 smoke pong_waiter 5회 정상 검증 완료, median 14.64ms latency)
-    - **2 status 차원 분리 (Coinone C4 mirror)**:
-        - `_connection_status`: normal | reconnecting | stale (PING/PONG + last_activity_at 기준)
-        - `_ticker_freshness_status`: normal | warning (ticker age 기반, log only)
+      ConnectionClosed → start reconnect loop.
+    - **2 status 차원 분리 (Coinone C4 mirror)**: connection / ticker_freshness 분리
     - **2-signal invariant**: ticker silence + heartbeat fresh → reconnect/stale 안 됨
-      (last_activity_at = max(tick, heartbeat), Coinone C4 핵심 결정 mirror)
     - **Reconnect loop (Bithumb start mirror)**: backoff sequence `[1,2,4,8,16,30]` Upbit/KRX 통일
-    - **Scope guard**: K4에서 `UsdtLivenessMonitor` 허용. Redis/DB/Alert/REST는 미진입 (K5~K7 영역).
 
-K5 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
-    - K5: KorbitRedisWriter + topic trigger 자동 발화
-    - K6: KorbitDbWriter + REST fallback + `fetch_korbit_usdt_tick()` normalized helper
+K5 Redis writer + topic trigger (현재):
+    - Constants: MAX_PENDING_WRITES=20 / REDIS_CLOSE_TIMEOUT_SEC=1.0 (Coinone/Bithumb 동일)
+    - `KorbitRedisWriter`: tick-level fire-and-forget (Coinone C5 1:1 mirror, logger prefix만 변경).
+      schedule → asyncio.create_task → _write_async (write_lock 직렬화 + to_thread + helper False
+      격리 + success 시 lock 밖에서 tether_topic_trigger).
+    - `_handle_message`의 valid ticker tick → `_run_one_session`에서 observe_tick → ticker freshness
+      normal 복귀 → `_redis_writer.schedule(tick)` (recv loop 격리).
+    - timestamp_ms (raw int) → KST ISO 변환 (`datetime.fromtimestamp(ms/1000, tz=_KST).isoformat()`)
+    - close: pending drain + timeout 후 cancel (마지막 tick 보존).
+    - finally 순서: ping_task cancel/await → `_redis_writer.close()` (Bithumb/Coinone 패턴 mirror).
+
+K6 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
+    - K6: KorbitDbWriter (1s window debounce) + REST fallback + `fetch_korbit_usdt_tick()` normalized helper
       (contract `{source, asset, rate, timestamp_ms}` Coinone/Bithumb과 동일).
       degraded transition + fallback hook도 K6에 추가.
     - K7: UsdtAlertEvaluator wiring
@@ -39,14 +44,23 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
 from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
+# K5 Redis writer + topic trigger imports (Coinone C5 패턴 mirror).
+from app import latest_rates_cache, tether_topic_trigger
+from app.tether_topic_trigger import (
+    TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+)
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.korbit")
+
+# K5 timestamp_ms → KST ISO 변환용 (Coinone _KST mirror).
+_KST = timezone(timedelta(hours=9))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -80,6 +94,137 @@ TICKER_FRESHNESS_WARNING_SEC = 30.0
 # K4 Reconnect backoff sequence — Upbit/KRX/Bithumb 통일 (USDT_WS_DESIGN_PLAN §5).
 RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 RECONNECT_BACKOFF_TAIL = 30.0
+
+# K5 Redis writer guards — Coinone/Bithumb 동일 값.
+MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
+REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
+
+
+class KorbitRedisWriter:
+    """Korbit USDT/KRW Redis latest writer — tick-level, fire-and-forget (K5).
+
+    Coinone `CoinoneRedisWriter` 1:1 mirror. logger prefix만 korbit.
+    source는 tick["source"]에서 "korbit" 자동 (KRX 학습: stage 추가 시 큰
+    추상화 금지. generic UsdtRedisWriter 추상화는 거래소 5개 land 후 별도 시점).
+
+    K5 핵심 (Coinone C5 mirror):
+        - 매 valid tick → `set_latest_usdt_rate_from_sync_job` 호출 (debounce 없음 —
+          DB writer가 K6에서 1s window debounce 담당, Redis는 tick-level latest 보존)
+        - schedule()은 background task 생성 후 즉시 반환 (recv loop 격리)
+        - asyncio.to_thread로 sync helper 호출 (event loop non-blocking)
+        - MAX_PENDING_WRITES 한도로 Redis 장애 시 task 폭증 차단
+        - close() drain-first, timeout 후 cancel (마지막 tick 보존)
+        - Redis write 성공 시에만 tether topic trigger (lock 밖에서 호출)
+        - reason은 source-neutral `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS` 재사용
+
+    Failure isolation:
+        - helper False 반환 / exception → log only, WS session 영향 X
+        - trigger 예외 → log only, writer/WS session 영향 X
+        - last-write-wins (helper 기존 정책 유지)
+
+    timestamp_ms → KST ISO 변환:
+        - tick["timestamp_ms"] (raw int ms) → `datetime.fromtimestamp(ms/1000, tz=_KST).isoformat()`
+        - K3에서 raw 유지 결정 (KST/UTC 변환은 sink 별 정책 — Redis는 KST ISO, DB는 K6 결정)
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        # write order 직렬화: 병렬 to_thread + connection pool 조합으로
+        # old tick이 new tick을 덮는 race 차단. lock은 to_thread 완료까지 보유
+        # — schedule 순서 = Redis SET 순서. (Coinone C5 mirror)
+        self._write_lock: asyncio.Lock = asyncio.Lock()
+
+    def schedule(self, tick: dict) -> None:
+        """tick → background Redis write task. fire-and-forget.
+
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning.
+        Redis 장애로 task가 누적되는 시나리오 차단.
+        """
+        if len(self._tasks) >= MAX_PENDING_WRITES:
+            logger.warning(
+                "[usdt_ws.korbit] Redis write queue saturated (%d in-flight) — skip tick",
+                len(self._tasks),
+            )
+            return
+        task = asyncio.create_task(self._write_async(tick))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _write_async(self, tick: dict) -> None:
+        """sync Redis helper를 to_thread로 호출. 실패는 격리.
+
+        `_write_lock`으로 직렬화 — 동시 to_thread + connection pool 조합에서
+        발생할 수 있는 SET 순서 역전 차단.
+
+        Redis write 성공 시 lock 밖에서 tether topic trigger 호출.
+        trigger 예외는 writer/WS session에 전파하지 않음.
+        """
+        success = False
+        source = tick["source"]
+        asset = tick["asset"]
+        async with self._write_lock:
+            # K5 timestamp_ms → KST ISO (Coinone C5 mirror).
+            ts_iso = datetime.fromtimestamp(
+                tick["timestamp_ms"] / 1000, tz=_KST,
+            ).isoformat()
+            try:
+                success = await asyncio.to_thread(
+                    latest_rates_cache.set_latest_usdt_rate_from_sync_job,
+                    source=source,
+                    asset=asset,
+                    rate=tick["rate"],
+                    timestamp=ts_iso,
+                )
+                if not success:
+                    logger.warning(
+                        "[usdt_ws.korbit] Redis write returned False "
+                        "(helper 내부 log 참조, WS session 유지)"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.korbit] Redis write task crashed (격리, WS session 유지)"
+                )
+                success = False
+
+        # lock 밖에서 trigger — Redis write 성공 시에만.
+        # trigger 호출 자체의 예외는 writer/WS에 전파 X (책임 분리).
+        if success:
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.korbit] tether topic trigger 호출 실패 (격리, WS session 유지)"
+                )
+
+    async def close(self, timeout: float = REDIS_CLOSE_TIMEOUT_SEC) -> None:
+        """pending writes drain — session/shutdown 시 마지막 tick latest 보존.
+
+        timeout (default 1s) 안에 drain 안 되면 강제 cancel. Redis hung 시 무한
+        대기 방지. finally에서 `_tasks.clear()` 보장.
+        """
+        if not self._tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[usdt_ws.korbit] Redis writer close timeout (%ds) — cancel %d pending tasks",
+                timeout, len(self._tasks),
+            )
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        finally:
+            self._tasks.clear()
 
 
 class KorbitWsClient:
@@ -118,6 +263,9 @@ class KorbitWsClient:
             "ticker_normal": 0,
             "ticker_warning": 0,
         }
+        # K5 Redis writer (tick-level, fire-and-forget) — A13 lifecycle invariant:
+        # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Coinone C5 mirror.
+        self._redis_writer: KorbitRedisWriter = KorbitRedisWriter()
 
     @staticmethod
     def _build_subscribe_payload() -> list:
@@ -427,12 +575,15 @@ class KorbitWsClient:
                         raise
 
                     # K4: valid ticker → observe_tick + freshness warning → normal 복귀.
-                    # K5~K7에서 Redis/DB/Alert downstream IO 추가 예정.
+                    # K5: Redis writer schedule (tick-level, fire-and-forget).
+                    # K6~K7에서 DB/Alert downstream IO 추가 예정.
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
                         if self._ticker_freshness_status == "warning":
                             self._set_ticker_freshness_status("normal")
+                        # K5: Redis writer schedule (recv loop 격리 — fire-and-forget).
+                        self._redis_writer.schedule(tick)
             finally:
                 # Acceptance #9: ping_task cancel/await 보장.
                 ping_task.cancel()
@@ -442,6 +593,12 @@ class KorbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.korbit] ping_task cleanup 실패")
+                # K5 close order: ping_task → Redis writer (Coinone C5 mirror).
+                # K6~K7에서 fallback → DB → Alert → Redis 4-step close로 확장 예정.
+                try:
+                    await self._redis_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.korbit] redis_writer.close() 실패")
 
     async def start(self) -> None:
         """K4 — reconnect loop with backoff (Bithumb start mirror).

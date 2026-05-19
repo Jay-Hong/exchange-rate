@@ -48,6 +48,7 @@ from app import config, scheduler
 from app.crawlers.usdt_ws.korbit import (
     KORBIT_SYMBOL,
     KORBIT_WS_URL,
+    MAX_PENDING_WRITES,
     PING_INTERVAL_SEC,
     PING_TIMEOUT_SEC,
     RECONNECT_BACKOFF_SEQ,
@@ -56,6 +57,7 @@ from app.crawlers.usdt_ws.korbit import (
     STALE_AFTER_SEC,
     SUBSCRIBE_REQUEST_ID,
     TICKER_FRESHNESS_WARNING_SEC,
+    KorbitRedisWriter,
     KorbitWsClient,
 )
 
@@ -530,16 +532,16 @@ class TestScopeGuard(unittest.TestCase):
     """K3 acceptance: korbit.py에 Redis/DB/Alert/REST writer import 0건."""
 
     def test_no_forbidden_imports(self):
-        """korbit.py module이 Redis/DB/Alert/REST/topic trigger import하지 않음.
+        """korbit.py module이 DB/Alert/REST import하지 않음 (K5 누적 후 docstring 정정).
 
-        K4 정정 (Codex blocker급): UsdtLivenessMonitor는 K4부터 의도적 import →
-        forbidden list에서 제거. 나머지 7개는 K5~K7 영역으로 유지.
+        Scope guard 진화:
+            K3: 8개 forbidden (UsdtLivenessMonitor 포함)
+            K4: 7개 forbidden (UsdtLivenessMonitor 허용, K4 의도적 import)
+            K5 (현재): 5개 forbidden (latest_rates_cache, tether_topic_trigger 추가 허용)
         """
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
         forbidden = [
-            "latest_rates_cache",
-            "tether_topic_trigger",
             "UsdtAlertEvaluator",
             "AlertObservation",
             "get_db_context",
@@ -549,17 +551,22 @@ class TestScopeGuard(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"K4 scope 위반: '{name}' import됨 (K5~K7 영역)",
+                f"K5 scope 위반: '{name}' import됨 (K6~K7 영역)",
             )
 
     def test_module_imports_minimal(self):
-        """module imports — asyncio + json + logging + time + typing + websockets + UsdtLivenessMonitor only."""
+        """module imports — K5 누적 (UsdtLivenessMonitor + latest_rates_cache + tether_topic_trigger)."""
         import app.crawlers.usdt_ws.korbit as korbit_module
         self.assertTrue(hasattr(korbit_module, "KorbitWsClient"))
         self.assertTrue(hasattr(korbit_module, "KORBIT_WS_URL"))
         self.assertTrue(hasattr(korbit_module, "KORBIT_SYMBOL"))
         # K4: UsdtLivenessMonitor source-neutral 재사용 (의도적 import)
         self.assertTrue(hasattr(korbit_module, "UsdtLivenessMonitor"))
+        # K5: Redis writer + topic trigger 의도적 import
+        self.assertTrue(hasattr(korbit_module, "latest_rates_cache"))
+        self.assertTrue(hasattr(korbit_module, "tether_topic_trigger"))
+        self.assertTrue(hasattr(korbit_module, "KorbitRedisWriter"))
+        self.assertTrue(hasattr(korbit_module, "TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS"))
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +955,269 @@ class TestStartReconnectLoop(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(task.done())
         self.assertFalse(client._running)
+
+
+# ===========================================================================
+# K5 — KorbitRedisWriter + topic trigger + _run_one_session valid tick wiring
+# ===========================================================================
+
+
+class TestKorbitRedisWriterScheduleSuccess(unittest.IsolatedAsyncioTestCase):
+    """K5 acceptance: schedule → _write_async → to_thread(helper) → timestamp_ms KST ISO."""
+
+    async def test_schedule_calls_helper_with_kst_iso(self):
+        """schedule(tick) → set_latest_usdt_rate_from_sync_job 호출 + timestamp_ms KST ISO 변환 검증."""
+        writer = KorbitRedisWriter()
+        tick = {
+            "source": "korbit",
+            "asset": "usdt-krw",
+            "rate": 1488.0,
+            "timestamp_ms": 1779194593306,
+        }
+        captured_kwargs = {}
+
+        def fake_helper(*, source, asset, rate, timestamp):
+            captured_kwargs["source"] = source
+            captured_kwargs["asset"] = asset
+            captured_kwargs["rate"] = rate
+            captured_kwargs["timestamp"] = timestamp
+            return True
+
+        trigger_calls = []
+
+        def fake_trigger(*, source, asset, reason):
+            trigger_calls.append({"source": source, "asset": asset, "reason": reason})
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=fake_helper,
+        ), patch(
+            "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=fake_trigger,
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(captured_kwargs["source"], "korbit")
+        self.assertEqual(captured_kwargs["asset"], "usdt-krw")
+        self.assertEqual(captured_kwargs["rate"], 1488.0)
+        ts = captured_kwargs["timestamp"]
+        self.assertIsInstance(ts, str)
+        self.assertIn("+09:00", ts)
+        from datetime import datetime, timezone, timedelta
+        expected_kst = datetime.fromtimestamp(
+            1779194593.306, tz=timezone(timedelta(hours=9)),
+        ).isoformat()
+        self.assertEqual(ts, expected_kst)
+
+        # topic trigger 호출 검증 (success 후)
+        self.assertEqual(len(trigger_calls), 1)
+        self.assertEqual(trigger_calls[0]["source"], "korbit")
+        self.assertEqual(trigger_calls[0]["asset"], "usdt-krw")
+
+
+class TestKorbitRedisWriterHelperFailureIsolated(unittest.IsolatedAsyncioTestCase):
+    """K5 acceptance: helper False / exception → log only + topic trigger 미호출."""
+
+    async def test_helper_returns_false_no_trigger(self):
+        writer = KorbitRedisWriter()
+        tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+        trigger_calls = []
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ), patch(
+            "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=lambda **kw: trigger_calls.append(kw),
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(len(trigger_calls), 0)
+
+    async def test_helper_exception_isolated(self):
+        writer = KorbitRedisWriter()
+        tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+        trigger_calls = []
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("Redis down"),
+        ), patch(
+            "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=lambda **kw: trigger_calls.append(kw),
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(len(trigger_calls), 0)
+
+
+class TestKorbitRedisWriterTriggerExceptionIsolated(unittest.IsolatedAsyncioTestCase):
+    """K5 acceptance: trigger 예외 → log only (writer/WS 영향 X). helper success 가정."""
+
+    async def test_trigger_exception_writer_continues(self):
+        writer = KorbitRedisWriter()
+        tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+        helper_calls = []
+
+        def fake_helper(**kw):
+            helper_calls.append(kw)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=fake_helper,
+        ), patch(
+            "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=RuntimeError("trigger queue full"),
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(len(helper_calls), 1)
+
+
+class TestKorbitRedisWriterSaturation(unittest.IsolatedAsyncioTestCase):
+    """K5 acceptance: saturation check — MAX_PENDING_WRITES 초과 시 skip + warning."""
+
+    async def test_saturation_skips_new_schedule(self):
+        writer = KorbitRedisWriter()
+
+        async def slow_helper(**kw):
+            await asyncio.sleep(10.0)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=slow_helper,
+        ):
+            tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+            for _ in range(MAX_PENDING_WRITES):
+                writer.schedule(tick)
+            self.assertEqual(len(writer._tasks), MAX_PENDING_WRITES)
+
+            with self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="WARNING") as cm:
+                writer.schedule(tick)
+            self.assertEqual(len(writer._tasks), MAX_PENDING_WRITES)
+            self.assertTrue(any("saturated" in m for m in cm.output))
+
+            for task in list(writer._tasks):
+                task.cancel()
+            await asyncio.gather(*writer._tasks, return_exceptions=True)
+
+
+class TestKorbitRedisWriterClose(unittest.IsolatedAsyncioTestCase):
+    """K5 acceptance: close drain + timeout 후 cancel + _tasks.clear()."""
+
+    async def test_close_drains_pending_then_clears(self):
+        writer = KorbitRedisWriter()
+        tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(tick)
+            writer.schedule(tick)
+            self.assertGreater(len(writer._tasks), 0)
+            await writer.close(timeout=2.0)
+            self.assertEqual(len(writer._tasks), 0)
+
+    async def test_close_timeout_cancels_pending(self):
+        writer = KorbitRedisWriter()
+        tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+
+        async def slow_helper(**kw):
+            await asyncio.sleep(10.0)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=slow_helper,
+        ):
+            writer.schedule(tick)
+            self.assertGreater(len(writer._tasks), 0)
+            await writer.close(timeout=0.1)
+            self.assertEqual(len(writer._tasks), 0)
+
+
+class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
+    """K5 acceptance: _run_one_session valid ticker path에서 observe_tick 후 _redis_writer.schedule 호출."""
+
+    async def test_valid_ticker_calls_schedule_on_redis_writer(self):
+        client = KorbitWsClient()
+        schedule_calls = []
+
+        client._redis_writer.schedule = MagicMock(
+            side_effect=lambda tick: schedule_calls.append(tick),
+        )
+
+        recv_raws = [
+            json.dumps({"status": "success", "requestId": 1}),  # ACK
+            json.dumps({
+                "type": "ticker", "timestamp": 1779194622984, "symbol": "usdt_krw",
+                "data": {"close": "1488", "lastTradedAt": 1779194593306},
+            }),
+        ]
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i < len(recv_raws):
+                return recv_raws[i]
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # ticker 1건만 schedule 호출됨 (ACK는 schedule 호출 X)
+        self.assertEqual(len(schedule_calls), 1)
+        self.assertEqual(schedule_calls[0]["source"], "korbit")
+        self.assertEqual(schedule_calls[0]["asset"], "usdt-krw")
+        self.assertEqual(schedule_calls[0]["rate"], 1488.0)
+        self.assertEqual(schedule_calls[0]["timestamp_ms"], 1779194593306)
+
+
+class TestScopeGuardK5(unittest.TestCase):
+    """K5 acceptance: K5 의도적 import 허용 + K6~K7 영역 forbidden."""
+
+    def test_redis_topic_imports_allowed(self):
+        """K5: latest_rates_cache, tether_topic_trigger, KorbitRedisWriter 의도적 import 허용."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        self.assertTrue(hasattr(korbit_module, "latest_rates_cache"))
+        self.assertTrue(hasattr(korbit_module, "tether_topic_trigger"))
+        self.assertTrue(hasattr(korbit_module, "KorbitRedisWriter"))
+        self.assertTrue(hasattr(korbit_module, "TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS"))
+
+    def test_db_alert_rest_forbidden(self):
+        """K6~K7 영역 (DB/Alert/REST) 여전히 forbidden."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        module_attrs = dir(korbit_module)
+        forbidden = [
+            "UsdtAlertEvaluator",
+            "AlertObservation",
+            "get_db_context",
+            "insert_source_rate_if_changed",
+            "fetch_korbit_usdt_tick",
+        ]
+        for name in forbidden:
+            self.assertNotIn(
+                name, module_attrs,
+                f"K5 scope 위반: '{name}' import됨 (K6~K7 영역)",
+            )
 
 
 if __name__ == "__main__":
