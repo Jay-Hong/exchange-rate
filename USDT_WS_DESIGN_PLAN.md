@@ -565,17 +565,45 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - **C3 = 별 protocol parser**. Phase B.3 U3 (Upbit 호환 parse) 와 별도 코드 작성. CONNECTED response_type 처리 명시적 분기 추가.
 - **C5/C6/C7 = Phase B.3 U5/U6/U7 거의 1:1 mirror** — Bithumb 후 정착된 source-neutral hook (`request_tether_topic_trigger`, `UsdtAlertEvaluator`, `AlertObservation`) 재사용.
 
-#### 12.6.5 Canary 활성화 조건
+#### 12.6.5 Canary 활성화 조건 + 운영 status
 
-> ⚠️ **운영 활성화는 KRX 5/26 close finalizer 7일 telemetry 안정 + Phase B.4 C2~C7 land 안정 후 별도 GO.**
+> 📅 **활성화 시점**: 2026-05-19 18:42:16 KST (선행 조건 일부 완화하여 선활성화)
+
+**원래 선행 조건** (계획 잠금 시점):
 
 - `USDT_WS_COINONE_ENABLED=false` default — Stage C2-C7 코드 land + push 누적 시 운영 영향 0
-- **선행 조건**:
-  - 2026-05-19 (화) 06:00 KST KRX CM close finalizer 정상 동작
-  - 2026-05-19 ~ 2026-05-26 KRX close finalizer 7일 telemetry 안정 (case A/B/C 분포 확인)
-  - Phase B.4 C2~C7 코드 land + 외부 검토 통과
-- 별도 deploy GO 후 `USDT_WS_COINONE_ENABLED=true` canary 진입
+- 2026-05-19 (화) 06:00 KST KRX CM close finalizer 정상 동작
+- 2026-05-19 ~ 2026-05-26 KRX close finalizer 7일 telemetry 안정 (case A/B/C 분포 확인)
+- Phase B.4 C2~C7 코드 land + 외부 검토 통과
 - canary 운영 1주 관찰 후 다음 단계 (Korbit/Gopax 또는 공통화 검토)
+
+**활성화 결정 (2026-05-19 사용자 판단)** — KRX 5/26 telemetry 완료 전 선활성화:
+
+- ✅ 2026-05-19 06:00 KST CM finalizer 통과 (KRX_CANARY 참조)
+- ✅ Phase B.4 C2~C7 land + push 완료 (C2 `13b6daf` → C7 `9da2beb`, 5/19 17:00~18:30 KST)
+- ⏳ 5/26 telemetry 진행 중 (Day 1/7)
+- **선활성화 근거**: (1) Coinone WS는 KRX와 axis 독립 (2) 사용자 앱 영향 0 — 앱 테더 탭 미배포, backend canary side effect (Redis/DB/Alert)는 허용 범위 (3) 이상 시 즉시 rollback 가능 (`env=false` + `--force-recreate`, §12.6.6) (4) sparse-time 데이터를 별도 smoke 없이 자연 누적 가능
+
+**활성화 lesson** (CLAUDE.md `## Docker 배포 및 관리` cross-reference):
+
+- `git pull` + `docker compose up -d --force-recreate fastapi`만으론 image rebuild 안 됨 → 새 모듈 (`coinone.py`) 부재 → `ModuleNotFoundError` 사고 발생
+- **`docker compose build fastapi` 선행 필수** (CLAUDE.md 변경 종류별 절차 표 참조)
+- 신규 모듈 검증: `docker exec exchange-rate-app python -c "from app.crawlers.usdt_ws.coinone import CoinoneWsClient"` import check
+
+**활성화 후 ~2시간 운영 status** (18:42 → 20:38 KST):
+
+- container Up 2h (healthy), reconnect 0
+- 이상 징후 0건: `DB write failed` / `Redis write returned False` / `connection_status normal → reconnecting` / `ticker_freshness_status` transition / `coinone.fallback` probe / `ping failed` / `ERROR`/`WARNING` 모두 0
+- DB throughput: coinone 1.82 rows/min (REST polling 단독 ~0.9 대비 ~2× ↑ — WS effect 확인). upbit 4.72/min / bithumb 5.65/min과 동일 axis에서 정상 동작
+- Redis mirror tick-level fresh (`mirrored_at` lag <1s)
+- DB row gap (가격 변경 저장 간격) 1h 분석: median 20.1s / max 137.5s — **DB 저장 관점 보조 지표**이며 실제 DATA frame freshness와 동일하지 않음 (호가/거래량 변경도 frame trigger이나 가격 무변동이면 DB INSERT skip)
+- 실제 ticker freshness 검증은 운영 로그상 `ticker_freshness_status` transition 0 + `fallback` 0 사실로만 — **저녁 활발 시간대 한정, sparse-time (새벽/주말) 데이터는 24h+ 자연 누적 예정**
+
+**남은 작업**:
+
+- 24h+ 운영 관찰 (sparse-time 자연 누적)
+- sparse-time max ticker_update_gap 결과로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 300s 정확값 확정 — 필요 시 별도 작은 commit (상수 1~2줄 수정)
+- 1주 운영 안정 검증 후 Phase B.5 (Korbit) 진입 또는 공통화 검토 결정
 
 #### 12.6.6 Rollback 정책 (Phase B.3 §12.5.4 패턴 재사용)
 
@@ -585,10 +613,14 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 #### 12.6.7 후속 phase 목록 + 보충 smoke (Phase B.4 범위 외)
 
-**보충 smoke (선택사항, C1 잠금에 영향 없음)**:
+**보충 smoke / 운영 관찰 (Phase B.4 land 후 자연 진행)**:
 
-- **새벽/주말 sparse-time smoke** (30분, 거래 뜸한 시간대) — DATA silence 패턴 추가 검증. price freshness soft threshold (~60s provisional) 정확 값 결정. plan 뒤집을 risk 평가 — USDT/KRW 24/7 + 한국 인기 자산 baseline이지만, 5분 이상 silence 발생 여부는 sparse-time smoke로 추가 검증 필요.
-- **ERROR shape smoke** (분리 실행, ~10분) — 의도적 잘못된 subscribe로 ERROR response shape 캡처. C3 (parse) 구현 시 input.
+- **새벽/주말 sparse-time 관찰** — 별도 ad-hoc smoke 대신 2026-05-19 18:42 canary 활성화 후 운영 데이터로 자연 누적 (§12.6.5 참조). DATA silence 패턴 검증 + threshold 정확값 확정 input:
+  - `TICKER_FRESHNESS_WARNING_SEC = 60s` (warning state, log only — provisional)
+  - `TICKER_FRESHNESS_DEGRADED_SEC = 300s` (REST probe trigger — provisional)
+  - `FALLBACK_COOLDOWN_SEC = 300s` (degraded threshold와 동일 — provisional)
+  - 둘 다 sparse-time 운영 데이터 (특히 5분 이상 silence 발생 여부)로 정확값 확정. 필요 시 상수 1~2줄 수정 별도 commit.
+- **ERROR shape smoke** (분리 실행, ~10분, 선택사항) — 의도적 잘못된 subscribe로 ERROR response shape 캡처. C3 (parse)에 unknown safe handler 이미 구현되어 있어 운영 영향 없음. 별도 검증 가치는 낮음.
 
 **후속 phase**:
 
