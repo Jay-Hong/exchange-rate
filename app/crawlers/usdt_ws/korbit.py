@@ -1,9 +1,9 @@
-"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K6a).
+"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K6b).
 
 USDT_WS_DESIGN_PLAN §12.7 Phase B.5.
-Coinone Stage C2-C6a + Bithumb Stage U4-U6 패턴 mirror.
-K6는 K6a (DbWriter, sparse-time smoke 무관) + K6b (REST helper + RestFallbackController +
-ticker_freshness degraded threshold)로 분할.
+Coinone Stage C2-C6b + Bithumb Stage U4-U6 패턴 mirror.
+K6는 K6a (DbWriter) + K6b (REST helper + RestFallbackController +
+ticker_freshness degraded threshold + fallback hook)로 분할.
 
 K2 lifecycle skeleton (완료):
     - `_stop_event` + `_running`
@@ -34,7 +34,7 @@ K5 Redis writer + topic trigger (완료):
     - close: pending drain + timeout 후 cancel (마지막 tick 보존).
     - finally 순서: ping_task cancel/await → `_redis_writer.close()` (Bithumb/Coinone 패턴 mirror).
 
-K6a DB writer + 1s window debounce (현재):
+K6a DB writer + 1s window debounce (완료):
     - Constants: DB_WRITE_WINDOW_SEC=1.0 (Coinone/Bithumb 동일)
     - `KorbitDbWriter`: Coinone C6a 1:1 mirror (logger prefix만 변경).
       schedule → window timer → _flush_after_window → asyncio.to_thread(_sync_db_write) →
@@ -45,12 +45,26 @@ K6a DB writer + 1s window debounce (현재):
     - close: timer cancel + pending tick 즉시 flush (window 일관성보다 last tick 우선).
     - finally 순서: ping_task → `_db_writer.close()` → `_redis_writer.close()`.
 
-K6b 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
-    - K6b: `fetch_korbit_usdt_tick()` normalized helper (usdt_sources.py) + `KorbitRestFallbackController`
-      + `TICKER_FRESHNESS_DEGRADED_SEC = 120` (provisional, K-2 base 10s × 12). degraded 진입 시
-      REST probe trigger + fanout (Redis + DB + Alert). normalized contract `{source, asset, rate, timestamp_ms}`
-      Coinone/Bithumb과 동일, 내부 timestamp source는 `data.lastTradedAt`.
-    - K7: UsdtAlertEvaluator wiring (`AlertObservation` schedule on valid tick + REST probe success)
+K6b REST fallback + degraded transition + fallback hook (현재):
+    - Constants 3개: TICKER_FRESHNESS_DEGRADED_SEC=120.0 / FALLBACK_COOLDOWN_SEC=120.0 /
+      FALLBACK_PROBE_TIMEOUT_SEC=10.0. 모두 provisional — K-2 30분 활발 시간대 sample base
+      (sparse-time guarantee X). canary 자연 누적 후 조정.
+    - `fetch_korbit_usdt_tick()` normalized helper (usdt_sources.py) — contract
+      `{source, asset, rate, timestamp_ms}` Coinone/Bithumb과 동일, 내부 timestamp source는
+      `data[0].lastTradedAt` (Coinone top-level `timestamp` 대신, K-1 audit + K-2 검증).
+    - `KorbitRestFallbackController`: Coinone C6b 1:1 mirror (logger prefix만 변경).
+      schedule_probe (sync, in-flight/cooldown/no-loop skip) → _run_probe → REST fetch
+      (to_thread + timeout) → fanout (Redis + DB; Alert는 K7).
+    - 3-level ticker freshness status + hook: normal | warning (30s+, log only) |
+      degraded (120s+, REST probe trigger). `_set_ticker_freshness_status` hook —
+      degraded → schedule_probe(reason="ticker_degraded"), normal 복귀 → reset_cooldown.
+    - `_run_one_session` 2-iteration degraded transition: 1st iter normal→warning,
+      2nd iter warning→degraded → schedule_probe.
+    - finally close order: ping_task → fallback → DB → Redis (Coinone C6b mirror).
+
+K7 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
+    - K7: UsdtAlertEvaluator wiring (`AlertObservation` schedule on valid tick + REST probe success).
+      finally close order 확장: fallback → DB → Alert → Redis (4-step).
 """
 from __future__ import annotations
 
@@ -117,6 +131,17 @@ REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
 # Korbit K-2 관찰은 ~10s publish이므로 매 tick INSERT 부담은 낮으나,
 # Bithumb/Coinone과 동일 1s window debounce 유지 (writer contract 통일).
 DB_WRITE_WINDOW_SEC = 1.0
+
+# K6b ticker freshness degraded threshold (provisional) — K-2 base 10s × 12.
+# K-2는 30분 활발 시간대 sample이라 sparse-time guarantee X (Codex 강조).
+# canary 자연 누적 후 조정 — 단일 상수 격리.
+TICKER_FRESHNESS_DEGRADED_SEC = 120.0
+
+# K6b REST fallback cooldown — degraded threshold와 동일 (Coinone 패턴).
+FALLBACK_COOLDOWN_SEC = 120.0
+
+# K6b REST probe timeout — Coinone 동일.
+FALLBACK_PROBE_TIMEOUT_SEC = 10.0
 
 
 class KorbitRedisWriter:
@@ -354,6 +379,145 @@ class KorbitDbWriter:
             )
 
 
+class KorbitRestFallbackController:
+    """Korbit REST fallback (silent probe) — K6b.
+
+    Coinone `CoinoneRestFallbackController` (coinone.py:412) 1:1 mirror.
+    K7에서 alert evaluator wiring 추가 예정 — 현재는 Redis + DB fanout만.
+
+    DATA frame age > TICKER_FRESHNESS_DEGRADED_SEC (120s provisional) 감지 시 REST 1회
+    probe → normalized tick → 기존 fanout (Redis + DB) 재사용. WS reconnect loop는
+    그대로 유지, fallback은 freshness 보조.
+
+    Guardrails (Coinone C6b mirror):
+        - schedule_probe()는 sync/non-blocking (_set_ticker_freshness_status 동기 흐름에서 호출).
+        - In-flight skip: probe 진행 중 중복 trigger 차단.
+        - Cooldown skip: 마지막 probe 종료 후 FALLBACK_COOLDOWN_SEC 미경과 시 skip
+          (degraded 지속 중 폭주 방지).
+        - Probe 실패도 cooldown 적용 (REST rate limit 보호).
+        - reset_cooldown(): normal 복귀 시 호출 → 다음 degraded 즉시 1회 probe 보장.
+        - REST 실패 격리: log only, WS session/reconnect 영향 X.
+        - fallback tick의 source/asset = "korbit"/"usdt-krw" (downstream 일관).
+        - K7에서 alert wiring 추가 예정 (현재는 Redis + DB만 schedule).
+    """
+
+    def __init__(
+        self,
+        redis_writer: "KorbitRedisWriter",
+        db_writer: "KorbitDbWriter",
+        *,
+        cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
+        probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
+    ) -> None:
+        self._redis_writer = redis_writer
+        self._db_writer = db_writer
+        # alert_evaluator는 K7에서 inject 예정.
+        self._cooldown_sec = cooldown_sec
+        self._probe_timeout_sec = probe_timeout_sec
+        self._in_flight: bool = False
+        self._cooldown_until: float = 0.0
+        self._pending_task: Optional[asyncio.Task] = None
+
+    def schedule_probe(self, reason: str) -> None:
+        """sync: in-flight/cooldown 체크 후 background probe task 생성. 즉시 반환.
+
+        `_set_ticker_freshness_status("degraded")` 안에서 호출 — 동기 흐름이라 즉시 반환 필수.
+        Production은 항상 asyncio context 안 (recv loop / reconnect loop), 단
+        sync test에서 _set_ticker_freshness_status 직접 호출 시 no-loop. defensive하게 skip.
+        """
+        now = time.time()
+        if self._in_flight:
+            logger.debug(
+                "[usdt_ws.korbit.fallback] probe in-flight, skip (reason=%s)", reason,
+            )
+            return
+        if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            logger.debug(
+                "[usdt_ws.korbit.fallback] cooldown active, skip (%.1fs remaining, reason=%s)",
+                remaining, reason,
+            )
+            return
+        # Loop 체크를 coroutine 생성 전에 — no-loop 시 coroutine 미생성으로
+        # "coroutine was never awaited" warning 회피.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug(
+                "[usdt_ws.korbit.fallback] no event loop, skip probe (reason=%s)", reason,
+            )
+            return
+        self._pending_task = loop.create_task(self._run_probe(reason))
+        self._in_flight = True
+
+    def reset_cooldown(self) -> None:
+        """normal 복귀 시 호출 — cooldown clear. 다음 degraded 즉시 1회 probe 보장."""
+        self._cooldown_until = 0.0
+        logger.debug("[usdt_ws.korbit.fallback] cooldown reset on normal recovery")
+
+    async def _run_probe(self, reason: str) -> None:
+        """REST probe → normalized tick → fanout (Redis + DB; Alert는 K7).
+
+        실패 시 log only + cooldown 적용 (재시도 X). WS session 영향 X.
+        K7: probe success 시 AlertObservation(kind="rest_probe") schedule 추가 예정.
+        """
+        try:
+            logger.info(
+                "[usdt_ws.korbit.fallback] probe start (reason=%s)", reason,
+            )
+            tick = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_korbit_tick),
+                timeout=self._probe_timeout_sec,
+            )
+            if tick is None:
+                logger.warning(
+                    "[usdt_ws.korbit.fallback] probe returned None — REST/parse 실패 or invalid rate",
+                )
+                return
+
+            # 기존 fanout 재사용 (K5 Redis writer + K6a DB writer). K7에서 Alert 추가 예정.
+            self._redis_writer.schedule(tick)
+            self._db_writer.schedule(tick)
+            logger.info(
+                "[usdt_ws.korbit.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
+                tick["rate"], tick["timestamp_ms"], reason,
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[usdt_ws.korbit.fallback] probe timeout (%.1fs, reason=%s)",
+                self._probe_timeout_sec, reason,
+            )
+        except Exception:
+            logger.exception(
+                "[usdt_ws.korbit.fallback] probe error (격리, reason=%s)", reason,
+            )
+        finally:
+            # 실패해도 cooldown 적용 (REST rate limit 보호).
+            self._cooldown_until = time.time() + self._cooldown_sec
+            self._in_flight = False
+
+    @staticmethod
+    def _fetch_korbit_tick() -> Optional[dict]:
+        """sync REST fetch — to_thread 내부 실행. 모듈 내부 import (순환 회피)."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        return fetch_korbit_usdt_tick()
+
+    async def close(self) -> None:
+        """pending probe task cancel + await. WS session 종료 시 호출."""
+        task = self._pending_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.korbit.fallback] pending task cleanup 실패")
+        self._pending_task = None
+
+
 class KorbitWsClient:
     """Korbit USDT/KRW WebSocket client — K2 skeleton + K3 parse + K4 liveness/reconnect.
 
@@ -389,12 +553,19 @@ class KorbitWsClient:
             "connection_stale": 0,
             "ticker_normal": 0,
             "ticker_warning": 0,
+            "ticker_degraded": 0,  # K6b 3-level extension
         }
         # K5 Redis writer (tick-level, fire-and-forget) — A13 lifecycle invariant:
         # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Coinone C5 mirror.
         self._redis_writer: KorbitRedisWriter = KorbitRedisWriter()
         # K6a DB writer (1s window debounce). Coinone C6a mirror.
         self._db_writer: KorbitDbWriter = KorbitDbWriter()
+        # K6b REST fallback controller (degraded threshold trigger). Coinone C6b mirror.
+        # alert_evaluator inject은 K7. 현재는 Redis + DB fanout만.
+        self._fallback_controller: KorbitRestFallbackController = KorbitRestFallbackController(
+            redis_writer=self._redis_writer,
+            db_writer=self._db_writer,
+        )
 
     @staticmethod
     def _build_subscribe_payload() -> list:
@@ -568,11 +739,14 @@ class KorbitWsClient:
         )
 
     def _set_ticker_freshness_status(self, new_status: str) -> None:
-        """K4 ticker freshness 차원 status 전이 + counter + log (Coinone C4 mirror).
+        """K4/K6b ticker freshness 차원 status 전이 + counter + log + K6b fallback hook.
 
         Transition-based — 매 loop마다 warning 안 찍히도록 상태 변화 시점에만 1회 log.
-        new_status: normal | warning.
-        K4 scope: log only, action 미진입. degraded transition + fallback hook은 K6 영역.
+        new_status: normal | warning | degraded (3-level, K6b 확장).
+
+        K6b fallback hook (Coinone C6b mirror):
+            - degraded 진입 시 fallback_controller.schedule_probe(reason="ticker_degraded")
+            - normal 복귀 시 fallback_controller.reset_cooldown()
         """
         if self._ticker_freshness_status == new_status:
             return
@@ -587,6 +761,13 @@ class KorbitWsClient:
             prev, new_status, self._liveness.last_tick_at,
             self._liveness.max_frame_gap_sec,
         )
+        # K6b fallback hook (Coinone C6b mirror)
+        if new_status == "degraded":
+            self._fallback_controller.schedule_probe(reason="ticker_degraded")
+        elif new_status == "normal":
+            # warning → normal 또는 degraded → normal 모두 reset_cooldown 호출.
+            # 새 outage cycle의 첫 degraded probe가 옛 cooldown으로 skip되지 않도록.
+            self._fallback_controller.reset_cooldown()
 
     @staticmethod
     def _compute_backoff(attempt: int) -> float:
@@ -680,9 +861,11 @@ class KorbitWsClient:
                     elif self._connection_status == "stale" and not self._liveness.is_stale(now, STALE_AFTER_SEC):
                         self._set_connection_status("normal")
 
-                    # Ticker freshness telemetry (transition 기반, K4 scope = normal ↔ warning).
+                    # Ticker freshness telemetry (transition 기반, 3-level: normal/warning/degraded).
+                    # K4: normal → warning (30s+, log only).
+                    # K6b: warning → degraded (120s+, REST probe trigger via _set_*_status hook).
                     # last_tick_at 없으면 (첫 tick 전) freshness 평가 skip.
-                    # K6에서 warning → degraded (REST probe trigger) 추가 예정.
+                    # 2-iteration 특성 (Codex Point 1): if/elif 구조라 normal → degraded 직행 불가.
                     last_tick = self._liveness.last_tick_at
                     if last_tick is not None:
                         ticker_update_age_sec = now - last_tick
@@ -691,7 +874,13 @@ class KorbitWsClient:
                             and ticker_update_age_sec > TICKER_FRESHNESS_WARNING_SEC
                         ):
                             self._set_ticker_freshness_status("warning")
-                        # warning → normal 복귀는 valid ticker 수신 시점에 처리 (아래).
+                        elif (
+                            self._ticker_freshness_status == "warning"
+                            and ticker_update_age_sec > TICKER_FRESHNESS_DEGRADED_SEC
+                        ):
+                            # K6b: degraded 진입 시 _set_*_status hook이 REST probe schedule
+                            self._set_ticker_freshness_status("degraded")
+                        # warning/degraded → normal 복귀는 valid ticker 수신 시점에 처리 (아래).
 
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_SEC)
@@ -710,7 +899,8 @@ class KorbitWsClient:
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
-                        if self._ticker_freshness_status == "warning":
+                        # warning/degraded → normal 복귀 (K4 + K6b — 상태 전이 1회 log + cooldown reset hook).
+                        if self._ticker_freshness_status in ("warning", "degraded"):
                             self._set_ticker_freshness_status("normal")
                         # K5: Redis writer schedule (recv loop 격리 — fire-and-forget).
                         self._redis_writer.schedule(tick)
@@ -725,8 +915,12 @@ class KorbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.korbit] ping_task cleanup 실패")
-                # K6a close order (Coinone C6a mirror): ping_task → DB → Redis.
-                # K6b/K7 누적 시: fallback → DB → Alert → Redis (Bithumb 최종 순서). Redis는 항상 마지막.
+                # K6b close order (Coinone C6b mirror): ping_task → fallback → DB → Redis.
+                # K7 누적 시: fallback → DB → Alert → Redis (Bithumb 최종 순서). Redis는 항상 마지막.
+                try:
+                    await self._fallback_controller.close()
+                except Exception:
+                    logger.exception("[usdt_ws.korbit] fallback_controller.close() 실패")
                 try:
                     await self._db_writer.close()
                 except Exception:

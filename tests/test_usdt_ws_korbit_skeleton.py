@@ -47,6 +47,8 @@ from websockets.exceptions import ConnectionClosed
 from app import config, scheduler
 from app.crawlers.usdt_ws.korbit import (
     DB_WRITE_WINDOW_SEC,
+    FALLBACK_COOLDOWN_SEC,
+    FALLBACK_PROBE_TIMEOUT_SEC,
     KORBIT_SYMBOL,
     KORBIT_WS_URL,
     MAX_PENDING_WRITES,
@@ -57,9 +59,11 @@ from app.crawlers.usdt_ws.korbit import (
     RECV_TIMEOUT_SEC,
     STALE_AFTER_SEC,
     SUBSCRIBE_REQUEST_ID,
+    TICKER_FRESHNESS_DEGRADED_SEC,
     TICKER_FRESHNESS_WARNING_SEC,
     KorbitDbWriter,
     KorbitRedisWriter,
+    KorbitRestFallbackController,
     KorbitWsClient,
 )
 
@@ -509,11 +513,14 @@ class TestRunOneSession(unittest.IsolatedAsyncioTestCase):
             handle_calls.append(raw)
             return original_handle(raw)
 
-        # K5+K6a downstream writers mock — K3 test는 wire format/parse path만 검증
+        # K5+K6a+K6b downstream writers mock — K3 test는 wire format/parse path만 검증
         client._redis_writer.schedule = MagicMock()
         client._redis_writer.close = AsyncMock()
         client._db_writer.schedule = MagicMock()
         client._db_writer.close = AsyncMock()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.close = AsyncMock()
 
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
              patch.object(client, "_handle_message", side_effect=spy_handle):
@@ -893,11 +900,14 @@ class TestRunOneSessionFreshnessWiring(unittest.IsolatedAsyncioTestCase):
         mock_ws.__aexit__ = AsyncMock(return_value=None)
         mock_ws.close = AsyncMock()
 
-        # K5+K6a downstream writers mock — freshness wiring path만 검증
+        # K5+K6a+K6b downstream writers mock — freshness wiring path만 검증
         client._redis_writer.schedule = MagicMock()
         client._redis_writer.close = AsyncMock()
         client._db_writer.schedule = MagicMock()
         client._db_writer.close = AsyncMock()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.close = AsyncMock()
 
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
              patch("app.crawlers.usdt_ws.korbit.PING_INTERVAL_SEC", 0.01):
@@ -1170,9 +1180,12 @@ class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
             side_effect=lambda tick: schedule_calls.append(tick),
         )
         client._redis_writer.close = AsyncMock()
-        # K6a downstream writer mock — K5 test는 Redis wiring path만 검증
+        # K6a+K6b downstream writers mock — K5 test는 Redis wiring path만 검증
         client._db_writer.schedule = MagicMock()
         client._db_writer.close = AsyncMock()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.close = AsyncMock()
 
         recv_raws = [
             json.dumps({"status": "success", "requestId": 1}),  # ACK
@@ -1393,9 +1406,15 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         client._redis_writer.schedule = MagicMock(
             side_effect=lambda tick: redis_calls.append(tick),
         )
+        client._redis_writer.close = AsyncMock()
         client._db_writer.schedule = MagicMock(
             side_effect=lambda tick: db_calls.append(tick),
         )
+        client._db_writer.close = AsyncMock()
+        # K6b downstream mock — DB wiring path 격리
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.close = AsyncMock()
 
         recv_raws = [
             json.dumps({"status": "success", "requestId": 1}),
@@ -1429,10 +1448,17 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db_calls), 1)
         self.assertEqual(redis_calls[0], db_calls[0])
 
-    async def test_finally_order_db_before_redis(self):
-        """finally 순서: ping_task → db_writer.close() → redis_writer.close()."""
+    async def test_finally_order_fallback_db_redis(self):
+        """K6b close order: ping_task → fallback.close → db.close → redis.close (3-step spy).
+
+        Codex Point 5: K5에서 비차단으로 보류했던 close order spy test를 K6b에서 박음.
+        K7에서 Alert 추가 시 fallback → DB → Alert → Redis 4-step로 확장 예정.
+        """
         client = KorbitWsClient()
         close_order = []
+
+        async def fake_fallback_close():
+            close_order.append("fallback")
 
         async def fake_db_close():
             close_order.append("db")
@@ -1440,6 +1466,7 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         async def fake_redis_close(timeout=1.0):
             close_order.append("redis")
 
+        client._fallback_controller.close = AsyncMock(side_effect=fake_fallback_close)
         client._db_writer.close = AsyncMock(side_effect=fake_db_close)
         client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
 
@@ -1460,7 +1487,7 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
-        self.assertEqual(close_order, ["db", "redis"])
+        self.assertEqual(close_order, ["fallback", "db", "redis"])
 
 
 class TestScopeGuardK6a(unittest.TestCase):
@@ -1487,6 +1514,457 @@ class TestScopeGuardK6a(unittest.TestCase):
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
         for name in ["UsdtAlertEvaluator", "AlertObservation", "fetch_korbit_usdt_tick"]:
+            self.assertNotIn(name, module_attrs)
+
+
+# ===========================================================================
+# K6b — fetch_korbit_usdt_tick helper + KorbitRestFallbackController +
+# degraded transition + _set_ticker_freshness_status fallback hook
+# ===========================================================================
+
+
+class TestFetchKorbitUsdtTick(unittest.TestCase):
+    """K6b acceptance: fetch_korbit_usdt_tick normalized helper — Korbit REST shape."""
+
+    def _valid_payload(self) -> dict:
+        return {
+            "success": True,
+            "data": [{
+                "symbol": "usdt_krw",
+                "open": "1486", "high": "1490", "low": "1483",
+                "close": "1488",
+                "lastTradedAt": 1779194593306,
+            }],
+        }
+
+    def _patch_response(self, payload):
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=payload)
+        return patch(
+            "app.crawlers.usdt_sources.requests.get",
+            return_value=mock_response,
+        )
+
+    def test_valid_response_returns_normalized_tick(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        with self._patch_response(self._valid_payload()):
+            tick = fetch_korbit_usdt_tick()
+        self.assertEqual(tick, {
+            "source": "korbit",
+            "asset": "usdt-krw",
+            "rate": 1488.0,
+            "timestamp_ms": 1779194593306,
+        })
+        self.assertIsInstance(tick["rate"], float)
+        self.assertIsInstance(tick["timestamp_ms"], int)
+
+    def test_success_false_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["success"] = False
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_success_string_true_returns_none(self):
+        """Codex Point: boolean strict — string 'true'는 success로 인정 X."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["success"] = "true"
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_data_not_list_returns_none(self):
+        """Codex 추가: malformed data container — list 아닌 경우 fail."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"] = {"not": "a list"}
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_data_empty_list_returns_none(self):
+        """Codex 추가: 빈 list도 malformed로 처리."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"] = []
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_symbol_missing_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        del payload["data"][0]["symbol"]
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_symbol_mismatch_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"][0]["symbol"] = "btc_krw"
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_zero_rate_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"][0]["close"] = "0"
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_lasttradedat_missing_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        del payload["data"][0]["lastTradedAt"]
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_request_exception_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        import requests as _requests
+        with patch(
+            "app.crawlers.usdt_sources.requests.get",
+            side_effect=_requests.ConnectionError("network down"),
+        ):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_payload_not_dict_returns_none(self):
+        """Codex Point 1 (blocker급): top-level payload가 list/str/null → AttributeError 격리."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        for malformed in [["a", "b"], "unexpected string", None, 42]:
+            with self._patch_response(malformed):
+                self.assertIsNone(
+                    fetch_korbit_usdt_tick(),
+                    f"malformed payload={malformed!r} should return None",
+                )
+
+    def test_success_none_returns_none(self):
+        """boolean strict — None도 success 아님."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["success"] = None
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_data_item_not_dict_returns_none(self):
+        """data list 안에 dict가 아닌 element가 있으면 None."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"] = ["not a dict"]
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_close_missing_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        del payload["data"][0]["close"]
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_close_negative_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"][0]["close"] = "-100"
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_close_parse_fail_returns_none(self):
+        """close가 numeric string이 아니면 ValueError 격리."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"][0]["close"] = "not-a-number"
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+    def test_lasttradedat_parse_fail_returns_none(self):
+        """lastTradedAt이 int 변환 불가능 시 ValueError/TypeError 격리."""
+        from app.crawlers.usdt_sources import fetch_korbit_usdt_tick
+        payload = self._valid_payload()
+        payload["data"][0]["lastTradedAt"] = "not-an-int"
+        with self._patch_response(payload):
+            self.assertIsNone(fetch_korbit_usdt_tick())
+
+
+class TestFetchKorbitRateOnlyWrapper(unittest.TestCase):
+    """K6b: _fetch_korbit rate-only wrapper — FETCHERS registry 회귀 방지 (Codex Point 2 mirror)."""
+
+    def test_wrapper_returns_rate_only(self):
+        from app.crawlers.usdt_sources import _fetch_korbit
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            return_value={"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1},
+        ):
+            rate = _fetch_korbit()
+        self.assertEqual(rate, 1488.0)
+
+    def test_wrapper_returns_none_when_helper_none(self):
+        from app.crawlers.usdt_sources import _fetch_korbit
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            return_value=None,
+        ):
+            self.assertIsNone(_fetch_korbit())
+
+
+class TestKorbitRestFallbackControllerScheduleProbe(unittest.IsolatedAsyncioTestCase):
+    """K6b acceptance: schedule_probe success → Redis + DB fanout."""
+
+    async def test_schedule_probe_calls_writers_on_success(self):
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+            cooldown_sec=10.0, probe_timeout_sec=5.0,
+        )
+        sample_tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1}
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            return_value=sample_tick,
+        ):
+            controller.schedule_probe(reason="test")
+            self.assertTrue(controller._in_flight)
+            # probe task await
+            if controller._pending_task is not None:
+                await controller._pending_task
+        redis_writer.schedule.assert_called_once_with(sample_tick)
+        db_writer.schedule.assert_called_once_with(sample_tick)
+        self.assertFalse(controller._in_flight)
+        # cooldown 적용됨
+        self.assertGreater(controller._cooldown_until, 0)
+
+
+class TestKorbitRestFallbackControllerCooldown(unittest.IsolatedAsyncioTestCase):
+    """K6b acceptance: cooldown skip — 마지막 probe 후 cooldown 동안 schedule_probe 무시."""
+
+    async def test_cooldown_skips_schedule(self):
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+            cooldown_sec=60.0, probe_timeout_sec=5.0,
+        )
+        # cooldown_until 강제 set
+        controller._cooldown_until = time.time() + 60.0
+        controller.schedule_probe(reason="test")
+        # task 생성 안 됨
+        self.assertIsNone(controller._pending_task)
+        redis_writer.schedule.assert_not_called()
+        db_writer.schedule.assert_not_called()
+
+
+class TestKorbitRestFallbackControllerInFlight(unittest.IsolatedAsyncioTestCase):
+    """K6b acceptance: in-flight skip — probe 진행 중 중복 trigger 무시."""
+
+    async def test_in_flight_skips_schedule(self):
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+            cooldown_sec=10.0, probe_timeout_sec=5.0,
+        )
+        # in_flight 강제 set
+        controller._in_flight = True
+        controller.schedule_probe(reason="test")
+        # task 생성 안 됨
+        self.assertIsNone(controller._pending_task)
+        redis_writer.schedule.assert_not_called()
+
+
+class TestKorbitRestFallbackControllerResetCooldown(unittest.TestCase):
+    """K6b acceptance: reset_cooldown — normal 복귀 시 cooldown clear."""
+
+    def test_reset_cooldown_clears(self):
+        controller = KorbitRestFallbackController(
+            redis_writer=MagicMock(), db_writer=MagicMock(),
+        )
+        controller._cooldown_until = time.time() + 1000.0
+        controller.reset_cooldown()
+        self.assertEqual(controller._cooldown_until, 0.0)
+
+
+class TestKorbitRestFallbackControllerProbeFailure(unittest.IsolatedAsyncioTestCase):
+    """K6b acceptance: probe 실패 (timeout/None/Exception) → cooldown 적용 (REST rate limit 보호)."""
+
+    async def test_probe_timeout_applies_cooldown(self):
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+            cooldown_sec=60.0, probe_timeout_sec=0.05,
+        )
+
+        def slow_fetch():
+            time.sleep(1.0)
+            return None
+
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            side_effect=slow_fetch,
+        ):
+            controller.schedule_probe(reason="test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # timeout 발생 → fanout X
+        redis_writer.schedule.assert_not_called()
+        db_writer.schedule.assert_not_called()
+        # cooldown 적용됨 (재시도 폭주 방지)
+        self.assertGreater(controller._cooldown_until, time.time())
+        self.assertFalse(controller._in_flight)
+
+    async def test_probe_returns_none_no_fanout(self):
+        """Codex 추가: helper None 반환 → fanout 미호출 + cooldown 적용 (REST parse 실패 격리)."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+            cooldown_sec=30.0, probe_timeout_sec=5.0,
+        )
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            return_value=None,
+        ):
+            controller.schedule_probe(reason="test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # helper None → fanout X
+        redis_writer.schedule.assert_not_called()
+        db_writer.schedule.assert_not_called()
+        # cooldown 적용됨 (REST rate limit 보호)
+        self.assertGreater(controller._cooldown_until, time.time())
+        self.assertFalse(controller._in_flight)
+
+    async def test_probe_exception_no_fanout(self):
+        """Codex 추가: helper Exception → fanout 미호출 + cooldown 적용 (WS session 영향 X)."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=redis_writer, db_writer=db_writer,
+            cooldown_sec=30.0, probe_timeout_sec=5.0,
+        )
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            side_effect=RuntimeError("REST unexpected"),
+        ):
+            controller.schedule_probe(reason="test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # helper Exception → fanout X (WS session 격리)
+        redis_writer.schedule.assert_not_called()
+        db_writer.schedule.assert_not_called()
+        # cooldown 적용됨
+        self.assertGreater(controller._cooldown_until, time.time())
+        self.assertFalse(controller._in_flight)
+
+
+class TestSetTickerFreshnessStatusFallbackHook(unittest.IsolatedAsyncioTestCase):
+    """K6b acceptance: _set_ticker_freshness_status hook — degraded → schedule_probe / normal → reset_cooldown."""
+
+    async def test_degraded_transition_schedules_probe(self):
+        client = KorbitWsClient()
+        client._fallback_controller.schedule_probe = MagicMock()
+        # warning 으로 set (정상 transition path)
+        client._ticker_freshness_status = "warning"
+        # degraded 전이
+        client._set_ticker_freshness_status("degraded")
+        self.assertEqual(client._ticker_freshness_status, "degraded")
+        client._fallback_controller.schedule_probe.assert_called_once_with(reason="ticker_degraded")
+
+    async def test_normal_recovery_resets_cooldown(self):
+        client = KorbitWsClient()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        # warning → normal 복귀
+        client._ticker_freshness_status = "warning"
+        client._set_ticker_freshness_status("normal")
+        client._fallback_controller.reset_cooldown.assert_called_once()
+
+    async def test_degraded_to_normal_resets_cooldown(self):
+        """Codex 추가: degraded → normal 복귀도 cooldown reset (운영 outage 복구 경로 검증)."""
+        client = KorbitWsClient()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.schedule_probe = MagicMock()  # degraded set 시 호출 무시
+        # degraded 상태로 직접 set
+        client._ticker_freshness_status = "degraded"
+        # degraded → normal 복귀
+        client._set_ticker_freshness_status("normal")
+        # cooldown reset 호출됨 (warning → normal과 동일 path지만 운영 의미상 별도 검증)
+        client._fallback_controller.reset_cooldown.assert_called_once()
+
+
+class TestRunOneSessionDegradedTransition(unittest.IsolatedAsyncioTestCase):
+    """K6b acceptance: _run_one_session 2-iteration degraded transition wiring (Codex Point 1).
+
+    if/elif 구조 (if normal and age > WARNING / elif warning and age > DEGRADED)라
+    한 iteration에서 normal → degraded 직행 불가. 1st iter warning, 2nd iter degraded.
+    """
+
+    async def test_2_iteration_warning_then_degraded(self):
+        client = KorbitWsClient()
+        # 모든 downstream mock
+        client._redis_writer.schedule = MagicMock()
+        client._redis_writer.close = AsyncMock()
+        client._db_writer.schedule = MagicMock()
+        client._db_writer.close = AsyncMock()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.close = AsyncMock()
+
+        # last_tick_at을 DEGRADED 초과로 의도 set (recv 시점에)
+        recv_count = {"calls": 0}
+
+        async def fake_send(payload):
+            # subscribe 직후 (reset_active_session + _set_*_status normal 이후) last_tick_at 의도 set
+            client._liveness.last_tick_at = time.time() - 200.0  # > 120s degraded
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            # 첫 iter: normal → warning, 두 번째 iter: warning → degraded
+            # iter가 더 돌도록 첫 두 호출은 stop 안 함
+            if i >= 2:
+                client._stop_event.set()
+            raise asyncio.TimeoutError()  # 모든 iter에서 timeout → handle 호출 안 함
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
+             patch("app.crawlers.usdt_ws.korbit.PING_INTERVAL_SEC", 0.01):
+            await asyncio.wait_for(client._run_one_session(), timeout=3.0)
+
+        # 결과: 2 iter 후 degraded 도달 + schedule_probe 호출
+        self.assertEqual(client._ticker_freshness_status, "degraded")
+        self.assertGreaterEqual(client._status_transition_count["ticker_warning"], 1)
+        self.assertGreaterEqual(client._status_transition_count["ticker_degraded"], 1)
+        client._fallback_controller.schedule_probe.assert_called_with(reason="ticker_degraded")
+
+
+class TestScopeGuardK6b(unittest.TestCase):
+    """K6b acceptance: K6b 의도적 imports + K7 영역 forbidden."""
+
+    def test_fallback_controller_class_present(self):
+        """K6b: KorbitRestFallbackController + 3개 Constants module-level 노출."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        self.assertTrue(hasattr(korbit_module, "KorbitRestFallbackController"))
+        self.assertTrue(hasattr(korbit_module, "TICKER_FRESHNESS_DEGRADED_SEC"))
+        self.assertTrue(hasattr(korbit_module, "FALLBACK_COOLDOWN_SEC"))
+        self.assertTrue(hasattr(korbit_module, "FALLBACK_PROBE_TIMEOUT_SEC"))
+
+    def test_fetch_korbit_lazy_import(self):
+        """fetch_korbit_usdt_tick은 _fetch_korbit_tick 함수 내부 lazy import (module-level 미노출)."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        self.assertNotIn("fetch_korbit_usdt_tick", dir(korbit_module))
+
+    def test_alert_still_forbidden(self):
+        """K7 영역 (Alert) 여전히 forbidden."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        module_attrs = dir(korbit_module)
+        for name in ["UsdtAlertEvaluator", "AlertObservation"]:
             self.assertNotIn(name, module_attrs)
 
 

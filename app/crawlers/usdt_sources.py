@@ -193,12 +193,84 @@ def _fetch_coinone() -> Optional[float]:
     return tick["rate"] if tick else None
 
 
-def _fetch_korbit() -> Optional[float]:
+def fetch_korbit_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[dict]:
+    """Korbit USDT/KRW REST ticker → normalized tick dict.
+
+    Coinone `fetch_coinone_usdt_tick()` (line 135) + Bithumb `fetch_bithumb_usdt_tick()`
+    (line 85) shape mirror. Phase B.5 Stage K6b (USDT_WS_DESIGN_PLAN §12.7):
+    KorbitRestFallbackController가 ticker freshness degraded (DATA frame age > 120s
+    provisional) 시 호출. 기존 `_fetch_korbit()` polling helper도 본 함수 재사용
+    (additive refactor).
+
+    Returns:
+        {"source": "korbit", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}
+        또는 REST/parse 실패 시 None (caller 격리).
+
+    Korbit REST response shape (실측 K-2 smoke 2026-05-19):
+        {"success": True, "data": [{"symbol": "usdt_krw", "close": "1488",
+         "lastTradedAt": 1779194593306, ...}]}
+        - success: boolean (Coinone "success" 문자열과 다른 strict bool, Codex 강조)
+        - symbol: 소문자 underscore (WS와 동일)
+        - close: string price
+        - lastTradedAt: epoch ms (top-level timestamp 없음, K-1 audit 확인)
+
+    Guard (Codex 6 + 1 + 후속 정정 통합):
+        - payload가 dict 아님 (list/str/null/etc.) → None
+          (Codex 후속 정정 — blocker급, top-level malformed payload 격리)
+        - success is not True → None (boolean strict, Coinone 스타일 문자열과 분리)
+        - data가 list 아님 or 빈 list → None (malformed container, Codex 추가)
+        - data[0]가 dict 아님 → None
+        - symbol missing 또는 != "usdt_krw" → None
+        - close 부재 / parse 실패 / <= 0 → None
+        - lastTradedAt 부재 / parse 실패 → None
+    """
     url = "https://api.korbit.co.kr/v2/tickers?symbol=usdt_krw"
-    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
-    return float(data["data"][0]["close"])
+    try:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        payload = response.json()
+        # Codex Point 1 (blocker급 정정): malformed top-level payload — list/str/null/etc.
+        # payload.get() 호출 시 AttributeError 차단. helper contract ("parse 실패 시 None") 유지.
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("success") is not True:
+            return None
+        data = payload.get("data")
+        if not isinstance(data, list) or not data:
+            return None
+        item = data[0]
+        if not isinstance(item, dict):
+            return None
+        if item.get("symbol") != "usdt_krw":
+            return None
+        close_raw = item.get("close")
+        if close_raw is None:
+            return None
+        rate = float(close_raw)
+        if rate <= 0:
+            return None
+        ts_raw = item.get("lastTradedAt")
+        if ts_raw is None:
+            return None
+        ts_ms = int(ts_raw)
+        return {
+            "source": "korbit",
+            "asset": "usdt-krw",
+            "rate": rate,
+            "timestamp_ms": ts_ms,
+        }
+    except (requests.RequestException, KeyError, ValueError, TypeError, IndexError):
+        # caller(fallback controller / polling)가 None 처리. propagate X.
+        return None
+
+
+def _fetch_korbit() -> Optional[float]:
+    """기존 polling helper — fetch_korbit_usdt_tick 재사용 (rate만 반환).
+
+    Phase B.5 K6b: 기존 rate-only 호환 유지. `FETCHERS` registry는 그대로 동작.
+    """
+    tick = fetch_korbit_usdt_tick()
+    return tick["rate"] if tick else None
 
 
 def _fetch_gopax() -> Optional[float]:
