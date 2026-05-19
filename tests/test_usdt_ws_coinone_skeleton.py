@@ -541,27 +541,28 @@ class TestScopeGuard(unittest.TestCase):
     """
 
     def test_no_forbidden_imports(self):
-        """coinone.py module이 REST fallback / Alert evaluator import하지 않음.
+        """coinone.py module의 lazy import 항목 검증 (Phase B.4 complete 후).
 
         Stage별 누적 허용:
         - C4: UsdtLivenessMonitor (source-neutral 재사용)
         - C5: latest_rates_cache, tether_topic_trigger (Redis writer + topic trigger)
-        - C6a: CoinoneDbWriter (module-level class) — get_db_context / insert_source_rate_if_changed는
-          _sync_db_write 함수 내부 import이라 module-level 비노출
-        C6b~C7 영역만 forbidden (fetch_coinone_usdt_tick / UsdtAlertEvaluator / AlertObservation).
+        - C6a: CoinoneDbWriter (DB symbols는 _sync_db_write 함수 내부 lazy import — module-level 비노출)
+        - C6b: CoinoneRestFallbackController (fetch_coinone_usdt_tick는 lazy import — module-level 비노출)
+        - C7: UsdtAlertEvaluator + AlertObservation (의도적 module-level import — Bithumb U7 mirror)
+
+        Phase B.4 complete 후 forbidden은 lazy import로 처리되는 항목만 (module-level 노출 금지):
+        - fetch_coinone_usdt_tick: _fetch_coinone_tick static에서 lazy import
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
-        # C6b~C7 영역 import만 forbidden (REST fallback helper / Alert evaluator)
+        # lazy import 항목만 forbidden (module-level 비노출 검증)
         forbidden = [
-            "UsdtAlertEvaluator",
-            "AlertObservation",
             "fetch_coinone_usdt_tick",
         ]
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"scope 위반: '{name}' import됨 (C6b~C7 영역)",
+                f"scope 위반: '{name}' module-level 노출 (lazy import 영역)",
             )
 
     def test_module_imports_minimal(self):
@@ -788,23 +789,21 @@ class TestScopeGuardC4(unittest.TestCase):
     """
 
     def test_no_forbidden_imports_after_c4(self):
-        """coinone.py module이 REST fallback / Alert evaluator import하지 않음.
+        """coinone.py module의 lazy import 항목 검증 (Phase B.4 complete 후).
 
-        C6a update: CoinoneDbWriter 신설 — get_db_context / insert_source_rate_if_changed는
-        _sync_db_write 함수 내부 import이라 module-level 비노출 (forbidden 점검 영향 X).
-        C6b~C7 영역만 forbidden (fetch_coinone_usdt_tick / UsdtAlertEvaluator / AlertObservation).
+        C5~C7 누적: latest_rates_cache / tether_topic_trigger / CoinoneRestFallbackController /
+        UsdtAlertEvaluator / AlertObservation 모두 의도적 module-level import.
+        lazy import (module-level 비노출)만 forbidden — fetch_coinone_usdt_tick.
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         forbidden = [
-            "UsdtAlertEvaluator",
-            "AlertObservation",
             "fetch_coinone_usdt_tick",
         ]
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"scope 위반: '{name}' import됨 (C6b~C7 영역)",
+                f"scope 위반: '{name}' module-level 노출 (lazy import 영역)",
             )
 
     def test_usdt_liveness_monitor_imported_for_reuse(self):
@@ -1061,8 +1060,10 @@ class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
             side_effect=lambda tick: schedule_calls.append(tick),
         )
         # C6a regression: _db_writer.schedule도 mock — 실제 timer/DB 호출 회피.
-        # 본 test는 Redis writer wiring만 검증, DB writer wiring은 TestRunOneSessionDbWiring 영역.
+        # C7 regression: _alert_evaluator.schedule도 mock — 실제 task 생성 회피.
+        # 본 test는 Redis writer wiring만 검증, DB/Alert는 별도 영역.
         client._db_writer.schedule = MagicMock()
+        client._alert_evaluator.schedule = MagicMock()
 
         recv_raws = [
             json.dumps({"response_type": "CONNECTED", "data": {"session_id": "abc"}}),
@@ -1120,18 +1121,20 @@ class TestScopeGuardC5(unittest.TestCase):
         self.assertTrue(hasattr(coinone_module, "TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS"))
 
     def test_rest_alert_forbidden(self):
-        """C6b~C7 영역 (REST fallback helper / Alert evaluator) 여전히 forbidden."""
+        """Phase B.4 complete 후 lazy import (module-level 비노출)만 forbidden.
+
+        C6b/C7 의도적 module-level: CoinoneRestFallbackController / UsdtAlertEvaluator /
+        AlertObservation. lazy: fetch_coinone_usdt_tick.
+        """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         forbidden = [
-            "UsdtAlertEvaluator",
-            "AlertObservation",
             "fetch_coinone_usdt_tick",
         ]
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"scope 위반: '{name}' import됨 (C6b~C7 영역)",
+                f"scope 위반: '{name}' module-level 노출 (lazy import 영역)",
             )
 
 
@@ -1323,6 +1326,8 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         client._db_writer.schedule = MagicMock(
             side_effect=lambda tick: db_calls.append(tick),
         )
+        # C7 regression: _alert_evaluator.schedule도 mock — 실제 task 생성 회피.
+        client._alert_evaluator.schedule = MagicMock()
 
         recv_raws = [
             json.dumps({"response_type": "CONNECTED", "data": {"session_id": "abc"}}),
@@ -1362,42 +1367,8 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         # 동일 tick 전달 검증
         self.assertEqual(redis_calls[0], db_calls[0])
 
-    async def test_finally_order_db_before_redis(self):
-        """finally 순서: ping_task → db_writer.close() → redis_writer.close().
-
-        close 순서 검증 — Bithumb U6 mirror (close 순서 일관성).
-        """
-        client = CoinoneWsClient()
-        close_order = []
-
-        async def fake_db_close():
-            close_order.append("db")
-
-        async def fake_redis_close(timeout=1.0):
-            close_order.append("redis")
-
-        client._db_writer.close = AsyncMock(side_effect=fake_db_close)
-        client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
-
-        recv_count = {"calls": 0}
-
-        async def fake_recv():
-            recv_count["calls"] += 1
-            client._stop_event.set()
-            raise asyncio.TimeoutError()
-
-        mock_ws = MagicMock()
-        mock_ws.send = AsyncMock()
-        mock_ws.recv = AsyncMock(side_effect=fake_recv)
-        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
-        mock_ws.__aexit__ = AsyncMock(return_value=None)
-        mock_ws.close = AsyncMock()
-
-        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
-            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
-
-        # db_close가 redis_close보다 먼저 호출
-        self.assertEqual(close_order, ["db", "redis"])
+    # NOTE: test_finally_order_db_before_redis (C6a 시점, db/redis 2개 순서만 검증)는
+    # C7 superset인 TestFinallyOrderAlertBeforeRedis (4개 순서: fallback→db→alert→redis)로 대체됨.
 
 
 class TestScopeGuardC6a(unittest.TestCase):
@@ -1421,15 +1392,15 @@ class TestScopeGuardC6a(unittest.TestCase):
         self.assertNotIn("insert_source_rate_if_changed", module_attrs)
 
     def test_rest_alert_still_forbidden(self):
-        """C7 영역 (Alert) 여전히 forbidden.
+        """Phase B.4 complete 후 lazy import (module-level 비노출)만 forbidden.
 
-        C6b update: fetch_coinone_usdt_tick은 _fetch_coinone_tick static에서 lazy import이라
-        module-level 비노출 — forbidden 검증 그대로 통과.
+        C7 update: UsdtAlertEvaluator / AlertObservation 의도적 module-level (Bithumb U7 mirror).
+        lazy: fetch_coinone_usdt_tick.
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
-        for name in ["UsdtAlertEvaluator", "AlertObservation", "fetch_coinone_usdt_tick"]:
-            self.assertNotIn(name, module_attrs)
+        # fetch_coinone_usdt_tick은 lazy import이라 module-level 비노출
+        self.assertNotIn("fetch_coinone_usdt_tick", module_attrs)
 
 
 # ===========================================================================
@@ -1564,6 +1535,7 @@ class TestCoinoneRestFallbackControllerScheduleProbe(unittest.IsolatedAsyncioTes
         controller = CoinoneRestFallbackController(
             redis_writer=redis_writer,
             db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=0.1,
             probe_timeout_sec=2.0,
         )
@@ -1597,6 +1569,7 @@ class TestCoinoneRestFallbackControllerScheduleProbe(unittest.IsolatedAsyncioTes
         controller = CoinoneRestFallbackController(
             redis_writer=redis_writer,
             db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=0.1,
             probe_timeout_sec=2.0,
         )
@@ -1632,6 +1605,7 @@ class TestCoinoneRestFallbackControllerCooldown(unittest.IsolatedAsyncioTestCase
         controller = CoinoneRestFallbackController(
             redis_writer=redis_writer,
             db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=10.0,
             probe_timeout_sec=2.0,
         )
@@ -1665,6 +1639,7 @@ class TestCoinoneRestFallbackControllerInFlight(unittest.IsolatedAsyncioTestCase
         controller = CoinoneRestFallbackController(
             redis_writer=redis_writer,
             db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=0.1,
             probe_timeout_sec=2.0,
         )
@@ -1707,6 +1682,7 @@ class TestCoinoneRestFallbackControllerResetCooldown(unittest.TestCase):
         controller = CoinoneRestFallbackController(
             redis_writer=CoinoneRedisWriter(),
             db_writer=CoinoneDbWriter(),
+            alert_evaluator=MagicMock(),
         )
         controller._cooldown_until = time.time() + 100.0
         controller.reset_cooldown()
@@ -1725,6 +1701,7 @@ class TestCoinoneRestFallbackControllerProbeFailure(unittest.IsolatedAsyncioTest
         controller = CoinoneRestFallbackController(
             redis_writer=CoinoneRedisWriter(),
             db_writer=CoinoneDbWriter(),
+            alert_evaluator=MagicMock(),
             cooldown_sec=5.0,
             probe_timeout_sec=0.05,  # 즉시 timeout
         )
@@ -1800,12 +1777,11 @@ class TestScopeGuardC6b(unittest.TestCase):
         import app.crawlers.usdt_ws.coinone as coinone_module
         self.assertNotIn("fetch_coinone_usdt_tick", dir(coinone_module))
 
-    def test_alert_evaluator_still_forbidden(self):
-        """C7 영역 (Alert) 여전히 forbidden."""
+    def test_alert_evaluator_module_level_after_c7(self):
+        """C7: UsdtAlertEvaluator + AlertObservation 의도적 module-level import (Bithumb U7 mirror)."""
         import app.crawlers.usdt_ws.coinone as coinone_module
-        module_attrs = dir(coinone_module)
-        for name in ["UsdtAlertEvaluator", "AlertObservation"]:
-            self.assertNotIn(name, module_attrs)
+        self.assertTrue(hasattr(coinone_module, "UsdtAlertEvaluator"))
+        self.assertTrue(hasattr(coinone_module, "AlertObservation"))
 
 
 class TestC6bConstants(unittest.TestCase):
@@ -1902,6 +1878,293 @@ class TestFetchCoinoneRateOnlyWrapper(unittest.TestCase):
         with patch("app.crawlers.usdt_sources.fetch_coinone_usdt_tick", return_value=None):
             result = _fetch_coinone()
         self.assertIsNone(result)
+
+
+# ===========================================================================
+# C7 — UsdtAlertEvaluator wiring + AlertObservation schedule + finally Alert close
+# ===========================================================================
+
+class TestAlertScheduleOnValidTick(unittest.IsolatedAsyncioTestCase):
+    """C7 acceptance 1-2: WS valid DATA tick → AlertObservation(kind="tick") schedule."""
+
+    async def test_valid_data_schedules_alert_with_kind_tick(self):
+        from app.notifications.alert_evaluator import AlertObservation
+        client = CoinoneWsClient()
+        alert_schedules = []
+
+        client._alert_evaluator.schedule = MagicMock(
+            side_effect=lambda obs: alert_schedules.append(obs),
+        )
+        # downstream writers mock — DB/Redis는 실제 호출 회피 (test 범위는 alert만)
+        client._redis_writer.schedule = MagicMock()
+        client._db_writer.schedule = MagicMock()
+
+        recv_raws = [
+            json.dumps({
+                "response_type": "DATA",
+                "data": {
+                    "quote_currency": "KRW", "target_currency": "USDT",
+                    "last": "1488", "timestamp": 1779179058028,
+                },
+            }),
+        ]
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i < len(recv_raws):
+                return recv_raws[i]
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # 1건 schedule + kind="tick"
+        self.assertEqual(len(alert_schedules), 1)
+        obs = alert_schedules[0]
+        self.assertIsInstance(obs, AlertObservation)
+        self.assertEqual(obs.source, "coinone")
+        self.assertEqual(obs.asset, "usdt-krw")
+        self.assertEqual(obs.rate, 1488.0)
+        self.assertEqual(obs.timestamp_ms, 1779179058028)
+        self.assertEqual(obs.kind, "tick")
+
+
+class TestAlertScheduleOnRestProbe(unittest.IsolatedAsyncioTestCase):
+    """C7 acceptance 3: REST probe success → AlertObservation(kind="rest_probe") schedule."""
+
+    async def test_probe_success_schedules_alert_with_kind_rest_probe(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        from app.notifications.alert_evaluator import AlertObservation
+        alert_schedules = []
+        alert_mock = MagicMock()
+        alert_mock.schedule = MagicMock(side_effect=lambda obs: alert_schedules.append(obs))
+
+        controller = CoinoneRestFallbackController(
+            redis_writer=CoinoneRedisWriter(),
+            db_writer=CoinoneDbWriter(),
+            alert_evaluator=alert_mock,
+            cooldown_sec=0.1,
+            probe_timeout_sec=2.0,
+        )
+
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779179058028}
+        controller._redis_writer.schedule = MagicMock()
+        controller._db_writer.schedule = MagicMock()
+
+        with patch(
+            "app.crawlers.usdt_sources.fetch_coinone_usdt_tick",
+            return_value=tick,
+        ):
+            controller.schedule_probe(reason="degraded_test")
+            for _ in range(100):
+                if not controller._in_flight:
+                    break
+                await asyncio.sleep(0.01)
+
+        # 1건 schedule + kind="rest_probe"
+        self.assertEqual(len(alert_schedules), 1)
+        obs = alert_schedules[0]
+        self.assertIsInstance(obs, AlertObservation)
+        self.assertEqual(obs.kind, "rest_probe")
+        self.assertEqual(obs.source, "coinone")
+        self.assertEqual(obs.rate, 1488.0)
+
+
+class TestAlertNotScheduledOnInvalidOrFailure(unittest.IsolatedAsyncioTestCase):
+    """C7 acceptance 4-5: invalid frame → alert 0 / probe None or failure → alert 0."""
+
+    async def test_invalid_frame_no_alert(self):
+        client = CoinoneWsClient()
+        client._alert_evaluator.schedule = MagicMock()
+
+        # invalid DATA: last 부재
+        client._handle_message(json.dumps({
+            "response_type": "DATA",
+            "data": {"quote_currency": "KRW", "target_currency": "USDT", "timestamp": 1},
+        }))
+        # _handle_message는 invalid 시 None 반환 — schedule 호출 안 됨
+
+        # _run_one_session에 들어가지 않으므로 schedule 미호출 검증
+        client._alert_evaluator.schedule.assert_not_called()
+
+    async def test_probe_returns_none_no_alert(self):
+        from app.crawlers.usdt_ws.coinone import (
+            CoinoneRestFallbackController,
+            CoinoneDbWriter,
+            CoinoneRedisWriter,
+        )
+        alert_mock = MagicMock()
+        controller = CoinoneRestFallbackController(
+            redis_writer=CoinoneRedisWriter(),
+            db_writer=CoinoneDbWriter(),
+            alert_evaluator=alert_mock,
+            cooldown_sec=0.1,
+            probe_timeout_sec=2.0,
+        )
+        controller._redis_writer.schedule = MagicMock()
+        controller._db_writer.schedule = MagicMock()
+
+        with patch(
+            "app.crawlers.usdt_sources.fetch_coinone_usdt_tick",
+            return_value=None,
+        ):
+            controller.schedule_probe(reason="failure_test")
+            for _ in range(100):
+                if not controller._in_flight:
+                    break
+                await asyncio.sleep(0.01)
+
+        # probe None → Redis/DB/Alert 모두 미호출
+        controller._redis_writer.schedule.assert_not_called()
+        controller._db_writer.schedule.assert_not_called()
+        alert_mock.schedule.assert_not_called()
+
+
+class TestFinallyOrderAlertBeforeRedis(unittest.IsolatedAsyncioTestCase):
+    """C7 acceptance 6: close 순서 fallback → DB → Alert → Redis."""
+
+    async def test_close_order(self):
+        client = CoinoneWsClient()
+        close_order = []
+
+        async def fake_fallback_close():
+            close_order.append("fallback")
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def fake_alert_close():
+            close_order.append("alert")
+
+        async def fake_redis_close(timeout=1.0):
+            close_order.append("redis")
+
+        client._fallback_controller.close = AsyncMock(side_effect=fake_fallback_close)
+        client._db_writer.close = AsyncMock(side_effect=fake_db_close)
+        client._alert_evaluator.close = AsyncMock(side_effect=fake_alert_close)
+        client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
+
+        async def fake_recv():
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        self.assertEqual(close_order, ["fallback", "db", "alert", "redis"])
+
+
+class TestFinallyCloseExceptionIsolation(unittest.IsolatedAsyncioTestCase):
+    """C7 acceptance 8 (Codex Point 2): 각 close 실패해도 뒤 close 실행."""
+
+    async def test_alert_close_failure_does_not_block_redis_close(self):
+        client = CoinoneWsClient()
+        close_order = []
+
+        async def fake_fallback_close():
+            close_order.append("fallback")
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def failing_alert_close():
+            close_order.append("alert_attempt")
+            raise RuntimeError("FCM connection lost")
+
+        async def fake_redis_close(timeout=1.0):
+            close_order.append("redis")
+
+        client._fallback_controller.close = AsyncMock(side_effect=fake_fallback_close)
+        client._db_writer.close = AsyncMock(side_effect=fake_db_close)
+        client._alert_evaluator.close = AsyncMock(side_effect=failing_alert_close)
+        client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
+
+        async def fake_recv():
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # alert close 실패해도 redis close까지 실행됨
+        self.assertEqual(close_order, ["fallback", "db", "alert_attempt", "redis"])
+
+
+class TestAlertEvaluatorInitInClient(unittest.TestCase):
+    """C7 acceptance 7: CoinoneWsClient __init__에 _alert_evaluator 인스턴스 생성."""
+
+    def test_client_has_alert_evaluator_instance(self):
+        from app.notifications.alert_evaluator import UsdtAlertEvaluator
+        client = CoinoneWsClient()
+        self.assertIsInstance(client._alert_evaluator, UsdtAlertEvaluator)
+
+    def test_fallback_controller_has_alert_evaluator(self):
+        """C7 mandatory inject: fallback_controller가 alert_evaluator 보유."""
+        client = CoinoneWsClient()
+        self.assertIs(
+            client._fallback_controller._alert_evaluator,
+            client._alert_evaluator,
+        )
+
+
+class TestScopeGuardC7(unittest.TestCase):
+    """C7 acceptance 9: Phase B.4 complete — Alert evaluator module-level (intended)."""
+
+    def test_alert_evaluator_module_level(self):
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertTrue(hasattr(coinone_module, "UsdtAlertEvaluator"))
+        self.assertTrue(hasattr(coinone_module, "AlertObservation"))
+
+    def test_fetch_coinone_usdt_tick_still_lazy(self):
+        """fetch_coinone_usdt_tick은 여전히 lazy import (module-level 비노출)."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertNotIn("fetch_coinone_usdt_tick", dir(coinone_module))
+
+
+class TestC7FlagFalseInvariantRegression(unittest.IsolatedAsyncioTestCase):
+    """C7 acceptance 7: flag=false invariant — CoinoneWsClient 생성 0 → UsdtAlertEvaluator 생성 0."""
+
+    def setUp(self):
+        _reset_scheduler_usdt_ws_coinone_globals()
+
+    def tearDown(self):
+        _reset_scheduler_usdt_ws_coinone_globals()
+
+    async def test_flag_false_no_alert_evaluator_created(self):
+        """flag=false 시 CoinoneWsClient 자체 생성 X — UsdtAlertEvaluator도 자동으로 생성 0."""
+        with patch.object(config, "USDT_WS_COINONE_ENABLED", False), \
+             patch("app.crawlers.usdt_ws.coinone.UsdtAlertEvaluator") as mock_evaluator_cls:
+            await scheduler.start_usdt_ws_coinone_client()
+        # CoinoneWsClient 생성자가 호출 안 됨 → UsdtAlertEvaluator 생성자도 호출 안 됨
+        mock_evaluator_cls.assert_not_called()
 
 
 if __name__ == "__main__":

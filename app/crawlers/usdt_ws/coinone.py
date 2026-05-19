@@ -1,10 +1,11 @@
-"""USDT WebSocket — Coinone canary client (Phase B.4 Stage C2-C6b).
+"""USDT WebSocket — Coinone canary client (Phase B.4 Stage C2-C7 complete).
 
 USDT_WS_DESIGN_PLAN §12.6 Phase B.4.
-Bithumb Stage U2-U6 패턴 mirror (작은 단위 stage 분할 학습 — KRX close finalizer
+Bithumb Stage U2-U7 패턴 mirror (작은 단위 stage 분할 학습 — KRX close finalizer
 1100 lines → 3 High findings → revert + Phase B.3 U2~U7 분할 재시작 학습 적용).
 C6는 C6a (DbWriter, sparse-time smoke 무관) + C6b (REST helper + RestFallbackController +
 ticker_freshness degraded threshold provisional 300s, sparse-time smoke 후 조정)로 분할 (Codex 권장).
+C7으로 기능 구현은 complete — 남은 작업은 sparse-time smoke 기반 threshold 조정 + canary enable.
 
 C2 lifecycle skeleton (완료):
     - `_stop_event` + `_running` (network/Redis/DB/Alert import 없음)
@@ -57,7 +58,7 @@ C6a DB writer + 1s window debounce (완료):
     - close: timer cancel + pending tick 즉시 flush (window 일관성보다 last tick 우선).
     - finally 순서: ping_task → `_db_writer.close()` → `_redis_writer.close()` (Bithumb mirror).
 
-C6b REST fallback + degraded threshold + DEGRADED hook (현재):
+C6b REST fallback + degraded threshold + DEGRADED hook (완료):
     - Constants 3개: TICKER_FRESHNESS_DEGRADED_SEC=300.0 / FALLBACK_COOLDOWN_SEC=300.0 /
       FALLBACK_PROBE_TIMEOUT_SEC=10.0. 모두 provisional — sparse-time smoke 후 조정.
     - `fetch_coinone_usdt_tick()` normalized helper (usdt_sources.py) — Bithumb 패턴 mirror.
@@ -71,8 +72,19 @@ C6b REST fallback + degraded threshold + DEGRADED hook (현재):
     - finally 순서 (Bithumb U7 mirror): fallback → DB → (Alert C7) → Redis.
     - ticker silence alone → reconnect never (Codex 강조 유지). degraded는 REST probe만 trigger.
 
-C7 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.6.4):
-    - C7: UsdtAlertEvaluator wiring (`AlertObservation` schedule on valid tick + REST probe success)
+C7 UsdtAlertEvaluator wiring (현재 — Phase B.4 complete):
+    - `UsdtAlertEvaluator` (source-neutral, Bithumb U7 mirror) — Coinone client 자체 instance 보유.
+    - `CoinoneRestFallbackController.__init__`에 `alert_evaluator` 필수 inject 추가 (Codex Point 1).
+    - `_run_one_session` valid DATA tick path → `_alert_evaluator.schedule(AlertObservation(kind="tick"))`.
+    - `_run_probe` success → `_alert_evaluator.schedule(AlertObservation(kind="rest_probe"))`.
+    - finally 순서 (Bithumb U7 mirror, 최종): fallback → DB → Alert → Redis (4개).
+    - 각 close 개별 try/except 격리 (Codex Point 2) — 한 close 실패해도 뒤 close 실행 보장.
+    - flag=false invariant: CoinoneWsClient 생성 0 → UsdtAlertEvaluator 생성 0.
+
+Phase B.4 complete. 남은 작업:
+    - sparse-time smoke (새벽/주말 30분) — TICKER_FRESHNESS_DEGRADED_SEC + FALLBACK_COOLDOWN_SEC
+      provisional 300s 정확값 조정 (별 작은 commit).
+    - Canary enable 판단: USDT_WS_COINONE_ENABLED=true 활성화 GO.
 """
 from __future__ import annotations
 
@@ -93,6 +105,12 @@ from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
 from app import latest_rates_cache, tether_topic_trigger
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+)
+# C7 Alert evaluator + observation — source-neutral (Bithumb U7 패턴 mirror, Phase B.1 PR6
+# source-neutral 설계 그대로 적용).
+from app.notifications.alert_evaluator import (
+    AlertObservation,
+    UsdtAlertEvaluator,
 )
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.coinone")
@@ -417,12 +435,14 @@ class CoinoneRestFallbackController:
         self,
         redis_writer: "CoinoneRedisWriter",
         db_writer: "CoinoneDbWriter",
+        alert_evaluator: "UsdtAlertEvaluator",
         *,
         cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
         probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
     ) -> None:
         self._redis_writer = redis_writer
         self._db_writer = db_writer
+        self._alert_evaluator = alert_evaluator  # C7: AlertObservation schedule on probe success
         self._cooldown_sec = cooldown_sec
         self._probe_timeout_sec = probe_timeout_sec
         self._in_flight: bool = False
@@ -467,9 +487,10 @@ class CoinoneRestFallbackController:
         logger.debug("[usdt_ws.coinone.fallback] cooldown reset on normal recovery")
 
     async def _run_probe(self, reason: str) -> None:
-        """REST probe → normalized tick → fanout (Redis + DB; Alert는 C7).
+        """REST probe → normalized tick → fanout (Redis + DB + Alert).
 
         실패 시 log only + cooldown 적용 (재시도 X). WS session 영향 X.
+        C7: probe success 시 AlertObservation(kind="rest_probe") schedule 추가.
         """
         try:
             logger.info(
@@ -485,9 +506,18 @@ class CoinoneRestFallbackController:
                 )
                 return
 
-            # 기존 fanout 재사용 (C5 Redis writer + C6a DB writer). Alert는 C7에서 추가.
+            # 기존 fanout 재사용 (C5 Redis writer + C6a DB writer + C7 Alert evaluator).
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
+            # C7: REST probe kind 구분 (Bithumb U7 mirror — log/metric 영역에서 tick vs probe 분리).
+            observation = AlertObservation(
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+                timestamp_ms=tick["timestamp_ms"],
+                kind="rest_probe",
+            )
+            self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.coinone.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
                 tick["rate"], tick["timestamp_ms"], reason,
@@ -530,9 +560,9 @@ class CoinoneRestFallbackController:
 
 
 class CoinoneWsClient:
-    """Coinone USDT/KRW WebSocket client — C2-C6b 누적 (C7 미진입).
+    """Coinone USDT/KRW WebSocket client — Phase B.4 complete (C2-C7 누적).
 
-    State (C2 lifecycle + C3 session + C4 liveness/status + C5 Redis + C6a DB + C6b REST fallback):
+    State:
         - `_stop_event`: stop signal (asyncio.Event)
         - `_running`: 중복 start 방지 flag
         - `_ws`: active WebSocketClientProtocol (session 안에서만)
@@ -547,8 +577,9 @@ class CoinoneWsClient:
         - `_redis_writer`: CoinoneRedisWriter (tick-level fire-and-forget, C5)
         - `_db_writer`: CoinoneDbWriter (1s window debounce, C6a)
         - `_fallback_controller`: CoinoneRestFallbackController (silent probe on degraded, C6b)
+        - `_alert_evaluator`: UsdtAlertEvaluator (observation-based, source-neutral, C7)
 
-    C7 이후 누적 예정 (Alert evaluator — Bithumb U7 `BithumbWsClient` 패턴).
+    Phase B.4 기능 구현 complete. 남은 작업: sparse-time smoke 기반 threshold 조정 + canary enable.
     """
 
     def __init__(self) -> None:
@@ -585,12 +616,16 @@ class CoinoneWsClient:
         self._redis_writer: CoinoneRedisWriter = CoinoneRedisWriter()
         # C6a DB writer (1s window debounce). Bithumb U6 mirror.
         self._db_writer: CoinoneDbWriter = CoinoneDbWriter()
-        # C6b REST fallback controller (silent probe). Bithumb U6 mirror.
-        # Redis + DB writer inject. Alert evaluator는 C7에서 추가 예정.
+        # C7 Alert evaluator (observation-based, source-neutral helper 재사용).
+        # Bithumb U7 mirror — Coinone client 자체 instance 보유.
+        self._alert_evaluator: UsdtAlertEvaluator = UsdtAlertEvaluator()
+        # C6b REST fallback controller (silent probe). Bithumb U6/U7 mirror.
+        # Redis + DB writer + Alert evaluator inject (C7 alert_evaluator 필수).
         self._fallback_controller: CoinoneRestFallbackController = (
             CoinoneRestFallbackController(
                 redis_writer=self._redis_writer,
                 db_writer=self._db_writer,
+                alert_evaluator=self._alert_evaluator,
             )
         )
 
@@ -952,6 +987,16 @@ class CoinoneWsClient:
                         self._redis_writer.schedule(tick)
                         # C6a: DB writer schedule (1s window debounce + race-prevention).
                         self._db_writer.schedule(tick)
+                        # C7: AlertObservation schedule (source-neutral evaluator 재사용).
+                        # Bithumb U7 mirror — kind="tick" 구분 (REST probe와 log/metric 분리).
+                        observation = AlertObservation(
+                            source=tick["source"],
+                            asset=tick["asset"],
+                            rate=tick["rate"],
+                            timestamp_ms=tick["timestamp_ms"],
+                            kind="tick",
+                        )
+                        self._alert_evaluator.schedule(observation)
             finally:
                 # C4 finally: ping_task cancel/await (Bithumb _run_one_session mirror).
                 ping_task.cancel()
@@ -962,9 +1007,10 @@ class CoinoneWsClient:
                 except Exception:
                     logger.exception("[usdt_ws.coinone] ping_task cleanup 실패")
                 # C6b finally 1: fallback_controller — pending probe task cancel.
-                # 순서 (Bithumb U7 mirror): fallback → DB → (Alert C7) → Redis.
+                # 순서 (Bithumb U7 mirror, 최종): fallback → DB → Alert → Redis.
                 # fallback이 모든 writer를 schedule할 수 있으므로 먼저 멈춰야 downstream
                 # writer들이 깔끔히 drain. Redis는 항상 마지막.
+                # 각 close는 개별 try/except로 격리 — 한 close 실패해도 뒤 close 실행 보장 (Codex Point 2).
                 try:
                     await self._fallback_controller.close()
                 except Exception:
@@ -974,7 +1020,13 @@ class CoinoneWsClient:
                     await self._db_writer.close()
                 except Exception:
                     logger.exception("[usdt_ws.coinone] db_writer.close() 실패")
-                # C5 finally 3: Redis writer pending drain (마지막).
+                # C7 finally 3: Alert evaluator drain (FCM 보호, Bithumb U7 mirror).
+                # 예외 격리: WS loop에 전파 X (acceptance 8).
+                try:
+                    await self._alert_evaluator.close()
+                except Exception:
+                    logger.exception("[usdt_ws.coinone] alert_evaluator.close() 실패")
+                # C5 finally 4: Redis writer pending drain (마지막).
                 try:
                     await self._redis_writer.close()
                 except Exception:
