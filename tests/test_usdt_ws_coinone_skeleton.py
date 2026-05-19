@@ -526,47 +526,51 @@ class TestRunOneSession(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Scope guard — stage별 누적 허용 + C6~C7 영역 forbidden
+# Scope guard — stage별 누적 허용 + C6b~C7 영역 forbidden
 # ---------------------------------------------------------------------------
 
 class TestScopeGuard(unittest.TestCase):
-    """C5 기준 scope guard: DB/Alert/REST writer import 금지.
+    """C6a 기준 scope guard: REST fallback / Alert evaluator만 forbidden.
 
     C3 신설 시 Redis/DB/Alert/REST 모두 forbidden. C4에서 UsdtLivenessMonitor 의도적 재사용,
-    C5에서 latest_rates_cache / tether_topic_trigger 의도적 재사용 — forbidden list에서 제외.
-    C6~C7 영역 (DB writer / REST fallback / Alert evaluator)만 forbidden.
+    C5에서 latest_rates_cache / tether_topic_trigger 의도적 재사용, C6a에서 CoinoneDbWriter
+    의도적 추가 (DB symbols는 _sync_db_write 함수 내부 lazy import이라 module-level 비노출) —
+    모두 forbidden list에서 제외.
+    C6b~C7 영역 (REST fallback helper / Alert evaluator)만 forbidden.
     """
 
     def test_no_forbidden_imports(self):
-        """coinone.py module이 DB/Alert/REST writer import하지 않음.
+        """coinone.py module이 REST fallback / Alert evaluator import하지 않음.
 
-        C4 update: UsdtLivenessMonitor는 source-neutral helper로 C4에서 재사용 (forbidden 제외).
-        C5 update: latest_rates_cache, tether_topic_trigger는 Redis writer / topic trigger 재사용
-        (forbidden 제외). C6~C7 영역 import만 forbidden.
+        Stage별 누적 허용:
+        - C4: UsdtLivenessMonitor (source-neutral 재사용)
+        - C5: latest_rates_cache, tether_topic_trigger (Redis writer + topic trigger)
+        - C6a: CoinoneDbWriter (module-level class) — get_db_context / insert_source_rate_if_changed는
+          _sync_db_write 함수 내부 import이라 module-level 비노출
+        C6b~C7 영역만 forbidden (fetch_coinone_usdt_tick / UsdtAlertEvaluator / AlertObservation).
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
-        # C6~C7 영역 import만 forbidden (DB/Alert/REST)
+        # C6b~C7 영역 import만 forbidden (REST fallback helper / Alert evaluator)
         forbidden = [
             "UsdtAlertEvaluator",
             "AlertObservation",
-            "get_db_context",
-            "insert_source_rate_if_changed",
             "fetch_coinone_usdt_tick",
         ]
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"scope 위반: '{name}' import됨 (C6~C7 영역)",
+                f"scope 위반: '{name}' import됨 (C6b~C7 영역)",
             )
 
     def test_module_imports_minimal(self):
-        """C5 module imports: asyncio + datetime + json + logging + time + typing + websockets
-        + UsdtLivenessMonitor + latest_rates_cache + tether_topic_trigger.
+        """C6a module imports: asyncio + datetime + json + logging + time + typing + websockets
+        + UsdtLivenessMonitor + latest_rates_cache + tether_topic_trigger + CoinoneDbWriter.
 
         C4 update: time + UsdtLivenessMonitor (source-neutral 재사용) 추가됨.
         C5 update: datetime + latest_rates_cache + tether_topic_trigger 추가됨 (Redis writer + topic trigger 재사용).
-        C6~C7 영역 import는 forbidden (TestScopeGuard.test_no_forbidden_imports에서 검증).
+        C6a update: CoinoneDbWriter class + DB_WRITE_WINDOW_SEC 추가됨 (DB symbols는 lazy import이라 module-level 비노출).
+        C6b~C7 영역 import는 forbidden (TestScopeGuard.test_no_forbidden_imports에서 검증).
         본 test는 module 정상 import + 핵심 symbols 존재만 검증.
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
@@ -783,24 +787,23 @@ class TestScopeGuardC4(unittest.TestCase):
     """
 
     def test_no_forbidden_imports_after_c4(self):
-        """coinone.py module이 C6~C7 영역 import하지 않음.
+        """coinone.py module이 REST fallback / Alert evaluator import하지 않음.
 
-        C5 update: latest_rates_cache, tether_topic_trigger는 C5 의도적 import (forbidden 제외).
-        C6~C7 영역 (DB/Alert/REST)만 forbidden.
+        C6a update: CoinoneDbWriter 신설 — get_db_context / insert_source_rate_if_changed는
+        _sync_db_write 함수 내부 import이라 module-level 비노출 (forbidden 점검 영향 X).
+        C6b~C7 영역만 forbidden (fetch_coinone_usdt_tick / UsdtAlertEvaluator / AlertObservation).
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         forbidden = [
             "UsdtAlertEvaluator",
             "AlertObservation",
-            "get_db_context",
-            "insert_source_rate_if_changed",
             "fetch_coinone_usdt_tick",
         ]
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"scope 위반: '{name}' import됨 (C6~C7 영역)",
+                f"scope 위반: '{name}' import됨 (C6b~C7 영역)",
             )
 
     def test_usdt_liveness_monitor_imported_for_reuse(self):
@@ -1056,6 +1059,9 @@ class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
         client._redis_writer.schedule = MagicMock(
             side_effect=lambda tick: schedule_calls.append(tick),
         )
+        # C6a regression: _db_writer.schedule도 mock — 실제 timer/DB 호출 회피.
+        # 본 test는 Redis writer wiring만 검증, DB writer wiring은 TestRunOneSessionDbWiring 영역.
+        client._db_writer.schedule = MagicMock()
 
         recv_raws = [
             json.dumps({"response_type": "CONNECTED", "data": {"session_id": "abc"}}),
@@ -1098,7 +1104,11 @@ class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
 
 
 class TestScopeGuardC5(unittest.TestCase):
-    """C5 acceptance 12-13: C5 의도적 import 허용 + C6~C7 영역 forbidden."""
+    """C5 acceptance: C5 의도적 import 허용 + C6b~C7 영역 forbidden.
+
+    C6a update: CoinoneDbWriter 추가 — DB symbols는 _sync_db_write 함수 내부 import이라
+    module-level forbidden 점검 영향 X.
+    """
 
     def test_redis_topic_imports_allowed(self):
         """C5: latest_rates_cache, tether_topic_trigger, CoinoneRedisWriter 의도적 import 허용."""
@@ -1108,22 +1118,312 @@ class TestScopeGuardC5(unittest.TestCase):
         self.assertTrue(hasattr(coinone_module, "CoinoneRedisWriter"))
         self.assertTrue(hasattr(coinone_module, "TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS"))
 
-    def test_db_alert_rest_forbidden(self):
-        """C6~C7 영역 (DB/Alert/REST) 여전히 forbidden."""
+    def test_rest_alert_forbidden(self):
+        """C6b~C7 영역 (REST fallback helper / Alert evaluator) 여전히 forbidden."""
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         forbidden = [
             "UsdtAlertEvaluator",
             "AlertObservation",
-            "get_db_context",
-            "insert_source_rate_if_changed",
             "fetch_coinone_usdt_tick",
         ]
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"C5 scope 위반: '{name}' import됨 (C6~C7 영역)",
+                f"scope 위반: '{name}' import됨 (C6b~C7 영역)",
             )
+
+
+# ===========================================================================
+# C6a — CoinoneDbWriter + 1s window debounce + _run_one_session DB wiring
+# ===========================================================================
+
+class TestCoinoneDbWriterScheduleAndFlush(unittest.IsolatedAsyncioTestCase):
+    """C6a acceptance 1-2: schedule → window timer → _flush_after_window → _sync_db_write."""
+
+    async def test_schedule_then_flush_calls_helper(self):
+        """schedule(tick) → window 후 _sync_db_write 호출 + crud.insert_source_rate_if_changed."""
+        from app.crawlers.usdt_ws.coinone import CoinoneDbWriter
+        # window 짧게 (0.05s)
+        writer = CoinoneDbWriter(window_sec=0.05)
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+        helper_calls = []
+
+        def fake_insert(*, db, source, asset, rate):
+            helper_calls.append({"source": source, "asset": asset, "rate": rate})
+
+        # crud.insert_source_rate_if_changed + get_db_context mock
+        from unittest.mock import MagicMock
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=fake_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule(tick)
+            # window 지나가도록 대기
+            await asyncio.sleep(0.15)
+
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0]["source"], "coinone")
+        self.assertEqual(helper_calls[0]["asset"], "usdt-krw")
+        self.assertEqual(helper_calls[0]["rate"], 1487.0)
+
+    async def test_multiple_ticks_in_window_only_last_flushed(self):
+        """window 내 여러 tick → 마지막 1건만 helper 호출 (debounce 의미)."""
+        from app.crawlers.usdt_ws.coinone import CoinoneDbWriter
+        writer = CoinoneDbWriter(window_sec=0.1)
+        helper_calls = []
+
+        def fake_insert(*, db, source, asset, rate):
+            helper_calls.append(rate)
+
+        from unittest.mock import MagicMock
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=fake_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            # 빠르게 3 tick — window 내
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 2.0, "timestamp_ms": 2})
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 3.0, "timestamp_ms": 3})
+            await asyncio.sleep(0.2)
+
+        # window 후 1회만 helper 호출 + 마지막 tick (rate=3.0)
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0], 3.0)
+
+
+class TestCoinoneDbWriterRaceWithNewTick(unittest.IsolatedAsyncioTestCase):
+    """C6a acceptance 4: write 진행 중 새 tick → finally에서 새 timer 예약 (누락 방지).
+
+    Codex hang 정정: asyncio.Event는 event loop 종속이라 asyncio.to_thread 내부
+    다른 thread에서 set()/is_set() 호출 시 thread-safe X. threading.Event 사용 +
+    event loop 쪽에서는 asyncio.to_thread(event.wait, timeout)으로 기다림.
+    """
+
+    async def test_new_tick_during_write_schedules_next_window(self):
+        """slow helper 진행 중 새 tick → finally에서 새 timer → 다음 window 종료 후 2번째 helper 호출."""
+        import threading
+        from app.crawlers.usdt_ws.coinone import CoinoneDbWriter
+        writer = CoinoneDbWriter(window_sec=0.05)
+        helper_calls = []
+
+        # asyncio.Event 대신 threading.Event (thread-safe)
+        first_write_started = threading.Event()
+        first_write_can_finish = threading.Event()
+
+        def slow_insert(*, db, source, asset, rate):
+            helper_calls.append(rate)
+            # thread 내부 — threading.Event는 thread-safe
+            first_write_started.set()
+            # 첫 write hang — 다음 tick schedule 시점 race 시뮬레이션
+            if rate == 1.0:
+                # threading.Event.wait — bounded (test timeout 방지)
+                first_write_can_finish.wait(timeout=2.0)
+
+        from unittest.mock import MagicMock
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=slow_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            # 첫 tick
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            # threading.Event.wait를 thread에서 — event loop 안 막음
+            await asyncio.wait_for(
+                asyncio.to_thread(first_write_started.wait, 2.0),
+                timeout=3.0,
+            )
+            # 첫 write 진행 중 두 번째 tick 도착
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 2.0, "timestamp_ms": 2})
+            # 첫 write 완료
+            first_write_can_finish.set()
+            # 다음 window 완료 대기
+            await asyncio.sleep(0.2)
+
+        # 2번 호출됨 (race 방지 — 두 번째 tick 누락 X)
+        self.assertEqual(len(helper_calls), 2)
+        self.assertIn(1.0, helper_calls)
+        self.assertIn(2.0, helper_calls)
+
+
+class TestCoinoneDbWriterHelperExceptionIsolated(unittest.IsolatedAsyncioTestCase):
+    """C6a acceptance 5: helper exception → log only (WS session 영향 X)."""
+
+    async def test_helper_exception_isolated(self):
+        from app.crawlers.usdt_ws.coinone import CoinoneDbWriter
+        writer = CoinoneDbWriter(window_sec=0.05)
+
+        def failing_insert(*, db, source, asset, rate):
+            raise RuntimeError("DB connection lost")
+
+        from unittest.mock import MagicMock
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=failing_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            # 예외 발생해도 schedule + 다음 close 정상
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            await asyncio.sleep(0.15)
+            # writer 상태 정상 — close 호출 가능
+            await writer.close()
+
+
+class TestCoinoneDbWriterCloseImmediateFlush(unittest.IsolatedAsyncioTestCase):
+    """C6a acceptance 6: close 시 pending tick 즉시 flush (1초 window 안 기다림)."""
+
+    async def test_close_flushes_pending_immediately(self):
+        """schedule 직후 close → window 안 기다리고 pending 즉시 flush."""
+        from app.crawlers.usdt_ws.coinone import CoinoneDbWriter
+        writer = CoinoneDbWriter(window_sec=10.0)  # 의도적으로 긴 window
+        helper_calls = []
+
+        def fake_insert(*, db, source, asset, rate):
+            helper_calls.append(rate)
+
+        from unittest.mock import MagicMock
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=fake_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule({"source": "coinone", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            # 10s window 기다리지 않고 즉시 close
+            await asyncio.wait_for(writer.close(), timeout=1.0)
+
+        # window 무시하고 즉시 flush — 1회 호출
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0], 1.0)
+
+
+class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
+    """C6a acceptance 7-8: _run_one_session valid DATA path에서 observe_tick → Redis → DB wiring + finally 순서."""
+
+    async def test_valid_data_calls_db_writer_schedule(self):
+        client = CoinoneWsClient()
+        redis_calls = []
+        db_calls = []
+
+        client._redis_writer.schedule = MagicMock(
+            side_effect=lambda tick: redis_calls.append(tick),
+        )
+        client._db_writer.schedule = MagicMock(
+            side_effect=lambda tick: db_calls.append(tick),
+        )
+
+        recv_raws = [
+            json.dumps({"response_type": "CONNECTED", "data": {"session_id": "abc"}}),
+            json.dumps({"response_type": "SUBSCRIBED", "channel": "TICKER",
+                        "data": {"quote_currency": "KRW", "target_currency": "USDT"}}),
+            json.dumps({
+                "response_type": "DATA",
+                "data": {
+                    "quote_currency": "KRW", "target_currency": "USDT",
+                    "last": "1487", "timestamp": 1779106625946,
+                },
+            }),
+        ]
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i < len(recv_raws):
+                return recv_raws[i]
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # DATA 1건만 schedule 호출 — Redis + DB 둘 다
+        self.assertEqual(len(redis_calls), 1)
+        self.assertEqual(len(db_calls), 1)
+        # 동일 tick 전달 검증
+        self.assertEqual(redis_calls[0], db_calls[0])
+
+    async def test_finally_order_db_before_redis(self):
+        """finally 순서: ping_task → db_writer.close() → redis_writer.close().
+
+        close 순서 검증 — Bithumb U6 mirror (close 순서 일관성).
+        """
+        client = CoinoneWsClient()
+        close_order = []
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def fake_redis_close(timeout=1.0):
+            close_order.append("redis")
+
+        client._db_writer.close = AsyncMock(side_effect=fake_db_close)
+        client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
+
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            recv_count["calls"] += 1
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # db_close가 redis_close보다 먼저 호출
+        self.assertEqual(close_order, ["db", "redis"])
+
+
+class TestScopeGuardC6a(unittest.TestCase):
+    """C6a acceptance 9: CoinoneDbWriter 의도적 + C6b~C7 영역 forbidden 유지."""
+
+    def test_db_writer_class_present(self):
+        """C6a: CoinoneDbWriter class module-level 노출."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertTrue(hasattr(coinone_module, "CoinoneDbWriter"))
+        self.assertTrue(hasattr(coinone_module, "DB_WRITE_WINDOW_SEC"))
+
+    def test_db_symbols_not_module_level(self):
+        """get_db_context, insert_source_rate_if_changed는 _sync_db_write 함수 내부 import.
+
+        module-level에 노출되면 안 됨 (lazy import — DB 의존성 모듈 로드 시점 격리).
+        """
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        module_attrs = dir(coinone_module)
+        self.assertNotIn("get_db_context", module_attrs)
+        self.assertNotIn("insert_source_rate_if_changed", module_attrs)
+
+    def test_rest_alert_still_forbidden(self):
+        """C6b~C7 영역 (REST helper / Alert) 여전히 forbidden."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        module_attrs = dir(coinone_module)
+        for name in ["UsdtAlertEvaluator", "AlertObservation", "fetch_coinone_usdt_tick"]:
+            self.assertNotIn(name, module_attrs)
 
 
 if __name__ == "__main__":

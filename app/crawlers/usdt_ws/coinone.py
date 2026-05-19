@@ -1,8 +1,10 @@
-"""USDT WebSocket — Coinone canary client (Phase B.4 Stage C2-C5).
+"""USDT WebSocket — Coinone canary client (Phase B.4 Stage C2-C6a).
 
 USDT_WS_DESIGN_PLAN §12.6 Phase B.4.
-Bithumb Stage U2-U5 패턴 mirror (작은 단위 stage 분할 학습 — KRX close finalizer
+Bithumb Stage U2-U6 패턴 mirror (작은 단위 stage 분할 학습 — KRX close finalizer
 1100 lines → 3 High findings → revert + Phase B.3 U2~U7 분할 재시작 학습 적용).
+C6는 C6a (DbWriter, sparse-time smoke 무관) + C6b (REST helper + RestFallbackController +
+ticker_freshness degraded threshold, sparse-time smoke 후 진행)로 분할 (Codex 권장).
 
 C2 lifecycle skeleton (완료):
     - `_stop_event` + `_running` (network/Redis/DB/Alert import 없음)
@@ -33,7 +35,7 @@ C4 connection liveness + ticker freshness telemetry (완료):
       alone → reconnect never (사용자 일요일 Bithumb 무체결 관찰 + USDT/KRW 시장에서 수분
       단위 무체결 정상 → false reconnect 위험 방지).
 
-C5 Redis writer + topic trigger (현재):
+C5 Redis writer + topic trigger (완료):
     - Constants: MAX_PENDING_WRITES=20 / REDIS_CLOSE_TIMEOUT_SEC=1.0 (Bithumb 동일)
     - `CoinoneRedisWriter`: tick-level fire-and-forget (Bithumb U5 1:1 mirror, logger prefix만 변경).
       schedule → asyncio.create_task → _write_async (write_lock 직렬화 + to_thread + helper False
@@ -44,10 +46,22 @@ C5 Redis writer + topic trigger (현재):
     - close: pending drain + timeout 후 cancel (마지막 tick 보존).
     - finally 순서: ping_task cancel/await → `_redis_writer.close()` (Codex Point 1).
 
-C6 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.6.4):
-    - C6: CoinoneDbWriter (1s window debounce) + REST fallback (180~300s ticker freshness degraded
-      threshold 결정 — sparse-time smoke 후) + `fetch_coinone_usdt_tick()` normalized helper
-    - C7: UsdtAlertEvaluator wiring
+C6a DB writer + 1s window debounce (현재):
+    - Constants: DB_WRITE_WINDOW_SEC=1.0 (Bithumb 동일)
+    - `CoinoneDbWriter`: Bithumb U6 1:1 mirror (logger prefix만 변경).
+      schedule → window timer → _flush_after_window → asyncio.to_thread(_sync_db_write) →
+      crud.insert_source_rate_if_changed. Race 방지: write 중 새 tick 도착 시 finally에서
+      새 timer 예약 (KRX PR6b-2b 패턴).
+    - `_handle_message`의 valid DATA tick → `_run_one_session`에서 observe_tick →
+      ticker freshness normal 복귀 → `_redis_writer.schedule` → `_db_writer.schedule`.
+    - close: timer cancel + pending tick 즉시 flush (window 일관성보다 last tick 우선).
+    - finally 순서: ping_task → `_db_writer.close()` → `_redis_writer.close()` (Bithumb mirror).
+
+C6b 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.6.4):
+    - C6b: `fetch_coinone_usdt_tick()` normalized helper (usdt_sources.py) + `CoinoneRestFallbackController`
+      + `TICKER_FRESHNESS_DEGRADED_SEC` (180~300s — sparse-time smoke 후 확정). degraded 진입 시
+      REST probe trigger + fanout (Redis + DB + Alert).
+    - C7: UsdtAlertEvaluator wiring (`AlertObservation` schedule on valid tick + REST probe success)
 """
 from __future__ import annotations
 
@@ -111,6 +125,11 @@ RECONNECT_BACKOFF_TAIL = 30.0
 # C5 Redis writer guards — Bithumb U5 동일 값 (bithumb.py:145-147 mirror).
 MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
 REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
+
+# C6a DB writer — Bithumb U6 동일 값 (bithumb.py:150 mirror).
+# tick rate ~100ms+ vs DB I/O ~10-50ms이라 매 tick INSERT는 DB 부담.
+# window 내 마지막 tick만 helper 호출.
+DB_WRITE_WINDOW_SEC = 1.0
 
 
 class CoinoneRedisWriter:
@@ -240,10 +259,119 @@ class CoinoneRedisWriter:
             self._tasks.clear()
 
 
-class CoinoneWsClient:
-    """Coinone USDT/KRW WebSocket client — C2 skeleton + C3 connect/parse + C4 liveness/freshness + C5 Redis writer.
+class CoinoneDbWriter:
+    """Coinone USDT/KRW DB writer — 1s window debounce + insert_source_rate_if_changed (C6a).
 
-    State (C2 lifecycle + C3 session + C4 liveness/status + C5 Redis writer):
+    Bithumb `BithumbDbWriter` (bithumb.py:277-383) 1:1 mirror. tick rate ~100ms+ vs DB I/O
+    ~10-50ms이라 매 tick INSERT는 DB 부담. window 내 마지막 tick만 helper 호출.
+
+    asyncio loop 차단 방지:
+        sync SQLAlchemy 호출은 asyncio.to_thread로 격리. DB session은
+        to_thread 내부에서 get_db_context()로 생성/close.
+
+    race 방지 (KRX PR6b-2b Codex 보정 + Bithumb U6 mirror):
+        DB write (to_thread) 진행 중 새 tick 도착 → _pending_tick 갱신,
+        _timer.done() X 라 schedule()이 새 timer 안 만듦. write 종료 후
+        finally 블록에서 _pending_tick 재확인 후 새 timer 예약 — 누락 방지.
+
+    failure isolation: DB exception → log only, WS session 영향 X.
+
+    shutdown (close): pending tick 1초 기다리지 않고 즉시 flush.
+        window 일관성보다 last tick 보장 우선 (shutdown은 드문 이벤트).
+    """
+
+    def __init__(self, *, window_sec: float = DB_WRITE_WINDOW_SEC) -> None:
+        self._window_sec = window_sec
+        self._pending_tick: Optional[dict] = None
+        self._timer: Optional[asyncio.Task] = None
+
+    def schedule(self, tick: dict) -> None:
+        """tick 입력 → pending 갱신 + window timer 시작/유지. sync, 즉시 반환."""
+        self._pending_tick = tick
+        if self._timer is None or self._timer.done():
+            self._timer = asyncio.create_task(self._flush_after_window())
+
+    async def _flush_after_window(self) -> None:
+        """window 만료 → last pending tick을 helper에 전달.
+
+        write 진행 중 새 tick 도착 시 finally에서 새 timer 예약 (race 방지).
+        """
+        try:
+            await asyncio.sleep(self._window_sec)
+        except asyncio.CancelledError:
+            raise
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.coinone] DB write failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+        finally:
+            # write 중 들어온 tick 처리 — 새 window 예약. finally 블록은
+            # 같은 코루틴 frame 안, await 없는 sync 영역이라 다른 코루틴
+            # race X (schedule()이 _timer.done() 체크 전 새 task 할당).
+            if self._pending_tick is not None:
+                self._timer = asyncio.create_task(self._flush_after_window())
+
+    @staticmethod
+    def _sync_db_write(tick: dict) -> None:
+        """sync DB write — to_thread 내부 실행.
+
+        get_db_context()로 SessionLocal 생성/close. insert_source_rate_if_changed는
+        내부에서 commit. Decimal 정규화 없음 (REST polling
+        `usdt_sources.collect_usdt_rates`와 일관, 둘 다 float 그대로 전달).
+        """
+        # 함수 내부 import — 모듈 로드 시 DB 의존성 격리.
+        from app import crud
+        from app.database import get_db_context
+
+        with get_db_context() as db:
+            crud.insert_source_rate_if_changed(
+                db=db,
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+            )
+
+    async def close(self) -> None:
+        """shutdown 시 timer cancel + pending tick 즉시 flush.
+
+        1초 window 기다리지 않고 마지막 tick DB 저장. window 일관성보다
+        last tick 보장 우선 (shutdown은 드문 이벤트).
+        """
+        if self._timer is not None and not self._timer.done():
+            self._timer.cancel()
+            try:
+                await self._timer
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.coinone] db_writer timer cancel 실패")
+        self._timer = None
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.coinone] DB write on close failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+
+
+class CoinoneWsClient:
+    """Coinone USDT/KRW WebSocket client — C2-C6a 누적 (C6b/C7 미진입).
+
+    State (C2 lifecycle + C3 session + C4 liveness/status + C5 Redis + C6a DB):
         - `_stop_event`: stop signal (asyncio.Event)
         - `_running`: 중복 start 방지 flag
         - `_ws`: active WebSocketClientProtocol (session 안에서만)
@@ -256,8 +384,9 @@ class CoinoneWsClient:
         - `_reconnect_attempt_count`: reconnect attempt 누적
         - `_pong_event`: application-level PONG synchronization (asyncio.Event)
         - `_redis_writer`: CoinoneRedisWriter (tick-level fire-and-forget, C5)
+        - `_db_writer`: CoinoneDbWriter (1s window debounce, C6a)
 
-    C6 이후 누적 예정 (DB/Alert/REST state — Bithumb `BithumbWsClient` 패턴).
+    C6b/C7 이후 누적 예정 (REST fallback controller / Alert evaluator — Bithumb `BithumbWsClient` 패턴).
     """
 
     def __init__(self) -> None:
@@ -290,6 +419,8 @@ class CoinoneWsClient:
         # C5 Redis writer (tick-level, fire-and-forget) — A13 lifecycle invariant:
         # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Bithumb U5 mirror.
         self._redis_writer: CoinoneRedisWriter = CoinoneRedisWriter()
+        # C6a DB writer (1s window debounce). Bithumb U6 mirror.
+        self._db_writer: CoinoneDbWriter = CoinoneDbWriter()
 
     @staticmethod
     def _build_subscribe_payload() -> dict:
@@ -618,7 +749,8 @@ class CoinoneWsClient:
 
                     # C3 parse + log only. C4: valid DATA → observe_tick + ticker freshness normal 복귀.
                     # C5: Redis writer schedule (tick-level, fire-and-forget).
-                    # C6~C7에서 DB/Alert downstream IO 추가 예정.
+                    # C6a: DB writer schedule (1s window debounce).
+                    # C6b~C7에서 REST fallback / Alert downstream IO 추가 예정.
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
@@ -627,6 +759,8 @@ class CoinoneWsClient:
                             self._set_ticker_freshness_status("normal")
                         # C5: Redis writer schedule (recv loop 격리 — fire-and-forget).
                         self._redis_writer.schedule(tick)
+                        # C6a: DB writer schedule (1s window debounce + race-prevention).
+                        self._db_writer.schedule(tick)
             finally:
                 # C4 finally: ping_task cancel/await (Bithumb _run_one_session mirror).
                 ping_task.cancel()
@@ -636,9 +770,14 @@ class CoinoneWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.coinone] ping_task cleanup 실패")
-                # C5 finally: Redis writer pending drain (Bithumb U5 mirror — ping_task 정리 후).
-                # 순서 — ping_task → Redis writer (Codex Point 1). C6~C7 누적 시:
-                # fallback → DB → Alert → Redis (Bithumb 최종 순서 mirror 예정).
+                # C6a finally: DB writer (source of truth) timer cancel + pending tick 즉시 flush.
+                # 순서 (Bithumb U6 mirror): ping_task → DB → Redis. C6b/C7 누적 시:
+                # fallback → DB → Alert → Redis (Bithumb 최종 순서). Redis는 항상 마지막.
+                try:
+                    await self._db_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.coinone] db_writer.close() 실패")
+                # C5 finally: Redis writer pending drain (마지막).
                 try:
                     await self._redis_writer.close()
                 except Exception:
