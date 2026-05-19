@@ -3270,7 +3270,7 @@ WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방
 
 - **운영 중 만기월 WS subscribe**: same appkey 충돌로 `OPSP8996 ALREADY IN USE`. → 운영 client는 active contract만 subscribe 유지가 옳음 (PR6c-2d-1 swap 후 옛 월물 client 종료 정책 정확).
 - **Post-close 만기월 WS subscribe** (15:48~16:02 별도 observer): `SUBSCRIBE SUCCESS`이지만 frame 0건, 14분 후 KIS idle close. → 이번 케이스에서는 운영 데이터 source로 가치 낮음 (운영 client는 active contract만 subscribe).
-- **다음 만기 (6/18) 옛 월물 실시간 관찰** — 별도 appkey 또는 단일 connection multi-contract subscribe 구조 필요 (Pending, KRX_CANARY 참조).
+- **다음 만기 (6/18) 별도 observer는 불필요** — 운영 로그/DB row 사후 확인으로 충분. 옛 월물 실시간 관찰은 별도 appkey 또는 단일 connection multi-contract subscribe 구조가 구현된 경우에만 재검토.
 
 #### KRX 단일가 메커니즘 (운영 close finalizer 설계 input)
 

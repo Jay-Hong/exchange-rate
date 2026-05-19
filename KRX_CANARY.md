@@ -510,21 +510,24 @@ case B 비율 결과로 3차 PR scope 결정 (REST fallback 제거 검토 / 유�
 6. **KIS REST access_token은 `KRX_REST_FALLBACK_ENABLED=false`에서 운영이 발급 안 함**: observer가 자체 발급해 별도 cache (`/tmp/krx_expiry_obs/.observer_token.json`)로 격리 필요.
 7. **Secret 마스킹**: `env | grep KIS`류 명령은 secret 노출 위험. CLAUDE.md global "운영 안전성 / 보안 원칙"의 `sed` 마스킹 명령 사용 필수.
 
-#### Observer 스크립트 (재사용 자산)
+#### Observer 스크립트 — 진단 도구
 
 ```text
-scripts/observe_kis_master.py  # KIS 상품 마스터 fetch (secret 무관, public URL)
-scripts/observe_kis_ws_old.py  # 옛 월물 WS subscribe (approval cache read-only)
-scripts/observe_kis_rest.py    # REST inquire-price (P1 access_token cache / P2 자체 발급)
+scripts/observe_kis_master.py  # KIS 상품 마스터 fetch (secret 무관, public URL) — 운영 진단 도구로 영구 유지
 ```
 
-다음 만기 6/18 또는 후속 만기에서 재사용 가능. 영구화 결정 시 repo commit + image rebuild.
+`observe_kis_rest.py` / `observe_kis_ws_old.py`는 5/18 만기 1회 실측 후 정리 (2026-05-19 commit). 필요 시 git history (`b7c8b6a`)에서 복구 가능하나, 다음 만기에는 다음 조건이 충족되기 전엔 재사용 가치 낮음:
+
+- REST observer: 다음 만기에서 stale 응답 패턴 재확인 가치는 2~3회 sample만 필요 (정책 판단은 ADR-027에서 완료) → ad-hoc 1회 호출로 충분
+- WS old observer: same appkey `OPSP8996` 제한으로 그대로 재사용 무가치. 별도 appkey 또는 단일 connection multi-contract subscribe 구조 만들기 전엔 재실행해도 같은 결과
+
+`observe_kis_master.py`는 만기 관찰이 아니라 KIS master public endpoint 진단 도구로 보고 유지. 운영 중 master 이상 (URL 변경 / 새 contract 추가 / `mmsc_cls_code` 형식 변경) 시 활용.
 
 #### Pending — 추가 관찰 항목
 
 - **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST 성공) / case C (둘 다 실패) 분포 측정. CF/CM 첫 실측 모두 case A. 상세 status는 [KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) 추적.
-- **master 전체 dict diff** (선택) — `mmsc_cls_code` 외 `name`, `contract_month`, `last_tr_date` 등 추가 sample 수집 가치 시점에 확인.
-- **다음 만기 (6/18) WS multi-contract 관찰 구조** — 별도 appkey 발급 또는 단일 connection multi-contract subscribe 구조로 옛 월물 실시간 capture 가능성 검토.
+
+> **다음 만기 (6/18) 별도 observer는 불필요로 결정 (2026-05-19)**. 5/18 첫 실측으로 운영 정책 input 모두 확정 — 만기일 rollover (PR6c-2d-1) 정상 / KIS master 익일 batch 갱신 / REST stale 정상 응답 가능 / 자체 calendar 기반 active contract 판단 / CF/CM close finalizer WS-first 성공. 다음 만기는 운영 로그/DB row만 사후 확인 ([KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) telemetry). master batch 재확인이 꼭 필요하면 `observe_kis_master.py` ad-hoc 1회 호출로 충분.
 
 ---
 
