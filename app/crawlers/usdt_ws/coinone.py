@@ -33,7 +33,7 @@ C4 connection liveness + ticker freshness telemetry (완료):
       2-signal 의식. heartbeat fresh이면 ticker silence 무관 is_stale=False.
     - Reconnect loop + backoff sequence (Bithumb start() mirror)
     - **scope guard**: Redis/DB/Alert/REST writer 일체 미진입 (C5~C7 영역). ticker silence
-      alone → reconnect never (사용자 일요일 Bithumb 무체결 관찰 + USDT/KRW 시장에서 수분
+      alone → reconnect never (사용자 일요일 Upbit 무체결 관찰 + USDT/KRW 시장에서 수분
       단위 무체결 정상 → false reconnect 위험 방지).
 
 C5 Redis writer + topic trigger (완료):
@@ -143,7 +143,7 @@ STALE_AFTER_SEC = 360.0
 # C4 Ticker freshness warning threshold — telemetry only, action 미진입.
 # USDT_WS_DESIGN_PLAN §12.6.3 결정 3 + Codex 정정: 60s = warning/log only (transition 기반).
 # 실제 REST probe trigger threshold (180~300s degraded)는 C6 결정.
-# 사용자 일요일 Bithumb 무체결 관찰: USDT/KRW 시장에서 수분 단위 무체결 정상 → DATA silence를
+# 사용자 일요일 Upbit 무체결 관찰: USDT/KRW 시장에서 수분 단위 무체결 정상 → DATA silence를
 # connection failure로 해석 시 false reconnect 위험. ticker silence alone → reconnect never.
 TICKER_FRESHNESS_WARNING_SEC = 60.0
 
@@ -161,7 +161,7 @@ REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
 DB_WRITE_WINDOW_SEC = 1.0
 
 # C6b Ticker freshness degraded threshold — REST fallback probe trigger (action threshold).
-# **provisional** — 사용자 일요일 Bithumb 3분(180s) 무체결 실관찰 + 5분 안전 마진. sparse-time
+# **provisional** — 사용자 일요일 Upbit 3분(180s) 무체결 실관찰 + 5분 안전 마진. sparse-time
 # smoke (새벽/주말 30분) 후 정확값 확정 예정 (USDT_WS_DESIGN_PLAN §12.6.3 + Codex 정정).
 # 300s = warning(60s)보다 5× 길게 잡아 false probe 폭주 회피.
 TICKER_FRESHNESS_DEGRADED_SEC = 300.0
