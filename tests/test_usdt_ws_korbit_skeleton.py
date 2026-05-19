@@ -46,6 +46,7 @@ from websockets.exceptions import ConnectionClosed
 
 from app import config, scheduler
 from app.crawlers.usdt_ws.korbit import (
+    DB_WRITE_WINDOW_SEC,
     KORBIT_SYMBOL,
     KORBIT_WS_URL,
     MAX_PENDING_WRITES,
@@ -57,6 +58,7 @@ from app.crawlers.usdt_ws.korbit import (
     STALE_AFTER_SEC,
     SUBSCRIBE_REQUEST_ID,
     TICKER_FRESHNESS_WARNING_SEC,
+    KorbitDbWriter,
     KorbitRedisWriter,
     KorbitWsClient,
 )
@@ -507,6 +509,12 @@ class TestRunOneSession(unittest.IsolatedAsyncioTestCase):
             handle_calls.append(raw)
             return original_handle(raw)
 
+        # K5+K6a downstream writers mock — K3 test는 wire format/parse path만 검증
+        client._redis_writer.schedule = MagicMock()
+        client._redis_writer.close = AsyncMock()
+        client._db_writer.schedule = MagicMock()
+        client._db_writer.close = AsyncMock()
+
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
              patch.object(client, "_handle_message", side_effect=spy_handle):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
@@ -885,6 +893,12 @@ class TestRunOneSessionFreshnessWiring(unittest.IsolatedAsyncioTestCase):
         mock_ws.__aexit__ = AsyncMock(return_value=None)
         mock_ws.close = AsyncMock()
 
+        # K5+K6a downstream writers mock — freshness wiring path만 검증
+        client._redis_writer.schedule = MagicMock()
+        client._redis_writer.close = AsyncMock()
+        client._db_writer.schedule = MagicMock()
+        client._db_writer.close = AsyncMock()
+
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
              patch("app.crawlers.usdt_ws.korbit.PING_INTERVAL_SEC", 0.01):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
@@ -1155,6 +1169,10 @@ class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
         client._redis_writer.schedule = MagicMock(
             side_effect=lambda tick: schedule_calls.append(tick),
         )
+        client._redis_writer.close = AsyncMock()
+        # K6a downstream writer mock — K5 test는 Redis wiring path만 검증
+        client._db_writer.schedule = MagicMock()
+        client._db_writer.close = AsyncMock()
 
         recv_raws = [
             json.dumps({"status": "success", "requestId": 1}),  # ACK
@@ -1218,6 +1236,258 @@ class TestScopeGuardK5(unittest.TestCase):
                 name, module_attrs,
                 f"K5 scope 위반: '{name}' import됨 (K6~K7 영역)",
             )
+
+
+# ===========================================================================
+# K6a — KorbitDbWriter + 1s window debounce + _run_one_session DB wiring + close order
+# ===========================================================================
+
+
+class TestKorbitDbWriterScheduleAndFlush(unittest.IsolatedAsyncioTestCase):
+    """K6a acceptance: schedule → window timer → _flush_after_window → _sync_db_write."""
+
+    async def test_schedule_then_flush_calls_helper(self):
+        writer = KorbitDbWriter(window_sec=0.05)
+        tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+        helper_calls = []
+
+        def fake_insert(*, db, source, asset, rate):
+            helper_calls.append({"source": source, "asset": asset, "rate": rate})
+
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=fake_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule(tick)
+            await asyncio.sleep(0.15)
+
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0]["source"], "korbit")
+        self.assertEqual(helper_calls[0]["asset"], "usdt-krw")
+        self.assertEqual(helper_calls[0]["rate"], 1488.0)
+
+    async def test_multiple_ticks_in_window_only_last_flushed(self):
+        """window 내 여러 tick → 마지막 1건만 helper 호출 (debounce)."""
+        writer = KorbitDbWriter(window_sec=0.1)
+        helper_calls = []
+
+        def fake_insert(*, db, source, asset, rate):
+            helper_calls.append(rate)
+
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=fake_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 2.0, "timestamp_ms": 2})
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 3.0, "timestamp_ms": 3})
+            await asyncio.sleep(0.2)
+
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0], 3.0)
+
+
+class TestKorbitDbWriterRaceWithNewTick(unittest.IsolatedAsyncioTestCase):
+    """K6a acceptance: write 진행 중 새 tick → finally에서 새 timer 예약 (누락 방지).
+
+    threading.Event 사용 (asyncio.to_thread thread-safety).
+    """
+
+    async def test_new_tick_during_write_schedules_next_window(self):
+        import threading
+        writer = KorbitDbWriter(window_sec=0.05)
+        helper_calls = []
+
+        first_write_started = threading.Event()
+        first_write_can_finish = threading.Event()
+
+        def slow_insert(*, db, source, asset, rate):
+            helper_calls.append(rate)
+            first_write_started.set()
+            if rate == 1.0:
+                first_write_can_finish.wait(timeout=2.0)
+
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=slow_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            await asyncio.wait_for(
+                asyncio.to_thread(first_write_started.wait, 2.0),
+                timeout=3.0,
+            )
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 2.0, "timestamp_ms": 2})
+            first_write_can_finish.set()
+            await asyncio.sleep(0.2)
+
+        # 2번 호출됨 (race 방지 — 두 번째 tick 누락 X)
+        self.assertEqual(len(helper_calls), 2)
+        self.assertIn(1.0, helper_calls)
+        self.assertIn(2.0, helper_calls)
+
+
+class TestKorbitDbWriterHelperExceptionIsolated(unittest.IsolatedAsyncioTestCase):
+    """K6a acceptance: helper exception → log only (WS session 영향 X)."""
+
+    async def test_helper_exception_isolated(self):
+        writer = KorbitDbWriter(window_sec=0.05)
+
+        def failing_insert(*, db, source, asset, rate):
+            raise RuntimeError("DB connection lost")
+
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=failing_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            await asyncio.sleep(0.15)
+            # writer 상태 정상 — close 호출 가능
+            await writer.close()
+
+
+class TestKorbitDbWriterCloseImmediateFlush(unittest.IsolatedAsyncioTestCase):
+    """K6a acceptance: close 시 pending tick 즉시 flush (1초 window 안 기다림)."""
+
+    async def test_close_flushes_pending_immediately(self):
+        writer = KorbitDbWriter(window_sec=10.0)  # 의도적으로 긴 window
+        helper_calls = []
+
+        def fake_insert(*, db, source, asset, rate):
+            helper_calls.append(rate)
+
+        mock_db = MagicMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_db)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.crud.insert_source_rate_if_changed", side_effect=fake_insert), \
+             patch("app.database.get_db_context", return_value=mock_ctx):
+            writer.schedule({"source": "korbit", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            await asyncio.wait_for(writer.close(), timeout=1.0)
+
+        # window 무시하고 즉시 flush — 1회 호출
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0], 1.0)
+
+
+class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
+    """K6a acceptance: _run_one_session valid ticker path에서 observe_tick → Redis → DB wiring + finally 순서."""
+
+    async def test_valid_ticker_calls_db_writer_schedule(self):
+        client = KorbitWsClient()
+        redis_calls = []
+        db_calls = []
+
+        client._redis_writer.schedule = MagicMock(
+            side_effect=lambda tick: redis_calls.append(tick),
+        )
+        client._db_writer.schedule = MagicMock(
+            side_effect=lambda tick: db_calls.append(tick),
+        )
+
+        recv_raws = [
+            json.dumps({"status": "success", "requestId": 1}),
+            json.dumps({
+                "type": "ticker", "timestamp": 1779194622984, "symbol": "usdt_krw",
+                "data": {"close": "1488", "lastTradedAt": 1779194593306},
+            }),
+        ]
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i < len(recv_raws):
+                return recv_raws[i]
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # ticker 1건만 schedule 호출 — Redis + DB 둘 다
+        self.assertEqual(len(redis_calls), 1)
+        self.assertEqual(len(db_calls), 1)
+        self.assertEqual(redis_calls[0], db_calls[0])
+
+    async def test_finally_order_db_before_redis(self):
+        """finally 순서: ping_task → db_writer.close() → redis_writer.close()."""
+        client = KorbitWsClient()
+        close_order = []
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def fake_redis_close(timeout=1.0):
+            close_order.append("redis")
+
+        client._db_writer.close = AsyncMock(side_effect=fake_db_close)
+        client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
+
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            recv_count["calls"] += 1
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        self.assertEqual(close_order, ["db", "redis"])
+
+
+class TestScopeGuardK6a(unittest.TestCase):
+    """K6a acceptance: KorbitDbWriter 의도적 + K6b~K7 영역 forbidden 유지."""
+
+    def test_db_writer_class_present(self):
+        """K6a: KorbitDbWriter class module-level 노출."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        self.assertTrue(hasattr(korbit_module, "KorbitDbWriter"))
+        self.assertTrue(hasattr(korbit_module, "DB_WRITE_WINDOW_SEC"))
+
+    def test_db_symbols_not_module_level(self):
+        """get_db_context, insert_source_rate_if_changed는 _sync_db_write 함수 내부 import.
+
+        module-level에 노출되면 안 됨 (lazy import — DB 의존성 모듈 로드 시점 격리).
+        """
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        module_attrs = dir(korbit_module)
+        self.assertNotIn("get_db_context", module_attrs)
+        self.assertNotIn("insert_source_rate_if_changed", module_attrs)
+
+    def test_rest_alert_still_forbidden(self):
+        """K6b~K7 영역 (REST helper / Alert) 여전히 forbidden."""
+        import app.crawlers.usdt_ws.korbit as korbit_module
+        module_attrs = dir(korbit_module)
+        for name in ["UsdtAlertEvaluator", "AlertObservation", "fetch_korbit_usdt_tick"]:
+            self.assertNotIn(name, module_attrs)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
-"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K5).
+"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K6a).
 
 USDT_WS_DESIGN_PLAN §12.7 Phase B.5.
-Coinone Stage C2-C5 + Bithumb Stage U4-U5 패턴 mirror.
+Coinone Stage C2-C6a + Bithumb Stage U4-U6 패턴 mirror.
+K6는 K6a (DbWriter, sparse-time smoke 무관) + K6b (REST helper + RestFallbackController +
+ticker_freshness degraded threshold)로 분할.
 
 K2 lifecycle skeleton (완료):
     - `_stop_event` + `_running`
@@ -21,7 +23,7 @@ K4 liveness + ws.ping() heartbeat + 2 status 분리 + reconnect loop (완료):
     - **2-signal invariant**: ticker silence + heartbeat fresh → reconnect/stale 안 됨
     - **Reconnect loop (Bithumb start mirror)**: backoff sequence `[1,2,4,8,16,30]` Upbit/KRX 통일
 
-K5 Redis writer + topic trigger (현재):
+K5 Redis writer + topic trigger (완료):
     - Constants: MAX_PENDING_WRITES=20 / REDIS_CLOSE_TIMEOUT_SEC=1.0 (Coinone/Bithumb 동일)
     - `KorbitRedisWriter`: tick-level fire-and-forget (Coinone C5 1:1 mirror, logger prefix만 변경).
       schedule → asyncio.create_task → _write_async (write_lock 직렬화 + to_thread + helper False
@@ -32,11 +34,23 @@ K5 Redis writer + topic trigger (현재):
     - close: pending drain + timeout 후 cancel (마지막 tick 보존).
     - finally 순서: ping_task cancel/await → `_redis_writer.close()` (Bithumb/Coinone 패턴 mirror).
 
-K6 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
-    - K6: KorbitDbWriter (1s window debounce) + REST fallback + `fetch_korbit_usdt_tick()` normalized helper
-      (contract `{source, asset, rate, timestamp_ms}` Coinone/Bithumb과 동일).
-      degraded transition + fallback hook도 K6에 추가.
-    - K7: UsdtAlertEvaluator wiring
+K6a DB writer + 1s window debounce (현재):
+    - Constants: DB_WRITE_WINDOW_SEC=1.0 (Coinone/Bithumb 동일)
+    - `KorbitDbWriter`: Coinone C6a 1:1 mirror (logger prefix만 변경).
+      schedule → window timer → _flush_after_window → asyncio.to_thread(_sync_db_write) →
+      crud.insert_source_rate_if_changed. Race 방지: write 중 새 tick 도착 시 finally에서
+      새 timer 예약.
+    - `_handle_message`의 valid ticker tick → `_run_one_session`에서 observe_tick →
+      ticker freshness normal 복귀 → `_redis_writer.schedule` → `_db_writer.schedule`.
+    - close: timer cancel + pending tick 즉시 flush (window 일관성보다 last tick 우선).
+    - finally 순서: ping_task → `_db_writer.close()` → `_redis_writer.close()`.
+
+K6b 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
+    - K6b: `fetch_korbit_usdt_tick()` normalized helper (usdt_sources.py) + `KorbitRestFallbackController`
+      + `TICKER_FRESHNESS_DEGRADED_SEC = 120` (provisional, K-2 base 10s × 12). degraded 진입 시
+      REST probe trigger + fanout (Redis + DB + Alert). normalized contract `{source, asset, rate, timestamp_ms}`
+      Coinone/Bithumb과 동일, 내부 timestamp source는 `data.lastTradedAt`.
+    - K7: UsdtAlertEvaluator wiring (`AlertObservation` schedule on valid tick + REST probe success)
 """
 from __future__ import annotations
 
@@ -98,6 +112,11 @@ RECONNECT_BACKOFF_TAIL = 30.0
 # K5 Redis writer guards — Coinone/Bithumb 동일 값.
 MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
 REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
+
+# K6a DB writer — Coinone/Bithumb 동일 값 (contract 통일).
+# Korbit K-2 관찰은 ~10s publish이므로 매 tick INSERT 부담은 낮으나,
+# Bithumb/Coinone과 동일 1s window debounce 유지 (writer contract 통일).
+DB_WRITE_WINDOW_SEC = 1.0
 
 
 class KorbitRedisWriter:
@@ -227,6 +246,114 @@ class KorbitRedisWriter:
             self._tasks.clear()
 
 
+class KorbitDbWriter:
+    """Korbit USDT/KRW DB writer — 1s window debounce + insert_source_rate_if_changed (K6a).
+
+    Coinone `CoinoneDbWriter` 1:1 mirror. tick rate ~10s vs DB I/O ~10-50ms이라
+    매 tick INSERT 부담은 낮으나 contract 통일 위해 1s window debounce 적용.
+
+    asyncio loop 차단 방지:
+        sync SQLAlchemy 호출은 asyncio.to_thread로 격리. DB session은
+        to_thread 내부에서 get_db_context()로 생성/close.
+
+    race 방지 (KRX PR6b-2b Codex 보정 + Coinone C6a mirror):
+        DB write (to_thread) 진행 중 새 tick 도착 → _pending_tick 갱신,
+        _timer.done() X 라 schedule()이 새 timer 안 만듦. write 종료 후
+        finally 블록에서 _pending_tick 재확인 후 새 timer 예약 — 누락 방지.
+
+    failure isolation: DB exception → log only, WS session 영향 X.
+
+    shutdown (close): pending tick 1초 기다리지 않고 즉시 flush.
+        window 일관성보다 last tick 보장 우선 (shutdown은 드문 이벤트).
+    """
+
+    def __init__(self, *, window_sec: float = DB_WRITE_WINDOW_SEC) -> None:
+        self._window_sec = window_sec
+        self._pending_tick: Optional[dict] = None
+        self._timer: Optional[asyncio.Task] = None
+
+    def schedule(self, tick: dict) -> None:
+        """tick 입력 → pending 갱신 + window timer 시작/유지. sync, 즉시 반환."""
+        self._pending_tick = tick
+        if self._timer is None or self._timer.done():
+            self._timer = asyncio.create_task(self._flush_after_window())
+
+    async def _flush_after_window(self) -> None:
+        """window 만료 → last pending tick을 helper에 전달.
+
+        write 진행 중 새 tick 도착 시 finally에서 새 timer 예약 (race 방지).
+        """
+        try:
+            await asyncio.sleep(self._window_sec)
+        except asyncio.CancelledError:
+            raise
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.korbit] DB write failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+        finally:
+            # write 중 들어온 tick 처리 — 새 window 예약. finally 블록은
+            # 같은 코루틴 frame 안, await 없는 sync 영역이라 다른 코루틴
+            # race X (schedule()이 _timer.done() 체크 전 새 task 할당).
+            if self._pending_tick is not None:
+                self._timer = asyncio.create_task(self._flush_after_window())
+
+    @staticmethod
+    def _sync_db_write(tick: dict) -> None:
+        """sync DB write — to_thread 내부 실행.
+
+        get_db_context()로 SessionLocal 생성/close. insert_source_rate_if_changed는
+        내부에서 commit. Decimal 정규화 없음 (REST polling과 일관, float 그대로 전달).
+        """
+        # 함수 내부 import — 모듈 로드 시 DB 의존성 격리.
+        from app import crud
+        from app.database import get_db_context
+
+        with get_db_context() as db:
+            crud.insert_source_rate_if_changed(
+                db=db,
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+            )
+
+    async def close(self) -> None:
+        """shutdown 시 timer cancel + pending tick 즉시 flush.
+
+        1초 window 기다리지 않고 마지막 tick DB 저장. window 일관성보다
+        last tick 보장 우선 (shutdown은 드문 이벤트).
+        """
+        if self._timer is not None and not self._timer.done():
+            self._timer.cancel()
+            try:
+                await self._timer
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.korbit] db_writer timer cancel 실패")
+        self._timer = None
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.korbit] DB write on close failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+
+
 class KorbitWsClient:
     """Korbit USDT/KRW WebSocket client — K2 skeleton + K3 parse + K4 liveness/reconnect.
 
@@ -266,6 +393,8 @@ class KorbitWsClient:
         # K5 Redis writer (tick-level, fire-and-forget) — A13 lifecycle invariant:
         # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Coinone C5 mirror.
         self._redis_writer: KorbitRedisWriter = KorbitRedisWriter()
+        # K6a DB writer (1s window debounce). Coinone C6a mirror.
+        self._db_writer: KorbitDbWriter = KorbitDbWriter()
 
     @staticmethod
     def _build_subscribe_payload() -> list:
@@ -576,7 +705,8 @@ class KorbitWsClient:
 
                     # K4: valid ticker → observe_tick + freshness warning → normal 복귀.
                     # K5: Redis writer schedule (tick-level, fire-and-forget).
-                    # K6~K7에서 DB/Alert downstream IO 추가 예정.
+                    # K6a: DB writer schedule (1s window debounce).
+                    # K6b~K7에서 REST fallback / Alert downstream IO 추가 예정.
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
@@ -584,6 +714,8 @@ class KorbitWsClient:
                             self._set_ticker_freshness_status("normal")
                         # K5: Redis writer schedule (recv loop 격리 — fire-and-forget).
                         self._redis_writer.schedule(tick)
+                        # K6a: DB writer schedule (1s window debounce + race-prevention).
+                        self._db_writer.schedule(tick)
             finally:
                 # Acceptance #9: ping_task cancel/await 보장.
                 ping_task.cancel()
@@ -593,8 +725,12 @@ class KorbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.korbit] ping_task cleanup 실패")
-                # K5 close order: ping_task → Redis writer (Coinone C5 mirror).
-                # K6~K7에서 fallback → DB → Alert → Redis 4-step close로 확장 예정.
+                # K6a close order (Coinone C6a mirror): ping_task → DB → Redis.
+                # K6b/K7 누적 시: fallback → DB → Alert → Redis (Bithumb 최종 순서). Redis는 항상 마지막.
+                try:
+                    await self._db_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.korbit] db_writer.close() 실패")
                 try:
                     await self._redis_writer.close()
                 except Exception:
