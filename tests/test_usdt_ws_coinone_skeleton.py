@@ -526,26 +526,28 @@ class TestRunOneSession(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# C3 Scenario 14: Scope guard — Redis/DB/Alert/REST import 0건
+# Scope guard — stage별 누적 허용 + C6~C7 영역 forbidden
 # ---------------------------------------------------------------------------
 
 class TestScopeGuard(unittest.TestCase):
-    """C3 acceptance 9: coinone.py에 Redis/DB/Alert/REST writer import 0건.
+    """C5 기준 scope guard: DB/Alert/REST writer import 금지.
 
-    Codex Point 5: C3의 가장 중요한 안전선.
+    C3 신설 시 Redis/DB/Alert/REST 모두 forbidden. C4에서 UsdtLivenessMonitor 의도적 재사용,
+    C5에서 latest_rates_cache / tether_topic_trigger 의도적 재사용 — forbidden list에서 제외.
+    C6~C7 영역 (DB writer / REST fallback / Alert evaluator)만 forbidden.
     """
 
     def test_no_forbidden_imports(self):
-        """coinone.py module이 Redis/DB/Alert/REST/topic trigger import하지 않음.
+        """coinone.py module이 DB/Alert/REST writer import하지 않음.
 
         C4 update: UsdtLivenessMonitor는 source-neutral helper로 C4에서 재사용 (forbidden 제외).
+        C5 update: latest_rates_cache, tether_topic_trigger는 Redis writer / topic trigger 재사용
+        (forbidden 제외). C6~C7 영역 import만 forbidden.
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
-        # C5~C7 영역 import만 forbidden
+        # C6~C7 영역 import만 forbidden (DB/Alert/REST)
         forbidden = [
-            "latest_rates_cache",
-            "tether_topic_trigger",
             "UsdtAlertEvaluator",
             "AlertObservation",
             "get_db_context",
@@ -555,14 +557,16 @@ class TestScopeGuard(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"scope 위반: '{name}' import됨 (C5~C7 영역)",
+                f"scope 위반: '{name}' import됨 (C6~C7 영역)",
             )
 
     def test_module_imports_minimal(self):
-        """C4 module imports: asyncio + json + logging + time + typing + websockets + UsdtLivenessMonitor.
+        """C5 module imports: asyncio + datetime + json + logging + time + typing + websockets
+        + UsdtLivenessMonitor + latest_rates_cache + tether_topic_trigger.
 
         C4 update: time + UsdtLivenessMonitor (source-neutral 재사용) 추가됨.
-        C5~C7 영역 import는 forbidden (TestScopeGuard.test_no_forbidden_imports에서 검증).
+        C5 update: datetime + latest_rates_cache + tether_topic_trigger 추가됨 (Redis writer + topic trigger 재사용).
+        C6~C7 영역 import는 forbidden (TestScopeGuard.test_no_forbidden_imports에서 검증).
         본 test는 module 정상 import + 핵심 symbols 존재만 검증.
         """
         import app.crawlers.usdt_ws.coinone as coinone_module
@@ -772,18 +776,21 @@ class TestTickerSilenceNoReconnect(unittest.IsolatedAsyncioTestCase):
 
 
 class TestScopeGuardC4(unittest.TestCase):
-    """C4 acceptance 15-16: Redis/DB/Alert/REST writer/REST probe 미진입.
+    """C4 acceptance regression: DB/Alert/REST writer/REST probe 미진입.
 
-    Codex 강조: C4는 freshness telemetry only. C5~C7에서 추가될 import도 미진입.
+    C4 신설 시: freshness telemetry only, Redis/DB/Alert/REST 모두 미진입.
+    C5 update: Redis writer + topic trigger는 C5 의도적 진입 (forbidden 제외). DB/Alert/REST만 forbidden.
     """
 
     def test_no_forbidden_imports_after_c4(self):
-        """coinone.py module이 C5~C7 영역 import하지 않음 (C3 scope guard 유지)."""
+        """coinone.py module이 C6~C7 영역 import하지 않음.
+
+        C5 update: latest_rates_cache, tether_topic_trigger는 C5 의도적 import (forbidden 제외).
+        C6~C7 영역 (DB/Alert/REST)만 forbidden.
+        """
         import app.crawlers.usdt_ws.coinone as coinone_module
         module_attrs = dir(coinone_module)
         forbidden = [
-            "latest_rates_cache",
-            "tether_topic_trigger",
             "UsdtAlertEvaluator",
             "AlertObservation",
             "get_db_context",
@@ -793,7 +800,7 @@ class TestScopeGuardC4(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"C4 scope 위반: '{name}' import됨 (C5~C7 영역)",
+                f"scope 위반: '{name}' import됨 (C6~C7 영역)",
             )
 
     def test_usdt_liveness_monitor_imported_for_reuse(self):
@@ -823,6 +830,301 @@ class TestC4ConstantsExist(unittest.TestCase):
 
 # time module 사용 (C4 _run_one_session test에서 필요)
 import time  # noqa: E402
+
+
+# ===========================================================================
+# C5 — CoinoneRedisWriter + topic trigger + _run_one_session valid tick wiring
+# ===========================================================================
+
+class TestCoinoneRedisWriterScheduleSuccess(unittest.IsolatedAsyncioTestCase):
+    """C5 acceptance 1-2, 5: schedule → _write_async → to_thread(helper) → timestamp_ms KST ISO."""
+
+    async def test_schedule_calls_helper_with_kst_iso(self):
+        """schedule(tick) → set_latest_usdt_rate_from_sync_job 호출 + timestamp_ms KST ISO 변환 검증.
+
+        Codex Point 2: timestamp_ms=1779106625946 → KST ISO 문자열 전달 확인.
+        """
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter
+        writer = CoinoneRedisWriter()
+        tick = {
+            "source": "coinone",
+            "asset": "usdt-krw",
+            "rate": 1487.0,
+            "timestamp_ms": 1779106625946,
+        }
+        captured_kwargs = {}
+
+        def fake_helper(*, source, asset, rate, timestamp):
+            captured_kwargs["source"] = source
+            captured_kwargs["asset"] = asset
+            captured_kwargs["rate"] = rate
+            captured_kwargs["timestamp"] = timestamp
+            return True
+
+        # tether_topic_trigger는 success 시 호출됨 — spy
+        trigger_calls = []
+
+        def fake_trigger(*, source, asset, reason):
+            trigger_calls.append({"source": source, "asset": asset, "reason": reason})
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=fake_helper,
+        ), patch(
+            "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=fake_trigger,
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        # helper 호출 인자 검증
+        self.assertEqual(captured_kwargs["source"], "coinone")
+        self.assertEqual(captured_kwargs["asset"], "usdt-krw")
+        self.assertEqual(captured_kwargs["rate"], 1487.0)
+        # timestamp_ms 1779106625946 (ms) → KST ISO. ms → s = 1779106625.946
+        # datetime.fromtimestamp(1779106625.946, tz=KST).isoformat() 형식 검증
+        ts = captured_kwargs["timestamp"]
+        self.assertIsInstance(ts, str)
+        self.assertIn("+09:00", ts)  # KST ISO
+        # 정확한 변환 결과 검증 (round-trip)
+        from datetime import datetime, timezone, timedelta
+        expected_kst = datetime.fromtimestamp(
+            1779106625.946, tz=timezone(timedelta(hours=9)),
+        ).isoformat()
+        self.assertEqual(ts, expected_kst)
+
+        # topic trigger 호출 검증 (success 후)
+        self.assertEqual(len(trigger_calls), 1)
+        self.assertEqual(trigger_calls[0]["source"], "coinone")
+        self.assertEqual(trigger_calls[0]["asset"], "usdt-krw")
+
+
+class TestCoinoneRedisWriterHelperFailureIsolated(unittest.IsolatedAsyncioTestCase):
+    """C5 acceptance 7: helper False / exception → log only (WS session 영향 X) + topic trigger 미호출."""
+
+    async def test_helper_returns_false_no_trigger(self):
+        """helper False 반환 → log warning + topic trigger 미호출."""
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+        trigger_calls = []
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ), patch(
+            "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=lambda **kw: trigger_calls.append(kw),
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        # helper False → trigger 호출 안 됨
+        self.assertEqual(len(trigger_calls), 0)
+
+    async def test_helper_exception_isolated(self):
+        """helper exception → log only (WS/writer 영향 X) + trigger 미호출."""
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+        trigger_calls = []
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("Redis down"),
+        ), patch(
+            "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=lambda **kw: trigger_calls.append(kw),
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(len(trigger_calls), 0)
+
+
+class TestCoinoneRedisWriterTriggerExceptionIsolated(unittest.IsolatedAsyncioTestCase):
+    """C5 acceptance 8: trigger 예외 → log only (writer/WS 영향 X). helper success 가정."""
+
+    async def test_trigger_exception_writer_continues(self):
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+        helper_calls = []
+
+        def fake_helper(**kw):
+            helper_calls.append(kw)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=fake_helper,
+        ), patch(
+            "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=RuntimeError("trigger queue full"),
+        ):
+            # trigger exception 발생해도 writer/await 정상 종료
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        # helper는 정상 호출됨
+        self.assertEqual(len(helper_calls), 1)
+
+
+class TestCoinoneRedisWriterSaturation(unittest.IsolatedAsyncioTestCase):
+    """C5 acceptance 4: saturation check — MAX_PENDING_WRITES 초과 시 skip + warning."""
+
+    async def test_saturation_skips_new_schedule(self):
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter, MAX_PENDING_WRITES
+        writer = CoinoneRedisWriter()
+
+        # MAX_PENDING_WRITES 만큼 fake task 채움 (실제 _write_async가 끝나기 전 상태 simulate)
+        async def slow_helper(**kw):
+            await asyncio.sleep(10.0)  # 일부러 hang
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=slow_helper,
+        ):
+            tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+            # MAX_PENDING_WRITES 회 schedule — 모두 진행 중
+            for _ in range(MAX_PENDING_WRITES):
+                writer.schedule(tick)
+            self.assertEqual(len(writer._tasks), MAX_PENDING_WRITES)
+
+            # 다음 schedule → saturated, skip
+            with self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="WARNING") as cm:
+                writer.schedule(tick)
+            self.assertEqual(len(writer._tasks), MAX_PENDING_WRITES)  # 변화 없음
+            self.assertTrue(any("saturated" in m for m in cm.output))
+
+            # cleanup — task cancel
+            for task in list(writer._tasks):
+                task.cancel()
+            await asyncio.gather(*writer._tasks, return_exceptions=True)
+
+
+class TestCoinoneRedisWriterClose(unittest.IsolatedAsyncioTestCase):
+    """C5 acceptance 9: close drain + timeout 후 cancel + _tasks.clear()."""
+
+    async def test_close_drains_pending_then_clears(self):
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(tick)
+            writer.schedule(tick)
+            self.assertGreater(len(writer._tasks), 0)
+            await writer.close(timeout=2.0)
+            self.assertEqual(len(writer._tasks), 0)
+
+    async def test_close_timeout_cancels_pending(self):
+        """timeout 안에 drain 안 되면 cancel + _tasks.clear() 보장."""
+        from app.crawlers.usdt_ws.coinone import CoinoneRedisWriter
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+
+        async def slow_helper(**kw):
+            await asyncio.sleep(10.0)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=slow_helper,
+        ):
+            writer.schedule(tick)
+            self.assertGreater(len(writer._tasks), 0)
+            # timeout 0.1s — slow_helper 끝나지 않음
+            await writer.close(timeout=0.1)
+            self.assertEqual(len(writer._tasks), 0)  # cancel 후 clear
+
+
+class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
+    """C5 acceptance 11 (Codex 추가): _run_one_session valid DATA path에서 observe_tick 후 _redis_writer.schedule 호출."""
+
+    async def test_valid_data_calls_schedule_on_redis_writer(self):
+        client = CoinoneWsClient()
+        schedule_calls = []
+
+        # _redis_writer.schedule mock — 호출 검증
+        client._redis_writer.schedule = MagicMock(
+            side_effect=lambda tick: schedule_calls.append(tick),
+        )
+
+        recv_raws = [
+            json.dumps({"response_type": "CONNECTED", "data": {"session_id": "abc"}}),
+            json.dumps({"response_type": "SUBSCRIBED", "channel": "TICKER",
+                        "data": {"quote_currency": "KRW", "target_currency": "USDT"}}),
+            json.dumps({
+                "response_type": "DATA",
+                "data": {
+                    "quote_currency": "KRW", "target_currency": "USDT",
+                    "last": "1487", "timestamp": 1779106625946,
+                },
+            }),
+        ]
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i < len(recv_raws):
+                return recv_raws[i]
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.coinone.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # DATA 1건만 schedule 호출됨 (CONNECTED/SUBSCRIBED는 schedule 호출 X)
+        self.assertEqual(len(schedule_calls), 1)
+        self.assertEqual(schedule_calls[0]["source"], "coinone")
+        self.assertEqual(schedule_calls[0]["asset"], "usdt-krw")
+        self.assertEqual(schedule_calls[0]["rate"], 1487.0)
+        self.assertEqual(schedule_calls[0]["timestamp_ms"], 1779106625946)
+
+
+class TestScopeGuardC5(unittest.TestCase):
+    """C5 acceptance 12-13: C5 의도적 import 허용 + C6~C7 영역 forbidden."""
+
+    def test_redis_topic_imports_allowed(self):
+        """C5: latest_rates_cache, tether_topic_trigger, CoinoneRedisWriter 의도적 import 허용."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        self.assertTrue(hasattr(coinone_module, "latest_rates_cache"))
+        self.assertTrue(hasattr(coinone_module, "tether_topic_trigger"))
+        self.assertTrue(hasattr(coinone_module, "CoinoneRedisWriter"))
+        self.assertTrue(hasattr(coinone_module, "TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS"))
+
+    def test_db_alert_rest_forbidden(self):
+        """C6~C7 영역 (DB/Alert/REST) 여전히 forbidden."""
+        import app.crawlers.usdt_ws.coinone as coinone_module
+        module_attrs = dir(coinone_module)
+        forbidden = [
+            "UsdtAlertEvaluator",
+            "AlertObservation",
+            "get_db_context",
+            "insert_source_rate_if_changed",
+            "fetch_coinone_usdt_tick",
+        ]
+        for name in forbidden:
+            self.assertNotIn(
+                name, module_attrs,
+                f"C5 scope 위반: '{name}' import됨 (C6~C7 영역)",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

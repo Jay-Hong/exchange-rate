@@ -1,7 +1,7 @@
-"""USDT WebSocket — Coinone canary client (Phase B.4 Stage C2-C4).
+"""USDT WebSocket — Coinone canary client (Phase B.4 Stage C2-C5).
 
 USDT_WS_DESIGN_PLAN §12.6 Phase B.4.
-Bithumb Stage U2-U4 패턴 mirror (작은 단위 stage 분할 학습 — KRX close finalizer
+Bithumb Stage U2-U5 패턴 mirror (작은 단위 stage 분할 학습 — KRX close finalizer
 1100 lines → 3 High findings → revert + Phase B.3 U2~U7 분할 재시작 학습 적용).
 
 C2 lifecycle skeleton (완료):
@@ -16,7 +16,7 @@ C3 connect/subscribe/parse + log only (완료):
     - `_run_one_session`: connect + subscribe + recv loop
     - `start`: `_run_one_session` 단일 실행
 
-C4 connection liveness + ticker freshness telemetry (현재):
+C4 connection liveness + ticker freshness telemetry (완료):
     - Constants: PING_INTERVAL_SEC=300 / PING_TIMEOUT_SEC=5 / STALE_AFTER_SEC=360 (5분 cycle + 마진) /
       TICKER_FRESHNESS_WARNING_SEC=60 (telemetry only, action X — USDT_WS_DESIGN_PLAN §12.6.3 + Codex 정정)
     - Application-level PING/PONG event-based (Coinone 별 protocol — `{"request_type":"PING"}`).
@@ -33,10 +33,20 @@ C4 connection liveness + ticker freshness telemetry (현재):
       alone → reconnect never (사용자 일요일 Bithumb 무체결 관찰 + USDT/KRW 시장에서 수분
       단위 무체결 정상 → false reconnect 위험 방지).
 
-C5 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.6.4):
-    - C5: CoinoneRedisWriter + topic trigger 자동 발화
-    - C6: CoinoneDbWriter + REST fallback (180~300s ticker freshness degraded threshold 결정) +
-      `fetch_coinone_usdt_tick()` normalized helper
+C5 Redis writer + topic trigger (현재):
+    - Constants: MAX_PENDING_WRITES=20 / REDIS_CLOSE_TIMEOUT_SEC=1.0 (Bithumb 동일)
+    - `CoinoneRedisWriter`: tick-level fire-and-forget (Bithumb U5 1:1 mirror, logger prefix만 변경).
+      schedule → asyncio.create_task → _write_async (write_lock 직렬화 + to_thread + helper False
+      격리 + success 시 lock 밖에서 tether_topic_trigger).
+    - `_handle_message`의 valid DATA tick → `_run_one_session`에서 observe_tick → ticker freshness
+      normal 복귀 → `_redis_writer.schedule(tick)` (recv loop 격리).
+    - timestamp_ms (raw int) → KST ISO 변환 (`datetime.fromtimestamp(ms/1000, tz=_KST).isoformat()`)
+    - close: pending drain + timeout 후 cancel (마지막 tick 보존).
+    - finally 순서: ping_task cancel/await → `_redis_writer.close()` (Codex Point 1).
+
+C6 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.6.4):
+    - C6: CoinoneDbWriter (1s window debounce) + REST fallback (180~300s ticker freshness degraded
+      threshold 결정 — sparse-time smoke 후) + `fetch_coinone_usdt_tick()` normalized helper
     - C7: UsdtAlertEvaluator wiring
 """
 from __future__ import annotations
@@ -45,6 +55,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import websockets
@@ -53,8 +64,16 @@ from websockets.exceptions import ConnectionClosed
 # UsdtLivenessMonitor 재사용 — source-neutral (last_activity_at = max(tick, heartbeat) 이미
 # 2-signal 의식이라 Coinone에 그대로 적용 가능. C4 신규 monitor 신설 X).
 from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
+# C5 Redis writer + topic trigger imports (Bithumb U5 패턴 mirror).
+from app import latest_rates_cache, tether_topic_trigger
+from app.tether_topic_trigger import (
+    TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+)
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.coinone")
+
+# C5 timestamp_ms → KST ISO 변환용 (Bithumb _KST mirror).
+_KST = timezone(timedelta(hours=9))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -89,11 +108,142 @@ TICKER_FRESHNESS_WARNING_SEC = 60.0
 RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 RECONNECT_BACKOFF_TAIL = 30.0
 
+# C5 Redis writer guards — Bithumb U5 동일 값 (bithumb.py:145-147 mirror).
+MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
+REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
+
+
+class CoinoneRedisWriter:
+    """Coinone USDT/KRW Redis latest writer — tick-level, fire-and-forget (C5).
+
+    Bithumb `BithumbRedisWriter` (bithumb.py:157-274) 1:1 mirror. logger prefix만
+    coinone. source는 tick["source"]에서 "coinone" 자동 (KRX 학습: stage 추가 시 큰
+    추상화 금지. generic UsdtRedisWriter 추상화는 거래소 3개 이상 누적 시점 별도 PR).
+
+    C5 핵심 (Bithumb U5 mirror):
+        - 매 valid tick → `set_latest_usdt_rate_from_sync_job` 호출 (debounce 없음 —
+          DB writer가 C6에서 1s window debounce 담당, Redis는 tick-level latest 보존)
+        - schedule()은 background task 생성 후 즉시 반환 (recv loop 격리)
+        - asyncio.to_thread로 sync helper 호출 (event loop non-blocking)
+        - MAX_PENDING_WRITES 한도로 Redis 장애 시 task 폭증 차단
+        - close() drain-first, timeout 후 cancel (마지막 tick 보존)
+        - Redis write 성공 시에만 tether topic trigger (lock 밖에서 호출)
+        - reason은 source-neutral `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS` 재사용
+
+    Failure isolation:
+        - helper False 반환 / exception → log only, WS session 영향 X
+        - trigger 예외 → log only, writer/WS session 영향 X
+        - last-write-wins (helper 기존 정책 유지)
+
+    timestamp_ms → KST ISO 변환:
+        - tick["timestamp_ms"] (raw int ms) → `datetime.fromtimestamp(ms/1000, tz=_KST).isoformat()`
+        - C3에서 raw 유지 결정 (KST/UTC 변환은 sink 별 정책 — Redis는 KST ISO, DB는 C6 결정)
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        # write order 직렬화: 병렬 to_thread + connection pool 조합으로
+        # old tick이 new tick을 덮는 race 차단. lock은 to_thread 완료까지 보유
+        # — schedule 순서 = Redis SET 순서. (Bithumb U5 mirror)
+        self._write_lock: asyncio.Lock = asyncio.Lock()
+
+    def schedule(self, tick: dict) -> None:
+        """tick → background Redis write task. fire-and-forget.
+
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning.
+        Redis 장애로 task가 누적되는 시나리오 차단.
+        """
+        if len(self._tasks) >= MAX_PENDING_WRITES:
+            logger.warning(
+                "[usdt_ws.coinone] Redis write queue saturated (%d in-flight) — skip tick",
+                len(self._tasks),
+            )
+            return
+        task = asyncio.create_task(self._write_async(tick))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _write_async(self, tick: dict) -> None:
+        """sync Redis helper를 to_thread로 호출. 실패는 격리.
+
+        `_write_lock`으로 직렬화 — 동시 to_thread + connection pool 조합에서
+        발생할 수 있는 SET 순서 역전 차단.
+
+        Redis write 성공 시 lock 밖에서 tether topic trigger 호출.
+        trigger 예외는 writer/WS session에 전파하지 않음.
+        """
+        success = False
+        source = tick["source"]
+        asset = tick["asset"]
+        async with self._write_lock:
+            # C5 timestamp_ms → KST ISO (Bithumb U5 mirror).
+            ts_iso = datetime.fromtimestamp(
+                tick["timestamp_ms"] / 1000, tz=_KST,
+            ).isoformat()
+            try:
+                success = await asyncio.to_thread(
+                    latest_rates_cache.set_latest_usdt_rate_from_sync_job,
+                    source=source,
+                    asset=asset,
+                    rate=tick["rate"],
+                    timestamp=ts_iso,
+                )
+                if not success:
+                    logger.warning(
+                        "[usdt_ws.coinone] Redis write returned False "
+                        "(helper 내부 log 참조, WS session 유지)"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.coinone] Redis write task crashed (격리, WS session 유지)"
+                )
+                success = False
+
+        # lock 밖에서 trigger — Redis write 성공 시에만.
+        # trigger 호출 자체의 예외는 writer/WS에 전파 X (책임 분리).
+        if success:
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.coinone] tether topic trigger 호출 실패 (격리, WS session 유지)"
+                )
+
+    async def close(self, timeout: float = REDIS_CLOSE_TIMEOUT_SEC) -> None:
+        """pending writes drain — session/shutdown 시 마지막 tick latest 보존.
+
+        timeout (default 1s) 안에 drain 안 되면 강제 cancel. Redis hung 시 무한
+        대기 방지. finally에서 `_tasks.clear()` 보장.
+        """
+        if not self._tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[usdt_ws.coinone] Redis writer close timeout (%ds) — cancel %d pending tasks",
+                timeout, len(self._tasks),
+            )
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        finally:
+            self._tasks.clear()
+
 
 class CoinoneWsClient:
-    """Coinone USDT/KRW WebSocket client — C2 skeleton + C3 connect/parse + C4 liveness/freshness.
+    """Coinone USDT/KRW WebSocket client — C2 skeleton + C3 connect/parse + C4 liveness/freshness + C5 Redis writer.
 
-    State (C2 lifecycle + C3 session + C4 liveness/status):
+    State (C2 lifecycle + C3 session + C4 liveness/status + C5 Redis writer):
         - `_stop_event`: stop signal (asyncio.Event)
         - `_running`: 중복 start 방지 flag
         - `_ws`: active WebSocketClientProtocol (session 안에서만)
@@ -105,8 +255,9 @@ class CoinoneWsClient:
         - `_status_transition_count`: 5개 키 counter (connection + ticker 차원)
         - `_reconnect_attempt_count`: reconnect attempt 누적
         - `_pong_event`: application-level PONG synchronization (asyncio.Event)
+        - `_redis_writer`: CoinoneRedisWriter (tick-level fire-and-forget, C5)
 
-    C5 이후 누적 예정 (Redis/DB/Alert/REST state — Bithumb `BithumbWsClient` 패턴).
+    C6 이후 누적 예정 (DB/Alert/REST state — Bithumb `BithumbWsClient` 패턴).
     """
 
     def __init__(self) -> None:
@@ -136,6 +287,9 @@ class CoinoneWsClient:
         # `_ping_loop`이 clear → send → wait_for 순서로 사용. PONG response는
         # `_handle_message`의 response_type=="PONG" 분기에서 set() 호출.
         self._pong_event: asyncio.Event = asyncio.Event()
+        # C5 Redis writer (tick-level, fire-and-forget) — A13 lifecycle invariant:
+        # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Bithumb U5 mirror.
+        self._redis_writer: CoinoneRedisWriter = CoinoneRedisWriter()
 
     @staticmethod
     def _build_subscribe_payload() -> dict:
@@ -463,15 +617,18 @@ class CoinoneWsClient:
                         raise
 
                     # C3 parse + log only. C4: valid DATA → observe_tick + ticker freshness normal 복귀.
-                    # C5~C7에서 Redis/DB/Alert downstream IO 추가 예정.
+                    # C5: Redis writer schedule (tick-level, fire-and-forget).
+                    # C6~C7에서 DB/Alert downstream IO 추가 예정.
                     tick = self._handle_message(raw)
                     if tick is not None:
                         self._liveness.observe_tick(time.time())
-                        # warning → normal 복귀 (Codex Point 1 — 상태 전이 1회 log).
+                        # warning → normal 복귀 (C4 — 상태 전이 1회 log).
                         if self._ticker_freshness_status == "warning":
                             self._set_ticker_freshness_status("normal")
+                        # C5: Redis writer schedule (recv loop 격리 — fire-and-forget).
+                        self._redis_writer.schedule(tick)
             finally:
-                # ping_task cancel/await — Bithumb _run_one_session finally mirror.
+                # C4 finally: ping_task cancel/await (Bithumb _run_one_session mirror).
                 ping_task.cancel()
                 try:
                     await ping_task
@@ -479,6 +636,13 @@ class CoinoneWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.coinone] ping_task cleanup 실패")
+                # C5 finally: Redis writer pending drain (Bithumb U5 mirror — ping_task 정리 후).
+                # 순서 — ping_task → Redis writer (Codex Point 1). C6~C7 누적 시:
+                # fallback → DB → Alert → Redis (Bithumb 최종 순서 mirror 예정).
+                try:
+                    await self._redis_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.coinone] redis_writer.close() 실패")
 
     async def start(self) -> None:
         """C4 — `_run_one_session` reconnect loop + backoff (Bithumb start() mirror).
