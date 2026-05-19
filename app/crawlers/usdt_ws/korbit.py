@@ -1,9 +1,10 @@
-"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K6b).
+"""USDT WebSocket — Korbit canary client (Phase B.5 Stage K2-K7 complete).
 
 USDT_WS_DESIGN_PLAN §12.7 Phase B.5.
-Coinone Stage C2-C6b + Bithumb Stage U4-U6 패턴 mirror.
+Coinone Stage C2-C7 + Bithumb Stage U4-U7 패턴 mirror.
 K6는 K6a (DbWriter) + K6b (REST helper + RestFallbackController +
 ticker_freshness degraded threshold + fallback hook)로 분할.
+K7으로 기능 구현은 complete — 남은 작업은 운영 안정 검증 + canary enable.
 
 K2 lifecycle skeleton (완료):
     - `_stop_event` + `_running`
@@ -45,7 +46,7 @@ K6a DB writer + 1s window debounce (완료):
     - close: timer cancel + pending tick 즉시 flush (window 일관성보다 last tick 우선).
     - finally 순서: ping_task → `_db_writer.close()` → `_redis_writer.close()`.
 
-K6b REST fallback + degraded transition + fallback hook (현재):
+K6b REST fallback + degraded transition + fallback hook (완료):
     - Constants 3개: TICKER_FRESHNESS_DEGRADED_SEC=120.0 / FALLBACK_COOLDOWN_SEC=120.0 /
       FALLBACK_PROBE_TIMEOUT_SEC=10.0. 모두 provisional — K-2 30분 활발 시간대 sample base
       (sparse-time guarantee X). canary 자연 누적 후 조정.
@@ -62,9 +63,18 @@ K6b REST fallback + degraded transition + fallback hook (현재):
       2nd iter warning→degraded → schedule_probe.
     - finally close order: ping_task → fallback → DB → Redis (Coinone C6b mirror).
 
-K7 이후 누적 예정 (USDT_WS_DESIGN_PLAN §12.7.4):
-    - K7: UsdtAlertEvaluator wiring (`AlertObservation` schedule on valid tick + REST probe success).
-      finally close order 확장: fallback → DB → Alert → Redis (4-step).
+K7 UsdtAlertEvaluator wiring (현재 — Phase B.5 complete):
+    - `UsdtAlertEvaluator` (source-neutral, Coinone C7/Bithumb U7 mirror) — Korbit client 자체 instance 보유.
+    - `KorbitRestFallbackController.__init__`에 `alert_evaluator` 필수 inject 추가.
+    - `_run_one_session` valid ticker tick path → `_alert_evaluator.schedule(AlertObservation(kind="tick"))`.
+    - `_run_probe` success → `_alert_evaluator.schedule(AlertObservation(kind="rest_probe"))`.
+    - finally 순서 (Bithumb U7 / Coinone C7 mirror, 최종): fallback → DB → Alert → Redis (4개).
+    - 각 close 개별 try/except 격리 — 한 close 실패해도 뒤 close 실행 보장.
+    - flag=false invariant: KorbitWsClient 생성 0 → UsdtAlertEvaluator 생성 0.
+
+Phase B.5 기능 구현 complete. 남은 작업:
+    - Korbit canary 활성화 결정 (Coinone canary 24h+ 안정 + K7 land 안정 검증 후).
+    - sparse-time smoke 또는 canary 자연 누적으로 provisional threshold (warning 30s / degraded 120s) 조정.
 """
 from __future__ import annotations
 
@@ -83,6 +93,11 @@ from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
 from app import latest_rates_cache, tether_topic_trigger
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+)
+# K7 Alert evaluator + observation — source-neutral (Coinone C7/Bithumb U7 mirror).
+from app.notifications.alert_evaluator import (
+    AlertObservation,
+    UsdtAlertEvaluator,
 )
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.korbit")
@@ -405,13 +420,14 @@ class KorbitRestFallbackController:
         self,
         redis_writer: "KorbitRedisWriter",
         db_writer: "KorbitDbWriter",
+        alert_evaluator: "UsdtAlertEvaluator",
         *,
         cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
         probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
     ) -> None:
         self._redis_writer = redis_writer
         self._db_writer = db_writer
-        # alert_evaluator는 K7에서 inject 예정.
+        self._alert_evaluator = alert_evaluator  # K7: AlertObservation schedule on probe success
         self._cooldown_sec = cooldown_sec
         self._probe_timeout_sec = probe_timeout_sec
         self._in_flight: bool = False
@@ -456,10 +472,10 @@ class KorbitRestFallbackController:
         logger.debug("[usdt_ws.korbit.fallback] cooldown reset on normal recovery")
 
     async def _run_probe(self, reason: str) -> None:
-        """REST probe → normalized tick → fanout (Redis + DB; Alert는 K7).
+        """REST probe → normalized tick → fanout (Redis + DB + Alert).
 
         실패 시 log only + cooldown 적용 (재시도 X). WS session 영향 X.
-        K7: probe success 시 AlertObservation(kind="rest_probe") schedule 추가 예정.
+        K7: probe success 시 AlertObservation(kind="rest_probe") schedule.
         """
         try:
             logger.info(
@@ -475,9 +491,18 @@ class KorbitRestFallbackController:
                 )
                 return
 
-            # 기존 fanout 재사용 (K5 Redis writer + K6a DB writer). K7에서 Alert 추가 예정.
+            # 기존 fanout 재사용 (K5 Redis writer + K6a DB writer + K7 Alert evaluator).
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
+            # K7: REST probe kind 구분 (Coinone C7 mirror — log/metric 영역에서 tick vs probe 분리).
+            observation = AlertObservation(
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+                timestamp_ms=tick["timestamp_ms"],
+                kind="rest_probe",
+            )
+            self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.korbit.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
                 tick["rate"], tick["timestamp_ms"], reason,
@@ -560,11 +585,14 @@ class KorbitWsClient:
         self._redis_writer: KorbitRedisWriter = KorbitRedisWriter()
         # K6a DB writer (1s window debounce). Coinone C6a mirror.
         self._db_writer: KorbitDbWriter = KorbitDbWriter()
+        # K7 Alert evaluator (observation-based, source-neutral). Coinone C7/Bithumb U7 mirror.
+        self._alert_evaluator: UsdtAlertEvaluator = UsdtAlertEvaluator()
         # K6b REST fallback controller (degraded threshold trigger). Coinone C6b mirror.
-        # alert_evaluator inject은 K7. 현재는 Redis + DB fanout만.
+        # K7: alert_evaluator 필수 inject 추가.
         self._fallback_controller: KorbitRestFallbackController = KorbitRestFallbackController(
             redis_writer=self._redis_writer,
             db_writer=self._db_writer,
+            alert_evaluator=self._alert_evaluator,
         )
 
     @staticmethod
@@ -906,6 +934,16 @@ class KorbitWsClient:
                         self._redis_writer.schedule(tick)
                         # K6a: DB writer schedule (1s window debounce + race-prevention).
                         self._db_writer.schedule(tick)
+                        # K7: AlertObservation schedule (source-neutral evaluator 재사용).
+                        # Coinone C7/Bithumb U7 mirror — kind="tick" 구분 (REST probe와 log/metric 분리).
+                        observation = AlertObservation(
+                            source=tick["source"],
+                            asset=tick["asset"],
+                            rate=tick["rate"],
+                            timestamp_ms=tick["timestamp_ms"],
+                            kind="tick",
+                        )
+                        self._alert_evaluator.schedule(observation)
             finally:
                 # Acceptance #9: ping_task cancel/await 보장.
                 ping_task.cancel()
@@ -915,8 +953,10 @@ class KorbitWsClient:
                     pass
                 except Exception:
                     logger.exception("[usdt_ws.korbit] ping_task cleanup 실패")
-                # K6b close order (Coinone C6b mirror): ping_task → fallback → DB → Redis.
-                # K7 누적 시: fallback → DB → Alert → Redis (Bithumb 최종 순서). Redis는 항상 마지막.
+                # K7 close order (Coinone C7/Bithumb U7 mirror, 최종): fallback → DB → Alert → Redis.
+                # fallback이 모든 writer를 schedule할 수 있으므로 먼저 멈춰야 downstream
+                # writer들이 깔끔히 drain. Redis는 항상 마지막.
+                # 각 close는 개별 try/except로 격리 — 한 close 실패해도 뒤 close 실행 보장.
                 try:
                     await self._fallback_controller.close()
                 except Exception:
@@ -925,6 +965,11 @@ class KorbitWsClient:
                     await self._db_writer.close()
                 except Exception:
                     logger.exception("[usdt_ws.korbit] db_writer.close() 실패")
+                # K7: Alert evaluator drain (FCM 보호, Coinone C7 mirror).
+                try:
+                    await self._alert_evaluator.close()
+                except Exception:
+                    logger.exception("[usdt_ws.korbit] alert_evaluator.close() 실패")
                 try:
                     await self._redis_writer.close()
                 except Exception:

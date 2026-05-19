@@ -521,6 +521,9 @@ class TestRunOneSession(unittest.IsolatedAsyncioTestCase):
         client._fallback_controller.schedule_probe = MagicMock()
         client._fallback_controller.reset_cooldown = MagicMock()
         client._fallback_controller.close = AsyncMock()
+        # K7 alert evaluator mock — wiring test는 alert 영역 외 path 검증
+        client._alert_evaluator.schedule = MagicMock()
+        client._alert_evaluator.close = AsyncMock()
 
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
              patch.object(client, "_handle_message", side_effect=spy_handle):
@@ -547,18 +550,20 @@ class TestScopeGuard(unittest.TestCase):
     """K3 acceptance: korbit.py에 Redis/DB/Alert/REST writer import 0건."""
 
     def test_no_forbidden_imports(self):
-        """korbit.py module이 DB/Alert/REST import하지 않음 (K5 누적 후 docstring 정정).
+        """korbit.py module의 lazy import 항목 검증 (Phase B.5 complete 후).
 
         Scope guard 진화:
             K3: 8개 forbidden (UsdtLivenessMonitor 포함)
-            K4: 7개 forbidden (UsdtLivenessMonitor 허용, K4 의도적 import)
-            K5 (현재): 5개 forbidden (latest_rates_cache, tether_topic_trigger 추가 허용)
+            K4: 7개 forbidden (UsdtLivenessMonitor 허용)
+            K5: 5개 forbidden (latest_rates_cache, tether_topic_trigger 허용)
+            K6a: 5개 forbidden 동일 (DB는 _sync_db_write 함수 내부 lazy import)
+            K6b: 3개 forbidden (KorbitRestFallbackController 허용, fetch_korbit_usdt_tick lazy)
+            K7 (현재): lazy import 항목만 forbidden — get_db_context/insert_source_rate_if_changed/fetch_korbit_usdt_tick.
+                       UsdtAlertEvaluator/AlertObservation 의도적 module-level (Coinone C7 mirror).
         """
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
         forbidden = [
-            "UsdtAlertEvaluator",
-            "AlertObservation",
             "get_db_context",
             "insert_source_rate_if_changed",
             "fetch_korbit_usdt_tick",
@@ -908,6 +913,9 @@ class TestRunOneSessionFreshnessWiring(unittest.IsolatedAsyncioTestCase):
         client._fallback_controller.schedule_probe = MagicMock()
         client._fallback_controller.reset_cooldown = MagicMock()
         client._fallback_controller.close = AsyncMock()
+        # K7 alert evaluator mock — wiring test는 alert 영역 외 path 검증
+        client._alert_evaluator.schedule = MagicMock()
+        client._alert_evaluator.close = AsyncMock()
 
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws), \
              patch("app.crawlers.usdt_ws.korbit.PING_INTERVAL_SEC", 0.01):
@@ -1186,6 +1194,9 @@ class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
         client._fallback_controller.schedule_probe = MagicMock()
         client._fallback_controller.reset_cooldown = MagicMock()
         client._fallback_controller.close = AsyncMock()
+        # K7 alert evaluator mock — wiring test는 alert 영역 외 path 검증
+        client._alert_evaluator.schedule = MagicMock()
+        client._alert_evaluator.close = AsyncMock()
 
         recv_raws = [
             json.dumps({"status": "success", "requestId": 1}),  # ACK
@@ -1233,13 +1244,12 @@ class TestScopeGuardK5(unittest.TestCase):
         self.assertTrue(hasattr(korbit_module, "KorbitRedisWriter"))
         self.assertTrue(hasattr(korbit_module, "TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS"))
 
-    def test_db_alert_rest_forbidden(self):
-        """K6~K7 영역 (DB/Alert/REST) 여전히 forbidden."""
+    def test_db_alert_rest_lazy_imports(self):
+        """K7 누적 후 정정: DB/REST는 lazy import (module-level 미노출). Alert는 K7에서 의도적 허용."""
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
+        # lazy import만 forbidden (module-level 미노출)
         forbidden = [
-            "UsdtAlertEvaluator",
-            "AlertObservation",
             "get_db_context",
             "insert_source_rate_if_changed",
             "fetch_korbit_usdt_tick",
@@ -1247,7 +1257,7 @@ class TestScopeGuardK5(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(
                 name, module_attrs,
-                f"K5 scope 위반: '{name}' import됨 (K6~K7 영역)",
+                f"lazy import 영역: '{name}' module-level 노출 불필요",
             )
 
 
@@ -1415,6 +1425,9 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         client._fallback_controller.schedule_probe = MagicMock()
         client._fallback_controller.reset_cooldown = MagicMock()
         client._fallback_controller.close = AsyncMock()
+        # K7 alert evaluator mock — wiring test는 alert 영역 외 path 검증
+        client._alert_evaluator.schedule = MagicMock()
+        client._alert_evaluator.close = AsyncMock()
 
         recv_raws = [
             json.dumps({"status": "success", "requestId": 1}),
@@ -1448,11 +1461,11 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db_calls), 1)
         self.assertEqual(redis_calls[0], db_calls[0])
 
-    async def test_finally_order_fallback_db_redis(self):
-        """K6b close order: ping_task → fallback.close → db.close → redis.close (3-step spy).
+    async def test_finally_order_fallback_db_alert_redis(self):
+        """K7 close order: ping_task → fallback.close → db.close → alert.close → redis.close (4-step spy).
 
-        Codex Point 5: K5에서 비차단으로 보류했던 close order spy test를 K6b에서 박음.
-        K7에서 Alert 추가 시 fallback → DB → Alert → Redis 4-step로 확장 예정.
+        K6b 3-step (fallback/db/redis)에서 K7 alert 추가로 4-step로 확장 (Coinone C7 mirror).
+        K5에서 비차단으로 보류했던 close order spy test를 K6b에서 박고, K7에서 4-step superset.
         """
         client = KorbitWsClient()
         close_order = []
@@ -1463,11 +1476,15 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         async def fake_db_close():
             close_order.append("db")
 
+        async def fake_alert_close():
+            close_order.append("alert")
+
         async def fake_redis_close(timeout=1.0):
             close_order.append("redis")
 
         client._fallback_controller.close = AsyncMock(side_effect=fake_fallback_close)
         client._db_writer.close = AsyncMock(side_effect=fake_db_close)
+        client._alert_evaluator.close = AsyncMock(side_effect=fake_alert_close)
         client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
 
         recv_count = {"calls": 0}
@@ -1487,7 +1504,7 @@ class TestRunOneSessionDbWiring(unittest.IsolatedAsyncioTestCase):
         with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
-        self.assertEqual(close_order, ["fallback", "db", "redis"])
+        self.assertEqual(close_order, ["fallback", "db", "alert", "redis"])
 
 
 class TestScopeGuardK6a(unittest.TestCase):
@@ -1509,12 +1526,14 @@ class TestScopeGuardK6a(unittest.TestCase):
         self.assertNotIn("get_db_context", module_attrs)
         self.assertNotIn("insert_source_rate_if_changed", module_attrs)
 
-    def test_rest_alert_still_forbidden(self):
-        """K6b~K7 영역 (REST helper / Alert) 여전히 forbidden."""
+    def test_rest_lazy_after_k7(self):
+        """K7 누적 후 정정: REST helper는 lazy import (module-level 미노출).
+        UsdtAlertEvaluator/AlertObservation은 K7에서 의도적 허용 (forbidden 제거).
+        """
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
-        for name in ["UsdtAlertEvaluator", "AlertObservation", "fetch_korbit_usdt_tick"]:
-            self.assertNotIn(name, module_attrs)
+        # lazy import 영역만 forbidden
+        self.assertNotIn("fetch_korbit_usdt_tick", module_attrs)
 
 
 # ===========================================================================
@@ -1713,6 +1732,7 @@ class TestKorbitRestFallbackControllerScheduleProbe(unittest.IsolatedAsyncioTest
         db_writer = MagicMock()
         controller = KorbitRestFallbackController(
             redis_writer=redis_writer, db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=10.0, probe_timeout_sec=5.0,
         )
         sample_tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1}
@@ -1740,6 +1760,7 @@ class TestKorbitRestFallbackControllerCooldown(unittest.IsolatedAsyncioTestCase)
         db_writer = MagicMock()
         controller = KorbitRestFallbackController(
             redis_writer=redis_writer, db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=60.0, probe_timeout_sec=5.0,
         )
         # cooldown_until 강제 set
@@ -1759,6 +1780,7 @@ class TestKorbitRestFallbackControllerInFlight(unittest.IsolatedAsyncioTestCase)
         db_writer = MagicMock()
         controller = KorbitRestFallbackController(
             redis_writer=redis_writer, db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=10.0, probe_timeout_sec=5.0,
         )
         # in_flight 강제 set
@@ -1775,6 +1797,7 @@ class TestKorbitRestFallbackControllerResetCooldown(unittest.TestCase):
     def test_reset_cooldown_clears(self):
         controller = KorbitRestFallbackController(
             redis_writer=MagicMock(), db_writer=MagicMock(),
+            alert_evaluator=MagicMock(),
         )
         controller._cooldown_until = time.time() + 1000.0
         controller.reset_cooldown()
@@ -1789,6 +1812,7 @@ class TestKorbitRestFallbackControllerProbeFailure(unittest.IsolatedAsyncioTestC
         db_writer = MagicMock()
         controller = KorbitRestFallbackController(
             redis_writer=redis_writer, db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=60.0, probe_timeout_sec=0.05,
         )
 
@@ -1817,6 +1841,7 @@ class TestKorbitRestFallbackControllerProbeFailure(unittest.IsolatedAsyncioTestC
         db_writer = MagicMock()
         controller = KorbitRestFallbackController(
             redis_writer=redis_writer, db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=30.0, probe_timeout_sec=5.0,
         )
         with patch(
@@ -1840,6 +1865,7 @@ class TestKorbitRestFallbackControllerProbeFailure(unittest.IsolatedAsyncioTestC
         db_writer = MagicMock()
         controller = KorbitRestFallbackController(
             redis_writer=redis_writer, db_writer=db_writer,
+            alert_evaluator=MagicMock(),
             cooldown_sec=30.0, probe_timeout_sec=5.0,
         )
         with patch(
@@ -1909,6 +1935,9 @@ class TestRunOneSessionDegradedTransition(unittest.IsolatedAsyncioTestCase):
         client._fallback_controller.schedule_probe = MagicMock()
         client._fallback_controller.reset_cooldown = MagicMock()
         client._fallback_controller.close = AsyncMock()
+        # K7 alert evaluator mock — wiring test는 alert 영역 외 path 검증
+        client._alert_evaluator.schedule = MagicMock()
+        client._alert_evaluator.close = AsyncMock()
 
         # last_tick_at을 DEGRADED 초과로 의도 set (recv 시점에)
         recv_count = {"calls": 0}
@@ -1960,12 +1989,194 @@ class TestScopeGuardK6b(unittest.TestCase):
         import app.crawlers.usdt_ws.korbit as korbit_module
         self.assertNotIn("fetch_korbit_usdt_tick", dir(korbit_module))
 
-    def test_alert_still_forbidden(self):
-        """K7 영역 (Alert) 여전히 forbidden."""
+    def test_alert_imports_allowed_after_k7(self):
+        """K7 이후: UsdtAlertEvaluator, AlertObservation 의도적 module-level (forbidden 제거)."""
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
         for name in ["UsdtAlertEvaluator", "AlertObservation"]:
-            self.assertNotIn(name, module_attrs)
+            self.assertIn(name, module_attrs, f"K7 의도적 import: '{name}' module-level 노출 필요")
+
+
+# ===========================================================================
+# K7 — UsdtAlertEvaluator wiring + close drain order 4-step
+# ===========================================================================
+
+
+class TestRunOneSessionValidTickAlertSchedule(unittest.IsolatedAsyncioTestCase):
+    """K7 acceptance 1: WS valid ticker tick → AlertObservation(kind="tick") schedule."""
+
+    async def test_valid_ticker_schedules_alert_observation(self):
+        client = KorbitWsClient()
+        # downstream mock
+        client._redis_writer.schedule = MagicMock()
+        client._redis_writer.close = AsyncMock()
+        client._db_writer.schedule = MagicMock()
+        client._db_writer.close = AsyncMock()
+        client._fallback_controller.schedule_probe = MagicMock()
+        client._fallback_controller.reset_cooldown = MagicMock()
+        client._fallback_controller.close = AsyncMock()
+
+        alert_calls = []
+        client._alert_evaluator.schedule = MagicMock(
+            side_effect=lambda obs: alert_calls.append(obs),
+        )
+        client._alert_evaluator.close = AsyncMock()
+
+        recv_raws = [
+            json.dumps({"status": "success", "requestId": 1}),
+            json.dumps({
+                "type": "ticker", "timestamp": 1779194622984, "symbol": "usdt_krw",
+                "data": {"close": "1488", "lastTradedAt": 1779194593306},
+            }),
+        ]
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            i = recv_count["calls"]
+            recv_count["calls"] += 1
+            if i < len(recv_raws):
+                return recv_raws[i]
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # ticker 1건 — alert schedule 1회 호출
+        self.assertEqual(len(alert_calls), 1)
+        observation = alert_calls[0]
+        self.assertEqual(observation.source, "korbit")
+        self.assertEqual(observation.asset, "usdt-krw")
+        self.assertEqual(observation.rate, 1488.0)
+        self.assertEqual(observation.timestamp_ms, 1779194593306)
+        self.assertEqual(observation.kind, "tick")
+
+
+class TestRunProbeSuccessAlertSchedule(unittest.IsolatedAsyncioTestCase):
+    """K7 acceptance 2: REST probe success → AlertObservation(kind="rest_probe") schedule."""
+
+    async def test_probe_success_schedules_alert_with_rest_probe_kind(self):
+        alert_evaluator = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=MagicMock(), db_writer=MagicMock(),
+            alert_evaluator=alert_evaluator,
+            cooldown_sec=10.0, probe_timeout_sec=5.0,
+        )
+        sample_tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
+
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            return_value=sample_tick,
+        ):
+            controller.schedule_probe(reason="test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # alert schedule 1회 호출 with kind="rest_probe"
+        alert_evaluator.schedule.assert_called_once()
+        observation = alert_evaluator.schedule.call_args[0][0]
+        self.assertEqual(observation.source, "korbit")
+        self.assertEqual(observation.asset, "usdt-krw")
+        self.assertEqual(observation.rate, 1488.0)
+        self.assertEqual(observation.timestamp_ms, 1779194593306)
+        self.assertEqual(observation.kind, "rest_probe")
+
+
+class TestRunProbeFailureNoAlertSchedule(unittest.IsolatedAsyncioTestCase):
+    """K7 acceptance 3: REST probe None/Exception → alert schedule 0."""
+
+    async def test_probe_none_no_alert(self):
+        alert_evaluator = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=MagicMock(), db_writer=MagicMock(),
+            alert_evaluator=alert_evaluator,
+            cooldown_sec=10.0, probe_timeout_sec=5.0,
+        )
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            return_value=None,
+        ):
+            controller.schedule_probe(reason="test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # helper None → alert schedule 미호출
+        alert_evaluator.schedule.assert_not_called()
+
+    async def test_probe_exception_no_alert(self):
+        alert_evaluator = MagicMock()
+        controller = KorbitRestFallbackController(
+            redis_writer=MagicMock(), db_writer=MagicMock(),
+            alert_evaluator=alert_evaluator,
+            cooldown_sec=10.0, probe_timeout_sec=5.0,
+        )
+        with patch(
+            "app.crawlers.usdt_sources.fetch_korbit_usdt_tick",
+            side_effect=RuntimeError("REST down"),
+        ):
+            controller.schedule_probe(reason="test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # helper Exception → alert schedule 미호출 (WS session 격리)
+        alert_evaluator.schedule.assert_not_called()
+
+
+class TestFinallyCloseExceptionIsolation(unittest.IsolatedAsyncioTestCase):
+    """K7 acceptance 6: 각 close 실패 격리 (개별 try/except).
+
+    alert close RuntimeError 발생해도 redis close 실행됨 검증 (Coinone C7 Codex Point 2 mirror).
+    """
+
+    async def test_alert_close_failure_still_runs_redis_close(self):
+        client = KorbitWsClient()
+        close_order = []
+
+        async def fake_fallback_close():
+            close_order.append("fallback")
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def fake_alert_close():
+            close_order.append("alert")
+            raise RuntimeError("alert close failed")
+
+        async def fake_redis_close(timeout=1.0):
+            close_order.append("redis")
+
+        client._fallback_controller.close = AsyncMock(side_effect=fake_fallback_close)
+        client._db_writer.close = AsyncMock(side_effect=fake_db_close)
+        client._alert_evaluator.close = AsyncMock(side_effect=fake_alert_close)
+        client._redis_writer.close = AsyncMock(side_effect=fake_redis_close)
+
+        recv_count = {"calls": 0}
+
+        async def fake_recv():
+            recv_count["calls"] += 1
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws = MagicMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+        mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_ws.__aexit__ = AsyncMock(return_value=None)
+        mock_ws.close = AsyncMock()
+
+        with patch("app.crawlers.usdt_ws.korbit.websockets.connect", return_value=mock_ws):
+            # alert close RuntimeError 발생해도 _run_one_session 정상 종료 (격리)
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # alert close 실패에도 redis close 실행됨 검증
+        self.assertEqual(close_order, ["fallback", "db", "alert", "redis"])
 
 
 if __name__ == "__main__":
