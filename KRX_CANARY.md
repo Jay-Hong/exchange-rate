@@ -18,7 +18,7 @@
 | Plan | [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md) §5 (2차 작업) |
 | Env toggle | `KRX_CLOSE_FINALIZER_ENABLED=true` (default) — `false` 시 1차 PR (c0855ff) 동작 rollback (Rollback B 참조) |
 | 검증 | 250 passed + 1 skipped |
-| 첫 실측 대기 | **2026-05-18 (월) 15:45 KST** CF close + **2026-05-19 (화) 06:00 KST** CM close |
+| 첫 실측 결과 | ✅ **2026-05-18 (월) 15:45 KST CF close 통과** + ✅ **2026-05-19 (화) 06:00 KST CM close 통과** (둘 다 WS-first path, REST fallback skip). 상세는 §"2026-05-18~19 만기 첫 실측 결과". |
 | Rollback | 본 문서 [Rollback 절차](#rollback-절차) Rollback B (`KRX_CLOSE_FINALIZER_ENABLED=false`) |
 
 ---
@@ -462,24 +462,30 @@ docker compose logs fastapi --since "2026-05-18T15:44+09:00" --until "2026-05-18
 
 case B 비율 결과로 3차 PR scope 결정 (REST fallback 제거 검토 / 유지).
 
-### 2026-05-18 만기일 첫 실측 결과 (CF 통과, CM/master pending)
+### 2026-05-18~19 만기 첫 실측 결과 (CF/CM 통과, master 가설 b 확정)
 
-> 📅 **실측일**: 2026-05-18 (월)
-> 🏷️ **상태**: CF close finalizer + post-close A75605 관찰 + 운영 자동 rollover 모두 통과. CM close (5/19 06:00) + master batch 갱신 시점 (5/19~5/22) pending.
+> 📅 **실측일**: 2026-05-18 (월) ~ 2026-05-19 (화)
+> 🏷️ **상태**: CF close finalizer + CM close finalizer + 만기일 07:00 자동 rollover + post-close A75605 관찰 + KIS master batch 익일 갱신 모두 통과/확정. close finalizer 양 session 첫 실측 완료.
 
 #### 확정 결론 — 운영 정책 input
 
 1. **07:00 자체 rollover (PR6c-2d-1) 정책 타당** — 07:01:47 KST `[krx] rollover A75605/202605 → A75606/202606 reason=scheduled` 발화. A75606 (만기 2026-06-15) 운영 client 자동 재시작. 08:30 CF 정규세션 진입 시 H0CFCNT0/H0CFASP0 SUBSCRIBE SUCCESS.
-2. **KIS master는 만기 당일 17:05까지 A75605 `mmsc_cls_code=1` 유지**. 즉시 제거 가설 (a) 부정. 가설 (b) 익일 갱신 / (c) 며칠 후 batch 추적 진행 중 (5/19~5/22).
+2. **KIS master batch 갱신 = 가설 (b) 확정 — 익일 5/19 07:00~08:00 KST window**:
+   - 5/18 17:05까지: A75605 `mmsc_cls_code=1` 유지
+   - 5/19 07:00: A75605 `cls=1` / A75606 `cls=2` (만기 다음날 새벽까지 옛 월물 잔존)
+   - **5/19 08:00 snapshot부터**: A75605 제거, A75606 `cls=1` 승급, A75607 `cls=2` 신규 부각
+   - 즉시 제거 가설 (a) 부정 / 익일 갱신 가설 (b) 확정 (5/22까지 추가 sample은 선택).
 3. **KIS REST는 만기 후에도 A75605에 대해 `rt_cd=0, futs_prpr=1505.800` stale 반환** (관찰 구간 11:31~12:10 동안 가격 + `acml_vol=7846` 고정. 12:10 이후 REST 미관찰). 응답 형식 자체는 정상 → 단순 `rt_cd == "0"` 분기로는 stale 인지 불가.
 4. **active contract 판단은 KIS master/REST 응답에 의존하면 안 됨** — 자체 calendar/expiry 정책 필요. PR6c-2d-1 만기일 07:00 KST swap이 이 위험을 정확히 회피.
-5. **CF 15:45 close finalizer (c2fb796 Stage 5) WS-first path 성공, REST fallback skip** — 첫 실측 통과. log: `[krx_close_window] close saved session=CF rate=1496.5 ts=2026-05-18T15:45:00+09:00` + `[krx_close_snapshot] WS captured at entry → REST skip`. F1/F2/F3 race 위험은 본 케이스에서 노출되지 않음 (단발 성공으로 일반 해소 단정 X).
-6. **만기월 A75605 WS post-close 관찰** (15:48~16:02 별도 observer):
+5. **CF 15:45 close finalizer (c2fb796 Stage 5) WS-first path 성공, REST fallback skip** — 첫 실측 통과. log: `[krx_close_window] close saved session=CF rate=1496.5 ts=2026-05-18T15:45:00+09:00` + `[krx_close_snapshot] WS captured at entry → REST skip`.
+6. **CM 06:00 close finalizer (c2fb796 Stage 5) WS-first path 성공, REST fallback skip** — 5/19 06:00:00 KST 첫 실측 통과. log: `[krx_close_window] close saved session=CM rate=1490.0 ts=2026-05-19T06:00:00+09:00` (06:01:00.151) + `[krx_close_snapshot] WS captured at entry → REST skip` (06:01:03.736). DB row: `id=293030 rate=1490.0 timestamp=2026-05-18 21:00:00 UTC` (= 2026-05-19 06:00:00 KST). F1/F2/F3 race 위험은 본 케이스에서 노출되지 않음 (CF/CM 양 session 단발 성공으로 일반 해소 단정 X — 7일 telemetry 누적 후 확정).
+7. **frame 수신 시각 추정 근거** — `[kis_ws] metrics` 06:00:50.119 시점 `trade_age=49 quote_age=49` → 마지막 trade/quote frame ~06:00:01 KST 수신 추정 (sec 단위). DB/Redis에는 received_at 미저장 — `event_at_kst = market_time payload (060000)` 우선 → boundary 06:00:00 KST 저장. WS-first path와 REST fallback이 동일 boundary timestamp semantics.
+8. **만기월 A75605 WS post-close 관찰** (15:48~16:02 별도 observer):
    - SUBSCRIBE SUCCESS (H0CFCNT0/H0CFASP0 `rt_cd=0 OPSP0000`)
    - 14분간 trade/quote frame 0건
    - 16:02:01 ConnectionClosedError (KIS가 idle close)
    - → 만기/휴장 후 subscribe 자체는 허용, frame은 미송신
-7. **운영 중 만기월 WS subscribe는 `OPSP8996 ALREADY IN USE appkey`로 거부** — KIS는 같은 appkey 동시 connection 1개만 허용 (운영 client가 A75606 사용 중). 다음 만기 옛 월물 실시간 관찰을 원하면 별도 appkey 또는 단일 connection multi-contract subscribe 구조 필요.
+9. **운영 중 만기월 WS subscribe는 `OPSP8996 ALREADY IN USE appkey`로 거부** — KIS는 같은 appkey 동시 connection 1개만 허용 (운영 client가 A75606 사용 중). 다음 만기 옛 월물 실시간 관찰을 원하면 별도 appkey 또는 단일 connection multi-contract subscribe 구조 필요.
 
 #### KRX 단일가 메커니즘 — 5/18 데이터로 검증
 
@@ -490,8 +496,9 @@ case B 비율 결과로 3차 PR scope 결정 (REST fallback 제거 검토 / 유�
 | **만기 CF 종가** (A75605) | 옛 월물 만기 처리 | 11:20:06~11:29:06 (10분, `acml_vol=7816` 고정) | **11:30:0X — 1505.800원 × 30계약** (`acml_vol` 7816 → 7846, +30) |
 | **정규 CF 종가** (A75606) | 새 월물 정규장 종료 | 15:35:49~15:44:49 (10분, `trade_age` 50→590s 증가) | **15:45:01 — 1496.5원** (운영 close finalizer capture) |
 | **야간 CM 시가** (A75606) | 새 월물 야간장 시작 | 17:50:01~17:59:49 (10분, `trade_age=None`) | **18:00:01 — 1494.7원** (DB row 18:00:01 KST `rate=1494.7`, `frames/min` 53→444 폭증) |
+| **야간 CM 종가** (A75606) | 새 월물 야간장 종료 (5/19 새벽) | 05:50:0X~05:59:5X (~10분) | **06:00:00 — 1490.0원** (WS-first path, REST fallback skip, DB row id=293030, timestamp=2026-05-18 21:00:00 UTC (= KST 2026-05-19 06:00:00), Redis "2026-05-19T06:00:00+09:00") |
 
-→ 사용자 도메인 지식 (10분 호가 접수 + 단일가 체결) 실측과 일치. **5/19 06:00 CM close에도 동일 패턴 예상**: 05:50~06:00 호가 접수 → 06:00:0X 단일가 종가.
+→ 사용자 도메인 지식 (10분 호가 접수 + 단일가 체결) 실측과 4시점 모두 일치 (만기 CF 종가 / 정규 CF 종가 / 야간 CM 시가 / 야간 CM 종가). c2fb796 Stage 5 close finalizer는 CF/CM 양 session 정각 boundary timestamp 저장 정책 (WS path는 KIS payload `market_time` 우선, REST path는 `boundary_at_kst` 고정) 검증 완료.
 
 #### 운영 교훈 — observer 도구 작업 중 발견 (재사용 가치)
 
@@ -515,10 +522,9 @@ scripts/observe_kis_rest.py    # REST inquire-price (P1 access_token cache / P2 
 
 #### Pending — 추가 관찰 항목
 
-- **5/19 06:00 KST CM close finalizer 첫 실측** (예상: 05:50~06:00 호가 접수 → 06:00:0X 단일가 종가)
-- **5/19~5/22 KIS master A75605 `mmsc_cls_code` 변화 시점** (가설 b/c 확정)
-- **master 전체 dict diff** — `mmsc_cls_code` 외 `name`, `contract_month`, `last_tr_date` 등 변화 추적
-- **다음 만기 (6/18) WS multi-contract 관찰 구조** — 별도 appkey 발급 또는 단일 connection multi-contract subscribe 구조로 옛 월물 실시간 capture 가능성 검토
+- **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST 성공) / case C (둘 다 실패) 분포 측정. CF/CM 첫 실측 모두 case A. 상세 status는 [KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) 추적.
+- **master 전체 dict diff** (선택) — `mmsc_cls_code` 외 `name`, `contract_month`, `last_tr_date` 등 추가 sample 수집 가치 시점에 확인.
+- **다음 만기 (6/18) WS multi-contract 관찰 구조** — 별도 appkey 발급 또는 단일 connection multi-contract subscribe 구조로 옛 월물 실시간 capture 가능성 검토.
 
 ---
 
