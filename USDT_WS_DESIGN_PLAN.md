@@ -605,15 +605,16 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - sparse-time max ticker_update_gap 결과로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 300s 정확값 확정 — 필요 시 별도 작은 commit (상수 1~2줄 수정)
 - Coinone 24h+ 자연 누적 관찰과 **병행하여** Phase B.5 (Korbit) 준비/진입 가능. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (2개만 보고 base class 결정 시 Korbit/Gopax의 별도 protocol 차이 미반영 위험).
 
-**Coinone 24h+ canary 기준 통과 관찰 (2026-05-20 ~19:57 KST 시점)**:
+**Coinone canary 운영 누적 관찰 (2026-05-21 ~07:28 KST 시점 갱신)**:
 
-- 활성화 5/19 18:42 → 2026-05-20 ~19:57 시점에 **24h+ canary 기준 통과**
-- 12h 운영 log grep (transition / fallback probe / ping failed / DB write failed / Redis write returned False) 이상징후 0건 관찰
-- Redis `mirrored_at` fresh (직접 측정 시점 기준 ~9ms 이내)
-- DB row 분포: 12h rows ~1700건, last_gap ~3초 (활발 시간대 측정)
-- **Upbit 부수 관찰 — Redis write queue saturation 1회 (10:09:07 KST burst 13건, ~1초)**:
-  - `MAX_PENDING_WRITES=20` PR4 guard 작동, tick skip + WARNING log (ERROR/Traceback 아님 — 의도된 보호 동작)
-  - 9h 50분 동안 1회 단발 관찰, 반복 여부는 자연 누적 추가 관찰 필요
+- 활성화 5/19 18:42 → 2026-05-21 ~07:28 시점에 **누적 ~36h, 24h+ 기준 통과**
+- 24h 운영 log grep (transition / fallback probe / ping failed / DB write failed / Redis write returned False) Coinone 자체 이상징후 0건 관찰
+- Redis `mirrored_at` fresh (직접 측정 시점 기준 ~수십 ms 이내), 24h DB rows ~2900건 + last_gap ~144s (가격 변경 기반 보조 지표)
+- **Upbit 부수 관찰 — Redis write queue saturation 반복 발생 확인 (서비스 영향 없음, guard 정상 작동)**:
+  - 1차 2026-05-20 10:09:07 KST: 13건 burst (~1초)
+  - 2차 2026-05-21 01:20:42 KST: 4건 burst (~1초), 1차 대비 약 15h 간격
+  - `MAX_PENDING_WRITES=20` PR4 guard 작동, tick skip + WARNING log (ERROR/Traceback 아님 — 의도된 보호 동작), 측정 시점 사용자 앱 영향 없음 (테더 탭 미배포 + last-write-wins로 latest 유지)
+  - 반복 발생 확인 (1차/2차 모두 새벽 시간대) — 원인/패턴 (sparse-time / 일정 cadence / Redis latency burst 등) 추가 telemetry 누적으로 관찰 필요. summary log 부재로 saturation count historical 산출 제한 (별도 후속 PR 영역, 본 §12.7.5 lesson 참조).
   - Coinone과 직접 인과 없음 (Upbit Redis writer 별도 instance), 같은 fastapi process 운영 시점 부수 관찰로 기록
 
 #### 12.6.6 Rollback 정책 (Phase B.3 §12.5.4 패턴 재사용)
@@ -823,16 +824,20 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - `_ticker_freshness_status` transition log 0건 = frame receive 기준 freshness 정상 (lastTradedAt 정지와 무관, K4 `_liveness.observe_tick(time.time())`은 frame receive time 기준).
 - DB rows 0건 = 가격 stable + `insert_source_rate_if_changed` skip (Coinone §12.6.5 lesson과 동일 패턴).
 
-**Korbit canary 15h+ 관찰 + Bithumb 단기 sample (2026-05-20 ~19:57 KST 시점)**:
+**Korbit canary 운영 누적 관찰 (2026-05-21 ~07:28 KST 시점 갱신)**:
 
-- 활성화 5/20 04:15 → 2026-05-20 ~19:57 시점에 **15h+ canary 운영 누적 관찰**
-- **Korbit reconnect 1회 자동 회복** (12:01:20 KST, ~8h 전):
-  - log: `connection_status normal → reconnecting (reconnect_attempt=1 max_gap=10.60s)` → `connection closed (attempt 1): no close frame received or sent — backoff 1.0s` → 1초 후 `connection_status reconnecting → normal`
-  - server-side abrupt close (no close frame received or sent)
-  - **K4 Bithumb mirror reconnect loop (backoff `[1, 2, 4, 8, 16, 30]`)의 운영 첫 실측 검증**
-  - 발생 후 8h 동안 동일 패턴 0건. 빈도 추가 관찰 영역.
+- 활성화 5/20 04:15 → 2026-05-21 ~07:28 시점에 **누적 ~27h, 24h+ 기준 통과**
+- **Korbit reconnect 2회 모두 자동 회복 — K4 reconnect loop + backoff sequence 운영 정상 작동 검증**:
+  - 1차 2026-05-20 12:01:20 KST:
+    - log: `connection_status normal → reconnecting (reconnect_attempt=1 max_gap=10.60s)` → `connection closed (attempt 1): no close frame received or sent — backoff 1.0s` → 1초 후 `connection_status reconnecting → normal`
+    - close reason: "no close frame received or sent" (server-side abrupt close 추정)
+  - 2차 2026-05-21 01:31:47 KST (1차 대비 ~13h 30분 간격):
+    - log: `connection_status normal → reconnecting (reconnect_attempt=2 max_gap=10.82s)` → `connection closed (attempt 2): received 1001 (going away) CloudFlare WebSocket proxy restarting; then sent 1001 (going away) — backoff 2.0s` → 2초 후 `connection_status reconnecting → normal`
+    - close reason: server-side / CloudFlare WebSocket proxy restart로 관찰 (close code 1001 "going away"). 정기성 / cadence는 2회 관찰 만으로 단정 X — 추가 누적 필요.
+  - 두 case 모두 backoff sequence `[1, 2, 4, 8, 16, 30]` 정상 적용 (1차 1.0s, 2차 2.0s = `reconnect_attempt` index 따라). 회복 시간 모두 backoff sec 직후 1 iteration.
+  - max_gap 두 case 유사 범위 (10.60s / 10.82s) — backoff 적용 직전 마지막 frame age. summary log 부재로 reconnect 외 시점 historical max_gap 산출 제한 (별도 후속 PR 영역).
 - **Bithumb 단기 sample 관찰 (참고만, 통계 결론 보류)**:
-  - 15초 간격 5-sample 중 1회 ~20초대 `mirrored_at` gap 관찰. 같은 sample 구간 transition / error 0건.
+  - 5/20 ~19:57 시점 15초 간격 5-sample 중 1회 ~20초대 `mirrored_at` gap 관찰. 같은 sample 구간 transition / error 0건.
   - 5-sample은 통계 의미 약함. "정상 범위" 단정 X. summary log 누적으로 통계 산출 필요.
 - Coinone/Upbit는 같은 sample 구간 `mirrored_at` ~10ms~수초 cadence 갱신, transition / error 0건 관찰.
 
