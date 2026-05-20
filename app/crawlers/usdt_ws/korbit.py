@@ -138,6 +138,11 @@ TICKER_FRESHNESS_WARNING_SEC = 30.0
 RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 RECONNECT_BACKOFF_TAIL = 30.0
 
+# Summary log follow-up (Phase B.5 §12.7.5 후속) — 60s cycle metric INFO emit.
+# KRX kis_ws _summary_log_loop 패턴 mirror, 1차 PR state-only.
+# 2차 PR scope: Redis saturation / fallback probe counter (별도 분리).
+SUMMARY_LOG_INTERVAL_SEC = 60.0
+
 # K5 Redis writer guards — Coinone/Bithumb 동일 값.
 MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
 REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
@@ -991,6 +996,9 @@ class KorbitWsClient:
             return
         self._running = True
         logger.info("[usdt_ws.korbit] start (K4 — reconnect loop with backoff)")
+        # Summary log follow-up — start lifetime (reconnect 사이 유지, KRX kis_ws 패턴 mirror).
+        # 60s cycle metric INFO emit. 1차 PR scope: state-only 8 metric.
+        summary_task = asyncio.create_task(self._summary_log_loop())
         attempt = 0
         try:
             while not self._stop_event.is_set():
@@ -1040,8 +1048,87 @@ class KorbitWsClient:
                     # backoff 소진 → 다음 attempt 진입
                     continue
         finally:
+            # Codex Point 1: summary cleanup이 reconnect loop 예외와 독립 (개별 try/except).
+            # CancelledError는 silently pass, 다른 예외만 log.
+            summary_task.cancel()
+            try:
+                await summary_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.korbit] summary_task cleanup 실패")
             self._running = False
             self._ws = None
+
+    async def _summary_log_loop(self) -> None:
+        """Phase B.5 §12.7.5 후속 — start lifetime 동안 60s cycle metric INFO emit.
+
+        KRX kis_ws `_summary_log_loop` ([app/crawlers/krx_kis.py:1033](app/crawlers/krx_kis.py))
+        패턴 mirror. 1차 PR scope: 기존 state-only attribute만 emit.
+
+        Emit metric (8개, state-only):
+            - frames_per_min: `_liveness.frame_count_total` 차이 / elapsed
+            - last_tick_age: `now - _liveness.last_tick_at` (없으면 -1.0 sentinel)
+            - last_heartbeat_age: `now - _liveness.last_heartbeat_at` (없으면 -1.0 sentinel)
+            - max_frame_gap: `_liveness.max_frame_gap_sec` (session 단위 reset)
+            - connection_status: `_connection_status` (normal/reconnecting/stale)
+            - ticker_freshness_status: `_ticker_freshness_status` (normal/warning/degraded)
+            - reconnect_attempts: `_reconnect_attempt_count` (instance lifetime)
+            - status_transitions: `_status_transition_count` 6 keys (key:N/key:N/...)
+
+        2차 PR scope (별도): Redis saturation / fallback probe counter는 writer 내부에
+        counter 신규 추가 필요 — 본 1차 PR 제외.
+
+        Caveat — frames_per_min 측정 기준 (KRX 동일 caveat 적용):
+            reconnect 직후 첫 summary log의 frames_per_min은 직전 60초 전체 기준이라
+            현재 session active duration 기준이 아닐 수 있다. 예: reconnect 전 50초 +
+            reconnect 후 active 10초이면 active만의 rate는 더 높음. baseline 분석 시
+            reconnect 직후 첫 summary log는 caveat 또는 무시 권장. 24~48h 누적 데이터로
+            보면 무시 가능 수준.
+
+        Sentinel 정책 (Codex Point 2):
+            last_tick_at / last_heartbeat_at이 None일 경우 (첫 tick/PONG 전) -1.0
+            numeric sentinel. log 파싱 / numeric aggregation 일관성 위해 None 회피.
+        """
+        prev_frame_total = self._liveness.frame_count_total
+        prev_at = time.time()
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(SUMMARY_LOG_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                return
+            now = time.time()
+            elapsed = max(now - prev_at, 1e-9)
+            frames_in_window = self._liveness.frame_count_total - prev_frame_total
+            frames_per_min = int(round(frames_in_window * 60 / elapsed))
+            prev_frame_total = self._liveness.frame_count_total
+            prev_at = now
+
+            # Sentinel -1.0 for None (Codex Point 2 — numeric for log aggregation)
+            last_tick = self._liveness.last_tick_at
+            last_tick_age = (now - last_tick) if last_tick is not None else -1.0
+            last_heartbeat = self._liveness.last_heartbeat_at
+            last_heartbeat_age = (now - last_heartbeat) if last_heartbeat is not None else -1.0
+
+            # status_transitions dict → key:N/key:N/... format
+            transitions_str = "/".join(
+                f"{k}:{v}" for k, v in self._status_transition_count.items()
+            )
+
+            logger.info(
+                "[usdt_ws.korbit] metrics frames_per_min=%d "
+                "last_tick_age=%.1f last_heartbeat_age=%.1f "
+                "max_frame_gap=%.1f "
+                "connection_status=%s ticker_freshness_status=%s "
+                "reconnect_attempts=%d "
+                "status_transitions=%s",
+                frames_per_min,
+                last_tick_age, last_heartbeat_age,
+                self._liveness.max_frame_gap_sec,
+                self._connection_status, self._ticker_freshness_status,
+                self._reconnect_attempt_count,
+                transitions_str,
+            )
 
     async def stop(self) -> None:
         """stop signal — `_run_one_session()`의 recv loop 및 start reconnect loop 모두 빠짐."""

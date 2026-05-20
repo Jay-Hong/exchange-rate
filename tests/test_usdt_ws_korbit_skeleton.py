@@ -59,6 +59,7 @@ from app.crawlers.usdt_ws.korbit import (
     RECV_TIMEOUT_SEC,
     STALE_AFTER_SEC,
     SUBSCRIBE_REQUEST_ID,
+    SUMMARY_LOG_INTERVAL_SEC,
     TICKER_FRESHNESS_DEGRADED_SEC,
     TICKER_FRESHNESS_WARNING_SEC,
     KorbitDbWriter,
@@ -2177,6 +2178,157 @@ class TestFinallyCloseExceptionIsolation(unittest.IsolatedAsyncioTestCase):
 
         # alert close 실패에도 redis close 실행됨 검증
         self.assertEqual(close_order, ["fallback", "db", "alert", "redis"])
+
+
+# ===========================================================================
+# Phase B.5 follow-up — Summary log (start-level, state-only 8 metrics, 1차 PR)
+# ===========================================================================
+
+
+class TestSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
+    """Phase B.5 §12.7.5 후속 — Korbit summary log 단독 검증.
+
+    1차 PR scope: state-only 8 metric. 2차 PR scope (writer counter)는 별도.
+    KRX kis_ws _summary_log_loop 패턴 mirror, start-level task lifecycle.
+    """
+
+    async def test_emit_format_contains_all_8_metrics(self):
+        """emit log에 state-only 8 metric 모두 key=value 포맷 포함."""
+        client = KorbitWsClient()
+        # frame_count_total 갱신해서 frames_per_min 계산 가능하게
+        client._liveness.frame_count_total = 100
+        client._liveness.last_tick_at = time.time() - 5.0
+        client._liveness.last_heartbeat_at = time.time() - 10.0
+        client._liveness.max_frame_gap_sec = 15.5
+
+        async def fake_sleep(_):
+            # 첫 sleep 후 stop_event set → 두 번째 iteration entry 시 break
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        # 8 metric 모두 emit format에 포함
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log, "metric INFO log 없음")
+        for keyword in [
+            "frames_per_min=",
+            "last_tick_age=",
+            "last_heartbeat_age=",
+            "max_frame_gap=",
+            "connection_status=",
+            "ticker_freshness_status=",
+            "reconnect_attempts=",
+            "status_transitions=",
+        ]:
+            self.assertIn(keyword, metric_log, f"metric key 누락: {keyword}")
+
+    async def test_frames_per_min_calculation(self):
+        """frame_count_total 차이 / elapsed * 60 = frames_per_min 정확성 검증.
+
+        Codex Point — deterministic elapsed로 numeric 값 자체 검증.
+        time.time() patch: 100.0 → 160.0 (elapsed=60s), frame_count 0 → 30
+        → frames_per_min = (30 - 0) * 60 / 60.0 = 30
+        """
+        client = KorbitWsClient()
+        client._liveness.frame_count_total = 0
+
+        # time.time() patch — deterministic elapsed 60s
+        time_values = iter([100.0, 160.0])
+
+        async def fake_sleep(duration):
+            # sleep 중 frame_count 30 증가 + stop event (다음 iteration 진입 차단)
+            client._liveness.frame_count_total = 30
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.korbit.time.time", side_effect=lambda: next(time_values)), \
+             patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        # frames_per_min=30 정확 검증 (단순 존재가 아닌 numeric 값)
+        metric_log = next((m for m in cm.output if "frames_per_min=" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("frames_per_min=30", metric_log)
+
+    async def test_sentinel_for_none_age(self):
+        """last_tick_at / last_heartbeat_at이 None이면 -1.0 numeric sentinel emit (Codex Point 2)."""
+        client = KorbitWsClient()
+        # 사전 조건: last_tick_at / last_heartbeat_at None (첫 tick 전 상태)
+        self.assertIsNone(client._liveness.last_tick_at)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        # -1.0 sentinel emit 확인 (log 파싱 numeric 일관성)
+        self.assertIn("last_tick_age=-1.0", metric_log)
+        self.assertIn("last_heartbeat_age=-1.0", metric_log)
+
+    async def test_cancelled_silently_returns(self):
+        """CancelledError 시 silently return (no exception propagate)."""
+        client = KorbitWsClient()
+
+        async def fake_sleep(_):
+            raise asyncio.CancelledError()
+
+        # CancelledError가 sleep에서 raise → return (no propagation)
+        with patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep):
+            # 정상 return (exception 없음)
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+    async def test_stop_event_before_first_emit_skips_emit(self):
+        """stop_event 사전 set 시 emit 0 (loop entry 못 함).
+
+        assertNoLogs (Python 3.10+) — log 0건 검증.
+        """
+        client = KorbitWsClient()
+        client._stop_event.set()
+
+        # log 0건 검증 (loop 자체가 entry 못 함 → metric INFO emit X)
+        with self.assertNoLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO"):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+
+class TestStartCancelsSummaryTask(unittest.IsolatedAsyncioTestCase):
+    """Phase B.5 §12.7.5 후속 — start() finally에서 summary_task cancel/await 검증.
+
+    Codex Point 1: summary cleanup이 reconnect loop 예외와 독립 (개별 try/except).
+    """
+
+    async def test_start_cancels_summary_task_on_stop(self):
+        """start 종료 시 summary_task가 cancel + await됨."""
+        client = KorbitWsClient()
+        cancelled = {"value": False}
+
+        async def fake_summary_loop():
+            try:
+                await asyncio.sleep(60)  # blocking sleep (canceled by stop)
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                return
+
+        # _run_one_session도 mock해서 즉시 정상 종료 (stop_event 의존)
+        async def fake_run_one_session():
+            await client._stop_event.wait()
+
+        with patch.object(client, "_summary_log_loop", side_effect=fake_summary_loop), \
+             patch.object(client, "_run_one_session", side_effect=fake_run_one_session):
+            task = asyncio.create_task(client.start())
+            await asyncio.sleep(0.05)
+            await client.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        # summary_task가 cancel + await됨 (CancelledError를 silently catch)
+        self.assertTrue(cancelled["value"], "summary_task가 cancel되지 않음")
+        self.assertFalse(client._running)
 
 
 if __name__ == "__main__":
