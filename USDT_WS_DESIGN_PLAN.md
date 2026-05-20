@@ -605,6 +605,17 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 - sparse-time max ticker_update_gap 결과로 `TICKER_FRESHNESS_DEGRADED_SEC` / `FALLBACK_COOLDOWN_SEC` provisional 300s 정확값 확정 — 필요 시 별도 작은 commit (상수 1~2줄 수정)
 - Coinone 24h+ 자연 누적 관찰과 **병행하여** Phase B.5 (Korbit) 준비/진입 가능. 공통화 검토는 Phase B.6까지 5개 거래소 전부 land 후 별도 시점에 진행 (2개만 보고 base class 결정 시 Korbit/Gopax의 별도 protocol 차이 미반영 위험).
 
+**Coinone 24h+ canary 기준 통과 관찰 (2026-05-20 ~19:57 KST 시점)**:
+
+- 활성화 5/19 18:42 → 2026-05-20 ~19:57 시점에 **24h+ canary 기준 통과**
+- 12h 운영 log grep (transition / fallback probe / ping failed / DB write failed / Redis write returned False) 이상징후 0건 관찰
+- Redis `mirrored_at` fresh (직접 측정 시점 기준 ~9ms 이내)
+- DB row 분포: 12h rows ~1700건, last_gap ~3초 (활발 시간대 측정)
+- **Upbit 부수 관찰 — Redis write queue saturation 1회 (10:09:07 KST burst 13건, ~1초)**:
+  - `MAX_PENDING_WRITES=20` PR4 guard 작동, tick skip + WARNING log (ERROR/Traceback 아님 — 의도된 보호 동작)
+  - 9h 50분 동안 1회 단발 관찰, 반복 여부는 자연 누적 추가 관찰 필요
+  - Coinone과 직접 인과 없음 (Upbit Redis writer 별도 instance), 같은 fastapi process 운영 시점 부수 관찰로 기록
+
 #### 12.6.6 Rollback 정책 (Phase B.3 §12.5.4 패턴 재사용)
 
 - **1차 수단**: env toggle `USDT_WS_COINONE_ENABLED=false`. lifecycle 격리 (Upbit/Bithumb/KRX 검증 완료 패턴).
@@ -811,6 +822,38 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 - `_ticker_freshness_status` transition log 0건 = frame receive 기준 freshness 정상 (lastTradedAt 정지와 무관, K4 `_liveness.observe_tick(time.time())`은 frame receive time 기준).
 - DB rows 0건 = 가격 stable + `insert_source_rate_if_changed` skip (Coinone §12.6.5 lesson과 동일 패턴).
+
+**Korbit canary 15h+ 관찰 + Bithumb 단기 sample (2026-05-20 ~19:57 KST 시점)**:
+
+- 활성화 5/20 04:15 → 2026-05-20 ~19:57 시점에 **15h+ canary 운영 누적 관찰**
+- **Korbit reconnect 1회 자동 회복** (12:01:20 KST, ~8h 전):
+  - log: `connection_status normal → reconnecting (reconnect_attempt=1 max_gap=10.60s)` → `connection closed (attempt 1): no close frame received or sent — backoff 1.0s` → 1초 후 `connection_status reconnecting → normal`
+  - server-side abrupt close (no close frame received or sent)
+  - **K4 Bithumb mirror reconnect loop (backoff `[1, 2, 4, 8, 16, 30]`)의 운영 첫 실측 검증**
+  - 발생 후 8h 동안 동일 패턴 0건. 빈도 추가 관찰 영역.
+- **Bithumb 단기 sample 관찰 (참고만, 통계 결론 보류)**:
+  - 15초 간격 5-sample 중 1회 ~20초대 `mirrored_at` gap 관찰. 같은 sample 구간 transition / error 0건.
+  - 5-sample은 통계 의미 약함. "정상 범위" 단정 X. summary log 누적으로 통계 산출 필요.
+- Coinone/Upbit는 같은 sample 구간 `mirrored_at` ~10ms~수초 cadence 갱신, transition / error 0건 관찰.
+
+**운영 관찰 lesson + summary log 부재 한계**:
+
+- 관찰 기준 5개 (cross-source 일관, 운영에서 계속 봐야 할 항목):
+  1. `mirrored_at` source별 예상 cadence 안에서 갱신되는지
+  2. `ticker_freshness_status` warning/degraded 전이 발생 여부 + 빈도
+  3. reconnect 발생 + 자동 회복 여부 + 반복 패턴
+  4. Redis write queue saturation 단발 vs 반복
+  5. REST fallback probe 발생 빈도 (과다 여부)
+- **한계 — historical max frame/tick gap 산출 제한**:
+  - USDT WS에는 KRX kis_ws `_summary_log_loop` ([app/crawlers/krx_kis.py](app/crawlers/krx_kis.py))같은 분당 metric emit이 **부재**.
+  - `_liveness.max_frame_gap_sec` 등 process memory에는 누적되지만 외부 노출 (logs/admin api/Redis) 없음.
+  - `docker compose exec ... python -c "..."`은 별도 process 진입이라 globals 초기 (None) 상태 — 운영 중인 FastAPI process introspection 불가 (§12.7.5 진단 lesson 참조).
+  - 현재 가용 max gap 데이터는 transition log 발생 시점에 한정 (예: 위 Korbit reconnect 시점 `max_gap=10.60s` — 운영 기간 전체 max 아님).
+  - DB row gap은 `insert_source_rate_if_changed` 특성으로 "가격 변경 저장 간격"이지 "tick gap"이 아님 (§12.6.5 lesson 동일).
+- **후속 PR 필요성**:
+  - KRX kis_ws `_summary_log_loop` 패턴 기반 source별 summary log 추가 — 분당 1회 `[usdt_ws.<source>] metrics frames_per_min=N max_frame_gap=Ns last_tick_age=Ns reconnect_attempts=N status_transitions=... redis_saturation=N fallback_probe=N` emit.
+  - 단계적 적용 권장 (Codex): 하나 source (Korbit 또는 Coinone)에 먼저 검증 → Upbit/Bithumb 확장. 4 source 일괄은 review 부담 + bug risk.
+  - 운영 영향 0 (log emit만 추가). threshold 조정 input 자연 누적 + reconnect/saturation 패턴 monitoring + admin api endpoint 확장 input.
 
 #### 12.7.6 Rollback 정책 (Phase B.4 §12.6.6 패턴 재사용)
 
