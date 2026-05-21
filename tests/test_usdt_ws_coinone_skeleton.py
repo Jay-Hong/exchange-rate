@@ -62,13 +62,14 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
 from app.crawlers.usdt_ws.coinone import (
     COINONE_QUOTE_CURRENCY,
     COINONE_TARGET_CURRENCY,
     COINONE_WS_URL,
+    MAX_PENDING_WRITES,
     PING_INTERVAL_SEC,
     PING_TIMEOUT_SEC,
     RECONNECT_BACKOFF_SEQ,
@@ -77,6 +78,8 @@ from app.crawlers.usdt_ws.coinone import (
     STALE_AFTER_SEC,
     TICKER_FRESHNESS_DEGRADED_SEC,
     TICKER_FRESHNESS_WARNING_SEC,
+    CoinoneRedisWriter,
+    CoinoneRestFallbackController,
     CoinoneWsClient,
 )
 
@@ -2165,6 +2168,324 @@ class TestC7FlagFalseInvariantRegression(unittest.IsolatedAsyncioTestCase):
             await scheduler.start_usdt_ws_coinone_client()
         # CoinoneWsClient 생성자가 호출 안 됨 → UsdtAlertEvaluator 생성자도 호출 안 됨
         mock_evaluator_cls.assert_not_called()
+
+
+# ===========================================================================
+# PR 2d (Coinone bundle) — summary log + redis_saturation_count + fallback_probe_scheduled_count
+# ===========================================================================
+
+
+class TestCoinoneRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2d — CoinoneRedisWriter._saturation_count counter 동작 검증.
+
+    의미: MAX_PENDING_WRITES skip 발생 횟수. write 성공/실패 무관.
+    """
+
+    def test_initial_value_zero(self):
+        """writer 생성 직후 counter == 0."""
+        writer = CoinoneRedisWriter()
+        self.assertEqual(writer.saturation_count, 0)
+
+    async def test_increments_on_saturation_skip(self):
+        """_tasks >= MAX_PENDING_WRITES → skip 시 counter +1."""
+        writer = CoinoneRedisWriter()
+        loop = asyncio.get_running_loop()
+        dummy_futures = [loop.create_future() for _ in range(MAX_PENDING_WRITES)]
+        writer._tasks = set(dummy_futures)
+
+        self.assertEqual(writer.saturation_count, 0)
+
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+        with patch("app.crawlers.usdt_ws.coinone.asyncio.to_thread"):
+            writer.schedule(tick)
+
+        self.assertEqual(writer.saturation_count, 1)
+
+        for fut in dummy_futures:
+            fut.set_result(None)
+        writer._tasks.clear()
+
+    async def test_no_increment_on_normal_schedule(self):
+        """_tasks < MAX_PENDING_WRITES → 정상 schedule → counter 0 유지."""
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+        with patch("app.crawlers.usdt_ws.coinone.asyncio.create_task") as mock_create:
+            mock_create.return_value = MagicMock()
+            writer.schedule(tick)
+
+        self.assertEqual(writer.saturation_count, 0)
+
+
+class TestCoinoneRedisWriterSaturationSemantics(unittest.IsolatedAsyncioTestCase):
+    """PR 2d (Codex 대칭 test) — saturation_count는 schedule() saturation branch에서만 증가.
+
+    의미 잠금: helper False / helper exception 같은 write 실패는 saturation과 무관.
+    saturation_count는 "skip 발생 횟수"이지 "write 실패 횟수"가 아니다.
+    """
+
+    async def test_helper_false_does_not_increment_saturation(self):
+        """helper False 반환 (write 거부) → _write_async 안 실패. saturation_count 0 유지."""
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+
+        # helper False 반환 → _write_async 안 success=False path, saturation branch 미진입
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ), patch(
+            "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        # _write_async 안 helper False는 saturation branch와 무관 — counter 0 유지
+        self.assertEqual(writer.saturation_count, 0)
+
+    async def test_helper_exception_does_not_increment_saturation(self):
+        """helper exception → _write_async 안 실패. saturation_count 0 유지."""
+        writer = CoinoneRedisWriter()
+        tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
+
+        with patch(
+            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("Redis 장애 simulated"),
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        # helper exception은 saturation branch와 무관 — counter 0 유지
+        self.assertEqual(writer.saturation_count, 0)
+
+
+class TestCoinoneFallbackScheduledProbeCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2d — CoinoneRestFallbackController.scheduled_probe_count counter 동작 검증.
+
+    의미: schedule_probe()가 in-flight/cooldown/no-loop skip 통과 후
+    loop.create_task() 성공 시점에만 +1. skip은 미증가.
+    """
+
+    def _make_controller(self) -> CoinoneRestFallbackController:
+        """Test용 controller — schedule만 검증, 실제 fanout 미실행."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        alert_evaluator = MagicMock()
+        return CoinoneRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=alert_evaluator,
+        )
+
+    def test_initial_value_zero(self):
+        """controller 생성 직후 counter == 0."""
+        controller = self._make_controller()
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    async def test_increments_on_successful_schedule(self):
+        """schedule_probe() 성공 (in-flight/cooldown/no-loop skip 통과) → +1."""
+        controller = self._make_controller()
+
+        async def fake_run_probe(reason):
+            return None
+
+        with patch.object(controller, "_run_probe", side_effect=fake_run_probe):
+            controller.schedule_probe(reason="test")
+            self.assertEqual(controller.scheduled_probe_count, 1)
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+    def test_no_increment_on_in_flight_skip(self):
+        """in-flight skip 발화 → counter 0 유지."""
+        controller = self._make_controller()
+        controller._in_flight = True
+        controller.schedule_probe(reason="test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    def test_no_increment_on_cooldown_skip(self):
+        """cooldown skip 발화 → counter 0 유지."""
+        controller = self._make_controller()
+        controller._cooldown_until = time.time() + 1000.0
+        controller.schedule_probe(reason="test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+
+class TestCoinoneSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
+    """PR 2d — Coinone summary log emit 검증 (10 fields, 2-dim status + 2 counters).
+
+    Coinone은 Korbit state shape (connection_status + ticker_freshness_status) +
+    Bithumb counter scope (saturation + probe 둘 다) union.
+    """
+
+    async def test_emit_format_contains_all_10_metrics(self):
+        """emit log에 state 8 + counter 2 = 10 metric key=value 포맷 포함."""
+        client = CoinoneWsClient()
+        client._liveness.frame_count_total = 100
+        client._liveness.last_tick_at = time.time() - 2.0
+        client._liveness.last_heartbeat_at = time.time() - 30.0
+        client._liveness.max_frame_gap_sec = 8.2
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.coinone.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log, "metric INFO log 없음")
+        for keyword in [
+            "frames_per_min=",
+            "last_tick_age=",
+            "last_heartbeat_age=",
+            "max_frame_gap=",
+            "connection_status=",                # 2-dim (Korbit 동일)
+            "ticker_freshness_status=",          # 2-dim (Korbit 동일)
+            "reconnect_attempts=",
+            "status_transitions=",
+            "redis_saturation_count=",           # PR 2d
+            "fallback_probe_scheduled_count=",   # PR 2d
+        ]:
+            self.assertIn(keyword, metric_log, f"metric key 누락: {keyword}")
+
+        # Coinone-specific schema 검증: 1-dim status= 형태 부재 (2-dim이라 status= 단독 없음)
+        # Note: 'connection_status=' / 'ticker_freshness_status='에는 'status='가 포함되므로
+        #       정확히 ' status=' (공백 prefix)로 1-dim status field 부재 확인
+        self.assertNotIn(" status=", metric_log)
+
+    async def test_sentinel_for_none_age(self):
+        """last_tick_at / last_heartbeat_at이 None이면 -1.0 numeric sentinel emit."""
+        client = CoinoneWsClient()
+        self.assertIsNone(client._liveness.last_tick_at)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.coinone.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("last_tick_age=-1.0", metric_log)
+        self.assertIn("last_heartbeat_age=-1.0", metric_log)
+
+    async def test_frames_per_min_calculation(self):
+        """frame_count_total 차이 / elapsed * 60 = frames_per_min 정확성 검증.
+
+        time.time() patch: 100.0 → 160.0 (elapsed=60s), frame_count 0 → 30
+        → frames_per_min = (30 - 0) * 60 / 60.0 = 30
+        """
+        client = CoinoneWsClient()
+        client._liveness.frame_count_total = 0
+
+        time_values = iter([100.0, 160.0])
+
+        async def fake_sleep(duration):
+            client._liveness.frame_count_total = 30
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.coinone.time.time", side_effect=lambda: next(time_values)), \
+             patch("app.crawlers.usdt_ws.coinone.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "frames_per_min=" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("frames_per_min=30", metric_log)
+
+    async def test_cancelled_silently_returns(self):
+        """CancelledError 시 silently return (no exception propagate)."""
+        client = CoinoneWsClient()
+
+        async def fake_sleep(_):
+            raise asyncio.CancelledError()
+
+        with patch("app.crawlers.usdt_ws.coinone.asyncio.sleep", side_effect=fake_sleep):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+    async def test_stop_event_before_first_emit_skips_emit(self):
+        """stop_event 사전 set 시 emit 0 (loop entry 못 함). assertNoLogs (Python 3.10+)."""
+        client = CoinoneWsClient()
+        client._stop_event.set()
+
+        with self.assertNoLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO"):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+
+class TestCoinoneSummaryLogEmitsCounters(unittest.IsolatedAsyncioTestCase):
+    """PR 2d — _summary_log_loop counter field emit value 검증 (PropertyMock pattern).
+
+    Bithumb PR 2c / Korbit PR 2a / Upbit PR 2b 패턴 mirror — counter property mock으로
+    emit log 안 numeric 값 직접 검증.
+    """
+
+    async def test_emit_contains_saturation_count_value(self):
+        """redis_saturation_count=N emit 검증 (PropertyMock)."""
+        client = CoinoneWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            CoinoneRedisWriter, "saturation_count",
+            new_callable=PropertyMock, return_value=13,
+        ), patch("app.crawlers.usdt_ws.coinone.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("redis_saturation_count=13", metric_log)
+
+    async def test_emit_contains_scheduled_probe_count_value(self):
+        """fallback_probe_scheduled_count=N emit 검증 (PropertyMock)."""
+        client = CoinoneWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            CoinoneRestFallbackController, "scheduled_probe_count",
+            new_callable=PropertyMock, return_value=4,
+        ), patch("app.crawlers.usdt_ws.coinone.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.coinone", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("fallback_probe_scheduled_count=4", metric_log)
+
+
+class TestCoinoneStartCancelsSummaryTask(unittest.IsolatedAsyncioTestCase):
+    """PR 2d — start() finally에서 summary_task cancel/await 검증.
+
+    Korbit/Bithumb start() finally cancel pattern mirror (reconnect loop 예외와 독립).
+    """
+
+    async def test_start_cancels_summary_task_on_stop(self):
+        """start 종료 시 summary_task가 cancel + await됨."""
+        client = CoinoneWsClient()
+        cancelled = {"value": False}
+
+        async def fake_summary_loop():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                return
+
+        async def fake_run_one_session():
+            await client._stop_event.wait()
+
+        with patch.object(client, "_summary_log_loop", side_effect=fake_summary_loop), \
+             patch.object(client, "_run_one_session", side_effect=fake_run_one_session):
+            task = asyncio.create_task(client.start())
+            await asyncio.sleep(0.05)
+            await client.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertTrue(cancelled["value"], "summary_task가 cancel되지 않음")
+        self.assertFalse(client._running)
 
 
 if __name__ == "__main__":

@@ -172,6 +172,15 @@ TICKER_FRESHNESS_DEGRADED_SEC = 300.0
 FALLBACK_COOLDOWN_SEC = 300.0           # provisional, sparse-time smoke 후 조정 가능
 FALLBACK_PROBE_TIMEOUT_SEC = 10.0       # REST HTTP timeout (Bithumb 동일)
 
+# Summary log follow-up (Phase B.5 §12.7.5 후속) — 60s cycle metric INFO emit.
+# Korbit/Upbit/Bithumb summary log 패턴 mirror.
+# PR 2d (Coinone bundle): Coinone은 Korbit state shape (2-dim status) + Bithumb counter
+# scope (saturation + probe 둘 다) union이라 10 fields emit (state 8 +
+# redis_saturation_count + fallback_probe_scheduled_count).
+# 향후 PR scope: probe lifecycle breakdown counter (success/timeout/none/cooldown_skip/
+# in_flight_skip) — 별도.
+SUMMARY_LOG_INTERVAL_SEC = 60.0
+
 
 class CoinoneRedisWriter:
     """Coinone USDT/KRW Redis latest writer — tick-level, fire-and-forget (C5).
@@ -206,14 +215,23 @@ class CoinoneRedisWriter:
         # old tick이 new tick을 덮는 race 차단. lock은 to_thread 완료까지 보유
         # — schedule 순서 = Redis SET 순서. (Bithumb U5 mirror)
         self._write_lock: asyncio.Lock = asyncio.Lock()
+        # PR 2d — Redis write queue saturation skip 누적 (Bithumb PR 2c / Upbit PR 2b mirror).
+        # 의미: MAX_PENDING_WRITES skip 발생 횟수. write 성공/실패 무관.
+        self._saturation_count: int = 0
+
+    @property
+    def saturation_count(self) -> int:
+        """PR 2d — Redis write queue saturation skip 누적 횟수 (read-only)."""
+        return self._saturation_count
 
     def schedule(self, tick: dict) -> None:
         """tick → background Redis write task. fire-and-forget.
 
-        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning.
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning + counter ++.
         Redis 장애로 task가 누적되는 시나리오 차단.
         """
         if len(self._tasks) >= MAX_PENDING_WRITES:
+            self._saturation_count += 1
             logger.warning(
                 "[usdt_ws.coinone] Redis write queue saturated (%d in-flight) — skip tick",
                 len(self._tasks),
@@ -448,6 +466,15 @@ class CoinoneRestFallbackController:
         self._in_flight: bool = False
         self._cooldown_until: float = 0.0
         self._pending_task: Optional[asyncio.Task] = None
+        # PR 2d — scheduled probe 누적 (Korbit PR 2a / Bithumb PR 2c mirror).
+        # 의미: loop.create_task() 성공 시점 기준 +1. in-flight/cooldown/no-loop skip 미증가.
+        # success/timeout/exception 무관 — schedule 자체만 카운팅.
+        self._scheduled_probe_count: int = 0
+
+    @property
+    def scheduled_probe_count(self) -> int:
+        """PR 2d — REST fallback probe schedule 누적 횟수 (read-only, instance lifetime)."""
+        return self._scheduled_probe_count
 
     def schedule_probe(self, reason: str) -> None:
         """sync: in-flight/cooldown 체크 후 background probe task 생성. 즉시 반환.
@@ -480,6 +507,8 @@ class CoinoneRestFallbackController:
             return
         self._pending_task = loop.create_task(self._run_probe(reason))
         self._in_flight = True
+        # PR 2d — schedule 성공 시점 누적 (skip 분기들은 위에서 이미 return).
+        self._scheduled_probe_count += 1
 
     def reset_cooldown(self) -> None:
         """normal 복귀 시 호출 — cooldown clear. 다음 degraded 즉시 1회 probe 보장."""
@@ -1046,6 +1075,9 @@ class CoinoneWsClient:
             return
         self._running = True
         logger.info("[usdt_ws.coinone] start (C4 — connect/subscribe/parse + PING/PONG + reconnect)")
+        # PR 2d — start-level summary log task (Korbit/Upbit/Bithumb 패턴 mirror).
+        # _run_one_session 영향 0 — start lifetime 동안만 60s cycle emit.
+        summary_task = asyncio.create_task(self._summary_log_loop())
         attempt = 0
         try:
             while not self._stop_event.is_set():
@@ -1090,8 +1122,88 @@ class CoinoneWsClient:
                 except asyncio.TimeoutError:
                     pass  # backoff 완료, 다음 iteration
         finally:
+            # PR 2d — summary_task cancel/await (reconnect loop 예외와 독립 try/except).
+            # Korbit/Bithumb start() finally cancel 패턴 mirror.
+            summary_task.cancel()
+            try:
+                await summary_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.coinone] summary_task cleanup 실패")
             self._running = False
             self._ws = None
+
+    async def _summary_log_loop(self) -> None:
+        """PR 2d — start lifetime 동안 60s cycle metric INFO emit (Coinone 10 fields).
+
+        Korbit `_summary_log_loop` / Bithumb `_summary_log_loop` 패턴 mirror.
+        Coinone은 Korbit state shape (2-dim status) + Bithumb counter scope
+        (saturation + probe 둘 다) union이라 10 fields (state 8 + counter 2).
+
+        Emit metric (10개, state 8 + counter 2):
+            - frames_per_min: `_liveness.frame_count_total` 차이 / elapsed
+            - last_tick_age: `now - _liveness.last_tick_at` (없으면 -1.0 sentinel)
+            - last_heartbeat_age: `now - _liveness.last_heartbeat_at` (없으면 -1.0 sentinel)
+            - max_frame_gap: `_liveness.max_frame_gap_sec`
+            - connection_status: `_connection_status` (normal/reconnecting/stale, Korbit 동일)
+            - ticker_freshness_status: `_ticker_freshness_status` (normal/warning/degraded, Korbit 동일)
+            - reconnect_attempts: `_reconnect_attempt_count` (instance lifetime)
+            - status_transitions: `_status_transition_count` 6 keys
+              (connection 3 + ticker 3, Korbit 동일)
+            - redis_saturation_count: `_redis_writer.saturation_count` (PR 2d)
+            - fallback_probe_scheduled_count: `_fallback_controller.scheduled_probe_count` (PR 2d)
+
+        Coinone-specific schema:
+            - Korbit state shape 그대로 (2-dim status + 6 transition keys)
+            - Bithumb처럼 redis_saturation_count + fallback_probe_scheduled_count 둘 다 포함
+            - 향후 PR scope (별도): probe lifecycle breakdown counter
+
+        Sentinel 정책 (Korbit/Upbit/Bithumb 동일):
+            last_tick_at / last_heartbeat_at이 None일 경우 (첫 tick/PONG 전) -1.0
+            numeric sentinel. log 파싱 / numeric aggregation 일관성.
+        """
+        prev_frame_total = self._liveness.frame_count_total
+        prev_at = time.time()
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(SUMMARY_LOG_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                return
+            now = time.time()
+            elapsed = max(now - prev_at, 1e-9)
+            frames_in_window = self._liveness.frame_count_total - prev_frame_total
+            frames_per_min = int(round(frames_in_window * 60 / elapsed))
+            prev_frame_total = self._liveness.frame_count_total
+            prev_at = now
+
+            last_tick = self._liveness.last_tick_at
+            last_tick_age = (now - last_tick) if last_tick is not None else -1.0
+            last_heartbeat = self._liveness.last_heartbeat_at
+            last_heartbeat_age = (now - last_heartbeat) if last_heartbeat is not None else -1.0
+
+            transitions_str = "/".join(
+                f"{k}:{v}" for k, v in self._status_transition_count.items()
+            )
+
+            logger.info(
+                "[usdt_ws.coinone] metrics frames_per_min=%d "
+                "last_tick_age=%.1f last_heartbeat_age=%.1f "
+                "max_frame_gap=%.1f "
+                "connection_status=%s ticker_freshness_status=%s "
+                "reconnect_attempts=%d "
+                "status_transitions=%s "
+                "redis_saturation_count=%d "
+                "fallback_probe_scheduled_count=%d",
+                frames_per_min,
+                last_tick_age, last_heartbeat_age,
+                self._liveness.max_frame_gap_sec,
+                self._connection_status, self._ticker_freshness_status,
+                self._reconnect_attempt_count,
+                transitions_str,
+                self._redis_writer.saturation_count,
+                self._fallback_controller.scheduled_probe_count,
+            )
 
     async def stop(self) -> None:
         """stop signal.
