@@ -1,39 +1,51 @@
-"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G2.
+"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G3.
 
 USDT_WS_DESIGN_PLAN §12.9 (Phase B.6, 2026-05-21).
 
-G2 scope (이 파일의 현재 범위):
-    G1 lifecycle skeleton + Subscribe/Parse/USDT-KRW 클라이언트 필터링까지.
-    Primus heartbeat (G3) / Liveness + reconnect (G4) / Writers + fallback +
-    alert (G5-G7) / Telemetry (PR 2e)는 별도 stage.
+G3 scope (이 파일의 현재 범위):
+    G1 lifecycle skeleton + G2 Subscribe/Parse/USDT-KRW 필터링 + G3 Primus pong
+    handler + heartbeat timestamp 기록까지. Liveness + reconnect (G4) / Writers
+    + fallback + alert (G5-G7) / Telemetry (PR 2e)는 별도 stage.
 
-⚠️ Production activation 제약 (G2 단계 — Codex 강조):
-    G2부터 `_run_one_session()`이 실제 `websockets.connect()`를 호출한다.
-    flag=true 시:
+G3 주요 변경:
+    - `_is_primus_ping()` static method — Primus ping **전용** 매칭 (3 form 처리,
+      Codex 정정: pong/open/close 등 다른 control frame은 False).
+    - `_handle_primus_ping(ws, raw)` async method — pong replacement send +
+      `_last_heartbeat_at` 갱신 (send 성공 시점에만). **bool return** (Codex 정정).
+    - `_run_one_session()` 안 Primus 분기 추가 — ping 매칭 시 pong send →
+      성공이면 continue, 실패면 session 종료 (Codex 정정: G4 reconnect 부재라 깨진
+      session 명시적 종료).
+    - 신규 attribute `_last_heartbeat_at: Optional[float]` (G4 liveness에서 활용).
+
+⚠️ Production activation 제약 (G3 단계도 유지 — Codex 강조):
+    G3는 Primus pong 처리되지만 **G4 reconnect/liveness 부재**라서:
         1. connect 성공 → SubscribeToTickers 송신 성공
-        2. Initial response (전체 ticker array) → USDT-KRW 매칭 → first tick log
+        2. Initial response → USDT-KRW 매칭 → first tick log
         3. ~30초 후 server `"primus::ping::<epoch_ms>"` 송신
-        4. G2는 skip만 (pong 응답은 G3에서 추가) → server 30s timeout → disconnect
-        5. **G4 reconnect loop 부재** → `_run_one_session()` 종료. session 1회만
-           실행되고 reconnect 없음. `start()` task는 종료되지 않고 stop_event
-           대기 상태로 **idle** 유지 (`_running=True`). 새 tick도 없고 reconnect도
-           없는 silent idle 상태 — silent termination이 아니라 silent stuck에 가깝다.
+        4. G3: pong replacement 송신 + `_last_heartbeat_at` 갱신 → session 유지
+        5. **단** pong send 실패 또는 ConnectionClosed 발생 시 `_run_one_session()`
+           종료 → G4 reconnect loop 부재라 재시작 없음. `start()` task는
+           stop_event 대기 상태로 **idle** 유지 (`_running=True`). 새 tick도
+           reconnect도 없는 silent idle 상태 — silent termination이 아니라
+           silent stuck에 가깝다.
 
-    따라서 G2 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지.
-    Production env는 default false 유지하며, **G3 (Primus pong) + G4 (reconnect/
-    liveness) land 후에만 activation 검토**.
+    따라서 G3 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지.
+    Production env는 default false 유지하며, **G4 (reconnect + liveness) land 후
+    에만 activation 검토** (G3 단독으로는 단일 session 후 idle 위험 여전).
 
-G2 acceptance:
-    - flag=false 시 GopaxWsClient 생성 X + task 생성 X + network connect X (G1 동일)
-    - flag=true 시 connect + subscribe + recv + parse 까지만, fanout 0
-    - USDT-KRW만 클라이언트 필터링하여 first tick INFO 1회 + 이후 DEBUG
-    - Primus ping 3가지 form 모두 skip (pong 응답은 G3)
+G3 acceptance:
+    - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1/G2 동일)
+    - flag=true 시 connect + subscribe + recv + parse + Primus pong까지
+    - Primus ping 3 form 모두 pong replacement 송신 + heartbeat 갱신 (Codex 정정:
+      ping 전용 — pong/open/close는 별도 처리)
+    - pong send 실패 시 session 명시적 종료 (Codex 정정: log-only 금지)
 
-G2 신규 attribute (Codex 최종 권고 — 필요한 것만):
-    - `_ws`: connect 결과 ws 객체 (recv loop 동안 보유)
-    - `_first_tick_logged`: first tick INFO 1회 emit (이후 DEBUG)
-    G3~G4 attribute (`_connection_status` / `_ticker_freshness_status` /
-    `_reconnect_attempt_count` / `_liveness` 등)는 본 stage 제외.
+G3 누적 attribute (G1 + G2 + G3):
+    - G1: `_stop_event` / `_running`
+    - G2: `_ws` / `_first_tick_logged`
+    - G3: `_last_heartbeat_at` (G4 liveness에서 활용, G3는 기록만)
+    G4 attribute (`_connection_status` / `_ticker_freshness_status` /
+    `_reconnect_attempt_count` / `_liveness`)는 여전히 본 stage 제외.
 """
 
 from __future__ import annotations
@@ -41,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 import websockets
@@ -60,16 +73,18 @@ GOPAX_TARGET_PAIR = "USDT-KRW"
 
 
 class GopaxWsClient:
-    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G2.
+    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G3.
 
-    G1 lifecycle skeleton + G2 connect/subscribe/parse 누적. Codex 최종 권고대로
-    `_connection_status` / `_ticker_freshness_status` / `_reconnect_attempt_count` /
-    `_liveness` 등 G4에서 실제 필요해질 attribute는 본 stage에서 제외 (선반영 회피).
+    G1 lifecycle skeleton + G2 connect/subscribe/parse + G3 Primus pong handler
+    누적. Codex 최종 권고대로 `_connection_status` / `_ticker_freshness_status` /
+    `_reconnect_attempt_count` / `_liveness` 등 G4에서 실제 필요해질 attribute는
+    본 stage에서 제외 (선반영 회피).
 
-    ⚠️ Production activation 제약 (G2):
-        G2 land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G3 (Primus pong) +
-        G4 (reconnect/liveness) land 후에만 activation 검토. 자세한 내용은 module
-        docstring 참조.
+    ⚠️ Production activation 제약 (G3 단계도 유지):
+        G3는 Primus pong을 처리하지만 G4 reconnect/liveness 부재라서 pong send
+        실패 또는 ConnectionClosed 시 여전히 silent idle/stuck 상태. G3 land 후
+        에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G4 land 후에만 activation
+        검토. 자세한 내용은 module docstring 참조.
     """
 
     def __init__(self) -> None:
@@ -79,6 +94,9 @@ class GopaxWsClient:
         # G2 session state — connect 결과 + first tick log throttle
         self._ws: Optional[Any] = None
         self._first_tick_logged: bool = False
+        # G3 heartbeat — Primus pong send 성공 시점 timestamp.
+        # G4 liveness/status 판단에서 활용 예정. G3는 기록만, 판단 X.
+        self._last_heartbeat_at: Optional[float] = None
 
     @staticmethod
     def _build_subscribe_payload() -> dict:
@@ -88,6 +106,63 @@ class GopaxWsClient:
         클라이언트측에서 USDT-KRW만 필터링 (`_parse_ticker_message` 안).
         """
         return {"n": "SubscribeToTickers", "o": {}}
+
+    @staticmethod
+    def _is_primus_ping(raw) -> bool:
+        """Primus ping 매칭 — **ping 전용** (Codex 정정).
+
+        G3는 pong 응답 단계라 ping만 잡는다. pong/open/close 등 다른 Primus
+        control frame은 False return (`_parse_ticker_message`의 G2 skip 분기에서
+        별도 처리). 3 form 모두 처리:
+            (i) JSON string form: '"primus::ping::..."' (with outer quotes)
+            (ii) Plain text form: 'primus::ping::...' (no quotes)
+            (iii) bytes form: G2 fast-path와 동일하게 decode 후 매칭
+
+        Returns:
+            True: Primus ping frame (3 form 중 하나)
+            False: 그 외 (일반 ticker / non-ping Primus control frame / invalid)
+        """
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return False
+        if not isinstance(raw, str):
+            return False
+        text = raw.strip()
+        return text.startswith('"primus::ping::') or text.startswith("primus::ping::")
+
+    async def _handle_primus_ping(self, ws, raw) -> bool:
+        """Primus ping → pong replacement + ws.send + _last_heartbeat_at 갱신.
+
+        guide §7 line 408-410 명세:
+            - JSON string form: '"primus::ping::..."' → '"primus::pong::..."'
+            - Plain text form: 'primus::ping::...' → 'primus::pong::...'
+            - replace("::ping::", "::pong::")로 두 form 모두 처리 가능
+
+        Heartbeat timestamp 정책 (Codex 검토 포인트 #3):
+            send 성공 시점에만 `_last_heartbeat_at = time.time()` 갱신. send 실패
+            시 갱신 안 함 (이후 G4 liveness가 stale 판정 가능).
+
+        Returns:
+            True: pong 송신 성공 (heartbeat 갱신 완료)
+            False: send 실패 — Codex 정정으로 _run_one_session()에서 session 종료
+                   (G4 reconnect 부재라 깨진 session 명시적 종료).
+        """
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        pong = raw.replace("::ping::", "::pong::")
+        try:
+            await ws.send(pong)
+            self._last_heartbeat_at = time.time()
+            logger.debug("[usdt_ws.gopax] primus pong sent")
+            return True
+        except Exception:
+            logger.exception(
+                "[usdt_ws.gopax] primus pong send 실패 — session 종료 "
+                "(G3 — G4 reconnect 부재)",
+            )
+            return False
 
     @staticmethod
     def _normalize_tick(item: dict) -> Optional[dict]:
@@ -208,20 +283,28 @@ class GopaxWsClient:
         return tick
 
     async def _run_one_session(self) -> None:
-        """G2 single session — connect + subscribe + recv loop + parse.
+        """G3 single session — connect + subscribe + recv loop + Primus pong + parse.
 
-        Lifecycle (G2 scope):
+        Lifecycle (G3 scope):
             1. websockets.connect(GOPAX_WS_URL)
             2. SubscribeToTickers payload send
-            3. recv loop: wake every RECV_TIMEOUT_SEC (stop_event 반응) + parse only
-            4. fanout (Redis/DB/Alert) 없음 — G5-G7 영역
+            3. recv loop: wake every RECV_TIMEOUT_SEC (stop_event 반응)
+            4. Primus ping → pong send + `_last_heartbeat_at` 갱신 → continue
+               (Codex 정정: send 실패 시 session 명시적 종료)
+            5. 그 외 frame → parse + handle
+            6. fanout (Redis/DB/Alert) 없음 — G5-G7 영역
 
-        ⚠️ G2 단독 flag=true는 production 활성화 금지:
-            recv loop가 Primus ping 도착 → skip만 (G3 pong 미구현) → server 30s
-            disconnect → ConnectionClosed → _run_one_session 종료. G4 reconnect
-            loop 부재라 재시작 없음 — `start()` task는 stop_event 대기 상태로
-            **idle** 유지 (silent termination이 아니라 silent stuck). 자세한 내용은
-            module docstring 참조.
+        Primus 처리 우선 순위 (Codex 검토 포인트):
+            - ping만 잡고 pong/open/close 등 다른 control frame은 parse layer로 전달
+              (parse는 None return — G2 defensive skip)
+            - send 성공 시점에만 heartbeat 갱신 (실패는 갱신 없음)
+            - send 실패 → session 종료 (return) → G4 reconnect loop 추가 시 자연 통합
+
+        ⚠️ G3 단독 flag=true는 production 활성화 금지:
+            Primus pong은 응답하지만 G4 reconnect/liveness 부재라 ConnectionClosed
+            또는 pong send 실패 시 session 종료 → `start()` task는 stop_event
+            대기 상태로 **idle** 유지 (silent termination이 아니라 silent stuck).
+            자세한 내용은 module docstring 참조.
         """
         async with websockets.connect(
             GOPAX_WS_URL,
@@ -245,14 +328,22 @@ class GopaxWsClient:
                     except asyncio.TimeoutError:
                         continue
                     except ConnectionClosed:
-                        # G2: server disconnect (e.g., Primus pong 미응답 30s)
-                        # → session 종료. G4 reconnect loop에서 재시도 추가 예정.
+                        # G3: server disconnect — session 종료.
+                        # G4 reconnect loop에서 재시도 추가 예정.
                         logger.warning(
-                            "[usdt_ws.gopax] connection closed during recv (G2 — no reconnect)",
+                            "[usdt_ws.gopax] connection closed during recv (G3 — no reconnect)",
                         )
                         return
+
+                    # G3: Primus ping 먼저 처리 (pong 송신 + heartbeat 갱신).
+                    if self._is_primus_ping(raw):
+                        if not await self._handle_primus_ping(ws, raw):
+                            # Codex 정정: send 실패 → session 종료 (G4 reconnect 부재).
+                            return
+                        continue
+
+                    # 그 외 frame → parse + handle. fanout은 G5+ 영역.
                     self._handle_message(raw)
-                    # G2 scope: tick detect만, fanout은 G5+ 영역
             finally:
                 self._ws = None
 
@@ -280,7 +371,7 @@ class GopaxWsClient:
             return
         self._running = True
         logger.info(
-            "[usdt_ws.gopax] start (G2 — connect/subscribe/parse, no reconnect/heartbeat/fanout)",
+            "[usdt_ws.gopax] start (G3 — connect/subscribe/parse + Primus pong, no reconnect/liveness/fanout)",
         )
         try:
             try:

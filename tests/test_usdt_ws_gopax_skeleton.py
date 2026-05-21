@@ -20,6 +20,8 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from websockets.exceptions import ConnectionClosed
+
 from app import config, scheduler
 from app.crawlers.usdt_ws.gopax import (
     GOPAX_WS_URL,
@@ -151,21 +153,23 @@ class TestShutdownUsdtWsGopaxClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
-    """G2 client — G1 lifecycle + _ws/_first_tick_logged 보유.
+    """G3 client — G1 lifecycle + G2 connect/parse + G3 heartbeat timestamp 보유.
 
     Codex 최종 권고: G4 attribute (_connection_status / _ticker_freshness_status /
     _reconnect_attempt_count / _liveness)는 본 stage 제외.
     """
 
-    async def test_init_state_g2_scope(self):
-        """__init__ 직후: G1 + G2 attribute만 보유, G4 attribute 부재."""
+    async def test_init_state_g3_scope(self):
+        """__init__ 직후: G1 + G2 + G3 attribute만 보유, G4 attribute 부재."""
         client = GopaxWsClient()
         # G1 state
         self.assertFalse(client._running)
         self.assertFalse(client._stop_event.is_set())
-        # G2 state — 신규 attribute (Codex 권고 — G2 단계에서만 필요)
+        # G2 state
         self.assertIsNone(client._ws)
         self.assertFalse(client._first_tick_logged)
+        # G3 state — heartbeat timestamp (Codex 권고 — G4 liveness에서 활용)
+        self.assertIsNone(client._last_heartbeat_at)
         # G4 attribute 부재 검증 (선반영 회피)
         self.assertFalse(hasattr(client, "_connection_status"))
         self.assertFalse(hasattr(client, "_ticker_freshness_status"))
@@ -224,28 +228,28 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
 
 
 class TestScopeGuard(unittest.TestCase):
-    """G2 module-level scope guard — G3~G7 미구현 symbol 부재 검증."""
+    """G3 module-level scope guard — G4~G7 미구현 symbol 부재 검증."""
 
     def test_gopax_ws_url_exported(self):
         """G1: GOPAX_WS_URL constant module-level 노출."""
         self.assertEqual(GOPAX_WS_URL, "wss://wsapi.gopax.co.kr")
 
-    def test_no_g3_g7_symbols_at_module_level(self):
-        """G2: G3~G7에서 추가될 symbol module-level 부재 검증.
+    def test_no_g4_g7_symbols_at_module_level(self):
+        """G3: G4~G7에서 추가될 symbol module-level 부재 검증.
 
-        G3 (Primus pong handler), G4 (Liveness/reconnect), G5 (Redis writer),
-        G6a (DB writer), G6b (REST helper + fallback controller), G7 (alert).
-        본 G2 단계에서는 모두 부재해야 함 (선제 작성 회피).
+        G3에서 Primus ping/pong helpers는 GopaxWsClient class method로 추가됨
+        (module-level X). G4 (Liveness/reconnect), G5 (Redis writer), G6a (DB
+        writer), G6b (REST helper + fallback controller), G7 (alert)은 module-level
+        부재해야 함 (선제 작성 회피).
         """
         from app.crawlers.usdt_ws import gopax as gopax_module
 
         forbidden_attrs = [
-            # G3 — Primus pong handler / heartbeat
-            "send_primus_pong",
-            "primus_ping_replacement",
             # G4 — Liveness + reconnect
             "RECONNECT_BACKOFF_SEQ",
             "STALE_AFTER_SEC",
+            "PING_INTERVAL_SEC",
+            "TICKER_FRESHNESS_WARNING_SEC",
             # G5 — Redis writer
             "GopaxRedisWriter",
             "MAX_PENDING_WRITES",
@@ -260,7 +264,7 @@ class TestScopeGuard(unittest.TestCase):
         for attr in forbidden_attrs:
             self.assertFalse(
                 hasattr(gopax_module, attr),
-                f"G2 scope 위반: {attr} symbol이 module-level에 존재함 — G3~G7 stage에서 추가 예정",
+                f"G3 scope 위반: {attr} symbol이 module-level에 존재함 — G4~G7 stage에서 추가 예정",
             )
 
 
@@ -559,9 +563,11 @@ class TestG2ActivationConstraint(unittest.TestCase):
         self.assertIn("G3", doc)
 
     def test_run_one_session_docstring_warns_activation_constraint(self):
-        """_run_one_session docstring에 G2 단독 activation 금지 + idle 명시."""
+        """_run_one_session docstring에 현재 stage 단독 activation 금지 + idle 명시."""
         doc = GopaxWsClient._run_one_session.__doc__ or ""
-        self.assertIn("G2 단독 flag=true", doc)
+        # 현재 stage (G3)는 단독 activation 금지 명시. 향후 G4 진입 시 동일 검증
+        # 패턴으로 갱신.
+        self.assertIn("G3 단독 flag=true", doc)
         # Codex 정정 — silent idle/stuck 명시
         self.assertIn("idle", doc)
 
@@ -571,6 +577,210 @@ class TestG2ActivationConstraint(unittest.TestCase):
         self.assertIn("idle", doc)
         # silent termination이 아니라 silent idle/stuck
         self.assertIn("silent termination이 아니", doc)
+
+
+# ===========================================================================
+# G3 Primus pong handler + heartbeat
+# ===========================================================================
+
+
+class TestIsPrimusPing(unittest.TestCase):
+    """G3: _is_primus_ping — ping 전용 매칭 (Codex 정정: pong/open/close 제외)."""
+
+    def test_json_string_form_ping(self):
+        """JSON string form: '"primus::ping::..."' → True."""
+        self.assertTrue(GopaxWsClient._is_primus_ping('"primus::ping::1234"'))
+
+    def test_plain_text_form_ping(self):
+        """Plain text form: 'primus::ping::...' → True."""
+        self.assertTrue(GopaxWsClient._is_primus_ping("primus::ping::1234"))
+
+    def test_whitespace_prefixed_ping(self):
+        """Leading whitespace → strip 후 매칭 → True."""
+        self.assertTrue(GopaxWsClient._is_primus_ping("  primus::ping::1234  "))
+
+    def test_bytes_form_ping(self):
+        """bytes → decode 후 매칭 → True."""
+        self.assertTrue(GopaxWsClient._is_primus_ping(b"primus::ping::1234"))
+
+
+class TestIsPrimusPingNonPingRejected(unittest.TestCase):
+    """G3 (Codex 정정): non-ping Primus control frame은 False — ping 전용 매칭.
+
+    pong/open/close 등은 _handle_primus_ping이 처리하면 안 된다.
+    """
+
+    def test_primus_pong_rejected(self):
+        """primus::pong::... → False (ping 아님, pong을 client가 다시 응답 안 함)."""
+        self.assertFalse(GopaxWsClient._is_primus_ping('"primus::pong::1234"'))
+        self.assertFalse(GopaxWsClient._is_primus_ping("primus::pong::1234"))
+
+    def test_primus_open_rejected(self):
+        """primus::open::... → False (control frame)."""
+        self.assertFalse(GopaxWsClient._is_primus_ping("primus::open::1234"))
+
+    def test_normal_json_message_rejected(self):
+        """일반 JSON ticker frame → False."""
+        self.assertFalse(GopaxWsClient._is_primus_ping('{"n":"TickerEvent","o":{}}'))
+        self.assertFalse(GopaxWsClient._is_primus_ping("any other text"))
+
+
+class TestHandlePrimusPing(unittest.IsolatedAsyncioTestCase):
+    """G3: _handle_primus_ping — pong send + heartbeat 갱신 + bool return."""
+
+    async def test_json_string_form_pong_sent(self):
+        """JSON string ping → JSON string pong 송신, True return, heartbeat 갱신."""
+        client = GopaxWsClient()
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        before = client._last_heartbeat_at
+        self.assertIsNone(before)
+
+        result = await client._handle_primus_ping(mock_ws, '"primus::ping::1234"')
+
+        self.assertTrue(result)
+        mock_ws.send.assert_called_once_with('"primus::pong::1234"')
+        # Codex 검토 포인트 #3: heartbeat은 send 성공 시점에만 갱신
+        self.assertIsNotNone(client._last_heartbeat_at)
+        self.assertIsInstance(client._last_heartbeat_at, float)
+
+    async def test_plain_text_form_pong_sent(self):
+        """Plain text ping → plain text pong 송신, True return, heartbeat 갱신."""
+        client = GopaxWsClient()
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        result = await client._handle_primus_ping(mock_ws, "primus::ping::5678")
+
+        self.assertTrue(result)
+        mock_ws.send.assert_called_once_with("primus::pong::5678")
+        self.assertIsNotNone(client._last_heartbeat_at)
+
+    async def test_bytes_form_pong_sent(self):
+        """bytes ping → str decode + pong 송신, True return."""
+        client = GopaxWsClient()
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        result = await client._handle_primus_ping(mock_ws, b"primus::ping::9999")
+
+        self.assertTrue(result)
+        mock_ws.send.assert_called_once_with("primus::pong::9999")
+        self.assertIsNotNone(client._last_heartbeat_at)
+
+
+class TestHandlePrimusPingFailureSessionEnd(unittest.IsolatedAsyncioTestCase):
+    """G3 (Codex 정정): pong send 실패 → False return + heartbeat 미갱신.
+
+    _run_one_session에서 False return 시 session 종료해야 함 (G4 reconnect 부재).
+    """
+
+    async def test_send_failure_returns_false_and_no_heartbeat(self):
+        """ws.send 실패 → False + heartbeat None 유지."""
+        client = GopaxWsClient()
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock(side_effect=ConnectionClosed(None, None))
+
+        result = await client._handle_primus_ping(mock_ws, "primus::ping::1234")
+
+        self.assertFalse(result)
+        # Codex 검토 포인트 #3: send 실패 시 heartbeat 미갱신
+        self.assertIsNone(client._last_heartbeat_at)
+
+
+class TestRunOneSessionPrimusFlow(unittest.IsolatedAsyncioTestCase):
+    """G3: _run_one_session 안 Primus 분기 — pong 송신 + parse 호출 안 됨."""
+
+    async def test_primus_ping_triggers_pong_send(self):
+        """recv loop에서 Primus ping 도착 → pong 송신 + parse 호출 0."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                return "primus::ping::1234"
+            if recv_count["n"] == 2:
+                # 2번째 recv 시 stop_event set으로 loop 종료
+                client._stop_event.set()
+                return "primus::ping::5678"
+            await asyncio.sleep(10)
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        # _handle_message는 parse 진입 검증 (Primus는 진입 안 됨)
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client, "_handle_message") as mock_handle:
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # subscribe 1회 + 2 pong replacement = 3회 send
+        self.assertEqual(mock_ws.send.call_count, 3)
+        # parse layer (_handle_message)는 호출 안 됨 (모두 Primus였음)
+        mock_handle.assert_not_called()
+
+    async def test_pong_send_failure_ends_session(self):
+        """Codex 정정: pong send 실패 → _run_one_session return (session 종료)."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        # subscribe send는 성공, 그 후 pong send 실패
+        send_count = {"n": 0}
+        async def fake_send(payload):
+            send_count["n"] += 1
+            if send_count["n"] == 1:
+                return  # subscribe 성공
+            raise ConnectionClosed(None, None)  # pong 실패
+
+        mock_ws.send = AsyncMock(side_effect=fake_send)
+        mock_ws.recv = AsyncMock(return_value="primus::ping::1234")
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # session 종료 — ws cleanup
+        self.assertIsNone(client._ws)
+        # heartbeat 미갱신
+        self.assertIsNone(client._last_heartbeat_at)
+
+
+class TestG3ActivationConstraint(unittest.TestCase):
+    """G3 (Codex 강조): G3 land 후에도 production env false 유지 docstring 명시.
+
+    G4 reconnect/liveness 부재라 pong send 실패 또는 ConnectionClosed 시 여전히
+    silent idle/stuck. docstring으로 이 제약 잠금.
+    """
+
+    def test_module_docstring_g3_activation_constraint(self):
+        """module docstring에 G3 단계도 activation 금지 명시."""
+        import app.crawlers.usdt_ws.gopax as gopax_module
+        doc = gopax_module.__doc__ or ""
+        self.assertIn("G3 단계도 유지", doc)
+        # G4 land 후에만 activation 명시
+        self.assertIn("G4", doc)
+        # silent idle 여전 명시
+        self.assertIn("idle", doc)
+
+    def test_class_docstring_g3_activation_constraint(self):
+        """class docstring에도 G3 단계 유지 명시."""
+        doc = GopaxWsClient.__doc__ or ""
+        self.assertIn("G3 단계도 유지", doc)
 
 
 class TestG2StartIdleAfterSessionEnd(unittest.IsolatedAsyncioTestCase):
