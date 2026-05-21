@@ -153,6 +153,14 @@ DB_WRITE_WINDOW_SEC = 1.0       # debounce window (KRX KrxDbWriter 동일)
 FALLBACK_COOLDOWN_SEC = 30.0       # stale 지속 중 probe 빈도 제한 (= STALE_AFTER_SEC)
 FALLBACK_PROBE_TIMEOUT_SEC = 10.0  # REST HTTP timeout
 
+# Summary log follow-up (Phase B.5 §12.7.5 후속) — 60s cycle metric INFO emit.
+# Korbit/Upbit summary log 패턴 mirror.
+# PR 2c (Bithumb bundle): Bithumb은 Upbit 1-dim status + Korbit REST fallback union이라
+# 9 fields emit (state 7 + redis_saturation_count + fallback_probe_scheduled_count).
+# 향후 PR scope: probe lifecycle breakdown counter (success/timeout/none/cooldown_skip/
+# in_flight_skip) — 별도.
+SUMMARY_LOG_INTERVAL_SEC = 60.0
+
 
 class BithumbRedisWriter:
     """Bithumb USDT/KRW Redis latest writer — tick-level, fire-and-forget.
@@ -183,14 +191,23 @@ class BithumbRedisWriter:
         # old tick이 new tick을 덮는 race 차단. lock은 to_thread 완료까지 보유
         # — schedule 순서 = Redis SET 순서. (Upbit Codex review 산물 mirror)
         self._write_lock: asyncio.Lock = asyncio.Lock()
+        # PR 2c — Redis write queue saturation skip 누적 (Upbit PR 2b mirror).
+        # 의미: MAX_PENDING_WRITES skip 발생 횟수. write 성공/실패 무관.
+        self._saturation_count: int = 0
+
+    @property
+    def saturation_count(self) -> int:
+        """PR 2c — Redis write queue saturation skip 누적 횟수 (read-only)."""
+        return self._saturation_count
 
     def schedule(self, tick: dict) -> None:
         """tick → background Redis write task. fire-and-forget.
 
-        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning.
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning + counter ++.
         Redis 장애로 task가 누적되는 시나리오 차단 (A8).
         """
         if len(self._tasks) >= MAX_PENDING_WRITES:
+            self._saturation_count += 1
             logger.warning(
                 "[usdt_ws.bithumb] Redis write queue saturated (%d in-flight) — skip tick",
                 len(self._tasks),
@@ -423,6 +440,15 @@ class BithumbRestFallbackController:
         self._in_flight: bool = False
         self._cooldown_until: float = 0.0
         self._pending_task: Optional[asyncio.Task] = None
+        # PR 2c — scheduled probe 누적 (Korbit PR 2a mirror).
+        # 의미: loop.create_task() 성공 시점 기준 +1. in-flight/cooldown/no-loop skip 미증가.
+        # success/timeout/exception 무관 — schedule 자체만 카운팅.
+        self._scheduled_probe_count: int = 0
+
+    @property
+    def scheduled_probe_count(self) -> int:
+        """PR 2c — REST fallback probe schedule 누적 횟수 (read-only, instance lifetime)."""
+        return self._scheduled_probe_count
 
     def schedule_probe(self, reason: str) -> None:
         """sync: in-flight/cooldown 체크 후 background probe task 생성. 즉시 반환.
@@ -455,6 +481,8 @@ class BithumbRestFallbackController:
             return
         self._pending_task = loop.create_task(self._run_probe(reason))
         self._in_flight = True
+        # PR 2c — schedule 성공 시점 누적 (skip 분기들은 위에서 이미 return).
+        self._scheduled_probe_count += 1
 
     def reset_cooldown(self) -> None:
         """normal 복귀 시 호출 — cooldown clear. 다음 stale 즉시 1회 probe 보장 (A8)."""
@@ -863,6 +891,9 @@ class BithumbWsClient:
             return
         self._running = True
         logger.info("[usdt_ws.bithumb] start (U4 reconnect loop)")
+        # PR 2c — start-level summary log task (Korbit/Upbit 패턴 mirror).
+        # _run_one_session 영향 0 — start lifetime 동안만 60s cycle emit.
+        summary_task = asyncio.create_task(self._summary_log_loop())
         attempt = 0
         try:
             while not self._stop_event.is_set():
@@ -907,11 +938,89 @@ class BithumbWsClient:
                 except asyncio.TimeoutError:
                     pass  # backoff 완료, 다음 iteration
         finally:
+            # PR 2c — summary_task cancel/await (reconnect loop 예외와 독립 try/except).
+            # Korbit start() finally cancel 패턴 mirror.
+            summary_task.cancel()
+            try:
+                await summary_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.bithumb] summary_task cleanup 실패")
             self._running = False
             self._ws = None
             logger.info(
                 "[usdt_ws.bithumb] start exited (reconnect_attempts=%d)",
                 self._reconnect_attempt_count,
+            )
+
+    async def _summary_log_loop(self) -> None:
+        """PR 2c — start lifetime 동안 60s cycle metric INFO emit (Bithumb 9 fields).
+
+        Korbit `_summary_log_loop` / Upbit `_summary_log_loop` 패턴 mirror.
+        Bithumb은 Upbit 1-dim status + Korbit REST fallback union이라 9 fields
+        (state 7 — Upbit 1-dim 동일 — + counter 2).
+
+        Emit metric (9개, state 7 + counter 2):
+            - frames_per_min: `_liveness.frame_count_total` 차이 / elapsed
+            - last_tick_age: `now - _liveness.last_tick_at` (없으면 -1.0 sentinel)
+            - last_heartbeat_age: `now - _liveness.last_heartbeat_at` (없으면 -1.0 sentinel)
+            - max_frame_gap: `_liveness.max_frame_gap_sec`
+            - status: `_status` (1-dim: normal/reconnecting/stale)
+            - reconnect_attempts: `_reconnect_attempt_count` (instance lifetime)
+            - status_transitions: `_status_transition_count` 3 keys (normal:N/reconnecting:N/stale:N)
+            - redis_saturation_count: `_redis_writer.saturation_count` (PR 2c)
+            - fallback_probe_scheduled_count: `_fallback_controller.scheduled_probe_count` (PR 2c)
+
+        Bithumb-specific schema:
+            - Upbit과 달리 fallback_probe_scheduled_count 포함
+            - Korbit과 달리 connection_status / ticker_freshness_status 부재 (1-dim)
+            - 향후 PR scope (별도): probe lifecycle breakdown counter
+
+        Sentinel 정책 (Korbit/Upbit 동일):
+            last_tick_at / last_heartbeat_at이 None일 경우 (첫 tick/PONG 전) -1.0
+            numeric sentinel. log 파싱 / numeric aggregation 일관성.
+        """
+        prev_frame_total = self._liveness.frame_count_total
+        prev_at = time.time()
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(SUMMARY_LOG_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                return
+            now = time.time()
+            elapsed = max(now - prev_at, 1e-9)
+            frames_in_window = self._liveness.frame_count_total - prev_frame_total
+            frames_per_min = int(round(frames_in_window * 60 / elapsed))
+            prev_frame_total = self._liveness.frame_count_total
+            prev_at = now
+
+            last_tick = self._liveness.last_tick_at
+            last_tick_age = (now - last_tick) if last_tick is not None else -1.0
+            last_heartbeat = self._liveness.last_heartbeat_at
+            last_heartbeat_age = (now - last_heartbeat) if last_heartbeat is not None else -1.0
+
+            transitions_str = "/".join(
+                f"{k}:{v}" for k, v in self._status_transition_count.items()
+            )
+
+            logger.info(
+                "[usdt_ws.bithumb] metrics frames_per_min=%d "
+                "last_tick_age=%.1f last_heartbeat_age=%.1f "
+                "max_frame_gap=%.1f "
+                "status=%s "
+                "reconnect_attempts=%d "
+                "status_transitions=%s "
+                "redis_saturation_count=%d "
+                "fallback_probe_scheduled_count=%d",
+                frames_per_min,
+                last_tick_age, last_heartbeat_age,
+                self._liveness.max_frame_gap_sec,
+                self._status,
+                self._reconnect_attempt_count,
+                transitions_str,
+                self._redis_writer.saturation_count,
+                self._fallback_controller.scheduled_probe_count,
             )
 
     async def stop(self) -> None:

@@ -30,7 +30,7 @@ import asyncio
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
 from app.crawlers.usdt_ws.bithumb import (
@@ -1993,6 +1993,279 @@ class TestFlagFalseInvariantU7Regression(unittest.IsolatedAsyncioTestCase):
         mock_trigger.assert_not_called()
         self.assertIsNone(scheduler.usdt_ws_bithumb_client)
         self.assertIsNone(scheduler.usdt_ws_bithumb_task)
+
+
+# ===========================================================================
+# PR 2c (Bithumb bundle) — summary log + redis_saturation_count + fallback_probe_scheduled_count
+# ===========================================================================
+
+
+class TestBithumbRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2c — BithumbRedisWriter._saturation_count counter 동작 검증.
+
+    의미: MAX_PENDING_WRITES skip 발생 횟수. write 성공/실패 무관.
+    """
+
+    def test_initial_value_zero(self):
+        """writer 생성 직후 counter == 0."""
+        writer = BithumbRedisWriter()
+        self.assertEqual(writer.saturation_count, 0)
+
+    async def test_increments_on_saturation_skip(self):
+        """_tasks >= MAX_PENDING_WRITES → skip 시 counter +1."""
+        writer = BithumbRedisWriter()
+        loop = asyncio.get_running_loop()
+        dummy_futures = [loop.create_future() for _ in range(MAX_PENDING_WRITES)]
+        writer._tasks = set(dummy_futures)
+
+        # 사전 counter 0 확인
+        self.assertEqual(writer.saturation_count, 0)
+
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.to_thread"):
+            writer.schedule(_make_valid_tick())
+
+        # saturation skip → counter +1
+        self.assertEqual(writer.saturation_count, 1)
+
+        # cleanup
+        for fut in dummy_futures:
+            fut.set_result(None)
+        writer._tasks.clear()
+
+    async def test_no_increment_on_normal_schedule(self):
+        """_tasks < MAX_PENDING_WRITES → 정상 schedule → counter 0 유지."""
+        writer = BithumbRedisWriter()
+        # _tasks가 비어 있으므로 saturation skip 발생 안 함
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.create_task") as mock_create:
+            mock_create.return_value = MagicMock()
+            writer.schedule(_make_valid_tick())
+
+        self.assertEqual(writer.saturation_count, 0)
+
+
+class TestBithumbFallbackScheduledProbeCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2c — BithumbRestFallbackController.scheduled_probe_count counter 동작 검증.
+
+    의미: schedule_probe()가 in-flight/cooldown/no-loop skip 통과 후
+    loop.create_task() 성공 시점에만 +1. skip은 미증가.
+    """
+
+    def _make_controller(self) -> BithumbRestFallbackController:
+        """Test용 controller — schedule만 검증, 실제 fanout 미실행."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        alert_evaluator = MagicMock()
+        return BithumbRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=alert_evaluator,
+        )
+
+    def test_initial_value_zero(self):
+        """controller 생성 직후 counter == 0."""
+        controller = self._make_controller()
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    async def test_increments_on_successful_schedule(self):
+        """schedule_probe() 성공 (in-flight/cooldown/no-loop skip 통과) → +1."""
+        controller = self._make_controller()
+
+        async def fake_run_probe(reason):
+            return None
+
+        with patch.object(controller, "_run_probe", side_effect=fake_run_probe):
+            controller.schedule_probe(reason="test")
+            self.assertEqual(controller.scheduled_probe_count, 1)
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+    def test_no_increment_on_in_flight_skip(self):
+        """in-flight skip 발화 → counter 0 유지."""
+        controller = self._make_controller()
+        controller._in_flight = True
+        controller.schedule_probe(reason="test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    def test_no_increment_on_cooldown_skip(self):
+        """cooldown skip 발화 → counter 0 유지."""
+        controller = self._make_controller()
+        controller._cooldown_until = time.time() + 1000.0
+        controller.schedule_probe(reason="test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+
+class TestBithumbSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
+    """PR 2c — Bithumb summary log emit 검증 (9 fields, 1-dim status + 2 counters)."""
+
+    async def test_emit_format_contains_all_9_metrics(self):
+        """emit log에 state 7 + counter 2 = 9 metric key=value 포맷 포함."""
+        client = BithumbWsClient()
+        client._liveness.frame_count_total = 100
+        client._liveness.last_tick_at = time.time() - 3.0
+        client._liveness.last_heartbeat_at = time.time() - 12.0
+        client._liveness.max_frame_gap_sec = 6.3
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.bithumb", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log, "metric INFO log 없음")
+        for keyword in [
+            "frames_per_min=",
+            "last_tick_age=",
+            "last_heartbeat_age=",
+            "max_frame_gap=",
+            "status=",                          # 1-dim (Upbit 동일)
+            "reconnect_attempts=",
+            "status_transitions=",
+            "redis_saturation_count=",          # PR 2c
+            "fallback_probe_scheduled_count=",  # PR 2c
+        ]:
+            self.assertIn(keyword, metric_log, f"metric key 누락: {keyword}")
+
+        # Bithumb-specific schema 검증: Korbit 전용 필드 부재
+        self.assertNotIn("connection_status=", metric_log)
+        self.assertNotIn("ticker_freshness_status=", metric_log)
+
+    async def test_sentinel_for_none_age(self):
+        """last_tick_at / last_heartbeat_at이 None이면 -1.0 numeric sentinel emit."""
+        client = BithumbWsClient()
+        self.assertIsNone(client._liveness.last_tick_at)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.bithumb", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("last_tick_age=-1.0", metric_log)
+        self.assertIn("last_heartbeat_age=-1.0", metric_log)
+
+    async def test_frames_per_min_calculation(self):
+        """frame_count_total 차이 / elapsed * 60 = frames_per_min 정확성 검증.
+
+        time.time() patch: 100.0 → 160.0 (elapsed=60s), frame_count 0 → 30
+        → frames_per_min = (30 - 0) * 60 / 60.0 = 30
+        """
+        client = BithumbWsClient()
+        client._liveness.frame_count_total = 0
+
+        time_values = iter([100.0, 160.0])
+
+        async def fake_sleep(duration):
+            client._liveness.frame_count_total = 30
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.bithumb.time.time", side_effect=lambda: next(time_values)), \
+             patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.bithumb", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "frames_per_min=" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("frames_per_min=30", metric_log)
+
+    async def test_cancelled_silently_returns(self):
+        """CancelledError 시 silently return (no exception propagate)."""
+        client = BithumbWsClient()
+
+        async def fake_sleep(_):
+            raise asyncio.CancelledError()
+
+        with patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+    async def test_stop_event_before_first_emit_skips_emit(self):
+        """stop_event 사전 set 시 emit 0 (loop entry 못 함). assertNoLogs (Python 3.10+)."""
+        client = BithumbWsClient()
+        client._stop_event.set()
+
+        with self.assertNoLogs("exchange_rate.crawler.usdt_ws.bithumb", level="INFO"):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+
+class TestBithumbSummaryLogEmitsCounters(unittest.IsolatedAsyncioTestCase):
+    """PR 2c — _summary_log_loop counter field emit value 검증 (PropertyMock pattern).
+
+    PR 2b Upbit / PR 2a Korbit 패턴 mirror — counter property mock으로 emit log 안
+    numeric 값 직접 검증.
+    """
+
+    async def test_emit_contains_saturation_count_value(self):
+        """redis_saturation_count=N emit 검증 (PropertyMock)."""
+        client = BithumbWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            BithumbRedisWriter, "saturation_count",
+            new_callable=PropertyMock, return_value=11,
+        ), patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.bithumb", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("redis_saturation_count=11", metric_log)
+
+    async def test_emit_contains_scheduled_probe_count_value(self):
+        """fallback_probe_scheduled_count=N emit 검증 (PropertyMock)."""
+        client = BithumbWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            BithumbRestFallbackController, "scheduled_probe_count",
+            new_callable=PropertyMock, return_value=5,
+        ), patch("app.crawlers.usdt_ws.bithumb.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.bithumb", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("fallback_probe_scheduled_count=5", metric_log)
+
+
+class TestBithumbStartCancelsSummaryTask(unittest.IsolatedAsyncioTestCase):
+    """PR 2c — start() finally에서 summary_task cancel/await 검증.
+
+    Korbit start() finally cancel pattern mirror (reconnect loop 예외와 독립 try/except).
+    """
+
+    async def test_start_cancels_summary_task_on_stop(self):
+        """start 종료 시 summary_task가 cancel + await됨."""
+        client = BithumbWsClient()
+        cancelled = {"value": False}
+
+        async def fake_summary_loop():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                return
+
+        async def fake_run_one_session():
+            await client._stop_event.wait()
+
+        with patch.object(client, "_summary_log_loop", side_effect=fake_summary_loop), \
+             patch.object(client, "_run_one_session", side_effect=fake_run_one_session):
+            task = asyncio.create_task(client.start())
+            await asyncio.sleep(0.05)
+            await client.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertTrue(cancelled["value"], "summary_task가 cancel되지 않음")
+        self.assertFalse(client._running)
 
 
 if __name__ == "__main__":
