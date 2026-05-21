@@ -552,6 +552,10 @@ async def lifespan(app: FastAPI):
     # USDT_WS_KORBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
     await scheduler.start_usdt_ws_korbit_client()
 
+    # Phase B.6 Stage G1 — USDT WebSocket Gopax canary skeleton (USDT_WS_DESIGN_PLAN §12.9).
+    # USDT_WS_GOPAX_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+    await scheduler.start_usdt_ws_gopax_client()
+
     yield
 
     # Shutdown code
@@ -571,6 +575,9 @@ async def lifespan(app: FastAPI):
 
     # USDT WebSocket Korbit client 종료 (Phase B.5 Stage K2)
     await scheduler.shutdown_usdt_ws_korbit_client()
+
+    # USDT WebSocket Gopax client 종료 (Phase B.6 Stage G1)
+    await scheduler.shutdown_usdt_ws_gopax_client()
 
     # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
     await scheduler.shutdown_krx_futures_client()

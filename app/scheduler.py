@@ -2303,3 +2303,84 @@ async def shutdown_usdt_ws_korbit_client():
 
     usdt_ws_korbit_client = None
     usdt_ws_korbit_task = None
+
+
+# ─────────────────────────────────────────────────────────────
+# USDT WS Gopax lifecycle (Phase B.6 Stage G1 skeleton)
+# USDT_WS_DESIGN_PLAN §12.9 (2026-05-21). Bithumb/Coinone/Korbit 패턴 mirror.
+# Canary 활성화 조건: Korbit/Coinone canary 24h+ 안정 + G2~G7 land 안정 후 별도 deploy GO.
+# G1 (현재): flag=true 시에도 stop_event 대기만, network 호출 없음.
+# ─────────────────────────────────────────────────────────────
+
+# 모듈 globals — Optional, 시작 전 None
+usdt_ws_gopax_client = None  # GopaxWsClient 인스턴스
+usdt_ws_gopax_task = None    # client.start() 실행 중인 task
+
+
+async def _run_usdt_ws_gopax_client(client):
+    """GopaxWsClient.start() wrapper — task crash 시 logger.exception.
+
+    Bithumb/Coinone/Korbit `_run_usdt_ws_*_client` 패턴 동일. CancelledError는 propagate.
+    """
+    try:
+        await client.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("[usdt_ws.gopax] GopaxWsClient task crashed")
+
+
+async def start_usdt_ws_gopax_client():
+    """USDT WS Gopax client startup — main.py lifespan에서 호출.
+
+    USDT_WS_GOPAX_ENABLED=false 시 즉시 return (lifecycle 비활성).
+    중복 호출 방지.
+
+    Stage G1 acceptance (USDT_WS_DESIGN_PLAN §12.9.1):
+        flag=false 시 함수 즉시 return + GopaxWsClient 생성 X + network connect X +
+        Redis/DB writer X. 본 stage 이후 G2-G7 운영 영향 0 보장.
+    """
+    global usdt_ws_gopax_client, usdt_ws_gopax_task
+
+    if not config.USDT_WS_GOPAX_ENABLED:
+        logger.info("[usdt_ws.gopax] USDT_WS_GOPAX_ENABLED=false, skip start")
+        return
+
+    # 중복 start 방지 — client task 이미 진행 중이면 skip
+    if usdt_ws_gopax_task is not None and not usdt_ws_gopax_task.done():
+        logger.debug("[usdt_ws.gopax] client task 진행 중, 중복 start 무시")
+        return
+
+    # 함수 내부 import — 순환 참조 방지 + 미연결 시점 import 영향 0
+    from app.crawlers.usdt_ws.gopax import GopaxWsClient
+
+    client = GopaxWsClient()
+    usdt_ws_gopax_client = client
+    usdt_ws_gopax_task = asyncio.create_task(_run_usdt_ws_gopax_client(client))
+    logger.info("[usdt_ws.gopax] GopaxWsClient task 시작")
+
+
+async def shutdown_usdt_ws_gopax_client():
+    """USDT WS Gopax client + task 안전 종료.
+
+    client.stop() → task cancel/await → globals 초기화.
+    """
+    global usdt_ws_gopax_client, usdt_ws_gopax_task
+
+    if usdt_ws_gopax_client is not None:
+        try:
+            await usdt_ws_gopax_client.stop()
+        except Exception:
+            logger.exception("[usdt_ws.gopax] client.stop() 실패")
+
+    if usdt_ws_gopax_task is not None and not usdt_ws_gopax_task.done():
+        usdt_ws_gopax_task.cancel()
+        try:
+            await usdt_ws_gopax_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[usdt_ws.gopax] task await 실패")
+
+    usdt_ws_gopax_client = None
+    usdt_ws_gopax_task = None
