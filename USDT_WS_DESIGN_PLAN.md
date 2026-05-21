@@ -886,6 +886,56 @@ Phase B.1 implementation을 7 PR로 분할. 각 PR은 default OFF feature flag �
 
 후속 phase 진입 시점 + 순서는 Phase B.5 운영 안정 측정 + B.6 land 후 결정.
 
+### 12.8 Post-5-source 정책 표준화 backlog (2026-05-21 추가)
+
+**컨텍스트 / 분리 원칙**:
+
+현재 진행 중인 source별 summary log + counter 작업은 **관찰 인프라 구축**이다.
+Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
+`_connection_status` + `_ticker_freshness_status` 모델 사이의 비대칭 해소,
+그리고 REST fallback 정책 표준화는 자동 진행하지 않는다. 5 source 관찰 데이터가
+누적된 뒤 본 backlog의 결정 절차에 따라 별도 후속 작업으로 진행 여부를 결정한다.
+
+**Entry 조건**:
+
+- Upbit summary log + `redis_saturation_count` 운영 적용
+- Korbit summary log + `fallback_probe_scheduled_count` 운영 적용
+- Bithumb summary log + `redis_saturation_count` + `fallback_probe_scheduled_count` 운영 적용
+- Coinone summary log + 필요한 counter 운영 적용
+- Gopax WS land 후 동일 telemetry 적용 여부 결정 및 5 source 관찰 인프라 완성
+- 5 source 모두 안정 운영 후 24~72h 관찰 누적
+
+**분석 input**:
+
+- observed frame gap 분포 (`max_frame_gap`, 시간대별)
+- status transition 빈도 (`status_transitions`)
+- `redis_saturation_count` 발생 패턴
+- `fallback_probe_scheduled_count` 발화 빈도
+- `reconnect_attempts` 빈도
+
+**결정 항목**:
+
+1. Upbit/Bithumb의 단일 `_status` 모델을 Coinone/Korbit식
+   `_connection_status` + `_ticker_freshness_status` 2-signal 모델로 전환할지 결정.
+2. REST fallback trigger를 connection stale 기준에서
+   `ticker_freshness_status=degraded` 기준으로 표준화할지 결정.
+3. warning/degraded/cooldown 임계값을 observed frame gap 분포 기반으로 재산정할지 결정.
+
+**결정 원칙**:
+
+- 진행 / 미진행 둘 다 합법 결론이다.
+- 표준화는 운영 일관성 목적이며, 기능 부재 해소가 아니다.
+- 비용이 가치보다 크면 source-specific 정책을 유지한다.
+- 선제 abstraction 금지 원칙을 따른다. 관찰 데이터로 정당화된 변경만 진행한다.
+- 이 원칙은 §12.6 "공통화 검토"의 선제 abstraction 금지 lesson (KRX close finalizer
+  큰 PR 학습)과 정렬된다.
+
+**결정 시 적용 절차**:
+
+- 결정 yes: 별도 PR로 적용한다.
+- 결정 no: 데이터 분석 요약과 함께 close한다.
+- 결정 보류: 추가 관찰 기간과 재검토 시점을 명시한다. 무기한 보류하지 않는다.
+
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
 PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
