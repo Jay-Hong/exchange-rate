@@ -166,8 +166,8 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
     G5 또는 별도 PR). G5-G7 attribute (writers / fallback / alert)는 본 stage 제외.
     """
 
-    async def test_init_state_g5_scope(self):
-        """__init__ 직후: G1~G5 attribute 보유, G6-G7 attribute 부재."""
+    async def test_init_state_g6a_scope(self):
+        """__init__ 직후: G1~G6a attribute 보유, G6b-G7 attribute 부재."""
         client = GopaxWsClient()
         # G1 state
         self.assertFalse(client._running)
@@ -175,7 +175,7 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         # G2 state
         self.assertIsNone(client._ws)
         self.assertFalse(client._first_tick_logged)
-        # G3 state — Codex dual-write 유지 (cleanup은 G5/별도 PR)
+        # G3 state
         self.assertIsNone(client._last_heartbeat_at)
         # G4 state — 2-signal status + liveness
         self.assertEqual(client._connection_status, "normal")
@@ -188,11 +188,12 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         })
         for v in client._status_transition_count.values():
             self.assertEqual(v, 0)
-        # G5 state — Redis writer (Bithumb U5 mirror)
+        # G5 state — Redis writer
         self.assertIsNotNone(client._redis_writer)
         self.assertEqual(client._redis_writer.saturation_count, 0)
-        # G6-G7 attribute 부재 검증 (선반영 회피)
-        self.assertFalse(hasattr(client, "_db_writer"))
+        # G6a state — DB writer (Bithumb U6a mirror)
+        self.assertIsNotNone(client._db_writer)
+        # G6b-G7 attribute 부재 검증 (선반영 회피)
         self.assertFalse(hasattr(client, "_fallback_controller"))
         self.assertFalse(hasattr(client, "_alert_evaluator"))
 
@@ -258,45 +259,43 @@ class TestScopeGuard(unittest.TestCase):
         """G1: GOPAX_WS_URL constant module-level 노출."""
         self.assertEqual(GOPAX_WS_URL, "wss://wsapi.gopax.co.kr")
 
-    def test_no_g6_g7_symbols_at_module_level(self):
-        """G5: G6~G7에서 추가될 symbol module-level 부재 검증.
+    def test_no_g6b_g7_symbols_at_module_level(self):
+        """G6a: G6b~G7에서 추가될 symbol module-level 부재 검증.
 
-        G5에서 GopaxRedisWriter / MAX_PENDING_WRITES / REDIS_CLOSE_TIMEOUT_SEC은 허용
-        (G5 신규 export). G6a (DB writer), G6b (REST helper + fallback controller),
-        G7 (alert)은 module-level 부재해야 함 (선제 작성 회피).
+        G6a에서 GopaxDbWriter + DB_WRITE_WINDOW_SEC은 허용. G6b (REST helper +
+        fallback controller), G7 (alert)은 module-level 부재해야 함.
         """
         from app.crawlers.usdt_ws import gopax as gopax_module
 
-        # G4 + G5 constants 허용 (검증 — 존재해야 함)
+        # G4 + G5 + G6a constants/class 허용 (검증 — 존재해야 함)
         for attr in [
             "STALE_AFTER_SEC", "TICKER_FRESHNESS_WARNING_SEC",
             "TICKER_FRESHNESS_DEGRADED_SEC", "RECONNECT_BACKOFF_SEQ",
             "RECONNECT_BACKOFF_TAIL",
-            # G5 신규
             "MAX_PENDING_WRITES", "REDIS_CLOSE_TIMEOUT_SEC",
             "GopaxRedisWriter",
+            # G6a 신규
+            "DB_WRITE_WINDOW_SEC",
+            "GopaxDbWriter",
         ]:
             self.assertTrue(
                 hasattr(gopax_module, attr),
-                f"G4/G5 constant 누락: {attr}",
+                f"G4/G5/G6a constant 누락: {attr}",
             )
 
-        # G6-G7 forbidden
+        # G6b-G7 forbidden
         forbidden_attrs = [
-            # G6a — DB writer
-            "GopaxDbWriter",
-            "DB_WRITE_WINDOW_SEC",
             # G6b — REST helper + fallback
             "GopaxRestFallbackController",
             "fetch_gopax_usdt_tick",
             "FALLBACK_COOLDOWN_SEC",
             # G7 — Alert
-            "AlertObservation",  # 일반 import는 OK이나 module-level alias는 X
+            "AlertObservation",
         ]
         for attr in forbidden_attrs:
             self.assertFalse(
                 hasattr(gopax_module, attr),
-                f"G5 scope 위반: {attr} symbol이 module-level에 존재함 — G6~G7 stage에서 추가 예정",
+                f"G6a scope 위반: {attr} symbol이 module-level에 존재함 — G6b~G7 stage에서 추가 예정",
             )
 
 
@@ -1032,30 +1031,43 @@ class TestG4ActivationConstraint(unittest.TestCase):
     """
 
     def test_module_docstring_g4_activation_constraint(self):
-        """module docstring에 현재 stage activation 보류 명시.
+        """module docstring에 현재 stage (G6a) activation 보류 명시.
 
-        Stage 진행에 따라 docstring keyword 갱신 (G4 → G5 → ...). 현재 stage (G5)
-        기준 검증.
+        Stage 진행에 따라 docstring keyword 갱신 (G4 → G5 → G6a → ...).
+        현재 stage 기준 검증. Codex 보강: activation은 G6b/G7/PR 2e 완료 후
+        또는 별도 canary 조건 재검토 후 결정.
         """
         import app.crawlers.usdt_ws.gopax as gopax_module
         doc = gopax_module.__doc__ or ""
-        self.assertIn("G5 단계도 유지", doc)
-        # PR 2e telemetry 이후 검토
+        self.assertIn("G6a 단계도 유지", doc)
+        # Codex 보강: G6b + G7 + PR 2e 완료 후 또는 canary 재검토 명시
+        self.assertIn("G6b", doc)
+        self.assertIn("G7", doc)
         self.assertIn("PR 2e", doc)
-        self.assertIn("telemetry", doc)
+        self.assertIn("canary", doc)
         # local/staging smoke 가능 단계
         self.assertIn("local/staging smoke", doc)
 
     def test_class_docstring_g4_activation_constraint(self):
-        """class docstring에 현재 stage (G5) activation 보류 명시.
-
-        Stage 진행에 따라 docstring keyword가 갱신됨 (G4 → G5 → ...). 향후 stage
-        진입 시 동일 검증 패턴으로 갱신.
-        """
+        """class docstring에 현재 stage (G6a) activation 보류 명시."""
         doc = GopaxWsClient.__doc__ or ""
-        self.assertIn("G5 단계도 유지", doc)
-        # PR 2e telemetry 이후 검토 명시 (현재 stage 기준)
+        self.assertIn("G6a 단계도 유지", doc)
+        # Codex 보강 keyword
+        self.assertIn("G6b", doc)
+        self.assertIn("G7", doc)
         self.assertIn("PR 2e", doc)
+
+    def test_start_docstring_g6a_activation_constraint(self):
+        """start() docstring에도 현재 stage (G6a) activation 보류 명시 (Codex 보강).
+
+        Stage 진행에 따라 docstring keyword 갱신 (G4 → G5 → G6a → ...). G6a까지
+        오면 start docstring도 G6a로 갱신되어야 stale 표현이 안 남음.
+        """
+        doc = GopaxWsClient.start.__doc__ or ""
+        self.assertIn("G6a", doc)
+        # G4 단독 stale 표현 부재 검증
+        self.assertNotIn("G4 단독", doc)
+        self.assertNotIn("G4 land 후에도", doc)
 
 
 # ===========================================================================
@@ -1292,7 +1304,9 @@ class TestGopaxRunOneSessionRedisFanout(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.usdt_ws.gopax.websockets.connect",
             return_value=mock_connect_ctx,
         ), patch.object(client._redis_writer, "schedule") as mock_schedule, \
-           patch.object(client._redis_writer, "close", new=AsyncMock()):
+           patch.object(client._redis_writer, "close", new=AsyncMock()), \
+           patch.object(client._db_writer, "schedule"), \
+           patch.object(client._db_writer, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # 2회 valid tick → schedule 2회 호출
@@ -1333,7 +1347,8 @@ class TestGopaxPrimusFrameNoSchedule(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.usdt_ws.gopax.websockets.connect",
             return_value=mock_connect_ctx,
         ), patch.object(client._redis_writer, "schedule") as mock_schedule, \
-           patch.object(client._redis_writer, "close", new=AsyncMock()):
+           patch.object(client._redis_writer, "close", new=AsyncMock()), \
+           patch.object(client._db_writer, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # Primus ping → schedule 호출 0
@@ -1366,12 +1381,314 @@ class TestGopaxFinallyCloseExceptionIsolated(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.crawlers.usdt_ws.gopax.websockets.connect",
             return_value=mock_connect_ctx,
-        ), patch.object(client._redis_writer, "close", side_effect=fake_close):
+        ), patch.object(client._redis_writer, "close", side_effect=fake_close), \
+           patch.object(client._db_writer, "close", new=AsyncMock()):
             # close 예외는 _run_one_session 외부로 전파되지 않음 (격리)
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # ws cleanup도 정상
         self.assertIsNone(client._ws)
+
+
+# ===========================================================================
+# G6a GopaxDbWriter — 1s window debounce + insert_source_rate_if_changed
+# ===========================================================================
+
+
+class TestGopaxDbWriterDebounce(unittest.IsolatedAsyncioTestCase):
+    """G6a: 1s window debounce — window 안 여러 tick → last만 flush."""
+
+    async def test_multiple_ticks_in_window_only_last_flushed(self):
+        """window 안 3 tick → 마지막 tick만 helper 호출."""
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter(window_sec=0.05)
+        captured = []
+
+        def fake_sync_write(tick):
+            captured.append(tick)
+
+        with patch.object(GopaxDbWriter, "_sync_db_write", side_effect=fake_sync_write):
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 2.0, "timestamp_ms": 2})
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 3.0, "timestamp_ms": 3})
+            await asyncio.sleep(0.15)
+
+        # 1회만 helper 호출 (debounce)
+        self.assertEqual(len(captured), 1)
+        # 마지막 tick (rate=3.0) flush
+        self.assertEqual(captured[0]["rate"], 3.0)
+
+    async def test_window_expires_then_flushes(self):
+        """window 만료 후 helper 호출 검증."""
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter(window_sec=0.05)
+        captured = []
+
+        def fake_sync_write(tick):
+            captured.append(tick)
+
+        with patch.object(GopaxDbWriter, "_sync_db_write", side_effect=fake_sync_write):
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            # window 만료 전 helper 호출 0
+            await asyncio.sleep(0.02)
+            self.assertEqual(len(captured), 0)
+            # window 만료 후 helper 호출 1
+            await asyncio.sleep(0.06)
+            self.assertEqual(len(captured), 1)
+
+
+class TestGopaxDbWriterRacePrevention(unittest.IsolatedAsyncioTestCase):
+    """G6a: write 후 _pending_tick 잔존 시 finally에서 새 timer 예약 (Bithumb race 방지).
+
+    write 진행 중 새 tick 도착 시 race 방지 동작 검증 — _pending_tick을 직접 갱신
+    하는 방식 (event-based sync는 asyncio.to_thread 안에서 thread-safety 문제).
+    """
+
+    async def test_pending_tick_after_write_schedules_next_timer(self):
+        """write 끝난 후 _pending_tick 잔존 → finally에서 새 timer 자동 예약."""
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter(window_sec=0.02)
+        captured = []
+        call_count = {"n": 0}
+
+        def fake_sync_write(tick):
+            captured.append(tick)
+            call_count["n"] += 1
+            # 첫 호출 후 _pending_tick에 새 tick "잔존" 시뮬레이션 (race)
+            if call_count["n"] == 1:
+                writer._pending_tick = {
+                    "source": "gopax", "asset": "usdt-krw", "rate": 99.0, "timestamp_ms": 99,
+                }
+
+        with patch.object(GopaxDbWriter, "_sync_db_write", side_effect=fake_sync_write):
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            # 첫 timer + race-prevention 두 번째 timer 둘 다 fire될 시간 대기
+            await asyncio.sleep(0.15)
+
+        # 2회 helper 호출 — 첫 timer (rate=1.0) + race-prevention (rate=99.0)
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0]["rate"], 1.0)
+        self.assertEqual(captured[1]["rate"], 99.0)
+
+
+class TestGopaxDbWriterFailureIsolation(unittest.IsolatedAsyncioTestCase):
+    """G6a: DB exception → log only, WS session 영향 X."""
+
+    async def test_db_exception_logged_but_not_propagated(self):
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter(window_sec=0.05)
+
+        def fail_sync_write(tick):
+            raise RuntimeError("DB connection lost simulated")
+
+        with patch.object(GopaxDbWriter, "_sync_db_write", side_effect=fail_sync_write), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="WARNING") as cm:
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            await asyncio.sleep(0.15)
+
+        # 예외 propagate X — log only
+        self.assertTrue(any("DB write failed" in m for m in cm.output))
+
+
+class TestGopaxDbWriterClose(unittest.IsolatedAsyncioTestCase):
+    """G6a: close() — timer cancel + pending tick 즉시 flush (Bithumb mirror)."""
+
+    async def test_close_flushes_pending_immediately(self):
+        """schedule 후 close → pending tick 즉시 flush (window 무시)."""
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter(window_sec=10.0)  # 큰 window
+        captured = []
+
+        def fake_sync_write(tick):
+            captured.append(tick)
+
+        with patch.object(GopaxDbWriter, "_sync_db_write", side_effect=fake_sync_write):
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 5.0, "timestamp_ms": 5})
+            # window (10s) 만료 전 close — pending 즉시 flush
+            await writer.close()
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["rate"], 5.0)
+
+    async def test_close_with_no_pending_is_noop(self):
+        """close → pending 없으면 helper 호출 0."""
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter()
+        with patch.object(GopaxDbWriter, "_sync_db_write") as mock_write:
+            await writer.close()
+        mock_write.assert_not_called()
+
+
+class TestGopaxDbWriterUsesToThread(unittest.IsolatedAsyncioTestCase):
+    """G6a: sync DB write가 asyncio.to_thread로 격리."""
+
+    async def test_to_thread_called_with_sync_write(self):
+        from app.crawlers.usdt_ws.gopax import GopaxDbWriter
+
+        writer = GopaxDbWriter(window_sec=0.05)
+        with patch(
+            "app.crawlers.usdt_ws.gopax.asyncio.to_thread",
+            new=AsyncMock(return_value=None),
+        ) as mock_to_thread:
+            writer.schedule({"source": "gopax", "asset": "usdt-krw", "rate": 1.0, "timestamp_ms": 1})
+            await asyncio.sleep(0.1)
+
+        # to_thread 1회 호출 (debounce 만료 후)
+        self.assertEqual(mock_to_thread.call_count, 1)
+
+
+class TestGopaxRunOneSessionDbFanout(unittest.IsolatedAsyncioTestCase):
+    """G6a: valid tick → _db_writer.schedule 호출 검증."""
+
+    async def test_valid_tick_triggers_db_schedule(self):
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+        ticker_message = json.dumps({
+            "n": "TickerEvent",
+            "o": {"USDT-KRW": {"last": 1490.5, "lastTraded": 1779106625946}},
+        })
+
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                return ticker_message
+            client._stop_event.set()
+            return ticker_message
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._redis_writer, "schedule"), \
+           patch.object(client._redis_writer, "close", new=AsyncMock()), \
+           patch.object(client._db_writer, "schedule") as mock_db_schedule, \
+           patch.object(client._db_writer, "close", new=AsyncMock()):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # 2 valid tick → DB schedule 2회
+        self.assertEqual(mock_db_schedule.call_count, 2)
+
+
+class TestGopaxInvalidFrameNoDbSchedule(unittest.IsolatedAsyncioTestCase):
+    """G6a (Codex 보강): invalid frame → DB schedule 호출 0."""
+
+    async def test_invalid_json_no_db_schedule(self):
+        """invalid JSON → tick=None → _db_writer.schedule 호출 0."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                client._stop_event.set()
+                return "this is not valid json"
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._redis_writer, "close", new=AsyncMock()), \
+           patch.object(client._db_writer, "schedule") as mock_db_schedule, \
+           patch.object(client._db_writer, "close", new=AsyncMock()):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # invalid frame → DB schedule 호출 0
+        mock_db_schedule.assert_not_called()
+
+
+class TestGopaxPrimusFrameNoDbSchedule(unittest.IsolatedAsyncioTestCase):
+    """G6a (Codex 보강): Primus ping → DB schedule 호출 0."""
+
+    async def test_primus_ping_no_db_schedule(self):
+        """Primus ping → _handle_primus_ping만, _db_writer.schedule 호출 0."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                client._stop_event.set()
+                return "primus::ping::1234"
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._redis_writer, "close", new=AsyncMock()), \
+           patch.object(client._db_writer, "schedule") as mock_db_schedule, \
+           patch.object(client._db_writer, "close", new=AsyncMock()):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # Primus ping → DB schedule 0
+        mock_db_schedule.assert_not_called()
+
+
+class TestGopaxFinallyDbCloseOrder(unittest.IsolatedAsyncioTestCase):
+    """G6a: finally close 순서 — DB close 먼저 → Redis close 마지막 (Bithumb mirror)."""
+
+    async def test_db_close_before_redis_close(self):
+        """finally 안 _db_writer.close()가 _redis_writer.close() 보다 먼저 호출."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+        mock_ws.recv = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        async def stop_after_subscribe(payload):
+            client._stop_event.set()
+
+        mock_ws.send = AsyncMock(side_effect=stop_after_subscribe)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        close_order = []
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def fake_redis_close(*args, **kwargs):
+            close_order.append("redis")
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._db_writer, "close", side_effect=fake_db_close), \
+           patch.object(client._redis_writer, "close", side_effect=fake_redis_close):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        self.assertEqual(close_order, ["db", "redis"])
 
 
 if __name__ == "__main__":

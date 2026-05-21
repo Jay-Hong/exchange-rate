@@ -1,12 +1,13 @@
-"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G5.
+"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G6a.
 
 USDT_WS_DESIGN_PLAN §12.9 (Phase B.6, 2026-05-21).
 
-G5 scope (이 파일의 현재 범위):
+G6a scope (이 파일의 현재 범위):
     G1 lifecycle + G2 Subscribe/Parse + G3 Primus pong + G4 reconnect/liveness +
-    2-signal status + **G5 GopaxRedisWriter (tick-level Redis fanout + tether topic
-    trigger + saturation counter)**까지. DB writer (G6a) / REST fallback (G6b) /
-    Alert evaluator (G7) / Telemetry summary log emit (PR 2e)는 별도 stage.
+    2-signal status + G5 GopaxRedisWriter (Redis fanout + saturation counter +
+    topic trigger) + **G6a GopaxDbWriter (1s window debounce + insert_source_rate_if_changed)**
+    까지. REST fallback (G6b) / Alert evaluator (G7) / Telemetry summary log emit
+    (PR 2e)는 별도 stage.
 
 G4 주요 변경 (G4 1ea4c74 → dd3e077 누적):
     - `UsdtLivenessMonitor` 통합 (source-neutral, Coinone/Korbit 패턴 mirror).
@@ -21,7 +22,7 @@ G4 주요 변경 (G4 1ea4c74 → dd3e077 누적):
       → backoff + 재시도. stop_event 즉시 반응.
     - `_handle_primus_ping` dual-write (Codex 정정): `_last_heartbeat_at` G3
       backward compat 유지 + `_liveness.observe_heartbeat(now)` 신규 — cleanup은
-      G5 또는 별도 PR로 미룸.
+      별도 PR (G5/G6a 지났으니 dedicated cleanup PR로 처리 권장).
     - `_handle_message` valid tick 시 `_liveness.observe_tick(now)` 호출.
     - Constants: STALE_AFTER_SEC=360 / TICKER_FRESHNESS_WARNING=60 / DEGRADED=300
       (Coinone 기준 provisional) / RECONNECT_BACKOFF_SEQ (1,2,4,8,16,30) tail 30.
@@ -43,33 +44,49 @@ G5 주요 변경 (현재 stage):
       invariant: __init__ 1회 생성, reconnect 사이 재사용).
     - KST ISO timestamp 변환 (`_KST = timezone(timedelta(hours=9))`, Bithumb 동일).
 
-⚠️ Production activation 제약 (G5 단계도 유지 — Codex 강조 강화):
-    G5 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지. G5는 Redis fanout이
-    추가됐지만 PR 2e telemetry (summary log + counter emit)가 없어 관찰 인프라
-    불완전. G5는 **local/staging smoke 가능 단계**.
+⚠️ Production activation 제약 (G6a 단계도 유지 — Codex 강조 강화):
+    G6a land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지. G6a는 DB writer가
+    추가됐지만 G6b REST fallback / G7 Alert evaluator / PR 2e telemetry 부재.
+    관찰 인프라 (summary log + counter emit) 부재라 silent ingestion 상태.
 
-    **Production activation은 PR 2e telemetry land 후 검토**.
+    **Production activation은 G6b + G7 + PR 2e 완료 후, 또는 별도 canary 조건
+    재검토 후 결정** (Codex 보강 정정). PR 2e 단독으로는 충분하지 않다 —
+    fallback/alert 부재 상태에서 activation은 운영 가치 제한적.
     그 전까지 production env는 default false 유지.
+    G6a는 **local/staging smoke 가능 단계**.
 
-G5 acceptance:
+G5/G6a acceptance:
     - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1~G4 동일)
-    - flag=true 시 reconnect loop + 2-signal status (G4 동일) + Redis fanout
-    - valid tick → Redis latest cache 갱신 + tether topic trigger (success only)
-    - invalid/Primus/control frame은 Redis schedule 0
+    - flag=true 시 reconnect loop + 2-signal status (G4) + Redis fanout (G5) +
+      DB fanout (G6a)
+    - valid tick → Redis latest cache + topic trigger + DB write (1s window debounce)
+    - invalid/Primus/control frame은 Redis schedule 0 + DB schedule 0
     - saturation skip 시 _saturation_count +1 (helper False/exception은 미증가)
-    - session finally `_redis_writer.close()` 예외 격리
-    - production env false 유지 (PR 2e 이전 activation 보류)
+    - session finally close 순서: DB → Redis (각 close 예외 격리)
+    - production env false 유지 (G6b/G7/PR 2e 또는 canary 재검토 이전 activation 보류)
 
-G5 누적 attribute (G1 + G2 + G3 + G4 + G5):
+G6a 주요 변경 (현재 stage):
+    - `GopaxDbWriter` class 신규 (Bithumb U6a / Coinone C6a 1:1 mirror).
+      1s window debounce + insert_source_rate_if_changed.
+    - asyncio.to_thread로 sync SQLAlchemy 호출 격리.
+    - race 방지 (Bithumb U6a mirror): write 진행 중 새 tick 도착 → _pending_tick
+      갱신, finally에서 새 timer 예약.
+    - failure isolation: DB exception → log only, WS session 영향 X.
+    - close(): timer cancel + pending tick 즉시 flush (window 무시).
+    - `_run_one_session` valid tick path → `_db_writer.schedule(tick)` (Redis 다음).
+    - `_run_one_session` finally → DB close → Redis close 순서 (Bithumb 패턴).
+    - Constants: DB_WRITE_WINDOW_SEC=1.0 (Bithumb/Coinone/Korbit/KRX 동일).
+
+G6a 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a):
     - G1: `_stop_event` / `_running`
     - G2: `_ws` / `_first_tick_logged`
     - G3: `_last_heartbeat_at` (dual-write 유지)
     - G4: `_liveness` / `_connection_status` / `_ticker_freshness_status` /
       `_reconnect_attempt_count` / `_status_transition_count` (6 keys)
-    - G5: `_redis_writer` (GopaxRedisWriter, A13 lifecycle invariant — __init__
-      1회 생성, reconnect 사이 재사용)
-    G6-G7 attribute (`_db_writer` / `_fallback_controller` / `_alert_evaluator`)는
-    여전히 본 stage 제외.
+    - G5: `_redis_writer` (GopaxRedisWriter, A13 lifecycle invariant)
+    - G6a: `_db_writer` (GopaxDbWriter, 1s window debounce)
+    G6b-G7 attribute (`_fallback_controller` / `_alert_evaluator`)는 여전히 본
+    stage 제외.
 """
 
 from __future__ import annotations
@@ -123,6 +140,11 @@ RECONNECT_BACKOFF_TAIL = 30.0
 # G5 — Redis writer guards (Coinone C5 / Bithumb U5 동일 값).
 MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
 REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
+
+# G6a — DB writer debounce window (Bithumb U6a / Coinone C6a / Korbit K6a / KRX 동일).
+# tick rate (~100ms+) vs DB I/O (~10-50ms)이라 매 tick INSERT는 DB 부담. window
+# 내 마지막 tick만 helper 호출.
+DB_WRITE_WINDOW_SEC = 1.0
 
 
 class GopaxRedisWriter:
@@ -253,18 +275,127 @@ class GopaxRedisWriter:
             self._tasks.clear()
 
 
+class GopaxDbWriter:
+    """Gopax USDT/KRW DB writer — 1s window debounce + insert_source_rate_if_changed.
+
+    Bithumb `BithumbDbWriter` / Coinone `CoinoneDbWriter` 1:1 mirror.
+    tick rate (~100ms+) vs DB I/O (~10-50ms)이라 매 tick INSERT는 DB 부담. window
+    내 마지막 tick만 helper 호출.
+
+    asyncio loop 차단 방지:
+        sync SQLAlchemy 호출은 asyncio.to_thread로 격리. DB session은 to_thread
+        내부에서 get_db_context()로 생성/close.
+
+    race 방지 (Bithumb U6a mirror):
+        DB write (to_thread) 진행 중 새 tick 도착 → _pending_tick 갱신,
+        _timer.done() X 라 schedule()이 새 timer 안 만듦. write 종료 후
+        finally 블록에서 _pending_tick 재확인 후 새 timer 예약 — 누락 방지.
+
+    failure isolation: DB exception → log only, WS session 영향 X.
+
+    shutdown (close): pending tick 1s window 기다리지 않고 즉시 flush.
+        window 일관성보다 last tick 보장 우선.
+    """
+
+    def __init__(self, *, window_sec: float = DB_WRITE_WINDOW_SEC) -> None:
+        self._window_sec = window_sec
+        self._pending_tick: Optional[dict] = None
+        self._timer: Optional[asyncio.Task] = None
+
+    def schedule(self, tick: dict) -> None:
+        """tick 입력 → pending 갱신 + window timer 시작/유지. sync, 즉시 반환."""
+        self._pending_tick = tick
+        if self._timer is None or self._timer.done():
+            self._timer = asyncio.create_task(self._flush_after_window())
+
+    async def _flush_after_window(self) -> None:
+        """window 만료 → last pending tick을 helper에 전달.
+
+        write 진행 중 새 tick 도착 시 finally에서 새 timer 예약 (race 방지).
+        """
+        try:
+            await asyncio.sleep(self._window_sec)
+        except asyncio.CancelledError:
+            raise
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.gopax] DB write failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+        finally:
+            # write 중 들어온 tick 처리 — 새 window 예약. finally는 같은 코루틴
+            # frame 안 sync 영역이라 다른 코루틴 race X.
+            if self._pending_tick is not None:
+                self._timer = asyncio.create_task(self._flush_after_window())
+
+    @staticmethod
+    def _sync_db_write(tick: dict) -> None:
+        """sync DB write — to_thread 내부 실행.
+
+        get_db_context()로 SessionLocal 생성/close. insert_source_rate_if_changed는
+        내부에서 commit. Decimal 정규화 없음 (REST polling 및 Bithumb/Coinone과
+        일관, float 그대로 전달).
+        """
+        # 함수 내부 import — 모듈 로드 시 DB 의존성 격리.
+        from app import crud
+        from app.database import get_db_context
+
+        with get_db_context() as db:
+            crud.insert_source_rate_if_changed(
+                db=db,
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+            )
+
+    async def close(self) -> None:
+        """shutdown 시 timer cancel + pending tick 즉시 flush.
+
+        1s window 기다리지 않고 마지막 tick DB 저장. window 일관성보다 last tick
+        보장 우선 (shutdown은 드문 이벤트).
+        """
+        if self._timer is not None and not self._timer.done():
+            self._timer.cancel()
+            try:
+                await self._timer
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.gopax] db_writer timer cancel 실패")
+        self._timer = None
+        tick = self._pending_tick
+        self._pending_tick = None
+        if tick is None:
+            return
+        try:
+            await asyncio.to_thread(self._sync_db_write, tick)
+        except Exception as exc:
+            logger.warning(
+                "[usdt_ws.gopax] DB write on close failed (격리): %s: %s",
+                type(exc).__name__, exc,
+            )
+
+
 class GopaxWsClient:
-    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G5.
+    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G6a.
 
-    G1~G4 누적 + G5 GopaxRedisWriter (tick-level Redis fanout + tether topic
-    trigger + saturation counter). G6-G7 attribute (DB writer / fallback / alert)
-    + PR 2e telemetry summary log은 여전히 본 stage 제외.
+    G1~G5 누적 + G6a GopaxDbWriter (1s window debounce + insert_source_rate_if_changed).
+    G6b-G7 attribute (REST fallback / Alert evaluator) + PR 2e telemetry는 여전히
+    본 stage 제외.
 
-    ⚠️ Production activation 제약 (G5 단계도 유지 — Codex 강조):
-        G5 land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G5는 Redis fanout이
-        추가됐지만 PR 2e telemetry (summary log + counter emit)가 없어 관찰 인프라
-        불완전. production activation은 **PR 2e telemetry land 후 검토**.
-        G5는 **local/staging smoke 가능 단계**.
+    ⚠️ Production activation 제약 (G6a 단계도 유지 — Codex 강조):
+        G6a land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G6a는 DB writer가
+        추가됐지만 G6b/G7/PR 2e 부재. production activation은 **G6b + G7 + PR 2e
+        완료 후, 또는 별도 canary 조건 재검토 후 결정** (Codex 보강).
+        G6a는 **local/staging smoke 가능 단계**.
         자세한 내용은 module docstring 참조.
     """
 
@@ -277,7 +408,7 @@ class GopaxWsClient:
         self._first_tick_logged: bool = False
         # G3 heartbeat — Primus pong send 성공 시점 timestamp. G4 진입 후에는
         # Codex 권고 dual-write로 유지 (UsdtLivenessMonitor.last_heartbeat_at과
-        # 병행). cleanup 시점은 G5 또는 별도 PR에서 판단.
+        # 병행). cleanup은 별도 PR (G5/G6a 지났으니 dedicated cleanup PR로 처리 권장).
         self._last_heartbeat_at: Optional[float] = None
         # G4 — 2-signal status + liveness (Coinone/Korbit 패턴 mirror).
         # last_activity_at = max(tick, heartbeat)로 stale 판정 (UsdtLivenessMonitor).
@@ -296,6 +427,8 @@ class GopaxWsClient:
         # G5 — Redis writer (tick-level, fire-and-forget). A13 lifecycle invariant:
         # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Bithumb U5 mirror.
         self._redis_writer: GopaxRedisWriter = GopaxRedisWriter()
+        # G6a — DB writer (1s window debounce). Bithumb U6a / Coinone C6a mirror.
+        self._db_writer: GopaxDbWriter = GopaxDbWriter()
 
     @staticmethod
     def _build_subscribe_payload() -> dict:
@@ -356,7 +489,7 @@ class GopaxWsClient:
             now = time.time()
             # G4 dual-write (Codex 정정): _last_heartbeat_at G3 backward compat 유지
             # + _liveness.observe_heartbeat(now) 신규 (is_stale 판정 입력).
-            # cleanup 시점은 G5 또는 별도 PR에서 판단.
+            # cleanup은 별도 PR (G5/G6a 지났으니 dedicated cleanup PR로 처리 권장).
             self._last_heartbeat_at = now
             self._liveness.observe_heartbeat(now)
             logger.debug("[usdt_ws.gopax] primus pong sent")
@@ -543,9 +676,10 @@ class GopaxWsClient:
         return RECONNECT_BACKOFF_TAIL
 
     async def _run_one_session(self) -> None:
-        """G4 single session — connect + subscribe + recv + Primus pong + liveness + status.
+        """G6a single session — connect + subscribe + recv + Primus pong + liveness +
+        status + Redis fanout (G5) + DB fanout (G6a).
 
-        Lifecycle (G4 scope):
+        Lifecycle (G6a누적 scope):
             1. websockets.connect(GOPAX_WS_URL) + reset_active_session()
             2. SubscribeToTickers payload send + _set_connection_status("normal")
             3. recv loop: wake every RECV_TIMEOUT_SEC (stop_event 반응)
@@ -556,17 +690,18 @@ class GopaxWsClient:
             6. Primus ping → pong send + dual-write heartbeat → continue
                (send 실패 시 RuntimeError raise → start() except 경로로 attempt++ + backoff)
             7. 그 외 frame → parse + handle + `_liveness.observe_tick(now)` + G5
-               Redis fanout (valid tick일 때만 `_redis_writer.schedule(tick)`)
+               Redis fanout + G6a DB fanout (valid tick일 때만 schedule)
             8. ConnectionClosed → raise (return X) → start() except 경로로 attempt++ + backoff
                (return 시 start() else: continue로 tight loop hang)
-            9. finally: `_redis_writer.close()` (Bithumb/Coinone 패턴 — session task
-               drain + _tasks.clear, 다음 session에서 빈 _tasks로 새 schedule)
-            10. fanout (DB/Alert) 없음 — G6-G7 영역. PR 2e summary log emit 별도.
+            9. finally close 순서: G6a DB → G5 Redis (Bithumb 순서 mirror —
+               fallback/alert은 G6b/G7에서 앞쪽에 삽입 예정). 각 close 예외 격리.
+            10. fanout (Alert) 없음 — G7 영역. PR 2e summary log emit 별도.
 
-        ⚠️ G4 단독 flag=true는 production 활성화 금지 (Codex 강조):
-            reconnect/liveness까지 land됐지만 Redis/DB/Telemetry 부재라 silent
-            ingestion (관찰 불가). production activation은 G5 + PR 2e 이후 검토.
-            자세한 내용은 module docstring 참조.
+        ⚠️ G6a 단독 flag=true는 production 활성화 금지 (Codex 강조):
+            G6a까지 land됐지만 G6b REST fallback / G7 Alert evaluator / PR 2e
+            telemetry 부재라 운영 가치 제한적. production activation은 G6b + G7 +
+            PR 2e 완료 후, 또는 별도 canary 조건 재검토 후 결정. 자세한 내용은
+            module docstring 참조.
         """
         async with websockets.connect(
             GOPAX_WS_URL,
@@ -641,17 +776,28 @@ class GopaxWsClient:
                             )
                         continue
 
-                    # 그 외 frame → parse + handle + G5 Redis fanout.
+                    # 그 외 frame → parse + handle + G5 Redis fanout + G6a DB fanout.
                     tick = self._handle_message(raw)
                     if tick is not None:
                         # G5: valid tick → Redis fanout (Bithumb U5 mirror).
                         # invalid/Primus/control frame은 tick=None이라 schedule 호출 0.
                         self._redis_writer.schedule(tick)
+                        # G6a: DB writer (1s window debounce, race-prevention).
+                        # Bithumb U6a / Coinone C6a mirror.
+                        self._db_writer.schedule(tick)
             finally:
                 self._ws = None
-                # G5: Redis writer drain + close (Bithumb/Coinone 패턴 mirror).
+                # G6a: DB writer close 먼저 (Bithumb U7 close 순서 mirror —
+                # fallback → DB → Alert → Redis, fallback/alert은 G6b/G7 시점에
+                # 앞쪽에 삽입 예정). pending tick 즉시 flush + timer cancel.
+                # close 자체 예외는 격리 — WS session 영향 X.
+                try:
+                    await self._db_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.gopax] db_writer.close() 실패")
+                # G5: Redis writer drain + close 마지막 (Bithumb 순서 mirror).
                 # session finally에서 close: 그 session task drain + _tasks.clear,
-                # 다음 session에서 빈 _tasks로 새 schedule. close 자체 예외는 격리.
+                # 다음 session에서 빈 _tasks로 새 schedule.
                 try:
                     await self._redis_writer.close()
                 except Exception:
@@ -676,18 +822,18 @@ class GopaxWsClient:
             - stop_event set 시 즉시 종료 (backoff sleep도 즉시 break)
             - flag=false 시 본 함수 호출 자체가 발생하지 않음 (scheduler가 차단)
 
-        Production activation 제약 (Codex 강조 — G4 단독 land 후에도 유지):
-            G4 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. production activation은
-            **최소 G5 Redis writer + PR 2e telemetry 이후 검토**. G4 단독은
-            reconnect/liveness만 land되고 Redis/DB/Telemetry 부재라 silent ingestion
-            상태 (관찰 불가). G4는 **local/staging smoke 가능 단계**.
+        Production activation 제약 (Codex 강조 — G6a 단계도 유지):
+            G6a land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. production activation은
+            **G6b + G7 + PR 2e 완료 후, 또는 별도 canary 조건 재검토 후 결정**
+            (Codex 보강). G6a는 DB writer까지 land됐지만 G6b/G7/PR 2e 부재라
+            운영 가치 제한적. G6a는 **local/staging smoke 가능 단계**.
         """
         if self._running:
             logger.debug("[usdt_ws.gopax] 이미 실행 중, 중복 start 무시")
             return
         self._running = True
         logger.info(
-            "[usdt_ws.gopax] start (G4 — reconnect loop + 2-signal status + liveness)",
+            "[usdt_ws.gopax] start (G6a — reconnect loop + liveness + Redis/DB fanout)",
         )
         attempt = 0
         try:
