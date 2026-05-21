@@ -1,51 +1,54 @@
-"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G3.
+"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G4.
 
 USDT_WS_DESIGN_PLAN §12.9 (Phase B.6, 2026-05-21).
 
-G3 scope (이 파일의 현재 범위):
-    G1 lifecycle skeleton + G2 Subscribe/Parse/USDT-KRW 필터링 + G3 Primus pong
-    handler + heartbeat timestamp 기록까지. Liveness + reconnect (G4) / Writers
-    + fallback + alert (G5-G7) / Telemetry (PR 2e)는 별도 stage.
+G4 scope (이 파일의 현재 범위):
+    G1 lifecycle + G2 Subscribe/Parse + G3 Primus pong + **G4 UsdtLivenessMonitor +
+    reconnect loop + 2-signal status (connection + ticker_freshness)**까지.
+    Writers + fallback + alert (G5-G7) / Telemetry (PR 2e)는 별도 stage.
 
-G3 주요 변경:
-    - `_is_primus_ping()` static method — Primus ping **전용** 매칭 (3 form 처리,
-      Codex 정정: pong/open/close 등 다른 control frame은 False).
-    - `_handle_primus_ping(ws, raw)` async method — pong replacement send +
-      `_last_heartbeat_at` 갱신 (send 성공 시점에만). **bool return** (Codex 정정).
-    - `_run_one_session()` 안 Primus 분기 추가 — ping 매칭 시 pong send →
-      성공이면 continue, 실패면 session 종료 (Codex 정정: G4 reconnect 부재라 깨진
-      session 명시적 종료).
-    - 신규 attribute `_last_heartbeat_at: Optional[float]` (G4 liveness에서 활용).
+G4 주요 변경:
+    - `UsdtLivenessMonitor` 통합 (source-neutral, Coinone/Korbit 패턴 mirror).
+      `last_activity_at = max(tick, heartbeat)` 기반 stale 판정.
+    - 2-signal status:
+        * `_connection_status` (normal/reconnecting/stale) — Primus heartbeat +
+          ConnectionClosed 기반.
+        * `_ticker_freshness_status` (normal/warning/degraded) — tick silence
+          age 기반. degraded는 **status 갱신만** (Codex 정정: fallback hook은 G6b).
+    - `_status_transition_count` 6 keys (connection 3 + ticker 3) — telemetry.
+    - reconnect loop (`start()` Bithumb 패턴 mirror): ConnectionClosed/Exception
+      → backoff + 재시도. stop_event 즉시 반응.
+    - `_handle_primus_ping` dual-write (Codex 정정): `_last_heartbeat_at` G3
+      backward compat 유지 + `_liveness.observe_heartbeat(now)` 신규 — cleanup은
+      G5 또는 별도 PR로 미룸.
+    - `_handle_message` valid tick 시 `_liveness.observe_tick(now)` 호출.
+    - Constants: STALE_AFTER_SEC=360 / TICKER_FRESHNESS_WARNING=60 / DEGRADED=300
+      (Coinone 기준 provisional) / RECONNECT_BACKOFF_SEQ (1,2,4,8,16,30) tail 30.
 
-⚠️ Production activation 제약 (G3 단계도 유지 — Codex 강조):
-    G3는 Primus pong 처리되지만 **G4 reconnect/liveness 부재**라서:
-        1. connect 성공 → SubscribeToTickers 송신 성공
-        2. Initial response → USDT-KRW 매칭 → first tick log
-        3. ~30초 후 server `"primus::ping::<epoch_ms>"` 송신
-        4. G3: pong replacement 송신 + `_last_heartbeat_at` 갱신 → session 유지
-        5. **단** pong send 실패 또는 ConnectionClosed 발생 시 `_run_one_session()`
-           종료 → G4 reconnect loop 부재라 재시작 없음. `start()` task는
-           stop_event 대기 상태로 **idle** 유지 (`_running=True`). 새 tick도
-           reconnect도 없는 silent idle 상태 — silent termination이 아니라
-           silent stuck에 가깝다.
+⚠️ Production activation 제약 (G4 단계도 유지 — Codex 강조 강화):
+    G4 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지. G4 단독은 reconnect/
+    liveness만 land되고 Redis/DB/Telemetry 부재라 silent ingestion 상태 (관찰
+    불가능). G4는 **local/staging smoke 가능 단계**.
 
-    따라서 G3 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지.
-    Production env는 default false 유지하며, **G4 (reconnect + liveness) land 후
-    에만 activation 검토** (G3 단독으로는 단일 session 후 idle 위험 여전).
+    **Production activation은 최소 G5 Redis writer + PR 2e telemetry 이후 검토**.
+    그 전까지 production env는 default false 유지.
 
-G3 acceptance:
-    - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1/G2 동일)
-    - flag=true 시 connect + subscribe + recv + parse + Primus pong까지
-    - Primus ping 3 form 모두 pong replacement 송신 + heartbeat 갱신 (Codex 정정:
-      ping 전용 — pong/open/close는 별도 처리)
-    - pong send 실패 시 session 명시적 종료 (Codex 정정: log-only 금지)
+G4 acceptance:
+    - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1~G3 동일)
+    - flag=true 시 reconnect loop으로 session crash 시 backoff 후 재시도
+    - liveness 기반 connection_status 전이 (stale ↔ normal)
+    - tick silence 기반 ticker_freshness_status 전이 (normal/warning/degraded)
+    - degraded 전이는 status 갱신만 — fallback action은 G6b 영역 (Codex 정정)
+    - production env false 유지 (G5 + PR 2e 이전 activation 보류)
 
-G3 누적 attribute (G1 + G2 + G3):
+G4 누적 attribute (G1 + G2 + G3 + G4):
     - G1: `_stop_event` / `_running`
     - G2: `_ws` / `_first_tick_logged`
-    - G3: `_last_heartbeat_at` (G4 liveness에서 활용, G3는 기록만)
-    G4 attribute (`_connection_status` / `_ticker_freshness_status` /
-    `_reconnect_attempt_count` / `_liveness`)는 여전히 본 stage 제외.
+    - G3: `_last_heartbeat_at` (dual-write 유지 — Codex 정정으로 G4에서 미제거)
+    - G4: `_liveness` / `_connection_status` / `_ticker_freshness_status` /
+      `_reconnect_attempt_count` / `_status_transition_count` (6 keys)
+    G5-G7 attribute (`_redis_writer` / `_db_writer` / `_fallback_controller` /
+    `_alert_evaluator`)는 여전히 본 stage 제외.
 """
 
 from __future__ import annotations
@@ -59,6 +62,8 @@ from typing import Any, Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
+
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.gopax")
 
 # Gopax WebSocket endpoint (Primus protocol — G3에서 pong 응답 추가).
@@ -71,20 +76,35 @@ RECV_TIMEOUT_SEC = 1.0
 # Gopax 거래쌍 명칭 — 클라이언트측 필터링 키.
 GOPAX_TARGET_PAIR = "USDT-KRW"
 
+# G4 — Connection liveness threshold (Coinone 동일 — Primus 30s × 12 안전 마진).
+# server-initiated heartbeat이라 last_activity_at (tick OR pong 수신) 기준.
+STALE_AFTER_SEC = 360.0
+
+# G4 — Ticker freshness threshold (Coinone 기준, provisional).
+# Gopax delta event 활성도 비례 변동 → Coinone과 유사. Korbit (30/120)보다 여유.
+# G4 land 후 staging smoke 측정으로 확정 예정.
+TICKER_FRESHNESS_WARNING_SEC = 60.0
+TICKER_FRESHNESS_DEGRADED_SEC = 300.0
+
+# G4 — Reconnect backoff sequence (Bithumb/Coinone/Korbit 동일).
+# Gopax rate limit 20 req/sec/IP에 비해 매우 여유 (1초 minimum 안전).
+RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
+RECONNECT_BACKOFF_TAIL = 30.0
+
 
 class GopaxWsClient:
-    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G3.
+    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G4.
 
-    G1 lifecycle skeleton + G2 connect/subscribe/parse + G3 Primus pong handler
-    누적. Codex 최종 권고대로 `_connection_status` / `_ticker_freshness_status` /
-    `_reconnect_attempt_count` / `_liveness` 등 G4에서 실제 필요해질 attribute는
-    본 stage에서 제외 (선반영 회피).
+    G1~G3 누적 + G4 UsdtLivenessMonitor + reconnect loop + 2-signal status.
+    Coinone/Korbit 패턴 mirror (2-dim status, last_activity_at 기반 stale 판정).
+    G5-G7 attribute (writers / fallback / alert)는 여전히 본 stage 제외.
 
-    ⚠️ Production activation 제약 (G3 단계도 유지):
-        G3는 Primus pong을 처리하지만 G4 reconnect/liveness 부재라서 pong send
-        실패 또는 ConnectionClosed 시 여전히 silent idle/stuck 상태. G3 land 후
-        에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G4 land 후에만 activation
-        검토. 자세한 내용은 module docstring 참조.
+    ⚠️ Production activation 제약 (G4 단계도 유지 — Codex 강조):
+        G4 land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G4 단독은 reconnect/
+        liveness만 land되고 Redis/DB/Telemetry 부재라 silent ingestion 상태
+        (관찰 불가). production activation은 **최소 G5 Redis writer + PR 2e
+        telemetry 이후 검토**. G4는 **local/staging smoke 가능 단계**.
+        자세한 내용은 module docstring 참조.
     """
 
     def __init__(self) -> None:
@@ -94,9 +114,24 @@ class GopaxWsClient:
         # G2 session state — connect 결과 + first tick log throttle
         self._ws: Optional[Any] = None
         self._first_tick_logged: bool = False
-        # G3 heartbeat — Primus pong send 성공 시점 timestamp.
-        # G4 liveness/status 판단에서 활용 예정. G3는 기록만, 판단 X.
+        # G3 heartbeat — Primus pong send 성공 시점 timestamp. G4 진입 후에는
+        # Codex 권고 dual-write로 유지 (UsdtLivenessMonitor.last_heartbeat_at과
+        # 병행). cleanup 시점은 G5 또는 별도 PR에서 판단.
         self._last_heartbeat_at: Optional[float] = None
+        # G4 — 2-signal status + liveness (Coinone/Korbit 패턴 mirror).
+        # last_activity_at = max(tick, heartbeat)로 stale 판정 (UsdtLivenessMonitor).
+        self._liveness: UsdtLivenessMonitor = UsdtLivenessMonitor()
+        self._connection_status: str = "normal"          # normal/reconnecting/stale
+        self._ticker_freshness_status: str = "normal"    # normal/warning/degraded
+        self._reconnect_attempt_count: int = 0
+        self._status_transition_count: dict[str, int] = {
+            "connection_normal": 0,
+            "connection_reconnecting": 0,
+            "connection_stale": 0,
+            "ticker_normal": 0,
+            "ticker_warning": 0,
+            "ticker_degraded": 0,
+        }
 
     @staticmethod
     def _build_subscribe_payload() -> dict:
@@ -154,13 +189,18 @@ class GopaxWsClient:
         pong = raw.replace("::ping::", "::pong::")
         try:
             await ws.send(pong)
-            self._last_heartbeat_at = time.time()
+            now = time.time()
+            # G4 dual-write (Codex 정정): _last_heartbeat_at G3 backward compat 유지
+            # + _liveness.observe_heartbeat(now) 신규 (is_stale 판정 입력).
+            # cleanup 시점은 G5 또는 별도 PR에서 판단.
+            self._last_heartbeat_at = now
+            self._liveness.observe_heartbeat(now)
             logger.debug("[usdt_ws.gopax] primus pong sent")
             return True
         except Exception:
             logger.exception(
                 "[usdt_ws.gopax] primus pong send 실패 — session 종료 "
-                "(G3 — G4 reconnect 부재)",
+                "(G4 reconnect로 backoff 재시도 예정)",
             )
             return False
 
@@ -270,11 +310,14 @@ class GopaxWsClient:
     def _handle_message(self, raw) -> Optional[dict]:
         """raw frame → normalized tick (or None). First tick INFO 1회 + 이후 DEBUG.
 
-        Bithumb `_handle_message` 패턴 mirror — fanout (Redis/DB/Alert)은 G5-G7 영역.
+        G4 갱신: valid tick 시 `_liveness.observe_tick(now)` 호출 (Bithumb 패턴 mirror)
+        — last_activity_at 갱신 → stale check 입력. fanout (Redis/DB/Alert)은 G5-G7 영역.
         """
         tick = self._parse_ticker_message(raw)
         if tick is None:
             return None
+        # G4 — liveness observe (last_activity_at = max(tick, heartbeat))
+        self._liveness.observe_tick(time.time())
         if not self._first_tick_logged:
             logger.info("[usdt_ws.gopax] first tick", extra=tick)
             self._first_tick_logged = True
@@ -282,28 +325,80 @@ class GopaxWsClient:
             logger.debug("[usdt_ws.gopax] tick", extra=tick)
         return tick
 
+    def _set_connection_status(self, new_status: str) -> None:
+        """G4 — connection status 전이 + counter + log (Coinone/Korbit 패턴 mirror).
+
+        동일 status 재호출 시 미증가 (log flood 방지). transition counter는
+        `connection_<new_status>` key로 증가.
+        """
+        if self._connection_status == new_status:
+            return
+        prev = self._connection_status
+        self._connection_status = new_status
+        key = f"connection_{new_status}"
+        if key in self._status_transition_count:
+            self._status_transition_count[key] += 1
+        logger.info(
+            "[usdt_ws.gopax] connection_status %s → %s (reconnect_attempt=%d max_gap=%.2fs)",
+            prev, new_status, self._reconnect_attempt_count,
+            self._liveness.max_frame_gap_sec,
+        )
+
+    def _set_ticker_freshness_status(self, new_status: str) -> None:
+        """G4 — ticker freshness status 전이 + counter + log.
+
+        Codex 정정 (G4 scope 명시): degraded 전이는 status 갱신만, fallback hook은
+        G6b 영역. 본 G4에서는 `_fallback_controller` attribute 자체가 없다.
+        TestTickerFreshnessDegradedNoFallback로 잠금.
+        """
+        if self._ticker_freshness_status == new_status:
+            return
+        prev = self._ticker_freshness_status
+        self._ticker_freshness_status = new_status
+        key = f"ticker_{new_status}"
+        if key in self._status_transition_count:
+            self._status_transition_count[key] += 1
+        logger.info(
+            "[usdt_ws.gopax] ticker_freshness_status %s → %s "
+            "(last_tick_at=%s max_gap=%.2fs)",
+            prev, new_status, self._liveness.last_tick_at,
+            self._liveness.max_frame_gap_sec,
+        )
+        # G6b 영역 (fallback hook) 명시적 미진입 — degraded action 없음.
+
+    @staticmethod
+    def _compute_backoff(attempt: int) -> float:
+        """G4 — reconnect backoff seq lookup (Bithumb mirror).
+
+        attempt: 1-based. seq exhausted 시 tail 30s 유지.
+        """
+        if attempt <= 0:
+            return RECONNECT_BACKOFF_SEQ[0]
+        if attempt <= len(RECONNECT_BACKOFF_SEQ):
+            return RECONNECT_BACKOFF_SEQ[attempt - 1]
+        return RECONNECT_BACKOFF_TAIL
+
     async def _run_one_session(self) -> None:
-        """G3 single session — connect + subscribe + recv loop + Primus pong + parse.
+        """G4 single session — connect + subscribe + recv + Primus pong + liveness + status.
 
-        Lifecycle (G3 scope):
-            1. websockets.connect(GOPAX_WS_URL)
-            2. SubscribeToTickers payload send
+        Lifecycle (G4 scope):
+            1. websockets.connect(GOPAX_WS_URL) + reset_active_session()
+            2. SubscribeToTickers payload send + _set_connection_status("normal")
             3. recv loop: wake every RECV_TIMEOUT_SEC (stop_event 반응)
-            4. Primus ping → pong send + `_last_heartbeat_at` 갱신 → continue
-               (Codex 정정: send 실패 시 session 명시적 종료)
-            5. 그 외 frame → parse + handle
-            6. fanout (Redis/DB/Alert) 없음 — G5-G7 영역
+            4. 매 iter: stale check (`_liveness.is_stale(now, STALE_AFTER_SEC)`) →
+               connection_status 전이 (stale ↔ normal)
+            5. 매 iter: ticker freshness 전이 (now - last_tick_at 기준 warning/degraded/normal)
+               — degraded는 status 갱신만, fallback hook은 G6b 영역 (Codex 정정)
+            6. Primus ping → pong send + dual-write heartbeat → continue
+               (send 실패 시 RuntimeError raise → start() except 경로로 attempt++ + backoff)
+            7. 그 외 frame → parse + handle + `_liveness.observe_tick(now)`
+            8. ConnectionClosed → raise (return X) → start() except 경로로 attempt++ + backoff
+               (return 시 start() else: continue로 tight loop hang)
+            9. fanout (Redis/DB/Alert) 없음 — G5-G7 영역
 
-        Primus 처리 우선 순위 (Codex 검토 포인트):
-            - ping만 잡고 pong/open/close 등 다른 control frame은 parse layer로 전달
-              (parse는 None return — G2 defensive skip)
-            - send 성공 시점에만 heartbeat 갱신 (실패는 갱신 없음)
-            - send 실패 → session 종료 (return) → G4 reconnect loop 추가 시 자연 통합
-
-        ⚠️ G3 단독 flag=true는 production 활성화 금지:
-            Primus pong은 응답하지만 G4 reconnect/liveness 부재라 ConnectionClosed
-            또는 pong send 실패 시 session 종료 → `start()` task는 stop_event
-            대기 상태로 **idle** 유지 (silent termination이 아니라 silent stuck).
+        ⚠️ G4 단독 flag=true는 production 활성화 금지 (Codex 강조):
+            reconnect/liveness까지 land됐지만 Redis/DB/Telemetry 부재라 silent
+            ingestion (관찰 불가). production activation은 G5 + PR 2e 이후 검토.
             자세한 내용은 module docstring 참조.
         """
         async with websockets.connect(
@@ -313,6 +408,8 @@ class GopaxWsClient:
             open_timeout=10,
         ) as ws:
             self._ws = ws
+            # G4 — active session 시작: liveness reset + connection_status normal.
+            self._liveness.reset_active_session()
             logger.info("[usdt_ws.gopax] connected url=%s", GOPAX_WS_URL)
             payload = self._build_subscribe_payload()
             await ws.send(json.dumps(payload))
@@ -320,26 +417,61 @@ class GopaxWsClient:
                 "[usdt_ws.gopax] subscribed all tickers (client-side filter pair=%s)",
                 GOPAX_TARGET_PAIR,
             )
+            self._set_connection_status("normal")
 
             try:
                 while not self._stop_event.is_set():
+                    now = time.time()
+                    # G4 — stale check: last_activity_at (max tick/heartbeat) 기준.
+                    if self._connection_status != "stale" and self._liveness.is_stale(now, STALE_AFTER_SEC):
+                        self._set_connection_status("stale")
+                    elif self._connection_status == "stale" and not self._liveness.is_stale(now, STALE_AFTER_SEC):
+                        self._set_connection_status("normal")
+
+                    # G4 — ticker freshness 전이 (tick silence age 기반).
+                    # Codex 정정: degraded는 status 갱신만, fallback hook은 G6b 영역.
+                    if self._liveness.last_tick_at is not None:
+                        ticker_age = now - self._liveness.last_tick_at
+                        if (
+                            self._ticker_freshness_status == "normal"
+                            and ticker_age > TICKER_FRESHNESS_WARNING_SEC
+                        ):
+                            self._set_ticker_freshness_status("warning")
+                        elif (
+                            self._ticker_freshness_status == "warning"
+                            and ticker_age > TICKER_FRESHNESS_DEGRADED_SEC
+                        ):
+                            self._set_ticker_freshness_status("degraded")
+                        elif (
+                            self._ticker_freshness_status != "normal"
+                            and ticker_age <= TICKER_FRESHNESS_WARNING_SEC
+                        ):
+                            self._set_ticker_freshness_status("normal")
+
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=RECV_TIMEOUT_SEC)
                     except asyncio.TimeoutError:
                         continue
                     except ConnectionClosed:
-                        # G3: server disconnect — session 종료.
-                        # G4 reconnect loop에서 재시도 추가 예정.
+                        # G4 (Codex 정정 v2): return 대신 raise — start()의 except
+                        # ConnectionClosed 경로로 attempt++ + backoff + reconnecting
+                        # status 전이. return 시 start()는 정상 종료로 인식 → else: continue
+                        # → tight loop hang.
                         logger.warning(
-                            "[usdt_ws.gopax] connection closed during recv (G3 — no reconnect)",
+                            "[usdt_ws.gopax] connection closed during recv "
+                            "(G4 reconnect loop으로 raise — backoff 재시도)",
                         )
-                        return
+                        raise
 
                     # G3: Primus ping 먼저 처리 (pong 송신 + heartbeat 갱신).
                     if self._is_primus_ping(raw):
                         if not await self._handle_primus_ping(ws, raw):
-                            # Codex 정정: send 실패 → session 종료 (G4 reconnect 부재).
-                            return
+                            # G4 (Codex 정정 v2): return 대신 raise — start()의
+                            # except Exception 경로로 attempt++ + backoff.
+                            # return 시 정상 종료 인식 → tight loop.
+                            raise RuntimeError(
+                                "primus pong send failed (G4 reconnect loop으로 backoff)"
+                            )
                         continue
 
                     # 그 외 frame → parse + handle. fanout은 G5+ 영역.
@@ -348,47 +480,86 @@ class GopaxWsClient:
                 self._ws = None
 
     async def start(self) -> None:
-        """G2 single session lifecycle — connect/subscribe/recv 1회 후 stop_event 대기.
+        """G4 reconnect loop — session crash 시 backoff 후 재시도.
 
-        G1 lifecycle은 그대로 (no network), G2부터 `_run_one_session()` 호출 추가.
-        G4 reconnect loop 부재라 session 종료 시 재시도 없음 — `stop_event.wait()`로
-        **idle 상태 진입** (`_running=True` 유지). task 자체는 종료되지 않고
-        stop_event set 호출까지 대기. stop() 호출 시에만 finally에서 `_running=False`로
-        전환되며 task done.
+        Bithumb start() 패턴 mirror. ConnectionClosed / Exception / pong send 실패
+        (`RuntimeError` raise) → except 경로에서 attempt++ + backoff + reconnecting
+        status 전이 → 재시도. stop_event set 시 즉시 종료.
 
-        ⚠️ 이는 silent termination이 아니라 silent idle/stuck — Primus pong 미응답으로
-        세션이 종료되면 새 tick도 없고 reconnect도 없는 상태로 task가 살아있다.
-        Production env=true 금지 사유 핵심 — module docstring 참조.
+        Codex v2 정정: `_run_one_session()`이 실패 신호를 return이 아니라 exception
+        으로 올려야 reconnect except 경로가 실제로 동작 (return 시 else: continue로
+        정상 종료 인식 → tight loop hang).
 
         Acceptance:
             - 중복 start 방지 (`_running` flag)
-            - stop_event set 시 즉시 종료 (idle wait 풀림)
-            - G4 미구현 — single session 1회만, 종료 후 재시작 없음 (idle 상태로 남음)
+            - ConnectionClosed → `_set_connection_status("reconnecting")` +
+              `_reconnect_attempt_count++` + backoff sleep
+            - Exception 동일 처리
+            - stop_event set 시 즉시 종료 (backoff sleep도 즉시 break)
             - flag=false 시 본 함수 호출 자체가 발생하지 않음 (scheduler가 차단)
+
+        Production activation 제약 (Codex 강조 — G4 단독 land 후에도 유지):
+            G4 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. production activation은
+            **최소 G5 Redis writer + PR 2e telemetry 이후 검토**. G4 단독은
+            reconnect/liveness만 land되고 Redis/DB/Telemetry 부재라 silent ingestion
+            상태 (관찰 불가). G4는 **local/staging smoke 가능 단계**.
         """
         if self._running:
             logger.debug("[usdt_ws.gopax] 이미 실행 중, 중복 start 무시")
             return
         self._running = True
         logger.info(
-            "[usdt_ws.gopax] start (G3 — connect/subscribe/parse + Primus pong, no reconnect/liveness/fanout)",
+            "[usdt_ws.gopax] start (G4 — reconnect loop + 2-signal status + liveness)",
         )
+        attempt = 0
         try:
-            try:
-                await self._run_one_session()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "[usdt_ws.gopax] _run_one_session crashed (G2 — no reconnect)",
-                )
-            # G2: single session 종료 후 stop_event 대기 (재시작 없음).
-            # G4 reconnect loop 추가 시 본 wait는 reconnect loop으로 대체.
-            if not self._stop_event.is_set():
-                await self._stop_event.wait()
+            while not self._stop_event.is_set():
+                try:
+                    await self._run_one_session()
+                    if self._stop_event.is_set():
+                        break
+                    attempt = 0  # 정상 종료 (rare — recv loop가 stop_event로 빠진 case)
+                except asyncio.CancelledError:
+                    raise
+                except ConnectionClosed as exc:
+                    if self._stop_event.is_set():
+                        break
+                    self._set_connection_status("reconnecting")
+                    attempt += 1
+                    self._reconnect_attempt_count += 1
+                    backoff = self._compute_backoff(attempt)
+                    logger.warning(
+                        "[usdt_ws.gopax] connection closed (attempt %d): %s — backoff %.1fs",
+                        attempt, exc, backoff,
+                    )
+                except Exception as exc:
+                    if self._stop_event.is_set():
+                        break
+                    self._set_connection_status("reconnecting")
+                    attempt += 1
+                    self._reconnect_attempt_count += 1
+                    backoff = self._compute_backoff(attempt)
+                    logger.warning(
+                        "[usdt_ws.gopax] session error (attempt %d): %s: %s — backoff %.1fs",
+                        attempt, type(exc).__name__, exc, backoff,
+                    )
+                else:
+                    continue  # 정상 종료 후 즉시 다음 iteration (no backoff)
+
+                # backoff sleep — stop_event 즉시 반응.
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=backoff,
+                    )
+                    break  # stop_event 도착
+                except asyncio.TimeoutError:
+                    pass  # backoff 완료, 다음 iteration
         finally:
             self._running = False
-            logger.info("[usdt_ws.gopax] start exited")
+            logger.info(
+                "[usdt_ws.gopax] start exited (reconnect_attempts=%d)",
+                self._reconnect_attempt_count,
+            )
 
     async def stop(self) -> None:
         """stop signal — recv loop / start wait 모두 풀어줌. idempotent."""
