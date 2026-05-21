@@ -40,7 +40,7 @@ import asyncio
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from websockets.exceptions import ConnectionClosed
 
@@ -2181,19 +2181,21 @@ class TestFinallyCloseExceptionIsolation(unittest.IsolatedAsyncioTestCase):
 
 
 # ===========================================================================
-# Phase B.5 follow-up — Summary log (start-level, state-only 8 metrics, 1차 PR)
+# Phase B.5 follow-up — Summary log (start-level, 8 state + 1 counter = 9 metrics)
+# 1차 PR: state-only 8 metrics / PR 2a: fallback_probe_scheduled_count (9th field)
 # ===========================================================================
 
 
 class TestSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
     """Phase B.5 §12.7.5 후속 — Korbit summary log 단독 검증.
 
-    1차 PR scope: state-only 8 metric. 2차 PR scope (writer counter)는 별도.
+    1차 PR scope: state-only 8 metric.
+    PR 2a: fallback_probe_scheduled_count 9th field.
     KRX kis_ws _summary_log_loop 패턴 mirror, start-level task lifecycle.
     """
 
-    async def test_emit_format_contains_all_8_metrics(self):
-        """emit log에 state-only 8 metric 모두 key=value 포맷 포함."""
+    async def test_emit_format_contains_all_9_metrics(self):
+        """emit log에 state 8 + counter 1 = 9 metric 모두 key=value 포맷 포함 (PR 2a)."""
         client = KorbitWsClient()
         # frame_count_total 갱신해서 frames_per_min 계산 가능하게
         client._liveness.frame_count_total = 100
@@ -2209,7 +2211,7 @@ class TestSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
              self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
             await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
 
-        # 8 metric 모두 emit format에 포함
+        # 9 metric (8 state + 1 PR 2a counter) 모두 emit format에 포함
         metric_log = next((m for m in cm.output if "metrics" in m), None)
         self.assertIsNotNone(metric_log, "metric INFO log 없음")
         for keyword in [
@@ -2221,6 +2223,7 @@ class TestSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
             "ticker_freshness_status=",
             "reconnect_attempts=",
             "status_transitions=",
+            "fallback_probe_scheduled_count=",  # PR 2a 9th field
         ]:
             self.assertIn(keyword, metric_log, f"metric key 누락: {keyword}")
 
@@ -2295,6 +2298,91 @@ class TestSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
         # log 0건 검증 (loop 자체가 entry 못 함 → metric INFO emit X)
         with self.assertNoLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO"):
             await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+
+# ===========================================================================
+# PR 2a — Korbit fallback_probe_scheduled_count counter 동작 + emit 검증
+# ===========================================================================
+
+
+class TestKorbitFallbackScheduledProbeCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2a — KorbitRestFallbackController.scheduled_probe_count counter 동작 검증.
+
+    의미: schedule_probe()가 in-flight/cooldown/no-loop skip 통과 후
+    loop.create_task(_run_probe(...)) 성공 시점에만 +1. skip은 미증가.
+    """
+
+    def _make_controller(self) -> KorbitRestFallbackController:
+        """Test용 controller — schedule만 검증, 실제 fanout 미실행."""
+        redis_writer = MagicMock()
+        db_writer = MagicMock()
+        alert_evaluator = MagicMock()
+        return KorbitRestFallbackController(
+            redis_writer=redis_writer,
+            db_writer=db_writer,
+            alert_evaluator=alert_evaluator,
+        )
+
+    def test_initial_value_zero(self):
+        """controller 생성 직후 counter == 0."""
+        controller = self._make_controller()
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    async def test_increments_on_successful_schedule(self):
+        """schedule_probe() 성공 (in-flight/cooldown/no-loop skip 통과) → +1."""
+        controller = self._make_controller()
+
+        # _run_probe mock — task 즉시 완료 (실제 REST 호출 안 함)
+        async def fake_run_probe(reason):
+            return None
+
+        with patch.object(controller, "_run_probe", side_effect=fake_run_probe):
+            controller.schedule_probe(reason="test")
+            self.assertEqual(controller.scheduled_probe_count, 1)
+            # pending_task drain (test isolation — "task was never awaited" 회피)
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+    def test_no_increment_on_in_flight_skip(self):
+        """in-flight skip 발화 → counter 0 유지 (skip 후 return)."""
+        controller = self._make_controller()
+        controller._in_flight = True  # 사전 in-flight 상태
+        controller.schedule_probe(reason="test")  # in-flight skip path
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    def test_no_increment_on_cooldown_skip(self):
+        """cooldown skip 발화 → counter 0 유지 (skip 후 return)."""
+        controller = self._make_controller()
+        controller._cooldown_until = time.time() + 1000.0  # 미래 cooldown 활성
+        controller.schedule_probe(reason="test")  # cooldown skip path
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+
+class TestKorbitSummaryLogEmitsScheduledProbeCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2a — _summary_log_loop 9th field emit value 검증.
+
+    PR 2b Upbit `redis_saturation_count` PropertyMock 패턴 mirror —
+    counter property를 mock해서 emit log 안 numeric 값 직접 검증.
+    """
+
+    async def test_emit_contains_scheduled_probe_count_value(self):
+        """fallback_probe_scheduled_count=N (N>0) emit 검증."""
+        client = KorbitWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            KorbitRestFallbackController, "scheduled_probe_count",
+            new_callable=PropertyMock, return_value=7,
+        ), patch("app.crawlers.usdt_ws.korbit.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.korbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log, "metric INFO log 없음")
+        # PropertyMock return_value=7 → emit value 정확 검증
+        self.assertIn("fallback_probe_scheduled_count=7", metric_log)
 
 
 class TestStartCancelsSummaryTask(unittest.IsolatedAsyncioTestCase):

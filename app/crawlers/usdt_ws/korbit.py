@@ -139,8 +139,12 @@ RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 RECONNECT_BACKOFF_TAIL = 30.0
 
 # Summary log follow-up (Phase B.5 §12.7.5 후속) — 60s cycle metric INFO emit.
-# KRX kis_ws _summary_log_loop 패턴 mirror, 1차 PR state-only.
-# 2차 PR scope: Redis saturation / fallback probe counter (별도 분리).
+# KRX kis_ws _summary_log_loop 패턴 mirror.
+# 1차 PR: state-only 8 metrics.
+# PR 2a: fallback_probe_scheduled_count (9th field) — scheduled probe 누적만 (skip 미포함).
+# 향후 PR scope: probe lifecycle breakdown counter (success/timeout/none/cooldown_skip/
+# in_flight_skip) — 별도. Korbit Redis saturation counter (KorbitRedisWriter
+# MAX_PENDING_WRITES skip 누적)도 PR 2a scope 밖 — 필요 시 별도 PR로 추가.
 SUMMARY_LOG_INTERVAL_SEC = 60.0
 
 # K5 Redis writer guards — Coinone/Bithumb 동일 값.
@@ -438,6 +442,27 @@ class KorbitRestFallbackController:
         self._in_flight: bool = False
         self._cooldown_until: float = 0.0
         self._pending_task: Optional[asyncio.Task] = None
+        # PR 2a — scheduled probe 누적 (in-flight/cooldown/no-loop skip 미증가).
+        # 의미: loop.create_task() 성공 시점 기준 +1. success/timeout/exception 무관.
+        # breakdown (success/timeout/none/skip 분해)은 향후 별도 PR scope.
+        self._scheduled_probe_count: int = 0
+
+    @property
+    def scheduled_probe_count(self) -> int:
+        """PR 2a — REST fallback probe schedule 누적 횟수 (read-only, instance lifetime).
+
+        increment 조건: `schedule_probe()`가 in-flight/cooldown/no-loop skip 통과 후
+        `loop.create_task(_run_probe(...))` 직후. probe 결과(success/timeout/none/
+        exception) 무관 — schedule 자체만 카운팅.
+
+        breakdown 확장 (향후 별도 PR):
+            - fallback_probe_success_count
+            - fallback_probe_timeout_count
+            - fallback_probe_none_count
+            - fallback_probe_cooldown_skip_count
+            - fallback_probe_in_flight_skip_count
+        """
+        return self._scheduled_probe_count
 
     def schedule_probe(self, reason: str) -> None:
         """sync: in-flight/cooldown 체크 후 background probe task 생성. 즉시 반환.
@@ -470,6 +495,8 @@ class KorbitRestFallbackController:
             return
         self._pending_task = loop.create_task(self._run_probe(reason))
         self._in_flight = True
+        # PR 2a — schedule 성공 시점 누적 (skip 분기들은 위에서 이미 return).
+        self._scheduled_probe_count += 1
 
     def reset_cooldown(self) -> None:
         """normal 복귀 시 호출 — cooldown clear. 다음 degraded 즉시 1회 probe 보장."""
@@ -1064,9 +1091,9 @@ class KorbitWsClient:
         """Phase B.5 §12.7.5 후속 — start lifetime 동안 60s cycle metric INFO emit.
 
         KRX kis_ws `_summary_log_loop` ([app/crawlers/krx_kis.py:1033](app/crawlers/krx_kis.py))
-        패턴 mirror. 1차 PR scope: 기존 state-only attribute만 emit.
+        패턴 mirror. 1차 PR + PR 2a 누적.
 
-        Emit metric (8개, state-only):
+        Emit metric (9개, state-only 8 + PR 2a counter 1):
             - frames_per_min: `_liveness.frame_count_total` 차이 / elapsed
             - last_tick_age: `now - _liveness.last_tick_at` (없으면 -1.0 sentinel)
             - last_heartbeat_age: `now - _liveness.last_heartbeat_at` (없으면 -1.0 sentinel)
@@ -1075,9 +1102,11 @@ class KorbitWsClient:
             - ticker_freshness_status: `_ticker_freshness_status` (normal/warning/degraded)
             - reconnect_attempts: `_reconnect_attempt_count` (instance lifetime)
             - status_transitions: `_status_transition_count` 6 keys (key:N/key:N/...)
+            - fallback_probe_scheduled_count: `_fallback_controller.scheduled_probe_count`
+              (PR 2a — scheduled probe 누적, skip 미포함)
 
-        2차 PR scope (별도): Redis saturation / fallback probe counter는 writer 내부에
-        counter 신규 추가 필요 — 본 1차 PR 제외.
+        향후 PR scope (별도): probe lifecycle breakdown counter는 별도 PR에서 추가
+        (success/timeout/none/cooldown_skip/in_flight_skip).
 
         Caveat — frames_per_min 측정 기준 (KRX 동일 caveat 적용):
             reconnect 직후 첫 summary log의 frames_per_min은 직전 60초 전체 기준이라
@@ -1121,13 +1150,15 @@ class KorbitWsClient:
                 "max_frame_gap=%.1f "
                 "connection_status=%s ticker_freshness_status=%s "
                 "reconnect_attempts=%d "
-                "status_transitions=%s",
+                "status_transitions=%s "
+                "fallback_probe_scheduled_count=%d",
                 frames_per_min,
                 last_tick_age, last_heartbeat_age,
                 self._liveness.max_frame_gap_sec,
                 self._connection_status, self._ticker_freshness_status,
                 self._reconnect_attempt_count,
                 transitions_str,
+                self._fallback_controller.scheduled_probe_count,
             )
 
     async def stop(self) -> None:
