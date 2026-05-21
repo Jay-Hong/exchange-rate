@@ -936,6 +936,72 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 - 결정 no: 데이터 분석 요약과 함께 close한다.
 - 결정 보류: 추가 관찰 기간과 재검토 시점을 명시한다. 무기한 보류하지 않는다.
 
+### 12.9 Phase B.6 — Gopax WS 확장 (Primus protocol, 전체 ticker 구독)
+
+Gopax는 기존 4 source 중 가장 다른 구조다. 전체 ticker 구독 + 클라이언트측
+USDT-KRW 필터링 + Primus `::ping::` 30s heartbeat 때문에 WS protocol 신규성이 크다.
+Phase B.6은 §12.6 (Coinone) / §12.7 (Korbit) 패턴을 참고하되, Gopax-specific
+protocol 차이를 별도 stage로 분리해 진행한다.
+
+#### 12.9.1 G1 scope (skeleton only)
+
+**진입 범위**:
+
+- GopaxWsClient minimal lifecycle (`_stop_event` / `_running` 만 보유 — Codex
+  최종 권고로 `_connection_status` / `_ticker_freshness_status` /
+  `_reconnect_attempt_count` / `_ws` 등 G2~G4 attribute는 본 stage 제외하여
+  G4 설계 선반영 회피)
+- USDT_WS_GOPAX_ENABLED feature flag (default false)
+- scheduler.py start/shutdown helpers + globals (Bithumb/Coinone/Korbit 패턴 mirror)
+- main.py lifespan 호출 추가
+- tests/test_usdt_ws_gopax_skeleton.py 신규 (flag invariant + lifecycle skeleton +
+  scope guard 검증)
+
+**G1 acceptance**:
+
+- USDT_WS_GOPAX_ENABLED=false 시 GopaxWsClient 생성 X + task 생성 X + network connect X
+- flag=true 시 G1 placeholder lifecycle은 stop_event 대기만 (외부 network 호출 0)
+- production 영향 0 — 다른 4 source lifecycle 변경 없음, default false로 deploy 안전
+
+**명시적 제외 (G2~G7 + 별도 stage)**:
+
+- G2: SubscribeToTickers + 2종 응답 parse (initial `SubscribeToTickers` array +
+  delta `TickerEvent` dict) + USDT-KRW 클라이언트 필터링
+- G3: Primus `::ping::` raw text matching + `::pong::` replacement 응답
+- G4: UsdtLivenessMonitor 통합 + reconnect loop + status 차원 결정
+  (Codex 권장: §12.8 backlog 정합 위해 2-signal 시작 — G4 단계에서 확정)
+- G5-G7: GopaxRedisWriter / GopaxDbWriter / RestFallbackController / Alert evaluator
+- PR 2e (옵션): Telemetry (summary log + saturation + probe counter)
+
+#### 12.9.2 Gopax-specific 차이 (기존 4 source 대비)
+
+| 항목 | Upbit/Bithumb | Coinone/Korbit | Gopax |
+| --- | --- | --- | --- |
+| Subscribe | 명시 코드 구독 | 별도 protocol, 명시 코드 | 전체 ticker `{"n":"SubscribeToTickers","o":{}}` (pair 지정 불가) |
+| 필터링 | 서버측 | 서버측 | 클라이언트측 (recv 후 USDT-KRW 매칭) |
+| Heartbeat 방향 | client-initiated `ws.ping()` | client-initiated App PING | **server-initiated** Primus `::ping::` 30s |
+| Pong 응답 | WS frame | App PONG message | raw text replacement (`"primus::ping::"` → `"primus::pong::"`) |
+| Heartbeat 미회신 영향 | client retry | client retry | **server disconnect** (30s 안 pong 미회신) |
+| REST helper 현황 | normalized tick | normalized tick | `_fetch_gopax()` **rate-only** — G6b 진입 시 `fetch_gopax_usdt_tick()` 신규 작성 필요 |
+
+#### 12.9.3 Canary 활성화 조건
+
+Korbit/Coinone canary 24h+ 안정 + G2~G7 land 안정 후 별도 deploy GO. G1 단독은
+production 영향 0이라 즉시 deploy 가능 (default false 유지).
+
+#### 12.9.4 Rollback 정책
+
+- **env toggle**: USDT_WS_GOPAX_ENABLED=false → lifecycle 즉시 비활성 (코드 변경 없이)
+- **코드 issue**: `git revert <G1 commit>` + re-deploy
+- **격리 보장**: 다른 4 source lifecycle 영향 0 (scheduler globals 분리)
+
+#### 12.9.5 후속 stage 예정
+
+- G2~G7: WS client 본격 구현 (별도 stage별 PR)
+- PR 2e (옵션): 5 source 관찰 인프라 완성 — §12.8 Post-5-source 정책 표준화
+  backlog Entry 조건 마지막 단계 ("Gopax WS land 후 동일 telemetry 적용 여부 결정")
+- 공통화 검토: 5 source 모두 land 후 (§12.6 / §12.7 패턴 mirror — 선제 abstraction 금지)
+
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
 PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
