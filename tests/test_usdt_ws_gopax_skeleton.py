@@ -166,8 +166,8 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
     G5 또는 별도 PR). G5-G7 attribute (writers / fallback / alert)는 본 stage 제외.
     """
 
-    async def test_init_state_g6a_scope(self):
-        """__init__ 직후: G1~G6a attribute 보유, G6b-G7 attribute 부재."""
+    async def test_init_state_g6b_scope(self):
+        """__init__ 직후: G1~G6b attribute 보유, G7 attribute 부재."""
         client = GopaxWsClient()
         # G1 state
         self.assertFalse(client._running)
@@ -177,7 +177,7 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client._first_tick_logged)
         # G3 state
         self.assertIsNone(client._last_heartbeat_at)
-        # G4 state — 2-signal status + liveness
+        # G4 state
         self.assertEqual(client._connection_status, "normal")
         self.assertEqual(client._ticker_freshness_status, "normal")
         self.assertEqual(client._reconnect_attempt_count, 0)
@@ -188,13 +188,15 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         })
         for v in client._status_transition_count.values():
             self.assertEqual(v, 0)
-        # G5 state — Redis writer
+        # G5 state
         self.assertIsNotNone(client._redis_writer)
         self.assertEqual(client._redis_writer.saturation_count, 0)
-        # G6a state — DB writer (Bithumb U6a mirror)
+        # G6a state
         self.assertIsNotNone(client._db_writer)
-        # G6b-G7 attribute 부재 검증 (선반영 회피)
-        self.assertFalse(hasattr(client, "_fallback_controller"))
+        # G6b state — fallback controller (Coinone C6b mirror)
+        self.assertIsNotNone(client._fallback_controller)
+        self.assertEqual(client._fallback_controller.scheduled_probe_count, 0)
+        # G7 attribute 부재 검증 (선반영 회피)
         self.assertFalse(hasattr(client, "_alert_evaluator"))
 
     async def test_start_stop_lifecycle(self):
@@ -259,43 +261,42 @@ class TestScopeGuard(unittest.TestCase):
         """G1: GOPAX_WS_URL constant module-level 노출."""
         self.assertEqual(GOPAX_WS_URL, "wss://wsapi.gopax.co.kr")
 
-    def test_no_g6b_g7_symbols_at_module_level(self):
-        """G6a: G6b~G7에서 추가될 symbol module-level 부재 검증.
+    def test_no_g7_symbols_at_module_level(self):
+        """G6b: G7에서 추가될 symbol module-level 부재 검증.
 
-        G6a에서 GopaxDbWriter + DB_WRITE_WINDOW_SEC은 허용. G6b (REST helper +
-        fallback controller), G7 (alert)은 module-level 부재해야 함.
+        G6b에서 GopaxRestFallbackController + FALLBACK_COOLDOWN_SEC +
+        FALLBACK_PROBE_TIMEOUT_SEC은 허용. G7 (alert)은 module-level 부재해야 함.
         """
         from app.crawlers.usdt_ws import gopax as gopax_module
 
-        # G4 + G5 + G6a constants/class 허용 (검증 — 존재해야 함)
+        # G4 + G5 + G6a + G6b constants/class 허용 (검증 — 존재해야 함)
         for attr in [
             "STALE_AFTER_SEC", "TICKER_FRESHNESS_WARNING_SEC",
             "TICKER_FRESHNESS_DEGRADED_SEC", "RECONNECT_BACKOFF_SEQ",
             "RECONNECT_BACKOFF_TAIL",
             "MAX_PENDING_WRITES", "REDIS_CLOSE_TIMEOUT_SEC",
             "GopaxRedisWriter",
-            # G6a 신규
             "DB_WRITE_WINDOW_SEC",
             "GopaxDbWriter",
+            # G6b 신규
+            "FALLBACK_COOLDOWN_SEC",
+            "FALLBACK_PROBE_TIMEOUT_SEC",
+            "GopaxRestFallbackController",
         ]:
             self.assertTrue(
                 hasattr(gopax_module, attr),
-                f"G4/G5/G6a constant 누락: {attr}",
+                f"G4/G5/G6a/G6b constant 누락: {attr}",
             )
 
-        # G6b-G7 forbidden
+        # G7 forbidden
         forbidden_attrs = [
-            # G6b — REST helper + fallback
-            "GopaxRestFallbackController",
-            "fetch_gopax_usdt_tick",
-            "FALLBACK_COOLDOWN_SEC",
             # G7 — Alert
             "AlertObservation",
         ]
         for attr in forbidden_attrs:
             self.assertFalse(
                 hasattr(gopax_module, attr),
-                f"G6a scope 위반: {attr} symbol이 module-level에 존재함 — G6b~G7 stage에서 추가 예정",
+                f"G6b scope 위반: {attr} symbol이 module-level에 존재함 — G7 stage에서 추가 예정",
             )
 
 
@@ -840,21 +841,9 @@ class TestSetTickerFreshnessStatus(unittest.TestCase):
         self.assertEqual(client._status_transition_count["ticker_degraded"], prev + 1)
 
 
-class TestTickerFreshnessDegradedNoFallback(unittest.TestCase):
-    """G4 scope 명시 (Codex 정정): degraded 전이는 status 갱신만, fallback hook은 G6b."""
-
-    def test_degraded_transition_no_fallback_call(self):
-        """degraded 전이 → status 갱신만, _fallback_controller attribute 자체 부재.
-
-        G6b 진입 전까지는 _fallback_controller 자체가 client에 없으므로 hook 호출이
-        구조적으로 불가능. 이 invariant를 잠가서 G5+ 진입 시 의도된 추가만 들어가도록.
-        """
-        client = GopaxWsClient()
-        client._set_ticker_freshness_status("warning")
-        client._set_ticker_freshness_status("degraded")
-        self.assertEqual(client._ticker_freshness_status, "degraded")
-        # G6b _fallback_controller attribute 자체가 부재 — fallback hook 호출 불가
-        self.assertFalse(hasattr(client, "_fallback_controller"))
+# Note: TestTickerFreshnessDegradedNoFallback (G4 시점 fallback 부재 검증) 삭제됨.
+# G6b 진입으로 의미 반전 — degraded 전이 시 fallback_controller.schedule_probe 호출.
+# TestTickerFreshnessDegradedTriggersFallback + TestNormalRecoveryResetsCooldown로 대체.
 
 
 class TestComputeBackoff(unittest.TestCase):
@@ -1031,17 +1020,16 @@ class TestG4ActivationConstraint(unittest.TestCase):
     """
 
     def test_module_docstring_g4_activation_constraint(self):
-        """module docstring에 현재 stage (G6a) activation 보류 명시.
+        """module docstring에 현재 stage (G6b) activation 보류 명시.
 
-        Stage 진행에 따라 docstring keyword 갱신 (G4 → G5 → G6a → ...).
-        현재 stage 기준 검증. Codex 보강: activation은 G6b/G7/PR 2e 완료 후
-        또는 별도 canary 조건 재검토 후 결정.
+        Stage 진행에 따라 docstring keyword 갱신. 현재 stage (G6b) 기준 검증.
+        Codex 보강: activation은 G7 + PR 2e 완료 후 또는 별도 canary 조건
+        재검토 후 결정.
         """
         import app.crawlers.usdt_ws.gopax as gopax_module
         doc = gopax_module.__doc__ or ""
-        self.assertIn("G6a 단계도 유지", doc)
-        # Codex 보강: G6b + G7 + PR 2e 완료 후 또는 canary 재검토 명시
-        self.assertIn("G6b", doc)
+        self.assertIn("G6b 단계도 유지", doc)
+        # Codex 보강: G7 + PR 2e 완료 후 또는 canary 재검토 명시
         self.assertIn("G7", doc)
         self.assertIn("PR 2e", doc)
         self.assertIn("canary", doc)
@@ -1049,25 +1037,23 @@ class TestG4ActivationConstraint(unittest.TestCase):
         self.assertIn("local/staging smoke", doc)
 
     def test_class_docstring_g4_activation_constraint(self):
-        """class docstring에 현재 stage (G6a) activation 보류 명시."""
+        """class docstring에 현재 stage (G6b) activation 보류 명시."""
         doc = GopaxWsClient.__doc__ or ""
-        self.assertIn("G6a 단계도 유지", doc)
+        self.assertIn("G6b 단계도 유지", doc)
         # Codex 보강 keyword
-        self.assertIn("G6b", doc)
         self.assertIn("G7", doc)
         self.assertIn("PR 2e", doc)
 
-    def test_start_docstring_g6a_activation_constraint(self):
-        """start() docstring에도 현재 stage (G6a) activation 보류 명시 (Codex 보강).
+    def test_start_docstring_g6b_activation_constraint(self):
+        """start() docstring에도 현재 stage (G6b) activation 보류 명시 (Codex 보강).
 
-        Stage 진행에 따라 docstring keyword 갱신 (G4 → G5 → G6a → ...). G6a까지
-        오면 start docstring도 G6a로 갱신되어야 stale 표현이 안 남음.
+        Stage 진행에 따라 docstring keyword 갱신.
         """
         doc = GopaxWsClient.start.__doc__ or ""
-        self.assertIn("G6a", doc)
-        # G4 단독 stale 표현 부재 검증
+        self.assertIn("G6b", doc)
+        # G4/G5/G6a stale 표현 부재 검증
         self.assertNotIn("G4 단독", doc)
-        self.assertNotIn("G4 land 후에도", doc)
+        self.assertNotIn("G6a 단계도 유지", doc)
 
 
 # ===========================================================================
@@ -1689,6 +1675,310 @@ class TestGopaxFinallyDbCloseOrder(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         self.assertEqual(close_order, ["db", "redis"])
+
+
+# ===========================================================================
+# G6b GopaxRestFallbackController — degraded threshold trigger + REST probe +
+# Redis/DB fanout + scheduled_probe_count
+# ===========================================================================
+
+
+class TestTickerFreshnessDegradedTriggersFallback(unittest.IsolatedAsyncioTestCase):
+    """G6b: _set_ticker_freshness_status("degraded") → schedule_probe 호출 (Coinone C6b mirror).
+
+    의미 반전 (G4 → G6b): G4 시점은 status 갱신만, G6b부터 schedule_probe hook 진입.
+    """
+
+    def test_degraded_transition_schedules_probe(self):
+        """warning → degraded → schedule_probe("ticker_degraded") 호출."""
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        client = GopaxWsClient()
+        client._set_ticker_freshness_status("warning")
+
+        with patch.object(GopaxRestFallbackController, "schedule_probe") as mock_schedule:
+            client._set_ticker_freshness_status("degraded")
+
+        self.assertEqual(client._ticker_freshness_status, "degraded")
+        mock_schedule.assert_called_once()
+        # reason kwarg 또는 args 확인
+        call = mock_schedule.call_args
+        if call.kwargs:
+            self.assertEqual(call.kwargs.get("reason"), "ticker_degraded")
+        else:
+            self.assertEqual(call.args[0] if call.args else None, "ticker_degraded")
+
+
+class TestNormalRecoveryResetsCooldown(unittest.IsolatedAsyncioTestCase):
+    """G6b: warning/degraded → normal 복귀 시 reset_cooldown 호출."""
+
+    def test_warning_to_normal_resets_cooldown(self):
+        """warning → normal 복귀 → reset_cooldown 호출."""
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        client = GopaxWsClient()
+        client._set_ticker_freshness_status("warning")
+
+        with patch.object(GopaxRestFallbackController, "reset_cooldown") as mock_reset:
+            client._set_ticker_freshness_status("normal")
+
+        self.assertEqual(client._ticker_freshness_status, "normal")
+        mock_reset.assert_called_once()
+
+    def test_degraded_to_normal_resets_cooldown(self):
+        """degraded → normal 복귀 → reset_cooldown 호출 (Codex outage recovery)."""
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        client = GopaxWsClient()
+        client._set_ticker_freshness_status("warning")
+        client._set_ticker_freshness_status("degraded")
+
+        with patch.object(GopaxRestFallbackController, "reset_cooldown") as mock_reset:
+            client._set_ticker_freshness_status("normal")
+
+        mock_reset.assert_called_once()
+
+
+class TestRestFallbackInFlightSkip(unittest.IsolatedAsyncioTestCase):
+    """G6b: _in_flight=True 상태에서 schedule_probe → skip."""
+
+    def test_in_flight_skips_schedule(self):
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        controller = GopaxRestFallbackController(
+            redis_writer=MagicMock(),
+            db_writer=MagicMock(),
+        )
+        controller._in_flight = True
+        controller.schedule_probe("test")
+        # in-flight skip → counter 미증가
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+
+class TestRestFallbackCooldownSkip(unittest.IsolatedAsyncioTestCase):
+    """G6b: cooldown 활성 상태 schedule_probe → skip."""
+
+    def test_cooldown_skips_schedule(self):
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        controller = GopaxRestFallbackController(
+            redis_writer=MagicMock(),
+            db_writer=MagicMock(),
+        )
+        controller._cooldown_until = time.time() + 1000.0  # 미래 cooldown 활성
+        controller.schedule_probe("test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+
+class TestRestFallbackProbeFanout(unittest.IsolatedAsyncioTestCase):
+    """G6b: REST probe success → Redis + DB schedule 호출."""
+
+    async def test_probe_success_triggers_redis_and_db_schedule(self):
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        redis_mock = MagicMock()
+        db_mock = MagicMock()
+        controller = GopaxRestFallbackController(
+            redis_writer=redis_mock,
+            db_writer=db_mock,
+        )
+
+        tick = {"source": "gopax", "asset": "usdt-krw", "rate": 1490.5, "timestamp_ms": 1779106625946}
+
+        with patch.object(
+            GopaxRestFallbackController, "_fetch_gopax_tick",
+            return_value=tick,
+        ):
+            controller.schedule_probe("test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        redis_mock.schedule.assert_called_once_with(tick)
+        db_mock.schedule.assert_called_once_with(tick)
+
+
+class TestRestFallbackProbeFailure(unittest.IsolatedAsyncioTestCase):
+    """G6b: REST probe None → Redis/DB schedule 0."""
+
+    async def test_probe_returns_none_no_fanout(self):
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        redis_mock = MagicMock()
+        db_mock = MagicMock()
+        controller = GopaxRestFallbackController(
+            redis_writer=redis_mock,
+            db_writer=db_mock,
+        )
+
+        with patch.object(
+            GopaxRestFallbackController, "_fetch_gopax_tick",
+            return_value=None,
+        ):
+            controller.schedule_probe("test")
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+        # None probe → fanout 0
+        redis_mock.schedule.assert_not_called()
+        db_mock.schedule.assert_not_called()
+
+
+class TestRestFallbackScheduledProbeCount(unittest.IsolatedAsyncioTestCase):
+    """G6b (Codex 보강): _scheduled_probe_count counter — schedule 성공 시점만 +1."""
+
+    def _make_controller(self):
+        from app.crawlers.usdt_ws.gopax import GopaxRestFallbackController
+        return GopaxRestFallbackController(
+            redis_writer=MagicMock(),
+            db_writer=MagicMock(),
+        )
+
+    def test_initial_value_zero(self):
+        controller = self._make_controller()
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    async def test_increments_on_successful_schedule(self):
+        """schedule_probe() 성공 → +1."""
+        controller = self._make_controller()
+
+        async def fake_run_probe(reason):
+            return None
+
+        with patch.object(controller, "_run_probe", side_effect=fake_run_probe):
+            controller.schedule_probe("test")
+            self.assertEqual(controller.scheduled_probe_count, 1)
+            if controller._pending_task is not None:
+                await controller._pending_task
+
+    def test_no_increment_on_in_flight_skip(self):
+        controller = self._make_controller()
+        controller._in_flight = True
+        controller.schedule_probe("test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+    def test_no_increment_on_cooldown_skip(self):
+        controller = self._make_controller()
+        controller._cooldown_until = time.time() + 1000.0
+        controller.schedule_probe("test")
+        self.assertEqual(controller.scheduled_probe_count, 0)
+
+
+# ===========================================================================
+# G6b fetch_gopax_usdt_tick helper — ISO timestamp parsing + guards
+# ===========================================================================
+
+
+class TestFetchGopaxUsdtTickHappyPath(unittest.TestCase):
+    """G6b: production curl 실측 응답 (Codex) → normalized tick."""
+
+    def test_happy_path_parses_iso_timestamp(self):
+        """{"price": 1487, "time": "2026-05-21T10:53:14.604Z"} → normalized tick."""
+        from app.crawlers.usdt_sources import fetch_gopax_usdt_tick
+
+        fake_payload = {"price": 1487, "time": "2026-05-21T10:53:14.604Z"}
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=fake_payload)
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            tick = fetch_gopax_usdt_tick()
+
+        self.assertIsNotNone(tick)
+        self.assertEqual(tick["source"], "gopax")
+        self.assertEqual(tick["asset"], "usdt-krw")
+        self.assertEqual(tick["rate"], 1487.0)
+        # ISO "2026-05-21T10:53:14.604Z" → epoch ms (UTC)
+        # datetime(2026,5,21,10,53,14,604000,tz=UTC).timestamp() * 1000
+        from datetime import datetime
+        expected_ms = int(
+            datetime.fromisoformat("2026-05-21T10:53:14.604+00:00").timestamp() * 1000
+        )
+        self.assertEqual(tick["timestamp_ms"], expected_ms)
+
+
+class TestFetchGopaxUsdtTickIsoTimestamp(unittest.TestCase):
+    """G6b (Codex 보강): ISO 8601 Z suffix 정확한 epoch ms 변환."""
+
+    def test_iso_z_suffix_to_epoch_ms(self):
+        """'2026-05-21T10:53:14.604Z' → 정확한 epoch ms."""
+        from app.crawlers.usdt_sources import fetch_gopax_usdt_tick
+
+        fake_payload = {"price": 1500.0, "time": "2026-05-21T10:53:14.604Z"}
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=fake_payload)
+
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            tick = fetch_gopax_usdt_tick()
+
+        # 2026-05-21T10:53:14.604Z UTC → epoch ms
+        # ms portion (604) 정확 보존 검증
+        self.assertEqual(tick["timestamp_ms"] % 1000, 604)
+
+
+class TestFetchGopaxUsdtTickGuards(unittest.TestCase):
+    """G6b: guard 검증 — rate<=0 / time missing / invalid ISO / request 실패."""
+
+    def test_rate_zero_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_gopax_usdt_tick
+        fake_payload = {"price": 0, "time": "2026-05-21T10:53:14.604Z"}
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=fake_payload)
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            self.assertIsNone(fetch_gopax_usdt_tick())
+
+    def test_time_missing_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_gopax_usdt_tick
+        fake_payload = {"price": 1487}
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=fake_payload)
+        with patch("app.crawlers.usdt_sources.requests.get", return_value=mock_response):
+            self.assertIsNone(fetch_gopax_usdt_tick())
+
+    def test_request_exception_returns_none(self):
+        from app.crawlers.usdt_sources import fetch_gopax_usdt_tick
+        import requests as req_mod
+        with patch(
+            "app.crawlers.usdt_sources.requests.get",
+            side_effect=req_mod.RequestException("simulated"),
+        ):
+            self.assertIsNone(fetch_gopax_usdt_tick())
+
+
+class TestGopaxFinallyFallbackCloseFirst(unittest.IsolatedAsyncioTestCase):
+    """G6b: finally close 순서 — fallback → DB → Redis (Bithumb 패턴 mirror)."""
+
+    async def test_fallback_close_before_db_and_redis(self):
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        async def stop_after_subscribe(payload):
+            client._stop_event.set()
+
+        mock_ws.send = AsyncMock(side_effect=stop_after_subscribe)
+        mock_ws.recv = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        close_order = []
+
+        async def fake_fallback_close():
+            close_order.append("fallback")
+
+        async def fake_db_close():
+            close_order.append("db")
+
+        async def fake_redis_close(*args, **kwargs):
+            close_order.append("redis")
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._fallback_controller, "close", side_effect=fake_fallback_close), \
+           patch.object(client._db_writer, "close", side_effect=fake_db_close), \
+           patch.object(client._redis_writer, "close", side_effect=fake_redis_close):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        self.assertEqual(close_order, ["fallback", "db", "redis"])
 
 
 if __name__ == "__main__":

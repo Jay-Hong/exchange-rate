@@ -17,6 +17,7 @@ Phase 1 대상:
 # 표준 라이브러리
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Callable, Optional
 
 # 서드파티 라이브러리
@@ -273,12 +274,67 @@ def _fetch_korbit() -> Optional[float]:
     return tick["rate"] if tick else None
 
 
-def _fetch_gopax() -> Optional[float]:
+def fetch_gopax_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[dict]:
+    """Gopax USDT/KRW REST ticker → normalized tick dict.
+
+    Bithumb/Korbit `fetch_*_usdt_tick()` shape mirror. Phase B.6 Stage G6b
+    (USDT_WS_DESIGN_PLAN §12.9): GopaxRestFallbackController가 ticker freshness
+    degraded 시 호출. 기존 `_fetch_gopax()` polling helper도 본 함수 재사용
+    (additive refactor, REST polling 동작 보존 — Bithumb/Korbit 패턴).
+
+    Returns:
+        {"source": "gopax", "asset": "usdt-krw", "rate": float, "timestamp_ms": int}
+        또는 REST/parse 실패 시 None (caller 격리).
+
+    Gopax REST response shape (Codex production curl 실측 2026-05-21):
+        {"price": 1487, ..., "time": "2026-05-21T10:53:14.604Z"}
+        - price: number (float 변환)
+        - time: ISO 8601 UTC string (Z suffix) — int(...) 직접 호출 불가
+
+    Timestamp 변환 (Codex 정정 — production 실측 기반):
+        time ISO string → datetime.fromisoformat (Z를 +00:00로 변환) → epoch ms.
+
+    Guard:
+        - payload가 dict 아님 → None
+        - rate <= 0 → None
+        - time missing 또는 parse 실패 → None
+        - timestamp <= 0 → None
+    """
     url = "https://api.gopax.co.kr/trading-pairs/USDT-KRW/ticker"
-    response = requests.get(url, timeout=PER_SOURCE_TIMEOUT_SECONDS, headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
-    return float(data["price"])
+    try:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            return None
+        rate = float(data["price"])
+        if rate <= 0:
+            return None
+        # Codex 정정: time ISO 8601 string → epoch ms. Z를 +00:00로 변환.
+        time_text = data["time"]
+        dt = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
+        ts_ms = int(dt.timestamp() * 1000)
+        if ts_ms <= 0:
+            return None
+        return {
+            "source": "gopax",
+            "asset": "usdt-krw",
+            "rate": rate,
+            "timestamp_ms": ts_ms,
+        }
+    except (requests.RequestException, KeyError, ValueError, TypeError):
+        # caller(fallback controller / polling)가 None 처리. propagate X.
+        return None
+
+
+def _fetch_gopax() -> Optional[float]:
+    """기존 polling helper — fetch_gopax_usdt_tick 재사용 (rate만 반환).
+
+    Phase B.6 G6b: 기존 rate-only 호환 유지. `FETCHERS` registry는 그대로 동작.
+    Bithumb/Korbit 패턴 mirror (additive refactor).
+    """
+    tick = fetch_gopax_usdt_tick()
+    return tick["rate"] if tick else None
 
 
 FETCHERS: dict[str, Callable[[], Optional[float]]] = {
