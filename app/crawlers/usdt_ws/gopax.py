@@ -1,14 +1,14 @@
-"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G7.
+"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G7 + PR 2e.
 
 USDT_WS_DESIGN_PLAN §12.9 (Phase B.6, 2026-05-21).
 
-G7 scope (이 파일의 현재 범위):
+G7 + PR 2e scope (이 파일의 현재 범위):
     G1 lifecycle + G2 Subscribe/Parse + G3 Primus pong + G4 reconnect/liveness +
     2-signal status + G5 GopaxRedisWriter + G6a GopaxDbWriter + G6b
-    GopaxRestFallbackController + **G7 UsdtAlertEvaluator wiring (WS tick →
-    AlertObservation(kind="tick"), REST probe success → AlertObservation(kind=
-    "rest_probe"), session-finally close drain)**까지. Telemetry summary log
-    emit (PR 2e)는 별도 stage.
+    GopaxRestFallbackController + G7 UsdtAlertEvaluator wiring + **PR 2e
+    Telemetry (60s cycle summary log emit — 10 fields union: 2-signal status +
+    saturation_count + fallback_probe_scheduled_count, Coinone PR 2d 1:1
+    mirror)**까지. Phase B.6 Gopax WS는 fanout + 관찰 인프라 모두 land됨.
 
 G4 주요 변경 (G4 1ea4c74 → dd3e077 누적):
     - `UsdtLivenessMonitor` 통합 (source-neutral, Coinone/Korbit 패턴 mirror).
@@ -45,24 +45,22 @@ G5 주요 변경 (현재 stage):
       invariant: __init__ 1회 생성, reconnect 사이 재사용).
     - KST ISO timestamp 변환 (`_KST = timezone(timedelta(hours=9))`, Bithumb 동일).
 
-⚠️ Production activation 제약 (G7 단계도 유지 — Codex 보강 표현):
-    G7 land 후에도 `USDT_WS_GOPAX_ENABLED=false` 유지. G7까지 fanout(Redis +
-    DB + Fallback + Alert)은 완성됐지만 PR 2e telemetry 부재라 관찰 인프라
-    (summary log + counter emit) 미완 → silent ingestion 상태.
-
-    **Activation은 PR 2e telemetry 완료 후 또는 별도 canary 조건 재검토 후
-    결정** (Codex 보강 표현). 그 전까지 production env는 default false 유지.
-    G7는 **local/staging smoke 가능 단계**.
+⚠️ Production activation 제약 (PR 2e land 후에도 유지 — Codex 보강 표현):
+    PR 2e land로 telemetry 관찰 인프라 완비. 하지만 `USDT_WS_GOPAX_ENABLED=false`
+    유지. **Activation은 별도 canary 조건 검토 및 짧은 안정 관찰 후 결정**
+    (PR 2e 자체만으로 자동 activation 아님). 그 전까지 production env는
+    default false 유지.
 
     flag=false invariant (transitive): scheduler `start_usdt_ws_gopax_client()`
     env false → GopaxWsClient 생성 0 → 그 안의 UsdtAlertEvaluator/Redis/DB/
-    fallback 모두 생성 0 → network/Redis/DB/Alert call 0. 별도 evaluator-only
-    test 불필요 (Codex 권고).
+    fallback/summary_task 모두 생성 0 → network/Redis/DB/Alert/summary log emit
+    call 0. 별도 evaluator-only / summary-only test 불필요 (Codex 권고).
 
-G5/G6a/G6b/G7 acceptance:
+G5/G6a/G6b/G7/PR 2e acceptance:
     - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1~G4 동일)
     - flag=true 시 reconnect loop + 2-signal status (G4) + Redis fanout (G5) +
-      DB fanout (G6a) + REST fallback on degraded (G6b) + Alert fanout (G7)
+      DB fanout (G6a) + REST fallback on degraded (G6b) + Alert fanout (G7) +
+      60s cycle metric INFO emit (PR 2e)
     - valid tick → Redis latest cache + topic trigger + DB write (1s window debounce) +
       AlertObservation(kind="tick") schedule
     - invalid/Primus/control frame은 Redis/DB/Alert schedule 0
@@ -72,7 +70,9 @@ G5/G6a/G6b/G7 acceptance:
     - REST probe success → Redis + DB + AlertObservation(kind="rest_probe") schedule
     - schedule 성공 시 _scheduled_probe_count +1 (skip 미증가)
     - session finally close 순서: fallback → DB → Alert → Redis (각 close 예외 격리)
-    - production env false 유지 (PR 2e 또는 canary 재검토 이전 activation 보류)
+    - start() lifetime 동안 summary log task 1개 (60s cycle, 10 fields emit)
+    - start() finally에서 summary_task cancel/await (예외 격리)
+    - production env false 유지 (canary 조건 검토 + 짧은 안정 관찰 후 activation 결정)
 
 G6a 주요 변경 (G6a fa29bdc):
     - `GopaxDbWriter` class 신규 (Bithumb U6a / Coinone C6a 1:1 mirror).
@@ -94,20 +94,26 @@ G6b 주요 변경 (G6b fbf590d):
         * normal 복귀 (prev != normal) → `reset_cooldown()` (옛 cooldown skip 회피)
     - Constants: FALLBACK_COOLDOWN_SEC=300 (Coinone 동일) / FALLBACK_PROBE_TIMEOUT_SEC=10.
 
-G7 주요 변경 (현재 stage):
+G7 주요 변경 (G7 7047feb):
     - `UsdtAlertEvaluator` import + `GopaxWsClient.__init__`에서 1회 생성
       (Coinone C7 / Bithumb U7 / Korbit K7 mirror, source-neutral helper 재사용).
-    - `GopaxRestFallbackController.__init__`에 `alert_evaluator` 필수 인자 추가
-      (kwargs 앞 positional, Coinone C7 시그니처 mirror).
-    - `_run_one_session` valid tick path → `AlertObservation(kind="tick")` schedule
-      (Redis + DB 후, Coinone C7 line 1019-1028 mirror).
-    - `_run_probe` success → `AlertObservation(kind="rest_probe")` schedule
-      (Redis + DB 후, Coinone C7 line 538-549 mirror).
-    - `_run_one_session` finally close 순서 변경: fallback → DB → **Alert** → Redis
-      (DB와 Redis 사이에 alert close 삽입, 5s 내부 timeout + 예외 격리, Coinone
-      C7 line 1052-1057 mirror).
+    - `GopaxRestFallbackController.__init__`에 `alert_evaluator` 필수 인자 추가.
+    - `_run_one_session` valid tick path → `AlertObservation(kind="tick")` schedule.
+    - `_run_probe` success → `AlertObservation(kind="rest_probe")` schedule.
+    - `_run_one_session` finally close 순서 변경: fallback → DB → Alert → Redis.
 
-G7 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b + G7):
+PR 2e 주요 변경 (현재 stage):
+    - `SUMMARY_LOG_INTERVAL_SEC = 60.0` module-level constant 추가.
+    - `_summary_log_loop()` method 추가 (Coinone PR 2d 1:1 mirror, 10 fields:
+      frames_per_min / last_tick_age / last_heartbeat_age / max_frame_gap /
+      connection_status / ticker_freshness_status / reconnect_attempts /
+      status_transitions / redis_saturation_count / fallback_probe_scheduled_count).
+    - `start()` lifetime 시작 직후 `summary_task = asyncio.create_task(...)`
+      생성 + finally cancel/await (Coinone PR 2d / Korbit/Bithumb start() mirror).
+    - sentinel 정책 (Coinone/Korbit/Upbit/Bithumb 동일): last_tick_at/heartbeat_at이
+      None일 경우 -1.0 numeric sentinel.
+
+PR 2e 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b + G7 + PR 2e):
     - G1: `_stop_event` / `_running`
     - G2: `_ws` / `_first_tick_logged`
     - G3: `_last_heartbeat_at` (dual-write 유지)
@@ -119,6 +125,8 @@ G7 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b + G7):
       _scheduled_probe_count read-only counter)
     - G7: `_alert_evaluator` (UsdtAlertEvaluator, source-neutral helper 재사용 —
       Coinone C7 / Bithumb U7 / Korbit K7 mirror)
+    - PR 2e: `summary_task` (start lifetime local, 60s cycle metric INFO emit —
+      Coinone PR 2d 1:1 mirror, 10 fields union)
 """
 
 from __future__ import annotations
@@ -187,6 +195,10 @@ DB_WRITE_WINDOW_SEC = 1.0
 # degraded까지 cooldown). STALE_AFTER_SEC=360 (connection liveness 보조)과 별개.
 FALLBACK_COOLDOWN_SEC = 300.0       # provisional, ticker freshness degraded 후 동일
 FALLBACK_PROBE_TIMEOUT_SEC = 10.0   # REST HTTP timeout (Bithumb 동일)
+
+# PR 2e — summary log emit cycle (Coinone PR 2d / Korbit PR 2a / Bithumb PR 2c / Upbit PR 2b 동일).
+# start() lifetime 동안 60s cycle로 metric INFO 1줄 emit. _run_one_session 영향 0.
+SUMMARY_LOG_INTERVAL_SEC = 60.0
 
 
 class GopaxRedisWriter:
@@ -598,17 +610,16 @@ class GopaxRestFallbackController:
 
 
 class GopaxWsClient:
-    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G7.
+    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G7 + PR 2e.
 
-    G1~G6b 누적 + G7 UsdtAlertEvaluator wiring (WS valid tick →
-    AlertObservation(kind="tick"), REST probe success → AlertObservation(kind=
-    "rest_probe"), session-finally close drain). PR 2e (Telemetry summary log)
-    여전히 본 stage 제외.
+    G1~G7 누적 + PR 2e Telemetry (60s cycle summary log emit, 10 fields union —
+    Coinone PR 2d 1:1 mirror). fanout(Redis + DB + Fallback + Alert) + 관찰
+    인프라 모두 land됨.
 
-    ⚠️ Production activation 제약 (G7 단계도 유지 — Codex 보강 표현):
-        G7 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은 PR 2e
-        telemetry 완료 후 또는 별도 canary 조건 재검토 후 결정. G7는
-        **local/staging smoke 가능 단계**. 자세한 내용은 module docstring 참조.
+    ⚠️ Production activation 제약 (PR 2e land 후에도 유지 — Codex 보강 표현):
+        PR 2e land로 telemetry 관찰 인프라 완비. 하지만 USDT_WS_GOPAX_ENABLED=false
+        유지. activation은 별도 canary 조건 검토 및 짧은 안정 관찰 후 결정
+        (PR 2e 자체만으로 자동 activation 아님). 자세한 내용은 module docstring 참조.
     """
 
     def __init__(self) -> None:
@@ -930,11 +941,9 @@ class GopaxWsClient:
                마지막. 각 close 예외 격리 — 한 close 실패해도 뒤 close 실행 보장.
             10. PR 2e summary log emit은 별도 stage.
 
-        ⚠️ G7 단독 flag=true는 production 활성화 금지 (Codex 보강 표현):
-            G7까지 fanout(Redis + DB + Fallback + Alert)은 완성됐지만 PR 2e
-            telemetry 부재라 관찰 인프라 미완. activation은 PR 2e telemetry
-            완료 후 또는 별도 canary 조건 재검토 후 결정. 자세한 내용은
-            module docstring 참조.
+        ⚠️ PR 2e land 후에도 flag=true 자동 activation 아님 (Codex 보강 표현):
+            PR 2e telemetry 관찰 인프라 완비. activation은 별도 canary 조건
+            검토 및 짧은 안정 관찰 후 결정. 자세한 내용은 module docstring 참조.
         """
         async with websockets.connect(
             GOPAX_WS_URL,
@@ -1076,20 +1085,26 @@ class GopaxWsClient:
             - stop_event set 시 즉시 종료 (backoff sleep도 즉시 break)
             - flag=false 시 본 함수 호출 자체가 발생하지 않음 (scheduler가 차단)
 
-        Production activation 제약 (Codex 보강 표현 — G7 단계도 유지):
-            G7 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은
-            **PR 2e telemetry 완료 후 또는 별도 canary 조건 재검토 후 결정**.
-            G7까지 fanout(Redis + DB + Fallback + Alert)은 완성됐지만 PR 2e
-            telemetry 부재라 관찰 인프라 미완 — silent ingestion 상태.
-            G7는 **local/staging smoke 가능 단계**.
+        Production activation 제약 (Codex 보강 표현 — PR 2e land 후에도 유지):
+            PR 2e land로 telemetry 관찰 인프라 완비. 하지만 USDT_WS_GOPAX_ENABLED=
+            false 유지. activation은 **별도 canary 조건 검토 및 짧은 안정 관찰 후
+            결정** (PR 2e 자체만으로 자동 activation 아님).
+
+        PR 2e 추가 lifecycle (현재 stage):
+            - 시작 직후: `summary_task = asyncio.create_task(self._summary_log_loop())`
+              (Coinone PR 2d mirror, 60s cycle, 10 fields emit, _run_one_session 영향 0).
+            - finally: summary_task cancel + await + CancelledError pass + Exception logger.
         """
         if self._running:
             logger.debug("[usdt_ws.gopax] 이미 실행 중, 중복 start 무시")
             return
         self._running = True
         logger.info(
-            "[usdt_ws.gopax] start (G7 — reconnect loop + liveness + Redis/DB/Alert fanout + REST fallback)",
+            "[usdt_ws.gopax] start (G7 + PR 2e — reconnect loop + liveness + Redis/DB/Alert fanout + REST fallback + summary log)",
         )
+        # PR 2e — start-level summary log task (Coinone PR 2d / Korbit/Upbit/Bithumb 패턴 mirror).
+        # _run_one_session 영향 0 — start lifetime 동안만 60s cycle metric INFO emit.
+        summary_task = asyncio.create_task(self._summary_log_loop())
         attempt = 0
         try:
             while not self._stop_event.is_set():
@@ -1134,10 +1149,84 @@ class GopaxWsClient:
                 except asyncio.TimeoutError:
                     pass  # backoff 완료, 다음 iteration
         finally:
+            # PR 2e — summary_task cancel/await (reconnect loop 예외와 독립 try/except).
+            # Coinone PR 2d / Korbit/Bithumb start() finally cancel 패턴 mirror.
+            summary_task.cancel()
+            try:
+                await summary_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.gopax] summary_task cleanup 실패")
             self._running = False
             logger.info(
                 "[usdt_ws.gopax] start exited (reconnect_attempts=%d)",
                 self._reconnect_attempt_count,
+            )
+
+    async def _summary_log_loop(self) -> None:
+        """PR 2e — start lifetime 동안 60s cycle metric INFO emit (Gopax 10 fields).
+
+        Coinone `_summary_log_loop` 1:1 mirror (Gopax는 Coinone형 2-signal status +
+        2 counter 조합이라 10 fields union).
+
+        Emit metric (10개, state 8 + counter 2):
+            - frames_per_min: `_liveness.frame_count_total` 차이 / elapsed
+            - last_tick_age: `now - _liveness.last_tick_at` (없으면 -1.0 sentinel)
+            - last_heartbeat_age: `now - _liveness.last_heartbeat_at` (없으면 -1.0 sentinel)
+            - max_frame_gap: `_liveness.max_frame_gap_sec`
+            - connection_status: `_connection_status` (normal/reconnecting/stale, Coinone 동일)
+            - ticker_freshness_status: `_ticker_freshness_status` (normal/warning/degraded, Coinone 동일)
+            - reconnect_attempts: `_reconnect_attempt_count` (instance lifetime)
+            - status_transitions: `_status_transition_count` 6 keys
+              (connection 3 + ticker 3, Coinone 동일)
+            - redis_saturation_count: `_redis_writer.saturation_count` (G5 land)
+            - fallback_probe_scheduled_count: `_fallback_controller.scheduled_probe_count` (G6b land)
+
+        Sentinel 정책 (Coinone/Korbit/Upbit/Bithumb 동일):
+            last_tick_at / last_heartbeat_at이 None일 경우 (첫 tick/PONG 전) -1.0
+            numeric sentinel. log 파싱 / numeric aggregation 일관성.
+        """
+        prev_frame_total = self._liveness.frame_count_total
+        prev_at = time.time()
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(SUMMARY_LOG_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                return
+            now = time.time()
+            elapsed = max(now - prev_at, 1e-9)
+            frames_in_window = self._liveness.frame_count_total - prev_frame_total
+            frames_per_min = int(round(frames_in_window * 60 / elapsed))
+            prev_frame_total = self._liveness.frame_count_total
+            prev_at = now
+
+            last_tick = self._liveness.last_tick_at
+            last_tick_age = (now - last_tick) if last_tick is not None else -1.0
+            last_heartbeat = self._liveness.last_heartbeat_at
+            last_heartbeat_age = (now - last_heartbeat) if last_heartbeat is not None else -1.0
+
+            transitions_str = "/".join(
+                f"{k}:{v}" for k, v in self._status_transition_count.items()
+            )
+
+            logger.info(
+                "[usdt_ws.gopax] metrics frames_per_min=%d "
+                "last_tick_age=%.1f last_heartbeat_age=%.1f "
+                "max_frame_gap=%.1f "
+                "connection_status=%s ticker_freshness_status=%s "
+                "reconnect_attempts=%d "
+                "status_transitions=%s "
+                "redis_saturation_count=%d "
+                "fallback_probe_scheduled_count=%d",
+                frames_per_min,
+                last_tick_age, last_heartbeat_age,
+                self._liveness.max_frame_gap_sec,
+                self._connection_status, self._ticker_freshness_status,
+                self._reconnect_attempt_count,
+                transitions_str,
+                self._redis_writer.saturation_count,
+                self._fallback_controller.scheduled_probe_count,
             )
 
     async def stop(self) -> None:

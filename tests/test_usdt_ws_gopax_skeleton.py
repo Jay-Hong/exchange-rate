@@ -19,7 +19,7 @@ import asyncio
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from websockets.exceptions import ConnectionClosed
 
@@ -29,6 +29,7 @@ from app.crawlers.usdt_ws.gopax import (
     MAX_PENDING_WRITES,
     REDIS_CLOSE_TIMEOUT_SEC,
     GopaxRedisWriter,
+    GopaxRestFallbackController,
     GopaxWsClient,
 )
 from app.tether_topic_trigger import (
@@ -295,6 +296,8 @@ class TestScopeGuard(unittest.TestCase):
             # G7 신규 — 의도적 module-level (Coinone C7 / Bithumb U7 mirror)
             "AlertObservation",
             "UsdtAlertEvaluator",
+            # PR 2e 신규 — 60s summary log cycle (Coinone PR 2d mirror)
+            "SUMMARY_LOG_INTERVAL_SEC",
         ]:
             self.assertTrue(
                 hasattr(gopax_module, attr),
@@ -1015,44 +1018,42 @@ class TestHandleMessageUpdatesLiveness(unittest.IsolatedAsyncioTestCase):
 
 
 class TestG4ActivationConstraint(unittest.TestCase):
-    """G7 (Codex 보강): G7 land 후에도 activation 보류 docstring 명시.
+    """PR 2e (Codex 보강 표현): PR 2e land 후에도 activation 보류 docstring 명시.
 
-    "G7 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은 PR 2e telemetry
-    완료 후 또는 별도 canary 조건 재검토 후 결정" + "G7는 local/staging smoke 가능
-    단계" 명시.
+    "PR 2e land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은 별도 canary
+    조건 검토 및 짧은 안정 관찰 후 결정 (PR 2e 자체만으로 자동 activation 아님)" 명시.
     """
 
-    def test_module_docstring_g7_activation_constraint(self):
-        """module docstring에 현재 stage (G7) activation 보류 명시.
+    def test_module_docstring_pr2e_activation_constraint(self):
+        """module docstring에 현재 stage (PR 2e) activation 보류 명시.
 
-        Stage 진행에 따라 docstring keyword 갱신. 현재 stage (G7) 기준 검증.
-        Codex 보강 표현: activation은 PR 2e telemetry 완료 후 또는 별도 canary
-        조건 재검토 후 결정.
+        Codex 보강 표현: PR 2e land 후에도 USDT_WS_GOPAX_ENABLED=false 유지.
+        activation은 별도 canary 조건 검토 및 짧은 안정 관찰 후 결정.
         """
         import app.crawlers.usdt_ws.gopax as gopax_module
         doc = gopax_module.__doc__ or ""
-        self.assertIn("G7 단계도 유지", doc)
-        # Codex 보강: PR 2e 완료 후 또는 canary 재검토 명시
         self.assertIn("PR 2e", doc)
         self.assertIn("canary", doc)
-        # local/staging smoke 가능 단계
-        self.assertIn("local/staging smoke", doc)
-
-    def test_class_docstring_g7_activation_constraint(self):
-        """class docstring에 현재 stage (G7) activation 보류 명시."""
-        doc = GopaxWsClient.__doc__ or ""
-        self.assertIn("G7 단계도 유지", doc)
-        # Codex 보강 keyword
-        self.assertIn("PR 2e", doc)
-
-    def test_start_docstring_g7_activation_constraint(self):
-        """start() docstring에도 현재 stage (G7) activation 보류 명시 (Codex 보강)."""
-        doc = GopaxWsClient.start.__doc__ or ""
+        self.assertIn("짧은 안정 관찰", doc)
+        # G7 attribute는 누적 표현 유지
         self.assertIn("G7", doc)
-        # G4/G5/G6a/G6b stale 표현 부재 검증
+
+    def test_class_docstring_pr2e_activation_constraint(self):
+        """class docstring에 현재 stage (PR 2e) activation 보류 명시."""
+        doc = GopaxWsClient.__doc__ or ""
+        self.assertIn("PR 2e", doc)
+        self.assertIn("canary", doc)
+
+    def test_start_docstring_pr2e_activation_constraint(self):
+        """start() docstring에도 현재 stage (PR 2e) activation 보류 명시 (Codex 보강)."""
+        doc = GopaxWsClient.start.__doc__ or ""
+        self.assertIn("PR 2e", doc)
+        self.assertIn("canary", doc)
+        # G4/G5/G6a/G6b/G7 stale 표현 부재 검증
         self.assertNotIn("G4 단독", doc)
         self.assertNotIn("G6a 단계도 유지", doc)
         self.assertNotIn("G6b 단계도 유지", doc)
+        self.assertNotIn("G7 단계도 유지", doc)
 
 
 # ===========================================================================
@@ -2120,6 +2121,192 @@ class TestGopaxRestProbeSuccessSchedulesAlertObservation(unittest.IsolatedAsynci
         # invariant: Redis/DB도 같이 schedule (fanout 일관)
         client._redis_writer.schedule.assert_called_once_with(sample_tick)
         client._db_writer.schedule.assert_called_once_with(sample_tick)
+
+
+# ===========================================================================
+# PR 2e — _summary_log_loop 60s cycle 10 fields emit (Coinone PR 2d 1:1 mirror)
+# ===========================================================================
+
+
+class TestGopaxSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
+    """PR 2e — Gopax summary log emit 검증 (10 fields, 2-signal status + 2 counters).
+
+    Gopax는 Coinone형 state shape (connection_status + ticker_freshness_status) +
+    Bithumb counter scope (saturation + probe 둘 다) union — Coinone PR 2d 1:1 mirror.
+    """
+
+    async def test_emit_format_contains_all_10_metrics(self):
+        """emit log에 state 8 + counter 2 = 10 metric key=value 포맷 포함."""
+        client = GopaxWsClient()
+        client._liveness.frame_count_total = 100
+        client._liveness.last_tick_at = time.time() - 2.0
+        client._liveness.last_heartbeat_at = time.time() - 30.0
+        client._liveness.max_frame_gap_sec = 8.2
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.gopax.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log, "metric INFO log 없음")
+        for keyword in [
+            "frames_per_min=",
+            "last_tick_age=",
+            "last_heartbeat_age=",
+            "max_frame_gap=",
+            "connection_status=",                # 2-signal (Coinone 동일)
+            "ticker_freshness_status=",          # 2-signal (Coinone 동일)
+            "reconnect_attempts=",
+            "status_transitions=",
+            "redis_saturation_count=",           # PR 2e (G5 land)
+            "fallback_probe_scheduled_count=",   # PR 2e (G6b land)
+        ]:
+            self.assertIn(keyword, metric_log, f"metric key 누락: {keyword}")
+
+        # Gopax-specific schema: 1-dim status= 형태 부재 (2-signal이라 status= 단독 없음).
+        # 'connection_status=' / 'ticker_freshness_status='에는 'status='가 포함되므로
+        # 정확히 ' status=' (공백 prefix)로 1-dim status field 부재 확인.
+        self.assertNotIn(" status=", metric_log)
+
+    async def test_sentinel_for_none_age(self):
+        """last_tick_at / last_heartbeat_at이 None이면 -1.0 numeric sentinel emit."""
+        client = GopaxWsClient()
+        self.assertIsNone(client._liveness.last_tick_at)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.gopax.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("last_tick_age=-1.0", metric_log)
+        self.assertIn("last_heartbeat_age=-1.0", metric_log)
+
+    async def test_frames_per_min_calculation(self):
+        """frame_count_total 차이 / elapsed * 60 = frames_per_min 정확성 검증.
+
+        time.time() patch: 100.0 → 160.0 (elapsed=60s), frame_count 0 → 30
+        → frames_per_min = (30 - 0) * 60 / 60.0 = 30
+        """
+        client = GopaxWsClient()
+        client._liveness.frame_count_total = 0
+
+        time_values = iter([100.0, 160.0])
+
+        async def fake_sleep(duration):
+            client._liveness.frame_count_total = 30
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.gopax.time.time", side_effect=lambda: next(time_values)), \
+             patch("app.crawlers.usdt_ws.gopax.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "frames_per_min=" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("frames_per_min=30", metric_log)
+
+    async def test_cancelled_silently_returns(self):
+        """CancelledError 시 silently return (no exception propagate)."""
+        client = GopaxWsClient()
+
+        async def fake_sleep(_):
+            raise asyncio.CancelledError()
+
+        with patch("app.crawlers.usdt_ws.gopax.asyncio.sleep", side_effect=fake_sleep):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+    async def test_stop_event_before_first_emit_skips_emit(self):
+        """stop_event 사전 set 시 emit 0 (loop entry 못 함). assertNoLogs (Python 3.10+)."""
+        client = GopaxWsClient()
+        client._stop_event.set()
+
+        with self.assertNoLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO"):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+
+class TestGopaxSummaryLogEmitsCounters(unittest.IsolatedAsyncioTestCase):
+    """PR 2e — _summary_log_loop counter field emit value 검증 (PropertyMock pattern).
+
+    Coinone PR 2d / Korbit PR 2a / Bithumb PR 2c / Upbit PR 2b 패턴 mirror —
+    counter property mock으로 emit log 안 numeric 값 직접 검증.
+    """
+
+    async def test_emit_contains_saturation_count_value(self):
+        """redis_saturation_count=N emit 검증 (PropertyMock)."""
+        client = GopaxWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            GopaxRedisWriter, "saturation_count",
+            new_callable=PropertyMock, return_value=13,
+        ), patch("app.crawlers.usdt_ws.gopax.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("redis_saturation_count=13", metric_log)
+
+    async def test_emit_contains_scheduled_probe_count_value(self):
+        """fallback_probe_scheduled_count=N emit 검증 (PropertyMock)."""
+        client = GopaxWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(
+            GopaxRestFallbackController, "scheduled_probe_count",
+            new_callable=PropertyMock, return_value=4,
+        ), patch("app.crawlers.usdt_ws.gopax.asyncio.sleep", side_effect=fake_sleep), \
+           self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("fallback_probe_scheduled_count=4", metric_log)
+
+
+class TestGopaxStartCancelsSummaryTask(unittest.IsolatedAsyncioTestCase):
+    """PR 2e — start() finally에서 summary_task cancel/await 검증.
+
+    Coinone PR 2d / Korbit/Bithumb start() finally cancel pattern mirror
+    (reconnect loop 예외와 독립).
+    """
+
+    async def test_start_cancels_summary_task_on_stop(self):
+        """start 종료 시 summary_task가 cancel + await됨."""
+        client = GopaxWsClient()
+        cancelled = {"value": False}
+
+        async def fake_summary_loop():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                return
+
+        async def fake_run_one_session():
+            await client._stop_event.wait()
+
+        with patch.object(client, "_summary_log_loop", side_effect=fake_summary_loop), \
+             patch.object(client, "_run_one_session", side_effect=fake_run_one_session):
+            task = asyncio.create_task(client.start())
+            await asyncio.sleep(0.05)
+            await client.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertTrue(cancelled["value"], "summary_task가 cancel되지 않음")
+        self.assertFalse(client._running)
 
 
 if __name__ == "__main__":
