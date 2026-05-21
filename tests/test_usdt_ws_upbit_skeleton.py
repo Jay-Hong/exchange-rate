@@ -21,7 +21,7 @@ import json
 import time
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
 from app.crawlers.usdt_ws import upbit as upbit_mod
@@ -35,6 +35,7 @@ from app.crawlers.usdt_ws.upbit import (
     RECONNECT_BACKOFF_SEQ,
     RECONNECT_BACKOFF_TAIL,
     STALE_AFTER_SEC,
+    SUMMARY_LOG_INTERVAL_SEC,
     UPBIT_SUBSCRIBE_TICKET,
     UPBIT_TARGET_CODE,
     UPBIT_WS_URL,
@@ -2477,6 +2478,252 @@ class TestUpbitWsClientFallbackHook(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._stop_event.is_set(), stop_before)
         self.assertEqual(client._status, status_before)
         self.assertEqual(client._reconnect_attempt_count, attempts_before)
+
+
+# ===========================================================================
+# PR 2b — Upbit summary log + redis_saturation_count (state-only + counter)
+# Korbit 1차 PR 패턴 mirror, Upbit source-specific shape
+# ===========================================================================
+
+
+class TestUpbitRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
+    """PR 2b — UpbitRedisWriter._saturation_count counter (Codex Point 3).
+
+    saturation_count는 MAX_PENDING_WRITES skip branch에서만 증가.
+    helper False / Redis exception / trigger exception은 saturation 아님 (counter 증가 X).
+    """
+
+    async def test_saturation_branch_increments_counter(self):
+        """MAX_PENDING_WRITES 한도 도달 시 saturation_count += 1."""
+        writer = UpbitRedisWriter()
+        self.assertEqual(writer.saturation_count, 0)
+
+        # MAX_PENDING_WRITES 개수만큼 fake task 채워서 saturation 유도
+        async def slow_helper(**kw):
+            await asyncio.sleep(10.0)
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=slow_helper,
+        ):
+            tick = {"source": "upbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1}
+            # MAX_PENDING_WRITES 회 schedule — 모두 in-flight
+            for _ in range(MAX_PENDING_WRITES):
+                writer.schedule(tick)
+            # 추가 schedule 3회 → saturation branch entry 3회, counter +3
+            writer.schedule(tick)
+            writer.schedule(tick)
+            writer.schedule(tick)
+
+            self.assertEqual(writer.saturation_count, 3)
+
+            # cleanup
+            for task in list(writer._tasks):
+                task.cancel()
+            await asyncio.gather(*writer._tasks, return_exceptions=True)
+
+    async def test_normal_schedule_does_not_increment(self):
+        """정상 schedule (saturation 미발생) 시 counter 증가 X."""
+        writer = UpbitRedisWriter()
+        self.assertEqual(writer.saturation_count, 0)
+
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            tick = {"source": "upbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1}
+            writer.schedule(tick)
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        # 정상 schedule → counter 0 유지
+        self.assertEqual(writer.saturation_count, 0)
+
+    async def test_helper_failure_does_not_increment(self):
+        """Codex Point 3: helper False / exception은 saturation 아님 — counter 증가 X."""
+        writer = UpbitRedisWriter()
+        tick = {"source": "upbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1}
+
+        # helper False 반환 (Redis SET 실패) — saturation 아님
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+        self.assertEqual(writer.saturation_count, 0)
+
+        # helper exception (Redis 예외) — saturation 아님
+        writer2 = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("Redis down"),
+        ):
+            writer2.schedule(tick)
+            await writer2.close(timeout=2.0)
+        self.assertEqual(writer2.saturation_count, 0)
+
+
+class TestUpbitSummaryLogLoop(unittest.IsolatedAsyncioTestCase):
+    """PR 2b — Upbit summary log 단독 검증.
+
+    Korbit 1차 PR 패턴 mirror, Upbit source-specific shape:
+    - status (1-차원) + status_transitions (3 keys) + redis_saturation_count (신규)
+    - ticker_freshness_status 미포함 (Codex 강조)
+    """
+
+    async def test_emit_format_contains_upbit_8_fields(self):
+        """emit log에 Upbit source-specific 8 field 모두 포함 + ticker_freshness_status 부재 확인 (Codex 강조 5)."""
+        client = UpbitWsClient()
+        client._liveness.frame_count_total = 100
+        client._liveness.last_tick_at = time.time() - 5.0
+        client._liveness.last_heartbeat_at = time.time() - 10.0
+        client._liveness.max_frame_gap_sec = 15.5
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.upbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.upbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log, "metric INFO log 없음")
+
+        # Upbit 8 field 모두 emit format에 포함
+        for keyword in [
+            "frames_per_min=",
+            "last_tick_age=",
+            "last_heartbeat_age=",
+            "max_frame_gap=",
+            "status=",                       # Upbit 1-차원 (Korbit connection_status + ticker_freshness_status 대신)
+            "reconnect_attempts=",
+            "status_transitions=",
+            "redis_saturation_count=",       # PR 2b 신규
+        ]:
+            self.assertIn(keyword, metric_log, f"Upbit metric key 누락: {keyword}")
+
+        # Codex 강조 5: ticker_freshness_status 문자열 없음 (Upbit 부재 + 억지 추가 X)
+        self.assertNotIn("ticker_freshness_status", metric_log,
+                         "Upbit metric에 ticker_freshness_status 포함되면 안 됨 (Upbit에 없음)")
+        self.assertNotIn("connection_status=", metric_log,
+                         "Upbit는 connection_status 별도 차원 없음 (status 1-차원)")
+
+    async def test_frames_per_min_calculation(self):
+        """frame_count_total 차이 / elapsed * 60 = frames_per_min deterministic 검증.
+
+        time.time() patch: 100.0 → 160.0 (elapsed=60s), frame_count 0 → 30
+        → frames_per_min = (30 - 0) * 60 / 60.0 = 30
+        """
+        client = UpbitWsClient()
+        client._liveness.frame_count_total = 0
+
+        time_values = iter([100.0, 160.0])
+
+        async def fake_sleep(duration):
+            client._liveness.frame_count_total = 30
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.upbit.time.time", side_effect=lambda: next(time_values)), \
+             patch("app.crawlers.usdt_ws.upbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.upbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "frames_per_min=" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("frames_per_min=30", metric_log)
+
+    async def test_sentinel_for_none_age(self):
+        """last_tick_at / last_heartbeat_at이 None이면 -1.0 numeric sentinel (Korbit 1차 PR 동일)."""
+        client = UpbitWsClient()
+        self.assertIsNone(client._liveness.last_tick_at)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch("app.crawlers.usdt_ws.upbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.upbit", level="INFO") as cm:
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("last_tick_age=-1.0", metric_log)
+        self.assertIn("last_heartbeat_age=-1.0", metric_log)
+
+    async def test_redis_saturation_count_in_emit(self):
+        """Codex 강조 4: summary log에 redis_saturation_count=N 포함.
+
+        Codex 후속 정정: property mock으로 internal state 우회 — property 도입 취지
+        (read 측 property 사용) 일관. private attr 직접 set 회피.
+        """
+        client = UpbitWsClient()
+
+        async def fake_sleep(_):
+            client._stop_event.set()
+
+        with patch.object(UpbitRedisWriter, "saturation_count", new_callable=PropertyMock) as mock_prop, \
+             patch("app.crawlers.usdt_ws.upbit.asyncio.sleep", side_effect=fake_sleep), \
+             self.assertLogs("exchange_rate.crawler.usdt_ws.upbit", level="INFO") as cm:
+            mock_prop.return_value = 7
+            await asyncio.wait_for(client._summary_log_loop(), timeout=2.0)
+
+        metric_log = next((m for m in cm.output if "metrics" in m), None)
+        self.assertIsNotNone(metric_log)
+        self.assertIn("redis_saturation_count=7", metric_log,
+                      "summary log에 redis_saturation_count emit 누락")
+
+    async def test_cancelled_silently_returns(self):
+        """CancelledError 시 silently return (no exception propagate)."""
+        client = UpbitWsClient()
+
+        async def fake_sleep(_):
+            raise asyncio.CancelledError()
+
+        with patch("app.crawlers.usdt_ws.upbit.asyncio.sleep", side_effect=fake_sleep):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+    async def test_stop_event_before_first_emit_skips_emit(self):
+        """stop_event 사전 set 시 emit 0 (loop entry 못 함)."""
+        client = UpbitWsClient()
+        client._stop_event.set()
+
+        with self.assertNoLogs("exchange_rate.crawler.usdt_ws.upbit", level="INFO"):
+            await asyncio.wait_for(client._summary_log_loop(), timeout=1.0)
+
+
+class TestUpbitStartCancelsSummaryTask(unittest.IsolatedAsyncioTestCase):
+    """PR 2b — start() finally에서 summary_task cancel/await 검증 (Codex Point 1).
+
+    summary cleanup이 reconnect loop 예외와 독립 (개별 try/except).
+    """
+
+    async def test_start_cancels_summary_task_on_stop(self):
+        client = UpbitWsClient()
+        cancelled = {"value": False}
+
+        async def fake_summary_loop():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                return
+
+        async def fake_run_one_session():
+            await client._stop_event.wait()
+
+        with patch.object(client, "_summary_log_loop", side_effect=fake_summary_loop), \
+             patch.object(client, "_run_one_session", side_effect=fake_run_one_session):
+            task = asyncio.create_task(client.start())
+            await asyncio.sleep(0.05)
+            await client.stop()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertTrue(cancelled["value"], "summary_task가 cancel되지 않음")
+        self.assertFalse(client._running)
 
 
 if __name__ == "__main__":

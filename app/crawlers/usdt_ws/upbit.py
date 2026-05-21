@@ -121,6 +121,12 @@ DB_WRITE_WINDOW_SEC = 1.0  # debounce window (KRX KrxDbWriter 동일)
 FALLBACK_COOLDOWN_SEC = 30.0      # stale 지속 중 probe 빈도 제한 (= STALE_AFTER_SEC)
 FALLBACK_PROBE_TIMEOUT_SEC = 10.0  # REST HTTP timeout
 
+# Summary log follow-up (PR 2b) — 60s cycle metric INFO emit.
+# Korbit summary log 1차 PR (USDT_WS_DESIGN_PLAN §12.7.5 후속) 패턴 mirror,
+# Upbit source-specific shape (status 1-차원, status_transitions 3 keys,
+# redis_saturation_count 신규 counter).
+SUMMARY_LOG_INTERVAL_SEC = 60.0
+
 
 class UsdtLivenessMonitor:
     """USDT WebSocket frame liveness state — frame/heartbeat 활동 관찰.
@@ -234,14 +240,28 @@ class UpbitRedisWriter:
         # 조합으로 old tick이 new tick을 덮는 race 차단. lock은 to_thread
         # 완료까지 보유 — schedule 순서 = Redis SET 순서.
         self._write_lock: asyncio.Lock = asyncio.Lock()
+        # PR 2b: saturation skip 누적 counter — schedule()의 MAX_PENDING_WRITES skip
+        # branch에서만 증가 (helper False / Redis exception / trigger exception은
+        # saturation 아님). UpbitWsClient._summary_log_loop이 property로 읽음.
+        self._saturation_count: int = 0
+
+    @property
+    def saturation_count(self) -> int:
+        """PR 2b — Redis write queue saturation skip 누적 횟수 (read-only)."""
+        return self._saturation_count
 
     def schedule(self, tick: dict) -> None:
         """tick → background Redis write task. fire-and-forget.
 
-        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning.
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning + counter increment.
         Redis 장애로 task가 누적되는 시나리오 차단.
+
+        PR 2b: saturation_count 증가는 MAX_PENDING_WRITES skip branch에서만.
+        helper False / Redis exception / trigger exception은 saturation 아님 (log only,
+        counter increment X).
         """
         if len(self._tasks) >= MAX_PENDING_WRITES:
+            self._saturation_count += 1  # PR 2b: saturation skip counter
             logger.warning(
                 "[usdt_ws.upbit] Redis write queue saturated (%d in-flight) — skip tick",
                 len(self._tasks),
@@ -635,6 +655,10 @@ class UpbitWsClient:
             return
         self._running = True
         logger.info("[usdt_ws.upbit] start (PR3 reconnect loop)")
+        # PR 2b: Summary log task — start lifetime (reconnect 사이 유지, Korbit 1차 PR 패턴 mirror).
+        # 60s cycle metric INFO emit. Upbit source-specific 8 fields (status 1-차원,
+        # status_transitions 3 keys, redis_saturation_count 신규).
+        summary_task = asyncio.create_task(self._summary_log_loop())
         attempt = 0
         try:
             while not self._stop_event.is_set():
@@ -685,11 +709,96 @@ class UpbitWsClient:
                 except asyncio.TimeoutError:
                     pass  # backoff 완료, 다음 시도
         finally:
+            # PR 2b Codex Point 1: summary cleanup이 reconnect loop 예외와 독립 (개별 try/except).
+            # CancelledError silently pass, 다른 예외만 logger.exception.
+            summary_task.cancel()
+            try:
+                await summary_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[usdt_ws.upbit] summary_task cleanup 실패")
             self._running = False
             self._ws = None
             logger.info(
                 "[usdt_ws.upbit] start exited (reconnect_attempts=%d)",
                 self._reconnect_attempt_count,
+            )
+
+    async def _summary_log_loop(self) -> None:
+        """PR 2b — start lifetime 동안 60s cycle metric INFO emit.
+
+        Korbit `_summary_log_loop` (USDT_WS_DESIGN_PLAN §12.7.5 1차 PR) 패턴 mirror,
+        Upbit source-specific shape (Codex Point 2).
+
+        Korbit summary log와 8 field로 숫자는 같지만 cross-source 동일 schema가 아님.
+        운영 파싱 시 source별 shape 분리 필수:
+
+        Upbit-specific (이 source):
+            - status (1-차원, normal/reconnecting/stale)
+            - status_transitions (3 keys: normal/reconnecting/stale)
+            - redis_saturation_count (PR 2b 신규 counter, _redis_writer.saturation_count property)
+
+        Korbit-specific (참고):
+            - connection_status + ticker_freshness_status (2-차원)
+            - status_transitions (6 keys: connection_* 3 + ticker_* 3)
+
+        공통 (5 fields): frames_per_min / last_tick_age / last_heartbeat_age /
+                         max_frame_gap / reconnect_attempts
+
+        제외 (Codex 강조):
+            - ticker_freshness_status: Upbit에 없음. 억지 추가 X.
+            - fallback_probe_count: PR 2a Korbit 우선, 본 PR 제외.
+
+        Caveat — frames_per_min 측정 기준 (KRX / Korbit 동일 caveat 적용):
+            reconnect 직후 첫 summary log의 frames_per_min은 직전 60초 전체 기준이라
+            현재 session active duration 기준이 아닐 수 있다. baseline 분석 시
+            reconnect 직후 첫 summary log는 caveat 또는 무시 권장.
+
+        Sentinel 정책 (Korbit 1차 PR과 동일):
+            last_tick_at / last_heartbeat_at이 None일 경우 -1.0 numeric sentinel.
+            log 파싱 / numeric aggregation 일관성 위해 None 회피.
+        """
+        prev_frame_total = self._liveness.frame_count_total
+        prev_at = time.time()
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(SUMMARY_LOG_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                return
+            now = time.time()
+            elapsed = max(now - prev_at, 1e-9)
+            frames_in_window = self._liveness.frame_count_total - prev_frame_total
+            frames_per_min = int(round(frames_in_window * 60 / elapsed))
+            prev_frame_total = self._liveness.frame_count_total
+            prev_at = now
+
+            # Sentinel -1.0 for None (log aggregation numeric 일관성)
+            last_tick = self._liveness.last_tick_at
+            last_tick_age = (now - last_tick) if last_tick is not None else -1.0
+            last_heartbeat = self._liveness.last_heartbeat_at
+            last_heartbeat_age = (now - last_heartbeat) if last_heartbeat is not None else -1.0
+
+            # Upbit 3-keys status_transitions (Korbit 6-keys와 다름 — source-specific)
+            transitions_str = "/".join(
+                f"{k}:{v}" for k, v in self._status_transition_count.items()
+            )
+
+            logger.info(
+                "[usdt_ws.upbit] metrics frames_per_min=%d "
+                "last_tick_age=%.1f last_heartbeat_age=%.1f "
+                "max_frame_gap=%.1f "
+                "status=%s "
+                "reconnect_attempts=%d "
+                "status_transitions=%s "
+                "redis_saturation_count=%d",
+                frames_per_min,
+                last_tick_age, last_heartbeat_age,
+                self._liveness.max_frame_gap_sec,
+                self._status,
+                self._reconnect_attempt_count,
+                transitions_str,
+                self._redis_writer.saturation_count,  # PR 2b: property 사용 (Codex Point 1)
             )
 
     async def stop(self) -> None:
