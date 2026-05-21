@@ -1,13 +1,14 @@
-"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G6b.
+"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G7.
 
 USDT_WS_DESIGN_PLAN §12.9 (Phase B.6, 2026-05-21).
 
-G6b scope (이 파일의 현재 범위):
+G7 scope (이 파일의 현재 범위):
     G1 lifecycle + G2 Subscribe/Parse + G3 Primus pong + G4 reconnect/liveness +
-    2-signal status + G5 GopaxRedisWriter + G6a GopaxDbWriter + **G6b
-    GopaxRestFallbackController (degraded threshold trigger + REST probe + Redis/DB
-    fanout + scheduled_probe_count)**까지. Alert evaluator (G7) / Telemetry
-    summary log emit (PR 2e)는 별도 stage.
+    2-signal status + G5 GopaxRedisWriter + G6a GopaxDbWriter + G6b
+    GopaxRestFallbackController + **G7 UsdtAlertEvaluator wiring (WS tick →
+    AlertObservation(kind="tick"), REST probe success → AlertObservation(kind=
+    "rest_probe"), session-finally close drain)**까지. Telemetry summary log
+    emit (PR 2e)는 별도 stage.
 
 G4 주요 변경 (G4 1ea4c74 → dd3e077 누적):
     - `UsdtLivenessMonitor` 통합 (source-neutral, Coinone/Korbit 패턴 mirror).
@@ -44,37 +45,41 @@ G5 주요 변경 (현재 stage):
       invariant: __init__ 1회 생성, reconnect 사이 재사용).
     - KST ISO timestamp 변환 (`_KST = timezone(timedelta(hours=9))`, Bithumb 동일).
 
-⚠️ Production activation 제약 (G6b 단계도 유지 — Codex 강조 강화):
-    G6b land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지. G6b는 fallback
-    controller까지 추가됐지만 G7 Alert evaluator / PR 2e telemetry 부재.
-    관찰 인프라 (summary log + counter emit) 부재라 silent ingestion 상태.
+⚠️ Production activation 제약 (G7 단계도 유지 — Codex 보강 표현):
+    G7 land 후에도 `USDT_WS_GOPAX_ENABLED=false` 유지. G7까지 fanout(Redis +
+    DB + Fallback + Alert)은 완성됐지만 PR 2e telemetry 부재라 관찰 인프라
+    (summary log + counter emit) 미완 → silent ingestion 상태.
 
-    **Production activation은 G7 + PR 2e 완료 후, 또는 별도 canary 조건
-    재검토 후 결정** (Codex 보강 정정). PR 2e 단독으로는 충분하지 않다 —
-    alert 부재 상태에서 activation은 운영 가치 제한적.
-    그 전까지 production env는 default false 유지.
-    G6b는 **local/staging smoke 가능 단계**.
+    **Activation은 PR 2e telemetry 완료 후 또는 별도 canary 조건 재검토 후
+    결정** (Codex 보강 표현). 그 전까지 production env는 default false 유지.
+    G7는 **local/staging smoke 가능 단계**.
 
-G5/G6a/G6b acceptance:
+    flag=false invariant (transitive): scheduler `start_usdt_ws_gopax_client()`
+    env false → GopaxWsClient 생성 0 → 그 안의 UsdtAlertEvaluator/Redis/DB/
+    fallback 모두 생성 0 → network/Redis/DB/Alert call 0. 별도 evaluator-only
+    test 불필요 (Codex 권고).
+
+G5/G6a/G6b/G7 acceptance:
     - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1~G4 동일)
     - flag=true 시 reconnect loop + 2-signal status (G4) + Redis fanout (G5) +
-      DB fanout (G6a) + REST fallback on degraded (G6b)
-    - valid tick → Redis latest cache + topic trigger + DB write (1s window debounce)
-    - invalid/Primus/control frame은 Redis schedule 0 + DB schedule 0
+      DB fanout (G6a) + REST fallback on degraded (G6b) + Alert fanout (G7)
+    - valid tick → Redis latest cache + topic trigger + DB write (1s window debounce) +
+      AlertObservation(kind="tick") schedule
+    - invalid/Primus/control frame은 Redis/DB/Alert schedule 0
     - saturation skip 시 _saturation_count +1 (helper False/exception은 미증가)
     - degraded 전이 → fallback_controller.schedule_probe (G6b)
     - normal 복귀 → fallback_controller.reset_cooldown (G6b)
-    - REST probe success → Redis + DB schedule (Alert는 G7에서 추가)
+    - REST probe success → Redis + DB + AlertObservation(kind="rest_probe") schedule
     - schedule 성공 시 _scheduled_probe_count +1 (skip 미증가)
-    - session finally close 순서: fallback → DB → Redis (각 close 예외 격리)
-    - production env false 유지 (G7/PR 2e 또는 canary 재검토 이전 activation 보류)
+    - session finally close 순서: fallback → DB → Alert → Redis (각 close 예외 격리)
+    - production env false 유지 (PR 2e 또는 canary 재검토 이전 activation 보류)
 
 G6a 주요 변경 (G6a fa29bdc):
     - `GopaxDbWriter` class 신규 (Bithumb U6a / Coinone C6a 1:1 mirror).
       1s window debounce + insert_source_rate_if_changed + race-prevention +
       failure isolation + close immediate flush.
 
-G6b 주요 변경 (현재 stage):
+G6b 주요 변경 (G6b fbf590d):
     - `GopaxRestFallbackController` class 신규 (Coinone C6b 1:1 mirror).
       degraded threshold trigger → REST 1회 probe → 기존 Redis/DB fanout 재사용.
     - `usdt_sources.fetch_gopax_usdt_tick()` 신규 helper (additive refactor —
@@ -87,10 +92,22 @@ G6b 주요 변경 (현재 stage):
     - `_set_ticker_freshness_status` hook 확장 (Coinone C6b mirror):
         * degraded 전이 → `schedule_probe("ticker_degraded")`
         * normal 복귀 (prev != normal) → `reset_cooldown()` (옛 cooldown skip 회피)
-    - `_run_one_session` finally close 순서: fallback → DB → Redis (Bithumb 패턴).
     - Constants: FALLBACK_COOLDOWN_SEC=300 (Coinone 동일) / FALLBACK_PROBE_TIMEOUT_SEC=10.
 
-G6b 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b):
+G7 주요 변경 (현재 stage):
+    - `UsdtAlertEvaluator` import + `GopaxWsClient.__init__`에서 1회 생성
+      (Coinone C7 / Bithumb U7 / Korbit K7 mirror, source-neutral helper 재사용).
+    - `GopaxRestFallbackController.__init__`에 `alert_evaluator` 필수 인자 추가
+      (kwargs 앞 positional, Coinone C7 시그니처 mirror).
+    - `_run_one_session` valid tick path → `AlertObservation(kind="tick")` schedule
+      (Redis + DB 후, Coinone C7 line 1019-1028 mirror).
+    - `_run_probe` success → `AlertObservation(kind="rest_probe")` schedule
+      (Redis + DB 후, Coinone C7 line 538-549 mirror).
+    - `_run_one_session` finally close 순서 변경: fallback → DB → **Alert** → Redis
+      (DB와 Redis 사이에 alert close 삽입, 5s 내부 timeout + 예외 격리, Coinone
+      C7 line 1052-1057 mirror).
+
+G7 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b + G7):
     - G1: `_stop_event` / `_running`
     - G2: `_ws` / `_first_tick_logged`
     - G3: `_last_heartbeat_at` (dual-write 유지)
@@ -100,7 +117,8 @@ G6b 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b):
     - G6a: `_db_writer` (GopaxDbWriter, 1s window debounce)
     - G6b: `_fallback_controller` (GopaxRestFallbackController, 300s cooldown,
       _scheduled_probe_count read-only counter)
-    G7 attribute (`_alert_evaluator`)는 여전히 본 stage 제외.
+    - G7: `_alert_evaluator` (UsdtAlertEvaluator, source-neutral helper 재사용 —
+      Coinone C7 / Bithumb U7 / Korbit K7 mirror)
 """
 
 from __future__ import annotations
@@ -117,6 +135,10 @@ from websockets.exceptions import ConnectionClosed
 
 from app import latest_rates_cache, tether_topic_trigger
 from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
+from app.notifications.alert_evaluator import (
+    AlertObservation,
+    UsdtAlertEvaluator,
+)
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
 )
@@ -405,16 +427,16 @@ class GopaxDbWriter:
 
 
 class GopaxRestFallbackController:
-    """Gopax REST fallback (silent probe) — G6b.
+    """Gopax REST fallback (silent probe) — G6b + G7 alert wiring.
 
-    Coinone CoinoneRestFallbackController 1:1 mirror. G7에서 alert evaluator
-    wiring 추가 예정.
+    Coinone CoinoneRestFallbackController 1:1 mirror. G7에서 alert evaluator inject
+    완료 → probe success 시 AlertObservation(kind="rest_probe") schedule 추가.
 
     DATA frame age > TICKER_FRESHNESS_DEGRADED_SEC (300s) 감지 시 REST 1회
-    probe → normalized tick → 기존 fanout (Redis + DB) 재사용. WS reconnect loop는
+    probe → normalized tick → 기존 fanout (Redis + DB + Alert) 재사용. WS reconnect loop는
     그대로 유지, fallback은 freshness 보조.
 
-    Guardrails (Coinone C6b mirror):
+    Guardrails (Coinone C6b/C7 mirror):
         - schedule_probe()는 sync/non-blocking (_set_ticker_freshness_status 동기 흐름에서 호출).
         - In-flight skip: probe 진행 중 중복 trigger 차단.
         - Cooldown skip: 마지막 probe 종료 후 FALLBACK_COOLDOWN_SEC 미경과 시 skip
@@ -423,7 +445,8 @@ class GopaxRestFallbackController:
         - reset_cooldown(): normal 복귀 시 호출 → 다음 degraded 즉시 1회 probe 보장.
         - REST 실패 격리: log only, WS session/reconnect 영향 X.
         - fallback tick의 source/asset = "gopax"/"usdt-krw" (downstream 일관).
-        - G7에서 alert wiring 추가 예정 (현재는 Redis + DB만 schedule).
+        - G7: probe success 시 AlertObservation(kind="rest_probe") schedule
+          (Bithumb U7 mirror — log/metric 영역에서 tick vs probe 분리).
 
     G6b scheduled probe counter (Codex 권고 — 신규 controller라 처음부터 read-only counter):
         - _scheduled_probe_count: schedule_probe()가 in-flight/cooldown/no-loop skip
@@ -436,12 +459,14 @@ class GopaxRestFallbackController:
         self,
         redis_writer: "GopaxRedisWriter",
         db_writer: "GopaxDbWriter",
+        alert_evaluator: "UsdtAlertEvaluator",
         *,
         cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
         probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
     ) -> None:
         self._redis_writer = redis_writer
         self._db_writer = db_writer
+        self._alert_evaluator = alert_evaluator  # G7: AlertObservation schedule on probe success
         self._cooldown_sec = cooldown_sec
         self._probe_timeout_sec = probe_timeout_sec
         self._in_flight: bool = False
@@ -501,10 +526,10 @@ class GopaxRestFallbackController:
         logger.debug("[usdt_ws.gopax.fallback] cooldown reset on normal recovery")
 
     async def _run_probe(self, reason: str) -> None:
-        """REST probe → normalized tick → fanout (Redis + DB).
+        """REST probe → normalized tick → fanout (Redis + DB + Alert).
 
         실패 시 log only + cooldown 적용 (재시도 X). WS session 영향 X.
-        G7: probe success 시 AlertObservation schedule 추가 예정.
+        G7: probe success 시 AlertObservation(kind="rest_probe") schedule (Coinone C7 mirror).
         """
         try:
             logger.info(
@@ -520,9 +545,18 @@ class GopaxRestFallbackController:
                 )
                 return
 
-            # 기존 fanout 재사용 (G5 Redis writer + G6a DB writer).
+            # 기존 fanout 재사용 (G5 Redis writer + G6a DB writer + G7 Alert evaluator).
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
+            # G7: REST probe kind 구분 (Coinone C7 mirror — log/metric 영역에서 tick vs probe 분리).
+            observation = AlertObservation(
+                source=tick["source"],
+                asset=tick["asset"],
+                rate=tick["rate"],
+                timestamp_ms=tick["timestamp_ms"],
+                kind="rest_probe",
+            )
+            self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.gopax.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
                 tick["rate"], tick["timestamp_ms"], reason,
@@ -564,19 +598,17 @@ class GopaxRestFallbackController:
 
 
 class GopaxWsClient:
-    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G6b.
+    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G7.
 
-    G1~G6a 누적 + G6b GopaxRestFallbackController (degraded threshold trigger +
-    REST probe + Redis/DB fanout + scheduled_probe_count). G7 (Alert evaluator)
-    + PR 2e (Telemetry summary log) 여전히 본 stage 제외.
+    G1~G6b 누적 + G7 UsdtAlertEvaluator wiring (WS valid tick →
+    AlertObservation(kind="tick"), REST probe success → AlertObservation(kind=
+    "rest_probe"), session-finally close drain). PR 2e (Telemetry summary log)
+    여전히 본 stage 제외.
 
-    ⚠️ Production activation 제약 (G6b 단계도 유지 — Codex 강조):
-        G6b land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G6b는 fallback
-        controller까지 추가됐지만 G7 Alert evaluator / PR 2e telemetry 부재.
-        production activation은 **G7 + PR 2e 완료 후, 또는 별도 canary 조건
-        재검토 후 결정** (Codex 보강).
-        G6b는 **local/staging smoke 가능 단계**.
-        자세한 내용은 module docstring 참조.
+    ⚠️ Production activation 제약 (G7 단계도 유지 — Codex 보강 표현):
+        G7 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은 PR 2e
+        telemetry 완료 후 또는 별도 canary 조건 재검토 후 결정. G7는
+        **local/staging smoke 가능 단계**. 자세한 내용은 module docstring 참조.
     """
 
     def __init__(self) -> None:
@@ -609,11 +641,15 @@ class GopaxWsClient:
         self._redis_writer: GopaxRedisWriter = GopaxRedisWriter()
         # G6a — DB writer (1s window debounce). Bithumb U6a / Coinone C6a mirror.
         self._db_writer: GopaxDbWriter = GopaxDbWriter()
+        # G7 — Alert evaluator (observation-based, source-neutral helper 재사용).
+        # Coinone C7 / Bithumb U7 / Korbit K7 mirror — Gopax client 자체 instance 보유.
+        self._alert_evaluator: UsdtAlertEvaluator = UsdtAlertEvaluator()
         # G6b — REST fallback controller (silent probe on degraded). Coinone C6b mirror.
-        # G7에서 alert_evaluator inject 추가 예정.
+        # Redis + DB writer + Alert evaluator inject (G7 alert_evaluator 필수).
         self._fallback_controller: GopaxRestFallbackController = GopaxRestFallbackController(
             redis_writer=self._redis_writer,
             db_writer=self._db_writer,
+            alert_evaluator=self._alert_evaluator,
         )
 
     @staticmethod
@@ -867,10 +903,11 @@ class GopaxWsClient:
         return RECONNECT_BACKOFF_TAIL
 
     async def _run_one_session(self) -> None:
-        """G6b single session — connect + subscribe + recv + Primus pong + liveness +
-        status + Redis fanout (G5) + DB fanout (G6a) + REST fallback (G6b).
+        """G7 single session — connect + subscribe + recv + Primus pong + liveness +
+        status + Redis fanout (G5) + DB fanout (G6a) + REST fallback (G6b) +
+        Alert fanout (G7).
 
-        Lifecycle (G6b 누적 scope):
+        Lifecycle (G7 누적 scope):
             1. websockets.connect(GOPAX_WS_URL) + reset_active_session()
             2. SubscribeToTickers payload send + _set_connection_status("normal")
             3. recv loop: wake every RECV_TIMEOUT_SEC (stop_event 반응)
@@ -883,17 +920,21 @@ class GopaxWsClient:
             6. Primus ping → pong send + dual-write heartbeat → continue
                (send 실패 시 RuntimeError raise → start() except 경로로 attempt++ + backoff)
             7. 그 외 frame → parse + handle + `_liveness.observe_tick(now)` + G5
-               Redis fanout + G6a DB fanout (valid tick일 때만 schedule)
+               Redis fanout + G6a DB fanout + G7 AlertObservation(kind="tick")
+               schedule (valid tick일 때만)
             8. ConnectionClosed → raise (return X) → start() except 경로로 attempt++ + backoff
                (return 시 start() else: continue로 tight loop hang)
-            9. finally close 순서: G6b fallback → G6a DB → G5 Redis (Bithumb 순서 mirror —
-               alert은 G7에서 앞쪽에 삽입 예정). 각 close 예외 격리.
-            10. fanout (Alert) 없음 — G7 영역. PR 2e summary log emit 별도.
+            9. finally close 순서 (G7 갱신, Coinone C7 mirror 최종):
+               G6b fallback → G6a DB → **G7 Alert** → G5 Redis. fallback이
+               downstream writer를 schedule할 수 있어 먼저 멈추고, Redis는 항상
+               마지막. 각 close 예외 격리 — 한 close 실패해도 뒤 close 실행 보장.
+            10. PR 2e summary log emit은 별도 stage.
 
-        ⚠️ G6b 단독 flag=true는 production 활성화 금지 (Codex 강조):
-            G6b까지 land됐지만 G7 Alert evaluator / PR 2e telemetry 부재라 운영
-            가치 제한적. production activation은 G7 + PR 2e 완료 후, 또는 별도
-            canary 조건 재검토 후 결정. 자세한 내용은 module docstring 참조.
+        ⚠️ G7 단독 flag=true는 production 활성화 금지 (Codex 보강 표현):
+            G7까지 fanout(Redis + DB + Fallback + Alert)은 완성됐지만 PR 2e
+            telemetry 부재라 관찰 인프라 미완. activation은 PR 2e telemetry
+            완료 후 또는 별도 canary 조건 재검토 후 결정. 자세한 내용은
+            module docstring 참조.
         """
         async with websockets.connect(
             GOPAX_WS_URL,
@@ -968,7 +1009,7 @@ class GopaxWsClient:
                             )
                         continue
 
-                    # 그 외 frame → parse + handle + G5 Redis fanout + G6a DB fanout.
+                    # 그 외 frame → parse + handle + G5 Redis fanout + G6a DB fanout + G7 Alert fanout.
                     tick = self._handle_message(raw)
                     if tick is not None:
                         # G5: valid tick → Redis fanout (Bithumb U5 mirror).
@@ -977,21 +1018,38 @@ class GopaxWsClient:
                         # G6a: DB writer (1s window debounce, race-prevention).
                         # Bithumb U6a / Coinone C6a mirror.
                         self._db_writer.schedule(tick)
+                        # G7: AlertObservation schedule (source-neutral evaluator 재사용).
+                        # Coinone C7 / Bithumb U7 / Korbit K7 mirror — kind="tick" 구분.
+                        observation = AlertObservation(
+                            source=tick["source"],
+                            asset=tick["asset"],
+                            rate=tick["rate"],
+                            timestamp_ms=tick["timestamp_ms"],
+                            kind="tick",
+                        )
+                        self._alert_evaluator.schedule(observation)
             finally:
                 self._ws = None
-                # G6b: fallback controller close 먼저 (Bithumb U7 close 순서 mirror —
+                # G6b finally 1: fallback controller close 먼저 (Bithumb U7 close 순서 mirror —
                 # fallback → DB → Alert → Redis. fallback이 downstream writer를
-                # schedule할 수 있으므로 먼저 멈춰야 깔끔하게 drain. Alert는 G7).
+                # schedule할 수 있으므로 먼저 멈춰야 깔끔하게 drain).
+                # 각 close는 개별 try/except로 격리 — 한 close 실패해도 뒤 close 실행 보장.
                 try:
                     await self._fallback_controller.close()
                 except Exception:
                     logger.exception("[usdt_ws.gopax] fallback_controller.close() 실패")
-                # G6a: DB writer (pending tick 즉시 flush + timer cancel).
+                # G6a finally 2: DB writer (pending tick 즉시 flush + timer cancel).
                 try:
                     await self._db_writer.close()
                 except Exception:
                     logger.exception("[usdt_ws.gopax] db_writer.close() 실패")
-                # G5: Redis writer drain + close 마지막 (Bithumb 순서 mirror).
+                # G7 finally 3: Alert evaluator drain (FCM 보호, Coinone C7 mirror).
+                # 예외 격리: WS loop에 전파 X.
+                try:
+                    await self._alert_evaluator.close()
+                except Exception:
+                    logger.exception("[usdt_ws.gopax] alert_evaluator.close() 실패")
+                # G5 finally 4: Redis writer drain + close 마지막 (Bithumb 순서 mirror).
                 # session finally에서 close: 그 session task drain + _tasks.clear,
                 # 다음 session에서 빈 _tasks로 새 schedule.
                 try:
@@ -1018,18 +1076,19 @@ class GopaxWsClient:
             - stop_event set 시 즉시 종료 (backoff sleep도 즉시 break)
             - flag=false 시 본 함수 호출 자체가 발생하지 않음 (scheduler가 차단)
 
-        Production activation 제약 (Codex 강조 — G6b 단계도 유지):
-            G6b land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. production activation은
-            **G7 + PR 2e 완료 후, 또는 별도 canary 조건 재검토 후 결정** (Codex 보강).
-            G6b는 fallback controller까지 land됐지만 G7 Alert / PR 2e telemetry
-            부재라 운영 가치 제한적. G6b는 **local/staging smoke 가능 단계**.
+        Production activation 제약 (Codex 보강 표현 — G7 단계도 유지):
+            G7 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은
+            **PR 2e telemetry 완료 후 또는 별도 canary 조건 재검토 후 결정**.
+            G7까지 fanout(Redis + DB + Fallback + Alert)은 완성됐지만 PR 2e
+            telemetry 부재라 관찰 인프라 미완 — silent ingestion 상태.
+            G7는 **local/staging smoke 가능 단계**.
         """
         if self._running:
             logger.debug("[usdt_ws.gopax] 이미 실행 중, 중복 start 무시")
             return
         self._running = True
         logger.info(
-            "[usdt_ws.gopax] start (G6b — reconnect loop + liveness + Redis/DB fanout + REST fallback)",
+            "[usdt_ws.gopax] start (G7 — reconnect loop + liveness + Redis/DB/Alert fanout + REST fallback)",
         )
         attempt = 0
         try:

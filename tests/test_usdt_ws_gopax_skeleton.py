@@ -160,14 +160,16 @@ class TestShutdownUsdtWsGopaxClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
-    """G4 client — G1~G3 attribute + G4 liveness/2-signal status 보유.
+    """G7 client — G1~G6b attribute + G7 UsdtAlertEvaluator instance 보유.
 
     Codex 권고 (G4 dual-write 유지): _last_heartbeat_at은 G4에서도 유지 (cleanup은
-    G5 또는 별도 PR). G5-G7 attribute (writers / fallback / alert)는 본 stage 제외.
+    별도 PR). G7까지 fanout 누적: Redis + DB + Fallback + Alert.
     """
 
-    async def test_init_state_g6b_scope(self):
-        """__init__ 직후: G1~G6b attribute 보유, G7 attribute 부재."""
+    async def test_init_state_g7_scope(self):
+        """__init__ 직후: G1~G7 attribute 모두 보유."""
+        from app.notifications.alert_evaluator import UsdtAlertEvaluator
+
         client = GopaxWsClient()
         # G1 state
         self.assertFalse(client._running)
@@ -196,8 +198,14 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         # G6b state — fallback controller (Coinone C6b mirror)
         self.assertIsNotNone(client._fallback_controller)
         self.assertEqual(client._fallback_controller.scheduled_probe_count, 0)
-        # G7 attribute 부재 검증 (선반영 회피)
-        self.assertFalse(hasattr(client, "_alert_evaluator"))
+        # G7 state — Alert evaluator (Coinone C7 mirror, single instance)
+        self.assertIsNotNone(client._alert_evaluator)
+        self.assertIsInstance(client._alert_evaluator, UsdtAlertEvaluator)
+        # fallback controller에 inject된 evaluator는 client 보유와 동일 instance
+        self.assertIs(
+            client._fallback_controller._alert_evaluator,
+            client._alert_evaluator,
+        )
 
     async def test_start_stop_lifecycle(self):
         """start() → _running=True → stop() → _running=False.
@@ -251,25 +259,27 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
 
 
 class TestScopeGuard(unittest.TestCase):
-    """G5 module-level scope guard — G6~G7 미구현 symbol 부재 검증.
+    """G7 module-level scope guard — G1~G7 expected symbol 노출 검증.
 
-    Stage 진행에 따라 갱신 (G3 → G4 → G5 → ...). G5 land 시 G5 constants/class
-    허용 + G6-G7 forbidden.
+    Stage 진행에 따라 갱신 (G3 → G4 → G5 → ... → G7). G7 land 시 alert evaluator
+    관련 symbol (AlertObservation/UsdtAlertEvaluator)은 의도적 module-level
+    import (Coinone C7 / Bithumb U7 / Korbit K7 mirror).
     """
 
     def test_gopax_ws_url_exported(self):
         """G1: GOPAX_WS_URL constant module-level 노출."""
         self.assertEqual(GOPAX_WS_URL, "wss://wsapi.gopax.co.kr")
 
-    def test_no_g7_symbols_at_module_level(self):
-        """G6b: G7에서 추가될 symbol module-level 부재 검증.
+    def test_g7_module_level_symbols_present(self):
+        """G7: G1~G7 stage symbol module-level 노출 검증.
 
         G6b에서 GopaxRestFallbackController + FALLBACK_COOLDOWN_SEC +
-        FALLBACK_PROBE_TIMEOUT_SEC은 허용. G7 (alert)은 module-level 부재해야 함.
+        FALLBACK_PROBE_TIMEOUT_SEC. G7 추가: AlertObservation / UsdtAlertEvaluator
+        의도적 module-level import (Coinone C7 mirror — Bithumb U7 패턴).
         """
         from app.crawlers.usdt_ws import gopax as gopax_module
 
-        # G4 + G5 + G6a + G6b constants/class 허용 (검증 — 존재해야 함)
+        # G4 + G5 + G6a + G6b + G7 constants/class 허용 (검증 — 존재해야 함)
         for attr in [
             "STALE_AFTER_SEC", "TICKER_FRESHNESS_WARNING_SEC",
             "TICKER_FRESHNESS_DEGRADED_SEC", "RECONNECT_BACKOFF_SEQ",
@@ -282,21 +292,13 @@ class TestScopeGuard(unittest.TestCase):
             "FALLBACK_COOLDOWN_SEC",
             "FALLBACK_PROBE_TIMEOUT_SEC",
             "GopaxRestFallbackController",
+            # G7 신규 — 의도적 module-level (Coinone C7 / Bithumb U7 mirror)
+            "AlertObservation",
+            "UsdtAlertEvaluator",
         ]:
             self.assertTrue(
                 hasattr(gopax_module, attr),
-                f"G4/G5/G6a/G6b constant 누락: {attr}",
-            )
-
-        # G7 forbidden
-        forbidden_attrs = [
-            # G7 — Alert
-            "AlertObservation",
-        ]
-        for attr in forbidden_attrs:
-            self.assertFalse(
-                hasattr(gopax_module, attr),
-                f"G6b scope 위반: {attr} symbol이 module-level에 존재함 — G7 stage에서 추가 예정",
+                f"G4/G5/G6a/G6b/G7 symbol 누락: {attr}",
             )
 
 
@@ -1013,47 +1015,44 @@ class TestHandleMessageUpdatesLiveness(unittest.IsolatedAsyncioTestCase):
 
 
 class TestG4ActivationConstraint(unittest.TestCase):
-    """G4 (Codex 강조): G4 land 후에도 activation 보류 docstring 명시.
+    """G7 (Codex 보강): G7 land 후에도 activation 보류 docstring 명시.
 
-    "production activation은 최소 G5 Redis writer + PR 2e telemetry 이후 검토" +
-    "G4는 local/staging smoke 가능 단계" 명시.
+    "G7 land 후에도 USDT_WS_GOPAX_ENABLED=false 유지. activation은 PR 2e telemetry
+    완료 후 또는 별도 canary 조건 재검토 후 결정" + "G7는 local/staging smoke 가능
+    단계" 명시.
     """
 
-    def test_module_docstring_g4_activation_constraint(self):
-        """module docstring에 현재 stage (G6b) activation 보류 명시.
+    def test_module_docstring_g7_activation_constraint(self):
+        """module docstring에 현재 stage (G7) activation 보류 명시.
 
-        Stage 진행에 따라 docstring keyword 갱신. 현재 stage (G6b) 기준 검증.
-        Codex 보강: activation은 G7 + PR 2e 완료 후 또는 별도 canary 조건
-        재검토 후 결정.
+        Stage 진행에 따라 docstring keyword 갱신. 현재 stage (G7) 기준 검증.
+        Codex 보강 표현: activation은 PR 2e telemetry 완료 후 또는 별도 canary
+        조건 재검토 후 결정.
         """
         import app.crawlers.usdt_ws.gopax as gopax_module
         doc = gopax_module.__doc__ or ""
-        self.assertIn("G6b 단계도 유지", doc)
-        # Codex 보강: G7 + PR 2e 완료 후 또는 canary 재검토 명시
-        self.assertIn("G7", doc)
+        self.assertIn("G7 단계도 유지", doc)
+        # Codex 보강: PR 2e 완료 후 또는 canary 재검토 명시
         self.assertIn("PR 2e", doc)
         self.assertIn("canary", doc)
         # local/staging smoke 가능 단계
         self.assertIn("local/staging smoke", doc)
 
-    def test_class_docstring_g4_activation_constraint(self):
-        """class docstring에 현재 stage (G6b) activation 보류 명시."""
+    def test_class_docstring_g7_activation_constraint(self):
+        """class docstring에 현재 stage (G7) activation 보류 명시."""
         doc = GopaxWsClient.__doc__ or ""
-        self.assertIn("G6b 단계도 유지", doc)
+        self.assertIn("G7 단계도 유지", doc)
         # Codex 보강 keyword
-        self.assertIn("G7", doc)
         self.assertIn("PR 2e", doc)
 
-    def test_start_docstring_g6b_activation_constraint(self):
-        """start() docstring에도 현재 stage (G6b) activation 보류 명시 (Codex 보강).
-
-        Stage 진행에 따라 docstring keyword 갱신.
-        """
+    def test_start_docstring_g7_activation_constraint(self):
+        """start() docstring에도 현재 stage (G7) activation 보류 명시 (Codex 보강)."""
         doc = GopaxWsClient.start.__doc__ or ""
-        self.assertIn("G6b", doc)
-        # G4/G5/G6a stale 표현 부재 검증
+        self.assertIn("G7", doc)
+        # G4/G5/G6a/G6b stale 표현 부재 검증
         self.assertNotIn("G4 단독", doc)
         self.assertNotIn("G6a 단계도 유지", doc)
+        self.assertNotIn("G6b 단계도 유지", doc)
 
 
 # ===========================================================================
@@ -1292,7 +1291,9 @@ class TestGopaxRunOneSessionRedisFanout(unittest.IsolatedAsyncioTestCase):
         ), patch.object(client._redis_writer, "schedule") as mock_schedule, \
            patch.object(client._redis_writer, "close", new=AsyncMock()), \
            patch.object(client._db_writer, "schedule"), \
-           patch.object(client._db_writer, "close", new=AsyncMock()):
+           patch.object(client._db_writer, "close", new=AsyncMock()), \
+           patch.object(client._alert_evaluator, "schedule"), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # 2회 valid tick → schedule 2회 호출
@@ -1334,7 +1335,9 @@ class TestGopaxPrimusFrameNoSchedule(unittest.IsolatedAsyncioTestCase):
             return_value=mock_connect_ctx,
         ), patch.object(client._redis_writer, "schedule") as mock_schedule, \
            patch.object(client._redis_writer, "close", new=AsyncMock()), \
-           patch.object(client._db_writer, "close", new=AsyncMock()):
+           patch.object(client._db_writer, "close", new=AsyncMock()), \
+           patch.object(client._alert_evaluator, "schedule"), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # Primus ping → schedule 호출 0
@@ -1368,7 +1371,9 @@ class TestGopaxFinallyCloseExceptionIsolated(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.usdt_ws.gopax.websockets.connect",
             return_value=mock_connect_ctx,
         ), patch.object(client._redis_writer, "close", side_effect=fake_close), \
-           patch.object(client._db_writer, "close", new=AsyncMock()):
+           patch.object(client._db_writer, "close", new=AsyncMock()), \
+           patch.object(client._alert_evaluator, "schedule"), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()):
             # close 예외는 _run_one_session 외부로 전파되지 않음 (격리)
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
@@ -1562,7 +1567,9 @@ class TestGopaxRunOneSessionDbFanout(unittest.IsolatedAsyncioTestCase):
         ), patch.object(client._redis_writer, "schedule"), \
            patch.object(client._redis_writer, "close", new=AsyncMock()), \
            patch.object(client._db_writer, "schedule") as mock_db_schedule, \
-           patch.object(client._db_writer, "close", new=AsyncMock()):
+           patch.object(client._db_writer, "close", new=AsyncMock()), \
+           patch.object(client._alert_evaluator, "schedule"), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # 2 valid tick → DB schedule 2회
@@ -1597,7 +1604,9 @@ class TestGopaxInvalidFrameNoDbSchedule(unittest.IsolatedAsyncioTestCase):
             return_value=mock_connect_ctx,
         ), patch.object(client._redis_writer, "close", new=AsyncMock()), \
            patch.object(client._db_writer, "schedule") as mock_db_schedule, \
-           patch.object(client._db_writer, "close", new=AsyncMock()):
+           patch.object(client._db_writer, "close", new=AsyncMock()), \
+           patch.object(client._alert_evaluator, "schedule"), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # invalid frame → DB schedule 호출 0
@@ -1632,7 +1641,9 @@ class TestGopaxPrimusFrameNoDbSchedule(unittest.IsolatedAsyncioTestCase):
             return_value=mock_connect_ctx,
         ), patch.object(client._redis_writer, "close", new=AsyncMock()), \
            patch.object(client._db_writer, "schedule") as mock_db_schedule, \
-           patch.object(client._db_writer, "close", new=AsyncMock()):
+           patch.object(client._db_writer, "close", new=AsyncMock()), \
+           patch.object(client._alert_evaluator, "schedule"), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
         # Primus ping → DB schedule 0
@@ -1671,6 +1682,7 @@ class TestGopaxFinallyDbCloseOrder(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.usdt_ws.gopax.websockets.connect",
             return_value=mock_connect_ctx,
         ), patch.object(client._db_writer, "close", side_effect=fake_db_close), \
+           patch.object(client._alert_evaluator, "close", new=AsyncMock()), \
            patch.object(client._redis_writer, "close", side_effect=fake_redis_close):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
@@ -1744,6 +1756,7 @@ class TestRestFallbackInFlightSkip(unittest.IsolatedAsyncioTestCase):
         controller = GopaxRestFallbackController(
             redis_writer=MagicMock(),
             db_writer=MagicMock(),
+            alert_evaluator=MagicMock(),
         )
         controller._in_flight = True
         controller.schedule_probe("test")
@@ -1759,6 +1772,7 @@ class TestRestFallbackCooldownSkip(unittest.IsolatedAsyncioTestCase):
         controller = GopaxRestFallbackController(
             redis_writer=MagicMock(),
             db_writer=MagicMock(),
+            alert_evaluator=MagicMock(),
         )
         controller._cooldown_until = time.time() + 1000.0  # 미래 cooldown 활성
         controller.schedule_probe("test")
@@ -1775,6 +1789,7 @@ class TestRestFallbackProbeFanout(unittest.IsolatedAsyncioTestCase):
         controller = GopaxRestFallbackController(
             redis_writer=redis_mock,
             db_writer=db_mock,
+            alert_evaluator=MagicMock(),
         )
 
         tick = {"source": "gopax", "asset": "usdt-krw", "rate": 1490.5, "timestamp_ms": 1779106625946}
@@ -1801,6 +1816,7 @@ class TestRestFallbackProbeFailure(unittest.IsolatedAsyncioTestCase):
         controller = GopaxRestFallbackController(
             redis_writer=redis_mock,
             db_writer=db_mock,
+            alert_evaluator=MagicMock(),
         )
 
         with patch.object(
@@ -1824,6 +1840,7 @@ class TestRestFallbackScheduledProbeCount(unittest.IsolatedAsyncioTestCase):
         return GopaxRestFallbackController(
             redis_writer=MagicMock(),
             db_writer=MagicMock(),
+            alert_evaluator=MagicMock(),
         )
 
     def test_initial_value_zero(self):
@@ -1941,9 +1958,9 @@ class TestFetchGopaxUsdtTickGuards(unittest.TestCase):
 
 
 class TestGopaxFinallyFallbackCloseFirst(unittest.IsolatedAsyncioTestCase):
-    """G6b: finally close 순서 — fallback → DB → Redis (Bithumb 패턴 mirror)."""
+    """G7: finally close 순서 — fallback → DB → Alert → Redis (Coinone C7 mirror)."""
 
-    async def test_fallback_close_before_db_and_redis(self):
+    async def test_fallback_close_before_db_alert_and_redis(self):
         client = GopaxWsClient()
 
         mock_ws = AsyncMock()
@@ -1967,6 +1984,9 @@ class TestGopaxFinallyFallbackCloseFirst(unittest.IsolatedAsyncioTestCase):
         async def fake_db_close():
             close_order.append("db")
 
+        async def fake_alert_close(*args, **kwargs):
+            close_order.append("alert")
+
         async def fake_redis_close(*args, **kwargs):
             close_order.append("redis")
 
@@ -1975,10 +1995,131 @@ class TestGopaxFinallyFallbackCloseFirst(unittest.IsolatedAsyncioTestCase):
             return_value=mock_connect_ctx,
         ), patch.object(client._fallback_controller, "close", side_effect=fake_fallback_close), \
            patch.object(client._db_writer, "close", side_effect=fake_db_close), \
+           patch.object(client._alert_evaluator, "close", side_effect=fake_alert_close), \
            patch.object(client._redis_writer, "close", side_effect=fake_redis_close):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
-        self.assertEqual(close_order, ["fallback", "db", "redis"])
+        self.assertEqual(close_order, ["fallback", "db", "alert", "redis"])
+
+
+# ===========================================================================
+# G7 — UsdtAlertEvaluator wiring + AlertObservation schedule (Coinone C7 mirror)
+# ===========================================================================
+
+
+class TestGopaxValidTickSchedulesAlertObservation(unittest.IsolatedAsyncioTestCase):
+    """G7 acceptance: WS valid tick → AlertObservation(kind="tick") schedule."""
+
+    async def test_valid_tick_schedules_alert_observation_with_kind_tick(self):
+        from app.notifications.alert_evaluator import AlertObservation
+
+        client = GopaxWsClient()
+        captured = []
+        client._alert_evaluator.schedule = MagicMock(
+            side_effect=lambda obs: captured.append(obs),
+        )
+        # Redis/DB schedule mock — 실제 task 생성/DB 접근 회피
+        client._redis_writer.schedule = MagicMock()
+        client._db_writer.schedule = MagicMock()
+
+        # _handle_message가 valid tick을 return하도록 mock
+        sample_tick = {
+            "source": "gopax",
+            "asset": "usdt-krw",
+            "rate": 1487.5,
+            "timestamp_ms": 1700000000000,
+        }
+        client._handle_message = MagicMock(return_value=sample_tick)
+
+        mock_ws = AsyncMock()
+        send_count = [0]
+
+        async def send_side_effect(payload):
+            send_count[0] += 1
+
+        mock_ws.send = AsyncMock(side_effect=send_side_effect)
+
+        # 1회 frame → stop
+        recv_count = [0]
+
+        async def recv_side_effect():
+            recv_count[0] += 1
+            if recv_count[0] == 1:
+                return '{"n":"TickerEvent","o":{}}'
+            client._stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_ws.recv = AsyncMock(side_effect=recv_side_effect)
+        # primus ping 매칭 회피 — frame은 plain dict ticker로 처리
+        client._is_primus_ping = MagicMock(return_value=False)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._alert_evaluator, "close", new=AsyncMock()):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # valid tick 1회 → AlertObservation schedule 1회 (kind="tick")
+        self.assertEqual(len(captured), 1)
+        obs = captured[0]
+        self.assertIsInstance(obs, AlertObservation)
+        self.assertEqual(obs.source, "gopax")
+        self.assertEqual(obs.asset, "usdt-krw")
+        self.assertEqual(obs.rate, 1487.5)
+        self.assertEqual(obs.timestamp_ms, 1700000000000)
+        self.assertEqual(obs.kind, "tick")
+        # invariant: Redis/DB도 같이 schedule (fanout 일관)
+        client._redis_writer.schedule.assert_called_once_with(sample_tick)
+        client._db_writer.schedule.assert_called_once_with(sample_tick)
+
+
+class TestGopaxRestProbeSuccessSchedulesAlertObservation(unittest.IsolatedAsyncioTestCase):
+    """G7 acceptance: REST probe success → AlertObservation(kind="rest_probe") schedule."""
+
+    async def test_probe_success_schedules_alert_observation_with_kind_rest_probe(self):
+        from app.notifications.alert_evaluator import AlertObservation
+
+        client = GopaxWsClient()
+        captured = []
+        client._alert_evaluator.schedule = MagicMock(
+            side_effect=lambda obs: captured.append(obs),
+        )
+        # downstream writer mock — 실제 task/DB 접근 회피
+        client._redis_writer.schedule = MagicMock()
+        client._db_writer.schedule = MagicMock()
+
+        # fetch_gopax_usdt_tick 성공 시뮬레이션
+        sample_tick = {
+            "source": "gopax",
+            "asset": "usdt-krw",
+            "rate": 1488.2,
+            "timestamp_ms": 1700000001000,
+        }
+        with patch(
+            "app.crawlers.usdt_sources.fetch_gopax_usdt_tick",
+            return_value=sample_tick,
+        ):
+            client._fallback_controller.schedule_probe(reason="ticker_degraded")
+            pending = client._fallback_controller._pending_task
+            self.assertIsNotNone(pending)
+            await pending
+
+        # probe success 1회 → AlertObservation schedule 1회 (kind="rest_probe")
+        self.assertEqual(len(captured), 1)
+        obs = captured[0]
+        self.assertIsInstance(obs, AlertObservation)
+        self.assertEqual(obs.source, "gopax")
+        self.assertEqual(obs.asset, "usdt-krw")
+        self.assertEqual(obs.rate, 1488.2)
+        self.assertEqual(obs.timestamp_ms, 1700000001000)
+        self.assertEqual(obs.kind, "rest_probe")
+        # invariant: Redis/DB도 같이 schedule (fanout 일관)
+        client._redis_writer.schedule.assert_called_once_with(sample_tick)
+        client._db_writer.schedule.assert_called_once_with(sample_tick)
 
 
 if __name__ == "__main__":
