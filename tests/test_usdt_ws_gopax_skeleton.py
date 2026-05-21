@@ -19,14 +19,20 @@ import asyncio
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from websockets.exceptions import ConnectionClosed
 
 from app import config, scheduler
 from app.crawlers.usdt_ws.gopax import (
     GOPAX_WS_URL,
+    MAX_PENDING_WRITES,
+    REDIS_CLOSE_TIMEOUT_SEC,
+    GopaxRedisWriter,
     GopaxWsClient,
+)
+from app.tether_topic_trigger import (
+    TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
 )
 
 
@@ -160,8 +166,8 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
     G5 또는 별도 PR). G5-G7 attribute (writers / fallback / alert)는 본 stage 제외.
     """
 
-    async def test_init_state_g4_scope(self):
-        """__init__ 직후: G1~G4 attribute 보유, G5-G7 attribute 부재."""
+    async def test_init_state_g5_scope(self):
+        """__init__ 직후: G1~G5 attribute 보유, G6-G7 attribute 부재."""
         client = GopaxWsClient()
         # G1 state
         self.assertFalse(client._running)
@@ -176,15 +182,16 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._ticker_freshness_status, "normal")
         self.assertEqual(client._reconnect_attempt_count, 0)
         self.assertIsNotNone(client._liveness)
-        # status_transition_count 6 keys (connection 3 + ticker 3, Coinone/Korbit mirror)
         self.assertEqual(set(client._status_transition_count.keys()), {
             "connection_normal", "connection_reconnecting", "connection_stale",
             "ticker_normal", "ticker_warning", "ticker_degraded",
         })
         for v in client._status_transition_count.values():
             self.assertEqual(v, 0)
-        # G5-G7 attribute 부재 검증 (선반영 회피)
-        self.assertFalse(hasattr(client, "_redis_writer"))
+        # G5 state — Redis writer (Bithumb U5 mirror)
+        self.assertIsNotNone(client._redis_writer)
+        self.assertEqual(client._redis_writer.saturation_count, 0)
+        # G6-G7 attribute 부재 검증 (선반영 회피)
         self.assertFalse(hasattr(client, "_db_writer"))
         self.assertFalse(hasattr(client, "_fallback_controller"))
         self.assertFalse(hasattr(client, "_alert_evaluator"))
@@ -235,43 +242,47 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# G1 Module scope guard: GOPAX_WS_URL 노출 + G2~ symbol 부재
+# Module scope guard: GOPAX_WS_URL + G5 constants/class 노출 + G6~ symbol 부재
+# (stage 진행에 따라 갱신 — 현재 stage G5)
 # ---------------------------------------------------------------------------
 
 
 class TestScopeGuard(unittest.TestCase):
-    """G3 module-level scope guard — G4~G7 미구현 symbol 부재 검증."""
+    """G5 module-level scope guard — G6~G7 미구현 symbol 부재 검증.
+
+    Stage 진행에 따라 갱신 (G3 → G4 → G5 → ...). G5 land 시 G5 constants/class
+    허용 + G6-G7 forbidden.
+    """
 
     def test_gopax_ws_url_exported(self):
         """G1: GOPAX_WS_URL constant module-level 노출."""
         self.assertEqual(GOPAX_WS_URL, "wss://wsapi.gopax.co.kr")
 
-    def test_no_g5_g7_symbols_at_module_level(self):
-        """G4: G5~G7에서 추가될 symbol module-level 부재 검증.
+    def test_no_g6_g7_symbols_at_module_level(self):
+        """G5: G6~G7에서 추가될 symbol module-level 부재 검증.
 
-        G4에서 STALE_AFTER_SEC / TICKER_FRESHNESS_WARNING_SEC / TICKER_FRESHNESS_DEGRADED_SEC /
-        RECONNECT_BACKOFF_SEQ / RECONNECT_BACKOFF_TAIL은 허용 (G4 constants).
-        G5 (Redis writer), G6a (DB writer), G6b (REST helper + fallback controller),
+        G5에서 GopaxRedisWriter / MAX_PENDING_WRITES / REDIS_CLOSE_TIMEOUT_SEC은 허용
+        (G5 신규 export). G6a (DB writer), G6b (REST helper + fallback controller),
         G7 (alert)은 module-level 부재해야 함 (선제 작성 회피).
         """
         from app.crawlers.usdt_ws import gopax as gopax_module
 
-        # G4 constants 허용 (검증 — 존재해야 함)
+        # G4 + G5 constants 허용 (검증 — 존재해야 함)
         for attr in [
             "STALE_AFTER_SEC", "TICKER_FRESHNESS_WARNING_SEC",
             "TICKER_FRESHNESS_DEGRADED_SEC", "RECONNECT_BACKOFF_SEQ",
             "RECONNECT_BACKOFF_TAIL",
+            # G5 신규
+            "MAX_PENDING_WRITES", "REDIS_CLOSE_TIMEOUT_SEC",
+            "GopaxRedisWriter",
         ]:
             self.assertTrue(
                 hasattr(gopax_module, attr),
-                f"G4 constant 누락: {attr}",
+                f"G4/G5 constant 누락: {attr}",
             )
 
-        # G5-G7 forbidden
+        # G6-G7 forbidden
         forbidden_attrs = [
-            # G5 — Redis writer
-            "GopaxRedisWriter",
-            "MAX_PENDING_WRITES",
             # G6a — DB writer
             "GopaxDbWriter",
             "DB_WRITE_WINDOW_SEC",
@@ -285,7 +296,7 @@ class TestScopeGuard(unittest.TestCase):
         for attr in forbidden_attrs:
             self.assertFalse(
                 hasattr(gopax_module, attr),
-                f"G4 scope 위반: {attr} symbol이 module-level에 존재함 — G5~G7 stage에서 추가 예정",
+                f"G5 scope 위반: {attr} symbol이 module-level에 존재함 — G6~G7 stage에서 추가 예정",
             )
 
 
@@ -1021,21 +1032,346 @@ class TestG4ActivationConstraint(unittest.TestCase):
     """
 
     def test_module_docstring_g4_activation_constraint(self):
-        """module docstring에 G4 단계도 activation 보류 명시."""
+        """module docstring에 현재 stage activation 보류 명시.
+
+        Stage 진행에 따라 docstring keyword 갱신 (G4 → G5 → ...). 현재 stage (G5)
+        기준 검증.
+        """
         import app.crawlers.usdt_ws.gopax as gopax_module
         doc = gopax_module.__doc__ or ""
-        self.assertIn("G4 단계도 유지", doc)
-        # G5 Redis writer + PR 2e telemetry 이후 검토
-        self.assertIn("G5", doc)
+        self.assertIn("G5 단계도 유지", doc)
+        # PR 2e telemetry 이후 검토
+        self.assertIn("PR 2e", doc)
         self.assertIn("telemetry", doc)
         # local/staging smoke 가능 단계
         self.assertIn("local/staging smoke", doc)
 
     def test_class_docstring_g4_activation_constraint(self):
-        """class docstring에도 G4 단계 activation 보류 명시."""
+        """class docstring에 현재 stage (G5) activation 보류 명시.
+
+        Stage 진행에 따라 docstring keyword가 갱신됨 (G4 → G5 → ...). 향후 stage
+        진입 시 동일 검증 패턴으로 갱신.
+        """
         doc = GopaxWsClient.__doc__ or ""
-        self.assertIn("G4 단계도 유지", doc)
-        self.assertIn("G5", doc)
+        self.assertIn("G5 단계도 유지", doc)
+        # PR 2e telemetry 이후 검토 명시 (현재 stage 기준)
+        self.assertIn("PR 2e", doc)
+
+
+# ===========================================================================
+# G5 GopaxRedisWriter — tick-level Redis fanout + saturation counter + topic trigger
+# ===========================================================================
+
+
+def _make_valid_tick() -> dict:
+    """Test용 normalized tick (Gopax 형식)."""
+    return {
+        "source": "gopax",
+        "asset": "usdt-krw",
+        "rate": 1490.5,
+        "timestamp_ms": 1779106625946,
+    }
+
+
+class TestGopaxRedisWriterScheduleSuccess(unittest.IsolatedAsyncioTestCase):
+    """G5: schedule → _write_async → to_thread(helper) → KST ISO timestamp."""
+
+    async def test_schedule_calls_helper_with_kst_iso(self):
+        """schedule(tick) → set_latest_usdt_rate_from_sync_job 호출 + KST ISO 변환."""
+        writer = GopaxRedisWriter()
+        tick = _make_valid_tick()
+        captured = {}
+
+        def fake_helper(*, source, asset, rate, timestamp):
+            captured.update({
+                "source": source, "asset": asset,
+                "rate": rate, "timestamp": timestamp,
+            })
+            return True
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=fake_helper,
+        ), patch(
+            "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(tick)
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(captured["source"], "gopax")
+        self.assertEqual(captured["asset"], "usdt-krw")
+        self.assertEqual(captured["rate"], 1490.5)
+        # KST ISO 변환 검증 (timestamp_ms=1779106625946 → KST 시간)
+        self.assertIn("T", captured["timestamp"])
+        # KST timezone offset +09:00 포함 검증
+        self.assertIn("+09:00", captured["timestamp"])
+
+
+class TestGopaxRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
+    """G5 (Codex 권고): saturation_count counter — MAX_PENDING_WRITES skip 누적."""
+
+    def test_initial_value_zero(self):
+        """writer 생성 직후 saturation_count == 0."""
+        writer = GopaxRedisWriter()
+        self.assertEqual(writer.saturation_count, 0)
+
+    async def test_increments_on_saturation_skip(self):
+        """_tasks >= MAX_PENDING_WRITES → skip 시 counter +1."""
+        writer = GopaxRedisWriter()
+        loop = asyncio.get_running_loop()
+        dummy = [loop.create_future() for _ in range(MAX_PENDING_WRITES)]
+        writer._tasks = set(dummy)
+
+        self.assertEqual(writer.saturation_count, 0)
+
+        with patch("app.crawlers.usdt_ws.gopax.asyncio.to_thread"):
+            writer.schedule(_make_valid_tick())
+
+        self.assertEqual(writer.saturation_count, 1)
+
+        for fut in dummy:
+            fut.set_result(None)
+        writer._tasks.clear()
+
+    async def test_no_increment_on_normal_schedule(self):
+        """_tasks < MAX_PENDING_WRITES → 정상 schedule → counter 0 유지."""
+        writer = GopaxRedisWriter()
+        with patch("app.crawlers.usdt_ws.gopax.asyncio.create_task") as mock_create:
+            mock_create.return_value = MagicMock()
+            writer.schedule(_make_valid_tick())
+        self.assertEqual(writer.saturation_count, 0)
+
+
+class TestGopaxRedisWriterSaturationSemantics(unittest.IsolatedAsyncioTestCase):
+    """G5 (Codex 대칭 test): helper False/exception은 saturation_count 미증가."""
+
+    async def test_helper_false_does_not_increment_saturation(self):
+        """helper False 반환 → _write_async 안 실패. saturation_count 0 유지."""
+        writer = GopaxRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ), patch(
+            "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(_make_valid_tick())
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(writer.saturation_count, 0)
+
+    async def test_helper_exception_does_not_increment_saturation(self):
+        """helper exception → _write_async 안 실패. saturation_count 0 유지."""
+        writer = GopaxRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            side_effect=RuntimeError("Redis 장애 simulated"),
+        ):
+            writer.schedule(_make_valid_tick())
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(writer.saturation_count, 0)
+
+
+class TestGopaxRedisHelperUsesToThread(unittest.IsolatedAsyncioTestCase):
+    """G5: asyncio.to_thread로 sync helper 호출 (event loop non-blocking)."""
+
+    async def test_to_thread_called_with_helper(self):
+        writer = GopaxRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.gopax.asyncio.to_thread",
+            new=AsyncMock(return_value=True),
+        ) as mock_to_thread, patch(
+            "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(_make_valid_tick())
+            await writer.close(timeout=2.0)
+
+        mock_to_thread.assert_called_once()
+
+
+class TestGopaxTopicTriggerOnSuccessOnly(unittest.IsolatedAsyncioTestCase):
+    """G5: Redis write 성공 시에만 tether topic trigger 호출 (Codex 리뷰 #2)."""
+
+    async def test_trigger_called_on_helper_success(self):
+        """helper True → trigger 1회 호출."""
+        writer = GopaxRedisWriter()
+        trigger_calls = []
+
+        def fake_trigger(*, source, asset, reason):
+            trigger_calls.append({"source": source, "asset": asset, "reason": reason})
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=fake_trigger,
+        ):
+            writer.schedule(_make_valid_tick())
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(len(trigger_calls), 1)
+        self.assertEqual(trigger_calls[0]["source"], "gopax")
+        self.assertEqual(trigger_calls[0]["asset"], "usdt-krw")
+        self.assertEqual(
+            trigger_calls[0]["reason"],
+            TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+        )
+
+    async def test_trigger_not_called_on_helper_false(self):
+        """helper False → trigger 호출 0."""
+        writer = GopaxRedisWriter()
+        trigger_calls = []
+
+        def fake_trigger(**kwargs):
+            trigger_calls.append(kwargs)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=False,
+        ), patch(
+            "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
+            side_effect=fake_trigger,
+        ):
+            writer.schedule(_make_valid_tick())
+            await writer.close(timeout=2.0)
+
+        self.assertEqual(len(trigger_calls), 0)
+
+
+class TestGopaxRedisCloseDrain(unittest.IsolatedAsyncioTestCase):
+    """G5: close() drain timeout 후 cancel + _tasks.clear."""
+
+    async def test_close_clears_tasks_after_drain(self):
+        """schedule 후 close → _tasks.clear (Bithumb mirror)."""
+        writer = GopaxRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=True,
+        ), patch(
+            "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
+        ):
+            writer.schedule(_make_valid_tick())
+            self.assertEqual(len(writer._tasks), 1)
+            await writer.close(timeout=2.0)
+        self.assertEqual(len(writer._tasks), 0)
+
+
+class TestGopaxRunOneSessionRedisFanout(unittest.IsolatedAsyncioTestCase):
+    """G5: _run_one_session valid tick path → _redis_writer.schedule 호출."""
+
+    async def test_valid_tick_triggers_redis_schedule(self):
+        """recv → valid TickerEvent → _redis_writer.schedule 호출 검증."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        ticker_message = json.dumps({
+            "n": "TickerEvent",
+            "o": {"USDT-KRW": {"last": 1490.5, "lastTraded": 1779106625946}},
+        })
+
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                return ticker_message
+            if recv_count["n"] == 2:
+                client._stop_event.set()
+                return ticker_message
+            await asyncio.sleep(10)
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._redis_writer, "schedule") as mock_schedule, \
+           patch.object(client._redis_writer, "close", new=AsyncMock()):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # 2회 valid tick → schedule 2회 호출
+        self.assertEqual(mock_schedule.call_count, 2)
+        # tick shape 검증
+        for call in mock_schedule.call_args_list:
+            tick = call.args[0]
+            self.assertEqual(tick["source"], "gopax")
+            self.assertEqual(tick["asset"], "usdt-krw")
+            self.assertEqual(tick["rate"], 1490.5)
+
+
+class TestGopaxPrimusFrameNoSchedule(unittest.IsolatedAsyncioTestCase):
+    """G5 (Codex 포인트 #5): Primus ping/control frame → Redis schedule 호출 0."""
+
+    async def test_primus_ping_does_not_trigger_schedule(self):
+        """recv Primus ping → _handle_primus_ping만 호출, schedule 호출 0."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                client._stop_event.set()
+                return "primus::ping::1234"
+            await asyncio.sleep(10)
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._redis_writer, "schedule") as mock_schedule, \
+           patch.object(client._redis_writer, "close", new=AsyncMock()):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # Primus ping → schedule 호출 0
+        mock_schedule.assert_not_called()
+
+
+class TestGopaxFinallyCloseExceptionIsolated(unittest.IsolatedAsyncioTestCase):
+    """G5: finally redis_writer.close() 예외 격리 (Codex 리뷰 #4)."""
+
+    async def test_close_exception_does_not_propagate(self):
+        """close() 예외 → log only, _run_one_session 외부로 전파 X."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+        # subscribe 직후 stop_event set
+        async def stop_after_subscribe(payload):
+            client._stop_event.set()
+
+        mock_ws.send = AsyncMock(side_effect=stop_after_subscribe)
+        mock_ws.recv = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        async def fake_close(*args, **kwargs):
+            raise RuntimeError("close failure simulated")
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ), patch.object(client._redis_writer, "close", side_effect=fake_close):
+            # close 예외는 _run_one_session 외부로 전파되지 않음 (격리)
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # ws cleanup도 정상
+        self.assertIsNone(client._ws)
 
 
 if __name__ == "__main__":

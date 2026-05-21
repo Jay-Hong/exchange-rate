@@ -1,13 +1,14 @@
-"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G4.
+"""Gopax USDT/KRW WebSocket client — Phase B.6 Stage G5.
 
 USDT_WS_DESIGN_PLAN §12.9 (Phase B.6, 2026-05-21).
 
-G4 scope (이 파일의 현재 범위):
-    G1 lifecycle + G2 Subscribe/Parse + G3 Primus pong + **G4 UsdtLivenessMonitor +
-    reconnect loop + 2-signal status (connection + ticker_freshness)**까지.
-    Writers + fallback + alert (G5-G7) / Telemetry (PR 2e)는 별도 stage.
+G5 scope (이 파일의 현재 범위):
+    G1 lifecycle + G2 Subscribe/Parse + G3 Primus pong + G4 reconnect/liveness +
+    2-signal status + **G5 GopaxRedisWriter (tick-level Redis fanout + tether topic
+    trigger + saturation counter)**까지. DB writer (G6a) / REST fallback (G6b) /
+    Alert evaluator (G7) / Telemetry summary log emit (PR 2e)는 별도 stage.
 
-G4 주요 변경:
+G4 주요 변경 (G4 1ea4c74 → dd3e077 누적):
     - `UsdtLivenessMonitor` 통합 (source-neutral, Coinone/Korbit 패턴 mirror).
       `last_activity_at = max(tick, heartbeat)` 기반 stale 판정.
     - 2-signal status:
@@ -25,30 +26,50 @@ G4 주요 변경:
     - Constants: STALE_AFTER_SEC=360 / TICKER_FRESHNESS_WARNING=60 / DEGRADED=300
       (Coinone 기준 provisional) / RECONNECT_BACKOFF_SEQ (1,2,4,8,16,30) tail 30.
 
-⚠️ Production activation 제약 (G4 단계도 유지 — Codex 강조 강화):
-    G4 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지. G4 단독은 reconnect/
-    liveness만 land되고 Redis/DB/Telemetry 부재라 silent ingestion 상태 (관찰
-    불가능). G4는 **local/staging smoke 가능 단계**.
+G5 주요 변경 (현재 stage):
+    - `GopaxRedisWriter` class 신규 (Coinone C5 / Bithumb U5 1:1 mirror).
+      tick-level fire-and-forget, asyncio.to_thread로 sync helper 호출.
+    - `_write_lock`으로 SET 순서 직렬화 (write order race 차단).
+    - `MAX_PENDING_WRITES=20` saturation guard (Redis 장애 시 task 폭증 차단).
+    - `_saturation_count` G5 포함 (Codex 권고 — 신규 writer라 처음부터 read-only
+      counter. summary log emit은 PR 2e에서 추가). skip branch에서만 +1.
+    - Redis write 성공 시 lock 밖에서 `tether_topic_trigger.request_tether_topic_trigger`
+      호출 (reason: `TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS`).
+    - `close(timeout)`: drain → timeout 후 cancel + `_tasks.clear`.
+    - `_run_one_session` valid tick path → `_redis_writer.schedule(tick)`.
+      Primus/invalid frame은 schedule 0.
+    - `_run_one_session` finally → `await self._redis_writer.close()` 예외 격리
+      (Bithumb/Coinone session finally close 패턴 mirror — A13 lifecycle
+      invariant: __init__ 1회 생성, reconnect 사이 재사용).
+    - KST ISO timestamp 변환 (`_KST = timezone(timedelta(hours=9))`, Bithumb 동일).
 
-    **Production activation은 최소 G5 Redis writer + PR 2e telemetry 이후 검토**.
+⚠️ Production activation 제약 (G5 단계도 유지 — Codex 강조 강화):
+    G5 land 후에도 `USDT_WS_GOPAX_ENABLED=true` 토글 금지. G5는 Redis fanout이
+    추가됐지만 PR 2e telemetry (summary log + counter emit)가 없어 관찰 인프라
+    불완전. G5는 **local/staging smoke 가능 단계**.
+
+    **Production activation은 PR 2e telemetry land 후 검토**.
     그 전까지 production env는 default false 유지.
 
-G4 acceptance:
-    - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1~G3 동일)
-    - flag=true 시 reconnect loop으로 session crash 시 backoff 후 재시도
-    - liveness 기반 connection_status 전이 (stale ↔ normal)
-    - tick silence 기반 ticker_freshness_status 전이 (normal/warning/degraded)
-    - degraded 전이는 status 갱신만 — fallback action은 G6b 영역 (Codex 정정)
-    - production env false 유지 (G5 + PR 2e 이전 activation 보류)
+G5 acceptance:
+    - flag=false 시 GopaxWsClient 생성 X + task 생성 X (G1~G4 동일)
+    - flag=true 시 reconnect loop + 2-signal status (G4 동일) + Redis fanout
+    - valid tick → Redis latest cache 갱신 + tether topic trigger (success only)
+    - invalid/Primus/control frame은 Redis schedule 0
+    - saturation skip 시 _saturation_count +1 (helper False/exception은 미증가)
+    - session finally `_redis_writer.close()` 예외 격리
+    - production env false 유지 (PR 2e 이전 activation 보류)
 
-G4 누적 attribute (G1 + G2 + G3 + G4):
+G5 누적 attribute (G1 + G2 + G3 + G4 + G5):
     - G1: `_stop_event` / `_running`
     - G2: `_ws` / `_first_tick_logged`
-    - G3: `_last_heartbeat_at` (dual-write 유지 — Codex 정정으로 G4에서 미제거)
+    - G3: `_last_heartbeat_at` (dual-write 유지)
     - G4: `_liveness` / `_connection_status` / `_ticker_freshness_status` /
       `_reconnect_attempt_count` / `_status_transition_count` (6 keys)
-    G5-G7 attribute (`_redis_writer` / `_db_writer` / `_fallback_controller` /
-    `_alert_evaluator`)는 여전히 본 stage 제외.
+    - G5: `_redis_writer` (GopaxRedisWriter, A13 lifecycle invariant — __init__
+      1회 생성, reconnect 사이 재사용)
+    G6-G7 attribute (`_db_writer` / `_fallback_controller` / `_alert_evaluator`)는
+    여전히 본 stage 제외.
 """
 
 from __future__ import annotations
@@ -57,14 +78,22 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from app import latest_rates_cache, tether_topic_trigger
 from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
+from app.tether_topic_trigger import (
+    TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+)
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.gopax")
+
+# G5 — KST timezone for Redis latest cache timestamp ISO format (Bithumb 동일).
+_KST = timezone(timedelta(hours=9))
 
 # Gopax WebSocket endpoint (Primus protocol — G3에서 pong 응답 추가).
 # 공식 문서: https://gopax.github.io/wsapi/
@@ -91,19 +120,151 @@ TICKER_FRESHNESS_DEGRADED_SEC = 300.0
 RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 RECONNECT_BACKOFF_TAIL = 30.0
 
+# G5 — Redis writer guards (Coinone C5 / Bithumb U5 동일 값).
+MAX_PENDING_WRITES = 20         # task 폭증 안전망 (Redis 장애 시)
+REDIS_CLOSE_TIMEOUT_SEC = 1.0   # close() drain timeout — 후 강제 cancel
+
+
+class GopaxRedisWriter:
+    """Gopax USDT/KRW Redis latest writer — tick-level, fire-and-forget (G5).
+
+    Coinone `CoinoneRedisWriter` / Bithumb `BithumbRedisWriter` 1:1 mirror.
+    source는 tick["source"]에서 "gopax"로 자동 — class-level source 인자 없음.
+
+    G5 핵심 (Bithumb U5 mirror):
+        - 매 valid tick → `set_latest_usdt_rate_from_sync_job` 호출 (debounce 없음)
+        - schedule()은 background task 생성 후 즉시 반환 (recv loop 격리)
+        - asyncio.to_thread로 sync helper 호출 (event loop non-blocking)
+        - MAX_PENDING_WRITES 한도로 Redis 장애 시 task 폭증 차단
+        - close() drain-first, timeout 후 cancel (마지막 tick 보존)
+        - Redis write 성공 시에만 tether topic trigger (lock 밖에서 호출)
+        - reason은 기존 TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS 재사용
+
+    G5 saturation counter (Codex 권고 — 신규 writer라 처음부터 read-only counter 포함):
+        - _saturation_count: MAX_PENDING_WRITES skip 발생 횟수
+        - saturation skip branch에서만 +1 (helper false/exception은 미증가)
+        - summary log emit은 PR 2e에서 추가 예정 (Coinone/Bithumb 패턴 분리)
+
+    Failure isolation:
+        - sync helper 예외/False → log only, task가 _tasks에서 제거됨 (callback)
+        - tether topic trigger 예외 → log only, writer 동작/WS session 영향 X
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        # write order 직렬화 — Bithumb U5 patterns: 병렬 to_thread + connection pool
+        # 조합에서 old tick이 new tick을 덮는 race 차단.
+        self._write_lock: asyncio.Lock = asyncio.Lock()
+        # G5 saturation counter (Codex 권고).
+        self._saturation_count: int = 0
+
+    @property
+    def saturation_count(self) -> int:
+        """G5 — Redis write queue saturation skip 누적 횟수 (read-only).
+
+        의미: MAX_PENDING_WRITES skip 발생 횟수. write 성공/실패 무관 —
+        helper false/exception은 saturation으로 세지 않음 (Codex 대칭 검증).
+        """
+        return self._saturation_count
+
+    def schedule(self, tick: dict) -> None:
+        """tick → background Redis write task. fire-and-forget.
+
+        Saturation 시 (`len(_tasks) >= MAX_PENDING_WRITES`) skip + warning + counter ++.
+        Redis 장애로 task가 누적되는 시나리오 차단.
+        """
+        if len(self._tasks) >= MAX_PENDING_WRITES:
+            self._saturation_count += 1
+            logger.warning(
+                "[usdt_ws.gopax] Redis write queue saturated (%d in-flight) — skip tick",
+                len(self._tasks),
+            )
+            return
+        task = asyncio.create_task(self._write_async(tick))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _write_async(self, tick: dict) -> None:
+        """sync Redis helper를 to_thread로 호출. 실패는 격리.
+
+        `_write_lock`으로 직렬화 — 동시 to_thread + connection pool 조합에서
+        발생할 수 있는 SET 순서 역전 차단. Redis write 성공 시 lock 밖에서 tether
+        topic trigger 호출. trigger 예외는 writer/WS session에 전파하지 않음.
+        """
+        success = False
+        source = tick["source"]
+        asset = tick["asset"]
+        async with self._write_lock:
+            ts_iso = datetime.fromtimestamp(tick["timestamp_ms"] / 1000, tz=_KST).isoformat()
+            try:
+                success = await asyncio.to_thread(
+                    latest_rates_cache.set_latest_usdt_rate_from_sync_job,
+                    source=source,
+                    asset=asset,
+                    rate=tick["rate"],
+                    timestamp=ts_iso,
+                )
+                if not success:
+                    logger.warning(
+                        "[usdt_ws.gopax] Redis write returned False "
+                        "(helper 내부 log 참조, WS session 유지)"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.gopax] Redis write task crashed (격리, WS session 유지)"
+                )
+                success = False
+
+        # lock 밖에서 trigger — Redis write 성공 시에만.
+        # trigger 호출 자체의 예외는 writer/WS에 전파 X (책임 분리).
+        if success:
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[usdt_ws.gopax] tether topic trigger 호출 실패 (격리, WS session 유지)"
+                )
+
+    async def close(self, timeout: float = REDIS_CLOSE_TIMEOUT_SEC) -> None:
+        """pending writes drain — session/shutdown 시 마지막 tick latest 보존.
+
+        timeout (default 1s) 안에 drain 안 되면 강제 cancel. Redis hung 시 무한
+        대기 방지. finally에서 `_tasks.clear()` 보장 (A13 lifecycle invariant —
+        __init__ 1회 생성, reconnect 사이 재사용).
+        """
+        if not self._tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            for task in self._tasks:
+                if not task.done():
+                    task.cancel()
+        finally:
+            self._tasks.clear()
+
 
 class GopaxWsClient:
-    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G4.
+    """Gopax USDT/KRW WebSocket client — Phase B.6 Stage G5.
 
-    G1~G3 누적 + G4 UsdtLivenessMonitor + reconnect loop + 2-signal status.
-    Coinone/Korbit 패턴 mirror (2-dim status, last_activity_at 기반 stale 판정).
-    G5-G7 attribute (writers / fallback / alert)는 여전히 본 stage 제외.
+    G1~G4 누적 + G5 GopaxRedisWriter (tick-level Redis fanout + tether topic
+    trigger + saturation counter). G6-G7 attribute (DB writer / fallback / alert)
+    + PR 2e telemetry summary log은 여전히 본 stage 제외.
 
-    ⚠️ Production activation 제약 (G4 단계도 유지 — Codex 강조):
-        G4 land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G4 단독은 reconnect/
-        liveness만 land되고 Redis/DB/Telemetry 부재라 silent ingestion 상태
-        (관찰 불가). production activation은 **최소 G5 Redis writer + PR 2e
-        telemetry 이후 검토**. G4는 **local/staging smoke 가능 단계**.
+    ⚠️ Production activation 제약 (G5 단계도 유지 — Codex 강조):
+        G5 land 후에도 USDT_WS_GOPAX_ENABLED=true 토글 금지. G5는 Redis fanout이
+        추가됐지만 PR 2e telemetry (summary log + counter emit)가 없어 관찰 인프라
+        불완전. production activation은 **PR 2e telemetry land 후 검토**.
+        G5는 **local/staging smoke 가능 단계**.
         자세한 내용은 module docstring 참조.
     """
 
@@ -132,6 +293,9 @@ class GopaxWsClient:
             "ticker_warning": 0,
             "ticker_degraded": 0,
         }
+        # G5 — Redis writer (tick-level, fire-and-forget). A13 lifecycle invariant:
+        # __init__에서 1회 생성, reconnect 사이 재사용 (재할당 없음). Bithumb U5 mirror.
+        self._redis_writer: GopaxRedisWriter = GopaxRedisWriter()
 
     @staticmethod
     def _build_subscribe_payload() -> dict:
@@ -391,10 +555,13 @@ class GopaxWsClient:
                — degraded는 status 갱신만, fallback hook은 G6b 영역 (Codex 정정)
             6. Primus ping → pong send + dual-write heartbeat → continue
                (send 실패 시 RuntimeError raise → start() except 경로로 attempt++ + backoff)
-            7. 그 외 frame → parse + handle + `_liveness.observe_tick(now)`
+            7. 그 외 frame → parse + handle + `_liveness.observe_tick(now)` + G5
+               Redis fanout (valid tick일 때만 `_redis_writer.schedule(tick)`)
             8. ConnectionClosed → raise (return X) → start() except 경로로 attempt++ + backoff
                (return 시 start() else: continue로 tight loop hang)
-            9. fanout (Redis/DB/Alert) 없음 — G5-G7 영역
+            9. finally: `_redis_writer.close()` (Bithumb/Coinone 패턴 — session task
+               drain + _tasks.clear, 다음 session에서 빈 _tasks로 새 schedule)
+            10. fanout (DB/Alert) 없음 — G6-G7 영역. PR 2e summary log emit 별도.
 
         ⚠️ G4 단독 flag=true는 production 활성화 금지 (Codex 강조):
             reconnect/liveness까지 land됐지만 Redis/DB/Telemetry 부재라 silent
@@ -474,10 +641,21 @@ class GopaxWsClient:
                             )
                         continue
 
-                    # 그 외 frame → parse + handle. fanout은 G5+ 영역.
-                    self._handle_message(raw)
+                    # 그 외 frame → parse + handle + G5 Redis fanout.
+                    tick = self._handle_message(raw)
+                    if tick is not None:
+                        # G5: valid tick → Redis fanout (Bithumb U5 mirror).
+                        # invalid/Primus/control frame은 tick=None이라 schedule 호출 0.
+                        self._redis_writer.schedule(tick)
             finally:
                 self._ws = None
+                # G5: Redis writer drain + close (Bithumb/Coinone 패턴 mirror).
+                # session finally에서 close: 그 session task drain + _tasks.clear,
+                # 다음 session에서 빈 _tasks로 새 schedule. close 자체 예외는 격리.
+                try:
+                    await self._redis_writer.close()
+                except Exception:
+                    logger.exception("[usdt_ws.gopax] redis_writer.close() 실패")
 
     async def start(self) -> None:
         """G4 reconnect loop — session crash 시 backoff 후 재시도.
