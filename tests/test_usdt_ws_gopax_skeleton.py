@@ -16,8 +16,9 @@ G1 acceptance (테스트 핵심):
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import config, scheduler
 from app.crawlers.usdt_ws.gopax import (
@@ -150,30 +151,48 @@ class TestShutdownUsdtWsGopaxClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
-    """G1 minimal client — Codex 최종 권고대로 _stop_event / _running 만 보유."""
+    """G2 client — G1 lifecycle + _ws/_first_tick_logged 보유.
 
-    async def test_init_minimal_state(self):
-        """__init__ 직후: _stop_event 미설정 + _running=False. G4 attribute 부재."""
+    Codex 최종 권고: G4 attribute (_connection_status / _ticker_freshness_status /
+    _reconnect_attempt_count / _liveness)는 본 stage 제외.
+    """
+
+    async def test_init_state_g2_scope(self):
+        """__init__ 직후: G1 + G2 attribute만 보유, G4 attribute 부재."""
         client = GopaxWsClient()
+        # G1 state
         self.assertFalse(client._running)
         self.assertFalse(client._stop_event.is_set())
-        # Codex 최종 권고 — G4 선반영 attribute 부재 검증
+        # G2 state — 신규 attribute (Codex 권고 — G2 단계에서만 필요)
+        self.assertIsNone(client._ws)
+        self.assertFalse(client._first_tick_logged)
+        # G4 attribute 부재 검증 (선반영 회피)
         self.assertFalse(hasattr(client, "_connection_status"))
         self.assertFalse(hasattr(client, "_ticker_freshness_status"))
         self.assertFalse(hasattr(client, "_reconnect_attempt_count"))
-        self.assertFalse(hasattr(client, "_ws"))
+        self.assertFalse(hasattr(client, "_liveness"))
+        self.assertFalse(hasattr(client, "_status_transition_count"))
 
     async def test_start_stop_lifecycle(self):
-        """start() → _running=True → stop() → _stop_event.wait() 풀림 → _running=False."""
+        """start() → _running=True → stop() → _running=False.
+
+        G2 start()는 _run_one_session 1회 호출 후 stop_event 대기. 본 test는
+        _run_one_session을 mock으로 즉시 return 처리.
+        """
         client = GopaxWsClient()
 
         async def stop_after_start():
-            # start()의 stop_event.wait() 진입 보장
             await asyncio.sleep(0.01)
             self.assertTrue(client._running)
             await client.stop()
 
-        await asyncio.gather(client.start(), stop_after_start())
+        # _run_one_session은 mock으로 즉시 return (network 호출 회피)
+        async def fake_run_session():
+            return
+
+        with patch.object(client, "_run_one_session", side_effect=fake_run_session):
+            await asyncio.gather(client.start(), stop_after_start())
+
         self.assertFalse(client._running)
         self.assertTrue(client._stop_event.is_set())
 
@@ -181,15 +200,21 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         """start() 호출 중 중복 start → 즉시 return (no duplicate lifecycle entry)."""
         client = GopaxWsClient()
 
-        start_task = asyncio.create_task(client.start())
-        await asyncio.sleep(0.01)  # 첫 start lifecycle 진입 대기
+        async def fake_run_session():
+            # session은 stop_event까지 대기
+            await client._stop_event.wait()
 
-        # 중복 start — 즉시 return
-        await client.start()
-        self.assertTrue(client._running)  # 첫 start 그대로 유지
+        with patch.object(client, "_run_one_session", side_effect=fake_run_session):
+            start_task = asyncio.create_task(client.start())
+            await asyncio.sleep(0.01)
 
-        await client.stop()
-        await start_task
+            # 중복 start — 즉시 return
+            await client.start()
+            self.assertTrue(client._running)
+
+            await client.stop()
+            await start_task
+
         self.assertFalse(client._running)
 
 
@@ -199,33 +224,387 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
 
 
 class TestScopeGuard(unittest.TestCase):
-    """G1 module-level scope guard — 미구현 stage symbol 부재 검증."""
+    """G2 module-level scope guard — G3~G7 미구현 symbol 부재 검증."""
 
     def test_gopax_ws_url_exported(self):
         """G1: GOPAX_WS_URL constant module-level 노출."""
         self.assertEqual(GOPAX_WS_URL, "wss://wsapi.gopax.co.kr")
 
-    def test_no_g2_g7_symbols_at_module_level(self):
-        """G1: G2~G7에서 추가될 symbol module-level 부재 검증.
+    def test_no_g3_g7_symbols_at_module_level(self):
+        """G2: G3~G7에서 추가될 symbol module-level 부재 검증.
 
-        G2 (Subscribe/Parse), G3 (Primus), G4 (Liveness), G5-G7 (writers/fallback/alert).
-        본 G1 단계에서는 부재해야 함 (선제 작성 회피).
+        G3 (Primus pong handler), G4 (Liveness/reconnect), G5 (Redis writer),
+        G6a (DB writer), G6b (REST helper + fallback controller), G7 (alert).
+        본 G2 단계에서는 모두 부재해야 함 (선제 작성 회피).
         """
         from app.crawlers.usdt_ws import gopax as gopax_module
 
         forbidden_attrs = [
-            "GOPAX_SUBSCRIBE_PAYLOAD",   # G2
-            "parse_gopax_ticker",        # G2
-            "GopaxRedisWriter",          # G5
-            "GopaxDbWriter",             # G6a
-            "GopaxRestFallbackController",  # G6b
-            "fetch_gopax_usdt_tick",     # G6b
+            # G3 — Primus pong handler / heartbeat
+            "send_primus_pong",
+            "primus_ping_replacement",
+            # G4 — Liveness + reconnect
+            "RECONNECT_BACKOFF_SEQ",
+            "STALE_AFTER_SEC",
+            # G5 — Redis writer
+            "GopaxRedisWriter",
+            "MAX_PENDING_WRITES",
+            # G6a — DB writer
+            "GopaxDbWriter",
+            "DB_WRITE_WINDOW_SEC",
+            # G6b — REST helper + fallback
+            "GopaxRestFallbackController",
+            "fetch_gopax_usdt_tick",
+            "FALLBACK_COOLDOWN_SEC",
         ]
         for attr in forbidden_attrs:
             self.assertFalse(
                 hasattr(gopax_module, attr),
-                f"G1 scope 위반: {attr} symbol이 module-level에 존재함 — G2~ stage에서 추가 예정",
+                f"G2 scope 위반: {attr} symbol이 module-level에 존재함 — G3~G7 stage에서 추가 예정",
             )
+
+
+# ===========================================================================
+# G2 Subscribe + Parse + USDT-KRW 필터링
+# ===========================================================================
+
+
+class TestBuildSubscribePayload(unittest.TestCase):
+    """G2: SubscribeToTickers payload — pair 지정 불가, 전체 ticker 구독."""
+
+    def test_subscribe_payload_shape(self):
+        """guide §7 spec: {"n": "SubscribeToTickers", "o": {}}"""
+        payload = GopaxWsClient._build_subscribe_payload()
+        self.assertEqual(payload, {"n": "SubscribeToTickers", "o": {}})
+
+
+class TestParseInitialMessage(unittest.TestCase):
+    """G2: SubscribeToTickers initial response — array에서 USDT-KRW 매칭."""
+
+    def test_parse_initial_with_usdt_krw(self):
+        """initial array → USDT-KRW 추출 → normalized tick."""
+        client = GopaxWsClient()
+        message = {
+            "n": "SubscribeToTickers",
+            "o": {
+                "data": [
+                    {"tradingPairName": "BTC-KRW", "last": 100000000, "lastTraded": 1777112971900},
+                    {"tradingPairName": "USDT-KRW", "last": 1490.5, "lastTraded": 1777112971993},
+                    {"tradingPairName": "ETH-KRW", "last": 5000000, "lastTraded": 1777112971800},
+                ]
+            },
+        }
+        tick = client._parse_ticker_message(json.dumps(message))
+        self.assertEqual(tick, {
+            "source": "gopax",
+            "asset": "usdt-krw",
+            "rate": 1490.5,
+            "timestamp_ms": 1777112971993,
+        })
+
+    def test_parse_initial_without_usdt_krw(self):
+        """initial array에 USDT-KRW 없음 → None."""
+        client = GopaxWsClient()
+        message = {
+            "n": "SubscribeToTickers",
+            "o": {
+                "data": [
+                    {"tradingPairName": "BTC-KRW", "last": 100000000, "lastTraded": 1777112971900},
+                ]
+            },
+        }
+        self.assertIsNone(client._parse_ticker_message(json.dumps(message)))
+
+    def test_parse_initial_empty_data(self):
+        """initial data 부재 → None."""
+        client = GopaxWsClient()
+        message = {"n": "SubscribeToTickers", "o": {}}
+        self.assertIsNone(client._parse_ticker_message(json.dumps(message)))
+
+
+class TestParseTickerEventMessage(unittest.TestCase):
+    """G2: TickerEvent delta — dict에서 USDT-KRW key 직접 추출."""
+
+    def test_parse_ticker_event_with_usdt_krw(self):
+        """TickerEvent o["USDT-KRW"] → normalized tick."""
+        client = GopaxWsClient()
+        message = {
+            "i": -1,
+            "n": "TickerEvent",
+            "o": {
+                "USDT-KRW": {
+                    "tradingPairName": "USDT-KRW",
+                    "last": 1491.2,
+                    "lastTraded": 1777112972500,
+                }
+            },
+        }
+        tick = client._parse_ticker_message(json.dumps(message))
+        self.assertEqual(tick, {
+            "source": "gopax",
+            "asset": "usdt-krw",
+            "rate": 1491.2,
+            "timestamp_ms": 1777112972500,
+        })
+
+    def test_parse_ticker_event_without_usdt_krw(self):
+        """TickerEvent o에 USDT-KRW key 부재 → None."""
+        client = GopaxWsClient()
+        message = {
+            "i": -1,
+            "n": "TickerEvent",
+            "o": {"BTC-KRW": {"last": 100000000, "lastTraded": 1777112972500}},
+        }
+        self.assertIsNone(client._parse_ticker_message(json.dumps(message)))
+
+
+class TestParsePrimusSkip(unittest.TestCase):
+    """G2: Primus ping skip — Codex 정정 반영 3가지 form 모두 None.
+
+    G3에서 pong 응답 추가 예정. G2는 skip만.
+    """
+
+    def test_primus_ping_json_string_form(self):
+        """JSON string form: '"primus::ping::..."' (with outer quotes) → None."""
+        client = GopaxWsClient()
+        raw = '"primus::ping::1777112968768"'
+        self.assertIsNone(client._parse_ticker_message(raw))
+
+    def test_primus_ping_plain_text_form(self):
+        """Plain text form: 'primus::ping::...' (no quotes) → None."""
+        client = GopaxWsClient()
+        raw = "primus::ping::1777112968768"
+        self.assertIsNone(client._parse_ticker_message(raw))
+
+    def test_primus_ping_json_decoded_str(self):
+        """JSON-decoded str: json.loads('"primus::ping::..."') = "primus::..." → None.
+
+        실제로는 raw text level (step 2) 또는 JSON-decoded str (step 4) 둘 중
+        하나에서 매칭됨. 이 test는 raw가 이미 decoded str로 들어온 case 가정 —
+        그러나 _parse_ticker_message는 string으로 받아 step 2에서 매칭 (실제 동작).
+        의도: 어떤 경로로 들어와도 primus::는 None이라는 것을 잠근다.
+        """
+        client = GopaxWsClient()
+        # 실제 ws.recv()는 raw string으로 옴 — 이미 step 2에서 잡힘.
+        # raw가 step 4 진입 시나리오는 거의 없으나 의미 검증 목적.
+        raw_with_leading_whitespace = '  "primus::ping::1234"  '
+        self.assertIsNone(client._parse_ticker_message(raw_with_leading_whitespace))
+
+
+class TestParseInvalidFrames(unittest.TestCase):
+    """G2: 잘못된 frame 격리 — bytes decode 실패 / JSON 파싱 실패 / invalid types / 잘못된 값."""
+
+    def test_bytes_decode_failure(self):
+        """invalid UTF-8 bytes → None."""
+        client = GopaxWsClient()
+        self.assertIsNone(client._parse_ticker_message(b"\xff\xfe invalid"))
+
+    def test_json_decode_failure(self):
+        """JSON 파싱 실패 → None (Primus skip 통과 후 JSONDecodeError 캡처)."""
+        client = GopaxWsClient()
+        self.assertIsNone(client._parse_ticker_message("this is not json"))
+
+    def test_unknown_frame_type(self):
+        """알 수 없는 `n` → None."""
+        client = GopaxWsClient()
+        message = {"n": "UnknownFrameType", "o": {}}
+        self.assertIsNone(client._parse_ticker_message(json.dumps(message)))
+
+    def test_last_zero_or_negative(self):
+        """last <= 0 → None (timestamp valid이어도 rate invalid)."""
+        client = GopaxWsClient()
+        message = {
+            "n": "TickerEvent",
+            "o": {
+                "USDT-KRW": {"last": 0, "lastTraded": 1777112972500},
+            },
+        }
+        self.assertIsNone(client._parse_ticker_message(json.dumps(message)))
+
+    def test_last_traded_zero(self):
+        """lastTraded == 0 → None (timestamp 0은 invalid)."""
+        client = GopaxWsClient()
+        message = {
+            "n": "TickerEvent",
+            "o": {"USDT-KRW": {"last": 1490.5, "lastTraded": 0}},
+        }
+        self.assertIsNone(client._parse_ticker_message(json.dumps(message)))
+
+
+class TestHandleMessage(unittest.IsolatedAsyncioTestCase):
+    """G2: _handle_message — first tick INFO 1회 + 이후 DEBUG (Bithumb 패턴 mirror)."""
+
+    async def test_first_tick_logged_once_at_info(self):
+        """valid tick 첫 수신 시 INFO 1회 emit, 이후 DEBUG."""
+        client = GopaxWsClient()
+        self.assertFalse(client._first_tick_logged)
+
+        message = {
+            "n": "TickerEvent",
+            "o": {"USDT-KRW": {"last": 1490.5, "lastTraded": 1777112972500}},
+        }
+
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="INFO") as cm:
+            tick = client._handle_message(json.dumps(message))
+        self.assertIsNotNone(tick)
+        self.assertTrue(client._first_tick_logged)
+        self.assertTrue(any("first tick" in m for m in cm.output))
+
+        # 2번째 tick — DEBUG로 격하 (assertNoLogs at INFO+ 검증 어려워서 first_tick_logged 유지로 잠금)
+        with self.assertLogs("exchange_rate.crawler.usdt_ws.gopax", level="DEBUG") as cm:
+            tick2 = client._handle_message(json.dumps(message))
+        self.assertIsNotNone(tick2)
+        # first tick INFO는 1회만 (이후는 DEBUG)
+        info_logs = [m for m in cm.output if "first tick" in m]
+        self.assertEqual(len(info_logs), 0, "first tick INFO가 2회 emit됨 (1회만 허용)")
+
+    async def test_invalid_message_returns_none_no_log(self):
+        """invalid raw → None + first_tick_logged 변경 없음."""
+        client = GopaxWsClient()
+        self.assertIsNone(client._handle_message("not json"))
+        self.assertFalse(client._first_tick_logged)
+
+
+class TestRunOneSession(unittest.IsolatedAsyncioTestCase):
+    """G2: _run_one_session — connect + subscribe + recv loop + parse only.
+
+    G5-G7 fanout (Redis/DB/Alert)은 본 stage 외.
+    """
+
+    async def test_connect_and_subscribe_send(self):
+        """connect → SubscribeToTickers payload send 검증."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+        # recv: 첫 호출 시 stop_event set으로 즉시 loop 빠짐
+        async def stop_then_recv():
+            client._stop_event.set()
+            return await asyncio.sleep(10)  # 도달 안 함
+        mock_ws.recv = AsyncMock(side_effect=stop_then_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # SubscribeToTickers payload send 검증
+        mock_ws.send.assert_called_once()
+        sent_arg = mock_ws.send.call_args[0][0]
+        self.assertEqual(json.loads(sent_arg), {"n": "SubscribeToTickers", "o": {}})
+
+    async def test_stop_event_breaks_recv_loop(self):
+        """stop_event set 시 recv loop 즉시 break + ws cleanup."""
+        client = GopaxWsClient()
+
+        mock_ws = AsyncMock()
+        mock_ws.send = AsyncMock()
+
+        # recv: 첫 호출 시 stop_event set + Primus skip frame return.
+        # → handle_message None → loop next iteration → stop_event check → break.
+        recv_count = {"n": 0}
+        async def fake_recv():
+            recv_count["n"] += 1
+            if recv_count["n"] == 1:
+                client._stop_event.set()
+                return "primus::ping::skip"  # skip-only frame
+            await asyncio.sleep(10)  # 도달 안 함
+
+        mock_ws.recv = AsyncMock(side_effect=fake_recv)
+
+        mock_connect_ctx = AsyncMock()
+        mock_connect_ctx.__aenter__ = AsyncMock(return_value=mock_ws)
+        mock_connect_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "app.crawlers.usdt_ws.gopax.websockets.connect",
+            return_value=mock_connect_ctx,
+        ):
+            await asyncio.wait_for(client._run_one_session(), timeout=2.0)
+
+        # ws cleanup 검증
+        self.assertIsNone(client._ws)
+
+
+class TestG2ActivationConstraint(unittest.TestCase):
+    """G2 production activation 금지 — Codex 강조 (G3/G4 land 전 flag=true 금지).
+
+    docstring에 명시되어 있어야 미래 maintainer가 인지 가능.
+    Codex 정정 반영: silent termination이 아니라 silent idle/stuck — 이 의미도 잠금.
+    """
+
+    def test_module_docstring_warns_activation_constraint(self):
+        """gopax.py module docstring에 'Production activation 제약' + idle 의미 명시."""
+        import app.crawlers.usdt_ws.gopax as gopax_module
+        doc = gopax_module.__doc__ or ""
+        self.assertIn("Production activation 제약", doc)
+        self.assertIn("G3", doc)
+        self.assertIn("G4", doc)
+        # 핵심 제약 — 30s 후 disconnect
+        self.assertIn("30", doc)
+        # Codex 정정 — silent termination이 아니라 silent idle/stuck 명시
+        self.assertIn("idle", doc)
+        # "silent termination이 아니라"를 분명히 적었는지 검증 (정확한 의미 잠금)
+        self.assertIn("silent termination이 아니", doc)
+
+    def test_class_docstring_warns_activation_constraint(self):
+        """GopaxWsClient class docstring에도 activation 제약 명시."""
+        doc = GopaxWsClient.__doc__ or ""
+        self.assertIn("Production activation 제약", doc)
+        self.assertIn("G3", doc)
+
+    def test_run_one_session_docstring_warns_activation_constraint(self):
+        """_run_one_session docstring에 G2 단독 activation 금지 + idle 명시."""
+        doc = GopaxWsClient._run_one_session.__doc__ or ""
+        self.assertIn("G2 단독 flag=true", doc)
+        # Codex 정정 — silent idle/stuck 명시
+        self.assertIn("idle", doc)
+
+    def test_start_docstring_describes_idle_after_session_end(self):
+        """start() docstring에 session 종료 후 idle 상태 (running=True 유지) 명시."""
+        doc = GopaxWsClient.start.__doc__ or ""
+        self.assertIn("idle", doc)
+        # silent termination이 아니라 silent idle/stuck
+        self.assertIn("silent termination이 아니", doc)
+
+
+class TestG2StartIdleAfterSessionEnd(unittest.IsolatedAsyncioTestCase):
+    """G2 — _run_one_session 종료 후 start() task는 idle 상태로 남는다 (Codex 권고).
+
+    silent termination이 아니라 silent idle/stuck이라는 사실을 동작으로 잠근다.
+    """
+
+    async def test_session_end_keeps_task_idle_with_running_true(self):
+        """_run_one_session 즉시 return → start() task는 done 아님, _running=True 유지.
+
+        stop() 호출 후에만 task done + _running=False.
+        """
+        client = GopaxWsClient()
+
+        # _run_one_session 즉시 return (network 없이 session 즉시 종료)
+        async def fake_run_session():
+            return
+
+        with patch.object(client, "_run_one_session", side_effect=fake_run_session):
+            start_task = asyncio.create_task(client.start())
+            # _run_one_session 종료 + stop_event.wait() 진입 보장
+            await asyncio.sleep(0.05)
+
+            # ⚠️ 핵심 검증: silent idle 상태
+            self.assertFalse(start_task.done(), "session 종료 후 task가 done됨 (idle 유지 expected)")
+            self.assertTrue(client._running, "session 종료 후 _running=False (idle 상태에서 True 유지 expected)")
+            self.assertFalse(client._stop_event.is_set())
+
+            # stop() 호출 → idle wait 풀림 → task done
+            await client.stop()
+            await asyncio.wait_for(start_task, timeout=1.0)
+            self.assertTrue(start_task.done())
+            self.assertFalse(client._running)
 
 
 if __name__ == "__main__":
