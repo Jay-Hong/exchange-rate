@@ -170,11 +170,14 @@ GOPAX_TARGET_PAIR = "USDT-KRW"
 # server-initiated heartbeat이라 last_activity_at (tick OR pong 수신) 기준.
 STALE_AFTER_SEC = 360.0
 
-# G4 — Ticker freshness threshold (Coinone 기준, provisional).
-# Gopax delta event 활성도 비례 변동 → Coinone과 유사. Korbit (30/120)보다 여유.
-# G4 land 후 staging smoke 측정으로 확정 예정.
-TICKER_FRESHNESS_WARNING_SEC = 60.0
-TICKER_FRESHNESS_DEGRADED_SEC = 300.0
+# G4 — Ticker freshness threshold (post-activation 실측 기반 Gopax-specific tuning).
+# Gopax는 5 source 중 거래량 최저 → 정상 sparse traffic에서도 tick_age ~180s,
+# max_frame_gap ~230s 발생. 60s warning은 false-positive 빈번 (매 cycle 도달).
+# WARNING=300s로 관측치 대비 자연 마진 + DEGRADED=600s (10분 무tick 수준)에서만
+# fallback probe 트리거 — warning/degraded 의미 보존. Coinone(60/300),
+# Korbit(30/120)과 별도 tuning.
+TICKER_FRESHNESS_WARNING_SEC = 300.0
+TICKER_FRESHNESS_DEGRADED_SEC = 600.0
 
 # G4 — Reconnect backoff sequence (Bithumb/Coinone/Korbit 동일).
 # Gopax rate limit 20 req/sec/IP에 비해 매우 여유 (1초 minimum 안전).
