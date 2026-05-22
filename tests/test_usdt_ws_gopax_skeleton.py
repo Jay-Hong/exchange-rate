@@ -163,8 +163,8 @@ class TestShutdownUsdtWsGopaxClient(unittest.IsolatedAsyncioTestCase):
 class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
     """G7 client — G1~G6b attribute + G7 UsdtAlertEvaluator instance 보유.
 
-    Codex 권고 (G4 dual-write 유지): _last_heartbeat_at은 G4에서도 유지 (cleanup은
-    별도 PR). G7까지 fanout 누적: Redis + DB + Fallback + Alert.
+    heartbeat 추적은 _liveness.last_heartbeat_at로 일원화.
+    G7까지 fanout 누적: Redis + DB + Fallback + Alert.
     """
 
     async def test_init_state_g7_scope(self):
@@ -178,8 +178,6 @@ class TestGopaxWsClientSkeleton(unittest.IsolatedAsyncioTestCase):
         # G2 state
         self.assertIsNone(client._ws)
         self.assertFalse(client._first_tick_logged)
-        # G3 state
-        self.assertIsNone(client._last_heartbeat_at)
         # G4 state
         self.assertEqual(client._connection_status, "normal")
         self.assertEqual(client._ticker_freshness_status, "normal")
@@ -645,16 +643,15 @@ class TestHandlePrimusPing(unittest.IsolatedAsyncioTestCase):
         mock_ws = AsyncMock()
         mock_ws.send = AsyncMock()
 
-        before = client._last_heartbeat_at
-        self.assertIsNone(before)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
 
         result = await client._handle_primus_ping(mock_ws, '"primus::ping::1234"')
 
         self.assertTrue(result)
         mock_ws.send.assert_called_once_with('"primus::pong::1234"')
-        # Codex 검토 포인트 #3: heartbeat은 send 성공 시점에만 갱신
-        self.assertIsNotNone(client._last_heartbeat_at)
-        self.assertIsInstance(client._last_heartbeat_at, float)
+        # heartbeat은 send 성공 시점에만 갱신
+        self.assertIsNotNone(client._liveness.last_heartbeat_at)
+        self.assertIsInstance(client._liveness.last_heartbeat_at, float)
 
     async def test_plain_text_form_pong_sent(self):
         """Plain text ping → plain text pong 송신, True return, heartbeat 갱신."""
@@ -666,7 +663,7 @@ class TestHandlePrimusPing(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
         mock_ws.send.assert_called_once_with("primus::pong::5678")
-        self.assertIsNotNone(client._last_heartbeat_at)
+        self.assertIsNotNone(client._liveness.last_heartbeat_at)
 
     async def test_bytes_form_pong_sent(self):
         """bytes ping → str decode + pong 송신, True return."""
@@ -678,13 +675,13 @@ class TestHandlePrimusPing(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
         mock_ws.send.assert_called_once_with("primus::pong::9999")
-        self.assertIsNotNone(client._last_heartbeat_at)
+        self.assertIsNotNone(client._liveness.last_heartbeat_at)
 
 
 class TestHandlePrimusPingFailureSessionEnd(unittest.IsolatedAsyncioTestCase):
-    """G3 (Codex 정정): pong send 실패 → False return + heartbeat 미갱신.
+    """G3: pong send 실패 → False return + heartbeat 미갱신.
 
-    _run_one_session에서 False return 시 session 종료해야 함 (G4 reconnect 부재).
+    _run_one_session에서 False return 시 session 종료/reconnect 처리.
     """
 
     async def test_send_failure_returns_false_and_no_heartbeat(self):
@@ -696,8 +693,8 @@ class TestHandlePrimusPingFailureSessionEnd(unittest.IsolatedAsyncioTestCase):
         result = await client._handle_primus_ping(mock_ws, "primus::ping::1234")
 
         self.assertFalse(result)
-        # Codex 검토 포인트 #3: send 실패 시 heartbeat 미갱신
-        self.assertIsNone(client._last_heartbeat_at)
+        # send 실패 시 heartbeat 미갱신
+        self.assertIsNone(client._liveness.last_heartbeat_at)
 
 
 class TestRunOneSessionPrimusFlow(unittest.IsolatedAsyncioTestCase):
@@ -769,8 +766,8 @@ class TestRunOneSessionPrimusFlow(unittest.IsolatedAsyncioTestCase):
         ), self.assertRaises(RuntimeError):
             await asyncio.wait_for(client._run_one_session(), timeout=2.0)
 
-        # heartbeat 미갱신 (send 실패라 dual-write 안 됨)
-        self.assertIsNone(client._last_heartbeat_at)
+        # heartbeat 미갱신 (send 실패)
+        self.assertIsNone(client._liveness.last_heartbeat_at)
 
 
 # Note: TestG3ActivationConstraint (G3 시점 docstring 검증) 삭제됨.
@@ -962,29 +959,6 @@ class TestReconnectLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client._status_transition_count["connection_reconnecting"], 1
         )
-
-
-class TestPrimusPingDualWrite(unittest.IsolatedAsyncioTestCase):
-    """G4 dual-write (Codex 정정): _handle_primus_ping → _last_heartbeat_at + _liveness.observe_heartbeat 둘 다 호출."""
-
-    async def test_dual_write_on_pong_success(self):
-        """pong send 성공 시 _last_heartbeat_at + _liveness.last_heartbeat_at 모두 갱신."""
-        client = GopaxWsClient()
-        mock_ws = AsyncMock()
-        mock_ws.send = AsyncMock()
-
-        # 사전: 둘 다 None
-        self.assertIsNone(client._last_heartbeat_at)
-        self.assertIsNone(client._liveness.last_heartbeat_at)
-
-        result = await client._handle_primus_ping(mock_ws, "primus::ping::1234")
-
-        self.assertTrue(result)
-        # G4 dual-write: 둘 다 갱신
-        self.assertIsNotNone(client._last_heartbeat_at)
-        self.assertIsNotNone(client._liveness.last_heartbeat_at)
-        # 두 값이 동일한 timestamp인지 (같은 now 시점)
-        self.assertEqual(client._last_heartbeat_at, client._liveness.last_heartbeat_at)
 
 
 class TestHandleMessageUpdatesLiveness(unittest.IsolatedAsyncioTestCase):

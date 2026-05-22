@@ -21,12 +21,10 @@ G4 주요 변경 (G4 1ea4c74 → dd3e077 누적):
     - `_status_transition_count` 6 keys (connection 3 + ticker 3) — telemetry.
     - reconnect loop (`start()` Bithumb 패턴 mirror): ConnectionClosed/Exception
       → backoff + 재시도. stop_event 즉시 반응.
-    - `_handle_primus_ping` dual-write (Codex 정정): `_last_heartbeat_at` G3
-      backward compat 유지 + `_liveness.observe_heartbeat(now)` 신규 — cleanup은
-      별도 PR (G5/G6a 지났으니 dedicated cleanup PR로 처리 권장).
+    - `_handle_primus_ping` → `_liveness.observe_heartbeat(now)` (is_stale 판정 입력).
     - `_handle_message` valid tick 시 `_liveness.observe_tick(now)` 호출.
-    - Constants: STALE_AFTER_SEC=360 / TICKER_FRESHNESS_WARNING=60 / DEGRADED=300
-      (Coinone 기준 provisional) / RECONNECT_BACKOFF_SEQ (1,2,4,8,16,30) tail 30.
+    - Constants: STALE_AFTER_SEC=360 / TICKER_FRESHNESS_WARNING=300 / DEGRADED=600
+      (Gopax-specific post-activation 실측 기반) / RECONNECT_BACKOFF_SEQ (1,2,4,8,16,30) tail 30.
 
 G5 주요 변경 (현재 stage):
     - `GopaxRedisWriter` class 신규 (Coinone C5 / Bithumb U5 1:1 mirror).
@@ -113,12 +111,12 @@ PR 2e 주요 변경 (현재 stage):
     - sentinel 정책 (Coinone/Korbit/Upbit/Bithumb 동일): last_tick_at/heartbeat_at이
       None일 경우 -1.0 numeric sentinel.
 
-PR 2e 누적 attribute (G1 + G2 + G3 + G4 + G5 + G6a + G6b + G7 + PR 2e):
+PR 2e 누적 attribute (G1 + G2 + G4 + G5 + G6a + G6b + G7 + PR 2e):
     - G1: `_stop_event` / `_running`
     - G2: `_ws` / `_first_tick_logged`
-    - G3: `_last_heartbeat_at` (dual-write 유지)
     - G4: `_liveness` / `_connection_status` / `_ticker_freshness_status` /
-      `_reconnect_attempt_count` / `_status_transition_count` (6 keys)
+      `_reconnect_attempt_count` / `_status_transition_count` (6 keys).
+      heartbeat 추적은 `_liveness.last_heartbeat_at`로 일원화.
     - G5: `_redis_writer` (GopaxRedisWriter, A13 lifecycle invariant)
     - G6a: `_db_writer` (GopaxDbWriter, 1s window debounce)
     - G6b: `_fallback_controller` (GopaxRestFallbackController, 300s cooldown,
@@ -632,12 +630,9 @@ class GopaxWsClient:
         # G2 session state — connect 결과 + first tick log throttle
         self._ws: Optional[Any] = None
         self._first_tick_logged: bool = False
-        # G3 heartbeat — Primus pong send 성공 시점 timestamp. G4 진입 후에는
-        # Codex 권고 dual-write로 유지 (UsdtLivenessMonitor.last_heartbeat_at과
-        # 병행). cleanup은 별도 PR (G5/G6a 지났으니 dedicated cleanup PR로 처리 권장).
-        self._last_heartbeat_at: Optional[float] = None
         # G4 — 2-signal status + liveness (Coinone/Korbit 패턴 mirror).
         # last_activity_at = max(tick, heartbeat)로 stale 판정 (UsdtLivenessMonitor).
+        # heartbeat 추적은 _liveness.last_heartbeat_at로 일원화.
         self._liveness: UsdtLivenessMonitor = UsdtLivenessMonitor()
         self._connection_status: str = "normal"          # normal/reconnecting/stale
         self._ticker_freshness_status: str = "normal"    # normal/warning/degraded
@@ -701,33 +696,27 @@ class GopaxWsClient:
         return text.startswith('"primus::ping::') or text.startswith("primus::ping::")
 
     async def _handle_primus_ping(self, ws, raw) -> bool:
-        """Primus ping → pong replacement + ws.send + _last_heartbeat_at 갱신.
+        """Primus ping → pong replacement + ws.send + heartbeat 갱신.
 
         guide §7 line 408-410 명세:
             - JSON string form: '"primus::ping::..."' → '"primus::pong::..."'
             - Plain text form: 'primus::ping::...' → 'primus::pong::...'
             - replace("::ping::", "::pong::")로 두 form 모두 처리 가능
 
-        Heartbeat timestamp 정책 (Codex 검토 포인트 #3):
-            send 성공 시점에만 `_last_heartbeat_at = time.time()` 갱신. send 실패
-            시 갱신 안 함 (이후 G4 liveness가 stale 판정 가능).
+        Heartbeat timestamp 정책:
+            send 성공 시점에만 `_liveness.observe_heartbeat(now)` 호출. send 실패
+            시 갱신 안 함 (is_stale 판정이 자연스럽게 동작).
 
         Returns:
             True: pong 송신 성공 (heartbeat 갱신 완료)
-            False: send 실패 — Codex 정정으로 _run_one_session()에서 session 종료
-                   (G4 reconnect 부재라 깨진 session 명시적 종료).
+            False: send 실패 — _run_one_session()에서 session 종료/reconnect 처리.
         """
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8", errors="ignore")
         pong = raw.replace("::ping::", "::pong::")
         try:
             await ws.send(pong)
-            now = time.time()
-            # G4 dual-write (Codex 정정): _last_heartbeat_at G3 backward compat 유지
-            # + _liveness.observe_heartbeat(now) 신규 (is_stale 판정 입력).
-            # cleanup은 별도 PR (G5/G6a 지났으니 dedicated cleanup PR로 처리 권장).
-            self._last_heartbeat_at = now
-            self._liveness.observe_heartbeat(now)
+            self._liveness.observe_heartbeat(time.time())
             logger.debug("[usdt_ws.gopax] primus pong sent")
             return True
         except Exception:
@@ -931,7 +920,7 @@ class GopaxWsClient:
                — degraded → fallback_controller.schedule_probe (G6b),
                  normal 복귀 → fallback_controller.reset_cooldown (G6b).
                (실제 hook은 _set_ticker_freshness_status 내부에서 처리.)
-            6. Primus ping → pong send + dual-write heartbeat → continue
+            6. Primus ping → pong send + `_liveness.observe_heartbeat(now)` → continue
                (send 실패 시 RuntimeError raise → start() except 경로로 attempt++ + backoff)
             7. 그 외 frame → parse + handle + `_liveness.observe_tick(now)` + G5
                Redis fanout + G6a DB fanout + G7 AlertObservation(kind="tick")
