@@ -570,6 +570,43 @@ signal에 의존하는 구조 → mirror cycle 격하/제거의 전제 조건이
 - legacy rates 전체 제거 PR은 별도 (Z-3 가설)
 - timing 결정은 운영 metric (legacy `/api/rates` 호출 빈도 + 신규 topic 사용률) 기반
 
+### 6.6 Bank/Investing source observation-based fanout (후속 phase 후보, 2026-05-22 추가)
+
+**컨텍스트**: PR4 Step B (main.py legacy hook 격하/제거)는 Bank/Investing이 source-level topic trigger router를 갖추지 못해 보류됨. main.py hook은 단순 fallback이 아니라 은행/Investing 변경을 fx:* + usdt:krw 양쪽 topic으로 발사하는 primary bridge 역할. 따라서 단순 trigger 추가가 아니라 수집/저장/알림/topic publish 전체 구조 재설계가 필요. 자세한 사유는 [USDT_WS_DESIGN_PLAN.md §14.7 2026-05-22 보강](USDT_WS_DESIGN_PLAN.md#147-legacy-piggyback-격하-정책) 참조.
+
+**목표**:
+
+- 크롤러 fetch 결과를 source observation으로 표현하여 Redis writer / DB writer / Alert evaluator / Topic trigger router 단계 분리 (USDT WS 패턴 또는 유사 구조 적용)
+- DB SELECT 최소화 — DB INSERT 전 중복 검사를 DB SELECT 대신 Redis 값 기반으로 ([REALTIME_ARCHITECTURE_PLAN.md §1](REALTIME_ARCHITECTURE_PLAN.md) "DB를 실시간 전송 경로에서 분리" 방향 일관)
+- fx:* topic trigger와 usdt:krw trigger를 source/asset 기준으로 라우팅
+- legacy WebSocket dual-emit은 구버전 앱 호환을 위해 유지 (§6.5 일관)
+- 안정화 후 main.py topic publish hook 제거 (PR4 Step B Option A) 재검토
+
+**topic trigger 정책 (검토 input)**:
+
+- topic trigger는 기본적으로 rate 변경 또는 topic payload에 의미 있는 state 변화(예: freshness 회복, stale 복구)가 있을 때 발화한다.
+- successful fetch 자체는 seen_at/mirrored_at 갱신으로 기록하되, 같은 rate 반복 fetch가 항상 topic publish를 유발하지는 않는다.
+- 각 옵션의 timestamp 분리 정책 (`rate_changed_at` vs `seen_at` vs `mirrored_at`)은 별도 phase에서 확정.
+
+**미래 구조 옵션** (확정 보류):
+
+- **α USDT 패턴 그대로**: 매 fetch → Redis SET + trigger. 단순. 같은 값 반복 publish 우려 (은행/Investing은 값 변화 드물어 USDT보다 동일 payload 발사 비율 ↑).
+- **β 절충 (현재 유력 후보)**: Redis는 매 fetch에서 seen_at/mirrored_at 갱신, rate/timestamp는 값 변경 시만 갱신, trigger는 위 정책에 따라 발화. observation freshness 정확 + publish 효율적.
+- **γ 보수**: Redis SET/trigger 모두 값 변경 시만, freshness는 별도 추적.
+
+**진입 조건**:
+
+- §12.8 Post-5-source 정책 표준화 결정 후 (5 source 24-72h 관찰 누적 + Upbit/Bithumb 2-signal 전환 결정 등 선결)
+- 또는 별도 우선순위 평가
+
+**설계 input**:
+
+- 현재 mirror cycle 기반 구조 ([app/crud.py:102-153](app/crud.py#L102-L153) `_write_changed_bank_rates_to_redis` / `_write_changed_investing_rates_to_redis`) vs USDT 패턴 (tick-driven 단계 분리)
+- Redis 입력 옵션 (α/β/γ)
+- DB 쿼리 최소화 (Redis 기반 dedup)
+- legacy broadcast + fx:* + usdt:krw 3 채널 dual-emit 정책 일관성 (§6.5)
+- 작업 분량/위험 평가 (대규모 refactor)
+
 ---
 
 ## 7. 참조

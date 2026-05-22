@@ -1421,6 +1421,24 @@ main.py 임시 hook은 즉시 삭제 X. PR4 Step B에서 다음 중 선택:
 - USDT/KRX처럼 direct write source는 writer success 직후 hook이 적절하다.
 - 은행/Investing처럼 mirror cycle 기반 source는 trigger 위치를 별도로 설계해야 한다. 단순 DB insert 직후 trigger는 Redis latest와 publish payload 시점이 어긋날 수 있다.
 
+**2026-05-22 보강 — PR4 Step B 보류 (Bank/Investing 구조 재설계 phase 이후 재검토)**:
+
+main.py legacy topic hook은 단순 fallback이 아니라 **은행(kb/hana) + Investing USD/KRW 변경을 fx:* 및 usdt:krw topic으로 발사하는 primary bridge** 역할을 포함한다. 코드 검증 ([app/main.py:716-735](app/main.py#L716-L735)) — `is_changed` 분기 안에서 `safe_publish_tether_tab_snapshot` + `safe_publish_all_fx_snapshots` 두 publish 모두 호출.
+
+은행/Investing은 현재 mirror cycle 기반 구조 — DB SELECT 후 중복 검사 → DB INSERT commit 후 helper로 Redis direct write ([app/crud.py:102-153](app/crud.py#L102-L153)). source-level topic trigger router는 부재. 특히 kb/hana/investing usd-krw는 fx:usd-krw와 usdt:krw 양쪽 topic에 영향을 주므로 단순 tether trigger 추가가 아니라 **수집/저장/알림/topic publish 전체 구조 재설계**가 필요하다.
+
+**미래 구조 옵션** (확정 보류, 별도 phase에서 검토):
+
+- **α USDT 패턴 그대로**: 매 fetch → Redis SET + trigger (단순, coalesce 흡수 의존). 같은 값 반복 publish 우려.
+- **β 절충 (현재 유력 후보)**: Redis는 매 fetch에서 seen_at/mirrored_at 갱신, rate/timestamp는 값 변경 시만 갱신. **topic trigger는 기본적으로 rate 변경 또는 topic payload에 의미 있는 state 변화(예: freshness 회복, stale 복구)가 있을 때 발화**. successful fetch 자체는 seen_at/mirrored_at 갱신으로 기록하되, 같은 rate 반복 fetch가 항상 topic publish를 유발하지는 않는다. observation freshness 정확 + publish 효율적.
+- **γ 보수**: Redis SET/trigger 모두 값 변경 시만, freshness는 별도 추적.
+
+DB 쿼리 최소화 input: 현재 DB INSERT 전 중복 검사는 DB SELECT. 미래 구조에서는 **Redis 값 기반 dedup**으로 DB SELECT 회피 가능 ([REALTIME_ARCHITECTURE_PLAN.md §1](REALTIME_ARCHITECTURE_PLAN.md) "DB를 실시간 전송 경로에서 분리, latest는 Redis에서 관리" 방향 일관).
+
+각 옵션의 timestamp 분리 정책 (`rate_changed_at` vs `seen_at` vs `mirrored_at`)은 별도 phase에서 확정. 자세한 내용은 [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) 참조.
+
+따라서 main.py hook 완전 제거(Option A)는 Bank/Investing 구조 재설계 phase 이후 재검토한다. Option B (fallback 격하)도 "main.py hook이 은행/Investing primary path 역할을 포함"한다는 사실과 어긋나 현재 상황에는 부적합 — 현재 상태 그대로 유지가 가장 정확한 표현이다.
+
 ### 14.8 Non-scope (잠금)
 
 - **FX topic trigger 변경**: `fx:usd-krw` 등 별도 publisher 그대로 (FX는 legacy data 변경과 동기화 의미 있음 — 분리 보류)
@@ -1429,6 +1447,8 @@ main.py 임시 hook은 즉시 삭제 X. PR4 Step B에서 다음 중 선택:
 - **Bithumb~Gopax WebSocket 확장**: Phase B.3 영역
 - **legacy piggyback 즉시 삭제**: PR4에서 telemetry 검증 후 결정
 - **Multi-process atomic claim** (Redis pub/sub coalesce): future Phase (Phase Z-2 Phase 2 영역)
+
+**참고 (2026-05-22)**: 본 non-scope는 PR4 Step B minimum scope 한정 표현이다. §14.7 2026-05-22 보강의 Bank/Investing 구조 재설계 phase에서는 fx:* trigger routing도 함께 재검토한다 ([USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) 참조).
 
 ### 14.9 24h Soak 처리
 
