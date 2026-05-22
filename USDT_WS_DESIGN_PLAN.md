@@ -995,12 +995,56 @@ production 영향 0이라 즉시 deploy 가능 (default false 유지).
 - **코드 issue**: `git revert <G1 commit>` + re-deploy
 - **격리 보장**: 다른 4 source lifecycle 영향 0 (scheduler globals 분리)
 
-#### 12.9.5 후속 stage 예정
+#### 12.9.5 Phase B.6 완료 상태 (2026-05-22 갱신)
 
-- G2~G7: WS client 본격 구현 (별도 stage별 PR)
-- PR 2e (옵션): 5 source 관찰 인프라 완성 — §12.8 Post-5-source 정책 표준화
-  backlog Entry 조건 마지막 단계 ("Gopax WS land 후 동일 telemetry 적용 여부 결정")
-- 공통화 검토: 5 source 모두 land 후 (§12.6 / §12.7 패턴 mirror — 선제 abstraction 금지)
+G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 모두 land.
+
+| Stage | Commit | 설명 |
+| --- | --- | --- |
+| G1 skeleton | `1ea4c74` | flag + scheduler + lifecycle (default false) |
+| G2 Subscribe/Parse | `2b79a38` | `SubscribeToTickers` + USDT-KRW client-side filter |
+| G3 Primus pong | `4ff528c` | server-initiated heartbeat raw text replacement |
+| G4 reconnect/liveness/2-signal | `dd3e077` | `UsdtLivenessMonitor` 통합 + reconnect loop + connection/ticker_freshness 2-signal status |
+| G5 Redis writer | `072ab0e` | tick-level fan-out + `_saturation_count` |
+| G6a DB writer | `fa29bdc` | 1s window debounce + `insert_source_rate_if_changed` |
+| G6b REST fallback | `fbf590d` | degraded→`schedule_probe` + 300s cooldown + `_scheduled_probe_count` |
+| G7 Alert evaluator | `7047feb` | tick + REST probe → `AlertObservation` schedule + finally close drain |
+| PR 2e Telemetry | `9c2b456` | 60s summary log emit, 10 fields (Coinone PR 2d mirror) |
+| activation | (env) 2026-05-21 22:04 KST | `USDT_WS_GOPAX_ENABLED=true` 운영 토글 |
+| threshold tuning | `758c21c` | post-activation 실측 기반 `WARNING=60→300` / `DEGRADED=300→600` (Gopax-specific, 거래량 최저 source) |
+| heartbeat state cleanup | `1e8e184` | G3 `_last_heartbeat_at` 죽은 필드 제거 — heartbeat 추적은 `_liveness.last_heartbeat_at`로 일원화 |
+
+#### 12.9.6 운영 baseline 스냅샷
+
+**캡처 시각**: 2026-05-22 13:14 KST (container uptime 약 14h 31min, `758c21c` 배포 2026-05-21 22:43 KST 이후)
+
+**5 source 운영 상태** (단일 summary cycle 캡처, `fpm`은 1분 window 측정치라 cycle마다 변동):
+
+| Source | fpm | reconnect | status transitions | counters | max_frame_gap |
+| --- | --- | --- | --- | --- | --- |
+| Upbit | 88 | 0 | normal:0/reconnecting:0/stale:0 (1-dim) | saturation:0 | 48.3s |
+| Bithumb | 19 | 0 | normal:0/reconnecting:0/stale:0 (1-dim) | saturation:0 / probe:0 | 98.5s |
+| Coinone | 8 | 0 | conn 0/0/0 + ticker 0/0/0 (2-signal 6 keys) | saturation:0 / probe:0 | 30.2s |
+| Korbit | 7 | **3** | conn normal:3/reconnecting:3/stale:0 + ticker 0/0/0 | probe:0 | 10.6s |
+| Gopax | 2 | 0 | conn 0/0/0 + ticker normal:47/warning:47/**degraded:20** | saturation:0 / **probe:20** | **2437s** |
+
+**Gopax fallback 운영 통계 (캡처 시점 누적, ~14h 30min)**:
+
+- `scheduled_count` = `probe_start` = `probe_success` = ticker_degraded transitions = **20**
+- `probe_failure / timeout / none / error` = **0** (REST fallback success rate 100%)
+- `max_frame_gap` = 2437s ≈ 40분 무tick 구간 발생했으나 새 `DEGRADED=600s` + fallback이 freshness 보강 — 의도된 보완 경로 정상 동작
+- 거래량 매우 적은 시간대(Gopax는 5 source 중 최저 fpm)에 정기적 fallback trigger — sparse traffic 보완 가치 검증
+
+**Korbit 자기 회복**: 14h 운영 중 3회 reconnect 모두 `reconnecting → normal` 정상 복귀 (평균 4.7h 간격, alert 불필요한 자연스러운 disconnection 패턴)
+
+**나머지 3 source (Upbit/Bithumb/Coinone)**: 전이 0, counter 0, 완전 안정.
+
+#### 12.9.7 후속 작업 후보
+
+- 5 source 24h+ 자연 누적 관찰 (다음 baseline 시점은 `1e8e184` cleanup 배포 후로 reset 예정)
+- §12.8 Post-5-source 정책 표준화 backlog 진입 검토 (5 source 모두 land + activation 완료된 시점부터 가능)
+- Gopax fallback failure rate trend tracking (현재 0% — future failure 발생 시 alert 또는 threshold 재조정 검토)
+- 공통화 검토 (5 source 모두 land 후 별도 시점, §12.6 / §12.7 패턴 mirror — 선제 abstraction 금지 원칙 유지)
 
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
