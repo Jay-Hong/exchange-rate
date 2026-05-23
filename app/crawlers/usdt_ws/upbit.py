@@ -46,7 +46,7 @@ PR4 핵심 설계 (Codex 검토):
       timestamp compare 없이 SET. 본 writer 측 직렬화로 sender side order는
       보장. REST polling과 dual-writer 시 한쪽 helper invocation order는 X —
       timestamp compare는 별 PR.
-    - **MAX_PENDING_WRITES guard**: Redis 장애 시 task 폭증 방지 (20 in-flight 한도).
+    - **MAX_PENDING_WRITES guard**: Redis 장애 시 task 폭증 방지 (50 in-flight 한도).
     - **close() drain-first**: 정상 shutdown 시 pending write 보존 (1s timeout 후 cancel).
     - **Redis 실패 격리**: helper False / exception 모두 log만, WS session 유지.
 
@@ -111,7 +111,7 @@ RECONNECT_BACKOFF_TAIL = 30.0
 _GAP_BUCKET_KEYS = ("<=1s", "<=2s", "<=5s", "<=10s", "<=30s", "<=60s", ">60s")
 
 # Redis writer guards
-MAX_PENDING_WRITES = 20   # task 폭증 안전망 (Redis 장애 시)
+MAX_PENDING_WRITES = 50   # task 폭증 안전망 (Redis 장애 시)
 REDIS_CLOSE_TIMEOUT_SEC = 1.0  # close() drain timeout — 후 강제 cancel
 
 # DB writer
