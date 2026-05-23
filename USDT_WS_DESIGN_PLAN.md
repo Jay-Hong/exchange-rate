@@ -988,6 +988,8 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 
 **컨텍스트**: §12.8의 분석 input #3 (`redis_saturation_count` 발생 패턴) 영역에 ~43h 관찰 중 **Upbit saturation 25회** 발견 (snapshot 시점 2026-05-23 19:06 KST). §12.8 공식 결정 3 항목 분류는 유지하되, 별도 follow-up backlog로 추적.
 
+📌 **상위 anchor**: 본 follow-up의 중기 구조 개선(freshness metadata 분리 + 의미 있는 payload/state 변화 시 trigger)은 [REALTIME_ARCHITECTURE_PLAN.md §4.1 "All-source observation fanout contract"](REALTIME_ARCHITECTURE_PLAN.md)에 anchored된 통합 phase에 속한다. 용어(`rate_changed_at` / `seen_at` / `mirrored_at`)는 §4.1.3 정의를 따른다.
+
 **관측 패턴 (총 6 burst, ~43h)**:
 
 - 2026-05-22 23:21 KST: 5회 (fpm 289까지 상승)
@@ -1012,7 +1014,7 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 
 같은 rate 반복 tick을 Redis에 반복 SET하는 현재 구조는 dense traffic source의 saturation burst 원인이지만, 단순 dedup ("rate 같으면 Redis 안 쓴다")만으로는 timestamp 의미가 "마지막 관측 시각"에서 "마지막 가격 변경 시각"으로 변질되어 단말/payload에서 source가 살아 있음에도 오래된 데이터처럼 보일 위험이 있다. 따라서 freshness metadata 분리가 함께 필요하다.
 
-권장 분리 구조:
+권장 분리 구조 ([REALTIME_ARCHITECTURE_PLAN.md §4.1.3](REALTIME_ARCHITECTURE_PLAN.md) 단일 정의 anchor 준수):
 
 - **`rate_changed_at`**: 가격 실제 변경 시각
 - **`seen_at` / `last_tick_at`**: 소스 살아 있음을 마지막 확인 시각 (같은 rate라도 매 tick 갱신)
@@ -1026,14 +1028,19 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 - **Redis latest write: rate 변경 또는 의미 있는 timestamp/state 변화에만 update**
 - **topic trigger: payload에 의미 있는 변화가 있을 때만 발화** (freshness 회복 / stale 복구 같은 state 변화 포함)
 
-**Bank/Investing 구조 재설계 (β 옵션)와 연결**:
+**All-source freshness metadata + fanout contract phase와 연결**:
 
-본 follow-up의 중기 구조 개선 방향(`rate_changed_at` / `seen_at` / `mirrored_at` 분리 + 의미 있는 변화 시만 trigger)은 [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) Bank/Investing observation-based fanout phase의 β 옵션과 **동일 설계 축**이다. 5 source + Bank/Investing 모두 같은 freshness metadata 정책 통합 시점에 함께 진입할 가치 있다.
+본 follow-up의 중기 구조 개선 방향(`rate_changed_at` / `seen_at` / `mirrored_at` 분리 + 의미 있는 payload/state 변화 시 trigger)은 [REALTIME_ARCHITECTURE_PLAN.md §4.1 "All-source observation fanout contract"](REALTIME_ARCHITECTURE_PLAN.md) 아래 통합 phase의 일부다. 다음 source들이 같은 설계 축을 공유한다:
+
+- **Bank/Investing**: [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) β 옵션 (DB-first monolithic → observation-based fanout)
+- **KRX 미국달러선물**: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 Stage E](KRX_FANOUT_REFACTOR_PLAN.md) (`KrxRedisLatestWriter` DB-insert-bound → tick-level 전환)
+
+5 source + Bank/Investing + KRX 모두 같은 freshness metadata 정책 통합 시점에 함께 진입할 가치 있다.
 
 **진입 조건**:
 
 - 단기: 운영 위험성 평가 후 즉시 검토 가능 (현재 status normal 유지라 긴급도 낮음)
-- 중기: Bank/Investing 구조 재설계 phase와 같이 진입 (5 source + Bank/Investing 통합 freshness metadata 정책)
+- 중기: All-source freshness metadata + fanout contract phase로 진입 (5 source + Bank/Investing + KRX 통합 — REALTIME §4.1 anchor 기반)
 
 ### 12.9 Phase B.6 — Gopax WS 확장 (Primus protocol, 전체 ticker 구독)
 
