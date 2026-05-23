@@ -936,6 +936,105 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 - 결정 no: 데이터 분석 요약과 함께 close한다.
 - 결정 보류: 추가 관찰 기간과 재검토 시점을 명시한다. 무기한 보류하지 않는다.
 
+#### 12.8.1 Stage 6 Close (2026-05-23)
+
+**관찰 기간**: container 1 (14h baseline, §12.9.6) + container 2 (29h+ 실측, 2026-05-22 13:27 ~ 2026-05-23 19:06 KST) = **두 운영 구간 합산 참고 ~43h**. 동일 컨테이너 연속 24h 누적은 아니지만, 분석 close에 충분한 근거로 사용.
+
+**snapshot 핵심** (snapshot 시점 2026-05-23 19:06 KST):
+
+- Upbit: status=normal, reconnect=0, transitions all 0, saturation 25회 (§12.8.2 참조)
+- Bithumb: status=normal, reconnect 1회 자기 회복, transitions all 0
+- Coinone: status=normal, reconnect=0, transitions all 0
+- Korbit: status=normal, reconnect 6회 자기 회복 (합산 참고), ticker transitions all 0
+- Gopax: ticker normal:82/warning:82/degraded:41, REST fallback **두 운영 구간 합산 참고 61회 scheduled, failure 0 관측** (확인된 probe log 53/53/0), worst max_frame_gap=5406s (90분), connection reconnect 1회 자기 회복 (container 2 시작 직후, 1초 내 reconnecting → normal 복귀)
+
+**결정 항목별 close**:
+
+##### 결정 항목 1 — Upbit/Bithumb 2-signal 전환
+
+- **분류: 더 관찰 (결정 보류)**
+- **근거**: 24h+ 합산 참고에서 Upbit/Bithumb의 1-dim `status`로 reconnect (Bithumb 1회) 정확 capture. 1-dim에서 분해 못 한 case (연결 문제 vs ticker freshness 분리 필요 사례) 0건.
+- **본질**: 2-signal은 장애 원인 분해력 향상 (연결 문제 vs ticker freshness 분리). 표준화 목적만으로는 코드 변경 대비 운영 이득 작음.
+- **재검토 조건**: 1-dim status로 원인 분해가 어려운 실제 장애/운영 신호 발생 시 또는 추가 72h 관찰 후 동일 패턴 유지 시 결정 close.
+
+##### 결정 항목 2 — REST fallback trigger 표준화 (stale → ticker_freshness_status=degraded)
+
+- **분류: source-specific 정책 공식화 (결정 no)**
+- **근거**: 5 source 모두 REST fallback 보유 (Upbit는 `normal → stale` 전이 trigger / Bithumb·Coinone·Korbit·Gopax는 fallback controller 보유). Gopax는 두 운영 구간 합산 참고 fallback 61회 scheduled, failure 0 관측 (`ticker_freshness_status=degraded` trigger). Upbit·Bithumb·Coinone·Korbit는 이번 관찰 구간에서 fallback 발화 신호 없음 (Upbit는 stale 전이 0, 다른 source는 fallback counter 0). 5 source 모두 ~43h 안정 운영.
+- **본질**: source별 거래량 특성 차이 (sparse vs dense traffic). Gopax 저유동성 = REST fallback이 의미 있는 보완 경로. 다른 source는 dense traffic으로 fallback 의미 약함.
+- **source-specific 정책 영구 기록**:
+  - **Gopax**: REST fallback `ticker_freshness_status=degraded` trigger (2-signal model), 운영 가치 검증됨 (probe 61회 scheduled / failure 0 관측)
+  - **Upbit**: REST fallback `normal → stale` 전이 trigger (1-dim model, `UpbitRestFallbackController`). 이번 관찰 구간에서 stale 전이 0 — 발화 신호 없음, 안전망으로 보유
+  - **Bithumb/Coinone/Korbit**: REST fallback 보유, 이번 관찰 구간에서 counter 0 — 안전망 성격으로 유지
+
+##### 결정 항목 3 — warning/degraded/cooldown threshold 재산정
+
+- **분류: source-specific 정책 공식화 (결정 no)**
+- **근거**: ~43h 합산 참고에서 source별 max_frame_gap 분포 극심 차이 (10s ~ 5406s). Gopax 300/600 (post-activation 실측 기반 tuning, commit `758c21c`) 적합 검증됨 (DEGRADED=600s가 90분 무tick 시 fallback trigger 정상 동작). 다른 source threshold도 각자 거래량 특성에 맞춤.
+- **본질**: threshold는 source별 거래량/heartbeat 패턴 함수. 통합 시 trade-off (저유동성 source false positive vs 고유동성 missed signal).
+- **source-specific 정책 영구 기록**:
+  - **Gopax**: `WARNING=300s / DEGRADED=600s` (저유동성, sparse traffic 적합)
+  - **Coinone**: `WARNING=60s / DEGRADED=300s`
+  - **Korbit**: `WARNING=30s / DEGRADED=120s`
+  - **Bithumb / Upbit**: 각자 거래량 특성에 맞춤 정책
+
+##### 참고 note — fallback failure alert
+
+- **분류: future alert 후보 (§12.8 공식 항목 아님)**
+- **근거**: 합산 참고 Gopax probe 61회 scheduled / failure 0 관측. alert 트리거 신호 없음.
+- **재검토 조건**: Gopax failure rate > 0% 발생 시 alert 트리거 검토. 다른 source에서 fallback 활성화 후 failure 발생 시 동일 검토.
+
+#### 12.8.2 Follow-up Backlog — Upbit redis_saturation_count 분석 (2026-05-23 추가)
+
+**컨텍스트**: §12.8의 분석 input #3 (`redis_saturation_count` 발생 패턴) 영역에 ~43h 관찰 중 **Upbit saturation 25회** 발견 (snapshot 시점 2026-05-23 19:06 KST). §12.8 공식 결정 3 항목 분류는 유지하되, 별도 follow-up backlog로 추적.
+
+**관측 패턴 (총 6 burst, ~43h)**:
+
+- 2026-05-22 23:21 KST: 5회 (fpm 289까지 상승)
+- 2026-05-23 03:37 KST: 8회
+- 2026-05-23 03:46 KST: 3회
+- 2026-05-23 04:30 KST: 5회 (fpm 1297까지 상승)
+- 2026-05-23 16:46 KST: 4회
+- 모든 burst가 dense traffic spike와 정확한 상관. **status=normal, reconnect=0, transitions all 0, error 0** — 운영 안정성 영향 없음
+- 다른 source 영향 없음 (Upbit 단독)
+
+**원인**: Upbit는 모든 tick 수신 구조. 짧은 순간 거래/호가 변동 burst 시 Redis write queue (MAX_PENDING_WRITES=20)가 saturation. skip된 tick의 latest path는 후속 tick/direct write 및 기존 mirror/warmup 경로가 보완할 수 있으나, skip tick 자체의 최신성 영향은 follow-up에서 확인.
+
+**follow-up 후보 (단기 / 중기 구조 분리)**:
+
+**단기 — pending write 임계값 재산정**:
+
+- `MAX_PENDING_WRITES=20` 상향 검토 (예: 50 또는 100)
+- 메모리 vs 부하 trade-off 평가
+- 빠른 적용 가능, 구조 변경 없음
+
+**중기 — Redis write dedup + freshness metadata 분리**:
+
+같은 rate 반복 tick을 Redis에 반복 SET하는 현재 구조는 dense traffic source의 saturation burst 원인이지만, 단순 dedup ("rate 같으면 Redis 안 쓴다")만으로는 timestamp 의미가 "마지막 관측 시각"에서 "마지막 가격 변경 시각"으로 변질되어 단말/payload에서 source가 살아 있음에도 오래된 데이터처럼 보일 위험이 있다. 따라서 freshness metadata 분리가 함께 필요하다.
+
+권장 분리 구조:
+
+- **`rate_changed_at`**: 가격 실제 변경 시각
+- **`seen_at` / `last_tick_at`**: 소스 살아 있음을 마지막 확인 시각 (같은 rate라도 매 tick 갱신)
+- **`mirrored_at`**: Redis/topic 반영 시각
+
+단계별 정책:
+
+- tick freshness 관찰: 매 tick 기준 유지
+- alert evaluator: 현재 tick observation 기반 정책 유지
+- DB writer: 기존 debounce/change 정책 유지
+- **Redis latest write: rate 변경 또는 의미 있는 timestamp/state 변화에만 update**
+- **topic trigger: payload에 의미 있는 변화가 있을 때만 발화** (freshness 회복 / stale 복구 같은 state 변화 포함)
+
+**Bank/Investing 구조 재설계 (β 옵션)와 연결**:
+
+본 follow-up의 중기 구조 개선 방향(`rate_changed_at` / `seen_at` / `mirrored_at` 분리 + 의미 있는 변화 시만 trigger)은 [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) Bank/Investing observation-based fanout phase의 β 옵션과 **동일 설계 축**이다. 5 source + Bank/Investing 모두 같은 freshness metadata 정책 통합 시점에 함께 진입할 가치 있다.
+
+**진입 조건**:
+
+- 단기: 운영 위험성 평가 후 즉시 검토 가능 (현재 status normal 유지라 긴급도 낮음)
+- 중기: Bank/Investing 구조 재설계 phase와 같이 진입 (5 source + Bank/Investing 통합 freshness metadata 정책)
+
 ### 12.9 Phase B.6 — Gopax WS 확장 (Primus protocol, 전체 ticker 구독)
 
 Gopax는 기존 4 source 중 가장 다른 구조다. 전체 ticker 구독 + 클라이언트측
