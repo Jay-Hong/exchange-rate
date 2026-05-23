@@ -574,6 +574,10 @@ signal에 의존하는 구조 → mirror cycle 격하/제거의 전제 조건이
 
 **컨텍스트**: PR4 Step B (main.py legacy hook 격하/제거)는 Bank/Investing이 source-level topic trigger router를 갖추지 못해 보류됨. main.py hook은 단순 fallback이 아니라 은행/Investing 변경을 fx:* + usdt:krw 양쪽 topic으로 발사하는 primary bridge 역할. 따라서 단순 trigger 추가가 아니라 수집/저장/알림/topic publish 전체 구조 재설계가 필요. 자세한 사유는 [USDT_WS_DESIGN_PLAN.md §14.7 2026-05-22 보강](USDT_WS_DESIGN_PLAN.md#147-legacy-piggyback-격하-정책) 참조.
 
+📌 **상위 anchor**: 본 follow-up은 [REALTIME_ARCHITECTURE_PLAN.md §4.1 "All-source observation fanout contract"](REALTIME_ARCHITECTURE_PLAN.md) 아래 통합 phase의 Bank/Investing 측 진입점이다. terminology(`rate_changed_at` / `seen_at` / `mirrored_at`)는 [REALTIME_ARCHITECTURE_PLAN.md §4.1.3](REALTIME_ARCHITECTURE_PLAN.md)을 따른다.
+
+📌 **공통 설계 축 vs 현재 경로 차이**: KRX의 [KRX_FANOUT_REFACTOR_PLAN.md §5.2 Stage E](KRX_FANOUT_REFACTOR_PLAN.md) (`KrxRedisLatestWriter` DB-insert-bound → tick-level 전환)와 **같은 설계 축**(observation fanout + freshness metadata 분리)을 공유한다. 다만 **현재 경로는 다르다**: Bank/Investing은 DB-first monolithic(crud.py 안에서 DB → Redis helper → `process_rate_alerts` 직렬), KRX는 DB-insert-bound Redis write(`KrxDbWriter` 안에서 DB insert 성공 후 Redis write)다. 두 source는 같은 통합 phase에서 다른 진입점으로 흡수된다.
+
 **목표**:
 
 - 크롤러 fetch 결과를 source observation으로 표현하여 Redis writer / DB writer / Alert evaluator / Topic trigger router 단계 분리 (USDT WS 패턴 또는 유사 구조 적용)
