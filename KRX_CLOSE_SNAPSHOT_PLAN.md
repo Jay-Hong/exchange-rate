@@ -51,6 +51,8 @@ docker compose up -d --force-recreate fastapi
 
 ⚠️ `restart`는 env_file 변경을 반영하지 않음. **반드시 `up -d --force-recreate fastapi`** ([KRX_CANARY.md](KRX_CANARY.md) 핵심 원칙 5 참조). 효과: KrxDbWriter close-grace skip 미진입 + KrxCloseWindowWriter `__call__` early return + REST 3 retry 그대로 (1차 PR c0855ff 동작 복귀).
 
+📌 **Fanout contract 경계 (anchor 정합)**: `close_snapshot`은 [REALTIME_ARCHITECTURE_PLAN.md §4.1.2](REALTIME_ARCHITECTURE_PLAN.md)의 observation type으로 fanout contract에 흡수된다. 그러나 close window scheduling (CF 15:45 / CM 06:00 boundary 감지), captured flag (`close_captured:krx:{session}:{kst_date}` TTL 1h), WS-first/REST fallback 실행 정책은 **KRX-only lifecycle policy로 외부에 잔존**한다. 즉 contract 안으로 들어오는 것은 *결과 observation*이지 *스케줄링 메커니즘 전체*가 아니다.
+
 ---
 
 ## 1. 문제 정의
