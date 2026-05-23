@@ -35,6 +35,7 @@
 - **구독 기반 토픽 라우팅** — 탭별로 필요한 데이터만 전송, 불필요한 대역폭 제거
 - **거래소 데이터 수집 방식 전환** (REST polling → 공식 WebSocket ticker)
 - **DB를 실시간 전송 경로에서 분리** — tick을 모두 INSERT하지 않고 latest state는 Redis에서 관리
+- **All-source observation fanout contract** — 모든 source(USDT 5거래소 / Bank 9개 / Investing / KRX 미국달러선물)가 동일한 observation fanout 계약을 따르되, source-specific 정책 값만 분기. 통합 계약은 Redis latest / DB writer / Alert evaluator / Topic trigger 4갈래 fanout과 freshness metadata semantics를 정의. 상세는 §4.1
 
 ### 비목표 (이번 마이그레이션에서 다루지 않음)
 
@@ -116,6 +117,72 @@ Investing live channel (조사 중) ─┤
 - **Broadcast / Alert / DB는 독립 흐름** — 각자 다른 정책
 - **클라이언트는 토픽 구독으로 필요한 것만 받음**
 - **legacy 전체 broadcast는 dual-emit으로 일정 기간 병행**
+
+### 4.1 All-source observation fanout contract
+
+> 📌 **목적**: USDT 5거래소 / Bank 9개 / Investing / KRX 미국달러선물 — 모든 source가 같은 fanout 계약을 따르도록 구조 통일. 정책 값(임계값/debounce/fallback 조건)은 source-specific으로 유지.
+> 📌 **단일 진리 위치**: 본 sub-section은 freshness metadata 용어 + observation type의 정의 anchor. 다른 문서는 본 절을 cross-ref하고 별도 정의 금지.
+> 📌 **Status는 phase docs 책임**: 본 anchor 문서는 *계약/원칙*만. source별 현재 상태와 phase 진척은 KRX_FANOUT / USDT_WS / USDT_TOPIC 등 phase docs에서 관리 (anchor drift 방지).
+
+#### 4.1.1 핵심 원칙
+
+1. **Observation fanout 4갈래** — 모든 source에서 observation 수신 → ① Redis latest write / ② DB writer / ③ Alert evaluator / ④ Topic trigger 4갈래로 fanout
+2. **계약 구조는 통일, 정책 값은 source-specific** — fanout 갈래는 모든 source 공통, 임계값/debounce window/fallback trigger 조건은 source별로 분기
+3. **Source-specific lifecycle은 계약 외부에 잔존** — 거래소별 세션/만기/contract rollover/close finalizer scheduling 등은 fanout 계약과 직교
+
+#### 4.1.2 Observation type
+
+모든 source는 다음 type 중 하나 이상을 발생:
+
+- `tick` — WS frame 또는 REST polling으로 수신되는 정상 가격 observation
+- `rest_probe` — stale-based REST fallback observation (USDT 5거래소 RestFallbackController / KRX KrxRestFallbackController Stage B+)
+- `close_snapshot` — session boundary observation (현재 KRX-only, CF 15:45 / CM 06:00). 다른 source 추가 시 동일 type으로 흡수
+
+#### 4.1.3 Freshness metadata terminology (단일 정의 anchor)
+
+각 source의 latest state는 다음 3개 timestamp를 함께 기록:
+
+| 용어 | 의미 | 갱신 시점 |
+| --- | --- | --- |
+| `rate_changed_at` | 가격 값이 마지막으로 *변경*된 시점 | observation이 dedup 통과 (값 != 이전 latest) |
+| `seen_at` | observation을 마지막으로 *수신*한 시점 (dedup 무관) | 매 observation |
+| `mirrored_at` | Redis latest mirror가 마지막으로 *갱신*된 시점 | Redis write 성공 |
+
+**왜 분리하는가** — 현재 일부 source(KRX ADR-031 1차)는 "값 동일 → Redis write skip" 정책이라 Redis timestamp가 *stale*해 보이는 false positive 발생. `seen_at` 기록으로 *데이터는 살아있는데 값만 안 바뀜* 상태를 명확히 표현 가능. `mirrored_at`은 mirror cycle 자체의 health 측정용 (ADR-026 PR5 `mirror_age_ms`와 정합).
+
+#### 4.1.4 Contract-common vs source-specific 경계
+
+| 영역 | 분류 | 예시 |
+| --- | --- | --- |
+| Observation 수신 인터페이스 | contract-common | tick / rest_probe / close_snapshot type 통일 |
+| Redis latest write 책임 | contract-common | `latest_rates_cache` helper 경유 |
+| DB writer 책임 | contract-common | window debounce + insert-if-changed 패턴 |
+| Alert evaluator 책임 | contract-common | source-neutral helper (`UsdtAlertEvaluator` 패턴) |
+| Topic trigger 책임 | contract-common | `request_*_topic_trigger` 호출 |
+| Freshness metadata fields | contract-common | `rate_changed_at` / `seen_at` / `mirrored_at` 모두 기록 |
+| Dedup 정책 (값 변경만 vs 매 tick) | source-specific | USDT 매 tick Redis write / KRX DB-insert-bound (Stage E에서 전환 예정) |
+| Liveness 임계값 | source-specific | Gopax 300/600, Coinone 60/300, Korbit 30/120 |
+| REST fallback trigger 조건 | source-specific | Upbit normal→stale / Gopax `ticker_freshness=degraded` / KRX 60s+ silence (Stage A counter only) |
+| Session 경계 / 만기 / contract rollover | source-specific 외부 | KRX-only (CF/CM session, 만기 swap, `_last_tick_at` reset) |
+| Close finalizer scheduling | source-specific 외부 | KRX-only (CF 15:45 / CM 06:00 boundary, captured flag, REST fallback) |
+
+#### 4.1.5 현재 주요 deviation 요약 (anchor 수준, 상세는 phase docs)
+
+본 계약과의 현재 deviation 요약(2026-05-24 기준). 상세 status / Stage 진척은 각 phase doc에서 관리:
+
+- **USDT 5거래소** — 계약 정합도가 가장 높음. 5 source 모두 RestFallbackController 보유 (trigger 조건만 source-specific). 매 tick → Redis write, source-neutral `UsdtAlertEvaluator` 운영 중. 남은 follow-up: Upbit saturation + freshness metadata 분리.
+- **Bank 9개 / Investing** — DB-first monolithic 경로(crud.py 안에서 DB → Redis write helper → `process_rate_alerts` 직렬). Redis write와 alert는 crud.py에서 직접 처리, **Topic trigger만 main.py broadcast diff hook 경유**. β 옵션(observation-based fanout) 검토 중.
+- **KRX 미국달러선물** — ADR-031 1차로 Redis write가 **DB-insert-bound**(tick-level 아님). Runtime alert evaluator 미연결 (`KrxAlertEvaluator`는 Stage D/F 후보). Stage E에서 tick-level Redis 전환 예정.
+
+#### 4.1.6 통합 phase 진입 조건 및 cross-reference
+
+본 계약의 전면 적용은 **multi-PR phase**로 진행. source별 작업분해는 다음 phase docs에서:
+
+- USDT 측: [USDT_WS_DESIGN_PLAN.md §12.8.2](USDT_WS_DESIGN_PLAN.md)
+- Bank/Investing 측: [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md)
+- KRX 측: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 E~G](KRX_FANOUT_REFACTOR_PLAN.md)
+- close_snapshot observation type 경계: [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md)
+- 관련 ADR: [ADR-027](DECISIONS.md) (KRX REST/stale) / [ADR-031](DECISIONS.md) (KRX Redis 통합 1차)
 
 ---
 
