@@ -8,6 +8,8 @@
 
 본 문서는 *신규 skeleton 작성*이 아니라 **이미 들어와 있는 Stage A/B 코드 + ADR-031 Redis 통합을 장기 fanout 목표와 정합화**하기 위한 mapping.
 
+📌 **장기 fanout 목표의 anchor**: [REALTIME_ARCHITECTURE_PLAN.md §4.1 "All-source observation fanout contract"](REALTIME_ARCHITECTURE_PLAN.md). 본 문서의 §4 목표 구조 및 §5.2 Stage E~G는 §4.1 계약과 정합화되며, freshness metadata terminology(`rate_changed_at` / `seen_at` / `mirrored_at`)는 §4.1.3을 참조하며, 본 문서에서는 용어를 재정의하지 않는다.
+
 **5/18 전 가능 범위**:
 
 - 현재 책임/시그널/Stage 정리
@@ -127,7 +129,7 @@ Quote frame은 liveness metric만 갱신, fanout 대상 X. 이유 (line 1171-117
 
 ## 4. 목표 fanout 구조
 
-REALTIME_ARCHITECTURE_PLAN의 "알림은 모든 tick, DB는 window close" 원칙에 맞춰:
+[REALTIME_ARCHITECTURE_PLAN.md §4.1 "All-source observation fanout contract"](REALTIME_ARCHITECTURE_PLAN.md)에 맞춰 KRX 목표 구조를 정렬한다. **"알림은 모든 tick, DB는 window close"** 원칙을 KRX fanout에 적용한다:
 
 ```
 WebSocket tick (KisFuturesClient)
@@ -212,6 +214,8 @@ WebSocket tick (KisFuturesClient)
 
 **E. KrxRedisLatestWriter tick-level 활성화**:
 
+[REALTIME_ARCHITECTURE_PLAN.md §4.1.5](REALTIME_ARCHITECTURE_PLAN.md)에서 KRX의 "DB-insert-bound" Redis write가 all-source fanout 계약의 주요 deviation으로 명시됨. Stage E가 KRX 측 정합 진입점.
+
 - ADR-031 timing semantic 변경 (`DB-insert-bound` → `tick-level`). 1차 ADR-031에서 의도적으로 제외한 결정.
 - 전제: ADR-027 Stage C 결정 (REST snapshot도 Redis에 반영할지) + 5/18 만기 baseline + 운영 stale 패턴 관찰.
 - *behavior change* — separate ADR / PR.
@@ -254,7 +258,7 @@ WebSocket tick (KisFuturesClient)
 
 - [DECISIONS.md ADR-027](DECISIONS.md): KRX REST snapshot/fallback + stale 정책 (5/18 후 결정)
 - [DECISIONS.md ADR-031](DECISIONS.md): KRX Redis 통합 (1차 완료)
-- [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md): "알림 모든 tick, DB window close" 원리
+- [REALTIME_ARCHITECTURE_PLAN.md §4.1](REALTIME_ARCHITECTURE_PLAN.md) "All-source observation fanout contract": 본 문서의 anchor. freshness metadata terminology 단일 정의 + "알림 모든 tick, DB window close" 원리.
 - [KRX_CANARY.md](KRX_CANARY.md): KRX Stage 0/1/2 운영 + Stage A/B baseline
 - [app/crawlers/krx_kis.py](app/crawlers/krx_kis.py): 본 doc 분석 대상
 - [tests/test_krx_fallback_eligibility.py](tests/test_krx_fallback_eligibility.py): eligibility 27 tests
