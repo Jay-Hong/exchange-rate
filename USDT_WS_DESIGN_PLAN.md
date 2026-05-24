@@ -1053,7 +1053,7 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 | # | 영역 | 확정 |
 | --- | --- | --- |
 | 1 | Redis write coalescing | 정책 D — `seen_at` 5s wall-clock grain rounding *(별 sub-PR — §12.8.3.3 참조, blast radius 분리)* |
-| 2 | Alert window pattern | A-3 — wall-clock 5s grain (`floor(now/5s)*5s`) |
+| 2 | Alert window pattern | A-3 — wall-clock 5s grain (`floor(now/5s)*5s`). **Flush timing은 tick-driven** — 다음 tick의 bucket boundary 넘김 또는 `close()`에서 flush. 별도 5초 timer cron 없음 (§13.10 "5초마다 검사" 아니라 "5초 안 관측 묶어 1회 평가" 정합). 희소 source(예: Gopax fpm≈2) alert 평가가 다음 tick 도래까지 지연될 수 있음 — source-specific window 정밀화는 후속 결정 영역. |
 | 3 | Window summary 필드 | `min_rate` / `max_rate` / `last_rate` / `window_start/end` / `tick_count` |
 | 4 | Coalescer 위치 | 별도 모듈 (`app/notifications/price_alert_coalescer.py`) + UsdtAlertEvaluator composition (호출부 무변경) |
 | 5 | Source-specific window 값 | USDT/KRX = 5s, Bank/Investing = 0 (pass-through) |

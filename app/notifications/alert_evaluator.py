@@ -53,7 +53,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from app.notifications.price_alert_coalescer import PriceAlertEvaluationInput
+from app.notifications.price_alert_coalescer import (
+    PriceAlertCoalescer,
+    PriceAlertEvaluationInput,
+)
 
 logger = logging.getLogger("exchange_rate.notifications.alert_evaluator")
 
@@ -311,10 +314,19 @@ class UsdtAlertEvaluator:
                 e. failed_tokens cleanup
     """
 
-    def __init__(self, *, cache: Optional[AlertSettingsCache] = None) -> None:
+    def __init__(
+        self,
+        *,
+        cache: Optional[AlertSettingsCache] = None,
+        coalescer: Optional[PriceAlertCoalescer] = None,
+    ) -> None:
         # default = module-level singleton (Settings CRUD cache invalidation
         # 위해 API endpoint와 공유). test 시 cache=AlertSettingsCache() inject로 격리.
         self._cache = cache if cache is not None else get_default_alert_settings_cache()
+        # 5b-3b: PriceAlertCoalescer composition (§12.8.3 결정 #4).
+        # USDT 5 source 공통 instance라 5초 wall-clock A-3 grain coalescing이 5 source
+        # 자동 동시 적용. 테스트용 DI 열어둠 (Codex 권장).
+        self._coalescer = coalescer if coalescer is not None else PriceAlertCoalescer(window_sec=5)
         self._tasks: set[asyncio.Task] = set()
         # In-flight setting guard — 동일 setting_id 동시 평가 시 중복 FCM 차단
         self._in_flight_settings: set[int] = set()
@@ -328,22 +340,55 @@ class UsdtAlertEvaluator:
 
         observation drop 금지 (Codex Finding 1 — 짧은 threshold crossing
         보호). 100+ pending이면 warning log만, drop 안 함.
+
+        5b-3b: kind 분기 (§12.8.3 결정 #12).
+            - kind="tick" → coalescer 적용 (5s wall-clock window), flush된
+              PriceAlertEvaluationInput마다 task 생성.
+            - kind="rest_probe" (및 미래 kind) → 기존 raw observation path
+              즉시 평가 (복구 신호 지연 회피).
+
+        Flush timing — *tick-driven*:
+            coalescer는 *다음 tick의 bucket boundary 넘김* 또는 *close()*에서
+            flush. 별도 5초 timer cron 없음 (§13.10 "5초마다 검사" 아니라
+            "5초 안 관측 묶어 1회 평가" 정책 정합). Upbit 같은 high-traffic
+            source는 영향 미미하나, fpm 낮은 source (예: Gopax fpm≈2)는 alert
+            평가가 다음 tick 도래까지 지연될 수 있음 — source-specific window
+            정밀화는 §12.8.3 후속 결정 영역.
         """
         if len(self._tasks) >= PENDING_TASKS_WARNING_THRESHOLD:
             logger.warning(
                 "[alert_evaluator] pending tasks backlog high: %d (no drop)",
                 len(self._tasks),
             )
-        task = asyncio.create_task(self._evaluate_async(observation))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+
+        if observation.kind == "tick":
+            flushed = self._coalescer.add(observation)
+            for price_input in flushed:
+                task = asyncio.create_task(self._evaluate_price_input_async(price_input))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+        else:
+            # rest_probe + 미래 kind — coalescer 우회, 즉시 raw observation 평가
+            task = asyncio.create_task(self._evaluate_async(observation))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     async def close(self, timeout: float = ALERT_CLOSE_TIMEOUT_SEC) -> None:
         """drain-first: pending alert tasks 완료 대기, timeout 후 cancel.
 
         FCM in-flight 보호 (Codex Finding 3). reconnect / shutdown 양쪽
         시나리오 모두 사용.
+
+        5b-3b: close 진입 시 pending coalescer bucket을 먼저 flush + schedule
+        해서 같은 drain cycle 안에 포함. shutdown/reconnect drain은 window
+        boundary 보존보다 alert 손실 방지를 우선 (§12.8.3 결정 #4).
         """
+        flushed = self._coalescer.flush_pending()
+        for price_input in flushed:
+            task = asyncio.create_task(self._evaluate_price_input_async(price_input))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
         if not self._tasks:
             return
         try:
@@ -365,7 +410,10 @@ class UsdtAlertEvaluator:
     # -- Internal -----------------------------------------------------------
 
     async def _evaluate_async(self, observation: AlertObservation) -> None:
-        """평가 main flow. cache → 조건 → 후보 → in-flight guard → send_one."""
+        """평가 main flow — raw observation path. cache → 조건 → 후보 → in-flight guard → send_one_observation.
+
+        rest_probe + 미래 kind 경로. tick은 _evaluate_price_input_async가 처리.
+        """
         try:
             settings = await self._get_settings(observation)
             candidates = [s for s in settings if condition_matches(s, observation)]
@@ -380,7 +428,7 @@ class UsdtAlertEvaluator:
                     continue
                 self._in_flight_settings.add(candidate.setting_id)
                 try:
-                    await self._send_one(candidate, observation)
+                    await self._send_one_observation(candidate, observation)
                 finally:
                     self._in_flight_settings.discard(candidate.setting_id)
         except asyncio.CancelledError:
@@ -395,19 +443,64 @@ class UsdtAlertEvaluator:
                 },
             )
 
-    async def _get_settings(
-        self, observation: AlertObservation
+    async def _evaluate_price_input_async(
+        self, price_input: PriceAlertEvaluationInput
+    ) -> None:
+        """평가 main flow — window-aware path (§12.8.3 결정 #9/#10).
+
+        condition_matches_price_input(max/min 기준)으로 1차 필터 후 _send_one_price_input.
+        crossing 보존 — last_rate가 아니라 max_rate/min_rate가 threshold를 cross했는지로 평가.
+        """
+        try:
+            settings = await self._get_settings_for_key(
+                price_input.source, price_input.asset
+            )
+            candidates = [
+                s for s in settings if condition_matches_price_input(s, price_input)
+            ]
+            if not candidates:
+                return
+            for candidate in candidates:
+                if candidate.setting_id in self._in_flight_settings:
+                    logger.debug(
+                        "[alert_evaluator] setting %d in-flight, skip duplicate",
+                        candidate.setting_id,
+                    )
+                    continue
+                self._in_flight_settings.add(candidate.setting_id)
+                try:
+                    await self._send_one_price_input(candidate, price_input)
+                finally:
+                    self._in_flight_settings.discard(candidate.setting_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "[alert_evaluator] price_input evaluator failed (격리, WS session 유지)",
+                extra={
+                    "source": price_input.source,
+                    "asset": price_input.asset,
+                    "min_rate": str(price_input.min_rate),
+                    "max_rate": str(price_input.max_rate),
+                    "tick_count": price_input.tick_count,
+                },
+            )
+
+    async def _get_settings_for_key(
+        self, source: str, asset: str
     ) -> tuple[CachedAlertSetting, ...]:
         """cache hit는 event loop, miss는 to_thread + per-key loading guard.
 
         TTL 만료 순간 동시 cache miss → 진행 중 loading task share → DB
         loader 1번만 호출 (thundering herd 방지).
+
+        5b-3b: (source, asset) 기반 — raw observation / price_input 양쪽 path 공통.
         """
-        bucket = self._cache.get_if_fresh(observation.source, observation.asset, time.time())
+        bucket = self._cache.get_if_fresh(source, asset, time.time())
         if bucket is not None:
             return bucket.settings
 
-        key = (observation.source, observation.asset)
+        key = (source, asset)
         existing = self._loading.get(key)
         if existing is not None and not existing.done():
             return await existing
@@ -420,6 +513,12 @@ class UsdtAlertEvaluator:
             # 다른 task가 같은 key를 새로 register했을 가능성 → 자기 자신일 때만 pop
             if self._loading.get(key) is task:
                 self._loading.pop(key, None)
+
+    async def _get_settings(
+        self, observation: AlertObservation
+    ) -> tuple[CachedAlertSetting, ...]:
+        """Backward-compat wrapper — observation에서 source/asset 추출."""
+        return await self._get_settings_for_key(observation.source, observation.asset)
 
     async def _load_and_cache(
         self, key: tuple[str, str]
@@ -479,15 +578,58 @@ class UsdtAlertEvaluator:
                 ))
             return tuple(snapshots)
 
-    async def _send_one(
+    async def _send_one_observation(
         self, candidate: CachedAlertSetting, observation: AlertObservation
     ) -> None:
-        """단일 candidate에 대한 발송 — DB session 3-step 분리.
+        """Raw observation path — refetch + revalidate + send + persist.
 
-        Session 1 (refetch): enabled/triggered 재확인 (cache stale 보호) →
-                             FreshSettingSnapshot → session close
-        No session:          FCM send (network I/O, DB connection 미보유)
-        Session 2 (persist): mark_triggered + log + failed_tokens cleanup
+        observation.rate 자체를 triggered_rate로 사용 (단일 tick 평가).
+        rest_probe + 미래 kind가 이 path 거침.
+        """
+        fresh_candidate = await self._refetch_and_revalidate_observation(
+            candidate, observation
+        )
+        if fresh_candidate is None:
+            return
+        triggered_rate = Decimal(str(observation.rate))
+        await self._do_send_and_persist(fresh_candidate, triggered_rate)
+
+    async def _send_one_price_input(
+        self, candidate: CachedAlertSetting, price_input: PriceAlertEvaluationInput
+    ) -> None:
+        """Window path (§12.8.3 결정 #11) — refetch + revalidate + matched_triggered_rate + send + persist.
+
+        crossing 보존 — refetch threshold 기준 ``matched_triggered_rate`` 재산출.
+        threshold 변경으로 더 이상 만족하지 않으면 발송 차단.
+        """
+        fresh_candidate = await self._refetch_and_revalidate_price_input(
+            candidate, price_input
+        )
+        if fresh_candidate is None:
+            return
+        # refetch threshold 기준 triggered_rate 재산출 (cache 옛 값 무시)
+        triggered_rate = matched_triggered_rate(fresh_candidate, price_input)
+        if triggered_rate is None:
+            logger.info(
+                "[alert_evaluator] stale cache (window crossing no longer matches), skip",
+                extra={
+                    "setting_id": candidate.setting_id,
+                    "cached_threshold": candidate.threshold,
+                    "fresh_threshold": fresh_candidate.threshold,
+                    "min_rate": str(price_input.min_rate),
+                    "max_rate": str(price_input.max_rate),
+                },
+            )
+            return
+        await self._do_send_and_persist(fresh_candidate, triggered_rate)
+
+    async def _refetch_and_revalidate_observation(
+        self, candidate: CachedAlertSetting, observation: AlertObservation
+    ) -> Optional[CachedAlertSetting]:
+        """DB session 1 — refetch + raw observation 재검증. fresh_candidate 또는 None.
+
+        Codex Finding (Medium): cache TTL 동안 source/asset/condition/threshold
+        변경 시 refetch로 stale 발송 차단.
         """
         snapshot = await asyncio.to_thread(
             self._refetch_setting_snapshot, candidate.setting_id, candidate.user_id,
@@ -501,10 +643,7 @@ class UsdtAlertEvaluator:
                     "snapshot_triggered": snapshot.triggered if snapshot else None,
                 },
             )
-            return
-
-        # Codex Finding (Medium): cache TTL 동안 사용자가 source/asset/condition/
-        # threshold를 변경했어도 refetch로 최종 보호. cache의 옛 값으로 발송 차단.
+            return None
         if snapshot.source != observation.source or snapshot.asset != observation.asset:
             logger.info(
                 "[alert_evaluator] stale cache (source/asset mismatch), skip",
@@ -516,10 +655,7 @@ class UsdtAlertEvaluator:
                     "fresh_asset": snapshot.asset,
                 },
             )
-            return
-
-        # Refresh candidate with snapshot의 최신 condition/threshold (device_tokens는
-        # cache 신뢰 — token cleanup은 failed_tokens cleanup이 처리)
+            return None
         fresh_candidate = CachedAlertSetting(
             setting_id=candidate.setting_id,
             user_id=candidate.user_id,
@@ -529,7 +665,7 @@ class UsdtAlertEvaluator:
             threshold=snapshot.threshold,
             device_tokens=candidate.device_tokens,
         )
-        if not condition_matches(fresh_candidate, observation):
+        if not condition_matches_observation(fresh_candidate, observation):
             logger.info(
                 "[alert_evaluator] stale cache (condition/threshold no longer matches), skip",
                 extra={
@@ -541,18 +677,67 @@ class UsdtAlertEvaluator:
                     "observation_rate": observation.rate,
                 },
             )
-            return
+            return None
+        return fresh_candidate
 
-        # FCM 발송 (no DB session). fresh_candidate 기준 payload.
-        title, body, data = self._build_fcm_payload(fresh_candidate, observation)
+    async def _refetch_and_revalidate_price_input(
+        self, candidate: CachedAlertSetting, price_input: PriceAlertEvaluationInput
+    ) -> Optional[CachedAlertSetting]:
+        """DB session 1 — refetch + window 재검증. fresh_candidate 또는 None.
+
+        source/asset/enabled/triggered stale 검증은 observation path와 동일,
+        condition 재검증은 window 기반 (max_rate/min_rate).
+        """
+        snapshot = await asyncio.to_thread(
+            self._refetch_setting_snapshot, candidate.setting_id, candidate.user_id,
+        )
+        if snapshot is None or not delivery_allowed(snapshot, datetime.now(timezone.utc)):
+            logger.info(
+                "[alert_evaluator] stale cache (enabled/triggered), skip",
+                extra={
+                    "setting_id": candidate.setting_id,
+                    "snapshot_enabled": snapshot.enabled if snapshot else None,
+                    "snapshot_triggered": snapshot.triggered if snapshot else None,
+                },
+            )
+            return None
+        if snapshot.source != price_input.source or snapshot.asset != price_input.asset:
+            logger.info(
+                "[alert_evaluator] stale cache (source/asset mismatch), skip",
+                extra={
+                    "setting_id": candidate.setting_id,
+                    "cached_source": candidate.source,
+                    "cached_asset": candidate.asset,
+                    "fresh_source": snapshot.source,
+                    "fresh_asset": snapshot.asset,
+                },
+            )
+            return None
+        return CachedAlertSetting(
+            setting_id=candidate.setting_id,
+            user_id=candidate.user_id,
+            source=snapshot.source,
+            asset=snapshot.asset,
+            condition=snapshot.condition,
+            threshold=snapshot.threshold,
+            device_tokens=candidate.device_tokens,
+        )
+
+    async def _do_send_and_persist(
+        self, fresh_candidate: CachedAlertSetting, triggered_rate: Decimal
+    ) -> None:
+        """공통 send + persist — observation/price_input 양쪽 path 끝단.
+
+        payload/log 모두 triggered_rate 기준. _persist_result는 legacy schema
+        호환을 위해 float 변환 후 저장.
+        """
+        title, body, data = self._build_fcm_payload(fresh_candidate, triggered_rate)
         result = await asyncio.to_thread(
             self._send_fcm_multicast,
             list(fresh_candidate.device_tokens), title, body, data,
         )
-
-        # mark_triggered + log + failed_tokens cleanup. fresh_candidate 기준 log.
         await asyncio.to_thread(
-            self._persist_result, fresh_candidate, observation.rate, result,
+            self._persist_result, fresh_candidate, float(triggered_rate), result,
         )
 
     @staticmethod
@@ -660,9 +845,13 @@ class UsdtAlertEvaluator:
 
     @staticmethod
     def _build_fcm_payload(
-        candidate: CachedAlertSetting, observation: AlertObservation,
+        candidate: CachedAlertSetting, triggered_rate: Decimal,
     ) -> tuple[str, str, dict]:
         """FCM title/body/data 생성 — 기존 `process_source_rate_alerts` 패턴 보존.
+
+        5b-3b: ``observation`` → ``triggered_rate`` 시그니처 변경 (§12.8.3 결정 #11).
+        observation path는 ``Decimal(str(observation.rate))``, window path는
+        ``matched_triggered_rate()`` 결과 — 양쪽 모두 *crossing 보존된* 가격이 들어옴.
 
         format_threshold + source_registry display_name 사용.
         """
@@ -679,7 +868,7 @@ class UsdtAlertEvaluator:
         condition_arrow = "↑" if candidate.condition == "above" else "↓"
         condition_text = "이상" if candidate.condition == "above" else "이하"
         threshold_str = format_threshold(candidate.threshold)
-        rate_str = f"{observation.rate:.2f}"
+        rate_str = f"{float(triggered_rate):.2f}"
         body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
 
         data = {
@@ -688,7 +877,7 @@ class UsdtAlertEvaluator:
             "body": body,
             "source": candidate.source,
             "asset": candidate.asset,
-            "rate": str(observation.rate),
+            "rate": str(float(triggered_rate)),
             "threshold": str(candidate.threshold),
             "condition": candidate.condition,
             "setting_id": str(candidate.setting_id),

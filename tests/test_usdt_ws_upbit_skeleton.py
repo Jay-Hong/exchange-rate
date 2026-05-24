@@ -1551,10 +1551,15 @@ def _make_observation(
     asset: str = "usdt-krw",
     rate: float = 1500.0,
     timestamp_ms: int = 1777370239843,
+    kind: str = "rest_probe",
 ) -> AlertObservation:
+    """기본 ``kind="rest_probe"`` — schedule() 직접 호출 시 coalescer 우회.
+
+    Tick path 검증은 새 TestUsdtAlertEvaluatorCoalescing 안에서 ``kind="tick"`` 명시.
+    """
     return AlertObservation(
         source=source, asset=asset, rate=rate,
-        timestamp_ms=timestamp_ms, kind="tick",
+        timestamp_ms=timestamp_ms, kind=kind,
     )
 
 
@@ -1930,7 +1935,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ) as mock_fcm, patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, _make_observation())
+            await evaluator._send_one_observation(candidate, _make_observation())
 
         mock_fcm.assert_not_called()
         mock_persist.assert_not_called()
@@ -1952,7 +1957,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, _make_observation())
+            await evaluator._send_one_observation(candidate, _make_observation())
 
         # fresh_candidate (cached와 fields 동일이면 == 성립)
         mock_persist.assert_called_once_with(candidate, 1500.0, fcm_result)
@@ -1973,7 +1978,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, _make_observation())
+            await evaluator._send_one_observation(candidate, _make_observation())
 
         mock_persist.assert_called_once_with(candidate, 1500.0, fcm_result)
 
@@ -2003,7 +2008,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ) as mock_fcm, patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, observation)
+            await evaluator._send_one_observation(candidate, observation)
 
         mock_fcm.assert_not_called()
         mock_persist.assert_not_called()
@@ -2033,7 +2038,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ) as mock_fcm, patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, observation)
+            await evaluator._send_one_observation(candidate, observation)
 
         mock_fcm.assert_not_called()
         mock_persist.assert_not_called()
@@ -2056,7 +2061,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ) as mock_fcm, patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, observation)
+            await evaluator._send_one_observation(candidate, observation)
 
         mock_fcm.assert_not_called()
         mock_persist.assert_not_called()
@@ -2089,7 +2094,7 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             UsdtAlertEvaluator, "_persist_result",
         ) as mock_persist:
-            await evaluator._send_one(candidate, observation)
+            await evaluator._send_one_observation(candidate, observation)
 
         # persist는 fresh_candidate 기준 (threshold=1400)
         mock_persist.assert_called_once()
@@ -2175,6 +2180,182 @@ class TestUsdtAlertEvaluatorClose(unittest.IsolatedAsyncioTestCase):
     async def test_close_noop_when_no_pending(self):
         evaluator = UsdtAlertEvaluator()
         await evaluator.close()
+
+
+# ---------------------------------------------------------------------------
+# 5b-3b ∪ 5b-4 — coalescing dispatch + price_input path + triggered_rate
+# ---------------------------------------------------------------------------
+
+
+def _make_price_input(
+    source: str = "upbit",
+    asset: str = "usdt-krw",
+    min_rate: str = "1470.0",
+    max_rate: str = "1482.0",
+    last_rate: str = "1471.0",
+    tick_count: int = 3,
+) -> PriceAlertEvaluationInput:
+    ts = datetime(2026, 5, 24, 6, 0, 0, tzinfo=timezone.utc)
+    return PriceAlertEvaluationInput(
+        source=source,
+        asset=asset,
+        observed_at=ts,
+        window_start=ts,
+        window_end=ts,
+        min_rate=Decimal(min_rate),
+        max_rate=Decimal(max_rate),
+        last_rate=Decimal(last_rate),
+        tick_count=tick_count,
+    )
+
+
+class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
+    """5b-3b: schedule() dispatch + price_input path + close flush_pending."""
+
+    def setUp(self):
+        get_default_alert_settings_cache().invalidate()
+
+    def tearDown(self):
+        get_default_alert_settings_cache().invalidate()
+
+    async def test_schedule_tick_first_bucket_no_immediate_task(self):
+        """tick observation 첫 bucket — coalescer 누적, task 생성 안 함.
+
+        close()가 pending bucket을 flush → _evaluate_price_input_async 호출 →
+        _load_settings_from_db에 도달하므로 patch 필수 (Codex Finding: 실 DB
+        path 진입 시 테스트 ~75s timeout).
+        """
+        evaluator = UsdtAlertEvaluator()
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ):
+            evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370240000))
+            # coalescer 누적만 — _evaluate_async / _evaluate_price_input_async task 0개
+            self.assertEqual(len(evaluator._tasks), 0)
+            await evaluator.close()
+
+    async def test_schedule_tick_bucket_change_creates_price_input_task(self):
+        """tick bucket boundary 넘으면 price_input task 생성."""
+        evaluator = UsdtAlertEvaluator()
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ):
+            # bucket1 = [06:00:00, 06:00:05) — t=06:00:00.000
+            evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370240000))
+            self.assertEqual(len(evaluator._tasks), 0)
+            # bucket2 = [06:00:05, 06:00:10) — t=06:00:05.000 → flush 1
+            evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370245000))
+            self.assertEqual(len(evaluator._tasks), 1)
+            await evaluator.close()
+
+    async def test_schedule_rest_probe_bypasses_coalescer(self):
+        """rest_probe → coalescer 우회, 즉시 _evaluate_async task 생성 (결정 #12)."""
+        evaluator = UsdtAlertEvaluator()
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ):
+            evaluator.schedule(_make_observation(kind="rest_probe"))
+            self.assertEqual(len(evaluator._tasks), 1)
+            await evaluator.close()
+
+    async def test_send_one_price_input_above_uses_max_rate(self):
+        """price window above — max_rate가 threshold 통과, FCM 발송 + persist에 max_rate."""
+        evaluator = UsdtAlertEvaluator()
+        # Codex 시나리오: 1470 → 1482 → 1471, threshold=1480
+        candidate = _make_cached_setting(condition="above", threshold=1480.0)
+        price_input = _make_price_input(min_rate="1470.0", max_rate="1482.0", last_rate="1471.0")
+
+        snapshot = _make_snapshot(condition="above", threshold=1480.0)
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot", return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            return_value={"success_count": 1, "failure_count": 0, "failed_tokens": []},
+        ), patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as persist:
+            await evaluator._send_one_price_input(candidate, price_input)
+            persist.assert_called_once()
+            _, args, _ = persist.mock_calls[0]
+            # args = (fresh_candidate, triggered_rate_float, fcm_result)
+            self.assertEqual(args[1], 1482.0)  # max_rate (crossing 보존)
+
+    async def test_send_one_price_input_below_uses_min_rate(self):
+        """price window below — min_rate가 threshold 통과, persist에 min_rate."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(condition="below", threshold=1470.0)
+        price_input = _make_price_input(min_rate="1469.0", max_rate="1485.0", last_rate="1480.0")
+
+        snapshot = _make_snapshot(condition="below", threshold=1470.0)
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot", return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+            return_value={"success_count": 1, "failure_count": 0, "failed_tokens": []},
+        ), patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as persist:
+            await evaluator._send_one_price_input(candidate, price_input)
+            persist.assert_called_once()
+            _, args, _ = persist.mock_calls[0]
+            self.assertEqual(args[1], 1469.0)  # min_rate
+
+    async def test_refetch_threshold_change_blocks_price_input_when_no_longer_crosses(self):
+        """refetch에서 threshold 변경 → window 기준으로 더 이상 crossing 안 됨 → FCM skip."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting(condition="above", threshold=1480.0)
+        price_input = _make_price_input(min_rate="1470.0", max_rate="1482.0", last_rate="1471.0")
+        # threshold가 refetch로 1500으로 변경 — max_rate=1482 < 1500 → no longer crossing
+        snapshot = _make_snapshot(condition="above", threshold=1500.0)
+        with patch.object(
+            UsdtAlertEvaluator, "_refetch_setting_snapshot", return_value=snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast",
+        ) as fcm, patch.object(
+            UsdtAlertEvaluator, "_persist_result",
+        ) as persist:
+            await evaluator._send_one_price_input(candidate, price_input)
+            fcm.assert_not_called()
+            persist.assert_not_called()
+
+    async def test_close_flushes_pending_bucket_and_drains_task(self):
+        """close()가 pending coalescer bucket을 flush + schedule + drain까지 포함."""
+        evaluator = UsdtAlertEvaluator()
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ):
+            # tick 1개 누적 (bucket 만들기) — task 0
+            evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370240000))
+            self.assertEqual(len(evaluator._tasks), 0)
+            # close()가 flush + task 생성 + drain
+            await evaluator.close()
+            # drain 후 모든 task 제거
+            self.assertEqual(len(evaluator._tasks), 0)
+
+    async def test_5_source_call_pattern_unchanged_schedule_observation(self):
+        """기존 5 source 호출부 — schedule(AlertObservation) public API 그대로 동작 (후보 B 약속).
+
+        rest_probe / tick / 미래 kind 모두 동일 entry point + 외부 caller 변경 0.
+        """
+        evaluator = UsdtAlertEvaluator()
+        with patch.object(
+            UsdtAlertEvaluator, "_load_settings_from_db",
+            return_value=tuple(),
+        ):
+            # rest_probe (즉시 path)
+            evaluator.schedule(_make_observation(kind="rest_probe"))
+            self.assertEqual(len(evaluator._tasks), 1)
+            # tick (coalescer path) — 추가 task 안 생김 (첫 bucket)
+            evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370240000))
+            self.assertEqual(len(evaluator._tasks), 1)  # 그대로 1
+            # tick bucket boundary 넘으면 task 생성
+            evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370245000))
+            self.assertEqual(len(evaluator._tasks), 2)
+            await evaluator.close()
 
 
 # ---------------------------------------------------------------------------
