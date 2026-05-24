@@ -385,8 +385,9 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
         asset: 통화쌍 ("usdt-krw").
 
     Returns:
-        True: Redis SET 성공.
-        False: latest 조회 실패 / sync helper 실패.
+        True: Redis SET 성공 (helper SET) 또는 5s grain coalesce (helper SKIPPED) —
+            둘 다 정상 latest 상태이므로 caller 관점 success.
+        False: latest 조회 None / sync helper FAILED outcome / 예외.
 
     Best-effort: 실패는 logger.warning만. **USDT source는 Z-2d allowlist 미통과로
     mirror cycle skip** — 즉 본 direct write가 실패하면 mirror cycle이 safety
@@ -402,7 +403,7 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
         )
         return False
     try:
-        success = latest_rates_cache.set_latest_usdt_rate_from_sync_job(
+        outcome = latest_rates_cache.set_latest_usdt_rate_from_sync_job(
             source=source,
             asset=asset,
             rate=latest["rate"],
@@ -414,12 +415,15 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
             extra={"source": source, "asset": asset},
         )
         return False
-    if not success:
+    # (5d-a) SKIPPED (5s grain coalesce)는 정상 — bool interface에서 success.
+    # FAILED만 false-positive 회피하며 warning 발사.
+    if outcome is latest_rates_cache.UsdtLatestWriteOutcome.FAILED:
         logger.warning(
-            "USDT Redis direct write False (best-effort, read path DB fallback에 의존)",
+            "USDT Redis direct write FAILED (best-effort, read path DB fallback에 의존)",
             extra={"source": source, "asset": asset, "rate": latest["rate"]},
         )
-    return success
+        return False
+    return True
 
 
 def collect_usdt_rates() -> None:

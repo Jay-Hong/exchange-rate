@@ -22,6 +22,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import redis as redis_sync  # sync client (PR Z-2e B-Step 1, scheduler thread 전용)
@@ -51,6 +52,20 @@ LATEST_INDEX_KEY = "latest:index"
 # DXY 적재 실패가 latest:index 갱신을 막아 rates fallback 전체를 유발하면 안 된다
 # (DXY-only fallback 보존). DXY 자체는 단일 key로 충분.
 LATEST_DXY_KEY = "latest:dxy:current"
+
+
+class UsdtLatestWriteOutcome(Enum):
+    """USDT direct writer 결과 — (5d-a) topic trigger 정책 입력.
+
+    - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
+    - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
+      Topic = change notification 역할이므로 동일 값/동일 bucket 재호출에 trigger 불필요.
+    - SET: Redis SET 성공 (cold-start GET miss 후 SET 포함). trigger 발사.
+    """
+
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    SET = "set"
 
 
 # ── Key helpers ──────────────────────────────────────────────
@@ -280,9 +295,10 @@ async def _set_latest(key: str, value: str) -> bool:
 #   - 향후 KRX/bank 등 sync crawler 확장 가능
 #
 # Key/value 포맷은 mirror cycle과 동일 (latest_key_source + serialize_value).
-# USDT source 실패는 logger.warning + False 반환. mirror cycle은 Z-2d 이후 USDT
-# source skip (legacy allowlist) — 실패 복구는 read path(B-Step 2)의 DB fallback이
-# 담당한다. (broadcast 대상 source는 mirror cycle이 여전히 safety repair.)
+# USDT source 실패는 logger.warning + UsdtLatestWriteOutcome.FAILED 반환. mirror
+# cycle은 Z-2d 이후 USDT source skip (legacy allowlist) — 실패 복구는 read
+# path(B-Step 2)의 DB fallback이 담당한다. (broadcast 대상 source는 mirror
+# cycle이 여전히 safety repair.)
 
 
 _sync_client: Optional[redis_sync.Redis] = None  # lazy module-level
@@ -333,7 +349,7 @@ def set_latest_usdt_rate_from_sync_job(
     asset: str,
     rate: float,
     timestamp: str,
-) -> bool:
+) -> UsdtLatestWriteOutcome:
     """sync scheduler thread 전용 direct writer.
 
     Args:
@@ -343,13 +359,16 @@ def set_latest_usdt_rate_from_sync_job(
         timestamp: ISO 8601 KST 문자열 (DB record.timestamp 기준).
 
     Returns:
-        True: Redis SET 성공.
-        False: client init 실패 / SET 예외.
+        UsdtLatestWriteOutcome.SET: Redis SET 성공 — topic trigger 발사.
+        UsdtLatestWriteOutcome.SKIPPED: same rate + same 5s bucket coalesce —
+            trigger 차단 (Topic = change notification 역할).
+        UsdtLatestWriteOutcome.FAILED: client init 실패 / parse 실패 / SET 예외 —
+            trigger 차단 + caller warning.
 
     설계 격리:
         - sync `redis.Redis` client 사용 (cache.py async와 분리)
         - **async circuit_breaker 호출 X** — broadcast/mirror Redis path 오염 회피
-        - 실패는 logger.warning + False
+        - 실패는 logger.warning + FAILED 반환
 
     Miss 처리 경로 (PR Z-2e B-Step 2):
         USDT source는 Z-2d allowlist 미통과로 mirror cycle skip. 즉 본 sync write가
@@ -363,7 +382,7 @@ def set_latest_usdt_rate_from_sync_job(
     client = _get_sync_client()
     if client is None:
         usdt_redis_stats.record_direct_write_failure(source)
-        return False
+        return UsdtLatestWriteOutcome.FAILED
 
     redis_key = latest_key_source(source, asset)
     state_key = (source, asset)
@@ -371,7 +390,7 @@ def set_latest_usdt_rate_from_sync_job(
     # 5b-bis (§12.8.3 결정 #1) — 옵션 A: in-memory state per (source, asset).
     # Warm state면 Redis GET 회피 (Redis I/O ↓↓ + saturation 완화).
     # Best-effort write 철학 (Codex Finding 3) — parse/serialize/coalesce/SET 전체
-    # try-block 안 → 모든 실패는 record_direct_write_failure + False로 통일.
+    # try-block 안 → 모든 실패는 record_direct_write_failure + FAILED로 통일.
     try:
         rate_decimal = Decimal(str(rate))
         tick_ts = _parse_kst(timestamp)
@@ -402,7 +421,7 @@ def set_latest_usdt_rate_from_sync_job(
             and state["rate"] == rate_decimal
             and state["seen_at"] == seen_at_floor
         ):
-            return True
+            return UsdtLatestWriteOutcome.SKIPPED
 
         # 4) rate_changed_at — same rate면 보존, 새 rate면 tick_ts (full precision)
         if state is not None and state["rate"] == rate_decimal:
@@ -423,7 +442,7 @@ def set_latest_usdt_rate_from_sync_job(
             "rate_changed_at": rate_changed_at,
         }
         usdt_redis_stats.record_direct_write_success(source)
-        return True
+        return UsdtLatestWriteOutcome.SET
     except Exception:
         usdt_redis_stats.record_direct_write_failure(source)
         logger.warning(
@@ -431,7 +450,7 @@ def set_latest_usdt_rate_from_sync_job(
             exc_info=True,
             extra={"key": redis_key},
         )
-        return False
+        return UsdtLatestWriteOutcome.FAILED
 
 
 def get_latest_usdt_rate_from_sync_job(

@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 
 from app import latest_rates_cache
 from app.latest_rates_cache import (
+    UsdtLatestWriteOutcome,
     _get_sync_client,
     set_latest_usdt_rate_from_sync_job,
 )
@@ -133,7 +134,7 @@ class TestSetLatestUsdtRateFromSyncJob(unittest.TestCase):
             rate=1485.5,
             timestamp="2026-05-12T15:00:00+09:00",
         )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SET)
         fake_client.set.assert_called_once()
         called_args = fake_client.set.call_args.args
         self.assertEqual(called_args[0], "latest:source:upbit:usdt-krw")
@@ -144,8 +145,8 @@ class TestSetLatestUsdtRateFromSyncJob(unittest.TestCase):
         self.assertEqual(parsed["timestamp"], "2026-05-12T15:00:00+09:00")
         self.assertIn("mirrored_at", parsed)
 
-    def test_returns_false_when_client_init_fails(self):
-        """init 실패 → False (best-effort skip).
+    def test_returns_failed_when_client_init_fails(self):
+        """init 실패 → FAILED (best-effort skip).
 
         logger.warning patch — _get_sync_client init 실패 시 발생하는
         warning(exc_info=True) traceback이 회귀 stderr 노출되지 않도록 차단 +
@@ -157,7 +158,7 @@ class TestSetLatestUsdtRateFromSyncJob(unittest.TestCase):
             result = set_latest_usdt_rate_from_sync_job(
                 "upbit", "usdt-krw", 1485.0, "2026-05-12T15:00:00+09:00"
             )
-        self.assertFalse(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.FAILED)
         mock_warn.assert_called_once()
 
 
@@ -175,8 +176,8 @@ class TestSyncRedisExceptionIsolation(unittest.TestCase):
         latest_rates_cache._sync_client = None
         latest_rates_cache._last_written_usdt_state.clear()
 
-    def test_set_exception_returns_false_with_warning(self):
-        """sync client .set() 예외 → False + warning (async circuit 미호출)."""
+    def test_set_exception_returns_failed_with_warning(self):
+        """sync client .set() 예외 → FAILED + warning (async circuit 미호출)."""
         fake_client = MagicMock()
         fake_client.set.side_effect = ConnectionError("simulated redis fault")
         latest_rates_cache._sync_client = fake_client
@@ -184,7 +185,7 @@ class TestSyncRedisExceptionIsolation(unittest.TestCase):
             result = set_latest_usdt_rate_from_sync_job(
                 "upbit", "usdt-krw", 1485.0, "2026-05-12T15:00:00+09:00"
             )
-        self.assertFalse(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.FAILED)
         mock_warn.assert_called_once()
 
     def test_does_not_touch_async_circuit_breaker(self):
@@ -236,7 +237,7 @@ class TestMirrorChangedSourceToRedis(unittest.TestCase):
         with patch("app.crawlers.usdt_sources.crud.get_latest_source_rate",
                    return_value=fake_latest) as mock_get, \
              patch("app.crawlers.usdt_sources.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-                   return_value=True) as mock_set:
+                   return_value=UsdtLatestWriteOutcome.SET) as mock_set:
             result = usdt_sources._mirror_changed_source_to_redis(
                 db=db, source="upbit", asset="usdt-krw"
             )
@@ -256,7 +257,7 @@ class TestMirrorChangedSourceToRedis(unittest.TestCase):
         with patch("app.crawlers.usdt_sources.crud.get_latest_source_rate",
                    return_value=None) as mock_get, \
              patch("app.crawlers.usdt_sources.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-                   return_value=True) as mock_set, \
+                   return_value=UsdtLatestWriteOutcome.SET) as mock_set, \
              patch("app.crawlers.usdt_sources.logger.warning") as mock_warn:
             result = usdt_sources._mirror_changed_source_to_redis(
                 db=db, source="upbit", asset="usdt-krw"
@@ -264,6 +265,51 @@ class TestMirrorChangedSourceToRedis(unittest.TestCase):
         self.assertFalse(result)
         mock_get.assert_called_once_with(db, "upbit", "usdt-krw")
         mock_set.assert_not_called()
+        mock_warn.assert_called_once()
+
+    def test_skipped_outcome_treated_as_success(self):
+        """(5d-a) helper SKIPPED outcome → mirror bool interface True (no false-positive warning).
+
+        SKIPPED는 정상적인 5s grain coalesce — caller에게 success로 반환.
+        """
+        from app.crawlers import usdt_sources
+        fake_latest = {
+            "bank": "upbit",
+            "currency": "usdt-krw",
+            "rate": 1485.5,
+            "timestamp": "2026-05-12T15:00:00+09:00",
+        }
+        db = MagicMock()
+        with patch("app.crawlers.usdt_sources.crud.get_latest_source_rate",
+                   return_value=fake_latest), \
+             patch("app.crawlers.usdt_sources.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+                   return_value=UsdtLatestWriteOutcome.SKIPPED), \
+             patch("app.crawlers.usdt_sources.logger.warning") as mock_warn:
+            result = usdt_sources._mirror_changed_source_to_redis(
+                db=db, source="upbit", asset="usdt-krw"
+            )
+        self.assertTrue(result)
+        mock_warn.assert_not_called()
+
+    def test_failed_outcome_returns_false_with_warning(self):
+        """(5d-a) helper FAILED outcome → mirror bool interface False + warning."""
+        from app.crawlers import usdt_sources
+        fake_latest = {
+            "bank": "upbit",
+            "currency": "usdt-krw",
+            "rate": 1485.5,
+            "timestamp": "2026-05-12T15:00:00+09:00",
+        }
+        db = MagicMock()
+        with patch("app.crawlers.usdt_sources.crud.get_latest_source_rate",
+                   return_value=fake_latest), \
+             patch("app.crawlers.usdt_sources.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+                   return_value=UsdtLatestWriteOutcome.FAILED), \
+             patch("app.crawlers.usdt_sources.logger.warning") as mock_warn:
+            result = usdt_sources._mirror_changed_source_to_redis(
+                db=db, source="upbit", asset="usdt-krw"
+            )
+        self.assertFalse(result)
         mock_warn.assert_called_once()
 
     def test_isolates_redis_exception(self):
@@ -1048,7 +1094,7 @@ class TestSetLatestUsdtRateCoalescing(unittest.TestCase):
         return client
 
     def test_same_rate_same_bucket_skip(self):
-        """Same rate + same 5s bucket → SET skip, True 반환, success counter 미증가."""
+        """Same rate + same 5s bucket → SKIPPED, success counter 미증가."""
         existing = serialize_usdt_value(
             _Decimal("1473.5"),
             datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),  # rate_changed_at
@@ -1064,7 +1110,7 @@ class TestSetLatestUsdtRateCoalescing(unittest.TestCase):
                 rate=1473.5,
                 timestamp="2026-05-24T20:34:47.500000+09:00",  # 같은 bucket
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SKIPPED)
         client.set.assert_not_called()  # SET skip
         mock_success.assert_not_called()  # success counter 미증가
 
@@ -1086,7 +1132,7 @@ class TestSetLatestUsdtRateCoalescing(unittest.TestCase):
                 rate=1473.5,
                 timestamp="2026-05-24T20:34:50.123000+09:00",  # 다음 bucket
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SET)
         client.set.assert_called_once()
         mock_success.assert_called_once()
         # SET value 확인 — rate_changed_at 유지, seen_at 새 bucket
@@ -1113,7 +1159,7 @@ class TestSetLatestUsdtRateCoalescing(unittest.TestCase):
                 rate=1474.0,  # 새 rate
                 timestamp="2026-05-24T20:34:47.500000+09:00",  # 같은 bucket이지만 rate 변경
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SET)
         client.set.assert_called_once()
         _, args, _ = client.set.mock_calls[0]
         parsed_new = deserialize_usdt_value(args[1])
@@ -1142,7 +1188,7 @@ class TestSetLatestUsdtRateCoalescing(unittest.TestCase):
                 timestamp="2026-05-24T20:34:47.500000+09:00",
             )
         # Same bucket + same rate → skip (float drift 없음)
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SKIPPED)
         client.set.assert_not_called()
         mock_success.assert_not_called()
 
@@ -1184,7 +1230,7 @@ class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
                 rate=1473.5,
                 timestamp="2026-05-24T20:34:47+09:00",
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SET)
         client.set.assert_called_once()
         # State populated
         state = latest_rates_cache._last_written_usdt_state.get(("upbit", "usdt-krw"))
@@ -1211,7 +1257,7 @@ class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
                 rate=1473.5,
                 timestamp="2026-05-24T20:34:47.500000+09:00",  # same bucket
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SKIPPED)
         client.get.assert_called_once()  # cold-start GET 1회
         client.set.assert_not_called()    # same bucket → SET skip
         mock_success.assert_not_called()
@@ -1237,7 +1283,7 @@ class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
                 rate=1473.5,
                 timestamp="2026-05-24T20:34:47.500000+09:00",  # same bucket
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SKIPPED)
         client.get.assert_not_called()  # warm state → GET 회피 (핵심)
         client.set.assert_not_called()  # same bucket → SET skip
         mock_success.assert_not_called()
@@ -1283,7 +1329,7 @@ class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
                 rate=1474.0,  # rate 변경 → SET 시도
                 timestamp="2026-05-24T20:34:50+09:00",
             )
-        self.assertFalse(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.FAILED)
         # State 그대로 (drift 방지)
         state = latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")]
         self.assertEqual(state["rate"], original_state["rate"])
@@ -1320,7 +1366,7 @@ class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
                 rate=1473.5,
                 timestamp="2026-05-24T20:34:47+09:00",
             )
-        self.assertTrue(result)
+        self.assertIs(result, UsdtLatestWriteOutcome.SET)
         client.set.assert_called_once()
         mock_success.assert_called_once()
         # State 갱신 (GET 실패해도 SET 성공 → state 새로 populate)

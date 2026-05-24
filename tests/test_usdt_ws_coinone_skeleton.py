@@ -65,6 +65,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
+from app.latest_rates_cache import UsdtLatestWriteOutcome
 from app.crawlers.usdt_ws.coinone import (
     COINONE_QUOTE_CURRENCY,
     COINONE_TARGET_CURRENCY,
@@ -865,7 +866,7 @@ class TestCoinoneRedisWriterScheduleSuccess(unittest.IsolatedAsyncioTestCase):
             captured_kwargs["asset"] = asset
             captured_kwargs["rate"] = rate
             captured_kwargs["timestamp"] = timestamp
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         # tether_topic_trigger는 success 시 호출됨 — spy
         trigger_calls = []
@@ -917,7 +918,7 @@ class TestCoinoneRedisWriterHelperFailureIsolated(unittest.IsolatedAsyncioTestCa
 
         with patch(
             "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ), patch(
             "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
             side_effect=lambda **kw: trigger_calls.append(kw),
@@ -959,7 +960,7 @@ class TestCoinoneRedisWriterTriggerExceptionIsolated(unittest.IsolatedAsyncioTes
 
         def fake_helper(**kw):
             helper_calls.append(kw)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -986,7 +987,7 @@ class TestCoinoneRedisWriterSaturation(unittest.IsolatedAsyncioTestCase):
         # MAX_PENDING_WRITES 만큼 fake task 채움 (실제 _write_async가 끝나기 전 상태 simulate)
         async def slow_helper(**kw):
             await asyncio.sleep(10.0)  # 일부러 hang
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1020,7 +1021,7 @@ class TestCoinoneRedisWriterClose(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
         ):
@@ -1038,7 +1039,7 @@ class TestCoinoneRedisWriterClose(unittest.IsolatedAsyncioTestCase):
 
         async def slow_helper(**kw):
             await asyncio.sleep(10.0)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -2231,7 +2232,7 @@ class TestCoinoneRedisWriterSaturationSemantics(unittest.IsolatedAsyncioTestCase
         # helper False 반환 → _write_async 안 success=False path, saturation branch 미진입
         with patch(
             "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ), patch(
             "app.crawlers.usdt_ws.coinone.tether_topic_trigger.request_tether_topic_trigger",
         ):

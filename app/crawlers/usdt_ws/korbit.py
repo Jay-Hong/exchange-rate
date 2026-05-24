@@ -227,7 +227,9 @@ class KorbitRedisWriter:
         Redis write 성공 시 lock 밖에서 tether topic trigger 호출.
         trigger 예외는 writer/WS session에 전파하지 않음.
         """
-        success = False
+        outcome: latest_rates_cache.UsdtLatestWriteOutcome = (
+            latest_rates_cache.UsdtLatestWriteOutcome.FAILED
+        )
         source = tick["source"]
         asset = tick["asset"]
         async with self._write_lock:
@@ -236,16 +238,16 @@ class KorbitRedisWriter:
                 tick["timestamp_ms"] / 1000, tz=_KST,
             ).isoformat()
             try:
-                success = await asyncio.to_thread(
+                outcome = await asyncio.to_thread(
                     latest_rates_cache.set_latest_usdt_rate_from_sync_job,
                     source=source,
                     asset=asset,
                     rate=tick["rate"],
                     timestamp=ts_iso,
                 )
-                if not success:
+                if outcome is latest_rates_cache.UsdtLatestWriteOutcome.FAILED:
                     logger.warning(
-                        "[usdt_ws.korbit] Redis write returned False "
+                        "[usdt_ws.korbit] Redis write returned FAILED "
                         "(helper 내부 log 참조, WS session 유지)"
                     )
             except asyncio.CancelledError:
@@ -254,11 +256,12 @@ class KorbitRedisWriter:
                 logger.exception(
                     "[usdt_ws.korbit] Redis write task crashed (격리, WS session 유지)"
                 )
-                success = False
+                outcome = latest_rates_cache.UsdtLatestWriteOutcome.FAILED
 
-        # lock 밖에서 trigger — Redis write 성공 시에만.
+        # (5d-a) lock 밖에서 trigger — Redis SET 성공 시에만 (change notification).
+        # SKIPPED (5s grain coalesce) / FAILED 시 trigger 차단.
         # trigger 호출 자체의 예외는 writer/WS에 전파 X (책임 분리).
-        if success:
+        if outcome is latest_rates_cache.UsdtLatestWriteOutcome.SET:
             try:
                 tether_topic_trigger.request_tether_topic_trigger(
                     source=source,

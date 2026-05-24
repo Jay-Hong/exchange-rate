@@ -33,6 +33,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
+from app.latest_rates_cache import UsdtLatestWriteOutcome
 from app.crawlers.usdt_ws.bithumb import (
     BITHUMB_SUBSCRIBE_TICKET,
     BITHUMB_TARGET_CODE,
@@ -879,7 +880,7 @@ class TestBithumbRedisWriterSchedule(unittest.IsolatedAsyncioTestCase):
 
         # to_thread + helper mock → 즉시 성공 반환
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -936,7 +937,7 @@ class TestRedisWriteLockOrdering(unittest.IsolatedAsyncioTestCase):
             call_order.append(int(rate))
             # 짧은 yield로 다른 task가 진입 시도하더라도 lock에 의해 차단됨
             await asyncio.sleep(0.001)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -962,7 +963,7 @@ class TestRedisHelperUsesToThread(unittest.IsolatedAsyncioTestCase):
         tick = _make_valid_tick()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -998,7 +999,7 @@ class TestTopicTriggerOnSuccessOnly(unittest.IsolatedAsyncioTestCase):
         writer = BithumbRedisWriter()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -1014,7 +1015,7 @@ class TestTopicTriggerOnSuccessOnly(unittest.IsolatedAsyncioTestCase):
         writer = BithumbRedisWriter()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return False
+            return UsdtLatestWriteOutcome.FAILED
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -1058,7 +1059,7 @@ class TestTopicTriggerReasonReused(unittest.IsolatedAsyncioTestCase):
         writer = BithumbRedisWriter()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -1084,7 +1085,7 @@ class TestTriggerExceptionIsolated(unittest.IsolatedAsyncioTestCase):
         writer = BithumbRedisWriter()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -1110,7 +1111,7 @@ class TestRedisCloseDrain(unittest.IsolatedAsyncioTestCase):
         writer = BithumbRedisWriter()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -1131,7 +1132,7 @@ class TestRedisCloseDrain(unittest.IsolatedAsyncioTestCase):
         async def hung_to_thread(func, *args, **kwargs):
             # close timeout보다 훨씬 길게 대기
             await asyncio.sleep(60)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",
@@ -1360,7 +1361,7 @@ class TestSessionLevelCloseAndReconnectReuse(unittest.IsolatedAsyncioTestCase):
         writer = BithumbRedisWriter()
 
         async def fake_to_thread(func, *args, **kwargs):
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.bithumb.asyncio.to_thread",

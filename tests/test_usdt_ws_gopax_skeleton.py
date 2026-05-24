@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from websockets.exceptions import ConnectionClosed
 
 from app import config, scheduler
+from app.latest_rates_cache import UsdtLatestWriteOutcome
 from app.crawlers.usdt_ws.gopax import (
     GOPAX_WS_URL,
     MAX_PENDING_WRITES,
@@ -1059,7 +1060,7 @@ class TestGopaxRedisWriterScheduleSuccess(unittest.IsolatedAsyncioTestCase):
                 "source": source, "asset": asset,
                 "rate": rate, "timestamp": timestamp,
             })
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1122,7 +1123,7 @@ class TestGopaxRedisWriterSaturationSemantics(unittest.IsolatedAsyncioTestCase):
         writer = GopaxRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ), patch(
             "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
         ):
@@ -1174,7 +1175,7 @@ class TestGopaxTopicTriggerOnSuccessOnly(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
             side_effect=fake_trigger,
@@ -1200,7 +1201,7 @@ class TestGopaxTopicTriggerOnSuccessOnly(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ), patch(
             "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
             side_effect=fake_trigger,
@@ -1219,7 +1220,7 @@ class TestGopaxRedisCloseDrain(unittest.IsolatedAsyncioTestCase):
         writer = GopaxRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.gopax.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.gopax.tether_topic_trigger.request_tether_topic_trigger",
         ):

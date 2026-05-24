@@ -25,6 +25,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
+from app.latest_rates_cache import UsdtLatestWriteOutcome
 from app.notifications.price_alert_coalescer import PriceAlertEvaluationInput
 from app.crawlers.usdt_ws import upbit as upbit_mod
 from app.crawlers.usdt_ws.upbit import (
@@ -907,7 +908,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
         writer = UpbitRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ):
             start = time.time()
             writer.schedule(_make_tick())
@@ -924,7 +925,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
         writer = UpbitRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ) as mock_helper:
             writer.schedule(_make_tick(rate=1500.5, timestamp_ms=1777370239843))
             await writer.close()
@@ -952,7 +953,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ) as mock_helper:
             writer.schedule(_make_tick(timestamp_ms=ts_ms))
             await writer.close()
@@ -964,7 +965,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
         writer = UpbitRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ):
             writer.schedule(_make_tick())
             # gather가 raise 안 함 (return_exceptions=True)
@@ -988,7 +989,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
         def slow_helper(**kwargs):
             time.sleep(0.05)  # 50ms
             completed.append(kwargs["rate"])
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1011,7 +1012,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
             # timeout 0.05s이라 cancel은 일어남 (Python sync sleep은 interrupt
             # 안 되지만 asyncio.wait_for + return_exceptions로 즉시 종료).
             time.sleep(0.5)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1053,7 +1054,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
                 # T1만 느리게
                 time.sleep(0.05)
             completion_order.append(kwargs["rate"])
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1084,7 +1085,7 @@ class TestUpbitRedisWriter(unittest.IsolatedAsyncioTestCase):
         # 추가 schedule 시도 → skip
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ) as mock_helper:
             writer.schedule(_make_tick())
             self.assertEqual(mock_helper.call_count, 0)
@@ -1177,10 +1178,11 @@ class TestUpbitSessionRedisIntegration(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 class TestUpbitRedisWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
-    """Regression guards for Phase B.2 PR2.
+    """Regression guards for Phase B.2 PR2 + (5d-a) SKIPPED 차단.
 
-    - Redis write success(True) → trigger 호출 1회
-    - Redis write False → trigger 호출 X
+    - Redis write SET → trigger 호출 1회 (change notification)
+    - Redis write FAILED → trigger 호출 X
+    - Redis write SKIPPED (5s grain coalesce) → trigger 호출 X (5d-a)
     - Redis helper exception → trigger 호출 X + writer 격리
     - Trigger 자체 예외 → writer/WS 영향 X
     - reason 상수 (TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS) 전달
@@ -1190,7 +1192,7 @@ class TestUpbitRedisWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
         writer = UpbitRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger"
         ) as mock_trigger:
@@ -1207,7 +1209,25 @@ class TestUpbitRedisWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
         writer = UpbitRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
+        ), patch(
+            "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger"
+        ) as mock_trigger:
+            writer.schedule(_make_tick())
+            await writer.close()
+
+        mock_trigger.assert_not_called()
+
+    async def test_trigger_not_called_when_redis_write_returns_skipped(self):
+        """(5d-a) SKIPPED outcome (5s grain coalesce) → trigger 차단.
+
+        Topic = change notification 역할. 동일 값/동일 bucket 재호출에서
+        topic publish 불필요. 5 source 동일 패턴이므로 Upbit를 대표로 검증.
+        """
+        writer = UpbitRedisWriter()
+        with patch(
+            "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
+            return_value=UsdtLatestWriteOutcome.SKIPPED,
         ), patch(
             "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger"
         ) as mock_trigger:
@@ -1234,7 +1254,7 @@ class TestUpbitRedisWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
         writer = UpbitRedisWriter()
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger",
             side_effect=RuntimeError("trigger boom"),
@@ -1269,7 +1289,7 @@ class TestUpbitRedisWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
             writer = UpbitRedisWriter()
             with patch(
                 "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-                return_value=True,
+                return_value=UsdtLatestWriteOutcome.SET,
             ):
                 writer.schedule(_make_tick())
                 await writer.close()
@@ -2812,7 +2832,7 @@ class TestUpbitRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
         # MAX_PENDING_WRITES 개수만큼 fake task 채워서 saturation 유도
         async def slow_helper(**kw):
             await asyncio.sleep(10.0)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -2841,7 +2861,7 @@ class TestUpbitRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.upbit.tether_topic_trigger.request_tether_topic_trigger",
         ):
@@ -2861,7 +2881,7 @@ class TestUpbitRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
         # helper False 반환 (Redis SET 실패) — saturation 아님
         with patch(
             "app.crawlers.usdt_ws.upbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ):
             writer.schedule(tick)
             await writer.close(timeout=2.0)

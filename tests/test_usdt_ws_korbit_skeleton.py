@@ -45,6 +45,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from websockets.exceptions import ConnectionClosed
 
 from app import config, scheduler
+from app.latest_rates_cache import UsdtLatestWriteOutcome
 from app.crawlers.usdt_ws.korbit import (
     DB_WRITE_WINDOW_SEC,
     FALLBACK_COOLDOWN_SEC,
@@ -1014,7 +1015,7 @@ class TestKorbitRedisWriterScheduleSuccess(unittest.IsolatedAsyncioTestCase):
             captured_kwargs["asset"] = asset
             captured_kwargs["rate"] = rate
             captured_kwargs["timestamp"] = timestamp
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         trigger_calls = []
 
@@ -1059,7 +1060,7 @@ class TestKorbitRedisWriterHelperFailureIsolated(unittest.IsolatedAsyncioTestCas
 
         with patch(
             "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=False,
+            return_value=UsdtLatestWriteOutcome.FAILED,
         ), patch(
             "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
             side_effect=lambda **kw: trigger_calls.append(kw),
@@ -1097,7 +1098,7 @@ class TestKorbitRedisWriterTriggerExceptionIsolated(unittest.IsolatedAsyncioTest
 
         def fake_helper(**kw):
             helper_calls.append(kw)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1120,7 +1121,7 @@ class TestKorbitRedisWriterSaturation(unittest.IsolatedAsyncioTestCase):
 
         async def slow_helper(**kw):
             await asyncio.sleep(10.0)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
@@ -1150,7 +1151,7 @@ class TestKorbitRedisWriterClose(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            return_value=True,
+            return_value=UsdtLatestWriteOutcome.SET,
         ), patch(
             "app.crawlers.usdt_ws.korbit.tether_topic_trigger.request_tether_topic_trigger",
         ):
@@ -1166,7 +1167,7 @@ class TestKorbitRedisWriterClose(unittest.IsolatedAsyncioTestCase):
 
         async def slow_helper(**kw):
             await asyncio.sleep(10.0)
-            return True
+            return UsdtLatestWriteOutcome.SET
 
         with patch(
             "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
