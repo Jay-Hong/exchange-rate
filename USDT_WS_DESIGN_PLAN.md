@@ -1042,6 +1042,59 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 - 단기: 운영 위험성 평가 후 즉시 검토 가능 (현재 status normal 유지라 긴급도 낮음)
 - 중기: All-source freshness metadata + fanout contract phase로 진입 (5 source + Bank/Investing + KRX 통합 — REALTIME §4.1 anchor 기반)
 
+#### 12.8.3 Follow-up implementation decision — price alert coalescing (2026-05-24 합의)
+
+**컨텍스트**: §12.8.2 follow-up의 implementation phase 진입 합의. (5a) coalescer 설계 + (5b) USDT 5 source alert path 적용 PR scope 결정. 본 항목은 §12.8.2의 후속 implementation decision으로, [REALTIME_ARCHITECTURE_PLAN.md §4.1 "All-source observation fanout contract"](REALTIME_ARCHITECTURE_PLAN.md) 안의 단일 가격 alert 영역. Redis freshness grain (정책 D — `seen_at` 5s wall-clock grain rounding)은 결정에는 포함하되 *별 sub-PR*로 분리 (§12.8.3.3 참조) — Redis value schema 변경 + topic payload/read path 영향이라 blast radius 분리.
+
+📌 **상위 anchor**: terminology는 [REALTIME_ARCHITECTURE_PLAN.md §4.1.3](REALTIME_ARCHITECTURE_PLAN.md) 단일 정의 따른다. 본 항목은 USDT 5 source 단일 가격 alert path만 다룬다 — 비교 알림(Phase E)과 KRX/Bank/Investing 측 적용은 별도.
+
+##### 12.8.3.1 12 결정 사항 (확정)
+
+| # | 영역 | 확정 |
+| --- | --- | --- |
+| 1 | Redis write coalescing | 정책 D — `seen_at` 5s wall-clock grain rounding *(별 sub-PR — §12.8.3.3 참조, blast radius 분리)* |
+| 2 | Alert window pattern | A-3 — wall-clock 5s grain (`floor(now/5s)*5s`) |
+| 3 | Window summary 필드 | `min_rate` / `max_rate` / `last_rate` / `window_start/end` / `tick_count` |
+| 4 | Coalescer 위치 | 별도 모듈 (`app/notifications/price_alert_coalescer.py`) + UsdtAlertEvaluator composition (호출부 무변경) |
+| 5 | Source-specific window 값 | USDT/KRX = 5s, Bank/Investing = 0 (pass-through) |
+| 6 | Tick 없으면 평가 | skip (B1 once-only); B2 due path만 예외 |
+| 7 | 비교 알림 | (5a) 영역 외 — Phase E 별도 evaluator (interface 흔적 X) |
+| 8 | 반복 알림 (B2) | (5a) interface forward-compat만 (`Literal["price_window", "repeat_due"]`만 허용, `comparison_snapshot` 제외) |
+| 9 | Evaluator input model | `PriceAlertEvaluationInput` dataclass + 단일 `schedule(observation)` entry (input_kind dispatch 내부) |
+| 10 | condition_matches 분리 | `condition_matches_observation` (raw observation용 보존) + `condition_matches_price_input` (window용 신규) |
+| 11 | triggered_rate 산출 | `matched_triggered_rate(setting, price_input) -> Decimal \| None` 통합 함수 (above=max_rate, below=min_rate) |
+| 12 | `rest_probe` 처리 | Coalescer pass-through 즉시 평가 ("상태 변화/복구" 성격이라 burst 최적화 대상 외) |
+
+##### 12.8.3.2 (5b) PR scope — USDT 5 source alert path 적용 (6 항목)
+
+> ⚠️ Evaluator 내부 composition 방식이라 *5 source 자동 동시 적용*. Upbit-only 점진 도입이 필요하면 source-specific coalescer config로 별도 gating 해야 한다. 결정 #5 USDT/KRX = 5s 통일 정합.
+
+1. `PriceAlertEvaluationInput` + `PriceAlertCoalescer` 신규 모듈 (`app/notifications/price_alert_coalescer.py`)
+2. UsdtAlertEvaluator 내부 composition으로 coalescer 적용 (5 source 호출부 변경 없음)
+3. `kind="tick"`만 5s wall-clock grain window coalesce
+4. `kind="rest_probe"`는 pass-through 즉시 평가 (window 우회)
+5. window 평가 시 `max_rate`/`min_rate` 기준 condition match, `triggered_rate` 분리 기록 (`_send_one()` + `_build_fcm_payload()` 시그니처 갱신)
+6. 기존 5 source 호출부 무변경 — `schedule(AlertObservation)` public API 유지
+
+##### 12.8.3.3 명시적 범위 외 (별 PR/ADR)
+
+- **Redis freshness grain (정책 D `seen_at` 5s grain)**: 별 sub-PR — `latest_rates_cache.py` USDT helper schema 변경 (`rate_changed_at` / `seen_at` / `mirrored_at` 필드 추가) + topic payload/read path 영향. alert coalescing PR과 분리해 blast radius 축소. 결정표 #1과 함께 잠금.
+- **비교 알림 (Phase E)**: `ComparisonAlertEvaluationInput` + `ComparisonAlertEvaluator`는 별도 evaluator로 도입. (5a) `PriceAlertEvaluationInput`에 *interface 슬롯 X*.
+- **B2 `repeat_interval_sec` 실제 구현**: interface forward-compat만 (Literal type slot). 실제 schema/API/iOS/Android UI는 별 ADR.
+- **B3 direction crossing**: B2 안정 후 별 ADR.
+- **Redis ZSET threshold index**: §13.4 Phase 3 영역.
+- **Bank/Investing β 옵션 적용**: [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) — coalescer `window=0` pass-through 적용은 (3) 영역.
+- **KRX Stage E 적용**: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 Stage E](KRX_FANOUT_REFACTOR_PLAN.md) — coalescer `window=5s` 적용은 (4) 영역.
+
+##### 12.8.3.4 4 forward-compat 원칙 정합 (cross-ref)
+
+본 결정은 §13.10 condition evaluation coalescing 정책의 USDT 5 source 측 implementation phase 진입. 4 원칙 매핑:
+
+1. AlertObservation / evaluator interface를 단일 source 전용으로 굳히지 않기 — ✅ `AlertObservation` 그대로 + `PriceAlertEvaluationInput` 신규 (`kind="comparison"` 추가 X)
+2. coalescing 구현을 단일 가격 전용 컴포넌트로 분리 — ✅ `PriceAlertCoalescer` 별 모듈
+3. 미래 `ComparisonAlertEvaluator`는 Redis latest snapshot 기반 별도 evaluator — ✅ Phase E 범위 외 명시
+4. "same-rate coalescing" 명칭은 단일 가격 내부 정책으로만, 상위 abstract = condition evaluation coalescing — ✅ §13.10 anchor 유지
+
 ### 12.9 Phase B.6 — Gopax WS 확장 (Primus protocol, 전체 ticker 구독)
 
 Gopax는 기존 4 source 중 가장 다른 구조다. 전체 ticker 구독 + 클라이언트측
