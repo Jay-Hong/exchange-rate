@@ -14,10 +14,13 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal, Protocol
+
+logger = logging.getLogger("exchange_rate.notifications.price_alert_coalescer")
 
 _KST = timezone(timedelta(hours=9))
 
@@ -113,7 +116,22 @@ class PriceAlertCoalescer:
         flushed: list[PriceAlertEvaluationInput] = []
         existing = self._buckets.get(key)
 
+        if existing is not None and window_start < existing.window_start:
+            # Out-of-order tick — active bucket보다 과거. 누적/flush 시 min/max 왜곡
+            # + 과거 bucket으로 되돌리는 부작용 차단. drop + warning.
+            logger.warning(
+                "[price_alert_coalescer] out-of-order tick dropped: "
+                "source=%s asset=%s tick_window_start=%s < active_window_start=%s rate=%s",
+                observation.source,
+                observation.asset,
+                window_start.isoformat(),
+                existing.window_start.isoformat(),
+                rate,
+            )
+            return []
+
         if existing is not None and existing.window_start != window_start:
+            # window_start > existing.window_start — 정상 bucket boundary 넘음
             flushed.append(
                 self._summary_from_bucket(observation.source, observation.asset, existing)
             )

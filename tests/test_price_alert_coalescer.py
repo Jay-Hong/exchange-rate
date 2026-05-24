@@ -13,6 +13,7 @@ Codex 7 핵심 tests:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -171,3 +172,51 @@ def test_non_tick_kind_raises_value_error() -> None:
 def test_negative_window_sec_rejected() -> None:
     with pytest.raises(ValueError, match="window_sec must be >= 0"):
         PriceAlertCoalescer(window_sec=-1)
+
+
+# Test 8: out-of-order tick drop + warning (5b-3a) ------------------------------
+def test_out_of_order_tick_dropped(caplog: pytest.LogCaptureFixture) -> None:
+    """과거 timestamp tick → drop + warning. 기존 bucket state 미변경 검증.
+
+    Codex 5b-3a 정밀화:
+    - 반환값: 빈 list
+    - 상태: out-of-order tick은 active bucket에 누적 안 됨 (min/max 왜곡 차단)
+    - log: "out-of-order" 핵심 문자열 (logger 이름 과도 의존 회피)
+    """
+    coalescer = PriceAlertCoalescer(window_sec=5)
+    # active bucket = [06:00:05, 06:00:10)
+    coalescer.add(_FakeObs("upbit", "usdt-krw", 1473.0, _ms(2026, 5, 24, 6, 0, 5)))
+    coalescer.add(_FakeObs("upbit", "usdt-krw", 1474.0, _ms(2026, 5, 24, 6, 0, 6)))
+
+    # Out-of-order: tick_ws=[06:00:00, 06:00:05) < active [06:00:05, 06:00:10)
+    caplog.set_level(logging.WARNING, logger="exchange_rate.notifications.price_alert_coalescer")
+    result = coalescer.add(_FakeObs("upbit", "usdt-krw", 1500.0, _ms(2026, 5, 24, 6, 0, 4)))
+
+    # 반환값 검증 — 빈 list
+    assert result == []
+
+    # 핵심 문자열 검증 — logger 이름 의존 회피 (메시지 자체 확인)
+    assert any("out-of-order" in rec.getMessage() for rec in caplog.records)
+
+    # 상태 검증 — out-of-order tick의 rate=1500.0이 active bucket에 누적되지 않음
+    final = coalescer.flush_pending()
+    assert len(final) == 1
+    summary = final[0]
+    assert summary.tick_count == 2  # 처음 2 tick만 (out-of-order 제외)
+    assert summary.min_rate == Decimal("1473.0")
+    assert summary.max_rate == Decimal("1474.0")  # 1500.0 무시 — 정확 drop 증거
+
+
+def test_same_window_start_treated_as_same_bucket() -> None:
+    """``window_start == existing.window_start``는 out-of-order가 아니라 정상 같은 bucket."""
+    coalescer = PriceAlertCoalescer(window_sec=5)
+    # 같은 bucket = [06:00:05, 06:00:10) — 모두 정상 누적
+    coalescer.add(_FakeObs("upbit", "usdt-krw", 1473.0, _ms(2026, 5, 24, 6, 0, 5)))
+    result = coalescer.add(_FakeObs("upbit", "usdt-krw", 1474.0, _ms(2026, 5, 24, 6, 0, 5, 500)))
+    assert result == []  # 같은 bucket, flush 없음
+    # 양쪽 tick 모두 누적 확인
+    final = coalescer.flush_pending()
+    assert len(final) == 1
+    assert final[0].tick_count == 2
+    assert final[0].min_rate == Decimal("1473.0")
+    assert final[0].max_rate == Decimal("1474.0")
