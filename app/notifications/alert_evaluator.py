@@ -50,7 +50,10 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
+
+from app.notifications.price_alert_coalescer import PriceAlertEvaluationInput
 
 logger = logging.getLogger("exchange_rate.notifications.alert_evaluator")
 
@@ -127,8 +130,8 @@ class FreshSettingSnapshot:
 # Pure functions (조건 평가 / 발송 정책)
 # ---------------------------------------------------------------------------
 
-def condition_matches(setting: CachedAlertSetting, observation: AlertObservation) -> bool:
-    """가격 조건 만족 여부 (above/below 경계 ≥/≤).
+def condition_matches_observation(setting: CachedAlertSetting, observation: AlertObservation) -> bool:
+    """가격 조건 만족 여부 — raw observation rate 기준 (above/below 경계 ≥/≤).
 
     기존 `crud.get_triggered_source_settings_for_rate` 조건 보존.
     """
@@ -137,6 +140,44 @@ def condition_matches(setting: CachedAlertSetting, observation: AlertObservation
     if setting.condition == "below" and observation.rate <= setting.threshold:
         return True
     return False
+
+
+# Backward-compat alias — 기존 호출처(`_evaluate_async`, `_send_one`)는 alias로 동작 보존.
+# 점진 마이그레이션은 5b-3 composition 단계에서 (호출처 변경 없이 evaluator 내부에서 dispatch).
+condition_matches = condition_matches_observation
+
+
+def matched_triggered_rate(
+    setting: CachedAlertSetting, price_input: PriceAlertEvaluationInput
+) -> Optional[Decimal]:
+    """조건 만족 시 trigger 가격 산출 — 조건 + 가격을 같은 기준에서 통합 결정.
+
+    above 조건 만족 → ``max_rate`` 반환 (window 동안 최고가, 실제 crossing한 가격)
+    below 조건 만족 → ``min_rate`` 반환 (window 동안 최저가)
+    조건 불만족 → ``None``
+
+    §12.8.3 결정 #11 정합 — FCM/log payload ``triggered_rate`` field 산출 source.
+    """
+    threshold = Decimal(str(setting.threshold))
+    if setting.condition == "above" and price_input.max_rate >= threshold:
+        return price_input.max_rate
+    if setting.condition == "below" and price_input.min_rate <= threshold:
+        return price_input.min_rate
+    return None
+
+
+def condition_matches_price_input(
+    setting: CachedAlertSetting, price_input: PriceAlertEvaluationInput
+) -> bool:
+    """Window-aware 조건 평가 — crossing 보존.
+
+    above: ``max_rate >= threshold`` (window 동안 최고가)
+    below: ``min_rate <= threshold`` (window 동안 최저가)
+
+    §12.8.3 결정 #10/#11 정합. ``matched_triggered_rate is not None``과 동일 —
+    조건 만족 기준과 ``triggered_rate`` 산출이 drift 없이 자동 일치.
+    """
+    return matched_triggered_rate(setting, price_input) is not None
 
 
 def delivery_allowed(snapshot: FreshSettingSnapshot, now: datetime) -> bool:

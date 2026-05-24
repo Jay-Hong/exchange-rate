@@ -21,9 +21,11 @@ import json
 import time
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from app import config, scheduler
+from app.notifications.price_alert_coalescer import PriceAlertEvaluationInput
 from app.crawlers.usdt_ws import upbit as upbit_mod
 from app.crawlers.usdt_ws.upbit import (
     DB_WRITE_WINDOW_SEC,
@@ -56,7 +58,10 @@ from app.notifications.alert_evaluator import (
     FreshSettingSnapshot,
     UsdtAlertEvaluator,
     condition_matches,
+    condition_matches_observation,
+    condition_matches_price_input,
     delivery_allowed,
+    matched_triggered_rate,
     get_default_alert_settings_cache,
     invalidate_alert_settings_cache,
 )
@@ -1599,6 +1604,131 @@ class TestConditionMatches(unittest.TestCase):
         s = _make_cached_setting(condition="below", threshold=1500.0)
         o = _make_observation(rate=1499.99)
         self.assertTrue(condition_matches(s, o))
+
+
+class TestConditionMatchesAliasAndObservation(unittest.TestCase):
+    """5b-2: condition_matches alias가 condition_matches_observation과 동일 동작."""
+
+    def test_alias_is_observation_function(self):
+        """alias 자체 identity 확인."""
+        self.assertIs(condition_matches, condition_matches_observation)
+
+    def test_observation_function_above_match(self):
+        s = _make_cached_setting(condition="above", threshold=1500.0)
+        o = _make_observation(rate=1500.0)
+        self.assertTrue(condition_matches_observation(s, o))
+
+    def test_observation_function_below_match(self):
+        s = _make_cached_setting(condition="below", threshold=1500.0)
+        o = _make_observation(rate=1499.99)
+        self.assertTrue(condition_matches_observation(s, o))
+
+
+class TestConditionMatchesPriceInput(unittest.TestCase):
+    """5b-2: window-aware 조건 평가 — crossing 보존 (§12.8.3 결정 #10)."""
+
+    @staticmethod
+    def _make_price_input(
+        min_rate: str = "1470.0",
+        max_rate: str = "1482.0",
+        last_rate: str = "1471.0",
+        source: str = "upbit",
+        asset: str = "usdt-krw",
+    ) -> PriceAlertEvaluationInput:
+        ts = datetime(2026, 5, 24, 6, 0, 0, tzinfo=timezone.utc)
+        return PriceAlertEvaluationInput(
+            source=source,
+            asset=asset,
+            observed_at=ts,
+            window_start=ts,
+            window_end=ts,
+            min_rate=Decimal(min_rate),
+            max_rate=Decimal(max_rate),
+            last_rate=Decimal(last_rate),
+            tick_count=3,
+        )
+
+    def test_above_crossing_preserved_via_max_rate(self):
+        """Codex 시나리오: 1470 → 1482 → 1471, threshold=1480 → above 매칭 (max=1482)."""
+        s = _make_cached_setting(condition="above", threshold=1480.0)
+        pi = self._make_price_input(min_rate="1470.0", max_rate="1482.0", last_rate="1471.0")
+        self.assertTrue(condition_matches_price_input(s, pi))
+
+    def test_above_no_crossing_when_max_below_threshold(self):
+        s = _make_cached_setting(condition="above", threshold=1500.0)
+        pi = self._make_price_input(min_rate="1470.0", max_rate="1482.0", last_rate="1471.0")
+        self.assertFalse(condition_matches_price_input(s, pi))
+
+    def test_below_crossing_preserved_via_min_rate(self):
+        """역시나리오: 1485 → 1469 → 1480, threshold=1470 → below 매칭 (min=1469)."""
+        s = _make_cached_setting(condition="below", threshold=1470.0)
+        pi = self._make_price_input(min_rate="1469.0", max_rate="1485.0", last_rate="1480.0")
+        self.assertTrue(condition_matches_price_input(s, pi))
+
+    def test_below_no_crossing_when_min_above_threshold(self):
+        s = _make_cached_setting(condition="below", threshold=1450.0)
+        pi = self._make_price_input(min_rate="1469.0", max_rate="1485.0", last_rate="1480.0")
+        self.assertFalse(condition_matches_price_input(s, pi))
+
+
+class TestMatchedTriggeredRate(unittest.TestCase):
+    """5b-2: triggered_rate 산출 — 조건 만족 기준과 같은 함수에서 결정 (§12.8.3 결정 #11)."""
+
+    @staticmethod
+    def _make_price_input(
+        min_rate: str, max_rate: str, last_rate: str
+    ) -> PriceAlertEvaluationInput:
+        ts = datetime(2026, 5, 24, 6, 0, 0, tzinfo=timezone.utc)
+        return PriceAlertEvaluationInput(
+            source="upbit",
+            asset="usdt-krw",
+            observed_at=ts,
+            window_start=ts,
+            window_end=ts,
+            min_rate=Decimal(min_rate),
+            max_rate=Decimal(max_rate),
+            last_rate=Decimal(last_rate),
+            tick_count=3,
+        )
+
+    def test_above_match_returns_max_rate(self):
+        """above 조건 만족 → max_rate 반환 (last_rate 아님)."""
+        s = _make_cached_setting(condition="above", threshold=1480.0)
+        pi = self._make_price_input(min_rate="1470.0", max_rate="1482.0", last_rate="1471.0")
+        self.assertEqual(matched_triggered_rate(s, pi), Decimal("1482.0"))
+
+    def test_below_match_returns_min_rate(self):
+        """below 조건 만족 → min_rate 반환 (last_rate 아님)."""
+        s = _make_cached_setting(condition="below", threshold=1470.0)
+        pi = self._make_price_input(min_rate="1469.0", max_rate="1485.0", last_rate="1480.0")
+        self.assertEqual(matched_triggered_rate(s, pi), Decimal("1469.0"))
+
+    def test_above_no_match_returns_none(self):
+        s = _make_cached_setting(condition="above", threshold=1500.0)
+        pi = self._make_price_input(min_rate="1470.0", max_rate="1482.0", last_rate="1471.0")
+        self.assertIsNone(matched_triggered_rate(s, pi))
+
+    def test_below_no_match_returns_none(self):
+        s = _make_cached_setting(condition="below", threshold=1450.0)
+        pi = self._make_price_input(min_rate="1469.0", max_rate="1485.0", last_rate="1480.0")
+        self.assertIsNone(matched_triggered_rate(s, pi))
+
+    def test_consistency_with_condition_matches_price_input(self):
+        """matched_triggered_rate is not None == condition_matches_price_input (drift 검증)."""
+        for cond, thr, mn, mx, expected in [
+            ("above", 1480.0, "1470.0", "1482.0", True),
+            ("above", 1500.0, "1470.0", "1482.0", False),
+            ("below", 1470.0, "1469.0", "1485.0", True),
+            ("below", 1450.0, "1469.0", "1485.0", False),
+        ]:
+            with self.subTest(cond=cond, thr=thr):
+                s = _make_cached_setting(condition=cond, threshold=thr)
+                pi = self._make_price_input(min_rate=mn, max_rate=mx, last_rate=mn)
+                self.assertEqual(
+                    matched_triggered_rate(s, pi) is not None,
+                    condition_matches_price_input(s, pi),
+                )
+                self.assertEqual(condition_matches_price_input(s, pi), expected)
 
 
 class TestDeliveryAllowed(unittest.TestCase):
