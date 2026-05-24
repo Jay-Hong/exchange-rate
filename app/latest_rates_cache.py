@@ -21,6 +21,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import redis as redis_sync  # sync client (PR Z-2e B-Step 1, scheduler thread 전용)
@@ -117,6 +118,104 @@ def deserialize_value(raw: Union[str, bytes]) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ── USDT-only freshness metadata helpers (5b-bis, §12.8.3 결정 #1) ──
+#
+# USDT 5 source 전용 Redis value schema 확장 — rate_changed_at / seen_at /
+# mirrored_at 분리. 공통 serialize_value() / deserialize_value()는 미터치
+# (KRX/Bank/Investing/mirror cycle isolation). Legacy ``timestamp = seen_at``
+# alias로 단말 호환 보존.
+
+
+def _floor_5s(ts: datetime) -> datetime:
+    """5초 wall-clock grain floor (A-3, §12.8.3 결정 #2 정합).
+
+    예: 20:34:47.500 → 20:34:45.000. tzinfo 보존.
+    """
+    return ts.replace(microsecond=0) - timedelta(seconds=ts.second % 5)
+
+
+def _parse_kst(s: str) -> datetime:
+    """ISO 8601 string → KST aware datetime.
+
+    naive datetime은 silent KST 부여 대신 ValueError raise — 기존
+    ``deserialize_value`` 패턴 정합 (line 109). ``deserialize_usdt_value``의
+    try/except (ValueError 포함)에서 자연 catch → None 반환.
+
+    Aware datetime은 KST로 normalize (Codex Finding 2 — 이름과 동작 정합).
+    """
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        raise ValueError(f"naive datetime not allowed: {s!r}")
+    return dt.astimezone(_KST)
+
+
+def serialize_usdt_value(
+    rate: Decimal,
+    rate_changed_at: datetime,
+    seen_at: datetime,
+    mirrored_at: datetime,
+) -> str:
+    """USDT 전용 Redis value JSON serializer (§12.8.3 결정 #1).
+
+    Dual schema — legacy ``timestamp = seen_at`` (단말 호환). 새 field 3개
+    추가: rate_changed_at / seen_at / mirrored_at (Redis SET 시각).
+    """
+    return json.dumps(
+        {
+            "rate": float(rate),
+            "timestamp": seen_at.isoformat(),
+            "rate_changed_at": rate_changed_at.isoformat(),
+            "seen_at": seen_at.isoformat(),
+            "mirrored_at": mirrored_at.isoformat(),
+        },
+        ensure_ascii=False,
+    )
+
+
+def deserialize_usdt_value(raw: Union[str, bytes]) -> Optional[Dict[str, Any]]:
+    """USDT 전용 Redis value JSON deserializer — old/new schema 정규화.
+
+    Old schema migration ({rate, timestamp, mirrored_at}):
+        seen_at = timestamp (없으니 derive)
+        rate_changed_at = timestamp (없으니 derive)
+        mirrored_at = 기존 값 사용 (운영 정상 경로)
+        mirrored_at 자체가 없는 매우 옛 legacy만 timestamp fallback.
+
+    Grain floor는 deserialize에서 강제하지 *않음* — 다음 write 시점에 새 tick의
+    seen_at floor가 자연 normalize (구현 단순성).
+
+    실패 정책 (parse fail / naive datetime / 필수 field 누락) → None.
+    기존 ``deserialize_value`` 패턴 정합. caller가 first write 분기로 자연 처리.
+
+    Returns:
+        성공: {rate: Decimal, timestamp: datetime, rate_changed_at: datetime,
+               seen_at: datetime, mirrored_at: datetime} (모두 tz-aware)
+        실패: None
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        rate = Decimal(str(data["rate"]))
+        timestamp = _parse_kst(data["timestamp"])
+        if timestamp.tzinfo is None:
+            return None
+        rate_changed_at = _parse_kst(data.get("rate_changed_at", data["timestamp"]))
+        seen_at = _parse_kst(data.get("seen_at", data["timestamp"]))
+        # Normal old schema migration: mirrored_at 보존.
+        # Very old legacy fallback (운영 경로 외): mirrored_at 자체가 없을 때만 timestamp.
+        mirrored_at = _parse_kst(data.get("mirrored_at", data["timestamp"]))
+        return {
+            "rate": rate,
+            "timestamp": timestamp,
+            "rate_changed_at": rate_changed_at,
+            "seen_at": seen_at,
+            "mirrored_at": mirrored_at,
+        }
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None
+
+
 # ── Stale 판정 ──────────────────────────────────────────────
 
 
@@ -187,6 +286,12 @@ async def _set_latest(key: str, value: str) -> bool:
 
 
 _sync_client: Optional[redis_sync.Redis] = None  # lazy module-level
+
+# 5b-bis 옵션 A (§12.8.3 결정 #1) — USDT 전용 in-memory state per (source, asset).
+# 매 tick Redis GET 회피 → Redis I/O ↓↓ + saturation 완화 (Codex Finding 1 해결).
+# Process restart 후 첫 tick(cold-start)만 Redis GET. SET 성공 후에만 갱신
+# (Redis-memory drift 방지). Test 격리: setUp/tearDown에서 .clear().
+_last_written_usdt_state: dict[tuple[str, str], dict] = {}
 
 
 def _get_sync_client() -> Optional[redis_sync.Redis]:
@@ -259,11 +364,64 @@ def set_latest_usdt_rate_from_sync_job(
     if client is None:
         usdt_redis_stats.record_direct_write_failure(source)
         return False
-    key = latest_key_source(source, asset)
-    mirrored_at = datetime.now(_KST)
-    value = serialize_value(rate, timestamp, mirrored_at)
+
+    redis_key = latest_key_source(source, asset)
+    state_key = (source, asset)
+
+    # 5b-bis (§12.8.3 결정 #1) — 옵션 A: in-memory state per (source, asset).
+    # Warm state면 Redis GET 회피 (Redis I/O ↓↓ + saturation 완화).
+    # Best-effort write 철학 (Codex Finding 3) — parse/serialize/coalesce/SET 전체
+    # try-block 안 → 모든 실패는 record_direct_write_failure + False로 통일.
     try:
-        client.set(key, value)
+        rate_decimal = Decimal(str(rate))
+        tick_ts = _parse_kst(timestamp)
+        seen_at_floor = _floor_5s(tick_ts)
+
+        # 1) In-memory state 우선 (warm path — no Redis I/O)
+        state = _last_written_usdt_state.get(state_key)
+
+        # 2) Cold-start (state miss) → Redis GET 1회로 initial state 복원
+        if state is None:
+            try:
+                existing_raw = client.get(redis_key)
+            except Exception:
+                # GET 실패는 silent — write 시도로 회복 (burst log 폭주 회피)
+                existing_raw = None
+            existing = deserialize_usdt_value(existing_raw) if existing_raw else None
+            if existing is not None:
+                state = {
+                    "rate": existing["rate"],
+                    "seen_at": existing["seen_at"],
+                    "rate_changed_at": existing["rate_changed_at"],
+                }
+                _last_written_usdt_state[state_key] = state
+
+        # 3) Coalesce — same rate + same 5s bucket → skip (no SET, no metric)
+        if (
+            state is not None
+            and state["rate"] == rate_decimal
+            and state["seen_at"] == seen_at_floor
+        ):
+            return True
+
+        # 4) rate_changed_at — same rate면 보존, 새 rate면 tick_ts (full precision)
+        if state is not None and state["rate"] == rate_decimal:
+            rate_changed_at = state["rate_changed_at"]
+        else:
+            rate_changed_at = tick_ts  # first write or rate 변경
+
+        mirrored_at = datetime.now(_KST)
+        value = serialize_usdt_value(
+            rate_decimal, rate_changed_at, seen_at_floor, mirrored_at
+        )
+        client.set(redis_key, value)
+
+        # 5) SET 성공한 *후에만* state 갱신 (Redis-memory drift 방지)
+        _last_written_usdt_state[state_key] = {
+            "rate": rate_decimal,
+            "seen_at": seen_at_floor,
+            "rate_changed_at": rate_changed_at,
+        }
         usdt_redis_stats.record_direct_write_success(source)
         return True
     except Exception:
@@ -271,7 +429,7 @@ def set_latest_usdt_rate_from_sync_job(
         logger.warning(
             "USDT sync Redis SET 실패 (best-effort, read path DB fallback)",
             exc_info=True,
-            extra={"key": key},
+            extra={"key": redis_key},
         )
         return False
 

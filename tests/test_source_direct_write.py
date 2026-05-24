@@ -43,9 +43,11 @@ class TestGetSyncClient(unittest.TestCase):
     def setUp(self):
         # 매 테스트 시작 시 module-level cache reset (Codex 권고)
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_lazy_init_creates_client(self):
         """첫 호출 시 redis_sync.from_url 호출 + client 캐싱."""
@@ -71,6 +73,7 @@ class TestGetSyncClient(unittest.TestCase):
         self.assertIs(first, fake_client_1)
         # reset
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
         with patch.object(latest_rates_cache.redis_sync, "from_url",
                           return_value=fake_client_2):
             second = _get_sync_client()
@@ -114,9 +117,11 @@ class TestSetLatestUsdtRateFromSyncJob(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_calls_set_with_correct_key_and_value(self):
         """latest_key_source + serialize_value 정확 사용."""
@@ -164,9 +169,11 @@ class TestSyncRedisExceptionIsolation(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_set_exception_returns_false_with_warning(self):
         """sync client .set() 예외 → False + warning (async circuit 미호출)."""
@@ -211,9 +218,11 @@ class TestMirrorChangedSourceToRedis(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_calls_sync_helper_when_latest_found(self):
         from app.crawlers import usdt_sources
@@ -291,11 +300,13 @@ class TestDirectWriteStatsCounters(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
         from app import usdt_redis_stats
         usdt_redis_stats.reset_stats()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_success_increments_direct_write_success(self):
         from app import usdt_redis_stats
@@ -341,11 +352,13 @@ class TestRedisReadStatsCounters(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
         from app import usdt_redis_stats
         usdt_redis_stats.reset_stats()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_hit_increments_redis_read_hit(self):
         from app import usdt_redis_stats
@@ -429,9 +442,11 @@ class TestBankRedisReadHelper(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def _redis_value(self, rate: float, mirrored_age_seconds: float = 0.0) -> bytes:
         """fresh mirrored_at으로 value JSON 생성. age_seconds 증가하면 stale."""
@@ -497,9 +512,11 @@ class TestInvestingRedisReadHelper(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def _fresh_value(self, rate: float = 1371.0) -> bytes:
         from datetime import datetime, timezone, timedelta
@@ -541,9 +558,11 @@ class TestSetLatestBankRateFromSyncJob(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_calls_set_with_correct_key_and_value(self):
         from app.latest_rates_cache import set_latest_bank_rate_from_sync_job
@@ -600,9 +619,11 @@ class TestSetLatestInvestingRateFromSyncJob(unittest.TestCase):
 
     def setUp(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
 
     def test_calls_set_with_correct_key_and_value(self):
         from app.latest_rates_cache import set_latest_investing_rate_from_sync_job
@@ -910,6 +931,402 @@ class TestInsertInvestingRatesCallOrder(unittest.TestCase):
                 )
         mock_redis.assert_not_called()
         mock_alerts.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 5b-bis (§12.8.3 결정 #1) — USDT Redis freshness grain coalescing
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal as _Decimal
+
+from app.latest_rates_cache import (
+    _KST as _kst,
+    _floor_5s,
+    _parse_kst,
+    deserialize_usdt_value,
+    serialize_usdt_value,
+)
+
+
+class TestUsdtSerializeDeserialize(unittest.TestCase):
+    """serialize_usdt_value / deserialize_usdt_value round-trip + old schema migration."""
+
+    def test_first_write_no_existing(self):
+        """First write: rate_changed_at full precision, seen_at = floor_5s(tick)."""
+        tick = datetime(2026, 5, 24, 20, 34, 47, 123_000, tzinfo=_kst)  # 47.123초
+        seen_at = _floor_5s(tick)
+        mirrored = datetime(2026, 5, 24, 20, 34, 47, 456_000, tzinfo=_kst)
+        raw = serialize_usdt_value(_Decimal("1473.5"), tick, seen_at, mirrored)
+        parsed = deserialize_usdt_value(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["rate"], _Decimal("1473.5"))
+        # rate_changed_at = full precision (not floor)
+        self.assertEqual(parsed["rate_changed_at"].microsecond, 123_000)
+        # seen_at = 5s floor (microsecond 0, second 45)
+        self.assertEqual(parsed["seen_at"].second, 45)
+        self.assertEqual(parsed["seen_at"].microsecond, 0)
+        # legacy timestamp = seen_at alias
+        self.assertEqual(parsed["timestamp"], parsed["seen_at"])
+
+    def test_first_write_at_exact_5s_boundary(self):
+        """Tick이 정확히 5s boundary면 rate_changed_at == seen_at (우연)."""
+        tick = datetime(2026, 5, 24, 20, 34, 45, 0, tzinfo=_kst)  # 정확히 45.0
+        seen_at = _floor_5s(tick)
+        mirrored = datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst)
+        raw = serialize_usdt_value(_Decimal("1473.5"), tick, seen_at, mirrored)
+        parsed = deserialize_usdt_value(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["rate_changed_at"], parsed["seen_at"])
+
+    def test_old_schema_with_mirrored_at_migration(self):
+        """기존 운영 schema {rate, timestamp, mirrored_at} → derive 정확.
+
+        rate_changed_at = timestamp, seen_at = timestamp, mirrored_at 보존.
+        """
+        old_raw = (
+            '{"rate": 1473.5, "timestamp": "2026-05-24T20:34:47+09:00", '
+            '"mirrored_at": "2026-05-24T20:34:47.456000+09:00"}'
+        )
+        parsed = deserialize_usdt_value(old_raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["rate"], _Decimal("1473.5"))
+        # rate_changed_at + seen_at derive from timestamp
+        ts = _parse_kst("2026-05-24T20:34:47+09:00")
+        self.assertEqual(parsed["rate_changed_at"], ts)
+        self.assertEqual(parsed["seen_at"], ts)
+        # mirrored_at preserved (운영 정상 migration 경로)
+        self.assertEqual(
+            parsed["mirrored_at"],
+            _parse_kst("2026-05-24T20:34:47.456000+09:00"),
+        )
+
+    def test_old_schema_without_mirrored_at_very_old_legacy(self):
+        """매우 옛 legacy: mirrored_at 자체 없음 → timestamp fallback (운영 경로 외)."""
+        very_old_raw = '{"rate": 1473.5, "timestamp": "2026-05-24T20:34:47+09:00"}'
+        parsed = deserialize_usdt_value(very_old_raw)
+        self.assertIsNotNone(parsed)
+        ts = _parse_kst("2026-05-24T20:34:47+09:00")
+        self.assertEqual(parsed["mirrored_at"], ts)
+
+    def test_deserialize_invalid_json_returns_none(self):
+        self.assertIsNone(deserialize_usdt_value("not a json"))
+
+    def test_deserialize_naive_datetime_returns_none(self):
+        """timestamp가 naive면 None — deserialize_value 패턴 정합."""
+        raw = '{"rate": 1473.5, "timestamp": "2026-05-24T20:34:47", "mirrored_at": "2026-05-24T20:34:47"}'
+        self.assertIsNone(deserialize_usdt_value(raw))
+
+    def test_deserialize_missing_required_field_returns_none(self):
+        raw_missing_rate = '{"timestamp": "2026-05-24T20:34:47+09:00", "mirrored_at": "2026-05-24T20:34:47+09:00"}'
+        self.assertIsNone(deserialize_usdt_value(raw_missing_rate))
+        raw_missing_ts = '{"rate": 1473.5, "mirrored_at": "2026-05-24T20:34:47+09:00"}'
+        self.assertIsNone(deserialize_usdt_value(raw_missing_ts))
+
+    def test_empty_raw_returns_none(self):
+        self.assertIsNone(deserialize_usdt_value(""))
+
+
+class TestSetLatestUsdtRateCoalescing(unittest.TestCase):
+    """set_latest_usdt_rate_from_sync_job — Redis SET coalescing (§12.8.3 결정 #1).
+
+    5b-bis 옵션 A: in-memory state per (source, asset) — Redis GET 회피.
+    setUp/tearDown에서 _last_written_usdt_state.clear() 격리 필수.
+    """
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
+
+    def _make_client_with_existing(self, existing_raw):
+        """Mock client — get() returns existing_raw, set() tracks calls."""
+        client = MagicMock()
+        client.get.return_value = existing_raw.encode() if isinstance(existing_raw, str) else existing_raw
+        return client
+
+    def test_same_rate_same_bucket_skip(self):
+        """Same rate + same 5s bucket → SET skip, True 반환, success counter 미증가."""
+        existing = serialize_usdt_value(
+            _Decimal("1473.5"),
+            datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),  # rate_changed_at
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),            # seen_at floor
+            datetime(2026, 5, 24, 20, 34, 45, 200_000, tzinfo=_kst),   # mirrored_at
+        )
+        client = self._make_client_with_existing(existing)
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success") as mock_success:
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:47.500000+09:00",  # 같은 bucket
+            )
+        self.assertTrue(result)
+        client.set.assert_not_called()  # SET skip
+        mock_success.assert_not_called()  # success counter 미증가
+
+    def test_same_rate_next_bucket_sets_with_preserved_rate_changed_at(self):
+        """Same rate + 다음 bucket → SET, seen_at 갱신, rate_changed_at 유지."""
+        original_rate_changed = datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst)
+        existing = serialize_usdt_value(
+            _Decimal("1473.5"),
+            original_rate_changed,
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            datetime(2026, 5, 24, 20, 34, 45, 200_000, tzinfo=_kst),
+        )
+        client = self._make_client_with_existing(existing)
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success") as mock_success:
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:50.123000+09:00",  # 다음 bucket
+            )
+        self.assertTrue(result)
+        client.set.assert_called_once()
+        mock_success.assert_called_once()
+        # SET value 확인 — rate_changed_at 유지, seen_at 새 bucket
+        _, args, _ = client.set.mock_calls[0]
+        new_value = args[1]
+        parsed_new = deserialize_usdt_value(new_value)
+        self.assertEqual(parsed_new["rate_changed_at"], original_rate_changed)  # 유지
+        self.assertEqual(parsed_new["seen_at"].second, 50)  # 새 bucket
+
+    def test_rate_change_updates_rate_changed_at(self):
+        """Rate 변경 → rate_changed_at = 새 tick_ts (full precision)."""
+        existing = serialize_usdt_value(
+            _Decimal("1473.5"),
+            datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            datetime(2026, 5, 24, 20, 34, 45, 200_000, tzinfo=_kst),
+        )
+        client = self._make_client_with_existing(existing)
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success"):
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1474.0,  # 새 rate
+                timestamp="2026-05-24T20:34:47.500000+09:00",  # 같은 bucket이지만 rate 변경
+            )
+        self.assertTrue(result)
+        client.set.assert_called_once()
+        _, args, _ = client.set.mock_calls[0]
+        parsed_new = deserialize_usdt_value(args[1])
+        # rate_changed_at = full precision tick (47.500), 기존 (45.100) 아님
+        self.assertEqual(parsed_new["rate_changed_at"].second, 47)
+        self.assertEqual(parsed_new["rate_changed_at"].microsecond, 500_000)
+        self.assertEqual(parsed_new["rate"], _Decimal("1474.0"))
+
+    def test_decimal_comparison_no_float_drift(self):
+        """Float 부동소수 drift 시나리오 — Decimal(str(rate)) 정확 비교."""
+        # 0.1 + 0.2 = 0.30000000000000004 (float drift)
+        existing = serialize_usdt_value(
+            _Decimal("1473.3"),  # str 정확
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+        )
+        client = self._make_client_with_existing(existing)
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success") as mock_success:
+            # Caller가 float 1473.3 넘김 → Decimal(str(1473.3)) = Decimal("1473.3") 일치
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.3,
+                timestamp="2026-05-24T20:34:47.500000+09:00",
+            )
+        # Same bucket + same rate → skip (float drift 없음)
+        self.assertTrue(result)
+        client.set.assert_not_called()
+        mock_success.assert_not_called()
+
+
+class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
+    """5b-bis 옵션 A — in-memory state로 Redis GET 회피 (saturation 완화 핵심)."""
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+        latest_rates_cache._last_written_usdt_state.clear()
+
+    def test_cold_start_triggers_redis_get(self):
+        """state miss (cold-start) → client.get 호출됨."""
+        client = MagicMock()
+        client.get.return_value = None  # Redis miss
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success"):
+            set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:47+09:00",
+            )
+        client.get.assert_called_once()
+
+    def test_cold_start_redis_miss_sets_and_populates_state(self):
+        """cold-start + Redis 없음 → 반드시 SET + state populate (Codex 잠금)."""
+        client = MagicMock()
+        client.get.return_value = None  # Redis miss
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success"):
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:47+09:00",
+            )
+        self.assertTrue(result)
+        client.set.assert_called_once()
+        # State populated
+        state = latest_rates_cache._last_written_usdt_state.get(("upbit", "usdt-krw"))
+        self.assertIsNotNone(state)
+        self.assertEqual(state["rate"], _Decimal("1473.5"))
+        self.assertEqual(state["seen_at"].second, 45)  # 5s floor
+
+    def test_cold_start_existing_same_bucket_skips_set_after_get(self):
+        """cold-start GET 후 Redis hit same bucket → SET skip + state populate (Codex 잠금)."""
+        # Redis 기존 값: same rate + same bucket
+        existing = serialize_usdt_value(
+            _Decimal("1473.5"),
+            datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),  # rate_changed_at
+            datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),            # seen_at floor
+            datetime(2026, 5, 24, 20, 34, 45, 200_000, tzinfo=_kst),
+        )
+        client = MagicMock()
+        client.get.return_value = existing.encode()
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success") as mock_success:
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:47.500000+09:00",  # same bucket
+            )
+        self.assertTrue(result)
+        client.get.assert_called_once()  # cold-start GET 1회
+        client.set.assert_not_called()    # same bucket → SET skip
+        mock_success.assert_not_called()
+        # State populated (Redis 기존 값 기반)
+        state = latest_rates_cache._last_written_usdt_state.get(("upbit", "usdt-krw"))
+        self.assertIsNotNone(state)
+        self.assertEqual(state["rate"], _Decimal("1473.5"))
+
+    def test_warm_state_skips_redis_get(self):
+        """warm state → client.get 호출 안 됨 (옵션 A 핵심 효과)."""
+        # State 미리 세팅 (warm)
+        latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")] = {
+            "rate": _Decimal("1473.5"),
+            "seen_at": datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            "rate_changed_at": datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),
+        }
+        client = MagicMock()
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success") as mock_success:
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:47.500000+09:00",  # same bucket
+            )
+        self.assertTrue(result)
+        client.get.assert_not_called()  # warm state → GET 회피 (핵심)
+        client.set.assert_not_called()  # same bucket → SET skip
+        mock_success.assert_not_called()
+
+    def test_state_updated_only_after_set_success(self):
+        """SET 성공 후 state 갱신 — 새 bucket으로 진입 시."""
+        # Warm state: rate=1473.5, bucket=20:34:45
+        latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")] = {
+            "rate": _Decimal("1473.5"),
+            "seen_at": datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            "rate_changed_at": datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),
+        }
+        client = MagicMock()
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success"):
+            set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:50.123000+09:00",  # 다음 bucket
+            )
+        client.set.assert_called_once()
+        state = latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")]
+        self.assertEqual(state["seen_at"].second, 50)  # 새 bucket
+        # rate_changed_at 유지 (rate 안 바뀜)
+        self.assertEqual(state["rate_changed_at"].second, 45)
+
+    def test_state_not_updated_when_set_fails(self):
+        """SET exception → state 미갱신 (Redis-memory drift 방지)."""
+        original_state = {
+            "rate": _Decimal("1473.5"),
+            "seen_at": datetime(2026, 5, 24, 20, 34, 45, tzinfo=_kst),
+            "rate_changed_at": datetime(2026, 5, 24, 20, 34, 45, 100_000, tzinfo=_kst),
+        }
+        latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")] = dict(original_state)
+        client = MagicMock()
+        client.set.side_effect = Exception("Redis down")
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_failure"):
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1474.0,  # rate 변경 → SET 시도
+                timestamp="2026-05-24T20:34:50+09:00",
+            )
+        self.assertFalse(result)
+        # State 그대로 (drift 방지)
+        state = latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")]
+        self.assertEqual(state["rate"], original_state["rate"])
+        self.assertEqual(state["seen_at"], original_state["seen_at"])
+
+    def test_state_per_source_asset_isolation(self):
+        """서로 다른 (source, asset) state 독립."""
+        client = MagicMock()
+        client.get.return_value = None
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success"):
+            set_latest_usdt_rate_from_sync_job(
+                "upbit", "usdt-krw", 1473.5, "2026-05-24T20:34:47+09:00",
+            )
+            set_latest_usdt_rate_from_sync_job(
+                "bithumb", "usdt-krw", 1474.0, "2026-05-24T20:34:47+09:00",
+            )
+        upbit_state = latest_rates_cache._last_written_usdt_state[("upbit", "usdt-krw")]
+        bithumb_state = latest_rates_cache._last_written_usdt_state[("bithumb", "usdt-krw")]
+        self.assertEqual(upbit_state["rate"], _Decimal("1473.5"))
+        self.assertEqual(bithumb_state["rate"], _Decimal("1474.0"))
+
+    def test_redis_get_failure_proceeds_to_set_and_updates_state(self):
+        """GET 실패 → coalescing 없이 SET 시도 → 성공하면 state 갱신 (Codex 잠금)."""
+        client = MagicMock()
+        client.get.side_effect = Exception("GET timeout")  # GET 실패
+        # SET은 성공 (default MagicMock 반환)
+        latest_rates_cache._sync_client = client
+
+        with patch("app.usdt_redis_stats.record_direct_write_success") as mock_success:
+            result = set_latest_usdt_rate_from_sync_job(
+                source="upbit", asset="usdt-krw",
+                rate=1473.5,
+                timestamp="2026-05-24T20:34:47+09:00",
+            )
+        self.assertTrue(result)
+        client.set.assert_called_once()
+        mock_success.assert_called_once()
+        # State 갱신 (GET 실패해도 SET 성공 → state 새로 populate)
+        state = latest_rates_cache._last_written_usdt_state.get(("upbit", "usdt-krw"))
+        self.assertIsNotNone(state)
+        self.assertEqual(state["rate"], _Decimal("1473.5"))
 
 
 if __name__ == "__main__":
