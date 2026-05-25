@@ -1724,6 +1724,7 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
         KisFuturesClient,
         KrxCloseWindowWriter,
         KrxDbWriter,
+        KrxRedisLatestWriter,
     )
 
     try:
@@ -1754,6 +1755,13 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
             approval, contract=resolved, access_token_manager=token_manager,
         )
         client.add_tick_handler(KrxDbWriter())
+        # KRX_FANOUT_REFACTOR_PLAN §5.2 E — Stage E tick-level Redis writer
+        # (KRX_REDIS_TICK_WRITE_ENABLED=true 시 활성). KrxDbWriter._sync_db_write가
+        # flag true 시 DB-bound Redis write/trigger skip하고 본 handler가 tick-level
+        # Redis SET + trigger 담당. close grace tick은 handler 자체에서 skip
+        # (KrxCloseWindowWriter non-interference 정책).
+        if config.KRX_REDIS_TICK_WRITE_ENABLED:
+            client.add_tick_handler(KrxRedisLatestWriter())
         # KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 5 (2026-05-17): close finalizer 활성 시 등록.
         # env false 시 KrxCloseWindowWriter.__call__이 early return이라 비활성 동작과 동일.
         if config.KRX_CLOSE_FINALIZER_ENABLED:

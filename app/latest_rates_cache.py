@@ -68,6 +68,21 @@ class UsdtLatestWriteOutcome(Enum):
     SET = "set"
 
 
+class KrxLatestWriteOutcome(Enum):
+    """KRX tick-level Redis writer 결과 — Stage E (KRX_REDIS_TICK_WRITE_ENABLED=true) 입력.
+
+    USDT 5d-a `UsdtLatestWriteOutcome` 패턴 mirror. trigger 발사 정책 동일.
+
+    - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
+    - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
+    - SET: Redis SET 성공. trigger 발사 (`TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS`).
+    """
+
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    SET = "set"
+
+
 # ── Key helpers ──────────────────────────────────────────────
 
 
@@ -569,6 +584,108 @@ def set_latest_krx_rate_from_sync_job(
             extra={"key": key},
         )
         return False
+
+
+# KRX Stage E — tick-level helper (KRX_REDIS_TICK_WRITE_ENABLED=true 시 사용).
+# USDT 5b-bis schema mirror — 5 fields + in-memory state.
+# 단일 source/asset이라 dict 불필요, 단일 dict[Optional] state 보관.
+_last_written_krx_state: dict[str, dict] = {}  # key=asset
+
+
+def set_latest_krx_rate_from_sync_job_tick_level(
+    asset: str,
+    rate: float,
+    timestamp: str,
+) -> KrxLatestWriteOutcome:
+    """KRX tick-level Redis writer — Stage E (KRX_FANOUT_REFACTOR_PLAN §5.2 E).
+
+    `KrxRedisLatestWriter` tick handler가 매 WS tick에서 호출. USDT 5b-bis
+    패턴 mirror — 5-field schema (legacy `timestamp=seen_at` alias + 신규
+    `rate_changed_at` / `seen_at` / `mirrored_at`) + in-memory state로 warm
+    same-rate/same-5s-bucket SET 자체 SKIPPED + Redis GET 회피.
+
+    USDT 5d-a `UsdtLatestWriteOutcome` 정책 mirror:
+        - FAILED: client init / parse / SET 실패 → trigger 차단
+        - SKIPPED: 5s grain coalesce → trigger 차단 (change notification 의미상)
+        - SET: Redis SET 성공 → trigger 발사 (`TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS`)
+
+    Args:
+        asset: KRX asset (예: "usd-krw-futures"). source는 "krx" 고정.
+        rate: 가격.
+        timestamp: ISO 8601 KST 문자열 (KIS WS frame 체결시각).
+
+    Returns:
+        KrxLatestWriteOutcome — caller (`KrxRedisLatestWriter`)가 SET 시점에만
+        `request_tether_topic_trigger` 호출.
+
+    설계 격리:
+        - sync `redis.Redis` client 재사용 (`_get_sync_client`)
+        - async circuit_breaker 호출 X
+        - usdt_redis_stats 호출 X (KRX 전용, telemetry 분리)
+    """
+    client = _get_sync_client()
+    if client is None:
+        return KrxLatestWriteOutcome.FAILED
+
+    key = latest_key_source("krx", asset)
+
+    # USDT 5b-bis 옵션 A mirror — warm state면 Redis GET 회피.
+    try:
+        rate_decimal = Decimal(str(rate))
+        tick_ts = _parse_kst(timestamp)
+        seen_at_floor = _floor_5s(tick_ts)
+
+        state = _last_written_krx_state.get(asset)
+
+        # Cold-start (state miss) → Redis GET 1회로 initial state 복원
+        if state is None:
+            try:
+                existing_raw = client.get(key)
+            except Exception:
+                existing_raw = None
+            existing = deserialize_usdt_value(existing_raw) if existing_raw else None
+            if existing is not None:
+                state = {
+                    "rate": existing["rate"],
+                    "seen_at": existing["seen_at"],
+                    "rate_changed_at": existing["rate_changed_at"],
+                }
+                _last_written_krx_state[asset] = state
+
+        # Coalesce — same rate + same 5s bucket → SKIPPED (no SET)
+        if (
+            state is not None
+            and state["rate"] == rate_decimal
+            and state["seen_at"] == seen_at_floor
+        ):
+            return KrxLatestWriteOutcome.SKIPPED
+
+        # rate_changed_at — same rate면 보존, 새 rate면 tick_ts (full precision)
+        if state is not None and state["rate"] == rate_decimal:
+            rate_changed_at = state["rate_changed_at"]
+        else:
+            rate_changed_at = tick_ts
+
+        mirrored_at = datetime.now(_KST)
+        value = serialize_usdt_value(
+            rate_decimal, rate_changed_at, seen_at_floor, mirrored_at
+        )
+        client.set(key, value)
+
+        # SET 성공한 *후에만* state 갱신 (Redis-memory drift 방지)
+        _last_written_krx_state[asset] = {
+            "rate": rate_decimal,
+            "seen_at": seen_at_floor,
+            "rate_changed_at": rate_changed_at,
+        }
+        return KrxLatestWriteOutcome.SET
+    except Exception:
+        logger.warning(
+            "KRX tick-level Redis SET 실패 (best-effort, DB fallback 안전망)",
+            exc_info=True,
+            extra={"key": key},
+        )
+        return KrxLatestWriteOutcome.FAILED
 
 
 def get_latest_krx_rate_from_sync_job(

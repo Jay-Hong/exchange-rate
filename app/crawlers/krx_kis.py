@@ -1573,6 +1573,13 @@ class KrxDbWriter:
             )
             if not inserted:
                 return False
+            # Stage E (KRX_FANOUT_REFACTOR_PLAN §5.2 E): flag true 시 Redis write/
+            # trigger는 tick-level handler(KrxRedisLatestWriter.__call__)가 담당.
+            # DB writer는 DB history만 담당 — return False로 caller (_flush_after_window)
+            # 의 trigger 분기도 자연 차단 (의미적 일관: DB-bound trigger는 ADR-031 1차
+            # spec, tick-level trigger는 Stage E 영역).
+            if config.KRX_REDIS_TICK_WRITE_ENABLED:
+                return False
             # ADR-031: DB insert 성공 시점에 Redis direct write (KrxRedisLatestWriter 위임).
             return KrxRedisLatestWriter.write_after_db_insert(db, source, asset)
 
@@ -1581,14 +1588,114 @@ class KrxRedisLatestWriter:
     """KRX Redis latest direct write — KrxDbWriter에서 분리된 책임 (PR Next-C).
 
     ADR-031 spec 유지 — DB insert 성공 후 같은 sync 컨텍스트에서 Redis latest
-    갱신. tick-level write가 *아님* (Stage C 영역, 별 phase).
+    갱신. 단 Stage E (KRX_FANOUT_REFACTOR_PLAN §5.2 E) 진입 시 tick-level write
+    도 함께 지원 (KRX_REDIS_TICK_WRITE_ENABLED=true 시 `__call__` tick handler 활성).
 
-    behavior-change-0 책임 분리만 수행 (KRX_FANOUT_REFACTOR_PLAN 5.1.C):
-        - 호출 위치/timing: KrxDbWriter._sync_db_write inserted=True 분기 직후
+    behavior-change-0 책임 분리 수행 (KRX_FANOUT_REFACTOR_PLAN 5.1.C):
+        - 호출 위치/timing: KrxDbWriter._sync_db_write inserted=True 분기 직후 (DB-bound)
         - latest 재조회 방식: crud.get_latest_source_rate (USDT _mirror_changed_source_to_redis 패턴)
         - Redis helper: latest_rates_cache.set_latest_krx_rate_from_sync_job (KRX 전용, stats 미부착)
         - 예외 격리: writer loop 영향 X
+
+    Stage E 확장 (KRX_FANOUT_REFACTOR_PLAN 5.2.E):
+        - `__call__` tick handler — 매 WS tick → tick-level Redis SET (USDT 5b-bis
+          schema mirror, 5-field + in-memory state + 5s grain coalescing)
+        - close grace window 안 tick은 skip (KrxCloseWindowWriter 단독 처리)
+        - KrxLatestWriteOutcome.SET 시점에만 `request_tether_topic_trigger` 발사
+          (trigger 발사 책임 이동 — DB-bound → tick-level)
     """
+
+    async def __call__(self, payload: Dict[str, Any]) -> None:
+        """Tick handler — Stage E (KRX_FANOUT_REFACTOR_PLAN §5.2 E).
+
+        매 WS tick → tick-level Redis SET (USDT 5b-bis mirror). flag false 시
+        scheduler가 본 handler를 미등록하지만 defensive check 유지.
+
+        Close grace window 안 tick은 skip — KrxCloseWindowWriter가 단독 처리
+        (KRX_CLOSE_SNAPSHOT_PLAN §5.7 non-interference 정책).
+
+        KrxLatestWriteOutcome.SET 시점에만 tether topic trigger 발사 (USDT 5d-a
+        패턴 mirror — SKIPPED/FAILED는 silent).
+        """
+        if not config.KRX_REDIS_TICK_WRITE_ENABLED:
+            # Defensive — scheduler에서 등록 안 했으나 안전망
+            return
+
+        # Close grace window check — KrxDbWriter 패턴 mirror (line 1488-1501)
+        if config.KRX_CLOSE_FINALIZER_ENABLED:
+            session = payload.get("session", "")
+            received_at_iso = payload.get("received_at", "")
+            try:
+                tick_kst_naive = datetime.fromisoformat(received_at_iso)
+                if is_in_close_grace_window(tick_kst_naive, session):
+                    # close grace tick은 KrxCloseWindowWriter가 처리 — Stage E skip
+                    return
+            except (ValueError, TypeError):
+                # received_at 파싱 실패 시 defensive — 일반 path 진행 (회귀 안전)
+                pass
+
+        # Payload 파싱 — KIS WS frame 정규화 결과
+        source = payload.get("source", "krx")
+        asset = payload.get("asset", "usd-krw-futures")
+        price_str = payload.get("price")
+        timestamp = payload.get("received_at", "")
+        if not price_str or not timestamp:
+            return
+
+        # Timestamp normalize — KRX 운영 payload `received_at`은 KST naive ISO
+        # (line ~1398 `datetime.now(KST).replace(tzinfo=None).isoformat()`)인데
+        # helper의 `_parse_kst()`는 USDT 5b-bis strict 정책상 naive를 거부.
+        # writer 측에서 KST-aware ISO로 변환해 helper 전달. aware payload도
+        # 방어적으로 KST로 변환 (forward-compat).
+        try:
+            dt = datetime.fromisoformat(timestamp)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=KST)
+            else:
+                dt = dt.astimezone(KST)
+            timestamp = dt.isoformat()
+        except (ValueError, TypeError):
+            return  # defensive — 파싱 실패 시 skip
+
+        try:
+            # KrxDbWriter와 같은 정규화 (0.1 KRW tick)
+            normalized_rate = float(Decimal(price_str).quantize(Decimal("0.1")))
+        except Exception:
+            logger.warning(
+                "[krx_redis_latest_writer] price 정규화 실패 (격리): %r",
+                price_str,
+            )
+            return
+
+        # to_thread로 sync helper 호출 (event loop non-blocking)
+        from app import latest_rates_cache as _latest_rates_cache
+        try:
+            outcome = await asyncio.to_thread(
+                _latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level,
+                asset=asset,
+                rate=normalized_rate,
+                timestamp=timestamp,
+            )
+        except Exception:
+            logger.exception("[krx_redis_latest_writer] tick write 예외 (격리)")
+            return
+
+        # SET-only trigger (USDT 5d-a mirror)
+        if outcome is _latest_rates_cache.KrxLatestWriteOutcome.SET:
+            from app import tether_topic_trigger
+            from app.tether_topic_trigger import (
+                TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+            )
+            try:
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+                )
+            except Exception:
+                logger.exception(
+                    "[krx_redis_latest_writer] tether topic trigger 호출 실패 (격리)"
+                )
 
     @staticmethod
     def write_after_db_insert(db: "Session", source: str, asset: str) -> bool:

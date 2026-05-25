@@ -221,6 +221,32 @@ KRX_CLOSE_FINALIZER_ENABLED = os.getenv("KRX_CLOSE_FINALIZER_ENABLED", "true").l
 # 영향 범위 외: KrxCloseWindowWriter (WS close frame 기반, 신뢰 source) — 변경 X.
 KRX_CLOSE_REST_WRITE_ENABLED = os.getenv("KRX_CLOSE_REST_WRITE_ENABLED", "false").lower() == "true"
 
+# KRX_REDIS_TICK_WRITE_ENABLED: KRX Stage E — Redis latest write timing 변경 토글
+# (KRX_FANOUT_REFACTOR_PLAN.md §5.2 E).
+#
+# 현재 동작 (flag=false default): KrxDbWriter가 1초 window debounce 후 DB
+# insert-if-changed 성공 시점에 Redis latest SET + tether topic trigger 발사
+# (DB-insert-bound). 가격 stagnant 시 DB insert 없음 → Redis timestamp /
+# mirrored_at도 갱신 안 됨.
+#
+# Stage E 동작 (flag=true): tick path를 DB insert 여부와 분리. 신규
+# KrxRedisLatestWriter tick handler가 매 tick → Redis latest SET (USDT 5b-bis
+# 5-field schema + in-memory state + 5s grain coalescing) → KrxLatestWriteOutcome.SET
+# 시점에만 trigger 발사. KrxDbWriter는 DB history만 담당 (Redis write/trigger skip).
+#
+# 권장 조합:
+#   finalizer=true + tick-write=true   → Stage E 정상 운영
+#   finalizer=true + tick-write=false  → 현재 default, Stage E 미적용
+#   finalizer=false + tick-write=false → 1차 PR 동작 rollback (안전)
+# 비권장 조합 (운영자 가드 — 코드는 강제 차단 X, 주석 가이드만):
+#   finalizer=false + tick-write=true  → close 종가 결측 risk (KrxCloseWindowWriter
+#     비활성 + close REST_WRITE=false 차단으로 close 정각 종가 누락 가능).
+#     finalizer rollback 시 tick-write도 함께 false로 되돌리는 게 안전.
+#
+# 영향 범위 외: KrxCloseWindowWriter (WS close frame 기반, 신뢰 source) — 변경 X.
+# Close grace window 안 tick은 Stage E writer skip (KrxCloseWindowWriter 단독 처리).
+KRX_REDIS_TICK_WRITE_ENABLED = os.getenv("KRX_REDIS_TICK_WRITE_ENABLED", "false").lower() == "true"
+
 # Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
 # TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
 #   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off
