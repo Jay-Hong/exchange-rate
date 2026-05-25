@@ -220,6 +220,8 @@ WebSocket tick (KisFuturesClient)
 - 전제: ADR-027 Stage C 결정 (REST snapshot도 Redis에 반영할지) + 5/18 만기 baseline + 운영 stale 패턴 관찰.
 - *behavior change* — separate ADR / PR.
 
+**진입 준비 상태 (2026-05-25 갱신)**: 5/18 만기 baseline 통과 (CF 15:45 + CM 06:00 close finalizer 양 session 첫 실측 성공, KRX_CANARY.md §"2026-05-18~19 만기 첫 실측 결과"), 자동 rollover 정상 (A75605/202605 → A75606/202606), KIS master batch 익일 갱신 가설 b 확정. **남은 선행 조건**: ADR-027 Stage C 결정 (REST fallback 수치 확정) + 5/19~5/26 close finalizer 7일 telemetry case A/B/C 분포 분석. **non-interference 잠금** (read 산출물에 반드시 포함): KrxCloseWindowWriter의 close grace window 일반 KrxDbWriter skip 정책 유지, close finalizer "window-end 1건 unconditional insert" 정책 미변경.
+
 **F. KrxAlertEvaluator 구현**:
 
 - "알림은 모든 tick" 원칙 실현. KRX 단일 source 알림 평가.

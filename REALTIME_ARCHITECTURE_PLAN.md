@@ -168,11 +168,11 @@ Investing live channel (조사 중) ─┤
 
 #### 4.1.5 현재 주요 deviation 요약 (anchor 수준, 상세는 phase docs)
 
-본 계약과의 현재 deviation 요약(2026-05-24 기준). 상세 status / Stage 진척은 각 phase doc에서 관리:
+본 계약과의 현재 deviation 요약(2026-05-25 갱신). 상세 status / Stage 진척은 각 phase doc에서 관리:
 
-- **USDT 5거래소** — 계약 정합도가 가장 높음. 5 source 모두 RestFallbackController 보유 (trigger 조건만 source-specific). 매 tick → Redis write, source-neutral `UsdtAlertEvaluator` 운영 중. 남은 follow-up: Upbit saturation + freshness metadata 분리.
-- **Bank 9개 / Investing** — DB-first monolithic 경로(crud.py 안에서 DB → Redis write helper → `process_rate_alerts` 직렬). Redis write와 alert는 crud.py에서 직접 처리, **Topic trigger만 main.py broadcast diff hook 경유**. β 옵션(observation-based fanout) 검토 중.
-- **KRX 미국달러선물** — ADR-031 1차로 Redis write가 **DB-insert-bound**(tick-level 아님). Runtime alert evaluator 미연결 (`KrxAlertEvaluator`는 Stage D/F 후보). Stage E에서 tick-level Redis 전환 예정.
+- **USDT 5거래소** — 계약 정합도가 가장 높음. 5 source 모두 RestFallbackController 보유 (trigger 조건만 source-specific). WS fanout이 Redis(tick path + 5s grain coalescing)/DB(1초 window writer)/Alert(coalescer) 책임 처리, source-neutral `UsdtAlertEvaluator` 운영 중. (5b-bis) Redis freshness grain — value JSON은 5 fields(legacy `timestamp=seen_at` alias + 신규 `rate_changed_at`/`seen_at`/`mirrored_at`) + 옵션 A in-memory state(`_last_written_usdt_state`)로 warm same-rate/same-bucket SET 자체 SKIPPED + Redis GET 회피 + (5d-a) SET-only topic trigger (`UsdtLatestWriteOutcome` enum, SKIPPED는 silent) + (legacy polling disable, `ed0885c`, `USDT_LEGACY_REST_POLLING_ENABLED=false` default) 모두 land. 남은 follow-up: Bank/Investing β + KRX Stage E land 후 공통화 검토 (USDT_WS_DESIGN_PLAN.md §12.6/§12.7/§12.9.7 선제 abstraction 금지 원칙).
+- **Bank 9개 / Investing** — DB-first monolithic 경로(crud.py 안에서 DB → Redis write helper → `process_rate_alerts` 직렬). Redis write와 alert는 crud.py에서 직접 처리, **Topic trigger만 main.py broadcast diff hook 경유**. β 옵션(observation-based fanout) 검토 중 ([USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) — observation fanout 재설계 + legacy hook 격하 가능성 포함, window=0 alert coalescer는 하위 측면일 뿐).
+- **KRX 미국달러선물** — ADR-031 1차로 Redis write가 **DB-insert-bound**(tick-level 아님). Runtime alert evaluator 미연결 (`KrxAlertEvaluator`는 Stage D/F 후보). Stage E에서 tick-level Redis 전환 예정 — 5/18 만기 baseline 통과 + close finalizer 5/19~5/26 7일 telemetry + ADR-027 Stage C 결정이 선행 조건.
 
 #### 4.1.6 통합 phase 진입 조건 및 cross-reference
 

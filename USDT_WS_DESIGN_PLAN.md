@@ -1083,8 +1083,8 @@ Upbit/Bithumb의 1-dim `_status` 모델과 Coinone/Korbit의 2-dim
 - **B2 `repeat_interval_sec` 실제 구현**: interface forward-compat만 (Literal type slot). 실제 schema/API/iOS/Android UI는 별 ADR.
 - **B3 direction crossing**: B2 안정 후 별 ADR.
 - **Redis ZSET threshold index**: §13.4 Phase 3 영역.
-- **Bank/Investing β 옵션 적용**: [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) — coalescer `window=0` pass-through 적용은 (3) 영역.
-- **KRX Stage E 적용**: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 Stage E](KRX_FANOUT_REFACTOR_PLAN.md) — coalescer `window=5s` 적용은 (4) 영역.
+- **Bank/Investing β 옵션 적용**: [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) — DB-first monolithic → observation fanout 재설계 + freshness metadata 정렬 + main.py legacy hook 격하 가능성까지 포함하는 **대규모 refactor**. coalescer `window=0` pass-through는 본 phase 본체의 작은 하위 측면일 뿐 (≠ 본 phase scope). §6.6 본문 참조.
+- **KRX Stage E 적용**: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 Stage E](KRX_FANOUT_REFACTOR_PLAN.md) — KRX Redis DB-insert-bound → tick-level 전환 + freshness metadata 정렬. coalescer `window=5s` 적용은 본 phase 안의 하나의 측면.
 
 ##### 12.8.3.4 4 forward-compat 원칙 정합 (cross-ref)
 
@@ -1204,6 +1204,8 @@ G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 �
 - §12.8 Post-5-source 정책 표준화 backlog 진입 검토 (5 source 모두 land + activation 완료된 시점부터 가능)
 - Gopax fallback failure rate trend tracking (현재 0% — future failure 발생 시 alert 또는 threshold 재조정 검토)
 - 공통화 검토 (5 source 모두 land 후 별도 시점, §12.6 / §12.7 패턴 mirror — 선제 abstraction 금지 원칙 유지)
+
+**우선순위 합의 (2026-05-25 추가)**: 5b/5d-a/legacy polling disable land 완료 후 [REALTIME_ARCHITECTURE_PLAN.md §4.1](REALTIME_ARCHITECTURE_PLAN.md) "All-source observation fanout contract" 통합 phase 진입 순서 합의 — **(1) [KRX Stage E](KRX_FANOUT_REFACTOR_PLAN.md) → (2) [Bank/Investing β](USDT_TOPIC_MIGRATION_PLAN.md) → (3) USDT 공통화 검토**. KRX Stage E 먼저 진행 이유: 단일 source라 scope 좁고 (5b-bis freshness metadata + 5d-a SET-only topic trigger) USDT 검증 패턴을 KRX에 먼저 이식하여 패턴 안정성 확보. USDT 공통화는 (1)+(2) land 후 3 도메인 검증 데이터 기반으로 진입 (선제 abstraction 금지 원칙 정렬).
 
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
@@ -1601,7 +1603,7 @@ DB 쿼리 최소화 input: 현재 DB INSERT 전 중복 검사는 DB SELECT. 미�
 ### 14.8 Non-scope (잠금)
 
 - **FX topic trigger 변경**: `fx:usd-krw` 등 별도 publisher 그대로 (FX는 legacy data 변경과 동기화 의미 있음 — 분리 보류)
-- **REST polling 제거**: §12.1 guardrail 2 (additive only) 유지. 장기적으로는 WS primary + REST fallback 전용 격하가 목표이나, silent failure/cross-validation baseline 확보 전까지 유지.
+- ~~**REST polling 제거**~~ **상태 변경 (2026-05-25, `ed0885c`)**: USDT 상시 REST polling cron(`collect_usdt_rates` 매분 6회)을 `USDT_LEGACY_REST_POLLING_ENABLED=false` default로 비활성화. 5b/5d series로 WS fanout이 Redis(tick path + 5s grain coalescing) / DB(1초 window writer) / Alert(coalescer) 책임 처리 + source-specific REST fallback probe가 stale 시 동일 fanout(`fetch_*_usdt_tick` helper) 재사용 — 상시 polling 중복. `app/crawlers/usdt_sources.py`의 `fetch_*_usdt_tick` helper는 WS fallback이 재사용하므로 **함수/모듈 보존**. Rollback: env `USDT_LEGACY_REST_POLLING_ENABLED=true` + `docker compose up -d --force-recreate fastapi`로 cron 복원. additive guardrail 단계는 통과, polling 제거 (flag-toggled) 단계 진입.
 - **iOS/Android 클라이언트 변경**: Phase B.2 minimum scope 외 (별도 phase)
 - **Bithumb~Gopax WebSocket 확장**: Phase B.3 영역
 - **legacy piggyback 즉시 삭제**: PR4에서 telemetry 검증 후 결정

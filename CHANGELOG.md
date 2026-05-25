@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **USDT legacy REST polling 비활성** (2026-05-25, `ed0885c`):
+  - `USDT_LEGACY_REST_POLLING_ENABLED` env flag 신규 ([app/config.py](app/config.py)) — default `false`로 상시 REST polling(`collect_usdt_rates` 매분 06,16,26,36,46,56초) cron 등록 차단.
+  - 5b/5d-a series로 WS fanout이 Redis(tick path + 5s grain coalescing) / DB(1초 window writer) / Alert(coalescer) 책임 처리 + source-specific REST fallback probe가 stale 시 동일 fanout 재사용 — 상시 polling 중복. WS 도입 전 과도기 잔재 제거.
+  - `_register_usdt_legacy_polling_job(target_scheduler) -> bool` helper 추출 ([app/scheduler.py](app/scheduler.py)) — flag=false 시 add_job 미호출 + "USDT legacy polling disabled (WS + fallback REST active)" 로그.
+  - `app/crawlers/usdt_sources.py` (collect_usdt_rates, `fetch_*_usdt_tick` helper)는 손대지 않음 — WS fallback controller가 `fetch_*_usdt_tick`을 재사용.
+  - alert path 흡수 확인: WS `UsdtAlertEvaluator._load_settings_from_db`가 legacy `process_source_rate_alerts → get_triggered_source_settings_for_rate`와 **같은** `SourceNotificationSetting` 테이블 + 같은 filter + 같은 FCM dispatch — alert 누락 없음.
+  - 신규 tests 2개 (`tests/test_usdt_legacy_polling_scheduler.py`) — flag false 미등록 + flag true 기존 cron(06,16,26,36,46,56) 등록.
+  - 운영 검증: 배포 직후 EC2에서 `USDT_LEGACY_REST_POLLING_ENABLED=False`, `_register_usdt_legacy_polling_job` helper 노출, `usdt_sources` APScheduler job 미등록, disabled 로그 발화, 5 source Redis latest 정상 적재 (upbit/bithumb/coinone/korbit/gopax) 모두 확인.
+  - Rollback: env `USDT_LEGACY_REST_POLLING_ENABLED=true` + `docker compose up -d --force-recreate fastapi` (1분 안 cron 복원).
+
+- **(5d-a) UsdtLatestWriteOutcome enum + topic trigger SET-only gating** (2026-05-25, `59276af`, [USDT_WS_DESIGN_PLAN.md §12.8.3](USDT_WS_DESIGN_PLAN.md)):
+  - `set_latest_usdt_rate_from_sync_job` 시그니처 `bool` → `UsdtLatestWriteOutcome` enum 변경 (`{FAILED, SKIPPED, SET}` — bool truthiness 모호성 제거).
+  - 5 USDT WS source writer (upbit/bithumb/coinone/korbit/gopax) trigger 분기: `outcome is SET` → `request_tether_topic_trigger` 발사 (change notification), `outcome is SKIPPED` → silent (5s grain coalesce는 동일 값/동일 bucket이라 topic publish 불필요. Topic = change notification 역할이지 heartbeat 아님), `outcome is FAILED` → warning + 차단.
+  - REST polling `_mirror_changed_source_to_redis`는 외부 `bool` interface 유지 — SKIPPED를 success로 처리 (false-positive warning 회피).
+  - TetherTrigger 회귀 테스트: SKIPPED → trigger 미호출 명시 검증 (Upbit 대표, 5 source 동일 패턴 + 누군가 'is not FAILED'로 바꾸면 즉시 fail 가드).
+  - 13 files changed, +226/-118. test_source_direct_write.py + 5 source skeleton tests `return_value=True/False` + `return True/False` (fake_to_thread) 모두 SET/FAILED enum으로 일관 변환.
+
 - **KRX close snapshot 1차 PR** (2026-05-15, `c0855ff`, [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md)):
   - CF 15:45 / CM 06:00 단일가 종가 누락 보강. 운영 EC2 로그 + DB 7~14일치 실측 기반 (CF 5/7 누락, CM 1/8 누락) — Codex/Claude 8라운드 합의.
   - `KrxCloseSnapshotController` 신규 ([app/crawlers/krx_kis.py](app/crawlers/krx_kis.py)): `KrxRestFallbackController` (stale-based)와 책임 분리, session boundary trigger.
