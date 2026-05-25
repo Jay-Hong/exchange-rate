@@ -2921,7 +2921,7 @@ Stage 2에서 KRX는 사용자에게 노출되어야 한다. 이때 WebSocket �
 | **REST → WebSocket 복귀 기준** | frame 1건 즉시 / N초 hysteresis / reconnect 명시 | **frame 1건 도착 즉시 normal** (코드 자동 transition 그대로). cooldown 무관 |
 | **REST 호출 cooldown (`KRX_REST_COOLDOWN_SEC`)** | 0s / 30s / 60s | **30s** 후보 (중복 폭주 방지, status 복귀에는 적용 X) |
 | **stale 지속 시 REST 재호출 주기** | 호출 후 재호출 X / cooldown마다 1회 / 적응형 | **cooldown마다 1회** 후보 |
-| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | DB 저장까지 수행해 provenance 유지. topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
+| REST 성공 시 저장 위치 | `source_rates`에 insert-if-changed / topic snapshot만 갱신 | ~~DB 저장까지 수행해 provenance 유지~~ → **superseded by 2026-05-25 follow-up**: KIS REST stale 본질 + 5/19/5/25 두 사례로 close write source 부적합 확정. close snapshot REST는 default off (write 차단, diagnostic만 유지). stale 시 호출 일반 REST snapshot/fallback은 본 ADR Stage C 결정 영역. topic snapshot/publish 경로는 ADR-028 기반 Phase Z-2에서 확정 |
 | REST 실패 시 정책 | KRX topic publish 제외 / 마지막 값 유지 / stale status 동반 | Stage 2 topic에서는 KRX publish 제외가 기본. 마지막 값 유지 + stale status는 topic schema 확정 후 재검토 |
 | **REST quote endpoint/TR** | KIS 상품선물 REST endpoint 재조사 / REST 없이 WebSocket stale 제외 정책 | **resolved**. `FHMIF10000000` + `/inquire-price` 유지, `FID_COND_MRKT_DIV_CODE`를 세션별 `CF`/`CM`으로 분기해야 A75605 USD futures `output1.futs_prpr` 반환 |
 | 만기일 rollover | cron / session boundary resolve / 수동 restart | **PR6c-2d-1 (2026-05-07) 결정**: 만기일 07:00 KST swap + 5분 reconcile cron (임시 안전모드). 5/18 검증 통과 후 hybrid (06:01 daily + session boundary)로 축소 검토 (PR6c-2d-5 후보). 자세한 내용은 본 ADR 하단 "PR6c-2d-1 amend" 절 참조 |
@@ -3246,7 +3246,7 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
 
 **2차 작업 완료 (2026-05-17, Stage 1-5 / `68b8702..c2fb796`)**:
 
-WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방지로 land. EC2 deploy 2026-05-17 17:07 KST. F1 (DB row 중복) / F2 (flag race) / F3 (test hang) 모두 구조적 해결. `KRX_CLOSE_FINALIZER_ENABLED` env default true, false 시 1차 PR (c0855ff) 동작 rollback. 첫 실측 2026-05-18 (월) 15:45 KST CF close / 2026-05-19 (화) 06:00 KST CM close. 7일 telemetry (`close_grace_saved` / `close_rest_fallback_used` 등) 분석 후 3차 PR scope (DB unique constraint / 종가 read API / open auction / REST fallback 제거 검토 / Stage E) 결정. 상세 + Stage 1-5 commits / 검증 / rollback은 plan 문서 §0 참조.
+WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방지로 land. EC2 deploy 2026-05-17 17:07 KST. F1 (DB row 중복) / F2 (flag race) / F3 (test hang) 모두 구조적 해결. `KRX_CLOSE_FINALIZER_ENABLED` env default true, false 시 1차 PR (c0855ff) 동작 rollback. 첫 실측 2026-05-18 (월) 15:45 KST CF close / 2026-05-19 (화) 06:00 KST CM close. 7일 telemetry (`close_grace_saved` / `close_rest_fallback_used` / 정책 PR `6a43785` 이후 `rest_write_blocked` 추가) 분석 후 3차 PR scope (DB unique constraint / 종가 read API / open auction / REST close fallback **코드 완전 제거** vs 검증 가능성 재검토 [2026-05-25 follow-up 이후 default off] / Stage E) 결정. 상세 + Stage 1-5 commits / 검증 / rollback은 plan 문서 §0 참조.
 
 상세: [KRX_CLOSE_SNAPSHOT_PLAN.md](KRX_CLOSE_SNAPSHOT_PLAN.md).
 
@@ -3285,12 +3285,70 @@ WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방
 
 #### Pending — 7일 telemetry 후 결정
 
-- **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST 성공) / case C (둘 다 실패) 분포 측정. 현재 CF 1건 + CM 1건 = case A 2건. 결과로 3차 PR scope 결정 (DB unique constraint / 종가 read API / open auction / REST fallback 제거 / Stage E).
+- **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST diagnostic + `rest_write_blocked` write 차단 — 2026-05-25 follow-up 이후) / case C (둘 다 실패) 분포 측정. 현재 CF 1건 + CM 1건 = case A 2건. 결과로 3차 PR scope 결정 (DB unique constraint / 종가 read API / open auction / REST close fallback **코드 완전 제거** vs 검증 가능성 재검토 / Stage E).
 - **PR6c-2d-5 hybrid scheduler 축소** — 5/18 rollover 통과 후 검토 가능 (현재 5분 reconcile cron, hybrid 06:01 + boundary로 축소 후보).
 - **PR6d-2b REST fallback 정책 설계** — active contract check + session boundary grace + stale/`acml_vol`/timestamp 비교 + 만기월 REST 응답 배제.
 - **master 전체 dict diff** (선택, `mmsc_cls_code` 외 `name`, `contract_month`, `last_tr_date` 등 추가 sample 수집 가치 시점에 확인).
 
 상세 관찰 데이터 + 운영 교훈: [KRX_CANARY.md "2026-05-18~19 만기 첫 실측 결과"](KRX_CANARY.md) 참조.
+
+### Follow-up 결정 — KIS REST close write source 격리 (2026-05-25)
+
+> 📅 **작성일**: 2026-05-25 (사고 당일 4단계 대응 완료)
+> 🏷️ **상태**: 운영 land 완료 (`170380f` hotfix + `6a43785` 정책 PR)
+
+#### 계기 — 2026-05-25 휴장일 사고
+
+부처님오신날(5/24 일요일) 대체공휴일로 KRX 휴장이었으나 `KRX_2026_KNOWN_HOLIDAYS`에 5/25 미등록 → `is_close_snapshot_eligible("CF", 2026-05-25)=True` → close snapshot REST fallback 발동 → KIS REST가 5/22 stale 종가(rate=1516.8)를 `rt_cd=0` 정상 응답으로 반환 → DB row id=429785 + Redis latest를 5/25 15:45 KST timestamp로 잘못 기록 → 단말 노출 사고.
+
+#### 근본 진단 — REST stale의 본질 (ADR-027 중심 주제 강화)
+
+본 ADR의 원칙 1 ("KIS REST는 stale 응답을 정상 형식으로 반환 가능") 추가 데이터:
+
+- **5/19 만기 실측**: A75605 만기 후에도 `rt_cd=0, futs_prpr=1505.800, acml_vol=7846` 고정 stale 반환. 응답 형식 자체는 정상 — 단순 `rt_cd == "0"` 분기로 stale 인지 불가 (§"2026-05-18~19 만기 첫 실측 결과" 결론 3)
+- **5/25 휴장 사고**: KRX 미운영이지만 REST가 5/22 종가 stale 응답을 정상 형식으로 반환
+- REST 응답에 거래일 / 체결시각 / 거래량 검증 가능한 명확한 필드 부재 — 자동 코드로 stale 인지 불가
+
+**핵심 결론**: REST 응답만으로 "오늘 종가"임을 증명할 수 없음 → **write source로 부적합**.
+
+#### 결정 — close REST write source 격리
+
+`KrxCloseSnapshotController`의 REST 기반 DB/Redis write를 **default off**로 격하 (env `KRX_CLOSE_REST_WRITE_ENABLED=false`).
+
+**핵심 anchor 5문장**:
+
+1. KIS REST close snapshot은 더 이상 authoritative write source가 아니다.
+2. REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.
+3. Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다.
+4. `KrxCloseWindowWriter`의 WS close frame write는 신뢰 경로로 유지한다.
+5. Stage E는 close finalizer 정책과 직교한다.
+
+#### 차단 범위 — `KRX_CLOSE_FINALIZER_ENABLED` 값과 무관
+
+`KrxCloseSnapshotController._sync_write` 단일 분기로 두 경로 모두 차단:
+
+- **`KRX_CLOSE_FINALIZER_ENABLED=true`** (default) 경로: 2차 PR `c2fb796` REST fallback 1회 — write 차단 + retry short-circuit
+- **`KRX_CLOSE_FINALIZER_ENABLED=false`** rollback 경로: 1차 PR `c0855ff` REST retry 3회 — 첫 attempt에서 short-circuit (같은 stale 값 3회 확인 무의미)
+
+`KrxCloseWindowWriter` (WS close frame 기반, 신뢰 source)는 변경 없음 — 본 결정 직교 영역.
+
+#### Case B 의미 변경
+
+- **이전**: KIS WS 미송신 → REST fallback 성공 → DB/Redis write → Redis latest REST 갱신
+- **이후**: KIS WS 미송신 → REST diagnostic 호출 → `close_rest_fallback_used` +1 + `rest_write_blocked` +1 → DB/Redis write 없음 → Redis latest는 직전 정상 영업일 종가 유지
+
+상세 telemetry 해석: [KRX_CLOSE_SNAPSHOT_PLAN.md §5.5](KRX_CLOSE_SNAPSHOT_PLAN.md) 참조.
+
+#### Rollback
+
+env `KRX_CLOSE_REST_WRITE_ENABLED=true` + `docker compose up -d --force-recreate fastapi`로 기존 1차/2차 PR write 동작 복원 가능. 단 KIS REST stale 위험 동반 — 회귀 사고 가능성.
+
+#### 다음 단계
+
+- 5/19~5/26 7일 telemetry 분석 시 신규 `rest_write_blocked` counter 결합 분석 → case B 분포 + KIS REST stale 재발 빈도 → REST close fallback 코드 완전 제거 vs 검증 가능성 재검토 결정.
+- Stage E (KRX Redis tick-level 전환, [KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md))는 본 결정과 직교 작업 — 별도 진입.
+
+상세 사고 기록 + 운영 보정 명령: [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md) / [KRX_CANARY.md §"2026-05-25 휴장일 사고 + 대응"](KRX_CANARY.md) 참조.
 
 ---
 

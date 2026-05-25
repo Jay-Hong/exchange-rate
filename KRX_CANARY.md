@@ -441,6 +441,8 @@ docker compose logs fastapi --since "2026-05-18T15:44+09:00" --until "2026-05-18
 `get_krx_close_finalizer_stats()`는 uvicorn 메인 프로세스의 module-level singleton이라
 `docker exec ... python -c` 같은 **새 Python 프로세스에서는 조회 불가** (별 import → 초기값 0만 보여 운영자 오도).
 
+> 📌 **2026-05-25 추가 (`6a43785` 정책 PR)**: 신규 `rest_write_blocked` counter는 본 5종과 **다른 owner** — `KrxCloseSnapshotController.counters` dict (controller instance attribute). 운영 dashboard / 조회 스크립트 작성 시 두 owner 분리 인식 필수. 상세: [KRX_CLOSE_SNAPSHOT_PLAN.md §5.5](KRX_CLOSE_SNAPSHOT_PLAN.md).
+
 현재 외부 조회 path 없음 — 1차 관찰은 다음 indirect signal로:
 
 - **logs**: `[krx_close_window] close saved session=... rate=... ts=...` 발화 횟수 (case A signal)
@@ -457,10 +459,10 @@ docker compose logs fastapi --since "2026-05-18T15:44+09:00" --until "2026-05-18
 **Case A/B/C 분포 분석** (7일 telemetry 측정 후, 2026-05-26 무렵):
 
 - case A (우리 cutoff fix): 영업일 close 시점 직후 `close saved` log 발화 + DB row + Redis flag 정상
-- case B (KIS WS 미송신): close saved log 없음 + REST fallback 발화 + Redis latest는 REST로 갱신
+- **case B (KIS WS 미송신, 2026-05-25 정책 PR `6a43785` 이후 갱신)**: close saved log 없음 + REST fallback 발화 (`close_rest_fallback_used` +1) → **DB/Redis write 차단** (`KRX_CLOSE_REST_WRITE_ENABLED=false` default, `rest_write_blocked` +1) → Redis latest는 직전 정상 영업일 종가 유지. REST 응답은 diagnostic only, write source 아님.
 - case C (dedup skip): 2차 작업 정책상 0 예상
 
-case B 비율 결과로 3차 PR scope 결정 (REST fallback 제거 검토 / 유지).
+case B 비율 + `rest_write_blocked` 분포 결과로 3차 PR scope 결정 (REST close fallback 코드 완전 제거 vs 검증 가능성 재검토). 상세 정책 근거는 [DECISIONS.md ADR-027 follow-up](DECISIONS.md) + [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md) 참조.
 
 ### 2026-05-18~19 만기 첫 실측 결과 (CF/CM 통과, master 가설 b 확정)
 
@@ -525,9 +527,145 @@ scripts/observe_kis_master.py  # KIS 상품 마스터 fetch (secret 무관, publ
 
 #### Pending — 추가 관찰 항목
 
-- **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST 성공) / case C (둘 다 실패) 분포 측정. CF/CM 첫 실측 모두 case A. 상세 status는 [KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) 추적.
+- **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST diagnostic + `rest_write_blocked` write 차단 — 2026-05-25 정책 PR `6a43785` 이후) / case C (둘 다 실패) 분포 측정. CF/CM 첫 실측 모두 case A. 상세 status는 [KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) 추적.
 
 > **다음 만기 (6/18) 별도 observer는 불필요로 결정 (2026-05-19)**. 5/18 첫 실측으로 운영 정책 input 모두 확정 — 만기일 rollover (PR6c-2d-1) 정상 / KIS master 익일 batch 갱신 / REST stale 정상 응답 가능 / 자체 calendar 기반 active contract 판단 / CF/CM close finalizer WS-first 성공. 다음 만기는 운영 로그/DB row만 사후 확인 ([KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) telemetry). master batch 재확인이 꼭 필요하면 `observe_kis_master.py` ad-hoc 1회 호출로 충분.
+
+### 2026-05-25 휴장일 사고 + 대응 (4단계 완료)
+
+> 📅 **실측일**: 2026-05-25 (월) — 부처님오신날(5/24 일요일) 대체공휴일
+> 🏷️ **상태**: 4단계 대응 land 완료 (`170380f` hotfix + `6a43785` 정책 PR)
+> 📋 **상세 정책 근거**: [DECISIONS.md ADR-027 follow-up](DECISIONS.md) + [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md)
+
+#### 사고 요약
+
+2026-05-25 (월)은 한국 부처님오신날 대체공휴일로 KRX 휴장. 그러나 `KRX_2026_KNOWN_HOLIDAYS`에 2026-05-25 미등록 → `is_krx_business_day(2026-05-25)=True` → `is_close_snapshot_eligible("CF", 2026-05-25)=True` → 15:45 KST CF close snapshot REST fallback 발동.
+
+KIS REST가 5/22 (금) stale 종가(rate=1516.8)를 `rt_cd=0` 정상 응답으로 반환 → DB row id=429785 + Redis latest를 `2026-05-25T15:45:00+09:00` timestamp로 잘못 기록 → 단말 노출.
+
+**근본 진단**: KIS REST는 휴장/만기 후에도 stale 응답을 정상 형식으로 반환 (5/19 만기 + 5/25 휴장 두 번 확인). 자동 코드로 stale 인지 불가 → REST 응답만으로 "오늘 종가"임을 증명할 수 없음 → write source로 부적합.
+
+#### 4단계 대응 (순서 기반, 시각은 commit 시각만 명시)
+
+**1. Production read-only 식별**
+
+```bash
+docker exec exchange-rate-app python -c '
+from app.database import get_db_context
+from app import models
+with get_db_context() as db:
+    rows = db.query(models.SourceRate).filter(
+        models.SourceRate.source == "krx",
+        models.SourceRate.timestamp.between("2026-05-25 06:00", "2026-05-25 07:30"),
+    ).all()
+    for r in rows:
+        print(r.id, r.rate, r.timestamp)
+'
+```
+
+식별 결과:
+
+- **잘못된 row**: `id=429785, rate=1516.8, ts_utc=2026-05-25 06:45:00` (= KST 15:45)
+- **직전 정상 row**: `id=390427, rate=1519.9, ts_utc=2026-05-22 21:00:00` (= KST 2026-05-23 06:00, 5/22 야간 CM close)
+- **Redis latest**: `{"rate": 1516.8, "timestamp": "2026-05-25T15:45:00+09:00", "mirrored_at": "2026-05-25T15:46:04+09:00"}` (잘못된 상태)
+- **close_captured flag**: CF/CM 모두 미존재 (ttl=-2)
+
+**2. 운영 데이터 보정**
+
+```bash
+docker exec exchange-rate-app python -c '
+from app.database import get_db_context
+from app import models
+from app.latest_rates_cache import _get_sync_client, latest_key_source
+from datetime import datetime, timezone, timedelta
+import json
+KST = timezone(timedelta(hours=9))
+now_kst = datetime.now(KST).isoformat()
+
+with get_db_context() as db:
+    row = db.query(models.SourceRate).filter(models.SourceRate.id == 429785).first()
+    db.delete(row); db.commit()
+
+client = _get_sync_client()
+client.set(
+    latest_key_source("krx", "usd-krw-futures"),
+    json.dumps({
+        "rate": 1519.9,
+        "timestamp": "2026-05-23T06:00:00+09:00",
+        "mirrored_at": now_kst,
+    }, ensure_ascii=False),
+)
+'
+```
+
+결과 — DB row id=429785 삭제 + Redis latest를 직전 정상값으로 복구 (mirrored_at = 보정 시각).
+
+**3. Hotfix (`170380f`)**
+
+- `app/sources/kis_futures.py` — `KRX_2026_KNOWN_HOLIDAYS`에 `date(2026, 5, 25)` 추가 (kwatch.kr/markets/kr/trading-days cross-check)
+- 5/25 CF skip + 5/26 06:00 CM skip 회귀 잠금 테스트 (mock 없이 실제 캘린더 entry 기반)
+- 32 tests passed → push → EC2 build + force-recreate → production sanity 검증
+
+**5/26 06:00 KST CM 재발 차단 확정**: production container에서 `is_close_snapshot_eligible("CM", date(2026, 5, 26))=False` (today-1=2026-05-25 business day check).
+
+**4. 정책 PR (`6a43785`) — KRX_CLOSE_REST_WRITE_ENABLED=false default**
+
+- 새 env `KRX_CLOSE_REST_WRITE_ENABLED` (default `false`)
+- `KrxCloseSnapshotController._sync_write` 안 sanity check 통과 후 DB/Redis write 직전 분기 + retry short-circuit (같은 stale 값 3회 확인 무의미)
+- `KRX_CLOSE_FINALIZER_ENABLED` 값과 무관 — finalizer=true의 fallback 1회와 finalizer=false rollback의 retry 3회 모두 단일 분기로 차단
+- 새 counter `rest_write_blocked` 추가 (case B 의 write 차단 signal)
+- `KrxCloseWindowWriter` (WS close frame, 신뢰 source): 변경 없음
+- 173 tests passed → push → EC2 deploy + production verification
+
+#### 정책 anchor — 5 핵심 결정
+
+1. **KIS REST close snapshot은 더 이상 authoritative write source가 아니다.**
+2. **REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.**
+3. **Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다.**
+4. **`KrxCloseWindowWriter`의 WS close frame write는 신뢰 경로로 유지한다.**
+5. **Stage E는 close finalizer 정책과 직교 작업이다.**
+
+#### 운영 검증 명령 (정책 PR 배포 후)
+
+```bash
+ssh -i ~/fxi-server-key-pair.pem ubuntu@<EC2> "docker exec exchange-rate-app python -c '
+from app import config
+from app.crawlers.krx_kis import KrxCloseSnapshotController
+print(f\"KRX_CLOSE_REST_WRITE_ENABLED: {config.KRX_CLOSE_REST_WRITE_ENABLED}\")  # False
+print(f\"KRX_CLOSE_FINALIZER_ENABLED:  {config.KRX_CLOSE_FINALIZER_ENABLED}\")   # True
+controller = KrxCloseSnapshotController(token_manager=None)
+print(f\"rest_write_blocked counter: {controller.counters.get(\\\"rest_write_blocked\\\")}\")  # 0 (initial)
+'"
+```
+
+#### Rollback 경로
+
+```bash
+# .env에 추가
+KRX_CLOSE_REST_WRITE_ENABLED=true
+# 재기동
+docker compose up -d --force-recreate fastapi
+```
+
+flag=true 시 기존 1차/2차 PR write 동작 복원. 단 KIS REST stale 위험 동반.
+
+#### 다음 자연 검증 시점
+
+| 시점 | 검증 항목 |
+| --- | --- |
+| **2026-05-26 (화) 06:00 KST** | CM close — 5/25 휴일 차단으로 진입 안 함 (hotfix 효과) |
+| **2026-05-26 (화) 08:30 KST** | CF 정규 세션 자동 진입 (정상 영업일) |
+| **2026-05-26 (화) 15:45 KST** | 정상 영업일 CF close — WS captured 케이스(case A) 정상 + WS 미captured 시 `rest_write_blocked` 로그 발화 확인 |
+| **5/19~5/26 7일 telemetry 분석** | case A/B/C 분포 + 신규 `rest_write_blocked` counter 결합 분석 → ADR-027 Stage C + 3차 PR scope 결정 |
+
+#### 다음 잠재 위험 (캘린더 보강 PR 후보)
+
+2026 한국 공휴일 중 본 코드의 사고 재발 위험:
+
+- 자연 회피 (주말 겹침): 현충일 6/6 토 / 광복절 8/15 토 / 개천절 10/3 토
+- 위험 (평일/금요일): 추석 9/24 목 / 9/25 금 / 한글날 10/9 금 / 크리스마스 12/25 금
+
+→ 별도 캘린더 보강 PR로 검증 + cross-check 후 추가 (본 5/25 hotfix scope 외).
 
 ---
 

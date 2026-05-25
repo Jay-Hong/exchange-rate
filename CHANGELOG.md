@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **KRX close REST write source 격리** (2026-05-25 정책 PR, `6a43785`, [DECISIONS.md ADR-027 follow-up](DECISIONS.md) / [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md)):
+  - **계기**: 2026-05-25 휴장일 사고 (`170380f` hotfix 후속) + 5/19 만기 stale 실측. KIS REST가 휴장/만기 후에도 stale 응답을 `rt_cd=0` 정상 형식으로 반환 → 자동 코드로 stale 인지 불가 → REST 응답만으로 "오늘 종가"임을 증명할 수 없음.
+  - **결정**: `KRX_CLOSE_REST_WRITE_ENABLED` env 신규 (default `false`). `KrxCloseSnapshotController._sync_write` 안 sanity check 통과 후 DB/Redis write 직전 분기 + retry short-circuit (같은 stale 값 3회 확인 무의미). `KRX_CLOSE_FINALIZER_ENABLED` 값과 무관하게 KrxCloseSnapshotController의 REST write path 전체 차단 — finalizer=true 경로의 fallback 1회와 finalizer=false rollback 경로의 retry 3회 모두 단일 분기로 차단.
+  - **유지**: `KrxCloseWindowWriter` (WS close frame, 신뢰 source). REST fetch + sanity check는 diagnostic으로 유지 (case A/B/C telemetry 보존).
+  - **새 counter** `rest_write_blocked`: case B 의 write 차단 signal. `KrxCloseSnapshotController` 내부 `success` counter는 retry short-circuit 위해 `return True` 사용 → 의미상 "attempt sequence completed", 운영 해석은 `rest_write_blocked` counter와 함께.
+  - **Case B 의미 변경**: 이전 "REST → Redis 갱신" → 이후 "REST diagnostic 호출 → `rest_write_blocked` +1, Redis latest는 직전 정상 영업일 종가 유지".
+  - **Rollback**: env `KRX_CLOSE_REST_WRITE_ENABLED=true` + force-recreate fastapi (기존 1차/2차 PR write 동작 복원 — 단 KIS REST stale 위험 동반).
+  - 신규 3 tests (`TestKrxCloseSnapshotControllerRestWriteBlocked`): finalizer=true + captured=false / finalizer=false rollback / flag=true legacy. 기존 `TestKrxCloseSnapshotController.setUp`에 `KRX_CLOSE_REST_WRITE_ENABLED=True` patch 추가 (legacy 회귀 잠금). 173 tests passed.
+  - Stage E ([KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md))는 close finalizer 정책과 직교 작업 — 별도 진입.
+
+- **KRX 2026-05-25 부처님오신날 대체공휴일 추가 + 5/26 06:00 CM skip 회귀 잠금** (hotfix, `170380f`, [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md) / [KRX_CANARY.md "2026-05-25 휴장일 사고 + 대응"](KRX_CANARY.md)):
+  - **운영 사고 (2026-05-25 15:45 KST)**: 한국 부처님오신날(5/24 일요일) 대체공휴일로 KRX 휴장이었으나 `KRX_2026_KNOWN_HOLIDAYS`에 2026-05-25 미등록 → `is_close_snapshot_eligible("CF", 2026-05-25)=True` → close snapshot REST fallback 발동 → KIS REST가 5/22 (금) stale 종가(rate=1516.8)를 `rt_cd=0` 정상 응답으로 반환 → DB row id=429785 + Redis latest를 `2026-05-25T15:45:00+09:00` timestamp로 잘못 기록 → 단말 노출.
+  - **운영 데이터 보정 (commit 외)**: DB row id=429785 DELETE + Redis latest를 직전 정상값(5/22 야간 CM close, rate=1519.9, timestamp=`2026-05-23T06:00:00+09:00`)으로 복구. close_captured flag는 미존재(ttl=-2)라 별도 작업 불필요.
+  - **Hotfix**: `app/sources/kis_futures.py`의 `KRX_2026_KNOWN_HOLIDAYS`에 `date(2026, 5, 25)` 추가 (kwatch.kr/markets/kr/trading-days cross-check). 5/26 06:00 KST CM은 today-1=2026-05-25 business day check를 거치므로 본 entry로 자연 차단.
+  - 신규 4 tests: 5/25 휴일 잠금(2 tests in `TestKrxBusinessDay`) + 5/25 CF skip + 5/26 CM skip (mock 없이 실제 캘린더 entry 기반 in `TestBoundaryHelpers` — 캘린더에서 5/25 빠지면 즉시 fail). 32 tests passed.
+  - **Production sanity 검증**: 배포 후 `is_close_snapshot_eligible("CM", date(2026, 5, 26))=False` (5/26 06:00 CM 재발 차단 확정).
+  - 다른 2026 한국 공휴일 (9/24, 9/25, 10/9, 12/25 등)은 별도 캘린더 보강 PR로 KRX 운영 정책 cross-check 후 추가.
+
 ### Added
 
 - **USDT legacy REST polling 비활성** (2026-05-25, `ed0885c`):

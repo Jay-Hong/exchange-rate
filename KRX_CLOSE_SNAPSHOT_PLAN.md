@@ -15,6 +15,7 @@
 | **CF 첫 실측 (2026-05-18 15:45 KST)** | ✅ **WS-first path 성공, REST fallback skip** | — | log: `[krx_close_window] close saved session=CF rate=1496.5` + `[krx_close_snapshot] WS captured at entry → REST skip`. F1/F2/F3 본 케이스 미노출 |
 | **CM 첫 실측 (2026-05-19 06:00 KST)** | ✅ **WS-first path 성공, REST fallback skip** | — | log: `[krx_close_window] close saved session=CM rate=1490.0 ts=2026-05-19T06:00:00+09:00` (06:01:00.151) + `[krx_close_snapshot] WS captured at entry → REST skip` (06:01:03.736). DB row id=293030. F1/F2/F3 본 케이스 미노출 (CF/CM 양 session 단발 성공) |
 | 7일 telemetry 측정 | Day 1/7 진행 중 (2026-05-19 ~ 2026-05-26) | — | 현재 case A 2건 (CF/CM 모두 WS-first 성공). 결과로 3차 PR scope 결정 |
+| **2026-05-25 휴장일 사고 + 대응** | ✅ **완료 + 배포** (4단계: read → 보정 → hotfix → 정책 PR) | `170380f`, `6a43785` | 부처님오신날 대체공휴일 캘린더 누락 → KIS REST가 5/22 stale 종가(rate=1516.8)를 5/25 15:45 KST timestamp로 잘못 기록(DB row id=429785 + Redis latest). 운영 데이터 보정(DB 삭제 + Redis 직전 정상값 1519.9 복구) + hotfix(2026-05-25 추가) + 정책 PR(REST close write default off). 상세: §5.7 |
 
 **2차 작업 Stage 1-5 요약** (분할 + 외부 검토 통과):
 
@@ -121,7 +122,7 @@ WS grace drain만으로는 부족: KIS server-side 미발화 case가 다수라 �
 
 **3차 PR 후보** (2차 PR 7일 telemetry 측정 후):
 
-- DB unique constraint, 종가 read API, open auction 보강, REST fallback 제거 검토, Stage E (KRX Redis-first)
+- DB unique constraint, 종가 read API, open auction 보강, REST close fallback **코드 완전 제거** vs 검증 가능성 재검토 (정책 PR `6a43785` 이후 default off, §5.7 참조), Stage E (KRX Redis-first)
 - §7.3 참조
 
 **1차 PR 시점 caveat (2026-05-15 작성, 2차 PR로 해소 예정)**:
@@ -462,17 +463,35 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 |---|---|---|
 | `KRX_CLOSE_FINALIZER_ENABLED` | `true` | 2차 PR 정책 전체 (close grace + close window writer + REST fallback 단순화) 활성. `false` 시 1차 PR (c0855ff) 동작 유지 — 회귀 시 즉시 rollback path |
 
-### 5.5 Telemetry (5 counters)
+### 5.5 Telemetry (6 counters — 2026-05-25 갱신)
 
-운영 dashboard에 추가 — case A/B/C 분포 실측 가능 (A: 우리 cutoff / B: KIS 미송신 / C: dedup skip).
+운영 dashboard에 추가 — case A/B/C 분포 실측 가능.
 
-| Counter | 의미 |
-|---|---|
-| `close_grace_tick_count` | Close window 안 WS frame 수신 (raw count, dedup 전) |
-| `close_grace_saved` | Close window 안 frame이 DB + Redis INSERT 성공 |
-| `close_rest_fallback_used` | WS grace 종료 시점 captured flag 부재 → REST 호출 |
-| `close_duplicate_count` | Close window 안 2 frame 이상 발생 (현재 baseline 0건, **이상 신호 alert**) |
-| `single_price_window_frame_count` | 단일가 진행 구간(15:35~15:44 / 05:50~05:59) frame 수신 (현재 baseline 11일 누적 2건 — 잔여 echo. 미래 KIS 정책 변경 대응 안전망) |
+**Case 정의 (2026-05-25 정책 PR `6a43785` 이후 갱신)**:
+
+- **Case A** (우리 cutoff fix): Close window 안 WS frame 수신 + DB/Redis write 성공 → `close_grace_saved` +1
+- **Case B** (KIS WS 미송신): Close window 안 WS frame 0건 → REST diagnostic 호출 + `close_rest_fallback_used` +1 → **DB/Redis write 차단** (`KRX_CLOSE_REST_WRITE_ENABLED=false` default) + `rest_write_blocked` +1. Redis latest는 직전 정상 영업일 종가 유지.
+- **Case C** (dedup skip): 2차 작업 정책상 0 예상 (Stage 4 단순화)
+
+| Counter | Owner (조회 경로) | 의미 |
+|---|---|---|
+| `close_grace_tick_count` | `KrxCloseFinalizerStats` (`_krx_close_finalizer_stats`) | Close window 안 WS frame 수신 (raw count, dedup 전) |
+| `close_grace_saved` | `KrxCloseFinalizerStats` | Close window 안 frame이 DB + Redis INSERT 성공 (**case A signal**) |
+| `close_rest_fallback_used` | `KrxCloseFinalizerStats` | WS grace 종료 시점 captured flag 부재 → REST diagnostic 호출 (**case B signal**, write 결과와 무관) |
+| `rest_write_blocked` | **`KrxCloseSnapshotController.counters`** (별도 owner, 2026-05-25 정책 PR 신규) | `KrxCloseSnapshotController` REST fetch + sanity 통과했지만 `KRX_CLOSE_REST_WRITE_ENABLED=false`라 DB/Redis write 차단 + retry short-circuit (**case B 의 write 차단 signal**) |
+| `close_duplicate_count` | `KrxCloseFinalizerStats` | Close window 안 2 frame 이상 발생 (현재 baseline 0건, **이상 신호 alert**) |
+| `single_price_window_frame_count` | `KrxCloseFinalizerStats` | 단일가 진행 구간(15:35~15:44 / 05:50~05:59) frame 수신 (현재 baseline 11일 누적 2건 — 잔여 echo. 미래 KIS 정책 변경 대응 안전망) |
+
+**Counter owner 운영 주의** (2026-05-25 추가):
+
+- 기존 5 counters는 `KrxCloseFinalizerStats` (`_krx_close_finalizer_stats` module-level) — close window writer / grace drain 영역
+- 신규 `rest_write_blocked`만 `KrxCloseSnapshotController.counters` dict (controller instance attribute) — REST snapshot fallback 영역
+- 운영 dashboard / 조회 스크립트 작성 시 owner 분리 인식 필수 (둘은 다른 모듈/instance)
+
+**해석 주의** (2026-05-25 추가):
+
+- Case B (`close_rest_fallback_used` +1 + `rest_write_blocked` +1)는 REST 성공 write가 아니라 **diagnostic signal**. Redis latest 갱신 없음.
+- `KrxCloseSnapshotController` 내부 `success` counter는 `KRX_CLOSE_REST_WRITE_ENABLED=false` 시 retry short-circuit 위해 `return True` 사용 → counter +1. 의미상 "attempt sequence completed without retry"지 REST write 성공이 아님. 운영 해석은 항상 `rest_write_blocked` counter와 함께 봐야 함.
 
 ### 5.6 2차 PR 제외 항목 (3차 PR / 별도 PR 미룸)
 
@@ -482,8 +501,77 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 | Schema metadata 추가 (`kind` / `session` / `event_timestamp` / `observed_at`) | over-engineering 의심. KRX 단일 source 위해 공통 schema 확장 비례성 깨짐. Read API에서 boundary timestamp range query(`WHERE timestamp BETWEEN ... AND source='krx'`)로 식별 가능 |
 | Open auction (CF 08:30~08:45 / CM 17:50~18:00) | §4.12 (a) baseline에서 CF_open / CM_open 100% capture rate라 우선순위 낮음. close finalizer 정착 + 운영 측정 후 별도 PR 검토 |
 | 종가 read API `get_close_rate(source, asset, kst_date, session)` | 3차 PR 영역. close finalizer 정착 + 종가 데이터 quality 확정 후 API 분리 |
-| REST fallback 완전 제거 | 7일 telemetry 측정 후 case B(KIS WS 미송신) 비율 0% 입증 시 제거 검토. 현 단계는 catastrophic backup 가치 유지 |
+| REST fallback 완전 제거 (코드 삭제) | 2026-05-25 정책 PR `6a43785`로 REST close write는 **default off** (`KRX_CLOSE_REST_WRITE_ENABLED=false`) — diagnostic만 유지. 완전 코드 삭제는 7일 telemetry 측정 후 case B 분포 + KIS REST stale 재발 빈도 보고 결정. 자세한 정책 근거는 §5.7 + [DECISIONS.md ADR-027 follow-up](DECISIONS.md) |
 | KRX Redis-first 전체 전환 (Stage E) | [KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md) 영역. tick-level Redis write는 close finalizer와 직교 layer라 별도 PR. 5/18 만기 baseline + ADR-027 Stage C 결정 후 진입 |
+
+### 5.7 2026-05-25 사고 + REST write source 격하 정책
+
+> 📅 **작성일**: 2026-05-25 (사고 당일 4단계 대응 완료)
+> 🏷️ **상태**: 운영 land 완료 (`170380f` hotfix + `6a43785` 정책 PR)
+
+#### 5.7.1 사고 요약
+
+2026-05-25 (월)은 한국 부처님오신날(5/24 일요일) 대체공휴일 — KRX 휴장.
+
+- `KRX_2026_KNOWN_HOLIDAYS`에 2026-05-25 미등록 → `is_krx_business_day(2026-05-25)=True` → `is_close_snapshot_eligible("CF", 2026-05-25)=True`
+- 15:45 KST CF close snapshot 발동 → `KrxCloseSnapshotController` REST fallback 진입
+- KIS REST가 5/22 (금) stale 종가(rate=1516.8)를 `rt_cd=0` 정상 응답으로 반환
+- DB row id=429785 + Redis latest를 `2026-05-25T15:45:00+09:00` timestamp로 잘못 기록
+- 단말 노출: 5/25 15:45 KST에 1516.8원 종가가 표시됨 (실제는 5/22 종가)
+
+#### 5.7.2 근본 진단 — KIS REST stale 본질
+
+[KRX_CANARY.md §"2026-05-18~19 만기 첫 실측 결과"](KRX_CANARY.md) 추가 데이터:
+
+- KIS REST는 **휴장 / 만기 후 / 점검 시간** 등에 stale 응답을 정상 형식(`rt_cd=0`)으로 반환
+- REST 응답에 거래일 / 체결시각 / 거래량 검증 가능한 명확한 필드 부재 — 자동 코드로 stale 인지 불가
+- 5/19 만기 실측 (`acml_vol=7846` 고정 stale) + 5/25 휴장 사고 — 두 번 확인된 패턴
+- **결론**: REST 응답만으로 "오늘 종가"임을 증명할 수 없음 → write source로 부적합
+
+#### 5.7.3 4단계 대응 (운영 + 코드)
+
+| 단계 | 작업 | Commit / 비고 |
+|---|---|---|
+| 1. read-only 식별 | DB row id=429785 (rate=1516.8, ts_utc=2026-05-25 06:45:00) + Redis latest stale (`{"rate": 1516.8, ...}`) + 직전 정상 row id=390427 (rate=1519.9, 5/22 야간 CM close = 2026-05-23 06:00:00 KST) | (no commit) |
+| 2. 운영 데이터 보정 | DB row id=429785 DELETE + Redis latest를 직전 정상값(`{"rate": 1519.9, "timestamp": "2026-05-23T06:00:00+09:00", "mirrored_at": "2026-05-25T20:05:54+09:00"}`)으로 복구 | (no commit, production 직접 보정) |
+| 3. Hotfix | `KRX_2026_KNOWN_HOLIDAYS`에 `date(2026, 5, 25)` 추가 + 5/26 06:00 CM skip 회귀 잠금 테스트 (`today-1=5/25` business day check). 32 tests passed. | `170380f` |
+| 4. 정책 PR | `KRX_CLOSE_REST_WRITE_ENABLED=false` default 도입. `KrxCloseSnapshotController._sync_write` 안 sanity check 통과 후 DB/Redis write 직전 분기 + retry short-circuit (`return True`). `rest_write_blocked` counter 추가. 173 tests passed. | `6a43785` |
+
+#### 5.7.4 정책 anchor — 5 핵심 결정
+
+1. **KIS REST close snapshot은 더 이상 authoritative write source가 아니다.**
+2. **REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off** (`KRX_CLOSE_REST_WRITE_ENABLED=false`).
+3. **Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다** (§5.5 참조).
+4. **`KrxCloseWindowWriter`의 WS close frame write는 신뢰 경로로 유지한다** — 본 정책 PR 변경 없음.
+5. **Stage E는 close finalizer 정책과 직교 작업이다** ([KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md), KRX Redis tick-level + freshness metadata).
+
+#### 5.7.5 차단 범위 — finalizer enabled 여부와 무관
+
+`KRX_CLOSE_REST_WRITE_ENABLED=false`는 `KrxCloseSnapshotController._sync_write` 단일 분기로 두 경로 모두 차단:
+
+- `KRX_CLOSE_FINALIZER_ENABLED=true` (default) 경로: 2차 PR `c2fb796` REST fallback 1회 → write 차단
+- `KRX_CLOSE_FINALIZER_ENABLED=false` rollback 경로: 1차 PR `c0855ff` REST retry 3회 → 첫 attempt에서 short-circuit (같은 stale 값 3회 확인 무의미)
+
+`KrxCloseWindowWriter` (WS close frame 기반)는 변경 없음 — 본 정책 PR 직교 영역.
+
+#### 5.7.6 Rollback
+
+운영 사고 시:
+
+```bash
+# .env에 추가
+KRX_CLOSE_REST_WRITE_ENABLED=true
+
+# 재기동
+docker compose up -d --force-recreate fastapi
+```
+
+flag=true 시 기존 1차 PR retry 3회 + 2차 PR fallback 1회 write 동작 복원. 단 KIS REST stale 위험 동반 — 회귀 사고 가능성.
+
+#### 5.7.7 다음 단계
+
+- 5/19~5/26 7일 telemetry 분석 시 신규 `rest_write_blocked` counter 결합해 case B 분포 측정. 자세한 분석 항목은 [DECISIONS.md ADR-027 follow-up](DECISIONS.md) + [KRX_CANARY.md §"2026-05-25 휴장일 사고 + 대응"](KRX_CANARY.md) 참조.
+- 다른 2026 한국 공휴일 (현충일 6/6 토 자연 회피 / 광복절 8/15 토 자연 회피 / 추석 9/24 목 9/25 금 / 개천절 10/3 토 자연 회피 / 한글날 10/9 금 / 크리스마스 12/25 금) — 별도 캘린더 보강 PR로 검증 후 추가.
 
 ## 6. 테스트 / 운영 smoke 기준
 
@@ -539,13 +627,12 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 - DB `source_rates` `(source='krx', asset='usd-krw-futures')`에 매 영업일 close window row 1건 이상 (가격 동일 무관)
 - Redis flag `close_captured:krx:CF:{kst_date}` / `close_captured:krx:CM:{kst_date}` 매 영업일 SET 확인
 
-**Case A/B/C 분포 측정** (2차 PR 도입 핵심 검증):
+**Case A/B/C 분포 측정** (2차 PR 도입 핵심 검증, 2026-05-25 정책 PR `6a43785` 이후 갱신):
 
 - **case A (우리 cutoff)** 비율: `close_grace_saved` > 0 AND `close_rest_fallback_used` == 0 in window
   - 사용자 가설 데이터 검증 — §4.12 (c) cutoff 가설이 옳다면 CF capture rate **2/8 (25%) → ~8/8 (100%) 개선** (CM도 8/9 → 9/9 동시 검증)
-- **case B (KIS WS 미송신)** 비율: `close_grace_saved` == 0 AND `close_rest_fallback_used` > 0
-  - 0% 입증 시 3차 PR에서 REST fallback 제거 검토 진입 가능 (사용자 원래 의도)
-  - >0% 발견 시 REST fallback 유지 (catastrophic backup 가치)
+- **case B (KIS WS 미송신)** 비율: `close_grace_saved` == 0 AND `close_rest_fallback_used` > 0 AND `rest_write_blocked` > 0 (정책 PR 이후 마지막 조건 추가 — REST diagnostic only, write 차단)
+  - 7일 telemetry 분포 측정 후 3차 PR에서 REST close fallback **코드 완전 제거** vs 검증 가능성 재검토 결정. 정책 PR 이전 "REST fallback 제거 검토" 표현은 stale — 이미 default off로 격하됨 (§5.7 참조).
 - **case C (dedup skip)** 비율: 2차 PR 정책 적용으로 0건 예상 (close window writer가 insert-if-changed 우회)
 
 **이상 신호 alert**:
@@ -589,7 +676,7 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 - **DB unique constraint** `(source, asset, timestamp)` + `ON CONFLICT DO NOTHING`: 사전 검증 + migration + 다른 source 호출처 conflict handling 검토 후 도입
 - **종가 read API** `get_close_rate(source, asset, kst_date, session)`: boundary timestamp range query 기반. 관리자 페이지 / 그래프 daily candle 활용
 - **Open auction 보강** (CF 08:30~08:45 / CM 17:50~18:00): close finalizer 패턴 재사용. 현재 baseline 100% capture라 우선순위는 낮음
-- **REST fallback 제거 검토**: telemetry case B == 0 입증 시 (사용자 원래 의도 실현 가능 지점)
+- **REST fallback 코드 완전 제거 vs 검증 가능성 재검토**: 정책 PR `6a43785` (2026-05-25, §5.7)로 REST close write는 이미 **default off**. 7일 telemetry 분포(case B + `rest_write_blocked` counter 결합) + KIS REST stale 재발 빈도 보고 결정 — case B 0~극소면 코드 완전 제거, 다수면 REST 응답 검증 가능성 (거래일/체결시각/거래량 필드) 재검토
 - **Stage E (KRX Redis-first)** 진입 trigger: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md) + [ADR-027](DECISIONS.md) Stage C 결정 후
 
 ## 8. 참조
