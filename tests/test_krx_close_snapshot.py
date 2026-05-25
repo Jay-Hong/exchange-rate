@@ -193,12 +193,20 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
         _retry_sequence를 1회 fallback + captured flag GET 분기로 격하시키므로
         1차 PR 시그니처 검증용 기존 tests는 env=false로 격리.
         Stage 4 정책은 test_krx_close_snapshot_controller_fallback.py에서 별도 검증.
+
+        Policy PR (2026-05-25 사고 대응): KRX_CLOSE_REST_WRITE_ENABLED default
+        false로 추가됨. 본 클래스는 1차 PR "기존 write 동작" 검증용이므로 본 flag를
+        True로 patch하여 legacy behavior 검증을 유지. flag false 분기 검증은
+        TestKrxCloseSnapshotControllerRestWriteBlocked에서 별도 수행.
         """
         from app import config
         self._env_patcher = patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False)
         self._env_patcher.start()
+        self._rest_write_patcher = patch.object(config, "KRX_CLOSE_REST_WRITE_ENABLED", True)
+        self._rest_write_patcher.start()
 
     def tearDown(self):
+        self._rest_write_patcher.stop()
         self._env_patcher.stop()
 
     def _make_controller(
@@ -433,6 +441,143 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
         # REST 호출 안 됨 (sleep 중 cancel)
         mock_fetch.assert_not_called()
         self.assertEqual(len(controller._tasks), 0)
+
+
+class TestKrxCloseSnapshotControllerRestWriteBlocked(unittest.IsolatedAsyncioTestCase):
+    """KRX_CLOSE_REST_WRITE_ENABLED=false 분기 검증 (2026-05-25 사고 대응).
+
+    KIS REST가 stale 응답을 정상 형식으로 반환할 수 있으므로 REST 기반 DB/Redis
+    write를 default off로 격하. REST fetch + sanity는 diagnostic으로 유지하되
+    DB/Redis write만 차단 + retry short-circuit (같은 stale 값 3회 확인 무의미).
+
+    finalizer enabled 여부와 무관하게 KrxCloseSnapshotController의 REST write
+    전체 차단 — finalizer=true 경로의 fallback 1회, finalizer=false rollback
+    경로의 retry 3회 모두 영향.
+    """
+
+    def _make_controller(self) -> KrxCloseSnapshotController:
+        token_manager = MagicMock()
+        return KrxCloseSnapshotController(
+            token_manager=token_manager,
+            retry_delays_sec={"CF": [0.0, 0.0, 0.0], "CM": [0.0, 0.0, 0.0]},
+            sanity_pct=0.02,
+            rest_timeout_sec=1.0,
+        )
+
+    async def test_rest_write_blocked_finalizer_enabled(self):
+        """finalizer=true + captured=false + REST_WRITE_ENABLED=false → write 미호출 + retry short-circuit."""
+        from app import config
+        controller = self._make_controller()
+        contract = _make_contract()
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
+
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", True), \
+             patch.object(config, "KRX_CLOSE_REST_WRITE_ENABLED", False), \
+             patch(
+                 "app.latest_rates_cache.get_krx_close_captured_flag",
+                 return_value=False,  # WS 미캡처 — REST 진행
+             ), patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=_make_rest_result("1500.2")),
+             ) as mock_fetch, patch(
+                 "app.crud.get_latest_source_rate",
+                 return_value={"rate": 1500.9, "timestamp": "..."},
+             ), patch(
+                 "app.crud.insert_source_rate_if_changed",
+             ) as mock_insert, patch(
+                 "app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+             ) as mock_redis, patch(
+                 "app.database.get_db_context",
+             ):
+            controller.schedule_close_snapshot(
+                contract=contract, session="CF", boundary_at_kst=boundary,
+            )
+            await asyncio.sleep(0.1)
+            await controller.close(timeout=1.0)
+
+        # REST fetch는 진행 (diagnostic) — 단 first attempt에서 short-circuit으로 1회만
+        self.assertGreaterEqual(mock_fetch.await_count, 1)
+        # DB/Redis write 차단
+        mock_insert.assert_not_called()
+        mock_redis.assert_not_called()
+        # counter — rest_write_blocked +1, write 관련 counter 0
+        self.assertEqual(controller.counters["rest_write_blocked"], 1)
+        # short-circuit — first attempt에서 True 반환 후 success counter +1
+        self.assertEqual(controller.counters["success"], 1)
+        self.assertEqual(controller.counters["attempted"], 1)
+
+    async def test_rest_write_blocked_finalizer_disabled_rollback(self):
+        """finalizer=false rollback path + REST_WRITE_ENABLED=false → write 미호출 + retry short-circuit."""
+        from app import config
+        controller = self._make_controller()
+        contract = _make_contract()
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
+
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False), \
+             patch.object(config, "KRX_CLOSE_REST_WRITE_ENABLED", False), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=_make_rest_result("1500.2")),
+             ) as mock_fetch, patch(
+                 "app.crud.get_latest_source_rate",
+                 return_value={"rate": 1500.9, "timestamp": "..."},
+             ), patch(
+                 "app.crud.insert_source_rate_if_changed",
+             ) as mock_insert, patch(
+                 "app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+             ) as mock_redis, patch(
+                 "app.database.get_db_context",
+             ):
+            controller.schedule_close_snapshot(
+                contract=contract, session="CF", boundary_at_kst=boundary,
+            )
+            await asyncio.sleep(0.1)
+            await controller.close(timeout=1.0)
+
+        # finalizer=false rollback path도 first attempt에서 short-circuit
+        # (3회 retry 안 함 — 같은 stale 값 3회 확인 무의미)
+        self.assertEqual(mock_fetch.await_count, 1)
+        mock_insert.assert_not_called()
+        mock_redis.assert_not_called()
+        self.assertEqual(controller.counters["rest_write_blocked"], 1)
+        self.assertEqual(controller.counters["success"], 1)
+        self.assertEqual(controller.counters["attempted"], 1)
+
+    async def test_rest_write_enabled_true_preserves_legacy_behavior(self):
+        """REST_WRITE_ENABLED=true rollback → 기존 1차 PR write 동작 복원."""
+        from app import config
+        controller = self._make_controller()
+        contract = _make_contract()
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
+
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False), \
+             patch.object(config, "KRX_CLOSE_REST_WRITE_ENABLED", True), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=_make_rest_result("1500.2")),
+             ), patch(
+                 "app.crud.get_latest_source_rate",
+                 return_value={"rate": 1500.9, "timestamp": "..."},
+             ), patch(
+                 "app.crud.insert_source_rate_if_changed", return_value=True,
+             ) as mock_insert, patch(
+                 "app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+                 return_value=True,
+             ) as mock_redis, patch(
+                 "app.database.get_db_context",
+             ):
+            controller.schedule_close_snapshot(
+                contract=contract, session="CF", boundary_at_kst=boundary,
+            )
+            await asyncio.sleep(0.1)
+            await controller.close(timeout=1.0)
+
+        # flag=true → 기존 동작: DB + Redis write 호출
+        mock_insert.assert_called_once()
+        mock_redis.assert_called_once()
+        # rest_write_blocked counter 0 (flag true라 차단 안 함)
+        self.assertEqual(controller.counters["rest_write_blocked"], 0)
+        self.assertEqual(controller.counters["success"], 1)
 
 
 # ---------------------------------------------------------------------------

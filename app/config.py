@@ -198,6 +198,29 @@ KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
 # false 시 1차 PR (c0855ff) 동작 그대로 — 회귀 시 즉시 rollback path.
 KRX_CLOSE_FINALIZER_ENABLED = os.getenv("KRX_CLOSE_FINALIZER_ENABLED", "true").lower() == "true"
 
+# KRX_CLOSE_REST_WRITE_ENABLED: KrxCloseSnapshotController의 REST 기반 DB/Redis
+# write path 차단 토글 (2026-05-25 운영 사고 대응).
+#
+# 사고: 2026-05-25 휴장일에 KIS REST가 5/22 stale 종가(rate=1516.8)를 rt_cd=0
+# 정상 응답으로 반환 → close snapshot REST fallback이 그 stale 값을 5/25 15:45
+# KST timestamp로 DB row(id=429785) + Redis latest 기록 → 단말 노출.
+#
+# 본질: KIS REST는 휴장/만기 후에도 stale 응답을 정상 형식으로 반환. REST 응답
+# 만으로 "오늘 종가"임을 증명할 수 없으므로 write source로 부적합.
+#
+# 정책 (default false):
+#   - flag=false: REST fetch + sanity check는 diagnostic으로 유지 (case A/B/C
+#     telemetry 측정), DB/Redis write만 차단 + retry short-circuit
+#   - flag=true: 기존 1차 PR (`c0855ff`) retry 3회 + 2차 PR (`c2fb796`) fallback
+#     1회 write 동작 복원 (rollback path)
+#
+# KRX_CLOSE_FINALIZER_ENABLED 값과 무관하게 KrxCloseSnapshotController의 REST
+# write path 전체 차단 — finalizer=true 경로의 REST fallback 1회, finalizer=false
+# rollback 경로의 REST retry 3회 모두 영향.
+#
+# 영향 범위 외: KrxCloseWindowWriter (WS close frame 기반, 신뢰 source) — 변경 X.
+KRX_CLOSE_REST_WRITE_ENABLED = os.getenv("KRX_CLOSE_REST_WRITE_ENABLED", "false").lower() == "true"
+
 # Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
 # TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
 #   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off

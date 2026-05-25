@@ -2028,6 +2028,9 @@ class KrxCloseSnapshotController:
             "sanity_aborted": 0,
             "rest_failed": 0,
             "exhausted": 0,
+            # KRX_CLOSE_REST_WRITE_ENABLED=false 분기 — REST 호출/sanity는 진행,
+            # DB/Redis write만 차단 후 short-circuit. case A/B/C telemetry 보존.
+            "rest_write_blocked": 0,
         }
 
     def schedule_close_snapshot(
@@ -2217,6 +2220,19 @@ class KrxCloseSnapshotController:
                                 self._sanity_pct * 100,
                             )
                             return False
+                # KRX_CLOSE_REST_WRITE_ENABLED=false: REST stale risk 차단
+                # (2026-05-25 휴장일 stale 사고 대응). REST fetch + sanity는 통과
+                # 했지만 DB/Redis write는 차단하고 retry short-circuit (같은 stale
+                # 값 3회 확인 무의미). finalizer enabled 여부와 무관.
+                if not config.KRX_CLOSE_REST_WRITE_ENABLED:
+                    self.counters["rest_write_blocked"] += 1
+                    logger.info(
+                        "[krx_close_snapshot] REST write blocked by flag "
+                        "(KRX_CLOSE_REST_WRITE_ENABLED=false) "
+                        "session=%s rate=%.1f boundary=%s",
+                        session, rest_rate, boundary_at_kst.isoformat(),
+                    )
+                    return True  # short-circuit retry loop
                 # boundary timestamp — DB UTC naive / Redis KST ISO
                 boundary_utc_naive = boundary_at_kst.astimezone(
                     dt_timezone.utc
