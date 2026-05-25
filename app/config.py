@@ -97,6 +97,13 @@ USDT_WS_KORBIT_ENABLED = os.getenv("USDT_WS_KORBIT_ENABLED", "false").lower() ==
 # 생성 X + network connect X + Redis/DB writer X.
 USDT_WS_GOPAX_ENABLED = os.getenv("USDT_WS_GOPAX_ENABLED", "false").lower() == "true"
 
+# USDT_LEGACY_REST_POLLING_ENABLED: 상시 USDT REST polling cron (collect_usdt_rates) 토글.
+# default false — WS 도입 전 과도기 잔재. WS가 매 tick으로 Redis/DB/alert를 모두
+# 처리하고, WS stale 시 source-specific REST fallback probe가 동일 fanout을 재사용
+# 하므로 상시 polling은 중복. flag=true 시 기존 cron(매분 06,16,26,36,46,56초) 복원.
+# rollback: env로 USDT_LEGACY_REST_POLLING_ENABLED=true + force-recreate fastapi.
+USDT_LEGACY_REST_POLLING_ENABLED = os.getenv("USDT_LEGACY_REST_POLLING_ENABLED", "false").lower() == "true"
+
 # KRX_BROADCAST_INCLUDE: removed in Z-2d cleanup (2026-05-12).
 # 이전: KRX 미국달러선물의 broadcast latest:* 노출 토글.
 # Z-2d 통일로 legacy_policy.should_include_source_in_legacy_rates allowlist가

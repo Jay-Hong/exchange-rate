@@ -1338,6 +1338,42 @@ async def check_worker_health():
         logger.error("❌ Worker 헬스체크 실패", exc_info=True)
 
 
+def _register_usdt_legacy_polling_job(target_scheduler) -> bool:
+    """USDT legacy REST polling cron 조건부 등록.
+
+    `config.USDT_LEGACY_REST_POLLING_ENABLED=true` 시 기존 cron(매분
+    06,16,26,36,46,56초) 등록, false 시 미등록 + disabled 명시 log.
+
+    Returns:
+        True: job 등록됨. False: flag false라 미등록.
+
+    설계:
+        - WS + source-specific REST fallback이 같은 fanout(Redis/DB/Alert)을
+          처리하므로 상시 polling은 default 미등록.
+        - flag=true는 rollback 경로 — env로 토글 후 force-recreate fastapi.
+        - test 친화 — start_scheduler 전체 호출 없이 본 helper만 검증 가능.
+    """
+    if not config.USDT_LEGACY_REST_POLLING_ENABLED:
+        logger.info(
+            "ℹ️ USDT legacy polling disabled (WS + fallback REST active). "
+            "rollback: env USDT_LEGACY_REST_POLLING_ENABLED=true"
+        )
+        return False
+
+    from app.crawlers.usdt_sources import collect_usdt_rates
+
+    target_scheduler.add_job(
+        collect_usdt_rates,
+        CronTrigger(second='6,16,26,36,46,56', timezone=KST),
+        id="usdt_sources",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=5,
+    )
+    logger.info("✅ USDT legacy polling 스케줄 등록 (매분 06,16,26,36,46,56초)")
+    return True
+
+
 def start_scheduler():
     global crawler_manager
 
@@ -1482,26 +1518,14 @@ def start_scheduler():
     scheduler.add_job(cleanup_old_market_index_rates, CronTrigger(hour=3, minute=32, second=1, timezone=KST), id="cleanup_old_market_index_rates")
 
     # ═════════════════════════════════════════════════════════════
-    # USDT 거래소 수집: 매분 06,16,26,36,46,56초 (Broadcasting 4초 전)
+    # USDT 거래소 legacy REST polling (조건부)
     # ═════════════════════════════════════════════════════════════
-    # - 24/7 상시 실행 (크립토는 시간 제약 없음, 모드 무관)
-    # - 단일 job에서 5개 거래소 병렬 fan-out
-    # - 변경 시에만 source_rates INSERT
-    # - job id는 `task_` prefix를 쓰지 않는다. switch_jobs()가 모드 전환 시
-    #   `task_` prefix 모든 job을 제거하기 때문. USDT는 mode-agnostic이라 제거되면 안 됨.
+    # - default 비활성 (config.USDT_LEGACY_REST_POLLING_ENABLED=false)
+    # - WS 도입 전 과도기 잔재. WS + source-specific REST fallback probe가 동일
+    #   fanout(Redis/DB/Alert)을 모두 처리하므로 상시 polling 중복.
+    # - flag=true 시 기존 cron(매분 06,16,26,36,46,56초) 복원 — rollback 경로.
     # ─────────────────────────────────────────────────────────────
-    from app.crawlers.usdt_sources import collect_usdt_rates
-
-    scheduler.add_job(
-        collect_usdt_rates,
-        CronTrigger(second='6,16,26,36,46,56', timezone=KST),
-        id="usdt_sources",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=5,
-    )
-
-    logger.info("✅ USDT 수집 스케줄 등록 (매분 06,16,26,36,46,56초)")
+    _register_usdt_legacy_polling_job(scheduler)
 
     # ═════════════════════════════════════════════════════════════
     # 그래프 캐시 갱신: 매분 03초 (Phase 1A)
