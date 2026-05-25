@@ -258,7 +258,11 @@ def parse_h0mfasp0_payload(data: str) -> Optional[Dict[str, str]]:
 #       정확 매핑은 holidays 라이브러리 또는 KRX 공식 캘린더 도입 후 보강.
 # TODO: 임시휴장 (KRX 공시 기반).
 KRX_2026_KNOWN_HOLIDAYS: FrozenSet[date] = frozenset({
-    date(2026, 5, 5),  # 어린이날 (외부 cross-check 완료)
+    date(2026, 5, 5),   # 어린이날 (외부 cross-check 완료)
+    date(2026, 5, 25),  # 부처님오신날(5/24 일) 대체공휴일 — 운영 사고 확인 2026-05-25
+                        # (5/22 stale 종가가 5/25 15:45 KST로 잘못 기록됨,
+                        #  kwatch.kr/markets/kr/trading-days cross-check 완료).
+                        # 추가 한국 공휴일은 별도 캘린더 보강 PR로 검증 후 추가.
 })
 
 # 미국달러선물 (A75x) 만기일. 만기월 셋째 월요일.

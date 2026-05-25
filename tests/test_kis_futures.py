@@ -251,6 +251,17 @@ class TestKrxBusinessDay(unittest.TestCase):
     def test_known_holidays_set_includes_childrens_day(self):
         self.assertIn(date(2026, 5, 5), KRX_2026_KNOWN_HOLIDAYS)
 
+    def test_2026_05_25_buddhas_birthday_substitute_is_holiday(self):
+        """5/25 월요일 — 부처님오신날(5/24 일) 대체공휴일.
+
+        운영 사고로 확인 (2026-05-25 15:45 KST에 stale 5/22 종가가 잘못 기록됨).
+        kwatch.kr/markets/kr/trading-days cross-check 완료.
+        """
+        self.assertFalse(is_krx_business_day(date(2026, 5, 25)))
+
+    def test_known_holidays_set_includes_buddhas_birthday_substitute(self):
+        self.assertIn(date(2026, 5, 25), KRX_2026_KNOWN_HOLIDAYS)
+
 
 class TestExpiryDay(unittest.TestCase):
 
