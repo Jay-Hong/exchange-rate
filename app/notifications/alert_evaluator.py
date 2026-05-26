@@ -883,3 +883,36 @@ class UsdtAlertEvaluator:
             "setting_id": str(candidate.setting_id),
         }
         return title, body, data
+
+
+# ---------------------------------------------------------------------------
+# KrxAlertEvaluator — KRX 가격 알림 thin wrapper (F-1, 2026-05-26)
+# ---------------------------------------------------------------------------
+
+class KrxAlertEvaluator(UsdtAlertEvaluator):
+    """KRX 미국달러선물 가격 알림 evaluator — `UsdtAlertEvaluator` thin subclass.
+
+    UsdtAlertEvaluator는 이미 source-neutral (observation.source/asset 기반
+    settings cache + condition_matches + refetch + FCM). KRX 전용 별도 evaluator
+    class 분리는 코드 중복만 늘리므로 thin wrapper 패턴 채택 (Codex 정정 반영).
+
+    Subclass 분리 이유:
+        - 로깅/타이핑 명확성 — log filter / isinstance 검사 / 향후 KRX 전용
+          분기가 필요해질 때 자리 마련.
+        - F-1 단계 동작 차이 없음 — body는 `pass`. 부모 클래스 로직 그대로 사용.
+
+    정책 anchor (F-1 설계, KRX_ALERT_EVALUATOR_ENABLED flag 참조):
+        - SET-only ❌: 모든 tick이 평가 대상 (Stage E SET/SKIPPED 분기는
+          mirror layer 영역, alert는 별 계층).
+        - Close grace skip ❌: close grace tick도 평가 (종가 crossing 보존).
+          mirror layer(`KrxRedisLatestWriter.__call__`)는 close grace skip이지만,
+          alert는 사용자 알림 누락 방지 위해 모든 tick 평가.
+        - Adapter는 `KrxAlertTickHandler` (`app/crawlers/krx_kis.py`)가 담당 —
+          payload → `AlertObservation` 변환 + `schedule(observation)` 호출.
+
+    F-2/F-3 후속:
+        - F-2: source_registry KRX phase1_enabled=True + API category="derivative"
+          허용. 현재 API endpoint는 KRX 등록 차단 — F-2 진입 전 사용자 등록 불가.
+        - F-3: env=true 활성 + 테스트 iOS canary 관찰.
+    """
+    pass

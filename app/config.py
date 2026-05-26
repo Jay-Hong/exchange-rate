@@ -247,6 +247,29 @@ KRX_CLOSE_REST_WRITE_ENABLED = os.getenv("KRX_CLOSE_REST_WRITE_ENABLED", "false"
 # Close grace window 안 tick은 Stage E writer skip (KrxCloseWindowWriter 단독 처리).
 KRX_REDIS_TICK_WRITE_ENABLED = os.getenv("KRX_REDIS_TICK_WRITE_ENABLED", "false").lower() == "true"
 
+# KRX_ALERT_EVALUATOR_ENABLED: KRX 가격 알림 evaluator 토글 (F-1, 2026-05-26).
+#
+# 현재 동작 (flag=false default): KRX tick은 alert evaluator로 흐르지 X
+# (KrxAlertTickHandler 미등록). KRX 가격 알림 자체가 비활성.
+#
+# Flag=true 동작: KisFuturesClient에 `KrxAlertTickHandler` tick handler 등록.
+# 매 WS tick → AlertObservation(kind="tick") 생성 → `UsdtAlertEvaluator` (source-
+# neutral helper 재사용) `schedule()`. USDT 5 source와 동일한 settings cache /
+# coalescer / refetch / FCM 경로 공유.
+#
+# 정책 anchor (Codex 정정 반영, F-1 설계):
+#   - SET-only ❌ — 모든 tick 평가 대상 (Stage E layer와 직교, alert는 SET/SKIPPED 분기 없음)
+#   - Close grace skip ❌ — close grace tick도 평가 대상 (종가 crossing 보존)
+#   - Thin wrapper 패턴 — `UsdtAlertEvaluator`가 이미 source-neutral이라 KRX
+#     전용 별도 evaluator class 분리 X (`KrxAlertEvaluator(UsdtAlertEvaluator)`는
+#     로깅/타이핑 목적 thin subclass).
+#
+# F-2 / F-3 후속 단계:
+#   - F-2: source_registry KRX phase1_enabled=True + API category validation 확장
+#     (현재 API는 category="derivative"라 KRX 알림 등록 차단 — F-2에서 허용)
+#   - F-3: env=true 활성 (force-recreate) + 테스트 iOS canary 관찰
+KRX_ALERT_EVALUATOR_ENABLED = os.getenv("KRX_ALERT_EVALUATOR_ENABLED", "false").lower() == "true"
+
 # Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
 # TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
 #   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off

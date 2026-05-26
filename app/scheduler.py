@@ -1722,6 +1722,7 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
         KisAccessTokenManager,
         KisApprovalManager,
         KisFuturesClient,
+        KrxAlertTickHandler,
         KrxCloseWindowWriter,
         KrxDbWriter,
         KrxRedisLatestWriter,
@@ -1762,6 +1763,13 @@ async def _bootstrap_krx_futures_client(resolved_override=None):
         # (KrxCloseWindowWriter non-interference 정책).
         if config.KRX_REDIS_TICK_WRITE_ENABLED:
             client.add_tick_handler(KrxRedisLatestWriter())
+        # F-1 (2026-05-26): KRX 가격 알림 evaluator 활성 시 등록.
+        # KrxAlertTickHandler가 매 tick → AlertObservation 변환 + KrxAlertEvaluator
+        # schedule. env false 시 handler 자체에 defensive guard 있어 등록되어도
+        # 동작 안 함 — 안전망 + 등록은 flag 기준이라 메모리/coalescer instance 절감.
+        # Close grace skip 없음 (alert는 종가 crossing 보존 우선).
+        if config.KRX_ALERT_EVALUATOR_ENABLED:
+            client.add_tick_handler(KrxAlertTickHandler())
         # KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 5 (2026-05-17): close finalizer 활성 시 등록.
         # env false 시 KrxCloseWindowWriter.__call__이 early return이라 비활성 동작과 동일.
         if config.KRX_CLOSE_FINALIZER_ENABLED:

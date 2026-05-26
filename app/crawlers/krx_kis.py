@@ -1173,6 +1173,35 @@ class KisFuturesClient:
                 ended_session,
             )
 
+    async def _drain_alert_tick_handlers(self, timeout: float = 5.0) -> None:
+        """KrxAlertTickHandler instances drain — session boundary + stop() 공통 helper.
+
+        F-1 (2026-05-26) 외부 검토 #1 보강: ``UsdtAlertEvaluator`` 내부
+        ``PriceAlertCoalescer``는 매 5초 wall-clock bucket을 *다음 bucket의 tick
+        도래* 또는 *evaluator.close()* 호출 시점에만 emit. KRX는 1
+        ``KisFuturesClient``가 여러 session (CF↔CM)을 ``_run_session`` 단위로
+        전환하는 구조라, USDT 5 source의 "1 source = 1 WS lifecycle 종료 시
+        finally drain" 패턴이 자동 적용되지 X. session 갭 (예: CF 15:45 종료 후
+        CM 미시작 만기일 시나리오, 일반 CF→CM 2-3시간 갭)이 길어지면 close
+        grace crossing이 영영 누락될 위험. session boundary + stop() 양쪽에서
+        명시 drain.
+
+        scope: 등록된 ``KrxAlertTickHandler`` instances만 ``close()`` 호출.
+        ``KrxDbWriter`` / ``KrxRedisLatestWriter`` 같은 다른 tick handler는
+        건드리지 X (각자의 drain timing 정책 존중).
+
+        예외 격리: 한 handler ``close()`` 실패가 다른 handler / session loop /
+        shutdown 흐름을 깨뜨리지 못하도록 ``logger.exception`` + propagate X.
+        """
+        for handler in self._tick_handlers:
+            if isinstance(handler, KrxAlertTickHandler):
+                try:
+                    await handler.close(timeout=timeout)
+                except Exception:
+                    logger.exception(
+                        "[kis_ws] KrxAlertTickHandler drain failed (격리)"
+                    )
+
     async def stop(self) -> None:
         self._stop.set()
         # KRX_FANOUT_REFACTOR_PLAN 5.1.B — controller cleanup 위임 (pending cancel/await/clear).
@@ -1182,6 +1211,7 @@ class KisFuturesClient:
             await self._close_snapshot_controller.close()
         # KRX_CLOSE_SNAPSHOT_PLAN §5.2 Stage 3 — close window writer pending flush drain.
         # KrxCloseWindowWriter는 tick_handlers list에 등록되어 있으므로 직접 조회.
+        # 정책: KrxCloseWindowWriter drain은 인라인 유지 (단일 책임, 기존 정책 보존).
         for handler in self._tick_handlers:
             if isinstance(handler, KrxCloseWindowWriter):
                 try:
@@ -1190,6 +1220,9 @@ class KisFuturesClient:
                     logger.exception(
                         "[kis_ws] KrxCloseWindowWriter drain failed (격리)"
                     )
+        # F-1 (2026-05-26): KrxAlertTickHandler drain은 helper로 위임 — session
+        # boundary와 동일 helper 공유 (coalescer pending flush 보장, 외부 검토 #1).
+        await self._drain_alert_tick_handlers(timeout=5.0)
 
     async def _run_session(self, session: str) -> None:
         """단일 active session 동안 WebSocket 연결 유지 + reconnect.
@@ -1198,6 +1231,12 @@ class KisFuturesClient:
         close snapshot controller에 schedule 요청 (boundary 시점에 contract
         캡처 — retry 재resolve 금지). controller가 retry sequence + DB/Redis
         갱신 책임. 예외/실패는 격리 — _run_session 흐름에 영향 X.
+
+        F-1 (2026-05-26) 외부 검토 #1: session boundary 시점에 alert evaluator
+        drain 추가. ``UsdtAlertEvaluator.PriceAlertCoalescer``는 마지막 5초
+        bucket을 다음 tick 또는 close()까지 보류하므로, KRX session 갭 동안
+        close grace crossing 누락 위험. ``_drain_alert_tick_handlers`` helper로
+        ``stop()``과 동일 drain 동작 공유.
         """
         attempt = 0
         while not self._stop.is_set():
@@ -1206,6 +1245,12 @@ class KisFuturesClient:
             current_session = get_active_session(now, self._contract.expiry_date)
             if current_session != session:
                 logger.info("[kis_ws] session changed %s → %s, exit loop", session, current_session)
+                # F-1 외부 검토 #1: session boundary 시점에 alert evaluator drain.
+                # coalescer 마지막 bucket이 다음 session tick (CM 18:00+ 또는 익일
+                # CF 08:00+)까지 보류되면 close grace crossing이 영영 누락될 수 있음.
+                # close_snapshot schedule 전에 drain — 순서는 독립이라 의미 영향 X,
+                # logger 메시지 직후 명확성 우선.
+                await self._drain_alert_tick_handlers(timeout=5.0)
                 self._maybe_schedule_close_snapshot(ended_session=session, today_kst=now.date())
                 return
 
@@ -1734,6 +1779,117 @@ class KrxRedisLatestWriter:
                 extra={"source": source, "asset": asset},
             )
             return False
+
+
+# ---------------------------------------------------------------------------
+# KrxAlertTickHandler — F-1 (2026-05-26) KRX 가격 알림 adapter
+# ---------------------------------------------------------------------------
+
+class KrxAlertTickHandler:
+    """KIS 체결 tick → ``AlertObservation`` 변환 + ``KrxAlertEvaluator.schedule``.
+
+    F-1 thin adapter (Codex 정정 반영) — `KrxAlertEvaluator`는 source-neutral
+    `UsdtAlertEvaluator` thin subclass라 KRX 전용 로직은 본 handler에 집중.
+
+    책임:
+        - KRX payload(``source/asset/price/received_at`` 등) → ``AlertObservation``
+          5-field 변환.
+        - ``price`` 0.1 KRW tick 정규화 (`KrxDbWriter._sync_db_write` /
+          `KrxRedisLatestWriter.__call__` mirror).
+        - ``received_at`` (KST naive ISO) → epoch ms 변환 (KST→UTC).
+        - 파싱 실패 시 격리 (logger.warning, propagate X) — alert가 KRX
+          수집 lifecycle을 깨뜨리지 못하도록.
+
+    정책 anchor (Codex 정정):
+        - **No SET-only**: Stage E mirror layer가 SET/SKIPPED 분기를 가지지만
+          alert는 그런 게 없음. 매 tick 평가 대상 (coalescer가 5초 wall-clock
+          grain으로 동일 source/asset 묶는 건 별 layer 책임).
+        - **No close grace skip**: close grace tick(15:45:00~15:45:59 /
+          06:00:00~06:00:59)도 알림 평가 — 종가 crossing 보존. mirror layer
+          (`KrxRedisLatestWriter.__call__`)는 close grace skip이지만, alert는
+          사용자 알림 누락 방지 우선.
+        - **Lifecycle drain**: `KisFuturesClient.stop()`이 `close()` 호출 →
+          `KrxAlertEvaluator.close()` 위임 → FCM in-flight 보호 (5s timeout).
+
+    Flag default false — `KRX_ALERT_EVALUATOR_ENABLED=false` 시 scheduler가
+    handler를 등록하지 않음. defensive guard도 `__call__`에 둠 (env 변경
+    timing 안전망).
+    """
+
+    def __init__(self, evaluator: Optional["KrxAlertEvaluator"] = None) -> None:
+        # 함수 내부 import — 순환 참조 회피. 모듈 import 시점에 alert_evaluator
+        # 로드 강제 X (KRX optional source 원칙).
+        from app.notifications.alert_evaluator import KrxAlertEvaluator
+        self._evaluator: "KrxAlertEvaluator" = (
+            evaluator if evaluator is not None else KrxAlertEvaluator()
+        )
+
+    @property
+    def evaluator(self) -> "KrxAlertEvaluator":
+        """테스트/검증용 — 외부에서 evaluator 인스턴스 조회."""
+        return self._evaluator
+
+    async def __call__(self, payload: Dict[str, Any]) -> None:
+        """Tick handler — KisFuturesClient fanout에서 호출.
+
+        env false 시 scheduler가 본 handler를 등록하지 X (defensive guard 유지).
+        Close grace skip 없음 — alert는 모든 tick 평가 (종가 crossing 보존).
+        """
+        if not config.KRX_ALERT_EVALUATOR_ENABLED:
+            return
+
+        source = payload.get("source", "krx")
+        asset = payload.get("asset", "usd-krw-futures")
+        price_str = payload.get("price")
+        received_at_iso = payload.get("received_at", "")
+        if not price_str or not received_at_iso:
+            return
+
+        # received_at은 KST naive ISO (line ~1398 datetime.now(KST).replace(tzinfo=None)).
+        # epoch ms 변환을 위해 KST aware로 보정 후 UTC 기준 epoch ms 산출.
+        try:
+            dt = datetime.fromisoformat(received_at_iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=KST)
+            timestamp_ms = int(dt.timestamp() * 1000)
+        except (ValueError, TypeError):
+            # defensive — 파싱 실패 시 skip (logger 부담 회피, KRX optional 원칙)
+            return
+
+        # Price 0.1 KRW tick 정규화 (KrxDbWriter / KrxRedisLatestWriter mirror).
+        try:
+            normalized_rate = float(Decimal(price_str).quantize(Decimal("0.1")))
+        except Exception:
+            logger.warning(
+                "[krx_alert_tick] price 정규화 실패 (격리): %r", price_str,
+            )
+            return
+
+        # 함수 내부 import — alert_evaluator 모듈 강제 로드 회피 (격리 원칙).
+        from app.notifications.alert_evaluator import AlertObservation
+        observation = AlertObservation(
+            source=source,
+            asset=asset,
+            rate=normalized_rate,
+            timestamp_ms=timestamp_ms,
+            kind="tick",
+        )
+        try:
+            self._evaluator.schedule(observation)
+        except Exception:
+            logger.exception(
+                "[krx_alert_tick] evaluator.schedule 실패 (격리, WS session 유지)"
+            )
+
+    async def close(self, timeout: float = 5.0) -> None:
+        """Lifecycle drain — KisFuturesClient.stop()에서 호출.
+
+        `KrxAlertEvaluator.close()` 위임. FCM in-flight 보호.
+        """
+        try:
+            await self._evaluator.close(timeout=timeout)
+        except Exception:
+            logger.exception("[krx_alert_tick] evaluator.close() 실패 (격리)")
 
 
 # ---------------------------------------------------------------------------
