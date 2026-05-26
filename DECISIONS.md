@@ -3909,6 +3909,21 @@ iOS FCM 도착 + DB persist + 서버 로그 4축 모두 통과:
     - alert_evaluator 예외 0 (sampler 시간대 docker logs 검증)
     - **단 close grace tick에서 alert evaluation/FCM 발사 path는 직접 실측되지 않음** — 그 시점 활성 KRX 알림 0건이라(setting id=6은 13:40에 이미 triggered=true) candidates empty path를 silent하게 거침. invariant 2 (close grace skip ❌)는 *코드 구조상 보장* (`KrxAlertTickHandler.__call__`이 close grace check 없음 — `KrxRedisLatestWriter`와 다르게)이고, 운영 실측은 별도 close grace 시점 활성 알림 등록 후 검증 필요.
 
+### 5/19~5/26 7일 telemetry 분석 결과 — close REST fallback 정책 결론 (2026-05-26)
+
+F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 정책 ([ADR-027 follow-up](#adr-027-krx-미국달러선물-stage-2-진입-전-rest-snapshotfallback--stale-정책-초안) / 5/25 정책 PR `6a43785`)의 운영 적정성을 평가:
+
+**Evidence level 분리 (정량 telemetry / 운영 관찰 / 한계 명시)**:
+
+- **Hard evidence**: sampler 직접 실측 — 5/26 CF close = Case A 확인 (위 항목 참조)
+- **Persistent evidence**: RDS `source_rates` table 5/19~5/26 KRX close boundary row 9건 존재 (CF 5/19~22 + 5/26, CM 5/20~23, 모두 timestamp 정확히 15:45:00 / 06:00:00 KST). 단 path source (KrxCloseWindowWriter vs REST write)는 DB row만으로 확정 불가
+- **Operator observation**: 운영 중 수시 확인상 정상 영업일 close는 WS path (KrxCloseWindowWriter)로 처리됨을 직접 확인. 정량 분포 X (계량 telemetry로 포장하지 않음)
+- **Unavailable**: 5/26 13:03 KST 재배포 이전 docker logs / container file logs / fastapi process counter 모두 유실. 7일 Case A/B/C **정량 분포 복원 불가**
+
+**정책 결론**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 **완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지**한다 (5/25 사고 같은 edge case 진단 가치 보존 + REST 호출 자체는 KIS rate limit 위협 작음). 3차 PR scope에서 close REST 코드 완전 제거는 진행하지 않음.
+
+**별 개선 후보 (이번 PR scope 외 — telemetry 보존 인프라)**: CloudWatch log stream / `/app/logs/` host volume mount / `KrxCloseFinalizerStats` Redis/DB persist. 정상 영업일 WS path 운영 관찰 기반 신뢰가 충분하므로 우선순위 낮음. 향후 close finalizer 정책 변경 또는 자동 monitoring 강화 시점에 별 PR로 진입.
+
 ### 후속 Phase
 
 1. **`_validate_phase1_source_asset` rename** — `_validate_alert_source_asset_or_400` 등 의미 명확한 이름. main.py 호출처 2곳(POST + PUT) 변경 + helper 시그니처 그대로. 별 cleanup PR scope.

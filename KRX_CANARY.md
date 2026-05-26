@@ -990,3 +990,24 @@ ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose up -d --force-recreate fa
 2. ✅ **5/26 15:45 CF close 첫 실측** — 위 결과로 invariant 검증 완료. 5/27 06:00 CM close도 같은 패턴 기대.
 3. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — 본 PR에 포함 (F-2 후속 자연 적용).
 4. **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** — 별 cleanup PR scope.
+
+### 5/19~5/26 7일 telemetry 분석 결과 (2026-05-26 요약)
+
+F-3 활성 후 수행한 5/19~5/26 close finalizer 7일 운영 평가 (정책: `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only, 5/25 정책 PR `6a43785`):
+
+**Evidence level 분리** (정량 telemetry / 운영 관찰 / 한계 명시):
+
+| Evidence | source | 결과 |
+| --- | --- | --- |
+| Hard evidence | sampler 직접 실측 | 5/26 CF close = Case A 확인 (captured_flag SET, DB row 1건 INSERT, REST `WS captured at entry → REST skip`, `rest_write_blocked` 증가 0) |
+| Persistent evidence | RDS `source_rates` table | 5/19~5/26 KRX close boundary row 9건 존재 — CF 5/19~22 + 5/26 + CM 5/20~23, 모두 timestamp 정확히 15:45:00 / 06:00:00 KST |
+| Operator observation | 운영 중 수시 확인 | 정상 영업일 close는 WS path (KrxCloseWindowWriter)로 처리됨을 직접 확인 (정량 분포 X, 단발성 확인 누적) |
+| Unavailable | docker logs / container file logs / fastapi process counter | 5/26 13:03 KST 재배포 시점 이전 모두 유실. 7일 Case A/B/C 정량 분포 복원 불가 |
+
+**정책 결론 (3차 PR scope)**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지한다.
+
+**별 개선 후보** (이번 PR scope 외 — logs/telemetry 보존 인프라):
+- CloudWatch log stream (container 재배포 영향 X)
+- `/app/logs/` host volume mount (container 재생성 시 file 보존)
+- `KrxCloseFinalizerStats` Redis/DB persist (process restart 시에도 누적 유지)
+- 위 3개는 향후 telemetry 보강 필요 시점에 별 PR로 진입. 현재 운영 안정성 측면에서는 우선순위 낮음 (정상 영업일 WS path 운영 관찰 기반 신뢰).
