@@ -989,7 +989,7 @@ ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose up -d --force-recreate fa
 1. **24h+ alert_evaluator FCM sent 누적 + 예외 0 유지** (ADR-032 Stable observed 조건)
 2. ✅ **5/26 15:45 CF close 첫 실측** — 위 결과로 invariant 검증 완료. 5/27 06:00 CM close도 같은 패턴 기대.
 3. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — 본 PR에 포함 (F-2 후속 자연 적용).
-4. **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** — 별 cleanup PR scope.
+4. ✅ **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** — F-3 직후 별도 cleanup commit으로 완료 (2026-05-26).
 
 ### 5/19~5/26 7일 telemetry 분석 결과 (2026-05-26 요약)
 
@@ -1006,8 +1006,8 @@ F-3 활성 후 수행한 5/19~5/26 close finalizer 7일 운영 평가 (정책: `
 
 **정책 결론 (3차 PR scope)**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지한다.
 
-**별 개선 후보** (이번 PR scope 외 — logs/telemetry 보존 인프라):
+**별도 개선 후보** (이번 PR scope 외 — logs/telemetry 보존 인프라):
 - CloudWatch log stream (container 재배포 영향 X)
 - `/app/logs/` host volume mount (container 재생성 시 file 보존)
 - `KrxCloseFinalizerStats` Redis/DB persist (process restart 시에도 누적 유지)
-- 위 3개는 향후 telemetry 보강 필요 시점에 별 PR로 진입. 현재 운영 안정성 측면에서는 우선순위 낮음 (정상 영업일 WS path 운영 관찰 기반 신뢰).
+- 위 3개는 향후 telemetry 보강 필요 시점에 별도 PR로 진입. 현재 운영 안정성 측면에서는 우선순위 낮음 (정상 영업일 WS path 운영 관찰 기반 신뢰).

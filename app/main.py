@@ -2424,13 +2424,18 @@ def build_source_notification_setting_response(
     )
 
 
-def _validate_phase1_source_asset(source: str, asset: str) -> None:
+def _validate_alert_source_asset_or_400(source: str, asset: str) -> None:
     """Thin wrapper — `source_registry.validate_alert_source_asset` + HTTPException 변환.
 
-    F-2 (2026-05-26): 검증 로직 본체는 `source_registry`로 분리 ([memory:
-    project_main_py_helper_placement] — main.py 안에 helper 두면 단위
-    테스트가 firebase_admin import chain으로 깨짐). 본 wrapper는 사용자
-    노출용 HTTPException 변환만 담당.
+    F-2 (2026-05-26): 검증 로직 본체는 `source_registry`로 분리 (과거 메모리
+    기록 `project_main_py_helper_placement` 참조 — main.py 안에 helper 두면
+    단위 테스트가 firebase_admin import chain으로 깨짐, 2026-05-10 Z-2b Stage 2
+    발견 사례 재발). 본 wrapper는 사용자 노출용 HTTPException 변환만 담당.
+
+    Rename history: F-2 이전 `_validate_phase1_source_asset` (Phase 1 USDT
+    exchange only 의미) → F-2에서 category in {"exchange","derivative"}
+    확장 후 의미 변화로 `_validate_alert_source_asset_or_400`로 cleanup
+    (2026-05-26). `_or_400` suffix가 wrapper 책임(HTTPException 400 변환)을 명시.
 
     `validate_alert_source_asset` 동작 (`source_registry.py`):
         허용: phase1_enabled=True + category in ("exchange", "derivative")
@@ -2483,7 +2488,7 @@ async def create_source_notification_setting(
     user_id = await verify_firebase_token(request)
     await require_premium(user_id, allow_empty=False)
 
-    _validate_phase1_source_asset(body.source, body.asset)
+    _validate_alert_source_asset_or_400(body.source, body.asset)
 
     try:
         setting = crud.create_source_notification_setting(
@@ -2592,7 +2597,7 @@ async def update_source_notification_setting(
     new_source = body.source if body.source is not None else setting.source
     new_asset = body.asset if body.asset is not None else setting.asset
     if body.source is not None or body.asset is not None:
-        _validate_phase1_source_asset(new_source, new_asset)
+        _validate_alert_source_asset_or_400(new_source, new_asset)
 
     condition_value = body.condition.value if body.condition else None
 

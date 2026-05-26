@@ -14,9 +14,10 @@ Scope:
     - docstring/module doc에 F-2 + dead alert gap 명시 잠금
 
 설계 anchor:
-    - 검증 helper는 `source_registry`에 위치 (FastAPI 비의존) — [memory:
-      project_main_py_helper_placement] 영구 적용.
-    - main.py `_validate_phase1_source_asset`은 thin HTTPException wrapper.
+    - 검증 helper는 `source_registry`에 위치 (FastAPI 비의존) — 과거 메모리
+      기록 `project_main_py_helper_placement` 영구 적용.
+    - main.py `_validate_alert_source_asset_or_400` (F-2 cleanup rename, 이전
+      `_validate_phase1_source_asset`)는 thin HTTPException wrapper.
 
 dead alert gap: F-2 land ~ F-3 (`KRX_ALERT_EVALUATOR_ENABLED=true`) 활성
 사이 KRX는 API 등록 가능 + 발송 안 됨 = 의도된 canary staging gap. 운영 영향 0.

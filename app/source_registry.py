@@ -11,8 +11,9 @@
 
 Phase 1 범위: 업비트/빗썸/코인원/고팍스/코빗 USDT/KRW
 Phase 2 진입 (F-2, 2026-05-26): KRX 미국달러선물 `phase1_enabled=True` —
-    `_validate_phase1_source_asset`가 category="derivative"도 허용. 알림
-    발송은 별 축인 `KRX_ALERT_EVALUATOR_ENABLED` env (F-3)로 분리.
+    `_validate_alert_source_asset_or_400` (main.py wrapper, F-2 cleanup에서
+    rename됨 — 이전 `_validate_phase1_source_asset`)가 derivative category도
+    허용. 알림 발송은 별도 축인 `KRX_ALERT_EVALUATOR_ENABLED` env (F-3)로 분리.
     F-2 land ~ F-3 활성 사이는 의도된 canary staging 상태 — API 등록은
     가능하나 발송은 안 됨 (dead alert gap). 운영 단말 영향 0 (테더 탭 자체가
     운영 앱에 없음, 테스트 iOS canary 전용).
@@ -70,10 +71,12 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="미국달러F",
         category="derivative",
         sort_order=40,
-        # F-2 (2026-05-26): phase1_enabled=False → True. `_validate_phase1_source_asset`
-        # 가 category="derivative"도 허용해 KRX 알림 설정 등록 가능. 발송은 별 축인
-        # `KRX_ALERT_EVALUATOR_ENABLED` env(F-3)가 열려야 발화 — F-2 land ~ F-3 활성
-        # 사이는 의도된 canary staging gap (dead alert). 운영 단말 영향 0.
+        # F-2 (2026-05-26): phase1_enabled=False → True. main.py wrapper
+        # `_validate_alert_source_asset_or_400` (rename 이전 이름은
+        # `_validate_phase1_source_asset`)가 derivative category도 허용해 KRX
+        # 알림 설정 등록 가능. 발송은 별도 축인 `KRX_ALERT_EVALUATOR_ENABLED`
+        # env(F-3)가 열려야 발화 — F-2 land ~ F-3 활성 사이는 의도된 canary
+        # staging gap (dead alert). 운영 단말 영향 0.
         phase1_enabled=True,
     ),
     SourceDefinition(
@@ -159,9 +162,10 @@ def get_usdt_exchange_entries() -> list[SourceDefinition]:
 def validate_alert_source_asset(source: str, asset: str) -> Optional[str]:
     """알림 등록 가능 여부 검증 — FastAPI 비의존 helper.
 
-    F-2 (2026-05-26) 진입: main.py에 두던 `_validate_phase1_source_asset`를
-    여기로 분리. 이유는 [project_main_py_helper_placement.md] 메모리 기록 —
-    main.py 안에 helper 두면 단위 테스트가 firebase_admin import chain으로
+    F-2 (2026-05-26) 진입: main.py에 두던 `_validate_phase1_source_asset`
+    (F-2 cleanup에서 `_validate_alert_source_asset_or_400`로 rename)의 검증
+    로직 본체를 여기로 분리. 이유는 과거 메모리 기록 `project_main_py_helper_placement`
+    참조 — main.py 안에 helper 두면 단위 테스트가 firebase_admin import chain으로
     깨짐. source_registry는 fastapi/firebase 의존성 없는 도메인 모듈이라
     검증 로직 자연 위치 + 테스트 격리 가능.
 

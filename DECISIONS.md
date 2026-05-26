@@ -3858,13 +3858,13 @@ KRX 가격알림은 **`UsdtAlertEvaluator` source-neutral helper를 재사용**�
 - **단점 / 제약**:
   - thin subclass 패턴은 KRX 전용 분기가 필요해질 때까지 의미가 약함 (현재는 logging/typing 목적). 단 분리 추가 비용 0이라 risk 낮음.
   - dead alert gap (F-2 land ~ F-3 활성) — 의도된 staging이지만 외부 사용자 영향 가능성을 운영 정책으로 차단 (테더 탭 운영 앱 미포함).
-  - `_validate_phase1_source_asset` historical name — F-2에서 derivative 허용해 의미적으로 "phase1" 표현이 좁아짐. F-3 이후 별 cleanup PR로 rename 검토.
+  - `_validate_phase1_source_asset` historical name — F-2에서 derivative 허용해 의미적으로 "phase1" 표현이 좁아짐. F-3 직후 별도 cleanup commit으로 `_validate_alert_source_asset_or_400`로 rename 완료 (2026-05-26).
 
 ### Alternatives 검토
 
 **Option A — `KrxAlertEvaluator` 별 evaluator class 신규 (no subclass)**:
 
-- 거부 이유: USDT 5 source가 이미 source-neutral evaluator 재사용 패턴. KRX만 별 class면 코드 중복 + 향후 USDT 추가 시 비대칭. thin subclass가 logging/typing 분기 자리 확보 + 동작 동일.
+- 거부 이유: USDT 5 source가 이미 source-neutral evaluator 재사용 패턴. KRX만 별도 class면 코드 중복 + 향후 USDT 추가 시 비대칭. thin subclass가 logging/typing 분기 자리 확보 + 동작 동일.
 
 **Option B — main.py에 validation 본체 유지**:
 
@@ -3922,14 +3922,14 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 **정책 결론**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 **완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지**한다 (5/25 사고 같은 edge case 진단 가치 보존 + REST 호출 자체는 KIS rate limit 위협 작음). 3차 PR scope에서 close REST 코드 완전 제거는 진행하지 않음.
 
-**별 개선 후보 (이번 PR scope 외 — telemetry 보존 인프라)**: CloudWatch log stream / `/app/logs/` host volume mount / `KrxCloseFinalizerStats` Redis/DB persist. 정상 영업일 WS path 운영 관찰 기반 신뢰가 충분하므로 우선순위 낮음. 향후 close finalizer 정책 변경 또는 자동 monitoring 강화 시점에 별 PR로 진입.
+**별도 개선 후보 (이번 PR scope 외 — telemetry 보존 인프라)**: CloudWatch log stream / `/app/logs/` host volume mount / `KrxCloseFinalizerStats` Redis/DB persist. 정상 영업일 WS path 운영 관찰 기반 신뢰가 충분하므로 우선순위 낮음. 향후 close finalizer 정책 변경 또는 자동 monitoring 강화 시점에 별도 PR로 진입.
 
 ### 후속 Phase
 
-1. **`_validate_phase1_source_asset` rename** — `_validate_alert_source_asset_or_400` 등 의미 명확한 이름. main.py 호출처 2곳(POST + PUT) 변경 + helper 시그니처 그대로. 별 cleanup PR scope.
+1. ✅ **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** (완료, 2026-05-26 별도 cleanup commit) — F-2 derivative 허용으로 의미 변화 반영. main.py 호출처 2곳(POST + PUT) + history docstring 5곳 sync.
 2. **F-2 다른 source 추가 시 자연 확장** — category="derivative" 외 새 카테고리 추가 시 validation 확장. 현재 USDT exchange + KRX derivative만 허용.
-3. **iOS/Android client KRX UI** — 운영 앱에 테더 탭 + KRX 알림 UI 추가 (별 release scope). 현재는 테스트 iOS canary 전용.
-4. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — "서버 검증 (category=='exchange')" → "category in ('exchange','derivative')"로 갱신. 별 cleanup PR scope (USDT 문서 도메인이라 KRX 알림 PR 안에서 함께 land하면 scope 흐려짐).
+3. **iOS/Android client KRX UI** — 운영 앱에 테더 탭 + KRX 알림 UI 추가 (별도 release scope). 현재는 테스트 iOS canary 전용.
+4. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — "서버 검증 (category=='exchange')" → "category in ('exchange','derivative')"로 갱신. 별도 cleanup PR scope (USDT 문서 도메인이라 KRX 알림 PR 안에서 함께 land하면 scope 흐려짐).
 
 ### 관련 문서
 
