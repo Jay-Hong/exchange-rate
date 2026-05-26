@@ -2397,11 +2397,13 @@ async def delete_notification_setting(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# USDT Phase 1: Source 기반 알림 API (/api/source-notification-settings)
+# Source 기반 알림 API (/api/source-notification-settings)
 # ═══════════════════════════════════════════════════════════════════════════════
 # - 기존 /api/notification-settings와 완전 분리된 새 API family
 # - DB: source_notification_settings 테이블 사용
-# - source/asset은 source_registry에서 검증 (phase1_enabled=True만 허용)
+# - source/asset은 source_registry에서 검증 (phase1_enabled=True + category
+#   in {exchange, derivative}만 허용). USDT exchange는 Phase 1 (2026-04-23),
+#   KRX derivative는 F-2 (2026-05-26)에서 추가.
 
 def build_source_notification_setting_response(
     setting: models.SourceNotificationSetting,
@@ -2423,34 +2425,25 @@ def build_source_notification_setting_response(
 
 
 def _validate_phase1_source_asset(source: str, asset: str) -> None:
-    """Phase 1 source 알림 대상 검증.
+    """Thin wrapper — `source_registry.validate_alert_source_asset` + HTTPException 변환.
 
-    허용 대상:
-    - phase1_enabled=True
-    - category == "exchange" (거래소만)
+    F-2 (2026-05-26): 검증 로직 본체는 `source_registry`로 분리 ([memory:
+    project_main_py_helper_placement] — main.py 안에 helper 두면 단위
+    테스트가 firebase_admin import chain으로 깨짐). 본 wrapper는 사용자
+    노출용 HTTPException 변환만 담당.
 
-    reference 소스(investing, kb, hana)는 기존 `/api/notification-settings`를 사용해야 한다.
-    이유: process_source_rate_alerts는 usdt_sources 크롤러에서만 호출되므로,
-    reference 소스를 허용하면 생성은 되지만 발송되지 않는 "dead alert"가 된다.
+    `validate_alert_source_asset` 동작 (`source_registry.py`):
+        허용: phase1_enabled=True + category in ("exchange", "derivative")
+        차단: 기타 모든 조합 (reference / 미등록 / phase1_disabled)
 
-    derivative(KRX 등)는 Phase 2에서 별도 정책으로 허용 여부 결정.
+    F-2 land ~ F-3 (`KRX_ALERT_EVALUATOR_ENABLED=true`) 활성 사이 KRX 알림은
+    의도된 staging gap — API 등록 가능하나 발송은 evaluator flag가 닫혀 있음.
+    운영 단말 영향 0 (테더 탭 자체가 운영 앱에 없음, 테스트 iOS canary 전용).
     """
     from app import source_registry
-    definition = source_registry.get_source_definition(source, asset)
-    if definition is None or not definition.phase1_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported source/asset combination: {source}:{asset}",
-        )
-    if definition.category != "exchange":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Source alerts are only supported for exchange sources in Phase 1 "
-                f"(got category={definition.category}). "
-                f"Use /api/notification-settings for bank/investing alerts."
-            ),
-        )
+    error = source_registry.validate_alert_source_asset(source, asset)
+    if error is not None:
+        raise HTTPException(status_code=400, detail=error)
 
 
 @app.post(
@@ -2463,7 +2456,12 @@ async def create_source_notification_setting(
     db: Session = Depends(get_db),
 ):
     """
-    Source 기반 알림 설정 생성 (USDT Phase 1).
+    Source 기반 알림 설정 생성 (USDT exchange + KRX derivative).
+
+    허용 대상 (`source_registry.validate_alert_source_asset`):
+    - USDT exchange (upbit/bithumb/coinone/korbit/gopax + usdt-krw)
+    - KRX derivative (krx + usd-krw-futures) — F-2 (2026-05-26) 허용 추가.
+      실제 발송은 `KRX_ALERT_EVALUATOR_ENABLED=true`(F-3) 활성 필요.
 
     Headers:
         Authorization: Bearer <Firebase ID Token>
@@ -2539,7 +2537,7 @@ async def get_source_notification_settings(
     사용자의 source 기반 알림 설정 목록 조회.
 
     Query Parameters:
-        asset: asset 필터 (선택, 예: usdt-krw)
+        asset: asset 필터 (선택, 예: usdt-krw / usd-krw-futures)
     """
     user_id = await verify_firebase_token(request)
 
@@ -2574,7 +2572,8 @@ async def update_source_notification_setting(
         source, asset, condition, threshold, is_enabled
 
     Notes:
-        - source/asset 변경 시 phase1_enabled 조합인지 검증
+        - source/asset 변경 시 phase1_enabled + category in {exchange, derivative}
+          조합인지 검증 (F-2: KRX 포함)
         - source, asset, condition, threshold 실제 변경 시 triggered 초기화
         - is_enabled: False→True 전환 시에도 triggered 초기화
     """
@@ -2719,7 +2718,7 @@ async def delete_user_account(
             models.NotificationSetting.user_id == user_id
         ).delete(synchronize_session=False)
 
-        # Source 기반 알림 (USDT Phase 1)
+        # Source 기반 알림 (USDT exchange + KRX derivative)
         deleted_source_logs = db.query(models.SourceNotificationLog).filter(
             models.SourceNotificationLog.user_id == user_id
         ).delete(synchronize_session=False)

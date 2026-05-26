@@ -10,7 +10,12 @@
 - 새 API (비교 알림 등): source + asset 구조 그대로 사용
 
 Phase 1 범위: 업비트/빗썸/코인원/고팍스/코빗 USDT/KRW
-Phase 2 예정: KRX 미국달러선물 (phase1_enabled=False로 자리만 확보)
+Phase 2 진입 (F-2, 2026-05-26): KRX 미국달러선물 `phase1_enabled=True` —
+    `_validate_phase1_source_asset`가 category="derivative"도 허용. 알림
+    발송은 별 축인 `KRX_ALERT_EVALUATOR_ENABLED` env (F-3)로 분리.
+    F-2 land ~ F-3 활성 사이는 의도된 canary staging 상태 — API 등록은
+    가능하나 발송은 안 됨 (dead alert gap). 운영 단말 영향 0 (테더 탭 자체가
+    운영 앱에 없음, 테스트 iOS canary 전용).
 
 Stale 판정에 대하여:
     현재 timestamp는 "마지막 값 변경 시각" (insert-if-changed 정책 결과)이라
@@ -65,7 +70,11 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
         display_name="미국달러F",
         category="derivative",
         sort_order=40,
-        phase1_enabled=False,
+        # F-2 (2026-05-26): phase1_enabled=False → True. `_validate_phase1_source_asset`
+        # 가 category="derivative"도 허용해 KRX 알림 설정 등록 가능. 발송은 별 축인
+        # `KRX_ALERT_EVALUATOR_ENABLED` env(F-3)가 열려야 발화 — F-2 land ~ F-3 활성
+        # 사이는 의도된 canary staging gap (dead alert). 운영 단말 영향 0.
+        phase1_enabled=True,
     ),
     SourceDefinition(
         source="upbit",
@@ -145,3 +154,40 @@ def get_usdt_exchange_entries() -> list[SourceDefinition]:
         for s in get_enabled_sources()
         if s.category == "exchange" and s.asset == "usdt-krw"
     ]
+
+
+def validate_alert_source_asset(source: str, asset: str) -> Optional[str]:
+    """알림 등록 가능 여부 검증 — FastAPI 비의존 helper.
+
+    F-2 (2026-05-26) 진입: main.py에 두던 `_validate_phase1_source_asset`를
+    여기로 분리. 이유는 [project_main_py_helper_placement.md] 메모리 기록 —
+    main.py 안에 helper 두면 단위 테스트가 firebase_admin import chain으로
+    깨짐. source_registry는 fastapi/firebase 의존성 없는 도메인 모듈이라
+    검증 로직 자연 위치 + 테스트 격리 가능.
+
+    Returns:
+        None: 통과 (알림 등록 허용).
+        str: 차단 사유 (400 응답 detail에 그대로 노출 가능한 형태).
+
+    허용 대상:
+    - phase1_enabled=True
+    - category in ("exchange", "derivative") — 거래소(USDT 5 source) + KRX 미국달러선물
+
+    reference 소스(investing, kb, hana)는 기존 `/api/notification-settings`를 사용해야 한다.
+    이유: process_source_rate_alerts는 usdt_sources 크롤러에서만 호출되므로,
+    reference 소스를 허용하면 생성은 되지만 발송되지 않는 "dead alert"가 된다.
+
+    F-2 land ~ F-3 (`KRX_ALERT_EVALUATOR_ENABLED=true`) 활성 사이 KRX 알림은
+    의도된 staging gap — API 등록 가능하나 발송은 evaluator flag가 닫혀 있음.
+    운영 단말 영향 0 (테더 탭 자체가 운영 앱에 없음, 테스트 iOS canary 전용).
+    """
+    definition = _LOOKUP.get((source, asset))
+    if definition is None or not definition.phase1_enabled:
+        return f"Unsupported source/asset combination: {source}:{asset}"
+    if definition.category not in ("exchange", "derivative"):
+        return (
+            f"Source alerts are only supported for exchange/derivative sources "
+            f"(got category={definition.category}). "
+            f"Use /api/notification-settings for bank/investing alerts."
+        )
+    return None

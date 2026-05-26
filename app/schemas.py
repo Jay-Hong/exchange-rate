@@ -145,21 +145,31 @@ class DeleteResponse(BaseModel):
 
 
 # ============================================================
-# USDT Phase 1: Source 기반 알림 스키마
+# Source 기반 알림 스키마 (USDT exchange + KRX derivative)
 # ============================================================
 
 class SourceNotificationSettingRequest(BaseModel):
     """Source 기반 알림 설정 생성 요청.
 
-    Phase 1 허용 대상: 거래소(category=exchange) + usdt-krw 조합만.
-    예: upbit/usdt-krw, bithumb/usdt-krw, coinone/usdt-krw, korbit/usdt-krw, gopax/usdt-krw
+    허용 대상: category in {"exchange", "derivative"}.
+    - exchange (USDT 5 source + usdt-krw): upbit/bithumb/coinone/korbit/gopax
+    - derivative (KRX 미국달러선물 + usd-krw-futures): krx
+      F-2 (2026-05-26): KRX 알림 등록 허용 추가. 실제 발송은 별 축인
+      `KRX_ALERT_EVALUATOR_ENABLED` env(F-3)가 열려야 발화 — F-2 land ~
+      F-3 활성 사이는 의도된 canary staging gap (API 등록 가능하나 발송 안 됨).
 
     investing/kb/hana 같은 reference 소스는 기존 `/api/notification-settings`를 사용해야 한다.
-    Phase 1에서 reference 소스를 여기에 등록해도 발송 루프가 연결되어 있지 않아 발동되지 않는다.
-    서버에서 category=="exchange" 기준으로 400 응답.
+    여기에 등록해도 발송 루프가 연결되어 있지 않아 발동되지 않는다.
+    서버에서 category not in {"exchange","derivative"} 기준으로 400 응답.
     """
-    source: str = Field(..., min_length=1, description="거래소 식별자 (upbit/bithumb/coinone/korbit/gopax)")
-    asset: str = Field(..., min_length=1, description="자산 식별자 (Phase 1: usdt-krw)")
+    source: str = Field(
+        ..., min_length=1,
+        description="source 식별자 (USDT: upbit/bithumb/coinone/korbit/gopax, KRX: krx)",
+    )
+    asset: str = Field(
+        ..., min_length=1,
+        description="자산 식별자 (USDT: usdt-krw, KRX: usd-krw-futures)",
+    )
     condition: ConditionEnum = Field(..., description="조건 (above/below)")
     threshold: float = Field(..., gt=0, description="목표 환율")
     is_enabled: bool = Field(default=True, description="활성화 여부 (기본: True)")
@@ -168,7 +178,8 @@ class SourceNotificationSettingRequest(BaseModel):
 class SourceNotificationSettingUpdateRequest(BaseModel):
     """Source 기반 알림 설정 수정 요청 (PUT - 부분 업데이트).
 
-    source/asset 변경 시에도 Phase 1 정책(category=="exchange") 재검증된다.
+    source/asset 변경 시에도 category in {"exchange","derivative"} 정책으로
+    재검증된다 (F-2 2026-05-26: derivative=KRX 허용 추가).
     """
     source: Optional[str] = Field(None, min_length=1)
     asset: Optional[str] = Field(None, min_length=1)
