@@ -270,6 +270,24 @@ KRX_REDIS_TICK_WRITE_ENABLED = os.getenv("KRX_REDIS_TICK_WRITE_ENABLED", "false"
 #   - F-3: env=true 활성 (force-recreate) + 테스트 iOS canary 관찰
 KRX_ALERT_EVALUATOR_ENABLED = os.getenv("KRX_ALERT_EVALUATOR_ENABLED", "false").lower() == "true"
 
+# KRX_CLOSE_EVENT_LOG_ENABLED: KRX close finalizer structured event persistence
+# 토글 (2026-05-26). 활성 시 KrxCloseWindowWriter + KrxCloseSnapshotController
+# emit point에서 Redis ZSET `krx:close_finalizer_events`에 event_type 단위로
+# append-only 저장. 14일 ZREMRANGEBYSCORE retention. admin endpoint
+# `/admin/api/krx-finalizer-stats`에서 (date_kst, session) aggregation + case
+# 분류 조회.
+#
+# 설계 원칙 (코덱스 + Claude 검증 합의):
+#   - best-effort / no-throw: Redis 실패/JSON 실패/trim 실패가 close finalizer
+#     본 동작(WS save / REST skip / rest_write_blocked counter)에 영향 0
+#   - 기존 control flow 변경 0: emit은 side effect chain 끝에 별도 try/except
+#   - 저장 시점 case 분류 X: event_type만 store, case는 query 시점 aggregation
+#   - dedup_skipped는 실제 코드 분기 부재로 catalog 제외 (speculation 차단)
+#
+# 운영 emergency rollback: env=false → force-recreate 시 emit 자체 skip.
+# 본 flag default true — telemetry 보존이 본 land 의도.
+KRX_CLOSE_EVENT_LOG_ENABLED = os.getenv("KRX_CLOSE_EVENT_LOG_ENABLED", "true").lower() == "true"
+
 # Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
 # TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
 #   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off

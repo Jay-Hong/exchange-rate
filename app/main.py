@@ -1413,6 +1413,96 @@ async def reset_topic_status():
     }
 
 
+@app.get("/admin/api/krx-finalizer-stats", dependencies=[Depends(verify_admin)])
+async def get_krx_finalizer_stats(days: int = 7):
+    """KRX close finalizer structured event 조회 + case aggregation (2026-05-26).
+
+    Redis `krx:close_finalizer_events` ZSET을 `days` 일 범위로 query +
+    (date_kst, session) 단위 case 분류 (A/B/C/unclassified).
+
+    Args:
+        days: 조회 기간 (기본 7일). 14일 retention cap 안.
+
+    Returns:
+        {
+            "since_kst": str (ISO),
+            "until_kst": str (ISO),
+            "total_events": int,
+            "events_by_type": {event_type: count, ...},
+            "closes": [{date_kst, session, types: [...], case: "A"|"B"|"C"|"unclassified"}, ...],
+            "case_summary": {"A": N, "B": M, "C": K, "unclassified": L}
+        }
+
+    Case 분류 원칙 (저장 시점 X, query 시점 aggregation):
+        - Case A: ws_close_saved 있음 + rest_write_blocked/rest_write_saved 둘 다 없음
+        - Case B: rest_write_blocked 또는 rest_write_saved 있음 (REST가 close source 됐거나 될 뻔)
+        - Case C: dedup_skipped 있음 (현 구현 catalog 외, 0건 예상)
+        - unclassified: 그 외 (rest_fallback_attempted 단독, returned_none/missing/parse_failed/sanity_aborted/write_failed 등 — 새 분기/관찰 신호)
+
+    no-throw: Redis 장애 또는 parse 실패 시 빈 결과 반환 (catastrophic backup 안전).
+    """
+    from collections import defaultdict
+    from datetime import datetime, timedelta, timezone as _tz
+    from app import latest_rates_cache
+
+    if days < 1:
+        days = 1
+    if days > 14:
+        days = 14  # retention cap
+
+    kst = _tz(timedelta(hours=9))
+    now_kst = datetime.now(kst)
+    since_kst = now_kst - timedelta(days=days)
+    since_ms = int(since_kst.timestamp() * 1000)
+    until_ms = int(now_kst.timestamp() * 1000)
+
+    events = latest_rates_cache.get_krx_close_events(
+        since_epoch_ms=since_ms, until_epoch_ms=until_ms,
+    )
+
+    events_by_type: Dict[str, int] = defaultdict(int)
+    by_close: Dict[tuple, list] = defaultdict(list)
+    for e in events:
+        # Defensive normalize — malformed-but-valid JSON (event_type None / non-str) 방어.
+        # str(None) → "None" 방지 위해 falsy check 우선.
+        et = str(e.get("event_type") or "unknown")
+        events_by_type[et] += 1
+        date_kst_v = str(e.get("date_kst") or "unknown")
+        session_v = str(e.get("session") or "unknown")
+        by_close[(date_kst_v, session_v)].append(e)
+
+    closes = []
+    case_summary: Dict[str, int] = defaultdict(int)
+    for (date_kst, session), evs in sorted(by_close.items()):
+        types = {str(e.get("event_type") or "unknown") for e in evs}
+        if "ws_close_saved" in types and not (types & {"rest_write_blocked", "rest_write_saved"}):
+            case = "A"
+        elif types & {"rest_write_blocked", "rest_write_saved"}:
+            case = "B"
+        elif "dedup_skipped" in types:
+            case = "C"
+        else:
+            case = "unclassified"
+        case_summary[case] += 1
+        closes.append({
+            "date_kst": date_kst,
+            "session": session,
+            "types": sorted(types),
+            "case": case,
+            "event_count": len(evs),
+        })
+
+    return {
+        "since_kst": since_kst.isoformat(),
+        "until_kst": now_kst.isoformat(),
+        "days": days,
+        "total_events": len(events),
+        "events_by_type": dict(events_by_type),
+        "closes": closes,
+        "case_summary": dict(case_summary),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # FX Topic Telemetry (PR Z-2c Step 3, 2026-05-12)
 #

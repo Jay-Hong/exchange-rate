@@ -2178,6 +2178,20 @@ class KrxCloseWindowWriter:
                 "[krx_close_window] close saved session=%s rate=%.1f ts=%s",
                 session, normalized_rate, timestamp_kst_iso,
             )
+            # 2026-05-26: structured event persist (best-effort, no-throw)
+            try:
+                latest_rates_cache.emit_krx_close_event(
+                    "ws_close_saved",
+                    session=session,
+                    date_kst=kst_date_iso,
+                    boundary_at_kst=timestamp_kst_iso,
+                    rate=normalized_rate,
+                )
+            except Exception:
+                logger.warning(
+                    "[krx_close_window] emit_krx_close_event 실패 (격리)",
+                    exc_info=True,
+                )
             # Tether topic trigger — KrxDbWriter pattern과 동일 (Redis write 성공 기반)
             try:
                 tether_topic_trigger.request_tether_topic_trigger(
@@ -2362,6 +2376,20 @@ class KrxCloseSnapshotController:
                     "[krx_close_snapshot] WS captured at entry → REST skip "
                     "(session=%s date=%s)", session, kst_date_iso,
                 )
+                # 2026-05-26: structured event persist (best-effort)
+                try:
+                    _latest_rates_cache.emit_krx_close_event(
+                        "rest_skipped_ws_captured",
+                        session=session,
+                        date_kst=kst_date_iso,
+                        boundary_at_kst=boundary_at_kst.isoformat(),
+                        extra={"check": "entry"},
+                    )
+                except Exception:
+                    logger.warning(
+                        "[krx_close_snapshot] emit_krx_close_event 실패 (격리)",
+                        exc_info=True,
+                    )
                 return
             # (2) 1회 fallback만
             delays = delays[:1]
@@ -2385,12 +2413,46 @@ class KrxCloseSnapshotController:
                         "[krx_close_snapshot] WS captured during wait → REST skip "
                         "(session=%s attempt=%d)", session, attempt,
                     )
+                    # 2026-05-26: structured event persist (best-effort)
+                    try:
+                        _latest_rates_cache.emit_krx_close_event(
+                            "rest_skipped_ws_captured",
+                            session=session,
+                            date_kst=kst_date_iso,
+                            boundary_at_kst=boundary_at_kst.isoformat(),
+                            attempt=attempt,
+                            extra={"check": "during_wait"},
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[krx_close_snapshot] emit_krx_close_event 실패 (격리)",
+                            exc_info=True,
+                        )
                     return
 
             self.counters["attempted"] += 1
             # (4) env true: 실제 REST 호출 직전 counter ++ (invariant: counter == call_count)
             if config.KRX_CLOSE_FINALIZER_ENABLED:
                 _krx_close_finalizer_stats.close_rest_fallback_used += 1
+            # 2026-05-26: structured event persist (best-effort)
+            if kst_date_iso is None:
+                # env false path도 fallback_attempted emit — date_kst를 인라인 derive
+                _kst_date_iso = boundary_at_kst.astimezone(KST).date().isoformat()
+            else:
+                _kst_date_iso = kst_date_iso
+            try:
+                _latest_rates_cache.emit_krx_close_event(
+                    "rest_fallback_attempted",
+                    session=session,
+                    date_kst=_kst_date_iso,
+                    boundary_at_kst=boundary_at_kst.isoformat(),
+                    attempt=attempt,
+                )
+            except Exception:
+                logger.warning(
+                    "[krx_close_snapshot] emit_krx_close_event 실패 (격리)",
+                    exc_info=True,
+                )
             # (5) _attempt_once 호출
             try:
                 ok = await self._attempt_once(
@@ -2435,6 +2497,28 @@ class KrxCloseSnapshotController:
         from app import crud, latest_rates_cache
         from app.database import get_db_context
 
+        # 2026-05-26: structured event persist용 context (best-effort, no-throw)
+        _date_kst = boundary_at_kst.astimezone(KST).date().isoformat()
+        _boundary_iso = boundary_at_kst.isoformat()
+
+        def _emit(event_type: str, *, rate: Optional[float] = None,
+                  extra: Optional[Dict[str, Any]] = None) -> None:
+            try:
+                latest_rates_cache.emit_krx_close_event(
+                    event_type,
+                    session=session,
+                    date_kst=_date_kst,
+                    boundary_at_kst=_boundary_iso,
+                    attempt=attempt,
+                    rate=rate,
+                    extra=extra,
+                )
+            except Exception:
+                logger.warning(
+                    "[krx_close_snapshot] emit_krx_close_event 실패 (격리)",
+                    exc_info=True,
+                )
+
         result = await fetch_kis_futures_quote(
             contract=contract,
             token_manager=self._token_manager,
@@ -2447,12 +2531,14 @@ class KrxCloseSnapshotController:
                 "[krx_close_snapshot] REST returned None attempt=%d session=%s",
                 attempt, session,
             )
+            _emit("rest_returned_none")
             return False
 
         price_str = result.get("price")
         if not price_str:
             self.counters["rest_failed"] += 1
             logger.warning("[krx_close_snapshot] REST price 부재 attempt=%d", attempt)
+            _emit("rest_price_missing")
             return False
 
         try:
@@ -2462,6 +2548,7 @@ class KrxCloseSnapshotController:
             logger.warning(
                 "[krx_close_snapshot] REST price 정규화 실패 price=%r", price_str,
             )
+            _emit("rest_price_parse_failed", extra={"price_raw": str(price_str)[:50]})
             return False
 
         # Sanity check (±sanity_pct) vs 직전 DB latest
@@ -2482,6 +2569,8 @@ class KrxCloseSnapshotController:
                                 rest_rate, last_rate, diff_pct * 100,
                                 self._sanity_pct * 100,
                             )
+                            _emit("rest_sanity_aborted", rate=rest_rate,
+                                  extra={"last_rate": last_rate, "diff_pct": round(diff_pct * 100, 2)})
                             return False
                 # KRX_CLOSE_REST_WRITE_ENABLED=false: REST stale risk 차단
                 # (2026-05-25 휴장일 stale 사고 대응). REST fetch + sanity는 통과
@@ -2495,6 +2584,7 @@ class KrxCloseSnapshotController:
                         "session=%s rate=%.1f boundary=%s",
                         session, rest_rate, boundary_at_kst.isoformat(),
                     )
+                    _emit("rest_write_blocked", rate=rest_rate)
                     return True  # short-circuit retry loop
                 # boundary timestamp — DB UTC naive / Redis KST ISO
                 boundary_utc_naive = boundary_at_kst.astimezone(
@@ -2514,12 +2604,19 @@ class KrxCloseSnapshotController:
                     rate=rest_rate,
                     timestamp=boundary_at_kst.isoformat(),
                 )
+                if bool(redis_ok):
+                    _emit("rest_write_saved", rate=rest_rate)
+                else:
+                    # 정상 path return False (예외 X) — terminal event 보존
+                    _emit("rest_write_failed", rate=rest_rate,
+                          extra={"reason": "redis_set_failed"})
                 return bool(redis_ok)
 
         try:
             ok = await asyncio.to_thread(_sync_write)
         except Exception:
             logger.exception("[krx_close_snapshot] DB/Redis write 예외 (격리)")
+            _emit("rest_write_failed", rate=rest_rate)
             return False
 
         if ok:

@@ -828,6 +828,171 @@ def get_krx_close_captured_flag(session: str, kst_date: str) -> bool:
         return False
 
 
+# ─────────────────────────────────────────────────────────────────────
+# KRX close finalizer structured event persist (2026-05-26)
+# ─────────────────────────────────────────────────────────────────────
+# event_type append-only log with 14d retention.
+# 설계 원칙:
+#   - best-effort / no-throw — close finalizer 본 동작 영향 0
+#   - 저장 시점 case 분류 X — query 시점 (date_kst, session) aggregation
+#   - dedup_skipped catalog 제외 (실제 코드 분기 부재, speculation 차단)
+#
+# event catalog (10가지):
+#   ws_close_saved, rest_skipped_ws_captured, rest_fallback_attempted,
+#   rest_returned_none, rest_price_missing, rest_price_parse_failed,
+#   rest_sanity_aborted, rest_write_blocked, rest_write_saved, rest_write_failed
+
+_KRX_CLOSE_EVENT_KEY = "krx:close_finalizer_events"
+_KRX_CLOSE_EVENT_TTL_SEC = 14 * 24 * 3600  # 14 days
+
+
+def emit_krx_close_event(
+    event_type: str,
+    *,
+    session: str,
+    date_kst: str,
+    boundary_at_kst: Optional[str] = None,
+    attempt: Optional[int] = None,
+    rate: Optional[float] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """KRX close finalizer event를 Redis ZSET에 append-only 저장.
+
+    Args:
+        event_type: catalog 10가지 중 1 (예: "ws_close_saved").
+        session: "CF" / "CM".
+        date_kst: ISO date string (예: "2026-05-26"). CF는 boundary date,
+            CM은 boundary 06:00이 찍히는 날.
+        boundary_at_kst: ISO KST timestamp (option). close boundary 시각.
+        attempt: REST retry attempt 번호 (option, retry sequence 안에서만).
+        rate: 가격 (option, emit type별로 다름).
+        extra: 추가 metadata dict (option).
+
+    Returns:
+        True: ZADD 성공 (ZREMRANGEBYSCORE trim 실패해도 ZADD 성공 보존).
+        False: flag false / client init 실패 / serialize 실패 / ZADD 실패
+            (best-effort 격리, close finalizer 영향 0).
+
+    설계 (no-throw):
+        - flag `KRX_CLOSE_EVENT_LOG_ENABLED=false` 시 즉시 False (no-op)
+        - 모든 단계 try/except + logger.warning + False return
+        - exception propagate 0 — close finalizer return 값 변경 0
+        - trim 실패는 자연 누적 — 다음 emit에서 retry
+    """
+    from app import config
+    if not config.KRX_CLOSE_EVENT_LOG_ENABLED:
+        return False
+
+    client = _get_sync_client()
+    if client is None:
+        return False
+
+    now_kst = datetime.now(_KST)
+    emit_at_kst_iso = now_kst.isoformat()
+    emit_at_epoch_ms = int(now_kst.timestamp() * 1000)
+
+    # event_id: 같은 close 안 같은 event_type이 여러 번 emit 가능 (attempt별)
+    # → attempt + emit_at_epoch_ms로 unique 보장 (ZSET member uniqueness)
+    event_id_parts = [date_kst, session, event_type]
+    if attempt is not None:
+        event_id_parts.append(f"attempt={attempt}")
+    event_id_parts.append(f"emit={emit_at_epoch_ms}")
+    event_id = ":".join(event_id_parts)
+
+    event = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "session": session,
+        "date_kst": date_kst,
+        "emit_at_kst": emit_at_kst_iso,
+    }
+    if boundary_at_kst is not None:
+        event["boundary_at_kst"] = boundary_at_kst
+    if attempt is not None:
+        event["attempt"] = attempt
+    if rate is not None:
+        event["rate"] = rate
+    if extra:
+        event["extra"] = extra
+
+    try:
+        member = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        logger.warning(
+            "KRX close event JSON serialize 실패 (best-effort)",
+            exc_info=True,
+            extra={"event_type": event_type, "session": session, "date_kst": date_kst},
+        )
+        return False
+
+    try:
+        client.zadd(_KRX_CLOSE_EVENT_KEY, {member: emit_at_epoch_ms})
+    except Exception:
+        logger.warning(
+            "KRX close event ZADD 실패 (best-effort)",
+            exc_info=True,
+            extra={"event_id": event_id},
+        )
+        return False
+
+    # 14일 이전 trim — best-effort, 실패해도 ZADD 성공 보존
+    try:
+        cutoff_ms = emit_at_epoch_ms - _KRX_CLOSE_EVENT_TTL_SEC * 1000
+        client.zremrangebyscore(_KRX_CLOSE_EVENT_KEY, "-inf", cutoff_ms)
+    except Exception:
+        logger.warning(
+            "KRX close event ZREMRANGEBYSCORE trim 실패 (best-effort, ZADD 성공 보존)",
+            exc_info=True,
+        )
+        # ZADD 성공이라 True return — trim 실패는 자연 누적
+
+    return True
+
+
+def get_krx_close_events(
+    since_epoch_ms: int,
+    until_epoch_ms: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """KRX close finalizer events 시간 범위 query.
+
+    Args:
+        since_epoch_ms: 시작 timestamp (포함).
+        until_epoch_ms: 종료 timestamp (포함). None이면 +inf (현재까지).
+
+    Returns:
+        시간순 정렬된 event dict list. Redis 장애 또는 parse 실패 시 빈 list.
+
+    설계 (no-throw): admin endpoint에서 호출. Redis 장애 시 빈 list →
+        endpoint가 빈 aggregation 반환 (catastrophic backup 안전 default).
+    """
+    client = _get_sync_client()
+    if client is None:
+        return []
+
+    max_score = "+inf" if until_epoch_ms is None else until_epoch_ms
+    try:
+        members = client.zrangebyscore(
+            _KRX_CLOSE_EVENT_KEY, since_epoch_ms, max_score,
+        )
+    except Exception:
+        logger.warning("KRX close events ZRANGEBYSCORE 실패", exc_info=True)
+        return []
+
+    events = []
+    for m in members:
+        try:
+            if isinstance(m, bytes):
+                m = m.decode("utf-8")
+            events.append(json.loads(m))
+        except Exception:
+            logger.warning(
+                "KRX close event JSON parse 실패 (skip)", exc_info=True,
+                extra={"member": str(m)[:200]},
+            )
+            continue
+    return events
+
+
 def set_latest_bank_rate_from_sync_job(
     bank: str,
     asset: str,
