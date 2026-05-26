@@ -827,3 +827,166 @@ Stage 1 24h+ 데이터로 결정해야 할 정책 파라미터:
    - 옵션 B: WebSocket session boundary 감지 시 resolve 재시도
    - 옵션 C: 수동 restart 절차만 (자동화 X) — 운영 부담 감수
 5. **ADR-027 작성**: REST fallback + rollover 정책 의사결정 기록
+
+---
+
+## F-3 KRX 가격알림 운영 활성 (2026-05-26)
+
+> 🟢 **상태**: Deployed and observing
+> 📌 **ADR**: [ADR-032](DECISIONS.md#adr-032-krx-가격알림-evaluator--source-neutral-재사용--krx-adapter--validate-helper-분리)
+> 📌 **Plan**: [KRX_FANOUT_REFACTOR_PLAN §5.2 F](KRX_FANOUT_REFACTOR_PLAN.md)
+
+### F-1/F-2/F-3 trilogy 요약
+
+| 단계 | Commit | Default | 사용자 영향 | 의미 |
+|---|---|---|---|---|
+| F-1 | `e5ef42e` | `KRX_ALERT_EVALUATOR_ENABLED=false` | 0 (evaluator 미등록) | KrxAlertEvaluator thin subclass + KrxAlertTickHandler adapter + boundary drain helper + 24 tests |
+| F-2 | `9cbd7ae` | API 허용 + helper 분리 | 0 (KRX 발송 여전히 닫힘) | `validate_alert_source_asset` source_registry 분리 + category derivative 허용 + 11 tests |
+| F-3 | env override | `KRX_ALERT_EVALUATOR_ENABLED=true` 활성 (2026-05-26 13:40 KST) | 테스트 iOS canary만 영향 | 코드 변경 0, .env 토글 + force-recreate |
+
+### F-3 활성 절차 (운영 runbook)
+
+```bash
+# 1) .env에 토글 추가 (sed 안전 패턴)
+ssh ubuntu@<ec2> '
+if grep -q "^KRX_ALERT_EVALUATOR_ENABLED=" ~/exchange-rate/.env; then
+  sed -i "s/^KRX_ALERT_EVALUATOR_ENABLED=.*/KRX_ALERT_EVALUATOR_ENABLED=true/" ~/exchange-rate/.env
+else
+  echo "KRX_ALERT_EVALUATOR_ENABLED=true" >> ~/exchange-rate/.env
+fi
+'
+
+# 2) git pull (F-1/F-2 코드가 EC2에 없으면 필수)
+ssh ubuntu@<ec2> 'cd ~/exchange-rate && git pull'
+
+# 3) build + force-recreate (코드 변경 포함 시 build 필수, env-only 변경이면 force-recreate만)
+ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose build fastapi && docker compose up -d --force-recreate fastapi'
+
+# 4) 컨테이너 안 import + flag 활성 확인
+ssh ubuntu@<ec2> 'docker exec exchange-rate-app python -c "
+from app import config, source_registry
+from app.crawlers.krx_kis import KrxAlertTickHandler
+from app.notifications.alert_evaluator import KrxAlertEvaluator, UsdtAlertEvaluator
+print(\"KRX_ALERT_EVALUATOR_ENABLED:\", config.KRX_ALERT_EVALUATOR_ENABLED)
+print(\"krx validation:\", source_registry.validate_alert_source_asset(\"krx\", \"usd-krw-futures\"))
+print(\"subclass OK:\", issubclass(KrxAlertEvaluator, UsdtAlertEvaluator))
+"'
+```
+
+기대 출력: `KRX_ALERT_EVALUATOR_ENABLED: True`, `krx validation: None` (통과), `subclass OK: True`.
+
+### iOS canary 검증 절차 (Google Sign-In 우회 — 옵션 D)
+
+테스트 iOS 앱이 KRX UI 미보유 + Google Sign-In 사용 시 Firebase REST `signInWithPassword` 불가. Admin SDK custom token + `signInWithCustomToken` 우회 패턴:
+
+```python
+# /tmp/krx_canary.py — EC2 컨테이너에서 단일 process 실행 (docker exec stdout pipe long-line 잘림 회피)
+from firebase_admin import auth
+from app.notifications.fcm import init_firebase
+from app.database import get_db_context
+from app import models
+from app.latest_rates_cache import _get_sync_client
+import os, json, urllib.request
+
+# 1. test user UID 조회 (USDT 알림 등록자 = 테스트 사용자 거의 확정)
+with get_db_context() as db:
+    row = db.query(models.SourceNotificationSetting.user_id).filter(
+        models.SourceNotificationSetting.user_id.like('<prefix>%')
+    ).first()
+    uid = row[0]
+
+# 2. custom token + ID token 교환
+init_firebase()
+custom_token = auth.create_custom_token(uid).decode()
+req = urllib.request.Request(
+    f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key={os.environ['WEB_API_KEY']}",
+    data=json.dumps({"token": custom_token, "returnSecureToken": True}).encode(),
+    headers={"Content-Type": "application/json"}, method="POST",
+)
+id_token = json.loads(urllib.request.urlopen(req).read())['idToken']
+
+# 3. KRX latest sampling
+v = _get_sync_client().get('latest:source:krx:usd-krw-futures')
+krx_rate = json.loads(v.decode())['rate']
+threshold = round(krx_rate - 0.5, 1)
+
+# 4. API POST — F-2 validation chain 검증 포함
+post_req = urllib.request.Request(
+    "https://fxi.kr/api/source-notification-settings",
+    data=json.dumps({"source":"krx","asset":"usd-krw-futures","condition":"above","threshold":threshold,"is_enabled":True}).encode(),
+    headers={"Authorization": f"Bearer {id_token}","Content-Type":"application/json"}, method="POST",
+)
+print(urllib.request.urlopen(post_req).read().decode())
+```
+
+실행: `docker cp /tmp/krx_canary.py exchange-rate-app:/app/ && docker exec -w /app -e PYTHONPATH=/app -e WEB_API_KEY="<from GoogleService-Info.plist>" exchange-rate-app python krx_canary.py`.
+
+### 5/26 13:40 KST iOS canary 실측 결과
+
+| 항목 | 결과 |
+|---|---|
+| F-2 API validation (`validate_alert_source_asset("krx", "usd-krw-futures") -> None`) | ✅ POST 200 (setting id=6) |
+| KRX latest rate | 1505.2 @ 2026-05-26T13:40:00 KST |
+| Threshold (`above`) | 1504.7 (즉시 매치 조건) |
+| F-1 KrxAlertTickHandler payload→AlertObservation | ✅ source=krx asset=usd-krw-futures rate=1505.3 kind=tick |
+| F-1 coalescer 5초 grain flush + evaluate_price_input_async | ✅ 13:40:06 POST → 13:40:08 FCM (2초) |
+| F-1 cache invalidate immediate | ✅ POST 직후 다음 tick에서 cache miss → DB query → 1건 평가 |
+| FCM multicast → iOS APNS 도착 | ✅ LG U+ iPhone 잠금화면 "📈 미국달러F USD-KRW-FUTURES [1504.7↑이상 도달] 1505.30" |
+| DB persist (triggered) | ✅ id=6, triggered=True, enabled=False, last_notified_at=2026-05-26T04:40:08.951948 UTC, last_notified_rate=1505.3 |
+| DB persist (log) | ✅ id=95, success=True, triggered_rate=1505.3, error=None |
+| 중복 발송 차단 (stale cache skip) | ✅ 13:40:11 / 13:40:15 `stale cache (enabled/triggered) skip` log 2회 |
+| 서버 alert_evaluator 예외 | ✅ 0건 |
+
+### Rollback 절차
+
+```bash
+# .env에서 토글 false
+ssh ubuntu@<ec2> 'sed -i "s/^KRX_ALERT_EVALUATOR_ENABLED=.*/KRX_ALERT_EVALUATOR_ENABLED=false/" ~/exchange-rate/.env'
+
+# force-recreate (env 변경은 restart로는 반영 안 됨 — env_file 재로드 필요)
+ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose up -d --force-recreate fastapi'
+```
+
+`docker compose restart`로는 env 변경 미반영 (env_file은 컨테이너 재생성 시에만 다시 읽음). `--force-recreate` 필수.
+
+### KRX 토글 매트릭스 (F-3 활성 후)
+
+| Env | Default | 운영값 (2026-05-26 기준) | 의미 |
+|---|---|---|---|
+| `KRX_FUTURES_ENABLED` | false | true | WS 연결 + 신규 DB 저장 |
+| `KRX_CLOSE_FINALIZER_ENABLED` | true | true | KrxCloseWindowWriter + KrxCloseSnapshotController |
+| `KRX_CLOSE_REST_WRITE_ENABLED` | false | false | REST close write 차단 (5/25 정책 PR 6a43785) |
+| `KRX_REDIS_TICK_WRITE_ENABLED` | false | true | Stage E E-2 tick-level Redis mirror |
+| `KRX_ALERT_EVALUATOR_ENABLED` | false | true | **F-3 신규** KRX 가격알림 활성 |
+
+### 5/26 15:45 CF close 첫 실측 결과 (sampler 검증)
+
+5/26 13:40 iOS canary 직후 15:45 close 자연 도래 검증. sampler `/tmp/krx_close_1545_sample.log` 5초 grain 36 sample.
+
+| 시점 | Phase | 핵심 데이터 |
+|---|---|---|
+| 15:44:30~15:45:54 | pre-close (close grace window 안) | latest stagnant (rate=1504.2 ts=15:34:55+09:00, mirrored=15:34:56) — Stage E tick writer가 close grace tick skip하므로 정상. captured_flag NONE. DB recent 3min count=0 |
+| 15:46:00.110 | KrxCloseWindowWriter close 발사 | LOG `[krx_close_window] close saved session=CF rate=1502.8 ts=2026-05-26T15:45:00+09:00` |
+| 15:46:00 | captured_flag SET | value="1" TTL=3594s (1h) |
+| 15:46:00 | DB row 1건 unconditional INSERT | id=451680 rate=1502.8 ts_kst=15:45:00.000 |
+| 15:46:00 | Redis latest 갱신 (KrxCloseWindowWriter 단독) | rate=1502.8 ts=15:45:00+09:00 mirrored=15:46:00.110 |
+| 15:46:01 | KrxCloseSnapshotController retry sequence entry | LOG `[krx_close_snapshot] WS captured at entry → REST skip (session=CF date=2026-05-26)` |
+
+**Invariant 검증 (3축 모두 통과, sampler 직접 실측)**:
+
+1. ✅ captured_flag SET (WS 단독 처리 성공 신호) — Case A 진입 조건
+2. ✅ DB close row 1건 (KrxCloseWindowWriter unconditional INSERT)
+3. ✅ REST `WS captured at entry → REST skip` (Case A — WS frame이 신뢰 source, `rest_write_blocked` 증가 0, `KRX_CLOSE_REST_WRITE_ENABLED=false`라 차단 분기도 미진입 — REST 호출 자체가 entry flag check에서 skip)
+
+**Stage E non-interference 실측**: pre-close 1분 동안 Redis latest stagnant (rate=1504.2 ts=15:34:55) — Stage E tick writer가 close grace tick skip + KrxCloseWindowWriter 단독 처리 정상.
+
+**F-1 alert handler 격리 실측**: alert_evaluator 예외 0건 (sampler 시간대 docker logs 검증). **단 close grace tick에서 alert evaluation/FCM 발사 path 자체는 직접 실측되지 않음** — sampler 시간대에 활성 KRX 알림 0건(setting id=6은 13:40에 이미 triggered=true)이라 candidates empty path를 silent하게 거침. ADR-032 invariant 2 (close grace skip ❌)는 *코드 구조상 보장* (`KrxAlertTickHandler.__call__`이 close grace check 없음 — `KrxRedisLatestWriter`와 다르게)이고, 운영 실측은 별도 close grace 시점 활성 알림 등록 후 검증 필요.
+
+= 5/26 CF close = **Case A 완전 정상 동작** (close finalizer / Stage E / REST fallback / alert handler 예외 격리 4 layer 실측 통과). close grace tick FCM 발사 path 실측은 후속 관찰 항목.
+
+### 후속 관찰 / TODO
+
+1. **24h+ alert_evaluator FCM sent 누적 + 예외 0 유지** (ADR-032 Stable observed 조건)
+2. ✅ **5/26 15:45 CF close 첫 실측** — 위 결과로 invariant 검증 완료. 5/27 06:00 CM close도 같은 패턴 기대.
+3. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — 본 PR에 포함 (F-2 후속 자연 적용).
+4. **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** — 별 cleanup PR scope.

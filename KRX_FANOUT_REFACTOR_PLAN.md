@@ -1,7 +1,7 @@
 # KRX Fanout Refactor Plan
 
 > 📅 **작성일**: 2026-05-14
-> 🏷️ **상태**: Active plan — A/B/C/A-pre completed, D pending
+> 🏷️ **상태**: Active plan — A/B/C/A-pre completed, **D superseded by F (2026-05-26)**, Stage F completed ([ADR-032](DECISIONS.md))
 > 📋 **문서 성격**: KRX 미국달러선물 (`app/crawlers/krx_kis.py`)의 현재 책임/시그널/Stage 상태를 정리하고 장기 fanout 구조와 정합화하기 위한 implementer-focused mapping. ADR-027의 *decision record*와 분리.
 
 ## 0. Scope & Status
@@ -22,7 +22,7 @@
 - ✅ **A**: KrxLivenessMonitor 추출 (commit `eb085c1` — frame/age/gap state ownership, `_set_status`는 client 잔류)
 - ✅ **B**: KrxRestFallbackController 추출 (commit `6a5aa91` — getter 패턴 active_session/last_tick_at, wrapper 경유 behavior-change-0)
 - ✅ **C**: KrxRedisLatestWriter 객체 분리 (commit `f5ba9bc` — ADR-031 DB-insert-bound timing 보존)
-- ⏸ **D**: KrxAlertEvaluator stub — Stage C 영역(ADR-027 결정)과 함께 검토. 단독 stub은 실익 낮음.
+- 🔀 **D superseded by F** (2026-05-26): 1차에서 "단독 stub 실익 낮음"으로 보류했으나, F-1/F-2/F-3 trilogy로 직접 land ([ADR-032](DECISIONS.md)). Stub 단계 건너뜀 — `UsdtAlertEvaluator` source-neutral helper 재사용 + KRX adapter (`KrxAlertTickHandler`) 패턴이 별 stub 단계 없이 final form으로 적합.
 
 각 PR은 5 invariants + 27 fallback eligibility + KRX kis + redis integration suites 모두 unchanged GREEN 입증. 전체 회귀 604 passed 유지.
 
@@ -196,11 +196,11 @@ WebSocket tick (KisFuturesClient)
 - 즉 객체 분리만 (책임 명시), tick-level 갱신은 X.
 - 검증: `test_krx_redis_integration.py` 12 tests 통과 + `usdt_redis_stats`에 krx 미등장 유지.
 
-**D. KrxAlertEvaluator stub 자리 마련**:
+**D. KrxAlertEvaluator stub — skipped (superseded by F, 2026-05-26)**:
 
-- 인터페이스 정의만 (Protocol/ABC), 실제 등록은 X.
-- `add_tick_handler`로 future 등록 가능한 형태.
-- 검증: 코드 변경 거의 없음, smoke 영향 없음.
+- 1차 계획: 인터페이스 정의만(Protocol/ABC), 실제 등록은 X. stub 자리만 확보.
+- 실제 결과: stub 단계 건너뜀 — F-1/F-2/F-3 trilogy로 직접 final form land ([ADR-032](DECISIONS.md)). `UsdtAlertEvaluator` source-neutral helper 재사용 + `KrxAlertTickHandler` adapter + boundary drain helper 조합이 별 stub 단계 없이 자연 land 가능.
+- 본 단계는 plan의 사적 기록으로만 남고, 동등 효과는 Stage F가 흡수.
 
 → A/B/C 모두 *behavior-change-0* 완료. 실제 PR 분리는 *각 단계 1개씩*으로 진행되어 회귀 surface 최소화:
 
@@ -208,7 +208,7 @@ WebSocket tick (KisFuturesClient)
 - PR-A (`eb085c1`): KrxLivenessMonitor 추출
 - PR-B (`6a5aa91`): KrxRestFallbackController 추출
 - PR-C (`f5ba9bc`): KrxRedisLatestWriter 객체 분리
-- D: Stage C 영역과 함께 검토 (단독 stub 실익 낮음)
+- D: superseded by F (2026-05-26) — stub 단계 건너뛰고 F-1/F-2/F-3 trilogy로 직접 land. 상세는 위 §0 Scope 또는 [ADR-032](DECISIONS.md).
 
 ### 5.2 5/18 후에만 가능 (Stage C 결정 영역)
 
@@ -222,10 +222,20 @@ WebSocket tick (KisFuturesClient)
 
 **진입 준비 상태 (2026-05-25 갱신)**: 5/18 만기 baseline 통과 (CF 15:45 + CM 06:00 close finalizer 양 session 첫 실측 성공, KRX_CANARY.md §"2026-05-18~19 만기 첫 실측 결과"), 자동 rollover 정상 (A75605/202605 → A75606/202606), KIS master batch 익일 갱신 가설 b 확정. **남은 선행 조건**: ADR-027 Stage C 결정 (REST fallback 수치 확정) + 5/19~5/26 close finalizer 7일 telemetry case A/B/C 분포 분석. **non-interference 잠금** (read 산출물에 반드시 포함): KrxCloseWindowWriter의 close grace window 일반 KrxDbWriter skip 정책 유지, close finalizer "window-end 1건 unconditional insert" 정책 미변경.
 
-**F. KrxAlertEvaluator 구현**:
+**F. KrxAlertEvaluator 구현** (✅ 완료 — 2026-05-26, [ADR-032](DECISIONS.md#adr-032-krx-가격알림-evaluator--source-neutral-재사용--krx-adapter--validate-helper-분리)):
 
 - "알림은 모든 tick" 원칙 실현. KRX 단일 source 알림 평가.
-- 전제: USDT/은행 알림 evaluator의 fanout 패턴 학습 후 일반화 또는 KRX 한정 1차.
+- 결정: `UsdtAlertEvaluator` source-neutral helper 재사용 + KRX adapter (`KrxAlertTickHandler`) 추가. 별 evaluator class 분리 X.
+- F-1 commit `e5ef42e` (default false land, 24 tests), F-2 commit `9cbd7ae` (API 허용 + helper 분리, 11 tests), F-3 활성 = `KRX_ALERT_EVALUATOR_ENABLED=true` env (2026-05-26 13:40 KST).
+- iOS canary 완전 검증: setting id=6 POST 13:40:06 → FCM 13:40:08 (2초) → iOS 도착 확인.
+
+**Fanout invariants — 회귀 잠금** (ADR-032 anchor):
+
+1. **SET-only ❌**: alert는 mirror layer (`KrxRedisLatestWriter`)의 `KrxLatestWriteOutcome.{SET,SKIPPED,FAILED}` 분기와 직교. 매 tick observation이 평가 대상. PriceAlertCoalescer 5초 wall-clock grain이 noise 차단.
+2. **Close grace skip ❌**: `KrxRedisLatestWriter.__call__`은 close grace tick (CF 15:45:00~15:45:59 / CM 06:00:00~06:00:59) skip (KrxCloseWindowWriter non-interference) — 그러나 `KrxAlertTickHandler.__call__`은 close grace tick **평가 진행**. 종가 crossing 알림 누락 차단이 alert 핵심 정책.
+3. **Session boundary drain**: PriceAlertCoalescer pending bucket은 다음 bucket tick 또는 `close()`까지 보류 — KRX는 1 client가 여러 session (CF↔CM) 전환이라 USDT 패턴 자동 적용 X. `KisFuturesClient._drain_alert_tick_handlers(timeout)` helper가 `_run_session` boundary return 전 + `stop()` 양쪽에서 명시 drain (외부 검토 #1 보강).
+
+**non-interference 잠금** (Stage E와 직교): KrxCloseWindowWriter의 close grace window 일반 KrxDbWriter skip 정책 유지, close finalizer "window-end 1건 unconditional insert" 정책 미변경. F-1 alert evaluator는 mirror/DB writer와 다른 책임 layer라 Stage E close non-interference에 영향 0.
 
 **G. REST fallback Stage C 반영**:
 

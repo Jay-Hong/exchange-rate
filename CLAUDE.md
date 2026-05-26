@@ -7,7 +7,7 @@
 ### 📚 주요 문서 가이드
 
 **핵심 가이드:**
-> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR). **최신: ADR-027 (KRX REST/stale 정책 초안), ADR-028 (Topic-only Tether/KRX + legacy FX dual-emit 계약)**
+> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR). **최신: ADR-031 (KRX Redis 1차 통합), ADR-032 (KRX 가격알림 evaluator — F-1/F-2/F-3 trilogy)**
 > 🕷️ **크롤러 구현:** [CRAWLERS.md](CRAWLERS.md) - 각 은행별 크롤링 방식과 특수 로직
 > 📝 **변경 이력:** [CHANGELOG.md](CHANGELOG.md) - 버전별 변경사항 및 마이그레이션 가이드
 > 🔔 **알림 & 구독:** [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md) - 푸시 알림, 인증, 구독 관리 가이드
@@ -29,7 +29,7 @@
 > 🔌 **USDT 거래소 WebSocket:** [USDT_EXCHANGE_WEBSOCKET_GUIDE.md](USDT_EXCHANGE_WEBSOCKET_GUIDE.md) - 업비트/빗썸/코인원/코빗/고팍스 ticker 구독 및 정규화 가이드 (collector 측, emit 모델과 독립)
 
 **USDT / KRX 도메인 문서** (Phase Z-1 status 정리, 2026-05-06):
-> 📋 **KRX Stage 1 운영:** [KRX_CANARY.md](KRX_CANARY.md) - **현재 운영 중**. Stage 0/1/2 runbook, SQL/Redis 검증 명령, 24h baseline 지표, 5/18 만기 관찰 시나리오, rollback 절차
+> 📋 **KRX Stage 1 운영:** [KRX_CANARY.md](KRX_CANARY.md) - **현재 운영 중**. Stage 0/1/2 runbook, SQL/Redis 검증 명령, 24h baseline 지표, 5/18 만기 관찰 시나리오, rollback 절차. **F-3 KRX 가격알림 운영 활성 (2026-05-26, 섹션 추가)**: env 활성 절차 + iOS canary (Google Sign-In 우회 custom token 패턴) + 토글 매트릭스 + Rollback.
 > 📜 **USDT 탭 초기 제안서:** [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md) - **Historical proposal (rollout superseded)**. 제품 방향성/Decision A~F는 참고 유효, "기존 WebSocket에 usdt-krw 포함" rollout은 폐기
 > 🧱 **USDT Phase 1 백엔드 설계:** [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md) - **source/asset 도메인 모델 유효 (source_rates / SourceRegistry / 알림 정책)**. legacy `/api/rates` + WebSocket `rates` 통합 rollout은 superseded — 데이터 수신 계약은 [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) + [ADR-028](DECISIONS.md) 따름
 > 📱 **USDT iOS/Android 가이드:** [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md) - **RateSource / 어댑터 / SourceRegistry 모델 참고용**. 데이터 수신 방식(`/api/rates`, `/ws` `rates` 배열)은 V2 protocol(`REALTIME_V2_CLIENT_GUIDE.md`, Phase Z-2 신설 예정)로 대체 예정
@@ -1279,6 +1279,12 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
   - **4단계 대응**: (1) Production read-only 식별 → (2) DB row id=429785 DELETE + Redis 직전 정상값(1519.9, 5/22 야간 CM close, ts=2026-05-23T06:00+09:00) 복구 → (3) hotfix `170380f` (`KRX_2026_KNOWN_HOLIDAYS`에 5/25 추가 + 5/26 06:00 CM skip 회귀 잠금) → (4) 정책 PR `6a43785` (`KRX_CLOSE_REST_WRITE_ENABLED=false` default, `KrxCloseSnapshotController._sync_write` 단일 분기로 finalizer enabled 여부와 무관 차단, retry short-circuit, `KrxCloseWindowWriter` WS frame 신뢰 경로 유지)
   - **5 anchor 결정**: (1) KIS REST close snapshot은 더 이상 authoritative write source 아님, (2) REST 호출은 diagnostic으로 유지 + DB/Redis write는 default off, (3) Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal, (4) `KrxCloseWindowWriter` WS close frame write는 신뢰 경로 유지, (5) Stage E는 close finalizer 정책과 직교
   - 신규 counter `rest_write_blocked`. 신규 7 tests (hotfix 4 + 정책 PR 3). 32 + 173 tests passed.
+- ✅ **KRX 가격알림 evaluator F-1/F-2/F-3 trilogy 운영 land** (2026-05-26, [ADR-032](DECISIONS.md) / [KRX_FANOUT_REFACTOR_PLAN §5.2 F](KRX_FANOUT_REFACTOR_PLAN.md) / [KRX_CANARY F-3 섹션](KRX_CANARY.md) / [ALERT_SUBSCRIPTION_GUIDE source-based anchor](ALERT_SUBSCRIPTION_GUIDE.md)):
+  - **F-1** (`e5ef42e`, default false land, 24 tests): `KrxAlertEvaluator(UsdtAlertEvaluator)` thin subclass + `KrxAlertTickHandler` payload→AlertObservation adapter + `_drain_alert_tick_handlers` boundary helper (외부 검토 #1 보강). 3 invariants 잠금: SET-only ❌ / close grace skip ❌ / session boundary drain.
+  - **F-2** (`9cbd7ae`, API 허용 + helper 분리, 11 tests): `source_registry.validate_alert_source_asset` FastAPI 비의존 helper 분리 ([memory: project_main_py_helper_placement] firebase_admin import chain 우회), `category in {exchange, derivative}` 허용, KRX `phase1_enabled=True`. main.py `_validate_phase1_source_asset`는 HTTPException thin wrapper.
+  - **F-3 운영 활성** (`KRX_ALERT_EVALUATOR_ENABLED=true` env, 2026-05-26 13:40 KST): iOS canary end-to-end 성공 — setting id=6 POST 13:40:06 → FCM 발사 13:40:08 (2초) → iOS 도착 (LG U+ 잠금화면 "📈 미국달러F USD-KRW-FUTURES [1504.7↑이상 도달] 1505.30") → DB triggered=true + log success + alert_evaluator 예외 0건.
+  - **dead alert gap 정책**: F-2 land ~ F-3 활성 사이는 의도된 canary staging (API 등록 가능 + 발송 안 됨). 운영 단말 영향 0 (테더 탭 자체가 운영 앱에 없음, 테스트 iOS canary 전용).
+  - **후속**: `_validate_phase1_source_asset` rename (별 cleanup PR) + `USDT_PHASE1_CLIENT_GUIDE.md` line 571 "category=='exchange'" stale fix (별 cleanup PR).
 - 🔜 **All-source observation fanout 통합 phase** — [REALTIME_ARCHITECTURE_PLAN.md §4.1](REALTIME_ARCHITECTURE_PLAN.md) anchor. 우선순위 합의 (2026-05-25): **(1) [KRX Stage E](KRX_FANOUT_REFACTOR_PLAN.md) (KRX Redis DB-insert-bound → tick-level + freshness metadata 정렬) → (2) [Bank/Investing β](USDT_TOPIC_MIGRATION_PLAN.md) (DB-first monolithic → observation fanout 재설계 + main.py legacy hook 격하 가능성) → (3) USDT 5 source 공통화 검토** (3 도메인 검증 패턴 input, 선제 abstraction 금지 원칙). KRX Stage E 진입 조건: ADR-027 Stage C 결정 + 5/19~5/26 close finalizer 7일 telemetry 분석.
 - 🔜 장기 realtime roadmap — 신규 단말은 topic 구독 모델만 사용, broadcast cycle은 구버전 호환 후 deprecate. 테더 탭 모든 표시 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤 legacy hook 완전 제거.
 - 🔜 5/18 KRX 만기 rollover 관찰 + ADR-027 REST fallback 수치 확정 → Stage C 결정

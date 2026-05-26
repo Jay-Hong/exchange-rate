@@ -3792,6 +3792,140 @@ KRX tick → Redis direct write + topic builder Redis-first read로 정렬한다
 
 ---
 
+## ADR-032: KRX 가격알림 evaluator — source-neutral 재사용 + KRX adapter + validate helper 분리
+
+**상태**: Proposed, **Deployed and observing** (2026-05-26)
+
+- 배포 commit: `e5ef42e` (F-1, default false land), `9cbd7ae` (F-2, API 허용), `KRX_ALERT_EVALUATOR_ENABLED=true` env (F-3 활성, 2026-05-26 13:40 KST)
+- iOS canary 완전 성공: setting id=6 POST 13:40:06 → FCM 발사 13:40:08 (2초) → iOS 도착 확인 (LG U+ 잠금화면 "📈 미국달러F USD-KRW-FUTURES [1504.7↑이상 도달] 1505.30")
+- DB persist 일치: triggered_rate=1505.3, success=True, triggered=True, enabled→False (1회성 자동 disable)
+- 중복 발송 차단 검증: `stale cache (enabled/triggered) skip` log 2회 (다음 bucket flush 시점)
+- 서버 측 alert_evaluator 예외 0건
+
+### 맥락
+
+[ADR-031](#adr-031-krx-미국달러선물-redis-통합--1차-부채-해소-stalerest는-후속) 1차 KRX Redis 통합에서 "Tick fanout handler 분리 (RedisLatestWriter / AlertEvaluator / DbWindowWriter 3-way)"는 **후속 ADR 영역**으로 분리됐고 "KRX 알림 evaluator 연결: fanout 패턴 정립 phase에 함께"라 명시됨. [KRX_FANOUT_REFACTOR_PLAN §5.2 F](KRX_FANOUT_REFACTOR_PLAN.md)에서 "KrxAlertEvaluator 구현 — 알림은 모든 tick 원칙 실현"이 ADR-031의 후속 Stage F로 자리. 본 ADR이 F-1/F-2/F-3 trilogy를 통해 그 자리를 채운다.
+
+USDT 5 source는 이미 `UsdtAlertEvaluator`로 source-neutral 평가 chain (settings cache + PriceAlertCoalescer 5초 wall-clock grain + refetch + FCM)을 운영 중. KRX 알림은 다음 두 가지 설계 분기점이 있다:
+1. **별 evaluator class 분리** vs **source-neutral helper 재사용**
+2. **API validation 위치** — main.py thin wrapper vs source_registry 도메인 helper
+
+### 결정
+
+KRX 가격알림은 **`UsdtAlertEvaluator` source-neutral helper를 재사용**하고 KRX-specific 로직은 **adapter layer**에 집중한다. F-2 validation helper는 **`source_registry`로 분리**해 main.py firebase_admin import chain을 우회한다. F-2 (API 허용) / F-3 (env 활성) 단계 분리로 dead alert gap을 의도된 canary staging으로 사용한다.
+
+1. **`KrxAlertEvaluator(UsdtAlertEvaluator)` thin wrapper** (`app/notifications/alert_evaluator.py`):
+   - body=`pass`. UsdtAlertEvaluator가 이미 `observation.source/asset` 기반 source-neutral (settings cache, condition_matches, refetch, FCM payload). 별 evaluator 분리는 코드 중복만 늘림.
+   - 로깅/타이핑/향후 KRX-specific 분기 자리 확보 목적.
+
+2. **`KrxAlertTickHandler` adapter** (`app/crawlers/krx_kis.py`):
+   - KIS payload (source/asset/price/received_at/session) → `AlertObservation(source, asset, rate, timestamp_ms, kind="tick")` 변환.
+   - `price`: `Decimal.quantize(0.1)` 0.1 KRW tick 정규화 (`KrxDbWriter`/`KrxRedisLatestWriter` mirror).
+   - `received_at`: KST naive ISO → KST aware datetime → UTC epoch ms 변환 (운영 payload는 `datetime.now(KST).replace(tzinfo=None).isoformat()`).
+   - `KRX_ALERT_EVALUATOR_ENABLED=false` 시 defensive early return (env 변경 timing 안전망).
+
+3. **`KisFuturesClient._drain_alert_tick_handlers(timeout)` helper** (외부 검토 #1 보강):
+   - `PriceAlertCoalescer`는 마지막 5초 bucket을 *다음 bucket의 tick 도래* 또는 *evaluator.close()* 호출 시점에만 emit. KRX는 1 client가 여러 session (CF↔CM) 전환이라 USDT의 "1 source = 1 WS lifecycle 종료 시 finally drain" 패턴이 자동 적용되지 X.
+   - session boundary (`_run_session`의 `current_session != session` 분기) + `stop()` 양쪽에서 명시 drain — CF↔CM 갭 동안 close grace crossing 누락 차단.
+   - 등록된 `KrxAlertTickHandler` instances만 선택 close (다른 tick handler 영향 X). 예외 격리.
+
+4. **`source_registry.validate_alert_source_asset(source, asset) -> Optional[str]` helper 분리** (FastAPI 비의존):
+   - main.py에 helper 두면 단위 테스트가 firebase_admin import chain으로 깨짐 (과거 메모리 기록 `project_main_py_helper_placement` 참조 — 2026-05-10 Z-2b Stage 2에서 동일 패턴 발견 후 영구 적용 권고).
+   - 본 helper는 None (통과) 또는 에러 메시지 string (차단) 반환. main.py `_validate_phase1_source_asset`는 HTTPException thin wrapper만 담당.
+   - 허용 대상: `category in ("exchange", "derivative")` — F-2 (2026-05-26)에서 derivative=KRX 추가.
+
+5. **F-2 (API 허용) / F-3 (env 활성) 분리 — dead alert gap 의도**:
+   - F-2 land (9cbd7ae) 후 `KRX_ALERT_EVALUATOR_ENABLED=false` default → API 등록 가능 + 발송 안 됨 = 의도된 canary staging gap.
+   - 운영 단말 영향 0 (테더 탭 자체가 운영 앱에 없음, 테스트 iOS canary 전용).
+   - F-3 활성 = env override + force-recreate. EC2에 이미 F-1/F-2 코드(`9cbd7ae`)가 land된 상태면 env 토글만으로 충분(`docker compose up -d --force-recreate fastapi`). 이전 commit이 land되어 있으면 `git pull + docker compose build fastapi + force-recreate` 순서 필요 (5/26 활성 시점은 EC2가 `c3cb1c1`이라 후자 절차로 진행). `docker compose restart`는 env_file 변경을 반영하지 않으므로 `--force-recreate` 필수.
+
+### Anchor — 3 invariants (회귀 잠금)
+
+본 ADR이 land한 이후 회귀 차단할 정책 anchor:
+
+1. **SET-only ❌**: alert는 mirror layer (KrxRedisLatestWriter)의 SET/SKIPPED/FAILED outcome 분기와 직교. 매 tick observation이 평가 대상. coalescer 5초 wall-clock grain이 noise 차단.
+2. **Close grace skip ❌**: `KrxRedisLatestWriter.__call__`은 close grace tick (15:45:00~15:45:59 / 06:00:00~06:00:59) skip (KrxCloseWindowWriter non-interference)이지만, `KrxAlertTickHandler.__call__`은 close grace tick **평가 진행** — 종가 crossing 보존 (사용자 알림 누락 방지 우선).
+3. **Session boundary drain**: PriceAlertCoalescer pending bucket은 `_run_session` boundary return 전 + `stop()` 양쪽에서 helper로 명시 flush. CF↔CM 갭 동안 close grace crossing 누락 차단.
+
+### Trade-offs
+
+- **장점**:
+  - `UsdtAlertEvaluator` source-neutral helper 재사용으로 코드 중복 0 — KRX 추가가 logging/typing wrapper 1줄 + adapter 1개로 land.
+  - F-1 default false + F-2 API 허용 + F-3 env 활성의 단계 분리로 each land가 default-safe (운영 영향 0).
+  - `source_registry.validate_alert_source_asset` 분리로 main.py firebase_admin import chain 격리 — 향후 알림 validation 단위 테스트 안전.
+  - close grace tick alert 평가 진행으로 종가 crossing 알림 누락 0.
+
+- **단점 / 제약**:
+  - thin subclass 패턴은 KRX 전용 분기가 필요해질 때까지 의미가 약함 (현재는 logging/typing 목적). 단 분리 추가 비용 0이라 risk 낮음.
+  - dead alert gap (F-2 land ~ F-3 활성) — 의도된 staging이지만 외부 사용자 영향 가능성을 운영 정책으로 차단 (테더 탭 운영 앱 미포함).
+  - `_validate_phase1_source_asset` historical name — F-2에서 derivative 허용해 의미적으로 "phase1" 표현이 좁아짐. F-3 이후 별 cleanup PR로 rename 검토.
+
+### Alternatives 검토
+
+**Option A — `KrxAlertEvaluator` 별 evaluator class 신규 (no subclass)**:
+
+- 거부 이유: USDT 5 source가 이미 source-neutral evaluator 재사용 패턴. KRX만 별 class면 코드 중복 + 향후 USDT 추가 시 비대칭. thin subclass가 logging/typing 분기 자리 확보 + 동작 동일.
+
+**Option B — main.py에 validation 본체 유지**:
+
+- 거부 이유: firebase_admin import chain으로 단위 테스트 깨짐 (5/10 Z-2b Stage 2 발견 사례). source_registry로 분리 = FastAPI 비의존 + 테스트 격리.
+
+**Option C — `alert_enabled` SourceDefinition 별 필드 추가 (phase1_enabled 의미 보존)**:
+
+- 거부 이유: phase1_enabled의 외부 호출자 0개 (`is_phase1_source`, `get_enabled_sources` 모두 source_registry 내부만, `get_usdt_exchange_entries`는 asset+category 필터). KRX phase1_enabled=True 변경의 부작용 0. alert_enabled 추가는 변경 surface 증가만.
+
+**Option D (채택) — Thin subclass + adapter + validate helper 분리 + F-2/F-3 단계 분리**.
+
+### 운영 검증 (실측 완료 — 2026-05-26 iOS canary)
+
+iOS FCM 도착 + DB persist + 서버 로그 4축 모두 통과:
+
+| 검증 항목 | 결과 |
+| --- | --- |
+| F-2 API validation (`validate_alert_source_asset("krx", "usd-krw-futures") -> None`) | ✅ POST 200 (setting id=6) |
+| F-1 KrxAlertTickHandler payload→AlertObservation 변환 | ✅ source=krx asset=usd-krw-futures rate=1505.3 kind=tick |
+| F-1 coalescer 5초 grain flush + evaluate_price_input_async | ✅ 13:40:06 POST → 13:40:08 FCM (2초) |
+| F-1 cache invalidate immediate | ✅ POST 직후 다음 tick에서 cache miss → DB query → 1건 평가 |
+| F-3 env=true → KrxAlertTickHandler scheduler 등록 | ✅ `KRX_ALERT_EVALUATOR_ENABLED=True` 컨테이너 import 확인 |
+| FCM multicast → iOS APNS 도착 | ✅ LG U+ iPhone 잠금화면 알림 표시 |
+| 1회성 알림 (triggered=true 자동 disable) | ✅ enabled=False, triggered=True, last_notified_at/rate persist |
+| 중복 발송 차단 (stale cache skip) | ✅ 다음 bucket flush에서 `stale cache (enabled/triggered) skip` log 2회 |
+| alert_evaluator 예외 | ✅ 0건 |
+
+### Stable observed / Accepted 조건
+
+- **Stable observed** (필수):
+  - F-3 활성 후 24h+ 운영 + KRX session 전환 1회 이상 (정규 → 휴식 → 야간 → 휴식) 정상 통과
+  - alert_evaluator FCM sent log 누적 + 예외 0 유지
+- **Accepted 조건** (Stable observed + 첫 close grace event):
+  - 위 Stable observed 모두 충족
+  - ✅ **5/26 15:45 CF close 첫 실측 통과 (2026-05-26)** — 4 layer 정합 확인 (close finalizer / Stage E / REST fallback / alert handler 예외 격리):
+    - sampler `/tmp/krx_close_1545_sample.log` 5초 grain 36 sample
+    - captured_flag SET (value="1" TTL 3594s) — WS 단독 처리 성공 신호
+    - DB row id=451680 rate=1502.8 ts_kst=15:45:00.000 unconditional INSERT
+    - Redis latest 15:46:00 갱신 (KrxCloseWindowWriter 단독)
+    - REST `WS captured at entry → REST skip` (Case A, `rest_write_blocked` 증가 0)
+    - pre-close 1분 동안 latest stagnant → Stage E non-interference (close grace tick skip 정상 동작)
+    - alert_evaluator 예외 0 (sampler 시간대 docker logs 검증)
+    - **단 close grace tick에서 alert evaluation/FCM 발사 path는 직접 실측되지 않음** — 그 시점 활성 KRX 알림 0건이라(setting id=6은 13:40에 이미 triggered=true) candidates empty path를 silent하게 거침. invariant 2 (close grace skip ❌)는 *코드 구조상 보장* (`KrxAlertTickHandler.__call__`이 close grace check 없음 — `KrxRedisLatestWriter`와 다르게)이고, 운영 실측은 별도 close grace 시점 활성 알림 등록 후 검증 필요.
+
+### 후속 Phase
+
+1. **`_validate_phase1_source_asset` rename** — `_validate_alert_source_asset_or_400` 등 의미 명확한 이름. main.py 호출처 2곳(POST + PUT) 변경 + helper 시그니처 그대로. 별 cleanup PR scope.
+2. **F-2 다른 source 추가 시 자연 확장** — category="derivative" 외 새 카테고리 추가 시 validation 확장. 현재 USDT exchange + KRX derivative만 허용.
+3. **iOS/Android client KRX UI** — 운영 앱에 테더 탭 + KRX 알림 UI 추가 (별 release scope). 현재는 테스트 iOS canary 전용.
+4. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — "서버 검증 (category=='exchange')" → "category in ('exchange','derivative')"로 갱신. 별 cleanup PR scope (USDT 문서 도메인이라 KRX 알림 PR 안에서 함께 land하면 scope 흐려짐).
+
+### 관련 문서
+
+- [ADR-031](#adr-031-krx-미국달러선물-redis-통합--1차-부채-해소-stalerest는-후속): KRX Redis 통합 1차 (본 ADR 전제)
+- [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback): USDT direct write 패턴 (유사 source-neutral 책임 분리)
+- [KRX_FANOUT_REFACTOR_PLAN.md](KRX_FANOUT_REFACTOR_PLAN.md) §5.2 F: KrxAlertEvaluator 구현 — 본 ADR이 그 자리
+- [KRX_CANARY.md](KRX_CANARY.md) F-3 runbook: 운영 활성 절차 + 5/26 canary 실측 결과
+- [REALTIME_ARCHITECTURE_PLAN.md §4.1](REALTIME_ARCHITECTURE_PLAN.md): "알림 모든 tick, DB window close" 원리 — close grace skip ❌ invariant 근거
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)

@@ -1892,6 +1892,22 @@ CREATE INDEX idx_notification_settings_bank_currency
 3. **우리 DB에 저장**: user_devices, notification_settings는 RDS PostgreSQL에 저장
 4. **Firebase Auth는 외부**: 로그인만 담당, user_id만 제공
 
+### Source 기반 알림 (USDT exchange + KRX derivative) — 별 API endpoint
+
+위 흐름은 `bank + currency` 기반 legacy 알림 (`/api/notification-settings`). USDT/KRX는 `source + asset` 도메인 모델 차이로 **별 API endpoint** 사용:
+
+| 도메인 | API endpoint | Body 예시 | FCM payload type |
+|---|---|---|---|
+| Bank/Investing (legacy) | `/api/notification-settings` | `{bank, currency, condition, threshold}` | `rate_alert` |
+| USDT exchange | `/api/source-notification-settings` | `{source:"upbit", asset:"usdt-krw", condition, threshold}` | `source_rate_alert` |
+| KRX derivative (F-2 2026-05-26 land) | `/api/source-notification-settings` | `{source:"krx", asset:"usd-krw-futures", condition, threshold}` | `source_rate_alert` |
+
+서버 검증 (`source_registry.validate_alert_source_asset`): `phase1_enabled=True` + `category in {"exchange", "derivative"}` 통과만 허용. reference 소스 (investing/kb/hana)는 차단 (기존 `/api/notification-settings` 사용).
+
+KRX 알림 발송은 별 축인 `KRX_ALERT_EVALUATOR_ENABLED` env (F-3) 활성 필요. F-2 land ~ F-3 활성 사이는 의도된 canary staging gap — API 등록 가능 + 발송 안 됨. 운영 단말 영향 0 (테더 탭 자체가 운영 앱에 없음, 테스트 iOS canary 전용).
+
+상세 client 통합 가이드: [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md) (RateSource / SourceRegistry / FCM type 분기). 운영 절차/canary runbook: [KRX_CANARY.md F-3 섹션](KRX_CANARY.md). 의사결정 기록: [ADR-032](DECISIONS.md#adr-032-krx-가격알림-evaluator--source-neutral-재사용--krx-adapter--validate-helper-분리).
+
 ---
 
 ## 1. 환율 알림 서비스 구현 방법

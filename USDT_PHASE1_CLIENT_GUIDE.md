@@ -568,16 +568,16 @@ reset (3 topic 일괄): `POST /admin/api/topic-status/fx/reset` → `{"results":
 
 **주의**: 탭 스코프로 알림을 관리한다 (달러 탭에서 만든 알림은 달러 탭에만 표시). 통합 "내 알림" 화면이 필요하면 두 API를 모두 호출해 클라이언트에서 합치거나 서버에 집계 엔드포인트 추가 요청.
 
-### 서버 검증 (category=="exchange")
+### 서버 검증 (category in {"exchange", "derivative"})
 
-테더 탭 알림 생성 시 `source`가 거래소(`upbit`, `bithumb`, `coinone`, `korbit`, `gopax`)가 아니면 서버가 `400` 반환:
+테더 탭 알림 생성 시 `source`가 거래소 5개(`upbit`, `bithumb`, `coinone`, `korbit`, `gopax`) 또는 KRX derivative(`krx` + `usd-krw-futures`, F-2 2026-05-26 land)가 아니면 서버가 `400` 반환:
 
 ```
-"Source alerts are only supported for exchange sources in Phase 1 (got category=reference).
+"Source alerts are only supported for exchange/derivative sources (got category=reference).
 Use /api/notification-settings for bank/investing alerts."
 ```
 
-클라이언트는 이 응답을 사용자 친화적 메시지로 매핑할 것.
+KRX 알림 발송은 별 축인 `KRX_ALERT_EVALUATOR_ENABLED` env(F-3) 활성 필요 — API 등록은 가능하나 발송은 evaluator flag가 닫혀 있을 수 있음 (dead alert gap, 의도된 canary staging). 클라이언트는 응답을 사용자 친화적 메시지로 매핑할 것. 상세: [ADR-032](DECISIONS.md) / [KRX_CANARY.md F-3 섹션](KRX_CANARY.md).
 
 ## Phase 3 비교 알림 대비
 
