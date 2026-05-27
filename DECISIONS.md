@@ -4224,10 +4224,7 @@ Hana daily canonical:
 #### Phase 2c → Phase 2d → Phase 2e 흐름 (정정)
 
 - Phase 2c: external_historical source 확보 (완료, Amendment 2026-05-27)
-- **Phase 2d (우선순위 ↑ for hot path 목적)**: source_daily_rates canonical table 구현
-  - Schema 정의 + retention / unique key / rebuild policy 확정
-  - Initial backfill job (Bithumb/KRX/Hana 외부 API 호출)
-  - Daily append job (close finalizer / observed_eod / source_rates rollup)
+- **Phase 2d (우선순위 ↑ for hot path 목적)**: source_daily_rates canonical table 구현 — **상세 설계는 [ADR-034](#adr-034-source_daily_rates-canonical-daily-table)** (schema + retention + unique key + rebuild policy + provenance + backfill/append jobs + timezone/date ownership + calendar-aware monitoring + rate==close invariant + rollout sequence)
 - Phase 2e: v2 endpoint 구현 — `source_daily_rates` 단일 조회 hot path
 
 ### 관련 문서
@@ -4236,6 +4233,342 @@ Hana daily canonical:
 - [ADR-019](#adr-019-dxy-보조지표--granularity-기반-2-part-merge-전략): DXY granularity 2-part merge — Hana backfill 패턴 참조
 - [ADR-023](#adr-023-데이터-보관-정책-30일-통일-banksource_ratesdxy-realtime): 30일 cap 정책 anchor
 - [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md): 서비스 계약 source of truth (topic-only / dual-emit)
+
+---
+
+## ADR-034: source_daily_rates canonical daily table
+
+**상태**: Proposed (2026-05-28)
+
+- v2 장기 그래프 (3m/1y) hot path가 읽을 **daily canonical table** 정의 ADR.
+- [ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only) Amendment 후속 결정 (`source_daily_rates` 도입 + close_basis/source_method provenance)의 구현·저장소·운영 정책 분리.
+
+### 1. Context
+
+[ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only) Amendment 2026-05-27 후속 결정에서 v2 장기 그래프 데이터 모델이 외부 API hot path 제거 + canonical daily table 단일 조회로 합의됨. ADR-033은 endpoint contract 수준이고, source_daily_rates는 storage/operational 수준이라 **별 ADR로 분리**.
+
+핵심 원칙:
+
+> 외부 API는 backfill / gap repair / 검증용이고, 그래프 요청 hot path는 우리 daily canonical table만 읽는다.
+
+### 2. Decision
+
+**Accepted** (이미 합의):
+
+1. `source_daily_rates` canonical table 도입 — v2 장기 그래프 hot path 단일 조회
+2. Graph hot path에서 외부 API 직접 호출 금지 (Bithumb / KIS / Hana official 모두 backfill / gap repair / 검증용)
+3. `close_basis` enum 4 values + `source_method` enum 5 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B 참조)
+4. Unique key 후보: `(source, asset, date_kst)`
+5. **`ohlc_quality` top-level column** (검색/필터/렌더링 판단 직접 사용)
+6. **`rate == close` app-level invariant** (모든 backfill/append job에서 같은 값으로 write)
+
+**Proposed** (본 ADR 권고):
+
+7. Retention: 무기한 또는 최소 5년 (storage 비용 산정 후 확정)
+8. Conflict policy: idempotent upsert
+9. Rebuild policy: source / date range 단위 idempotent rebuild
+10. Monitoring: calendar-aware daily row missing alert + source_method별 실패 로그 + gap detection + rate != close drift alert
+11. metadata_json upsert: incoming non-null이면 replace (shallow merge 거부)
+
+**Open** (추가 검증/결정 필요):
+
+12. Bithumb 24h candle date_kst 매핑: candle start vs close/end 기준 — 공식 docs 추가 검증
+13. Retention 최종 기간: 무기한 vs 10년 vs 5년 — storage 비용 산정 후 결정
+14. Exact indexes: unique key 외 추가 index 필요 항목 — query 패턴 실측 후 결정
+15. Rebuild command interface: CLI vs admin endpoint vs scheduled cron with manual trigger
+16. Numeric precision: 잠정 Numeric(14, 6) — Phase 2d 구현 시 최종 확정
+17. DB CHECK constraint (`rate == close`) 적용 여부: 잠정 보류, Phase 2d 결정 (future flexibility 보존)
+18. `ohlc_quality` enum 명칭 표준화: 잠정 `source_ohlc` / `observed_rollup` / `close_only` — Phase 2d 확정
+
+### 3. Schema
+
+**SQLAlchemy ORM model 형식** (Phase 2d 구현 시):
+
+```python
+class SourceDailyRate(Base):
+    __tablename__ = "source_daily_rates"
+    id = Column(Integer, primary_key=True)
+    source = Column(String, nullable=False)
+    asset = Column(String, nullable=False)
+    date_kst = Column(Date, nullable=False)
+    # invariant: rate == close (app-level enforce, §10)
+    rate = Column(Numeric(14, 6), nullable=False)
+    high = Column(Numeric(14, 6), nullable=True)
+    low = Column(Numeric(14, 6), nullable=True)
+    close = Column(Numeric(14, 6), nullable=False)
+    ohlc_quality = Column(String, nullable=False)         # source_ohlc / observed_rollup / close_only
+    close_basis = Column(String, nullable=False)
+    source_method = Column(String, nullable=False)
+    contract_code = Column(String, nullable=True)
+    basis_date = Column(Date, nullable=True)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    captured_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    metadata_json = Column(JSON, nullable=True)
+    __table_args__ = (UniqueConstraint('source', 'asset', 'date_kst'),)
+```
+
+**주요 필드**:
+
+| Field | Nullable | 의미 |
+| --- | --- | --- |
+| `source` | No | "hana" / "krx" / "bithumb" |
+| `asset` | No | "usd-krw" / "usdt-krw" / "usd-krw-futures" 등 |
+| `date_kst` | No | canonical date (KST 기준, §12 참조) |
+| `rate` | No | 대표값. **invariant: rate == close** (§10). legacy 호환 + 단일값 consumer 용 |
+| `high` | Yes | source에 따라 없을 수 있음 (close_only 시 = close) |
+| `low` | Yes | source에 따라 없을 수 있음 (close_only 시 = close) |
+| `close` | No | daily representative close (v2 그래프 consumer 사용) |
+| `ohlc_quality` | No | OHLC 품질 — `source_ohlc` / `observed_rollup` / `close_only` (§7) |
+| `close_basis` | No | 4 values (§6) |
+| `source_method` | No | 5 values (§6) |
+| `contract_code` | Yes | KRX 전용 (예: A75606) |
+| `basis_date` | Yes | Hana official endpoint 응답 기준일 |
+| `published_at` | Yes | Hana official 발표시각 (다음날 새벽) |
+| `captured_at` | No | 우리 시스템 저장 시각 |
+| `metadata_json` | Yes | pbldSqn / raw response 일부 / diagnostics 등 보조 정보 only |
+
+### 4. Unique key / indexes
+
+**Accepted**:
+
+- Unique key: `(source, asset, date_kst)` — 하루 1 row per (source, asset)
+
+**Proposed**:
+
+- Index 1: `(source, asset, date_kst)` — unique key (range query 자연 cover)
+- Index 2: `(source, date_kst)` — source별 daily aggregation (운영 monitoring 용)
+
+**Open**:
+
+- 추가 index 필요 항목 — query 패턴 실측 후 결정 (Phase 2d 구현 시)
+
+### 5. Retention
+
+**Accepted**:
+
+- 그래프용 source_daily_rates는 **장기 보존** 정책 (source_rates 30d cap과 무관)
+
+**Proposed**:
+
+- 기본: 무기한 보존 또는 최소 5년+
+- storage 부담은 매우 작음; 5~10년 보존도 RDS 관점에서 negligible
+- 무기한 보존이 가장 단순 + storage 비용 미미
+
+**Open**:
+
+- 최종 기간 결정: 무기한 vs 10년 vs 5년 — Phase 2d 진입 시점 storage 비용 산정 후 확정
+
+### 6. close_basis / source_method / ohlc_quality provenance
+
+**3 column 직교 관계 anchor**:
+
+- `close_basis` = **무엇이 close인지** (의미)
+- `source_method` = **어떻게 얻었는지** (수집 방법)
+- `ohlc_quality` = **OHLC 신뢰도** (품질)
+
+**`close_basis` enum 4 values** (ADR-033 Amendment 후속 Decision B 참조):
+
+- `krx_cf_close_1545`: KRX CF 정규장 15:45 KST close finalizer
+- `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close
+- `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
+- `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
+
+**`source_method` enum 5 values** (ADR-033 Amendment 후속 Decision B-bis 참조):
+
+- `observed_rollup`: DB tick/source_rates/bank_exchange_rates 기반 daily rollup
+- `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint)
+- `close_finalizer`: KRX CF close finalizer 결과
+- `bithumb_candlestick_backfill`: Bithumb 공식 24h candle API 초기 backfill
+- `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill
+
+**`ohlc_quality` enum 3 values** (잠정 명칭, Open):
+
+- `source_ohlc`: source 자체 OHLC 직접 사용 (Bithumb backfill, KRX backfill)
+- `observed_rollup`: 관측값 rollup 계산 (daily append jobs)
+- `close_only`: representative row만 — high=low=close synthetic (Hana official backfill)
+
+### 7. Source-specific population policy
+
+| Source | 초기 Backfill | 매일 append (canonical) | close_basis | source_method 매핑 |
+| --- | --- | --- | --- | --- |
+| Bithumb | 공식 24h candle API | DB tick/source_rates → KST daily rollup | `bithumb_24h_kst_close` | backfill=`bithumb_candlestick_backfill`, append=`observed_rollup` |
+| Hana | 부족한 과거만 official historical | DB의 KST 24:00 이전 마지막 관측값 | backfill=`hana_official_historical_backfill`, canonical=`hana_observed_eod` | backfill=`external_backfill`, append=`observed_rollup` |
+| KRX | KIS daily + A75YMM chain | close finalizer CF 15:45 정규 종가 | `krx_cf_close_1545` | backfill=`kis_daily_backfill`, append=`close_finalizer` |
+
+**high/low population policy (★ Phase 2d 구현 input)**:
+
+**Accepted**:
+
+- raw daily OHLC가 있는 source: source 값 그대로 사용
+  - Bithumb backfill: 24h candle high/low → `ohlc_quality="source_ohlc"`
+  - KRX backfill: KIS daily `futs_hgpr` / `futs_lwpr` → `ohlc_quality="source_ohlc"`
+- representative close만 있는 backfill: `high=low=close` + `ohlc_quality="close_only"`
+  - Hana official backfill (매매기준율 1개 값)
+- close_only synthetic 처리 시 품질 플래그 (`ohlc_quality`) 명시 필수
+
+**Proposed** (Phase 2d 구현 결정):
+
+- raw observations rollup으로 high/low 계산 시 → `ohlc_quality="observed_rollup"`
+  - Bithumb daily append: source_rates KST 일자 rollup
+  - Hana observed_eod: bank_exchange_rates KST 일자 rollup
+  - KRX daily append: source_rates CF session (08:30~15:45 KST) rollup
+
+**Hana = mixed series** (close_basis 구간별 다름):
+
+- 앞으로 쌓는 구간: `hana_observed_eod` (close_basis) + `observed_rollup` (source_method) + `observed_rollup` ohlc_quality (또는 `close_only` fallback, Phase 2d 결정). **`source_ohlc` 불가능** — Hana는 source 자체에 OHLC 없음 (bank_exchange_rates 단일 rate값 시계열)
+- 과거 부족분: `hana_official_historical_backfill` + `external_backfill` + `close_only`
+
+**KRX/Bithumb = single close_basis series** (backfill/append 구간 모두 동일 close_basis, source_method/ohlc_quality만 분기)
+
+### 8. Backfill jobs
+
+**Proposed** (Phase 2d 구현 시):
+
+- **Bithumb backfill**: `api.bithumb.com/public/candlestick/USDT_KRW/24h` 호출 → 902일 일괄 적재
+- **KRX backfill**: KIS `inquire-daily-fuopchartprice` + A75YMM contract chain → 만기 종목 chain 순회. Date-to-contract mapping (ADR-033 Amendment 후속) 적용
+- **Hana backfill**: Hana official endpoint historical row → 부족한 과거 구간만
+- 모든 backfill = **idempotent** (재실행 시 같은 결과, §10 참조)
+- Initial backfill 1회 + Gap repair 호출 시 사용
+
+**Open**:
+
+- Backfill 진행 monitoring (progress / completion log)
+- Rate limit 처리 (Bithumb 500ms/request / KIS 100건 cap / Hana 분당 30회 보수)
+
+### 9. Daily append jobs
+
+**Proposed** (Phase 2d 구현 시):
+
+- **Bithumb daily append**: KST 00:01 ~ 00:10 사이 source_rates → daily rollup → upsert
+- **Hana daily append**: KST 00:01 ~ 00:10 사이 bank_exchange_rates에서 전일 23:XX 마지막 Hana row 추출 → upsert
+- **KRX daily append**: CF close finalizer 15:46:00 직후 결과를 source_daily_rates에 직접 write
+- 모든 daily append = **idempotent upsert** (재실행 시 덮어쓰기, rate == close 강제)
+
+**Open**:
+
+- Daily append 실패 시 retry 정책
+- KRX close finalizer write 실패 시 fallback (KIS daily endpoint로 백업 fetch)
+
+### 10. Conflict / upsert policy + rate == close invariant
+
+**Conflict policy**:
+
+- 같은 `(source, asset, date_kst)` 재계산 시 **idempotent upsert** (`ON CONFLICT DO UPDATE`)
+- Update field 정책:
+  - Always update: `rate`, `high`, `low`, `close`, `ohlc_quality`, `close_basis`, `source_method`, `captured_at`
+  - **Nullable fields**: `published_at`, `basis_date`, `contract_code`은 incoming value non-null일 때만 update (null로 기존 값 덮지 않음). SQL pattern: `COALESCE(EXCLUDED.field, source_daily_rates.field)`
+  - `metadata_json`: incoming non-null이면 **replace** (shallow merge 거부 — source별 metadata 구조 다르고 stale key 혼동 risk)
+  - Preserve: `id`
+
+**rate == close invariant (★ app-level enforce)**:
+
+- 기본적으로 `rate == close` (모든 row)
+- v2 그래프 consumer = close / high / low 사용
+- Legacy 또는 단일값 consumer = rate 사용
+- Phase 2d backfill / daily append jobs: rate와 close를 항상 같은 값으로 write
+- DB CHECK constraint (`CHECK (rate = close)`) — 잠정 보류, Phase 2d 결정 (future flexibility 보존)
+- §13 Monitoring에서 `rate != close` row drift alert
+
+**Open**:
+
+- close_basis 변경 시 (예: backfill → canonical 전환) policy: 덮어쓰기 vs audit log — Phase 2d 구현 시 결정
+
+### 11. Rebuild policy
+
+**Proposed**:
+
+- Source / date range 단위 idempotent rebuild
+- 예: `rebuild source=hana asset=usd-krw start=2024-01-01 end=2024-12-31`
+- Backfill + Daily append 같은 entry point 재호출 → upsert로 자연 적용
+
+**Open**:
+
+- Rebuild command interface: CLI script (`scripts/rebuild_source_daily_rates.py`) vs admin endpoint vs scheduled cron with manual trigger
+- Rebuild 진행 monitoring + completion alert
+
+### 12. Timezone / date ownership
+
+**Accepted**:
+
+- `date_kst` = canonical KST date (server 시점 무관, source의 KST 매핑 기준)
+
+**Proposed** — source별 date_kst 매핑 정책:
+
+- **KRX**: CF 15:45 close가 일어난 KST date = 당일 date_kst (예: 2026-05-27 15:45 close → date_kst=2026-05-27)
+- **Hana**:
+  - `hana_observed_eod`: KST 24:00 이전 마지막 관측 시각의 date = 당일 date_kst (예: 2026-05-27 23:58 last observation → date_kst=2026-05-27)
+  - `hana_official_historical_backfill`: 응답의 `basis_date`를 date_kst로 사용 (다음날 새벽 고시 row의 `기준일` field, 예: 2026-05-27 03:30 발표 row의 basis_date=2026-05-26 → date_kst=2026-05-26)
+- **Bithumb**: 24h candle의 timestamp 기준 — **Open question** (candle start 기준 vs close/end 기준 미확정. Bithumb 공식 docs 추가 검증 필요. 5/27 검증 시 `1701874800000` = 2023-12-07 00:00:00 KST 첫 candle = candle start 추정이지만 확정 검증 필요)
+
+**Open**:
+
+- Bithumb candle date ownership 확정 검증 (candle start vs close/end)
+
+### 13. Monitoring / repair
+
+**Proposed**:
+
+- **Daily row missing alert** (★ calendar-aware): 매일 KST 01:00 시점에 어제 date_kst의 row 존재 체크. **append source만 대상** (backfill source는 별 track). source별 expected calendar 사용 (false positive 차단):
+  - KRX: 한국 영업일 (KRX 휴장일 제외)
+  - Bithumb: 365일 (crypto 24/7)
+  - Hana observed_eod: 한국 은행 영업일
+- **Historical gap detection / rebuild** (backfill source 대상, daily missing alert와 분리):
+  - Hana official_historical_backfill: historical coverage 측정 + gap detection → rebuild command
+  - Bithumb candle backfill / KIS daily chain backfill: 동일 패턴 (historical gap detection / rebuild trigger)
+- **source_method별 실패 로그**: backfill/append job 실패 시 source + source_method + error message 로그
+- **Gap detection**: source_daily_rates의 date_kst 연속성 체크 (각 source calendar 기준). gap 발견 시 alert
+- **Rate != close drift alert** (★ invariant check): `rate != close` row 존재 검사. 발견 시 alert + 자동 audit log (write path 버그 catch)
+- **Rebuild runbook**: 운영자가 gap 발견 시 rebuild command 실행 절차 documentation
+
+**Open**:
+
+- Alert delivery (Telegram / Slack / FCM)
+- Gap detection 영업일 calendar (KRX 휴장일 etc.)
+- 자동 rebuild vs 수동 rebuild 정책
+
+### 14. Rollout sequence
+
+**Proposed** — Phase 2d 구현 진입 순서:
+
+1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 0 (빈 table)
+2. **Backfill dry-run**: 각 source 별 backfill job 작성 + dry-run 모드 (실제 INSERT X, log only)
+3. **Source별 partial backfill**: 1 source씩 (예: KRX 먼저) 일부 date range 실측 적재 → 검증
+4. **전체 backfill**: 3 source 모두 historical 적재
+5. **Daily append enable**: 매일 KST 00:01 ~ 00:10 cron 활성화 (KRX는 close finalizer 직후 write)
+6. **v2 endpoint switch**: catalog/tab endpoint가 source_daily_rates 조회로 전환 (Phase 2e)
+
+각 단계는 이전 단계 검증 후 진입. 운영 영향은 6단계 (v2 endpoint switch)에서만 발생.
+
+**Open**:
+
+- 단계별 진입 검증 기준 (예: backfill 완료율 100% / daily append 7일 연속 성공 등)
+
+### 15. Alternatives considered
+
+**Option A — 외부 API hot path 유지** (거부):
+
+- 그래프 요청 시 외부 API 직접 호출
+- 단점: 장애/차단/schema 변경 risk + latency (외부 API ~100ms vs DB ~5ms)
+- → 거부 (ADR-033 Amendment 후속 핵심 원칙)
+
+**Option B — graph_buckets / market_index_rates 같은 기존 table 재사용** (거부):
+
+- DXY granularity 2-part merge 패턴 ([ADR-019](#adr-019-dxy-보조지표--granularity-기반-2-part-merge-전략)) 재사용
+- 단점: schema가 DXY 한정 (instrument='dxy' / granularity 컬럼). source/asset/close_basis 분리 안 됨
+- → 거부 (새 schema 필요)
+
+**Option C — source_daily_rates 신규 (채택)**:
+
+- 별 table + 명시적 schema + provenance metadata (close_basis / source_method / ohlc_quality 직교 분리)
+- 운영 정합성 + future extensibility 우위
+- rate == close invariant로 legacy/v2 consumer 분리
+
+### 16. Related docs
+
+- [ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only): Graph API v2 catalog policy + Amendment 2026-05-27 + Amendment 후속 (Decision A-E)
+- [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md): §3 catalog matrix / §6 close_basis schema / §7 Hana / §7-new KRX / §8 Bithumb / §13 Phase 2d rollout
+- [ADR-019](#adr-019-dxy-보조지표--granularity-기반-2-part-merge-전략): DXY granularity 2-part merge (legacy comparison)
+- [ADR-023](#adr-023-데이터-보관-정책-30일-통일-banksource_ratesdxy-realtime): 30일 cap 정책 (source_rates retention과 무관 — source_daily_rates는 장기 보존)
 
 ---
 
@@ -4272,3 +4605,4 @@ Hana daily canonical:
 - 2026-05-12: ADR-029 작성 (USDT source는 mirror cycle 미경유 — direct write + read-path DB fallback)
 - 2026-05-13: ADR-030 초안 작성 (latest:index 책임 분리 — freshness는 per-key mirrored_at으로 판단, Proposed)
 - 2026-05-13: ADR-031 초안 작성 (KRX 미국달러선물 Redis 통합 — 1차 부채 해소, stale/REST는 후속, Proposed)
+- 2026-05-28: ADR-034 초안 작성 (source_daily_rates canonical daily table — Phase 2d 구현 설계, Proposed)

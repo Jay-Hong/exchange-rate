@@ -13,9 +13,10 @@
 **Scope**:
 - Graph API v2 endpoint contract (catalog 발견 + 탭 그래프 fetch)
 - catalog matrix 정의 (tab × period × series)
-- provenance schema (actual_source + history_policy + per-point metadata)
-- Hana official historical source rule (Amendment 2026-05-27)
+- provenance schema (actual_source + history_policy + close_basis / source_method / ohlc_quality + per-point metadata)
+- Hana daily canonical policy (Amendment 후속 — observed_eod + official_historical_backfill 2-source 분리)
 - Bithumb/KRX external_historical policy + insufficient_history fallback (신규 자산 / source 장애 / coverage 부족 시점)
+- source_daily_rates canonical daily table (구현 상세는 ADR-034 참조)
 - axis groups / units 정의
 - legacy v1 (`/api/graph/{currency}`) 공존 정책
 - cache key strategy + rollout plan
@@ -598,14 +599,11 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
 
 1. **Phase 2b** (완료, 본 문서 + ADR-033 land): 정책 anchor — design 문서 + ADR + CLAUDE.md anchor.
 2. ✅ **Phase 2c** (완료, 2026-05-27): Bithumb/KRX/Hana historical source 외부 조사 — 3 source 모두 external_historical 확보. ADR-033 Amendment 2026-05-27 + 본 문서 §3/§5/§6/§7/§7-new/§8 update.
-3. **Phase 2d** (Amendment 후속 — 두 목적 분리):
+3. **Phase 2d** (Amendment 후속 — 두 목적 분리): **상세 설계는 [ADR-034](DECISIONS.md#adr-034-source_daily_rates-canonical-daily-table)** (source_daily_rates canonical daily table — schema / retention / unique key / rebuild / backfill·append jobs / timezone/date ownership / calendar-aware monitoring / rate==close invariant / rollout sequence)
    - 장기 coverage 확보 목적의 rollup: 외부 historical source 확보됨 → 우선순위 ↓
-   - **Hot path 안정화 / canonical daily table 목적의 `source_daily_rates`**: 우선순위 ↑ (이번 amendment 신규)
-   - Schema 정의 + retention / unique key / rebuild policy 확정 (Phase 2d 설계 결정 항목)
-   - Initial backfill job (Bithumb 24h candle + KIS daily + Hana official endpoint)
-   - Daily append job (close finalizer / observed_eod / source_rates rollup)
+   - **Hot path 안정화 / canonical daily table 목적의 `source_daily_rates`**: 우선순위 ↑ (ADR-034 본문 참조)
    - 외부 API hot path 제거 → 그래프 요청 시 `source_daily_rates` 단일 조회
-4. **Phase 2e**: v2 endpoint 구현 PR — catalog + tab graph 2개 endpoint + `source_daily_rates` 조회 hot path 통합. 진입 전 확정 항목: ADR-033 Amendment 후속 결정 모두 land 후 진입.
+4. **Phase 2e**: v2 endpoint 구현 PR — catalog + tab graph 2개 endpoint + `source_daily_rates` 조회 hot path 통합. 진입 전 확정 항목: ADR-033 Amendment 후속 결정 + **ADR-034 Accepted/Proposed 기준 Phase 2d 구현 결과**. ADR-034 Open 항목은 Phase 2d 중 필요한 항목부터 확정 (전체 Open 모두 land 대기 X).
 5. **Phase 2f** (Later, optional): single series endpoint 추가 — 사용 패턴 확보 후.
 
 ## 14. Open questions (Amendment 2026-05-27)
@@ -649,7 +647,8 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
 ## 관련 문서
 
 - [ADR-033](DECISIONS.md#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only): 본 문서의 정책 anchor ADR
-- [ADR-019](DECISIONS.md#adr-019-dxy-보조지표--granularity-기반-2-part-merge-전략): DXY granularity 2-part merge (legacy comparison only — Amendment 2026-05-27 후 Hana는 자체 historical 단일 source라 본 merge 패턴 미사용)
+- [ADR-034](DECISIONS.md#adr-034-source_daily_rates-canonical-daily-table): source_daily_rates canonical daily table — Phase 2d 구현 상세 설계 (schema + retention + provenance + backfill·append jobs + monitoring + rollout)
+- [ADR-019](DECISIONS.md#adr-019-dxy-보조지표--granularity-기반-2-part-merge-전략): DXY granularity 2-part merge (legacy comparison only)
 - [ADR-023](DECISIONS.md#adr-023-데이터-보관-정책-30일-통일-banksource_ratesdxy-realtime): 30일 cap 정책 anchor
 - [app/admin/graph_cache.py](app/admin/graph_cache.py): legacy v1 graph 구현 (DXY 2-part merge 패턴)
 - [app/admin/dxy_rollup.py](app/admin/dxy_rollup.py): DXY rollup 구현 (Phase 2d source_rates 적용 패턴 참조)
