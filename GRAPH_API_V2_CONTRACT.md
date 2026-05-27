@@ -143,10 +143,12 @@ period별 `all_series` / `default_visible_series` 분리:
 }
 ```
 
-response 안 data point (KRX series만 contract_code 포함):
+response 안 data point (KRX series만 contract_code 포함, date-to-contract mapping은 §7-new 참조):
 ```json
-{"ts": "2026-05-27T00:00:00+09:00", "rate": 1500.8, "source": "krx", "contract_code": "A75606"}
-{"ts": "2025-12-26T00:00:00+09:00", "rate": 1439.1, "source": "krx", "contract_code": "A75605"}
+{"ts": "2026-05-18T00:00:00+09:00", "rate": 1496.5, "source": "krx", "contract_code": "A75606"}
+// ← 만기일 — daily date bucket은 next contract (07:00 swap 후 user-facing)
+{"ts": "{expiry_date 이전 마지막 거래일}", "rate": "...", "source": "krx", "contract_code": "A75605"}
+// ← expiry_date 이전 — 만기 contract
 ```
 
 ## 6. Provenance / fallback schema
@@ -219,15 +221,18 @@ Referer: https://www.kebhana.com/cont/mall/mall15/mall1501/index.jsp
 | [8] | 환가료율 |
 | [9] | 미화환산율 |
 
-### 회차 (`pbldSqn`) 정책 (★ Phase 2e 전 확정 필요)
+### 회차 (`pbldSqn`) 정책 — 채택 (Amendment 2026-05-27)
 
-Hana endpoint는 일별 여러 회차 (publishing sequence) 발표. v2 daily historical은 다음 정책 중 선택:
+Hana endpoint는 일별 여러 회차 (publishing sequence) 발표. v2 daily historical은 **`pbldSqn=` 빈값 요청으로 반환되는 Hana 기본 일일 historical row를 representative rate로 사용**한다.
 
-- **(a) 최종 회차** (`pbldSqn=` 빈값으로 endpoint 응답 받음, daily close 수치) — 잠정 권고
-- (b) 대표 회차 (특정 시각 회차 fix, 예: 11시 회차)
-- (c) 서버 default (Hana 측 변경 가능성, fragility risk)
+- **"최종 회차"라고 공식 명칭으로 단정하지 않음** — Hana 측 공식 용어 검증 X
+- **응답에 포함된 회차 값은 provenance/debug metadata로 저장** (예: `{"pbldSqn": 1081}`)
+- **요청일과 응답 기준일이 다르면 응답 기준일을 canonical date**로 사용 (휴일 자동 fallback dedup 차단)
+- 운영 검증상 최신/최종 고시값으로 동작 (5/27 검증: 2026-05-26 USD = 1081회차, 다음날 07:46 발표 / 2025-05-27 USD = 1237회차)
 
-5/27 검증 시 응답 회차: 2026-05-26 USD = 1081회차 (다음날 07:46 발표), 2025-05-27 USD = 1237회차.
+대안 거부:
+- 대표 회차 fix: 과거 모든 날짜에서 해당 회차 보장 의문 (검증 비용 ↑)
+- Hana가 반환하는 `pbldSqn` 빈값 row를 명시 정책 없이 암묵 사용: 본 채택 정책과 헷갈릴 수 있어 명확 분리 필요
 
 ### 운영 정책
 
@@ -290,31 +295,52 @@ KIS master에서 20개 미래 contracts active (~3년 forward).
 - 각 contract listing 시작 ~ 만기일 데이터 fetch
 - Listing 기간: 만기 5~6개월 전부터 활성 (월별 만기 → 동시에 여러 월물이 listing 중)
 - **Contract 수는 rollover boundary 정책에 따라 변동**:
-  - Monthly front-month chain (rollover boundary = 만기일 정산가): 1y는 **최대 12 contracts** (월별 만기 × 12개월)
+  - Monthly front-month chain (rollover boundary = 만기일 07:00 KST user-facing swap point): 1y는 **최대 12 contracts** (월별 만기 × 12개월)
   - 분기 또는 6개월 chain 등 다른 정책: 더 적은 contracts (Phase 2e 전 정책 확정)
 - **각 contract의 사용 구간만 fetch하면 보통 100건 cap 안**. 단, **단일 contract의 listing 전체를 wide range로 조회하면 100건 cap에 걸릴 수 있음** (5/27 실측: A75605를 listing 전체 범위로 요청 시 정확히 100 rows cap 도달, A75606 1y range 동일 cap 도달).
 - **100건 cap 처리**: chain 전략 사용 시 contract별 사용 구간만 좁게 fetch (cap 자연 회피). 단일 contract wide range 조회 필요 시 date range split.
 - Continuation key 없음 — date range 분할 호출
 
-### Rollover boundary 정책 (★ Phase 2e 구현 전 확정 필요)
+### Rollover boundary 정책 — 채택: 만기일 07:00 KST user-facing swap point (Amendment 2026-05-27)
 
-옵션:
-- **(a) 만기일 정산가 boundary** — 만기일 close까지 본 contract 사용, 다음 영업일 swap (잠정 권고)
-- (b) 만기 전일 boundary — 만기 1영업일 전 close에서 swap (front-month swap point)
-- (c) Trading volume 기준 boundary — 거래량이 다음 월물로 넘어가는 시점
+현재 운영의 user-facing rollover 정책 (만기일 07:00 KST swap, PR6c-2d-1)을 v2 historical chain에도 동일 적용. 거래소 자체 만기일 정산가 boundary 표현은 제거 (user-facing 운영 정책과 충돌).
 
-권고: (a) — KRX 미국달러선물 자체가 만기일 정산 종결로 매끄러움.
+**Intraday 운영 기준** ([app/sources/kis_master.py:209+](app/sources/kis_master.py) `select_active_usd_futures_contract`):
+
+- expiry_date 07:00 KST 이전: expiring contract (이미 06:00 야간장 종료)
+- expiry_date 07:00 KST 이후: next contract (user-facing 선제 전환)
+- 07:00 KST는 휴장 (06:00~08:30) 한가운데 — KRX 이벤트 없음
+
+**Daily historical graph 기준** (date-to-contract mapping):
+
+- **expiry_date 이전 날짜**: expiring contract 사용
+- **expiry_date 당일 및 이후 날짜**: next contract 사용 (07:00 swap 일관)
+- expiring contract의 expiry_date row는 거래소 원월물 이력에는 존재하지만 v2 user-facing graph에서는 제외
+- 만기일 정규장 (08:30~15:45) 거래 가격은 user-facing 노출 X (이미 swap 후)
+
+**대안 거부**:
+- 거래소 만기일 정산가 boundary: 거래소 자체 가격 이력 관점이나 user-facing 운영 (07:00 swap)과 충돌 → 그래프 history vs 단말 실시간 fanout 불일치 risk
+- 만기 전일 boundary: 운영 정책과 1일 차이
+- Trading volume 기준: 구현 복잡 + 과거 재현성 ↓
+
+근거: B-B 검증 실측 — KIS daily endpoint가 **A75606 20260518 close=1496.5 반환** (5/18 만기 contract A75605 만기일 후 next contract user-facing 전환됨). A75605의 20260518 row는 거래소 원월물 이력에 존재하지만 v2에서는 제외.
 
 ### Provenance per-point
 
-response 각 point에 `contract_code` 포함:
+response 각 point에 `contract_code` 포함. **Date-to-contract mapping anchor**:
 
 ```json
-{"ts": "2026-05-27T00:00:00+09:00", "rate": 1500.8, "source": "krx", "contract_code": "A75606"}
-{"ts": "2025-12-26T00:00:00+09:00", "rate": 1439.1, "source": "krx", "contract_code": "A75605"}
+{"ts": "2026-05-18T00:00:00+09:00", "rate": 1496.5, "source": "krx", "contract_code": "A75606"}
+// ← 만기일 — 07:00 swap 후 user-facing, daily date bucket은 next contract A75606
+//   (A75605의 동일 date row는 거래소 원월물 이력에 존재하지만 v2 제외)
+//   검증: 2026-05-27 B-B probe — KIS daily endpoint가 A75606 20260518 close=1496.5 반환
+{"ts": "{expiry_date 이전 마지막 거래일}", "rate": "...", "source": "krx", "contract_code": "A75605"}
+// ← expiry_date 이전 마지막 거래일 — 만기 contract A75605
 ```
 
-클라이언트는 contract_code 선택적 표시 (tooltip 등).
+(추가 예시: A75606 20260527 daily row는 검증 시점 intraday 진행 중이라 close 값 stale 가능. durable 문서는 검증 완료된 만기일 row만 인용.)
+
+클라이언트는 `contract_code` 선택적 표시 (tooltip 등).
 
 ## 8. external_historical policy + insufficient_history (Amendment 2026-05-27)
 
@@ -511,12 +537,18 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
 
 ## 14. Open questions (Amendment 2026-05-27)
 
-### Phase 2e 전 확정 필요 (★ Amendment 2026-05-27)
+### Phase 2e 전 확정 필요 (Amendment 2026-05-27 이후)
 
-- **KRX contract chain rollover boundary**: 옵션 (a) 만기일 정산가 / (b) 만기 전일 / (c) trading volume 기준 — 잠정 권고 (a). §7-new 참조.
-- **Hana 회차 (`pbldSqn`) 정책**: 옵션 (a) 최종 회차 default / (b) 대표 회차 fix / (c) 서버 default — 잠정 권고 (a). §7 참조.
 - **insufficient_history 응답 status code**: 200 + empty data (현재 권장) vs 422 — 클라이언트 UX 분기 결정 영향.
 - **bucket_size 재정의 여부**: 1d=10min / 1w=1h / 3m/1y=1d는 legacy v1 패턴 그대로인지, v2에서 재정의할지 (예: 1y는 1주 bucket?).
+- **★ 신규 — KRX 1w bucket 정책** (제품 UX 결정 영역):
+  - (a) source_rates 30일 보유분으로 1시간 bucket (운영 일관, 1w<30일 충분)
+  - (b) KIS intraday endpoint 별도 조사 (예: inquire-time-itemchartprice)
+  - (c) Daily 다운그레이드 (1주 = 7 points)
+- **★ 신규 — Hana 1w bucket 정책** (제품 UX 결정 영역):
+  - (a) bank_exchange_rates 30일 보유분으로 1시간 bucket (Hana actual)
+  - (b) Daily 다운그레이드
+  - (c) v2 catalog 제외 (legacy v1만)
 
 ### General open (Phase 2e 외, 운영 후 결정)
 
@@ -532,6 +564,8 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
 - ~~Bithumb USDT historical source~~ → ✅ 공식 candlestick API 채택
 - ~~KRX 미국달러선물 historical source~~ → ✅ KIS daily endpoint + A75YMM contract chain 채택
 - ~~daily rollup retention 결정 시점~~ → 우선순위 ↓ (장기 coverage 목적은 external_historical로 대체). future optimization 도입 시점 별도 ADR.
+- ~~KRX contract chain rollover boundary~~ → ✅ **채택: 만기일 07:00 KST user-facing swap point** (현재 운영 정책 일관, §7-new 참조). Daily graph는 expiry_date 당일 및 이후 = next contract.
+- ~~Hana 회차 (`pbldSqn`) 정책~~ → ✅ **채택: `pbldSqn=` 빈값 기본 일일 historical row + 응답 회차 provenance 저장** (§7 참조). "최종 회차" 공식 단정 X.
 
 ---
 
