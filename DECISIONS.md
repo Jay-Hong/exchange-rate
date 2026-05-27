@@ -3941,6 +3941,107 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ---
 
+## ADR-033: Graph API v2 catalog policy — legacy 공존 + Hana backfill + Bithumb/KRX actual-only + DXY_futures 1d only
+
+**상태**: Proposed (2026-05-27)
+
+- Graph API v2 catalog 정책 anchor — 첫 구현 진입 전 비가역 결정 잠금.
+- 관련 design 문서: [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md)
+- DB audit 근거 (2026-05-27 production EC2):
+  - bank_exchange_rates 30.1~30.2일 span (cleanup 30d 실측)
+  - investing_exchange_rates USD/JPY/EUR 443.1일 span (장기 backfill 적격)
+  - source_rates 30.3~30.4일 span (`SOURCE_RATE_RETENTION_DAYS = 30`), KRX 22.5일
+  - market_index_rates dxy daily 376일 / hourly 77일 / dxy_futures realtime **29.1일 only** (hourly/daily rollup 없음)
+
+### 맥락
+
+기존 legacy `/api/graph/{currency}` ([app/main.py:1831](app/main.py#L1831))는 다음 한계를 가진다:
+
+- 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
+- 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
+- DXY는 USD 탭에만 표시 (다른 탭 DXY 노출 불가)
+- catalog 발견 endpoint 없음 — 클라이언트 hard-coded 자산 목록
+
+신규 단말은 테더 탭 도입 + Citi 제외 모든 은행 그래프 + USD 탭 DXY + Tether 탭 DXY/DXY_futures (DXY_futures는 1d only, USD 탭 1d에는 DXY_futures 미노출) + 테더 탭 5거래소 USDT + KRX 미국달러선물 노출이 필요하다. JPY/EUR 탭은 DXY 계열 미노출 (legacy v1 정책 유지). legacy v1 endpoint를 확장하면 구단말 호환을 깨거나 분기 폭증.
+
+또한 2026-05-27 production DB audit 결과를 catalog 정책에 anchor해야 backfill/insufficient_history 결정이 데이터 측면 근거를 가진다. 회상 기반 backfill 논쟁 차단 + 외부 historical source 미발굴 상태에서도 honest empty state로 사용자에게 노출하는 정책이 잠긴다.
+
+### 결정
+
+Graph API v2를 신규 endpoint set으로 분리하고 다음 10개 정책을 anchor한다:
+
+1. **legacy `/api/graph/{currency}` 유지** — 구단말 호환. v2 endpoint와 hot path/cache key 분리.
+2. **new app은 Graph API v2 사용** — 새 단말은 v2 catalog endpoint로 자산 발견 후 tab graph endpoint fetch.
+3. **catalog는 tab × period × series** — period-aware catalog. 같은 자산도 period에 따라 series 구성/source 다름.
+4. **Citi는 v2 catalog에서 제외, 수집 layer는 유지** — presentation/catalog만 제외. [app/crawlers/citi.py](app/crawlers/citi.py) 수집은 그대로 (수집 중단은 별도 결정).
+5. **Hana 장기 그래프 = 최근 30일 Hana actual + 이전 Investing backfill** — provenance chain. `actual_source="hana"` + `fallback_source="investing"` + `fallback_after_days=30`.
+6. **Bithumb/KRX Investing backfill 금지** — USDT/KRW (crypto microstructure) ≠ KRX 미국달러선물 (futures instrument) ≠ Investing USD/KRW (interbank 환율). 성격 다른 source로 채우면 graph 의미 왜곡.
+7. **Bithumb/KRX 장기 그래프는 external historical source 또는 daily rollup 없으면 insufficient_history** — `supports_periods` dynamic. 외부 source 확보 또는 rollup 도입 전까지 3m/1y empty + `history_policy.insufficient_history=true`.
+8. **DXY futures는 1d only** — `market_index_rates.dxy_futures` realtime granularity만 있고 hourly/daily rollup 없음 (29.1일 only). 1d 외 period는 catalog 미노출.
+9. **source_rates 30일 cap 때문에 daily rollup 없이는 자연 확장 불가** — `cleanup_old_source_rates` cron 매일 03:31 30d 이전 삭제. "시간이 지나면 확장된다"는 daily rollup 도입 후에만 성립.
+10. **Daily rollup retention은 별도 결정** — source_rates realtime 30d 유지는 anchor이지만, 신규 daily rollup retention (영구 / 5년 / 2년) 결정은 storage 비용 산정 후 별 ADR 또는 구현 설계에서 결정. 본 ADR이 영구 보존을 잠그지 않는다.
+
+### Trade-offs
+
+- **장점**:
+  - 신규 단말 catalog 요구 (테더 탭 + 8 은행 + USD 탭 DXY + Tether 탭 DXY/DXY_futures, DXY_futures는 1d only)를 legacy endpoint 분기 폭증 없이 land 가능
+  - audit 결과를 정책에 anchor — backfill 가능 여부를 데이터 측면 근거로 잠금 (회상 기반 backfill 논쟁 차단)
+  - provenance chain explicit — Hana 30d actual + Investing backfill 경계를 catalog metadata에 표시 → 클라이언트 unit/source 표시 일관성
+  - Bithumb/KRX actual-only로 graph 의미 왜곡 차단 (USDT vs 환율 vs 선물 성격 분리)
+  - retention 미확정 부분은 별도 ADR로 분리 → 본 ADR이 storage 산정 없이 영구 보존을 잠그지 않음
+
+- **단점 / 제약**:
+  - Bithumb/KRX 장기 그래프는 외부 source 발굴 또는 daily rollup 구현 전까지 사용자 경험상 3m/1y empty (수용 — 잘못된 backfill보다 insufficient_history 표시가 honest)
+  - v2 endpoint 신규 도입으로 클라이언트 마이그레이션 비용 (legacy v1 공존으로 점진 대응)
+  - DXY_futures 1d only — catalog UI에서 다른 자산과 period 불일치 (수용 — rollup 미도입 자연 결과)
+
+### Alternatives 검토
+
+**Option A — legacy `/api/graph/{currency}` 확장으로 catalog 요구 흡수**:
+
+- 거부 이유: 통화 grid (USD/JPY/EUR/Tether) + 자산 종류 (은행 9 + investing + USDT 5 + KRX + DXY + DXY_futures) 곱하면 분기 폭증. 구단말 응답 schema 보장 깨질 위험. v2 분리가 hot path 분리 + cache key 분리 + rollout 단계화 모두 reversible.
+
+**Option B — Bithumb/KRX Investing backfill 허용**:
+
+- 거부 이유: USDT/KRW은 거래소 microstructure (premium/discount), KRX 미국달러선물은 futures instrument (basis spread), Investing USD/KRW은 interbank 환율. 성격 다른 source로 backfill = 그래프 의미 왜곡. 사용자가 "거래소 USDT의 과거 추세"로 해석하지만 실제로는 환율 데이터를 보고 있게 됨.
+
+**Option C — daily rollup retention 영구 보존을 본 ADR에서 확정**:
+
+- 거부 이유: 영구 보존 storage 비용 산정 없음. ADR 비가역성 기준상 retention 결정은 storage 산정 + 신규 테이블 schema 결정 후 별 ADR로 분리하는 게 reversible. 본 ADR이 default를 잠그면 향후 retention 조정 비용 증가.
+
+**Option D — single series endpoint도 첫 구현에 포함 (catalog + tab + series 3개)**:
+
+- 거부 이유: 첫 구현 핵심 use case는 "탭 전체 그래프 그리기" (catalog + tab graph 2개로 충분). single series는 디버그/optimization용 — 사용 패턴 확보 후 추가가 ETC. 처음부터 3개 contract 잠그면 client 의존 형성 후 변경 어려움.
+
+**Option E (채택) — Decision 10개 + design 문서 분리 + endpoint 단계 분리** (Initial v2 = catalog + tab graph / Later v2 = single series).
+
+### Stable observed / Accepted 조건
+
+본 ADR은 **정책 결정 ADR**로 운영 검증 항목보다 land 후 design + 구현 진입 anchor 역할이 크다.
+
+- **Proposed (현재 상태)**: ADR 본문 land + design 문서 ([GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md)) land + CLAUDE.md anchor 추가.
+- **Accepted 조건**:
+  - v2 endpoint 첫 구현 PR (catalog + tab graph 2개 endpoint) land + 신규 단말 client 어댑터 통합 + 1주일 운영 후 catalog grid 변경 없이 안정 운영.
+  - Bithumb/KRX insufficient_history 응답이 client UI에서 honest fallback (empty state)으로 정상 처리 확인.
+  - legacy `/api/graph/{currency}` 응답 변화 없음 (구단말 회귀 0).
+
+### 후속 Phase
+
+1. **Phase 2b** (본 ADR 직후, 동시 land): [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md) design 문서 + CLAUDE.md anchor.
+2. **Phase 2c** (별도 트랙, 병행 가능): Bithumb USDT 외부 historical source 조사 (거래소 API/CSV) + KRX 미국달러선물 외부 historical source 조사 (KRX/KIS/공공데이터포털).
+3. **Phase 2d**: daily rollup 구현 — DXY hourly/daily rollup 패턴 ([app/admin/dxy_rollup.py](app/admin/dxy_rollup.py)) mirror to source_rates. retention은 별도 ADR.
+4. **Phase 2e**: v2 endpoint 구현 PR (catalog + tab graph 2개) — 별도 PR 분할 land.
+5. **Phase 2f (Later, optional)**: single series endpoint (`GET /api/v2/graph/series/{series_id}?period={period}`) — 사용 패턴 확보 후 추가.
+
+### 관련 문서
+
+- [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md): catalog matrix / endpoint contract / provenance schema (본 ADR의 design 문서)
+- [ADR-019](#adr-019-dxy-보조지표--granularity-기반-2-part-merge-전략): DXY granularity 2-part merge — Hana backfill 패턴 참조
+- [ADR-023](#adr-023-데이터-보관-정책-30일-통일-banksource_ratesdxy-realtime): 30일 cap 정책 anchor
+- [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md): 서비스 계약 source of truth (topic-only / dual-emit)
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)

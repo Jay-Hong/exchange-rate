@@ -7,7 +7,8 @@
 ### 📚 주요 문서 가이드
 
 **핵심 가이드:**
-> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR). **최신: ADR-031 (KRX Redis 1차 통합), ADR-032 (KRX 가격알림 evaluator — F-1/F-2/F-3 trilogy)**
+> 💡 **아키텍처 의사결정:** [DECISIONS.md](DECISIONS.md) - 주요 기술 선택과 그 근거 (ADR). **최신: ADR-031 (KRX Redis 1차 통합), ADR-032 (KRX 가격알림 evaluator — F-1/F-2/F-3 trilogy), ADR-033 (Graph API v2 catalog policy — Hana backfill / Bithumb·KRX actual-only / DXY_futures 1d only)**
+> 📊 **Graph API v2 design:** [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md) - catalog matrix (tab × period × series), provenance schema, Hana backfill merge rule, insufficient_history policy, endpoint contract (Phase 2b draft, 2026-05-27)
 > 🕷️ **크롤러 구현:** [CRAWLERS.md](CRAWLERS.md) - 각 은행별 크롤링 방식과 특수 로직
 > 📝 **변경 이력:** [CHANGELOG.md](CHANGELOG.md) - 버전별 변경사항 및 마이그레이션 가이드
 > 🔔 **알림 & 구독:** [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md) - 푸시 알림, 인증, 구독 관리 가이드
@@ -1285,6 +1286,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
   - **F-3 운영 활성** (`KRX_ALERT_EVALUATOR_ENABLED=true` env, 2026-05-26 13:40 KST): iOS canary end-to-end 성공 — setting id=6 POST 13:40:06 → FCM 발사 13:40:08 (2초) → iOS 도착 (LG U+ 잠금화면 "📈 미국달러F USD-KRW-FUTURES [1504.7↑이상 도달] 1505.30") → DB triggered=true + log success + alert_evaluator 예외 0건.
   - **dead alert gap 정책**: F-2 land ~ F-3 활성 사이는 의도된 canary staging (API 등록 가능 + 발송 안 됨). 운영 단말 영향 0 (테더 탭 자체가 운영 앱에 없음, 테스트 iOS canary 전용).
   - **후속 cleanup (2026-05-26 별도 commit으로 land)**: main.py `_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename (의미 변화 반영) + `USDT_PHASE1_CLIENT_GUIDE.md` line 571 "category=='exchange'" stale fix.
+- ✅ **Graph API v2 catalog policy land (Phase 2b)** — [ADR-033](DECISIONS.md) + [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md) (2026-05-27, Proposed). 10개 decision anchor: legacy `/api/graph/{currency}` 유지 / new app v2 / catalog = tab × period × series / Citi v2 catalog 제외 (수집 유지) / Hana 30d actual + Investing backfill / Bithumb·KRX Investing backfill 금지 / Bithumb·KRX 외부 historical 또는 daily rollup 없으면 insufficient_history / DXY_futures 1d only / source_rates 30d cap = daily rollup 없이 자연 확장 불가 / daily rollup retention은 별도 결정. v2 endpoint 구현 (Phase 2e) + Bithumb·KRX historical 조사 (Phase 2c) + daily rollup 구현 (Phase 2d) 별도 트랙.
 - 🔜 **All-source observation fanout 통합 phase** — [REALTIME_ARCHITECTURE_PLAN.md §4.1](REALTIME_ARCHITECTURE_PLAN.md) anchor. 우선순위 합의 (2026-05-25): **(1) [KRX Stage E](KRX_FANOUT_REFACTOR_PLAN.md) (KRX Redis DB-insert-bound → tick-level + freshness metadata 정렬) → (2) [Bank/Investing β](USDT_TOPIC_MIGRATION_PLAN.md) (DB-first monolithic → observation fanout 재설계 + main.py legacy hook 격하 가능성) → (3) USDT 5 source 공통화 검토** (3 도메인 검증 패턴 input, 선제 abstraction 금지 원칙). KRX Stage E 진입 조건: ADR-027 Stage C 결정 + 5/19~5/26 close finalizer 7일 telemetry 분석.
 - 🔜 장기 realtime roadmap — 신규 단말은 topic 구독 모델만 사용, broadcast cycle은 구버전 호환 후 deprecate. 테더 탭 모든 표시 자산이 Redis latest write-through 성공 지점 기반 trigger를 갖춘 뒤 legacy hook 완전 제거.
 - 🔜 5/18 KRX 만기 rollover 관찰 + ADR-027 REST fallback 수치 확정 → Stage C 결정
