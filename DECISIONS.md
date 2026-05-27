@@ -3907,7 +3907,18 @@ iOS FCM 도착 + DB persist + 서버 로그 4축 모두 통과:
     - REST `WS captured at entry → REST skip` (Case A, `rest_write_blocked` 증가 0)
     - pre-close 1분 동안 latest stagnant → Stage E non-interference (close grace tick skip 정상 동작)
     - alert_evaluator 예외 0 (sampler 시간대 docker logs 검증)
-    - **단 close grace tick에서 alert evaluation/FCM 발사 path는 직접 실측되지 않음** — 그 시점 활성 KRX 알림 0건이라(setting id=6은 13:40에 이미 triggered=true) candidates empty path를 silent하게 거침. invariant 2 (close grace skip ❌)는 *코드 구조상 보장* (`KrxAlertTickHandler.__call__`이 close grace check 없음 — `KrxRedisLatestWriter`와 다르게)이고, 운영 실측은 별도 close grace 시점 활성 알림 등록 후 검증 필요.
+    - **(5/26 시점) 단 close grace tick에서 alert evaluation/FCM 발사 path는 직접 실측되지 않음** — 그 시점 활성 KRX 알림 0건이라(setting id=6은 13:40에 이미 triggered=true) candidates empty path를 silent하게 거침. invariant 2 (close grace skip ❌)는 *코드 구조상 보장* (`KrxAlertTickHandler.__call__`이 close grace check 없음 — `KrxRedisLatestWriter`와 다르게)이고, 운영 실측은 별도 close grace 시점 활성 알림 등록 후 검증 필요 — 다음 항목으로 닫힘.
+  - ✅ **5/27 15:45 CF close grace + FCM canary 통과 (2026-05-27) — invariant 2 운영 실측 closed**:
+    - canary trigger 15:43:15 KST start (custom token + ID token + 114s wait → 15:45:10 POST)
+    - 등록 setting id=7 threshold=1490.3 (current-10.0 margin, Stage E close grace skip으로 Redis latest stale 마진 확보)
+    - close finalizer 15:46:00 `[krx_close_window] close saved session=CF rate=1499.6 ts=2026-05-27T15:45:00+09:00`
+    - alert evaluator 15:46:01 FCM sent (close grace tick path 실측) + DB log id=96 success=True
+    - setting id=7 final: triggered=True, enabled=False, last_notified_rate=1499.6 (1회성 자동 disable)
+    - iOS APNS 도착: 사용자 캡처 15:46:10 KST (iPad + iPhone 동시) → 서버 sent_at 15:46:01 대비 **사용자 확인 기준 ~9s 이내 (실제 도착은 그보다 빠름)**, 알림 문구 `📈 미국달러F USD-KRW-FUTURES [1490.3 ↑이상 도달] 1499.60`
+    - structured event persist (commit `18b06f5` land 후 **첫 운영 검증**): `/admin/api/krx-finalizer-stats?days=1` → `ws_close_saved=1`, `rest_skipped_ws_captured=1`, `case_summary={"A": 1}` (정상 영업일 path)
+    - REST skip: `[krx_close_snapshot] WS captured at entry → REST skip` (rest_write_blocked 증가 0)
+    - **닫힌 항목**: invariant 2 (close grace skip ❌) — close grace tick에서 alert evaluator 평가 진행 + FCM 발사 + iOS 도착 end-to-end 검증
+    - **별도 항목**: invariant 1 (SET-only ❌) + invariant 3 (Session boundary drain) — 본 canary로 직접 검증되지 않음. 1번은 코드 구조 보장 유지, 3번은 CF→CM session boundary 시점 활성 알림 별도 등록 후 검증 필요
 
 ### 5/19~5/26 7일 telemetry 분석 결과 — close REST fallback 정책 결론 (2026-05-26)
 

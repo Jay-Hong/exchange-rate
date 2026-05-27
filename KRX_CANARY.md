@@ -982,14 +982,55 @@ ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose up -d --force-recreate fa
 
 **F-1 alert handler 격리 실측**: alert_evaluator 예외 0건 (sampler 시간대 docker logs 검증). **단 close grace tick에서 alert evaluation/FCM 발사 path 자체는 직접 실측되지 않음** — sampler 시간대에 활성 KRX 알림 0건(setting id=6은 13:40에 이미 triggered=true)이라 candidates empty path를 silent하게 거침. ADR-032 invariant 2 (close grace skip ❌)는 *코드 구조상 보장* (`KrxAlertTickHandler.__call__`이 close grace check 없음 — `KrxRedisLatestWriter`와 다르게)이고, 운영 실측은 별도 close grace 시점 활성 알림 등록 후 검증 필요.
 
-= 5/26 CF close = **Case A 완전 정상 동작** (close finalizer / Stage E / REST fallback / alert handler 예외 격리 4 layer 실측 통과). close grace tick FCM 발사 path 실측은 후속 관찰 항목.
+= 5/26 CF close = **Case A 완전 정상 동작** (close finalizer / Stage E / REST fallback / alert handler 예외 격리 4 layer 실측 통과). close grace tick FCM 발사 path 실측은 후속 관찰 항목 → 5/27 canary로 닫힘 (다음 섹션).
+
+### 5/27 15:45 CF close grace + FCM canary 실측 결과 (invariant 2 closed)
+
+5/26 caveat (close grace tick FCM 발사 path 직접 실측 X)을 닫기 위해 5/27 15:45 CF close 직전 활성 KRX 알림을 등록하고 end-to-end 5축 검증.
+
+**Canary 설계**:
+
+- canary script `/tmp/krx_canary_close_grace.py`: 15:43:15 KST 시작 → custom token + ID token 발급 → 114s wait → 15:45:10 POST
+- threshold = current - 10.0 (Stage E close grace skip으로 Redis latest stale 마진 확보 — 5/26 lesson)
+- condition = above (1499.6 close rate → 1490.3 threshold 초과 = 발사 조건)
+- sampler `/tmp/krx_close_1545_sample.sh` 병행 (5초 grain Redis latest + DB recent 관찰)
+
+**Timeline (5축 evidence)**:
+
+| 시점 | 축 | Evidence |
+| --- | --- | --- |
+| 15:43:15 | canary start | Step 1 UID resolved + Step 2 custom_token len=872 segments=3 + Step 3 ID token len=1118 |
+| 15:45:10 | canary POST | setting id=7 / threshold=1490.3 / condition=above / triggered=false (응답 시점) |
+| 15:46:00 | close finalizer | LOG `[krx_close_window] close saved session=CF rate=1499.6 ts=2026-05-27T15:45:00+09:00` + captured_flag SET |
+| 15:46:00 | Stage E | pre-close 1분 latest stagnant (rate=15:34:55 stale) → close save 후 15:45:00/1499.6 반영. KrxRedisLatestWriter close grace tick skip 정상 |
+| 15:46:01 | alert evaluator | `alert_evaluator FCM sent` (close grace tick path 실측) |
+| 15:46:01 | DB log | log id=96 success=True, setting id=7 triggered=True enabled=False last_notified_rate=1499.6 |
+| 15:46:01 | REST skip | LOG `[krx_close_snapshot] WS captured at entry → REST skip` (rest_write_blocked 증가 0) |
+| 15:46:01+ | structured event | `/admin/api/krx-finalizer-stats?days=1` → `ws_close_saved=1`, `rest_skipped_ws_captured=1`, `case_summary={"A": 1}` |
+| ~15:46:10 | iOS APNS | iPad + iPhone 동시 도착 (사용자 캡처 15:46:10) — 서버 sent_at 대비 **사용자 확인 기준 ~9s 이내 (실제 도착은 그보다 빠름)**, 문구 `📈 미국달러F USD-KRW-FUTURES [1490.3 ↑이상 도달] 1499.60` |
+
+**5축 판정 = 모두 통과**:
+
+1. ✅ **close finalizer**: 15:46:00 CF close 1499.6 DB save + captured_flag SET (Case A 진입)
+2. ✅ **Stage E**: close grace tick에서 Redis mirror SKIP 정상 (KrxRedisLatestWriter non-interference) + KrxCloseWindowWriter 단독 처리
+3. ✅ **alert evaluator**: close grace tick에서 evaluator 평가 진행 + FCM 발사 (15:46:01) + DB log success
+4. ✅ **structured event persist**: commit `18b06f5` (2026-05-26 land) 후 **첫 운영 검증** — case=A aggregation 정상 동작
+5. ✅ **iOS APNS**: 사용자 화면 캡처로 도착 확인, APNs 지연 ~9s 이내
+
+**ADR-032 invariant 2 (close grace skip ❌) closed by 2026-05-27 close grace canary**.
+
+**별도 항목**: invariant 1 (SET-only ❌) + invariant 3 (Session boundary drain) — 본 canary로 직접 검증되지 않음. 1번은 alert path가 mirror SET/SKIPPED/FAILED outcome과 직교 (코드 구조 보장 유지), 3번은 CF→CM session boundary 시점 활성 알림 별도 등록 후 검증 필요 (Phase 외 후속 작업).
+
+**2일 연속 case=A 안정 확인 (5/26 → 5/27)**: WS path 단독 처리 정상 영업일 안정. 5/25 휴장일 사고 같은 stale REST write 재발 X — `KRX_CLOSE_REST_WRITE_ENABLED=false` default 정책 효과 운영 검증.
 
 ### 후속 관찰 / TODO
 
-1. **24h+ alert_evaluator FCM sent 누적 + 예외 0 유지** (ADR-032 Stable observed 조건)
-2. ✅ **5/26 15:45 CF close 첫 실측** — 위 결과로 invariant 검증 완료. 5/27 06:00 CM close도 같은 패턴 기대.
-3. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — 본 PR에 포함 (F-2 후속 자연 적용).
-4. ✅ **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** — F-3 직후 별도 cleanup commit으로 완료 (2026-05-26).
+1. **24h+ alert_evaluator FCM sent 누적 + 예외 0 유지** (ADR-032 Stable observed 조건) — 5/27 canary로 1차 충족 (FCM sent 누적 시작 + 예외 0), 24h+ 누적은 5/28 14:00경 도달.
+2. ✅ **5/26 15:45 CF close 첫 실측** — close finalizer / Stage E / REST fallback / alert handler 예외 격리 4 layer 통과. close grace tick FCM 발사 path 직접 실측은 다음 항목으로 닫힘.
+3. ✅ **5/27 15:45 CF close grace + FCM canary 통과 (2026-05-27)** — ADR-032 invariant 2 closed by 2026-05-27 close grace canary (위 5/27 섹션 5축 evidence). structured event persist (commit `18b06f5`) 첫 운영 검증 동시 통과.
+4. **`USDT_PHASE1_CLIENT_GUIDE.md` line 571 stale fix** — 본 PR에 포함 (F-2 후속 자연 적용).
+5. ✅ **`_validate_phase1_source_asset` → `_validate_alert_source_asset_or_400` rename** — F-3 직후 별도 cleanup commit으로 완료 (2026-05-26).
+6. **CF→CM session boundary drain 실측** (ADR-032 invariant 3) — 본 canary로 직접 검증되지 않음. CF→CM boundary 시점 활성 알림 별도 등록 후 검증 필요 (Phase 외 후속).
 
 ### 5/19~5/26 7일 telemetry 분석 결과 (2026-05-26 요약)
 
