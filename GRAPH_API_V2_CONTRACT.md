@@ -47,15 +47,17 @@ v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `
 
 | Tab | 1d (10min bucket) | 1w (1h bucket) | 3m / 1y (1d bucket) |
 | --- | --- | --- | --- |
-| USD | 8 banks (Citi 제외) + investing + DXY | investing + Hana (자체 historical 단일 source) + DXY hourly | investing + Hana (자체 historical 단일 source) + DXY daily |
-| JPY | 8 banks (Citi 제외) + investing | investing + Hana (자체 historical 단일 source) | investing + Hana (자체 historical 단일 source) |
-| EUR | 8 banks (Citi 제외) + investing | investing + Hana (자체 historical 단일 source) | investing + Hana (자체 historical 단일 source) |
-| Tether | 5 exchanges (Upbit/Bithumb/Coinone/Korbit/Gopax) + KRX + investing USD + KB USD + Hana USD + DXY + DXY_futures | Bithumb (대표, external_historical) + KRX (external_historical, contract chain) + investing USD + Hana (자체 historical) + DXY hourly | Bithumb (대표, external_historical 902d) + KRX (external_historical, contract chain) + investing USD + Hana (자체 historical) + DXY daily |
+| USD | 8 banks (Citi 제외) + investing + DXY | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY hourly | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY daily |
+| JPY | 8 banks (Citi 제외) + investing | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) |
+| EUR | 8 banks (Citi 제외) + investing | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) |
+| Tether | 5 exchanges (Upbit/Bithumb/Coinone/Korbit/Gopax) + KRX + investing USD + KB USD + Hana USD + DXY + DXY_futures | Bithumb (대표, external_historical) + KRX (external_historical, contract chain) + investing USD + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY hourly | Bithumb (대표, external_historical 902d) + KRX (external_historical, contract chain) + investing USD + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY daily |
 
 **제약** (Amendment 2026-05-27 반영):
 - Bithumb 3m/1y: Bithumb 공식 candlestick API external_historical (902일 coverage)
 - KRX 3m/1y: KIS `inquire-daily-fuopchartprice` + A75YMM contract chain external_historical
-- Hana 1w/3m/1y: Hana official historical endpoint 단일 source (20년+, Investing backfill 폐기)
+- Hana 3m/1y: 2-source 분리 정책 (Amendment 후속) — `hana_observed_eod` canonical (앞으로) + `hana_official_historical_backfill` (과거 부족분). Investing은 Hana backfill에 미사용 (Hana series identity 유지).
+- Hana 1w: Phase 2e 전 결정 (open question, §14 참조 — 후보 a/b/c)
+- KRX 1w: Phase 2e 전 결정 (open question, §14 참조 — 후보 a/b/c)
 - DXY_futures는 1d only (1w/3m/1y catalog 미노출)
 - Citi는 모든 tab/period에서 catalog 미노출 (수집 layer 유지)
 - 은행은 1d catalog 8개 (Hana 외 7개는 외부 historical 미보유 — 1d only), 1w+ catalog는 Hana만 (Hana 자체 historical로)
@@ -105,7 +107,7 @@ period별 `all_series` / `default_visible_series` 분리:
 
 각 series는 catalog 안에 다음 metadata를 가진다 (Amendment 2026-05-27 — Hana 단일 source / KRX contract chain per-point metadata).
 
-**Hana (자체 historical 단일 source)**:
+**Hana (observed_eod + official_historical_backfill 2-source 분리 — mixed series)**:
 ```json
 {
   "id": "hana.usd",
@@ -119,9 +121,21 @@ period별 `all_series` / `default_visible_series` 분리:
     "fallback_after_days": null,
     "history_policy": "external_historical",
     "coverage_days": 7300,
-    "insufficient_history": false
+    "insufficient_history": false,
+    "close_basis_mode": "mixed",
+    "default_close_basis": "hana_observed_eod",
+    "close_basis_values": ["hana_observed_eod", "hana_official_historical_backfill"],
+    "default_source_method": "observed_rollup",
+    "source_method_values": ["observed_rollup", "external_backfill"],
+    "per_point_metadata": ["close_basis", "source_method"]
   }
 }
+```
+
+per-point data (mixed series, 구간별 close_basis 다름):
+```json
+{"ts": "2026-04-27", "rate": 1402.5, "close_basis": "hana_observed_eod", "source_method": "observed_rollup"}
+{"ts": "2025-12-01", "rate": 1438.2, "close_basis": "hana_official_historical_backfill", "source_method": "external_backfill"}
 ```
 
 **KRX (KIS contract chain, per-point `contract_code` 추가)**:
@@ -164,6 +178,30 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 | `coverage_days` | int \| string | series 전체 최대 coverage (string은 `"varies_by_chain"` 같은 경우) |
 | `insufficient_history` | bool | 요청한 period를 채울 수 없으면 true (신규 자산/source 장애/coverage 부족 시점) |
 | `per_point_metadata` | string[] \| optional | data point에 추가 metadata field 명시 (예: KRX의 `["contract_code"]`) |
+| `close_basis_mode` | enum | **Amendment 후속**. `"single"` (series 전체 동일 close_basis) 또는 `"mixed"` (구간별 다름 — 예: Hana의 observed_eod ↔ official_historical_backfill 경계) |
+| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 4 values 중 하나 (아래 참조) |
+| `close_basis_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 close_basis values (예: `["hana_observed_eod", "hana_official_historical_backfill"]`) |
+| `default_source_method` | enum | series-level default. mixed series에서는 **canonical/future append 기준 기본 source_method** (예: Hana mixed의 default = `observed_rollup`). 5 values 중 하나 (아래 참조) |
+| `source_method_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 source_method values |
+
+`close_basis` enum 의미 (Amendment 후속 — source identity 명시):
+
+- `krx_cf_close_1545`: KRX CF 정규장 15:45 KST close finalizer
+- `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close
+- `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
+- `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
+
+같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
+
+`source_method` enum 의미 (close_basis와 직교 — 획득 방식):
+
+- `observed_rollup`: DB tick/source_rates 기반 daily rollup
+- `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint 등)
+- `close_finalizer`: KRX CF close finalizer 결과
+- `bithumb_candlestick_backfill`: Bithumb 공식 24h candle API 초기 backfill
+- `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill
+
+→ Bithumb/KRX는 close_basis 동일하지만 source_method 분기 (backfill vs 운영 중 매일 append). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별.
 
 `history_policy` enum 의미:
 - `actual_only`: backfill 없이 actual_source만, 외부 historical 미보유 (예: Hana 외 7개 은행 1d only)
@@ -176,9 +214,23 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 - `external_historical` + coverage_days = 외부 source 제공 범위 → period 자연 확장 (예: Hana 7300d, Bithumb 902d, KRX varies_by_chain)
 - `rollup_based`: future optimization 도입 후 적용 (현재 미사용)
 
-## 7. Hana official historical source rule (Amendment 2026-05-27 — Hana backfill merge rule 대체)
+## 7. Hana daily canonical policy (Amendment 후속 — 정책 재작성)
 
-Hana 장기 그래프 (1w/3m/1y)는 **Hana official historical endpoint 단일 source**. 기존 cutoff_ts 기반 Hana 30d + Investing backfill merge rule은 폐기. Investing은 Hana fallback에서 제거 (graph 의미 일관성).
+Hana 장기 그래프 (3m/1y)는 다음 **2-source 분리 정책**. 기존 "Hana official historical endpoint 단일 source" 표현은 폐기. **1w는 Phase 2e 전 결정 open question** (§14 참조 — KRX 1w + Hana 1w 후보 a/b/c).
+
+### Hana daily canonical 정의 (★)
+
+- **앞으로 쌓이는 구간** (DB observed_eod 산출 가능 구간): `hana_observed_eod`
+  - bank_exchange_rates의 KST 24:00 이전 마지막 Hana 관측값
+  - = 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
+- **과거 부족분 보강** (DB raw 관측값 없는 구간): `hana_official_historical_backfill`
+  - Hana official endpoint (`wpfxd651_01i_01.do`) historical row
+  - 응답 기준일을 canonical date로 사용 (휴일 자동 fallback dedup)
+  - 다음날 새벽 고시 row (KST EOD와 timing 의미 다름 — provenance로 명시)
+- **두 구간이 섞이는 경계**: per-point `close_basis` provenance로 표시
+- **Investing은 Hana backfill source에 미사용** — Hana series identity 유지
+
+### Hana official endpoint (backfill source)
 
 ### Endpoint
 
@@ -342,6 +394,14 @@ response 각 point에 `contract_code` 포함. **Date-to-contract mapping anchor*
 
 클라이언트는 `contract_code` 선택적 표시 (tooltip 등).
 
+### close_basis = krx_cf_close_1545 (Amendment 후속)
+
+- **매일 append (canonical)**: close finalizer가 잡은 CF 15:45 정규장 종가. source_method=`close_finalizer`
+- **초기 backfill**: KIS daily endpoint + A75YMM contract chain. source_method=`kis_daily_backfill` (정규장 일봉 close)
+- CM 06:00 야간 종가는 별 session close로 보존, 3m/1y daily에는 미사용
+- 24:00 통일 거부 — 야간장 진행 중간값은 "close" 의미 부정확
+- provenance: `close_basis=krx_cf_close_1545` 명시로 마감 시각 차이 honest
+
 ## 8. external_historical policy + insufficient_history (Amendment 2026-05-27)
 
 Phase 2c 검증 후 Bithumb/KRX/Hana 모두 external_historical 확보. 기존 "actual-only state + insufficient_history empty" 분기는 **신규 자산/source 장애/coverage 부족 시점에만 적용** (완전 제거 X).
@@ -353,6 +413,13 @@ Phase 2c 검증 후 Bithumb/KRX/Hana 모두 external_historical 확보. 기존 "
 - Interval: 1m, 3m, 5m, 10m, 15m, 30m, 1h, 4h, 6h, 12h, 24h, 1w, 1mm (13개)
 - Rate limit: ccxt 500ms/request (분당 120회)
 - Provenance: `history_policy="external_historical"`, `actual_source="bithumb"`, `coverage_days=902`
+
+#### close_basis = bithumb_24h_kst_close (Amendment 후속)
+
+- **매일 append (canonical)**: DB source_rates → KST daily rollup. source_method=`observed_rollup`
+- **초기 backfill**: Bithumb 공식 24h candle API. source_method=`bithumb_candlestick_backfill`
+- KST 00:00 boundary 확인됨 (B-A 검증, `1701874800000` = 2023-12-07 00:00:00 KST)
+- provenance: `close_basis=bithumb_24h_kst_close` 명시
 
 #### Bithumb response schema warning (★ 구현 주의)
 
@@ -531,8 +598,14 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
 
 1. **Phase 2b** (완료, 본 문서 + ADR-033 land): 정책 anchor — design 문서 + ADR + CLAUDE.md anchor.
 2. ✅ **Phase 2c** (완료, 2026-05-27): Bithumb/KRX/Hana historical source 외부 조사 — 3 source 모두 external_historical 확보. ADR-033 Amendment 2026-05-27 + 본 문서 §3/§5/§6/§7/§7-new/§8 update.
-3. **Phase 2d** (우선순위 ↓, future optimization): daily rollup 구현. 장기 coverage 확보 목적은 Phase 2c external_historical로 대체. 단 internal cache / materialization / 외부 source 일시 장애 대비 / 응답 latency 개선 목적은 future optimization 후보 보존. retention 결정은 그대로 별도 ADR.
-4. **Phase 2e**: v2 endpoint 구현 PR — catalog + tab graph 2개 endpoint + historical scrape job 통합 (Hana daily + Bithumb candlestick + KRX KIS chain). 진입 전 확정 항목: KRX rollover boundary (옵션 a/b/c) + Hana 회차 정책 (옵션 a/b/c).
+3. **Phase 2d** (Amendment 후속 — 두 목적 분리):
+   - 장기 coverage 확보 목적의 rollup: 외부 historical source 확보됨 → 우선순위 ↓
+   - **Hot path 안정화 / canonical daily table 목적의 `source_daily_rates`**: 우선순위 ↑ (이번 amendment 신규)
+   - Schema 정의 + retention / unique key / rebuild policy 확정 (Phase 2d 설계 결정 항목)
+   - Initial backfill job (Bithumb 24h candle + KIS daily + Hana official endpoint)
+   - Daily append job (close finalizer / observed_eod / source_rates rollup)
+   - 외부 API hot path 제거 → 그래프 요청 시 `source_daily_rates` 단일 조회
+4. **Phase 2e**: v2 endpoint 구현 PR — catalog + tab graph 2개 endpoint + `source_daily_rates` 조회 hot path 통합. 진입 전 확정 항목: ADR-033 Amendment 후속 결정 모두 land 후 진입.
 5. **Phase 2f** (Later, optional): single series endpoint 추가 — 사용 패턴 확보 후.
 
 ## 14. Open questions (Amendment 2026-05-27)
@@ -549,6 +622,10 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
   - (a) bank_exchange_rates 30일 보유분으로 1시간 bucket (Hana actual)
   - (b) Daily 다운그레이드
   - (c) v2 catalog 제외 (legacy v1만)
+
+### Phase 2d 설계 결정 항목 (Amendment 후속)
+
+- **source_daily_rates retention / unique key / rebuild policy**: Phase 2d에서 schema 확정 시점에 결정. 예상 unique key 후보 `(source, asset, date_kst)`.
 
 ### General open (Phase 2e 외, 운영 후 결정)
 

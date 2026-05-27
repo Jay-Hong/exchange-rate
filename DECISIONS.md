@@ -4093,9 +4093,142 @@ Graph API v2를 신규 endpoint set으로 분리하고 다음 10개 정책을 an
 **후속 Phase 변경 (Phase 2c → Phase 2c 검증 완료)**:
 
 - ~~Phase 2c~~ (외부 historical source 조사) → ✅ **완료 (본 Amendment)**
-- Phase 2d daily rollup 구현 → **우선순위 ↓ (future optimization)** + retention 별도 ADR
+- Phase 2d daily rollup 구현 → **장기 coverage 확보 목적 기준 우선순위 ↓ (future optimization)** + retention 별도 ADR. [Amendment 후속에서 hot path 안정화 목적의 source_daily_rates는 우선순위 ↑로 정정 — 두 목적 분리]
 - Phase 2e v2 endpoint 구현 → catalog + tab graph + historical scrape job 통합. **Phase 2e 진입 전 확정 결정 (2026-05-27)**: KRX rollover = 만기일 07:00 KST user-facing swap point 채택 (Amendment 2) + Hana representative row = `pbldSqn=` 빈값 기본 일일 historical row 채택 (Amendment 1). **남은 Phase 2e 전 open question**: KRX/Hana 1w bucket 정책 (제품 UX 결정 영역 — KRX 1w 후보 a/b/c: source_rates 30일분 1시간 bucket / KIS intraday endpoint 조사 / daily 다운그레이드. Hana 1w 후보 a/b/c: bank_exchange_rates 30일분 1시간 bucket / daily 다운그레이드 / v2 catalog 제외)
 - Phase 2f (Later) single series endpoint — 변경 X
+
+### Amendment 후속 — source_daily_rates canonical table 도입 (★ v2 데이터 모델 결정)
+
+Phase 2e 진입 전 결정 (KRX 07:00 rollover + Hana pbldSqn) 후속 결정 영역으로 도출됨. 표면적으로는 표현 수정처럼 보이지만, 본질은 **v2 장기 그래프의 데이터 모델 결정**. 특히 GRAPH_API_V2_CONTRACT.md §7 (Hana official historical source rule)은 **부분 수정 아닌 정책 재작성**.
+
+**핵심 통찰** (사용자 발견 + Codex 정확화):
+
+- 5/26 USD Hana official endpoint = 1,507.50, 다음날 07:46:45 KST 발표 (다음날 새벽 고시 row)
+- 우리 DB의 5/26 24:00 이전 last = 1,503.9 → Hana official과 의미 다름
+- "Hana 사이트의 historical row"는 canonical date의 representative이지만 timing은 다음날 새벽
+- 다른 source (Bithumb 24h candle close / KRX CF 15:45 정규 종가)와 비교 시 마감 시각 불일치
+- → "**소스별 close 의미가 다르다**"는 사실을 숨기지 않고 provenance로 명시하는 게 honest
+
+**핵심 원칙**:
+
+> 외부 API는 backfill / gap repair / 검증용이고, 그래프 요청 hot path는 우리 daily canonical table만 읽는다.
+
+#### Decision A — source_daily_rates canonical table 도입
+
+- 신규 테이블 (Phase 2d 구현 영역): `source_daily_rates`
+- 초기 backfill (1회): 각 source의 외부 historical API 호출 후 적재
+- 매일 append (운영 중): 각 source 별 daily canonical row 1건 / day
+- v2 3m/1y 그래프 hot path = `source_daily_rates` 단일 조회 (외부 API 호출 X)
+- 외부 API는 backfill / gap repair / 검증용으로만 유지
+- Phase 2d 설계 결정 항목: retention / unique key / rebuild policy 확정
+
+**Schema 초안 (주요 필드)**:
+
+| Field | Nullable | 의미 |
+| --- | --- | --- |
+| `source` | No | "hana" / "krx" / "bithumb" |
+| `asset` | No | "usd-krw" / "usdt-krw" / "usd-krw-futures" 등 |
+| `date_kst` | No | canonical date (KST 기준) |
+| `rate` | No | 대표값, 기본은 close와 동일 |
+| `high` | Yes | source에 따라 없을 수 있음 |
+| `low` | Yes | source에 따라 없을 수 있음 |
+| `close` | No | daily representative close |
+| `close_basis` | No | 의미 (Decision B 참조) |
+| `source_method` | No | 획득 방식 (Decision B-bis 참조) |
+| `contract_code` | Yes | KRX 전용 (예: A75606) |
+| `basis_date` | Yes | Hana official backfill 응답 기준일 등 |
+| `published_at` | Yes | Hana official 발표시각 등 (다음날 새벽) |
+| `captured_at` | No | 우리 시스템 저장 시각 |
+| `metadata` | Yes | pbldSqn, raw fields 등 추가 metadata json |
+
+Unique key 후보: `(source, asset, date_kst)` — Phase 2d 설계 확정.
+
+#### Decision B — close_basis provenance enum (★ source identity 명시)
+
+response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
+
+| `close_basis` | Source | 의미 |
+| --- | --- | --- |
+| `krx_cf_close_1545` | KRX | CF 정규장 15:45 KST close finalizer |
+| `bithumb_24h_kst_close` | Bithumb | 24h candle KST 00:00 boundary close |
+| `hana_observed_eod` | Hana (canonical) | 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값 |
+| `hana_official_historical_backfill` | Hana (과거 부족분만) | Hana 사이트 historical row (다음날 새벽 고시) |
+
+같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
+
+#### Decision B-bis — close_basis vs source_method 직교 분리
+
+`close_basis` (의미)와 `source_method` (수집 방법)는 직교 개념. 두 field 모두 필수.
+
+**source_method enum 5 values**:
+
+- `observed_rollup`
+- `external_backfill`
+- `close_finalizer`
+- `bithumb_candlestick_backfill`
+- `kis_daily_backfill`
+
+**close_basis × source_method 매핑**:
+
+| close_basis | source_method | 시점/의미 |
+| --- | --- | --- |
+| `hana_observed_eod` | `observed_rollup` | 운영 중 매일 append |
+| `hana_official_historical_backfill` | `external_backfill` | 초기 부족분 backfill |
+| `krx_cf_close_1545` | `close_finalizer` | 운영 중 매일 append (CF close finalizer) |
+| `krx_cf_close_1545` | `kis_daily_backfill` | 초기 backfill (KIS daily endpoint + A75YMM chain) |
+| `bithumb_24h_kst_close` | `bithumb_candlestick_backfill` | 초기 backfill |
+| `bithumb_24h_kst_close` | `observed_rollup` | 운영 중 매일 append (DB rollup) |
+
+→ KRX/Bithumb은 close_basis 동일 but source_method 분기 (backfill vs 운영). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
+
+#### Decision C — Source별 daily canonical 정책
+
+| Source | 초기 Backfill | 앞으로 쌓는 값 (canonical) | close_basis (canonical) |
+| --- | --- | --- | --- |
+| **Bithumb** | 공식 24h candle API | DB tick/source_rates → KST daily rollup | `bithumb_24h_kst_close` |
+| **Hana** | 부족한 과거만 official historical | DB의 KST 24:00 이전 마지막 관측값 | `hana_observed_eod` |
+| **KRX** | KIS daily + A75YMM chain | close finalizer CF 15:45 정규 종가 | `krx_cf_close_1545` |
+
+**Investing은 Hana backfill source에 미사용** (Decision 6 일관 — Hana series identity 유지). Investing은 별 Investing series로만 노출.
+
+**KRX 24:00 통일 거부 이유**:
+
+- 24:00 야간장 (CM session) 진행 중간 관측값은 "close" 의미 부정확
+- KIS daily backfill (CF 정규 종가)과 의미 불일치 → 과거/미래 섞임
+- 대신 `close_basis=krx_cf_close_1545` provenance로 마감 시각 차이 명시 (숨기지 않는 방식)
+- CM 06:00 야간 종가는 별 session close로 보존, 기본 3m/1y daily close에는 미사용
+
+#### Decision D — Phase 2d 우선순위 표현 정정 (Amendment 3 보강)
+
+기존 Amendment 3 ("daily rollup 우선순위 ↓") 표현을 두 목적으로 분리:
+
+- **장기 coverage 확보 목적의 rollup**: 외부 historical source 확보됨 → 우선순위 **↓** (Amendment 2026-05-27 그대로)
+- **Hot path 안정화 / canonical daily table 목적의 source_daily_rates**: 외부 API hot path 제거 + 매일 append 통합 → 우선순위 **↑** (이번 후속 amendment 신규)
+
+두 목적은 서로 다른 가치. 한 묶음으로 Phase 2d 우선순위 ↓ 표현은 부정확 — 분리 명시.
+
+#### Decision E — §7 Hana 정책 재작성 (★ 핵심 변경)
+
+기존 §7 표현 ("Hana official historical endpoint 단일 source")은 **폐기**. 새 정책 재작성:
+
+```text
+Hana daily canonical:
+  앞으로 쌓이는 구간 (DB observed_eod 산출 가능 구간): hana_observed_eod
+  과거 부족분 (DB raw 관측값 없음): hana_official_historical_backfill
+  두 구간이 섞이는 경계는 source_method provenance로 표시
+  Investing은 Hana backfill source에 미사용 (Hana series identity 유지)
+```
+
+§7은 부분 수정 X. 전체 정책 재작성 (위 4-line anchor + parser 기준 + 회차 정책 + canonical date 정책 유지).
+
+#### Phase 2c → Phase 2d → Phase 2e 흐름 (정정)
+
+- Phase 2c: external_historical source 확보 (완료, Amendment 2026-05-27)
+- **Phase 2d (우선순위 ↑ for hot path 목적)**: source_daily_rates canonical table 구현
+  - Schema 정의 + retention / unique key / rebuild policy 확정
+  - Initial backfill job (Bithumb/KRX/Hana 외부 API 호출)
+  - Daily append job (close finalizer / observed_eod / source_rates rollup)
+- Phase 2e: v2 endpoint 구현 — `source_daily_rates` 단일 조회 hot path
 
 ### 관련 문서
 
