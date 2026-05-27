@@ -4615,6 +4615,67 @@ ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규
 - Backfill job (Step 2): Bithumb 24h candle / KIS daily chain / Hana official endpoint
 - Daily append job (Step 5): close finalizer / observed_eod / source_rates KST daily rollup
 
+### Phase 2d Step 2 land — Bithumb dry-run (2026-05-28)
+
+ADR-034 §14 Rollout step 2 (각 source 별 backfill job 작성 + dry-run 모드) — Bithumb 24h candlestick dry-run validator land. Step 2/3 경계 보존 (DB write 없음, `upsert()` 호출 없음).
+
+**변경 파일** (land 완료):
+
+- `scripts/backfill_bithumb_source_daily_rates.py` (신규): Bithumb USDT/KRW 24h candlestick API → source_daily_rates row dict 변환 + 9 validation suite + issue 발생 시 `sys.exit(1)`. ADR-033 Amendment 1 Decision 2-1의 무인증 / OCHL schema `[ts_ms, open, close, high, low, volume]` / 902일 coverage 정책 그대로 적용. 외부 의존성 0 (requests만 사용, ccxt 도입 회피).
+
+**검증 9 항목 (모든 row 대상 전수 검사)**:
+
+1. raw API shape (first/last raw row 출력)
+2. parse 실패 collection (raise → script crash 회피, issue 수집 후 통계 보존)
+3. sort order (ascending / descending / mixed 라벨)
+4. anchor (모든 row의 KST timestamp가 `00:00:00+09:00`인지 — first/last only가 아닌 전수 검사)
+5. `rate == close` invariant
+6. duplicate `date_kst`
+7. date gap (expected = `(last - first).days + 1`)
+8. OHLC non-positive / `high < low`
+9. Decimal(14, 6) precision (소수부 6자리 초과)
+10. metadata policy (`contract_code` / `basis_date` / `published_at` = None 회귀 가드)
+
+**Dry-run 실행 결과 (전체 904 candles, 2026-05-28 KST 04:07)**:
+
+- parse 실패 / sort order / anchor 전수 / duplicate / date gap / OHLC / precision / metadata policy: 모두 **0건**
+- exit code = 0
+- date range: 2023-12-07 ~ 2026-05-28 (904일, ADR-033 Amendment 1 "902일"보다 +2일은 시간 흐름 자연 증가)
+
+**핵심 발견 (Step 3+ 정책 anchor)**:
+
+- Bithumb 24h candle `ts_ms`는 **KST 00:00 boundary anchor** — ADR-034 §6 `bithumb_24h_kst_close` 정책과 자연 정렬. Step 3 partial backfill 진입 시 date_kst 변환 logic 추가 불필요 (1:1 매핑).
+- **904일 span 누락 candle 0개**. Bithumb historical data 신뢰성 baseline 확정.
+- sort order = ascending (별도 sort 단계 불필요).
+- OCHL response shape 실측 확정: `[ts_ms_int, open_str, close_str, high_str, low_str, volume_str]` — 가격은 string. `Decimal(str(...))` 변환 일관 적용.
+- 단일 호출로 전체 904 candle fetch (페이지네이션 불필요).
+
+**Step 2/3 경계 보존**:
+
+- 본 script는 `app/source_daily_rates.upsert()` 호출하지 않음 (DB write 절대 X)
+- row dict 생성 + validation 후 결과 출력만
+- Step 3 (partial backfill 실측 적재)은 별도 PR
+
+**published_at 정책 (schema 의미 보존)**:
+
+- Bithumb candle close timestamp는 `published_at`에 넣지 않음 (`published_at`은 Hana official 발표 timestamp 한정 의미)
+- `metadata_json.candle_ts_ms` / `metadata_json.candle_ts_kst`로 격리
+
+**보정 history (Codex 5 review rounds 반영)**:
+
+- Round 1 (외부 의존성): ccxt 도입 회피 → requests + inline OCHL tuple unpack
+- Round 2 (Step 2/3 경계): `upsert()` 호출 제거 → row dict + validation only
+- Round 3 (검증 항목 확장): non-positive OHLC / Decimal precision / duplicate / gap / sort order
+- Round 4 (3 blocker): `sys.exit(1)` on issue / anchor 전체 row 검사 / 전체 904 dry-run 실행
+- Round 5 (3 non-blocker): `--limit` positive int validator / parse 실패 issue collection / metadata policy validation
+
+**후속 작업 (Step 2 영역 확장 + Step 3 진입)**:
+
+- KIS daily chain dry-run (Step 2 — KRX A75YMM contract chain + 만기일 07:00 KST rollover boundary)
+- Hana official_historical dry-run (Step 2 — `pbldSqn` provenance + 휴일 fallback + `basis_date` 매핑)
+- Step 3 partial backfill 실측 적재 (예: KRX 먼저, ADR-034 §14 잠정 — service value 기준)
+- Step 2 dry-run script는 fetch 1회 + raise propagate. scheduled job (Step 3+) 진입 시 retry/backoff/structured error는 그때 함께 land
+
 ### 16. Related docs
 
 - [ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only): Graph API v2 catalog policy + Amendment 2026-05-27 + Amendment 후속 (Decision A-E)
@@ -4659,3 +4720,4 @@ ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규
 - 2026-05-13: ADR-031 초안 작성 (KRX 미국달러선물 Redis 통합 — 1차 부채 해소, stale/REST는 후속, Proposed)
 - 2026-05-28: ADR-034 초안 작성 (source_daily_rates canonical daily table — Phase 2d 구현 설계, Proposed)
 - 2026-05-28: ADR-034 Phase 2d Step 1 land (Open #14/#16/#17 → Accepted + app/models.py SourceDailyRate ORM + scripts/migrate_source_daily_rates.py + app/source_daily_rates.py helper)
+- 2026-05-28: ADR-034 Phase 2d Step 2 land — Bithumb 24h candlestick dry-run validator (scripts/backfill_bithumb_source_daily_rates.py 신규 / 9 validation suite / 전체 904 candles 0 issue / KST 00:00 anchor 일관 확정 / 904일 span 누락 0 / Step 2/3 경계 보존 — DB write X)
