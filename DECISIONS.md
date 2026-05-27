@@ -4044,6 +4044,50 @@ Graph API v2를 신규 endpoint set으로 분리하고 다음 10개 정책을 an
 4. **Phase 2e**: v2 endpoint 구현 PR (catalog + tab graph 2개) — 별도 PR 분할 land.
 5. **Phase 2f (Later, optional)**: single series endpoint (`GET /api/v2/graph/series/{series_id}?period={period}`) — 사용 패턴 확보 후 추가.
 
+### Amendment 2026-05-27 (Phase 2c 검증 후 정책 변경)
+
+2026-05-27 Phase 2c 외부 historical source 조사 결과 (Bithumb / KRX / Hana 3 source 모두 external_historical 확보) 기반으로 Decision 5 / 7 / 10 amendment. 기존 Decision 본문은 historical record로 보존하며, 본 Amendment 섹션이 현행 정책 anchor.
+
+**Amendment 1 — Decision 5 변경**: Hana 30d actual + Investing backfill 폐기 → **Hana official historical endpoint 단일 source** 채택.
+
+- 검증: Hana endpoint `wpfxd651_01i_01.do?ajax=true&curCd=USD&inqStrDt=YYYYMMDD`로 20년+ historical 확인 (2006-05-26 USD 매매기준율 945.50 / 2016-05-27 1,180.00 / 2026-05-26 USD 매매기준율 1,507.50). JPY/EUR 동일 endpoint.
+- 휴일/공휴일 요청 시 자동 직전 영업일 fallback (2026-05-24 일 요청 → 응답 기준일 2026-05-22 금 / 2026-01-01 신정 → 2025-12-31).
+- **Canonical date 정책**: 응답 안 `기준일` field 사용 (요청 날짜 아님). 같은 기준일 중복 요청은 idempotent skip → 휴일 fallback dedup 차단 anchor.
+- **Backfill 호출 수**: calendar-day fetch (단순 loop) ~7300회/20년 + canonical date dedup 필수. business-day calendar 보유 시 ~5200회 (dedup 불필요). 권고는 **calendar-day + dedup** (영업일 calendar 외부 의존 차단).
+- **Parser 기준**: `<td class="txtAr">` numeric cell 중 인덱스 7 (8th) = 매매기준율. 컬럼 순서 [0] 현찰 사실 환율 / [1] 사실 spread / [2] 파실 환율 / [3] 파실 spread / [4] 송금 보낼 / [5] 받을 / [6] 외화수표 파실 / [7] **매매기준율** / [8] 환가료율 / [9] 미화환산율.
+- **회차 (`pbldSqn`) 정책**: Hana endpoint는 일별 여러 회차 발표. v2 historical은 옵션 (a) 최종 회차 (`pbldSqn=` 빈값으로 응답되는 daily close 수치) / (b) 대표 회차 fix / (c) 서버 default 중 선택. Phase 2e 전 확정 필요 — 잠정 권고 (a) 최종 회차 (5/27 검증 시 1081회차 = 다음 영업일 07:46 발표).
+- DOM 변경 risk: 현재 시점 schema 안정 (응답 size 일관) 확인되지만, Hana template 변경 시 historical fetch 일괄 broken risk → 운영 monitoring 필요 (Open question).
+- bulk Excel/TXT endpoint: 단순 추정 URL 실패 + doExcelDown JavaScript 함수 본체 reverse engineering 미진행 → **미발견** (bulk endpoint 없음으로 단정 X). HTML fragment endpoint만으로 production 충분. bulk는 future optimization 보류.
+- Investing은 Hana fallback에서 완전 제거 → graph 의미 일관성 (Hana 매매기준율 ≠ Investing 기준환율 source mix 차단).
+
+**Amendment 2 — Decision 7 변경**: Bithumb/KRX insufficient_history 분기 → **external_historical 확정** (insufficient_history는 신규 자산/source 장애/coverage 부족 시점에 여전히 적용 — 완전 제거 X).
+
+- **Bithumb**: 공식 candlestick API `api.bithumb.com/public/candlestick/USDT_KRW/{interval}` 채택. 902일 coverage (2023-12-07 KST 시작). 무인증. raw schema 비표준 **OCHL** 순서 `[ts_ms, open, close, high, low, volume]` — ccxt parse_ohlcv ([ccxt/bithumb.py:640-658](https://github.com/ccxt/ccxt/blob/master/python/ccxt/bithumb.py))로 잠금 + design 문서에 explicit warning 필수. rate limit ccxt 500ms/request (분당 120회) — 운영 사용 패턴 (startup backfill 1회 + daily refresh 1회) limit의 0.001%.
+- **KRX**: KIS `inquire-daily-fuopchartprice` (TR_ID=FHKIF03020100) + `FID_COND_MRKT_DIV_CODE=CF` + **A75YMM contract chain** 채택. 만기 지난 월물도 rt_cd=0 정상 조회 (A75605/A75604/A75603/A75602/A75601 각 100/95/70/53/34 rows). 종목 코드 sequential (Y=년 1자리, MM=월 2자리). KIS master에 명시적 continuous front-month 코드 미발견 → chain 패턴 필수.
+- **KRX endpoint 호출 형식**: 표준 GET (`GET /uapi/domestic-futureoption/v1/quotations/inquire-daily-fuopchartprice` + headers `appkey/appsecret/authorization/tr_id` + query params).
+- **KRX chain round trip**: contract 수는 rollover boundary 정책에 따라 변동. Monthly front-month chain (boundary=만기일 정산가)이면 1y는 **최대 12 contracts** (월별 만기 × 12개월). 각 contract 사용 구간만 좁게 fetch하면 보통 100건 cap 안. **단일 contract listing 전체를 wide range로 조회하면 cap에 걸림** (5/27 실측: A75605 listing 전체 범위 = 정확히 100 rows cap 도달, A75606 1y range 동일 cap 도달). chain 전략은 cap 자연 회피, 단일 contract wide range만 date range split 필요.
+- **KRX provenance**: response 각 point에 `contract_code` 포함 권고 (client tooltip 등 선택적 표시).
+- **Rollover boundary 정책** (Phase 2e 구현 전 확정 필요): (a) 만기일 정산가 boundary / (b) 만기 전일 boundary / (c) trading volume 기준. 잠정 권고 (a) 만기일 정산가 — KRX 미국달러선물 자체가 만기일 정산 종결로 매끄러움.
+
+**Amendment 3 — Decision 10 보강**: daily rollup 우선순위 하향 (장기 coverage 확보 목적만).
+
+- source_rates 30d cap 정책 (`cleanup_old_source_rates` cron) **유지** — 운영 정책 변경 X.
+- 3 source 모두 external_historical 확보 → **장기 coverage 확보 목적의 daily rollup 우선순위 ↓** (Phase 2c external_historical로 대체).
+- **단, daily rollup 자체는 future optimization 후보 보존**: 내부 cache / materialization / 외부 source 일시 장애 대비 / 응답 latency 개선 목적의 rollup은 별도 가치. retention 결정은 그대로 별도 ADR (필요 시점 storage 산정 후).
+
+**Phase 2c 검증 cross-reference**:
+
+- B-A Bithumb 공식 docs: ccxt parse_ohlcv field swap (index 1→1, 3→2, 4→3, 2→4) + rateLimit 500ms + interval 13개 (1m/3m/5m/10m/15m/30m/1h/4h/6h/12h/24h/1w/1mm)
+- B-B KRX KIS chain: 만기 지난 월물 (A75605~A75601) daily endpoint rt_cd=0 + A75YMM sequential + 100건 cap (wide range 조건) + continuous code 미발견
+- B-C Hana endpoint: 20년+ historical + 휴일 자동 fallback + HTML fragment 매매기준율 인덱스 7 + 회차 정책 추가 필요
+
+**후속 Phase 변경 (Phase 2c → Phase 2c 검증 완료)**:
+
+- ~~Phase 2c~~ (외부 historical source 조사) → ✅ **완료 (본 Amendment)**
+- Phase 2d daily rollup 구현 → **우선순위 ↓ (future optimization)** + retention 별도 ADR
+- Phase 2e v2 endpoint 구현 → catalog + tab graph + historical scrape job 통합. Phase 2e 전 확정 필요 항목: KRX rollover boundary + **Hana 회차 정책** (★ Amendment 1)
+- Phase 2f (Later) single series endpoint — 변경 X
+
 ### 관련 문서
 
 - [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md): catalog matrix / endpoint contract / provenance schema (본 ADR의 design 문서)
