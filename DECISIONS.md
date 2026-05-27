@@ -4274,11 +4274,14 @@ Hana daily canonical:
 
 12. Bithumb 24h candle date_kst 매핑: candle start vs close/end 기준 — 공식 docs 추가 검증
 13. Retention 최종 기간: 무기한 vs 10년 vs 5년 — storage 비용 산정 후 결정
-14. Exact indexes: unique key 외 추가 index 필요 항목 — query 패턴 실측 후 결정
 15. Rebuild command interface: CLI vs admin endpoint vs scheduled cron with manual trigger
-16. Numeric precision: 잠정 Numeric(14, 6) — Phase 2d 구현 시 최종 확정
-17. DB CHECK constraint (`rate == close`) 적용 여부: 잠정 보류, Phase 2d 결정 (future flexibility 보존)
-18. `ohlc_quality` enum 명칭 표준화: 잠정 `source_ohlc` / `observed_rollup` / `close_only` — Phase 2d 확정
+18. `ohlc_quality` enum 명칭 표준화: 잠정 `source_ohlc` / `observed_rollup` / `close_only` — Phase 2d 안정화 후 확정
+
+**Phase 2d Step 1 결정 (2026-05-28 Accepted 전환)**:
+
+14. ✅ **Exact indexes**: initially **UNIQUE (source, asset, date_kst)만 시작**. 추가 index는 monitoring/query 패턴 실측 후 추가 (premature optimization 회피).
+16. ✅ **Numeric precision = Numeric(14, 6)** 확정 — 환율/선물/USDT/DXY index 모두 충분 (정수부 8자리 / 소수부 6자리). 향후 자산 확장에도 여유. Read path는 Decimal 반환 → helper에서 float() 변환 정책 적용.
+17. ✅ **DB CHECK constraint (`rate == close`) 보류** — app-level invariant + monitoring drift alert로 시작. 데이터 안정 후 CHECK 추가는 future amendment 가능 (반대로 처음 적용 후 제거는 reversible 비용 큼).
 
 ### 3. Schema
 
@@ -4530,7 +4533,7 @@ class SourceDailyRate(Base):
 
 **Proposed** — Phase 2d 구현 진입 순서:
 
-1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 0 (빈 table)
+1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `main.py:152`의 `Base.metadata.create_all(bind=engine)`이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
 2. **Backfill dry-run**: 각 source 별 backfill job 작성 + dry-run 모드 (실제 INSERT X, log only)
 3. **Source별 partial backfill**: 1 source씩 (예: KRX 먼저) 일부 date range 실측 적재 → 검증
 4. **전체 backfill**: 3 source 모두 historical 적재
@@ -4562,6 +4565,55 @@ class SourceDailyRate(Base):
 - 별 table + 명시적 schema + provenance metadata (close_basis / source_method / ohlc_quality 직교 분리)
 - 운영 정합성 + future extensibility 우위
 - rate == close invariant로 legacy/v2 consumer 분리
+
+### Phase 2d Step 1 land (2026-05-28)
+
+ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규 도입.
+
+**변경 파일** (land 완료):
+
+- `app/models.py`: `SourceDailyRate` ORM class 추가 (Numeric(14,6) + unique (source, asset, date_kst) + top-level `ohlc_quality` + `metadata_json` column + invariant comment)
+- `scripts/migrate_source_daily_rates.py` (신규): idempotent migration script — `SourceDailyRate.__table__.create(bind=engine, checkfirst=True)` pattern + `--dry-run` 모드 (DB 연결 없이 CREATE TABLE + CREATE INDEX DDL 출력, `--dialect postgresql|sqlite` 명시) + 컬럼/인덱스 audit 출력
+- `app/source_daily_rates.py` (신규): CRUD helper — `get_by_key` / `get_range` / `upsert` (rate==close invariant enforce + close_only fallback + dialect 분기 + set_ 조건부 nullable update) / `batch_upsert` (단일 transaction) / `delete_range` (rebuild cleanup) / `find_rate_close_drift` (monitoring) + `row_to_dict` (Numeric → float 변환 정책)
+
+**Upsert null overwrite 방지 패턴**:
+
+- `contract_code` / `basis_date` / `published_at` / `metadata_json`: incoming non-null일 때만 `set_` dict에 포함 (None이면 update 자체 발생 X → 기존 값 자연 보존). COALESCE 대신 **set_ 조건부 추가 패턴** 사용 — dialect-agnostic (SQLite JSON column COALESCE 동작 차이 회피) + 명시적 의도 표현.
+- `captured_at`: `func.now()`로 명시 update (row 마지막 update 시각).
+
+**Dialect 분기 (Session.bind 기준)**:
+
+- `db.bind.dialect.name == "postgresql"` → `dialects.postgresql.insert`
+- `db.bind.dialect.name == "sqlite"` → `dialects.sqlite.insert` (SQLAlchemy 1.4+ ON CONFLICT 지원)
+- 그 외 dialect → `NotImplementedError`
+- helper가 `app.database.engine` 직접 의존 X — test용 SQLite in-memory engine 등에서도 동일 helper 검증 가능.
+
+**검증 (Step 1 land 전 7/7 통과)**:
+
+1. invariant `rate == close` enforce
+2. nullable fields null overwrite 방지 (`basis_date` / `published_at` / `metadata_json` / `contract_code` 모두 보존)
+3. `metadata_json` incoming non-null replace policy
+4. `close_only` fallback (high=low=close synthetic)
+5. `batch_upsert` 단일 transaction
+6. `rate != close` drift monitoring (drift=0 정상)
+7. `row_to_dict` Numeric → float 변환
+
+**Production migration 적용**:
+
+- 본 land에 포함 X — 별도 GO 단계
+- 검증 명령: `docker compose run --rm fastapi python scripts/migrate_source_daily_rates.py --dry-run`
+- 적용 명령: `docker compose run --rm fastapi python scripts/migrate_source_daily_rates.py`
+
+**Step 1 land 후 운영 상태**:
+
+- 코드 배포 시 `main.py:152` `Base.metadata.create_all(bind=engine)`이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
+- 운영 영향 거의 0 — read/write 호출자 X (helper module은 import 가능하나 사용자 없음)
+- ADR-034 §14 Rollout step 1 완료. Step 2 (backfill dry-run) 진입 가능.
+
+**후속 작업 (Step 2+ 영역)**:
+
+- Backfill job (Step 2): Bithumb 24h candle / KIS daily chain / Hana official endpoint
+- Daily append job (Step 5): close finalizer / observed_eod / source_rates KST daily rollup
 
 ### 16. Related docs
 
@@ -4606,3 +4658,4 @@ class SourceDailyRate(Base):
 - 2026-05-13: ADR-030 초안 작성 (latest:index 책임 분리 — freshness는 per-key mirrored_at으로 판단, Proposed)
 - 2026-05-13: ADR-031 초안 작성 (KRX 미국달러선물 Redis 통합 — 1차 부채 해소, stale/REST는 후속, Proposed)
 - 2026-05-28: ADR-034 초안 작성 (source_daily_rates canonical daily table — Phase 2d 구현 설계, Proposed)
+- 2026-05-28: ADR-034 Phase 2d Step 1 land (Open #14/#16/#17 → Accepted + app/models.py SourceDailyRate ORM + scripts/migrate_source_daily_rates.py + app/source_daily_rates.py helper)

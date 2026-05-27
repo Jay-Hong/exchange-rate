@@ -2,7 +2,7 @@
 
 # 표준 라이브러리
 from datetime import datetime, timezone as dt_timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Index
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, func
 
 # 로컬 애플리케이션
 from app.database import Base
@@ -186,3 +186,43 @@ class SourceNotificationLog(Base):
     success = Column(Boolean, default=True, nullable=False)
     error_message = Column(String, nullable=True)
     sent_at = Column(DateTime, default=get_utc_now, nullable=False)
+
+
+class SourceDailyRate(Base):
+    """v2 장기 그래프 (3m/1y) hot path가 읽는 daily canonical row.
+
+    상세 설계: ADR-034 §3 schema.
+
+    invariant: rate == close (app-level enforce, ADR-034 §10 + §13 monitoring).
+    DB CHECK constraint는 보류 — Phase 2d 안정화 후 추가 검토.
+
+    Source별 정책:
+    - Bithumb: 24h candle backfill + source_rates KST daily rollup append
+    - Hana: official_historical backfill (mixed) + bank_exchange_rates observed_eod append
+    - KRX: KIS daily + A75YMM chain backfill + CF 15:45 close finalizer append
+
+    Numeric(14, 6): 환율/선물/USDT/DXY index 모두 충분 (정수부 8자리 / 소수부 6자리).
+    Read path는 Decimal 반환 — helper에서 float() 변환 정책 적용 (app/source_daily_rates.py).
+    """
+    __tablename__ = "source_daily_rates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, nullable=False)              # "hana" / "krx" / "bithumb"
+    asset = Column(String, nullable=False)               # "usd-krw" / "usdt-krw" / "usd-krw-futures" 등
+    date_kst = Column(Date, nullable=False)              # canonical KST date (ADR-034 §12)
+    rate = Column(Numeric(14, 6), nullable=False)        # invariant: rate == close
+    high = Column(Numeric(14, 6), nullable=True)
+    low = Column(Numeric(14, 6), nullable=True)
+    close = Column(Numeric(14, 6), nullable=False)
+    ohlc_quality = Column(String, nullable=False)        # source_ohlc / observed_rollup / close_only (ADR-034 §6)
+    close_basis = Column(String, nullable=False)         # 4 values (ADR-034 §6)
+    source_method = Column(String, nullable=False)       # 5 values (ADR-034 §6)
+    contract_code = Column(String, nullable=True)        # KRX 전용 (예: A75606)
+    basis_date = Column(Date, nullable=True)             # Hana official backfill 응답 기준일
+    published_at = Column(DateTime(timezone=True), nullable=True)  # Hana official 발표 timestamp (다음날 새벽)
+    captured_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    metadata_json = Column(JSON, nullable=True)          # pbldSqn / raw response 일부 / diagnostics
+
+    __table_args__ = (
+        Index('uq_source_daily_rates', 'source', 'asset', 'date_kst', unique=True),
+    )
