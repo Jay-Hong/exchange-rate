@@ -4742,6 +4742,96 @@ ADR-034 §14 Rollout step 2 — Hana official_historical dry-run validator land.
 - KIS daily chain dry-run (Step 2-3 마지막 — KRX A75YMM contract chain + 만기일 07:00 KST rollover boundary + 100건 cap 회피)
 - Step 3 partial backfill 실측 적재 (ADR-034 §14 §3 잠정 — KRX 먼저, service value 기준)
 
+### Phase 2d Step 2-3 land — KIS daily chain dry-run (2026-05-28)
+
+ADR-034 §14 Rollout step 2 — KIS daily chain dry-run validator land. **Step 2 영역의 마지막 source** (Bithumb / Hana / KIS 3-source 모두 dry-run 완료 — Step 2 closed). Step 2/3 경계 보존 (DB write 없음, `upsert()` 호출 없음).
+
+**변경 파일** (land 완료):
+
+- `scripts/backfill_kis_source_daily_rates.py` (신규): KIS `inquire-daily-fuopchartprice` REST endpoint → source_daily_rates row dict 변환 + 13 validation suite + 2 mode (`dynamic` default + `--known-boundary-smoke`) + structured failure (`[CONFIG 실패]` / `[TOKEN 실패]` / `[MASTER 실패]` / `[FETCH 실패]` / `[PARSE 실패]`). 외부 의존성 0 (requests + dotenv + 운영 `KisAccessTokenManager` 재사용으로 drift 회피).
+
+**Mode 분리 (Codex 보강, Round 5)**:
+
+- **dynamic (default)** — 운영 영속성. `current.contract_month - 1`로 previous 동적 계산. 시간 흐름 시 자동 갱신.
+- **`--known-boundary-smoke`** — GRAPH §7-new line 372-379 검증 사례 재현 전용. `previous = A75605` hardcoded. `current=A75606` 시점에만 정합 (가드 raise).
+
+**Chain 구성 + 사용 구간 (Codex Round 6 정정)**:
+
+각 contract C_i의 user-facing 사용 구간 = `[C_{i-1}.expiry_date, C_i.expiry_date)` 반열린 구간:
+
+- **before_previous** A75604 (expiry 2026-04-20) — anchor only, fetch X
+- **previous** A75605 (expiry 2026-05-18) — fetch range `[2026-04-20, 2026-05-17]`
+- **current** A75606 (expiry 2026-06-15) — fetch range `[2026-05-18, today-1=2026-05-27]` (today 제외 default)
+- **next** A75607 (expiry 2026-07-20) — current.expiry 미도래 → probe range `[2026-06-08, 2026-06-15]` (mapping 미사용)
+
+validation `validate_usage_segment`: `previous_contract.expiry_date <= row.date_kst < current_contract.expiry_date` 양방향 검증.
+
+**Token cache 정책 (Codex Round 2)**:
+
+- default: `.cache/kis_access_token.json` (운영 `KisAccessTokenManager` + `scripts/kis_smoke.py` 공유) — KIS는 1일 1회 발급 원칙이라 shared가 추가 발급 0으로 가장 안전
+- `--token-cache-path`: operator가 별도 cache 명시 가능 (보수적 격리 시 새 token 발급 유도 위험 회피용으로는 default가 더 안전)
+- `KisAccessTokenManager` (async) → `asyncio.run()` wrapper로 sync 재사용 (drift 최소화)
+
+**검증 13 항목**:
+
+1. `[CONFIG 실패]` env 미설정 (KIS_APP_KEY/KIS_APP_SECRET)
+2. `[TOKEN 실패]` KisAccessTokenManager 발급/cache load 실패
+3. `[MASTER 실패]` KIS master fetch/parse 실패
+4. `[FETCH 실패]` requests.RequestException
+5. `[PARSE 실패]` output2 parse / ValueError / InvalidOperation
+6. `fetch_range_compliance` — mapped contract OOR = exit 1 (데이터 오염) / probe OOR = WARNING surface only (KIS stale 동작 known, range count 미포함)
+7. `usage_segment` — `[previous.expiry, this.expiry)` 양방향 (Codex Round 6 정정)
+8. `rate == close` invariant
+9. `source_ohlc` OHLC 완전 + `high >= low`
+10. metadata policy (KRX 방향: `contract_code` 필수 / `basis_date=None` / `published_at=None`, Hana와 반대)
+11. `close_basis = "krx_cf_close_1545"` + `source_method = "kis_daily_backfill"` enum
+12. `duplicate date_kst` (mapped_rows 기준, Codex Non-blocker 2)
+13. Decimal(14, 6) precision + OHLC non-positive
+
+**Dry-run 결과 (2026-05-28 KST, mapped 25 / probe 1)**:
+
+- **dynamic mode**: exit 0, mapped 25 rows (previous A75605: [2026-04-20, 2026-05-15] / current A75606: [2026-05-18, 2026-05-27]) / probe 1 row
+- **known-boundary-smoke mode**: exit 0, 동일 chain (current=A75606 시점이라 dynamic과 결과 일치)
+- **GRAPH §7-new line 372-379 B-B probe 사례 100% 재현**: 2026-05-18 row → A75606 contract → close=1496.500
+- **probe out-of-range row** (next A75607 fetch [2026-06-08, 2026-06-15] 요청에 2026-05-28 row 반환): WARNING surface only — Step 3 적재 시 차단 신호로 명시 (KIS daily endpoint가 미래 range에 listing 활성 contract 최신 row 반환하는 stale 동작)
+
+**핵심 발견 (Step 3+ 정책 anchor)**:
+
+- **dynamic mode가 GRAPH §7-new anchor를 자동 재현** — 시간 흐름 시 운영 영속성 검증 완료 (current=A75607 미래 시점에도 previous=A75606 자동 계산)
+- **user-facing chain mapping** = `[previous.expiry, this.expiry)` — Step 3 적재 시 contract_code mapping 정확성 보장. SAFE_FETCH_DAYS 임의 range는 100건 cap 회피만 보장 (Round 6에서 폐기)
+- **today 제외 default** — 15:45 close 미확정 intraday row가 `krx_cf_close_1545`로 잘못 저장되는 위험 회피. `--include-today` opt는 close 도래 후 명시 사용
+- **mapped/probe 분리** — global validation은 mapped 기준 (probe stale row가 backfill 후보 품질 오염 차단)
+- **KIS access_token 1일 1회 발급 원칙** — shared cache가 추가 발급 회피 + 운영 token invalidation 위험 0
+- **100건 cap 회피** — chain 사용 구간 단위로 자연 회피 (previous 28일, current 10일 모두 cap 미접근)
+
+**Step 2/3 경계 보존**:
+
+- 본 script는 `app/source_daily_rates.upsert()` 호출하지 않음 (DB write 절대 X)
+- row dict 생성 + 13 validation 후 결과 출력만
+- Step 3 (partial backfill 실측 적재)은 별도 PR
+
+**보정 history (Codex 6 review rounds 반영)**:
+
+- Round 1 (외부 의존성): 운영 `KisAccessTokenManager` 재사용 — 신규 의존성 0
+- Round 2 (token cache): default shared `.cache/kis_access_token.json` + `--token-cache-path` opt (KIS 1일 1회 원칙)
+- Round 3 (chain 옵션 B): current/previous/next 3 contracts + rollover boundary 검증 (단건 fetch 거부)
+- Round 4 (사용 구간 정정): `[previous.expiry, this.expiry)` 반열린 구간 + 양방향 validation
+- Round 5 (4 Blocker + 2 Non-blocker):
+  - Blocker 1: today 제외 default (`--include-today` opt)
+  - Blocker 2: `validate_fetch_range_compliance` 신규 — mapped contract OOR = exit 1 / probe OOR = WARNING surface
+  - Blocker 3: mapped_rows vs probe_rows 분리 (global validation은 mapped 기준)
+  - Blocker 4: mode 분리 (dynamic default + `--known-boundary-smoke`) — 운영 영속성 + anchor 재현 분리
+  - Non-blocker 1: `validate_source_ohlc` dead code 제거
+  - Non-blocker 2: `validate_duplicates_mapped` 신규 (mapped 기준)
+- Round 6 (previous 사용 시작 anchor): `_build_before_previous_dynamic(previous)` — previous fetch range = `[before_previous.expiry, previous.expiry-1]` (SAFE_FETCH_DAYS 임의 range 폐기, user-facing chain mapping 정확성 ↑) + probe section 문구 정정 ("WARNING surface only, range count 미포함")
+
+**후속 작업 (Step 3 진입)**:
+
+- **Step 2 영역 closed** — Bithumb (Step 2) / Hana (Step 2-2) / KIS (Step 2-3) 3-source 모두 dry-run + validation 통과
+- Step 3 partial backfill 실측 적재 (ADR-034 §14 §3 잠정 — KRX 먼저, service value 기준 + GRAPH §7-new rollover boundary 검증 완료)
+- Step 3 적재 시 KIS probe out-of-range row 차단 logic 별도 land (현재 dry-run에서 WARNING surface 완료)
+- retry/backoff/structured error는 scheduled job (Step 3+) 진입 시 함께 land
+
 ### 16. Related docs
 
 - [ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only): Graph API v2 catalog policy + Amendment 2026-05-27 + Amendment 후속 (Decision A-E)
@@ -4788,3 +4878,4 @@ ADR-034 §14 Rollout step 2 — Hana official_historical dry-run validator land.
 - 2026-05-28: ADR-034 Phase 2d Step 1 land (Open #14/#16/#17 → Accepted + app/models.py SourceDailyRate ORM + scripts/migrate_source_daily_rates.py + app/source_daily_rates.py helper)
 - 2026-05-28: ADR-034 Phase 2d Step 2 land — Bithumb 24h candlestick dry-run validator (scripts/backfill_bithumb_source_daily_rates.py 신규 / 9 validation suite / 전체 904 candles 0 issue / KST 00:00 anchor 일관 확정 / 904일 span 누락 0 / Step 2/3 경계 보존 — DB write X)
 - 2026-05-28: ADR-034 Phase 2d Step 2-2 land — Hana official_historical dry-run validator (scripts/backfill_hana_source_daily_rates.py 신규 / 10 validation suite / USD·JPY·EUR 4 case smoke 0 issue / 휴일 fallback 정확 검증 — 2026-05-24 일 → 2026-05-22 금 / close_only + basis_date + published_at + pbldSqn schema path 처음 활성 / Step 2/3 경계 보존)
+- 2026-05-28: ADR-034 Phase 2d Step 2-3 land — KIS daily chain dry-run validator (scripts/backfill_kis_source_daily_rates.py 신규 / 13 validation suite / 2 mode dynamic+known-boundary-smoke 모두 exit 0 / GRAPH §7-new B-B probe 사례 A75606 20260518 close=1496.500 재현 / chain 사용 구간 [previous.expiry, this.expiry) 반열린 / today 제외 default / mapped/probe 분리 / KisAccessTokenManager 재사용 / Step 2 closed — Bithumb·Hana·KIS 3-source dry-run 완료)
