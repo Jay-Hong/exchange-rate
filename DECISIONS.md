@@ -4676,6 +4676,72 @@ ADR-034 §14 Rollout step 2 (각 source 별 backfill job 작성 + dry-run 모드
 - Step 3 partial backfill 실측 적재 (예: KRX 먼저, ADR-034 §14 잠정 — service value 기준)
 - Step 2 dry-run script는 fetch 1회 + raise propagate. scheduled job (Step 3+) 진입 시 retry/backoff/structured error는 그때 함께 land
 
+### Phase 2d Step 2-2 land — Hana dry-run (2026-05-28)
+
+ADR-034 §14 Rollout step 2 — Hana official_historical dry-run validator land. Step 2/3 경계 보존 (DB write 없음, `upsert()` 호출 없음). Step 2-1 (Bithumb) 다음 자연 단계 — schema/helper의 미검증 path (`close_only` / `basis_date` / `published_at` / `pbldSqn`)를 처음 활성 검증.
+
+**변경 파일** (land 완료):
+
+- `scripts/backfill_hana_source_daily_rates.py` (신규): Hana official endpoint (`wpfxd651_01i_01.do`) HTML response → source_daily_rates row dict 변환 + 10 validation suite + issue 발생 시 `sys.exit(1)`. `[FETCH 실패]` (requests.RequestException) / `[PARSE 실패]` (ValueError/AttributeError/InvalidOperation) structured output. 외부 의존성 0 (requests + bs4, 둘 다 이미 사용 중).
+
+**검증 10 항목 (단건 fetch + transparent row mapping)**:
+
+1. raw fetch + response size (structured failure on RequestException)
+2. HTML parse — 기준일 / 고시일시 / 회차 / 매매기준율 idx 7 (structured failure on ValueError·AttributeError·InvalidOperation)
+3. fallback signal (`request_date != basis_date` 시 `metadata_json.fallback=true`)
+4. txtAr cell count >= 8 (DOM 변경 monitoring, GRAPH_API_V2_CONTRACT.md §14 Open anchor)
+5. `rate == close` invariant
+6. `close_only` fallback (`high == low == close` + `ohlc_quality == "close_only"`)
+7. `date_kst == basis_date` (canonical date 정책)
+8. metadata policy (Hana 필수: `basis_date` / `published_at` / `metadata_json.pbldSqn` 모두 not None / `contract_code = None`)
+9. `published_at` KST tzinfo + offset +09:00 (Hana 발표 timestamp schema 의미 잠금)
+10. `close_basis = "hana_official_historical_backfill"` / `source_method = "external_backfill"` enum + OHLC non-positive + Decimal(14, 6) precision
+
+**Dry-run 4 case smoke (2026-05-28 KST)**:
+
+| Case | currency | request_date | basis_date | fallback | pbldSqn | 매매기준율 | published_at | exit |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | USD | 2026-05-26 (화) | 2026-05-26 | false | 1081 | 1507.50 | 2026-05-27 07:46:40 KST | 0 |
+| 2 | USD | **2026-05-24 (일)** | **2026-05-22 (금)** | **true** | 2513 | 1512.00 | 2026-05-26 05:42:02 KST | 0 |
+| 3 | JPY | 2026-05-26 | 2026-05-26 | false | 1081 | 946.39 | 2026-05-27 07:46:40 KST | 0 |
+| 4 | EUR | 2026-05-26 | 2026-05-26 | false | 1081 | 1753.67 | 2026-05-27 07:46:40 KST | 0 |
+
+**핵심 발견 (Step 3+ 정책 anchor)**:
+
+- **휴일 fallback 정책 정확 동작 (Case 2 핵심)**: 2026-05-24 일요일 요청 → 2026-05-22 금요일 자동 fallback, `date_kst = basis_date = 2026-05-22`, `metadata_json.fallback = true` signal 정확. GRAPH_API_V2_CONTRACT.md §7 line 255 정책 사례 ("2026-05-24 일 요청 → 응답 기준일 2026-05-22 금") 100% 재현.
+- **USD/JPY/EUR 3통화 동일 schema + 동일 발표 timestamp 공유**: 같은 요청일 3통화 모두 `pbldSqn=1081` + `published_at=2026-05-27 07:46:40 KST` → Hana는 회차 단위로 3통화 동시 발표. 통화별 별도 fetch 필요하나 회차/timestamp는 공유.
+- **GRAPH_API_V2_CONTRACT.md §7 anchor 정확 일치**: line 284 검증 사례 (2026-05-26 USD = 1081회차, 다음날 07:46 발표) 1차 fetch부터 100% 재현. response shape 안정성 확인.
+- **`close_only` fallback path 처음 활성**: `ohlc_quality="close_only"` + `high == low == close` synthetic — Bithumb dry-run에서는 `source_ohlc` only path만 cover. Hana로 schema/helper close_only path 잠금.
+- **published_at top-level field 실사용**: schema 정의의 본 의미 (Hana official 발표 timestamp 한정) — Bithumb은 None, Hana는 `2026-05-27T07:46:40+09:00` KST timezone-aware datetime 저장. tzinfo + offset +09:00 validation 잠금.
+- **txtAr cell count = 10** (인덱스 0-9, GRAPH_API_V2_CONTRACT.md §7 매핑과 일치). DOM 변경 monitoring baseline 확정.
+
+**Step 2/3 경계 보존**:
+
+- 본 script는 `app/source_daily_rates.upsert()` 호출하지 않음 (DB write 절대 X)
+- row dict 생성 + 10 validation 후 결과 출력만
+- Step 3 (partial backfill 실측 적재)은 별도 PR
+
+**회차 (`pbldSqn`) 정책 (ADR-033 Amendment 2)**:
+
+- `pbldSqn=` 빈값 default 요청 → response의 representative rate 사용
+- 회차 값 (1081, 2513 등)은 `metadata_json.pbldSqn`로 저장 (provenance/debug)
+- "최종 회차" 공식 단정 X — 운영 검증상 최신/최종 고시값으로 동작
+
+**보정 history (Codex 4 review rounds 반영)**:
+
+- Round 1 (외부 의존성): bs4 / requests 이미 사용 중 — 새 의존성 0
+- Round 2 (정책 잠금 확인): date_kst = basis_date / 휴일 fallback 옵션 A / published_at top-level / USD/JPY/EUR / endpoint URL / 매매기준율 idx 7 — 모두 GRAPH_API_V2_CONTRACT.md §7과 ADR-033 Amendment 2에 잠긴 상태 확인
+- Round 3 (Hana dry-run script 범위): Bithumb과 반대 방향 metadata policy (basis_date / published_at / pbldSqn 필수), close_only path 활성, fallback signal metadata_json
+- Round 4 (2 Blocker + 1 Non-blocker):
+  - Blocker 1: `[FETCH 실패]` / `[PARSE 실패]` structured output (`requests.RequestException` / `ValueError·AttributeError`)
+  - Blocker 2: `published_at` KST timezone + offset +09:00 validation
+  - Non-blocker: `decimal.InvalidOperation` catch 추가 (rate cell text 비정상 DOM 회귀 가드)
+
+**후속 작업 (Step 2 영역 마지막 source + Step 3 진입)**:
+
+- KIS daily chain dry-run (Step 2-3 마지막 — KRX A75YMM contract chain + 만기일 07:00 KST rollover boundary + 100건 cap 회피)
+- Step 3 partial backfill 실측 적재 (ADR-034 §14 §3 잠정 — KRX 먼저, service value 기준)
+
 ### 16. Related docs
 
 - [ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only): Graph API v2 catalog policy + Amendment 2026-05-27 + Amendment 후속 (Decision A-E)
@@ -4721,3 +4787,4 @@ ADR-034 §14 Rollout step 2 (각 source 별 backfill job 작성 + dry-run 모드
 - 2026-05-28: ADR-034 초안 작성 (source_daily_rates canonical daily table — Phase 2d 구현 설계, Proposed)
 - 2026-05-28: ADR-034 Phase 2d Step 1 land (Open #14/#16/#17 → Accepted + app/models.py SourceDailyRate ORM + scripts/migrate_source_daily_rates.py + app/source_daily_rates.py helper)
 - 2026-05-28: ADR-034 Phase 2d Step 2 land — Bithumb 24h candlestick dry-run validator (scripts/backfill_bithumb_source_daily_rates.py 신규 / 9 validation suite / 전체 904 candles 0 issue / KST 00:00 anchor 일관 확정 / 904일 span 누락 0 / Step 2/3 경계 보존 — DB write X)
+- 2026-05-28: ADR-034 Phase 2d Step 2-2 land — Hana official_historical dry-run validator (scripts/backfill_hana_source_daily_rates.py 신규 / 10 validation suite / USD·JPY·EUR 4 case smoke 0 issue / 휴일 fallback 정확 검증 — 2026-05-24 일 → 2026-05-22 금 / close_only + basis_date + published_at + pbldSqn schema path 처음 활성 / Step 2/3 경계 보존)
