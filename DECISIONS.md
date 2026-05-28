@@ -5027,6 +5027,96 @@ db.commit()
 - Step 5 daily append (scheduled cron)
 - Step 6 v2 endpoint switch (Phase 2e)
 
+### Phase 2d Step 3 Bithumb first PR Round 1 — USDT/KRW partial backfill writer (2026-05-29)
+
+ADR-034 §14 Rollout step 3 — **Bithumb** first PR. KRX Step 3 first/옵션 B + Hana first PR Round 1 land 후 source diversity 마지막 핵심 path 진입. **schema의 모든 top-level metadata None path 처음 production-level 활성** (contract_code=basis_date=published_at=None, KRX는 contract_code 필수 + Hana는 basis_date+published_at+pbldSqn 필수와 모두 다른 가장 단순 row mapping) + **candle_ts_ms/candle_ts_kst metadata_json 격리** (KST 00:00 anchor 정책). 본 commit = Stage 1 (code in repo) 대상. Stage 2 (push) / Stage 3 (production RDS execution) 별 GO 대기. **Stage 3는 manual snapshot 생략 가능** (KRX 옵션 B + Hana first PR과 동일 — Bithumb도 incremental write라 자동 backup 1 Day + `delete_range` rollback anchor 신뢰).
+
+**변경 파일** (Stage 1 land 대상):
+
+- `scripts/backfill_bithumb_source_daily_rates.py` 확장 (Step 2 dry-run script에 write mode 추가):
+  - `--write` flag (default off, dry-run only safe)
+  - `--start-date` / `--end-date` (date_kst range filter, --write 시 필수)
+  - `--include-today` (default off, 24h candle 마감 전 미확정 위험 회피)
+  - `--allow-production-write` (default off, non-SQLite DB 차단)
+  - 신규 함수:
+    - `check_production_write_guard` (KRX/Hana writer 패턴 재사용 — dialect/host redacted)
+    - `validate_write_range` (Bithumb은 24/7 거래라 휴일 처리 없음 → 단순 range + today 가드)
+    - `ensure_source_daily_rates_table_created` (idempotent)
+    - `write_with_transaction_bithumb` (Bithumb 방향 metadata policy — 모든 top-level metadata None / candle_ts_ms + candle_ts_kst metadata_json 격리)
+  - `_date_arg` ISO YYYY-MM-DD validator (KRX/Hana 패턴 재사용)
+  - `typing.Optional` import 추가
+
+**First PR scope (옵션 A — USDT/KRW only / 짧은 range)**:
+
+- Asset: **USDT/KRW only** (Bithumb 1 currency pair)
+- date_kst range: `[2026-05-21, 2026-05-27]` (calendar 7일)
+- Expected rows: **7** (Bithumb 24/7 거래 — 휴일 dedup 없음, calendar = expected 정확 일치)
+
+**Bithumb writer vs KRX/Hana writer 패턴 차이**:
+
+| 항목 | KRX writer | Hana writer | **Bithumb writer** |
+| --- | --- | --- | --- |
+| Fetch 단위 | 1 contract chain (3 contracts) | 1 calendar day = 1 HTTP | **단일 fetch (1 HTTP call로 전체 candles)** |
+| Loop | Contract chain loop | Calendar-day loop | **fetch all + date range filter** |
+| Dedup | contract_code IN | basis_date (휴일 fallback) | **없음** (24/7 거래) |
+| Metadata policy | contract_code NOT NULL / basis_date+published_at NULL | contract_code NULL / basis_date+published_at+pbldSqn NOT NULL | **모든 top-level metadata None** + candle_ts metadata_json 격리 |
+| post-write SELECT | `contract_code.in_()` + range | `date_kst.in_(expected_dates)` | `date_kst.in_(expected_dates)` (Hana 패턴) |
+| Calendar 연속성 | 영업일만 | 영업일 dedup | **24/7 연속** (`end-start+1 == expected_count`) |
+
+**Codex Round 1 보정 (Blocker 1 + Non-blocker 2)**:
+
+- **Blocker — `--write + --limit` hard reject**: 운영자 실수로 `--write --limit N` 실행 시 partial write 위험 (limit 적용된 rows에서 date range filter → expected의 일부만 적재). production guard 근처 early check (fetch 전)에 hard reject 추가 — `[CONFIG 실패] --write와 --limit는 함께 사용할 수 없음 (partial write 위험)`.
+- **Non-blocker 1 — candle_ts_kst validation**: post-write에 `metadata_json.candle_ts_ms` 외 **`metadata_json.candle_ts_kst`도 검증** 추가 (KST 00:00 anchor 정책 핵심).
+- **Non-blocker 2 — 연속성 회귀 가드**: `expected_count == (end_date - start_date).days + 1` 명시 검증 (Bithumb 24/7 거래 + 휴일 dedup 없음 anchor — 7일 range = 7 rows 정확 일치).
+- (cleanup) `InvalidOperation` unused import 제거 — `ArithmeticError`가 superclass라 자동 catch.
+
+**Local SQLite smoke 6단계 모두 PASS**:
+
+| Step | 결과 |
+| --- | --- |
+| 1. py_compile | OK |
+| 2. dry-run regression (`--limit 5` 단순 검증) | exit 0 |
+| 3. `--write` without override (production guard 차단) | exit 1, dialect=postgresql host=*** redacted |
+| 4. **`--write + --limit` hard reject** (Codex Blocker 검증) | exit 1, `[CONFIG 실패] partial write 위험` |
+| 5. cleanup + first smoke + 재실행 | exit 0, **7 rows committed + post-write validations passed** |
+| 6. DB query 직접 검증 | 7 rows / `[2026-05-21, 2026-05-27]` / **all candle_ts_kst present** / drift 0 / 모든 top-level metadata None |
+
+**핵심 발견 (Step 3+ 정책 anchor)**:
+
+- **모든 top-level metadata None path 첫 production-level 활성** — KRX (contract_code 필수) / Hana (basis_date+published_at+pbldSqn 필수)와 다른 가장 단순 row mapping path 검증
+- **candle_ts_ms / candle_ts_kst metadata_json 격리 정책 적용** — published_at에 candle timestamp 넣지 않는 schema 의미 보존 (KST 00:00 anchor 정책 핵심)
+- **24/7 연속성 정확 검증** — calendar 7일 = expected 7 rows (휴일 dedup 0, KRX 영업일 + Hana 휴일 fallback과 다른 패턴)
+- **`--write + --limit` partial write 위험 잠금** — production guard 근처 early hard reject (Codex Round 1 Blocker)
+- post-write SELECT `date_kst.in_(expected_dates)` 채택 (Hana 패턴 재사용) — future overlap/partial rerun 안전 + range delete도 안전 (24/7 연속이라 휴일 gap 없음)
+
+**Stage 분리 (KRX/Hana first PR 패턴 동일)**:
+
+- **Stage 1**: write logic + production guard + fetch all + date range filter + transaction + 6-단계 SQLite smoke 검증 — **본 commit 대상**
+- **Stage 2**: origin/master push — **별 GO 대기**
+- **Stage 3**: production RDS execution — **별 GO 대기** (절차: SSH → git pull → docker compose build fastapi → `docker compose run --rm fastapi python scripts/backfill_bithumb_source_daily_rates.py --write --start-date 2026-05-21 --end-date 2026-05-27 --allow-production-write` → post-write 검증)
+- **Manual snapshot 생략 권장** (KRX 옵션 B + Hana first PR과 동일 — Bithumb incremental write 자동 backup + `delete_range` rollback anchor 신뢰)
+
+**Rollback anchor (Bithumb-specific, 24/7 연속이라 range delete 안전)**:
+
+```python
+from app.database import SessionLocal
+from app.source_daily_rates import delete_range
+from datetime import date
+db = SessionLocal()
+delete_range(db, "bithumb", "usdt-krw", date(2026, 5, 21), date(2026, 5, 27))
+```
+
+**KRX/Hana는 비연속 expected_dates이라 개별 dates `IN` delete 필요했으나, Bithumb은 24/7 거래로 expected_dates 연속이라 range delete 안전.**
+
+**후속 작업**:
+
+- Stage 2 (push to origin/master): 별 GO
+- Stage 3 (production RDS execution): 별 GO + manual snapshot 생략 + `--allow-production-write` 명시
+- Hana JPY/EUR 진입 (3통화 다각화) — Bithumb first PR 안정성 확인 후
+- Step 4 full backfill (모든 source × 1년+ range)
+- Step 5 daily append (scheduled cron)
+- Step 6 v2 endpoint switch (Phase 2e)
+
 ### Phase 2d Step 3 first land — KRX current partial backfill writer (2026-05-28)
 
 ADR-034 §14 Rollout step 3 **first PR** — KRX current contract (A75606) partial backfill writer land. **Step 3 진입 첫 source = KRX** (ADR-034 §14 §3 잠정 — service value 기준 + KIS dry-run에서 chain/rollover/cap/stale 모두 검증 완료). **Stage 1 (commit `40279c9`) + Stage 2 (origin/master push) + Stage 3 (production RDS execution) 모두 land 완료** (2026-05-28 KST 18:30, RDS manual snapshot `fxi-pre-step3-2026-05-28` 직후 production write). Stage 3 production verify: **7 rows committed + 7 post-write validations passed + drift 0 + boundary close=1496.500 production-level 재현** (GRAPH §7-new B-B probe 사례). 운영 fastapi runtime 갱신은 Phase 2e endpoint switch 시점 별 배포 영역 (현재 source_daily_rates read 호출자 0 — user-facing 영향 0).
@@ -5173,3 +5263,4 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - 2026-05-28: ADR-034 Phase 2d Step 3 옵션 B Round 9 Stage 2+3 production execution 완료 (Stage 2 push + Stage 3 production write 모두 land / `--contract previous` only 진행 — current 7 rows 재-upsert 회피 + manual snapshot 생략 (옵션 B는 incremental write라 과보호, 자동 backup 1 Day + `delete_range` rollback anchor 신뢰) / production verify: 18 rows committed (A75605 [2026-04-20 ~ 2026-05-15]) + 7 post-write validations passed + drift 0 + current A75606 7 rows 영향 0 (cross-mode regression) + 전체 chain 25 rows + boundary 2026-05-18 → A75606 close=1496.500 유지 / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0)
 - 2026-05-28: ADR-034 Phase 2d Step 3 Hana first PR Round 1 Stage 1 candidate — USD partial backfill writer (scripts/backfill_hana_source_daily_rates.py 확장 / --write + --start-date + --end-date + --include-today + --allow-production-write + check_production_write_guard + validate_write_range + ensure_source_daily_rates_table_created + fetch_and_dedup_calendar_range (Hana-specific calendar-day loop + basis_date dedup) + write_with_transaction_hana (Hana 방향 metadata policy) / Codex Round 1 Blocker (post-write SELECT date_kst.in_(expected_dates) 정정 — KRX Round 7 Blocker 2와 동등 패턴, 비연속 expected_dates 휴일 gap 안 false failure 차단) + 보완 (개별 dates delete rollback anchor) + Non-blocker (help 문구) / Local SQLite smoke 8단계 모두 PASS — fake gap row 검증으로 Blocker 닫힘 근거 확보 / first run: 4 rows committed (calendar 7일 dedup, 5/23 토 + 5/24 일 + 5/25 월 대체공휴일 모두 5/22 fallback) / schema close_only path 첫 production-level 활성 / drift 0 / Stage 1 commit 대상, Stage 2 push + Stage 3 production execution 별 GO 대기 — manual snapshot 생략 권장 (incremental write))
 - 2026-05-28: ADR-034 Phase 2d Step 3 Hana first PR Round 1 Stage 2+3 production execution 완료 (Stage 2 push + Stage 3 production write 모두 land / manual snapshot 생략 — Hana incremental write 자동 backup 1 Day + 개별 dates delete rollback anchor 신뢰 / `--currency USD --start-date 2026-05-21 --end-date 2026-05-27 --allow-production-write` / production verify: 4 rows committed (Hana usd-krw `[2026-05-21, 2026-05-22, 2026-05-26, 2026-05-27]`) + post-write validations passed + drift 0 + 휴일 dedup 정확 (5/23/24/25 → 5/22 fallback, 2026-05-25 대체공휴일 자연 흡수 — KRX_CANARY 사고 캘린더와 일관) + **schema close_only path production-level 첫 활성** (high==low==close + ohlc_quality close_only + basis_date NOT NULL + published_at NOT NULL KST timezone-aware + metadata_json.pbldSqn 각 row별 다른 회차 1356/2513/1081/1271) / 전체 production source_daily_rates state: KRX 25 rows + Hana 4 rows + Bithumb 0 rows / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0)
+- 2026-05-29: ADR-034 Phase 2d Step 3 Bithumb first PR Round 1 Stage 1 candidate — USDT/KRW partial backfill writer (scripts/backfill_bithumb_source_daily_rates.py 확장 / --write + --start-date + --end-date + --include-today + --allow-production-write + check_production_write_guard + validate_write_range + ensure_source_daily_rates_table_created + write_with_transaction_bithumb (Bithumb 방향 metadata policy — 모든 top-level metadata None + candle_ts_ms/candle_ts_kst metadata_json 격리) / Codex Round 1 Blocker (--write + --limit hard reject — partial write 위험 차단, early check fetch 전) + Non-blocker 2 (candle_ts_kst validation + 연속성 회귀 가드 expected_count == (end-start)+1) + cleanup (InvalidOperation unused import 제거) / Local SQLite smoke 6단계 모두 PASS — production guard 차단 + limit reject + first run 7 rows + DB query (all candle_ts_kst present) + idempotent rerun / **schema의 모든 top-level metadata None path 첫 production-level 활성 준비** (KRX contract_code 필수 + Hana basis_date+published_at+pbldSqn 필수와 다른 가장 단순 row mapping) / Stage 1 commit 대상, Stage 2 push + Stage 3 production execution 별 GO 대기 — manual snapshot 생략 권장)
