@@ -521,6 +521,246 @@ def _printable(row: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 3 — Write helpers (Codex 6 review rounds + Stage 1 보강)
+# ─────────────────────────────────────────────────────────────
+
+EXPECTED_BOUNDARY_DATE = date(2026, 5, 18)
+EXPECTED_BOUNDARY_CLOSE = Decimal("1496.500")
+
+
+def _date_arg(s: str) -> date:
+    """argparse type validator: ISO YYYY-MM-DD."""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"date format은 YYYY-MM-DD (입력: {s!r})")
+
+
+def validate_write_range(
+    start: date,
+    end: date,
+    current: ContractInfo,
+    previous_expiry: date,
+    today: date,
+    include_today: bool,
+) -> Optional[str]:
+    """Step 3 write 진입 전 사전 가드 (rollover boundary + today 가드).
+
+    Returns: error message (str) or None.
+    """
+    if start > end:
+        return f"start_date={start} > end_date={end}"
+    if start < previous_expiry:
+        return (
+            f"start_date={start} < previous.expiry={previous_expiry} — "
+            f"current contract({current.short_code}) 사용 시작 anchor 위반"
+        )
+    if end >= current.expiry_date:
+        return (
+            f"end_date={end} >= current.expiry={current.expiry_date} — "
+            f"current contract({current.short_code}) 사용 종료 anchor 위반 (rollover 후 next contract 영역)"
+        )
+    if not include_today and end >= today:
+        return (
+            f"end_date={end} >= today={today} (intraday close 미확정 위험). "
+            "--include-today 명시 또는 today-1 이하로 제한"
+        )
+    return None
+
+
+def check_production_write_guard(allow_production: bool) -> Optional[str]:
+    """Step 3 write 진입 전 production DB guard (Codex Blocker 1, Round 7).
+
+    DB URL dialect 검사 (sqlite는 안전, postgresql/mysql 등은 default reject).
+    URL 전체 출력 회피 — dialect + host redacted (CLAUDE.md 보안 원칙).
+
+    이 함수는 DB 연결 발생하는 모든 write-path 함수 (table create / session / fetch)
+    보다 먼저 호출되어야 함. 이전 사고 (network unreachable이 우연히 보호)의 anchor.
+
+    Returns: error message (str) or None.
+    """
+    from app.database import engine
+    dialect_name = engine.url.get_dialect().name  # 'sqlite' / 'postgresql' / ...
+    if dialect_name == "sqlite":
+        return None  # local 안전
+    if not allow_production:
+        host = engine.url.host or "(unknown)"
+        redacted_host = "***" if host and host != "(unknown)" else "(unknown)"
+        return (
+            f"non-SQLite DB detected (dialect={dialect_name} host={redacted_host}). "
+            "--allow-production-write 명시 안 됨 — production write 차단. "
+            "local smoke: DATABASE_URL=sqlite:///$(pwd)/data/exchange_rates.db env override 권장."
+        )
+    return None
+
+
+def ensure_source_daily_rates_table_created() -> None:
+    """SourceDailyRate table 존재 보장 (Codex Stage 1 보강).
+
+    local SQLite smoke 시 table 없을 수 있음. idempotent — 존재하면 skip.
+    Production에서도 안전 (Step 1 migration과 동일 패턴).
+    """
+    from app.database import engine
+    from app.models import SourceDailyRate
+    SourceDailyRate.__table__.create(bind=engine, checkfirst=True)
+
+
+def write_with_transaction(
+    rows_to_write: list[dict],
+    current: ContractInfo,
+    start_date: date,
+    end_date: date,
+) -> tuple[bool, list[str]]:
+    """단일 transaction write: upsert(commit=False) loop → post-write validation → commit/rollback.
+
+    Codex Blocker 2 (Round 7): post-write SELECT에 date range filter + exact count +
+    expected/written date set 정확 일치 검증. same contract의 이전 write row가
+    range 외에 있어도 잘못 포함되지 않도록.
+
+    Returns: (success: bool, issues: list[str])
+    """
+    from app.database import SessionLocal
+    from app.source_daily_rates import upsert as upsert_fn
+    from app.models import SourceDailyRate
+
+    session = SessionLocal()
+    issues: list[str] = []
+    try:
+        # 1. upsert (commit=False) loop — 명시적 keyword mapping
+        # (upsert 시그니처는 invariant rate=close라 'rate' 키 안 받음. row dict 추가 키 무시)
+        for row in rows_to_write:
+            upsert_fn(
+                session,
+                commit=False,
+                source=row["source"],
+                asset=row["asset"],
+                date_kst=row["date_kst"],
+                close=row["close"],
+                ohlc_quality=row["ohlc_quality"],
+                close_basis=row["close_basis"],
+                source_method=row["source_method"],
+                high=row.get("high"),
+                low=row.get("low"),
+                contract_code=row.get("contract_code"),
+                basis_date=row.get("basis_date"),
+                published_at=row.get("published_at"),
+                metadata_json=row.get("metadata_json"),
+            )
+
+        # 2. post-write validation (same transaction, pre-commit, date range 제한)
+        written = (
+            session.query(SourceDailyRate)
+            .filter(
+                SourceDailyRate.source == "krx",
+                SourceDailyRate.asset == "usd-krw-futures",
+                SourceDailyRate.contract_code == current.short_code,
+                SourceDailyRate.date_kst >= start_date,
+                SourceDailyRate.date_kst <= end_date,
+            )
+            .order_by(SourceDailyRate.date_kst.asc())
+            .all()
+        )
+
+        # (a) expected row count — 정확 일치 (Codex Round 7 정정: < → ==)
+        expected_count = len(rows_to_write)
+        if len(written) != expected_count:
+            issues.append(
+                f"row count: written {len(written)} != expected {expected_count} "
+                "(같은 contract + date range 한정 query)"
+            )
+
+        # (a-1) expected_dates vs written_dates 정확 일치 (Codex Blocker 2 강화)
+        expected_dates = {row["date_kst"] for row in rows_to_write}
+        written_dates = {row.date_kst for row in written}
+        missing = expected_dates - written_dates
+        extra = written_dates - expected_dates
+        if missing:
+            issues.append(
+                f"missing dates ({len(missing)}): {sorted(d.isoformat() for d in missing)[:5]}"
+            )
+        if extra:
+            issues.append(
+                f"unexpected dates in range ({len(extra)}): "
+                f"{sorted(d.isoformat() for d in extra)[:5]}"
+            )
+
+        # (b) rate == close drift 0
+        for row in written:
+            if row.rate != row.close:
+                issues.append(
+                    f"drift at date_kst={row.date_kst}: rate={row.rate} != close={row.close}"
+                )
+
+        # (c) all contract_code == current.short_code
+        for row in written:
+            if row.contract_code != current.short_code:
+                issues.append(
+                    f"contract_code mismatch at date_kst={row.date_kst}: "
+                    f"got {row.contract_code!r}, expected {current.short_code!r}"
+                )
+
+        # (d) basis_date IS NULL, published_at IS NULL
+        for row in written:
+            if row.basis_date is not None:
+                issues.append(
+                    f"basis_date NOT NULL at date_kst={row.date_kst}: got {row.basis_date}"
+                )
+            if row.published_at is not None:
+                issues.append(
+                    f"published_at NOT NULL at date_kst={row.date_kst}: got {row.published_at}"
+                )
+
+        # (e) duplicate date_kst — same contract 내 unique
+        seen_dates = set()
+        for row in written:
+            if row.date_kst in seen_dates:
+                issues.append(f"duplicate date_kst={row.date_kst} in same contract")
+            seen_dates.add(row.date_kst)
+
+        # (f) enum/literal 회귀 가드
+        for row in written:
+            if row.source != "krx":
+                issues.append(f"source mismatch at date_kst={row.date_kst}: got {row.source!r}")
+            if row.asset != "usd-krw-futures":
+                issues.append(f"asset mismatch at date_kst={row.date_kst}: got {row.asset!r}")
+            if row.source_method != "kis_daily_backfill":
+                issues.append(
+                    f"source_method mismatch at date_kst={row.date_kst}: got {row.source_method!r}"
+                )
+            if row.close_basis != "krx_cf_close_1545":
+                issues.append(
+                    f"close_basis mismatch at date_kst={row.date_kst}: got {row.close_basis!r}"
+                )
+            if row.ohlc_quality != "source_ohlc":
+                issues.append(
+                    f"ohlc_quality mismatch at date_kst={row.date_kst}: got {row.ohlc_quality!r}"
+                )
+
+        # (g) boundary sample — range includes 2026-05-18 → close == 1496.500
+        boundary_rows = [r for r in written if r.date_kst == EXPECTED_BOUNDARY_DATE]
+        if boundary_rows:
+            r = boundary_rows[0]
+            # Numeric → Decimal 비교 (precision 안전)
+            if Decimal(str(r.close)) != EXPECTED_BOUNDARY_CLOSE:
+                issues.append(
+                    f"boundary sample mismatch at {EXPECTED_BOUNDARY_DATE}: "
+                    f"got close={r.close}, expected {EXPECTED_BOUNDARY_CLOSE} (GRAPH §7-new B-B probe)"
+                )
+
+        if issues:
+            session.rollback()
+            return False, issues
+        session.commit()
+        return True, []
+    except Exception as e:
+        session.rollback()
+        issues.append(f"transaction exception: {type(e).__name__}: {e}")
+        return False, issues
+    finally:
+        session.close()
+
+
+# ─────────────────────────────────────────────────────────────
 # Token (KisAccessTokenManager 재사용 — drift 회피)
 # ─────────────────────────────────────────────────────────────
 
@@ -657,10 +897,54 @@ def main() -> None:
             "기본 제외가 안전. operator가 close 도래 후 명시 시에만 사용."
         ),
     )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help=(
+            "[Step 3 write mode] dry-run 통과 후 current contract row를 source_daily_rates에 적재. "
+            "default: dry-run only (safe). --start-date / --end-date 함께 명시 필수. "
+            "transaction 패턴 — upsert(commit=False) loop + post-write validation + commit/rollback."
+        ),
+    )
+    parser.add_argument(
+        "--start-date",
+        type=_date_arg,
+        default=None,
+        help="[--write 시 필수] YYYY-MM-DD. current contract 사용 시작 anchor (previous.expiry) 이상.",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=_date_arg,
+        default=None,
+        help="[--write 시 필수] YYYY-MM-DD. current contract 사용 종료 anchor (current.expiry) 미만 + today-1 이하.",
+    )
+    parser.add_argument(
+        "--allow-production-write",
+        action="store_true",
+        help=(
+            "[Step 3 production guard] non-SQLite DB (RDS PostgreSQL 등)에 --write 진입 허용. "
+            "default off — local SQLite smoke만 허용. production execution은 별도 명시 + "
+            "RDS backup 직전 + Stage 3 GO 필수."
+        ),
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
     load_dotenv(project_root / ".env")
+
+    # *** PRODUCTION GUARD EARLY (Codex Round 8) ***
+    # KIS API call (token/master/daily fetch) 진입 전 + DB connection 전.
+    # production .env로 --write 잘못 실행 시 DB write뿐 아니라 KIS token rotation /
+    # master fetch / daily fetch 모두 사전 차단. KIS 1일 1회 발급 원칙 보호.
+    if args.write:
+        if args.start_date is None or args.end_date is None:
+            print("[CONFIG 실패] --write 시 --start-date / --end-date 필수")
+            sys.exit(1)
+        guard_err = check_production_write_guard(args.allow_production_write)
+        if guard_err:
+            print(f"[PRODUCTION 가드] {guard_err}")
+            sys.exit(1)
+
     app_key = os.getenv("KIS_APP_KEY")
     app_secret = os.getenv("KIS_APP_SECRET")
     if not app_key or not app_secret:
@@ -901,10 +1185,98 @@ def main() -> None:
         print(f"[DRY-RUN 완료] 모든 validation 통과 (DB write 안 됨)")
     else:
         print(f"[DRY-RUN 실패] 총 {total_issues}건 이슈 (DB write 안 됨)")
-    print()
-    print("[다음 단계] Step 3 partial backfill 실측 적재는 별도 PR (ADR-034 §14 §3 잠정 KRX 먼저).")
 
     if total_issues > 0:
+        # dry-run validation fail 시 write 진입 차단
+        if args.write:
+            print(f"\n[WRITE SKIP] dry-run validation 실패 — write 진입 차단")
+        sys.exit(1)
+
+    # ─────────────────────────────────────────────────────────────
+    # Step 3 write section (--write 명시 시 진입)
+    # ─────────────────────────────────────────────────────────────
+    if not args.write:
+        print()
+        print("[다음 단계] Step 3 partial backfill 실측 적재는 --write 명시 시 진입.")
+        return
+
+    print()
+    print("=" * 60)
+    print("Step 3 write section (current contract only)")
+    print("=" * 60)
+    # production guard + start/end 필수 검사는 main 진입 시점에서 처리됨 (Codex Round 8).
+
+    # rollover boundary + today 가드
+    range_err = validate_write_range(
+        start=args.start_date,
+        end=args.end_date,
+        current=current,
+        previous_expiry=previous.expiry_date,
+        today=today,
+        include_today=args.include_today,
+    )
+    if range_err:
+        print(f"[CONFIG 실패] write range: {range_err}")
+        sys.exit(1)
+
+    print(f"  write range: {args.start_date} ~ {args.end_date}")
+    print(f"  current contract: {current.short_code} (expiry={current.expiry_date})")
+    print(f"  rollover boundary: previous.expiry={previous.expiry_date} <= start && end < current.expiry")
+    print()
+
+    # current contract row 중 args range 내에 있는 row만 추출 (write 대상)
+    rows_to_write = [
+        r for r in cur_rows
+        if args.start_date <= r["date_kst"] <= args.end_date
+    ]
+    print(f"  write 대상 row 수: {len(rows_to_write)} (cur_rows {len(cur_rows)} 중 range 내)")
+
+    if not rows_to_write:
+        print("[WRITE SKIP] write 대상 row 0개 — args range 안에 fetched row 없음")
+        sys.exit(1)
+
+    # OOR hard reject (dry-run에서 surface된 항목 write 진입 차단)
+    oor_in_write = [
+        r for r in rows_to_write
+        if r["date_kst"] < args.start_date or r["date_kst"] > args.end_date
+    ]
+    if oor_in_write:
+        print(f"[WRITE 실패] write 대상 중 out-of-range {len(oor_in_write)}건 — hard reject")
+        sys.exit(1)
+
+    # Ensure table created (Codex Stage 1 보강)
+    print("  ensure source_daily_rates table created (checkfirst=True, idempotent)...")
+    try:
+        ensure_source_daily_rates_table_created()
+    except Exception as e:
+        print(f"[TABLE 실패] {type(e).__name__}: {e}")
+        sys.exit(1)
+    print("  OK")
+    print()
+
+    # Transaction write
+    print(f"[Step 3 write] {len(rows_to_write)} rows → source_daily_rates ...")
+    success, write_issues = write_with_transaction(
+        rows_to_write, current, args.start_date, args.end_date
+    )
+    if success:
+        print(f"[Step 3 write 완료] {len(rows_to_write)} rows committed + 7 post-write validations passed")
+        print()
+        print("[Rollback anchor] cleanup 시:")
+        print(
+            f"  from app.database import SessionLocal; from app.source_daily_rates import delete_range; "
+            f'db = SessionLocal(); '
+            f'delete_range(db, "krx", "usd-krw-futures", date({args.start_date.year}, {args.start_date.month}, {args.start_date.day}), '
+            f'date({args.end_date.year}, {args.end_date.month}, {args.end_date.day}))'
+        )
+        print()
+        print("[Stage 2] commit 별 GO / Stage 3 production execution 별 GO (RDS backup 직전).")
+    else:
+        print(f"[Step 3 write 실패] {len(write_issues)}건 issue — transaction rollback 완료")
+        for issue in write_issues[:5]:
+            print(f"  - {issue}")
+        if len(write_issues) > 5:
+            print(f"  ... 외 {len(write_issues) - 5}건")
         sys.exit(1)
 
 

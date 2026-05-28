@@ -4832,6 +4832,99 @@ validation `validate_usage_segment`: `previous_contract.expiry_date <= row.date_
 - Step 3 적재 시 KIS probe out-of-range row 차단 logic 별도 land (현재 dry-run에서 WARNING surface 완료)
 - retry/backoff/structured error는 scheduled job (Step 3+) 진입 시 함께 land
 
+### Phase 2d Step 3 first land — KRX current partial backfill writer (2026-05-28)
+
+ADR-034 §14 Rollout step 3 **first PR** — KRX current contract (A75606) partial backfill writer land. **Step 3 진입 첫 source = KRX** (ADR-034 §14 §3 잠정 — service value 기준 + KIS dry-run에서 chain/rollover/cap/stale 모두 검증 완료). 본 commit = **Stage 1 (code in repo)**. **Stage 2 (origin/master push) 별 GO 대기**. **Stage 3 (production RDS execution)**은 별 GO + RDS backup 직전 + SSH 진입 + `--allow-production-write` 명시 필수.
+
+**변경 파일** (Stage 1 land):
+
+- `scripts/backfill_kis_source_daily_rates.py` 확장 (Step 2-3 dry-run script에 write mode 추가):
+  - `--write` flag (default off, dry-run only가 default safe)
+  - `--start-date` / `--end-date` (required when `--write`)
+  - `--allow-production-write` (default off — non-SQLite DB 차단)
+  - 신규 함수: `check_production_write_guard()` / `validate_write_range()` / `ensure_source_daily_rates_table_created()` / `write_with_transaction()` / `_date_arg`
+  - 외부 의존성 0 (기존 + `app.database.SessionLocal` + `app.models.SourceDailyRate` + `app.source_daily_rates.upsert/delete_range` 재사용)
+
+**Step 3 first PR scope (옵션 A — single contract)**:
+
+- KRX current contract **A75606만** (chain previous + next 제외 — 옵션 B는 후속 PR)
+- date range = `[2026-05-18, 2026-05-27]` (rollover boundary 시작 ~ today-1)
+- 7 영업일 row (cur_rows 7 중 range 내 7)
+- DB write: `source_daily_rates` table만 (Phase 2d schema)
+- DB read 호출자: **0** (v2 endpoint Phase 2e 미진입 — user-facing 영향 0)
+
+**Production guard (Codex Round 8 — early call)**:
+
+- 위치: main() args parse 직후 + `.env` load 직후 + KIS API call (token/master/daily fetch) **모두 전**
+- 동작: `engine.url.get_dialect().name == "sqlite"` 아니면 default reject
+- 출력: `dialect=postgresql host=***` redacted (URL 전체 출력 X, CLAUDE.md 보안 원칙)
+- 안전 효과: production .env에서 `--write` 잘못 실행 시 **output 1 line + exit 1** (이전 사고 시 104 line + KIS API call 진행). KIS 1일 1회 발급 원칙 + token rotation risk + rate limit 영향 **모두 0**.
+
+**Transaction pattern (Codex Round 7)**:
+
+- `upsert(commit=False)` loop (명시적 keyword mapping — row dict 추가 키 무시, invariant `rate=close` 안전)
+- post-write SELECT with **date range filter** (`date_kst BETWEEN start AND end` + source/asset/contract_code) — same contract 다른 range row 검증 혼입 차단
+- 7 post-write validations:
+  - exact row count `== expected_count` (`<` 검사 폐기)
+  - **`expected_dates set == written_dates set` 정확 일치** (missing/extra 양방향)
+  - `rate == close` invariant
+  - `contract_code == current.short_code`
+  - `basis_date IS NULL` / `published_at IS NULL` (KRX 패턴)
+  - duplicate `date_kst` 0
+  - enum/literal 회귀 가드 (`source` / `asset` / `source_method` / `close_basis` / `ohlc_quality`)
+  - boundary sample — range includes 2026-05-18 시 `close == 1496.500` (GRAPH §7-new B-B probe 사례)
+- 검증 통과 → `db.commit()` / 실패 → `db.rollback()` (transaction atomic, partial write 0)
+
+**Local SQLite smoke 결과 (DATABASE_URL=sqlite:///$(pwd)/data/exchange_rates.db override)**:
+
+| Step | 결과 |
+| --- | --- |
+| py_compile | OK |
+| `--write` without override (production .env 상태) | exit 1, output 1 line, KIS API call 0 (Round 8 guard early) |
+| SQLite override smoke first run | exit 0, **7 rows committed + 7 post-write validations passed** |
+| Idempotent re-run | exit 0, 동일 결과 (unique key 자연 idempotent + COALESCE-style set_ 조건부) |
+| Post-write DB query 직접 검증 | 7 rows / `[2026-05-18, 2026-05-27]` / **boundary close=1496.500 (GRAPH §7-new 재현)** / `rate==close=True` / `basis_date/published_at IS NULL` / enum/literal 모두 정확 |
+
+**Rollback anchor** (cleanup 필요 시):
+
+```python
+from app.database import SessionLocal
+from app.source_daily_rates import delete_range
+from datetime import date
+db = SessionLocal()
+delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
+```
+
+**Stage 분리 (Codex anchor)**:
+
+- **Stage 1**: `--write` script + helper functions in repo (본 commit)
+- **Stage 2**: origin/master push (별 GO)
+- **Stage 3**: production RDS execution (별 GO + RDS backup 직전 + SSH 진입 + `--allow-production-write` 명시)
+- Stage 3 진입 절차:
+  1. RDS backup (`scripts/backup-db.sh` 또는 manual snapshot)
+  2. SSH `ubuntu@<production-ec2>` 진입
+  3. `docker compose run --rm fastapi python scripts/backfill_kis_source_daily_rates.py --write --start-date 2026-05-18 --end-date 2026-05-27 --allow-production-write`
+  4. post-write validation 통과 확인
+  5. drift query (`find_rate_close_drift`) 0 확인
+
+**보정 history (Codex 8 review rounds for KIS / Round 7-8 for Step 3 writer)**:
+
+- Round 7 (Step 3 writer 1차): 2 Blocker (production guard 신규 + post-write query date range filter + exact count + dates set 검증)
+- Round 7 (사고): `.env` DATABASE_URL이 production RDS 가리킴 발견. network unreachable이 우연히 보호. local log 정리 + script-level guard 추가 필요성 확정
+- Round 7 보정: `--allow-production-write` flag + dialect/host redacted + `write_with_transaction(start, end)` 시그니처 확장
+- Round 8 (Codex Blocker): guard 위치가 KIS API call 후 → token rotation / master fetch / daily fetch 영향. guard를 main 진입 직후 (args parse + .env load 후, KIS keys 검사 전)로 이동
+- Round 8 검증: output 104 lines → **1 line** (token/master/fetch 모두 진입 전 즉시 차단, KIS API call 0)
+
+**Step 3 후속 작업**:
+
+- **Stage 3 production execution** (별 GO + RDS backup 직전) — production RDS에 동일 7 rows 적재
+- **Step 3 옵션 B**: chain 확장 (previous A75605 + current A75606) — 후속 PR. 이전 contract row까지 land 시 cleanup/rollback 범위 ↑이라 first PR에서 분리
+- **Step 3 KRX 외 source**: Hana / Bithumb partial backfill — Step 3 first PR 안정성 확인 후 진입
+- **probe out-of-range row 차단** (현재 dry-run WARNING surface): Step 3 적재 시 hard reject logic 별도 land
+- **Step 4 full backfill**: 모든 contract chain + 모든 source historical 적재 (1년+ range)
+- **Step 5 daily append**: scheduled job (close finalizer / observed_eod / source_rates rollup) — retry/backoff/structured error 함께 land
+- **Step 6 v2 endpoint switch** (Phase 2e): catalog/tab endpoint가 source_daily_rates 조회로 전환
+
 ### 16. Related docs
 
 - [ADR-033](#adr-033-graph-api-v2-catalog-policy--legacy-공존--hana-backfill--bithumbkrx-actual-only--dxy_futures-1d-only): Graph API v2 catalog policy + Amendment 2026-05-27 + Amendment 후속 (Decision A-E)
@@ -4879,3 +4972,4 @@ validation `validate_usage_segment`: `previous_contract.expiry_date <= row.date_
 - 2026-05-28: ADR-034 Phase 2d Step 2 land — Bithumb 24h candlestick dry-run validator (scripts/backfill_bithumb_source_daily_rates.py 신규 / 9 validation suite / 전체 904 candles 0 issue / KST 00:00 anchor 일관 확정 / 904일 span 누락 0 / Step 2/3 경계 보존 — DB write X)
 - 2026-05-28: ADR-034 Phase 2d Step 2-2 land — Hana official_historical dry-run validator (scripts/backfill_hana_source_daily_rates.py 신규 / 10 validation suite / USD·JPY·EUR 4 case smoke 0 issue / 휴일 fallback 정확 검증 — 2026-05-24 일 → 2026-05-22 금 / close_only + basis_date + published_at + pbldSqn schema path 처음 활성 / Step 2/3 경계 보존)
 - 2026-05-28: ADR-034 Phase 2d Step 2-3 land — KIS daily chain dry-run validator (scripts/backfill_kis_source_daily_rates.py 신규 / 13 validation suite / 2 mode dynamic+known-boundary-smoke 모두 exit 0 / GRAPH §7-new B-B probe 사례 A75606 20260518 close=1496.500 재현 / chain 사용 구간 [previous.expiry, this.expiry) 반열린 / today 제외 default / mapped/probe 분리 / KisAccessTokenManager 재사용 / Step 2 closed — Bithumb·Hana·KIS 3-source dry-run 완료)
+- 2026-05-28: ADR-034 Phase 2d Step 3 first land — KRX current partial backfill writer (scripts/backfill_kis_source_daily_rates.py 확장 / --write + --start-date + --end-date + --allow-production-write / production guard early call — token/master/daily fetch 모두 전 즉시 차단 / transaction pattern upsert(commit=False) + range-filtered post-write SELECT + exact count + expected/written dates set / 7 post-write validations / Codex Round 7-8 보정 — production guard + range filter / SQLite override smoke 7 rows committed + idempotent rerun 통과 + boundary close=1496.500 DB level 재현 / Stage 1 commit (code land), Stage 2 push / Stage 3 production execution 별 GO)
