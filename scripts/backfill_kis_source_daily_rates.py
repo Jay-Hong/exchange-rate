@@ -539,26 +539,32 @@ def _date_arg(s: str) -> date:
 def validate_write_range(
     start: date,
     end: date,
-    current: ContractInfo,
-    previous_expiry: date,
+    chain_start_expiry: date,
+    chain_end_expiry: date,
     today: date,
     include_today: bool,
+    chain_label: str,
 ) -> Optional[str]:
     """Step 3 write 진입 전 사전 가드 (rollover boundary + today 가드).
+
+    multi-contract 지원 (옵션 B Round 9):
+      - current 모드: chain_start = previous.expiry, chain_end = current.expiry
+      - previous 모드: chain_start = before_previous.expiry, chain_end = previous.expiry
+      - both 모드: chain_start = before_previous.expiry, chain_end = current.expiry
 
     Returns: error message (str) or None.
     """
     if start > end:
         return f"start_date={start} > end_date={end}"
-    if start < previous_expiry:
+    if start < chain_start_expiry:
         return (
-            f"start_date={start} < previous.expiry={previous_expiry} — "
-            f"current contract({current.short_code}) 사용 시작 anchor 위반"
+            f"start_date={start} < chain_start_expiry={chain_start_expiry} — "
+            f"{chain_label} 사용 시작 anchor 위반"
         )
-    if end >= current.expiry_date:
+    if end >= chain_end_expiry:
         return (
-            f"end_date={end} >= current.expiry={current.expiry_date} — "
-            f"current contract({current.short_code}) 사용 종료 anchor 위반 (rollover 후 next contract 영역)"
+            f"end_date={end} >= chain_end_expiry={chain_end_expiry} — "
+            f"{chain_label} 사용 종료 anchor 위반 (rollover 후 next contract 영역)"
         )
     if not include_today and end >= today:
         return (
@@ -607,15 +613,17 @@ def ensure_source_daily_rates_table_created() -> None:
 
 def write_with_transaction(
     rows_to_write: list[dict],
-    current: ContractInfo,
+    contract_codes: set[str],
     start_date: date,
     end_date: date,
 ) -> tuple[bool, list[str]]:
     """단일 transaction write: upsert(commit=False) loop → post-write validation → commit/rollback.
 
+    Round 9 (옵션 B): single contract → multi-contract 지원 (current / previous / both).
+    contract_codes = {current.short_code} | {previous.short_code} | {둘 다}.
+
     Codex Blocker 2 (Round 7): post-write SELECT에 date range filter + exact count +
-    expected/written date set 정확 일치 검증. same contract의 이전 write row가
-    range 외에 있어도 잘못 포함되지 않도록.
+    expected/written date set 정확 일치 검증.
 
     Returns: (success: bool, issues: list[str])
     """
@@ -647,13 +655,13 @@ def write_with_transaction(
                 metadata_json=row.get("metadata_json"),
             )
 
-        # 2. post-write validation (same transaction, pre-commit, date range 제한)
+        # 2. post-write validation (same transaction, pre-commit, date range + contract_code IN 제한)
         written = (
             session.query(SourceDailyRate)
             .filter(
                 SourceDailyRate.source == "krx",
                 SourceDailyRate.asset == "usd-krw-futures",
-                SourceDailyRate.contract_code == current.short_code,
+                SourceDailyRate.contract_code.in_(contract_codes),
                 SourceDailyRate.date_kst >= start_date,
                 SourceDailyRate.date_kst <= end_date,
             )
@@ -666,23 +674,21 @@ def write_with_transaction(
         if len(written) != expected_count:
             issues.append(
                 f"row count: written {len(written)} != expected {expected_count} "
-                "(같은 contract + date range 한정 query)"
+                f"(contract_codes={sorted(contract_codes)} + date range 한정 query)"
             )
 
-        # (a-1) expected_dates vs written_dates 정확 일치 (Codex Blocker 2 강화)
-        expected_dates = {row["date_kst"] for row in rows_to_write}
-        written_dates = {row.date_kst for row in written}
-        missing = expected_dates - written_dates
-        extra = written_dates - expected_dates
+        # (a-1) expected (date_kst, contract_code) tuples vs written tuples 정확 일치
+        # (Codex Blocker 2 강화 + Round 9 multi-contract — same date가 다른 contract에 매핑 가능성 차단)
+        expected_pairs = {(row["date_kst"], row["contract_code"]) for row in rows_to_write}
+        written_pairs = {(row.date_kst, row.contract_code) for row in written}
+        missing = expected_pairs - written_pairs
+        extra = written_pairs - expected_pairs
         if missing:
-            issues.append(
-                f"missing dates ({len(missing)}): {sorted(d.isoformat() for d in missing)[:5]}"
-            )
+            sample = sorted([(d.isoformat(), c) for d, c in missing])[:5]
+            issues.append(f"missing (date, contract) pairs ({len(missing)}): {sample}")
         if extra:
-            issues.append(
-                f"unexpected dates in range ({len(extra)}): "
-                f"{sorted(d.isoformat() for d in extra)[:5]}"
-            )
+            sample = sorted([(d.isoformat(), c) for d, c in extra])[:5]
+            issues.append(f"unexpected (date, contract) pairs in range ({len(extra)}): {sample}")
 
         # (b) rate == close drift 0
         for row in written:
@@ -691,12 +697,12 @@ def write_with_transaction(
                     f"drift at date_kst={row.date_kst}: rate={row.rate} != close={row.close}"
                 )
 
-        # (c) all contract_code == current.short_code
+        # (c) all contract_code ∈ contract_codes set (Round 9 multi-contract)
         for row in written:
-            if row.contract_code != current.short_code:
+            if row.contract_code not in contract_codes:
                 issues.append(
                     f"contract_code mismatch at date_kst={row.date_kst}: "
-                    f"got {row.contract_code!r}, expected {current.short_code!r}"
+                    f"got {row.contract_code!r}, expected ∈ {sorted(contract_codes)}"
                 )
 
         # (d) basis_date IS NULL, published_at IS NULL
@@ -901,7 +907,7 @@ def main() -> None:
         "--write",
         action="store_true",
         help=(
-            "[Step 3 write mode] dry-run 통과 후 current contract row를 source_daily_rates에 적재. "
+            "[Step 3 write mode] dry-run 통과 후 --contract mode 대상 row를 source_daily_rates에 적재. "
             "default: dry-run only (safe). --start-date / --end-date 함께 명시 필수. "
             "transaction 패턴 — upsert(commit=False) loop + post-write validation + commit/rollback."
         ),
@@ -910,13 +916,19 @@ def main() -> None:
         "--start-date",
         type=_date_arg,
         default=None,
-        help="[--write 시 필수] YYYY-MM-DD. current contract 사용 시작 anchor (previous.expiry) 이상.",
+        help=(
+            "[--write 시 필수] YYYY-MM-DD. selected chain 사용 시작 anchor 이상 "
+            "(--contract current=previous.expiry / previous=before_previous.expiry / both=before_previous.expiry)."
+        ),
     )
     parser.add_argument(
         "--end-date",
         type=_date_arg,
         default=None,
-        help="[--write 시 필수] YYYY-MM-DD. current contract 사용 종료 anchor (current.expiry) 미만 + today-1 이하.",
+        help=(
+            "[--write 시 필수] YYYY-MM-DD. selected chain 사용 종료 anchor 미만 + today-1 이하 "
+            "(--contract current=current.expiry / previous=previous.expiry / both=current.expiry)."
+        ),
     )
     parser.add_argument(
         "--allow-production-write",
@@ -925,6 +937,18 @@ def main() -> None:
             "[Step 3 production guard] non-SQLite DB (RDS PostgreSQL 등)에 --write 진입 허용. "
             "default off — local SQLite smoke만 허용. production execution은 별도 명시 + "
             "RDS backup 직전 + Stage 3 GO 필수."
+        ),
+    )
+    parser.add_argument(
+        "--contract",
+        choices=["current", "previous", "both"],
+        default="current",
+        help=(
+            "[Step 3 옵션 B] write 대상 contract chain (default: current). "
+            "current = 현재 active (예: A75606). previous = 직전 만기 (예: A75605). "
+            "both = previous + current 둘 다 single transaction. "
+            "사용 구간: current=[prev.expiry, cur.expiry) / previous=[bef_prev.expiry, prev.expiry) / "
+            "both=[bef_prev.expiry, cur.expiry)."
         ),
     )
     args = parser.parse_args()
@@ -1202,37 +1226,68 @@ def main() -> None:
 
     print()
     print("=" * 60)
-    print("Step 3 write section (current contract only)")
+    print(f"Step 3 write section (--contract {args.contract})")
     print("=" * 60)
     # production guard + start/end 필수 검사는 main 진입 시점에서 처리됨 (Codex Round 8).
 
-    # rollover boundary + today 가드
+    # --contract 분기 (Round 9 옵션 B): mode별 rows / contract_codes / chain range
+    if args.contract == "current":
+        rows_source = cur_rows
+        contract_codes = {current.short_code}
+        chain_start_expiry = previous.expiry_date
+        chain_end_expiry = current.expiry_date
+        chain_label = f"current ({current.short_code})"
+    elif args.contract == "previous":
+        rows_source = prev_rows
+        contract_codes = {previous.short_code}
+        chain_start_expiry = before_previous.expiry_date
+        chain_end_expiry = previous.expiry_date
+        chain_label = f"previous ({previous.short_code})"
+    else:  # "both"
+        rows_source = prev_rows + cur_rows
+        contract_codes = {previous.short_code, current.short_code}
+        chain_start_expiry = before_previous.expiry_date
+        chain_end_expiry = current.expiry_date
+        chain_label = f"both ({previous.short_code} + {current.short_code})"
+
+    # rollover boundary + today 가드 (multi-contract 지원)
     range_err = validate_write_range(
         start=args.start_date,
         end=args.end_date,
-        current=current,
-        previous_expiry=previous.expiry_date,
+        chain_start_expiry=chain_start_expiry,
+        chain_end_expiry=chain_end_expiry,
         today=today,
         include_today=args.include_today,
+        chain_label=chain_label,
     )
     if range_err:
         print(f"[CONFIG 실패] write range: {range_err}")
         sys.exit(1)
 
+    print(f"  contract mode: {args.contract}")
+    print(f"  chain: {chain_label}")
+    print(f"  contract_codes: {sorted(contract_codes)}")
     print(f"  write range: {args.start_date} ~ {args.end_date}")
-    print(f"  current contract: {current.short_code} (expiry={current.expiry_date})")
-    print(f"  rollover boundary: previous.expiry={previous.expiry_date} <= start && end < current.expiry")
+    print(f"  rollover boundary: [{chain_start_expiry}, {chain_end_expiry})")
     print()
 
-    # current contract row 중 args range 내에 있는 row만 추출 (write 대상)
+    # rows source 중 args range 내에 있는 row만 추출 (write 대상)
     rows_to_write = [
-        r for r in cur_rows
+        r for r in rows_source
         if args.start_date <= r["date_kst"] <= args.end_date
     ]
-    print(f"  write 대상 row 수: {len(rows_to_write)} (cur_rows {len(cur_rows)} 중 range 내)")
+    print(f"  write 대상 row 수: {len(rows_to_write)} (rows_source {len(rows_source)} 중 range 내)")
 
     if not rows_to_write:
         print("[WRITE SKIP] write 대상 row 0개 — args range 안에 fetched row 없음")
+        sys.exit(1)
+
+    # contract_code 정합성 사전 확인 (rows_to_write 안의 contract_code가 모두 contract_codes set 안에 있음)
+    invalid_contract = [
+        r for r in rows_to_write if r.get("contract_code") not in contract_codes
+    ]
+    if invalid_contract:
+        print(f"[WRITE 실패] write 대상 row 중 contract_code 위반 {len(invalid_contract)}건 — hard reject")
         sys.exit(1)
 
     # OOR hard reject (dry-run에서 surface된 항목 write 진입 차단)
@@ -1254,10 +1309,10 @@ def main() -> None:
     print("  OK")
     print()
 
-    # Transaction write
-    print(f"[Step 3 write] {len(rows_to_write)} rows → source_daily_rates ...")
+    # Transaction write (multi-contract)
+    print(f"[Step 3 write] {len(rows_to_write)} rows → source_daily_rates (contracts={sorted(contract_codes)}) ...")
     success, write_issues = write_with_transaction(
-        rows_to_write, current, args.start_date, args.end_date
+        rows_to_write, contract_codes, args.start_date, args.end_date
     )
     if success:
         print(f"[Step 3 write 완료] {len(rows_to_write)} rows committed + 7 post-write validations passed")

@@ -4832,6 +4832,80 @@ validation `validate_usage_segment`: `previous_contract.expiry_date <= row.date_
 - Step 3 적재 시 KIS probe out-of-range row 차단 logic 별도 land (현재 dry-run에서 WARNING surface 완료)
 - retry/backoff/structured error는 scheduled job (Step 3+) 진입 시 함께 land
 
+### Phase 2d Step 3 옵션 B Round 9 — KRX chain previous + current 확장 (2026-05-28)
+
+ADR-034 §14 Rollout step 3 옵션 B 진입 — **chain previous + current 확장** (first PR의 current 한정 → previous A75605 + current A75606 chain 단일 transaction 적재 지원). 본 commit = **Stage 1 (code in repo) 대상**. **Stage 2 (origin/master push)** + **Stage 3 (production RDS execution)** 모두 별 GO 대기 (Stage 3는 새 RDS manual snapshot 직후).
+
+**변경 파일** (Stage 1 land 대상):
+
+- `scripts/backfill_kis_source_daily_rates.py` 확장 (옵션 B Round 9):
+  - `--contract current|previous|both` argparse 추가 (default `current`, **후방 호환**)
+  - `validate_write_range(chain_start_expiry, chain_end_expiry, chain_label)` 시그니처 확장 — single contract → multi-contract chain anchor
+  - `write_with_transaction(contract_codes: set[str])` 시그니처 확장 — multi-contract single transaction
+  - post-write SELECT: `contract_code.in_(contract_codes)` + date range filter (same-contract 다른 range row 혼입 차단)
+  - post-write validation: `expected_dates set` → **`expected (date_kst, contract_code) pairs set`** (multi-contract — same date 다른 contract 매핑 위험 차단, 강화)
+  - main() write section: `--contract` 분기 (current/previous/both별 rows_source / contract_codes / chain anchor 결정)
+  - help 문구 정정 ("current contract" → "selected chain mode")
+
+**Chain 사용 구간 (mode별)**:
+
+| Mode | `chain_start_expiry` | `chain_end_expiry` | 적재 대상 |
+| --- | --- | --- | --- |
+| `current` (default) | `previous.expiry` (=2026-05-18) | `current.expiry` (=2026-06-15) | A75606 |
+| `previous` | `before_previous.expiry` (=2026-04-20) | `previous.expiry` (=2026-05-18) | A75605 |
+| `both` | `before_previous.expiry` (=2026-04-20) | `current.expiry` (=2026-06-15) | A75605 + A75606 |
+
+**Local SQLite smoke 5단계 (모두 PASS)**:
+
+| Step | 결과 |
+| --- | --- |
+| 1. py_compile + dry-run regression (`--contract` 없을 때 default current, write 안 함) | exit 0 |
+| 2. `--contract previous` smoke ([2026-04-20, 2026-05-17], A75605) | exit 0, **18 rows committed** (영업일 기준) |
+| 3. cleanup + `--contract both` smoke ([2026-04-20, 2026-05-27], chain 전체) | exit 0, **25 rows committed** (18 prev + 7 cur, single transaction) |
+| 4. idempotent `--contract both` rerun (같은 args) | exit 0, 동일 결과 (unique key 자연 idempotent + COALESCE-style set_ 조건부) |
+| 5. cross-mode `--contract previous` re-run on same DB | exit 0, current rows 영향 0, total 25 rows 유지, drift 0 |
+
+**핵심 발견 (rollover boundary 정합 검증)**:
+
+- A75605 사용 구간 정확 분리: rows `[2026-04-20 ~ 2026-05-15]` (만기 5/18 이전 마지막 영업일까지)
+- A75606 사용 구간 정확 분리: rows `[2026-05-18 ~ 2026-05-27]` (rollover boundary부터)
+- 5/16 토 / 5/17 일은 영업일 아니라 row 없음 (자연 분리)
+- **boundary 2026-05-18 → A75606 (current) / close=1496.500** — GRAPH §7-new B-B probe 사례 100% 재현 (both mode에서도)
+- cross-mode regression: same DB에 previous-only re-run 시 current 8 rows 영향 0 (mode 분리 정확)
+
+**Codex 검토 (Round 9, Blocker 0)**:
+
+- Blocker 없음 — diff/smoke 결과 모두 정합
+- post-write 검증이 `(date_kst, contract_code)` pair 기준 강화되어 multi-contract 혼입/누락 검출 OK
+- query 도 `contract_code.in_()` + date range 제한으로 기존 row 혼입 위험 낮음
+- Non-blocker (commit 전 정정 완료): `--write`/`--start-date`/`--end-date` help 문구 "current contract" → "selected chain mode"로 정정
+
+**Stage 분리 (옵션 B, Step 3 first PR 패턴 동일)**:
+
+- **Stage 1**: `--contract` 확장 script + 5-단계 SQLite smoke 검증 — **본 commit 대상**
+- **Stage 2**: origin/master push — **별 GO 대기**
+- **Stage 3**: production RDS execution — **별 GO 대기** (절차: 새 RDS manual snapshot 생성 → SSH → git pull → docker compose build fastapi → `docker compose run --rm fastapi python scripts/backfill_kis_source_daily_rates.py --write --contract both --start-date 2026-04-20 --end-date 2026-05-27 --allow-production-write` 또는 `--contract previous` 1차)
+
+**Rollback anchor**:
+
+```python
+from app.database import SessionLocal
+from app.source_daily_rates import delete_range
+from datetime import date
+db = SessionLocal()
+# previous only:
+delete_range(db, "krx", "usd-krw-futures", date(2026, 4, 20), date(2026, 5, 17))
+# 또는 both (chain 전체):
+delete_range(db, "krx", "usd-krw-futures", date(2026, 4, 20), date(2026, 5, 27))
+```
+
+**후속 작업 (옵션 B Stage 3 진입 후)**:
+
+- Hana / Bithumb Step 3 partial backfill 진입 (KRX 옵션 B 안정성 확인 후)
+- Step 4 full backfill (모든 contract chain + 모든 source historical 1년+ range)
+- Step 5 daily append job (scheduled cron + retry/backoff/structured error)
+- Step 6 v2 endpoint switch (Phase 2e)
+
 ### Phase 2d Step 3 first land — KRX current partial backfill writer (2026-05-28)
 
 ADR-034 §14 Rollout step 3 **first PR** — KRX current contract (A75606) partial backfill writer land. **Step 3 진입 첫 source = KRX** (ADR-034 §14 §3 잠정 — service value 기준 + KIS dry-run에서 chain/rollover/cap/stale 모두 검증 완료). **Stage 1 (commit `40279c9`) + Stage 2 (origin/master push) + Stage 3 (production RDS execution) 모두 land 완료** (2026-05-28 KST 18:30, RDS manual snapshot `fxi-pre-step3-2026-05-28` 직후 production write). Stage 3 production verify: **7 rows committed + 7 post-write validations passed + drift 0 + boundary close=1496.500 production-level 재현** (GRAPH §7-new B-B probe 사례). 운영 fastapi runtime 갱신은 Phase 2e endpoint switch 시점 별 배포 영역 (현재 source_daily_rates read 호출자 0 — user-facing 영향 0).
@@ -4974,3 +5048,4 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - 2026-05-28: ADR-034 Phase 2d Step 2-3 land — KIS daily chain dry-run validator (scripts/backfill_kis_source_daily_rates.py 신규 / 13 validation suite / 2 mode dynamic+known-boundary-smoke 모두 exit 0 / GRAPH §7-new B-B probe 사례 A75606 20260518 close=1496.500 재현 / chain 사용 구간 [previous.expiry, this.expiry) 반열린 / today 제외 default / mapped/probe 분리 / KisAccessTokenManager 재사용 / Step 2 closed — Bithumb·Hana·KIS 3-source dry-run 완료)
 - 2026-05-28: ADR-034 Phase 2d Step 3 first land — KRX current partial backfill writer (scripts/backfill_kis_source_daily_rates.py 확장 / --write + --start-date + --end-date + --allow-production-write / production guard early call — token/master/daily fetch 모두 전 즉시 차단 / transaction pattern upsert(commit=False) + range-filtered post-write SELECT + exact count + expected/written dates set / 7 post-write validations / Codex Round 7-8 보정 — production guard + range filter / SQLite override smoke 7 rows committed + idempotent rerun 통과 + boundary close=1496.500 DB level 재현 / Stage 1 commit (code land), Stage 2 push / Stage 3 production execution 별 GO)
 - 2026-05-28: ADR-034 Phase 2d Step 3 production RDS execution 완료 (KST 18:30 — Stage 2 push + Stage 3 production write 모두 land / RDS manual snapshot fxi-pre-step3-2026-05-28 직후 / `--allow-production-write` 적용 / production verify: 7 rows committed + 7 post-write validations passed + drift 0 + range 7 + contract A75606 단일 + **boundary close=1496.500 production-level 재현** (GRAPH §7-new B-B probe 사례) + rate==close + basis_date/published_at IS NULL + enum/literal 모두 정확 / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0 / manual snapshot 보존 — Step 3+ rollback anchor)
+- 2026-05-28: ADR-034 Phase 2d Step 3 옵션 B Round 9 Stage 1 candidate — KRX chain previous + current 확장 (scripts/backfill_kis_source_daily_rates.py 확장 / --contract current|previous|both default current 후방 호환 / validate_write_range + write_with_transaction multi-contract 시그니처 확장 / post-write SELECT contract_code.in_() + range filter / (date_kst, contract_code) pair set 검증 강화 / Codex Round 9 Blocker 0 + help 문구 polish / Local SQLite smoke 5단계 모두 PASS — previous 18 rows / both 25 rows / idempotent + cross-mode regression / boundary 2026-05-18 → A75606 close=1496.500 both mode 재현 / Stage 1 commit 대상, Stage 2 push + Stage 3 production execution 별 GO 대기)
