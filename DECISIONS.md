@@ -5126,6 +5126,87 @@ delete_range(db, "bithumb", "usdt-krw", date(2026, 5, 21), date(2026, 5, 27))
 - Step 5 daily append (scheduled cron)
 - Step 6 v2 endpoint switch (Phase 2e)
 
+### Phase 2d Step 5 daily append minimum first PR Stage 1 — Bithumb only orchestrator (2026-05-29)
+
+ADR-034 §14 Rollout step 5 (daily append job) **minimum viable first PR**. KRX/Hana/Bithumb 3 source partial backfill production land 후 ongoing freshness 확보 단계 진입. 본 commit = Stage 1 (code in repo) 대상. Stage 2 (push) / Stage 3 (production cron 등록) 별 GO 대기.
+
+**Scope 분리 정책 (Codex 합의)**:
+
+- **첫 PR scope = Bithumb only** (24h candle close, 적재 anchor: 다음날 00:01 KST)
+- **Hana 별 PR (별도 진행)**: `hana_observed_eod` 정책 진입 필요 — 기존 backfill_hana_source_daily_rates.py official endpoint writer 재사용 금지 (schema 위반 위험, ADR-034 §6 + ADR-033 Amendment 후속). 사전 read 5 항목 필요: bank_exchange_rates schema / Hana source naming / 전일 마지막 관측값 추출 기준 / source_method enum / missing day 처리.
+- **KRX 별 PR (별도 진행)**: close finalizer 통합 — CF 15:45 KST 종가 직후 trigger 정책 + 운영 close finalizer 정책 연계 필요. 단순 cron으로 분리 부적절.
+
+**변경 파일** (Stage 1 land 대상):
+
+- `scripts/daily_append_source_daily_rates.py` 신규 — orchestrator script:
+  - argparse: `--source bithumb` (choices=["bithumb"], 첫 PR scope 잠금) / `--date YYYY-MM-DD` (default yesterday KST) / `--write` (default dry-run = command preview only, subprocess 실행 X) / `--allow-production-write` (writer subprocess에 forward)
+  - dry-run mode: 3 command preview (writer full dry-run / local write / production write — operator UX, production cron 진입 전 차이 확인)
+  - write mode: 기존 `backfill_bithumb_source_daily_rates.py` subprocess 호출 + capture + structured summary
+  - subprocess timeout: 180초/source
+  - subprocess cwd: `REPO_ROOT` (production cron robustness)
+  - script_path 절대경로 보장 (`.resolve()` 명시)
+  - row count stdout regex parse (`r"(\d+) rows committed"`)
+  - **Codex Round 1 Blocker 정정**: parse_row_count → `Optional[int]` (regex 매칭 실패 시 None, 0과 명확 구분) + `EXPECTED_ROWS_PER_SOURCE = {"bithumb": 1}` + summary `returncode == 0 AND rows == expected_rows` 양방향 검증 → daily append freshness silent failure 차단
+
+**Local SQLite smoke 5단계 모두 PASS** (Codex Round 1 보정 후):
+
+| Step | 결과 |
+| --- | --- |
+| 1. py_compile | OK |
+| 2. dry-run preview (default yesterday KST 2026-05-28) | 3 command preview 출력, subprocess 실행 X, exit 0 |
+| 3. cleanup + write mode (`--write --date 2026-05-28`) | `bithumb: PASS (1 rows committed, expected=1, exit=0)`, [PASS] 모든 source 성공 |
+| 4. **silent failure 시뮬** (--date 2020-01-01, Bithumb candle 미존재) | writer SKIP → exit 1 → orchestrator `bithumb: FAIL (unparsed rows committed, expected=1, exit=1, exit_fail)` + 실제 orchestrator exit 1 (Codex 별도 검증) |
+| 5. argparse validation (--source hana) | `invalid choice: 'hana' (choose from bithumb)` — 첫 PR scope 잠금 |
+
+**핵심 발견 (Codex Round 1 Blocker 정정 효과)**:
+
+- **freshness silent failure 차단** — `returncode == 0` + `rows == expected_rows` 양방향 검증 진입. writer stdout format 변경 / capture 깨짐 시 → exit 0 + parse 실패 (None) → orchestrator FAIL 표기.
+- **operator UX 강화** — dry-run mode에서 3 command preview (validation / local write / production write), production cron 진입 전 명시적 차이 확인.
+- **REPO_ROOT cwd + script_path absolute** — production cron 어떤 실행 위치에서도 robustness.
+- **첫 PR scope 잠금** — argparse choices=["bithumb"] — Hana/KRX 진입 시 enum 확장 자연.
+
+**writer 재사용 효과**:
+
+- 신규 write logic 0 — 기존 backfill_bithumb_source_daily_rates.py 의 production guard + transaction + post-write validation 7개 그대로 활용
+- daily append (`--date today-1` range) = 기존 writer의 1-day range 호출과 동등
+- idempotent — unique key 자연 + COALESCE-style set_ 조건부
+
+**Codex Round 1 보정 history**:
+
+- Blocker (rows mismatch silent failure 차단): parse_row_count Optional[int] + EXPECTED_ROWS + summary 양방향 검증
+- Non-blocker 1 (dry-run 문구): "validation command" → "writer full dry-run command" + 주의 문구 (range는 target-date 한정 X)
+- Non-blocker 2 (subprocess cwd): `cwd=REPO_ROOT` 추가
+- Non-blocker 3 (script_path absolute): `.resolve()` 명시 (cron 환경 robustness)
+
+**Stage 분리 (KRX/Hana/Bithumb first PR 패턴 동일)**:
+
+- **Stage 1**: orchestrator script + smoke 5단계 검증 — **본 commit 대상**
+- **Stage 2**: origin/master push — **별 GO 대기**
+- **Stage 3**: production cron 등록 — **별 GO 대기** (cron line 예: `1 0 * * * cd ~/exchange-rate && docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --write --allow-production-write` — 매일 KST 00:01 Bithumb yesterday 적재)
+
+**Stage 3 production cron 등록 절차 anchor**:
+
+```bash
+# 1. SSH ubuntu@<production-ec2>
+# 2. crontab -e (또는 별 systemd timer)
+# 3. cron line 추가:
+1 0 * * * cd ~/exchange-rate && docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --write --allow-production-write >> ~/logs/daily_append.log 2>&1
+# 4. 7일 안정 운영 모니터링 (drift 0 / 1 row append every day)
+# 5. retry/backoff/alert는 운영 데이터 기반 후속 PR
+```
+
+**후속 작업 (Step 5 first PR land 후)**:
+
+- Stage 2 (push to origin/master): 별 GO
+- Stage 3 (production cron 등록): 별 GO + 운영 cron line 추가 + 7일 안정 운영 모니터링
+- **Hana observed_eod 별 PR**: 사전 read 5 항목 (bank_exchange_rates schema / Hana source naming / 전일 last 추출 기준 / source_method enum / missing day) + 신 writer 작성 + orchestrator `--source choices` 확장
+- **KRX 별 PR**: close finalizer 통합 (CF 15:45 KST 종가 직후 trigger) + orchestrator choices 확장
+- **retry/backoff/structured error/alert** (운영 데이터 기반 단계적 강화)
+- **monitoring**: drift 0 / row count / freshness staleness 감지 (admin endpoint or Slack)
+- **calendar-aware missing row alert** (ADR-034 §13)
+- **Step 4 full backfill** — Hana observed_eod + Bithumb 902일 + KRX chain 깊이 확장 (Step 5 daily append 안정 운영 base 위에서)
+- **Step 6 v2 endpoint switch** (Phase 2e + 장기 그래프 DB 표준화 ADR-035 결정 — `source_hourly_rates` 신 table 도입 여부)
+
 ### Phase 2d Step 3 first land — KRX current partial backfill writer (2026-05-28)
 
 ADR-034 §14 Rollout step 3 **first PR** — KRX current contract (A75606) partial backfill writer land. **Step 3 진입 첫 source = KRX** (ADR-034 §14 §3 잠정 — service value 기준 + KIS dry-run에서 chain/rollover/cap/stale 모두 검증 완료). **Stage 1 (commit `40279c9`) + Stage 2 (origin/master push) + Stage 3 (production RDS execution) 모두 land 완료** (2026-05-28 KST 18:30, RDS manual snapshot `fxi-pre-step3-2026-05-28` 직후 production write). Stage 3 production verify: **7 rows committed + 7 post-write validations passed + drift 0 + boundary close=1496.500 production-level 재현** (GRAPH §7-new B-B probe 사례). 운영 fastapi runtime 갱신은 Phase 2e endpoint switch 시점 별 배포 영역 (현재 source_daily_rates read 호출자 0 — user-facing 영향 0).
@@ -5274,3 +5355,4 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - 2026-05-28: ADR-034 Phase 2d Step 3 Hana first PR Round 1 Stage 2+3 production execution 완료 (Stage 2 push + Stage 3 production write 모두 land / manual snapshot 생략 — Hana incremental write 자동 backup 1 Day + 개별 dates delete rollback anchor 신뢰 / `--currency USD --start-date 2026-05-21 --end-date 2026-05-27 --allow-production-write` / production verify: 4 rows committed (Hana usd-krw `[2026-05-21, 2026-05-22, 2026-05-26, 2026-05-27]`) + post-write validations passed + drift 0 + 휴일 dedup 정확 (5/23/24/25 → 5/22 fallback, 2026-05-25 대체공휴일 자연 흡수 — KRX_CANARY 사고 캘린더와 일관) + **schema close_only path production-level 첫 활성** (high==low==close + ohlc_quality close_only + basis_date NOT NULL + published_at NOT NULL KST timezone-aware + metadata_json.pbldSqn 각 row별 다른 회차 1356/2513/1081/1271) / 전체 production source_daily_rates state: KRX 25 rows + Hana 4 rows + Bithumb 0 rows / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0)
 - 2026-05-29: ADR-034 Phase 2d Step 3 Bithumb first PR Round 1 Stage 1 candidate — USDT/KRW partial backfill writer (scripts/backfill_bithumb_source_daily_rates.py 확장 / --write + --start-date + --end-date + --include-today + --allow-production-write + check_production_write_guard + validate_write_range + ensure_source_daily_rates_table_created + write_with_transaction_bithumb (Bithumb 방향 metadata policy — 모든 top-level metadata None + candle_ts_ms/candle_ts_kst metadata_json 격리) / Codex Round 1 Blocker (--write + --limit hard reject — partial write 위험 차단, early check fetch 전) + Non-blocker 2 (candle_ts_kst validation + 연속성 회귀 가드 expected_count == (end-start)+1) + cleanup (InvalidOperation unused import 제거) / Local SQLite smoke 6단계 모두 PASS — production guard 차단 + limit reject + first run 7 rows + DB query (all candle_ts_kst present) + idempotent rerun / **schema의 모든 top-level metadata None path 첫 production-level 활성 준비** (KRX contract_code 필수 + Hana basis_date+published_at+pbldSqn 필수와 다른 가장 단순 row mapping) / Stage 1 commit 대상, Stage 2 push + Stage 3 production execution 별 GO 대기 — manual snapshot 생략 권장)
 - 2026-05-29: ADR-034 Phase 2d Step 3 Bithumb first PR Round 1 Stage 2+3 production execution 완료 (Stage 2 push + Stage 3 production write 모두 land / manual snapshot 생략 — Bithumb incremental write 자동 backup 1 Day + `delete_range` rollback anchor 신뢰, 24/7 연속이라 range delete 안전 / `--start-date 2026-05-21 --end-date 2026-05-27 --allow-production-write` / production verify: 7 rows committed (Bithumb usdt-krw `[2026-05-21, 2026-05-27]` 연속) + post-write validations passed + drift 0 + 모든 top-level metadata None (contract_code/basis_date/published_at) + all candle_ts_kst present (KST 00:00 anchor 격리) + rate==close + close_basis=bithumb_24h_kst_close + source_method=bithumb_candlestick_backfill + ohlc_quality=source_ohlc / **ADR-034 §3 schema 3 직교 path 모두 production-level 활성 완료** (KRX source_ohlc+contract_code+rollover / Hana close_only+basis_date+published_at+pbldSqn / Bithumb source_ohlc+모든 top-level None+candle metadata_json) / 전체 production source_daily_rates state: KRX 25 + Hana 4 + Bithumb 7 = 36 rows / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0)
+- 2026-05-29: ADR-034 Phase 2d Step 5 daily append minimum first PR Stage 1 candidate — Bithumb only orchestrator (scripts/daily_append_source_daily_rates.py 신규 / orchestrator script — 기존 backfill_bithumb_source_daily_rates.py를 subprocess 호출, 신규 write logic 0 / --source bithumb (choices 잠금, 첫 PR scope) + --date YYYY-MM-DD (default yesterday KST) + --write (default dry-run = 3 command preview only) + --allow-production-write (writer subprocess에 forward) / subprocess timeout 180s + cwd=REPO_ROOT (production cron robustness) + script_path .resolve() / Codex Round 1 Blocker 정정 — parse_row_count Optional[int] + EXPECTED_ROWS_PER_SOURCE = {"bithumb": 1} + summary `returncode == 0 AND rows == expected_rows` 양방향 검증 (daily append freshness silent failure 차단) + Non-blocker 3 (cwd / script_path resolve / dry-run 문구 polish) / Local SQLite smoke 5단계 모두 PASS — py_compile + dry-run preview (3 command — validation/local write/production write) + write mode (1 row committed, PASS) + silent failure 시뮬 (--date 2020-01-01 → exit 1 FAIL) + argparse choices=["bithumb"] 차단 (--source hana invalid choice) / Hana observed_eod 별 PR (사전 read 5 항목 — bank_exchange_rates schema / Hana source naming / 전일 last 추출 기준 / source_method enum / missing day) + KRX 별 PR (close finalizer 통합) 분리 정책 / Stage 1 commit 대상, Stage 2 push + Stage 3 production cron 등록 별 GO 대기)
