@@ -199,10 +199,10 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 - `observed_rollup`: DB tick/source_rates 기반 daily rollup
 - `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint 등)
 - `close_finalizer`: KRX CF close finalizer 결과
-- `bithumb_candlestick_backfill`: Bithumb 공식 24h candle API 초기 backfill
+- `bithumb_candlestick_api`: Bithumb 공식 24h candle API (backfill + daily refresh append 동일 방법 — Amendment 2026-06-01, 구 `bithumb_candlestick_backfill`)
 - `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill
 
-→ Bithumb/KRX는 close_basis 동일하지만 source_method 분기 (backfill vs 운영 중 매일 append). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별.
+→ **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**. candle이 실 OHLC 제공해 DB rollup보다 우월). KRX는 close_basis 동일 + source_method 분기(`kis_daily_backfill` vs `close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill/운영 구간 식별.
 
 `history_policy` enum 의미:
 - `actual_only`: backfill 없이 actual_source만, 외부 historical 미보유 (예: Hana 외 7개 은행 1d only)
@@ -417,8 +417,7 @@ Phase 2c 검증 후 Bithumb/KRX/Hana 모두 external_historical 확보. 기존 "
 
 #### close_basis = bithumb_24h_kst_close (Amendment 후속)
 
-- **매일 append (canonical)**: DB source_rates → KST daily rollup. source_method=`observed_rollup`
-- **초기 backfill**: Bithumb 공식 24h candle API. source_method=`bithumb_candlestick_backfill`
+- **초기 backfill + 매일 append (canonical) 동일 방법**: 공식 24h candle API. source_method=`bithumb_candlestick_api` (Amendment 2026-06-01 — 구 backfill=`bithumb_candlestick_backfill`/append=`observed_rollup` 분기 폐기. candle이 실 OHLC 제공해 DB rollup보다 우월)
 - KST 00:00 boundary 확인됨 (B-A 검증, `1701874800000` = 2023-12-07 00:00:00 KST)
 - provenance: `close_basis=bithumb_24h_kst_close` 명시
 

@@ -27,17 +27,20 @@ ADR-033 Amendment 1 Decision 2-1:
   - 무인증, 902일 coverage (2023-12-07 KST 시작)
   - raw schema 비표준 OCHL: [ts_ms, open, close, high, low, volume]
   - close_basis="bithumb_24h_kst_close"
-  - source_method="bithumb_candlestick_backfill"
+  - source_method="bithumb_candlestick_api" (backfill·daily refresh 동일 방법 — ADR-034 §6/§7)
   - ohlc_quality="source_ohlc"
 
 사용법:
+  # dry-run (default) — fetch + validation, DB write X
   python scripts/backfill_bithumb_source_daily_rates.py [--limit N]
+  # write (range 적재)
+  python scripts/backfill_bithumb_source_daily_rates.py --write --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--allow-production-write]
+  # daily append (orchestrator 호출) — 단일 날짜 + verdict sentinel
+  python scripts/backfill_bithumb_source_daily_rates.py --write --start-date D --end-date D --emit-daily-append-verdict
 
 주의:
-  - 본 script는 dry-run only. DB write 절대 X.
-  - app.source_daily_rates.upsert()를 호출하지 않음 (Step 2/3 경계 보존).
-  - row dict 생성 + validation 후 결과 출력만.
-  - Step 3 (partial backfill 실측 적재)은 별도 PR.
+  - dry-run mode: app.source_daily_rates.upsert() 호출 X (fetch + validation + 결과 출력만).
+  - write mode: --write 시 transaction 적재 (production guard + post-write validation + idempotent upsert).
 """
 
 # 표준 라이브러리
@@ -63,6 +66,11 @@ from app.daily_append_verdict import emit_verdict  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 ENDPOINT = "https://api.bithumb.com/public/candlestick/USDT_KRW/24h"
+
+# canonical 획득 방식 = 공식 24h candlestick API (backfill + daily refresh 동일 방법).
+# build_row와 post-write validator가 같은 상수 사용 (literal divergence 방지).
+# ADR-034 §6/§7: Bithumb은 backfill·append 모두 candlestick → source_method 단일 값.
+SOURCE_METHOD = "bithumb_candlestick_api"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -125,7 +133,7 @@ def parse_candle(candle: list) -> dict:
         "close": close_dec,
         "ohlc_quality": "source_ohlc",
         "close_basis": "bithumb_24h_kst_close",
-        "source_method": "bithumb_candlestick_backfill",
+        "source_method": SOURCE_METHOD,
         "contract_code": None,
         "basis_date": None,
         # published_at은 ADR-034 §3 schema 정의로는 Hana official 발표 timestamp 한정.
@@ -466,7 +474,7 @@ def write_with_transaction_bithumb(
                 issues.append(f"source mismatch at date_kst={row.date_kst}: got {row.source!r}")
             if row.asset != "usdt-krw":
                 issues.append(f"asset mismatch at date_kst={row.date_kst}: got {row.asset!r}")
-            if row.source_method != "bithumb_candlestick_backfill":
+            if row.source_method != SOURCE_METHOD:
                 issues.append(
                     f"source_method mismatch at date_kst={row.date_kst}: got {row.source_method!r}"
                 )

@@ -4165,7 +4165,7 @@ response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
 - `observed_rollup`
 - `external_backfill`
 - `close_finalizer`
-- `bithumb_candlestick_backfill`
+- `bithumb_candlestick_api` (Amendment 2026-06-01 — 구 `bithumb_candlestick_backfill`)
 - `kis_daily_backfill`
 
 **close_basis × source_method 매핑**:
@@ -4176,16 +4176,15 @@ response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
 | `hana_official_historical_backfill` | `external_backfill` | 초기 부족분 backfill |
 | `krx_cf_close_1545` | `close_finalizer` | 운영 중 매일 append (CF close finalizer) |
 | `krx_cf_close_1545` | `kis_daily_backfill` | 초기 backfill (KIS daily endpoint + A75YMM chain) |
-| `bithumb_24h_kst_close` | `bithumb_candlestick_backfill` | 초기 backfill |
-| `bithumb_24h_kst_close` | `observed_rollup` | 운영 중 매일 append (DB rollup) |
+| `bithumb_24h_kst_close` | `bithumb_candlestick_api` | 초기 backfill + 운영 중 매일 append (동일 candle API — Amendment 2026-06-01) |
 
-→ KRX/Bithumb은 close_basis 동일 but source_method 분기 (backfill vs 운영). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
+→ **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**). KRX는 close_basis 동일 + source_method 분기 (backfill=`kis_daily_backfill` vs append=`close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
 
 #### Decision C — Source별 daily canonical 정책
 
 | Source | 초기 Backfill | 앞으로 쌓는 값 (canonical) | close_basis (canonical) |
 | --- | --- | --- | --- |
-| **Bithumb** | 공식 24h candle API | DB tick/source_rates → KST daily rollup | `bithumb_24h_kst_close` |
+| **Bithumb** | 공식 24h candle API | ~~DB tick/source_rates → KST daily rollup~~ → **공식 24h candle API daily refresh** (Amendment 2026-06-01) | `bithumb_24h_kst_close` |
 | **Hana** | 부족한 과거만 official historical | DB의 KST 24:00 이전 마지막 관측값 | `hana_observed_eod` |
 | **KRX** | KIS daily + A75YMM chain | close finalizer CF 15:45 정규 종가 | `krx_cf_close_1545` |
 
@@ -4381,7 +4380,7 @@ class SourceDailyRate(Base):
 - `observed_rollup`: DB tick/source_rates/bank_exchange_rates 기반 daily rollup
 - `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint)
 - `close_finalizer`: KRX CF close finalizer 결과
-- `bithumb_candlestick_backfill`: Bithumb 공식 24h candle API 초기 backfill
+- `bithumb_candlestick_api`: Bithumb 공식 24h candle API (backfill + daily refresh append **동일 방법** — Amendment 2026-06-01, 구 `bithumb_candlestick_backfill` rename. source_method=획득 방법이므로 backfill/daily 구분은 timing이지 방법 아님)
 - `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill
 
 **`ohlc_quality` enum 3 values** (잠정 명칭, Open):
@@ -4394,7 +4393,7 @@ class SourceDailyRate(Base):
 
 | Source | 초기 Backfill | 매일 append (canonical) | close_basis | source_method 매핑 |
 | --- | --- | --- | --- | --- |
-| Bithumb | 공식 24h candle API | DB tick/source_rates → KST daily rollup | `bithumb_24h_kst_close` | backfill=`bithumb_candlestick_backfill`, append=`observed_rollup` |
+| Bithumb | 공식 24h candle API | **공식 24h candle API daily refresh** (Amendment 2026-06-01 — DB rollup 폐기, candle이 실 OHLC 제공해 우월) | `bithumb_24h_kst_close` | backfill=append=`bithumb_candlestick_api` (단일 방법) |
 | Hana | 부족한 과거만 official historical | DB의 KST 24:00 이전 마지막 관측값 | backfill=`hana_official_historical_backfill`, canonical=`hana_observed_eod` | backfill=`external_backfill`, append=`observed_rollup` |
 | KRX | KIS daily + A75YMM chain | close finalizer CF 15:45 정규 종가 | `krx_cf_close_1545` | backfill=`kis_daily_backfill`, append=`close_finalizer` |
 
@@ -4412,7 +4411,7 @@ class SourceDailyRate(Base):
 **Proposed** (Phase 2d 구현 결정):
 
 - raw observations rollup으로 high/low 계산 시 → `ohlc_quality="observed_rollup"`
-  - Bithumb daily append: source_rates KST 일자 rollup
+  - ~~Bithumb daily append: source_rates KST 일자 rollup~~ (Amendment 2026-06-01 폐기 — Bithumb daily refresh는 공식 candle API라 `ohlc_quality="source_ohlc"`, observed_rollup 미해당)
   - Hana observed_eod: bank_exchange_rates KST 일자 rollup
   - KRX daily append: source_rates CF session (08:30~15:45 KST) rollup
 
@@ -4442,7 +4441,7 @@ class SourceDailyRate(Base):
 
 **Proposed** (Phase 2d 구현 시):
 
-- **Bithumb daily append**: KST 00:01 ~ 00:10 사이 source_rates → daily rollup → upsert
+- **Bithumb daily append**: KST 00:01 cron이 **공식 24h candle API로 전일 candle fetch → upsert** (Amendment 2026-06-01 — source_rates rollup 폐기, candlestick API 실 OHLC 우월. source_method=`bithumb_candlestick_api`, ohlc_quality=`source_ohlc`)
 - **Hana daily append**: KST 00:01 ~ 00:10 사이 bank_exchange_rates에서 전일 23:XX 마지막 Hana row 추출 → upsert
 - **KRX daily append**: CF close finalizer 15:46:00 직후 결과를 source_daily_rates에 직접 write
 - 모든 daily append = **idempotent upsert** (재실행 시 덮어쓰기, rate == close 강제)
@@ -4614,7 +4613,7 @@ ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규
 **후속 작업 (Step 2+ 영역)**:
 
 - Backfill job (Step 2): Bithumb 24h candle / KIS daily chain / Hana official endpoint
-- Daily append job (Step 5): close finalizer / observed_eod / source_rates KST daily rollup
+- Daily append job (Step 5): close finalizer (KRX) / observed_eod (Hana) / ~~source_rates KST daily rollup (Bithumb)~~ → Bithumb candle API daily refresh (Amendment 2026-06-01)
 
 ### Phase 2d Step 2 land — Bithumb dry-run (2026-05-28)
 
@@ -5207,9 +5206,40 @@ ADR-034 §14 Rollout step 5 (daily append job) **minimum viable first PR**. KRX/
 - **Step 4 full backfill** — Hana observed_eod + Bithumb 902일 + KRX chain 깊이 확장 (Step 5 daily append 안정 운영 base 위에서)
 - **Step 6 v2 endpoint switch** (Phase 2e + 장기 그래프 DB 표준화 ADR-035 결정 — `source_hourly_rates` 신 table 도입 여부)
 
+### Phase 2d Bithumb provenance Amendment — source_method rename (`bithumb_candlestick_backfill` → `bithumb_candlestick_api`) (2026-06-01)
+
+ADR-034 §6/§7/§9 Amendment. PR A1 cron 검증 중 발견된 provenance 불일치 정정. **Stage 1 candidate** (Stage 2 push + Stage 3 production migration 별 GO).
+
+**배경 (불일치)**: ADR §7/§9는 Bithumb daily append를 `observed_rollup`(DB source_rates rollup)으로 규정했으나, 구현(Step 5 daily append)은 candlestick backfill writer를 재사용 → 실제 backfill·append 모두 **공식 24h candle API**. 즉 ADR 설계 ≠ 구현. **데이터는 정확** (candle 실 OHLC가 DB rollup보다 우월), provenance **label**(`bithumb_candlestick_backfill` = "backfill" 함의)만 부정확.
+
+**결정 (옵션 a — Codex 협업 7 round)**:
+- canonical 획득 방식 = **공식 24h candle API** (DB rollup writer 신규 구현 ❌ — 더 나쁜 데이터를 label에 맞추는 역방향).
+- `source_method` = **`bithumb_candlestick_api`** (단일 값). source_method=획득 **방법** → Bithumb은 backfill·daily 동일 방법이므로 하나. backfill/daily 구분은 **timing**(실행 목적)이지 방법 아님.
+- `ohlc_quality`=`source_ohlc` / `close_basis`=`bithumb_24h_kst_close` **유지**. enum 5개 구조 유지, 값 하나만 rename.
+- **`ingest_mode` metadata 미도입** (YAGNI — backfill/daily는 목적이지 방법, v2 consumer 불요, metadata upsert replace로 소실 위험. 감사 요구 시 writer+flag 함께 별도).
+- "24h" method명 중복 회피 (close_basis에 이미 24h).
+
+**변경 파일 (Stage 1)**:
+- `scripts/backfill_bithumb_source_daily_rates.py`: `SOURCE_METHOD = "bithumb_candlestick_api"` 상수 신설 → build_row + post-write validator 공유 (literal divergence 방지) + docstring(dry-run only stale) 정리
+- `app/models.py` SourceDailyRate docstring: Bithumb append = candle API (source_rates rollup 폐기)
+- 문서: DECISIONS §6(enum/표)/§7/§9 + GRAPH §6/§7 + CLAUDE Amendment anchor — rename + Bithumb=candlestick + DB rollup 문구 제거 + "backfill/append 분기"를 KRX 한정 구분. **과거 history line**(Bithumb Step 3 land)은 당시 사실이므로 rewrite ❌, 본 Amendment가 supersede.
+- `scripts/migrate_bithumb_source_method.py` 신규 + `tests/test_migrate_bithumb_source_method.py` (회귀 13 — Codex 7종 + 추가 3 + fail-open count 방어 3)
+
+**Migration 계약 (Codex 7 round)**: dry-run default / `--write --expected-old-count N --expected-new-count M --allow-production-write` (강한 dialect guard — 기존 migrate 약한 guard 복제 ❌). transaction: old method FOR UPDATE lock → count 재확인(expected 비교) → snapshot → source_method만 UPDATE → rowcount==N → **source_method 외 전 컬럼 불변 surgical 검증** → post-verify(old_after=0 / new_after=M+N / total_after=total_before) → mismatch rollback. idempotent: old=0 AND new=M+N → SKIP / old=0 AND new≠M+N → stale ABORT.
+
+**배포 순서 (운영 race 절차 차단 — FOR UPDATE는 신규 insert 못 막음)**:
+1. 코드 commit/push → EC2 git pull + `docker compose build fastapi` (신코드 배포 = 이후 cron이 `bithumb_candlestick_api` 기록 → old count 안정)
+2. 직전 cron 완료 로그 + daily_append one-shot 컨테이너 미실행 확인 + **15:01 UTC(cron) 충분히 회피**
+3. read-only pre-query(N/M) → migration(`--expected-old N --expected-new M`) → post-query
+4. 다음 cron 1회 새 method 유지 확인
+
+**가격/OHLC/metadata/captured_at 변경 0 — provenance `source_method` 문자열만 UPDATE** (production 11~12 rows surgical rename).
+
+**Local test**: migration 13 (Codex 7종 + 추가 3 + fail-open count 방어 3) + Bithumb writer rename(literal 0, 상수=bithumb_candlestick_api). non-urgent (v2 그래프 미출시) — A2 전 provenance 정리로 Hana(observed_rollup)/Bithumb(candlestick_api) 분리 명확.
+
 ### Phase 2d PR A1 — Hana daily append 자동화 foundation (calendar + JSON verdict 계약) (2026-05-31)
 
-ADR-034 §14 Rollout step 5 후속 — Hana USD daily append 자동화를 위한 **계약/calendar foundation**. cron line 변경 없이 writer verdict 계약 + 한국 공휴일 calendar 도입. 운영 cron 전환(`--source all`)은 **PR A2**. **Stage 1 (commit `a7b128d`) + Stage 2 (origin/master push) + Stage 3 (EC2 build + in-image 검증 + Bithumb manual smoke) 모두 land 완료** (2026-05-31). Stage 3 deploy verify: in-image `holidays.__version__==0.97` + 대체공휴일 fixture (5/25·3/2 True / 5/1 근로자의날 True / 12/31 False) + Bithumb JSON manual smoke PASS (`{written,rows:1}` → orchestrator PASS) + production 40 rows idempotent 무결. **cron line 변경 0** → live container recreate 없이 다음 발화(2026-06-01 00:01 KST)부터 JSON verdict 경로 자동 사용. 첫 JSON cron 발화(신규 insert 5/31 row) **모니터링 진입 — cron 성공 미검증** (6/1 00:05 KST 이후 SSH read-only로 JSON 로그 / orchestrator PASS / Bithumb 5/31 row / 40→41 확인 예정).
+ADR-034 §14 Rollout step 5 후속 — Hana USD daily append 자동화를 위한 **계약/calendar foundation**. cron line 변경 없이 writer verdict 계약 + 한국 공휴일 calendar 도입. 운영 cron 전환(`--source all`)은 **PR A2**. **Stage 1 (commit `a7b128d`) + Stage 2 (origin/master push) + Stage 3 (EC2 build + in-image 검증 + Bithumb manual smoke) 모두 land 완료** (2026-05-31). Stage 3 deploy verify: in-image `holidays.__version__==0.97` + 대체공휴일 fixture (5/25·3/2 True / 5/1 근로자의날 True / 12/31 False) + Bithumb JSON manual smoke PASS (`{written,rows:1}` → orchestrator PASS) + production 40 rows idempotent 무결. **cron line 변경 0** → live container recreate 없이 다음 발화(2026-06-01 00:01 KST)부터 JSON verdict 경로 자동 사용. 첫 JSON cron 발화 **PASS** (2026-06-01 00:01 KST cron이 Bithumb 5/31 신규 row를 JSON verdict 경로로 적재 — `{written,rows:1}` → orchestrator PASS, total 40→41, 신규 insert 검증 완료). **A1 운영 검증 완전 closure.**
 
 **배경**: 기존 orchestrator는 `parse_row_count` regex + Bithumb 고정 1-row 가정. Hana는 주말·공휴일 0 row가 정상이라 이 계약으로 통합 불가 → source-aware JSON verdict 계약 필요. + 기존 Hana writer는 공휴일을 평일로 취급(`weekday_no_changes` 오판) → 한국 공휴일 calendar 필요.
 
@@ -5244,7 +5274,7 @@ ADR-034 §14 Rollout step 5 후속 — Hana USD daily append 자동화를 위한
 
 - Stage 1: foundation + test — **commit `a7b128d` 완료**
 - Stage 2: origin/master push — **완료** (`3365c1b..a7b128d`)
-- Stage 3: EC2 git pull (a7b128d) + `docker compose build fastapi` (새 이미지) + **in-image `holidays.__version__==0.97` + 대체공휴일 fixture 확인 완료** + Bithumb JSON manual smoke PASS + production 40 rows idempotent 무결 — **완료** (2026-05-31). cron 1회 확인은 6/1 00:01 KST 발화 후 SSH read-only (모니터링 진입, 미검증)
+- Stage 3: EC2 git pull (a7b128d) + `docker compose build fastapi` (새 이미지) + **in-image `holidays.__version__==0.97` + 대체공휴일 fixture 확인 완료** + Bithumb JSON manual smoke PASS + production 40 rows idempotent 무결 — **완료** (2026-05-31). **cron 1회 검증 완료 (2026-06-01 00:01 KST)**: 신규 insert Bithumb 5/31 row JSON verdict 경로 적재 `{written,rows:1}` → orchestrator PASS, total 40→41 — A1 운영 검증 완전 closure
 - **PR A2**: `--source bithumb|hana|all` + per-source 예외 격리 + aggregate exit + cron line `--source all` 교체 (Hana 실패가 Bithumb 막지 않음)
 
 **Open (PR A2 / 후속)**: Hana cron line 추가 / KRX stub(`KRX_2026_KNOWN_HOLIDAYS`)을 공유 calendar base로 migration / crawler-success heartbeat (평일 liveness 정확화) / 임시공휴일 override (라이브러리 lag 시).
@@ -5430,7 +5460,7 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - **Step 3 KRX 외 source**: Hana / Bithumb partial backfill — Step 3 first PR 안정성 확인 후 진입
 - **probe out-of-range row 차단** (현재 dry-run WARNING surface): Step 3 적재 시 hard reject logic 별도 land
 - **Step 4 full backfill**: 모든 contract chain + 모든 source historical 적재 (1년+ range)
-- **Step 5 daily append**: scheduled job (close finalizer / observed_eod / source_rates rollup) — retry/backoff/structured error 함께 land
+- **Step 5 daily append**: scheduled job (close finalizer (KRX) / observed_eod (Hana) / Bithumb candle API daily refresh [Amendment 2026-06-01, 구 source_rates rollup]) — retry/backoff/structured error 함께 land
 - **Step 6 v2 endpoint switch** (Phase 2e): catalog/tab endpoint가 source_daily_rates 조회로 전환
 
 ### 16. Related docs
@@ -5493,4 +5523,5 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - 2026-05-31: ADR-034 Phase 2d Step 3 Hana observed_eod first PR Round 1 Stage 1 candidate — bank_exchange_rates observed_eod writer (scripts/backfill_hana_observed_eod_source_daily_rates.py 신규 + tests/test_hana_observed_eod_writer.py 신규 16 test / official_historical_backfill과 별 path — close_basis hana_observed_eod / source_method+ohlc_quality observed_rollup / bank_exchange_rates 내부 관측 read / KST→UTC naive boundary + carry-in baseline(prev) + 당일 changes rollup / **liveness gate ⊥ baseline quality 분리** — changes=write gate, prev age(<=7d)=rollup 포함 gate / case: 평일·주말 changes>=1 write, 평일 changes==0 skip_error exit1 (weekday_no_changes), 주말 changes==0 skip_ok exit0 (weekend_no_changes) / nullable contract_code/basis_date/published_at 모두 None / Codex 8 round 수렴 + write-path Blocker 2 (B1 range atomicity 부분 commit 차단 — skip_error 시 transaction 전 abort + B2 DRY_RUN_CHECKS transaction 전 적용 — 음수/precision raw reject) + N1 metadata fail-closed + N2 dry-run 이중 query 정리 / 영구 test 16 (process_date 6 / write_transaction 4 incl official overlap rollback 안전망 + metadata fail-closed / `_run_write` 3 / production guard 3) + /tmp smoke 11 case 58 check / **overlap 안전망 실측** — official row overlap 시 nullable leftover → post-write fail → rollback → official 보존 (ADR-034 §10 Open 전까지 자동 차단) / First PR scope: USD only / 2026-05-28 단일 row (official 4 rows [5/21,22,26,27]와 overlap 0) / **Phase 1-3 production read-only query** (EC2 docker compose run): change_rows=1096 + prev age 254.6s fresh + existing source_daily_rates row=0 / 예상 row close=1496.1 high=1510.8 low=1494.3 rollup_point_count=1097 / Stage 1 commit 대상, Stage 2 push + Stage 3 production execution 별 GO — Stage 3 선행 EC2 git pull + docker compose build fastapi 필수 (one-shot 이미지 신규 writer 반영, scripts/ image COPY, live container recreate 불필요))
 - 2026-05-31: ADR-034 Phase 2d Step 3 Hana observed_eod first PR Round 1 Stage 2+3 production execution 완료 (Stage 1 commit `e7213bf` + Stage 2 origin/master push `a533ba9..e7213bf` + Stage 3 production RDS execution 모두 land / 절차: EC2 git pull e7213bf → docker compose build fastapi (image 863c75e9, one-shot 이미지에 신규 writer bake, live container recreate 불필요) → production data dry-run (row + 7 validation 확인, write X) → `--write --start-date 2026-05-28 --end-date 2026-05-28 --allow-production-write` → 이중 독립 verify (write 직후 + 별 read-only query) / manual snapshot 생략 — incremental single row + `date_kst.in_([date(2026,5,28)])` delete rollback anchor / **production verify: Hana usd-krw 2026-05-28 1 row committed + post-write validations passed + drift 0 + overlap 0** (close=rate=1496.1 / high=1510.8 / low=1494.3 / baseline_included=True / day_change_count=1096 / rollup_point_count=1097 / contract_code·basis_date·published_at 모두 None / close_basis hana_observed_eod / source_method+ohlc_quality observed_rollup) / hana/usd-krw = 5 (official_historical_backfill 4 `[5/21,22,26,27]` + observed_eod 1 `[5/28]`, corruption 0) / **전체 production source_daily_rates state: KRX 25 + Hana 5 + Bithumb 10 = total 40 rows** (Bithumb 8→10: daily append cron `1 15 * * *` 2026-05-29·05-30 row 정상 append 확인 — cron liveness 입증) / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0 / 후속: Hana JPY/EUR 다각화 → orchestrator --source 확장 + Hana daily append cron → holiday calendar + heartbeat → Step 4 full backfill → Step 6 v2 endpoint switch)
 - 2026-05-31: ADR-034 Phase 2d PR A1 Stage 1 candidate — Hana daily append 자동화 foundation (calendar + JSON verdict 계약) (app/calendars/{__init__,kr_holidays,hana_business_days}.py 신규 — holidays.SouthKorea(categories=(PUBLIC,BANK), observed=True) + classify_hana_calendar_day 단일 진실 소스 weekend>holiday>business_day / app/daily_append_verdict.py 신규 — verdict 계약 공유 소스 / Hana writer calendar 통합 (holiday_no_changes→skip_ok / business_day_no_changes→skip_error) + calendar_class 3-way + --emit-daily-append-verdict / Bithumb writer --emit-daily-append-verdict (success 경로 sentinel) / orchestrator regex→JSON verdict fail-closed + source-aware policy (bithumb written-only/usdt-krw, hana written|skipped/usd-krw) / requirements.txt holidays>=0.97,<1.0.0 + lock holidays==0.97 (dateutil 기존) / **observed=True load-bearing 실측** (observed=False면 5/25 대체공휴일·3/2 삼일절 대체 drop) + PUBLIC∪BANK(근로자의날 5/1 BANK 전용) + 12/31 한국 공휴일 아님(사용자 정정) / **Codex adversarial Blocker 4 + NB 재현 확인 후 fix** — B1 non-object JSON crash→FAIL(isinstance dict) / B2 asset 미검증→source별 asset 검증 / B3 Bithumb skipped 허용→source-aware allowed_statuses / B4 bool·str rows→type(rows) is int / NB written→reason None / Local 59 PASS (calendar 9 + Hana writer 22 + orchestrator 28 incl 재현 6 + CLI guard subprocess 4) + Bithumb end-to-end PASS / cron line 변경 0 (orchestrator만 JSON 전환) / Stage 1 commit 대상, Stage 2 push + Stage 3 (EC2 build + in-image holidays==0.97/fixture 확인 + Bithumb manual smoke) 별 GO / PR A2: --source all + per-source 격리 + cron line 교체)
-- 2026-05-31: ADR-034 Phase 2d PR A1 Stage 2+3 production deploy 완료 (Stage 1 commit `a7b128d` + Stage 2 origin/master push `3365c1b..a7b128d` + Stage 3 EC2 배포 모두 land / 절차: EC2 git pull a7b128d → docker compose build fastapi (새 이미지, holidays 패키지 bake) → in-image 검증 (holidays.__version__==0.97 + 대체공휴일 fixture 5/25·3/2 True / 5/1 근로자의날 True / 12/31 False / classify 정상) → Bithumb JSON manual smoke (`{written,asset:usdt-krw,rows:1}` → orchestrator PASS, idempotent 5/30) → read-only verify (hana 5 + bithumb 10 + krx 25 = 40 불변, Bithumb 5/30 close=1481 무결) / **cron line 변경 0** → live exchange-rate-app 컨테이너 recreate 없이 one-shot 이미지만 rebuild (broadcast 영향 0) / Codex 독립 재검증 일치 (EC2 a7b128d / 새 이미지 f7bab620 / in-image holidays + fixture / 40 rows / crontab 기존 line 유지) / **첫 JSON cron 발화 2026-06-01 00:01 KST (EC2 timezone Etc/UTC 실측, cron 1 15 * * * = 15:01 UTC) — 신규 insert 5/31 row 모니터링 진입, cron 성공 미검증** (6/1 00:05 KST 이후 SSH read-only로 JSON 로그 / orchestrator PASS / Bithumb 5/31 row / 40→41 확인 예정) / 후속: cron 검증 성공 후 PR A2 (--source all + per-source 격리 + cron line 교체))
+- 2026-05-31: ADR-034 Phase 2d PR A1 Stage 2+3 production deploy 완료 (Stage 1 commit `a7b128d` + Stage 2 origin/master push `3365c1b..a7b128d` + Stage 3 EC2 배포 모두 land / 절차: EC2 git pull a7b128d → docker compose build fastapi (새 이미지, holidays 패키지 bake) → in-image 검증 (holidays.__version__==0.97 + 대체공휴일 fixture 5/25·3/2 True / 5/1 근로자의날 True / 12/31 False / classify 정상) → Bithumb JSON manual smoke (`{written,asset:usdt-krw,rows:1}` → orchestrator PASS, idempotent 5/30) → read-only verify (hana 5 + bithumb 10 + krx 25 = 40 불변, Bithumb 5/30 close=1481 무결) / **cron line 변경 0** → live exchange-rate-app 컨테이너 recreate 없이 one-shot 이미지만 rebuild (broadcast 영향 0) / Codex 독립 재검증 일치 (EC2 a7b128d / 새 이미지 f7bab620 / in-image holidays + fixture / 40 rows / crontab 기존 line 유지) / **첫 JSON cron 발화 2026-06-01 00:01 KST (EC2 timezone Etc/UTC 실측, cron 1 15 * * * = 15:01 UTC) — 검증 PASS**: 신규 insert Bithumb 5/31 row JSON verdict 경로 적재 (`{written,rows:1}` → orchestrator PASS, total 40→41, candle_ts_kst=2026-05-31T00:00+09:00) — **A1 운영 검증 완전 closure** / 후속: PR A2 (--source all + per-source 격리 + cron line 교체))
+- 2026-06-01: ADR-034 Bithumb provenance Amendment Stage 1 candidate — source_method rename `bithumb_candlestick_backfill` → `bithumb_candlestick_api` (PR A1 cron 검증 중 발견 — ADR §7/§9는 Bithumb daily append=observed_rollup(DB rollup) 규정이나 구현은 candlestick backfill writer 재사용 → backfill·append 모두 공식 24h candle API / 데이터 정확, label만 부정확 / 결정 옵션 a: candlestick canonical 인정 + source_method 단일 값 bithumb_candlestick_api (방법=획득방식, backfill/daily는 timing) + ohlc_quality=source_ohlc·close_basis=bithumb_24h_kst_close 유지 + ingest_mode 미도입(YAGNI) / 변경: Bithumb writer SOURCE_METHOD 상수(build+validator 공유) + docstring + models.py docstring + DECISIONS §6/§7/§9 + GRAPH §6/§7 + CLAUDE amend (과거 history rewrite ❌, Amendment supersede) + migrate_bithumb_source_method.py 신규 + 회귀 test 13 (fail-open count 방어 3 포함) / migration 계약: FOR UPDATE lock → count 재확인(--expected-old N --expected-new M) → snapshot → source_method만 UPDATE → all-cols surgical 불변 검증 → post-verify(old_after=0/new_after=M+N/total 불변) → idempotent(old=0 AND new=M+N skip / 아니면 stale abort) / 배포 순서: 신코드 배포 후(cron이 new 기록) → cron 15:01 UTC 회피 + one-shot 미실행 확인 → pre-query → migration → post-query → 다음 cron / 가격·OHLC·metadata·captured_at 변경 0, source_method 문자열만 UPDATE / Local test 13 PASS + Bithumb writer rename(literal 0) / non-urgent — A2 전 provenance 정리로 Hana/Bithumb 수집방식 분리 명확 / Stage 1 commit 대상, Stage 2 push + Stage 3 production migration 별 GO)

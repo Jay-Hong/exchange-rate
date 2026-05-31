@@ -197,7 +197,7 @@ class SourceDailyRate(Base):
     DB CHECK constraint는 보류 — Phase 2d 안정화 후 추가 검토.
 
     Source별 정책:
-    - Bithumb: 24h candle backfill + source_rates KST daily rollup append
+    - Bithumb: 공식 24h candle API (backfill + daily refresh append 동일 방법, source_method=bithumb_candlestick_api)
     - Hana: official_historical backfill (mixed) + bank_exchange_rates observed_eod append
     - KRX: KIS daily + A75YMM chain backfill + CF 15:45 close finalizer append
 
