@@ -42,9 +42,10 @@ def _ts(y, mo, d, h, mi=0):
 
 
 # 공통 target dates (역사 고정 — 시간 독립)
-WEEKDAY = date(2026, 5, 28)    # Thursday. window [2026-05-27 15:00, 2026-05-28 15:00) UTC
+WEEKDAY = date(2026, 5, 28)    # Thursday (business_day). window [2026-05-27 15:00, 2026-05-28 15:00) UTC
 SATURDAY = date(2026, 5, 30)   # Saturday
 SUNDAY = date(2026, 5, 31)     # Sunday
+HOLIDAY = date(2026, 5, 25)    # Monday 부처님오신날 대체공휴일 (KRX 사고 날짜). window [2026-05-24 15:00, 2026-05-25 15:00) UTC
 
 
 class _BaseDBTest(unittest.TestCase):
@@ -96,7 +97,7 @@ class TestProcessDateClassification(_BaseDBTest):
         md = row["metadata_json"]
         self.assertTrue(md["baseline_included"])
         self.assertIsNone(md["baseline_exclusion_reason"])
-        self.assertEqual(md["calendar_class"], "weekday")
+        self.assertEqual(md["calendar_class"], "business_day")
         self.assertEqual(md["day_change_count"], 2)
         self.assertEqual(md["rollup_point_count"], 3)
         # 항등식: rollup_point_count == day_change_count + int(baseline_included)
@@ -139,14 +140,33 @@ class TestProcessDateClassification(_BaseDBTest):
         self.assertIsNone(md["carry_in_raw_row_id"])
         self.assertEqual(md["rollup_point_count"], 1)
 
-    def test_weekday_no_changes_skip_error(self):
-        """평일 + changes 0 → skip_error (weekday_no_changes)."""
+    def test_business_day_no_changes_skip_error(self):
+        """영업일(평일+비공휴일) + changes 0 → skip_error (business_day_no_changes)."""
         self._add_bank(_ts(2026, 5, 27, 10, 0), 1400.0)  # prev only
         with self.Session() as db:
             action, row, code = W.process_date(db, WEEKDAY)
         self.assertEqual(action, "skip_error")
-        self.assertEqual(code, "weekday_no_changes")
+        self.assertEqual(code, "business_day_no_changes")
         self.assertIsNone(row)
+
+    def test_holiday_no_changes_skip_ok(self):
+        """공휴일(평일) + changes 0 → skip_ok (holiday_no_changes). 2026-05-25 대체공휴일."""
+        self._add_bank(_ts(2026, 5, 22, 10, 0), 1400.0)  # prev (금 5/22)
+        with self.Session() as db:
+            action, row, code = W.process_date(db, HOLIDAY)
+        self.assertEqual(action, "skip_ok")
+        self.assertEqual(code, "holiday_no_changes")
+        self.assertIsNone(row)
+
+    def test_holiday_changes_present_write(self):
+        """공휴일 + changes 존재 → write + calendar_class="holiday" (드물지만 가능)."""
+        self._add_bank(_ts(2026, 5, 22, 10, 0), 1400.0)  # prev
+        self._add_bank(_ts(2026, 5, 25, 5, 0), 1408.0)   # 공휴일 change (KST 14:00)
+        with self.Session() as db:
+            action, row, code = W.process_date(db, HOLIDAY)
+        self.assertEqual(action, "write")
+        self.assertEqual(row["metadata_json"]["calendar_class"], "holiday")
+        self.assertEqual(row["close"], Decimal("1408.0"))
 
     def test_weekend_no_changes_skip_ok(self):
         """주말 + changes 0 → skip_ok (weekend_no_changes, 정상)."""
@@ -304,10 +324,12 @@ class TestProductionGuard(unittest.TestCase):
 
 class TestRunWriteExitCodes(_BaseDBTest):
 
-    def _args(self, start, end, include_today=False, allow_production=False):
+    def _args(self, start, end, include_today=False, allow_production=False,
+              emit_verdict=False):
         return argparse.Namespace(
             start_date=start, end_date=end,
             include_today=include_today, allow_production_write=allow_production,
+            emit_daily_append_verdict=emit_verdict,
         )
 
     def _run(self, args):
@@ -342,6 +364,54 @@ class TestRunWriteExitCodes(_BaseDBTest):
         rc, out = self._run(self._args(WEEKDAY, WEEKDAY))
         self.assertEqual(rc, 0)
         self.assertEqual(len(self._daily_rows()), 1)
+
+    # ── verdict sentinel (--emit-daily-append-verdict) ──
+
+    def _extract_verdict(self, out):
+        """출력에서 DAILY_APPEND_VERDICT_JSON sentinel 정확히 1개 추출."""
+        import json as _json
+        prefix = W.SENTINEL_PREFIX
+        lines = [ln for ln in out.splitlines() if ln.startswith(prefix)]
+        self.assertEqual(len(lines), 1, msg=f"expected exactly 1 sentinel, got {len(lines)}")
+        return _json.loads(lines[0][len(prefix):])
+
+    def test_verdict_written(self):
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 1400.0)
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 1405.0)
+        rc, out = self._run(self._args(WEEKDAY, WEEKDAY, emit_verdict=True))
+        self.assertEqual(rc, 0)
+        v = self._extract_verdict(out)
+        self.assertEqual(v["version"], 1)
+        self.assertEqual(v["source"], "hana")
+        self.assertEqual(v["date_kst"], "2026-05-28")
+        self.assertEqual(v["status"], "written")
+        self.assertEqual(v["rows"], 1)
+
+    def test_verdict_skipped_weekend(self):
+        # SATURDAY(과거 주말) 사용 — SUNDAY는 오늘(2026-05-31)이라 today 가드에 걸림
+        rc, out = self._run(self._args(SATURDAY, SATURDAY, emit_verdict=True))
+        self.assertEqual(rc, 0)
+        v = self._extract_verdict(out)
+        self.assertEqual(v["status"], "skipped")
+        self.assertEqual(v["reason"], "weekend_no_changes")
+        self.assertEqual(v["rows"], 0)
+
+    def test_verdict_skipped_holiday(self):
+        rc, out = self._run(self._args(HOLIDAY, HOLIDAY, emit_verdict=True))
+        self.assertEqual(rc, 0)
+        v = self._extract_verdict(out)
+        self.assertEqual(v["status"], "skipped")
+        self.assertEqual(v["reason"], "holiday_no_changes")
+        self.assertEqual(v["rows"], 0)
+
+    def test_verdict_error_business_day(self):
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 1400.0)  # prev only, no changes
+        rc, out = self._run(self._args(WEEKDAY, WEEKDAY, emit_verdict=True))
+        self.assertEqual(rc, 1)
+        v = self._extract_verdict(out)
+        self.assertEqual(v["status"], "error")
+        self.assertEqual(v["reason"], "business_day_no_changes")
+        self.assertEqual(v["rows"], 0)
 
 
 if __name__ == "__main__":

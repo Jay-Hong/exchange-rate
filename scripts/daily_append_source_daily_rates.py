@@ -39,13 +39,21 @@ ADR-034 Phase 2d Step 5 — Daily append orchestrator (minimum viable, first PR 
 
 # 표준 라이브러리
 import argparse
-import re
+import json
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 from zoneinfo import ZoneInfo
+
+# 로컬 애플리케이션 (sys.path 설정 후) — daily append verdict 공유 계약
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.daily_append_verdict import (  # noqa: E402
+    VALID_SKIPPED_REASONS,
+    VALID_STATUSES,
+    VERDICT_VERSION,
+    extract_verdicts,
+)
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -55,10 +63,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # 첫 PR scope — 향후 PR에서 hana / krx / all 확장
 SUPPORTED_SOURCES = ["bithumb"]
 
-# Source별 daily append expected row count (freshness 보장 검증)
-# Codex Round 1 Blocker: row count mismatch는 returncode 0이라도 FAIL 처리해야 silent failure 차단
-EXPECTED_ROWS_PER_SOURCE = {
-    "bithumb": 1,  # 24h candle yesterday 1 row
+# source-aware verdict 정책 (Codex Blocker — global allowlist 대신 source별 잠금)
+# - bithumb: 24/7 source라 skipped 불가 (항상 candle 존재) → written only
+# - hana: 영업일 calendar라 skipped(주말/공휴일) 허용
+SOURCE_POLICY = {
+    "bithumb": {"asset": "usdt-krw", "allowed_statuses": frozenset({"written"})},
+    "hana": {"asset": "usd-krw", "allowed_statuses": frozenset({"written", "skipped"})},
 }
 
 
@@ -97,6 +107,7 @@ def build_bithumb_command(d: date, *, write: bool, allow_production: bool) -> li
     ]
     if write:
         cmd.append("--write")
+        cmd.append("--emit-daily-append-verdict")  # orchestrator는 JSON verdict로 결과 판정
         if allow_production:
             cmd.append("--allow-production-write")
     return cmd
@@ -110,25 +121,13 @@ def build_command(source: str, d: date, *, write: bool, allow_production: bool) 
 
 
 # ─────────────────────────────────────────────────────────────
-# Subprocess execution + stdout parse
+# Subprocess execution + JSON verdict 판정 (fail-closed)
 # ─────────────────────────────────────────────────────────────
 
-_ROW_COUNT_RE = re.compile(r"(\d+) rows committed")
-
-
-def parse_row_count(stdout: str) -> Optional[int]:
-    """stdout에서 'N rows committed' regex parse. Bithumb writer 출력 패턴 의존.
-
-    Codex Round 1 Blocker: regex 매칭 실패 시 None 반환 (0과 명확 구분 — silent failure 차단).
-    """
-    m = _ROW_COUNT_RE.search(stdout)
-    return int(m.group(1)) if m else None
-
-
-def run_source(source: str, d: date, *, allow_production: bool) -> tuple[int, Optional[int], str]:
+def run_source(source: str, d: date, *, allow_production: bool) -> tuple[int, str, str]:
     """source별 writer subprocess 실행 (cwd=REPO_ROOT, robustness).
 
-    Returns: (returncode, row_count_or_None, stdout_tail_30_lines + stderr_tail_on_fail)
+    Returns: (returncode, stdout_full, stdout_tail_30_lines + stderr_tail_on_fail)
     """
     cmd = build_command(source, d, write=True, allow_production=allow_production)
 
@@ -138,17 +137,106 @@ def run_source(source: str, d: date, *, allow_production: bool) -> tuple[int, Op
             capture_output=True,
             text=True,
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
-            cwd=str(REPO_ROOT),  # Codex Round 1 Non-blocker 3: production cron robustness
+            cwd=str(REPO_ROOT),  # production cron robustness
         )
     except subprocess.TimeoutExpired:
-        return 124, None, f"[TIMEOUT] {SUBPROCESS_TIMEOUT_SECONDS}s 초과 (source={source})"
+        return 124, "", f"[TIMEOUT] {SUBPROCESS_TIMEOUT_SECONDS}s 초과 (source={source})"
 
-    row_count = parse_row_count(result.stdout)
     stdout_lines = result.stdout.splitlines()
     tail = "\n".join(stdout_lines[-30:])
     if result.returncode != 0 and result.stderr:
         tail += "\n--- stderr (tail) ---\n" + "\n".join(result.stderr.splitlines()[-10:])
-    return result.returncode, row_count, tail
+    return result.returncode, result.stdout, tail
+
+
+def _is_strict_int(x) -> bool:
+    """bool 제외 정수 (Python에서 True==1, type(True) is bool이라 엄격 검사)."""
+    return type(x) is int
+
+
+def _validate_verdict_schema(v: dict, source: str, expected_date: date) -> list[str]:
+    """verdict JSON schema + source-aware 정책 검증.
+
+    검증: version / source / asset(source별) / date_kst / status(source별 허용).
+    """
+    policy = SOURCE_POLICY.get(source)
+    if policy is None:
+        return [f"미지원 source={source!r} (SOURCE_POLICY 없음)"]
+
+    issues = []
+    if v.get("version") != VERDICT_VERSION:
+        issues.append(f"version={v.get('version')!r} != {VERDICT_VERSION}")
+    if v.get("source") != source:
+        issues.append(f"source={v.get('source')!r} != {source!r}")
+    if v.get("asset") != policy["asset"]:  # Codex Blocker 2: asset 검증
+        issues.append(f"asset={v.get('asset')!r} != {policy['asset']!r}")
+    if v.get("date_kst") != expected_date.isoformat():
+        issues.append(f"date_kst={v.get('date_kst')!r} != {expected_date.isoformat()!r}")
+    status = v.get("status")
+    if status not in VALID_STATUSES:
+        issues.append(f"status={status!r} invalid")
+    elif status not in policy["allowed_statuses"]:  # Codex Blocker 3: source-aware
+        issues.append(
+            f"status={status!r}는 source={source}에 비허용 (허용: {sorted(policy['allowed_statuses'])})"
+        )
+    return issues
+
+
+def evaluate_source_result(
+    source: str, expected_date: date, returncode: int, stdout: str,
+) -> tuple[str, str]:
+    """fail-closed verdict 판정.
+
+    - exit nonzero → 항상 FAIL (sentinel은 선택적 진단)
+    - exit 0 → sentinel 정확히 1개 + JSON object + source-aware schema + status×rows 검증
+      written → rows==1(int) + reason None / skipped → rows==0(int) + 허용 reason / error → FAIL
+
+    Returns: (status: "PASS"|"FAIL", detail).
+    """
+    try:
+        verdicts = extract_verdicts(stdout)
+    except (ValueError, json.JSONDecodeError):
+        return "FAIL", "malformed verdict JSON (sentinel parse 실패)"
+
+    if returncode != 0:
+        # nonzero exit → 항상 FAIL. sentinel이 dict면 진단 정보만 추가 (Non-blocker).
+        diag = ""
+        if len(verdicts) == 1 and isinstance(verdicts[0], dict):
+            v = verdicts[0]
+            diag = f" verdict.status={v.get('status')!r} reason={v.get('reason')!r}"
+        return "FAIL", f"exit={returncode}{diag} (sentinel={len(verdicts)})"
+
+    # exit 0 → sentinel 정확히 1개 필수
+    if len(verdicts) != 1:
+        return "FAIL", f"exit 0이나 sentinel {len(verdicts)}개 (정확히 1개 필수)"
+
+    v = verdicts[0]
+    if not isinstance(v, dict):  # Codex Blocker 1: non-object JSON (list/null/str) → crash 방지
+        return "FAIL", f"verdict가 JSON object 아님 (type={type(v).__name__})"
+
+    schema_issues = _validate_verdict_schema(v, source, expected_date)
+    if schema_issues:
+        return "FAIL", "schema: " + "; ".join(schema_issues)
+
+    status = v["status"]
+    rows = v.get("rows")
+    if not _is_strict_int(rows):  # Codex Blocker 4: bool/str rows 거부 (True==1 회피)
+        return "FAIL", f"rows type 부적합 ({type(rows).__name__}, int 필요)"
+
+    if status == "written":
+        if rows != 1:
+            return "FAIL", f"written이나 rows={rows} (1 기대 — freshness 위반)"
+        if v.get("reason") is not None:  # Non-blocker: written은 reason None
+            return "FAIL", f"written이나 reason={v.get('reason')!r} (None 기대)"
+        return "PASS", "written rows=1"
+    if status == "skipped":
+        if rows != 0:
+            return "FAIL", f"skipped이나 rows={rows} (0 기대)"
+        if v.get("reason") not in VALID_SKIPPED_REASONS:
+            return "FAIL", f"skipped이나 reason={v.get('reason')!r} 비허용"
+        return "PASS", f"skipped ({v.get('reason')})"
+    # status == "error" — allowed_statuses에서 이미 걸러지나 방어
+    return "FAIL", f"error verdict (reason={v.get('reason')!r})"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -241,44 +329,25 @@ def main() -> None:
         print("[DRY-RUN 완료] subprocess 실행 안 됨. --write 명시 시 실 적재 진입.")
         return
 
-    # write mode: subprocess 실행 + structured summary
+    # write mode: subprocess 실행 + JSON verdict 기반 fail-closed 판정
     results: dict[str, dict] = {}
     for source in sources:
         print(f"--- {source} subprocess ---")
-        rc, rows, tail = run_source(source, target_date, allow_production=args.allow_production_write)
-        results[source] = {"exit": rc, "rows": rows, "tail": tail}
+        rc, stdout, tail = run_source(source, target_date, allow_production=args.allow_production_write)
+        verdict_status, detail = evaluate_source_result(source, target_date, rc, stdout)
+        results[source] = {"exit": rc, "status": verdict_status, "detail": detail, "tail": tail}
         print(tail)
         print()
 
-    # structured summary
-    # Codex Round 1 Blocker: returncode 0 AND rows == expected_rows 양방향 검증 (silent failure 차단)
+    # structured summary (fail-closed verdict 판정)
     print("=" * 60)
     print(f"[Daily Append Summary] date={target_date.isoformat()} mode=write")
     print("=" * 60)
     any_fail = False
     for source, r in results.items():
-        expected = EXPECTED_ROWS_PER_SOURCE[source]
-        rows_actual = r["rows"]  # Optional[int] — None이면 stdout parse 실패
-        rows_ok = rows_actual == expected
-        exit_ok = r["exit"] == 0
-        if exit_ok and rows_ok:
-            status = "PASS"
-        else:
-            status = "FAIL"
+        if r["status"] != "PASS":
             any_fail = True
-        rows_display = "unparsed" if rows_actual is None else str(rows_actual)
-        reason = ""
-        if not exit_ok:
-            reason = f", exit_fail"
-        elif not rows_ok:
-            if rows_actual is None:
-                reason = f", row count parse 실패 (stdout regex mismatch — writer 출력 포맷 변경?)"
-            else:
-                reason = f", row count mismatch (silent failure — freshness 위반)"
-        print(
-            f"  {source}: {status} ({rows_display} rows committed, "
-            f"expected={expected}, exit={r['exit']}{reason})"
-        )
+        print(f"  {source}: {r['status']} (exit={r['exit']}, {r['detail']})")
     print()
     if any_fail:
         print("[FAIL] 일부 source 실패 — 재실행 또는 rollback anchor 확인 필요")

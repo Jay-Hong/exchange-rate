@@ -25,6 +25,9 @@ redis>=5.0.0
 # 타임존 (항상 최신 권장)
 pytz>=2024.2
 
+# 한국 공휴일 calendar (ADR-034 Phase 2d — Hana observed_eod holiday 분류)
+holidays>=0.97,<1.0.0
+
 # 로깅
 python-json-logger>=2.0.7,<3.0.0
 

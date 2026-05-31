@@ -80,6 +80,13 @@ from zoneinfo import ZoneInfo
 # 프로젝트 루트를 sys.path에 추가 (일관성 유지)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 로컬 애플리케이션 (sys.path 설정 후 import)
+from app.calendars.hana_business_days import classify_hana_calendar_day  # noqa: E402
+from app.daily_append_verdict import (  # noqa: E402
+    SENTINEL_PREFIX,
+    emit_verdict,
+)
+
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -96,6 +103,14 @@ AGE_LIMIT_SECONDS = AGE_LIMIT_DAYS * 86400
 CLOSE_BASIS = "hana_observed_eod"
 SOURCE_METHOD = "observed_rollup"
 OHLC_QUALITY = "observed_rollup"
+
+def _emit_verdict(date_kst: date, status: str, reason: Optional[str], rows: int) -> None:
+    """daily append verdict sentinel — 공유 계약(app.daily_append_verdict)에 source/asset 채워 위임.
+
+    status 매핑 (writer 내부 action → 외부 계약):
+      write → written / skip_ok → skipped / skip_error → error
+    """
+    emit_verdict("hana", ASSET, date_kst, status, reason, rows)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -180,7 +195,9 @@ def build_observed_eod_row(
     baseline (prev)은 신선(<=7일)할 때만 high/low rollup에 포함, stale/missing이면 제외하되
     당일 close는 보존 (liveness gate ⊥ baseline quality 분리).
     """
-    calendar_class = "weekend" if target_date_kst.weekday() >= 5 else "weekday"
+    # calendar_class: business_day | weekend | holiday (단일 진실 소스 재사용)
+    # 공휴일에 changes가 있으면 write하되 provenance는 "holiday"로 정확히 기록.
+    calendar_class = classify_hana_calendar_day(target_date_kst)
 
     # baseline quality (rollup 포함 여부만 — write gate 아님)
     baseline_ok = False
@@ -262,9 +279,14 @@ def process_date(
 
     if not changes:
         # liveness gate: 당일 변경 row 없음 → calendar 분류로 skip 종류 결정
-        if target_date_kst.weekday() >= 5:
+        cal = classify_hana_calendar_day(target_date_kst)
+        if cal == "weekend":
             return "skip_ok", None, "weekend_no_changes"
-        return "skip_error", None, "weekday_no_changes"
+        if cal == "holiday":
+            # 공휴일 무변동 = 정상 (은행 휴무, Hana 미고시)
+            return "skip_ok", None, "holiday_no_changes"
+        # business_day: 평일 + 비공휴일 무변동 = 크롤러 장애 의심
+        return "skip_error", None, "business_day_no_changes"
 
     row = build_observed_eod_row(target_date_kst, prev, changes, utc_start, utc_end_excl)
     return "write", row, None
@@ -601,10 +623,10 @@ def _run_dry_run(target_date_kst: date) -> int:
     print()
 
     if action == "skip_ok":
-        print(f"[SKIP OK] {skip_code} — 주말 무변동 정상 (ADR-034 §13 한국 은행 영업일 calendar). row 미적재.")
+        print(f"[SKIP OK] {skip_code} — 주말/공휴일 무변동 정상 (ADR-034 §13 한국 은행 영업일 calendar). row 미적재.")
         return 0
     if action == "skip_error":
-        print(f"[SKIP ERROR] {skip_code} — 평일 무변동 (크롤러 장애 의심). row 미적재, exit 1로 surface.")
+        print(f"[SKIP ERROR] {skip_code} — business_day 무변동 (크롤러 장애 의심). row 미적재, exit 1로 surface.")
         return 1
 
     # action == "write" → row 검증
@@ -681,27 +703,33 @@ def _run_write(args) -> int:
         db.close()
 
     print(f"  write rows: {len(write_rows)}")
-    print(f"  skip_ok (주말 무변동): {len(skip_ok_events)}")
+    print(f"  skip_ok (주말/공휴일 무변동): {len(skip_ok_events)}")
     for d, code in skip_ok_events[:10]:
         print(f"    - {d.isoformat()} ({code})")
-    print(f"  skip_error (평일 무변동 — 장애 의심): {len(skip_error_events)}")
+    print(f"  skip_error (business_day 무변동 — 장애 의심): {len(skip_error_events)}")
     for d, code in skip_error_events[:10]:
         print(f"    - {d.isoformat()} ({code})")
     print()
 
     # *** ATOMICITY GATE (B1): skip_error 있으면 transaction 전 즉시 중단 ***
-    # 평일 무변동(weekday_no_changes)이 range에 하나라도 있으면 부분 commit 금지 —
+    # business_day 무변동(business_day_no_changes)이 range에 하나라도 있으면 부분 commit 금지 —
     # 전체 range를 all-or-nothing으로 처리 (valid rows도 write 안 함, exit 1).
-    # 주말 skip_ok는 정상이므로 write 진행 허용.
+    # 주말/공휴일 skip_ok는 정상이므로 write 진행 허용.
     if skip_error_events:
+        d_err, code_err = skip_error_events[0]
         print(
-            f"[FAIL] 평일 무변동 {len(skip_error_events)}건 (weekday_no_changes) — 크롤러 장애 의심."
+            f"[FAIL] business_day 무변동 {len(skip_error_events)}건 (business_day_no_changes) — 크롤러 장애 의심."
         )
         print("  → range atomicity: transaction 미진입, write_rows 미적재 (부분 commit 차단, exit 1).")
+        if args.emit_daily_append_verdict:
+            _emit_verdict(d_err, "error", code_err, 0)
         return 1
 
     if not write_rows:
-        print("[PASS] write rows 0개 (모두 주말 skip_ok 또는 빈 range). source_daily_rates write 안 됨.")
+        print("[PASS] write rows 0개 (모두 주말/공휴일 skip_ok 또는 빈 range). source_daily_rates write 안 됨.")
+        if args.emit_daily_append_verdict and skip_ok_events:
+            d_ok, code_ok = skip_ok_events[0]
+            _emit_verdict(d_ok, "skipped", code_ok, 0)
         return 0
 
     # *** PRE-WRITE ROW VALIDATION (B2): DRY_RUN_CHECKS를 transaction 전 적용 ***
@@ -749,6 +777,8 @@ def _run_write(args) -> int:
         f").delete(synchronize_session=False); db.commit()"
     )
     print()
+    if args.emit_daily_append_verdict:
+        _emit_verdict(write_rows[0]["date_kst"], "written", None, len(write_rows))
     print("[PASS] 모든 date 처리 완료. Stage 2 commit 별 GO / Stage 3 production execution 별 GO.")
     return 0
 
@@ -799,13 +829,30 @@ def main() -> None:
             "default off — local SQLite smoke만 허용. production execution은 별 GO 필수."
         ),
     )
+    parser.add_argument(
+        "--emit-daily-append-verdict",
+        action="store_true",
+        help=(
+            "[orchestrator 전용] 처리 결과를 DAILY_APPEND_VERDICT_JSON= sentinel 1줄로 출력. "
+            "--write + 단일 날짜(start==end)에서만 허용. 일반 backfill 실행은 미사용."
+        ),
+    )
     args = parser.parse_args()
+
+    # --emit-daily-append-verdict: --write 동반 필수 (verdict는 append 결과 계약)
+    if args.emit_daily_append_verdict and not args.write:
+        print("[CONFIG 실패] --emit-daily-append-verdict는 --write 동반 필수")
+        sys.exit(1)
 
     # *** PRODUCTION GUARD EARLY (write mode 진입 시, DB write 전) ***
     # production .env로 --write 잘못 실행 시 DB write 사전 차단 + 운영 영향 0 보장.
     if args.write:
         if args.start_date is None or args.end_date is None:
             print("[CONFIG 실패] --write 시 --start-date / --end-date 필수")
+            sys.exit(1)
+        # verdict는 1일 의미 — 단일 날짜만 허용 (multi-day range + verdict 차단)
+        if args.emit_daily_append_verdict and args.start_date != args.end_date:
+            print("[CONFIG 실패] --emit-daily-append-verdict는 단일 날짜(start==end)만 허용")
             sys.exit(1)
         guard_err = check_production_write_guard(args.allow_production_write)
         if guard_err:

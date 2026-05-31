@@ -54,8 +54,11 @@ from zoneinfo import ZoneInfo
 # 서드파티 라이브러리
 import requests
 
-# 프로젝트 루트를 sys.path에 추가 (현재는 import 없지만 일관성 유지)
+# 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 로컬 애플리케이션 (sys.path 설정 후) — daily append verdict 공유 계약
+from app.daily_append_verdict import emit_verdict  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -660,7 +663,20 @@ def main() -> None:
             "default off — local SQLite smoke만 허용. production execution은 별도 명시 + Stage 3 GO 필수."
         ),
     )
+    parser.add_argument(
+        "--emit-daily-append-verdict",
+        action="store_true",
+        help=(
+            "[orchestrator 전용] 처리 결과를 DAILY_APPEND_VERDICT_JSON= sentinel 1줄로 출력. "
+            "--write + 단일 날짜(start==end)에서만 허용. 일반 backfill 실행은 미사용."
+        ),
+    )
     args = parser.parse_args()
+
+    # --emit-daily-append-verdict: --write 동반 필수
+    if args.emit_daily_append_verdict and not args.write:
+        print("[CONFIG 실패] --emit-daily-append-verdict는 --write 동반 필수")
+        sys.exit(1)
 
     # *** PRODUCTION GUARD EARLY (Bithumb writer, KRX Round 8 / Hana 패턴 재사용) ***
     if args.write:
@@ -670,6 +686,10 @@ def main() -> None:
         # Codex Round 1 Blocker: --write + --limit hard reject (partial write 위험 회피)
         if args.limit is not None:
             print("[CONFIG 실패] --write와 --limit는 함께 사용할 수 없음 (partial write 위험)")
+            sys.exit(1)
+        # verdict는 1일 의미 — 단일 날짜만 허용
+        if args.emit_daily_append_verdict and args.start_date != args.end_date:
+            print("[CONFIG 실패] --emit-daily-append-verdict는 단일 날짜(start==end)만 허용")
             sys.exit(1)
         guard_err = check_production_write_guard(args.allow_production_write)
         if guard_err:
@@ -844,6 +864,9 @@ def main() -> None:
     )
     if success:
         print(f"[Bithumb write 완료] {len(rows_to_write)} rows committed + post-write validations passed")
+        # daily append verdict (단일 날짜 success 경로에만 — 빈 candle/실패 경로는 sentinel 없음 → orchestrator FAIL)
+        if args.emit_daily_append_verdict:
+            emit_verdict("bithumb", "usdt-krw", args.start_date, "written", None, len(rows_to_write))
         print()
         print("[Rollback anchor] cleanup 시:")
         print(
