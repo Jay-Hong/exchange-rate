@@ -5207,6 +5207,97 @@ ADR-034 §14 Rollout step 5 (daily append job) **minimum viable first PR**. KRX/
 - **Step 4 full backfill** — Hana observed_eod + Bithumb 902일 + KRX chain 깊이 확장 (Step 5 daily append 안정 운영 base 위에서)
 - **Step 6 v2 endpoint switch** (Phase 2e + 장기 그래프 DB 표준화 ADR-035 결정 — `source_hourly_rates` 신 table 도입 여부)
 
+### Phase 2d Step 3 Hana observed_eod first PR Round 1 — bank_exchange_rates observed_eod writer (2026-05-31)
+
+ADR-034 §14 Rollout step 3 — **Hana observed_eod 별 PR** (Step 5 daily append에서 분리된 canonical append path). 기존 `backfill_hana_source_daily_rates.py` (official_historical_backfill)와 **별 path** — close_basis / source_method / ohlc_quality 모두 다름. 외부 endpoint 미사용, 우리 DB `bank_exchange_rates` 내부 관측값 read. **Stage 1 candidate** (writer + 영구 test land 대상). Stage 2 push + Stage 3 production execution 별 GO 대기.
+
+**문서 anchor**: GRAPH_API_V2_CONTRACT.md §7 (`hana_observed_eod` = KST 해당일 24:00 이전 마지막 관측 Hana 고시값) + ADR-034 §6/§7 (close_basis `hana_observed_eod` / source_method `observed_rollup` / ohlc_quality `observed_rollup`) + §13 (한국 은행 영업일 expected calendar).
+
+**변경 파일** (Stage 1 land 대상, 둘 다 신규):
+
+- `scripts/backfill_hana_observed_eod_source_daily_rates.py` 신규 — observed_eod writer:
+  - dry-run (bank_exchange_rates read only) / write (calendar-day range) / production guard (dialect) — 4 anchor 재사용 (KRX/Hana official/Bithumb writer 패턴)
+  - 핵심 신규 로직: KST→UTC naive boundary 변환 + carry-in baseline (prev) + 당일 changes rollup
+- `tests/test_hana_observed_eod_writer.py` 신규 — 영구 회귀 16 test (in-memory SQLite + `patch` 주입, repo unittest 컨벤션)
+
+**First PR scope (옵션 A — overlap-free single row)**:
+
+- Currency: **USD only** (JPY/EUR 후속 PR)
+- date_kst: **2026-05-28 단일 row** (official_historical_backfill 4 rows `[5/21,22,26,27]`와 overlap 0 — overlap 회피)
+- production guard: dialect 검사 + `--allow-production-write` 필요
+
+**핵심 설계 (Codex 협업 8 round 수렴)**:
+
+- **bank_exchange_rates = change-only table** (insert_bank_rates_into_db: rate 변경 시에만 INSERT). 하루 값 불변이면 그날 row 0개 가능.
+- **liveness gate ⊥ baseline quality 직교 분리**:
+  - changes 존재 여부 = write 가능 여부 (liveness gate)
+  - prev (00:00 직전 마지막 관측) 신선도 = high/low rollup 포함 여부만 (write gate 아님)
+- **rollup**: rollup_rows = ([prev] if baseline_ok else []) + changes. close=rate=changes[-1] (invariant). high/low=rollup max/min. baseline_ok = prev 존재 AND age(utc_start - prev.timestamp) <= 7d.
+- **case 매트릭스**: 평일/주말 changes>=1 → write / 평일 changes==0 → skip_error (exit 1, `weekday_no_changes`) / 주말 changes==0 → skip_ok (exit 0, `weekend_no_changes`).
+- nullable: contract_code / basis_date / published_at 모두 None (observed_eod 방향 — 외부 발표/기준일 개념 없음).
+- metadata_json: rollup provenance (rollup_mode / calendar_class / liveness_evidence / baseline_included / baseline_exclusion_reason / carry_in_age_at_start_seconds / close_raw_row_id / rollup_point_count 등).
+
+**Hana official_backfill vs observed_eod writer 차이**:
+
+| 항목 | official_backfill | observed_eod |
+| --- | --- | --- |
+| Source | Hana official endpoint (외부) | bank_exchange_rates (내부 DB) |
+| close_basis | hana_official_historical_backfill | hana_observed_eod |
+| source_method | external_backfill | observed_rollup |
+| ohlc_quality | close_only (high=low=close synthetic) | observed_rollup (rollup max/min) |
+| basis_date / published_at | NOT NULL (회차 provenance) | None |
+
+**Codex review (설계 6 round + write-path Blocker 2 round)**:
+
+- 설계 수렴: basis_date/published_at None (§3 정의 + §10 nullable preserve) / age=day-start baseline 신선도 (write gate 아닌 rollup 포함 gate) / 평일 changes==0 skip+error (§13 영업일 + 장애 surface) / 주말 무변동 정상 skip.
+- **write-path Blocker 2건** (Codex temp SQLite 재현 + 자기 코드 직접 trace 확인):
+  - **B1 range atomicity**: 실패 range 부분 commit → skip_error 시 transaction 전 abort (all-or-nothing).
+  - **B2 write-path validation 우회**: 음수/precision raw commit → DRY_RUN_CHECKS를 transaction 전 적용 (pre-write abort).
+  - N1 metadata fail-closed (필수 key 누락 시 rollback) / N2 dry-run 이중 query 정리 (prefetch 재사용).
+- 영구 test 추가 (Codex 권장): metadata 필수 key rollback + non-SQLite guard reject.
+
+**Local SQLite smoke 11 case + 영구 unittest 16 PASS**:
+
+- /tmp smoke 11 case (process_date + write subprocess + B1/B2 재현 + production guard) — 58 check PASS
+- `tests/test_hana_observed_eod_writer.py` 16 test: process_date 6 / write_transaction 4 (commit / idempotent / **official overlap rollback 안전망** / metadata fail-closed) / `_run_write` 3 (B1 atomicity / B2 negative reject / clean) / production guard 3 (non-SQLite reject / allow flag / sqlite pass)
+
+**overlap 안전망 (실측 확인)**: official row와 overlap 시 upsert nullable-preserve로 basis_date/published_at leftover → post-write nullable validation fail → rollback → official row 보존 (corruption 차단). ADR-034 §10 Open (close_basis 전환 정책 미확정) 전까지 overlap write 자동 차단. 첫 PR scope 2026-05-28은 overlap 0.
+
+**Phase 1-3 production read-only 사전 query (2026-05-31, EC2 `docker compose run --rm fastapi`)**:
+
+- (1) 2026-05-28 Hana USD raw change_rows: **1096** (정상 활성 평일) — first KST 00:06=1497.5 / last KST 23:56=1496.1 (→ close) / min·max 1494.3·1510.8
+- carry-in baseline (prev): 2026-05-27 14:55:45 UTC, 1497.3, age 254.6s (~4분, fresh ≤ 7d)
+- (2) source_daily_rates hana/usd-krw 2026-05-28 existing: **0** (overlap 없음)
+- 예상 production row: close=rate=1496.1 / high=1510.8 / low=1494.3 / baseline_included=True / day_change_count=1096 / rollup_point_count=1097 / weekday
+
+**Stage 분리**:
+
+- **Stage 1**: writer + 영구 test 2 파일 + 본 anchor — **본 commit 대상**
+- **Stage 2**: origin/master push — 별 GO 대기
+- **Stage 3**: production execution — 별 GO 대기. **선행 필수**: push 후 EC2 `git pull` + `docker compose build fastapi` (one-shot 이미지에 신규 writer 반영 — scripts/는 image COPY, live container recreate 불필요). 명령: `docker compose run --rm fastapi python scripts/backfill_hana_observed_eod_source_daily_rates.py --write --start-date 2026-05-28 --end-date 2026-05-28 --allow-production-write`. manual snapshot 생략 (incremental write + rollback anchor).
+
+**Rollback anchor** (단일 row, 개별 date IN delete):
+
+```python
+from app.database import SessionLocal
+from app.models import SourceDailyRate
+from datetime import date
+db = SessionLocal()
+db.query(SourceDailyRate).filter(
+    SourceDailyRate.source == "hana", SourceDailyRate.asset == "usd-krw",
+    SourceDailyRate.date_kst.in_([date(2026, 5, 28)]),
+).delete(synchronize_session=False)
+db.commit()
+```
+
+**후속 작업**:
+
+- Hana JPY/EUR observed_eod 진입 (3통화 다각화)
+- orchestrator `--source` choices 확장 (`["bithumb", "hana"]`) + Hana daily append cron line (KST 00:01)
+- holiday calendar 도입 (공휴일 평일 weekday_no_changes false-positive 회피 + age threshold business-day 전환)
+- crawler-success heartbeat (평일 liveness_verified 정확화)
+- official overlap 시 close_basis 전환 정책 (ADR-034 §10 Open)
+
 ### Phase 2d Step 3 first land — KRX current partial backfill writer (2026-05-28)
 
 ADR-034 §14 Rollout step 3 **first PR** — KRX current contract (A75606) partial backfill writer land. **Step 3 진입 첫 source = KRX** (ADR-034 §14 §3 잠정 — service value 기준 + KIS dry-run에서 chain/rollover/cap/stale 모두 검증 완료). **Stage 1 (commit `40279c9`) + Stage 2 (origin/master push) + Stage 3 (production RDS execution) 모두 land 완료** (2026-05-28 KST 18:30, RDS manual snapshot `fxi-pre-step3-2026-05-28` 직후 production write). Stage 3 production verify: **7 rows committed + 7 post-write validations passed + drift 0 + boundary close=1496.500 production-level 재현** (GRAPH §7-new B-B probe 사례). 운영 fastapi runtime 갱신은 Phase 2e endpoint switch 시점 별 배포 영역 (현재 source_daily_rates read 호출자 0 — user-facing 영향 0).
@@ -5357,3 +5448,4 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - 2026-05-29: ADR-034 Phase 2d Step 3 Bithumb first PR Round 1 Stage 2+3 production execution 완료 (Stage 2 push + Stage 3 production write 모두 land / manual snapshot 생략 — Bithumb incremental write 자동 backup 1 Day + `delete_range` rollback anchor 신뢰, 24/7 연속이라 range delete 안전 / `--start-date 2026-05-21 --end-date 2026-05-27 --allow-production-write` / production verify: 7 rows committed (Bithumb usdt-krw `[2026-05-21, 2026-05-27]` 연속) + post-write validations passed + drift 0 + 모든 top-level metadata None (contract_code/basis_date/published_at) + all candle_ts_kst present (KST 00:00 anchor 격리) + rate==close + close_basis=bithumb_24h_kst_close + source_method=bithumb_candlestick_backfill + ohlc_quality=source_ohlc / **ADR-034 §3 schema 3 직교 path 모두 production-level 활성 완료** (KRX source_ohlc+contract_code+rollover / Hana close_only+basis_date+published_at+pbldSqn / Bithumb source_ohlc+모든 top-level None+candle metadata_json) / 전체 production source_daily_rates state: KRX 25 + Hana 4 + Bithumb 7 = 36 rows / 운영 fastapi runtime 미교체 — Phase 2e endpoint switch 시점 별 배포 영역 / source_daily_rates read 호출자 0 — user-facing 영향 0)
 - 2026-05-29: ADR-034 Phase 2d Step 5 daily append minimum first PR Stage 1 candidate — Bithumb only orchestrator (scripts/daily_append_source_daily_rates.py 신규 / orchestrator script — 기존 backfill_bithumb_source_daily_rates.py를 subprocess 호출, 신규 write logic 0 / --source bithumb (choices 잠금, 첫 PR scope) + --date YYYY-MM-DD (default yesterday KST) + --write (default dry-run = 3 command preview only) + --allow-production-write (writer subprocess에 forward) / subprocess timeout 180s + cwd=REPO_ROOT (production cron robustness) + script_path .resolve() / Codex Round 1 Blocker 정정 — parse_row_count Optional[int] + EXPECTED_ROWS_PER_SOURCE = {"bithumb": 1} + summary `returncode == 0 AND rows == expected_rows` 양방향 검증 (daily append freshness silent failure 차단) + Non-blocker 3 (cwd / script_path resolve / dry-run 문구 polish) / Local SQLite smoke 5단계 모두 PASS — py_compile + dry-run preview (3 command — validation/local write/production write) + write mode (1 row committed, PASS) + silent failure 시뮬 (--date 2020-01-01 → exit 1 FAIL) + argparse choices=["bithumb"] 차단 (--source hana invalid choice) / Hana observed_eod 별 PR (사전 read 5 항목 — bank_exchange_rates schema / Hana source naming / 전일 last 추출 기준 / source_method enum / missing day) + KRX 별 PR (close finalizer 통합) 분리 정책 / Stage 1 commit 대상, Stage 2 push + Stage 3 production cron 등록 별 GO 대기)
 - 2026-05-29: ADR-034 Phase 2d Step 5 daily append minimum first PR Stage 2+3 production execution + OS crontab 등록 완료 (Stage 2 push + Stage 3 manual smoke production write + OS crontab 등록 모두 land / manual smoke verify: Bithumb 2026-05-28 1 row committed (`bithumb: PASS (1 rows committed, expected=1, exit=0)`) + post-write validations passed + drift 0 + candle_ts_kst=2026-05-28T00:00:00+09:00 KST anchor 격리 + 전체 Bithumb rows 8 (7 backfill + 1 daily append) / **OS crontab 등록**: `1 15 * * *` (UTC 15:01 = KST 00:01 매일) — 기존 `monday_reopen_exec.sh` cron 보존 + daily append line 추가, `/usr/bin/docker` 절대경로 사용 (cron PATH 회피) + `~/logs/daily_append.log` 로그 destination / cron 첫 발화 예정: 2026-05-29 UTC 15:01 / **운영 fastapi runtime 미교체** — APScheduler in-process schedule과 별 영역 (OS cron이 `docker compose run --rm` 새 one-shot container 띄움, 운영 fastapi process 영향 0) / 7일 안정 운영 모니터링 진입 / 전체 production source_daily_rates state: KRX 25 + Hana 4 + Bithumb 8 = 37 rows / source_daily_rates read 호출자 0 — user-facing 영향 0)
+- 2026-05-31: ADR-034 Phase 2d Step 3 Hana observed_eod first PR Round 1 Stage 1 candidate — bank_exchange_rates observed_eod writer (scripts/backfill_hana_observed_eod_source_daily_rates.py 신규 + tests/test_hana_observed_eod_writer.py 신규 16 test / official_historical_backfill과 별 path — close_basis hana_observed_eod / source_method+ohlc_quality observed_rollup / bank_exchange_rates 내부 관측 read / KST→UTC naive boundary + carry-in baseline(prev) + 당일 changes rollup / **liveness gate ⊥ baseline quality 분리** — changes=write gate, prev age(<=7d)=rollup 포함 gate / case: 평일·주말 changes>=1 write, 평일 changes==0 skip_error exit1 (weekday_no_changes), 주말 changes==0 skip_ok exit0 (weekend_no_changes) / nullable contract_code/basis_date/published_at 모두 None / Codex 8 round 수렴 + write-path Blocker 2 (B1 range atomicity 부분 commit 차단 — skip_error 시 transaction 전 abort + B2 DRY_RUN_CHECKS transaction 전 적용 — 음수/precision raw reject) + N1 metadata fail-closed + N2 dry-run 이중 query 정리 / 영구 test 16 (process_date 6 / write_transaction 4 incl official overlap rollback 안전망 + metadata fail-closed / `_run_write` 3 / production guard 3) + /tmp smoke 11 case 58 check / **overlap 안전망 실측** — official row overlap 시 nullable leftover → post-write fail → rollback → official 보존 (ADR-034 §10 Open 전까지 자동 차단) / First PR scope: USD only / 2026-05-28 단일 row (official 4 rows [5/21,22,26,27]와 overlap 0) / **Phase 1-3 production read-only query** (EC2 docker compose run): change_rows=1096 + prev age 254.6s fresh + existing source_daily_rates row=0 / 예상 row close=1496.1 high=1510.8 low=1494.3 rollup_point_count=1097 / Stage 1 commit 대상, Stage 2 push + Stage 3 production execution 별 GO — Stage 3 선행 EC2 git pull + docker compose build fastapi 필수 (one-shot 이미지 신규 writer 반영, scripts/ image COPY, live container recreate 불필요))
