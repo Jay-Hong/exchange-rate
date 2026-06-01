@@ -342,7 +342,7 @@ class TestRunWriteExitCodes(_BaseDBTest):
         """[B1] 평일 무변동이 range에 섞이면 transaction 전 abort → 0 row (부분 commit 금지)."""
         self._add_bank(_ts(2026, 5, 26, 10, 0), 1395.0)  # prev for 5/27
         self._add_bank(_ts(2026, 5, 27, 5, 0), 1400.0)   # 5/27 change (write 후보)
-        # 5/28 window에는 change 없음 → weekday_no_changes
+        # 5/28 window에는 change 없음 → business_day_no_changes (영업일 무변동)
         rc, out = self._run(self._args(date(2026, 5, 27), date(2026, 5, 28)))
         self.assertEqual(rc, 1)
         self.assertEqual(len(self._daily_rows()), 0)      # 5/27도 미적재 (atomicity)

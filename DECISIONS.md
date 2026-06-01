@@ -5181,17 +5181,26 @@ ADR-034 §14 Rollout step 5 (daily append job) **minimum viable first PR**. KRX/
 
 - **Stage 1**: orchestrator script + smoke 5단계 검증 — **본 commit 대상**
 - **Stage 2**: origin/master push — **별 GO 대기**
-- **Stage 3**: production cron 등록 — **별 GO 대기** (cron line 예: `1 0 * * * cd ~/exchange-rate && docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --write --allow-production-write` — 매일 KST 00:01 Bithumb yesterday 적재)
+- **Stage 3**: production cron 등록 — **별 GO 대기** (실배포 cron line: `1 15 * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --write --allow-production-write` — EC2 timezone UTC라 `1 15`=KST 00:01, `/usr/bin/docker` cron PATH 안전. Bithumb default(적재 source 미지정). **PR A2에서 `--source all`로 교체**)
 
 **Stage 3 production cron 등록 절차 anchor**:
 
 ```bash
 # 1. SSH ubuntu@<production-ec2>
 # 2. crontab -e (또는 별 systemd timer)
-# 3. cron line 추가:
-1 0 * * * cd ~/exchange-rate && docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --write --allow-production-write >> ~/logs/daily_append.log 2>&1
+# 3. cron line 추가 (Step 5 first PR 실배포 형태 — Bithumb default, EC2 timezone UTC라 1 15 = KST 00:01):
+1 15 * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --write --allow-production-write >> ~/logs/daily_append.log 2>&1
 # 4. 7일 안정 운영 모니터링 (drift 0 / 1 row append every day)
 # 5. retry/backoff/alert는 운영 데이터 기반 후속 PR
+#
+# [PR A2] 위 한 줄을 아래 --source all (bithumb + hana) 한 줄로 *교체* (중복 금지).
+#   별 GO (production write + 설정 변경). **통합 관찰 정책**: 6/2 Bithumb 단독 검증 대기 불요 —
+#   고정 날짜 idempotent pre-smoke로 A2 loop 선검증 후 교체 → 6/2 자연 발화에서 amendment + A2 통합 관찰.
+#   (Bithumb 명령은 A2에서 무변경이라 amendment 검증 보존 + 사후 source_method query로 독립 분리 가능)
+#   절차: git pull → docker compose build fastapi (one-shot 이미지 rebuild load-bearing) →
+#   --source all dry-run preview → manual smoke (--date 2026-05-28 idempotent) → crontab 교체 →
+#   중복 line 확인 → 다음 발화 source별 분리 검증 (Bithumb api row / Hana observed_eod row).
+1 15 * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm fastapi python scripts/daily_append_source_daily_rates.py --source all --write --allow-production-write >> ~/logs/daily_append.log 2>&1
 ```
 
 **후속 작업 (Step 5 first PR land 후)**:
@@ -5277,7 +5286,7 @@ ADR-034 §14 Rollout step 5 후속 — Hana USD daily append 자동화를 위한
 - Stage 3: EC2 git pull (a7b128d) + `docker compose build fastapi` (새 이미지) + **in-image `holidays.__version__==0.97` + 대체공휴일 fixture 확인 완료** + Bithumb JSON manual smoke PASS + production 40 rows idempotent 무결 — **완료** (2026-05-31). **cron 1회 검증 완료 (2026-06-01 00:01 KST)**: 신규 insert Bithumb 5/31 row JSON verdict 경로 적재 `{written,rows:1}` → orchestrator PASS, total 40→41 — A1 운영 검증 완전 closure
 - **PR A2**: `--source bithumb|hana|all` + per-source 예외 격리 + aggregate exit + cron line `--source all` 교체 (Hana 실패가 Bithumb 막지 않음)
 
-**Open (PR A2 / 후속)**: Hana cron line 추가 / KRX stub(`KRX_2026_KNOWN_HOLIDAYS`)을 공유 calendar base로 migration / crawler-success heartbeat (평일 liveness 정확화) / 임시공휴일 override (라이브러리 lag 시).
+**Open (PR A2 / 후속)**: Hana를 production cron에 포함 (기존 Bithumb cron 한 줄을 `--source all`로 *교체* — 신규 줄 추가 아님, 중복 금지; A2 Stage 3) / KRX stub(`KRX_2026_KNOWN_HOLIDAYS`)을 공유 calendar base로 migration / crawler-success heartbeat (평일 liveness 정확화) / 임시공휴일 override (라이브러리 lag 시).
 
 ### Phase 2d Step 3 Hana observed_eod first PR Round 1 — bank_exchange_rates observed_eod writer (2026-05-31)
 
@@ -5305,7 +5314,7 @@ ADR-034 §14 Rollout step 3 — **Hana observed_eod 별 PR** (Step 5 daily appen
   - changes 존재 여부 = write 가능 여부 (liveness gate)
   - prev (00:00 직전 마지막 관측) 신선도 = high/low rollup 포함 여부만 (write gate 아님)
 - **rollup**: rollup_rows = ([prev] if baseline_ok else []) + changes. close=rate=changes[-1] (invariant). high/low=rollup max/min. baseline_ok = prev 존재 AND age(utc_start - prev.timestamp) <= 7d.
-- **case 매트릭스**: 평일/주말 changes>=1 → write / 평일 changes==0 → skip_error (exit 1, `weekday_no_changes`) / 주말 changes==0 → skip_ok (exit 0, `weekend_no_changes`).
+- **case 매트릭스** (A1 calendar 통합 — classify_hana_calendar_day): changes>=1 → write (영업일/주말/공휴일 무관) / 영업일(비공휴일) changes==0 → skip_error (exit 1, `business_day_no_changes`) / 공휴일 changes==0 → skip_ok (exit 0, `holiday_no_changes`) / 주말 changes==0 → skip_ok (exit 0, `weekend_no_changes`).
 - nullable: contract_code / basis_date / published_at 모두 None (observed_eod 방향 — 외부 발표/기준일 개념 없음).
 - metadata_json: rollup provenance (rollup_mode / calendar_class / liveness_evidence / baseline_included / baseline_exclusion_reason / carry_in_age_at_start_seconds / close_raw_row_id / rollup_point_count 등).
 
@@ -5365,7 +5374,7 @@ db.commit()
 **후속 작업**:
 
 - Hana JPY/EUR observed_eod 진입 (3통화 다각화)
-- orchestrator `--source` choices 확장 (`["bithumb", "hana"]`) + Hana daily append cron line (KST 00:01)
+- orchestrator `--source` choices 확장 (`["bithumb", "hana", "all"]`) — **PR A2 Stage 1 구현 완료** (per-source 격리 포함). production cron `--source all` 교체만 pending (A2 Stage 3 — 고정 날짜 idempotent pre-smoke 후 교체, 6/2 자연 발화에서 Bithumb amendment + A2 통합 관찰)
 - holiday calendar 도입 (공휴일 평일 weekday_no_changes false-positive 회피 + age threshold business-day 전환) — **공휴일 분류는 PR A1에서 구현 완료** (holiday_no_changes → skip_ok, 본 §14 PR A1 섹션 참조). age threshold business-day 전환은 미구현 (후속)
 - crawler-success heartbeat (평일 liveness_verified 정확화)
 - official overlap 시 close_basis 전환 정책 (ADR-034 §10 Open)
@@ -5526,3 +5535,4 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 - 2026-05-31: ADR-034 Phase 2d PR A1 Stage 2+3 production deploy 완료 (Stage 1 commit `a7b128d` + Stage 2 origin/master push `3365c1b..a7b128d` + Stage 3 EC2 배포 모두 land / 절차: EC2 git pull a7b128d → docker compose build fastapi (새 이미지, holidays 패키지 bake) → in-image 검증 (holidays.__version__==0.97 + 대체공휴일 fixture 5/25·3/2 True / 5/1 근로자의날 True / 12/31 False / classify 정상) → Bithumb JSON manual smoke (`{written,asset:usdt-krw,rows:1}` → orchestrator PASS, idempotent 5/30) → read-only verify (hana 5 + bithumb 10 + krx 25 = 40 불변, Bithumb 5/30 close=1481 무결) / **cron line 변경 0** → live exchange-rate-app 컨테이너 recreate 없이 one-shot 이미지만 rebuild (broadcast 영향 0) / Codex 독립 재검증 일치 (EC2 a7b128d / 새 이미지 f7bab620 / in-image holidays + fixture / 40 rows / crontab 기존 line 유지) / **첫 JSON cron 발화 2026-06-01 00:01 KST (EC2 timezone Etc/UTC 실측, cron 1 15 * * * = 15:01 UTC) — 검증 PASS**: 신규 insert Bithumb 5/31 row JSON verdict 경로 적재 (`{written,rows:1}` → orchestrator PASS, total 40→41, candle_ts_kst=2026-05-31T00:00+09:00) — **A1 운영 검증 완전 closure** / 후속: PR A2 (--source all + per-source 격리 + cron line 교체))
 - 2026-06-01: ADR-034 Bithumb provenance Amendment Stage 1 candidate — source_method rename `bithumb_candlestick_backfill` → `bithumb_candlestick_api` (PR A1 cron 검증 중 발견 — ADR §7/§9는 Bithumb daily append=observed_rollup(DB rollup) 규정이나 구현은 candlestick backfill writer 재사용 → backfill·append 모두 공식 24h candle API / 데이터 정확, label만 부정확 / 결정 옵션 a: candlestick canonical 인정 + source_method 단일 값 bithumb_candlestick_api (방법=획득방식, backfill/daily는 timing) + ohlc_quality=source_ohlc·close_basis=bithumb_24h_kst_close 유지 + ingest_mode 미도입(YAGNI) / 변경: Bithumb writer SOURCE_METHOD 상수(build+validator 공유) + docstring + models.py docstring + DECISIONS §6/§7/§9 + GRAPH §6/§7 + CLAUDE amend (과거 history rewrite ❌, Amendment supersede) + migrate_bithumb_source_method.py 신규 + 회귀 test 13 (fail-open count 방어 3 포함) / migration 계약: FOR UPDATE lock → count 재확인(--expected-old N --expected-new M) → snapshot → source_method만 UPDATE → all-cols surgical 불변 검증 → post-verify(old_after=0/new_after=M+N/total 불변) → idempotent(old=0 AND new=M+N skip / 아니면 stale abort) / 배포 순서: 신코드 배포 후(cron이 new 기록) → cron 15:01 UTC 회피 + one-shot 미실행 확인 → pre-query → migration → post-query → 다음 cron / 가격·OHLC·metadata·captured_at 변경 0, source_method 문자열만 UPDATE / Local test 13 PASS + Bithumb writer rename(literal 0) / non-urgent — A2 전 provenance 정리로 Hana/Bithumb 수집방식 분리 명확 / Stage 1 commit 대상, Stage 2 push + Stage 3 production migration 별 GO)
 - 2026-06-01: ADR-034 Bithumb provenance Amendment Stage 2+3 production migration 완료 (Stage 2 push 6779213 + Stage 3 production migration 모두 land / EC2 git pull a7b128d→6779213 + docker compose build fastapi [image sha256:0a94ac1a0e15 — cron one-shot 이미지에 새 SOURCE_METHOD 반영] / write 직전 dry-run pre-query N=11 M=0 → migrate --write --expected-old-count 11 --expected-new-count 0 --allow-production-write / production verify: rename 11 rows old→new + post-query old 0/new 11/total 11 불변 + source_method 외 전 컬럼 in-transaction surgical 불변 검증 통과 (commit 자체가 11행 before/after 일치 증거) / SSH read-only 독립 전수 (Codex): rate_close_drift 0 + bad OHLC(low≤close≤high) 0 + bad nullable 0 + missing candle_ts_kst 0 + image writer SOURCE_METHOD=bithumb_candlestick_api = committed after-state 확인 / 전체 production source_daily_rates: Bithumb 11 + Hana 5 + KRX 25 = 41 rows / 운영 fastapi recreate 안 함 — 운영 in-process source_daily_rates write 호출자 0 (app/main.py·scheduler.py 미접근, scripts one-shot만 write) / **다음 cron(2026-06-02 00:01 KST = 6/1 15:01 UTC) 신규 append api 적재 검증 pending — 비차단 모니터링** / Rollback anchor: git revert 6779213 → docker compose build fastapi → guarded reverse SQL api→backfill)
+- 2026-06-01: ADR-034 Phase 2d PR A2 Stage 1 candidate — daily append orchestrator `--source all` (bithumb + hana) + per-source 격리 (scripts/daily_append_source_daily_rates.py 확장 — 신규 write logic 0, 기존 writer subprocess 재사용 / `SUPPORTED_SOURCES`=["bithumb","hana","all"] + `SOURCE_RUN_ALL`=("bithumb","hana") tuple 순서 고정 + `resolve_sources()` helper / `build_hana_command` 신규 — observed_eod writer CLI quirk 반영 (write→--start-date/--end-date+--emit-daily-append-verdict, dry-run→--date) + `build_command` dispatch에 hana / `execute_source` helper (run_source+evaluate 묶음) / **main loop per-source `except Exception` 격리** — 한 source 예외가 다른 source 막지 않음, synthetic FAIL(detail에 `type(e).__name__`) 기록 후 continue, BaseException 금지(KeyboardInterrupt/SystemExit 전파) / `print_dry_run_preview` source-aware 문구 (bithumb candle fetch vs hana 내부 DB read) / **CLI default "bithumb" 유지** (후방 호환 — 기존 cron은 --source 생략) / SOURCE_POLICY·evaluate_source_result는 A1에서 이미 hana 지원 (변경 0) / **per-source 독립 명시** — cross-source transaction 아님, Bithumb commit 후 Hana 실패 시 Bithumb row 유지+exit 1(의도된 정책), re-run idempotent upsert / Codex 4 round 수렴 — 필수 보완(격리 경계=source 단위 전체) + 정밀화 3(cron history 5184 덮어쓰기 금지·CLI default·dry-run 문구) + 구현 구조(resolve_sources/execute_source helper) + Minor(검증 지점 "소멸" 과장→변수 격리) + smoke 날짜 2026-05-28(idempotent) / **result shape 검증** (`_REQUIRED_RESULT_KEYS` — execute_source가 non-dict/키 누락 반환 시 try 내 synthetic FAIL 변환 → post-try record/print/summary indexing 안전, Codex 재현 None·필수키 누락 닫음) / test 14 추가 (resolve_sources 3 + build_hana 3 + main loop 격리 6 incl synthetic FAIL type name·Bithumb 성공+Hana 실패 보존·malformed result[None/필수키 누락]→synthetic FAIL + all dry-run preview + default bithumb only) → orchestrator 42 PASS / **DECISIONS 5184/5192 정정** — `1 0`→`1 15`(EC2 UTC=KST 00:01)+/usr/bin/docker 실배포값(Step 5 first PR Bithumb default 보존) + A2 `--source all` cron 별도 anchor 추가 / 범위 밖: KRX close finalizer 통합·Hana JPY·EUR·retry/backoff/alert / Stage 1 commit 대상, Stage 2 push 별 GO / **Stage 3 cron 교체는 고정 날짜(2026-05-28) idempotent pre-smoke 후 별 GO** — 통합 관찰 정책(6/2 00:01 KST 자연 발화에서 Bithumb amendment + A2 source별 통합 관찰; Bithumb 명령 A2 무변경이라 amendment 검증 보존 + 변수 격리는 사후 source_method query로 대체. 6/2 발화 전 deploy+교체 못 들어가면 conservative 회귀 — 무해))

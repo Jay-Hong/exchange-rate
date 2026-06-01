@@ -7,11 +7,14 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 # scripts/ + repo root 경로
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -224,6 +227,162 @@ class TestCliEmitGuards(unittest.TestCase):
         ])
         self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
         self.assertIn("단일 날짜", r.stdout)
+
+
+# ══════════════════════════════════════════════════════════════
+# PR A2 — --source all (bithumb + hana) + per-source 격리
+# ══════════════════════════════════════════════════════════════
+
+class TestResolveSources(unittest.TestCase):
+
+    def test_all_expands_in_fixed_order(self):
+        """all → ("bithumb", "hana") 순서 고정."""
+        self.assertEqual(O.resolve_sources("all"), ("bithumb", "hana"))
+
+    def test_single_bithumb(self):
+        self.assertEqual(O.resolve_sources("bithumb"), ("bithumb",))
+
+    def test_single_hana(self):
+        self.assertEqual(O.resolve_sources("hana"), ("hana",))
+
+
+class TestBuildHanaCommand(unittest.TestCase):
+    """Hana observed_eod writer CLI quirk: write=start/end+emit, dry-run=--date."""
+
+    def test_write_shape(self):
+        cmd = O.build_command("hana", D, write=True, allow_production=False)
+        self.assertIn("--write", cmd)
+        self.assertIn("--start-date", cmd)
+        self.assertIn("--end-date", cmd)
+        self.assertIn("--emit-daily-append-verdict", cmd)
+        self.assertIn("backfill_hana_observed_eod_source_daily_rates.py", " ".join(cmd))
+
+    def test_write_prod_forwards_allow(self):
+        cmd = O.build_command("hana", D, write=True, allow_production=True)
+        self.assertIn("--allow-production-write", cmd)
+
+    def test_dryrun_uses_date_not_startend(self):
+        cmd = O.build_command("hana", D, write=False, allow_production=False)
+        self.assertIn("--date", cmd)
+        self.assertNotIn("--write", cmd)
+        self.assertNotIn("--start-date", cmd)
+        self.assertNotIn("--emit-daily-append-verdict", cmd)
+
+
+def _run_main(argv) -> tuple[int, str]:
+    """main()을 argv로 실행 → (exit_code, stdout). exit_code=0 = 정상 return (SystemExit 없음)."""
+    out = io.StringIO()
+    code = 0
+    with patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
+        try:
+            O.main()
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+    return code, out.getvalue()
+
+
+class TestMainLoopIsolation(unittest.TestCase):
+    """main loop per-source 격리 (Codex 필수 보완): 한 source 예외가 다른 source를 막지 않음."""
+
+    ARGV = ["prog", "--source", "all", "--write", "--allow-production-write", "--date", "2026-05-28"]
+
+    def _ok(self, detail="ok"):
+        return {"exit": 0, "status": "PASS", "detail": detail, "tail": "tail"}
+
+    def test_first_source_exception_second_still_runs(self):
+        """첫 source(bithumb) 예외 → 둘째(hana) 여전히 실행 + aggregate exit 1."""
+        calls = []
+
+        def side_effect(source, d, *, allow_production):
+            calls.append(source)
+            if source == "bithumb":
+                raise RuntimeError("boom")
+            return self._ok()
+
+        with patch.object(O, "execute_source", side_effect=side_effect):
+            code, _ = _run_main(self.ARGV)
+        self.assertEqual(calls, ["bithumb", "hana"])
+        self.assertEqual(code, 1)
+
+    def test_bithumb_success_hana_fail_preserved_exit1(self):
+        """Bithumb 성공 commit 후 Hana 실패 → Bithumb 결과 보존 + exit 1 (cross-source transaction 아님)."""
+        def side_effect(source, d, *, allow_production):
+            if source == "hana":
+                raise ValueError("hana down")
+            return self._ok(detail="bithumb written rows=1")
+
+        with patch.object(O, "execute_source", side_effect=side_effect):
+            code, out = _run_main(self.ARGV)
+        self.assertEqual(code, 1)
+        self.assertIn("bithumb: PASS", out)
+        self.assertIn("hana: FAIL", out)
+
+    def test_synthetic_fail_detail_has_exception_type(self):
+        """synthetic FAIL detail에 type(e).__name__ 포함 (운영 장애 분류 최소 정보 — Codex)."""
+        def side_effect(source, d, *, allow_production):
+            if source == "hana":
+                raise KeyError("missing")
+            return self._ok()
+
+        with patch.object(O, "execute_source", side_effect=side_effect):
+            _, out = _run_main(self.ARGV)
+        self.assertIn("KeyError", out)
+
+    def test_all_pass_exit0(self):
+        with patch.object(O, "execute_source", return_value=self._ok()):
+            code, out = _run_main(self.ARGV)
+        self.assertEqual(code, 0)
+        self.assertIn("[PASS]", out)
+
+    def test_malformed_result_none_synthetic_fail(self):
+        """execute_source가 None(malformed) 반환 → 해당 source synthetic FAIL, 다른 source 보존 + exit 1.
+
+        (검증 없으면 None.get/None indexing으로 loop crash — Codex 재현)
+        """
+        def side_effect(source, d, *, allow_production):
+            return None if source == "hana" else self._ok()
+
+        with patch.object(O, "execute_source", side_effect=side_effect):
+            code, out = _run_main(self.ARGV)
+        self.assertEqual(code, 1)
+        self.assertIn("bithumb: PASS", out)
+        self.assertIn("hana: FAIL", out)
+
+    def test_malformed_result_missing_key_synthetic_fail(self):
+        """execute_source가 필수 키 누락 dict 반환 → synthetic FAIL, 다른 source 보존 + exit 1.
+
+        (검증 없으면 summary의 r["status"] KeyError로 crash — Codex 재현)
+        """
+        def side_effect(source, d, *, allow_production):
+            return {"tail": "x"} if source == "hana" else self._ok()  # status/exit/detail 누락
+
+        with patch.object(O, "execute_source", side_effect=side_effect):
+            code, out = _run_main(self.ARGV)
+        self.assertEqual(code, 1)
+        self.assertIn("bithumb: PASS", out)
+        self.assertIn("hana: FAIL", out)
+
+
+class TestDryRunPreviewAllSources(unittest.TestCase):
+
+    def test_all_preview_outputs_both_sources(self):
+        """--source all dry-run preview는 bithumb + hana 모두 출력 (hana는 내부 read 문구)."""
+        code, out = _run_main(["prog", "--source", "all"])
+        self.assertEqual(code, 0)
+        self.assertIn("--- bithumb ---", out)
+        self.assertIn("--- hana ---", out)
+        self.assertIn("내부 관측 read", out)  # Hana source-aware 문구
+
+
+class TestDefaultSourceBithumb(unittest.TestCase):
+
+    def test_default_source_is_bithumb_only(self):
+        """--source 생략 → bithumb only (후방 호환 — 기존 cron은 옵션 생략)."""
+        with patch.object(O, "resolve_sources", wraps=O.resolve_sources) as rs:
+            code, out = _run_main(["prog"])
+        rs.assert_called_once_with("bithumb")
+        self.assertIn("--- bithumb ---", out)
+        self.assertNotIn("--- hana ---", out)
 
 
 if __name__ == "__main__":

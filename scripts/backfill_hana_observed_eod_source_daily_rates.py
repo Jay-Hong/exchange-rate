@@ -27,11 +27,12 @@ ADR-034 Phase 2d Step 3 — Hana observed_eod 별 PR (canonical append path).
     - high = max(rollup_rows.rate), low = min(rollup_rows.rate)
     - baseline_ok = prev 존재 AND (utc_start - prev.timestamp) <= 7일 (stale baseline 제외, 당일 close는 보존)
 
-case 매트릭스:
-  | 조건                                | action      | exit | skip_code           |
-  | changes >= 1 (평일/주말 무관)       | write       | 0    | -                   |
-  | 평일 + changes == 0                 | skip_error  | 1    | weekday_no_changes  |
-  | 주말 + changes == 0                 | skip_ok     | 0    | weekend_no_changes  |
+case 매트릭스 (A1 calendar 통합 — classify_hana_calendar_day):
+  | 조건                                 | action      | exit | skip_code               |
+  | changes >= 1 (영업일/주말/공휴일 무관) | write       | 0    | -                       |
+  | 영업일(비공휴일) + changes == 0       | skip_error  | 1    | business_day_no_changes |
+  | 공휴일 + changes == 0                 | skip_ok     | 0    | holiday_no_changes      |
+  | 주말 + changes == 0                   | skip_ok     | 0    | weekend_no_changes      |
 
 Row mapping:
   - source = "hana" / asset = "usd-krw"
@@ -42,11 +43,11 @@ Row mapping:
   - contract_code = basis_date = published_at = None (observed_eod 방향 — 외부 발표/기준일 개념 없음)
   - metadata_json = rollup provenance (아래 build_observed_eod_row 참조)
 
-첫 PR 단순화 (후속 PR defer):
-  - calendar: weekday() only (공휴일 calendar 별 PR — 공휴일 평일은 weekday_no_changes로 surface)
-  - 7일 baseline age threshold: calendar-age (holiday calendar PR에서 business-day age 검토)
-  - heartbeat 없음 → carry-in-only row 미발동 (changes 없으면 항상 skip)
-  - cron 통합 / orchestrator --source 확장: 별 PR
+첫 PR 단순화 (일부 후속 PR에서 해소):
+  - calendar: classify_hana_calendar_day 통합 완료 (A1 — 공휴일=holiday_no_changes skip_ok / 비공휴일 평일=business_day_no_changes skip_error)
+  - 7일 baseline age threshold: calendar-age (holiday calendar PR에서 business-day age 검토) — 아직 defer
+  - heartbeat 없음 → carry-in-only row 미발동 (changes 없으면 항상 skip) — 아직 defer
+  - cron 통합 / orchestrator --source 확장: PR A2 (orchestrator --source all 완료, production cron 교체는 A2 Stage 3)
   - 주말 series shape (official_backfill 주말 dedup vs observed 주말 적재): Phase 2e merge PR
 
 사용법:
@@ -268,8 +269,8 @@ def process_date(
     Returns: (action, row_or_None, skip_code_or_None)
       action ∈ {"write", "skip_ok", "skip_error"}
       - "write": row dict 반환 (changes >= 1)
-      - "skip_ok": 주말 무변동 (정상) — skip_code="weekend_no_changes"
-      - "skip_error": 평일 무변동 (장애 의심) — skip_code="weekday_no_changes"
+      - "skip_ok": 주말/공휴일 무변동 (정상) — skip_code="weekend_no_changes" / "holiday_no_changes"
+      - "skip_error": 영업일(비공휴일) 무변동 (장애 의심) — skip_code="business_day_no_changes"
     """
     utc_start, utc_end_excl = kst_day_bounds_utc(target_date_kst)
     if prefetched is not None:

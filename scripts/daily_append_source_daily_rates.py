@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ADR-034 Phase 2d Step 5 — Daily append orchestrator (minimum viable, first PR Bithumb only).
+ADR-034 Phase 2d Step 5 + PR A2 — Daily append orchestrator (--source all = bithumb + hana).
 
 목적:
   - 기존 backfill writer를 subprocess로 호출 (재사용, 신규 write logic 0)
@@ -8,15 +8,19 @@ ADR-034 Phase 2d Step 5 — Daily append orchestrator (minimum viable, first PR 
   - dry-run mode: validation + write command preview only (subprocess 실행 X)
   - write mode: subprocess + capture + structured summary (PASS/FAIL/rows/exit code)
 
-첫 PR scope:
-  - Bithumb only (24h candle close, 적재 시각: 다음날 00:01 KST cron 권장)
-  - Hana observed_eod (별 PR): bank_exchange_rates 내부 관측 DB read → hana_observed_eod 신 writer 필요
-  - KRX close finalizer 통합 (별 PR): CF 15:45 KST 종가 직후 trigger
+A2 scope (--source all = bithumb + hana, 00:01 KST cron):
+  - Bithumb: 24h candle close (backfill_bithumb writer 재사용)
+  - Hana: observed_eod (bank_exchange_rates 내부 관측 read → backfill_hana_observed_eod writer)
+  - KRX 미포함: close finalizer (CF 15:45 KST 종가 직후 trigger)는 별 PR 영역
 
-후속 PR scope 확장:
-  - --source choices=["bithumb"] → ["bithumb", "hana", "krx", "all"]
-  - production cron 등록 절차 (Bithumb 00:01 KST + Hana 00:01 + KRX close finalizer 직후)
-  - retry/backoff/structured error/alert (운영 데이터 기반 단계적 강화)
+source별 독립 (cross-source transaction 아님):
+  - 각 source = 별도 subprocess + 각자 commit. Bithumb commit 후 Hana 실패 시
+    Bithumb row는 유지되고 aggregate exit만 1 (부분 성공 = 의도된 정책).
+  - 한 source 예외가 다른 source를 막지 않음 (main loop per-source except Exception 격리).
+  - 재실행은 writer의 idempotent upsert(ON CONFLICT)로 안전.
+
+후속 PR scope:
+  - KRX close finalizer 통합 / Hana JPY·EUR 다각화 / retry·backoff·structured alert
 
 사용법:
   # dry-run (default) — validation + write command preview only, subprocess 실행 X
@@ -26,6 +30,9 @@ ADR-034 Phase 2d Step 5 — Daily append orchestrator (minimum viable, first PR 
   # write mode — subprocess 실 실행 + structured summary
   python scripts/daily_append_source_daily_rates.py --write
   python scripts/daily_append_source_daily_rates.py --write --date 2026-05-27
+
+  # 다중 source (bithumb + hana) — production cron 권장 형태
+  python scripts/daily_append_source_daily_rates.py --source all --write --allow-production-write
 
   # production execution — --allow-production-write writer subprocess에 forward
   python scripts/daily_append_source_daily_rates.py --write --allow-production-write
@@ -60,8 +67,10 @@ KST = ZoneInfo("Asia/Seoul")
 SUBPROCESS_TIMEOUT_SECONDS = 180
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# 첫 PR scope — 향후 PR에서 hana / krx / all 확장
-SUPPORTED_SOURCES = ["bithumb"]
+# A2: --source 허용값 (bithumb / hana / all). KRX는 close finalizer 별 PR — 00:01 cron 미대상.
+SUPPORTED_SOURCES = ["bithumb", "hana", "all"]
+# "all" 확장 대상 — 순서 고정 (bithumb → hana). tuple로 불변 보장.
+SOURCE_RUN_ALL = ("bithumb", "hana")
 
 # source-aware verdict 정책 (Codex Blocker — global allowlist 대신 source별 잠금)
 # - bithumb: 24/7 source라 skipped 불가 (항상 candle 존재) → written only
@@ -70,6 +79,21 @@ SOURCE_POLICY = {
     "bithumb": {"asset": "usdt-krw", "allowed_statuses": frozenset({"written"})},
     "hana": {"asset": "usd-krw", "allowed_statuses": frozenset({"written", "skipped"})},
 }
+
+# dry-run preview 문구 (source별 — Bithumb candle fetch vs Hana 내부 DB read)
+_DRYRUN_NOTE = {
+    "bithumb": "Bithumb writer 전체 candle fetch + validation (DB write 0; "
+               "--start-date/--end-date를 target-date 한정으로 사용하지 않음)",
+    "hana": "Hana observed_eod writer — bank_exchange_rates 내부 관측 read 기반 "
+            "단일일 dry-run (--date, DB write 0)",
+}
+
+
+def resolve_sources(source_arg: str) -> tuple[str, ...]:
+    """--source 인자 → 실행 source tuple. "all" → SOURCE_RUN_ALL (순서 고정)."""
+    if source_arg == "all":
+        return SOURCE_RUN_ALL
+    return (source_arg,)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -113,11 +137,39 @@ def build_bithumb_command(d: date, *, write: bool, allow_production: bool) -> li
     return cmd
 
 
+def build_hana_command(d: date, *, write: bool, allow_production: bool) -> list[str]:
+    """backfill_hana_observed_eod_source_daily_rates.py command 생성.
+
+    **Bithumb과 CLI 형태 다름** (observed_eod writer):
+    - write=True: --write --start-date X --end-date X --emit-daily-append-verdict (단일일)
+    - write=False (dry-run): --date X (bank_exchange_rates 내부 read, start/end 미사용)
+    """
+    script_path = (
+        Path(__file__).resolve().parent / "backfill_hana_observed_eod_source_daily_rates.py"
+    ).resolve()
+    if not write:
+        # dry-run: observed_eod writer는 --date 기반 (start/end 아님)
+        return [sys.executable, str(script_path), "--date", d.isoformat()]
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--write",
+        "--start-date", d.isoformat(),
+        "--end-date", d.isoformat(),
+        "--emit-daily-append-verdict",  # orchestrator는 JSON verdict로 결과 판정
+    ]
+    if allow_production:
+        cmd.append("--allow-production-write")
+    return cmd
+
+
 def build_command(source: str, d: date, *, write: bool, allow_production: bool) -> list[str]:
-    """source별 command dispatch (첫 PR scope: bithumb only)."""
+    """source별 command dispatch (A2 scope: bithumb, hana)."""
     if source == "bithumb":
         return build_bithumb_command(d, write=write, allow_production=allow_production)
-    raise ValueError(f"미지원 source: {source} (첫 PR scope: bithumb only)")
+    if source == "hana":
+        return build_hana_command(d, write=write, allow_production=allow_production)
+    raise ValueError(f"미지원 source: {source} (A2 scope: bithumb, hana)")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -239,6 +291,23 @@ def evaluate_source_result(
     return "FAIL", f"error verdict (reason={v.get('reason')!r})"
 
 
+# result dict 계약 — main loop이 post-try에서 직접 indexing (record/print/summary).
+# malformed(키 누락/non-dict) result는 main loop에서 synthetic FAIL로 변환 (격리 경계 보존).
+_REQUIRED_RESULT_KEYS = frozenset({"exit", "status", "detail", "tail"})
+
+
+def execute_source(source: str, d: date, *, allow_production: bool) -> dict:
+    """source 1개 실행 단위: run_source(subprocess) + evaluate_source_result → result dict.
+
+    계약: 반드시 `_REQUIRED_RESULT_KEYS` 4개 키를 가진 dict 반환.
+    예외는 잡지 않음 — caller(main loop)가 per-source `except Exception`으로 격리하여
+    한 source 실패가 다른 source 실행을 막지 않도록 한다.
+    """
+    rc, stdout, tail = run_source(source, d, allow_production=allow_production)
+    verdict_status, detail = evaluate_source_result(source, d, rc, stdout)
+    return {"exit": rc, "status": verdict_status, "detail": detail, "tail": tail}
+
+
 # ─────────────────────────────────────────────────────────────
 # Dry-run preview (subprocess 실행 X)
 # ─────────────────────────────────────────────────────────────
@@ -253,8 +322,7 @@ def print_dry_run_preview(source: str, d: date) -> None:
     write_cmd_prod = build_command(source, d, write=True, allow_production=True)
 
     print(f"--- {source} ---")
-    print(f"[DRY-RUN] writer full dry-run command (Bithumb writer 전체 candle fetch + 9 validation, DB write 0;")
-    print(f"          주의: writer dry-run은 --start-date/--end-date를 target-date 한정으로 사용하지 않음):")
+    print(f"[DRY-RUN] writer dry-run command ({_DRYRUN_NOTE.get(source, source)}):")
     print(f"  {' '.join(val_cmd)}")
     print()
     print(f"[DRY-RUN] write command preview (local SQLite, --allow-production-write 없음):")
@@ -272,8 +340,8 @@ def print_dry_run_preview(source: str, d: date) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "ADR-034 Phase 2d Step 5 — Daily append orchestrator (minimum viable, "
-            "first PR Bithumb only). 기존 backfill writer를 subprocess로 호출."
+            "ADR-034 Phase 2d Step 5 + PR A2 — Daily append orchestrator "
+            "(--source all = bithumb + hana). 기존 backfill writer를 subprocess로 호출."
         )
     )
     parser.add_argument(
@@ -281,8 +349,8 @@ def main() -> None:
         choices=SUPPORTED_SOURCES,
         default="bithumb",
         help=(
-            "적재 대상 source (첫 PR scope: bithumb only). "
-            "Hana observed_eod / KRX close finalizer 통합은 별 PR에서 enum 확장."
+            "적재 대상 source. 'all'=bithumb+hana (순서 고정). "
+            "default 'bithumb' 유지 (후방 호환). KRX는 close finalizer 별 PR."
         ),
     )
     parser.add_argument(
@@ -311,8 +379,7 @@ def main() -> None:
     args = parser.parse_args()
 
     target_date = args.date or yesterday_kst()
-    # 첫 PR은 단일 source. 향후 --source all 옵션 추가 시 list 분기.
-    sources = [args.source]
+    sources = resolve_sources(args.source)  # "all" → ("bithumb", "hana")
 
     print(f"모드: {'WRITE (subprocess 실 실행)' if args.write else 'DRY-RUN (command preview only)'}")
     print(f"대상 date: {target_date.isoformat()} (KST)")
@@ -329,14 +396,26 @@ def main() -> None:
         print("[DRY-RUN 완료] subprocess 실행 안 됨. --write 명시 시 실 적재 진입.")
         return
 
-    # write mode: subprocess 실행 + JSON verdict 기반 fail-closed 판정
+    # write mode: source별 격리 실행 — 한 source 예외가 다른 source를 막지 않음.
+    # execute_source(run_source + evaluate) + result shape 검증을 except Exception으로 감싼다
+    # (BaseException 금지: KeyboardInterrupt / SystemExit 전파). 예외/malformed → synthetic FAIL.
+    # 따라서 try 이후 result는 항상 _REQUIRED_RESULT_KEYS dict → record/print/summary indexing 안전.
     results: dict[str, dict] = {}
     for source in sources:
         print(f"--- {source} subprocess ---")
-        rc, stdout, tail = run_source(source, target_date, allow_production=args.allow_production_write)
-        verdict_status, detail = evaluate_source_result(source, target_date, rc, stdout)
-        results[source] = {"exit": rc, "status": verdict_status, "detail": detail, "tail": tail}
-        print(tail)
+        try:
+            result = execute_source(source, target_date, allow_production=args.allow_production_write)
+            if not isinstance(result, dict) or not _REQUIRED_RESULT_KEYS <= result.keys():
+                raise ValueError(f"execute_source malformed result (키 누락/non-dict): {result!r}")
+        except Exception as e:
+            result = {
+                "exit": None,
+                "status": "FAIL",
+                "detail": f"orchestrator 예외: {type(e).__name__}: {e}",
+                "tail": f"[EXCEPTION] {type(e).__name__}: {e}",
+            }
+        results[source] = result
+        print(result["tail"])  # 위 검증으로 4-key dict 보장 → 안전
         print()
 
     # structured summary (fail-closed verdict 판정)
