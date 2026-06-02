@@ -56,7 +56,7 @@ v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `
 **제약** (Amendment 2026-05-27 반영):
 - Bithumb 3m/1y: Bithumb 공식 candlestick API external_historical (902일 coverage)
 - KRX 3m/1y: KIS `inquire-daily-fuopchartprice` + A75YMM contract chain external_historical
-- Hana 3m/1y: 2-source 분리 정책 (Amendment 후속) — `hana_observed_eod` canonical (앞으로) + `hana_official_historical_backfill` (과거 부족분). Investing은 Hana backfill에 미사용 (Hana series identity 유지).
+- Hana 3m/1y: 2-source 분리 정책 (Amendment 후속) — `hana_observed_eod` canonical (앞으로) + `hana_official_historical_backfill` (과거 부족분). Investing은 Hana backfill에 미사용 (Hana series identity 유지). **Invariant (Step 4A, 2026-06-02)**: official backfill은 `hana_observed_eod` canonical row를 덮지 않음 (official→observed = overlap guard + conditional conflict update). 역방향(observed→official)은 기존 observed_eod post-write nullable validation rollback으로 차단. 경계 전환 정책(ADR-034 §10 Open) 결정 전까지 **양방향** overlap reject.
 - Hana 1w: Phase 2e 전 결정 (open question, §14 참조 — 후보 a/b/c)
 - KRX 1w: Phase 2e 전 결정 (open question, §14 참조 — 후보 a/b/c)
 - DXY_futures는 1d only (1w/3m/1y catalog 미노출)

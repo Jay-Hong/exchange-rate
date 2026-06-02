@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hana official_historical USD/JPY/EUR → source_daily_rates dry-run validator.
+Hana official_historical USD/JPY/EUR → source_daily_rates backfill writer.
 
-ADR-034 Phase 2d Step 2-2 (Hana dry-run, Step 2/3 경계 보존 — DB write X).
+ADR-034 Phase 2d Step 2-2(dry-run validator) → Step 3/4A(write + range dry-run + overlap guard)로 확장.
 
 목적:
   - Hana official endpoint (wpfxd651_01i_01.do) historical row fetch
-  - HTML response → source_daily_rates row dict 변환 (upsert() 호출 X)
+  - HTML response → source_daily_rates row dict 변환 + (--write 시) upsert 적재
   - Hana-방향 metadata policy 검증 (basis_date / published_at / pbldSqn 모두 필수)
+  - official이 observed_eod canonical row를 덮지 않도록 overlap guard + conditional conflict update
 
 문서 anchor (ADR-033 Amendment 2 + GRAPH_API_V2_CONTRACT.md §7):
   - endpoint: GET wpfxd651_01i_01.do (Referer 헤더 필수)
@@ -31,13 +32,15 @@ Row mapping:
   - published_at = 고시일시 (Hana 필수, top-level)
   - metadata_json = {pbldSqn, request_date, fallback, currency, endpoint, fetched_at_utc}
 
-사용법:
-  python scripts/backfill_hana_source_daily_rates.py [--currency USD] [--date YYYY-MM-DD]
+사용법 (mode — _validate_cli_combo로 조합 fail-close):
+  - 단일일 dry-run (default, DB write X): --date YYYY-MM-DD
+  - range dry-run (DB-free pre-batch gate): --range-dry-run --start-date X --end-date Y
+  - write (적재): --write --start-date X --end-date Y [--allow-production-write] [--require-empty-target]
 
 주의:
-  - 본 script는 dry-run only. DB write 절대 X.
-  - app.source_daily_rates.upsert() 호출하지 않음.
-  - Step 3 (partial backfill 실측 적재)은 별도 PR.
+  - --write는 overlap guard(observed_eod canonical 보존) + conditional upsert(absent-key race) + post-write validation.
+  - --require-empty-target: gap-only 강제 (official one-shot 단독 실행 시 rollback delete 안전).
+  - 미래 date(end > today)는 --include-today로도 reject (backfill은 과거만).
 """
 
 # 표준 라이브러리
@@ -48,7 +51,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import NamedTuple, Optional
 from zoneinfo import ZoneInfo
 
 # 서드파티 라이브러리
@@ -170,7 +173,7 @@ def parse_response(html: str) -> dict:
 
 
 def build_row(parsed: dict, request_date: date, currency: str) -> dict:
-    """parsed → source_daily_rates row dict (DB write X — dry-run only).
+    """parsed → source_daily_rates row dict (순수 변환, 자체 DB write 없음 — caller가 write/dry-run 결정).
 
     invariant: rate = close. close_only fallback: high = low = close.
     """
@@ -367,15 +370,19 @@ def check_production_write_guard(allow_production: bool) -> Optional[str]:
 
 
 def validate_write_range(start: date, end: date, today: date, include_today: bool) -> Optional[str]:
-    """Step 3 write 진입 전 사전 가드 (range + today 가드).
+    """Step 3 write / range dry-run 진입 전 사전 가드 (range + today 가드).
 
     Hana는 contract chain 없음 → 단순 calendar range validation.
+    - 미래 date(end > today)는 **항상 reject** (backfill은 과거만 — --include-today로도 허용 X).
+    - end == today는 --include-today 명시 시만 허용 (intraday close 미확정 회피).
     """
     if start > end:
         return f"start_date={start} > end_date={end}"
-    if not include_today and end >= today:
+    if end > today:
+        return f"end_date={end} > today={today} (미래 date — backfill은 과거만 허용)"
+    if end == today and not include_today:
         return (
-            f"end_date={end} >= today={today} (intraday close 미확정 위험). "
+            f"end_date={end} == today={today} (intraday close 미확정 위험). "
             "--include-today 명시 또는 today-1 이하로 제한"
         )
     return None
@@ -439,22 +446,34 @@ def fetch_and_dedup_calendar_range(
     return rows_to_write, fetch_errors, fallback_events
 
 
+class HanaWriteOutcome(NamedTuple):
+    """write_with_transaction_hana 결과 — rollback anchor용 inserted/updated 구분 (official one-shot 단독 실행 전제)."""
+    success: bool
+    issues: list
+    inserted_dates: list   # guard 시점 부재 → 신규 insert. one-shot 단독 실행 시 rollback delete 대상.
+    updated_dates: list    # guard 시점 기존 official → idempotent re-upsert. 전체 삭제 anchor 금지 대상.
+
+
 def write_with_transaction_hana(
     rows_to_write: list[dict],
     currency: str,
     start_date: date,
     end_date: date,
-) -> tuple[bool, list[str]]:
-    """Hana 단일 transaction write: upsert(commit=False) loop → post-write validation → commit/rollback.
+    require_empty_target: bool = False,
+) -> "HanaWriteOutcome":
+    """Hana 단일 transaction write: pre-write overlap guard → upsert(commit=False) loop → post-write validation → commit/rollback.
 
     KIS writer와 다른 점:
-      - Hana는 contract_code 없음 — post-write SELECT는 source/asset/date_kst range filter
+      - Hana는 contract_code 없음 — post-write SELECT는 source/asset/date_kst IN expected_dates
       - post-write validation Hana 방향 (contract_code IS NULL / basis_date+published_at NOT NULL / pbldSqn NOT NULL)
       - basis_date는 row의 date_kst와 동일 (canonical date 정책)
 
+    overlap guard (Step 4A Stage 1): expected_dates에 non-official(observed_eod 등) row가 있으면 reject
+    (관측 안전망 대칭). + 공용 upsert conditional conflict update로 absent-key concurrent insert도 차단.
+
     rows_to_write은 이미 fetch_and_dedup_calendar_range에서 basis_date 기준 dedup됨.
 
-    Returns: (success: bool, issues: list[str])
+    Returns: HanaWriteOutcome(success, issues, inserted_dates, updated_dates)
     """
     from app.database import SessionLocal
     from app.source_daily_rates import upsert as upsert_fn
@@ -464,6 +483,65 @@ def write_with_transaction_hana(
     session = SessionLocal()
     issues: list[str] = []
     try:
+        # 0. pre-write OVERLAP GUARD (Codex Blocker — official write가 observed_eod canonical row를
+        #    조용히 덮는 것 차단). 공용 upsert는 conflict 시 close_basis/source_method/OHLC를 항상
+        #    덮으므로, expected_dates에 non-official(observed_eod 등) row가 있으면 upsert 전 reject.
+        #    expected_dates(실제 written date_kst) 기준 — 휴일 fallback로 request range와 달라도 정확
+        #    (관측 안전망의 대칭). PostgreSQL은 기존 row FOR UPDATE. 기존 official row overlap은
+        #    idempotent rerun 허용 (같은 provenance 재-upsert).
+        expected_dates = {row["date_kst"] for row in rows_to_write}
+        if not expected_dates:
+            # 빈 rows_to_write → 정상 (모든 휴일 또는 fetch 실패)
+            session.rollback()
+            return HanaWriteOutcome(True, [], [], [])
+        guard_q = session.query(SourceDailyRate).filter(
+            SourceDailyRate.source == "hana",
+            SourceDailyRate.asset == asset,
+            SourceDailyRate.date_kst.in_(expected_dates),
+        )
+        if session.bind.dialect.name == "postgresql":
+            guard_q = guard_q.with_for_update()
+        existing_rows = guard_q.all()
+        existing_dates = {r.date_kst for r in existing_rows}
+        conflicts = [
+            r for r in existing_rows
+            if r.close_basis != "hana_official_historical_backfill"
+        ]
+        if conflicts:
+            session.rollback()
+            sample = sorted(f"{r.date_kst}:{r.close_basis}" for r in conflicts)[:5]
+            return HanaWriteOutcome(False, [
+                f"overlap guard: official write가 non-official row {len(conflicts)}건을 덮으려 함 "
+                f"{sample} — gap-only range로 재실행 (observed_eod canonical 보존)"
+            ], [], [])
+        # --require-empty-target: 기존 row 0(gap-only) 강제 → updated_dates 0 → official one-shot
+        # 단독 실행 전제에서 rollback delete 안전 (concurrent official 금지는 운영 절차로 보장).
+        if require_empty_target and existing_dates:
+            session.rollback()
+            sample = sorted(d.isoformat() for d in existing_dates)[:5]
+            return HanaWriteOutcome(False, [
+                f"--require-empty-target: expected_dates에 기존 row {len(existing_dates)}건 존재 "
+                f"{sample} — gap-only batch만 허용"
+            ], [], [])
+        # inserted (guard 시점 부재) vs updated (기존 official, non-official은 위에서 reject) 구분 —
+        # rollback anchor가 기존 official을 지우지 않도록 main에서 inserted_dates만 삭제.
+        inserted_dates = sorted(expected_dates - existing_dates)
+        updated_dates = sorted(existing_dates)
+
+        # pre-write row validation (writer self fail-close — dry-run 생략한 직접 --write여도 비정상 row 차단).
+        # post-write (a)-(g)는 구조 invariant만 확인 → 값 validator(positivity / precision / published_at KST)는
+        # 여기서 적용. _ROW_DRY_RUN_CHECKS는 module-level (call 시점 정의됨). 한 row라도 issue면 atomic abort.
+        prewrite_issues = []
+        for _row in rows_to_write:
+            for _vname, _vfn in _ROW_DRY_RUN_CHECKS:
+                _vi = _vfn(_row)
+                if _vi:
+                    prewrite_issues.extend(f"[{_row['date_kst']}] {_vname}: {i}" for i in _vi)
+        if prewrite_issues:
+            session.rollback()
+            return HanaWriteOutcome(
+                False, ["pre-write validation 실패: " + "; ".join(prewrite_issues[:8])], [], [])
+
         # 1. upsert (commit=False) loop — 명시적 keyword mapping
         for row in rows_to_write:
             upsert_fn(
@@ -482,18 +560,16 @@ def write_with_transaction_hana(
                 basis_date=row.get("basis_date"),
                 published_at=row.get("published_at"),
                 metadata_json=row.get("metadata_json"),
+                # absent-key concurrent observed insert 차단 (High 1) — 기존 close_basis가
+                # official일 때만 update. 불일치면 skip → post-validation이 mismatch 잡아 rollback.
+                update_only_if_existing_close_basis="hana_official_historical_backfill",
             )
 
         # 2. post-write validation (same transaction, pre-commit, expected_dates IN filter)
         # Codex Round 1 Blocker: Hana calendar-day dedup → expected_dates 비연속이라
         # range query (date_kst >= min, <= max)는 휴일 gap 안 다른 적재 row를 false detect 가능.
         # date_kst.in_(expected_dates)로 정확 매칭 (KRX의 contract_code.in_() 패턴 equiv).
-        expected_dates = {row["date_kst"] for row in rows_to_write}
-        if not expected_dates:
-            # 빈 rows_to_write → 정상 (모든 휴일 또는 fetch 실패) — skip but log
-            session.rollback()
-            return True, []
-
+        # (expected_dates는 위 overlap guard에서 이미 계산)
         written = (
             session.query(SourceDailyRate)
             .filter(
@@ -589,13 +665,13 @@ def write_with_transaction_hana(
 
         if issues:
             session.rollback()
-            return False, issues
+            return HanaWriteOutcome(False, issues, [], [])
         session.commit()
-        return True, []
+        return HanaWriteOutcome(True, [], inserted_dates, updated_dates)
     except Exception as e:
         session.rollback()
         issues.append(f"transaction exception: {type(e).__name__}: {e}")
-        return False, issues
+        return HanaWriteOutcome(False, issues, [], [])
     finally:
         session.close()
 
@@ -648,6 +724,46 @@ def _date_arg(s: str) -> date:
         raise argparse.ArgumentTypeError(f"--date format은 YYYY-MM-DD (입력: {s!r})")
 
 
+def _validate_cli_combo(args) -> Optional[str]:
+    """CLI mode/flag 조합을 한 곳에서 fail-close 검증 (조용히 무시되는 조합 차단).
+
+    mode: --write / --range-dry-run / (둘 다 없으면) 단일일 dry-run(--date).
+    flag 유효 범위:
+      --start-date/--end-date → --write 또는 --range-dry-run
+      --date → 단일일 dry-run 전용
+      --require-empty-target / --allow-production-write → --write 전용 (DB write 개념)
+      --include-today → --write 또는 --range-dry-run
+    """
+    has_range_mode = args.write or args.range_dry_run
+    if args.write and args.range_dry_run:
+        return "--write와 --range-dry-run 동시 사용 금지"
+    if args.date is not None and has_range_mode:
+        return "--date(단일일 dry-run)는 --write/--range-dry-run과 동시 사용 금지"
+    if (args.start_date is not None or args.end_date is not None) and not has_range_mode:
+        return "--start-date/--end-date는 --write 또는 --range-dry-run과 함께만 유효 (단일일은 --date)"
+    if args.require_empty_target and not args.write:
+        return "--require-empty-target는 --write 전용 (range dry-run/단일일에선 무의미 — 오인 방지 reject)"
+    if args.allow_production_write and not args.write:
+        return "--allow-production-write는 --write 전용"
+    if args.include_today and not has_range_mode:
+        return "--include-today는 --write 또는 --range-dry-run과 함께만 유효"
+    return None
+
+
+# row-level dry-run validators (단일일 + range dry-run 공유) — 모두 row dict 입력.
+_ROW_DRY_RUN_CHECKS = [
+    ("rate == close invariant", validate_invariant),
+    ("close_only fallback (high=low=close + ohlc_quality)", validate_close_only),
+    ("date_kst == basis_date", validate_date_kst_basis_date),
+    ("metadata policy (Hana 필수: basis_date / published_at / pbldSqn / contract_code=None)",
+     validate_metadata_policy),
+    ("published_at KST tzinfo + offset +09:00", validate_published_at_kst),
+    ("close_basis / source_method enum", validate_close_basis_method),
+    ("OHLC non-positive / high<low", validate_ohlc_positive),
+    ("Decimal(14, 6) precision", validate_decimal_precision),
+]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -694,6 +810,23 @@ def main() -> None:
         help="--end-date에 today 포함 (default off, intraday close 오염 회피).",
     )
     parser.add_argument(
+        "--range-dry-run",
+        action="store_true",
+        help=(
+            "[range dry-run] --start-date~--end-date 전 구간 fetch + dedup + row validation "
+            "(DB 연결/table create/upsert 0). --write와 동시 사용 금지. fetch error 1건이라도 있으면 exit 1. "
+            "1년 backfill 전 pre-batch 검증용 (단일일 --date dry-run과 구분)."
+        ),
+    )
+    parser.add_argument(
+        "--require-empty-target",
+        action="store_true",
+        help=(
+            "[Step 4A production 안전] --write 시 expected_dates에 기존 row가 하나라도 있으면 reject "
+            "(gap-only batch 강제 → updated_dates 0 보장 → official one-shot 단독 실행 시 rollback delete 안전)."
+        ),
+    )
+    parser.add_argument(
         "--allow-production-write",
         action="store_true",
         help=(
@@ -702,6 +835,63 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    # CLI mode/flag 조합 fail-close (한 곳 consolidate — 조용히 무시되는 조합 차단)
+    combo_err = _validate_cli_combo(args)
+    if combo_err:
+        print(f"[CONFIG 실패] {combo_err}")
+        sys.exit(1)
+
+    # ── range dry-run (DB-free pre-batch validation) ──
+    if args.range_dry_run:
+        if args.start_date is None or args.end_date is None:
+            print("[CONFIG 실패] --range-dry-run 시 --start-date / --end-date 필수")
+            sys.exit(1)
+        # range gate: 역순/intraday를 fail-close (write 경로와 동일 validate_write_range)
+        range_err = validate_write_range(
+            args.start_date, args.end_date, datetime.now(tz=KST).date(), args.include_today)
+        if range_err:
+            print(f"[CONFIG 실패] range: {range_err}")
+            sys.exit(1)
+        print("모드: RANGE DRY-RUN (DB write/connect X)")
+        print(f"Currency: {args.currency} (asset={ASSET_MAP[args.currency]})")
+        print(f"Range: {args.start_date.isoformat()} ~ {args.end_date.isoformat()}")
+        print()
+        rows, fetch_errors, fallback_events = fetch_and_dedup_calendar_range(
+            args.currency, args.start_date, args.end_date,
+        )
+        calendar_days = (args.end_date - args.start_date).days + 1
+        print(f"  calendar days: {calendar_days}")
+        print(f"  fetch errors: {len(fetch_errors)}")
+        print(f"  fallback events (request != basis_date): {len(fallback_events)}")
+        for req_d, basis_d in fallback_events[:10]:
+            print(f"    - {req_d.isoformat()} → basis_date={basis_d.isoformat()}")
+        print(f"  rows (basis_date dedup): {len(rows)}")
+        print()
+        # empty result fail-close (production gate — 빈 range/전부 휴일은 batch 진입 차단 신호)
+        if not rows and not fetch_errors:
+            print("[RANGE DRY-RUN 실패] rows 0 + fetch error 0 — range가 비었거나 전부 휴일 (gate fail-close, exit 1)")
+            sys.exit(1)
+        total_issues = len(fetch_errors)
+        if fetch_errors:
+            print(f"[FETCH/PARSE 실패] {len(fetch_errors)}건:")
+            for err in fetch_errors[:5]:
+                print(f"  - {err}")
+        for row in rows:
+            for name, fn in _ROW_DRY_RUN_CHECKS:
+                row_issues = fn(row)
+                if row_issues:
+                    total_issues += len(row_issues)
+                    print(f"  [{row['date_kst']}] {name}: {len(row_issues)}건")
+                    for issue in row_issues[:3]:
+                        print(f"    - {issue}")
+        print()
+        if total_issues == 0:
+            print(f"[RANGE DRY-RUN 완료] {len(rows)} rows validation 통과 (DB write/connect 안 됨)")
+        else:
+            print(f"[RANGE DRY-RUN 실패] 총 {total_issues}건 (fetch error + validation) — exit 1")
+            sys.exit(1)
+        return
 
     # *** PRODUCTION GUARD EARLY (Hana writer, KIS Round 8 패턴 재사용) ***
     # KIS와 다르게 Hana는 외부 인증 없음 (공개 endpoint)이지만, DB write 가드는 동일.
@@ -780,36 +970,44 @@ def main() -> None:
 
         # transaction write
         print(f"[3] write {len(rows_to_write)} rows → source_daily_rates (source=hana asset={ASSET_MAP[args.currency]})...")
-        success, write_issues = write_with_transaction_hana(
+        outcome = write_with_transaction_hana(
             rows_to_write, args.currency, args.start_date, args.end_date,
+            require_empty_target=args.require_empty_target,
         )
-        if success:
+        if outcome.success:
             print(f"[Hana write 완료] {len(rows_to_write)} rows committed + post-write validations passed")
+            print(f"  inserted (신규): {len(outcome.inserted_dates)} / "
+                  f"updated (기존 official re-upsert): {len(outcome.updated_dates)}")
+            if outcome.updated_dates:
+                print("  ⚠️  updated_dates 존재 — rollback anchor는 inserted_dates만 삭제 (기존 official 보존).")
+                print("      완전 rollback은 snapshot 없이 불가. Step 4A production은 --require-empty-target로 gap-only 강제 권장.")
             print()
-            print("[Rollback anchor] cleanup (Hana는 calendar-day dedup으로 expected_dates 비연속 — 개별 삭제가 안전):")
             asset_str = ASSET_MAP[args.currency]
-            sorted_dates = sorted(r["date_kst"] for r in rows_to_write)
-            dates_repr = ", ".join(f"date({d.year}, {d.month}, {d.day})" for d in sorted_dates)
-            print(
-                f"  from app.database import SessionLocal; from app.models import SourceDailyRate; "
-                f"from datetime import date; db = SessionLocal(); "
-                f"db.query(SourceDailyRate).filter("
-                f"SourceDailyRate.source == 'hana', "
-                f"SourceDailyRate.asset == '{asset_str}', "
-                f"SourceDailyRate.date_kst.in_([{dates_repr}])"
-                f").delete(synchronize_session=False); db.commit()"
-            )
-            print()
-            print("  주의: range delete (delete_range) 사용 시 비연속 expected_dates 사이 휴일 gap 안")
-            print("  다른 Hana row가 있으면 같이 삭제될 수 있음. 개별 dates IN delete가 정확.")
+            if outcome.inserted_dates:
+                print("[Rollback anchor] inserted_dates만 삭제 — 개별 IN delete. **전제: official one-shot 단독 실행**")
+                print("  (inserted_dates는 guard 시점 부재 기준. concurrent official writer가 같은 키를 먼저 insert하면")
+                print("   이 run이 만든 row라 단정 불가 — Step 4A는 official 중복 실행 금지):")
+                dates_repr = ", ".join(
+                    f"date({d.year}, {d.month}, {d.day})" for d in outcome.inserted_dates)
+                print(
+                    f"  from app.database import SessionLocal; from app.models import SourceDailyRate; "
+                    f"from datetime import date; db = SessionLocal(); "
+                    f"db.query(SourceDailyRate).filter("
+                    f"SourceDailyRate.source == 'hana', "
+                    f"SourceDailyRate.asset == '{asset_str}', "
+                    f"SourceDailyRate.date_kst.in_([{dates_repr}])"
+                    f").delete(synchronize_session=False); db.commit()"
+                )
+            else:
+                print("[Rollback anchor] inserted_dates 0 (모두 idempotent re-upsert) — 삭제할 신규 row 없음.")
             print()
             print("[Stage 2] commit 별 GO / Stage 3 production execution 별 GO.")
         else:
-            print(f"[Hana write 실패] {len(write_issues)}건 issue — transaction rollback 완료")
-            for issue in write_issues[:5]:
+            print(f"[Hana write 실패] {len(outcome.issues)}건 issue — transaction rollback 완료")
+            for issue in outcome.issues[:5]:
                 print(f"  - {issue}")
-            if len(write_issues) > 5:
-                print(f"  ... 외 {len(write_issues) - 5}건")
+            if len(outcome.issues) > 5:
+                print(f"  ... 외 {len(outcome.issues) - 5}건")
             sys.exit(1)
         return  # write mode end
 
@@ -877,19 +1075,7 @@ def main() -> None:
             f"\n[txtAr cell count (DOM monitoring)] OK ({parsed['txt_ar_count']} cells, >=8)"
         )
 
-    checks = [
-        ("rate == close invariant", validate_invariant),
-        ("close_only fallback (high=low=close + ohlc_quality)", validate_close_only),
-        ("date_kst == basis_date", validate_date_kst_basis_date),
-        (
-            "metadata policy (Hana 필수: basis_date / published_at / pbldSqn / contract_code=None)",
-            validate_metadata_policy,
-        ),
-        ("published_at KST tzinfo + offset +09:00", validate_published_at_kst),
-        ("close_basis / source_method enum", validate_close_basis_method),
-        ("OHLC non-positive / high<low", validate_ohlc_positive),
-        ("Decimal(14, 6) precision", validate_decimal_precision),
-    ]
+    checks = _ROW_DRY_RUN_CHECKS
 
     for name, fn in checks:
         issues = fn(row)

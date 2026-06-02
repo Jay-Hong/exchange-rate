@@ -152,6 +152,7 @@ def upsert(
     published_at: Optional[datetime] = None,
     metadata_json: Optional[dict] = None,
     commit: bool = True,
+    update_only_if_existing_close_basis: Optional[str] = None,
 ) -> None:
     """단일 row idempotent upsert.
 
@@ -169,6 +170,10 @@ def upsert(
     Args:
         commit: True면 호출 시점 commit (기본). False면 caller가 commit 책임
                 (batch_upsert에서 transaction 묶음 용도).
+        update_only_if_existing_close_basis: 지정 시 ON CONFLICT DO UPDATE에 WHERE 추가 —
+                기존 row close_basis가 이 값일 때만 update (불일치면 skip → 기존 row 보존).
+                Hana official이 concurrent observed insert로부터 보호용 ("hana_official_historical_backfill").
+                기본 None → 무조건 update (기존 caller 동작 유지).
     """
     # invariant: rate == close
     rate = close
@@ -225,10 +230,20 @@ def upsert(
     if metadata_json is not None:
         set_dict["metadata_json"] = stmt.excluded.metadata_json
 
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["source", "asset", "date_kst"],
-        set_=set_dict,
-    )
+    conflict_kwargs = {
+        "index_elements": ["source", "asset", "date_kst"],
+        "set_": set_dict,
+    }
+    # conditional conflict update (Step 4A Stage 1 — Hana official 전용):
+    # update_only_if_existing_close_basis 지정 시 기존 row의 close_basis가 일치할 때만 update.
+    # 불일치(예: absent key에 concurrent observed insert가 먼저 들어온 경우) → conflict update SKIP
+    # → 기존(observed) row 보존 → caller의 post-write validation이 mismatch 잡아 rollback (race-safe).
+    # 기본 None → 무조건 update (KRX/Bithumb/Hana observed 기존 동작 유지).
+    if update_only_if_existing_close_basis is not None:
+        conflict_kwargs["where"] = (
+            SourceDailyRate.close_basis == update_only_if_existing_close_basis
+        )
+    stmt = stmt.on_conflict_do_update(**conflict_kwargs)
 
     db.execute(stmt)
     if commit:
