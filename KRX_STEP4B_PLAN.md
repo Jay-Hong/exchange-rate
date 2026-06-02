@@ -113,10 +113,22 @@
 - KRX는 기존 seed 존재 → rollback은 **신규 inserted dates만** 대상 (기존 25 seed 보존).
 - **read-only state 재확인**: KRX row 수/날짜는 Step 3 시점 값이지 실행 fact 아님 — write 직전 production read-only로 재확인 후 overlap policy·rollback anchor 확정.
 
-## 12. Open items (구현 전 결정)
+## 12. 결정 / Open items
 
-- coverage window 시작 anchor 확정: today-1 기준 1년 vs Bithumb/Hana 정렬 고정 window.
-- N-contract chain loop의 시작점: current에서 backward N회 vs window 시작 date front-month resolve.
-- gap ≥N일 surface 임계값(잠정 4일) 확정.
-- transaction batch: 12 contracts ≈ 240 rows 단일 transaction (작아서 가능) vs contract별 — 단일이 단순, partial state 없음.
-- KRX는 daily append(Step 5) 미포함 → 4B 이후 close finalizer 통합 별도 PR에서 ongoing freshness 결정.
+### Resolved — item 1·2 (manifest 기반, 2026-06-03 Codex 합의)
+
+**item 1 — coverage window**:
+- today-1 기준 **rolling 1년으로 산정**, 실행 시 계산된 `start_date`/`end_date`를 **manifest/log에 고정 기록** (재현성 + idempotent — "동적 window"로 구현 금지).
+
+**item 2 — chain loop / boundary**:
+- contract sequence = **window_start가 속한 front-month resolve 후 forward 생성** (종료: `segment ∩ [window_start, window_end] ≠ ∅`).
+- **window_start == expiry_date → next contract** resolve (invariant 2 일관 — 누락 시 첫 segment 경계 오류).
+- **segment = calendar date 기준**(셋째 월요일 만기, 거래일 무관) / **실제 rows = KIS 응답 trading-day set 기준** — 2-layer 분리.
+- **window_start 또는 window_end가 휴장일이면** 첫/마지막 row가 경계일과 불일치 가능 — **정상** (gap 아님).
+- **manifest expected dates = KIS trading-day set ∩ [window_start, window_end]**.
+
+### Open — 구현 중 / 별도 결정
+
+- **item 3** (구현 중 결정): gap ≥N일 surface 임계값 (잠정 4일) 확정.
+- **item 4** (구현 중 결정): transaction batch — 12 contracts ≈ 240 rows 단일 transaction (작아서 가능) vs contract별. 단일이 단순, partial state 없음.
+- **item 5** (4B write와 **분리**, **Phase 2e 전 별도 결정 필수**): KRX daily append(Step 5) 통합. 4B production write를 막진 않으나, Phase 2e v2 endpoint가 source_daily_rates를 1y 그래프에 쓰면 **KRX가 4B 실행일 이후 멈춰 그래프 끝 stale** → freshness 운영 정책 영향. close finalizer(CF/CM 종가, 이미 `source_rates` 기록 중)를 source_daily_rates로 잇는 경로 재사용 가능 — 별도 PR.
