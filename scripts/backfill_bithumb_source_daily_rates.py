@@ -885,9 +885,11 @@ def main() -> None:
             f'date({args.end_date.year}, {args.end_date.month}, {args.end_date.day}))'
         )
         print()
-        print("  Bithumb은 24/7 거래라 expected_dates가 연속 (휴일 dedup 없음) — range delete 안전.")
+        print("  Bithumb은 24/7 거래라 expected_dates가 연속 (휴일 dedup 없음).")
+        print("  단, range delete 안전성은 연속성이 아니라 gap-only 사전 확인 + 교집합 historical/manual write 부재 + 동일 작업 창 내 즉시 rollback일 때만 성립.")
+        print("  작업 종료 후에는 이 delete_range를 바로 실행하지 말 것 — snapshot 기반 복구 또는 교집합 historical/manual write 부재를 별도 재검증한 뒤에만 rollback (snapshot = 삭제 전까지 durable recovery anchor).")
         print()
-        print("[Stage 2] commit 별 GO / Stage 3 production execution 별 GO.")
+        print("[Stage 2] commit 별도 GO / Stage 3 production execution 별도 GO.")
     else:
         print(f"[Bithumb write 실패] {len(write_issues)}건 issue — transaction rollback 완료")
         for issue in write_issues[:5]:
