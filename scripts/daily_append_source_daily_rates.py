@@ -431,7 +431,7 @@ def main() -> None:
     if any_fail:
         print("[FAIL] 일부 source 실패 — 재실행 또는 rollback anchor 확인 필요")
         sys.exit(1)
-    print("[PASS] 모든 source 성공. production cron 활성화 가능 (별 GO).")
+    print("[PASS] 모든 source 성공.")
 
 
 if __name__ == "__main__":

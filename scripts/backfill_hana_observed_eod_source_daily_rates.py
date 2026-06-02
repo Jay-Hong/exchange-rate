@@ -58,7 +58,7 @@ Row mapping:
   python scripts/backfill_hana_observed_eod_source_daily_rates.py \\
       --write --start-date 2026-05-28 --end-date 2026-05-28
 
-  # production execution — non-SQLite DB write 허용 (별 GO 필수)
+  # production execution — non-SQLite DB write 허용 (별도 GO 필수)
   python scripts/backfill_hana_observed_eod_source_daily_rates.py \\
       --write --start-date 2026-05-28 --end-date 2026-05-28 --allow-production-write
 
@@ -780,7 +780,7 @@ def _run_write(args) -> int:
     print()
     if args.emit_daily_append_verdict:
         _emit_verdict(write_rows[0]["date_kst"], "written", None, len(write_rows))
-    print("[PASS] 모든 date 처리 완료. Stage 2 commit 별 GO / Stage 3 production execution 별 GO.")
+    print(f"[PASS] 모든 date 처리 완료 ({len(write_rows)} rows committed).")
     return 0
 
 
@@ -827,7 +827,7 @@ def main() -> None:
         action="store_true",
         help=(
             "[production guard] non-SQLite DB (RDS PostgreSQL 등)에 --write 진입 허용. "
-            "default off — local SQLite smoke만 허용. production execution은 별 GO 필수."
+            "default off — local SQLite smoke만 허용. production execution은 별도 GO 필수."
         ),
     )
     parser.add_argument(
