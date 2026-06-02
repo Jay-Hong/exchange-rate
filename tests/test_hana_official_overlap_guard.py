@@ -16,14 +16,16 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 import unittest
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+import requests
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -301,7 +303,7 @@ def _parsed(basis: date, rate: str = "1512.0", sqn: int = 1081) -> dict:
 
 
 class TestRangeDryRun(unittest.TestCase):
-    """--range-dry-run: DB-free pre-batch validation gate."""
+    """--range-dry-run: DB-free pre-write validation gate."""
 
     ARGV = ["prog", "--range-dry-run", "--start-date", "2026-05-21", "--end-date", "2026-05-27"]
 
@@ -320,12 +322,48 @@ class TestRangeDryRun(unittest.TestCase):
         # 5/22(Fri)·5/23(Sat)·5/24(Sun) — 23/24는 휴일이라 basis_date=5/22로 fallback
         argv = ["prog", "--range-dry-run", "--start-date", "2026-05-22", "--end-date", "2026-05-24"]
         with patch.object(W, "fetch_html", return_value="<html/>"), \
-             patch.object(W, "parse_response", return_value=_parsed(date(2026, 5, 22))):
+             patch.object(W, "parse_response", return_value=_parsed(date(2026, 5, 22))), \
+             patch("backfill_hana_source_daily_rates.time.sleep"):  # throttle 실제 sleep 우회 (fake-clock)
             code, out = _run_main(argv)
         self.assertEqual(code, 0, out)
         self.assertIn("RANGE DRY-RUN 완료", out)
         self.assertIn("rows (basis_date dedup): 1", out)          # 실제 dedup
         self.assertIn("basis_date=2026-05-22", out)               # 실제 fallback event surface
+        # EXPECTED_DATES_JSON= 실제 출력 parse (CLI 레벨 — helper 호출 + 출력 잠금)
+        json_line = next(l for l in out.splitlines() if l.startswith("EXPECTED_DATES_JSON="))
+        self.assertEqual(json.loads(json_line[len("EXPECTED_DATES_JSON="):]), ["2026-05-22"])
+
+    @patch("backfill_hana_source_daily_rates.time.sleep")
+    @patch("backfill_hana_source_daily_rates.fetch_html")
+    def test_range_dry_run_429_cli_exit1(self, mock_fetch, mock_sleep):
+        """[Codex 필수2] --range-dry-run 중 429 → CLI exit 1 + [429 ABORT] + 이후 fetch 0."""
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.headers = {"Retry-After": "30"}
+        mock_fetch.side_effect = requests.HTTPError(response=resp)
+        code, out = _run_main(
+            ["prog", "--range-dry-run", "--start-date", "2026-05-01", "--end-date", "2026-05-31"])
+        self.assertEqual(code, 1)
+        self.assertIn("429 ABORT", out)
+        self.assertEqual(mock_fetch.call_count, 1)  # 첫 429에서 즉시 abort (남은 fetch 0)
+
+    @patch("backfill_hana_source_daily_rates.write_with_transaction_hana")
+    @patch("backfill_hana_source_daily_rates.ensure_source_daily_rates_table_created")
+    @patch("backfill_hana_source_daily_rates.check_production_write_guard", return_value=None)
+    @patch("backfill_hana_source_daily_rates.time.sleep")
+    @patch("backfill_hana_source_daily_rates.fetch_html")
+    def test_write_429_cli_exit1_no_write_call(self, mock_fetch, mock_sleep, mock_guard, mock_ensure, mock_write):
+        """[Codex 필수2] --write 중 429 → CLI exit 1 + write_with_transaction_hana 미호출 (DB write 미진입)."""
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.headers = {"Retry-After": "30"}
+        mock_fetch.side_effect = requests.HTTPError(response=resp)
+        code, out = _run_main(
+            ["prog", "--write", "--start-date", "2026-05-01", "--end-date", "2026-05-31", "--allow-production-write"])
+        self.assertEqual(code, 1)
+        self.assertIn("429 ABORT", out)
+        mock_write.assert_not_called()              # 429 abort → write 미진입
+        self.assertEqual(mock_fetch.call_count, 1)  # 첫 429에서 abort
 
     def test_reverse_range_rejected(self):
         """[Codex #1] 역순 range → validate_write_range로 fail-close exit 1 (silent pass 차단)."""

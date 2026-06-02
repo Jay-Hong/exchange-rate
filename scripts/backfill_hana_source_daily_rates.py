@@ -34,12 +34,12 @@ Row mapping:
 
 사용법 (mode — _validate_cli_combo로 조합 fail-close):
   - 단일일 dry-run (default, DB write X): --date YYYY-MM-DD
-  - range dry-run (DB-free pre-batch gate): --range-dry-run --start-date X --end-date Y
+  - range dry-run (DB-free pre-write gate): --range-dry-run --start-date X --end-date Y
   - write (적재): --write --start-date X --end-date Y [--allow-production-write] [--require-empty-target]
 
 주의:
   - --write는 overlap guard(observed_eod canonical 보존) + conditional upsert(absent-key race) + post-write validation.
-  - --require-empty-target: gap-only 강제 (official one-shot 단독 실행 시 rollback delete 안전).
+  - --require-empty-target: gap-only 강제 (동일 작업 창 내 즉시 rollback delete만 안전; official one-shot 단독 + 작업 종료 후엔 snapshot/재검증).
   - 미래 date(end > today)는 --include-today로도 reject (backfill은 과거만).
 """
 
@@ -49,6 +49,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import NamedTuple, Optional
@@ -66,6 +67,21 @@ KST = ZoneInfo("Asia/Seoul")
 ENDPOINT = "https://www.hanabank.com/cms/rate/wpfxd651_01i_01.do"
 REFERER = "https://www.kebhana.com/cont/mall/mall15/mall1501/index.jsp"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15"
+
+# Hana endpoint throttle: 분당 30회 보수 권장(GRAPH §14 Open) + live Hana crawler가 같은
+# endpoint(wpfxd651_01i_01.do)를 분당 최대 4회(rolling) 공유 → backfill 간격을 3.0초로.
+# rolling 60s: backfill floor(60/3)+1=21 + live 4 = 25 < 30. 첫 요청 cooldown + 실패 요청 포함.
+THROTTLE_INTERVAL_SECONDS = 3.0
+
+
+class HanaRateLimitAbort(Exception):
+    """HTTP 429 감지 시 endpoint 보호 위해 range loop 즉시 abort (Retry-After 보존, 남은 fetch 0)."""
+
+
+def expected_dates_json(rows: list) -> str:
+    """rows의 date_kst sorted·unique → machine-readable 한 줄 (runbook DB pre-query — expected date 전수 audit용)."""
+    dates = sorted({r["date_kst"] for r in rows})
+    return "EXPECTED_DATES_JSON=" + json.dumps([d.isoformat() for d in dates])
 
 ASSET_MAP = {
     "USD": "usd-krw",
@@ -415,12 +431,33 @@ def fetch_and_dedup_calendar_range(
     fallback_events: list[tuple[date, date]] = []
     written_basis_dates: set[date] = set()
 
+    # throttle: 첫 요청 포함 모든 요청 시작 간격 >= THROTTLE_INTERVAL_SECONDS (monotonic 기준).
+    # 함수 시작 시각으로 last_request_start 초기화 → 첫 요청도 cooldown (별도 CLI 프로세스
+    # 경계 dry-run→write 보호). loop 상단 적용 → fetch 성공/실패 무관 간격 유지 (retry storm 방지).
+    last_request_start = time.monotonic()
+
     cur = start
     while cur <= end:
+        elapsed = time.monotonic() - last_request_start
+        if elapsed < THROTTLE_INTERVAL_SECONDS:
+            time.sleep(THROTTLE_INTERVAL_SECONDS - elapsed)
+        last_request_start = time.monotonic()
         try:
             html = fetch_html(currency, cur)
             parsed = parse_response(html)
             row = build_row(parsed, request_date=cur, currency=currency)
+        except requests.HTTPError as e:
+            # HTTP 429 (rate-limit): endpoint 보호 위해 즉시 abort (남은 날짜 fetch 0).
+            if e.response is not None and e.response.status_code == 429:
+                retry_after = e.response.headers.get("Retry-After")
+                raise HanaRateLimitAbort(
+                    f"HTTP 429 at request_date={cur} (Retry-After={retry_after}) — "
+                    f"rate-limit 감지, range loop 즉시 중단"
+                )
+            # 429 외 HTTPError는 일반 fetch 실패 (다음 날짜 진행, 최종 fail-close)
+            fetch_errors.append(f"FETCH 실패 request_date={cur}: {type(e).__name__}: {e}")
+            cur += timedelta(days=1)
+            continue
         except requests.RequestException as e:
             fetch_errors.append(f"FETCH 실패 request_date={cur}: {type(e).__name__}: {e}")
             cur += timedelta(days=1)
@@ -515,13 +552,13 @@ def write_with_transaction_hana(
                 f"{sample} — gap-only range로 재실행 (observed_eod canonical 보존)"
             ], [], [])
         # --require-empty-target: 기존 row 0(gap-only) 강제 → updated_dates 0 → official one-shot
-        # 단독 실행 전제에서 rollback delete 안전 (concurrent official 금지는 운영 절차로 보장).
+        # 동일 작업 창 내 즉시 rollback delete만 안전 (concurrent official 금지 운영 절차 + 작업 종료 후엔 snapshot/재검증).
         if require_empty_target and existing_dates:
             session.rollback()
             sample = sorted(d.isoformat() for d in existing_dates)[:5]
             return HanaWriteOutcome(False, [
                 f"--require-empty-target: expected_dates에 기존 row {len(existing_dates)}건 존재 "
-                f"{sample} — gap-only batch만 허용"
+                f"{sample} — gap-only range만 허용"
             ], [], [])
         # inserted (guard 시점 부재) vs updated (기존 official, non-official은 위에서 reject) 구분 —
         # rollback anchor가 기존 official을 지우지 않도록 main에서 inserted_dates만 삭제.
@@ -815,7 +852,7 @@ def main() -> None:
         help=(
             "[range dry-run] --start-date~--end-date 전 구간 fetch + dedup + row validation "
             "(DB 연결/table create/upsert 0). --write와 동시 사용 금지. fetch error 1건이라도 있으면 exit 1. "
-            "1년 backfill 전 pre-batch 검증용 (단일일 --date dry-run과 구분)."
+            "1년 single full-range backfill 전 pre-write 검증용 (단일일 --date dry-run과 구분)."
         ),
     )
     parser.add_argument(
@@ -823,7 +860,7 @@ def main() -> None:
         action="store_true",
         help=(
             "[Step 4A production 안전] --write 시 expected_dates에 기존 row가 하나라도 있으면 reject "
-            "(gap-only batch 강제 → updated_dates 0 보장 → official one-shot 단독 실행 시 rollback delete 안전)."
+            "(gap-only range 강제 → updated_dates 0 보장 → official one-shot 단독 + 동일 작업 창 내 즉시 rollback delete만 안전; 작업 종료 후엔 snapshot/재검증)."
         ),
     )
     parser.add_argument(
@@ -842,7 +879,7 @@ def main() -> None:
         print(f"[CONFIG 실패] {combo_err}")
         sys.exit(1)
 
-    # ── range dry-run (DB-free pre-batch validation) ──
+    # ── range dry-run (DB-free pre-write validation) ──
     if args.range_dry_run:
         if args.start_date is None or args.end_date is None:
             print("[CONFIG 실패] --range-dry-run 시 --start-date / --end-date 필수")
@@ -857,9 +894,14 @@ def main() -> None:
         print(f"Currency: {args.currency} (asset={ASSET_MAP[args.currency]})")
         print(f"Range: {args.start_date.isoformat()} ~ {args.end_date.isoformat()}")
         print()
-        rows, fetch_errors, fallback_events = fetch_and_dedup_calendar_range(
-            args.currency, args.start_date, args.end_date,
-        )
+        try:
+            rows, fetch_errors, fallback_events = fetch_and_dedup_calendar_range(
+                args.currency, args.start_date, args.end_date,
+            )
+        except HanaRateLimitAbort as e:
+            print(f"[429 ABORT] {e}")
+            print("  rate-limit 감지 — 남은 날짜 fetch 중단, dry-run 종료. interval 상향 후 재시도.")
+            sys.exit(1)
         calendar_days = (args.end_date - args.start_date).days + 1
         print(f"  calendar days: {calendar_days}")
         print(f"  fetch errors: {len(fetch_errors)}")
@@ -867,8 +909,9 @@ def main() -> None:
         for req_d, basis_d in fallback_events[:10]:
             print(f"    - {req_d.isoformat()} → basis_date={basis_d.isoformat()}")
         print(f"  rows (basis_date dedup): {len(rows)}")
+        print(expected_dates_json(rows))
         print()
-        # empty result fail-close (production gate — 빈 range/전부 휴일은 batch 진입 차단 신호)
+        # empty result fail-close (production gate — 빈 range/전부 휴일은 write 진입 차단 신호)
         if not rows and not fetch_errors:
             print("[RANGE DRY-RUN 실패] rows 0 + fetch error 0 — range가 비었거나 전부 휴일 (gate fail-close, exit 1)")
             sys.exit(1)
@@ -946,9 +989,14 @@ def main() -> None:
 
         # calendar-day loop + basis_date dedup
         print(f"[2] Calendar-day loop ({args.start_date} ~ {args.end_date}) + basis_date dedup...")
-        rows_to_write, fetch_errors, fallback_events = fetch_and_dedup_calendar_range(
-            args.currency, args.start_date, args.end_date,
-        )
+        try:
+            rows_to_write, fetch_errors, fallback_events = fetch_and_dedup_calendar_range(
+                args.currency, args.start_date, args.end_date,
+            )
+        except HanaRateLimitAbort as e:
+            print(f"[429 ABORT] {e}")
+            print("  rate-limit 감지 — 남은 날짜 fetch 중단, DB write 미진입. interval 상향 후 재시도.")
+            sys.exit(1)
         calendar_days = (args.end_date - args.start_date).days + 1
         print(f"  calendar days: {calendar_days}")
         print(f"  fetch errors: {len(fetch_errors)}")
@@ -956,6 +1004,7 @@ def main() -> None:
         for req_d, basis_d in fallback_events[:10]:
             print(f"    - {req_d.isoformat()} → basis_date={basis_d.isoformat()}")
         print(f"  rows_to_write (basis_date dedup): {len(rows_to_write)}")
+        print(expected_dates_json(rows_to_write))
         print()
 
         if fetch_errors:
@@ -1001,7 +1050,7 @@ def main() -> None:
             else:
                 print("[Rollback anchor] inserted_dates 0 (모두 idempotent re-upsert) — 삭제할 신규 row 없음.")
             print()
-            print("[Stage 2] commit 별 GO / Stage 3 production execution 별 GO.")
+            print("[Stage 2] commit 별도 GO / Stage 3 production execution 별도 GO.")
         else:
             print(f"[Hana write 실패] {len(outcome.issues)}건 issue — transaction rollback 완료")
             for issue in outcome.issues[:5]:
