@@ -47,6 +47,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -349,6 +350,135 @@ def build_contract_sequence(
         current, cy, cm = next_contract, ny, nm
 
     return sequence
+
+
+# ─────────────────────────────────────────────────────────────
+# Manifest builder (Step 4B 단위 2 — segment-clip fetch + partition gate)
+# ─────────────────────────────────────────────────────────────
+#
+# build_contract_sequence() 결과를 받아 각 segment를 fetch range로 clip해 fetch하고,
+# manifest rows + hard_issues(fail-close 대상) + warnings(surface) + boundary_samples를 만든다.
+# fetch_fn 주입 → network 의존 격리 (테스트는 mock payload).
+# DB write / overlap 비교 / production guard는 변경하지 않는다 (단위 4·5 영역).
+
+GAP_SURFACE_THRESHOLD_DAYS = 4  # 연휴(설/추석)는 정상 4일+ gap → hard 아닌 surface (§12 item 3)
+
+
+@dataclass
+class ManifestResult:
+    """build_manifest 산출물.
+
+    rows: 검증 통과한 manifest row dict (date_kst 오름차순). hard_issues가 비어 있을 때
+        dup 0 = strictly increasing (hard issue 있으면 dup row가 rows에 남아 있을 수 있음).
+    hard_issues: fail-close 대상 (호출자 — 단위 5 --range-dry-run — 이 비어야 write 진입).
+    warnings: surface (gap ≥4일 / cap 100 도달 등 — hard fail 아님).
+    boundary_samples: segment 경계(±1일) 주변 row (만기일=next 등 boundary 검증용 surface).
+    """
+    rows: list[dict]
+    hard_issues: list[str]
+    warnings: list[str]
+    boundary_samples: list[dict]
+
+
+def _segment_fetch_range(
+    segment_start: date, segment_end: date, window_start: date, window_end: date
+) -> tuple[date, date]:
+    """segment ∩ window → fetch range (inclusive).
+
+    fetch_start = max(segment_start, window_start)
+    fetch_end   = min(segment_end - 1day, window_end)
+      └ segment_end(만기일)는 next contract 소속이므로 -1day로 제외 (boundary=next 자연 유지).
+
+    sequence 포함 조건(segment ∩ window != ∅)이면 fetch_start <= fetch_end 항상 성립.
+    """
+    fetch_start = max(segment_start, window_start)
+    fetch_end = min(segment_end - timedelta(days=1), window_end)
+    return fetch_start, fetch_end
+
+
+def build_manifest(
+    sequence: list[tuple[ContractInfo, date, date]],
+    window_start: date,
+    window_end: date,
+    fetch_fn,
+) -> ManifestResult:
+    """sequence를 segment-clip fetch → manifest (Step 4B 단위 2).
+
+    fetch_fn(contract, fetch_start, fetch_end) -> list[row dict]
+      (실제: parse_daily_rows(fetch_daily(...)) wrapping / 테스트: mock payload).
+
+    Hard fail (issues 수집 → 호출자 fail-close):
+      - 만기일 row가 자기(previous) segment에 존재 (boundary=next 위반)
+      - row가 segment [seg_start, seg_end) 밖
+      - row가 window [window_start, window_end] 밖
+      - manifest date_kst duplicate (validate_duplicates_mapped 재사용)
+    Surface (warnings):
+      - gap >= GAP_SURFACE_THRESHOLD_DAYS (연휴/KIS 결손 확인용)
+      - fetched rows >= KIS_DAILY_ROWS_CAP (단위 4에서 write-intended fail-close 격상)
+    """
+    rows: list[dict] = []
+    hard_issues: list[str] = []
+    warnings: list[str] = []
+    boundary_samples: list[dict] = []
+
+    for contract, seg_start, seg_end in sequence:
+        fetch_start, fetch_end = _segment_fetch_range(seg_start, seg_end, window_start, window_end)
+        if fetch_start > fetch_end:  # sequence 포함 조건상 발생 안 함 (방어)
+            hard_issues.append(
+                f"{contract.short_code}: empty fetch range [{fetch_start}, {fetch_end}]"
+            )
+            continue
+
+        fetched = fetch_fn(contract, fetch_start, fetch_end)
+        if len(fetched) >= KIS_DAILY_ROWS_CAP:
+            warnings.append(
+                f"{contract.short_code}: {len(fetched)} rows >= cap {KIS_DAILY_ROWS_CAP} "
+                "(range split 필요 — surface; 단위 4 write-intended path에서 fail-close 격상)"
+            )
+
+        for row in fetched:
+            d = row["date_kst"]
+            rc = row.get("contract_code")
+            if rc != contract.short_code:  # (date_kst → contract_code) invariant — fetch_fn 주입 방어
+                hard_issues.append(
+                    f"{contract.short_code} date_kst={d} contract_code mismatch: row has {rc!r}"
+                )
+                continue
+            if d == seg_end:  # 만기일 = next contract 소속 (boundary=next 위반)
+                hard_issues.append(
+                    f"{contract.short_code} date_kst={d} == segment_end "
+                    "(boundary 위반: 만기일은 next contract 소속)"
+                )
+                continue
+            if not (seg_start <= d < seg_end):
+                hard_issues.append(
+                    f"{contract.short_code} date_kst={d} segment [{seg_start}, {seg_end}) 밖"
+                )
+                continue
+            if not (window_start <= d <= window_end):
+                hard_issues.append(
+                    f"{contract.short_code} date_kst={d} window [{window_start}, {window_end}] 밖"
+                )
+                continue
+            rows.append(row)
+            if (d - seg_start).days <= 1 or (seg_end - d).days <= 1:  # segment 경계 ±1일
+                boundary_samples.append(
+                    {"contract": contract.short_code, "date_kst": d, "close": row.get("close")}
+                )
+
+    rows.sort(key=lambda r: r["date_kst"])
+    # sorted + dup 0 = strictly increasing (별도 정렬 검증 불요 — DRY)
+    hard_issues.extend(validate_duplicates_mapped(rows))
+
+    dates = [r["date_kst"] for r in rows]
+    for i in range(len(dates) - 1):
+        gap = (dates[i + 1] - dates[i]).days
+        if gap >= GAP_SURFACE_THRESHOLD_DAYS:
+            warnings.append(
+                f"gap {gap}d: {dates[i]} -> {dates[i + 1]} (연휴/KIS 결손 확인 — surface)"
+            )
+
+    return ManifestResult(rows, hard_issues, warnings, boundary_samples)
 
 
 # ─────────────────────────────────────────────────────────────
