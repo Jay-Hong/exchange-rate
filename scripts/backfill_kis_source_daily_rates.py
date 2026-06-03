@@ -218,6 +218,140 @@ def build_chain_static_anchor(now_kst: datetime) -> tuple[ContractInfo, Contract
 
 
 # ─────────────────────────────────────────────────────────────
+# Coverage window + N-contract sequence (Step 4B — calendar 순수 계산)
+# ─────────────────────────────────────────────────────────────
+#
+# Step 4B는 1년 coverage window를 덮는 front-month contract sequence를 만든다.
+# 핵심 invariant (KRX_STEP4B_PLAN.md §12 Resolved):
+#   - segment = [prev.expiry, this.expiry) 반열린 (calendar date, 거래일 무관)
+#   - window_start가 속한 front-month resolve (만기일 당일 = next contract)
+#   - 포함 조건: segment ∩ [window_start, window_end] != ∅
+# master / fetch / DB 의존 0 — _compute_expiry_date(셋째 월요일)만 재사용.
+
+def _parse_contract_month(contract: ContractInfo) -> tuple[int, int]:
+    """ContractInfo.contract_month 'YYYYMM' → (year, month)."""
+    return int(contract.contract_month[:4]), int(contract.contract_month[4:6])
+
+
+def _prev_month(year: int, month: int) -> tuple[int, int]:
+    """이전 월 (1월 → 전년 12월)."""
+    if month == 1:
+        return year - 1, 12
+    return year, month - 1
+
+
+def _next_month(year: int, month: int) -> tuple[int, int]:
+    """다음 월 (12월 → 다음해 1월)."""
+    if month == 12:
+        return year + 1, 1
+    return year, month + 1
+
+
+def _make_usd_futures_contract(year: int, month: int) -> ContractInfo:
+    """year/month → 미국달러선물 ContractInfo (calendar 계산, master 불필요).
+
+    short_code 패턴: A75 + (year % 10) + month_2digit (GRAPH §7-new line 336).
+    expiry_date: _compute_expiry_date 재사용 (셋째 월요일).
+    standard_code는 "" (미사용) — 만기 지난 contract도 KIS daily endpoint로 fetch 가능.
+    기존 _build_previous_dynamic / _build_before_previous_dynamic과 동일 short_code 규칙
+    (후속에서 그 helper들을 본 함수 기반으로 통합 가능 — 이번 단위는 변경 최소).
+    """
+    contract_month = f"{year:04d}{month:02d}"
+    short_code = f"A75{year % 10}{month:02d}"
+    expiry = _compute_expiry_date(contract_month)
+    if expiry is None:
+        raise RuntimeError(f"expiry compute 실패: {contract_month}")
+    return ContractInfo(
+        short_code=short_code,
+        standard_code="",
+        name=f"미국달러 F {contract_month}",
+        contract_month=contract_month,
+        expiry_date=expiry,
+    )
+
+
+def _resolve_front_month(target_date: date) -> ContractInfo:
+    """target_date가 속한 front-month contract resolve (calendar 기준).
+
+    front-month = target_date 이후 첫 만기 월물:
+      - target_date <  expiry(M) → M월물
+      - target_date >= expiry(M) (만기일 당일 포함) → 다음 월물 (boundary=next, invariant 2)
+
+    target_date가 휴장일이어도 segment는 calendar date 기준으로 resolve된다
+    (실제 row 존재는 KIS trading-day set이 결정 — 2-layer 분리, §12 Resolved).
+    """
+    year, month = target_date.year, target_date.month
+    candidate = _make_usd_futures_contract(year, month)
+    if target_date < candidate.expiry_date:
+        return candidate
+    ny, nm = _next_month(year, month)
+    return _make_usd_futures_contract(ny, nm)
+
+
+def _compute_coverage_window(now_kst: datetime) -> tuple[date, date]:
+    """today-1 기준 rolling 1년 window 산정 (§12 Resolved item 1).
+
+    window_end   = today_kst - 1 day (today 제외 — intraday close 오염 회피).
+    window_start = window_end 의 1년 전 (year-1 동일 월일, 2/29는 2/28 보정).
+    "rolling"은 산정 방식이며, 호출자가 반환된 (start, end)를 manifest/log에 고정 기록한다.
+
+    window 길이 = **calendar-year lookback** (window_start ~ window_end inclusive,
+    ~366일). "정확히 N daily bucket"이 아니다 — KRX는 거래일만 적재하므로 실제 row 수는
+    KIS 거래일 집합이 결정한다 (calendar 366 vs 365 차이는 시작 경계 거래일 0~1개에만 영향).
+    """
+    today = now_kst.date()
+    window_end = today - timedelta(days=1)
+    try:
+        window_start = window_end.replace(year=window_end.year - 1)
+    except ValueError:  # window_end == 2/29 → 전년 2/28
+        window_start = window_end.replace(year=window_end.year - 1, day=28)
+    return window_start, window_end
+
+
+def build_contract_sequence(
+    window_start: date, window_end: date
+) -> list[tuple[ContractInfo, date, date]]:
+    """coverage window를 덮는 front-month contract sequence (calendar 순수 계산).
+
+    반환 각 항목: (contract, segment_start, segment_end)
+      - segment = [segment_start, segment_end) 반열린 (calendar date).
+      - segment_start = 이전 월물 expiry (= 이 contract 사용 시작).
+      - segment_end   = 이 contract expiry (= 다음 contract 사용 시작, 미포함).
+
+    window_start가 속한 front-month부터 forward로 생성하며,
+    `segment ∩ [window_start, window_end] != ∅`인 contract만 포함한다
+    (forward라 segment_start 단조 증가 → 종료조건 = segment_start <= window_end).
+
+    DB write / overlap 비교 / production guard와 무관한 순수 계산 (Step 4B 단위 1).
+    """
+    if window_start > window_end:
+        raise ValueError(
+            f"window_start({window_start}) > window_end({window_end}) — 역전 range"
+        )
+
+    sequence: list[tuple[ContractInfo, date, date]] = []
+    current = _resolve_front_month(window_start)
+    cy, cm = _parse_contract_month(current)
+    # C_0 segment_start = 이전 월물 expiry (window_start ∈ [segment_start, current.expiry))
+    py, pm = _prev_month(cy, cm)
+    prev_expiry = _compute_expiry_date(f"{py:04d}{pm:02d}")
+    if prev_expiry is None:
+        raise RuntimeError(f"prev expiry compute 실패: {py:04d}{pm:02d}")
+    segment_start = prev_expiry
+
+    while segment_start <= window_end:
+        segment_end = current.expiry_date  # 반열린 — segment_end는 다음 contract 소속
+        sequence.append((current, segment_start, segment_end))
+        # forward: 다음 월물, 다음 segment_start = 이번 contract expiry
+        ny, nm = _next_month(cy, cm)
+        next_contract = _make_usd_futures_contract(ny, nm)
+        segment_start = current.expiry_date
+        current, cy, cm = next_contract, ny, nm
+
+    return sequence
+
+
+# ─────────────────────────────────────────────────────────────
 # Fetch + Parse
 # ─────────────────────────────────────────────────────────────
 
