@@ -116,9 +116,10 @@ class TestBuildManifest(unittest.TestCase):
         many = [_row(date(2026, 5, 15), "A75605")] * B.KIS_DAILY_ROWS_CAP  # 100 rows (동일 날짜)
         fetch = _fetch_from({"A75605": many})
         res = B.build_manifest(seq, self.WS, self.WE, fetch)
-        self.assertTrue(any("cap" in w for w in res.warnings))
-        # cap은 surface-only (hard 아님) 독립 검증 — dup hard는 동일 날짜 100개라 부수 발생
+        self.assertTrue(any("cap" in w for w in res.cap_warnings))  # cap은 cap_warnings로 분리
+        # cap은 build_manifest 단계 surface (hard 아님) — write-intended promote에서만 hard
         self.assertFalse(any("cap" in i for i in res.hard_issues))
+        self.assertFalse(any("cap" in w for w in res.warnings))  # warnings(gap)엔 cap 없음
 
     def test_contract_code_mismatch_fails(self):
         # fetch_fn이 A75605 fetch에 contract_code=A75606 row를 줌 (wrapper/mock 실수 방어).
@@ -142,6 +143,59 @@ class TestBuildManifest(unittest.TestCase):
         fetch = _fetch_from({"A75605": [_row(date(2026, 5, 17), "A75605")]})
         res = B.build_manifest(seq, self.WS, self.WE, fetch)
         self.assertTrue(any(s["date_kst"] == date(2026, 5, 17) for s in res.boundary_samples))
+
+
+class TestPromoteWriteIntended(unittest.TestCase):
+    """단위 4 — cap_warnings를 write-intended path에서 hard로 승격. gap은 surface 유지."""
+    WS = date(2026, 4, 25)
+    WE = date(2026, 6, 10)
+
+    def _seq(self):
+        return B.build_contract_sequence(self.WS, self.WE)
+
+    def _cap_result(self):
+        many = [_row(date(2026, 5, 15), "A75605")] * B.KIS_DAILY_ROWS_CAP
+        return B.build_manifest(self._seq(), self.WS, self.WE, _fetch_from({"A75605": many}))
+
+    def test_cap_surface_before_promote(self):
+        res = self._cap_result()
+        self.assertTrue(res.cap_warnings)
+        self.assertFalse(any("cap" in i for i in res.hard_issues))  # promote 전 hard 아님
+
+    def test_cap_hard_after_promote(self):
+        promoted = B.promote_write_intended_manifest_warnings(self._cap_result())
+        self.assertTrue(any("cap 격상" in i for i in promoted.hard_issues))  # promote 후 hard
+        self.assertTrue(promoted.cap_warnings)  # audit 유지
+
+    def test_gap_not_promoted(self):
+        seq = self._seq()
+        fetch = _fetch_from({
+            "A75605": [_row(date(2026, 4, 25), "A75605"), _row(date(2026, 5, 15), "A75605")],
+        })
+        res = B.build_manifest(seq, self.WS, self.WE, fetch)
+        self.assertTrue(any("gap" in w for w in res.warnings))
+        promoted = B.promote_write_intended_manifest_warnings(res)
+        self.assertEqual(promoted.warnings, res.warnings)            # gap 유지
+        self.assertFalse(any("gap" in i for i in promoted.hard_issues))  # gap hard 아님
+
+    def test_existing_hard_preserved(self):
+        # cap + segment 밖 row(hard) 동시 → promote 후 기존 hard 보존 + cap 추가
+        many = [_row(date(2026, 5, 15), "A75605")] * B.KIS_DAILY_ROWS_CAP
+        many.append(_row(date(2026, 6, 1), "A75605"))  # segment 밖 → hard
+        res = B.build_manifest(self._seq(), self.WS, self.WE, _fetch_from({"A75605": many}))
+        pre_hard = list(res.hard_issues)
+        self.assertTrue(pre_hard)
+        promoted = B.promote_write_intended_manifest_warnings(res)
+        for h in pre_hard:
+            self.assertIn(h, promoted.hard_issues)  # 보존
+
+    def test_no_cap_returns_same(self):
+        seq = self._seq()
+        fetch = _fetch_from({"A75605": [_row(date(2026, 5, 15), "A75605")]})
+        res = B.build_manifest(seq, self.WS, self.WE, fetch)
+        self.assertEqual(res.cap_warnings, [])
+        promoted = B.promote_write_intended_manifest_warnings(res)
+        self.assertIs(promoted, res)  # cap 없으면 no-op (동일 객체)
 
 
 if __name__ == "__main__":

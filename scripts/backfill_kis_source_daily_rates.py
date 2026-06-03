@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-KIS daily chain → source_daily_rates dry-run validator.
+KIS daily chain → source_daily_rates backfill.
 
-ADR-034 Phase 2d Step 2-3 (KIS daily chain dry-run, Step 2/3 경계 보존 — DB write X).
+ADR-034 Phase 2d: Step 2-3 (dry-run validator) → Step 3 (--write/--contract 적재)
+→ Step 4B (N-contract 1년 chain + manifest partition + 기존 seed 비교 helper).
 
 목적:
   - KIS inquire-daily-fuopchartprice REST endpoint 호출
-  - A75YMM contract chain 3 contracts (previous + current + next) fetch
+  - contract chain: Step 3 = 3 contracts (previous + current + next),
+    Step 4B = N-contract (coverage window를 덮는 front-month sequence — build_contract_sequence)
   - rollover boundary 검증 (만기일 07:00 KST swap point, GRAPH §7-new)
-  - source_daily_rates row dict 생성 + 13 validation suite
-  - Step 2/3 경계 보존 (DB write X, upsert() 호출 X)
+  - source_daily_rates row dict 생성 + validation suite + manifest partition gate (build_manifest)
+  - --write로 DB 적재 (production guard + gap-only overlap). Step 4B main wiring은 단위 5 예정.
 
 문서 anchor:
   - GRAPH_API_V2_CONTRACT.md §7-new: endpoint / TR_ID / A75YMM chain / rollover policy
@@ -32,13 +34,16 @@ Row mapping (KRX 패턴, Hana/Bithumb과 분리):
   - basis_date = None / published_at = None (Hana official 전용)
 
 사용법:
-  python scripts/backfill_kis_source_daily_rates.py [--token-cache-path PATH]
+  # dry-run validator (Step 2-3 탐색 — DB write X)
+  python scripts/backfill_kis_source_daily_rates.py
+  # 적재 (Step 3+ — --write + production guard; 상세 옵션은 --help)
+  python scripts/backfill_kis_source_daily_rates.py --write --allow-production-write
 
 주의:
   - KIS_APP_KEY / KIS_APP_SECRET 필요 (.env)
   - 기본 token cache: .cache/kis_access_token.json (운영 + smoke 공유)
   - KIS는 접근 토큰 1일 1회 발급 원칙 — fresh cache 재사용으로 추가 발급 0
-  - 본 script는 dry-run only. DB write 절대 X.
+  - dry-run은 DB write X. --write 진입 시 production guard (--allow-production-write 필요).
 """
 
 # 표준 라이브러리
@@ -47,7 +52,7 @@ import asyncio
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -371,13 +376,16 @@ class ManifestResult:
     rows: 검증 통과한 manifest row dict (date_kst 오름차순). hard_issues가 비어 있을 때
         dup 0 = strictly increasing (hard issue 있으면 dup row가 rows에 남아 있을 수 있음).
     hard_issues: fail-close 대상 (호출자 — 단위 5 --range-dry-run — 이 비어야 write 진입).
-    warnings: surface (gap ≥4일 / cap 100 도달 등 — hard fail 아님).
+    warnings: gap surface (gap ≥4일 등 — 연휴 정상, 항상 surface).
     boundary_samples: segment 경계(±1일) 주변 row (만기일=next 등 boundary 검증용 surface).
+    cap_warnings: cap 100 도달 — write-intended path에서 hard 승격 대상
+        (promote_write_intended_manifest_warnings). 탐색 dry-run은 surface 유지.
     """
     rows: list[dict]
     hard_issues: list[str]
     warnings: list[str]
     boundary_samples: list[dict]
+    cap_warnings: list[str] = field(default_factory=list)
 
 
 def _segment_fetch_range(
@@ -420,6 +428,7 @@ def build_manifest(
     hard_issues: list[str] = []
     warnings: list[str] = []
     boundary_samples: list[dict] = []
+    cap_warnings: list[str] = []
 
     for contract, seg_start, seg_end in sequence:
         fetch_start, fetch_end = _segment_fetch_range(seg_start, seg_end, window_start, window_end)
@@ -431,9 +440,9 @@ def build_manifest(
 
         fetched = fetch_fn(contract, fetch_start, fetch_end)
         if len(fetched) >= KIS_DAILY_ROWS_CAP:
-            warnings.append(
+            cap_warnings.append(
                 f"{contract.short_code}: {len(fetched)} rows >= cap {KIS_DAILY_ROWS_CAP} "
-                "(range split 필요 — surface; 단위 4 write-intended path에서 fail-close 격상)"
+                "(range split 필요 — surface; write-intended path에서 promote_*로 fail-close 격상)"
             )
 
         for row in fetched:
@@ -478,7 +487,29 @@ def build_manifest(
                 f"gap {gap}d: {dates[i]} -> {dates[i + 1]} (연휴/KIS 결손 확인 — surface)"
             )
 
-    return ManifestResult(rows, hard_issues, warnings, boundary_samples)
+    return ManifestResult(rows, hard_issues, warnings, boundary_samples, cap_warnings)
+
+
+def promote_write_intended_manifest_warnings(result: ManifestResult) -> ManifestResult:
+    """write-intended path(`--range-dry-run` 게이트 + `--write`): cap_warnings를 hard_issues로 승격.
+
+    cap 100 도달은 usage segment(≈20거래일) 기준 정상 불가 → 설계/endpoint 이상 신호이므로
+    write-intended path에서는 fail-close (하나라도 도달 시 전체 abort 대상).
+    - 기존 hard_issues 보존 + cap_warnings를 hard로 추가
+    - gap warnings(surface)는 그대로 유지 (연휴 정상)
+    - cap_warnings도 audit용으로 유지 (어떤 게 격상됐는지 추적)
+    순수 탐색 dry-run(Step 2-3 probe)은 본 함수를 호출하지 않음 → cap이 surface로 남음 (동작 불변).
+    """
+    if not result.cap_warnings:
+        return result
+    return ManifestResult(
+        rows=result.rows,
+        hard_issues=result.hard_issues
+        + [f"[write-intended cap 격상] {w}" for w in result.cap_warnings],
+        warnings=result.warnings,
+        boundary_samples=result.boundary_samples,
+        cap_warnings=result.cap_warnings,
+    )
 
 
 # ─────────────────────────────────────────────────────────────
