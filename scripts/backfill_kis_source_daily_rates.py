@@ -686,6 +686,138 @@ def query_existing_krx_rows(db, window_start: date, window_end: date) -> list[di
 
 
 # ─────────────────────────────────────────────────────────────
+# Range dry-run 게이트 (Step 4B 단위 5 — write-intended, DB write 0)
+# ─────────────────────────────────────────────────────────────
+#
+# sequence → manifest → promote(cap hard) → (manifest hard 없으면) compare.
+# manifest hard 있으면 compare skip (오염 manifest 비교 = secondary noise 회피, fail-close).
+# DB write/upsert/transaction 0 — compare의 query_existing SELECT만. 출력은 운영자 파싱용 sentinel.
+
+def _make_fetch_fn(token: str, app_key: str, app_secret: str):
+    """build_manifest 주입용 fetch_fn — parse_daily_rows(fetch_daily(...)) wrapping."""
+    def fetch_fn(contract: ContractInfo, fetch_start: date, fetch_end: date) -> list[dict]:
+        payload = fetch_daily(
+            short_code=contract.short_code, start_date=fetch_start, end_date=fetch_end,
+            token=token, app_key=app_key, app_secret=app_secret,
+        )
+        return parse_daily_rows(payload, contract)
+    return fetch_fn
+
+
+def run_range_dry_run(window_start: date, window_end: date, fetch_fn, db) -> int:
+    """write-intended dry-run 게이트 (Step 4B 단위 5). return: exit code (hard 있으면 1).
+
+    manifest hard(boundary/segment/window/dup/cap promote 등) 있으면 compare skip + exit 1
+    (오염 manifest를 DB seed와 비교하면 secondary noise — fail-close).
+    DB write 0 — compare의 query_existing SELECT만.
+    """
+    print(f"WINDOW_START={window_start.isoformat()}")
+    print(f"WINDOW_END={window_end.isoformat()}")
+    sequence = build_contract_sequence(window_start, window_end)
+    print(f"SEQUENCE_CONTRACTS={json.dumps([c.short_code for c, _, _ in sequence])}")
+    for c, ss, se in sequence:
+        print(f"  segment {c.short_code}: [{ss.isoformat()}, {se.isoformat()})")
+
+    try:
+        manifest = build_manifest(sequence, window_start, window_end, fetch_fn)
+    except (requests.RequestException, RuntimeError, ValueError, InvalidOperation) as e:
+        print(f"FETCH_ERROR={type(e).__name__}: {e}")
+        print("RANGE_DRY_RUN_RESULT=FAIL")
+        return 1
+    manifest = promote_write_intended_manifest_warnings(manifest)
+    print(f"MANIFEST_ROW_COUNT={len(manifest.rows)}")
+    print(f"MANIFEST_HARD_COUNT={len(manifest.hard_issues)}")
+    print(f"WARNINGS_COUNT={len(manifest.warnings)}")
+    print(f"CAP_WARNINGS_COUNT={len(manifest.cap_warnings)}")
+    print(f"BOUNDARY_SAMPLES_COUNT={len(manifest.boundary_samples)}")
+    for w in manifest.warnings:
+        print(f"  [warning] {w}")
+    for w in manifest.cap_warnings:
+        print(f"  [cap_warning] {w}")
+    for h in manifest.hard_issues:
+        print(f"  [HARD] {h}")
+
+    if manifest.hard_issues:
+        print("COMPARE_STATUS=skipped_due_to_manifest_hard")
+        print("RANGE_DRY_RUN_RESULT=FAIL")
+        return 1
+
+    existing = query_existing_krx_rows(db, window_start, window_end)
+    compare = compare_manifest_with_existing(manifest.rows, existing, window_start, window_end)
+    print("COMPARE_STATUS=ran")
+    print(f"EXISTING_ROW_COUNT={len(existing)}")
+    print(f"ROWS_TO_WRITE_COUNT={len(compare.rows_to_write)}")
+    print(f"MATCHED_EXISTING_COUNT={len(compare.matched_existing)}")
+    print(f"COMPARE_HARD_COUNT={len(compare.hard_issues)}")
+    print(
+        "ROWS_TO_WRITE_DATES="
+        + json.dumps([r["date_kst"].isoformat() for r in compare.rows_to_write])
+    )
+    for w in compare.warnings:
+        print(f"  [compare_warning] {w}")
+    for h in compare.hard_issues:
+        print(f"  [COMPARE_HARD] {h}")
+
+    if compare.hard_issues:
+        print("RANGE_DRY_RUN_RESULT=FAIL")
+        return 1
+    print("RANGE_DRY_RUN_RESULT=PASS")
+    return 0
+
+
+def _resolve_range_dry_run_window(args):
+    """window 산정: --start/--end 고정 or today-1 rolling 1년 (§12 Resolved item 1).
+
+    args.start_date / args.end_date는 type=_date_arg라 **이미 date 객체** (str 아님 —
+    date.fromisoformat 적용 금지). return: (window_start, window_end) or None (한쪽만 지정 → fail-close).
+    """
+    if args.start_date and args.end_date:
+        return args.start_date, args.end_date
+    if args.start_date or args.end_date:
+        return None
+    now_kst = datetime.now(tz=KST).replace(tzinfo=None)
+    return _compute_coverage_window(now_kst)
+
+
+def _run_range_dry_run_main(args) -> int:
+    """--range-dry-run main wiring: window/token/db 준비 → run_range_dry_run (테스트는 run_range_dry_run 직접).
+
+    window: --start-date/--end-date 있으면 고정 (재현성), 없으면 today-1 rolling 1년 (§12 Resolved item 1).
+    DB write 0.
+    """
+    app_key = os.getenv("KIS_APP_KEY")
+    app_secret = os.getenv("KIS_APP_SECRET")
+    if not app_key or not app_secret:
+        print("[CONFIG 실패] KIS_APP_KEY / KIS_APP_SECRET 미설정 (.env 확인)")
+        return 1
+
+    window = _resolve_range_dry_run_window(args)
+    if window is None:
+        print("[CONFIG 실패] --start-date/--end-date는 함께 지정 (또는 둘 다 생략 → today-1 rolling 1년)")
+        return 2
+    window_start, window_end = window
+
+    if window_start > window_end:
+        print(f"[CONFIG 실패] window_start({window_start}) > window_end({window_end})")
+        return 2
+
+    print(f"모드: RANGE-DRY-RUN (write-intended 게이트, DB write 0)")
+    try:
+        token = get_access_token(app_key, app_secret, args.token_cache_path)
+    except Exception as e:
+        print(f"[TOKEN 실패] {type(e).__name__}: {e}")
+        return 1
+    fetch_fn = _make_fetch_fn(token, app_key, app_secret)
+
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        return run_range_dry_run(window_start, window_end, fetch_fn, db)
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────
 # Fetch + Parse
 # ─────────────────────────────────────────────────────────────
 
@@ -1419,10 +1551,26 @@ def main() -> None:
             "both=[bef_prev.expiry, cur.expiry)."
         ),
     )
+    parser.add_argument(
+        "--range-dry-run",
+        action="store_true",
+        help=(
+            "[Step 4B 단위 5] write-intended dry-run 게이트. N-contract coverage window "
+            "(today-1 rolling 1년 또는 --start-date/--end-date 고정) → sequence → manifest → "
+            "promote(cap hard) → 기존 seed 비교. DB write 0. hard 있으면 exit 1. --write 상호 배타."
+        ),
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent
     load_dotenv(project_root / ".env")
+
+    # Step 4B 단위 5 — --range-dry-run (write-intended 게이트). --write 상호 배타 + early branch.
+    if args.range_dry_run and args.write:
+        print("[CONFIG 실패] --range-dry-run과 --write는 상호 배타")
+        sys.exit(2)
+    if args.range_dry_run:
+        sys.exit(_run_range_dry_run_main(args))
 
     # *** PRODUCTION GUARD EARLY (Codex Round 8) ***
     # KIS API call (token/master/daily fetch) 진입 전 + DB connection 전.
