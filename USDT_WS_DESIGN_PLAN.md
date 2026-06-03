@@ -1207,6 +1207,59 @@ G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 �
 
 **우선순위 합의 (2026-05-25 추가)**: 5b/5d-a/legacy polling disable land 완료 후 [REALTIME_ARCHITECTURE_PLAN.md §4.1](REALTIME_ARCHITECTURE_PLAN.md) "All-source observation fanout contract" 통합 phase 진입 순서 합의 — **(1) [KRX Stage E](KRX_FANOUT_REFACTOR_PLAN.md) → (2) [Bank/Investing β](USDT_TOPIC_MIGRATION_PLAN.md) → (3) USDT 공통화 검토**. KRX Stage E 먼저 진행 이유: 단일 source라 scope 좁고 (5b-bis freshness metadata + 5d-a SET-only topic trigger) USDT 검증 패턴을 KRX에 먼저 이식하여 패턴 안정성 확보. USDT 공통화는 (1)+(2) land 후 3 도메인 검증 데이터 기반으로 진입 (선제 abstraction 금지 원칙 정렬).
 
+#### 12.9.8 Silent-session 사고 postmortem + `c4a51e5` fix + deferred follow-ups (2026-06-03)
+
+**Incident**: 2026-05-28 이후 Gopax USDT/KRW가 stale 고착 (~5일). 운영 실측(2026-06-03 캡처): Redis latest·공개 `usdt:krw` topic = `5/28 15:52:50 KST / 1475.0`, DB `source_rates` latest = `5/28 15:42 KST / 1475.0` — 셋 다 5/28 동결 (DB는 변경 시에만 INSERT라 Redis tick/probe write보다 ~10분 older, rate는 동일 1475.0).
+
+- 원인: WS task는 **살아 있었으나**(metrics 계속 emit) tick·heartbeat frame이 **모두 정지**했고 `ConnectionClosed`가 발생하지 않은 **silent WS session**. 운영 로그 실측: `frames_per_min=0` / `last_tick_age ≈ last_heartbeat_age ≈ 427,600s` / `connection_status=stale` / `reconnect_attempts=1`(freeze 이후 0).
+- 핵심 결함: `connection_status=stale`은 감지됐으나 **label-only no-op** — 재연결이 `ConnectionClosed` 예외에만 묶여 있어 half-open/silent 소켓은 영구 고착.
+- Gopax 고유성: 다른 4 source(Upbit/Bithumb/Coinone/Korbit)는 `_ping_loop`로 능동 `ws.close()` → reconnect 보유. Gopax만 서버발 Primus heartbeat 수동 응답에 의존해 능동 종료 경로 부재.
+- 복구: fastapi restart로 즉시 회복. end-user 영향 0(테더 탭 미배포), canary/topic 데이터 품질 이슈.
+
+**Fixed in `c4a51e5` (PR #1, deploy 2026-06-03)**:
+
+- no-first-valid-USDT-tick timeout (`FIRST_TICK_TIMEOUT_SEC=30`, valid tick 기준 — heartbeat-only 세션 포착) → `_SilentSessionError` → reconnect
+- mid-session stale (tick·heartbeat silence > `STALE_AFTER_SEC=360`) → `_SilentSessionError` → reconnect (기존 no-op 대체)
+- 첫 valid tick에 consecutive backoff 리셋 (`_consecutive_reconnect_attempts`, lifetime `_reconnect_attempt_count` metric과 분리)
+- backoff 구간 bounded REST probe (`run_backoff_probe`: 병렬 / backoff 종료 시 cancel / cancel 시 cooldown 미소비 / session-scoped probe와 독립 in-flight·cooldown)
+- USDT Redis writer `<` 역행 가드 (`SKIPPED_REGRESSION` enum + `direct_write_regression_skipped` counter + throttled warning)
+- 테스트 `tests/test_gopax_silent_session_fix.py` 16 + 관련 suite 765 passed, **migration 없음**
+
+**c4a51e5가 못 덮는 잔여 모드 → deferred follow-ups (미구현, 비긴급, 필요 시 별 PR)**:
+
+| 실패 모드 | c4a51e5 | 후속 |
+| --- | --- | --- |
+| tick·heartbeat 모두 정지 / 첫 tick 없음 / Redis out-of-order | ✅ | — |
+| **heartbeat 살아있는데 ticker만 정지** | ❌ | ① |
+| **WS task 자체 종료(크래시/취소)** | ❌ | ② |
+| **DB out-of-order write** | ❌ (Redis만) | ③ |
+
+**① heartbeat-alive · ticker-dead 복구** — [우선순위 1 / 작업량 M / migration 없음]
+
+- 문제: heartbeat는 오는데 target ticker만 정지. 시장은 거래 중인데 우리 데이터만 dead.
+- 현 fix 미커버: `is_stale = max(tick,heartbeat) silence`라 heartbeat fresh면 not-stale → 재연결 안 됨. first-tick guard는 세션 시작 때만.
+- 탐지 신호: ticker degraded 지속 시 REST `lastTraded`(체결 시각)와 **저장된 WS last `lastTraded`** 비교 → REST가 앞서면 WS 데이터 dead 확정 → reconnect.
+- 건드릴 파일: `app/crawlers/usdt_sources.py` (현 `fetch_gopax_usdt_tick`은 `/trading-pairs/USDT-KRW/ticker`의 `time`=ticker update time 사용 → **`/tickers`의 `lastTraded`=trade time으로 교체/추가, 시맨틱 일치 필수**) / `gopax.py` (WS tick `lastTraded` instance 저장 + degraded 비교 + `_SilentSessionError` 재사용) / race 가드(probe 중 WS 회복).
+- 스코프: **Gopax-only 먼저**. 5 source 공통 위험이나(다른 4 ping loop도 *데이터* 죽음 미탐지) REST 비교 5개 확장은 M→L. Gopax 검증 후 공통화 검토.
+- 테스트: REST>WS→reconnect / REST==WS(조용한 시장)→무동작 / race.
+
+**② 5-source 공통 task supervisor** — [우선순위 2 / 작업량 M / migration 없음]
+
+- 문제: WS *연결* 죽음이 아니라 **collector task 자체**(asyncio task)가 종료(크래시/취소)되는 경우 — 되살릴 장치 없음. (legacy REST polling 안전망 5/25 비활성.)
+- 현 fix 미커버: 이번 fix는 *살아있는 task 안*에서 reconnect.
+- 설계: `app/scheduler.py`의 5개 `start_usdt_ws_*_client`/`_run_usdt_ws_*_client`(현재 crash 시 log-only)에 공용 supervisor — `task.done()` 감지 또는 주기 watchdog → 재기동 + shutdown race / 중복 task 방지 / backoff. KRX wrapper도 동일 log-only 구조라 함께 검토 가능. all-source 안전망.
+
+**③ DB exchange-ts 정합** — [우선순위 3 / 작업량 M~L / **migration 필요** / 가장 비긴급]
+
+- 문제: out-of-order write 시 stale value가 늦게 도착해 '최신'으로 기록 가능. Redis는 c4a51e5 `<` 가드로 차단, **DB 미차단**.
+- 현 fix 미커버: DB writer가 save-time(now())만 기록 → 거래 시각 역행 미구분. latest 쿼리 `timestamp DESC, id DESC`(`crud.py`).
+- 현재 완화: lifecycle ordering(죽은 세션 flush 후 새 세션 write)으로 *사실상* 방지 → robustness/defense-in-depth.
+- 설계: `source_rates`에 **신규 `exchange_ts` 컬럼(migration)** + insert 시 역행 거부. ⚠️ `crud.insert_source_rate_if_changed`는 **KRX 공유**(`krx_kis.py` 2곳) — 전역 수정 신중(opt-in param). `timestamp` 컬럼 의미 변경은 graph/cleanup 등 광범위 영향이라 **신규 컬럼이 안전**. 5 WS DB writer는 현재 timestamp 미전달 → plumbing 필요.
+
+**추천 순서**: ① → ② → ③ (서로 독립, 임의 순서 가능). **①② 먼저 묶으면** silent-data 재발 방지 + task-death 안전망을 migration 없이 가볍게 종료 (③은 migration + 이미 완화라 마지막).
+
+**참고**: fix commit `c4a51e5` / PR #1(merged, branch 삭제됨) / 진단 근거는 운영 metrics 로그(2026-06-03 캡처).
+
 ## 13. Long-term alert scaling roadmap (PR6 follow-up 2)
 
 PR6 + follow-up 1 (CRUD invalidation) 완료 후 미래 작업 방향 명시. 사용자 우려
