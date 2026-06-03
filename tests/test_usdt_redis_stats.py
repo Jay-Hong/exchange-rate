@@ -128,6 +128,7 @@ class TestUsdtRedisStatsSnapshot(unittest.TestCase):
             set(stats["per_source"]["upbit"].keys()),
             {
                 "direct_write_success", "direct_write_failure",
+                "direct_write_regression_skipped",
                 "redis_read_hit", "redis_read_miss",
                 "redis_read_parse_fail", "redis_read_error",
                 "last_direct_write_success_at", "last_redis_read_hit_at",
