@@ -482,6 +482,179 @@ def build_manifest(
 
 
 # ─────────────────────────────────────────────────────────────
+# Existing seed comparison (Step 4B 단위 3 — DB read-only 비교 + write target 산출)
+# ─────────────────────────────────────────────────────────────
+#
+# full manifest와 기존 KRX seed를 비교해 4-way 분류 (KRX_STEP4B_PLAN.md §6·§7):
+#   ① manifest only       → rows_to_write
+#   ② manifest + DB 일치   → matched_existing (skip write)
+#   ③ manifest + DB 충돌   → hard (기존 seed = ground truth, manifest 의심)
+#   ④ DB(window 안) only   → hard (manifest가 검증된 seed 미설명 = coverage 불완전)
+# write / upsert / transaction / main wiring 없음 (단위 4·5 영역).
+
+_COMPARE_LITERAL_KEYS = ("contract_code", "close_basis", "source_method", "ohlc_quality")
+_COMPARE_DECIMAL_KEYS = ("rate", "high", "low", "close")
+_COMPARE_NULL_KEYS = ("basis_date", "published_at")
+_COMPARE_METADATA_IDENTITY = ("contract_short_code", "contract_month", "contract_expiry_date")
+
+
+@dataclass
+class CompareResult:
+    """compare_manifest_with_existing 산출물.
+
+    rows_to_write: manifest only (DB에 없음) → 단위 5가 gap-only write.
+    matched_existing: manifest + DB 일치 (skip) → 단위 5 post-write full coverage 추적.
+    hard_issues: ③ 충돌 / ④ orphan / window 밖 existing (fail-close 대상).
+    warnings: metadata.open 누락·mismatch 등 surface.
+    """
+    rows_to_write: list[dict]
+    matched_existing: list[dict]
+    hard_issues: list[str]
+    warnings: list[str]
+
+
+def _norm_decimal(value):
+    """float(row_to_dict) / Decimal(manifest) / str → Decimal 정규화 (None 보존).
+
+    row_to_dict는 Numeric(14,6)을 float로 변환하므로, manifest Decimal과 비교하려면
+    양쪽을 str 경유 Decimal로 정규화한다 (1496.5 == 1496.500000, 문자열 비교 금지 §7).
+    """
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
+def _compare_existing_row(manifest_row: dict, existing_row: dict) -> list[str]:
+    """단일 (date_kst 동일) row 비교 → 충돌 issue list (빈 = 일치). open은 surface 별도."""
+    issues: list[str] = []
+    d = manifest_row["date_kst"]
+    for k in _COMPARE_LITERAL_KEYS:
+        if manifest_row.get(k) != existing_row.get(k):
+            issues.append(
+                f"date_kst={d} {k} mismatch: manifest={manifest_row.get(k)!r} db={existing_row.get(k)!r}"
+            )
+    for k in _COMPARE_DECIMAL_KEYS:
+        if _norm_decimal(manifest_row.get(k)) != _norm_decimal(existing_row.get(k)):
+            issues.append(
+                f"date_kst={d} {k} numeric mismatch: manifest={manifest_row.get(k)} db={existing_row.get(k)}"
+            )
+    for k in _COMPARE_NULL_KEYS:
+        if manifest_row.get(k) is not None or existing_row.get(k) is not None:
+            issues.append(
+                f"date_kst={d} {k} must be None: manifest={manifest_row.get(k)!r} db={existing_row.get(k)!r}"
+            )
+    m_meta = manifest_row.get("metadata_json") or {}
+    e_meta = existing_row.get("metadata_json") or {}
+    for k in _COMPARE_METADATA_IDENTITY:
+        mv, ev = m_meta.get(k), e_meta.get(k)
+        if mv is None or ev is None:
+            issues.append(f"date_kst={d} metadata.{k} 누락 (manifest={mv!r} db={ev!r}) — identity hard")
+        elif mv != ev:
+            issues.append(f"date_kst={d} metadata.{k} mismatch: manifest={mv!r} db={ev!r}")
+    return issues
+
+
+def _compare_open_warning(manifest_row: dict, existing_row: dict) -> list[str]:
+    """metadata.open 비교 (누락·mismatch 모두 surface — §7 open 약한 비교)."""
+    d = manifest_row["date_kst"]
+    m_open = (manifest_row.get("metadata_json") or {}).get("open")
+    e_open = (existing_row.get("metadata_json") or {}).get("open")
+    if m_open is None or e_open is None:
+        return [f"date_kst={d} metadata.open 누락 (surface): manifest={m_open!r} db={e_open!r}"]
+    if _norm_decimal(m_open) != _norm_decimal(e_open):
+        return [f"date_kst={d} metadata.open mismatch (surface): manifest={m_open} db={e_open}"]
+    return []
+
+
+def compare_manifest_with_existing(
+    manifest_rows: list[dict],
+    existing_rows: list[dict],
+    window_start: date,
+    window_end: date,
+) -> CompareResult:
+    """full manifest × 기존 KRX seed → 4-way 분류 (순수 비교, DB 의존 0).
+
+    existing_rows는 source=krx / asset=usd-krw-futures / date_kst ∈ window로 제한된
+    결과 전제 (query_existing_krx_rows). compare는 window를 defensive 재확인한다.
+    """
+    rows_to_write: list[dict] = []
+    matched_existing: list[dict] = []
+    hard_issues: list[str] = []
+    warnings: list[str] = []
+
+    # dict 색인 시 duplicate date 방어 (입력 전제 신뢰 X — Crash Early, 단위 2 contract_code 방어와 동일).
+    m_by_date: dict = {}
+    for r in manifest_rows:
+        d = r["date_kst"]
+        if d in m_by_date:
+            hard_issues.append(f"manifest duplicate date_kst={d} (입력 전제 위반 — defensive hard)")
+        m_by_date[d] = r
+    e_by_date: dict = {}
+    for r in existing_rows:
+        d = r["date_kst"]
+        if d in e_by_date:
+            hard_issues.append(f"existing duplicate date_kst={d} (DB unique 위반 의심 — defensive hard)")
+        e_by_date[d] = r
+
+    for d, m_row in m_by_date.items():
+        e_row = e_by_date.get(d)
+        if e_row is None:
+            rows_to_write.append(m_row)  # ① manifest only
+            continue
+        conflicts = _compare_existing_row(m_row, e_row)
+        warnings.extend(_compare_open_warning(m_row, e_row))
+        if conflicts:
+            hard_issues.extend(conflicts)  # ③ 충돌
+        else:
+            matched_existing.append(e_row)  # ② 일치 → skip
+
+    for d, e_row in e_by_date.items():
+        if not (window_start <= d <= window_end):  # query 제한 위반 방어 (Crash Early)
+            hard_issues.append(
+                f"existing date_kst={d} window [{window_start}, {window_end}] 밖 "
+                "— query 제한(source/asset/date_kst) 확인"
+            )
+            continue
+        if d not in m_by_date:  # ④ DB only within window → orphan hard
+            hard_issues.append(
+                f"date_kst={d} DB(window 안)에 존재하나 manifest에 없음 "
+                "— manifest coverage가 기존 seed 미설명 (orphan, hard)"
+            )
+
+    return CompareResult(rows_to_write, matched_existing, hard_issues, warnings)
+
+
+def query_existing_krx_rows(db, window_start: date, window_end: date) -> list[dict]:
+    """기존 KRX rows read-only 조회 (source/asset/date_kst 제한 — 비교 오염 방지).
+
+    DB read-only. row_to_dict(Numeric→float) 변환. write/transaction 없음.
+    """
+    # 함수 내 import — 무거운 ORM + 단위 1·2 순수 테스트 격리 (app.models 미로드)
+    from app.models import SourceDailyRate
+    from app.source_daily_rates import row_to_dict
+
+    rows = (
+        db.query(SourceDailyRate)
+        .filter(
+            SourceDailyRate.source == "krx",
+            SourceDailyRate.asset == "usd-krw-futures",
+            SourceDailyRate.date_kst >= window_start,
+            SourceDailyRate.date_kst <= window_end,
+        )
+        .order_by(SourceDailyRate.date_kst)
+        .all()
+    )
+    # row_to_dict는 date_kst를 v2 JSON용 isoformat str로 변환 → compare는 date object 필요.
+    # date_kst만 date로 복원 (window 비교 + dict key 매칭). Numeric→float 등 나머지는 재사용.
+    result = []
+    for r in rows:
+        rd = row_to_dict(r)
+        rd["date_kst"] = r.date_kst
+        result.append(rd)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
 # Fetch + Parse
 # ─────────────────────────────────────────────────────────────
 
