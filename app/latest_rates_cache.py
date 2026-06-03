@@ -60,11 +60,14 @@ class UsdtLatestWriteOutcome(Enum):
     - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
     - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
       Topic = change notification 역할이므로 동일 값/동일 bucket 재호출에 trigger 불필요.
+    - SKIPPED_REGRESSION: incoming exchange ts < stored seen_at → out-of-order write
+      차단 (reconnect snapshot/probe 경합 시 stale이 fresh 값을 덮지 않게). trigger 차단.
     - SET: Redis SET 성공 (cold-start GET miss 후 SET 포함). trigger 발사.
     """
 
     FAILED = "failed"
     SKIPPED = "skipped"
+    SKIPPED_REGRESSION = "skipped_regression"
     SET = "set"
 
 
@@ -359,6 +362,23 @@ def _get_sync_client() -> Optional[redis_sync.Redis]:
     return _sync_client
 
 
+# Regression skip warning throttle — counter는 매번, warning은 source별 이 간격마다 1회.
+_REGRESSION_WARN_THROTTLE_SEC = 60.0
+_last_regression_warn_at: Dict[str, float] = {}
+
+
+def _maybe_warn_regression(source: str, incoming: datetime, stored: datetime) -> None:
+    """역행 차단 warning을 source별 throttle (stale snapshot 반복 시 로그 폭주 회피)."""
+    now = time.monotonic()
+    if now - _last_regression_warn_at.get(source, 0.0) >= _REGRESSION_WARN_THROTTLE_SEC:
+        _last_regression_warn_at[source] = now
+        logger.warning(
+            "USDT Redis write regression skip — incoming seen_at(%s) < stored(%s) "
+            "source=%s (out-of-order write 차단, counter=direct_write_regression_skipped)",
+            incoming.isoformat(), stored.isoformat(), source,
+        )
+
+
 def set_latest_usdt_rate_from_sync_job(
     source: str,
     asset: str,
@@ -437,6 +457,15 @@ def set_latest_usdt_rate_from_sync_job(
             and state["seen_at"] == seen_at_floor
         ):
             return UsdtLatestWriteOutcome.SKIPPED
+
+        # 3.5) Regression guard — out-of-order write 차단 (reconnect snapshot/probe 경합).
+        # 더 오래된 exchange timestamp(seen_at_floor)가 더 최신 stored 값을 덮지 않게.
+        # < strict: 동일 5s bucket의 rate 갱신은 허용 (same rate+bucket은 위 coalesce가 skip).
+        # counter는 매번(관찰성), warning은 source별 throttle (stale snapshot 반복 시 로그 폭주).
+        if state is not None and seen_at_floor < state["seen_at"]:
+            usdt_redis_stats.record_direct_write_regression_skipped(source)
+            _maybe_warn_regression(source, seen_at_floor, state["seen_at"])
+            return UsdtLatestWriteOutcome.SKIPPED_REGRESSION
 
         # 4) rate_changed_at — same rate면 보존, 새 rate면 tick_ts (full precision)
         if state is not None and state["rate"] == rate_decimal:

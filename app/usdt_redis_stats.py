@@ -33,6 +33,7 @@ _KST = timezone(timedelta(hours=9))
 _SOURCE_COUNTER_FIELDS = (
     "direct_write_success",
     "direct_write_failure",
+    "direct_write_regression_skipped",
     "redis_read_hit",
     "redis_read_miss",
     "redis_read_parse_fail",
@@ -97,6 +98,17 @@ def record_direct_write_failure(source: str) -> None:
     with _lock:
         stats = _get_source_stats_locked(source)
         stats["direct_write_failure"] += 1
+
+
+def record_direct_write_regression_skipped(source: str) -> None:
+    """direct write 역행 차단 — incoming exchange ts < stored seen_at으로 SKIPPED_REGRESSION.
+
+    coalesce SKIPPED(정상 동일 rate/bucket)와 구분되는 out-of-order write 차단 신호.
+    counter는 매번 증가(관찰성), warning throttle은 호출 site(latest_rates_cache)에서.
+    """
+    with _lock:
+        stats = _get_source_stats_locked(source)
+        stats["direct_write_regression_skipped"] += 1
 
 
 def record_redis_read_hit(source: str) -> None:

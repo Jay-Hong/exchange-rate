@@ -177,6 +177,12 @@ STALE_AFTER_SEC = 360.0
 TICKER_FRESHNESS_WARNING_SEC = 300.0
 TICKER_FRESHNESS_DEGRADED_SEC = 600.0
 
+# Fix (silent-session reconnect) — no-first-tick guard: 새 session이 첫 valid USDT-KRW
+# tick을 이 시간 안에 못 받으면 (Primus heartbeat만 와도) silent-data session으로 보고
+# reconnect. 정상 SubscribeToTickers snapshot은 subscribe 후 ~0.1s 도착(실측) → 30s 보수적.
+# heartbeat는 mid-session stale(STALE_AFTER_SEC)에만 쓰고, no-data 판정엔 tick만 사용.
+FIRST_TICK_TIMEOUT_SEC = 30.0
+
 # G4 — Reconnect backoff sequence (Bithumb/Coinone/Korbit 동일).
 # Gopax rate limit 20 req/sec/IP에 비해 매우 여유 (1초 minimum 안전).
 RECONNECT_BACKOFF_SEQ = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
@@ -200,6 +206,15 @@ FALLBACK_PROBE_TIMEOUT_SEC = 10.0   # REST HTTP timeout (Bithumb 동일)
 # PR 2e — summary log emit cycle (Coinone PR 2d / Korbit PR 2a / Bithumb PR 2c / Upbit PR 2b 동일).
 # start() lifetime 동안 60s cycle로 metric INFO 1줄 emit. _run_one_session 영향 0.
 SUMMARY_LOG_INTERVAL_SEC = 60.0
+
+
+class _SilentSessionError(Exception):
+    """silent WS session (frame 정지인데 ConnectionClosed 미발생) 감지 시 reconnect
+    loop로 탈출시키는 내부 신호. start()의 `except Exception` 경로가 잡아 backoff +
+    재접속. reason: "stale"(tick·heartbeat 모두 silent > STALE_AFTER_SEC) 또는
+    "no_first_tick"(첫 valid USDT-KRW tick을 FIRST_TICK_TIMEOUT 안에 못 받음).
+    5/28 사고(stale 감지는 됐으나 no-op이라 영구 고착)의 직접 대응.
+    """
 
 
 class GopaxRedisWriter:
@@ -491,6 +506,11 @@ class GopaxRestFallbackController:
         # G6b — scheduled probe counter (Codex 권고).
         # in-flight/cooldown/no-loop skip 미증가, loop.create_task() 성공 시점에만 +1.
         self._scheduled_probe_count: int = 0
+        # Fix — backoff-region probe 전용 lifecycle (session-scoped probe와 분리).
+        # 독립 in-flight/cooldown: cancel(backoff 종료) 시 cooldown 미소비, session
+        # cleanup의 _pending_task cancel과 무관 (Codex lifecycle 분리 요구).
+        self._backoff_in_flight: bool = False
+        self._backoff_cooldown_until: float = 0.0
 
     @property
     def scheduled_probe_count(self) -> int:
@@ -599,6 +619,65 @@ class GopaxRestFallbackController:
         from app.crawlers.usdt_sources import fetch_gopax_usdt_tick
         return fetch_gopax_usdt_tick()
 
+    async def run_backoff_probe(self, reason: str) -> None:
+        """reconnect backoff 구간 best-effort probe — await 가능, cancel 안전, 독립 lifecycle.
+
+        session-scoped schedule_probe/_run_probe와 분리된 별도 in-flight/cooldown:
+            - cancel(backoff 종료) 시 cooldown 미소비 (REST 결과 없이 cooldown 먹기 방지).
+              실제 완료(success/timeout/error)에만 cooldown 적용 (Codex 정정).
+            - cancel은 to_thread underlying REST thread를 멈추지 않으나, fetch가
+              PER_SOURCE_TIMEOUT_SECONDS(2s) bound라 stray thread는 곧 종료 (Codex 검토).
+            - session cleanup의 _pending_task cancel과 무관 (독립 task, start()가 소유).
+            - 첫 *연결 시도*(reconnect loop 진입 직후 _run_one_session)는 probe 없이 즉시.
+              이후 매 실패 backoff 구간에서 호출(첫 1s backoff 포함)되며 backoff 종료 시 cancel.
+        """
+        now = time.time()
+        if self._backoff_in_flight or now < self._backoff_cooldown_until:
+            return
+        self._backoff_in_flight = True
+        completed = False
+        try:
+            tick = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_gopax_tick),
+                timeout=self._probe_timeout_sec,
+            )
+            completed = True
+            if tick is None:
+                logger.warning(
+                    "[usdt_ws.gopax.fallback] backoff probe None (REST/parse 실패, reason=%s)",
+                    reason,
+                )
+                return
+            # 기존 fanout 재사용 (Redis + DB + Alert). out-of-order는 Redis writer의
+            # regression guard(SKIPPED_REGRESSION)가 차단.
+            self._redis_writer.schedule(tick)
+            self._db_writer.schedule(tick)
+            self._alert_evaluator.schedule(AlertObservation(
+                source=tick["source"], asset=tick["asset"], rate=tick["rate"],
+                timestamp_ms=tick["timestamp_ms"], kind="rest_probe",
+            ))
+            logger.info(
+                "[usdt_ws.gopax.fallback] backoff probe success (rate=%s, ts_ms=%d, reason=%s)",
+                tick["rate"], tick["timestamp_ms"], reason,
+            )
+        except asyncio.CancelledError:
+            raise  # backoff 종료 cancel — cooldown 미소비 (다음 backoff probe 즉시 가능)
+        except asyncio.TimeoutError:
+            completed = True
+            logger.warning(
+                "[usdt_ws.gopax.fallback] backoff probe timeout (%.1fs, reason=%s)",
+                self._probe_timeout_sec, reason,
+            )
+        except Exception:
+            completed = True
+            logger.exception(
+                "[usdt_ws.gopax.fallback] backoff probe error (격리, reason=%s)", reason,
+            )
+        finally:
+            if completed:
+                self._backoff_cooldown_until = time.time() + self._cooldown_sec
+            self._backoff_in_flight = False
+
     async def close(self) -> None:
         """pending probe task cancel + await. WS session 종료 시 호출."""
         task = self._pending_task
@@ -640,6 +719,11 @@ class GopaxWsClient:
         self._connection_status: str = "normal"          # normal/reconnecting/stale
         self._ticker_freshness_status: str = "normal"    # normal/warning/degraded
         self._reconnect_attempt_count: int = 0
+        # Fix — backoff용 consecutive 카운터 (lifetime _reconnect_attempt_count와 분리).
+        # exception마다 +1, 첫 valid target tick에 0 리셋(_handle_message).
+        self._consecutive_reconnect_attempts: int = 0
+        # Fix — 현재 session 시작 시각 (no-first-tick guard 기준, _run_one_session에서 set).
+        self._session_started_at: float = 0.0
         self._status_transition_count: dict[str, int] = {
             "connection_normal": 0,
             "connection_reconnecting": 0,
@@ -843,6 +927,9 @@ class GopaxWsClient:
             return None
         # G4 — liveness observe (last_activity_at = max(tick, heartbeat))
         self._liveness.observe_tick(time.time())
+        # Fix — 첫 valid target tick = session 건강 신호 → backoff attempt 리셋
+        # (heartbeat 아니라 valid USDT-KRW tick 기준 — Codex). 매 tick idempotent.
+        self._consecutive_reconnect_attempts = 0
         if not self._first_tick_logged:
             logger.info("[usdt_ws.gopax] first tick", extra=tick)
             self._first_tick_logged = True
@@ -949,6 +1036,7 @@ class GopaxWsClient:
             self._ws = ws
             # G4 — active session 시작: liveness reset + connection_status normal.
             self._liveness.reset_active_session()
+            self._session_started_at = time.time()  # Fix — no-first-tick guard 기준
             logger.info("[usdt_ws.gopax] connected url=%s", GOPAX_WS_URL)
             payload = self._build_subscribe_payload()
             await ws.send(json.dumps(payload))
@@ -961,11 +1049,40 @@ class GopaxWsClient:
             try:
                 while not self._stop_event.is_set():
                     now = time.time()
-                    # G4 — stale check: last_activity_at (max tick/heartbeat) 기준.
-                    if self._connection_status != "stale" and self._liveness.is_stale(now, STALE_AFTER_SEC):
+                    # Fix — no-first-tick guard: 첫 valid USDT-KRW tick을 FIRST_TICK_TIMEOUT
+                    # 안에 못 받으면 (Primus heartbeat만 와도 last_tick_at은 None) silent-data
+                    # session → dedicated exception으로 reconnect. heartbeat-only 세션은
+                    # is_stale가 not-stale로 두므로 별도 guard 필요 (Codex).
+                    if (
+                        self._liveness.last_tick_at is None
+                        and now - self._session_started_at > FIRST_TICK_TIMEOUT_SEC
+                    ):
                         self._set_connection_status("stale")
-                    elif self._connection_status == "stale" and not self._liveness.is_stale(now, STALE_AFTER_SEC):
-                        self._set_connection_status("normal")
+                        hb_age = (
+                            f"{now - self._liveness.last_heartbeat_at:.1f}s"
+                            if self._liveness.last_heartbeat_at is not None else "none"
+                        )
+                        logger.warning(
+                            "[usdt_ws.gopax] no valid USDT-KRW tick within %.0fs of session "
+                            "start (heartbeat_age=%s) — reconnect",
+                            FIRST_TICK_TIMEOUT_SEC, hb_age,
+                        )
+                        raise _SilentSessionError("no_first_tick")
+                    # Fix — mid-session stale: tick·heartbeat 모두 silent > STALE_AFTER_SEC →
+                    # silent WS session (ConnectionClosed 미발생) → dedicated exception으로
+                    # reconnect. 기존엔 status 라벨만 바꾸는 no-op이라 영구 고착(=5/28 사고).
+                    if self._liveness.is_stale(now, STALE_AFTER_SEC):
+                        self._set_connection_status("stale")
+                        tick_age = (
+                            f"{now - self._liveness.last_tick_at:.1f}s"
+                            if self._liveness.last_tick_at is not None else "none"
+                        )
+                        logger.warning(
+                            "[usdt_ws.gopax] connection stale (no tick/heartbeat > %.0fs, "
+                            "last_tick_age=%s) — reconnect",
+                            STALE_AFTER_SEC, tick_age,
+                        )
+                        raise _SilentSessionError("stale")
 
                     # G4 — ticker freshness 전이 (tick silence age 기반).
                     # G6b: degraded → fallback_controller.schedule_probe (위 _set_ticker_freshness_status에서 처리).
@@ -1100,42 +1217,53 @@ class GopaxWsClient:
         # PR 2e — start-level summary log task (Coinone PR 2d / Korbit/Upbit/Bithumb 패턴 mirror).
         # _run_one_session 영향 0 — start lifetime 동안만 60s cycle metric INFO emit.
         summary_task = asyncio.create_task(self._summary_log_loop())
-        attempt = 0
+        # Fix — backoff는 instance _consecutive_reconnect_attempts 사용 (첫 valid tick에
+        # _handle_message가 0 리셋 → 성공 복구 후 backoff 재증가 방지). lifetime
+        # _reconnect_attempt_count는 metric 누적용 별도.
+        self._consecutive_reconnect_attempts = 0
         try:
             while not self._stop_event.is_set():
                 try:
                     await self._run_one_session()
                     if self._stop_event.is_set():
                         break
-                    attempt = 0  # 정상 종료 (rare — recv loop가 stop_event로 빠진 case)
+                    self._consecutive_reconnect_attempts = 0  # 정상 종료 (rare — stop_event)
                 except asyncio.CancelledError:
                     raise
                 except ConnectionClosed as exc:
                     if self._stop_event.is_set():
                         break
                     self._set_connection_status("reconnecting")
-                    attempt += 1
+                    self._consecutive_reconnect_attempts += 1
                     self._reconnect_attempt_count += 1
-                    backoff = self._compute_backoff(attempt)
+                    backoff = self._compute_backoff(self._consecutive_reconnect_attempts)
                     logger.warning(
                         "[usdt_ws.gopax] connection closed (attempt %d): %s — backoff %.1fs",
-                        attempt, exc, backoff,
+                        self._consecutive_reconnect_attempts, exc, backoff,
                     )
                 except Exception as exc:
                     if self._stop_event.is_set():
                         break
                     self._set_connection_status("reconnecting")
-                    attempt += 1
+                    self._consecutive_reconnect_attempts += 1
                     self._reconnect_attempt_count += 1
-                    backoff = self._compute_backoff(attempt)
+                    backoff = self._compute_backoff(self._consecutive_reconnect_attempts)
                     logger.warning(
                         "[usdt_ws.gopax] session error (attempt %d): %s: %s — backoff %.1fs",
-                        attempt, type(exc).__name__, exc, backoff,
+                        self._consecutive_reconnect_attempts, type(exc).__name__, exc, backoff,
                     )
                 else:
                     continue  # 정상 종료 후 즉시 다음 iteration (no backoff)
 
-                # backoff sleep — stop_event 즉시 반응.
+                # backoff sleep — stop_event 즉시 반응. 첫 *연결 시도*(loop 진입 직후
+                # _run_one_session)는 probe 없이 즉시 실행됐고, 여기는 그 시도가 실패한 뒤
+                # 구간이다. backoff 동안 best-effort REST probe를 *병렬* 실행(첫 1s backoff
+                # 포함)해 공백 최신성 보강하되, backoff 종료 시 cancel → 다음 reconnect 지연
+                # X (cancel은 cooldown 미소비). 짧은 backoff(1~2s)에선 probe가 완료 전 cancel
+                # 되어 사실상 생략되고, 긴 backoff(8~30s, REST 2s bound)에서만 실효.
+                probe_task = asyncio.create_task(
+                    self._fallback_controller.run_backoff_probe("reconnect_backoff")
+                )
                 try:
                     await asyncio.wait_for(
                         self._stop_event.wait(), timeout=backoff,
@@ -1143,6 +1271,15 @@ class GopaxWsClient:
                     break  # stop_event 도착
                 except asyncio.TimeoutError:
                     pass  # backoff 완료, 다음 iteration
+                finally:
+                    if not probe_task.done():
+                        probe_task.cancel()
+                    try:
+                        await probe_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.exception("[usdt_ws.gopax] backoff probe cleanup 실패")
         finally:
             # PR 2e — summary_task cancel/await (reconnect loop 예외와 독립 try/except).
             # Coinone PR 2d / Korbit/Bithumb start() finally cancel 패턴 mirror.

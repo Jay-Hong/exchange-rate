@@ -1585,6 +1585,7 @@ async def get_usdt_redis_stats():
           "per_source": {
             "<source>": {
               "direct_write_success": int, "direct_write_failure": int,
+              "direct_write_regression_skipped": int,
               "redis_read_hit": int, "redis_read_miss": int,
               "redis_read_parse_fail": int, "redis_read_error": int,
               "last_direct_write_success_at": ISO 8601 KST | None,
