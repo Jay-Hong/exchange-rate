@@ -390,3 +390,86 @@ def get_krx_cf_session_rollup(db: Session, date_kst: date) -> CfSessionRollup:
         high=max(rates), low=min(rates), point_count=len(rows),
         first_ts=rows[0].timestamp, last_ts=rows[-1].timestamp,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# KRX CF append row builder (ADR-034 §9 — KRX daily append Unit 2)
+# ─────────────────────────────────────────────────────────────
+
+_KRX_CF_CLOSE_BASIS = "krx_cf_close_1545"
+_KRX_CF_SOURCE_METHOD = "close_finalizer"
+_KRX_TICK = Decimal("0.1")  # KRX 미국달러선물 호가 단위
+
+
+def _quantize_krx(value) -> Decimal:
+    """float/Decimal → KRX 0.1 tick Decimal. float은 Decimal(str(v)) 경유 (정밀도 artifact 회피)."""
+    return Decimal(str(value)).quantize(_KRX_TICK)
+
+
+def _utc_naive_to_kst_iso(ts: Optional[datetime]) -> Optional[str]:
+    """source_rates UTC naive datetime → KST isoformat (None 보존)."""
+    if ts is None:
+        return None
+    return ts.replace(tzinfo=timezone.utc).astimezone(_KST_TZ).isoformat()
+
+
+def build_krx_cf_append_row(
+    date_kst: date, close, rollup: CfSessionRollup, contract_code: str
+) -> dict:
+    """KRX CF close finalizer daily-append row builder (pure — logging/side-effect 없음).
+
+    close = finalizer authoritative close (Unit 2 주입). high/low:
+      - point_count >= 1 → rollup high/low를 close까지 clamp (low<=close<=high invariant)
+      - point_count == 0 → close_only (high=low=close)
+    clamp 발생 시 metadata_json에 방향/pre-clamp 값 영속 (Unit 4 hook이 로그/event — builder는 미로그).
+    Decimal quantize(0.1), rate == close invariant.
+
+    Returns: source_daily_rates upsert용 row dict (rate/high/low/close = Decimal).
+    """
+    if close is None:
+        raise ValueError("close(finalizer authoritative)는 필수 — None 불가")
+    if not contract_code:
+        raise ValueError("contract_code는 필수 (KRX front contract)")
+
+    close_d = _quantize_krx(close)
+
+    metadata: dict = {
+        "cf_session_point_count": rollup.point_count,
+        "cf_session_first_ts": _utc_naive_to_kst_iso(rollup.first_ts),
+        "cf_session_last_ts": _utc_naive_to_kst_iso(rollup.last_ts),
+    }
+
+    if rollup.point_count == 0:
+        ohlc_quality = "close_only"
+        high_d = low_d = close_d
+    else:
+        if rollup.high is None or rollup.low is None:
+            raise ValueError("rollup high/low는 point_count > 0일 때 필수")
+        ohlc_quality = "observed_rollup"
+        rollup_high_d = _quantize_krx(rollup.high)
+        rollup_low_d = _quantize_krx(rollup.low)
+        high_d = max(rollup_high_d, close_d)
+        low_d = min(rollup_low_d, close_d)
+        if close_d > rollup_high_d or close_d < rollup_low_d:
+            metadata["close_outside_rollup"] = True
+            metadata["close_above_rollup_high"] = bool(close_d > rollup_high_d)
+            metadata["close_below_rollup_low"] = bool(close_d < rollup_low_d)
+            metadata["rollup_high_before_clamp"] = float(rollup_high_d)
+            metadata["rollup_low_before_clamp"] = float(rollup_low_d)
+
+    return {
+        "source": _KRX_SOURCE,
+        "asset": _KRX_ASSET,
+        "date_kst": date_kst,
+        "rate": close_d,
+        "high": high_d,
+        "low": low_d,
+        "close": close_d,
+        "ohlc_quality": ohlc_quality,
+        "close_basis": _KRX_CF_CLOSE_BASIS,
+        "source_method": _KRX_CF_SOURCE_METHOD,
+        "contract_code": contract_code,
+        "basis_date": None,
+        "published_at": None,
+        "metadata_json": metadata,
+    }
