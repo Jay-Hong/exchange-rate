@@ -18,7 +18,8 @@ Key 정책 (ADR-034):
 """
 
 # 표준 라이브러리
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Optional
 
@@ -29,7 +30,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
-from app.models import SourceDailyRate
+from app.models import SourceDailyRate, SourceRate
 
 
 # ─────────────────────────────────────────────────────────────
@@ -327,3 +328,65 @@ def find_rate_close_drift(
     if asset is not None:
         query = query.filter(SourceDailyRate.asset == asset)
     return query.order_by(SourceDailyRate.date_kst.desc()).all()
+
+
+# ─────────────────────────────────────────────────────────────
+# KRX CF 정규장 세션 rollup (ADR-034 §9 — KRX daily append Unit 1)
+# ─────────────────────────────────────────────────────────────
+
+# CF 정규장 세션 window (KST) — high/low rollup 범위 (DECISIONS §9 / line 4419)
+_KST_TZ = timezone(timedelta(hours=9))
+_KRX_SOURCE = "krx"
+_KRX_ASSET = "usd-krw-futures"
+_CF_SESSION_START = time(8, 30, 0)
+_CF_SESSION_END = time(15, 45, 0)
+
+
+@dataclass(frozen=True)
+class CfSessionRollup:
+    """KRX CF 정규장 세션 source_rates rollup 결과 (high/low + completeness 진단).
+
+    **close 미포함** — finalizer authoritative close를 Unit 2 row builder에서 주입.
+    point_count=0이면 empty(세션 tick 0건) — caller가 completeness gate(close_only/fail-close) 판정.
+    first_ts/last_ts는 source_rates 저장 형식(UTC naive).
+    """
+    high: Optional[float]
+    low: Optional[float]
+    point_count: int
+    first_ts: Optional[datetime]
+    last_ts: Optional[datetime]
+
+
+def get_krx_cf_session_rollup(db: Session, date_kst: date) -> CfSessionRollup:
+    """date_kst의 KRX CF 정규장(KST 08:30:00~15:45:00) source_rates rollup → high/low + 진단.
+
+    source_rates.timestamp는 UTC naive 저장 → KST CF window를 UTC naive 경계로 변환해 조회.
+    high=max(rate) / low=min(rate). **close 미포함**(finalizer authoritative 주입, Unit 2).
+    empty(세션 tick 0건)면 point_count=0 + high/low/ts=None — caller가 completeness gate 판정.
+
+    경계: KST 08:30:00 <= ts <= 15:45:00 (inclusive). CM 야간 세션 tick은 이 KST window 밖이라 자연 제외.
+    """
+    start_utc = datetime.combine(date_kst, _CF_SESSION_START, tzinfo=_KST_TZ).astimezone(
+        timezone.utc).replace(tzinfo=None)
+    end_utc = datetime.combine(date_kst, _CF_SESSION_END, tzinfo=_KST_TZ).astimezone(
+        timezone.utc).replace(tzinfo=None)
+
+    rows = (
+        db.query(SourceRate.rate, SourceRate.timestamp)
+        .filter(
+            SourceRate.source == _KRX_SOURCE,
+            SourceRate.asset == _KRX_ASSET,
+            SourceRate.timestamp >= start_utc,
+            SourceRate.timestamp <= end_utc,
+        )
+        .order_by(SourceRate.timestamp.asc(), SourceRate.id.asc())
+        .all()
+    )
+    if not rows:
+        return CfSessionRollup(high=None, low=None, point_count=0,
+                               first_ts=None, last_ts=None)
+    rates = [r.rate for r in rows]
+    return CfSessionRollup(
+        high=max(rates), low=min(rates), point_count=len(rows),
+        first_ts=rows[0].timestamp, last_ts=rows[-1].timestamp,
+    )
