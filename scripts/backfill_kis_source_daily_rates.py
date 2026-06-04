@@ -728,6 +728,42 @@ def _make_fetch_fn(token: str, app_key: str, app_secret: str):
     return fetch_fn
 
 
+def _emit_compare_and_gate(manifest_rows: list[dict], window_start: date, window_end: date, db) -> int:
+    """manifest rows × 기존 KRX seed compare 출력 + 게이트 (KIS·KRX dry-run 공유).
+
+    query_existing_krx_rows(source=krx)는 KIS·KRX manifest 모두 동일 대상 → 단일화로
+    PASS_WITH_TRANSITIONAL 게이트 정책이 한 곳에만 존재(drift 차단). 호출자(run_*_range_dry_run)는
+    manifest hard 없을 때만 진입. 출력 순서는 기존 KIS 로그와 동일(운영 diff 0).
+    return: exit code (compare hard → 1 / else 0). DB write 0 — query SELECT만.
+    """
+    existing = query_existing_krx_rows(db, window_start, window_end)
+    compare = compare_manifest_with_existing(manifest_rows, existing, window_start, window_end)
+    print("COMPARE_STATUS=ran")
+    print(f"EXISTING_ROW_COUNT={len(existing)}")
+    print(f"ROWS_TO_WRITE_COUNT={len(compare.rows_to_write)}")
+    print(f"MATCHED_EXISTING_COUNT={len(compare.matched_existing)}")  # exact-only (source_method 동일)
+    print(f"TRANSITIONAL_SOURCE_METHOD_MATCH_COUNT={len(compare.transitional_source_method_matches)}")
+    print(f"COMPARE_HARD_COUNT={len(compare.hard_issues)}")
+    print(
+        "ROWS_TO_WRITE_DATES="
+        + json.dumps([r["date_kst"].isoformat() for r in compare.rows_to_write])
+    )
+    for w in compare.warnings:
+        print(f"  [compare_warning] {w}")
+    for h in compare.hard_issues:
+        print(f"  [COMPARE_HARD] {h}")
+
+    if compare.hard_issues:
+        print("RANGE_DRY_RUN_RESULT=FAIL")
+        return 1
+    if compare.transitional_source_method_matches:
+        # hard 0이지만 provenance 정리(kis→krx migration) 대기 — silent PASS로 묻지 않음.
+        print("RANGE_DRY_RUN_RESULT=PASS_WITH_TRANSITIONAL")
+        return 0
+    print("RANGE_DRY_RUN_RESULT=PASS")
+    return 0
+
+
 def run_range_dry_run(window_start: date, window_end: date, fetch_fn, db) -> int:
     """write-intended dry-run 게이트 (Step 4B 단위 5). return: exit code (hard 있으면 1).
 
@@ -766,32 +802,7 @@ def run_range_dry_run(window_start: date, window_end: date, fetch_fn, db) -> int
         print("RANGE_DRY_RUN_RESULT=FAIL")
         return 1
 
-    existing = query_existing_krx_rows(db, window_start, window_end)
-    compare = compare_manifest_with_existing(manifest.rows, existing, window_start, window_end)
-    print("COMPARE_STATUS=ran")
-    print(f"EXISTING_ROW_COUNT={len(existing)}")
-    print(f"ROWS_TO_WRITE_COUNT={len(compare.rows_to_write)}")
-    print(f"MATCHED_EXISTING_COUNT={len(compare.matched_existing)}")  # exact-only (source_method 동일)
-    print(f"TRANSITIONAL_SOURCE_METHOD_MATCH_COUNT={len(compare.transitional_source_method_matches)}")
-    print(f"COMPARE_HARD_COUNT={len(compare.hard_issues)}")
-    print(
-        "ROWS_TO_WRITE_DATES="
-        + json.dumps([r["date_kst"].isoformat() for r in compare.rows_to_write])
-    )
-    for w in compare.warnings:
-        print(f"  [compare_warning] {w}")
-    for h in compare.hard_issues:
-        print(f"  [COMPARE_HARD] {h}")
-
-    if compare.hard_issues:
-        print("RANGE_DRY_RUN_RESULT=FAIL")
-        return 1
-    if compare.transitional_source_method_matches:
-        # hard 0이지만 provenance 정리(kis→krx migration) 대기 — silent PASS로 묻지 않음.
-        print("RANGE_DRY_RUN_RESULT=PASS_WITH_TRANSITIONAL")
-        return 0
-    print("RANGE_DRY_RUN_RESULT=PASS")
-    return 0
+    return _emit_compare_and_gate(manifest.rows, window_start, window_end, db)
 
 
 def _resolve_range_dry_run_window(args):

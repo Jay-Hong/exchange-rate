@@ -123,6 +123,18 @@ class TestBuildKrxManifest(unittest.TestCase):
         self.assertTrue(any("변환 실패(coverage)" in h for h in res.hard_issues))
         self.assertNotIn(date(2026, 6, 11), _day_rows(res.rows))
 
+    def test_malformed_decimal_hard(self):
+        # CLS 비어있진 않으나 숫자 아님("abc") → _parse_krx_decimal InvalidOperation → coverage hard
+        # (InvalidOperation은 ValueError 서브클래스 아님 — except 누락 시 propagate; 회귀 잠금)
+        ws, we = date(2026, 6, 8), date(2026, 6, 12)
+        days = [date(2026, 6, d) for d in (8, 9, 10, 11, 12)]
+        mapping = {d: [_raw(_YMD(d))] for d in days}
+        mapping[date(2026, 6, 9)] = [_raw("20260609", cls="abc")]  # 숫자 파싱 불가
+        fetch = _Fetch(mapping)
+        res = K.build_krx_manifest(_SEQ, ws, we, fetch)
+        self.assertTrue(any("변환 실패(coverage)" in h for h in res.hard_issues))
+        self.assertNotIn(date(2026, 6, 9), _day_rows(res.rows))
+
     def test_boundary_expiry_excluded(self):
         # 만기일(06-15)에 row가 와도 seg_end 제외라 미호출·미포함
         ws, we = date(2026, 6, 8), date(2026, 6, 16)

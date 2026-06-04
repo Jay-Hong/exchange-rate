@@ -4,15 +4,17 @@
 KRX_STEP4B_PLAN.md §0 / DECISIONS.md ADR-033 Amendment 2 Step 4B 정정.
 KIS year-series 한계(A755xx=2025 미조회) → KRX 공식 OPEN API date-based로 전환.
 
-이 모듈 (Step 4B — KRX parser + filter + 변환 + date-based manifest builder, 순수·mock 테스트):
+이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run, 순수·mock 테스트):
   - parse_krx_fut_response: 응답 → OutBlock_1 rows
   - select_usd_front_month_row: 그날 selected front-month(미국달러 F {YYYYMM} 정규 주간) 1개
   - krx_row_to_source_daily: 선택 row → source_daily_rates dict (source_method=krx_openapi_daily)
   - build_krx_manifest: weekday-only date loop + BAS_DD==요청일 가드 → manifest (date-based)
+  - run_krx_range_dry_run: sequence + build_krx_manifest + _emit_compare_and_gate(KIS 공유) 게이트 (DB read-only)
 
 다음 단위:
-  - range dry-run wiring (build_contract_sequence + fetch_fn(date) + build_krx_manifest + compare_manifest_with_existing)
-  - 기존 25 KIS rows 전수 transitional match 확인 (PASS_WITH_TRANSITIONAL 게이트)
+  - 실제 fut_bydd_trd HTTP helper (fetch_krx_fut_bydd_trd + make_krx_fetch_fn, AUTH_KEY env) — 별도 sub-step
+  - main/CLI wiring (window 산정 + production read-only 가드) → 운영 dry-run 별도 GO
+  - 전수 transitional 확인 후 migration/reingest (별도 GO)
 
 endpoint (참고, 키는 코드/문서 미기재):
   GET https://data-dbg.krx.co.kr/svc/apis/drv/fut_bydd_trd?basDd=YYYYMMDD  (헤더 AUTH_KEY)
@@ -20,10 +22,11 @@ endpoint (참고, 키는 코드/문서 미기재):
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 # Row filter 상수 (KRX_STEP4B_PLAN §0.3)
 PROD_NM_USD = "미국달러 선물"
@@ -254,7 +257,7 @@ def build_krx_manifest(sequence, window_start: date, window_end: date, fetch_fn)
                 continue
             try:
                 row = krx_row_to_source_daily(selected, contract)
-            except ValueError as e:  # CLS/high/low 빈 → source_ohlc 불완전 = coverage hard
+            except (ValueError, InvalidOperation) as e:  # CLS/high/low 빈(ValueError) 또는 숫자 파싱 불가(InvalidOperation) → coverage hard
                 hard_issues.append(f"date={d} 변환 실패(coverage): {e}")
                 d += timedelta(days=1)
                 continue
@@ -278,3 +281,66 @@ def build_krx_manifest(sequence, window_start: date, window_end: date, fetch_fn)
         hard_issues.append("manifest 0 rows (window 전체 미수집 — coverage hard)")
 
     return KrxManifestResult(rows, hard_issues, warnings, missing_dates, boundary_samples)
+
+
+# ─────────────────────────────────────────────────────────────
+# Range dry-run wiring (Step 4B 단위 — KRX 전용 게이트, DB read-only)
+# ─────────────────────────────────────────────────────────────
+#
+# KIS run_range_dry_run과 분리: fetch_fn(date) + build_krx_manifest + cap 개념 없음 + missing_dates sentinel.
+# compare 출력+게이트(PASS_WITH_TRANSITIONAL)는 _emit_compare_and_gate를 공유 (정책 단일화, drift 차단).
+# manifest hard(변환실패/0rows/dup/select 이상) → compare skip + FAIL (오염 manifest 비교 회피, fail-close).
+# DB write 0 — compare의 query SELECT만. fetch_fn 주입(이번 단위 mock; 실제 fut_bydd_trd HTTP는 다음 sub-step).
+
+
+def run_krx_range_dry_run(window_start: date, window_end: date, fetch_fn, db) -> int:
+    """KRX date-based write-intended dry-run 게이트. return: exit code (hard 있으면 1).
+
+    fetch_fn(d: date) -> list[raw OutBlock_1 rows] (주입 — mock/실제 HTTP).
+    출력 sentinel: WINDOW / MANIFEST_ROW_COUNT / MANIFEST_DATE_MIN·MAX(rows 0이면 None) /
+      MANIFEST_HARD_COUNT / MISSING_DATES_COUNT / MISSING_DATES_JSON / BOUNDARY_SAMPLES_COUNT
+      → (manifest hard면 skip+FAIL) → _emit_compare_and_gate (EXISTING/ROWS_TO_WRITE/MATCHED(exact)/
+      TRANSITIONAL/COMPARE_HARD + PASS|PASS_WITH_TRANSITIONAL|FAIL).
+    """
+    # 함수-레벨 import — parser 순수 테스트 격리 + compare/sequence는 KIS 스크립트 공유 (재사용).
+    import requests  # fetch_fn 예외 분류 (실제 HTTP sub-step과 공유)
+    from backfill_kis_source_daily_rates import build_contract_sequence, _emit_compare_and_gate
+
+    print(f"WINDOW_START={window_start.isoformat()}")
+    print(f"WINDOW_END={window_end.isoformat()}")
+    sequence = build_contract_sequence(window_start, window_end)
+    print(f"SEQUENCE_CONTRACTS={json.dumps([c.short_code for c, _, _ in sequence])}")
+    for c, ss, se in sequence:
+        print(f"  segment {c.short_code}: [{ss.isoformat()}, {se.isoformat()})")
+
+    try:
+        manifest = build_krx_manifest(sequence, window_start, window_end, fetch_fn)
+    except (requests.RequestException, RuntimeError, ValueError, InvalidOperation) as e:
+        print(f"FETCH_ERROR={type(e).__name__}: {e}")
+        print("RANGE_DRY_RUN_RESULT=FAIL")
+        return 1
+
+    dates = [r["date_kst"] for r in manifest.rows]
+    print(f"MANIFEST_ROW_COUNT={len(manifest.rows)}")
+    print(f"MANIFEST_DATE_MIN={min(dates).isoformat() if dates else None}")  # rows 0이면 None (Crash 방지)
+    print(f"MANIFEST_DATE_MAX={max(dates).isoformat() if dates else None}")
+    print(f"MANIFEST_HARD_COUNT={len(manifest.hard_issues)}")
+    print(f"WARNINGS_COUNT={len(manifest.warnings)}")
+    print(f"MISSING_DATES_COUNT={len(manifest.missing_dates)}")
+    print(f"BOUNDARY_SAMPLES_COUNT={len(manifest.boundary_samples)}")
+    print(
+        "MISSING_DATES_JSON="
+        + json.dumps([{"date": m["date"].isoformat(), "reason": m["reason"]}
+                      for m in manifest.missing_dates])
+    )
+    for w in manifest.warnings:
+        print(f"  [warning] {w}")
+    for h in manifest.hard_issues:
+        print(f"  [HARD] {h}")
+
+    if manifest.hard_issues:
+        print("COMPARE_STATUS=skipped_due_to_manifest_hard")
+        print("RANGE_DRY_RUN_RESULT=FAIL")
+        return 1
+
+    return _emit_compare_and_gate(manifest.rows, window_start, window_end, db)
