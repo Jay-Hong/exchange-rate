@@ -4384,7 +4384,7 @@ class SourceDailyRate(Base):
 - `close_finalizer`: KRX CF close finalizer 결과
 - `bithumb_candlestick_api`: Bithumb 공식 24h candle API (backfill + daily refresh append **동일 방법** — Amendment 2026-06-01, 구 `bithumb_candlestick_backfill` rename. source_method=획득 방법이므로 backfill/daily 구분은 timing이지 방법 아님)
 - `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill (**Step 4B에서 KIS year-series 한계로 superseded** — KRX OpenAPI 전환, [KRX_STEP4B_PLAN.md §0](KRX_STEP4B_PLAN.md))
-- `krx_openapi_daily`: **KRX 공식 OPEN API `fut_bydd_trd`(선물 일별매매정보, 주식선물外) date-based 적재** (Step 4B source 전환, 정규장 종가 `TDD_CLSPRC`. KIS와 동일 KRX 원천이나 획득 방법 분리). 기존 `kis_daily_backfill` 25 rows와는 **transitional match**(값/contract/close_basis/ohlc_quality/metadata 전부 일치 시 source_method 차이만 허용 + warning/count surface) — dry-run 전수 일치 확인 후 migration 별도 GO.
+- `krx_openapi_daily`: **KRX 공식 OPEN API `fut_bydd_trd`(선물 일별매매정보, 주식선물外) date-based 적재** (Step 4B source 전환, 정규장 종가 `TDD_CLSPRC`. KIS와 동일 KRX 원천이나 획득 방법 분리). 기존 `kis_daily_backfill` 25 rows와는 **transitional match**(값/contract/close_basis/ohlc_quality/metadata 전부 일치 시 source_method 차이만 허용 + warning/count surface) — dry-run 전수 일치 확인 후 별도 migration GO를 거치도록 설계(당시 적용한 안전 절차). **→ migration 완료 (2026-06-04): 25 rows 전부 `krx_openapi_daily` (§8 land anchor 참조).**
 
 **`ohlc_quality` enum 3 values** (잠정 명칭, Open):
 
@@ -4430,7 +4430,7 @@ class SourceDailyRate(Base):
 **Proposed** (Phase 2d 구현 시):
 
 - **Bithumb backfill**: `api.bithumb.com/public/candlestick/USDT_KRW/24h` 호출 → 902일 일괄 적재
-- **KRX backfill**: ~~KIS `inquire-daily-fuopchartprice` + A75YMM contract chain~~ → **Step 4B(2026-06-04)에서 KRX 공식 OPEN API `fut_bydd_trd` date-based로 전환** (KIS year-series 한계 — A755xx(2025) 미조회. [KRX_STEP4B_PLAN.md §0](KRX_STEP4B_PLAN.md) + ADR-033 Amendment 2 Step 4B 정정). Date-to-contract mapping(만기일=next)은 유지 (`build_contract_sequence`/`_resolve_front_month` 재사용 + KRX `contract_month` join). KIS는 verification/fallback.
+- **KRX backfill**: ~~KIS `inquire-daily-fuopchartprice` + A75YMM contract chain~~ → **Step 4B(2026-06-04)에서 KRX 공식 OPEN API `fut_bydd_trd` date-based로 전환** (KIS year-series 한계 — A755xx(2025) 미조회. [KRX_STEP4B_PLAN.md §0](KRX_STEP4B_PLAN.md) + ADR-033 Amendment 2 Step 4B 정정). Date-to-contract mapping(만기일=next)은 유지 (`build_contract_sequence`/`_resolve_front_month` 재사용 + KRX `contract_month` join). KIS는 verification/fallback. **전환 land 완료 (2026-06-04)**: 구현 8 단위(`c2caa50`..`1103ecf` 구간 [feat 8 + enum docs `c38196b` = 9 commits] — parser→변환→compare transitional→manifest builder[weekday loop + BAS_DD==요청일 stale 가드]→range dry-run→HTTP helper→main CLI→migration writer) + 운영 dry-run GO(scoped `[2026-04-20, 2026-05-27]`, TRANSITIONAL=25 / COMPARE_HARD=0 / PASS_WITH_TRANSITIONAL) + production migration(snapshot `fxi-pre-krx-source-method-2026-06-04`, 25 rows `kis_daily_backfill`→`krx_openapi_daily` in-place **source_method only** surgical relabel, drift 0, boundary 2026-05-18=`1496.500000`/A75606 보존, Claude+Codex 이중 독립 검증). source_daily_rates KRX 25 rows 전부 `krx_openapi_daily`. migration writer = `scripts/migrate_krx_source_method.py` (DB-only, scoped window, `migrate_bithumb_source_method` 패턴).
 - **Hana backfill**: Hana official endpoint historical row → 부족한 과거 구간만
 - 모든 backfill = **idempotent** (재실행 시 같은 결과, §10 참조)
 - Initial backfill 1회 + Gap repair 호출 시 사용
