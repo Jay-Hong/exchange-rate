@@ -4,16 +4,16 @@
 KRX_STEP4B_PLAN.md §0 / DECISIONS.md ADR-033 Amendment 2 Step 4B 정정.
 KIS year-series 한계(A755xx=2025 미조회) → KRX 공식 OPEN API date-based로 전환.
 
-이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run, 순수·mock 테스트):
+이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run + HTTP helper, mock 테스트):
   - parse_krx_fut_response: 응답 → OutBlock_1 rows
   - select_usd_front_month_row: 그날 selected front-month(미국달러 F {YYYYMM} 정규 주간) 1개
   - krx_row_to_source_daily: 선택 row → source_daily_rates dict (source_method=krx_openapi_daily)
   - build_krx_manifest: weekday-only date loop + BAS_DD==요청일 가드 → manifest (date-based)
   - run_krx_range_dry_run: sequence + build_krx_manifest + _emit_compare_and_gate(KIS 공유) 게이트 (DB read-only)
+  - fetch_krx_fut_bydd_trd / make_krx_fetch_fn: 실제 fut_bydd_trd HTTP (주입 가능, AUTH_KEY env, throttle + 429 abort)
 
 다음 단위:
-  - 실제 fut_bydd_trd HTTP helper (fetch_krx_fut_bydd_trd + make_krx_fetch_fn, AUTH_KEY env) — 별도 sub-step
-  - main/CLI wiring (window 산정 + production read-only 가드) → 운영 dry-run 별도 GO
+  - main/CLI wiring (window 산정 + production read-only 가드, AUTH_KEY env) → 운영 dry-run 별도 GO
   - 전수 transitional 확인 후 migration/reingest (별도 GO)
 
 endpoint (참고, 키는 코드/문서 미기재):
@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+
+import requests
 
 # Row filter 상수 (KRX_STEP4B_PLAN §0.3)
 PROD_NM_USD = "미국달러 선물"
@@ -302,8 +305,7 @@ def run_krx_range_dry_run(window_start: date, window_end: date, fetch_fn, db) ->
       → (manifest hard면 skip+FAIL) → _emit_compare_and_gate (EXISTING/ROWS_TO_WRITE/MATCHED(exact)/
       TRANSITIONAL/COMPARE_HARD + PASS|PASS_WITH_TRANSITIONAL|FAIL).
     """
-    # 함수-레벨 import — parser 순수 테스트 격리 + compare/sequence는 KIS 스크립트 공유 (재사용).
-    import requests  # fetch_fn 예외 분류 (실제 HTTP sub-step과 공유)
+    # 함수-레벨 import — KIS 스크립트의 compare/sequence 재사용 (parser/manifest 순수 테스트는 KIS 미로드).
     from backfill_kis_source_daily_rates import build_contract_sequence, _emit_compare_and_gate
 
     print(f"WINDOW_START={window_start.isoformat()}")
@@ -344,3 +346,87 @@ def run_krx_range_dry_run(window_start: date, window_end: date, fetch_fn, db) ->
         return 1
 
     return _emit_compare_and_gate(manifest.rows, window_start, window_end, db)
+
+
+# ─────────────────────────────────────────────────────────────
+# HTTP helper (Step 4B 단위 — 실제 fut_bydd_trd 호출, 주입 가능)
+# ─────────────────────────────────────────────────────────────
+#
+# fetch_krx_fut_bydd_trd: 단일 basDd HTTP 호출 + status 직접 분기 + parse_krx_fut_response.
+# make_krx_fetch_fn: throttle + 429 abort를 감싼 fetch_fn(date) 생성 (build_krx_manifest 주입용).
+# 보안: AUTH_KEY는 헤더로만 전달, 예외/로그/응답에 절대 미기재 (CLAUDE.md secret 원칙).
+# 테스트: get_fn/sleep_fn/now_fn 주입으로 network·시간 0 (실제 KRX 호출은 운영 dry-run 별도 GO).
+
+KRX_FUT_BYDD_TRD_URL = "https://data-dbg.krx.co.kr/svc/apis/drv/fut_bydd_trd"
+KRX_DEFAULT_TIMEOUT = 15.0
+# KRX OpenAPI는 live crawler와 공유 endpoint 아님 + 월 한도 큼 → Hana 3.0s 불필요.
+# 보수 default 1.0s (~252 weekday calls ≈ 4분). 실제 한도는 운영 dry-run서 관찰 후 튜닝.
+KRX_DEFAULT_MIN_INTERVAL_SEC = 1.0
+
+
+class KrxRateLimitAbort(RuntimeError):
+    """HTTP 429 감지 시 endpoint 보호 위해 즉시 abort (Retry-After 보존, auth_key 미포함).
+
+    RuntimeError 서브클래스 — run_krx_range_dry_run의 except가 잡아 FETCH_ERROR + FAIL로 graceful.
+    """
+
+
+def fetch_krx_fut_bydd_trd(
+    bas_dd: date, auth_key: str, *, get_fn=requests.get, timeout: float = KRX_DEFAULT_TIMEOUT
+) -> list[dict]:
+    """단일 basDd KRX fut_bydd_trd 호출 → OutBlock_1 rows (raw dict list).
+
+    https 직접 호출(redirect 무의존). AUTH_KEY는 헤더로만. status 직접 분기(raise_for_status 미사용):
+      429    → KrxRateLimitAbort (Retry-After 포함, auth_key 미포함)
+      != 200 → RuntimeError (status만 — body/headers/auth_key 미포함)
+      == 200 → response.json() (JSON 실패 → RuntimeError, body snippet 미포함)
+    → parse_krx_fut_response로 OutBlock_1 검증.
+
+    보안: auth_key를 예외 메시지/로그에 절대 포함하지 않는다 (CLAUDE.md secret 원칙).
+    get_fn 주입 → network 0 테스트. 실제 KRX 호출은 운영 dry-run 별도 GO.
+    """
+    response = get_fn(
+        KRX_FUT_BYDD_TRD_URL,
+        params={"basDd": bas_dd.strftime("%Y%m%d")},
+        headers={"AUTH_KEY": auth_key},
+        timeout=timeout,
+    )
+    status = response.status_code
+    if status == 429:  # 먼저 — 429도 != 200이므로 순서 중요
+        retry_after = response.headers.get("Retry-After")
+        raise KrxRateLimitAbort(
+            f"KRX fut_bydd_trd HTTP 429 basDd={bas_dd.isoformat()} (Retry-After={retry_after})"
+        )
+    if status != 200:
+        raise RuntimeError(f"KRX fut_bydd_trd HTTP {status} basDd={bas_dd.isoformat()}")
+    try:
+        data = response.json()
+    except ValueError as e:  # json.JSONDecodeError·requests JSONDecodeError 모두 ValueError 서브클래스
+        raise RuntimeError(
+            f"KRX fut_bydd_trd JSON parse 실패 basDd={bas_dd.isoformat()}: {type(e).__name__}"
+        )
+    return parse_krx_fut_response(data)
+
+
+def make_krx_fetch_fn(
+    auth_key: str, *, get_fn=requests.get, sleep_fn=time.sleep, now_fn=time.monotonic,
+    min_interval_sec: float = KRX_DEFAULT_MIN_INTERVAL_SEC, timeout: float = KRX_DEFAULT_TIMEOUT,
+):
+    """throttle + 429 abort를 감싼 fetch_fn(date) 생성 (build_krx_manifest 주입용).
+
+    throttle: 첫 요청 무throttle / 이후 요청 시작 간격 >= min_interval_sec (now_fn monotonic 기준).
+      last_start는 fetch 직전 갱신 → 실패 요청도 간격에 포함(rapid retry 방지).
+    429 → KrxRateLimitAbort 전파 (build_krx_manifest 미catch → run_krx_range_dry_run FETCH_ERROR + FAIL).
+    get_fn/sleep_fn/now_fn 주입 → network·시간 0 테스트 (실제 KRX 호출은 운영 dry-run 별도 GO).
+    """
+    state = {"last_start": None}
+
+    def fetch_fn(d: date) -> list[dict]:
+        if state["last_start"] is not None:
+            elapsed = now_fn() - state["last_start"]
+            if elapsed < min_interval_sec:
+                sleep_fn(min_interval_sec - elapsed)
+        state["last_start"] = now_fn()  # fetch 직전 갱신 → 실패도 간격 포함
+        return fetch_krx_fut_bydd_trd(d, auth_key, get_fn=get_fn, timeout=timeout)
+
+    return fetch_fn
