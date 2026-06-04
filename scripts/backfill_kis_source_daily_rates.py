@@ -516,17 +516,23 @@ def promote_write_intended_manifest_warnings(result: ManifestResult) -> Manifest
 # Existing seed comparison (Step 4B 단위 3 — DB read-only 비교 + write target 산출)
 # ─────────────────────────────────────────────────────────────
 #
-# full manifest와 기존 KRX seed를 비교해 4-way 분류 (KRX_STEP4B_PLAN.md §6·§7):
-#   ① manifest only       → rows_to_write
-#   ② manifest + DB 일치   → matched_existing (skip write)
-#   ③ manifest + DB 충돌   → hard (기존 seed = ground truth, manifest 의심)
-#   ④ DB(window 안) only   → hard (manifest가 검증된 seed 미설명 = coverage 불완전)
+# full manifest와 기존 KRX seed를 비교해 분류 (KRX_STEP4B_PLAN.md §6·§7 + ADR-034 §11 source 전환):
+#   ① manifest only             → rows_to_write
+#   ② manifest + DB 완전 일치    → matched_existing (skip write, source_method 동일)
+#   ②' manifest + DB 값 동일하나 source_method만 krx_openapi_daily(manifest)↔kis_daily_backfill(db)
+#                               → transitional_source_method_matches (skip write, migration 대기)
+#   ③ manifest + DB 충돌(값/contract/null/metadata, 또는 그 외/역방향 source_method)
+#                               → hard (기존 seed = ground truth, manifest 의심)
+#   ④ DB(window 안) only         → hard (manifest가 검증된 seed 미설명 = coverage 불완전)
 # write / upsert / transaction / main wiring 없음 (단위 4·5 영역).
 
-_COMPARE_LITERAL_KEYS = ("contract_code", "close_basis", "source_method", "ohlc_quality")
+# source_method는 literal 동일 비교에서 빼고 전환 분기로 별도 처리 (값충돌이 sm 전환에 가려지지 않도록).
+_COMPARE_LITERAL_KEYS = ("contract_code", "close_basis", "ohlc_quality")
 _COMPARE_DECIMAL_KEYS = ("rate", "high", "low", "close")
 _COMPARE_NULL_KEYS = ("basis_date", "published_at")
 _COMPARE_METADATA_IDENTITY = ("contract_short_code", "contract_month", "contract_expiry_date")
+# 전환쌍 (manifest/new, existing/db) — kis→krx 마이그레이션 대기. 이 방향만 transitional, 역방향·그 외는 hard.
+_TRANSITION_SOURCE_METHOD = ("krx_openapi_daily", "kis_daily_backfill")
 
 
 @dataclass
@@ -534,12 +540,16 @@ class CompareResult:
     """compare_manifest_with_existing 산출물.
 
     rows_to_write: manifest only (DB에 없음) → 단위 5가 gap-only write.
-    matched_existing: manifest + DB 일치 (skip) → 단위 5 post-write full coverage 추적.
-    hard_issues: ③ 충돌 / ④ orphan / window 밖 existing (fail-close 대상).
+    matched_existing: manifest + DB 완전 일치 (exact, source_method 동일) → skip.
+    transitional_source_method_matches: 값 전부 동일하나 source_method만
+        krx_openapi_daily(manifest)↔kis_daily_backfill(db) (kis→krx 전환 대기) → skip write.
+        exact과 분리해 migration 전/후 상태를 dry-run 출력에 보존 (둘을 섞으면 count가 동일해져 신호 소실).
+    hard_issues: ③ 충돌(값/contract/null/metadata, 그 외·역방향 sm) / ④ orphan / window 밖 (fail-close).
     warnings: metadata.open 누락·mismatch 등 surface.
     """
     rows_to_write: list[dict]
     matched_existing: list[dict]
+    transitional_source_method_matches: list[dict]
     hard_issues: list[str]
     warnings: list[str]
 
@@ -603,13 +613,14 @@ def compare_manifest_with_existing(
     window_start: date,
     window_end: date,
 ) -> CompareResult:
-    """full manifest × 기존 KRX seed → 4-way 분류 (순수 비교, DB 의존 0).
+    """full manifest × 기존 KRX seed → 분류 (①/②/②'transitional/③/④, 순수 비교, DB 의존 0).
 
     existing_rows는 source=krx / asset=usd-krw-futures / date_kst ∈ window로 제한된
     결과 전제 (query_existing_krx_rows). compare는 window를 defensive 재확인한다.
     """
     rows_to_write: list[dict] = []
     matched_existing: list[dict] = []
+    transitional_source_method_matches: list[dict] = []
     hard_issues: list[str] = []
     warnings: list[str] = []
 
@@ -632,12 +643,23 @@ def compare_manifest_with_existing(
         if e_row is None:
             rows_to_write.append(m_row)  # ① manifest only
             continue
-        conflicts = _compare_existing_row(m_row, e_row)
+        conflicts = _compare_existing_row(m_row, e_row)  # source_method 제외 (전환 분기로 별도)
         warnings.extend(_compare_open_warning(m_row, e_row))
         if conflicts:
-            hard_issues.extend(conflicts)  # ③ 충돌
+            hard_issues.extend(conflicts)  # ③ 값/contract/null/metadata 충돌 → hard
+            continue
+        # 나머지 전 필드 일치 (conflicts 없음) — source_method 관계로만 분기.
+        # 전환쌍이 값충돌을 가리는 통로 차단: 다른 필드가 달랐다면 위 conflicts에서 이미 hard로 빠짐.
+        m_sm, e_sm = m_row.get("source_method"), e_row.get("source_method")
+        if m_sm == e_sm:
+            matched_existing.append(e_row)  # ② exact 일치 → skip
+        elif (m_sm, e_sm) == _TRANSITION_SOURCE_METHOD:
+            transitional_source_method_matches.append(e_row)  # ②' kis→krx 전환 대기 → skip (write 아님)
         else:
-            matched_existing.append(e_row)  # ② 일치 → skip
+            hard_issues.append(  # 역방향(kis manifest / krx db)·그 외 sm mismatch → hard
+                f"date_kst={d} unexpected source_method mismatch (전환쌍 아님 — 허용은 "
+                f"manifest=krx_openapi_daily ∧ db=kis_daily_backfill만): manifest={m_sm!r} db={e_sm!r}"
+            )
 
     for d, e_row in e_by_date.items():
         if not (window_start <= d <= window_end):  # query 제한 위반 방어 (Crash Early)
@@ -652,7 +674,9 @@ def compare_manifest_with_existing(
                 "— manifest coverage가 기존 seed 미설명 (orphan, hard)"
             )
 
-    return CompareResult(rows_to_write, matched_existing, hard_issues, warnings)
+    return CompareResult(
+        rows_to_write, matched_existing, transitional_source_method_matches, hard_issues, warnings
+    )
 
 
 def query_existing_krx_rows(db, window_start: date, window_end: date) -> list[dict]:
@@ -747,7 +771,8 @@ def run_range_dry_run(window_start: date, window_end: date, fetch_fn, db) -> int
     print("COMPARE_STATUS=ran")
     print(f"EXISTING_ROW_COUNT={len(existing)}")
     print(f"ROWS_TO_WRITE_COUNT={len(compare.rows_to_write)}")
-    print(f"MATCHED_EXISTING_COUNT={len(compare.matched_existing)}")
+    print(f"MATCHED_EXISTING_COUNT={len(compare.matched_existing)}")  # exact-only (source_method 동일)
+    print(f"TRANSITIONAL_SOURCE_METHOD_MATCH_COUNT={len(compare.transitional_source_method_matches)}")
     print(f"COMPARE_HARD_COUNT={len(compare.hard_issues)}")
     print(
         "ROWS_TO_WRITE_DATES="
@@ -761,6 +786,10 @@ def run_range_dry_run(window_start: date, window_end: date, fetch_fn, db) -> int
     if compare.hard_issues:
         print("RANGE_DRY_RUN_RESULT=FAIL")
         return 1
+    if compare.transitional_source_method_matches:
+        # hard 0이지만 provenance 정리(kis→krx migration) 대기 — silent PASS로 묻지 않음.
+        print("RANGE_DRY_RUN_RESULT=PASS_WITH_TRANSITIONAL")
+        return 0
     print("RANGE_DRY_RUN_RESULT=PASS")
     return 0
 

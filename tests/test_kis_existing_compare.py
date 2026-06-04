@@ -1,7 +1,7 @@
-"""Step 4B 단위 3 — manifest × 기존 KRX seed 비교 (4-way 분류) 단위 테스트.
+"""Step 4B 단위 3 — manifest × 기존 KRX seed 비교 (①/②/②'transitional/③/④ 분류) 단위 테스트.
 
 2층:
-  1) compare_manifest_with_existing 순수 로직 (dict 입력, 4-way + 비교 키 정책)
+  1) compare_manifest_with_existing 순수 로직 (dict 입력, 분류 + 비교 키 + source_method 전환 정책)
   2) query_existing_krx_rows + compare 통합 (실제 SQLAlchemy in-memory round-trip —
      Numeric(14,6)→float / JSON / null 동작까지 검증, production DB 무관)
 """
@@ -152,6 +152,57 @@ class TestCompareFourWay(unittest.TestCase):
         d = date(2026, 6, 10)
         res = B.compare_manifest_with_existing([], [_existing_dict(d), _existing_dict(d)], _WS, _WE)
         self.assertTrue(any("existing duplicate" in i for i in res.hard_issues))
+
+
+class TestTransitionalSourceMethod(unittest.TestCase):
+    """source_method 전환쌍 (krx_openapi_daily↔kis_daily_backfill) 분류 (ADR-034 §11)."""
+
+    D = date(2026, 6, 10)
+
+    def test_transition_pair_skip_not_write_not_hard(self):
+        # 값 전부 동일 + source_method만 krx(manifest)↔kis(db) → transitional skip
+        m = _manifest_row(self.D, source_method="krx_openapi_daily")
+        e = _existing_dict(self.D, source_method="kis_daily_backfill")
+        res = B.compare_manifest_with_existing([m], [e], _WS, _WE)
+        self.assertEqual(res.hard_issues, [])
+        self.assertEqual(len(res.transitional_source_method_matches), 1)
+        self.assertEqual(res.matched_existing, [])
+        # Codex 핵심 invariant: transitional은 write skip — rows_to_write에 절대 안 들어감
+        self.assertEqual(res.rows_to_write, [])
+
+    def test_transition_pair_with_value_conflict_is_hard(self):
+        # 전환쌍이지만 close도 다름 → transitional 아님, hard (값충돌이 sm 전환에 가려지지 않음)
+        m = _manifest_row(self.D, close="1496.5", source_method="krx_openapi_daily")
+        e = _existing_dict(self.D, close=1496.6, source_method="kis_daily_backfill")
+        res = B.compare_manifest_with_existing([m], [e], _WS, _WE)
+        self.assertEqual(res.transitional_source_method_matches, [])
+        self.assertTrue(any("close numeric mismatch" in i for i in res.hard_issues))
+        self.assertEqual(res.rows_to_write, [])  # 충돌도 write 아님
+
+    def test_reverse_direction_is_hard(self):
+        # 역방향(manifest=kis, db=krx) → manifest는 항상 krx라 발생 불가 이상치 → hard
+        m = _manifest_row(self.D, source_method="kis_daily_backfill")
+        e = _existing_dict(self.D, source_method="krx_openapi_daily")
+        res = B.compare_manifest_with_existing([m], [e], _WS, _WE)
+        self.assertEqual(res.transitional_source_method_matches, [])
+        self.assertTrue(any("unexpected source_method mismatch" in i for i in res.hard_issues))
+
+    def test_other_source_method_is_hard(self):
+        # 그 외 sm mismatch (예: db=external_backfill) → 전환쌍 아님 → hard
+        m = _manifest_row(self.D, source_method="krx_openapi_daily")
+        e = _existing_dict(self.D, source_method="external_backfill")
+        res = B.compare_manifest_with_existing([m], [e], _WS, _WE)
+        self.assertEqual(res.transitional_source_method_matches, [])
+        self.assertTrue(any("unexpected source_method mismatch" in i for i in res.hard_issues))
+
+    def test_exact_match_both_krx_is_matched_existing(self):
+        # source_method 동일(둘 다 krx) → exact matched_existing (migration 후 상태, transitional 아님)
+        m = _manifest_row(self.D, source_method="krx_openapi_daily")
+        e = _existing_dict(self.D, source_method="krx_openapi_daily")
+        res = B.compare_manifest_with_existing([m], [e], _WS, _WE)
+        self.assertEqual(res.transitional_source_method_matches, [])
+        self.assertEqual(len(res.matched_existing), 1)
+        self.assertEqual(res.hard_issues, [])
 
 
 class TestQueryCompareRoundtrip(unittest.TestCase):

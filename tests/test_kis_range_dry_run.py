@@ -51,12 +51,12 @@ class TestRunRangeDryRun(unittest.TestCase):
         ))
         self.db.commit()
 
-    def _krx_row(self, d, contract_code, close="1496.5"):
+    def _krx_row(self, d, contract_code, close="1496.5", source_method="kis_daily_backfill"):
         return {
             "source": "krx", "asset": "usd-krw-futures", "date_kst": d,
             "rate": Decimal(close), "high": Decimal(close), "low": Decimal(close), "close": Decimal(close),
             "ohlc_quality": "source_ohlc", "close_basis": "krx_cf_close_1545",
-            "source_method": "kis_daily_backfill", "contract_code": contract_code,
+            "source_method": source_method, "contract_code": contract_code,
             "basis_date": None, "published_at": None,
             "metadata_json": {"contract_short_code": contract_code, "contract_month": "202606",
                               "contract_expiry_date": "2026-06-15", "open": close},
@@ -81,7 +81,8 @@ class TestRunRangeDryRun(unittest.TestCase):
         })
         rc, out = self._run(fetch)
         self.assertEqual(rc, 0)
-        self.assertIn("RANGE_DRY_RUN_RESULT=PASS", out)
+        # exact-line: PASS_WITH_TRANSITIONAL 부분매칭 차단 (sentinel 의미 분리됨)
+        self.assertRegex(out, r"(?m)^RANGE_DRY_RUN_RESULT=PASS$")
         self.assertIn("ROWS_TO_WRITE_COUNT=2", out)
         self.assertIn("COMPARE_STATUS=ran", out)
 
@@ -119,6 +120,33 @@ class TestRunRangeDryRun(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("ROWS_TO_WRITE_COUNT=0", out)
         self.assertIn("MATCHED_EXISTING_COUNT=1", out)
+
+    def test_transitional_pass_with_transitional_exit0(self):
+        # manifest=krx_openapi_daily, DB=kis_daily_backfill, 값 동일 → transitional skip
+        # → TRANSITIONAL count 1 / MATCHED 0 / ROWS_TO_WRITE 0 / RESULT=PASS_WITH_TRANSITIONAL / exit 0
+        d = date(2026, 5, 15)
+        fetch = self._fetch({
+            "A75605": [self._krx_row(d, "A75605", close="1496.5", source_method="krx_openapi_daily")],
+        })
+        self._insert(d, close="1496.5", contract_code="A75605")  # DB: kis_daily_backfill
+        rc, out = self._run(fetch)
+        self.assertEqual(rc, 0)
+        self.assertIn("ROWS_TO_WRITE_COUNT=0", out)
+        self.assertIn("MATCHED_EXISTING_COUNT=0", out)
+        self.assertIn("TRANSITIONAL_SOURCE_METHOD_MATCH_COUNT=1", out)
+        self.assertIn("RANGE_DRY_RUN_RESULT=PASS_WITH_TRANSITIONAL", out)
+
+    def test_transition_pair_value_conflict_still_hard(self):
+        # 전환쌍 + 값 충돌 → hard FAIL (sm 전환이 값충돌 가리지 않음, dry-run 레벨 회귀)
+        d = date(2026, 5, 15)
+        fetch = self._fetch({
+            "A75605": [self._krx_row(d, "A75605", close="1496.6", source_method="krx_openapi_daily")],
+        })
+        self._insert(d, close="1496.5", contract_code="A75605")  # DB 값 다름
+        rc, out = self._run(fetch)
+        self.assertEqual(rc, 1)
+        self.assertIn("TRANSITIONAL_SOURCE_METHOD_MATCH_COUNT=0", out)
+        self.assertIn("RANGE_DRY_RUN_RESULT=FAIL", out)
 
     def test_fetch_exception_fails_gracefully(self):
         # fetch_fn 예외 → traceback 대신 FETCH_ERROR + exit 1 (gate 일관성)
