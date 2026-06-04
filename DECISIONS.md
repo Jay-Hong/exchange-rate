@@ -4161,13 +4161,14 @@ response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
 
 `close_basis` (의미)와 `source_method` (수집 방법)는 직교 개념. 두 field 모두 필수.
 
-**source_method enum 5 values**:
+**source_method enum 6 values**:
 
 - `observed_rollup`
 - `external_backfill`
 - `close_finalizer`
 - `bithumb_candlestick_api` (Amendment 2026-06-01 — 구 `bithumb_candlestick_backfill`)
-- `kis_daily_backfill`
+- `kis_daily_backfill` (Step 4B에서 KIS year-series 한계로 superseded — [§0 KRX 전환](KRX_STEP4B_PLAN.md))
+- `krx_openapi_daily` (Step 4B — KRX OPEN API `fut_bydd_trd` date-based)
 
 **close_basis × source_method 매핑**:
 
@@ -4176,10 +4177,10 @@ response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
 | `hana_observed_eod` | `observed_rollup` | 운영 중 매일 append |
 | `hana_official_historical_backfill` | `external_backfill` | 초기 부족분 backfill |
 | `krx_cf_close_1545` | `close_finalizer` | 운영 중 매일 append (CF close finalizer) |
-| `krx_cf_close_1545` | `kis_daily_backfill` | 초기 backfill (KIS daily endpoint + A75YMM chain) |
+| `krx_cf_close_1545` | `krx_openapi_daily` | 초기 backfill (KRX OPEN API `fut_bydd_trd` date-based, Step 4B 전환 — 기존 `kis_daily_backfill` 25 rows transitional) |
 | `bithumb_24h_kst_close` | `bithumb_candlestick_api` | 초기 backfill + 운영 중 매일 append (동일 candle API — Amendment 2026-06-01) |
 
-→ **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**). KRX는 close_basis 동일 + source_method 분기 (backfill=`kis_daily_backfill` vs append=`close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
+→ **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**). KRX는 close_basis 동일 + source_method 분기 (backfill=`krx_openapi_daily` [Step 4B 전환, 기존 `kis_daily_backfill` transitional] vs append=`close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
 
 #### Decision C — Source별 daily canonical 정책
 
@@ -4257,7 +4258,7 @@ Hana daily canonical:
 
 1. `source_daily_rates` canonical table 도입 — v2 장기 그래프 hot path 단일 조회
 2. Graph hot path에서 외부 API 직접 호출 금지 (Bithumb / KIS / Hana official 모두 backfill / gap repair / 검증용)
-3. `close_basis` enum 4 values + `source_method` enum 5 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B 참조)
+3. `close_basis` enum 4 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 참조)
 4. Unique key 후보: `(source, asset, date_kst)`
 5. **`ohlc_quality` top-level column** (검색/필터/렌더링 판단 직접 사용)
 6. **`rate == close` app-level invariant** (모든 backfill/append job에서 같은 값으로 write)
@@ -4323,7 +4324,7 @@ class SourceDailyRate(Base):
 | `close` | No | daily representative close (v2 그래프 consumer 사용) |
 | `ohlc_quality` | No | OHLC 품질 — `source_ohlc` / `observed_rollup` / `close_only` (§7) |
 | `close_basis` | No | 4 values (§6) |
-| `source_method` | No | 5 values (§6) |
+| `source_method` | No | 6 values (§6) |
 | `contract_code` | Yes | KRX 전용 (예: A75606) |
 | `basis_date` | Yes | Hana official endpoint 응답 기준일 |
 | `published_at` | Yes | Hana official 발표시각 (다음날 새벽) |
@@ -4376,13 +4377,14 @@ class SourceDailyRate(Base):
 - `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
 - `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
 
-**`source_method` enum 5 values** (ADR-033 Amendment 후속 Decision B-bis 참조):
+**`source_method` enum 6 values** (ADR-033 Amendment 후속 Decision B-bis + Step 4B KRX 전환):
 
 - `observed_rollup`: DB tick/source_rates/bank_exchange_rates 기반 daily rollup
 - `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint)
 - `close_finalizer`: KRX CF close finalizer 결과
 - `bithumb_candlestick_api`: Bithumb 공식 24h candle API (backfill + daily refresh append **동일 방법** — Amendment 2026-06-01, 구 `bithumb_candlestick_backfill` rename. source_method=획득 방법이므로 backfill/daily 구분은 timing이지 방법 아님)
-- `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill
+- `kis_daily_backfill`: KIS daily endpoint + A75YMM chain 초기 backfill (**Step 4B에서 KIS year-series 한계로 superseded** — KRX OpenAPI 전환, [KRX_STEP4B_PLAN.md §0](KRX_STEP4B_PLAN.md))
+- `krx_openapi_daily`: **KRX 공식 OPEN API `fut_bydd_trd`(선물 일별매매정보, 주식선물外) date-based 적재** (Step 4B source 전환, 정규장 종가 `TDD_CLSPRC`. KIS와 동일 KRX 원천이나 획득 방법 분리). 기존 `kis_daily_backfill` 25 rows와는 **transitional match**(값/contract/close_basis/ohlc_quality/metadata 전부 일치 시 source_method 차이만 허용 + warning/count surface) — dry-run 전수 일치 확인 후 migration 별도 GO.
 
 **`ohlc_quality` enum 3 values** (잠정 명칭, Open):
 
@@ -4396,7 +4398,7 @@ class SourceDailyRate(Base):
 | --- | --- | --- | --- | --- |
 | Bithumb | 공식 24h candle API | **공식 24h candle API daily refresh** (Amendment 2026-06-01 — DB rollup 폐기, candle이 실 OHLC 제공해 우월) | `bithumb_24h_kst_close` | backfill=append=`bithumb_candlestick_api` (단일 방법) |
 | Hana | 부족한 과거만 official historical | DB의 KST 24:00 이전 마지막 관측값 | backfill=`hana_official_historical_backfill`, canonical=`hana_observed_eod` | backfill=`external_backfill`, append=`observed_rollup` |
-| KRX | KIS daily + A75YMM chain | close finalizer CF 15:45 정규 종가 | `krx_cf_close_1545` | backfill=`kis_daily_backfill`, append=`close_finalizer` |
+| KRX | **KRX OPEN API `fut_bydd_trd` date-based** (Step 4B 전환 — 기존 KIS daily+A75YMM superseded) | close finalizer CF 15:45 정규 종가 | `krx_cf_close_1545` | backfill=`krx_openapi_daily`, append=`close_finalizer` |
 
 **high/low population policy (★ Phase 2d 구현 input)**:
 

@@ -216,7 +216,7 @@ class SourceDailyRate(Base):
     close = Column(Numeric(14, 6), nullable=False)
     ohlc_quality = Column(String, nullable=False)        # source_ohlc / observed_rollup / close_only (ADR-034 §6)
     close_basis = Column(String, nullable=False)         # 4 values (ADR-034 §6)
-    source_method = Column(String, nullable=False)       # 5 values (ADR-034 §6)
+    source_method = Column(String, nullable=False)       # 6 values (ADR-034 §6 + Step 4B krx_openapi_daily)
     contract_code = Column(String, nullable=True)        # KRX 전용 (예: A75606)
     basis_date = Column(Date, nullable=True)             # Hana official backfill 응답 기준일
     published_at = Column(DateTime(timezone=True), nullable=True)  # Hana official 발표 timestamp (다음날 새벽)
