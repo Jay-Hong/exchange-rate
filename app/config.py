@@ -221,6 +221,15 @@ KRX_CLOSE_FINALIZER_ENABLED = os.getenv("KRX_CLOSE_FINALIZER_ENABLED", "true").l
 # 영향 범위 외: KrxCloseWindowWriter (WS close frame 기반, 신뢰 source) — 변경 X.
 KRX_CLOSE_REST_WRITE_ENABLED = os.getenv("KRX_CLOSE_REST_WRITE_ENABLED", "false").lower() == "true"
 
+# KRX_DAILY_APPEND_ENABLED: ADR-034 Phase 2d KRX daily-append (source_daily_rates) 토글.
+# default false — Unit 4b CF finalizer hook(append_krx_cf_daily_row)을 배포와 분리해
+# 활성화하기 위함. critical path(close finalizer)에 붙은 코드라 "배포 ≠ 동작 변화" 보장:
+#   - false: KrxCloseWindowWriter._sync_write의 CF 성공 tail에서 daily-append 미실행
+#            (close finalizer 기존 동작과 완전 동일 — source_rates/Redis/flag/tether/return 불변)
+#   - true: CF 정규장 종가 확정 후 source_daily_rates에 daily row append (격리된 best-effort tail)
+# 활성화 순서: EC2 배포(gate off 동작 확인) → env 토글 → 다음 CF close canary 관찰.
+KRX_DAILY_APPEND_ENABLED = os.getenv("KRX_DAILY_APPEND_ENABLED", "false").lower() == "true"
+
 # KRX_REDIS_TICK_WRITE_ENABLED: KRX Stage E — Redis latest write timing 변경 토글
 # (KRX_FANOUT_REFACTOR_PLAN.md §5.2 E).
 #

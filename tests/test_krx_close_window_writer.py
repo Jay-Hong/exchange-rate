@@ -104,7 +104,8 @@ class TestKrxDbWriterClosesGraceSkip(unittest.IsolatedAsyncioTestCase):
         self._trigger_patcher = patch(
             "app.tether_topic_trigger.request_tether_topic_trigger",
         )
-        # Unit 4b: CF daily-append default mock — 실 DB append(get_db_context) hang(75s timeout) 차단
+        # Unit 4b/4c: CF daily-append default mock — gate true 테스트/미래 테스트의 실 DB
+        # append(get_db_context) hang(75s) 방지 (gate default false라 평소 redundant·safety net)
         self._append_patcher = patch(
             "app.source_daily_rates.append_krx_cf_daily_row", return_value=("SKIP", "test"),
         )
@@ -213,7 +214,8 @@ class TestCloseFinalizerFlagCondition(unittest.IsolatedAsyncioTestCase):
         self._trigger_patcher = patch(
             "app.tether_topic_trigger.request_tether_topic_trigger",
         )
-        # Unit 4b: CF daily-append default mock — 실 DB append(get_db_context) hang(75s timeout) 차단
+        # Unit 4b/4c: CF daily-append default mock — gate true 테스트/미래 테스트의 실 DB
+        # append(get_db_context) hang(75s) 방지 (gate default false라 평소 redundant·safety net)
         self._append_patcher = patch(
             "app.source_daily_rates.append_krx_cf_daily_row", return_value=("SKIP", "test"),
         )
@@ -331,7 +333,8 @@ class TestKrxCloseWindowWriterBasic(unittest.IsolatedAsyncioTestCase):
         self._trigger_patcher = patch(
             "app.tether_topic_trigger.request_tether_topic_trigger",
         )
-        # Unit 4b: CF daily-append default mock — 실 DB append(get_db_context) hang(75s timeout) 차단
+        # Unit 4b/4c: CF daily-append default mock — gate true 테스트/미래 테스트의 실 DB
+        # append(get_db_context) hang(75s) 방지 (gate default false라 평소 redundant·safety net)
         self._append_patcher = patch(
             "app.source_daily_rates.append_krx_cf_daily_row", return_value=("SKIP", "test"),
         )
@@ -621,11 +624,12 @@ class TestKrxCloseWindowWriterDailyAppend(unittest.IsolatedAsyncioTestCase):
         for p in reversed(self._patchers):
             p.stop()
 
-    async def _flush(self, session, payload):
+    async def _flush(self, session, payload, *, daily_append=True):
         from app.crawlers.krx_kis import KrxCloseWindowWriter
         from app import config
         writer = KrxCloseWindowWriter()
-        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", True):
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", True), \
+             patch.object(config, "KRX_DAILY_APPEND_ENABLED", daily_append):
             await writer(payload)
             await writer._flush_at_window_end(session, datetime.now(KST))
 
@@ -691,6 +695,18 @@ class TestKrxCloseWindowWriterDailyAppend(unittest.IsolatedAsyncioTestCase):
         append_mock.assert_called_once()
         self.assertIsNone(append_mock.call_args.args[3])  # contract_code=None 전달
         flag_mock.assert_called_once()  # 기존 흐름 불변
+        self.assertEqual(get_krx_close_finalizer_stats().close_grace_saved, 1)
+
+    async def test_gate_off_no_append_even_cf(self):
+        # Unit 4c: KRX_DAILY_APPEND_ENABLED=False(default) → CF여도 append 미호출 (배포 ≠ 동작 변화)
+        from app.crawlers.krx_kis import get_krx_close_finalizer_stats
+        payload = _make_payload(_make_close_grace_dt("CF"), "CF")
+        with patch("app.latest_rates_cache.set_krx_close_captured_flag", return_value=True) as flag_mock, \
+             patch("app.tether_topic_trigger.request_tether_topic_trigger"), \
+             patch("app.source_daily_rates.append_krx_cf_daily_row") as append_mock:
+            await self._flush("CF", payload, daily_append=False)
+        append_mock.assert_not_called()
+        flag_mock.assert_called_once()  # gate off = 기존 finalizer 흐름 그대로 (behavior-neutral)
         self.assertEqual(get_krx_close_finalizer_stats().close_grace_saved, 1)
 
 

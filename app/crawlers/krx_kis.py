@@ -2203,33 +2203,37 @@ class KrxCloseWindowWriter:
                 logger.exception(
                     "[krx_close_window] tether topic trigger failed (격리)"
                 )
-            # KRX daily-append (Unit 4b) — CF 정규장 종가만, best-effort tail.
+            # KRX daily-append (Unit 4b/4c) — CF 정규장 종가만, best-effort tail.
             # source_rates+Redis+flag 성공 후 호출. 실패는 전부 격리 (finalizer return True/흐름 영향 0).
             # CM(야간장 06:00)은 daily canonical close 아님 → 미append (그 시점 CF session 미발생).
+            # Unit 4c gate: KRX_DAILY_APPEND_ENABLED(default false)일 때만 — 배포 ≠ 동작 변화.
+            #   함수-레벨 config 참조 (test patch.object 호환; 운영 env 변경은 프로세스 재시작/재배포 필요).
             if session == "CF":
-                try:
-                    from app.source_daily_rates import (
-                        KRX_APPEND_HARD,
-                        append_krx_cf_daily_row,
-                    )
-                    contract_code = tick.get("contract_code")
-                    with get_db_context() as db_append:
-                        action, reason = append_krx_cf_daily_row(
-                            db_append,
-                            event_at_kst.date(),
-                            normalized_rate,
-                            contract_code,
+                from app import config as _config
+                if _config.KRX_DAILY_APPEND_ENABLED:
+                    try:
+                        from app.source_daily_rates import (
+                            KRX_APPEND_HARD,
+                            append_krx_cf_daily_row,
                         )
-                    log_fn = logger.warning if action == KRX_APPEND_HARD else logger.info
-                    log_fn(
-                        "[krx_cf_append] %s date=%s contract=%s close=%.1f — %s",
-                        action, kst_date_iso, contract_code, normalized_rate, reason,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[krx_cf_append] daily-append 실패 (격리, finalizer 영향 없음)",
-                        exc_info=True,
-                    )
+                        contract_code = tick.get("contract_code")
+                        with get_db_context() as db_append:
+                            action, reason = append_krx_cf_daily_row(
+                                db_append,
+                                event_at_kst.date(),
+                                normalized_rate,
+                                contract_code,
+                            )
+                        log_fn = logger.warning if action == KRX_APPEND_HARD else logger.info
+                        log_fn(
+                            "[krx_cf_append] %s date=%s contract=%s close=%.1f — %s",
+                            action, kst_date_iso, contract_code, normalized_rate, reason,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[krx_cf_append] daily-append 실패 (격리, finalizer 영향 없음)",
+                            exc_info=True,
+                        )
             return True
 
         # DB 또는 Redis 실패 — flag 미설정, REST fallback에 보정 capacity 유지
