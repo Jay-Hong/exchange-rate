@@ -1,9 +1,52 @@
 # KRX Step 4B — 12개월 contract-chain full backfill 설계
 
-> **상태**: 설계 초안 (Proposed, 2026-06-03). 구현 전 외부 검토 → 구현 → dry-run → snapshot → production write.
+> **상태**: 설계 초안 (Proposed). **⚠️ Source 전환 (2026-06-04 KRX OpenAPI POC) — §0 참조.** KIS `inquire-daily-fuopchartprice` contract-chain → **KRX OPEN API `fut_bydd_trd` date-based**. §1~§12의 chain mapping(단위 1)·invariant(§3)·overlap(§2·§6)·compare(§7) 정책은 **유효**하되, **fetch source가 KRX로 전환**된다(§0).
 > **anchor**: [ADR-034 §14 Rollout sequence](DECISIONS.md) Step 4 full backfill의 **4B KRX 부분** (4A Bithumb/Hana는 완료).
-> **선행 문서**: [GRAPH_API_V2_CONTRACT.md §7-new](GRAPH_API_V2_CONTRACT.md) (KRX contract chain rollover boundary policy), [DECISIONS.md ADR-033 Amendment 2](DECISIONS.md) (KIS daily chain 채택).
-> **대상 writer**: [scripts/backfill_kis_source_daily_rates.py](scripts/backfill_kis_source_daily_rates.py) (Step 2-3 dry-run validator + Step 3 `--write`/`--contract` 확장 land).
+> **선행 문서**: [GRAPH_API_V2_CONTRACT.md §7-new](GRAPH_API_V2_CONTRACT.md) (KRX contract chain rollover boundary policy), [DECISIONS.md ADR-033 Amendment 2](DECISIONS.md) (KIS daily chain 채택 — §0에서 source 전환으로 부분 supersede).
+> **대상 writer**: [scripts/backfill_kis_source_daily_rates.py](scripts/backfill_kis_source_daily_rates.py) (단위 1·3 재사용 / 단위 2·5 재작성 / 단위 4 폐기 — §0.4).
+
+---
+
+## 0. Source 전환 — KRX OpenAPI date-based (2026-06-04 POC) ⭐
+
+> 이 섹션이 §1~§12를 **부분 supersede**한다. chain mapping(단위 1)·invariant(§3)·overlap(§2·§6)·compare(§7) 정책은 **유효**하되, **fetch source가 KIS contract-chain → KRX OPEN API `fut_bydd_trd` date-based로 전환**된다.
+
+### 0.1 배경 — KIS year-series 한계 발견
+
+- Step 4B KIS chain dry-run(2026-06-04 production)에서 **KIS `inquire-daily-fuopchartprice`가 A755xx(2025 만기 series) 미조회** 확인 — `rt_cd=0`이나 `output2=[]`(에러 아닌 정상 빈). A756xx(2026)만 제공(~5.5개월). 시간 retention이 아니라 **year-series 한계**(A75512=2025-12도 빈 응답으로 확정).
+- 12개월 coverage가 KIS 단독으로 불가 → 대안 탐색(TradingView=공식 API 부재·24h세션 / Investing=선물 부재 / data.krx.co.kr=로그인 게이트 / data.go.kr=통화선물 불명확) → **KRX 공식 OPEN API `fut_bydd_trd`(선물 일별매매정보, 주식선물外)** 확정.
+
+### 0.2 POC 결과 anchor (2026-06-04, 정식 키 — **키 값 문서 미기재**)
+
+- **KIS 대조 1:1 일치** (KRX `TDD_CLSPRC`(정규장 종가) == KIS close, 둘 다 KRX 원천):
+  - 2026-05-18 = **1496.50** / 2026-05-27 = **1499.60** / 2026-06-02 = **1518.00** (우리 KIS A75606과 동일)
+- **만기일 mapping 정합** (우리 "만기일=next" rule 유효):
+  - 2025-12-15(202512 만기일): `202512`=1477.30(만기월물) + `202601`=1468.90(next) **공존** → user-facing = **next(202601)**
+  - 2026-05-18(A75605 만기일): `202605`=1505.80 + `202606`=**1496.50**(next) → next가 KIS와 일치
+- **2025 구간 조회 가능성 실증** (전수 아님, **샘플 3날**): 2025-06-02(`202506`=1370.80) / 2025-09-15(`202509`=1390.00) / 2025-12-15(`202512`=1477.30) — KIS 공백(A755xx) 메움.
+- **range**: 서비스 명세상 2010-01-04~ 제공. 12M 이용신청으로 최근 12개월 조회 확인.
+
+### 0.3 Source 전환 결정
+
+- **Primary source**: KRX OPEN API `fut_bydd_trd` (endpoint `https://data-dbg.krx.co.kr/svc/apis/drv/fut_bydd_trd?basDd=YYYYMMDD`, 헤더 `AUTH_KEY`, http→https redirect).
+- **Fetch unit**: contract-range(KIS) → **`basDd` 날짜별**(그날 전 상장 선물 ~385 rows).
+- **Contract selection**: 기존 `_resolve_front_month`/`build_contract_sequence` mapping rule **재사용**(그날 front-month `contract_month` 결정).
+- **Row filter**: `PROD_NM=="미국달러 선물"` ∧ `MKT_NM=="정규"` ∧ `ISU_NM.startswith("미국달러 F ")`(**SP 스프레드 제외**) ∧ `"(주간)" in ISU_NM` ∧ **selected front-month YYYYMM 일치**(KRX는 `contract_month`로 join, KIS 단축코드 아님) ∧ `TDD_CLSPRC != ""`.
+- **Price**: `TDD_CLSPRC`(정규장 종가) primary, `SETL_PRC`(정산가)는 metadata/audit.
+- **KIS**: daily backfill에서 **verification/fallback**으로 격하(realtime broadcast는 유지).
+
+### 0.4 재사용 / 재작성 / 폐기
+
+- ✅ **재사용**: `_resolve_front_month`·`build_contract_sequence`(단위 1) / `compare_manifest_with_existing`(단위 3) / existing seed 충돌·오염 검증.
+- 🔨 **재작성**: `build_manifest`(단위 2 — KRX `basDd` date-based fetch + row filter) / `run_range_dry_run`(단위 5 — fetch source + coverage logic) / **coverage gate**(KRX 날짜 기반 `MANIFEST_DATE_MIN/MAX` + missing trading days + selected contract/month — KIS dry-run의 **"window 시작부 통째 누락" 사각지대 해소**: `MANIFEST_DATE_MIN`이 window_start와 과도하게 벌어지면 hard).
+- ❌ **폐기**: KIS 100-row cap gate(단위 4 — KRX date-based엔 무관) / KIS A755xx year-series 한계 대응.
+
+### 0.5 Open (전환 후 결정)
+
+- `fut_bydd_trd` 기간 파라미터(`beginBasDt`/`endBasDt`?) 유무 — 거래일별 ~245 calls vs 기간 1 call (fetch 효율). POC는 단일 `basDd`만 사용.
+- KRX rate limit(10,000/일) vs throttle 필요성.
+- **secret 재발급**: POC 키는 대화에 노출됨 → **운영 전 재발급**, 운영 `.env` `KRX_OPENAPI_KEY`(문서·메모리 미기재).
+- **front-month 빈 종가 정책**: POC 샘플 3날에선 selected front-month `TDD_CLSPRC` non-empty(원월물만 `''`)였으나 **전수 미검증** → 구현에서 **selected front-month row가 없거나 `TDD_CLSPRC == ""`이면 coverage hard로 처리**(silent 통과 방지, §0.4 coverage gate 정신).
 
 ---
 
