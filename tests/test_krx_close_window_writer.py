@@ -104,14 +104,20 @@ class TestKrxDbWriterClosesGraceSkip(unittest.IsolatedAsyncioTestCase):
         self._trigger_patcher = patch(
             "app.tether_topic_trigger.request_tether_topic_trigger",
         )
+        # Unit 4b: CF daily-append default mock — 실 DB append(get_db_context) hang(75s timeout) 차단
+        self._append_patcher = patch(
+            "app.source_daily_rates.append_krx_cf_daily_row", return_value=("SKIP", "test"),
+        )
         self._grace_end_patcher.start()
         self._crud_patcher.start()
         self._redis_patcher.start()
         self._flag_patcher.start()
         self._trigger_patcher.start()
+        self._append_patcher.start()
 
     def tearDown(self):
         # LIFO order
+        self._append_patcher.stop()
         self._trigger_patcher.stop()
         self._flag_patcher.stop()
         self._redis_patcher.stop()
@@ -207,14 +213,20 @@ class TestCloseFinalizerFlagCondition(unittest.IsolatedAsyncioTestCase):
         self._trigger_patcher = patch(
             "app.tether_topic_trigger.request_tether_topic_trigger",
         )
+        # Unit 4b: CF daily-append default mock — 실 DB append(get_db_context) hang(75s timeout) 차단
+        self._append_patcher = patch(
+            "app.source_daily_rates.append_krx_cf_daily_row", return_value=("SKIP", "test"),
+        )
         self._grace_end_patcher.start()
         self._crud_patcher.start()
         self._redis_patcher.start()
         self._flag_patcher.start()
         self._trigger_patcher.start()
+        self._append_patcher.start()
 
     def tearDown(self):
         # LIFO order
+        self._append_patcher.stop()
         self._trigger_patcher.stop()
         self._flag_patcher.stop()
         self._redis_patcher.stop()
@@ -319,14 +331,20 @@ class TestKrxCloseWindowWriterBasic(unittest.IsolatedAsyncioTestCase):
         self._trigger_patcher = patch(
             "app.tether_topic_trigger.request_tether_topic_trigger",
         )
+        # Unit 4b: CF daily-append default mock — 실 DB append(get_db_context) hang(75s timeout) 차단
+        self._append_patcher = patch(
+            "app.source_daily_rates.append_krx_cf_daily_row", return_value=("SKIP", "test"),
+        )
         self._grace_end_patcher.start()
         self._crud_patcher.start()
         self._redis_patcher.start()
         self._flag_patcher.start()
         self._trigger_patcher.start()
+        self._append_patcher.start()
 
     def tearDown(self):
         # LIFO order
+        self._append_patcher.stop()
         self._trigger_patcher.stop()
         self._flag_patcher.stop()
         self._redis_patcher.stop()
@@ -575,6 +593,105 @@ class TestKrxCloseWindowWriterBasic(unittest.IsolatedAsyncioTestCase):
         # received_at = cf_dt (KST naive) → KST aware → UTC naive
         expected_utc = cf_dt.replace(tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
         self.assertEqual(db_ts, expected_utc)
+
+
+class TestKrxCloseWindowWriterDailyAppend(unittest.IsolatedAsyncioTestCase):
+    """Unit 4b — CF daily-append hook (_sync_write tail, ADR-034 §9).
+
+    CF만 append / CM 미호출(gate) / append 예외 격리(flag 흐름 불변) /
+    call order(flag·tether 뒤 tail) / contract_code 누락 격리.
+    """
+
+    def setUp(self):
+        from app.crawlers.krx_kis import reset_krx_close_finalizer_stats_for_tests
+        reset_krx_close_finalizer_stats_for_tests()
+        # db_ok·redis_ok=True 성공 블록 진입 + emit/get_db_context mock (append session no-op)
+        self._patchers = [
+            patch("app.crawlers.krx_kis.compute_close_grace_end_kst",
+                  side_effect=lambda now, session: datetime.now(KST)),
+            patch("app.crud.insert_source_rate_unconditional", return_value=True),
+            patch("app.latest_rates_cache.set_latest_krx_rate_from_sync_job", return_value=True),
+            patch("app.latest_rates_cache.emit_krx_close_event"),
+            patch("app.database.get_db_context", MagicMock()),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patchers):
+            p.stop()
+
+    async def _flush(self, session, payload):
+        from app.crawlers.krx_kis import KrxCloseWindowWriter
+        from app import config
+        writer = KrxCloseWindowWriter()
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", True):
+            await writer(payload)
+            await writer._flush_at_window_end(session, datetime.now(KST))
+
+    async def test_cf_calls_append(self):
+        dt = _make_close_grace_dt("CF")
+        payload = _make_payload(dt, "CF", "1490.6")
+        with patch("app.latest_rates_cache.set_krx_close_captured_flag", return_value=True), \
+             patch("app.tether_topic_trigger.request_tether_topic_trigger"), \
+             patch("app.source_daily_rates.append_krx_cf_daily_row",
+                   return_value=("INSERT", "ok")) as append_mock:
+            await self._flush("CF", payload)
+        append_mock.assert_called_once()
+        args = append_mock.call_args.args  # (db, date_kst, close, contract_code)
+        self.assertEqual(args[1], dt.date())
+        self.assertEqual(args[2], 1490.6)
+        self.assertEqual(args[3], "A75605")
+
+    async def test_cm_does_not_call_append(self):
+        dt = _make_close_grace_dt("CM")
+        payload = _make_payload(dt, "CM", "1490.6")
+        with patch("app.latest_rates_cache.set_krx_close_captured_flag", return_value=True), \
+             patch("app.tether_topic_trigger.request_tether_topic_trigger"), \
+             patch("app.source_daily_rates.append_krx_cf_daily_row") as append_mock:
+            await self._flush("CM", payload)
+        append_mock.assert_not_called()
+
+    async def test_append_exception_isolated_flag_still_set(self):
+        from app.crawlers.krx_kis import get_krx_close_finalizer_stats
+        payload = _make_payload(_make_close_grace_dt("CF"), "CF")
+        with patch("app.latest_rates_cache.set_krx_close_captured_flag", return_value=True) as flag_mock, \
+             patch("app.tether_topic_trigger.request_tether_topic_trigger"), \
+             patch("app.source_daily_rates.append_krx_cf_daily_row",
+                   side_effect=RuntimeError("append boom")):
+            await self._flush("CF", payload)  # 예외 raise X (격리)
+        flag_mock.assert_called_once()  # 기존 흐름 불변 (append 실패해도 flag SET됨)
+        self.assertEqual(get_krx_close_finalizer_stats().close_grace_saved, 1)
+
+    async def test_append_called_after_flag_and_tether(self):
+        payload = _make_payload(_make_close_grace_dt("CF"), "CF")
+        manager = MagicMock()
+        with patch("app.latest_rates_cache.set_krx_close_captured_flag", return_value=True) as flag_mock, \
+             patch("app.tether_topic_trigger.request_tether_topic_trigger") as tether_mock, \
+             patch("app.source_daily_rates.append_krx_cf_daily_row") as append_mock:
+            manager.attach_mock(flag_mock, "flag")
+            manager.attach_mock(tether_mock, "tether")
+            manager.attach_mock(append_mock, "append")
+            append_mock.return_value = ("INSERT", "ok")
+            await self._flush("CF", payload)
+        names = [c[0] for c in manager.mock_calls]
+        # 최소 순서만 (brittle 회피): flag·tether < append (tail 위치 잠금)
+        self.assertLess(names.index("flag"), names.index("append"))
+        self.assertLess(names.index("tether"), names.index("append"))
+
+    async def test_missing_contract_code_isolated(self):
+        from app.crawlers.krx_kis import get_krx_close_finalizer_stats
+        payload = _make_payload(_make_close_grace_dt("CF"), "CF")
+        payload["contract_code"] = None  # 누락
+        with patch("app.latest_rates_cache.set_krx_close_captured_flag", return_value=True) as flag_mock, \
+             patch("app.tether_topic_trigger.request_tether_topic_trigger"), \
+             patch("app.source_daily_rates.append_krx_cf_daily_row",
+                   side_effect=ValueError("contract_code 필수")) as append_mock:
+            await self._flush("CF", payload)  # ValueError 격리
+        append_mock.assert_called_once()
+        self.assertIsNone(append_mock.call_args.args[3])  # contract_code=None 전달
+        flag_mock.assert_called_once()  # 기존 흐름 불변
+        self.assertEqual(get_krx_close_finalizer_stats().close_grace_saved, 1)
 
 
 if __name__ == "__main__":
