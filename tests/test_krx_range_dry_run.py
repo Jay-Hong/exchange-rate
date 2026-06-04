@@ -12,12 +12,15 @@ DB write 0 — _emit_compare_and_gate의 query SELECT만.
 from __future__ import annotations
 
 import io
+import os
 import sys
 import unittest
 from contextlib import redirect_stdout
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -145,6 +148,38 @@ class TestRunKrxRangeDryRun(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("FETCH_ERROR", out)
         self.assertIn("RANGE_DRY_RUN_RESULT=FAIL", out)
+
+
+class TestRunKrxRangeDryRunMainConfig(unittest.TestCase):
+    """main wiring config-fail 분기 (env 미설정 / one-sided / inverted window) — network·DB 0."""
+
+    def _args(self, start=None, end=None, min_interval=1.0):
+        return SimpleNamespace(start_date=start, end_date=end, min_interval_sec=min_interval)
+
+    def test_missing_env_returns_1(self):
+        # KRX_OPENAPI_AUTH_KEY 미설정 → exit 1 (HTTP/DB 진입 전 fail-close)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, clear=False):
+            os.environ.pop(K.KRX_OPENAPI_AUTH_KEY_ENV, None)
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_dry_run_main(self._args(date(2026, 6, 8), date(2026, 6, 12)))
+        self.assertEqual(rc, 1)
+        self.assertIn(K.KRX_OPENAPI_AUTH_KEY_ENV, buf.getvalue())
+
+    def test_one_sided_window_returns_2(self):
+        # env 있으나 --start만 → window None → exit 2 (make_krx_fetch_fn/DB 진입 전)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {K.KRX_OPENAPI_AUTH_KEY_ENV: "dummy"}, clear=False):
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_dry_run_main(self._args(date(2026, 6, 8), None))
+        self.assertEqual(rc, 2)
+
+    def test_inverted_window_returns_2(self):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {K.KRX_OPENAPI_AUTH_KEY_ENV: "dummy"}, clear=False):
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_dry_run_main(self._args(date(2026, 6, 12), date(2026, 6, 8)))
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":

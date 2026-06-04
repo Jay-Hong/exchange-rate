@@ -4,16 +4,17 @@
 KRX_STEP4B_PLAN.md §0 / DECISIONS.md ADR-033 Amendment 2 Step 4B 정정.
 KIS year-series 한계(A755xx=2025 미조회) → KRX 공식 OPEN API date-based로 전환.
 
-이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run + HTTP helper, mock 테스트):
+이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run + HTTP helper + CLI, mock 테스트):
   - parse_krx_fut_response: 응답 → OutBlock_1 rows
   - select_usd_front_month_row: 그날 selected front-month(미국달러 F {YYYYMM} 정규 주간) 1개
   - krx_row_to_source_daily: 선택 row → source_daily_rates dict (source_method=krx_openapi_daily)
   - build_krx_manifest: weekday-only date loop + BAS_DD==요청일 가드 → manifest (date-based)
   - run_krx_range_dry_run: sequence + build_krx_manifest + _emit_compare_and_gate(KIS 공유) 게이트 (DB read-only)
   - fetch_krx_fut_bydd_trd / make_krx_fetch_fn: 실제 fut_bydd_trd HTTP (주입 가능, AUTH_KEY env, throttle + 429 abort)
+  - main / _run_krx_range_dry_run_main: --range-dry-run CLI 진입점 (KRX_OPENAPI_AUTH_KEY env, window 산정, DB read-only)
 
 다음 단위:
-  - main/CLI wiring (window 산정 + production read-only 가드, AUTH_KEY env) → 운영 dry-run 별도 GO
+  - 운영 dry-run 실행 (별도 GO) — 실제 KRX 호출로 기존 25 KIS rows 전수 transitional match 확인
   - 전수 transitional 확인 후 migration/reingest (별도 GO)
 
 endpoint (참고, 키는 코드/문서 미기재):
@@ -22,14 +23,22 @@ endpoint (참고, 키는 코드/문서 미기재):
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
+
+# 프로젝트 루트를 sys.path에 추가 (standalone 실행 시 app.* / backfill_kis 재사용 import)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Row filter 상수 (KRX_STEP4B_PLAN §0.3)
 PROD_NM_USD = "미국달러 선물"
@@ -430,3 +439,86 @@ def make_krx_fetch_fn(
         return fetch_krx_fut_bydd_trd(d, auth_key, get_fn=get_fn, timeout=timeout)
 
     return fetch_fn
+
+
+# ─────────────────────────────────────────────────────────────
+# main / CLI wiring (Step 4B 단위 — range dry-run 진입점, DB read-only)
+# ─────────────────────────────────────────────────────────────
+#
+# --range-dry-run 명시 플래그로만 실제 KRX HTTP 호출 (bare run = help, 실수 발사 방지).
+# window/_date_arg/_resolve_range_dry_run_window는 KIS 스크립트 재사용 (DRY).
+# read-only dry-run이라 write guard 없음 (KIS _run_range_dry_run_main과 동일 — guard는 --write 전용).
+# AUTH_KEY는 KRX_OPENAPI_AUTH_KEY env에서만 로드 (로그/예외 미노출). 실제 호출은 운영 dry-run 별도 GO.
+
+KRX_OPENAPI_AUTH_KEY_ENV = "KRX_OPENAPI_AUTH_KEY"
+
+
+def _run_krx_range_dry_run_main(args) -> int:
+    """--range-dry-run main wiring: env/window/db 준비 → run_krx_range_dry_run.
+
+    DB write 0 (read-only dry-run, write guard 없음). 테스트는 run_krx_range_dry_run 직접 +
+    이 함수의 config-fail 분기(env 미설정/one-sided window). return: exit code.
+    """
+    from backfill_kis_source_daily_rates import _resolve_range_dry_run_window
+
+    auth_key = os.getenv(KRX_OPENAPI_AUTH_KEY_ENV)
+    if not auth_key:
+        print(f"[CONFIG 실패] {KRX_OPENAPI_AUTH_KEY_ENV} 미설정 (.env 확인)")
+        return 1
+
+    window = _resolve_range_dry_run_window(args)
+    if window is None:
+        print("[CONFIG 실패] --start-date/--end-date는 함께 지정 (또는 둘 다 생략 → today-1 rolling 1년)")
+        return 2
+    window_start, window_end = window
+    if window_start > window_end:
+        print(f"[CONFIG 실패] window_start({window_start}) > window_end({window_end})")
+        return 2
+
+    print("모드: KRX RANGE-DRY-RUN (DB write 0, read-only)")
+    fetch_fn = make_krx_fetch_fn(auth_key, min_interval_sec=args.min_interval_sec)
+
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        return run_krx_range_dry_run(window_start, window_end, fetch_fn, db)
+    finally:
+        db.close()
+
+
+def main() -> int:
+    # 함수-레벨 import — KIS argparse validator 재사용 (parser 순수 테스트는 KIS 미로드).
+    from backfill_kis_source_daily_rates import _date_arg
+
+    parser = argparse.ArgumentParser(
+        description="KRX OpenAPI fut_bydd_trd → source_daily_rates range dry-run (Step 4B, DB read-only).",
+    )
+    parser.add_argument(
+        "--range-dry-run", action="store_true",
+        help="KRX range dry-run 실행 (실제 fut_bydd_trd HTTP + DB read-only compare). "
+             "미지정 시 help만 출력 (HTTP 호출 없음 — 실수 발사 방지).",
+    )
+    parser.add_argument(
+        "--start-date", type=_date_arg, default=None,
+        help="YYYY-MM-DD. --end-date와 함께 지정 (재현성). 둘 다 생략 시 today-1 rolling 1년.",
+    )
+    parser.add_argument(
+        "--end-date", type=_date_arg, default=None,
+        help="YYYY-MM-DD. --start-date와 함께 지정.",
+    )
+    parser.add_argument(
+        "--min-interval-sec", type=float, default=KRX_DEFAULT_MIN_INTERVAL_SEC,
+        help=f"throttle 요청 시작 간격 초 (default {KRX_DEFAULT_MIN_INTERVAL_SEC}). 운영 dry-run서 튜닝.",
+    )
+
+    args = parser.parse_args()
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+    if not args.range_dry_run:
+        parser.print_help()
+        return 0
+    return _run_krx_range_dry_run_main(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
