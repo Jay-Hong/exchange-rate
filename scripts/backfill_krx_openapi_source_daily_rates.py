@@ -442,6 +442,101 @@ def make_krx_fetch_fn(
 
 
 # ─────────────────────────────────────────────────────────────
+# gap-only write-core (Step 4B full-year backfill — insert-only transaction)
+# ─────────────────────────────────────────────────────────────
+#
+# rows_to_write(compare_manifest_with_existing 산출 — DB에 없는 신규 거래일)만 insert.
+# insert-only: unique conflict(source/asset/date_kst) = race/stale dry-run/compare-write drift 신호
+# → ABORT+rollback (skip/upsert로 덮지 않음). 기존 matched row update/delete 0.
+# idempotency는 writer 내부가 아니라 **fresh dry-run + expected count gate**로 확보
+# (재실행 시 rows_to_write=0 → expected mismatch ABORT). commit/rollback은 caller.
+# production write는 CLI 단위에서 production guard + snapshot + 별도 GO (이 함수는 transaction core).
+
+
+# 기존 row 값 불변 검증 대상 컬럼 (id 제외 전 컬럼 — migration writer _COMPARE_COLS 동형)
+_GAP_SNAP_COLS = (
+    "source", "asset", "date_kst", "rate", "high", "low", "close",
+    "ohlc_quality", "close_basis", "source_method", "contract_code",
+    "basis_date", "published_at", "captured_at", "metadata_json",
+)
+
+
+def write_krx_gap_rows(db, rows_to_write: list[dict], expected_rows: int,
+                       window_start: date, window_end: date) -> tuple[str, str]:
+    """gap-only insert transaction core (commit/rollback은 caller).
+
+    rows_to_write(krx_row_to_source_daily dict list)만 insert. insert-only + unique conflict ABORT.
+    Returns: (status, detail) — "WRITE_OK" / "ABORT".
+    """
+    from sqlalchemy.exc import IntegrityError
+    from app.models import SourceDailyRate
+
+    # 1. expected 가드 (fail-open 차단 — production backfill은 대상 row 필수)
+    if expected_rows <= 0:
+        return "ABORT", f"expected_rows <= 0 (대상 row 필수): {expected_rows}"
+    if len(rows_to_write) != expected_rows:
+        return "ABORT", f"len(rows_to_write)={len(rows_to_write)} != expected_rows={expected_rows}"
+    # 입력 pre-check — DB touch 전 fail-fast (rows_to_write가 manifest 산출물이라 정상이나,
+    # write-core 독립 방어: source/asset/source_method/rate==close/window 위반 거부).
+    for row in rows_to_write:
+        if row.get("source") != SOURCE or row.get("asset") != ASSET:
+            return "ABORT", f"입력 row source/asset 불일치: {row.get('source')!r}/{row.get('asset')!r}"
+        if row.get("source_method") != SOURCE_METHOD:
+            return "ABORT", f"입력 row source_method != {SOURCE_METHOD}: {row.get('source_method')!r}"
+        if row.get("rate") != row.get("close"):
+            return "ABORT", f"입력 row rate != close (invariant 위반): {row.get('rate')} != {row.get('close')}"
+        d = row["date_kst"]
+        if not (window_start <= d <= window_end):
+            return "ABORT", f"입력 row date_kst={d} window 밖 [{window_start}, {window_end}]"
+
+    def _window_rows():
+        return db.query(SourceDailyRate).filter(
+            SourceDailyRate.source == SOURCE, SourceDailyRate.asset == ASSET,
+            SourceDailyRate.date_kst >= window_start, SourceDailyRate.date_kst <= window_end,
+        )
+
+    # 2. pre-write: window 내 기존 row snapshot (값 불변 검증 — migration writer surgical 동형)
+    existing_before = _window_rows().all()
+    existing_count_before = len(existing_before)
+    existing_snap = {r.id: {c: getattr(r, c) for c in _GAP_SNAP_COLS} for r in existing_before}
+
+    # 3. insert-only (unique conflict → IntegrityError → ABORT, caller rollback)
+    for row in rows_to_write:
+        db.add(SourceDailyRate(**row))
+    try:
+        db.flush()
+    except IntegrityError as e:
+        return "ABORT", f"unique conflict during insert (race/stale dry-run/drift): {type(e).__name__}"
+
+    db.expire_all()  # flush 후 fresh read 강제
+
+    # 4. post-verify (DB-state: count + 기존 값 불변)
+    after = _window_rows().all()
+    total_after = len(after)
+    if total_after != existing_count_before + expected_rows:
+        return "ABORT", (
+            f"total_after={total_after} != existing({existing_count_before}) + expected({expected_rows})"
+        )
+    after_by_id = {r.id: r for r in after}
+    inserted_ids = set(after_by_id) - set(existing_snap)
+    if len(inserted_ids) != expected_rows:
+        return "ABORT", f"inserted={len(inserted_ids)} != expected={expected_rows}"
+    # 기존 row 값 불변 (snapshot 비교 — insert-only라 구조상 보장되나, surgical 명시 검증)
+    for rid, snap in existing_snap.items():
+        r = after_by_id.get(rid)
+        if r is None:
+            return "ABORT", f"기존 row id={rid} 사라짐 (insert-only 위반 — delete 발생)"
+        for c, v in snap.items():
+            if getattr(r, c) != v:
+                return "ABORT", f"기존 row id={rid} col '{c}' 변경됨 (surgical 위반): {v!r} → {getattr(r, c)!r}"
+
+    return "WRITE_OK", (
+        f"inserted {expected_rows} gap rows / window [{window_start}, {window_end}] / "
+        f"total {existing_count_before}→{total_after} (기존 {existing_count_before} 불변)"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # main / CLI wiring (Step 4B 단위 — range dry-run 진입점, DB read-only)
 # ─────────────────────────────────────────────────────────────
 #
