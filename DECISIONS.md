@@ -4064,6 +4064,7 @@ Graph API v2를 신규 endpoint set으로 분리하고 다음 10개 정책을 an
 
 - **Bithumb**: 공식 candlestick API `api.bithumb.com/public/candlestick/USDT_KRW/{interval}` 채택. 902일 coverage (2023-12-07 KST 시작). 무인증. raw schema 비표준 **OCHL** 순서 `[ts_ms, open, close, high, low, volume]` — ccxt parse_ohlcv ([ccxt/bithumb.py:640-658](https://github.com/ccxt/ccxt/blob/master/python/ccxt/bithumb.py))로 잠금 + design 문서에 explicit warning 필수. rate limit ccxt 500ms/request (분당 120회) — 운영 사용 패턴 (startup backfill 1회 + daily refresh 1회) limit의 0.001%.
 - **KRX**: KIS `inquire-daily-fuopchartprice` (TR_ID=FHKIF03020100) + `FID_COND_MRKT_DIV_CODE=CF` + **A75YMM contract chain** 채택. 만기 지난 월물도 rt_cd=0 정상 조회 (A75605/A75604/A75603/A75602/A75601 각 100/95/70/53/34 rows). 종목 코드 sequential (Y=년 1자리, MM=월 2자리). KIS master에 명시적 continuous front-month 코드 미발견 → chain 패턴 필수.
+  - ⚠️ **Step 4B 후속 정정 (2026-06-04) — KIS year-series 한계 + source 전환**: 위 "만기 지난 월물 조회" 검증 사례(A75605~A75601)는 전부 **A756xx(Y=6=2026)**였고, **A755xx(Y=5=2025 만기 series)는 KIS 미조회**(`rt_cd=0`이나 `output2=[]` — Step 4B production dry-run 2026-06-04 확인). 시간 retention이 아니라 **year-series 한계**(A75512=2025-12도 빈 응답). 12개월 coverage가 KIS 단독 불가 → **KRX 공식 OPEN API `fut_bydd_trd`(선물 일별매매정보, 주식선물外) date-based로 source 전환** ([KRX_STEP4B_PLAN.md §0](KRX_STEP4B_PLAN.md)). KIS 대조 1:1 일치(2026-05-18=1496.50 등) + 만기일=next mapping 정합 + 2025 구간 조회 실증(샘플 3날). **KIS는 daily backfill에서 fallback/verification으로 격하** (realtime broadcast는 유지).
 - **KRX endpoint 호출 형식**: 표준 GET (`GET /uapi/domestic-futureoption/v1/quotations/inquire-daily-fuopchartprice` + headers `appkey/appsecret/authorization/tr_id` + query params).
 - **KRX chain round trip**: contract 수는 rollover boundary 정책에 따라 변동. Monthly front-month chain (boundary=만기일 07:00 KST user-facing swap point)이면 1y는 **최대 12 contracts** (월별 만기 × 12개월). 각 contract 사용 구간만 좁게 fetch하면 보통 100건 cap 안. **단일 contract listing 전체를 wide range로 조회하면 cap에 걸림** (5/27 실측: A75605 listing 전체 범위 = 정확히 100 rows cap 도달, A75606 1y range 동일 cap 도달). chain 전략은 cap 자연 회피, 단일 contract wide range만 date range split 필요.
 - **KRX provenance**: response 각 point에 `contract_code` 포함 권고 (client tooltip 등 선택적 표시).
@@ -4427,7 +4428,7 @@ class SourceDailyRate(Base):
 **Proposed** (Phase 2d 구현 시):
 
 - **Bithumb backfill**: `api.bithumb.com/public/candlestick/USDT_KRW/24h` 호출 → 902일 일괄 적재
-- **KRX backfill**: KIS `inquire-daily-fuopchartprice` + A75YMM contract chain → 만기 종목 chain 순회. Date-to-contract mapping (ADR-033 Amendment 후속) 적용
+- **KRX backfill**: ~~KIS `inquire-daily-fuopchartprice` + A75YMM contract chain~~ → **Step 4B(2026-06-04)에서 KRX 공식 OPEN API `fut_bydd_trd` date-based로 전환** (KIS year-series 한계 — A755xx(2025) 미조회. [KRX_STEP4B_PLAN.md §0](KRX_STEP4B_PLAN.md) + ADR-033 Amendment 2 Step 4B 정정). Date-to-contract mapping(만기일=next)은 유지 (`build_contract_sequence`/`_resolve_front_month` 재사용 + KRX `contract_month` join). KIS는 verification/fallback.
 - **Hana backfill**: Hana official endpoint historical row → 부족한 과거 구간만
 - 모든 backfill = **idempotent** (재실행 시 같은 결과, §10 참조)
 - Initial backfill 1회 + Gap repair 호출 시 사용
