@@ -473,3 +473,81 @@ def build_krx_cf_append_row(
         "published_at": None,
         "metadata_json": metadata,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# KRX CF append write guard (ADR-034 §9 — KRX daily append Unit 3)
+# ─────────────────────────────────────────────────────────────
+
+KRX_APPEND_INSERT = "INSERT"
+KRX_APPEND_SKIP = "SKIP"
+KRX_APPEND_HARD = "HARD"
+
+# conflict 허용 existing provenance — close 일치 시 skip 허용 (그 외 조합은 HARD)
+#  - krx_openapi_daily: backfill row (source_ohlc) — incoming 덮지 않고 보존
+#  - close_finalizer: 이전 append (idempotent 재실행)
+_KRX_APPEND_ALLOWED_EXISTING_METHODS = frozenset({"krx_openapi_daily", _KRX_CF_SOURCE_METHOD})
+
+
+def decide_krx_cf_append_action(existing, incoming: dict) -> tuple[str, str]:
+    """KRX CF daily-append conflict 정책 (pure — DB touch 없음).
+
+    existing: 기존 source_daily_rates ORM row (None이면 신규). incoming: build_krx_cf_append_row dict.
+    Returns: (action, reason). action ∈ {INSERT, SKIP, HARD}.
+
+    정책: incoming validity(KRX close_finalizer) → existing None INSERT → key/method/close 판정.
+    close match는 허용 pair(krx_openapi_daily / close_finalizer)에만 skip. 그 외 provenance는 HARD.
+    """
+    # incoming validity (이 guard는 KRX close_finalizer append 전용)
+    if incoming.get("source") != _KRX_SOURCE or incoming.get("asset") != _KRX_ASSET:
+        return KRX_APPEND_HARD, (
+            f"incoming source/asset != KRX ({incoming.get('source')}/{incoming.get('asset')})")
+    if incoming.get("source_method") != _KRX_CF_SOURCE_METHOD:
+        return KRX_APPEND_HARD, (
+            f"incoming source_method != {_KRX_CF_SOURCE_METHOD} ({incoming.get('source_method')})")
+
+    if existing is None:
+        return KRX_APPEND_INSERT, "신규 date — insert"
+
+    # existing vs incoming unique key 방어 (caller가 key로 조회하지만 pure 함수 방어)
+    if (existing.source, existing.asset, existing.date_kst) != (
+            incoming["source"], incoming["asset"], incoming["date_kst"]):
+        return KRX_APPEND_HARD, "existing/incoming key mismatch (source/asset/date)"
+
+    if existing.source_method not in _KRX_APPEND_ALLOWED_EXISTING_METHODS:
+        return KRX_APPEND_HARD, f"예상 밖 existing provenance (source_method={existing.source_method})"
+
+    if _quantize_krx(existing.close) != _quantize_krx(incoming["close"]):
+        return KRX_APPEND_HARD, (
+            f"close mismatch (existing={existing.close}, incoming={incoming['close']}, "
+            f"existing_method={existing.source_method})")
+
+    # close 일치 → skip (backfill 보존 / idempotent). high/low 차이는 정상 — reason에 surface (hard 아님)
+    reason = f"close match (existing={existing.source_method}) — skip"
+    if existing.high is not None and existing.low is not None and (
+            _quantize_krx(existing.high) != _quantize_krx(incoming["high"])
+            or _quantize_krx(existing.low) != _quantize_krx(incoming["low"])):
+        reason += " (high/low differ — existing 보존)"
+    return KRX_APPEND_SKIP, reason
+
+
+def write_krx_cf_append_row(db: Session, row: dict) -> tuple[str, str]:
+    """KRX CF daily-append guarded single-row write core (commit/rollback은 caller).
+
+    unique key로 existing 조회 → decide_krx_cf_append_action 정책 → **INSERT일 때만 db.add**.
+    plain upsert ❌ (conflict update로 backfill row 덮지 않음). SKIP/HARD는 DB touch 0.
+    caller(Unit 4 hook): INSERT→commit / SKIP→no-op / HARD→rollback + structured event/log.
+    """
+    existing = (
+        db.query(SourceDailyRate)
+        .filter(
+            SourceDailyRate.source == row["source"],
+            SourceDailyRate.asset == row["asset"],
+            SourceDailyRate.date_kst == row["date_kst"],
+        )
+        .one_or_none()
+    )
+    action, reason = decide_krx_cf_append_action(existing, row)
+    if action == KRX_APPEND_INSERT:
+        db.add(SourceDailyRate(**row))
+    return action, reason
