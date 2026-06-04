@@ -7,11 +7,27 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import backfill_krx_openapi_source_daily_rates as K  # noqa: E402
+
+_CONTRACT = SimpleNamespace(short_code="A75606", contract_month="202606",
+                            expiry_date=date(2026, 6, 15))
+
+
+def _full_row(cls="1496.50", hi="1531.10", lo="1521.90", opn="1517.60", **over):
+    row = {"BAS_DD": "20260518", "PROD_NM": "미국달러 선물", "MKT_NM": "정규",
+           "ISU_CD": "A75606", "ISU_NM": "미국달러 F 202606 (주간)",
+           "TDD_CLSPRC": cls, "TDD_HGPRC": hi, "TDD_LWPRC": lo, "TDD_OPNPRC": opn,
+           "SETL_PRC": "1496.50", "SPOT_PRC": "1495.00",
+           "ACC_TRDVOL": "12345", "ACC_OPNINT_QTY": "678"}
+    row.update(over)
+    return row
 
 
 def _row(prod, mkt, isu, cls, setl=""):
@@ -112,6 +128,64 @@ class TestSelectFrontMonth(unittest.TestCase):
         # "(주간)" 뒤 추가 텍스트는 anchor `$`로 차단
         rows = [_row("미국달러 선물", "정규", "미국달러 F 202606 (주간) X", "1496.50")]
         self.assertIsNone(K.select_usd_front_month_row(rows, "202606"))
+
+
+class TestRowToSourceDaily(unittest.TestCase):
+    def test_normal_conversion(self):
+        d = K.krx_row_to_source_daily(_full_row(), _CONTRACT)
+        self.assertEqual(d["source"], "krx")
+        self.assertEqual(d["asset"], "usd-krw-futures")
+        self.assertEqual(d["date_kst"], date(2026, 5, 18))
+        self.assertEqual(d["close"], Decimal("1496.50"))
+        self.assertEqual(d["rate"], d["close"])             # invariant
+        self.assertEqual(d["high"], Decimal("1531.10"))
+        self.assertEqual(d["low"], Decimal("1521.90"))
+        self.assertEqual(d["ohlc_quality"], "source_ohlc")
+        self.assertEqual(d["close_basis"], "krx_cf_close_1545")
+        self.assertEqual(d["source_method"], "krx_openapi_daily")
+        self.assertEqual(d["contract_code"], "A75606")
+        self.assertIsNone(d["basis_date"])
+        self.assertIsNone(d["published_at"])
+
+    def test_metadata_audit(self):
+        d = K.krx_row_to_source_daily(_full_row(), _CONTRACT)
+        m = d["metadata_json"]
+        self.assertEqual(m["contract_month"], "202606")
+        self.assertEqual(m["contract_expiry_date"], "2026-06-15")
+        self.assertEqual(m["open"], "1517.60")              # str(Decimal) — trailing 0 유지 (compare는 §7 numeric)
+        self.assertEqual(m["settlement_price"], "1496.50")
+        self.assertEqual(m["spot_price"], "1495.00")
+        self.assertEqual(m["acc_trdvol"], "12345")
+        self.assertEqual(m["isu_nm"], "미국달러 F 202606 (주간)")
+
+    def test_close_empty_raises(self):
+        with self.assertRaises(ValueError):
+            K.krx_row_to_source_daily(_full_row(cls=""), _CONTRACT)
+
+    def test_high_empty_raises_coverage(self):
+        with self.assertRaises(ValueError):
+            K.krx_row_to_source_daily(_full_row(hi=""), _CONTRACT)
+
+    def test_low_empty_raises_coverage(self):
+        with self.assertRaises(ValueError):
+            K.krx_row_to_source_daily(_full_row(lo=""), _CONTRACT)
+
+    def test_open_empty_metadata_none(self):
+        # open만 빈 → 변환 성공, metadata open None (top-level 영향 없음)
+        d = K.krx_row_to_source_daily(_full_row(opn=""), _CONTRACT)
+        self.assertIsNone(d["metadata_json"]["open"])
+        self.assertEqual(d["close"], Decimal("1496.50"))    # close/high/low 정상
+
+    def test_comma_defense(self):
+        # KRX string에 comma가 와도 Decimal 파싱 (방어)
+        d = K.krx_row_to_source_daily(_full_row(cls="1,496.50", hi="1,531.10", lo="1,521.90"), _CONTRACT)
+        self.assertEqual(d["close"], Decimal("1496.50"))
+        self.assertEqual(d["high"], Decimal("1531.10"))
+
+    def test_decimal_parse_helper(self):
+        self.assertEqual(K._parse_krx_decimal("1496.50"), Decimal("1496.50"))
+        self.assertEqual(K._parse_krx_decimal("1,496.50"), Decimal("1496.50"))
+        self.assertEqual(K._parse_krx_decimal(" 1496.5 "), Decimal("1496.5"))
 
 
 if __name__ == "__main__":
