@@ -551,3 +551,29 @@ def write_krx_cf_append_row(db: Session, row: dict) -> tuple[str, str]:
     if action == KRX_APPEND_INSERT:
         db.add(SourceDailyRate(**row))
     return action, reason
+
+
+# ─────────────────────────────────────────────────────────────
+# KRX CF daily-append orchestration (ADR-034 §9 — KRX daily append Unit 4a)
+# ─────────────────────────────────────────────────────────────
+
+def append_krx_cf_daily_row(
+    db: Session, date_kst: date, close, contract_code: str
+) -> tuple[str, str]:
+    """KRX CF close finalizer daily-append orchestration + transaction.
+
+    Unit 1(get_krx_cf_session_rollup) → Unit 2(build_krx_cf_append_row) → Unit 3(write_krx_cf_append_row).
+    session=="CF" 전용 (caller(4b hook)가 gate). close = finalizer authoritative CF close.
+    INSERT → db.commit() / SKIP·HARD → db.rollback(). **logging은 caller(4b)** — 4a는 (action, reason)만 반환.
+    builder 오류(close None / contract_code 빈값)는 ValueError 전파 → caller try/except 격리.
+
+    Returns: (action, reason). action ∈ {KRX_APPEND_INSERT, KRX_APPEND_SKIP, KRX_APPEND_HARD}.
+    """
+    rollup = get_krx_cf_session_rollup(db, date_kst)
+    row = build_krx_cf_append_row(date_kst, close, rollup, contract_code)
+    action, reason = write_krx_cf_append_row(db, row)
+    if action == KRX_APPEND_INSERT:
+        db.commit()
+    else:
+        db.rollback()
+    return action, reason
