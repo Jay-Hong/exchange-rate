@@ -4,18 +4,19 @@
 KRX_STEP4B_PLAN.md §0 / DECISIONS.md ADR-033 Amendment 2 Step 4B 정정.
 KIS year-series 한계(A755xx=2025 미조회) → KRX 공식 OPEN API date-based로 전환.
 
-이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run + HTTP helper + CLI, mock 테스트):
+이 모듈 (Step 4B — KRX parser + filter + 변환 + manifest builder + range dry-run + HTTP + gap-only write + CLI, mock 테스트):
   - parse_krx_fut_response: 응답 → OutBlock_1 rows
   - select_usd_front_month_row: 그날 selected front-month(미국달러 F {YYYYMM} 정규 주간) 1개
   - krx_row_to_source_daily: 선택 row → source_daily_rates dict (source_method=krx_openapi_daily)
   - build_krx_manifest: weekday-only date loop + BAS_DD==요청일 가드 → manifest (date-based)
   - run_krx_range_dry_run: sequence + build_krx_manifest + _emit_compare_and_gate(KIS 공유) 게이트 (DB read-only)
   - fetch_krx_fut_bydd_trd / make_krx_fetch_fn: 실제 fut_bydd_trd HTTP (주입 가능, AUTH_KEY env, throttle + 429 abort)
-  - main / _run_krx_range_dry_run_main: --range-dry-run CLI 진입점 (KRX_OPENAPI_AUTH_KEY env, window 산정, DB read-only)
+  - write_krx_gap_rows: full-year backfill insert-only transaction core (rows_to_write만 insert, surgical post-verify)
+  - main / _run_krx_range_dry_run_main / _run_krx_range_write_main: --range-dry-run / --write CLI 진입점 (env, window, production guard)
 
 다음 단위:
-  - 운영 dry-run 실행 (별도 GO) — 실제 KRX 호출로 기존 25 KIS rows 전수 transitional match 확인
-  - 전수 transitional 확인 후 migration/reingest (별도 GO)
+  - 운영 full-year write 실행 (별도 GO) — count dry-run 218 재확인 → RDS snapshot → --write --expected-rows-count 218
+  - (KRX migration·25-row 전환은 완료 — 6/4 land)
 
 endpoint (참고, 키는 코드/문서 미기재):
   GET https://data-dbg.krx.co.kr/svc/apis/drv/fut_bydd_trd?basDd=YYYYMMDD  (헤더 AUTH_KEY)
@@ -581,17 +582,143 @@ def _run_krx_range_dry_run_main(args) -> int:
         db.close()
 
 
+def _run_krx_range_write_main(args) -> int:
+    """--write main wiring: env/window/guard → fresh full flow → write_krx_gap_rows (gap-only backfill).
+
+    production DB write. fresh dry-run flow 재수행(build_krx_manifest + compare — dry-run과 동일 공유 함수,
+    drift 0) → MANIFEST_HARD/COMPARE_HARD/TRANSITIONAL>0 또는 rows_to_write != --expected-rows-count면 abort.
+    write_krx_gap_rows = insert-only transaction core. production guard + expected count gate.
+    테스트는 write_krx_gap_rows 직접 + 이 함수의 config-fail 분기(env/expected/guard).
+    """
+    from backfill_kis_source_daily_rates import (
+        _resolve_range_dry_run_window, build_contract_sequence,
+        query_existing_krx_rows, compare_manifest_with_existing,
+        check_production_write_guard,
+    )
+
+    auth_key = os.getenv(KRX_OPENAPI_AUTH_KEY_ENV)
+    if not auth_key:
+        print(f"[CONFIG 실패] {KRX_OPENAPI_AUTH_KEY_ENV} 미설정 (.env 확인)")
+        return 1
+
+    window = _resolve_range_dry_run_window(args)
+    if window is None:
+        print("[CONFIG 실패] --start-date/--end-date는 함께 지정 (또는 둘 다 생략 → today-1 rolling 1년)")
+        return 2
+    window_start, window_end = window
+    if window_start > window_end:
+        print(f"[CONFIG 실패] window_start({window_start}) > window_end({window_end})")
+        return 2
+
+    if args.expected_rows_count is None:
+        print("[CONFIG 실패] --write 시 --expected-rows-count 필수")
+        return 1
+    if args.expected_rows_count <= 0:
+        print("[CONFIG 실패] --expected-rows-count > 0 필요 (gap-only backfill은 대상 row 필수)")
+        return 1
+    guard_err = check_production_write_guard(args.allow_production_write)
+    if guard_err:
+        print(f"[PRODUCTION 가드] {guard_err}")
+        return 1
+
+    print(f"모드: KRX WRITE (gap-only backfill) / window [{window_start}, {window_end}] / "
+          f"expected_rows={args.expected_rows_count}")
+    fetch_fn = make_krx_fetch_fn(auth_key, min_interval_sec=args.min_interval_sec)
+
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        # fresh full flow — dry-run과 동일 공유 함수(build_krx_manifest / compare_manifest_with_existing)
+        sequence = build_contract_sequence(window_start, window_end)
+        try:
+            manifest = build_krx_manifest(sequence, window_start, window_end, fetch_fn)
+        except (requests.RequestException, RuntimeError, ValueError, InvalidOperation) as e:
+            print(f"FETCH_ERROR={type(e).__name__}: {e}")
+            print("WRITE_RESULT=FAIL")
+            return 1
+        print(f"MANIFEST_ROW_COUNT={len(manifest.rows)}")
+        print(f"MANIFEST_HARD_COUNT={len(manifest.hard_issues)}")
+        print(f"WARNINGS_COUNT={len(manifest.warnings)}")
+        print(f"MISSING_DATES_COUNT={len(manifest.missing_dates)}")  # 휴장일 surface (gate blocker 아님)
+        print(f"BOUNDARY_SAMPLES_COUNT={len(manifest.boundary_samples)}")
+        print(
+            "MISSING_DATES_JSON="
+            + json.dumps([{"date": m["date"].isoformat(), "reason": m["reason"]}
+                          for m in manifest.missing_dates])
+        )
+        for w in manifest.warnings:
+            print(f"  [warning] {w}")
+        if manifest.hard_issues:
+            for h in manifest.hard_issues:
+                print(f"  [HARD] {h}")
+            print("WRITE_RESULT=FAIL (manifest hard)")
+            return 1
+
+        existing = query_existing_krx_rows(db, window_start, window_end)
+        compare = compare_manifest_with_existing(manifest.rows, existing, window_start, window_end)
+        print(f"EXISTING_ROW_COUNT={len(existing)}")
+        print(f"MATCHED_EXISTING_COUNT={len(compare.matched_existing)}")
+        print(f"TRANSITIONAL_SOURCE_METHOD_MATCH_COUNT={len(compare.transitional_source_method_matches)}")
+        print(f"COMPARE_HARD_COUNT={len(compare.hard_issues)}")
+        print(f"ROWS_TO_WRITE_COUNT={len(compare.rows_to_write)}")
+        for h in compare.hard_issues:
+            print(f"  [COMPARE_HARD] {h}")
+        if compare.hard_issues:
+            print("WRITE_RESULT=FAIL (compare hard)")
+            return 1
+        if compare.transitional_source_method_matches:
+            print("WRITE_RESULT=FAIL (transitional > 0 — migration 미완료, gap write 금지)")
+            return 1
+        if len(compare.rows_to_write) != args.expected_rows_count:
+            print(f"WRITE_RESULT=FAIL (rows_to_write={len(compare.rows_to_write)} "
+                  f"!= --expected-rows-count={args.expected_rows_count} — drift/stale dry-run)")
+            return 1
+
+        status, detail = write_krx_gap_rows(
+            db, compare.rows_to_write, args.expected_rows_count, window_start, window_end
+        )
+        if status == "WRITE_OK":
+            db.commit()
+            print(f"[WRITE 완료] {detail}")
+            print("WRITE_RESULT=OK")
+            return 0
+        db.rollback()
+        print(f"[ABORT] {detail} (rollback)")
+        print("WRITE_RESULT=FAIL")
+        return 1
+    except Exception as e:
+        db.rollback()
+        print(f"[ABORT] exception: {type(e).__name__}: {e} (rollback)")
+        print("WRITE_RESULT=FAIL")
+        return 1
+    finally:
+        db.close()
+
+
 def main() -> int:
     # 함수-레벨 import — KIS argparse validator 재사용 (parser 순수 테스트는 KIS 미로드).
     from backfill_kis_source_daily_rates import _date_arg
 
     parser = argparse.ArgumentParser(
-        description="KRX OpenAPI fut_bydd_trd → source_daily_rates range dry-run (Step 4B, DB read-only).",
+        description="KRX OpenAPI fut_bydd_trd → source_daily_rates (range dry-run + gap-only write, Step 4B).",
     )
     parser.add_argument(
         "--range-dry-run", action="store_true",
         help="KRX range dry-run 실행 (실제 fut_bydd_trd HTTP + DB read-only compare). "
-             "미지정 시 help만 출력 (HTTP 호출 없음 — 실수 발사 방지).",
+             "미지정·--write 미지정 시 help만 출력 (HTTP 호출 없음 — 실수 발사 방지).",
+    )
+    parser.add_argument(
+        "--write", action="store_true",
+        help="gap-only backfill write 실행 (production DB insert). --range-dry-run과 상호 배타. "
+             "--expected-rows-count(>0) 필수 + --allow-production-write(non-SQLite).",
+    )
+    parser.add_argument(
+        "--expected-rows-count", type=int, default=None,
+        help="[--write 필수] 적재할 rows_to_write 기대 수 (write 직전 count dry-run 결과, > 0).",
+    )
+    parser.add_argument(
+        "--allow-production-write", action="store_true",
+        help="[--write] non-SQLite DB write 허용 (default off — production guard).",
     )
     parser.add_argument(
         "--start-date", type=_date_arg, default=None,
@@ -609,6 +736,11 @@ def main() -> int:
     args = parser.parse_args()
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+    if args.write and args.range_dry_run:
+        print("[CONFIG 실패] --write와 --range-dry-run은 상호 배타")
+        return 2
+    if args.write:
+        return _run_krx_range_write_main(args)
     if not args.range_dry_run:
         parser.print_help()
         return 0

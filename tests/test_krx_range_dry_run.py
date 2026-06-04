@@ -182,5 +182,143 @@ class TestRunKrxRangeDryRunMainConfig(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestRunKrxRangeWriteMainConfig(unittest.TestCase):
+    """--write main wiring config-fail 분기 (env/expected/window) — HTTP·DB write 진입 전 fail-close."""
+
+    def _args(self, start=date(2026, 4, 20), end=date(2026, 5, 27), expected=218,
+              allow=True, min_interval=1.0):
+        return SimpleNamespace(start_date=start, end_date=end, min_interval_sec=min_interval,
+                               expected_rows_count=expected, allow_production_write=allow)
+
+    def test_missing_env_returns_1(self):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, clear=False):
+            os.environ.pop(K.KRX_OPENAPI_AUTH_KEY_ENV, None)
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_write_main(self._args())
+        self.assertEqual(rc, 1)
+        self.assertIn(K.KRX_OPENAPI_AUTH_KEY_ENV, buf.getvalue())
+
+    def test_expected_none_returns_1(self):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {K.KRX_OPENAPI_AUTH_KEY_ENV: "dummy"}, clear=False):
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_write_main(self._args(expected=None))
+        self.assertEqual(rc, 1)
+        self.assertIn("expected-rows-count 필수", buf.getvalue())
+
+    def test_expected_zero_returns_1(self):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {K.KRX_OPENAPI_AUTH_KEY_ENV: "dummy"}, clear=False):
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_write_main(self._args(expected=0))
+        self.assertEqual(rc, 1)
+        self.assertIn("> 0 필요", buf.getvalue())
+
+    def test_one_sided_window_returns_2(self):
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {K.KRX_OPENAPI_AUTH_KEY_ENV: "dummy"}, clear=False):
+            with redirect_stdout(buf):
+                rc = K._run_krx_range_write_main(self._args(start=date(2026, 4, 20), end=None))
+        self.assertEqual(rc, 2)
+
+
+def _mock_manifest(rows=2, hard=0):
+    return SimpleNamespace(rows=[{}] * rows, hard_issues=["h"] * hard,
+                           warnings=[], missing_dates=[], boundary_samples=[])
+
+
+def _mock_compare(rows_to_write=2, hard=0, transitional=0, matched=0):
+    return SimpleNamespace(
+        rows_to_write=[{}] * rows_to_write, hard_issues=["h"] * hard,
+        transitional_source_method_matches=["t"] * transitional,
+        matched_existing=["m"] * matched, warnings=[],
+    )
+
+
+class TestRunKrxRangeWriteMainCore(unittest.TestCase):
+    """--write orchestration 핵심 경로 (fresh flow → compare → write_krx_gap_rows → commit/rollback).
+
+    mock: build_contract_sequence/query_existing/compare(KIS) + make_krx_fetch_fn/build_krx_manifest/
+    write_krx_gap_rows(KRX) + SessionLocal + check_production_write_guard. HTTP·실DB 0.
+    """
+
+    def _run(self, *, manifest, compare, write_result=("WRITE_OK", "ok"), expected=2):
+        args = SimpleNamespace(start_date=date(2026, 4, 20), end_date=date(2026, 5, 27),
+                               min_interval_sec=1.0, expected_rows_count=expected,
+                               allow_production_write=True)
+        mock_db = mock.MagicMock()
+        buf = io.StringIO()
+        with mock.patch("backfill_kis_source_daily_rates.build_contract_sequence", return_value=[]), \
+             mock.patch("backfill_kis_source_daily_rates.query_existing_krx_rows", return_value=[]), \
+             mock.patch("backfill_kis_source_daily_rates.compare_manifest_with_existing", return_value=compare), \
+             mock.patch("backfill_kis_source_daily_rates.check_production_write_guard", return_value=None), \
+             mock.patch("backfill_krx_openapi_source_daily_rates.make_krx_fetch_fn", return_value=(lambda d: [])), \
+             mock.patch("backfill_krx_openapi_source_daily_rates.build_krx_manifest", return_value=manifest), \
+             mock.patch("backfill_krx_openapi_source_daily_rates.write_krx_gap_rows", return_value=write_result) as mock_write, \
+             mock.patch("app.database.SessionLocal", return_value=mock_db), \
+             mock.patch.dict(os.environ, {K.KRX_OPENAPI_AUTH_KEY_ENV: "dummy"}, clear=False), \
+             redirect_stdout(buf):
+            rc = K._run_krx_range_write_main(args)
+        return rc, mock_write, mock_db, buf.getvalue()
+
+    def test_success_commits(self):
+        manifest = _mock_manifest(rows=5)            # manifest.rows(5) != rows_to_write(2) — 오전달 구분
+        compare = _mock_compare(rows_to_write=2)
+        rc, mock_write, mock_db, out = self._run(manifest=manifest, compare=compare, expected=2)
+        self.assertEqual(rc, 0)
+        mock_write.assert_called_once()
+        mock_db.commit.assert_called_once()
+        mock_db.rollback.assert_not_called()
+        self.assertIn("WRITE_RESULT=OK", out)
+        # 인자 검증 (Codex): write_krx_gap_rows(db, compare.rows_to_write, expected, ws, we)
+        call_args = mock_write.call_args.args
+        self.assertIs(call_args[1], compare.rows_to_write)   # manifest.rows 아닌 rows_to_write
+        self.assertEqual(call_args[2], 2)                    # expected_rows_count
+        self.assertEqual(call_args[3], date(2026, 4, 20))    # window_start
+        self.assertEqual(call_args[4], date(2026, 5, 27))    # window_end
+
+    def test_manifest_hard_no_write(self):
+        rc, mock_write, mock_db, out = self._run(
+            manifest=_mock_manifest(hard=1), compare=_mock_compare())
+        self.assertEqual(rc, 1)
+        mock_write.assert_not_called()
+        mock_db.commit.assert_not_called()
+        self.assertIn("manifest hard", out)
+
+    def test_compare_hard_no_write(self):
+        rc, mock_write, mock_db, out = self._run(
+            manifest=_mock_manifest(), compare=_mock_compare(hard=1))
+        self.assertEqual(rc, 1)
+        mock_write.assert_not_called()
+        mock_db.commit.assert_not_called()
+        self.assertIn("compare hard", out)
+
+    def test_transitional_no_write(self):
+        rc, mock_write, mock_db, out = self._run(
+            manifest=_mock_manifest(), compare=_mock_compare(transitional=1))
+        self.assertEqual(rc, 1)
+        mock_write.assert_not_called()
+        self.assertIn("transitional", out)
+
+    def test_expected_mismatch_no_write(self):
+        # rows_to_write(3) != expected(2) → write 미호출
+        rc, mock_write, mock_db, out = self._run(
+            manifest=_mock_manifest(rows=3), compare=_mock_compare(rows_to_write=3), expected=2)
+        self.assertEqual(rc, 1)
+        mock_write.assert_not_called()
+        mock_db.commit.assert_not_called()
+
+    def test_write_core_abort_rollback(self):
+        rc, mock_write, mock_db, out = self._run(
+            manifest=_mock_manifest(), compare=_mock_compare(),
+            write_result=("ABORT", "post-verify 실패"))
+        self.assertEqual(rc, 1)
+        mock_write.assert_called_once()
+        mock_db.rollback.assert_called_once()
+        mock_db.commit.assert_not_called()
+        self.assertIn("ABORT", out)
+
+
 if __name__ == "__main__":
     unittest.main()
