@@ -180,7 +180,7 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 | `insufficient_history` | bool | 요청한 period를 채울 수 없으면 true (신규 자산/source 장애/coverage 부족 시점) |
 | `per_point_metadata` | string[] \| optional | data point에 추가 metadata field 명시 (예: KRX의 `["contract_code"]`) |
 | `close_basis_mode` | enum | **Amendment 후속**. `"single"` (series 전체 동일 close_basis) 또는 `"mixed"` (구간별 다름 — 예: Hana의 observed_eod ↔ official_historical_backfill 경계) |
-| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 4 values 중 하나 (아래 참조) |
+| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 5 values 중 하나 (아래 참조, Investing은 ADR-035 D1) |
 | `close_basis_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 close_basis values (예: `["hana_observed_eod", "hana_official_historical_backfill"]`) |
 | `default_source_method` | enum | series-level default. mixed series에서는 **canonical/future append 기준 기본 source_method** (예: Hana mixed의 default = `observed_rollup`). 5 values 중 하나 (아래 참조) |
 | `source_method_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 source_method values |
@@ -191,12 +191,13 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 - `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close
 - `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
 - `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
+- `investing_observed_eod`: 우리 DB(`investing_exchange_rates` 장기 보관)에서 KST 해당일 마지막 관측 기준 환율 (ADR-035 D1, Proposed)
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
 
 `source_method` enum 의미 (close_basis와 직교 — 획득 방식):
 
-- `observed_rollup`: DB tick/source_rates 기반 daily rollup
+- `observed_rollup`: DB 관측 기반 daily rollup (source_rates[KRX/Bithumb] / bank_exchange_rates[Hana] / investing_exchange_rates[Investing, ADR-035 D1])
 - `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint 등)
 - `close_finalizer`: KRX CF close finalizer 결과
 - `bithumb_candlestick_api`: Bithumb 공식 24h candle API (backfill + daily refresh append 동일 방법 — Amendment 2026-06-01, 구 `bithumb_candlestick_backfill`)

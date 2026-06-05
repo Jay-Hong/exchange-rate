@@ -4146,7 +4146,7 @@ Unique key 후보: `(source, asset, date_kst)` — Phase 2d 설계 확정.
 
 #### Decision B — close_basis provenance enum (★ source identity 명시)
 
-response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
+response 각 series provenance에 `close_basis` field 추가. 5 가지 enum (Investing은 ADR-035 D1 추가):
 
 | `close_basis` | Source | 의미 |
 | --- | --- | --- |
@@ -4154,6 +4154,7 @@ response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
 | `bithumb_24h_kst_close` | Bithumb | 24h candle KST 00:00 boundary close |
 | `hana_observed_eod` | Hana (canonical) | 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값 |
 | `hana_official_historical_backfill` | Hana (과거 부족분만) | Hana 사이트 historical row (다음날 새벽 고시) |
+| `investing_observed_eod` | Investing (canonical) | 우리 DB(`investing_exchange_rates` 장기 보관)에서 KST 해당일 마지막 관측 기준 환율 (ADR-035 D1, Proposed) |
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
 
@@ -4179,6 +4180,7 @@ response 각 series provenance에 `close_basis` field 추가. 4 가지 enum:
 | `krx_cf_close_1545` | `close_finalizer` | 운영 중 매일 append (CF close finalizer) |
 | `krx_cf_close_1545` | `krx_openapi_daily` | 초기 backfill (KRX OPEN API `fut_bydd_trd` date-based, Step 4B 전환 — 기존 `kis_daily_backfill` 25 rows transitional) |
 | `bithumb_24h_kst_close` | `bithumb_candlestick_api` | 초기 backfill + 운영 중 매일 append (동일 candle API — Amendment 2026-06-01) |
+| `investing_observed_eod` | `observed_rollup` | `investing_exchange_rates`(장기 raw) daily rollup — backfill + going-forward (ADR-035 D1, Proposed) |
 
 → **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**). KRX는 close_basis 동일 + source_method 분기 (backfill=`krx_openapi_daily` [Step 4B 전환, 기존 `kis_daily_backfill` transitional] vs append=`close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
 
@@ -4258,7 +4260,7 @@ Hana daily canonical:
 
 1. `source_daily_rates` canonical table 도입 — v2 장기 그래프 hot path 단일 조회
 2. Graph hot path에서 외부 API 직접 호출 금지 (Bithumb / KIS / Hana official 모두 backfill / gap repair / 검증용)
-3. `close_basis` enum 4 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 참조)
+3. `close_basis` enum 5 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 참조)
 4. Unique key 후보: `(source, asset, date_kst)`
 5. **`ohlc_quality` top-level column** (검색/필터/렌더링 판단 직접 사용)
 6. **`rate == close` app-level invariant** (모든 backfill/append job에서 같은 값으로 write)
@@ -4323,7 +4325,7 @@ class SourceDailyRate(Base):
 | `low` | Yes | source에 따라 없을 수 있음 (close_only 시 = close) |
 | `close` | No | daily representative close (v2 그래프 consumer 사용) |
 | `ohlc_quality` | No | OHLC 품질 — `source_ohlc` / `observed_rollup` / `close_only` (§7) |
-| `close_basis` | No | 4 values (§6) |
+| `close_basis` | No | 5 values (§6) |
 | `source_method` | No | 6 values (§6) |
 | `contract_code` | Yes | KRX 전용 (예: A75606) |
 | `basis_date` | Yes | Hana official endpoint 응답 기준일 |
@@ -4370,16 +4372,17 @@ class SourceDailyRate(Base):
 - `source_method` = **어떻게 얻었는지** (수집 방법)
 - `ohlc_quality` = **OHLC 신뢰도** (품질)
 
-**`close_basis` enum 4 values** (ADR-033 Amendment 후속 Decision B 참조):
+**`close_basis` enum 5 values** (ADR-033 Amendment 후속 Decision B 참조, Investing은 ADR-035 D1):
 
 - `krx_cf_close_1545`: KRX CF 정규장 15:45 KST close finalizer
 - `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close
 - `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
 - `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
+- `investing_observed_eod`: 우리 DB(`investing_exchange_rates` 장기 보관)에서 KST 해당일 마지막 관측 기준 환율 (ADR-035 D1, Proposed)
 
 **`source_method` enum 6 values** (ADR-033 Amendment 후속 Decision B-bis + Step 4B KRX 전환):
 
-- `observed_rollup`: DB tick/source_rates/bank_exchange_rates 기반 daily rollup
+- `observed_rollup`: DB 관측 기반 daily rollup (source_rates / bank_exchange_rates / investing_exchange_rates)
 - `external_backfill`: 외부 API에서 초기 부족분 backfill (Hana official endpoint)
 - `close_finalizer`: KRX CF close finalizer 결과
 - `bithumb_candlestick_api`: Bithumb 공식 24h candle API (backfill + daily refresh append **동일 방법** — Amendment 2026-06-01, 구 `bithumb_candlestick_backfill` rename. source_method=획득 방법이므로 backfill/daily 구분은 timing이지 방법 아님)

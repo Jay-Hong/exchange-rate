@@ -200,6 +200,7 @@ class SourceDailyRate(Base):
     - Bithumb: 공식 24h candle API (backfill + daily refresh append 동일 방법, source_method=bithumb_candlestick_api)
     - Hana: official_historical backfill (mixed) + bank_exchange_rates observed_eod append
     - KRX: KIS daily + A75YMM chain backfill + CF 15:45 close finalizer append
+    - Investing: investing_exchange_rates(장기 raw) observed_eod daily rollup (ADR-035 D1, Proposed)
 
     Numeric(14, 6): 환율/선물/USDT/DXY index 모두 충분 (정수부 8자리 / 소수부 6자리).
     Read path는 Decimal 반환 — helper에서 float() 변환 정책 적용 (app/source_daily_rates.py).
@@ -207,7 +208,7 @@ class SourceDailyRate(Base):
     __tablename__ = "source_daily_rates"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    source = Column(String, nullable=False)              # "hana" / "krx" / "bithumb"
+    source = Column(String, nullable=False)              # "hana" / "krx" / "bithumb" / "investing"
     asset = Column(String, nullable=False)               # "usd-krw" / "usdt-krw" / "usd-krw-futures" 등
     date_kst = Column(Date, nullable=False)              # canonical KST date (ADR-034 §12)
     rate = Column(Numeric(14, 6), nullable=False)        # invariant: rate == close
@@ -215,7 +216,7 @@ class SourceDailyRate(Base):
     low = Column(Numeric(14, 6), nullable=True)
     close = Column(Numeric(14, 6), nullable=False)
     ohlc_quality = Column(String, nullable=False)        # source_ohlc / observed_rollup / close_only (ADR-034 §6)
-    close_basis = Column(String, nullable=False)         # 4 values (ADR-034 §6)
+    close_basis = Column(String, nullable=False)         # 5 values (ADR-034 §6 + ADR-035 investing_observed_eod)
     source_method = Column(String, nullable=False)       # 6 values (ADR-034 §6 + Step 4B krx_openapi_daily)
     contract_code = Column(String, nullable=True)        # KRX 전용 (예: A75606)
     basis_date = Column(Date, nullable=True)             # Hana official backfill 응답 기준일
