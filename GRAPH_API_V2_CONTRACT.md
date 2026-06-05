@@ -603,7 +603,7 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
    - 장기 coverage 확보 목적의 rollup: 외부 historical source 확보됨 → 우선순위 ↓
    - **Hot path 안정화 / canonical daily table 목적의 `source_daily_rates`**: 우선순위 ↑ (ADR-034 본문 참조)
    - 외부 API hot path 제거 → 그래프 요청 시 `source_daily_rates` 단일 조회
-4. **Phase 2e**: v2 endpoint 구현 PR — catalog + tab graph 2개 endpoint + `source_daily_rates` 조회 hot path 통합. 진입 전 확정 항목: ADR-033 Amendment 후속 결정 + **ADR-034 Accepted/Proposed 기준 Phase 2d 구현 결과**. ADR-034 Open 항목은 Phase 2d 중 필요한 항목부터 확정 (전체 Open 모두 land 대기 X).
+4. ✅ **Phase 2e MVP** (코드+테스트 land 2026-06-06, 운영 deploy 별도 pending): v2 endpoint 2개 — `GET /api/v2/graph/catalog` + `GET /api/v2/graph/tab` (`app/graph_v2.py` 로직 + main.py thin wiring + endpoint harness, commits `7bc1d65`/`9d43773`/`c7c218c`). **MVP 범위 = 3m/1y만** (`source_daily_rates` 단일 조회 hot path) + DXY는 market_index_rates.daily reader. 1d=v1 realtime / 1w=source_hourly_rates(ADR-035 D3) 후속 → v2는 1d/1w **400 unsupported_period**(insufficient_history 아님 — 데이터는 v1에 있음, v1 fallback hint). **v1 `/api/graph/{currency}` 변경 0** (legacy 공존 §12). catalog 코드 상수 = MVP subset(3m/1y) — 본 문서 §4 full target(1d/1w 포함)과 비강제 분리. 18 tests(graph_v2 로직 12 + endpoint 6). 동적 provenance(single/mixed + per-point) + insufficient partial coverage. 후속(별도): EC2 deploy / source_hourly_rates(1w, Phase 2e+) / 프론트 client cutover. 상세: [DECISIONS.md ADR-035](DECISIONS.md) + CLAUDE.md Phase 2e MVP anchor.
 5. **Phase 2f** (Later, optional): single series endpoint 추가 — 사용 패턴 확보 후.
 
 ## 14. Open questions (Amendment 2026-05-27)
