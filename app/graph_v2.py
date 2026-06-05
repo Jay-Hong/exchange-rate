@@ -1,0 +1,349 @@
+"""Graph API v2 — catalog + tab graph (ADR-035 Phase 2e MVP).
+
+설계: [GRAPH_API_V2_CONTRACT.md](../GRAPH_API_V2_CONTRACT.md) §4/§5/§6/§9/§10.
+
+MVP 범위 (좁게 — Codex/Claude 수렴):
+  - **supported period = 3m, 1y만**. 1d는 v1 realtime path, 1w는 source_hourly_rates(미구축) 후속.
+    → 1d/1w 요청은 endpoint(main.py)에서 400 unsupported_period.
+  - 3m/1y hot path = source_daily_rates 단일 조회 (외부/raw read 제거).
+  - DXY는 source_daily_rates 아님 → market_index_rates.daily 별도 reader (kind="market_index").
+
+문서=full target / 구현=MVP subset (비강제):
+  - GRAPH §4 catalog matrix는 1d(은행 8개) + 1w 포함한 제품 full target.
+  - 본 모듈 상수는 **3m/1y subset만** 인코딩. 1d/1w v2 추가 시 확장.
+
+엔드포인트(main.py thin wiring):
+  - GET /api/v2/graph/catalog → build_catalog()
+  - GET /api/v2/graph/tab?tab=&period= → build_tab(db, tab, period) (period∈{3m,1y})
+
+v1 (/api/graph/{currency})는 변경 0 (legacy 공존, §12).
+"""
+
+# 표준 라이브러리
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+KST = ZoneInfo("Asia/Seoul")
+
+# MVP 지원 period (1d=v1 realtime / 1w=source_hourly_rates 후속 → v2 미지원)
+MVP_PERIODS = ("3m", "1y")
+PERIOD_DAYS = {"3m": 90, "1y": 365}
+
+# insufficient_history 기준 (§6 "요청 period를 채울 수 없으면 true"):
+# 빈 series 또는 첫 데이터가 period 시작보다 이만큼(일) 초과 늦으면 period 미충족(신규 자산/coverage 부족).
+# tolerance — period 시작이 주말/휴일이거나 source 간 소폭 gap 허용(신규 자산의 큰 gap과 구분).
+# (연속 series의 시작 경계 대형 gap은 false-flag 가능하나 canonical series는 연속이라 MVP 허용)
+_COVERAGE_TOLERANCE_DAYS = 7
+
+# DXY(market_index_rates) source dedup 우선순위 — crud.py `_dxy_query_single`과 동일 (investing>cnbc>else).
+_DXY_SOURCE_PRIORITY = {"investing": 0, "cnbc": 1}
+
+CATALOG_VERSION = "2026-05-27"
+
+
+def _is_insufficient_history(first_date, start_date) -> bool:
+    """series가 요청 period 시작을 못 채우면 true (빈 series 또는 첫 데이터가 start+tolerance 초과)."""
+    if first_date is None:
+        return True
+    return (first_date - start_date).days > _COVERAGE_TOLERANCE_DAYS
+
+# ─────────────────────────────────────────────────────────────
+# Series registry — id ↔ DB key 분리 (Codex 보탬)
+#   kind="source_daily_rates": source+asset (get_range read 키)
+#   kind="market_index": instrument+granularity (market_index_rates read)
+#   id는 client 표시용 (FX는 short "hana.usd", KRX/Bithumb은 full asset)
+# ─────────────────────────────────────────────────────────────
+
+SERIES_REGISTRY = {
+    # FX — Investing (내부 investing_exchange_rates rollup, single close_basis)
+    "investing.usd": {"kind": "source_daily_rates", "source": "investing", "asset": "usd-krw",
+                      "axis_group": "krw", "label": "인베스팅", "unit": "KRW", "decimals": 2,
+                      "history_policy": "rollup_based"},
+    "investing.jpy": {"kind": "source_daily_rates", "source": "investing", "asset": "jpy-krw",
+                      "axis_group": "krw", "label": "인베스팅", "unit": "KRW", "decimals": 2,
+                      "history_policy": "rollup_based"},
+    "investing.eur": {"kind": "source_daily_rates", "source": "investing", "asset": "eur-krw",
+                      "axis_group": "krw", "label": "인베스팅", "unit": "KRW", "decimals": 2,
+                      "history_policy": "rollup_based"},
+    # FX — Hana (observed_eod + official_historical_backfill 2-source → mixed 가능)
+    "hana.usd": {"kind": "source_daily_rates", "source": "hana", "asset": "usd-krw",
+                 "axis_group": "krw", "label": "하나은행", "unit": "KRW", "decimals": 2,
+                 "history_policy": "external_historical"},
+    "hana.jpy": {"kind": "source_daily_rates", "source": "hana", "asset": "jpy-krw",
+                 "axis_group": "krw", "label": "하나은행", "unit": "KRW", "decimals": 2,
+                 "history_policy": "external_historical"},
+    "hana.eur": {"kind": "source_daily_rates", "source": "hana", "asset": "eur-krw",
+                 "axis_group": "krw", "label": "하나은행", "unit": "KRW", "decimals": 2,
+                 "history_policy": "external_historical"},
+    # Tether group — Bithumb (candlestick external_historical, single close_basis)
+    "bithumb.usdt-krw": {"kind": "source_daily_rates", "source": "bithumb", "asset": "usdt-krw",
+                         "axis_group": "krw", "label": "빗썸", "unit": "KRW", "decimals": 2,
+                         "history_policy": "external_historical"},
+    # Tether group — KRX 미국달러선물 (KIS contract chain, per-point contract_code)
+    "krx.usd-krw-futures": {"kind": "source_daily_rates", "source": "krx", "asset": "usd-krw-futures",
+                            "axis_group": "krw", "label": "KRX 미국달러선물", "unit": "KRW", "decimals": 1,
+                            "history_policy": "external_historical"},
+    # DXY — market_index_rates.daily (source_daily_rates 아님)
+    "dxy": {"kind": "market_index", "instrument": "dxy", "granularity": "daily",
+            "axis_group": "index", "label": "달러지수", "unit": "INDEX", "decimals": 3,
+            "history_policy": "rollup_based"},
+}
+
+# axis_group 정의 (§4/§9 — DXY 노출 탭만 index group 추가)
+_AXIS_KRW = {"unit": "KRW", "decimals": 2, "side": "left"}
+_AXIS_INDEX = {"unit": "INDEX", "decimals": 3, "side": "right"}
+
+# ─────────────────────────────────────────────────────────────
+# Tab × period 구성 (MVP 3m/1y subset — §3/§9 근거)
+#   usd/jpy/eur: FX 탭 / tether: USDT group
+#   §9: JPY/EUR는 DXY 미노출 / KB USD 등 은행은 1d only(3m/1y canonical은 Hana만)
+# ─────────────────────────────────────────────────────────────
+
+_TAB_SERIES = {
+    "usd": ["investing.usd", "hana.usd", "dxy"],
+    "jpy": ["investing.jpy", "hana.jpy"],
+    "eur": ["investing.eur", "hana.eur"],
+    "tether": ["bithumb.usdt-krw", "krx.usd-krw-futures", "investing.usd", "hana.usd", "dxy"],
+}
+
+_TAB_LABEL = {"usd": "달러", "jpy": "엔", "eur": "유로", "tether": "테더"}
+
+# 첫 진입 default 체크 ON (§4 default_visible_series) — DXY + 대표 1-2개
+_TAB_DEFAULT_VISIBLE = {
+    "usd": ["investing.usd", "hana.usd", "dxy"],
+    "jpy": ["investing.jpy", "hana.jpy"],
+    "eur": ["investing.eur", "hana.eur"],
+    "tether": ["bithumb.usdt-krw", "krx.usd-krw-futures", "dxy"],
+}
+
+
+def _tab_axis_groups(tab: str) -> dict:
+    """탭의 axis_groups — DXY 포함 탭만 index group 추가 (§9)."""
+    has_index = any(SERIES_REGISTRY[s]["axis_group"] == "index" for s in _TAB_SERIES[tab])
+    groups = {"krw": dict(_AXIS_KRW)}
+    if has_index:
+        groups["index"] = dict(_AXIS_INDEX)
+    return groups
+
+
+# ─────────────────────────────────────────────────────────────
+# Period 검증 / range
+# ─────────────────────────────────────────────────────────────
+
+def is_supported_period(period: str) -> bool:
+    """v2 MVP 지원 period (3m, 1y)."""
+    return period in MVP_PERIODS
+
+
+def period_range(period: str, today_kst: date) -> tuple[date, date]:
+    """period → (start_date, end_date) KST. end=today(최신 available까지), start=today-N일."""
+    days = PERIOD_DAYS[period]
+    return today_kst - timedelta(days=days), today_kst
+
+
+# ─────────────────────────────────────────────────────────────
+# Provenance 조립 (source_daily_rates series — single/mixed 동적)
+# ─────────────────────────────────────────────────────────────
+
+def _assemble_sdr_provenance(entry: dict, rows: list, start_date) -> dict:
+    """rows에서 series-level provenance 동적 조립 (§6).
+
+    - close_basis_mode: distinct close_basis 1개 → single / 2개+ → mixed (Hana만 예상)
+    - default_close_basis: 가장 최근(rows[-1]) close_basis (canonical/going-forward 기준)
+    - per_point_metadata: mixed면 [close_basis, source_method] / KRX(contract_code 존재)면 [contract_code]
+    """
+    prov = {
+        "actual_source": entry["source"],
+        "fallback_source": None,          # Amendment 후 external_historical/rollup series는 null
+        "fallback_after_days": None,
+        "history_policy": entry["history_policy"],
+        "coverage_days": (rows[-1].date_kst - rows[0].date_kst).days + 1 if rows else 0,
+        "insufficient_history": _is_insufficient_history(rows[0].date_kst if rows else None, start_date),
+    }
+    if not rows:
+        prov["close_basis_mode"] = "single"
+        prov["per_point_metadata"] = []
+        return prov
+
+    distinct_cb = {r.close_basis for r in rows}
+    distinct_sm = {r.source_method for r in rows}
+    has_contract = any(r.contract_code for r in rows)
+
+    prov["close_basis_mode"] = "mixed" if len(distinct_cb) > 1 else "single"
+    prov["default_close_basis"] = rows[-1].close_basis        # 최신 = going-forward canonical
+    prov["default_source_method"] = rows[-1].source_method
+    if prov["close_basis_mode"] == "mixed":
+        prov["close_basis_values"] = sorted(distinct_cb)
+        prov["source_method_values"] = sorted(distinct_sm)
+
+    per_point = []
+    if prov["close_basis_mode"] == "mixed":
+        per_point += ["close_basis", "source_method"]
+    if has_contract:
+        per_point.append("contract_code")
+    prov["per_point_metadata"] = per_point
+    return prov
+
+
+def _sdr_data_point(row, per_point_metadata: list) -> dict:
+    """SourceDailyRate row → v2 data point. per_point_metadata에 따라 조건부 필드 포함.
+
+    ts = date_kst 00:00:00+09:00 (§5 daily bucket 포맷).
+    """
+    ts = datetime.combine(row.date_kst, time(0, 0), tzinfo=KST).isoformat()
+    point = {"ts": ts, "rate": float(row.close), "source": row.source}
+    if "close_basis" in per_point_metadata:
+        point["close_basis"] = row.close_basis
+        point["source_method"] = row.source_method
+    if "contract_code" in per_point_metadata:
+        point["contract_code"] = row.contract_code
+    return point
+
+
+# ─────────────────────────────────────────────────────────────
+# Reader — source_daily_rates series
+# ─────────────────────────────────────────────────────────────
+
+def _read_sdr_series(db, series_id: str, entry: dict, start: date, end: date) -> dict:
+    """source_daily_rates series 1개 → {id, label, axis_group, unit, decimals, data, provenance}."""
+    from app.source_daily_rates import get_range
+
+    rows = get_range(db, entry["source"], entry["asset"], start, end)
+    provenance = _assemble_sdr_provenance(entry, rows, start)
+    per_point = provenance["per_point_metadata"]
+    data = [_sdr_data_point(r, per_point) for r in rows]
+    return {
+        "id": series_id,
+        "label": entry["label"],
+        "axis_group": entry["axis_group"],
+        "unit": entry["unit"],
+        "decimals": entry["decimals"],
+        "data": data,
+        "provenance": provenance,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Reader — DXY (market_index_rates.daily)
+# ─────────────────────────────────────────────────────────────
+
+def _read_market_index_series(db, series_id: str, entry: dict, start: date, end: date) -> dict:
+    """market_index_rates.daily series (DXY) → {id, ..., data, provenance}.
+
+    daily row의 timestamp(UTC)를 KST date로 변환해 date bucket 매핑.
+    같은 KST date 다수 source면 source priority(investing>cnbc>else, crud.py `_dxy_query_single` 일치) → 동순위는 최신 timestamp.
+    """
+    from app.models import MarketIndexRate
+
+    # KST [start 00:00, (end+1) 00:00) → UTC naive 경계로 daily row 조회 (timestamp는 naive UTC)
+    start_utc = datetime.combine(start, time(0, 0), tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = datetime.combine(end + timedelta(days=1), time(0, 0), tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
+    rows = (
+        db.query(MarketIndexRate)
+        .filter(
+            MarketIndexRate.instrument == entry["instrument"],
+            MarketIndexRate.granularity == entry["granularity"],
+            MarketIndexRate.timestamp >= start_utc,
+            MarketIndexRate.timestamp < end_utc,
+        )
+        .order_by(MarketIndexRate.timestamp.asc())
+        .all()
+    )
+    # KST date bucket — 같은 date 다수 source면 priority(investing>cnbc>else, crud.py와 동일) → 동순위 최신 timestamp.
+    # (단순 last-row dedup은 yahoo가 investing보다 늦으면 yahoo 선택 → v1 source priority 회귀)
+    def _rank(r):
+        return (_DXY_SOURCE_PRIORITY.get(r.source, 2), -r.timestamp.timestamp())
+    by_date: dict[date, MarketIndexRate] = {}
+    for r in rows:
+        d = r.timestamp.replace(tzinfo=timezone.utc).astimezone(KST).date()
+        cur = by_date.get(d)
+        if cur is None or _rank(r) < _rank(cur):
+            by_date[d] = r
+    data = [
+        {"ts": datetime.combine(d, time(0, 0), tzinfo=KST).isoformat(),
+         "rate": float(by_date[d].rate), "source": by_date[d].source}
+        for d in sorted(by_date)
+    ]
+    provenance = {
+        "actual_source": "market_index",
+        "fallback_source": None,
+        "fallback_after_days": None,
+        "history_policy": entry["history_policy"],
+        "coverage_days": (max(by_date) - min(by_date)).days + 1 if by_date else 0,
+        "insufficient_history": _is_insufficient_history(min(by_date) if by_date else None, start),
+        "close_basis_mode": "single",   # market_index는 close_basis 개념 없음 — single 고정
+        "per_point_metadata": [],
+    }
+    return {
+        "id": series_id,
+        "label": entry["label"],
+        "axis_group": entry["axis_group"],
+        "unit": entry["unit"],
+        "decimals": entry["decimals"],
+        "data": data,
+        "provenance": provenance,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# build_catalog / build_tab
+# ─────────────────────────────────────────────────────────────
+
+def build_catalog() -> dict:
+    """전체 catalog (MVP — 3m/1y subset). DB 불필요 (정적 상수)."""
+    tabs = []
+    for tab, series_ids in _TAB_SERIES.items():
+        periods = {}
+        for period in MVP_PERIODS:
+            periods[period] = {
+                "all_series": list(series_ids),
+                "default_visible_series": list(_TAB_DEFAULT_VISIBLE[tab]),
+            }
+        tabs.append({
+            "id": tab,
+            "label": _TAB_LABEL[tab],
+            "axis_groups": _tab_axis_groups(tab),
+            "periods": periods,
+        })
+    return {
+        "tabs": tabs,
+        "version": CATALOG_VERSION,
+        "supported_periods": list(MVP_PERIODS),
+        "cache_ttl_seconds": 3600,
+    }
+
+
+def build_tab(db, tab: str, period: str, today_kst: date | None = None) -> dict:
+    """탭×기간 모든 series 데이터 (§10 /api/v2/graph/tab 응답).
+
+    호출 전 endpoint가 tab 존재 + period 지원(is_supported_period) 검증 가정.
+    """
+    if today_kst is None:
+        today_kst = datetime.now(tz=KST).date()
+    start, end = period_range(period, today_kst)
+
+    series_out = []
+    for series_id in _TAB_SERIES[tab]:
+        entry = SERIES_REGISTRY[series_id]
+        if entry["kind"] == "source_daily_rates":
+            series_out.append(_read_sdr_series(db, series_id, entry, start, end))
+        elif entry["kind"] == "market_index":
+            series_out.append(_read_market_index_series(db, series_id, entry, start, end))
+        else:
+            raise ValueError(f"미지원 series kind: {entry['kind']!r} (series={series_id})")
+
+    return {
+        "tab": tab,
+        "period": period,
+        "series": series_out,
+        "metadata": {
+            "fetched_at": datetime.now(tz=KST).isoformat(),
+            "bucket_size": "1d",
+            "range": {"start": start.isoformat(), "end": end.isoformat()},
+        },
+    }
+
+
+def known_tabs() -> list[str]:
+    """catalog에 존재하는 tab id 목록 (endpoint 404 판정용)."""
+    return list(_TAB_SERIES.keys())
