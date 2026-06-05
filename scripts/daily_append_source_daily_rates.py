@@ -79,6 +79,13 @@ SOURCE_POLICY = {
     "bithumb": {"asset": "usdt-krw", "allowed_statuses": frozenset({"written"})},
     "hana": {"asset": "usd-krw", "allowed_statuses": frozenset({"written", "skipped"})},
 }
+# hana asset은 HANA_CURRENCIES/run unit 기준으로 검증한다 (verdict asset == run unit asset).
+# SOURCE_POLICY["hana"]["asset"]은 사용하지 않는다 — hana는 allowed_statuses만 정책으로 쓰임.
+# (bithumb은 단일 asset이라 resolve_run_units가 policy["asset"]을 그대로 사용.)
+
+# Hana 다각화: 3통화 (bank_exchange_rates.currency = source_daily_rates.asset).
+# orchestrator가 통화별로 따로 writer 호출 → run unit = (source, asset), per-currency 격리.
+HANA_CURRENCIES = ("usd-krw", "jpy-krw", "eur-krw")
 
 # dry-run preview 문구 (source별 — Bithumb candle fetch vs Hana 내부 DB read)
 _DRYRUN_NOTE = {
@@ -94,6 +101,23 @@ def resolve_sources(source_arg: str) -> tuple[str, ...]:
     if source_arg == "all":
         return SOURCE_RUN_ALL
     return (source_arg,)
+
+
+def resolve_run_units(sources: tuple[str, ...]) -> list[tuple[str, str]]:
+    """sources → (source, asset) run unit 리스트 (per-unit 격리 단위).
+
+    - bithumb → (bithumb, usdt-krw) 1개 (단일 asset)
+    - hana → (hana, usd-krw) / (hana, jpy-krw) / (hana, eur-krw) 3개 (통화별 따로 호출)
+    순서 고정 (sources 순서 + HANA_CURRENCIES 순서).
+    """
+    units: list[tuple[str, str]] = []
+    for source in sources:
+        if source == "hana":
+            for cur in HANA_CURRENCIES:
+                units.append((source, cur))
+        else:
+            units.append((source, SOURCE_POLICY[source]["asset"]))
+    return units
 
 
 # ─────────────────────────────────────────────────────────────
@@ -137,25 +161,27 @@ def build_bithumb_command(d: date, *, write: bool, allow_production: bool) -> li
     return cmd
 
 
-def build_hana_command(d: date, *, write: bool, allow_production: bool) -> list[str]:
-    """backfill_hana_observed_eod_source_daily_rates.py command 생성.
+def build_hana_command(d: date, asset: str, *, write: bool, allow_production: bool) -> list[str]:
+    """backfill_hana_observed_eod_source_daily_rates.py command 생성 (통화별).
 
     **Bithumb과 CLI 형태 다름** (observed_eod writer):
-    - write=True: --write --start-date X --end-date X --emit-daily-append-verdict (단일일)
-    - write=False (dry-run): --date X (bank_exchange_rates 내부 read, start/end 미사용)
+    - write=True: --write --start-date X --end-date X --currency A --emit-daily-append-verdict (단일일)
+    - write=False (dry-run): --date X --currency A (bank_exchange_rates 내부 read)
+    asset = Hana 통화 (usd-krw / jpy-krw / eur-krw).
     """
     script_path = (
         Path(__file__).resolve().parent / "backfill_hana_observed_eod_source_daily_rates.py"
     ).resolve()
     if not write:
         # dry-run: observed_eod writer는 --date 기반 (start/end 아님)
-        return [sys.executable, str(script_path), "--date", d.isoformat()]
+        return [sys.executable, str(script_path), "--date", d.isoformat(), "--currency", asset]
     cmd = [
         sys.executable,
         str(script_path),
         "--write",
         "--start-date", d.isoformat(),
         "--end-date", d.isoformat(),
+        "--currency", asset,
         "--emit-daily-append-verdict",  # orchestrator는 JSON verdict로 결과 판정
     ]
     if allow_production:
@@ -163,12 +189,15 @@ def build_hana_command(d: date, *, write: bool, allow_production: bool) -> list[
     return cmd
 
 
-def build_command(source: str, d: date, *, write: bool, allow_production: bool) -> list[str]:
-    """source별 command dispatch (A2 scope: bithumb, hana)."""
+def build_command(source: str, d: date, asset: str, *, write: bool, allow_production: bool) -> list[str]:
+    """source별 command dispatch (A2 scope: bithumb, hana). asset = run unit 통화/자산.
+
+    bithumb는 단일 asset(usdt-krw)이라 asset 미사용, hana는 --currency로 전달.
+    """
     if source == "bithumb":
         return build_bithumb_command(d, write=write, allow_production=allow_production)
     if source == "hana":
-        return build_hana_command(d, write=write, allow_production=allow_production)
+        return build_hana_command(d, asset, write=write, allow_production=allow_production)
     raise ValueError(f"미지원 source: {source} (A2 scope: bithumb, hana)")
 
 
@@ -176,12 +205,12 @@ def build_command(source: str, d: date, *, write: bool, allow_production: bool) 
 # Subprocess execution + JSON verdict 판정 (fail-closed)
 # ─────────────────────────────────────────────────────────────
 
-def run_source(source: str, d: date, *, allow_production: bool) -> tuple[int, str, str]:
-    """source별 writer subprocess 실행 (cwd=REPO_ROOT, robustness).
+def run_source(source: str, d: date, asset: str, *, allow_production: bool) -> tuple[int, str, str]:
+    """source/asset별 writer subprocess 실행 (cwd=REPO_ROOT, robustness).
 
     Returns: (returncode, stdout_full, stdout_tail_30_lines + stderr_tail_on_fail)
     """
-    cmd = build_command(source, d, write=True, allow_production=allow_production)
+    cmd = build_command(source, d, asset, write=True, allow_production=allow_production)
 
     try:
         result = subprocess.run(
@@ -192,7 +221,7 @@ def run_source(source: str, d: date, *, allow_production: bool) -> tuple[int, st
             cwd=str(REPO_ROOT),  # production cron robustness
         )
     except subprocess.TimeoutExpired:
-        return 124, "", f"[TIMEOUT] {SUBPROCESS_TIMEOUT_SECONDS}s 초과 (source={source})"
+        return 124, "", f"[TIMEOUT] {SUBPROCESS_TIMEOUT_SECONDS}s 초과 (source={source} asset={asset})"
 
     stdout_lines = result.stdout.splitlines()
     tail = "\n".join(stdout_lines[-30:])
@@ -206,10 +235,11 @@ def _is_strict_int(x) -> bool:
     return type(x) is int
 
 
-def _validate_verdict_schema(v: dict, source: str, expected_date: date) -> list[str]:
-    """verdict JSON schema + source-aware 정책 검증.
+def _validate_verdict_schema(v: dict, source: str, asset: str, expected_date: date) -> list[str]:
+    """verdict JSON schema + source/asset-aware 정책 검증.
 
-    검증: version / source / asset(source별) / date_kst / status(source별 허용).
+    검증: version / source / asset(run unit별) / date_kst / status(source별 허용).
+    asset은 run unit이 정한 통화/자산 (hana는 통화별로 다름) — verdict가 해당 asset인지 확인.
     """
     policy = SOURCE_POLICY.get(source)
     if policy is None:
@@ -220,8 +250,8 @@ def _validate_verdict_schema(v: dict, source: str, expected_date: date) -> list[
         issues.append(f"version={v.get('version')!r} != {VERDICT_VERSION}")
     if v.get("source") != source:
         issues.append(f"source={v.get('source')!r} != {source!r}")
-    if v.get("asset") != policy["asset"]:  # Codex Blocker 2: asset 검증
-        issues.append(f"asset={v.get('asset')!r} != {policy['asset']!r}")
+    if v.get("asset") != asset:  # Codex Blocker 2: asset 검증 (run unit asset 기준)
+        issues.append(f"asset={v.get('asset')!r} != {asset!r}")
     if v.get("date_kst") != expected_date.isoformat():
         issues.append(f"date_kst={v.get('date_kst')!r} != {expected_date.isoformat()!r}")
     status = v.get("status")
@@ -235,7 +265,7 @@ def _validate_verdict_schema(v: dict, source: str, expected_date: date) -> list[
 
 
 def evaluate_source_result(
-    source: str, expected_date: date, returncode: int, stdout: str,
+    source: str, asset: str, expected_date: date, returncode: int, stdout: str,
 ) -> tuple[str, str]:
     """fail-closed verdict 판정.
 
@@ -266,7 +296,7 @@ def evaluate_source_result(
     if not isinstance(v, dict):  # Codex Blocker 1: non-object JSON (list/null/str) → crash 방지
         return "FAIL", f"verdict가 JSON object 아님 (type={type(v).__name__})"
 
-    schema_issues = _validate_verdict_schema(v, source, expected_date)
+    schema_issues = _validate_verdict_schema(v, source, asset, expected_date)
     if schema_issues:
         return "FAIL", "schema: " + "; ".join(schema_issues)
 
@@ -296,15 +326,15 @@ def evaluate_source_result(
 _REQUIRED_RESULT_KEYS = frozenset({"exit", "status", "detail", "tail"})
 
 
-def execute_source(source: str, d: date, *, allow_production: bool) -> dict:
-    """source 1개 실행 단위: run_source(subprocess) + evaluate_source_result → result dict.
+def execute_source(source: str, asset: str, d: date, *, allow_production: bool) -> dict:
+    """run unit (source, asset) 1개 실행: run_source(subprocess) + evaluate → result dict.
 
     계약: 반드시 `_REQUIRED_RESULT_KEYS` 4개 키를 가진 dict 반환.
-    예외는 잡지 않음 — caller(main loop)가 per-source `except Exception`으로 격리하여
-    한 source 실패가 다른 source 실행을 막지 않도록 한다.
+    예외는 잡지 않음 — caller(main loop)가 per-unit `except Exception`으로 격리하여
+    한 unit(통화) 실패가 다른 unit 실행을 막지 않도록 한다.
     """
-    rc, stdout, tail = run_source(source, d, allow_production=allow_production)
-    verdict_status, detail = evaluate_source_result(source, d, rc, stdout)
+    rc, stdout, tail = run_source(source, d, asset, allow_production=allow_production)
+    verdict_status, detail = evaluate_source_result(source, asset, d, rc, stdout)
     return {"exit": rc, "status": verdict_status, "detail": detail, "tail": tail}
 
 
@@ -312,16 +342,16 @@ def execute_source(source: str, d: date, *, allow_production: bool) -> dict:
 # Dry-run preview (subprocess 실행 X)
 # ─────────────────────────────────────────────────────────────
 
-def print_dry_run_preview(source: str, d: date) -> None:
+def print_dry_run_preview(source: str, asset: str, d: date) -> None:
     """dry-run mode: validation + write command preview (operator UX 측면).
 
     string only — subprocess 실행 X. operator가 production cron 진입 전 차이 확인.
     """
-    val_cmd = build_command(source, d, write=False, allow_production=False)
-    write_cmd = build_command(source, d, write=True, allow_production=False)
-    write_cmd_prod = build_command(source, d, write=True, allow_production=True)
+    val_cmd = build_command(source, d, asset, write=False, allow_production=False)
+    write_cmd = build_command(source, d, asset, write=True, allow_production=False)
+    write_cmd_prod = build_command(source, d, asset, write=True, allow_production=True)
 
-    print(f"--- {source} ---")
+    print(f"--- {source} ({asset}) ---")
     print(f"[DRY-RUN] writer dry-run command ({_DRYRUN_NOTE.get(source, source)}):")
     print(f"  {' '.join(val_cmd)}")
     print()
@@ -380,10 +410,11 @@ def main() -> None:
 
     target_date = args.date or yesterday_kst()
     sources = resolve_sources(args.source)  # "all" → ("bithumb", "hana")
+    run_units = resolve_run_units(sources)  # (source, asset) — hana는 3통화로 확장
 
     print(f"모드: {'WRITE (subprocess 실 실행)' if args.write else 'DRY-RUN (command preview only)'}")
     print(f"대상 date: {target_date.isoformat()} (KST)")
-    print(f"sources: {sources}")
+    print(f"run units (source, asset): {run_units}")
     if args.write:
         print(f"allow_production_write: {args.allow_production_write}")
         print(f"subprocess timeout: {SUBPROCESS_TIMEOUT_SECONDS}s / source")
@@ -391,8 +422,8 @@ def main() -> None:
 
     if not args.write:
         # dry-run mode: command preview only (subprocess 실행 X)
-        for source in sources:
-            print_dry_run_preview(source, target_date)
+        for source, asset in run_units:
+            print_dry_run_preview(source, asset, target_date)
         print("[DRY-RUN 완료] subprocess 실행 안 됨. --write 명시 시 실 적재 진입.")
         return
 
@@ -401,10 +432,11 @@ def main() -> None:
     # (BaseException 금지: KeyboardInterrupt / SystemExit 전파). 예외/malformed → synthetic FAIL.
     # 따라서 try 이후 result는 항상 _REQUIRED_RESULT_KEYS dict → record/print/summary indexing 안전.
     results: dict[str, dict] = {}
-    for source in sources:
-        print(f"--- {source} subprocess ---")
+    for source, asset in run_units:
+        label = f"{source}:{asset}"
+        print(f"--- {label} subprocess ---")
         try:
-            result = execute_source(source, target_date, allow_production=args.allow_production_write)
+            result = execute_source(source, asset, target_date, allow_production=args.allow_production_write)
             if not isinstance(result, dict) or not _REQUIRED_RESULT_KEYS <= result.keys():
                 raise ValueError(f"execute_source malformed result (키 누락/non-dict): {result!r}")
         except Exception as e:
@@ -414,7 +446,7 @@ def main() -> None:
                 "detail": f"orchestrator 예외: {type(e).__name__}: {e}",
                 "tail": f"[EXCEPTION] {type(e).__name__}: {e}",
             }
-        results[source] = result
+        results[label] = result
         print(result["tail"])  # 위 검증으로 4-key dict 보장 → 안전
         print()
 
@@ -423,10 +455,10 @@ def main() -> None:
     print(f"[Daily Append Summary] date={target_date.isoformat()} mode=write")
     print("=" * 60)
     any_fail = False
-    for source, r in results.items():
+    for label, r in results.items():
         if r["status"] != "PASS":
             any_fail = True
-        print(f"  {source}: {r['status']} (exit={r['exit']}, {r['detail']})")
+        print(f"  {label}: {r['status']} (exit={r['exit']}, {r['detail']})")
     print()
     if any_fail:
         print("[FAIL] 일부 source 실패 — 재실행 또는 rollback anchor 확인 필요")

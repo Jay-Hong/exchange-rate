@@ -91,10 +91,12 @@ from app.daily_append_verdict import (  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 
-# bank_exchange_rates 조회 키 (app/crawlers/hana.py: BANK_NAME='hana', currency='usd-krw')
+# bank_exchange_rates 조회 키 (app/crawlers/hana.py: BANK_NAME='hana', currency='usd-krw'/'jpy-krw'/'eur-krw')
+# Hana는 bank_exchange_rates.currency == source_daily_rates.asset (동일 통화값) →
+# currency 1개 파라미터로 bank 조회 키 + source_daily asset 둘 다 설정.
 BANK_NAME = "hana"
-BANK_CURRENCY = "usd-krw"
-ASSET = "usd-krw"
+DEFAULT_CURRENCY = "usd-krw"
+SUPPORTED_CURRENCIES = ("usd-krw", "jpy-krw", "eur-krw")
 
 # baseline (prev) 최대 허용 age — 초과 시 high/low rollup에서 제외 (write 자체는 차단 X)
 # 첫 PR: calendar-age. holiday calendar PR에서 business-day age 전환 검토.
@@ -105,13 +107,15 @@ CLOSE_BASIS = "hana_observed_eod"
 SOURCE_METHOD = "observed_rollup"
 OHLC_QUALITY = "observed_rollup"
 
-def _emit_verdict(date_kst: date, status: str, reason: Optional[str], rows: int) -> None:
+def _emit_verdict(date_kst: date, status: str, reason: Optional[str], rows: int,
+                  currency: str = DEFAULT_CURRENCY) -> None:
     """daily append verdict sentinel — 공유 계약(app.daily_append_verdict)에 source/asset 채워 위임.
 
     status 매핑 (writer 내부 action → 외부 계약):
       write → written / skip_ok → skipped / skip_error → error
+    asset = currency (Hana는 bank currency == source_daily asset).
     """
-    emit_verdict("hana", ASSET, date_kst, status, reason, rows)
+    emit_verdict("hana", currency, date_kst, status, reason, rows)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -144,13 +148,15 @@ def _utc_naive_to_kst_iso(ts: datetime) -> str:
 # Fetch (bank_exchange_rates 내부 read)
 # ─────────────────────────────────────────────────────────────
 
-def fetch_prev_and_changes(db, utc_start: datetime, utc_end_excl: datetime):
+def fetch_prev_and_changes(db, utc_start: datetime, utc_end_excl: datetime,
+                           currency: str = DEFAULT_CURRENCY):
     """bank_exchange_rates에서 carry-in baseline (prev) + 당일 변경 row (changes) 조회.
 
     bank_exchange_rates는 change-only table이므로:
       - prev: utc_start 직전 마지막 관측값 (KST 00:00 시점 latest known Hana state)
       - changes: [utc_start, utc_end_excl) 윈도우 안 변경 row (당일 실 관측)
 
+    currency: bank_exchange_rates.currency 조회 키 (usd-krw / jpy-krw / eur-krw).
     Returns: (prev: Optional[BankExchangeRate], changes: list[BankExchangeRate])
     """
     from app.models import BankExchangeRate
@@ -159,7 +165,7 @@ def fetch_prev_and_changes(db, utc_start: datetime, utc_end_excl: datetime):
         db.query(BankExchangeRate)
         .filter(
             BankExchangeRate.bank == BANK_NAME,
-            BankExchangeRate.currency == BANK_CURRENCY,
+            BankExchangeRate.currency == currency,
             BankExchangeRate.timestamp < utc_start,
         )
         .order_by(BankExchangeRate.timestamp.desc(), BankExchangeRate.id.desc())
@@ -169,7 +175,7 @@ def fetch_prev_and_changes(db, utc_start: datetime, utc_end_excl: datetime):
         db.query(BankExchangeRate)
         .filter(
             BankExchangeRate.bank == BANK_NAME,
-            BankExchangeRate.currency == BANK_CURRENCY,
+            BankExchangeRate.currency == currency,
             BankExchangeRate.timestamp >= utc_start,
             BankExchangeRate.timestamp < utc_end_excl,
         )
@@ -189,6 +195,7 @@ def build_observed_eod_row(
     changes: list,
     utc_start: datetime,
     utc_end_excl: datetime,
+    currency: str = DEFAULT_CURRENCY,
 ) -> dict:
     """changes >= 1 전제 — rollup 계산 + source_daily_rates row dict 생성.
 
@@ -223,7 +230,7 @@ def build_observed_eod_row(
 
     return {
         "source": "hana",
-        "asset": ASSET,
+        "asset": currency,
         "date_kst": target_date_kst,
         "rate": close_dec,
         "high": high_dec,
@@ -259,6 +266,7 @@ def process_date(
     db,
     target_date_kst: date,
     prefetched: Optional[tuple] = None,
+    currency: str = DEFAULT_CURRENCY,
 ) -> tuple[str, Optional[dict], Optional[str]]:
     """단일 date 처리 — fetch + classify + build (DB write X).
 
@@ -276,7 +284,7 @@ def process_date(
     if prefetched is not None:
         prev, changes = prefetched
     else:
-        prev, changes = fetch_prev_and_changes(db, utc_start, utc_end_excl)
+        prev, changes = fetch_prev_and_changes(db, utc_start, utc_end_excl, currency)
 
     if not changes:
         # liveness gate: 당일 변경 row 없음 → calendar 분류로 skip 종류 결정
@@ -289,7 +297,7 @@ def process_date(
         # business_day: 평일 + 비공휴일 무변동 = 크롤러 장애 의심
         return "skip_error", None, "business_day_no_changes"
 
-    row = build_observed_eod_row(target_date_kst, prev, changes, utc_start, utc_end_excl)
+    row = build_observed_eod_row(target_date_kst, prev, changes, utc_start, utc_end_excl, currency)
     return "write", row, None
 
 
@@ -457,6 +465,21 @@ def write_with_transaction_observed_eod(
 
     session = SessionLocal()
     issues: list[str] = []
+    if not rows_to_write:
+        session.close()
+        return True, []
+    # 단일 통화 invocation 전제 — rows의 asset 도출 (post-write filter/check 기준).
+    # orchestrator가 통화별로 따로 호출하므로 한 호출의 rows는 모두 같은 asset.
+    assets = {row["asset"] for row in rows_to_write}
+    if len(assets) != 1:
+        session.close()
+        return False, [f"rows_to_write 혼합 asset: {sorted(assets)} (단일 통화 invocation 위반)"]
+    asset = assets.pop()
+    # persister 경계 allowlist guard — CLI는 argparse choices로 막지만, 수동/미래 caller가
+    # 비지원 asset row를 넘기면 차단 (구 ASSET 상수가 하던 방어를 파라미터화 후 명시 복원).
+    if asset not in SUPPORTED_CURRENCIES:
+        session.close()
+        return False, [f"unsupported asset: {asset!r} (지원: {SUPPORTED_CURRENCIES})"]
     try:
         # 1. upsert (commit=False) loop
         for row in rows_to_write:
@@ -484,7 +507,7 @@ def write_with_transaction_observed_eod(
             session.query(SourceDailyRate)
             .filter(
                 SourceDailyRate.source == "hana",
-                SourceDailyRate.asset == ASSET,
+                SourceDailyRate.asset == asset,
                 SourceDailyRate.date_kst.in_(expected_dates),
             )
             .order_by(SourceDailyRate.date_kst.asc())
@@ -495,7 +518,7 @@ def write_with_transaction_observed_eod(
         if len(written) != len(rows_to_write):
             issues.append(
                 f"row count: written {len(written)} != expected {len(rows_to_write)} "
-                f"(source=hana asset={ASSET} date_kst IN expected_dates)"
+                f"(source=hana asset={asset} date_kst IN expected_dates)"
             )
         written_dates = {row.date_kst for row in written}
         missing = expected_dates - written_dates
@@ -518,7 +541,7 @@ def write_with_transaction_observed_eod(
             # (d) enum 잠금
             if row.source != "hana":
                 issues.append(f"source mismatch at {d}: got {row.source!r}")
-            if row.asset != ASSET:
+            if row.asset != asset:
                 issues.append(f"asset mismatch at {d}: got {row.asset!r}")
             if row.close_basis != CLOSE_BASIS:
                 issues.append(f"close_basis mismatch at {d}: got {row.close_basis!r}")
@@ -601,7 +624,7 @@ def _date_arg(s: str) -> date:
         raise argparse.ArgumentTypeError(f"date format은 YYYY-MM-DD (입력: {s!r})")
 
 
-def _run_dry_run(target_date_kst: date) -> int:
+def _run_dry_run(target_date_kst: date, currency: str = DEFAULT_CURRENCY) -> int:
     """dry-run mode (bank_exchange_rates read only). Returns exit code."""
     from app.database import SessionLocal
 
@@ -613,8 +636,9 @@ def _run_dry_run(target_date_kst: date) -> int:
     db = SessionLocal()
     try:
         # 단일 fetch 후 process_date에 prefetch 전달 (N2: 이중 query 회피)
-        prev, changes = fetch_prev_and_changes(db, utc_start, utc_end_excl)
-        action, row, skip_code = process_date(db, target_date_kst, prefetched=(prev, changes))
+        prev, changes = fetch_prev_and_changes(db, utc_start, utc_end_excl, currency)
+        action, row, skip_code = process_date(
+            db, target_date_kst, prefetched=(prev, changes), currency=currency)
     finally:
         db.close()
 
@@ -663,6 +687,7 @@ def _run_write(args) -> int:
     from app.database import SessionLocal
 
     today_kst = datetime.now(tz=KST).date()
+    currency = getattr(args, "currency", DEFAULT_CURRENCY)
 
     # range guard
     range_err = validate_write_range(
@@ -692,7 +717,7 @@ def _run_write(args) -> int:
     try:
         cur = args.start_date
         while cur <= args.end_date:
-            action, row, skip_code = process_date(db, cur)
+            action, row, skip_code = process_date(db, cur, currency=currency)
             if action == "write":
                 write_rows.append(row)
             elif action == "skip_ok":
@@ -723,14 +748,14 @@ def _run_write(args) -> int:
         )
         print("  → range atomicity: transaction 미진입, write_rows 미적재 (부분 commit 차단, exit 1).")
         if args.emit_daily_append_verdict:
-            _emit_verdict(d_err, "error", code_err, 0)
+            _emit_verdict(d_err, "error", code_err, 0, currency)
         return 1
 
     if not write_rows:
         print("[PASS] write rows 0개 (모두 주말/공휴일 skip_ok 또는 빈 range). source_daily_rates write 안 됨.")
         if args.emit_daily_append_verdict and skip_ok_events:
             d_ok, code_ok = skip_ok_events[0]
-            _emit_verdict(d_ok, "skipped", code_ok, 0)
+            _emit_verdict(d_ok, "skipped", code_ok, 0, currency)
         return 0
 
     # *** PRE-WRITE ROW VALIDATION (B2): DRY_RUN_CHECKS를 transaction 전 적용 ***
@@ -753,7 +778,7 @@ def _run_write(args) -> int:
     print()
 
     # write transaction (모든 write_rows valid + skip_error 0 — atomic)
-    print(f"[4] write {len(write_rows)} rows → source_daily_rates (source=hana asset={ASSET})...")
+    print(f"[4] write {len(write_rows)} rows → source_daily_rates (source=hana asset={currency})...")
     success, write_issues = write_with_transaction_observed_eod(write_rows)
     if not success:
         print(f"[Hana observed_eod write 실패] {len(write_issues)}건 issue — transaction rollback 완료")
@@ -773,13 +798,13 @@ def _run_write(args) -> int:
         f"from datetime import date; db = SessionLocal(); "
         f"db.query(SourceDailyRate).filter("
         f"SourceDailyRate.source == 'hana', "
-        f"SourceDailyRate.asset == '{ASSET}', "
+        f"SourceDailyRate.asset == '{currency}', "
         f"SourceDailyRate.date_kst.in_([{dates_repr}])"
         f").delete(synchronize_session=False); db.commit()"
     )
     print()
     if args.emit_daily_append_verdict:
-        _emit_verdict(write_rows[0]["date_kst"], "written", None, len(write_rows))
+        _emit_verdict(write_rows[0]["date_kst"], "written", None, len(write_rows), currency)
     print(f"[PASS] 모든 date 처리 완료 ({len(write_rows)} rows committed).")
     return 0
 
@@ -838,6 +863,15 @@ def main() -> None:
             "--write + 단일 날짜(start==end)에서만 허용. 일반 backfill 실행은 미사용."
         ),
     )
+    parser.add_argument(
+        "--currency",
+        choices=SUPPORTED_CURRENCIES,
+        default=DEFAULT_CURRENCY,
+        help=(
+            f"Hana 통화 (bank_exchange_rates.currency = source_daily_rates.asset). "
+            f"default {DEFAULT_CURRENCY}. orchestrator가 통화별로 따로 호출."
+        ),
+    )
     args = parser.parse_args()
 
     # --emit-daily-append-verdict: --write 동반 필수 (verdict는 append 결과 계약)
@@ -862,7 +896,7 @@ def main() -> None:
 
     mode_label = "WRITE (calendar-day loop)" if args.write else "DRY-RUN (bank_exchange_rates read only)"
     print(f"모드: {mode_label}")
-    print(f"Source: bank_exchange_rates (bank={BANK_NAME} currency={BANK_CURRENCY}) → source_daily_rates (source=hana asset={ASSET})")
+    print(f"Source: bank_exchange_rates (bank={BANK_NAME} currency={args.currency}) → source_daily_rates (source=hana asset={args.currency})")
     print(f"close_basis={CLOSE_BASIS} / source_method={SOURCE_METHOD} / ohlc_quality={OHLC_QUALITY}")
     print()
 
@@ -870,7 +904,7 @@ def main() -> None:
         sys.exit(_run_write(args))
     else:
         target_date_kst = args.date or datetime.now(tz=KST).date()
-        sys.exit(_run_dry_run(target_date_kst))
+        sys.exit(_run_dry_run(target_date_kst, args.currency))
 
 
 if __name__ == "__main__":

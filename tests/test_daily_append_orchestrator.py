@@ -39,84 +39,84 @@ class TestEvaluateSourceResult(unittest.TestCase):
 
     def test_written_pass(self):
         out = "로그 라인\n" + sentinel(status="written", rows=1) + "\n추가 로그"
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "PASS", detail)
 
     def test_written_rows_mismatch_fail(self):
-        s, detail = O.evaluate_source_result("bithumb", D, 0, sentinel(status="written", rows=2))
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, sentinel(status="written", rows=2))
         self.assertEqual(s, "FAIL")
         self.assertIn("rows", detail)
 
     def test_skipped_weekend_pass(self):
         out = sentinel(source="hana", asset="usd-krw", status="skipped",
                        reason="weekend_no_changes", rows=0)
-        s, detail = O.evaluate_source_result("hana", D, 0, out)
+        s, detail = O.evaluate_source_result("hana", "usd-krw", D, 0, out)
         self.assertEqual(s, "PASS", detail)
 
     def test_skipped_holiday_pass(self):
         out = sentinel(source="hana", asset="usd-krw", status="skipped",
                        reason="holiday_no_changes", rows=0)
-        s, detail = O.evaluate_source_result("hana", D, 0, out)
+        s, detail = O.evaluate_source_result("hana", "usd-krw", D, 0, out)
         self.assertEqual(s, "PASS", detail)
 
     def test_skipped_disallowed_reason_fail(self):
         # hana skipped이나 business_day_no_changes는 허용 reason 아님 (hana로 — bithumb은 skipped 자체 불가)
         out = sentinel(source="hana", asset="usd-krw", status="skipped",
                        reason="business_day_no_changes", rows=0)
-        s, detail = O.evaluate_source_result("hana", D, 0, out)
+        s, detail = O.evaluate_source_result("hana", "usd-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("reason", detail)
 
     def test_skipped_nonzero_rows_fail(self):
         out = sentinel(source="hana", asset="usd-krw", status="skipped",
                        reason="weekend_no_changes", rows=1)
-        s, detail = O.evaluate_source_result("hana", D, 0, out)
+        s, detail = O.evaluate_source_result("hana", "usd-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
 
     def test_error_status_fail(self):
         out = sentinel(source="hana", asset="usd-krw", status="error",
                        reason="business_day_no_changes", rows=0)
-        s, detail = O.evaluate_source_result("hana", D, 1, out)
+        s, detail = O.evaluate_source_result("hana", "usd-krw", D, 1, out)
         self.assertEqual(s, "FAIL")
 
     def test_exit_nonzero_always_fail(self):
         # written sentinel이 있어도 exit nonzero면 FAIL
-        s, detail = O.evaluate_source_result("bithumb", D, 1, sentinel(status="written", rows=1))
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 1, sentinel(status="written", rows=1))
         self.assertEqual(s, "FAIL")
 
     def test_exit0_no_sentinel_fail(self):
         out = "로그만 있고 sentinel 없음\n[Bithumb write 완료] 1 rows committed"
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("정확히 1개", detail)
 
     def test_exit0_duplicate_sentinel_fail(self):
         out = sentinel(rows=1) + "\n" + sentinel(rows=1)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
 
     def test_malformed_json_fail(self):
         out = SENTINEL_PREFIX + "{not valid json"
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("malformed", detail)
 
     def test_schema_source_mismatch_fail(self):
         # 기대 bithumb인데 verdict source=hana
         out = sentinel(source="hana", status="written", rows=1)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("source", detail)
 
     def test_schema_date_mismatch_fail(self):
         out = sentinel(date_kst="2026-05-27", status="written", rows=1)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("date_kst", detail)
 
     def test_schema_version_mismatch_fail(self):
         out = sentinel(version=999, status="written", rows=1)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
 
     # ── Codex adversarial Blockers (fail-closed 잠금) ──
@@ -125,41 +125,41 @@ class TestEvaluateSourceResult(unittest.TestCase):
         """B1: 유효 JSON이라도 object 아니면 crash 대신 FAIL (list/null/string/number)."""
         for raw in ("[]", "null", '"text"', "123"):
             out = SENTINEL_PREFIX + raw
-            s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+            s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
             self.assertEqual(s, "FAIL", msg=f"{raw} should FAIL")
             self.assertIn("object 아님", detail)
 
     def test_asset_mismatch_fail(self):
         """B2: source별 expected asset 불일치 거부."""
         out = sentinel(asset="WRONG", status="written", rows=1)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("asset", detail)
 
     def test_bithumb_skipped_rejected(self):
         """B3: Bithumb은 24/7 source — skipped 비허용 (source-aware freshness guard)."""
         out = sentinel(source="bithumb", status="skipped", reason="weekend_no_changes", rows=0)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("비허용", detail)
 
     def test_bool_rows_rejected(self):
         """B4: rows=True는 type(rows) is int 검사로 거부 (True==1 회피)."""
         out = sentinel(status="written", reason=None, rows=True)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("rows type", detail)
 
     def test_str_rows_rejected(self):
         """B4: rows="1" (str)도 거부."""
         out = sentinel(status="written", reason=None, rows="1")
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
 
     def test_written_nonnull_reason_rejected(self):
         """NB: written은 reason None 필수."""
         out = sentinel(status="written", reason="unexpected", rows=1)
-        s, detail = O.evaluate_source_result("bithumb", D, 0, out)
+        s, detail = O.evaluate_source_result("bithumb", "usdt-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
         self.assertIn("reason", detail)
 
@@ -167,22 +167,22 @@ class TestEvaluateSourceResult(unittest.TestCase):
 class TestBuildCommand(unittest.TestCase):
 
     def test_write_includes_emit_flag(self):
-        cmd = O.build_command("bithumb", D, write=True, allow_production=False)
+        cmd = O.build_command("bithumb", D, "usdt-krw", write=True, allow_production=False)
         self.assertIn("--write", cmd)
         self.assertIn("--emit-daily-append-verdict", cmd)
 
     def test_validation_command_no_emit_no_write(self):
-        cmd = O.build_command("bithumb", D, write=False, allow_production=False)
+        cmd = O.build_command("bithumb", D, "usdt-krw", write=False, allow_production=False)
         self.assertNotIn("--write", cmd)
         self.assertNotIn("--emit-daily-append-verdict", cmd)
 
     def test_allow_production_forwarded(self):
-        cmd = O.build_command("bithumb", D, write=True, allow_production=True)
+        cmd = O.build_command("bithumb", D, "usdt-krw", write=True, allow_production=True)
         self.assertIn("--allow-production-write", cmd)
 
     def test_unsupported_source_raises(self):
         with self.assertRaises(ValueError):
-            O.build_command("krx", D, write=True, allow_production=False)
+            O.build_command("krx", D, "usd-krw-futures", write=True, allow_production=False)
 
 
 class TestCliEmitGuards(unittest.TestCase):
@@ -250,7 +250,7 @@ class TestBuildHanaCommand(unittest.TestCase):
     """Hana observed_eod writer CLI quirk: write=start/end+emit, dry-run=--date."""
 
     def test_write_shape(self):
-        cmd = O.build_command("hana", D, write=True, allow_production=False)
+        cmd = O.build_command("hana", D, "usd-krw", write=True, allow_production=False)
         self.assertIn("--write", cmd)
         self.assertIn("--start-date", cmd)
         self.assertIn("--end-date", cmd)
@@ -258,15 +258,45 @@ class TestBuildHanaCommand(unittest.TestCase):
         self.assertIn("backfill_hana_observed_eod_source_daily_rates.py", " ".join(cmd))
 
     def test_write_prod_forwards_allow(self):
-        cmd = O.build_command("hana", D, write=True, allow_production=True)
+        cmd = O.build_command("hana", D, "usd-krw", write=True, allow_production=True)
         self.assertIn("--allow-production-write", cmd)
 
     def test_dryrun_uses_date_not_startend(self):
-        cmd = O.build_command("hana", D, write=False, allow_production=False)
+        cmd = O.build_command("hana", D, "usd-krw", write=False, allow_production=False)
         self.assertIn("--date", cmd)
         self.assertNotIn("--write", cmd)
         self.assertNotIn("--start-date", cmd)
         self.assertNotIn("--emit-daily-append-verdict", cmd)
+
+    def test_currency_forwarded_write(self):
+        cmd = O.build_command("hana", D, "jpy-krw", write=True, allow_production=False)
+        self.assertIn("--currency", cmd)
+        self.assertIn("jpy-krw", cmd)
+
+    def test_currency_forwarded_dryrun(self):
+        cmd = O.build_command("hana", D, "eur-krw", write=False, allow_production=False)
+        self.assertIn("--currency", cmd)
+        self.assertIn("eur-krw", cmd)
+
+
+class TestResolveRunUnits(unittest.TestCase):
+    """sources → (source, asset) run units (hana 3통화 확장)."""
+
+    def test_bithumb_single_unit(self):
+        self.assertEqual(O.resolve_run_units(("bithumb",)), [("bithumb", "usdt-krw")])
+
+    def test_hana_three_currencies(self):
+        self.assertEqual(
+            O.resolve_run_units(("hana",)),
+            [("hana", "usd-krw"), ("hana", "jpy-krw"), ("hana", "eur-krw")],
+        )
+
+    def test_all_four_units_fixed_order(self):
+        self.assertEqual(
+            O.resolve_run_units(("bithumb", "hana")),
+            [("bithumb", "usdt-krw"), ("hana", "usd-krw"),
+             ("hana", "jpy-krw"), ("hana", "eur-krw")],
+        )
 
 
 def _run_main(argv) -> tuple[int, str]:
@@ -282,45 +312,52 @@ def _run_main(argv) -> tuple[int, str]:
 
 
 class TestMainLoopIsolation(unittest.TestCase):
-    """main loop per-source 격리 (Codex 필수 보완): 한 source 예외가 다른 source를 막지 않음."""
+    """main loop per-unit (source, asset) 격리: 한 unit 예외가 다른 unit을 막지 않음.
+
+    --source all → run units [bithumb:usdt-krw, hana:usd-krw, hana:jpy-krw, hana:eur-krw].
+    execute_source(source, asset, d, *, allow_production) 시그니처.
+    """
 
     ARGV = ["prog", "--source", "all", "--write", "--allow-production-write", "--date", "2026-05-28"]
 
     def _ok(self, detail="ok"):
         return {"exit": 0, "status": "PASS", "detail": detail, "tail": "tail"}
 
-    def test_first_source_exception_second_still_runs(self):
-        """첫 source(bithumb) 예외 → 둘째(hana) 여전히 실행 + aggregate exit 1."""
+    def test_first_unit_exception_rest_still_run(self):
+        """첫 unit(bithumb) 예외 → 나머지 hana 3통화 여전히 실행 + aggregate exit 1."""
         calls = []
 
-        def side_effect(source, d, *, allow_production):
-            calls.append(source)
+        def side_effect(source, asset, d, *, allow_production):
+            calls.append((source, asset))
             if source == "bithumb":
                 raise RuntimeError("boom")
             return self._ok()
 
         with patch.object(O, "execute_source", side_effect=side_effect):
             code, _ = _run_main(self.ARGV)
-        self.assertEqual(calls, ["bithumb", "hana"])
+        self.assertEqual(calls, [("bithumb", "usdt-krw"), ("hana", "usd-krw"),
+                                 ("hana", "jpy-krw"), ("hana", "eur-krw")])
         self.assertEqual(code, 1)
 
-    def test_bithumb_success_hana_fail_preserved_exit1(self):
-        """Bithumb 성공 commit 후 Hana 실패 → Bithumb 결과 보존 + exit 1 (cross-source transaction 아님)."""
-        def side_effect(source, d, *, allow_production):
-            if source == "hana":
-                raise ValueError("hana down")
-            return self._ok(detail="bithumb written rows=1")
+    def test_one_hana_currency_fail_others_run(self):
+        """Hana 한 통화(jpy) 실패 → 다른 통화(usd/eur) 보존 + exit 1 (per-currency 격리)."""
+        def side_effect(source, asset, d, *, allow_production):
+            if asset == "jpy-krw":
+                raise ValueError("jpy down")
+            return self._ok(detail=f"{source}:{asset} ok")
 
         with patch.object(O, "execute_source", side_effect=side_effect):
             code, out = _run_main(self.ARGV)
         self.assertEqual(code, 1)
-        self.assertIn("bithumb: PASS", out)
-        self.assertIn("hana: FAIL", out)
+        self.assertIn("bithumb:usdt-krw: PASS", out)
+        self.assertIn("hana:usd-krw: PASS", out)
+        self.assertIn("hana:jpy-krw: FAIL", out)
+        self.assertIn("hana:eur-krw: PASS", out)
 
     def test_synthetic_fail_detail_has_exception_type(self):
         """synthetic FAIL detail에 type(e).__name__ 포함 (운영 장애 분류 최소 정보 — Codex)."""
-        def side_effect(source, d, *, allow_production):
-            if source == "hana":
+        def side_effect(source, asset, d, *, allow_production):
+            if asset == "eur-krw":
                 raise KeyError("missing")
             return self._ok()
 
@@ -335,42 +372,38 @@ class TestMainLoopIsolation(unittest.TestCase):
         self.assertIn("[PASS]", out)
 
     def test_malformed_result_none_synthetic_fail(self):
-        """execute_source가 None(malformed) 반환 → 해당 source synthetic FAIL, 다른 source 보존 + exit 1.
-
-        (검증 없으면 None.get/None indexing으로 loop crash — Codex 재현)
-        """
-        def side_effect(source, d, *, allow_production):
-            return None if source == "hana" else self._ok()
+        """execute_source가 None(malformed) 반환 → 해당 unit synthetic FAIL, 다른 unit 보존 + exit 1."""
+        def side_effect(source, asset, d, *, allow_production):
+            return None if asset == "jpy-krw" else self._ok()
 
         with patch.object(O, "execute_source", side_effect=side_effect):
             code, out = _run_main(self.ARGV)
         self.assertEqual(code, 1)
-        self.assertIn("bithumb: PASS", out)
-        self.assertIn("hana: FAIL", out)
+        self.assertIn("hana:usd-krw: PASS", out)
+        self.assertIn("hana:jpy-krw: FAIL", out)
 
     def test_malformed_result_missing_key_synthetic_fail(self):
-        """execute_source가 필수 키 누락 dict 반환 → synthetic FAIL, 다른 source 보존 + exit 1.
-
-        (검증 없으면 summary의 r["status"] KeyError로 crash — Codex 재현)
-        """
-        def side_effect(source, d, *, allow_production):
-            return {"tail": "x"} if source == "hana" else self._ok()  # status/exit/detail 누락
+        """execute_source가 필수 키 누락 dict 반환 → synthetic FAIL, 다른 unit 보존 + exit 1."""
+        def side_effect(source, asset, d, *, allow_production):
+            return {"tail": "x"} if asset == "jpy-krw" else self._ok()  # status/exit/detail 누락
 
         with patch.object(O, "execute_source", side_effect=side_effect):
             code, out = _run_main(self.ARGV)
         self.assertEqual(code, 1)
-        self.assertIn("bithumb: PASS", out)
-        self.assertIn("hana: FAIL", out)
+        self.assertIn("hana:usd-krw: PASS", out)
+        self.assertIn("hana:jpy-krw: FAIL", out)
 
 
 class TestDryRunPreviewAllSources(unittest.TestCase):
 
-    def test_all_preview_outputs_both_sources(self):
-        """--source all dry-run preview는 bithumb + hana 모두 출력 (hana는 내부 read 문구)."""
+    def test_all_preview_outputs_all_units(self):
+        """--source all dry-run preview는 bithumb + hana 3통화 모두 출력 (unit별)."""
         code, out = _run_main(["prog", "--source", "all"])
         self.assertEqual(code, 0)
-        self.assertIn("--- bithumb ---", out)
-        self.assertIn("--- hana ---", out)
+        self.assertIn("--- bithumb (usdt-krw) ---", out)
+        self.assertIn("--- hana (usd-krw) ---", out)
+        self.assertIn("--- hana (jpy-krw) ---", out)
+        self.assertIn("--- hana (eur-krw) ---", out)
         self.assertIn("내부 관측 read", out)  # Hana source-aware 문구
 
 
@@ -381,8 +414,8 @@ class TestDefaultSourceBithumb(unittest.TestCase):
         with patch.object(O, "resolve_sources", wraps=O.resolve_sources) as rs:
             code, out = _run_main(["prog"])
         rs.assert_called_once_with("bithumb")
-        self.assertIn("--- bithumb ---", out)
-        self.assertNotIn("--- hana ---", out)
+        self.assertIn("--- bithumb (usdt-krw) ---", out)
+        self.assertNotIn("hana", out)
 
 
 if __name__ == "__main__":

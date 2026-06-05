@@ -66,9 +66,9 @@ class _BaseDBTest(unittest.TestCase):
         self._p_engine.stop()
         self.engine.dispose()
 
-    def _add_bank(self, ts, rate):
+    def _add_bank(self, ts, rate, currency="usd-krw"):
         with self.Session() as db:
-            db.add(BankExchangeRate(bank="hana", currency="usd-krw", rate=rate, timestamp=ts))
+            db.add(BankExchangeRate(bank="hana", currency=currency, rate=rate, timestamp=ts))
             db.commit()
 
     def _daily_rows(self):
@@ -325,11 +325,11 @@ class TestProductionGuard(unittest.TestCase):
 class TestRunWriteExitCodes(_BaseDBTest):
 
     def _args(self, start, end, include_today=False, allow_production=False,
-              emit_verdict=False):
+              emit_verdict=False, currency="usd-krw"):
         return argparse.Namespace(
             start_date=start, end_date=end,
             include_today=include_today, allow_production_write=allow_production,
-            emit_daily_append_verdict=emit_verdict,
+            emit_daily_append_verdict=emit_verdict, currency=currency,
         )
 
     def _run(self, args):
@@ -412,6 +412,96 @@ class TestRunWriteExitCodes(_BaseDBTest):
         self.assertEqual(v["status"], "error")
         self.assertEqual(v["reason"], "business_day_no_changes")
         self.assertEqual(v["rows"], 0)
+
+    def test_verdict_written_jpy_asset(self):
+        """JPY: verdict asset == jpy-krw (orchestrator가 통화별 검증)."""
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 9.00, currency="jpy-krw")
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 9.05, currency="jpy-krw")
+        rc, out = self._run(self._args(WEEKDAY, WEEKDAY, emit_verdict=True, currency="jpy-krw"))
+        self.assertEqual(rc, 0)
+        v = self._extract_verdict(out)
+        self.assertEqual(v["status"], "written")
+        self.assertEqual(v["asset"], "jpy-krw")
+        self.assertEqual(len(self._daily_rows()), 1)
+
+
+# ---------------------------------------------------------------------------
+# Group D — 통화 파라미터화 (JPY/EUR) + currency 격리 (Hana 다각화)
+# ---------------------------------------------------------------------------
+
+class TestCurrencyParameterization(_BaseDBTest):
+    """JPY/EUR process_date·write + currency 격리 + 혼합 asset 거부."""
+
+    def test_jpy_process_date_row_asset(self):
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 9.00, currency="jpy-krw")  # prev
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 9.05, currency="jpy-krw")   # change = close
+        with self.Session() as db:
+            action, row, code = W.process_date(db, WEEKDAY, currency="jpy-krw")
+        self.assertEqual(action, "write")
+        self.assertEqual(row["asset"], "jpy-krw")
+        self.assertEqual(row["source"], "hana")
+        self.assertEqual(row["close"], Decimal("9.05"))
+        self.assertEqual(row["rate"], row["close"])
+        self.assertEqual(row["low"], Decimal("9.00"))  # prev baseline 포함
+
+    def test_eur_process_date_row_asset(self):
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 1600.0, currency="eur-krw")
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 1605.0, currency="eur-krw")
+        with self.Session() as db:
+            action, row, code = W.process_date(db, WEEKDAY, currency="eur-krw")
+        self.assertEqual(action, "write")
+        self.assertEqual(row["asset"], "eur-krw")
+        self.assertEqual(row["close"], Decimal("1605.0"))
+
+    def test_currency_isolation_in_fetch(self):
+        """usd + jpy bank row 공존 → currency별 조회 독립 (서로 무관)."""
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 1405.0, currency="usd-krw")  # usd change
+        self._add_bank(_ts(2026, 5, 28, 6, 0), 9.05, currency="jpy-krw")    # jpy change
+        with self.Session() as db:
+            _, jpy_row, _ = W.process_date(db, WEEKDAY, currency="jpy-krw")
+            _, usd_row, _ = W.process_date(db, WEEKDAY, currency="usd-krw")
+        self.assertEqual(jpy_row["asset"], "jpy-krw")
+        self.assertEqual(jpy_row["close"], Decimal("9.05"))   # usd 1405 아님
+        self.assertEqual(usd_row["asset"], "usd-krw")
+        self.assertEqual(usd_row["close"], Decimal("1405.0"))
+
+    def test_jpy_write_commits_with_asset(self):
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 9.00, currency="jpy-krw")
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 9.05, currency="jpy-krw")
+        with self.Session() as db:
+            _, row, _ = W.process_date(db, WEEKDAY, currency="jpy-krw")
+        success, issues = W.write_with_transaction_observed_eod([row])
+        self.assertTrue(success, issues)
+        rows = self._daily_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].asset, "jpy-krw")
+        self.assertEqual(rows[0].source_method, "observed_rollup")
+
+    def test_mixed_asset_write_rejected(self):
+        """혼합 asset rows → write 거부 (단일 통화 invocation 위반, post-write 전 차단)."""
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 1400.0, currency="usd-krw")
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 1405.0, currency="usd-krw")
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 9.00, currency="jpy-krw")
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 9.05, currency="jpy-krw")
+        with self.Session() as db:
+            _, usd_row, _ = W.process_date(db, WEEKDAY, currency="usd-krw")
+            _, jpy_row, _ = W.process_date(db, WEEKDAY, currency="jpy-krw")
+        success, issues = W.write_with_transaction_observed_eod([usd_row, jpy_row])
+        self.assertFalse(success)
+        self.assertTrue(any("혼합 asset" in i for i in issues), issues)
+        self.assertEqual(len(self._daily_rows()), 0)
+
+    def test_unsupported_asset_rejected(self):
+        """지원 통화 외 asset row → write 전 reject + DB write 0 (persister allowlist guard)."""
+        self._add_bank(_ts(2026, 5, 27, 10, 0), 100.0, currency="xxx-krw")
+        self._add_bank(_ts(2026, 5, 28, 5, 0), 101.0, currency="xxx-krw")
+        with self.Session() as db:
+            _, row, _ = W.process_date(db, WEEKDAY, currency="xxx-krw")
+        self.assertEqual(row["asset"], "xxx-krw")  # build는 막지 않음 (write 경계가 방어)
+        success, issues = W.write_with_transaction_observed_eod([row])
+        self.assertFalse(success)
+        self.assertTrue(any("unsupported asset" in i for i in issues), issues)
+        self.assertEqual(len(self._daily_rows()), 0)
 
 
 if __name__ == "__main__":
