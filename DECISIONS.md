@@ -4547,7 +4547,7 @@ class SourceDailyRate(Base):
 **Open**:
 
 - 단계별 진입 검증 기준 (예: backfill 완료율 100% / daily append 7일 연속 성공 등)
-- **장기 그래프 DB 표준화 (Phase 2e 진입 전 결정)**: 1w는 `source_hourly_rates`(가칭), 3m/1y는 `source_daily_rates`로 분리하는 2-table 표준화안을 Phase 2e v2 endpoint 구현 PR 직전에 평가한다. 별도 ADR-035(가칭)에서 DXY/Investing/Hana/KRX/Bithumb 1w 적재 범위와 legacy hybrid 제거 여부를 결정한다.
+- **장기 그래프 DB 표준화 (Phase 2e 진입 전 결정)**: 1w는 `source_hourly_rates`(가칭), 3m/1y는 `source_daily_rates`로 분리하는 2-table 표준화안을 Phase 2e v2 endpoint 구현 PR 직전에 평가한다. 별도 ADR-035에서 DXY/Investing/Hana/KRX/Bithumb 1w 적재 범위와 legacy hybrid 제거 여부를 결정함 (ADR-035 Proposed, 2026-06-05 land — 본 문서 ADR-035 섹션 참조).
 
 ### 15. Alternatives considered
 
