@@ -142,6 +142,22 @@ class TestBuildRow(_BaseDBTest):
         self.assertIn("first_ts_kst", row["metadata_json"])
         self.assertIn("last_ts_kst", row["metadata_json"])
 
+    def test_float_artifact_quantized_to_6_places(self):
+        """Float 연산 artifact(13자리) → quantize 6 places (range-dry-run에서 발견된 실제 JPY 케이스)."""
+        # 921.6100000000001 = JPY/KRW per-100 환산 류 binary float artifact (str()이 13자리 보존)
+        self._add_inv(_ts(2026, 6, 4, 2, 0), 921.6100000000001, currency="jpy-krw")
+        self._add_inv(_ts(2026, 6, 4, 8, 0), 932.5100000000001, currency="jpy-krw")
+        with self.Session() as db:
+            _, row, _ = W.process_date(db, WEEKDAY, currency="jpy-krw")
+        # quantize → 소수부 <= 6, precision validation 0건 (quantize 없으면 13자리로 실패)
+        self.assertEqual(W.validate_decimal_precision(row), [])
+        for f in ("rate", "high", "low", "close"):
+            self.assertGreaterEqual(row[f].as_tuple().exponent, -6, f"{f}={row[f]}")
+        # 값 보존 (artifact만 제거)
+        self.assertEqual(row["close"], Decimal("932.51"))  # last obs
+        self.assertEqual(row["high"], Decimal("932.51"))   # max
+        self.assertEqual(row["low"], Decimal("921.61"))    # min
+
 
 # ---------------------------------------------------------------------------
 # Group C — write transaction
@@ -375,6 +391,30 @@ class TestCliComboGuards(unittest.TestCase):
         r = self._run(["--expected-min-rows=-1"])
         self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
         self.assertIn(">= 1", r.stdout)
+
+    def test_range_args_without_mode_rejected(self):
+        """--start-date/--end-date를 mode 없이 → reject (조용히 today 단일 dry-run 빠지는 것 차단, Codex F6)."""
+        r = self._run(["--start-date", "2026-06-01", "--end-date", "2026-06-02"])
+        self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
+        self.assertIn("--write 또는 --range-dry-run 전용", r.stdout)
+
+    def test_include_today_without_mode_rejected(self):
+        r = self._run(["--include-today"])
+        self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
+        self.assertIn("--include-today", r.stdout)
+
+    def test_allow_production_without_write_rejected(self):
+        r = self._run(["--range-dry-run", "--start-date", "2026-06-01", "--end-date", "2026-06-02",
+                       "--allow-production-write"])
+        self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
+        self.assertIn("--allow-production-write는 --write 전용", r.stdout)
+
+    def test_date_with_range_mode_rejected(self):
+        """대칭 케이스 — --date(단일 전용)를 range mode와 같이 → reject (역방향 mode 혼동)."""
+        r = self._run(["--range-dry-run", "--date", "2026-06-01",
+                       "--start-date", "2026-06-01", "--end-date", "2026-06-02"])
+        self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
+        self.assertIn("--date는 단일일 dry-run 전용", r.stdout)
 
 
 if __name__ == "__main__":

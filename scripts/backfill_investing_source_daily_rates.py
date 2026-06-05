@@ -72,6 +72,10 @@ CLOSE_BASIS = "investing_observed_eod"
 SOURCE_METHOD = "observed_rollup"
 OHLC_QUALITY = "observed_rollup"
 
+# Numeric(14, 6) — 소수부 6자리. investing_exchange_rates Float의 연산 artifact
+# (특히 JPY 계산값 921.6100000000001 류 13자리)를 컬럼 precision으로 정규화 (range-dry-run에서 발견).
+_QUANTIZE = Decimal("0.000001")
+
 
 class InvestingWriteOutcome(NamedTuple):
     """write_with_transaction_investing 결과 — rollback anchor용 inserted/updated 구분 (Hana official 패턴).
@@ -143,10 +147,12 @@ def build_investing_eod_row(target_date_kst: date, day_rows: list, currency: str
     close_row = day_rows[-1]
     first_row = day_rows[0]
 
-    # Decimal(str(float)) — binary float artifact 회피 (Hana writer anchor)
-    close_dec = Decimal(str(close_row.rate))
-    high_dec = max(Decimal(str(r.rate)) for r in day_rows)
-    low_dec = min(Decimal(str(r.rate)) for r in day_rows)
+    # Decimal(str(float)) 후 quantize(6자리): str()은 Float의 연산 artifact를 보존하므로
+    # (JPY 921.6100000000001 류 13자리, range-dry-run 발견) Numeric(14,6) 초과 → quantize로 컬럼 precision 정규화.
+    # max/min은 raw Decimal로 비교 후 결과만 quantize (monotonic — OHLC ordering 보존).
+    close_dec = Decimal(str(close_row.rate)).quantize(_QUANTIZE)
+    high_dec = max(Decimal(str(r.rate)) for r in day_rows).quantize(_QUANTIZE)
+    low_dec = min(Decimal(str(r.rate)) for r in day_rows).quantize(_QUANTIZE)
 
     return {
         "source": SOURCE,
@@ -835,9 +841,24 @@ def main() -> None:
     args = parser.parse_args()
 
     # CLI combo fail-close (Hana official _validate_cli_combo 패턴 — 조용히 무시되는 조합 차단)
+    has_range_mode = args.write or args.range_dry_run
     if args.range_dry_run and args.write:
         print("[CONFIG 실패] --range-dry-run과 --write 동시 사용 금지")
         sys.exit(1)
+    # mode-arg 정합 — 잘못된 mode에서 조용히 무시되는 arg 차단
+    if args.date is not None and has_range_mode:
+        print("[CONFIG 실패] --date는 단일일 dry-run 전용 (--write/--range-dry-run은 --start-date/--end-date 사용)")
+        sys.exit(1)
+    if (args.start_date is not None or args.end_date is not None) and not has_range_mode:
+        print("[CONFIG 실패] --start-date/--end-date는 --write 또는 --range-dry-run 전용 (단일일은 --date)")
+        sys.exit(1)
+    if args.include_today and not has_range_mode:
+        print("[CONFIG 실패] --include-today는 --write 또는 --range-dry-run 전용")
+        sys.exit(1)
+    if args.allow_production_write and not args.write:
+        print("[CONFIG 실패] --allow-production-write는 --write 전용 (range-dry-run은 read-only)")
+        sys.exit(1)
+    # value/write 전용 가드
     if args.expected_min_rows is not None and args.expected_min_rows < 1:
         print(f"[CONFIG 실패] --expected-min-rows는 >= 1 (입력: {args.expected_min_rows})")
         sys.exit(1)
