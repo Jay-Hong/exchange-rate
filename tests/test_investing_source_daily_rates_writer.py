@@ -327,6 +327,70 @@ class TestCurrencyParameterization(_BaseDBTest):
 
 
 # ---------------------------------------------------------------------------
+# Group F2 — daily append verdict (orchestrator 계약)
+# ---------------------------------------------------------------------------
+
+class TestDailyAppendVerdict(_BaseDBTest):
+    """--emit-daily-append-verdict: 단일일 write verdict sentinel (orchestrator fail-closed 계약)."""
+
+    def _args(self, d, emit=True, currency="usd-krw"):
+        return argparse.Namespace(
+            start_date=d, end_date=d, include_today=False, allow_production_write=False,
+            currency=currency, require_empty_target=False, expected_min_rows=None,
+            emit_daily_append_verdict=emit,
+        )
+
+    def _run_capture(self, args):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = W._run_write(args)
+        return rc, buf.getvalue()
+
+    def test_written_verdict(self):
+        from app.daily_append_verdict import extract_verdicts
+        self._add_inv(_ts(2026, 6, 4, 2, 0), 1385.0)
+        rc, out = self._run_capture(self._args(WEEKDAY))
+        self.assertEqual(rc, 0)
+        verdicts = extract_verdicts(out)
+        self.assertEqual(len(verdicts), 1, out)
+        v = verdicts[0]
+        self.assertEqual(v["source"], "investing")
+        self.assertEqual(v["asset"], "usd-krw")
+        self.assertEqual(v["date_kst"], WEEKDAY.isoformat())
+        self.assertEqual(v["status"], "written")
+        self.assertIsNone(v["reason"])
+        self.assertEqual(v["rows"], 1)
+
+    def test_skipped_verdict_no_observation(self):
+        """단일일 0-obs → skipped/no_observation/0 (Codex catch — exit 0인데 sentinel 없으면 orchestrator FAIL)."""
+        from app.daily_append_verdict import extract_verdicts
+        self._add_inv(_ts(2026, 6, 10, 2, 0), 1390.0)  # WEEKDAY(6/4) 관측 없음
+        rc, out = self._run_capture(self._args(WEEKDAY))
+        self.assertEqual(rc, 0)
+        verdicts = extract_verdicts(out)
+        self.assertEqual(len(verdicts), 1, out)
+        v = verdicts[0]
+        self.assertEqual(v["status"], "skipped")
+        self.assertEqual(v["reason"], "no_observation")
+        self.assertEqual(v["rows"], 0)
+
+    def test_no_verdict_without_flag(self):
+        from app.daily_append_verdict import extract_verdicts
+        self._add_inv(_ts(2026, 6, 4, 2, 0), 1385.0)
+        rc, out = self._run_capture(self._args(WEEKDAY, emit=False))
+        self.assertEqual(len(extract_verdicts(out)), 0)
+
+    def test_jpy_written_verdict_asset(self):
+        """통화별 verdict asset 정확 (orchestrator run unit asset 검증용)."""
+        from app.daily_append_verdict import extract_verdicts
+        self._add_inv(_ts(2026, 6, 4, 2, 0), 9.05, currency="jpy-krw")
+        rc, out = self._run_capture(self._args(WEEKDAY, currency="jpy-krw"))
+        v = extract_verdicts(out)[0]
+        self.assertEqual(v["asset"], "jpy-krw")
+        self.assertEqual(v["status"], "written")
+
+
+# ---------------------------------------------------------------------------
 # Group F — production guard
 # ---------------------------------------------------------------------------
 
@@ -415,6 +479,17 @@ class TestCliComboGuards(unittest.TestCase):
                        "--start-date", "2026-06-01", "--end-date", "2026-06-02"])
         self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
         self.assertIn("--date는 단일일 dry-run 전용", r.stdout)
+
+    def test_emit_verdict_without_write_rejected(self):
+        r = self._run(["--emit-daily-append-verdict", "--currency", "usd-krw"])
+        self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
+        self.assertIn("--emit-daily-append-verdict는 --write 동반 필수", r.stdout)
+
+    def test_emit_verdict_multiday_rejected(self):
+        r = self._run(["--write", "--emit-daily-append-verdict", "--currency", "usd-krw",
+                       "--start-date", "2026-06-01", "--end-date", "2026-06-02"])
+        self.assertEqual(r.returncode, 1, msg=r.stdout[-300:])
+        self.assertIn("단일 날짜(start==end)만 허용", r.stdout)
 
 
 if __name__ == "__main__":

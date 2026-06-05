@@ -21,7 +21,10 @@ VERDICT_VERSION = 1
 
 # 허용 status / skipped reason (orchestrator fail-closed 검증용)
 VALID_STATUSES = frozenset({"written", "skipped", "error"})
-VALID_SKIPPED_REASONS = frozenset({"weekend_no_changes", "holiday_no_changes"})
+# 전체 union (contract-level). source별 허용 subset은 orchestrator SOURCE_POLICY["valid_skipped_reasons"]에서 잠금.
+# - weekend_no_changes / holiday_no_changes: Hana 은행 calendar (영업일 외 무변동)
+# - no_observation: Investing FX 24/5 (Sunday 휴장 / 주말 무변동 / 드문 weekday gap)
+VALID_SKIPPED_REASONS = frozenset({"weekend_no_changes", "holiday_no_changes", "no_observation"})
 
 
 def emit_verdict(

@@ -73,6 +73,33 @@ class TestEvaluateSourceResult(unittest.TestCase):
         s, detail = O.evaluate_source_result("hana", "usd-krw", D, 0, out)
         self.assertEqual(s, "FAIL")
 
+    def test_investing_written_pass(self):
+        out = sentinel(source="investing", asset="usd-krw", status="written", rows=1)
+        s, detail = O.evaluate_source_result("investing", "usd-krw", D, 0, out)
+        self.assertEqual(s, "PASS", detail)
+
+    def test_investing_skipped_no_observation_pass(self):
+        out = sentinel(source="investing", asset="usd-krw", status="skipped",
+                       reason="no_observation", rows=0)
+        s, detail = O.evaluate_source_result("investing", "usd-krw", D, 0, out)
+        self.assertEqual(s, "PASS", detail)
+
+    def test_investing_skipped_weekend_reason_fail(self):
+        """source-aware — investing은 weekend_no_changes 비허용 (Hana 전용 reason)."""
+        out = sentinel(source="investing", asset="usd-krw", status="skipped",
+                       reason="weekend_no_changes", rows=0)
+        s, detail = O.evaluate_source_result("investing", "usd-krw", D, 0, out)
+        self.assertEqual(s, "FAIL")
+        self.assertIn("reason", detail)
+
+    def test_hana_skipped_no_observation_reason_fail(self):
+        """source-aware — hana는 no_observation 비허용 (Investing 전용). 전역 추가의 정책 느슨화 회피 입증."""
+        out = sentinel(source="hana", asset="usd-krw", status="skipped",
+                       reason="no_observation", rows=0)
+        s, detail = O.evaluate_source_result("hana", "usd-krw", D, 0, out)
+        self.assertEqual(s, "FAIL")
+        self.assertIn("reason", detail)
+
     def test_error_status_fail(self):
         out = sentinel(source="hana", asset="usd-krw", status="error",
                        reason="business_day_no_changes", rows=0)
@@ -236,14 +263,17 @@ class TestCliEmitGuards(unittest.TestCase):
 class TestResolveSources(unittest.TestCase):
 
     def test_all_expands_in_fixed_order(self):
-        """all → ("bithumb", "hana") 순서 고정."""
-        self.assertEqual(O.resolve_sources("all"), ("bithumb", "hana"))
+        """all → ("bithumb", "hana", "investing") 순서 고정."""
+        self.assertEqual(O.resolve_sources("all"), ("bithumb", "hana", "investing"))
 
     def test_single_bithumb(self):
         self.assertEqual(O.resolve_sources("bithumb"), ("bithumb",))
 
     def test_single_hana(self):
         self.assertEqual(O.resolve_sources("hana"), ("hana",))
+
+    def test_single_investing(self):
+        self.assertEqual(O.resolve_sources("investing"), ("investing",))
 
 
 class TestBuildHanaCommand(unittest.TestCase):
@@ -279,8 +309,33 @@ class TestBuildHanaCommand(unittest.TestCase):
         self.assertIn("eur-krw", cmd)
 
 
+class TestBuildInvestingCommand(unittest.TestCase):
+    """Investing writer CLI: write=--currency+start/end+emit (단일일), dry-run=--date."""
+
+    def test_write_shape(self):
+        cmd = O.build_command("investing", D, "usd-krw", write=True, allow_production=False)
+        self.assertIn("--write", cmd)
+        self.assertIn("--currency", cmd)
+        self.assertIn("usd-krw", cmd)
+        self.assertIn("--emit-daily-append-verdict", cmd)
+        self.assertIn("backfill_investing_source_daily_rates.py", " ".join(cmd))
+        # 단일일 — start == end
+        self.assertEqual(cmd[cmd.index("--start-date") + 1], cmd[cmd.index("--end-date") + 1])
+
+    def test_write_prod_forwards_allow(self):
+        cmd = O.build_command("investing", D, "usd-krw", write=True, allow_production=True)
+        self.assertIn("--allow-production-write", cmd)
+
+    def test_dryrun_uses_date(self):
+        cmd = O.build_command("investing", D, "jpy-krw", write=False, allow_production=False)
+        self.assertIn("--date", cmd)
+        self.assertIn("jpy-krw", cmd)
+        self.assertNotIn("--write", cmd)
+        self.assertNotIn("--emit-daily-append-verdict", cmd)
+
+
 class TestResolveRunUnits(unittest.TestCase):
-    """sources → (source, asset) run units (hana 3통화 확장)."""
+    """sources → (source, asset) run units (hana/investing 3통화 확장)."""
 
     def test_bithumb_single_unit(self):
         self.assertEqual(O.resolve_run_units(("bithumb",)), [("bithumb", "usdt-krw")])
@@ -289,6 +344,20 @@ class TestResolveRunUnits(unittest.TestCase):
         self.assertEqual(
             O.resolve_run_units(("hana",)),
             [("hana", "usd-krw"), ("hana", "jpy-krw"), ("hana", "eur-krw")],
+        )
+
+    def test_investing_three_currencies(self):
+        self.assertEqual(
+            O.resolve_run_units(("investing",)),
+            [("investing", "usd-krw"), ("investing", "jpy-krw"), ("investing", "eur-krw")],
+        )
+
+    def test_all_seven_units_fixed_order(self):
+        self.assertEqual(
+            O.resolve_run_units(O.resolve_sources("all")),
+            [("bithumb", "usdt-krw"),
+             ("hana", "usd-krw"), ("hana", "jpy-krw"), ("hana", "eur-krw"),
+             ("investing", "usd-krw"), ("investing", "jpy-krw"), ("investing", "eur-krw")],
         )
 
     def test_all_four_units_fixed_order(self):
@@ -314,7 +383,7 @@ def _run_main(argv) -> tuple[int, str]:
 class TestMainLoopIsolation(unittest.TestCase):
     """main loop per-unit (source, asset) 격리: 한 unit 예외가 다른 unit을 막지 않음.
 
-    --source all → run units [bithumb:usdt-krw, hana:usd-krw, hana:jpy-krw, hana:eur-krw].
+    --source all → run units [bithumb:usdt-krw, hana:usd-krw/jpy-krw/eur-krw, investing:usd-krw/jpy-krw/eur-krw].
     execute_source(source, asset, d, *, allow_production) 시그니처.
     """
 
@@ -324,7 +393,7 @@ class TestMainLoopIsolation(unittest.TestCase):
         return {"exit": 0, "status": "PASS", "detail": detail, "tail": "tail"}
 
     def test_first_unit_exception_rest_still_run(self):
-        """첫 unit(bithumb) 예외 → 나머지 hana 3통화 여전히 실행 + aggregate exit 1."""
+        """첫 unit(bithumb) 예외 → 나머지 hana 3통화 + investing 3통화 여전히 실행 + aggregate exit 1."""
         calls = []
 
         def side_effect(source, asset, d, *, allow_production):
@@ -335,8 +404,9 @@ class TestMainLoopIsolation(unittest.TestCase):
 
         with patch.object(O, "execute_source", side_effect=side_effect):
             code, _ = _run_main(self.ARGV)
-        self.assertEqual(calls, [("bithumb", "usdt-krw"), ("hana", "usd-krw"),
-                                 ("hana", "jpy-krw"), ("hana", "eur-krw")])
+        self.assertEqual(calls, [("bithumb", "usdt-krw"),
+                                 ("hana", "usd-krw"), ("hana", "jpy-krw"), ("hana", "eur-krw"),
+                                 ("investing", "usd-krw"), ("investing", "jpy-krw"), ("investing", "eur-krw")])
         self.assertEqual(code, 1)
 
     def test_one_hana_currency_fail_others_run(self):

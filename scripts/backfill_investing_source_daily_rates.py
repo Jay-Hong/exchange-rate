@@ -60,6 +60,9 @@ from zoneinfo import ZoneInfo
 # 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 로컬 애플리케이션 (sys.path 설정 후) — daily append verdict 공유 계약
+from app.daily_append_verdict import emit_verdict  # noqa: E402
+
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -709,6 +712,9 @@ def _run_write(args) -> int:
             print(f"[FAIL] multi-day range({days_in_range}일)인데 write rows 0개 — range/currency/query 오류 의심 "
                   f"(Investing은 FX 24/5라 평일 데이터 존재 정상). 단일일 Sunday skip이면 start==end로 실행. exit 1.")
             return 1
+        # daily append verdict: 단일일 0-obs → skipped (orchestrator exit-0-no-sentinel FAIL 방지, Codex catch)
+        if getattr(args, "emit_daily_append_verdict", False):
+            emit_verdict("investing", currency, args.start_date, "skipped", "no_observation", 0)
         print("[PASS] write rows 0개 (단일일, 관측 0 — Sunday/시장휴장 정상). source_daily_rates write 안 됨.")
         return 0
 
@@ -760,6 +766,9 @@ def _run_write(args) -> int:
     else:
         print(f"[Rollback anchor] inserted 0 (전부 updated/idempotent re-upsert) — 삭제 anchor 없음.")
     print()
+    # daily append verdict: 단일일 write 성공 → written rows=1 (orchestrator는 written→rows==1 기대; combo가 단일일 보장)
+    if getattr(args, "emit_daily_append_verdict", False):
+        emit_verdict("investing", currency, args.start_date, "written", None, len(write_rows))
     print(f"[PASS] 모든 date 처리 완료 ({len(write_rows)} rows committed).")
     return 0
 
@@ -838,6 +847,14 @@ def main() -> None:
             "(잘못된 range/currency/query silent PASS 차단). range-dry-run 결과 row 수 기준 권장."
         ),
     )
+    parser.add_argument(
+        "--emit-daily-append-verdict",
+        action="store_true",
+        help=(
+            "[orchestrator daily append] 단일일 write 결과를 verdict JSON sentinel로 stdout 출력 "
+            "(--write + 단일일 start==end 전용). obs→written rows=1 / 0 obs→skipped(no_observation) rows=0."
+        ),
+    )
     args = parser.parse_args()
 
     # CLI combo fail-close (Hana official _validate_cli_combo 패턴 — 조용히 무시되는 조합 차단)
@@ -867,6 +884,12 @@ def main() -> None:
         sys.exit(1)
     if args.expected_min_rows is not None and not args.write:
         print("[CONFIG 실패] --expected-min-rows는 --write 전용 (dry-run에서 무의미)")
+        sys.exit(1)
+    if args.emit_daily_append_verdict and not args.write:
+        print("[CONFIG 실패] --emit-daily-append-verdict는 --write 동반 필수")
+        sys.exit(1)
+    if args.emit_daily_append_verdict and args.start_date != args.end_date:
+        print("[CONFIG 실패] --emit-daily-append-verdict는 단일 날짜(start==end)만 허용 (verdict는 1일 의미)")
         sys.exit(1)
 
     if args.range_dry_run:

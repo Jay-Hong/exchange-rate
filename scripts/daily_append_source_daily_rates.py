@@ -67,25 +67,37 @@ KST = ZoneInfo("Asia/Seoul")
 SUBPROCESS_TIMEOUT_SECONDS = 180
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# A2: --source 허용값 (bithumb / hana / all). KRX는 close finalizer 별 PR — 00:01 cron 미대상.
-SUPPORTED_SOURCES = ["bithumb", "hana", "all"]
-# "all" 확장 대상 — 순서 고정 (bithumb → hana). tuple로 불변 보장.
-SOURCE_RUN_ALL = ("bithumb", "hana")
+# A2: --source 허용값 (bithumb / hana / investing / all). KRX는 close finalizer 별 PR — 00:01 cron 미대상.
+SUPPORTED_SOURCES = ["bithumb", "hana", "investing", "all"]
+# "all" 확장 대상 — 순서 고정 (bithumb → hana 3통화 → investing 3통화). tuple로 불변 보장.
+SOURCE_RUN_ALL = ("bithumb", "hana", "investing")
 
 # source-aware verdict 정책 (Codex Blocker — global allowlist 대신 source별 잠금)
 # - bithumb: 24/7 source라 skipped 불가 (항상 candle 존재) → written only
-# - hana: 영업일 calendar라 skipped(주말/공휴일) 허용
+# - hana: 영업일 calendar라 skipped(주말/공휴일) 허용 → weekend/holiday_no_changes
+# - investing: FX 24/5라 skipped(Sunday 휴장 / 주말·드문 weekday 무변동) 허용 → no_observation
+# valid_skipped_reasons: skipped status의 허용 reason (source-aware — 전역 VALID_SKIPPED_REASONS의 subset)
 SOURCE_POLICY = {
-    "bithumb": {"asset": "usdt-krw", "allowed_statuses": frozenset({"written"})},
-    "hana": {"asset": "usd-krw", "allowed_statuses": frozenset({"written", "skipped"})},
+    "bithumb": {"asset": "usdt-krw", "allowed_statuses": frozenset({"written"}),
+                "valid_skipped_reasons": frozenset()},
+    "hana": {"asset": "usd-krw", "allowed_statuses": frozenset({"written", "skipped"}),
+             "valid_skipped_reasons": frozenset({"weekend_no_changes", "holiday_no_changes"})},
+    "investing": {"asset": "usd-krw", "allowed_statuses": frozenset({"written", "skipped"}),
+                  "valid_skipped_reasons": frozenset({"no_observation"})},
 }
-# hana asset은 HANA_CURRENCIES/run unit 기준으로 검증한다 (verdict asset == run unit asset).
-# SOURCE_POLICY["hana"]["asset"]은 사용하지 않는다 — hana는 allowed_statuses만 정책으로 쓰임.
+# source별 valid_skipped_reasons는 전역 union의 subset이어야 함 (contract 정합 — 잘못된 reason 조기 차단)
+assert all(
+    p["valid_skipped_reasons"] <= VALID_SKIPPED_REASONS for p in SOURCE_POLICY.values()
+), "SOURCE_POLICY valid_skipped_reasons must be subset of VALID_SKIPPED_REASONS"
+# hana/investing asset은 *_CURRENCIES/run unit 기준으로 검증한다 (verdict asset == run unit asset).
+# SOURCE_POLICY[...]["asset"]은 다통화 source(hana/investing)에선 미사용 — allowed_statuses/valid_skipped_reasons만 정책.
 # (bithumb은 단일 asset이라 resolve_run_units가 policy["asset"]을 그대로 사용.)
 
-# Hana 다각화: 3통화 (bank_exchange_rates.currency = source_daily_rates.asset).
-# orchestrator가 통화별로 따로 writer 호출 → run unit = (source, asset), per-currency 격리.
+# Hana/Investing 다각화: 3통화. orchestrator가 통화별로 따로 writer 호출 → run unit = (source, asset), per-currency 격리.
 HANA_CURRENCIES = ("usd-krw", "jpy-krw", "eur-krw")
+INVESTING_CURRENCIES = ("usd-krw", "jpy-krw", "eur-krw")
+# 다통화 source → 통화 tuple (resolve_run_units에서 per-currency run unit 확장)
+_MULTI_CURRENCY_SOURCES = {"hana": HANA_CURRENCIES, "investing": INVESTING_CURRENCIES}
 
 # dry-run preview 문구 (source별 — Bithumb candle fetch vs Hana 내부 DB read)
 _DRYRUN_NOTE = {
@@ -93,6 +105,8 @@ _DRYRUN_NOTE = {
                "--start-date/--end-date를 target-date 한정으로 사용하지 않음)",
     "hana": "Hana observed_eod writer — bank_exchange_rates 내부 관측 read 기반 "
             "단일일 dry-run (--date, DB write 0)",
+    "investing": "Investing writer — investing_exchange_rates 내부 관측 read 기반 "
+                 "단일일 dry-run (--date, DB write 0)",
 }
 
 
@@ -107,13 +121,14 @@ def resolve_run_units(sources: tuple[str, ...]) -> list[tuple[str, str]]:
     """sources → (source, asset) run unit 리스트 (per-unit 격리 단위).
 
     - bithumb → (bithumb, usdt-krw) 1개 (단일 asset)
-    - hana → (hana, usd-krw) / (hana, jpy-krw) / (hana, eur-krw) 3개 (통화별 따로 호출)
-    순서 고정 (sources 순서 + HANA_CURRENCIES 순서).
+    - hana/investing → 통화별 3개 ((source, usd-krw) / (source, jpy-krw) / (source, eur-krw))
+    순서 고정 (sources 순서 + *_CURRENCIES 순서).
     """
     units: list[tuple[str, str]] = []
     for source in sources:
-        if source == "hana":
-            for cur in HANA_CURRENCIES:
+        currencies = _MULTI_CURRENCY_SOURCES.get(source)
+        if currencies is not None:
+            for cur in currencies:
                 units.append((source, cur))
         else:
             units.append((source, SOURCE_POLICY[source]["asset"]))
@@ -189,16 +204,45 @@ def build_hana_command(d: date, asset: str, *, write: bool, allow_production: bo
     return cmd
 
 
-def build_command(source: str, d: date, asset: str, *, write: bool, allow_production: bool) -> list[str]:
-    """source별 command dispatch (A2 scope: bithumb, hana). asset = run unit 통화/자산.
+def build_investing_command(d: date, asset: str, *, write: bool, allow_production: bool) -> list[str]:
+    """backfill_investing_source_daily_rates.py command (통화별).
 
-    bithumb는 단일 asset(usdt-krw)이라 asset 미사용, hana는 --currency로 전달.
+    **observed_eod writer와 유사한 CLI** (단일일):
+    - write=True: --write --currency A --start-date X --end-date X --emit-daily-append-verdict (단일일)
+    - write=False (dry-run): --date X --currency A (단일일 dry-run, investing_exchange_rates read)
+    asset = Investing 통화 (usd-krw / jpy-krw / eur-krw).
+    """
+    script_path = (
+        Path(__file__).resolve().parent / "backfill_investing_source_daily_rates.py"
+    ).resolve()
+    if not write:
+        return [sys.executable, str(script_path), "--date", d.isoformat(), "--currency", asset]
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--write",
+        "--currency", asset,
+        "--start-date", d.isoformat(),
+        "--end-date", d.isoformat(),
+        "--emit-daily-append-verdict",  # orchestrator는 JSON verdict로 결과 판정
+    ]
+    if allow_production:
+        cmd.append("--allow-production-write")
+    return cmd
+
+
+def build_command(source: str, d: date, asset: str, *, write: bool, allow_production: bool) -> list[str]:
+    """source별 command dispatch (bithumb / hana / investing). asset = run unit 통화/자산.
+
+    bithumb는 단일 asset(usdt-krw)이라 asset 미사용, hana/investing은 --currency로 전달.
     """
     if source == "bithumb":
         return build_bithumb_command(d, write=write, allow_production=allow_production)
     if source == "hana":
         return build_hana_command(d, asset, write=write, allow_production=allow_production)
-    raise ValueError(f"미지원 source: {source} (A2 scope: bithumb, hana)")
+    if source == "investing":
+        return build_investing_command(d, asset, write=write, allow_production=allow_production)
+    raise ValueError(f"미지원 source: {source} (scope: bithumb, hana, investing)")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -314,8 +358,13 @@ def evaluate_source_result(
     if status == "skipped":
         if rows != 0:
             return "FAIL", f"skipped이나 rows={rows} (0 기대)"
-        if v.get("reason") not in VALID_SKIPPED_REASONS:
-            return "FAIL", f"skipped이나 reason={v.get('reason')!r} 비허용"
+        # source-aware reason (전역 union이 아닌 SOURCE_POLICY[source] subset — schema 검증 통과로 source 유효 보장)
+        allowed_reasons = SOURCE_POLICY[source]["valid_skipped_reasons"]
+        if v.get("reason") not in allowed_reasons:
+            return "FAIL", (
+                f"skipped이나 reason={v.get('reason')!r}는 source={source}에 비허용 "
+                f"(허용: {sorted(allowed_reasons)})"
+            )
         return "PASS", f"skipped ({v.get('reason')})"
     # status == "error" — allowed_statuses에서 이미 걸러지나 방어
     return "FAIL", f"error verdict (reason={v.get('reason')!r})"
