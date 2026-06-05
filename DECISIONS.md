@@ -5486,6 +5486,63 @@ delete_range(db, "krx", "usd-krw-futures", date(2026, 5, 18), date(2026, 5, 27))
 
 ---
 
+## ADR-035: 장기 그래프 DB 표준화 — Investing daily canonical + source_hourly_rates(1w) + Phase 2e MVP 범위
+
+**Status**: Proposed (2026-06-05) — Phase 2e v2 endpoint 진입 전 결정. ADR-033 Decision 10 + ADR-034 후속. (DECISIONS "장기 그래프 DB 표준화 (Phase 2e 진입 전 결정)" 노트 + [GRAPH_API_V2_CONTRACT.md](GRAPH_API_V2_CONTRACT.md) §catalog 1w open question을 본 ADR로 확정.)
+
+### Context
+
+Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 production land (KRX 245 / Hana 744[3통화] / Bithumb 368 = 1357 rows, 모두 1년 + 최근 observed). 그러나 **v2 그래프 endpoint(Phase 2e)가 아직 source_daily_rates를 읽지 않음** (read caller 0). 진입 전 (1) 표준화 범위, (2) 1w 해상도, (3) Phase 2e MVP 범위를 본 ADR에서 결정.
+
+현재 canonical 상태 (catalog series별):
+
+| series | 장기(3m/1y) 위치 | 1w 위치 | 표준화 상태 |
+|--------|-----------------|---------|------------|
+| KRX | source_daily_rates ✅ | 없음 | daily 완료 |
+| Hana | source_daily_rates ✅ (3통화) | 없음 | daily 완료 |
+| Bithumb | source_daily_rates ✅ | 없음 | daily 완료 |
+| DXY | market_index_rates.daily ✅ | market_index_rates.hourly ✅ | granularity 별 table (선행 사례) |
+| **Investing** | **investing_exchange_rates (raw)** ❌ | investing_exchange_rates (raw) | **미표준화 — 3m/1y 유일 gap** |
+
+### Decision
+
+**D1 — Investing → source_daily_rates daily canonical (rollup)**: investing_exchange_rates(**장기 보관** — 30일 cap 무관)를 daily로 말아 source_daily_rates에 적재. KRX/Hana/Bithumb backfill보다 단순 — external API/contract chain/perishability 없이 **기존 장기 raw 기반 rollup** (investing_exchange_rates는 장기 보존이라 1y+ coverage 기대 — per-currency 실제 coverage는 구현 직전 production read 확인, Open).
+- source = `investing` / asset = `usd-krw` | `jpy-krw` | `eur-krw`
+- close_basis = `investing_observed_eod` (신규 enum) / source_method = `observed_rollup` / ohlc_quality = `observed_rollup`
+- rate = close = 해당 KST 날짜 마지막 관측값 / high·low = 당일 관측값 max·min / contract_code·basis_date·published_at = None (Hana observed_eod 동형)
+- metadata_json = {point_count, first_ts, last_ts, source_table: "investing_exchange_rates"}
+- 적재 = 과거분 일괄 rollup(backfill) + going-forward daily rollup job (`dxy_rollup.py` daily rollup 선례 동형, KST 00:0X)
+
+**D2 — DXY → market_index_rates 유지 (source_daily_rates 미이전)**: DXY는 index(instrument)지 source/asset 아님. 이미 granularity(realtime/hourly/daily) + `dxy_rollup.py` 구조 보유 → source 모델 강제 이전 시 index/source 구분 흐려짐. **v2 endpoint는 source_daily_rates(sources) + market_index_rates(DXY) 다중 table read** (read 통합 방식은 endpoint PR).
+
+**D3 — source_hourly_rates(1w) → 도입, 단 Phase 2e MVP와 분리된 2차 phase**: 1w(7일)는 daily 7점 부족 + source_rates(30d raw)를 hot path 직접 read는 표준화 취지(external/raw hot path 제거)와 충돌 → **pre-aggregate hourly canonical 신설** (DXY hourly rollup 선례 동형).
+- schema = source_daily_rates mirror (date_kst → 시간 bucket_ts_kst, OHLC + provenance) [정확 schema는 구현 PR]
+- 대상 = Hana·KRX·Bithumb·Investing (DXY는 market_index_rates.hourly 보유)
+- rollup source = **source별 observation provider** — 현재 구현: KRX/Bithumb=`source_rates`, Hana=`bank_exchange_rates`, Investing=`investing_exchange_rates` (DXY=`market_index_rates.hourly` 유지). **향후 Bank/Investing source/asset realtime pipeline 통합([All-source observation fanout](REALTIME_ARCHITECTURE_PLAN.md) Bank/Investing β) 후 동일 provider가 normalized observation(`source_rates`/Redis mirror)을 읽도록 전환** — canonical(source_daily/hourly_rates) schema는 **이미 source/asset 기반이라 input 경로만 변경, 미래 리팩터와 호환**
+- source_hourly_rates 자체 retention = 구현 PR 확정 (1w(7일)면 충분, source별 raw table retention과 분리)
+- 1w bucket = GRAPH §catalog 후보 a/b/c 중 hourly canonical 채택 (legacy hybrid 제거)
+- **Phase 2e MVP 이후 별 phase** — schema + 한 source canary로 시작
+
+**D4 — Phase 2e MVP = 3m/1y 우선, 1w 후속**: 3m/1y는 source_daily_rates(KRX/Hana/Bithumb) + market_index_rates(DXY) + **Investing daily rollup(D1)**만 추가하면 완성 → payoff 즉시. 1w(source_hourly_rates)를 MVP에 묶으면 hourly 표준화 설계로 출시 지연 → **MVP=3m/1y, 1w=source_hourly_rates land 후 추가**.
+
+### Open (구현 PR에서 확정)
+
+- Investing daily rollup 정확 정의 (KST boundary / 외환시장 24/5 주말 gap 처리 / point_count==0 case) + 구현 직전 production read로 investing USD/JPY/EUR coverage 확인
+- source_hourly_rates 정확 schema + retention 일수 + bucket size(1h 고정 여부)
+- **Bank/Investing source/asset realtime pipeline 통합 후 rollup provider 전환 방식** (기존 per-source raw table 기반 backfill ↔ 신규 normalized `source_rates` 기반 append의 provenance 유지) — [All-source observation fanout](REALTIME_ARCHITECTURE_PLAN.md) Bank/Investing β 트랙과 정합. **단 Phase 2e MVP/D1을 이 리팩터에 묶지 않음** — 현 장기 raw table로 daily canonical 먼저, realtime pipeline은 나중 교체 (canonical schema 불변)
+- legacy hybrid (현 1w = investing + DXY hourly + realtime) 제거 시점 (source_hourly_rates land 후)
+- DXY를 v2에서 다중 read로 합칠지 / 별 path 둘지 (D2는 table 유지만 결정)
+- Phase 2e endpoint contract (catalog/tab 응답 + insufficient_history 적용 — GRAPH §13)
+
+### Consequences
+
+- ✅ 3m/1y hot path 완전 표준화 (Investing 포함 → external/raw 직접 read 0) — v2 MVP 선명
+- ✅ provenance 일관 (모든 source canonical에 close_basis/source_method/ohlc_quality)
+- ⚠️ 다중 table read (source_daily_rates + market_index_rates) — endpoint 복잡도 ↑ (index/source 모델 명확성과 trade)
+- ⚠️ source_hourly_rates 신설 = 신 table + rollup job + retention 관리 (1w 전용) — MVP 후로 분리해 risk 격리
+
+---
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
