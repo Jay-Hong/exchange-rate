@@ -2,7 +2,7 @@
 
 > 📅 **마지막 업데이트**: 2026-04-27
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
-> 📌 **범위**: 이 문서는 환율 크롤러(`app/crawlers/`)만 다룹니다. 뉴스 수집(`app/news/`)은 [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) 참고.
+> 📌 **범위**: 이 문서는 환율 크롤러(`app/crawlers/`)만 다룹니다. 뉴스 수집(`app/news/`)은 코드 + [CLAUDE.md](CLAUDE.md) Phase 1B 섹션 참고.
 > 🆕 **최근 변경**:
 > - MIBANK URL/DOM 변경 대응: `exchange.mibank.me/bank?bank_cd=` 형식 + `table.main_table.content` 파싱 ([MAINTENANCE_2026-04-27.md](MAINTENANCE_2026-04-27.md))
 > - DXY 수집 분리: 현물(`instrument='dxy'`) `dxy_spot.py` 독립 크롤러 (`/indices/usdollar` `__NEXT_DATA__` → CSS → CNBC → Yahoo) + 선물(`instrument='dxy_futures'`) `investing.py` 동반 추출 (`#sb_last_8827` → `/currencies/us-dollar-index`). `dxy.py`는 양쪽 외부 폴백 유틸 모듈

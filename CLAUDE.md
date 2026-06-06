@@ -1084,7 +1084,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 - `app/news/kb_fetcher.py`: KB API 수집 ([전문] PDF 추출)
 - `app/news/upsert.py`: 공통 Redis upsert (KB↔RSS 병합 규칙)
 
-**구현 참고 문서**: [NEWS_IMPL_SPEC.md](NEWS_IMPL_SPEC.md) (임시, 안정화 후 삭제 예정)
+**구현 상세**: `app/news/` 코드 (source of truth, Phase 1B 안정화 완료 — 임시 NEWS_IMPL_SPEC.md는 삭제, git history 보존)
 
 ### USDT Phase 1: 테더 탭 백엔드 foundation ✅ 백엔드 완료 / 서비스 미출시 (2026-04-23 구현, 2026-05-06 status 갱신)
 
