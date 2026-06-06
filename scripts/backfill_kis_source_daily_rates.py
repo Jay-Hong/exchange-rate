@@ -1981,7 +1981,7 @@ def main() -> None:
             f'date({args.end_date.year}, {args.end_date.month}, {args.end_date.day}))'
         )
         print()
-        print("[Stage 2] commit 별 GO / Stage 3 production execution 별 GO (RDS backup 직전).")
+        print("[Stage 2] commit 별도 GO / Stage 3 production execution 별도 GO (RDS backup 직전).")
     else:
         print(f"[Step 3 write 실패] {len(write_issues)}건 issue — transaction rollback 완료")
         for issue in write_issues[:5]:
