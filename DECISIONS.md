@@ -2880,7 +2880,7 @@ baseline 명확히 구분:
 ## ADR-027: KRX 미국달러선물 Stage 2 진입 전 REST snapshot/fallback + stale 정책 (초안)
 
 > 📅 **작성일**: 2026-05-06
-> 🏷️ **상태**: Stage A/B 구현·배포 완료 (2026-05~06, `KRX_REST_FALLBACK_ENABLED=false` 운영 / Stage B=log·counter-only, 반영 경로 없음) / **Stage C(REST 결과 반영) 미구현 — freshness guard 선행 필요** (설계 2026-06-07, 하단 §Stage C guard 설계 참조). 초기 "Stage 1 canary 수치 미확정" 초안에서 갱신.
+> 🏷️ **상태**: Stage A/B + Stage C guard(판정+telemetry) + robust calendar 모두 배포 완료. **telemetry canary 활성화 (2026-06-07 주말 — EC2 deploy `23df2d2` + `KRX_REST_FALLBACK_ENABLED=true` + recreate, verified: health·calendar live(1/1=False)·KRX bootstrap A75606 ERROR 0)**. write/broadcast 0 (telemetry-only). **주말은 KRX 세션 없어 guard idle → 월요일 6/8 개장부터 guard 발화 + 첫 telemetry(`rest_guard_*`·`rest_success/error`) 관찰 예정** (관찰 결과는 추후 보강 기록). **Stage C 실 반영(topic/Redis write)은 미구현** — ADR-028 topic protocol + KRX Stage 2 선행. 설계: 하단 §Stage C guard 설계.
 
 ### 맥락
 
