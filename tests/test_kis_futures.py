@@ -17,7 +17,6 @@ from app.sources.kis_futures import (
     H0CFCNT0_COLUMNS,
     H0MFASP0_COLUMNS,
     H0MFCNT0_COLUMNS,
-    KRX_2026_KNOWN_HOLIDAYS,
     KRX_2026_USDF_EXPIRY_DAYS,
     get_active_session,
     is_expiry_day,
@@ -248,9 +247,6 @@ class TestKrxBusinessDay(unittest.TestCase):
         """토요일 — 주말."""
         self.assertFalse(is_krx_business_day(date(2026, 5, 2)))
 
-    def test_known_holidays_set_includes_childrens_day(self):
-        self.assertIn(date(2026, 5, 5), KRX_2026_KNOWN_HOLIDAYS)
-
     def test_2026_05_25_buddhas_birthday_substitute_is_holiday(self):
         """5/25 월요일 — 부처님오신날(5/24 일) 대체공휴일.
 
@@ -259,8 +255,34 @@ class TestKrxBusinessDay(unittest.TestCase):
         """
         self.assertFalse(is_krx_business_day(date(2026, 5, 25)))
 
-    def test_known_holidays_set_includes_buddhas_birthday_substitute(self):
-        self.assertIn(date(2026, 5, 25), KRX_2026_KNOWN_HOLIDAYS)
+    def test_2026_07_17_constitution_day_is_holiday(self):
+        """7/17 제헌절 — 2026 공휴일 재지정 (kr_holidays observed). 거래일 아님."""
+        self.assertFalse(is_krx_business_day(date(2026, 7, 17)))
+
+    def test_2026_12_31_year_end_closure_is_holiday(self):
+        """12/31 KRX 연말 폐장 — kr_holidays에 없는 KRX 고유 규칙."""
+        self.assertFalse(is_krx_business_day(date(2026, 12, 31)))
+
+    def test_2026_12_30_is_business_day(self):
+        """12/30 — 2026 최종 매매거래일 (연말 폐장 직전)."""
+        self.assertTrue(is_krx_business_day(date(2026, 12, 30)))
+
+    def test_year_end_closure_across_years(self):
+        """연말 폐장 규칙(과거 연도): 12/31, 휴일이면 직전 매매거래일 = 휴장.
+
+        2022 휴장 12/30·최종 12/29 / 2023 휴장 12/29·최종 12/28 / 2024 휴장 12/31·최종 12/30.
+        """
+        self.assertFalse(is_krx_business_day(date(2022, 12, 30)))
+        self.assertTrue(is_krx_business_day(date(2022, 12, 29)))
+        self.assertFalse(is_krx_business_day(date(2023, 12, 29)))
+        self.assertTrue(is_krx_business_day(date(2023, 12, 28)))
+        self.assertFalse(is_krx_business_day(date(2024, 12, 31)))
+        self.assertTrue(is_krx_business_day(date(2024, 12, 30)))
+
+    def test_dynamic_future_year_not_hardcoded(self):
+        """연도 무관 동적 계산 — 2027 신정도 휴일 (구 2026 하드코딩이면 실패)."""
+        self.assertFalse(is_krx_business_day(date(2027, 1, 1)))
+        self.assertTrue(is_krx_business_day(date(2027, 1, 4)))
 
 
 class TestExpiryDay(unittest.TestCase):

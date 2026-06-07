@@ -35,6 +35,8 @@ from datetime import date, datetime, time, timedelta
 from typing import Dict, FrozenSet, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
+from app.calendars.kr_holidays import is_kr_holiday
+
 
 # ---------------------------------------------------------------------------
 # Field columns — KIS 공식 examples 기반 (50 + 38)
@@ -253,17 +255,8 @@ def parse_h0mfasp0_payload(data: str) -> Optional[Dict[str, str]]:
 # Calendar — 검증된 최소 데이터 (TODO 명시)
 # ---------------------------------------------------------------------------
 
-# 2026 KRX 휴장일 (외부 cross-check 완료된 항목만).
-# TODO: 신정/설/삼일절/부처님 오신날/현충일/광복절/추석/개천절/한글날/크리스마스
-#       정확 매핑은 holidays 라이브러리 또는 KRX 공식 캘린더 도입 후 보강.
-# TODO: 임시휴장 (KRX 공시 기반).
-KRX_2026_KNOWN_HOLIDAYS: FrozenSet[date] = frozenset({
-    date(2026, 5, 5),   # 어린이날 (외부 cross-check 완료)
-    date(2026, 5, 25),  # 부처님오신날(5/24 일) 대체공휴일 — 운영 사고 확인 2026-05-25
-                        # (5/22 stale 종가가 5/25 15:45 KST로 잘못 기록됨,
-                        #  kwatch.kr/markets/kr/trading-days cross-check 완료).
-                        # 추가 한국 공휴일은 별도 캘린더 보강 PR로 검증 후 추가.
-})
+# KRX 휴장 calendar는 is_krx_business_day(아래)가 kr_holidays(연도 무관 동적) +
+# 연말 폐장 규칙으로 계산 — 구 KRX_2026_KNOWN_HOLIDAYS 2-date 하드코딩 제거.
 
 # 미국달러선물 (A75x) 만기일. 만기월 셋째 월요일.
 # 검증된 1건만 — 다른 월은 KIS master 또는 KRX 공식 캘린더로 보강.
@@ -273,16 +266,32 @@ KRX_2026_USDF_EXPIRY_DAYS: FrozenSet[date] = frozenset({
 })
 
 
+def _krx_year_end_closure_day(year: int) -> date:
+    """KRX 연말 폐장일(휴장) — 12/31 기준, 휴일이면 직전 매매거래일로 당김.
+
+    KRX 규칙: 12월 31일 휴장, 단 12/31이 주말/공휴일이면 직전 매매거래일을 휴장.
+    `is_kr_holiday`(공휴일)에 없는 KRX 고유 규칙이라 별도 처리.
+    예) 2022→12/30(Fri) · 2023→12/29(Fri) · 2024·2025·2026→12/31.
+    """
+    d = date(year, 12, 31)
+    while d.weekday() >= 5 or is_kr_holiday(d):
+        d -= timedelta(days=1)
+    return d
+
+
 def is_krx_business_day(d: date) -> bool:
     """KRX 영업일 여부.
 
-    주말 (토/일) 또는 KRX_2026_KNOWN_HOLIDAYS 포함이면 False.
-    검증되지 않은 다른 휴일이 있을 수 있음 — 운영 코드에서는
-    holidays 라이브러리 또는 KRX 공식 캘린더로 보강 필수.
+    False 조건: 주말 / 한국 공휴일(`is_kr_holiday` — PUBLIC∪BANK + observed,
+    대체공휴일·근로자의날·제헌절 재지정 포함) / KRX 연말 폐장일.
+    holidays 라이브러리 기반이라 **연도 무관 동적 계산** (구 2-date 하드코딩 대체).
+    잔여 한계: 라이브러리 미반영 임시공휴일 (운영 발견 시 대응).
     """
     if d.weekday() >= 5:  # 5=토, 6=일
         return False
-    if d in KRX_2026_KNOWN_HOLIDAYS:
+    if is_kr_holiday(d):
+        return False
+    if d == _krx_year_end_closure_day(d.year):
         return False
     return True
 

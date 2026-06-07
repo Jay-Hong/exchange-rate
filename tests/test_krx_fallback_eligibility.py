@@ -354,9 +354,9 @@ class TestStageCRestGuard(unittest.IsolatedAsyncioTestCase):
     """Stage C guard 판정 (ADR-027 §Stage C). 첫 PR — 판정 + telemetry only.
 
     _make_client_with_token: contract=A75605 (월물 202605, 만기 2026-05-18).
-    calendar gate는 현재 KRX_2026_KNOWN_HOLIDAYS minimum 하드코딩(5/5·5/25만)
-    기준 — robust calendar(kr_holidays)는 enabling 전 별도 PR.
-    test_calendar_reject_2026_05_25가 현 5/25 coverage를 회귀 잠금한다.
+    calendar gate는 is_krx_business_day(kr_holidays 기반 robust, 연도 무관 +
+    KRX 연말 폐장 — 2026-06-07 업그레이드)를 사용.
+    test_calendar_reject_2026_05_25가 5/25 coverage를 회귀 잠금한다.
     """
 
     _MATCH_RESULT = {

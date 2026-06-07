@@ -822,10 +822,8 @@ class KrxRestFallbackController:
         (`_invoke_rest_fallback`)가 counter/log로만 기록한다.
 
         hard reject 3 gate (통과 순서):
-          1. calendar — 오늘 KRX 거래일? (`is_krx_business_day`)
-             ⚠️ 현재 `KRX_2026_KNOWN_HOLIDAYS` minimum 하드코딩(5/5·5/25만 등록).
-             robust calendar(`app/calendars/kr_holidays.py`)는 enabling 전
-             별도 prerequisite PR (이 함수는 그 seam을 그대로 사용).
+          1. calendar — 오늘 KRX 거래일? (`is_krx_business_day` — kr_holidays 기반
+             연도 무관 동적 + KRX 연말 폐장. 구 2-date 하드코딩에서 업그레이드 완료).
           2. active contract — 만기 미경과 + REST 응답 월물/만기일이 현재 contract와
              일치 (만기 후 / rollover stale 월물 차단 — 5/18 사고 대응).
           3. session — CF/CM 장중 + 종료 grace 아님.

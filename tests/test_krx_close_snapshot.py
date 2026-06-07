@@ -97,8 +97,8 @@ class TestBoundaryHelpers(unittest.TestCase):
     def test_eligible_cf_2026_05_25_buddhas_birthday_substitute_skips(self):
         """5/25 월요일 부처님오신날 대체공휴일 — CF skip (운영 사고 회귀 잠금).
 
-        mock 없이 실제 KRX_2026_KNOWN_HOLIDAYS 캘린더 entry 검증 — 캘린더에서
-        5/25 빠지면 즉시 fail.
+        mock 없이 실제 kr_holidays(+ KRX wrapper) 캘린더 검증 — is_krx_business_day가
+        5/25 대체공휴일을 휴장으로 잡지 못하면 즉시 fail.
         """
         self.assertFalse(is_close_snapshot_eligible("CF", date(2026, 5, 25)))
 
