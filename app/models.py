@@ -227,3 +227,41 @@ class SourceDailyRate(Base):
     __table_args__ = (
         Index('uq_source_daily_rates', 'source', 'asset', 'date_kst', unique=True),
     )
+
+
+class SourceHourlyRate(Base):
+    """v2 1w 그래프 hot path가 읽는 hourly canonical row (ADR-035 D3).
+
+    source_daily_rates의 1w 대응 — schema mirror, date_kst(Date) → bucket_ts_kst(DateTime).
+    bucket_ts_kst = KST 시 정각 floor (예: 2026-06-07 14:00 = 14:00~14:59 KST 관측 rollup).
+
+    invariant: rate == close (app-level enforce, source_daily_rates 동형).
+    retention ~14일 (config — 1w(7일) 노출 + 주말/배포지연/boundary 버퍼). source별 raw table retention과 분리.
+
+    Source별 rollup provider (raw → hour bucket): KRX·Bithumb=source_rates / Hana=bank_exchange_rates /
+    Investing=investing_exchange_rates (DXY는 market_index_rates.hourly 유지 — D2 동형 별 path).
+
+    Numeric(14, 6) / read path Decimal → helper float() 변환 (app/source_hourly_rates.py).
+    """
+    __tablename__ = "source_hourly_rates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, nullable=False)              # "krx" / "hana" / "bithumb" / "investing"
+    asset = Column(String, nullable=False)               # "usd-krw" / "usdt-krw" / "usd-krw-futures" 등
+    bucket_ts_kst = Column(DateTime, nullable=False)     # KST 시 정각 floor (naive, KST 해석 — date_kst 동형)
+    rate = Column(Numeric(14, 6), nullable=False)        # invariant: rate == close
+    high = Column(Numeric(14, 6), nullable=True)
+    low = Column(Numeric(14, 6), nullable=True)
+    close = Column(Numeric(14, 6), nullable=False)
+    ohlc_quality = Column(String, nullable=False)        # source_ohlc / observed_rollup / close_only
+    close_basis = Column(String, nullable=False)         # source_daily_rates와 동일 enum
+    source_method = Column(String, nullable=False)       # source_daily_rates와 동일 enum
+    contract_code = Column(String, nullable=True)        # KRX 전용 (예: A75606)
+    basis_date = Column(Date, nullable=True)             # provenance (daily schema parity — hourly observed는 보통 None)
+    published_at = Column(DateTime(timezone=True), nullable=True)  # provenance (daily schema parity)
+    captured_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    metadata_json = Column(JSON, nullable=True)          # point_count / first_ts / last_ts / diagnostics
+
+    __table_args__ = (
+        Index('uq_source_hourly_rates', 'source', 'asset', 'bucket_ts_kst', unique=True),
+    )

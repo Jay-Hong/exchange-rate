@@ -44,6 +44,11 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
 
+# source_hourly_rates retention (ADR-035 D3 Step 1).
+# v2 1w graph reads 7 days, but the canonical hourly table keeps a buffer for
+# deploy delay, weekend/session boundaries, and short operational interruptions.
+SOURCE_HOURLY_RETENTION_DAYS = int(os.getenv("SOURCE_HOURLY_RETENTION_DAYS", "14"))
+
 # KRX_FUTURES_ENABLED: PR6 KRX 미국달러선물 수집/저장 자체 토글.
 # default false — scheduler 등록되어도 client.start() 호출 안 함.
 # false 시 WebSocket 연결, DB 저장, mirror 모두 X (KRX 완전 비활성).
@@ -170,6 +175,12 @@ if LATEST_MIRROR_INTERVAL_SECONDS < 1:
     raise ValueError(
         f"LATEST_MIRROR_INTERVAL_SECONDS must be >= 1 (got {LATEST_MIRROR_INTERVAL_SECONDS}). "
         "Silent floor 대신 startup 시 명시 실패 (Crash Early)."
+    )
+
+if SOURCE_HOURLY_RETENTION_DAYS < 8:
+    raise ValueError(
+        f"SOURCE_HOURLY_RETENTION_DAYS must be >= 8 (got {SOURCE_HOURLY_RETENTION_DAYS}). "
+        "1w(7일) 노출 window보다 작거나 같으면 boundary/운영 지연 버퍼가 사라진다."
     )
 
 # Phase Z-2b: Topic dispatcher 토글 (PR Z-2b Stage 1).
