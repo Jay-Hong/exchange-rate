@@ -350,6 +350,128 @@ class TestStageBInvokeRestFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._fallback_counters["rest_error"], 1)
 
 
+class TestStageCRestGuard(unittest.IsolatedAsyncioTestCase):
+    """Stage C guard 판정 (ADR-027 §Stage C). 첫 PR — 판정 + telemetry only.
+
+    _make_client_with_token: contract=A75605 (월물 202605, 만기 2026-05-18).
+    calendar gate는 현재 KRX_2026_KNOWN_HOLIDAYS minimum 하드코딩(5/5·5/25만)
+    기준 — robust calendar(kr_holidays)는 enabling 전 별도 PR.
+    test_calendar_reject_2026_05_25가 현 5/25 coverage를 회귀 잠금한다.
+    """
+
+    _MATCH_RESULT = {
+        "price": "1450.5",
+        "session": "CF",
+        "resp_hts_kor_isnm": "미국달러 F 202605",
+        "resp_futs_last_tr_date": "20260518",
+        "resp_acml_vol": "12345",
+    }
+
+    def _controller(self):
+        return _make_client_with_token()._fallback_controller
+
+    # --- unit: _evaluate_rest_guard (now 주입) ---
+
+    def test_calendar_reject_2026_05_25(self):
+        """★ 필수 회귀 잠금 — 2026-05-25(대체공휴일)은 calendar gate에서 reject."""
+        now = datetime(2026, 5, 25, 15, 0)
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "calendar",
+        )
+
+    def test_pass_on_trading_day_in_session(self):
+        """거래일 CF 장중 + 응답 identity 일치 → None (3 gate 통과)."""
+        now = datetime(2026, 5, 15, 14, 0)  # Fri, CF 장중, A75605 active
+        self.assertIsNone(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now)
+        )
+
+    def test_contract_expired_reject(self):
+        """만기(5/18) 지난 거래일 → contract reject."""
+        now = datetime(2026, 5, 19, 14, 0)  # Tue, 만기 후
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "contract",
+        )
+
+    def test_contract_month_mismatch_reject(self):
+        """응답 월물이 active contract와 불일치 → contract reject."""
+        now = datetime(2026, 5, 15, 14, 0)
+        result = {**self._MATCH_RESULT, "resp_hts_kor_isnm": "미국달러 F 202606"}
+        self.assertEqual(self._controller()._evaluate_rest_guard(result, now), "contract")
+
+    def test_contract_last_tr_mismatch_reject(self):
+        """응답 만기일이 active contract expiry와 불일치 → contract reject."""
+        now = datetime(2026, 5, 15, 14, 0)
+        result = {**self._MATCH_RESULT, "resp_futs_last_tr_date": "20260615"}
+        self.assertEqual(self._controller()._evaluate_rest_guard(result, now), "contract")
+
+    def test_contract_month_suffix_variant_reject(self):
+        """월물 substring variant('202605X')는 exact 파서로 reject (Codex finding 1)."""
+        now = datetime(2026, 5, 15, 14, 0)
+        result = {**self._MATCH_RESULT, "resp_hts_kor_isnm": "미국달러 F 202605X"}
+        self.assertEqual(self._controller()._evaluate_rest_guard(result, now), "contract")
+
+    def test_contract_missing_hts_kor_isnm_reject(self):
+        """응답 hts_kor_isnm 부재 → contract reject (fail-closed)."""
+        now = datetime(2026, 5, 15, 14, 0)
+        result = {k: v for k, v in self._MATCH_RESULT.items() if k != "resp_hts_kor_isnm"}
+        self.assertEqual(self._controller()._evaluate_rest_guard(result, now), "contract")
+
+    def test_contract_missing_last_tr_reject(self):
+        """응답 futs_last_tr_date 부재 → contract reject (fail-closed, Codex finding 2)."""
+        now = datetime(2026, 5, 15, 14, 0)
+        result = {k: v for k, v in self._MATCH_RESULT.items() if k != "resp_futs_last_tr_date"}
+        self.assertEqual(self._controller()._evaluate_rest_guard(result, now), "contract")
+
+    def test_session_reject_outside_window(self):
+        """거래일이지만 세션 밖(break) → session reject."""
+        now = datetime(2026, 5, 15, 16, 30)  # CF 종료(15:45)~야간(17:50) break
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "session",
+        )
+
+    def test_session_reject_in_end_grace(self):
+        """CF 종료 grace(15:45-40min=15:05~) 구간 → session reject."""
+        now = datetime(2026, 5, 15, 15, 30)
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "session",
+        )
+
+    # --- integration: _invoke_rest_fallback → counter (now/fetch patch) ---
+
+    async def test_invoke_guard_pass_increments_counter(self):
+        """guard PASS → rest_guard_pass +1 (DB/Redis/topic 반영 X)."""
+        client = _make_client_with_token()
+        client._active_session = "CF"
+        ctrl = client._fallback_controller
+        with patch.object(ctrl, "_now_kst", return_value=datetime(2026, 5, 15, 14, 0)), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=dict(self._MATCH_RESULT)),
+             ):
+            await client._invoke_rest_fallback()
+        self.assertEqual(client._fallback_counters["rest_guard_pass"], 1)
+        self.assertEqual(client._fallback_counters["rest_success"], 1)
+
+    async def test_invoke_guard_calendar_reject_increments_counter(self):
+        """guard REJECT(calendar) → rest_guard_rejected_calendar +1."""
+        client = _make_client_with_token()
+        client._active_session = "CF"
+        ctrl = client._fallback_controller
+        with patch.object(ctrl, "_now_kst", return_value=datetime(2026, 5, 25, 15, 0)), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=dict(self._MATCH_RESULT)),
+             ):
+            await client._invoke_rest_fallback()
+        self.assertEqual(client._fallback_counters["rest_guard_rejected_calendar"], 1)
+        self.assertEqual(client._fallback_counters["rest_guard_pass"], 0)
+
+
 class TestStageBEligibleTriggersTask(unittest.IsolatedAsyncioTestCase):
     """eligible 분기에서 env=true 시 task 생성, env=false 시 task 생성 X."""
 

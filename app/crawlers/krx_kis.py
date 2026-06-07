@@ -60,12 +60,13 @@ from app.sources.kis_futures import (
     is_in_close_grace_window,
     is_in_session_end_grace,
     is_in_single_price_window,
+    is_krx_business_day,
     parse_h0cfasp0_payload,
     parse_h0cfcnt0_payload,
     parse_h0mfasp0_payload,
     parse_h0mfcnt0_payload,
 )
-from app.sources.kis_master import ContractInfo
+from app.sources.kis_master import ContractInfo, _extract_contract_month
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +506,12 @@ async def fetch_kis_futures_quote(
         "market_div_code": market_div_code,
         "received_at": datetime.now(KST).isoformat(),
         "raw_rt_cd": rt_cd,
+        # Stage C guard용 REST 응답 원본 필드 (위 contract_month/expires_on은
+        # 요청 contract 기준 — 아래 resp_*는 KIS 응답 원본). active contract
+        # gate(월물/만기일 일치 검증) + freshness telemetry(acml_vol)용.
+        "resp_hts_kor_isnm": output.get("hts_kor_isnm"),
+        "resp_futs_last_tr_date": output.get("futs_last_tr_date"),
+        "resp_acml_vol": output.get("acml_vol"),
     }
 
 
@@ -684,6 +691,11 @@ class KrxRestFallbackController:
             "suppressed_cooldown": 0,
             "rest_success": 0,
             "rest_error": 0,
+            # Stage C guard (첫 PR — 판정/telemetry only, DB/Redis/topic 반영 X)
+            "rest_guard_pass": 0,
+            "rest_guard_rejected_calendar": 0,
+            "rest_guard_rejected_contract": 0,
+            "rest_guard_rejected_session": 0,
         }
         self.last_fallback_at: Optional[float] = None  # cooldown 추적
         self.tasks: "set[asyncio.Task]" = set()  # fire-and-forget task lifecycle
@@ -774,6 +786,21 @@ class KrxRestFallbackController:
                     "[kis_ws] REST fallback success contract=%s price=%s session=%s",
                     self._contract.short_code, result.get("price"), result.get("session"),
                 )
+                # Stage C guard 판정 (첫 PR: 판정 + telemetry only — DB/Redis/topic 반영 X)
+                reject = self._evaluate_rest_guard(result, self._now_kst())
+                if reject is None:
+                    self.counters["rest_guard_pass"] += 1
+                    logger.info(
+                        "[kis_ws] REST guard PASS contract=%s price=%s acml_vol=%s last_tr=%s",
+                        self._contract.short_code, result.get("price"),
+                        result.get("resp_acml_vol"), result.get("resp_futs_last_tr_date"),
+                    )
+                else:
+                    self.counters[f"rest_guard_rejected_{reject}"] += 1
+                    logger.info(
+                        "[kis_ws] REST guard REJECTED reason=%s contract=%s acml_vol=%s",
+                        reject, self._contract.short_code, result.get("resp_acml_vol"),
+                    )
             else:
                 self.counters["rest_error"] += 1
                 logger.warning(
@@ -783,6 +810,71 @@ class KrxRestFallbackController:
         except Exception:
             self.counters["rest_error"] += 1
             logger.exception("[kis_ws] REST fallback 호출 실패")
+
+    def _now_kst(self) -> datetime:
+        """guard 판정용 KST naive now (테스트 patch seam)."""
+        return datetime.now(KST).replace(tzinfo=None)
+
+    def _evaluate_rest_guard(self, result: dict, now: datetime) -> Optional[str]:
+        """Stage C guard 판정 (ADR-027 §Stage C guard 설계).
+
+        첫 PR: 판정 + telemetry only — DB/Redis/topic 반영 없음. 결과는 호출자
+        (`_invoke_rest_fallback`)가 counter/log로만 기록한다.
+
+        hard reject 3 gate (통과 순서):
+          1. calendar — 오늘 KRX 거래일? (`is_krx_business_day`)
+             ⚠️ 현재 `KRX_2026_KNOWN_HOLIDAYS` minimum 하드코딩(5/5·5/25만 등록).
+             robust calendar(`app/calendars/kr_holidays.py`)는 enabling 전
+             별도 prerequisite PR (이 함수는 그 seam을 그대로 사용).
+          2. active contract — 만기 미경과 + REST 응답 월물/만기일이 현재 contract와
+             일치 (만기 후 / rollover stale 월물 차단 — 5/18 사고 대응).
+          3. session — CF/CM 장중 + 종료 grace 아님.
+        freshness(gate 4)는 hard reject 아님 — 호출자가 acml_vol을 telemetry로만 기록.
+
+        Args:
+            result: `fetch_kis_futures_quote` 반환 dict (resp_* 응답 필드 포함).
+            now: KST naive datetime.
+
+        Returns:
+            None — 3 hard gate 통과 (fill 후보, 단 첫 PR은 반영 안 함).
+            "calendar" / "contract" / "session" — 해당 gate에서 reject.
+        """
+        today = now.date()
+
+        # gate 1: calendar (오늘 KRX 거래일?)
+        if not is_krx_business_day(today):
+            return "calendar"
+
+        # gate 2: active contract (만기 미경과 + 응답 identity 정확 일치, fail-closed)
+        #   - 월물: _extract_contract_month로 마지막 token이 정확히 YYYYMM인지 검증.
+        #     substring 'in'은 '202605X'(suffix)·'1202605'(prefix) variant를 통과시켜
+        #     약함 (Codex finding 1). contract_month를 만든 동일 파서 재사용 = DRY.
+        #   - futs_last_tr_date 부재도 reject — 6/7 실측상 항상 존재했으므로 missing은
+        #     이상 신호 (default-safe fail-closed, Codex finding 2).
+        if self._contract.expiry_date < today:
+            return "contract"
+        resp_month = _extract_contract_month(result.get("resp_hts_kor_isnm") or "")
+        if resp_month != self._contract.contract_month:
+            return "contract"
+        if result.get("resp_futs_last_tr_date") != self._contract.expiry_date.strftime("%Y%m%d"):
+            return "contract"
+
+        # gate 3: session (CF/CM 장중 + 종료 grace 아님)
+        #   NOTE(Stage C 실 반영 시): now 기준 session을 재계산만 한다. result["session"]
+        #   (fetch 시점 주입)과의 consistency check는 telemetry-only 첫 PR엔 불필요
+        #   (반영 없음) — 실 반영 단계에서 추가 (Codex non-blocking memo 2026-06-07).
+        session = get_active_session(now, self._contract.expiry_date)
+        if session is None:
+            return "session"
+        if is_in_session_end_grace(
+            now,
+            session,
+            config.KRX_REST_FALLBACK_SESSION_END_GRACE_MIN,
+            self._contract.expiry_date,
+        ):
+            return "session"
+
+        return None  # 3 hard gate 통과 (gate 4 freshness는 telemetry only)
 
     async def cleanup_tasks(self) -> None:
         """stop() cleanup — KisFuturesClient.stop()에서 위임.
