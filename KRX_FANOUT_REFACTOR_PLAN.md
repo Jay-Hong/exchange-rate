@@ -136,7 +136,7 @@ WebSocket tick (KisFuturesClient)
   → _dispatch_tick (frame parse + liveness metric 갱신)
   → _fanout (trade tick만)
       ├─ KrxRedisLatestWriter      # 매 tick → Redis latest
-      ├─ KrxAlertEvaluator (stub)  # 매 tick 평가 (후속)
+      ├─ KrxAlertTickHandler → KrxAlertEvaluator  # 매 tick 평가 (F-1/F-2/F-3 완료)
       └─ KrxDbWindowWriter         # 1초 window의 last → DB
 
 별도 cycle:
@@ -150,9 +150,9 @@ WebSocket tick (KisFuturesClient)
 |---|---|---|
 | `KrxLivenessMonitor` | KisFuturesClient line 670-750 (`get_metrics`) + line 1134-1166 (silence/gap 갱신) + line 1015 (`_set_status`) | metric state ownership 이전. behavior-change-0 가능 (state 위치만 이동). |
 | `KrxRestFallbackController` | KisFuturesClient line 853-961, 599-602, 967-972 | counter + task lifecycle + invoke. LivenessMonitor의 status/age signal 의존 → interface 정의 필요. |
-| `KrxRedisLatestWriter` | `KrxDbWriter._sync_db_write` line 1297-1318 | **현재 ADR-031 = DB insert 성공 후 Redis write**. tick-level write로 옮기면 *behavior change* — 5/18 후 Stage C 결정 영역. 1차에서는 *호출 위치 동일, 책임 객체만 분리*. |
+| `KrxRedisLatestWriter` | `KrxDbWriter._sync_db_write` / `__call__` tick handler | 1차 ADR-031 = DB insert 후 Redis write (책임 객체 분리 `f5ba9bc`). **Stage E(`c3cb1c1`)에서 tick-level 활성화 — E-2 운영 활성 2026-05-26, Stage C와 직교.** |
 | `KrxDbWindowWriter` | `KrxDbWriter` line 1219-1318 minus Redis write-through 부분 | window debounce + insert-if-changed만 유지. |
-| `KrxAlertEvaluator` | 미존재 | tick fanout handler 인터페이스 자리만 마련. 구현 후속 phase. |
+| `KrxAlertTickHandler` / `KrxAlertEvaluator` | tick fanout handler + source-neutral evaluator | F-1/F-2/F-3 완료, `KRX_ALERT_EVALUATOR_ENABLED=true` 운영 활성 2026-05-26. |
 
 ## 5. Refactor 순서 제안
 
@@ -193,7 +193,7 @@ WebSocket tick (KisFuturesClient)
 
 - `KrxDbWriter._sync_db_write` 내부의 *Redis write-through* 부분을 별도 `KrxRedisLatestWriter` 객체로 추출.
 - 단, **호출 위치 + timing은 ADR-031 그대로**: DB insert 성공 후, 같은 sync 컨텍스트에서 `redis_writer.write_after_db_insert(asset, rate, ts)` 위임.
-- 즉 객체 분리만 (책임 명시), tick-level 갱신은 X.
+- 즉 객체 분리만 (책임 명시), tick-level 갱신은 X. (→ tick-level 전환은 후속 Stage E E-1 `c3cb1c1`에서 별도 land — §5.2 E 참조)
 - 검증: `test_krx_redis_integration.py` 12 tests 통과 + `usdt_redis_stats`에 krx 미등장 유지.
 
 **D. KrxAlertEvaluator stub — skipped (superseded by F, 2026-05-26)**:
@@ -210,17 +210,21 @@ WebSocket tick (KisFuturesClient)
 - PR-C (`f5ba9bc`): KrxRedisLatestWriter 객체 분리
 - D: superseded by F (2026-05-26) — stub 단계 건너뛰고 F-1/F-2/F-3 trilogy로 직접 land. 상세는 위 §0 Scope 또는 [ADR-032](DECISIONS.md).
 
-### 5.2 5/18 후에만 가능 (Stage C 결정 영역)
+### 5.2 5/18 이후 단계 (2026-06-07 정정)
 
-**E. KrxRedisLatestWriter tick-level 활성화**:
+> 구 제목 "5/18 후에만 가능 (Stage C 결정 영역)" 정정: E(Stage E)는 Stage C와 **직교 재분류·완료**, F(alert evaluator) 완료 → grouping 전체가 "Stage C 결정 영역"은 아님. G(REST Stage C 반영)만 여전히 Stage C 결정 영역(진행 중 — guard 판정+telemetry 첫 PR `b4b69c4` + robust calendar `23df2d2` + `KRX_REST_FALLBACK_ENABLED=true` telemetry canary 활성 `5d816fc`(2026-06-07, write/broadcast 0); 실 반영(topic/Redis write) 미구현, 6/8 첫 telemetry 관찰 예정).
 
-[REALTIME_ARCHITECTURE_PLAN.md §4.1.5](REALTIME_ARCHITECTURE_PLAN.md)에서 KRX의 "DB-insert-bound" Redis write가 all-source fanout 계약의 주요 deviation으로 명시됨. Stage E가 KRX 측 정합 진입점.
+**E. KrxRedisLatestWriter tick-level 활성화** — ✅ **완료** (E-1 `c3cb1c1` default false land / E-2 2026-05-26 운영 활성).
+
+⚠️ **의존성 모델 정정 (2026-06-07)**: 구현 단계에서 Stage E는 close finalizer/REST 정책과 **직교**로 재분류됨 (`app/config.py` 주석 / `c3cb1c1`). 따라서 아래 "전제: ADR-027 Stage C 결정"과 "남은 선행 조건"은 superseded — Stage C 결정과 무관하게 5/26 활성.
+
+[REALTIME_ARCHITECTURE_PLAN.md §4.1.5](REALTIME_ARCHITECTURE_PLAN.md)에서 KRX의 "DB-insert-bound" Redis write가 all-source fanout 계약의 주요 deviation으로 명시됐던 항목 — Stage E 전환으로 정합 완료.
 
 - ADR-031 timing semantic 변경 (`DB-insert-bound` → `tick-level`). 1차 ADR-031에서 의도적으로 제외한 결정.
-- 전제: ADR-027 Stage C 결정 (REST snapshot도 Redis에 반영할지) + 5/18 만기 baseline + 운영 stale 패턴 관찰.
+- ~~전제: ADR-027 Stage C 결정 (REST snapshot도 Redis에 반영할지) + 5/18 만기 baseline + 운영 stale 패턴 관찰.~~ (superseded — Stage E는 Stage C/REST 반영 정책과 직교)
 - *behavior change* — separate ADR / PR.
 
-**진입 준비 상태 (2026-05-25 갱신)**: 5/18 만기 baseline 통과 (CF 15:45 + CM 06:00 close finalizer 양 session 첫 실측 성공, KRX_CANARY.md §"2026-05-18~19 만기 첫 실측 결과"), 자동 rollover 정상 (A75605/202605 → A75606/202606), KIS master batch 익일 갱신 가설 b 확정. **남은 선행 조건**: ADR-027 Stage C 결정 (REST fallback 수치 확정) + 5/19~5/26 close finalizer 7일 telemetry case A/B/C 분포 분석. **non-interference 잠금** (read 산출물에 반드시 포함): KrxCloseWindowWriter의 close grace window 일반 KrxDbWriter skip 정책 유지, close finalizer "window-end 1건 unconditional insert" 정책 미변경.
+**진입/활성 상태 (2026-06-07 정정)**: E-1 `c3cb1c1` land 후 E-2가 2026-05-26 운영 활성. 5/18 만기 baseline 통과 (CF 15:45 + CM 06:00 close finalizer 양 session 첫 실측 성공), 자동 rollover 정상 (A75605/202605 → A75606/202606), KIS master batch 익일 갱신 가설 b 확정. ~~남은 선행 조건: ADR-027 Stage C 결정 + 5/19~5/26 close finalizer 7일 telemetry case A/B/C 분포 분석.~~ (superseded — 활성 완료. 잔여는 다음 KRX 영업 세션 live tick-level 5-field hard telemetry) **non-interference 잠금** (유지): KrxCloseWindowWriter의 close grace window 일반 KrxDbWriter skip 정책 유지, close finalizer "window-end 1건 unconditional insert" 정책 미변경.
 
 **F. KrxAlertEvaluator 구현** (✅ 완료 — 2026-05-26, [ADR-032](DECISIONS.md#adr-032-krx-가격알림-evaluator--source-neutral-재사용--krx-adapter--validate-helper-분리)):
 
@@ -260,7 +264,7 @@ WebSocket tick (KisFuturesClient)
 - 옵션 1: KRX 단일 source 알림 (현재 source_notification_settings)
 - 옵션 2: 비교 알림 (KRX vs USDT 등) — Phase 3 영역, USDT_PHASE1_DESIGN.md 참고
 
-1차에서는 stub만, 구현 시점에 옵션 선택.
+1차에서는 stub만, 구현 시점에 옵션 선택. (→ F-1/F-2/F-3로 구현 완료 — §5.2 F 참조)
 
 ### 6.3 LivenessMonitor의 alarm 출력
 

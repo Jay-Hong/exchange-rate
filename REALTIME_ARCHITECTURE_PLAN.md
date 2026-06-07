@@ -148,7 +148,7 @@ Investing live channel (조사 중) ─┤
 | `seen_at` | observation을 마지막으로 *수신*한 시점 (dedup 무관) | 매 observation |
 | `mirrored_at` | Redis latest mirror가 마지막으로 *갱신*된 시점 | Redis write 성공 |
 
-**왜 분리하는가** — 현재 일부 source(KRX ADR-031 1차)는 "값 동일 → Redis write skip" 정책이라 Redis timestamp가 *stale*해 보이는 false positive 발생. `seen_at` 기록으로 *데이터는 살아있는데 값만 안 바뀜* 상태를 명확히 표현 가능. `mirrored_at`은 mirror cycle 자체의 health 측정용 (ADR-026 PR5 `mirror_age_ms`와 정합).
+**왜 분리하는가** — KRX ADR-031 1차처럼 과거 일부 source는 "값 동일 → Redis write skip" 정책이라 Redis timestamp가 *stale*해 보이는 false positive가 발생할 수 있었다(Stage E에서 KRX는 tick-level로 전환 완료). `seen_at` 기록으로 *데이터는 살아있는데 값만 안 바뀜* 상태를 명확히 표현 가능. `mirrored_at`은 mirror cycle 자체의 health 측정용 (ADR-026 PR5 `mirror_age_ms`와 정합).
 
 #### 4.1.4 Contract-common vs source-specific 경계
 
@@ -160,7 +160,7 @@ Investing live channel (조사 중) ─┤
 | Alert evaluator 책임 | contract-common | source-neutral helper (`UsdtAlertEvaluator` 패턴) |
 | Topic trigger 책임 | contract-common | `request_*_topic_trigger` 호출 |
 | Freshness metadata fields | contract-common | `rate_changed_at` / `seen_at` / `mirrored_at` 모두 기록 |
-| Dedup 정책 (값 변경만 vs 매 tick) | source-specific | USDT 매 tick Redis write / KRX DB-insert-bound (Stage E에서 전환 예정) |
+| Dedup 정책 (값 변경만 vs 매 tick) | source-specific | USDT 매 tick Redis write / KRX tick-level (Stage E 활성 2026-05-26, `KRX_REDIS_TICK_WRITE_ENABLED=true`) |
 | Liveness 임계값 | source-specific | Gopax 300/600, Coinone 60/300, Korbit 30/120 |
 | REST fallback trigger 조건 | source-specific | Upbit normal→stale / Gopax `ticker_freshness=degraded` / KRX 60s+ silence (Stage A counter only) |
 | Session 경계 / 만기 / contract rollover | source-specific 외부 | KRX-only (CF/CM session, 만기 swap, `_last_tick_at` reset) |
@@ -170,9 +170,9 @@ Investing live channel (조사 중) ─┤
 
 본 계약과의 현재 deviation 요약(2026-05-25 갱신). 상세 status / Stage 진척은 각 phase doc에서 관리:
 
-- **USDT 5거래소** — 계약 정합도가 가장 높음. 5 source 모두 RestFallbackController 보유 (trigger 조건만 source-specific). WS fanout이 Redis(tick path + 5s grain coalescing)/DB(1초 window writer)/Alert(coalescer) 책임 처리, source-neutral `UsdtAlertEvaluator` 운영 중. (5b-bis) Redis freshness grain — value JSON은 5 fields(legacy `timestamp=seen_at` alias + 신규 `rate_changed_at`/`seen_at`/`mirrored_at`) + 옵션 A in-memory state(`_last_written_usdt_state`)로 warm same-rate/same-bucket SET 자체 SKIPPED + Redis GET 회피 + (5d-a) SET-only topic trigger (`UsdtLatestWriteOutcome` enum, SKIPPED는 silent) + (legacy polling disable, `ed0885c`, `USDT_LEGACY_REST_POLLING_ENABLED=false` default) 모두 land. 남은 follow-up: Bank/Investing β + KRX Stage E land 후 공통화 검토 (USDT_WS_DESIGN_PLAN.md §12.6/§12.7/§12.9.7 선제 abstraction 금지 원칙).
+- **USDT 5거래소** — 계약 정합도가 가장 높음. 5 source 모두 RestFallbackController 보유 (trigger 조건만 source-specific). WS fanout이 Redis(tick path + 5s grain coalescing)/DB(1초 window writer)/Alert(coalescer) 책임 처리, source-neutral `UsdtAlertEvaluator` 운영 중. (5b-bis) Redis freshness grain — value JSON은 5 fields(legacy `timestamp=seen_at` alias + 신규 `rate_changed_at`/`seen_at`/`mirrored_at`) + 옵션 A in-memory state(`_last_written_usdt_state`)로 warm same-rate/same-bucket SET 자체 SKIPPED + Redis GET 회피 + (5d-a) SET-only topic trigger (`UsdtLatestWriteOutcome` enum, SKIPPED는 silent) + (legacy polling disable, `ed0885c`, `USDT_LEGACY_REST_POLLING_ENABLED=false` default) 모두 land. 남은 follow-up: Bank/Investing β + KRX Stage E 완료 후 공통화 검토 (USDT_WS_DESIGN_PLAN.md §12.6/§12.7/§12.9.7 선제 abstraction 금지 원칙).
 - **Bank 9개 / Investing** — DB-first monolithic 경로(crud.py 안에서 DB → Redis write helper → `process_rate_alerts` 직렬). Redis write와 alert는 crud.py에서 직접 처리, **Topic trigger만 main.py broadcast diff hook 경유**. β 옵션(observation-based fanout) 검토 중 ([USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md) — observation fanout 재설계 + legacy hook 격하 가능성 포함, window=0 alert coalescer는 하위 측면일 뿐).
-- **KRX 미국달러선물** — ADR-031 1차로 Redis write가 **DB-insert-bound**(tick-level 아님). Runtime alert evaluator 미연결 (`KrxAlertEvaluator`는 Stage D/F 후보). Stage E에서 tick-level Redis 전환 예정 — 5/18 만기 baseline 통과 + close finalizer 5/19~5/26 7일 telemetry + ADR-027 Stage C 결정이 선행 조건. **2026-05-25 휴장일 사고 후속 정책 PR(`6a43785`)로 close REST write는 default off** (`KRX_CLOSE_REST_WRITE_ENABLED=false`, [ADR-027 follow-up](DECISIONS.md)) — KIS REST stale 본질 격리. Stage E는 본 정책과 직교 작업.
+- **KRX 미국달러선물** — Stage E tick-level Redis 전환 **완료** (E-2 `KRX_REDIS_TICK_WRITE_ENABLED=true` 운영 활성 2026-05-26; ADR-031 1차 DB-insert-bound → tick-level). Runtime alert evaluator **연결됨** (F-1/F-2/F-3, `KRX_ALERT_EVALUATOR_ENABLED=true`, 2026-05-26). Stage E는 ADR-027 Stage C/REST 정책과 **직교**(Stage C 결정은 선행 조건 아님). **2026-05-25 휴장일 사고 후속 정책 PR(`6a43785`)로 close REST write는 default off** (`KRX_CLOSE_REST_WRITE_ENABLED=false`, [ADR-027 follow-up](DECISIONS.md)) — KIS REST stale 본질 격리. G(REST Stage C 실반영)는 별도 트랙 — telemetry canary 활성(`5d816fc`), 실반영 미구현.
 
 #### 4.1.6 통합 phase 진입 조건 및 cross-reference
 

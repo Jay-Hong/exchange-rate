@@ -959,6 +959,8 @@ ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose up -d --force-recreate fa
 | `KRX_REDIS_TICK_WRITE_ENABLED` | false | true | Stage E E-2 tick-level Redis mirror |
 | `KRX_ALERT_EVALUATOR_ENABLED` | false | true | **F-3 신규** KRX 가격알림 활성 |
 
+> **E-2 활성 anchor (2026-06-07 정리)**: E-1 `c3cb1c1` land 이후 2026-05-26 운영에서 `KRX_REDIS_TICK_WRITE_ENABLED=true` 확인. 5/26에는 약 01:30 KST 컨테이너 시작 후보와 13:03 KST 수동 컨테이너 교체(journald 확인)가 있었으나, env 값은 journald/docker 로그에 남지 않아 어느 recreate에서 flip이 적용됐는지는 특정 불가. Stage E 활성 증거는 본 토글 매트릭스와 5/26 15:45 CF close Stage E non-interference 실측이며, 13:40 iOS canary는 F-3 alert 활성 증거(별개 토글)다. 정확한 flip 시각은 `.env` mtime 덮임(6/5)·이후 컨테이너 재생성·bash history timestamp 부재·journald env 미기록으로 복구 불가.
+
 ### 5/26 15:45 CF close 첫 실측 결과 (sampler 검증)
 
 5/26 13:40 iOS canary 직후 15:45 close 자연 도래 검증. sampler `/tmp/krx_close_1545_sample.log` 5초 grain 36 sample.
