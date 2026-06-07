@@ -3362,8 +3362,8 @@ env `KRX_CLOSE_REST_WRITE_ENABLED=true` + `docker compose up -d --force-recreate
 |---|------|-----------|---------|---------------------------|
 | 1 | **calendar** | 오늘 KRX 거래일 | exclude | `is_krx_business_day`(주말 + `KRX_2026_KNOWN_HOLIDAYS`). ⚠️ 2026 하드코딩 → `app/calendars/kr_holidays.py`(holidays lib, PR A1) 재사용 검토 (KRX 거래 캘린더 미세차 확인) |
 | 2 | **session** | CF/CM 장중 + 종료 grace 아님 | exclude | `get_active_session` + `is_in_session_end_grace` ✅ |
-| 3 | **active contract** | REST 응답 월물 == 현재 active contract 월물 | exclude | smoke 확인: `output1.hts_kor_isnm='미국달러 F 202605'` → 월물 파싱 비교. 만기 후/rollover stale 월물 차단(5/18 사고) ✅ |
-| 4 | **freshness** (secondary, parameterized) | BAS_DD 있으면 기준일==오늘(stateless) / 없으면 acml_vol·timestamp vs 최근 WS state(stateful best-effort) | telemetry-only(반영 보류) | `output1.futs_prpr` + `acml_vol` ✅ / **BAS_DD 실재는 inquire-price read-only 1회 verify-later** |
+| 3 | **active contract** | REST 응답 월물 == 현재 active contract 월물 (+ 만기 미경과) | exclude | `output1.hts_kor_isnm`(월물) + **`futs_last_tr_date`(만기일, 2026-06-07 실측 확인)** 둘 다 보강 신호 → 만기 후/rollover stale 월물 차단(5/18 사고) ✅ |
+| 4 | **freshness** (secondary, telemetry) | **BAS_DD 부재 확정**(2026-06-07 inquire-price 실측 — output1 31필드 중 거래일 필드 없음) → acml_vol·가격 vs 최근 WS state(stateful) **telemetry 수준**(hard reject 아님 — gate 1-2가 장중을 이미 확정) | telemetry-only | `output1.futs_prpr`+`acml_vol` ✅ / BAS_DD ❌ (확인 완료) |
 
 **gate 1-3가 알려진 두 사고(5/25 휴장 · 5/18 만기 stale 월물)를 직접 차단** = robust 방어 본체. **gate 4(freshness)는 secondary** — acml_vol stateful 비교는 "DB row gap ≠ raw frame gap"(§원칙 4) 진단대로 장중 저유동성 정체를 stale로 오탐 → 단독 차단 근거 부적합(gate 1-2가 "장중"을 이미 확정). BAS_DD 있으면 clean, 없으면 telemetry 수준.
 
@@ -3371,7 +3371,7 @@ env `KRX_CLOSE_REST_WRITE_ENABLED=true` + `docker compose up -d --force-recreate
 
 **의존/순서**: Stage C 실 노출 채널은 ADR-028 **topic-only**(legacy `rates` 아님) + KRX Stage 2. guard+reflect 코드는 작성 가능하나 실 노출은 topic protocol(Phase Z-2) 선행. 권장 구현 순서: (a) inquire-price read-only 1회로 BAS_DD/acml_vol 일관성 확인 → (b) 4-gate guard + `rest_guard_rejected` telemetry 구현(controller 결과 처리부) → (c) topic 반영은 Phase Z-2 정합.
 
-**구현 전 확정 (open)**: BAS_DD 필드 실재 / calendar 업그레이드(kr_holidays 재사용 vs KRX 전용) / active contract 비교 형식(`hts_kor_isnm` 파싱 vs `contract.contract_month`).
+**구현 전 확정 (open)**: ✅ ~~BAS_DD 필드 실재~~ → **2026-06-07 inquire-price read-only 실측으로 BAS_DD/거래일 필드 부재 확정** (output1 31필드 — futs_prpr/acml_vol/hts_kor_isnm/futs_last_tr_date 등, 데이터 거래일 없음. 휴장일 6/7에 거래일 필드 없이 1538.9를 `rt_cd=0`으로 반환 → **REST payload만으로 기준 거래일 판별 불가** 실증. 값 1538.9는 6/5 CF close finalizer 값과 일치 = 직전 거래일 stale 값 추정[단, 응답 자체가 날짜를 증명하진 않음]). freshness=acml_vol telemetry로 닫음. **남은 open**: calendar 업그레이드(`kr_holidays` 재사용 vs KRX 전용 — 거래소 휴장 미세차) / active contract 비교 형식(`hts_kor_isnm` 파싱 vs `contract.contract_month` + `futs_last_tr_date` 보강).
 
 ---
 
