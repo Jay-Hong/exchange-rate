@@ -2880,7 +2880,7 @@ baseline 명확히 구분:
 ## ADR-027: KRX 미국달러선물 Stage 2 진입 전 REST snapshot/fallback + stale 정책 (초안)
 
 > 📅 **작성일**: 2026-05-06
-> 🏷️ **상태**: 초안 (Stage 1 canary 운영 데이터 수집 중, 수치 미확정)
+> 🏷️ **상태**: Stage A/B 구현·배포 완료 (2026-05~06, `KRX_REST_FALLBACK_ENABLED=false` 운영 / Stage B=log·counter-only, 반영 경로 없음) / **Stage C(REST 결과 반영) 미구현 — freshness guard 선행 필요** (설계 2026-06-07, 하단 §Stage C guard 설계 참조). 초기 "Stage 1 canary 수치 미확정" 초안에서 갱신.
 
 ### 맥락
 
@@ -3349,6 +3349,29 @@ env `KRX_CLOSE_REST_WRITE_ENABLED=true` + `docker compose up -d --force-recreate
 - Stage E (KRX Redis tick-level 전환, [KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md))는 본 결정과 직교 작업 — 별도 진입.
 
 상세 사고 기록 + 운영 보정 명령: [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md) / [KRX_CANARY.md §"2026-05-25 휴장일 사고 + 대응"](KRX_CANARY.md) 참조.
+
+### Stage C guard 설계 (2026-06-07 amendment)
+
+> **현황 재정리**: Stage A/B(helper `fetch_kis_futures_quote` + controller `evaluate`/`_invoke_rest_fallback` — stale gating·cooldown·session-end grace·REST 호출)는 구현·배포 완료. `KRX_REST_FALLBACK_ENABLED=false` 운영. **Stage B는 REST 호출 후 log/counter만**([krx_kis.py:754](app/crawlers/krx_kis.py), 반영 경로 0). Stage C = REST 결과를 topic/Redis/DB에 **반영**. 단 2026-05-25 close snapshot 사고([config.py:201-210](app/config.py) — 휴장일 KIS REST가 5/22 stale 종가를 `rt_cd=0`으로 반환 → DB row id=429785 + Redis 기록 → 단말 노출)가 입증하듯 **REST 응답만으로 freshness 증명 불가** → 반영 전 다층 guard 필수.
+
+**설계 원칙**: REST를 일괄 차단(close snapshot 방식)하지 않는다 — close snapshot은 15:45 마감-순간이라 항상 경계여서 차단이 정답이었으나, **general fallback은 장중 일시 WS 단절** 한정이라 **장중 + 다층 guard 통과 시에만 fill**, 하나라도 실패 시 **exclude/telemetry-only**(default-safe).
+
+**4-gate (앞 3개가 robust 방어 본체, 4번이 보강):**
+
+| # | gate | 통과 조건 | 실패 시 | building block (실재 확인) |
+|---|------|-----------|---------|---------------------------|
+| 1 | **calendar** | 오늘 KRX 거래일 | exclude | `is_krx_business_day`(주말 + `KRX_2026_KNOWN_HOLIDAYS`). ⚠️ 2026 하드코딩 → `app/calendars/kr_holidays.py`(holidays lib, PR A1) 재사용 검토 (KRX 거래 캘린더 미세차 확인) |
+| 2 | **session** | CF/CM 장중 + 종료 grace 아님 | exclude | `get_active_session` + `is_in_session_end_grace` ✅ |
+| 3 | **active contract** | REST 응답 월물 == 현재 active contract 월물 | exclude | smoke 확인: `output1.hts_kor_isnm='미국달러 F 202605'` → 월물 파싱 비교. 만기 후/rollover stale 월물 차단(5/18 사고) ✅ |
+| 4 | **freshness** (secondary, parameterized) | BAS_DD 있으면 기준일==오늘(stateless) / 없으면 acml_vol·timestamp vs 최근 WS state(stateful best-effort) | telemetry-only(반영 보류) | `output1.futs_prpr` + `acml_vol` ✅ / **BAS_DD 실재는 inquire-price read-only 1회 verify-later** |
+
+**gate 1-3가 알려진 두 사고(5/25 휴장 · 5/18 만기 stale 월물)를 직접 차단** = robust 방어 본체. **gate 4(freshness)는 secondary** — acml_vol stateful 비교는 "DB row gap ≠ raw frame gap"(§원칙 4) 진단대로 장중 저유동성 정체를 stale로 오탐 → 단독 차단 근거 부적합(gate 1-2가 "장중"을 이미 확정). BAS_DD 있으면 clean, 없으면 telemetry 수준.
+
+**output policy**: 4 gate 통과 → fill 후보; 하나라도 실패 → `rest_guard_rejected` verdict + telemetry only(반영 0). 이번 세션 `daily_append_verdict` 패턴과 일관.
+
+**의존/순서**: Stage C 실 노출 채널은 ADR-028 **topic-only**(legacy `rates` 아님) + KRX Stage 2. guard+reflect 코드는 작성 가능하나 실 노출은 topic protocol(Phase Z-2) 선행. 권장 구현 순서: (a) inquire-price read-only 1회로 BAS_DD/acml_vol 일관성 확인 → (b) 4-gate guard + `rest_guard_rejected` telemetry 구현(controller 결과 처리부) → (c) topic 반영은 Phase Z-2 정합.
+
+**구현 전 확정 (open)**: BAS_DD 필드 실재 / calendar 업그레이드(kr_holidays 재사용 vs KRX 전용) / active contract 비교 형식(`hts_kor_isnm` 파싱 vs `contract.contract_month`).
 
 ---
 
