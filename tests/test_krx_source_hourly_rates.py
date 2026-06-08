@@ -19,14 +19,17 @@ import sys
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from app import models  # noqa: E402
-from app.models import SourceDailyRate  # noqa: E402
+from app.models import SourceDailyRate, SourceHourlyRate  # noqa: E402
+import backfill_bithumb_source_hourly_rates as B  # noqa: E402
 import backfill_krx_source_hourly_rates as K  # noqa: E402
 
 
@@ -139,6 +142,144 @@ class TestFetchDailyContractMap(unittest.TestCase):
         self.db.commit()
         cmap = K.fetch_daily_contract_map(self.db, date(2026, 6, 7), date(2026, 6, 9))
         self.assertEqual(cmap, {date(2026, 6, 8): "A75606"})      # krx + 범위 안만
+
+
+class TestWritePath(unittest.TestCase):
+    """Step 3a write path — B.write_with_transaction 확장 재사용 (allow_contract_code=True +
+    krx_post_write_validator). in-memory SQLite + app.database.SessionLocal patch (Hana/Bithumb 패턴).
+    """
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        models.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def _cf_rows(self, contract="A75606"):
+        """2026-06-08 CF buckets 2개 (09:00 + 15:00, 15:45 inclusive). contract=None이면 미resolve."""
+        cmap = {date(2026, 6, 8): contract} if contract is not None else {}
+        ticks = [
+            (1500.0, datetime(2026, 6, 8, 0, 15)),   # KST 09:15 CF
+            (1502.0, datetime(2026, 6, 8, 0, 30)),   # KST 09:30 high
+            (1499.0, datetime(2026, 6, 8, 0, 45)),   # KST 09:45 close(09)
+            (1505.0, datetime(2026, 6, 8, 6, 44)),   # KST 15:44
+            (1506.0, datetime(2026, 6, 8, 6, 45)),   # KST 15:45 close(15) inclusive
+            (1490.0, datetime(2026, 6, 8, 10, 0)),   # KST 19:00 CM → drop
+        ]
+        return K.rollup_cf_ticks_to_hourly(ticks, cmap)
+
+    def _written(self):
+        db = self.Session()
+        try:
+            return (db.query(SourceHourlyRate)
+                    .filter(SourceHourlyRate.source == "krx")
+                    .order_by(SourceHourlyRate.bucket_ts_kst).all())
+        finally:
+            db.close()
+
+    def test_write_persists_contract_and_session(self):
+        """(a) write 성공 → contract_code(A75606) + session=CF persisted, CM drop, rate==close."""
+        rows = self._cf_rows(contract="A75606")
+        self.assertEqual(len(rows), 2)   # CF 09:00 + 15:00 (CM drop)
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(
+                rows, require_empty=True,
+                source="krx", asset="usd-krw-futures", close_basis="krx_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup",
+                allow_contract_code=True, post_write_validator=K.krx_post_write_validator)
+        self.assertTrue(success, issues)
+        self.assertEqual(outcome, {"inserted": 2, "updated": 0})
+        written = self._written()
+        self.assertEqual([w.bucket_ts_kst.hour for w in written], [9, 15])         # CM dropped
+        self.assertTrue(all(w.contract_code == "A75606" for w in written))         # contract 보존
+        self.assertTrue(all((w.metadata_json or {}).get("session") == "CF" for w in written))
+        self.assertTrue(all(w.rate == w.close for w in written))                   # invariant
+        # basis_date/published_at는 hourly observed라 None
+        self.assertTrue(all(w.basis_date is None and w.published_at is None for w in written))
+        b15 = [w for w in written if w.bucket_ts_kst.hour == 15][0]
+        self.assertEqual(float(b15.close), 1506.0)                                 # 15:45 inclusive
+
+    def test_require_empty_rejects_nonempty_target(self):
+        """(b) --require-empty-target → 기존 row 있으면 reject (gap-only 위반)."""
+        rows = self._cf_rows(contract="A75606")
+        with patch("app.database.SessionLocal", self.Session):
+            ok1, _, _ = B.write_with_transaction(
+                rows, require_empty=True,
+                source="krx", asset="usd-krw-futures", close_basis="krx_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup",
+                allow_contract_code=True, post_write_validator=K.krx_post_write_validator)
+            self.assertTrue(ok1)   # 1차 적재
+            # 동일 target에 require_empty=True 재시도 → reject
+            ok2, issues2, _ = B.write_with_transaction(
+                rows, require_empty=True,
+                source="krx", asset="usd-krw-futures", close_basis="krx_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup",
+                allow_contract_code=True, post_write_validator=K.krx_post_write_validator)
+        self.assertFalse(ok2)
+        self.assertTrue(any("require-empty-target" in i for i in issues2))
+        self.assertEqual(len(self._written()), 2)   # 1차 2 row 그대로 (2차는 미반영)
+
+    def test_contract_none_post_write_rollback(self):
+        """(c) contract None(daily 부재) → in-transaction post-write 검증 실패 → rollback (0 row)."""
+        rows = self._cf_rows(contract=None)   # contract_map 부재 → 모든 row contract None
+        self.assertTrue(all(r["contract_code"] is None for r in rows))
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(
+                rows, require_empty=True,
+                source="krx", asset="usd-krw-futures", close_basis="krx_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup",
+                allow_contract_code=True, post_write_validator=K.krx_post_write_validator)
+        self.assertFalse(success)
+        self.assertTrue(any("contract_code IS NULL" in i for i in issues))
+        self.assertEqual(outcome, {"inserted": 0, "updated": 0})
+        self.assertEqual(len(self._written()), 0)   # rollback — 0 row
+
+    def test_session_not_cf_post_write_rollback(self):
+        """(c-bis) metadata session != CF (CM 누출 등) → post-write 검증 실패 → rollback (0 row)."""
+        rows = self._cf_rows(contract="A75606")
+        rows[0]["metadata_json"]["session"] = "CM"   # 강제 변조 (CM 누출 시뮬)
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, _ = B.write_with_transaction(
+                rows, require_empty=True,
+                source="krx", asset="usd-krw-futures", close_basis="krx_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup",
+                allow_contract_code=True, post_write_validator=K.krx_post_write_validator)
+        self.assertFalse(success)
+        self.assertTrue(any("session != CF" in i for i in issues))
+        self.assertEqual(len(self._written()), 0)   # rollback — 0 row
+
+
+class TestWriteBackwardCompat(unittest.TestCase):
+    """B 확장(allow_contract_code / post_write_validator)이 generic source(Bithumb/Investing/Hana)에
+    영향 0임을 KRX 테스트 파일에서도 직접 확인 (default 미전달 = contract None 강제 + validator 미호출).
+    """
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        models.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def test_default_path_unchanged_contract_none(self):
+        """default(allow_contract_code 미전달) → contract_code 무시(None) + validator 미호출 → 정상 적재.
+
+        candidate에 contract_code가 있어도 default path는 upsert에 미전달 → None persist (generic 계약).
+        """
+        rows = B.rollup_ticks_to_hourly([
+            (1400.0, datetime(2026, 6, 8, 5, 0)),    # KST 14:00
+            (1401.0, datetime(2026, 6, 8, 5, 30)),
+        ])
+        rows[0]["contract_code"] = "SHOULD_BE_IGNORED"   # default path는 무시해야 함
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(rows, require_empty=True)
+        self.assertTrue(success, issues)
+        self.assertEqual(outcome, {"inserted": 1, "updated": 0})
+        db = self.Session()
+        try:
+            w = db.query(SourceHourlyRate).filter(SourceHourlyRate.source == "bithumb").one()
+        finally:
+            db.close()
+        self.assertIsNone(w.contract_code)   # default path → contract_code None (generic 불변)
 
 
 if __name__ == "__main__":

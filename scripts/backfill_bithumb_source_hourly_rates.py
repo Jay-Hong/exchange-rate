@@ -309,9 +309,11 @@ def write_with_transaction(
     close_basis: str = CLOSE_BASIS,
     source_method: str = SOURCE_METHOD,
     ohlc_quality: str = OHLC_QUALITY,
+    allow_contract_code: bool = False,
+    post_write_validator=None,
 ) -> tuple[bool, list[str], dict]:
     """단일 transaction write: (require_empty pre-check) → upsert(commit=False) loop →
-    post-write SELECT 검증 → commit/rollback.
+    post-write SELECT 검증 → (옵션 post_write_validator) → commit/rollback.
 
     source/asset/close_basis/source_method/ohlc_quality는 **default=Bithumb 상수** — Bithumb caller는
     인자 미전달로 동작 불변(test 검증). Investing 등 다른 hourly source는 통화별 인자 전달해 재사용.
@@ -319,6 +321,17 @@ def write_with_transaction(
     Returns: (success, issues, outcome). outcome = {inserted, updated}.
     require_empty면 pre-write에 target bucket이 비어있어야 함 (gap-only 강제). post-write SELECT는
     bucket_ts_kst.in_(expected_buckets) (partial rerun / 다른 path overlap 안전 — daily 패턴).
+
+    allow_contract_code (default False):
+      - **KRX 전용 확장**. False(=Bithumb/Investing/Hana)면 기존 동작 100% 불변:
+        upsert에 contract_code 미전달(자연 None) + post-write 검증 (d)는 contract_code/basis_date/
+        published_at 전부 None을 강제 (hourly observed 계약).
+      - True(=KRX)면 candidate row의 contract_code를 upsert에 전달(영속) + 검증 (d)는 contract_code를
+        예외로 두고 basis_date/published_at만 None 강제 (KRX는 front contract code를 hourly row에 보존).
+    post_write_validator (default None):
+      - 옵션 callback(written ORM rows: list) → issue str 리스트. commit 전 generic 검증 직후 호출되어
+        source-specific 불변(KRX는 contract_code NOT NULL + metadata session=="CF")을 같은 transaction
+        안에서 검증한다 (issue 반환 시 rollback). None이면 호출 안 함 (기존 caller 동작 불변).
     """
     from app.database import SessionLocal
     from app.models import SourceHourlyRate
@@ -366,6 +379,8 @@ def write_with_transaction(
                 ], outcome
 
         # upsert loop (commit=False — caller transaction)
+        # allow_contract_code=False(default)면 contract_code 미전달 → 자연 None (Bithumb/Investing/Hana 불변).
+        # True(KRX)면 candidate row의 contract_code(front month code)를 영속.
         for r in rows:
             upsert_fn(
                 session, commit=False,
@@ -373,6 +388,7 @@ def write_with_transaction(
                 close=r["close"], ohlc_quality=r["ohlc_quality"],
                 close_basis=r["close_basis"], source_method=r["source_method"],
                 high=r.get("high"), low=r.get("low"), metadata_json=r.get("metadata_json"),
+                contract_code=(r.get("contract_code") if allow_contract_code else None),
             )
 
         # post-write SELECT (in_(expected_buckets))
@@ -401,9 +417,13 @@ def write_with_transaction(
             # (c) invariant
             if w.rate != w.close:
                 issues.append(f"drift @ {w.bucket_ts_kst}: rate={w.rate} != close={w.close}")
-            # (d) metadata policy: hourly observed는 contract_code/basis_date/published_at 전부 None
-            if w.contract_code is not None or w.basis_date is not None or w.published_at is not None:
-                issues.append(f"top-level metadata NOT None @ {w.bucket_ts_kst} (hourly observed는 전부 None)")
+            # (d) metadata policy: hourly observed는 basis_date/published_at는 항상 None.
+            #     contract_code는 allow_contract_code=False면 None 강제(Bithumb/Investing/Hana),
+            #     True면 예외(KRX는 front contract code 보존 — NOT NULL은 post_write_validator가 검증).
+            if w.basis_date is not None or w.published_at is not None:
+                issues.append(f"basis_date/published_at NOT None @ {w.bucket_ts_kst} (hourly observed는 None)")
+            if not allow_contract_code and w.contract_code is not None:
+                issues.append(f"contract_code NOT None @ {w.bucket_ts_kst} (이 source는 contract_code 미사용)")
             # (e) enum/literal
             if (w.source != source or w.asset != asset or w.close_basis != close_basis
                     or w.source_method != source_method or w.ohlc_quality not in allowed_ohlc_quality):
@@ -423,6 +443,11 @@ def write_with_transaction(
             if w.bucket_ts_kst in seen:
                 issues.append(f"duplicate bucket @ {w.bucket_ts_kst}")
             seen.add(w.bucket_ts_kst)
+
+        # source-specific 후처리 검증 (옵션 — 같은 transaction 안, commit 전).
+        # KRX: contract_code NOT NULL + metadata session=="CF". issue 반환 시 rollback.
+        if post_write_validator is not None:
+            issues.extend(post_write_validator(written))
 
         if issues:
             session.rollback()
