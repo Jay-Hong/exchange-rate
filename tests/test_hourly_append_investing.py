@@ -1,8 +1,8 @@
-"""Investing per-currency hourly append PLAN 단위 테스트 (ADR-035 D3 — going-forward freshness).
+"""Investing per-currency hourly append 단위 테스트 (ADR-035 D3 — PLAN + prune).
 
 `scripts/hourly_append_investing_source_hourly_rates.py`의 fetch_candidates_investing +
-compute_append_plan_investing(per-currency classification)을 in-memory SQLite/synthetic으로 검증.
-read-only(write 0) PLAN만. 외부 의존성 0.
+compute_append_plan_investing(per-currency classification) + prune_old_buckets_investing을
+in-memory SQLite/synthetic으로 검증. 외부 의존성 0.
 
 검증 포인트:
 - fetch_candidates_investing: 직전 완료 hour까지, 현재 incomplete hour 제외, per-currency
@@ -114,6 +114,28 @@ class TestComputeAppendPlanInvesting(unittest.TestCase):
         plan = self._plan(now, "usd-krw")
         self.assertEqual(plan.candidate_count, 1)           # usd 13:00만
         self.assertEqual(plan.prune_count, 0)               # usd엔 old 없음 (jpy old는 무관)
+
+    def test_prune_atomic_asset_subset_isolation(self):
+        # prune은 asset.in_(assets) — assets에 없는 통화 old는 안 건드림
+        self._bucket(datetime(2026, 5, 20, 0, 0), "usd-krw", 1400.0)   # usd old → prune
+        self._bucket(datetime(2026, 6, 8, 13, 0), "usd-krw", 1500.0)   # usd recent → 유지
+        self._bucket(datetime(2026, 5, 20, 0, 0), "jpy-krw", 900.0)    # jpy old (assets=[usd]엔 무관)
+        self.db.commit()
+        deleted = AI.prune_old_buckets_investing(self.db, ["usd-krw"], datetime(2026, 5, 25, 14, 0))
+        self.assertEqual(deleted, 1)                                                                  # usd old만
+        self.assertEqual(self.db.query(SourceHourlyRate).filter(SourceHourlyRate.asset == "jpy-krw").count(), 1)  # jpy 격리
+        self.assertEqual(self.db.query(SourceHourlyRate).filter(SourceHourlyRate.asset == "usd-krw").count(), 1)  # usd recent 유지
+
+    def test_prune_atomic_multi_asset(self):
+        # 여러 통화 old를 한 transaction에서 atomic 삭제 (부분 prune 불가)
+        for a, r in [("usd-krw", 1400.0), ("jpy-krw", 900.0), ("eur-krw", 1800.0)]:
+            self._bucket(datetime(2026, 5, 20, 0, 0), a, r)            # 3통화 old
+        self._bucket(datetime(2026, 6, 8, 13, 0), "usd-krw", 1500.0)  # recent → 유지
+        self.db.commit()
+        deleted = AI.prune_old_buckets_investing(
+            self.db, ["usd-krw", "jpy-krw", "eur-krw"], datetime(2026, 5, 25, 14, 0))
+        self.assertEqual(deleted, 3)                                   # usd/jpy/eur old atomic
+        self.assertEqual(self.db.query(SourceHourlyRate).count(), 1)   # recent usd만
 
 
 if __name__ == "__main__":

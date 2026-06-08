@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Investing per-currency hourly append — PLAN (ADR-035 D3 — going-forward freshness).
+"""Investing per-currency hourly append — PLAN + WRITE (ADR-035 D3 — going-forward freshness).
 
-source_hourly_rates의 Investing(usd/jpy/eur)을 going-forward로 최신 유지하는 append의 **PLAN mode**.
-**read-only (write 0)** — 통화별로 어떤 bucket을 upsert/prune할지 산출 + 로그. **write path / cron은 별도 GO.**
+source_hourly_rates의 Investing(usd/jpy/eur)을 going-forward로 최신 유지하는 append.
+**default PLAN(read-only)** — 통화별 upsert/prune 계획 산출 + 로그. **`--write` 시 통화별 독립 transaction upsert + retention prune.** cron 연결은 별도 GO.
 
 설계 (Bithumb append와 동형, per-currency):
   - cadence: hourly (HH:05 권장 — correctness는 catch-up이 보장, minute은 freshness tuning)
@@ -18,8 +18,11 @@ source_hourly_rates의 Investing(usd/jpy/eur)을 going-forward로 최신 유지�
   - classification은 Investing-local (B.SOURCE/ASSET 하드코딩 회피, per-currency) — 동형 로직.
     Hana/KRX까지 붙어 중복 확인되면 그때 generic helper 추출 (지금은 운영 Bithumb append 불변 우선)
 
-사용법 (read-only):
+사용법:
+  # plan (read-only, default):
   python scripts/hourly_append_investing_source_hourly_rates.py [--currency all] [--window-days 2] [--as-of 2026-06-08T14:30]
+  # write (통화별 upsert+prune — production DB는 --allow-production-write):
+  python scripts/hourly_append_investing_source_hourly_rates.py --currency all --write --allow-production-write
 """
 
 # 표준 라이브러리
@@ -34,6 +37,7 @@ sys.path.insert(0, os.path.dirname(_SCRIPT_DIR))
 sys.path.insert(0, _SCRIPT_DIR)
 
 # 로컬 애플리케이션
+import backfill_bithumb_source_hourly_rates as B  # noqa: E402  write_with_transaction(param화) + guard + ensure_table
 import backfill_investing_source_hourly_rates as I  # noqa: E402  fetch + rollup + 상수 + resolve_currencies
 import hourly_append_source_hourly_rates as A  # noqa: E402  pure generic helper (Bithumb append 불변 재사용)
 import app.source_hourly_rates as H  # noqa: E402
@@ -124,6 +128,30 @@ def compute_append_plan_investing(
     )
 
 
+def prune_old_buckets_investing(db, assets, cutoff: datetime) -> int:
+    """retention 밖(bucket_ts_kst < cutoff) Investing(assets) bucket을 **단일 transaction atomic** 삭제.
+
+    assets(통화 리스트) 전체를 한 delete+commit으로 — all-or-nothing이라 **통화별 부분 prune 불가**
+    (중간 실패 시 일부만 prune되어 anchor로 복구 못하는 구멍 차단 — Codex finding). 실패 시 rollback + raise.
+    Returns: 삭제 수.
+    """
+    try:
+        deleted = (
+            db.query(SourceHourlyRate)
+            .filter(
+                SourceHourlyRate.source == I.SOURCE,
+                SourceHourlyRate.asset.in_(assets),
+                SourceHourlyRate.bucket_ts_kst < cutoff,
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return deleted
+    except Exception:
+        db.rollback()
+        raise
+
+
 def print_plan_investing(cur: str, asset: str, plan: "A.AppendPlan") -> None:
     print(f"=== {cur} ({asset}) ===")
     print(f"  window (직전 완료 hour까지): {plan.window_start} ~ {plan.window_end}")
@@ -140,11 +168,15 @@ def print_plan_investing(cur: str, asset: str, plan: "A.AppendPlan") -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Investing per-currency hourly append PLAN (ADR-035 D3 — read-only. write/cron은 별 GO)"
+        description="Investing per-currency hourly append (ADR-035 D3 — default PLAN/read-only, --write 시 통화별 upsert+prune. cron은 별 GO)"
     )
     parser.add_argument("--currency", default="all", help="usd|jpy|eur|all (기본 all)")
     parser.add_argument("--window-days", type=int, default=2, help="catch-up re-roll window (기본 2일)")
     parser.add_argument("--as-of", default=None, help="기준 시각 ISO (테스트/재현용, 기본 now KST)")
+    parser.add_argument("--write", action="store_true",
+                        help="plan 출력 후 통화별 upsert(require_empty 미사용) + retention prune (default: PLAN only)")
+    parser.add_argument("--allow-production-write", action="store_true",
+                        help="[guard] non-SQLite DB(RDS 등)에 --write 허용")
     args = parser.parse_args()
 
     if args.window_days <= 0:
@@ -166,10 +198,21 @@ def main() -> None:
 
     retention_days = config.SOURCE_HOURLY_RETENTION_DAYS
 
-    print(f"모드: PLAN (read-only, write 0) — Investing per-currency hourly append")
+    # write 진입 가드 (DB read 전)
+    if args.write:
+        guard_err = B.check_production_write_guard(args.allow_production_write)
+        if guard_err:
+            print(f"[GUARD 차단] {guard_err}")
+            sys.exit(2)
+        B.ensure_source_hourly_rates_table_created()
+
+    mode_label = "WRITE (plan 후 통화별 upsert+prune)" if args.write else "PLAN (read-only, write 0)"
+    print(f"모드: {mode_label} — Investing per-currency hourly append")
     print(f"통화: {currencies} / now(KST)={now_kst} / window={args.window_days}d / retention={retention_days}d")
 
     from app.database import SessionLocal
+    # PLAN loop — 통화별 1회 fetch (plan 출력과 write가 동일 snapshot 사용 — double-fetch 불일치 회피)
+    per_currency = {}   # asset → (candidates, window_start, prev_complete)
     for cur in currencies:
         asset = I._CURRENCY_MAP[cur]
         db = SessionLocal()
@@ -180,11 +223,65 @@ def main() -> None:
                 db, asset, candidates, window_start, prev_complete, now_kst, retention_days)
         finally:
             db.close()
+        per_currency[asset] = (candidates, window_start, prev_complete)
         print()
         print_plan_investing(cur, asset, plan)
 
     print()
-    print("[PLAN ONLY] 실제 upsert/prune은 write path(별 GO) / cron 연결도 별 GO.")
+    if not args.write:
+        print("[PLAN ONLY] 실제 upsert/prune은 --write / cron 연결도 별 GO.")
+        return
+
+    # rollback anchor (이미 commit된 통화 — 동일 작업 창 내 즉시 rollback 시에만)
+    def _emit_rollback_anchor(committed):
+        if not committed:
+            return
+        print("=== rollback anchor (이미 commit된 통화, 동일 작업 창 내 즉시 rollback 시에만) ===")
+        print("  from datetime import datetime; from app.database import SessionLocal")
+        print("  from app.source_hourly_rates import delete_range; db = SessionLocal()")
+        for a, ws, pc in committed:
+            print(f'  delete_range(db, "{I.SOURCE}", "{a}", '
+                  f'datetime.fromisoformat("{ws.isoformat()}"), '
+                  f'datetime.fromisoformat("{pc.isoformat()}"))')
+        print("  주의: range delete 안전성 = 동일 작업 창 + 교집합 write 부재일 때만. 종료 후엔 snapshot 복구.")
+
+    # WRITE: 통화별 독립 transaction (한 통화 실패가 다른 통화 rollback 안 함)
+    print("=== WRITE — 통화별 upsert (require_empty 미사용 — append 갱신 허용) ===")
+    committed = []   # (asset, window_start, prev_complete)
+    for cur in currencies:
+        asset = I._CURRENCY_MAP[cur]
+        candidates, ws, pc = per_currency[asset]
+        success, issues, outcome = B.write_with_transaction(
+            candidates, require_empty=False,
+            source=I.SOURCE, asset=asset, close_basis=I.CLOSE_BASIS,
+            source_method=I.SOURCE_METHOD, ohlc_quality=I.OHLC_QUALITY)
+        if not success:
+            print(f"  [{cur} WRITE 실패] {len(issues)}건 issue — 이 통화 rollback")
+            for issue in issues[:10]:
+                print(f"    - {issue}")
+            if committed:
+                print(f"\n  ⚠️ 이미 commit된 통화 {[a for a, _, _ in committed]} — 아래 anchor로 복구 필요:")
+                _emit_rollback_anchor(committed)
+            sys.exit(1)
+        committed.append((asset, ws, pc))
+        print(f"  [{cur} UPSERT OK] inserted={outcome['inserted']} updated={outcome['updated']} (commit)")
+
+    # PRUNE — 모든 write 성공 후 atomic retention cleanup (단일 transaction, all-or-nothing — 부분 prune 방지)
+    cutoff = A.retention_cutoff_kst(now_kst, retention_days)
+    prune_assets = [I._CURRENCY_MAP[cur] for cur in currencies]
+    db_p = SessionLocal()
+    try:
+        pruned = prune_old_buckets_investing(db_p, prune_assets, cutoff)
+    finally:
+        db_p.close()
+    print(f"  [PRUNE OK] cutoff={cutoff} 미만 {pruned} bucket 삭제 (atomic, {len(prune_assets)}통화)")
+
+    print()
+    _emit_rollback_anchor(committed)
+    print()
+    print("[복구 범위] append upsert는 위 delete_range anchor로 복구 가능(additive). "
+          "retention prune은 destructive cleanup이라 anchor 아닌 snapshot/RDS backup 복구 영역.")
+    print("[WRITE 완료] cron 연결은 별 GO.")
 
 
 if __name__ == "__main__":
