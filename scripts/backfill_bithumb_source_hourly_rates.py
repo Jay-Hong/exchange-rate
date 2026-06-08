@@ -315,6 +315,7 @@ def write_with_transaction(
 
     source/asset/close_basis/source_method/ohlc_quality는 **default=Bithumb 상수** — Bithumb caller는
     인자 미전달로 동작 불변(test 검증). Investing 등 다른 hourly source는 통화별 인자 전달해 재사용.
+    ohlc_quality는 str(단일) 또는 set/iterable(Hana는 mixed observed_rollup/close_only — set 전달).
     Returns: (success, issues, outcome). outcome = {inserted, updated}.
     require_empty면 pre-write에 target bucket이 비어있어야 함 (gap-only 강제). post-write SELECT는
     bucket_ts_kst.in_(expected_buckets) (partial rerun / 다른 path overlap 안전 — daily 패턴).
@@ -326,6 +327,10 @@ def write_with_transaction(
     session = SessionLocal()
     issues: list[str] = []
     outcome = {"inserted": 0, "updated": 0}
+    # ohlc_quality는 str(단일) 또는 set/iterable(여러 허용값 — Hana는 mixed observed_rollup/close_only)
+    allowed_ohlc_quality = (
+        frozenset([ohlc_quality]) if isinstance(ohlc_quality, str) else frozenset(ohlc_quality)
+    )
     try:
         expected_buckets = {r["bucket_ts_kst"] for r in rows}
         if not expected_buckets:
@@ -353,7 +358,7 @@ def write_with_transaction(
         # 필터라 못 잡고(기존 param-target row만 봄) 통과 → silent 잘못된 row. → pre-upsert fail-close.
         for r in rows:
             if (r["source"] != source or r["asset"] != asset or r["close_basis"] != close_basis
-                    or r["source_method"] != source_method or r["ohlc_quality"] != ohlc_quality):
+                    or r["source_method"] != source_method or r["ohlc_quality"] not in allowed_ohlc_quality):
                 session.rollback()
                 return False, [
                     f"candidate row literal != param @ {r['bucket_ts_kst']}: "
@@ -401,7 +406,7 @@ def write_with_transaction(
                 issues.append(f"top-level metadata NOT None @ {w.bucket_ts_kst} (hourly observed는 전부 None)")
             # (e) enum/literal
             if (w.source != source or w.asset != asset or w.close_basis != close_basis
-                    or w.source_method != source_method or w.ohlc_quality != ohlc_quality):
+                    or w.source_method != source_method or w.ohlc_quality not in allowed_ohlc_quality):
                 issues.append(f"enum/literal mismatch @ {w.bucket_ts_kst}")
             # (f) OHLC completeness + ordering
             if w.high is None or w.low is None or w.close is None or not (w.low <= w.close <= w.high):

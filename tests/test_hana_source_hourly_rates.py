@@ -16,14 +16,17 @@ import unittest
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from app import models  # noqa: E402
-from app.models import BankExchangeRate  # noqa: E402
+from app.models import BankExchangeRate, SourceHourlyRate  # noqa: E402
+import backfill_bithumb_source_hourly_rates as B  # noqa: E402
 import backfill_hana_source_hourly_rates as HV  # noqa: E402
 
 
@@ -159,6 +162,46 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(rows[0]["bucket_ts_kst"], _kst_bucket(14))
         self.assertEqual(rows[0]["close"], Decimal("1382.0"))
         self.assertEqual(rows[0]["ohlc_quality"], "observed_rollup")
+
+
+class TestHanaWritePath(unittest.TestCase):
+    """B의 파라미터화된 write_with_transaction이 Hana mixed ohlc_quality(set)로 적재."""
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        models.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def test_write_mixed_ohlc_quality(self):
+        rows = HV.rollup_to_hourly([(1380.0, _utc(5, 0)), (1382.0, _utc(5, 30))], "usd-krw")  # observed_rollup
+        rows += HV.rollup_to_hourly([(1381.0, _utc(7, 30))], "usd-krw")                       # close_only (16:00)
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(
+                rows, require_empty=True,
+                source="hana", asset="usd-krw", close_basis="hana_observed_hourly",
+                source_method="observed_rollup", ohlc_quality=HV._ALLOWED_OHLC_QUALITY)
+        self.assertTrue(success, issues)
+        self.assertEqual(outcome, {"inserted": 2, "updated": 0})
+        db = self.Session()
+        try:
+            written = (db.query(SourceHourlyRate)
+                       .filter(SourceHourlyRate.source == "hana")
+                       .order_by(SourceHourlyRate.bucket_ts_kst).all())
+        finally:
+            db.close()
+        self.assertEqual(sorted(w.ohlc_quality for w in written), ["close_only", "observed_rollup"])  # mixed 적재
+
+    def test_write_rejects_ohlc_quality_outside_set(self):
+        rows = HV.rollup_to_hourly([(1380.0, _utc(5, 0)), (1382.0, _utc(5, 30))], "usd-krw")
+        rows[0]["ohlc_quality"] = "source_ohlc"   # Hana 허용 set 밖 → pre-upsert fail
+        with patch("app.database.SessionLocal", self.Session):
+            success, _, _ = B.write_with_transaction(
+                rows, require_empty=True,
+                source="hana", asset="usd-krw", close_basis="hana_observed_hourly",
+                source_method="observed_rollup", ohlc_quality=HV._ALLOWED_OHLC_QUALITY)
+        self.assertFalse(success)
+        self.assertEqual(self.Session().query(SourceHourlyRate).count(), 0)   # rollback
 
 
 if __name__ == "__main__":

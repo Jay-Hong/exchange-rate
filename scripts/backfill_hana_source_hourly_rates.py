@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Hana per-currency hourly rollup dry-run validator (ADR-035 D3, Step 2 level).
+"""Hana per-currency hourly rollup validator/writer (ADR-035 D3, Step 2/3).
 
 `bank_exchange_rates`(bank="hana", 우리 DB 은행 고시값) per-currency 관측을 KST 1h bucket으로
-rollup한 source_hourly_rates candidate를 만들고 schema/provenance 정합성을 검증. **write 0 (dry-run)**.
+rollup한 source_hourly_rates candidate를 만들고 schema/provenance 정합성을 검증. **default dry-run, `--write` 시 통화별 적재**(carry-forward 미적용=실관측 buckets만, B 파라미터화 write_with_transaction 재사용).
 
 Investing hourly(`backfill_investing_source_hourly_rates.py`)와 차이:
   - **provider**: `BankExchangeRate`(bank="hana", currency) — 은행 고시값(change-only)
@@ -15,8 +15,11 @@ generic validate suite / compute_gap_report / evaluate_dry_run / kst_date_range_
 
 provenance: close_basis=`hana_observed_hourly` / source_method=`observed_rollup` / ohlc_quality=observed_rollup|close_only.
 
-사용법 (read-only, write 0):
+사용법:
+  # dry-run (read-only, default):
   python scripts/backfill_hana_source_hourly_rates.py --currency all --start-date 2026-06-01 --end-date 2026-06-07
+  # write (Step 3 — production DB는 --allow-production-write):
+  python scripts/backfill_hana_source_hourly_rates.py --currency all --start-date 2026-06-01 --end-date 2026-06-07 --write --require-empty-target --allow-production-write
 """
 
 # 표준 라이브러리
@@ -197,11 +200,19 @@ def _parse_date(s: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Hana per-currency hourly rollup dry-run validator (ADR-035 D3 Step 2, write 0)"
+        description="Hana per-currency hourly rollup validator/writer (ADR-035 D3 Step 2/3 — default dry-run, --write 적재. carry-forward 미적용=실관측만)"
     )
     parser.add_argument("--currency", default="all", help="usd|jpy|eur|all (기본 all)")
     parser.add_argument("--start-date", required=True, help="KST 시작일 YYYY-MM-DD (inclusive)")
     parser.add_argument("--end-date", required=True, help="KST 종료일 YYYY-MM-DD (inclusive)")
+    parser.add_argument("--write", action="store_true",
+                        help="[Step 3] dry-run 통과 시 통화별 transaction 적재 (default: dry-run only)")
+    parser.add_argument("--allow-production-write", action="store_true",
+                        help="[guard] non-SQLite DB(RDS 등)에 --write 허용")
+    parser.add_argument("--require-empty-target", action="store_true",
+                        help="[Step 3] write 전 통화별 target bucket 비어있어야 함 (initial backfill gap-only)")
+    parser.add_argument("--include-today", action="store_true",
+                        help="[Step 3] end_date에 오늘 포함 허용 (default: 오늘 미완성 hour 회피로 reject)")
     args = parser.parse_args()
 
     try:
@@ -216,17 +227,32 @@ def main() -> None:
         print(f"[ERR] start_date({start_date}) > end_date({end_date})")
         sys.exit(2)
 
+    # write 진입 가드 (DB read 전)
+    if args.write:
+        today_kst = datetime.now(_KST_TZ).date()
+        if not args.include_today and end_date >= today_kst:
+            print(f"[CONFIG 실패] --write인데 end_date={end_date} >= today={today_kst} "
+                  "(오늘 미완성 hour 위험). --include-today 또는 today-1 이하로 제한")
+            sys.exit(2)
+        guard_err = B.check_production_write_guard(args.allow_production_write)
+        if guard_err:
+            print(f"[GUARD 차단] {guard_err}")
+            sys.exit(2)
+        B.ensure_source_hourly_rates_table_created()
+
     start_utc, end_utc = B.kst_date_range_to_utc(start_date, end_date)
     window_start = datetime.combine(start_date, time.min)   # KST start 00:00
     window_end = datetime.combine(end_date, time(23, 0))    # KST end 23:00
 
-    print(f"모드: DRY-RUN (write 0) — Hana per-currency hourly rollup")
+    mode_label = "WRITE (통화별 적재)" if args.write else "DRY-RUN (write 0)"
+    print(f"모드: {mode_label} — Hana per-currency hourly rollup")
     print(f"통화: {currencies} / 범위 (KST): {start_date} ~ {end_date}")
     print(f"조회 (UTC naive): {start_utc} ~ {end_utc}")
 
     from app.database import SessionLocal
     total_issues = 0
     any_empty = False
+    per_currency_rows = {}   # asset → rows (plan=write 동일 snapshot — double-fetch 회피)
     for cur in currencies:
         asset = _CURRENCY_MAP[cur]
         db = SessionLocal()
@@ -235,6 +261,7 @@ def main() -> None:
         finally:
             db.close()
         rows = rollup_to_hourly(obs, asset)
+        per_currency_rows[asset] = rows
 
         print(f"\n=== {cur} ({asset}) ===")
         print(f"  관측: {len(obs)}건 / hourly bucket: {len(rows)}건")
@@ -264,7 +291,48 @@ def main() -> None:
     if total_issues > 0 or any_empty:
         print(f"[DRY-RUN FAIL] validation issue {total_issues}건 / 빈 통화 {any_empty} — 적재 전 정정")
         sys.exit(1)
-    print(f"[DRY-RUN OK] 모든 통화 validation 통과. carry-forward 정책은 위 분포 + 의미론 검토 후 결정. write/cron은 별 GO.")
+    if not args.write:
+        print(f"[DRY-RUN OK] 모든 통화 validation 통과. carry-forward 정책은 위 분포 + 의미론 검토 후 결정. write/cron은 별 GO.")
+        return
+
+    # rollback anchor (이미 commit된 통화 — 동일 작업 창 내 즉시 rollback 시에만)
+    def _emit_rollback_anchor(committed):
+        if not committed:
+            return
+        print("=== rollback anchor (이미 commit된 통화, 동일 작업 창 내 즉시 rollback 시에만) ===")
+        print("  from datetime import datetime; from app.database import SessionLocal")
+        print("  from app.source_hourly_rates import delete_range; db = SessionLocal()")
+        for a, ws, we in committed:
+            print(f'  delete_range(db, "{SOURCE}", "{a}", '
+                  f'datetime.fromisoformat("{ws.isoformat()}"), '
+                  f'datetime.fromisoformat("{we.isoformat()}"))')
+        print("  주의: range delete 안전성 = 동일 작업 창 + 교집합 write 부재일 때만. 종료 후엔 snapshot 복구.")
+
+    # WRITE: 통화별 독립 transaction (carry-forward 미적용 = 실관측 buckets만 / ohlc_quality mixed set 허용)
+    print(f"\n=== WRITE (require_empty={args.require_empty_target}) — 통화별 transaction (실관측 buckets, carry-forward 없음) ===")
+    committed = []   # (asset, window_start, window_end)
+    for cur in currencies:
+        asset = _CURRENCY_MAP[cur]
+        rows = per_currency_rows[asset]
+        success, issues, outcome = B.write_with_transaction(
+            rows, args.require_empty_target,
+            source=SOURCE, asset=asset, close_basis=CLOSE_BASIS,
+            source_method=SOURCE_METHOD, ohlc_quality=_ALLOWED_OHLC_QUALITY)
+        if not success:
+            print(f"  [{cur} WRITE 실패] {len(issues)}건 issue — 이 통화 rollback")
+            for issue in issues[:10]:
+                print(f"    - {issue}")
+            if committed:
+                print(f"\n  ⚠️ 이미 commit된 통화 {[a for a, _, _ in committed]} — 아래 anchor로 복구 필요:")
+                _emit_rollback_anchor(committed)
+            sys.exit(1)
+        committed.append((asset, window_start, window_end))
+        print(f"  [{cur} UPSERT OK] inserted={outcome['inserted']} updated={outcome['updated']} (commit)")
+
+    print()
+    _emit_rollback_anchor(committed)
+    print()
+    print("[WRITE 완료] retention prune은 append 단계 / cron 연결은 별 GO.")
 
 
 if __name__ == "__main__":
