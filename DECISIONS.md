@@ -2880,7 +2880,7 @@ baseline 명확히 구분:
 ## ADR-027: KRX 미국달러선물 Stage 2 진입 전 REST snapshot/fallback + stale 정책 (초안)
 
 > 📅 **작성일**: 2026-05-06
-> 🏷️ **상태**: Stage A/B + Stage C guard(판정+telemetry) + robust calendar 모두 배포 완료. **telemetry canary 활성화 (2026-06-07 주말 — EC2 deploy `23df2d2` + `KRX_REST_FALLBACK_ENABLED=true` + recreate, verified: health·calendar live(1/1=False)·KRX bootstrap A75606 ERROR 0)**. write/broadcast 0 (telemetry-only). **주말은 KRX 세션 없어 guard idle → 월요일 6/8 개장부터 guard 발화 + 첫 telemetry(`rest_guard_*`·`rest_success/error`) 관찰 예정** (관찰 결과는 추후 보강 기록). **Stage C 실 반영(topic/Redis write)은 미구현** — ADR-028 topic protocol + KRX Stage 2 선행. 설계: 하단 §Stage C guard 설계.
+> 🏷️ **상태**: Stage A/B + Stage C guard(판정+telemetry) + robust calendar 모두 배포 완료. **telemetry canary 활성화 (2026-06-07 주말 — EC2 deploy `23df2d2` + `KRX_REST_FALLBACK_ENABLED=true` + recreate, verified: health·calendar live(1/1=False)·KRX bootstrap A75606 ERROR 0)**. write/broadcast 0 (telemetry-only). 주말 guard idle. **6/8 1차 관찰(CF 08:30~15:45 + CM 18:00~ read-only 2회 + 독립 교차 확인): stale 0 / guard 발화 0(`rest_guard_pass`·`rejected_{calendar,contract,session}` 0) / fallback 0(`evaluated`·`eligible`·`rest_success`·`rest_error` 0) / write·broadcast 0(`fallback_last_at` null) = WS 전 구간 안정으로 stale fallback 불필요했던 정상 결과.** `evaluate()`는 `status==stale`에서만 호출 → **4-gate guard 로직은 production 미실증**(첫 실측은 향후 WS stale 60s+ 이벤트 시점). counters in-memory(recreate 시 reset), running=6/7 canary 빌드 무중단. **Stage C 실 반영(topic/Redis write)은 미구현** — ADR-028 topic protocol + KRX Stage 2 선행. 설계: 하단 §Stage C guard 설계.
 
 ### 맥락
 
