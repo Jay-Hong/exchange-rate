@@ -1,7 +1,7 @@
-"""Bithumb source_rates → source_hourly_rates dry-run validator 단위 테스트 (ADR-035 D3 Step 2).
+"""Bithumb source_rates → source_hourly_rates validator/writer 단위 테스트 (ADR-035 D3 Step 2/3).
 
 `scripts/backfill_bithumb_source_hourly_rates.py`의 rollup + validation suite + gap 진단 +
-fetch를 in-memory SQLite/synthetic tick으로 검증. 외부 DB/API 의존성 0. write 0 (dry-run).
+fetch + Step 3 write path를 in-memory SQLite/synthetic tick으로 검증. 외부 DB/API 의존성 0.
 
 검증 포인트:
 - rollup: UTC naive tick → KST 1h bucket (9h 변환), close=마지막 tick, high/low=max/min, point_count
@@ -10,6 +10,7 @@ fetch를 in-memory SQLite/synthetic tick으로 검증. 외부 DB/API 의존성 0
 - evaluate_dry_run: 0 bucket / validation issue fail-close
 - fetch: source/asset/range 필터
 - kst_date_range_to_utc 경계
+- write path (Step 3): insert/outcome, require_empty reject, post-write validation rollback, fail-close, guard
 """
 from __future__ import annotations
 
@@ -17,14 +18,16 @@ import sys
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from app import models  # noqa: E402
-from app.models import SourceRate  # noqa: E402
+from app.models import SourceHourlyRate, SourceRate  # noqa: E402
 import backfill_bithumb_source_hourly_rates as B  # noqa: E402
 
 
@@ -194,6 +197,64 @@ class TestFetchAndRange(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["bucket_ts_kst"], _kst_bucket(14))
         self.assertEqual(rows[0]["close"], 1480.0)
+
+
+class TestWritePath(unittest.TestCase):
+    """Step 3 write_with_transaction — in-memory SQLite(StaticPool) + SessionLocal patch."""
+
+    def setUp(self):
+        # StaticPool: 모든 session이 같은 in-memory DB 공유 (write_with_transaction의 SessionLocal 패치용)
+        self.engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        models.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def _two_rows(self):
+        # KST 14:00(close 1475), 15:00(close 1480)
+        return B.rollup_ticks_to_hourly([(1475.0, _utc(5, 0)), (1480.0, _utc(6, 0))])
+
+    def _count(self):
+        db = self.Session()
+        try:
+            return db.query(SourceHourlyRate).count()
+        finally:
+            db.close()
+
+    def test_write_inserts_and_outcome(self):
+        rows = self._two_rows()
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(rows, require_empty=True)
+        self.assertTrue(success, issues)
+        self.assertEqual(outcome, {"inserted": 2, "updated": 0})
+        self.assertEqual(self._count(), 2)
+
+    def test_require_empty_rejects_existing(self):
+        rows = self._two_rows()
+        with patch("app.database.SessionLocal", self.Session):
+            B.write_with_transaction(rows, require_empty=True)             # 1차 insert
+            success, issues, _ = B.write_with_transaction(rows, require_empty=True)  # 2차
+        self.assertFalse(success)
+        self.assertTrue(any("require-empty" in i for i in issues))
+        self.assertEqual(self._count(), 2)  # 2차는 rollback, 1차 2건 유지
+
+    def test_post_write_validation_catches_bad_enum_and_rolls_back(self):
+        rows = self._two_rows()
+        rows[0]["close_basis"] = "bithumb_24h_kst_close"  # hourly 아닌 daily enum → (e) 위반
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, _ = B.write_with_transaction(rows, require_empty=True)
+        self.assertFalse(success)
+        self.assertTrue(any("enum" in i for i in issues))
+        self.assertEqual(self._count(), 0)  # rollback — 아무것도 persist 안 됨
+
+    def test_write_empty_fail_close(self):
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, _ = B.write_with_transaction([], require_empty=False)
+        self.assertFalse(success)
+
+    def test_production_guard_sqlite_safe(self):
+        # 로컬 sqlite engine → guard None (안전). (non-sqlite reject는 운영 engine 필요라 생략)
+        with patch("app.database.engine", self.engine):
+            self.assertIsNone(B.check_production_write_guard(allow_production=False))
 
 
 if __name__ == "__main__":
