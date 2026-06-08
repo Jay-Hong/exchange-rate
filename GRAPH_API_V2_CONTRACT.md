@@ -180,7 +180,7 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 | `insufficient_history` | bool | 요청한 period를 채울 수 없으면 true (신규 자산/source 장애/coverage 부족 시점) |
 | `per_point_metadata` | string[] \| optional | data point에 추가 metadata field 명시 (예: KRX의 `["contract_code"]`) |
 | `close_basis_mode` | enum | **Amendment 후속**. `"single"` (series 전체 동일 close_basis) 또는 `"mixed"` (구간별 다름 — 예: Hana의 observed_eod ↔ official_historical_backfill 경계) |
-| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 8 values 중 하나 (아래 참조, Investing daily은 ADR-035 D1, Bithumb/Investing/Hana hourly는 ADR-035 D3) |
+| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 9 values 중 하나 (아래 참조, Investing daily은 ADR-035 D1, Bithumb/Investing/Hana/KRX hourly는 ADR-035 D3) |
 | `close_basis_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 close_basis values (예: `["hana_observed_eod", "hana_official_historical_backfill"]`) |
 | `default_source_method` | enum | series-level default. mixed series에서는 **canonical/future append 기준 기본 source_method** (예: Hana mixed의 default = `observed_rollup`). 6 values 중 하나 (아래 참조) |
 | `source_method_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 source_method values |
@@ -195,6 +195,7 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 - `bithumb_observed_hourly`: `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`. daily `bithumb_24h_kst_close`와 다른 granularity: 3m/1y=24h candle, 1w=시간별 관측)
 - `investing_observed_hourly`: `investing_exchange_rates` raw 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`, per-currency usd/jpy/eur. daily `investing_observed_eod`와 다른 granularity)
 - `hana_observed_hourly`: `bank_exchange_rates`(bank=hana) 고시 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`, per-currency usd/jpy/eur, ohlc_quality observed_rollup/close_only 분기. daily `hana_observed_eod`와 다른 granularity)
+- `krx_observed_hourly`: `source_rates`(krx/usd-krw-futures) raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`. **session-agnostic** — CF/CM 공통 enum, 첫 PR은 CF 정규장 08:30~15:45 KST coverage. contract_code는 source_daily_rates daily row에서 재사용. daily `krx_cf_close_1545`와 다른 granularity)
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
 

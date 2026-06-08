@@ -4169,7 +4169,7 @@ Unique key 후보: `(source, asset, date_kst)` — Phase 2d 설계 확정.
 
 #### Decision B — close_basis provenance enum (★ source identity 명시)
 
-response 각 series provenance에 `close_basis` field 추가. 8 가지 enum (Investing daily은 ADR-035 D1, Bithumb/Investing/Hana hourly는 ADR-035 D3 추가):
+response 각 series provenance에 `close_basis` field 추가. 9 가지 enum (Investing daily은 ADR-035 D1, Bithumb/Investing/Hana/KRX hourly는 ADR-035 D3 추가):
 
 | `close_basis` | Source | 의미 |
 | --- | --- | --- |
@@ -4181,6 +4181,7 @@ response 각 series provenance에 `close_basis` field 추가. 8 가지 enum (Inv
 | `bithumb_observed_hourly` | Bithumb (1w hourly) | `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **source_hourly_rates** — 24h candle close와 다른 granularity. 1w 그래프 전용) |
 | `investing_observed_hourly` | Investing (1w hourly) | `investing_exchange_rates` raw 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, **source_hourly_rates** — daily `investing_observed_eod`와 다른 granularity. 1w 그래프 전용, per-currency usd/jpy/eur) |
 | `hana_observed_hourly` | Hana (1w hourly) | `bank_exchange_rates`(bank=hana) 고시 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, **source_hourly_rates** — daily `hana_observed_eod`와 다른 granularity. 1w 그래프 전용, per-currency usd/jpy/eur. ohlc_quality는 multi-tick observed_rollup / single-tick close_only) |
+| `krx_observed_hourly` | KRX (1w hourly) | `source_rates`(krx/usd-krw-futures) raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **source_hourly_rates** — daily `krx_cf_close_1545`와 다른 granularity. 1w 그래프 전용. **session-agnostic** — CF/CM 공통 enum, 첫 PR은 CF 정규장 08:30~15:45 coverage. contract_code는 source_daily_rates daily row에서 재사용) |
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
 
@@ -4212,6 +4213,7 @@ response 각 series provenance에 `close_basis` field 추가. 8 가지 enum (Inv
 | `bithumb_observed_hourly` | `observed_rollup` | `source_rates`(raw tick) → KST 1h bucket rollup (1w hourly, ADR-035 D3 — daily `bithumb_24h_kst_close`와 별 granularity) |
 | `investing_observed_hourly` | `observed_rollup` | `investing_exchange_rates`(raw 관측) → KST 1h bucket rollup (1w hourly, ADR-035 D3 — daily `investing_observed_eod`와 별 granularity, per-currency) |
 | `hana_observed_hourly` | `observed_rollup` | `bank_exchange_rates`(bank=hana 고시) → KST 1h bucket rollup (1w hourly, ADR-035 D3 — daily `hana_observed_eod`와 별 granularity, per-currency. ohlc_quality은 single-tick hour만 close_only) |
+| `krx_observed_hourly` | `observed_rollup` | `source_rates`(krx/usd-krw-futures) → KST 1h bucket rollup (1w hourly, ADR-035 D3 — daily `krx_cf_close_1545`와 별 granularity. session-agnostic enum, 첫 PR CF 정규장 coverage. contract_code는 source_daily_rates daily row 재사용) |
 
 → **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**). KRX는 close_basis 동일 + source_method 분기 (backfill=`krx_openapi_daily` [Step 4B 전환, 기존 `kis_daily_backfill` transitional] vs append=`close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
 
@@ -4291,7 +4293,7 @@ Hana daily canonical:
 
 1. `source_daily_rates` canonical table 도입 — v2 장기 그래프 hot path 단일 조회
 2. Graph hot path에서 외부 API 직접 호출 금지 (Bithumb / KIS / Hana official 모두 backfill / gap repair / 검증용)
-3. `close_basis` enum 8 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 + ADR-035 D1/D3 참조)
+3. `close_basis` enum 9 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 + ADR-035 D1/D3 참조)
 4. Unique key 후보: `(source, asset, date_kst)`
 5. **`ohlc_quality` top-level column** (검색/필터/렌더링 판단 직접 사용)
 6. **`rate == close` app-level invariant** (모든 backfill/append job에서 같은 값으로 write)
@@ -4356,7 +4358,7 @@ class SourceDailyRate(Base):
 | `low` | Yes | source에 따라 없을 수 있음 (close_only 시 = close) |
 | `close` | No | daily representative close (v2 그래프 consumer 사용) |
 | `ohlc_quality` | No | OHLC 품질 — `source_ohlc` / `observed_rollup` / `close_only` (§7) |
-| `close_basis` | No | 8 values (§6) |
+| `close_basis` | No | 9 values (§6) |
 | `source_method` | No | 6 values (§6) |
 | `contract_code` | Yes | KRX 전용 (예: A75606) |
 | `basis_date` | Yes | Hana official endpoint 응답 기준일 |
@@ -4403,7 +4405,7 @@ class SourceDailyRate(Base):
 - `source_method` = **어떻게 얻었는지** (수집 방법)
 - `ohlc_quality` = **OHLC 신뢰도** (품질)
 
-**`close_basis` enum 8 values** (ADR-033 Amendment 후속 Decision B 참조, Investing daily은 ADR-035 D1, Bithumb/Investing/Hana hourly는 ADR-035 D3):
+**`close_basis` enum 9 values** (ADR-033 Amendment 후속 Decision B 참조, Investing daily은 ADR-035 D1, Bithumb/Investing/Hana/KRX hourly는 ADR-035 D3):
 
 - `krx_cf_close_1545`: KRX CF 정규장 15:45 KST close finalizer
 - `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close (daily, source_daily_rates)
@@ -4413,6 +4415,7 @@ class SourceDailyRate(Base):
 - `bithumb_observed_hourly`: `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, source_hourly_rates — 1w 그래프 전용, daily `bithumb_24h_kst_close`와 별 granularity)
 - `investing_observed_hourly`: `investing_exchange_rates` raw 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, source_hourly_rates — 1w 그래프 전용, per-currency usd/jpy/eur, daily `investing_observed_eod`와 별 granularity)
 - `hana_observed_hourly`: `bank_exchange_rates`(bank=hana) 고시 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, source_hourly_rates — 1w 그래프 전용, per-currency usd/jpy/eur, ohlc_quality observed_rollup/close_only 분기, daily `hana_observed_eod`와 별 granularity)
+- `krx_observed_hourly`: `source_rates`(krx/usd-krw-futures) raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, source_hourly_rates — 1w 그래프 전용, daily `krx_cf_close_1545`와 별 granularity. **session-agnostic** — CF/CM 공통 enum, 첫 PR은 CF 정규장 08:30~15:45 coverage. contract_code는 source_daily_rates daily row 재사용)
 
 **`source_method` enum 6 values** (ADR-033 Amendment 후속 Decision B-bis + Step 4B KRX 전환):
 
@@ -5563,7 +5566,7 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 **provenance (Step 2~ 구현)**:
 
 - `source_method` = `observed_rollup` / `ohlc_quality` = `observed_rollup` — daily observed rollup 계열 재사용 (신규 enum 값 없음)
-- `close_basis` = **source별 신규 hourly 값** (daily 24h/EOD close와 다른 granularity 명시). Bithumb = `bithumb_observed_hourly`, Investing = `investing_observed_hourly`, Hana = `hana_observed_hourly` 확정·운영 반영 (Decision B enum 표 + §6 + GRAPH §6에 추가). KRX hourly close_basis는 source canary PR에서 확정
+- `close_basis` = **source별 신규 hourly 값** (daily 24h/EOD close와 다른 granularity 명시). Bithumb = `bithumb_observed_hourly`, Investing = `investing_observed_hourly`, Hana = `hana_observed_hourly` 확정·운영 반영, KRX = `krx_observed_hourly` 확정 (Decision B enum 표 + §6 + GRAPH §6에 추가 — 9 values). KRX는 **session-agnostic enum** (ADR-035 D3 Step 2, 첫 PR CF-only coverage, CM follow-up도 동일 enum 재사용 — mixed/migration 회피). KRX write path는 Step 3 후속(현재 Step 2 dry-run validator만 land)
 - bucket = `floor_bucket_ts_kst` (KST 시 정각 floor). `source_rates` 등 UTC naive timestamp는 `replace(tzinfo=utc)` 후 변환 (Step 1 helper 계약 — UTC naive 직접 전달 시 9h 오차)
 - gap = change-only raw source는 무변동 hour에 bucket 없음 → **write는 실관측 bucket만 적재**(carry-forward 안 함 — canonical source of truth, provenance 흐림 방지). Hana 고시 step function 의미론의 carry-forward/step render는 **v2 1w endpoint read-side에서 결정** — dry-run validator가 within-span 빈 hour 분포 surface(Hana ~72/통화·14d), 적용은 endpoint render 정책 (Bithumb/Investing/Hana write 모두 실관측 일관)
 
