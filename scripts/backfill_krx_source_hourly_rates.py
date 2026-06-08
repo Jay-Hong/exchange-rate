@@ -46,8 +46,7 @@ KRX write path은 generic source(Bithumb/Investing/Hana)와 2가지 차이로 B.
 import argparse
 import os
 import sys
-from collections import Counter
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time
 
 # 프로젝트 루트 + scripts (B 재사용)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,210 +55,34 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 # 로컬 애플리케이션
 import backfill_bithumb_source_hourly_rates as B  # noqa: E402  generic gap/verdict 재사용
-from app.models import SourceDailyRate, SourceRate  # noqa: E402
-from app.source_hourly_rates import floor_bucket_ts_kst  # noqa: E402
-
-SOURCE = "krx"
-ASSET = "usd-krw-futures"
-CLOSE_BASIS = "krx_observed_hourly"   # 신규 enum — session-agnostic (CF/CM 공통, 본 PR은 CF coverage)
-SOURCE_METHOD = "observed_rollup"
-OHLC_QUALITY = "observed_rollup"
-
-_KST_TZ = timezone(timedelta(hours=9))
-# CF 정규장 세션 window (KST) — get_krx_cf_session_rollup(app/source_daily_rates.py)과 동일 경계
-_CF_SESSION_START = time(8, 30, 0)
-_CF_SESSION_END = time(15, 45, 0)
-_CF_SESSION_LABEL = "CF"
-
-_ALLOWED_CLOSE_BASIS = frozenset({CLOSE_BASIS})
-_ALLOWED_SOURCE_METHOD = frozenset({SOURCE_METHOD})
-_ALLOWED_OHLC_QUALITY = frozenset({OHLC_QUALITY})
-
-
-# ─────────────────────────────────────────────────────────────
-# 시간 변환 / 조회
-# ─────────────────────────────────────────────────────────────
-
-def _utc_naive_to_kst_iso(ts: datetime) -> str:
-    """source_rates UTC naive datetime → KST isoformat."""
-    return ts.replace(tzinfo=timezone.utc).astimezone(_KST_TZ).isoformat()
-
-
-def _ts_in_cf_session(ts: datetime) -> bool:
-    """UTC naive tick이 KST CF 정규장 window(08:30:00~15:45:00 inclusive) 안인지.
-
-    source_rates.timestamp는 UTC naive 저장 → KST로 변환 후 시각만 비교.
-    CM 야간 세션(17:50~익일 06:00) tick은 이 KST window 밖이라 False.
-    """
-    kst_t = ts.replace(tzinfo=timezone.utc).astimezone(_KST_TZ).time()
-    return _CF_SESSION_START <= kst_t <= _CF_SESSION_END
-
-
-def fetch_krx_ticks(db, start_utc: datetime, end_utc: datetime) -> list[tuple]:
-    """source_rates(krx/usd-krw-futures) [start_utc, end_utc] 조회 → (rate, ts) timestamp ASC.
-
-    CF/CM 세션 모두 포함해 fetch (KST window 필터는 rollup에서 CF-only로 적용).
-    """
-    rows = (
-        db.query(SourceRate.rate, SourceRate.timestamp)
-        .filter(
-            SourceRate.source == SOURCE,
-            SourceRate.asset == ASSET,
-            SourceRate.timestamp >= start_utc,
-            SourceRate.timestamp <= end_utc,
-        )
-        .order_by(SourceRate.timestamp.asc(), SourceRate.id.asc())
-        .all()
-    )
-    return [(r.rate, r.timestamp) for r in rows]
-
-
-def fetch_daily_contract_map(db, start_date: date, end_date: date) -> dict:
-    """source_daily_rates(krx/usd-krw-futures) [start_date, end_date] → {date_kst: contract_code}.
-
-    daily가 이미 resolve한 KRX front contract를 hourly bucket이 재사용 (KIS API 미호출).
-    date_kst별 단일 row(unique key) 전제 — contract_code None이면 None 그대로 (validation이 flag).
-    """
-    rows = (
-        db.query(SourceDailyRate.date_kst, SourceDailyRate.contract_code)
-        .filter(
-            SourceDailyRate.source == SOURCE,
-            SourceDailyRate.asset == ASSET,
-            SourceDailyRate.date_kst >= start_date,
-            SourceDailyRate.date_kst <= end_date,
-        )
-        .all()
-    )
-    return {r.date_kst: r.contract_code for r in rows}
-
-
-# ─────────────────────────────────────────────────────────────
-# Rollup (pure — testable). CF-only 필터 + contract resolve
-# ─────────────────────────────────────────────────────────────
-
-def rollup_cf_ticks_to_hourly(ticks: list[tuple], contract_map: dict) -> list[dict]:
-    """(rate, ts_utc_naive) timestamp-ASC ticks → KST 1h bucket candidate rows (CF 세션만).
-
-    CF 세션(KST 08:30~15:45) tick만 포함 (CM 야간 drop). close = bucket 마지막 tick (ASC라 마지막
-    append) / high = max / low = min. rate == close invariant. metadata_json에 point_count +
-    first/last ts(KST) + session:"CF". contract_code는 contract_map[bucket date]에서 lookup
-    (부재 시 None — validation이 unresolved로 flag).
-    """
-    buckets: dict = {}
-    for rate, ts in ticks:
-        if not _ts_in_cf_session(ts):   # CF-only: CM 야간 tick drop
-            continue
-        bucket = floor_bucket_ts_kst(ts.replace(tzinfo=timezone.utc))
-        b = buckets.get(bucket)
-        if b is None:
-            b = {"rates": [], "first_ts": ts, "last_ts": ts, "last_rate": rate}
-            buckets[bucket] = b
-        b["rates"].append(rate)
-        b["last_ts"] = ts
-        b["last_rate"] = rate
-
-    rows = []
-    for bucket in sorted(buckets):
-        b = buckets[bucket]
-        close = b["last_rate"]
-        # bucket.date()는 naive KST bucket_ts_kst의 KST 날짜 → daily row date_kst와 1:1
-        contract_code = contract_map.get(bucket.date())
-        rows.append({
-            "source": SOURCE,
-            "asset": ASSET,
-            "bucket_ts_kst": bucket,
-            "rate": close,
-            "close": close,
-            "high": max(b["rates"]),
-            "low": min(b["rates"]),
-            "ohlc_quality": OHLC_QUALITY,
-            "close_basis": CLOSE_BASIS,
-            "source_method": SOURCE_METHOD,
-            "contract_code": contract_code,
-            "metadata_json": {
-                "point_count": len(b["rates"]),
-                "first_ts_kst": _utc_naive_to_kst_iso(b["first_ts"]),
-                "last_ts_kst": _utc_naive_to_kst_iso(b["last_ts"]),
-                "session": _CF_SESSION_LABEL,
-            },
-        })
-    return rows
-
-
-# ─────────────────────────────────────────────────────────────
-# Validation suite (pure — 각 함수는 issue 문자열 리스트 반환)
-# ─────────────────────────────────────────────────────────────
-
-def validate_decimal_precision(rows: list[dict]) -> list[str]:
-    """Numeric(14, 6) precision — 소수부 6자리 초과(exponent < -6) 검출.
-
-    KRX 호가 단위는 0.1이라 보통 clean하나, source_rates float read 시 artifact 방어.
-    Decimal이 아니면 float → Decimal(str(v))로 자릿수 판정.
-    """
-    from decimal import Decimal
-    issues = []
-    for r in rows:
-        for field in ("rate", "high", "low", "close"):
-            value = r[field]
-            if value is None:
-                continue
-            dec = value if isinstance(value, Decimal) else Decimal(str(value))
-            exponent = dec.as_tuple().exponent
-            if not isinstance(exponent, int):
-                issues.append(f"{field}={value} non-finite @ {r['bucket_ts_kst']}")
-                continue
-            if exponent < -6:
-                issues.append(f"{field} 소수부 {-exponent}자리 (>6) @ {r['bucket_ts_kst']}: {value}")
-    return issues
-
-
-def validate_enum(rows: list[dict]) -> list[str]:
-    """KRX close_basis / source_method / ohlc_quality allowlist 잠금 (계약 enum 외 값 차단)."""
-    issues = []
-    for r in rows:
-        if r["close_basis"] not in _ALLOWED_CLOSE_BASIS:
-            issues.append(f"close_basis 위반 @ {r['bucket_ts_kst']}: {r['close_basis']}")
-        if r["source_method"] not in _ALLOWED_SOURCE_METHOD:
-            issues.append(f"source_method 위반 @ {r['bucket_ts_kst']}: {r['source_method']}")
-        if r["ohlc_quality"] not in _ALLOWED_OHLC_QUALITY:
-            issues.append(f"ohlc_quality 위반 @ {r['bucket_ts_kst']}: {r['ohlc_quality']}")
-    return issues
-
-
-def validate_session(rows: list[dict]) -> list[str]:
-    """CF-only 계약: 모든 bucket metadata.session=="CF" AND bucket_ts_kst hour ∈ 8..15.
-
-    CF 정규장 08:30~15:45 → floor 시 hour bucket은 8,9,...,15 (15:00 bucket은 15:00~15:45 부분).
-    8 미만 / 15 초과 hour가 나오면 CM 야간 tick이 누출됐다는 신호.
-    """
-    issues = []
-    for r in rows:
-        m = r["metadata_json"]
-        if m.get("session") != _CF_SESSION_LABEL:
-            issues.append(f"session != CF @ {r['bucket_ts_kst']}: {m.get('session')}")
-        hour = r["bucket_ts_kst"].hour
-        if not (8 <= hour <= 15):
-            issues.append(f"CF-only인데 bucket hour {hour} ∉ [8,15] @ {r['bucket_ts_kst']} (CM 누출 의심)")
-    return issues
-
-
-def validate_contract(rows: list[dict]) -> list[str]:
-    """모든 bucket이 source_daily_rates에서 contract_code resolve 됐는지 (non-null).
-
-    None이면 그 bucket date에 KRX daily row가 없다는 의미 → daily backfill/append 누락.
-    issue 메시지에 누락 date를 surface (중복 date는 1회만).
-    """
-    issues = []
-    missing_dates = set()
-    for r in rows:
-        if not r.get("contract_code"):
-            d = r["bucket_ts_kst"].date()
-            if d not in missing_dates:
-                missing_dates.add(d)
-                issues.append(f"contract_code 미resolve @ date {d} "
-                              "(source_daily_rates KRX row 부재 — daily backfill/append 확인)")
-    return issues
-
+# CF-only rollup/validation core는 app.krx_hourly로 이동 (backfill 스크립트 + close-finalizer hook 공유).
+# 아래 re-export로 모듈-레벨 `K.<name>` 참조(rollup_cf_ticks_to_hourly / fetch_daily_contract_map /
+# validate_session / krx_post_write_validator / SOURCE 등)는 불변 — CLI/main/write-path 100% 동일.
+from app.krx_hourly import (  # noqa: E402,F401
+    ASSET,
+    CLOSE_BASIS,
+    OHLC_QUALITY,
+    SOURCE,
+    SOURCE_METHOD,
+    _ALLOWED_CLOSE_BASIS,
+    _ALLOWED_OHLC_QUALITY,
+    _ALLOWED_SOURCE_METHOD,
+    _CF_SESSION_END,
+    _CF_SESSION_LABEL,
+    _CF_SESSION_START,
+    _KST_TZ,
+    _ts_in_cf_session,
+    _utc_naive_to_kst_iso,
+    compute_cf_coverage,
+    fetch_daily_contract_map,
+    fetch_krx_ticks,
+    krx_post_write_validator,
+    rollup_cf_ticks_to_hourly,
+    validate_contract,
+    validate_decimal_precision,
+    validate_enum,
+    validate_session,
+)
 
 VALIDATIONS = [
     ("invariant (rate==close)", B.validate_invariant),
@@ -275,44 +98,7 @@ VALIDATIONS = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────
-# Post-write validator (write path 전용 — ORM row 기반, in-transaction)
-# ─────────────────────────────────────────────────────────────
-
-def krx_post_write_validator(written) -> list[str]:
-    """B.write_with_transaction post-write hook — 적재된 KRX ORM row 검증 (commit 전, rollback 가능).
-
-    dry-run의 validate_contract/validate_session과 symmetric하게 **write된 실 row**에서 재확인:
-      (a) EVERY row contract_code IS NOT NULL (KRX는 front contract code 필수 — daily 미resolve면 차단)
-      (b) EVERY row metadata_json["session"] == "CF" (CF-only 계약 — CM 누출/누락 차단)
-    issue 반환 시 write_with_transaction이 같은 transaction을 rollback (corrupt provenance commit 금지).
-    """
-    issues = []
-    for w in written:
-        if w.contract_code is None:
-            issues.append(f"contract_code IS NULL @ {w.bucket_ts_kst} "
-                          "(post-write — KRX hourly는 contract_code 필수)")
-        md = w.metadata_json or {}
-        if md.get("session") != _CF_SESSION_LABEL:
-            issues.append(f"metadata session != CF @ {w.bucket_ts_kst} "
-                          f"(post-write — got {md.get('session')})")
-    return issues
-
-
-# ─────────────────────────────────────────────────────────────
-# Coverage 진단 (validation 아님 — CF 영업일 분포 정보)
-# ─────────────────────────────────────────────────────────────
-
-def compute_cf_coverage(rows: list[dict]) -> dict:
-    """CF 세션 date 분포 + date별 bucket 개수 (informational).
-
-    CF 영업일은 보통 hour 8~15 = 최대 8 bucket. date별 bucket 수가 적으면 그 날 거래/관측 희소.
-    """
-    per_date = Counter(r["bucket_ts_kst"].date() for r in rows)
-    return {
-        "distinct_dates": len(per_date),
-        "buckets_per_date": {str(d): per_date[d] for d in sorted(per_date)},
-    }
+# krx_post_write_validator / compute_cf_coverage 정의는 app.krx_hourly로 이동 (상단 re-export).
 
 
 # ─────────────────────────────────────────────────────────────
