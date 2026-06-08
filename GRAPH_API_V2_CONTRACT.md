@@ -180,9 +180,9 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 | `insufficient_history` | bool | 요청한 period를 채울 수 없으면 true (신규 자산/source 장애/coverage 부족 시점) |
 | `per_point_metadata` | string[] \| optional | data point에 추가 metadata field 명시 (예: KRX의 `["contract_code"]`) |
 | `close_basis_mode` | enum | **Amendment 후속**. `"single"` (series 전체 동일 close_basis) 또는 `"mixed"` (구간별 다름 — 예: Hana의 observed_eod ↔ official_historical_backfill 경계) |
-| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 5 values 중 하나 (아래 참조, Investing은 ADR-035 D1) |
+| `default_close_basis` | enum | **Amendment 후속**. series-level default value. mixed series에서는 **canonical/future append 기준 기본 close_basis** (예: Hana mixed의 default = `hana_observed_eod`, 앞으로 쌓는 정책 기준 고정값 — backfill 데이터량과 무관 time-invariant). 6 values 중 하나 (아래 참조, Investing은 ADR-035 D1, Bithumb hourly는 ADR-035 D3) |
 | `close_basis_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 close_basis values (예: `["hana_observed_eod", "hana_official_historical_backfill"]`) |
-| `default_source_method` | enum | series-level default. mixed series에서는 **canonical/future append 기준 기본 source_method** (예: Hana mixed의 default = `observed_rollup`). 5 values 중 하나 (아래 참조) |
+| `default_source_method` | enum | series-level default. mixed series에서는 **canonical/future append 기준 기본 source_method** (예: Hana mixed의 default = `observed_rollup`). 6 values 중 하나 (아래 참조) |
 | `source_method_values` | enum[] | mixed series만 — 본 series가 사용하는 모든 source_method values |
 
 `close_basis` enum 의미 (Amendment 후속 — source identity 명시):
@@ -192,6 +192,7 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 - `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
 - `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
 - `investing_observed_eod`: 우리 DB(`investing_exchange_rates` 장기 보관)에서 KST 해당일 마지막 관측 기준 환율 (ADR-035 D1, Proposed)
+- `bithumb_observed_hourly`: `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`. daily `bithumb_24h_kst_close`와 다른 granularity: 3m/1y=24h candle, 1w=시간별 관측)
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
 

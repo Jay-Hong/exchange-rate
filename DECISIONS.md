@@ -4169,7 +4169,7 @@ Unique key 후보: `(source, asset, date_kst)` — Phase 2d 설계 확정.
 
 #### Decision B — close_basis provenance enum (★ source identity 명시)
 
-response 각 series provenance에 `close_basis` field 추가. 5 가지 enum (Investing은 ADR-035 D1 추가):
+response 각 series provenance에 `close_basis` field 추가. 6 가지 enum (Investing은 ADR-035 D1, Bithumb hourly는 ADR-035 D3 추가):
 
 | `close_basis` | Source | 의미 |
 | --- | --- | --- |
@@ -4178,8 +4178,11 @@ response 각 series provenance에 `close_basis` field 추가. 5 가지 enum (Inv
 | `hana_observed_eod` | Hana (canonical) | 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값 |
 | `hana_official_historical_backfill` | Hana (과거 부족분만) | Hana 사이트 historical row (다음날 새벽 고시) |
 | `investing_observed_eod` | Investing (canonical) | 우리 DB(`investing_exchange_rates` 장기 보관)에서 KST 해당일 마지막 관측 기준 환율 (ADR-035 D1, Proposed) |
+| `bithumb_observed_hourly` | Bithumb (1w hourly) | `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **source_hourly_rates** — 24h candle close와 다른 granularity. 1w 그래프 전용) |
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
+
+> **granularity 주의**: `bithumb_24h_kst_close`(daily, source_daily_rates)와 `bithumb_observed_hourly`(hourly, source_hourly_rates)는 같은 Bithumb이지만 close 기준이 다르다 (24h candle close vs 시간별 마지막 관측 tick). 3m/1y는 전자, 1w는 후자.
 
 #### Decision B-bis — close_basis vs source_method 직교 분리
 
@@ -4204,6 +4207,7 @@ response 각 series provenance에 `close_basis` field 추가. 5 가지 enum (Inv
 | `krx_cf_close_1545` | `krx_openapi_daily` | 초기 backfill (KRX OPEN API `fut_bydd_trd` date-based, Step 4B 전환 — 기존 `kis_daily_backfill` 25 rows transitional) |
 | `bithumb_24h_kst_close` | `bithumb_candlestick_api` | 초기 backfill + 운영 중 매일 append (동일 candle API — Amendment 2026-06-01) |
 | `investing_observed_eod` | `observed_rollup` | `investing_exchange_rates`(장기 raw) daily rollup — backfill + going-forward (ADR-035 D1, Proposed) |
+| `bithumb_observed_hourly` | `observed_rollup` | `source_rates`(raw tick) → KST 1h bucket rollup (1w hourly, ADR-035 D3 — daily `bithumb_24h_kst_close`와 별 granularity) |
 
 → **Bithumb은 backfill·append 동일 방법**(`bithumb_candlestick_api` — Amendment 2026-06-01, close_basis·source_method **모두 단일**). KRX는 close_basis 동일 + source_method 분기 (backfill=`krx_openapi_daily` [Step 4B 전환, 기존 `kis_daily_backfill` transitional] vs append=`close_finalizer`). Hana는 close_basis + source_method 둘 다 분리. provenance 측면 backfill 구간과 운영 구간 명확 식별 가능.
 
@@ -4283,7 +4287,7 @@ Hana daily canonical:
 
 1. `source_daily_rates` canonical table 도입 — v2 장기 그래프 hot path 단일 조회
 2. Graph hot path에서 외부 API 직접 호출 금지 (Bithumb / KIS / Hana official 모두 backfill / gap repair / 검증용)
-3. `close_basis` enum 5 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 참조)
+3. `close_basis` enum 6 values + `source_method` enum 6 values + `ohlc_quality` enum 3 values **직교 분리** (ADR-033 Amendment 후속 + 본 ADR Decision B + Step 4B KRX 전환 + ADR-035 D1/D3 참조)
 4. Unique key 후보: `(source, asset, date_kst)`
 5. **`ohlc_quality` top-level column** (검색/필터/렌더링 판단 직접 사용)
 6. **`rate == close` app-level invariant** (모든 backfill/append job에서 같은 값으로 write)
@@ -4348,7 +4352,7 @@ class SourceDailyRate(Base):
 | `low` | Yes | source에 따라 없을 수 있음 (close_only 시 = close) |
 | `close` | No | daily representative close (v2 그래프 consumer 사용) |
 | `ohlc_quality` | No | OHLC 품질 — `source_ohlc` / `observed_rollup` / `close_only` (§7) |
-| `close_basis` | No | 5 values (§6) |
+| `close_basis` | No | 6 values (§6) |
 | `source_method` | No | 6 values (§6) |
 | `contract_code` | Yes | KRX 전용 (예: A75606) |
 | `basis_date` | Yes | Hana official endpoint 응답 기준일 |
@@ -4395,13 +4399,14 @@ class SourceDailyRate(Base):
 - `source_method` = **어떻게 얻었는지** (수집 방법)
 - `ohlc_quality` = **OHLC 신뢰도** (품질)
 
-**`close_basis` enum 5 values** (ADR-033 Amendment 후속 Decision B 참조, Investing은 ADR-035 D1):
+**`close_basis` enum 6 values** (ADR-033 Amendment 후속 Decision B 참조, Investing은 ADR-035 D1, Bithumb hourly는 ADR-035 D3):
 
 - `krx_cf_close_1545`: KRX CF 정규장 15:45 KST close finalizer
-- `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close
+- `bithumb_24h_kst_close`: Bithumb 24h candle KST 00:00 boundary close (daily, source_daily_rates)
 - `hana_observed_eod`: 우리 DB에서 KST 해당일 24:00 이전 마지막으로 관측한 Hana 고시값
 - `hana_official_historical_backfill`: Hana 사이트 historical row (다음날 새벽 고시, 과거 부족분 보강용)
 - `investing_observed_eod`: 우리 DB(`investing_exchange_rates` 장기 보관)에서 KST 해당일 마지막 관측 기준 환율 (ADR-035 D1, Proposed)
+- `bithumb_observed_hourly`: `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, source_hourly_rates — 1w 그래프 전용, daily `bithumb_24h_kst_close`와 별 granularity)
 
 **`source_method` enum 6 values** (ADR-033 Amendment 후속 Decision B-bis + Step 4B KRX 전환):
 
@@ -5548,6 +5553,15 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 - source_hourly_rates 자체 retention = 구현 PR 확정 (1w(7일)면 충분, source별 raw table retention과 분리)
 - 1w bucket = GRAPH §catalog 후보 a/b/c 중 hourly canonical 채택 (legacy hybrid 제거)
 - **Phase 2e MVP 이후 별 phase** — schema + 한 source canary로 시작
+
+**provenance (Step 2~ 구현)**:
+
+- `source_method` = `observed_rollup` / `ohlc_quality` = `observed_rollup` — daily observed rollup 계열 재사용 (신규 enum 값 없음)
+- `close_basis` = **source별 신규 hourly 값** (daily 24h/EOD close와 다른 granularity 명시). 첫 source Bithumb = `bithumb_observed_hourly` (Decision B enum 표 + §6 + GRAPH §6에 추가). KRX/Hana/Investing hourly close_basis는 각 source canary PR에서 확정
+- bucket = `floor_bucket_ts_kst` (KST 시 정각 floor). `source_rates` 등 UTC naive timestamp는 `replace(tzinfo=utc)` 후 변환 (Step 1 helper 계약 — UTC naive 직접 전달 시 9h 오차)
+- gap = change-only raw source는 무변동 hour에 bucket 없음 → **carry-forward 안 함, 존재 bucket만 + gap 진단** (carry-forward 여부는 실제 dry-run gap 패턴 보고 별도 결정)
+
+**구현 상태**: Step 1 schema/helper/migration land (`6e5b9bc` — SourceHourlyRate ORM + helper + retention config 14d + 13 tests). Step 2 = Bithumb hourly rollup dry-run validator (write 0). production migration / backfill / append cron / v2 1w endpoint switch는 각각 별 GO.
 
 **D4 — Phase 2e MVP = 3m/1y 우선, 1w 후속**: 3m/1y는 source_daily_rates(KRX/Hana/Bithumb) + market_index_rates(DXY) + **Investing daily rollup(D1)**만 추가하면 완성 → payoff 즉시. 1w(source_hourly_rates)를 MVP에 묶으면 hourly 표준화 설계로 출시 지연 → **MVP=3m/1y, 1w=source_hourly_rates land 후 추가**.
 
