@@ -1,14 +1,15 @@
 """Graph API v2 (Phase 2e MVP) 테스트 — app/graph_v2.py.
 
-8종 (Codex/Claude 수렴):
-  1. catalog exposes only 3m/1y
-  2. unsupported 1d/1w period
+12종 (Codex/Claude 수렴):
+  1. catalog exposes 3m/1y/1w (1d만 v1 realtime)
+  2. supported 3m/1y/1w / unsupported 1d
   3. tab composition: usd/jpy/eur/tether
   4. Hana mixed provenance + per-point close_basis/source_method
   5. single close_basis provenance (per-point 없음)
   6. KRX per-point contract_code
   7. DXY market_index daily mapping
   8. insufficient_history edge
+  9-12. 1w hourly: bucket_size 1h + KRX insufficient + Hana 실관측 gap 유지 + DXY hourly
 
 build_tab(db, ...)은 db 주입이라 patch 불필요 — in-memory SQLite session 직접 전달.
 """
@@ -19,7 +20,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models
-from app.models import SourceDailyRate, MarketIndexRate
+from app.models import SourceDailyRate, SourceHourlyRate, MarketIndexRate
 from app import graph_v2 as G
 
 TODAY = date(2026, 6, 6)  # period_range 결정용 (고정)
@@ -58,17 +59,17 @@ class _Base(unittest.TestCase):
 
 class TestCatalog(unittest.TestCase):
 
-    def test_catalog_only_3m_1y(self):
+    def test_catalog_3m_1y_1w(self):
         cat = G.build_catalog()
-        self.assertEqual(cat["supported_periods"], ["3m", "1y"])
+        self.assertEqual(cat["supported_periods"], ["3m", "1y", "1w"])
         for t in cat["tabs"]:
-            self.assertEqual(set(t["periods"].keys()), {"3m", "1y"})  # 1d/1w 미노출
+            self.assertEqual(set(t["periods"].keys()), {"3m", "1y", "1w"})  # 1d만 미노출(v1)
 
-    def test_unsupported_period(self):
+    def test_supported_periods(self):
         self.assertTrue(G.is_supported_period("3m"))
         self.assertTrue(G.is_supported_period("1y"))
-        self.assertFalse(G.is_supported_period("1d"))
-        self.assertFalse(G.is_supported_period("1w"))
+        self.assertTrue(G.is_supported_period("1w"))   # 1w 지원 (hourly)
+        self.assertFalse(G.is_supported_period("1d"))  # 1d만 v1 realtime → 미지원
 
     def test_tab_composition(self):
         tabs = {t["id"]: t for t in G.build_catalog()["tabs"]}
@@ -246,6 +247,96 @@ class TestInsufficientHistory(_Base):
                    if s["id"] == "investing.usd")
         self.assertEqual(len(inv["data"]), 1)  # 2026-06-01만
         self.assertEqual(inv["data"][0]["rate"], 1390.0)
+
+
+# ---------------------------------------------------------------------------
+# 9-12. 1w period — hourly reader (source_hourly_rates + market_index.hourly)
+# ---------------------------------------------------------------------------
+
+def _shr(source, asset, ts_kst, close, close_basis, source_method,
+         ohlc_quality="observed_rollup", contract_code=None, high=None, low=None):
+    """SourceHourlyRate 헬퍼 (bucket_ts_kst = KST naive 시 정각)."""
+    return SourceHourlyRate(
+        source=source, asset=asset, bucket_ts_kst=ts_kst,
+        rate=close, high=high if high is not None else close,
+        low=low if low is not None else close, close=close,
+        ohlc_quality=ohlc_quality, close_basis=close_basis, source_method=source_method,
+        contract_code=contract_code,
+    )
+
+
+class TestPeriod1wHourly(_Base):
+    """1w = source_hourly_rates hourly reader (bucket_ts_kst 시 단위) + DXY market_index.hourly."""
+
+    def test_1w_hourly_buckets_and_bucket_size(self):
+        # TODAY=2026-06-06 → 1w start=2026-05-30. start+1(05-31) 첫 bucket → sufficient(2d tolerance).
+        self._add(
+            _shr("bithumb", "usdt-krw", datetime(2026, 5, 31, 10, 0), 1400.0,
+                 "bithumb_observed_hourly", "bithumb_candlestick_api"),
+            _shr("bithumb", "usdt-krw", datetime(2026, 5, 31, 11, 0), 1402.0,
+                 "bithumb_observed_hourly", "bithumb_candlestick_api"),
+        )
+        tab = G.build_tab(self.db, "tether", "1w", today_kst=TODAY)
+        self.assertEqual(tab["metadata"]["bucket_size"], "1h")            # hourly granularity
+        bith = next(s for s in tab["series"] if s["id"] == "bithumb.usdt-krw")
+        self.assertEqual(len(bith["data"]), 2)
+        self.assertEqual(bith["data"][0]["rate"], 1400.0)
+        self.assertTrue(bith["data"][0]["ts"].startswith("2026-05-31T10:00:00"))  # 시 단위 ts
+        self.assertTrue(bith["data"][0]["ts"].endswith("+09:00"))                 # KST
+        self.assertFalse(bith["provenance"]["insufficient_history"])    # start+1 ≤ 2d
+
+    def test_1w_krx_no_hourly_insufficient(self):
+        # KRX는 source_hourly_rates 미적재 → 빈 series → insufficient_history (자연 처리)
+        krx = next(s for s in G.build_tab(self.db, "tether", "1w", today_kst=TODAY)["series"]
+                   if s["id"] == "krx.usd-krw-futures")
+        self.assertEqual(krx["data"], [])
+        self.assertTrue(krx["provenance"]["insufficient_history"])
+
+    def test_1w_hana_actual_buckets_no_carry_forward(self):
+        # Hana 1w = 실관측 bucket만, gap 유지 (carry-forward/step render 미적용). close_only mixed 허용.
+        self._add(
+            _shr("hana", "usd-krw", datetime(2026, 6, 5, 10, 0), 1380.0,
+                 "hana_observed_hourly", "observed_rollup"),
+            _shr("hana", "usd-krw", datetime(2026, 6, 5, 12, 0), 1382.0,
+                 "hana_observed_hourly", "observed_rollup", ohlc_quality="close_only"),
+        )
+        hana = next(s for s in G.build_tab(self.db, "usd", "1w", today_kst=TODAY)["series"]
+                    if s["id"] == "hana.usd")
+        self.assertEqual(len(hana["data"]), 2)   # 11:00 gap 안 채움 (실관측만)
+        self.assertEqual([p["ts"][11:16] for p in hana["data"]], ["10:00", "12:00"])
+
+    def test_1w_dxy_hourly(self):
+        # DXY 1w = market_index granularity=hourly (daily는 hourly reader가 무시)
+        self._add(
+            MarketIndexRate(instrument="dxy", source="investing", rate=99.5,
+                            timestamp=datetime(2026, 6, 5, 1, 0), granularity="hourly"),   # KST 10:00
+            MarketIndexRate(instrument="dxy", source="investing", rate=100.0,
+                            timestamp=datetime(2026, 6, 5, 2, 0), granularity="hourly"),   # KST 11:00
+            MarketIndexRate(instrument="dxy", source="investing", rate=88.8,
+                            timestamp=datetime(2026, 6, 5, 1, 0), granularity="daily"),    # 무시돼야
+        )
+        dxy = next(s for s in G.build_tab(self.db, "usd", "1w", today_kst=TODAY)["series"]
+                   if s["id"] == "dxy")
+        self.assertEqual(len(dxy["data"]), 2)            # hourly 2개 (daily 무시)
+        self.assertEqual(dxy["data"][0]["rate"], 99.5)
+        self.assertTrue(dxy["data"][0]["ts"].startswith("2026-06-05T10:00:00"))  # KST 시각
+
+    def test_1w_insufficient_tolerance_2d(self):
+        # 1w tolerance=2d (daily 7d와 분리, Codex finding). start=2026-05-30.
+        # start+1(주말성 지연) → sufficient / start+6(partial coverage) → insufficient.
+        self._add(
+            _shr("hana", "usd-krw", datetime(2026, 5, 31, 10, 0), 1380.0,
+                 "hana_observed_hourly", "observed_rollup"),               # usd 탭: start+1 → sufficient
+            _shr("bithumb", "usdt-krw", datetime(2026, 6, 5, 10, 0), 1400.0,
+                 "bithumb_observed_hourly", "bithumb_candlestick_api"),    # tether 탭: start+6 → insufficient
+        )
+        hana = next(s for s in G.build_tab(self.db, "usd", "1w", today_kst=TODAY)["series"]
+                    if s["id"] == "hana.usd")
+        self.assertFalse(hana["provenance"]["insufficient_history"])   # start+1 ≤ 2d (주말 시작 허용)
+        bith = next(s for s in G.build_tab(self.db, "tether", "1w", today_kst=TODAY)["series"]
+                    if s["id"] == "bithumb.usdt-krw")
+        self.assertTrue(bith["provenance"]["insufficient_history"])    # start+6 > 2d (partial coverage)
+        self.assertEqual(len(bith["data"]), 1)                         # partial이어도 data 반환
 
 
 if __name__ == "__main__":

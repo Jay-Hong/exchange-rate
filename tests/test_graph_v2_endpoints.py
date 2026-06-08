@@ -4,7 +4,7 @@ main.py import harness는 tests/conftest.py가 처리 (firebase stub + DATABASE_
 collection 시작 시 모든 import 전에 설정 — memory: project_main_py_helper_placement).
 lifespan(scheduler/crawler)은 TestClient context manager 미사용으로 미진입.
 
-검증: catalog 200 / tab unsupported 400 / unknown tab 404 / tab 3m 200(빈 DB→insufficient) / v1 무변경.
+검증: catalog 200 / tab unsupported 400(1d) / tab 1w 200(hourly) / unknown tab 404 / tab 3m 200(빈 DB→insufficient) / v1 무변경.
 """
 import unittest
 
@@ -29,7 +29,7 @@ class TestGraphV2Endpoints(unittest.TestCase):
         r = self.client.get("/api/v2/graph/catalog")
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertEqual(body["supported_periods"], ["3m", "1y"])
+        self.assertEqual(body["supported_periods"], ["3m", "1y", "1w"])
         self.assertEqual({t["id"] for t in body["tabs"]}, {"usd", "jpy", "eur", "tether"})
 
     def test_tab_unsupported_period_400(self):
@@ -37,13 +37,18 @@ class TestGraphV2Endpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         body = r.json()
         self.assertEqual(body["error"], "unsupported_period")
-        self.assertEqual(body["supported_periods"], ["3m", "1y"])
+        self.assertEqual(body["supported_periods"], ["3m", "1y", "1w"])
         self.assertEqual(body["fallback"]["type"], "legacy_graph_api")
 
-    def test_tab_unsupported_1w_400(self):
+    def test_tab_1w_200_hourly(self):
+        # 1w 이제 지원 (hourly). 빈 DB → 200 + bucket_size 1h + insufficient.
         r = self.client.get("/api/v2/graph/tab", params={"tab": "tether", "period": "1w"})
-        self.assertEqual(r.status_code, 400)
-        self.assertEqual(r.json()["error"], "unsupported_period")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["period"], "1w")
+        self.assertEqual(body["metadata"]["bucket_size"], "1h")
+        for s in body["series"]:
+            self.assertTrue(s["provenance"]["insufficient_history"])  # 빈 DB
 
     def test_tab_unknown_tab_404(self):
         r = self.client.get("/api/v2/graph/tab", params={"tab": "xxx", "period": "3m"})

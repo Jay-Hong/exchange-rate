@@ -2,19 +2,19 @@
 
 설계: [GRAPH_API_V2_CONTRACT.md](../GRAPH_API_V2_CONTRACT.md) §4/§5/§6/§9/§10.
 
-MVP 범위 (좁게 — Codex/Claude 수렴):
-  - **supported period = 3m, 1y만**. 1d는 v1 realtime path, 1w는 source_hourly_rates(미구축) 후속.
-    → 1d/1w 요청은 endpoint(main.py)에서 400 unsupported_period.
-  - 3m/1y hot path = source_daily_rates 단일 조회 (외부/raw read 제거).
-  - DXY는 source_daily_rates 아님 → market_index_rates.daily 별도 reader (kind="market_index").
+MVP 범위 (Codex/Claude 수렴):
+  - **supported period = 3m, 1y, 1w**. 1d는 v1 realtime path → endpoint(main.py)에서 400 unsupported_period.
+  - 3m/1y hot path = source_daily_rates 단일 조회 / 1w = source_hourly_rates (period→granularity 분기, 외부/raw read 제거).
+  - DXY는 source_daily/hourly_rates 아님 → market_index_rates(.daily/.hourly) 별도 reader (kind="market_index").
+  - Hana 1w gap = 실관측 bucket 그대로 반환 (carry-forward/step render 미적용 — write 정책 일치, frontend render).
 
 문서=full target / 구현=MVP subset (비강제):
-  - GRAPH §4 catalog matrix는 1d(은행 8개) + 1w 포함한 제품 full target.
-  - 본 모듈 상수는 **3m/1y subset만** 인코딩. 1d/1w v2 추가 시 확장.
+  - GRAPH §4 catalog matrix는 1d(은행 8개) 포함한 제품 full target.
+  - 본 모듈 상수는 **3m/1y/1w 인코딩** (1d는 v1 realtime). 1d v2 추가 시 확장.
 
 엔드포인트(main.py thin wiring):
   - GET /api/v2/graph/catalog → build_catalog()
-  - GET /api/v2/graph/tab?tab=&period= → build_tab(db, tab, period) (period∈{3m,1y})
+  - GET /api/v2/graph/tab?tab=&period= → build_tab(db, tab, period) (period∈{3m,1y,1w})
 
 v1 (/api/graph/{currency})는 변경 0 (legacy 공존, §12).
 """
@@ -25,15 +25,20 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 
-# MVP 지원 period (1d=v1 realtime / 1w=source_hourly_rates 후속 → v2 미지원)
-MVP_PERIODS = ("3m", "1y")
-PERIOD_DAYS = {"3m": 90, "1y": 365}
+# MVP 지원 period (1d=v1 realtime / 1w=source_hourly_rates hourly / 3m·1y=source_daily_rates daily)
+MVP_PERIODS = ("3m", "1y", "1w")
+PERIOD_DAYS = {"3m": 90, "1y": 365, "1w": 7}
+# period → granularity (3m/1y=daily reader, 1w=hourly reader). bucket_size = data point 간격.
+PERIOD_GRANULARITY = {"3m": "daily", "1y": "daily", "1w": "hourly"}
+_BUCKET_SIZE = {"daily": "1d", "hourly": "1h"}
 
 # insufficient_history 기준 (§6 "요청 period를 채울 수 없으면 true"):
-# 빈 series 또는 첫 데이터가 period 시작보다 이만큼(일) 초과 늦으면 period 미충족(신규 자산/coverage 부족).
-# tolerance — period 시작이 주말/휴일이거나 source 간 소폭 gap 허용(신규 자산의 큰 gap과 구분).
-# (연속 series의 시작 경계 대형 gap은 false-flag 가능하나 canonical series는 연속이라 MVP 허용)
-_COVERAGE_TOLERANCE_DAYS = 7
+# 빈 series 또는 첫 데이터가 period 시작보다 tolerance(일) 초과 늦으면 period 미충족(신규 자산/coverage 부족).
+# granularity별 tolerance (Codex finding — 단일 7d면 1w window(7일)에서 partial coverage[마지막 1~2일만]도 sufficient 오판):
+#   daily(3m/1y) = 7일 (주말/휴일 + source 소폭 gap 허용, 90/365일 window에서 작은 비율).
+#   hourly(1w)  = 2일 (주말 시작 Sat/Sun→Mon FX 허용 + partial은 insufficient로 잡음.
+#                 3일 연휴 시작은 드문 false-positive지만 soft flag라 under-flagging보다 안전.)
+_COVERAGE_TOLERANCE_DAYS = {"daily": 7, "hourly": 2}
 
 # DXY(market_index_rates) source dedup 우선순위 — crud.py `_dxy_query_single`과 동일 (investing>cnbc>else).
 _DXY_SOURCE_PRIORITY = {"investing": 0, "cnbc": 1}
@@ -41,16 +46,19 @@ _DXY_SOURCE_PRIORITY = {"investing": 0, "cnbc": 1}
 CATALOG_VERSION = "2026-05-27"
 
 
-def _is_insufficient_history(first_date, start_date) -> bool:
-    """series가 요청 period 시작을 못 채우면 true (빈 series 또는 첫 데이터가 start+tolerance 초과)."""
+def _is_insufficient_history(first_date, start_date, tolerance_days) -> bool:
+    """series가 요청 period 시작을 못 채우면 true (빈 series 또는 첫 데이터가 start+tolerance 초과).
+
+    tolerance_days = granularity별 (_COVERAGE_TOLERANCE_DAYS[granularity]) — daily 7 / hourly 2.
+    """
     if first_date is None:
         return True
-    return (first_date - start_date).days > _COVERAGE_TOLERANCE_DAYS
+    return (first_date - start_date).days > tolerance_days
 
 # ─────────────────────────────────────────────────────────────
 # Series registry — id ↔ DB key 분리 (Codex 보탬)
 #   kind="source_daily_rates": source+asset (get_range read 키)
-#   kind="market_index": instrument+granularity (market_index_rates read)
+#   kind="market_index": instrument (granularity는 period 파생 — daily/hourly)
 #   id는 client 표시용 (FX는 short "hana.usd", KRX/Bithumb은 full asset)
 # ─────────────────────────────────────────────────────────────
 
@@ -83,8 +91,8 @@ SERIES_REGISTRY = {
     "krx.usd-krw-futures": {"kind": "source_daily_rates", "source": "krx", "asset": "usd-krw-futures",
                             "axis_group": "krw", "label": "KRX 미국달러선물", "unit": "KRW", "decimals": 1,
                             "history_policy": "external_historical"},
-    # DXY — market_index_rates.daily (source_daily_rates 아님)
-    "dxy": {"kind": "market_index", "instrument": "dxy", "granularity": "daily",
+    # DXY — market_index_rates .daily(3m/1y)/.hourly(1w) (source_daily_rates 아님). granularity는 period 파생(reader) — entry에 없음.
+    "dxy": {"kind": "market_index", "instrument": "dxy",
             "axis_group": "index", "label": "달러지수", "unit": "INDEX", "decimals": 3,
             "history_policy": "rollup_based"},
 }
@@ -131,12 +139,16 @@ def _tab_axis_groups(tab: str) -> dict:
 # ─────────────────────────────────────────────────────────────
 
 def is_supported_period(period: str) -> bool:
-    """v2 MVP 지원 period (3m, 1y)."""
+    """v2 MVP 지원 period (3m, 1y, 1w)."""
     return period in MVP_PERIODS
 
 
 def period_range(period: str, today_kst: date) -> tuple[date, date]:
-    """period → (start_date, end_date) KST. end=today(최신 available까지), start=today-N일."""
+    """period → (start_date, end_date) KST. end=today(최신 available까지), start=today-N일.
+
+    inclusive [today-N, today] = N+1 calendar day (1w=today-7~today ≈ 8일, "정확히 168h" 아님).
+    3m/1y와 동일 uniform 패턴 — 의도된 결정 (Codex caveat). "정확 168h rolling"은 전 period semantics 변경 필요.
+    """
     days = PERIOD_DAYS[period]
     return today_kst - timedelta(days=days), today_kst
 
@@ -145,20 +157,23 @@ def period_range(period: str, today_kst: date) -> tuple[date, date]:
 # Provenance 조립 (source_daily_rates series — single/mixed 동적)
 # ─────────────────────────────────────────────────────────────
 
-def _assemble_sdr_provenance(entry: dict, rows: list, start_date) -> dict:
+def _assemble_sdr_provenance(entry: dict, rows: list, start_date, bucket_date, tolerance_days) -> dict:
     """rows에서 series-level provenance 동적 조립 (§6).
 
     - close_basis_mode: distinct close_basis 1개 → single / 2개+ → mixed (Hana만 예상)
     - default_close_basis: 가장 최근(rows[-1]) close_basis (canonical/going-forward 기준)
     - per_point_metadata: mixed면 [close_basis, source_method] / KRX(contract_code 존재)면 [contract_code]
+    - bucket_date: row → KST date 추출 (daily=date_kst / hourly=bucket_ts_kst.date()) — coverage/insufficient 판정
     """
+    first_d = bucket_date(rows[0]) if rows else None
+    last_d = bucket_date(rows[-1]) if rows else None
     prov = {
         "actual_source": entry["source"],
         "fallback_source": None,          # Amendment 후 external_historical/rollup series는 null
         "fallback_after_days": None,
         "history_policy": entry["history_policy"],
-        "coverage_days": (rows[-1].date_kst - rows[0].date_kst).days + 1 if rows else 0,
-        "insufficient_history": _is_insufficient_history(rows[0].date_kst if rows else None, start_date),
+        "coverage_days": (last_d - first_d).days + 1 if rows else 0,
+        "insufficient_history": _is_insufficient_history(first_d, start_date, tolerance_days),
     }
     if not rows:
         prov["close_basis_mode"] = "single"
@@ -185,13 +200,12 @@ def _assemble_sdr_provenance(entry: dict, rows: list, start_date) -> dict:
     return prov
 
 
-def _sdr_data_point(row, per_point_metadata: list) -> dict:
-    """SourceDailyRate row → v2 data point. per_point_metadata에 따라 조건부 필드 포함.
+def _sdr_data_point(row, per_point_metadata: list, bucket_ts) -> dict:
+    """SourceDailyRate/SourceHourlyRate row → v2 data point. per_point_metadata에 따라 조건부 필드 포함.
 
-    ts = date_kst 00:00:00+09:00 (§5 daily bucket 포맷).
+    ts = bucket_ts(row) — daily=date_kst 00:00:00+09:00 / hourly=bucket_ts_kst 시각+09:00 (§5).
     """
-    ts = datetime.combine(row.date_kst, time(0, 0), tzinfo=KST).isoformat()
-    point = {"ts": ts, "rate": float(row.close), "source": row.source}
+    point = {"ts": bucket_ts(row), "rate": float(row.close), "source": row.source}
     if "close_basis" in per_point_metadata:
         point["close_basis"] = row.close_basis
         point["source_method"] = row.source_method
@@ -204,14 +218,29 @@ def _sdr_data_point(row, per_point_metadata: list) -> dict:
 # Reader — source_daily_rates series
 # ─────────────────────────────────────────────────────────────
 
-def _read_sdr_series(db, series_id: str, entry: dict, start: date, end: date) -> dict:
-    """source_daily_rates series 1개 → {id, label, axis_group, unit, decimals, data, provenance}."""
-    from app.source_daily_rates import get_range
+def _read_sdr_series(db, series_id: str, entry: dict, start: date, end: date, granularity: str) -> dict:
+    """source_daily/hourly_rates series 1개 → {id, label, axis_group, unit, decimals, data, provenance}.
 
-    rows = get_range(db, entry["source"], entry["asset"], start, end)
-    provenance = _assemble_sdr_provenance(entry, rows, start)
+    granularity=daily(3m/1y): source_daily_rates.get_range(date) + date_kst bucket.
+    granularity=hourly(1w): source_hourly_rates.get_range(datetime) + bucket_ts_kst(시 단위) bucket.
+    """
+    if granularity == "hourly":
+        from app.source_hourly_rates import get_range
+        # bucket_ts_kst는 KST naive — KST [start 00:00, end 23:59:59] inclusive 경계로 조회
+        start_ts = datetime.combine(start, time(0, 0))
+        end_ts = datetime.combine(end, time(23, 59, 59))
+        rows = get_range(db, entry["source"], entry["asset"], start_ts, end_ts)
+        def _bucket_date(r): return r.bucket_ts_kst.date()
+        def _bucket_ts(r): return r.bucket_ts_kst.replace(tzinfo=KST).isoformat()
+    else:
+        from app.source_daily_rates import get_range
+        rows = get_range(db, entry["source"], entry["asset"], start, end)
+        def _bucket_date(r): return r.date_kst
+        def _bucket_ts(r): return datetime.combine(r.date_kst, time(0, 0), tzinfo=KST).isoformat()
+
+    provenance = _assemble_sdr_provenance(entry, rows, start, _bucket_date, _COVERAGE_TOLERANCE_DAYS[granularity])
     per_point = provenance["per_point_metadata"]
-    data = [_sdr_data_point(r, per_point) for r in rows]
+    data = [_sdr_data_point(r, per_point, _bucket_ts) for r in rows]
     return {
         "id": series_id,
         "label": entry["label"],
@@ -227,50 +256,63 @@ def _read_sdr_series(db, series_id: str, entry: dict, start: date, end: date) ->
 # Reader — DXY (market_index_rates.daily)
 # ─────────────────────────────────────────────────────────────
 
-def _read_market_index_series(db, series_id: str, entry: dict, start: date, end: date) -> dict:
-    """market_index_rates.daily series (DXY) → {id, ..., data, provenance}.
+def _read_market_index_series(db, series_id: str, entry: dict, start: date, end: date, granularity: str) -> dict:
+    """market_index_rates series (DXY) → {id, ..., data, provenance}.
 
-    daily row의 timestamp(UTC)를 KST date로 변환해 date bucket 매핑.
-    같은 KST date 다수 source면 source priority(investing>cnbc>else, crud.py `_dxy_query_single` 일치) → 동순위는 최신 timestamp.
+    granularity=daily(3m/1y): timestamp(UTC)→KST date bucket / granularity=hourly(1w): KST 시각(시 floor) bucket.
+    같은 bucket 다수 source면 source priority(investing>cnbc>else, crud.py `_dxy_query_single` 일치) → 동순위는 최신 timestamp.
     """
     from app.models import MarketIndexRate
 
-    # KST [start 00:00, (end+1) 00:00) → UTC naive 경계로 daily row 조회 (timestamp는 naive UTC)
+    # KST [start 00:00, (end+1) 00:00) → UTC naive 경계로 row 조회 (timestamp는 naive UTC)
     start_utc = datetime.combine(start, time(0, 0), tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
     end_utc = datetime.combine(end + timedelta(days=1), time(0, 0), tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
     rows = (
         db.query(MarketIndexRate)
         .filter(
             MarketIndexRate.instrument == entry["instrument"],
-            MarketIndexRate.granularity == entry["granularity"],
+            MarketIndexRate.granularity == granularity,
             MarketIndexRate.timestamp >= start_utc,
             MarketIndexRate.timestamp < end_utc,
         )
         .order_by(MarketIndexRate.timestamp.asc())
         .all()
     )
-    # KST date bucket — 같은 date 다수 source면 priority(investing>cnbc>else, crud.py와 동일) → 동순위 최신 timestamp.
+    # bucket key — daily=KST date / hourly=KST 시각(시 floor). 같은 bucket 다수 source면 priority dedup.
     # (단순 last-row dedup은 yahoo가 investing보다 늦으면 yahoo 선택 → v1 source priority 회귀)
     def _rank(r):
         return (_DXY_SOURCE_PRIORITY.get(r.source, 2), -r.timestamp.timestamp())
-    by_date: dict[date, MarketIndexRate] = {}
+
+    def _kst(r):
+        return r.timestamp.replace(tzinfo=timezone.utc).astimezone(KST)
+
+    if granularity == "hourly":
+        def _bucket_key(r): return _kst(r).replace(minute=0, second=0, microsecond=0)
+        def _bucket_ts(k): return k.isoformat()
+        def _bucket_date(k): return k.date()
+    else:
+        def _bucket_key(r): return _kst(r).date()
+        def _bucket_ts(k): return datetime.combine(k, time(0, 0), tzinfo=KST).isoformat()
+        def _bucket_date(k): return k
+
+    by_bucket: dict = {}
     for r in rows:
-        d = r.timestamp.replace(tzinfo=timezone.utc).astimezone(KST).date()
-        cur = by_date.get(d)
+        k = _bucket_key(r)
+        cur = by_bucket.get(k)
         if cur is None or _rank(r) < _rank(cur):
-            by_date[d] = r
+            by_bucket[k] = r
     data = [
-        {"ts": datetime.combine(d, time(0, 0), tzinfo=KST).isoformat(),
-         "rate": float(by_date[d].rate), "source": by_date[d].source}
-        for d in sorted(by_date)
+        {"ts": _bucket_ts(k), "rate": float(by_bucket[k].rate), "source": by_bucket[k].source}
+        for k in sorted(by_bucket)
     ]
+    bucket_dates = [_bucket_date(k) for k in by_bucket]
     provenance = {
         "actual_source": "market_index",
         "fallback_source": None,
         "fallback_after_days": None,
         "history_policy": entry["history_policy"],
-        "coverage_days": (max(by_date) - min(by_date)).days + 1 if by_date else 0,
-        "insufficient_history": _is_insufficient_history(min(by_date) if by_date else None, start),
+        "coverage_days": (max(bucket_dates) - min(bucket_dates)).days + 1 if bucket_dates else 0,
+        "insufficient_history": _is_insufficient_history(min(bucket_dates) if bucket_dates else None, start, _COVERAGE_TOLERANCE_DAYS[granularity]),
         "close_basis_mode": "single",   # market_index는 close_basis 개념 없음 — single 고정
         "per_point_metadata": [],
     }
@@ -290,7 +332,7 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
 # ─────────────────────────────────────────────────────────────
 
 def build_catalog() -> dict:
-    """전체 catalog (MVP — 3m/1y subset). DB 불필요 (정적 상수)."""
+    """전체 catalog (MVP — 3m/1y/1w). DB 불필요 (정적 상수)."""
     tabs = []
     for tab, series_ids in _TAB_SERIES.items():
         periods = {}
@@ -317,18 +359,20 @@ def build_tab(db, tab: str, period: str, today_kst: date | None = None) -> dict:
     """탭×기간 모든 series 데이터 (§10 /api/v2/graph/tab 응답).
 
     호출 전 endpoint가 tab 존재 + period 지원(is_supported_period) 검증 가정.
+    period→granularity (3m/1y=daily=source_daily_rates / 1w=hourly=source_hourly_rates).
     """
     if today_kst is None:
         today_kst = datetime.now(tz=KST).date()
     start, end = period_range(period, today_kst)
+    granularity = PERIOD_GRANULARITY[period]
 
     series_out = []
     for series_id in _TAB_SERIES[tab]:
         entry = SERIES_REGISTRY[series_id]
         if entry["kind"] == "source_daily_rates":
-            series_out.append(_read_sdr_series(db, series_id, entry, start, end))
+            series_out.append(_read_sdr_series(db, series_id, entry, start, end, granularity))
         elif entry["kind"] == "market_index":
-            series_out.append(_read_market_index_series(db, series_id, entry, start, end))
+            series_out.append(_read_market_index_series(db, series_id, entry, start, end, granularity))
         else:
             raise ValueError(f"미지원 series kind: {entry['kind']!r} (series={series_id})")
 
@@ -338,7 +382,7 @@ def build_tab(db, tab: str, period: str, today_kst: date | None = None) -> dict:
         "series": series_out,
         "metadata": {
             "fetched_at": datetime.now(tz=KST).isoformat(),
-            "bucket_size": "1d",
+            "bucket_size": _BUCKET_SIZE[granularity],
             "range": {"start": start.isoformat(), "end": end.isoformat()},
         },
     }

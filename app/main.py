@@ -2142,7 +2142,7 @@ async def get_v2_graph_catalog():
 
 @app.get("/api/v2/graph/tab")
 async def get_v2_graph_tab(tab: str, period: str = "3m"):
-    """탭×기간 모든 series 데이터 (source_daily_rates read). period∈{3m,1y}만 지원."""
+    """탭×기간 모든 series 데이터 (source_daily/hourly_rates read). period∈{3m,1y,1w} 지원 (1w=hourly)."""
     from app.graph_v2 import build_tab, is_supported_period, known_tabs, MVP_PERIODS
 
     if tab not in known_tabs():
@@ -2152,14 +2152,14 @@ async def get_v2_graph_tab(tab: str, period: str = "3m"):
             "known_tabs": known_tabs(),
         })
     if not is_supported_period(period):
-        # MVP 범위 밖(1d/1w) — insufficient_history 아님, 명시적 미지원 + v1 fallback hint
+        # MVP 범위 밖(1d) — insufficient_history 아님, 명시적 미지원 + v1 fallback hint
         return JSONResponse(status_code=400, content={
             "error": "unsupported_period",
             "detail": f"period '{period}' is not in Graph API v2 MVP scope",
             "supported_periods": list(MVP_PERIODS),
             "fallback": {
                 "type": "legacy_graph_api",
-                "hint": "Use legacy /api/graph/{currency}?range={period} for 1d/1w",
+                "hint": "Use legacy /api/graph/{currency}?range={period} for 1d",
             },
         })
 
