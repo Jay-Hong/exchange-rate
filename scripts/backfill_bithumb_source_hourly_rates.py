@@ -304,10 +304,17 @@ def ensure_source_hourly_rates_table_created() -> None:
 def write_with_transaction(
     rows: list[dict],
     require_empty: bool,
+    source: str = SOURCE,
+    asset: str = ASSET,
+    close_basis: str = CLOSE_BASIS,
+    source_method: str = SOURCE_METHOD,
+    ohlc_quality: str = OHLC_QUALITY,
 ) -> tuple[bool, list[str], dict]:
     """단일 transaction write: (require_empty pre-check) → upsert(commit=False) loop →
     post-write SELECT 검증 → commit/rollback.
 
+    source/asset/close_basis/source_method/ohlc_quality는 **default=Bithumb 상수** — Bithumb caller는
+    인자 미전달로 동작 불변(test 검증). Investing 등 다른 hourly source는 통화별 인자 전달해 재사용.
     Returns: (success, issues, outcome). outcome = {inserted, updated}.
     require_empty면 pre-write에 target bucket이 비어있어야 함 (gap-only 강제). post-write SELECT는
     bucket_ts_kst.in_(expected_buckets) (partial rerun / 다른 path overlap 안전 — daily 패턴).
@@ -329,8 +336,8 @@ def write_with_transaction(
         existing = (
             session.query(SourceHourlyRate)
             .filter(
-                SourceHourlyRate.source == SOURCE,
-                SourceHourlyRate.asset == ASSET,
+                SourceHourlyRate.source == source,
+                SourceHourlyRate.asset == asset,
                 SourceHourlyRate.bucket_ts_kst.in_(expected_buckets),
             )
             .count()
@@ -340,6 +347,18 @@ def write_with_transaction(
             return False, [
                 f"--require-empty-target인데 target에 기존 {existing} bucket 존재 (gap-only write 위반)"
             ], outcome
+
+        # pre-upsert literal 일치 검증 (generic helper — candidate row가 전달 param과 일치해야 함).
+        # 불일치 시: upsert가 row literal(잘못된 source/asset)을 commit하는데 post-write SELECT는 param
+        # 필터라 못 잡고(기존 param-target row만 봄) 통과 → silent 잘못된 row. → pre-upsert fail-close.
+        for r in rows:
+            if (r["source"] != source or r["asset"] != asset or r["close_basis"] != close_basis
+                    or r["source_method"] != source_method or r["ohlc_quality"] != ohlc_quality):
+                session.rollback()
+                return False, [
+                    f"candidate row literal != param @ {r['bucket_ts_kst']}: "
+                    "source/asset/close_basis/source_method/ohlc_quality 중 불일치 (fail-close)"
+                ], outcome
 
         # upsert loop (commit=False — caller transaction)
         for r in rows:
@@ -355,8 +374,8 @@ def write_with_transaction(
         written = (
             session.query(SourceHourlyRate)
             .filter(
-                SourceHourlyRate.source == SOURCE,
-                SourceHourlyRate.asset == ASSET,
+                SourceHourlyRate.source == source,
+                SourceHourlyRate.asset == asset,
                 SourceHourlyRate.bucket_ts_kst.in_(expected_buckets),
             )
             .order_by(SourceHourlyRate.bucket_ts_kst.asc())
@@ -381,8 +400,8 @@ def write_with_transaction(
             if w.contract_code is not None or w.basis_date is not None or w.published_at is not None:
                 issues.append(f"top-level metadata NOT None @ {w.bucket_ts_kst} (hourly observed는 전부 None)")
             # (e) enum/literal
-            if (w.source != SOURCE or w.asset != ASSET or w.close_basis != CLOSE_BASIS
-                    or w.source_method != SOURCE_METHOD or w.ohlc_quality != OHLC_QUALITY):
+            if (w.source != source or w.asset != asset or w.close_basis != close_basis
+                    or w.source_method != source_method or w.ohlc_quality != ohlc_quality):
                 issues.append(f"enum/literal mismatch @ {w.bucket_ts_kst}")
             # (f) OHLC completeness + ordering
             if w.high is None or w.low is None or w.close is None or not (w.low <= w.close <= w.high):

@@ -1,7 +1,8 @@
-"""Investing per-currency hourly rollup dry-run validator 단위 테스트 (ADR-035 D3 Step 2).
+"""Investing per-currency hourly rollup validator/writer 단위 테스트 (ADR-035 D3 Step 2/3).
 
 `scripts/backfill_investing_source_hourly_rates.py`의 resolve_currencies / rollup(UTC→KST bucket +
-quantize) / validate_enum / fetch를 in-memory SQLite/synthetic으로 검증. write 0. 외부 의존성 0.
+quantize) / validate_enum / fetch + write path(per-currency 적재/provenance/param mismatch)를
+in-memory SQLite/synthetic으로 검증. 외부 의존성 0.
 
 검증 포인트:
 - resolve_currencies: usd|jpy|eur|all + invalid
@@ -17,14 +18,17 @@ import unittest
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from app import models  # noqa: E402
-from app.models import InvestingExchangeRate  # noqa: E402
+from app.models import InvestingExchangeRate, SourceHourlyRate  # noqa: E402
+import backfill_bithumb_source_hourly_rates as B  # noqa: E402
 import backfill_investing_source_hourly_rates as I  # noqa: E402
 
 
@@ -121,6 +125,73 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["bucket_ts_kst"], _kst_bucket(14))
         self.assertEqual(rows[0]["close"], Decimal("1510.000000"))
+
+
+class TestInvestingWritePath(unittest.TestCase):
+    """B의 파라미터화된 write_with_transaction이 Investing 상수로 적재 + post-write 검증 통과."""
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        models.Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def test_write_with_investing_constants(self):
+        rows = I.rollup_to_hourly([(1500.0, _utc(5, 0)), (1510.0, _utc(6, 0))], "usd-krw")
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(
+                rows, require_empty=True,
+                source="investing", asset="usd-krw", close_basis="investing_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup")
+        self.assertTrue(success, issues)
+        self.assertEqual(outcome, {"inserted": 2, "updated": 0})
+        db = self.Session()
+        try:
+            w = db.query(SourceHourlyRate).filter(SourceHourlyRate.source == "investing").all()
+        finally:
+            db.close()
+        self.assertEqual(len(w), 2)
+        self.assertEqual(w[0].close_basis, "investing_observed_hourly")
+        self.assertEqual(w[0].asset, "usd-krw")
+
+    def test_pre_upsert_catches_close_basis_mismatch(self):
+        # close_basis param != rows literal → pre-upsert fail-close → rollback (적재 0)
+        rows = I.rollup_to_hourly([(1500.0, _utc(5, 0))], "usd-krw")
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, _ = B.write_with_transaction(
+                rows, require_empty=True,
+                source="investing", asset="usd-krw", close_basis="bithumb_observed_hourly",  # 불일치
+                source_method="observed_rollup", ohlc_quality="observed_rollup")
+        self.assertFalse(success)
+        self.assertTrue(any("literal != param" in i for i in issues))
+        self.assertEqual(self.Session().query(SourceHourlyRate).count(), 0)
+
+    def test_pre_upsert_catches_asset_mismatch_with_existing(self):
+        # Codex 시나리오: rows asset != param asset + require_empty=False + 기존 param-target row 존재.
+        # pre-upsert 검증 없으면 잘못된 asset row가 silent commit (post-write SELECT는 param 필터라 못 봄).
+        db0 = self.Session()
+        db0.add(SourceHourlyRate(
+            source="investing", asset="usd-krw", bucket_ts_kst=_kst_bucket(14),
+            rate=Decimal("1500.000000"), close=Decimal("1500.000000"),
+            high=Decimal("1500.000000"), low=Decimal("1500.000000"),
+            ohlc_quality="observed_rollup", close_basis="investing_observed_hourly",
+            source_method="observed_rollup",
+            metadata_json={"point_count": 1, "first_ts_kst": "x", "last_ts_kst": "x"}))
+        db0.commit()
+        db0.close()
+        rows = I.rollup_to_hourly([(900.0, _utc(5, 0))], "jpy-krw")   # asset 불일치, bucket 동일(14:00)
+        with patch("app.database.SessionLocal", self.Session):
+            success, _, _ = B.write_with_transaction(
+                rows, require_empty=False,
+                source="investing", asset="usd-krw", close_basis="investing_observed_hourly",
+                source_method="observed_rollup", ohlc_quality="observed_rollup")
+        self.assertFalse(success)   # pre-upsert 불일치 catch
+        db = self.Session()
+        try:
+            self.assertEqual(db.query(SourceHourlyRate).filter(SourceHourlyRate.asset == "jpy-krw").count(), 0)   # 미적재
+            self.assertEqual(db.query(SourceHourlyRate).filter(SourceHourlyRate.asset == "usd-krw").count(), 1)   # 기존 불변
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

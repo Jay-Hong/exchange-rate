@@ -237,13 +237,13 @@ class TestWritePath(unittest.TestCase):
         self.assertTrue(any("require-empty" in i for i in issues))
         self.assertEqual(self._count(), 2)  # 2차는 rollback, 1차 2건 유지
 
-    def test_post_write_validation_catches_bad_enum_and_rolls_back(self):
+    def test_pre_upsert_catches_bad_enum_and_rolls_back(self):
         rows = self._two_rows()
-        rows[0]["close_basis"] = "bithumb_24h_kst_close"  # hourly 아닌 daily enum → (e) 위반
+        rows[0]["close_basis"] = "bithumb_24h_kst_close"  # hourly 아닌 daily enum → param 불일치 → pre-upsert fail-close
         with patch("app.database.SessionLocal", self.Session):
             success, issues, _ = B.write_with_transaction(rows, require_empty=True)
         self.assertFalse(success)
-        self.assertTrue(any("enum" in i for i in issues))
+        self.assertTrue(any("literal != param" in i for i in issues))
         self.assertEqual(self._count(), 0)  # rollback — 아무것도 persist 안 됨
 
     def test_write_empty_fail_close(self):
