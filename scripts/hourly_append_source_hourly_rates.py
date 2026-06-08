@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bithumb hourly append PLAN (ADR-035 D3 Step — going-forward freshness).
+"""Bithumb hourly append — PLAN(default) + WRITE (ADR-035 D3 — going-forward freshness).
 
-source_hourly_rates를 going-forward로 최신 유지하기 위한 append의 **plan/dry-run 모드**.
-실제 write·cron 연결은 별도 GO. 본 PR은 plan만 — 어떤 bucket을 upsert/prune할지 + 로그.
+source_hourly_rates를 going-forward로 최신 유지하는 append.
+**default PLAN(read-only)** — 어떤 bucket을 upsert/prune할지 + 로그. **`--write` 시 실제 upsert + retention prune.** cron 연결은 별도 GO.
 
 설계 (다른 Claude / Codex 수렴):
   - cadence: hourly (HH:05 권장 — correctness는 catch-up이 보장, minute은 freshness tuning)
@@ -12,10 +12,14 @@ source_hourly_rates를 going-forward로 최신 유지하기 위한 append의 **p
   - retention prune: config.SOURCE_HOURLY_RETENTION_DAYS(14d) 밖 bucket 삭제 계획
   - 정상 현상: latest hour 값이 다음 실행에서 미세 revise 가능 (불완전→완전). 로그로 표면화.
 
-본 plan은 read-only: source_rates(rollup) + source_hourly_rates(기존 비교) 조회만, write 0.
+default(PLAN)는 read-only: source_rates(rollup) + source_hourly_rates(기존 비교) 조회만, write 0.
+--write 시 upsert(require_empty 미사용 — 갱신 허용) + prune.
 
-사용법 (plan, read-only):
+사용법:
+  # plan (read-only, default):
   python scripts/hourly_append_source_hourly_rates.py [--window-days 2] [--as-of 2026-06-08T14:30]
+  # write (upsert+prune — production DB는 --allow-production-write):
+  python scripts/hourly_append_source_hourly_rates.py --write --allow-production-write
 """
 
 # 표준 라이브러리
@@ -75,28 +79,54 @@ class AppendPlan:
     latest_lag_seconds: Optional[float]   # now - latest bucket 마지막 tick (수집 지연)
 
 
-def compute_append_plan(
-    db,
-    now_kst: datetime,
-    window_days: int,
-    retention_days: int,
-) -> AppendPlan:
-    """append plan 계산 (read-only — write 0).
+def _fetch_candidates(db, now_kst: datetime, window_days: int):
+    """직전 완료 hour까지 최근 window_days 일 source_rates rollup → (window_start, prev_complete, candidates).
 
-    1) 직전 완료 hour까지의 최근 window_days 일 source_rates rollup → candidate bucket
-    2) 기존 source_hourly_rates와 비교 → inserted / updated_same / updated_changed
-    3) retention(now - retention_days) 밖 bucket prune 계획
+    plan과 write가 공유 — window 계산 + fetch + rollup 단일 소스.
+    window_start = 직전 완료 hour 기준 rolling window_days*24h 시작점 (00:00 고정 아님).
+    fetch 상한 = prev_complete 59:59 → 현재 incomplete hour tick 자연 배제.
     """
     prev_complete = previous_complete_hour(now_kst)
     window_start = prev_complete - timedelta(hours=window_days * 24 - 1)
-
-    # source_rates 조회: [window_start, prev_complete 59:59] KST → UTC
-    # (window_start = 직전 완료 hour 기준 rolling window_days*24h 시작점 — 00:00 고정 아님)
     fetch_start_utc = kst_naive_to_utc_naive(window_start)
     fetch_end_utc = kst_naive_to_utc_naive(prev_complete + timedelta(hours=1)) - timedelta(microseconds=1)
     ticks = B.fetch_bithumb_ticks(db, fetch_start_utc, fetch_end_utc)
-    candidates = B.rollup_ticks_to_hourly(ticks)
+    return window_start, prev_complete, B.rollup_ticks_to_hourly(ticks)
 
+
+def retention_cutoff_kst(now_kst: datetime, retention_days: int) -> datetime:
+    """retention prune 경계 (이 시각 미만 bucket 삭제 대상). now.floor(hour) - retention_days."""
+    return now_kst.replace(minute=0, second=0, microsecond=0, tzinfo=None) - timedelta(days=retention_days)
+
+
+def prune_old_buckets(db, cutoff: datetime) -> int:
+    """retention 밖(bucket_ts_kst < cutoff) Bithumb bucket 삭제. Returns: 삭제 수. (자체 commit)"""
+    deleted = (
+        db.query(SourceHourlyRate)
+        .filter(
+            SourceHourlyRate.source == B.SOURCE,
+            SourceHourlyRate.asset == B.ASSET,
+            SourceHourlyRate.bucket_ts_kst < cutoff,
+        )
+        .delete()
+    )
+    db.commit()
+    return deleted
+
+
+def compute_append_plan_from_candidates(
+    db,
+    candidates: list,
+    window_start: datetime,
+    prev_complete: datetime,
+    now_kst: datetime,
+    retention_days: int,
+) -> AppendPlan:
+    """candidate snapshot으로부터 plan 계산.
+
+    plan 출력과 write가 **동일 candidates snapshot**을 쓰도록 fetch와 분리
+    (double-fetch 시 그 사이 late tick으로 plan/commit 불일치 회피).
+    """
     # 기존 bucket 비교 — price 변동 / metadata-only 변동 / 완전 동일 구분
     # (upsert는 metadata_json도 갱신하므로, price 동일해도 point_count/last_ts 변경은 실제 row 변경 = no-op 아님)
     existing = {e.bucket_ts_kst: e for e in
@@ -116,7 +146,7 @@ def compute_append_plan(
             updated_same += 1                                    # price + metadata 완전 동일 (진짜 no-op)
 
     # retention prune 계획
-    retention_cutoff = now_kst.replace(minute=0, second=0, microsecond=0, tzinfo=None) - timedelta(days=retention_days)
+    retention_cutoff = retention_cutoff_kst(now_kst, retention_days)
     prune_count = (
         db.query(SourceHourlyRate)
         .filter(
@@ -155,8 +185,15 @@ def compute_append_plan(
     )
 
 
+def compute_append_plan(db, now_kst: datetime, window_days: int, retention_days: int) -> AppendPlan:
+    """편의 wrapper — fetch 후 compute_append_plan_from_candidates (PLAN-only / 테스트용)."""
+    window_start, prev_complete, candidates = _fetch_candidates(db, now_kst, window_days)
+    return compute_append_plan_from_candidates(
+        db, candidates, window_start, prev_complete, now_kst, retention_days)
+
+
 def print_plan(plan: AppendPlan) -> None:
-    print("=== Bithumb hourly append PLAN (read-only, write 0) ===")
+    print("=== Bithumb hourly append PLAN ===")
     print(f"  window (직전 완료 hour까지): {plan.window_start} ~ {plan.window_end}")
     print(f"  candidate bucket: {plan.candidate_count}")
     print(f"  upsert 계획: inserted={plan.inserted} / updated_same(no-op)={plan.updated_same} "
@@ -172,12 +209,16 @@ def print_plan(plan: AppendPlan) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Bithumb hourly append PLAN (ADR-035 D3, read-only — write/cron은 별 GO)"
+        description="Bithumb hourly append (ADR-035 D3 — default PLAN/read-only, --write 시 upsert+prune. cron은 별 GO)"
     )
     parser.add_argument("--window-days", type=int, default=2,
                         help="catch-up re-roll window (기본 2일)")
     parser.add_argument("--as-of", default=None,
                         help="기준 시각 ISO (테스트/재현용, 기본 now KST)")
+    parser.add_argument("--write", action="store_true",
+                        help="plan 출력 후 실제 upsert(require_empty 미사용) + retention prune")
+    parser.add_argument("--allow-production-write", action="store_true",
+                        help="[guard] non-SQLite DB(RDS 등)에 --write 허용")
     args = parser.parse_args()
 
     if args.window_days <= 0:
@@ -192,20 +233,54 @@ def main() -> None:
         now_kst = datetime.now(_KST_TZ).replace(tzinfo=None)
 
     retention_days = config.SOURCE_HOURLY_RETENTION_DAYS
-    print(f"모드: PLAN (read-only, write 0) — now(KST)={now_kst} / window={args.window_days}d "
-          f"/ retention={retention_days}d")
+
+    # write 진입 가드 (DB read 전)
+    if args.write:
+        guard_err = B.check_production_write_guard(args.allow_production_write)
+        if guard_err:
+            print(f"[GUARD 차단] {guard_err}")
+            sys.exit(2)
+        B.ensure_source_hourly_rates_table_created()
+
+    mode_label = "WRITE (plan 후 upsert+prune)" if args.write else "PLAN (read-only, write 0)"
+    print(f"모드: {mode_label} — now(KST)={now_kst} / window={args.window_days}d / retention={retention_days}d")
     print()
 
     from app.database import SessionLocal
     db = SessionLocal()
     try:
-        plan = compute_append_plan(db, now_kst, args.window_days, retention_days)
+        # candidate 1회 fetch → plan 출력과 write가 동일 snapshot 사용 (double-fetch 불일치 회피)
+        window_start, prev_complete, candidates = _fetch_candidates(db, now_kst, args.window_days)
+        plan = compute_append_plan_from_candidates(
+            db, candidates, window_start, prev_complete, now_kst, retention_days)
+        print_plan(plan)
+        print()
+        if not args.write:
+            print("[PLAN ONLY] 실제 upsert/prune은 --write에서. cron 연결도 별 GO.")
+            return
     finally:
         db.close()
 
-    print_plan(plan)
+    # WRITE: upsert (B.write_with_transaction — 자체 session + post-write 검증 a~i + commit/rollback)
+    print(f"=== WRITE — upsert {len(candidates)} candidate (require_empty 미사용 — append 갱신 허용) ===")
+    success, write_issues, outcome = B.write_with_transaction(candidates, require_empty=False)
+    if not success:
+        print(f"[WRITE 실패] {len(write_issues)}건 issue — transaction rollback")
+        for issue in write_issues[:10]:
+            print(f"  - {issue}")
+        sys.exit(1)
+    print(f"[UPSERT OK] inserted={outcome['inserted']} updated={outcome['updated']} (commit)")
+
+    # retention prune (별 transaction — recent window와 disjoint)
+    cutoff = retention_cutoff_kst(now_kst, retention_days)
+    db_p = SessionLocal()
+    try:
+        pruned = prune_old_buckets(db_p, cutoff)
+    finally:
+        db_p.close()
+    print(f"[PRUNE OK] cutoff={cutoff} 미만 {pruned} bucket 삭제 (commit)")
     print()
-    print("[PLAN ONLY] 실제 upsert/prune은 write 경로(별 GO)에서. cron 연결도 별 GO.")
+    print("[WRITE 완료] cron 연결은 별 GO.")
 
 
 if __name__ == "__main__":

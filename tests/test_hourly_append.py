@@ -120,6 +120,51 @@ class TestComputeAppendPlan(unittest.TestCase):
         self.assertEqual(plan.latest_bucket_ts, datetime(2026, 6, 8, 13, 0))
 
 
+class TestWriteHelpers(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine("sqlite://")
+        models.Base.metadata.create_all(self.engine)
+        self.db = sessionmaker(bind=self.engine)()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _bucket(self, kst_dt, close):
+        self.db.add(SourceHourlyRate(
+            source="bithumb", asset="usdt-krw", bucket_ts_kst=kst_dt,
+            rate=Decimal(str(close)), close=Decimal(str(close)),
+            high=Decimal(str(close)), low=Decimal(str(close)),
+            ohlc_quality="observed_rollup", close_basis="bithumb_observed_hourly",
+            source_method="observed_rollup"))
+
+    def test_retention_cutoff_kst(self):
+        # now 14:30 → floor 14:00 - 14d = 2026-05-25 14:00
+        self.assertEqual(A.retention_cutoff_kst(datetime(2026, 6, 8, 14, 30), 14),
+                         datetime(2026, 5, 25, 14, 0))
+
+    def test_prune_old_buckets(self):
+        self._bucket(datetime(2026, 5, 20, 0, 0), 1400.0)   # < cutoff → prune
+        self._bucket(datetime(2026, 5, 25, 14, 0), 1450.0)  # == cutoff → 유지 (< 아님)
+        self._bucket(datetime(2026, 6, 8, 13, 0), 1500.0)   # > cutoff → 유지
+        self.db.commit()
+        deleted = A.prune_old_buckets(self.db, datetime(2026, 5, 25, 14, 0))
+        self.assertEqual(deleted, 1)
+        self.assertEqual(self.db.query(SourceHourlyRate).count(), 2)
+
+    def test_fetch_candidates_excludes_current_hour(self):
+        # KST 13:30(bucket 13:00) + 14:30(현재 incomplete) — now 14:30 → 직전 완료 13:00만
+        self.db.add(SourceRate(source="bithumb", asset="usdt-krw", rate=1510.0,
+                               timestamp=datetime(2026, 6, 8, 4, 30)))   # KST 13:30
+        self.db.add(SourceRate(source="bithumb", asset="usdt-krw", rate=1520.0,
+                               timestamp=datetime(2026, 6, 8, 5, 30)))   # KST 14:30 (현재 hour)
+        self.db.commit()
+        window_start, prev_complete, candidates = A._fetch_candidates(
+            self.db, datetime(2026, 6, 8, 14, 30), 2)
+        self.assertEqual(prev_complete, datetime(2026, 6, 8, 13, 0))
+        self.assertEqual(len(candidates), 1)                  # 14:00 제외
+        self.assertEqual(candidates[0]["bucket_ts_kst"], datetime(2026, 6, 8, 13, 0))
+
+
 class TestCli(unittest.TestCase):
     def test_window_days_guard(self):
         import subprocess
