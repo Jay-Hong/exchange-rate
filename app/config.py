@@ -128,6 +128,16 @@ KRX_REST_FALLBACK_ENABLED = os.getenv("KRX_REST_FALLBACK_ENABLED", "false").lowe
 # (PR6d-2) 후 조정. CM 저거래량 별도 임계값(KRX_STALE_SEC_CM)은 baseline 후 결정.
 KRX_STALE_SEC = int(os.getenv("KRX_STALE_SEC", "60"))
 
+# Fix (2026-06-10, silent-session reconnect): data frame 침묵이 이 임계를 넘으면
+# WS 연결을 능동 재수립 (_KrxSilentSessionError raise → 기존 reconnect backoff 경로).
+# KRX_STALE_SEC(60s)는 라벨 + REST fallback 평가 신호로 유지, 본 임계는 reconnect
+# "액션" 임계 — 2단 분리. 6/9 사고: CF 15:04 silent stall (PINGPONG으로 TCP 유지,
+# data frame 0) 40분 고착 → reconnect_attempts=0 → 15:45 종가 누락.
+# default 150s 근거: 정상 세션 max_total_gap 실측 ~34s (체결+호가 합산, CF/CM
+# 2026-06-09~10) → ~4.4× 마진. 호가 frame도 _last_tick_at 갱신하므로 정상 장중/
+# 단일가/pre-open(08:30 실측 호가 즉시 흐름)에는 미발화.
+KRX_SILENT_RECONNECT_SEC = int(os.getenv("KRX_SILENT_RECONNECT_SEC", "150"))
+
 # PR6d-1: REST 호출 cooldown (초). status 복귀 cooldown 아님 — REST 호출 중복
 # 방지용 (stale 지속 중에는 cooldown마다 1회). status 복귀는 frame 1건 즉시.
 KRX_REST_COOLDOWN_SEC = int(os.getenv("KRX_REST_COOLDOWN_SEC", "30"))
@@ -156,6 +166,13 @@ if KRX_REST_FALLBACK_STALE_SEC < KRX_STALE_SEC:
         f"KRX_REST_FALLBACK_STALE_SEC ({KRX_REST_FALLBACK_STALE_SEC}) must be >= "
         f"KRX_STALE_SEC ({KRX_STALE_SEC}). fallback 임계가 status 전이 임계보다 "
         "작으면 의미 모순 — status가 stale로 전이되기 전에 fallback eligible 판정."
+    )
+
+if KRX_SILENT_RECONNECT_SEC <= KRX_STALE_SEC:
+    raise ValueError(
+        f"KRX_SILENT_RECONNECT_SEC ({KRX_SILENT_RECONNECT_SEC}) must be > "
+        f"KRX_STALE_SEC ({KRX_STALE_SEC}). reconnect 액션 임계가 stale 라벨 임계보다 "
+        "작거나 같으면 의미 모순 — stale 가시화/REST 평가 전에 연결을 끊어버린다."
     )
 
 if KRX_REST_FALLBACK_SESSION_END_GRACE_MIN < 0:

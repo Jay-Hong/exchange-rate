@@ -121,6 +121,11 @@ RECONNECT_BACKOFF_TAIL = 30
 # stale 전환 임계 — default 60s, env로 조정 가능 (PR6d-1).
 STALE_AFTER_SEC = config.KRX_STALE_SEC
 
+# Fix (2026-06-10, silent-session reconnect) — data frame 침묵이 이 임계를 넘으면
+# recv loop가 _KrxSilentSessionError를 raise해 기존 reconnect backoff 경로로 탈출.
+# STALE_AFTER_SEC(라벨/REST 평가)와 분리된 "액션" 임계. config 가드: > KRX_STALE_SEC.
+SILENT_RECONNECT_SEC = config.KRX_SILENT_RECONNECT_SEC
+
 
 # ---------------------------------------------------------------------------
 # Normalized payload (PR6a 출력)
@@ -520,6 +525,17 @@ async def fetch_kis_futures_quote(
 # ---------------------------------------------------------------------------
 
 TickHandler = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+class _KrxSilentSessionError(Exception):
+    """silent WS session (data frame 정지인데 ConnectionClosed 미발생) 감지 시
+    reconnect loop로 탈출시키는 내부 신호. _run_session의 `except Exception`
+    경로가 잡아 backoff + 재접속 (Gopax `_SilentSessionError` 패턴 이식).
+
+    6/9 사고의 직접 대응: CF 15:04 silent stall — KIS가 data frame을 멈췄지만
+    PINGPONG으로 TCP는 유지 → recv timeout은 continue만, stale은 라벨만 →
+    예외 없음 → reconnect_attempts=0으로 40분 고착 → 15:45 종가 누락.
+    """
 
 
 class KrxLivenessMonitor:
@@ -1385,6 +1401,35 @@ class KisFuturesClient:
                 # 기존 `client._evaluate_rest_fallback` patch.object 테스트 호환).
                 self._evaluate_rest_fallback(time.time())
 
+    def _check_silent_session(
+        self, *, now_epoch: float, now_kst: datetime, session: str
+    ) -> None:
+        """Fix (2026-06-10): silent-session reconnect 판정 — recv loop에서 호출.
+
+        data frame 침묵(_last_tick_at 기준)이 SILENT_RECONNECT_SEC 초과 지속이면
+        _KrxSilentSessionError raise → _run_session의 except Exception이 잡아
+        backoff + 재접속. PINGPONG/system frame은 _last_tick_at을 갱신하지 않으므로
+        (observe_tick은 _dispatch_tick 한정) "TCP 살아있는데 data만 죽은" 세션도 감지.
+
+        close grace window(boundary 직후 60s, KRX_CLOSE_FINALIZER_ENABLED 시) 중에는
+        skip — 건강한데 조용한 연결이면 close frame capture 기회 보호, 죽은 연결이면
+        어차피 frame 없고 grace 종료 후 boundary exit가 정상 처리. recv loop의
+        boundary grace 분기(connect loop 상단)와 동일 조건으로 대칭.
+        """
+        if not self._last_tick_at:
+            return
+        silence = now_epoch - self._last_tick_at
+        if silence <= SILENT_RECONNECT_SEC:
+            return
+        if config.KRX_CLOSE_FINALIZER_ENABLED and is_in_close_grace_window(
+            now_kst, session
+        ):
+            return
+        raise _KrxSilentSessionError(
+            f"data silent {silence:.0f}s > {SILENT_RECONNECT_SEC}s "
+            f"(session={session}, last_tick_at={self._epoch_to_kst_iso(self._last_tick_at)})"
+        )
+
     async def _connect_and_listen(self, session: str, approval_key: str) -> None:
         """WebSocket 연결 + subscribe + recv loop. 예외 시 caller가 reconnect."""
         async with websockets.connect(
@@ -1437,6 +1482,12 @@ class KisFuturesClient:
                     and time.time() - self._last_tick_at > STALE_AFTER_SEC
                 ):
                     self._set_status("stale")
+
+                # Fix (2026-06-10, silent-session reconnect) — data 침묵이
+                # SILENT_RECONNECT_SEC 초과 지속 시 raise → reconnect 경로 탈출.
+                self._check_silent_session(
+                    now_epoch=time.time(), now_kst=now, session=session
+                )
 
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=5)

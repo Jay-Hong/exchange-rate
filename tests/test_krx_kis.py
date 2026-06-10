@@ -20,6 +20,7 @@ from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app import config
 from app.crawlers.krx_kis import (
     ACCESS_TOKEN_REFRESH_MARGIN_SEC,
     APPROVAL_REFRESH_MARGIN_SEC,
@@ -37,8 +38,10 @@ from app.crawlers.krx_kis import (
     RECONNECT_BACKOFF_SEQ,
     RECONNECT_BACKOFF_TAIL,
     SESSION_TR_MAP,
+    SILENT_RECONNECT_SEC,
     STALE_AFTER_SEC,
     TR_KEY_STATIC,
+    _KrxSilentSessionError,
     fetch_kis_futures_quote,
     make_normalized_payload,
 )
@@ -1770,6 +1773,135 @@ class TestActiveSessionGapMetricReset(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client._liveness.frame_count_total, 100)
         # active_session도 None으로 정리됨
         self.assertIsNone(self.client._active_session)
+
+
+# ---------------------------------------------------------------------------
+# Fix (2026-06-10) — silent-session reconnect (_check_silent_session)
+# 6/9 사고 회귀 잠금: data frame 침묵 + PINGPONG TCP 유지 → reconnect 0 고착
+# ---------------------------------------------------------------------------
+
+class TestCheckSilentSession(unittest.TestCase):
+    """_check_silent_session 판정 단위 — raise/skip 경계."""
+
+    def setUp(self):
+        self.client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager)
+        )
+        # 장중 (CF, close grace 아님)
+        self.intraday_kst = datetime(2026, 6, 10, 11, 0, 0)
+
+    def test_constants_invariant(self):
+        # default 150s + stale 라벨 임계(60s)보다 큼 (config 가드와 동일 invariant)
+        self.assertEqual(SILENT_RECONNECT_SEC, 150)
+        self.assertGreater(SILENT_RECONNECT_SEC, STALE_AFTER_SEC)
+
+    def test_no_last_tick_no_raise(self):
+        self.client._last_tick_at = None
+        self.client._check_silent_session(
+            now_epoch=time.time(), now_kst=self.intraday_kst, session="CF"
+        )
+
+    def test_fresh_tick_no_raise(self):
+        now = time.time()
+        self.client._last_tick_at = now - 5
+        self.client._check_silent_session(
+            now_epoch=now, now_kst=self.intraday_kst, session="CF"
+        )
+
+    def test_stale_label_range_no_raise(self):
+        # 60s(stale 라벨) 초과 ~ 150s 이하: 라벨만, reconnect 액션 없음 (2단 분리)
+        now = time.time()
+        self.client._last_tick_at = now - (STALE_AFTER_SEC + 10)
+        self.client._check_silent_session(
+            now_epoch=now, now_kst=self.intraday_kst, session="CF"
+        )
+
+    def test_exactly_threshold_no_raise(self):
+        # 경계값: silence == SILENT_RECONNECT_SEC는 raise 안 함 (strict >)
+        now = time.time()
+        self.client._last_tick_at = now - SILENT_RECONNECT_SEC
+        self.client._check_silent_session(
+            now_epoch=now, now_kst=self.intraday_kst, session="CF"
+        )
+
+    def test_silent_over_threshold_raises(self):
+        now = time.time()
+        self.client._last_tick_at = now - (SILENT_RECONNECT_SEC + 1)
+        with self.assertRaises(_KrxSilentSessionError):
+            self.client._check_silent_session(
+                now_epoch=now, now_kst=self.intraday_kst, session="CF"
+            )
+
+    def test_system_frame_does_not_refresh_last_tick(self):
+        # 6/9 사고 핵심: PINGPONG/system frame은 data freshness가 아님 —
+        # _handle_frame system 경로는 observe_tick 미호출 → _last_tick_at 불변.
+        self.client._last_tick_at = 12345.0
+        raw = json.dumps({"header": {"tr_id": "PINGPONG"}, "body": {}})
+        asyncio.run(self.client._handle_frame(raw, "CF"))
+        self.assertEqual(self.client._last_tick_at, 12345.0)
+
+    def test_close_grace_window_skips_raise(self):
+        # CF close grace (15:45:00~15:45:59) — silent여도 skip (close capture 보호)
+        now = time.time()
+        self.client._last_tick_at = now - (SILENT_RECONNECT_SEC + 100)
+        grace_kst = datetime(2026, 6, 10, 15, 45, 30)
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", True):
+            self.client._check_silent_session(
+                now_epoch=now, now_kst=grace_kst, session="CF"
+            )
+
+    def test_close_grace_finalizer_disabled_raises(self):
+        # finalizer off면 grace 의미 없음 — boundary 분기와 대칭으로 raise
+        now = time.time()
+        self.client._last_tick_at = now - (SILENT_RECONNECT_SEC + 100)
+        grace_kst = datetime(2026, 6, 10, 15, 45, 30)
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False):
+            with self.assertRaises(_KrxSilentSessionError):
+                self.client._check_silent_session(
+                    now_epoch=now, now_kst=grace_kst, session="CF"
+                )
+
+    def test_after_grace_window_raises(self):
+        # grace 종료(15:46:00+) 후 helper 판정은 raise로 복귀 — helper-level 경계
+        # 잠금. (실제 recv loop에선 boundary return이 silent check보다 먼저라
+        # 이 시각엔 보통 도달하지 않음 — Codex 검토 관찰 반영)
+        now = time.time()
+        self.client._last_tick_at = now - (SILENT_RECONNECT_SEC + 100)
+        after_grace_kst = datetime(2026, 6, 10, 15, 46, 30)
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", True):
+            with self.assertRaises(_KrxSilentSessionError):
+                self.client._check_silent_session(
+                    now_epoch=now, now_kst=after_grace_kst, session="CF"
+                )
+
+
+class TestRunSessionSilentReconnect(unittest.IsolatedAsyncioTestCase):
+    """_run_session이 _KrxSilentSessionError를 기존 reconnect 경로로 처리."""
+
+    async def test_silent_error_triggers_backoff_reconnect(self):
+        client = KisFuturesClient(
+            approval_manager=MagicMock(spec=KisApprovalManager)
+        )
+        client._approval.get_approval_key = AsyncMock(return_value="key")
+        calls = {"n": 0}
+
+        async def fake_connect(session, approval_key):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _KrxSilentSessionError("data silent 151s (test)")
+            client._stop.set()  # 2번째 연결(재접속) 진입 확인 후 종료
+
+        client._connect_and_listen = fake_connect
+        with patch("app.crawlers.krx_kis.get_active_session", return_value="CF"):
+            await asyncio.wait_for(client._run_session("CF"), timeout=10)
+
+        # 예외 1회 → reconnect attempt 1 증가 + backoff 후 재접속 진입 (총 2회 호출)
+        self.assertEqual(client._reconnect_attempt_count, 1)
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(
+            client._status_transition_count["reconnecting"], 1,
+            "silent raise 후 status reconnecting 전이 1회",
+        )
 
 
 if __name__ == "__main__":
