@@ -295,18 +295,10 @@ if KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS <= 0:
 # 활성화 순서: EC2 배포(gate off 동작 확인) → env 토글 → 다음 CF close canary 관찰.
 KRX_DAILY_APPEND_ENABLED = os.getenv("KRX_DAILY_APPEND_ENABLED", "false").lower() == "true"
 
-# KRX_HOURLY_APPEND_ENABLED: ADR-035 D3 Phase 2d KRX hourly-append (source_hourly_rates) 토글.
-# default false — KRX CF close finalizer in-process hook(append_krx_cf_hourly_rows)을 배포와 분리해
-# 활성화하기 위함. KRX_DAILY_APPEND_ENABLED와 동형 ("배포 ≠ 동작 변화"):
-#   - false: KrxCloseWindowWriter._sync_write의 CF daily-append tail 직후 hourly-append 미실행
-#            (daily append만 동작 — hourly hook이 close finalizer 기존 흐름에 영향 0)
-#   - true: CF 정규장 daily row append(commit) 직후 그 날 CF hourly bucket을 source_hourly_rates에
-#           append (격리된 best-effort tail, daily append와 별 transaction).
-# hourly hook은 daily가 commit한 daily row에서 contract_code를 재사용하므로 **daily append 이후**에만
-# 실행 (cron 아닌 in-process hook인 이유 — daily row 존재가 contract resolve 전제). daily action이
-# HARD(daily row 미생성)면 hourly skip.
-# 활성화 순서: EC2 배포(gate off 동작 확인) → env 토글 → 다음 CF close canary 관찰.
-KRX_HOURLY_APPEND_ENABLED = os.getenv("KRX_HOURLY_APPEND_ENABLED", "false").lower() == "true"
+# NOTE(2026-06-10, ADR-035 D3): KRX_HOURLY_APPEND_ENABLED env + in-process hourly hook은
+# 제거됨. KRX hourly는 cron append(scripts/hourly_append_krx_source_hourly_rates.py — 월물
+# 제거 + CF/CM 통합 + 일봉 의존 절단)로 재설계되어 다른 hourly source(Bithumb/Investing/Hana)와
+# 동일한 OS cron(:11) self-maintaining 구조로 전환. daily append(KRX_DAILY_APPEND_ENABLED, 위)만 유지.
 
 # KRX_REDIS_TICK_WRITE_ENABLED: KRX Stage E — Redis latest write timing 변경 토글
 # (KRX_FANOUT_REFACTOR_PLAN.md §5.2 E).

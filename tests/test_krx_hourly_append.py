@@ -284,6 +284,46 @@ class TestWriteIntegration(_DbCase):
                  .filter(SourceHourlyRate.source == "krx").count())
         self.assertEqual(count, 1)
 
+    def test_trip_wire_old_contract_row_fails_closed(self):
+        """④ 재구축 'delete 깜빡' 안전망 영구 회귀 — 구 contract 보유 row 위에 신
+        write(allow_contract_code=False) 시 H.upsert null-보존(contract 유지) ×
+        post-write 검증(d, 'contract NOT None → issue') → fail-close + rollback +
+        구 row 원형 보존. 2026-06-10 ⑥에서 삭제된 test_krx_source_hourly_rates.py의
+        True-arm 커버 대신, 더 중요한 False-arm rejection(모든 caller live 경로)을 잠근다.
+        """
+        from decimal import Decimal
+        # 구 hook 스타일 row (contract=A75606 + session metadata) — delete 누락 시뮬
+        self.db.add(SourceHourlyRate(
+            source="krx", asset="usd-krw-futures",
+            bucket_ts_kst=datetime(2026, 6, 10, 13, 0),
+            rate=Decimal("1520.0"), close=Decimal("1520.0"),
+            high=Decimal("1522.0"), low=Decimal("1519.0"),
+            ohlc_quality="observed_rollup", close_basis="krx_observed_hourly",
+            source_method="observed_rollup", contract_code="A75606",
+            metadata_json={"session": "CF", "point_count": 99}))
+        self.db.commit()
+        # 신 candidate (같은 bucket, contract None)
+        self._tick(datetime(2026, 6, 10, 4, 30), 1521.0)   # KST 13:30 → bucket 13:00
+        self.db.commit()
+        _, _, candidates = K._fetch_candidates(
+            self.db, datetime(2026, 6, 10, 14, 30), window_days=2)
+
+        with patch("app.database.SessionLocal", self.Session):
+            success, issues, outcome = B.write_with_transaction(
+                candidates, require_empty=False,
+                source=K.SOURCE, asset=K.ASSET, close_basis=K.CLOSE_BASIS,
+                source_method=K.SOURCE_METHOD, ohlc_quality=K.OHLC_QUALITY,
+            )
+        self.assertFalse(success)
+        self.assertTrue(any("contract_code NOT None" in i for i in issues),
+                        f"issues: {issues}")
+        # rollback — 구 row 원형 보존 (contract/close/metadata 불변)
+        self.db.expire_all()
+        r = self.db.query(SourceHourlyRate).filter(SourceHourlyRate.source == "krx").one()
+        self.assertEqual(r.contract_code, "A75606")
+        self.assertEqual(float(r.close), 1520.0)
+        self.assertEqual(r.metadata_json, {"session": "CF", "point_count": 99})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

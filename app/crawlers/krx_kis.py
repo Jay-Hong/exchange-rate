@@ -2344,20 +2344,20 @@ class KrxCloseWindowWriter:
                 logger.exception(
                     "[krx_close_window] tether topic trigger failed (격리)"
                 )
-            # KRX daily-append (Unit 4b/4c) — CF 정규장 종가만, best-effort tail.
+            # KRX daily-append (Unit 4b/4c) — CF 정규장 종가만 source_daily_rates에 append.
             # source_rates+Redis+flag 성공 후 호출. 실패는 전부 격리 (finalizer return True/흐름 영향 0).
             # CM(야간장 06:00)은 daily canonical close 아님 → 미append (그 시점 CF session 미발생).
             # Unit 4c gate: KRX_DAILY_APPEND_ENABLED(default false)일 때만 — 배포 ≠ 동작 변화.
             #   함수-레벨 config 참조 (test patch.object 호환; 운영 env 변경은 프로세스 재시작/재배포 필요).
+            # NOTE(2026-06-10, ADR-035 D3): KRX hourly는 cron append
+            #   (scripts/hourly_append_krx_source_hourly_rates.py — 월물 제거 + CF/CM 통합)로
+            #   재설계되어 in-process hourly hook은 제거됨. daily append만 finalizer tail로 유지.
             if session == "CF":
                 from app import config as _config
                 from app.source_daily_rates import (
                     KRX_APPEND_HARD,
-                    KRX_APPEND_INSERT,
-                    KRX_APPEND_SKIP,
                     append_krx_cf_daily_row,
                 )
-                daily_action = None   # daily-append action 캡처 (hourly hook gate용)
                 if _config.KRX_DAILY_APPEND_ENABLED:
                     try:
                         contract_code = tick.get("contract_code")
@@ -2376,32 +2376,6 @@ class KrxCloseWindowWriter:
                     except Exception:
                         logger.warning(
                             "[krx_cf_append] daily-append 실패 (격리, finalizer 영향 없음)",
-                            exc_info=True,
-                        )
-                        daily_action = None   # 예외 시 hourly hook 미실행 (daily row 보장 X)
-
-                # KRX hourly-append (ADR-035 D3) — daily append 직후 best-effort tail.
-                # daily가 commit한 daily row에서 contract_code를 재사용하므로 **daily append 이후**에만 실행.
-                #   - daily INSERT/SKIP: daily row 존재 → hourly contract resolvable → hourly run
-                #   - daily HARD(미생성)/예외(None): daily row 보장 X → hourly skip (contract 미resolve 차단)
-                # KRX_HOURLY_APPEND_ENABLED(default false) gate — daily와 독립 토글 ("배포 ≠ 동작 변화").
-                # 실패는 전부 격리 (daily append와 동일 패턴 — finalizer return True/흐름 영향 0).
-                if (_config.KRX_HOURLY_APPEND_ENABLED
-                        and daily_action in (KRX_APPEND_INSERT, KRX_APPEND_SKIP)):
-                    try:
-                        from app.krx_hourly import append_krx_cf_hourly_rows
-                        with get_db_context() as db_hourly:
-                            hourly_counts = append_krx_cf_hourly_rows(
-                                db_hourly, event_at_kst.date(),
-                            )
-                        logger.info(
-                            "[krx_hourly_append] date=%s inserted=%d updated=%d pruned=%d buckets=%d",
-                            kst_date_iso, hourly_counts["inserted"], hourly_counts["updated"],
-                            hourly_counts["pruned"], hourly_counts["buckets"],
-                        )
-                    except Exception:
-                        logger.warning(
-                            "[krx_hourly_append] hourly-append 실패 (격리, finalizer 영향 없음)",
                             exc_info=True,
                         )
             return True
@@ -2917,7 +2891,8 @@ class KrxCloseSnapshotController:
             # captured flag는 SET 안 함 (flag = "WS captured" 의미 보존 — 소비자는
             # _retry_sequence entry/during-wait GET뿐이고 finalizer 경로는 단일
             # 시도라 기능 효과 0, rest_write_saved 이벤트로 가시성 충분).
-            # hourly chain 없음 — hook OFF + 재설계(cron) 예정.
+            # hourly chain 없음 — KRX hourly는 별도 cron append로 재설계됨
+            # (scripts/hourly_append_krx_source_hourly_rates.py, ADR-035 D3 2026-06-10).
             if session == "CF" and config.KRX_DAILY_APPEND_ENABLED:
                 try:
                     from app.source_daily_rates import (
