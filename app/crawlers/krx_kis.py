@@ -2509,6 +2509,11 @@ class KrxCloseSnapshotController:
             # KRX_CLOSE_REST_WRITE_ENABLED=false 분기 — REST 호출/sanity는 진행,
             # DB/Redis write만 차단 후 short-circuit. case A/B/C telemetry 보존.
             "rest_write_blocked": 0,
+            # 2026-06-10 #4 gate chain (flag 무관 shadow 평가) — reject 사유별 counter.
+            # Stage C `rest_guard_rejected_{reason}` 패턴 mirror.
+            "rest_write_gate_rejected_calendar": 0,
+            "rest_write_gate_rejected_contract": 0,
+            "rest_write_gate_rejected_session_evidence": 0,
         }
 
     def schedule_close_snapshot(
@@ -2681,6 +2686,72 @@ class KrxCloseSnapshotController:
             len(delays), session, contract.short_code,
         )
 
+    def _evaluate_close_write_gates(
+        self,
+        *,
+        result: Dict[str, Any],
+        contract: ContractInfo,
+        boundary_at_kst: datetime,
+        last: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """2026-06-10 #4 — close REST write gate chain 판정 (pure, DB touch 없음).
+
+        flag(KRX_CLOSE_REST_WRITE_ENABLED)와 무관하게 항상 평가 (shadow) —
+        verdict는 호출자(_sync_write)가 counter/event로 기록하고, write 허용은
+        flag=true AND verdict None일 때만.
+
+        gate 1 calendar: boundary date가 KRX 거래일 (Stage C guard gate 1 mirror).
+        gate 2 contract identity: REST 응답 월물/만기 == 캡처 contract + 만기 미경과
+            (Stage C guard gate 2 mirror — 5/18 rollover stale 차단, fail-closed).
+        gate 3 session evidence: 우리 WS의 마지막 tick(last)이 boundary −
+            KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS 이내 — 자기 데이터로 "오늘
+            세션이 실제 거래했다" 증명. 캘린더 라이브러리 미등록 휴장(5/25 모드
+            본질)까지 차단. last=None / timestamp 파싱 불가도 reject (fail-closed —
+            구 sanity-skip 구멍 동시 폐쇄).
+        (price sanity ±2%는 기존 _sync_write 분기 유지 — 본 함수 범위 밖.)
+
+        Args:
+            result: fetch_kis_futures_quote 반환 dict (resp_* 응답 원본 필드 포함).
+            contract: boundary 시점 캡처된 ContractInfo.
+            boundary_at_kst: close boundary (KST aware).
+            last: crud.get_latest_source_rate 결과 (timestamp는 KST ISO 문자열) 또는 None.
+
+        Returns:
+            None — 전 gate 통과 (write 후보).
+            "calendar" / "contract" / "session_evidence" — 해당 gate에서 reject.
+        """
+        boundary_date = boundary_at_kst.astimezone(KST).date()
+
+        # gate 1: calendar
+        if not is_krx_business_day(boundary_date):
+            return "calendar"
+
+        # gate 2: contract identity (Stage C _evaluate_rest_guard gate 2 mirror)
+        if contract.expiry_date < boundary_date:
+            return "contract"
+        resp_month = _extract_contract_month(result.get("resp_hts_kor_isnm") or "")
+        if resp_month != contract.contract_month:
+            return "contract"
+        if result.get("resp_futs_last_tr_date") != contract.expiry_date.strftime("%Y%m%d"):
+            return "contract"
+
+        # gate 3: session evidence (last WS tick recency)
+        if last is None:
+            return "session_evidence"
+        try:
+            last_ts = datetime.fromisoformat(str(last.get("timestamp")))
+        except (TypeError, ValueError):
+            return "session_evidence"
+        if last_ts.tzinfo is None:
+            # to_kst_isoformat은 aware(+09:00)가 정상 — naive면 KST로 간주
+            last_ts = last_ts.replace(tzinfo=KST)
+        age_sec = (boundary_at_kst - last_ts).total_seconds()
+        # 경계: age == 임계는 pass (strict >). 미래 timestamp(late tick)는 음수 age → pass.
+        if age_sec > config.KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS * 3600:
+            return "session_evidence"
+
+        return None
+
     async def _attempt_once(
         self,
         *,
@@ -2756,7 +2827,13 @@ class KrxCloseSnapshotController:
         source = result.get("source", "krx")
         asset = result.get("asset", "usd-krw-futures")
 
+        # 2026-06-10 #4 Finding 2 — "success" INFO를 실제 saved 경로로 한정하기 위한
+        # closure flag. gate-rejected/blocked terminal(return True)은 각자 분기에서
+        # 이미 로그 — tail의 success 로그 중복 방지 (counter/return 의미는 불변).
+        write_saved = False
+
         def _sync_write() -> bool:
+            nonlocal write_saved
             with get_db_context() as db:
                 last = crud.get_latest_source_rate(db, source, asset)
                 if last is not None:
@@ -2773,19 +2850,38 @@ class KrxCloseSnapshotController:
                             _emit("rest_sanity_aborted", rate=rest_rate,
                                   extra={"last_rate": last_rate, "diff_pct": round(diff_pct * 100, 2)})
                             return False
-                # KRX_CLOSE_REST_WRITE_ENABLED=false: REST stale risk 차단
-                # (2026-05-25 휴장일 stale 사고 대응). REST fetch + sanity는 통과
-                # 했지만 DB/Redis write는 차단하고 retry short-circuit (같은 stale
-                # 값 3회 확인 무의미). finalizer enabled 여부와 무관.
+                # 2026-06-10 #4 — gate chain shadow 평가: flag와 무관하게 항상 판정.
+                # reject는 deterministic(calendar/contract/recency — 수초 간 retry로
+                # 안 바뀜)이라 True short-circuit (blocked와 동일 의미).
+                gate_verdict = self._evaluate_close_write_gates(
+                    result=result, contract=contract,
+                    boundary_at_kst=boundary_at_kst, last=last,
+                )
+                if gate_verdict is not None:
+                    self.counters[f"rest_write_gate_rejected_{gate_verdict}"] += 1
+                    logger.warning(
+                        "[krx_close_snapshot] REST write gate REJECTED reason=%s "
+                        "session=%s rate=%.1f boundary=%s (flag=%s)",
+                        gate_verdict, session, rest_rate,
+                        boundary_at_kst.isoformat(),
+                        config.KRX_CLOSE_REST_WRITE_ENABLED,
+                    )
+                    _emit("rest_write_gate_rejected", rate=rest_rate,
+                          extra={"reason": gate_verdict})
+                    return True  # short-circuit retry loop
+                # KRX_CLOSE_REST_WRITE_ENABLED=false: write 차단 (2026-05-25 사고
+                # 정책의 kill-switch 잔존). 2026-06-10부터 gate 통과 verdict가
+                # extra로 남음 (shadow 증거 — WS-miss 날에만 쌓이는 게 정상).
                 if not config.KRX_CLOSE_REST_WRITE_ENABLED:
                     self.counters["rest_write_blocked"] += 1
                     logger.info(
                         "[krx_close_snapshot] REST write blocked by flag "
-                        "(KRX_CLOSE_REST_WRITE_ENABLED=false) "
+                        "(KRX_CLOSE_REST_WRITE_ENABLED=false, gates=passed) "
                         "session=%s rate=%.1f boundary=%s",
                         session, rest_rate, boundary_at_kst.isoformat(),
                     )
-                    _emit("rest_write_blocked", rate=rest_rate)
+                    _emit("rest_write_blocked", rate=rest_rate,
+                          extra={"gates": "passed"})
                     return True  # short-circuit retry loop
                 # boundary timestamp — DB UTC naive / Redis KST ISO
                 boundary_utc_naive = boundary_at_kst.astimezone(
@@ -2806,12 +2902,53 @@ class KrxCloseSnapshotController:
                     timestamp=boundary_at_kst.isoformat(),
                 )
                 if bool(redis_ok):
+                    write_saved = True
                     _emit("rest_write_saved", rate=rest_rate)
                 else:
                     # 정상 path return False (예외 X) — terminal event 보존
                     _emit("rest_write_failed", rate=rest_rate,
                           extra={"reason": "redis_set_failed"})
-                return bool(redis_ok)
+                    return False
+
+            # 2026-06-10 #4 (a안) — REST-origin daily append tail (WS 경로
+            # KrxCloseWindowWriter._sync_write tail mirror). gate 통과 + write 성공
+            # 후에만. CF 한정 (CM 06:00은 daily canonical close 아님). 독립 db
+            # context — append rollback이 close write에 영향 없도록 격리.
+            # captured flag는 SET 안 함 (flag = "WS captured" 의미 보존 — 소비자는
+            # _retry_sequence entry/during-wait GET뿐이고 finalizer 경로는 단일
+            # 시도라 기능 효과 0, rest_write_saved 이벤트로 가시성 충분).
+            # hourly chain 없음 — hook OFF + 재설계(cron) 예정.
+            if session == "CF" and config.KRX_DAILY_APPEND_ENABLED:
+                try:
+                    from app.source_daily_rates import (
+                        KRX_APPEND_HARD,
+                        append_krx_cf_daily_row,
+                    )
+                    append_date = boundary_at_kst.astimezone(KST).date()
+                    with get_db_context() as db_append:
+                        daily_action, daily_reason = append_krx_cf_daily_row(
+                            db_append, append_date, rest_rate, contract.short_code,
+                            metadata_extra={"origin": "rest_close_write"},
+                        )
+                    log_fn = (
+                        logger.warning if daily_action == KRX_APPEND_HARD
+                        else logger.info
+                    )
+                    log_fn(
+                        "[krx_cf_append] %s date=%s contract=%s close=%.1f — %s "
+                        "(origin=rest_close_write)",
+                        daily_action, append_date.isoformat(),
+                        contract.short_code, rest_rate, daily_reason,
+                    )
+                    _emit("rest_daily_append", rate=rest_rate,
+                          extra={"action": daily_action, "reason": daily_reason})
+                except Exception:
+                    logger.warning(
+                        "[krx_cf_append] REST-origin daily-append 실패 "
+                        "(격리, close write 영향 없음)",
+                        exc_info=True,
+                    )
+            return True
 
         try:
             ok = await asyncio.to_thread(_sync_write)
@@ -2820,14 +2957,17 @@ class KrxCloseSnapshotController:
             _emit("rest_write_failed", rate=rest_rate)
             return False
 
-        if ok:
+        if ok and write_saved:
+            # Finding 2 (2026-06-10 #4): success 로그는 실제 saved 경로만.
+            # gate-rejected/blocked terminal(ok=True, saved=False)은 각자 분기에서
+            # 이미 REJECTED WARNING / blocked INFO 기록 — "reject 직후 success" 오독 방지.
             logger.info(
                 "[krx_close_snapshot] success session=%s contract=%s rate=%.1f "
                 "boundary=%s attempt=%d",
                 session, contract.short_code, rest_rate,
                 boundary_at_kst.isoformat(), attempt,
             )
-        else:
+        elif not ok:
             self.counters["sanity_aborted"] += 1
         return ok
 

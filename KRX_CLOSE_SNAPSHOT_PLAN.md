@@ -508,6 +508,9 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 
 > 📅 **작성일**: 2026-05-25 (사고 당일 4단계 대응 완료)
 > 🏷️ **상태**: 운영 land 완료 (`170380f` hotfix + `6a43785` 정책 PR)
+> ⚠️ **Amendment 2026-06-10 (§5.7.8)**: 6/9 WS silent-stall 종가 누락 사고로 반대 방향
+> 실패 확인 — anchor (1)(2)(3) 부분 supersede, "무조건 차단" → **gate-checked write** 재설계.
+> anchor (4)(5)는 유지.
 
 #### 5.7.1 사고 요약
 
@@ -539,9 +542,13 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 
 #### 5.7.4 정책 anchor — 5 핵심 결정
 
-1. **KIS REST close snapshot은 더 이상 authoritative write source가 아니다.**
-2. **REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off** (`KRX_CLOSE_REST_WRITE_ENABLED=false`).
-3. **Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다** (§5.5 참조).
+> ⚠️ (1)(2)(3)은 **2026-06-10 §5.7.8 amendment로 부분 supersede** — REST close write는
+> "무조건 차단"에서 "gate-checked write"(검증 통과 시 authoritative fallback)로 재설계.
+> (4)(5)는 그대로 유지.
+
+1. ~~**KIS REST close snapshot은 더 이상 authoritative write source가 아니다.**~~ → (§5.7.8) gate 전부 통과 시 **gated authoritative fallback** (WS-first 불변 — WS captured 시 REST 자체 skip).
+2. ~~**REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off** (`KRX_CLOSE_REST_WRITE_ENABLED=false`)~~ → (§5.7.8) default false 유지하되 false 의미 = **shadow 평가 + 차단**, true 의미 = **gate-checked write** (구 "무가드 복원" 폐기).
+3. ~~**Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다**~~ → (§5.7.8) flag=true + gate 통과면 Case B가 실제 write가 됨. flag=false에서는 기존 해석 유지 (`rest_write_blocked` + gates=passed shadow 증거).
 4. **`KrxCloseWindowWriter`의 WS close frame write는 신뢰 경로로 유지한다** — 본 정책 PR 변경 없음.
 5. **Stage E는 close finalizer 정책과 직교 작업이다** ([KRX_FANOUT_REFACTOR_PLAN.md §5.2 E](KRX_FANOUT_REFACTOR_PLAN.md), KRX Redis tick-level + freshness metadata).
 
@@ -566,12 +573,89 @@ KRX_CLOSE_REST_WRITE_ENABLED=true
 docker compose up -d --force-recreate fastapi
 ```
 
-flag=true 시 기존 1차 PR retry 3회 + 2차 PR fallback 1회 write 동작 복원. 단 KIS REST stale 위험 동반 — 회귀 사고 가능성.
+~~flag=true 시 기존 1차 PR retry 3회 + 2차 PR fallback 1회 write 동작 복원. 단 KIS REST stale 위험 동반 — 회귀 사고 가능성.~~
+
+> ⚠️ **2026-06-10 §5.7.8 이후 의미 변경**: flag=true는 더 이상 "무가드 write 복원"이
+> 아니라 **gate-checked write** — gate(calendar/contract/session evidence) 전부 통과
+> 시에만 write. 5/25형 stale은 gate가 차단하므로 구 회귀 위험 없음. 완전 차단으로
+> 돌아가려면 flag=false (shadow 평가 + 차단) 유지.
 
 #### 5.7.7 다음 단계
 
 - 5/19~5/26 7일 telemetry 분석 시 신규 `rest_write_blocked` counter 결합해 case B 분포 측정. 자세한 분석 항목은 [DECISIONS.md ADR-027 follow-up](DECISIONS.md) + [KRX_CANARY.md §"2026-05-25 휴장일 사고 + 대응"](KRX_CANARY.md) 참조.
 - 다른 2026 한국 공휴일 (현충일 6/6 토 자연 회피 / 광복절 8/15 토 자연 회피 / 추석 9/24 목 9/25 금 / 개천절 10/3 토 자연 회피 / 한글날 10/9 금 / 크리스마스 12/25 금) — 별도 캘린더 보강 PR로 검증 후 추가.
+
+#### 5.7.8 Amendment 2026-06-10 — gate-checked REST close write 재설계 (#4)
+
+> 📅 **작성일**: 2026-06-10 · 🏷️ **상태**: 코드 land (default false = 배포 무변화),
+> env 활성화는 6/15 A75606 rollover 통과 후 별도 GO
+
+**배경 — 6/9 사고가 보여준 반대 방향 실패**: 6/9 KRX WS가 CF 15:04에 silent stall
+(reconnect_attempts=0, 별도 fix `87b51c3`) → 15:45 종가 frame 미수신 → REST fallback이
+정확한 종가(1514.7, 공식 종가와 일치 — 사용자 직접 확인)를 확보했으나 §5.7.4 anchor (2)의
+무조건 차단에 막혀 **일봉 누락**. 5/25(차단이 정답)와 6/9(write가 정답)는 동일 정책의
+양방향 실패 — "무조건"이 문제이지 차단/허용 자체가 문제가 아님.
+
+**재설계 — gate chain (fail-closed, 전부 통과 시에만 write)**
+(`KrxCloseSnapshotController._evaluate_close_write_gates`, krx_kis.py):
+
+| Gate | 내용 | 차단하는 사고 모드 |
+|---|---|---|
+| 1. calendar | `is_krx_business_day(boundary date)` | 5/25 (등록 휴장) — Stage C guard gate 1 mirror |
+| 2. contract identity | REST 응답 `resp_hts_kor_isnm` 월물 + `resp_futs_last_tr_date` 만기 == 캡처 contract + 만기 미경과 (fail-closed) | 5/18 rollover stale — Stage C guard gate 2 mirror |
+| 3. session evidence (신규) | 우리 WS의 마지막 tick(`get_latest_source_rate`)이 boundary − `KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS`(default 3h) 이내. last=None / timestamp 파싱 불가도 reject | **미등록 휴장(5/25 모드 본질)** — 자기 데이터로 "오늘 세션이 실제 거래했다" 증명. 구 last=None→sanity skip→write 구멍도 동시 폐쇄 |
+| (+) price sanity ±2% | 기존 유지 | 가격 이상치 |
+
+- **평가 순서 주의**: sanity → gate 1~3 → flag → write (기존 분기 보존 — sanity가 사실상
+  gate 0). 비대칭: sanity abort=False(legacy 모드 retry 진행) / gate reject=True(terminal
+  short-circuit — calendar/contract/recency는 수초 retry로 안 바뀜). stale+±2% 동시 이탈
+  날은 `rest_sanity_aborted`로 귀속되어 gate verdict가 안 남음 (telemetry 해석 시 참고).
+- **gate 3 검증**: 5/25 재현(last ts=5/23 06:00 KST — 5/22 야간 CM close, boundary
+  −2.4일)→reject ✓ / 6/9 재현(last 15:04, −41min)→pass ✓. gate 1이 hotfix로 5/25를
+  잡으므로 gate 3의 존재 가치는 "라이브러리 미등록 휴장" 케이스 (테스트 시뮬로 잠금).
+- **3h recency vs session-open-anchored 대안 비교** (결정: 3h 채택, env로 조정 가능):
+  - session-open-anchored("당일 세션 open 이후 tick 존재")가 휴장 판별 목적엔 더 정확하고
+    복구 범위도 넓음 (예: WS가 오전에 죽은 날의 정확한 REST 종가도 수용).
+  - 단 장중 거래정지(halt) edge에서 halt 가격을 종가로 쓰는 것까지 수용 — 확증 불가능한
+    값을 안 쓰는 fail-closed 원칙에 따라 보수적 3h recency로 시작.
+  - 한계: `source_rates`는 insert-if-changed라 가격 3h+ 정체 시 false-reject 가능
+    (WS-miss AND 정체 — 이중 희귀, fail-closed 수용). 3h+ 침묵 WS-miss 날은 reject →
+    next-day `krx_openapi_daily` 복구 경로 (6/10에 6/9 복구로 실증).
+
+**flag semantics 변경** (`KRX_CLOSE_REST_WRITE_ENABLED`, default false 유지):
+
+- **false = shadow 평가 + 차단**: gate verdict를 counter/event로만 기록
+  (`rest_write_gate_rejected_{calendar|contract|session_evidence}` 또는
+  `rest_write_blocked` + extra `gates=passed`). **주의**: finalizer 경로 REST는 WS-miss
+  날에만 실행 (정상일은 captured flag entry-skip — REST attempt 자체 0회) → shadow 샘플은
+  WS-miss 날에만 쌓이는 게 정상. "주간 데이터 축적" 기대 금지 — 가치는 "미래 WS-miss 날에
+  활성화 전이라도 gate 판정 증거가 자동으로 남는 것".
+- **true = gate-checked write**: gate 전부 통과 시에만 DB/Redis write. 구 "무가드 write
+  복원" 의미 폐기.
+
+**REST-origin daily append tail** (write 성공 시, WS 경로 KrxCloseWindowWriter tail mirror):
+
+- 조건: session==CF + `KRX_DAILY_APPEND_ENABLED` (CM 06:00은 daily canonical close 아님).
+  독립 db context (append rollback이 close write에 영향 없음, 예외 전부 격리).
+- provenance: `source_method=close_finalizer` 유지 + `metadata_json.origin=rest_close_write`
+  마커 (builder `metadata_extra` param — WS 경로 기본 None 불변).
+- **데이터 품질 caveat**: blackout 날 H/L은 rollup(관측 구간) ∪ {REST close} — 잃는 것은
+  "blackout 중 발생 AND close·관측 range 모두 벗어난 극값"뿐 (close clamp + 발동 시
+  `close_outside_rollup` 진단 metadata 영속). next-day OpenAPI writer는 gap-only라 이
+  row를 자동 교정하지 않음 → 영구 관측 품질. **escape hatch**: 해당 date row delete
+  선행 → openapi writer 재실행(gap-fill)으로 공식 OHLC 적재 — writer는 gap-only +
+  unique conflict ABORT라 delete 없이는 동작 안 함. 6/9~6/10 복구가 동일 메커니즘 실증
+  (비-canonical kis row delete → 익일 openapi gap-fill 적재, 2단계).
+- gate 3 통과 ⇒ rollup point_count ≥ 1 보장 (12:45~15:45 tick ⊂ CF window) →
+  REST-origin append는 항상 observed_rollup (close_only 도달 불가).
+- captured flag는 SET 안 함 — flag = "WS captured" 의미 보존 (소비자는 `_retry_sequence`
+  entry/during-wait GET뿐, finalizer 경로 단일 시도라 기능 효과 0, `rest_write_saved`
+  이벤트로 가시성 충분). hourly chain 없음 (hook OFF + cron 재설계 예정).
+
+**검증**: gate 매트릭스 14 + 통합 7 + builder 3 신규 테스트, KRX 10 suite 289 passed.
+**배포 플랜**: 코드 land (default false = 배포 무변화) → **6/15 A75606→A75607 rollover
+통과 후** env true 별도 GO (첫 활성화와 rollover 주간 결합 회피 — gate 2가 보호하지만
+관찰 명료성 우선).
 
 ## 6. 테스트 / 운영 smoke 기준
 

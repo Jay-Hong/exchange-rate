@@ -459,7 +459,7 @@ docker compose logs fastapi --since "2026-05-18T15:44+09:00" --until "2026-05-18
 **Case A/B/C 분포 분석** (7일 telemetry 측정 후, 2026-05-26 무렵):
 
 - case A (우리 cutoff fix): 영업일 close 시점 직후 `close saved` log 발화 + DB row + Redis flag 정상
-- **case B (KIS WS 미송신, 2026-05-25 정책 PR `6a43785` 이후 갱신)**: close saved log 없음 + REST fallback 발화 (`close_rest_fallback_used` +1) → **DB/Redis write 차단** (`KRX_CLOSE_REST_WRITE_ENABLED=false` default, `rest_write_blocked` +1) → Redis latest는 직전 정상 영업일 종가 유지. REST 응답은 diagnostic only, write source 아님.
+- **case B (KIS WS 미송신, 2026-05-25 정책 PR `6a43785` 이후 갱신)**: close saved log 없음 + REST fallback 발화 (`close_rest_fallback_used` +1) → **DB/Redis write 차단** (`KRX_CLOSE_REST_WRITE_ENABLED=false` default, `rest_write_blocked` +1) → Redis latest는 직전 정상 영업일 종가 유지. REST 응답은 diagnostic only, write source 아님. **[2026-06-10 amendment: flag=true 활성화(6/15 rollover 후) 이후엔 gate 통과 시 실제 write — §5.7.8]**
 - case C (dedup skip): 2차 작업 정책상 0 예상
 
 case B 비율 + `rest_write_blocked` 분포 결과로 3차 PR scope 결정 (REST close fallback 코드 완전 제거 vs 검증 가능성 재검토). 상세 정책 근거는 [DECISIONS.md ADR-027 follow-up](DECISIONS.md) + [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7](KRX_CLOSE_SNAPSHOT_PLAN.md) 참조.
@@ -619,9 +619,17 @@ client.set(
 
 #### 정책 anchor — 5 핵심 결정
 
-1. **KIS REST close snapshot은 더 이상 authoritative write source가 아니다.**
-2. **REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.**
-3. **Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다.**
+> ⚠️ **Amendment 2026-06-10**: (1)(2)(3)은 [KRX_CLOSE_SNAPSHOT_PLAN §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md)로
+> 부분 supersede — 6/9 WS silent-stall 종가 누락(차단이 정확한 종가 1514.7을 버림) 후
+> "무조건 차단" → **gate-checked write** 재설계 (gate: calendar / contract identity /
+> session evidence[tick recency, env `KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS`=3h] + sanity).
+> flag=false = shadow 평가 + 차단 (gate verdict telemetry — WS-miss 날에만 샘플) /
+> flag=true = gate-checked write (구 "무가드 복원" 폐기). (4)(5)는 유지.
+> env 활성화는 6/15 rollover 후 별도 GO.
+
+1. ~~KIS REST close snapshot은 더 이상 authoritative write source가 아니다.~~ (supersede — gate 전부 통과 시 gated authoritative fallback, WS-first 불변)
+2. ~~REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.~~ (supersede — default false 유지하되 true 의미가 gate-checked write로 변경)
+3. ~~Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다.~~ (supersede — flag=true + gate 통과 시 실제 write + CF daily append tail)
 4. **`KrxCloseWindowWriter`의 WS close frame write는 신뢰 경로로 유지한다.**
 5. **Stage E는 close finalizer 정책과 직교 작업이다.**
 
@@ -647,7 +655,10 @@ KRX_CLOSE_REST_WRITE_ENABLED=true
 docker compose up -d --force-recreate fastapi
 ```
 
-flag=true 시 기존 1차/2차 PR write 동작 복원. 단 KIS REST stale 위험 동반.
+~~flag=true 시 기존 1차/2차 PR write 동작 복원. 단 KIS REST stale 위험 동반.~~
+**2026-06-10 이후**: flag=true는 gate-checked write (gate 통과 시에만 write — 5/25형
+stale은 gate가 차단). 완전 차단 복귀는 flag=false 유지. 상세:
+[KRX_CLOSE_SNAPSHOT_PLAN §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md).
 
 #### 다음 자연 검증 시점
 

@@ -414,7 +414,8 @@ def _utc_naive_to_kst_iso(ts: Optional[datetime]) -> Optional[str]:
 
 
 def build_krx_cf_append_row(
-    date_kst: date, close, rollup: CfSessionRollup, contract_code: str
+    date_kst: date, close, rollup: CfSessionRollup, contract_code: str,
+    *, metadata_extra: Optional[dict] = None,
 ) -> dict:
     """KRX CF close finalizer daily-append row builder (pure — logging/side-effect 없음).
 
@@ -423,6 +424,11 @@ def build_krx_cf_append_row(
       - point_count == 0 → close_only (high=low=close)
     clamp 발생 시 metadata_json에 방향/pre-clamp 값 영속 (Unit 4 hook이 로그/event — builder는 미로그).
     Decimal quantize(0.1), rate == close invariant.
+    metadata_extra: provenance 마커 추가 (예: REST-origin close write의
+    {"origin": "rest_close_write"} — 2026-06-10 #4 설계). 기본 None = 기존 호출자 불변.
+    extra를 먼저 깔고 cf_session_* 3종 예약 키를 나중에 써서 그 3종은 항상 이김.
+    clamp 진단 키(close_outside_rollup 등)는 clamp 발동 시에만 쓰이므로 extra로
+    같은 이름을 넣지 말 것 (스푸핑 잔존 가능 — 호출자 책임, 현 호출자는 origin만 사용).
 
     Returns: source_daily_rates upsert용 row dict (rate/high/low/close = Decimal).
     """
@@ -433,11 +439,12 @@ def build_krx_cf_append_row(
 
     close_d = _quantize_krx(close)
 
-    metadata: dict = {
+    metadata: dict = dict(metadata_extra) if metadata_extra else {}
+    metadata.update({
         "cf_session_point_count": rollup.point_count,
         "cf_session_first_ts": _utc_naive_to_kst_iso(rollup.first_ts),
         "cf_session_last_ts": _utc_naive_to_kst_iso(rollup.last_ts),
-    }
+    })
 
     if rollup.point_count == 0:
         ohlc_quality = "close_only"
@@ -558,7 +565,8 @@ def write_krx_cf_append_row(db: Session, row: dict) -> tuple[str, str]:
 # ─────────────────────────────────────────────────────────────
 
 def append_krx_cf_daily_row(
-    db: Session, date_kst: date, close, contract_code: str
+    db: Session, date_kst: date, close, contract_code: str,
+    *, metadata_extra: Optional[dict] = None,
 ) -> tuple[str, str]:
     """KRX CF close finalizer daily-append orchestration + transaction.
 
@@ -570,7 +578,9 @@ def append_krx_cf_daily_row(
     Returns: (action, reason). action ∈ {KRX_APPEND_INSERT, KRX_APPEND_SKIP, KRX_APPEND_HARD}.
     """
     rollup = get_krx_cf_session_rollup(db, date_kst)
-    row = build_krx_cf_append_row(date_kst, close, rollup, contract_code)
+    row = build_krx_cf_append_row(
+        date_kst, close, rollup, contract_code, metadata_extra=metadata_extra,
+    )
     action, reason = write_krx_cf_append_row(db, row)
     if action == KRX_APPEND_INSERT:
         db.commit()

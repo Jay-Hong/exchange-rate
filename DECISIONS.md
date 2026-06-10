@@ -3317,9 +3317,26 @@ WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방
 
 **핵심 anchor 5문장**:
 
-1. KIS REST close snapshot은 더 이상 authoritative write source가 아니다.
-2. REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.
-3. Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다.
+> ⚠️ **Amendment 2026-06-10 — gate-checked write 재설계 (#4)**: (1)(2)(3) 부분 supersede.
+> 계기: 6/9 KRX WS silent-stall(15:04, reconnect 0 — 별도 fix `87b51c3`)로 종가 frame
+> 미수신 → REST가 정확한 종가(1514.7, 공식 종가 일치 확인)를 확보했으나 무조건 차단에
+> 막혀 **일봉 누락** — 5/25(차단=정답)와 6/9(write=정답)는 동일 정책의 양방향 실패.
+> 재설계: `_evaluate_close_write_gates` gate chain (calendar / contract identity /
+> **session evidence** — 우리 WS last tick recency 3h, env
+> `KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS`. 미등록 휴장까지 자기 데이터로 차단 +
+> 구 last=None sanity-skip 구멍 폐쇄) + 기존 sanity ±2%. flag=false = **shadow 평가 +
+> 차단** (gate verdict telemetry — finalizer 경로 REST는 WS-miss 날에만 실행되므로 샘플은
+> 그런 날에만 쌓임이 정상) / flag=true = **gate-checked write** + 성공 시 CF daily append
+> tail (`metadata_json.origin=rest_close_write`, WS 경로 hook mirror — H/L은 rollup ∪
+> {close}, gap-only 미교정 + delete 후 openapi 재실행 escape hatch). 평가 순서는 sanity가
+> gate보다 먼저 (기존 분기 보존 — sanity abort=False retry / gate reject=True terminal
+> 비대칭). captured flag는 SET 안 함 (WS captured 의미 보존). default false 유지 — 배포
+> 무변화, env 활성화는 6/15 A75606 rollover 후 별도 GO. 상세:
+> [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md).
+
+1. ~~KIS REST close snapshot은 더 이상 authoritative write source가 아니다.~~ (supersede — gate 전부 통과 시 gated authoritative fallback, WS-first 불변)
+2. ~~REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.~~ (supersede — default false 유지, true 의미 = gate-checked write)
+3. ~~Case B는 REST 성공 write가 아니라 `rest_write_blocked` diagnostic signal로 해석한다.~~ (supersede — flag=true + gate 통과 시 실제 write)
 4. `KrxCloseWindowWriter`의 WS close frame write는 신뢰 경로로 유지한다.
 5. Stage E는 close finalizer 정책과 직교한다.
 
@@ -3341,7 +3358,8 @@ WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방
 
 #### Rollback
 
-env `KRX_CLOSE_REST_WRITE_ENABLED=true` + `docker compose up -d --force-recreate fastapi`로 기존 1차/2차 PR write 동작 복원 가능. 단 KIS REST stale 위험 동반 — 회귀 사고 가능성.
+~~env `KRX_CLOSE_REST_WRITE_ENABLED=true` + `docker compose up -d --force-recreate fastapi`로 기존 1차/2차 PR write 동작 복원 가능. 단 KIS REST stale 위험 동반 — 회귀 사고 가능성.~~
+**2026-06-10 amendment 이후**: flag=true = gate-checked write (5/25형 stale은 gate가 차단 — 구 회귀 위험 없음). 완전 차단 복귀는 flag=false 유지.
 
 #### 다음 단계
 

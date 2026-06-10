@@ -49,7 +49,18 @@ def _make_rest_result(price: str = "1500.2") -> dict:
         "market_div_code": "CF",
         "received_at": "2026-05-15T15:46:00+09:00",
         "raw_rt_cd": "0",
+        # 2026-06-10 #4 gate chain — gate 2(contract identity)용 resp_* 응답 원본
+        # 필드 (_make_contract와 일치하는 gate-passing 기본값).
+        "resp_hts_kor_isnm": "미국달러 F 202605",
+        "resp_futs_last_tr_date": "20260518",
+        "resp_acml_vol": "956734",
     }
+
+
+def _recent_last(rate: float = 1500.9) -> dict:
+    """gate 3(session evidence) 통과용 last mock — boundary 5/15 15:45 기준
+    10분 전 fresh tick (구 "..." placeholder는 gate 3 도입으로 reject됨)."""
+    return {"rate": rate, "timestamp": "2026-05-15T15:35:00+09:00"}
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +244,7 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=_make_rest_result("1500.2")),
         ) as mock_fetch, patch(
             "app.crud.get_latest_source_rate",
-            return_value={"rate": 1500.9, "timestamp": "..."},
+            return_value=_recent_last(1500.9),
         ), patch(
             "app.crud.insert_source_rate_if_changed", return_value=True,
         ) as mock_insert, patch(
@@ -268,7 +279,7 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=_make_rest_result("1600.0")),
         ) as mock_fetch, patch(
             "app.crud.get_latest_source_rate",
-            return_value={"rate": 1500.0, "timestamp": "..."},
+            return_value=_recent_last(1500.0),
         ), patch(
             "app.crud.insert_source_rate_if_changed",
         ) as mock_insert, patch(
@@ -303,7 +314,7 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.krx_kis.fetch_kis_futures_quote", new=fetch_mock,
         ), patch(
             "app.crud.get_latest_source_rate",
-            return_value={"rate": 1500.0, "timestamp": "..."},
+            return_value=_recent_last(1500.0),
         ), patch(
             "app.crud.insert_source_rate_if_changed", return_value=True,
         ) as mock_insert, patch(
@@ -357,7 +368,10 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.krx_kis.fetch_kis_futures_quote",
             new=AsyncMock(return_value=_make_rest_result("1500.2")),
         ), patch(
-            "app.crud.get_latest_source_rate", return_value=None,
+            # 2026-06-10 #4: 구 return_value=None은 gate 3(last=None → reject)으로
+            # 더 이상 write에 도달 못함 (구멍 폐쇄) — fresh last로 교체.
+            # None reject 검증은 TestKrxCloseSnapshotControllerGateChain에서.
+            "app.crud.get_latest_source_rate", return_value=_recent_last(1500.0),
         ), patch(
             "app.crud.insert_source_rate_if_changed", return_value=True,
         ) as mock_insert, patch(
@@ -396,7 +410,7 @@ class TestKrxCloseSnapshotController(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=_make_rest_result("1500.2")),
         ) as mock_fetch, patch(
             "app.crud.get_latest_source_rate",
-            return_value={"rate": 1500.0, "timestamp": "..."},
+            return_value=_recent_last(1500.0),
         ), patch(
             "app.crud.insert_source_rate_if_changed", return_value=True,
         ), patch(
@@ -481,7 +495,7 @@ class TestKrxCloseSnapshotControllerRestWriteBlocked(unittest.IsolatedAsyncioTes
                  new=AsyncMock(return_value=_make_rest_result("1500.2")),
              ) as mock_fetch, patch(
                  "app.crud.get_latest_source_rate",
-                 return_value={"rate": 1500.9, "timestamp": "..."},
+                 return_value=_recent_last(1500.9),
              ), patch(
                  "app.crud.insert_source_rate_if_changed",
              ) as mock_insert, patch(
@@ -520,7 +534,7 @@ class TestKrxCloseSnapshotControllerRestWriteBlocked(unittest.IsolatedAsyncioTes
                  new=AsyncMock(return_value=_make_rest_result("1500.2")),
              ) as mock_fetch, patch(
                  "app.crud.get_latest_source_rate",
-                 return_value={"rate": 1500.9, "timestamp": "..."},
+                 return_value=_recent_last(1500.9),
              ), patch(
                  "app.crud.insert_source_rate_if_changed",
              ) as mock_insert, patch(
@@ -543,8 +557,13 @@ class TestKrxCloseSnapshotControllerRestWriteBlocked(unittest.IsolatedAsyncioTes
         self.assertEqual(controller.counters["success"], 1)
         self.assertEqual(controller.counters["attempted"], 1)
 
-    async def test_rest_write_enabled_true_preserves_legacy_behavior(self):
-        """REST_WRITE_ENABLED=true rollback → 기존 1차 PR write 동작 복원."""
+    async def test_rest_write_enabled_true_gated_write(self):
+        """REST_WRITE_ENABLED=true + gate 전부 통과 → write 수행.
+
+        2026-06-10 #4: 구 의미("무가드 write 복원")는 폐기 — true는 gate-checked
+        write. 본 테스트 mock은 gate-passing(resp_* 일치 + fresh last)이라 write
+        도달. gate reject 분기는 GateChain 테스트 클래스에서 검증.
+        """
         from app import config
         controller = self._make_controller()
         contract = _make_contract()
@@ -557,7 +576,7 @@ class TestKrxCloseSnapshotControllerRestWriteBlocked(unittest.IsolatedAsyncioTes
                  new=AsyncMock(return_value=_make_rest_result("1500.2")),
              ), patch(
                  "app.crud.get_latest_source_rate",
-                 return_value={"rate": 1500.9, "timestamp": "..."},
+                 return_value=_recent_last(1500.9),
              ), patch(
                  "app.crud.insert_source_rate_if_changed", return_value=True,
              ) as mock_insert, patch(
@@ -578,6 +597,279 @@ class TestKrxCloseSnapshotControllerRestWriteBlocked(unittest.IsolatedAsyncioTes
         # rest_write_blocked counter 0 (flag true라 차단 안 함)
         self.assertEqual(controller.counters["rest_write_blocked"], 0)
         self.assertEqual(controller.counters["success"], 1)
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-10 #4 — close REST write gate chain (_evaluate_close_write_gates)
+# ---------------------------------------------------------------------------
+
+class TestKrxCloseSnapshotControllerGateChain(unittest.TestCase):
+    """gate chain 판정 단위 매트릭스 (pure — DB/Redis touch 없음)."""
+
+    def setUp(self):
+        self.controller = KrxCloseSnapshotController(token_manager=MagicMock())
+        self.contract = _make_contract()
+        self.boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
+
+    def _eval(self, *, result=None, contract=None, boundary=None, last="default"):
+        if last == "default":
+            last = _recent_last()
+        return self.controller._evaluate_close_write_gates(
+            result=result or _make_rest_result(),
+            contract=contract or self.contract,
+            boundary_at_kst=boundary or self.boundary,
+            last=last,
+        )
+
+    def test_all_gates_pass(self):
+        self.assertIsNone(self._eval())
+
+    def test_gate1_calendar_holiday_rejects(self):
+        # 5/25 부처님오신날 대체공휴일 (실제 캘린더 — 5/25 사고 1차 차단 회귀 잠금)
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 25))
+        self.assertEqual(self._eval(boundary=boundary), "calendar")
+
+    def test_gate2_contract_month_mismatch_rejects(self):
+        result = _make_rest_result()
+        result["resp_hts_kor_isnm"] = "미국달러 F 202606"
+        self.assertEqual(self._eval(result=result), "contract")
+
+    def test_gate2_expiry_date_mismatch_rejects(self):
+        result = _make_rest_result()
+        result["resp_futs_last_tr_date"] = "20260615"
+        self.assertEqual(self._eval(result=result), "contract")
+
+    def test_gate2_resp_fields_missing_rejects(self):
+        # fail-closed: 응답 원본 필드 부재 → contract reject
+        result = _make_rest_result()
+        result["resp_hts_kor_isnm"] = None
+        self.assertEqual(self._eval(result=result), "contract")
+
+    def test_gate2_expired_contract_rejects(self):
+        # 만기(5/18) 경과 후 boundary(5/19 화 영업일) → contract reject.
+        # gate 3 통과 가능한 fresh last를 줘서 gate 2 단독 검증.
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 19))
+        last = {"rate": 1500.9, "timestamp": "2026-05-19T15:40:00+09:00"}
+        self.assertEqual(self._eval(boundary=boundary, last=last), "contract")
+
+    def test_gate3_last_none_rejects(self):
+        # 구 동작(last=None → sanity skip → write 진행) 구멍 폐쇄
+        self.assertEqual(self._eval(last=None), "session_evidence")
+
+    def test_gate3_stale_last_rejects_unregistered_holiday_sim(self):
+        """캘린더 미등록 휴장 시뮬 — gate 3 존재 증명 케이스.
+
+        gate 1(라이브러리)은 영업일로 통과하지만 마지막 WS tick이 3일 전(5/12)이면
+        시장이 오늘 실제로 안 열렸다는 자기 데이터 증거 → session_evidence reject.
+        (5/25 사고 재현은 hotfix 이후 gate 1이 잡으므로, gate 3의 가치는 이
+        미등록-휴장 케이스로 증명된다.)
+        """
+        last = {"rate": 1500.9, "timestamp": "2026-05-12T15:45:00+09:00"}
+        self.assertEqual(self._eval(last=last), "session_evidence")
+
+    def test_gate3_unparseable_timestamp_rejects(self):
+        last = {"rate": 1500.9, "timestamp": "..."}
+        self.assertEqual(self._eval(last=last), "session_evidence")
+
+    def test_gate3_exactly_threshold_passes(self):
+        # 경계값: age == 3h(default) → pass (strict >)
+        last = {"rate": 1500.9, "timestamp": "2026-05-15T12:45:00+09:00"}
+        self.assertIsNone(self._eval(last=last))
+
+    def test_gate3_just_over_threshold_rejects(self):
+        last = {"rate": 1500.9, "timestamp": "2026-05-15T12:44:59+09:00"}
+        self.assertEqual(self._eval(last=last), "session_evidence")
+
+    def test_gate3_future_timestamp_passes(self):
+        # boundary 이후 late tick (음수 age) → pass
+        last = {"rate": 1500.9, "timestamp": "2026-05-15T15:45:30+09:00"}
+        self.assertIsNone(self._eval(last=last))
+
+    def test_gate3_naive_timestamp_treated_as_kst(self):
+        last = {"rate": 1500.9, "timestamp": "2026-05-15T15:35:00"}
+        self.assertIsNone(self._eval(last=last))
+
+    def test_incident_0609_scenario_passes(self):
+        """6/9 사고 재현 — last tick 15:04 (boundary −41min) → 전 gate 통과.
+
+        gate-checked write가 있었다면 6/9 종가(1514.7)는 same-day 보존됐다.
+        """
+        boundary = compute_close_boundary_kst("CF", date(2026, 6, 9))
+        contract = ContractInfo(
+            short_code="A75606", standard_code="KR4A75660006",
+            name="미국달러 F 202606", contract_month="202606",
+            expiry_date=date(2026, 6, 15),
+        )
+        result = _make_rest_result("1514.7")
+        result["resp_hts_kor_isnm"] = "미국달러 F 202606"
+        result["resp_futs_last_tr_date"] = "20260615"
+        last = {"rate": 1510.6, "timestamp": "2026-06-09T15:04:00+09:00"}
+        verdict = self.controller._evaluate_close_write_gates(
+            result=result, contract=contract, boundary_at_kst=boundary, last=last,
+        )
+        self.assertIsNone(verdict)
+
+
+class TestKrxCloseSnapshotControllerGateChainIntegration(unittest.IsolatedAsyncioTestCase):
+    """gate chain end-to-end — shadow counter/short-circuit + daily append tail."""
+
+    def _make_controller(self) -> KrxCloseSnapshotController:
+        return KrxCloseSnapshotController(
+            token_manager=MagicMock(),
+            retry_delays_sec={"CF": [0.0, 0.0, 0.0], "CM": [0.0, 0.0, 0.0]},
+            sanity_pct=0.02,
+            rest_timeout_sec=1.0,
+        )
+
+    async def _run_snapshot(self, controller, *, session="CF", boundary=None,
+                            last=None, flag=False, daily_enabled=False,
+                            rest_result=None):
+        """공통 실행 harness — patch 묶음 + schedule + drain. mock 3종 반환."""
+        from app import config
+        contract = _make_contract()
+        if boundary is None:
+            boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False), \
+             patch.object(config, "KRX_CLOSE_REST_WRITE_ENABLED", flag), \
+             patch.object(config, "KRX_DAILY_APPEND_ENABLED", daily_enabled), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=rest_result or _make_rest_result()),
+             ), patch(
+                 "app.crud.get_latest_source_rate", return_value=last,
+             ), patch(
+                 "app.crud.insert_source_rate_if_changed", return_value=True,
+             ) as mock_insert, patch(
+                 "app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+                 return_value=True,
+             ) as mock_redis, patch(
+                 "app.source_daily_rates.append_krx_cf_daily_row",
+                 return_value=("INSERT", "신규 date — insert"),
+             ) as mock_append, patch(
+                 "app.database.get_db_context",
+             ):
+            controller.schedule_close_snapshot(
+                contract=contract, session=session, boundary_at_kst=boundary,
+            )
+            await asyncio.sleep(0.1)
+            await controller.close(timeout=1.0)
+        return mock_insert, mock_redis, mock_append
+
+    async def test_gate_reject_shadow_with_flag_false(self):
+        """flag=false에서도 gate 평가 (shadow) — reject counter + write 차단 + short-circuit."""
+        controller = self._make_controller()
+        stale_last = {"rate": 1500.9, "timestamp": "2026-05-12T15:45:00+09:00"}
+        mock_insert, mock_redis, mock_append = await self._run_snapshot(
+            controller, last=stale_last, flag=False,
+        )
+        self.assertEqual(
+            controller.counters["rest_write_gate_rejected_session_evidence"], 1)
+        self.assertEqual(controller.counters["rest_write_blocked"], 0)  # gate가 먼저
+        mock_insert.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_append.assert_not_called()
+        self.assertEqual(controller.counters["success"], 1)   # short-circuit
+        self.assertEqual(controller.counters["attempted"], 1)  # retry 안 함
+
+    async def test_gate_reject_with_flag_true_blocks_write(self):
+        """flag=true여도 gate reject면 write 안 함 (5/25 모드 — calendar)."""
+        controller = self._make_controller()
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 25))  # 대체공휴일
+        mock_insert, mock_redis, mock_append = await self._run_snapshot(
+            controller, boundary=boundary, last=_recent_last(), flag=True,
+        )
+        self.assertEqual(controller.counters["rest_write_gate_rejected_calendar"], 1)
+        mock_insert.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_append.assert_not_called()
+
+    async def test_gates_pass_flag_false_blocked_shadow_evidence(self):
+        """gates 통과 + flag=false → rest_write_blocked (gates=passed shadow 증거)."""
+        controller = self._make_controller()
+        mock_insert, mock_redis, mock_append = await self._run_snapshot(
+            controller, last=_recent_last(), flag=False,
+        )
+        self.assertEqual(controller.counters["rest_write_blocked"], 1)
+        for reason in ("calendar", "contract", "session_evidence"):
+            self.assertEqual(
+                controller.counters[f"rest_write_gate_rejected_{reason}"], 0)
+        mock_insert.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_append.assert_not_called()
+
+    async def test_gates_pass_flag_true_writes_and_appends_daily(self):
+        """gates 통과 + flag=true + daily enabled + CF → write + daily append tail."""
+        controller = self._make_controller()
+        mock_insert, mock_redis, mock_append = await self._run_snapshot(
+            controller, last=_recent_last(), flag=True, daily_enabled=True,
+        )
+        mock_insert.assert_called_once()
+        mock_redis.assert_called_once()
+        mock_append.assert_called_once()
+        # (db, date_kst, close, contract_code) + metadata_extra origin 마커
+        args, kwargs = mock_append.call_args
+        self.assertEqual(args[1], date(2026, 5, 15))
+        self.assertEqual(args[2], 1500.2)
+        self.assertEqual(args[3], "A75605")
+        self.assertEqual(kwargs["metadata_extra"], {"origin": "rest_close_write"})
+        self.assertEqual(controller.counters["success"], 1)
+
+    async def test_cm_session_no_daily_append(self):
+        """CM 세션은 daily append 대상 아님 (write는 수행)."""
+        controller = self._make_controller()
+        # CM 06:00 금요일(5/15) — 영업일. last는 06:00 기준 fresh.
+        boundary = compute_close_boundary_kst("CM", date(2026, 5, 15))
+        last = {"rate": 1500.9, "timestamp": "2026-05-15T05:30:00+09:00"}
+        mock_insert, mock_redis, mock_append = await self._run_snapshot(
+            controller, session="CM", boundary=boundary, last=last,
+            flag=True, daily_enabled=True,
+        )
+        mock_insert.assert_called_once()
+        mock_redis.assert_called_once()
+        mock_append.assert_not_called()
+
+    async def test_daily_append_disabled_not_called(self):
+        controller = self._make_controller()
+        mock_insert, _, mock_append = await self._run_snapshot(
+            controller, last=_recent_last(), flag=True, daily_enabled=False,
+        )
+        mock_insert.assert_called_once()
+        mock_append.assert_not_called()
+
+    async def test_daily_append_exception_isolated(self):
+        """append 예외 → 격리 (close write success 유지)."""
+        from app import config
+        controller = self._make_controller()
+        contract = _make_contract()
+        boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
+        with patch.object(config, "KRX_CLOSE_FINALIZER_ENABLED", False), \
+             patch.object(config, "KRX_CLOSE_REST_WRITE_ENABLED", True), \
+             patch.object(config, "KRX_DAILY_APPEND_ENABLED", True), \
+             patch(
+                 "app.crawlers.krx_kis.fetch_kis_futures_quote",
+                 new=AsyncMock(return_value=_make_rest_result()),
+             ), patch(
+                 "app.crud.get_latest_source_rate", return_value=_recent_last(),
+             ), patch(
+                 "app.crud.insert_source_rate_if_changed", return_value=True,
+             ) as mock_insert, patch(
+                 "app.latest_rates_cache.set_latest_krx_rate_from_sync_job",
+                 return_value=True,
+             ), patch(
+                 "app.source_daily_rates.append_krx_cf_daily_row",
+                 side_effect=RuntimeError("append boom"),
+             ) as mock_append, patch(
+                 "app.database.get_db_context",
+             ):
+            controller.schedule_close_snapshot(
+                contract=contract, session="CF", boundary_at_kst=boundary,
+            )
+            await asyncio.sleep(0.1)
+            await controller.close(timeout=1.0)
+
+        mock_insert.assert_called_once()
+        mock_append.assert_called_once()
+        self.assertEqual(controller.counters["success"], 1)  # write 성공 유지
 
 
 # ---------------------------------------------------------------------------

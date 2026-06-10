@@ -236,18 +236,55 @@ KRX_CLOSE_FINALIZER_ENABLED = os.getenv("KRX_CLOSE_FINALIZER_ENABLED", "true").l
 # 본질: KIS REST는 휴장/만기 후에도 stale 응답을 정상 형식으로 반환. REST 응답
 # 만으로 "오늘 종가"임을 증명할 수 없으므로 write source로 부적합.
 #
-# 정책 (default false):
-#   - flag=false: REST fetch + sanity check는 diagnostic으로 유지 (case A/B/C
-#     telemetry 측정), DB/Redis write만 차단 + retry short-circuit
-#   - flag=true: 기존 1차 PR (`c0855ff`) retry 3회 + 2차 PR (`c2fb796`) fallback
-#     1회 write 동작 복원 (rollback path)
+# 정책 재설계 (2026-06-10, #4 — 6/9 WS silent-stall 종가 누락 사고 후속):
+# 6/9에 WS가 종가를 못 잡았을 때 REST는 정확한 종가(1514.7, 공식 종가와 일치 확인)를
+# 확보했으나 본 flag 무조건 차단에 막혀 일봉이 누락됨 → "무조건 차단"을
+# "gate-checked write"로 재설계. gate chain(fail-closed, 전부 통과 시에만 write):
+#   gate 1 calendar         — is_krx_business_day(boundary date) (5/25 모드 1차 차단)
+#   gate 2 contract identity — REST 응답 월물/만기 == 캡처 contract (5/18 rollover 차단)
+#   gate 3 session evidence  — 우리 WS의 마지막 tick이 boundary −
+#       KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS 이내 (자기 데이터로 "오늘 시장이
+#       실제 거래했다" 증명 — 캘린더 라이브러리 미등록 휴장(5/25 모드 본질)까지 차단.
+#       last=None도 reject — 구 sanity-skip 구멍 폐쇄)
+#   + price sanity ±2% — 기존 유지. 단 실제 평가 순서는 sanity가 gate 1~3보다
+#     먼저 (기존 분기 보존). 비대칭 주의: sanity abort=False(legacy 모드 retry) /
+#     gate reject=True(terminal short-circuit) — stale+±2% 동시 이탈 날은
+#     rest_sanity_aborted로 귀속되고 gate verdict가 안 남음 (telemetry 해석 시 참고).
 #
-# KRX_CLOSE_FINALIZER_ENABLED 값과 무관하게 KrxCloseSnapshotController의 REST
-# write path 전체 차단 — finalizer=true 경로의 REST fallback 1회, finalizer=false
-# rollback 경로의 REST retry 3회 모두 영향.
+# semantics (default false):
+#   - flag=false: REST fetch + sanity + **gate chain shadow 평가** (verdict는
+#     counter/event telemetry로만 기록 — rest_write_gate_rejected_{reason} 또는
+#     rest_write_blocked(gates=passed)), DB/Redis write는 차단 + retry short-circuit.
+#     주의: finalizer 경로 REST는 WS-miss 날에만 실행되므로 shadow 샘플은 그런 날에만
+#     쌓임 (정상일 0건이 정상 — "데이터가 안 쌓였네" 오독 금지).
+#   - flag=true: **gate-checked write** — gate 전부 통과 시에만 DB/Redis write +
+#     (CF + KRX_DAILY_APPEND_ENABLED 시) daily append tail. 구 "무가드 write 복원"
+#     의미는 폐기 (2026-06-10 supersede).
+#
+# KRX_CLOSE_FINALIZER_ENABLED 값과 무관하게 동일 적용 — finalizer=true 경로의 REST
+# fallback 1회, finalizer=false rollback 경로의 retry 3회 모두 gate 경유.
 #
 # 영향 범위 외: KrxCloseWindowWriter (WS close frame 기반, 신뢰 source) — 변경 X.
 KRX_CLOSE_REST_WRITE_ENABLED = os.getenv("KRX_CLOSE_REST_WRITE_ENABLED", "false").lower() == "true"
+
+# gate 3 (session evidence) 임계: 마지막 WS tick이 boundary로부터 이 시간(시간 단위)
+# 이내면 "오늘 세션이 실제 거래했다"로 인정. 실측 근거: 6/9 사고는 last tick 15:04
+# (boundary −41min) → pass가 정답 / 5/25는 last ts=5/23 06:00 KST (5/22 야간 CM close,
+# boundary −2.4일) → reject가 정답.
+# 보수적 3h: 장중 거래정지(halt) edge에서 halt 가격을 종가로 쓰는 것도 거름 (fail-closed).
+# 대안(세션 open 이후 tick 존재 — 복구 범위 넓음)과의 비교는 KRX_CLOSE_SNAPSHOT_PLAN
+# §5.7 amendment 참조. insert-if-changed 특성상 가격 3h+ 정체 시 false-reject 가능
+# (이중 희귀: WS-miss AND 정체 — fail-closed 수용, next-day OpenAPI 복구 경로 존재).
+KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS = float(
+    os.getenv("KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS", "3")
+)
+
+if KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS <= 0:
+    raise ValueError(
+        f"KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS must be > 0 "
+        f"(got {KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS}). 0 이하면 gate 3 "
+        "(session evidence)가 모든 REST close write를 무조건 reject한다."
+    )
 
 # KRX_DAILY_APPEND_ENABLED: ADR-034 Phase 2d KRX daily-append (source_daily_rates) 토글.
 # default false — Unit 4b CF finalizer hook(append_krx_cf_daily_row)을 배포와 분리해

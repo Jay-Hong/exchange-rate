@@ -134,6 +134,38 @@ class TestBuildKrxCfAppendRow(unittest.TestCase):
             build_krx_cf_append_row(date(2026, 6, 3), 1500.0,
                                     _rollup(high=None, low=None, point_count=5), "A75606")
 
+    def test_metadata_extra_merged(self):
+        """2026-06-10 #4 — metadata_extra(REST-origin 마커)가 metadata_json에 병합."""
+        row = build_krx_cf_append_row(
+            date(2026, 6, 9), 1514.7,
+            _rollup(high=1533.1, low=1509.3, point_count=6104), "A75606",
+            metadata_extra={"origin": "rest_close_write"},
+        )
+        self.assertEqual(row["metadata_json"]["origin"], "rest_close_write")
+        # 예약 키는 그대로 유지
+        self.assertEqual(row["metadata_json"]["cf_session_point_count"], 6104)
+
+    def test_metadata_extra_reserved_keys_win(self):
+        """extra가 예약 키(cf_session_*)를 덮을 수 없음 — 예약 키가 나중에 쓰여 이김."""
+        row = build_krx_cf_append_row(
+            date(2026, 6, 9), 1514.7,
+            _rollup(high=1533.1, low=1509.3, point_count=6104), "A75606",
+            metadata_extra={"cf_session_point_count": -1, "origin": "rest_close_write"},
+        )
+        self.assertEqual(row["metadata_json"]["cf_session_point_count"], 6104)
+        self.assertEqual(row["metadata_json"]["origin"], "rest_close_write")
+
+    def test_metadata_extra_default_none_unchanged(self):
+        """default None — 기존 WS 경로 호출자 metadata 키 구성 불변."""
+        row = build_krx_cf_append_row(
+            date(2026, 6, 9), 1514.7,
+            _rollup(high=1533.1, low=1509.3, point_count=6104), "A75606",
+        )
+        self.assertNotIn("origin", row["metadata_json"])
+        self.assertEqual(
+            set(row["metadata_json"].keys()),
+            {"cf_session_point_count", "cf_session_first_ts", "cf_session_last_ts"},
+        )
 
 if __name__ == "__main__":
     unittest.main()
