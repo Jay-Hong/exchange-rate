@@ -195,7 +195,7 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 - `bithumb_observed_hourly`: `source_rates` raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`. daily `bithumb_24h_kst_close`와 다른 granularity: 3m/1y=24h candle, 1w=시간별 관측)
 - `investing_observed_hourly`: `investing_exchange_rates` raw 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`, per-currency usd/jpy/eur. daily `investing_observed_eod`와 다른 granularity)
 - `hana_observed_hourly`: `bank_exchange_rates`(bank=hana) 고시 관측 → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`, per-currency usd/jpy/eur, ohlc_quality observed_rollup/close_only 분기. daily `hana_observed_eod`와 다른 granularity)
-- `krx_observed_hourly`: `source_rates`(krx/usd-krw-futures) raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`. **session-agnostic** — CF/CM 공통 enum, 첫 PR은 CF 정규장 08:30~15:45 KST coverage. contract_code는 source_daily_rates daily row에서 재사용. daily `krx_cf_close_1545`와 다른 granularity)
+- `krx_observed_hourly`: `source_rates`(krx/usd-krw-futures) raw tick → KST 1h bucket 마지막 관측 close (ADR-035 D3, **1w hourly** — `source_hourly_rates`. **session-agnostic** — CF/CM 공통 enum. daily `krx_cf_close_1545`와 다른 granularity). **[재설계 2026-06-10]**: ~~첫 PR CF 정규장 08:30~15:45 coverage + contract_code는 daily row 재사용~~ → **세션 무관 CF/CM 통합 rollup + contract_code 미저장** (Bithumb/Investing/Hana와 동일 모델 — 월물 제거로 CM 야간 자연 커버 + 일봉 의존 절단). **KRX 1w per-point `contract_code` 노출은 자연 소멸** (graph_v2 has_contract 동적 판정 — daily 3m/1y의 per-point contract는 불변. 필요 시 read-side daily join 옵션, 미구현)
 
 같은 series 안에서 구간별로 다른 close_basis인 경우 per-point metadata로 표시 (특히 Hana의 backfill vs canonical 경계).
 
