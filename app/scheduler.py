@@ -1874,6 +1874,12 @@ async def _reconcile_krx_futures_contract():
     if not config.KRX_FUTURES_ENABLED:
         return
 
+    # KRX task-death gap + 기존 client-None bootstrap race guard: app shutdown 중에는
+    # reconcile이 종료되는 client를 부활/재시작하지 않도록 즉시 return (공유 flag —
+    # shutdown_krx의 stop()/task await ~ globals=None 구간을 'None skip'만으론 못 막음).
+    if _collector_shutdown_initiated:
+        return
+
     try:
         resolved = await resolve_active_krx_futures_contract()
     except Exception:
@@ -1915,6 +1921,44 @@ async def _reconcile_krx_futures_contract():
         return
 
     current = krx_futures_client._contract
+
+    # KRX task-death gap (§12.9.8 ② KRX-side): client 객체는 잔존하나 client task만 죽은 경우.
+    #   _run_krx_futures_client crash는 log-only + globals 미reset이라 client 비None + task
+    #   done 상태로 고착 → 만기 동일 시 아래 no_op로 빠져 다음 rollover(최대 한 달)까지 사망.
+    #   dead task면 contract mismatch 무관 shutdown_krx → bootstrap(resolved)로 부활 (rollover
+    #   겸 처리). bootstrap-death(client set 전 사망)는 위 client-None 경로가 복구 — 본 분기는
+    #   client 비None 단일 케이스. 5분 cron이 throttle이라 backoff 없음 (반복 시 ≤12/h, KIS 무해).
+    if krx_futures_task is not None and krx_futures_task.done():
+        if _collector_shutdown_initiated:
+            return  # resolve await 중 shutdown 시작 — restart 보류 (belt-and-suspenders)
+        logger.warning(
+            "[krx] reconcile: client task dead (client 객체 잔존) — 재시작 (resolved=%s)",
+            resolved.short_code,
+        )
+        try:
+            await shutdown_krx_futures_client()
+        except Exception:
+            logger.exception("[krx] task-death restart shutdown 실패")
+            _record_krx_reconcile(
+                result="task_dead_restart_error", current=current, resolved=resolved,
+            )
+            return
+        # rollover branch와 동일 패턴: resolved 직접 사용 (두 번째 resolve 회피).
+        await _bootstrap_krx_futures_client(resolved_override=resolved)
+        # post-condition (rollover branch와 동형): _bootstrap는 예외 catch라 raise 안 됨
+        # → globals로 판정. client present + contract == resolved.
+        if (
+            krx_futures_client is None
+            or krx_futures_client._contract.short_code != resolved.short_code
+        ):
+            _record_krx_reconcile(
+                result="task_dead_restart_error", current=current, resolved=resolved,
+            )
+        else:
+            _record_krx_reconcile(
+                result="task_dead_restarted", current=current, resolved=resolved,
+            )
+        return
 
     # 2. 같은 contract → no-op (대부분 케이스)
     # PR6c-2d-2 (Codex 권고): no-op도 state 기록 — admin endpoint으로 reconcile 발화 검증 가능.
@@ -2450,11 +2494,13 @@ async def shutdown_usdt_ws_gopax_client():
 # start_*의 `not task.done()` dedup 가드 재사용 (새 메커니즘 불필요).
 # USDT_WS_SUPERVISOR_ENABLED=false default → job 미등록 (배포 ≠ 동작 변화, 0 경로).
 
-# app shutdown 중 supervisor가 종료되는 task를 되살리지 못하도록 차단하는 flag.
-# main.py lifespan이 shutdown_usdt_ws_* 체인 전에 signal_usdt_ws_supervisor_shutdown()
-# 으로 set. 각 shutdown_* 내부 set 금지 — 부분 shutdown 시 supervisor 영구 비활성 +
-# supervisor 자신이 shutdown_*를 호출하므로.
-_usdt_ws_supervisor_shutting_down = False
+# app shutdown 중 collector 재시작 로직(USDT supervisor tick + KRX reconcile task-death
+# 분기)이 종료되는 task/client를 되살리지 못하도록 차단하는 **공유** flag. main.py
+# lifespan이 USDT/KRX shutdown 체인 전에 signal_collector_shutdown_initiated()로 set.
+# 각 shutdown_* 내부 set 금지 — 부분 shutdown 시 영구 비활성 + 호출자 자신이 shutdown_*를
+# 호출하므로. "app shutdown 시작"은 단일 사실 → 단일 flag (USDT/KRX 이중 flag로 두면
+# 미래에 한쪽만 set하는 silent-rot 위험 — 단일 진실 소스, DRY).
+_collector_shutdown_initiated = False
 
 # per-source backoff state — crash-restart storm 방지.
 #   consecutive: 연속 재시작 횟수 (backoff escalation 기준)
@@ -2467,21 +2513,22 @@ _SUPERVISOR_BACKOFF_BASE_SEC = 60.0    # consecutive 2부터 60s × 2^(n-2)
 _SUPERVISOR_BACKOFF_MAX_SEC = 300.0    # backoff 상한 (영구 포기 X — cap 후에도 재시도 유지)
 
 
-def signal_usdt_ws_supervisor_shutdown():
-    """§12.9.8 ② — app shutdown 시작 시 호출 (main.py lifespan, shutdown_usdt_ws_* 체인 전).
+def signal_collector_shutdown_initiated():
+    """app shutdown 시작 시 호출 (main.py lifespan, USDT/KRX shutdown 체인 전).
 
-    supervisor tick이 '종료 중인 task'를 death로 오인 → 재시작하지 못하도록 flag set.
-    shutdown_*의 `await client.stop()`/`await task` 구간에서 globals가 아직 None이
-    아니라 'task None skip'만으론 race가 뚫림 (main.py shutdown 순서 직접 확인). 명시 flag 필수.
+    collector 재시작 로직(USDT supervisor tick + KRX reconcile task-death 분기)이
+    '종료 중인 task/client'를 death로 오인 → 부활/재시작하지 못하도록 **공유** flag set.
+    shutdown_*의 `await stop()`/`await task` ~ globals=None 구간에서 'None skip'만으론
+    race가 뚫림 (main.py shutdown 순서 직접 확인). §12.9.8 ② + KRX task-death gap 공용.
     """
-    global _usdt_ws_supervisor_shutting_down
-    _usdt_ws_supervisor_shutting_down = True
+    global _collector_shutdown_initiated
+    _collector_shutdown_initiated = True
 
 
 def reset_usdt_ws_supervisor_state():
-    """테스트/재시작용 — shutdown flag + per-source backoff state 초기화."""
-    global _usdt_ws_supervisor_shutting_down
-    _usdt_ws_supervisor_shutting_down = False
+    """테스트/재시작용 — collector shutdown flag + USDT supervisor backoff state 초기화."""
+    global _collector_shutdown_initiated
+    _collector_shutdown_initiated = False
     _usdt_ws_supervisor_state.clear()
 
 
@@ -2521,7 +2568,7 @@ async def _usdt_ws_supervisor_tick():
     지속, 일시 crash 후 안정만 reset). task None(미시작/정상종료/disabled)은 자연 skip.
     per-source 격리 — 한 source 실패가 다른 source watchdog를 막지 않음.
     """
-    if _usdt_ws_supervisor_shutting_down:
+    if _collector_shutdown_initiated:
         return
     now = time.time()
     for name, flag_getter, shutdown_fn, start_fn, task_getter in _USDT_WS_SUPERVISOR_REGISTRY:
@@ -2550,7 +2597,7 @@ async def _usdt_ws_supervisor_tick():
             # task.done() = crash/비정상 종료 → 재시작 후보
             if now < state["next_allowed_at"]:
                 continue  # backoff throttle
-            if _usdt_ws_supervisor_shutting_down:
+            if _collector_shutdown_initiated:
                 return  # restart 직전 재확인 (belt-and-suspenders)
             consecutive = state["consecutive"] + 1
             logger.warning(

@@ -98,7 +98,7 @@ class TestSupervisorTick(unittest.IsolatedAsyncioTestCase):
         # shutdown race 차단 — flag set 시 done task여도 재시작 안 함
         shutdown_fn, start_fn = AsyncMock(), AsyncMock()
         reg = _registry(task=_mk_task(done=True), shutdown_fn=shutdown_fn, start_fn=start_fn)
-        scheduler.signal_usdt_ws_supervisor_shutdown()
+        scheduler.signal_collector_shutdown_initiated()
         with patch.object(scheduler, "_USDT_WS_SUPERVISOR_REGISTRY", reg):
             await scheduler._usdt_ws_supervisor_tick()
         shutdown_fn.assert_not_awaited()
@@ -184,9 +184,9 @@ class TestSupervisorHelpers(unittest.TestCase):
         self.assertEqual(scheduler._compute_supervisor_backoff(100), 300.0)
 
     def test_signal_shutdown_sets_flag(self):
-        self.assertFalse(scheduler._usdt_ws_supervisor_shutting_down)
-        scheduler.signal_usdt_ws_supervisor_shutdown()
-        self.assertTrue(scheduler._usdt_ws_supervisor_shutting_down)
+        self.assertFalse(scheduler._collector_shutdown_initiated)
+        scheduler.signal_collector_shutdown_initiated()
+        self.assertTrue(scheduler._collector_shutdown_initiated)
 
     def test_registry_has_five_usdt_sources(self):
         names = [e[0] for e in scheduler._USDT_WS_SUPERVISOR_REGISTRY]
