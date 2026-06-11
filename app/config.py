@@ -102,6 +102,22 @@ USDT_WS_KORBIT_ENABLED = os.getenv("USDT_WS_KORBIT_ENABLED", "false").lower() ==
 # 생성 X + network connect X + Redis/DB writer X.
 USDT_WS_GOPAX_ENABLED = os.getenv("USDT_WS_GOPAX_ENABLED", "false").lower() == "true"
 
+# USDT_WS_SUPERVISOR_ENABLED: §12.9.8 ② 5-source WS collector task supervisor 토글.
+# default false — 배포 ≠ 동작 변화 (job 등록 자체를 gate, 비활성 시 코드 경로 0).
+# 활성화 = env toggle + recreate 별도 GO. supervisor는 죽은 collector task(asyncio
+# task crash/cancel)를 주기 watchdog으로 감지 → idempotent teardown(shutdown_*) 후
+# fresh 재시작(start_*). ①(silent-stale reconnect)은 살아있는 task 안의 reconnect라
+# task-death 미커버 → 본 supervisor가 마지막 안전망.
+USDT_WS_SUPERVISOR_ENABLED = os.getenv("USDT_WS_SUPERVISOR_ENABLED", "false").lower() == "true"
+# supervisor watchdog 주기 (초). done() 체크는 무비용이라 30s면 복구 지연 충분.
+USDT_WS_SUPERVISOR_INTERVAL_SECONDS = int(os.getenv("USDT_WS_SUPERVISOR_INTERVAL_SECONDS", "30"))
+if USDT_WS_SUPERVISOR_INTERVAL_SECONDS < 1:
+    raise ValueError(
+        f"USDT_WS_SUPERVISOR_INTERVAL_SECONDS must be >= 1 "
+        f"(got {USDT_WS_SUPERVISOR_INTERVAL_SECONDS}). 0 이하이면 IntervalTrigger 동작이 "
+        "미정의 — watchdog 주기 오설정 차단."
+    )
+
 # USDT_LEGACY_REST_POLLING_ENABLED: 상시 USDT REST polling cron (collect_usdt_rates) 토글.
 # default false — WS 도입 전 과도기 잔재. WS가 매 tick으로 Redis/DB/alert를 모두
 # 처리하고, WS stale 시 source-specific REST fallback probe가 동일 fanout을 재사용

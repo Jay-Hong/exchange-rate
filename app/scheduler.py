@@ -1441,6 +1441,20 @@ def start_scheduler():
             misfire_grace_time=60,
         )
 
+    # §12.9.8 ② — USDT WS 5-source collector task supervisor (주기 watchdog).
+    # USDT_WS_SUPERVISOR_ENABLED=false default → job 미등록 (배포 ≠ 동작 변화, 0 경로).
+    # 활성화 시 죽은 collector task를 감지 → shutdown_*→start_* 재시작 (KRX는 1차 제외 —
+    # bootstrap+client 2-task + reconcile cron이라 별 case, task-death gap 잔존).
+    if config.USDT_WS_SUPERVISOR_ENABLED:
+        scheduler.add_job(
+            _usdt_ws_supervisor_tick,
+            IntervalTrigger(seconds=config.USDT_WS_SUPERVISOR_INTERVAL_SECONDS, timezone=KST),
+            id="usdt_ws_supervisor",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=config.USDT_WS_SUPERVISOR_INTERVAL_SECONDS,
+        )
+
     # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
     # - 모드 전환 시점: 21:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 07:00 (OUT 시작), 월 06:00 (OUT 종료 → BREAK2)
     scheduler.add_job(
@@ -2424,3 +2438,135 @@ async def shutdown_usdt_ws_gopax_client():
 
     usdt_ws_gopax_client = None
     usdt_ws_gopax_task = None
+
+
+# ═════════════════════════════════════════════════════════════
+# §12.9.8 ② — 5-source USDT WS collector task supervisor
+# ═════════════════════════════════════════════════════════════
+# ①(silent-stale reconnect)은 살아있는 task 안의 reconnect라, task 자체가 죽으면
+# (client.start() 예외 escape / cancel) 미커버. _run_usdt_ws_*_client의 except는
+# logger.exception만 → 부활 X. 본 supervisor가 주기 watchdog으로 done() task를 감지 →
+# shutdown_*(idempotent teardown) → start_*(fresh client+task). 재시작 메커니즘은
+# start_*의 `not task.done()` dedup 가드 재사용 (새 메커니즘 불필요).
+# USDT_WS_SUPERVISOR_ENABLED=false default → job 미등록 (배포 ≠ 동작 변화, 0 경로).
+
+# app shutdown 중 supervisor가 종료되는 task를 되살리지 못하도록 차단하는 flag.
+# main.py lifespan이 shutdown_usdt_ws_* 체인 전에 signal_usdt_ws_supervisor_shutdown()
+# 으로 set. 각 shutdown_* 내부 set 금지 — 부분 shutdown 시 supervisor 영구 비활성 +
+# supervisor 자신이 shutdown_*를 호출하므로.
+_usdt_ws_supervisor_shutting_down = False
+
+# per-source backoff state — crash-restart storm 방지.
+#   consecutive: 연속 재시작 횟수 (backoff escalation 기준)
+#   last_restart_at: 마지막 재시작 epoch (5분+ 생존 시 counter reset 판정)
+#   next_allowed_at: 다음 재시작 허용 epoch (backoff throttle)
+_usdt_ws_supervisor_state: dict = {}
+
+_SUPERVISOR_RESET_AFTER_SEC = 300.0    # 마지막 restart 이후 5분 생존 시 backoff counter reset
+_SUPERVISOR_BACKOFF_BASE_SEC = 60.0    # consecutive 2부터 60s × 2^(n-2)
+_SUPERVISOR_BACKOFF_MAX_SEC = 300.0    # backoff 상한 (영구 포기 X — cap 후에도 재시도 유지)
+
+
+def signal_usdt_ws_supervisor_shutdown():
+    """§12.9.8 ② — app shutdown 시작 시 호출 (main.py lifespan, shutdown_usdt_ws_* 체인 전).
+
+    supervisor tick이 '종료 중인 task'를 death로 오인 → 재시작하지 못하도록 flag set.
+    shutdown_*의 `await client.stop()`/`await task` 구간에서 globals가 아직 None이
+    아니라 'task None skip'만으론 race가 뚫림 (main.py shutdown 순서 직접 확인). 명시 flag 필수.
+    """
+    global _usdt_ws_supervisor_shutting_down
+    _usdt_ws_supervisor_shutting_down = True
+
+
+def reset_usdt_ws_supervisor_state():
+    """테스트/재시작용 — shutdown flag + per-source backoff state 초기화."""
+    global _usdt_ws_supervisor_shutting_down
+    _usdt_ws_supervisor_shutting_down = False
+    _usdt_ws_supervisor_state.clear()
+
+
+def _compute_supervisor_backoff(consecutive: int) -> float:
+    """연속 재시작 횟수 → 다음 재시작까지 backoff(초). consecutive 1=즉시(다음 tick),
+    2부터 지수(60·120·240…) cap 300s. 영구 포기 X (cap 도달 후에도 5분마다 재시도)."""
+    if consecutive <= 1:
+        return 0.0
+    return min(
+        _SUPERVISOR_BACKOFF_BASE_SEC * (2 ** (consecutive - 2)),
+        _SUPERVISOR_BACKOFF_MAX_SEC,
+    )
+
+
+# registry: (name, flag_getter, shutdown_fn, start_fn, task_getter).
+# task_getter는 module-global lambda — start_*가 reassign하는 최신 task를 call-time에 읽음.
+_USDT_WS_SUPERVISOR_REGISTRY = [
+    ("upbit", lambda: config.USDT_WS_UPBIT_ENABLED,
+     shutdown_usdt_ws_upbit_client, start_usdt_ws_upbit_client, lambda: usdt_ws_upbit_task),
+    ("bithumb", lambda: config.USDT_WS_BITHUMB_ENABLED,
+     shutdown_usdt_ws_bithumb_client, start_usdt_ws_bithumb_client, lambda: usdt_ws_bithumb_task),
+    ("coinone", lambda: config.USDT_WS_COINONE_ENABLED,
+     shutdown_usdt_ws_coinone_client, start_usdt_ws_coinone_client, lambda: usdt_ws_coinone_task),
+    ("korbit", lambda: config.USDT_WS_KORBIT_ENABLED,
+     shutdown_usdt_ws_korbit_client, start_usdt_ws_korbit_client, lambda: usdt_ws_korbit_task),
+    ("gopax", lambda: config.USDT_WS_GOPAX_ENABLED,
+     shutdown_usdt_ws_gopax_client, start_usdt_ws_gopax_client, lambda: usdt_ws_gopax_task),
+]
+
+
+async def _usdt_ws_supervisor_tick():
+    """§12.9.8 ② — watchdog 1회: 죽은 USDT WS collector task 부활.
+
+    각 source: flag enabled + not shutting_down + task.done() → backoff 통과 시
+    shutdown_*(teardown) → start_*(fresh). 정상 running은 skip(중복 방지), 단 마지막
+    restart 이후 5분+ 생존 시 backoff counter reset (crash-loop은 5분 생존 못 해 escalate
+    지속, 일시 crash 후 안정만 reset). task None(미시작/정상종료/disabled)은 자연 skip.
+    per-source 격리 — 한 source 실패가 다른 source watchdog를 막지 않음.
+    """
+    if _usdt_ws_supervisor_shutting_down:
+        return
+    now = time.time()
+    for name, flag_getter, shutdown_fn, start_fn, task_getter in _USDT_WS_SUPERVISOR_REGISTRY:
+        try:
+            if not flag_getter():
+                continue  # source disabled
+            task = task_getter()
+            if task is None:
+                continue  # 미시작 / 정상 종료 후 globals None
+            state = _usdt_ws_supervisor_state.setdefault(
+                name, {"consecutive": 0, "last_restart_at": None, "next_allowed_at": 0.0},
+            )
+            if not task.done():
+                # 건강하게 running — 마지막 restart 이후 5분+ 생존 시 backoff counter reset.
+                # (단일-tick-alive reset 금지: 45s-crash-loop이 30s tick에서 'alive 1회
+                #  관측 → reset → 재crash'를 반복해 backoff 무력화되기 때문.)
+                if (state["consecutive"] > 0 and state["last_restart_at"] is not None
+                        and now - state["last_restart_at"] >= _SUPERVISOR_RESET_AFTER_SEC):
+                    logger.info(
+                        "[usdt_ws.supervisor] %s 5분+ 생존 — backoff counter reset (was %d)",
+                        name, state["consecutive"],
+                    )
+                    state["consecutive"] = 0
+                    state["last_restart_at"] = None
+                continue
+            # task.done() = crash/비정상 종료 → 재시작 후보
+            if now < state["next_allowed_at"]:
+                continue  # backoff throttle
+            if _usdt_ws_supervisor_shutting_down:
+                return  # restart 직전 재확인 (belt-and-suspenders)
+            consecutive = state["consecutive"] + 1
+            logger.warning(
+                "[usdt_ws.supervisor] %s task dead — restart (consecutive=%d, next backoff=%.0fs)",
+                name, consecutive, _compute_supervisor_backoff(consecutive),
+            )
+            try:
+                await shutdown_fn()   # #8 idempotent teardown (구 client 잔여물 정리)
+                await start_fn()      # fresh client+task (start_* dedup 재사용)
+            except Exception:
+                logger.exception("[usdt_ws.supervisor] %s restart 실패", name)
+            # state 갱신은 restart try/except 밖 — 실패한 restart 시도도 backoff 소비.
+            # (의도: 지속 실패 source의 retry storm 방지. '실패는 카운트 안 함'으로
+            #  리팩토링하면 restart-fail-restart storm 재발 — 변경 금지.)
+            state["consecutive"] = consecutive
+            state["last_restart_at"] = now
+            state["next_allowed_at"] = now + _compute_supervisor_backoff(consecutive)
+        except Exception:
+            logger.exception("[usdt_ws.supervisor] %s tick 처리 실패 (격리)", name)

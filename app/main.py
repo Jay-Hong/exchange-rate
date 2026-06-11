@@ -564,6 +564,11 @@ async def lifespan(app: FastAPI):
     # Phase B.2 PR1 — pending tether topic trigger flush 정리.
     await tether_topic_trigger.shutdown_tether_topic_trigger()
 
+    # §12.9.8 ② — supervisor가 shutdown 체인 중 종료되는 task를 되살리지 못하도록 차단.
+    #   shutdown_usdt_ws_* 진입 전 set 필수 — stop()/task await 구간에서 globals가 아직
+    #   None이 아니라 'task None skip'만으론 race가 뚫림 (main.py shutdown 순서 직접 확인).
+    scheduler.signal_usdt_ws_supervisor_shutdown()
+
     # USDT WebSocket Upbit client 종료
     await scheduler.shutdown_usdt_ws_upbit_client()
 
