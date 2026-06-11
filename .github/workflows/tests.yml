@@ -1,0 +1,35 @@
+name: tests
+
+# 트리거: push to master(이 리포는 직커밋 흐름이라 실효적) + pull_request(미래 PR 대비,
+#   PR 없으면 무발화·무비용 — c4a51e5가 PR #1 선례). docs-only(**.md) push는 skip
+#   (이 리포는 docs-only commit 잦음 — 혼합 commit은 코드 파일이 있어 정상 실행).
+on:
+  push:
+    branches: [master]
+    paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+
+# 연속 push 시 구 run 자동 취소 (commit 몰리는 날 큐/비용 위생).
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # hang 시 기본 6h timeout 방지 (무료 한도 보호)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'  # Dockerfile python:3.13-slim 일치
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            requirements-test.txt
+      # runtime은 lock(Dockerfile과 동일 deps = production 일치 검증) + test deps.
+      - run: pip install -r requirements.lock.txt -r requirements-test.txt
+      # secret 불요: conftest가 firebase stub + DATABASE_URL→sqlite tempfile 격리,
+      #   config는 getenv-default라 .env 없이 동작 (2026-06-11 .env 숨김 실측 2097 passed).
+      - run: python -m pytest tests/ -q

@@ -1,0 +1,9 @@
+# CI/CD 전용 test 의존성 — runtime `requirements.lock.txt`에는 없음 (Docker 미설치).
+# CI는 `requirements.lock.txt`(runtime, Dockerfile과 동일) + 본 파일로 설치.
+#
+# pytest-asyncio 미포함: 전 async 테스트가 unittest `IsolatedAsyncioTestCase` 기반
+# (모듈 레벨 `async def test_` / `@pytest.mark.asyncio` 0). 2026-06-11 `pytest -p
+# no:asyncio`로 전체 suite 2097 passed = inert 실측 확인. 미래에 pytest-style
+# `async def test_`를 도입하면 그때 pytest-asyncio를 의식적으로 추가할 것 (crash-early
+# — 검증 안 된 inert 패키지를 미리 pin하면 drift 표면만 늘어남).
+pytest==9.0.1
