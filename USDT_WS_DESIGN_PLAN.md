@@ -1236,6 +1236,8 @@ G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 �
 
 **① heartbeat-alive · ticker-dead 복구** — [우선순위 1 / 작업량 M / migration 없음]
 
+> ✅ **완료** (2026-06-11, commit `ef99c66` + 배포 live): Gopax-only. `fetch_gopax_last_traded_ms`(/tickers, 신규·기존 fetch 무접촉) + controller 별 task detector(REST `lastTraded` > WS 저장값 → reconnect flag → recv loop `_SilentSessionError("ticker_dead")`) + race guard(valid tick flag clear) + metrics `ticker_dead_check_count`. 14 단위 테스트. 배포 후 live(normal, 평상시 발화 0 정상). 5-source 공통화는 후속.
+
 - 문제: heartbeat는 오는데 target ticker만 정지. 시장은 거래 중인데 우리 데이터만 dead.
 - 현 fix 미커버: `is_stale = max(tick,heartbeat) silence`라 heartbeat fresh면 not-stale → 재연결 안 됨. first-tick guard는 세션 시작 때만.
 - 탐지 신호: ticker degraded 지속 시 REST `lastTraded`(체결 시각)와 **저장된 WS last `lastTraded`** 비교 → REST가 앞서면 WS 데이터 dead 확정 → reconnect.
@@ -1244,6 +1246,8 @@ G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 �
 - 테스트: REST>WS→reconnect / REST==WS(조용한 시장)→무동작 / race.
 
 **② 5-source 공통 task supervisor** — [우선순위 2 / 작업량 M / migration 없음]
+
+> ✅ **완료** (2026-06-11, commit `db8461b` + 배포 + 활성): 30s watchdog(`_usdt_ws_supervisor_tick`) — done() task 감지 → `shutdown_*`(idempotent teardown) → `start_*`(fresh, dedup 가드 재사용). `USDT_WS_SUPERVISOR_ENABLED` env(default false → job 미등록, 배포 ≠ 동작 변화) + main.py shutdown race guard flag(stop()/task await 구간 globals not-None window 차단) + per-source backoff(consec 2부터 60·120·240… cap 300s, **영구 포기 X**, 생존 5분+ reset — 단일-tick-alive 아님) + per-source 격리. 16 단위 테스트. 활성 후 5 source 전수 감시 + restart 0(healthy). ⚠️ **KRX 1차 제외 — task-death gap 잔존**(reconcile cron은 contract 불일치 시에만 restart, ③와 함께 후속).
 
 - 문제: WS *연결* 죽음이 아니라 **collector task 자체**(asyncio task)가 종료(크래시/취소)되는 경우 — 되살릴 장치 없음. (legacy REST polling 안전망 5/25 비활성.)
 - 현 fix 미커버: 이번 fix는 *살아있는 task 안*에서 reconnect.
@@ -1256,7 +1260,7 @@ G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 �
 - 현재 완화: lifecycle ordering(죽은 세션 flush 후 새 세션 write)으로 *사실상* 방지 → robustness/defense-in-depth.
 - 설계: `source_rates`에 **신규 `exchange_ts` 컬럼(migration)** + insert 시 역행 거부. ⚠️ `crud.insert_source_rate_if_changed`는 **KRX 공유**(`krx_kis.py` 2곳) — 전역 수정 신중(opt-in param). `timestamp` 컬럼 의미 변경은 graph/cleanup 등 광범위 영향이라 **신규 컬럼이 안전**. 5 WS DB writer는 현재 timestamp 미전달 → plumbing 필요.
 
-**추천 순서**: ① → ② → ③ (서로 독립, 임의 순서 가능). **①② 먼저 묶으면** silent-data 재발 방지 + task-death 안전망을 migration 없이 가볍게 종료 (③은 migration + 이미 완화라 마지막).
+**추천 순서**: ① → ② → ③ (서로 독립, 임의 순서 가능). **①② land 완료** (2026-06-11, `ef99c66`·`db8461b` 배포). 남은 것 = **③**(migration + 이미 lifecycle ordering으로 완화 → 가장 비긴급) + **KRX task-death gap**(② USDT-only, KRX는 별 case).
 
 **참고**: fix commit `c4a51e5` / PR #1(merged, branch 삭제됨) / 진단 근거는 운영 metrics 로그(2026-06-03 캡처).
 
