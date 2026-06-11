@@ -1276,7 +1276,7 @@ class TestKorbitDbWriterScheduleAndFlush(unittest.IsolatedAsyncioTestCase):
         tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
         helper_calls = []
 
-        def fake_insert(*, db, source, asset, rate):
+        def fake_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append({"source": source, "asset": asset, "rate": rate})
 
         mock_db = MagicMock()
@@ -1299,7 +1299,7 @@ class TestKorbitDbWriterScheduleAndFlush(unittest.IsolatedAsyncioTestCase):
         writer = KorbitDbWriter(window_sec=0.1)
         helper_calls = []
 
-        def fake_insert(*, db, source, asset, rate):
+        def fake_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append(rate)
 
         mock_db = MagicMock()
@@ -1332,7 +1332,7 @@ class TestKorbitDbWriterRaceWithNewTick(unittest.IsolatedAsyncioTestCase):
         first_write_started = threading.Event()
         first_write_can_finish = threading.Event()
 
-        def slow_insert(*, db, source, asset, rate):
+        def slow_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append(rate)
             first_write_started.set()
             if rate == 1.0:
@@ -1366,7 +1366,7 @@ class TestKorbitDbWriterHelperExceptionIsolated(unittest.IsolatedAsyncioTestCase
     async def test_helper_exception_isolated(self):
         writer = KorbitDbWriter(window_sec=0.05)
 
-        def failing_insert(*, db, source, asset, rate):
+        def failing_insert(*, db, source, asset, rate, timestamp=None):
             raise RuntimeError("DB connection lost")
 
         mock_db = MagicMock()
@@ -1389,7 +1389,7 @@ class TestKorbitDbWriterCloseImmediateFlush(unittest.IsolatedAsyncioTestCase):
         writer = KorbitDbWriter(window_sec=10.0)  # 의도적으로 긴 window
         helper_calls = []
 
-        def fake_insert(*, db, source, asset, rate):
+        def fake_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append(rate)
 
         mock_db = MagicMock()

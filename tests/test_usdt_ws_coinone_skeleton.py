@@ -1157,7 +1157,7 @@ class TestCoinoneDbWriterScheduleAndFlush(unittest.IsolatedAsyncioTestCase):
         tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
         helper_calls = []
 
-        def fake_insert(*, db, source, asset, rate):
+        def fake_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append({"source": source, "asset": asset, "rate": rate})
 
         # crud.insert_source_rate_if_changed + get_db_context mock
@@ -1184,7 +1184,7 @@ class TestCoinoneDbWriterScheduleAndFlush(unittest.IsolatedAsyncioTestCase):
         writer = CoinoneDbWriter(window_sec=0.1)
         helper_calls = []
 
-        def fake_insert(*, db, source, asset, rate):
+        def fake_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append(rate)
 
         from unittest.mock import MagicMock
@@ -1225,7 +1225,7 @@ class TestCoinoneDbWriterRaceWithNewTick(unittest.IsolatedAsyncioTestCase):
         first_write_started = threading.Event()
         first_write_can_finish = threading.Event()
 
-        def slow_insert(*, db, source, asset, rate):
+        def slow_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append(rate)
             # thread 내부 — threading.Event는 thread-safe
             first_write_started.set()
@@ -1269,7 +1269,7 @@ class TestCoinoneDbWriterHelperExceptionIsolated(unittest.IsolatedAsyncioTestCas
         from app.crawlers.usdt_ws.coinone import CoinoneDbWriter
         writer = CoinoneDbWriter(window_sec=0.05)
 
-        def failing_insert(*, db, source, asset, rate):
+        def failing_insert(*, db, source, asset, rate, timestamp=None):
             raise RuntimeError("DB connection lost")
 
         from unittest.mock import MagicMock
@@ -1296,7 +1296,7 @@ class TestCoinoneDbWriterCloseImmediateFlush(unittest.IsolatedAsyncioTestCase):
         writer = CoinoneDbWriter(window_sec=10.0)  # 의도적으로 긴 window
         helper_calls = []
 
-        def fake_insert(*, db, source, asset, rate):
+        def fake_insert(*, db, source, asset, rate, timestamp=None):
             helper_calls.append(rate)
 
         from unittest.mock import MagicMock

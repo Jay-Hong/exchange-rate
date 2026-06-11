@@ -14,9 +14,12 @@ PR5 핵심 설계 (Codex 검토):
       write는 DB 부담 ↑. KRX `KrxDbWriter._flush_after_window` 패턴 mirror.
       Redis writer (PR4)는 "latest 최신성" 목적이라 tick-level 유지,
       DB writer는 "저장량 제어" 목적 분리.
-    - **`insert_source_rate_if_changed` signature 그대로 사용**: timestamp는
-      DB 자동 생성 (helper에 timestamp param 없음). exchange timestamp 저장
-      semantics는 schema 변경 영역 → 별 PR.
+    - **exchange event ts 저장** (§12.9.8 ③ super-lite, 2026-06-11): `insert_source_rate_
+      if_changed`의 기존 `timestamp` param에 tick의 exchange 체결/이벤트 시각
+      (`crud.event_ms_to_utc_naive(tick["timestamp_ms"])`)을 전달 — **schema 변경 없이**
+      out-of-order stale tick이 latest로 오판되지 않게(`timestamp DESC` 쿼리). 원래 "schema
+      변경 영역 → 별 PR"로 보류했으나, 기존 timestamp param + DESC 쿼리로 무-migration 해소.
+      Redis 가드(seen_at)와 동일 timestamp_ms 사용이라 시맨틱 일관 (5 source 전수 검증).
     - **`asyncio.to_thread` 격리**: sync SQLAlchemy 호출이 event loop 막지
       않음. `get_db_context()`로 session 생성/close가 thread 내부에서.
     - **race handling**: flush 진행 중 새 tick 도착 시 `_pending_tick` 갱신.
@@ -427,6 +430,9 @@ class UpbitDbWriter:
                 source=tick["source"],
                 asset=tick["asset"],
                 rate=tick["rate"],
+                # §12.9.8 ③ super-lite — exchange event ts를 저장 시각으로 (now() 아님).
+                #   out-of-order stale tick이 latest로 오판되지 않게 (timestamp DESC 쿼리).
+                timestamp=crud.event_ms_to_utc_naive(tick["timestamp_ms"]),
             )
 
     async def close(self) -> None:

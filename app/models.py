@@ -139,6 +139,10 @@ class SourceRate(Base):
     source = Column(String, nullable=False)   # 'upbit', 'bithumb', etc.
     asset = Column(String, nullable=False)    # 'usdt-krw', 'usd-krw-futures'
     rate = Column(Float, nullable=False)
+    # §12.9.8 ③ super-lite (2026-06-11): USDT WS row는 exchange event ts(naive UTC)를
+    # writer가 명시 전달. default(get_utc_now=save-time)는 미전달 경로(KRX 일부/legacy)만.
+    # 혼재: 구 row(super-lite 전)=save-time / 신 USDT WS row=exchange-time — 정상 tick은
+    # ≈동일, out-of-order stale만 (의도적으로) 과거 ts로 latest 회피.
     timestamp = Column(DateTime, nullable=False, default=get_utc_now)
 
     __table_args__ = (

@@ -427,6 +427,14 @@ class GopaxDbWriter:
                 source=tick["source"],
                 asset=tick["asset"],
                 rate=tick["rate"],
+                # §12.9.8 ③ super-lite — exchange event ts를 저장 시각으로 (now() 아님).
+                #   out-of-order stale tick이 latest로 오판되지 않게 (timestamp DESC 쿼리).
+                #   WS tick timestamp_ms = lastTraded(체결시각). **이 _sync_db_write는 WS tick +
+                #   REST probe fanout(_run_probe → 같은 db_writer.schedule) 둘 다 경유** → probe
+                #   tick(/ticker `time`=update time, fresh fetch라 ~now)도 자동 적용 = out-of-order
+                #   보호 확대(scoping이 지목한 'probe가 WS 회복 직후 도착' 시나리오 커버). 직접
+                #   crud 호출 경로(legacy polling / KRX)만 본 변경 미적용.
+                timestamp=crud.event_ms_to_utc_naive(tick["timestamp_ms"]),
             )
 
     async def close(self) -> None:

@@ -266,7 +266,7 @@ REST 결과 반영 범위 (옵션 B 채택 시 추가 결정):
 - 추가로 1초 window debounce → 동일 가격 연속 tick에서도 SELECT 비교 부담까지 절감
 - 구현: `UpbitDbWriter._flush_after_window` (KRX `KrxDbWriter` 패턴 mirror, [app/crawlers/usdt_ws/upbit.py](app/crawlers/usdt_ws/upbit.py))
 - close 시 1초 window 기다리지 않고 마지막 pending tick 즉시 flush — shutdown 마지막 tick 보장
-- helper signature / schema 변경 없음 (timestamp 자동 생성, exchange timestamp 저장은 별도 PR)
+- timestamp: §12.9.8 ③ **super-lite (2026-06-11)** — DB writer가 tick의 exchange 체결/이벤트 시각을 기존 `insert_source_rate_if_changed(timestamp=)` param(`crud.event_ms_to_utc_naive`)으로 전달. **schema 변경 없음** (기존 `timestamp DESC` 쿼리가 latest 결정 → out-of-order stale이 latest 못 덮음). 원래 "exchange timestamp 저장은 별도 PR(schema 변경 영역)"로 보류했으나 무-migration 해소. DB writer 경유 전체(WS tick + REST probe fanout) 적용 — 직접 crud 호출(KRX/legacy)만 미적용.
 
 ## 8. Feature flag / Rollback / Smoke 기준
 
@@ -1253,7 +1253,9 @@ G1~G7 + PR 2e + activation + threshold tuning + heartbeat state cleanup까지 �
 - 현 fix 미커버: 이번 fix는 *살아있는 task 안*에서 reconnect.
 - 설계: `app/scheduler.py`의 5개 `start_usdt_ws_*_client`/`_run_usdt_ws_*_client`(현재 crash 시 log-only)에 공용 supervisor — `task.done()` 감지 또는 주기 watchdog → 재기동 + shutdown race / 중복 task 방지 / backoff. KRX wrapper도 동일 log-only 구조라 함께 검토 가능. all-source 안전망.
 
-**③ DB exchange-ts 정합** — [우선순위 3 / 작업량 M~L / **migration 필요** / 가장 비긴급]
+**③ DB exchange-ts 정합** — [우선순위 3 / 가장 비긴급]
+
+> ✅ **super-lite first PR land** (2026-06-11, 세 리뷰어 수렴): 아래 설계(신규 `exchange_ts` 컬럼 + migration)는 **불필요로 판명**. 기존 `insert_source_rate_if_changed(timestamp=)` param + `timestamp DESC` 쿼리가 이미 받을 수 있어, USDT 5 WS DB writer가 tick의 exchange event ts(`crud.event_ms_to_utc_naive`)를 그 param으로 전달 → **out-of-order stale이 latest로 오판되지 않음 (migration/watermark/read-path 0)**. DB writer 경유 전체(WS tick + REST probe fanout) 적용, 직접 crud 호출(KRX/legacy)만 미적용. 핵심 근거 = **DB는 history store**라 stale도 제 ts로 보존(Redis latest-only는 skip이 맞지만 DB는 다름). Redis 가드(seen_at)와 동일 `timestamp_ms` 사용이라 시맨틱 일관(5 source 전수 확인). full(영속 컬럼)은 추가 가치(재시작 직후 첫 write 가드)가 plumbing 비용 대비 약해 **보류·폐기**. KRX는 KIS frame ts 시맨틱 검토 후 별 PR. 아래는 **super-lite 전 원 설계 기록**(역사 보존):
 
 - 문제: out-of-order write 시 stale value가 늦게 도착해 '최신'으로 기록 가능. Redis는 c4a51e5 `<` 가드로 차단, **DB 미차단**.
 - 현 fix 미커버: DB writer가 save-time(now())만 기록 → 거래 시각 역행 미구분. latest 쿼리 `timestamp DESC, id DESC`(`crud.py`).

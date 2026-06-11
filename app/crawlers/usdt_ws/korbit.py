@@ -376,6 +376,9 @@ class KorbitDbWriter:
                 source=tick["source"],
                 asset=tick["asset"],
                 rate=tick["rate"],
+                # §12.9.8 ③ super-lite — exchange event ts를 저장 시각으로 (now() 아님).
+                #   out-of-order stale tick이 latest로 오판되지 않게 (timestamp DESC 쿼리).
+                timestamp=crud.event_ms_to_utc_naive(tick["timestamp_ms"]),
             )
 
     async def close(self) -> None:

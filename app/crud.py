@@ -1815,6 +1815,17 @@ def insert_source_rate_unconditional(
     return True
 
 
+def event_ms_to_utc_naive(timestamp_ms: int) -> datetime:
+    """exchange event epoch-ms → UTC naive datetime (source_rates.timestamp 저장용).
+
+    §12.9.8 ③ super-lite — USDT WS DB writer가 tick의 exchange 체결/이벤트 시각을
+    `insert_source_rate_if_changed(timestamp=)`로 넘길 때 사용. epoch ms는 UTC이므로
+    fromtimestamp(tz=utc) 후 tzinfo 제거 — `SourceRate.timestamp`는 naive
+    ("KST aware 금지" 계약). 5 writer 공용(DRY) + 변환 규칙 단일 지점.
+    """
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=dt_timezone.utc).replace(tzinfo=None)
+
+
 def insert_source_rate_if_changed(
     db: Session,
     source: str,

@@ -1416,15 +1416,19 @@ class TestUpbitDbWriter(unittest.IsolatedAsyncioTestCase):
         mock_ctx.__enter__ = MagicMock(return_value=mock_session)
         mock_ctx.__exit__ = MagicMock(return_value=None)
 
+        tick = _make_tick(rate=1486.0)
         with patch("app.database.get_db_context", return_value=mock_ctx), \
              patch("app.crud.insert_source_rate_if_changed") as mock_insert:
-            UpbitDbWriter._sync_db_write(_make_tick(rate=1486.0))
+            UpbitDbWriter._sync_db_write(tick)
 
+        # §12.9.8 ③ super-lite — exchange event ts(timestamp_ms→UTC naive)를 timestamp로 전달.
+        from app import crud
         mock_insert.assert_called_once_with(
             db=mock_session,
             source="upbit",
             asset="usdt-krw",
             rate=1486.0,
+            timestamp=crud.event_ms_to_utc_naive(tick["timestamp_ms"]),
         )
 
 
