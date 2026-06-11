@@ -327,6 +327,36 @@ def fetch_gopax_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Option
         return None
 
 
+def fetch_gopax_last_traded_ms(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[int]:
+    """Gopax /tickers bulk → USDT-KRW lastTraded(체결시각 epoch ms) 조회.
+
+    §12.9.8 ① heartbeat-alive·ticker-dead detector 전용. WS frame의 timestamp_ms도
+    lastTraded 기반(`gopax.py` `_normalize_tick`)이라 **동일 필드·단위(ms)·clock domain**
+    → 변환 없이 직결 비교. `fetch_gopax_usdt_tick`(/ticker, write-path)과 **별 함수로
+    분리** → 기존 fetch shape / Redis `<` regression guard / DB·Alert timestamp 의미
+    무접촉 (Note 2 차단).
+
+    Returns:
+        lastTraded epoch ms (int > 0) — USDT-KRW 항목.
+        None — HTTP/parse 실패 / list 아님 / USDT-KRW 항목 부재 / lastTraded 누락·0
+        (caller가 None 처리, propagate X).
+    """
+    url = "https://api.gopax.co.kr/tickers"
+    try:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if item.get("tradingPairName") == "USDT-KRW":
+                last_traded = int(item.get("lastTraded", 0) or 0)
+                return last_traded if last_traded > 0 else None
+        return None
+    except (requests.RequestException, KeyError, ValueError, TypeError):
+        return None
+
+
 def _fetch_gopax() -> Optional[float]:
     """기존 polling helper — fetch_gopax_usdt_tick 재사용 (rate만 반환).
 

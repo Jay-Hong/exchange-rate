@@ -134,7 +134,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -494,6 +494,8 @@ class GopaxRestFallbackController:
         *,
         cooldown_sec: float = FALLBACK_COOLDOWN_SEC,
         probe_timeout_sec: float = FALLBACK_PROBE_TIMEOUT_SEC,
+        ws_last_traded_getter: Optional[Callable[[], Optional[int]]] = None,
+        request_ticker_dead_reconnect: Optional[Callable[[], None]] = None,
     ) -> None:
         self._redis_writer = redis_writer
         self._db_writer = db_writer
@@ -503,6 +505,18 @@ class GopaxRestFallbackController:
         self._in_flight: bool = False
         self._cooldown_until: float = 0.0
         self._pending_task: Optional[asyncio.Task] = None
+        # §12.9.8 ① — heartbeat-alive·ticker-dead detector (별 task, _run_probe 무접촉).
+        #   ws_last_traded_getter: client의 마지막 WS lastTraded(ms) 반환.
+        #   request_ticker_dead_reconnect: client의 reconnect flag set.
+        #   둘 중 하나라도 None이면 detector 비활성 (기존 caller 동작 100% 불변).
+        #   probe(_run_probe)와 독립 in-flight/cooldown — /ticker fanout 성공·실패와
+        #   무관하게 /tickers 비교 실행 (외부 검토 #1: fanout 실패가 detector 무력화 차단).
+        self._ws_last_traded_getter = ws_last_traded_getter
+        self._request_ticker_dead_reconnect = request_ticker_dead_reconnect
+        self._tdc_in_flight: bool = False
+        self._tdc_cooldown_until: float = 0.0
+        self._pending_ticker_dead_task: Optional[asyncio.Task] = None
+        self._ticker_dead_check_count: int = 0
         # G6b — scheduled probe counter (Codex 권고).
         # in-flight/cooldown/no-loop skip 미증가, loop.create_task() 성공 시점에만 +1.
         self._scheduled_probe_count: int = 0
@@ -557,9 +571,86 @@ class GopaxRestFallbackController:
         self._scheduled_probe_count += 1
 
     def reset_cooldown(self) -> None:
-        """normal 복귀 시 호출 — cooldown clear. 다음 degraded 즉시 1회 probe 보장."""
+        """normal 복귀 시 호출 — probe + detector cooldown clear. 다음 degraded 즉시 1회 보장."""
         self._cooldown_until = 0.0
+        self._tdc_cooldown_until = 0.0
         logger.debug("[usdt_ws.gopax.fallback] cooldown reset on normal recovery")
+
+    @property
+    def ticker_dead_check_count(self) -> int:
+        """§12.9.8 ① — ticker-dead detector schedule 누적 (read-only, telemetry)."""
+        return self._ticker_dead_check_count
+
+    def schedule_ticker_dead_check(self, reason: str) -> None:
+        """§12.9.8 ① — sync: in-flight/cooldown 체크 후 ticker-dead detector task 생성.
+
+        `_set_ticker_freshness_status("degraded")`에서 schedule_probe와 **동일 trigger
+        병렬 호출** (1 trigger, 2 fetch — /ticker fanout + /tickers detector, 엔드포인트
+        상이). detector 미설정(getter/request None) 시 no-op (기존 caller 불변).
+        probe와 독립 in-flight/cooldown.
+        """
+        if self._ws_last_traded_getter is None or self._request_ticker_dead_reconnect is None:
+            return
+        now = time.time()
+        if self._tdc_in_flight or now < self._tdc_cooldown_until:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._pending_ticker_dead_task = loop.create_task(self._run_ticker_dead_check(reason))
+        self._tdc_in_flight = True
+        self._ticker_dead_check_count += 1
+
+    async def _run_ticker_dead_check(self, reason: str) -> None:
+        """§12.9.8 ① — /tickers lastTraded vs WS 저장 lastTraded 비교 → REST 앞서면
+        client reconnect flag set. **probe(_run_probe)와 독립** — /ticker fanout 성공·
+        실패 무관 (외부 검토 #1).
+
+        무동작 조건: REST==WS(조용한 시장) / REST None(parse·HTTP 실패) /
+        WS None(첫 tick 전 — None guard, 외부 검토 #2). 실패 전부 격리 (WS session 영향 0).
+
+        2단 인계 (외부 검토 #3): flag set → recv loop가 _SilentSessionError raise →
+        reconnect. reconnect 후에도 ticker-dead 지속이면 새 session의 no-first-tick
+        guard(FIRST_TICK_TIMEOUT)가 인계 → detector 1회 발화로 충분, 무한 probe-reconnect
+        루프 구조적 부재.
+        """
+        try:
+            rest_last_traded = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_gopax_last_traded),
+                timeout=self._probe_timeout_sec,
+            )
+            ws_last_traded = self._ws_last_traded_getter() if self._ws_last_traded_getter else None
+            if rest_last_traded is None or ws_last_traded is None:
+                return  # None guard — 비교 skip
+            if rest_last_traded > ws_last_traded:  # strict > (margin 0, 같은 clock domain)
+                logger.warning(
+                    "[usdt_ws.gopax.fallback] ticker-dead 감지 (REST lastTraded=%d > "
+                    "WS=%d, reason=%s) — reconnect 요청",
+                    rest_last_traded, ws_last_traded, reason,
+                )
+                if self._request_ticker_dead_reconnect is not None:
+                    self._request_ticker_dead_reconnect()
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[usdt_ws.gopax.fallback] ticker-dead check timeout (%.1fs, reason=%s)",
+                self._probe_timeout_sec, reason,
+            )
+        except Exception:
+            logger.exception(
+                "[usdt_ws.gopax.fallback] ticker-dead check error (격리, reason=%s)", reason,
+            )
+        finally:
+            self._tdc_cooldown_until = time.time() + self._cooldown_sec
+            self._tdc_in_flight = False
+
+    @staticmethod
+    def _fetch_gopax_last_traded() -> Optional[int]:
+        """sync REST fetch (/tickers lastTraded) — to_thread 내부 실행. 모듈 내부 import (순환 회피)."""
+        from app.crawlers.usdt_sources import fetch_gopax_last_traded_ms
+        return fetch_gopax_last_traded_ms()
 
     async def _run_probe(self, reason: str) -> None:
         """REST probe → normalized tick → fanout (Redis + DB + Alert).
@@ -679,17 +770,18 @@ class GopaxRestFallbackController:
             self._backoff_in_flight = False
 
     async def close(self) -> None:
-        """pending probe task cancel + await. WS session 종료 시 호출."""
-        task = self._pending_task
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("[usdt_ws.gopax.fallback] pending task cleanup 실패")
-        self._pending_task = None
+        """pending probe task + ticker-dead detector task cancel + await. WS session 종료 시 호출."""
+        for attr in ("_pending_task", "_pending_ticker_dead_task"):
+            task = getattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("[usdt_ws.gopax.fallback] %s cleanup 실패", attr)
+            setattr(self, attr, None)
 
 
 class GopaxWsClient:
@@ -724,6 +816,13 @@ class GopaxWsClient:
         self._consecutive_reconnect_attempts: int = 0
         # Fix — 현재 session 시작 시각 (no-first-tick guard 기준, _run_one_session에서 set).
         self._session_started_at: float = 0.0
+        # §12.9.8 ① — heartbeat-alive·ticker-dead detector state.
+        #   _last_ws_traded_ms: 마지막 valid WS tick의 lastTraded(체결시각 ms, _normalize_tick).
+        #     degraded probe 시 controller가 REST /tickers lastTraded와 비교.
+        #     valid tick에서 갱신 + flag clear(race guard), session 시작 시 None 리셋.
+        #   _ticker_dead_reconnect_requested: controller detector가 set → recv loop가 raise.
+        self._last_ws_traded_ms: Optional[int] = None
+        self._ticker_dead_reconnect_requested: bool = False
         self._status_transition_count: dict[str, int] = {
             "connection_normal": 0,
             "connection_reconnecting": 0,
@@ -746,6 +845,9 @@ class GopaxWsClient:
             redis_writer=self._redis_writer,
             db_writer=self._db_writer,
             alert_evaluator=self._alert_evaluator,
+            # §12.9.8 ① — detector wiring: controller가 client state를 getter/setter로 접근.
+            ws_last_traded_getter=lambda: self._last_ws_traded_ms,
+            request_ticker_dead_reconnect=self._request_ticker_dead_reconnect,
         )
 
     @staticmethod
@@ -956,6 +1058,12 @@ class GopaxWsClient:
             self._liveness.max_frame_gap_sec,
         )
 
+    def _request_ticker_dead_reconnect(self) -> None:
+        """§12.9.8 ① — controller detector(/tickers lastTraded > WS)가 호출 → reconnect
+        flag set. recv loop가 다음 iter에서 감지해 _SilentSessionError("ticker_dead") raise.
+        flag는 valid WS tick 수신 시 clear(race guard) + session 시작 시 리셋."""
+        self._ticker_dead_reconnect_requested = True
+
     def _set_ticker_freshness_status(self, new_status: str) -> None:
         """G4/G6b — ticker freshness status 전이 + counter + log + (G6b) fallback hook.
 
@@ -980,6 +1088,9 @@ class GopaxWsClient:
         # G6b — fallback hook (Coinone C6b mirror).
         if new_status == "degraded":
             self._fallback_controller.schedule_probe(reason="ticker_degraded")
+            # §12.9.8 ① — 동일 degraded trigger에서 ticker-dead detector 병렬 schedule
+            #   (1 trigger, 2 fetch — /ticker fanout + /tickers detector, 독립 task).
+            self._fallback_controller.schedule_ticker_dead_check(reason="ticker_degraded")
         elif prev != "normal" and new_status == "normal":
             self._fallback_controller.reset_cooldown()
 
@@ -1037,6 +1148,10 @@ class GopaxWsClient:
             # G4 — active session 시작: liveness reset + connection_status normal.
             self._liveness.reset_active_session()
             self._session_started_at = time.time()  # Fix — no-first-tick guard 기준
+            # §12.9.8 ① — 새 session: ticker-dead detector state 리셋
+            #   (이전 session의 _last_ws_traded_ms / flag carry-over 차단).
+            self._last_ws_traded_ms = None
+            self._ticker_dead_reconnect_requested = False
             logger.info("[usdt_ws.gopax] connected url=%s", GOPAX_WS_URL)
             payload = self._build_subscribe_payload()
             await ws.send(json.dumps(payload))
@@ -1083,6 +1198,19 @@ class GopaxWsClient:
                             STALE_AFTER_SEC, tick_age,
                         )
                         raise _SilentSessionError("stale")
+
+                    # §12.9.8 ① — heartbeat-alive·ticker-dead reconnect: degraded probe의
+                    # detector가 REST 체결시각 > WS 저장값을 확인하면 flag set → 여기서
+                    # raise (probe는 별 task라 직접 raise 불가). 5/28형(tick·heartbeat 모두
+                    # 정지)은 위 stale check가 잡지만, 이 모드는 heartbeat가 살아 is_stale=
+                    # False라 별도 분기 필요. flag는 valid tick에서 clear(race guard).
+                    if self._ticker_dead_reconnect_requested:
+                        self._set_connection_status("stale")
+                        logger.warning(
+                            "[usdt_ws.gopax] ticker dead confirmed (REST 체결시각 > WS "
+                            "last_traded=%s) — reconnect", self._last_ws_traded_ms,
+                        )
+                        raise _SilentSessionError("ticker_dead")
 
                     # G4 — ticker freshness 전이 (tick silence age 기반).
                     # G6b: degraded → fallback_controller.schedule_probe (위 _set_ticker_freshness_status에서 처리).
@@ -1133,6 +1261,12 @@ class GopaxWsClient:
                     # 그 외 frame → parse + handle + G5 Redis fanout + G6a DB fanout + G7 Alert fanout.
                     tick = self._handle_message(raw)
                     if tick is not None:
+                        # §12.9.8 ① — WS 생존 신호: 마지막 체결시각(lastTraded) 저장 +
+                        #   ticker-dead flag clear (race guard — probe 진행 중 fresh tick
+                        #   도착 시 reconnect 무력화). probe fanout은 이 경로 미경유 →
+                        #   probe tick이 _last_ws_traded_ms 오염 구조적 불가 (검토 invariant).
+                        self._last_ws_traded_ms = tick["timestamp_ms"]
+                        self._ticker_dead_reconnect_requested = False
                         # G5: valid tick → Redis fanout (Bithumb U5 mirror).
                         # invalid/Primus/control frame은 tick=None이라 schedule 호출 0.
                         self._redis_writer.schedule(tick)
@@ -1297,12 +1431,13 @@ class GopaxWsClient:
             )
 
     async def _summary_log_loop(self) -> None:
-        """PR 2e — start lifetime 동안 60s cycle metric INFO emit (Gopax 10 fields).
+        """PR 2e — start lifetime 동안 60s cycle metric INFO emit (Gopax 11 fields).
 
-        Coinone `_summary_log_loop` 1:1 mirror (Gopax는 Coinone형 2-signal status +
-        2 counter 조합이라 10 fields union).
+        Coinone `_summary_log_loop` 10 fields mirror + §12.9.8 ① Gopax-specific
+        `ticker_dead_check_count` 1개 추가 (Gopax는 Coinone형 2-signal status +
+        2 counter + detector counter 1).
 
-        Emit metric (10개, state 8 + counter 2):
+        Emit metric (11개, state 8 + counter 3):
             - frames_per_min: `_liveness.frame_count_total` 차이 / elapsed
             - last_tick_age: `now - _liveness.last_tick_at` (없으면 -1.0 sentinel)
             - last_heartbeat_age: `now - _liveness.last_heartbeat_at` (없으면 -1.0 sentinel)
@@ -1314,6 +1449,8 @@ class GopaxWsClient:
               (connection 3 + ticker 3, Coinone 동일)
             - redis_saturation_count: `_redis_writer.saturation_count` (G5 land)
             - fallback_probe_scheduled_count: `_fallback_controller.scheduled_probe_count` (G6b land)
+            - ticker_dead_check_count: `_fallback_controller.ticker_dead_check_count`
+              (§12.9.8 ① heartbeat-alive·ticker-dead detector schedule 누적 — Gopax-specific)
 
         Sentinel 정책 (Coinone/Korbit/Upbit/Bithumb 동일):
             last_tick_at / last_heartbeat_at이 None일 경우 (첫 tick/PONG 전) -1.0
@@ -1350,7 +1487,8 @@ class GopaxWsClient:
                 "reconnect_attempts=%d "
                 "status_transitions=%s "
                 "redis_saturation_count=%d "
-                "fallback_probe_scheduled_count=%d",
+                "fallback_probe_scheduled_count=%d "
+                "ticker_dead_check_count=%d",
                 frames_per_min,
                 last_tick_age, last_heartbeat_age,
                 self._liveness.max_frame_gap_sec,
@@ -1359,6 +1497,7 @@ class GopaxWsClient:
                 transitions_str,
                 self._redis_writer.saturation_count,
                 self._fallback_controller.scheduled_probe_count,
+                self._fallback_controller.ticker_dead_check_count,
             )
 
     async def stop(self) -> None:
