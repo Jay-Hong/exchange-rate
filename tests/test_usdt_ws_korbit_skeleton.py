@@ -1165,18 +1165,28 @@ class TestKorbitRedisWriterClose(unittest.IsolatedAsyncioTestCase):
         writer = KorbitRedisWriter()
         tick = {"source": "korbit", "asset": "usdt-krw", "rate": 1488.0, "timestamp_ms": 1779194593306}
 
-        async def slow_helper(**kw):
-            await asyncio.sleep(10.0)
-            return UsdtLatestWriteOutcome.SET
+        started = asyncio.Event()
+        blocked = asyncio.Event()
+
+        async def slow_to_thread(*args, **kwargs):
+            # _write_async가 진짜 대기 → close(timeout)이 task를 실제로 cancel.
+            # 구: sync 기대 helper에 async side_effect → to_thread가 코루틴 즉시 반환 →
+            #     write 즉시 완료(cancel 경로 미실증 공허) + orphan 코루틴 경고. 강화 fix.
+            started.set()
+            await blocked.wait()
 
         with patch(
-            "app.crawlers.usdt_ws.korbit.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            side_effect=slow_helper,
+            "app.crawlers.usdt_ws.korbit.asyncio.to_thread",
+            slow_to_thread,
         ):
             writer.schedule(tick)
-            self.assertGreater(len(writer._tasks), 0)
+            task = next(iter(writer._tasks))
+            # blocker 실진입 확인 (write가 진짜 대기 상태) → 공허 검증 차단
+            await asyncio.wait_for(started.wait(), timeout=1.0)
             await writer.close(timeout=0.1)
-            self.assertEqual(len(writer._tasks), 0)
+            # 직접 잠금: timeout 후 해당 task 실제 cancel + _tasks 정리
+            self.assertTrue(task.cancelled())
+            self.assertEqual(writer._tasks, set())
 
 
 class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):

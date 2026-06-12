@@ -1110,7 +1110,9 @@ class TestGopaxRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
         """_tasks < MAX_PENDING_WRITES → 정상 schedule → counter 0 유지."""
         writer = GopaxRedisWriter()
         with patch("app.crawlers.usdt_ws.gopax.asyncio.create_task") as mock_create:
-            mock_create.return_value = MagicMock()
+            # schedule()이 인자로 만든 _write_async 코루틴을 close해 "never awaited"
+            # 경고 차단 (테스트 위생, app 무변경). saturation_count 검증 의도 불변.
+            mock_create.side_effect = lambda coro: coro.close() or MagicMock()
             writer.schedule(_make_valid_tick())
         self.assertEqual(writer.saturation_count, 0)
 

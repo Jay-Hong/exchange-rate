@@ -1037,19 +1037,28 @@ class TestCoinoneRedisWriterClose(unittest.IsolatedAsyncioTestCase):
         writer = CoinoneRedisWriter()
         tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
 
-        async def slow_helper(**kw):
-            await asyncio.sleep(10.0)
-            return UsdtLatestWriteOutcome.SET
+        started = asyncio.Event()
+        blocked = asyncio.Event()
+
+        async def slow_to_thread(*args, **kwargs):
+            # _write_async가 진짜 대기 → close(timeout)이 task를 실제로 cancel.
+            # 구: sync 기대 helper에 async side_effect → to_thread가 코루틴 즉시 반환 →
+            #     write 즉시 완료(cancel 경로 미실증 공허) + orphan 코루틴 경고. 강화 fix.
+            started.set()
+            await blocked.wait()
 
         with patch(
-            "app.crawlers.usdt_ws.coinone.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
-            side_effect=slow_helper,
+            "app.crawlers.usdt_ws.coinone.asyncio.to_thread",
+            slow_to_thread,
         ):
             writer.schedule(tick)
-            self.assertGreater(len(writer._tasks), 0)
-            # timeout 0.1s — slow_helper 끝나지 않음
+            task = next(iter(writer._tasks))
+            # blocker 실진입 확인 (write가 진짜 대기 상태) → 공허 검증 차단
+            await asyncio.wait_for(started.wait(), timeout=1.0)
             await writer.close(timeout=0.1)
-            self.assertEqual(len(writer._tasks), 0)  # cancel 후 clear
+            # 직접 잠금: timeout 후 해당 task 실제 cancel + _tasks 정리
+            self.assertTrue(task.cancelled())
+            self.assertEqual(writer._tasks, set())
 
 
 class TestRunOneSessionRedisWiring(unittest.IsolatedAsyncioTestCase):
@@ -2211,7 +2220,9 @@ class TestCoinoneRedisWriterSaturationCount(unittest.IsolatedAsyncioTestCase):
         writer = CoinoneRedisWriter()
         tick = {"source": "coinone", "asset": "usdt-krw", "rate": 1487.0, "timestamp_ms": 1779106625946}
         with patch("app.crawlers.usdt_ws.coinone.asyncio.create_task") as mock_create:
-            mock_create.return_value = MagicMock()
+            # schedule()이 인자로 만든 _write_async 코루틴을 close해 "never awaited"
+            # 경고 차단 (테스트 위생, app 무변경). saturation_count 검증 의도 불변.
+            mock_create.side_effect = lambda coro: coro.close() or MagicMock()
             writer.schedule(tick)
 
         self.assertEqual(writer.saturation_count, 0)
