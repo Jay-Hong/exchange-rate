@@ -615,6 +615,32 @@ signal에 의존하는 구조 → mirror cycle 격하/제거의 전제 조건이
 - legacy broadcast + fx:* + usdt:krw 3 채널 dual-emit 정책 일관성 (§6.5)
 - 작업 분량/위험 평가 (대규모 refactor)
 
+#### 6.6.1 Characterization-first 스코핑 + 현 계약 catalog + PR A land (2026-06-13, 리뷰 수렴)
+
+KRX Stage E 안정화 후 본 phase 진입. 두 세션 Claude + Codex 리뷰 수렴으로 read-only 계약 catalog 확정 + PR A(characterization, behavior-change-0) land. **본 절이 PR B의 fixed anchor**.
+
+**현 계약 catalog (확정)**:
+
+| 층 | 사실 |
+| --- | --- |
+| 저장 함수 ([crud.py:156](app/crud.py#L156) bank / [:271](app/crud.py#L271) investing) | insert-if-changed(per-pair DB SELECT, `timestamp DESC,id DESC`, None skip) → count>0 시 단일 `db.commit()` → `_write_changed_*_to_redis` → `process_rate_alerts`. **순서 잠금**(docstring). 출력 `new_records_count`. timestamp=`models.get_utc_now()`(save-time — 은행 고시는 관측=의미라 USDT exchange-ts 문제 없음). 2 shape: FCM `{bank,currency,rate}` / topic-native `{source,asset,rate,timestamp=KST}`. 실패 격리: redis best-effort / alert try/except / commit 실패는 상위 전파 |
+| Redis 직접 write ([crud.py:102](app/crud.py#L102)/[134](app/crud.py#L134)) | `latest:bank:*`/`latest:investing:*` **latest-only** (write-through topic trigger 없음 = β 핵심 격차). writer는 **bool 반환**(`_write_changed_*`가 무시) → 실패 = exception ∪ False, 둘 다 best-effort(mirror 3s 복구) |
+| Legacy hook = topic primary bridge ([main.py:741](app/main.py#L741)) | broadcast 매초 `is_changed`(whole-payload JSON diff) + `FX_TOPIC_ENABLED` → `fx_topic_publisher.safe_publish_all_fx_snapshots(db)`가 **모든 fx snapshot DB 재발행**(source-routed 아님). **`FX_TOPIC_ENABLED` production=true** (config default false override, 운영 컨테이너 printenv 확인) → fx: 발행 **live** → PR D는 dead-code 제거 아닌 **write-through 인수 후 전환** |
+| outer try/except ([main.py:798](app/main.py#L798)) FACT | publisher 호출(730/741)이 함수 전체 `try`(664)/`except`(798)/`finally: db.close()`(806) 안. **publisher raise → outer except가 crash backstop(프로세스 생존)** / 단 그 cycle의 legacy send(743+)는 유실 → **wrapper no-raise = per-cycle send 가용성 계약**(2층) |
+| Blast radius | 9 은행 27 call site(Request+Selenium fallback) + investing 1. 다수 호출부가 count를 상위로 return → **signature(반환 타입 포함) 유지 선호**(호출부 호환) |
+| Phase B.2 교차 | [USDT_WS_DESIGN_PLAN §14.7](USDT_WS_DESIGN_PLAN.md) "legacy piggyback 격하" 미결 = β PR D와 동일 대상(중복 아닌 **흡수 관계**) |
+
+**PR 분할 (characterization-first, KRX A/B/C behavior-change-0 패턴 재사용)**:
+
+- **PR A — land (`bb653ee`, 2026-06-13, tests-only / production code 0, CI green / 0 warnings)**: broadcast wiring 3(changed+active→publisher 2 + legacy send + record_success / unchanged→미호출 + record_skip(no_changes) / active-0→publisher 호출 + send 미호출 + record_skip(no_connections), **각 record_failure 미호출 positive control로 outer-except vacuous 차단**) + crud isolation 4(process_rate_alerts 예외→insert 미전파 / Redis False-return→alert 계속 + commit 무영향, 각 Bank/Investing). (v) publisher-raise 제외(내부 격리는 test_fx_topic_publisher가 잠금 + outer except backstop). 신규 `tests/test_broadcast_rates_once_wiring.py` + `tests/test_source_direct_write.py` +class. conftest harness(firebase stub + sqlite)로 main.py import.
+- **PR B (behavior-change-0)**: 저장 함수 → observation → {Redis writer, DB writer, Alert evaluator} 단계 분리(DTO/adapter). 외부 signature + 호출 순서 유지. helper 추출은 본 PR 범위(PR A에서 금지였던 것).
+- **PR C (write-through 도입)**: source-level fx topic trigger router(**β 유력안** — Redis seen_at/mirrored_at 매 fetch, rate/timestamp는 값 변경 시만) + **trigger = rate 변경 또는 의미 있는 freshness/state 변화**(기존 §6.6 topic trigger 정책 일치) + Redis outcome 명시(bool→outcome) + cold-start/miss DB fallback + fx:* / usdt:krw routing + DB SELECT→Redis dedup. α/β/γ 최종 확정은 Open.
+- **PR D (legacy hook 격하)**: write-through 안정화 + production `FX_TOPIC_ENABLED`(=true) canary 확인 후 main.py broadcast-diff fx hook 격하/제거(B.2 §14.7). legacy WebSocket dual-emit 유지.
+
+**Open (미해결, 스코핑 결정 필요)**: α/β/γ 확정(β 유력) / 진입조건(§12.8 선결 vs 별도 우선순위 — 현재 후자로 진입) / DB→Redis dedup 정확성(miss/cold-start fallback 정책).
+
+**정정 이력 (미래 독자 — 부분-read 단정 반복 방지)**: 본 catalog는 3연속 정정 후 확정 — (1) "characterization 공백" over-claim(실제 `TestInsertBankRatesCallOrder`/`...Investing...`가 순서/commit-fail/unchanged/redis-exception→alert/대칭 이미 잠금) → (2) "(v) call-site 무가드" → (3) **outer try/except(798) 발견**(세 리뷰어 모두 call-site만 보고 함수 경계 미확인). **교훈: 함수 계약 단정 전 try/except/finally 경계까지 읽을 것.**
+
 ---
 
 ## 7. 참조
