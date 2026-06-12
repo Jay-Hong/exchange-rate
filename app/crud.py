@@ -3,6 +3,7 @@
 # 표준 라이브러리
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -153,25 +154,30 @@ def _write_changed_investing_rates_to_redis(redis_updates: list) -> None:
             )
 
 
-def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
+@dataclass(frozen=True)
+class ChangedRate:
+    """변경된 환율 1건의 내부 DTO (PR B — Bank/Investing β observation fanout 1단계).
+
+    staging이 insert-if-changed 통과한 **변경값만** 생성. sink(Redis/Alert) adapter가
+    기존 dict shape로 변환. PR B는 changes-only — §4.1.3 `seen_at`(값 변경 무관 수신)
+    /`rate_changed_at` 분리는 PR C(freshness). `changed_at`은 현행
+    `models.get_utc_now()`(save-time) 그대로.
     """
-    은행 환율 DB 저장 + Redis direct write + 알림 조건 체크
+    source: str
+    asset: str
+    rate: float
+    changed_at: datetime
 
-    Returns:
-        변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
 
-    Notes:
-        - 환율 변경 시 DB INSERT (변경된 row만)
-        - commit 직후 Redis latest:bank:* key direct write (PR Z-2e Step 3b)
-        - 알림 조건 체크하고 FCM 발송 (process_rate_alerts)
-        - 호출 순서 잠금: db.commit() → Redis write → process_rate_alerts
-          (역전 시 DB-Redis 비정합 + alert 누락 위험)
+def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -> List[ChangedRate]:
+    """은행 환율 insert-if-changed staging — 변경 row를 `db.add` + ChangedRate 생성.
+
+    ⚠️ `_stage_investing_rate_changes`와 **의도적 중복**(model/filter/로그 포맷만 차이).
+    통합은 5-source 공통화 phase에서 검토 ([§6.6.1](../USDT_TOPIC_MIGRATION_PLAN.md)) —
+    PR C 중 '친절한' 통합 금지(staging은 source 차이 집결지 + sink가 patch-target이라
+    분리 유지가 보수적, behavior-change-0).
     """
-    logger.info(f"|                {bank_name} 환율                 |", extra={"bank": bank_name})
-    new_records_count = 0
-    changed_rates = []  # 알림 처리용 (FCM shape: {bank, currency, rate})
-    redis_updates = []  # Redis direct write용 (topic-native shape: {source, asset, rate, timestamp})
-
+    changes: List[ChangedRate] = []
     for pair, current_rate in current_rates.items():
         if current_rate is None:
             continue
@@ -196,31 +202,60 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
 
         if should_save:
             ts = models.get_utc_now()
-            new_entry = models.BankExchangeRate(
+            db.add(models.BankExchangeRate(
                 bank = bank_name,
                 currency = pair,
                 rate = current_rate,
                 timestamp = ts
-            )
-            db.add(new_entry)
-            new_records_count += 1
+            ))
             logger.debug("✅ DB에 새 레코드 저장됨")
+            changes.append(ChangedRate(source=bank_name, asset=pair, rate=current_rate, changed_at=ts))
 
-            # 알림 처리용 변경 정보 수집
-            changed_rates.append({
-                "bank": bank_name,
-                "currency": pair,
-                "rate": current_rate
-            })
-            # Redis direct write용 (topic-native shape)
-            redis_updates.append({
-                "source": bank_name,
-                "asset": pair,
-                "rate": current_rate,
-                "timestamp": to_kst_isoformat(ts),
-            })
+    return changes
+
+
+def _changes_to_redis_updates(changes: List[ChangedRate]) -> List[dict]:
+    """ChangedRate → topic-native dict (기존 `_write_changed_*_to_redis` 인자 shape 보존).
+
+    timestamp KST iso 변환 책임은 본 mirror adapter (DTO는 raw `changed_at` 보유).
+    """
+    return [{
+        "source": c.source,
+        "asset": c.asset,
+        "rate": c.rate,
+        "timestamp": to_kst_isoformat(c.changed_at),
+    } for c in changes]
+
+
+def _changes_to_fcm(changes: List[ChangedRate]) -> List[dict]:
+    """ChangedRate → FCM dict (기존 `process_rate_alerts` 인자 shape 보존, ts/source leak 없음)."""
+    return [{
+        "bank": c.source,
+        "currency": c.asset,
+        "rate": c.rate,
+    } for c in changes]
+
+
+def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
+    """은행 환율 DB 저장 + Redis direct write + 알림 조건 체크.
+
+    PR B(β observation fanout 1단계): staging → orchestration 분리. **직렬 순서
+    (db.commit() → Redis write → process_rate_alerts) + signature + count==0 게이트
+    + sink dict shape 전부 불변** (기존 + PR A characterization 무수정 통과 = spec).
+
+    Returns:
+        변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
+    """
+    logger.info(f"|                {bank_name} 환율                 |", extra={"bank": bank_name})
+    changes = _stage_bank_rate_changes(db, current_rates, bank_name)
+    new_records_count = len(changes)
 
     if new_records_count > 0:
+        # sink payload 변환은 commit 전에 — 구 staging-loop 변환과 동일 failure boundary
+        # (to_kst_isoformat 실패 시 commit 전 차단 → DB 미커밋 보존, behavior-change-0).
+        redis_updates = _changes_to_redis_updates(changes)
+        changed_rates = _changes_to_fcm(changes)
+
         db.commit()
         logger.info(f"🎉 총 {new_records_count}개 {bank_name}은행의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": bank_name})
 
@@ -268,25 +303,14 @@ def get_last_bank_rates_with_ts(db: Session, bank_name: str, pairs: List[str]) -
     return results
 
 
-def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
+def _stage_investing_rate_changes(db: Session, current_rates: dict) -> List[ChangedRate]:
+    """Investing 환율 insert-if-changed staging — 변경 row를 `db.add` + ChangedRate 생성.
+
+    ⚠️ `_stage_bank_rate_changes`와 **의도적 중복**(investing은 currency-only filter +
+    `.2f` 로그 + source="investing" 고정). 통합은 5-source 공통화 phase에서 검토
+    ([§6.6.1](../USDT_TOPIC_MIGRATION_PLAN.md)) — PR C 중 '친절한' 통합 금지.
     """
-    Investing 환율 DB 저장 + Redis direct write + 알림 조건 체크
-
-    Returns:
-        변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
-
-    Notes:
-        - 환율 변경 시 DB INSERT
-        - commit 직후 Redis latest:investing:* key direct write (PR Z-2e Step 3b)
-        - 알림 조건 체크하고 FCM 발송 (process_rate_alerts)
-        - bank 값은 "investing"으로 통일
-        - 호출 순서 잠금: db.commit() → Redis write → process_rate_alerts
-    """
-    logger.info("|                Investing 환율                 |", extra={"bank": "investing"})
-    new_records_count = 0
-    changed_rates = []  # 알림 처리용 (FCM shape)
-    redis_updates = []  # Redis direct write용 (topic-native shape)
-
+    changes: List[ChangedRate] = []
     for pair, current_rate in current_rates.items():
         if current_rate is None:
             continue
@@ -311,30 +335,37 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
 
         if should_save:
             ts = models.get_utc_now()
-            new_entry = models.InvestingExchangeRate(
+            db.add(models.InvestingExchangeRate(
                 currency = pair,
                 rate = current_rate,
                 timestamp = ts
-            )
-            db.add(new_entry)
-            new_records_count += 1
+            ))
             logger.debug("✅ DB에 새 레코드 저장됨")
+            changes.append(ChangedRate(source="investing", asset=pair, rate=current_rate, changed_at=ts))
 
-            # 알림 처리용 변경 정보 수집 (bank="investing")
-            changed_rates.append({
-                "bank": "investing",
-                "currency": pair,
-                "rate": current_rate
-            })
-            # Redis direct write용
-            redis_updates.append({
-                "source": "investing",
-                "asset": pair,
-                "rate": current_rate,
-                "timestamp": to_kst_isoformat(ts),
-            })
+    return changes
+
+
+def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
+    """Investing 환율 DB 저장 + Redis direct write + 알림 조건 체크.
+
+    PR B(β observation fanout 1단계): staging → orchestration 분리. bank writer와 동일
+    구조 — 직렬 순서(commit→Redis→alert) + signature + count==0 게이트 + sink dict shape
+    불변. bank 값은 "investing"으로 통일.
+
+    Returns:
+        변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
+    """
+    logger.info("|                Investing 환율                 |", extra={"bank": "investing"})
+    changes = _stage_investing_rate_changes(db, current_rates)
+    new_records_count = len(changes)
 
     if new_records_count > 0:
+        # sink payload 변환은 commit 전에 — 구 staging-loop 변환과 동일 failure boundary
+        # (to_kst_isoformat 실패 시 commit 전 차단 → DB 미커밋 보존, behavior-change-0).
+        redis_updates = _changes_to_redis_updates(changes)
+        changed_rates = _changes_to_fcm(changes)
+
         db.commit()
         logger.info(f"🎉 총 {new_records_count}개 Investing의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": "investing"})
 

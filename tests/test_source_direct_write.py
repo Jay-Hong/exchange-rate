@@ -1454,5 +1454,39 @@ class TestInsertRatesAlertAndRedisFalseIsolation(unittest.TestCase):
         db.commit.assert_called_once()  # Redis False가 commit/count 무영향 (직접 잠금)
 
 
+    def test_bank_payload_conversion_failure_before_commit(self):
+        """to_kst_isoformat(payload 변환) 실패 → commit 전 차단 → DB 미커밋 (구 staging-loop 변환과 동일 boundary, PR B)."""
+        from app import crud
+        db = self._db_with_no_prior()
+        with patch.object(crud, "to_kst_isoformat", side_effect=RuntimeError("ts boom")), \
+             patch.object(crud, "_write_changed_bank_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            with self.assertRaises(RuntimeError):
+                crud.insert_bank_rates_into_db(
+                    db=db, current_rates={"usd-krw": 1371.5}, bank_name="kb",
+                )
+        db.commit.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
+
+    def test_investing_payload_conversion_failure_before_commit(self):
+        from app import crud
+        db = self._db_with_no_prior()
+        with patch.object(crud, "to_kst_isoformat", side_effect=RuntimeError("ts boom")), \
+             patch.object(crud, "_write_changed_investing_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            with self.assertRaises(RuntimeError):
+                crud.insert_investing_rates_into_db(
+                    db=db, current_rates={"usd-krw": 1371.5},
+                )
+        db.commit.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
