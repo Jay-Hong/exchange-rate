@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Optional, List, Literal
 
 # 서드파티 라이브러리
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ============================================================
@@ -47,10 +47,8 @@ class BankExchangeRateResponse(BaseModel):
     timestamp: Optional[str]  # ISO 8601 문자열로 변경
 
     
-    # ORM 객체(= SQLAlchemy 객체)를 Pydantic이 읽을 수 있도록 설정
-    class Config:
-        # orm_mode = True (Pydantic v1)
-        from_attributes = True
+    # ORM 객체(= SQLAlchemy 객체)를 Pydantic이 읽을 수 있도록 설정 (Pydantic V2 ConfigDict)
+    model_config = ConfigDict(from_attributes=True)
 
 # 모바일/AJAX용 주요 스키마
 class ExchangeRateItem(BaseModel):
@@ -120,8 +118,7 @@ class NotificationSettingResponse(BaseModel):
     updated_at: Optional[str] = None  # ISO 8601
     triggered_at: Optional[str] = None  # ISO 8601, 발송 시간
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class NotificationSettingsListResponse(BaseModel):
@@ -202,8 +199,7 @@ class SourceNotificationSettingResponse(BaseModel):
     updated_at: Optional[str] = None
     triggered_at: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SourceNotificationSettingsListResponse(BaseModel):
