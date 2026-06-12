@@ -1375,5 +1375,84 @@ class TestUsdtInMemoryStateCoalescing(unittest.TestCase):
         self.assertEqual(state["rate"], _Decimal("1473.5"))
 
 
+class TestInsertRatesAlertAndRedisFalseIsolation(unittest.TestCase):
+    """insert_bank/investing_rates_into_db — alert 예외 미전파 + Redis writer False-return 격리.
+
+    PR A (Bank/Investing β characterization). 기존 TestInsertBankRatesCallOrder는
+    redis EXCEPTION→alert 계속(test_redis_helper_internal_failure_does_not_block_alerts)을
+    잠갔으나, (i) writer **False-return**(예외 아님) 경로와 (ii) process_rate_alerts
+    **예외 미전파**는 미잠금이었다 — 본 클래스가 보강. β에서 Redis writer가 bool→outcome으로
+    바뀌므로 False-return 경로를 명시 고정 (회귀 가드).
+    """
+
+    @staticmethod
+    def _db_with_no_prior():
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
+        return db
+
+    def test_bank_alert_exception_does_not_propagate(self):
+        """process_rate_alerts raise → insert 밖으로 전파 X, 저장 count/commit 유지 (try/except 233)."""
+        from app import crud
+        db = self._db_with_no_prior()
+        with patch.object(crud, "_write_changed_bank_rates_to_redis"), \
+             patch.object(crud, "process_rate_alerts",
+                          side_effect=RuntimeError("fcm dead")), \
+             patch.object(crud, "models") as mock_models, \
+             patch.object(crud.logger, "exception"):
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            count = crud.insert_bank_rates_into_db(
+                db=db, current_rates={"usd-krw": 1371.5}, bank_name="kb",
+            )
+        self.assertEqual(count, 1)
+        db.commit.assert_called_once()
+
+    def test_investing_alert_exception_does_not_propagate(self):
+        from app import crud
+        db = self._db_with_no_prior()
+        with patch.object(crud, "_write_changed_investing_rates_to_redis"), \
+             patch.object(crud, "process_rate_alerts",
+                          side_effect=RuntimeError("fcm dead")), \
+             patch.object(crud, "models") as mock_models, \
+             patch.object(crud.logger, "exception"):
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            count = crud.insert_investing_rates_into_db(
+                db=db, current_rates={"usd-krw": 1371.5},
+            )
+        self.assertEqual(count, 1)
+        db.commit.assert_called_once()
+
+    def test_bank_redis_writer_false_return_does_not_block_alerts(self):
+        """sync writer가 False 반환(예외 아님) → _write_changed가 무시 → alerts 계속."""
+        from app import crud
+        db = self._db_with_no_prior()
+        with patch("app.latest_rates_cache.set_latest_bank_rate_from_sync_job",
+                   return_value=False), \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            count = crud.insert_bank_rates_into_db(
+                db=db, current_rates={"usd-krw": 1371.5}, bank_name="kb",
+            )
+        self.assertEqual(count, 1)
+        mock_alerts.assert_called_once()
+        db.commit.assert_called_once()  # Redis False가 commit/count 무영향 (직접 잠금)
+
+    def test_investing_redis_writer_false_return_does_not_block_alerts(self):
+        from app import crud
+        db = self._db_with_no_prior()
+        with patch("app.latest_rates_cache.set_latest_investing_rate_from_sync_job",
+                   return_value=False), \
+             patch.object(crud, "process_rate_alerts") as mock_alerts, \
+             patch.object(crud, "models") as mock_models:
+            mock_models.get_utc_now.return_value = datetime(2026, 5, 13, 1, 0, tzinfo=dt_timezone.utc)
+            count = crud.insert_investing_rates_into_db(
+                db=db, current_rates={"usd-krw": 1371.5},
+            )
+        self.assertEqual(count, 1)
+        mock_alerts.assert_called_once()
+        db.commit.assert_called_once()  # Redis False가 commit/count 무영향 (직접 잠금)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
