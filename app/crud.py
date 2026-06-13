@@ -287,22 +287,21 @@ def _run_topic_emission(succeeded: List[dict], mode: str) -> None:
         request_fx_topic_trigger(source, asset, reason)
 
         # usdt:krw cross-route — kb/hana/investing의 usd-krw만 (usdt:krw payload 구성).
-        # direct_coalesced에서만 실호출 — dual_shadow는 live tether 발행 방지로 미호출
-        # (예상 발화량 측정용 tether_route_shadow counter는 Increment 3 Redis telemetry).
-        if (
-            asset == "usd-krw"
-            and source in cross_sources
-            and mode == "direct_coalesced"
-        ):
-            from app import tether_topic_trigger
-            from app.tether_topic_trigger import (
-                TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE,
-            )
-            tether_topic_trigger.request_tether_topic_trigger(
-                source=source,
-                asset=asset,
-                reason=TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE,
-            )
+        if asset == "usd-krw" and source in cross_sources:
+            if mode == "direct_coalesced":
+                from app import tether_topic_trigger
+                from app.tether_topic_trigger import (
+                    TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE,
+                )
+                tether_topic_trigger.request_tether_topic_trigger(
+                    source=source,
+                    asset=asset,
+                    reason=TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE,
+                )
+            elif mode == "dual_shadow":
+                # live tether 발행 방지 — 예상 발화량 counter만 (Increment 3).
+                from app.fx_topic_trigger import record_tether_route_shadow
+                record_tether_route_shadow(asset)
 
 
 def _emit_topic_triggers(succeeded: List[dict]) -> None:

@@ -105,14 +105,17 @@ class TestRunTopicEmissionRouting(unittest.TestCase):
             crud._run_topic_emission(_updates(("kb", "jpy-krw")), "direct_coalesced")
         teth.assert_not_called()  # jpy는 usdt:krw context 아님
 
-    def test_dual_shadow_does_not_call_tether(self):
-        """dual_shadow: fx는 발사하되 live tether는 호출 안 함 (발행 방지)."""
+    def test_dual_shadow_records_shadow_not_live_tether(self):
+        """dual_shadow: fx 발사 + shadow counter 발화, live tether는 미호출 (발행 방지)."""
         with patch("app.fx_topic_trigger.request_fx_topic_trigger") as fx, patch(
             "app.tether_topic_trigger.request_tether_topic_trigger"
-        ) as teth:
+        ) as teth, patch(
+            "app.fx_topic_trigger.record_tether_route_shadow"
+        ) as shadow:
             crud._run_topic_emission(_updates(("kb", "usd-krw")), "dual_shadow")
         fx.assert_called_once()
-        teth.assert_not_called()
+        teth.assert_not_called()  # live tether 미발행
+        shadow.assert_called_once_with("usd-krw")  # shadow counter 발화 (Codex 3)
 
     def test_investing_vs_bank_reason(self):
         from app.fx_topic_trigger import (

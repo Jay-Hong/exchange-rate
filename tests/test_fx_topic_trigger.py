@@ -32,7 +32,8 @@ class TestFxTopicTriggerController(unittest.IsolatedAsyncioTestCase):
         await controller.close(timeout=0.01)
         reset_fx_topic_trigger_for_tests(None)
 
-    async def test_legacy_piggyback_is_strict_noop(self):
+    async def test_legacy_piggyback_skips_publish_and_coalesce(self):
+        # legacy = publish/coalesce noop (skipped_legacy telemetry는 wiring 클래스에서 검증).
         publish = AsyncMock(return_value=True)
         c = FxTopicTriggerController(
             mode=MODE_LEGACY_PIGGYBACK, coalesce_ms=5, publish_func=publish
@@ -150,6 +151,160 @@ class TestFxTopicTriggerController(unittest.IsolatedAsyncioTestCase):
                 "eur-krw": "fx:eur-krw",
             },
         )
+
+
+class TestFxTriggerTelemetry(unittest.IsolatedAsyncioTestCase):
+    """Increment 3 — Redis telemetry (tether _record_trigger_event mirror, per-asset)."""
+
+    async def test_record_writes_counter_and_last_fields(self):
+        from app.cache import redis_cache
+        from app import fx_topic_trigger as fxt
+
+        client = AsyncMock()
+        with patch.object(redis_cache, "client", client), patch.object(
+            redis_cache.circuit, "can_attempt", AsyncMock(return_value=True)
+        ):
+            await fxt._record_trigger_event(
+                "usd-krw", counter="request", last_reason="bank_change", last_source="kb"
+            )
+        client.hincrby.assert_any_await(
+            "topic:fx:usd-krw:stats", "trigger_request", 1
+        )
+        client.hset.assert_any_await(
+            "topic:fx:usd-krw:stats", "trigger_last_source", "kb"
+        )
+
+    async def test_record_silent_skip_when_client_none(self):
+        from app.cache import redis_cache
+        from app import fx_topic_trigger as fxt
+
+        with patch.object(redis_cache, "client", None):
+            await fxt._record_trigger_event("usd-krw", counter="request")  # no raise
+
+    async def test_record_silent_skip_when_circuit_open(self):
+        from app.cache import redis_cache
+        from app import fx_topic_trigger as fxt
+
+        client = AsyncMock()
+        with patch.object(redis_cache, "client", client), patch.object(
+            redis_cache.circuit, "can_attempt", AsyncMock(return_value=False)
+        ):
+            await fxt._record_trigger_event("usd-krw", counter="request")
+        client.hincrby.assert_not_awaited()  # circuit open → write 0
+
+    async def test_record_isolates_redis_exception(self):
+        from app.cache import redis_cache
+        from app import fx_topic_trigger as fxt
+
+        client = AsyncMock()
+        client.hincrby.side_effect = RuntimeError("boom")
+        with patch.object(redis_cache, "client", client), patch.object(
+            redis_cache.circuit, "can_attempt", AsyncMock(return_value=True)
+        ):
+            await fxt._record_trigger_event("usd-krw", counter="request")  # no raise
+
+    def test_fire_telemetry_noop_without_running_loop(self):
+        from app import fx_topic_trigger as fxt
+
+        fxt._fire_telemetry("usd-krw", counter="request")  # sync ctx, no raise
+
+    async def test_record_tether_route_shadow_fires_counter(self):
+        from app.cache import redis_cache
+        from app import fx_topic_trigger as fxt
+
+        client = AsyncMock()
+        with patch.object(redis_cache, "client", client), patch.object(
+            redis_cache.circuit, "can_attempt", AsyncMock(return_value=True)
+        ):
+            fxt.record_tether_route_shadow("usd-krw")
+            # fire-and-forget task 결정적으로 await
+            await asyncio.gather(*list(fxt._telemetry_tasks))
+        client.hincrby.assert_any_await(
+            "topic:fx:usd-krw:stats", "trigger_tether_route_shadow", 1
+        )
+
+    def test_counter_fields_cover_used_counters(self):
+        from app import fx_topic_trigger as fxt
+
+        for c in (
+            "request", "skipped_legacy", "coalesced", "flush_dual_shadow",
+            "flush_direct", "publish_called", "publish_success",
+            "publish_skipped_shadow", "error", "tether_route_shadow",
+        ):
+            self.assertIn(c, fxt.TRIGGER_COUNTER_FIELDS)
+
+
+class TestFxTriggerTelemetryWiring(unittest.IsolatedAsyncioTestCase):
+    """controller request_trigger/flush가 _fire_telemetry를 실제 호출하는지 잠금.
+
+    Increment 3 목적 = telemetry wiring. _fire_telemetry를 patch해 counter 발화를
+    직접 단언 — _fire_telemetry 호출을 제거하면 실패 (vacuous 아님, Codex review).
+    """
+
+    async def asyncTearDown(self):
+        controller = get_fx_topic_trigger_controller()
+        await controller.close(timeout=0.01)
+        reset_fx_topic_trigger_for_tests(None)
+
+    async def test_legacy_fires_skipped_legacy_only(self):
+        with patch("app.fx_topic_trigger._fire_telemetry") as fire:
+            c = FxTopicTriggerController(
+                mode=MODE_LEGACY_PIGGYBACK, coalesce_ms=5,
+                publish_func=AsyncMock(return_value=True),
+            )
+            c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
+            await asyncio.sleep(0.02)
+        counters = [call.kwargs.get("counter") for call in fire.call_args_list]
+        self.assertEqual(counters, ["skipped_legacy"])
+
+    async def test_direct_flush_fires_wiring_counters(self):
+        with patch("app.fx_topic_trigger._fire_telemetry") as fire:
+            c = FxTopicTriggerController(
+                mode=MODE_DIRECT_COALESCED, coalesce_ms=20,
+                publish_func=AsyncMock(return_value=True),
+            )
+            c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
+            await asyncio.sleep(0.05)
+        counters = [call.kwargs.get("counter") for call in fire.call_args_list]
+        for expected in ("request", "flush_direct", "publish_called", "publish_success"):
+            self.assertIn(expected, counters)
+
+    async def test_direct_flush_publish_zero_last_result(self):
+        with patch("app.fx_topic_trigger._fire_telemetry") as fire:
+            c = FxTopicTriggerController(
+                mode=MODE_DIRECT_COALESCED, coalesce_ms=20,
+                publish_func=AsyncMock(return_value=False),  # zero send
+            )
+            c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
+            await asyncio.sleep(0.05)
+        last_results = [call.kwargs.get("last_result") for call in fire.call_args_list]
+        counters = [call.kwargs.get("counter") for call in fire.call_args_list]
+        self.assertIn("publish_zero", last_results)  # zero → last_result 갱신
+        self.assertNotIn("publish_success", counters)  # success 미발화
+
+    async def test_dual_shadow_flush_fires_wiring_counters(self):
+        with patch("app.fx_topic_trigger._fire_telemetry") as fire:
+            c = FxTopicTriggerController(
+                mode=MODE_DUAL_SHADOW, coalesce_ms=20,
+                publish_func=AsyncMock(return_value=True),
+            )
+            c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
+            await asyncio.sleep(0.05)
+        counters = [call.kwargs.get("counter") for call in fire.call_args_list]
+        self.assertIn("flush_dual_shadow", counters)
+        self.assertIn("publish_skipped_shadow", counters)
+
+    async def test_coalesce_fires_coalesced_counter(self):
+        with patch("app.fx_topic_trigger._fire_telemetry") as fire:
+            c = FxTopicTriggerController(
+                mode=MODE_DIRECT_COALESCED, coalesce_ms=30,
+                publish_func=AsyncMock(return_value=True),
+            )
+            c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
+            c.request_trigger("hana", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
+            await asyncio.sleep(0.06)
+        counters = [call.kwargs.get("counter") for call in fire.call_args_list]
+        self.assertIn("coalesced", counters)
 
 
 class TestSafePublishFxSnapshotContract(unittest.IsolatedAsyncioTestCase):
