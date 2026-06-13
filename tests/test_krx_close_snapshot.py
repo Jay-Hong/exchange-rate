@@ -611,10 +611,11 @@ class TestKrxCloseSnapshotControllerGateChain(unittest.TestCase):
         self.contract = _make_contract()
         self.boundary = compute_close_boundary_kst("CF", date(2026, 5, 15))
 
-    def _eval(self, *, result=None, contract=None, boundary=None, last="default"):
+    def _eval(self, *, session="CF", result=None, contract=None, boundary=None, last="default"):
         if last == "default":
             last = _recent_last()
         return self.controller._evaluate_close_write_gates(
+            session=session,
             result=result or _make_rest_result(),
             contract=contract or self.contract,
             boundary_at_kst=boundary or self.boundary,
@@ -628,6 +629,21 @@ class TestKrxCloseSnapshotControllerGateChain(unittest.TestCase):
         # 5/25 부처님오신날 대체공휴일 (실제 캘린더 — 5/25 사고 1차 차단 회귀 잠금)
         boundary = compute_close_boundary_kst("CF", date(2026, 5, 25))
         self.assertEqual(self._eval(boundary=boundary), "calendar")
+
+    def test_gate1_cm_friday_night_saturday_passes(self):
+        """2026-06-13 fix — 금요일밤 CM → 토 06:00: 야간장 시작일(금)이 영업일이면
+        calendar 통과. boundary=토 5/16, 시작일=금 5/15(영업일). gate 2/3도 정합 →
+        전 gate 통과(None). 구 is_krx_business_day(boundary=토)는 매주 reject였음."""
+        boundary = compute_close_boundary_kst("CM", date(2026, 5, 16))  # 토 06:00
+        last = {"rate": 1500.9, "timestamp": "2026-05-16T05:50:00+09:00"}  # boundary 10분 전
+        self.assertIsNone(self._eval(session="CM", boundary=boundary, last=last))
+
+    def test_gate1_cm_friday_holiday_rejects(self):
+        """negative-control — 야간장 시작일(금)이 휴장일(5/1 근로자의날)이면 토 CM도
+        calendar reject. "CM이면 항상 통과"하는 over-relax가 아니라 시작일(boundary−1)을
+        실제로 검사함을 증명. gate 1 first라 gate 2/3 미평가(short-circuit)."""
+        boundary = compute_close_boundary_kst("CM", date(2026, 5, 2))  # 토 06:00, 시작일=금 5/1(휴장)
+        self.assertEqual(self._eval(session="CM", boundary=boundary), "calendar")
 
     def test_gate2_contract_month_mismatch_rejects(self):
         result = _make_rest_result()
@@ -705,7 +721,7 @@ class TestKrxCloseSnapshotControllerGateChain(unittest.TestCase):
         result["resp_futs_last_tr_date"] = "20260615"
         last = {"rate": 1510.6, "timestamp": "2026-06-09T15:04:00+09:00"}
         verdict = self.controller._evaluate_close_write_gates(
-            result=result, contract=contract, boundary_at_kst=boundary, last=last,
+            session="CF", result=result, contract=contract, boundary_at_kst=boundary, last=last,
         )
         self.assertIsNone(verdict)
 

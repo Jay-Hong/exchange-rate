@@ -2663,6 +2663,7 @@ class KrxCloseSnapshotController:
     def _evaluate_close_write_gates(
         self,
         *,
+        session: Literal["CF", "CM"],
         result: Dict[str, Any],
         contract: ContractInfo,
         boundary_at_kst: datetime,
@@ -2674,7 +2675,10 @@ class KrxCloseSnapshotController:
         verdict는 호출자(_sync_write)가 counter/event로 기록하고, write 허용은
         flag=true AND verdict None일 때만.
 
-        gate 1 calendar: boundary date가 KRX 거래일 (Stage C guard gate 1 mirror).
+        gate 1 calendar: is_close_snapshot_eligible(session, boundary_date) —
+            CF는 boundary 당일, CM은 야간장 시작일(boundary−1)이 KRX 거래일.
+            scheduling eligibility와 정합 (2026-06-13: 구 is_krx_business_day(
+            boundary_date)는 금요일밤 CM의 토요일 boundary를 매주 휴장 오판 reject).
         gate 2 contract identity: REST 응답 월물/만기 == 캡처 contract + 만기 미경과
             (Stage C guard gate 2 mirror — 5/18 rollover stale 차단, fail-closed).
         gate 3 session evidence: 우리 WS의 마지막 tick(last)이 boundary −
@@ -2696,8 +2700,10 @@ class KrxCloseSnapshotController:
         """
         boundary_date = boundary_at_kst.astimezone(KST).date()
 
-        # gate 1: calendar
-        if not is_krx_business_day(boundary_date):
+        # gate 1: calendar — CM은 야간장 시작일(boundary−1) 기준 (is_close_snapshot_eligible
+        # 재사용 → scheduling과 정합). CF는 boundary 당일 검사라 동작 불변. 5/25형 휴장
+        # 보호는 gate 3(session evidence)가 유지 — 본 gate 완화가 그 백스톱을 약화 X.
+        if not is_close_snapshot_eligible(session, boundary_date):
             return "calendar"
 
         # gate 2: contract identity (Stage C _evaluate_rest_guard gate 2 mirror)
@@ -2828,6 +2834,7 @@ class KrxCloseSnapshotController:
                 # reject는 deterministic(calendar/contract/recency — 수초 간 retry로
                 # 안 바뀜)이라 True short-circuit (blocked와 동일 의미).
                 gate_verdict = self._evaluate_close_write_gates(
+                    session=session,
                     result=result, contract=contract,
                     boundary_at_kst=boundary_at_kst, last=last,
                 )
