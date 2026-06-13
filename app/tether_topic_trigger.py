@@ -51,6 +51,9 @@ TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS = "usdt_ws_redis_write_success
 # KRX는 "ws" prefix 미포함 — REST fallback이 동일 DB path 공유 가능 +
 # 미래 KRX tick-level Redis writer 도입 시에도 같은 reason 유지 (hook 위치만 이동).
 TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS = "krx_redis_write_success"
+# §6.6.2 C1 — bank/investing usd-krw 변경의 usdt:krw cross-route trigger reason
+# (kb/hana/investing usd-krw SET 성공 → usdt:krw 재발행, direct_coalesced에서만).
+TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE = "bank_investing_fx_change"
 
 # Redis-backed telemetry — `tether_topic_publisher`와 동일 hash 재사용
 # (운영 admin 단일 조회 지점 유지). `trigger_*` prefix로 publish counter와 분리.

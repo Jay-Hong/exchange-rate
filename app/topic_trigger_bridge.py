@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("exchange_rate.topic_trigger_bridge")
@@ -30,6 +31,10 @@ logger = logging.getLogger("exchange_rate.topic_trigger_bridge")
 _main_loop: Optional[asyncio.AbstractEventLoop] = None
 # shutdown 진입 신호 — set되면 신규 enqueue 거부 (drain 중 새 작업 방지).
 _shutting_down: bool = False
+# schedule_on_loop(worker thread) ⊥ signal_shutdown(main loop) 직렬화 lock.
+# flag set 후 어떤 worker thread도 enqueue 못 하게 → shutdown 후 orphan callback
+# 방지 (Codex review). schedule는 hot path 아님(변경 드묾) → lock 비용 무시.
+_lock = threading.Lock()
 
 
 def register_main_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -38,21 +43,28 @@ def register_main_loop(loop: asyncio.AbstractEventLoop) -> None:
     재등록 시 shutdown 플래그도 초기화 (재시작/테스트 안전).
     """
     global _main_loop, _shutting_down
-    _main_loop = loop
-    _shutting_down = False
+    with _lock:
+        _main_loop = loop
+        _shutting_down = False
 
 
 def signal_shutdown() -> None:
-    """shutdown 진입 시 신규 enqueue 차단 (controller drain 전에 호출)."""
+    """shutdown 진입 시 신규 enqueue 차단 (controller drain 전에 호출).
+
+    lock으로 schedule_on_loop과 직렬화 — 이 함수 반환 후엔 어떤 worker thread도
+    새 callback을 enqueue할 수 없다 (flag check + enqueue가 같은 lock 안).
+    """
     global _shutting_down
-    _shutting_down = True
+    with _lock:
+        _shutting_down = True
 
 
 def reset_for_tests() -> None:
     """테스트 격리용 — 모듈 전역 상태 초기화."""
     global _main_loop, _shutting_down
-    _main_loop = None
-    _shutting_down = False
+    with _lock:
+        _main_loop = None
+        _shutting_down = False
 
 
 def _run_guarded(callback: Callable[..., Any], args: tuple) -> None:
@@ -80,14 +92,34 @@ def schedule_on_loop(callback: Callable[..., Any], *args: Any) -> bool:
         False: loop 미등록 / shutdown 진입 / loop closed / 마샬링 race —
             best-effort skip (호출자 흐름 영향 X).
     """
+    # lock으로 signal_shutdown과 직렬화 — flag set 후 enqueue 차단 보장
+    # (shutdown 후 orphan callback 방지). flag check + enqueue가 atomic.
+    with _lock:
+        loop = _main_loop
+        if loop is None or _shutting_down:
+            return False
+        if loop.is_closed():
+            return False
+        try:
+            loop.call_soon_threadsafe(_run_guarded, callback, args)
+            return True
+        except RuntimeError:
+            # check와 call 사이에 loop이 닫힌 shutdown race — best-effort skip.
+            return False
+
+
+async def drain_loop_callbacks() -> None:
+    """signal_shutdown 후 호출 — 이미 큐잉된 bridge callback을 모두 실행시킨다.
+
+    `call_soon_threadsafe`로 enqueue된 callback은 loop _ready에 FIFO. sentinel을
+    `call_soon`으로 뒤에 넣고 await하면 앞선 callback이 모두 실행된 뒤 resume →
+    그 후 controller를 drain하면 callback이 만든 flush task까지 drain된다
+    (shutdown orphan 방지, Codex review). signal_shutdown으로 신규 enqueue가
+    이미 차단된 뒤 호출해야 의미가 있다.
+    """
     loop = _main_loop
-    if loop is None or _shutting_down:
-        return False
-    if loop.is_closed():
-        return False
-    try:
-        loop.call_soon_threadsafe(_run_guarded, callback, args)
-        return True
-    except RuntimeError:
-        # check와 call 사이에 loop이 닫힌 shutdown race — best-effort skip.
-        return False
+    if loop is None or loop.is_closed():
+        return
+    done = loop.create_future()
+    loop.call_soon(done.set_result, None)
+    await done

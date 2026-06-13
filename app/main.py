@@ -527,6 +527,11 @@ async def lifespan(app: FastAPI):
     # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
     scheduler.init_selenium_queue()
 
+    # §6.6.2 C1 — topic trigger bridge: crud worker thread → main loop 마샬링용 loop
+    # 등록 (scheduler 시작 전). crud emission이 이 loop으로 fx/tether trigger를 보낸다.
+    from app import topic_trigger_bridge
+    topic_trigger_bridge.register_main_loop(asyncio.get_running_loop())
+
     # 스케줄러 시작 (Queue를 사용하는 작업 + WebSocket Broadcasting 포함)
     scheduler.start_scheduler()
 
@@ -560,6 +565,14 @@ async def lifespan(app: FastAPI):
 
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
+
+    # §6.6.2 C1 — bridge 신규 enqueue 차단(drain 전) + 큐된 callback flush + fx drain.
+    # 순서: 차단 → barrier(큐된 bridge callback 실행 완료 → flush task 생성) →
+    # fx drain(그 task까지 drain, orphan 방지) → tether drain → (이후) scheduler 종료.
+    from app import topic_trigger_bridge, fx_topic_trigger
+    topic_trigger_bridge.signal_shutdown()
+    await topic_trigger_bridge.drain_loop_callbacks()
+    await fx_topic_trigger.shutdown_fx_topic_trigger()
 
     # Phase B.2 PR1 — pending tether topic trigger flush 정리.
     await tether_topic_trigger.shutdown_tether_topic_trigger()

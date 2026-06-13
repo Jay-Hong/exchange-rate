@@ -100,7 +100,7 @@ def to_kst_isoformat(dt: Optional[datetime]) -> Optional[str]:
     return dt.astimezone(KST).isoformat()
 
 
-def _write_changed_bank_rates_to_redis(redis_updates: list) -> None:
+def _write_changed_bank_rates_to_redis(redis_updates: list) -> list:
     """PR Z-2e Step 3b — bank latest Redis direct write (commit 직후 호출).
 
     broadcast hot path가 latest:bank:* key를 Redis-first로 읽으므로 mirror cycle
@@ -111,47 +111,60 @@ def _write_changed_bank_rates_to_redis(redis_updates: list) -> None:
     (topic-native). 호출자는 db.commit() 성공 후에만 이 함수를 부른다.
 
     실패는 best-effort — 호출자(FCM alerts) 흐름에 영향 X.
+
+    Returns (§6.6.2 C1 — SET-only trigger gating):
+        Redis SET 성공한 update 부분집합 (입력 순서 보존). SET 실패/예외분 제외 →
+        호출자가 이 부분집합만 topic trigger (stale publish 방지, axis #2).
+        Redis SET 동작·best-effort·mirror 안전망은 불변 — outcome 반환만 추가.
     """
     if not redis_updates:
-        return
+        return []
     # 함수 내부 import — latest_rates_cache가 crud를 module-level로 import하므로
     # 순환 참조 회피.
     from app import latest_rates_cache
+    succeeded: list = []
     for update in redis_updates:
         try:
-            latest_rates_cache.set_latest_bank_rate_from_sync_job(
+            if latest_rates_cache.set_latest_bank_rate_from_sync_job(
                 bank=update["source"],
                 asset=update["asset"],
                 rate=update["rate"],
                 timestamp=update["timestamp"],
-            )
+            ):
+                succeeded.append(update)
         except Exception:
             logger.exception(
                 "bank Redis direct write 예외 (격리, mirror cycle 안전망 의존)",
                 extra={"bank": update["source"], "asset": update["asset"]},
             )
+    return succeeded
 
 
-def _write_changed_investing_rates_to_redis(redis_updates: list) -> None:
+def _write_changed_investing_rates_to_redis(redis_updates: list) -> list:
     """PR Z-2e Step 3b — investing latest Redis direct write (commit 직후).
 
     bank helper와 동일 정책 (mirror cycle safety net 의존, best-effort 격리).
+
+    Returns (§6.6.2 C1): SET 성공한 update 부분집합 (SET-only trigger gating).
     """
     if not redis_updates:
-        return
+        return []
     from app import latest_rates_cache
+    succeeded: list = []
     for update in redis_updates:
         try:
-            latest_rates_cache.set_latest_investing_rate_from_sync_job(
+            if latest_rates_cache.set_latest_investing_rate_from_sync_job(
                 asset=update["asset"],
                 rate=update["rate"],
                 timestamp=update["timestamp"],
-            )
+            ):
+                succeeded.append(update)
         except Exception:
             logger.exception(
                 "investing Redis direct write 예외 (격리, mirror cycle 안전망 의존)",
                 extra={"asset": update["asset"]},
             )
+    return succeeded
 
 
 @dataclass(frozen=True)
@@ -160,7 +173,7 @@ class ChangedRate:
 
     staging이 insert-if-changed 통과한 **변경값만** 생성. sink(Redis/Alert) adapter가
     기존 dict shape로 변환. PR B는 changes-only — §4.1.3 `seen_at`(값 변경 무관 수신)
-    /`rate_changed_at` 분리는 PR C(freshness). `changed_at`은 현행
+    /`rate_changed_at` 분리는 C2(freshness). `changed_at`은 현행
     `models.get_utc_now()`(save-time) 그대로.
     """
     source: str
@@ -236,6 +249,79 @@ def _changes_to_fcm(changes: List[ChangedRate]) -> List[dict]:
     } for c in changes]
 
 
+# ── §6.6.2 C1 — bank/investing → topic trigger emission ──────────────
+# crud worker thread(no running loop)에서 호출 → topic_trigger_bridge로 main loop
+# 마샬링. mode 게이트 + SET-only(성공분만) + fx:* / usdt:krw cross-route 라우팅.
+
+def _tether_cross_route_sources() -> set:
+    """usd-krw 변경 시 usdt:krw로도 cross-route할 source 집합.
+
+    usdt:krw payload가 읽는 bank source(TETHER_TAB_BANK_SOURCES SSOT) + investing.
+    """
+    from app.usdt_topic_payload import TETHER_TAB_BANK_SOURCES
+    return set(TETHER_TAB_BANK_SOURCES) | {"investing"}
+
+
+def _run_topic_emission(succeeded: List[dict], mode: str) -> None:
+    """main loop 위(bridge callback)에서 실행 — fx:* trigger + 조건부 usdt:krw cross-route.
+
+    Args:
+        succeeded: SET 성공한 topic-native dict ({source, asset, rate, timestamp}).
+        mode: direct_coalesced면 cross-route 실호출, dual_shadow면 미호출(live tether
+            발행 방지). legacy_piggyback은 _emit_topic_triggers에서 이미 걸러짐.
+    """
+    from app.fx_topic_trigger import (
+        FX_TRIGGER_REASON_BANK_CHANGE,
+        FX_TRIGGER_REASON_INVESTING_CHANGE,
+        request_fx_topic_trigger,
+    )
+    cross_sources = _tether_cross_route_sources()
+    for update in succeeded:
+        source = update["source"]
+        asset = update["asset"]
+        reason = (
+            FX_TRIGGER_REASON_INVESTING_CHANGE
+            if source == "investing"
+            else FX_TRIGGER_REASON_BANK_CHANGE
+        )
+        request_fx_topic_trigger(source, asset, reason)
+
+        # usdt:krw cross-route — kb/hana/investing의 usd-krw만 (usdt:krw payload 구성).
+        # direct_coalesced에서만 실호출 — dual_shadow는 live tether 발행 방지로 미호출
+        # (예상 발화량 측정용 tether_route_shadow counter는 Increment 3 Redis telemetry).
+        if (
+            asset == "usd-krw"
+            and source in cross_sources
+            and mode == "direct_coalesced"
+        ):
+            from app import tether_topic_trigger
+            from app.tether_topic_trigger import (
+                TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE,
+            )
+            tether_topic_trigger.request_tether_topic_trigger(
+                source=source,
+                asset=asset,
+                reason=TETHER_TRIGGER_REASON_BANK_INVESTING_FX_CHANGE,
+            )
+
+
+def _emit_topic_triggers(succeeded: List[dict]) -> None:
+    """SET 성공 변경 → topic trigger emission (worker thread → bridge 마샬링).
+
+    mode 게이트: legacy_piggyback이면 **bridge 호출 자체 X** (axis #4 — marshal 0,
+    zero overhead, land behavior-change-0). 비legacy면 bridge로 _run_topic_emission을
+    main loop에 마샬링 (best-effort — bridge skip 시에도 호출자 흐름 영향 X).
+    """
+    if not succeeded:
+        return
+    from app import config as app_config
+    mode = app_config.BANK_INVESTING_TOPIC_TRIGGER_MODE
+    if mode == "legacy_piggyback":
+        return
+    from app import topic_trigger_bridge
+    topic_trigger_bridge.schedule_on_loop(_run_topic_emission, succeeded, mode)
+
+
 def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
     """은행 환율 DB 저장 + Redis direct write + 알림 조건 체크.
 
@@ -261,9 +347,11 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
 
         # commit 성공 후 Redis direct write — broadcast hot path latency 단축.
         # 실패해도 mirror cycle (3s)이 safety repair, alert 흐름에 영향 X.
-        _write_changed_bank_rates_to_redis(redis_updates)
+        # (PR C) 반환된 SET 성공분만 topic trigger 대상 (SET-only gating, axis #2).
+        redis_succeeded = _write_changed_bank_rates_to_redis(redis_updates)
 
         # 알림 조건 체크 및 FCM 발송 (실패해도 환율 저장에 영향 없음)
+        # alert는 DB-authoritative — Redis SET 성공 여부 무관, 전 change 발화 (axis #3).
         if changed_rates:
             try:
                 sent_count = process_rate_alerts(db, changed_rates)
@@ -271,6 +359,13 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": bank_name, "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": bank_name, "error": str(e)})
+
+        # (PR C §6.6.2) topic trigger emission — SET 성공분만, mode-gated, bridge 경유.
+        # 직렬 블록 끝 + try/except 격리 (emission 실패가 저장/alert에 영향 X).
+        try:
+            _emit_topic_triggers(redis_succeeded)
+        except Exception:
+            logger.exception("topic trigger emission 실패 (격리)", extra={"bank": bank_name})
 
     elif current_rates:
         logger.debug(f"✋ 모든 {bank_name}은행 환율 확인 완료 - 변경사항 없음", extra={"bank": bank_name})
@@ -370,9 +465,11 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
         logger.info(f"🎉 총 {new_records_count}개 Investing의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": "investing"})
 
         # commit 성공 후 Redis direct write — broadcast hot path latency 단축
-        _write_changed_investing_rates_to_redis(redis_updates)
+        # (PR C) 반환된 SET 성공분만 topic trigger 대상 (SET-only gating, axis #2).
+        redis_succeeded = _write_changed_investing_rates_to_redis(redis_updates)
 
         # 알림 조건 체크 및 FCM 발송 (실패해도 환율 저장에 영향 없음)
+        # alert는 DB-authoritative — Redis SET 성공 여부 무관, 전 change 발화 (axis #3).
         if changed_rates:
             try:
                 sent_count = process_rate_alerts(db, changed_rates)
@@ -380,6 +477,12 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": "investing", "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": "investing", "error": str(e)})
+
+        # (PR C §6.6.2) topic trigger emission — SET 성공분만, mode-gated, bridge 경유.
+        try:
+            _emit_topic_triggers(redis_succeeded)
+        except Exception:
+            logger.exception("topic trigger emission 실패 (격리)", extra={"bank": "investing"})
 
     elif current_rates:
         logger.debug("✋ 모든 Investing 환율 확인 완료 - 변경사항 없음", extra={"bank": "investing"})
