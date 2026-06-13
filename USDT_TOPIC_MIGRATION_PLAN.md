@@ -633,13 +633,80 @@ KRX Stage E 안정화 후 본 phase 진입. 두 세션 Claude + Codex 리뷰 수
 **PR 분할 (characterization-first, KRX A/B/C behavior-change-0 패턴 재사용)**:
 
 - **PR A — land (`bb653ee`, 2026-06-13, tests-only / production code 0, CI green / 0 warnings)**: broadcast wiring 3(changed+active→publisher 2 + legacy send + record_success / unchanged→미호출 + record_skip(no_changes) / active-0→publisher 호출 + send 미호출 + record_skip(no_connections), **각 record_failure 미호출 positive control로 outer-except vacuous 차단**) + crud isolation 4(process_rate_alerts 예외→insert 미전파 / Redis False-return→alert 계속 + commit 무영향, 각 Bank/Investing). (v) publisher-raise 제외(내부 격리는 test_fx_topic_publisher가 잠금 + outer except backstop). 신규 `tests/test_broadcast_rates_once_wiring.py` + `tests/test_source_direct_write.py` +class. conftest harness(firebase stub + sqlite)로 main.py import.
-- **PR B — land (`a0eb22c`, 2026-06-13, behavior-change-0, CI green / 0 warnings)**: 저장 함수 → staging(`_stage_*_rate_changes`) + 공통 adapter(`_changes_to_redis_updates`/`_changes_to_fcm`) + orchestrator 분리. signature/호출 순서/count==0 게이트/sink dict shape/patch-target 심볼 불변. **`ChangedRate` narrow DTO**(changes-only, `changed_at`=save-time — freshness는 PR C). bank/investing staging은 **의도적 중복**(통합 defer). **boundary fix(Codex review)**: sink payload 변환(`to_kst_isoformat`)을 `db.commit()` **전**으로 — 구 staging-loop와 동일 failure boundary(변환 실패 시 commit 전 차단 → DB 미커밋 보존) + lock test 2건. 기존 + PR A characterization 무수정 통과 = behavior-change-0 증명.
-- **PR C (write-through 도입)**: source-level fx topic trigger router(**β 유력안** — Redis seen_at/mirrored_at 매 fetch, rate/timestamp는 값 변경 시만) + **trigger = rate 변경 또는 의미 있는 freshness/state 변화**(기존 §6.6 topic trigger 정책 일치) + Redis outcome 명시(bool→outcome) + cold-start/miss DB fallback + fx:* / usdt:krw routing + DB SELECT→Redis dedup. α/β/γ 최종 확정은 Open.
-- **PR D (legacy hook 격하)**: write-through 안정화 + production `FX_TOPIC_ENABLED`(=true) canary 확인 후 main.py broadcast-diff fx hook 격하/제거(B.2 §14.7). legacy WebSocket dual-emit 유지.
+- **PR B — land (`a0eb22c`, 2026-06-13, behavior-change-0, CI green / 0 warnings)**: 저장 함수 → staging(`_stage_*_rate_changes`) + 공통 adapter(`_changes_to_redis_updates`/`_changes_to_fcm`) + orchestrator 분리. signature/호출 순서/count==0 게이트/sink dict shape/patch-target 심볼 불변. **`ChangedRate` narrow DTO**(changes-only, `changed_at`=save-time — freshness는 C2). bank/investing staging은 **의도적 중복**(통합 defer). **boundary fix(Codex review)**: sink payload 변환(`to_kst_isoformat`)을 `db.commit()` **전**으로 — 구 staging-loop와 동일 failure boundary(변환 실패 시 commit 전 차단 → DB 미커밋 보존) + lock test 2건. 기존 + PR A characterization 무수정 통과 = behavior-change-0 증명.
+- **PR C (write-through 도입) — source-routed trigger-only로 재스코핑 (2026-06-13 설계 확정, 상세 §6.6.2).** 원안 번들 분해: **C1=source-routed topic trigger-only (+ SET-only trigger gating — Redis outcome은 C1 correctness 전제, defer 아님)** / **C2=freshness**(seen_at/mirrored_at 5-field, mirror ownership 재설계 선행) / **C3=DB→Redis dedup**(독립 최적화, change-only INSERT 토대 변경이라 최고 위험). **PR C = C1만.** 근거: fx publish는 publisher 자체 DB session + payload builder **Redis-first + DB fallback**([fx_topic_payload.py:208-227](app/fx_topic_payload.py#L208-L227))이고 published payload는 `{rate,timestamp}`만(seen_at 미포함) → trigger는 freshness(C2)/dedup(C3)와 직교. C1만으로 β 핵심 격차(write-through trigger 부재) 해소 + PR D 잠금 해제.
+- **PR D (FX legacy hook 격하)**: C1 fx canary(Stage 2) + **SET-failure 복구 publish 경로 결정**(precondition, §6.6.2 ②) 후 main.py broadcast-diff **fx hook([main.py:741](app/main.py#L741))만** 격하/제거(B.2 §14.7) → **fx:* source-trigger-only**. usdt:krw는 불변(tether hook([main.py:730](app/main.py#L730)) 유지 → 계속 이중 발행).
+- **PR E (tether legacy hook 격하, B.2 §14.7 흡수)**: usdt:krw 전 source(USDT 5 + KRX + bank/investing cross-route) direct trigger 안정 + SET-failure 복구 경로 후 tether hook([main.py:730](app/main.py#L730)) 제거 → usdt:krw source-trigger-only. **cross-route(C1 Stage 2 canary)가 enabler.** legacy WebSocket dual-emit은 PR D/E 무관 유지.
 
-**Open (미해결, 스코핑 결정 필요)**: α/β/γ 확정(β 유력) / 진입조건(§12.8 선결 vs 별도 우선순위 — 현재 후자로 진입) / DB→Redis dedup 정확성(miss/cold-start fallback 정책).
+**Open (스코핑 결정 — 2026-06-13 확정, 상세 §6.6.2)**: **C1 source-routed trigger-only 채택** — α/β/γ write-빈도 축은 C1에서 미발생(Redis schema 미변경, trigger=rate 변경 = PR B `changes`). β의 freshness-write 절반은 C2로 분리, 최종 확정은 C2 dual_shadow telemetry / **진입조건** = 별도 우선순위 진입(§12.8 선결 아님) / **dedup cold-start** = C1은 dedup DB-based 유지라 위험 0, C3 진입 시 Redis miss→DB SELECT fallback(USDT read path) 정책.
 
 **정정 이력 (미래 독자 — 부분-read 단정 반복 방지)**: 본 catalog는 3연속 정정 후 확정 — (1) "characterization 공백" over-claim(실제 `TestInsertBankRatesCallOrder`/`...Investing...`가 순서/commit-fail/unchanged/redis-exception→alert/대칭 이미 잠금) → (2) "(v) call-site 무가드" → (3) **outer try/except(798) 발견**(세 리뷰어 모두 call-site만 보고 함수 경계 미확인). **교훈: 함수 계약 단정 전 try/except/finally 경계까지 읽을 것.**
+
+#### 6.6.2 PR C 설계 확정 — source-routed trigger-only (C1) (2026-06-13, 2-세션 Claude + Codex 5라운드 수렴 — SET-only gating·PR D/E 분리 정정 포함)
+
+§6.6.1 PR C 원안을 **3개의 분리 가능한 behavior change**로 분해하고 **PR C = C1(trigger-only)**로 확정 (characterization-first / behavior-change-0, PR A/B land 방식 일관). C2/C3는 별도 PR + 자체 telemetry.
+
+**설계를 규정하는 핵심 발견 (file:line 검증 완료)**:
+
+1. **fx:*에 trigger 계층 부재** — `usdt:krw`만 [tether_topic_trigger.py:199](app/tether_topic_trigger.py#L199)(mode FF + coalesce + telemetry) 보유. fx는 [fx_topic_publisher.py:125](app/fx_topic_publisher.py#L125)(publish "how")만 있고 "when" 계층 0 → PR C가 `fx_topic_trigger.py` 신설(tether 복제 + 3-topic).
+2. **mirror cycle = bank/investing key 공동 writer** — [_mirror_all_latest:1429](app/latest_rates_cache.py#L1429)/[:1417](app/latest_rates_cache.py#L1417)가 `latest:bank:*`/`latest:investing:*`를 **3초마다 `serialize_value` 3-field로 재기록**. USDT/KRX는 [should_include_source_in_latest:1347](app/latest_rates_cache.py#L1347) allowlist 제외라 direct writer 단독 소유(5-field 안전) — 정반대. → C2(freshness 5-field) 이식 시 mirror가 3초마다 덮어씀 + dual-writer state drift = **mirror ownership 재설계 선행 필요**(C1과 직교).
+3. **crud insert = no-loop worker thread** — [make_request_crawler_wrapper:247](app/scheduler.py#L247)가 sync `wrapper()` → APScheduler thread executor → [insert_bank_rates_into_db:239](app/crud.py#L239) 전체가 no-loop thread. KRX는 async handler로 복귀해 trigger 발사([krx_kis.py:1870](app/crawlers/krx_kis.py#L1870))하나 bank/investing엔 복귀점 없음 → inline `request_trigger`는 [tether_topic_trigger.py:276](app/tether_topic_trigger.py#L276) no_loop 분기로 항상 skip → **loop bridge 필수**.
+4. **fx publish는 Redis-first read → SET 실패 시 stale 위험** — [fx_topic_payload.py:208-227](app/fx_topic_payload.py#L208-L227) builder가 Redis hit + `is_stale` false면 이전 값 사용. 직접 SET([crud.py:103](app/crud.py#L103) writer bool **폐기**, [latest_rates_cache.py:1046](app/latest_rates_cache.py#L1046) False 가능) 실패 후 즉시 trigger하면 mirror(3s) 복구 전 **stale snapshot 발행**. legacy hook은 broadcast diff가 같은 Redis read 기반이라 이 문제 없음(**C1이 새로 도입하는 failure mode**) → **SET-only trigger gating 필수**(USDT/KRX [krx_kis.py:1870](app/crawlers/krx_kis.py#L1870) 패턴: outcome=SET일 때만 trigger).
+
+**라우팅 (소스 완결 — 코드 read로 검증)**:
+
+| 변경 소스 | → topic |
+| --- | --- |
+| 모든 bank(9)/investing 변경 (3통화) | `fx:<asset>` |
+| **kb·hana·investing의 usd-krw 변경만** | `usdt:krw` cross-route 추가 |
+
+- usdt:krw payload가 kb/hana usd-krw + investing usd-krw를 읽음: [usdt_topic_payload.py:74](app/usdt_topic_payload.py#L74)(`TETHER_TAB_BANK_SOURCES=("kb","hana")`) + [:307-325](app/usdt_topic_payload.py#L307-L325). → cross-route 없으면 **tether hook(730) 제거(PR E)** 후 USDT 탭 은행/기준 row가 다음 USDT tick까지 stale(야간 체감) = **cross-route는 freshness 개선 아닌 PR E behavior-change-0 필수 경로** (C1에서 구축·Stage 2 canary, 소비는 PR E). PR D(fx hook만)는 cross-route 불요 — tether hook이 usdt:krw 커버 유지.
+- fx payload = `banks`(9) + `reference`(investing)뿐, **DXY 없음**([fx_topic_payload.py:164](app/fx_topic_payload.py#L164)) → 제3 라우팅 소스 없음(DXY-only 변경은 fx 내용 불변 → PR D 후에도 갭 0).
+
+**behavior-change-0 게이팅**:
+
+- 신규 emission 전체를 `BANK_INVESTING_TOPIC_TRIGGER_MODE`(default `legacy_piggyback`) + `_COALESCE_MS`로 게이트. 이름은 fx + usdt:krw cross-route 둘 다 제어하므로 **source(bank/investing) 기준** — `FX_*` 아님.
+- **production tether = `direct_coalesced` (live, SSH 실증)**. cross-route를 무조건 wiring하면 land 즉시 usdt:krw가 bank 변경마다 재발행 = behavior-change-0 파괴 → 게이트 필수.
+- 3-mode:
+  - `legacy_piggyback` (land default): 신규 route 전체 noop. legacy hook이 **bank/investing→topic 유일 경로**(fx:* + usdt:krw의 bank/investing 반영분; usdt:krw 자체는 USDT/KRX direct trigger도 발행 중). **land = behavior-change-0.**
+  - `dual_shadow`: fx coalesce 측정(publish X) + 조건부 cross-route는 **`tether_route_shadow` counter만 기록** (실제 `request_tether_topic_trigger` 호출 X — live tether가 발행하므로). counter는 **request-count proxy** — 실제 publish 증가분은 tether가 USDT/KRX와 live coalesce라 더 작음(활성 시간대엔 기존 flush에 흡수, 야간에만 marginal).
+  - `direct_coalesced`: fx controller flush(publish, **SET 성공 change만**) + 조건부 cross-route `request_tether_topic_trigger`(live tether 발행). fx·usdt:krw 모두 legacy hook과 **이중 발행**(idempotent — 단 *다른* source SET 실패 시 집계 부분-stale 가능, ≤3s mirror+legacy hook 교정; fx는 PR D / usdt:krw는 PR E에서 해소).
+
+**구조 계약**:
+
+- **`app/topic_trigger_bridge.py` 신규** (crud→main import 금지 — [[project_main_py_helper_placement]] 정합): lifespan이 scheduler 시작 **전** `register_main_loop(loop)`, shutdown 진입 즉시 신규 enqueue 차단. crud worker thread는 이 bridge만 import(함수 내부 import). bridge가 **단일 `call_soon_threadsafe` callback**으로 main loop에서 `fx.request_trigger` + (조건부) `tether.request_trigger`/`tether_route_shadow` 실행 + callback 예외 격리.
+- **`FxTopicTriggerController`** ([tether_topic_trigger.py](app/tether_topic_trigger.py) 복제 + multi-topic): `_pending`을 3 fx topic별 key, flush는 **per-topic** `safe_publish_fx_snapshot(asset)`.
+- **`safe_publish_fx_snapshot(asset)` 신규** (direct flush 전용): asset validation + 자체 `get_db_context()` + per-asset try/except + 기존 hook_entered/error publisher telemetry 보존. **코어 `_publish_fx_snapshot(db,asset)` 공유, 기존 `safe_publish_all_fx_snapshots(db)`는 불변** (legacy hook db session 1개 유지 = legacy 경로 behavior-change-0).
+- crud orchestrator([crud.py:253](app/crud.py#L253)/[:363](app/crud.py#L363)): `changes>0` 직렬 블록(commit→Redis→alert) **끝에** bridge emission 1줄, try/except 격리. signature/순서/count==0 gate 불변.
+- **SET-only trigger gating**: `_write_changed_*_to_redis`를 `None`→**`list[dict]` (SET 성공한 update만 반환, 입력 순서·실패 격리·기존 SET 동작 유지)**. bridge엔 **성공분만** 전달 → emission은 SET 성공 change만 trigger, SET 실패는 trigger X + failure telemetry. Redis SET 자체 동작·best-effort·mirror 안전망 불변 — outcome **소비**만 추가. (USDT/KRX `*LatestWriteOutcome` SET-only 패턴 mirror.) **gating은 topic trigger 한정 — alert(`process_rate_alerts`, DB-authoritative)는 전 change 발화·불변** (Redis 장애 시 알림 누락 방지).
+- config: `BANK_INVESTING_TOPIC_TRIGGER_MODE`/`_COALESCE_MS` + reason 상수(fx: `FX_TRIGGER_REASON_BANK_CHANGE`/`..._INVESTING_CHANGE`, cross-route: 기존 `TETHER_TRIGGER_REASON_*` 계열 신규).
+- **shutdown 순서**: bridge enqueue 차단 → fx controller flush drain → 기존 tether trigger drain → scheduler 종료.
+
+**① 변경 / 불변 경계 (C1 trigger-only)**:
+
+- 변경: 신규 `fx_topic_trigger.py` / `topic_trigger_bridge.py` / `safe_publish_fx_snapshot` / crud emission 1줄(bridge 경유) / **`_write_changed_*_to_redis` outcome 전파 + SET-only trigger gating** / config 2 + reason 상수 / `tether_route_shadow` telemetry.
+- 불변: insert_bank/investing signature+`int` 반환(27 call site) / 직렬 순서 commit→Redis→alert + count==0 gate(PR A/B 잠금) / `ChangedRate` DTO + sink shape / **Redis SET 동작·best-effort·mirror 안전망**(outcome은 소비만 추가) / `latest:bank:*`/`latest:investing:*` 3-field schema + mirror cycle(→C2) / insert-if-changed DB SELECT(→C3) / broadcast hot path + is_stale + 알림 경로 / `safe_publish_all_fx_snapshots(db)` + legacy fx hook([:741](app/main.py#L741), PR D까지)·tether hook([:730](app/main.py#L730), PR E까지) 공존 / `_publish_fx_snapshot` 내부.
+
+**② Open 결정**:
+
+- **α/β/γ**: C1에선 freshness-write 빈도 축 미발생(Redis schema 미변경). trigger 정책 = "rate 변경 시 발화"(= PR B `changes>0`, β의 trigger 절반). α(매 fetch publish → 동일 payload 폭발) / γ(freshness 손실) 기각. β의 seen_at-매-fetch write 절반은 C2, **최종 확정은 C2 dual_shadow telemetry**.
+- **dedup cold-start**: C1은 dedup DB-based 유지 → 위험 0. C3 진입 시 정책 박제 — Redis miss/재시작 → DB SELECT fallback(USDT read path), Redis=fast-path / DB=correctness backstop, 첫 fetch가 seed + regression guard.
+- **SET-failure 복구 + 집계 부분-stale 경로 (PR D/E precondition, 동일 축)**: ⚠️ **preliminary — PR D/E 스코핑 시 telemetry 기반 최종화** (아래 선택지는 directional, locked decision 아님). SET-only는 *trigger source 자신*의 stale-publish만 막음. 두 잔여 — **(a)** SET 실패 변경은 **trigger 자체가 안 남** → 다음 event까지 미발행(bank/investing 변경 드물어 갭 김 — USDT는 tick 빈번해 self-heal); **(b)** `fx:<asset>`은 9은행+investing **집계**라 *다른* source SET 실패 시 성공 source의 trigger가 부분-stale snapshot 발행. **둘 다 legacy 공유·C1 신규 아님**(legacy hook도 Redis-first read, ≤3s mirror 교정) + PR C 중엔 legacy hook 커버. hook 제거(PR D/E) 전 결정 (**trigger 발생 여부 ⊥ publisher 권위 = 별 concern**):
+  - **(i)** mirror가 changed value 감지 시 trigger 발생(publish는 mirror-fresh Redis) → (a)+(b) eventually-consistent(≤3s).
+  - **(ii)** SET-only 완화 — **SET 실패도 committed-change trigger 발생 + publisher DB-authoritative** → (a)+(b) 즉시 해소. ⚠️ **DB-authoritative 단독(trigger 복원 없이)은 (b) + trigger가 나는 (a)만 해소 — trigger 자체 없는 순수 (a)는 미해소** (publisher가 호출 안 됨). 순수 (a)엔 trigger 복원 필수.
+  - **C1 범위는 SET-only gating까지** (복구 경로는 hook 제거 PR의 precondition).
+
+**③ Canary**:
+
+| Stage | 조치 | 관찰 |
+| --- | --- | --- |
+| 0 land | `BANK_INVESTING_TOPIC_TRIGGER_MODE=legacy_piggyback` default | behavior-change-0, CI green. legacy hook이 bank/investing→topic 유일 경로(usdt:krw는 USDT/KRX direct도 발행). |
+| 1 dual_shadow | production env flip + force-recreate | fx 발화/coalesce 빈도 + `tether_route_shadow` counter를 legacy hook 빈도와 대조. publish X → 영향 0. 영업일 1–3일. |
+| 2 direct_coalesced | env flip | fx + usdt:krw 이중 발행(부분-stale 가능 — SET 실패 source, mirror+legacy hook 교정). **direct trigger payload == legacy hook payload 동치 검증**(count/success만으론 정합 불충분) + `tether_route_shadow`→실측 전환 + iOS canary. **KRX CF close 창(15:35–15:50) 회피.** |
+| 3 = PR D | legacy **fx hook(741)만** 제거 + SET-failure/부분-stale 복구 경로 | **fx:* source-trigger-only**, publish 누락 0 + fx 집계 payload 정합 확인. usdt:krw는 tether hook(730) 유지 → PR E까지 이중발행. |
+| 4 = PR E (별도) | tether hook(730) 제거 | usdt:krw source-trigger-only(USDT 5 + KRX + cross-route). **kb/hana/investing 변경이 usdt:krw payload에 실제 반영 확인**(enabler=cross-route). |
+
+Rollback: 각 stage env 1줄 + force-recreate. anchor = `legacy_piggyback`.
 
 ---
 
