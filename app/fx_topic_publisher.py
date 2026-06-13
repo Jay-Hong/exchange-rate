@@ -224,6 +224,49 @@ async def safe_publish_all_fx_snapshots(db: "Session") -> Dict[str, bool]:
     return results
 
 
+async def safe_publish_fx_snapshot(asset: str) -> bool:
+    """단일 FX asset publish — 자체 DB session 소유 (direct trigger flush 전용).
+
+    §6.6.2 C1: `FxTopicTriggerController` flush가 호출. main.py legacy hook이 쓰는
+    `safe_publish_all_fx_snapshots(db)`와 **별개** — direct flush는 caller db가
+    없으므로 자체 session을 연다 (tether `_default_publish_tether_snapshot` 패턴).
+    코어 `_publish_fx_snapshot`은 공유, **all-wrapper는 불변** (legacy 경로 db
+    session 1개 유지 = behavior-change-0).
+
+    Args:
+        asset: FX_TOPIC_ASSETS 중 하나. 외 invalid면 False (방어 — controller가
+            이미 거르지만 이중).
+
+    Returns:
+        True — guard 통과 + 1명 이상 send 성공. False — invalid asset / FF off /
+        subscriber 0 / 모든 send 실패 / 예외.
+
+    예외 격리: builder/publish/DB 실패가 flush 호출자(trigger controller)로
+    전파되지 않음. all-wrapper와 동일 hook_entered/error telemetry 보존.
+    """
+    if asset not in FX_TOPIC_ASSETS:
+        logger.warning("safe_publish_fx_snapshot invalid asset (격리)", extra={"asset": asset})
+        return False
+
+    from app.database import get_db_context
+
+    await _record_topic_event(asset, result="hook_entered", increment_hook=True)
+    try:
+        with get_db_context() as db:
+            return await _publish_fx_snapshot(db, asset)
+    except Exception as exc:
+        logger.exception(
+            "fx topic single publish 실패 (격리, flush 호출자 영향 X)",
+            extra={"asset": asset},
+        )
+        await _record_topic_event(
+            asset,
+            result="error",
+            error=f"{type(exc).__name__}: {str(exc)}",
+        )
+        return False
+
+
 async def get_fx_topic_telemetry() -> Dict[str, Dict[str, Any]]:
     """admin endpoint 노출용 telemetry snapshot (3 asset).
 

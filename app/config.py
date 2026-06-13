@@ -420,6 +420,41 @@ if TETHER_TOPIC_TRIGGER_COALESCE_MS < 1:
         f"(got {TETHER_TOPIC_TRIGGER_COALESCE_MS})."
     )
 
+# Phase Z-2 §6.6.2 — Bank/Investing β PR C (C1) source-routed topic trigger.
+# bank/investing 변경을 fx:* (+ kb·hana·investing usd-krw는 usdt:krw cross-route)
+# topic으로 발사하는 write-through trigger 모드. tether 패턴 mirror.
+# 이름이 fx가 아닌 source(bank/investing) 기준인 이유: fx:* + usdt:krw cross-route
+# 둘 다 게이트하므로 (§6.6.2).
+#   - legacy_piggyback (default): emission 전체 noop → land behavior-change-0
+#     (기존 main.py legacy hook만 publish).
+#   - dual_shadow: fx coalesce 측정 (publish X) + 조건부 cross-route는
+#     tether_route_shadow counter만 (실제 tether 호출 X — live tether 발행 방지).
+#   - direct_coalesced: fx publish + 조건부 cross-route tether 실호출.
+BANK_INVESTING_TOPIC_TRIGGER_MODE = os.getenv(
+    "BANK_INVESTING_TOPIC_TRIGGER_MODE", "legacy_piggyback"
+).strip().lower()
+BANK_INVESTING_TOPIC_TRIGGER_ALLOWED_MODES = (
+    "legacy_piggyback",
+    "dual_shadow",
+    "direct_coalesced",
+)
+BANK_INVESTING_TOPIC_TRIGGER_COALESCE_MS = int(
+    os.getenv("BANK_INVESTING_TOPIC_TRIGGER_COALESCE_MS", "500")
+)
+
+if BANK_INVESTING_TOPIC_TRIGGER_MODE not in BANK_INVESTING_TOPIC_TRIGGER_ALLOWED_MODES:
+    raise ValueError(
+        "BANK_INVESTING_TOPIC_TRIGGER_MODE must be one of "
+        f"{BANK_INVESTING_TOPIC_TRIGGER_ALLOWED_MODES} "
+        f"(got {BANK_INVESTING_TOPIC_TRIGGER_MODE!r})."
+    )
+
+if BANK_INVESTING_TOPIC_TRIGGER_COALESCE_MS < 1:
+    raise ValueError(
+        "BANK_INVESTING_TOPIC_TRIGGER_COALESCE_MS must be >= 1 "
+        f"(got {BANK_INVESTING_TOPIC_TRIGGER_COALESCE_MS})."
+    )
+
 # 텔레그램 설정 (Phase 2용, 현재 비활성화)
 TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
