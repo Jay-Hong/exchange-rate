@@ -601,7 +601,7 @@ docker compose up -d --force-recreate fastapi
 
 | Gate | 내용 | 차단하는 사고 모드 |
 |---|---|---|
-| 1. calendar | `is_krx_business_day(boundary date)` | 5/25 (등록 휴장) — Stage C guard gate 1 mirror |
+| 1. calendar | `is_close_snapshot_eligible(session, boundary date)` — CF: boundary 당일 / CM: 야간장 시작일(boundary−1) | 5/25 CF (등록 휴장, CF·CM 공통 차단). **2026-06-13 (`78b02be`)**: 구 `is_krx_business_day(boundary date)`는 금요일밤 CM(토 boundary)의 REST fallback 평가(WS-miss 시)에서 휴장 오판 reject → session-aware(scheduling eligibility 정합) 정정 |
 | 2. contract identity | REST 응답 `resp_hts_kor_isnm` 월물 + `resp_futs_last_tr_date` 만기 == 캡처 contract + 만기 미경과 (fail-closed) | 5/18 rollover stale — Stage C guard gate 2 mirror |
 | 3. session evidence (신규) | 우리 WS의 마지막 tick(`get_latest_source_rate`)이 boundary − `KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS`(default 3h) 이내. last=None / timestamp 파싱 불가도 reject | **미등록 휴장(5/25 모드 본질)** — 자기 데이터로 "오늘 세션이 실제 거래했다" 증명. 구 last=None→sanity skip→write 구멍도 동시 폐쇄 |
 | (+) price sanity ±2% | 기존 유지 | 가격 이상치 |
@@ -677,7 +677,7 @@ docker compose up -d --force-recreate fastapi
 1. **WS close tick captured**: CF 15:45:01 frame 수신 → close window writer가 DB + Redis 양쪽 unconditional INSERT (실제 WS timestamp), `close_grace_saved` counter ++, Redis flag SET
 2. **Same-price close saved**: WS close frame 가격이 직전 정규장 마지막 거래가와 동일 → DB INSERT 발생 (insert-if-changed 우회 검증), Redis SET 발생
 3. **REST fallback skipped when captured**: WS close frame이 grace window 안에 1건이라도 잡힘 → grace 종료 시점에 Redis flag GET → captured 확인 → REST 호출 자체 skip, `close_rest_fallback_used` counter unchanged
-4. **REST fallback used when not captured**: WS grace 동안 frame 0건 → grace 종료 직후 REST 1회 호출 → 성공 시 Redis + DB INSERT + flag SET, `close_rest_fallback_used` counter ++
+4. **REST fallback used when not captured**: WS grace 동안 frame 0건 → grace 종료 직후 REST 1회 호출 → 성공 시 Redis + DB INSERT + flag SET, `close_rest_fallback_used` counter ++ **[§5.7.8(2026-06-10)로 supersede — 현 REST 경로 = insert-if-changed(동일가 skip) + Redis boundary timestamp overwrite + captured flag 미SET]**
 5. **Env toggle off**: `KRX_CLOSE_FINALIZER_ENABLED=false` → 2차 PR 정책 비활성 + 1차 PR (c0855ff) 동작 그대로 (close window writer 진입 X, REST 3 retry sequence 그대로)
 6. **Single-price window frame counted but not close-saved**: 15:35:00 ~ 15:44:59 frame 수신 (예: 단일가 시작 직후 잔여 echo) → `single_price_window_frame_count` counter ++ but close window writer 미진입 (일반 dedup 유지)
 

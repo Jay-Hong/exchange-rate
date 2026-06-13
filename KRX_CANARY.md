@@ -678,6 +678,24 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false 유지. 상세:
 
 → 별도 캘린더 보강 PR로 검증 + cross-check 후 추가 (본 5/25 hotfix scope 외).
 
+### 2026-06-13 금요일밤 CM close-write calendar gap 발견 + fix (`78b02be`)
+
+> 📅 **발견**: 2026-06-13(토) 06:00 KST CM close (금요일밤 세션 종료). 🏷️ **상태**: fix land(shadow-only, flag=false) — flag=true 실측은 6/15 rollover 후.
+
+**관측 (6/13, 이미 발생 — flag=false)**:
+
+- 마지막 체결 **1518.10 @ 05:49:30 KST**, 이후 06:00까지 무거래(thin night close, trade_age 636s)
+- close trade frame 0건 → WS close-window write 미발생 (captured flag 미SET)
+- REST는 **동일가 1518.1 반환** (production 로그 `rate=1518.1` 실증 — `futs_prpr`=마지막 체결가)
+- **구 gate가 토요일 boundary를 calendar reject**: `[krx_close_snapshot] REST write gate REJECTED reason=calendar ... boundary=2026-06-13T06:00:00+09:00 (flag=False)`
+- Redis latest는 **05:49에 잔존** (06:00 미갱신)
+
+**root cause**: gate 1이 `is_krx_business_day(boundary date=토)` 판정 → 금요일밤 CM의 REST fallback 평가(WS 종가 미capture 시)에서 토요일 boundary를 휴장 오판 reject. scheduling `is_close_snapshot_eligible`(CM: boundary−1=금)과 불일치.
+
+**fix (`78b02be`)**: gate 1 → `is_close_snapshot_eligible(session, boundary_date)` (CM: 야간장 시작일 boundary−1). shadow-only(flag=false → write 변화 0). gate 3(session evidence) 5/25 보호 유지. 상세: [KRX_CLOSE_SNAPSHOT_PLAN §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md).
+
+**예측 (6/15 rollover 후 flag=true, 미실측)**: 금요일밤 CM(다음 6/20 토 06:00)이 gate 통과 시 **Redis를 REST 반환 최근가(그날 마지막 체결가) @06:00 overwrite / DB insert-if-changed(동일가 skip)** — 첫 실측은 6/20. 토글 매트릭스 + CF/CM 첫 write canary는 flag 활성화 단계 갱신.
+
 ---
 
 ## Rollback 절차
