@@ -47,6 +47,12 @@ _REPORT_PDF_PATTERN = re.compile(
     r'https?://rreport\.einfomax\.co\.kr/report/[^\s"<>]+\.pdf'
 )
 
+# KB가 모든 제목 앞에 붙이는 division 접두사 (예: "[일반] [외환] ...").
+# 콘텐츠 태그([외환]/[부고]/[표]/[전문] 등)와 본문없음 마커(*)가 그 뒤에 오므로,
+# 다른 판별(* / [전문] / 노이즈 prefix) 전에 가장 먼저 제거해야 한다.
+# 접두사가 없는 옛 형식도 그대로 통과(no-op)되어 하위 호환.
+_KB_DIVISION_PREFIX_PATTERN = re.compile(r'^\[일반\]\s*')
+
 
 # ── 공개 API ──────────────────────────────────────────
 
@@ -231,6 +237,9 @@ def _parse_kb_item(raw: dict, category: str) -> Optional[dict]:
         published_at = datetime.strptime(write_dt_str, "%Y%m%d%H%M%S").replace(tzinfo=KST)
     except ValueError:
         return None
+
+    # KB division 접두사([일반]) 제거 → 이후 * / [전문] / 노이즈 prefix 판별이 정상 동작
+    title = _KB_DIVISION_PREFIX_PATTERN.sub("", title)
 
     # * 접두사 → 본문 없음
     is_bodyless = title.startswith("*")
