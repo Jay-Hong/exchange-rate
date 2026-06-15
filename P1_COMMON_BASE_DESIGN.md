@@ -115,23 +115,23 @@ direct SET + mirror 공유, **atomic**:
 | `skipped_newer` | Redis revision > incoming | skip (역행 방지) |
 | `failed` | read/parse/write 오류 | — |
 
-- 비교 = **정규화 epoch + integer id** (ISO 문자열 금지 — 동일 ts tie-break = DB `(timestamp DESC, id DESC)`).
+- 비교 = **canonical revision `(canonical_epoch_us, id)`** (정수 μs epoch + integer id; ISO/float 금지 — 동일 ts tie-break = DB `(timestamp DESC, id DESC)`). canonical 변환·확보 = §16.
 - **atomic op 실패 시 unconditional 복귀 금지.** 단 **per-key write 실패**(일시 Redis 오류 등) = 그 write만 **skip + telemetry + mirror/next-cycle 재시도, atomic 모드 유지** / **전역 halt = 의도된 mode 상태**(admin/incident). 단일 Redis blip ≠ 전역 halt.
 
 ## 12. 7 선결 조건 (구현 전 고정)
 
-1. revision timing — 부여=flush(provisional) / 외부 사용=post-commit / rollback 폐기
+1. revision timing — flush 후 row.timestamp/row.id에서 capture(provisional, internal) / 외부 노출=post-commit / flush·commit 실패=rollback+폐기 (§16)
 2. legacy migration — §10
-3. revision = 정규화 UTC epoch
+3. revision = `(canonical_epoch_us, id)` — 정수 μs(naive→UTC, float 금지), direct+selector 공유 canonical 함수 (§16)
 4. rollout — forward + rollback (§3·6·8)
 5. fail-closed — §7·11
 6. **outcome 계약** (§14) — 5-state writer 결과 ↔ caller/D 발행 결정 분리. legacy-mode bool 경로 불변은 characterization으로 잠금 (production standalone-atomic 전제 제거 — atomic은 D와 함께만 활성, §2/§15)
-7. **mirror revision 공급** — 전용 revision-aware selector/internal type (공개 selector·payload에 id 유출 금지; crud.py:512/564 공유 selector 직접 변경 금지)
+7. **mirror revision 공급** — 전용 revision-aware selector/internal type (공개 selector·payload에 id 유출 금지; crud.py:512/564 공유 selector 직접 변경 금지). direct=flush-row-ref / mirror·bootstrap=revision-aware selector (§16)
 
 ## 13. open (다음 결정/설계)
 
 - ✅ **outcome 계약** → §14 (resolved). ✅ **readiness/cutover gate** → §15 (resolved — (a)+(c) + seed-in-atomic/publish_blocked + bounded-eventual).
-- **steady-state revision ID 확보** (잔존): flush-row-ref (ChangedRate에 ORM row 보관, provisional id를 commit 전 외부 노출 금지) vs commit-후 재조회 (failure boundary 변경 — crud.py:339 "sink 변환 실패 시 commit 전 차단"). bootstrap revision-ID는 §15에서 DB row id 직독으로 해소(별개).
+- ✅ **steady-state revision-ID 확보** → §16 (resolved — flush-row-ref + StagedRateChange + canonical epoch 계약 + rollback 계약). bootstrap revision-ID는 §15 DB row id 직독(별개).
 - **atomic primitive**: Lua vs WATCH (선례 0; **direct=sync thread / mirror=async loop 분리** → 공유 coordinator 까다로움 → CAS 무게).
 - **lease/timeout 수치** (운영 튜닝, §15 골격과 분리): publisher drain timeout / catch-up bounded 횟수·시간 / lease expiry·renew / status=failed 재시도 정책.
 - migration 완료 판정 / subscribe-time initial snapshot (별도 client 계약) / **D layer 내부** (builder effective revision vector + success watermark 저장 + retry/backoff — §14/§15는 P1↔D 인터페이스·cutover까지, D 내부 구현은 범위 밖).
@@ -210,7 +210,53 @@ item 4 telemetry reason 매핑 (보수적, SET-relative 지점): `client_unavail
 
 **sub-decision (확정)**: full revision vector(작고 진단 가능) / readiness per-asset 저장 / 최초 cutover flip all-at-once(3 asset, 단순성 + 원자성).
 
-## 16. 참조
+## 16. revision-ID 확보 (StagedRateChange + flush-ID + canonical 계약)
+
+> §11 compare가 쓰는 revision `(canonical_epoch_us, id)`의 **확보·정규화** 방식. direct write + mirror/bootstrap 두 공급원이 **같은 row → 같은 revision** 산출해야 함 (§11 conflict/skipped_newer false-positive 방지).
+
+**direct write 순서** (insert_bank_rates_into_db 재구성):
+
+```text
+stage → StagedRateChange{change: ChangedRate, row: ORM}
+  → sink payload 변환 (to_kst_isoformat, pre-flush — 변환 실패 시 flush 전 abort, 현 failure boundary 보존)
+  → db.flush()  (INSERT, id 할당)
+  → revision = (canonical_epoch_us(row.timestamp), row.id)  plain value capture (commit 전, expire_on_commit 비의존)
+  → db.commit()
+  → commit 성공 후에만 revision을 Redis/candidate에 노출
+```
+
+- **anchor = row.timestamp** (DB 컬럼; changed_at 아님 — ChangedRate docstring C2 `seen_at`/`rate_changed_at` 분리 시 changed_at이 save-time과 divergence → DB 컬럼 추적이 requery-identity future-proof). 명시 입력값이라 flush 후 auto-갱신 가능성 낮으나 **"flush 후 읽는다" 원칙 유지**.
+- **ownership**: `ChangedRate`(frozen) sink DTO 청정 유지 / ORM ref는 **StagedRateChange (staging-only transient)** — frozen DTO를 SQLAlchemy lifecycle에 결합 안 함, commit 후 ORM 객체 downstream 미전달(plain value만).
+- **direct source** = flush-row-ref (추가 재조회 SELECT 없음 — id via INSERT RETURNING; flush INSERT round trip은 commit에서 어차피 발생). **mirror/bootstrap source** = 내부 revision-aware selector (공개 §512/564 무변경, §12-7).
+
+**canonical 함수 (direct + selector 공유)**:
+
+```text
+to_canonical_epoch_us(dt) -> int:
+    dt = dt.replace(tzinfo=UTC) if naive else dt.astimezone(UTC)
+    delta = dt - 1970-01-01(UTC)
+    return delta.days*86_400_000_000 + delta.seconds*1_000_000 + delta.microseconds
+```
+
+signed integer μs, **float `.timestamp()` 금지**(μs 스케일 rounding).
+
+**precision 계약**:
+
+- 단위 μs는 **우리 코드(canonical 함수)가 강제**.
+- DB(`Column(DateTime)`, precision 인자 없음 — μs는 Postgres/SQLite default 동작이지 schema 강제 아님)의 μs 보존은 **integration test로 검증**.
+- flush→requery 정밀도 동일성은 **integration test/preflight로 검증** — 불일치 시 **activation 차단**(해당 env 부적합). direct runtime은 requery 안 하므로 **runtime 감지 아님**(불일치는 §11 spurious conflict/skip로 발현 → preflight가 선차단). silent truncation 금지.
+- 하드 강제 필요 시에만 **향후 `timestamp(6)` migration**.
+
+**rollback 계약 (구현 계약 — 현재 orchestrator에 명시 rollback 없음)**:
+
+- **staging(db.add) 이후 변환·flush·commit 어느 단계든 실패 → `db.rollback()`** — db.add가 이미 session에 pending row를 넣으므로 rollback 없이 session 재사용 시 이후 flush/commit에 그 row가 섞여 저장될 수 있음(변환-fail은 INSERT 미실행이나 **pending row 정리 위해 rollback 필요**). + provisional revision 폐기 + Redis·candidate·alert·trigger **0** + 실패 신호(silent 성공 금지).
+- rollback **완료 전 해당 session 작업 계속 금지** / rollback **후 session 재사용 여부는 호출자 lifecycle 계약**에 따름.
+- 변환은 pre-flush 유지 → 변환-fail 시 INSERT 미실행 = **DB-not-committed boundary 보존**(rollback은 pending row 정리용 추가; 현 orchestrator는 변환-fail에도 명시 rollback 없이 session lifecycle 의존).
+- **commit 성공 후 downstream 실패는 rollback 대상 아님** → D reconciliation 복구 (DB는 committed = 정확).
+
+**test**: ① canonical 단위 / ② SQLite flush→requery revision 동일 / ③ Postgres(통합 환경 있으면) 동일 / ④ commit-fail → rollback + provisional discard + downstream 0 / ⑤ 변환-fail → flush 미호출 + rollback + downstream 0 / ⑥ commit 성공 전 Redis·candidate 호출 0 / ⑦ plain-int capture(expire 비의존).
+
+## 17. 참조
 
 - [PR_D_RECOVERY_SPEC.md](PR_D_RECOVERY_SPEC.md) — D 결정 (§12), 옵션 비교 (§7)
 - 코드: [crud.py:324](app/crud.py#L324)(orchestrator stage→commit→write→emit) / [:103](app/crud.py#L103)(_write_changed) / [:512](app/crud.py#L512)·[:564](app/crud.py#L564)(selector, id 없음) / [latest_rates_cache.py](app/latest_rates_cache.py)(set_latest·_mirror_all_latest·serialize/deserialize/is_stale, ChangedRate id 없음) / [docker-compose.yml:22](docker-compose.yml#L22)(redis allkeys-lru → marker DB 필수) / [Dockerfile:118](Dockerfile#L118)(--workers 1 단일 프로세스)
