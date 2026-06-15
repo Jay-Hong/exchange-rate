@@ -1022,6 +1022,26 @@ def get_krx_close_events(
     return events
 
 
+def _safe_record_bank_investing_set_stat(fn, *args, **kwargs) -> None:
+    """bank/investing SET-outcome telemetry record를 writer hot path에서 격리.
+
+    bank_investing_redis_stats.record_*는 내부 try/except를 갖지만, 향후 모듈
+    리팩터/테스트 monkeypatch로 record_*가 예외를 던지더라도 writer의 SET 결과·
+    bool 반환이 절대 영향받지 않도록 호출부에서 한 번 더 막는다(production hot
+    path 불변 — telemetry는 비필수 관측이라 유실 허용, rate write 중단 불가).
+
+    명칭을 bank/investing SET stat로 좁힌 이유: 같은 모듈의 다른 telemetry
+    (usdt_redis_stats 등)에 잘못 재사용되지 않도록 (semantics·로그 문구 전용).
+    """
+    try:
+        fn(*args, **kwargs)
+    except Exception:
+        logger.debug(
+            "bank/investing SET telemetry record 격리 (writer hot path 보호)",
+            exc_info=True,
+        )
+
+
 def set_latest_bank_rate_from_sync_job(
     bank: str,
     asset: str,
@@ -1045,23 +1065,55 @@ def set_latest_bank_rate_from_sync_job(
 
     Returns:
         True: Redis SET 성공.
-        False: client init 실패 / SET 예외.
+        False: client 미가용(client_unavailable) / key·serialize 예외
+            (writer_exception) / SET 예외(set_exception). 실패는
+            bank_investing_redis_stats에 원인별 집계 (item 4).
 
     설계 격리 (USDT writer와 동일):
         - sync `redis.Redis` client 사용 (broadcast/mirror async path와 분리)
         - **async circuit_breaker 호출 X**
-        - telemetry 미부착 (Step 3b 1st pass — direct write 안정 후 별 PR)
+        - SET-outcome telemetry 부착 (item 4 — bank_investing_redis_stats,
+          _safe_record_bank_investing_set_stat로 writer hot path 격리)
     """
-    client = _get_sync_client()
-    if client is None:
+    from app import bank_investing_redis_stats as set_stats  # 순환 없음(set_stats는 app 미의존)
+    _safe_record_bank_investing_set_stat(set_stats.record_attempt, bank, asset)
+    try:
+        client = _get_sync_client()
+    except Exception as e:  # 방어적: _get_sync_client는 현재 내부에서 예외를 흡수하나
+        _safe_record_bank_investing_set_stat(  # 향후 리팩터/monkeypatch에도 bool 계약 유지
+            set_stats.record_failure, bank, asset, "client_unavailable",
+            error=f"{type(e).__name__}: {e}",
+        )
         return False
-    key = latest_key_bank(bank, asset)
-    mirrored_at = datetime.now(_KST)
-    value = serialize_value(rate, timestamp, mirrored_at)
+    if client is None:
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, bank, asset, "client_unavailable"
+        )
+        return False
+    try:
+        key = latest_key_bank(bank, asset)
+        mirrored_at = datetime.now(_KST)
+        value = serialize_value(rate, timestamp, mirrored_at)
+    except Exception as e:
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, bank, asset, "writer_exception",
+            error=f"{type(e).__name__}: {e}",
+        )
+        logger.warning(
+            "bank sync Redis writer 예외 (key/serialize 단계, mirror cycle 안전망 의존)",
+            exc_info=True,
+            extra={"bank": bank, "asset": asset},  # key 미정의 가능 → bank/asset
+        )
+        return False
     try:
         client.set(key, value)
+        _safe_record_bank_investing_set_stat(set_stats.record_success, bank, asset)
         return True
-    except Exception:
+    except Exception as e:
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, bank, asset, "set_exception",
+            error=f"{type(e).__name__}: {e}",
+        )
         logger.warning(
             "bank sync Redis SET 실패 (best-effort, mirror cycle 안전망 의존)",
             exc_info=True,
@@ -1132,7 +1184,7 @@ def set_latest_investing_rate_from_sync_job(
 
     `crud.insert_investing_rates_into_db`가 commit 직후 호출. bank writer와 동일
     설계 (Z-2d allowlist 통과 → mirror cycle safety net + async circuit 격리 +
-    telemetry 미부착).
+    SET-outcome telemetry 부착, item 4 — source="investing").
 
     Args:
         asset: 통화쌍.
@@ -1141,18 +1193,48 @@ def set_latest_investing_rate_from_sync_job(
 
     Returns:
         True: Redis SET 성공.
-        False: client init 실패 / SET 예외.
+        False: client 미가용 / key·serialize 예외 / SET 예외
+            (bank_investing_redis_stats 원인별 집계).
     """
-    client = _get_sync_client()
-    if client is None:
+    from app import bank_investing_redis_stats as set_stats  # 순환 없음
+    _safe_record_bank_investing_set_stat(set_stats.record_attempt, "investing", asset)
+    try:
+        client = _get_sync_client()
+    except Exception as e:  # 방어적: bool 계약 유지(향후 리팩터/monkeypatch 대비)
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, "investing", asset, "client_unavailable",
+            error=f"{type(e).__name__}: {e}",
+        )
         return False
-    key = latest_key_investing(asset)
-    mirrored_at = datetime.now(_KST)
-    value = serialize_value(rate, timestamp, mirrored_at)
+    if client is None:
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, "investing", asset, "client_unavailable"
+        )
+        return False
+    try:
+        key = latest_key_investing(asset)
+        mirrored_at = datetime.now(_KST)
+        value = serialize_value(rate, timestamp, mirrored_at)
+    except Exception as e:
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, "investing", asset, "writer_exception",
+            error=f"{type(e).__name__}: {e}",
+        )
+        logger.warning(
+            "investing sync Redis writer 예외 (key/serialize 단계, mirror cycle 안전망 의존)",
+            exc_info=True,
+            extra={"asset": asset},  # key 미정의 가능 → asset
+        )
+        return False
     try:
         client.set(key, value)
+        _safe_record_bank_investing_set_stat(set_stats.record_success, "investing", asset)
         return True
-    except Exception:
+    except Exception as e:
+        _safe_record_bank_investing_set_stat(
+            set_stats.record_failure, "investing", asset, "set_exception",
+            error=f"{type(e).__name__}: {e}",
+        )
         logger.warning(
             "investing sync Redis SET 실패 (best-effort, mirror cycle 안전망 의존)",
             exc_info=True,

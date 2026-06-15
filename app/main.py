@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats
 from app.database import engine, SessionLocal, Base
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -1591,6 +1591,47 @@ async def reset_fx_topic_status():
         "success": all_ok,
         "reason": None if all_ok else "Redis 미가용 또는 circuit open / 예외 (일부 또는 전체)",
     }
+
+
+@app.get("/admin/api/bank-investing-redis-stats", dependencies=[Depends(verify_admin)])
+async def get_bank_investing_redis_stats():
+    """Bank/Investing direct-SET outcome telemetry (item 4).
+
+    set_latest_bank/investing_rate_from_sync_job의 Redis SET 시도/성공/실패(원인 3종:
+    client_unavailable / writer_exception / set_exception)를 process-local로 집계한
+    snapshot. PR D(legacy FX hook 격하)의 운영 계측 축 — SET 실패 빈도·원인 관찰.
+
+    Redis 미저장 (Redis 장애 순간의 실패까지 기록해야 해 Redis를 telemetry sink로
+    쓰면 바로 그 실패가 유실 — writer_exception은 Redis 무관하나 일관성 위해 동일
+    sink) → in-process counter 직접 read. **process 재시작 시 reset** (started_at으로
+    누적 구간 해석). reset route 없음 (운영 실수 회피 — reset_stats는 테스트 전용).
+
+    get_stats()는 deepcopy 1회(작은 dict)라 동기 호출 (event loop 차단 무시 가능).
+
+    Returns:
+        {
+          "started_at": str,                       # 누적 시작(KST ISO, 재시작 시 갱신)
+          "aggregate": {"attempt", "success", "failure",
+                        "failure_by_reason": {client_unavailable, writer_exception,
+                                              set_exception, unknown}},
+          "per_source": {
+            "<source>": {                          # bank명(kb/hana/...) 또는 "investing"
+              "aggregate": {...},
+              "per_asset": {"<asset>": {attempt, success, failure, failure_by_reason,
+                consecutive_failures, last_attempt_at, last_success_at,
+                last_failure_at, last_failure_reason, last_failure_error}},
+            }, ...
+          },
+        }
+
+    운영 sanity check (correctness invariant 아님): telemetry record 유실이 없고
+    writer가 정지된 시점에 한해 aggregate.attempt == success + failure가 기대됨.
+    차이의 두 원인 — (1) in-flight writer: record_attempt가 먼저 +1된 뒤 success/
+    failure +1 전 동시 조회 시 attempt가 일시적으로 앞섬, (2) best-effort telemetry
+    기록 유실(_safe_record_*가 예외를 삼킴): 정지 시점에도 등식이 영구적으로 어긋날
+    수 있음. 따라서 정확한 무결성 척도가 아닌 운영 점검 지표.
+    """
+    return bank_investing_redis_stats.get_stats()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

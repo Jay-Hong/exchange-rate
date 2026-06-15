@@ -28,6 +28,7 @@ from datetime import datetime, timezone as dt_timezone
 from unittest.mock import MagicMock, patch
 
 from app import latest_rates_cache
+from app import bank_investing_redis_stats
 from app.latest_rates_cache import (
     UsdtLatestWriteOutcome,
     _get_sync_client,
@@ -605,10 +606,12 @@ class TestSetLatestBankRateFromSyncJob(unittest.TestCase):
     def setUp(self):
         latest_rates_cache._sync_client = None
         latest_rates_cache._last_written_usdt_state.clear()
+        bank_investing_redis_stats.reset_stats()  # item 4: 전역 telemetry 누적 격리
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
         latest_rates_cache._last_written_usdt_state.clear()
+        bank_investing_redis_stats.reset_stats()
 
     def test_calls_set_with_correct_key_and_value(self):
         from app.latest_rates_cache import set_latest_bank_rate_from_sync_job
@@ -666,10 +669,12 @@ class TestSetLatestInvestingRateFromSyncJob(unittest.TestCase):
     def setUp(self):
         latest_rates_cache._sync_client = None
         latest_rates_cache._last_written_usdt_state.clear()
+        bank_investing_redis_stats.reset_stats()  # item 4: 전역 telemetry 누적 격리
 
     def tearDown(self):
         latest_rates_cache._sync_client = None
         latest_rates_cache._last_written_usdt_state.clear()
+        bank_investing_redis_stats.reset_stats()
 
     def test_calls_set_with_correct_key_and_value(self):
         from app.latest_rates_cache import set_latest_investing_rate_from_sync_job
@@ -716,6 +721,161 @@ class TestSetLatestInvestingRateFromSyncJob(unittest.TestCase):
         mock_warn.assert_called_once()
         mock_success.assert_not_called()
         mock_failure.assert_not_called()
+
+
+class TestBankInvestingSetTelemetryWiring(unittest.TestCase):
+    """Layer A 배선 (item 4) — set_latest_* SET outcome이 bank_investing_redis_stats에
+    원인별 집계되는지 + telemetry 예외가 writer bool 계약을 깨지 않는지 잠금."""
+
+    _TS = "2026-06-15T10:00:00+09:00"
+
+    def setUp(self):
+        latest_rates_cache._sync_client = None
+        bank_investing_redis_stats.reset_stats()
+
+    def tearDown(self):
+        latest_rates_cache._sync_client = None
+        bank_investing_redis_stats.reset_stats()
+
+    def _bank_asset(self, source="kb", asset="usd-krw"):
+        return bank_investing_redis_stats.get_stats()["per_source"][source]["per_asset"][asset]
+
+    # ── bank: success + 3 failure zone ──
+    def test_bank_success_records_attempt_and_success(self):
+        latest_rates_cache._sync_client = MagicMock()
+        ok = latest_rates_cache.set_latest_bank_rate_from_sync_job(
+            "kb", "usd-krw", 1371.5, self._TS)
+        self.assertTrue(ok)
+        a = self._bank_asset()
+        self.assertEqual((a["attempt"], a["success"], a["failure"]), (1, 1, 0))
+
+    def test_bank_client_unavailable_records_failure(self):
+        with patch.object(latest_rates_cache.redis_sync, "from_url",
+                          side_effect=RuntimeError("init fail")), \
+             patch.object(latest_rates_cache.logger, "warning"):
+            ok = latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        a = self._bank_asset()
+        self.assertEqual((a["attempt"], a["success"], a["failure"]), (1, 0, 1))
+        self.assertEqual(a["failure_by_reason"]["client_unavailable"], 1)
+
+    def test_bank_client_raise_records_client_unavailable(self):
+        # _get_sync_client가 (방어적으로) 예외를 던져도 bool 계약 유지 + client_unavailable
+        with patch.object(latest_rates_cache, "_get_sync_client",
+                          side_effect=RuntimeError("boom")):
+            ok = latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        a = self._bank_asset()
+        self.assertEqual(a["failure_by_reason"]["client_unavailable"], 1)
+        self.assertEqual(a["last_failure_reason"], "client_unavailable")
+        self.assertIsNotNone(a["last_failure_error"])
+
+    def test_bank_writer_exception_logs_with_bank_asset_not_key(self):
+        latest_rates_cache._sync_client = MagicMock()
+        with patch.object(latest_rates_cache, "latest_key_bank",
+                          side_effect=ValueError("bad key")), \
+             patch.object(latest_rates_cache.logger, "warning") as mock_warn:
+            ok = latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        mock_warn.assert_called_once()
+        # key 미정의 시점 → extra는 bank/asset (undefined 'key' 참조 X)
+        self.assertEqual(mock_warn.call_args.kwargs["extra"],
+                         {"bank": "kb", "asset": "usd-krw"})
+        self.assertEqual(self._bank_asset()["failure_by_reason"]["writer_exception"], 1)
+
+    def test_bank_set_exception_records_set_exception(self):
+        fake = MagicMock()
+        fake.set.side_effect = ConnectionError("redis fault")
+        latest_rates_cache._sync_client = fake
+        with patch.object(latest_rates_cache.logger, "warning"):
+            ok = latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        self.assertEqual(self._bank_asset()["failure_by_reason"]["set_exception"], 1)
+
+    # ── investing: success + zone (source="investing") ──
+    def test_investing_success_recorded_under_investing_source(self):
+        latest_rates_cache._sync_client = MagicMock()
+        ok = latest_rates_cache.set_latest_investing_rate_from_sync_job(
+            "usd-krw", 1371.5, self._TS)
+        self.assertTrue(ok)
+        a = self._bank_asset(source="investing")
+        self.assertEqual((a["attempt"], a["success"], a["failure"]), (1, 1, 0))
+
+    def test_investing_client_unavailable_records_failure(self):
+        with patch.object(latest_rates_cache.redis_sync, "from_url",
+                          side_effect=RuntimeError("init fail")), \
+             patch.object(latest_rates_cache.logger, "warning"):
+            ok = latest_rates_cache.set_latest_investing_rate_from_sync_job(
+                "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        a = self._bank_asset(source="investing")
+        self.assertEqual((a["attempt"], a["success"], a["failure"]), (1, 0, 1))
+        self.assertEqual(a["failure_by_reason"]["client_unavailable"], 1)
+
+    def test_investing_set_exception_records_set_exception(self):
+        fake = MagicMock()
+        fake.set.side_effect = ConnectionError("fault")
+        latest_rates_cache._sync_client = fake
+        with patch.object(latest_rates_cache.logger, "warning"):
+            ok = latest_rates_cache.set_latest_investing_rate_from_sync_job(
+                "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        self.assertEqual(
+            self._bank_asset(source="investing")["failure_by_reason"]["set_exception"], 1)
+
+    def test_investing_writer_exception_logs_with_asset_only(self):
+        latest_rates_cache._sync_client = MagicMock()
+        with patch.object(latest_rates_cache, "latest_key_investing",
+                          side_effect=ValueError("bad")), \
+             patch.object(latest_rates_cache.logger, "warning") as mock_warn:
+            ok = latest_rates_cache.set_latest_investing_rate_from_sync_job(
+                "usd-krw", 1371.5, self._TS)
+        self.assertFalse(ok)
+        self.assertEqual(mock_warn.call_args.kwargs["extra"], {"asset": "usd-krw"})
+        self.assertEqual(
+            self._bank_asset(source="investing")["failure_by_reason"]["writer_exception"], 1)
+
+    # ── quiesced invariant: attempt == success + failure ──
+    def test_aggregate_attempt_equals_success_plus_failure(self):
+        latest_rates_cache._sync_client = MagicMock()
+        latest_rates_cache.set_latest_bank_rate_from_sync_job("kb", "usd-krw", 1.0, self._TS)
+        latest_rates_cache.set_latest_investing_rate_from_sync_job("usd-krw", 2.0, self._TS)
+        fake = MagicMock()
+        fake.set.side_effect = ConnectionError("x")
+        latest_rates_cache._sync_client = fake
+        with patch.object(latest_rates_cache.logger, "warning"):
+            latest_rates_cache.set_latest_bank_rate_from_sync_job("hana", "usd-krw", 3.0, self._TS)
+        agg = bank_investing_redis_stats.get_stats()["aggregate"]
+        self.assertEqual(agg["attempt"], agg["success"] + agg["failure"])
+        self.assertEqual(agg["attempt"], 3)
+
+    # ── telemetry 예외 비전파 (helper 격리) — 3종 각각 raise ──
+    def test_telemetry_record_raise_does_not_break_writer(self):
+        # record_attempt raise (성공 경로 진입 전) → 여전히 True
+        latest_rates_cache._sync_client = MagicMock()
+        with patch.object(bank_investing_redis_stats, "record_attempt",
+                          side_effect=RuntimeError("boom")):
+            self.assertTrue(latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1.0, self._TS))
+        # record_success raise (SET 성공 직후) → 여전히 True
+        latest_rates_cache._sync_client = MagicMock()
+        with patch.object(bank_investing_redis_stats, "record_success",
+                          side_effect=RuntimeError("boom")):
+            self.assertTrue(latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1.0, self._TS))
+        # record_failure raise (SET 실패 경로) → 여전히 False (중단 X)
+        fake = MagicMock()
+        fake.set.side_effect = ConnectionError("x")
+        latest_rates_cache._sync_client = fake
+        with patch.object(bank_investing_redis_stats, "record_failure",
+                          side_effect=RuntimeError("boom")), \
+             patch.object(latest_rates_cache.logger, "warning"):
+            self.assertFalse(latest_rates_cache.set_latest_bank_rate_from_sync_job(
+                "kb", "usd-krw", 1.0, self._TS))
 
 
 class TestWriteChangedBankRatesToRedis(unittest.TestCase):
