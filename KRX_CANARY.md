@@ -625,7 +625,7 @@ client.set(
 > session evidence[tick recency, env `KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS`=3h] + sanity).
 > flag=false = shadow 평가 + 차단 (gate verdict telemetry — WS-miss 날에만 샘플) /
 > flag=true = gate-checked write (구 "무가드 복원" 폐기). (4)(5)는 유지.
-> env 활성화: **2026-06-15 16:12 KST 완료** (A75606→A75607 rollover + CF close case A 후 GO → prod `KRX_CLOSE_REST_WRITE_ENABLED=true`). 첫 gate-checked write 실측 후보 6/16 06:00 CM~.
+> env 활성화: **2026-06-15 16:12 KST 완료** (A75606→A75607 rollover + CF close case A 후 GO → prod `KRX_CLOSE_REST_WRITE_ENABLED=true`). **2026-06-16 06:00 CM 첫 후보 = case A** (WS-first close saved 1512.3 @06:00 KST, REST skip; source_rates id=954079) → **gate-checked REST write 미실증 지속**, 다음 실증은 WS-stall-at-close 발생 시 opportunistic.
 
 1. ~~KIS REST close snapshot은 더 이상 authoritative write source가 아니다.~~ (supersede — gate 전부 통과 시 gated authoritative fallback, WS-first 불변)
 2. ~~REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.~~ (supersede — default false 유지하되 true 의미가 gate-checked write로 변경)
