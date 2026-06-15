@@ -1,0 +1,197 @@
+# PR D 복구 경로 — 비교 spec (결론 없음 / working doc)
+
+> ⚠️ **상태**: working doc. **결론 없음** — guarantee level·옵션 결정 전 단계. §6.6.2 확정 기록·구현 전.
+> **목적**: PR D(legacy fx hook 제거) 후 SET/dispatch/publish 실패 복구 설계 옵션을 **중립 비교**.
+> **산출 경위**: Claude + Codex 다회 검토 수렴(2026-06-15~16). 도중 폐기된 선결론은 §9 참조.
+> **선행물**: Step 1 characterization = [tests/test_pr_d_set_failure_characterization.py](tests/test_pr_d_set_failure_characterization.py) (현 복구 동작 박제, `a1b17a4`).
+
+---
+
+## 1. 배경 / 현 구조 (코드 기준)
+
+- **legacy fx hook**: [main.py:754](app/main.py#L754) `safe_publish_all_fx_snapshots(db)` — broadcast `is_changed` 블록 안에서 **3 fx 토픽 전체** 재발행. 캐시 SET([main.py:733](app/main.py#L733))이 hook **이전**.
+- **C1 direct**: SET 성공분만 trigger → `safe_publish_fx_snapshot(asset)` (per-asset). funnel = `topic_trigger_bridge.schedule_on_loop(_run_topic_emission)` ([crud.py:321](app/crud.py#L321)) → `request_fx_topic_trigger`.
+- **mirror**: 3s interval, [`_mirror_all_latest`](app/latest_rates_cache.py) DB→Redis **unconditional `_set_latest`**, trigger 없음.
+- **broadcast**: normal 모드 실질 10s ([scheduler.py:1407](app/scheduler.py#L1407) `second='*'` + mode/second early-return).
+- **fx builder**: [`load_and_build_fx_topic_payload`](app/fx_topic_payload.py) per-source Redis-first, `is_stale`(시간만, 6s) 시에만 DB fallback ([:211-222](app/fx_topic_payload.py#L211)).
+- **subscribe**: [`topic_dispatcher`](app/topic_dispatcher.py) `register`는 **registry 등록만**, 즉시 snapshot 미전송. 실패 send ws는 **즉시 registry 제거**([:136-137](app/topic_dispatcher.py#L136)).
+- **DB 최신 정렬**: `(timestamp DESC, id DESC)` ([crud.py:201/508/544](app/crud.py#L201), 주석 "동일 초 중복 방지").
+
+---
+
+## 2. 서버측 failure mode (controllable)
+
+| # | mode | 설명 |
+|---|---|---|
+| **1** | SET-failure | direct SET 실패 → Redis≠DB (Redis stale) |
+| **2** | dispatch-miss | SET 성공했으나 publisher **미진입** (schedule_on_loop 실패 등) → Redis==DB지만 미발행 |
+| **3** | server publish-failure | publisher 진입 후 예외 or `all_send_failed` (subscriber-0·FF 차단 **제외**) |
+
+## 3. 별도 축 (WS 한계 — 옵션으로 보장 불가/부분)
+
+- **client 전달**: `≥1 send 성공` vs `전 연결 전달` — outbox로도 ≥1 초과 보장 불가.
+- **subscriber-0 정책**: 완료로 볼지 재시도로 볼지 (미확정, per-option).
+- **재접속 / subscribe-time initial snapshot**: 현재 subscribe=registry 등록만이라 신규 구독자는 다음 발행까지 snapshot 없음. **pre-existing gap** (PR D 이전부터, 별도 계약).
+
+---
+
+## 4. 현재 legacy hook baseline (정확 기술)
+
+- **어떤 broad payload change든 3 fx 전부 재시도** (broad — USD/JPY/DXY 등 무엇이 바뀌든 EUR 포함 재발행).
+- **조건부**: ① mirror 복구 **이후**의 ② 다음 broad change + ③ 구독자 존재 시에만 교정 기회. (SET 실패 후 mirror 복구 전 broad publish는 여전히 옛 값 발행.)
+- **dedicated retry 없음**: 캐시 SET이 hook보다 먼저([main.py:733](app/main.py#L733)<[754](app/main.py#L754))라 hook이 실패해도 같은 change로 재호출 안 됨. publish 실패는 "**다음 broad change**가 재시도 기회"일 뿐 보장 아님.
+
+→ **parity 기준선 = mode 1·2·3을 "다음 broad change + 구독자 존재 시" 재시도** (절대 보장 아님).
+
+---
+
+## 5. 공통 base (전 옵션 전제 — ⚠️ write-pipeline 계약 변경 포함)
+
+### 5.1 canonical revision `(timestamp, id)`
+- DB 최신 정렬과 동일 total order 필요. **timestamp-only 불충분** (same-timestamp 다른 rate 변경을 equal로 오판 → reconcile 누락).
+- **id 확보 = write-pipeline 계약 변경**: `ChangedRate`([crud.py](app/crud.py) dataclass: `source/asset/rate/changed_at` — **id 없음**) + staging은 commit **전** DTO 생성이라 신규 row id 미확보.
+  - **default 후보**: flush-후 ORM row id 수집 / commit-후 재조회
+  - **research(동등성 증명 전)**: 별도 revision 생성 — DB 정렬 순서 동등 + row 연결 증명 전까지 canonical 아님.
+- **2 레벨 구분 (must — 옵션 C/D 상태 모델 좌우)**:
+  - **per-source-key revision** `(timestamp, id)` — §5.2 monotonic write용 (key 단위 advance/equal/older 판정).
+  - **per-asset watermark identity** — 옵션 C/D watermark는 `fx:<asset>` snapshot 전체(9은행+investing)를 식별. 단일 scalar로 부분 변경(kb advance, hana 불변) 표현 불가 → **revision vector** `{source: (timestamp,id)}` 또는 canonical hash.
+  - **effective revision (must)** — vector는 DB-read revision이 아니라 **실제 Redis 발행 payload의 effective revision**으로 구성 (monotonic-write 결과가 effective_revision 반환):
+    - `advance`/`refreshed_equal` → incoming revision
+    - `skipped_newer` → **현재 Redis revision** (DB보다 최신 — DB를 넣으면 발행 payload와 불일치)
+    - `failed`/`conflict` → vector 생성 중단 (그 asset 미발행)
+  - **keyset 변화 — 2종 분리 (must)**:
+    - **membership 변경**(정책상 source 추가/제거) → 명시적 **membership revision** 변경 (정당한 새 composite, 발행).
+    - **transient 누락**(DB 조회 실패/일시 부재) → **incomplete asset → 발행 차단 + 다음 cycle 재시도**.
+    - 기준 source 집합 = `source_registry` 또는 별도 고정 계약으로 명시 (둘 구분의 근거).
+  - **watermark 기록 timing (C/D, must)**:
+    - **attempt watermark (C)**: build 완료 후 **send 직전** `built_revision` 기록.
+    - **success watermark (D)**: send 후 **`sent_count > 0` 확인 후** `built_revision` 기록 (success는 성공 전 기록 불가).
+    - build 예외는 둘 다 미기록 → 재시도. C는 send 시작 후 실패가 attempt 기록 완료라 미복구 / D는 sent_count>0 전까지 미기록이라 재시도.
+  - **builder 계약 변경 (must — C/D 선택 시 비용, 공통 base 아님)**: 현재 payload entry는 `{source,asset,rate,timestamp}`로 **id 없음** → built_revision 산출 불가. (A/B는 watermark 없어 불필요.) builder가 payload와 함께 **per-source effective revision vector 반환**(또는 internal build result에 payload+built_revision 포함) 필요. **public WS payload revision 노출 여부는 별도 결정**(기본: 내부 전용).
+  - **target ≠ built race (정상)**: `target_revision`(reconciliation 요청) 이후 Redis 변경으로 builder가 더 최신을 읽으면 `built_revision > target_revision` — **정상 race**. 실제 전송한 `built_revision`으로 watermark 갱신, 더 최신 revision은 다음 reconciliation에서 재판단. **불일치 자체를 §5.2 `conflict`로 처리 금지** (conflict는 same-revision-different-rate 한정).
+
+### 5.2 monotonic write — 5 state (direct SET + mirror **공유** primitive, atomic)
+| state | 조건 | 동작 | trigger |
+|---|---|---|---|
+| `advance` | incoming revision > Redis | rate/ts/mirrored_at write | 후보 |
+| `refreshed_equal` | 같은 revision + 같은 rate | **mirrored_at만 refresh** (freshness 유지) | 아니오 |
+| `conflict` | 같은 revision + **다른 rate** | failed 처리 + **차단** + surface (invariant 위반) | 아니오 |
+| `skipped_newer` | Redis revision > incoming | skip (역행 방지) | 아니오 |
+| `failed` | read/parse/write 오류 | — | 아니오 |
+- **atomic (Lua/WATCH)** — MGET→write 사이 + 늦은 direct writer의 TOCTOU race 방지. (현재 direct SET·mirror 둘 다 unconditional → race 실재.)
+- `refreshed_equal`에서 mirrored_at refresh 필수 — skip하면 6s 뒤 `is_stale` → DB fallback (freshness 붕괴).
+
+### 5.3 per-asset 완결 (per-key-latest 합성)
+- asset trigger 가능 = 그 cycle DB snapshot의 **전 구성 key**가 {`refreshed_equal` / `advance` write 성공 / `skipped_newer`} 중 하나.
+- 하나라도 `failed`/`conflict`/read·parse 실패면 **그 asset 보류**(pending/다음 cycle).
+- DB snapshot은 investing+은행 **다중 쿼리(비원자)** → "per-key-latest 합성"으로 정의 (transaction snapshot 아님).
+
+### 5.4 publisher raw outcome 계약 (enum + 부가정보)
+> 현재 bool/count 반환은 아래를 뭉침 → **richer outcome 구현 필요**. 완료/재시도 매핑은 **per-option** (여기선 분류만).
+
+| outcome | 부가정보 | 비고 |
+|---|---|---|
+| `sent` | `sent_count`, `subscriber_count_at_start` | partial vs full 구분 (완료 기준 per-option) |
+| `no_subscribers` | — | **관측 시점 결과, 영구 완료 아님** |
+| `disabled` | **두 flag 상태 모두** (`fx_topic_enabled`, `topic_dispatcher_enabled` — 동시 off 가능) | 단일 enum 불가 |
+| `all_send_failed` | — | 아래 전이 참조 |
+| `exception` | stage: `build` / `publish` / 기타 | — |
+
+### 5.5 outcome 상태 전이
+- `all_send_failed` → 실패 ws **evict**([topic_dispatcher:136](app/topic_dispatcher.py#L136)) → **다음 시도 `no_subscribers`**.
+- subscriber 재등장 → 재발행 방법 정의 필요 (→ subscribe-time snapshot 연결).
+- `disabled` → 재시도 주기 + 재활성화 후 복구 방식.
+
+### 5.6 FX-only scope
+- `request_fx_topic_trigger`만. **tether cross-route는 PR E 별 gate** (usd-krw reconciliation에서 호출 금지 — PR D/E 혼선 방지).
+
+---
+
+## 6. guarantee level (axis — 옵션과 별개; 첫 결정)
+
+> guarantee level은 **목표 축**이고, §7 옵션 A~D가 각각 어느 level에 도달하는지는 §7 참조. **옵션 라벨(A~D)은 level을 함의하지 않음** — A·C는 G1(parity)에 미달하는 비교 후보임에 유의.
+
+| level | 의미 | 달성 (옵션) |
+|---|---|---|
+| **G1 (parity-ish)** | 현재보다 나쁘지 않은 **서버측 재시도** | B·D **달성 가능 후보**(subscriber-0/retry 정책 확정 필요) / A·C 구조적 미달 |
+| **G2** | **≥1 send 성공까지** retry | D **후보**(outcome/retry 정책 확정 필요) |
+| (3) 전 연결 전달 | 모든 연결 수신 | **절대 보장 불가** (네트워크) |
+| (4) 재접속 최신 snapshot | 재접속 client에 최신 제공 | **현재 프로토콜 미지원**; subscribe-time snapshot 또는 resume/ack 계약 추가 시 **server-side 제공 가능**, 단 실제 수신 보장은 불가 |
+
+> ⚠️ **이 결정이 watermark/outbox 채택을 좌우** — **일부 후보(A)는 무상태** 가능, G2(D)는 success-watermark 필요. (3)은 범위 밖, (4)는 server-side 부분 가능(별도 계약).
+
+---
+
+## 7. 옵션 비교 (결론 없음)
+
+failure mode 커버 (✓ = **서버측 재시도** 동작, 전달 보장 아님):
+
+| 안 | m1 SET-fail | m2 dispatch-miss | m3 publish-fail | 상태 | guarantee | 핵심 |
+|---|---|---|---|---|---|---|
+| **현재 hook** | △ | △ | △ | 무(캐시 diff) | ~G1(조건부) | mirror 복구 후 다음 broad change + 구독자 시 |
+| **A** divergence reconciliation | ✓\* | ✗ | ✗ | 무상태 | **G1 미달** | 최단순, broad retry 상실 |
+| **B** bounded asset safety republish | ✓ | ✓ | ✓ | (타이머) | **G1 후보** | "주기 내 구독자 존재 시 반복 시도", periodic(순수 source-trigger 아님) |
+| **C** = A + attempt-watermark | ✓\* | ✓ | △ | attempt-watermark | **G1 미달** | attempt는 **build 완료 후 send 직전** `built_revision` 기록 → build 예외는 재시도, **send-시도 이후 실패만 미복구**; subscriber-0 정책 필요 |
+| **D** success-watermark + retry | ✓ | ✓ | ✓ | success-watermark | **G1·G2 후보** | "≥1 send까지" + subscriber-0·재접속 정책 |
+
+(\* mirror 복구 이후)
+
+> **C의 m3 △ 의미**: build 단계 예외 = watermark 미기록 → **재시도** / send 시작 이후 예외·전송 실패 = attempt 기록 완료 → **미복구**.
+
+**비교 축** (옵션 × 축으로 채울 것):
+1. 현재(broad) 대비 재시도 범위
+2. 최대 교정 지연 (**mirror 복구 latency 포함**)
+3. 상태 저장 (무 / attempt-watermark / success-watermark) + 저장 위치(in-memory/Redis/DB)
+4. restart 동작 (상태 소실 시)
+5. 발행 중복 (특히 B periodic)
+6. subscriber-0 정책 + 재접속 snapshot 연결
+7. **공통 base 배선 비용** (canonical revision pipeline + 5-state atomic write — 전 옵션 공유)
+
+**per-option 정책 정의 필요**: 완료 vs 재시도 outcome 매핑 / `all_send_failed→no_subscribers` 전이 / subscriber 재등장 재발행 / `disabled` 재시도·복구 주기.
+
+---
+
+## 8. open decisions (미결 — 이 spec은 결론 안 냄)
+
+1. **guarantee level** (G1 parity-ish vs G2)
+2. **옵션** (A / B / C / D)
+3. **watermark persistence** (in-memory / Redis / DB) + restart 정책
+4. **subscribe-time initial snapshot** 채택 여부 (D / 일부 C와 coupling)
+5. **canonical revision id-capture** 방식 (flush-후 id / commit-후 재조회)
+6. **subscriber-0** 완료/재시도 정책
+
+> **결정 기준 주의**: item 4 telemetry(`bank_investing_redis_stats`)는 **mode 1(Redis SET write 실패)만** 측정 — mode 2(dispatch-miss)/mode 3(publish 예외·전송 실패)/subscriber-0 재발행/disabled 복구는 **미측정**. 따라서 **B/D 선택 근거가 아니며** SET-복구 운영 우선순위(부분)만 시사. 옵션 결정은 위 1~6(guarantee level + 발행 중복/상태 영속/subscriber 정책)으로 한다.
+
+---
+
+## 9. 제외된 (검토 중 정정된) 가정
+
+> 아래는 수렴 과정에서 **틀린 것으로 판명** — 초안/결정에서 제외.
+
+- ❌ pure-(A) atomic-write-`advanced`만으로 correctness-complete → **published ≠ converged** (SET 성공+publish 실패는 divergence로 미감지).
+- ❌ A(divergence) = 현재와 parity → **broad retry 상실** (현재는 any-change 재시도, source-trigger는 per-asset).
+- ❌ C(attempt-watermark) = parity+ → **m3 중 send-시도 이후 실패 미복구** (build 후 send 직전 `built_revision` 기록 → build 예외는 재시도되나 send 실패는 watermark 갱신 후라 미재시도).
+- ❌ 현재 legacy hook이 publish-failure **보장** → dedicated retry 없음(캐시 diff가 같은 change 재호출 차단).
+- ❌ canonical revision = C2 **필수 prerequisite** → 별도 recovery key로 decouple 가능.
+- ❌ subscriber-0 = complete → **미확정 정책** (중립 유지).
+- ❌ canonical revision = 단순 메타 추가 → **write-pipeline 계약 변경**.
+
+---
+
+## 10. sequencing (방향 확정 후)
+
+방향 결정 시 예상 PR 분할:
+1. **공통 base** (전 옵션) — source-key revision 배선(id capture, write-pipeline 계약) + monotonic 5-state atomic write (direct SET + mirror 공유). 기존 transient 퇴행 race도 동시 해소.
+2. **옵션 layer** — 선택된 메커니즘. **C/D 선택 시 추가**: builder effective revision vector 반환(build 계약) + per-asset watermark identity (A/B는 watermark 없어 불필요).
+3. **legacy fx hook 제거** (PR D 본체).
+
+(tether hook 제거 = PR E 별 트랙.)
+
+---
+
+## 11. 참조
+
+- Step 1 characterization: [tests/test_pr_d_set_failure_characterization.py](tests/test_pr_d_set_failure_characterization.py)
+- [USDT_TOPIC_MIGRATION_PLAN.md §6.6.1 / §6.6.2](USDT_TOPIC_MIGRATION_PLAN.md)
+- 코드: [main.py:733/754](app/main.py#L733), [crud.py:321](app/crud.py#L321), [latest_rates_cache.py `_mirror_all_latest`](app/latest_rates_cache.py), [fx_topic_payload.py:211](app/fx_topic_payload.py#L211), [topic_dispatcher.py:136](app/topic_dispatcher.py#L136)
+- item 4 SET-outcome telemetry (실 SET-failure 빈도 입력): [app/bank_investing_redis_stats.py](app/bank_investing_redis_stats.py), admin `/admin/api/bank-investing-redis-stats`
