@@ -66,6 +66,39 @@ _COUNTER_FIELDS = (
     "error",
 )
 
+# C1 trigger 측 필드 — fx_topic_trigger가 같은 hash(topic:fx:<asset>:stats)에 trigger_ prefix로
+# 기록. publish 측 _COUNTER_FIELDS와 'error'/'publish_called'가 동명이라 응답에선 prefix 유지로 분리.
+# publisher→fx_topic_trigger import는 cycle(trigger가 이미 publisher의 FX_TOPICS import)이라 여기
+# 명시 정의하고, tests의 cross-check로 fx_topic_trigger의 Redis-영속 counter 집합 일치를 강제(drift guard).
+_TRIGGER_PREFIX = "trigger_"
+# no_loop은 running loop 부재 시 발생 → _fire_telemetry(async, loop 필요)가 실행 불가하여 Redis에
+# trigger_no_loop를 못 남김(in-process stats.no_loop_skipped만 증가, fx_topic_trigger.py:281).
+# Redis endpoint surface에서 제외 — 노출하면 항상 0이라 "발생 안 함"으로 오해됨(실제는 "측정 불가").
+_TRIGGER_PROCESS_LOCAL_FIELDS = frozenset({"no_loop"})
+_TRIGGER_COUNTER_FIELDS = (
+    "request",
+    "skipped_legacy",
+    "coalesced",
+    "flush_dual_shadow",
+    "flush_direct",
+    "publish_called",
+    "publish_success",
+    "publish_skipped_shadow",
+    "error",
+    "tether_route_shadow",
+)
+# last_ 필드 — fx_topic_trigger._fire_telemetry가 inline 기록(상수 아님, line 117-130). counter와 달리
+# trigger-side 상수가 없어 cross-check drift guard는 부재 — 현재 6개는 writer와 일치 확인(Codex review).
+# 완전 guard는 _fire_telemetry가 이 목록을 SSOT로 구동하도록 리팩터 필요(future, 저우선).
+_TRIGGER_LAST_FIELDS = (
+    "last_result",
+    "last_reason",
+    "last_source",
+    "last_window_ms",
+    "last_error",
+    "last_at_kst",
+)
+
 
 def _telemetry_key(asset: str) -> str:
     """asset별 Redis hash key. usdt:krw `topic:tether:stats`와 분리."""
@@ -291,6 +324,10 @@ async def get_fx_topic_telemetry() -> Dict[str, Dict[str, Any]]:
         base["last_result"] = None
         base["last_at_kst"] = None
         base["last_error"] = None
+        for tfield in _TRIGGER_COUNTER_FIELDS:
+            base[f"{_TRIGGER_PREFIX}{tfield}"] = 0
+        for tfield in _TRIGGER_LAST_FIELDS:
+            base[f"{_TRIGGER_PREFIX}{tfield}"] = None
 
         client = redis_cache.client
         if client is None:
@@ -337,6 +374,18 @@ async def get_fx_topic_telemetry() -> Dict[str, Dict[str, Any]]:
             base["last_at_kst"] = decoded["last_at_kst"]
         if "last_error" in decoded:
             base["last_error"] = decoded["last_error"]
+
+        for tfield in _TRIGGER_COUNTER_FIELDS:
+            pkey = f"{_TRIGGER_PREFIX}{tfield}"
+            if pkey in decoded:
+                try:
+                    base[pkey] = int(decoded[pkey])
+                except ValueError:
+                    base[pkey] = 0
+        for tfield in _TRIGGER_LAST_FIELDS:
+            pkey = f"{_TRIGGER_PREFIX}{tfield}"
+            if pkey in decoded:
+                base[pkey] = decoded[pkey]
 
         out[topic] = base
 

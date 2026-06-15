@@ -313,5 +313,100 @@ class TestTelemetryBestEffort(unittest.IsolatedAsyncioTestCase):
             mock_cache.circuit.record_failure.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# get_fx_topic_telemetry — C1 trigger_* 필드 surface (Item 1, admin observability)
+# ---------------------------------------------------------------------------
+
+class TestGetFxTopicTelemetryTriggerFields(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        self._original_registry = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._original_registry
+
+    def test_trigger_counter_fields_match_redis_persisted_set(self):
+        """drift guard: publisher surface == fx_topic_trigger의 Redis-영속 counter
+        (= TRIGGER_COUNTER_FIELDS − process-local). no_loop은 loop 부재라 Redis 미기록 → 제외."""
+        from app import fx_topic_trigger
+        self.assertEqual(
+            set(fx_topic_publisher._TRIGGER_COUNTER_FIELDS),
+            set(fx_topic_trigger.TRIGGER_COUNTER_FIELDS)
+            - fx_topic_publisher._TRIGGER_PROCESS_LOCAL_FIELDS,
+        )
+        self.assertNotIn("no_loop", fx_topic_publisher._TRIGGER_COUNTER_FIELDS)
+
+    def _mock_cache(self, mock_cache, raw):
+        mock_cache.client = MagicMock()
+        mock_cache.circuit = MagicMock()
+        mock_cache.circuit.can_attempt = AsyncMock(return_value=True)
+        mock_cache.client.hgetall = AsyncMock(return_value=raw)
+
+    async def test_trigger_fields_default_zero_none_when_absent(self):
+        """hash에 trigger_ 필드 없으면 counter=0 / last_=None 계약."""
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            self._mock_cache(mock_cache, {})  # 빈 hash
+            out = await fx_topic_publisher.get_fx_topic_telemetry()
+        snap = out["fx:usd-krw"]
+        for c in fx_topic_publisher._TRIGGER_COUNTER_FIELDS:
+            self.assertEqual(snap[f"trigger_{c}"], 0)
+        for lf in fx_topic_publisher._TRIGGER_LAST_FIELDS:
+            self.assertIsNone(snap[f"trigger_{lf}"])
+        # no_loop은 Redis 미기록(process-local) → surface 안 함 (항상 0 오해 방지)
+        self.assertNotIn("trigger_no_loop", snap)
+
+    async def test_trigger_fields_surfaced_and_separated_from_publisher(self):
+        """hash trigger_ 값 반영 + publisher 동명 필드(error/publish_called)와 충돌 분리."""
+        raw = {
+            "trigger_request": "42",
+            "trigger_flush_direct": "7",
+            "trigger_publish_success": "3",
+            "trigger_error": "0",
+            "trigger_tether_route_shadow": "12",
+            "trigger_last_result": "publish_success",
+            "trigger_last_reason": "bank_change",
+            "publish_called": "100",  # publisher 측
+            "error": "5",             # publisher 측
+        }
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            self._mock_cache(mock_cache, raw)
+            out = await fx_topic_publisher.get_fx_topic_telemetry()
+        snap = out["fx:usd-krw"]
+        self.assertEqual(snap["trigger_request"], 42)
+        self.assertEqual(snap["trigger_flush_direct"], 7)
+        self.assertEqual(snap["trigger_publish_success"], 3)
+        self.assertEqual(snap["trigger_tether_route_shadow"], 12)
+        self.assertEqual(snap["trigger_last_result"], "publish_success")
+        self.assertEqual(snap["trigger_last_reason"], "bank_change")
+        # 충돌 분리 — publisher 측과 trigger 측이 별개 키
+        self.assertEqual(snap["error"], 5)
+        self.assertEqual(snap["trigger_error"], 0)
+        self.assertEqual(snap["publish_called"], 100)
+        self.assertEqual(snap["trigger_publish_called"], 0)  # hash에 없음 → 0
+
+    async def test_existing_publisher_fields_preserved(self):
+        """회귀: 기존 publisher-side/메타 필드 그대로 노출 (호출자 영향 0)."""
+        raw = {"publish_sent_total": "9", "hook_called": "11", "last_result": "sent"}
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            self._mock_cache(mock_cache, raw)
+            out = await fx_topic_publisher.get_fx_topic_telemetry()
+        snap = out["fx:usd-krw"]
+        for f in ("enabled", "fx_topic_enabled", "topic_dispatcher_enabled",
+                  "topic", "asset", "subscriber_count",
+                  "hook_called", "publish_sent_total", "publish_zero", "error",
+                  "last_result", "last_at_kst", "last_error"):
+            self.assertIn(f, snap)
+        self.assertEqual(snap["publish_sent_total"], 9)
+        self.assertEqual(snap["hook_called"], 11)
+        self.assertEqual(snap["last_result"], "sent")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

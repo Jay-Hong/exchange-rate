@@ -1555,6 +1555,14 @@ async def get_fx_topic_status():
             "last_result": str | None,
             "last_at_kst": str | None,
             "last_error": str | None,
+            # C1 trigger 측 카운터 (fx_topic_trigger가 같은 hash에 trigger_ prefix로 기록):
+            "trigger_request": int, "trigger_flush_direct": int,
+            "trigger_publish_success": int, "trigger_error": int,
+            "trigger_tether_route_shadow": int, ...(Redis-backed trigger counter 전체),
+            "trigger_last_result": str | None, "trigger_last_reason": str | None,
+            "trigger_last_source": str | None, ...(trigger_last_* 전체),
+            # NOTE: trigger_no_loop은 미노출 — loop 부재 시만 발생해 Redis 미기록
+            #   (in-process no_loop_skipped만 증가). 노출 시 항상 0이라 오해 소지라 제외.
           },
           "fx:jpy-krw": {...},
           "fx:eur-krw": {...},
