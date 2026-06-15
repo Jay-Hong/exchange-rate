@@ -408,5 +408,78 @@ class TestGetFxTopicTelemetryTriggerFields(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snap["last_result"], "sent")
 
 
+# ---------------------------------------------------------------------------
+# item 2: direct↔legacy wrapper payload equality (공통 core regression lock)
+# ---------------------------------------------------------------------------
+
+class TestDirectLegacyPayloadEquality(unittest.IsolatedAsyncioTestCase):
+    """safe_publish_fx_snapshot(direct flush) vs safe_publish_all_fx_snapshots(legacy hook)가
+    동일 asset에 동일 topic+payload를 publish_topic으로 전달함을 잠근다. 둘 다 공통
+    _publish_fx_snapshot→load_and_build_fx_topic_payload core라 by-construction 동치지만,
+    wrapper 분기(legacy asset 누락 / 다른 builder·topic 매핑 등)를 회귀로 catch."""
+
+    async def asyncSetUp(self):
+        self._original_registry = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+        for asset in fx_topic_publisher.FX_TOPIC_ASSETS:
+            topic_dispatcher.registry.register(MagicMock(), [f"fx:{asset}"])
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._original_registry
+
+    async def test_direct_and_legacy_emit_equal_payload_per_asset(self):
+        from contextlib import contextmanager
+
+        def fake_build(db, asset):
+            # asset별 결정적 payload (db 무관 = 입력 고정 효과). 매 호출 새 dict
+            # (publisher가 payload["topic"] 주입 mutate해도 경로 간 독립).
+            return {
+                "type": "snapshot", "version": 1,
+                "data": {
+                    "banks": [{"source": "kb", "asset": asset, "rate": 1.0, "timestamp": "t"}],
+                    "reference": {"source": "investing", "asset": asset, "rate": 2.0, "timestamp": "t"},
+                },
+            }
+
+        @contextmanager
+        def fake_db_context():
+            yield MagicMock()
+
+        legacy_db = MagicMock()
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(fx_topic_publisher, "load_and_build_fx_topic_payload",
+                          side_effect=fake_build), \
+             patch("app.database.get_db_context", fake_db_context), \
+             patch.object(topic_dispatcher, "publish_topic",
+                          new=AsyncMock(return_value=1)) as mock_pub:
+            # direct: asset별 단건 호출 (자체 get_db_context)
+            direct = {}
+            for asset in fx_topic_publisher.FX_TOPIC_ASSETS:
+                mock_pub.reset_mock()
+                d_ok = await fx_topic_publisher.safe_publish_fx_snapshot(asset)
+                self.assertTrue(d_ok)  # wrapper 성공 반환
+                self.assertEqual(mock_pub.call_count, 1)
+                direct[asset] = mock_pub.call_args.args  # (topic, payload)
+            # legacy: 일괄 호출 (caller db)
+            mock_pub.reset_mock()
+            legacy_results = await fx_topic_publisher.safe_publish_all_fx_snapshots(legacy_db)
+            # 각 asset 정확히 1회 발행 — dict 변환이 중복 발행을 가리는 것 방지 (Codex)
+            self.assertEqual(mock_pub.call_count, len(fx_topic_publisher.FX_TOPIC_ASSETS))
+            self.assertTrue(all(legacy_results.values()))  # 모든 asset 성공 반환
+            legacy = {c.args[0]: c.args[1] for c in mock_pub.call_args_list}
+
+        # legacy가 3 asset 모두 발행 + direct와 topic·payload deep-equal
+        self.assertEqual(
+            set(legacy.keys()),
+            {f"fx:{a}" for a in fx_topic_publisher.FX_TOPIC_ASSETS},
+        )
+        for asset in fx_topic_publisher.FX_TOPIC_ASSETS:
+            topic = f"fx:{asset}"
+            d_topic, d_payload = direct[asset]
+            self.assertEqual(d_topic, topic)
+            self.assertEqual(d_payload, legacy[topic])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
