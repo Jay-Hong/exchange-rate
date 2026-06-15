@@ -3331,7 +3331,7 @@ WS-first close finalizer + REST fallback 1회 + Redis TTL captured flag race 방
 > {close}, gap-only 미교정 + delete 후 openapi 재실행 escape hatch). 평가 순서는 sanity가
 > gate보다 먼저 (기존 분기 보존 — sanity abort=False retry / gate reject=True terminal
 > 비대칭). captured flag는 SET 안 함 (WS captured 의미 보존). default false 유지 — 배포
-> 무변화, env 활성화는 6/15 A75606 rollover 후 별도 GO. 상세:
+> 무변화, env 활성화는 **2026-06-15 완료** (A75606→A75607 rollover 후 prod `KRX_CLOSE_REST_WRITE_ENABLED=true`, 16:12 KST). 상세:
 > [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md).
 
 1. ~~KIS REST close snapshot은 더 이상 authoritative write source가 아니다.~~ (supersede — gate 전부 통과 시 gated authoritative fallback, WS-first 불변)
@@ -3973,6 +3973,8 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 - **Unavailable**: 5/26 13:03 KST 재배포 이전 docker logs / container file logs / fastapi process counter 모두 유실. 7일 Case A/B/C **정량 분포 복원 불가**
 
 **정책 결론**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 **완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지**한다 (5/25 사고 같은 edge case 진단 가치 보존 + REST 호출 자체는 KIS rate limit 위협 작음). 3차 PR scope에서 close REST 코드 완전 제거는 진행하지 않음.
+
+> **Amendment 2026-06-10 + 2026-06-15 (위 'diagnostic-only / false 유지' 결론 supersede)**: (6/10) flag=true 의미가 diagnostic-only → **gate-checked write**로 재정의됨([KRX_CLOSE_SNAPSHOT_PLAN §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md) — calendar/contract/session[tick recency 3h]/sanity gate 전부 통과 시에만 write). (6/15) A75606→A75607 rollover + CF close case A 후 prod `KRX_CLOSE_REST_WRITE_ENABLED=true` **활성**(16:12 KST, 별도 GO). **code default는 여전히 false** (완전 차단 복귀 시 flag=false). 첫 gate-checked write 실측 후보 = 6/16 06:00 CM(WS-miss 시).
 
 **별도 개선 후보 (이번 PR scope 외 — telemetry 보존 인프라)**: CloudWatch log stream / `/app/logs/` host volume mount / `KrxCloseFinalizerStats` Redis/DB persist. 정상 영업일 WS path 운영 관찰 기반 신뢰가 충분하므로 우선순위 낮음. 향후 close finalizer 정책 변경 또는 자동 monitoring 강화 시점에 별도 PR로 진입.
 

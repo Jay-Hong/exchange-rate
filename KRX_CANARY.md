@@ -625,7 +625,7 @@ client.set(
 > session evidence[tick recency, env `KRX_CLOSE_REST_WRITE_TICK_RECENCY_HOURS`=3h] + sanity).
 > flag=false = shadow 평가 + 차단 (gate verdict telemetry — WS-miss 날에만 샘플) /
 > flag=true = gate-checked write (구 "무가드 복원" 폐기). (4)(5)는 유지.
-> env 활성화는 6/15 rollover 후 별도 GO.
+> env 활성화: **2026-06-15 16:12 KST 완료** (A75606→A75607 rollover + CF close case A 후 GO → prod `KRX_CLOSE_REST_WRITE_ENABLED=true`). 첫 gate-checked write 실측 후보 6/16 06:00 CM~.
 
 1. ~~KIS REST close snapshot은 더 이상 authoritative write source가 아니다.~~ (supersede — gate 전부 통과 시 gated authoritative fallback, WS-first 불변)
 2. ~~REST 호출은 diagnostic으로 유지될 수 있지만 DB/Redis write는 default off다.~~ (supersede — default false 유지하되 true 의미가 gate-checked write로 변경)
@@ -639,25 +639,29 @@ client.set(
 ssh -i ~/fxi-server-key-pair.pem ubuntu@<EC2> "docker exec exchange-rate-app python -c '
 from app import config
 from app.crawlers.krx_kis import KrxCloseSnapshotController
-print(f\"KRX_CLOSE_REST_WRITE_ENABLED: {config.KRX_CLOSE_REST_WRITE_ENABLED}\")  # False
+print(f\"KRX_CLOSE_REST_WRITE_ENABLED: {config.KRX_CLOSE_REST_WRITE_ENABLED}\")  # True (2026-06-15 활성, code default=false)
 print(f\"KRX_CLOSE_FINALIZER_ENABLED:  {config.KRX_CLOSE_FINALIZER_ENABLED}\")   # True
 controller = KrxCloseSnapshotController(token_manager=None)
 print(f\"rest_write_blocked counter: {controller.counters.get(\\\"rest_write_blocked\\\")}\")  # 0 (initial)
 '"
 ```
 
-#### Rollback 경로
+#### Rollback 경로 (6/15 활성 → shadow-only 복귀)
+
+prod이 현재 `KRX_CLOSE_REST_WRITE_ENABLED=true`(2026-06-15 활성)이므로 **REST flag rollback = false 복귀**:
 
 ```bash
-# .env에 추가
-KRX_CLOSE_REST_WRITE_ENABLED=true
-# 재기동
+# REST flag만 원복(direct mode 유지) — .env true→false 실제 변경
+sed -i 's/^KRX_CLOSE_REST_WRITE_ENABLED=true$/KRX_CLOSE_REST_WRITE_ENABLED=false/' .env
+grep -qx 'KRX_CLOSE_REST_WRITE_ENABLED=false' .env || exit 1   # 미적용 시 중단(fail-closed)
 docker compose up -d --force-recreate fastapi
 ```
 
+→ gate-checked write 중단, shadow 평가만(5/25형 stale 차단 복귀). [D] 전체(direct mode 포함) 일괄 원복은 `.env.bak.predirect-20260615` 복원.
+
 ~~flag=true 시 기존 1차/2차 PR write 동작 복원. 단 KIS REST stale 위험 동반.~~
 **2026-06-10 이후**: flag=true는 gate-checked write (gate 통과 시에만 write — 5/25형
-stale은 gate가 차단). 완전 차단 복귀는 flag=false 유지. 상세:
+stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 [KRX_CLOSE_SNAPSHOT_PLAN §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md).
 
 #### 다음 자연 검증 시점
@@ -680,7 +684,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false 유지. 상세:
 
 ### 2026-06-13 금요일밤 CM close-write calendar gap 발견 + fix (`78b02be`)
 
-> 📅 **발견**: 2026-06-13(토) 06:00 KST CM close (금요일밤 세션 종료). 🏷️ **상태**: fix land(shadow-only, flag=false) — flag=true 실측은 6/15 rollover 후.
+> 📅 **발견**: 2026-06-13(토) 06:00 KST CM close (금요일밤 세션 종료). 🏷️ **상태**: fix land(shadow-only). **`KRX_CLOSE_REST_WRITE_ENABLED=true` prod 활성 2026-06-15 16:12 KST** (A75606→A75607 rollover[07:04] + CF close case A[15:46] 후 별도 GO, `.env.bak.predirect-20260615`). 활성 전까지 shadow-only(flag=false). **첫 gate-checked write 실측 후보 = 6/16 06:00 CM~** (WS-miss 시 gate 전부 통과하면 write, WS captured면 inert). code default는 여전히 false.
 
 **관측 (6/13, 이미 발생 — flag=false)**:
 
@@ -694,7 +698,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false 유지. 상세:
 
 **fix (`78b02be`)**: gate 1 → `is_close_snapshot_eligible(session, boundary_date)` (CM: 야간장 시작일 boundary−1). shadow-only(flag=false → write 변화 0). gate 3(session evidence) 5/25 보호 유지. 상세: [KRX_CLOSE_SNAPSHOT_PLAN §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md).
 
-**예측 (6/15 rollover 후 flag=true, 미실측)**: 금요일밤 CM(다음 6/20 토 06:00)이 gate 통과 시 **Redis를 REST 반환 최근가(그날 마지막 체결가) @06:00 overwrite / DB insert-if-changed(동일가 skip)** — 첫 실측은 6/20. 토글 매트릭스 + CF/CM 첫 write canary는 flag 활성화 단계 갱신.
+**예측 (flag=true 활성 2026-06-15 완료, 첫 write 미실측)**: 금요일밤 CM(다음 6/20 토 06:00)이 gate 통과 시 **Redis를 REST 반환 최근가(그날 마지막 체결가) @06:00 overwrite / DB insert-if-changed(동일가 skip)**. 첫 write 실측 후보 = 6/16 06:00 CM 또는 6/20. 토글 매트릭스는 6/15 활성 반영 완료([line 987 이하]), CF/CM 첫 write canary 측정은 다음 WS-miss close 대기.
 
 ---
 
@@ -980,11 +984,11 @@ ssh ubuntu@<ec2> 'cd ~/exchange-rate && docker compose up -d --force-recreate fa
 
 ### KRX 토글 매트릭스 (F-3 활성 후)
 
-| Env | Default | 운영값 (2026-05-26 기준) | 의미 |
+| Env | Default | 운영값 (2026-06-15 기준) | 의미 |
 |---|---|---|---|
 | `KRX_FUTURES_ENABLED` | false | true | WS 연결 + 신규 DB 저장 |
 | `KRX_CLOSE_FINALIZER_ENABLED` | true | true | KrxCloseWindowWriter + KrxCloseSnapshotController |
-| `KRX_CLOSE_REST_WRITE_ENABLED` | false | false | REST close write 차단 (5/25 정책 PR 6a43785) |
+| `KRX_CLOSE_REST_WRITE_ENABLED` | false | **true** (2026-06-15 16:12 활성) | gate-checked write (6/10 §5.7.8 재설계 + 6/15 rollover 후 GO; 첫 write 실측 6/16 CM~) |
 | `KRX_REDIS_TICK_WRITE_ENABLED` | false | true | Stage E E-2 tick-level Redis mirror |
 | `KRX_ALERT_EVALUATOR_ENABLED` | false | true | **F-3 신규** KRX 가격알림 활성 |
 
@@ -1076,7 +1080,7 @@ F-3 활성 후 수행한 5/19~5/26 close finalizer 7일 운영 평가 (정책: `
 | Operator observation | 운영 중 수시 확인 | 정상 영업일 close는 WS path (KrxCloseWindowWriter)로 처리됨을 직접 확인 (정량 분포 X, 단발성 확인 누적) |
 | Unavailable | docker logs / container file logs / fastapi process counter | 5/26 13:03 KST 재배포 시점 이전 모두 유실. 7일 Case A/B/C 정량 분포 복원 불가 |
 
-**정책 결론 (3차 PR scope)**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지한다.
+**정책 결론 (3차 PR scope)**: 정상 영업일 close는 운영 중 수시 확인상 WebSocket close path로 처리됐고, 5/26 CF close는 sampler로 Case A를 직접 재확인했다. 다만 container 재배포로 과거 logs/process counters가 유실되어 7일 Case A/B/C 정량 분포는 복원할 수 없다. 따라서 close REST fallback은 완전 제거하지 않고 `KRX_CLOSE_REST_WRITE_ENABLED=false` diagnostic-only 상태를 유지한다. **[Amendment 2026-06-15: 이 diagnostic-only/false 결론은 6/10 gate-checked write 재설계(§5.7.8) + 6/15 16:12 prod `=true` 활성으로 supersede — code default만 false 유지. 상세: 본 문서 토글 매트릭스 + DECISIONS ADR-027 follow-up amendment.]**
 
 **별도 개선 후보** (이번 PR scope 외 — logs/telemetry 보존 인프라):
 - CloudWatch log stream (container 재배포 영향 X)

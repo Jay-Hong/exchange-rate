@@ -566,8 +566,9 @@ Redis.timestamp = event_at_kst.isoformat()                          # KST ISO st
 운영 사고 시:
 
 ```bash
-# .env에 추가
-KRX_CLOSE_REST_WRITE_ENABLED=true
+# prod 현재 true(2026-06-15 활성) → 운영 사고 시 false 복귀(shadow-only)
+sed -i 's/^KRX_CLOSE_REST_WRITE_ENABLED=true$/KRX_CLOSE_REST_WRITE_ENABLED=false/' .env
+grep -qx 'KRX_CLOSE_REST_WRITE_ENABLED=false' .env || exit 1   # 미적용 시 중단(fail-closed)
 
 # 재기동
 docker compose up -d --force-recreate fastapi
@@ -588,7 +589,7 @@ docker compose up -d --force-recreate fastapi
 #### 5.7.8 Amendment 2026-06-10 — gate-checked REST close write 재설계 (#4)
 
 > 📅 **작성일**: 2026-06-10 · 🏷️ **상태**: 코드 land (default false = 배포 무변화),
-> env 활성화는 6/15 A75606 rollover 통과 후 별도 GO
+> env 활성화 **2026-06-15 16:12 KST 완료** (A75607 rollover + CF close case A 후 GO, prod `KRX_CLOSE_REST_WRITE_ENABLED=true`). 첫 gate-checked write 실측 후보 6/16 06:00 CM
 
 **배경 — 6/9 사고가 보여준 반대 방향 실패**: 6/9 KRX WS가 CF 15:04에 silent stall
 (reconnect_attempts=0, 별도 fix `87b51c3`) → 15:45 종가 frame 미수신 → REST fallback이
@@ -653,9 +654,7 @@ docker compose up -d --force-recreate fastapi
   이벤트로 가시성 충분). hourly chain 없음 (hook OFF + cron 재설계 예정).
 
 **검증**: gate 매트릭스 14 + 통합 7 + builder 3 신규 테스트, KRX 10 suite 289 passed.
-**배포 플랜**: 코드 land (default false = 배포 무변화) → **6/15 A75606→A75607 rollover
-통과 후** env true 별도 GO (첫 활성화와 rollover 주간 결합 회피 — gate 2가 보호하지만
-관찰 명료성 우선).
+**배포 플랜**: 코드 land (default false = 배포 무변화) → **2026-06-15 활성 완료** (A75606→A75607 rollover[07:04] + CF close case A[15:46] 후 env true GO, 16:12 KST). 첫 gate-checked write 실측 후보 6/16 06:00 CM.
 
 ## 6. 테스트 / 운영 smoke 기준
 
