@@ -1,6 +1,6 @@
 # P1 공통 base 구현 설계 — control plane + rollout (design / pre-implementation)
 
-> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane·**outcome 계약(§14)·cutover state machine(§15) 확정**. **잔존 open(§13)**: steady-state revision-ID·lease/timeout·Lua/WATCH·migration 완료 판정.
+> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17) 확정**. **잔존 open(§13)**: lease/timeout·migration 완료 판정.
 > **소유권**: PR D 복구 = D 채택([PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)). 본 문서 = D의 **공통 base(P1)** 구현 경계·migration·control plane·rollout (비교 spec과 분리).
 > **산출**: Claude + Codex/검증-Claude 다회 검토 (2026-06-16).
 
@@ -105,7 +105,7 @@ revision 없는 기존 `latest:*` value 비교 — **timestamp 기반**(정규�
 
 ## 11. monotonic 5-state write (공통 primitive)
 
-direct SET + mirror 공유, **atomic**:
+direct SET + mirror 공유, **atomic** (구현 = **Lua**; v2 schema·Lua 책임·v1 migration split = §17):
 
 | state | 조건 | 동작 |
 |---|---|---|
@@ -132,7 +132,7 @@ direct SET + mirror 공유, **atomic**:
 
 - ✅ **outcome 계약** → §14 (resolved). ✅ **readiness/cutover gate** → §15 (resolved — (a)+(c) + seed-in-atomic/publish_blocked + bounded-eventual).
 - ✅ **steady-state revision-ID 확보** → §16 (resolved — flush-row-ref + StagedRateChange + canonical epoch 계약 + rollback 계약). bootstrap revision-ID는 §15 DB row id 직독(별개).
-- **atomic primitive**: Lua vs WATCH (선례 0; **direct=sync thread / mirror=async loop 분리** → 공유 coordinator 까다로움 → CAS 무게).
+- ✅ **atomic primitive: Lua vs WATCH** → §17 (resolved = **Lua** — v2 compare/write + v1 migration raw-CAS 모두 Lua, Python은 parse/canonical/4-case 전담; sync/async 서버사이드 atomic 통일 + atomicity 구성 보장).
 - **lease/timeout 수치** (운영 튜닝, §15 골격과 분리): publisher drain timeout / catch-up bounded 횟수·시간 / lease expiry·renew / status=failed 재시도 정책.
 - migration 완료 판정 / subscribe-time initial snapshot (별도 client 계약) / **D layer 내부** (builder effective revision vector + success watermark 저장 + retry/backoff — §14/§15는 P1↔D 인터페이스·cutover까지, D 내부 구현은 범위 밖).
 
@@ -256,7 +256,40 @@ signed integer μs, **float `.timestamp()` 금지**(μs 스케일 rounding).
 
 **test**: ① canonical 단위 / ② SQLite flush→requery revision 동일 / ③ Postgres(통합 환경 있으면) 동일 / ④ commit-fail → rollback + provisional discard + downstream 0 / ⑤ 변환-fail → flush 미호출 + rollback + downstream 0 / ⑥ commit 성공 전 Redis·candidate 호출 0 / ⑦ plain-int capture(expire 비의존).
 
-## 17. 참조
+## 17. atomic primitive — Lua + v2 schema + v1 migration split
+
+> §11 monotonic write의 **구현 결정**. revision/rate 비교(§16)는 Lua-safe string 인코딩으로 Redis-side atomic, v1 legacy parsing은 Python으로 분리. **Lua vs WATCH = Lua** (sync/async 서버사이드 atomic 통일 + atomicity 구성 보장 + Python parse 전담으로 Lua는 string/atomic만).
+
+**v2 value schema** (기존에 additive):
+
+- **public (기존 포맷 UNCHANGED — WS/API 소비자 문자열 계약)**: `rate`(float) / `timestamp`(ISO 기존) / `mirrored_at`(ISO 기존). ⚠️ timestamp를 fixed-width로 바꾸면 안 됨 — v2 Lua는 timestamp 비교 안 함(revision_key 사용).
+- **internal (atomic 전용, old reader 무시 — §12-7 id 미유출)**:
+  - `schema_version` = JSON number `2` (타입 고정; v1 = 부재/≠2 → discriminator)
+  - `revision_key` = `"{epoch_us:020d}:{id:020d}"` (fixed-width string; Python 생성, Lua lex compare)
+  - `rate_key` = canonical decimal string (`format(Decimal(str(rate)).normalize(), 'f')` — trailing-zero 제거, **exponent 금지**; Python 생성, Lua string equality)
+  - `source`/`asset` = debug optional
+  - (`timestamp_key` 불필요 — revision_key가 epoch 포함)
+
+**Lua 책임 (semantic parsing 0 — JSON 구조 decode + string compare only)**:
+
+- **v2 atomic compare/write**: cjson.decode로 구조 파싱하되 **비교는 string 필드만**(revision_key lex / rate_key eq):
+  - nil → SET v2 (advance, 첫 write)
+  - v2 current: revision_key incoming> → advance / == & rate_key== → refreshed_equal(mirrored_at refresh) / == & rate_key!= → **conflict**(data corruption) / incoming< → skipped_newer
+  - malformed v2 (decode 실패 / 필드 누락 / schema invalid) → **failed:invalid_schema**(structure corruption — conflict와 분리, telemetry 구분)
+  - v1 (schema_version 부재) → return **"migration_required"** (parsing 안 함)
+  - client EVAL 예외 → failed / tri-state(pre-send NOT_APPLIED / reply-lost UNKNOWN, §16)
+- **v1 migration raw-CAS**: `if GET key == raw then SET v2 else return changed` (raw string equality, parsing 0)
+
+**Python 책임 (timestamp/rate canonical parsing — Lua 아님)**:
+
+- v2 serialization (revision_key/rate_key 생성, canonical helper)
+- **controlled migration command** (bootstrap = 첫 사용처, 재실행 가능):
+  - GET raw v1 → Python parse(ISO/Decimal) → **§10 full 4-case** (legacy ts< : upgrade / same ts+rate : seed revision / legacy ts> : skip / same ts+diff rate·parse-fail : conflict/fail-closed)
+  - 최종 write = **Lua raw-CAS** (raw==본 값일 때만 v2 / changed → Python retry)
+
+**steady-state v1 재출현** (rollback/mixed-deploy): Lua "migration_required" → **block + alert + controlled migration command 재실행 복구** (hot path inline migration 안 함, dead-end 방지).
+
+## 18. 참조
 
 - [PR_D_RECOVERY_SPEC.md](PR_D_RECOVERY_SPEC.md) — D 결정 (§12), 옵션 비교 (§7)
 - 코드: [crud.py:324](app/crud.py#L324)(orchestrator stage→commit→write→emit) / [:103](app/crud.py#L103)(_write_changed) / [:512](app/crud.py#L512)·[:564](app/crud.py#L564)(selector, id 없음) / [latest_rates_cache.py](app/latest_rates_cache.py)(set_latest·_mirror_all_latest·serialize/deserialize/is_stale, ChangedRate id 없음) / [docker-compose.yml:22](docker-compose.yml#L22)(redis allkeys-lru → marker DB 필수) / [Dockerfile:118](Dockerfile#L118)(--workers 1 단일 프로세스)
