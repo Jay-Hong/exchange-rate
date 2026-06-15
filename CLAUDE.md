@@ -1211,44 +1211,23 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 ## 문서 관리 가이드라인
 
-### 자동 Reminder (CRITICAL) 🚨
+### 문서 영향 분석 (코드 commit 전, 자동 read-only)
 
-**IMPORTANT:** 다음 조건에 해당하는 코드 변경 후, **반드시** 사용자에게 질문하세요:
+> ⚠️ 구 `/docs-check`(주요 문서 3개[CLAUDE/CRAWLERS/DECISIONS] 한정 + feat 후 사용자 질문) 절차는 **제거**됨 — 도메인/계약 문서(USDT_*, REALTIME_*, KRX_*, GRAPH_API_V2, ALERT_*, CHANGELOG, *_CLIENT_GUIDE 등)를 검사 범위에서 빠뜨려 **false-negative**를 냈음(2026-06-15 admin `trigger_*` surfacing 시 CLIENT_GUIDE 응답 계약 누락 실측). slash command 파일 `.claude/commands/docs-check.md`도 함께 제거.
 
-> "문서 업데이트 확인을 위해 `/docs-check`를 실행하시겠습니까?"
+코드를 commit하기 전, 변경이 닿는 **계약/상태 표면**을 기준으로 **전체 `*.md`를 read-only로 영향 분석**한다 (Claude·Codex 공통 절차, 별도 slash command 불요):
 
-**트리거 조건:**
-- `app/crawlers/*.py` 파일 수정 (크롤러 로직)
-- `app/models.py`, `app/schemas.py` 수정 (DB 스키마)
-- 새 기능 추가 (feat: 커밋)
-- 주요 리팩토링 (refactor: 커밋)
-- 새 은행/통화 추가
+**검사 표면**: API 요청/응답 계약 · DB/schema · env/config/default · scheduler/운영 절차/rollback · 아키텍처/ADR · crawler/source 동작 · 사용자/클라이언트 계약.
 
-**사용자 응답:**
-- "Yes" / "Okay" → `/docs-check` 실행
-- "No" / "나중에" → 건너뜀 (명시적 선택, 기록)
+**방법**: 변경된 route/config/symbol/필드명을 `rg`로 **전체 `*.md`** 검색 (3-doc 한정 금지).
 
-**중요**: 이 Reminder는 **선택 사항이 아닙니다**. 위 조건에 해당하면 항상 물어보세요.
+**보고 (둘 중 하나 필수)**:
+- `Docs impact: none` + 근거
+- `Docs impact: required` + 대상 파일 + 이유
 
----
+required면 [수정 전 확인 대기 모드]·[코드/문서 변경 검증 게이트]의 수정 GO 규칙대로 반영하고, **commit 전 코드↔문서 정합을 재확인**한다.
 
-### 문서 역할 정의
-
-이 프로젝트는 **3개의 주요 문서**로 구성되어 있으며, 각각 명확한 역할이 있습니다:
-
-| 문서 | 역할 | 업데이트 트리거 | 예시 |
-|------|------|----------------|------|
-| **CLAUDE.md** | 프로젝트 전체 가이드 | 아키텍처 변경, 기술 스택 추가, DB 스키마 변경 | PostgreSQL 전환, 새 은행 추가 (개수 변경) |
-| **CRAWLERS.md** | 크롤러 구현 세부사항 | 크롤링 로직 변경, 특수 로직 추가, 주의사항 발견 | SC 방식 적용, Alert 처리 변경 |
-| **DECISIONS.md** | 아키텍처 의사결정 (ADR) | 기술 선택, 트레이드오프 결정 (4가지 기준 충족) | WebSocket vs Node.js, Docker 채택 |
-
-### 문서 업데이트 기준 (간략)
-
-**CRAWLERS.md**: 크롤러 로직 변경, 특수 로직 추가, 트러블슈팅 패턴
-**DECISIONS.md**: 아키텍처 결정 (ADR 4가지 기준: 비가역성, 영향 범위, 대안 존재, 장기 유지)
-**CLAUDE.md**: 은행/통화 개수 변경, DB 스키마 변경, 기술 스택 변경
-
-**도구**: `/docs-check` - 변경된 파일 분석 후 자동으로 문서 업데이트 체크리스트 제시
+**문서 역할 (참고 — 한정 아님)**: CLAUDE.md=프로젝트 가이드(아키텍처/스키마/기술스택/은행·통화 개수) · CRAWLERS.md=크롤러 구현 · DECISIONS.md=ADR(4기준: 비가역성·영향범위·대안·장기유지) · 그 외 도메인/계약 문서도 변경 표면에 닿으면 동일하게 대상.
 
 ---
 
