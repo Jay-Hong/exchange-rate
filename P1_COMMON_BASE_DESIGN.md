@@ -1,6 +1,6 @@
 # P1 공통 base 구현 설계 — control plane + rollout (design / pre-implementation)
 
-> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17) 확정**. **잔존 open(§13)**: lease/timeout·migration 완료 판정.
+> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17) 확정**. **P1 설계 open 전부 resolved**(§13 — lease/timeout=§18 / migration 완료=§15·§18). 잔여 = P1 범위 밖(D layer 내부) + 별도 client/server 계약(subscribe-time initial snapshot).
 > **소유권**: PR D 복구 = D 채택([PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)). 본 문서 = D의 **공통 base(P1)** 구현 경계·migration·control plane·rollout (비교 spec과 분리).
 > **산출**: Claude + Codex/검증-Claude 다회 검토 (2026-06-16).
 
@@ -101,7 +101,7 @@ revision 없는 기존 `latest:*` value 비교 — **timestamp 기반**(정규�
 - legacy ts `>` incoming → **overwrite 금지**
 - 동일 ts·다른 rate / parse 실패 → **conflict / fail-closed**
 
-혼재 허용 + **migration 완료 판정은 별도** (open).
+혼재 허용 + **migration 완료 판정 = §15 readiness의 migration_complete(asset)로 흡수** (별도 subsystem 아님 — §15·§18).
 
 ## 11. monotonic 5-state write (공통 primitive)
 
@@ -133,8 +133,10 @@ direct SET + mirror 공유, **atomic** (구현 = **Lua**; v2 schema·Lua 책임�
 - ✅ **outcome 계약** → §14 (resolved). ✅ **readiness/cutover gate** → §15 (resolved — (a)+(c) + seed-in-atomic/publish_blocked + bounded-eventual).
 - ✅ **steady-state revision-ID 확보** → §16 (resolved — flush-row-ref + StagedRateChange + canonical epoch 계약 + rollback 계약). bootstrap revision-ID는 §15 DB row id 직독(별개).
 - ✅ **atomic primitive: Lua vs WATCH** → §17 (resolved = **Lua** — v2 compare/write + v1 migration raw-CAS 모두 Lua, Python은 parse/canonical/4-case 전담; sync/async 서버사이드 atomic 통일 + atomicity 구성 보장).
-- **lease/timeout 수치** (운영 튜닝, §15 골격과 분리): publisher drain timeout / catch-up bounded 횟수·시간 / lease expiry·renew / status=failed 재시도 정책.
-- migration 완료 판정 / subscribe-time initial snapshot (별도 client 계약) / **D layer 내부** (builder effective revision vector + success watermark 저장 + retry/backoff — §14/§15는 P1↔D 인터페이스·cutover까지, D 내부 구현은 범위 밖).
+- ✅ **lease/timeout 정책** → §18 (resolved — 정책 중심, 값은 tunable default).
+- ✅ **migration 완료 판정** → §15 `migration_complete(asset)` + §18 post-ready reverify (resolved — §15 readiness로 흡수, 별도 subsystem 아님).
+- 잔여 — **P1 범위 밖**: D layer 내부 (builder effective revision vector + success watermark 저장 + retry/backoff — §14/§15는 P1↔D 인터페이스·cutover까지).
+- 잔여 — **별도 client/server 계약** (PR D와 직교, 별도 open): subscribe-time initial snapshot.
 
 ## 14. outcome 계약 (①② — P1↔D 인터페이스)
 
@@ -197,7 +199,7 @@ item 4 telemetry reason 매핑 (보수적, SET-relative 지점): `client_unavail
 1. legacy/ready → halt/blocked: writer-gate + publisher-gate 둘 다 stop-issue + drain + durable ACK
 2. halt/blocked → atomic/blocked: one-shot CAS + 새 session/generation + status=running (writer-gate 재개방, atomic live)
 3. [atomic/blocked] reconciliation seed/catch-up (atomic primitive + §10 4-case); 수렴목표 = known-backlog drain
-4. readiness = schema 완결 + membership 완결 + backlog drained → CAS(session+gen+status=running) → status=verified (crash-resume marker, publish 허용 근거 아님)
+4. readiness = **migration_complete(전 asset)** + backlog drained → CAS(session+gen+status=running) → status=verified (crash-resume marker, publish 허용 근거 아님). **migration_complete(asset)** = membership_version match + 전 required source key 존재 + v2 + `(revision_key, rate_key)`==verification snapshot. **revision-current은 cutover baseline 게이트 전용**(post-ready 불변 아님 — §18).
 5. **최종 단일 tx**: CAS(expected session/generation/status=verified) → global status=completed + 3 asset publish_state=ready + 각 full vector·membership 저장 → commit → cache refresh → publisher gate open. (부분 갱신 후 crash로 일부 asset만 ready 금지. re-verify는 backlog 축소용이지 원자적 보장 아님)
 6. fail/timeout → atomic/blocked + status=failed (no auto-ready)
 
@@ -289,7 +291,30 @@ signed integer μs, **float `.timestamp()` 금지**(μs 스케일 rounding).
 
 **steady-state v1 재출현** (rollback/mixed-deploy): Lua "migration_required" → **block + alert + controlled migration command 재실행 복구** (hot path inline migration 안 함, dead-end 방지).
 
-## 18. 참조
+## 18. lease/timeout 정책 + post-ready maintenance
+
+> §15 cutover 골격 위 운영 정책. **값보다 정책** — 숫자는 tunable default, 정책이 계약. 핵심 불변: **readiness drop은 D가 복구 못 하는 구조적 문제에만** (revision-lag은 D 대상, drop 아님).
+
+**cutover vs post-ready 분리** (revision-current 적용 범위):
+
+- **cutover readiness 검증** (ready 1회 전환): `migration_complete(asset)` (§15-4) — `(revision_key, rate_key)`==verification snapshot 포함 (baseline 확립 게이트).
+- **post-ready periodic reverify** (유지): **구조적 문제만** — v1 재출현 / malformed v2 / membership mismatch / missing required key / schema·version mismatch → readiness drop(durable CAS) + re-migrate. **Redis-only 구조 scan**(DB revision 비교 없음 → revision-drift false-positive 구조적 불가) + publisher gate 즉시 block.
+- **post-ready revision lag** (Redis<DB, 정상 pending): **readiness drop 아님** → D reconciliation (bounded-eventual, §15 guarantee). R1 초과 지속 → **alert/retry 강화, readiness 유지**(즉시 block 아님).
+
+**lease/timeout 정책** (값은 tunable default):
+
+| 항목 | 정책 | default |
+|---|---|---|
+| publisher/writer gate drain timeout | timeout → transition **abort + 이전 durable 상태 유지 + alert** (force·auto-proceed 금지) | ~5s |
+| cutover catch-up timeout (max duration/passes) | 초과 → **atomic/blocked + status=failed** (no auto-ready) → manual controlled command 재실행 | ~60s/N passes (저-churn window 권장) |
+| bootstrap lease ttl / renew | concurrent bootstrap 방지 + crash takeover (ttl 만료 → 새 command가 fresh session/generation 인수); **ttl > catch-up max** | ttl ~분 / renew ~ttl/3 |
+| status=failed retry | **no auto-ready** → 운영자 controlled migration command 재실행 (실패=조사 필요) | manual |
+| post-ready structural reverify interval | 구조적 corruption 감지(Redis-only) → drop + block + migration command | ~분 |
+| R1 revision-lag alert | revision lag > R1 지속 → D retry/reconciliation 강화 + alert, **readiness 유지** | R1=15s |
+
+**공통 정책**: 모든 timeout/failure = **fail-closed** (abort/stay-blocked/D-recover, alert). force-proceed·auto-ready 금지. readiness drop = **D-unrecoverable 구조적 문제 한정**.
+
+## 19. 참조
 
 - [PR_D_RECOVERY_SPEC.md](PR_D_RECOVERY_SPEC.md) — D 결정 (§12), 옵션 비교 (§7)
 - 코드: [crud.py:324](app/crud.py#L324)(orchestrator stage→commit→write→emit) / [:103](app/crud.py#L103)(_write_changed) / [:512](app/crud.py#L512)·[:564](app/crud.py#L564)(selector, id 없음) / [latest_rates_cache.py](app/latest_rates_cache.py)(set_latest·_mirror_all_latest·serialize/deserialize/is_stale, ChangedRate id 없음) / [docker-compose.yml:22](docker-compose.yml#L22)(redis allkeys-lru → marker DB 필수) / [Dockerfile:118](Dockerfile#L118)(--workers 1 단일 프로세스)
