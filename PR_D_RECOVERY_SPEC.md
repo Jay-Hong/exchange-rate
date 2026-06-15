@@ -1,6 +1,6 @@
-# PR D 복구 경로 — 비교 spec (결론 없음 / working doc)
+# PR D 복구 경로 — 비교 spec + 결정 (working doc)
 
-> ⚠️ **상태**: working doc. **결론 없음** — guarantee level·옵션 결정 전 단계. §6.6.2 확정 기록·구현 전.
+> ⚠️ **상태**: **결정됨 (2026-06-16) — D(success-watermark reconciliation) 채택. §12 참조.** 본문 §1~11은 결정에 이른 중립 비교 분석(G-기준 R1~R3 / 옵션 A~D / best-effort R2). 구현 spec·코드는 후속.
 > **목적**: PR D(legacy fx hook 제거) 후 SET/dispatch/publish 실패 복구 설계 옵션을 **중립 비교**.
 > **산출 경위**: Claude + Codex 다회 검토 수렴(2026-06-15~16). 도중 폐기된 선결론은 §9 참조.
 > **선행물**: Step 1 characterization = [tests/test_pr_d_set_failure_characterization.py](tests/test_pr_d_set_failure_characterization.py) (현 복구 동작 박제, `a1b17a4`).
@@ -195,3 +195,37 @@ failure mode 커버 (✓ = **서버측 재시도** 동작, 전달 보장 아님)
 - [USDT_TOPIC_MIGRATION_PLAN.md §6.6.1 / §6.6.2](USDT_TOPIC_MIGRATION_PLAN.md)
 - 코드: [main.py:733/754](app/main.py#L733), [crud.py:321](app/crud.py#L321), [latest_rates_cache.py `_mirror_all_latest`](app/latest_rates_cache.py), [fx_topic_payload.py:211](app/fx_topic_payload.py#L211), [topic_dispatcher.py:136](app/topic_dispatcher.py#L136)
 - item 4 SET-outcome telemetry (실 SET-failure 빈도 입력): [app/bank_investing_redis_stats.py](app/bank_investing_redis_stats.py), admin `/admin/api/bank-investing-redis-stats`
+
+---
+
+## 12. 결정 (2026-06-16, 사용자 확정)
+
+> Claude + Codex/검증-Claude 다회 검토 + 사용자 결정으로 수렴. §1~11은 이 결정에 이른 비교 분석.
+
+### 12.1 수용 기준 (G — 사용자 확정)
+
+- **R1 (교정 지연)**: 정상 운영(subscriber 존재·기능 활성) 시 복구 대상 확인 후 **≤15초 server-side publish attempt**. 실패 cycle은 hard deadline 아님 — 다음 성공 기회까지 retry + 경고.
+- **R2 (best-effort)**: 정상 프로세스 생존 중 **예방적 중복 발행 금지**. 단 (a) send 성공 ↔ watermark 기록 **비원자 window**, (b) watermark 유실 **bootstrap**의 중복은 **허용 + telemetry 관찰** — **전역 bounded 아님**(연속 재시작/Redis 유실 시 반복 가능).
+- **R3**: 변경 + **실패·미완료 revision 복구 retry** (상태 추적 필요).
+
+### 12.2 옵션 결정 — D 채택
+
+R1~R3 적용: **A 탈락**(무상태 → mode 2/3 미복구, R3) · **B 탈락**(주기 재발행, R2) · **C 탈락**(attempt-watermark → send 실패 revision 미retry, R3) · **D = 유일 생존**(success-watermark + retry, R1·R2·R3 충족). Client ack/dedup은 범위 밖.
+
+### 12.3 D 정책 (확정)
+
+- **완료**: **모든 경로에서** `sent_count > 0`일 때만 success watermark 갱신. bootstrap에서 subscriber 0이면 **완료 처리 안 함, pending 유지**(send 0 → watermark 미갱신).
+- **send ↔ watermark 분리**: send 성공 + watermark 저장 실패 → `sent_but_uncommitted` → 동일 프로세스는 **재전송 없이 watermark 저장만 재시도**. 중복은 그 사이 재시작 시(재시작당 ≤1, 전역 bounded 아님) + telemetry.
+- **watermark monotonic**: asset별 publish/watermark 갱신을 **실행 모델에 맞춰 단일 coordinator 직렬화 또는 Redis atomic CAS**(단일 프로세스·단일 coordinator면 직렬화 / 다중 프로세스·우회 경로면 CAS). revision vector는 **실제 전송한 vector 전체를 하나의 identity로** 비교(component merge 금지).
+- **subscriber 0**: pending 유지 + polling 중단 + 등장 시 **pending 있을 때만** 즉시 publish + send 후 기록.
+- **disabled (FF off)**: pending 유지 + 재활성화 시 즉시 reconciliation.
+- **restart**: Redis success watermark 영속(asset별 success revision vector + schema/membership version) + **유실·비호환 시에만 asset별 1회 bootstrap**(R2 명시적 예외, **send 성공 후에만 완료**, telemetry). DB 영속은 과함(per-publish write + 운영데이터 결합)으로 기각.
+- **send 실패**: 15초 목표 내 bounded backoff + subscriber 0 전환 시 event-driven 대기.
+
+### 12.4 sequencing (§10)
+
+**공통 base**(source-key revision 배선 + monotonic 5-state atomic write) → **D layer**(builder effective revision vector + success watermark + retry 정책) → **legacy fx hook 제거**. (builder revision vector·watermark는 D layer 비용 — 공통 base 아님.)
+
+### 12.5 구현 spec 이월 (이 문서 범위 밖)
+
+직렬화 vs CAS 택(실행 모델 확정 후) / backoff 간격 / watermark schema·persistence 상세 / subscribe-time initial snapshot 별도 client 계약.

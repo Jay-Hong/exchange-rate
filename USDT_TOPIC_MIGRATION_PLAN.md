@@ -702,6 +702,7 @@ KRX Stage E 안정화 후 본 phase 진입. 두 세션 Claude + Codex 리뷰 수
   - **(i)** mirror가 changed value 감지 시 trigger 발생(publish는 mirror-fresh Redis) → (a)+(b) eventually-consistent(≤3s).
   - **(ii)** SET-only 완화 — **SET 실패도 committed-change trigger 발생 + publisher DB-authoritative** → (a)+(b) 즉시 해소. ⚠️ **DB-authoritative 단독(trigger 복원 없이)은 (b) + trigger가 나는 (a)만 해소 — trigger 자체 없는 순수 (a)는 미해소** (publisher가 호출 안 됨). 순수 (a)엔 trigger 복원 필수.
   - **C1 범위는 SET-only gating까지** (복구 경로는 hook 제거 PR의 precondition).
+  - **복구 경로 결정 (2026-06-16) — [PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)**: 위 (i)/(ii) preliminary는 **superseded**. 채택 = **D (success-watermark reconciliation)**. 기준 R1(정상 시 ≤15s server attempt) / R2(best-effort — 예방적 중복 금지, 단 send↔watermark 비원자·watermark 유실 bootstrap의 중복은 허용·telemetry, 전역 bounded 아님) / R3(변경+실패·미완료 revision retry). **A**(무상태)·**B**(주기 재발행)·**C**(attempt-watermark, send 실패 미retry) 탈락. 정책: `sent_count>0` 시만 watermark / `sent_but_uncommitted`(재전송 없이 watermark 재시도) / watermark monotonic(직렬화 or CAS) / restart=Redis watermark 영속+유실 시 1회 bootstrap. 순서: 공통 base(source-key revision + monotonic 5-state write) → D layer → fx hook 제거.
 
 **③ Canary**:
 
