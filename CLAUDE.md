@@ -495,6 +495,7 @@ scheduler.add_job(
 - `GET /admin/api/redis-status` - Redis 메모리 및 Circuit 상태
 - `GET /admin/api/monitor/current` - 현재 시스템 리소스 (메모리, CPU, Chrome)
 - `GET /admin/api/monitor/history` - 시간별 리소스 히스토리 (파라미터: `hours`)
+- `GET /admin/api/bank-investing-redis-stats` - Bank/Investing direct-SET outcome telemetry (process-local 집계, reset route 없음 — item 4, PR D 계측 축)
 
 ### 계정 API (Apple App Store 5.1.1(v) 준수)
 

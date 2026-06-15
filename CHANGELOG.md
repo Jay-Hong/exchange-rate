@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **admin `/admin/api/bank-investing-redis-stats` + process-local SET-outcome telemetry (item 4)** (2026-06-15, `7ab51ec`): 신규 `app/bank_investing_redis_stats.py`가 `set_latest_bank/investing_rate_from_sync_job`의 Redis direct-SET 시도/성공/실패를 원인 3종(`client_unavailable`/`writer_exception`/`set_exception`)+`unknown`으로 process-local 집계 (derived aggregate + `consecutive_failures` + `last_*`). writer는 3-zone 배선 + `_safe_record_bank_investing_set_stat` hot-path 격리(telemetry 예외 비전파) + `_get_sync_client` 보호로 **bool 계약 불변**. Redis 미저장 이유 = Redis 장애 순간의 실패까지 기록해야 해 Redis를 sink로 못 씀(process 재시작 시 reset, `started_at` 기준). admin endpoint는 read-only(reset route 없음). **`trigger_*`(SET-success만 카운트)가 못 재는 SET-fail 빈도·원인 계측** = PR D precondition 계측 축. tests +25(모듈 12 + 배선 11 + endpoint 2). ⚠️ SET-failure 복구 발행 경로(correctness)는 별도 후속(failure-injection characterization test → recovery 설계).
 - **admin `/admin/api/topic-status/fx`에 C1 trigger_* telemetry 노출** (2026-06-15, `69357ed` — repo land + CI green, **prod deploy pending**): `get_fx_topic_telemetry`가 Redis-backed trigger counter 10 + `trigger_last_*` 6을 `trigger_` prefix로 추가 노출(publisher 필드와 분리). `trigger_no_loop`은 loop 부재 시만 발생→Redis 미기록(in-process `no_loop_skipped`만)이라 미노출. **publish/trigger hot path 동작 불변 + admin 응답 필드 additive 변경**(deploy 후 SSH HGETALL 대체 가능). tests +4.
 
 ### Fixed
