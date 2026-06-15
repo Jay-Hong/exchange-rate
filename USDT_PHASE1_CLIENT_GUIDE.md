@@ -519,13 +519,24 @@ reset (시험 구간 분리용): `POST /admin/api/topic-status/reset`.
     "subscriber_count": 0,
     "hook_called": 0,
     "skipped_disabled": 0,
+    "skipped_no_subscribers": 0,
     "built": 0,
     "publish_called": 0,
     "publish_sent_total": 0,
+    "publish_zero": 0,
     "error": 0,
     "last_result": null,
     "last_at_kst": null,
-    "last_error": null
+    "last_error": null,
+    // C1 trigger 측 (fx_topic_trigger가 같은 hash에 trigger_ prefix 기록). counter 10 = integer:
+    "trigger_request": 0, "trigger_skipped_legacy": 0, "trigger_coalesced": 0,
+    "trigger_flush_dual_shadow": 0, "trigger_flush_direct": 0,
+    "trigger_publish_called": 0, "trigger_publish_success": 0,
+    "trigger_publish_skipped_shadow": 0, "trigger_error": 0, "trigger_tether_route_shadow": 0,
+    // trigger_last_* 6 = string | null (trigger_last_window_ms도 "500.45" 형식 string|null):
+    "trigger_last_result": null, "trigger_last_reason": null, "trigger_last_source": null,
+    "trigger_last_window_ms": null, "trigger_last_error": null, "trigger_last_at_kst": null
+    // trigger_no_loop은 미노출 — loop 부재 시만 발생 → Redis 미기록(in-process no_loop_skipped만)
   },
   "fx:jpy-krw": { /* same shape */ },
   "fx:eur-krw": { /* same shape */ }

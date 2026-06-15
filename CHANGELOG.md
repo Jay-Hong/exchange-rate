@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **admin `/admin/api/topic-status/fx`에 C1 trigger_* telemetry 노출** (2026-06-15, `69357ed` — repo land + CI green, **prod deploy pending**): `get_fx_topic_telemetry`가 Redis-backed trigger counter 10 + `trigger_last_*` 6을 `trigger_` prefix로 추가 노출(publisher 필드와 분리). `trigger_no_loop`은 loop 부재 시만 발생→Redis 미기록(in-process `no_loop_skipped`만)이라 미노출. **publish/trigger hot path 동작 불변 + admin 응답 필드 additive 변경**(deploy 후 SSH HGETALL 대체 가능). tests +4.
+
 ### Fixed
 
 - **KRX close write gate 1 calendar — CM 야간장 시작일 기준** (2026-06-13, `78b02be`, [KRX_CLOSE_SNAPSHOT_PLAN.md §5.7.8](KRX_CLOSE_SNAPSHOT_PLAN.md)): `_evaluate_close_write_gates` gate 1이 `is_krx_business_day(boundary date)`로 판정해 금요일밤 CM(토요일 06:00 boundary)의 REST fallback 평가(WS 종가 미capture 시 — capture되면 REST 자체 skip)에서 토요일을 휴장 오판 reject (scheduling `is_close_snapshot_eligible`와 불일치). → `is_close_snapshot_eligible(session, boundary_date)` 재사용 (CF: boundary 당일 / CM: 야간장 시작일 boundary−1). 5/25형 미등록 휴장 보호는 gate 3(session evidence) 유지. **shadow-only** — `KRX_CLOSE_REST_WRITE_ENABLED=false` 동안 verdict telemetry만 변경(실제 write 변화 0); flag=true는 §5.7.8 **gate-checked write**(구 "무가드 복원" 폐기), 활성화는 6/15 rollover 후 별도 GO → **2026-06-15 16:12 prod 활성 완료**. gate-level test +2 (금요일밤 CM 통과 / negative-control 금요일 휴장 reject).

@@ -1567,7 +1567,7 @@ class TetherTopicTriggerController:
 
 **PR2 실측 telemetry field (구현 시 보강)**:
 
-- Counter (10, `trigger_` prefix): `request`, `skipped_legacy`, `coalesced`, `flush_dual_shadow`, `flush_direct`, `publish_called`, `publish_success`, `publish_skipped_shadow`, `no_loop`, `error`
+- Counter (분류 10 / **Redis-backed 9**, `trigger_` prefix): `request`, `skipped_legacy`, `coalesced`, `flush_dual_shadow`, `flush_direct`, `publish_called`, `publish_success`, `publish_skipped_shadow`, `error` (= 9 Redis-backed). **`no_loop`은 분류에만 존재** — loop 부재 시만 발생해 `_fire_telemetry`(loop 필요) 실행 불가 → Redis `trigger_no_loop` 미기록, in-process `stats.no_loop_skipped`만 증가
 - Last/HSET fields: `last_result`, `last_reason`, `last_source`, `last_asset`, `last_window_ms`, `last_at_kst`, `last_error`
 - 초안 (12 field, `trigger_count` / `trigger_coalesced_count` / `trigger_last_mode` 등) 대비 일부 명칭 단순화 + `skipped_legacy` / `no_loop` / `error` / `last_result` / `last_at_kst` / `last_error` 추가 (운영 진단 보강)
 - GC strong reference 보강: module-level `_telemetry_tasks` set + `add_done_callback(discard)` (asyncio docs 권고, fire-and-forget task GC 회피)
@@ -1580,7 +1580,7 @@ class TetherTopicTriggerController:
 
 **실측 telemetry fields** (구현 후 갱신, 옛 12 field 초안 대비 일부 명칭 단순화 + 운영 진단 보강):
 
-**Counter fields (10개, `trigger_` prefix, `hincrby`)**:
+**Counter 분류** — taxonomy 10 / **Redis-backed 9** (`trigger_` prefix, `hincrby`) / **process-local 1** (`no_loop_skipped`, Redis 미기록). 아래 9개가 Redis-backed counter:
 
 - `trigger_request` — request_trigger 호출 횟수 (옛 `trigger_count`에서 단순화)
 - `trigger_skipped_legacy` — legacy_piggyback mode strict noop 카운트 (운영 진단 보강)
@@ -1590,7 +1590,7 @@ class TetherTopicTriggerController:
 - `trigger_publish_called` — direct mode에서 publish 호출
 - `trigger_publish_success` — publish 성공 (sent > 0)
 - `trigger_publish_skipped_shadow` — dual_shadow에서 publish skip 한 횟수 (flush_dual_shadow와 동일 값)
-- `trigger_no_loop` — running event loop 부재로 trigger skip 한 횟수 (sync test/startup 경로 진단)
+- **(process-local — Redis 미기록, hincrby 아님)** `no_loop`: running event loop 부재로 trigger skip. `_fire_telemetry`가 loop 필요해 실행 불가 → in-process `stats.no_loop_skipped`만 증가 (taxonomy엔 포함되나 `trigger_no_loop` Redis counter/admin endpoint 미노출)
 - `trigger_error` — flush task 예외 격리 카운트 (`circuit.record_failure` 미호출, best-effort 보존)
 
 **Last/HSET fields (7개, `trigger_` prefix, `hset`)**:
