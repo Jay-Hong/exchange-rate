@@ -1,6 +1,6 @@
 # P1 공통 base 구현 설계 — control plane + rollout (design / pre-implementation)
 
-> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane은 확정, **outcome 계약·revision ID 확보·Lua/WATCH는 open(§13)**.
+> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane·**outcome 계약(§14)·cutover state machine(§15) 확정**. **잔존 open(§13)**: steady-state revision-ID·lease/timeout·Lua/WATCH·migration 완료 판정.
 > **소유권**: PR D 복구 = D 채택([PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)). 본 문서 = D의 **공통 base(P1)** 구현 경계·migration·control plane·rollout (비교 spec과 분리).
 > **산출**: Claude + Codex/검증-Claude 다회 검토 (2026-06-16).
 
@@ -15,6 +15,7 @@ P1 = D 옵션의 공통 base = **source-key revision `(timestamp, id)` + monoton
 - **P1a(shadow)** = race 측정 불가(would-be 분포만) + 배포 1회 추가 → **생략**. (분포는 atomic enable canary의 outcome telemetry가 제공.)
 - **P1+D 동시** = blast radius로 기각.
 - **P1b 직행** = atomic write 적용 + code-enforced 3-state rollout + canary 통제. (근거: PR_D_RECOVERY_SPEC §7.)
+- **활성화 timing** = P1b는 atomic write **코드**를 legacy 모드로 land(별도 PR). atomic **활성화는 D layer 준비 후 함께**(atomic+D canary, §15) — watermark 없는 P1-atomic 단독 운영 구간을 만들지 않음. ("P1+D 동시" 기각은 단일 대형 PR 기각이지 *활성화* 동시성 부정 아님.)
 
 ## 3. 3-state rollout (legacy / atomic / halt)
 
@@ -124,17 +125,92 @@ direct SET + mirror 공유, **atomic**:
 3. revision = 정규화 UTC epoch
 4. rollout — forward + rollback (§3·6·8)
 5. fail-closed — §7·11
-6. **5-state ↔ 기존 bool trigger 계약** (outcome 계약, §13) + P1 단독 배포 invariant
+6. **outcome 계약** (§14) — 5-state writer 결과 ↔ caller/D 발행 결정 분리. legacy-mode bool 경로 불변은 characterization으로 잠금 (production standalone-atomic 전제 제거 — atomic은 D와 함께만 활성, §2/§15)
 7. **mirror revision 공급** — 전용 revision-aware selector/internal type (공개 selector·payload에 id 유출 금지; crud.py:512/564 공유 selector 직접 변경 금지)
 
 ## 13. open (다음 결정/설계)
 
-- **outcome 계약**: `write_applied` / `write_healthy` / `should_trigger` + 5-state ↔ caller trigger gating (현 `bool True=trigger` 매핑, crud.py:128/321).
-- **revision ID 확보**: flush-row-ref (ChangedRate에 ORM row 보관, provisional id를 commit 전 외부 노출 금지) vs commit-후 재조회 (failure boundary 변경 — crud.py:339 "sink 변환 실패 시 commit 전 차단").
+- ✅ **outcome 계약** → §14 (resolved). ✅ **readiness/cutover gate** → §15 (resolved — (a)+(c) + seed-in-atomic/publish_blocked + bounded-eventual).
+- **steady-state revision ID 확보** (잔존): flush-row-ref (ChangedRate에 ORM row 보관, provisional id를 commit 전 외부 노출 금지) vs commit-후 재조회 (failure boundary 변경 — crud.py:339 "sink 변환 실패 시 commit 전 차단"). bootstrap revision-ID는 §15에서 DB row id 직독으로 해소(별개).
 - **atomic primitive**: Lua vs WATCH (선례 0; **direct=sync thread / mirror=async loop 분리** → 공유 coordinator 까다로움 → CAS 무게).
-- migration 완료 판정 / subscribe-time initial snapshot (별도 client 계약) / **D layer** (builder effective revision vector + success watermark + retry — P1 아님).
+- **lease/timeout 수치** (운영 튜닝, §15 골격과 분리): publisher drain timeout / catch-up bounded 횟수·시간 / lease expiry·renew / status=failed 재시도 정책.
+- migration 완료 판정 / subscribe-time initial snapshot (별도 client 계약) / **D layer 내부** (builder effective revision vector + success watermark 저장 + retry/backoff — §14/§15는 P1↔D 인터페이스·cutover까지, D 내부 구현은 범위 밖).
 
-## 14. 참조
+## 14. outcome 계약 (①② — P1↔D 인터페이스)
+
+> 범위: P1 writer 결과 + P1→D 핸드오프 + correctness backstop **역할**. D의 watermark 저장·reconciliation·retry/backoff **내부 구현은 범위 밖**(D layer, §13).
+
+**WriteOutcome** (writer 소유, publish-agnostic):
+
+| 필드 | 값 |
+|---|---|
+| `state` | advance / refreshed_equal / skipped_newer / conflict / failed |
+| `incoming_revision` | 이번 write가 시도한 revision `(epoch, id)` |
+| `effective_revision?` | write 후 그 key의 현재 Redis revision (확인 불가 시 None) |
+| `redis_write_performed` | **APPLIED \| NOT_APPLIED \| UNKNOWN** |
+| `revision_advanced` | **YES \| NO \| UNKNOWN** |
+| `error/reason` | 실패 사유 |
+
+`write_healthy`는 state 파생 (저장 안 함): conflict/failed = unhealthy, 그 외 healthy.
+
+**5-state ↔ 두 축** (state 단독 파생 불가 — failed는 실패 지점에 따라 갈림):
+
+| state | redis_write_performed | revision_advanced |
+|---|---|---|
+| advance | APPLIED | YES |
+| refreshed_equal | APPLIED (mirrored_at) | NO |
+| skipped_newer | NOT_APPLIED | NO |
+| failed (pre-SET) | NOT_APPLIED | NO |
+| failed (uncertain SET) | UNKNOWN | UNKNOWN |
+| conflict | NOT_APPLIED | NO |
+
+item 4 telemetry reason 매핑 (보수적, SET-relative 지점): `client_unavailable` + SET-전 `writer_exception` → NOT_APPLIED / `set_exception` → 기본 UNKNOWN.
+
+**PendingCandidate** (모든 committed 변경에서 생성 — event-driven latency 최적화, correctness 유일 근거 아님):
+
+- `source`, `asset`
+- `desired_revision` = committed DB revision (복구 anchor)
+- `observed_effective_revision?` (불가 시 None)
+- `write_state`
+
+처리: advance/refreshed_equal/skipped_newer → candidate, D가 asset vector 재구성·발행 판정 / **failed·UNKNOWN → candidate 유지 + 재조회 후 상태 확정 (retry 대상)** / **conflict → candidate 유지 + asset publish 차단 + alert**.
+
+**Correctness backstop** = DB latest revision vs durable success-watermark reconciliation (= D 결정, [PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)). candidate 소실(commit 후 핸드오프 전 crash)에도 crash/restart 포함 미완료 변경 재구성. candidate = fast path / watermark reconciliation = correctness. **R1 ≤15s는 recovery 시스템 전체에 적용** — candidate fast path뿐 아니라 periodic watermark reconciliation 주기도 R1을 충족하도록 스케줄 (candidate 유실 시에도 backstop이 R1 내 복구).
+
+## 15. cutover state machine (③ — P1/D 활성화)
+
+> 범위: P1↔D 활성화 cutover 계약 (state/gate/atomicity). D publisher 내부·watermark durable 형식은 **범위 밖**(D layer, §13).
+
+**guarantee**: bounded eventual correction (R1). 중간 stale 허용·R1 교정. "DB==Redis 보장" 아님.
+
+**seed 위치**: atomic/publish_blocked에서 reconciliation으로 seed/catch-up (별도 privileged halt-writer 없음 — 동일 atomic primitive + §10 4-case를 실경로 검증). halt = quiesce·protocol 전환 한정.
+
+**durable control (DB, §4 확장)**:
+
+- global: `bootstrap_session_id` / `bootstrap_generation` / `bootstrap_status = idle | running | failed | verified | completed` / `lease(owner, expiry)`
+- per-asset: `asset` / `publish_state = blocked | ready` / `ready_revision_vector`(full) / `membership_version`(source_registry 파생)
+
+**states** (write_mode × publish_state): `legacy/ready → halt/blocked → atomic/blocked → atomic/ready`
+
+**전이** (전부 session+generation CAS):
+
+1. legacy/ready → halt/blocked: writer-gate + publisher-gate 둘 다 stop-issue + drain + durable ACK
+2. halt/blocked → atomic/blocked: one-shot CAS + 새 session/generation + status=running (writer-gate 재개방, atomic live)
+3. [atomic/blocked] reconciliation seed/catch-up (atomic primitive + §10 4-case); 수렴목표 = known-backlog drain
+4. readiness = schema 완결 + membership 완결 + backlog drained → CAS(session+gen+status=running) → status=verified (crash-resume marker, publish 허용 근거 아님)
+5. **최종 단일 tx**: CAS(expected session/generation/status=verified) → global status=completed + 3 asset publish_state=ready + 각 full vector·membership 저장 → commit → cache refresh → publisher gate open. (부분 갱신 후 crash로 일부 asset만 ready 금지. re-verify는 backlog 축소용이지 원자적 보장 아님)
+6. fail/timeout → atomic/blocked + status=failed (no auto-ready)
+
+**publisher gate** (모든 FX publisher 공유 — legacy hook([main.py:754](app/main.py#L754) retrofit) / C1 direct flush / D publisher / queued callback; §9 writer-gate와 동일 primitive 별 token-pool):
+
+- token 획득 → token의 generation/session + durable-cached readiness 검증 → build/send → token 반환 (TOCTOU 차단 — entry-check만으론 부족)
+- **방향성 전환 순서**: 차단 = gate-close → in-flight drain → durable blocked → cache/ACK / 개방 = durable commit → cache refresh → gate-open
+
+**불변**: atomic/blocked reconciliation의 skipped_newer = concurrent atomic writer로 **정상**(anomaly 아님) — effective_revision으로 완결성 판단 / any → halt = incident.
+
+**sub-decision (확정)**: full revision vector(작고 진단 가능) / readiness per-asset 저장 / 최초 cutover flip all-at-once(3 asset, 단순성 + 원자성).
+
+## 16. 참조
 
 - [PR_D_RECOVERY_SPEC.md](PR_D_RECOVERY_SPEC.md) — D 결정 (§12), 옵션 비교 (§7)
 - 코드: [crud.py:324](app/crud.py#L324)(orchestrator stage→commit→write→emit) / [:103](app/crud.py#L103)(_write_changed) / [:512](app/crud.py#L512)·[:564](app/crud.py#L564)(selector, id 없음) / [latest_rates_cache.py](app/latest_rates_cache.py)(set_latest·_mirror_all_latest·serialize/deserialize/is_stale, ChangedRate id 없음) / [docker-compose.yml:22](docker-compose.yml#L22)(redis allkeys-lru → marker DB 필수) / [Dockerfile:118](Dockerfile#L118)(--workers 1 단일 프로세스)
