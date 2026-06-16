@@ -359,6 +359,33 @@ A1~B3 = **3-state mode(legacy default) gate로 dormant** → production write �
 
 A1→A2→A3→A4 → {A5, B1→B2a→B2b→B3} (A4 이후 병렬) → C6(A+B 전부 후) → C7.
 
+### A2 상세 설계 (reconciliation 수렴, 2026-06-17)
+
+> A2(writer mode-aware enforcement) 설계 closed — workflow 설계 + 내부 adversarial 6 + codex High(6확인·4추가) + reconciliation 3 수렴. **구현 전**. 근거 file:line은 §20 + A1 land 코드.
+
+**대원칙 3**: ① legacy 100% 불변(writer가 mode 읽되 legacy면 기존 commit→Redis→alert→trigger 순서·예외격리·반환계약 비트단위 불변, early-branch만 위에 얹음) ② halt phase-gate(A2 배포만으로 — migration 유무 무관 — live 서비스 절대 halt 안 됨) ③ atomic dormant(atomic 분기/flush-ID/rollback land하되 gate 뒤 dormant, activation=C6).
+
+**crux b — halt 실효 시점**: writer는 **immutable snapshot 1-read** `{diagnostic_effective_mode, activation_latched, enforced_action, mode_generation}` (no-throw accessor — read 실패 시 last-good snapshot 유지; legacy passthrough는 초기/pre-activation[activation_latched=false]에 한정, post-activation은 latch 보존→fail-closed). `enforced_action`(legacy/atomic/halt 단일 필드, writer는 이것만 분기)를 `diagnostic_effective_mode`(compute_effective_mode 결과 — None→HALT 진단 라벨 불변)와 **분리** — `effective_mode==HALT`가 곧 "차단" 아님. `halt_enforced = (diagnostic==HALT AND activation_latched)`. activation 전 부재/corruption=legacy, 후=halt 실효. effective_mode()+halt_enforced() 2-call torn read 금지 → 1-snapshot.
+
+**T1 — post-activation restart (못박음)**: A2 latch = **in-process monotonic latch**(한 번 True면 프로세스 생애 False 금지), restart durable marker 아님. **durable activation marker = DB control row `activation_epoch>0`**(재시작 생존, 읽히는 한). restart 시 control 못 읽는 post-activation ambiguity는 **C6 precondition으로 닫음**(C6 activation/runbook이 readability 보장 or 못 읽으면 fail-closed). A2-1은 새 durable marker 안 만듦. A2는 pre-activation이라 restart/read-fail→legacy가 항상 정확.
+
+**A2 sub-step 재분해**:
+
+- **A2-1 (cache, 완전 dormant)**: `app/atomic_write_runtime.py` 신규 — immutable snapshot + `activation_latched` in-process monotonic + no-throw accessor + `refresh_from_db()`(DB read/compute는 lock 밖, swap만 lock 안) + diagnostic/enforced_action 분리. **live poll scheduling 없음**(import/lifespan 자동 poll 금지 — writer 미연결이어도 live DB-polling은 behavior-change-0 위반). control read-fail 문서정정 동반(아래). writer 미연결 — A1처럼 정의+테스트, live 효과 0.
+- **A2-2 (bank/investing writer 분기)**: orchestrator 진입부 snapshot 1-read + early-branch. legacy fall-through(불변) / halt(phase-gate, **staging 전 return**) / atomic skeleton(**pending `db.add()` row commit/rollback 계약 명시** — early-return이 commit 우회 시 session 오염 방지 + 테스트). startup refresh + managed poll 등록(여기서). A1 trip-wire "writer 미호출"→"호출함" 전환. characterization green 유지.
+- **A2-3 (usdt/krx Redis writer 분기)**: `set_latest_usdt/krx_*` SET 감싸기, legacy/halt까지만. **atomic branch는 구현 전이라도 legacy fallback 금지 → fail-closed/assert+telemetry**(silent legacy 쓰기 구멍 차단).
+- **A2-4 (§16 revision plumbing pure)**: canonical epoch_us(정수)/StagedRateChange/internal selector(public selector 무변경) — atomic gate 뒤 dormant.
+
+**C6-전 blocker dependency (A2 미구현, atomic 활성 전 필수)**:
+
+- **USDT/KRX atomic revision-ID plumbing**: DB insert와 Redis write 독립 채널이라 Redis writer가 row.id 못 봄 → atomic 시 §11 compare false-positive. A2-3는 legacy/halt만, atomic revision은 C6 전 재설계.
+- **mirror atomicization**: `_mirror_all_latest`가 또 다른 latest:* writer → atomic 시 v1 계속 쓰면 §11 invariant 깸. atomic 활성 전 mirror도 atomic primitive 공유.
+- **coalesce bypass/clear**: `_last_written_usdt/krx_state` same-rate/bucket skip이 atomic v2 migration write 건너뜀 → atomic mode는 coalesce bypass, Lua revision compare가 판단.
+
+**문서정정 (A2-1 동반 — 구현자 오독 차단)**: `models.py` AtomicWriteControl docstring "A2는 singleton 부재=halt 취급"→"activation 전 phase는 부재/corruption=legacy fall-through, 후엔 halt; compute_effective_mode None→HALT는 진단 라벨, enforcement는 phase-gated" / §9 line 93("부재→halt")에 "= activation/atomic context, legacy bootstrap 단계 부재는 A2 phase-gate로 legacy" 명시.
+
+**공통(전 sub-step)**: snapshot read no-throw, per-write 로그 금지, pre-activation enforcement=legacy passthrough, 기존 commit→Redis→alert→trigger 순서 characterization 유지.
+
 ## 20. 참조
 
 - [PR_D_RECOVERY_SPEC.md](PR_D_RECOVERY_SPEC.md) — D 결정 (§12), 옵션 비교 (§7)
