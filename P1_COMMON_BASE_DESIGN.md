@@ -90,7 +90,7 @@ P1 = D 옵션의 공통 base = **source-key revision `(timestamp, id)` + monoton
 
 ⚠️ **activation race (must, blocker)**: 실행 앱을 legacy-cached로 둔 채 DB mode만 atomic으로 바꾸면 poll 전까지 unconditional write 계속 → **activation 순간 invariant 깨짐**. → 위 6–8 (durable halt-quiesce + 공통 gate drain → one-shot → recreate-atomic). 최초 활성화 = **`legacy → halt → atomic` composite** (§3).
 
-singleton 부재·중복·parse 실패 → **halt**.
+singleton 부재·중복·parse 실패 → **halt** (= activation/atomic context의 진단·fail-closed 라벨; **legacy bootstrap[activation 전] 단계의 부재/corruption은 §19 A2 phase-gate로 legacy passthrough** — A2 배포≠halt).
 
 ## 10. legacy value migration (lazy, mixed-tolerant)
 
@@ -365,7 +365,7 @@ A1→A2→A3→A4 → {A5, B1→B2a→B2b→B3} (A4 이후 병렬) → C6(A+B �
 
 **대원칙 3**: ① legacy 100% 불변(writer가 mode 읽되 legacy면 기존 commit→Redis→alert→trigger 순서·예외격리·반환계약 비트단위 불변, early-branch만 위에 얹음) ② halt phase-gate(A2 배포만으로 — migration 유무 무관 — live 서비스 절대 halt 안 됨) ③ atomic dormant(atomic 분기/flush-ID/rollback land하되 gate 뒤 dormant, activation=C6).
 
-**crux b — halt 실효 시점**: writer는 **immutable snapshot 1-read** `{diagnostic_effective_mode, activation_latched, enforced_action, mode_generation}` (no-throw accessor — read 실패 시 last-good snapshot 유지; legacy passthrough는 초기/pre-activation[activation_latched=false]에 한정, post-activation은 latch 보존→fail-closed). `enforced_action`(legacy/atomic/halt 단일 필드, writer는 이것만 분기)를 `diagnostic_effective_mode`(compute_effective_mode 결과 — None→HALT 진단 라벨 불변)와 **분리** — `effective_mode==HALT`가 곧 "차단" 아님. `halt_enforced = (diagnostic==HALT AND activation_latched)`. activation 전 부재/corruption=legacy, 후=halt 실효. effective_mode()+halt_enforced() 2-call torn read 금지 → 1-snapshot.
+**crux b — halt 실효 시점**: writer는 **immutable snapshot 1-read** `{diagnostic_effective_mode, activation_latched, enforced_action, mode_generation}` (no-throw accessor). `enforced_action`(legacy/atomic/halt 단일 필드, writer는 이것만 분기)를 `diagnostic_effective_mode`(compute_effective_mode 결과 — None→HALT 진단 라벨 불변)와 **분리** — `effective_mode==HALT`가 곧 "차단" 아님. **derive 우선순위**: diagnostic==atomic→atomic / **valid explicit halt(format 일치 + requested_mode==halt)→halt**(pre-activation에도 §3/§9 legacy→halt quiesce 존중 — 부재/corruption과 구분) / post-activation(activation_latched)→fail-closed halt / 그 외(pre-activation 부재/corruption/atomic-미활성, involuntary)→legacy passthrough. **read 실패**: diagnostic=HALT + enforced는 last-good fail-close(atomic→halt[§7 못읽음→halt], legacy/halt 보존) + latch/gen 보존. `mode_generation`은 관측 단조(fencing token, 회귀 금지). 2-call torn read 금지 → 1-snapshot.
 
 **T1 — post-activation restart (못박음)**: A2 latch = **in-process monotonic latch**(한 번 True면 프로세스 생애 False 금지), restart durable marker 아님. **durable activation marker = DB control row `activation_epoch>0`**(재시작 생존, 읽히는 한). restart 시 control 못 읽는 post-activation ambiguity는 **C6 precondition으로 닫음**(C6 activation/runbook이 readability 보장 or 못 읽으면 fail-closed). A2-1은 새 durable marker 안 만듦. A2는 pre-activation이라 restart/read-fail→legacy가 항상 정확.
 

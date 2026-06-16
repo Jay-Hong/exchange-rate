@@ -299,9 +299,11 @@ class AtomicWriteControl(Base):
         (UPDATE ... WHERE id=1 AND col < :new + affected==1)로 A2/C6에서 enforce.
 
     A1→A2 handoff precondition: table-exists ≠ row-exists. 운영 진입점(main.py/backfill)은
-        create_all_app_tables로 이 table을 만들지 않음 — migration script만 생성+seed하지만
-        create→seed 2단계라 중단 시 table-without-row 가능 → A2/bootstrap(§9)은 'singleton
-        부재 = halt'로 취급하고 row 존재를 가정하지 말 것.
+        create_all_app_tables로 이 table을 만들지 않음 — migration script만 생성+seed.
+        **A2 enforcement (§19 A2 상세)**: activation 전(activation_latched=false) phase는
+        row 부재/corruption = **legacy passthrough**(배포≠halt), activation(activation_epoch>0)
+        후에만 halt 차단. compute_effective_mode None→HALT는 **진단 라벨 불변**이고 writer
+        enforcement 강도만 phase-gated. A2/bootstrap은 row 존재를 가정하지 말 것.
     """
     __tablename__ = "atomic_write_control"
 

@@ -243,13 +243,17 @@ class TestDormancyTripwire(unittest.TestCase):
 
     def test_control_symbols_absent_from_other_app_modules(self):
         app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
-        allow = {"atomic_write_control.py", "main.py"}  # main.py는 위 테스트가 정밀 검사
+        # 합법적 consumer만 allow: atomic_write_control.py(정의) / atomic_write_runtime.py(A2 cache
+        # layer — writer 아님, control symbol 읽어 snapshot 계산) / main.py(status endpoint, 위 AST
+        # 테스트가 정밀 검사). writer(crud/latest_rates_cache/scheduler 등) 누수는 여전히 차단.
+        allow = {"atomic_write_control.py", "atomic_write_runtime.py", "main.py"}
         offenders = []
         for py in app_dir.rglob("*.py"):
             if py.name in allow:
                 continue
             text = py.read_text(encoding="utf-8")
-            if any(s in text for s in self.SYMBOLS):
+            # 호출 형태(`symbol(`)만 = 실제 사용. docstring/주석의 단순 언급은 dormancy 위반 아님.
+            if any((s + "(") in text for s in self.SYMBOLS):
                 offenders.append(str(py.relative_to(app_dir.parent)))
         self.assertEqual(offenders, [], f"control symbol 누출 (A1 dormancy 위반): {offenders}")
 
