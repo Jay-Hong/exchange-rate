@@ -174,6 +174,15 @@ Investing live channel (조사 중) ─┤
 - **Bank 9개 / Investing** — DB-first monolithic 경로(crud.py 안에서 DB → Redis write helper → `process_rate_alerts` 직렬). Redis write와 alert는 여전히 crud.py에서 직접 처리. **Topic trigger는 (a) C1 source-level trigger**(SET-success → bridge → `fx:*` + 조건부 `usdt:krw` cross-route, **2026-06-15 direct 활성**) **+ (b) legacy main.py broadcast diff hook 공존**(PR D/E 전까지). β(observation-based fanout): **C1(trigger-only) land+활성**, C2(freshness)/C3(dedup)/PR D·E(hook 격하)는 pending, **Stage 2 canary 부분완료**. 상세 [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md).
 - **KRX 미국달러선물** — Stage E tick-level Redis 전환 **완료** (E-2 `KRX_REDIS_TICK_WRITE_ENABLED=true` 운영 활성 2026-05-26; ADR-031 1차 DB-insert-bound → tick-level). Runtime alert evaluator **연결됨** (F-1/F-2/F-3, `KRX_ALERT_EVALUATOR_ENABLED=true`, 2026-05-26). Stage E는 ADR-027 Stage C/REST 정책과 **직교**(Stage C 결정은 선행 조건 아님). **2026-05-25 휴장일 사고 후속 정책 PR(`6a43785`)로 close REST write는 code default off** (`KRX_CLOSE_REST_WRITE_ENABLED`, [ADR-027 follow-up](DECISIONS.md)) — KIS REST stale 본질 격리. **[Amendment: 6/10 gate-checked write 재설계(§5.7.8) 후 prod 2026-06-15 16:12 `=true` 활성; code default은 false 유지]**. G(REST Stage C 실반영)는 별도 트랙 — telemetry canary 활성(`5d816fc`), 실반영 미구현.
 
+**mirror cycle (ADR-026) retirement 방향** (후속 트랙, P1 범위 밖): 3s latest mirror는 broadcast hot path를 DB에서 떼기 위한 **1세대 해법**. P1/PR D는 mirror 제거가 아니라 **direct+mirror를 revision-aware atomic writer로** 만드는 단계([P1_COMMON_BASE_DESIGN.md §11](P1_COMMON_BASE_DESIGN.md)). 3s polling은 장기 축소 대상이나 현재 **mirrored_at freshness 갱신 + read-path DB fallback 회피** 역할을 겸하므로 **naive 제거 금지**(빼면 unchanged fx 값이 stale 판정 → DB 부하가 read path로 이동할 뿐). 방향:
+
+1. **measure first** — mirror 실제 DB query 수·CPU / Redis stale fallback 빈도 / mirror가 실제 failed direct SET을 복구한 사례 유무
+2. **freshness 의미 분리** — `seen_at`(값 안 바뀜) vs 캐시 누락/실패 (§4.1.3); unchanged-but-valid를 stale 취급 안 하도록
+3. **targeted reconciliation/audit** — miss/invalid/SET-fail/restart-warmup + 낮은 주기 audit·ops 명령만 DB 조회 (3s 무조건 poll 폐기)
+4. **cadence 축소 또는 제거** — fx를 USDT/KRX direct-write 모델로 이전
+
+원칙 **replace-before-remove**(대체재 먼저, mirror 제거는 마지막). 주목적은 DB 부하 절감보다 **polling 의존 제거**; ADR-026 당시 "분당 20 cycle"은 무시할 수준 평가였으나 cycle당 다수 query라 **현재 부하는 재측정 후 판단**.
+
 #### 4.1.6 통합 phase 진입 조건 및 cross-reference
 
 본 계약의 전면 적용은 **multi-PR phase**로 진행. source별 작업분해는 다음 phase docs에서:

@@ -117,6 +117,7 @@ direct SET + mirror 공유, **atomic** (구현 = **Lua**; v2 schema·Lua 책임�
 
 - 비교 = **canonical revision `(canonical_epoch_us, id)`** (정수 μs epoch + integer id; ISO/float 금지 — 동일 ts tie-break = DB `(timestamp DESC, id DESC)`). canonical 변환·확보 = §16.
 - **atomic op 실패 시 unconditional 복귀 금지.** 단 **per-key write 실패**(일시 Redis 오류 등) = 그 write만 **skip + telemetry + mirror/next-cycle 재시도, atomic 모드 유지** / **전역 halt = 의도된 mode 상태**(admin/incident). 단일 Redis blip ≠ 전역 halt.
+- **mirror 제거는 P1 범위 밖** — P1은 mirror 유지(direct+mirror 공유 atomic). 3s mirror polling 축소·제거는 후속 fanout 트랙 ([REALTIME_ARCHITECTURE_PLAN.md §4.1.5](REALTIME_ARCHITECTURE_PLAN.md), replace-before-remove).
 
 ## 12. 7 선결 조건 (구현 전 고정)
 
