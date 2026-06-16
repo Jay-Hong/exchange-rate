@@ -1,6 +1,6 @@
-# P1 공통 base 구현 설계 — control plane + rollout (design / pre-implementation)
+# P1 공통 base 구현 설계 — control plane + rollout (design + A1 land)
 
-> ⚠️ **상태**: 설계 분석 (구현 전, 코드 0). 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17)·P1b/D 구현 분해(§19) 확정**. **P1 설계 + 구현 분해 전부 resolved**(§13). 잔여 = 별도 client/server 계약(subscribe-time initial snapshot).
+> ⚠️ **상태**: 설계 분석 + **A1 구현 land (2026-06-17), A2+ 구현 전**. 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17)·P1b/D 구현 분해(§19) 확정**. **P1 설계 + 구현 분해 전부 resolved**(§13). 잔여 = 별도 client/server 계약(subscribe-time initial snapshot).
 > **소유권**: PR D 복구 = D 채택([PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)). 본 문서 = D의 **공통 base(P1)** 구현 경계·migration·control plane·rollout (비교 spec과 분리).
 > **산출**: Claude + Codex/검증-Claude 다회 검토 (2026-06-16).
 
@@ -36,7 +36,7 @@ P1 = D 옵션의 공통 base = **source-key revision `(timestamp, id)` + monoton
 
 ## 4. control table (singleton, DB 제약)
 
-필드: `control_row_format_version` / `target_write_schema_version` / `required_writer_protocol` / **`activation_epoch`**(atomic 최초 활성화 이력·schema floor) / **`mode_generation`**(legacy/halt/atomic 전환마다 증가하는 **fencing token** — `activation_epoch`와 별개; atomic→halt→atomic에서도 증가해 이전 write 거부) / `requested_mode` / `activated_at` / `updated_at`.
+필드: `control_row_format_version` / `target_write_schema_version` / `required_writer_protocol` / **`activation_epoch`**(atomic 최초 활성화 이력·schema floor) / **`mode_generation`**(legacy/halt/atomic 전환마다 증가하는 **fencing token** — `activation_epoch`와 별개; atomic→halt→atomic에서도 증가해 이전 write 거부) / `requested_mode` / **`activated_at`**(atomic activation 시각 — seed/활성화 전 **None**, §8 one-shot에서 set; `activation_epoch=0`과 정합) / `updated_at`.
 
 **DB 제약 (구조적)**:
 
@@ -321,7 +321,7 @@ signed integer μs, **float `.timestamp()` 금지**(μs 스케일 rounding).
 
 ### A. P1 dormant foundation (5 — 전부 behavior-change-0)
 
-- **A1** Control table + 3-state infra: control infra read-only, **writer hot path 미연결**(순수 legacy). control-read-fail = status/preflight error surface(writer 미영향).
+- **A1** ✅ **land (2026-06-17, behavior-change-0)** Control table + 3-state infra: control infra read-only, **writer hot path 미연결**(순수 legacy). control-read-fail = status/preflight error surface(writer 미영향). 구현 — `AtomicWriteControl` 싱글톤(CHECK 3) / `app/atomic_write_control.py`(`compute_effective_mode` dormant + trip-wire 테스트로 잠금) / `create_all_app_tables`(control table 제외 → `migrate_atomic_write_control.py`가 운영(non-test) 유일 생성 경로) / never-crash status endpoint. codex CLI 4-round 리뷰(최종 High 게이트 포함) 수렴, 23 tests + 전체 suite green.
 - **A2** writer mode-aware enforcement + revision plumbing: writer가 cached effective-mode 읽음 → control 못읽음/schema 불일치 = **halt(fail-closed, §7)**. flush-ID·rollback flow는 **atomic-mode gate 뒤 dormant**. helper·§16 selector pure 추가.
 - **A3** v2 schema + Lua infra + migration command: Lua load-but-not-called, v2 helper·migration cmd dormant.
 - **A4** WriteOutcome + PendingCandidate interface: atomic-mode-only handoff, legacy=bool.

@@ -2,7 +2,7 @@
 
 # 표준 라이브러리
 from datetime import datetime, timezone as dt_timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, func
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, func, CheckConstraint
 
 # 로컬 애플리케이션
 from app.database import Base
@@ -268,4 +268,60 @@ class SourceHourlyRate(Base):
 
     __table_args__ = (
         Index('uq_source_hourly_rates', 'source', 'asset', 'bucket_ts_kst', unique=True),
+    )
+
+
+# ============================================================
+# P1 atomic-write control plane (PR D / P1b — A1)
+# ============================================================
+
+class AtomicWriteControl(Base):
+    """P1 atomic writer 3-state control plane (싱글톤 row id=1).
+
+    P1_COMMON_BASE_DESIGN.md §4 control table. legacy/atomic/halt 3-state mode를
+    DB 단일 진실 소스로 관리. **A1에서는 read-only infra만** — writer hot path
+    미연결(순수 legacy), behavior-change-0. writer가 effective-mode를 consume하는
+    enforcement는 A2+. 읽기/계산 helper는 app/atomic_write_control.py.
+
+    이름 'atomic_write_control': 기존 broadcast hot path 개념과 구분 — 이 table은
+    broadcast가 아니라 atomic write mode control plane.
+
+    DB CHECK 제약 (control-plane safety constraint):
+        리포 첫 DB CHECK. ADR-034 §10 'DB CHECK 보류'(rate==close 같은 data-quality
+        case)와 **의도적 divergence** — 싱글톤/enum/non-negative는 data quality가
+        아니라 구조적 무결성이고, 깨지면 wrong-mode read → halt 대상이라 DB-level
+        fail-closed가 타당. §4가 ADR-034 이후 명시적으로 이 CHECK를 mandate하므로
+        governs. (future reader가 ADR-034 선례로 app-level 회귀시키지 말 것.)
+
+        §4 line 43-45 명시 3개만 구현: CHECK(id=1) / requested_mode enum /
+        activation_epoch non-negative. monotonicity(activation_epoch/mode_generation)는
+        intra-row CHECK로 불가(§4 line 48) → conditional-update
+        (UPDATE ... WHERE id=1 AND col < :new + affected==1)로 A2/C6에서 enforce.
+
+    A1→A2 handoff precondition: table-exists ≠ row-exists. 운영 진입점(main.py/backfill)은
+        create_all_app_tables로 이 table을 만들지 않음 — migration script만 생성+seed하지만
+        create→seed 2단계라 중단 시 table-without-row 가능 → A2/bootstrap(§9)은 'singleton
+        부재 = halt'로 취급하고 row 존재를 가정하지 말 것.
+    """
+    __tablename__ = "atomic_write_control"
+
+    # 싱글톤 PK. autoincrement=False → PostgreSQL이 SERIAL 아닌 plain INTEGER emit
+    # → 명시 id=1 seed가 CHECK(id=1)와 공존.
+    id = Column(Integer, primary_key=True, autoincrement=False)
+    control_row_format_version = Column(Integer, nullable=False, default=1)   # §5 control row 형식
+    target_write_schema_version = Column(Integer, nullable=False, default=1)  # §5 새 write가 emit할 Redis value schema (1=legacy, 2=atomic)
+    required_writer_protocol = Column(Integer, nullable=False, default=1)     # §5/§6 preflight 비교 대상
+    activation_epoch = Column(Integer, nullable=False, default=0)             # §4 atomic 최초 활성화 이력·schema floor (0=미활성화)
+    mode_generation = Column(Integer, nullable=False, default=0)              # §4 fencing token (legacy/halt/atomic 전환마다 증가, activation_epoch와 별개)
+    requested_mode = Column(String, nullable=False, default="legacy")         # 'legacy'|'atomic'|'halt' (CHECK enforce)
+    activated_at = Column(DateTime, nullable=True)                            # atomic activation 시각 (활성화 전 None — §8 one-shot에서 set; activation_epoch=0과 정합)
+    updated_at = Column(DateTime, nullable=False, default=get_utc_now, onupdate=get_utc_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_atomic_write_control_singleton"),
+        CheckConstraint(
+            "requested_mode IN ('legacy', 'atomic', 'halt')",
+            name="ck_atomic_write_control_requested_mode",
+        ),
+        CheckConstraint("activation_epoch >= 0", name="ck_atomic_write_control_activation_epoch"),
     )

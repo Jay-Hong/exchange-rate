@@ -22,7 +22,7 @@ import secrets
 
 # 로컬 애플리케이션
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats
-from app.database import engine, SessionLocal, Base
+from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
 from app import config
@@ -148,8 +148,10 @@ async def notify_user_devices_sync(db: Session, user_id: str):
         logger.warning("동기화 푸시 실패 (무시됨)", exc_info=True)
 
 
-# DB 테이블 생성
-Base.metadata.create_all(bind=engine)
+# DB 테이블 생성 — atomic_write_control(P1 control plane)은 제외 (migration script가
+# 운영(non-test) 유일 생성 경로 → import 시점에 운영 PG로 신규 CHECK DDL emit 안 함 = A1 behavior-change-0).
+# 제외 로직은 app/database.create_all_app_tables 단일 진실 소스 (backfill 등 다른 진입점도 공유).
+create_all_app_tables(engine)
 
 # HTML 템플릿 디렉토리 설정
 templates = Jinja2Templates(directory="templates")
@@ -1330,6 +1332,64 @@ async def get_redis_status():
             "circuit_state": redis_cache.circuit.state,
             "error": str(e)
         }
+
+
+@app.get("/admin/api/atomic-write-control-status", dependencies=[Depends(verify_admin)])
+async def get_atomic_write_control_status():
+    """P1 atomic-write control plane 상태 조회 (A1 — dormant, read-only 진단 전용).
+
+    behavior-change-0: writer/broadcast hot path를 건드리지 않는다. control table
+    read 실패도 HTTP 500이 아니라 JSON control_read_error로 surface (redis-status
+    never-crash 패턴). effective_mode는 진단용으로만 노출 — A1에서는 어떤 writer도
+    이 값을 consume하지 않는다 (writer_enforced=false).
+
+    Returns (항상 200):
+        {status, control_available, control, effective_mode, preflight,
+         writer_enforced(=false), control_read_error}
+    """
+    from app import atomic_write_control as awc
+
+    db = None
+    control = {}
+    effective_mode = None
+    preflight = None
+    control_read_error = None
+    try:
+        db = SessionLocal()  # try 안에서 open — SessionLocal() 자체 예외도 never-crash 포섭
+        row = awc.read_control_row(db)
+        if row is None:
+            # fail-closed 진단: control row 없음 = writer라면 halt (§7). None으로 두지 않음.
+            effective_mode = awc.compute_effective_mode(None)
+            preflight = awc.evaluate_preflight(None)
+            control_read_error = {
+                "reason": "row_missing",
+                "message": "atomic_write_control 싱글톤 row 없음 (migration 미실행)",
+            }
+        else:
+            control = awc.get_control_state_dict(row)
+            effective_mode = awc.compute_effective_mode(row)
+            preflight = awc.evaluate_preflight(row)
+    except Exception as e:
+        logger.error("atomic-write control 상태 조회 실패", exc_info=True)
+        # control 못 읽음 = fail-closed halt (§7). awc 미import 가능성 대비 literal.
+        effective_mode = "halt"
+        control_read_error = {
+            "reason": type(e).__name__,
+            "message": "control table을 읽을 수 없습니다",
+        }
+    finally:
+        if db is not None:
+            db.close()
+
+    return {
+        "status": "success" if control_read_error is None else "error",
+        "control_available": control_read_error is None,
+        "control": control,
+        "effective_mode": effective_mode,
+        "preflight": preflight,
+        "writer_enforced": False,  # A1: writer는 control을 consume하지 않음 (dormant)
+        "control_read_error": control_read_error,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

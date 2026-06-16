@@ -37,6 +37,22 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+# atomic_write_control(P1 control plane, CHECK-bearing)은 일반 create_all에서 제외 —
+# scripts/migrate_atomic_write_control.py가 운영(non-test) 유일 생성 경로 (import/script 시점에 운영 PG로
+# 신규 CHECK DDL을 emit하지 않음 = A1 behavior-change-0 + migration-first 코드 보장).
+# 운영 진입점(main.py import / backfill_history.py 등)은 본 helper를 쓴다.
+# (테스트는 control table이 필요하므로 Base.metadata.create_all을 직접 사용.)
+CREATE_ALL_EXCLUDE_TABLES = frozenset({"atomic_write_control"})
+
+
+def create_all_app_tables(bind) -> None:
+    """control-plane 테이블을 제외하고 ORM 테이블 생성 (checkfirst, idempotent)."""
+    Base.metadata.create_all(
+        bind=bind,
+        tables=[t for t in Base.metadata.sorted_tables if t.name not in CREATE_ALL_EXCLUDE_TABLES],
+    )
+
+
 @contextmanager
 def get_db_context():
     """

@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import yfinance as yf
 
 # 로컬 애플리케이션
-from app.database import SessionLocal, engine, Base
+from app.database import SessionLocal, engine, Base, create_all_app_tables
 from app import models
 
 # ═════════════════════════════════════════════════════════════
@@ -343,8 +343,8 @@ def main():
     print(f"대상: {args.target}")
     print("=" * 60)
 
-    # 테이블이 없으면 생성 (로컬 SQLite 등)
-    Base.metadata.create_all(bind=engine)
+    # 테이블이 없으면 생성 (로컬 SQLite 등). atomic_write_control은 제외 (migration script 전용).
+    create_all_app_tables(engine)
 
     db = SessionLocal()
 
