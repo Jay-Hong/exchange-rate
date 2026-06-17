@@ -63,12 +63,15 @@ class UsdtLatestWriteOutcome(Enum):
     - SKIPPED_REGRESSION: incoming exchange ts < stored seen_at → out-of-order write
       차단 (reconnect snapshot/probe 경합 시 stale이 fresh 값을 덮지 않게). trigger 차단.
     - SET: Redis SET 성공 (cold-start GET miss 후 SET 포함). trigger 발사.
+    - BLOCKED: P1b A2-3 write-mode gate(halt/atomic)로 SET 자체 차단. trigger 차단 +
+      coalesce SKIPPED와 **구분**(polling caller가 success로 오인 안 함). atomic은 A3 전 fail-closed.
     """
 
     FAILED = "failed"
     SKIPPED = "skipped"
     SKIPPED_REGRESSION = "skipped_regression"
     SET = "set"
+    BLOCKED = "blocked"
 
 
 class KrxLatestWriteOutcome(Enum):
@@ -79,11 +82,13 @@ class KrxLatestWriteOutcome(Enum):
     - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
     - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
     - SET: Redis SET 성공. trigger 발사 (`TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS`).
+    - BLOCKED: P1b A2-3 write-mode gate(halt/atomic)로 SET 차단. trigger 차단(SKIPPED와 구분).
     """
 
     FAILED = "failed"
     SKIPPED = "skipped"
     SET = "set"
+    BLOCKED = "blocked"
 
 
 # ── Key helpers ──────────────────────────────────────────────
@@ -379,6 +384,18 @@ def _maybe_warn_regression(source: str, incoming: datetime, stored: datetime) ->
         )
 
 
+# P1b A2-3: write-mode block 관측 (process-local approximate counter, debug용). gate가 halt/atomic으로
+# SET을 막을 때 누적. 동시 thread RMW race로 일부 유실 가능(no-lock — debug 관측이라 허용). A2엔 0.
+_write_mode_block_counts: dict[tuple[str, str], int] = {}
+
+
+def _record_write_mode_block(label: str, enforced: str) -> None:
+    """write-mode gate(halt/atomic)로 Redis SET을 막은 것 기록 (approximate counter + debug log)."""
+    key = (label, enforced)
+    _write_mode_block_counts[key] = _write_mode_block_counts.get(key, 0) + 1
+    logger.debug("write-mode block (Redis SET 차단)", extra={"label": label, "enforced": enforced})
+
+
 def set_latest_usdt_rate_from_sync_job(
     source: str,
     asset: str,
@@ -411,6 +428,15 @@ def set_latest_usdt_rate_from_sync_job(
         (`get_latest_usdt_rate_from_sync_job`)에서 None 감지 후 호출자가
         DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리한다.
     """
+    # P1b A2-3: write-mode gate (최상단, Redis I/O·stats 전). halt/atomic → SET 차단(BLOCKED),
+    # legacy → 기존 흐름 한 글자도 안 바뀜. atomic은 A3 전 fail-closed(legacy fallback 금지).
+    from app import atomic_write_runtime
+    from app.atomic_write_control import WriterMode
+    enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced != WriterMode.LEGACY:
+        _record_write_mode_block(f"usdt:{source}:{asset}", enforced)
+        return UsdtLatestWriteOutcome.BLOCKED
+
     # 모듈 내부 import — 순환 참조 회피 (usdt_redis_stats가 latest_rates_cache 의존 안 함)
     from app import usdt_redis_stats
 
@@ -652,6 +678,15 @@ def set_latest_krx_rate_from_sync_job_tick_level(
         - async circuit_breaker 호출 X
         - usdt_redis_stats 호출 X (KRX 전용, telemetry 분리)
     """
+    # P1b A2-3: write-mode gate (최상단, Redis I/O 전). halt/atomic → SET 차단(BLOCKED),
+    # legacy → 기존 흐름 불변. atomic은 A3 전 fail-closed(legacy fallback 금지).
+    from app import atomic_write_runtime
+    from app.atomic_write_control import WriterMode
+    enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced != WriterMode.LEGACY:
+        _record_write_mode_block(f"krx:{asset}", enforced)
+        return KrxLatestWriteOutcome.BLOCKED
+
     client = _get_sync_client()
     if client is None:
         return KrxLatestWriteOutcome.FAILED

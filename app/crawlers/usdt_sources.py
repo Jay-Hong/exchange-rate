@@ -453,6 +453,10 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
             extra={"source": source, "asset": asset, "rate": latest["rate"]},
         )
         return False
+    # P1b A2-3: BLOCKED(write-mode halt/atomic) → SET 안 됨. success(True)로 오인 금지
+    # (SKIPPED coalesce와 달리 Redis latest 미갱신). 의도된 차단이라 warning 없이 False.
+    if outcome is latest_rates_cache.UsdtLatestWriteOutcome.BLOCKED:
+        return False
     return True
 
 

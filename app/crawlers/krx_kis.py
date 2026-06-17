@@ -1766,6 +1766,15 @@ class KrxDbWriter:
             # spec, tick-level trigger는 Stage E 영역).
             if config.KRX_REDIS_TICK_WRITE_ENABLED:
                 return False
+            # P1b A2-3: flag=false(Stage E rollback) routine Redis(write_after_db_insert→
+            # set_latest_krx 571)도 write-mode gate. halt/atomic → Redis SET 차단(DB insert는
+            # 이미 됨 — benign partial, read-path DB-fallback). flag=true tick-level(624)이
+            # 이미 갖는 Redis-side gating과 동일 일관성. close/REST(571 직접, 2308/2880)는
+            # write_after_db_insert 경유 안 하므로 무영향. usdt/krx DB-side full halt는 C6.
+            from app import atomic_write_runtime
+            from app.atomic_write_control import WriterMode
+            if atomic_write_runtime.snapshot().enforced_action != WriterMode.LEGACY:
+                return False
             # ADR-031: DB insert 성공 시점에 Redis direct write (KrxRedisLatestWriter 위임).
             return KrxRedisLatestWriter.write_after_db_insert(db, source, asset)
 
