@@ -19,6 +19,20 @@ jobs:
   pytest:
     runs-on: ubuntu-latest
     timeout-minutes: 10  # hang 시 기본 6h timeout 방지 (무료 한도 보호)
+    # 실 Redis service — P1b A3-2 atomic Lua(EVAL/cjson/raw-CAS) env-gated 테스트가 CI에서
+    #   authoritative 실행되도록. **host 포트 6390에 매핑**(컨테이너 6379) — app Redis 기본
+    #   REDIS_URL(localhost:6379/0)은 6390 service에 안 닿아 비어 있음 → 기존 테스트 영향 0
+    #   구조적 보장(codex 검토). REDIS_TEST_URL(아래)만 6390 사용. health-check로 준비 보장.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6390:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -32,4 +46,9 @@ jobs:
       - run: pip install -r requirements.lock.txt -r requirements-test.txt
       # secret 불요: conftest가 firebase stub + DATABASE_URL→sqlite tempfile 격리,
       #   config는 getenv-default라 .env 없이 동작 (2026-06-11 .env 숨김 실측 2097 passed).
+      # REDIS_TEST_URL: A3-2 atomic Lua 테스트 전용 (service 6390, db 15) — 명시 설정이므로
+      #   연결 실패 시 skip 아니라 fail(test setUp). 다른 테스트는 conftest 격리 + app Redis(6379)
+      #   미가동 유지.
       - run: python -m pytest tests/ -q
+        env:
+          REDIS_TEST_URL: redis://localhost:6390/15
