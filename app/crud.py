@@ -14,6 +14,7 @@ from sqlalchemy.sql import func, and_
 # 로컬 애플리케이션
 from app import models
 from app import atomic_write_runtime  # P1b A2-2: write-mode gate (snapshot read, module import for patchability)
+from app import atomic_revision  # P1b A2-4: revision primitives (stdlib-only, dormant)
 from app.atomic_write_control import WriterMode  # P1b A2-2: enforced_action 비교
 
 # 로거 설정
@@ -182,6 +183,27 @@ class ChangedRate:
     asset: str
     rate: float
     changed_at: datetime
+
+
+@dataclass(frozen=True)
+class StagedRateChange:
+    """P1b A2-4 — staging-only transient: ChangedRate(frozen sink DTO) + ORM row ref (§16).
+
+    direct write revision은 flush 후 row.id에서 확보(추가 SELECT 없음). frozen sink DTO를
+    SQLAlchemy lifecycle에 결합하지 않기 위해 ORM ref는 별도 transient에 보관 — commit 후
+    downstream에는 plain value(revision)만 전달, ORM 객체 미유출 (§16 ownership).
+
+    **dormant**: 본 타입을 생성/소비하는 건 A3 orchestrator 재구성(flush-ID flow). A2-4는
+    타입 정의만 — 기존 `_stage_*`/`insert_*` live path는 무변경(behavior-change-0).
+    """
+
+    change: ChangedRate
+    row: atomic_revision.RevisionRow
+
+    @property
+    def revision(self) -> atomic_revision.Revision:
+        """flush 후 호출 — `(canonical_epoch_us(row.timestamp), row.id)`. selector와 공유 구성."""
+        return atomic_revision.revision_from_row(self.row)
 
 
 def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -> List[ChangedRate]:
@@ -599,6 +621,80 @@ def select_latest_bank_rates_from_db(db: Session, pair: str) -> List[Dict[str, A
             "rate": record.rate,
             "timestamp": to_kst_isoformat(record.timestamp)
         }
+        for record in records
+    ]
+
+
+# ---------------------------------------------------------------------------
+# P1b A2-4 — internal revision-aware selector (§16, dormant, caller 0)
+#
+# mirror/bootstrap source가 direct write(flush-row-ref)와 **같은 revision**을 산출하도록
+# 하는 내부 selector. 공개 selector(select_a_latest_investing_rate_from_db /
+# select_latest_bank_rates_from_db)는 **무변경** — dict shape에 id/revision 미노출 유지.
+# 반환은 ORM row가 아니라 RevisionedRate(plain DTO, raw timestamp + revision).
+# wiring(mirror/bootstrap 호출)은 C6 — A2-4는 정의만, behavior-change-0.
+# ---------------------------------------------------------------------------
+
+
+def _select_latest_investing_rate_with_revision(
+    db: Session, pair: str
+) -> Optional[atomic_revision.RevisionedRate]:
+    """투자 최신 1건 → RevisionedRate (공개 select_a_latest_investing_rate_from_db의 revision 변형).
+
+    tie-break(`timestamp DESC, id DESC`)은 공개 selector와 동일 — 같은 row 선택 보장.
+    """
+    record = (
+        db.query(models.InvestingExchangeRate)
+        .filter(models.InvestingExchangeRate.currency == pair)
+        .order_by(models.InvestingExchangeRate.timestamp.desc(), models.InvestingExchangeRate.id.desc())
+        .first()
+    )
+    if record is None:
+        return None
+    return atomic_revision.RevisionedRate(
+        source="investing",
+        asset=record.currency,
+        rate=record.rate,
+        timestamp=record.timestamp,
+        revision=atomic_revision.revision_from_row(record),
+    )
+
+
+def _select_latest_bank_rates_with_revision(
+    db: Session, pair: str
+) -> List[atomic_revision.RevisionedRate]:
+    """은행별 최신 1건 → RevisionedRate 리스트 (공개 select_latest_bank_rates_from_db의 revision 변형).
+
+    window function(`partition_by=bank, order_by=timestamp DESC, id DESC` → rn=1)은 공개
+    selector와 동일 — 각 은행 같은 row 선택 보장. 표시순 정렬은 mirror/bootstrap 비관여라 생략.
+    """
+    ranked = (
+        db.query(
+            models.BankExchangeRate.id,
+            func.row_number().over(
+                partition_by=models.BankExchangeRate.bank,
+                order_by=[
+                    models.BankExchangeRate.timestamp.desc(),
+                    models.BankExchangeRate.id.desc(),
+                ],
+            ).label("rn"),
+        )
+        .filter(models.BankExchangeRate.currency == pair)
+        .subquery()
+    )
+    records = (
+        db.query(models.BankExchangeRate)
+        .join(ranked, and_(models.BankExchangeRate.id == ranked.c.id, ranked.c.rn == 1))
+        .all()
+    )
+    return [
+        atomic_revision.RevisionedRate(
+            source=record.bank,
+            asset=record.currency,
+            rate=record.rate,
+            timestamp=record.timestamp,
+            revision=atomic_revision.revision_from_row(record),
+        )
         for record in records
     ]
 
