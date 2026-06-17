@@ -1427,6 +1427,20 @@ def start_scheduler():
             misfire_grace_time=LATEST_MIRROR_INTERVAL_SECONDS,
         )
 
+    # P1b A2-2: write-mode cache — startup 1회 refresh + poll(N초). atomic_write_control row를
+    # 읽어 atomic_write_runtime cache 갱신 (외부/admin/C6 control 변경 backstop). no-throw.
+    # control table 없으면 read-fail→legacy (cache _INITIAL 유지) → writer legacy = behavior-change-0.
+    from app.atomic_write_refresh import refresh_write_mode_cache  # 함수 내부 import (mirror 패턴)
+    refresh_write_mode_cache()  # startup 1회 — writer가 stale _INITIAL 대신 현재 mode를 보게
+    scheduler.add_job(
+        refresh_write_mode_cache,
+        IntervalTrigger(seconds=config.ATOMIC_MODE_POLL_INTERVAL_SECONDS, timezone=KST),
+        id="atomic_write_mode_poll",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=config.ATOMIC_MODE_POLL_INTERVAL_SECONDS,
+    )
+
     # PR6c-2d-1: KRX active contract reconcile (5/18 임시 안전모드).
     # 5분마다 master resolve → 현재 client contract 비교 → 다르면 rollover.
     # config.KRX_FUTURES_ENABLED=false 시 함수 내부에서 즉시 return.

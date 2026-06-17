@@ -13,6 +13,8 @@ from sqlalchemy.sql import func, and_
 
 # 로컬 애플리케이션
 from app import models
+from app import atomic_write_runtime  # P1b A2-2: write-mode gate (snapshot read, module import for patchability)
+from app.atomic_write_control import WriterMode  # P1b A2-2: enforced_action 비교
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.db")
@@ -321,6 +323,19 @@ def _emit_topic_triggers(succeeded: List[dict]) -> None:
     topic_trigger_bridge.schedule_on_loop(_run_topic_emission, succeeded, mode)
 
 
+# P1b A2-2: write-mode skip 관측 (process-local **approximate** counter, debug용). enforced가
+# halt/atomic이면 writer가 staging 전 skip → 여기 누적. 동시 crawler thread의 read-modify-write
+# race로 일부 증가가 유실될 수 있음(no-lock — debug 관측이라 정확 카운트 불요). A2엔 0(legacy만).
+_write_mode_skip_counts: Dict[Tuple[str, str], int] = {}
+
+
+def _record_write_mode_skip(source: str, enforced: str) -> None:
+    """write-mode가 legacy 아님(halt/atomic)이라 writer가 skip한 것 기록 (approximate counter + debug log)."""
+    key = (source, enforced)
+    _write_mode_skip_counts[key] = _write_mode_skip_counts.get(key, 0) + 1
+    logger.debug("write-mode skip (staging 전 차단)", extra={"source": source, "enforced": enforced})
+
+
 def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
     """은행 환율 DB 저장 + Redis direct write + 알림 조건 체크.
 
@@ -332,6 +347,15 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
         변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
     """
     logger.info(f"|                {bank_name} 환율                 |", extra={"bank": bank_name})
+
+    # P1b A2-2: write-mode gate (snapshot 1-read, no-throw). banner 직후·staging 전 — halt/atomic은
+    # db.add() 전 return이라 rollback 불요. legacy면 아래 기존 흐름 한 글자도 안 바뀜.
+    enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced != WriterMode.LEGACY:
+        # halt = 의도적 차단 / atomic = A3 구현 전 fail-closed(legacy fallback 금지). 둘 다 write 0.
+        _record_write_mode_skip(bank_name, enforced)
+        return 0
+
     changes = _stage_bank_rate_changes(db, current_rates, bank_name)
     new_records_count = len(changes)
 
@@ -451,6 +475,13 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
         변경된 레코드 개수 (0: 변경 없음, N: N개 변경됨)
     """
     logger.info("|                Investing 환율                 |", extra={"bank": "investing"})
+
+    # P1b A2-2: write-mode gate (bank과 동일). banner 직후·staging 전.
+    enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced != WriterMode.LEGACY:
+        _record_write_mode_skip("investing", enforced)
+        return 0
+
     changes = _stage_investing_rate_changes(db, current_rates)
     new_records_count = len(changes)
 

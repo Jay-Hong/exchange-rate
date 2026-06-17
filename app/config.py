@@ -44,6 +44,16 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
 
+# ATOMIC_MODE_POLL_INTERVAL_SECONDS: P1b A2-2 write-mode cache poll 주기 (초).
+# scheduler가 N초마다 atomic_write_control row를 읽어 atomic_write_runtime cache를 갱신
+# (외부/admin/C6의 control 변경을 따라잡는 backstop). 0 이하면 IntervalTrigger 미정의.
+ATOMIC_MODE_POLL_INTERVAL_SECONDS = int(os.getenv("ATOMIC_MODE_POLL_INTERVAL_SECONDS", "10"))
+if ATOMIC_MODE_POLL_INTERVAL_SECONDS < 1:
+    raise ValueError(
+        f"ATOMIC_MODE_POLL_INTERVAL_SECONDS must be >= 1 "
+        f"(got {ATOMIC_MODE_POLL_INTERVAL_SECONDS}). 0 이하이면 poll 주기 오설정."
+    )
+
 # source_hourly_rates retention (ADR-035 D3 Step 1).
 # v2 1w graph reads 7 days, but the canonical hourly table keeps a buffer for
 # deploy delay, weekend/session boundaries, and short operational interruptions.

@@ -199,15 +199,15 @@ class TestImportSideEffectFree(unittest.TestCase):
                 f"atomic_write_runtime.py에 '{forbidden}' 존재 — import-time side effect 위험 (A2-1 dormant 위반)",
             )
 
-    def test_writers_do_not_import_runtime_yet(self):
-        # A2-1: writer 미연결. writer/broadcast 모듈이 atomic_write_runtime을 아직 호출 안 함.
+    def test_usdt_krx_writer_not_connected_yet(self):
+        # A2-2: bank/investing(crud.py)·scheduler(poll)는 연결됨. latest_rates_cache(usdt/krx writer)는
+        # A2-3까지 atomic_write_runtime 미연결 (단계적 dormancy 해제 경계).
         app_dir = pathlib.Path(__file__).resolve().parent.parent / "app"
-        offenders = []
-        for name in ("crud.py", "latest_rates_cache.py", "scheduler.py"):
-            text = (app_dir / name).read_text(encoding="utf-8")
-            if "atomic_write_runtime" in text:
-                offenders.append(name)
-        self.assertEqual(offenders, [], f"A2-1 dormant 위반 — writer가 atomic_write_runtime 연결: {offenders}")
+        text = (app_dir / "latest_rates_cache.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "atomic_write_runtime", text,
+            "A2-3 전인데 latest_rates_cache가 atomic_write_runtime 연결됨 (usdt/krx는 A2-3)",
+        )
 
 
 if __name__ == "__main__":

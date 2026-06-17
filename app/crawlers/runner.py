@@ -58,6 +58,12 @@ def main():
 
     bank_name = sys.argv[1]
 
+    # P1b A2-2: subprocess는 별 프로세스라 main process의 write-mode cache poll을 공유하지 않음
+    # → 진입 시 1회 refresh로 control row를 읽어 cache 세팅 (no-throw). bank 크롤러가 이 subprocess
+    # 안에서 insert_bank_rates_into_db를 호출하므로 필요. A2(pre-activation)엔 legacy → 동작 동일.
+    from app.atomic_write_refresh import refresh_write_mode_cache
+    refresh_write_mode_cache()
+
     # 크롤러 함수 가져오기
     crawler_func = CRAWLER_MAP.get(bank_name)
     if not crawler_func:
