@@ -505,7 +505,11 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
 
     def test_apply_prod_hard_fail(self):
-        p = self._run(["--apply"], env_extra={"DATABASE_URL": "postgresql://u:p@prod-host/db"})
+        # 드라이버는 프로젝트 실제 드라이버 psycopg(v3) 명시 — bare `postgresql://`는 SQLAlchemy 기본
+        # psycopg2를 create_engine 시점에 import하는데 lock엔 psycopg2 부재(psycopg v3만) → CI clean
+        # 설치에서 ModuleNotFoundError로 subprocess가 [BLOCKED] 전에 크래시(로컬은 psycopg2 leak로 가려짐).
+        # dialect.name은 "postgresql" 동일이라 check_apply_safety의 non-sqlite 차단 의도 보존.
+        p = self._run(["--apply"], env_extra={"DATABASE_URL": "postgresql+psycopg://u:p@prod-host/db"})
         self.assertEqual(p.returncode, 1)
         self.assertIn("BLOCKED", p.stdout)
 
