@@ -270,6 +270,7 @@ class TestRealRedisLua(unittest.TestCase):
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
     "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
+    "atomic_build.py",  # B2a dormant — uniform dormant skip set
 })
 
 

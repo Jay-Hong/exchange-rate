@@ -216,6 +216,7 @@ class TestModuleStdlibOnly(unittest.TestCase):
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
     "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
+    "atomic_build.py",  # B2a dormant (non-island이나 docstring이 dormant siblings 언급 — live-scan skip)
 })
 
 
