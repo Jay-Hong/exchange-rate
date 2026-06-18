@@ -105,6 +105,10 @@ def serialize_v2_value(
         revision: `(canonical_epoch_us, id)` — internal revision_key 생성용 (payload에 raw id 미노출)
         source/asset: debug optional (internal)
     """
+    # mirrored_at은 tz-aware여야 — naive면 old reader의 deserialize_value(naive mirrored_at → None)가
+    # v2를 못 읽음 (A3-3 review L2, fail-closed Crash Early).
+    if mirrored_at.tzinfo is None or mirrored_at.tzinfo.utcoffset(mirrored_at) is None:
+        raise ValueError(f"serialize_v2_value: mirrored_at must be tz-aware — got {mirrored_at!r}")
     payload = {
         # public — v1 serialize_value와 동일 키/의미 (소비자 계약 불변)
         "rate": rate,

@@ -151,6 +151,16 @@ class TestSerializeV2Value(unittest.TestCase):
         self.assertNotIn("id", v)
         self.assertNotIn("revision", v)
 
+    def test_naive_mirrored_at_raises(self):
+        # A3-3 review L2: naive mirrored_at → old reader deserialize 실패 → fail-closed
+        from datetime import datetime as _dt
+        with self.assertRaises(ValueError):
+            avs.serialize_v2_value(
+                rate=1300.5, timestamp="2026-06-17T10:00:00+09:00",
+                mirrored_at=_dt(2026, 6, 17, 1, 0, 0),  # naive
+                revision=(to_canonical_epoch_us(datetime(2026, 6, 17, 1, 0, 0, tzinfo=timezone.utc)), 42),
+            )
+
     def test_source_asset_optional(self):
         v_without = self._value()
         self.assertNotIn("source", v_without)
