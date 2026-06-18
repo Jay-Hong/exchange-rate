@@ -354,7 +354,7 @@ services:
 - FXi-EC2-CPU-High (CPUUtilization > 80)
 - FXi-EC2-CPU-Credit-Low (CPUCreditBalance < 50)
 - FXi-RDS-CPU-High (CPUUtilization > 80)
-- FXi-RDS-Memory-Low (FreeableMemory < 100MB)
+- FXi-RDS-Memory-Low (FreeableMemory < 50MB, 3/3 데이터포인트 = 15분 평가 창)
 - FXi-RDS-Storage-Low (FreeStorageSpace < 2GB)
 
 > 로그 기반 알람(에러/크롤러 실패)은 CloudWatch Logs 통합 후 설정 필요
@@ -384,7 +384,7 @@ services:
 
 - db.t4g.micro (2 vCPU, 1GB RAM, ARM64)
 - 20GB SSD 스토리지
-- 12개월 프리티어
+- 12개월 프리티어 (만료 2026-06-27 — welcome email 기준 계정 생성 2025-06-27 + 12개월)
 
 #### 6.2 (참고) SQLite → PostgreSQL 마이그레이션 스크립트
 
@@ -824,7 +824,7 @@ async def get_latest_rates(db: Session):
 |------|------|------|
 | EC2 t3.small | $15/월 | 온디맨드 |
 | EBS 30GB | ~$0 | 프리티어 12개월 한정 |
-| RDS db.t4g.micro | $0 | 프리티어 12개월 |
+| RDS db.t4g.micro | $0 | 프리티어 12개월 (만료 2026-06-27) |
 | S3 백업 (5GB) | 무료 | 프리티어 12개월 한정 |
 | CloudWatch Logs (5GB) | 무료 | 프리티어 영구 |
 | 도메인 (Cloudflare) | $0.83/월 | $10/년 |

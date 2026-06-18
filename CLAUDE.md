@@ -594,7 +594,7 @@ AWS Cloud (서울 리전)
 
 - **인스턴스**: db.t4g.micro (2 vCPU, 1GB RAM, ARM64)
 - **스토리지**: 20GB SSD (gp2)
-- **기간**: 12개월 무료 (AWS 첫 가입 후)
+- **기간**: 12개월 무료 — 프리티어 만료 2026-06-27 (welcome email 기준 계정 생성 2025-06-27 + 12개월; AWS Billing 콘솔에서 최종 확인 가능)
 - **네트워크**: 같은 VPC 내 통신 (지연 1-3ms, 비용 $0)
 - **12개월 후 비용**: ~$15/월
 
@@ -605,11 +605,11 @@ AWS Cloud (서울 리전)
 | FXi-EC2-CPU-High | CPUUtilization > 80% | EC2 CPU 과부하 |
 | FXi-EC2-CPU-Credit-Low | CPUCreditBalance < 50 | EC2 버스트 크레딧 부족 |
 | FXi-RDS-CPU-High | CPUUtilization > 80% | RDS CPU 과부하 |
-| FXi-RDS-Memory-Low | FreeableMemory < 100MB | RDS 메모리 부족 |
+| FXi-RDS-Memory-Low | FreeableMemory < 50MB (3/3 데이터포인트, period 5분 → 15분 평가 창) | RDS 메모리 부족 |
 | FXi-RDS-Storage-Low | FreeStorageSpace < 2GB | RDS 스토리지 부족 |
 
 - **SNS 주제**: `fxi-alerts` (이메일 알림)
-- **평가 기간**: 5분 내 1개 데이터 포인트
+- **평가 기간**: 기본 5분 내 1개 데이터 포인트. 단 **FXi-RDS-Memory-Low**는 3/3 데이터포인트(period 5분 × 3 = 15분 평가 창). 배경: SNS 이메일 무료 한도(1000건/월)가 89%(892/1000, 2026-06-13)에 도달한 뒤, 직전 80MB 임계값이 관찰된 RDS 여유메모리 대역(~64–88MB) 안이라 flapping(상시 OK↔ALARM 전이)으로 SNS 이메일을 추가 소모 → 50MB(대역 아래)+3/3로 재조정. ⚠️ 임계값을 대역 안(예: 80MB)으로 다시 올리면 flapping 재발, 100MB↑로 올리면 (관찰 대역이 모두 그 아래라) 상시 ALARM — 둘 다 회피
 
 ### 비용 예상
 
