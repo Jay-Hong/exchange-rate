@@ -164,7 +164,7 @@ class TestDormancy(unittest.TestCase):
     _DORMANT_MODULES = frozenset({
         "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
         "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py", "atomic_build.py",
-        "atomic_reconcile.py", "atomic_coordinator.py",
+        "atomic_reconcile.py", "atomic_coordinator.py", "atomic_retry.py",
     })
     _CALL_NEEDLES = ("build_fx_result",)
 

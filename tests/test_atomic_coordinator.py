@@ -154,7 +154,7 @@ class TestDormancy(unittest.TestCase):
     _DORMANT_MODULES = frozenset({
         "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
         "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
-        "atomic_build.py", "atomic_reconcile.py", "atomic_coordinator.py",
+        "atomic_build.py", "atomic_reconcile.py", "atomic_coordinator.py", "atomic_retry.py",
     })
     _CALL_NEEDLES = ("materialize_watermark", "write_action_for_relation")
 
@@ -717,9 +717,13 @@ def _is_type_checking_if(node):
 
 
 def _walk_skip_type_checking(node):
-    """TYPE_CHECKING if 본문은 건너뛰며 노드 yield (import은 TYPE_CHECKING 안에선 허용)."""
+    """TYPE_CHECKING if **본문**만 건너뛰며 노드 yield (import은 TYPE_CHECKING body에선 허용). else: 절은
+    런타임 실행이라 검사 대상(orelse blind spot 방지)."""
     for child in ast.iter_child_nodes(node):
         if _is_type_checking_if(child):
+            for sub in child.orelse:
+                yield sub
+                yield from _walk_skip_type_checking(sub)
             continue
         yield child
         yield from _walk_skip_type_checking(child)
@@ -792,6 +796,8 @@ class TestPositiveDormancyAst(unittest.TestCase):
             "import app.topic_dispatcher\n",
             "def f():\n    publish_topic('t', {})\n",
             "async def f(c):\n    await c.send_json({})\n",
+            # TYPE_CHECKING else: 절의 런타임 live import은 잡혀야(orelse blind spot)
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    pass\nelse:\n    from app import cache\n",
         ):
             self.assertTrue(_scan_direct_live_io(planted),
                             f"planted 위반인데 detector 미검출: {planted!r}")
