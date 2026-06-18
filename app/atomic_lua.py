@@ -13,6 +13,10 @@ timestamp/rate canonical parsing은 Python(atomic_value_schema) 책임. **Lua vs
 **discriminator 순서**(plan-review Medium 7 / codex): decode 실패·비-table scalar → invalid_schema /
   schema_version 부재 table(v1-object + array) → migration_required(semantic v1 검증은 migration
   command A3-3 책임) / schema_version==2 → v2 compare / 그 외(≠2·필드누락) → invalid_schema.
+  ⚠️ array-edge 발산(둘 다 fail-closed, recovery directive만 상이): schema_version 없는 **array**를
+  Lua는 migration_required로 분류하나 migration command(atomic_migration.classify_redis_value)는
+  migratable v1 object가 아니라 invalid로 거부 — v2 write는 양쪽 다 안 일어남(안전). consumer 측
+  분류는 atomic_migration 주석 참조(거기가 semantic 검증 책임 지점).
 
 **dormant**: live writer는 본 모듈을 import/인스턴스화/호출하지 않음 (A4/C6 wiring). `register_script`는
   lazy — Script 객체 등록만, 첫 호출 전 SCRIPT LOAD 0. EVAL 예외/tri-state(NOT_APPLIED/UNKNOWN, §16)

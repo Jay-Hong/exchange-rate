@@ -34,12 +34,14 @@ def _print_report(result) -> None:
         elif r.detail:
             line += f" — {r.detail}"
         print(line)
+    # 전 action histogram — 일부만 표기하면 skipped_newer/redis_ahead/db_absent/retry_exhausted/
+    # timeout/fetch_error/exception 등 non-error action이 요약에서 비가시(holistic 검토 Low).
+    from collections import Counter
+    hist = Counter(r.action for r in result.results)
+    hist_str = " ".join(f"{a}={n}" for a, n in sorted(hist.items()))
     print(
         f"--- total={len(result.results)} wrote={result.wrote_count} "
-        f"errors={result.error_count} "
-        f"(already_current={result.count('already_current')} "
-        f"lagging_v2={result.count('lagging_v2')} conflict={result.count('conflict')} "
-        f"invalid_schema={result.count('invalid_schema')})"
+        f"errors={result.error_count} | {hist_str}"
     )
 
 

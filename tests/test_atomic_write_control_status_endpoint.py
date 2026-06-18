@@ -4,7 +4,8 @@ conftest.py harness (firebase stub + DATABASE_URL=file sqlite, collection 전 �
 lifespan(scheduler) 미진입 (TestClient context manager 미사용).
 
 검증: seeded 200 success / row 부재 200 error(row_missing) / read 예외 200 error(never-crash) /
-SessionLocal() 예외 200 error(never-crash) / writer_enforced 항상 false.
+SessionLocal() 예외 200 error(never-crash) / writer_enforced·enforced_action은 writer가 실제 gate하는
+cached snapshot 기준 파생 (legacy→false, atomic/halt→true — A2 land 후 writer가 control consume).
 """
 import unittest
 from unittest.mock import patch
@@ -94,6 +95,42 @@ class TestAtomicWriteControlStatusEndpoint(unittest.TestCase):
         self.assertEqual(body["control_read_error"]["reason"], "RuntimeError")
         self.assertFalse(body["writer_enforced"])
         self.assertEqual(body["effective_mode"], "halt")  # read 예외도 fail-closed halt
+
+    def test_writer_enforced_derives_from_snapshot_atomic(self):
+        # A2 land 후 writer는 control을 consume — snapshot enforced_action=atomic이면 writer_enforced=true
+        # + enforced_action 노출 (control row read와 독립적인 cached snapshot 기준).
+        from types import SimpleNamespace
+        from app.atomic_write_control import WriterMode
+        self._seed()
+        with patch("app.atomic_write_runtime.snapshot",
+                   return_value=SimpleNamespace(enforced_action=WriterMode.ATOMIC)):
+            r = self.client.get("/admin/api/atomic-write-control-status")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["writer_enforced"])
+        self.assertEqual(body["enforced_action"], WriterMode.ATOMIC)
+
+    def test_writer_enforced_false_when_snapshot_legacy(self):
+        # legacy snapshot → pass-through → writer_enforced=false (현 운영 상태와 동일, 회귀 잠금).
+        from types import SimpleNamespace
+        from app.atomic_write_control import WriterMode
+        self._seed()
+        with patch("app.atomic_write_runtime.snapshot",
+                   return_value=SimpleNamespace(enforced_action=WriterMode.LEGACY)):
+            r = self.client.get("/admin/api/atomic-write-control-status")
+        body = r.json()
+        self.assertFalse(body["writer_enforced"])
+        self.assertEqual(body["enforced_action"], WriterMode.LEGACY)
+
+    def test_writer_enforced_false_when_snapshot_call_fails(self):
+        # snapshot() 호출 자체가 raise해도 never-crash — enforced_action=None, writer_enforced=false.
+        self._seed()
+        with patch("app.atomic_write_runtime.snapshot", side_effect=RuntimeError("boom")):
+            r = self.client.get("/admin/api/atomic-write-control-status")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertIsNone(body["enforced_action"])
+        self.assertFalse(body["writer_enforced"])
 
     def test_never_crash_on_session_open_failure(self):
         # SessionLocal() 자체 예외도 never-crash (db open이 try 안 — finding #2 fix)

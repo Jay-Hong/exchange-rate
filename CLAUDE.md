@@ -496,7 +496,7 @@ scheduler.add_job(
 - `GET /admin/api/monitor/current` - 현재 시스템 리소스 (메모리, CPU, Chrome)
 - `GET /admin/api/monitor/history` - 시간별 리소스 히스토리 (파라미터: `hours`)
 - `GET /admin/api/bank-investing-redis-stats` - Bank/Investing direct-SET outcome telemetry (process-local 집계, reset route 없음 — item 4, PR D 계측 축)
-- `GET /admin/api/atomic-write-control-status` - P1 atomic-write control plane 상태 (PR D/P1b A1, dormant read-only 진단 — control/effective_mode/preflight/control_read_error, `writer_enforced=false`. never-crash)
+- `GET /admin/api/atomic-write-control-status` - P1 atomic-write control plane 상태 (PR D/P1b, read-only 진단 — control/effective_mode/preflight/`enforced_action`/`writer_enforced`/control_read_error, never-crash). `enforced_action`/`writer_enforced`는 writer가 실제 gate하는 cached snapshot 기준 (A2 land로 writer가 control consume — legacy면 pass-through라 `writer_enforced=false`, atomic/halt면 true)
 
 ### 계정 API (Apple App Store 5.1.1(v) 준수)
 

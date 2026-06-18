@@ -179,38 +179,48 @@ class TestModuleStdlibOnly(unittest.TestCase):
             self.assertNotIn(forbidden, src, f"atomic_value_schema에 '{forbidden}' — stdlib-only 위반")
 
 
+# dormant island — 서로 정당 교차 import하는 primitive들만 skip (atomic_lua/migration이 v2 schema 사용 등).
+# live atomic 모듈(atomic_write_control/runtime/refresh/revision = crud/scheduler/main 등이 import)은 scan
+# 대상으로 남겨 미래 회귀(live atomic이 dormant primitive import)도 잡음 (codex holistic cross-check —
+# startswith("atomic_") 광역 skip은 live atomic까지 가려 약함).
+_DORMANT_ISLAND = frozenset({
+    "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
+    "atomic_write_outcome.py", "atomic_cutover.py",
+})
+
+
 class TestDormancy(unittest.TestCase):
-    """A3-1 dormant — live writer 경로(crud/latest_rates_cache/scheduler/main)가 v2 serializer를
-    import/호출하지 않음 (behavior-change-0; 호출 시 Redis value 포맷 drift). AST 노드 검사."""
+    """A3-1 dormant — **app/ 전체** 어떤 live 모듈도 v2 serializer를 import/호출 0 (crawler live-writer +
+    live atomic 모듈 포함 — dormant island만 skip, A 시리즈 holistic 검토 + codex cross-check)."""
 
-    _LIVE_MODULES = ("crud.py", "latest_rates_cache.py", "scheduler.py", "main.py")
-
-    def test_live_modules_do_not_use_v2_schema(self):
+    def test_no_app_module_uses_v2_schema(self):
         import ast
 
         app_dir = pathlib.Path(avs.__file__).resolve().parent
-        for mod in self._LIVE_MODULES:
-            tree = ast.parse((app_dir / mod).read_text(encoding="utf-8"))
+        for py in sorted(app_dir.rglob("*.py")):
+            if py.name in _DORMANT_ISLAND:
+                continue
+            rel = py.relative_to(app_dir)
+            tree = ast.parse(py.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
-                    if node.module and "atomic_value_schema" in node.module:
-                        self.fail(f"{mod}: from atomic_value_schema import — dormant 위반")
+                    if node.module and "atomic_value_schema" in node.module.split("."):
+                        self.fail(f"{rel}: from atomic_value_schema import — dormant 위반")
                     if node.module == "app" and any(a.name == "atomic_value_schema" for a in node.names):
-                        self.fail(f"{mod}: from app import atomic_value_schema — dormant 위반")
+                        self.fail(f"{rel}: from app import atomic_value_schema — dormant 위반")
                 elif isinstance(node, ast.Import):
                     for a in node.names:
-                        if "atomic_value_schema" in a.name:
-                            self.fail(f"{mod}: import atomic_value_schema — dormant 위반")
+                        if "atomic_value_schema" in a.name.split("."):
+                            self.fail(f"{rel}: import atomic_value_schema — dormant 위반")
                 elif isinstance(node, ast.Call):
                     name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
                     if name in ("serialize_v2_value", "make_revision_key", "make_rate_key"):
-                        self.fail(f"{mod}: {name}() 호출 — dormant 위반")
+                        self.fail(f"{rel}: {name}() 호출 — dormant 위반")
                 elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    # dynamic import/getattr(importlib.import_module("app.atomic_value_schema") /
-                    # getattr(m, "serialize_v2_value")) false-negative 차단 — 문자열 리터럴도 금지
+                    # dynamic import/getattr false-negative 차단 — 문자열 리터럴도 금지
                     for needle in ("atomic_value_schema", "serialize_v2_value"):
                         if needle in node.value:
-                            self.fail(f"{mod}: 문자열 '{node.value}'에 '{needle}' — dynamic 호출 의심(dormant 위반)")
+                            self.fail(f"{rel}: 문자열 '{node.value}'에 '{needle}' — dynamic 호출 의심(dormant 위반)")
 
 
 if __name__ == "__main__":

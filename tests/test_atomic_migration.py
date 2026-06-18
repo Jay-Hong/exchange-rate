@@ -510,10 +510,6 @@ class TestCLI(unittest.TestCase):
         self.assertIn("BLOCKED", p.stdout)
 
 
-class TestDormancy(unittest.TestCase):
-    """A3-3a dormant — live writer 경로가 atomic_migration import/호출 0."""
-
-
 def _sqlite_session(rows):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     models.BankExchangeRate.__table__.create(engine)
@@ -585,30 +581,41 @@ class TestRunMigrationApplyRealRedis(unittest.TestCase):
         self.assertEqual(json.loads(self.client.get(self.key).decode())["schema_version"], 2)
 
 
+# dormant island — 서로 정당 교차 import (atomic_lua가 atomic_migration 참조 등)만 skip. live atomic
+# 모듈(atomic_write_control/runtime/refresh/revision)은 scan 대상으로 남겨 미래 회귀까지 잡음
+# (codex holistic cross-check — startswith("atomic_") 광역 skip은 live atomic까지 가려 약함).
+_DORMANT_ISLAND = frozenset({
+    "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
+    "atomic_write_outcome.py", "atomic_cutover.py",
+})
+
+
 class TestDormancy(unittest.TestCase):
-    """A3-3a dormant — live writer 경로가 atomic_migration import/호출 0."""
+    """A3-3 dormant — **app/ 전체** 어떤 live 모듈도 atomic_migration import 0 (crawler live-writer +
+    live atomic 모듈 포함 — dormant island만 skip, codex holistic cross-check)."""
 
-    _LIVE_MODULES = ("crud.py", "latest_rates_cache.py", "scheduler.py", "main.py")
-
-    def test_live_modules_do_not_import_atomic_migration(self):
+    def test_no_app_module_imports_atomic_migration(self):
         import ast
 
         app_dir = pathlib.Path(am.__file__).resolve().parent
-        for mod in self._LIVE_MODULES:
-            tree = ast.parse((app_dir / mod).read_text(encoding="utf-8"))
+        for py in sorted(app_dir.rglob("*.py")):
+            if py.name in _DORMANT_ISLAND:
+                continue
+            rel = py.relative_to(app_dir)
+            tree = ast.parse(py.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
-                    if node.module and "atomic_migration" in node.module:
-                        self.fail(f"{mod}: from atomic_migration import — dormant 위반")
+                    if node.module and "atomic_migration" in node.module.split("."):
+                        self.fail(f"{rel}: from atomic_migration import — dormant 위반")
                     if node.module == "app" and any(a.name == "atomic_migration" for a in node.names):
-                        self.fail(f"{mod}: from app import atomic_migration — dormant 위반")
+                        self.fail(f"{rel}: from app import atomic_migration — dormant 위반")
                 elif isinstance(node, ast.Import):
                     for a in node.names:
-                        if "atomic_migration" in a.name:
-                            self.fail(f"{mod}: import atomic_migration — dormant 위반")
+                        if "atomic_migration" in a.name.split("."):
+                            self.fail(f"{rel}: import atomic_migration — dormant 위반")
                 elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                     if "atomic_migration" in node.value:
-                        self.fail(f"{mod}: 문자열 '{node.value}'에 atomic_migration — dynamic 의심")
+                        self.fail(f"{rel}: 문자열 '{node.value}'에 atomic_migration — dynamic 의심")
 
 
 if __name__ == "__main__":

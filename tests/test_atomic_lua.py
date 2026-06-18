@@ -263,38 +263,49 @@ class TestRealRedisLua(unittest.TestCase):
         self.assertEqual(result.decode() if isinstance(result, bytes) else result, actual)  # 미변경
 
 
+# dormant island — 서로 정당 교차 import (atomic_migration/atomic_write_outcome이 atomic_lua import 등)만
+# skip. live atomic 모듈(atomic_write_control/runtime/refresh/revision)은 scan 대상 — generic Lua-call
+# (register_script/evalsha/script_load/.eval)은 app/ 전체에서 atomic_lua.py만 사용(grep 확인)이라 전체 적용
+# 안전 + 미래 회귀까지 잡음 (codex holistic cross-check).
+_DORMANT_ISLAND = frozenset({
+    "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
+    "atomic_write_outcome.py", "atomic_cutover.py",
+})
+
+
 class TestDormancy(unittest.TestCase):
-    """A3-2 dormant — live writer 경로가 atomic_lua를 import/호출/인스턴스화하지 않음 (behavior-change-0)."""
+    """A3-2 dormant — **app/ 전체** 어떤 live 모듈도 atomic_lua import/Lua 호출 0 (crawler live-writer +
+    live atomic 모듈 포함 — dormant island만 skip, codex holistic cross-check)."""
 
-    _LIVE_MODULES = ("crud.py", "latest_rates_cache.py", "scheduler.py", "main.py")
-
-    def test_live_modules_do_not_use_atomic_lua_or_eval(self):
+    def test_no_app_module_uses_atomic_lua_or_eval(self):
         import ast
 
         app_dir = pathlib.Path(atomic_lua.__file__).resolve().parent
-        for mod in self._LIVE_MODULES:
-            tree = ast.parse((app_dir / mod).read_text(encoding="utf-8"))
+        for py in sorted(app_dir.rglob("*.py")):
+            if py.name in _DORMANT_ISLAND:
+                continue
+            rel = py.relative_to(app_dir)
+            tree = ast.parse(py.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
-                    if node.module and "atomic_lua" in node.module:
-                        self.fail(f"{mod}: from atomic_lua import — dormant 위반")
+                    if node.module and "atomic_lua" in node.module.split("."):
+                        self.fail(f"{rel}: from atomic_lua import — dormant 위반")
                     if node.module == "app" and any(a.name == "atomic_lua" for a in node.names):
-                        self.fail(f"{mod}: from app import atomic_lua — dormant 위반")
+                        self.fail(f"{rel}: from app import atomic_lua — dormant 위반")
                 elif isinstance(node, ast.Import):
                     for a in node.names:
-                        if "atomic_lua" in a.name:
-                            self.fail(f"{mod}: import atomic_lua — dormant 위반")
+                        if "atomic_lua" in a.name.split("."):
+                            self.fail(f"{rel}: import atomic_lua — dormant 위반")
                 elif isinstance(node, ast.Call):
                     name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
                     if name in ("register_script", "evalsha", "script_load", "AtomicLatestWriter",
                                 "compare_write", "migrate_cas"):
-                        self.fail(f"{mod}: {name}() 호출 — Lua dormant 위반")
-                    # redis client .eval(...) 직접 호출도 금지
+                        self.fail(f"{rel}: {name}() 호출 — Lua dormant 위반")
                     if name == "eval" and isinstance(node.func, ast.Attribute):
-                        self.fail(f"{mod}: .eval() 호출 — Lua dormant 위반")
+                        self.fail(f"{rel}: .eval() 호출 — Lua dormant 위반")
                 elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                     if "atomic_lua" in node.value:
-                        self.fail(f"{mod}: 문자열 '{node.value}'에 atomic_lua — dynamic 호출 의심")
+                        self.fail(f"{rel}: 문자열 '{node.value}'에 atomic_lua — dynamic 호출 의심")
 
 
 if __name__ == "__main__":

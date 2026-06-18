@@ -1340,12 +1340,16 @@ async def get_atomic_write_control_status():
 
     behavior-change-0: writer/broadcast hot path를 건드리지 않는다. control table
     read 실패도 HTTP 500이 아니라 JSON control_read_error로 surface (redis-status
-    never-crash 패턴). effective_mode는 진단용으로만 노출 — A1에서는 어떤 writer도
-    이 값을 consume하지 않는다 (writer_enforced=false).
+    never-crash 패턴). effective_mode는 control row 기준 진단값.
+
+    ⚠️ A2 이후 writer는 control을 **consume**한다(cached snapshot enforced_action으로 gate).
+    `writer_enforced`/`enforced_action`은 writer가 실제 gate하는 **cached snapshot** 기준 —
+    legacy면 pass-through라 writer_enforced=false, atomic/halt면 true. (A1 docstring의
+    "writer가 consume 안 함"은 A2 land로 stale — 정정.)
 
     Returns (항상 200):
         {status, control_available, control, effective_mode, preflight,
-         writer_enforced(=false), control_read_error}
+         enforced_action, writer_enforced, control_read_error}
     """
     from app import atomic_write_control as awc
 
@@ -1381,13 +1385,23 @@ async def get_atomic_write_control_status():
         if db is not None:
             db.close()
 
+    # writer가 실제 gate하는 cached snapshot 기준 enforced_action (A2 이후). snapshot()은 no-throw,
+    # import만 never-crash 가드. legacy → pass-through(writer_enforced=false), atomic/halt → true.
+    enforced_action = None
+    try:
+        from app import atomic_write_runtime
+        enforced_action = atomic_write_runtime.snapshot().enforced_action
+    except Exception:
+        logger.error("atomic_write_runtime snapshot 조회 실패 (status endpoint)", exc_info=True)
+
     return {
         "status": "success" if control_read_error is None else "error",
         "control_available": control_read_error is None,
         "control": control,
         "effective_mode": effective_mode,
         "preflight": preflight,
-        "writer_enforced": False,  # A1: writer는 control을 consume하지 않음 (dormant)
+        "enforced_action": enforced_action,  # writer가 gate하는 cached snapshot 값
+        "writer_enforced": enforced_action is not None and enforced_action != awc.WriterMode.LEGACY,
         "control_read_error": control_read_error,
     }
 

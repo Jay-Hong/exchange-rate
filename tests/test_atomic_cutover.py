@@ -66,16 +66,25 @@ class TestPublisherGateDisposition(unittest.TestCase):
             ac.publisher_gate_disposition("atomic_ready")
 
 
+# dormant island만 skip — live atomic 모듈(atomic_write_control/runtime/refresh/revision)은 scan 대상으로
+# 남겨 미래 회귀까지 잡음 (codex holistic cross-check — startswith("atomic_") 광역 skip은 live atomic까지
+# 가려 약함). atomic_cutover는 현재 island 어느 멤버도 import 안 하지만 일관성 위해 동일 allowlist 사용.
+_DORMANT_ISLAND = frozenset({
+    "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
+    "atomic_write_outcome.py", "atomic_cutover.py",
+})
+
+
 class TestDormancy(unittest.TestCase):
-    """A5 dormant — app/ 전체 어떤 모듈도 atomic_cutover import 0 (codex: main/fx publisher/trigger 포함)."""
+    """A5 dormant — app/ 전체 어떤 live 모듈도 atomic_cutover import 0 (main/fx publisher/trigger +
+    live atomic 모듈 포함 — dormant island만 skip, codex holistic cross-check)."""
 
     def test_no_app_module_imports_atomic_cutover(self):
         import ast
 
         app_dir = pathlib.Path(ac.__file__).resolve().parent
-        self_name = pathlib.Path(ac.__file__).name
         for py in sorted(app_dir.rglob("*.py")):
-            if py.name == self_name:
+            if py.name in _DORMANT_ISLAND:
                 continue
             rel = py.relative_to(app_dir)
             tree = ast.parse(py.read_text(encoding="utf-8"))
