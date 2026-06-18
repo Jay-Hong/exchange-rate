@@ -71,7 +71,7 @@ class TestPublisherGateDisposition(unittest.TestCase):
 # 가려 약함). atomic_cutover는 현재 island 어느 멤버도 import 안 하지만 일관성 위해 동일 allowlist 사용.
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
-    "atomic_write_outcome.py", "atomic_cutover.py",
+    "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
 })
 
 

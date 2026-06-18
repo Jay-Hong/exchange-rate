@@ -63,6 +63,36 @@ class TestMakeRevisionKey(unittest.TestCase):
             avs.make_revision_key(0, 10 ** 20)
 
 
+class TestParseRevisionKey(unittest.TestCase):
+    """make_revision_key 역함수 — round-trip + fail-closed (B1/B2b watermark vector 인코딩 single-source)."""
+
+    def test_round_trip(self):
+        for epoch, rid in [(0, 0), (1_700_000_000_000_000, 42), (10 ** 20 - 1, 10 ** 20 - 1)]:
+            key = avs.make_revision_key(epoch, rid)
+            self.assertEqual(avs.parse_revision_key(key), (epoch, rid))
+            self.assertEqual(avs.make_revision_key(*avs.parse_revision_key(key)), key)
+
+    def test_non_str(self):
+        with self.assertRaises(ValueError):
+            avs.parse_revision_key(123)
+
+    def test_wrong_segment_count(self):
+        with self.assertRaises(ValueError):
+            avs.parse_revision_key("123")
+        with self.assertRaises(ValueError):
+            avs.parse_revision_key("1:2:3")
+
+    def test_not_fixed_width(self):
+        # 20자리 고정폭 아님 (lex order 보장 깨짐)
+        with self.assertRaises(ValueError):
+            avs.parse_revision_key("1:2")
+
+    def test_non_ascii_digit(self):
+        # str.isdigit True지만 ascii 아님 / 부호 / 공백 → 거부
+        with self.assertRaises(ValueError):
+            avs.parse_revision_key("-0000000000000000001:" + "0" * 20)
+
+
 class TestMakeRateKey(unittest.TestCase):
 
     def test_trailing_zero_stripped(self):
@@ -185,7 +215,7 @@ class TestModuleStdlibOnly(unittest.TestCase):
 # startswith("atomic_") 광역 skip은 live atomic까지 가려 약함).
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
-    "atomic_write_outcome.py", "atomic_cutover.py",
+    "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
 })
 
 
@@ -214,7 +244,8 @@ class TestDormancy(unittest.TestCase):
                             self.fail(f"{rel}: import atomic_value_schema — dormant 위반")
                 elif isinstance(node, ast.Call):
                     name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-                    if name in ("serialize_v2_value", "make_revision_key", "make_rate_key"):
+                    if name in ("serialize_v2_value", "make_revision_key", "make_rate_key",
+                                "parse_revision_key"):
                         self.fail(f"{rel}: {name}() 호출 — dormant 위반")
                 elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                     # dynamic import/getattr false-negative 차단 — 문자열 리터럴도 금지

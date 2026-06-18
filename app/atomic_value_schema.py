@@ -64,6 +64,34 @@ def make_revision_key_from_revision(revision: Revision) -> str:
     return make_revision_key(revision[0], revision[1])
 
 
+def parse_revision_key(key: str) -> Revision:
+    """revision_key `"{epoch:020d}:{id:020d}"` → `Revision (epoch_us, id)` (make_revision_key 역함수).
+
+    인코딩 single-source 원칙 — B1/B2b(D layer) success watermark의 present_revision_vector(string)와
+    DB Revision(tuple) 비교 시 양쪽이 동일 인코딩을 공유하도록 역변환을 여기(인코딩 소유 모듈)에 둔다.
+    **round-trip 보장**: `make_revision_key(*parse_revision_key(k)) == k` (canonical 양수·고정폭 한정).
+    **fail-closed**: 비-str / 'epoch:id' 형식 아님 / 20자리 고정폭 아님 / ascii 숫자 아님(부호·공백·unicode
+    digit 불가) / 범위 초과 → ValueError. make_revision_key가 음수/폭초과를 거부하므로 역함수도 대칭.
+    """
+    if not isinstance(key, str):
+        raise ValueError(f"parse_revision_key: str만 허용 — got {key!r}")
+    parts = key.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"parse_revision_key: 'epoch:id' 형식 아님 — got {key!r}")
+    epoch_str, id_str = parts
+    # 고정폭 20자리 + ascii digit (str.isdigit은 unicode digit도 True라 isascii 병행 — int() 새는 것 차단)
+    for part in (epoch_str, id_str):
+        if len(part) != _REVISION_KEY_WIDTH or not (part.isascii() and part.isdigit()):
+            raise ValueError(
+                f"parse_revision_key: 각 부분 {_REVISION_KEY_WIDTH}자리 ascii 숫자 고정폭 아님 — got {key!r}"
+            )
+    epoch_us = int(epoch_str)
+    row_id = int(id_str)
+    if not (0 <= epoch_us < _REVISION_KEY_MAX and 0 <= row_id < _REVISION_KEY_MAX):
+        raise ValueError(f"parse_revision_key: 범위 초과 — got {key!r}")
+    return (epoch_us, row_id)
+
+
 def make_rate_key(rate: float) -> str:
     """rate(float) → canonical decimal string (trailing-zero 제거, **exponent 금지**).
 

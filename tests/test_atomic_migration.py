@@ -590,7 +590,7 @@ class TestRunMigrationApplyRealRedis(unittest.TestCase):
 # (codex holistic cross-check — startswith("atomic_") 광역 skip은 live atomic까지 가려 약함).
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
-    "atomic_write_outcome.py", "atomic_cutover.py",
+    "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
 })
 
 

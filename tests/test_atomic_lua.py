@@ -269,7 +269,7 @@ class TestRealRedisLua(unittest.TestCase):
 # 안전 + 미래 회귀까지 잡음 (codex holistic cross-check).
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
-    "atomic_write_outcome.py", "atomic_cutover.py",
+    "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
 })
 
 
