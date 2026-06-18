@@ -117,9 +117,9 @@ class DecisionAction(enum.Enum):
 # dedup-only candidate의 placeholder (B2b-4가 실제 발급 lineage/seq/sent_at으로 교체 후에만 write).
 # ⚠️ 이 placeholder candidate를 classify_watermark_relation/serialize/Redis write에 **넣지 말 것** —
 # lineage_id/publish_sequence를 실제 의미로 보는 경로엔 부적합. watermark_content_equal dedup 전용.
-_CANDIDATE_PLACEHOLDER_LINEAGE = "__candidate__"
-_CANDIDATE_PLACEHOLDER_SEQ = 0
-_CANDIDATE_PLACEHOLDER_SENT_AT = "__candidate__"
+CANDIDATE_PLACEHOLDER_LINEAGE = "__candidate__"
+CANDIDATE_PLACEHOLDER_SEQ = 0
+CANDIDATE_PLACEHOLDER_SENT_AT = "__candidate__"
 
 
 @dataclass(frozen=True)
@@ -216,12 +216,12 @@ def decide_and_build_next(
     # ⑥ dedup-only candidate (placeholder lineage/seq/sent_at — B2b-4가 실제 발급 교체)
     candidate = Watermark(
         asset=build_result.asset,
-        lineage_id=_CANDIDATE_PLACEHOLDER_LINEAGE,
-        publish_sequence=_CANDIDATE_PLACEHOLDER_SEQ,
+        lineage_id=CANDIDATE_PLACEHOLDER_LINEAGE,
+        publish_sequence=CANDIDATE_PLACEHOLDER_SEQ,
         membership_version=build_result.membership_version,
         present_revision_vector=dict(effective_revision_vector),
         missing_sources=build_result.missing_sources,
-        sent_at=_CANDIDATE_PLACEHOLDER_SENT_AT,
+        sent_at=CANDIDATE_PLACEHOLDER_SENT_AT,
     )
     # dedup: content(vector+missing+membership) 동일하면 재발행 불필요 (§19:351). lineage/seq/sent_at 무관.
     if last_watermark is not None and watermark_content_equal(last_watermark, candidate):
