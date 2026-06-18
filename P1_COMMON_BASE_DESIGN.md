@@ -1,6 +1,7 @@
-# P1 공통 base 구현 설계 — control plane + rollout (design + A1 land)
+# P1 공통 base 구현 설계 — control plane + rollout (design + A1~A4 land)
 
-> ⚠️ **상태**: 설계 분석 + **A1 구현 land (2026-06-17), A2+ 구현 전**. 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17)·P1b/D 구현 분해(§19) 확정**. **P1 설계 + 구현 분해 전부 resolved**(§13). 잔여 = 별도 client/server 계약(subscribe-time initial snapshot).
+> ⚠️ **상태**: 설계 분석 + **A1~A4 dormant land (2026-06)**: A1 control plane / A2 writer mode-aware gate + revision plumbing / A3 v2 schema + Lua atomic primitive + migration command(runner+CLI) / A4 WriteOutcome+PendingCandidate interface — **전부 dormant, behavior-change-0, live write 미배선**. **A5(cutover/publisher gate skeleton) 진행 중**. 경계·control plane·**outcome 계약(§14)·cutover state machine(§15)·revision-ID 확보(§16)·atomic primitive Lua(§17)·P1b/D 구현 분해(§19) 확정**. **P1 설계 + 구현 분해 전부 resolved**(§13). 잔여 = 별도 client/server 계약(subscribe-time initial snapshot).
+> ⚠️ **A5 scope (codex plan-review scope 확정 + codex/Workflow reconcile)**: A5 = publisher gate primitive(**publish_state/CutoverState 기반**, pass-through/dry-run; **A2 snapshot 미사용 — writer gate와 별개**, §15 별 token-pool) + cutover state enum + allowed-transition validator(pure)만. (gate 상태 소스는 plan의 A2 writer-mode가 아니라 reconcile로 publish_state 정정 — writer ATOMIC≠publisher open, atomic/blocked는 writer atomic+publisher CLOSED.) **§15 publisher gate의 legacy hook([main.py](app/main.py) `safe_publish_all_fx_snapshots`) retrofit + durable control DB schema + 6-step CAS 전이 = C6**(activation 한 점). A5는 live `main.py` 무배선 + DB DDL 0 + B-layer(publish/watermark/coordinator) 무접촉.
 > **소유권**: PR D 복구 = D 채택([PR_D_RECOVERY_SPEC.md §12](PR_D_RECOVERY_SPEC.md)). 본 문서 = D의 **공통 base(P1)** 구현 경계·migration·control plane·rollout (비교 spec과 분리).
 > **산출**: Claude + Codex/검증-Claude 다회 검토 (2026-06-16).
 
