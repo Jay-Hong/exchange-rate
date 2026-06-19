@@ -3,7 +3,8 @@
 conftest.py가 firebase stub + DATABASE_URL=sqlite 처리. mock atomic_write_runtime.snapshot로
 enforced_action별 writer 동작 검증:
 - legacy → gate 통과(_get_sync_client 호출) / halt·atomic → BLOCKED + **Redis I/O 0**(_get_sync_client 미호출).
-- set_latest_krx(571, close finalizer/REST 공유)는 A2-3 **미gate** — halt에도 진행(close partial 방지, High fix).
+- set_latest_krx(597, close finalizer/REST/routine 공유)는 **C6-5b-2가 gate**(TestKrxDirectSetterGated) —
+  halt/atomic block + legacy 진행. (A2-3 시점엔 close partial 방지로 미gate였고 그 lock을 C6-5b-2서 의도 flip.)
 - usdt_sources polling이 BLOCKED를 success로 오인 안 함(Medium 1).
 - BLOCKED counter(approximate) 증가.
 """
@@ -75,18 +76,45 @@ class TestKrxTickGate(unittest.TestCase):
         self.assertEqual(outcome, lrc.KrxLatestWriteOutcome.BLOCKED)
 
 
-class TestKrxCloseWriterNotGated(unittest.TestCase):
-    """High fix — set_latest_krx(571, close finalizer/REST/DB-bound 공유)는 A2-3 미gate.
+class TestKrxDirectSetterGated(unittest.TestCase):
+    """C6-5b-2 — set_latest_krx_rate_from_sync_job(597, close finalizer/REST/routine 공유)에 write-mode gate.
 
-    halt에도 진행해야 close finalizer가 partial(DB unconditional INSERT 후 Redis 차단)이 되지 않음.
+    ⚠️ A2-3 시점엔 close finalizer partial 방지로 **미gate**였고 이 클래스는 그 ungated 계약(TestKrxCloseWriter
+    NotGated)을 잠갔었다. C6-5b-2가 halt/atomic을 gate(latest:source:krx freeze + §11 v2 invariant)하면서 그
+    lock을 **의도적으로 flip**(codex Q4). legacy는 불변(진행) — close finalizer DB write는 gate 밖이라
+    mode-independent. :597은 bool 계약이라 BLOCKED enum 대신 False. cascade(flag/daily-append skip)는
+    test_krx_close_window_writer F2 lock(redis_ok=False)이 이미 잠금 — 여기선 gate 자체만 검증.
     """
 
-    def test_571_ignores_write_mode_even_on_halt(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
+    def test_legacy_proceeds(self):
+        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.LEGACY)), \
              patch("app.latest_rates_cache._get_sync_client", return_value=None) as gsc:
             result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
-        gsc.assert_called_once()  # halt여도 진행 = gate 안 됨 (close finalizer 보호)
-        self.assertFalse(result)  # client None → False (write-mode와 무관)
+        gsc.assert_called_once()  # legacy → 진행 (client None → False)
+        self.assertFalse(result)
+
+    def test_halt_blocked_no_redis_io(self):
+        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
+             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError("Redis I/O!")) as gsc:
+            result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
+        gsc.assert_not_called()  # gate 최상단 — Redis I/O 0
+        self.assertFalse(result)  # bool 계약 (BLOCKED enum 없음)
+
+    def test_atomic_blocked(self):
+        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
+             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
+            result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
+        self.assertFalse(result)  # A3 전 fail-closed (legacy fallback 금지)
+
+    def test_block_counter_increments_neutral_label(self):
+        # neutral label "krx:direct:{asset}" (tick-level "krx:{asset}"와 구분)
+        lrc._write_mode_block_counts.clear()
+        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
+             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
+            lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
+        self.assertEqual(
+            lrc._write_mode_block_counts.get(("krx:direct:usd-krw-futures", WriterMode.HALT)), 1
+        )
 
 
 class TestBlockedCounter(unittest.TestCase):

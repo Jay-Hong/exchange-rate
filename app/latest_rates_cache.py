@@ -615,14 +615,38 @@ def set_latest_krx_rate_from_sync_job(
         timestamp: ISO 8601 KST 문자열.
 
     Returns:
-        True: Redis SET 성공.
-        False: client init 실패 / SET 예외.
+        True: Redis SET 성공 (legacy mode).
+        False: halt/atomic gate 차단 / client init 실패 / SET 예외.
 
     설계 격리:
         - sync `redis.Redis` client 재사용 (`_get_sync_client`)
         - **async circuit_breaker 호출 X**
         - **`usdt_redis_stats` 호출 X** (KRX 전용 — 텔레메트리 분리)
+
+    C6-5b-2 write-mode gate (atomic-mode 결과 — KRX는 자체 cutover까지 freeze, codex Option 3):
+        A2-3 시점엔 close finalizer partial 방지로 **미gate**였으나, C6-5b-2가 halt/atomic을 gate
+        (latest:source:krx freeze + §11 v2 invariant 보호 + 깨끗한 freeze). legacy는 불변(C6-5b-1
+        legacy 계약 lock). :597은 bool 계약이라 BLOCKED enum 대신 False 반환.
+        gate가 redis_ok=False를 만들면 공유 caller의 기존 동작이 cascade(신규 로직 아님):
+        - WS close(KrxCloseWindowWriter): DB write(insert_source_rate_unconditional)는 gate **밖**이라
+          진행(mode-independent) / `db_ok and redis_ok` 블록 미진입 → close_captured flag·tether trigger·
+          CF daily-append(source_daily_rates) skip(test_krx_close_window_writer F2 lock) → return False.
+        - REST(KrxCloseSnapshotController): redis_ok=False → return False, env-true 1 attempt(no storm).
+        - ⚠️ telemetry noise(correctness 영향 0): REST 실패 counter `sanity_aborted`가 block을 failure로
+          오분류 / WS "REST가 보정" partial-failure log가 오도(REST도 block). Option 3 documented noise.
+        - 결과: latest:source:krx + CF daily-append freeze = **recoverable canonical freshness gap**
+          (FX atomic invariant corruption 아님 — KRX는 FX invariant 밖). /api/v2/graph/tab(graph_v2)가
+          KRX source_daily_rates를 read하나 frontend client cutover 전. KRX 자체 cutover가 close
+          finalizer v2 retrofit으로 정식 해소 + backfill로 gap 복구.
     """
+    from app import atomic_write_runtime
+    from app.atomic_write_control import WriterMode
+    enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced != WriterMode.LEGACY:
+        # close/REST/routine 공유 setter — neutral label(krx:direct), tick-level "krx:{asset}"와 구분
+        _record_write_mode_block(f"krx:direct:{asset}", enforced)
+        return False
+
     client = _get_sync_client()
     if client is None:
         return False

@@ -1769,8 +1769,9 @@ class KrxDbWriter:
             # P1b A2-3: flag=false(Stage E rollback) routine Redis(write_after_db_insert→
             # set_latest_krx 571)도 write-mode gate. halt/atomic → Redis SET 차단(DB insert는
             # 이미 됨 — benign partial, read-path DB-fallback). flag=true tick-level(624)이
-            # 이미 갖는 Redis-side gating과 동일 일관성. close/REST(571 직접, 2308/2880)는
-            # write_after_db_insert 경유 안 하므로 무영향. usdt/krx DB-side full halt는 C6.
+            # 이미 갖는 Redis-side gating과 동일 일관성. close/REST(597 직접, 2317/2889)는
+            # write_after_db_insert 경유 안 해 **이 routine gate엔** 무영향이나, C6-5b-2가 :597 setter
+            # 자체를 gate해 halt/atomic서 close/REST Redis도 block(latest_rates_cache). DB-side full halt는 C6.
             from app import atomic_write_runtime
             from app.atomic_write_control import WriterMode
             if atomic_write_runtime.snapshot().enforced_action != WriterMode.LEGACY:
