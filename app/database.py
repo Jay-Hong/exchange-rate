@@ -42,7 +42,13 @@ Base = declarative_base()
 # 신규 CHECK DDL을 emit하지 않음 = A1 behavior-change-0 + migration-first 코드 보장).
 # 운영 진입점(main.py import / backfill_history.py 등)은 본 helper를 쓴다.
 # (테스트는 control table이 필요하므로 Base.metadata.create_all을 직접 사용.)
-CREATE_ALL_EXCLUDE_TABLES = frozenset({"atomic_write_control"})
+# P1b C6-1: cutover-control tables(atomic_cutover_control/atomic_cutover_asset, CHECK-bearing)도
+# 동일 — scripts/migrate_atomic_cutover.py가 운영 유일 생성 경로 (create_all 제외 = behavior-change-0).
+CREATE_ALL_EXCLUDE_TABLES = frozenset({
+    "atomic_write_control",
+    "atomic_cutover_control",
+    "atomic_cutover_asset",
+})
 
 
 def create_all_app_tables(bind) -> None:

@@ -2,7 +2,7 @@
 
 # 표준 라이브러리
 from datetime import datetime, timezone as dt_timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, func, CheckConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, Text, func, CheckConstraint
 
 # 로컬 애플리케이션
 from app.database import Base
@@ -326,4 +326,77 @@ class AtomicWriteControl(Base):
             name="ck_atomic_write_control_requested_mode",
         ),
         CheckConstraint("activation_epoch >= 0", name="ck_atomic_write_control_activation_epoch"),
+    )
+
+
+class AtomicCutoverControl(Base):
+    """P1b C6-1 — cutover/activation 제어 singleton (§15 global bootstrap + §18 lease). dormant.
+
+    A1 `AtomicWriteControl`(writer mode)와 **분리된** cutover-state table — A1 row는 live-read
+    (scheduler refresh + admin status + compute_effective_mode)라 컬럼 추가 시 migration-before-model
+    위험이 있어 무접촉. C6-1은 schema + idempotent seed만, read/CAS/transition은 C6-2+ (zero live logic).
+    monotonicity(bootstrap_generation)는 intra-row CHECK 불가(§4 line 48) → conditional-update로 C6-2 enforce.
+    `scripts/migrate_atomic_cutover.py`가 운영(non-test) 유일 생성 경로 (create_all 제외, A1 패턴).
+    """
+    __tablename__ = "atomic_cutover_control"
+
+    id = Column(Integer, primary_key=True, autoincrement=False)            # 싱글톤 (CHECK id=1)
+    cutover_row_format_version = Column(Integer, nullable=False, default=1)
+    bootstrap_session_id = Column(String, nullable=True)                   # §18 active session (None pre-bootstrap)
+    bootstrap_generation = Column(Integer, nullable=False, default=0)      # §18 generation (monotonic via conditional-update, C6-2)
+    bootstrap_status = Column(String, nullable=False, default="idle")      # §15-4 idle|running|failed|verified|completed
+    lease_owner = Column(String, nullable=True)                           # §18 migration lease holder (None when unleased)
+    lease_expiry = Column(DateTime, nullable=True)                        # lease TTL (None when unleased)
+    updated_at = Column(DateTime, nullable=False, default=get_utc_now, onupdate=get_utc_now)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_atomic_cutover_control_singleton"),
+        CheckConstraint(
+            "bootstrap_status IN ('idle', 'running', 'failed', 'verified', 'completed')",
+            name="ck_atomic_cutover_control_status",
+        ),
+        CheckConstraint("bootstrap_generation >= 0", name="ck_atomic_cutover_control_generation"),
+        CheckConstraint("cutover_row_format_version >= 1", name="ck_atomic_cutover_control_format_version"),
+        # lease는 owner+expiry 쌍 — 둘 다 NULL(unleased) 또는 둘 다 NOT NULL(leased)
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_expiry IS NULL) "
+            "OR (lease_owner IS NOT NULL AND lease_expiry IS NOT NULL)",
+            name="ck_atomic_cutover_control_lease_paired",
+        ),
+    )
+
+
+class AtomicCutoverAsset(Base):
+    """P1b C6-1 — per-asset cutover publish gate state (§15 publish_state + readiness). dormant.
+
+    publish_state=blocked(기본)/ready. ready면 ready_revision_vector(JSON Text)+membership_version 필수
+    (payload consistency CHECK — ready인데 readiness 데이터 부재 차단). seed=3 asset blocked
+    (insert-if-missing — readiness 후 migration rerun이 state 리셋 못 함). read/transition은 C6-2+.
+    """
+    __tablename__ = "atomic_cutover_asset"
+
+    asset = Column(String, primary_key=True)                              # usd-krw|jpy-krw|eur-krw (CHECK enum)
+    publish_state = Column(String, nullable=False, default="blocked")     # §15 gate: blocked|ready
+    ready_revision_vector = Column(Text, nullable=True)                   # readiness 시 effective vector JSON 직렬화 (blocked면 None)
+    membership_version = Column(Integer, nullable=True)                   # readiness 시 FX membership version (blocked면 None)
+    updated_at = Column(DateTime, nullable=False, default=get_utc_now, onupdate=get_utc_now)
+
+    __table_args__ = (
+        CheckConstraint(
+            "publish_state IN ('blocked', 'ready')", name="ck_atomic_cutover_asset_publish_state"
+        ),
+        CheckConstraint(
+            "asset IN ('usd-krw', 'jpy-krw', 'eur-krw')", name="ck_atomic_cutover_asset_asset"
+        ),
+        CheckConstraint(
+            "membership_version IS NULL OR membership_version > 0",
+            name="ck_atomic_cutover_asset_membership",
+        ),
+        # publish_state ⟺ readiness payload 일관성
+        CheckConstraint(
+            "(publish_state = 'blocked' AND ready_revision_vector IS NULL AND membership_version IS NULL) "
+            "OR (publish_state = 'ready' AND ready_revision_vector IS NOT NULL "
+            "AND ready_revision_vector <> '' AND membership_version IS NOT NULL)",
+            name="ck_atomic_cutover_asset_payload_consistency",
+        ),
     )
