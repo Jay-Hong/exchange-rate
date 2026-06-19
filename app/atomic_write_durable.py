@@ -29,6 +29,10 @@ fail-closed 설계:
 - `cas_activate_atomic`: halt→atomic (§8 one-shot). ⚠️ §15상 이 단계 = **begin-atomic = atomic/blocked
   reconciliation 구간 진입**(writer atomic live + publish gate blocked) — finalize(verified→completed +
   asset ready)가 아님. command(C6-8b)가 cas_begin_cutover와 같은 tx로 묶어 atomic/blocked를 만든다.
+
+C6-8b-1 recovery primitive:
+- `cas_request_incident_halt`: atomic→halt (§3 admin incident, line 31). begin-atomic 이후 dead-end
+  (writer atomic 고착) 복구 — activation_epoch 보존(§3 atomic·halt→legacy 금지).
 """
 from __future__ import annotations
 
@@ -101,6 +105,45 @@ def cas_request_halt(db: "Session", *, expected_generation: int) -> CasResult:
             AtomicWriteControl.control_row_format_version == CONTROL_ROW_FORMAT_VERSION,
             AtomicWriteControl.mode_generation == expected_generation,
             AtomicWriteControl.requested_mode == WriterMode.LEGACY,
+        )
+        .update(
+            {
+                "requested_mode": WriterMode.HALT,
+                "mode_generation": expected_generation + 1,
+            },
+            synchronize_session=False,
+        )
+    )
+    if result == 1:
+        return CasResult.APPLIED
+    return _disambiguate(db, expected_generation=expected_generation)
+
+
+def cas_request_incident_halt(db: "Session", *, expected_generation: int) -> CasResult:
+    """atomic→halt (§3 admin incident, line 31). cas_request_halt(legacy→halt)의 incident 짝.
+
+    fence: id=1 AND control_row_format_version=CONTROL_ROW_FORMAT_VERSION AND mode_generation=expected AND
+    requested_mode='atomic'. SET requested_mode=halt, mode_generation++ — **activation_epoch/activated_at 불변**
+    (incident halt은 활성화 이력 보존; §3은 atomic·halt→legacy만 금지하고 atomic→halt는 허용 → epoch downgrade 안 함).
+    caller-commits. DB 예외 전파.
+
+    **C6-8b-1 recovery primitive**: begin-atomic 이후 verify/finalize 실패 시 writer가 atomic에 고착되는 dead-end
+    (cas_request_halt는 LEGACY fence라 atomic→halt 불가)를 닫는다. writer halt는 derive_cutover_state에서 cutover
+    상태를 지배(writer axis first → HALT_BLOCKED, publish closed)라 cutover row 별도 reset 없이도 즉시 안전 —
+    pre-finalize는 assets 아직 blocked이고, post-activation incident도 halt가 publish gate 닫음.
+    ⚠️ post-finalize re-cutover(asset ready→blocked + control completed reset)는 별도 unit defer(§3 atomic·halt→
+    legacy 금지라 abort_halt_to_legacy는 미도입 — compute_effective_mode의 epoch==0→legacy는 bootstrap passthrough지
+    rollback 전이 아님).
+    """
+    if not _valid_fence_int(expected_generation):
+        return CasResult.PRECONDITION_FAILED
+    result = (
+        db.query(AtomicWriteControl)
+        .filter(
+            AtomicWriteControl.id == 1,
+            AtomicWriteControl.control_row_format_version == CONTROL_ROW_FORMAT_VERSION,
+            AtomicWriteControl.mode_generation == expected_generation,
+            AtomicWriteControl.requested_mode == WriterMode.ATOMIC,
         )
         .update(
             {

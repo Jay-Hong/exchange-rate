@@ -21,7 +21,11 @@ from app.atomic_write_control import (
     WriterMode,
     read_control_row,
 )
-from app.atomic_write_durable import cas_activate_atomic, cas_request_halt
+from app.atomic_write_durable import (
+    cas_activate_atomic,
+    cas_request_halt,
+    cas_request_incident_halt,
+)
 from app.models import AtomicWriteControl
 
 
@@ -33,12 +37,12 @@ def _session():
 
 def _seed(db, *, requested_mode="legacy", mode_generation=0, activation_epoch=0,
           target_write_schema_version=1, required_writer_protocol=1,
-          control_row_format_version=CONTROL_ROW_FORMAT_VERSION):
+          control_row_format_version=CONTROL_ROW_FORMAT_VERSION, activated_at=None):
     db.add(AtomicWriteControl(
         id=1, control_row_format_version=control_row_format_version,
         target_write_schema_version=target_write_schema_version,
         required_writer_protocol=required_writer_protocol, activation_epoch=activation_epoch,
-        mode_generation=mode_generation, requested_mode=requested_mode, activated_at=None,
+        mode_generation=mode_generation, requested_mode=requested_mode, activated_at=activated_at,
     ))
     db.commit()
 
@@ -177,6 +181,74 @@ class TestCallerCommits(unittest.TestCase):
         self.assertEqual(row.requested_mode, WriterMode.ATOMIC)
         self.assertEqual(row.mode_generation, 2)            # halt +1, atomic +1
         self.assertEqual(row.activation_epoch, 1)
+
+
+class TestIncidentHalt(unittest.TestCase):
+    """C6-8b-1: cas_request_incident_halt atomic→halt (§3 incident) — activation_epoch/activated_at 보존."""
+
+    def test_atomic_to_halt_applied_preserves_epoch_and_activated_at(self):
+        from datetime import datetime
+        ts = datetime(2026, 6, 19, 0, 0, 0)
+        db = _session(); _seed(db, requested_mode="atomic", mode_generation=6, activation_epoch=1,
+                               target_write_schema_version=2, required_writer_protocol=2, activated_at=ts)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=6), CasResult.APPLIED)
+        db.commit()
+        row = read_control_row(db)
+        self.assertEqual(row.requested_mode, WriterMode.HALT)
+        self.assertEqual(row.mode_generation, 7)            # ++
+        self.assertEqual(row.activation_epoch, 1)           # 보존 (§3: epoch downgrade 안 함)
+        self.assertEqual(row.activated_at, ts)              # 보존
+        self.assertEqual(row.target_write_schema_version, 2)  # 보존
+        self.assertEqual(row.required_writer_protocol, 2)     # 보존
+
+    def test_legacy_not_atomic_precondition(self):
+        # legacy에서 incident_halt → requested_mode!=atomic → PRECONDITION_FAILED (legacy halt은 cas_request_halt)
+        db = _session(); _seed(db, requested_mode="legacy", mode_generation=4)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=4), CasResult.PRECONDITION_FAILED)
+
+    def test_already_halt_precondition(self):
+        # halt에서 재호출(idempotent) → requested_mode!=atomic → PRECONDITION_FAILED
+        db = _session(); _seed(db, requested_mode="halt", mode_generation=7, activation_epoch=1)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=7), CasResult.PRECONDITION_FAILED)
+
+    def test_wrong_generation_cas_lost(self):
+        db = _session(); _seed(db, requested_mode="atomic", mode_generation=9, activation_epoch=1)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=3), CasResult.CAS_LOST)
+
+    def test_format_mismatch_precondition(self):
+        db = _session(); _seed(db, requested_mode="atomic", mode_generation=6, activation_epoch=1,
+                               control_row_format_version=99)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=6), CasResult.PRECONDITION_FAILED)
+        self.assertEqual(read_control_row(db).requested_mode, WriterMode.ATOMIC)   # 불변
+
+    def test_invalid_fence_param(self):
+        db = _session(); _seed(db, requested_mode="atomic", mode_generation=6, activation_epoch=1)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=None), CasResult.PRECONDITION_FAILED)
+
+    def test_caller_commits_staged(self):
+        db = _session(); _seed(db, requested_mode="atomic", mode_generation=6, activation_epoch=1)
+        self.assertIs(cas_request_incident_halt(db, expected_generation=6), CasResult.APPLIED)
+        db.rollback()
+        self.assertEqual(read_control_row(db).requested_mode, WriterMode.ATOMIC)   # 원복
+
+    def test_full_recovery_sequence(self):
+        # legacy→halt→atomic→incident_halt: begin-atomic 후 dead-end 복구 경로. epoch 보존.
+        db = _session(); _seed(db, requested_mode="legacy", mode_generation=0, activation_epoch=0)
+        self.assertIs(cas_request_halt(db, expected_generation=0), CasResult.APPLIED); db.commit()
+        self.assertIs(
+            cas_activate_atomic(db, expected_generation=1, expected_epoch=0,
+                                required_writer_protocol=2, target_write_schema_version=2),
+            CasResult.APPLIED,
+        ); db.commit()
+        row = read_control_row(db)
+        self.assertEqual(row.requested_mode, WriterMode.ATOMIC)
+        self.assertEqual(row.mode_generation, 2); self.assertEqual(row.activation_epoch, 1)
+        # incident halt (atomic→halt) — 복구
+        self.assertIs(cas_request_incident_halt(db, expected_generation=2), CasResult.APPLIED); db.commit()
+        row = read_control_row(db)
+        self.assertEqual(row.requested_mode, WriterMode.HALT)
+        self.assertEqual(row.mode_generation, 3)            # halt+1, atomic+1, incident+1
+        self.assertEqual(row.activation_epoch, 1)           # 활성화 이력 보존(§3)
 
 
 class TestFormatFence(unittest.TestCase):
