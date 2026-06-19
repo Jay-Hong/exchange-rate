@@ -161,14 +161,19 @@ class TestBuildAtomicWriter(unittest.TestCase):
         self.assertIsInstance(writer, AtomicLatestWriter)
 
 
-class TestDormancy(unittest.TestCase):
-    """app/ 어떤 live 모듈도 atomic_direct_write를 import 0 (C6-5b-3b가 crud atomic 분기서 wiring할 때 sanctioned)."""
+# C6-5b-3b: crud.py가 atomic 분기(_atomic_write_changes_v2)에서 atomic_direct_write를 sanctioned import.
+# 그 외 app/ live 모듈은 여전히 import 0 (island 경계 유지 — crud만 유일 live caller).
+_SANCTIONED_IMPORTERS = frozenset({"atomic_direct_write.py", "crud.py"})
 
-    def test_no_app_module_imports_atomic_direct_write(self):
+
+class TestDormancy(unittest.TestCase):
+    """app/ live 모듈 중 atomic_direct_write를 import하는 건 crud.py(C6-5b-3b sanctioned)뿐 — 그 외 0."""
+
+    def test_only_crud_imports_atomic_direct_write(self):
         app_dir = pathlib.Path(adw.__file__).resolve().parent
         offenders = []
         for py in sorted(app_dir.rglob("*.py")):
-            if py.name == "atomic_direct_write.py":
+            if py.name in _SANCTIONED_IMPORTERS:
                 continue
             tree = ast.parse(py.read_text(encoding="utf-8"))
             for node in ast.walk(tree):

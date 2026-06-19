@@ -6,10 +6,11 @@ write_outcome_from_lua)으로 제공한다. **writer-side only** — `WriteOutco
 SET-only trigger gating용). PendingCandidate 생성 / coordinator 전달 / publish는 C6-5b-3 범위 밖
 (C6-7 / C6-FLIP, codex 합의).
 
-**dormant island**: app/ live 모듈이 본 모듈을 import 0 (no-importer trip-wire, tests/test_atomic_direct_write).
-유일 caller = C6-5b-3b/3c가 crud atomic 분기에서 wiring할 때. 본 모듈은 atomic primitive
-(atomic_lua / atomic_value_schema / atomic_write_outcome)를 import하므로 그들의 dormant island allowlist
-(_DORMANT_ISLAND)에 추가됨(sanctioned importer). "pure" 아님 — compare_write가 Redis write I/O 소유.
+**sanctioned island importer (C6-5b-3b)**: app/ live 모듈 중 본 모듈을 import하는 건 `crud.py`(bank atomic
+분기 `_atomic_write_changes_v2`)뿐 — 그 외 0 (tests/test_atomic_direct_write no-importer trip-wire, crud만
+sanctioned). **atomic 분기 자체는 C6-FLIP(must-confirm)까지 prod 미발화**(atomic mode dormant). 본 모듈은
+atomic primitive(atomic_lua / atomic_value_schema / atomic_write_outcome)를 import하므로 그들의 dormant
+island allowlist(_DORMANT_ISLAND)에 포함됨. "pure" 아님 — compare_write가 Redis write I/O 소유.
 
 **C4 (commit precedes Redis)**: 본 helper는 Redis write만 수행 — DB commit은 caller(crud atomic 분기)가
 **먼저** 한다. 어떤 outcome/예외도 DB rollback 신호가 아니며, caller가 best-effort로 격리한다(§16:261
@@ -34,7 +35,12 @@ from app.atomic_value_schema import (
     make_revision_key_from_revision,
     serialize_v2_value,
 )
-from app.atomic_write_outcome import FailureKind, WriteOutcome, write_outcome_from_lua
+from app.atomic_write_outcome import (
+    FailureKind,
+    RedisWritePerformed,
+    WriteOutcome,
+    write_outcome_from_lua,
+)
 
 _KST = ZoneInfo("Asia/Seoul")
 
@@ -108,3 +114,14 @@ def atomic_compare_write_v2(
             reason=f"after_send:{type(e).__name__}",
         )
     return write_outcome_from_lua(outcome_str, revision)
+
+
+def applied_for_trigger(outcome: WriteOutcome) -> bool:
+    """SET-only topic trigger 대상 여부 — `redis_write_performed == APPLIED`(advance/refreshed_equal)만.
+
+    ⚠️ **candidate_disposition 아님**(C7): skipped_newer는 candidate_disposition상 PUBLISH_CANDIDATE이나
+    redis_write_performed=NOT_APPLIED(SET 미수행)라 trigger 제외해야 한다 — disposition으로 gate하면
+    "Redis SET 없이 trigger 발사" 버그. caller(crud atomic 분기)가 atomic_write_outcome를 직접 import하지
+    않도록 island이 이 판정을 소유(trip-wire 경계 보존).
+    """
+    return outcome.redis_write_performed == RedisWritePerformed.APPLIED

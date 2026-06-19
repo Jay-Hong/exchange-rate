@@ -193,8 +193,9 @@ class StagedRateChange:
     SQLAlchemy lifecycle에 결합하지 않기 위해 ORM ref는 별도 transient에 보관 — commit 후
     downstream에는 plain value(revision)만 전달, ORM 객체 미유출 (§16 ownership).
 
-    **dormant**: 본 타입을 생성/소비하는 건 A3 orchestrator 재구성(flush-ID flow). A2-4는
-    타입 정의만 — 기존 `_stage_*`/`insert_*` live path는 무변경(behavior-change-0).
+    **producers (C6-5b-3b)**: `_stage_bank_rate_changes`/`_stage_investing_rate_changes`가 생성. legacy branch는
+    `.change`(ChangedRate)만 사용(관측 동작 불변), `.row`/`.revision`(flush-row-ref)은 atomic 분기
+    (`_insert_bank_rates_atomic`)만 소비 — atomic mode는 C6-FLIP(must-confirm)까지 prod 미발화(behavior-change-0).
     """
 
     change: ChangedRate
@@ -206,15 +207,15 @@ class StagedRateChange:
         return atomic_revision.revision_from_row(self.row)
 
 
-def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -> List[ChangedRate]:
-    """은행 환율 insert-if-changed staging — 변경 row를 `db.add` + ChangedRate 생성.
+def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -> List["StagedRateChange"]:
+    """은행 환율 insert-if-changed staging — 변경 row를 `db.add` + `StagedRateChange`(ChangedRate + ORM row) 생성.
 
-    ⚠️ `_stage_investing_rate_changes`와 **의도적 중복**(model/filter/로그 포맷만 차이).
-    통합은 5-source 공통화 phase에서 검토 ([§6.6.1](../USDT_TOPIC_MIGRATION_PLAN.md)) —
-    PR C 중 '친절한' 통합 금지(staging은 source 차이 집결지 + sink가 patch-target이라
-    분리 유지가 보수적, behavior-change-0).
+    C6-5b-3b: 반환을 `StagedRateChange`로 (ORM row ref 동반 — atomic 분기의 flush-row-ref revision용,
+    §16). **legacy 소비자는 `[sc.change for sc in staged]`로 ChangedRate 추출 → 관측 동작 불변**
+    (.row/.revision는 atomic 분기만 사용). ⚠️ `_stage_investing_rate_changes`와 **의도적 중복**(model/filter/
+    로그 포맷만 차이) 유지 — 통합은 5-source 공통화 phase([§6.6.1](../USDT_TOPIC_MIGRATION_PLAN.md)).
     """
-    changes: List[ChangedRate] = []
+    staged: List["StagedRateChange"] = []
     for pair, current_rate in current_rates.items():
         if current_rate is None:
             continue
@@ -239,16 +240,20 @@ def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -
 
         if should_save:
             ts = models.get_utc_now()
-            db.add(models.BankExchangeRate(
+            row = models.BankExchangeRate(
                 bank = bank_name,
                 currency = pair,
                 rate = current_rate,
                 timestamp = ts
-            ))
+            )
+            db.add(row)
             logger.debug("✅ DB에 새 레코드 저장됨")
-            changes.append(ChangedRate(source=bank_name, asset=pair, rate=current_rate, changed_at=ts))
+            staged.append(StagedRateChange(
+                change=ChangedRate(source=bank_name, asset=pair, rate=current_rate, changed_at=ts),
+                row=row,
+            ))
 
-    return changes
+    return staged
 
 
 def _changes_to_redis_updates(changes: List[ChangedRate]) -> List[dict]:
@@ -358,6 +363,112 @@ def _record_write_mode_skip(source: str, enforced: str) -> None:
     logger.debug("write-mode skip (staging 전 차단)", extra={"source": source, "enforced": enforced})
 
 
+# C6-5b-3b: atomic v2 compare_write outcome 관측 (process-local **disjoint** counter — bank_investing_redis_stats
+# 미오염, behavior-change-0). no-lock(approximate). key=(source, state, structural).
+_atomic_write_outcome_counts: Dict[Tuple[str, str, bool], int] = {}
+
+
+def _record_atomic_write_outcome(source: str, outcome) -> None:
+    """atomic v2 compare_write outcome 누적 (approximate, debug/go-no-go). key=(source, state.value, **structural**).
+
+    **structural bool로 FAILED 세분** (review MED): migration_required/invalid_schema/unsupported는 모두
+    state.value=="failed"로 collapse되므로, structural=True(§17 corruption = go-gate G3 critical)를
+    general failed(structural=False = reply-lost 등 benign retry)와 key로 구분한다. conflict는 state="conflict"라
+    이미 distinct. crud는 atomic_write_outcome를 직접 import 안 함(trip-wire 경계) — duck-typed
+    .state.value/.structural. skipped_newer는 concurrent atomic writer서 정상(경고 X).
+    ⚠️ **현재 read path 없음**(write-only) — go-gate 소비 + admin surfacing은 C6-FLIP 전 observability PR
+    (legacy v1는 /admin/api/bank-investing-redis-stats로 노출되나 atomic은 미노출, 활성화 전 보강).
+    """
+    key = (source, outcome.state.value, getattr(outcome, "structural", False))
+    _atomic_write_outcome_counts[key] = _atomic_write_outcome_counts.get(key, 0) + 1
+
+
+def _atomic_write_changes_v2(captured, redis_updates, source_label: str, *, key_kind: str) -> List[dict]:
+    """post-commit v2 compare_write loop (best-effort, **FULLY isolated**) → APPLIED subset(topic-native dicts).
+
+    codex guard: writer build 포함 어떤 예외도 caller의 alert/return을 막지 않는다(전체 try/except). DB는 이미
+    commit됨 → 어떤 outcome/예외도 rollback 신호 아님(§16:261). per-change `atomic_compare_write_v2`는 no-throw.
+    APPLIED(advance/refreshed_equal)만 SET-only trigger 대상(axis #2, C7 — `applied_for_trigger`).
+    key_kind: "bank"=latest_key_bank(source, asset) / "investing"=latest_key_investing(asset)(C6-5b-3c 재사용).
+    """
+    applied: List[dict] = []
+    try:
+        # lazy import — atomic_direct_write island(crud는 이 island만 import, primitive 직접 import 0 → trip-wire 보존)
+        from app import atomic_direct_write, latest_rates_cache
+        writer = atomic_direct_write.build_atomic_writer()
+        for (change, revision), update in zip(captured, redis_updates):
+            if key_kind == "investing":
+                key = latest_rates_cache.latest_key_investing(change.asset)
+            else:
+                key = latest_rates_cache.latest_key_bank(change.source, change.asset)
+            outcome = atomic_direct_write.atomic_compare_write_v2(
+                writer, key, rate=change.rate, timestamp=update["timestamp"], revision=revision,
+                source=change.source, asset=change.asset,
+            )
+            _record_atomic_write_outcome(change.source, outcome)
+            if atomic_direct_write.applied_for_trigger(outcome):
+                applied.append(update)
+    except Exception:
+        logger.exception(
+            "atomic v2 write loop 실패 (격리, post-commit best-effort — DB는 commit됨, rollback 아님)",
+            extra={"source": source_label},
+        )
+    return applied
+
+
+def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) -> int:
+    """은행 환율 **atomic-mode** writer (C6-5b-3b) — DB commit은 legacy 동일, Redis는 v1 SET 대신 v2 compare_write.
+
+    순서: stage → precommit payload 변환 → db.flush()(id 할당) → flush-row-ref revision capture(commit 전,
+    expire_on_commit 회피, §16:229) → db.commit() → post-commit v2 compare_write(best-effort FULLY isolated) →
+    process_rate_alerts(ALL changes, DB-authoritative axis #3) → _emit_topic_triggers(APPLIED subset, axis #2).
+    banner는 caller(insert_bank_rates_into_db)가 이미 출력. **post-commit Redis 실패/예외는 rollback·alert·
+    return을 막지 않는다**(DB 이미 commit, codex guard). atomic mode는 C6-FLIP(must-confirm)까지 prod 미발화.
+    """
+    staged = _stage_bank_rate_changes(db, current_rates, bank_name)
+    new_records_count = len(staged)
+
+    if new_records_count > 0:
+        changes = [sc.change for sc in staged]
+        redis_updates = _changes_to_redis_updates(changes)   # legacy와 동일 topic-native shape (commit 전)
+        changed_rates = _changes_to_fcm(changes)
+
+        db.flush()  # autoflush=False → id 할당 위해 명시 flush
+        # flush 후·commit 전 revision capture (expire_on_commit=True면 commit 후 attr 접근이 re-query → 회피)
+        captured = [(sc.change, sc.revision) for sc in staged]
+
+        db.commit()
+        logger.info(
+            f"🎉 총 {new_records_count}개 {bank_name}은행의 새로운 환율 데이터 저장 완료 (atomic v2)",
+            extra={"count": new_records_count, "bank": bank_name},
+        )
+
+        # post-commit Redis v2 (best-effort, FULLY isolated — 아래 alert/trigger/return 보호)
+        applied_updates = _atomic_write_changes_v2(captured, redis_updates, bank_name, key_kind="bank")
+
+        # alert는 DB-authoritative — Redis outcome 무관, 전 committed change 발화 (axis #3, legacy 동일)
+        if changed_rates:
+            try:
+                sent_count = process_rate_alerts(db, changed_rates)
+                if sent_count > 0:
+                    logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": bank_name, "sent": sent_count})
+            except Exception as e:
+                logger.exception("알림 처리 중 예외 발생", extra={"bank": bank_name, "error": str(e)})
+
+        # topic trigger — APPLIED subset만 (axis #2 SET-only gating)
+        try:
+            _emit_topic_triggers(applied_updates)
+        except Exception:
+            logger.exception("topic trigger emission 실패 (격리)", extra={"bank": bank_name})
+
+    elif current_rates:
+        logger.debug(f"✋ 모든 {bank_name}은행 환율 확인 완료 - 변경사항 없음", extra={"bank": bank_name})
+    else:
+        logger.warning(f"🈚️ {bank_name}은행 환율 데이터 없음", extra={"bank": bank_name, "source": "crud"})
+
+    return new_records_count
+
+
 def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
     """은행 환율 DB 저장 + Redis direct write + 알림 조건 체크.
 
@@ -370,18 +481,22 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
     """
     logger.info(f"|                {bank_name} 환율                 |", extra={"bank": bank_name})
 
-    # P1b A2-2: write-mode gate (snapshot 1-read, no-throw). banner 직후·staging 전 — halt/atomic은
-    # db.add() 전 return이라 rollback 불요. legacy면 아래 기존 흐름 한 글자도 안 바뀜.
+    # P1b A2-2/C6-5b-3b: write-mode gate (snapshot 1-read, no-throw). banner 직후·staging 전.
+    #   atomic → 별 분기 _insert_bank_rates_atomic (DB commit + Redis v2 compare_write).
+    #   halt(또는 미지값) → fail-closed skip (db.add() 전 return이라 rollback 불요, C2 불변).
+    #   legacy → 아래 기존 흐름 불변 (staged에서 .change 추출만 추가, 관측 동작 동일).
     enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced == WriterMode.ATOMIC:
+        return _insert_bank_rates_atomic(db, current_rates, bank_name)
     if enforced != WriterMode.LEGACY:
-        # halt = 의도적 차단 / atomic = A3 구현 전 fail-closed(legacy fallback 금지). 둘 다 write 0.
         _record_write_mode_skip(bank_name, enforced)
         return 0
 
-    changes = _stage_bank_rate_changes(db, current_rates, bank_name)
-    new_records_count = len(changes)
+    staged = _stage_bank_rate_changes(db, current_rates, bank_name)
+    new_records_count = len(staged)
 
     if new_records_count > 0:
+        changes = [sc.change for sc in staged]  # legacy: ChangedRate 추출 (관측 동작 불변)
         # sink payload 변환은 commit 전에 — 구 staging-loop 변환과 동일 failure boundary
         # (to_kst_isoformat 실패 시 commit 전 차단 → DB 미커밋 보존, behavior-change-0).
         redis_updates = _changes_to_redis_updates(changes)
@@ -443,14 +558,14 @@ def get_last_bank_rates_with_ts(db: Session, bank_name: str, pairs: List[str]) -
     return results
 
 
-def _stage_investing_rate_changes(db: Session, current_rates: dict) -> List[ChangedRate]:
-    """Investing 환율 insert-if-changed staging — 변경 row를 `db.add` + ChangedRate 생성.
+def _stage_investing_rate_changes(db: Session, current_rates: dict) -> List["StagedRateChange"]:
+    """Investing 환율 insert-if-changed staging — 변경 row를 `db.add` + `StagedRateChange`(ChangedRate + ORM row) 생성.
 
-    ⚠️ `_stage_bank_rate_changes`와 **의도적 중복**(investing은 currency-only filter +
-    `.2f` 로그 + source="investing" 고정). 통합은 5-source 공통화 phase에서 검토
-    ([§6.6.1](../USDT_TOPIC_MIGRATION_PLAN.md)) — PR C 중 '친절한' 통합 금지.
+    C6-5b-3b: 반환을 `StagedRateChange`로 (bank과 대칭, flush-row-ref revision용). **legacy 소비자는
+    `[sc.change for sc in staged]`로 ChangedRate 추출 → 관측 동작 불변**. ⚠️ `_stage_bank_rate_changes`와
+    **의도적 중복**(investing은 currency-only filter + `.2f` 로그 + source="investing" 고정) 유지.
     """
-    changes: List[ChangedRate] = []
+    staged: List["StagedRateChange"] = []
     for pair, current_rate in current_rates.items():
         if current_rate is None:
             continue
@@ -475,15 +590,19 @@ def _stage_investing_rate_changes(db: Session, current_rates: dict) -> List[Chan
 
         if should_save:
             ts = models.get_utc_now()
-            db.add(models.InvestingExchangeRate(
+            row = models.InvestingExchangeRate(
                 currency = pair,
                 rate = current_rate,
                 timestamp = ts
-            ))
+            )
+            db.add(row)
             logger.debug("✅ DB에 새 레코드 저장됨")
-            changes.append(ChangedRate(source="investing", asset=pair, rate=current_rate, changed_at=ts))
+            staged.append(StagedRateChange(
+                change=ChangedRate(source="investing", asset=pair, rate=current_rate, changed_at=ts),
+                row=row,
+            ))
 
-    return changes
+    return staged
 
 
 def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
@@ -504,10 +623,14 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
         _record_write_mode_skip("investing", enforced)
         return 0
 
-    changes = _stage_investing_rate_changes(db, current_rates)
-    new_records_count = len(changes)
+    # ⚠️ investing atomic 분기는 C6-5b-3c — 현재 atomic은 위 gate에서 fail-closed skip(bank만 3b에서 atomicize).
+    #   결과: investing atomic은 여전히 _record_write_mode_skip 증가 / bank atomic은 미증가(별 분기로 라우팅) —
+    #   skip-counter 의미가 두 source 간 transient 비대칭(3c가 investing atomicize 시 해소, telemetry-only).
+    staged = _stage_investing_rate_changes(db, current_rates)
+    new_records_count = len(staged)
 
     if new_records_count > 0:
+        changes = [sc.change for sc in staged]  # legacy: ChangedRate 추출 (관측 동작 불변)
         # sink payload 변환은 commit 전에 — 구 staging-loop 변환과 동일 failure boundary
         # (to_kst_isoformat 실패 시 commit 전 차단 → DB 미커밋 보존, behavior-change-0).
         redis_updates = _changes_to_redis_updates(changes)

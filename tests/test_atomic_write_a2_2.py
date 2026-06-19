@@ -50,13 +50,24 @@ class TestBankGate(unittest.TestCase):
         self.assertFalse(db.add.called)
         self.assertFalse(db.commit.called)
 
-    def test_atomic_skips_staging(self):
+    def test_atomic_routes_to_atomic_branch(self):
+        # C6-5b-3b: bank atomic은 더 이상 fail-closed skip 아님 — _insert_bank_rates_atomic로 라우팅
+        # (staging+commit+v2 compare_write). (A2-3 시점 test_atomic_skips_staging의 의도적 flip.)
         db = MagicMock()
         with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
-             patch("app.crud._stage_bank_rate_changes", side_effect=AssertionError("staging 호출됨")):
+             patch("app.crud._insert_bank_rates_atomic", return_value=3) as atomic_branch:
             result = crud.insert_bank_rates_into_db(db, {"usd-krw": 1300.0}, "kb")
-        self.assertEqual(result, 0)         # atomic(A3 전 fail-closed) → write 0, legacy fallback 아님
-        self.assertFalse(db.commit.called)
+        atomic_branch.assert_called_once()  # atomic → 별 분기
+        self.assertEqual(result, 3)         # 분기 결과 반환
+
+    def test_atomic_does_not_increment_skip_counter(self):
+        # atomic은 skip이 아니라 write → skip counter 미증가 (counter 의미 전환, plan open Q 해소)
+        crud._write_mode_skip_counts.clear()
+        db = MagicMock()
+        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
+             patch("app.crud._insert_bank_rates_atomic", return_value=0):
+            crud.insert_bank_rates_into_db(db, {"usd-krw": 1300.0}, "kb")
+        self.assertIsNone(crud._write_mode_skip_counts.get(("kb", WriterMode.ATOMIC)))
 
     def test_skip_counter_increments(self):
         crud._write_mode_skip_counts.clear()
