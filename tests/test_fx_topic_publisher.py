@@ -411,6 +411,30 @@ class TestGetFxTopicTelemetryTriggerFields(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snap["hook_called"], 11)
         self.assertEqual(snap["last_result"], "sent")
 
+    async def test_gate_shadow_fields_surfaced_default_and_from_hash(self):
+        """C6-9a: gate_* field surface (additive). 부재 시 counter=0/last=None, 존재 시 반영. legacy 무접촉."""
+        # 부재
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            self._mock_cache(mock_cache, {})
+            snap = (await fx_topic_publisher.get_fx_topic_telemetry())["fx:usd-krw"]
+        self.assertEqual(snap["gate_would_block_dry_run"], 0)
+        self.assertIsNone(snap["gate_last_disposition"])
+        self.assertIsNone(snap["gate_last_at_kst"])
+        # 존재 + legacy 무접촉
+        raw = {"gate_would_block_dry_run": "3", "gate_last_disposition": "would_block_dry_run",
+               "gate_last_at_kst": "2026-06-19T09:00:00+09:00", "last_result": "sent", "publish_called": "50"}
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            self._mock_cache(mock_cache, raw)
+            snap = (await fx_topic_publisher.get_fx_topic_telemetry())["fx:usd-krw"]
+        self.assertEqual(snap["gate_would_block_dry_run"], 3)
+        self.assertEqual(snap["gate_last_disposition"], "would_block_dry_run")
+        self.assertEqual(snap["last_result"], "sent")        # legacy 무접촉
+        self.assertEqual(snap["publish_called"], 50)
+
 
 # ---------------------------------------------------------------------------
 # item 2: direct↔legacy wrapper payload equality (공통 core regression lock)

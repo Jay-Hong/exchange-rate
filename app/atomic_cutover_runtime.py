@@ -82,6 +82,70 @@ def _row_generation(control: Optional[CutoverControlView], current: int) -> int:
     return current
 
 
+@dataclass(frozen=True)
+class _DeriveResult:
+    """_read_and_derive 결과 — refresh_from_db(swap) + read_cutover_snapshot_fresh(pure) 공유."""
+    writer_enforced: str
+    control: Optional[CutoverControlView]
+    cutover_state: CutoverState
+    per_asset: Tuple[Tuple[str, str], ...]
+    session_id: Optional[str]
+    status: str
+    read_ok: bool
+
+
+def _read_and_derive(db: "Session") -> _DeriveResult:
+    """DB read + derive (lock 밖, no-throw). read/compute 실패 → fail-closed(HALT_BLOCKED, read_ok=False).
+
+    control-first(torn fail-closed) + writer axis는 atomic_write_runtime.snapshot() 재사용. _current 미접촉
+    — caller(refresh_from_db는 swap, read_cutover_snapshot_fresh는 pure build)가 처리.
+    """
+    try:
+        writer_enforced = atomic_write_runtime.snapshot().enforced_action
+        control = read_cutover_control(db)
+        assets = read_cutover_assets(db)
+        cutover_state = derive_cutover_state(writer_enforced, control, assets, FX_MEMBERSHIP_VERSION)
+        per_asset = tuple(sorted((a, v.publish_state) for a, v in assets.items()))
+        return _DeriveResult(
+            writer_enforced=writer_enforced, control=control, cutover_state=cutover_state,
+            per_asset=per_asset,
+            session_id=control.session_id if control is not None else None,
+            status=control.status if control is not None else "idle",
+            read_ok=True,
+        )
+    except Exception:
+        return _DeriveResult(
+            writer_enforced=WriterMode.HALT, control=None, cutover_state=CutoverState.HALT_BLOCKED,
+            per_asset=(), session_id=None, status="idle", read_ok=False,
+        )
+
+
+def read_cutover_snapshot_fresh(db: "Session") -> CutoverReadinessSnapshot:
+    """**pure** fresh cutover snapshot — read+derive 후 즉시 build, **_current 미변경**(observability 전용,
+    C6-9 go/no-go endpoint). gate가 읽는 _current cache를 advance하지 않아 observer side-effect 0. no-throw.
+
+    refresh_from_db와 달리 monotonic gen cache 없음(one-shot raw DB gen). gen=control.generation(read_ok),
+    read 실패 시 fail-closed(HALT_BLOCKED, gate 닫음, read_ok=False).
+    """
+    r = _read_and_derive(db)
+    try:
+        if r.read_ok:
+            gate_open = publisher_gate_disposition(r.cutover_state) is PublisherGateDisposition.PASS_THROUGH
+            return CutoverReadinessSnapshot(
+                writer_enforced_action=r.writer_enforced, cutover_state=r.cutover_state,
+                bootstrap_session_id=r.session_id, bootstrap_generation=_row_generation(r.control, 0),
+                bootstrap_status=r.status, per_asset_publish_state=r.per_asset,
+                publisher_gate_open=gate_open, read_ok=True,
+            )
+    except Exception:
+        pass  # build 예외(미래 derive non-enum 등) → 아래 fail-closed (구조적 no-throw — go/no-go authority)
+    return CutoverReadinessSnapshot(   # read_ok=False or build 예외 → fail-closed
+        writer_enforced_action=WriterMode.HALT, cutover_state=CutoverState.HALT_BLOCKED,
+        bootstrap_session_id=None, bootstrap_generation=0, bootstrap_status="idle",
+        per_asset_publish_state=(), publisher_gate_open=False, read_ok=False,
+    )
+
+
 def refresh_from_db(db: "Session") -> CutoverReadinessSnapshot:
     """cutover rows + write-mode snapshot을 읽어 cutover snapshot 갱신 후 반환 (no-throw).
 
@@ -98,41 +162,23 @@ def refresh_from_db(db: "Session") -> CutoverReadinessSnapshot:
     **C6-2엔 호출자 없음**(live poll/gate 미연결). C6-runtime/C6-8 wiring이 startup/command에서 호출.
     """
     global _current
-    # ── DB read + derive (lock 밖) ── control-first(torn fail-closed, docstring 참조)
-    try:
-        writer_enforced = atomic_write_runtime.snapshot().enforced_action
-        control = read_cutover_control(db)
-        assets = read_cutover_assets(db)
-        cutover_state = derive_cutover_state(writer_enforced, control, assets, FX_MEMBERSHIP_VERSION)
-        per_asset = tuple(sorted((a, v.publish_state) for a, v in assets.items()))
-        session_id = control.session_id if control is not None else None
-        status = control.status if control is not None else "idle"
-        read_ok = True
-    except Exception:
-        writer_enforced = WriterMode.HALT
-        control = None
-        cutover_state = CutoverState.HALT_BLOCKED  # fail-closed
-        per_asset = ()
-        session_id = None
-        status = "idle"
-        read_ok = False
-
+    r = _read_and_derive(db)  # DB read + derive (lock 밖, no-throw) — control-first torn fail-closed
     # ── swap (lock 안 — gen 단조, read-fail fail-closed) ──
     try:
         with _LOCK:
             prev = _current
-            gen = _row_generation(control, prev.bootstrap_generation) if read_ok else prev.bootstrap_generation
-            if read_ok:
-                gate_open = publisher_gate_disposition(cutover_state) is PublisherGateDisposition.PASS_THROUGH
+            gen = _row_generation(r.control, prev.bootstrap_generation) if r.read_ok else prev.bootstrap_generation
+            if r.read_ok:
+                gate_open = publisher_gate_disposition(r.cutover_state) is PublisherGateDisposition.PASS_THROUGH
                 new = CutoverReadinessSnapshot(
-                    writer_enforced_action=writer_enforced, cutover_state=cutover_state,
-                    bootstrap_session_id=session_id, bootstrap_generation=gen, bootstrap_status=status,
-                    per_asset_publish_state=per_asset, publisher_gate_open=gate_open, read_ok=True,
+                    writer_enforced_action=r.writer_enforced, cutover_state=r.cutover_state,
+                    bootstrap_session_id=r.session_id, bootstrap_generation=gen, bootstrap_status=r.status,
+                    per_asset_publish_state=r.per_asset, publisher_gate_open=gate_open, read_ok=True,
                 )
             else:
                 # read 실패: fail-closed(gate 닫음, HALT_BLOCKED) + gen 보존(회귀 금지). session/status는 prev 보존.
                 new = CutoverReadinessSnapshot(
-                    writer_enforced_action=writer_enforced, cutover_state=CutoverState.HALT_BLOCKED,
+                    writer_enforced_action=r.writer_enforced, cutover_state=CutoverState.HALT_BLOCKED,
                     bootstrap_session_id=prev.bootstrap_session_id, bootstrap_generation=gen,
                     bootstrap_status=prev.bootstrap_status, per_asset_publish_state=prev.per_asset_publish_state,
                     publisher_gate_open=False, read_ok=False,

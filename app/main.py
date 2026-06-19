@@ -1406,6 +1406,18 @@ async def get_atomic_write_control_status():
     }
 
 
+@app.get("/admin/api/atomic-cutover-status", dependencies=[Depends(verify_admin)])
+async def get_atomic_cutover_status():
+    """P1b C6-9a — atomic FX cutover go/no-go 상태 (read-only 진단, behavior-change-0, dormant observability).
+
+    cutover state(pure fresh read — live gate snapshot cache 무간섭) + C6-7 dry-run gate shadow 분포 +
+    config + future 신호(available:false). atomic-write-control status는 별도 endpoint
+    (/admin/api/atomic-write-control-status)로 조회. authorized 기준 always-200(per-block degraded dict).
+    """
+    from app.atomic_cutover_status import build_cutover_status_dict
+    return await build_cutover_status_dict(SessionLocal)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # KRX Status API (PR6d-2a, ADR-027) — raw frame metric / status observability
 # ═══════════════════════════════════════════════════════════════════════════════

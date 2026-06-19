@@ -161,6 +161,9 @@ async def _record_topic_event(
 # _record_topic_event는 result가 _COUNTER_FIELDS에 없어도 last_result/last_at_kst를 무조건 overwrite
 # (line 145-146)하므로, gate 결과를 그 경로로 쓰면 legacy ordering invariant 손상 → 별도 helper 필수.
 _GATE_WOULD_BLOCK_FIELD = "gate_would_block_dry_run"
+# C6-9a: get_fx_topic_telemetry가 surface하는 gate shadow field (additive — legacy/trigger 무접촉).
+_GATE_COUNTER_FIELDS = (_GATE_WOULD_BLOCK_FIELD,)
+_GATE_LAST_FIELDS = ("gate_last_disposition", "gate_last_at_kst")
 
 
 def _read_fx_publisher_gate_disposition() -> PublisherGateDisposition:
@@ -388,6 +391,10 @@ async def get_fx_topic_telemetry() -> Dict[str, Dict[str, Any]]:
             base[f"{_TRIGGER_PREFIX}{tfield}"] = 0
         for tfield in _TRIGGER_LAST_FIELDS:
             base[f"{_TRIGGER_PREFIX}{tfield}"] = None
+        for gfield in _GATE_COUNTER_FIELDS:  # C6-9a gate shadow surface (additive)
+            base[gfield] = 0
+        for gfield in _GATE_LAST_FIELDS:
+            base[gfield] = None
 
         client = redis_cache.client
         if client is None:
@@ -446,6 +453,15 @@ async def get_fx_topic_telemetry() -> Dict[str, Dict[str, Any]]:
             pkey = f"{_TRIGGER_PREFIX}{tfield}"
             if pkey in decoded:
                 base[pkey] = decoded[pkey]
+        for gfield in _GATE_COUNTER_FIELDS:  # C6-9a gate shadow surface (additive)
+            if gfield in decoded:
+                try:
+                    base[gfield] = int(decoded[gfield])
+                except ValueError:
+                    base[gfield] = 0
+        for gfield in _GATE_LAST_FIELDS:
+            if gfield in decoded:
+                base[gfield] = decoded[gfield]
 
         out[topic] = base
 

@@ -127,6 +127,48 @@ class TestSnapshotRuntime(unittest.TestCase):
         # snapshot()은 어떤 상황에서도 예외 안 냄
         self.assertIsInstance(snapshot(), CutoverReadinessSnapshot)
 
+    def test_read_fresh_pure_no_current_mutation(self):
+        # C6-9a: read_cutover_snapshot_fresh는 fresh DB state 반환하되 _current 미변경(observer side-effect 0)
+        db = _session(); _seed(db, status="idle", generation=4)
+        before = snapshot()   # _INITIAL (read_ok=False)
+        with patch.object(atomic_write_runtime, "snapshot", return_value=_writer_snap(WriterMode.LEGACY)):
+            fresh = acr.read_cutover_snapshot_fresh(db)
+        self.assertTrue(fresh.read_ok)
+        self.assertEqual(fresh.cutover_state, CutoverState.LEGACY_READY)
+        self.assertEqual(fresh.bootstrap_generation, 4)   # raw DB gen
+        self.assertTrue(fresh.publisher_gate_open)
+        self.assertIs(snapshot(), before)   # CRITICAL: _current 미변경 (gate snapshot source 무간섭)
+
+    def test_read_fresh_fail_closed(self):
+        # DB read 실패 → HALT_BLOCKED + read_ok=False + _current 미변경
+        before = snapshot()
+        with patch.object(acr, "read_cutover_control", side_effect=RuntimeError("db down")), \
+             patch.object(atomic_write_runtime, "snapshot", return_value=_writer_snap(WriterMode.LEGACY)):
+            fresh = acr.read_cutover_snapshot_fresh(_session())
+        self.assertFalse(fresh.read_ok)
+        self.assertEqual(fresh.cutover_state, CutoverState.HALT_BLOCKED)
+        self.assertFalse(fresh.publisher_gate_open)
+        self.assertIs(snapshot(), before)
+
+    def test_read_fresh_raw_gen_non_monotonic(self):
+        # fresh는 raw DB gen 보고(refresh의 monotonic floor와 다름) — gen 낮춰도 그대로 반영
+        db = _session(); _seed(db, status="idle", generation=10)
+        with patch.object(atomic_write_runtime, "snapshot", return_value=_writer_snap(WriterMode.LEGACY)):
+            self.assertEqual(acr.read_cutover_snapshot_fresh(db).bootstrap_generation, 10)
+            db.query(AtomicCutoverControl).filter(AtomicCutoverControl.id == 1).update(
+                {"bootstrap_generation": 2})
+            db.commit()
+            self.assertEqual(acr.read_cutover_snapshot_fresh(db).bootstrap_generation, 2)  # NOT 10(monotonic 아님)
+
+    def test_read_fresh_structural_no_throw(self):
+        # build 단계 예외(미래 derive non-enum 등)도 fail-closed HALT_BLOCKED 반환(raise 안 함)
+        db = _session(); _seed(db, status="idle", generation=4)
+        with patch.object(atomic_write_runtime, "snapshot", return_value=_writer_snap(WriterMode.LEGACY)), \
+             patch.object(acr, "publisher_gate_disposition", side_effect=RuntimeError("derive bug")):
+            fresh = acr.read_cutover_snapshot_fresh(db)
+        self.assertFalse(fresh.read_ok)
+        self.assertEqual(fresh.cutover_state, CutoverState.HALT_BLOCKED)
+
 
 class TestDormancy(unittest.TestCase):
     """C6-2 dormant — app/ 어떤 live 모듈도 atomic_cutover_runtime import 0 + scheduling 0."""
@@ -137,9 +179,10 @@ class TestDormancy(unittest.TestCase):
         "atomic_coordinator.py", "atomic_retry.py", "atomic_cutover_durable.py", "atomic_cutover_runtime.py", "atomic_fx_v2_loader.py", "atomic_fx_publisher.py", "atomic_watermark_store.py", "atomic_fx_live.py",
     })
 
-    # C6-7: fx_topic_publisher가 atomic_cutover_runtime.snapshot()의 첫 **sanctioned live consumer**
-    # (publish gate shadow read, dry-run). 그 외 live 모듈은 여전히 import 0.
-    _SANCTIONED_LIVE_CONSUMERS = frozenset({"fx_topic_publisher.py"})
+    # C6-7: fx_topic_publisher가 snapshot()의 첫 sanctioned live consumer(publish gate shadow read).
+    # C6-9a: atomic_cutover_status가 read_cutover_snapshot_fresh(pure)의 sanctioned consumer(go/no-go endpoint).
+    # 그 외 live 모듈은 여전히 import 0.
+    _SANCTIONED_LIVE_CONSUMERS = frozenset({"fx_topic_publisher.py", "atomic_cutover_status.py"})
 
     def test_no_live_module_imports_runtime(self):
         app_dir = pathlib.Path(acr.__file__).resolve().parent

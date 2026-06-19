@@ -93,14 +93,16 @@ class TestDormancy(unittest.TestCase):
             rel = py.relative_to(app_dir)
             tree = ast.parse(py.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
+                # exact-tail match — substring("atomic_cutover" in module)은 sibling
+                # (atomic_cutover_runtime/durable/status)을 false-match (C6-9a main.py 적발).
                 if isinstance(node, ast.ImportFrom):
-                    if node.module and "atomic_cutover" in node.module:
+                    if node.module and node.module.split(".")[-1] == "atomic_cutover":
                         self.fail(f"{rel}: from atomic_cutover import — dormant 위반")
                     if node.module == "app" and any(a.name == "atomic_cutover" for a in node.names):
                         self.fail(f"{rel}: from app import atomic_cutover — dormant 위반")
                 elif isinstance(node, ast.Import):
                     for a in node.names:
-                        if "atomic_cutover" in a.name:
+                        if a.name.split(".")[-1] == "atomic_cutover":
                             self.fail(f"{rel}: import atomic_cutover — dormant 위반")
 
 
