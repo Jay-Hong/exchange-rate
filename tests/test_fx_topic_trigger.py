@@ -25,6 +25,21 @@ from app.fx_topic_trigger import (
 from app.fx_topic_publisher import safe_publish_fx_snapshot
 
 
+async def _poll(predicate, *, timeout=2.0, interval=0.005):
+    """coalesce flush 완료를 bounded poll로 대기 (fixed `sleep`의 full-suite load-flake 제거).
+
+    predicate()가 truthy면 즉시 반환 — flush가 부하로 느려도 timeout까지 기다려 통과. timeout이면
+    그냥 반환하고 호출자의 assert가 현재 상태로 실패 메시지를 낸다(false-fail 대신 진단 가능 실패).
+    flush는 전부 coalesce_ms 후 async task라, fixed sleep(0.05)은 부하 시 task 미완료로 flaky.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(interval)
+
+
 class TestFxTopicTriggerController(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
@@ -52,7 +67,7 @@ class TestFxTopicTriggerController(unittest.IsolatedAsyncioTestCase):
         )
         for _ in range(3):
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-        await asyncio.sleep(0.05)
+        await _poll(lambda: c.stats.flush_count_dual_shadow == 1)  # flush 완료 대기(positive co-signal)
         self.assertEqual(c.stats.flush_count_dual_shadow, 1)
         self.assertEqual(c.stats.publish_skipped_shadow, 1)
         self.assertGreaterEqual(c.stats.coalesced_trigger_count, 2)
@@ -65,7 +80,7 @@ class TestFxTopicTriggerController(unittest.IsolatedAsyncioTestCase):
         )
         for _ in range(3):
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-        await asyncio.sleep(0.05)
+        await _poll(lambda: publish.await_count >= 1)
         publish.assert_awaited_once_with("usd-krw")
         self.assertEqual(c.stats.publish_success, 1)
 
@@ -77,7 +92,7 @@ class TestFxTopicTriggerController(unittest.IsolatedAsyncioTestCase):
         )
         c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
         c.request_trigger("investing", "jpy-krw", FX_TRIGGER_REASON_INVESTING_CHANGE)
-        await asyncio.sleep(0.05)
+        await _poll(lambda: publish.await_count >= 2)  # 두 topic flush 완료 대기
         assets = sorted(call.args[0] for call in publish.await_args_list)
         self.assertEqual(assets, ["jpy-krw", "usd-krw"])
 
@@ -253,7 +268,7 @@ class TestFxTriggerTelemetryWiring(unittest.IsolatedAsyncioTestCase):
                 publish_func=AsyncMock(return_value=True),
             )
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-            await asyncio.sleep(0.02)
+            await _poll(lambda: "skipped_legacy" in [c.kwargs.get("counter") for c in fire.call_args_list])
         counters = [call.kwargs.get("counter") for call in fire.call_args_list]
         self.assertEqual(counters, ["skipped_legacy"])
 
@@ -264,7 +279,8 @@ class TestFxTriggerTelemetryWiring(unittest.IsolatedAsyncioTestCase):
                 publish_func=AsyncMock(return_value=True),
             )
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-            await asyncio.sleep(0.05)
+            _need = {"request", "flush_direct", "publish_called", "publish_success"}
+            await _poll(lambda: _need <= {c.kwargs.get("counter") for c in fire.call_args_list})
         counters = [call.kwargs.get("counter") for call in fire.call_args_list]
         for expected in ("request", "flush_direct", "publish_called", "publish_success"):
             self.assertIn(expected, counters)
@@ -276,11 +292,11 @@ class TestFxTriggerTelemetryWiring(unittest.IsolatedAsyncioTestCase):
                 publish_func=AsyncMock(return_value=False),  # zero send
             )
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-            await asyncio.sleep(0.05)
+            await _poll(lambda: "publish_zero" in [c.kwargs.get("last_result") for c in fire.call_args_list])
         last_results = [call.kwargs.get("last_result") for call in fire.call_args_list]
         counters = [call.kwargs.get("counter") for call in fire.call_args_list]
         self.assertIn("publish_zero", last_results)  # zero → last_result 갱신
-        self.assertNotIn("publish_success", counters)  # success 미발화
+        self.assertNotIn("publish_success", counters)  # success 미발화 (publish_zero 후 시점이라 결정적)
 
     async def test_dual_shadow_flush_fires_wiring_counters(self):
         with patch("app.fx_topic_trigger._fire_telemetry") as fire:
@@ -289,7 +305,8 @@ class TestFxTriggerTelemetryWiring(unittest.IsolatedAsyncioTestCase):
                 publish_func=AsyncMock(return_value=True),
             )
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-            await asyncio.sleep(0.05)
+            _need = {"flush_dual_shadow", "publish_skipped_shadow"}
+            await _poll(lambda: _need <= {c.kwargs.get("counter") for c in fire.call_args_list})
         counters = [call.kwargs.get("counter") for call in fire.call_args_list]
         self.assertIn("flush_dual_shadow", counters)
         self.assertIn("publish_skipped_shadow", counters)
@@ -302,7 +319,7 @@ class TestFxTriggerTelemetryWiring(unittest.IsolatedAsyncioTestCase):
             )
             c.request_trigger("kb", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
             c.request_trigger("hana", "usd-krw", FX_TRIGGER_REASON_BANK_CHANGE)
-            await asyncio.sleep(0.06)
+            await _poll(lambda: "coalesced" in [c.kwargs.get("counter") for c in fire.call_args_list])
         counters = [call.kwargs.get("counter") for call in fire.call_args_list]
         self.assertIn("coalesced", counters)
 
