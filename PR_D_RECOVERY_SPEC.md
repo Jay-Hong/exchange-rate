@@ -88,6 +88,8 @@
 
 ### 5.4 publisher raw outcome 계약 (enum + 부가정보)
 > 현재 bool/count 반환은 아래를 뭉침 → **richer outcome 구현 필요**. 완료/재시도 매핑은 **per-option** (여기선 분류만).
+>
+> **✅ C6-4 land (dormant, behavior-change-0, 2026-06-19)**: richer outcome building block 구현됨 (live wiring은 C6-6 pending) — `topic_dispatcher.publish_topic_detailed` → `TopicSendCounts(attempted, sent, enabled)`로 bare int=0의 `no_subscribers`/`all_send_failed`/`disabled` conflate를 분리(attempted>0 & sent==0 ⟹ all_send_failed) + island pure mapper `atomic_fx_publisher.send_counts_to_send_result`(count→`SendResult` 4-way: SENT/ALL_FAILED/NO_SUBSCRIBERS). live `publish_topic`은 byte-identical 유지(parity test 잠금, delegation은 C7). `disabled`는 `SendDisposition`에 멤버 없어 mapper가 `NO_SUBSCRIBERS`로 collapse(FX는 coordinator step② FF upstream gate라 publisher 미도달) — `enabled` flag는 primitive에 truthful 보존(telemetry). `exception`은 mapper가 생성 안 함 — raise origin 전용(coordinator `SEND_EXCEPTION` funnel).
 
 | outcome | 부가정보 | 비고 |
 |---|---|---|
@@ -98,9 +100,10 @@
 | `exception` | stage: `build` / `publish` / 기타 | — |
 
 ### 5.5 outcome 상태 전이
-- `all_send_failed` → 실패 ws **evict**([topic_dispatcher:136](app/topic_dispatcher.py#L136)) → **다음 시도 `no_subscribers`**.
-- subscriber 재등장 → 재발행 방법 정의 필요 (→ subscribe-time snapshot 연결).
-- `disabled` → 재시도 주기 + 재활성화 후 복구 방식.
+- `all_send_failed` → 실패 ws **evict**([topic_dispatcher:155](app/topic_dispatcher.py#L155)) → **다음 시도 `no_subscribers`**.
+  - **C6-4**: `publish_topic_detailed`는 이 evict 전이를 `publish_topic`과 동일하게 보존 — parity test가 return값 + eviction side-effect 둘 다 잠금(all_failed→evict→다음 호출 no_subscribers).
+- subscriber 재등장 → 재발행 방법 정의 필요 (→ subscribe-time snapshot 연결). **(C6-4 범위 밖, C6/B3 pending)**
+- `disabled` → 재시도 주기 + 재활성화 후 복구 방식. **(C6-4 범위 밖, C6/B3 pending)**
 
 ### 5.6 FX-only scope
 - `request_fx_topic_trigger`만. **tether cross-route는 PR E 별 gate** (usd-krw reconciliation에서 호출 금지 — PR D/E 혼선 방지).

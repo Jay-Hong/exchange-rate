@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Set
 
 if TYPE_CHECKING:
@@ -158,6 +159,74 @@ async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
                 exc_info=True,
             )
     return sent
+
+
+@dataclass(frozen=True)
+class TopicSendCounts:
+    """publish_topic_detailed의 rich-outcome 반환 — bare int(sent)가 뭉개는 3-way 0 분리 (C6-4, §5.4).
+
+    Fields:
+        attempted: send 시도한 구독자 수 (get_subscribers snapshot 크기). FF-off/구독자 0이면 0.
+        sent: per-client send 성공 수 (불변: sent <= attempted).
+        enabled: send 시점 ``config.TOPIC_DISPATCHER_ENABLED`` (FF). **TOPIC_DISPATCHER_ENABLED만
+            의미** — fx publish의 FX_TOPIC_ENABLED(별개 flag)와 무관. FF-off(enabled=False)와
+            구독자-0(enabled=True, attempted=0)을 구분(bare int=0은 둘 다 0이라 못 함).
+
+    bare int=0은 FF-off / no-subscribers / all-failed 셋을 conflate한다. attempted + enabled가
+    이를 분리 → C6-6 adapter가 island mapper(atomic_fx_publisher.send_counts_to_send_result)로
+    SendDisposition 4-way 분류. 이 dataclass는 dispatcher-native(SendResult/SendDisposition import
+    안 함 — live 모듈이 island 의존 갖지 않게). C6-4 dormant: live caller 0.
+    """
+    attempted: int
+    sent: int
+    enabled: bool
+
+    def __post_init__(self) -> None:
+        for name in ("attempted", "sent"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError(f"TopicSendCounts.{name}: non-negative int — got {v!r}")
+        if not isinstance(self.enabled, bool):
+            raise ValueError(f"TopicSendCounts.enabled: bool — got {self.enabled!r}")
+        if self.sent > self.attempted:
+            raise ValueError(
+                f"TopicSendCounts: sent>attempted 위반 (sent={self.sent}, attempted={self.attempted})"
+            )
+
+
+async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSendCounts:
+    """publish_topic의 additive rich-outcome sibling — TopicSendCounts 반환 (C6-4, dormant).
+
+    publish_topic(line 125)과 **동일 로직**: FF early-return / subscriber snapshot / per-client send
+    격리(remove_websocket + 동일 warning + continue). 차이는 bare int 대신 (attempted, sent, enabled)
+    반환 → NO_SUBSCRIBERS(attempted==0) vs ALL_FAILED(attempted>0, sent==0)를 분리 가능.
+
+    **behavior-change-0**: publish_topic은 byte-identical 유지 — 이 함수가 delegate target이 아님
+    (delegation은 live 본문 rewrite라 C7로 defer; parity test가 publish_topic == detailed().sent +
+    동일 eviction을 잠금). publish_topic처럼 top-level raise 없음(per-client isolated) — coordinator의
+    SEND_EXCEPTION funnel은 구조적 raise 전용. **dormant**: live caller 0 (C6-6 adapter가 첫 caller).
+    """
+    if not config.TOPIC_DISPATCHER_ENABLED:
+        return TopicSendCounts(attempted=0, sent=0, enabled=False)
+
+    subscribers = registry.get_subscribers(topic)
+    if not subscribers:
+        return TopicSendCounts(attempted=0, sent=0, enabled=True)
+
+    attempted = len(subscribers)
+    sent = 0
+    for ws in subscribers:
+        try:
+            await ws.send_json(payload)
+            sent += 1
+        except Exception:
+            registry.remove_websocket(ws)
+            logger.warning(
+                "topic publish 실패 (격리)",
+                extra={"topic": topic},
+                exc_info=True,
+            )
+    return TopicSendCounts(attempted=attempted, sent=sent, enabled=True)
 
 
 async def handle_client_message(websocket: "WebSocket", raw_text: str) -> None:
