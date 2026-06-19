@@ -6,9 +6,11 @@ write_outcome_from_lua)으로 제공한다. **writer-side only** — `WriteOutco
 SET-only trigger gating용). PendingCandidate 생성 / coordinator 전달 / publish는 C6-5b-3 범위 밖
 (C6-7 / C6-FLIP, codex 합의).
 
-**sanctioned island importer (C6-5b-3b)**: app/ live 모듈 중 본 모듈을 import하는 건 `crud.py`(bank atomic
-분기 `_atomic_write_changes_v2`)뿐 — 그 외 0 (tests/test_atomic_direct_write no-importer trip-wire, crud만
-sanctioned). **atomic 분기 자체는 C6-FLIP(must-confirm)까지 prod 미발화**(atomic mode dormant). 본 모듈은
+**sanctioned island importer (C6-5b-3b / C6-5b-4)**: app/ live 모듈 중 본 모듈을 import하는 건 `crud.py`
+(bank/investing direct atomic 분기 `_atomic_write_changes_v2`) + `latest_rates_cache.py`(C6-5b-4 mirror
+atomic 분기 — `build_atomic_writer`/`atomic_compare_write_v2`/`present_for_index`/`outcome_label`)뿐 — 그 외 0
+(tests/test_atomic_direct_write no-importer trip-wire, crud+latest_rates_cache만 sanctioned). **atomic 분기
+자체는 C6-FLIP(must-confirm)까지 prod 미발화**(atomic mode dormant). 본 모듈은
 atomic primitive(atomic_lua / atomic_value_schema / atomic_write_outcome)를 import하므로 그들의 dormant
 island allowlist(_DORMANT_ISLAND)에 포함됨. "pure" 아님 — compare_write가 Redis write I/O 소유.
 
@@ -28,7 +30,11 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from app.atomic_lua import AtomicLatestWriter
+from app.atomic_lua import (
+    AtomicLatestWriter,
+    OUTCOME_INVALID_SCHEMA,
+    OUTCOME_MIGRATION_REQUIRED,
+)
 from app.atomic_revision import Revision
 from app.atomic_value_schema import (
     make_rate_key,
@@ -39,6 +45,7 @@ from app.atomic_write_outcome import (
     FailureKind,
     RedisWritePerformed,
     WriteOutcome,
+    WriteState,
     write_outcome_from_lua,
 )
 
@@ -125,3 +132,38 @@ def applied_for_trigger(outcome: WriteOutcome) -> bool:
     않도록 island이 이 판정을 소유(trip-wire 경계 보존).
     """
     return outcome.redis_write_performed == RedisWritePerformed.APPLIED
+
+
+def present_for_index(outcome: WriteOutcome) -> bool:
+    """mirror(`_mirror_all_latest`) index 멤버십 — 해당 key가 Redis에 present+valid+fresh인가 (C6-5b-4).
+
+    True = advance(이번 cycle write로 SET) / refreshed_equal(같은 revision, mirrored_at만 refresh) /
+    **skipped_newer**(concurrent direct writer가 더 fresh한 값 이미 기록 — 이 key는 present+fresh).
+    False = conflict / FAILED(structural[migration_required·invalid_schema] + general) — 이 key는
+    신뢰 불가라 loaded_keys/latest:index에서 제외 → mirror가 failed++ → index 게이트(failed==0) 차단.
+
+    ⚠️ **applied_for_trigger 아님**(C7 lesson): trigger는 SET 실제 발생(APPLIED=advance/refreshed_equal)
+    만이라 skipped_newer 제외 — 하지만 index는 "key가 present인가"라 skipped_newer **포함**해야 한다
+    (제외 시 그 자산이 index['keys']에서 빠져 read-path MGET에서 사라짐 = payload drop). ⚠️
+    candidate_disposition(§14 publish 축)도 아님 — state 집합이 우연히 PUBLISH_CANDIDATE와 겹치지만
+    의미 축이 다름. caller(mirror)가 atomic_write_outcome를 직접 import하지 않도록 island이 본 판정을
+    소유(dormancy trip-wire 경계 보존, applied_for_trigger와 동일 원칙).
+    """
+    return outcome.state in (
+        WriteState.ADVANCE, WriteState.REFRESHED_EQUAL, WriteState.SKIPPED_NEWER,
+    )
+
+
+def outcome_label(outcome: WriteOutcome) -> str:
+    """telemetry per-outcome 카운터 라벨 (bounded) — mirror가 WriteState/atomic_write_outcome를 직접
+    import하지 않고 per-outcome 관찰 카운터를 만들 수 있게 island이 라벨 소유 (C6-5b-4).
+
+    값 집합: {advance, refreshed_equal, skipped_newer, conflict, migration_required, invalid_schema,
+    structural_failed, general_failed}. migration_required/invalid_schema는 §17 structural alert 신호
+    (전자=v1 재출현=C6-PRE migration 미완 / 후자=corruption)라 FLIP go/no-go용으로 구분 노출.
+    """
+    if outcome.state != WriteState.FAILED:
+        return outcome.state.value
+    if outcome.reason in (OUTCOME_MIGRATION_REQUIRED, OUTCOME_INVALID_SCHEMA):
+        return outcome.reason
+    return "structural_failed" if outcome.structural else "general_failed"

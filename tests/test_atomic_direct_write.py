@@ -25,7 +25,12 @@ from app.atomic_lua import (
     OUTCOME_SKIPPED_NEWER,
 )
 from app.atomic_value_schema import make_rate_key, make_revision_key_from_revision
-from app.atomic_write_outcome import RedisWritePerformed, WriteState
+from app.atomic_write_outcome import (
+    FailureKind,
+    RedisWritePerformed,
+    WriteState,
+    write_outcome_from_lua,
+)
 
 _REV = (1_700_000_000_000_000, 5)
 _KEY = "latest:bank:kb:usd-krw"
@@ -161,13 +166,64 @@ class TestBuildAtomicWriter(unittest.TestCase):
         self.assertIsInstance(writer, AtomicLatestWriter)
 
 
-# C6-5b-3b: crud.py가 atomic 분기(_atomic_write_changes_v2)에서 atomic_direct_write를 sanctioned import.
-# 그 외 app/ live 모듈은 여전히 import 0 (island 경계 유지 — crud만 유일 live caller).
-_SANCTIONED_IMPORTERS = frozenset({"atomic_direct_write.py", "crud.py"})
+class TestPresentForIndex(unittest.TestCase):
+    """C6-5b-4 present_for_index — mirror index 멤버십 (advance/refreshed_equal/skipped_newer=True)."""
+
+    def _mk(self, lua):
+        return write_outcome_from_lua(lua, _REV)
+
+    def test_present_outcomes(self):
+        for lua in (OUTCOME_ADVANCE, OUTCOME_REFRESHED_EQUAL, OUTCOME_SKIPPED_NEWER):
+            self.assertTrue(adw.present_for_index(self._mk(lua)), f"{lua} → present")
+
+    def test_skipped_newer_present_but_not_trigger(self):
+        # C7 경계: skipped_newer는 index present(True)이나 trigger 대상은 아님(applied_for_trigger=False).
+        outcome = self._mk(OUTCOME_SKIPPED_NEWER)
+        self.assertTrue(adw.present_for_index(outcome))      # index 포함 (payload drop 방지)
+        self.assertFalse(adw.applied_for_trigger(outcome))   # SET 미수행 → trigger 제외
+
+    def test_conflict_and_structural_not_present(self):
+        for lua in (OUTCOME_CONFLICT, OUTCOME_MIGRATION_REQUIRED, OUTCOME_INVALID_SCHEMA):
+            self.assertFalse(adw.present_for_index(self._mk(lua)), f"{lua} → not present")
+
+    def test_general_failed_not_present(self):
+        for fk in (FailureKind.DEFINITE_NOT_APPLIED, FailureKind.UNCERTAIN_AFTER_SEND):
+            outcome = write_outcome_from_lua(None, _REV, failure_kind=fk, reason="x")
+            self.assertFalse(adw.present_for_index(outcome))
+
+
+class TestOutcomeLabel(unittest.TestCase):
+    """C6-5b-4 outcome_label — bounded telemetry 라벨 (mirror가 WriteState import 회피)."""
+
+    def test_non_failed_labels(self):
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua(OUTCOME_ADVANCE, _REV)), "advance")
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua(OUTCOME_REFRESHED_EQUAL, _REV)), "refreshed_equal")
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua(OUTCOME_SKIPPED_NEWER, _REV)), "skipped_newer")
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua(OUTCOME_CONFLICT, _REV)), "conflict")
+
+    def test_structural_failed_labels_distinguished(self):
+        # migration_required(v1 재출현=C6-PRE 미완) / invalid_schema(corruption) 구분 노출 (FLIP 신호).
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua(OUTCOME_MIGRATION_REQUIRED, _REV)), "migration_required")
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua(OUTCOME_INVALID_SCHEMA, _REV)), "invalid_schema")
+
+    def test_unsupported_status_structural_failed(self):
+        # 예상 밖 lua status → structural=True + reason="unsupported_lua_status:.." → "structural_failed"
+        self.assertEqual(adw.outcome_label(write_outcome_from_lua("weird", _REV)), "structural_failed")
+
+    def test_general_failed_label(self):
+        for fk in (FailureKind.DEFINITE_NOT_APPLIED, FailureKind.UNCERTAIN_AFTER_SEND):
+            outcome = write_outcome_from_lua(None, _REV, failure_kind=fk, reason="x")
+            self.assertEqual(adw.outcome_label(outcome), "general_failed")
+
+
+# C6-5b-3b/C6-5b-4: atomic_direct_write를 import하는 sanctioned live 모듈 — crud.py(direct bank/investing
+# atomic 분기) + latest_rates_cache.py(C6-5b-4 mirror atomic 분기 — build_atomic_writer/atomic_compare_write_v2/
+# present_for_index/outcome_label). 그 외 app/ live 모듈은 여전히 import 0 (island 경계 유지).
+_SANCTIONED_IMPORTERS = frozenset({"atomic_direct_write.py", "crud.py", "latest_rates_cache.py"})
 
 
 class TestDormancy(unittest.TestCase):
-    """app/ live 모듈 중 atomic_direct_write를 import하는 건 crud.py(C6-5b-3b sanctioned)뿐 — 그 외 0."""
+    """app/ live 모듈 중 atomic_direct_write를 import하는 건 crud.py + latest_rates_cache.py(sanctioned)뿐 — 그 외 0."""
 
     def test_only_crud_imports_atomic_direct_write(self):
         app_dir = pathlib.Path(adw.__file__).resolve().parent

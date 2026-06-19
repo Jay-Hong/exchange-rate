@@ -17,6 +17,7 @@ main.py는 import 안 함 (순환 회피) — DB fallback은 호출자가 처리
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -1513,6 +1514,154 @@ def should_include_source_in_latest(source: str, asset: str) -> bool:
     return should_include_source_in_legacy_rates(source, asset)
 
 
+def _sync_atomic_mirror_fx(
+    ordered_writes: List[Tuple[str, str, Any]],
+    mirrored_at: datetime,
+) -> Tuple[Dict[str, int], Dict[str, int], List[str]]:
+    """ATOMIC mirror FX write loop (sync — scheduler thread에서 asyncio.to_thread로 실행, C6-5b-4).
+
+    Args:
+        ordered_writes: legacy 순서 그대로의 (kind, key, RevisionedRate) — pair별 investing(0~1) →
+            display-sorted banks. kind ∈ {"investing", "bank"} (stats 분기용).
+        mirrored_at: tz-aware (cycle 공통, freshness re-stamp).
+
+    `build_atomic_writer()` 1회 생성 후 per-key `atomic_compare_write_v2` — direct writer(crud.py:398)
+    패턴 동일. event loop를 막지 않도록 단일 to_thread 안에서 동기 Redis EVALSHA를 순차 수행
+    (sync client는 async circuit과 격리). DB는 미접근 — RevisionedRate DTO만 받아 cross-thread Session
+    사용 회피. atomic_compare_write_v2는 no-throw(writer None도 DEFINITE_NOT_APPLIED)라 루프 중 예외 없음.
+
+    Returns:
+        (counts, outcome_counts, loaded_keys)
+        - counts: {loaded_total, bank, investing, failed} (int)
+        - outcome_counts: {label: count} per-outcome 관찰 카운터 (telemetry)
+        - loaded_keys: present(advance/refreshed_equal/skipped_newer) key — latest:index 멤버십
+    """
+    from app import atomic_direct_write  # island (lazy — dormant module-load 경량 + cycle 회피)
+
+    writer = atomic_direct_write.build_atomic_writer()
+    counts: Dict[str, int] = {"loaded_total": 0, "bank": 0, "investing": 0, "failed": 0}
+    outcome_counts: Dict[str, int] = {}
+    loaded_keys: List[str] = []
+    for kind, key, rr in ordered_writes:
+        outcome = atomic_direct_write.atomic_compare_write_v2(
+            writer,
+            key,
+            rate=rr.rate,
+            timestamp=crud.to_kst_isoformat(rr.timestamp),
+            revision=rr.revision,
+            source=rr.source,
+            asset=rr.asset,
+            mirrored_at=mirrored_at,
+        )
+        label = atomic_direct_write.outcome_label(outcome)
+        outcome_counts[label] = outcome_counts.get(label, 0) + 1
+        if atomic_direct_write.present_for_index(outcome):
+            counts["loaded_total"] += 1
+            counts[kind] += 1
+            loaded_keys.append(key)
+        else:
+            counts["failed"] += 1
+    return counts, outcome_counts, loaded_keys
+
+
+async def _mirror_all_latest_atomic(db: Session) -> Dict[str, Any]:
+    """`_mirror_all_latest`의 ATOMIC 분기 (C6-5b-4) — bank/investing data key를 v2 compare_write로 적재.
+
+    enforced_action==ATOMIC일 때만 호출 (prod는 C6-FLIP까지 LEGACY라 dormant). 경계:
+    - bank/investing: §16 re-read revision selector(direct flush-row-ref와 same row→same revision) +
+      v2 compare_write. **topic trigger 미발사** — mirror는 value-recovery/refresh이지 change-notification
+      아님(3s마다 발사 시 subscriber spam). DXY/latest:index는 v1 유지(별도 카테고리/control key).
+    - source 루프: allowlist로 항상 skip이라 atomic에서 미반복 (USDT/KRX source atomic은 별도 C6 트랙 —
+      `_select_latest_source_with_revision` 신규 필요, P1_COMMON_BASE_DESIGN §17 holistic).
+    - loaded_keys/latest:index 순서: revision selector가 표시순 미적용이라 `_bank_display_sort_key`로 명시
+      정렬 + pair별 investing→banks 인터리브 = legacy loaded_keys 순서와 byte-identical.
+
+    invariant (legacy와 동일): attempted_total = loaded_total + failed, loaded_total = bank + investing
+    (+ source=0). latest:index는 failed==0일 때만 갱신(부분 실패 → 이전 index 유지 → fetch fallback).
+    """
+    mirrored_at = datetime.now(_KST)
+
+    # ordered_writes — legacy loop 구조 그대로(pair별 investing → display-sorted banks)로 구성해
+    # loaded_keys/latest:index 순서를 legacy와 동일하게 유지.
+    ordered_writes: List[Tuple[str, str, Any]] = []
+    for pair in crud.SUPPORTED_CURRENCY_PAIRS:
+        inv_rev = crud._select_latest_investing_rate_with_revision(db, pair)
+        if inv_rev:
+            ordered_writes.append(("investing", latest_key_investing(inv_rev.asset), inv_rev))
+        bank_revs = crud._select_latest_bank_rates_with_revision(db, pair)
+        bank_revs.sort(key=lambda rr: crud._bank_display_sort_key(rr.source))
+        for rr in bank_revs:
+            ordered_writes.append(("bank", latest_key_bank(rr.source, rr.asset), rr))
+
+    # 동기 Redis compare_write 루프를 단일 to_thread로 — event loop non-blocking + writer 1회 생성.
+    counts, outcome_counts, loaded_keys = await asyncio.to_thread(
+        _sync_atomic_mirror_fx, ordered_writes, mirrored_at
+    )
+
+    stats: Dict[str, Any] = {
+        "attempted_total": len(ordered_writes),
+        "loaded_total": counts["loaded_total"],
+        "bank": counts["bank"],
+        "investing": counts["investing"],
+        "source": 0,
+        "failed": counts["failed"],
+        "index_updated": False,
+        "dxy_attempted": 0,
+        "dxy_loaded": 0,
+        "dxy_failed": 0,
+        # atomic: source 루프 미반복 (allowlist skip count는 legacy-only 관찰값)
+        "source_skipped": 0,
+        "write_mode": "atomic",
+        "atomic_outcomes": outcome_counts,
+    }
+
+    # latest:index — v1 serialize_index, failed==0일 때만 (legacy와 동일 게이트/async 경로)
+    if stats["failed"] == 0 and loaded_keys:
+        index_value = serialize_index(loaded_keys, mirrored_at)
+        if await _set_latest(LATEST_INDEX_KEY, index_value):
+            stats["index_updated"] = True
+
+    # DXY — v1 유지 (별도 카테고리, latest:index 무관 — legacy와 동일)
+    dxy_record = crud.get_latest_dxy_rate(db)
+    if dxy_record:
+        stats["dxy_attempted"] += 1
+        dxy_value = serialize_dxy_value(
+            dxy_record["rate"],
+            dxy_record["timestamp"],
+            dxy_record["source"],
+            mirrored_at,
+        )
+        if await _set_latest(LATEST_DXY_KEY, dxy_value):
+            stats["dxy_loaded"] += 1
+        else:
+            stats["dxy_failed"] += 1
+
+    return stats
+
+
+def _mirror_skip_stats(enforced: Any) -> Dict[str, Any]:
+    """HALT(또는 예상 밖 enforced) 시 mirror full quiesce stats — 어떤 write도 수행 안 함 (C6-5b-4).
+
+    §9 quiesce handshake: mirror(async)도 direct(sync)와 함께 drain 대상이라 bank/investing/index/DXY
+    전부 skip. index_updated=False는 의도된 skip이므로 warmup/once WARNING이 오발화하지 않도록
+    `skipped_mode` 마커로 구분. read-path는 이전 index가 stale로 age-out하며 DB fallback (보수적).
+    """
+    return {
+        "attempted_total": 0,
+        "loaded_total": 0,
+        "bank": 0,
+        "investing": 0,
+        "source": 0,
+        "failed": 0,
+        "index_updated": False,
+        "dxy_attempted": 0,
+        "dxy_loaded": 0,
+        "dxy_failed": 0,
+        "source_skipped": 0,
+        "skipped_mode": getattr(enforced, "value", str(enforced)),
+    }
+
+
 async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
     """DB latest를 Redis로 적재하는 core. warmup과 mirror_once가 공유.
 
@@ -1530,6 +1679,18 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
     Returns:
         stats dict — data key 카운트 + index_updated 별도 필드
     """
+    # C6-5b-4 — write-mode gate (1-snapshot, no-throw). early-branch만 위에 얹어 legacy 본문은
+    # byte-identical 유지(P1_COMMON_BASE_DESIGN §대원칙3 ①). ATOMIC → v2 compare_write 분기 /
+    # HALT(및 예상 밖 값) → §9 quiesce(mirror도 drain 대상)라 full skip / LEGACY → 아래 기존 본문.
+    # prod는 C6-FLIP(must-confirm)까지 LEGACY라 atomic/halt 분기 dormant.
+    from app import atomic_write_runtime
+    from app.atomic_write_control import WriterMode
+    _enforced = atomic_write_runtime.snapshot().enforced_action
+    if _enforced == WriterMode.ATOMIC:
+        return await _mirror_all_latest_atomic(db)
+    if _enforced != WriterMode.LEGACY:
+        return _mirror_skip_stats(_enforced)
+    # ---- LEGACY: 기존 본문 (byte-identical) ----
     stats: Dict[str, Any] = {
         "attempted_total": 0,
         "loaded_total": 0,
@@ -1641,7 +1802,10 @@ async def warmup_latest_rates() -> Optional[Dict[str, Any]]:
     db = SessionLocal()
     try:
         stats = await _mirror_all_latest(db)
-        if stats["failed"] > 0 or not stats["index_updated"] or stats["dxy_failed"] > 0:
+        if stats.get("skipped_mode"):
+            # C6-5b-4 — write-mode quiesce(HALT 등) 의도된 skip → WARNING 아님
+            logger.debug("⏸️ Redis latest mirror warmup skip (write-mode quiesce)", extra=stats)
+        elif stats["failed"] > 0 or not stats["index_updated"] or stats["dxy_failed"] > 0:
             logger.warning(
                 "⚠️ Redis latest mirror warmup 일부 실패 또는 index/DXY 미갱신",
                 extra=stats,
@@ -1843,7 +2007,10 @@ async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:
     db = SessionLocal()
     try:
         stats = await _mirror_all_latest(db)
-        if stats["failed"] > 0 or not stats["index_updated"] or stats["dxy_failed"] > 0:
+        if stats.get("skipped_mode"):
+            # C6-5b-4 — write-mode quiesce(HALT 등) 의도된 skip → WARNING 아님
+            logger.debug("⏸️ Redis latest mirror skip (write-mode quiesce)", extra=stats)
+        elif stats["failed"] > 0 or not stats["index_updated"] or stats["dxy_failed"] > 0:
             logger.warning(
                 "⚠️ Redis latest mirror 일부 실패 또는 index/DXY 미갱신",
                 extra=stats,
