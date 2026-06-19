@@ -137,10 +137,14 @@ class TestDormancy(unittest.TestCase):
         "atomic_coordinator.py", "atomic_retry.py", "atomic_cutover_durable.py", "atomic_cutover_runtime.py", "atomic_fx_v2_loader.py", "atomic_fx_publisher.py", "atomic_watermark_store.py", "atomic_fx_live.py",
     })
 
+    # C6-7: fx_topic_publisher가 atomic_cutover_runtime.snapshot()의 첫 **sanctioned live consumer**
+    # (publish gate shadow read, dry-run). 그 외 live 모듈은 여전히 import 0.
+    _SANCTIONED_LIVE_CONSUMERS = frozenset({"fx_topic_publisher.py"})
+
     def test_no_live_module_imports_runtime(self):
         app_dir = pathlib.Path(acr.__file__).resolve().parent
         for py in sorted(app_dir.rglob("*.py")):
-            if py.name in self._ISLAND:
+            if py.name in self._ISLAND or py.name in self._SANCTIONED_LIVE_CONSUMERS:
                 continue
             rel = py.relative_to(app_dir)
             tree = ast.parse(py.read_text(encoding="utf-8"))

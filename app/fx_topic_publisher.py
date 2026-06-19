@@ -38,7 +38,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from pytz import timezone as pytz_timezone
 
-from app import config, topic_dispatcher
+from app import atomic_cutover_runtime, config, topic_dispatcher
+from app.atomic_cutover import PublisherGateDisposition
 from app.cache import redis_cache
 from app.fx_topic_payload import FX_TOPIC_ASSETS, load_and_build_fx_topic_payload
 
@@ -155,6 +156,53 @@ async def _record_topic_event(
         )
 
 
+# ── P1b C6-7 cutover gate SHADOW (dry-run observe, legacy publish 절대 미차단) ──
+# **disjoint field family** — _COUNTER_FIELDS / last_result / last_at_kst / last_error 무접촉.
+# _record_topic_event는 result가 _COUNTER_FIELDS에 없어도 last_result/last_at_kst를 무조건 overwrite
+# (line 145-146)하므로, gate 결과를 그 경로로 쓰면 legacy ordering invariant 손상 → 별도 helper 필수.
+_GATE_WOULD_BLOCK_FIELD = "gate_would_block_dry_run"
+
+
+def _read_fx_publisher_gate_disposition() -> PublisherGateDisposition:
+    """cutover gate disposition read — **fail-OPEN**(coordinator/runtime의 fail-closed와 반대 polarity).
+
+    live legacy publish는 dormant gate가 죽여선 안 되므로 어떤 예외에도 PASS_THROUGH 반환(legacy 진행).
+    C6-7은 refresh_from_db 미스케줄이라 snapshot()==_INITIAL→PASS_THROUGH 상시(WOULD_BLOCK은 test-injected만).
+    """
+    try:
+        snap = atomic_cutover_runtime.snapshot()  # no-throw last-good
+        return (
+            PublisherGateDisposition.PASS_THROUGH if snap.publisher_gate_open
+            else PublisherGateDisposition.WOULD_BLOCK_DRY_RUN
+        )
+    except Exception:
+        return PublisherGateDisposition.PASS_THROUGH  # fail-OPEN — legacy publish 생존 우선
+
+
+async def _record_gate_shadow_event(asset: str, disposition: PublisherGateDisposition) -> None:
+    """C6-7 dry-run gate shadow telemetry — gate_* disjoint field만(legacy 무접촉, best-effort 격리)."""
+    client = redis_cache.client
+    if client is None:
+        return
+    try:
+        if not await redis_cache.circuit.can_attempt():
+            return
+    except Exception:
+        return
+    key = _telemetry_key(asset)
+    try:
+        if disposition is PublisherGateDisposition.WOULD_BLOCK_DRY_RUN:
+            await client.hincrby(key, _GATE_WOULD_BLOCK_FIELD, 1)
+        await client.hset(key, "gate_last_disposition", disposition.value)
+        await client.hset(key, "gate_last_at_kst", datetime.now(_KST).isoformat())
+    except Exception:
+        logger.debug(
+            "fx gate shadow telemetry 기록 실패 (격리, dry-run no-op)",
+            extra={"asset": asset},
+            exc_info=True,
+        )
+
+
 async def _publish_fx_snapshot(db: "Session", asset: str) -> bool:
     """단일 FX asset의 snapshot publish.
 
@@ -196,6 +244,18 @@ async def _publish_fx_snapshot(db: "Session", asset: str) -> bool:
     # (builder는 topic-agnostic 유지 — wrapper 책임).
     payload["topic"] = topic
     await _record_topic_event(asset, result="built")
+
+    # P1b C6-7 cutover gate SHADOW (dry-run, flag-gated). 여기 = publish 직전 = FF/sub/build 통과 = "would
+    # publish" 지점(FLIP의 자연 enforcement point). PASS_THROUGH/WOULD_BLOCK 둘 다 legacy publish 진행 —
+    # real-block 없음(PublisherGateDisposition에 real-block 값 자체가 없음). flag-off면 snapshot 미호출.
+    # ⚠️ C6-FLIP seam: 여기서 dry-run → real enforcement(WOULD_BLOCK & would-publish → 아래 publish_topic
+    #    skip + AtomicFxCoordinator.publish_asset route 또는 HALT)로 **국소 1-spot 전환**. fail-polarity도
+    #    inversion 필요(C6-7 fail-OPEN ↔ FLIP fail-closed) — 의식적으로 뒤집을 것.
+    #    NOTE: publishability는 publish_topic 내부에서 send 시점에 재평가됨(get_subscribers fresh read) —
+    #    gate read(여기)와 실제 send(아래)는 atomic 결합 아님. FLIP enforcement는 would-block 판정 후
+    #    자연 0-subscriber send가 뒤따를 수 있음을 허용해야 함.
+    if config.FX_CUTOVER_GATE_OBSERVE_ENABLED:
+        await _record_gate_shadow_event(asset, _read_fx_publisher_gate_disposition())
 
     sent = await topic_dispatcher.publish_topic(topic, payload)
     if sent > 0:

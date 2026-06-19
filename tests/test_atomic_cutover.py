@@ -80,12 +80,15 @@ class TestDormancy(unittest.TestCase):
     """A5 dormant — app/ 전체 어떤 live 모듈도 atomic_cutover import 0 (main/fx publisher/trigger +
     live atomic 모듈 포함 — dormant island만 skip, codex holistic cross-check)."""
 
+    # C6-7: fx_topic_publisher가 PublisherGateDisposition(enum) import — gate-shell sanctioned live consumer.
+    _C6_7_SANCTIONED = frozenset({"fx_topic_publisher.py"})
+
     def test_no_app_module_imports_atomic_cutover(self):
         import ast
 
         app_dir = pathlib.Path(ac.__file__).resolve().parent
         for py in sorted(app_dir.rglob("*.py")):
-            if py.name in _DORMANT_ISLAND:
+            if py.name in _DORMANT_ISLAND or py.name in self._C6_7_SANCTIONED:
                 continue
             rel = py.relative_to(app_dir)
             tree = ast.parse(py.read_text(encoding="utf-8"))

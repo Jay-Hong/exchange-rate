@@ -402,6 +402,13 @@ KRX_CLOSE_EVENT_LOG_ENABLED = os.getenv("KRX_CLOSE_EVENT_LOG_ENABLED", "true").l
 # FX만 켜기/끄기 가능).
 FX_TOPIC_ENABLED = os.getenv("FX_TOPIC_ENABLED", "false").lower() == "true"
 
+# P1b C6-7 — atomic cutover publisher gate **shadow observe** (dry-run, default OFF).
+# true일 때만 _publish_fx_snapshot이 publish 직전 cutover gate disposition을 read해 would-block을
+# 별도 gate_* telemetry로 기록(legacy publish는 절대 차단 안 함 — dry-run). off면 snapshot() 미호출
+# (zero hot-path 추가). real enforcement(closed→skip publish)는 C6-FLIP. refresh_from_db 미스케줄이라
+# C6-7에선 켜도 prod는 _INITIAL/PASS_THROUGH 상시(WOULD_BLOCK은 test-injected만).
+FX_CUTOVER_GATE_OBSERVE_ENABLED = os.getenv("FX_CUTOVER_GATE_OBSERVE_ENABLED", "false").lower() == "true"
+
 # Phase B.2 — Tether topic direct trigger 분리.
 # default legacy_piggyback: PR1~PR3 배포해도 기존 main.py is_changed hook만 동작.
 # dual_shadow: direct trigger/coalesce는 실제처럼 수행하되 publish call만 skip.

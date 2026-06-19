@@ -11,14 +11,18 @@
 """
 from __future__ import annotations
 
+import ast
+import pathlib
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app import config, fx_topic_publisher, topic_dispatcher
+from app import atomic_cutover_runtime, config, fx_topic_publisher, topic_dispatcher
+from app.atomic_cutover import PublisherGateDisposition
 from app.fx_topic_publisher import (
     FX_TOPICS,
     FX_TOPIC_ASSETS,
     _publish_fx_snapshot,
+    _read_fx_publisher_gate_disposition,
     _telemetry_key,
     safe_publish_all_fx_snapshots,
 )
@@ -479,6 +483,234 @@ class TestDirectLegacyPayloadEquality(unittest.IsolatedAsyncioTestCase):
             d_topic, d_payload = direct[asset]
             self.assertEqual(d_topic, topic)
             self.assertEqual(d_payload, legacy[topic])
+
+
+# ---------------------------------------------------------------------------
+# P1b C6-7 — cutover gate SHADOW (dry-run observe, characterization-locked behavior-change-0)
+# ---------------------------------------------------------------------------
+
+class _FakeSnap:
+    def __init__(self, gate_open):
+        self.publisher_gate_open = gate_open
+
+
+class TestC6_7CutoverGateShadow(unittest.IsolatedAsyncioTestCase):
+    """gate는 dry-run shadow: PASS_THROUGH/WOULD_BLOCK 둘 다 legacy publish 진행(real-block 없음).
+    flag-off=zero work, fail-OPEN, pre-publish placement(early-return/builder-raise는 gate 미도달).
+
+    **single-core equivalence**: 3 entry(safe_publish_fx_snapshot·safe_publish_all_fx_snapshots·trigger)가
+    전부 _publish_fx_snapshot 경유 → gate는 그 single core에 1곳. _publish_fx_snapshot characterization이
+    by construction 모든 entry를 cover."""
+
+    async def asyncSetUp(self):
+        self._orig = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._orig
+
+    def _payload(self):
+        return {"type": "snapshot", "version": 1, "data": {"banks": []}}
+
+    def _publishable_ctx(self, *, flag, snap_gate_open=True, snap_side_effect=None, sent=1):
+        # FF on + 구독자 → publishable. gate flag + snapshot 제어.
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw"])
+        snap_mock = (MagicMock(side_effect=snap_side_effect) if snap_side_effect
+                     else MagicMock(return_value=_FakeSnap(snap_gate_open)))
+        return snap_mock, (
+            patch.object(config, "FX_CUTOVER_GATE_OBSERVE_ENABLED", flag),
+            patch.object(config, "FX_TOPIC_ENABLED", True),
+            patch.object(config, "TOPIC_DISPATCHER_ENABLED", True),
+            patch.object(fx_topic_publisher, "load_and_build_fx_topic_payload", return_value=self._payload()),
+            patch.object(topic_dispatcher, "publish_topic", new=AsyncMock(return_value=sent)),
+            patch.object(atomic_cutover_runtime, "snapshot", snap_mock),
+        )
+
+    async def test_flag_off_gate_not_invoked_legacy_identical(self):
+        snap, ctx = self._publishable_ctx(flag=False)
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], \
+             patch.object(fx_topic_publisher, "_record_gate_shadow_event", new=AsyncMock()) as shadow:
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        self.assertTrue(result)                # legacy 발행 그대로
+        snap.assert_not_called()               # flag-off → snapshot 미호출 (zero hot-path)
+        shadow.assert_not_called()
+
+    async def test_flag_on_pass_through_publishes_and_records(self):
+        snap, ctx = self._publishable_ctx(flag=True, snap_gate_open=True)
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], \
+             patch.object(fx_topic_publisher, "_record_gate_shadow_event", new=AsyncMock()) as shadow:
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        self.assertTrue(result)                # legacy 발행
+        shadow.assert_awaited_once()
+        self.assertIs(shadow.await_args.args[1], PublisherGateDisposition.PASS_THROUGH)
+
+    async def test_flag_on_would_block_STILL_publishes(self):
+        # behavior-change-0 핵심: WOULD_BLOCK이어도 legacy publish 진행(real-block 없음)
+        snap, ctx = self._publishable_ctx(flag=True, snap_gate_open=False)
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4] as pub, ctx[5], \
+             patch.object(fx_topic_publisher, "_record_gate_shadow_event", new=AsyncMock()) as shadow:
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        self.assertTrue(result)                # 차단 안 됨
+        pub.assert_awaited_once()              # publish_topic 실제 호출됨
+        self.assertIs(shadow.await_args.args[1], PublisherGateDisposition.WOULD_BLOCK_DRY_RUN)
+
+    async def test_gate_read_fail_open_on_snapshot_exception(self):
+        # snapshot() raise → _read_..._disposition fail-OPEN PASS_THROUGH → legacy publish 진행
+        snap, ctx = self._publishable_ctx(flag=True, snap_side_effect=RuntimeError("runtime down"))
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4] as pub, ctx[5]:
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        self.assertTrue(result)
+        pub.assert_awaited_once()
+
+    def test_read_disposition_fail_open_unit(self):
+        with patch.object(atomic_cutover_runtime, "snapshot", side_effect=RuntimeError("x")):
+            self.assertIs(_read_fx_publisher_gate_disposition(), PublisherGateDisposition.PASS_THROUGH)
+        with patch.object(atomic_cutover_runtime, "snapshot", return_value=_FakeSnap(False)):
+            self.assertIs(_read_fx_publisher_gate_disposition(), PublisherGateDisposition.WOULD_BLOCK_DRY_RUN)
+
+    async def test_gate_not_invoked_on_ff_off(self):
+        # pre-publish placement: FF-off early-return은 gate 도달 전 → snapshot 미호출
+        snap = MagicMock(return_value=_FakeSnap(True))
+        with patch.object(config, "FX_CUTOVER_GATE_OBSERVE_ENABLED", True), \
+             patch.object(config, "FX_TOPIC_ENABLED", False), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(atomic_cutover_runtime, "snapshot", snap):
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        self.assertFalse(result)
+        snap.assert_not_called()
+
+    async def test_gate_not_invoked_on_ff2_off(self):
+        # pre-publish: TOPIC_DISPATCHER_ENABLED=false 두 번째 early-return도 gate 미도달
+        snap = MagicMock(return_value=_FakeSnap(True))
+        with patch.object(config, "FX_CUTOVER_GATE_OBSERVE_ENABLED", True), \
+             patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", False), \
+             patch.object(atomic_cutover_runtime, "snapshot", snap):
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        self.assertFalse(result)
+        snap.assert_not_called()
+
+    async def test_gate_not_invoked_on_no_subscribers(self):
+        snap = MagicMock(return_value=_FakeSnap(True))
+        with patch.object(config, "FX_CUTOVER_GATE_OBSERVE_ENABLED", True), \
+             patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(atomic_cutover_runtime, "snapshot", snap):
+            result = await _publish_fx_snapshot(MagicMock(), "usd-krw")  # 구독자 0
+        self.assertFalse(result)
+        snap.assert_not_called()
+
+    async def test_gate_not_invoked_on_builder_raise(self):
+        snap = MagicMock(return_value=_FakeSnap(True))
+        ws = MagicMock(); topic_dispatcher.registry.register(ws, ["fx:usd-krw"])
+        with patch.object(config, "FX_CUTOVER_GATE_OBSERVE_ENABLED", True), \
+             patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(fx_topic_publisher, "load_and_build_fx_topic_payload", side_effect=RuntimeError("build")), \
+             patch.object(atomic_cutover_runtime, "snapshot", snap):
+            with self.assertRaises(RuntimeError):
+                await _publish_fx_snapshot(MagicMock(), "usd-krw")  # legacy: builder 예외 전파
+        snap.assert_not_called()                # builder(line 194) 후 gate라 미도달
+
+    async def test_record_topic_event_sequence_unchanged_by_gate(self):
+        # gate(flag-on PASS_THROUGH)가 legacy _record_topic_event result 시퀀스를 perturb 안 함
+        results = []
+        async def _capture(asset, *, result, **kw):
+            results.append(result)
+        snap, ctx = self._publishable_ctx(flag=True, snap_gate_open=True, sent=1)
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], ctx[5], \
+             patch.object(fx_topic_publisher, "_record_topic_event", new=_capture):
+            await _publish_fx_snapshot(MagicMock(), "usd-krw")
+        # legacy sent>0 시퀀스: built → publish_called (gate result는 _record_topic_event에 없음)
+        self.assertEqual(results, ["built", "publish_called"])
+
+    async def test_shadow_helper_writes_only_gate_fields_would_block(self):
+        # MEDIUM(Workflow): disjoint-field invariant **실행 검증** — _record_gate_shadow_event가 gate_* 만
+        # 기록하고 legacy last_result/last_at_kst/last_error 무접촉(_record_topic_event corruption 회피의 핵심).
+        with patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            mock_cache.client = MagicMock()
+            mock_cache.client.hincrby = AsyncMock()
+            mock_cache.client.hset = AsyncMock()
+            mock_cache.circuit = MagicMock()
+            mock_cache.circuit.can_attempt = AsyncMock(return_value=True)
+            await fx_topic_publisher._record_gate_shadow_event(
+                "usd-krw", PublisherGateDisposition.WOULD_BLOCK_DRY_RUN)
+        key = _telemetry_key("usd-krw")
+        mock_cache.client.hincrby.assert_awaited_once_with(key, "gate_would_block_dry_run", 1)
+        hset_fields = [c.args[1] for c in mock_cache.client.hset.await_args_list]
+        self.assertIn("gate_last_disposition", hset_fields)
+        self.assertIn("gate_last_at_kst", hset_fields)
+        # CRITICAL: legacy ordering field 무접촉
+        self.assertNotIn("last_result", hset_fields)
+        self.assertNotIn("last_at_kst", hset_fields)
+        self.assertNotIn("last_error", hset_fields)
+        mock_cache.circuit.record_failure.assert_not_called()  # circuit 오염 차단(_record_topic_event 정합)
+
+    async def test_shadow_helper_pass_through_no_counter(self):
+        with patch("app.fx_topic_publisher.redis_cache") as mock_cache:
+            mock_cache.client = MagicMock()
+            mock_cache.client.hincrby = AsyncMock()
+            mock_cache.client.hset = AsyncMock()
+            mock_cache.circuit = MagicMock()
+            mock_cache.circuit.can_attempt = AsyncMock(return_value=True)
+            await fx_topic_publisher._record_gate_shadow_event(
+                "usd-krw", PublisherGateDisposition.PASS_THROUGH)
+        mock_cache.client.hincrby.assert_not_called()  # PASS_THROUGH → would_block counter 미증가
+        hset_fields = [c.args[1] for c in mock_cache.client.hset.await_args_list]
+        self.assertEqual(set(hset_fields), {"gate_last_disposition", "gate_last_at_kst"})
+        self.assertNotIn("last_result", hset_fields)
+
+
+# gate-shell은 atomic_cutover(enum) + atomic_cutover_runtime(snapshot)만 sanctioned. coordinator/adapter
+# (atomic_coordinator·atomic_fx_live) import + activation(publish_asset/refresh_from_db/AtomicFxCoordinator)
+# call은 FLIP 영역. AST 기반(주석 제외) — FLIP seam 주석의 AtomicFxCoordinator 언급에 false-trip 안 함.
+_C6_7_FORBIDDEN_MODULES = frozenset({"atomic_fx_live", "atomic_coordinator"})
+_C6_7_FORBIDDEN_CALLS = frozenset({"publish_asset", "refresh_from_db", "AtomicFxCoordinator"})
+
+
+def _scan_fx_publisher_scope_violations(src):
+    """C6-7 scope 위반(coordinator/adapter import + activation call) 목록 (real test + self-arm 공유)."""
+    hits = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            tail = (node.module or "").split(".")[-1]
+            if tail in _C6_7_FORBIDDEN_MODULES:
+                hits.append(f"from {node.module} import")
+            if node.module == "app" and any(a.name in _C6_7_FORBIDDEN_MODULES for a in node.names):
+                hits.append("from app import <coordinator/adapter>")
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.split(".")[-1] in _C6_7_FORBIDDEN_MODULES:
+                    hits.append(f"import {a.name}")
+        elif isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name in _C6_7_FORBIDDEN_CALLS:
+                hits.append(f"{name}()")
+    return hits
+
+
+class TestC6_7Dormancy(unittest.TestCase):
+    """C6-7 scope: gate-shell only — coordinator/activation/refresh는 FLIP. fx_topic_publisher가
+    coordinator/adapter import·publish_asset·refresh_from_db·AtomicFxCoordinator call 0 (AST, 주석 제외)."""
+
+    def test_publisher_no_coordinator_or_activation(self):
+        src = pathlib.Path(fx_topic_publisher.__file__).read_text(encoding="utf-8")
+        self.assertEqual(_scan_fx_publisher_scope_violations(src), [],
+                         "fx_topic_publisher가 coordinator/activation 참조 — C6-7 scope 위반(FLIP 영역)")
+
+    def test_trip_wire_self_arms(self):
+        # real test와 동일 predicate를 forbidden form 전수 plant로 검증 (vacuous pass 방지)
+        for planted in (
+            "from app.atomic_fx_live import X\n",
+            "from app.atomic_coordinator import AtomicFxCoordinator\n",  # import-without-call도 검출
+            "import app.atomic_fx_live\n",
+            "from app import atomic_coordinator\n",
+            "def f():\n    publish_asset()\n",
+            "def f():\n    AtomicFxCoordinator()\n",
+            "def f():\n    refresh_from_db()\n",
+        ):
+            self.assertTrue(_scan_fx_publisher_scope_violations(planted), f"planted 미검출: {planted!r}")
 
 
 if __name__ == "__main__":

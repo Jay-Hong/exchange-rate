@@ -348,7 +348,8 @@ class TestDormancy(unittest.TestCase):
         self.assertIn("publish_topic(", src)            # legacy byte-identical send path 유지(C7까지)
         self.assertNotIn("publish_topic_detailed", src)  # C6-4 detailed는 C7 전까지 legacy 미사용
         self.assertNotIn("atomic_fx_live", src)
-        self.assertNotIn("AtomicFxCoordinator", src)
+        # NOTE: AtomicFxCoordinator/publish_asset 미사용은 AST 기반 trip-wire가 검증
+        # (test_fx_topic_publisher.TestC6_7Dormancy) — string check는 C6-7 FLIP seam 주석에 false-fail
 
     def test_no_scheduling(self):
         src = pathlib.Path(m.__file__).read_text(encoding="utf-8")
