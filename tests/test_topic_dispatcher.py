@@ -435,9 +435,11 @@ class TestPublishTopicDetailedDormancy(unittest.TestCase):
     'no live caller' grep으로 dormancy 보장 (C6-6 adapter가 첫 caller)."""
 
     def test_no_live_caller(self):
-        # topic_dispatcher.py 자신(정의) 제외 — app/ 어디서도 호출/import 0
-        hits = _scan_callers_of("publish_topic_detailed", exclude_files={"topic_dispatcher.py"})
-        self.assertEqual(hits, [], f"publish_topic_detailed live caller 발견 — C6-4 dormant 위반: {hits}")
+        # topic_dispatcher.py 자신(정의) + atomic_fx_live.py(C6-6 의도된 dormant adapter caller, 자체
+        # no-importer로 dormancy 보장) 제외 — 그 외 app/ 어디서도 호출/import 0
+        hits = _scan_callers_of(
+            "publish_topic_detailed", exclude_files={"topic_dispatcher.py", "atomic_fx_live.py"})
+        self.assertEqual(hits, [], f"publish_topic_detailed live caller 발견 — dormant 위반: {hits}")
 
     def test_detector_self_arms(self):
         # HIGH8: detector가 실제 caller에 trip하는지 (green-only 가드 방지). string 기반 — 파일 write 없음

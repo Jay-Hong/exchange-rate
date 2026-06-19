@@ -167,7 +167,7 @@ class TestNoValueComparison(unittest.TestCase):
 _DORMANT_ISLAND = frozenset({
     "atomic_value_schema.py", "atomic_lua.py", "atomic_migration.py",
     "atomic_write_outcome.py", "atomic_cutover.py", "atomic_watermark.py",
-    "atomic_build.py", "atomic_reconcile.py", "atomic_coordinator.py", "atomic_retry.py", "atomic_cutover_durable.py", "atomic_cutover_runtime.py", "atomic_fx_v2_loader.py", "atomic_fx_publisher.py", "atomic_watermark_store.py",  # B2a/B2b-1/B2b-4a dormant — uniform dormant skip set
+    "atomic_build.py", "atomic_reconcile.py", "atomic_coordinator.py", "atomic_retry.py", "atomic_cutover_durable.py", "atomic_cutover_runtime.py", "atomic_fx_v2_loader.py", "atomic_fx_publisher.py", "atomic_watermark_store.py", "atomic_fx_live.py",  # B2a/B2b-1/B2b-4a dormant — uniform dormant skip set
 })
 
 
