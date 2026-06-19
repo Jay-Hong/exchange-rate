@@ -212,7 +212,9 @@ class TestDormancy(unittest.TestCase):
     """
 
     _MODELS = ("AtomicQuiesceSession", "AtomicQuiesceAppAck")
-    _ALLOWED = frozenset({"models.py"})
+    # 정의 site(models.py) + Q2b dormant CAS island(atomic_quiesce_durable, live caller 0 — 자체 no-importer
+    # trip-wire가 보장). live reader는 여전히 차단.
+    _ALLOWED = frozenset({"models.py", "atomic_quiesce_durable.py"})
 
     def test_no_live_module_references_quiesce_models(self):
         import app.models as m
