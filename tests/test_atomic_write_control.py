@@ -276,6 +276,9 @@ class TestCreateAllExclusionBehavior(unittest.TestCase):
         create_all_app_tables(engine)
         tables = set(inspect(engine).get_table_names())
         self.assertNotIn("atomic_write_control", tables)  # 핵심 safety: control table 미생성
+        # C6-quiesce Q2a: quiesce evidence table도 create_all 진입점에서 미생성 (migrate sole-path)
+        self.assertNotIn("atomic_quiesce_session", tables)
+        self.assertNotIn("atomic_quiesce_app_ack", tables)
         self.assertIn("bank_exchange_rates", tables)       # 다른 ORM table은 정상 생성됨
 
 

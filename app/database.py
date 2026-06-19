@@ -44,10 +44,14 @@ Base = declarative_base()
 # (테스트는 control table이 필요하므로 Base.metadata.create_all을 직접 사용.)
 # P1b C6-1: cutover-control tables(atomic_cutover_control/atomic_cutover_asset, CHECK-bearing)도
 # 동일 — scripts/migrate_atomic_cutover.py가 운영 유일 생성 경로 (create_all 제외 = behavior-change-0).
+# P1b C6-quiesce Q2a: quiesce evidence tables(atomic_quiesce_session/atomic_quiesce_app_ack, CHECK-bearing)도
+# 동일 — scripts/migrate_atomic_quiesce.py가 운영 유일 생성 경로 (create_all 제외 = behavior-change-0).
 CREATE_ALL_EXCLUDE_TABLES = frozenset({
     "atomic_write_control",
     "atomic_cutover_control",
     "atomic_cutover_asset",
+    "atomic_quiesce_session",
+    "atomic_quiesce_app_ack",
 })
 
 

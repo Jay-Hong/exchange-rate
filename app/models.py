@@ -2,7 +2,7 @@
 
 # 표준 라이브러리
 from datetime import datetime, timezone as dt_timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, Text, func, CheckConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, Text, func, text, CheckConstraint
 
 # 로컬 애플리케이션
 from app.database import Base
@@ -399,4 +399,79 @@ class AtomicCutoverAsset(Base):
             "AND ready_revision_vector <> '' AND membership_version IS NOT NULL)",
             name="ck_atomic_cutover_asset_payload_consistency",
         ),
+    )
+
+
+class AtomicQuiesceSession(Base):
+    """P1b C6-quiesce Q2a — activation FLIP quiesce session (halt-axis evidence). dormant.
+
+    §9 step 6(개정) live-app quiesce: halt 명령이 `cas_request_halt`와 **같은 tx**에서 이 row를 열어
+    (state='open') 어떤 halt를 drain 중인지 durable 기록. recreate된 fresh app이 atomic_quiesce_app_ack로
+    halt 관측을 ACK하고, Q4 RealQuiesceBoundary가 둘을 join해 begin-atomic을 gate한다.
+    **halt-axis** — cutover bootstrap_session(AtomicCutoverControl)과 별개: quiesce 시점엔 begin-atomic 전이라
+    bootstrap_status=idle, bootstrap_session_id=None. drain = recreate + fresh-process halt ACK (§19 C6-quiesce).
+
+    A1 `AtomicWriteControl` **무접촉**: halt_mode_generation은 value copy(같은 tx `cas_request_halt` 후
+    generation, atomic_write_durable.py:112), A1 컬럼 추가 아님 (C6-1 live-read migration-before-model 위험 회피).
+
+    **history (multi-row)** — id=1 singleton **아님**(재-halt 시 새 session). 동시 1개 open만 partial-unique
+    index(state='open')로 구조 차단. state open|consumed|aborted. CAS brick은 Q2b(atomic_quiesce_durable).
+    `scripts/migrate_atomic_quiesce.py`가 운영(non-test) 유일 생성 경로 (create_all 제외, seed 없음).
+    """
+    __tablename__ = "atomic_quiesce_session"
+
+    id = Column(Integer, primary_key=True)                                   # autoincrement (history, NOT singleton)
+    session_id = Column(String, nullable=False)                             # halt-scoped opaque id (cutover bootstrap_session과 별개)
+    quiesce_row_format_version = Column(Integer, nullable=False, default=1)  # format-fence (A1/C6-1 parity)
+    halt_mode_generation = Column(Integer, nullable=False)                  # post-halt mode_generation (value copy; boundary cond3 baseline)
+    halt_committed_at = Column(DateTime, nullable=False)                    # halt commit 시각 naive UTC (boundary cond4 baseline)
+    state = Column(String, nullable=False, default="open")                  # open|consumed|aborted
+    created_at = Column(DateTime, nullable=False, default=get_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=get_utc_now, onupdate=get_utc_now)
+
+    __table_args__ = (
+        CheckConstraint("quiesce_row_format_version >= 1", name="ck_atomic_quiesce_session_format_version"),
+        CheckConstraint("state IN ('open', 'consumed', 'aborted')", name="ck_atomic_quiesce_session_state"),
+        CheckConstraint("halt_mode_generation >= 0", name="ck_atomic_quiesce_session_halt_generation"),
+        Index("uq_atomic_quiesce_session_id", "session_id", unique=True),
+        # 동시 open 1개만 — partial-unique (PG/sqlite>=3.8). 재-halt가 prior open과 충돌 시 구조적 차단.
+        Index(
+            "uq_atomic_quiesce_session_single_open", "state", unique=True,
+            postgresql_where=text("state = 'open'"), sqlite_where=text("state = 'open'"),
+        ),
+    )
+
+
+class AtomicQuiesceAppAck(Base):
+    """P1b C6-quiesce Q2a — recreate된 fresh app의 halt-관측 ACK (per-boot). dormant.
+
+    recreate 후 새 process가 startup에서 **durable halt를 실제 관측**했음을 증명하는 cross-process bridge:
+    observed_enforced_action==HALT ∧ observed_writer_generation >= session.halt_mode_generation ∧
+    process_started_at > session.halt_committed_at. Q4 ACK-writer가 조건 충족 시 1 row INSERT,
+    Q4 RealQuiesceBoundary가 read해 begin-atomic을 gate. `_INITIAL.enforced_action=LEGACY`
+    (atomic_write_runtime.py:84)라 'recreate 성공'·row 존재만으론 부족 → observed_enforced_action 값을
+    저장+재검증(§19 C6-quiesce codex 보강).
+
+    **multi-row (per boot/retry)** — UNIQUE(session_id, boot_id). session에 hard FK 없음(C6-1 패턴,
+    boundary가 read-join; dangling ACK는 boundary fail-closed ignore). CAS brick은 Q2b.
+    """
+    __tablename__ = "atomic_quiesce_app_ack"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String, nullable=False)                            # link-by-value to session (hard FK 없음)
+    boot_id = Column(String, nullable=False)                               # fresh process 식별 (startup uuid)
+    process_started_at = Column(DateTime, nullable=False)                  # process boot 시각 naive UTC (boundary cond4 LHS)
+    observed_writer_generation = Column(Integer, nullable=False)           # startup snapshot.mode_generation (boundary cond3 LHS)
+    observed_enforced_action = Column(String, nullable=False)              # startup snapshot.enforced_action (boundary cond2; brick은 'halt'만 write)
+    observed_at = Column(DateTime, nullable=False, default=get_utc_now)    # ACK write 시각 (latest-wins tiebreak)
+    queue_size = Column(Integer, nullable=True)                            # 선택 진단(Selenium queue depth) — boundary 미사용(§19)
+
+    __table_args__ = (
+        CheckConstraint(
+            "observed_enforced_action IN ('legacy', 'atomic', 'halt')",
+            name="ck_atomic_quiesce_app_ack_observed_action",
+        ),
+        CheckConstraint("observed_writer_generation >= 0", name="ck_atomic_quiesce_app_ack_observed_generation"),
+        CheckConstraint("queue_size IS NULL OR queue_size >= 0", name="ck_atomic_quiesce_app_ack_queue_size"),
+        Index("uq_atomic_quiesce_app_ack_session_boot", "session_id", "boot_id", unique=True),
     )
