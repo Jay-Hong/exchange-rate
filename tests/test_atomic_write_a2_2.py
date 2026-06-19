@@ -96,12 +96,15 @@ class TestInvestingGate(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse(db.commit.called)
 
-    def test_atomic_skips_staging(self):
+    def test_atomic_routes_to_atomic_branch(self):
+        # C6-5b-3c: investing atomic도 더 이상 fail-closed skip 아님 — _insert_investing_rates_atomic로 라우팅
+        # (bank 대칭, A2-3 시점 test_atomic_skips_staging의 의도적 flip).
         db = MagicMock()
         with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
-             patch("app.crud._stage_investing_rate_changes", side_effect=AssertionError):
+             patch("app.crud._insert_investing_rates_atomic", return_value=2) as atomic_branch:
             result = crud.insert_investing_rates_into_db(db, {"usd-krw": 1300.0})
-        self.assertEqual(result, 0)
+        atomic_branch.assert_called_once()
+        self.assertEqual(result, 2)
 
 
 class TestRefreshWrapper(unittest.TestCase):

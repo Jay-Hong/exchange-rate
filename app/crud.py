@@ -605,6 +605,59 @@ def _stage_investing_rate_changes(db: Session, current_rates: dict) -> List["Sta
     return staged
 
 
+def _insert_investing_rates_atomic(db: Session, current_rates: dict) -> int:
+    """Investing 환율 **atomic-mode** writer (C6-5b-3c) — bank `_insert_bank_rates_atomic` 대칭.
+
+    DB commit은 legacy 동일, Redis는 v1 SET 대신 v2 compare_write (key_kind="investing" →
+    latest_key_investing(asset)). 순서/격리/alert(DB-authoritative axis #3)/trigger(APPLIED subset axis #2)는
+    bank와 동일 — `_atomic_write_changes_v2` 재사용. banner는 caller(insert_investing_rates_into_db)가 이미 출력.
+    **post-commit Redis 실패/예외는 rollback·alert·return 막지 않음**(DB 이미 commit). atomic mode는
+    C6-FLIP(must-confirm)까지 prod 미발화.
+    """
+    staged = _stage_investing_rate_changes(db, current_rates)
+    new_records_count = len(staged)
+
+    if new_records_count > 0:
+        changes = [sc.change for sc in staged]
+        redis_updates = _changes_to_redis_updates(changes)   # legacy와 동일 topic-native shape (commit 전)
+        changed_rates = _changes_to_fcm(changes)
+
+        db.flush()  # autoflush=False → id 할당 위해 명시 flush
+        # flush 후·commit 전 revision capture (expire_on_commit 회피, §16:229)
+        captured = [(sc.change, sc.revision) for sc in staged]
+
+        db.commit()
+        logger.info(
+            f"🎉 총 {new_records_count}개 Investing의 새로운 환율 데이터 저장 완료 (atomic v2)",
+            extra={"count": new_records_count, "bank": "investing"},
+        )
+
+        # post-commit Redis v2 (best-effort, FULLY isolated — 아래 alert/trigger/return 보호)
+        applied_updates = _atomic_write_changes_v2(captured, redis_updates, "investing", key_kind="investing")
+
+        # alert는 DB-authoritative — Redis outcome 무관, 전 committed change 발화 (axis #3, legacy 동일)
+        if changed_rates:
+            try:
+                sent_count = process_rate_alerts(db, changed_rates)
+                if sent_count > 0:
+                    logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": "investing", "sent": sent_count})
+            except Exception as e:
+                logger.exception("알림 처리 중 예외 발생", extra={"bank": "investing", "error": str(e)})
+
+        # topic trigger — APPLIED subset만 (axis #2 SET-only gating)
+        try:
+            _emit_topic_triggers(applied_updates)
+        except Exception:
+            logger.exception("topic trigger emission 실패 (격리)", extra={"bank": "investing"})
+
+    elif current_rates:
+        logger.debug("✋ 모든 Investing 환율 확인 완료 - 변경사항 없음", extra={"bank": "investing"})
+    else:
+        logger.warning("🈚️ Investing 환율 데이터 없음", extra={"bank": "investing", "source": "crud"})
+
+    return new_records_count
+
+
 def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
     """Investing 환율 DB 저장 + Redis direct write + 알림 조건 체크.
 
@@ -617,15 +670,15 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
     """
     logger.info("|                Investing 환율                 |", extra={"bank": "investing"})
 
-    # P1b A2-2: write-mode gate (bank과 동일). banner 직후·staging 전.
+    # P1b A2-2/C6-5b-3c: write-mode gate (bank과 동일 3-way). banner 직후·staging 전.
+    #   atomic → 별 분기 _insert_investing_rates_atomic (bank 대칭) / halt(미지값) → skip+return 0 / legacy 불변.
     enforced = atomic_write_runtime.snapshot().enforced_action
+    if enforced == WriterMode.ATOMIC:
+        return _insert_investing_rates_atomic(db, current_rates)
     if enforced != WriterMode.LEGACY:
         _record_write_mode_skip("investing", enforced)
         return 0
 
-    # ⚠️ investing atomic 분기는 C6-5b-3c — 현재 atomic은 위 gate에서 fail-closed skip(bank만 3b에서 atomicize).
-    #   결과: investing atomic은 여전히 _record_write_mode_skip 증가 / bank atomic은 미증가(별 분기로 라우팅) —
-    #   skip-counter 의미가 두 source 간 transient 비대칭(3c가 investing atomicize 시 해소, telemetry-only).
     staged = _stage_investing_rate_changes(db, current_rates)
     new_records_count = len(staged)
 
