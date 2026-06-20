@@ -10,6 +10,7 @@ import ast
 import json
 import pathlib
 import unittest
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -20,9 +21,12 @@ from app.atomic_cutover_durable import (
     CasResult,
     CutoverAssetView,
     CutoverControlView,
+    cas_acquire_migration_lease,
     cas_advance_status,
     cas_begin_cutover,
     cas_flip_asset_ready,
+    cas_release_migration_lease,
+    cas_renew_migration_lease,
     cas_reset_to_idle,
     control_plane_readiness_ok,
     derive_cutover_state,
@@ -310,6 +314,112 @@ class TestCasResultNaming(unittest.TestCase):
         # caller-commits라 APPLIED(staged), COMMITTED 아님. ERROR 제거(DB 예외는 전파, codex).
         names = {m.name for m in CasResult}
         self.assertEqual(names, {"APPLIED", "CAS_LOST", "PRECONDITION_FAILED"})
+
+
+class TestMigrationLease(unittest.TestCase):
+    """C6-PRE-build-a — migration lease CAS (app-clock Option A): acquire/renew/release + crash-takeover + boundary."""
+
+    _NOW = datetime(2026, 6, 20, 6, 0, 0)
+
+    def _acquire(self, db, owner, now, ttl=300):
+        r = cas_acquire_migration_lease(db, owner=owner, now=now, ttl_seconds=ttl)
+        db.commit()
+        return r
+
+    def test_acquire_when_unleased(self):
+        db = _session(); _seed(db)
+        self.assertIs(self._acquire(db, "op1", self._NOW), CasResult.APPLIED)
+        c = read_cutover_control(db)
+        self.assertEqual(c.lease_owner, "op1")
+        self.assertEqual(c.lease_expiry, self._NOW + timedelta(seconds=300))
+
+    def test_acquire_held_by_other_refused(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        self.assertIs(self._acquire(db, "op2", self._NOW + timedelta(seconds=10)), CasResult.PRECONDITION_FAILED)
+        self.assertEqual(read_cutover_control(db).lease_owner, "op1")  # 불변
+
+    def test_acquire_expired_takeover(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        # now > op1 expiry(+300) → crash-takeover
+        self.assertIs(self._acquire(db, "op2", self._NOW + timedelta(seconds=301)), CasResult.APPLIED)
+        self.assertEqual(read_cutover_control(db).lease_owner, "op2")
+
+    def test_acquire_at_exact_expiry_still_held(self):
+        # boundary: now == expiry → `< now` False → still held → 타 owner 거부 (renew >= now과 일관)
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        self.assertIs(self._acquire(db, "op2", self._NOW + timedelta(seconds=300)), CasResult.PRECONDITION_FAILED)
+        self.assertEqual(read_cutover_control(db).lease_owner, "op1")
+
+    def test_acquire_same_owner_reacquire_idempotent(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        self.assertIs(self._acquire(db, "op1", self._NOW + timedelta(seconds=10)), CasResult.APPLIED)
+        self.assertEqual(read_cutover_control(db).lease_expiry, self._NOW + timedelta(seconds=310))
+
+    def test_renew_valid_own(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        r = cas_renew_migration_lease(db, owner="op1", now=self._NOW + timedelta(seconds=100), ttl_seconds=300)
+        db.commit()
+        self.assertIs(r, CasResult.APPLIED)
+        self.assertEqual(read_cutover_control(db).lease_expiry, self._NOW + timedelta(seconds=400))
+
+    def test_renew_expired_refused(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        r = cas_renew_migration_lease(db, owner="op1", now=self._NOW + timedelta(seconds=301), ttl_seconds=300)
+        db.commit()
+        self.assertIs(r, CasResult.PRECONDITION_FAILED)  # 만료된 own lease는 renew 불가(acquire로 재획득)
+
+    def test_renew_not_owner_refused(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        r = cas_renew_migration_lease(db, owner="op2", now=self._NOW + timedelta(seconds=10), ttl_seconds=300)
+        db.commit()
+        self.assertIs(r, CasResult.PRECONDITION_FAILED)
+
+    def test_release_own_paired_null(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        r = cas_release_migration_lease(db, owner="op1"); db.commit()
+        self.assertIs(r, CasResult.APPLIED)
+        c = read_cutover_control(db)
+        self.assertIsNone(c.lease_owner); self.assertIsNone(c.lease_expiry)  # paired-null CHECK 정합
+
+    def test_release_not_owner_refused(self):
+        db = _session(); _seed(db); self._acquire(db, "op1", self._NOW)
+        r = cas_release_migration_lease(db, owner="op2"); db.commit()
+        self.assertIs(r, CasResult.PRECONDITION_FAILED)
+        self.assertEqual(read_cutover_control(db).lease_owner, "op1")  # 불변
+
+    def test_param_validation_fail_closed(self):
+        db = _session(); _seed(db)
+        self.assertIs(cas_acquire_migration_lease(db, owner="", now=self._NOW, ttl_seconds=300),
+                      CasResult.PRECONDITION_FAILED)
+        self.assertIs(cas_acquire_migration_lease(db, owner="op1", now=self._NOW, ttl_seconds=0),
+                      CasResult.PRECONDITION_FAILED)
+        self.assertIs(cas_acquire_migration_lease(db, owner="op1", now=self._NOW, ttl_seconds=True),
+                      CasResult.PRECONDITION_FAILED)  # bool 거부
+        self.assertIs(cas_acquire_migration_lease(db, owner="op1", now="2026-06-20", ttl_seconds=300),
+                      CasResult.PRECONDITION_FAILED)  # non-datetime 거부
+        self.assertIs(cas_release_migration_lease(db, owner=""), CasResult.PRECONDITION_FAILED)
+        # 검증 실패는 mutation 0 (unleased 유지)
+        self.assertIsNone(read_cutover_control(db).lease_owner)
+
+    def test_acquire_normalizes_aware_now(self):
+        from datetime import timezone as _tz
+        db = _session(); _seed(db)
+        aware = datetime(2026, 6, 20, 6, 0, 0, tzinfo=_tz.utc)
+        r = cas_acquire_migration_lease(db, owner="op1", now=aware, ttl_seconds=300); db.commit()
+        self.assertIs(r, CasResult.APPLIED)
+        exp = read_cutover_control(db).lease_expiry
+        self.assertIsNone(exp.tzinfo)  # aware → naive UTC 정규화
+        self.assertEqual(exp, datetime(2026, 6, 20, 6, 5, 0))
+
+    def test_acquire_format_mismatch_fail_closed(self):
+        # 방어적 format fence: corrupt/future format(=2) row 위에선 lease 미획득 (control row 직접 구성)
+        db = _session()
+        db.add(AtomicCutoverControl(id=1, cutover_row_format_version=2, bootstrap_generation=0,
+                                    bootstrap_status="idle", bootstrap_session_id=None))
+        db.commit()
+        r = cas_acquire_migration_lease(db, owner="op1", now=self._NOW, ttl_seconds=300); db.commit()
+        self.assertIs(r, CasResult.PRECONDITION_FAILED)
+        self.assertIsNone(read_cutover_control(db).lease_owner)
 
 
 class TestDisambiguateControlFreshRead(unittest.TestCase):

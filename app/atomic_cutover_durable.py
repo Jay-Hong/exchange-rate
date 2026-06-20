@@ -15,7 +15,10 @@ from __future__ import annotations
 import enum
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, Mapping, Optional
+
+from sqlalchemy import or_
 
 from app.atomic_cutover import CutoverState, is_allowed_transition
 from app.atomic_value_schema import parse_revision_key
@@ -362,3 +365,102 @@ def cas_flip_asset_ready(
     if result == 1:
         return CasResult.APPLIED
     return CasResult.PRECONDITION_FAILED  # 이미 ready거나 row 부재 (asset엔 generation fence 없음)
+
+
+# ────────────────────────────── migration lease CAS (C6-PRE-build-a, §18) ──────────────────────────────
+# concurrent migration runner 방지 + crash-takeover. **app-clock(Option A, codex thread 019ee30e)**: lease_expiry
+# 비교/설정 모두 caller-passed `now`(app-clock, cas_activate_atomic now= idiom) — cross-dialect testable
+# (sqlite/PostgreSQL, func.now()+interval 회피) + Dockerfile --workers 1 단일 EC2 host라 migration runner가
+# 같은 wall clock 공유 → skew 무시 가능. ⚠️ **단일 clock source 가정**(multi-host 확장 시 DB-clock 재검토).
+# crash-takeover = `lease_expiry < now`(만료 strict 후에만 인수; ==now은 still-held, renew `>= now`과 boundary 일관).
+# format fence(codex endorse, 방어적 — corrupt/future format row 위에서 migration lease 잡지 않음; sibling cutover
+# CAS는 format 미fence[B4 command-level]이나 lease는 migration 권위라 직접 fence).
+_CUTOVER_ROW_FORMAT_VERSION = 1
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """tz-aware → UTC naive 정규화 (lease_expiry 컬럼 naive 정합; get_utc_now()는 naive라 통상 no-op)."""
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
+def _valid_owner(v: object) -> bool:
+    return isinstance(v, str) and bool(v)
+
+
+def _valid_ttl(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def cas_acquire_migration_lease(
+    db: "Session", *, owner: str, now: datetime, ttl_seconds: int
+) -> CasResult:
+    """migration lease 획득: unleased(owner NULL) / expired(crash-takeover, lease_expiry < now) /
+    same-owner re-acquire(idempotent — partial retry 안전). caller-commits.
+
+    fence: id=1 AND format ok AND (lease_owner IS NULL OR lease_expiry < :now OR lease_owner=:owner)
+    → SET lease_owner=:owner, lease_expiry=:now+ttl. affected==1 → APPLIED / 0 → PRECONDITION_FAILED
+    (타 owner non-expired lease 보유 / format mismatch / row 부재). DB 예외 전파.
+    """
+    if not _valid_owner(owner) or not _valid_ttl(ttl_seconds) or not isinstance(now, datetime):
+        return CasResult.PRECONDITION_FAILED
+    now = _naive_utc(now)
+    expiry = now + timedelta(seconds=ttl_seconds)
+    result = (
+        db.query(AtomicCutoverControl)
+        .filter(
+            AtomicCutoverControl.id == 1,
+            AtomicCutoverControl.cutover_row_format_version == _CUTOVER_ROW_FORMAT_VERSION,
+            or_(
+                AtomicCutoverControl.lease_owner.is_(None),
+                AtomicCutoverControl.lease_expiry < now,
+                AtomicCutoverControl.lease_owner == owner,
+            ),
+        )
+        .update({"lease_owner": owner, "lease_expiry": expiry}, synchronize_session=False)
+    )
+    return CasResult.APPLIED if result == 1 else CasResult.PRECONDITION_FAILED
+
+
+def cas_renew_migration_lease(
+    db: "Session", *, owner: str, now: datetime, ttl_seconds: int
+) -> CasResult:
+    """own **valid** lease 갱신(strict — 만료된 own lease는 renew 불가, acquire로 재획득). caller-commits.
+
+    fence: id=1 AND format ok AND lease_owner=:owner AND lease_expiry >= :now → SET lease_expiry=:now+ttl.
+    affected==1 → APPLIED / 0 → PRECONDITION_FAILED (lease 상실/만료/타 owner/row 부재). DB 예외 전파.
+    """
+    if not _valid_owner(owner) or not _valid_ttl(ttl_seconds) or not isinstance(now, datetime):
+        return CasResult.PRECONDITION_FAILED
+    now = _naive_utc(now)
+    expiry = now + timedelta(seconds=ttl_seconds)
+    result = (
+        db.query(AtomicCutoverControl)
+        .filter(
+            AtomicCutoverControl.id == 1,
+            AtomicCutoverControl.cutover_row_format_version == _CUTOVER_ROW_FORMAT_VERSION,
+            AtomicCutoverControl.lease_owner == owner,
+            AtomicCutoverControl.lease_expiry >= now,
+        )
+        .update({"lease_expiry": expiry}, synchronize_session=False)
+    )
+    return CasResult.APPLIED if result == 1 else CasResult.PRECONDITION_FAILED
+
+
+def cas_release_migration_lease(db: "Session", *, owner: str) -> CasResult:
+    """own lease 해제 → lease_owner=NULL, lease_expiry=NULL(paired-null CHECK 정합). caller-commits.
+
+    fence: id=1 AND format ok AND lease_owner=:owner. affected==1 → APPLIED / 0 → PRECONDITION_FAILED
+    (미보유/타 owner/row 부재). DB 예외 전파. (만료 여부 무관 — 자기 owner면 해제 가능.)
+    """
+    if not _valid_owner(owner):
+        return CasResult.PRECONDITION_FAILED
+    result = (
+        db.query(AtomicCutoverControl)
+        .filter(
+            AtomicCutoverControl.id == 1,
+            AtomicCutoverControl.cutover_row_format_version == _CUTOVER_ROW_FORMAT_VERSION,
+            AtomicCutoverControl.lease_owner == owner,
+        )
+        .update({"lease_owner": None, "lease_expiry": None}, synchronize_session=False)
+    )
+    return CasResult.APPLIED if result == 1 else CasResult.PRECONDITION_FAILED
