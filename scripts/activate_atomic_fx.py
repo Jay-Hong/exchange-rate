@@ -101,6 +101,7 @@ from app.atomic_write_durable import (  # noqa: E402
     cas_request_incident_halt,
 )
 from app.fx_membership import FX_MEMBERSHIP_VERSION  # noqa: E402
+from app.models import AtomicQuiesceAppAck, AtomicQuiesceSession  # noqa: E402  (C6-quiesce Q4b RealQuiesceBoundary read)
 
 # cutover row format은 cutover CAS가 fence하지 않음(codex B4) → command가 이 값과 일치할 때만 진행.
 # (writer 측 CONTROL_ROW_FORMAT_VERSION와 별개 — cutover table은 자체 format 컬럼.)
@@ -126,6 +127,73 @@ class _FailClosedQuiesceBoundary:
 
     def confirm_quiesced(self) -> bool:
         return False
+
+
+class RealQuiesceBoundary:
+    """C6-quiesce Q4b — durable ACK 기반 quiesce 검증 (begin-atomic machine gate).
+
+    `_FailClosedQuiesceBoundary`(항상 False)의 **일반화** — recreate된 fresh app이 durable halt를 관측해 남긴
+    ACK(Q4a)가 §9 step6 4조건을 만족할 때만 True. read-only(자체 SessionLocal), **never-raise → False**(stub의
+    안전 floor 보존 — 어떤 read/parse/table-absent 실패도 False). consume는 begin-atomic 몫(boundary 아님).
+
+    ⚠️ **주입은 C6-FLIP only** — 이 클래스는 정의만, `AtomicFxActivator.__init__` default kwarg는
+    `_FailClosedQuiesceBoundary` 유지, `main()`도 무주입(legacy/pre-FLIP은 항상 fail-closed). app/ 아닌 scripts/라
+    app dormancy trip-wire 무관(activate_atomic_fx는 이미 app.atomic_*_durable import).
+
+    confirm_quiesced() True 조건 (전부 AND):
+      STEP1 open quiesce session 존재(partial-unique라 최대 1개).
+      FRESH AtomicWriteControl read (defense-in-depth — ACK write 이후 generation bump 포착):
+        format==CONTROL_ROW_FORMAT_VERSION / requested_mode==HALT(cond1 live) /
+        mode_generation==session.halt_mode_generation(**exact pin** — ACK의 >= 보다 tight, superseded halt
+        fail-close) / activation_epoch==0(activation quiesce 한정).
+      STEP2 latest qualifying ACK (value-join session_id, observed_at DESC):
+        observed_enforced_action=='halt'(cond2) / observed_writer_generation>=session.halt_mode_generation(cond3) /
+        process_started_at>session.halt_committed_at(cond4).
+    """
+
+    def confirm_quiesced(self) -> bool:
+        db = None
+        try:
+            from app.database import SessionLocal  # lazy (main() 패턴)
+
+            db = SessionLocal()
+            session = (
+                db.query(AtomicQuiesceSession)
+                .populate_existing()
+                .filter(AtomicQuiesceSession.state == "open")
+                .first()
+            )
+            if session is None:
+                return False
+            ctrl = read_control_row(db)
+            if ctrl is None or ctrl.control_row_format_version != CONTROL_ROW_FORMAT_VERSION:
+                return False
+            if ctrl.requested_mode != WriterMode.HALT:  # cond1 live
+                return False
+            if ctrl.mode_generation != session.halt_mode_generation:  # cond3-fresh exact pin
+                return False
+            if ctrl.activation_epoch != 0:  # activation quiesce 한정 (incident-halt epoch>=1)
+                return False
+            ack = (
+                db.query(AtomicQuiesceAppAck)
+                .filter(
+                    AtomicQuiesceAppAck.session_id == session.session_id,
+                    AtomicQuiesceAppAck.observed_enforced_action == WriterMode.HALT,  # cond2
+                    AtomicQuiesceAppAck.observed_writer_generation >= session.halt_mode_generation,  # cond3
+                    AtomicQuiesceAppAck.process_started_at > session.halt_committed_at,  # cond4
+                )
+                .order_by(AtomicQuiesceAppAck.observed_at.desc(), AtomicQuiesceAppAck.id.desc())
+                .first()
+            )
+            return ack is not None
+        except Exception:
+            return False  # never-raise: stub의 fail-closed floor 일반화 (read/table-absent 실패도 False)
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
 
 # ────────────────────────────── resume action (pure) ──────────────────────────────
