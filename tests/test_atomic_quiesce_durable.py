@@ -228,25 +228,31 @@ class TestConsumeSession(unittest.TestCase):
 
 
 class TestDormancy(unittest.TestCase):
-    """C6-quiesce Q2b dormant — app/ 어떤 live 모듈도 atomic_quiesce_durable import 0 (Q4까지 caller 0)."""
+    """C6-quiesce Q2b/Q4a — atomic_quiesce_durable를 import하는 app/ live 모듈은 sanctioned set뿐.
 
-    _ISLAND = frozenset({"atomic_quiesce_durable.py"})
+    Q2b 시점 caller 0. Q4a에서 atomic_quiesce_startup.py(startup halt-ACK writer)가 sanctioned importer로
+    추가됨 (crud→atomic_direct_write C6-5b-3b 선례 — offenders-allowlist 전환). main.py는 atomic_quiesce_startup만
+    import(island 직접 아님)이라 sanctioned set에 불포함. self(atomic_quiesce_durable.py)도 skip.
+    """
 
-    def test_no_live_module_imports_quiesce_durable(self):
+    _SANCTIONED_IMPORTERS = frozenset({"atomic_quiesce_durable.py", "atomic_quiesce_startup.py"})
+
+    def test_only_sanctioned_modules_import_quiesce_durable(self):
         app_dir = pathlib.Path(aqd.__file__).resolve().parent
+        offenders = []
         for py in sorted(app_dir.rglob("*.py")):
-            if py.name in self._ISLAND:
+            if py.name in self._SANCTIONED_IMPORTERS:
                 continue
-            rel = py.relative_to(app_dir)
             tree = ast.parse(py.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module \
                         and node.module.split(".")[-1] == "atomic_quiesce_durable":
-                    self.fail(f"{rel}: from atomic_quiesce_durable import — dormant 위반")
-                if isinstance(node, ast.Import):
+                    offenders.append(py.name)
+                elif isinstance(node, ast.Import):
                     for a in node.names:
                         if a.name.split(".")[-1] == "atomic_quiesce_durable":
-                            self.fail(f"{rel}: import atomic_quiesce_durable — dormant 위반")
+                            offenders.append(py.name)
+        self.assertEqual(offenders, [], f"unsanctioned import of atomic_quiesce_durable: {offenders}")
 
     def test_no_import_time_scheduling(self):
         src = pathlib.Path(aqd.__file__).read_text(encoding="utf-8")

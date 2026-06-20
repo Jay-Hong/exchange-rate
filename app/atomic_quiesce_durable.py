@@ -192,3 +192,18 @@ def cas_consume_quiesce_session(db: "Session", *, session_id: str) -> CasResult:
     if result == 1:
         return CasResult.APPLIED
     return CasResult.PRECONDITION_FAILED
+
+
+def find_open_quiesce_session(db: "Session") -> Optional[AtomicQuiesceSession]:
+    """현재 open 상태 quiesce session 1개 read (없으면 None). partial-unique(state='open')라 최대 1개.
+
+    Q4-A startup ACK-writer가 session_id 확보용으로 호출(cas_record_quiesce_app_ack는 (session_id, state='open')
+    lookup이라 caller가 session_id를 먼저 알아야 함). pure read(populate_existing — identity-map stale 회피).
+    table 부재(create_all 제외, pre-migrate) 시 query가 raise → caller(startup module)가 no-throw로 흡수.
+    """
+    return (
+        db.query(AtomicQuiesceSession)
+        .populate_existing()
+        .filter(AtomicQuiesceSession.state == _OPEN)
+        .first()
+    )

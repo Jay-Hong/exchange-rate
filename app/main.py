@@ -537,6 +537,12 @@ async def lifespan(app: FastAPI):
     # 스케줄러 시작 (Queue를 사용하는 작업 + WebSocket Broadcasting 포함)
     scheduler.start_scheduler()
 
+    # C6-quiesce Q4a — recreate된 fresh app의 halt-관측 ACK (§9 step6, no-throw).
+    # start_scheduler()가 startup refresh_write_mode_cache()를 동기 실행한 *직후*라 snapshot이 durable halt
+    # 반영. open quiesce session 없으면(=legacy steady state) no-op, table 부재 시에도 no-throw → startup 영향 0.
+    from app.atomic_quiesce_startup import record_app_ack_if_quiescing
+    await asyncio.to_thread(record_app_ack_if_quiescing)
+
     # ✅ Broadcasting은 APScheduler에서 자동 실행 (매분 00, 10, 20, 30, 40, 50초)
 
     # PR6c-2b — KRX 미국달러선물 client (background bootstrap, 즉시 return)
