@@ -216,11 +216,25 @@ _STATUS_PROGRESSION = frozenset({
 
 
 def _disambiguate_control(db: "Session", expected_generation: int) -> CasResult:
-    """rowcount==0 시 CAS_LOST(gen 전진) vs PRECONDITION_FAILED(status/session 불일치) 구분 — re-SELECT."""
-    cur = read_cutover_control(db)
+    """rowcount==0 시 CAS_LOST(gen 전진) vs PRECONDITION_FAILED(status/session 불일치) 구분 — re-SELECT.
+
+    **populate_existing()** = identity-map의 stale 객체 대신 DB fresh state(다른 세션이 commit한
+    bootstrap_generation 전진을 정확히 관측, READ COMMITTED 전제 — CAS 브릭의 bulk
+    .update(synchronize_session=False)는 identity-map 미동기라 일반 re-read는 stale 반환). C6-8a
+    _disambiguate(atomic_write_durable.py:60) 대칭. 공유 read_cutover_control(:57)은 LIVE path(runtime
+    refresh_from_db / status endpoint / publisher gate 소비)라 pure-read 유지 — 여기서만 전용 fresh 쿼리.
+    ⚠️ C6-8a와 달리 format-precedence는 의도적 미포함(cutover CAS는 format을 fence하지 않아 format-mismatch
+    CAS_LOST 오분류 hazard가 없음) — '미러 완성' 목적으로 format 분기를 추가하지 말 것.
+    """
+    cur = (
+        db.query(AtomicCutoverControl)
+        .populate_existing()
+        .filter(AtomicCutoverControl.id == 1)
+        .first()
+    )
     if cur is None:
         return CasResult.PRECONDITION_FAILED
-    if cur.generation > expected_generation:
+    if cur.bootstrap_generation > expected_generation:
         return CasResult.CAS_LOST
     return CasResult.PRECONDITION_FAILED
 

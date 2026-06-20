@@ -312,6 +312,50 @@ class TestCasResultNaming(unittest.TestCase):
         self.assertEqual(names, {"APPLIED", "CAS_LOST", "PRECONDITION_FAILED"})
 
 
+class TestDisambiguateControlFreshRead(unittest.TestCase):
+    """C6-2 follow-up — _disambiguate_control이 identity-map stale 객체 대신 fresh read(populate_existing)로
+    CAS_LOST를 정확 분류 (C6-8a TestDisambiguateFreshRead 대칭).
+
+    ⚠️ read_cutover_control은 frozen CutoverControlView DTO를 반환해 ORM row가 GC됨(weakref identity-map) →
+    staleness를 재현하려면 ORM AtomicCutoverControl row에 strong ref를 직접 유지해야 함(C6-8a read_control_row는
+    ORM 객체를 반환해 '공짜로' 얻지만 cutover read helper는 DTO라 명시 보강 필요 — 이 차이를 빠뜨리면 테스트가
+    fix 없이도 PASS해 회귀 가드로 무력). per-session 공유를 위해 file-backed engine 사용(_session()의 :memory:는
+    세션 간 공유 불가).
+    """
+
+    def _shared_engine(self):
+        import os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix="_acd.db")
+        os.close(fd)
+        engine = create_engine(f"sqlite:///{path}")
+        AtomicCutoverControl.__table__.create(bind=engine)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return engine
+
+    def test_concurrent_advance_classified_cas_lost(self):
+        engine = self._shared_engine()
+        Session = sessionmaker(bind=engine)
+        sa, sb = Session(), Session()
+        self.addCleanup(sa.close); self.addCleanup(sb.close)
+        # idle control 시드 (gen=0)
+        sa.add(AtomicCutoverControl(id=1, cutover_row_format_version=1, bootstrap_generation=0,
+                                    bootstrap_status="idle", bootstrap_session_id=None))
+        sa.commit()
+        # A가 ORM row를 strong ref로 선load → identity-map에 gen=0 stale 캐시 유발.
+        # (DTO 반환 read_cutover_control로는 ORM이 GC돼[weakref map] staleness 미재현 — Lens A 발견.)
+        stale_ref = sa.query(AtomicCutoverControl).filter(AtomicCutoverControl.id == 1).first()
+        self.assertEqual(stale_ref.bootstrap_generation, 0)
+        # B가 begin_cutover로 전진 + commit (gen 0→1, status running, session 점유)
+        self.assertIs(cas_begin_cutover(sb, new_session="s:B", expected_generation=0), CasResult.APPLIED)
+        sb.commit()
+        # A가 같은 expected=0 재시도 → fence(idle AND session IS NULL) mismatch로 rowcount 0 →
+        # _disambiguate_control fresh read가 gen 1>0 관측 → CAS_LOST (stale이면 gen=0이라 PRECONDITION_FAILED 오분류).
+        self.assertIs(cas_begin_cutover(sa, new_session="s:A", expected_generation=0), CasResult.CAS_LOST)
+        # populate_existing이 identity-map의 stale_ref도 fresh로 refresh(side effect) → gen 1 (stale_ref 생존 보장 겸).
+        self.assertEqual(stale_ref.bootstrap_generation, 1)
+
+
 class TestDormancy(unittest.TestCase):
     """C6-2 dormant — app/ 어떤 live 모듈도 atomic_cutover_durable import 0 (island 멤버끼리만)."""
 
