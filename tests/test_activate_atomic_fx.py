@@ -80,6 +80,13 @@ def _seed_cutover(db, *, status="idle", session_id=None, generation=0,
     db.commit()
 
 
+def _seed_quiesce_open(db, *, session_id="s1", halt_mode_generation=5):
+    """W2: begin-atomic이 discover할 open quiesce session 시드 (halt[W1]가 open한 것 모사)."""
+    db.add(AtomicQuiesceSession(session_id=session_id, halt_mode_generation=halt_mode_generation,
+                                halt_committed_at=datetime(2026, 6, 20), state="open"))
+    db.commit()
+
+
 def _parse(argv):
     return A._build_arg_parser().parse_args(argv)
 
@@ -408,9 +415,11 @@ class TestBeginAtomic(unittest.TestCase):
         self.assertEqual(row.requested_mode, WriterMode.HALT)  # mutation 0
 
     def test_begin_atomic_applied_one_tx(self):
-        # pass boundary + future image → begin-atomic 실제 적용 (writer atomic + cutover running, 1 tx)
+        # pass boundary + future image + open quiesce session → begin-atomic 실제 적용
+        # (writer atomic + cutover running[bootstrap=discovered] + quiesce consume, 1 tx)
         db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
         _seed_cutover(db, status="idle", generation=2)
+        _seed_quiesce_open(db, session_id="s1")  # W2: halt가 open한 lineage id
         with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2):
             out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(
                 _parse(self._argv("--required-protocol", "2", "--target-schema", "2")))
@@ -424,18 +433,91 @@ class TestBeginAtomic(unittest.TestCase):
         self.assertEqual(w.target_write_schema_version, 2)
         c = db.query(AtomicCutoverControl).filter(AtomicCutoverControl.id == 1).one()
         self.assertEqual(c.bootstrap_status, "running")
-        self.assertEqual(c.bootstrap_session_id, "s1")
+        self.assertEqual(c.bootstrap_session_id, "s1")  # W2: discovered lineage id (single shared)
         self.assertEqual(c.bootstrap_generation, 3)
+        # W2: quiesce session consume됨 (open→consumed, same tx)
+        qs = db.query(AtomicQuiesceSession).filter(AtomicQuiesceSession.session_id == "s1").one()
+        self.assertEqual(qs.state, "consumed")
+        self.assertEqual(db.query(AtomicQuiesceSession).filter(AtomicQuiesceSession.state == "open").count(), 0)
 
-    def test_begin_atomic_missing_session_refused(self):
-        db = _session(); _seed_writer(db, requested_mode="halt"); _seed_cutover(db)
+    def test_begin_atomic_no_session_id_uses_discovered(self):
+        # W2: --session-id 없어도 open quiesce session을 DB discover → bootstrap=discovered (optional cross-check)
+        db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
+        _seed_cutover(db, status="idle", generation=2)
+        _seed_quiesce_open(db, session_id="qs")
         with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2):
             argv = ["--apply", "--i-understand-this-flips-production", "--rds-snapshot-confirmed",
                     "--quiesce-confirmed", "--ack-global-writer-mode-scope",
-                    "--required-protocol", "2", "--target-schema", "2"]
+                    "--required-protocol", "2", "--target-schema", "2"]  # no --session-id
             out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(_parse(argv))
+        self.assertEqual(out.exit_code, A._EXIT_OK)
+        c = db.query(AtomicCutoverControl).filter(AtomicCutoverControl.id == 1).one()
+        self.assertEqual(c.bootstrap_session_id, "qs")  # discovered
+
+    def test_begin_atomic_no_open_session_refused(self):
+        # W2: open quiesce session 없으면(halt 미수행/이미 consume) begin-atomic 거부 — drain 미완
+        db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
+        _seed_cutover(db, status="idle", generation=2)  # quiesce session 미시드
+        with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2):
+            out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(
+                _parse(self._argv("--required-protocol", "2", "--target-schema", "2")))
         self.assertEqual(out.exit_code, A._EXIT_REFUSED)
-        self.assertIn("--session-id", out.message)
+        self.assertIn("open quiesce session 없음", out.message)
+        # mutation 0 — writer halt 유지
+        self.assertEqual(db.query(AtomicWriteControl).one().requested_mode, WriterMode.HALT)
+
+    def test_begin_atomic_session_id_cross_check_mismatch_refused(self):
+        # W2 #3: --session-id 주되 discovered와 != → operator mismatch 거부 (DB-authoritative)
+        db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
+        _seed_cutover(db, status="idle", generation=2)
+        _seed_quiesce_open(db, session_id="qs")
+        with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2):
+            out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(
+                _parse(self._argv("--required-protocol", "2", "--target-schema", "2")))  # _argv has --session-id s1
+        self.assertEqual(out.exit_code, A._EXIT_REFUSED)
+        self.assertIn("mismatch", out.message)
+        # mutation 0 — open session(qs) 유지(consume 안 됨)
+        self.assertEqual(db.query(AtomicQuiesceSession).filter(AtomicQuiesceSession.state == "open").count(), 1)
+
+    def test_begin_atomic_plan_surfaces_session_mismatch(self):
+        # W2 parity(codex blocker fix): dry-run(boundary pass)이 --session-id↔discovered mismatch를 blocking에
+        # surface — apply가 refuse하는 것을 dry-run이 미리 노출(parity gap 차단).
+        db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
+        _seed_cutover(db, status="idle", generation=2)
+        _seed_quiesce_open(db, session_id="qs")
+        with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2):
+            argv = ["--required-protocol", "2", "--target-schema", "2", "--session-id", "s1",
+                    "--quiesce-confirmed", "--ack-global-writer-mode-scope"]  # no --apply, mismatch s1!=qs
+            out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(_parse(argv))
+        self.assertEqual(out.status, "plan")
+        self.assertIn("mismatch", out.message)
+
+    def test_begin_atomic_plan_surfaces_no_open_session(self):
+        # W2 parity: dry-run(boundary pass)이 open quiesce session 부재를 blocking에 surface.
+        db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
+        _seed_cutover(db, status="idle", generation=2)  # quiesce 미시드
+        with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2):
+            argv = ["--required-protocol", "2", "--target-schema", "2", "--session-id", "s1",
+                    "--quiesce-confirmed", "--ack-global-writer-mode-scope"]  # no --apply
+            out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(_parse(argv))
+        self.assertEqual(out.status, "plan")
+        self.assertIn("open quiesce session 없음", out.message)
+
+    def test_begin_atomic_consume_failure_rolls_back(self):
+        # W2 원자성(codex noted gap): cas_consume_quiesce_session 실패 시 writer activate + cutover begin 모두 rollback.
+        db = _session(); _seed_writer(db, requested_mode="halt", mode_generation=5, activation_epoch=0)
+        _seed_cutover(db, status="idle", generation=2)
+        _seed_quiesce_open(db, session_id="s1")
+        with patch.object(A, "IMAGE_MAX_WRITER_PROTOCOL", 2), \
+                patch.object(A, "cas_consume_quiesce_session", return_value=A.CasResult.PRECONDITION_FAILED):
+            out = A.AtomicFxActivator(db, quiesce_boundary=_PassBoundary()).run(
+                _parse(self._argv("--required-protocol", "2", "--target-schema", "2")))
+        self.assertEqual(out.exit_code, A._EXIT_FAILED)
+        self.assertIn("cas_consume_quiesce_session", out.message)
+        # rollback — writer halt 유지(atomic 안 됨), cutover idle 유지, quiesce open 유지
+        self.assertEqual(db.query(AtomicWriteControl).one().requested_mode, WriterMode.HALT)
+        self.assertEqual(db.query(AtomicCutoverControl).one().bootstrap_status, "idle")
+        self.assertEqual(db.query(AtomicQuiesceSession).filter(AtomicQuiesceSession.state == "open").count(), 1)
 
     def test_begin_atomic_plan_surfaces_machine_gate(self):
         # review #8: dry-run plan(default fail-closed boundary)이 QuiesceBoundary machine gate를 blocking에 표시

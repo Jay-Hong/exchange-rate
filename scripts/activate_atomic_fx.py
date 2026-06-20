@@ -100,7 +100,11 @@ from app.atomic_write_durable import (  # noqa: E402
     cas_request_halt,
     cas_request_incident_halt,
 )
-from app.atomic_quiesce_durable import cas_open_quiesce_session  # noqa: E402  (W1 halt quiesce session open)
+from app.atomic_quiesce_durable import (  # noqa: E402  (W1 halt open / W2 begin-atomic discover+consume)
+    cas_consume_quiesce_session,
+    cas_open_quiesce_session,
+    find_open_quiesce_session,
+)
 from app.fx_membership import FX_MEMBERSHIP_VERSION  # noqa: E402
 from app.models import AtomicQuiesceAppAck, AtomicQuiesceSession, get_utc_now  # noqa: E402  (Q4b boundary read + W1 halt quiesce open)
 
@@ -454,6 +458,16 @@ class AtomicFxActivator:
             if not self.quiesce_boundary.confirm_quiesced():
                 blocking.append("QuiesceBoundary machine-gate (현재 default fail-closed — C6-quiesce unit이 "
                                 "실 boundary 주입 전엔 begin-atomic 거부, §9:92 activation race)")
+            else:
+                # W2 parity(codex): boundary 통과 시 discovered quiesce session 일관성을 plan에 surface —
+                # _do_begin_atomic이 find-None/--session-id mismatch 시 refuse하므로 dry-run이 미리 노출(apply 예측).
+                # boundary 통과 후에만 find 호출(table-absent 시 RealBoundary가 이미 False → 이 분기 미진입).
+                qsession = find_open_quiesce_session(self.db)
+                if qsession is None:
+                    blocking.append("open quiesce session 없음 — halt(W1) 선행 필요(drain 미완)")
+                elif args.session_id is not None and args.session_id != qsession.session_id:
+                    blocking.append(f"--session-id={args.session_id} != open quiesce session"
+                                    f"({qsession.session_id}) — operator mismatch(DB-authoritative)")
         if not args.apply:
             return self._plan(state, resolved, blocking)
         if blocking:
@@ -511,8 +525,9 @@ class AtomicFxActivator:
         )
 
     def _do_begin_atomic(self, state: ControlState, args: argparse.Namespace) -> PhaseOutcome:
-        """halt→atomic + cutover idle→running, **단일 tx**(codex: stale completed/ready 상속 방지).
-        결과 = §15 atomic/blocked(writer atomic live, publish gate closed)."""
+        """halt→atomic + cutover idle→running + quiesce consume, **단일 tx**(codex: stale completed/ready 상속 방지).
+        결과 = §15 atomic/blocked(writer atomic live, publish gate closed). W2(W0 계약): cutover bootstrap session
+        + consume 모두 **DB-authoritative discovered** quiesce session_id(single shared id) — args 불신."""
         # machine gate (default fail-closed → dormant). human ack는 _apply_acks에서 이미 검사됨.
         if not self.quiesce_boundary.confirm_quiesced():
             return self._refuse(
@@ -521,6 +536,21 @@ class AtomicFxActivator:
                 "(실 boundary는 C6-quiesce unit이 주입). begin-atomic 거부(§9:92 activation race 방어).",
             )
         db = self.db
+        # W0: DB-authoritative discover — halt(W1)가 open한 quiesce session을 begin tx의 single shared id로 사용.
+        session = find_open_quiesce_session(db)
+        if session is None:
+            return self._refuse(
+                "begin-atomic",
+                "open quiesce session 없음 — halt(W1)가 session open 안 했거나 이미 consume됨. drain 미완 → 거부.",
+            )
+        # W0 #3: --session-id는 optional cross-check (주면 discovered와 일치해야 — operator-error 검출, DB 권위 불변).
+        if args.session_id is not None and args.session_id != session.session_id:
+            return self._refuse(
+                "begin-atomic",
+                f"--session-id={args.session_id} != open quiesce session({session.session_id}) — operator "
+                "mismatch, 거부(DB-authoritative).",
+            )
+        lineage = session.session_id
         try:
             r1 = cas_activate_atomic(
                 db, expected_generation=state.writer_generation, expected_epoch=state.writer_epoch,
@@ -529,21 +559,25 @@ class AtomicFxActivator:
             if r1 is not CasResult.APPLIED:
                 db.rollback()
                 return self._failed("begin-atomic", f"cas_activate_atomic → {r1.value}")
-            r2 = cas_begin_cutover(db, new_session=args.session_id, expected_generation=state.cutover_generation)
+            r2 = cas_begin_cutover(db, new_session=lineage, expected_generation=state.cutover_generation)
             if r2 is not CasResult.APPLIED:
                 db.rollback()
                 return self._failed("begin-atomic", f"cas_begin_cutover → {r2.value}")
+            r3 = cas_consume_quiesce_session(db, session_id=lineage)
+            if r3 is not CasResult.APPLIED:
+                db.rollback()
+                return self._failed("begin-atomic", f"cas_consume_quiesce_session → {r3.value}")
             db.commit()
         except Exception:
             db.rollback()
             raise
         return PhaseOutcome(
             _EXIT_OK, "begin-atomic", "applied",
-            "writer halt→atomic + cutover idle→running 적용(1 tx, atomic/blocked). 다음: §9:90 app "
-            "recreate-atomic(writer가 atomic mode + cache refresh) → verify(migration self-verify). "
+            "writer halt→atomic + cutover idle→running + quiesce consume 적용(1 tx, atomic/blocked). 다음: §9:90 "
+            "app recreate-atomic(writer가 atomic mode + cache refresh) → verify(migration self-verify). "
             "publish gate는 finalize까지 닫혀 있음.",
             {"writer_generation": state.writer_generation + 1, "writer_epoch": state.writer_epoch + 1,
-             "cutover_generation": state.cutover_generation + 1, "session_id": args.session_id},
+             "cutover_generation": state.cutover_generation + 1, "session_id": lineage},
         )
 
     def _do_verify(self, state: ControlState) -> PhaseOutcome:
@@ -717,8 +751,7 @@ class AtomicFxActivator:
             if not args.ack_global_writer_mode_scope:
                 out.append("--ack-global-writer-mode-scope (requested_mode=atomic은 GLOBAL — USDT/KRX/mirror "
                            "writer가 BLOCKED fail-closed; C6-5b atomicization 확인)")
-            if not args.session_id:
-                out.append("--session-id (cutover bootstrap session)")
+            # W0 #3: begin-atomic --session-id는 optional cross-check(DB-authoritative discover) — 필수 아님.
         return out
 
     def _begin_atomic_capability(self, args: argparse.Namespace) -> List[str]:
