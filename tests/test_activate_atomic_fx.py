@@ -12,6 +12,7 @@ import json
 import pathlib
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,7 +26,13 @@ from app.atomic_cutover_durable import FX_CUTOVER_ASSETS  # noqa: E402
 from app.atomic_fx_v2_loader import FxV2LoadResult  # noqa: E402
 from app.atomic_value_schema import make_revision_key  # noqa: E402
 from app.atomic_write_control import WriterMode  # noqa: E402
-from app.models import AtomicCutoverAsset, AtomicCutoverControl, AtomicWriteControl  # noqa: E402
+from app.models import (  # noqa: E402
+    AtomicCutoverAsset,
+    AtomicCutoverControl,
+    AtomicQuiesceAppAck,
+    AtomicQuiesceSession,
+    AtomicWriteControl,
+)
 
 import activate_atomic_fx as A  # noqa: E402
 
@@ -39,6 +46,8 @@ def _session():
     AtomicWriteControl.__table__.create(bind=engine)
     AtomicCutoverControl.__table__.create(bind=engine)
     AtomicCutoverAsset.__table__.create(bind=engine)
+    AtomicQuiesceSession.__table__.create(bind=engine)
+    AtomicQuiesceAppAck.__table__.create(bind=engine)
     return sessionmaker(bind=engine)()
 
 
@@ -293,7 +302,8 @@ class TestDryRun(unittest.TestCase):
 # ────────────────────────────── halt phase ──────────────────────────────
 class TestHaltPhase(unittest.TestCase):
     def _argv(self, *extra):
-        return ["--apply", "--i-understand-this-flips-production", "--rds-snapshot-confirmed", *extra]
+        return ["--apply", "--i-understand-this-flips-production", "--rds-snapshot-confirmed",
+                "--session-id", "qs1", *extra]
 
     def test_halt_applied(self):
         db = _session(); _seed_writer(db, mode_generation=4); _seed_cutover(db)
@@ -303,6 +313,38 @@ class TestHaltPhase(unittest.TestCase):
         row = db.query(AtomicWriteControl).filter(AtomicWriteControl.id == 1).one()
         self.assertEqual(row.requested_mode, WriterMode.HALT)
         self.assertEqual(row.mode_generation, 5)
+        # W1: activation halt가 quiesce session open (W0 lineage id, halt gen에 pin)
+        qs = db.query(AtomicQuiesceSession).filter(AtomicQuiesceSession.state == "open").one()
+        self.assertEqual(qs.session_id, "qs1")
+        self.assertEqual(qs.halt_mode_generation, 5)
+
+    def test_halt_missing_session_id_refused(self):
+        # W1: activation halt는 --session-id 필수(quiesce session open). 없으면 refuse, mutation 0.
+        db = _session(); _seed_writer(db, mode_generation=4); _seed_cutover(db)
+        out = A.AtomicFxActivator(db).run(_parse(
+            ["--apply", "--i-understand-this-flips-production", "--rds-snapshot-confirmed"]))
+        self.assertEqual(out.exit_code, A._EXIT_REFUSED)
+        self.assertIn("--session-id", out.message)
+        row = db.query(AtomicWriteControl).filter(AtomicWriteControl.id == 1).one()
+        self.assertEqual(row.requested_mode, WriterMode.LEGACY)
+        self.assertEqual(db.query(AtomicQuiesceSession).count(), 0)
+
+    def test_halt_rolls_back_when_quiesce_open_fails(self):
+        # W1 원자성(same tx): 이미 open session 존재 → cas_open_quiesce_session PRECONDITION_FAILED →
+        # cas_request_halt까지 rollback(halt 미적용, 부분 적용 방지).
+        db = _session(); _seed_writer(db, mode_generation=4); _seed_cutover(db)
+        db.add(AtomicQuiesceSession(session_id="pre", halt_mode_generation=4,
+                                    halt_committed_at=datetime(2026, 6, 20), state="open"))
+        db.commit()
+        out = A.AtomicFxActivator(db).run(_parse(self._argv()))
+        self.assertEqual(out.exit_code, A._EXIT_FAILED)
+        self.assertIn("cas_open_quiesce_session", out.message)
+        # halt rollback — writer legacy 유지(gen 불변)
+        row = db.query(AtomicWriteControl).filter(AtomicWriteControl.id == 1).one()
+        self.assertEqual(row.requested_mode, WriterMode.LEGACY)
+        self.assertEqual(row.mode_generation, 4)
+        # 새 session(qs1) 미생성 — 기존 open(pre) 1개만
+        self.assertEqual(db.query(AtomicQuiesceSession).count(), 1)
 
     def test_halt_missing_ack_refused(self):
         db = _session(); _seed_writer(db); _seed_cutover(db)

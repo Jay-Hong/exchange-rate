@@ -51,7 +51,7 @@ usage (dry-run plan):
     python scripts/activate_atomic_fx.py --phase verify-only            # read-only migration self-verify
 apply (C6-FLIP, must-confirm — 이 unit에선 실행 안 함):
     python scripts/activate_atomic_fx.py --apply --i-understand-this-flips-production \\
-        --rds-snapshot-confirmed --phase halt
+        --rds-snapshot-confirmed --phase halt --session-id <id>
     python scripts/activate_atomic_fx.py --apply --i-understand-this-flips-production \\
         --rds-snapshot-confirmed --phase begin-atomic --quiesce-confirmed \\
         --ack-global-writer-mode-scope --required-protocol 2 --target-schema 2 --session-id <id>
@@ -100,8 +100,9 @@ from app.atomic_write_durable import (  # noqa: E402
     cas_request_halt,
     cas_request_incident_halt,
 )
+from app.atomic_quiesce_durable import cas_open_quiesce_session  # noqa: E402  (W1 halt quiesce session open)
 from app.fx_membership import FX_MEMBERSHIP_VERSION  # noqa: E402
-from app.models import AtomicQuiesceAppAck, AtomicQuiesceSession  # noqa: E402  (C6-quiesce Q4b RealQuiesceBoundary read)
+from app.models import AtomicQuiesceAppAck, AtomicQuiesceSession, get_utc_now  # noqa: E402  (Q4b boundary read + W1 halt quiesce open)
 
 # cutover row format은 cutover CAS가 fence하지 않음(codex B4) → command가 이 값과 일치할 때만 진행.
 # (writer 측 CONTROL_ROW_FORMAT_VERSION와 별개 — cutover table은 자체 format 컬럼.)
@@ -463,7 +464,7 @@ class AtomicFxActivator:
     def _dispatch_apply(self, resolved: ResumeAction, state: ControlState,
                         args: argparse.Namespace) -> PhaseOutcome:
         if resolved is ResumeAction.HALT:
-            return self._do_halt(state)
+            return self._do_halt(state, args)
         if resolved is ResumeAction.BEGIN_ATOMIC:
             return self._do_begin_atomic(state, args)
         if resolved is ResumeAction.VERIFY:
@@ -473,23 +474,40 @@ class AtomicFxActivator:
         return self._refuse(resolved.value, f"no apply handler for {resolved.value}")  # 도달 불가
 
     # ── phases (each owns its tx; caller-commits → command commits/rolls back) ──
-    def _do_halt(self, state: ControlState) -> PhaseOutcome:
-        """legacy→halt durable pre-quiesce (§9:88 — ACK보다 먼저 commit)."""
+    def _do_halt(self, state: ControlState, args: argparse.Namespace) -> PhaseOutcome:
+        """legacy→halt durable pre-quiesce + activation quiesce session open (§9:88, W0 계약 — ACK보다 먼저 commit).
+
+        W1: cas_request_halt APPLIED 직후 **같은 tx**에서 cas_open_quiesce_session(activation lineage id 확립)
+        → 1 commit. **원자성**: cas_open 실패 시 halt도 rollback(부분 적용 방지). halt_mode_generation =
+        state.writer_generation+1(staged halt gen — cas_open이 populate_existing 재read로 pin 검증). halt_committed_at
+        = durable halt barrier ts(get_utc_now; DB commit ts 아님 — recreate된 fresh process의 process_started_at >
+        barrier로 ACK cond4 충족, 구 pre-halt process는 거부). incident-halt는 별 phase(cas_request_incident_halt,
+        epoch>=1)라 cas_open 미경유 — cas_open의 activation_epoch==0 fence와 정합.
+        """
         db = self.db
         try:
             r = cas_request_halt(db, expected_generation=state.writer_generation)
             if r is not CasResult.APPLIED:
                 db.rollback()
                 return self._failed("halt", f"cas_request_halt → {r.value}")
+            q = cas_open_quiesce_session(
+                db, session_id=args.session_id,
+                halt_mode_generation=state.writer_generation + 1,
+                halt_committed_at=get_utc_now(),
+            )
+            if q is not CasResult.APPLIED:
+                db.rollback()
+                return self._failed("halt", f"cas_open_quiesce_session → {q.value}")
             db.commit()
         except Exception:
             db.rollback()
             raise
         return PhaseOutcome(
             _EXIT_OK, "halt", "applied",
-            "writer legacy→halt 적용(durable). 다음: 모든 writer가 halt 관측하도록 app recreate/quiesce 후 "
-            "begin-atomic. ⚠️ quiesce drain 확인 전 begin-atomic 금지(§9:92 activation race).",
-            {"writer_generation": state.writer_generation + 1},
+            "writer legacy→halt + activation quiesce session open 적용(durable, 1 tx — W0 lineage id). 다음: 모든 "
+            "writer가 halt 관측하도록 app recreate/quiesce 후 begin-atomic. ⚠️ quiesce drain 확인 전 begin-atomic "
+            "금지(§9:92 activation race).",
+            {"writer_generation": state.writer_generation + 1, "session_id": args.session_id},
         )
 
     def _do_begin_atomic(self, state: ControlState, args: argparse.Namespace) -> PhaseOutcome:
@@ -690,6 +708,9 @@ class AtomicFxActivator:
             out.append("--i-understand-this-flips-production")
         if not args.rds_snapshot_confirmed:
             out.append("--rds-snapshot-confirmed")
+        if resolved is ResumeAction.HALT:
+            if not args.session_id:
+                out.append("--session-id (activation lineage id — halt가 quiesce session open, W0)")
         if resolved is ResumeAction.BEGIN_ATOMIC:
             if not args.quiesce_confirmed:
                 out.append("--quiesce-confirmed (§9 quiesce handshake 완료 human ack)")
@@ -829,7 +850,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-schema", type=int, default=None,
                    help="begin-atomic이 설정할 target_write_schema_version (>= atomic schema floor)")
     p.add_argument("--session-id", type=str, default=None,
-                   help="begin-atomic cutover bootstrap session id")
+                   help="activation lineage id — halt가 quiesce session open(W0) + begin-atomic cutover bootstrap "
+                        "(single shared id)")
     p.add_argument("--expected-writer-generation", type=int, default=None,
                    help="guard: 현재 writer mode_generation (불일치 시 거부)")
     p.add_argument("--expected-writer-epoch", type=int, default=None,
