@@ -439,7 +439,7 @@ A1→A2→A3→A4 → {A5, B1→B2a→B2b→B3} (A4 이후 병렬) → C6(A+B �
 
 - **G1** control rows seeded+format-valid — HARD (activate_atomic_fx.py:387-393/:401-406, compute_effective_mode HALT-on-corrupt atomic_write_control.py:117)
 - **G2a** prod schema tables migrated — operational (3 migrate script idempotent)
-- **G2b** v1→v2 value migration complete — HARD (dry-run all already_current + verify-only; **prod 경로 부재라 C6-PRE-build-b 선행**)
+- **G2b** v1→v2 value migration complete — HARD (dry-run all already_current + verify-only; prod migration 경로 = b2 `--allow-production-migration` ✅ LAND(`29bab06`, drain proof+lease+backstop); migration **실행**은 EXEC-3)
 - **G3** control-plane coherent/no corruption — HARD (resolve_resume_action≠FAIL_CLOSED, derive_cutover_state≠corrupt-HALT_BLOCKED; **관측 gap**: conflict counter write-only crud.py:386, endpoint available:false)
 - **G4** staging rehearsal pass — operational (rehearse_fx_cutover.py; **caveat: 0-sub라 send-path 미검증 + synthetic write_outcomes라 real conflict BLOCK 미검증 = 필요-비충분**)
 - **G5** preflight pass + startup control-readability(§19 T1) — HARD (evaluate_preflight atomic_write_control.py:138-167)
