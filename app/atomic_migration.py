@@ -49,6 +49,19 @@ _REVISION_KEY_RE = re.compile(r"^\d{20}:\d{20}$")
 
 
 @dataclass(frozen=True)
+class ProductionAuthToken:
+    """C6-PRE-build-b2 — prod migration apply 인가 증명 (re-validatable, bool 아님).
+
+    script가 authorize 시(confirm_quiesce_drained drain proof + cas_acquire_migration_lease) 생성해
+    run_migration에 넘긴다. run_migration→_check_apply_target backstop이 이 token으로 control(HALT @
+    expected_generation)+lease(owner) fresh re-read 재검증(TOCTOU 차단). owner=fresh per-run token,
+    expected_generation=operator --expected-writer-generation pin.
+    """
+    owner: str
+    expected_generation: int
+
+
+@dataclass(frozen=True)
 class MigrationDecision:
     """한 latest key의 migration 결정. write action만 v2_value/write_method 동반."""
 
@@ -412,6 +425,7 @@ def run_migration(
     max_retries: int = _DEFAULT_MAX_RETRIES,
     timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
     mirrored_at_factory: Optional[Callable[[], datetime]] = None,
+    production_authorized: Optional[ProductionAuthToken] = None,
 ) -> MigrationRunResult:
     """bank/investing latest v1→v2 migration runner (dry-run 기본).
 
@@ -426,8 +440,9 @@ def run_migration(
     if apply:
         # **실제 write 대상**(인자 db bind + client host)으로 fail-closed 검사 — config.REDIS_URL
         # posture(check_apply_safety, CLI preflight)와 별개로 config≠client인 직접 caller도 차단
-        # (codex Medium). dialect/host 판정 불가 → 차단.
-        block = _check_apply_target(db, client)
+        # (codex Medium). dialect/host 판정 불가 → 차단. production_authorized 있으면 prod posture에서
+        # control+lease fresh re-read 재검증(b2 TOCTOU backstop) → None이면 통과, 실패면 block.
+        block = _check_apply_target(db, client, authorized=production_authorized)
         if block is not None:
             raise RuntimeError(f"run_migration apply 차단 (target guard, defense-in-depth): {block}")
 
@@ -458,26 +473,86 @@ def run_migration(
     return result
 
 
-def _check_apply_target(db, client) -> Optional[str]:
+def _check_apply_target(db, client, *, authorized: Optional[ProductionAuthToken] = None) -> Optional[str]:
     """run_migration apply 시 **실제 write 대상** fail-closed 검사 — db bind dialect + client host.
 
     check_apply_safety(config.REDIS_URL posture, CLI preflight)와 별개. 직접 caller가 config와 다른
     client/db를 주입해도 실제 대상으로 차단(codex Medium — config!=client hole). 판정 불가 → 차단.
     sqlite DB + local Redis client만 허용(C6 lease 전까지). host redact(보안).
+
+    **b2**: authorized(ProductionAuthToken) 있으면 prod posture(non-sqlite/non-local)를 곧장 block하지 않고
+    `_revalidate_production_authorization`로 control(HALT @ expected_generation/format/epoch0) + lease(owner/
+    expiry) **fresh re-read 재검증**(TOCTOU backstop) — None이면 통과(prod apply 허용), 실패면 block string.
+    authorized=None(기존 모든 caller/test): **byte-identical** — sqlite+local만 허용. dialect/host **판정 불가**는
+    authorized 여부 무관 항상 block(fail-closed).
     """
     try:
         dialect = db.get_bind().dialect.name
     except Exception:
         return "DB bind dialect 판정 불가 — apply 차단 (fail-closed)"
-    if dialect != "sqlite":
+    # authorized=None은 기존 순서 보존(non-sqlite면 host 안 읽고 즉시 block) — byte-identical.
+    if dialect != "sqlite" and authorized is None:
         return f"non-sqlite DB (dialect={dialect}) — A3-3b apply는 local 전용 (override 없음). prod=C6."
+    # **host는 authorized 여부 무관 항상 판정**(codex b2 blocker — authorized라도 write 대상 Redis client가
+    # 미판정/malformed면 config!=client hole). 예외/None → block.
     try:
         host = client.connection_pool.connection_kwargs.get("host")
     except Exception:
         return "Redis client host 판정 불가 — apply 차단 (fail-closed)"
-    if host is None or str(host).lower() not in ("localhost", "127.0.0.1", "::1"):
-        return "non-local Redis client — A3-3b apply는 local 전용 (override 없음, fail-closed)."
-    return None
+    host_local = host is not None and str(host).lower() in ("localhost", "127.0.0.1", "::1")
+    if dialect == "sqlite" and host_local:
+        return None  # 기존 local path (authorized 무관 — local sqlite+local Redis는 prod 위험 0, 항상 허용)
+    # 여기 도달 = non-sqlite OR non-local posture
+    if authorized is not None:
+        # authorized override는 **prod DB(non-sqlite) + 판정된 host** 일치 시에만 revalidate. sqlite DB +
+        # non-local Redis는 **env-mismatch** → block (codex b2 blocker2): token이 읽은 control/lease는 그 DB
+        # 것인데(local sqlite=test 데이터) write 대상은 prod Redis → host 판정만으론 환경 일치를 보장 못 함.
+        if dialect == "sqlite":
+            return ("authorized override는 prod DB(non-sqlite) 필요 — sqlite DB + non-local Redis는 "
+                    "env-mismatch (control/lease는 local인데 write 대상은 non-local, fail-closed).")
+        if host is None:
+            return "Redis client host 판정 불가(None) — apply 차단 (fail-closed)"
+        # prod DB + 판정된 host + authorized: DB control+lease fresh re-read 재검증.
+        return _revalidate_production_authorization(db, authorized)
+    # authorized=None + (non-sqlite는 위에서 처리) → sqlite + non-local Redis (byte-identical block)
+    return "non-local Redis client — A3-3b apply는 local 전용 (override 없음, fail-closed)."
+
+
+def _revalidate_production_authorization(db, authorized: ProductionAuthToken) -> Optional[str]:
+    """b2 prod apply backstop (TOCTOU): control + lease **fresh re-read**(populate_existing) 재검증.
+
+    None=통과(인가 유효), str=block 사유. ACK/drain proof는 **재검증 안 함** — durable append-only라
+    TOCTOU surface 아님(writer는 halt window에서 un-drain 불가; script가 authorize 시 confirm_quiesce_drained로
+    full drain proof 검증). 그래서 atomic_migration은 atomic_quiesce_durable을 import하지 않는다(디커플 —
+    no-importer wire 회피). 재검증 항목: control HALT @ authorized.expected_generation / format / epoch==0
+    (TOCTOU halt-flip·gen-bump) + lease owner==authorized.owner / lease_expiry >= now(naive) (TOCTOU
+    lease-steal·expiry). 어떤 read 예외도 block(fail-closed). caller(run_migration)가 db 소유.
+    """
+    try:
+        from app.atomic_write_control import CONTROL_ROW_FORMAT_VERSION, WriterMode
+        from app.models import AtomicCutoverControl, AtomicWriteControl, get_utc_now
+
+        ctrl = (
+            db.query(AtomicWriteControl).populate_existing().filter(AtomicWriteControl.id == 1).first()
+        )
+        if ctrl is None or ctrl.control_row_format_version != CONTROL_ROW_FORMAT_VERSION:
+            return "authorized prod 재검증 실패: control row 부재/format mismatch (fail-closed)"
+        if ctrl.requested_mode != WriterMode.HALT:
+            return "authorized prod 재검증 실패: writer not HALT (TOCTOU halt-flip)"
+        if ctrl.mode_generation != authorized.expected_generation:
+            return "authorized prod 재검증 실패: mode_generation != expected (stale/superseded halt)"
+        if ctrl.activation_epoch != 0:
+            return "authorized prod 재검증 실패: activation_epoch != 0 (pre-activation only)"
+        lease = (
+            db.query(AtomicCutoverControl).populate_existing().filter(AtomicCutoverControl.id == 1).first()
+        )
+        if lease is None or lease.lease_owner != authorized.owner:
+            return "authorized prod 재검증 실패: lease 미보유/타 owner (TOCTOU lease-steal)"
+        if lease.lease_expiry is None or lease.lease_expiry < get_utc_now():
+            return "authorized prod 재검증 실패: lease 만료 (TOCTOU lease-expiry)"
+        return None
+    except Exception as e:
+        return f"authorized prod 재검증 예외 — 차단 (fail-closed): {type(e).__name__}"
 
 
 def check_apply_safety() -> Optional[str]:

@@ -181,8 +181,11 @@ class TestDormancy(unittest.TestCase):
 
     _MODELS = ("AtomicCutoverControl", "AtomicCutoverAsset")
     # 정의 site(models.py) + C6-2 dormant durable reader(atomic_cutover_durable, live caller 0 — 자체
-    # dormancy test가 보장). live reader는 여전히 차단.
-    _ALLOWED = frozenset({"models.py", "atomic_cutover_durable.py"})
+    # dormancy test가 보장) + C6-PRE-build-b2 prod-apply backstop reader(atomic_migration —
+    # _revalidate_production_authorization이 lease[AtomicCutoverControl] fresh re-read; atomic_migration도
+    # dormant[test_atomic_migration _DORMANT_ISLAND이 live caller 0 보장], backstop은 authorized prod apply
+    # 경로에서만 실행 — atomic_cutover_durable import 대신 모델 직접 참조로 island 디커플 유지). live reader는 차단.
+    _ALLOWED = frozenset({"models.py", "atomic_cutover_durable.py", "atomic_migration.py"})
 
     def test_no_live_module_references_cutover_models(self):
         import app.models as m

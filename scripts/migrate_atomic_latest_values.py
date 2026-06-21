@@ -45,6 +45,79 @@ def _print_report(result) -> None:
     )
 
 
+def _authorize_production(db, args):
+    """b2 prod override authorize — static TTL ceiling + full drain proof + lease acquire.
+
+    Returns: ProductionAuthToken(인가 성공) | int(exit code, BLOCK 시 2). caller(main)는 int면 즉시 return.
+    flag는 필요조건일 뿐 — 충분조건은 (drain proof[confirm_quiesce_drained] ∧ lease acquire). args는
+    --allow-production-migration True 전제(combo guard 통과 후 호출).
+    """
+    import math
+    import uuid
+
+    from app.atomic_cutover_durable import CasResult, cas_acquire_migration_lease
+    from app.atomic_migration import ProductionAuthToken
+    from app.atomic_quiesce_durable import confirm_quiesce_drained
+    from app.crud import BANK_DISPLAY_ORDER, SUPPORTED_CURRENCY_PAIRS
+    from app.models import get_utc_now
+
+    # static TTL ceiling (DB-independent max keys by scope) — _check_apply_target는 single front-gate라
+    # mid-run lease 만료를 못 잡음 → TTL이 전체 worst-case(max_keys × per-key timeout)를 덮어야(codex#4).
+    n_pairs = len(SUPPORTED_CURRENCY_PAIRS)
+    n_banks = len(BANK_DISPLAY_ORDER)
+    max_keys = {"bank": n_banks * n_pairs, "investing": n_pairs,
+                "all": (n_banks + 1) * n_pairs}[args.scope]
+    required_ttl = math.ceil(max_keys * args.timeout_sec) + 120  # ceil(codex) + 120s margin (timeout=soft bound)
+    if args.lease_ttl_seconds < required_ttl:
+        print(f"[BLOCKED] --lease-ttl-seconds={args.lease_ttl_seconds} < 필요 {required_ttl} "
+              f"(max_keys={max_keys} × timeout={args.timeout_sec}s + margin 120)")
+        return 2
+
+    # full drain proof — "control이 HALT"만으론 부족(stale legacy-cached writer가 v1 덮음). open quiesce
+    # session + qualifying ACK(recreate된 fresh process의 halt 관측) + control HALT @ expected gen 전부 요구.
+    if not confirm_quiesce_drained(db, expected_generation=args.expected_writer_generation):
+        print("[BLOCKED] quiesce drain 미확인 — halt + recreate-drain(ACK) 선행 필요 (fail-closed). "
+              "control HALT @ --expected-writer-generation / open quiesce session / qualifying ACK 미충족.")
+        return 2
+
+    # migration lease acquire (owner = fresh per-run token; stable hostname 금지 — idempotency가 우발 동시성 가림)
+    owner = f"migrate-{uuid.uuid4()}"
+    try:
+        r = cas_acquire_migration_lease(db, owner=owner, now=get_utc_now(), ttl_seconds=args.lease_ttl_seconds)
+    except Exception as e:
+        db.rollback()
+        print(f"[BLOCKED] migration lease acquire DB 예외 — fail-closed: {type(e).__name__}")
+        return 2
+    if r is not CasResult.APPLIED:
+        db.rollback()
+        print("[BLOCKED] migration lease 미획득 (타 holder non-expired / cutover row 부재 / format mismatch)")
+        return 2
+    db.commit()  # cross-session durability — staged lease는 다른 host를 배제 못 함 (codex C9)
+    print(f"[OK] production authorized — drain proof + lease (owner={owner}, ttl={args.lease_ttl_seconds}s)")
+    return ProductionAuthToken(owner=owner, expected_generation=args.expected_writer_generation)
+
+
+def _release_production_lease(db, token) -> None:
+    """b2 prod lease 해제 (best-effort, finally). **rollback-first**(run_migration 실패로 깨진 tx state
+    정리) → release → commit. release 예외/non-APPLIED는 원본 migration 에러를 mask하지 않음(raise/return X) —
+    TTL 만료가 최종 backstop."""
+    from app.atomic_cutover_durable import CasResult, cas_release_migration_lease
+    try:
+        db.rollback()  # 실패한 migration tx state가 release를 막지 않게 (codex)
+        rr = cas_release_migration_lease(db, owner=token.owner)
+        if rr is CasResult.APPLIED:
+            db.commit()
+        else:
+            db.rollback()
+            print(f"[WARN] migration lease release non-APPLIED ({rr.value}) — TTL 만료가 backstop")
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print(f"[WARN] migration lease release 예외 (무시, TTL backstop): {type(e).__name__}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="A3-3b v1→v2 latest migration (dry-run default)")
     parser.add_argument("--apply", action="store_true",
@@ -52,6 +125,14 @@ def main() -> int:
     parser.add_argument("--scope", choices=["bank", "investing", "all"], default="all")
     parser.add_argument("--max-retries", type=int, default=3, help="migrate_cas changed 재시도 상한")
     parser.add_argument("--timeout-sec", type=float, default=60.0, help="per-key retry 시간 상한")
+    # b2 — prod migration override (dormant, operator-run only). 단순 flag 아님: drain proof + lease 동반.
+    parser.add_argument("--allow-production-migration", action="store_true",
+                        help="prod apply override (C6-PRE). halt drain proof + migration lease 충족 시만. "
+                             "--apply + --expected-writer-generation 필수.")
+    parser.add_argument("--expected-writer-generation", type=int, default=None,
+                        help="prod override 시 halt mode_generation pin (operator 확인값, 0 유효).")
+    parser.add_argument("--lease-ttl-seconds", type=int, default=3600,
+                        help="prod override migration lease TTL (런타임 강제: >= max_keys×timeout+margin).")
     args = parser.parse_args()
 
     if args.max_retries < 0:
@@ -61,8 +142,25 @@ def main() -> int:
         print("[BLOCKED] --timeout-sec는 양수")
         return 1
 
+    # b2 combo fail-close — flag는 필요조건일 뿐(절대 충분조건 아님). I/O 전.
+    if args.allow_production_migration:
+        if not args.apply:
+            print("[BLOCKED] --allow-production-migration은 --apply 필요")
+            return 1
+        if args.expected_writer_generation is None:  # is None (gen 0은 유효 pin — falsy 체크 금지)
+            print("[BLOCKED] --allow-production-migration은 --expected-writer-generation 필요")
+            return 1
+        if args.expected_writer_generation < 0:
+            print("[BLOCKED] --expected-writer-generation은 0 이상")
+            return 1
+        if args.lease_ttl_seconds <= 0:
+            print("[BLOCKED] --lease-ttl-seconds는 양수")
+            return 1
+
     # apply 안전 가드 — prod hard-fail (override 없음). main 진입 직후, DB/Redis I/O 전.
-    if args.apply:
+    # b2: override 경로는 check_apply_safety를 우회(authorize[drain proof + lease] + _check_apply_target
+    # backstop이 대체) — no-flag 경로는 byte-identical(기존 prod hard-block 유지).
+    if args.apply and not args.allow_production_migration:
         from app.atomic_migration import check_apply_safety
         block = check_apply_safety()
         if block:
@@ -95,12 +193,21 @@ def main() -> int:
             return 1
 
         db = SessionLocal()
+        production_authorized = None
         try:
+            if args.allow_production_migration:
+                rc = _authorize_production(db, args)   # ProductionAuthToken | int(exit code)
+                if isinstance(rc, int):
+                    return rc                          # BLOCK (exit 2) — lease 미획득이라 release 불요
+                production_authorized = rc
             result = run_migration(
                 db, client, apply=args.apply, scope=args.scope,
                 max_retries=args.max_retries, timeout_sec=args.timeout_sec,
+                production_authorized=production_authorized,
             )
         finally:
+            if production_authorized is not None:
+                _release_production_lease(db, production_authorized)
             db.close()
     finally:
         if lock_fd is not None:
