@@ -10,10 +10,11 @@ loader(atomic_fx_v2_loader)로 **합성하는 operator command**. 실제 실행�
 dormancy를 **다층**으로 보장한다:
 1. **scripts/ 배치**: app/ AST trip-wire(no-importer scan)는 app/만 순회 → 이 파일은 sanction 0(C6-9b 선례).
    어떤 live 모듈도 이 파일을 import/호출하지 않는다.
-2. **fail-closed QuiesceBoundary stub**(machine gate): begin-atomic은 `quiesce_boundary.confirm_quiesced()`가
-   True여야 진행 — default `_FailClosedQuiesceBoundary`는 **항상 False**(no-op 아님). 실 in-flight drain 확인
-   boundary는 미래 unit(C6-quiesce)이 주입. 그 전엔 모든 dangerous flag + --quiesce-confirmed가 있어도
-   begin-atomic이 거부된다(§9:92 activation race 방어).
+2. **QuiesceBoundary machine gate**: begin-atomic은 `quiesce_boundary.confirm_quiesced()`가 True여야 진행.
+   constructor default는 `_FailClosedQuiesceBoundary`(항상 False) 유지지만 **W3에서 main()이 RealQuiesceBoundary
+   주입**(arming) — RealBoundary는 open quiesce session + halt ACK(§9 step6 drain proof)를 검증해 True/False.
+   prod behavior-change-0: W3 후에도 capability gate(IMAGE_MAX=1) + quiesce table 부재(G2a 전)로 begin-atomic은
+   RELEASE/G2a/EXEC 전까지 차단(arming ≠ flip). 모든 dangerous flag가 있어도 drain 미확인 시 거부(§9:92 race 방어).
 3. **image-capability hard gate**(§6 preflight): begin-atomic은 `--required-protocol`이 실행 image
    [IMAGE_MIN, IMAGE_MAX] 범위 AND > REQUIRED_WRITER_PROTOCOL_SEED 여야 한다. 현재 image는 IMAGE_MAX=1
    이라 둘을 동시 만족 불가 → begin-atomic apply가 **현재 image에서 hard-fail**. C6-FLIP release가 IMAGE_MAX를
@@ -57,8 +58,9 @@ apply (C6-FLIP, must-confirm — 이 unit에선 실행 안 함):
     python scripts/activate_atomic_fx.py --apply --i-understand-this-flips-production \\
         --rds-snapshot-confirmed --phase begin-atomic --quiesce-confirmed \\
         --ack-global-writer-mode-scope --required-protocol 2 --target-schema 2 --session-id <id>
-        # ⚠️ 현재 image(IMAGE_MAX=1)에선 capability gate + fail-closed QuiesceBoundary로 거부됨(dormant) —
-        #    C6-FLIP release가 IMAGE_MAX bump + atomic writer 배선 + 실 QuiesceBoundary 주입 후에만 통과.
+        # ⚠️ 현재 image(IMAGE_MAX=1)에선 **capability gate**로 거부됨 — W3 후 main()은 실 RealQuiesceBoundary를
+        #    주입(arming)하나, capability gate(IMAGE_MAX=1) + quiesce table 부재(G2a 전)로 begin-atomic은 여전히
+        #    차단. C6-FLIP-RELEASE(IMAGE_MAX bump) + G2a + EXEC 후에만 실제 통과(arming ≠ flip).
 incident recovery (writer atomic 고착 시):
     python scripts/activate_atomic_fx.py --apply --i-understand-this-flips-production \\
         --phase incident-halt --confirm-incident-halt
@@ -126,11 +128,12 @@ class _FailClosedQuiesceBoundary:
     """begin-atomic machine gate — **항상 fail-closed**(no-op 아님).
 
     §9:92 activation race: legacy-cached writer가 atomic flip 순간에 unconditional write를 계속하면 invariant가
-    깨진다. 안전 진입은 halt commit → 모든 writer가 halt를 관측(recreate/poll) + in-flight drain → 그제서야
-    begin-atomic. 그 'drain 완료'를 확인하는 게 QuiesceBoundary다.
+    깨진다. 안전 진입은 halt commit → 모든 writer가 halt를 관측(**recreate + fresh-process halt ACK** = drain,
+    recreate-is-the-drain pivot) → 그제서야 begin-atomic. 그 'drain 완료'를 확인하는 게 QuiesceBoundary다.
 
-    실 boundary(in-flight counter==0 + local cache halt 관측)는 별도 unit(C6-quiesce)이 같은 kwarg로 주입.
-    그 전까지 default는 confirm_quiesced()=False → begin-atomic이 구조적으로 거부됨 = machine-level dormancy.
+    실 boundary(RealQuiesceBoundary: open quiesce session + halt ACK 검증, §9 step6)는 **W3에서 main()이** 같은
+    kwarg로 주입(arming). 이 stub은 constructor default(injection 없는 호출/test)에서 항상 False →
+    begin-atomic 구조적 거부 = machine-level fail-closed floor.
     """
 
     def confirm_quiesced(self) -> bool:
@@ -144,9 +147,10 @@ class RealQuiesceBoundary:
     ACK(Q4a)가 §9 step6 4조건을 만족할 때만 True. read-only(자체 SessionLocal), **never-raise → False**(stub의
     안전 floor 보존 — 어떤 read/parse/table-absent 실패도 False). consume는 begin-atomic 몫(boundary 아님).
 
-    ⚠️ **주입은 C6-FLIP only** — 이 클래스는 정의만, `AtomicFxActivator.__init__` default kwarg는
-    `_FailClosedQuiesceBoundary` 유지, `main()`도 무주입(legacy/pre-FLIP은 항상 fail-closed). app/ 아닌 scripts/라
-    app dormancy trip-wire 무관(activate_atomic_fx는 이미 app.atomic_*_durable import).
+    ⚠️ **W3 arming(C6-FLIP) 완료** — `AtomicFxActivator.__init__` default kwarg는 `_FailClosedQuiesceBoundary`
+    유지(constructor는 안전), 단 **`main()`은 W3에서 RealQuiesceBoundary를 주입**해 begin-atomic이 실 drain
+    proof를 consult. prod behavior-change-0: capability gate(IMAGE_MAX=1) + quiesce table 부재로 begin-atomic은
+    RELEASE/G2a/EXEC 전까지 차단(arming ≠ flip). app/ 아닌 scripts/라 app dormancy trip-wire 무관.
 
     **b1**: 판정 로직은 공유 `confirm_quiesce_drained(db)`(atomic_quiesce_durable)에 위임 — prod migration
     gate(C6-PRE-build-b)와 **동일 기준**(재인라인 방지). expected_generation=None = begin-atomic은 open
@@ -362,7 +366,8 @@ class PhaseOutcome:
 # ────────────────────────────── activator ──────────────────────────────
 class AtomicFxActivator:
     """양축 CAS brick + loader self-verify를 phase별로 합성. quiesce_boundary는 injectable-with-default
-    (default fail-closed stub → begin-atomic dormant). live caller 0(scripts/ 전용)."""
+    (constructor default = _FailClosedQuiesceBoundary stub; **main()은 W3에서 RealQuiesceBoundary 주입**).
+    live caller 0(scripts/ 전용)."""
 
     def __init__(self, db, *, quiesce_boundary: Optional[_FailClosedQuiesceBoundary] = None) -> None:
         self.db = db
@@ -437,11 +442,13 @@ class AtomicFxActivator:
         blocking = self._apply_acks(resolved, args)
         if resolved is ResumeAction.BEGIN_ATOMIC:
             blocking += self._begin_atomic_capability(args)
-            # review #8: machine gate를 plan blocking에 surface — dry-run이 apply 결과를 정직하게 예측하도록.
-            # (실제 hard gate는 _do_begin_atomic에도 backstop으로 남아 있음.)
+            # review #8: machine gate(boundary)를 plan blocking에 surface — dry-run이 apply 결과를 정직하게 예측.
+            # (boundary machine-gate는 _do_begin_atomic:516에도 backstop; **capability(IMAGE_MAX) gate는 run()
+            #  전용** — _do_begin_atomic 미backstop[cas_activate_atomic는 protocol/schema precondition만], run()
+            #  path가 항상 거치므로 충분.)
             if not self.quiesce_boundary.confirm_quiesced():
-                blocking.append("QuiesceBoundary machine-gate (현재 default fail-closed — C6-quiesce unit이 "
-                                "실 boundary 주입 전엔 begin-atomic 거부, §9:92 activation race)")
+                blocking.append("QuiesceBoundary machine-gate — drain 미확인 (RealQuiesceBoundary[main()이 W3에서 "
+                                "주입]가 open quiesce session + halt ACK 요구; halt+recreate-drain 선행 필요, §9:92 race)")
             else:
                 # W2 parity(codex): boundary 통과 시 discovered quiesce session 일관성을 plan에 surface —
                 # _do_begin_atomic이 find-None/--session-id mismatch 시 refuse하므로 dry-run이 미리 노출(apply 예측).
@@ -512,12 +519,14 @@ class AtomicFxActivator:
         """halt→atomic + cutover idle→running + quiesce consume, **단일 tx**(codex: stale completed/ready 상속 방지).
         결과 = §15 atomic/blocked(writer atomic live, publish gate closed). W2(W0 계약): cutover bootstrap session
         + consume 모두 **DB-authoritative discovered** quiesce session_id(single shared id) — args 불신."""
-        # machine gate (default fail-closed → dormant). human ack는 _apply_acks에서 이미 검사됨.
+        # machine gate. main()은 W3에서 RealQuiesceBoundary 주입(constructor default는 _FailClosedQuiesceBoundary).
+        # human ack는 _apply_acks에서 이미 검사됨.
         if not self.quiesce_boundary.confirm_quiesced():
             return self._refuse(
                 "begin-atomic",
-                "QuiesceBoundary machine-gate FAILED — in-flight drain 미확인. default boundary는 fail-closed "
-                "(실 boundary는 C6-quiesce unit이 주입). begin-atomic 거부(§9:92 activation race 방어).",
+                "QuiesceBoundary machine-gate FAILED — drain 미확인. RealQuiesceBoundary(main()이 W3에서 주입)가 "
+                "open quiesce session + halt ACK(§9 step6 drain proof)를 요구 — halt+recreate-drain 선행 필요. "
+                "begin-atomic 거부(§9:92 activation race 방어).",
             )
         db = self.db
         # W0: DB-authoritative discover — halt(W1)가 open한 quiesce session을 begin tx의 single shared id로 사용.
@@ -833,7 +842,8 @@ def _runbook_lines() -> List[str]:
         "0. (precondition) requested_mode=atomic은 GLOBAL — halt 전에 USDT/KRX/mirror writer가 atomic(C6-5b) "
         "또는 frozen 상태인지 확인. 미충족 시 해당 writer가 BLOCKED fail-closed(FX publisher scope는 "
         "bank+investing뿐이나 writer-mode는 전역). --ack-global-writer-mode-scope로 ack.",
-        "1. halt 적용 후: 모든 writer가 halt를 관측하도록 app recreate + in-flight drain (§9 quiesce).",
+        "1. halt 적용 후: app recreate (= drain — fresh process가 halt 관측 후 halt ACK 기록, §9 quiesce; "
+        "recreate-is-the-drain).",
         "2. quiesce drain 확인 후에만 begin-atomic (§9:92 activation race — 미드레인 시 invariant 깨짐).",
         "3. begin-atomic 후: app recreate-atomic으로 writer가 atomic mode + runtime cache refresh (§9:90).",
         "4. verify → finalize 순으로 진행. 각 phase는 fresh state 재read 후 CAS fence.",
@@ -888,7 +898,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     db = SessionLocal()
     try:
-        outcome = AtomicFxActivator(db).run(args)
+        # W3 arming (C6-FLIP): 실 RealQuiesceBoundary 주입 — begin-atomic이 §9 step6 drain proof(open
+        # quiesce session + ACK)를 실제 consult. constructor default는 _FailClosedQuiesceBoundary 유지(main만 주입).
+        # prod behavior-change-0: capability gate(IMAGE_MAX=1) + quiesce table 부재로 begin-atomic은
+        # RELEASE/G2a/EXEC 전까지 여전히 차단(arming ≠ flip).
+        outcome = AtomicFxActivator(db, quiesce_boundary=RealQuiesceBoundary()).run(args)
     finally:
         try:
             db.close()

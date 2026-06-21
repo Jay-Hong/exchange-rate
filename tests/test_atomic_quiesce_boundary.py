@@ -2,11 +2,13 @@
 
 confirm_quiesced() §9 step6 4조건 verdict matrix(open session + FRESH A1[cond1 halt / cond3 exact-pin /
 epoch0] + latest qualifying ACK[cond2/3/4]) + never-raise→False(table absent / session error) +
-**default-stays-fail-closed lock**(AtomicFxActivator default = _FailClosedQuiesceBoundary, main() 무주입 —
-RealBoundary 주입은 C6-FLIP only). read-only, no live race(seed rows + in-memory sqlite).
+**constructor-default-stays-fail-closed lock**(AtomicFxActivator default kwarg = _FailClosedQuiesceBoundary)
++ **W3 arming**(main()은 RealQuiesceBoundary 주입 — test_main_injects_real_boundary). read-only, no live
+race(seed rows + in-memory sqlite).
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import unittest
 from datetime import datetime, timedelta
@@ -151,18 +153,32 @@ class TestRealBoundaryDelegatesToHelper(unittest.TestCase):
 
 
 class TestDefaultStaysFailClosed(unittest.TestCase):
-    """C6-FLIP 전: default boundary는 _FailClosedQuiesceBoundary, main()은 RealBoundary 미주입."""
+    """constructor default boundary는 **여전히** _FailClosedQuiesceBoundary. **W3(arming) 후 main()만**
+    RealQuiesceBoundary를 주입(아래 test_main_injects_real_boundary)."""
 
     def test_activator_default_is_fail_closed(self):
         act = AtomicFxActivator(MagicMock())
         self.assertIsInstance(act.quiesce_boundary, _FailClosedQuiesceBoundary)
         self.assertFalse(act.quiesce_boundary.confirm_quiesced())
 
-    def test_main_does_not_inject_real_boundary(self):
-        # main()이 RealQuiesceBoundary를 주입하면 dormant 깨짐 — 주입은 C6-FLIP only.
-        main_src = inspect.getsource(afx.main)
-        self.assertNotIn("RealQuiesceBoundary", main_src,
-                         "main()이 RealQuiesceBoundary 주입 — C6-FLIP 전엔 default fail-closed 유지해야")
+    def test_main_injects_real_boundary(self):
+        # W3 arming(C6-FLIP): main()이 AtomicFxActivator(..., quiesce_boundary=RealQuiesceBoundary()) 주입 →
+        # begin-atomic이 실 drain proof를 consult. **AST 구조 검사**(getsource substring은 주석의
+        # 'RealQuiesceBoundary'로 false-pass — codex; 주입 call이 제거되면 trip). 이 marker가 arming audit
+        # point(critic#9). prod behavior-change-0: capability gate(IMAGE_MAX=1) + quiesce table 부재로
+        # begin-atomic은 RELEASE/G2a/EXEC 전까지 여전히 차단 — arming ≠ flip.
+        def _name(fn):
+            return fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
+        tree = ast.parse(inspect.getsource(afx.main))
+        injected = any(
+            isinstance(n, ast.Call) and _name(n.func) == "AtomicFxActivator"
+            and any(kw.arg == "quiesce_boundary" and isinstance(kw.value, ast.Call)
+                    and _name(kw.value.func) == "RealQuiesceBoundary"
+                    for kw in n.keywords)
+            for n in ast.walk(tree)
+        )
+        self.assertTrue(
+            injected, "W3: main()이 AtomicFxActivator(quiesce_boundary=RealQuiesceBoundary()) 주입해야 (arming)")
 
 
 if __name__ == "__main__":
