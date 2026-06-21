@@ -1,15 +1,28 @@
-"""P1b A2-3 — usdt/krx Redis writer write-mode gate 테스트.
+"""USDT/KRX Redis writer — mode-INDEPENDENT 계약 (구 P1b A2-3 write-mode gate 제거).
 
-conftest.py가 firebase stub + DATABASE_URL=sqlite 처리. mock atomic_write_runtime.snapshot로
-enforced_action별 writer 동작 검증:
-- legacy → gate 통과(_get_sync_client 호출) / halt·atomic → BLOCKED + **Redis I/O 0**(_get_sync_client 미호출).
-- set_latest_krx(597, close finalizer/REST/routine 공유)는 **C6-5b-2가 gate**(TestKrxDirectSetterGated) —
-  halt/atomic block + legacy 진행. (A2-3 시점엔 close partial 방지로 미gate였고 그 lock을 C6-5b-2서 의도 flip.)
-- usdt_sources polling이 BLOCKED를 success로 오인 안 함(Medium 1).
-- BLOCKED counter(approximate) 증가.
+배경: FX atomic cutover(prod live)의 전역 writer mode가 USDT/KRX source Redis writer까지
+BLOCK시켜 iOS 테스트 테더 탭이 freeze됐다. 수정 = USDT/KRX Redis-latest writer를
+mode-independent로 (FX writer mode 미참조, 항상 v1 write). 근거: latest:source:*는 FX atomic
+keyspace와 **disjoint** — atomic loader는 bank/investing만 read, atomic mirror는 source loop를
+allowlist-skip이라 KRX/USDT key를 안 읽고 안 쓴다 → v1 SET이 §11 FX v2 invariant를 깰 경로 없음.
+DB writer(insert_source_rate_*)도 이미 mode-independent라 Redis도 정렬.
+
+이 파일이 잠그는 것 (구 gate-lock 테스트를 invert):
+- 3 Redis setter(usdt / krx base 598 / krx tick 675)가 legacy·halt·atomic 모두 v1 SET 진행
+  (BLOCKED/False 미반환) — TestUsdt/KrxTick/KrxBase ModeIndependent.
+- KRX routine(KRX_REDIS_TICK_WRITE_ENABLED=false) _sync_db_write가 halt/atomic서도 Redis write
+  진행 (구 krx_kis.py 4번째 gate 제거) — TestKrxRoutineFlagFalseModeIndependent.
+- structural-AST NEGATIVE trip-wire: 4 writer body에 write-mode 심볼 0 — 미래 PR이 전역 FX mode
+  gate를 몰래 재결합 못 하게 (DB-side TestSourceDbWritersNoWriteModeSymbols 대칭). 재결합 시
+  P1_COMMON_BASE_DESIGN §394/§401-402 ledger를 먼저 갱신해야 함.
+- BLOCKED enum / _record_write_mode_block helper는 dormant scaffolding으로 보존(미래 per-source
+  cutover gate용) — polling helper의 BLOCKED 방어 분기도 보존(TestUsdtSourcesPollingDefensive).
 """
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +31,7 @@ from app.atomic_write_control import WriterMode
 from app.atomic_write_runtime import WriteModeSnapshot
 
 _TS = "2026-06-17T10:00:00+09:00"
+_ALL_MODES = (WriterMode.LEGACY, WriterMode.HALT, WriterMode.ATOMIC)
 
 
 def _snap(enforced: str) -> WriteModeSnapshot:
@@ -29,152 +43,106 @@ def _snap(enforced: str) -> WriteModeSnapshot:
     )
 
 
-class TestUsdtGate(unittest.TestCase):
-
-    def test_legacy_passes_gate(self):
-        # legacy → gate 통과 → _get_sync_client 호출(None→FAILED). gate가 안 막음(통과 증거).
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.LEGACY)), \
-             patch("app.latest_rates_cache._get_sync_client", return_value=None) as gsc:
-            outcome = lrc.set_latest_usdt_rate_from_sync_job("upbit", "usdt-krw", 1300.0, _TS)
-        gsc.assert_called_once()
-        self.assertEqual(outcome, lrc.UsdtLatestWriteOutcome.FAILED)
-
-    def test_halt_blocked_no_redis_io(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError("Redis I/O!")) as gsc:
-            outcome = lrc.set_latest_usdt_rate_from_sync_job("upbit", "usdt-krw", 1300.0, _TS)
-        self.assertEqual(outcome, lrc.UsdtLatestWriteOutcome.BLOCKED)
-        gsc.assert_not_called()  # gate 최상단 — Redis I/O 0
-
-    def test_atomic_blocked(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
-            outcome = lrc.set_latest_usdt_rate_from_sync_job("upbit", "usdt-krw", 1300.0, _TS)
-        self.assertEqual(outcome, lrc.UsdtLatestWriteOutcome.BLOCKED)  # A3 전 fail-closed (legacy 아님)
+def _fresh_client() -> MagicMock:
+    """cold-start client — get()=None이라 coalesce/regression 오염 없이 항상 SET 경로."""
+    client = MagicMock()
+    client.get.return_value = None
+    return client
 
 
-class TestKrxTickGate(unittest.TestCase):
+class TestUsdtModeIndependent(unittest.TestCase):
+    """USDT setter는 legacy·halt·atomic 모두 v1 SET 진행 (mode-independent)."""
 
-    def test_legacy_passes_gate(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.LEGACY)), \
-             patch("app.latest_rates_cache._get_sync_client", return_value=None) as gsc:
-            outcome = lrc.set_latest_krx_rate_from_sync_job_tick_level("usd-krw-futures", 1500.0, _TS)
-        gsc.assert_called_once()
-        self.assertEqual(outcome, lrc.KrxLatestWriteOutcome.FAILED)
-
-    def test_halt_blocked_no_redis_io(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError) as gsc:
-            outcome = lrc.set_latest_krx_rate_from_sync_job_tick_level("usd-krw-futures", 1500.0, _TS)
-        self.assertEqual(outcome, lrc.KrxLatestWriteOutcome.BLOCKED)
-        gsc.assert_not_called()
-
-    def test_atomic_blocked(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
-            outcome = lrc.set_latest_krx_rate_from_sync_job_tick_level("usd-krw-futures", 1500.0, _TS)
-        self.assertEqual(outcome, lrc.KrxLatestWriteOutcome.BLOCKED)
+    def test_all_modes_proceed_to_set(self):
+        for mode in _ALL_MODES:
+            with self.subTest(mode=mode):
+                lrc._last_written_usdt_state.clear()  # state-pollution 가드 (codex)
+                client = _fresh_client()
+                with patch("app.atomic_write_runtime.snapshot", return_value=_snap(mode)), \
+                     patch("app.latest_rates_cache._get_sync_client", return_value=client) as gsc:
+                    outcome = lrc.set_latest_usdt_rate_from_sync_job("upbit", "usdt-krw", 1300.0, _TS)
+                gsc.assert_called_once()  # gate 없음 — 모든 mode에서 Redis I/O 진행
+                self.assertEqual(outcome, lrc.UsdtLatestWriteOutcome.SET)
+                client.set.assert_called_once()
+                # v1 schema (5-field usdt) — atomic v2 marker 미포함
+                _, written = client.set.call_args[0]
+                self.assertNotIn('"schema_version"', written)
 
 
-class TestKrxDirectSetterGated(unittest.TestCase):
-    """C6-5b-2 — set_latest_krx_rate_from_sync_job(597, close finalizer/REST/routine 공유)에 write-mode gate.
+class TestKrxTickModeIndependent(unittest.TestCase):
+    """KRX tick-level setter는 legacy·halt·atomic 모두 v1 SET 진행."""
 
-    ⚠️ A2-3 시점엔 close finalizer partial 방지로 **미gate**였고 이 클래스는 그 ungated 계약(TestKrxCloseWriter
-    NotGated)을 잠갔었다. C6-5b-2가 halt/atomic을 gate(latest:source:krx freeze + §11 v2 invariant)하면서 그
-    lock을 **의도적으로 flip**(codex Q4). legacy는 불변(진행) — close finalizer DB write는 gate 밖이라
-    mode-independent. :597은 bool 계약이라 BLOCKED enum 대신 False. cascade(flag/daily-append skip)는
-    test_krx_close_window_writer F2 lock(redis_ok=False)이 이미 잠금 — 여기선 gate 자체만 검증.
-    """
-
-    def test_legacy_proceeds(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.LEGACY)), \
-             patch("app.latest_rates_cache._get_sync_client", return_value=None) as gsc:
-            result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
-        gsc.assert_called_once()  # legacy → 진행 (client None → False)
-        self.assertFalse(result)
-
-    def test_halt_blocked_no_redis_io(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError("Redis I/O!")) as gsc:
-            result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
-        gsc.assert_not_called()  # gate 최상단 — Redis I/O 0
-        self.assertFalse(result)  # bool 계약 (BLOCKED enum 없음)
-
-    def test_atomic_blocked(self):
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
-            result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
-        self.assertFalse(result)  # A3 전 fail-closed (legacy fallback 금지)
-
-    def test_block_counter_increments_neutral_label(self):
-        # neutral label "krx:direct:{asset}" (tick-level "krx:{asset}"와 구분)
-        lrc._write_mode_block_counts.clear()
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
-            lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
-        self.assertEqual(
-            lrc._write_mode_block_counts.get(("krx:direct:usd-krw-futures", WriterMode.HALT)), 1
-        )
+    def test_all_modes_proceed_to_set(self):
+        for mode in _ALL_MODES:
+            with self.subTest(mode=mode):
+                lrc._last_written_krx_state.clear()
+                client = _fresh_client()
+                with patch("app.atomic_write_runtime.snapshot", return_value=_snap(mode)), \
+                     patch("app.latest_rates_cache._get_sync_client", return_value=client) as gsc:
+                    outcome = lrc.set_latest_krx_rate_from_sync_job_tick_level("usd-krw-futures", 1500.0, _TS)
+                gsc.assert_called_once()
+                self.assertEqual(outcome, lrc.KrxLatestWriteOutcome.SET)
+                client.set.assert_called_once()
+                _, written = client.set.call_args[0]
+                self.assertNotIn('"schema_version"', written)
 
 
-class TestBlockedCounter(unittest.TestCase):
+class TestKrxBaseSetterModeIndependent(unittest.TestCase):
+    """KRX base setter(598, close finalizer/REST/routine 공유)는 legacy·halt·atomic 모두 진행."""
 
-    def test_counter_increments_on_block(self):
-        lrc._write_mode_block_counts.clear()
-        with patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
-             patch("app.latest_rates_cache._get_sync_client", side_effect=AssertionError):
-            lrc.set_latest_usdt_rate_from_sync_job("upbit", "usdt-krw", 1300.0, _TS)
-        self.assertEqual(
-            lrc._write_mode_block_counts.get(("usdt:upbit:usdt-krw", WriterMode.HALT)), 1
-        )
+    def test_all_modes_proceed_to_set(self):
+        for mode in _ALL_MODES:
+            with self.subTest(mode=mode):
+                client = MagicMock()  # base setter는 state/get 미사용 — 직접 set
+                with patch("app.atomic_write_runtime.snapshot", return_value=_snap(mode)), \
+                     patch("app.latest_rates_cache._get_sync_client", return_value=client) as gsc:
+                    result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
+                gsc.assert_called_once()
+                self.assertTrue(result)  # bool 계약 — 모든 mode에서 True
+                client.set.assert_called_once()
+                _, written = client.set.call_args[0]
+                self.assertNotIn('"schema_version"', written)
+
+    def test_client_none_returns_false_all_modes(self):
+        # client init 실패만 False — mode와 무관.
+        for mode in _ALL_MODES:
+            with self.subTest(mode=mode):
+                with patch("app.atomic_write_runtime.snapshot", return_value=_snap(mode)), \
+                     patch("app.latest_rates_cache._get_sync_client", return_value=None):
+                    result = lrc.set_latest_krx_rate_from_sync_job("usd-krw-futures", 1500.0, _TS)
+                self.assertFalse(result)
 
 
-class TestKrxRoutineFlagFalseGate(unittest.TestCase):
-    """Medium (xHigh review) — flag=false(KRX_REDIS_TICK_WRITE_ENABLED=false, Stage E rollback)
-    routine Redis(_sync_db_write→write_after_db_insert→571)도 gate.
+class TestKrxRoutineFlagFalseModeIndependent(unittest.TestCase):
+    """KRX_REDIS_TICK_WRITE_ENABLED=false(Stage E rollback) routine Redis도 mode-independent.
 
-    DB insert는 진행(A2-3 = Redis-side only) / Redis SET은 halt·atomic 차단(benign partial,
-    read-path DB-fallback). close/REST(571 직접, 2308/2880)는 write_after_db_insert 경유 안 하니 무영향.
+    구 krx_kis.py 4번째 gate(_sync_db_write flag=false 분기) 제거 — halt/atomic서도
+    write_after_db_insert 진행. flag=true(prod) 분기는 tick-level handler가 담당(여기 무관).
     """
 
     _TICK = {"price": "1500.0", "source": "krx", "asset": "usd-krw-futures"}
 
-    def test_flag_false_halt_skips_redis(self):
+    def _run(self, mode):
         from app.crawlers import krx_kis
         with patch("app.crawlers.krx_kis.config.KRX_REDIS_TICK_WRITE_ENABLED", False), \
-             patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.HALT)), \
+             patch("app.atomic_write_runtime.snapshot", return_value=_snap(mode)), \
              patch("app.crud.insert_source_rate_if_changed", return_value=True), \
              patch.object(krx_kis.KrxRedisLatestWriter, "write_after_db_insert",
-                          side_effect=AssertionError("routine Redis 호출됨")) as wadi:
+                          return_value=True) as wadi:
             result = krx_kis.KrxDbWriter._sync_db_write(self._TICK)
-        wadi.assert_not_called()  # halt → routine Redis 차단
-        self.assertFalse(result)  # return False → _flush_after_window trigger 자연 미발화
+        return result, wadi
 
-    def test_flag_false_atomic_skips_redis(self):
-        # gate는 != LEGACY라 atomic도 차단 (A3 전 fail-closed — legacy fallback 아님).
-        from app.crawlers import krx_kis
-        with patch("app.crawlers.krx_kis.config.KRX_REDIS_TICK_WRITE_ENABLED", False), \
-             patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.ATOMIC)), \
-             patch("app.crud.insert_source_rate_if_changed", return_value=True), \
-             patch.object(krx_kis.KrxRedisLatestWriter, "write_after_db_insert",
-                          side_effect=AssertionError("routine Redis 호출됨")) as wadi:
-            result = krx_kis.KrxDbWriter._sync_db_write(self._TICK)
-        wadi.assert_not_called()
-        self.assertFalse(result)
-
-    def test_flag_false_legacy_proceeds_to_redis(self):
-        from app.crawlers import krx_kis
-        with patch("app.crawlers.krx_kis.config.KRX_REDIS_TICK_WRITE_ENABLED", False), \
-             patch("app.atomic_write_runtime.snapshot", return_value=_snap(WriterMode.LEGACY)), \
-             patch("app.crud.insert_source_rate_if_changed", return_value=True), \
-             patch.object(krx_kis.KrxRedisLatestWriter, "write_after_db_insert", return_value=True) as wadi:
-            result = krx_kis.KrxDbWriter._sync_db_write(self._TICK)
-        wadi.assert_called_once()  # legacy → routine Redis 진행(기존 흐름)
-        self.assertTrue(result)
+    def test_all_modes_proceed_to_routine_redis(self):
+        for mode in _ALL_MODES:
+            with self.subTest(mode=mode):
+                result, wadi = self._run(mode)
+                wadi.assert_called_once()  # 모든 mode에서 routine Redis 진행 (gate 제거)
+                self.assertTrue(result)
 
 
-class TestUsdtSourcesPollingBlocked(unittest.TestCase):
-    """Medium 1 — polling helper(_mirror_changed_source_to_redis)가 BLOCKED를 success로 오인 안 함."""
+class TestUsdtSourcesPollingDefensive(unittest.TestCase):
+    """polling helper의 BLOCKED 방어 분기 보존 — setter가 더는 BLOCKED 미반환(dormant)이나,
+    미래 per-source cutover gate가 BLOCKED를 도입하면 success 오인 방지 분기가 필요하므로 유지."""
 
     def test_blocked_returns_false_not_success(self):
         from app.crawlers import usdt_sources
@@ -183,7 +151,52 @@ class TestUsdtSourcesPollingBlocked(unittest.TestCase):
              patch("app.crawlers.usdt_sources.latest_rates_cache.set_latest_usdt_rate_from_sync_job",
                    return_value=lrc.UsdtLatestWriteOutcome.BLOCKED):
             result = usdt_sources._mirror_changed_source_to_redis(MagicMock(), "upbit", "usdt-krw")
-        self.assertFalse(result)  # BLOCKED → not success (SKIPPED coalesce와 구분)
+        self.assertFalse(result)  # BLOCKED(가정적) → not success
+
+
+class TestUsdtKrxRedisWritersNoWriteModeSymbols(unittest.TestCase):
+    """structural-AST NEGATIVE trip-wire — USDT/KRX Redis writer body에 write-mode 심볼 0.
+
+    DB-side TestSourceDbWritersNoWriteModeSymbols(C6-5b-5)의 Redis-side 대칭. 미래 PR이 전역 FX
+    write-mode gate를 이 writer들에 몰래 재결합하면 이 lock이 잡고, P1_COMMON_BASE_DESIGN
+    §394/§401-402 ledger(usdt/krx Redis mode-independent)를 먼저 갱신하도록 강제한다.
+
+    _FORBIDDEN은 DB-side set + 우회형 gate 방어용 확장(codex): is_initialized / atomic_write_control
+    / WriteModeSnapshot 추가.
+    """
+
+    _FORBIDDEN = {
+        "snapshot", "enforced_action", "WriterMode", "atomic_write_runtime",
+        "_record_write_mode_skip", "_record_write_mode_block",
+        "is_initialized", "atomic_write_control", "WriteModeSnapshot",
+    }
+
+    @staticmethod
+    def _syms(fn) -> set:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        out = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                out.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                out.add(node.attr)
+        return out
+
+    def test_redis_writers_contain_no_write_mode_symbols(self):
+        from app.crawlers.krx_kis import KrxDbWriter
+        targets = [
+            lrc.set_latest_usdt_rate_from_sync_job,
+            lrc.set_latest_krx_rate_from_sync_job,
+            lrc.set_latest_krx_rate_from_sync_job_tick_level,
+            KrxDbWriter._sync_db_write,  # 구 4번째 gate 위치 — 재결합 방지
+        ]
+        for fn in targets:
+            leaked = self._syms(fn) & self._FORBIDDEN
+            self.assertEqual(
+                leaked, set(),
+                f"{fn.__qualname__} body에 write-mode 심볼 {leaked} — USDT/KRX Redis writer는 "
+                "mode-independent로 잠금. 전역 FX mode gate 재결합 시 §394/§401-402 ledger를 먼저 갱신.",
+            )
 
 
 if __name__ == "__main__":

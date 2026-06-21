@@ -64,8 +64,8 @@ class UsdtLatestWriteOutcome(Enum):
     - SKIPPED_REGRESSION: incoming exchange ts < stored seen_at → out-of-order write
       차단 (reconnect snapshot/probe 경합 시 stale이 fresh 값을 덮지 않게). trigger 차단.
     - SET: Redis SET 성공 (cold-start GET miss 후 SET 포함). trigger 발사.
-    - BLOCKED: P1b A2-3 write-mode gate(halt/atomic)로 SET 자체 차단. trigger 차단 +
-      coalesce SKIPPED와 **구분**(polling caller가 success로 오인 안 함). atomic은 A3 전 fail-closed.
+    - BLOCKED: (dormant) 구 전역 FX write-mode gate의 잔재. 현 setter는 mode-independent라
+      이 값을 반환하지 않음 — USDT/KRX 자체 cutover의 per-source gate용으로 enum만 보존.
     """
 
     FAILED = "failed"
@@ -83,7 +83,8 @@ class KrxLatestWriteOutcome(Enum):
     - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
     - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
     - SET: Redis SET 성공. trigger 발사 (`TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS`).
-    - BLOCKED: P1b A2-3 write-mode gate(halt/atomic)로 SET 차단. trigger 차단(SKIPPED와 구분).
+    - BLOCKED: (dormant) 구 전역 FX write-mode gate의 잔재. 현 setter는 mode-independent라 미반환
+      (USDT/KRX 자체 cutover의 per-source gate용으로 enum만 보존).
     """
 
     FAILED = "failed"
@@ -385,13 +386,15 @@ def _maybe_warn_regression(source: str, incoming: datetime, stored: datetime) ->
         )
 
 
-# P1b A2-3: write-mode block 관측 (process-local approximate counter, debug용). gate가 halt/atomic으로
-# SET을 막을 때 누적. 동시 thread RMW race로 일부 유실 가능(no-lock — debug 관측이라 허용). A2엔 0.
+# (dormant) write-mode block 관측 counter. 구 P1b A2-3 usdt/krx Redis gate가 halt/atomic SET을 막을 때
+# 누적했으나, 2026-06-22 decouple hotfix로 그 gate들이 제거돼 **현재 호출자 0(미발생)**. USDT/KRX 자체
+# cutover의 per-source gate가 다시 쓸 수 있도록 scaffolding 보존(§401-405 Amendment).
 _write_mode_block_counts: dict[tuple[str, str], int] = {}
 
 
 def _record_write_mode_block(label: str, enforced: str) -> None:
-    """write-mode gate(halt/atomic)로 Redis SET을 막은 것 기록 (approximate counter + debug log)."""
+    """(dormant) write-mode gate가 Redis SET을 막은 것 기록. 2026-06-22 decouple 후 호출자 0 —
+    per-source cutover gate용 scaffolding (approximate counter + debug log)."""
     key = (label, enforced)
     _write_mode_block_counts[key] = _write_mode_block_counts.get(key, 0) + 1
     logger.debug("write-mode block (Redis SET 차단)", extra={"label": label, "enforced": enforced})
@@ -429,15 +432,12 @@ def set_latest_usdt_rate_from_sync_job(
         (`get_latest_usdt_rate_from_sync_job`)에서 None 감지 후 호출자가
         DB fallback(`crud.get_latest_source_rates_for_topic`)로 처리한다.
     """
-    # P1b A2-3: write-mode gate (최상단, Redis I/O·stats 전). halt/atomic → SET 차단(BLOCKED),
-    # legacy → 기존 흐름 한 글자도 안 바뀜. atomic은 A3 전 fail-closed(legacy fallback 금지).
-    from app import atomic_write_runtime
-    from app.atomic_write_control import WriterMode
-    enforced = atomic_write_runtime.snapshot().enforced_action
-    if enforced != WriterMode.LEGACY:
-        _record_write_mode_block(f"usdt:{source}:{asset}", enforced)
-        return UsdtLatestWriteOutcome.BLOCKED
-
+    # mode-independent: USDT latest:source:*는 FX atomic keyspace와 disjoint — atomic loader는
+    # bank/investing만 read하고 atomic mirror는 source loop를 allowlist-skip(source_skipped=0)이라
+    # KRX/USDT key를 안 읽고 안 씀. 따라서 FX writer mode(legacy/halt/atomic)와 무관하게 항상
+    # v1 write — DB writer(insert_source_rate_*)도 이미 mode-independent라 정합. (구 P1b A2-3 전역
+    # FX write-mode gate 제거: 전역 FX mode가 테더 topic trigger를 막아 탭을 freeze시키던 버그 수정.
+    # USDT/KRX 자체 cutover track에서 per-source control gate로 v2 정식 편입 — 전역 FX mode 재결합 금지.)
     # 모듈 내부 import — 순환 참조 회피 (usdt_redis_stats가 latest_rates_cache 의존 안 함)
     from app import usdt_redis_stats
 
@@ -616,38 +616,24 @@ def set_latest_krx_rate_from_sync_job(
         timestamp: ISO 8601 KST 문자열.
 
     Returns:
-        True: Redis SET 성공 (legacy mode).
-        False: halt/atomic gate 차단 / client init 실패 / SET 예외.
+        True: Redis SET 성공.
+        False: client init 실패 / SET 예외.
 
     설계 격리:
         - sync `redis.Redis` client 재사용 (`_get_sync_client`)
         - **async circuit_breaker 호출 X**
         - **`usdt_redis_stats` 호출 X** (KRX 전용 — 텔레메트리 분리)
 
-    C6-5b-2 write-mode gate (atomic-mode 결과 — KRX는 자체 cutover까지 freeze, codex Option 3):
-        A2-3 시점엔 close finalizer partial 방지로 **미gate**였으나, C6-5b-2가 halt/atomic을 gate
-        (latest:source:krx freeze + §11 v2 invariant 보호 + 깨끗한 freeze). legacy는 불변(C6-5b-1
-        legacy 계약 lock). :597은 bool 계약이라 BLOCKED enum 대신 False 반환.
-        gate가 redis_ok=False를 만들면 공유 caller의 기존 동작이 cascade(신규 로직 아님):
-        - WS close(KrxCloseWindowWriter): DB write(insert_source_rate_unconditional)는 gate **밖**이라
-          진행(mode-independent) / `db_ok and redis_ok` 블록 미진입 → close_captured flag·tether trigger·
-          CF daily-append(source_daily_rates) skip(test_krx_close_window_writer F2 lock) → return False.
-        - REST(KrxCloseSnapshotController): redis_ok=False → return False, env-true 1 attempt(no storm).
-        - ⚠️ telemetry noise(correctness 영향 0): REST 실패 counter `sanity_aborted`가 block을 failure로
-          오분류 / WS "REST가 보정" partial-failure log가 오도(REST도 block). Option 3 documented noise.
-        - 결과: latest:source:krx + CF daily-append freeze = **recoverable canonical freshness gap**
-          (FX atomic invariant corruption 아님 — KRX는 FX invariant 밖). /api/v2/graph/tab(graph_v2)가
-          KRX source_daily_rates를 read하나 frontend client cutover 전. KRX 자체 cutover가 close
-          finalizer v2 retrofit으로 정식 해소 + backfill로 gap 복구.
+    mode-independent (구 C6-5b-2 write-mode gate 제거):
+        latest:source:krx는 FX atomic keyspace와 disjoint — atomic loader는 bank/investing만 read하고,
+        atomic mirror는 source loop를 allowlist-skip(source_skipped=0)이라 KRX key를 안 읽고 안 쓴다.
+        따라서 v1 SET이 §11 FX v2 invariant를 깰 경로가 없다. close/REST/routine 공유 setter
+        (KrxCloseWindowWriter / KrxCloseSnapshotController / KrxDbWriter)가 전부 FX writer mode와 무관하게
+        동작 → close finalizer Redis write + close_captured flag + tether trigger + CF daily-append
+        (append_krx_cf_daily_row)이 atomic/halt에서도 정상 진행. DB writer(insert_source_rate_*)는 이미
+        mode-independent라 Redis도 정렬. (전역 FX mode가 latest:source:krx를 freeze시키던 구 gate 제거.)
+        KRX 자체 cutover track에서 v2 retrofit + per-source control gate로 정식 편입 — 전역 FX mode 재결합 금지.
     """
-    from app import atomic_write_runtime
-    from app.atomic_write_control import WriterMode
-    enforced = atomic_write_runtime.snapshot().enforced_action
-    if enforced != WriterMode.LEGACY:
-        # close/REST/routine 공유 setter — neutral label(krx:direct), tick-level "krx:{asset}"와 구분
-        _record_write_mode_block(f"krx:direct:{asset}", enforced)
-        return False
-
     client = _get_sync_client()
     if client is None:
         return False
@@ -703,15 +689,10 @@ def set_latest_krx_rate_from_sync_job_tick_level(
         - async circuit_breaker 호출 X
         - usdt_redis_stats 호출 X (KRX 전용, telemetry 분리)
     """
-    # P1b A2-3: write-mode gate (최상단, Redis I/O 전). halt/atomic → SET 차단(BLOCKED),
-    # legacy → 기존 흐름 불변. atomic은 A3 전 fail-closed(legacy fallback 금지).
-    from app import atomic_write_runtime
-    from app.atomic_write_control import WriterMode
-    enforced = atomic_write_runtime.snapshot().enforced_action
-    if enforced != WriterMode.LEGACY:
-        _record_write_mode_block(f"krx:{asset}", enforced)
-        return KrxLatestWriteOutcome.BLOCKED
-
+    # mode-independent: latest:source:krx는 FX atomic keyspace와 disjoint (atomic loader/mirror가
+    # 안 읽고 안 씀 — mirror allowlist-skip). FX writer mode와 무관하게 항상 v1 write — 구 P1b A2-3
+    # 전역 FX gate 제거(전역 FX mode가 테더 topic trigger를 막던 버그 수정). KRX 자체 cutover track에서
+    # per-source control gate로 v2 정식 편입 — 전역 FX mode 재결합 금지.
     client = _get_sync_client()
     if client is None:
         return KrxLatestWriteOutcome.FAILED

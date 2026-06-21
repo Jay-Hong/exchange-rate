@@ -6,8 +6,9 @@ C6-5b가 곧 건드릴 live writer들의 **legacy 관측 계약**을 변경 前�
 (test_atomic_write_runtime.py)도 무변경 — trip-wire 교체는 mirror가 실제 write-mode-aware해지는 C6-5b-4에서.
 
 기존 lock과 DRY (중복 작성 안 함):
-- USDT/KRX tick gate(legacy passes / halt·atomic BLOCKED + Redis I/O 0) + KRX :597 ungated-on-halt +
-  BLOCKED counter + polling BLOCKED≠success → tests/test_atomic_write_a2_3.py
+- USDT/KRX Redis writer **mode-independence**(legacy·halt·atomic 모두 v1 SET 진행) + KRX routine
+  flag=false mode-independence + polling BLOCKED-dormant 방어 + AST trip-wire → tests/test_atomic_write_a2_3.py
+  (구 halt·atomic BLOCKED gate는 2026-06-22 decouple hotfix에서 제거 — USDT/KRX는 FX atomic keyspace와 disjoint)
 - bank/investing write-mode gate(legacy passes / halt·atomic _stage 미호출 + return 0) → tests/test_atomic_write_a2_2.py
 - bank/investing serial order(commit→Redis→alerts) + payload shape + commit-fail isolation → tests/test_source_direct_write.py
 - mirror 무조건 SET(값 복구, DB-sourced) + topic trigger 미발사 → tests/test_pr_d_set_failure_characterization.py
@@ -21,8 +22,8 @@ C6-5b가 곧 건드릴 live writer들의 **legacy 관측 계약**을 변경 前�
    (failed>0 시 LATEST_INDEX_KEY 미SET) / DXY는 rates invariant와 별도 카테고리. C6-5b-4 mirror atomicize가
    legacy 경로에서 보존해야 할 구조.
 2. KRX direct setter set_latest_krx_rate_from_sync_job(:597) **legacy 계약** — client None→False / 실 client→
-   True + v1 serialize_value(rate/timestamp/mirrored_at 정확 shape) 1회 set / 예외→False. C6-5b-2가 halt·atomic만
-   gate하고 legacy는 이 계약을 유지.
+   True + v1 serialize_value(rate/timestamp/mirrored_at 정확 shape) 1회 set / 예외→False. (구 C6-5b-2 halt·atomic
+   gate는 2026-06-22 decouple hotfix에서 제거 — 이 legacy 계약이 이제 모든 mode의 universal 계약, mode-independent.)
 """
 from __future__ import annotations
 
@@ -140,11 +141,12 @@ class TestMirrorLegacyInvariant(unittest.IsolatedAsyncioTestCase):
 
 
 class TestKrxDirectSetterLegacyContract(unittest.TestCase):
-    """GAP #2 — set_latest_krx_rate_from_sync_job(:597) legacy 계약 (a2_3의 None→False ungated-on-halt 너머).
+    """GAP #2 — set_latest_krx_rate_from_sync_job(:597) v1 write 계약 (client None→False / 실 client→True).
 
-    이 setter는 현재 ungated(close finalizer/REST 공유라 A2-3 미gate). C6-5b-2가 halt·atomic을 gate해도 **legacy
-    경로는 이 계약을 유지**해야 한다 → snapshot=legacy로 명시. v1 serialize_value write를 잠가, 향후 v2 retrofit/
-    gating이 의도적·가시적 변경이 되게 한다.
+    이 setter는 **mode-independent**(2026-06-22 decouple hotfix로 구 C6-5b-2 halt/atomic gate 제거 — usdt/krx는
+    FX atomic과 disjoint keyspace, §401-405 Amendment). 여기서는 snapshot=legacy로 v1 serialize_value write
+    shape을 잠근다(전 mode 동일 동작). 전 mode mode-independence + AST trip-wire는 tests/test_atomic_write_a2_3.py.
+    향후 self-cutover의 v2 retrofit이 의도적·가시적 변경이 되게 한다.
     """
 
     def test_client_none_returns_false(self):

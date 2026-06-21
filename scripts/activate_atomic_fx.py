@@ -745,8 +745,10 @@ class AtomicFxActivator:
             if not args.quiesce_confirmed:
                 out.append("--quiesce-confirmed (§9 quiesce handshake 완료 human ack)")
             if not args.ack_global_writer_mode_scope:
-                out.append("--ack-global-writer-mode-scope (requested_mode=atomic은 GLOBAL — USDT/KRX/mirror "
-                           "writer가 BLOCKED fail-closed; C6-5b atomicization 확인)")
+                out.append("--ack-global-writer-mode-scope (requested_mode=atomic은 GLOBAL row지만 "
+                           "mode-dependent writer는 FX bank/investing + mirror뿐. USDT/KRX source writer"
+                           "(latest:source:*)는 decoupled[mode-independent, FX atomic과 disjoint keyspace]라 "
+                           "영향 없음 — atomic/halt에도 계속 write)")
             # W0 #3: begin-atomic --session-id는 optional cross-check(DB-authoritative discover) — 필수 아님.
         return out
 
@@ -841,9 +843,9 @@ def _action_summary(resolved: ResumeAction) -> str:
 
 def _runbook_lines() -> List[str]:
     return [
-        "0. (precondition) requested_mode=atomic은 GLOBAL — halt 전에 USDT/KRX/mirror writer가 atomic(C6-5b) "
-        "또는 frozen 상태인지 확인. 미충족 시 해당 writer가 BLOCKED fail-closed(FX publisher scope는 "
-        "bank+investing뿐이나 writer-mode는 전역). --ack-global-writer-mode-scope로 ack.",
+        "0. (precondition) requested_mode=atomic은 GLOBAL row지만 mode-dependent writer는 FX(bank/investing) "
+        "+ mirror뿐. USDT/KRX source writer(latest:source:*)는 decoupled(mode-independent, FX atomic과 "
+        "disjoint keyspace)라 halt/atomic에도 계속 write — freeze 안 됨. --ack-global-writer-mode-scope로 ack.",
         "1. halt 적용 후: app recreate (= drain — fresh process가 halt 관측 후 halt ACK 기록, §9 quiesce; "
         "recreate-is-the-drain).",
         "2. quiesce drain 확인 후에만 begin-atomic (§9:92 activation race — 미드레인 시 invariant 깨짐).",
@@ -871,7 +873,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiesce-confirmed", action="store_true",
                    help="§9 quiesce handshake 완료 human ack (begin-atomic 필수; machine gate와 별개)")
     p.add_argument("--ack-global-writer-mode-scope", action="store_true",
-                   help="requested_mode=atomic이 GLOBAL(USDT/KRX/mirror 영향)임을 ack (begin-atomic 필수)")
+                   help="requested_mode=atomic은 GLOBAL row지만 mode-dependent writer는 FX bank/investing+mirror뿐 "
+                        "(USDT/KRX source는 decoupled/mode-independent)임을 ack (begin-atomic 필수)")
     p.add_argument("--confirm-incident-halt", action="store_true",
                    help="incident-halt(atomic→halt) 확인 ack")
     p.add_argument("--required-protocol", type=int, default=None,

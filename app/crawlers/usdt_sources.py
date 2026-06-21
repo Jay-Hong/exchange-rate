@@ -453,8 +453,9 @@ def _mirror_changed_source_to_redis(db: Session, source: str, asset: str) -> boo
             extra={"source": source, "asset": asset, "rate": latest["rate"]},
         )
         return False
-    # P1b A2-3: BLOCKED(write-mode halt/atomic) → SET 안 됨. success(True)로 오인 금지
-    # (SKIPPED coalesce와 달리 Redis latest 미갱신). 의도된 차단이라 warning 없이 False.
+    # BLOCKED은 dormant — setter가 mode-independent라 더 이상 반환하지 않음(구 전역 FX
+    # write-mode gate 제거). 방어적 분기로 보존: USDT/KRX 자체 cutover가 per-source gate를
+    # 도입하면 그때 다시 활성. (도달 시엔 success로 오인 금지 — Redis latest 미갱신.)
     if outcome is latest_rates_cache.UsdtLatestWriteOutcome.BLOCKED:
         return False
     return True
