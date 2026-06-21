@@ -165,8 +165,8 @@ class TestDefaultStaysFailClosed(unittest.TestCase):
         # W3 arming(C6-FLIP): main()이 AtomicFxActivator(..., quiesce_boundary=RealQuiesceBoundary()) 주입 →
         # begin-atomic이 실 drain proof를 consult. **AST 구조 검사**(getsource substring은 주석의
         # 'RealQuiesceBoundary'로 false-pass — codex; 주입 call이 제거되면 trip). 이 marker가 arming audit
-        # point(critic#9). prod behavior-change-0: capability gate(IMAGE_MAX=1) + quiesce table 부재로
-        # begin-atomic은 RELEASE/G2a/EXEC 전까지 여전히 차단 — arming ≠ flip.
+        # point(critic#9). prod behavior-change-0: RELEASE(IMAGE_MAX=2) 후에도 drain proof + seeded
+        # control+cutover state로 begin-atomic은 G2a/EXEC 전까지 여전히 차단 — arming ≠ flip.
         def _name(fn):
             return fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
         tree = ast.parse(inspect.getsource(afx.main))

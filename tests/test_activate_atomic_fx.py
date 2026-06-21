@@ -14,7 +14,7 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -380,12 +380,21 @@ class TestBeginAtomic(unittest.TestCase):
         return ["--apply", "--i-understand-this-flips-production", "--rds-snapshot-confirmed",
                 "--quiesce-confirmed", "--ack-global-writer-mode-scope", "--session-id", "s1", *extra]
 
-    def test_b2_capability_hardfail_current_image(self):
-        # 현재 image IMAGE_MAX=1 → required-protocol 2(범위밖) 또는 1(<=seed) 모두 불충족
+    def test_b2_capability_hardfail_out_of_range(self):
+        # C6-FLIP-RELEASE 후 image IMAGE_MAX=2 → required-protocol 3(범위밖)이 capability gate 거부
         db = _session(); _seed_writer(db, requested_mode="halt"); _seed_cutover(db)
-        out = A.AtomicFxActivator(db).run(_parse(self._argv("--required-protocol", "2", "--target-schema", "2")))
+        out = A.AtomicFxActivator(db).run(_parse(self._argv("--required-protocol", "3", "--target-schema", "2")))
         self.assertEqual(out.exit_code, A._EXIT_REFUSED)
         self.assertIn("image", out.message)
+
+    def test_b2_capability_admits_protocol2_at_default(self):
+        # C6-FLIP-RELEASE arming proof: 실 default IMAGE_MAX=2 (patch 없음)에서 capability gate가
+        # required-protocol 2를 ADMIT (blocking list 빈 []). 기존 11개 positive test는 모두 IMAGE_MAX→2
+        # patch라 '실 default에서 열린다'를 증명 못 함. capability list만 검사 → flip 유발 불가
+        # (downstream QuiesceBoundary/session/cas gate는 독립 — test_quiesce_machine_gate_blocks_default_boundary).
+        cap = A.AtomicFxActivator(MagicMock())._begin_atomic_capability(
+            _parse(self._argv("--required-protocol", "2", "--target-schema", "2")))
+        self.assertEqual(cap, [])
 
     def test_b2_protocol_at_seed_refused(self):
         db = _session(); _seed_writer(db, requested_mode="halt"); _seed_cutover(db)

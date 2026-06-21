@@ -188,10 +188,16 @@ class TestPreflight(unittest.TestCase):
 
     def test_fail_when_required_outside_range(self):
         row = _mode_row()
-        row.required_writer_protocol = 2  # image range [1,1] 밖
+        row.required_writer_protocol = 3  # image range [1,2] 밖 (C6-FLIP-RELEASE: IMAGE_MAX=2)
         result = evaluate_preflight(row)
         self.assertFalse(result["passed"])
         self.assertIsNotNone(result["reason"])
+
+    def test_image_protocol_range_constants(self):
+        # C6-FLIP-RELEASE arming proof + MIN-guard: MAX=2(image가 atomic v2 지원) /
+        # MIN=1(legacy v1 유지 — bump 금지, halt/legacy phase + rollback-to-legacy 호환).
+        self.assertEqual(IMAGE_MIN_WRITER_PROTOCOL, 1)
+        self.assertEqual(IMAGE_MAX_WRITER_PROTOCOL, 2)
 
     def test_none_row_fails_closed(self):
         result = evaluate_preflight(None)

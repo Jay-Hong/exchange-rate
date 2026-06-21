@@ -13,15 +13,18 @@ dormancy를 **다층**으로 보장한다:
 2. **QuiesceBoundary machine gate**: begin-atomic은 `quiesce_boundary.confirm_quiesced()`가 True여야 진행.
    constructor default는 `_FailClosedQuiesceBoundary`(항상 False) 유지지만 **W3에서 main()이 RealQuiesceBoundary
    주입**(arming) — RealBoundary는 open quiesce session + halt ACK(§9 step6 drain proof)를 검증해 True/False.
-   prod behavior-change-0: W3 후에도 capability gate(IMAGE_MAX=1) + quiesce table 부재(G2a 전)로 begin-atomic은
-   RELEASE/G2a/EXEC 전까지 차단(arming ≠ flip). 모든 dangerous flag가 있어도 drain 미확인 시 거부(§9:92 race 방어).
+   prod behavior-change-0: RELEASE(IMAGE_MAX=2) 후에도 begin-atomic은 drain proof(open quiesce session + halt ACK)
+   + seeded/coherent control+cutover state로 G2a/EXEC 전까지 차단(arming ≠ flip). 모든 dangerous flag가 있어도
+   drain 미확인 시 거부(§9:92 race 방어).
 3. **image-capability hard gate**(§6 preflight): begin-atomic은 `--required-protocol`이 실행 image
-   [IMAGE_MIN, IMAGE_MAX] 범위 AND > REQUIRED_WRITER_PROTOCOL_SEED 여야 한다. 현재 image는 IMAGE_MAX=1
-   이라 둘을 동시 만족 불가 → begin-atomic apply가 **현재 image에서 hard-fail**. C6-FLIP release가 IMAGE_MAX를
-   올린 뒤에야 통과. ⚠️ **atomic writer는 이미 실제 v2 write다**(C6-5b-3b/3c bank/investing crud.py:489/676
-   → `_insert_*_atomic` = DB commit + Redis v2 compare_write, mirror C6-5b-4) — 잘못 flip하면 'write 0'(무해)이
-   아니라 **실 v2 write가 발생**한다. capability gate(IMAGE_MAX)가 그 사고를 **구조적으로** 차단(write 0이라
-   무해해서가 아님 — flip은 항상 real write를 낸다고 가정하고 게이트 추론할 것, critic#7).
+   [IMAGE_MIN, IMAGE_MAX] 범위 AND > REQUIRED_WRITER_PROTOCOL_SEED 여야 한다. C6-FLIP-RELEASE가 IMAGE_MAX를
+   2로 올림 → --required-protocol 2가 [1,2] AND >1 만족하여 **이 gate는 통과**(RELEASE 전 IMAGE_MAX=1에선
+   동시 만족 불가로 hard-fail이었음). ⚠️ **atomic writer는 이미 실제 v2 write다**(C6-5b-3b/3c bank/investing
+   crud.py:489/676 → `_insert_*_atomic` = DB commit + Redis v2 compare_write, mirror C6-5b-4) — 잘못 flip하면
+   'write 0'(무해)이 아니라 **실 v2 write가 발생**한다(flip은 항상 real write를 낸다고 가정하고 게이트 추론할 것,
+   critic#7). RELEASE 후 capability gate는 더 이상 차단하지 않으므로, begin-atomic을 막는 것은 **남은 gate들**이다:
+   gate 2 drain proof(RealQuiesceBoundary: open quiesce session + halt ACK) + seeded/coherent control+cutover
+   state(부재/unseeded면 더 일찍 refuse/crash — 역시 안전) + accidental-exec 강가드 + cas fence.
 4. **accidental-exec 강가드**: --apply(default dry-run) + --i-understand-this-flips-production +
    --rds-snapshot-confirmed + --expected-* state fence.
 
@@ -58,9 +61,9 @@ apply (C6-FLIP, must-confirm — 이 unit에선 실행 안 함):
     python scripts/activate_atomic_fx.py --apply --i-understand-this-flips-production \\
         --rds-snapshot-confirmed --phase begin-atomic --quiesce-confirmed \\
         --ack-global-writer-mode-scope --required-protocol 2 --target-schema 2 --session-id <id>
-        # ⚠️ 현재 image(IMAGE_MAX=1)에선 **capability gate**로 거부됨 — W3 후 main()은 실 RealQuiesceBoundary를
-        #    주입(arming)하나, capability gate(IMAGE_MAX=1) + quiesce table 부재(G2a 전)로 begin-atomic은 여전히
-        #    차단. C6-FLIP-RELEASE(IMAGE_MAX bump) + G2a + EXEC 후에만 실제 통과(arming ≠ flip).
+        # ⚠️ RELEASE(IMAGE_MAX=2) 후 capability gate는 통과 — W3 후 main()은 실 RealQuiesceBoundary 주입(arming).
+        #    begin-atomic은 여전히 drain proof(open quiesce session + halt ACK) + seeded control+cutover state로
+        #    G2a/EXEC 전까지 차단. G2a(quiesce table) + EXEC(halt→ACK→begin-atomic) 후에만 실제 통과(arming ≠ flip).
 incident recovery (writer atomic 고착 시):
     python scripts/activate_atomic_fx.py --apply --i-understand-this-flips-production \\
         --phase incident-halt --confirm-incident-halt
@@ -149,8 +152,8 @@ class RealQuiesceBoundary:
 
     ⚠️ **W3 arming(C6-FLIP) 완료** — `AtomicFxActivator.__init__` default kwarg는 `_FailClosedQuiesceBoundary`
     유지(constructor는 안전), 단 **`main()`은 W3에서 RealQuiesceBoundary를 주입**해 begin-atomic이 실 drain
-    proof를 consult. prod behavior-change-0: capability gate(IMAGE_MAX=1) + quiesce table 부재로 begin-atomic은
-    RELEASE/G2a/EXEC 전까지 차단(arming ≠ flip). app/ 아닌 scripts/라 app dormancy trip-wire 무관.
+    proof를 consult. prod behavior-change-0: RELEASE(IMAGE_MAX=2) 후에도 drain proof + seeded control+cutover state로
+    begin-atomic은 G2a/EXEC 전까지 차단(arming ≠ flip). app/ 아닌 scripts/라 app dormancy trip-wire 무관.
 
     **b1**: 판정 로직은 공유 `confirm_quiesce_drained(db)`(atomic_quiesce_durable)에 위임 — prod migration
     gate(C6-PRE-build-b)와 **동일 기준**(재인라인 방지). expected_generation=None = begin-atomic은 open
@@ -748,7 +751,7 @@ class AtomicFxActivator:
         return out
 
     def _begin_atomic_capability(self, args: argparse.Namespace) -> List[str]:
-        """B2 image-capability hard gate — 현재 image(IMAGE_MAX=1)에선 불충족 → begin-atomic hard-fail."""
+        """B2 image-capability hard gate — RELEASE 후 image IMAGE_MAX=2 → --required-protocol 2 충족(통과). 범위밖(예: 3) 또는 <=seed면 거부."""
         out: List[str] = []
         if args.required_protocol is None:
             out.append("--required-protocol")
@@ -758,8 +761,7 @@ class AtomicFxActivator:
             if not (IMAGE_MIN_WRITER_PROTOCOL <= args.required_protocol <= IMAGE_MAX_WRITER_PROTOCOL):
                 out.append(f"--required-protocol={args.required_protocol}이 실행 image 범위 "
                            f"[{IMAGE_MIN_WRITER_PROTOCOL}, {IMAGE_MAX_WRITER_PROTOCOL}] 밖 — image가 이 writer "
-                           "protocol 미지원(§6 preflight). C6-FLIP release가 IMAGE_MAX bump + atomic writer 배선 "
-                           "후 통과.")
+                           "protocol 미지원(§6 preflight). 더 높은 protocol은 그를 지원하는 image release 필요.")
             if args.required_protocol <= REQUIRED_WRITER_PROTOCOL_SEED:
                 out.append(f"--required-protocol은 > {REQUIRED_WRITER_PROTOCOL_SEED}(legacy seed)여야 — atomic "
                            "activation은 writer protocol을 legacy 이상으로 전진시켜야 함")
@@ -900,8 +902,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         # W3 arming (C6-FLIP): 실 RealQuiesceBoundary 주입 — begin-atomic이 §9 step6 drain proof(open
         # quiesce session + ACK)를 실제 consult. constructor default는 _FailClosedQuiesceBoundary 유지(main만 주입).
-        # prod behavior-change-0: capability gate(IMAGE_MAX=1) + quiesce table 부재로 begin-atomic은
-        # RELEASE/G2a/EXEC 전까지 여전히 차단(arming ≠ flip).
+        # prod behavior-change-0: RELEASE(IMAGE_MAX=2) 후에도 drain proof + seeded control+cutover state로
+        # begin-atomic은 G2a/EXEC 전까지 여전히 차단(arming ≠ flip).
         outcome = AtomicFxActivator(db, quiesce_boundary=RealQuiesceBoundary()).run(args)
     finally:
         try:

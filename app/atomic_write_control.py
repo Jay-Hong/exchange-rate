@@ -38,9 +38,12 @@ TARGET_WRITE_SCHEMA_VERSION_SEED = 1
 REQUIRED_WRITER_PROTOCOL_SEED = 1
 
 # 현재 실행 이미지가 지원하는 writer protocol 범위 (§6 preflight 비교용).
-# 코드 property → release마다 bump. A1엔 legacy(v1)만.
+# 코드 property → release마다 bump. C6-FLIP-RELEASE: MAX 1→2 (image가 atomic v2 writer 지원).
+# MIN=1 유지 — image는 legacy v1도 지원해야 함(halt/legacy phase + rollback-to-legacy).
+# ⚠️ behavior-change-0: compute_effective_mode는 IMAGE_MAX/MIN 미참조(:101-139) → 이 bump은 writer
+# effective-mode 불변. capability gate(activate_atomic_fx.py:761) + 진단 preflight(:141)만 영향.
 IMAGE_MIN_WRITER_PROTOCOL = 1
-IMAGE_MAX_WRITER_PROTOCOL = 1
+IMAGE_MAX_WRITER_PROTOCOL = 2
 
 # atomic 실효 진입에 필요한 target_write_schema_version 하한 (§3 'schema 검사').
 # atomic write schema = v2. A1엔 dormant (seed target_write_schema_version=1).
