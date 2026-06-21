@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 
 _OPEN = "open"
 _CONSUMED = "consumed"
+# AtomicQuiesceSession.quiesce_row_format_version 기대값 (format-fence — corrupt/future quiesce evidence fail-closed)
+_QUIESCE_ROW_FORMAT_VERSION = 1
 
 
 def _valid_fence_int(v: object) -> bool:
@@ -207,3 +209,62 @@ def find_open_quiesce_session(db: "Session") -> Optional[AtomicQuiesceSession]:
         .filter(AtomicQuiesceSession.state == _OPEN)
         .first()
     )
+
+
+def confirm_quiesce_drained(db: "Session", *, expected_generation: Optional[int] = None) -> bool:
+    """§9 step6 quiesce drain proof 판정 (RealQuiesceBoundary[begin-atomic gate] + prod migration gate 공유).
+
+    drain = recreate + fresh-process halt ACK. "control row가 HALT"만으론 부족 — halt 전에 떠 있던
+    stale legacy-cached writer가 halt를 아직 관측 못 했으면 v1을 계속 쓸 수 있음. 그래서 **open quiesce
+    session ∧ fresh control HALT(exact-pin/epoch0/format) ∧ qualifying ACK**(recreate된 fresh process가
+    halt 관측을 durable 기록)을 전부 요구한다. `expected_generation` 주면(prod migration의
+    `--expected-writer-generation`) session.halt_mode_generation과 교차검증(operator pin).
+
+    조건 (전부 AND, 하나라도 실패/모호 → False):
+      - open quiesce session 존재(partial-unique → 최대 1) ∧ quiesce_row_format_version == 기대값
+        (corrupt/future quiesce evidence fail-closed).
+      - fresh control(populate_existing): 부재 / format≠CONTROL_ROW_FORMAT_VERSION / requested_mode≠HALT(cond1) /
+        mode_generation≠session.halt_mode_generation(cond3 exact-pin) / activation_epoch≠0(activation 한정) → False.
+      - expected_generation is not None → non-bool int ∧ session.halt_mode_generation==expected_generation
+        (아니면 False — 잘못된 pin/타입, fail-closed).
+      - qualifying ACK(session_id 일치 / observed_enforced_action==HALT[cond2] /
+        observed_writer_generation>=session.halt_mode_generation[cond3] /
+        process_started_at>session.halt_committed_at[cond4]).
+
+    **never-raise → False**: 어떤 read/parse/table-absent 실패도 False(fail-closed floor — RealQuiesceBoundary
+    stub 계약 보존). read-only(자체 commit/write 없음). caller가 db lifecycle 소유.
+    """
+    try:
+        session = find_open_quiesce_session(db)
+        if session is None:
+            return False
+        if session.quiesce_row_format_version != _QUIESCE_ROW_FORMAT_VERSION:
+            return False
+        ctrl = _read_control(db)
+        if ctrl is None or ctrl.control_row_format_version != CONTROL_ROW_FORMAT_VERSION:
+            return False
+        if ctrl.requested_mode != WriterMode.HALT:  # cond1 live
+            return False
+        if ctrl.mode_generation != session.halt_mode_generation:  # cond3 exact-pin
+            return False
+        if ctrl.activation_epoch != 0:  # activation quiesce 한정 (incident-halt epoch>=1)
+            return False
+        if expected_generation is not None:  # prod migration operator pin 교차검증
+            if not _valid_fence_int(expected_generation):
+                return False
+            if session.halt_mode_generation != expected_generation:
+                return False
+        ack = (
+            db.query(AtomicQuiesceAppAck)
+            .filter(
+                AtomicQuiesceAppAck.session_id == session.session_id,
+                AtomicQuiesceAppAck.observed_enforced_action == WriterMode.HALT,  # cond2
+                AtomicQuiesceAppAck.observed_writer_generation >= session.halt_mode_generation,  # cond3
+                AtomicQuiesceAppAck.process_started_at > session.halt_committed_at,  # cond4
+            )
+            .order_by(AtomicQuiesceAppAck.observed_at.desc(), AtomicQuiesceAppAck.id.desc())
+            .first()
+        )
+        return ack is not None
+    except Exception:
+        return False  # never-raise: fail-closed floor (table-absent/read/parse 실패도 False)

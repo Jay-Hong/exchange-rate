@@ -21,6 +21,7 @@ from app.atomic_quiesce_durable import (
     cas_consume_quiesce_session,
     cas_open_quiesce_session,
     cas_record_quiesce_app_ack,
+    confirm_quiesce_drained,
 )
 from app.atomic_write_control import CONTROL_ROW_FORMAT_VERSION, WriterMode
 from app.models import AtomicQuiesceAppAck, AtomicQuiesceSession, AtomicWriteControl
@@ -225,6 +226,84 @@ class TestConsumeSession(unittest.TestCase):
     def test_empty_session_id_rejected(self):
         db = _session()
         self.assertIs(cas_consume_quiesce_session(db, session_id=""), CasResult.PRECONDITION_FAILED)
+
+
+class TestConfirmQuiesceDrained(unittest.TestCase):
+    """b1 — confirm_quiesce_drained (RealQuiesceBoundary + prod migration gate 공유 drain proof)."""
+
+    def _drained(self, db):
+        """happy-path 시드: HALT@5 control + open session(q1) + qualifying ACK. 전부 commit."""
+        _seed_control(db)                       # HALT, gen=5, epoch=0
+        self.assertIs(_open_session(db), CasResult.APPLIED); db.commit()
+        self.assertIs(_record_ack(db), CasResult.APPLIED); db.commit()
+
+    def test_all_true(self):
+        db = _session(); self._drained(db)
+        self.assertTrue(confirm_quiesce_drained(db))
+
+    def test_no_open_session(self):
+        db = _session(); _seed_control(db)      # control HALT지만 session 없음
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_no_qualifying_ack(self):
+        db = _session(); _seed_control(db)
+        self.assertIs(_open_session(db), CasResult.APPLIED); db.commit()  # ACK 없음
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_non_qualifying_ack_filtered(self):
+        # 직접 삽입한 non-HALT ACK는 cond2 필터로 제외 → False
+        db = _session(); _seed_control(db)
+        self.assertIs(_open_session(db), CasResult.APPLIED); db.commit()
+        db.add(AtomicQuiesceAppAck(session_id="q1", boot_id="b", process_started_at=_BOOT_AT,
+                                   observed_writer_generation=5, observed_enforced_action=WriterMode.LEGACY,
+                                   observed_at=_BOOT_AT)); db.commit()
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_expected_generation_match(self):
+        db = _session(); self._drained(db)
+        self.assertTrue(confirm_quiesce_drained(db, expected_generation=5))
+
+    def test_expected_generation_mismatch(self):
+        db = _session(); self._drained(db)
+        self.assertFalse(confirm_quiesce_drained(db, expected_generation=4))  # operator pin != session gen
+
+    def test_expected_generation_non_bool_int_rejected(self):
+        db = _session(); self._drained(db)
+        self.assertFalse(confirm_quiesce_drained(db, expected_generation=True))   # bool 거부
+        self.assertFalse(confirm_quiesce_drained(db, expected_generation="5"))    # str 거부
+
+    def test_quiesce_format_fence(self):
+        # codex 보강: quiesce session format != 1 → fail-closed (corrupt/future quiesce evidence)
+        db = _session(); self._drained(db)
+        db.query(AtomicQuiesceSession).filter(AtomicQuiesceSession.session_id == "q1").update(
+            {"quiesce_row_format_version": 2}); db.commit()
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_control_flipped_not_halt(self):
+        # open 후 control이 HALT→legacy로 flip(TOCTOU) → fresh control read가 잡아 False
+        db = _session(); self._drained(db)
+        db.query(AtomicWriteControl).filter(AtomicWriteControl.id == 1).update(
+            {"requested_mode": WriterMode.LEGACY}); db.commit()
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_control_generation_bumped(self):
+        # control.mode_generation != session.halt_mode_generation(exact-pin) → False
+        db = _session(); self._drained(db)
+        db.query(AtomicWriteControl).filter(AtomicWriteControl.id == 1).update(
+            {"mode_generation": 6}); db.commit()
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_activation_epoch_nonzero(self):
+        db = _session(); self._drained(db)
+        db.query(AtomicWriteControl).filter(AtomicWriteControl.id == 1).update(
+            {"activation_epoch": 1}); db.commit()
+        self.assertFalse(confirm_quiesce_drained(db))
+
+    def test_never_raise_tables_absent(self):
+        # quiesce table 부재(create_all 제외 pre-migrate 모사) → never-raise → False
+        engine = create_engine("sqlite:///:memory:")  # 테이블 0개
+        db = sessionmaker(bind=engine)()
+        self.assertFalse(confirm_quiesce_drained(db))
 
 
 class TestDormancy(unittest.TestCase):

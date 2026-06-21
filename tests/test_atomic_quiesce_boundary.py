@@ -124,6 +124,32 @@ class TestRealQuiesceBoundary(unittest.TestCase):
             self.assertFalse(RealQuiesceBoundary().confirm_quiesced())
 
 
+class TestRealBoundaryDelegatesToHelper(unittest.TestCase):
+    """b1 — RealQuiesceBoundary.confirm_quiesced()는 공유 confirm_quiesce_drained에 위임(재인라인 회귀 방지).
+
+    동일 semantics 증명은 TestRealQuiesceBoundary 16 case(실 row seed)가 이미 커버 — 이 클래스는 '실제로
+    helper를 호출(중복 구현 아님)'을 patch로 잠근다. expected_generation=None(begin-atomic은 session 신뢰).
+    """
+
+    def test_delegates_true(self):
+        with patch("scripts.activate_atomic_fx.confirm_quiesce_drained", return_value=True) as m, \
+                patch("app.database.SessionLocal", MagicMock()):
+            self.assertTrue(RealQuiesceBoundary().confirm_quiesced())
+        m.assert_called_once()
+        self.assertEqual(m.call_args.kwargs, {})  # expected_generation 미전달 = None(session 권위)
+
+    def test_delegates_false(self):
+        with patch("scripts.activate_atomic_fx.confirm_quiesce_drained", return_value=False), \
+                patch("app.database.SessionLocal", MagicMock()):
+            self.assertFalse(RealQuiesceBoundary().confirm_quiesced())
+
+    def test_helper_raise_still_false(self):
+        # helper가 (이론상) raise해도 confirm_quiesced의 try/except floor가 False 보장
+        with patch("scripts.activate_atomic_fx.confirm_quiesce_drained", side_effect=RuntimeError("x")), \
+                patch("app.database.SessionLocal", MagicMock()):
+            self.assertFalse(RealQuiesceBoundary().confirm_quiesced())
+
+
 class TestDefaultStaysFailClosed(unittest.TestCase):
     """C6-FLIP 전: default boundary는 _FailClosedQuiesceBoundary, main()은 RealBoundary 미주입."""
 

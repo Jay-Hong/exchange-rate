@@ -100,13 +100,14 @@ from app.atomic_write_durable import (  # noqa: E402
     cas_request_halt,
     cas_request_incident_halt,
 )
-from app.atomic_quiesce_durable import (  # noqa: E402  (W1 halt open / W2 begin-atomic discover+consume)
+from app.atomic_quiesce_durable import (  # noqa: E402  (W1 halt open / W2 discover+consume / b1 boundary drain proof)
     cas_consume_quiesce_session,
     cas_open_quiesce_session,
+    confirm_quiesce_drained,
     find_open_quiesce_session,
 )
 from app.fx_membership import FX_MEMBERSHIP_VERSION  # noqa: E402
-from app.models import AtomicQuiesceAppAck, AtomicQuiesceSession, get_utc_now  # noqa: E402  (Q4b boundary read + W1 halt quiesce open)
+from app.models import get_utc_now  # noqa: E402  (W1 halt quiesce open — barrier ts)
 
 # cutover row format은 cutover CAS가 fence하지 않음(codex B4) → command가 이 값과 일치할 때만 진행.
 # (writer 측 CONTROL_ROW_FORMAT_VERSION와 별개 — cutover table은 자체 format 컬럼.)
@@ -145,8 +146,13 @@ class RealQuiesceBoundary:
     `_FailClosedQuiesceBoundary` 유지, `main()`도 무주입(legacy/pre-FLIP은 항상 fail-closed). app/ 아닌 scripts/라
     app dormancy trip-wire 무관(activate_atomic_fx는 이미 app.atomic_*_durable import).
 
-    confirm_quiesced() True 조건 (전부 AND):
-      STEP1 open quiesce session 존재(partial-unique라 최대 1개).
+    **b1**: 판정 로직은 공유 `confirm_quiesce_drained(db)`(atomic_quiesce_durable)에 위임 — prod migration
+    gate(C6-PRE-build-b)와 **동일 기준**(재인라인 방지). expected_generation=None = begin-atomic은 open
+    session의 halt_mode_generation을 권위로(operator pin 없음).
+
+    confirm_quiesced() True 조건 (전부 AND, 공유 helper가 강제):
+      STEP1 open quiesce session 존재(partial-unique라 최대 1개) ∧ quiesce_row_format_version==1
+        (b1 추가 — corrupt/future quiesce evidence fail-closed).
       FRESH AtomicWriteControl read (defense-in-depth — ACK write 이후 generation bump 포착):
         format==CONTROL_ROW_FORMAT_VERSION / requested_mode==HALT(cond1 live) /
         mode_generation==session.halt_mode_generation(**exact pin** — ACK의 >= 보다 tight, superseded halt
@@ -157,42 +163,18 @@ class RealQuiesceBoundary:
     """
 
     def confirm_quiesced(self) -> bool:
+        # b1: §9 step6 drain proof 판정은 공유 helper confirm_quiesce_drained(atomic_quiesce_durable)가 소유 —
+        # prod migration gate(C6-PRE-build-b)와 **동일 기준**(open session + fresh control HALT/exact-pin/epoch0/
+        # format + quiesce format fence + qualifying ACK)을 쓴다. expected_generation=None = session 신뢰
+        # (begin-atomic는 operator pin 없이 open session의 halt_mode_generation을 권위로). never-raise→False.
         db = None
         try:
             from app.database import SessionLocal  # lazy (main() 패턴)
 
             db = SessionLocal()
-            session = (
-                db.query(AtomicQuiesceSession)
-                .populate_existing()
-                .filter(AtomicQuiesceSession.state == "open")
-                .first()
-            )
-            if session is None:
-                return False
-            ctrl = read_control_row(db)
-            if ctrl is None or ctrl.control_row_format_version != CONTROL_ROW_FORMAT_VERSION:
-                return False
-            if ctrl.requested_mode != WriterMode.HALT:  # cond1 live
-                return False
-            if ctrl.mode_generation != session.halt_mode_generation:  # cond3-fresh exact pin
-                return False
-            if ctrl.activation_epoch != 0:  # activation quiesce 한정 (incident-halt epoch>=1)
-                return False
-            ack = (
-                db.query(AtomicQuiesceAppAck)
-                .filter(
-                    AtomicQuiesceAppAck.session_id == session.session_id,
-                    AtomicQuiesceAppAck.observed_enforced_action == WriterMode.HALT,  # cond2
-                    AtomicQuiesceAppAck.observed_writer_generation >= session.halt_mode_generation,  # cond3
-                    AtomicQuiesceAppAck.process_started_at > session.halt_committed_at,  # cond4
-                )
-                .order_by(AtomicQuiesceAppAck.observed_at.desc(), AtomicQuiesceAppAck.id.desc())
-                .first()
-            )
-            return ack is not None
+            return confirm_quiesce_drained(db)
         except Exception:
-            return False  # never-raise: stub의 fail-closed floor 일반화 (read/table-absent 실패도 False)
+            return False  # never-raise: SessionLocal 실패 등도 fail-closed floor (helper 자체도 never-raise)
         finally:
             if db is not None:
                 try:
