@@ -17,8 +17,10 @@ dormancy를 **다층**으로 보장한다:
 3. **image-capability hard gate**(§6 preflight): begin-atomic은 `--required-protocol`이 실행 image
    [IMAGE_MIN, IMAGE_MAX] 범위 AND > REQUIRED_WRITER_PROTOCOL_SEED 여야 한다. 현재 image는 IMAGE_MAX=1
    이라 둘을 동시 만족 불가 → begin-atomic apply가 **현재 image에서 hard-fail**. C6-FLIP release가 IMAGE_MAX를
-   올리고 atomic writer를 실제 배선(crud.py 등)한 뒤에야 통과. (현 crud.py:376은 atomic을 'write skip'으로
-   취급 = 실 atomic write 미구현 → 지금 flip하면 write 0이라 capability gate가 그 사고를 차단.)
+   올린 뒤에야 통과. ⚠️ **atomic writer는 이미 실제 v2 write다**(C6-5b-3b/3c bank/investing crud.py:489/676
+   → `_insert_*_atomic` = DB commit + Redis v2 compare_write, mirror C6-5b-4) — 잘못 flip하면 'write 0'(무해)이
+   아니라 **실 v2 write가 발생**한다. capability gate(IMAGE_MAX)가 그 사고를 **구조적으로** 차단(write 0이라
+   무해해서가 아님 — flip은 항상 real write를 낸다고 가정하고 게이트 추론할 것, critic#7).
 4. **accidental-exec 강가드**: --apply(default dry-run) + --i-understand-this-flips-production +
    --rds-snapshot-confirmed + --expected-* state fence.
 
