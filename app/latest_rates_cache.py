@@ -1685,6 +1685,13 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
     # prod는 C6-FLIP(must-confirm)까지 LEGACY라 atomic/halt 분기 dormant.
     from app import atomic_write_runtime
     from app.atomic_write_control import WriterMode
+    # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL, startup refresh 전/transient 실패)엔
+    # mirror-WRITE 금지. _INITIAL.enforced_action=LEGACY라 post-flip warmup이 v2를 v1으로 덮으면
+    # atomic mirror가 migration_required로 고착. skip(legacy-write 아님) — start_scheduler refresh 후
+    # 3s mirror job이 backfill, 그 사이 fetch는 DB fallback(설계 경로). table-absent(pre-G2a)는 refresh가
+    # legacy로 확정하므로 is_initialized()=True → 정상 legacy write.
+    if not atomic_write_runtime.is_initialized():
+        return _mirror_skip_stats("uninitialized")
     _enforced = atomic_write_runtime.snapshot().enforced_action
     if _enforced == WriterMode.ATOMIC:
         return await _mirror_all_latest_atomic(db)

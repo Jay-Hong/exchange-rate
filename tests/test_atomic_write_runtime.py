@@ -187,6 +187,40 @@ class TestAtomicWriteRuntime(unittest.TestCase):
         atomic = awr.refresh_from_db(_session_with_row(WriterMode.ATOMIC, 1, target_schema=2))
         self.assertFalse(awr.halt_enforced(atomic))
 
+    # ── is_initialized() + 첫-refresh 미확정 가드 (incident 2026-06-21 startup-ordering fix) ──
+    def test_is_initialized_false_before_refresh(self):
+        self.assertFalse(awr.is_initialized())  # _reset_for_test → _current is _INITIAL
+
+    def test_is_initialized_true_after_legacy_refresh(self):
+        awr.refresh_from_db(_session_with_row(WriterMode.LEGACY, 0))
+        self.assertTrue(awr.is_initialized())
+
+    def test_first_refresh_transient_failure_table_present_keeps_initial(self):
+        # 첫 refresh가 transient read 실패(table 존재) → _INITIAL 유지 → is_initialized False (mirror skip).
+        # post-flip warmup이 v2를 v1으로 덮는 transient 변종 차단(codex 보강).
+        db = _empty_session()  # table 존재
+        with patch("app.atomic_write_runtime.read_control_row", side_effect=RuntimeError("boom")):
+            snap = awr.refresh_from_db(db)
+        self.assertIs(snap, awr._INITIAL)        # swap 안 함
+        self.assertFalse(awr.is_initialized())
+
+    def test_first_refresh_table_absent_swaps_legacy(self):
+        # 첫 refresh가 table-absent(pre-G2a) read 실패 → legacy fail-close swap → is_initialized True
+        #   → dormant legacy mirror 정상(회귀 방지: DEPLOY-before-G2a 동안 mirror가 legacy write해야).
+        db = _empty_session()
+        with patch("app.atomic_write_runtime.read_control_row", side_effect=RuntimeError("boom")), \
+             patch("app.atomic_write_runtime._control_table_present", return_value=False):
+            snap = awr.refresh_from_db(db)
+        self.assertIsNot(snap, awr._INITIAL)     # swap 됨
+        self.assertTrue(awr.is_initialized())
+        self.assertEqual(snap.enforced_action, WriterMode.LEGACY)
+
+    def test_first_refresh_row_missing_table_present_keeps_initial(self):
+        # 첫 refresh가 row 부재 + table 존재(corrupt/partial G2a) → _INITIAL 유지 → mirror skip (codex 보강).
+        snap = awr.refresh_from_db(_empty_session())
+        self.assertIs(snap, awr._INITIAL)
+        self.assertFalse(awr.is_initialized())
+
 
 class TestImportSideEffectFree(unittest.TestCase):
     """invariant 1: import-time side effect 0 — thread/job/engine/session 모듈 부재."""

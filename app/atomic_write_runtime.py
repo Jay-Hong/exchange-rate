@@ -101,6 +101,28 @@ def snapshot() -> WriteModeSnapshot:
         return _INITIAL
 
 
+def is_initialized() -> bool:
+    """startup refresh가 _INITIAL을 실제 snapshot으로 교체했는지 (write-mode 확정 여부).
+
+    False = 아직 write-mode 미확정(_current is _INITIAL) → mirror-WRITE 금지(post-flip v1 downgrade
+    방지, incident 2026-06-21). snapshot() 기준이라 test가 snapshot()을 patch하면 일관. no-throw.
+    """
+    return snapshot() is not _INITIAL
+
+
+def _control_table_present(db: "Session") -> bool:
+    """atomic_write_control 테이블 존재 여부 (best-effort, no-throw).
+
+    refresh read 실패 시 'table-absent(pre-G2a legacy world)' vs 'transient(mode 미상)'을 구분하려
+    호출. 불확실(probe 자체 실패) 시 True 반환 = transient로 간주 → 미초기화 유지(skip, downgrade 방지).
+    """
+    from sqlalchemy import inspect as _sa_inspect  # 함수 내부 import — 모듈 import 경량 유지
+    try:
+        return _sa_inspect(db.get_bind()).has_table("atomic_write_control")
+    except Exception:
+        return True
+
+
 def halt_enforced(snap: WriteModeSnapshot) -> bool:
     """writer가 halt로 차단해야 하는지 (enforced_action 단일 판정)."""
     return snap.enforced_action == WriterMode.HALT
@@ -161,23 +183,36 @@ def refresh_from_db(db: "Session") -> WriteModeSnapshot:
     """
     global _current
     # ── DB read + compute (lock 밖) ──
+    table_present = True   # default: 불확실 시 transient로 간주(미초기화 유지 → skip, downgrade 방지)
+    row_is_none = False
     try:
         row = read_control_row(db)
         diagnostic = compute_effective_mode(row)
         row_activated = _row_activated(row)
         explicit_halt = _row_explicit_halt(row)
         read_ok = True
+        row_is_none = row is None   # table 존재 + row 부재 (corrupt/partial G2a) — read_control_row은 부재 시 None
     except Exception:
         row = None
         diagnostic = WriterMode.HALT  # 못 읽음 = HALT 진단 라벨
         row_activated = False
         explicit_halt = False
         read_ok = False
+        table_present = _control_table_present(db)  # table-absent(pre-G2a) vs transient 구분용
 
     # ── swap (lock 안 — monotonic latch/gen, read-fail fail-closed) ──
     try:
         with _LOCK:
             prev = _current
+            # ── 첫 refresh(prev is _INITIAL) + write-mode 미확정 → _INITIAL 유지(swap 안 함) ──
+            # mirror가 미확정 상태에서 LEGACY write로 v2를 v1 덮는 사고 방지(incident 2026-06-21).
+            #   (1) read 실패 + table 존재 = transient(mode 미상)
+            #   (2) read 성공이나 row 부재 + table 존재 = corrupt/partial G2a (codex 보강)
+            # table-absent(pre-G2a legacy world)는 제외 — 아래 fail-close swap으로 legacy 진행(dormant 정상).
+            if prev is _INITIAL and (
+                (not read_ok and table_present) or (read_ok and row_is_none)
+            ):
+                return prev  # _INITIAL 유지 → is_initialized()=False → mirror skip
             latched = prev.activation_latched or row_activated  # 단조: True면 영구
             if read_ok:
                 gen = _row_generation(row, prev.mode_generation)

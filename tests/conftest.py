@@ -16,6 +16,8 @@ import sys
 import tempfile
 from unittest.mock import MagicMock
 
+import pytest
+
 # 1. firebase_admin chain stub (main.py import 시 실제 init/creds 회피) — force(설치 여부 무관)
 for _m in ("firebase_admin", "firebase_admin.credentials", "firebase_admin.messaging",
            "firebase_admin.auth", "firebase_admin.exceptions"):
@@ -28,3 +30,21 @@ _fd, _path = tempfile.mkstemp(suffix="_pytest.db")
 os.close(_fd)  # mkstemp fd 즉시 닫기 (path만 사용)
 os.environ["DATABASE_URL"] = f"sqlite:///{_path}"
 atexit.register(lambda: os.path.exists(_path) and os.remove(_path))
+
+
+# 3. write-mode cache 기본 초기화 (incident 2026-06-21 fix 후속).
+#    fix로 write-mode 미확정(_INITIAL)은 모든 FX writer/mirror가 skip(legacy v1 write 금지 — post-flip
+#    v2 downgrade 방지). 대부분의 writer 테스트는 production steady-state(initialized legacy)를 가정하므로
+#    각 test 전 cache를 legacy로 초기화한다. uninitialized/특정 mode를 명시 테스트하는 케이스는 자신의
+#    setUp `_reset_for_test()` 또는 `snapshot` patch로 override한다(이 autouse fixture보다 나중에 적용됨).
+@pytest.fixture(autouse=True)
+def _default_legacy_write_mode():
+    try:
+        from app import atomic_write_runtime as _awr
+        _awr._current = _awr.WriteModeSnapshot(
+            diagnostic_effective_mode="legacy", activation_latched=False,
+            enforced_action="legacy", mode_generation=0,
+        )
+    except Exception:
+        pass
+    yield

@@ -485,6 +485,12 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
     #   atomic → 별 분기 _insert_bank_rates_atomic (DB commit + Redis v2 compare_write).
     #   halt(또는 미지값) → fail-closed skip (db.add() 전 return이라 rollback 불요, C2 불변).
     #   legacy → 아래 기존 흐름 불변 (staged에서 .change 추출만 추가, 관측 동작 동일).
+    # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL — subprocess refresh transient 실패 등)엔
+    # legacy write 금지(post-flip v2를 v1으로 downgrade 방지). _INITIAL.enforced_action=LEGACY라 가드 없으면
+    # 아래 legacy 경로로 진입. skip — refresh 확정 후 다음 cycle이 처리(mirror Fix B와 동일 불변).
+    if not atomic_write_runtime.is_initialized():
+        _record_write_mode_skip(bank_name, "uninitialized")
+        return 0
     enforced = atomic_write_runtime.snapshot().enforced_action
     if enforced == WriterMode.ATOMIC:
         return _insert_bank_rates_atomic(db, current_rates, bank_name)
@@ -672,6 +678,10 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
 
     # P1b A2-2/C6-5b-3c: write-mode gate (bank과 동일 3-way). banner 직후·staging 전.
     #   atomic → 별 분기 _insert_investing_rates_atomic (bank 대칭) / halt(미지값) → skip+return 0 / legacy 불변.
+    # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL)엔 legacy write 금지(v2 downgrade 방지, bank 대칭).
+    if not atomic_write_runtime.is_initialized():
+        _record_write_mode_skip("investing", "uninitialized")
+        return 0
     enforced = atomic_write_runtime.snapshot().enforced_action
     if enforced == WriterMode.ATOMIC:
         return _insert_investing_rates_atomic(db, current_rates)

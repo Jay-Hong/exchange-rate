@@ -275,6 +275,23 @@ class TestModeGate(_AtomicMirrorBase):
                      if c[0][0] == latest_key_bank("kb", "usd-krw")][0]
         self.assertNotIn("schema_version", json.loads(bank_call[0][1]))
 
+    async def test_uninitialized_skips_no_write(self):
+        # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL, startup refresh 전/첫 transient 실패)엔
+        # mirror-WRITE 금지. _INITIAL.enforced_action=LEGACY라 post-flip warmup이 v2를 v1으로 덮으면 atomic
+        # mirror가 migration_required로 고착됐던 사고. skip(write 0) — 3s job이 refresh 후 backfill.
+        from app.atomic_write_runtime import _INITIAL
+        with patch("app.atomic_write_runtime.snapshot", return_value=_INITIAL), \
+             patch("app.atomic_direct_write.build_atomic_writer") as mock_build, \
+             patch("app.latest_rates_cache._set_latest", new_callable=AsyncMock) as mock_set:
+            stats = await _mirror_all_latest(MagicMock())
+        self.assertEqual(stats["skipped_mode"], "uninitialized")
+        self.assertEqual(stats["attempted_total"], 0)
+        self.assertEqual(stats["loaded_total"], 0)
+        self.assertEqual(stats["failed"], 0)
+        self.assertFalse(stats["index_updated"])
+        mock_build.assert_not_called()         # atomic writer 생성 0
+        mock_set.assert_not_called()           # bank/investing/index/DXY write 0 (v1 downgrade 없음)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -995,6 +995,23 @@ class TestInsertBankRatesCallOrder(unittest.TestCase):
             "rate": 1371.5,
         }])
 
+    def test_uninitialized_write_mode_skips_no_stage_commit_redis(self):
+        # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL — subprocess refresh transient 실패 등)엔
+        # bank writer가 stage/commit/redis 전에 skip(return 0) — post-flip v2를 v1으로 downgrade 방지.
+        # conftest default-legacy fixture를 명시 override(is_initialized=False).
+        from app import crud
+        db = MagicMock()
+        with patch("app.atomic_write_runtime.is_initialized", return_value=False), \
+             patch.object(crud, "_write_changed_bank_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts:
+            count = crud.insert_bank_rates_into_db(
+                db=db, current_rates={"usd-krw": 1371.5}, bank_name="kb")
+        self.assertEqual(count, 0)            # skip
+        db.add.assert_not_called()            # stage 안 함
+        db.commit.assert_not_called()         # commit 안 함
+        mock_redis.assert_not_called()        # v1 Redis write 안 함 (downgrade 방지)
+        mock_alerts.assert_not_called()
+
     def test_unchanged_pair_skips_commit_redis_alerts(self):
         """last_record.rate == current_rate → INSERT/commit/redis/alerts 모두 skip (Codex Low-3)."""
         from app import crud
@@ -1115,6 +1132,22 @@ class TestInsertInvestingRatesCallOrder(unittest.TestCase):
                 current_rates={"usd-krw": 1371.5},
             )
         self.assertEqual(count, 0)
+        db.commit.assert_not_called()
+        mock_redis.assert_not_called()
+        mock_alerts.assert_not_called()
+
+    def test_uninitialized_write_mode_skips_no_stage_commit_redis(self):
+        # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL)엔 investing writer가 stage/commit/redis 전
+        # skip(return 0) — post-flip v2 downgrade 방지 (bank 대칭). conftest default-legacy를 명시 override.
+        from app import crud
+        db = MagicMock()
+        with patch("app.atomic_write_runtime.is_initialized", return_value=False), \
+             patch.object(crud, "_write_changed_investing_rates_to_redis") as mock_redis, \
+             patch.object(crud, "process_rate_alerts") as mock_alerts:
+            count = crud.insert_investing_rates_into_db(
+                db=db, current_rates={"usd-krw": 1371.5})
+        self.assertEqual(count, 0)
+        db.add.assert_not_called()
         db.commit.assert_not_called()
         mock_redis.assert_not_called()
         mock_alerts.assert_not_called()

@@ -174,6 +174,34 @@ class TestWiringStatic(unittest.TestCase):
         self.assertTrue(calls_refresh, "start_scheduler가 refresh_write_mode_cache() startup 호출 안 함")
         self.assertTrue(registers_poll, "start_scheduler가 atomic_write_mode_poll job 등록 안 함")
 
+    def test_lifespan_refreshes_write_mode_before_warmup(self):
+        # Bug-fix(incident 2026-06-21): main.lifespan은 warmup_latest_rates() *전*에 write-mode를 refresh해야
+        # (asyncio.to_thread(refresh_write_mode_cache)). 안 그러면 warmup이 stale _INITIAL=LEGACY로 mirror해
+        # post-flip v2를 v1으로 덮음. lineno 기반(walk order 무관) AST 검증.
+        import ast
+        tree = ast.parse(self._src("app", "main.py"))
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "lifespan"),
+            None,
+        )
+        self.assertIsNotNone(fn, "lifespan 함수 없음")
+        refresh_linenos, warmup_linenos = [], []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                if (isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread"
+                        and any(isinstance(a, ast.Name) and a.id == "refresh_write_mode_cache"
+                                for a in node.args)):
+                    refresh_linenos.append(node.lineno)
+                if isinstance(node.func, ast.Name) and node.func.id == "warmup_latest_rates":
+                    warmup_linenos.append(node.lineno)
+        self.assertTrue(refresh_linenos, "lifespan이 asyncio.to_thread(refresh_write_mode_cache) 호출 안 함")
+        self.assertTrue(warmup_linenos, "lifespan이 warmup_latest_rates() 호출 안 함")
+        self.assertLess(
+            min(refresh_linenos), min(warmup_linenos),
+            "refresh_write_mode_cache가 warmup_latest_rates 전에 호출돼야 (post-flip v1 downgrade 방지)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

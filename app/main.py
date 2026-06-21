@@ -508,6 +508,12 @@ async def lifespan(app: FastAPI):
     # broadcast Redis-first 경로가 첫 호출부터 데이터 있도록 startup에 1회 적재.
     # 실패해도 broadcast는 DB fallback으로 동작 → 앱 시작은 막지 않음.
     if REDIS_LATEST_ENABLED:
+        # Bug-fix(incident 2026-06-21): startup mirror(warmup) 전에 write-mode cache refresh — warmup이
+        # stale _INITIAL=LEGACY 대신 실제 mode(post-flip atomic 등)를 반영하게. idempotent(start_scheduler도
+        # refresh), no-throw, control table 부재 시 fail-soft. Fix B(is_initialized skip)가 1차 방어, 이건
+        # ordering belt-and-suspenders.
+        from app.atomic_write_refresh import refresh_write_mode_cache
+        await asyncio.to_thread(refresh_write_mode_cache)
         await warmup_latest_rates()
 
     # Firebase Admin SDK 초기화 (Phase 2 - FCM)
