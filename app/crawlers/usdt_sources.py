@@ -16,8 +16,9 @@ Phase 1 대상:
 
 # 표준 라이브러리
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 # 서드파티 라이브러리
@@ -33,6 +34,14 @@ from app.source_registry import get_usdt_exchange_entries
 logger = logging.getLogger("exchange_rate.crawler.usdt_sources")
 
 PER_SOURCE_TIMEOUT_SECONDS = 2.0
+
+_KST = timezone(timedelta(hours=9))
+
+# Bithumb REST `trade_timestamp` +9h KST-as-UTC 결함(2026-06-22 실측) 재발 fail-closed 임계.
+# 정상 체결시각은 ≈now 이하 — now+5min 초과 미래는 결함/오염으로 판정(+9h=32400s 결함과
+# 초 단위 정상 clock skew를 명확히 가르는 여유 임계). `_bithumb_rest_event_ms`의 최후
+# raw 폴백이 미래 schema 변화로 결함값을 흘릴 때를 보강 (Codex review 산물).
+_BITHUMB_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 
 # 거래소별 USDT/KRW 퍼블릭 엔드포인트 및 응답 price 필드 파서
 # 검증일: 2026-04-12 (USDT_TAB_PROPOSAL.md의 Confirmed Public Crypto Endpoints)
@@ -83,6 +92,50 @@ def _fetch_upbit() -> Optional[float]:
     return tick["rate"] if tick else None
 
 
+def _bithumb_rest_event_ms(item: dict) -> Optional[int]:
+    """Bithumb REST v1/ticker item → true UTC epoch ms (true UTC 기준).
+
+    ⚠️ Bithumb REST v1/ticker의 `trade_timestamp`/`timestamp`는 KST 벽시계를
+    UTC epoch인 것처럼 인코딩해 실제 UTC epoch보다 +9h 크다 (2026-06-22 실측,
+    REST diff=+9.0h / WS diff≈0h — 같은 v1 스키마인데 REST만의 결함). 파이프라인
+    계약은 timestamp_ms = true UTC epoch ms (`crud.event_ms_to_utc_naive`,
+    Redis `seen_at`/regression guard 모두 이를 전제)이라, 그대로 쓰면 +9h 미래
+    시각이 저장되고 regression guard가 이후 정상 tick을 ~9h 동안 차단(freeze)한다.
+    → 명시적으로 라벨된 벽시계 필드에서 epoch을 재구성한다 (`trade_timestamp` 결함
+    비의존, self-correcting). WS 경로(`bithumb._parse_ticker_message`)는 `trade_timestamp`가
+    정상이고 `*_kst` 필드도 없으므로 본 helper 미적용 — Bithumb 엔드포인트 간 비대칭
+    그대로 반영.
+
+    우선순위:
+      1. trade_date_kst + trade_time_kst (명시 KST) → KST datetime → epoch
+      2. trade_date + trade_time (명시 UTC) → UTC datetime → epoch
+      3. 둘 다 없으면 raw trade_timestamp/timestamp (최후 폴백; 결함 가능하나 None 회피)
+    초 단위 정밀도 (벽시계 필드에 ms 없음) — seen_at 5s floor라 무해.
+    """
+    def _epoch_ms(date_str, time_str, tz) -> Optional[int]:
+        if not date_str or not time_str:
+            return None
+        try:
+            dt = datetime.strptime(f"{date_str}{time_str}", "%Y%m%d%H%M%S")
+        except (TypeError, ValueError):
+            return None
+        return int(dt.replace(tzinfo=tz).timestamp() * 1000)
+
+    kst_ms = _epoch_ms(item.get("trade_date_kst"), item.get("trade_time_kst"), _KST)
+    if kst_ms is not None:
+        return kst_ms
+    utc_ms = _epoch_ms(item.get("trade_date"), item.get("trade_time"), timezone.utc)
+    if utc_ms is not None:
+        return utc_ms
+    raw = item.get("trade_timestamp") or item.get("timestamp")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_bithumb_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Optional[dict]:
     """Bithumb USDT/KRW REST ticker → normalized tick dict.
 
@@ -96,8 +149,10 @@ def fetch_bithumb_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Opti
         또는 REST/parse 실패 시 None (caller 격리).
 
     timestamp_ms:
-        Bithumb REST 응답의 `trade_timestamp` 우선, 없으면 `timestamp` 폴백
-        (Upbit-compatible payload + WS `_parse_ticker_message` 동일 패턴).
+        `_bithumb_rest_event_ms`로 true UTC epoch ms 재구성. ⚠️ Bithumb REST의
+        `trade_timestamp`/`timestamp`는 +9h KST-as-UTC 결함이라 raw로 쓰면 미래
+        시각이 저장돼 regression guard freeze를 유발 → 벽시계 필드 기반 정규화
+        (상세는 `_bithumb_rest_event_ms` docstring). WS 경로는 정상이라 미적용.
 
     Guard (Upbit Codex Finding 2 mirror — A11):
         - 0/음수 rate가 fallback fanout (Redis/DB) 통과 시 잘못된 알림 위험
@@ -112,7 +167,19 @@ def fetch_bithumb_usdt_tick(timeout: float = PER_SOURCE_TIMEOUT_SECONDS) -> Opti
         rate = float(item["trade_price"])
         if rate <= 0:
             return None
-        ts_ms = int(item.get("trade_timestamp") or item["timestamp"])
+        ts_ms = _bithumb_rest_event_ms(item)
+        if ts_ms is None:
+            return None
+        # +9h 결함 재발 fail-closed: wall-clock 필드가 사라지고 raw trade_timestamp만
+        # 남는 미래 schema 변화에도 미래값을 latest로 흘리지 않게 (regression guard
+        # ~9h freeze 차단). 정상 tick은 과거 체결시각이라 미영향. skip된 probe는
+        # WS primary + 다음 probe로 자연 회복.
+        if ts_ms > int(time.time() * 1000) + _BITHUMB_MAX_FUTURE_SKEW_MS:
+            logger.warning(
+                "[usdt_sources.bithumb] REST timestamp_ms 비정상 미래(%dms) — "
+                "+9h 결함 의심, fail-closed (tick None)", ts_ms,
+            )
+            return None
         return {
             "source": "bithumb",
             "asset": "usdt-krw",

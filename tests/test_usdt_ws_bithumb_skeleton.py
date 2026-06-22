@@ -1528,6 +1528,92 @@ class TestFetchBithumbUsdtTick(unittest.TestCase):
         ):
             self.assertIsNone(fetch_bithumb_usdt_tick())
 
+    def test_rest_kst_as_utc_bug_normalized(self):
+        """REGRESSION (2026-06-22): Bithumb REST `trade_timestamp`는 +9h KST-as-UTC
+        결함. 벽시계(`trade_date_kst`/`trade_time_kst`) 기반으로 true UTC epoch 재구성
+        해야 미래 시각(+9h) 저장 + regression guard freeze를 방지.
+        """
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        # 2026-06-22 13:06:00 KST == 04:06:00 UTC == 1782101160000 ms.
+        # raw trade_timestamp는 +9h(=KST를 UTC로 오인코딩) → 1782133560156.
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "type": "ticker", "code": "KRW-USDT", "trade_price": 1509.0,
+            "trade_date_kst": "20260622", "trade_time_kst": "130600",
+            "trade_date": "20260622", "trade_time": "040600",
+            "trade_timestamp": 1782133560156,  # +9h 결함값
+            "timestamp": 1782133560156,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        # 재구성값(2026-06-22 04:06 UTC)을 결정적으로 '과거'로 두기 위해 now를 1h 뒤로
+        # 고정 — future-skew 가드(real time.time 의존)의 경계 flakiness 제거.
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ), patch(
+            "app.crawlers.usdt_sources.time.time", return_value=1782101160 + 3600,
+        ):
+            tick = fetch_bithumb_usdt_tick()
+        self.assertEqual(tick["timestamp_ms"], 1782101160000)
+        # 결함 raw 값을 그대로 쓰지 않았음을 명시 (회귀 잠금).
+        self.assertNotEqual(tick["timestamp_ms"], 1782133560156)
+
+    def test_rest_no_wallclock_fields_preserves_raw(self):
+        """벽시계 필드 부재 시 raw trade_timestamp 보존 (후방 호환 — 다른 거래소/legacy
+        mock은 wall-clock 필드 없이 raw epoch 전달).
+        """
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "trade_price": 1486.0, "trade_timestamp": 1777370239843,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ):
+            tick = fetch_bithumb_usdt_tick()
+        self.assertEqual(tick["timestamp_ms"], 1777370239843)
+
+    def test_rest_raw_future_skew_fail_closed(self):
+        """REGRESSION (Codex review): 벽시계 필드 없이 raw trade_timestamp만 +9h 미래면
+        fail-closed(None) — 미래 schema 변화로 결함값이 재유입돼도 freeze 재발 차단.
+        """
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        now_s = 1_000_000.0
+        raw_future_ms = int((now_s + 9 * 3600) * 1000)  # now + 9h (결함 패턴)
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "trade_price": 1509.0, "trade_timestamp": raw_future_ms,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ), patch(
+            "app.crawlers.usdt_sources.time.time", return_value=now_s,
+        ):
+            self.assertIsNone(fetch_bithumb_usdt_tick())
+
+    def test_rest_raw_within_tolerance_accepted(self):
+        """raw가 now 기준 허용 범위(+5min 이내) 안이면 accept — 정상 skew는 막지 않음."""
+        from app.crawlers.usdt_sources import fetch_bithumb_usdt_tick
+
+        now_s = 1_000_000.0
+        raw_ms = int((now_s + 2) * 1000)  # now + 2s (정상 skew)
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{
+            "trade_price": 1509.0, "trade_timestamp": raw_ms,
+        }]
+        mock_response.raise_for_status = MagicMock()
+        with patch(
+            "app.crawlers.usdt_sources.requests.get", return_value=mock_response,
+        ), patch(
+            "app.crawlers.usdt_sources.time.time", return_value=now_s,
+        ):
+            tick = fetch_bithumb_usdt_tick()
+        self.assertEqual(tick["timestamp_ms"], raw_ms)
+
 
 class TestBithumbDbWriterDebounce(unittest.IsolatedAsyncioTestCase):
     """A3 — DB writer 1초 window debounce + close pending tick flush."""
