@@ -88,26 +88,26 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 
 > plan-first Workflow(`wf_f45a7380`) 3 조사 + codex design GO. **구현은 별 세션**(M, design-sensitive).
 
-**6 coupling points** (evaluator → backend/sender 추상화):
-1. `load_settings` (구 `_load_settings_from_db` 562) 2. `refetch_snapshot` (구 `_refetch_setting_snapshot` 770) 3. `persist_success` (mark_triggered+log, `_persist_result` 807) 4. `persist_failure` (log fail 836) 5. `build_payload` (구 `_build_fcm_payload` 879, `data["type"]` 소유) 6. **🔴 `sender` (delivery)** — codex blocker: `_send_fcm_multicast`(785)는 ABC 5점 밖 → persist no-op만으론 **2× FCM 발사**. **constructor-injected sender**(default `send_fcm_multicast_sync`, FX shadow=no-op)로 추상화. global flag ❌.
+**5 coupling** (4 backend method + 1 evaluator-injected sender — codex 019ef2fa: §6.1 초안의 6-coupling[persist 분리]을 **whole-persist로 정정**):
+1. `load_settings` (구 `_load_settings_from_db` 562) 2. `refetch_snapshot` (구 `_refetch_setting_snapshot` 770) 3. **`persist_result` WHOLE** (구 `_persist_result` 794 — mark_triggered+log+failed-token cleanup 통째) — ⚠️ **split 안 함**: mark/log/cleanup이 각자 `db.commit()`(crud.py:2886/2909 + alert_evaluator:849)이라 split 시 **session/commit-order 변경 = byte-identity 위협**. whole 이동이 안전. FX shadow = persist_result **전체 no-op**(부분 no-op 시 success_count=0→failure-log 발사). 4. `build_payload` (구 `_build_fcm_payload` 879, `data["type"]` 소유). + **🔴 `sender` (delivery, evaluator constructor-injected, backend ABC 밖)** — `_send_fcm_multicast`(785) 미추상화 시 persist no-op만으론 **2× FCM 발사**. default = **lazy-import wrapper**(현 body, module-import 시점 bind 금지). global flag ❌.
 
 **backends**: `SourceAlertBackend`(default, 현 동작 verbatim, USDT/KRX runtime byte-identical, **KRX subclass `pass` 유지**) / `FxNotificationBackend`(notification_settings read — **value pass-through**: source→bank·asset→currency identity[확인 `_changes_to_fcm` crud.py:275], persist=shadow no-op, payload type=`rate_alert`).
 
 **shadow wiring**: crud.py 4 site(522/593/717/783, `process_rate_alerts` 직전) + `schedule_on_loop`(worker→main loop, crud.py:350 검증 패턴). double-fire = **committed changed_rates batch당 1회**(atomic gate 561/752로 atomic OR legacy 한 경로만 — codex 확인). **bounded sequential batch pure-eval**(TTL-0 per-observation load-task spam ❌ = threadpool/DB/pending backlog[356/517/546] 위험) + **dedicated cache**(singleton ❌ = cross-pollution + FX API invalidation[295] 부재). `timestamp_ms`는 changed_rates에 없어 ingest-time 합성 + coalescer bypass. default-OFF `FX_ALERT_SHADOW_ENABLED`.
 
 **sub-slices** (codex GO):
-- **S1** (M): AlertStorageBackend ABC + SourceAlertBackend **+ sender seam** 추출. ⚠️ gate = backend **characterization test**(empty-token 제외/refetch stale/persist 순서/failed-token cleanup) + static method를 patch하던 기존 test는 **backend patch로 갱신**("zero-edit green"은 compat-wrapper 잔존 신호라 gate 부적절 — behavior-change-0 기준 = runtime alert 출력 identical).
+- **S1** (M): AlertStorageBackend ABC(4 method) + SourceAlertBackend(verbatim) **+ sender seam**(evaluator constructor, lazy wrapper default) 추출. ⚠️ gate = backend **characterization**(empty-token 제외 / refetch stale / **persist_result whole: mark+log+cleanup commit-order** / payload) + static-patch 기존 test는 **backend patch로 갱신** + **runtime alert 출력 identical + commit/session order identical + sender default lazy wrapper**(= behavior-change-0 기준; "zero-edit green"은 compat-wrapper 잔존 신호라 부적절). unused `crud` import는 verbatim 보존(S1서 제거 X = import side-effect 변경 회피).
 - **S2** (M): FxNotificationBackend (dead code, 단위 test만).
 - **S3** (M): FX shadow evaluator singleton + bounded batch wrapper + **delivery no-op + state/log no-op + telemetry-only** + dedicated cache.
 - **S4** (S): crud 4 site 주입 behind flag(default off).
 - **S5** (ops): flag 활성 + parity 관찰(would_fire vs legacy sent_count per source/asset).
 
 **S1 착수 준비 (pre-impl checklist, 2026-06-23 read-only 확인)**:
-- **추출 대상 6**(alert_evaluator.py): `_load_settings_from_db`(def 551 / call 546) → `load_settings` · `_refetch_setting_snapshot`(762 / call 653·710) → `refetch_snapshot` · `_persist_result`(794 / call 758) → `persist_success`+`persist_failure` 분리(⚠️ **failed-token cleanup[UserDevice delete]은 evaluator 잔류** — fcm_result 기반, schema 무관) · `_build_fcm_payload`(865 / call 752) → `build_payload` · **`_send_fcm_multicast`(786 / call 754) → constructor 주입 `sender`**.
-- **constructor**: `__init__`에 `backend=SourceAlertBackend()` + `sender=send_fcm_multicast_sync` default → 6 instantiation(USDT 5 + KRX) 불변. **`KrxAlertEvaluator`(910) `pass` 유지**.
+- **추출 대상 = 4 backend method + sender**(alert_evaluator.py): `_load_settings_from_db`(def 551 / call 546) → `load_settings` · `_refetch_setting_snapshot`(762 / call 653·710) → `refetch_snapshot` · `_persist_result`(794 / call 758) → **`persist_result` WHOLE**(split ❌ — mark/log/cleanup 각자 commit이라 commit-order 보존; cleanup도 backend 잔류) · `_build_fcm_payload`(865 / call 752) → `build_payload` · **`_send_fcm_multicast`(786 / call 754) → constructor 주입 `sender`(lazy wrapper)**.
+- **constructor**: `__init__`에 `backend=SourceAlertBackend()` + `sender=lazy FCM wrapper`(현 `_send_fcm_multicast` body, **module-import 시점 bind 금지**) default → 6 instantiation(USDT 5 + KRX) 불변. **`KrxAlertEvaluator`(910) `pass` 유지**.
 - **test-update scope (bounded)**: `tests/test_usdt_ws_upbit_skeleton.py`만 기존 static seam **5개** 참조(50 refs: load 17·refetch 11·persist 11·send 11; **`_build_fcm_payload` direct ref 0** = characterization 신규 대상; ≥3 `patch.object`) — patch를 backend/sender 인스턴스로 재타겟 + characterization test 추가. **나머지 4 USDT + KRX test는 미참조(영향 0)**.
-- **gate(정정)**: runtime alert 출력 identical = behavior-change-0("zero-edit green" ❌). characterization lock = empty-token 제외 / refetch stale 차단 / persist success·failure 순서 / failed-token cleanup 위치 / payload `data["type"]`.
-- **risk**: session 경계(get_db_context per call 보존) / persist 분리 시 순서 / sender @staticmethod→injected(default real).
+- **gate(정정)**: runtime alert 출력 identical + **commit/session order identical** = behavior-change-0("zero-edit green" ❌). characterization lock = empty-token 제외 / refetch stale 차단 / **persist_result whole(mark+log+cleanup commit-order)** / payload `data["type"]` / sender default lazy wrapper.
+- **risk**: session 경계(get_db_context per call 보존) / persist_result whole = mark·log·cleanup commit order 보존 / sender @staticmethod→injected(lazy wrapper default).
 
 **open** (구현 시): parity tolerance 정의 / cutover 시 persist no-op→real 전환 + FX endpoint invalidation(constraint ④ option a) — shadow 범위 밖.
 
