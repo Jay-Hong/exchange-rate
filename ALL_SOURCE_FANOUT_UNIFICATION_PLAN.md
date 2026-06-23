@@ -102,6 +102,13 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **S4** (S): crud 4 site 주입 behind flag(default off).
 - **S5** (ops): flag 활성 + parity 관찰(would_fire vs legacy sent_count per source/asset).
 
+**S1 착수 준비 (pre-impl checklist, 2026-06-23 read-only 확인)**:
+- **추출 대상 6**(alert_evaluator.py): `_load_settings_from_db`(def 551 / call 546) → `load_settings` · `_refetch_setting_snapshot`(762 / call 653·710) → `refetch_snapshot` · `_persist_result`(794 / call 758) → `persist_success`+`persist_failure` 분리(⚠️ **failed-token cleanup[UserDevice delete]은 evaluator 잔류** — fcm_result 기반, schema 무관) · `_build_fcm_payload`(865 / call 752) → `build_payload` · **`_send_fcm_multicast`(786 / call 754) → constructor 주입 `sender`**.
+- **constructor**: `__init__`에 `backend=SourceAlertBackend()` + `sender=send_fcm_multicast_sync` default → 6 instantiation(USDT 5 + KRX) 불변. **`KrxAlertEvaluator`(910) `pass` 유지**.
+- **test-update scope (bounded)**: `tests/test_usdt_ws_upbit_skeleton.py`만 기존 static seam **5개** 참조(50 refs: load 17·refetch 11·persist 11·send 11; **`_build_fcm_payload` direct ref 0** = characterization 신규 대상; ≥3 `patch.object`) — patch를 backend/sender 인스턴스로 재타겟 + characterization test 추가. **나머지 4 USDT + KRX test는 미참조(영향 0)**.
+- **gate(정정)**: runtime alert 출력 identical = behavior-change-0("zero-edit green" ❌). characterization lock = empty-token 제외 / refetch stale 차단 / persist success·failure 순서 / failed-token cleanup 위치 / payload `data["type"]`.
+- **risk**: session 경계(get_db_context per call 보존) / persist 분리 시 순서 / sender @staticmethod→injected(default real).
+
 **open** (구현 시): parity tolerance 정의 / cutover 시 persist no-op→real 전환 + FX endpoint invalidation(constraint ④ option a) — shadow 범위 밖.
 
 ## 7. Sequencing 가드레일
