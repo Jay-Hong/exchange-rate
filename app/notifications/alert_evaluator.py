@@ -51,7 +51,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import Callable, Optional
 
 from app.notifications.price_alert_coalescer import (
     PriceAlertCoalescer,
@@ -344,6 +344,7 @@ class UsdtAlertEvaluator:
         cache: Optional[AlertSettingsCache] = None,
         coalescer: Optional[PriceAlertCoalescer] = None,
         backend: Optional[AlertStorageBackend] = None,
+        sender: Optional[Callable[[list[str], str, str, dict], dict]] = None,
     ) -> None:
         # default = module-level singleton (Settings CRUD cache invalidation
         # 위해 API endpoint와 공유). test 시 cache=AlertSettingsCache() inject로 격리.
@@ -354,8 +355,12 @@ class UsdtAlertEvaluator:
         self._coalescer = coalescer if coalescer is not None else PriceAlertCoalescer(window_sec=5)
         # fanout step 4 S1: storage backend (load/refetch/persist/payload). default =
         # source_notification_settings (USDT/KRX byte-identical). FX shadow(S3)는 FxNotificationBackend 주입.
-        # sender(FCM delivery) seam은 S3(FX shadow)에서 추가 — S1은 backend 추상화만(_send_fcm_multicast 직접 유지).
         self._backend = backend if backend is not None else SourceAlertBackend()
+        # fanout step 4 S3: FCM delivery seam (backend ABC 밖). default None →
+        # _do_send_and_persist에서 (self._sender or self._send_fcm_multicast) per-call late-bind
+        # → USDT/KRX byte-identical + 11 patch.object(_send_fcm_multicast) 보존.
+        # ⚠️ __init__ pre-resolve 금지 (class-level patch 동결 → 11 patch 우회).
+        self._sender = sender
         self._tasks: set[asyncio.Task] = set()
         # In-flight setting guard — 동일 setting_id 동시 평가 시 중복 FCM 차단
         self._in_flight_settings: set[int] = set()
@@ -713,7 +718,7 @@ class UsdtAlertEvaluator:
         """
         title, body, data = self._backend.build_payload(fresh_candidate, triggered_rate)
         result = await asyncio.to_thread(
-            self._send_fcm_multicast,
+            (self._sender or self._send_fcm_multicast),
             list(fresh_candidate.device_tokens), title, body, data,
         )
         await asyncio.to_thread(
