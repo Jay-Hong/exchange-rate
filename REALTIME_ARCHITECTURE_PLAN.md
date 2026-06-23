@@ -187,6 +187,7 @@ Investing live channel (조사 중) ─┤
 
 본 계약의 전면 적용은 **multi-PR phase**로 진행. source별 작업분해는 다음 phase docs에서:
 
+- **cross-source scope-lock (통합 경계 + 단계 분해, 통합 phase 진입점)**: [ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md](ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md) — 공통화 대상 / 절대 통합 금지(never-unify) / open decision / staged step. 계약은 본 §4.1 anchor 재사용.
 - USDT 측: [USDT_WS_DESIGN_PLAN.md §12.8.2](USDT_WS_DESIGN_PLAN.md)
 - Bank/Investing 측: [USDT_TOPIC_MIGRATION_PLAN.md §6.6](USDT_TOPIC_MIGRATION_PLAN.md)
 - KRX 측: [KRX_FANOUT_REFACTOR_PLAN.md §5.2 E~G](KRX_FANOUT_REFACTOR_PLAN.md)
