@@ -84,6 +84,26 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 | 7 | **β C2(freshness) / C3(dedup) 반영** — Bank/Investing observation의 freshness metadata(decision 1) + dedup 정책 정의·land(USDT 5b-bis/5d-a 등가). [USDT_TOPIC_MIGRATION_PLAN §6.6](USDT_TOPIC_MIGRATION_PLAN.md). | crud FX fanout | M |
 | 8 | **(C1+C2+C3 coverage 입증 + PR D/E recovery 경로 확보 후에만) legacy FX broadcast hook 격하/제거** — `safe_publish_all_fx_snapshots`(main.py). 끝 단계. recovery test 갱신. tether hook(main.py)도 독립 audit. | main.py + tests | M |
 
+### §6.1 step 4 (FX alert shadow) 상세 설계 — codex-agreed (019ef2fa, 2026-06-23, plan-only, 코드 0)
+
+> plan-first Workflow(`wf_f45a7380`) 3 조사 + codex design GO. **구현은 별 세션**(M, design-sensitive).
+
+**6 coupling points** (evaluator → backend/sender 추상화):
+1. `load_settings` (구 `_load_settings_from_db` 562) 2. `refetch_snapshot` (구 `_refetch_setting_snapshot` 770) 3. `persist_success` (mark_triggered+log, `_persist_result` 807) 4. `persist_failure` (log fail 836) 5. `build_payload` (구 `_build_fcm_payload` 879, `data["type"]` 소유) 6. **🔴 `sender` (delivery)** — codex blocker: `_send_fcm_multicast`(785)는 ABC 5점 밖 → persist no-op만으론 **2× FCM 발사**. **constructor-injected sender**(default `send_fcm_multicast_sync`, FX shadow=no-op)로 추상화. global flag ❌.
+
+**backends**: `SourceAlertBackend`(default, 현 동작 verbatim, USDT/KRX runtime byte-identical, **KRX subclass `pass` 유지**) / `FxNotificationBackend`(notification_settings read — **value pass-through**: source→bank·asset→currency identity[확인 `_changes_to_fcm` crud.py:275], persist=shadow no-op, payload type=`rate_alert`).
+
+**shadow wiring**: crud.py 4 site(522/593/717/783, `process_rate_alerts` 직전) + `schedule_on_loop`(worker→main loop, crud.py:350 검증 패턴). double-fire = **committed changed_rates batch당 1회**(atomic gate 561/752로 atomic OR legacy 한 경로만 — codex 확인). **bounded sequential batch pure-eval**(TTL-0 per-observation load-task spam ❌ = threadpool/DB/pending backlog[356/517/546] 위험) + **dedicated cache**(singleton ❌ = cross-pollution + FX API invalidation[295] 부재). `timestamp_ms`는 changed_rates에 없어 ingest-time 합성 + coalescer bypass. default-OFF `FX_ALERT_SHADOW_ENABLED`.
+
+**sub-slices** (codex GO):
+- **S1** (M): AlertStorageBackend ABC + SourceAlertBackend **+ sender seam** 추출. ⚠️ gate = backend **characterization test**(empty-token 제외/refetch stale/persist 순서/failed-token cleanup) + static method를 patch하던 기존 test는 **backend patch로 갱신**("zero-edit green"은 compat-wrapper 잔존 신호라 gate 부적절 — behavior-change-0 기준 = runtime alert 출력 identical).
+- **S2** (M): FxNotificationBackend (dead code, 단위 test만).
+- **S3** (M): FX shadow evaluator singleton + bounded batch wrapper + **delivery no-op + state/log no-op + telemetry-only** + dedicated cache.
+- **S4** (S): crud 4 site 주입 behind flag(default off).
+- **S5** (ops): flag 활성 + parity 관찰(would_fire vs legacy sent_count per source/asset).
+
+**open** (구현 시): parity tolerance 정의 / cutover 시 persist no-op→real 전환 + FX endpoint invalidation(constraint ④ option a) — shadow 범위 밖.
+
 ## 7. Sequencing 가드레일
 
 - **legacy FX broadcast hook을 먼저 제거하지 말 것** — fx:* topic의 recovery publisher + test-locked (C1 source-level trigger는 이미 direct 활성이나 hook은 PR D/E까지 공존). 제거는 §6 마지막(C1+C2+C3 coverage 입증 + PR D/E recovery 경로 확보 후). tether hook도 동일 주의.
