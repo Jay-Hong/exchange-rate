@@ -142,8 +142,8 @@ from websockets.exceptions import ConnectionClosed
 from app import latest_rates_cache, tether_topic_trigger
 from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
 from app.notifications.alert_evaluator import (
-    AlertObservation,
     UsdtAlertEvaluator,
+    observation_from_tick,
 )
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
@@ -684,13 +684,7 @@ class GopaxRestFallbackController:
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
             # G7: REST probe kind 구분 (Coinone C7 mirror — log/metric 영역에서 tick vs probe 분리).
-            observation = AlertObservation(
-                source=tick["source"],
-                asset=tick["asset"],
-                rate=tick["rate"],
-                timestamp_ms=tick["timestamp_ms"],
-                kind="rest_probe",
-            )
+            observation = observation_from_tick(tick, kind="rest_probe")
             self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.gopax.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
@@ -751,10 +745,7 @@ class GopaxRestFallbackController:
             # regression guard(SKIPPED_REGRESSION)가 차단.
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
-            self._alert_evaluator.schedule(AlertObservation(
-                source=tick["source"], asset=tick["asset"], rate=tick["rate"],
-                timestamp_ms=tick["timestamp_ms"], kind="rest_probe",
-            ))
+            self._alert_evaluator.schedule(observation_from_tick(tick, kind="rest_probe"))
             logger.info(
                 "[usdt_ws.gopax.fallback] backoff probe success (rate=%s, ts_ms=%d, reason=%s)",
                 tick["rate"], tick["timestamp_ms"], reason,
@@ -1283,13 +1274,7 @@ class GopaxWsClient:
                         self._db_writer.schedule(tick)
                         # G7: AlertObservation schedule (source-neutral evaluator 재사용).
                         # Coinone C7 / Bithumb U7 / Korbit K7 mirror — kind="tick" 구분.
-                        observation = AlertObservation(
-                            source=tick["source"],
-                            asset=tick["asset"],
-                            rate=tick["rate"],
-                            timestamp_ms=tick["timestamp_ms"],
-                            kind="tick",
-                        )
+                        observation = observation_from_tick(tick)
                         self._alert_evaluator.schedule(observation)
             finally:
                 self._ws = None

@@ -109,8 +109,8 @@ from app.tether_topic_trigger import (
 # C7 Alert evaluator + observation — source-neutral (Bithumb U7 패턴 mirror, Phase B.1 PR6
 # source-neutral 설계 그대로 적용).
 from app.notifications.alert_evaluator import (
-    AlertObservation,
     UsdtAlertEvaluator,
+    observation_from_tick,
 )
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.coinone")
@@ -547,13 +547,7 @@ class CoinoneRestFallbackController:
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
             # C7: REST probe kind 구분 (Bithumb U7 mirror — log/metric 영역에서 tick vs probe 분리).
-            observation = AlertObservation(
-                source=tick["source"],
-                asset=tick["asset"],
-                rate=tick["rate"],
-                timestamp_ms=tick["timestamp_ms"],
-                kind="rest_probe",
-            )
+            observation = observation_from_tick(tick, kind="rest_probe")
             self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.coinone.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
@@ -1026,13 +1020,7 @@ class CoinoneWsClient:
                         self._db_writer.schedule(tick)
                         # C7: AlertObservation schedule (source-neutral evaluator 재사용).
                         # Bithumb U7 mirror — kind="tick" 구분 (REST probe와 log/metric 분리).
-                        observation = AlertObservation(
-                            source=tick["source"],
-                            asset=tick["asset"],
-                            rate=tick["rate"],
-                            timestamp_ms=tick["timestamp_ms"],
-                            kind="tick",
-                        )
+                        observation = observation_from_tick(tick)
                         self._alert_evaluator.schedule(observation)
             finally:
                 # C4 finally: ping_task cancel/await (Bithumb _run_one_session mirror).

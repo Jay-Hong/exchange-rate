@@ -1791,10 +1791,10 @@ class TestScopeGuardC6b(unittest.TestCase):
         self.assertNotIn("fetch_coinone_usdt_tick", dir(coinone_module))
 
     def test_alert_evaluator_module_level_after_c7(self):
-        """C7: UsdtAlertEvaluator + AlertObservation 의도적 module-level import (Bithumb U7 mirror)."""
+        """C7: UsdtAlertEvaluator + observation_from_tick 의도적 module-level import (fanout step 3: AlertObservation→helper)."""
         import app.crawlers.usdt_ws.coinone as coinone_module
         self.assertTrue(hasattr(coinone_module, "UsdtAlertEvaluator"))
-        self.assertTrue(hasattr(coinone_module, "AlertObservation"))
+        self.assertTrue(hasattr(coinone_module, "observation_from_tick"))
 
 
 class TestC6bConstants(unittest.TestCase):
@@ -2154,7 +2154,7 @@ class TestScopeGuardC7(unittest.TestCase):
     def test_alert_evaluator_module_level(self):
         import app.crawlers.usdt_ws.coinone as coinone_module
         self.assertTrue(hasattr(coinone_module, "UsdtAlertEvaluator"))
-        self.assertTrue(hasattr(coinone_module, "AlertObservation"))
+        self.assertTrue(hasattr(coinone_module, "observation_from_tick"))
 
     def test_fetch_coinone_usdt_tick_still_lazy(self):
         """fetch_coinone_usdt_tick은 여전히 lazy import (module-level 비노출)."""

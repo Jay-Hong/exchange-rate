@@ -86,6 +86,24 @@ class AlertObservation:
     kind: str            # "tick" | "rest_probe" | future
 
 
+def observation_from_tick(tick: dict, kind: str = "tick") -> AlertObservation:
+    """source-neutral tick dict → AlertObservation 매핑 (fanout step 3, behavior-change-0).
+
+    [ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md §6 step 3] USDT 5소스 WS + KRX tick handler가
+    각자 반복하던 AlertObservation 생성을 단일 adapter로 통합. tick은 {source, asset, rate,
+    timestamp_ms} 키 보유. **timestamp_ms 도출은 caller 책임** — USDT는 거래소 event-ts를
+    passthrough, KRX는 received_at를 변환(의미가 달라 helper에 안 둠, never-unify §4-3/§5-6).
+    kind: "tick" | "rest_probe".
+    """
+    return AlertObservation(
+        source=tick["source"],
+        asset=tick["asset"],
+        rate=tick["rate"],
+        timestamp_ms=tick["timestamp_ms"],
+        kind=kind,
+    )
+
+
 @dataclass(frozen=True)
 class CachedAlertSetting:
     """알림 설정 cache snapshot (ORM-free).

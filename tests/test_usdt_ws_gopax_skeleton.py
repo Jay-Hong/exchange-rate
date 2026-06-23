@@ -292,8 +292,8 @@ class TestScopeGuard(unittest.TestCase):
             "FALLBACK_COOLDOWN_SEC",
             "FALLBACK_PROBE_TIMEOUT_SEC",
             "GopaxRestFallbackController",
-            # G7 신규 — 의도적 module-level (Coinone C7 / Bithumb U7 mirror)
-            "AlertObservation",
+            # G7 신규 — 의도적 module-level (fanout step 3: observation_from_tick adapter)
+            "observation_from_tick",
             "UsdtAlertEvaluator",
             # PR 2e 신규 — 60s summary log cycle (Coinone PR 2d mirror)
             "SUMMARY_LOG_INTERVAL_SEC",

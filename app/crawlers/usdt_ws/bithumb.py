@@ -106,8 +106,8 @@ from app.crawlers.usdt_ws.upbit import UsdtLivenessMonitor
 # UsdtAlertEvaluator + AlertObservation 재사용 — source-neutral (Upbit/Bithumb 공통,
 # Phase B.1 PR6 source-neutral 설계 적용).
 from app.notifications.alert_evaluator import (
-    AlertObservation,
     UsdtAlertEvaluator,
+    observation_from_tick,
 )
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
@@ -518,13 +518,7 @@ class BithumbRestFallbackController:
             # 기존 fanout 재사용 (U5 Redis writer + U6 DB writer + U7 Alert evaluator)
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
-            observation = AlertObservation(
-                source=tick["source"],
-                asset=tick["asset"],
-                rate=tick["rate"],
-                timestamp_ms=tick["timestamp_ms"],
-                kind="rest_probe",  # U7: REST probe kind 구분 (log/metric)
-            )
+            observation = observation_from_tick(tick, kind="rest_probe")
             self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.bithumb.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
@@ -839,13 +833,7 @@ class BithumbWsClient:
                         # U6: DB writer schedule (1s window debounce, race-prevention)
                         self._db_writer.schedule(tick)
                         # U7: AlertObservation schedule (source-neutral evaluator 재사용)
-                        observation = AlertObservation(
-                            source=tick["source"],
-                            asset=tick["asset"],
-                            rate=tick["rate"],
-                            timestamp_ms=tick["timestamp_ms"],
-                            kind="tick",  # WS tick (Upbit upbit.py:906 mirror)
-                        )
+                        observation = observation_from_tick(tick)
                         self._alert_evaluator.schedule(observation)
             finally:
                 # U4 Acceptance 3: ping task cancel/await 보장.

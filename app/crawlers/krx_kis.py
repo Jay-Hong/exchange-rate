@@ -2011,13 +2011,9 @@ class KrxAlertTickHandler:
             return
 
         # 함수 내부 import — alert_evaluator 모듈 강제 로드 회피 (격리 원칙).
-        from app.notifications.alert_evaluator import AlertObservation
-        observation = AlertObservation(
-            source=source,
-            asset=asset,
-            rate=normalized_rate,
-            timestamp_ms=timestamp_ms,
-            kind="tick",
+        from app.notifications.alert_evaluator import observation_from_tick
+        observation = observation_from_tick(
+            {"source": source, "asset": asset, "rate": normalized_rate, "timestamp_ms": timestamp_ms}
         )
         try:
             self._evaluator.schedule(observation)

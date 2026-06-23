@@ -96,8 +96,8 @@ from app.tether_topic_trigger import (
 )
 # K7 Alert evaluator + observation — source-neutral (Coinone C7/Bithumb U7 mirror).
 from app.notifications.alert_evaluator import (
-    AlertObservation,
     UsdtAlertEvaluator,
+    observation_from_tick,
 )
 
 logger = logging.getLogger("exchange_rate.crawler.usdt_ws.korbit")
@@ -533,13 +533,7 @@ class KorbitRestFallbackController:
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
             # K7: REST probe kind 구분 (Coinone C7 mirror — log/metric 영역에서 tick vs probe 분리).
-            observation = AlertObservation(
-                source=tick["source"],
-                asset=tick["asset"],
-                rate=tick["rate"],
-                timestamp_ms=tick["timestamp_ms"],
-                kind="rest_probe",
-            )
+            observation = observation_from_tick(tick, kind="rest_probe")
             self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.korbit.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
@@ -974,13 +968,7 @@ class KorbitWsClient:
                         self._db_writer.schedule(tick)
                         # K7: AlertObservation schedule (source-neutral evaluator 재사용).
                         # Coinone C7/Bithumb U7 mirror — kind="tick" 구분 (REST probe와 log/metric 분리).
-                        observation = AlertObservation(
-                            source=tick["source"],
-                            asset=tick["asset"],
-                            rate=tick["rate"],
-                            timestamp_ms=tick["timestamp_ms"],
-                            kind="tick",
-                        )
+                        observation = observation_from_tick(tick)
                         self._alert_evaluator.schedule(observation)
             finally:
                 # Acceptance #9: ping_task cancel/await 보장.

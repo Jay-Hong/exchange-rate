@@ -2002,10 +2002,10 @@ class TestScopeGuardK6b(unittest.TestCase):
         self.assertNotIn("fetch_korbit_usdt_tick", dir(korbit_module))
 
     def test_alert_imports_allowed_after_k7(self):
-        """K7 이후: UsdtAlertEvaluator, AlertObservation 의도적 module-level (forbidden 제거)."""
+        """K7 이후: UsdtAlertEvaluator, observation_from_tick 의도적 module-level (fanout step 3)."""
         import app.crawlers.usdt_ws.korbit as korbit_module
         module_attrs = dir(korbit_module)
-        for name in ["UsdtAlertEvaluator", "AlertObservation"]:
+        for name in ["UsdtAlertEvaluator", "observation_from_tick"]:
             self.assertIn(name, module_attrs, f"K7 의도적 import: '{name}' module-level 노출 필요")
 
 

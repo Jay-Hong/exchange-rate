@@ -79,8 +79,8 @@ from websockets.exceptions import ConnectionClosed
 
 from app import latest_rates_cache, tether_topic_trigger
 from app.notifications.alert_evaluator import (
-    AlertObservation,
     UsdtAlertEvaluator,
+    observation_from_tick,
 )
 from app.tether_topic_trigger import (
     TETHER_TRIGGER_REASON_USDT_WS_REDIS_WRITE_SUCCESS,
@@ -565,13 +565,7 @@ class UpbitRestFallbackController:
             # 기존 fanout 재사용 (PR4/PR5/PR6 writer/evaluator)
             self._redis_writer.schedule(tick)
             self._db_writer.schedule(tick)
-            observation = AlertObservation(
-                source=tick["source"],
-                asset=tick["asset"],
-                rate=tick["rate"],
-                timestamp_ms=tick["timestamp_ms"],
-                kind="rest_probe",  # PR6 kind 필드 활용 (log/metric 구분)
-            )
+            observation = observation_from_tick(tick, kind="rest_probe")
             self._alert_evaluator.schedule(observation)
             logger.info(
                 "[usdt_ws.upbit.fallback] probe success (rate=%s, ts_ms=%d, reason=%s)",
@@ -1016,13 +1010,7 @@ class UpbitWsClient:
                         self._liveness.observe_tick(time.time())
                         self._redis_writer.schedule(tick)
                         self._db_writer.schedule(tick)
-                        observation = AlertObservation(
-                            source=tick["source"],
-                            asset=tick["asset"],
-                            rate=tick["rate"],
-                            timestamp_ms=tick["timestamp_ms"],
-                            kind="tick",
-                        )
+                        observation = observation_from_tick(tick)
                         self._alert_evaluator.schedule(observation)
             finally:
                 ping_task.cancel()
