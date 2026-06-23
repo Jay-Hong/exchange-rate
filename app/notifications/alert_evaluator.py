@@ -57,6 +57,12 @@ from app.notifications.price_alert_coalescer import (
     PriceAlertCoalescer,
     PriceAlertEvaluationInput,
 )
+# fanout step 4 S1: storage/IO coupling을 backend로 추출 (load/refetch/persist/payload).
+# alert_storage_backend는 alert_evaluator를 TYPE_CHECKING/lazy로만 참조 → 순환 없음.
+from app.notifications.alert_storage_backend import (
+    AlertStorageBackend,
+    SourceAlertBackend,
+)
 
 logger = logging.getLogger("exchange_rate.notifications.alert_evaluator")
 
@@ -337,6 +343,7 @@ class UsdtAlertEvaluator:
         *,
         cache: Optional[AlertSettingsCache] = None,
         coalescer: Optional[PriceAlertCoalescer] = None,
+        backend: Optional[AlertStorageBackend] = None,
     ) -> None:
         # default = module-level singleton (Settings CRUD cache invalidation
         # 위해 API endpoint와 공유). test 시 cache=AlertSettingsCache() inject로 격리.
@@ -345,6 +352,10 @@ class UsdtAlertEvaluator:
         # USDT 5 source 공통 instance라 5초 wall-clock A-3 grain coalescing이 5 source
         # 자동 동시 적용. 테스트용 DI 열어둠 (Codex 권장).
         self._coalescer = coalescer if coalescer is not None else PriceAlertCoalescer(window_sec=5)
+        # fanout step 4 S1: storage backend (load/refetch/persist/payload). default =
+        # source_notification_settings (USDT/KRX byte-identical). FX shadow(S3)는 FxNotificationBackend 주입.
+        # sender(FCM delivery) seam은 S3(FX shadow)에서 추가 — S1은 backend 추상화만(_send_fcm_multicast 직접 유지).
+        self._backend = backend if backend is not None else SourceAlertBackend()
         self._tasks: set[asyncio.Task] = set()
         # In-flight setting guard — 동일 setting_id 동시 평가 시 중복 FCM 차단
         self._in_flight_settings: set[int] = set()
@@ -543,58 +554,9 @@ class UsdtAlertEvaluator:
     ) -> tuple[CachedAlertSetting, ...]:
         """DB query via to_thread → cache populate."""
         source, asset = key
-        settings = await asyncio.to_thread(self._load_settings_from_db, source, asset)
+        settings = await asyncio.to_thread(self._backend.load_settings, source, asset)
         self._cache.put(source, asset, settings, time.time())
         return settings
-
-    @staticmethod
-    def _load_settings_from_db(
-        source: str, asset: str
-    ) -> tuple[CachedAlertSetting, ...]:
-        """sync DB query — to_thread 내부 실행. ORM → CachedAlertSetting snapshot 변환.
-
-        Empty device_tokens settings는 제외 (조건 평가 의미 없음).
-        """
-        from app import crud, models
-        from app.database import get_db_context
-
-        with get_db_context() as db:
-            settings = db.query(models.SourceNotificationSetting).filter(
-                models.SourceNotificationSetting.source == source,
-                models.SourceNotificationSetting.asset == asset,
-                models.SourceNotificationSetting.enabled == True,  # noqa: E712
-                models.SourceNotificationSetting.triggered == False,  # noqa: E712
-            ).all()
-
-            if not settings:
-                return tuple()
-
-            # devices 일괄 조회 (user_id 기반)
-            user_ids = {s.user_id for s in settings}
-            devices = db.query(models.UserDevice).filter(
-                models.UserDevice.user_id.in_(user_ids),
-            ).all()
-
-            tokens_by_user: dict[str, list[str]] = {}
-            for dev in devices:
-                tokens_by_user.setdefault(dev.user_id, []).append(dev.device_token)
-
-            snapshots = []
-            for setting in settings:
-                tokens = tuple(tokens_by_user.get(setting.user_id, ()))
-                if not tokens:
-                    # empty device_tokens 제외 (조건 평가 + FCM 의미 없음)
-                    continue
-                snapshots.append(CachedAlertSetting(
-                    setting_id=setting.id,
-                    user_id=setting.user_id,
-                    source=setting.source,
-                    asset=setting.asset,
-                    condition=setting.condition,
-                    threshold=setting.threshold,
-                    device_tokens=tokens,
-                ))
-            return tuple(snapshots)
 
     async def _send_one_observation(
         self, candidate: CachedAlertSetting, observation: AlertObservation
@@ -650,7 +612,7 @@ class UsdtAlertEvaluator:
         변경 시 refetch로 stale 발송 차단.
         """
         snapshot = await asyncio.to_thread(
-            self._refetch_setting_snapshot, candidate.setting_id, candidate.user_id,
+            self._backend.refetch_snapshot, candidate.setting_id, candidate.user_id,
         )
         if snapshot is None or not delivery_allowed(snapshot, datetime.now(timezone.utc)):
             logger.info(
@@ -707,7 +669,7 @@ class UsdtAlertEvaluator:
         condition 재검증은 window 기반 (max_rate/min_rate).
         """
         snapshot = await asyncio.to_thread(
-            self._refetch_setting_snapshot, candidate.setting_id, candidate.user_id,
+            self._backend.refetch_snapshot, candidate.setting_id, candidate.user_id,
         )
         if snapshot is None or not delivery_allowed(snapshot, datetime.now(timezone.utc)):
             logger.info(
@@ -749,38 +711,14 @@ class UsdtAlertEvaluator:
         payload/log 모두 triggered_rate 기준. _persist_result는 legacy schema
         호환을 위해 float 변환 후 저장.
         """
-        title, body, data = self._build_fcm_payload(fresh_candidate, triggered_rate)
+        title, body, data = self._backend.build_payload(fresh_candidate, triggered_rate)
         result = await asyncio.to_thread(
             self._send_fcm_multicast,
             list(fresh_candidate.device_tokens), title, body, data,
         )
         await asyncio.to_thread(
-            self._persist_result, fresh_candidate, float(triggered_rate), result,
+            self._backend.persist_result, fresh_candidate, float(triggered_rate), result,
         )
-
-    @staticmethod
-    def _refetch_setting_snapshot(
-        setting_id: int, user_id: str
-    ) -> Optional[FreshSettingSnapshot]:
-        """Session 1 — refetch + snapshot 추출 (ORM 객체 escape 차단)."""
-        from app import crud
-        from app.database import get_db_context
-
-        with get_db_context() as db:
-            setting = crud.get_source_notification_setting_by_id(
-                db=db, setting_id=setting_id, user_id=user_id,
-            )
-            if setting is None:
-                return None
-            return FreshSettingSnapshot(
-                setting_id=setting.id,
-                enabled=setting.enabled,
-                triggered=setting.triggered,
-                source=setting.source,
-                asset=setting.asset,
-                condition=setting.condition,
-                threshold=setting.threshold,
-            )
 
     @staticmethod
     def _send_fcm_multicast(
@@ -789,118 +727,6 @@ class UsdtAlertEvaluator:
         """FCM 발송 wrapper — 함수 내부 import (alert_evaluator 로드 영향 차단)."""
         from app.notifications.fcm import send_fcm_multicast_sync
         return send_fcm_multicast_sync(tokens, title, body, data)
-
-    @staticmethod
-    def _persist_result(
-        candidate: CachedAlertSetting, rate: float, fcm_result: dict,
-    ) -> None:
-        """Session 2 — success → mark_triggered + log success / fail → log failure only.
-
-        기존 `process_source_rate_alerts` 순서 보존. FCM 실패가 setting을
-        disabled 처리하면 사용자 알림 영영 X.
-        """
-        from app import crud, models
-        from app.database import get_db_context
-
-        with get_db_context() as db:
-            if fcm_result["success_count"] > 0:
-                crud.mark_source_setting_triggered(
-                    db=db, setting_id=candidate.setting_id, rate=rate,
-                )
-                crud.create_source_notification_log(
-                    db=db,
-                    user_id=candidate.user_id,
-                    setting_id=candidate.setting_id,
-                    source=candidate.source,
-                    asset=candidate.asset,
-                    condition=candidate.condition,
-                    threshold=candidate.threshold,
-                    triggered_rate=rate,
-                    success=True,
-                )
-                logger.info(
-                    "🔔 alert_evaluator FCM sent",
-                    extra={
-                        "event": "alert_fcm_sent",
-                        "source": candidate.source,
-                        "asset": candidate.asset,
-                        "rate": rate,
-                        "threshold": candidate.threshold,
-                        "setting_id": candidate.setting_id,
-                        "user_id": candidate.user_id[:8] + "...",
-                        "success_count": fcm_result["success_count"],
-                    },
-                )
-            else:
-                err_msg = fcm_result.get("error") or "no successful sends"
-                crud.create_source_notification_log(
-                    db=db,
-                    user_id=candidate.user_id,
-                    setting_id=candidate.setting_id,
-                    source=candidate.source,
-                    asset=candidate.asset,
-                    condition=candidate.condition,
-                    threshold=candidate.threshold,
-                    triggered_rate=rate,
-                    success=False,
-                    error_message=err_msg,
-                )
-
-            # failed_tokens cleanup (기존 패턴 동일)
-            failed_tokens = fcm_result.get("failed_tokens") or []
-            if failed_tokens:
-                try:
-                    deleted = db.query(models.UserDevice).filter(
-                        models.UserDevice.device_token.in_(failed_tokens),
-                    ).delete(synchronize_session=False)
-                    db.commit()
-                    logger.info(
-                        "[alert_evaluator] failed_tokens cleanup",
-                        extra={"deleted_count": deleted, "tokens": len(failed_tokens)},
-                    )
-                except Exception:
-                    logger.exception("[alert_evaluator] failed_tokens cleanup 실패")
-
-    @staticmethod
-    def _build_fcm_payload(
-        candidate: CachedAlertSetting, triggered_rate: Decimal,
-    ) -> tuple[str, str, dict]:
-        """FCM title/body/data 생성 — 기존 `process_source_rate_alerts` 패턴 보존.
-
-        5b-3b: ``observation`` → ``triggered_rate`` 시그니처 변경 (§12.8.3 결정 #11).
-        observation path는 ``Decimal(str(observation.rate))``, window path는
-        ``matched_triggered_rate()`` 결과 — 양쪽 모두 *crossing 보존된* 가격이 들어옴.
-
-        format_threshold + source_registry display_name 사용.
-        """
-        from app import source_registry
-        from app.crud import format_threshold
-
-        definition = source_registry.get_source_definition(candidate.source, candidate.asset)
-        source_display = definition.display_name if definition else candidate.source.upper()
-        asset_display = candidate.asset.upper()
-
-        icon = "📈" if candidate.condition == "above" else "📉"
-        title = f"{icon}  {source_display}  {asset_display}"
-
-        condition_arrow = "↑" if candidate.condition == "above" else "↓"
-        condition_text = "이상" if candidate.condition == "above" else "이하"
-        threshold_str = format_threshold(candidate.threshold)
-        rate_str = f"{float(triggered_rate):.2f}"
-        body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
-
-        data = {
-            "type": "source_rate_alert",
-            "title": title,
-            "body": body,
-            "source": candidate.source,
-            "asset": candidate.asset,
-            "rate": str(float(triggered_rate)),
-            "threshold": str(candidate.threshold),
-            "condition": candidate.condition,
-            "setting_id": str(candidate.setting_id),
-        }
-        return title, body, data
 
 
 # ---------------------------------------------------------------------------

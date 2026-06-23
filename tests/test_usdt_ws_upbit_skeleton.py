@@ -48,6 +48,7 @@ from app.crawlers.usdt_ws.upbit import (
     UpbitWsClient,
     UsdtLivenessMonitor,
 )
+from app.notifications.alert_storage_backend import SourceAlertBackend
 from app.notifications.alert_evaluator import (
     ALERT_CACHE_TTL_SEC,
     ALERT_CLOSE_TIMEOUT_SEC,
@@ -349,7 +350,7 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
         # PR5/PR6: valid tick은 db_writer + alert_evaluator 트리거 → DB 연결 회피.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
              patch.object(UpbitDbWriter, "_sync_db_write"), \
-             patch.object(UsdtAlertEvaluator, "_load_settings_from_db", return_value=tuple()):
+             patch.object(SourceAlertBackend, "load_settings", return_value=tuple()):
             await client._run_one_session()
 
         # non-ticker (1번째) + valid (2번째) 둘 다 recv 했지만
@@ -384,7 +385,7 @@ class TestUpbitSession(unittest.IsolatedAsyncioTestCase):
         # 시도하지 않도록 patch.
         with patch("app.crawlers.usdt_ws.upbit.websockets.connect", return_value=mock_connect), \
              patch.object(UpbitDbWriter, "_sync_db_write"), \
-             patch.object(UsdtAlertEvaluator, "_load_settings_from_db", return_value=tuple()):
+             patch.object(SourceAlertBackend, "load_settings", return_value=tuple()):
             await client._run_one_session()
 
         # 두 message 처리 + 1번 TimeoutError → recv 3회 호출
@@ -1859,7 +1860,7 @@ class TestUsdtAlertEvaluatorBasics(unittest.IsolatedAsyncioTestCase):
     async def test_schedule_returns_immediately(self):
         evaluator = UsdtAlertEvaluator()
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ):
             start = time.time()
@@ -1896,7 +1897,7 @@ class TestUsdtAlertEvaluatorBasics(unittest.IsolatedAsyncioTestCase):
         evaluator._cache.put("upbit", "usdt-krw", tuple(), time.time())
 
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ) as mock_load:
             evaluator.schedule(_make_observation())
@@ -1909,7 +1910,7 @@ class TestUsdtAlertEvaluatorBasics(unittest.IsolatedAsyncioTestCase):
         evaluator = UsdtAlertEvaluator()
 
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ) as mock_load:
             evaluator.schedule(_make_observation())
@@ -1928,7 +1929,7 @@ class TestUsdtAlertEvaluatorBasics(unittest.IsolatedAsyncioTestCase):
             return tuple()
 
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             side_effect=slow_load,
         ):
             # 5개 동시 schedule (모두 cache miss, 같은 key)
@@ -1951,13 +1952,13 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         stale_snapshot = _make_snapshot(enabled=False, triggered=False)  # disabled
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=stale_snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             return_value={"success_count": 1, "failure_count": 0, "failed_tokens": []},
         ) as mock_fcm, patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, _make_observation())
 
@@ -1973,13 +1974,13 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         fcm_result = {"success_count": 1, "failure_count": 0, "failed_tokens": []}
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=ok_snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             return_value=fcm_result,
         ), patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, _make_observation())
 
@@ -1994,13 +1995,13 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         fcm_result = {"success_count": 0, "failure_count": 1, "failed_tokens": ["token-bad"]}
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=ok_snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             return_value=fcm_result,
         ), patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, _make_observation())
 
@@ -2025,12 +2026,12 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         observation = _make_observation(rate=1510.0)
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
         ) as mock_fcm, patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, observation)
 
@@ -2055,12 +2056,12 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         observation = _make_observation(rate=1510.0)
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
         ) as mock_fcm, patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, observation)
 
@@ -2078,12 +2079,12 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         observation = _make_observation(source="upbit", asset="usdt-krw")
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
         ) as mock_fcm, patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, observation)
 
@@ -2110,13 +2111,13 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         fcm_result = {"success_count": 1, "failure_count": 0, "failed_tokens": []}
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             return_value=fcm_result,
         ), patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as mock_persist:
             await evaluator._send_one_observation(candidate, observation)
 
@@ -2148,13 +2149,13 @@ class TestUsdtAlertEvaluatorInFlightGuard(unittest.IsolatedAsyncioTestCase):
         ok_snapshot = _make_snapshot(setting_id=42, enabled=True, triggered=False)
 
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot",
+            SourceAlertBackend, "refetch_snapshot",
             return_value=ok_snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             side_effect=slow_fcm,
         ), patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ):
             # 5개 동시 schedule (같은 setting_id 매칭 예상)
             for rate in [1501.0, 1502.0, 1503.0, 1504.0, 1505.0]:
@@ -2251,7 +2252,7 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
         """
         evaluator = UsdtAlertEvaluator()
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ):
             evaluator.schedule(_make_observation(kind="tick", timestamp_ms=1777370240000))
@@ -2263,7 +2264,7 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
         """tick bucket boundary 넘으면 price_input task 생성."""
         evaluator = UsdtAlertEvaluator()
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ):
             # bucket1 = [06:00:00, 06:00:05) — t=06:00:00.000
@@ -2278,7 +2279,7 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
         """rest_probe → coalescer 우회, 즉시 _evaluate_async task 생성 (결정 #12)."""
         evaluator = UsdtAlertEvaluator()
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ):
             evaluator.schedule(_make_observation(kind="rest_probe"))
@@ -2294,12 +2295,12 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
 
         snapshot = _make_snapshot(condition="above", threshold=1480.0)
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot", return_value=snapshot,
+            SourceAlertBackend, "refetch_snapshot", return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             return_value={"success_count": 1, "failure_count": 0, "failed_tokens": []},
         ), patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as persist:
             await evaluator._send_one_price_input(candidate, price_input)
             persist.assert_called_once()
@@ -2315,12 +2316,12 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
 
         snapshot = _make_snapshot(condition="below", threshold=1470.0)
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot", return_value=snapshot,
+            SourceAlertBackend, "refetch_snapshot", return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
             return_value={"success_count": 1, "failure_count": 0, "failed_tokens": []},
         ), patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as persist:
             await evaluator._send_one_price_input(candidate, price_input)
             persist.assert_called_once()
@@ -2335,11 +2336,11 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
         # threshold가 refetch로 1500으로 변경 — max_rate=1482 < 1500 → no longer crossing
         snapshot = _make_snapshot(condition="above", threshold=1500.0)
         with patch.object(
-            UsdtAlertEvaluator, "_refetch_setting_snapshot", return_value=snapshot,
+            SourceAlertBackend, "refetch_snapshot", return_value=snapshot,
         ), patch.object(
             UsdtAlertEvaluator, "_send_fcm_multicast",
         ) as fcm, patch.object(
-            UsdtAlertEvaluator, "_persist_result",
+            SourceAlertBackend, "persist_result",
         ) as persist:
             await evaluator._send_one_price_input(candidate, price_input)
             fcm.assert_not_called()
@@ -2349,7 +2350,7 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
         """close()가 pending coalescer bucket을 flush + schedule + drain까지 포함."""
         evaluator = UsdtAlertEvaluator()
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ):
             # tick 1개 누적 (bucket 만들기) — task 0
@@ -2367,7 +2368,7 @@ class TestUsdtAlertEvaluatorCoalescing(unittest.IsolatedAsyncioTestCase):
         """
         evaluator = UsdtAlertEvaluator()
         with patch.object(
-            UsdtAlertEvaluator, "_load_settings_from_db",
+            SourceAlertBackend, "load_settings",
             return_value=tuple(),
         ):
             # rest_probe (즉시 path)
@@ -2427,7 +2428,7 @@ class TestLoadSettingsFromDbExcludesEmptyDevices(unittest.TestCase):
         mock_ctx.__exit__ = MagicMock(return_value=None)
 
         with patch("app.database.get_db_context", return_value=mock_ctx):
-            result = Evaluator._load_settings_from_db("upbit", "usdt-krw")
+            result = SourceAlertBackend().load_settings("upbit", "usdt-krw")
 
         # user-A만 포함 (device_tokens 있음), user-B 제외
         self.assertEqual(len(result), 1)
@@ -2800,7 +2801,7 @@ class TestUpbitWsClientFallbackHook(unittest.IsolatedAsyncioTestCase):
                 "rate": 1500.0, "timestamp_ms": 1777370239843,
             },
         ), patch.object(UpbitDbWriter, "_sync_db_write"), \
-           patch.object(UsdtAlertEvaluator, "_load_settings_from_db", return_value=tuple()):
+           patch.object(SourceAlertBackend, "load_settings", return_value=tuple()):
             client._fallback_controller.schedule_probe("test")
             await asyncio.sleep(0.05)
             await client._fallback_controller.close()
