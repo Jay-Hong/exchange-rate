@@ -111,6 +111,17 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **gate(정정)**: runtime alert 출력 identical + **commit/session order identical** = behavior-change-0("zero-edit green" ❌). characterization lock = empty-token 제외 / refetch stale 차단 / **persist_result whole(mark+log+cleanup commit-order)** / payload `data["type"]` / sender default lazy wrapper.
 - **risk**: session 경계(get_db_context per call 보존) / persist_result whole = mark·log·cleanup commit order 보존 / sender @staticmethod→injected(lazy wrapper default).
 
+> **✅ S2 LAND (2026-06-23, `b44da01`)**: `FxNotificationBackend`(notification_settings, **value pass-through** source=bank·asset=currency / persist=shadow no-op / build_payload=legacy `rate_alert` BANK_NAMES_KR) + FX 단위 test 4 → 전체 3222 passed. **dead code**(미주입) = behavior-change-0. codex impl GO(logic 전부 통과, stale docstring 2 catch→정정). flake de-flake 별도 commit `b84d10d`(test_schedule_returns_immediately 0.01→1.0s, [[feedback_flaky_sleep_async_tests]]).
+
+**S3 착수 준비 (pre-impl checklist, 2026-06-23 read-only 확인 — S1서 shifted line 반영)**:
+
+- **R1 — sender seam(S1 defer, THE key risk)**: 현 `alert_evaluator.py` call=716(`self._send_fcm_multicast`) / def=724. S3 = `__init__(sender=None)` + 호출처 `(self._sender or self._send_fcm_multicast)`. ⚠️ **early-bind 금지**(`self._sender = sender or self._send_fcm_multicast` at `__init__` → 11 patch의 late-binding 깨짐, S1서 실증). USDT/KRX(sender=None)→falsy→late-bind `self._send_fcm_multicast`→11 patch 작동. FX shadow→no-op sender 주입→FCM 0. gate: sender seam 후 `UsdtAlertEvaluator,"_send_fcm_multicast"` patch **11개 전수 통과** + USDT/KRX FCM 출력 불변.
+- **R2 — dedicated cache = 이미 무료**: `__init__(cache: Optional[AlertSettingsCache]=None)`(344) → `self._cache = cache if cache is not None else get_default_alert_settings_cache()`(350) 존재 → FX shadow = `UsdtAlertEvaluator(backend=FxNotificationBackend(), cache=AlertSettingsCache(), sender=<no-op>)`. singleton(`get_default_alert_settings_cache` 304) 재사용 ❌(USDT/KRX 교차오염 + FX endpoint invalidation[295] 부재). gate: fx instance `_cache is not get_default_alert_settings_cache()`.
+- **R3 — pure-eval(side-effect 0)**: persist no-op(✅ S2 검증) + no-op sender(R1) → FCM/DB/mark/log/failed-token cleanup/cache-mutate 전부 0. telemetry-only(`would_fire` counter per source/asset). gate: shadow eval 후 crud mark/log/cleanup + sender 호출 0, counter만 증가.
+- **R4 — bounded eval + sync→async bridge(seam만, 실주입 S4)**: `schedule()`(367)은 observation당 `create_task`(tick 396 / non-tick 401 / coalesced 417). FX shadow는 own coalescer instance라 USDT 동급이나, S3는 **bounded sequential batch wrapper**(per-obs N task spam ❌ = threadpool/DB/pending backlog 위험)만 신설. `timestamp_ms`는 changed_rates에 없어 ingest-time 합성 + coalescer bypass(§6.1 line 98). bridge = `schedule_on_loop`(crud.py:350 패턴), crud 4-site 실주입은 **S4**.
+- **S3 산출물**: (a) sender seam(R1) (b) FX shadow singleton factory(backend Fx + fresh cache + no-op sender) (c) bounded batch pure-eval wrapper (d) would_fire telemetry. **flag(`FX_ALERT_SHADOW_ENABLED`)/crud 주입은 S4** → S3 자체는 미주입 dead-until-S4 = behavior-change-0.
+- **gate**: 11 `_send_fcm_multicast` patch 통과 + USDT/KRX runtime byte-identity + FX shadow factory/wrapper side-effect 0 단위 test(no-op sender·persist no-op·dedicated cache 확인).
+
 **open** (구현 시): parity tolerance 정의 / cutover 시 persist no-op→real 전환 + FX endpoint invalidation(constraint ④ option a) — shadow 범위 밖.
 
 ## 7. Sequencing 가드레일
