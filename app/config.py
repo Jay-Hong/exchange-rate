@@ -375,6 +375,18 @@ KRX_REDIS_TICK_WRITE_ENABLED = os.getenv("KRX_REDIS_TICK_WRITE_ENABLED", "false"
 #   - F-3: env=true 활성 (force-recreate) + 테스트 iOS canary 관찰
 KRX_ALERT_EVALUATOR_ENABLED = os.getenv("KRX_ALERT_EVALUATOR_ENABLED", "false").lower() == "true"
 
+# FX_ALERT_SHADOW_ENABLED: FX(bank+investing) alert shadow 토글 (fanout step 4 S4, 2026-06-23).
+#
+# 현재 동작 (flag=false default): crud의 _emit_fx_alert_shadow가 첫 줄 early-return →
+# schedule_on_loop 미호출 = zero overhead. legacy process_rate_alerts(authoritative)만 동작.
+#
+# Flag=true 동작 (S5): bank/investing 환율 변경 batch마다 changes→AlertObservation 변환 후
+# topic_trigger_bridge로 main loop에 마샬링 → fx_alert_shadow.evaluate_fx_batch_shadow(
+# FxNotificationBackend + dedicated cache + no-op sender)로 병렬 telemetry-only 평가.
+# persist/FCM no-op → legacy와 2× 발사 없음. would_fire counter vs legacy sent_count parity 관찰용.
+# ([ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md] §6.1 S4/S5)
+FX_ALERT_SHADOW_ENABLED = os.getenv("FX_ALERT_SHADOW_ENABLED", "false").lower() == "true"
+
 # KRX_CLOSE_EVENT_LOG_ENABLED: KRX close finalizer structured event persistence
 # 토글 (2026-05-26). 활성 시 KrxCloseWindowWriter + KrxCloseSnapshotController
 # emit point에서 Redis ZSET `krx:close_finalizer_events`에 event_type 단위로

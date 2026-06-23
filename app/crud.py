@@ -350,6 +350,56 @@ def _emit_topic_triggers(succeeded: List[dict]) -> None:
     topic_trigger_bridge.schedule_on_loop(_run_topic_emission, succeeded, mode)
 
 
+# fanout step 4 S4: FX(bank+investing) alert shadow — worker thread → main loop bridge.
+# strong-ref set (asyncio는 task에 weak ref만 → un-referenced task GC 방지, 선례 fx_topic_trigger._telemetry_tasks).
+_fx_shadow_tasks: "set[asyncio.Task]" = set()
+
+
+def _run_fx_alert_shadow(observations: list) -> None:
+    """main loop 위 실행 (bridge 마샬링) — async shadow eval을 task로 spawn.
+
+    schedule_on_loop이 sync callback만 받으므로 여기서 create_task (coroutine 직접 전달 ❌
+    = un-awaited silent 미실행). _run_guarded는 이 sync wrapper만 격리 — coroutine 예외는
+    evaluate_fx_batch_shadow 내부(_evaluate_async per-obs try/except)가 처리(이중 wrap ❌).
+    """
+    import asyncio
+    from app.notifications import fx_alert_shadow
+    loop = asyncio.get_running_loop()
+    task = loop.create_task(fx_alert_shadow.evaluate_fx_batch_shadow(observations))
+    _fx_shadow_tasks.add(task)
+    task.add_done_callback(_fx_shadow_tasks.discard)
+
+
+def _emit_fx_alert_shadow(changes: "List[ChangedRate]") -> None:
+    """FX alert shadow 발화 — telemetry-only, FX_ALERT_SHADOW_ENABLED gated, worker thread.
+
+    [ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md §6.1 S4] flag off면 즉시 return (schedule_on_loop
+    미호출 = zero overhead). on이면 changes(ChangedRate, changed_at 보유)→AlertObservation 변환
+    후 bridge로 main loop 마샬링. legacy process_rate_alerts(authoritative)와 병렬 — persist/FCM
+    no-op(2× 발사 없음). timestamp_ms는 changed_at(save-time) 도출 — history-log-only(평가 미참조).
+    """
+    from app import config as app_config
+    if not app_config.FX_ALERT_SHADOW_ENABLED:
+        return
+    if not changes:
+        return
+    from app.notifications.alert_evaluator import AlertObservation
+    observations = [
+        AlertObservation(
+            source=c.source,
+            asset=c.asset,
+            rate=c.rate,
+            # changed_at은 get_utc_now() naive UTC (models.py) → 명시적 UTC로 epoch 산출
+            # (naive.timestamp()는 로컬 TZ 해석 → 프로세스 TZ 비-UTC 시 오차). history-log-only.
+            timestamp_ms=int(c.changed_at.replace(tzinfo=dt_timezone.utc).timestamp() * 1000),
+            kind="fx_change",
+        )
+        for c in changes
+    ]
+    from app import topic_trigger_bridge
+    topic_trigger_bridge.schedule_on_loop(_run_fx_alert_shadow, observations)
+
+
 # P1b A2-2: write-mode skip 관측 (process-local **approximate** counter, debug용). enforced가
 # halt/atomic이면 writer가 staging 전 skip → 여기 누적. 동시 crawler thread의 read-modify-write
 # race로 일부 증가가 유실될 수 있음(no-lock — debug 관측이라 정확 카운트 불요). A2엔 0(legacy만).
@@ -525,6 +575,12 @@ def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) 
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": bank_name, "error": str(e)})
 
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        try:
+            _emit_fx_alert_shadow(changes)
+        except Exception:
+            logger.exception("FX alert shadow 실패 (격리)", extra={"bank": bank_name})
+
         # topic trigger — APPLIED subset만 (axis #2 SET-only gating)
         try:
             _emit_topic_triggers(applied_updates)
@@ -595,6 +651,12 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": bank_name, "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": bank_name, "error": str(e)})
+
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        try:
+            _emit_fx_alert_shadow(changes)
+        except Exception:
+            logger.exception("FX alert shadow 실패 (격리)", extra={"bank": bank_name})
 
         # (PR C §6.6.2) topic trigger emission — SET 성공분만, mode-gated, bridge 경유.
         # 직렬 블록 끝 + try/except 격리 (emission 실패가 저장/alert에 영향 X).
@@ -720,6 +782,12 @@ def _insert_investing_rates_atomic(db: Session, current_rates: dict) -> int:
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": "investing", "error": str(e)})
 
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        try:
+            _emit_fx_alert_shadow(changes)
+        except Exception:
+            logger.exception("FX alert shadow 실패 (격리)", extra={"bank": "investing"})
+
         # topic trigger — APPLIED subset만 (axis #2 SET-only gating)
         try:
             _emit_topic_triggers(applied_updates)
@@ -785,6 +853,12 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": "investing", "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": "investing", "error": str(e)})
+
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        try:
+            _emit_fx_alert_shadow(changes)
+        except Exception:
+            logger.exception("FX alert shadow 실패 (격리)", extra={"bank": "investing"})
 
         # (PR C §6.6.2) topic trigger emission — SET 성공분만, mode-gated, bridge 경유.
         try:
