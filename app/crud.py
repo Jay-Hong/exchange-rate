@@ -366,6 +366,8 @@ def _record_write_mode_skip(source: str, enforced: str) -> None:
 # C6-5b-3b: atomic v2 compare_write outcome 관측 (process-local **disjoint** counter — bank_investing_redis_stats
 # 미오염, behavior-change-0). no-lock(approximate). key=(source, state, structural).
 _atomic_write_outcome_counts: Dict[Tuple[str, str, bool], int] = {}
+# C7-a: counter 누적 시작 시각 (process-local — 재시작 시 reset, started_at으로 해석). import-time 1회.
+_atomic_write_outcome_started_at: str = datetime.now(dt_timezone.utc).isoformat()
 
 
 def _record_atomic_write_outcome(source: str, outcome) -> None:
@@ -376,11 +378,79 @@ def _record_atomic_write_outcome(source: str, outcome) -> None:
     general failed(structural=False = reply-lost 등 benign retry)와 key로 구분한다. conflict는 state="conflict"라
     이미 distinct. crud는 atomic_write_outcome를 직접 import 안 함(trip-wire 경계) — duck-typed
     .state.value/.structural. skipped_newer는 concurrent atomic writer서 정상(경고 X).
-    ⚠️ **현재 read path 없음**(write-only) — go-gate 소비 + admin surfacing은 C6-FLIP 전 observability PR
-    (legacy v1는 /admin/api/bank-investing-redis-stats로 노출되나 atomic은 미노출, 활성화 전 보강).
+    read path: `get_atomic_write_outcome_counts()` (C7-a — /admin/api/atomic-write-outcomes로 노출).
     """
     key = (source, outcome.state.value, getattr(outcome, "structural", False))
     _atomic_write_outcome_counts[key] = _atomic_write_outcome_counts.get(key, 0) + 1
+
+
+# C7-a observability: writer-side atomic outcome counter의 read accessor (post-flip 건강 신호).
+# coordinator-side persisted conflict_counters(atomic_cutover_status future stub)와 **별개** — 여기는
+# crud의 process-local writer counter. raw key tuple 미노출 → aggregate/per-source/critical 구조화.
+def _empty_outcome_block() -> dict:
+    return {
+        "total": 0,
+        "by_state": {
+            "advance": 0,
+            "refreshed_equal": 0,
+            "skipped_newer": 0,
+            "conflict": 0,
+            "failed": {"structural": 0, "general": 0},
+        },
+        "critical": {"total": 0, "conflict": 0, "failed_structural": 0},
+    }
+
+
+def _accumulate_outcome_block(block: dict, state: str, structural: bool, count: int) -> None:
+    """block(_empty_outcome_block 산출)에 (state, structural, count) 누적. unknown state는 'other' bucket."""
+    block["total"] += count
+    by_state = block["by_state"]
+    if state == "failed":
+        by_state["failed"]["structural" if structural else "general"] += count
+    elif state in by_state:
+        by_state[state] += count
+    else:  # defensive — 미래 state 추가 시 silent drop 방지
+        by_state["other"] = by_state.get("other", 0) + count
+    # critical rollup = conflict + failed-structural (§17 corruption = G3 critical)
+    conflict = by_state["conflict"]
+    failed_structural = by_state["failed"]["structural"]
+    block["critical"] = {
+        "total": conflict + failed_structural,
+        "conflict": conflict,
+        "failed_structural": failed_structural,
+    }
+
+
+def get_atomic_write_outcome_counts() -> dict:
+    """C7-a: writer-side atomic v2 compare_write outcome 누적의 read accessor (process-local 진단).
+
+    flip 후 atomic writer(bank+investing) 건강: advance/refreshed_equal/skipped_newer(정상),
+    conflict(cross-process race)·failed-structural(corruption=G3)=**critical**, failed-general=benign retry.
+    aggregate(by_state + critical) + per_source + health(ok|critical) + g3_ok. never-raise
+    (동시 변이 중 iteration 안전 위해 items snapshot copy). reset route 없음(process-local, 재시작 reset).
+    """
+    # 동시 변이 중 read snapshot: 현 GIL build에선 list(items())가 단일 C-iteration이라 GIL 미해제 →
+    # "dict changed size" 사실상 회피. 단 never-crash 최종 보증은 GIL 세부가 아니라 caller(endpoint)의
+    # try/except (free-threaded 3.13t 대비 + 방어적 — 여기 가정에 의존하지 않음).
+    snapshot = list(_atomic_write_outcome_counts.items())
+    aggregate = _empty_outcome_block()
+    per_source: Dict[str, dict] = {}
+    for (source, state, structural), count in snapshot:
+        _accumulate_outcome_block(aggregate, state, structural, count)
+        block = per_source.get(source)
+        if block is None:
+            block = _empty_outcome_block()
+            per_source[source] = block
+        _accumulate_outcome_block(block, state, structural, count)
+    critical_total = aggregate["critical"]["total"]
+    return {
+        "started_at": _atomic_write_outcome_started_at,
+        "process_local": True,
+        "aggregate": aggregate,
+        "per_source": per_source,
+        "health": "critical" if critical_total > 0 else "ok",
+        "g3_ok": critical_total == 0,
+    }
 
 
 def _atomic_write_changes_v2(captured, redis_updates, source_label: str, *, key_kind: str) -> List[dict]:

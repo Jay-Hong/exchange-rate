@@ -497,6 +497,7 @@ scheduler.add_job(
 - `GET /admin/api/monitor/history` - 시간별 리소스 히스토리 (파라미터: `hours`)
 - `GET /admin/api/bank-investing-redis-stats` - Bank/Investing direct-SET outcome telemetry (process-local 집계, reset route 없음 — item 4, PR D 계측 축)
 - `GET /admin/api/atomic-write-control-status` - P1 atomic-write control plane 상태 (PR D/P1b, read-only 진단 — control/effective_mode/preflight/`enforced_action`/`writer_enforced`/control_read_error, never-crash). `enforced_action`/`writer_enforced`는 writer가 실제 gate하는 cached snapshot 기준 (A2 land로 writer가 control consume — legacy면 pass-through라 `writer_enforced=false`, atomic/halt면 true)
+- `GET /admin/api/atomic-write-outcomes` - C7-a writer-side atomic v2 compare_write outcome telemetry (process-local 집계, reset route 없음, read-only — `aggregate`/`per_source` by_state{advance/refreshed_equal/skipped_newer/conflict/failed{structural,general}} + `critical`{conflict+failed_structural=§17 corruption=G3} + `health`(ok\|critical)/`g3_ok`, never-crash). crud `_atomic_write_outcome_counts`(구 write-only)의 read accessor — flip 후 atomic writer 건강 신호. coordinator-side persisted counter(atomic-cutover-status future stub)와 별개 = writer-side live counter
 
 ### 계정 API (Apple App Store 5.1.1(v) 준수)
 

@@ -1430,6 +1430,23 @@ async def get_atomic_cutover_status():
     return await build_cutover_status_dict(SessionLocal)
 
 
+@app.get("/admin/api/atomic-write-outcomes", dependencies=[Depends(verify_admin)])
+async def get_atomic_write_outcomes():
+    """C7-a — atomic v2 writer compare_write outcome telemetry (read-only, process-local, behavior-change-0).
+
+    cutover flip 후 atomic writer(bank+investing)의 1차 건강 신호를 surface. crud의 write-only
+    counter(`_atomic_write_outcome_counts`)를 read accessor로 노출(§19 C7-a). aggregate/per_source
+    by_state + critical(conflict+failed_structural=§17 corruption=G3) + health(ok|critical) + g3_ok.
+    process-local(재시작 reset, started_at으로 해석), reset route 없음. coordinator-side persisted
+    counter(atomic-cutover-status future stub)와 별개 — 여기는 writer-side live counter. never-crash.
+    """
+    try:
+        return {"status": "success", "outcomes": crud.get_atomic_write_outcome_counts()}
+    except Exception:
+        logger.error("atomic-write-outcomes 조회 실패", exc_info=True)
+        return {"status": "error", "outcomes": None, "read_error": "outcome_read_error"}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # KRX Status API (PR6d-2a, ADR-027) — raw frame metric / status observability
 # ═══════════════════════════════════════════════════════════════════════════════
