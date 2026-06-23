@@ -99,8 +99,8 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 
 **sub-slices** (codex GO):
 - **✅ S1 LAND** (2026-06-23, 위 note): AlertStorageBackend ABC(**4 method** — sender seam은 S3 defer) + SourceAlertBackend(logic-verbatim) 추출 + evaluator backend 주입(5 rewire, 4 static 제거, KRX `pass` 상속). gate 통과 = backend characterization(empty-token / refetch stale / **persist_result whole mark+log+cleanup** / payload) + static-patch test backend 재타겟 + **runtime alert 출력·commit/session order identical**(3218 passed; "zero-edit green" ❌ — test 35 재타겟이 정상).
-- **S2** (M): FxNotificationBackend (dead code, 단위 test만).
-- **S3** (M): FX shadow evaluator singleton + bounded batch wrapper + **delivery no-op + state/log no-op + telemetry-only** + dedicated cache.
+- **✅ S2 LAND** (2026-06-23, `b44da01`): FxNotificationBackend (dead code, 단위 test 4).
+- **✅ S3 LAND** (2026-06-23, `b2e787c`): sender seam(alert_evaluator `__init__` sender param + `_do_send_and_persist` `(self._sender or self._send_fcm_multicast)` per-call late-bind = USDT/KRX byte-identical) + `fx_alert_shadow.py` 신규(get_fx_alert_evaluator lazy singleton[FxNotificationBackend + dedicated cache + no-op sender] / evaluate_fx_batch_shadow bounded sequential `_evaluate_async` / `_shadow_noop_sender` would_fire 카운트[FCM 0, `_counter_lock`] / get_fx_would_fire_counts + `_reset_fx_shadow_state`) + test 12. 전체 3234 passed(+12), 회귀 0(11 patch 보존). **dead-until-S4**: app·scripts 0 ref = behavior-change-0. 4-lens Workflow + 합성(GO_WITH_FIXES) + codex design+impl GO(lock snapshot/clear 확대). deploy 보류.
 - **S4** (S): crud 4 site 주입 behind flag(default off).
 - **S5** (ops): flag 활성 + parity 관찰(would_fire vs legacy sent_count per source/asset).
 
