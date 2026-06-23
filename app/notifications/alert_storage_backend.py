@@ -6,7 +6,7 @@
 
 - `SourceAlertBackend`: 현 evaluator static method 동작 **verbatim** (USDT 5 + KRX,
   `source_notification_settings`). USDT/KRX runtime byte-identical.
-- `FxNotificationBackend` (S2 예정): `notification_settings`(bank/currency) — FX shadow.
+- `FxNotificationBackend` (S2 land 2026-06-23, S3 wiring 예정): `notification_settings`(bank/currency) — FX shadow.
 
 설계 결정 (codex 019ef2fa):
 - **sender(FCM delivery)는 backend ABC 밖** — evaluator constructor-injected callable(별 seam).
@@ -227,6 +227,127 @@ class SourceAlertBackend(AlertStorageBackend):
             "body": body,
             "source": candidate.source,
             "asset": candidate.asset,
+            "rate": str(float(triggered_rate)),
+            "threshold": str(candidate.threshold),
+            "condition": candidate.condition,
+            "setting_id": str(candidate.setting_id),
+        }
+        return title, body, data
+
+
+class FxNotificationBackend(AlertStorageBackend):
+    """`notification_settings`(bank/currency) 기반 — FX(bank+investing) shadow (fanout step 4 S2).
+
+    [§6.1 open decision 7 = (a) adapter] **value pass-through**: changed_rates["bank"]=`c.source`가 이미
+    "kb"/"investing"이고 `notification_settings.bank`도 동일 값(crud.py:275 `_changes_to_fcm`)이라
+    `CachedAlertSetting`/`FreshSettingSnapshot`의 source=bank·asset=currency identity 매핑(remap 아님).
+
+    - `persist_result`는 **shadow no-op** — FX shadow는 telemetry-only(mark_triggered/log/cleanup 0).
+      legacy `crud.process_rate_alerts`가 authoritative. cutover 시 real persist는 open decision 7 후속.
+    - `build_payload`는 **legacy FX 형식**(data["type"]="rate_alert", BANK_NAMES_KR/CURRENCY_NAMES_KR) —
+      shadow telemetry를 legacy 발송과 apples-to-apples 비교 위해.
+
+    ⚠️ **dead code (S2)**: 아직 어떤 evaluator에도 주입 안 됨. S3(FX shadow evaluator + sender seam)에서 wiring.
+    """
+
+    def load_settings(self, source: str, asset: str) -> tuple["CachedAlertSetting", ...]:
+        """notification_settings(bank=source, currency=asset) 활성 설정 → CachedAlertSetting tuple.
+
+        SourceAlertBackend.load_settings의 NotificationSetting 버전(empty device_tokens 제외 동일).
+        """
+        from app import models
+        from app.database import get_db_context
+        from app.notifications.alert_evaluator import CachedAlertSetting
+
+        with get_db_context() as db:
+            settings = db.query(models.NotificationSetting).filter(
+                models.NotificationSetting.bank == source,
+                models.NotificationSetting.currency == asset,
+                models.NotificationSetting.enabled == True,  # noqa: E712
+                models.NotificationSetting.triggered == False,  # noqa: E712
+            ).all()
+
+            if not settings:
+                return tuple()
+
+            user_ids = {s.user_id for s in settings}
+            devices = db.query(models.UserDevice).filter(
+                models.UserDevice.user_id.in_(user_ids),
+            ).all()
+
+            tokens_by_user: dict[str, list[str]] = {}
+            for dev in devices:
+                tokens_by_user.setdefault(dev.user_id, []).append(dev.device_token)
+
+            snapshots = []
+            for setting in settings:
+                tokens = tuple(tokens_by_user.get(setting.user_id, ()))
+                if not tokens:
+                    continue
+                snapshots.append(CachedAlertSetting(
+                    setting_id=setting.id,
+                    user_id=setting.user_id,
+                    source=setting.bank,       # value pass-through (bank → source)
+                    asset=setting.currency,    # value pass-through (currency → asset)
+                    condition=setting.condition,
+                    threshold=setting.threshold,
+                    device_tokens=tokens,
+                ))
+            return tuple(snapshots)
+
+    def refetch_snapshot(self, setting_id: int, user_id: str) -> Optional["FreshSettingSnapshot"]:
+        """notification_settings refetch (소유권 검증 포함) → FreshSettingSnapshot 또는 None."""
+        from app import crud
+        from app.database import get_db_context
+        from app.notifications.alert_evaluator import FreshSettingSnapshot
+
+        with get_db_context() as db:
+            setting = crud.get_notification_setting_by_id(
+                db=db, setting_id=setting_id, user_id=user_id,
+            )
+            if setting is None:
+                return None
+            return FreshSettingSnapshot(
+                setting_id=setting.id,
+                enabled=setting.enabled,
+                triggered=setting.triggered,
+                source=setting.bank,       # value pass-through
+                asset=setting.currency,    # value pass-through
+                condition=setting.condition,
+                threshold=setting.threshold,
+            )
+
+    def persist_result(self, candidate: "CachedAlertSetting", rate: float, fcm_result: dict) -> None:
+        """FX shadow: **no-op** — telemetry-only(mark_triggered/log/cleanup 0). legacy가 authoritative.
+
+        cutover 시 real persist(mark_setting_triggered + create_notification_log) 전환은 open decision 7 후속.
+        """
+        return
+
+    def build_payload(self, candidate: "CachedAlertSetting", triggered_rate: Decimal) -> tuple[str, str, dict]:
+        """legacy FX 형식 (crud.process_rate_alerts 2200-2226 mirror) — data["type"]="rate_alert"."""
+        from app.crud import BANK_NAMES_KR, CURRENCY_NAMES_KR, format_threshold
+
+        bank = candidate.source       # value pass-through
+        currency = candidate.asset
+        bank_kr = BANK_NAMES_KR.get(bank, bank.upper())
+        currency_kr = CURRENCY_NAMES_KR.get(currency, currency.upper())
+
+        icon = "📈" if candidate.condition == "above" else "📉"
+        title = f"{icon}  {bank_kr}  {currency_kr}"
+
+        condition_arrow = "↑" if candidate.condition == "above" else "↓"
+        condition_text = "이상" if candidate.condition == "above" else "이하"
+        threshold_str = format_threshold(candidate.threshold)
+        rate_str = f"{float(triggered_rate):.2f}"
+        body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
+
+        data = {
+            "type": "rate_alert",
+            "title": title,
+            "body": body,
+            "bank": bank,
+            "currency": currency,
             "rate": str(float(triggered_rate)),
             "threshold": str(candidate.threshold),
             "condition": candidate.condition,

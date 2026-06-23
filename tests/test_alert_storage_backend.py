@@ -1,4 +1,4 @@
-"""fanout step 4 S1 — AlertStorageBackend / SourceAlertBackend characterization.
+"""fanout step 4 S1/S2 — AlertStorageBackend / SourceAlertBackend / FxNotificationBackend characterization.
 
 load/refetch의 DB 동작은 test_usdt_ws_upbit_skeleton(re-targeted patches)가 byte-identity로 검증
 (3210 passed). 여기선 backend 단위 계약 명시 lock:
@@ -13,7 +13,11 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from app.notifications.alert_evaluator import CachedAlertSetting
-from app.notifications.alert_storage_backend import AlertStorageBackend, SourceAlertBackend
+from app.notifications.alert_storage_backend import (
+    AlertStorageBackend,
+    FxNotificationBackend,
+    SourceAlertBackend,
+)
 
 
 def _candidate() -> CachedAlertSetting:
@@ -121,6 +125,74 @@ class TestSourceAlertBackendPersistResult(unittest.TestCase):
         # failed_tokens 없음 → cleanup query/commit 없음
         mock_db.query.assert_not_called()
         mock_db.commit.assert_not_called()
+
+
+class TestFxNotificationBackend(unittest.TestCase):
+    """FX(notification_settings) backend (S2, dead code) — value pass-through / legacy payload / persist no-op."""
+
+    def _fx_candidate(self) -> CachedAlertSetting:
+        return CachedAlertSetting(
+            setting_id=5, user_id="user-1", source="kb", asset="usd-krw",
+            condition="above", threshold=1450.0, device_tokens=("t1",),
+        )
+
+    def test_is_alert_storage_backend(self):
+        self.assertIsInstance(FxNotificationBackend(), AlertStorageBackend)
+
+    def test_build_payload_legacy_rate_alert_format(self):
+        title, body, data = FxNotificationBackend().build_payload(self._fx_candidate(), Decimal("1455.5"))
+        self.assertEqual(data["type"], "rate_alert")     # legacy type (source_rate_alert 아님)
+        self.assertEqual(data["bank"], "kb")             # bank/currency 키 (source/asset 아님)
+        self.assertEqual(data["currency"], "usd-krw")
+        self.assertNotIn("source", data)
+        self.assertNotIn("asset", data)
+        self.assertIn("📈", title)
+        self.assertIn("국민은행", title)                  # BANK_NAMES_KR 적용
+        self.assertIn("1455.50", body)
+
+    def test_persist_result_is_noop(self):
+        with patch("app.database.get_db_context") as mock_ctx, \
+             patch("app.crud.mark_setting_triggered") as mock_mark, \
+             patch("app.crud.create_notification_log") as mock_log:
+            FxNotificationBackend().persist_result(
+                self._fx_candidate(), 1455.0,
+                {"success_count": 1, "failure_count": 0, "failed_tokens": ["bad"]},
+            )
+        # shadow no-op: DB 세션·mark·log·cleanup 전부 미호출 (failed_tokens 있어도)
+        mock_ctx.assert_not_called()
+        mock_mark.assert_not_called()
+        mock_log.assert_not_called()
+
+    def test_load_settings_value_passthrough(self):
+        # notification_settings.bank/currency → CachedAlertSetting.source/asset (value pass-through)
+        mock_setting = MagicMock(
+            id=1, user_id="user-A", bank="kb", currency="usd-krw",
+            condition="above", threshold=1450.0, enabled=True, triggered=False,
+        )
+        mock_device = MagicMock(user_id="user-A", device_token="token-A")
+        query_results = [[mock_setting], [mock_device]]
+        query_idx = [0]
+
+        def make_query(model):
+            q = MagicMock()
+            q.filter.return_value = q
+            q.all.return_value = query_results[query_idx[0]]
+            query_idx[0] += 1
+            return q
+
+        mock_session = MagicMock()
+        mock_session.query.side_effect = make_query
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(return_value=mock_session)
+        mock_ctx.__exit__ = MagicMock(return_value=None)
+
+        with patch("app.database.get_db_context", return_value=mock_ctx):
+            result = FxNotificationBackend().load_settings("kb", "usd-krw")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].source, "kb")        # bank → source
+        self.assertEqual(result[0].asset, "usd-krw")    # currency → asset
+        self.assertEqual(result[0].device_tokens, ("token-A",))
 
 
 if __name__ == "__main__":
