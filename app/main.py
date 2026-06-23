@@ -1447,6 +1447,34 @@ async def get_atomic_write_outcomes():
         return {"status": "error", "outcomes": None, "read_error": "outcome_read_error"}
 
 
+@app.get("/admin/api/fx-shadow-counts", dependencies=[Depends(verify_admin)])
+async def get_fx_shadow_counts():
+    """fanout step 4 S5 — FX alert shadow would_fire telemetry (read-only, process-local, behavior-change-0).
+
+    FX_ALERT_SHADOW_ENABLED 활성 시 shadow evaluator가 누적한 would_fire count(per (source,asset))를
+    surface — legacy sent_count(로그 🔔)와 parity 관찰용. counter는 running process in-memory(재시작 reset,
+    reset route 없음). would_fire = refetch+delivery_allowed+조건 재검증 통과 후 발사 직전(attempted-send)
+    이라 legacy sent_count(delivered)와 1:1 아님(coalescer/in-flight dedup/dedicated cache staleness).
+    `shadow_enabled=false`면 counter는 0 누적(flag off=dormant). never-crash.
+    """
+    try:
+        from app import config as app_config
+        from app.notifications.fx_alert_shadow import get_fx_would_fire_counts
+        counts = get_fx_would_fire_counts()
+        return {
+            "status": "success",
+            "shadow_enabled": app_config.FX_ALERT_SHADOW_ENABLED,
+            "would_fire": [
+                {"source": k[0], "asset": k[1], "count": v}
+                for k, v in sorted(counts.items())
+            ],
+            "total": sum(counts.values()),
+        }
+    except Exception:
+        logger.error("fx-shadow-counts 조회 실패", exc_info=True)
+        return {"status": "error", "would_fire": None, "read_error": "fx_shadow_read_error"}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # KRX Status API (PR6d-2a, ADR-027) — raw frame metric / status observability
 # ═══════════════════════════════════════════════════════════════════════════════
