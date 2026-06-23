@@ -76,7 +76,7 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 | # | step | scope | size |
 | --- | --- | --- | --- |
 | 1 | **본 scope-lock 문서**(이 artifact) + REALTIME §4.1.6 cross-ref 등록. 코드 0. | docs | S |
-| 2 | **Redis-write OUTCOME enum 통합** — `UsdtLatestWriteOutcome`+`KrxLatestWriteOutcome` → 공유 enum(동일 멤버). setter는 per-source. behavior-change-0. | latest_rates_cache 타입 | S |
+| 2 | **✅ LAND (2026-06-23)** — Redis-write OUTCOME enum 통합: `Usdt`+`Krx`LatestWriteOutcome → `SourceLatestWriteOutcome`(union 멤버, 동일 .value) + 후방 호환 alias. setter per-source 유지, return type만 공유. behavior-change-0(3205 passed, codex GO). | latest_rates_cache 타입 | S |
 | 3 | **source-neutral ObservationToAlert adapter 추출** — KRX/USDT tick handler의 payload→AlertObservation(received_at→KST→epoch-ms)를 1 helper로. evaluator subclass 유지. behavior-change-0. | app/notifications/ | S |
 | 4 | **FX alert을 source-neutral evaluator 경로로 SHADOW(dual-run)** — `crud.process_rate_alerts` authoritative 유지 + default-OFF flag로 병렬 AlertObservation 평가(telemetry-only, FCM 0). settings 모델 = **open decision 7**(shadow는 기존 `NotificationSetting` adapter 권장, 테이블 불변). 결정 비교. | crud FX fanout + evaluator | M |
 | 5 | **unified freshness shape 결정(emit은 나중)** — open decision 1로 FX가 seen_at/rate_changed_at 받을지 결정. yes면 reader-tolerant deserialize 뒤 schema-additive로 land(reader 동작 변화 0 먼저). | latest_rates_cache + docs | M |

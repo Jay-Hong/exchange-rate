@@ -55,17 +55,24 @@ LATEST_INDEX_KEY = "latest:index"
 LATEST_DXY_KEY = "latest:dxy:current"
 
 
-class UsdtLatestWriteOutcome(Enum):
-    """USDT direct writer 결과 — (5d-a) topic trigger 정책 입력.
+class SourceLatestWriteOutcome(Enum):
+    """Source latest-write 결과 — USDT(5d-a)·KRX(Stage E) direct writer 공유 (fanout step 2 통합).
+
+    [ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md §2-5]: USDT/KRX writer가 공유하는 source-neutral outcome.
+    topic trigger 정책 입력 — **SET만 trigger 발사**, 나머지는 silent. 구 `UsdtLatestWriteOutcome` +
+    `KrxLatestWriteOutcome` 병합(멤버·value·identity 보존, behavior-change-0). atomic v2 `WriteState`
+    (atomic_write_outcome.py)와는 **별개 enum**(의도적 distinct — test_atomic_write_outcome.py:158-161).
 
     - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
     - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
       Topic = change notification 역할이므로 동일 값/동일 bucket 재호출에 trigger 불필요.
-    - SKIPPED_REGRESSION: incoming exchange ts < stored seen_at → out-of-order write
-      차단 (reconnect snapshot/probe 경합 시 stale이 fresh 값을 덮지 않게). trigger 차단.
-    - SET: Redis SET 성공 (cold-start GET miss 후 SET 포함). trigger 발사.
-    - BLOCKED: (dormant) 구 전역 FX write-mode gate의 잔재. 현 setter는 mode-independent라
-      이 값을 반환하지 않음 — USDT/KRX 자체 cutover의 per-source gate용으로 enum만 보존.
+    - SKIPPED_REGRESSION: incoming exchange ts < stored seen_at → out-of-order write 차단
+      (reconnect snapshot/probe 경합 시 stale이 fresh 값을 덮지 않게). trigger 차단.
+      **USDT만 반환** — KRX tick은 regression `<` 가드 없음(accepted gap, fanout plan §4-3).
+    - SET: Redis SET 성공 (cold-start GET miss 후 SET 포함). trigger 발사
+      (KRX는 `TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS`).
+    - BLOCKED: (dormant) 구 전역 FX write-mode gate 잔재. 현 setter는 mode-independent라 미반환 —
+      USDT/KRX 자체 cutover의 per-source gate용으로 enum만 보존.
     """
 
     FAILED = "failed"
@@ -75,22 +82,11 @@ class UsdtLatestWriteOutcome(Enum):
     BLOCKED = "blocked"
 
 
-class KrxLatestWriteOutcome(Enum):
-    """KRX tick-level Redis writer 결과 — Stage E (KRX_REDIS_TICK_WRITE_ENABLED=true) 입력.
-
-    USDT 5d-a `UsdtLatestWriteOutcome` 패턴 mirror. trigger 발사 정책 동일.
-
-    - FAILED: client init 실패 / parse 실패 / Redis SET 예외. trigger 차단.
-    - SKIPPED: 5초 grain 안에서 same rate + same bucket → coalesce skip.
-    - SET: Redis SET 성공. trigger 발사 (`TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS`).
-    - BLOCKED: (dormant) 구 전역 FX write-mode gate의 잔재. 현 setter는 mode-independent라 미반환
-      (USDT/KRX 자체 cutover의 per-source gate용으로 enum만 보존).
-    """
-
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    SET = "set"
-    BLOCKED = "blocked"
+# 후방 호환 alias (deprecated — 신규 코드는 SourceLatestWriteOutcome 사용). 기존 call site 무변경 +
+# 동일 enum이라 UsdtLatestWriteOutcome.SET is KrxLatestWriteOutcome.SET is SourceLatestWriteOutcome.SET.
+# (KRX는 SKIPPED_REGRESSION을 반환하지 않음 — 멤버 접근은 가능하나 setter가 미사용.)
+UsdtLatestWriteOutcome = SourceLatestWriteOutcome
+KrxLatestWriteOutcome = SourceLatestWriteOutcome
 
 
 # ── Key helpers ──────────────────────────────────────────────
@@ -405,7 +401,7 @@ def set_latest_usdt_rate_from_sync_job(
     asset: str,
     rate: float,
     timestamp: str,
-) -> UsdtLatestWriteOutcome:
+) -> SourceLatestWriteOutcome:
     """sync scheduler thread 전용 direct writer.
 
     Args:
@@ -444,7 +440,7 @@ def set_latest_usdt_rate_from_sync_job(
     client = _get_sync_client()
     if client is None:
         usdt_redis_stats.record_direct_write_failure(source)
-        return UsdtLatestWriteOutcome.FAILED
+        return SourceLatestWriteOutcome.FAILED
 
     redis_key = latest_key_source(source, asset)
     state_key = (source, asset)
@@ -483,7 +479,7 @@ def set_latest_usdt_rate_from_sync_job(
             and state["rate"] == rate_decimal
             and state["seen_at"] == seen_at_floor
         ):
-            return UsdtLatestWriteOutcome.SKIPPED
+            return SourceLatestWriteOutcome.SKIPPED
 
         # 3.5) Regression guard — out-of-order write 차단 (reconnect snapshot/probe 경합).
         # 더 오래된 exchange timestamp(seen_at_floor)가 더 최신 stored 값을 덮지 않게.
@@ -492,7 +488,7 @@ def set_latest_usdt_rate_from_sync_job(
         if state is not None and seen_at_floor < state["seen_at"]:
             usdt_redis_stats.record_direct_write_regression_skipped(source)
             _maybe_warn_regression(source, seen_at_floor, state["seen_at"])
-            return UsdtLatestWriteOutcome.SKIPPED_REGRESSION
+            return SourceLatestWriteOutcome.SKIPPED_REGRESSION
 
         # 4) rate_changed_at — same rate면 보존, 새 rate면 tick_ts (full precision)
         if state is not None and state["rate"] == rate_decimal:
@@ -513,7 +509,7 @@ def set_latest_usdt_rate_from_sync_job(
             "rate_changed_at": rate_changed_at,
         }
         usdt_redis_stats.record_direct_write_success(source)
-        return UsdtLatestWriteOutcome.SET
+        return SourceLatestWriteOutcome.SET
     except Exception:
         usdt_redis_stats.record_direct_write_failure(source)
         logger.warning(
@@ -521,7 +517,7 @@ def set_latest_usdt_rate_from_sync_job(
             exc_info=True,
             extra={"key": redis_key},
         )
-        return UsdtLatestWriteOutcome.FAILED
+        return SourceLatestWriteOutcome.FAILED
 
 
 def get_latest_usdt_rate_from_sync_job(
@@ -662,7 +658,7 @@ def set_latest_krx_rate_from_sync_job_tick_level(
     asset: str,
     rate: float,
     timestamp: str,
-) -> KrxLatestWriteOutcome:
+) -> SourceLatestWriteOutcome:
     """KRX tick-level Redis writer — Stage E (KRX_FANOUT_REFACTOR_PLAN §5.2 E).
 
     `KrxRedisLatestWriter` tick handler가 매 WS tick에서 호출. USDT 5b-bis
@@ -695,7 +691,7 @@ def set_latest_krx_rate_from_sync_job_tick_level(
     # per-source control gate로 v2 정식 편입 — 전역 FX mode 재결합 금지.
     client = _get_sync_client()
     if client is None:
-        return KrxLatestWriteOutcome.FAILED
+        return SourceLatestWriteOutcome.FAILED
 
     key = latest_key_source("krx", asset)
 
@@ -728,7 +724,7 @@ def set_latest_krx_rate_from_sync_job_tick_level(
             and state["rate"] == rate_decimal
             and state["seen_at"] == seen_at_floor
         ):
-            return KrxLatestWriteOutcome.SKIPPED
+            return SourceLatestWriteOutcome.SKIPPED
 
         # rate_changed_at — same rate면 보존, 새 rate면 tick_ts (full precision)
         if state is not None and state["rate"] == rate_decimal:
@@ -748,14 +744,14 @@ def set_latest_krx_rate_from_sync_job_tick_level(
             "seen_at": seen_at_floor,
             "rate_changed_at": rate_changed_at,
         }
-        return KrxLatestWriteOutcome.SET
+        return SourceLatestWriteOutcome.SET
     except Exception:
         logger.warning(
             "KRX tick-level Redis SET 실패 (best-effort, DB fallback 안전망)",
             exc_info=True,
             extra={"key": key},
         )
-        return KrxLatestWriteOutcome.FAILED
+        return SourceLatestWriteOutcome.FAILED
 
 
 def get_latest_krx_rate_from_sync_job(
