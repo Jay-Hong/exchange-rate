@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
@@ -1494,7 +1495,7 @@ def should_include_source_in_latest(source: str, asset: str) -> bool:
 def _sync_atomic_mirror_fx(
     ordered_writes: List[Tuple[str, str, Any]],
     mirrored_at: datetime,
-) -> Tuple[Dict[str, int], Dict[str, int], List[str]]:
+) -> Tuple[Dict[str, int], Dict[str, int], List[str], List[Dict[str, Any]]]:
     """ATOMIC mirror FX write loop (sync — scheduler thread에서 asyncio.to_thread로 실행, C6-5b-4).
 
     Args:
@@ -1508,10 +1509,12 @@ def _sync_atomic_mirror_fx(
     사용 회피. atomic_compare_write_v2는 no-throw(writer None도 DEFINITE_NOT_APPLIED)라 루프 중 예외 없음.
 
     Returns:
-        (counts, outcome_counts, loaded_keys)
+        (counts, outcome_counts, loaded_keys, notable)
         - counts: {loaded_total, bank, investing, failed} (int)
         - outcome_counts: {label: count} per-outcome 관찰 카운터 (telemetry)
         - loaded_keys: present(advance/refreshed_equal/skipped_newer) key — latest:index 멤버십
+        - notable: Slice 1a-2 attribution — label != refreshed_equal event detail
+          ({label, kind, key, source, asset, revision}). 대부분 cycle은 빈 list.
     """
     from app import atomic_direct_write  # island (lazy — dormant module-load 경량 + cycle 회피)
 
@@ -1519,6 +1522,9 @@ def _sync_atomic_mirror_fx(
     counts: Dict[str, int] = {"loaded_total": 0, "bank": 0, "investing": 0, "failed": 0}
     outcome_counts: Dict[str, int] = {}
     loaded_keys: List[str] = []
+    # Slice 1a-2 (attribution): refreshed_equal(baseline 99.9%) 외 notable outcome만 detail 수집
+    # (advance/skipped_newer/conflict/failed = key/source/asset/revision). bounded — cycle당 보통 0건.
+    notable: List[Dict[str, Any]] = []
     for kind, key, rr in ordered_writes:
         outcome = atomic_direct_write.atomic_compare_write_v2(
             writer,
@@ -1532,13 +1538,22 @@ def _sync_atomic_mirror_fx(
         )
         label = atomic_direct_write.outcome_label(outcome)
         outcome_counts[label] = outcome_counts.get(label, 0) + 1
+        if label != "refreshed_equal":  # 희소 non-baseline event → attribution detail
+            notable.append({
+                "label": label,
+                "kind": kind,
+                "key": key,
+                "source": rr.source,
+                "asset": rr.asset,
+                "revision": rr.revision,
+            })
         if atomic_direct_write.present_for_index(outcome):
             counts["loaded_total"] += 1
             counts[kind] += 1
             loaded_keys.append(key)
         else:
             counts["failed"] += 1
-    return counts, outcome_counts, loaded_keys
+    return counts, outcome_counts, loaded_keys, notable
 
 
 async def _mirror_all_latest_atomic(db: Session) -> Dict[str, Any]:
@@ -1571,7 +1586,7 @@ async def _mirror_all_latest_atomic(db: Session) -> Dict[str, Any]:
             ordered_writes.append(("bank", latest_key_bank(rr.source, rr.asset), rr))
 
     # 동기 Redis compare_write 루프를 단일 to_thread로 — event loop non-blocking + writer 1회 생성.
-    counts, outcome_counts, loaded_keys = await asyncio.to_thread(
+    counts, outcome_counts, loaded_keys, notable = await asyncio.to_thread(
         _sync_atomic_mirror_fx, ordered_writes, mirrored_at
     )
 
@@ -1590,6 +1605,7 @@ async def _mirror_all_latest_atomic(db: Session) -> Dict[str, Any]:
         "source_skipped": 0,
         "write_mode": "atomic",
         "atomic_outcomes": outcome_counts,
+        "atomic_notable_events": notable,  # Slice 1a-2 attribution (non-refreshed_equal detail)
     }
 
     # latest:index — v1 serialize_index, failed==0일 때만 (legacy와 동일 게이트/async 경로)
@@ -1996,6 +2012,16 @@ _mirror_cycle_stats: Dict[str, int] = {
 }
 _mirror_outcome_started_at: str = datetime.now(_KST).isoformat()
 _mirror_outcome_last_cycle_at: Optional[str] = None
+# Slice 1a-2 (attribution): 희소 non-refreshed_equal event(advance/skipped_newer/conflict/failed)의
+# bounded ring buffer(최근 N) + per-key×label counter. aggregate가 못 보는 "어느 key/source에서 mirror가
+# advance(보정)했나" = race vs non-Redis-path 구분용. bounded(ring maxlen + key 수 ≤30)라 무한 성장 X.
+_MIRROR_NOTABLE_RING_MAX = 100
+# per-key counter는 prod에서 FX key cardinality(~30 고정)라 사실상 bounded지만, _select_latest_bank_rates_
+# with_revision이 key를 필터링 안 하므로 구조적 cap을 둠(codex 019ef8d1 — 오염/확대 데이터 방어). cap 도달
+# 후 새 key는 per-key skip(ring buffer는 계속 기록). 30 ≪ 256이라 정상 운영 영향 0.
+_MIRROR_NOTABLE_KEY_CAP = 256
+_mirror_notable_events: deque = deque(maxlen=_MIRROR_NOTABLE_RING_MAX)
+_mirror_notable_by_key: Dict[str, Dict[str, int]] = {}
 
 
 def _record_mirror_outcome(stats: Dict[str, Any]) -> None:
@@ -2020,6 +2046,17 @@ def _record_mirror_outcome(stats: Dict[str, Any]) -> None:
     _mirror_cycle_stats["dxy_loaded"] += stats.get("dxy_loaded", 0)
     _mirror_cycle_stats["dxy_failed"] += stats.get("dxy_failed", 0)
     _mirror_outcome_last_cycle_at = datetime.now(_KST).isoformat()
+    # Slice 1a-2: 희소 notable event attribution (ring buffer + per-key×label). 대부분 cycle은 빈 list.
+    for ev in stats.get("atomic_notable_events") or []:
+        rec = dict(ev)
+        rec["at"] = _mirror_outcome_last_cycle_at
+        _mirror_notable_events.append(rec)  # ring buffer (bounded maxlen)
+        k = ev.get("key", "?")
+        # per-key는 cap까지만 새 key 추가 (기존 key는 항상 누적) — 구조적 bound
+        if k in _mirror_notable_by_key or len(_mirror_notable_by_key) < _MIRROR_NOTABLE_KEY_CAP:
+            by = _mirror_notable_by_key.setdefault(k, {})
+            lbl = ev.get("label", "?")
+            by[lbl] = by.get(lbl, 0) + 1
 
 
 def get_mirror_outcome_counts() -> Dict[str, Any]:
@@ -2037,6 +2074,11 @@ def get_mirror_outcome_counts() -> Dict[str, Any]:
       write/mirror 안정성부터. general_failed = writer 미가용/pre-SET 직렬화/불확실 Redis 예외 등 =
       corruption(G3) 아니나 **availability 신호**(지속 시 점검). never-raise(snapshot copy), reset route
       없음. DXY/index는 atomic outcome 아니라 cycle_stats로 분리(codex 주의: DXY는 FX mirror와 별 범위).
+
+    Slice 1a-2 attribution (codex 019ef8xx): `recent_notable_events`(희소 non-refreshed_equal event의
+    bounded ring buffer — label/kind/key/source/asset/revision/at) + `notable_by_key`(key→{label:count}).
+    aggregate가 못 보는 "어느 key/source에서 advance 했나" = race(여러 key 산발) vs non-Redis-path(특정
+    key 집중) 구분용.
     """
     outcomes = dict(_mirror_outcome_counts)  # snapshot (동시 변이 중 read 안전)
     cyc = dict(_mirror_cycle_stats)
@@ -2067,6 +2109,9 @@ def get_mirror_outcome_counts() -> Dict[str, Any]:
             "redundant_ratio": round(redundant / total, 4) if total else None,
         },
         "cycle_stats": cyc,
+        # Slice 1a-2 attribution: 희소 advance/skipped_newer/conflict/failed의 key/source/asset/revision/at
+        "recent_notable_events": list(_mirror_notable_events),  # 최근 N (ring buffer snapshot)
+        "notable_by_key": {k: dict(v) for k, v in _mirror_notable_by_key.items()},  # key→{label:count}
     }
 
 
