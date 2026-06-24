@@ -1976,6 +1976,100 @@ async def fetch_rates_from_redis() -> Tuple[
     return rates, redis_dxy, meta
 
 
+# ── Slice 1a (mirror-retirement measure-first): latest mirror atomic outcome telemetry ──
+# _mirror_all_latest_atomic이 매 cycle 계산하는 atomic_outcomes(advance/refreshed_equal/skipped_newer/
+# conflict/migration_required/invalid_schema/structural_failed/general_failed = atomic_direct_write.
+# outcome_label 집합)는 normal-case DEBUG 로그로만 나가 prod invisible + 누적/조회 endpoint도 없음.
+# mirror write 의미를 3분리해 mirror-retirement go/no-go 신호로 surface (codex 019ef896):
+# advance(direct writer revision gap 보정=은퇴 위험) / refreshed_equal=freshness_refresh(mirrored_at
+# 재기록=read-path is_stale 방지, 은퇴 시 대체 필요) / skipped_newer=redundant(진짜 잉여).
+# read-only, behavior-change-0(mirror 동작 불변, counting만), 재시작 reset(started_at으로 해석).
+_mirror_outcome_counts: Dict[str, int] = {}
+_mirror_cycle_stats: Dict[str, int] = {
+    "atomic_cycles": 0,
+    "bank_loaded": 0,
+    "investing_loaded": 0,
+    "failed": 0,
+    "index_updated": 0,
+    "dxy_loaded": 0,
+    "dxy_failed": 0,
+}
+_mirror_outcome_started_at: str = datetime.now(_KST).isoformat()
+_mirror_outcome_last_cycle_at: Optional[str] = None
+
+
+def _record_mirror_outcome(stats: Dict[str, Any]) -> None:
+    """latest mirror atomic cycle stats 누적 (Slice 1a, measure-first, behavior-change-0).
+
+    atomic 분기(write_mode=="atomic")만 측정 — legacy/skipped_mode는 write_mode 키 없어 no-op.
+    outcomes 비어도(예: 빈 DB / selector outage) atomic_cycles는 카운트 = "atomic mirror cycle 수"
+    (codex non-blocker: outcomes 유무로 판별하면 빈 atomic cycle을 숨김). mirror 동작 불변, counting만.
+    read: get_mirror_outcome_counts(). pure dict 산술이라 no-throw지만 caller도 hot path 보호 try/except.
+    """
+    global _mirror_outcome_last_cycle_at
+    if stats.get("write_mode") != "atomic":
+        return  # legacy / skipped_mode — atomic outcome 측정 대상 아님 (write_mode 키 부재)
+    outcomes = stats.get("atomic_outcomes") or {}
+    for label, n in outcomes.items():
+        _mirror_outcome_counts[label] = _mirror_outcome_counts.get(label, 0) + n
+    _mirror_cycle_stats["atomic_cycles"] += 1
+    _mirror_cycle_stats["bank_loaded"] += stats.get("bank", 0)
+    _mirror_cycle_stats["investing_loaded"] += stats.get("investing", 0)
+    _mirror_cycle_stats["failed"] += stats.get("failed", 0)
+    _mirror_cycle_stats["index_updated"] += 1 if stats.get("index_updated") else 0
+    _mirror_cycle_stats["dxy_loaded"] += stats.get("dxy_loaded", 0)
+    _mirror_cycle_stats["dxy_failed"] += stats.get("dxy_failed", 0)
+    _mirror_outcome_last_cycle_at = datetime.now(_KST).isoformat()
+
+
+def get_mirror_outcome_counts() -> Dict[str, Any]:
+    """Slice 1a read accessor (process-local 진단, /admin/api/latest-mirror-outcomes로 노출).
+
+    mirror-retirement go/no-go 신호 — 3 write 의미를 분리 (codex 019ef896: refreshed_equal을
+    redundant로 묶지 말 것):
+    - advance = mirror가 direct writer의 revision gap을 실제 보정(direct writer 지연) → **은퇴 위험 큼**.
+    - freshness_refresh = refreshed_equal(동일 revision, mirrored_at만 재기록). direct write는 rate
+      변경 시에만 발생(crud insert-if-changed)이라 변경 사이 구간 freshness를 mirror가 유지 — read-path
+      is_stale 방지의 load-bearing 작업. **은퇴 시 freshness 대체 메커니즘 선행 필요**(redundant 아님).
+    - redundant = skipped_newer만(concurrent direct writer가 이미 더 fresh) → **진짜 잉여**, cadence
+      축소 후보.
+    - stability_concern = conflict+structural_failed+migration_required+invalid_schema → 은퇴 전 atomic
+      write/mirror 안정성부터. general_failed = writer 미가용/pre-SET 직렬화/불확실 Redis 예외 등 =
+      corruption(G3) 아니나 **availability 신호**(지속 시 점검). never-raise(snapshot copy), reset route
+      없음. DXY/index는 atomic outcome 아니라 cycle_stats로 분리(codex 주의: DXY는 FX mirror와 별 범위).
+    """
+    outcomes = dict(_mirror_outcome_counts)  # snapshot (동시 변이 중 read 안전)
+    cyc = dict(_mirror_cycle_stats)
+    total = sum(outcomes.values())
+    advance = outcomes.get("advance", 0)
+    freshness_refresh = outcomes.get("refreshed_equal", 0)  # load-bearing (read-path freshness 유지)
+    redundant = outcomes.get("skipped_newer", 0)            # 진짜 잉여 (direct가 이미 fresh)
+    stability_concern = (
+        outcomes.get("conflict", 0)
+        + outcomes.get("structural_failed", 0)
+        + outcomes.get("migration_required", 0)
+        + outcomes.get("invalid_schema", 0)
+    )
+    return {
+        "started_at": _mirror_outcome_started_at,
+        "last_cycle_at": _mirror_outcome_last_cycle_at,
+        "atomic_cycles": cyc["atomic_cycles"],
+        "outcomes": outcomes,
+        "interpretation": {
+            "total_writes": total,
+            "advance": advance,
+            "freshness_refresh": freshness_refresh,
+            "redundant": redundant,
+            "stability_concern": stability_concern,
+            "general_failed": outcomes.get("general_failed", 0),
+            "advance_ratio": round(advance / total, 4) if total else None,
+            "freshness_refresh_ratio": round(freshness_refresh / total, 4) if total else None,
+            "redundant_ratio": round(redundant / total, 4) if total else None,
+        },
+        "cycle_stats": cyc,
+    }
+
+
 async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:
     """Scheduler IntervalTrigger 주기 호출 — DB latest를 Redis로 갱신.
 
@@ -1991,6 +2085,11 @@ async def mirror_latest_rates_once() -> Optional[Dict[str, Any]]:
     db = SessionLocal()
     try:
         stats = await _mirror_all_latest(db)
+        # Slice 1a: mirror outcome telemetry 누적 (behavior-change-0, telemetry가 mirror 깨지 않게 격리)
+        try:
+            _record_mirror_outcome(stats)
+        except Exception:
+            logger.debug("mirror outcome telemetry 기록 실패 (무시)", exc_info=True)
         if stats.get("skipped_mode"):
             # C6-5b-4 — write-mode quiesce(HALT 등) 의도된 skip → WARNING 아님
             logger.debug("⏸️ Redis latest mirror skip (write-mode quiesce)", extra=stats)
@@ -2026,4 +2125,5 @@ __all__ = [
     "fetch_rates_from_redis",
     "warmup_latest_rates",
     "mirror_latest_rates_once",
+    "get_mirror_outcome_counts",
 ]

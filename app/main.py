@@ -1451,6 +1451,26 @@ async def get_atomic_write_outcomes():
         return {"status": "error", "outcomes": None, "read_error": "outcome_read_error"}
 
 
+@app.get("/admin/api/latest-mirror-outcomes", dependencies=[Depends(verify_admin)])
+async def get_latest_mirror_outcomes():
+    """Slice 1a (mirror-retirement measure-first) — latest mirror atomic compare_write outcome telemetry.
+
+    3초 mirror cycle의 atomic_outcomes(advance/refreshed_equal/skipped_newer/conflict/structural 등)를
+    process-local 누적으로 surface(read-only, behavior-change-0). interpretation은 3 의미 분리:
+    advance=direct writer revision gap 보정(은퇴 위험) / freshness_refresh=refreshed_equal(mirrored_at
+    재기록=read-path freshness 유지, 은퇴 시 대체 필요) / redundant=skipped_newer만(진짜 잉여) +
+    stability_concern. = mirror-retirement go/no-go 신호. process-local
+    (재시작 reset, started_at 해석), reset route 없음, never-crash. atomic writer-side counter
+    (/admin/api/atomic-write-outcomes)와 별개 — 이건 mirror-side.
+    """
+    try:
+        from app import latest_rates_cache
+        return {"status": "success", "mirror_outcomes": latest_rates_cache.get_mirror_outcome_counts()}
+    except Exception:
+        logger.error("latest-mirror-outcomes 조회 실패", exc_info=True)
+        return {"status": "error", "mirror_outcomes": None, "read_error": "mirror_outcome_read_error"}
+
+
 @app.get("/admin/api/fx-shadow-counts", dependencies=[Depends(verify_admin)])
 async def get_fx_shadow_counts():
     """fanout step 4 S5/S6 — FX alert shadow telemetry (read-only, process-local, behavior-change-0).
