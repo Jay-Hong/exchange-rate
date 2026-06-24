@@ -90,5 +90,62 @@ class TestEmitDxyDirectLatest(unittest.TestCase):
             dxy_spot._emit_dxy_direct_latest(MagicMock())
 
 
+class TestS2bSilentStaleHeartbeat(unittest.TestCase):
+    """S2b: DXY silent-stale(값 무변경) 경로도 _emit_dxy_direct_latest 호출 = same-rate heartbeat.
+
+    crawl_and_save_dxy_spot의 stale 분기(source_ts_ms 동일)는 insert 안 하고 return하던 유일한
+    fresh-page 경로 → S2b가 거기 _emit 추가로 mirrored_at 재stamp(read-path is_stale 방지).
+    """
+
+    def setUp(self):
+        self._orig_last = dxy_spot._last_source_ts_ms
+
+    def tearDown(self):
+        dxy_spot._last_source_ts_ms = self._orig_last
+
+    def _run_stale(self, mode, fresh_age=0.0):
+        mock_db = MagicMock()
+        with patch("app.database.SessionLocal", return_value=mock_db), \
+             patch.object(dxy_spot, "_fetch_spot_page", return_value=MagicMock()), \
+             patch.object(dxy_spot, "_extract_next_data_price", return_value=(104.5, 999)), \
+             patch.object(dxy_spot, "_mark_investing_fetch_ok"), \
+             patch.object(dxy_spot, "_fresh_age_seconds", return_value=fresh_age), \
+             patch.object(dxy_spot, "get_market_mode", return_value=mode), \
+             patch("app.crud.insert_dxy_rate_into_db") as mock_insert, \
+             patch.object(dxy_spot, "_emit_dxy_direct_latest") as mock_emit:
+            dxy_spot._last_source_ts_ms = 999  # == source_ts_ms → stale 분기
+            dxy_spot.crawl_and_save_dxy_spot()
+        return mock_emit, mock_db, mock_insert
+
+    def test_out_mode_silent_stale_calls_emit(self):
+        # OUT(주말): grace/yahoo 분기 skip → silent-stale return 경로 → _emit (heartbeat 효과 최대 구간)
+        mock_emit, mock_db, mock_insert = self._run_stale("OUT")
+        mock_emit.assert_called_once_with(mock_db)
+        mock_insert.assert_not_called()  # silent-stale = "insert 없는 heartbeat" 계약 (codex)
+
+    def test_in_mode_grace_not_exceeded_calls_emit(self):
+        # IN + fresh_age < grace → yahoo fallback 미진입 → silent-stale 경로 → _emit
+        mock_emit, mock_db, mock_insert = self._run_stale("IN", fresh_age=0.0)
+        mock_emit.assert_called_once_with(mock_db)
+        mock_insert.assert_not_called()
+
+    def test_in_mode_grace_exceeded_yahoo_path_no_silent_emit(self):
+        # no-double-SET (codex): IN + fresh_age >= grace → _try_yahoo_fallback 후 즉시 return →
+        # silent-stale _emit 미도달 (yahoo 경로는 외부 chain이 자체 _emit, 중복 방지).
+        mock_db = MagicMock()
+        with patch("app.database.SessionLocal", return_value=mock_db), \
+             patch.object(dxy_spot, "_fetch_spot_page", return_value=MagicMock()), \
+             patch.object(dxy_spot, "_extract_next_data_price", return_value=(104.5, 999)), \
+             patch.object(dxy_spot, "_mark_investing_fetch_ok"), \
+             patch.object(dxy_spot, "_fresh_age_seconds", return_value=10**9), \
+             patch.object(dxy_spot, "get_market_mode", return_value="IN"), \
+             patch.object(dxy_spot, "_try_yahoo_fallback") as mock_yahoo, \
+             patch.object(dxy_spot, "_emit_dxy_direct_latest") as mock_emit:
+            dxy_spot._last_source_ts_ms = 999
+            dxy_spot.crawl_and_save_dxy_spot()
+        mock_yahoo.assert_called_once()        # grace 초과 → yahoo 경로 진입
+        mock_emit.assert_not_called()          # silent-stale _emit 미도달 (상호배타)
+
+
 if __name__ == "__main__":
     unittest.main()

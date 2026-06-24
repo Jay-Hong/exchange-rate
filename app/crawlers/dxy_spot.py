@@ -551,6 +551,11 @@ def crawl_and_save_dxy_spot() -> None:
                             _try_yahoo_fallback(db, now_utc)
                             return
 
+                    # S2b: silent-stale(값 무변경) heartbeat — get_latest_dxy_rate 재read로 mirrored_at만
+                    # 갱신해 read-path is_stale(6s) 방지. grace-미초과 + OUT 모드 stale 모두 도달(yahoo
+                    # 분기는 :552 return이라 상호배타=중복 SET 없음). flag off면 no-op. 주말(OUT)에 DXY가
+                    # 가장 오래 정체 → heartbeat 효과 최대.
+                    _emit_dxy_direct_latest(db)
                     logger.debug(
                         "📼 DXY spot source timestamp 유지",
                         extra={"source_ts_ms": source_ts_ms, "source": "investing"},
