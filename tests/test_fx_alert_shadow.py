@@ -424,22 +424,137 @@ class TestFxCanaryEvaluatorAndHook(unittest.TestCase):
         import app.crud as crud_mod
         with patch("app.config.FX_ALERT_CUTOVER_CANARY_ENABLED", False), \
              patch("app.topic_trigger_bridge.schedule_on_loop") as mock_sched:
-            crud_mod._emit_fx_alert_canary([_changed_rate()])
+            result = crud_mod._emit_fx_alert_canary([_changed_rate()])
         mock_sched.assert_not_called()
+        self.assertFalse(result)  # B1: flag off → canary_handled False → legacy fallback
 
     def test_emit_canary_flag_on_schedules_run_canary(self):
         import app.crud as crud_mod
         with patch("app.config.FX_ALERT_CUTOVER_CANARY_ENABLED", True), \
-             patch("app.topic_trigger_bridge.schedule_on_loop") as mock_sched:
-            crud_mod._emit_fx_alert_canary([_changed_rate()])
+             patch("app.topic_trigger_bridge.schedule_on_loop", return_value=True) as mock_sched:
+            result = crud_mod._emit_fx_alert_canary([_changed_rate()])
         mock_sched.assert_called_once()
         cb, observations = mock_sched.call_args.args
         self.assertIs(cb, crud_mod._run_fx_alert_canary)  # sync wrapper
         self.assertEqual(observations[0].kind, "fx_canary")
+        self.assertTrue(result)  # B1: enqueue 성공 → canary_handled True → legacy allowlist skip
+
+    def test_emit_canary_enqueue_fail_returns_false(self):
+        # B1: schedule_on_loop False(no loop/shutdown/race) → _emit False → legacy fallback(no miss)
+        import app.crud as crud_mod
+        with patch("app.config.FX_ALERT_CUTOVER_CANARY_ENABLED", True), \
+             patch("app.topic_trigger_bridge.schedule_on_loop", return_value=False) as mock_sched:
+            result = crud_mod._emit_fx_alert_canary([_changed_rate()])
+        mock_sched.assert_called_once()
+        self.assertFalse(result)
+
+    def test_emit_canary_empty_changes_returns_false(self):
+        # B1: flag on이어도 changes 비면 enqueue X → False
+        import app.crud as crud_mod
+        with patch("app.config.FX_ALERT_CUTOVER_CANARY_ENABLED", True), \
+             patch("app.topic_trigger_bridge.schedule_on_loop") as mock_sched:
+            result = crud_mod._emit_fx_alert_canary([])
+        mock_sched.assert_not_called()
+        self.assertFalse(result)
 
     def test_close_canary_noop_when_not_created(self):
         _reset_fx_canary_state()
         asyncio.run(close_fx_canary_evaluator())  # singleton None → 예외 없이 no-op
+
+
+class TestB1LegacyCanaryGate(unittest.TestCase):
+    """§6.1 B1: process_rate_alerts canary_handled gate — enqueue 성공(True)일 때만 allowlist
+    setting을 legacy가 skip(canary가 real 발사), 실패/flag-off(False)면 legacy fallback(no miss).
+    baseline(_fx_legacy_match_counts)도 대칭으로 제외/포함."""
+
+    def tearDown(self):
+        import app.crud as crud
+        crud._fx_legacy_match_counts.clear()
+
+    def _fake_triggered(self, setting_id=999):
+        setting = MagicMock()
+        setting.id = setting_id
+        setting.condition = "above"
+        setting.threshold = 1530.0
+        device = MagicMock()
+        device.device_token = "tok-1"
+        return [{"setting": setting, "devices": [device], "user_id": "user-1234abcd"}]
+
+    def _run(self, canary_handled, allowlist, shadow_enabled=False, setting_id=999):
+        import app.crud as crud_mod
+        crud_mod._fx_legacy_match_counts.clear()
+        with patch("app.notifications.fcm.init_firebase", return_value=True), \
+             patch("app.notifications.fcm.send_fcm_multicast_sync",
+                   return_value={"success_count": 1, "failed_tokens": []}) as mock_fcm, \
+             patch.object(crud_mod, "get_triggered_settings_for_rate",
+                          return_value=self._fake_triggered(setting_id)), \
+             patch.object(crud_mod, "mark_setting_triggered") as mock_mark, \
+             patch.object(crud_mod, "create_notification_log") as mock_log, \
+             patch("app.config.FX_ALERT_CUTOVER_CANARY_SETTING_IDS", frozenset(allowlist)), \
+             patch("app.config.FX_ALERT_SHADOW_ENABLED", shadow_enabled):
+            db = MagicMock()
+            sent = crud_mod.process_rate_alerts(
+                db, [{"bank": "kb", "currency": "usd-krw", "rate": 1541.0}],
+                canary_handled=canary_handled,
+            )
+        return sent, mock_fcm, mock_mark
+
+    def test_enqueue_success_skips_allowlist_setting(self):
+        # canary_handled=True + setting in allowlist → legacy skip (FCM/persist 0)
+        sent, mock_fcm, mock_mark = self._run(canary_handled=True, allowlist={999})
+        self.assertEqual(sent, 0)
+        mock_fcm.assert_not_called()
+        mock_mark.assert_not_called()
+
+    def test_enqueue_fail_legacy_fires(self):
+        # canary_handled=False → legacy fallback (no miss): FCM + persist 발생
+        sent, mock_fcm, mock_mark = self._run(canary_handled=False, allowlist={999})
+        self.assertEqual(sent, 1)
+        mock_fcm.assert_called_once()
+        mock_mark.assert_called_once()
+
+    def test_non_allowlist_setting_always_fires(self):
+        # canary_handled=True여도 setting이 allowlist 밖이면 legacy 그대로 발사 (partition)
+        sent, mock_fcm, mock_mark = self._run(canary_handled=True, allowlist={111})
+        self.assertEqual(sent, 1)
+        mock_fcm.assert_called_once()
+
+    def test_baseline_excludes_allowlist_only_on_enqueue_success(self):
+        import app.crud as crud_mod
+        # enqueue 성공 + shadow on → baseline = legacy 실제 발사분 = 0 (allowlist 제외)
+        self._run(canary_handled=True, allowlist={999}, shadow_enabled=True)
+        self.assertEqual(
+            crud_mod.get_fx_legacy_match_counts().get(("kb", "usd-krw"), 0), 0
+        )
+
+    def test_baseline_includes_when_enqueue_fail(self):
+        import app.crud as crud_mod
+        # enqueue 실패 + shadow on → legacy가 실제 발사 → baseline 포함
+        self._run(canary_handled=False, allowlist={999}, shadow_enabled=True)
+        self.assertEqual(
+            crud_mod.get_fx_legacy_match_counts().get(("kb", "usd-krw"), 0), 1
+        )
+
+
+class TestB1FourSiteWiring(unittest.TestCase):
+    """§6.1 B1: 4 호출부(bank atomic/legacy, investing atomic/legacy) reorder trip-wire.
+
+    canary enqueue를 try/except로 먼저 캡처(예외→canary_handled=False 유지) 후 process_rate_alerts에
+    canary_handled를 전달하는 구조를 소스 레벨로 잠금. 호출부는 DB/Redis/atomic 경로라 behavior 통합
+    테스트는 비용↑ → 리팩토링이 순서/예외 fallback/전달을 깨면 잡는 구조 회귀 가드(codex non-blocker)."""
+
+    def test_four_site_canary_capture_before_legacy(self):
+        import inspect
+        import app.crud as crud_mod
+        src = inspect.getsource(crud_mod)
+        # 4곳 모두: canary_handled=False 초기화(예외 fallback) + _emit 캡처 + process_rate_alerts 전달
+        self.assertEqual(src.count("canary_handled = False"), 4)
+        self.assertEqual(src.count("canary_handled = _emit_fx_alert_canary(changes)"), 4)
+        self.assertEqual(
+            src.count("process_rate_alerts(db, changed_rates, canary_handled=canary_handled)"), 4
+        )
+        # 구 패턴(shadow 뒤 별도 canary 블록) 완전 제거 — reorder로 이동
+        self.assertNotIn("§6.1 canary: FX alert cutover canary", src)
 
 
 if __name__ == "__main__":

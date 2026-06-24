@@ -413,19 +413,22 @@ def _run_fx_alert_canary(observations: list) -> None:
         ev.schedule(obs)
 
 
-def _emit_fx_alert_canary(changes: "List[ChangedRate]") -> None:
+def _emit_fx_alert_canary(changes: "List[ChangedRate]") -> bool:
     """FX alert cutover canary 발화 — **real persist+FCM**, FX_ALERT_CUTOVER_CANARY_ENABLED gated, worker thread.
 
-    [§6.1 canary plan] flag off면 즉시 return(zero overhead). on이면 changes→AlertObservation 변환 후
-    bridge로 main loop 마샬링 → canary evaluator(FxCanaryBackend, allowlist setting만 real 발사).
-    legacy는 allowlist setting을 skip(process_rate_alerts)해 중복 없음. ⚠️ best-effort: schedule_on_loop
-    실패 시 legacy skip된 setting이 miss(B1) — canary phase 수용, 확대 전 enqueue-confirmed-skip 필요.
+    [§6.1 canary plan + B1] changes→AlertObservation 변환 후 bridge로 main loop 마샬링 → canary evaluator
+    (FxCanaryBackend, allowlist setting만 real 발사). **B1 enqueue-confirmed-skip**: 반환값으로 caller가
+    legacy skip 결정 — True(enqueue 성공)면 legacy가 allowlist skip, False(flag off/no changes/enqueue 실패)면
+    legacy fallback(no miss). ⚠️ True = bridge `schedule_on_loop`(call_soon_threadsafe) 성공일 뿐 **canary
+    FCM 성공 보장 아님**(callback内 예외는 bridge가 삼킴) — 잔여 async eval/FCM 실패 miss는 B1 범위 밖.
+
+    Returns: enqueue 성공 시 True (→ legacy allowlist skip), 아니면 False (→ legacy fallback).
     """
     from app import config as app_config
     if not app_config.FX_ALERT_CUTOVER_CANARY_ENABLED:
-        return
+        return False
     if not changes:
-        return
+        return False
     from app.notifications.alert_evaluator import AlertObservation
     observations = [
         AlertObservation(
@@ -438,7 +441,7 @@ def _emit_fx_alert_canary(changes: "List[ChangedRate]") -> None:
         for c in changes
     ]
     from app import topic_trigger_bridge
-    topic_trigger_bridge.schedule_on_loop(_run_fx_alert_canary, observations)
+    return topic_trigger_bridge.schedule_on_loop(_run_fx_alert_canary, observations)
 
 
 # P1b A2-2: write-mode skip 관측 (process-local **approximate** counter, debug용). enforced가
@@ -609,24 +612,25 @@ def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) 
 
         # alert는 DB-authoritative — Redis outcome 무관, 전 committed change 발화 (axis #3, legacy 동일)
         if changed_rates:
+            # §6.1 B1: canary enqueue 먼저 — 성공(canary_handled) 시에만 legacy가 allowlist skip
+            # (enqueue 실패/예외/flag off → False → legacy fallback, no miss).
+            canary_handled = False
             try:
-                sent_count = process_rate_alerts(db, changed_rates)
+                canary_handled = _emit_fx_alert_canary(changes)
+            except Exception:
+                logger.exception("FX alert canary 실패 (격리)", extra={"bank": bank_name})
+            try:
+                sent_count = process_rate_alerts(db, changed_rates, canary_handled=canary_handled)
                 if sent_count > 0:
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": bank_name, "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": bank_name, "error": str(e)})
 
-        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리). canary는 위 B1 reorder로 이동.
         try:
             _emit_fx_alert_shadow(changes)
         except Exception:
             logger.exception("FX alert shadow 실패 (격리)", extra={"bank": bank_name})
-
-        # §6.1 canary: FX alert cutover canary (real persist+FCM, allowlist-gated, 격리)
-        try:
-            _emit_fx_alert_canary(changes)
-        except Exception:
-            logger.exception("FX alert canary 실패 (격리)", extra={"bank": bank_name})
 
         # topic trigger — APPLIED subset만 (axis #2 SET-only gating)
         try:
@@ -692,24 +696,25 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
         # 알림 조건 체크 및 FCM 발송 (실패해도 환율 저장에 영향 없음)
         # alert는 DB-authoritative — Redis SET 성공 여부 무관, 전 change 발화 (axis #3).
         if changed_rates:
+            # §6.1 B1: canary enqueue 먼저 — 성공(canary_handled) 시에만 legacy가 allowlist skip
+            # (enqueue 실패/예외/flag off → False → legacy fallback, no miss).
+            canary_handled = False
             try:
-                sent_count = process_rate_alerts(db, changed_rates)
+                canary_handled = _emit_fx_alert_canary(changes)
+            except Exception:
+                logger.exception("FX alert canary 실패 (격리)", extra={"bank": bank_name})
+            try:
+                sent_count = process_rate_alerts(db, changed_rates, canary_handled=canary_handled)
                 if sent_count > 0:
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": bank_name, "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": bank_name, "error": str(e)})
 
-        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리). canary는 위 B1 reorder로 이동.
         try:
             _emit_fx_alert_shadow(changes)
         except Exception:
             logger.exception("FX alert shadow 실패 (격리)", extra={"bank": bank_name})
-
-        # §6.1 canary: FX alert cutover canary (real persist+FCM, allowlist-gated, 격리)
-        try:
-            _emit_fx_alert_canary(changes)
-        except Exception:
-            logger.exception("FX alert canary 실패 (격리)", extra={"bank": bank_name})
 
         # (PR C §6.6.2) topic trigger emission — SET 성공분만, mode-gated, bridge 경유.
         # 직렬 블록 끝 + try/except 격리 (emission 실패가 저장/alert에 영향 X).
@@ -828,24 +833,25 @@ def _insert_investing_rates_atomic(db: Session, current_rates: dict) -> int:
 
         # alert는 DB-authoritative — Redis outcome 무관, 전 committed change 발화 (axis #3, legacy 동일)
         if changed_rates:
+            # §6.1 B1: canary enqueue 먼저 — 성공(canary_handled) 시에만 legacy가 allowlist skip
+            # (enqueue 실패/예외/flag off → False → legacy fallback, no miss).
+            canary_handled = False
             try:
-                sent_count = process_rate_alerts(db, changed_rates)
+                canary_handled = _emit_fx_alert_canary(changes)
+            except Exception:
+                logger.exception("FX alert canary 실패 (격리)", extra={"bank": "investing"})
+            try:
+                sent_count = process_rate_alerts(db, changed_rates, canary_handled=canary_handled)
                 if sent_count > 0:
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": "investing", "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": "investing", "error": str(e)})
 
-        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리). canary는 위 B1 reorder로 이동.
         try:
             _emit_fx_alert_shadow(changes)
         except Exception:
             logger.exception("FX alert shadow 실패 (격리)", extra={"bank": "investing"})
-
-        # §6.1 canary: FX alert cutover canary (real persist+FCM, allowlist-gated, 격리)
-        try:
-            _emit_fx_alert_canary(changes)
-        except Exception:
-            logger.exception("FX alert canary 실패 (격리)", extra={"bank": "investing"})
 
         # topic trigger — APPLIED subset만 (axis #2 SET-only gating)
         try:
@@ -906,24 +912,25 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
         # 알림 조건 체크 및 FCM 발송 (실패해도 환율 저장에 영향 없음)
         # alert는 DB-authoritative — Redis SET 성공 여부 무관, 전 change 발화 (axis #3).
         if changed_rates:
+            # §6.1 B1: canary enqueue 먼저 — 성공(canary_handled) 시에만 legacy가 allowlist skip
+            # (enqueue 실패/예외/flag off → False → legacy fallback, no miss).
+            canary_handled = False
             try:
-                sent_count = process_rate_alerts(db, changed_rates)
+                canary_handled = _emit_fx_alert_canary(changes)
+            except Exception:
+                logger.exception("FX alert canary 실패 (격리)", extra={"bank": "investing"})
+            try:
+                sent_count = process_rate_alerts(db, changed_rates, canary_handled=canary_handled)
                 if sent_count > 0:
                     logger.info(f"🔔 {sent_count}건 알림 발송 완료", extra={"bank": "investing", "sent": sent_count})
             except Exception as e:
                 logger.exception("알림 처리 중 예외 발생", extra={"bank": "investing", "error": str(e)})
 
-        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리)
+        # fanout step 4 S4: FX alert shadow (telemetry-only, flag-gated, 격리). canary는 위 B1 reorder로 이동.
         try:
             _emit_fx_alert_shadow(changes)
         except Exception:
             logger.exception("FX alert shadow 실패 (격리)", extra={"bank": "investing"})
-
-        # §6.1 canary: FX alert cutover canary (real persist+FCM, allowlist-gated, 격리)
-        try:
-            _emit_fx_alert_canary(changes)
-        except Exception:
-            logger.exception("FX alert canary 실패 (격리)", extra={"bank": "investing"})
 
         # (PR C §6.6.2) topic trigger emission — SET 성공분만, mode-gated, bridge 경유.
         try:
@@ -2314,7 +2321,8 @@ def get_fx_legacy_match_counts() -> Dict[Tuple[str, str], int]:
 
 def process_rate_alerts(
     db: Session,
-    changed_rates: List[Dict[str, Any]]
+    changed_rates: List[Dict[str, Any]],
+    canary_handled: bool = False,
 ) -> int:
     """
     변경된 환율에 대해 알림 조건 체크 및 FCM 발송
@@ -2359,12 +2367,12 @@ def process_rate_alerts(
 
             # S6b: legacy pre-mutation match baseline = parity 기준선 (mark_triggered 전 = legacy가
             # 실제 발사할 대상). telemetry-only, shadow 활성 창에만 기록(관찰 창 정렬).
-            # ⚠️ canary on이면 allowlist setting은 legacy가 skip(아래) → baseline에서도 제외해
-            # "legacy 실제 발사분"만 카운트 (shadow+canary 동시 on 시 mismatch 방지, codex 019ef7fd).
+            # ⚠️ B1: canary enqueue 성공(canary_handled) 시에만 allowlist setting을 legacy가 skip(아래) →
+            # baseline에서도 그때만 제외해 "legacy 실제 발사분"만 카운트 (enqueue 실패=legacy fallback=포함).
             if app_config.FX_ALERT_SHADOW_ENABLED:
                 legacy_fired = [
                     it for it in triggered_items
-                    if not (app_config.FX_ALERT_CUTOVER_CANARY_ENABLED
+                    if not (canary_handled
                             and it["setting"].id in app_config.FX_ALERT_CUTOVER_CANARY_SETTING_IDS)
                 ]
                 _record_fx_legacy_match(bank, currency, len(legacy_fired))
@@ -2372,9 +2380,10 @@ def process_rate_alerts(
             for item in triggered_items:
                 setting = item["setting"]
 
-                # §6.1 canary: allowlist setting은 canary가 real 발사(_emit_fx_alert_canary) →
-                # legacy는 skip(중복 방지, partition). flag off거나 비-allowlist면 legacy 그대로.
-                if (app_config.FX_ALERT_CUTOVER_CANARY_ENABLED
+                # §6.1 canary + B1: canary enqueue 성공(canary_handled)한 allowlist setting만 legacy skip
+                # (canary가 real 발사). enqueue 실패/예외/flag off(canary_handled=False)면 legacy fallback
+                # (no miss). 비-allowlist는 legacy 그대로.
+                if (canary_handled
                         and setting.id in app_config.FX_ALERT_CUTOVER_CANARY_SETTING_IDS):
                     continue
 
