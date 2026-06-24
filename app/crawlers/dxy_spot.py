@@ -89,6 +89,33 @@ _last_investing_fetch_ok_at: Optional[datetime] = None       # 마지막 Investi
 logger = logging.getLogger("exchange_rate.crawler.dxy_spot")
 
 
+def _emit_dxy_direct_latest(db) -> None:
+    """mirror-retirement S1: DXY 저장 직후 latest:dxy:current direct write (flag-gated, 격리).
+
+    config.DXY_DIRECT_LATEST_ENABLED off면 no-op(배포 시점 behavior-change-0; DB read도 안 함). on이면
+    mirror cycle과 **동일하게** get_latest_dxy_rate(db) → set_latest_dxy_rate_from_sync_job로 써서
+    mirror와 **client-visible 동일** value(rate/timestamp/source; mirrored_at은 호출시각이라 다름).
+    공존은 bounded race(≤1 cycle ~3s self-heal, DXY 10s 해상도라 무시가능). insert 반환값 미확인 =
+    same-rate여도 현재 latest 재SET(의도된 mini-heartbeat; codex B5 — insert bool gate 금지).
+    best-effort: 실패해도 mirror cycle이 안전망(read path 보호).
+    instrument='dxy' 현물만 — dxy_spot은 insert_dxy_rate_into_db(=instrument='dxy' 하드코딩)만
+    호출하므로 futures는 구조적으로 제외.
+    """
+    from app import config
+    if not config.DXY_DIRECT_LATEST_ENABLED:
+        return
+    try:
+        from app import crud
+        from app.latest_rates_cache import set_latest_dxy_rate_from_sync_job
+        record = crud.get_latest_dxy_rate(db)
+        if record:
+            set_latest_dxy_rate_from_sync_job(
+                record["rate"], record["timestamp"], record["source"]
+            )
+    except Exception:
+        logger.warning("DXY direct latest emit 실패 (격리, mirror cycle 안전망)", exc_info=True)
+
+
 # --- Investing 성공/실패 마커 ---
 
 def _mark_investing_fetch_ok() -> None:
@@ -364,6 +391,7 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
 
         # 저장 성공 → chain 종료 (Yahoo까지 안 감)
         crud.insert_dxy_rate_into_db(db=db, rate=rate, source=source_name)
+        _emit_dxy_direct_latest(db)  # S1: external chain 저장 직후 direct latest write (flag-gated)
         logger.info(
             f"📦 DXY {source_name} 폴백 저장 "
             f"(rate={rate}, mode={meta.get('mode')}, "
@@ -533,6 +561,7 @@ def crawl_and_save_dxy_spot() -> None:
                 _mark_investing_fresh_success(now_utc)
                 _last_source_ts_ms = source_ts_ms
                 crud.insert_dxy_rate_into_db(db=db, rate=rate, source="investing")
+                _emit_dxy_direct_latest(db)  # S1: primary fresh 저장 직후 direct latest write (flag-gated)
                 logger.info(
                     "📦 DXY spot primary 저장",
                     extra={"rate": rate, "source": "investing", "source_ts_ms": source_ts_ms},
@@ -547,6 +576,7 @@ def crawl_and_save_dxy_spot() -> None:
             # CSS 경로에서는 source_ts_ms를 모르므로 리셋 (다음 primary 복구 시 정상 동작)
             _last_source_ts_ms = 0
             crud.insert_dxy_rate_into_db(db=db, rate=rate, source="investing")
+            _emit_dxy_direct_latest(db)  # S1: CSS fallback 저장 직후 direct latest write (flag-gated)
             logger.info("📦 DXY spot CSS 폴백 저장", extra={"rate": rate, "source": "investing"})
             return
         except Exception:

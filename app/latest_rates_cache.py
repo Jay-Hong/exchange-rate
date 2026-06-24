@@ -649,6 +649,46 @@ def set_latest_krx_rate_from_sync_job(
         return False
 
 
+def set_latest_dxy_rate_from_sync_job(rate: float, timestamp: str, source: str) -> bool:
+    """sync scheduler thread 전용 DXY 현물 direct latest writer (mirror-retirement S1).
+
+    dxy_spot 크롤러가 DXY 저장 직후 호출 (gate는 호출부 — config.DXY_DIRECT_LATEST_ENABLED).
+    mirror cycle의 DXY write(get_latest_dxy_rate → serialize_dxy_value → _set_latest)와 **동일
+    포맷·동일 source**(client-visible rate/timestamp/source 동일; mirrored_at만 호출시각이라 다름).
+    공존은 **bounded race**(codex 019ef998): mirror가 stale read 후 늦게 SET하면 ≤1 cycle(~3s)
+    옛 rate로 revert 가능하나 다음 cycle/direct write에서 self-heal, DXY는 10s 해상도 보조지표라
+    무시가능 + mirror 은퇴 시 소멸. DXY는 v1이라 bank atomic의 revision-compare 보호는 없음.
+
+    DXY는 latest:index 분리 카테고리 + atomic keyspace 밖(atomic loader/mirror가 DXY key를 안
+    다룸)이라 **write-mode 무관(v1 SET)** — bank atomic writer와 달리 compare_write/revision 불요.
+    KRX bool writer 패턴(telemetry 미부착, best-effort): client 미가용/예외 시 False,
+    실패해도 mirror cycle이 안전망.
+
+    Args:
+        rate: DXY 값.
+        timestamp: ISO 8601 KST 문자열 (get_latest_dxy_rate 반환 그대로).
+        source: 'investing' | 'cnbc' | 'yahoo' (serialize_dxy_value 필수 필드).
+
+    Returns:
+        True: Redis SET 성공. False: client 미가용 / serialize·SET 예외.
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    try:
+        mirrored_at = datetime.now(_KST)
+        value = serialize_dxy_value(rate, timestamp, source, mirrored_at)
+        client.set(LATEST_DXY_KEY, value)
+        return True
+    except Exception:
+        logger.warning(
+            "DXY sync Redis SET 실패 (best-effort, mirror cycle 안전망)",
+            exc_info=True,
+            extra={"key": LATEST_DXY_KEY},
+        )
+        return False
+
+
 # KRX Stage E — tick-level helper (KRX_REDIS_TICK_WRITE_ENABLED=true 시 사용).
 # USDT 5b-bis schema mirror — 5 fields + in-memory state.
 # 단일 source/asset이라 dict 불필요, 단일 dict[Optional] state 보관.

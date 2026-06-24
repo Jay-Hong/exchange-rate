@@ -44,6 +44,13 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
 
+# mirror-retirement Slice 1: DXY direct latest writer 토글 (default OFF = dormant).
+# true 시 dxy_spot 수집 성공 직후 latest:dxy:current를 직접 SET(mirror cycle의 DXY 갱신을
+# 크롤러 측으로 이관하는 1단계). mirror와 공존(동일 v1 serialize_dxy_value, last-write-wins).
+# 배포는 flag off라 behavior-change-0, 이후 env=true로 canary 활성화. mirror 제거는 후속
+# 슬라이스(replace-before-remove) — 본 flag는 direct write 추가만.
+DXY_DIRECT_LATEST_ENABLED = os.getenv("DXY_DIRECT_LATEST_ENABLED", "false").lower() == "true"
+
 # ATOMIC_MODE_POLL_INTERVAL_SECONDS: P1b A2-2 write-mode cache poll 주기 (초).
 # scheduler가 N초마다 atomic_write_control row를 읽어 atomic_write_runtime cache를 갱신
 # (외부/admin/C6의 control 변경을 따라잡는 backstop). 0 이하면 IntervalTrigger 미정의.
