@@ -108,6 +108,24 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **❌ S7 검토→폐기 (2026-06-24, tautological)**: inline dual-compute(legacy pre-mutation 지점서 새 condition 동기 비교) 검토했으나 — legacy condition(`crud:2113-2116`)과 `condition_matches_observation`(`alert_evaluator:165-168`)이 **byte-identical**(>=/<=, 동일 4-필터, rate/threshold 동일 출처)이라 **항상 일치 = tautological**(적대적 refute Workflow 3 lens + codex 확정). regression guard 가치뿐(단위 테스트가 더 싸게 커버). 진짜 cutover 위험(real persist / FCM / failed-token cleanup / cache invalidation / 중복발사 방지)은 inline으로 검증 불가(pre-mutation 동기가 그 위험을 정의상 제거). → **fanout parity-measurement 트랙 종료** (매칭이 공유라 측정할 divergence 없음).
 - **🔜 cutover (open decision 7, 별도 plan-first 세션)**: legacy `process_rate_alerts` → 새 evaluator authoritative 전환. **위험 = orchestration**(real persist/FCM/cleanup/cache invalidation/중복발사). 검증 근거 = **(a) USDT/KRX 운영 실증된 공유 `UsdtAlertEvaluator` orchestration**(FX shadow가 재사용 = source-agnostic) + **(b) FxNotificationBackend 단위 테스트** + **(c) single-setting canary**(실 FX 설정 1개로 새 path authoritative + legacy 중복 방지 + FCM 수신 + notification_logs + triggered/enabled + cache invalidation 실측, KRX F-3 패턴). high-stakes user-facing이라 fresh focus 별도 세션.
 
+**cutover canary plan-first — 설계 잠금 (2026-06-24, codex 019ef7ec review 반영, 구현 X)**:
+
+- **접근**: setting_id allowlist 기반 **single-setting canary**부터. shadow(S3-S6) bridge/evaluator 인프라 **재사용**(backend만 FxCanaryBackend로 교체) → S3-S6은 헛수고 아닌 cutover 토대.
+- **불변식(partition)**: allowlist setting = canary만 real 발사 / legacy skip. non-allowlist = legacy 그대로 / canary는 load 안 함. ⚠️ **단 canary는 async best-effort라 "no miss 견고" 아님**(B1).
+- **변경포인트**:
+  1. config: `FX_ALERT_CUTOVER_CANARY_ENABLED`(default false) + `FX_ALERT_CUTOVER_CANARY_SETTING_IDS`(콤마 int set, default 빈) — config:376 패턴.
+  2. `FxCanaryBackend(FxNotificationBackend)`: `load_settings`=부모(enabled+!triggered+bank/currency+device) **+ allowlist 필터** / `persist_result`=**legacy mirror**(success→`crud.mark_setting_triggered`+`crud.create_notification_log`, **failure→로그 X** [legacy FX엔 failure-log 분기 없음, `SourceAlertBackend.persist_result`:173 복붙 금지], failed-token cleanup) / `build_payload`·`refetch_snapshot`=부모 상속.
+  3. canary evaluator+hook: `get_fx_canary_evaluator()`(=`UsdtAlertEvaluator(backend=FxCanaryBackend(), cache=AlertSettingsCache(), sender=None→real FCM)`, **shadow와 별 singleton/cache**) + `_emit_fx_alert_canary(changes)`(flag gate→obs→schedule_on_loop). `ev._evaluate_async` 직접(real, once-policy=refetch+delivery_allowed).
+  4. legacy skip: `process_rate_alerts` for-loop(crud:2301) 최상단 `if CANARY_ENABLED and item["setting"].id ∈ allowlist: continue`.
+  5. crud 4-site wiring(`_emit_fx_alert_shadow` 옆, try/except 격리).
+- **🔴 codex blocker (반영 필수)**:
+  - **B1 enqueue-fail miss**: legacy skip 후 canary `schedule_on_loop` 실패 시 0회 발사(miss). canary phase=best-effort 수용(1 setting 본인 watch, 명시 문서화). **확대 전 필수**: enqueue-confirmed-skip(canary enqueue 성공 시만 legacy skip) or sync fallback.
+  - **B2 shutdown drain**: real FCM이라 canary task drain 필요(USDT `close()` 패턴, upbit:1037). main.py lifespan shutdown에 `get_fx_canary_evaluator().close()` 추가.
+- **cache invalidation**: FX CRUD엔 invalidate 호출 없음(source CRUD와 달리 — main:2867 류 부재). canary(1 setting)=TTL 10s edge 수용(once-policy는 refetch 보장). **확대 시 hook 필수.**
+- **검증**: flag off 배포(dormant, import/startup/health) → 본인 테스트 setting 1개 allowlist+flag on(force-recreate) → 실 crossing 1건: 푸시 1 / notification_logs 1 / enabled=False+triggered=True / **legacy 중복 0** / error·예외 0.
+- **확대+rollback**: canary 통과 → **enqueue-confirmed-skip(B1) 추가** → 내 계정 → FX 일부 bank/currency → legacy 완전 교체. rollback=flag off or allowlist 비우기 → 즉시 legacy 복귀.
+- **behavior-change-0**: flag off → `_emit_fx_alert_canary` early-return + legacy skip 미발동(allowlist 빈) → prod 동작 불변.
+
 **S1 착수 준비 (pre-impl checklist, 2026-06-23 read-only 확인)**:
 - **추출 대상 = 4 backend method + sender**(alert_evaluator.py): `_load_settings_from_db`(def 551 / call 546) → `load_settings` · `_refetch_setting_snapshot`(762 / call 653·710) → `refetch_snapshot` · `_persist_result`(794 / call 758) → **`persist_result` WHOLE**(split ❌ — mark/log/cleanup 각자 commit이라 commit-order 보존; cleanup도 backend 잔류) · `_build_fcm_payload`(865 / call 752) → `build_payload` · **`_send_fcm_multicast`(786 / call 754) → constructor 주입 `sender`(lazy wrapper)**.
 - **constructor**: `__init__`에 `backend=SourceAlertBackend()` + `sender=lazy FCM wrapper`(현 `_send_fcm_multicast` body, **module-import 시점 bind 금지**) default → 6 instantiation(USDT 5 + KRX) 불변. **`KrxAlertEvaluator`(910) `pass` 유지**.
