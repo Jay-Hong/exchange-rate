@@ -2,6 +2,7 @@
 
 # 표준 라이브러리
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -2222,6 +2223,31 @@ def create_notification_log(
 # 환율 변경 시 알림 처리 (크롤러에서 호출)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# fanout step 4 S6b: legacy FX alert pre-mutation match baseline = **parity 기준선**.
+# process_rate_alerts가 mark_setting_triggered(triggered=True + enabled=False)로 mutate하기 전
+# 매칭 수(legacy가 실제 발사할 대상)를 (bank,currency)별 누적. telemetry-only(process-local, 재시작 reset).
+# FX_ALERT_SHADOW_ENABLED 활성 시에만 기록(관찰 창 정렬). ⚠️ fx_alert_shadow matched_candidates는
+# post-legacy async라 신뢰 불가(보조 진단) — parity는 이 baseline이 기준. accessor=/admin/api/fx-shadow-counts.
+_fx_legacy_match_counts: Dict[Tuple[str, str], int] = {}
+# worker thread(process_rate_alerts in to_thread) write ↔ event-loop(endpoint) read 경계 →
+# lock 보호 (dict size 변경 중 dict() 복사 RuntimeError 방지, fx_alert_shadow 카운터와 동일 규율).
+_fx_legacy_match_lock = threading.Lock()
+
+
+def _record_fx_legacy_match(bank: str, currency: str, n: int) -> None:
+    if n <= 0:
+        return
+    key = (bank, currency)
+    with _fx_legacy_match_lock:
+        _fx_legacy_match_counts[key] = _fx_legacy_match_counts.get(key, 0) + n
+
+
+def get_fx_legacy_match_counts() -> Dict[Tuple[str, str], int]:
+    """S6b baseline snapshot (read accessor, process-local, lock-guarded)."""
+    with _fx_legacy_match_lock:
+        return dict(_fx_legacy_match_counts)
+
+
 def process_rate_alerts(
     db: Session,
     changed_rates: List[Dict[str, Any]]
@@ -2242,6 +2268,7 @@ def process_rate_alerts(
     """
     # 순환 참조 방지를 위해 함수 내부에서 import
     from app.notifications.fcm import send_fcm_multicast_sync, init_firebase
+    from app import config as app_config  # S6b baseline gate (FX_ALERT_SHADOW_ENABLED)
 
     if not changed_rates:
         return 0
@@ -2265,6 +2292,11 @@ def process_rate_alerts(
 
             if not triggered_items:
                 continue
+
+            # S6b: legacy pre-mutation match baseline = parity 기준선 (mark_triggered 전 = legacy가
+            # 실제 발사할 대상). telemetry-only, shadow 활성 창에만 기록(관찰 창 정렬).
+            if app_config.FX_ALERT_SHADOW_ENABLED:
+                _record_fx_legacy_match(bank, currency, len(triggered_items))
 
             for item in triggered_items:
                 setting = item["setting"]

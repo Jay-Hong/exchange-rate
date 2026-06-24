@@ -245,9 +245,10 @@ class FxNotificationBackend(AlertStorageBackend):
     - `persist_result`는 **shadow no-op** — FX shadow는 telemetry-only(mark_triggered/log/cleanup 0).
       legacy `crud.process_rate_alerts`가 authoritative. cutover 시 real persist는 open decision 7 후속.
     - `build_payload`는 **legacy FX 형식**(data["type"]="rate_alert", BANK_NAMES_KR/CURRENCY_NAMES_KR) —
-      shadow telemetry를 legacy 발송과 apples-to-apples 비교 위해.
+      cutover 시 real 발송 fidelity 위해 (shadow는 no-op sender라 미발송, parity 비교용 아님).
 
-    ⚠️ **dead code (S2)**: 아직 어떤 evaluator에도 주입 안 됨. S3(FX shadow evaluator + sender seam)에서 wiring.
+    ⚠️ S3~S6에서 fx_alert_shadow에 wiring됨 — **보조 진단(execution-proof), parity 기준 아님**(S6 demote).
+       parity 기준 = legacy pre-mutation baseline(crud `_fx_legacy_match_counts`). cutover=open decision 7.
     """
 
     def load_settings(self, source: str, asset: str) -> tuple["CachedAlertSetting", ...]:

@@ -383,8 +383,9 @@ KRX_ALERT_EVALUATOR_ENABLED = os.getenv("KRX_ALERT_EVALUATOR_ENABLED", "false").
 # Flag=true 동작 (S5): bank/investing 환율 변경 batch마다 changes→AlertObservation 변환 후
 # topic_trigger_bridge로 main loop에 마샬링 → fx_alert_shadow.evaluate_fx_batch_shadow(
 # FxNotificationBackend + dedicated cache + no-op sender)로 병렬 telemetry-only 평가.
-# persist/FCM no-op → legacy와 2× 발사 없음. would_fire counter vs legacy sent_count parity 관찰용.
-# ([ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md] §6.1 S4/S5)
+# persist/FCM no-op → legacy와 2× 발사 없음. would_fire/shadow_stats = 보조 진단(execution-proof),
+# parity 기준선은 legacy baseline(crud _fx_legacy_match_counts) — async shadow는 parity 아님(S6 demote).
+# ([ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md] §6.1 S4/S5/S6)
 FX_ALERT_SHADOW_ENABLED = os.getenv("FX_ALERT_SHADOW_ENABLED", "false").lower() == "true"
 
 # KRX_CLOSE_EVENT_LOG_ENABLED: KRX close finalizer structured event persistence

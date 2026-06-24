@@ -1449,18 +1449,28 @@ async def get_atomic_write_outcomes():
 
 @app.get("/admin/api/fx-shadow-counts", dependencies=[Depends(verify_admin)])
 async def get_fx_shadow_counts():
-    """fanout step 4 S5 — FX alert shadow would_fire telemetry (read-only, process-local, behavior-change-0).
+    """fanout step 4 S5/S6 — FX alert shadow telemetry (read-only, process-local, behavior-change-0).
 
-    FX_ALERT_SHADOW_ENABLED 활성 시 shadow evaluator가 누적한 would_fire count(per (source,asset))를
-    surface — legacy sent_count(로그 🔔)와 parity 관찰용. counter는 running process in-memory(재시작 reset,
-    reset route 없음). would_fire = refetch+delivery_allowed+조건 재검증 통과 후 발사 직전(attempted-send)
-    이라 legacy sent_count(delivered)와 1:1 아님(coalescer/in-flight dedup/dedicated cache staleness).
-    `shadow_enabled=false`면 counter는 0 누적(flag off=dormant). never-crash.
+    FX_ALERT_SHADOW_ENABLED 활성 시 surface (counter는 running process in-memory, 재시작 reset, reset route 없음):
+    - ✅ `legacy_match`(per bank/currency) = **parity 기준선** — legacy `triggered_items` pre-mutation
+      count(crud S6b, mark_triggered 전 = legacy가 실제 발사할 대상). 신뢰 가능.
+    - ⚠️ `would_fire`(per source/asset) + `shadow_stats` = **보조 진단(execution-proof), parity 기준 아님**.
+      post-legacy async shadow는 legacy 발사 후 setting이 enabled=False가 되어 fresh load서 사라짐 →
+      matched_candidates는 cache-hit subset만 잡힘(구조적 신뢰 불가). "새 async 경로가 prod서 무에러로
+      도는가 / 어디서 빠지는가"(batch_seen/settings_loaded/matched_candidates/refetch_skipped_triggered/
+      would_send) 진단 용도. **would_fire ≈ legacy_match로 parity 단정 금지.**
+    - 최종 parity/cutover 판단 = inline dual-compute(S7, legacy pre-mutation 지점 동기 비교, 향후).
+    `shadow_enabled=false`면 누적 0(dormant). never-crash.
     """
     try:
         from app import config as app_config
-        from app.notifications.fx_alert_shadow import get_fx_would_fire_counts
+        from app import crud
+        from app.notifications.fx_alert_shadow import (
+            get_fx_shadow_stats,
+            get_fx_would_fire_counts,
+        )
         counts = get_fx_would_fire_counts()
+        legacy = crud.get_fx_legacy_match_counts()
         return {
             "status": "success",
             "shadow_enabled": app_config.FX_ALERT_SHADOW_ENABLED,
@@ -1469,6 +1479,11 @@ async def get_fx_shadow_counts():
                 for k, v in sorted(counts.items())
             ],
             "total": sum(counts.values()),
+            "legacy_match": [
+                {"bank": k[0], "currency": k[1], "count": v}
+                for k, v in sorted(legacy.items())
+            ],
+            "shadow_stats": get_fx_shadow_stats(),
         }
     except Exception:
         logger.error("fx-shadow-counts 조회 실패", exc_info=True)

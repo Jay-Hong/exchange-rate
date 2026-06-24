@@ -30,10 +30,11 @@ from app.notifications.alert_storage_backend import (
     SourceAlertBackend,
 )
 from app.notifications.fx_alert_shadow import (
+    _noop_sender,
     _reset_fx_shadow_state,
-    _shadow_noop_sender,
     evaluate_fx_batch_shadow,
     get_fx_alert_evaluator,
+    get_fx_shadow_stats,
     get_fx_would_fire_counts,
 )
 
@@ -123,43 +124,60 @@ class TestFxShadowFactory(unittest.TestCase):
 
 
 class TestFxShadowNoopSender(unittest.TestCase):
+    """S6: _noop_sender는 카운팅 책임 제거 → 방어용 no-delivery dict만 (count는 eval이)."""
 
     def tearDown(self):
         _reset_fx_shadow_state()
 
-    def test_noop_sender_counts_and_no_delivery(self):
-        result = _shadow_noop_sender(
-            ["t1"], "title", "body", {"bank": "kb", "currency": "usd-krw"},
-        )
-        # no-delivery dict (FCM 미발송)
+    def test_noop_sender_no_delivery_no_count(self):
+        result = _noop_sender(["t1"], "title", "body", {"bank": "kb", "currency": "usd-krw"})
         self.assertEqual(result["success_count"], 0)
         self.assertEqual(result["failure_count"], 0)
         self.assertEqual(result["failed_tokens"], [])
-        # key 계약 = (data["bank"], data["currency"]) — FxNotificationBackend.build_payload 출력 의존
-        self.assertEqual(get_fx_would_fire_counts().get(("kb", "usd-krw")), 1)
-
-    def test_noop_sender_accumulates(self):
-        for _ in range(3):
-            _shadow_noop_sender(["t1"], "t", "b", {"bank": "kb", "currency": "usd-krw"})
-        self.assertEqual(get_fx_would_fire_counts().get(("kb", "usd-krw")), 3)
+        # S6: sender는 더 이상 카운트 안 함 (count는 evaluate_fx_batch_shadow의 condition-match 지점)
+        self.assertEqual(get_fx_would_fire_counts(), {})
 
 
 class TestFxShadowBatchEval(unittest.TestCase):
+    """S6: would_fire/matched_candidates = **보조 진단**(execution-proof, cache-hit subset) — parity 아님.
+    parity 기준은 crud legacy baseline. 여기선 진단 카운터 동작만 lock."""
 
     def tearDown(self):
         _reset_fx_shadow_state()
 
-    def test_match_increments_count_no_fcm_no_db(self):
-        # persist_result는 _do_send_and_persist에서 항상 호출되나 FxNotificationBackend는
-        # no-op(DB 미접촉) → get_db_context 미호출로 "shadow = DB mutation 0" 직접 검증.
+    def test_match_counts_at_condition_match_pre_refetch(self):
+        # load → condition-match → would_fire(matched) += (refetch 이전). refetch !triggered → would_send.
         with patch.object(FxNotificationBackend, "load_settings", return_value=(_fx_candidate(),)), \
              patch.object(FxNotificationBackend, "refetch_snapshot", return_value=_fx_snapshot()), \
-             patch("app.database.get_db_context") as mock_db, \
              patch("app.notifications.fcm.send_fcm_multicast_sync") as mock_fcm:
             asyncio.run(evaluate_fx_batch_shadow([_fx_observation()]))
         self.assertEqual(get_fx_would_fire_counts().get(("kb", "usd-krw")), 1)
-        mock_fcm.assert_not_called()   # shadow = FCM 0
-        mock_db.assert_not_called()    # persist_result no-op → DB 세션 0 (load/refetch도 mock)
+        stats = get_fx_shadow_stats()
+        self.assertEqual(stats["batch_seen"], 1)
+        self.assertEqual(stats["settings_loaded"], 1)
+        self.assertEqual(stats["matched_candidates"], 1)
+        self.assertEqual(stats["would_send"], 1)              # refetch !triggered → would_send
+        self.assertEqual(stats["refetch_skipped_triggered"], 0)
+        mock_fcm.assert_not_called()                          # shadow = FCM 0
+
+    def test_cached_match_triggered_refetch_diagnostic(self):
+        # 진단(parity 아님): cache에 후보가 있는 cache-hit 케이스면 condition-match로 matched_candidates
+        # 카운트되고, refetch서 triggered=true(legacy 선점)는 refetch_skipped_triggered로 분리(post-legacy
+        # race 증거) + would_send=0. ⚠️ 실제 prod는 cache-miss가 흔해 이 카운트 자체가 신뢰 불가 →
+        # parity는 legacy baseline으로 봐야 함. 이 test는 진단 카운터 분리 동작만 확인.
+        triggered_snap = FreshSettingSnapshot(
+            setting_id=5, enabled=True, triggered=True,   # legacy가 이미 발사+commit
+            source="kb", asset="usd-krw", condition="above", threshold=1450.0,
+        )
+        with patch.object(FxNotificationBackend, "load_settings", return_value=(_fx_candidate(),)), \
+             patch.object(FxNotificationBackend, "refetch_snapshot", return_value=triggered_snap), \
+             patch("app.notifications.fcm.send_fcm_multicast_sync"):
+            asyncio.run(evaluate_fx_batch_shadow([_fx_observation()]))
+        self.assertEqual(get_fx_would_fire_counts().get(("kb", "usd-krw")), 1)  # 여전히 카운트!
+        stats = get_fx_shadow_stats()
+        self.assertEqual(stats["matched_candidates"], 1)
+        self.assertEqual(stats["refetch_skipped_triggered"], 1)  # race 증거
+        self.assertEqual(stats["would_send"], 0)
 
     def test_multi_candidate_counts_per_pair(self):
         cands = (_fx_candidate(setting_id=5), _fx_candidate(setting_id=6))
@@ -171,8 +189,9 @@ class TestFxShadowBatchEval(unittest.TestCase):
              patch.object(FxNotificationBackend, "refetch_snapshot", side_effect=_snap), \
              patch("app.notifications.fcm.send_fcm_multicast_sync"):
             asyncio.run(evaluate_fx_batch_shadow([_fx_observation()]))
-        # key=(bank,currency) pair 단위 집계 → 같은 (kb,usd-krw) 2 setting → 2
+        # key=(source,asset) pair 단위 집계 → 같은 (kb,usd-krw) 2 setting → 2
         self.assertEqual(get_fx_would_fire_counts().get(("kb", "usd-krw")), 2)
+        self.assertEqual(get_fx_shadow_stats()["matched_candidates"], 2)
 
     def test_no_match_no_count(self):
         with patch.object(FxNotificationBackend, "load_settings", return_value=(_fx_candidate(),)), \
@@ -181,10 +200,15 @@ class TestFxShadowBatchEval(unittest.TestCase):
             # above threshold=1450, rate=1400 → 미만족
             asyncio.run(evaluate_fx_batch_shadow([_fx_observation(rate=1400.0)]))
         self.assertEqual(get_fx_would_fire_counts(), {})
+        stats = get_fx_shadow_stats()
+        self.assertEqual(stats["batch_seen"], 1)
+        self.assertEqual(stats["settings_loaded"], 1)
+        self.assertEqual(stats["matched_candidates"], 0)
 
     def test_empty_batch_no_count(self):
         asyncio.run(evaluate_fx_batch_shadow([]))
         self.assertEqual(get_fx_would_fire_counts(), {})
+        self.assertEqual(get_fx_shadow_stats()["batch_seen"], 0)
 
 
 class TestFxShadowDeadCode(unittest.TestCase):
@@ -282,6 +306,39 @@ class TestS4FxShadowWiring(unittest.TestCase):
         import app.crud as crud_mod
         with patch("app.config.FX_ALERT_SHADOW_ENABLED", True):
             crud_mod._emit_fx_alert_shadow([_changed_rate()])  # raise 없으면 통과
+
+
+class TestLegacyMatchBaseline(unittest.TestCase):
+    """S6b: crud legacy pre-mutation match baseline counter (parity 기준선)."""
+
+    def tearDown(self):
+        import app.crud as crud
+        crud._fx_legacy_match_counts.clear()
+
+    def test_record_and_get_accumulate(self):
+        import app.crud as crud
+        crud._fx_legacy_match_counts.clear()
+        crud._record_fx_legacy_match("kb", "usd-krw", 2)
+        crud._record_fx_legacy_match("kb", "usd-krw", 1)
+        crud._record_fx_legacy_match("hana", "usd-krw", 3)
+        counts = crud.get_fx_legacy_match_counts()
+        self.assertEqual(counts[("kb", "usd-krw")], 3)
+        self.assertEqual(counts[("hana", "usd-krw")], 3)
+
+    def test_record_zero_or_negative_noop(self):
+        import app.crud as crud
+        crud._fx_legacy_match_counts.clear()
+        crud._record_fx_legacy_match("kb", "usd-krw", 0)
+        crud._record_fx_legacy_match("kb", "usd-krw", -1)
+        self.assertEqual(crud.get_fx_legacy_match_counts(), {})
+
+    def test_get_returns_copy(self):
+        import app.crud as crud
+        crud._fx_legacy_match_counts.clear()
+        crud._record_fx_legacy_match("kb", "usd-krw", 1)
+        snap = crud.get_fx_legacy_match_counts()
+        snap[("kb", "usd-krw")] = 999  # snapshot 수정이 원본 오염 X
+        self.assertEqual(crud.get_fx_legacy_match_counts()[("kb", "usd-krw")], 1)
 
 
 if __name__ == "__main__":
