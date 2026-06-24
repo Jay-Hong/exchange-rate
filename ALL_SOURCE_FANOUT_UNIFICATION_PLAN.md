@@ -126,7 +126,7 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **확대+rollback**: canary 통과 → **enqueue-confirmed-skip(B1) 추가** → 내 계정 → FX 일부 bank/currency → legacy 완전 교체. rollback=flag off or allowlist 비우기 → 즉시 legacy 복귀.
 - **behavior-change-0**: flag off → `_emit_fx_alert_canary` early-return + legacy skip 미발동(allowlist 빈) → prod 동작 불변.
 
-**B1 enqueue-confirmed-skip — 설계 잠금 (2026-06-24, codex 019ef822 design GO, 구현 X)** — canary 확대(real 유저) 전 필수:
+**B1 enqueue-confirmed-skip — ✅ LAND (2026-06-24, `adb4dec`, codex 019ef822 design GO + 019ef834 impl GO[blocker 0], CI green 28078707713)** — canary 확대(real 유저) 전 필수 보강 완료. 변경포인트 3 모두 구현 + 4-site reorder + S6b baseline gate + tests(emit bool 4 + gate 5 + 4-site trip-wire 1, codex non-blocker[wiring 회귀 가드] 반영). 3260 passed. 코드 변경은 crud.py만(canary 인프라 e859030 land). prod 미배포(canary flag off=dormant, behavior-change-0). 아래는 설계 기록:
 
 - **목적**: 현재 canary는 best-effort — legacy skip 후 canary `schedule_on_loop` 실패(loop 미등록/shutdown/race → False) 시 allowlist setting이 legacy·canary 둘 다 미발사=**miss**. single-setting watch는 수용, 확대 전 차단 필수.
 - **변경포인트**:
