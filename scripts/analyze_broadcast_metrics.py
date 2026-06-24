@@ -86,7 +86,8 @@ DXY_FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_ope
 # Z-2f(ADR-030) 후 추가: per_key_stale (개별 data key mirrored_at stale).
 # redis_stale은 Z-2f 후 rates path에서 deprecated이지만, 과거 로그 호환 및
 # rollback 대비로 분류 유지.
-FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_open", "per_key_stale"]
+# B step2(mirror-retirement): per_key_stale_ceiling = 완화 ON인데 age가 ceiling 초과라 fallback.
+FALLBACK_REASONS = ["redis_miss", "redis_stale", "redis_error", "circuit_open", "per_key_stale", "per_key_stale_ceiling"]
 
 
 def parse_iso(s: str) -> datetime:
@@ -290,6 +291,18 @@ def format_table(records: List[Dict[str, Any]], top: int, since: datetime, until
             for k, v in sorted(unknown.items(), key=lambda x: -x[1]):
                 lines.append(f"  {k:15s}: {v:6d} ({v*100/fb_total:.1f}%) [unknown]")
 
+    # B step2 — per_key_stale 완화로 old-but-present를 서빙한 record 집계 (rollout 지표).
+    # mirror ON 중엔 거의 0(mirror가 fresh 유지) → 무해성; 실제 노출은 mirror cadence 축소 후.
+    served_recs = [r for r in records if r.get("served_stale_key_count")]
+    if served_recs:
+        total_served = sum(r.get("served_stale_key_count", 0) for r in served_recs)
+        max_age = max((r.get("served_stale_max_age_s", 0) or 0) for r in served_recs)
+        lines.append("")
+        lines.append("[B step2 served_stale 분포] (per_key_stale 완화 = old-but-present 서빙)")
+        lines.append(f"  served_stale broadcasts : {len(served_recs)} / {len(records)}")
+        lines.append(f"  served_stale key total  : {total_served}")
+        lines.append(f"  served_stale max age (s): {max_age}")
+
     # PR5 — DXY path 분포 + DXY fallback reason (rates와 분리)
     dxy_bucket = Counter(classify_dxy_path(r) for r in records)
     pr5_active = (dxy_bucket["redis"] + dxy_bucket["db_fallback"] + dxy_bucket["missing"]) > 0
@@ -384,6 +397,14 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
         dxy_bucket["redis"] * 100 / pr5_records if pr5_records > 0 else None
     )
 
+    # B step2 — per_key_stale 완화 served_stale 집계 (rollout 지표, --json 자동 수집용)
+    served_recs = [r for r in records if r.get("served_stale_key_count")]
+    served_stale = {
+        "broadcasts": len(served_recs),
+        "key_total": sum(r.get("served_stale_key_count", 0) for r in served_recs),
+        "max_age_s": max((r.get("served_stale_max_age_s", 0) or 0) for r in served_recs) if served_recs else 0,
+    }
+
     big = sorted(
         [r for r in records if isinstance(r.get("payload_build_ms"), (int, float))],
         key=lambda r: -r["payload_build_ms"],
@@ -433,6 +454,8 @@ def format_json(records: List[Dict[str, Any]], top: int, since: datetime, until:
                 "dxy_redis_hit_rate_percent": dxy_redis_hit_rate,
                 "pr5_records": pr5_records,
             },
+            # B step2 (mirror-retirement) — per_key_stale 완화로 서빙한 stale 집계
+            "served_stale": served_stale,
             "top_spikes": top_spikes,
         },
         ensure_ascii=False,

@@ -150,7 +150,9 @@ class TestFetchRatesFromRedisZ2f(unittest.IsolatedAsyncioTestCase):
             index_response=index_response,
             mget_values=mget_values,
         )
-        with patches[0], patches[1], patches[2]:
+        # B step2: 이 테스트는 flag OFF 기준 동작(behavior-change-0)을 잠금 — env 민감성 제거 위해 명시 pin
+        with patch("app.config.LATEST_PER_KEY_STALE_SERVE_ENABLED", False), \
+                patches[0], patches[1], patches[2]:
             rates, dxy, meta = await fetch_rates_from_redis()
 
         self.assertIsNone(rates)
@@ -293,6 +295,117 @@ class TestFetchRatesFromRedisZ2f(unittest.IsolatedAsyncioTestCase):
         # 정상 처리 (schema 변경 없이 동작)
         self.assertIsNotNone(rates)
         self.assertEqual(meta.get("latest_source"), "redis")
+
+
+class TestBStep2PerKeyStaleRelax(unittest.IsolatedAsyncioTestCase):
+    """mirror-retirement B step2 — per_key_stale 완화(flag-gated): old-but-present 서빙 + ceiling.
+
+    flag off = 기존 per_key_stale 전체 fallback(behavior-change-0, 위 Z2f 테스트가 잠금).
+    flag on = stale key를 서빙(latest_source=redis 유지 + served_stale meta) 단 age > ceiling이면 fallback.
+    miss/parse/redis_error 등 hard failure는 완화 대상 아님(계속 fallback).
+    """
+
+    KEYS = ["latest:bank:kb:usd-krw", "latest:investing:usd-krw"]
+    TS_KST = "2026-05-13T10:00:00+09:00"
+
+    def _index(self, mirrored_at, keys=None):
+        return (_make_index_value(keys or self.KEYS, mirrored_at), None)
+
+    async def _mock(self, *, index_response, mget_values):
+        async def fake_get(key):
+            if key == LATEST_INDEX_KEY:
+                return index_response
+            if key == LATEST_DXY_KEY:
+                return (None, "redis_miss")
+            return (None, "redis_miss")
+        mc = AsyncMock()
+        mc.mget = AsyncMock(return_value=mget_values)
+        cb = AsyncMock()
+        cb.can_attempt = AsyncMock(return_value=True)
+        cb.record_success = AsyncMock()
+        cb.record_failure = AsyncMock()
+        return (
+            patch.object(latest_rates_cache, "_get_latest_with_reason", side_effect=fake_get),
+            patch.object(latest_rates_cache.redis_cache, "client", mc),
+            patch.object(latest_rates_cache.redis_cache, "circuit", cb),
+        )
+
+    async def test_flag_on_within_ceiling_serves_stale(self):
+        # 1 key stale(20s > 6s 임계) + flag on + ceiling 기본(7일) → 서빙 (fallback 아님)
+        idx = self._index(_fresh_mirrored_at(0.5))
+        mget = [
+            _make_data_value(1371.5, self.TS_KST, _fresh_mirrored_at(0.5)),
+            _make_data_value(1372.0, self.TS_KST, _stale_mirrored_at(20.0)),  # stale
+        ]
+        patches = await self._mock(index_response=idx, mget_values=mget)
+        with patch("app.config.LATEST_PER_KEY_STALE_SERVE_ENABLED", True), \
+             patches[0], patches[1], patches[2]:
+            rates, dxy, meta = await fetch_rates_from_redis()
+        self.assertIsNotNone(rates)                              # 서빙 (fallback 아님)
+        self.assertEqual(meta.get("latest_source"), "redis")     # fallback 아님
+        self.assertEqual(len(rates), 2)                          # stale key도 포함
+        self.assertEqual(meta.get("served_stale_key_count"), 1)  # 계측
+        self.assertIn("latest:investing:usd-krw", meta.get("served_stale_keys", []))
+        self.assertGreater(meta.get("served_stale_max_age_s", 0), 6.0)
+
+    async def test_flag_on_over_ceiling_falls_back(self):
+        # stale(20s) + flag on + ceiling 10s로 축소 → age 20s > ceiling → per_key_stale_ceiling fallback
+        idx = self._index(_fresh_mirrored_at(0.5))
+        mget = [
+            _make_data_value(1371.5, self.TS_KST, _fresh_mirrored_at(0.5)),
+            _make_data_value(1372.0, self.TS_KST, _stale_mirrored_at(20.0)),
+        ]
+        patches = await self._mock(index_response=idx, mget_values=mget)
+        with patch("app.config.LATEST_PER_KEY_STALE_SERVE_ENABLED", True), \
+             patch("app.config.LATEST_PER_KEY_STALE_CEILING_SECONDS", 10), \
+             patches[0], patches[1], patches[2]:
+            rates, dxy, meta = await fetch_rates_from_redis()
+        self.assertIsNone(rates)
+        self.assertEqual(meta.get("latest_source"), "db_fallback")
+        self.assertEqual(meta.get("fallback_reason"), "per_key_stale_ceiling")
+
+    async def test_flag_off_keeps_per_key_stale_fallback(self):
+        # flag off(default) → 기존 per_key_stale 전체 fallback (behavior-change-0)
+        idx = self._index(_fresh_mirrored_at(0.5))
+        mget = [
+            _make_data_value(1371.5, self.TS_KST, _fresh_mirrored_at(0.5)),
+            _make_data_value(1372.0, self.TS_KST, _stale_mirrored_at(20.0)),
+        ]
+        patches = await self._mock(index_response=idx, mget_values=mget)
+        with patch("app.config.LATEST_PER_KEY_STALE_SERVE_ENABLED", False), \
+             patches[0], patches[1], patches[2]:
+            rates, dxy, meta = await fetch_rates_from_redis()
+        self.assertIsNone(rates)
+        self.assertEqual(meta.get("fallback_reason"), "per_key_stale")
+
+    async def test_flag_on_hard_failure_still_fallback(self):
+        # 완화는 per_key_stale만 — hard failure(redis_miss: data key None)는 flag on이어도 fallback
+        idx = self._index(_fresh_mirrored_at(0.5))
+        mget = [
+            _make_data_value(1371.5, self.TS_KST, _fresh_mirrored_at(0.5)),
+            None,  # redis_miss
+        ]
+        patches = await self._mock(index_response=idx, mget_values=mget)
+        with patch("app.config.LATEST_PER_KEY_STALE_SERVE_ENABLED", True), \
+             patches[0], patches[1], patches[2]:
+            rates, dxy, meta = await fetch_rates_from_redis()
+        self.assertIsNone(rates)
+        self.assertEqual(meta.get("fallback_reason"), "redis_miss")  # 완화 대상 아님
+
+    async def test_flag_on_all_fresh_no_served_stale(self):
+        # 완화 on이어도 stale 없으면 served_stale meta 부재 (정상 fresh)
+        idx = self._index(_fresh_mirrored_at(0.5))
+        mget = [
+            _make_data_value(1371.5, self.TS_KST, _fresh_mirrored_at(0.5)),
+            _make_data_value(1372.0, self.TS_KST, _fresh_mirrored_at(0.5)),
+        ]
+        patches = await self._mock(index_response=idx, mget_values=mget)
+        with patch("app.config.LATEST_PER_KEY_STALE_SERVE_ENABLED", True), \
+             patches[0], patches[1], patches[2]:
+            rates, dxy, meta = await fetch_rates_from_redis()
+        self.assertIsNotNone(rates)
+        self.assertEqual(meta.get("latest_source"), "redis")
+        self.assertNotIn("served_stale_key_count", meta)
 
 
 if __name__ == "__main__":

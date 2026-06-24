@@ -1975,6 +1975,8 @@ async def fetch_rates_from_redis() -> Tuple[
     # 5. decode + key→rate 변환 + per-key stale 검사 (PR Z-2f / ADR-030)
     t_decode0 = time.perf_counter()
     rates: List[Dict[str, Any]] = []
+    served_stale_keys: List[str] = []  # B step2: per_key_stale 완화 시 서빙한 stale key (계측)
+    served_stale_max_age_s = 0.0
     for key, raw_v in raw_pairs:
         parsed = deserialize_value(raw_v)
         if parsed is None:
@@ -1983,14 +1985,30 @@ async def fetch_rates_from_redis() -> Tuple[
             meta["fallback_reason"] = "redis_error"
             meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
             return None, None, meta
-        # PR Z-2f: 개별 data key value의 mirrored_at으로 freshness 판정
-        # 1개라도 stale → 전체 fallback (보수적 1차, ADR-030)
+        # PR Z-2f: 개별 data key value의 mirrored_at으로 freshness 판정 (ADR-030).
+        # B step2(mirror-retirement): per_key_stale 완화 — flag on이면 old-but-present 서빙
+        # (rate 정확, mirrored_at만 늙음; ceiling 내), off면 기존 보수적 전체 fallback.
         if is_stale(parsed["mirrored_at"]):
-            meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
-            meta["latest_source"] = "db_fallback"
-            meta["fallback_reason"] = "per_key_stale"
-            meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
-            return None, None, meta
+            if not config.LATEST_PER_KEY_STALE_SERVE_ENABLED:
+                # 기존 동작: 1개라도 stale → 전체 fallback
+                meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
+                meta["latest_source"] = "db_fallback"
+                meta["fallback_reason"] = "per_key_stale"
+                meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+                return None, None, meta
+            age_s = (datetime.now(_KST) - parsed["mirrored_at"]).total_seconds()
+            if age_s > config.LATEST_PER_KEY_STALE_CEILING_SECONDS:
+                # ceiling 초과 = 비상식적으로 오래됨 → fallback (naive 무한 서빙 금지)
+                meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
+                meta["latest_source"] = "db_fallback"
+                meta["fallback_reason"] = "per_key_stale_ceiling"
+                meta["latest_fetch_total_ms"] = (time.perf_counter() - fetch_t0) * 1000
+                return None, None, meta
+            # 완화: old-but-present 서빙 (latest_source=redis 유지=fallback 아님) + 계측 표시.
+            # 진짜 Redis<DB malfunction은 시간 아닌 step4 revision reconciliation이 담당.
+            served_stale_keys.append(key)
+            if age_s > served_stale_max_age_s:
+                served_stale_max_age_s = age_s
         rate_record = _key_to_rate_record(key, parsed)
         if rate_record is None:
             meta["latest_decode_ms"] = (time.perf_counter() - t_decode0) * 1000
@@ -2006,6 +2024,12 @@ async def fetch_rates_from_redis() -> Tuple[
     meta["latest_source"] = "redis"
     meta["mirror_age_ms"] = mirror_age_ms
     meta["latest_key_count"] = len(rates)
+    # B step2: per_key_stale 완화로 stale-but-present를 서빙한 경우 계측(rollout 판단 지표).
+    # mirror ON 중엔 거의 0(mirror가 fresh 유지) → 무해성 검증; 실제 노출은 mirror cadence 축소 후.
+    if served_stale_keys:
+        meta["served_stale_key_count"] = len(served_stale_keys)
+        meta["served_stale_max_age_s"] = round(served_stale_max_age_s, 1)
+        meta["served_stale_keys"] = served_stale_keys  # bounded ≤ fleet(30)
 
     # 7. DXY Redis fetch (PR5) — rates와 독립. DXY 실패는 rates fallback 안 만듦.
     # DB fallback 시도는 호출자(_assemble_payload_from_rates)가 결정. fetch는 Redis만 책임.

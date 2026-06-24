@@ -51,6 +51,27 @@ LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS",
 # 슬라이스(replace-before-remove) — 본 flag는 direct write 추가만.
 DXY_DIRECT_LATEST_ENABLED = os.getenv("DXY_DIRECT_LATEST_ENABLED", "false").lower() == "true"
 
+# mirror-retirement B step2: read-path per_key_stale 완화 토글 (default OFF = 현 동작 유지).
+# true 시 fetch_rates_from_redis가 per-key mirrored_at이 is_stale(6s)이어도 전체 DB fallback 대신
+# old-but-present 값을 서빙(rate는 정확, mirrored_at만 늙음) + served_stale meta 표시. 단 age가
+# CEILING 초과면 fallback(naive 무한 서빙 금지). miss/parse/redis_error/circuit은 계속 fallback(완화 X).
+# mirror 은퇴의 forcing function(A heartbeat가 아니라 read-path freshness 의미 재정의). mirror ON 채
+# 배포해 회귀 격리 — mirror 살아있으면 per_key_stale 자체가 거의 0이라 무해성만 검증, 실제 노출은
+# mirror cadence 축소 후. 진짜 Redis<DB malfunction은 시간 아닌 revision reconciliation(step4)으로.
+LATEST_PER_KEY_STALE_SERVE_ENABLED = os.getenv("LATEST_PER_KEY_STALE_SERVE_ENABLED", "false").lower() == "true"
+# CEILING: 관대한 절대 backstop (default 7일). off-hours 주말(~60h)/긴 연휴(추석·설 ~5일)의 정당한
+# 무변경 staleness를 서빙해야 B의 off-hours 이점이 유지됨 → 분/시간 단위 ceiling이면 주말 전체 fallback.
+# 시간 기반은 market-closed와 writer-failure를 구분 못 하므로(codex 019ef9c5) malfunction 판정은
+# step4 revision reconciliation에 맡기고, 본 ceiling은 "절대 비상식적으로 오래된 값 서빙 금지" 한계만.
+LATEST_PER_KEY_STALE_CEILING_SECONDS = int(os.getenv("LATEST_PER_KEY_STALE_CEILING_SECONDS", "604800"))
+# 검증: ceiling은 is_stale 임계(interval × STALE_RATIO)보다 커야 의미 있음(완화 효과 존재).
+if LATEST_PER_KEY_STALE_CEILING_SECONDS <= LATEST_MIRROR_INTERVAL_SECONDS * 2:
+    raise ValueError(
+        "LATEST_PER_KEY_STALE_CEILING_SECONDS must exceed is_stale threshold "
+        f"(LATEST_MIRROR_INTERVAL_SECONDS×STALE_RATIO=2) "
+        f"(got {LATEST_PER_KEY_STALE_CEILING_SECONDS})."
+    )
+
 # ATOMIC_MODE_POLL_INTERVAL_SECONDS: P1b A2-2 write-mode cache poll 주기 (초).
 # scheduler가 N초마다 atomic_write_control row를 읽어 atomic_write_runtime cache를 갱신
 # (외부/admin/C6의 control 변경을 따라잡는 backstop). 0 이하면 IntervalTrigger 미정의.
