@@ -388,6 +388,19 @@ KRX_ALERT_EVALUATOR_ENABLED = os.getenv("KRX_ALERT_EVALUATOR_ENABLED", "false").
 # ([ALL_SOURCE_FANOUT_UNIFICATION_PLAN.md] §6.1 S4/S5/S6)
 FX_ALERT_SHADOW_ENABLED = os.getenv("FX_ALERT_SHADOW_ENABLED", "false").lower() == "true"
 
+# FX_ALERT_CUTOVER_CANARY_*: FX 알림 cutover canary (setting_id allowlist, 2026-06-24, §6.1 canary plan).
+#
+# legacy crud.process_rate_alerts → 새 evaluator(FxCanaryBackend, real persist+FCM) 전환을 setting 단위로.
+# allowlist setting만 canary가 real 발사 + legacy가 skip(중복 방지). non-allowlist = legacy 그대로.
+# shadow(diagnostic, no-op)와 별 evaluator/cache. flag off면 _emit_fx_alert_canary early-return +
+# legacy skip 미발동(allowlist 빈) → prod 동작 불변(behavior-change-0).
+# ⚠️ canary는 async best-effort — schedule_on_loop 실패 시 legacy skip된 setting이 0회 발사(miss).
+#    canary phase(본인 setting 1개 watch)는 수용, **확대 전 enqueue-confirmed-skip 필요**(§6.1 B1).
+FX_ALERT_CUTOVER_CANARY_ENABLED = os.getenv("FX_ALERT_CUTOVER_CANARY_ENABLED", "false").lower() == "true"
+FX_ALERT_CUTOVER_CANARY_SETTING_IDS = frozenset(
+    int(x) for x in os.getenv("FX_ALERT_CUTOVER_CANARY_SETTING_IDS", "").split(",") if x.strip()
+)
+
 # KRX_CLOSE_EVENT_LOG_ENABLED: KRX close finalizer structured event persistence
 # 토글 (2026-05-26). 활성 시 KrxCloseWindowWriter + KrxCloseSnapshotController
 # emit point에서 Redis ZSET `krx:close_finalizer_events`에 event_type 단위로

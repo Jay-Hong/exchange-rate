@@ -355,3 +355,69 @@ class FxNotificationBackend(AlertStorageBackend):
             "setting_id": str(candidate.setting_id),
         }
         return title, body, data
+
+
+class FxCanaryBackend(FxNotificationBackend):
+    """FX alert **cutover canary** backend (§6.1 canary plan) — real persist + allowlist.
+
+    FxNotificationBackend(shadow no-op)와 달리 **실제 발사**: allowlist setting만 load하고,
+    persist_result는 legacy `process_rate_alerts`와 동치(success→mark_triggered+log / **failure→로그 X** /
+    failed-token cleanup). build_payload·refetch_snapshot은 부모(legacy rate_alert + notification_settings) 상속.
+    legacy는 allowlist setting을 skip하므로 중복 발사 없음(partition). sender는 canary evaluator가
+    real `_send_fcm_multicast`(sender=None) 사용.
+    """
+
+    def load_settings(self, source: str, asset: str) -> tuple["CachedAlertSetting", ...]:
+        """부모 load(enabled+!triggered+bank/currency+device) + **allowlist 필터** → canary setting만."""
+        from app import config as app_config
+        allowlist = app_config.FX_ALERT_CUTOVER_CANARY_SETTING_IDS
+        return tuple(
+            s for s in super().load_settings(source, asset) if s.setting_id in allowlist
+        )
+
+    def persist_result(self, candidate: "CachedAlertSetting", rate: float, fcm_result: dict) -> None:
+        """legacy `process_rate_alerts` 동치 real persist (success-only log, SourceAlertBackend 복붙 ❌).
+
+        candidate.source=bank, candidate.asset=currency (value pass-through). failure log 없음
+        (legacy FX엔 failure 분기 없음). failed-token cleanup은 같은 세션 (WHOLE).
+        """
+        from app import crud, models
+        from app.database import get_db_context
+
+        with get_db_context() as db:
+            if fcm_result["success_count"] > 0:
+                crud.mark_setting_triggered(db, candidate.setting_id, rate)
+                crud.create_notification_log(
+                    db=db,
+                    user_id=candidate.user_id,
+                    setting_id=candidate.setting_id,
+                    bank=candidate.source,       # value pass-through (source=bank)
+                    currency=candidate.asset,    # value pass-through (asset=currency)
+                    rate=rate,
+                    success=True,
+                )
+                logger.info(
+                    "🔔 FX canary FCM sent",
+                    extra={
+                        "event": "fx_canary_fcm_sent",
+                        "bank": candidate.source,
+                        "currency": candidate.asset,
+                        "rate": rate,
+                        "threshold": candidate.threshold,
+                        "setting_id": candidate.setting_id,
+                        "user_id": candidate.user_id[:8] + "...",
+                        "success_count": fcm_result["success_count"],
+                    },
+                )
+            # else: legacy FX 동치 — failure log 없음 (mark/log 둘 다 skip)
+
+            failed_tokens = fcm_result.get("failed_tokens") or []
+            if failed_tokens:
+                try:
+                    deleted = db.query(models.UserDevice).filter(
+                        models.UserDevice.device_token.in_(failed_tokens),
+                    ).delete(synchronize_session=False)
+                    db.commit()
+                    logger.info("FX canary 무효 토큰 삭제", extra={"count": deleted})
+                except Exception:
+                    logger.exception("FX canary 무효 토큰 삭제 실패")

@@ -586,6 +586,10 @@ async def lifespan(app: FastAPI):
     from app import topic_trigger_bridge, fx_topic_trigger
     topic_trigger_bridge.signal_shutdown()
     await topic_trigger_bridge.drain_loop_callbacks()
+    # §6.1 canary (B2): bridge callback drain 후 canary evaluator의 pending real FCM task drain.
+    # (canary 비활성이면 evaluator 미생성 → no-op.) bridge drain 뒤여야 ev.schedule된 task까지 포함.
+    from app.notifications import fx_alert_shadow
+    await fx_alert_shadow.close_fx_canary_evaluator()
     await fx_topic_trigger.shutdown_fx_topic_trigger()
 
     # Phase B.2 PR1 — pending tether topic trigger flush 정리.

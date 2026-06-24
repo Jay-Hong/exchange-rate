@@ -35,7 +35,7 @@ from app.notifications.alert_evaluator import (
     condition_matches_observation,
     delivery_allowed,
 )
-from app.notifications.alert_storage_backend import FxNotificationBackend
+from app.notifications.alert_storage_backend import FxCanaryBackend, FxNotificationBackend
 
 logger = logging.getLogger("exchange_rate.notifications.fx_alert_shadow")
 
@@ -144,3 +144,37 @@ def _reset_fx_shadow_state() -> None:
         for k in _fx_shadow_stats:
             _fx_shadow_stats[k] = 0
     _fx_shadow_evaluator = None
+
+
+# ---------------------------------------------------------------------------
+# FX alert CUTOVER CANARY (§6.1 canary plan) — shadow와 달리 **real persist+FCM**.
+# shadow와 별 singleton/cache. allowlist setting만 발사(FxCanaryBackend), legacy는 skip(crud).
+# ---------------------------------------------------------------------------
+
+_fx_canary_evaluator: Optional[UsdtAlertEvaluator] = None
+
+
+def get_fx_canary_evaluator() -> UsdtAlertEvaluator:
+    """lazy-init FX canary evaluator — FxCanaryBackend(real persist + allowlist load) + dedicated
+    cache + **real FCM**(sender=None → `_send_fcm_multicast` late-bind). shadow와 별 instance/cache."""
+    global _fx_canary_evaluator
+    if _fx_canary_evaluator is None:
+        _fx_canary_evaluator = UsdtAlertEvaluator(
+            backend=FxCanaryBackend(),
+            cache=AlertSettingsCache(),
+            sender=None,  # real FCM
+        )
+    return _fx_canary_evaluator
+
+
+async def close_fx_canary_evaluator() -> None:
+    """shutdown drain (B2) — canary evaluator의 pending real FCM task 완료 대기(timeout 후 cancel).
+    미생성(canary 비활성)이면 no-op. main.py lifespan shutdown에서 호출."""
+    if _fx_canary_evaluator is not None:
+        await _fx_canary_evaluator.close()
+
+
+def _reset_fx_canary_state() -> None:
+    """test-only — canary singleton reset (테스트 격리)."""
+    global _fx_canary_evaluator
+    _fx_canary_evaluator = None

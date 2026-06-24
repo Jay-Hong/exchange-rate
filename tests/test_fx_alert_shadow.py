@@ -26,14 +26,18 @@ from app.notifications.alert_evaluator import (
     get_default_alert_settings_cache,
 )
 from app.notifications.alert_storage_backend import (
+    FxCanaryBackend,
     FxNotificationBackend,
     SourceAlertBackend,
 )
 from app.notifications.fx_alert_shadow import (
     _noop_sender,
+    _reset_fx_canary_state,
     _reset_fx_shadow_state,
+    close_fx_canary_evaluator,
     evaluate_fx_batch_shadow,
     get_fx_alert_evaluator,
+    get_fx_canary_evaluator,
     get_fx_shadow_stats,
     get_fx_would_fire_counts,
 )
@@ -339,6 +343,103 @@ class TestLegacyMatchBaseline(unittest.TestCase):
         snap = crud.get_fx_legacy_match_counts()
         snap[("kb", "usd-krw")] = 999  # snapshot 수정이 원본 오염 X
         self.assertEqual(crud.get_fx_legacy_match_counts()[("kb", "usd-krw")], 1)
+
+
+def _mock_db_ctx():
+    mock_db = MagicMock()
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=mock_db)
+    ctx.__exit__ = MagicMock(return_value=None)
+    return mock_db, ctx
+
+
+class TestFxCanaryBackend(unittest.TestCase):
+    """§6.1 canary: FxCanaryBackend — allowlist load + legacy-mirror real persist."""
+
+    def test_load_settings_allowlist_filter(self):
+        cands = (_fx_candidate(setting_id=5), _fx_candidate(setting_id=6))
+        with patch.object(FxNotificationBackend, "load_settings", return_value=cands), \
+             patch("app.config.FX_ALERT_CUTOVER_CANARY_SETTING_IDS", frozenset({5})):
+            result = FxCanaryBackend().load_settings("kb", "usd-krw")
+        self.assertEqual(len(result), 1)  # allowlist(5)만
+        self.assertEqual(result[0].setting_id, 5)
+
+    def test_persist_success_marks_and_logs_value_passthrough(self):
+        _, ctx = _mock_db_ctx()
+        with patch("app.database.get_db_context", return_value=ctx), \
+             patch("app.crud.mark_setting_triggered") as mock_mark, \
+             patch("app.crud.create_notification_log") as mock_log:
+            FxCanaryBackend().persist_result(
+                _fx_candidate(), 1455.0,
+                {"success_count": 1, "failure_count": 0, "failed_tokens": []},
+            )
+        mock_mark.assert_called_once()
+        mock_log.assert_called_once()
+        self.assertTrue(mock_log.call_args.kwargs["success"])
+        self.assertEqual(mock_log.call_args.kwargs["bank"], "kb")        # source→bank
+        self.assertEqual(mock_log.call_args.kwargs["currency"], "usd-krw")  # asset→currency
+
+    def test_persist_failure_no_log(self):
+        # legacy FX mirror: failure 시 mark/log 둘 다 X (SourceAlertBackend와 달리 failure-log 없음)
+        _, ctx = _mock_db_ctx()
+        with patch("app.database.get_db_context", return_value=ctx), \
+             patch("app.crud.mark_setting_triggered") as mock_mark, \
+             patch("app.crud.create_notification_log") as mock_log:
+            FxCanaryBackend().persist_result(
+                _fx_candidate(), 1455.0,
+                {"success_count": 0, "failure_count": 1, "failed_tokens": []},
+            )
+        mock_mark.assert_not_called()
+        mock_log.assert_not_called()
+
+    def test_persist_failed_tokens_cleanup(self):
+        mock_db, ctx = _mock_db_ctx()
+        with patch("app.database.get_db_context", return_value=ctx), \
+             patch("app.crud.mark_setting_triggered"), \
+             patch("app.crud.create_notification_log"):
+            FxCanaryBackend().persist_result(
+                _fx_candidate(), 1455.0,
+                {"success_count": 1, "failure_count": 1, "failed_tokens": ["bad"]},
+            )
+        mock_db.query.assert_called()
+        mock_db.commit.assert_called()
+
+
+class TestFxCanaryEvaluatorAndHook(unittest.TestCase):
+    """§6.1 canary: evaluator(별 singleton, real FCM) + crud hook + shutdown drain."""
+
+    def tearDown(self):
+        _reset_fx_canary_state()
+        _reset_fx_shadow_state()
+
+    def test_canary_evaluator_structure_and_singleton(self):
+        ev = get_fx_canary_evaluator()
+        self.assertIsInstance(ev._backend, FxCanaryBackend)
+        self.assertIsNone(ev._sender)  # real FCM (late-bind _send_fcm_multicast)
+        self.assertIsNot(ev._cache, get_default_alert_settings_cache())  # dedicated
+        self.assertIs(get_fx_canary_evaluator(), ev)  # singleton
+        self.assertIsNot(ev, get_fx_alert_evaluator())  # shadow와 별 instance
+
+    def test_emit_canary_flag_off_no_schedule(self):
+        import app.crud as crud_mod
+        with patch("app.config.FX_ALERT_CUTOVER_CANARY_ENABLED", False), \
+             patch("app.topic_trigger_bridge.schedule_on_loop") as mock_sched:
+            crud_mod._emit_fx_alert_canary([_changed_rate()])
+        mock_sched.assert_not_called()
+
+    def test_emit_canary_flag_on_schedules_run_canary(self):
+        import app.crud as crud_mod
+        with patch("app.config.FX_ALERT_CUTOVER_CANARY_ENABLED", True), \
+             patch("app.topic_trigger_bridge.schedule_on_loop") as mock_sched:
+            crud_mod._emit_fx_alert_canary([_changed_rate()])
+        mock_sched.assert_called_once()
+        cb, observations = mock_sched.call_args.args
+        self.assertIs(cb, crud_mod._run_fx_alert_canary)  # sync wrapper
+        self.assertEqual(observations[0].kind, "fx_canary")
+
+    def test_close_canary_noop_when_not_created(self):
+        _reset_fx_canary_state()
+        asyncio.run(close_fx_canary_evaluator())  # singleton None → 예외 없이 no-op
 
 
 if __name__ == "__main__":

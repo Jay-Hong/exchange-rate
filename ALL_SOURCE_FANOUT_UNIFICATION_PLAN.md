@@ -108,7 +108,7 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **❌ S7 검토→폐기 (2026-06-24, tautological)**: inline dual-compute(legacy pre-mutation 지점서 새 condition 동기 비교) 검토했으나 — legacy condition(`crud:2113-2116`)과 `condition_matches_observation`(`alert_evaluator:165-168`)이 **byte-identical**(>=/<=, 동일 4-필터, rate/threshold 동일 출처)이라 **항상 일치 = tautological**(적대적 refute Workflow 3 lens + codex 확정). regression guard 가치뿐(단위 테스트가 더 싸게 커버). 진짜 cutover 위험(real persist / FCM / failed-token cleanup / cache invalidation / 중복발사 방지)은 inline으로 검증 불가(pre-mutation 동기가 그 위험을 정의상 제거). → **fanout parity-measurement 트랙 종료** (매칭이 공유라 측정할 divergence 없음).
 - **🔜 cutover (open decision 7, 별도 plan-first 세션)**: legacy `process_rate_alerts` → 새 evaluator authoritative 전환. **위험 = orchestration**(real persist/FCM/cleanup/cache invalidation/중복발사). 검증 근거 = **(a) USDT/KRX 운영 실증된 공유 `UsdtAlertEvaluator` orchestration**(FX shadow가 재사용 = source-agnostic) + **(b) FxNotificationBackend 단위 테스트** + **(c) single-setting canary**(실 FX 설정 1개로 새 path authoritative + legacy 중복 방지 + FCM 수신 + notification_logs + triggered/enabled + cache invalidation 실측, KRX F-3 패턴). high-stakes user-facing이라 fresh focus 별도 세션.
 
-**cutover canary plan-first — 설계 잠금 (2026-06-24, codex 019ef7ec review 반영, 구현 X)**:
+**cutover canary — ✅ 구현 LAND (2026-06-24, codex 019ef7ec design + 019ef7fd impl review)**:
 
 - **접근**: setting_id allowlist 기반 **single-setting canary**부터. shadow(S3-S6) bridge/evaluator 인프라 **재사용**(backend만 FxCanaryBackend로 교체) → S3-S6은 헛수고 아닌 cutover 토대.
 - **불변식(partition)**: allowlist setting = canary만 real 발사 / legacy skip. non-allowlist = legacy 그대로 / canary는 load 안 함. ⚠️ **단 canary는 async best-effort라 "no miss 견고" 아님**(B1).
