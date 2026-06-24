@@ -126,6 +126,18 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **확대+rollback**: canary 통과 → **enqueue-confirmed-skip(B1) 추가** → 내 계정 → FX 일부 bank/currency → legacy 완전 교체. rollback=flag off or allowlist 비우기 → 즉시 legacy 복귀.
 - **behavior-change-0**: flag off → `_emit_fx_alert_canary` early-return + legacy skip 미발동(allowlist 빈) → prod 동작 불변.
 
+**B1 enqueue-confirmed-skip — 설계 잠금 (2026-06-24, codex 019ef822 design GO, 구현 X)** — canary 확대(real 유저) 전 필수:
+
+- **목적**: 현재 canary는 best-effort — legacy skip 후 canary `schedule_on_loop` 실패(loop 미등록/shutdown/race → False) 시 allowlist setting이 legacy·canary 둘 다 미발사=**miss**. single-setting watch는 수용, 확대 전 차단 필수.
+- **변경포인트**:
+  1. `_emit_fx_alert_canary` → **bool 반환**: flag off/no changes/schedule_on_loop False → False, enqueue 성공 → True. (현재 schedule_on_loop 반환 버림 crud:441 → 보존.)
+  2. `process_rate_alerts(db, changed_rates, canary_handled=False)` param 추가: legacy skip을 `if canary_handled and setting.id in allowlist: continue`(flag 대신 **실제 enqueue 결과** gate). + S6b baseline 제외(crud `legacy_fired` 필터)도 `canary_handled and allowlist` 기준(enqueue 실패=legacy 발사=baseline 포함).
+  3. **4-site reorder**: `canary_handled = _emit_fx_alert_canary(changes)`(try/except → 예외 시 **False=legacy fallback**) → `process_rate_alerts(db, changed_rates, canary_handled=canary_handled)` → shadow(그대로 after). enqueue 성공해야만 legacy가 allowlist skip.
+- **불변식**: enqueue 성공 → legacy skip + canary(1회). enqueue 실패/예외/flag off → legacy fire(fallback, **no miss**). 매칭 tautological이라 matching-divergence miss 없음.
+- ⚠️ **B1 정확한 보장 = "bridge enqueue 성공 시에만 legacy skip"**(codex 정정 — "canary fire 보장" 아님; bridge True=`call_soon_threadsafe`까지, callback内 예외는 bridge가 삼킴 topic_trigger_bridge:77/103). **잔여 = enqueue 성공 후 async eval/FCM 실패 miss**(드묾, USDT/KRX 동일 수용, B1 범위 밖).
+- ⚠️ **최종 cutover(legacy 완전 제거) 시**: partition miss는 사라지나 `schedule_on_loop=False`가 곧 **authoritative alert miss** → B1보다 강한 **dispatch 보장**(robust enqueue/eval — 재시도/sync fallback 등) 필요(별도, 확대 후반/cutover 직전).
+- **test**: enqueue 성공→legacy skip+baseline 제외 / enqueue False→legacy fire+baseline 포함 / 예외→False(legacy fire) / flag off→canary_handled False(legacy 그대로).
+
 **S1 착수 준비 (pre-impl checklist, 2026-06-23 read-only 확인)**:
 - **추출 대상 = 4 backend method + sender**(alert_evaluator.py): `_load_settings_from_db`(def 551 / call 546) → `load_settings` · `_refetch_setting_snapshot`(762 / call 653·710) → `refetch_snapshot` · `_persist_result`(794 / call 758) → **`persist_result` WHOLE**(split ❌ — mark/log/cleanup 각자 commit이라 commit-order 보존; cleanup도 backend 잔류) · `_build_fcm_payload`(865 / call 752) → `build_payload` · **`_send_fcm_multicast`(786 / call 754) → constructor 주입 `sender`(lazy wrapper)**.
 - **constructor**: `__init__`에 `backend=SourceAlertBackend()` + `sender=lazy FCM wrapper`(현 `_send_fcm_multicast` body, **module-import 시점 bind 금지**) default → 6 instantiation(USDT 5 + KRX) 불변. **`KrxAlertEvaluator`(910) `pass` 유지**.
