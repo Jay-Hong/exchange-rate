@@ -1459,7 +1459,7 @@ async def get_fx_shadow_counts():
       matched_candidates는 cache-hit subset만 잡힘(구조적 신뢰 불가). "새 async 경로가 prod서 무에러로
       도는가 / 어디서 빠지는가"(batch_seen/settings_loaded/matched_candidates/refetch_skipped_triggered/
       would_send) 진단 용도. **would_fire ≈ legacy_match로 parity 단정 금지.**
-    - 최종 parity/cutover 판단 = inline dual-compute(S7, legacy pre-mutation 지점 동기 비교, 향후).
+    - 최종 cutover 판단 = single-setting canary (S7 inline dual-compute는 매칭 byte-identical=tautological이라 폐기, open decision 7 별도).
     `shadow_enabled=false`면 누적 0(dormant). never-crash.
     """
     try:

@@ -11,13 +11,14 @@
   간격보다 짧아 crossing 시점엔 보통 만료 → fresh load(발사 후) → 0. 즉 **would_fire/matched_candidates는
   구조적으로 신뢰 불가**(cache-hit인 우연한 창만 잡힘) — parity 수치로 쓰지 말 것.
 - ✅ **parity 기준 = legacy pre-mutation baseline** (crud `_fx_legacy_match_counts`: triggered_items 직후
-  mark_triggered 전 = legacy와 같은 DB 상태, 신뢰 가능). 최종 cutover 판단 = **inline dual-compute(S7, 향후)**:
-  legacy pre-mutation 지점에서 새 condition 로직을 동기 적용·비교 (post-legacy async는 race 구조적 불가피).
+  mark_triggered 전 = legacy와 같은 DB 상태, 신뢰 가능). ⚠️ inline dual-compute(S7)는 검토했으나 **폐기**
+  — legacy condition ≡ `condition_matches_observation`(byte-identical >=/<=)이라 tautological. 최종
+  cutover(real persist 전환) 판단 = **single-setting canary**(open decision 7 별도 plan-first).
 
 이 모듈의 카운터 = **execution-proof 보조 진단**: 새 async 경로가 돌았나(batch_seen) / 설정 load됐나
 (settings_loaded) / condition 매칭됐나(matched_candidates, cache-hit subset만) / refetch서 빠졌나
 (refetch_skipped_triggered). cutover 시 이 async infra가 authoritative 되므로 prod 무에러 실행 검증용.
-cache invalidation·cutover(real persist)는 별도 (open decision 7 / S7).
+cache invalidation·cutover(real persist)는 별도 (open decision 7, canary plan-first).
 """
 from __future__ import annotations
 
@@ -87,7 +88,7 @@ async def evaluate_fx_batch_shadow(observations: list[AlertObservation]) -> None
 
     ⚠️ parity 기준 아님 (module docstring 참조): matched_candidates는 post-legacy async라 cache-hit
     subset만 잡힘(legacy 발사 후 setting은 enabled=False라 fresh load서 사라짐). parity 기준은 crud
-    `_fx_legacy_match_counts`(legacy pre-mutation baseline), 최종 cutover는 inline dual-compute(S7).
+    `_fx_legacy_match_counts`(legacy pre-mutation baseline); cutover는 canary plan-first(S7 inline은 tautological이라 폐기).
     이 함수는 "새 async 경로가 prod서 무에러로 도는가 / 어디서 빠지는가"를 보는 진단 용도.
     refetch_skipped_triggered/would_send = post-legacy race 진단 보조 지표.
     각 obs는 try/except로 격리 (shadow 실패가 bridge/writer에 영향 0).

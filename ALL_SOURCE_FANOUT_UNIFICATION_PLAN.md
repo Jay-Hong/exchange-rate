@@ -141,7 +141,7 @@ fetch*가 아니다. 나이브하게 "전부 한 writer로" 합치면 이번 분
 - **parity(S5)** ⚠️ **S6에서 supersede**: 이 prep의 "would_fire ≥ sent_count 경향" 전제는 **틀렸음** — post-legacy async shadow는 legacy 발사 후 setting이 enabled=False라 would_fire가 구조적으로 0에 수렴(2026-06-24 prod 실측). → would_fire는 **보조 진단**, **parity 기준선 = legacy pre-mutation baseline**(crud `_fx_legacy_match_counts`). ⚠️ 최종 parity 측정은 **불요**(매칭이 legacy와 byte-identical = tautological → S7 폐기). cutover는 single-setting canary로 검증. (위 sub-slices S6/cutover 참조)
 - **S4→S5 경계**: S4=wiring(live-but-inactive, env로 flip 가능, 로직 재배포 불요) / S5=`FX_ALERT_SHADOW_ENABLED=true`(force-recreate)+parity 관찰+cutover(open decision 7) 결정.
 
-**open** (구현 시): parity tolerance 정의 / cutover 시 persist no-op→real 전환 + FX endpoint invalidation(constraint ④ option a) — shadow 범위 밖.
+**open** (cutover plan-first 영역): cutover 시 persist no-op→real 전환 + FX endpoint invalidation(constraint ④ option a). ⚠️ parity tolerance는 불요 — 매칭이 legacy와 byte-identical(tautological)이라 측정할 divergence 없음(S7 폐기). cutover 검증은 single-setting canary.
 
 ## 7. Sequencing 가드레일
 
