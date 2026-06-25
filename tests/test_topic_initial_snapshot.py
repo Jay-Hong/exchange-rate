@@ -69,6 +69,20 @@ class TestBuildSnapshotSync(unittest.TestCase):
         t_b.assert_not_called()
 
 
+class TestSupportedSnapshotTopics(unittest.TestCase):
+    """supported_snapshot_topics() = REST bootstrap unknown_topic 검증 단일 소스.
+
+    _build_snapshot_sync dispatch와 drift 잠금 (codex 019efe32).
+    """
+
+    def test_exact_supported_set(self):
+        from app.topic_initial_snapshot import supported_snapshot_topics
+        self.assertEqual(
+            set(supported_snapshot_topics()),
+            {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw"},
+        )
+
+
 class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
     """send_initial_snapshots — _build_snapshot_sync patch로 격리(실 DB 0)."""
 

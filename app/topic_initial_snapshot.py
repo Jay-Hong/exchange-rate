@@ -41,6 +41,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger("exchange_rate.topic_initial_snapshot")
 
 
+def supported_snapshot_topics() -> tuple:
+    """snapshot 빌드 가능한 topic 목록 (구현상 지원 set — availability gate와 무관).
+
+    REST bootstrap endpoint(`/api/v2/topics/snapshot`)의 unknown_topic 검증 + client 노출용
+    단일 소스. `_build_snapshot_sync`의 dispatch(fx:* + usdt:krw)와 일치. lazy import로
+    모듈 경량 유지(FX_TOPICS/TETHER_TOPIC).
+    """
+    from app.fx_topic_publisher import FX_TOPICS  # {asset: "fx:{asset}"}
+    from app.tether_topic_publisher import TETHER_TOPIC  # "usdt:krw"
+
+    return tuple(FX_TOPICS.values()) + (TETHER_TOPIC,)
+
+
 def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
     """주어진 topic의 현재 snapshot payload 빌드 — asyncio.to_thread 내부 sync 실행 전용.
 

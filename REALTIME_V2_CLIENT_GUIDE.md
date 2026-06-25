@@ -1,7 +1,7 @@
 # REALTIME_V2_CLIENT_GUIDE — topic 구독 클라이언트 계약 (신규 iOS/Android 앱)
 
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
-> OPEN 1건 잔존: usdt:krw REST bootstrap(§3). (USDT same-bucket ordering OPEN은 `rate_changed_at` 노출로 해소됨, §5.)
+> 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출). 서버 측 계약 closed — 잔여는 client 구현 + live enable(별도 GO).
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e), **prod에서는 flag-off dormant**
 > (`TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` default false) — live 활성은 별도 GO.
 > 이 문서가 topic 계약의 **authoritative source**. [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md)
@@ -113,12 +113,19 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 → 정상 경로 **REST bootstrap 불필요**. 빈 시간대(주말/조용한 통화)에도 구독 즉시 현재값 수신.
 
-**REST fallback (WS 연결 실패 시)** — ⚠️ 부분적:
-- FX(`usd-krw`/`jpy-krw`/`eur-krw`): `GET /api/rates/{asset}` → 200, 단 **legacy shape**(`{rates:[{bank, currency, rate, timestamp}]}`) → 단말이 topic shape로 매핑.
-- `usdt:krw` 구성요소: `GET /api/rates/usdt-krw`·`/api/rates/usd-krw-futures` → **410 Gone**(`detail.use_topic="usdt:krw"`). **테더 탭은 REST bootstrap 없음 = WS-only**.
+**REST bootstrap (WS 미연결/실패 시 권장 fallback)** — v2 endpoint:
 
-> **🔴 OPEN (출시 전 확정)** — usdt:krw REST bootstrap 부재: WS 불가 시 테더 탭 cold-start 경로 없음.
-> 결정: (a) 서버 v2 REST bootstrap endpoint 추가(topic shape 반환) vs (b) 테더 탭 WS 필수 수용.
+```text
+GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw}
+```
+
+- 응답 = **WS snapshot과 동일 schema**(`{type:"snapshot", version:1, topic, data}` + `usdt_krw`/`usd_krw_futures`의 `rate_changed_at` + KRX optional). 같은 builder 공유 → client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
+- 권장 흐름: **REST bootstrap(즉시 렌더) → WS subscribe → snapshot/live merge**(REST 응답을 §5 merge로 흡수, WS snapshot이 자연 갱신).
+- `Cache-Control: no-store`. 인증 없음(WS topic과 일관).
+- 응답 코드: 200(payload) / 404 `topics_disabled`(TOPIC_DISPATCHER_ENABLED off=출시 전) / 404 `unknown_topic`(+supported_topics) / 404 `topic_unavailable`(지원 topic이나 현재 미제공, 예 FX_TOPIC_ENABLED off).
+- legacy `/api/rates/{usdt-krw|usd-krw-futures}`는 여전히 410 Gone(use_topic) — 신규 앱은 위 v2 bootstrap 사용. FX legacy `/api/rates/{asset}`(legacy shape)도 v2 bootstrap으로 대체 권장.
+
+> ✅ (구 OPEN — usdt:krw REST bootstrap 부재)는 본 endpoint로 **해소**(2026-06-25). 전 topic(fx:*+usdt:krw) 통일 bootstrap.
 
 ## 4. 수신 규칙 (snapshot 처리)
 

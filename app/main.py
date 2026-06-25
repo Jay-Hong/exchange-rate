@@ -2423,6 +2423,36 @@ async def get_v2_graph_tab(tab: str, period: str = "3m"):
     return await asyncio.to_thread(_build)
 
 
+@app.get("/api/v2/topics/snapshot")
+async def get_v2_topic_snapshot(topic: str):
+    """topic 현재 snapshot REST bootstrap (WS 미연결/실패 시 cold-start fallback, OPEN 1).
+
+    WS subscribe의 snapshot-on-subscribe와 **동일 builder**(`_build_snapshot_sync`) →
+    동일 schema(type/version/topic/data + usdt_krw/usd_krw_futures의 rate_changed_at + KRX
+    optional). client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
+    TOPIC_DISPATCHER_ENABLED off면 dormant(404). REALTIME_V2_CLIENT_GUIDE §3.
+    """
+    from app import config
+    from app.topic_initial_snapshot import _build_snapshot_sync, supported_snapshot_topics
+
+    if not config.TOPIC_DISPATCHER_ENABLED:
+        # 출시 전 dormant — supported_topics 비노출 (codex 019efe2d)
+        return JSONResponse(status_code=404, content={"error": "topics_disabled"})
+    supported = supported_snapshot_topics()
+    if topic not in supported:
+        return JSONResponse(status_code=404, content={
+            "error": "unknown_topic",
+            "detail": f"topic '{topic}' not supported",
+            "supported_topics": list(supported),
+        })
+    payload = await asyncio.to_thread(_build_snapshot_sync, topic)
+    if payload is None:
+        # 지원 topic이지만 현재 미제공 (예: fx FX_TOPIC_ENABLED off) — WS publish 가능성과 일치
+        return JSONResponse(status_code=404, content={"error": "topic_unavailable", "topic": topic})
+    # latest 성격 — 캐시 금지 (codex 019efe2d). body는 WS snapshot과 동일 contract.
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Phase 2: Firebase Auth + FCM 알림 API
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -134,5 +134,47 @@ class TestSnapshotOnSubscribeE2E(unittest.TestCase):
         self.assertEqual(snap["topic"], "fx:usd-krw")
 
 
+class TestTopicSnapshotRestBootstrap(unittest.TestCase):
+    """GET /api/v2/topics/snapshot — REST bootstrap (OPEN 1 해소). _build_snapshot_sync patch로 격리."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    def test_dormant_when_dispatcher_disabled(self):
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
+            r = self.client.get("/api/v2/topics/snapshot", params={"topic": "usdt:krw"})
+        self.assertEqual(r.status_code, 404)
+        body = r.json()
+        self.assertEqual(body["error"], "topics_disabled")
+        self.assertNotIn("supported_topics", body)  # dormant 시 미노출 (codex 019efe2d)
+
+    def test_unknown_topic_404(self):
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+            r = self.client.get("/api/v2/topics/snapshot", params={"topic": "dxy"})
+        self.assertEqual(r.status_code, 404)
+        body = r.json()
+        self.assertEqual(body["error"], "unknown_topic")
+        self.assertIn("usdt:krw", body["supported_topics"])
+
+    def test_supported_topic_returns_snapshot_with_no_store(self):
+        canned = {"type": "snapshot", "version": 1, "topic": "usdt:krw",
+                  "data": {"_canned": True}}
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=canned):
+            r = self.client.get("/api/v2/topics/snapshot", params={"topic": "usdt:krw"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), canned)  # WS snapshot과 동일 contract
+        self.assertEqual(r.headers.get("cache-control"), "no-store")
+
+    def test_topic_unavailable_when_build_none(self):
+        """지원 topic이나 _build_snapshot_sync None(예: fx FX_TOPIC_ENABLED off) → 404 topic_unavailable."""
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=None):
+            r = self.client.get("/api/v2/topics/snapshot", params={"topic": "fx:usd-krw"})
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["error"], "topic_unavailable")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
