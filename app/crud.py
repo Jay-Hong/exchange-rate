@@ -2628,9 +2628,9 @@ def get_latest_source_rates_for_topic(
         sources: 조회할 source list — 호출자가 명시 (출력 순서도 입력 순서 보존).
 
     Returns:
-        [{"source", "asset", "rate", "timestamp"}, ...] topic-native shape.
+        [{"source", "asset", "rate", "timestamp", "rate_changed_at"}, ...] topic-native shape.
         Redis read helper(`get_latest_usdt_rate_from_sync_job`)와 동일 shape —
-        builder normalization 단순화.
+        builder normalization 단순화. rate_changed_at = timestamp (DB row는 정밀 변경시각).
 
         해당 (source, asset) 조합이 DB에 없으면 결과 list에서 누락 (호출자가
         부분 결과 처리 — 정상 동작은 모든 source 존재).
@@ -2661,6 +2661,11 @@ def get_latest_source_rates_for_topic(
             "asset": record.asset,
             "rate": record.rate,
             "timestamp": to_kst_isoformat(record.timestamp),
+            # DB row timestamp = 정밀 변경시각 (source_rates insert-if-changed). Redis path
+            # (get_latest_usdt_rate_from_sync_job)와 일관되게 rate_changed_at 노출 (codex
+            # 019efe0b Option B). usdt:krw builder의 _normalize_entry가 asset=usdt-krw entry
+            # 에만 carry — 다른 asset/source는 무시되므로 universal 추가도 안전.
+            "rate_changed_at": to_kst_isoformat(record.timestamp),
         }
         for source in sources
         for record in [by_source.get(source)]

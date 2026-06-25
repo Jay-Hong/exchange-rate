@@ -450,6 +450,9 @@ class TestLoadAndBuildTetherTabPayload(unittest.TestCase):
             # 접속 시도로 인한 비결정적 동작 회피, Codex 권고).
             patch.object(utp, "get_latest_bank_rate_from_sync_job", return_value=None),
             patch.object(utp, "get_latest_investing_rate_from_sync_job", return_value=None),
+            # KRX Redis-first helper도 None 고정 → KRX는 mocked DB fallback(get_latest_source_rate)
+            # 경유 결정화 (rate_changed_at 노출 후 Redis key 존재 시 비결정 회피, codex 019efe1f).
+            patch.object(utp, "get_latest_krx_rate_from_sync_job", return_value=None),
         ]
 
     def _run_with(self, **kwargs):
@@ -1079,6 +1082,208 @@ class TestBankInvestingRedisFirstReadContract(unittest.TestCase):
         krx_db_mock.assert_called_once_with(unittest.mock.ANY, "krx", "usd-krw-futures")
         self.assertIn("usd_krw_futures", payload["data"])
         self.assertEqual(payload["data"]["usd_krw_futures"]["rate"], 1382.0)
+
+
+# ---------------------------------------------------------------------------
+# rate_changed_at 노출 (OPEN 2 해소 — USDT same-bucket ordering, REALTIME_V2 §5 race merge)
+# codex 019efe0b: usdt_krw 거래소 entry만 carry(asset 가드) + Redis/DB 양 경로 노출(Option B)
+# ---------------------------------------------------------------------------
+class TestRateChangedAtCarryScope(unittest.TestCase):
+    """build_tether_tab_payload: rate_changed_at는 asset==usdt-krw entry만 carry."""
+
+    def test_usdt_entry_carries_rate_changed_at_when_present(self):
+        raw = {
+            "source": "upbit", "asset": "usdt-krw", "rate": 1485.0,
+            "timestamp": "2026-06-25T15:00:05+09:00",            # seen_at bucket
+            "rate_changed_at": "2026-06-25T15:00:03.500000+09:00",  # 정밀
+        }
+        payload = build_tether_tab_payload(usdt_rates=[raw], bank_rates=[])
+        entry = payload["data"]["usdt_krw"][0]
+        self.assertEqual(entry["rate_changed_at"], "2026-06-25T15:00:03.500000+09:00")
+        self.assertEqual(entry["timestamp"], "2026-06-25T15:00:05+09:00")  # 하위호환 유지
+
+    def test_usdt_entry_omits_rate_changed_at_when_absent(self):
+        """additive — raw에 rate_changed_at 없으면 entry에도 없음(기존 동작 보존)."""
+        payload = build_tether_tab_payload(usdt_rates=[_u("upbit", 1485.0)], bank_rates=[])
+        self.assertNotIn("rate_changed_at", payload["data"]["usdt_krw"][0])
+
+    def test_bank_investing_never_carry_rate_changed_at(self):
+        """scope guard: bank/investing(asset=usd-krw)은 raw에 rate_changed_at 있어도 미부착(timestamp 정밀)."""
+        bank = {"bank": "kb", "currency": "usd-krw", "rate": 1380.0,
+                "timestamp": "2026-06-25T15:00:00+09:00", "rate_changed_at": "X"}
+        inv = {"bank": "investing", "currency": "usd-krw", "rate": 1380.2,
+               "timestamp": "2026-06-25T15:00:00+09:00", "rate_changed_at": "X"}
+        payload = build_tether_tab_payload(
+            usdt_rates=[], bank_rates=[bank], investing_rate=inv)
+        self.assertNotIn("rate_changed_at", payload["data"]["usd_krw_banks"][0])
+        self.assertNotIn("rate_changed_at", payload["data"]["usd_krw_reference"])
+
+    def test_krx_futures_carries_rate_changed_at_when_present(self):
+        """usd_krw_futures(KRX Stage E tick = seen_at alias)도 rate_changed_at carry (USDT 대칭, codex 019efe14)."""
+        krx = {"source": "krx", "asset": "usd-krw-futures", "rate": 1382.0,
+               "timestamp": "2026-06-25T15:00:05+09:00",
+               "rate_changed_at": "2026-06-25T15:00:03+09:00"}
+        payload = build_tether_tab_payload(
+            usdt_rates=[], bank_rates=[], krx_futures_rate=krx)
+        self.assertEqual(
+            payload["data"]["usd_krw_futures"]["rate_changed_at"],
+            "2026-06-25T15:00:03+09:00",
+        )
+
+    def test_krx_futures_omits_rate_changed_at_when_absent(self):
+        """KRX non-tick(generic 3-field) / DB fallback은 rate_changed_at 없음(additive)."""
+        krx = {"source": "krx", "asset": "usd-krw-futures", "rate": 1382.0,
+               "timestamp": "2026-06-25T15:00:00+09:00"}
+        payload = build_tether_tab_payload(
+            usdt_rates=[], bank_rates=[], krx_futures_rate=krx)
+        self.assertNotIn("rate_changed_at", payload["data"]["usd_krw_futures"])
+
+
+class TestUsdtRedisReadRateChangedAt(unittest.TestCase):
+    """get_latest_usdt_rate_from_sync_job: deserialize_usdt_value 전환 + rate_changed_at 노출.
+
+    blocker(codex 019efe0b): Decimal/datetime → float/ISO str 변환 검증(JSON-serializable).
+    """
+
+    def _serialize(self, *, rate, rate_changed_at, seen_at, mirrored_at):
+        import datetime as _dt
+        from decimal import Decimal
+        from app import latest_rates_cache as lrc
+        return lrc.serialize_usdt_value(
+            Decimal(str(rate)),
+            _dt.datetime.fromisoformat(rate_changed_at),
+            _dt.datetime.fromisoformat(seen_at),
+            _dt.datetime.fromisoformat(mirrored_at),
+        )
+
+    def test_returns_rate_changed_at_json_serializable(self):
+        import json
+        from app import latest_rates_cache as lrc
+        value = self._serialize(
+            rate=1485.0,
+            rate_changed_at="2026-06-25T15:00:03+09:00",
+            seen_at="2026-06-25T15:00:05+09:00",
+            mirrored_at="2026-06-25T15:00:05+09:00",
+        )
+        client = MagicMock()
+        client.get.return_value = value
+        with patch.object(lrc, "_get_sync_client", return_value=client):
+            result = lrc.get_latest_usdt_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNotNone(result)
+        # timestamp=seen_at(bucket), rate_changed_at=정밀 — 서로 다름
+        self.assertIn("15:00:05", result["timestamp"])
+        self.assertIn("15:00:03", result["rate_changed_at"])
+        # JSON-serializable (Decimal/datetime 누출 없음 — blocker fix)
+        json.dumps(result)
+        self.assertIsInstance(result["rate"], float)
+        self.assertIsInstance(result["timestamp"], str)
+        self.assertIsInstance(result["rate_changed_at"], str)
+
+    def test_old_schema_rate_changed_at_defaults_to_timestamp(self):
+        import json
+        from app import latest_rates_cache as lrc
+        # old schema (rate_changed_at/seen_at 없음) — deserialize_usdt_value가 timestamp default
+        old_value = json.dumps({
+            "rate": 1485.0,
+            "timestamp": "2026-06-25T15:00:05+09:00",
+            "mirrored_at": "2026-06-25T15:00:05+09:00",
+        })
+        client = MagicMock()
+        client.get.return_value = old_value
+        with patch.object(lrc, "_get_sync_client", return_value=client):
+            result = lrc.get_latest_usdt_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["rate_changed_at"], result["timestamp"])
+
+    def test_malformed_rate_returns_none_db_fallback(self):
+        """malformed rate → deserialize_usdt_value가 None(parse fail 계약) → 호출자 DB fallback.
+
+        codex 019efe14: deserialize_value(generic, float+ValueError)는 None 처리했는데
+        deserialize_usdt_value는 Decimal+InvalidOperation이 except에 없어 예외 전파했음 → 수정 검증.
+        """
+        import json
+        from app import latest_rates_cache as lrc
+        bad_value = json.dumps({
+            "rate": "not-a-number",
+            "timestamp": "2026-06-25T15:00:05+09:00",
+            "rate_changed_at": "2026-06-25T15:00:03+09:00",
+            "seen_at": "2026-06-25T15:00:05+09:00",
+            "mirrored_at": "2026-06-25T15:00:05+09:00",
+        })
+        client = MagicMock()
+        client.get.return_value = bad_value
+        with patch.object(lrc, "_get_sync_client", return_value=client):
+            result = lrc.get_latest_usdt_rate_from_sync_job("upbit", "usdt-krw")
+        self.assertIsNone(result)  # 예외 전파 아닌 None
+
+
+class TestKrxRedisReadRateChangedAt(unittest.TestCase):
+    """get_latest_krx_rate_from_sync_job: Stage E tick(USDT 5-field schema) rate_changed_at 노출."""
+
+    def test_tick_schema_exposes_rate_changed_at(self):
+        import json
+        from app import latest_rates_cache as lrc
+        from decimal import Decimal
+        import datetime as _dt
+        # Stage E tick writer가 쓰는 serialize_usdt_value 값 (timestamp=seen_at, rate_changed_at=정밀)
+        value = lrc.serialize_usdt_value(
+            Decimal("1382.0"),
+            _dt.datetime.fromisoformat("2026-06-25T15:00:03+09:00"),  # rate_changed_at
+            _dt.datetime.fromisoformat("2026-06-25T15:00:05+09:00"),  # seen_at
+            _dt.datetime.fromisoformat("2026-06-25T15:00:05+09:00"),  # mirrored_at
+        )
+        client = MagicMock()
+        client.get.return_value = value
+        with patch.object(lrc, "_get_sync_client", return_value=client):
+            result = lrc.get_latest_krx_rate_from_sync_job("usd-krw-futures")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["source"], "krx")
+        self.assertIn("15:00:05", result["timestamp"])       # seen_at bucket
+        self.assertIn("15:00:03", result["rate_changed_at"])  # 정밀
+        json.dumps(result)  # JSON-serializable (Decimal/datetime 누출 없음)
+        self.assertIsInstance(result["rate"], float)
+
+    def test_generic_schema_rate_changed_at_defaults_to_timestamp(self):
+        """non-tick writer(generic 3-field serialize_value) 값도 처리 — rate_changed_at=timestamp."""
+        import json
+        from app import latest_rates_cache as lrc
+        old_value = json.dumps({
+            "rate": 1382.0,
+            "timestamp": "2026-06-25T15:00:00+09:00",
+            "mirrored_at": "2026-06-25T15:00:00+09:00",
+        })
+        client = MagicMock()
+        client.get.return_value = old_value
+        with patch.object(lrc, "_get_sync_client", return_value=client):
+            result = lrc.get_latest_krx_rate_from_sync_job("usd-krw-futures")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["rate_changed_at"], result["timestamp"])
+
+
+class TestSourceRatesForTopicRateChangedAt(unittest.TestCase):
+    """get_latest_source_rates_for_topic(DB fallback): rate_changed_at = timestamp(정밀)."""
+
+    def test_db_fallback_includes_rate_changed_at_equal_timestamp(self):
+        import datetime as _dt
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from app import crud, models
+
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine)
+        db = sessionmaker(bind=engine)()
+        try:
+            db.add(models.SourceRate(
+                source="upbit", asset="usdt-krw", rate=1485.0,
+                timestamp=_dt.datetime(2026, 6, 25, 6, 0, 0),  # naive UTC
+            ))
+            db.commit()
+            rows = crud.get_latest_source_rates_for_topic(db, "usdt-krw", ["upbit"])
+        finally:
+            db.close()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("rate_changed_at", rows[0])
+        self.assertEqual(rows[0]["rate_changed_at"], rows[0]["timestamp"])
 
 
 if __name__ == "__main__":

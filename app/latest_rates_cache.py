@@ -23,7 +23,7 @@ import logging
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -249,7 +249,10 @@ def deserialize_usdt_value(raw: Union[str, bytes]) -> Optional[Dict[str, Any]]:
             "seen_at": seen_at,
             "mirrored_at": mirrored_at,
         }
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, InvalidOperation):
+        # InvalidOperation: malformed rate(예 "abc") → Decimal()이 ValueError 아닌
+        # decimal.InvalidOperation 발생 → "parse fail → None" 계약(docstring) 위해 포함
+        # (codex 019efe14: generic deserialize_value는 float()+ValueError catch라 None 처리했음).
         return None
 
 
@@ -543,8 +546,9 @@ def get_latest_usdt_rate_from_sync_job(
         asset: 통화쌍.
 
     Returns:
-        {"source", "asset", "rate", "timestamp"} topic-native shape — DB fallback
-        helper(`crud.get_latest_source_rates_for_topic`)와 동일.
+        {"source", "asset", "rate", "timestamp", "rate_changed_at"} topic-native shape —
+        DB fallback helper(`crud.get_latest_source_rates_for_topic`)와 동일(양쪽 rate_changed_at 포함).
+        timestamp=seen_at(5s bucket), rate_changed_at=정밀 변경시각. 모두 JSON-serializable.
         miss(key 부재) / parse fail / 예외 시 None — 호출자가 DB fallback.
     """
     from app import usdt_redis_stats
@@ -567,18 +571,23 @@ def get_latest_usdt_rate_from_sync_job(
     if raw is None:
         usdt_redis_stats.record_redis_read_miss(source)
         return None
-    parsed = deserialize_value(raw)
+    parsed = deserialize_usdt_value(raw)
     if parsed is None:
         # parse fail (mirrored_at naive 등) — None 반환, 호출자 DB fallback
         usdt_redis_stats.record_redis_read_parse_fail(source)
         return None
     usdt_redis_stats.record_redis_read_hit(source)
-    # topic-native shape으로 반환 — helper 인자 source/asset 그대로 부착
+    # topic-native shape으로 반환 — helper 인자 source/asset 그대로 부착.
+    # deserialize_usdt_value는 rate=Decimal, timestamp/rate_changed_at=datetime이므로
+    # JSON-serializable(float / ISO str)로 변환 (codex 019efe0b blocker). rate_changed_at은
+    # 정밀 변경시각 — timestamp(=seen_at 5s bucket alias)의 same-bucket ordering 한계 해소용
+    # (§5 race merge). timestamp는 기존대로 seen_at(하위호환).
     return {
         "source": source,
         "asset": asset,
-        "rate": parsed["rate"],
-        "timestamp": parsed["timestamp"],
+        "rate": float(parsed["rate"]),
+        "timestamp": parsed["timestamp"].isoformat(),
+        "rate_changed_at": parsed["rate_changed_at"].isoformat(),
     }
 
 
@@ -813,8 +822,10 @@ def get_latest_krx_rate_from_sync_job(
         asset: KRX asset (예: "usd-krw-futures"). source는 "krx" 고정.
 
     Returns:
-        topic-native shape `{source, asset, rate, timestamp}` (DB
-        fallback과 동일 shape) 또는 miss/parse fail/error 시 None.
+        topic-native shape `{source, asset, rate, timestamp, rate_changed_at}` 또는
+        miss/parse fail/error 시 None. rate_changed_at=정밀 변경시각(Stage E tick seen_at
+        alias 대응). DB fallback(get_latest_source_rate)은 rate_changed_at 없음 — 그쪽
+        timestamp가 이미 정밀이라 client `rate_changed_at ?? timestamp`로 동작.
 
     설계 격리:
         - sync `redis.Redis` client 재사용
@@ -836,14 +847,21 @@ def get_latest_krx_rate_from_sync_job(
         return None
     if raw is None:
         return None
-    parsed = deserialize_value(raw)
+    parsed = deserialize_usdt_value(raw)
     if parsed is None:
         return None
+    # KRX Stage E tick writer(set_latest_krx_rate_from_sync_job_tick_level, KRX_REDIS_TICK_WRITE_ENABLED)는
+    # USDT 5-field schema(serialize_usdt_value)로 timestamp=seen_at(5s bucket)·rate_changed_at=정밀 기록.
+    # deserialize_usdt_value는 generic 3-field(non-tick writer)도 처리(rate_changed_at=timestamp default).
+    # Decimal/datetime → float/ISO str 변환 (codex 019efe0b/14). rate_changed_at 노출로 USDT와 동일한
+    # same-bucket merge 정밀도 (REALTIME_V2 §5). DB fallback(get_latest_source_rate)은 정밀 timestamp라
+    # client `rate_changed_at ?? timestamp`로 충분(공유 함수 미변경).
     return {
         "source": "krx",
         "asset": asset,
-        "rate": parsed["rate"],
-        "timestamp": parsed["timestamp"],
+        "rate": float(parsed["rate"]),
+        "timestamp": parsed["timestamp"].isoformat(),
+        "rate_changed_at": parsed["rate_changed_at"].isoformat(),
     }
 
 

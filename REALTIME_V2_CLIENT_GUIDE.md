@@ -1,6 +1,7 @@
 # REALTIME_V2_CLIENT_GUIDE — topic 구독 클라이언트 계약 (신규 iOS/Android 앱)
 
-> **상태**: Proposed/Draft (2026-06-25, codex 019efdf0 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
+> **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
+> OPEN 1건 잔존: usdt:krw REST bootstrap(§3). (USDT same-bucket ordering OPEN은 `rate_changed_at` 노출로 해소됨, §5.)
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e), **prod에서는 flag-off dormant**
 > (`TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` default false) — live 활성은 별도 GO.
 > 이 문서가 topic 계약의 **authoritative source**. [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md)
@@ -78,6 +79,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 - Entry 식별자 = **`(source, asset)` tuple**. 같은 source가 다른 asset 가능.
 - 서버는 표시명/아이콘/색상/정렬 **미전송**. 단말이 `(source, asset)`로 자체 registry lookup. 새 source 추가 시 단말 registry 갱신.
+- **`rate_changed_at`(optional, ISO8601 KST)**: `usdt_krw` 거래소 + `usd_krw_futures`(KRX) entry의 정밀 변경 시각(Redis-served 시). 이들 `timestamp`는 `seen_at`(5초 bucket)일 수 있어 merge ordering은 이 필드를 우선(§5). bank/investing/FX entry엔 없음(`timestamp`가 이미 정밀). client는 항상 `rate_changed_at ?? timestamp` 사용.
 
 ### 2.3 `fx:<asset>` data
 
@@ -92,10 +94,10 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 ```jsonc
 "data": {
-  "usdt_krw": [ {entry}, ... ],       // USDT 5거래소 (upbit/bithumb/coinone/korbit/gopax)
+  "usdt_krw": [ {entry + "rate_changed_at"}, ... ],  // USDT 5거래소 — entry에 rate_changed_at 추가(§5)
   "usd_krw_banks": [ {entry}, ... ],  // 은행 (kb, hana)
   "usd_krw_reference": {entry},       // Optional — source="investing", asset="usd-krw"
-  "usd_krw_futures": {entry}          // Optional — source="krx", asset="usd-krw-futures" (KRX_TOPIC_INCLUDE 시만)
+  "usd_krw_futures": {entry (+"rate_changed_at" when Redis-served)}  // Optional — source="krx", asset="usd-krw-futures" (KRX_TOPIC_INCLUDE 시만)
 }
 ```
 
@@ -127,15 +129,17 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
   - *중도 부재*(이전엔 왔는데 이번 메시지에 없음): **이전 값 유지**(v1엔 삭제 신호 없음).
   - ⚠️ 운영 함의: `KRX_TOPIC_INCLUDE`를 끄면(`usd_krw_futures` 미전송) **이미 연결된 앱에서 KRX가 즉시 사라지지 않고 마지막 값이 남는다**. 즉시 제거가 필요하면 별도 신호 필요(v1 미지원).
 
-## 5. ⚠️ snapshot ↔ live race → timestamp merge (필수 계약 + 한계)
+## 5. ⚠️ snapshot ↔ live race → merge 규칙 (필수 계약)
 
 서버는 구독 snapshot과 직후 live publish의 **순서 역전**이 가능(per-message seq 없음). 클라이언트 merge 규칙:
 
-> **`(source, asset)`별로 `timestamp`가 더 최신인 entry만 반영. 더 오래된 `timestamp`로 기존 값을 덮지 않는다. 같은 `timestamp`면 기존 값 유지(회귀 방지).**
+> **각 `(source, asset)`에 대해 `merge_at = rate_changed_at ?? timestamp`를 비교해, `merge_at`이 더 최신인 entry만 반영. 더 오래된 `merge_at`으로 기존 값을 덮지 않는다(같으면 기존 유지 → 회귀 방지).**
 
-- FX(은행/investing): `timestamp`=실제 값 변경 시각(정밀) → merge 정확.
-- **⚠️ USDT 5거래소**: `timestamp`=`seen_at`(서버 5초 bucket alias, `serialize_usdt_value`) — 실제 변경 시각 아님. **같은 5초 bucket 안 연속 변경은 timestamp가 동일**할 수 있어, 동률 merge로 회귀는 막지만 같은 bucket의 더 최신 rate를 ≤5초간 놓칠 수 있음(다음 메시지에 자연 보정).
-  > **🔴 OPEN (출시 전 검토)**: USDT same-bucket 정밀 ordering이 필요하면 topic payload에 `rate_changed_at`(이미 Redis value에 존재) 또는 per-message `seq`를 노출하도록 서버 보강. v1 미노출.
+- **FX(은행/investing)**: `timestamp`=실제 값 변경 시각(정밀). `rate_changed_at` 없음 → `merge_at = timestamp`. merge 정확.
+- **USDT 5거래소(`usdt_krw` 그룹)**: `timestamp`=`seen_at`(5초 bucket alias)지만 **`rate_changed_at`(정밀 변경 시각)이 entry에 포함됨** → `merge_at = rate_changed_at`로 same-bucket 연속 변경도 정밀 ordering. (서버: Redis path `get_latest_usdt_rate_from_sync_job` + DB fallback `get_latest_source_rates_for_topic` 양쪽 노출.)
+- **KRX(`usd_krw_futures`)**: Stage E tick writer(`KRX_REDIS_TICK_WRITE_ENABLED`, 운영 활성)가 USDT와 동일한 5-field schema를 써서 `timestamp`=`seen_at`(5초 bucket)일 수 있음 → **Redis-served entry에 `rate_changed_at`(정밀) 포함**(USDT와 대칭). DB fallback 시엔 `timestamp`가 정밀이라 `rate_changed_at` 생략 → `merge_at = rate_changed_at ?? timestamp`로 일관 처리.
+
+> 한계: `rate_changed_at`은 ms 해상도라 5초 bucket 문제는 해소되나, 진정한 total order(동일 ms 동시 변경)는 per-message `seq`가 필요(v1 미지원, 실질 영향 없음).
 
 ## 6. reconnect / resync + 클라이언트 정책
 
@@ -153,7 +157,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 REALTIME_ARCHITECTURE_PLAN.md §5에 설계로 적혀 있으나 **현재 서버 미구현** — 계약 제외:
 - **hello handshake**(protocol_version/supported_topics 협상): 없음. 단말은 고정 topic 목록(§0) 사용.
-- **delta / seq**: 없음. 항상 full snapshot. dedup/순서는 §5 timestamp merge로 단말이 처리(USDT 한계 §5 OPEN).
+- **delta / seq**: 없음. 항상 full snapshot. dedup/순서는 §5 merge(`rate_changed_at ?? timestamp`)로 단말이 처리.
 - **서버측 stale 신호**: payload에 stale 필드 없음(timestamp만). 휴장/주말 stale UI는 단말 정책(권고: 마지막 값 유지).
 
 ## 9. 참조

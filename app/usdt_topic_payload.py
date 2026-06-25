@@ -27,11 +27,16 @@ Schema (version=1):
       "type": "snapshot",
       "version": 1,
       "data": {
-        "usdt_krw": [{"source", "asset", "rate", "timestamp"}, ...],
-        "usd_krw_banks": [...],
+        "usdt_krw": [{"source", "asset", "rate", "timestamp", "rate_changed_at"}, ...],
+        "usd_krw_banks": [...],         # entry shape: {source, asset, rate, timestamp}
         "usd_krw_reference": {...},     # source="investing" + asset="usd-krw" only
         "usd_krw_futures": {...}        # source="krx" + asset="usd-krw-futures" only (optional)
       }
+
+    `rate_changed_at`(정밀 변경시각)는 **seen_at(5s bucket) alias를 쓰는 entry** — usdt_krw 거래소
+    + usd_krw_futures(KRX Stage E tick, Redis-served)에 추가 — same-bucket ordering 한계 해소
+    (REALTIME_V2_CLIENT_GUIDE §5, client merge = rate_changed_at ?? timestamp). bank/investing은
+    timestamp가 정밀이라 미부착. KRX DB fallback(get_latest_source_rate)도 정밀이라 미부착.
     }
 
     Entry 식별자는 (source, asset) tuple. 단말은 자체 registry로 표시명/아이콘/
@@ -100,6 +105,8 @@ def _normalize_entry(
 
     Returns:
         {"source", "asset", "rate", "timestamp"} 또는 rate/timestamp 부재 시 None.
+        asset in ("usdt-krw", "usd-krw-futures") 이고 raw에 rate_changed_at 있으면 entry에
+        추가(seen_at alias source = USDT 거래소 + KRX Stage E tick, §5).
 
     Note (display_name 제거, 2026-05-11):
         Entry 식별자는 (source, asset) tuple. 서버 payload는 표시명/아이콘/색상을
@@ -116,12 +123,21 @@ def _normalize_entry(
     if source is None or asset is None or rate is None or timestamp is None:
         return None
 
-    return {
+    entry = {
         "source": source,
         "asset": asset,
         "rate": rate,
         "timestamp": timestamp,
     }
+    # rate_changed_at: seen_at(5s bucket) alias를 쓰는 source entry만 노출 (same-bucket 정밀
+    # ordering — REALTIME_V2_CLIENT_GUIDE §5 race merge). 대상 = usdt-krw 거래소 + usd-krw-futures
+    # (KRX Stage E tick writer가 USDT 5-field schema 사용, codex 019efe14). bank/investing은
+    # timestamp가 이미 정밀이라 미부착. asset 가드로 bank/reference에 우연히 필드 있어도 안 붙음.
+    if asset in ("usdt-krw", "usd-krw-futures"):
+        rate_changed_at = raw.get("rate_changed_at")
+        if rate_changed_at is not None:
+            entry["rate_changed_at"] = rate_changed_at
+    return entry
 
 
 def _list_sort_key(entry: Dict[str, Any]) -> Tuple[int, int, str]:
