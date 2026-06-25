@@ -277,5 +277,11 @@ async def handle_client_message(websocket: "WebSocket", raw_text: str) -> None:
 
     if msg_type == "subscribe":
         registry.register(websocket, topics)
+        # snapshot-on-subscribe (realtime topic release readiness): 구독 직후 현재 상태를
+        # 즉시 전송 → 신규 topic-only 앱이 다음 publish까지 빈 화면으로 시작하는 것 방지.
+        # lazy import로 dispatcher import 그래프 경량 유지(builder 체인은 첫 subscribe 시 로드).
+        from app.topic_initial_snapshot import send_initial_snapshots
+
+        await send_initial_snapshots(websocket, topics)
     else:  # unsubscribe
         registry.unregister(websocket, topics)

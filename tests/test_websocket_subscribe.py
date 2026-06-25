@@ -82,7 +82,10 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
 
     async def test_subscribe_with_flag_enabled_registers_topics(self):
         ws = MagicMock()
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+        # subscribe(FF on)는 이제 snapshot-on-subscribe도 트리거 → routing 검증만 격리하려고
+        # send_initial_snapshots를 no-op으로 patch(snapshot 로직은 test_topic_initial_snapshot.py).
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()):
             await handle_client_message(
                 ws,
                 '{"type": "subscribe", "topics": ["usdt:krw", "krx:usd-krw-futures"]}',
@@ -90,6 +93,22 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             topic_dispatcher.registry.get_subscriptions(ws),
             {"usdt:krw", "krx:usd-krw-futures"},
+        )
+
+    async def test_subscribe_triggers_initial_snapshot(self):
+        """subscribe(FF on) → register 후 send_initial_snapshots 호출 (snapshot-on-subscribe wiring)."""
+        ws = MagicMock()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch(
+                 "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+             ) as mock_snap:
+            await handle_client_message(
+                ws, '{"type": "subscribe", "topics": ["fx:usd-krw"]}'
+            )
+        mock_snap.assert_awaited_once_with(ws, ["fx:usd-krw"])
+        # register는 snapshot 전에 완료 (구독 등록 보장)
+        self.assertEqual(
+            topic_dispatcher.registry.get_subscriptions(ws), {"fx:usd-krw"}
         )
 
     async def test_unsubscribe_with_flag_enabled_removes_topics(self):
