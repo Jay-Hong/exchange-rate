@@ -598,7 +598,7 @@ def collect_usdt_rates() -> None:
                         },
                     )
                     # PR Z-2e B-Step 1 Foundation 재시도: sync Redis client로
-                    # latest 즉시 갱신 (mirror cycle 3초 bypass).
+                    # latest 즉시 갱신 (mirror cycle bypass).
                     # 실패는 best-effort — USDT는 Z-2d로 mirror cycle 미경유.
                     # Miss는 B-Step 2 read path가 DB fallback으로 처리.
                     _mirror_changed_source_to_redis(db=db, source=source, asset=asset)

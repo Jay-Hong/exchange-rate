@@ -108,8 +108,8 @@ def _write_changed_bank_rates_to_redis(redis_updates: list) -> list:
     """PR Z-2e Step 3b — bank latest Redis direct write (commit 직후 호출).
 
     broadcast hot path가 latest:bank:* key를 Redis-first로 읽으므로 mirror cycle
-    3초 bypass. Z-2d allowlist 통과한 source라 본 write 실패 시 mirror cycle이
-    safety repair (3s 주기).
+    bypass. Z-2d allowlist 통과한 source라 본 write 실패 시 mirror cycle이
+    safety repair (LATEST_MIRROR_INTERVAL_SECONDS 주기, 운영 60s).
 
     `redis_updates` entry shape: `{"source", "asset", "rate", "timestamp"}`
     (topic-native). 호출자는 db.commit() 성공 후에만 이 함수를 부른다.
@@ -689,7 +689,7 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
         logger.info(f"🎉 총 {new_records_count}개 {bank_name}은행의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": bank_name})
 
         # commit 성공 후 Redis direct write — broadcast hot path latency 단축.
-        # 실패해도 mirror cycle (3s)이 safety repair, alert 흐름에 영향 X.
+        # 실패해도 mirror cycle (LATEST_MIRROR_INTERVAL_SECONDS 주기, 운영 60s)이 safety repair, alert 흐름에 영향 X.
         # (PR C) 반환된 SET 성공분만 topic trigger 대상 (SET-only gating, axis #2).
         redis_succeeded = _write_changed_bank_rates_to_redis(redis_updates)
 

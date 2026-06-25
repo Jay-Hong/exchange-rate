@@ -1129,9 +1129,9 @@ def set_latest_bank_rate_from_sync_job(
     """sync scheduler thread 전용 direct writer — bank (PR Z-2e Step 3b).
 
     `crud.insert_bank_rates_into_db`가 commit 직후 호출. broadcast hot path가
-    latest:bank:* key를 Redis-first로 읽으므로 mirror cycle 3초 bypass.
+    latest:bank:* key를 Redis-first로 읽으므로 mirror cycle bypass.
 
-    USDT writer와 다른 점: bank는 Z-2d allowlist 통과 → mirror cycle (3s)이 매
+    USDT writer와 다른 점: bank는 Z-2d allowlist 통과 → mirror cycle (LATEST_MIRROR_INTERVAL_SECONDS, 운영 60s)이 매
     사이클 latest:bank:* key를 재기록한다 (safety net). 따라서 본 direct write가
     실패해도 다음 mirror cycle이 자연 복구한다. 호출자 흐름(FCM alerts)에 영향 X.
 
@@ -1206,8 +1206,8 @@ def get_latest_bank_rate_from_sync_job(
     """sync builder 전용 Redis GET — bank latest (PR Z-2e Step 3a).
 
     USDT source(get_latest_usdt_rate_from_sync_job)와 달리 bank는 Z-2d allowlist
-    통과 → mirror cycle이 매 3초 latest:bank:* key를 갱신한다. 따라서 stale 판정
-    적용 (is_stale, 6초 기준). stale/miss/parse fail/error 시 None — 호출자 DB
+    통과 → mirror cycle이 주기적으로(LATEST_MIRROR_INTERVAL_SECONDS, 운영 60s) latest:bank:* key를 갱신한다. 따라서 stale 판정
+    적용 (is_stale, interval×2 기준; 운영 120s). stale/miss/parse fail/error 시 None — 호출자 DB
     fallback. async circuit_breaker 미사용 (USDT helper 패턴 일관, broadcast Redis
     path 격리).
 
@@ -1602,7 +1602,7 @@ async def _mirror_all_latest_atomic(db: Session) -> Dict[str, Any]:
     enforced_action==ATOMIC일 때만 호출 (prod는 C6-FLIP까지 LEGACY라 dormant). 경계:
     - bank/investing: §16 re-read revision selector(direct flush-row-ref와 same row→same revision) +
       v2 compare_write. **topic trigger 미발사** — mirror는 value-recovery/refresh이지 change-notification
-      아님(3s마다 발사 시 subscriber spam). DXY/latest:index는 v1 유지(별도 카테고리/control key).
+      아님(매 mirror cycle 발사 시 subscriber spam). DXY/latest:index는 v1 유지(별도 카테고리/control key).
     - source 루프: allowlist로 항상 skip이라 atomic에서 미반복 (USDT/KRX source atomic은 별도 C6 트랙 —
       `_select_latest_source_with_revision` 신규 필요, P1_COMMON_BASE_DESIGN §17 holistic).
     - loaded_keys/latest:index 순서: revision selector가 표시순 미적용이라 `_bank_display_sort_key`로 명시
@@ -1721,7 +1721,7 @@ async def _mirror_all_latest(db: Session) -> Dict[str, Any]:
     # Bug-fix(incident 2026-06-21): write-mode 미확정(_INITIAL, startup refresh 전/transient 실패)엔
     # mirror-WRITE 금지. _INITIAL.enforced_action=LEGACY라 post-flip warmup이 v2를 v1으로 덮으면
     # atomic mirror가 migration_required로 고착. skip(legacy-write 아님) — start_scheduler refresh 후
-    # 3s mirror job이 backfill, 그 사이 fetch는 DB fallback(설계 경로). table-absent(pre-G2a)는 refresh가
+    # mirror job(LATEST_MIRROR_INTERVAL_SECONDS 주기)이 backfill, 그 사이 fetch는 DB fallback(설계 경로). table-absent(pre-G2a)는 refresh가
     # legacy로 확정하므로 is_initialized()=True → 정상 legacy write.
     if not atomic_write_runtime.is_initialized():
         return _mirror_skip_stats("uninitialized")

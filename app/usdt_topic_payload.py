@@ -258,7 +258,7 @@ def load_and_build_tether_tab_payload(
           banks는 각 cron 독립). DB는 lazy 조회 (Redis 1+ miss 시점에 1회).
         - Investing (asset=usd-krw): **Redis-first** (Step 3a). 단일 fallback —
           Redis hit이면 사용, miss/stale이면 DB fallback.
-        - bank/investing은 mirror cycle 갱신 가정 → `is_stale()` 적용 (6초 기준).
+        - bank/investing은 mirror cycle 갱신 가정 → `is_stale()` 적용 (interval×2 기준; 운영 120s).
           USDT(mirror skip)와 다른 환경 (ADR-026 vs ADR-029).
         - KRX (asset=usd-krw-futures): include_krx=True일 때만 query.
           False면 호출 자체 X (불필요 DB load 차단).

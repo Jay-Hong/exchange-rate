@@ -1455,7 +1455,7 @@ async def get_atomic_write_outcomes():
 async def get_latest_mirror_outcomes():
     """Slice 1a (mirror-retirement measure-first) — latest mirror atomic compare_write outcome telemetry.
 
-    3초 mirror cycle의 atomic_outcomes(advance/refreshed_equal/skipped_newer/conflict/structural 등)를
+    mirror cycle(LATEST_MIRROR_INTERVAL_SECONDS 주기, 운영 60s)의 atomic_outcomes(advance/refreshed_equal/skipped_newer/conflict/structural 등)를
     process-local 누적으로 surface(read-only, behavior-change-0). interpretation은 3 의미 분리:
     advance=direct writer revision gap 보정(은퇴 위험) / freshness_refresh=refreshed_equal(mirrored_at
     재기록=read-path freshness 유지, 은퇴 시 대체 필요) / redundant=skipped_newer만(진짜 잉여) +

@@ -95,7 +95,7 @@ def _emit_dxy_direct_latest(db) -> None:
     config.DXY_DIRECT_LATEST_ENABLED off면 no-op(배포 시점 behavior-change-0; DB read도 안 함). on이면
     mirror cycle과 **동일하게** get_latest_dxy_rate(db) → set_latest_dxy_rate_from_sync_job로 써서
     mirror와 **client-visible 동일** value(rate/timestamp/source; mirrored_at은 호출시각이라 다름).
-    공존은 bounded race(≤1 cycle ~3s self-heal, DXY 10s 해상도라 무시가능). insert 반환값 미확인 =
+    공존은 bounded race(≤1 mirror cycle self-heal, DXY 10s 해상도라 무시가능). insert 반환값 미확인 =
     same-rate여도 현재 latest 재SET(의도된 mini-heartbeat; codex B5 — insert bool gate 금지).
     best-effort: 실패해도 mirror cycle이 안전망(read path 보호).
     instrument='dxy' 현물만 — dxy_spot은 insert_dxy_rate_into_db(=instrument='dxy' 하드코딩)만

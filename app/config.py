@@ -39,8 +39,9 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None �
 # Redis-first broadcast (PR3 - latest mirror)
 # REDIS_LATEST_ENABLED: PR3 활성화 토글. default OFF로 코드 배포 후 운영 영향 없이 들어가고,
 # 운영에서 env=true로 canary 활성화. guardrail 위반 시 env=false로 즉시 rollback 가능.
-# LATEST_MIRROR_INTERVAL_SECONDS: mirror job 주기 (초). PoC 후 1/3/5초 sweet spot 비교 가능.
-# stale 판정은 mirrored_at 기준 interval * 2 초 초과 (latest_rates_cache.is_stale).
+# LATEST_MIRROR_INTERVAL_SECONDS: mirror job 주기 (초). 기본 3s, 운영 60s
+# (mirror-retirement cadence-reduce 2026-06-25 — polling 3s→60s 20×↓, 60s recovery net 유지).
+# stale 판정은 mirrored_at 기준 interval * 2 초 초과 (latest_rates_cache.is_stale → 운영 120s).
 REDIS_LATEST_ENABLED = os.getenv("REDIS_LATEST_ENABLED", "false").lower() == "true"
 LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS", "3"))
 
@@ -52,7 +53,7 @@ LATEST_MIRROR_INTERVAL_SECONDS = int(os.getenv("LATEST_MIRROR_INTERVAL_SECONDS",
 DXY_DIRECT_LATEST_ENABLED = os.getenv("DXY_DIRECT_LATEST_ENABLED", "false").lower() == "true"
 
 # mirror-retirement B step2: read-path per_key_stale 완화 토글 (default OFF = 현 동작 유지).
-# true 시 fetch_rates_from_redis가 per-key mirrored_at이 is_stale(6s)이어도 전체 DB fallback 대신
+# true 시 fetch_rates_from_redis가 per-key mirrored_at이 is_stale(interval×2; 기본 6s/운영 120s)이어도 전체 DB fallback 대신
 # old-but-present 값을 서빙(rate는 정확, mirrored_at만 늙음) + served_stale meta 표시. 단 age가
 # CEILING 초과면 fallback(naive 무한 서빙 금지). miss/parse/redis_error/circuit은 계속 fallback(완화 X).
 # mirror 은퇴의 forcing function(A heartbeat가 아니라 read-path freshness 의미 재정의). mirror ON 채
