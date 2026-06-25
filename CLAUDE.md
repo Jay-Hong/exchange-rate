@@ -34,7 +34,8 @@
 > 📋 **KRX Stage 1 운영:** [KRX_CANARY.md](KRX_CANARY.md) - **현재 운영 중**. Stage 0/1/2 runbook, SQL/Redis 검증 명령, 24h baseline 지표, 5/18 만기 관찰 시나리오, rollback 절차. **F-3 KRX 가격알림 운영 활성 (2026-05-26, 섹션 추가)**: env 활성 절차 + iOS canary (Google Sign-In 우회 custom token 패턴) + 토글 매트릭스 + Rollback.
 > 📜 **USDT 탭 초기 제안서:** [USDT_TAB_PROPOSAL.md](USDT_TAB_PROPOSAL.md) - **Historical proposal (rollout superseded)**. 제품 방향성/Decision A~F는 참고 유효, "기존 WebSocket에 usdt-krw 포함" rollout은 폐기
 > 🧱 **USDT Phase 1 백엔드 설계:** [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md) - **source/asset 도메인 모델 유효 (source_rates / SourceRegistry / 알림 정책)**. legacy `/api/rates` + WebSocket `rates` 통합 rollout은 superseded — 데이터 수신 계약은 [REALTIME_ARCHITECTURE_PLAN.md](REALTIME_ARCHITECTURE_PLAN.md) + [ADR-028](DECISIONS.md) 따름
-> 📱 **USDT iOS/Android 가이드:** [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md) - **RateSource / 어댑터 / SourceRegistry 모델 참고용**. 데이터 수신 방식(`/api/rates`, `/ws` `rates` 배열)은 V2 protocol(`REALTIME_V2_CLIENT_GUIDE.md`, Phase Z-2 신설 예정)로 대체 예정
+> 📱 **USDT iOS/Android 가이드:** [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md) - **RateSource / 어댑터 / SourceRegistry 모델 참고용**. 데이터 수신 방식(`/api/rates`, `/ws` `rates` 배열)은 V2 topic protocol로 대체 — Topic API 섹션은 [REALTIME_V2_CLIENT_GUIDE.md](REALTIME_V2_CLIENT_GUIDE.md)로 supersede됨
+> 📡 **Realtime V2 클라이언트 계약:** [REALTIME_V2_CLIENT_GUIDE.md](REALTIME_V2_CLIENT_GUIDE.md) - **신규 topic-consuming 앱 핸드오프 단일 계약 (2026-06-25 신설, Draft)**. 지원 topic(fx:\*/usdt:krw) · subscribe/snapshot-on-subscribe · payload schema · (source,asset) timestamp-merge race 계약 · REST bootstrap(usdt:krw 부재=OPEN) · versioning. 서버 코드 구현 완료·flag-off dormant, live 활성 별도 GO. OPEN 2건(usdt:krw REST bootstrap / USDT same-bucket ordering)은 출시 전 확정
 
 **글로벌 가이드:**
 > 📚 **공통 개발 규칙:** [~/.claude/CLAUDE.md](file:///Users/jay/.claude/CLAUDE.md) - MCP 설정, 코딩 스타일, Git Convention

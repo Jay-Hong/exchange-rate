@@ -288,6 +288,11 @@ SourceRate { source, asset, rate, timestamp }
 
 ## Topic API (Phase Z-2b, REALTIME v2)
 
+> 🔴 **SUPERSEDED (2026-06-25)**: 이 "Topic API" 섹션은 [REALTIME_V2_CLIENT_GUIDE.md](REALTIME_V2_CLIENT_GUIDE.md)로
+> 통합·대체됐다. **신규 앱 구현은 REALTIME_V2_CLIENT_GUIDE.md를 authoritative source로 사용**(snapshot-on-subscribe,
+> connect 직후 legacy `type=rates` payload 무시, (source,asset) timestamp-merge, REST bootstrap OPEN 등 포함).
+> 아래 내용은 snapshot-on-subscribe 이전 설명이라 일부 stale — 참고용으로만.
+
 테더 탭 전용 신규 채널. legacy `/ws` `rates` 배열과 **별개 채널**로 동시 운영
 (legacy는 유지). topic API는 ADR-028 "topic-only Tether/KRX" 계약 구현.
 
