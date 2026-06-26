@@ -160,11 +160,13 @@ per-point data (mixed series, 구간별 close_basis 다름):
 
 response 안 data point (KRX series만 contract_code 포함, date-to-contract mapping은 §7-new 참조):
 ```json
-{"ts": "2026-05-18T00:00:00+09:00", "rate": 1496.5, "source": "krx", "contract_code": "A75606"}
+{"ts": "2026-05-18T00:00:00+09:00", "rate": 1496.5, "source": "krx", "high": 1499.0, "low": 1494.0, "contract_code": "A75606"}
 // ← 만기일 — daily date bucket은 next contract (07:00 swap 후 user-facing)
 {"ts": "{expiry_date 이전 마지막 거래일}", "rate": "...", "source": "krx", "contract_code": "A75605"}
 // ← expiry_date 이전 — 만기 contract
 ```
+
+data point 필드: `ts`(ISO8601 KST) · `rate`(=close) · `source` · **`high`/`low`**(optional, source_daily/hourly의 버킷 고가/저가 — client 단일 소스 음영 밴드용. `close_only` row는 high=low=close. row에 없으면 생략 → client nil → 밴드 미표시. DXY/market_index series는 미노출) · `close_basis`/`source_method`(mixed series per-point) · `contract_code`(KRX).
 
 ## 6. Provenance / fallback schema
 

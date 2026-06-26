@@ -206,6 +206,12 @@ def _sdr_data_point(row, per_point_metadata: list, bucket_ts) -> dict:
     ts = bucket_ts(row) — daily=date_kst 00:00:00+09:00 / hourly=bucket_ts_kst 시각+09:00 (§5).
     """
     point = {"ts": bucket_ts(row), "rate": float(row.close), "source": row.source}
+    # high/low: 단일 소스 음영 밴드용 (client GraphV2Point.high/low). close_only row는 high=low=close.
+    # additive — 기존 client는 무시. None이면 생략(client nil → 밴드 미표시).
+    if row.high is not None:
+        point["high"] = float(row.high)
+    if row.low is not None:
+        point["low"] = float(row.low)
     if "close_basis" in per_point_metadata:
         point["close_basis"] = row.close_basis
         point["source_method"] = row.source_method

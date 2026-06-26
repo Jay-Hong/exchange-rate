@@ -131,6 +131,20 @@ class TestProvenance(_Base):
         self.assertEqual(inv["data"][1]["rate"], 1390.0)
         self.assertEqual(inv["data"][1]["source"], "investing")
         self.assertTrue(inv["data"][1]["ts"].endswith("+09:00"))  # KST 포맷
+        # high/low 노출 (단일 소스 음영 밴드용) — close_only는 high=low=close
+        self.assertEqual(inv["data"][1]["high"], 1390.0)
+        self.assertEqual(inv["data"][1]["low"], 1390.0)
+
+    def test_high_low_exposed_for_ohlc(self):
+        """source_ohlc row의 high/low가 point에 노출 (단일 소스 음영, close와 구별)."""
+        self._add(
+            _sdr("investing", "usd-krw", date(2026, 6, 1), 1390.0,
+                 "investing_observed_eod", "observed_rollup", high=1395.0, low=1385.0),
+        )
+        inv = next(s for s in self._usd_3m()["series"] if s["id"] == "investing.usd")
+        self.assertEqual(inv["data"][0]["rate"], 1390.0)
+        self.assertEqual(inv["data"][0]["high"], 1395.0)
+        self.assertEqual(inv["data"][0]["low"], 1385.0)
 
 
 # ---------------------------------------------------------------------------
