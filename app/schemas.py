@@ -208,6 +208,30 @@ class SourceNotificationSettingsListResponse(BaseModel):
     total_count: int
 
 
+class SourceNotificationLogResponse(BaseModel):
+    """Source 기반 알림 발송 히스토리 1건 (사용자용).
+
+    source log는 condition/threshold/triggered_rate를 inline 보존 → 설정 삭제 후에도
+    안전. `type` 필드 없음(source-scoped endpoint라 중복; 향후 comparison은 별 record).
+    sent_at은 main.py builder에서 crud.to_kst_isoformat() KST ISO8601로 채움
+    (from_attributes 미사용 — naive UTC 직렬화로 iOS 디코더와 어긋나는 것 회피).
+    """
+    id: int
+    setting_id: Optional[int] = None
+    source: str
+    asset: str
+    condition: str  # "above" or "below"
+    threshold: float
+    triggered_rate: float
+    sent_at: str  # KST ISO 8601
+
+
+class SourceNotificationLogsListResponse(BaseModel):
+    """Source 기반 알림 발송 히스토리 목록 응답 (최신순)."""
+    logs: List[SourceNotificationLogResponse]
+    total_count: int  # 반환된 페이지 길이 (cap된 '최근 N건'; 전체 카운트 아님)
+
+
 # ============================================================
 # News: 뉴스 피드 스키마
 # ============================================================

@@ -2841,6 +2841,26 @@ def build_source_notification_setting_response(
     )
 
 
+def build_source_notification_log_response(
+    log: models.SourceNotificationLog,
+) -> schemas.SourceNotificationLogResponse:
+    """SourceNotificationLog DB 모델을 API 응답으로 변환.
+
+    sent_at은 다른 응답과 동일하게 crud.to_kst_isoformat()로 KST(+09:00) ISO 직렬화
+    (from_attributes에 의존하면 naive UTC가 나가 iOS 디코더와 어긋남).
+    """
+    return schemas.SourceNotificationLogResponse(
+        id=log.id,
+        setting_id=log.setting_id,
+        source=log.source,
+        asset=log.asset,
+        condition=log.condition,
+        threshold=log.threshold,
+        triggered_rate=log.triggered_rate,
+        sent_at=crud.to_kst_isoformat(log.sent_at),
+    )
+
+
 def _validate_alert_source_asset_or_400(source: str, asset: str) -> None:
     """Thin wrapper — `source_registry.validate_alert_source_asset` + HTTPException 변환.
 
@@ -3088,6 +3108,55 @@ async def delete_source_notification_setting(
 
     await notify_user_devices_sync(db, user_id)
     return schemas.DeleteResponse(success=True, message="Setting deleted")
+
+
+# Source 알림 발송 히스토리 (테더 탭: USDT 거래소 + KRX 달러선물).
+# source_notification_logs의 최초 user-facing reader. settings GET과 auth/premium 정책 동일.
+_SOURCE_NOTIFICATION_LOG_DEFAULT_LIMIT = 100
+_SOURCE_NOTIFICATION_LOG_MAX_LIMIT = 200
+
+
+@app.get(
+    "/api/source-notification-logs",
+    response_model=schemas.SourceNotificationLogsListResponse,
+)
+async def get_source_notification_logs(
+    request: Request,
+    asset: Optional[str] = None,
+    limit: int = _SOURCE_NOTIFICATION_LOG_DEFAULT_LIMIT,
+    db: Session = Depends(get_db),
+):
+    """Source 기반 알림 발송 히스토리 조회 (테더 탭: USDT 거래소 + KRX 달러선물).
+
+    사용자에게 '받은 알림' 히스토리를 보여준다 — 발송 성공(success=True) row만,
+    최신순(sent_at DESC). 전송 실패 row는 운영 진단용이라 미노출.
+
+    Query Parameters:
+        asset: asset 필터 (선택, 예: usdt-krw / usd-krw-futures)
+        limit: 1..200 (기본 100). offset 없음 — '최근 N건'.
+            total_count는 반환된 페이지 길이(전체 카운트 아님).
+
+    premium 게이팅은 settings GET과 동일:
+        INACTIVE → 빈 목록 / PENDING → 503(Retry-After) / ACTIVE → 조회.
+    """
+    user_id = await verify_firebase_token(request)
+
+    if not await require_premium(user_id, allow_empty=True):
+        return schemas.SourceNotificationLogsListResponse(logs=[], total_count=0)
+
+    capped_limit = max(1, min(limit, _SOURCE_NOTIFICATION_LOG_MAX_LIMIT))
+    logs = crud.get_source_notification_logs(
+        db=db,
+        user_id=user_id,
+        asset=asset,
+        success_only=True,
+        limit=capped_limit,
+    )
+    items = [build_source_notification_log_response(log) for log in logs]
+    return schemas.SourceNotificationLogsListResponse(
+        logs=items,
+        total_count=len(items),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

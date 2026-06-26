@@ -3133,6 +3133,45 @@ def create_source_notification_log(
     return log
 
 
+def get_source_notification_logs(
+    db: Session,
+    user_id: str,
+    asset: Optional[str] = None,
+    success_only: bool = True,
+    limit: int = 100,
+) -> List[models.SourceNotificationLog]:
+    """Source 기반 알림 발송 히스토리 조회 (최신순, 사용자용).
+
+    제품 의미: 사용자에게 '받은(발송 성공) 알림 히스토리'를 보여주는 read 경로
+    (이 함수가 source_notification_logs의 최초 reader — 기존엔 create-only).
+    실패 row(success=False)는 운영 진단(telemetry)용이라 success_only=True 기본 제외.
+    성공 경로만 mark_source_setting_triggered로 setting을 닫으므로
+    (create_source_notification_log 호출부 참조), 성공 row가 사용자가 실제 통지받은
+    이벤트와 일치한다.
+
+    스코프/안전:
+        - user_id는 호출자가 token에서 파생한 값만 전달 (cross-user 격리).
+        - asset은 SQL WHERE로 필터 (append-only 무한 증가 테이블이라 fetch-all 회피).
+        - 단일 writer 전제: 현재 prod는 evaluator 경로만 활성
+          (USDT_LEGACY_REST_POLLING_ENABLED=false). legacy polling 재활성 시 동일
+          fire가 2 row가 될 수 있음 (dedup key 없음) → 그 경우 중복 노출 가능.
+        - limit은 호출자가 cap (main.py 1..200). offset 없음 — one-shot 알림이라
+          per-user 볼륨 작음. 필요 시 cursor 페이지네이션 후속.
+    """
+    query = db.query(models.SourceNotificationLog).filter(
+        models.SourceNotificationLog.user_id == user_id
+    )
+    if asset:
+        query = query.filter(models.SourceNotificationLog.asset == asset)
+    if success_only:
+        query = query.filter(models.SourceNotificationLog.success.is_(True))
+    return (
+        query.order_by(models.SourceNotificationLog.sent_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 # Source 표시명은 app.source_registry.get_source_definition에서 얻는다.
 # BANK_NAMES_KR와 중복을 피하고 단일 진실 소스 유지.
 

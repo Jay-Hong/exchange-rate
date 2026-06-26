@@ -1107,7 +1107,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 - **거래소 5종 수집**: 업비트, 빗썸, 코인원, 고팍스, 코빗 USDT/KRW (REST polling 10초, 24/7)
 - **새 데이터 모델**: `source_rates`, `source_notification_settings`, `source_notification_logs`
-- **Source 알림 API**: `/api/source-notification-settings` (4종, 거래소 전용, reference는 400 + 기존 API 안내)
+- **Source 알림 API**: `/api/source-notification-settings` (4종) + `/api/source-notification-logs` (발송 히스토리 조회, Slice B 2026-06-27) — exchange + KRX derivative 허용(F-2), reference는 400 + 기존 API 안내
 - **30일 보관 cleanup**: 매일 03:31
 
 **legacy compatibility 경로 (test-era, 서비스 계약 아님)**:
@@ -1118,10 +1118,11 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 
 **알림 API**:
 
-- `POST /api/source-notification-settings` - source 기반 알림 생성 (category=exchange만 허용)
+- `POST /api/source-notification-settings` - source 기반 알림 생성 (category in {exchange, derivative} 허용 — KRX 달러선물 포함, F-2 2026-05-26)
 - `GET /api/source-notification-settings` - 알림 설정 조회 (asset 필터 지원)
 - `PUT /api/source-notification-settings/{id}` - 알림 설정 수정 (source/asset 변경 시 재검증)
 - `DELETE /api/source-notification-settings/{id}` - 알림 설정 삭제 (멱등성)
+- `GET /api/source-notification-logs` - 발송 히스토리 조회 (success=True 최신순, asset 필터 + limit≤200, premium 게이팅; 실패 row는 운영 진단용 미노출) — Slice B 2026-06-27
 
 **핵심 파일**:
 
