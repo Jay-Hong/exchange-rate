@@ -2390,6 +2390,11 @@ async def get_v2_graph_catalog():
     return build_catalog()
 
 
+# v2 graph tab read-through 캐시 TTL(초) — 데이터 변경주기(1w 시간/3m·1y 하루)보다 짧게(보수적 시작).
+# 문제 없으면 확대 가능. live-tail이 client-side(topic)라 캐시 stale해도 그래프 끝 현재값엔 영향 없음.
+_GRAPH_V2_CACHE_TTL_SECONDS = {"1w": 300, "3m": 1800, "1y": 1800}
+
+
 @app.get("/api/v2/graph/tab")
 async def get_v2_graph_tab(tab: str, period: str = "3m"):
     """탭×기간 모든 series 데이터 (source_daily/hourly_rates read). period∈{3m,1y,1w} 지원 (1w=hourly)."""
@@ -2413,6 +2418,19 @@ async def get_v2_graph_tab(tab: str, period: str = "3m"):
             },
         })
 
+    # read-through Redis cache (graph_v2:tab:{tab}:{period}) — 동일 tab×period는 사용자 공통 +
+    # daily/hourly 저빈도 변경이라 캐시 효율 높음. Redis 장애/circuit-open 시 get None → miss →
+    # DB build로 자동 fallback (cache.py Circuit Breaker). live-tail은 client-side(topic)라 캐시가
+    # stale해도 그래프 끝 현재값엔 영향 없음. TTL-only(cron 무효화 없음). 404/400은 위에서 bypass.
+    cache_key = f"graph_v2:tab:{tab}:{period}"
+    cached = await redis_cache.get(cache_key)
+    if cached is not None:
+        try:
+            return json.loads(cached)
+        except (ValueError, TypeError):
+            # corrupt 캐시 → miss로 처리하고 rebuild (다음 set으로 자연 복구, delete 불필요)
+            logger.warning("graph_v2 캐시 parse 실패 — rebuild", extra={"cache_key": cache_key})
+
     def _build():
         db = SessionLocal()
         try:
@@ -2420,7 +2438,11 @@ async def get_v2_graph_tab(tab: str, period: str = "3m"):
         finally:
             db.close()
 
-    return await asyncio.to_thread(_build)
+    result = await asyncio.to_thread(_build)
+    await redis_cache.set(
+        cache_key, json.dumps(result), ex=_GRAPH_V2_CACHE_TTL_SECONDS.get(period, 1800)
+    )
+    return result
 
 
 @app.get("/api/v2/topics/snapshot")
