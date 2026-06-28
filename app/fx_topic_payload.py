@@ -60,6 +60,13 @@ if TYPE_CHECKING:
 # 파생. 외부 호출자가 잘못된 asset (예: usdt-krw, usd-krw-futures, typo) 시 즉시 차단.
 FX_TOPIC_ASSETS: Tuple[str, ...] = ("usd-krw", "jpy-krw", "eur-krw")
 
+# 신규 앱 public fx:* 토픽 표시용 은행 순서 — legacy 9은행에서 Citi 제외(8).
+# 근거: ADR-033 / GRAPH_API_V2_CONTRACT (Citi는 모든 v2 tab/period 미노출, 수집은 유지).
+# ⚠️ public topic publish/snapshot 경로에서만 builder에 bank_order로 전달한다.
+# BANK_DISPLAY_ORDER(9) / fx_membership / atomic 계열은 불변 — builder 기본값 9 유지(아래).
+# (legacy 구앱·atomic 9-bank invariant 보존, <10명 신앱 전환 완료 후 legacy 일괄 정리 예정.)
+FX_TOPIC_BANK_ORDER: Tuple[str, ...] = tuple(b for b in BANK_DISPLAY_ORDER if b != "citi")
+
 _REFERENCE_SOURCE: str = "investing"
 
 
@@ -112,6 +119,7 @@ def build_fx_tab_payload(
     asset: str,
     bank_rates: Iterable[Dict[str, Any]],
     reference: Optional[Dict[str, Any]],
+    bank_order: Iterable[str] = BANK_DISPLAY_ORDER,
 ) -> Dict[str, Any]:
     """FX topic payload 생성 (DB 의존 X — pure builder).
 
@@ -145,7 +153,7 @@ def build_fx_tab_payload(
         by_source.setdefault(source, raw)
 
     bank_normalized: List[Dict[str, Any]] = []
-    for source in BANK_DISPLAY_ORDER:
+    for source in bank_order:
         if source not in by_source:
             continue
         normalized = _normalize_entry(
@@ -184,7 +192,9 @@ def build_fx_tab_payload(
     }
 
 
-def load_and_build_fx_topic_payload(db: "Session", asset: str) -> Dict[str, Any]:
+def load_and_build_fx_topic_payload(
+    db: "Session", asset: str, bank_order: Iterable[str] = BANK_DISPLAY_ORDER
+) -> Dict[str, Any]:
     """DB/Redis에서 FX 데이터 load 후 build_fx_tab_payload 호출 (PR Z-2e Step 3c).
 
     Redis-first read 정책 (Step 3a와 동일 패턴):
@@ -205,10 +215,15 @@ def load_and_build_fx_topic_payload(db: "Session", asset: str) -> Dict[str, Any]
     """
     _validate_fx_asset(asset)
 
+    # bank_order는 아래 load loop + build_fx_tab_payload(끝)에서 2회 순회된다. 타입 계약이
+    # Iterable[str]라 one-shot generator가 들어오면 2번째 순회가 비어 silent 0-bank가 됨 →
+    # tuple로 고정해 advertised Iterable 계약을 안전하게 보장 (현 caller는 tuple/list라 무변화).
+    bank_order = tuple(bank_order)
+
     # Banks Redis-first per-source fallback (lazy DB load)
     bank_rates: List[Dict[str, Any]] = []
     _db_banks_loaded: Optional[Dict[str, Dict[str, Any]]] = None
-    for bank_source in BANK_DISPLAY_ORDER:
+    for bank_source in bank_order:
         redis_entry = get_latest_bank_rate_from_sync_job(bank_source, asset)
         if redis_entry is not None:
             bank_rates.append(redis_entry)
@@ -226,4 +241,4 @@ def load_and_build_fx_topic_payload(db: "Session", asset: str) -> Dict[str, Any]
     if reference is None:
         reference = select_a_latest_investing_rate_from_db(db, asset)
 
-    return build_fx_tab_payload(asset, bank_rates, reference)
+    return build_fx_tab_payload(asset, bank_rates, reference, bank_order=bank_order)

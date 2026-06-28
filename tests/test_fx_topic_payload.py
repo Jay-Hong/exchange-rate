@@ -569,5 +569,99 @@ class TestFxRedisFirstReadContract(unittest.TestCase):
             self.assertTrue(all(e["asset"] == asset for e in payload["data"]["banks"]))
 
 
+# ---------------------------------------------------------------------------
+# public fx:* 토픽 Citi 제외 8-bank order (신규 앱 계약) — atomic/legacy는 default 9 불변
+# ---------------------------------------------------------------------------
+
+class TestFxTopicBankOrderCitiExclusion(unittest.TestCase):
+    """public fx:* publish/snapshot은 FX_TOPIC_BANK_ORDER(8, Citi 제외)로 build.
+    builder 기본값은 BANK_DISPLAY_ORDER(9) 유지 → atomic_build / atomic_fx_v2_loader 무영향.
+    """
+
+    def test_fx_topic_bank_order_excludes_citi(self):
+        from app.fx_topic_payload import FX_TOPIC_BANK_ORDER
+        self.assertNotIn("citi", FX_TOPIC_BANK_ORDER)
+        self.assertEqual(
+            list(FX_TOPIC_BANK_ORDER),
+            ["kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs"],
+        )
+
+    def test_build_with_topic_order_excludes_citi(self):
+        """citi 포함 9 input + bank_order=FX_TOPIC_BANK_ORDER → payload 8 (citi 제외)."""
+        from app.fx_topic_payload import FX_TOPIC_BANK_ORDER
+        bank_rates = [
+            _bank_legacy(b) for b in
+            ["kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs", "citi"]
+        ]
+        payload = build_fx_tab_payload(
+            "usd-krw", bank_rates, None, bank_order=FX_TOPIC_BANK_ORDER
+        )
+        sources = [e["source"] for e in payload["data"]["banks"]]
+        self.assertEqual(
+            sources, ["kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs"]
+        )
+
+    def test_build_default_preserves_9_banks_incl_citi(self):
+        """bank_order 미지정(default) = BANK_DISPLAY_ORDER(9, citi 포함) → atomic/legacy 보존."""
+        bank_rates = [
+            _bank_legacy(b) for b in
+            ["kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs", "citi"]
+        ]
+        payload = build_fx_tab_payload("usd-krw", bank_rates, None)
+        sources = [e["source"] for e in payload["data"]["banks"]]
+        self.assertIn("citi", sources)
+        self.assertEqual(len(sources), 9)
+
+    def test_load_and_build_topic_order_excludes_citi(self):
+        """read+build 경로에 bank_order=FX_TOPIC_BANK_ORDER → citi 미read·미노출(8)."""
+        from app.fx_topic_payload import FX_TOPIC_BANK_ORDER
+        read_banks = []
+
+        def fake_bank_redis(bank, asset):
+            read_banks.append(bank)
+            return {"source": bank, "asset": asset, "rate": 1370.0,
+                    "timestamp": "2026-05-13T15:00:00+09:00"}
+
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=fake_bank_redis), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=None), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db",
+                   return_value=[]), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   return_value=None):
+            payload = load_and_build_fx_topic_payload(
+                MagicMock(), "usd-krw", bank_order=FX_TOPIC_BANK_ORDER
+            )
+        sources = [e["source"] for e in payload["data"]["banks"]]
+        self.assertNotIn("citi", sources)
+        self.assertEqual(len(sources), 8)
+        self.assertNotIn("citi", read_banks)  # citi는 read조차 안 함
+
+    def test_load_and_build_one_shot_generator_not_silently_empty(self):
+        """bank_order로 one-shot generator를 넘겨도 tuple 강제로 2회 순회 안전(8 banks).
+
+        regression-lock: load_and_build는 bank_order를 load loop + build_fx_tab_payload에서
+        2회 순회한다. tuple() coercion이 없으면 generator가 첫 loop에서 소진되어 silent 0-bank.
+        """
+        def fake_bank_redis(bank, asset):
+            return {"source": bank, "asset": asset, "rate": 1370.0,
+                    "timestamp": "2026-05-13T15:00:00+09:00"}
+
+        gen = (b for b in ["kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs"])
+        with patch("app.fx_topic_payload.get_latest_bank_rate_from_sync_job",
+                   side_effect=fake_bank_redis), \
+             patch("app.fx_topic_payload.get_latest_investing_rate_from_sync_job",
+                   return_value=None), \
+             patch("app.fx_topic_payload.select_latest_bank_rates_from_db",
+                   return_value=[]), \
+             patch("app.fx_topic_payload.select_a_latest_investing_rate_from_db",
+                   return_value=None):
+            payload = load_and_build_fx_topic_payload(MagicMock(), "usd-krw", bank_order=gen)
+        sources = [e["source"] for e in payload["data"]["banks"]]
+        self.assertEqual(len(sources), 8)  # generator 소진으로 0이 되지 않음
+        self.assertNotIn("citi", sources)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

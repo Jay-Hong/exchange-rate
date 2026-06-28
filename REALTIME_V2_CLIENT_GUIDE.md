@@ -11,9 +11,9 @@
 
 | topic | 의미 | 상태 |
 | --- | --- | --- |
-| `fx:usd-krw` | USD/KRW 은행(≤9, BANK_DISPLAY_ORDER) + Investing reference | ✅ 구현 |
-| `fx:jpy-krw` | JPY/KRW 은행 + reference | ✅ 구현 |
-| `fx:eur-krw` | EUR/KRW 은행 + reference | ✅ 구현 |
+| `fx:usd-krw` | USD/KRW 은행(≤8, **Citi 제외** — `FX_TOPIC_BANK_ORDER`) + Investing reference | ✅ 구현 |
+| `fx:jpy-krw` | JPY/KRW 은행(≤8, Citi 제외) + reference | ✅ 구현 |
+| `fx:eur-krw` | EUR/KRW 은행(≤8, Citi 제외) + reference | ✅ 구현 |
 | `usdt:krw` | 테더 탭 (USDT 5거래소 + USD/KRW 은행[kb,hana] + reference + KRX 선물 optional) | ✅ 구현 |
 
 **범위 밖 (topic publisher 미구현 — 구독해도 데이터 안 옴)**:
@@ -85,7 +85,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 ```jsonc
 "data": {
-  "banks": [ {entry}, ... ],     // 은행 ≤9 (BANK_DISPLAY_ORDER, 미등록 source 자동 제외)
+  "banks": [ {entry}, ... ],     // 은행 ≤8 (FX_TOPIC_BANK_ORDER = Citi 제외, 미등록 source 자동 제외)
   "reference": {entry}           // Optional — source="investing". 없으면 key 누락
 }
 ```
@@ -101,7 +101,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 }
 ```
 
-**snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤9 + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 + futures 1 = ≤9 entry. 작음.
+**snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 + futures 1 = ≤9 entry. 작음.
 
 ## 3. Bootstrap (초기 상태 획득)
 

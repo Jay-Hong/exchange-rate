@@ -121,7 +121,10 @@ class TestPublishFxSnapshotNormal(unittest.IsolatedAsyncioTestCase):
             result = await _publish_fx_snapshot(db, "usd-krw")
 
         self.assertTrue(result)
-        mock_build.assert_called_once_with(db, "usd-krw")
+        # public fx:* publish는 Citi 제외 8-bank order 전달 (atomic/legacy default 9와 분리)
+        mock_build.assert_called_once_with(
+            db, "usd-krw", bank_order=fx_topic_publisher.FX_TOPIC_BANK_ORDER
+        )
         mock_pub.assert_awaited_once()
 
     async def test_payload_topic_field_injected_by_publisher(self):
@@ -205,7 +208,7 @@ class TestSafePublishAllFxSnapshots(unittest.IsolatedAsyncioTestCase):
             ws = MagicMock(name=f"ws_{asset}")
             topic_dispatcher.registry.register(ws, [topic])
 
-        def builder_side_effect(db, asset):
+        def builder_side_effect(db, asset, bank_order=None):
             if asset == "jpy-krw":
                 raise RuntimeError("simulated builder failure")
             return {"type": "snapshot", "version": 1, "data": {"banks": []}}
@@ -458,7 +461,7 @@ class TestDirectLegacyPayloadEquality(unittest.IsolatedAsyncioTestCase):
     async def test_direct_and_legacy_emit_equal_payload_per_asset(self):
         from contextlib import contextmanager
 
-        def fake_build(db, asset):
+        def fake_build(db, asset, bank_order=None):
             # asset별 결정적 payload (db 무관 = 입력 고정 효과). 매 호출 새 dict
             # (publisher가 payload["topic"] 주입 mutate해도 경로 간 독립).
             return {

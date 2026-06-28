@@ -41,7 +41,11 @@ from pytz import timezone as pytz_timezone
 from app import atomic_cutover_runtime, config, topic_dispatcher
 from app.atomic_cutover import PublisherGateDisposition
 from app.cache import redis_cache
-from app.fx_topic_payload import FX_TOPIC_ASSETS, load_and_build_fx_topic_payload
+from app.fx_topic_payload import (
+    FX_TOPIC_ASSETS,
+    FX_TOPIC_BANK_ORDER,
+    load_and_build_fx_topic_payload,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -242,7 +246,8 @@ async def _publish_fx_snapshot(db: "Session", asset: str) -> bool:
         await _record_topic_event(asset, result="skipped_no_subscribers")
         return False
 
-    payload = load_and_build_fx_topic_payload(db, asset)
+    # public fx:* topic은 Citi 제외 8-bank (FX_TOPIC_BANK_ORDER). atomic/legacy는 builder 기본값 9.
+    payload = load_and_build_fx_topic_payload(db, asset, bank_order=FX_TOPIC_BANK_ORDER)
     # multi-topic 환경에서 단말이 메시지 topic 식별 가능하게 inject
     # (builder는 topic-agnostic 유지 — wrapper 책임).
     payload["topic"] = topic

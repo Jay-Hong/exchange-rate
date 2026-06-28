@@ -40,7 +40,13 @@ refresh_from_db scheduling(미스케줄 시 _INITIAL legacy-passthrough gate), (
 Session의 to_thread handoff 재검토(thread 내 session 생성 또는 single-thread read 제한), (5) publish_asset
 gate enforcement를 _publish_fx_snapshot에 설치(C6-7 characterization), (6) membership_version 변경 시 lineage
 재생성(bootstrap_generation bump 또는 is_watermark_compatible 참조 — 현재 lineage_provider는 cutover
-snapshot의 session/gen만 본다).
+snapshot의 session/gen만 본다). (7) **public fx:* 8-bank membership**: 이 coordinator의 build
+경로(atomic_fx_v2_loader.load_fx_topic_payload_with_revisions → build_fx_tab_payload)는
+9-bank(BANK_DISPLAY_ORDER default — Citi 포함)로 조립한다. 그러나 신규 앱 public fx:* 계약은
+8-bank(Citi 제외 — fx_topic_payload.FX_TOPIC_BANK_ORDER, legacy _publish_fx_snapshot과 일치)다.
+이 publisher를 live 배선하기 전 atomic loader가 public fx:* 토픽엔 FX_TOPIC_BANK_ORDER로 build하도록
+adapter를 넣어야 한다 — 안 그러면 C6 flip이 신앱에 Citi를 재도입(회귀)한다. fx_membership(9)은 atomic
+watermark/membership 계약이라 public 표시 set(8)과 의도적으로 별개다.
 """
 from __future__ import annotations
 
@@ -240,6 +246,11 @@ class FxLiveCoordinatorAdapter:
         return await asyncio.to_thread(self._read_db_revisions, asset)
 
     async def _publisher_fn(self, asset: str, payload: dict) -> SendResult:
+        # ⚠️ PUBLIC fx:* MEMBERSHIP: 이 payload는 9-bank(atomic_fx_v2_loader가 BANK_DISPLAY_ORDER
+        # default 사용 — Citi 포함)다. 신규 앱 public fx:* 계약은 8-bank(Citi 제외 —
+        # fx_topic_payload.FX_TOPIC_BANK_ORDER, legacy _publish_fx_snapshot과 일치). 이 coordinator를
+        # live 배선(C6-7)하기 전 atomic loader가 public 토픽엔 FX_TOPIC_BANK_ORDER로 build해야 한다 —
+        # 안 그러면 C6 flip이 신앱에 Citi를 재도입(회귀). 상세: docstring C6-7 precondition (7).
         topic = FX_TOPICS[asset]
         p = dict(payload)  # shallow copy — build_result.payload 불변 유지
         p["topic"] = topic  # Blocker 1: legacy parity (fx_topic_publisher.py:197 wrapper 책임)

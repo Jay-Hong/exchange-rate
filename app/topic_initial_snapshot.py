@@ -77,11 +77,15 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
             return None
         asset = fx_asset_by_topic[topic]
         from app.database import SessionLocal
-        from app.fx_topic_payload import load_and_build_fx_topic_payload
+        from app.fx_topic_payload import (
+            FX_TOPIC_BANK_ORDER,
+            load_and_build_fx_topic_payload,
+        )
 
         db = SessionLocal()
         try:
-            payload = load_and_build_fx_topic_payload(db, asset)
+            # public fx:* snapshot도 Citi 제외 8-bank (publish 경로와 동일). atomic/legacy는 기본 9.
+            payload = load_and_build_fx_topic_payload(db, asset, bank_order=FX_TOPIC_BANK_ORDER)
         finally:
             db.close()
         payload["topic"] = topic
