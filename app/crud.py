@@ -2459,6 +2459,9 @@ def process_rate_alerts(
                     "threshold": str(setting.threshold),
                     "condition": setting.condition,
                     "setting_id": str(setting.id),
+                    # B2 (ADR-036): cross-device race 차단용 권위 플래그. 수신 단말이 stale 로컬 대신
+                    # 이 값으로 toggle-off 결정 (repeat="true"면 비활성 금지). FCM data는 문자열만 허용.
+                    "is_repeat": "true" if setting.repeat_interval_sec is not None else "false",
                 }
 
                 # FCM 발송
@@ -3333,6 +3336,9 @@ def process_source_rate_alerts(
                     "threshold": str(setting.threshold),
                     "condition": setting.condition,
                     "setting_id": str(setting.id),
+                    # B2 (ADR-036): cross-device race 차단용 권위 플래그 (legacy REST polling 경로,
+                    # 현재 비활성이나 backend.build_payload와 일관성 유지).
+                    "is_repeat": "true" if setting.repeat_interval_sec is not None else "false",
                 }
 
                 tokens = [d.device_token for d in devices]

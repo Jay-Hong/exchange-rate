@@ -114,9 +114,11 @@ def observation_from_tick(tick: dict, kind: str = "tick") -> AlertObservation:
 class CachedAlertSetting:
     """알림 설정 cache snapshot (ORM-free).
 
-    PR6는 once 정책 (enabled+triggered=false 평가만). 미래 B2 확장 자리:
-        # repeat_interval_sec: Optional[int] = None
-        # last_notified_at: Optional[datetime] = None
+    PR6는 once 정책 (enabled+triggered=false 평가만). gate(delivery_allowed)는 refetch
+    snapshot에서 실행하므로 cache 단계엔 repeat_interval_sec 불요였으나, B2 payload-flag
+    (ADR-036)에서 **build_payload의 is_repeat 도출용**으로 fresh_candidate에 carry한다
+    (snapshot.repeat_interval_sec → fresh_candidate). load_settings 단계 default None은
+    그대로 — gate/payload 모두 refetch 경유 fresh_candidate만 사용.
     """
     setting_id: int
     user_id: str
@@ -125,6 +127,7 @@ class CachedAlertSetting:
     condition: str          # "above" | "below"
     threshold: float
     device_tokens: tuple[str, ...]  # FCM multicast 입력
+    repeat_interval_sec: Optional[int] = None  # B2 (ADR-036): None=once / 정수=repeat (payload is_repeat 도출)
 
 
 @dataclass(frozen=True)
@@ -664,6 +667,7 @@ class UsdtAlertEvaluator:
             condition=snapshot.condition,
             threshold=snapshot.threshold,
             device_tokens=candidate.device_tokens,
+            repeat_interval_sec=snapshot.repeat_interval_sec,  # B2 (ADR-036): payload is_repeat 도출
         )
         if not condition_matches_observation(fresh_candidate, observation):
             logger.info(
@@ -721,6 +725,7 @@ class UsdtAlertEvaluator:
             condition=snapshot.condition,
             threshold=snapshot.threshold,
             device_tokens=candidate.device_tokens,
+            repeat_interval_sec=snapshot.repeat_interval_sec,  # B2 (ADR-036): payload is_repeat 도출
         )
 
     async def _do_send_and_persist(

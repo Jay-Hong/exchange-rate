@@ -234,6 +234,9 @@ class SourceAlertBackend(AlertStorageBackend):
             "threshold": str(candidate.threshold),
             "condition": candidate.condition,
             "setting_id": str(candidate.setting_id),
+            # B2 (ADR-036): cross-device race 차단용 권위 플래그. 수신 단말이 stale 로컬 대신
+            # 이 값으로 toggle-off 결정 (repeat="true"면 비활성 금지). FCM data는 문자열만 허용.
+            "is_repeat": "true" if candidate.repeat_interval_sec is not None else "false",
         }
         return title, body, data
 
@@ -363,6 +366,8 @@ class FxNotificationBackend(AlertStorageBackend):
             "threshold": str(candidate.threshold),
             "condition": candidate.condition,
             "setting_id": str(candidate.setting_id),
+            # B2 (ADR-036): cross-device race 차단용 권위 플래그 (legacy crud.process_rate_alerts와 동일 키).
+            "is_repeat": "true" if candidate.repeat_interval_sec is not None else "false",
         }
         return title, body, data
 

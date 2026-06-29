@@ -2048,6 +2048,52 @@ class TestUsdtAlertEvaluatorSendOne(unittest.IsolatedAsyncioTestCase):
         # fresh_candidate (cached와 fields 동일이면 == 성립)
         mock_persist.assert_called_once_with(candidate, 1500.0, fcm_result)
 
+    async def test_payload_is_repeat_true_carried_from_snapshot(self):
+        """B2 (ADR-036) payload-flag end-to-end: refetch snapshot의 repeat_interval_sec가
+        fresh_candidate → build_payload(미패치)로 carry되어 FCM data['is_repeat']='true'.
+        cache default None이 우회되지 않음을 잠금 (codex 권장 회귀 가드)."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting()  # cache repeat_interval_sec=None (default)
+        repeat_snapshot = _make_snapshot(enabled=True, triggered=False, repeat_interval_sec=300)
+        captured: dict = {}
+
+        def _capture(tokens, title, body, data):
+            captured.update(data)
+            return {"success_count": 1, "failure_count": 0, "failed_tokens": []}
+
+        with patch.object(
+            SourceAlertBackend, "refetch_snapshot", return_value=repeat_snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast", side_effect=_capture,
+        ), patch.object(
+            SourceAlertBackend, "persist_result",
+        ):
+            await evaluator._send_one_observation(candidate, _make_observation())
+
+        self.assertEqual(captured.get("is_repeat"), "true")  # snapshot 300이 payload로
+
+    async def test_payload_is_repeat_false_for_once_snapshot(self):
+        """once(snapshot repeat_interval_sec=None) → FCM data['is_repeat']='false'."""
+        evaluator = UsdtAlertEvaluator()
+        candidate = _make_cached_setting()
+        once_snapshot = _make_snapshot(enabled=True, triggered=False)  # repeat_interval_sec=None
+        captured: dict = {}
+
+        def _capture(tokens, title, body, data):
+            captured.update(data)
+            return {"success_count": 1, "failure_count": 0, "failed_tokens": []}
+
+        with patch.object(
+            SourceAlertBackend, "refetch_snapshot", return_value=once_snapshot,
+        ), patch.object(
+            UsdtAlertEvaluator, "_send_fcm_multicast", side_effect=_capture,
+        ), patch.object(
+            SourceAlertBackend, "persist_result",
+        ):
+            await evaluator._send_one_observation(candidate, _make_observation())
+
+        self.assertEqual(captured.get("is_repeat"), "false")
+
     async def test_fcm_failure_still_calls_persist_for_log(self):
         """FCM 실패 → log failure (persist 호출). setting은 변경 X (persist 내부 처리)."""
         evaluator = UsdtAlertEvaluator()

@@ -69,6 +69,20 @@ class TestSourceAlertBackendBuildPayload(unittest.TestCase):
         self.assertIn("이하", body)
         self.assertIn("1399.00", body)
 
+    def test_build_payload_is_repeat_false_for_once(self):
+        # B2 (ADR-036) payload-flag: repeat_interval_sec None(once) → "false" (str, FCM data 호환)
+        _, _, data = SourceAlertBackend().build_payload(_candidate(), Decimal("1455.5"))
+        self.assertEqual(data["is_repeat"], "false")
+
+    def test_build_payload_is_repeat_true_for_repeat(self):
+        cand = CachedAlertSetting(
+            setting_id=3, user_id="user-3", source="upbit", asset="usdt-krw",
+            condition="above", threshold=1450.0, device_tokens=("t3",),
+            repeat_interval_sec=300,
+        )
+        _, _, data = SourceAlertBackend().build_payload(cand, Decimal("1455.5"))
+        self.assertEqual(data["is_repeat"], "true")
+
 
 class TestSourceAlertBackendPersistResult(unittest.TestCase):
     """WHOLE persist_result (최고위험 verbatim 이동) 직접 lock — mark/log/cleanup 호출·순서."""
@@ -149,6 +163,17 @@ class TestFxNotificationBackend(unittest.TestCase):
         self.assertIn("📈", title)
         self.assertIn("국민은행", title)                  # BANK_NAMES_KR 적용
         self.assertIn("1455.50", body)
+        self.assertEqual(data["is_repeat"], "false")     # B2 (ADR-036): once 기본
+
+    def test_build_payload_is_repeat_true(self):
+        # B2 (ADR-036) payload-flag: FX backend도 candidate.repeat_interval_sec → is_repeat
+        cand = CachedAlertSetting(
+            setting_id=9, user_id="user-9", source="hana", asset="usd-krw",
+            condition="above", threshold=1500.0, device_tokens=("t9",),
+            repeat_interval_sec=600,
+        )
+        _, _, data = FxNotificationBackend().build_payload(cand, Decimal("1501.0"))
+        self.assertEqual(data["is_repeat"], "true")
 
     def test_persist_result_is_noop(self):
         with patch("app.database.get_db_context") as mock_ctx, \
