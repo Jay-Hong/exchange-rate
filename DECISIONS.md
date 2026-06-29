@@ -5614,7 +5614,7 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 
 ## ADR-036: 가격알림 반복 발송 (repeat_interval_sec, B2) — 정책 + 스키마 + evaluator/mark mode 분기
 
-**Status**: Proposed (2026-06-29)
+**Status**: Accepted — PR1(source/tether) + PR2(bank/FX) land + prod deploy 완료 (2026-06-29). PR1 server `d2dfe28`/iOS `c4b88eb`(+토글 깜빡임 fix `479d611`), PR2 server `195058b`(crud gate+mark+create/update §7/§8 + FxNotificationBackend.refetch_snapshot repeat-aware)/iOS `d7791c8`(bank interval picker + UpdateAlertRequest 3-state). 컬럼 마이그레이션은 PR1에서 양 테이블 prod 적용 완료. 잔여: 기기 smoke(bank repeat e2e) + payload-flag follow-up(cross-device race, 별도 PR).
 **관련**: [USDT_WS_DESIGN_PLAN.md §B2](USDT_WS_DESIGN_PLAN.md), ADR-032 (KRX/source alert evaluator), 신규 앱 overhaul(메모리 project_app_overhaul — 가격+비교알림 전 탭). B3(direction-crossing)은 본 ADR 범위 밖(후속).
 
 ### Context
