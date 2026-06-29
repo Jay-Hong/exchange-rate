@@ -5612,6 +5612,124 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 
 ---
 
+## ADR-036: 가격알림 반복 발송 (repeat_interval_sec, B2) — 정책 + 스키마 + evaluator/mark mode 분기
+
+**Status**: Proposed (2026-06-29)
+**관련**: [USDT_WS_DESIGN_PLAN.md §B2](USDT_WS_DESIGN_PLAN.md), ADR-032 (KRX/source alert evaluator), 신규 앱 overhaul(메모리 project_app_overhaul — 가격+비교알림 전 탭). B3(direction-crossing)은 본 ADR 범위 밖(후속).
+
+### Context
+
+현재 가격알림은 **1회성(once-only)**: 조건 충족 시 1회 발송 후 `triggered=true, enabled=false`로 자동 비활성. 재무장은 사용자가 토글 ON([crud.py:2240-2242](app/crud.py#L2240) bank / [3095-3097](app/crud.py#L3095) source).
+
+신규 앱 요구(사용자 확정): **조건이 만족되는 동안 사용자가 선택한 간격으로 반복 발송**. 가격알림 + (후속)비교알림 **공통 기능**(spec §B2).
+
+**검증된 현황(코드 직접 확인, 2026-06-29)**:
+- 양 알림 테이블(`notification_settings`, `source_notification_settings`)에 **`last_notified_at` + `last_notified_rate` 이미 존재**([models.py:85+](app/models.py#L85), [153+](app/models.py#L153)). ⚠️ CLAUDE.md 스키마 문서가 **notification_settings 표에서 이 두 필드 누락(stale)** — PR1에서 **양 테이블 표**에 누락필드 정정 + `repeat_interval_sec` 신규 기재.
+- 발송 시 `last_notified_at = now` **이미 set**, 재활성/중복/PUT 시 `last_notified_at = None` **이미 리셋**([crud.py:1930/2084/2867/2982](app/crud.py#L1930)).
+- evaluator `delivery_allowed`의 B2 분기는 **docstring 예시일 뿐 실행 코드 아님**([alert_evaluator.py:210-225](app/notifications/alert_evaluator.py#L210)); `repeat_interval_sec`는 **모델/스키마 필드로 미존재**.
+
+→ B2 마이그레이션은 **`repeat_interval_sec` 1 컬럼 × 2 테이블만 신규**. 반복 gating 인프라(last_notified_at set/reset)는 이미 깔려 있음.
+
+### Decision — 정책 (확정)
+
+1. **once 판별**: `repeat_interval_sec IS NULL` = once-only (canonical, 단일 sentinel). `0`/음수는 API에서 reject (NULL-or-0 모호성 + `0초=연속 스팸` footgun 제거).
+2. **interval enum 고정** (자유 입력 금지, 기존 문서 [§B2:208](USDT_WS_DESIGN_PLAN.md#L208) 후보 채택): **1m / 5m / 10m / 30m / 1h / 2h / 4h / 6h / 12h / 1d** (초: 60 / 300 / 600 / 1800 / 3600 / 7200 / 14400 / 21600 / 43200 / 86400). "한번만"은 enum 아닌 NULL(= interval 없음). floor 1m로 FCM 스팸 1차 차단. (직전 draft의 15m은 문서 미존재 + 임의 추가라 **철회** — 문서 후보를 따름, special reason 없음.)
+3. **once mode** (`repeat_interval_sec IS NULL`): 현행 유지 — 발송 후 `triggered=true, enabled=false`.
+4. **repeat mode** (`repeat_interval_sec` 설정): 발송 후 **`enabled=true` 유지, `triggered`는 절대 set 안 함**, `last_notified_at=now`. **gating = `enabled AND (last_notified_at IS NULL OR now >= last_notified_at + repeat_interval_sec)`**.
+   - ⚠️ **timezone (workflow 검증, load-bearing)**: gate의 `now`/`last_notified_at`은 **둘 다 naive UTC**여야 함. 현 호출부([alert_evaluator.py:622/679](app/notifications/alert_evaluator.py#L622))는 **aware** `datetime.now(timezone.utc)`를 넘기는데 `last_notified_at`은 **naive**([models.get_utc_now](app/models.py#L11) = `.replace(tzinfo=None)`) → B2 뺄셈이 **TypeError(aware−naive)** → `_evaluate_*_async`의 `except Exception`([470/511](app/notifications/alert_evaluator.py#L470))이 삼켜 **repeat 영영 silent 미발화**. PR1은 호출부 622/679를 `models.get_utc_now()`로 바꾸거나 `delivery_allowed` 내부에서 `now`를 naive 정규화(둘 중 하나 필수). 회귀: 기존 테스트가 aware now를 쓰면 정규화 후 green 재확인.
+5. **triggered 원칙 (ADR 핵심)**: `triggered=true`는 **once-only 종료 상태 전용**("발송됨, 토글로 재무장"). repeat는 *진행 중*이라 종료 상태가 없음 → repeat 모드에선 `triggered`를 set하지 않는다. UI "발송됨" 인디케이터도 repeat엔 미적용.
+6. **조건 release 후 재충족**: repeat 도중 조건이 풀렸다 다시 만족해도 `last_notified_at` 리셋 안 함 = **"마지막 발송 기준 간격"만** 본다. (재크로싱 즉시 발송은 **B3**의 영역 — 본 ADR 분리.)
+7. **리셋(`last_notified_at = NULL`)**: OFF→ON(enabled false→true) · threshold · condition · (source의 경우) source/asset · `repeat_interval_sec` **변경 시**. 기존 리셋 지점([crud.py:1930/2867](app/crud.py#L1930)) 재사용.
+8. **모드 전환 PUT 정규화** (edge-case 시뮬레이션 발견): 이미 발사된 once-only(`triggered=true, enabled=false`)를 repeat로 변경 시 interval-변경 리셋만으론 `enabled=false`가 남아 안 울림 → **모드 전환 PUT은 `enabled=true · triggered=false · last_notified_at=NULL`로 정규화**(새 모드 clean 시작). 역방향(repeat→once)도 동일 정규화.
+9. **dedup key**: 기존 키(bank·source + currency·asset + condition + threshold) **유지**. `repeat_interval_sec`는 **키에 넣지 않고 그 설정의 갱신 가능 속성**(PUT으로 변경 + §7 리셋).
+10. **history**: 반복 발송마다 기존 log row 추가(`notification_logs`/`source_notification_logs`). [Slice B PR1 히스토리 endpoint](app/main.py)가 이미 다건 표시 ready.
+11. **repeat 재평가 메커니즘** (문서 [§생략금지 #5](USDT_WS_DESIGN_PLAN.md#L1427) + coalescer `repeat_due` slot): 알림 평가는 tick fanout의 **독립 분기**(Redis same-rate-SET-skip / DB writer와 별개). [`PriceAlertCoalescer`](app/notifications/price_alert_coalescer.py)(5s 윈도우)가 same-rate를 **drop 없이 집계** → boundary마다 summary flush → evaluator가 **매 윈도우 평가**(same-rate skip 없음 — [alert_evaluator.py](app/notifications/alert_evaluator.py)의 skip은 in-flight dedup·stale-cache 재검증뿐, 현 코드 확인). 따라서:
+    - **source-first(USDT/KRX 등 tick 흐르는 피드)**: 자연 tick 흐름으로 repeat-due가 재평가·재발화. **별도 타이머 불요**(B2-PR1 MVP). ⚠️ 단 정확히 interval 시점이 아니라 **interval 경과 후 *다음 tick* 도래 시** 발화 — coalescer가 last bucket을 다음 tick에서 flush([price_alert_coalescer.py:133](app/notifications/price_alert_coalescer.py#L133)). high-traffic(USDT)은 무시 가능(~수초), low-fpm 피드는 그만큼 지연(정밀 due가 필요하면 `repeat_due` 타이머 — defer).
+    - [`PriceAlertEvaluationInput.input_kind="repeat_due"`](app/notifications/price_alert_coalescer.py#L55) forward-compat slot = **조용한 피드**(은행 비고시/off-session)에서 tick 없이 due를 발화시키는 **타이머 트리거용 — PR1·PR2 모두 범위 밖(post-B2 optional enhancement)**. PR2(bank)도 **시장 시간대 자연 tick**으로 repeat 동작 → 비고시/off-session 미발화는 의미상 타당(장 마감 중 스팸 회피). 타이머는 "tick 없는 구간에도 due 발화"가 제품 요구가 될 때 별도 PR.
+    - 문서 §생략금지 #5는 **향후 same-rate-skip 최적화(Phase 3 ZSET threshold index)가 repeat-due를 carve-out해야 한다는 제약**으로 유지.
+
+### Schema
+
+```sql
+ALTER TABLE notification_settings        ADD COLUMN repeat_interval_sec INTEGER NULL;  -- NULL = once
+ALTER TABLE source_notification_settings ADD COLUMN repeat_interval_sec INTEGER NULL;
+```
+- `last_notified_at` / `last_notified_rate`: **기존 컬럼 재사용**(추가 없음).
+- 기본값 NULL → **기존 모든 row = once-only 보존**(behavior-change-0).
+- migration: SQLAlchemy `create_all`는 기존 테이블에 컬럼 추가 안 함 → 별도 idempotent migration script(`ALTER ... ADD COLUMN IF NOT EXISTS` 동등) 필요. ADR-034 패턴 따름.
+
+### Evaluator / mark — 두 코드 경로 (codex "둘 다"의 정밀화)
+
+가격알림 평가는 **2개의 분리된 경로**:
+- **source path** (USDT/KRX, 신규 앱 테더 reference vertical) — workflow 검증 정밀화:
+  - gate(`delivery_allowed`)는 **refetch된 `FreshSettingSnapshot`에서 실행**([alert_evaluator.py:622/679](app/notifications/alert_evaluator.py#L622)) → **`FreshSettingSnapshot`에 `repeat_interval_sec`+`last_notified_at` 추가 필수**, [`SourceAlertBackend.refetch_snapshot`](app/notifications/alert_storage_backend.py)가 두 필드를 채움.
+  - **`CachedAlertSetting`은 gate가 cache 미참조라 추가 불요**(workflow 중재 — lens4 "둘 다 cache" 과다 설계).
+  - `delivery_allowed` pseudocode→실행 분기화(§4 gate, timezone 정규화 포함).
+  - `mark_source_setting_triggered`는 **이미 ORM row 재조회([crud.py:3090](app/crud.py#L3090))하므로 `setting.repeat_interval_sec`로 직접 mode 분기**(persist_result/cache로 interval thread **불요** — lens2/4 과다 설계).
+- **bank path** (notification_settings, FX 탭 legacy 경로): `crud.process_rate_alerts` + `mark_setting_triggered` mode 분기.
+
+**Scope = FULL B2 (bank + source 공통, 문서 §B2 정합).** 구현은 risk 관리 위해 **B2 안에서 2 PR로 위상 분리** — **"B2 완료"는 양쪽 끝난 뒤에만 선언**(source-only를 "B2 완료"라 부르지 않음):
+- **PR1 (source path)**: `alert_evaluator.delivery_allowed` 실행 분기 + dataclass 필드 + `mark_source_setting_triggered` mode 분기 + source API + `SourceAlertAddSheet` picker. 테더 live 경로(USDT+KRX) + 가장 깨끗한 evaluator(함수형 gate) → **정책 먼저 실증**.
+- **PR2 (bank path)**: `process_rate_alerts`의 gate([get_triggered_settings_for_rate](app/crud.py)) repeat-aware화 + `mark_setting_triggered` mode 분기 + bank API + `AlertAddSheet` picker. ⚠️ **FX_ALERT_SHADOW 패리티 로직(메모리 project_fx_alert_shadow_active) 보존 주의** — bank gate가 쿼리 기반 + shadow 무빙파트라 source보다 moderate하게 큼(별 PR 근거).
+- **스키마**(`repeat_interval_sec` ×2)는 **PR1에서 함께 추가**(대칭, 2차 migration 회피). bank 컬럼은 PR1~PR2 사이만 잠시 dormant(API/UI 미노출 → NULL → once 불변).
+
+**근거**: bank/source는 별도 코드 경로이고 bank는 쿼리 gate + FX_ALERT_SHADOW로 더 무겁다 → 한 PR에 몰면 risk↑. 그러나 문서가 B2를 공통으로 정의 + 같은 앱에서 테더-repeat/FX-norepeat 비대칭은 사용자 혼란 → **scope는 full, delivery만 source→bank 순서**. vertical-first = scope-제외가 아니라 sequencing.
+
+### API (source, PR1)
+
+- `POST/PUT /api/source-notification-settings` request + response에 `repeat_interval_sec: Optional[int]` 추가.
+- validation: `None` 또는 enum 허용 값(60/300/600/1800/3600/7200/14400/21600/43200/86400)만; 그 외(0/음수/비-enum) → 422 reject.
+- PUT에서 §7/§8 리셋·정규화 적용.
+
+### iOS (source, PR1)
+
+- `SourceAlertAddSheet`(테더 source 알림 picker — PR1)에 **반복 간격 picker**(한번만 + enum 10) 추가. 한번만 = `repeat_interval_sec=nil` 전송. (bank `AlertAddSheet` picker는 PR2.)
+- 수정 모드: 기존 값 로드. summaryText/목록에 반복 표기(예: "5분마다").
+- `SourceAlertSetting` 모델 + CRUD payload에 `repeat_interval_sec`.
+
+### B2 / B3 경계
+
+- **B2 (본 ADR)**: 사용자 설정 간격 반복, interval-from-last-send.
+- **B3 (후속)**: threshold direction crossing 즉시 발송(조건 release→재충족 즉시). B2 안정 후 별 ADR.
+
+### Consequences
+
+- (+) 신규 앱 핵심 알림 UX(반복) + 비교알림이 올라탈 공통 토대.
+- (+) 기존 once 무영향(NULL 기본), 기존 last_notified_at 인프라 재사용으로 작은 변경.
+- (−) FCM 발송량 증가 가능(조건 고착 시 interval마다). 1차 완화 = enum floor 1분. **runaway(하루 종일 고착) 대비 일일 cap/auto-expire는 본 ADR 범위 밖, 관찰 후 별도 결정**(최소 floor는 확보).
+- (−) bank/source 경로 분리로 full coverage는 2 PR(의도적 vertical-first).
+
+### Alternatives (기각)
+
+- `0 = once`: NULL과 이중 sentinel → 모호 + 0초 연속 스팸 위험. → NULL 단일.
+- repeat에서 triggered를 gate로 재사용: once-only 의미와 충돌, UI "발송됨" 오표시. → repeat는 last_notified_at gate, triggered 미사용.
+- "cooldown 반복" 표현: implementer-centric → 제품 spec은 "사용자 설정 반복 간격"(spec §B2 reframe).
+- **source-only로 "B2 완료" 선언 (기각, codex)**: 문서가 B2를 공통 기능으로 정의 + 같은 앱에서 테더-repeat/FX-norepeat 비대칭 = 사용자/문서 혼란 + 완료 선언 모호. → scope는 full B2(bank+source), 단 delivery는 source→bank 2 PR 위상(완료는 둘 다 후). (source-first를 "B2a"로 개명하는 codex 대안 B보다, full scope 유지 + 정직한 완료 기준이 더 깔끔.)
+- bank+source 한 PR full wiring: bank gate(쿼리) + FX_ALERT_SHADOW로 source보다 무거워 단일 PR risk↑ → scope는 full이되 PR은 위상 분리.
+
+### Rollout
+
+1. 본 ADR 확정.
+2. DB migration script(`repeat_interval_sec` × 2) + models/schemas.
+3. source evaluator: dataclass 필드 + `delivery_allowed` 실행 분기 + `mark_source_setting_triggered` mode 분기.
+4. source CRUD/API create/update/read + validation(§API).
+5. tests(once 회귀 + repeat gate boundary/nil/release/reset/모드전환).
+6. iOS interval picker(source/테더).
+7. 실기기 알림 smoke(repeat 발송 + 간격 + 히스토리 다건).
+8. **PR2 (bank path)**: `process_rate_alerts` gate repeat-aware + `mark_setting_triggered` mode 분기 + bank API + `AlertAddSheet` picker + **FX_ALERT_SHADOW 패리티 보존**. **"B2 완료"는 PR2 후 선언.**
+
+### PR1 구현 touchpoints (workflow w0xxx3yw4 검증, file:line)
+
+- `app/models.py`: `NotificationSetting`([85+](app/models.py#L85)) + `SourceNotificationSetting`([153+](app/models.py#L153)) 양쪽 `repeat_interval_sec = Column(Integer, nullable=True)`.
+- `scripts/migrate_repeat_interval_sec.py` (신규): [migrate_market_index_granularity.py](scripts/migrate_market_index_granularity.py) 패턴 — `column_exists` 멱등 + `--dry-run` + SQLite/PostgreSQL 동일 `ADD COLUMN ... INTEGER NULL`. DEFAULT/UPDATE step 불요(NULL=once).
+- `app/notifications/alert_evaluator.py`: `FreshSettingSnapshot`([137-154](app/notifications/alert_evaluator.py#L137)) += `repeat_interval_sec`/`last_notified_at` / `delivery_allowed`([210](app/notifications/alert_evaluator.py#L210)) 실행 분기(+timezone naive 정규화) / 호출부([622/679](app/notifications/alert_evaluator.py#L622)) now naive.
+- `app/notifications/alert_storage_backend.py`: `refetch_snapshot`(snapshot에 2필드 채움) + `load_settings`(cache는 `repeat_interval_sec` 선택적·불요).
+- `app/crud.py`: `mark_source_setting_triggered`([3084](app/crud.py#L3084)) `setting.repeat_interval_sec` 직접 mode 분기 / `update_source_notification_setting`([2934](app/crud.py#L2934)) §7 리셋(interval 변경) + §8 모드전환 정규화 / `create_source_notification_setting`([2838](app/crud.py#L2838)) dedup 분기에 interval set.
+- `app/schemas.py`: SourceNotificationSetting Request/UpdateRequest/Response에 `repeat_interval_sec: Optional[int]` + enum validation(422).
+- `app/main.py`: create/update 호출 전달 + `build_source_notification_setting_response`에 노출.
+- `CLAUDE.md`: 양 테이블 스키마 표 정정(§13).
+- 테스트: delivery_allowed boundary(nil/미경과/경과/once 회귀) + naive/aware 회귀 + mark mode + §7/§8.
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -5679,3 +5797,4 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 - 2026-06-06: ADR-035 D1 Investing daily append orchestrator 통합 + cron 첫 발화 검증 (production end-to-end, Claude+Codex 이중 독립) — backfill(2026-06-04까지)에서 멈춘 Investing을 매일 자동 갱신, KRX/Hana/Bithumb going-forward freshness parity. **(1) 구현** (`bef10eb`): verdict 계약(`app/daily_append_verdict.py`) `VALID_SKIPPED_REASONS` union에 `no_observation` 추가 + **orchestrator source-aware `valid_skipped_reasons`**(SOURCE_POLICY per-source subset + subset assert — Hana는 no_observation 비허용 / Investing은 weekend_no_changes 비허용 → 전역 추가의 정책 느슨화 회피) + `SOURCE_RUN_ALL`(bithumb→hana 3→investing 3) + resolve_run_units 다통화 일반화(`_MULTI_CURRENCY_SOURCES`) + build_investing_command + evaluate_source_result source-aware reason + Investing writer `--emit-daily-append-verdict`(단일일 written/skipped, **0-obs도 skipped/no_observation sentinel 방출 — exit-0-no-sentinel orchestrator FAIL 방지, Codex catch**; combo: --write 동반 + start==end 전용; multi-day 0-row fail-close 유지). 163 tests(writer verdict 4 + combo 2 + source-aware reason 4[investing no_observation PASS / investing weekend FAIL / hana no_observation FAIL — 정책 느슨화 회피 입증] + build_investing 3 + resolve 3 + 회귀). **(2) EC2 deploy** (build-only): `git pull` + `docker compose build fastapi`(cron이 쓰는 image 반영, running fastapi recreate 안 함 — orchestrator/writer/verdict은 script). dry-run smoke로 `--source investing` 3통화 인식 + command 확인. **(3) cron 첫 발화 검증** (2026-06-06 00:01 KST `--source all`): investing **2026-06-05** 3통화 written(usd C=1553.83 / jpy C=969.49[**quantize 6자리, artifact 0**] / eur C=1795.45, investing_observed_eod / observed_rollup, drift·OHLC·dup 0) + 동반 bithumb 1 + hana 3 → **cron summary 7 units 전부 PASS**. KRX는 cron unit 아니나 in-process close finalizer(CF 15:45)가 same-date(2026-06-05) row 1건 적재. totals **2194→2201**(bithumb 369 / hana 747 / krx 245 / investing 840). **이중 독립 verify**(Claude post-verify + Codex production read-only 일치). sanity cross-check: 같은 6/5 hana usd 1553.30 vs investing usd 1553.83(~0.5 KRW) / hana jpy 969.30 vs investing jpy 969.49 정합(독립 2 source 일치). **→ 4 source going-forward freshness 완성** (bithumb/hana/investing=cron `--source all` 00:01 KST + krx=in-process close finalizer 15:45 — source_daily_rates 매일 자동 최신). 후속(별도): ✅ Phase 2e v2 endpoint(source_daily_rates read 전환) — Phase 2e MVP land + 운영 deploy 완료 2026-06-06 / source_hourly_rates(1w).
 - 2026-06-06: ADR-035 Phase 2e MVP land — v2 graph endpoint (catalog + tab, source_daily_rates read, 3m/1y) (로컬 구현+테스트 + 운영 deploy 완료 2026-06-06) — canonical daily layer를 v2 그래프 endpoint가 직접 read하는 hot path 완성. write-side(4 source 적재) 완료 후 read-side 전환. **(1) graph_v2.py 로직** (`7bc1d65`): `app/graph_v2.py` — `build_catalog()`(3m/1y subset, usd/jpy/eur/tether tab × series + DXY 노출 탭만 index axis_group, §3/§9 근거) + `build_tab(db, tab, period)`(SERIES_REGISTRY id↔DB key 분리 + **kind dispatch**: source_daily_rates=get_range+row_to_dict / DXY=market_index_rates.daily). **동적 provenance**(distinct close_basis 1=single/2+=mixed[Hana만]) + per-point(mixed→close_basis/source_method, KRX→contract_code) + **insufficient partial coverage**(첫 row>start+7일, §6 — 빈 series뿐 아니라 신규 자산 미충족). **Codex 2 findings**(F1 insufficient partial / F2 DXY source priority investing>cnbc>else, crud.py `_dxy_query_single` 일치 — last-row dedup 회귀 차단). 12 tests. **(2) main.py thin wiring** (`9d43773`): `GET /api/v2/graph/catalog` + `/api/v2/graph/tab` — tab 404(unknown_tab) + period 400(unsupported_period + v1 fallback hint) + build_tab(asyncio.to_thread 비차단). 로직 0(graph_v2 호출만) / **v1 `/api/graph/{currency}` 변경 0**(legacy 공존 §12). **(3) endpoint harness** (`c7c218c`): `tests/conftest.py`(firebase stub + DATABASE_URL=file-backed sqlite, collection 시작 시 모든 import 전 — main.py firebase_admin+RDS 연결 회피, 재사용 가능, in-memory override + mkstemp fd close [Codex 2건]) + `tests/test_graph_v2_endpoints.py` 6종(catalog 200/unsupported 400/unknown tab 404/tab empty insufficient/v1 무변경, TestClient lifespan 미진입). **검증 18 tests**(graph_v2 12 + endpoint 6). **MVP 범위**: 3m/1y만(source_daily_rates 단일 조회), 1d=v1 realtime / 1w=source_hourly_rates(D3) 후속 → v2 1d/1w는 400 unsupported_period(insufficient_history와 분리 — 데이터는 v1에 있음). **문서=full target(§4) / 구현=MVP subset(3m/1y)** 비강제. **운영 deploy 완료 2026-06-06**(f04d9b8→0e52b7a recreate, image 9e2e3186; Claude+Codex 이중 독립 검증: catalog 200·tab usd 3m 200 series[77,63,79]·1d 400·v1 200·health healthy·KRX status=normal·ERROR 0; client 미연동이라 실사용 caller 0 — 프론트 cutover 별도). 후속(별도): source_hourly_rates(1w, Phase 2e+) / 프론트 client cutover. 상세: CLAUDE.md Phase 2e MVP anchor + [GRAPH_API_V2_CONTRACT.md §13](GRAPH_API_V2_CONTRACT.md).
 - 2026-06-11: ADR-034 §9 KRX daily append **6/11 회귀 canary PASS** — ⑥(ADR-035 D3 구 hourly hook 제거, `KrxCloseWindowWriter._sync_write` 수정) 운영 반영 후 첫 CF close. 15:46:00 `[krx_cf_append] INSERT date=2026-06-11 A75606 close=1531.2`, close_finalizer / observed_rollup / krx_cf_close_1545 / cf_session_point_count=5935 / KRX 248→249 / drift·OHLC·dup 0. 의미: hook 제거가 daily finalizer-tail(같은 `_sync_write` success path) 무손상 — unit trip-wire(shared writer False-arm)가 못 잡는 영역의 live 회귀 확증. **WS Case A** finalizer (정상 close frame 경로) — REST gate-checked write(`KRX_CLOSE_REST_WRITE_ENABLED`, 6/15 A75606 rollover 후 활성 판단) 미실증이라 KRX_CLOSE_SNAPSHOT_PLAN 직교. 기록 위치: CLAUDE.md Phase 2d KRX daily-append anchor + 본 changelog 2파일 (KRX_CANARY.md 선택·생략).
+- 2026-06-29: ADR-036 작성 (가격알림 반복 발송 repeat_interval_sec, B2) — Proposed, 구현 미착수. **정책**(5라운드 codex 수렴): NULL=once(0/음수 reject) / interval enum 1m·5m·10m·30m·1h·2h·4h·6h·12h·1d(문서 §B2) / once=triggered+disable(현행), **repeat=triggered 미설정·enabled 유지·gate `last_notified_at+interval`(naive UTC)** / 조건 release 리셋 없음(재크로싱=B3) / OFF·threshold·condition·source·interval 변경 시 last_notified_at 리셋 + 모드전환 PUT 정규화 / dedup key interval 제외 / 발송마다 log row. **scope=FULL B2(bank+source)** but 구현 2 PR 위상(PR1 source→PR2 bank, "B2 완료"는 둘 다 후). 검토: codex LOCK OK + workflow ready-after-adr-edits(5-lens 구현가능성). **load-bearing gotcha 박제**: delivery_allowed 호출부(622/679) aware now vs last_notified_at naive → B2 뺄셈 TypeError → except 삼켜 repeat silent 미발화 → PR1 naive 정규화 필수. last_notified_at/rate 인프라 양 테이블 기존(CLAUDE.md notification_settings 스키마 누락은 PR1 정정). 후속: PR1(source) 착수.
