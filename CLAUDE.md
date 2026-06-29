@@ -193,7 +193,7 @@ granularity   TEXT NOT NULL          -- 'realtime' | 'hourly' | 'daily'
 > 상세 스키마: [ALERT_SUBSCRIPTION_GUIDE.md](ALERT_SUBSCRIPTION_GUIDE.md#필요한-db-테이블-rds-postgresql)
 
 - `user_devices` - FCM Device Token 저장 (user_id, device_token, platform)
-- `notification_settings` - 알림 조건 설정 (bank, currency, condition, threshold, enabled, triggered)
+- `notification_settings` - 알림 조건 설정 (bank, currency, condition, threshold, enabled, triggered, last_notified_at, last_notified_rate, **repeat_interval_sec** [B2 ADR-036: NULL=once / 정수=초 간격, bank wiring=PR2])
 - `notification_logs` - 알림 발송 히스토리 (중복 방지)
 
 ### USDT Phase 1 — Source 기반 테이블 (2026-04-23)
@@ -226,6 +226,7 @@ enabled             BOOLEAN DEFAULT TRUE
 triggered           BOOLEAN DEFAULT FALSE
 last_notified_at    DATETIME
 last_notified_rate  REAL
+repeat_interval_sec INTEGER               -- B2 (ADR-036): NULL=once / 정수=초 간격 반복 발송
 created_at          DATETIME
 updated_at          DATETIME
 

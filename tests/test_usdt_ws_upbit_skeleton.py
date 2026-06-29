@@ -20,7 +20,7 @@ import inspect
 import json
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -1599,10 +1599,13 @@ def _make_snapshot(
     asset: str = "usdt-krw",
     condition: str = "above",
     threshold: float = 1500.0,
+    repeat_interval_sec=None,       # B2 (ADR-036): None=once / 정수=repeat
+    last_notified_at=None,          # B2: naive UTC, repeat gate 기준
 ) -> FreshSettingSnapshot:
     return FreshSettingSnapshot(
         setting_id=setting_id, enabled=enabled, triggered=triggered,
         source=source, asset=asset, condition=condition, threshold=threshold,
+        repeat_interval_sec=repeat_interval_sec, last_notified_at=last_notified_at,
     )
 
 
@@ -1782,6 +1785,61 @@ class TestDeliveryAllowed(unittest.TestCase):
     def test_disabled_and_triggered_blocks(self):
         s = _make_snapshot(enabled=False, triggered=True)
         self.assertFalse(delivery_allowed(s, datetime.now(timezone.utc)))
+
+
+class TestDeliveryAllowedRepeat(unittest.TestCase):
+    """B2 (ADR-036) repeat 모드 delivery_allowed — gate = enabled and (last is None or now-last >= interval)."""
+
+    NAIVE_NOW = datetime(2026, 6, 29, 12, 0, 0)  # naive UTC
+
+    def test_repeat_first_fire_last_none_allows(self):
+        # last_notified_at None → 첫 발송 즉시 허용
+        s = _make_snapshot(repeat_interval_sec=300, last_notified_at=None)
+        self.assertTrue(delivery_allowed(s, self.NAIVE_NOW))
+
+    def test_repeat_interval_not_elapsed_blocks(self):
+        # 120s 전 발송, interval 300s → 미경과 차단
+        s = _make_snapshot(repeat_interval_sec=300,
+                           last_notified_at=datetime(2026, 6, 29, 11, 58, 0))
+        self.assertFalse(delivery_allowed(s, self.NAIVE_NOW))
+
+    def test_repeat_interval_elapsed_boundary_allows(self):
+        # 정확히 300s 경과 → >= 경계 허용
+        s = _make_snapshot(repeat_interval_sec=300,
+                           last_notified_at=datetime(2026, 6, 29, 11, 55, 0))
+        self.assertTrue(delivery_allowed(s, self.NAIVE_NOW))
+
+    def test_repeat_triggered_ignored_in_repeat_mode(self):
+        # repeat 모드: triggered=True여도 interval 경과면 발송 (triggered는 once 종료 전용)
+        s = _make_snapshot(repeat_interval_sec=300, triggered=True,
+                           last_notified_at=datetime(2026, 6, 29, 11, 50, 0))  # 600s 전
+        self.assertTrue(delivery_allowed(s, self.NAIVE_NOW))
+
+    def test_repeat_disabled_blocks(self):
+        s = _make_snapshot(repeat_interval_sec=300, enabled=False, last_notified_at=None)
+        self.assertFalse(delivery_allowed(s, self.NAIVE_NOW))
+
+    def test_repeat_aware_now_no_typeerror(self):
+        # load-bearing (ADR-036 §4): 호출부가 aware now(datetime.now(timezone.utc))를 넘겨도
+        # naive last_notified_at과 뺄셈 TypeError 없이 정상 판정 (내부 naive 정규화).
+        aware_now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+        s = _make_snapshot(repeat_interval_sec=300,
+                           last_notified_at=datetime(2026, 6, 29, 11, 54, 0))  # 360s 전
+        self.assertTrue(delivery_allowed(s, aware_now))  # TypeError 없이 True
+
+    def test_once_mode_regression_repeat_none(self):
+        # repeat_interval_sec None → once 정책 유지 (triggered면 차단)
+        s = _make_snapshot(repeat_interval_sec=None, enabled=True, triggered=True)
+        self.assertFalse(delivery_allowed(s, self.NAIVE_NOW))
+
+    def test_repeat_aware_non_utc_now_converts(self):
+        # codex review: aware 비-UTC now도 UTC 변환 후 비교(wall-clock strip 아님).
+        # last=11:58 UTC, interval 300 → 12:00 UTC instant은 120s 경과라 차단이 정답
+        # (단순 tzinfo strip이면 21:00 naive로 오판해 허용됨 → 이 테스트가 보강 잠금).
+        kst_now = datetime(2026, 6, 29, 21, 0, 0, tzinfo=timezone(timedelta(hours=9)))  # = 12:00 UTC
+        s = _make_snapshot(repeat_interval_sec=300,
+                           last_notified_at=datetime(2026, 6, 29, 11, 58, 0))  # 120s 전(UTC)
+        self.assertFalse(delivery_allowed(s, kst_now))
 
 
 class TestAlertSettingsCache(unittest.TestCase):

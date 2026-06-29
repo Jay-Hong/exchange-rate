@@ -97,6 +97,8 @@ class NotificationSetting(Base):
     triggered = Column(Boolean, default=False)
     last_notified_at = Column(DateTime, nullable=True)
     last_notified_rate = Column(Float, nullable=True)
+    # B2 (ADR-036): NULL=once-only(현행 1회성), 정수=초 간격 반복 발송 (last_notified_at+interval gating). bank wiring=PR2.
+    repeat_interval_sec = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=get_utc_now)
     updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now)
 
@@ -167,6 +169,8 @@ class SourceNotificationSetting(Base):
     triggered = Column(Boolean, default=False, nullable=False)
     last_notified_at = Column(DateTime, nullable=True)
     last_notified_rate = Column(Float, nullable=True)
+    # B2 (ADR-036): NULL=once-only(현행 1회성), 정수=초 간격 반복 발송 (last_notified_at+interval gating).
+    repeat_interval_sec = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=get_utc_now, nullable=False)
     updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now, nullable=False)
 

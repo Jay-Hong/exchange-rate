@@ -130,6 +130,9 @@ class SourceAlertBackend(AlertStorageBackend):
                 asset=setting.asset,
                 condition=setting.condition,
                 threshold=setting.threshold,
+                # B2 (ADR-036): repeat gate(delivery_allowed)가 snapshot에서 실행 — 두 필드 필수.
+                repeat_interval_sec=setting.repeat_interval_sec,
+                last_notified_at=setting.last_notified_at,
             )
 
     def persist_result(self, candidate: "CachedAlertSetting", rate: float, fcm_result: dict) -> None:

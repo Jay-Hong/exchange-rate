@@ -2857,6 +2857,7 @@ def build_source_notification_setting_response(
         threshold=setting.threshold,
         is_enabled=setting.enabled,
         triggered=setting.triggered,
+        repeat_interval_sec=setting.repeat_interval_sec,  # B2 (ADR-036): iOS picker 초기값 로드용
         created_at=crud.to_kst_isoformat(setting.created_at),
         updated_at=crud.to_kst_isoformat(setting.updated_at),
         triggered_at=crud.to_kst_isoformat(setting.last_notified_at),
@@ -2958,6 +2959,7 @@ async def create_source_notification_setting(
             condition=body.condition.value,
             threshold=body.threshold,
             is_enabled=body.is_enabled,
+            repeat_interval_sec=body.repeat_interval_sec,  # B2 (ADR-036): null=once
         )
 
         # Settings CRUD cache invalidation (PR6 follow-up):
@@ -3060,6 +3062,14 @@ async def update_source_notification_setting(
 
     condition_value = body.condition.value if body.condition else None
 
+    # B2 (ADR-036): repeat_interval_sec는 "미제공"(변경 안 함)과 "명시적 null(=once 전환)"을
+    # model_fields_set으로 구분 — 제공됐을 때만 crud에 전달(미제공이면 crud 기본 sentinel _UNSET).
+    repeat_kwargs = (
+        {"repeat_interval_sec": body.repeat_interval_sec}
+        if "repeat_interval_sec" in body.model_fields_set
+        else {}
+    )
+
     updated = crud.update_source_notification_setting(
         db=db,
         setting_id=setting_id,
@@ -3069,6 +3079,7 @@ async def update_source_notification_setting(
         condition=condition_value,
         threshold=body.threshold,
         enabled=body.is_enabled,
+        **repeat_kwargs,
     )
 
     # Settings CRUD cache invalidation (PR6 follow-up):

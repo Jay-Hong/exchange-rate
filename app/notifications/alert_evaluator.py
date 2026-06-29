@@ -151,6 +151,11 @@ class FreshSettingSnapshot:
     asset: str
     condition: str
     threshold: float
+    # B2 (ADR-036): repeat 모드 gate(delivery_allowed)는 refetch된 이 snapshot에서 실행.
+    # repeat_interval_sec NULL=once / last_notified_at=마지막 발송(naive UTC, gate 기준).
+    # default 부여 — 기존 snapshot 생성부/테스트 factory 회귀 안전.
+    repeat_interval_sec: Optional[int] = None
+    last_notified_at: Optional[datetime] = None
 
 
 # ---------------------------------------------------------------------------
@@ -208,21 +213,31 @@ def condition_matches_price_input(
 
 
 def delivery_allowed(snapshot: FreshSettingSnapshot, now: datetime) -> bool:
-    """발송 가능 여부.
+    """발송 가능 여부 (ADR-036 B2).
 
-    PR6: once 정책 — `enabled=true and triggered=false`.
+    - once (`repeat_interval_sec IS NULL`): `enabled and not triggered` (PR6 현행).
+    - repeat (정수 간격): `enabled and (last_notified_at is None or now-last >= interval)`.
+      triggered는 repeat 게이트에 미사용(once 종료 상태 전용).
 
-    미래 확장 자리 (B2 `repeat_interval_sec` 도입 시):
-        if snapshot.repeat_interval_sec is None:
-            return snapshot.enabled and not snapshot.triggered
-        return (
-            snapshot.enabled
-            and (snapshot.last_notified_at is None
-                 or (now - snapshot.last_notified_at).total_seconds()
-                    >= snapshot.repeat_interval_sec)
-        )
+    timezone (ADR-036 §4, load-bearing): now/last_notified_at 모두 **naive UTC**로 비교.
+    호출부가 aware now(`datetime.now(timezone.utc)`)를 넘겨도 여기서 naive 정규화 —
+    last_notified_at은 naive UTC(`models.get_utc_now`)라, 정규화 없으면 aware-naive 뺄셈이
+    TypeError → `_evaluate_*_async`의 except가 삼켜 repeat가 영영 silent 미발화.
     """
-    return snapshot.enabled and not snapshot.triggered
+    if snapshot.repeat_interval_sec is None:
+        return snapshot.enabled and not snapshot.triggered
+    if not snapshot.enabled:
+        return False
+    if snapshot.last_notified_at is None:
+        return True
+    # aware면 UTC로 변환 후 strip(비-UTC aware도 정확, codex review). naive면 UTC 가정 유지
+    # (naive에 astimezone 호출 시 시스템 로컬tz 가정 버그 → 분기 분리).
+    if now.tzinfo is not None:
+        now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        now_naive = now
+    elapsed = (now_naive - snapshot.last_notified_at).total_seconds()
+    return elapsed >= snapshot.repeat_interval_sec
 
 
 # ---------------------------------------------------------------------------

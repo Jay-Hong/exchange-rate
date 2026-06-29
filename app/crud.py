@@ -2835,6 +2835,11 @@ def delete_old_market_index_rates(
 # USDT Phase 1: source_notification_settings CRUD
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# B2 (ADR-036): PUT 부분 업데이트에서 repeat_interval_sec의 "미제공"과 "명시적 None(=once)"을
+# 구분하기 위한 sentinel. None 자체가 once 설정 의미라 absent 표현에 쓸 수 없음.
+_UNSET = object()
+
+
 def create_source_notification_setting(
     db: Session,
     user_id: str,
@@ -2843,6 +2848,7 @@ def create_source_notification_setting(
     condition: str,
     threshold: float,
     is_enabled: bool = True,
+    repeat_interval_sec: Optional[int] = None,  # B2 (ADR-036): NULL=once / 정수=초 간격
 ) -> models.SourceNotificationSetting:
     """
     Source 기반 알림 설정 생성 (중복 방지).
@@ -2862,6 +2868,7 @@ def create_source_notification_setting(
 
     if existing:
         existing.enabled = is_enabled
+        existing.repeat_interval_sec = repeat_interval_sec  # B2: dedup 시 interval 갱신
         if is_enabled:
             existing.triggered = False
             existing.last_notified_at = None
@@ -2889,6 +2896,7 @@ def create_source_notification_setting(
         threshold=threshold,
         enabled=is_enabled,
         triggered=False,
+        repeat_interval_sec=repeat_interval_sec,  # B2 (ADR-036)
     )
     db.add(setting)
     db.commit()
@@ -2940,11 +2948,13 @@ def update_source_notification_setting(
     condition: Optional[str] = None,
     threshold: Optional[float] = None,
     enabled: Optional[bool] = None,
+    repeat_interval_sec=_UNSET,  # B2 (ADR-036): sentinel=미제공 / None=once / 정수=repeat
 ) -> Optional[models.SourceNotificationSetting]:
     """
     Source 기반 알림 설정 수정 (PUT - 부분 업데이트).
 
     값이 실제로 변경된 경우에만 triggered 초기화. 기존 NotificationSetting 규칙과 동일.
+    B2 (ADR-036): repeat_interval_sec 변경 시 §7 리셋 + once↔repeat 전환 시 §8 정규화.
     """
     setting = get_source_notification_setting_by_id(db, setting_id, user_id)
     if not setting:
@@ -2977,14 +2987,28 @@ def update_source_notification_setting(
             should_reset_triggered = True
         setting.enabled = enabled
 
+    # B2 (ADR-036): repeat_interval_sec — sentinel=미제공 / None=once / 정수=repeat
+    mode_transition = False
+    if repeat_interval_sec is not _UNSET:
+        if repeat_interval_sec != setting.repeat_interval_sec:
+            should_reset_triggered = True  # §7: interval 변경 시 last_notified_at 리셋
+            if (setting.repeat_interval_sec is None) != (repeat_interval_sec is None):
+                mode_transition = True     # §8: once↔repeat 전환
+        setting.repeat_interval_sec = repeat_interval_sec
+
     if should_reset_triggered:
         setting.triggered = False
         setting.last_notified_at = None
         setting.last_notified_rate = None
         logger.info(
-            "source 알림 설정 재활성화 (조건 변경)",
+            "source 알림 설정 재활성화 (조건/interval 변경)",
             extra={"setting_id": setting_id, "triggered_reset": True},
         )
+
+    # §8: 모드 전환은 새 모드 clean active 시작 — 이전 once 발사로 남은 enabled=false 해제.
+    # 단 같은 PUT에서 사용자가 명시적으로 enabled=false를 주면 그 의도 존중.
+    if mode_transition and enabled is not False:
+        setting.enabled = True
 
     setting.updated_at = models.get_utc_now()
     db.commit()
@@ -3092,15 +3116,25 @@ def mark_source_setting_triggered(
     ).first()
 
     if setting:
-        setting.triggered = True
-        setting.enabled = False
+        # B2 (ADR-036): mode 분기 — ORM row를 직접 읽어 repeat_interval_sec로 판단
+        # (persist_result/cache로 interval thread 불요).
+        if setting.repeat_interval_sec is None:
+            # once-only (현행): 발송 후 자동 비활성화 + triggered=종료 플래그.
+            setting.triggered = True
+            setting.enabled = False
+        # else: repeat — enabled 유지 + triggered 미설정(once 종료 전용).
+        #       gate(delivery_allowed)가 last_notified_at+interval로 다음 발송 판단.
         setting.last_notified_at = models.get_utc_now()
         setting.last_notified_rate = rate
         db.commit()
 
         logger.info(
-            "source 알림 발송 완료 (자동 비활성화)",
-            extra={"setting_id": setting_id, "rate": rate, "enabled": False},
+            "source 알림 발송 완료",
+            extra={
+                "setting_id": setting_id, "rate": rate,
+                "mode": "once" if setting.repeat_interval_sec is None else "repeat",
+                "enabled": setting.enabled,
+            },
         )
 
 
