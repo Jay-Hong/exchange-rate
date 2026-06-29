@@ -566,8 +566,10 @@ reset (3 topic 일괄): `POST /admin/api/topic-status/fx/reset` → `{"results":
 
 | `type` | 의미 | data 필드 |
 |--- |--- |--- |
-| `rate_alert` | 기존 bank+currency 알림 | `bank`, `currency`, `rate`, `threshold`, `condition`, `setting_id` |
-| `source_rate_alert` | **신규** source+asset 알림 | `source`, `asset`, `rate`, `threshold`, `condition`, `setting_id` |
+| `rate_alert` | 기존 bank+currency 알림 | `bank`, `currency`, `rate`, `threshold`, `condition`, `setting_id`, `is_repeat` |
+| `source_rate_alert` | **신규** source+asset 알림 | `source`, `asset`, `rate`, `threshold`, `condition`, `setting_id`, `is_repeat` |
+
+> **`is_repeat`** (B2 ADR-036, 문자열 `"true"`/`"false"`): 이 발송이 반복(repeat) 알림인지 여부의 **권위 플래그**. 수신 단말은 stale 로컬 상태 대신 이 값으로 toggle-off 여부를 결정해야 한다 — `"true"`면 서버가 enabled를 유지하므로 로컬 비활성 금지(반복 지속), `"false"`면 once-only로 발송 후 비활성. **구 서버는 이 필드가 없으므로**, 부재 시 로컬 `repeat_interval_sec != nil` 휴리스틱으로 폴백(하위 호환). 타 기기에서 once↔repeat를 바꾼 직후 로컬이 stale일 때 id-only 푸시 오판으로 토글이 깜빡이는 cross-device race를 차단한다.
 
 **필수 처리**:
 

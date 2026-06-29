@@ -5614,7 +5614,7 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 
 ## ADR-036: 가격알림 반복 발송 (repeat_interval_sec, B2) — 정책 + 스키마 + evaluator/mark mode 분기
 
-**Status**: Accepted — PR1(source/tether) + PR2(bank/FX) land + prod deploy 완료 (2026-06-29). PR1 server `d2dfe28`/iOS `c4b88eb`(+토글 깜빡임 fix `479d611`), PR2 server `195058b`(crud gate+mark+create/update §7/§8 + FxNotificationBackend.refetch_snapshot repeat-aware)/iOS `d7791c8`(bank interval picker + UpdateAlertRequest 3-state). 컬럼 마이그레이션은 PR1에서 양 테이블 prod 적용 완료. 잔여: 기기 smoke(bank repeat e2e) + payload-flag follow-up(cross-device race, 별도 PR).
+**Status**: Accepted — PR1(source/tether) + PR2(bank/FX) + payload-flag(cross-device race) land + prod deploy 완료 (2026-06-29~30). PR1 server `d2dfe28`/iOS `c4b88eb`(+토글 깜빡임 fix `479d611`), PR2 server `195058b`(crud gate+mark+create/update §7/§8 + FxNotificationBackend.refetch_snapshot repeat-aware)/iOS `d7791c8`(bank interval picker + UpdateAlertRequest 3-state), payload-flag server `b0b21fb`(FCM data `is_repeat` 4 builder + CachedAlertSetting.repeat_interval_sec carry)/iOS `157100c`(push 체인 is_repeat 권위 + handleTriggeredSetting(id:isRepeat:) 양 VM). 컬럼 마이그레이션은 PR1에서 양 테이블 prod 적용 완료. 기기 검증: USDT+bank 반복 e2e 정상(은행은 가격변동 시 재발사 = event-driven floor, 정상). **payload-flag**: FCM `is_repeat`("true"/"false") 권위 플래그로 단말이 stale 로컬 대신 toggle-off 결정 → once↔repeat cross-device race 양방향 차단(구 서버 부재 시 로컬 휴리스틱 폴백). 잔여 없음(B2 완료); iOS는 신규 빌드 배포 시 payload-flag 소비(하위 호환 — 구 앱은 필드 무시).
 **관련**: [USDT_WS_DESIGN_PLAN.md §B2](USDT_WS_DESIGN_PLAN.md), ADR-032 (KRX/source alert evaluator), 신규 앱 overhaul(메모리 project_app_overhaul — 가격+비교알림 전 탭). B3(direction-crossing)은 본 ADR 범위 밖(후속).
 
 ### Context
