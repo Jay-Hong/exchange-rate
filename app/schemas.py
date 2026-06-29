@@ -95,6 +95,25 @@ class RegisterDeviceResponse(BaseModel):
     device_id: Optional[int] = None
 
 
+# B2 (ADR-036): 반복 발송 간격(초) 허용 enum. null=한번만(once). bank + source 알림 공유.
+# iOS picker enum과 값 일치 필요(불일치 시 422 reject). 0/음수/비-enum reject.
+REPEAT_INTERVAL_SEC_ALLOWED = frozenset(
+    {60, 300, 600, 1800, 3600, 7200, 14400, 21600, 43200, 86400}
+)
+
+
+def _validate_repeat_interval_sec(value: Optional[int]) -> Optional[int]:
+    """null(once) 또는 허용 enum 값만 통과. 그 외 ValueError → FastAPI 422."""
+    if value is None:
+        return value
+    if value not in REPEAT_INTERVAL_SEC_ALLOWED:
+        raise ValueError(
+            "repeat_interval_sec must be null (once) or one of "
+            f"{sorted(REPEAT_INTERVAL_SEC_ALLOWED)} seconds"
+        )
+    return value
+
+
 class NotificationSettingRequest(BaseModel):
     """알림 설정 요청"""
     bank: BankEnum = Field(..., description="은행 코드")
@@ -102,6 +121,15 @@ class NotificationSettingRequest(BaseModel):
     condition: ConditionEnum = Field(..., description="조건 (above: 이상, below: 이하)")
     threshold: float = Field(..., gt=0, description="목표 환율")
     is_enabled: bool = Field(default=True, description="활성화 여부 (기본: True)")
+    repeat_interval_sec: Optional[int] = Field(
+        default=None,
+        description="반복 발송 간격(초). null=한번만(once). 허용: 60/300/600/1800/3600/7200/14400/21600/43200/86400",
+    )
+
+    @field_validator("repeat_interval_sec")
+    @classmethod
+    def _validate_repeat_interval(cls, v: Optional[int]) -> Optional[int]:
+        return _validate_repeat_interval_sec(v)
 
 
 class NotificationSettingResponse(BaseModel):
@@ -114,6 +142,7 @@ class NotificationSettingResponse(BaseModel):
     threshold: float
     is_enabled: bool  # 활성화 여부
     triggered: bool
+    repeat_interval_sec: Optional[int] = None  # B2 (ADR-036): null=once / 정수=초 간격
     created_at: str  # ISO 8601
     updated_at: Optional[str] = None  # ISO 8601
     triggered_at: Optional[str] = None  # ISO 8601, 발송 시간
@@ -133,6 +162,14 @@ class NotificationSettingUpdateRequest(BaseModel):
     condition: Optional[ConditionEnum] = None  # 조건 변경
     threshold: Optional[float] = Field(None, gt=0)  # 임계값 변경
     is_enabled: Optional[bool] = None  # 활성화 여부 (토글)
+    # B2 (ADR-036): null=once / 정수=repeat. PUT에서 "미제공"과 "명시적 null(=once)" 구분은
+    # main.py가 model_fields_set으로 판단해 crud sentinel(_UNSET)에 매핑.
+    repeat_interval_sec: Optional[int] = Field(default=None)
+
+    @field_validator("repeat_interval_sec")
+    @classmethod
+    def _validate_repeat_interval(cls, v: Optional[int]) -> Optional[int]:
+        return _validate_repeat_interval_sec(v)
 
 
 class DeleteResponse(BaseModel):
@@ -144,24 +181,8 @@ class DeleteResponse(BaseModel):
 # ============================================================
 # Source 기반 알림 스키마 (USDT exchange + KRX derivative)
 # ============================================================
-
-# B2 (ADR-036): 반복 발송 간격(초) 허용 enum. null=한번만(once). 문서 §B2 후보.
-# iOS picker enum과 값 일치 필요(불일치 시 422 reject). 0/음수/비-enum reject.
-REPEAT_INTERVAL_SEC_ALLOWED = frozenset(
-    {60, 300, 600, 1800, 3600, 7200, 14400, 21600, 43200, 86400}
-)
-
-
-def _validate_repeat_interval_sec(value: Optional[int]) -> Optional[int]:
-    """null(once) 또는 허용 enum 값만 통과. 그 외 ValueError → FastAPI 422."""
-    if value is None:
-        return value
-    if value not in REPEAT_INTERVAL_SEC_ALLOWED:
-        raise ValueError(
-            "repeat_interval_sec must be null (once) or one of "
-            f"{sorted(REPEAT_INTERVAL_SEC_ALLOWED)} seconds"
-        )
-    return value
+# (B2 repeat 간격 helper REPEAT_INTERVAL_SEC_ALLOWED / _validate_repeat_interval_sec는
+#  bank 알림 스키마와 공유하므로 파일 상단 NotificationSettingRequest 앞에서 정의.)
 
 
 class SourceNotificationSettingRequest(BaseModel):

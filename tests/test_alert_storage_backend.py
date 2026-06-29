@@ -194,6 +194,26 @@ class TestFxNotificationBackend(unittest.TestCase):
         self.assertEqual(result[0].asset, "usd-krw")    # currency → asset
         self.assertEqual(result[0].device_tokens, ("token-A",))
 
+    def test_refetch_snapshot_carries_repeat_fields(self):
+        # B2 (ADR-036): FX backend refetch가 repeat_interval_sec/last_notified_at을 snapshot에 실어야
+        # delivery_allowed가 FX(shadow/canary) 경로에서도 interval throttle 적용 (누락 시 repeat→once 오인).
+        import datetime as _dt
+        last = _dt.datetime(2026, 6, 29, 1, 2, 3)
+        mock_setting = MagicMock(
+            id=7, user_id="user-B", bank="hana", currency="usd-krw",
+            condition="above", threshold=1500.0, enabled=True, triggered=False,
+            repeat_interval_sec=300, last_notified_at=last,
+        )
+        with patch("app.crud.get_notification_setting_by_id", return_value=mock_setting), \
+             patch("app.database.get_db_context") as mock_ctx:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=None)
+            snap = FxNotificationBackend().refetch_snapshot(setting_id=7, user_id="user-B")
+
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap.repeat_interval_sec, 300)
+        self.assertEqual(snap.last_notified_at, last)
+
 
 if __name__ == "__main__":
     unittest.main()

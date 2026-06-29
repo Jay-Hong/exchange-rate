@@ -1882,6 +1882,13 @@ def get_devices_by_user(db: Session, user_id: str) -> List[models.UserDevice]:
 # NotificationSetting CRUD
 # ─────────────────────────────────────────────────────────────
 
+# B2 (ADR-036): PUT 부분 업데이트에서 repeat_interval_sec의 "미제공"과 "명시적 None(=once)"을
+# 구분하기 위한 sentinel. None 자체가 once 설정 의미라 absent 표현에 쓸 수 없음.
+# bank/source 양쪽 update 함수가 공유하므로 두 함수보다 먼저 단일 정의 (중복 정의 시 모듈 global
+# 재바인딩으로 default-vs-body 비교가 어긋남).
+_UNSET = object()
+
+
 def create_notification_setting(
     db: Session,
     user_id: str,
@@ -1889,7 +1896,8 @@ def create_notification_setting(
     currency: str,
     condition: str,
     threshold: float,
-    is_enabled: bool = True
+    is_enabled: bool = True,
+    repeat_interval_sec: Optional[int] = None,  # B2 (ADR-036): NULL=once / 정수=초 간격
 ) -> models.NotificationSetting:
     """
     알림 설정 생성 (중복 방지)
@@ -1924,6 +1932,7 @@ def create_notification_setting(
     if existing:
         # 기존 설정 업데이트
         existing.enabled = is_enabled
+        existing.repeat_interval_sec = repeat_interval_sec  # B2: dedup 시 interval 갱신
         if is_enabled:
             # True로 재활성화할 때만 triggered 초기화 (재알림 가능)
             existing.triggered = False
@@ -1955,7 +1964,8 @@ def create_notification_setting(
         condition=condition,
         threshold=threshold,
         enabled=is_enabled,
-        triggered=False
+        triggered=False,
+        repeat_interval_sec=repeat_interval_sec,  # B2 (ADR-036)
     )
     db.add(setting)
     db.commit()
@@ -2021,7 +2031,8 @@ def update_notification_setting(
     bank: Optional[str] = None,
     condition: Optional[str] = None,
     threshold: Optional[float] = None,
-    enabled: Optional[bool] = None
+    enabled: Optional[bool] = None,
+    repeat_interval_sec=_UNSET,  # B2 (ADR-036): sentinel=미제공 / None=once / 정수=repeat
 ) -> Optional[models.NotificationSetting]:
     """
     알림 설정 수정 (PUT - 부분 업데이트)
@@ -2042,6 +2053,7 @@ def update_notification_setting(
         - bank, condition, threshold 중 실제로 값이 변경되면 triggered 초기화
         - enabled: False→True 전환 시에도 triggered 초기화
         - is_enabled는 기존 값 유지 (자동 활성화 안 함)
+        - B2 (ADR-036): repeat_interval_sec 변경 시 §7 리셋 + once↔repeat 전환 시 §8 정규화
     """
     setting = get_notification_setting_by_id(db, setting_id, user_id)
     if not setting:
@@ -2078,15 +2090,29 @@ def update_notification_setting(
             should_reset_triggered = True
         setting.enabled = enabled
 
+    # B2 (ADR-036): repeat_interval_sec — sentinel=미제공 / None=once / 정수=repeat
+    mode_transition = False
+    if repeat_interval_sec is not _UNSET:
+        if repeat_interval_sec != setting.repeat_interval_sec:
+            should_reset_triggered = True  # §7: interval 변경 시 last_notified_at 리셋
+            if (setting.repeat_interval_sec is None) != (repeat_interval_sec is None):
+                mode_transition = True     # §8: once↔repeat 전환
+        setting.repeat_interval_sec = repeat_interval_sec
+
     # triggered 초기화 (재알림 가능) - last_notified_* 도 함께 초기화
     if should_reset_triggered:
         setting.triggered = False
         setting.last_notified_at = None
         setting.last_notified_rate = None
         logger.info(
-            "알림 설정 재활성화 (조건 변경)",
+            "알림 설정 재활성화 (조건/interval 변경)",
             extra={"setting_id": setting_id, "triggered_reset": True}
         )
+
+    # §8: 모드 전환은 새 모드 clean active 시작 — 이전 once 발사로 남은 enabled=false 해제.
+    # 단 같은 PUT에서 사용자가 명시적으로 enabled=false를 주면 그 의도 존중.
+    if mode_transition and enabled is not False:
+        setting.enabled = True
 
     setting.updated_at = models.get_utc_now()
     db.commit()
@@ -2187,6 +2213,16 @@ def get_triggered_settings_for_rate(
             condition_met = True
 
         if condition_met:
+            # B2 (ADR-036): repeat 모드 interval gate. query는 enabled+!triggered만 거르는데
+            # repeat는 triggered 항상 false라 매 tick 통과 → last_notified_at+interval 미경과면 skip해
+            # 반복 throttle. once는 query의 !triggered가 이미 gate(repeat_interval_sec None이라 미진입).
+            # get_utc_now()=naive UTC, last_notified_at도 naive UTC라 뺄셈 안전(소스 aware-now 이슈 없음).
+            # bank(get_triggered_settings_for_rate) + source-legacy(get_triggered_source_settings_for_rate)
+            # 둘 다 동일 적용 — 후자는 REST polling 비활성이나 재활성 시 spam 방어.
+            if setting.repeat_interval_sec is not None and setting.last_notified_at is not None:
+                elapsed = (models.get_utc_now() - setting.last_notified_at).total_seconds()
+                if elapsed < setting.repeat_interval_sec:
+                    continue
             matched_settings.append(setting)
             user_ids.add(setting.user_id)
 
@@ -2237,15 +2273,22 @@ def mark_setting_triggered(
     ).first()
 
     if setting:
-        setting.triggered = True
-        setting.enabled = False  # 알림 발송 후 자동 비활성화 (1회성 알림)
+        # B2 (ADR-036): mode 분기 — repeat는 enabled 유지 + triggered 미설정(once 종료 전용),
+        # last_notified_at만 갱신해 gate가 다음 interval 판단. once는 현행(자동 비활성).
+        if setting.repeat_interval_sec is None:
+            setting.triggered = True
+            setting.enabled = False  # once: 발송 후 자동 비활성화 (1회성)
         setting.last_notified_at = models.get_utc_now()
         setting.last_notified_rate = rate
         db.commit()
 
         logger.info(
-            "알림 발송 완료 (자동 비활성화)",
-            extra={"setting_id": setting_id, "rate": rate, "enabled": False}
+            "알림 발송 완료",
+            extra={
+                "setting_id": setting_id, "rate": rate,
+                "mode": "once" if setting.repeat_interval_sec is None else "repeat",
+                "enabled": setting.enabled,
+            },
         )
 
 
@@ -2834,10 +2877,7 @@ def delete_old_market_index_rates(
 # ═══════════════════════════════════════════════════════════════════════════════
 # USDT Phase 1: source_notification_settings CRUD
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# B2 (ADR-036): PUT 부분 업데이트에서 repeat_interval_sec의 "미제공"과 "명시적 None(=once)"을
-# 구분하기 위한 sentinel. None 자체가 once 설정 의미라 absent 표현에 쓸 수 없음.
-_UNSET = object()
+# (B2 sentinel `_UNSET`는 bank create_notification_setting 앞에서 단일 정의 — bank/source 공유.)
 
 
 def create_source_notification_setting(
@@ -3078,6 +3118,16 @@ def get_triggered_source_settings_for_rate(
             condition_met = True
 
         if condition_met:
+            # B2 (ADR-036): repeat 모드 interval gate. query는 enabled+!triggered만 거르는데
+            # repeat는 triggered 항상 false라 매 tick 통과 → last_notified_at+interval 미경과면 skip해
+            # 반복 throttle. once는 query의 !triggered가 이미 gate(repeat_interval_sec None이라 미진입).
+            # get_utc_now()=naive UTC, last_notified_at도 naive UTC라 뺄셈 안전(소스 aware-now 이슈 없음).
+            # bank(get_triggered_settings_for_rate) + source-legacy(get_triggered_source_settings_for_rate)
+            # 둘 다 동일 적용 — 후자는 REST polling 비활성이나 재활성 시 spam 방어.
+            if setting.repeat_interval_sec is not None and setting.last_notified_at is not None:
+                elapsed = (models.get_utc_now() - setting.last_notified_at).total_seconds()
+                if elapsed < setting.repeat_interval_sec:
+                    continue
             matched_settings.append(setting)
             user_ids.add(setting.user_id)
 

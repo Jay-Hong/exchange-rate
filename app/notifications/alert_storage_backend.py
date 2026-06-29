@@ -319,6 +319,13 @@ class FxNotificationBackend(AlertStorageBackend):
                 asset=setting.currency,    # value pass-through
                 condition=setting.condition,
                 threshold=setting.threshold,
+                # B2 (ADR-036): repeat-aware delivery_allowed가 FX 경로(shadow/canary)에서도
+                # interval throttle을 적용하려면 필수. 누락 시 delivery_allowed가 repeat를 once로 오인 →
+                # canary는 interval throttle 없이 매 tick 발사 + shadow의 delivery 진단(would_send/
+                # refetch_skipped_triggered)이 legacy gate와 어긋남. matched_candidates(refetch 이전
+                # condition-match 카운터)는 무관. SourceAlertBackend와 대칭.
+                repeat_interval_sec=setting.repeat_interval_sec,
+                last_notified_at=setting.last_notified_at,
             )
 
     def persist_result(self, candidate: "CachedAlertSetting", rate: float, fcm_result: dict) -> None:

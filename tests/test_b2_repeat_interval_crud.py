@@ -139,5 +139,157 @@ class TestUpdateResetAndNormalize(_Base):
         self.assertEqual(s.repeat_interval_sec, 300)   # 변경 안 됨
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# PR2: bank(NotificationSetting) 경로 — source와 동일 정책 미러 + 신규 gate 로직
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class _BankBase(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine("sqlite://")
+        models.Base.metadata.create_all(self.engine)
+        self.db = sessionmaker(bind=self.engine)()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _create(self, repeat_interval_sec=None, **kw):
+        return crud.create_notification_setting(
+            db=self.db, user_id=_USER, bank=kw.get("bank", "hana"),
+            currency=kw.get("currency", "usd-krw"), condition=kw.get("condition", "above"),
+            threshold=kw.get("threshold", 1500.0), is_enabled=kw.get("is_enabled", True),
+            repeat_interval_sec=repeat_interval_sec,
+        )
+
+    def _add_device(self, token="tok-1"):
+        d = models.UserDevice(user_id=_USER, device_token=token, platform="ios")
+        self.db.add(d)
+        self.db.commit()
+        return d
+
+
+class TestBankCreate(_BankBase):
+    def test_create_once_default_null(self):
+        s = self._create(repeat_interval_sec=None)
+        self.assertIsNone(s.repeat_interval_sec)
+
+    def test_create_repeat_stored(self):
+        s = self._create(repeat_interval_sec=600)
+        self.assertEqual(s.repeat_interval_sec, 600)
+
+    def test_create_dedup_updates_interval(self):
+        s1 = self._create(repeat_interval_sec=None)
+        s2 = self._create(repeat_interval_sec=300)
+        self.assertEqual(s1.id, s2.id)              # dedup
+        self.assertEqual(s2.repeat_interval_sec, 300)
+
+
+class TestBankMarkModeBranch(_BankBase):
+    def test_mark_once_disables(self):
+        s = self._create(repeat_interval_sec=None)
+        crud.mark_setting_triggered(self.db, s.id, rate=1501.0)
+        self.db.refresh(s)
+        self.assertTrue(s.triggered)
+        self.assertFalse(s.enabled)
+        self.assertIsNotNone(s.last_notified_at)
+        self.assertEqual(s.last_notified_rate, 1501.0)
+
+    def test_mark_repeat_keeps_enabled_no_triggered(self):
+        s = self._create(repeat_interval_sec=300)
+        crud.mark_setting_triggered(self.db, s.id, rate=1502.0)
+        self.db.refresh(s)
+        self.assertFalse(s.triggered)               # repeat: triggered 미설정
+        self.assertTrue(s.enabled)                  # repeat: enabled 유지
+        self.assertIsNotNone(s.last_notified_at)
+        self.assertEqual(s.last_notified_rate, 1502.0)
+
+
+class TestBankUpdateResetAndNormalize(_BankBase):
+    def test_interval_change_resets_last_notified(self):
+        s = self._create(repeat_interval_sec=300)
+        crud.mark_setting_triggered(self.db, s.id, rate=1503.0)
+        self.db.refresh(s)
+        self.assertIsNotNone(s.last_notified_at)
+        crud.update_notification_setting(self.db, s.id, _USER, repeat_interval_sec=600)
+        self.db.refresh(s)
+        self.assertEqual(s.repeat_interval_sec, 600)
+        self.assertIsNone(s.last_notified_at)       # §7 리셋
+        self.assertFalse(s.triggered)
+
+    def test_mode_transition_once_to_repeat_normalizes(self):
+        s = self._create(repeat_interval_sec=None)
+        crud.mark_setting_triggered(self.db, s.id, rate=1504.0)
+        self.db.refresh(s)
+        self.assertTrue(s.triggered)
+        self.assertFalse(s.enabled)
+        crud.update_notification_setting(self.db, s.id, _USER, repeat_interval_sec=300)
+        self.db.refresh(s)
+        self.assertEqual(s.repeat_interval_sec, 300)
+        self.assertTrue(s.enabled)                  # §8 정규화
+        self.assertFalse(s.triggered)
+        self.assertIsNone(s.last_notified_at)
+
+    def test_mode_transition_repeat_to_once(self):
+        s = self._create(repeat_interval_sec=300)
+        crud.mark_setting_triggered(self.db, s.id, rate=1505.0)
+        crud.update_notification_setting(self.db, s.id, _USER, repeat_interval_sec=None)
+        self.db.refresh(s)
+        self.assertIsNone(s.repeat_interval_sec)
+        self.assertTrue(s.enabled)
+        self.assertFalse(s.triggered)
+        self.assertIsNone(s.last_notified_at)
+
+    def test_mode_transition_respects_explicit_disable(self):
+        s = self._create(repeat_interval_sec=None)
+        crud.mark_setting_triggered(self.db, s.id, rate=1506.0)
+        crud.update_notification_setting(
+            self.db, s.id, _USER, repeat_interval_sec=300, enabled=False,
+        )
+        self.db.refresh(s)
+        self.assertEqual(s.repeat_interval_sec, 300)
+        self.assertFalse(s.enabled)                 # 사용자 명시 enabled=False 존중
+
+    def test_unset_does_not_change_interval(self):
+        s = self._create(repeat_interval_sec=300)
+        crud.update_notification_setting(self.db, s.id, _USER, threshold=1490.0)
+        self.db.refresh(s)
+        self.assertEqual(s.repeat_interval_sec, 300)
+
+
+class TestBankGateIntervalThrottle(_BankBase):
+    """get_triggered_settings_for_rate의 repeat interval gate (PR2 신규 로직)."""
+
+    def _matched_ids(self, rate=1501.0):
+        items = crud.get_triggered_settings_for_rate(self.db, "hana", "usd-krw", rate)
+        return {it["setting"].id for it in items}
+
+    def test_once_first_fire_then_query_gate_excludes(self):
+        # once: 첫 발사 후 mark가 triggered=True → query !triggered가 제외 (gate 미진입)
+        self._add_device()
+        s = self._create(repeat_interval_sec=None)
+        self.assertIn(s.id, self._matched_ids())    # 첫 tick 매칭
+        crud.mark_setting_triggered(self.db, s.id, rate=1501.0)
+        self.assertNotIn(s.id, self._matched_ids())  # 발사 후 제외
+
+    def test_repeat_throttled_within_interval(self):
+        # repeat: mark 후 interval 미경과면 gate가 skip (enabled/triggered는 그대로)
+        self._add_device()
+        s = self._create(repeat_interval_sec=60)
+        self.assertIn(s.id, self._matched_ids())    # 첫 tick 매칭 (last_notified_at None)
+        crud.mark_setting_triggered(self.db, s.id, rate=1501.0)
+        self.assertNotIn(s.id, self._matched_ids())  # interval 내 → throttle
+
+    def test_repeat_refires_after_interval_elapsed(self):
+        # repeat: last_notified_at이 interval 이전이면 다시 매칭
+        import datetime as _dt
+        self._add_device()
+        s = self._create(repeat_interval_sec=60)
+        crud.mark_setting_triggered(self.db, s.id, rate=1501.0)
+        self.db.refresh(s)
+        s.last_notified_at = models.get_utc_now() - _dt.timedelta(seconds=120)
+        self.db.commit()
+        self.assertIn(s.id, self._matched_ids())    # interval 경과 → 재매칭
+
+
 if __name__ == "__main__":
     unittest.main()
