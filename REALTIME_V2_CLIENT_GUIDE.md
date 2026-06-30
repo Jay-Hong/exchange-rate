@@ -2,8 +2,9 @@
 
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
 > 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출). 서버 측 계약 closed — 잔여는 client 구현 + live enable(별도 GO).
-> 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e), **prod에서는 flag-off dormant**
-> (`TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` default false) — live 활성은 별도 GO.
+> 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). **prod LIVE** (2026-06-27 확인:
+> `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED`/`KRX_TOPIC_INCLUDE` ON). 잔여 = **client release gate**
+> (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).
 > 이 문서가 topic 계약의 **authoritative source**. [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md)
 > "Topic API" 섹션은 본 문서로 supersede(구현에 사용 금지).
 
@@ -44,7 +45,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 ### 활성 조건 (서버 flag)
 
-- `TOPIC_DISPATCHER_ENABLED=true` 필요(전 topic). **현 prod는 false → subscribe 무시·snapshot 없음**.
+- `TOPIC_DISPATCHER_ENABLED=true` 필요(전 topic). **현 prod는 ON**(2026-06-27 확인) → subscribe·snapshot 정상.
 - FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`는 `TOPIC_DISPATCHER_ENABLED`만(+ KRX 포함은 `KRX_TOPIC_INCLUDE`).
 - live 활성 = 별도 운영 GO (출시 직전).
 
