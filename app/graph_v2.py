@@ -338,7 +338,14 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
 # ─────────────────────────────────────────────────────────────
 
 def build_catalog() -> dict:
-    """전체 catalog (MVP — 3m/1y/1w). DB 불필요 (정적 상수)."""
+    """전체 catalog (3m/1y/1w MVP + 테더 1d). DB 불필요 (정적 상수).
+
+    테더 1d는 10min 11 series(§4 line 54)로 장기(3m/1y/1w)의 5 series와 구성이 달라 별도 정의
+    (섞지 않음 — graph_v2_intraday). 다른 탭의 1d는 아직 v2 미지원(endpoint 400)이라 catalog 미노출.
+    supported_periods(전역)는 MVP_PERIODS 유지 — 1d는 tab-specific(테더 periods에만 존재).
+    """
+    from app.graph_v2_intraday import TETHER_1D_ALL_SERIES, TETHER_1D_DEFAULT_VISIBLE
+
     tabs = []
     for tab, series_ids in _TAB_SERIES.items():
         periods = {}
@@ -346,6 +353,11 @@ def build_catalog() -> dict:
             periods[period] = {
                 "all_series": list(series_ids),
                 "default_visible_series": list(_TAB_DEFAULT_VISIBLE[tab]),
+            }
+        if tab == "tether":
+            periods["1d"] = {
+                "all_series": list(TETHER_1D_ALL_SERIES),
+                "default_visible_series": list(TETHER_1D_DEFAULT_VISIBLE),
             }
         tabs.append({
             "id": tab,

@@ -113,11 +113,13 @@ def fetch_last_before(source: str, currency: str, cutoff_ts: int) -> Optional[Li
         return None
 
 
-def build_graph_series(source: str, currency: str) -> Tuple[List[List[float]], int]:
+def build_graph_series(source: str, currency: str, now_kst: Optional[datetime] = None) -> Tuple[List[List[float]], int]:
     """
     24시간 구간을 10분 버킷으로 집계하여 [ts, max, min, close] 리스트를 만든다.
     - ts: 버킷 시작 시각(Unix, 초)
     - max/min/close: 버킷 내 최고/최저/종가. 데이터가 없으면 직전 close를 carry-forward.
+    - now_kst: 미주입 시 datetime.now(KST)(legacy). 주입 시 그 시점 기준 — graph_v2 1d builder가
+      11 series를 **한 now로** 묶어 일관된 스냅샷(버킷 경계 동일)을 만들 때 사용.
     Returns: (series, latest_ts)
     """
 
@@ -125,7 +127,7 @@ def build_graph_series(source: str, currency: str) -> Tuple[List[List[float]], i
         table = "investing_exchange_rates" if source == "investing" else "bank_exchange_rates"
         where_clause = "AND bank = :bank" if source != "investing" else ""
 
-        now_kst = datetime.now(KST)
+        now_kst = now_kst or datetime.now(KST)
         window_start_kst = now_kst - timedelta(hours=24)
         window_start_ts = int(window_start_kst.timestamp())
         # 버킷 정렬: 10분 경계로 맞춰 시작 (KST 기준 유지)
@@ -209,15 +211,16 @@ PERIOD_CONFIG = {
 # DXY 그래프 시리즈 (1일용, 10분 버킷)
 # ═════════════════════════════════════════════════════════════
 
-def build_dxy_graph_series() -> Tuple[List[List[float]], int]:
+def build_dxy_graph_series(now_kst: Optional[datetime] = None) -> Tuple[List[List[float]], int]:
     """
     24시간 DXY 데이터를 10분 버킷으로 집계 (realtime granularity만).
     같은 timestamp에 investing/yahoo 공존 시 investing 우선 (ROW_NUMBER).
+    now_kst: 미주입 시 datetime.now(KST)(legacy). 주입 시 graph_v2 1d builder의 일관 스냅샷용.
 
     Returns: (series, latest_ts) — 기존 build_graph_series와 동일 형식
     """
     with get_db_context() as db:
-        now_kst = datetime.now(KST)
+        now_kst = now_kst or datetime.now(KST)
         window_start_kst = now_kst - timedelta(hours=24)
         window_start_ts = int(window_start_kst.timestamp())
         bucket_start_ts = window_start_ts - (window_start_ts % 600)

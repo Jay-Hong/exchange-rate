@@ -74,14 +74,45 @@ class TestGraphV2Cache(unittest.TestCase):
         self.assertEqual(kwargs.get("ex"), 300)  # 1w TTL
 
     def test_unsupported_period_bypasses_cache(self):
-        """400(1d) → 캐시 path 미진입 (get/set 미호출)."""
+        """400(usd 1d, 아직 v2 미지원) → read-through 캐시 path 미진입 (get/set 미호출).
+
+        (테더 1d는 이제 precompute path로 지원 → 미지원 케이스는 usd 1d로 검증.)
+        """
         with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)) as mget, \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset:
-            r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
+            r = self.client.get("/api/v2/graph/tab?tab=usd&period=1d")
 
         self.assertEqual(r.status_code, 400)
         mget.assert_not_awaited()
         mset.assert_not_awaited()
+
+    def test_tether_1d_cache_hit_skips_build(self):
+        """테더 1d hit(precompute key 유효 JSON) → build_tether_1d_payload 미호출 + 캐시값 반환."""
+        cached = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True}}
+        with patch("app.main.redis_cache.get", new=AsyncMock(return_value=json.dumps(cached))), \
+             patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
+             patch("app.graph_v2_intraday.build_tether_1d_payload") as mbuild:
+            r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
+
+        self.assertEqual(r.status_code, 200)
+        mbuild.assert_not_called()
+        mset.assert_not_awaited()
+        self.assertEqual(r.json()["metadata"].get("cached"), True)
+
+    def test_tether_1d_cache_miss_single_flight_rebuild(self):
+        """테더 1d miss(get None) → lock 아래 build_tether_1d_payload 1회 + set(key/TTL 1200)."""
+        fake = {"tab": "tether", "period": "1d", "series": [], "metadata": {}}
+        with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)), \
+             patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
+             patch("app.graph_v2_intraday.build_tether_1d_payload", return_value=fake) as mbuild:
+            r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
+
+        self.assertEqual(r.status_code, 200)
+        mbuild.assert_called_once()
+        mset.assert_awaited_once()
+        args, kwargs = mset.await_args
+        self.assertEqual(args[0], "graph_v2:tab:tether:1d")
+        self.assertEqual(kwargs.get("ex"), 1200)  # CACHE_TTL_SECONDS (안전망)
 
     def test_unknown_tab_bypasses_cache(self):
         """404(unknown tab) → 캐시 path 미진입."""

@@ -2395,9 +2395,47 @@ async def get_v2_graph_catalog():
 _GRAPH_V2_CACHE_TTL_SECONDS = {"1w": 300, "3m": 1800, "1y": 1800}
 
 
+# 테더 1d miss-rebuild single-flight (process-local). precompute(scheduler */10)가 캐시를 warm하게
+# 유지하므로 miss는 드묾(cold start / cron 사망 + TTL 만료). ⚠️ 현 prod는 --workers 1이라 process-local
+# 로 충분 — multi-worker 전환 시 Redis SET NX EX 필요(redis_cache.set은 nx 미지원 → 별도 구현).
+_tether_1d_rebuild_lock = asyncio.Lock()
+
+
+async def _serve_tether_1d_cached():
+    """테더 1d (10min closed-bucket) — precompute key read, miss 시 lock 아래 1회 rebuild.
+
+    완료된 10분봉만 서버가 제공 → client가 live topic으로 진행 중 봉을 live-tail. graph_v2_intraday.
+    """
+    from app.graph_v2_intraday import (
+        CACHE_KEY_TETHER_1D,
+        CACHE_TTL_SECONDS,
+        build_tether_1d_payload,
+    )
+
+    cached = await redis_cache.get(CACHE_KEY_TETHER_1D)
+    if cached is not None:
+        try:
+            return json.loads(cached)
+        except (ValueError, TypeError):
+            logger.warning("graph_v2 테더 1d 캐시 parse 실패 — rebuild")
+
+    async with _tether_1d_rebuild_lock:
+        # lock 대기 중 다른 요청/precompute가 채웠을 수 있음 → double-check (중복 build 회피)
+        cached = await redis_cache.get(CACHE_KEY_TETHER_1D)
+        if cached is not None:
+            try:
+                return json.loads(cached)
+            except (ValueError, TypeError):
+                pass
+        payload = await asyncio.to_thread(build_tether_1d_payload)
+        await redis_cache.set(CACHE_KEY_TETHER_1D, json.dumps(payload), ex=CACHE_TTL_SECONDS)
+        return payload
+
+
 @app.get("/api/v2/graph/tab")
 async def get_v2_graph_tab(tab: str, period: str = "3m"):
-    """탭×기간 모든 series 데이터 (source_daily/hourly_rates read). period∈{3m,1y,1w} 지원 (1w=hourly)."""
+    """탭×기간 모든 series 데이터. period∈{3m,1y,1w} = source_daily/hourly_rates read-through.
+    period=1d = 테더 전용 10min closed-bucket precompute(graph_v2_intraday)."""
     from app.graph_v2 import build_tab, is_supported_period, known_tabs, MVP_PERIODS
 
     if tab not in known_tabs():
@@ -2406,8 +2444,21 @@ async def get_v2_graph_tab(tab: str, period: str = "3m"):
             "detail": f"tab '{tab}' not found",
             "known_tabs": known_tabs(),
         })
+    # 1d — 테더만 지원(10min precompute). 다른 탭 1d는 아직 v2 미지원 → 400 + v1 hint.
+    if period == "1d":
+        if tab == "tether":
+            return await _serve_tether_1d_cached()
+        return JSONResponse(status_code=400, content={
+            "error": "unsupported_period",
+            "detail": f"period '1d' is not supported for tab '{tab}' in Graph API v2",
+            "supported_periods": list(MVP_PERIODS),
+            "fallback": {
+                "type": "legacy_graph_api",
+                "hint": "Use legacy /api/graph/{currency}?range=1d",
+            },
+        })
     if not is_supported_period(period):
-        # MVP 범위 밖(1d) — insufficient_history 아님, 명시적 미지원 + v1 fallback hint
+        # MVP 범위 밖 — insufficient_history 아님, 명시적 미지원 + v1 fallback hint
         return JSONResponse(status_code=400, content={
             "error": "unsupported_period",
             "detail": f"period '{period}' is not in Graph API v2 MVP scope",

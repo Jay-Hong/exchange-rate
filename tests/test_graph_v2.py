@@ -61,9 +61,13 @@ class TestCatalog(unittest.TestCase):
 
     def test_catalog_3m_1y_1w(self):
         cat = G.build_catalog()
-        self.assertEqual(cat["supported_periods"], ["3m", "1y", "1w"])
-        for t in cat["tabs"]:
-            self.assertEqual(set(t["periods"].keys()), {"3m", "1y", "1w"})  # 1d만 미노출(v1)
+        self.assertEqual(cat["supported_periods"], ["3m", "1y", "1w"])  # 전역 MVP (1d=tab-specific)
+        tabs = {t["id"]: t for t in cat["tabs"]}
+        # FX 탭: 3m/1y/1w만 (1d는 아직 v2 미지원)
+        for tab in ("usd", "jpy", "eur"):
+            self.assertEqual(set(tabs[tab]["periods"].keys()), {"3m", "1y", "1w"})
+        # 테더 탭: 1d(10min precompute) 추가 노출
+        self.assertEqual(set(tabs["tether"]["periods"].keys()), {"1d", "3m", "1y", "1w"})
 
     def test_supported_periods(self):
         self.assertTrue(G.is_supported_period("3m"))
