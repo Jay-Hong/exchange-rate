@@ -2467,10 +2467,17 @@ async def _get_tether_1d_in_progress() -> dict:
 
 
 @app.get("/api/v2/graph/tab")
-async def get_v2_graph_tab(tab: str, period: str = "3m"):
+async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
     """탭×기간 모든 series 데이터. period∈{3m,1y,1w} = source_daily/hourly_rates read-through.
     period=1d = 테더 전용 10min closed-bucket precompute(graph_v2_intraday)."""
     from app.graph_v2 import build_tab, is_supported_period, known_tabs, MVP_PERIODS
+
+    # 라이브 그래프(1d 10min 진행봉 + in_progress seed, 3m/1y/1w도 매일/매시 갱신)는 클라가 HTTP
+    # 캐시하면 cold-open에 stale 응답을 내줌 → no-store로 어떤 캐시 레이어도 저장 안 하게 함. iOS
+    # URLCache가 cache 헤더 없는 200 GET을 휴리스틱 캐싱해 cold-launch에 직전 세션 그래프를 ~2-3분
+    # 내주던 문제(닫힌 봉+seed 둘 다 지연) 대응. 속도는 서버 Redis 캐시가 담당(클라 캐시 불필요).
+    # 성공(dict) 응답에만 적용(에러 JSONResponse는 자체 반환이라 미적용, 무해).
+    response.headers["Cache-Control"] = "no-store"
 
     if tab not in known_tabs():
         return JSONResponse(status_code=404, content={
