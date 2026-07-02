@@ -87,32 +87,51 @@ class TestGraphV2Cache(unittest.TestCase):
         mset.assert_not_awaited()
 
     def test_tether_1d_cache_hit_skips_build(self):
-        """테더 1d hit(precompute key 유효 JSON) → build_tether_1d_payload 미호출 + 캐시값 반환."""
-        cached = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True}}
-        with patch("app.main.redis_cache.get", new=AsyncMock(return_value=json.dumps(cached))), \
+        """테더 1d hit — closed key + in_progress key 각각 유효 JSON → 둘 다 build 미호출 + set 미호출,
+        응답에 closed(cached) + additive in_progress seed 부착. (key-aware mock으로 계약 정확 검증.)"""
+        closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True}}
+        seed = {"bithumb.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
+
+        def fake_get(key):
+            if key == "graph_v2:tab:tether:1d":
+                return json.dumps(closed)
+            if key == "graph_v2:tab:tether:1d:in_progress":
+                return json.dumps(seed)
+            return None
+
+        with patch("app.main.redis_cache.get", new=AsyncMock(side_effect=fake_get)), \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
-             patch("app.graph_v2_intraday.build_tether_1d_payload") as mbuild:
+             patch("app.graph_v2_intraday.build_tether_1d_payload") as mbuild, \
+             patch("app.graph_v2_intraday.build_tether_1d_in_progress") as mseed:
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)
         mbuild.assert_not_called()
+        mseed.assert_not_called()
         mset.assert_not_awaited()
-        self.assertEqual(r.json()["metadata"].get("cached"), True)
+        body = r.json()
+        self.assertEqual(body["metadata"].get("cached"), True)
+        self.assertEqual(body["in_progress"], seed)   # additive seed 부착
 
-    def test_tether_1d_cache_miss_single_flight_rebuild(self):
-        """테더 1d miss(get None) → lock 아래 build_tether_1d_payload 1회 + set(key/TTL 1200)."""
-        fake = {"tab": "tether", "period": "1d", "series": [], "metadata": {}}
+    def test_tether_1d_cache_miss_rebuilds_closed_and_in_progress(self):
+        """테더 1d miss(둘 다 None) → closed rebuild(build_tether_1d_payload, set TTL 1200) +
+        in_progress rebuild(build_tether_1d_in_progress, set in_progress key TTL 15). 응답에 seed 부착."""
+        closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {}}
+        seed = {"upbit.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
         with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)), \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
-             patch("app.graph_v2_intraday.build_tether_1d_payload", return_value=fake) as mbuild:
+             patch("app.graph_v2_intraday.build_tether_1d_payload", return_value=closed) as mbuild, \
+             patch("app.graph_v2_intraday.build_tether_1d_in_progress", return_value=seed) as mseed:
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)
         mbuild.assert_called_once()
-        mset.assert_awaited_once()
-        args, kwargs = mset.await_args
-        self.assertEqual(args[0], "graph_v2:tab:tether:1d")
-        self.assertEqual(kwargs.get("ex"), 1200)  # CACHE_TTL_SECONDS (안전망)
+        mseed.assert_called_once()
+        self.assertEqual(mset.await_count, 2)   # closed + in_progress
+        set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
+        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d"), 1200)          # closed 안전망
+        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d:in_progress"), 15)  # seed short TTL
+        self.assertEqual(r.json()["in_progress"], seed)
 
     def test_unknown_tab_bypasses_cache(self):
         """404(unknown tab) → 캐시 path 미진입."""

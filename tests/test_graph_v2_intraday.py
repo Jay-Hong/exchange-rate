@@ -20,6 +20,7 @@ from app.graph_v2_intraday import (
     _build_market_index_series_1d,
     _build_source_series_1d,
     _trim_in_progress,
+    build_tether_1d_in_progress,
     build_tether_1d_payload,
 )
 
@@ -189,6 +190,60 @@ class TestCatalog1dIsolation(unittest.TestCase):
         self.assertNotIn("1d", tabs["usd"]["periods"])
         self.assertNotIn("1d", tabs["jpy"]["periods"])
         self.assertNotIn("1d", tabs["eur"]["periods"])
+
+
+class TestBuildTether1dInProgress(unittest.TestCase):
+    """진행 중(현재) 10분봉 seed — cold-open/resync 시 클라 현재 봉 partial 해소용."""
+
+    def setUp(self):
+        for tbl in (models.SourceRate, models.BankExchangeRate, models.InvestingExchangeRate, models.MarketIndexRate):
+            db = SessionLocal()
+            db.query(tbl).delete()
+            db.commit()
+            db.close()
+
+    tearDown = setUp
+
+    def _add_upbit(self, now_kst, hms_rates):
+        db = SessionLocal()
+        for (h, m, s), rate in hms_rates:
+            ts_utc = datetime(2026, 1, 1, h, m, s, tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
+            db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=rate, timestamp=ts_utc))
+        db.commit()
+        db.close()
+
+    def test_extracts_current_bucket_high_low_close(self):
+        """현재 봉(09:20~09:30) 관측 3건 → seed high=max/low=min/close=last."""
+        now_kst = datetime(2026, 1, 1, 9, 23, tzinfo=KST)   # 진행 중 봉 = 09:20
+        self._add_upbit(now_kst, [((9, 20, 30), 1500.0), ((9, 21, 0), 1510.0), ((9, 22, 0), 1505.0)])
+        ip = build_tether_1d_in_progress(now_kst=now_kst)
+        self.assertIn("upbit.usdt-krw", ip)
+        seed = ip["upbit.usdt-krw"]
+        self.assertEqual(seed["high"], 1510.0)
+        self.assertEqual(seed["low"], 1500.0)
+        self.assertEqual(seed["close"], 1505.0)   # 마지막 관측
+        self.assertTrue(seed["bucket_start"].startswith("2026-01-01T09:20:00"))   # align(now)=09:20 KST
+        self.assertTrue(seed["sampled_at"].startswith("2026-01-01T09:23:00"))
+
+    def test_omitted_when_no_data(self):
+        """데이터 0 → seed 생략(클라 client-only 누적 fallback)."""
+        now_kst = datetime(2026, 1, 1, 9, 23, tzinfo=KST)
+        ip = build_tether_1d_in_progress(now_kst=now_kst)
+        self.assertNotIn("upbit.usdt-krw", ip)
+
+    def test_carry_forward_zero_width_when_only_prior_data(self):
+        """현재 봉 관측 없고 이전 데이터만 → carry-forward zero-width(high==low==prev close). 변동 없음 표현."""
+        now_kst = datetime(2026, 1, 1, 9, 23, tzinfo=KST)
+        before = (now_kst - timedelta(hours=25)).astimezone(timezone.utc).replace(tzinfo=None)
+        db = SessionLocal()
+        db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1490.0, timestamp=before))
+        db.commit()
+        db.close()
+        ip = build_tether_1d_in_progress(now_kst=now_kst)
+        self.assertIn("upbit.usdt-krw", ip)
+        seed = ip["upbit.usdt-krw"]
+        self.assertEqual(seed["high"], seed["low"])   # zero-width(무변동)
+        self.assertEqual(seed["close"], 1490.0)       # carry-forward
 
 
 if __name__ == "__main__":

@@ -2399,13 +2399,23 @@ _GRAPH_V2_CACHE_TTL_SECONDS = {"1w": 300, "3m": 1800, "1y": 1800}
 # 유지하므로 miss는 드묾(cold start / cron 사망 + TTL 만료). ⚠️ 현 prod는 --workers 1이라 process-local
 # 로 충분 — multi-worker 전환 시 Redis SET NX EX 필요(redis_cache.set은 nx 미지원 → 별도 구현).
 _tether_1d_rebuild_lock = asyncio.Lock()
+_tether_1d_in_progress_lock = asyncio.Lock()
 
 
 async def _serve_tether_1d_cached():
-    """테더 1d (10min closed-bucket) — precompute key read, miss 시 lock 아래 1회 rebuild.
+    """테더 1d 응답 = closed-bucket payload + optional `in_progress` seed(현재 10분봉 high/low/close).
 
-    완료된 10분봉만 서버가 제공 → client가 live topic으로 진행 중 봉을 live-tail. graph_v2_intraday.
+    closed는 precompute 캐시(완료봉만). in_progress는 additive short-TTL cache-aside — cold-open/resync
+    시 클라가 현재 봉 앞부분 high/low를 못 보는 문제 해소용 seed. 실패해도 seed만 생략(closed 정상),
+    클라는 seed로 현재 봉을 채우고 없으면 client-only 누적 fallback. graph_v2_intraday.
     """
+    payload = await _get_tether_1d_closed()
+    payload["in_progress"] = await _get_tether_1d_in_progress()   # {} 가능(데이터 없음/실패) → 클라 fallback
+    return payload
+
+
+async def _get_tether_1d_closed() -> dict:
+    """closed-bucket payload — precompute key read, miss 시 lock 아래 1회 rebuild(process-local single-flight)."""
     from app.graph_v2_intraday import (
         CACHE_KEY_TETHER_1D,
         CACHE_TTL_SECONDS,
@@ -2430,6 +2440,30 @@ async def _serve_tether_1d_cached():
         payload = await asyncio.to_thread(build_tether_1d_payload)
         await redis_cache.set(CACHE_KEY_TETHER_1D, json.dumps(payload), ex=CACHE_TTL_SECONDS)
         return payload
+
+
+async def _get_tether_1d_in_progress() -> dict:
+    """진행 중(현재) 10분봉 seed — short-TTL cache-aside(miss 시 lock 아래 현재 봉만 재계산).
+    실패는 격리: 빈 dict 반환 → 클라는 seed 없이 client-only 누적 fallback(closed 그래프는 정상)."""
+    from app.graph_v2_intraday import (
+        CACHE_KEY_TETHER_1D_IN_PROGRESS,
+        IN_PROGRESS_TTL_SECONDS,
+        build_tether_1d_in_progress,
+    )
+    try:
+        cached = await redis_cache.get(CACHE_KEY_TETHER_1D_IN_PROGRESS)
+        if cached is not None:
+            return json.loads(cached)
+        async with _tether_1d_in_progress_lock:
+            cached = await redis_cache.get(CACHE_KEY_TETHER_1D_IN_PROGRESS)
+            if cached is not None:
+                return json.loads(cached)
+            seed = await asyncio.to_thread(build_tether_1d_in_progress)
+            await redis_cache.set(CACHE_KEY_TETHER_1D_IN_PROGRESS, json.dumps(seed), ex=IN_PROGRESS_TTL_SECONDS)
+            return seed
+    except Exception:
+        logger.warning("graph_v2 테더 1d in_progress seed 실패 — 생략(client-only fallback)", exc_info=True)
+        return {}
 
 
 @app.get("/api/v2/graph/tab")

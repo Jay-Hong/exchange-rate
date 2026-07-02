@@ -42,8 +42,14 @@ logger = logging.getLogger("exchange_rate.graph_v2_intraday")
 BUCKET_SECONDS = 600          # 10분봉
 WINDOW_HOURS = 24             # 1d = 최근 24시간
 CACHE_KEY_TETHER_1D = "graph_v2:tab:tether:1d"
+# 진행 중(현재) 10분봉 seed — closed payload와 별개 short-TTL cache-aside (cold-open/resync 시 클라가
+# 현재 봉 앞부분 high/low를 못 보는 문제 해소). additive: 없으면 클라가 client-only 누적으로 fallback.
+CACHE_KEY_TETHER_1D_IN_PROGRESS = "graph_v2:tab:tether:1d:in_progress"
 # cron */10이 신선도 책임 → TTL은 안전망(>10분). cron 사망 시 ~20분 후 만료 → miss rebuild로 자연 복구.
 CACHE_TTL_SECONDS = 1200
+# in_progress seed는 실시간성 필요(현재 봉) → 짧은 TTL. serve 시 cache-aside(miss면 현재 봉만 재계산).
+# fetch가 드물어(cold-open/resync) 계산 빈도 = min(TTL, serve 빈도). 트래픽 급증 시 별도 cron으로 전환 여지.
+IN_PROGRESS_TTL_SECONDS = 15
 
 # ─────────────────────────────────────────────────────────────
 # 1d 전용 series 메타데이터 (§4 line 54).
@@ -244,24 +250,27 @@ def _provenance_1d(source: str, n_points: int) -> dict:
     }
 
 
-def _build_series_1d(spec: dict, now_kst: datetime, in_progress_start_ts: int) -> dict:
-    """spec 1개 → v2 series dict (graph_v2 _read_*_series와 동일 출력 shape)."""
+def _build_raw_1d(spec: dict, now_kst: datetime) -> Tuple[List[List[float]], str]:
+    """spec → (raw series [ts,max,min,close] — 진행 중 봉 포함, src_label). reader dispatch 공용.
+    closed payload(_build_series_1d, trim 후)와 in_progress seed(build_tether_1d_in_progress, 현재 봉만)가
+    같은 reader를 재사용해 query drift 0. now_kst 주입으로 11 series가 동일 버킷 경계(경계 race 제거)."""
     if spec["kind"] == "source":
-        raw = _build_source_series_1d(spec["source"], spec["asset"], spec["decimals"], now_kst)
-        src_label = spec["source"]
-    elif spec["kind"] == "fx":
-        # now_kst 주입 — 11 series가 동일 now 기준 버킷 경계를 갖도록(경계 race 제거, codex finding)
+        return _build_source_series_1d(spec["source"], spec["asset"], spec["decimals"], now_kst), spec["source"]
+    if spec["kind"] == "fx":
         raw, _ = build_graph_series(spec["fx_source"], spec["currency"], now_kst)
-        src_label = spec["fx_source"]
-    elif spec["kind"] == "market_index":
+        return raw, spec["fx_source"]
+    if spec["kind"] == "market_index":
         if spec["instrument"] == "dxy":
             raw, _ = build_dxy_graph_series(now_kst)   # investing>yahoo dedup 내장 + now_kst 일관
         else:
             raw = _build_market_index_series_1d(spec["instrument"], spec["decimals"], now_kst)
-        src_label = spec["instrument"]
-    else:
-        raise ValueError(f"미지원 1d series kind: {spec['kind']!r} (series={spec['id']})")
+        return raw, spec["instrument"]
+    raise ValueError(f"미지원 1d series kind: {spec['kind']!r} (series={spec['id']})")
 
+
+def _build_series_1d(spec: dict, now_kst: datetime, in_progress_start_ts: int) -> dict:
+    """spec 1개 → v2 series dict (graph_v2 _read_*_series와 동일 출력 shape). closed-bucket only."""
+    raw, src_label = _build_raw_1d(spec, now_kst)
     raw = _trim_in_progress(raw, in_progress_start_ts)   # 완료봉만(closed-bucket)
     points = _to_v2_points(raw, src_label)
     return {
@@ -300,6 +309,35 @@ def build_tether_1d_payload() -> dict:
             },
         },
     }
+
+
+def build_tether_1d_in_progress(now_kst: Optional[datetime] = None) -> dict:
+    """진행 중(현재) 10분봉만 per-series 추출 — cold-open/resync seed용. closed payload와 별개 short-TTL.
+
+    readers는 full 24h를 만들지만 in_progress_start_ts(align(now)) 버킷 1개만 취함(readers 재사용 =
+    query drift 0, carry-forward 포함해 현재 봉이 empty여도 직전 close로 seed). 현재 봉이 아예 없으면
+    (데이터 0) 해당 series 생략 → 클라는 그 소스에 seed 없이 client-only 누적 fallback.
+    반환: { "<series.id>": {bucket_start(KST ISO), high, low, close, sampled_at(KST ISO)} }.
+    now_kst: 테스트 결정성용 주입(기본 datetime.now(KST)). prod endpoint는 인자 없이 호출."""
+    now_kst = now_kst or datetime.now(KST)
+    ip_start = _bucket_align(int(now_kst.timestamp()))
+    ip_iso = datetime.fromtimestamp(ip_start, tz=timezone.utc).astimezone(KST).isoformat()
+    sampled_at = now_kst.isoformat()
+    out: dict = {}
+    for spec in _TETHER_1D_SERIES:
+        raw, _ = _build_raw_1d(spec, now_kst)
+        bucket = next((b for b in raw if int(b[0]) == ip_start), None)
+        if bucket is None:
+            continue   # 현재 봉 데이터 없음 → seed 생략(client-only fallback)
+        _ts, mx, mn, close = bucket
+        out[spec["id"]] = {
+            "bucket_start": ip_iso,
+            "high": mx,
+            "low": mn,
+            "close": close,
+            "sampled_at": sampled_at,
+        }
+    return out
 
 
 def precompute_tether_1d() -> None:
