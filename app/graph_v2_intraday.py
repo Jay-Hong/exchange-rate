@@ -300,6 +300,11 @@ def build_tether_1d_payload() -> dict:
         "tab": "tether",
         "period": "1d",
         "series": series_out,
+        # 이 payload가 build된 진행중 버킷 경계(epoch, 잘라낸 지점). serve(_get_tether_1d_closed)가
+        # "캐시 경계 < 현재 경계"면 경계 통과 후 precompute(:12) 전 창이라 방금 닫힌 봉이 아직 캐시에
+        # 없다고 판단 → 온디맨드 rebuild(cold-open ~12초 gap 제거). 클라(GraphV2TabResponse)는 미인지 필드
+        # 무시(전방호환). `_` prefix = 내부 메타(클라 계약 아님).
+        "_in_progress_start_ts": in_progress_start_ts,
         "metadata": {
             "fetched_at": now_kst.isoformat(),
             "bucket_size": "10min",

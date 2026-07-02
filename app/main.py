@@ -2415,26 +2415,47 @@ async def _serve_tether_1d_cached():
 
 
 async def _get_tether_1d_closed() -> dict:
-    """closed-bucket payload — precompute key read, miss 시 lock 아래 1회 rebuild(process-local single-flight)."""
+    """closed-bucket payload — precompute key read, miss/stale 시 lock 아래 1회 rebuild(process-local single-flight).
+
+    stale = 경계 통과 후 precompute(:12) 전 창. 캐시의 `_in_progress_start_ts`(build 시점 경계)가 현재
+    경계보다 작으면, 방금 닫힌 봉이 아직 캐시에 없음(precompute 미실행) → 온디맨드 rebuild로 즉시 반영해
+    cold-open ~12초 gap 제거(사용자 실측: 경계 직후 재실행 시 직전 완료 봉 누락). 그 외엔 캐시 read(빠름).
+    """
+    import time
+
     from app.graph_v2_intraday import (
         CACHE_KEY_TETHER_1D,
         CACHE_TTL_SECONDS,
+        _bucket_align,
         build_tether_1d_payload,
     )
+
+    current_boundary = _bucket_align(int(time.time()))
+
+    def _fresh(payload) -> bool:
+        # 캐시가 현재 경계 이후에 build됐으면(방금 닫힌 봉 포함) fresh. 구 캐시(_in_progress_start_ts 부재)는
+        # 0 → stale 간주 → 배포 직후 1회 rebuild로 self-heal. non-dict JSON(내부 writer만 쓰나 방어)은
+        # isinstance로 걸러 rebuild(500 회피, codex hardening).
+        return isinstance(payload, dict) and payload.get("_in_progress_start_ts", 0) >= current_boundary
 
     cached = await redis_cache.get(CACHE_KEY_TETHER_1D)
     if cached is not None:
         try:
-            return json.loads(cached)
+            payload = json.loads(cached)
+            if _fresh(payload):
+                return payload
+            # stale-by-one-bucket (경계 통과, precompute 전) → 아래서 rebuild
         except (ValueError, TypeError):
             logger.warning("graph_v2 테더 1d 캐시 parse 실패 — rebuild")
 
     async with _tether_1d_rebuild_lock:
-        # lock 대기 중 다른 요청/precompute가 채웠을 수 있음 → double-check (중복 build 회피)
+        # lock 대기 중 다른 요청/precompute가 fresh하게 채웠을 수 있음 → double-check (중복 build 회피)
         cached = await redis_cache.get(CACHE_KEY_TETHER_1D)
         if cached is not None:
             try:
-                return json.loads(cached)
+                payload = json.loads(cached)
+                if _fresh(payload):
+                    return payload
             except (ValueError, TypeError):
                 pass
         payload = await asyncio.to_thread(build_tether_1d_payload)

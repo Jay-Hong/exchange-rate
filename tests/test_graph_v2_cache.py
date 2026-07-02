@@ -87,9 +87,11 @@ class TestGraphV2Cache(unittest.TestCase):
         mset.assert_not_awaited()
 
     def test_tether_1d_cache_hit_skips_build(self):
-        """테더 1d hit — closed key + in_progress key 각각 유효 JSON → 둘 다 build 미호출 + set 미호출,
-        응답에 closed(cached) + additive in_progress seed 부착. (key-aware mock으로 계약 정확 검증.)"""
-        closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True}}
+        """테더 1d hit(캐시 경계 fresh) — closed key + in_progress key 각각 유효 JSON → 둘 다 build 미호출 +
+        set 미호출, 응답에 closed(cached) + additive in_progress seed 부착. (key-aware mock으로 계약 정확 검증.)
+        `_in_progress_start_ts`가 현재 경계 이상(먼 미래값)이라 stale rebuild 미발동 = fresh cache 경로."""
+        closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True},
+                  "_in_progress_start_ts": 9999999999}   # 현재 경계 이상 = fresh (rebuild 안 함)
         seed = {"bithumb.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
 
         def fake_get(key):
@@ -112,6 +114,36 @@ class TestGraphV2Cache(unittest.TestCase):
         body = r.json()
         self.assertEqual(body["metadata"].get("cached"), True)
         self.assertEqual(body["in_progress"], seed)   # additive seed 부착
+
+    def test_tether_1d_stale_boundary_rebuilds_closed(self):
+        """테더 1d hit이지만 캐시 경계 stale(_in_progress_start_ts=0 < 현재 경계) → 경계 통과 후 precompute(:12)
+        전 창으로 판단, closed를 온디맨드 rebuild(build_tether_1d_payload 호출 + set) → cold-open ~12초 gap 제거.
+        구 캐시(_in_progress_start_ts 부재)도 default 0이라 동일하게 rebuild(배포 직후 self-heal)."""
+        stale_closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True},
+                        "_in_progress_start_ts": 0}   # 현재 경계 미만 = stale
+        rebuilt = {"tab": "tether", "period": "1d", "series": [], "metadata": {"rebuilt": True},
+                   "_in_progress_start_ts": 9999999999}
+        seed = {"upbit.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
+
+        def fake_get(key):
+            if key == "graph_v2:tab:tether:1d":
+                return json.dumps(stale_closed)
+            if key == "graph_v2:tab:tether:1d:in_progress":
+                return json.dumps(seed)
+            return None
+
+        with patch("app.main.redis_cache.get", new=AsyncMock(side_effect=fake_get)), \
+             patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
+             patch("app.graph_v2_intraday.build_tether_1d_payload", return_value=rebuilt) as mbuild, \
+             patch("app.graph_v2_intraday.build_tether_1d_in_progress", return_value=seed):
+            r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
+
+        self.assertEqual(r.status_code, 200)
+        mbuild.assert_called_once()   # stale 경계 → 온디맨드 rebuild
+        self.assertEqual(r.json()["metadata"].get("rebuilt"), True)   # 캐시 아닌 rebuild 값 반환
+        # closed rebuild set(TTL 1200) 포함
+        set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
+        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d"), 1200)
 
     def test_tether_1d_cache_miss_rebuilds_closed_and_in_progress(self):
         """테더 1d miss(둘 다 None) → closed rebuild(build_tether_1d_payload, set TTL 1200) +
