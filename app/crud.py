@@ -2381,6 +2381,16 @@ def process_rate_alerts(
     Returns:
         발송된 알림 수
     """
+    # 비교알림 dual-trigger hook (ADR-037 Decision 3 — bank/investing 변경 leg).
+    # sync crawler thread → emit 내부 schedule_on_loop 마샬링(best-effort). flag off면 zero-overhead.
+    # 함수 내부 1곳 배선으로 전 호출부(bank atomic/legacy + investing) 커버.
+    try:
+        from app.notifications.comparison_evaluator import emit_comparison_observation
+        for _cr in changed_rates:
+            emit_comparison_observation(_cr["bank"], _cr["currency"])
+    except Exception:
+        logger.exception("comparison hook 실패 (격리)")
+
     # 순환 참조 방지를 위해 함수 내부에서 import
     from app.notifications.fcm import send_fcm_multicast_sync, init_firebase
     from app import config as app_config  # S6b baseline gate (FX_ALERT_SHADOW_ENABLED)
@@ -3185,6 +3195,39 @@ def mark_source_setting_triggered(
             "source 알림 발송 완료",
             extra={
                 "setting_id": setting_id, "rate": rate,
+                "mode": "once" if setting.repeat_interval_sec is None else "repeat",
+                "enabled": setting.enabled,
+            },
+        )
+
+
+def mark_comparison_alert_triggered(
+    db: Session,
+    setting_id: int,
+    spread: float,
+) -> None:
+    """비교 알림 설정을 '발송됨'으로 표시 (ADR-037 — mark_source_setting_triggered 미러).
+
+    once(repeat_interval_sec NULL): triggered=True + enabled=False (1회성 종료).
+    repeat: enabled 유지 + triggered 미설정 — gate(delivery_allowed)가 last_notified_at+interval 판단.
+    last_notified_spread는 signed raw (진단/히스토리 요약용 — ADR-037 Decision 2).
+    """
+    setting = db.query(models.ComparisonAlert).filter(
+        models.ComparisonAlert.id == setting_id
+    ).first()
+
+    if setting:
+        if setting.repeat_interval_sec is None:
+            setting.triggered = True
+            setting.enabled = False
+        setting.last_notified_at = models.get_utc_now()
+        setting.last_notified_spread = spread
+        db.commit()
+
+        logger.info(
+            "비교 알림 발송 완료",
+            extra={
+                "setting_id": setting_id, "spread": spread,
                 "mode": "once" if setting.repeat_interval_sec is None else "repeat",
                 "enabled": setting.enabled,
             },

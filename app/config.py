@@ -404,6 +404,12 @@ KRX_REDIS_TICK_WRITE_ENABLED = os.getenv("KRX_REDIS_TICK_WRITE_ENABLED", "false"
 #   - F-3: env=true 활성 (force-recreate) + 테스트 iOS canary 관찰
 KRX_ALERT_EVALUATOR_ENABLED = os.getenv("KRX_ALERT_EVALUATOR_ENABLED", "false").lower() == "true"
 
+# COMPARISON_ALERT_ENABLED: 비교 알림(ADR-037) evaluator 발화 게이트 (default false — dormant).
+# emit_comparison_observation 첫 줄 gate (KRX_ALERT_EVALUATOR_ENABLED 패턴 — flag off면
+# zero-overhead return). API/스키마는 flag 무관 land(dead until flag). 활성화 = env true +
+# force-recreate + iOS canary end-to-end (F-3 절차).
+COMPARISON_ALERT_ENABLED = os.getenv("COMPARISON_ALERT_ENABLED", "false").lower() == "true"
+
 # FX_ALERT_SHADOW_ENABLED: FX(bank+investing) alert shadow 토글 (fanout step 4 S4, 2026-06-23).
 #
 # 현재 동작 (flag=false default): crud의 _emit_fx_alert_shadow가 첫 줄 early-return →

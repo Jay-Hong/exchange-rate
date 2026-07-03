@@ -215,6 +215,15 @@ def condition_matches_price_input(
     return matched_triggered_rate(setting, price_input) is not None
 
 
+def _emit_comparison(source: str, asset: str) -> None:
+    """비교알림 hook forward (ADR-037) — lazy import + 예외 격리 (tick 경로 영향 0)."""
+    try:
+        from app.notifications.comparison_evaluator import emit_comparison_observation
+        emit_comparison_observation(source, asset)
+    except Exception:
+        logger.exception("[alert_evaluator] comparison hook 실패 (격리)")
+
+
 def delivery_allowed(snapshot: FreshSettingSnapshot, now: datetime) -> bool:
     """발송 가능 여부 (ADR-036 B2).
 
@@ -419,11 +428,16 @@ class UsdtAlertEvaluator:
                 task = asyncio.create_task(self._evaluate_price_input_async(price_input))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
+            if flushed:
+                # 비교알림 dual-trigger hook (ADR-037 Decision 3 — coalescer 5s grain 뒤,
+                # 단일알림과 동일 절제). flag off면 zero-overhead. USDT 5 + KRX(상속) 커버.
+                _emit_comparison(observation.source, observation.asset)
         else:
             # rest_probe + 미래 kind — coalescer 우회, 즉시 raw observation 평가
             task = asyncio.create_task(self._evaluate_async(observation))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+            _emit_comparison(observation.source, observation.asset)   # 복구 신호도 비교 재평가
 
     async def close(self, timeout: float = ALERT_CLOSE_TIMEOUT_SEC) -> None:
         """drain-first: pending alert tasks 완료 대기, timeout 후 cancel.
