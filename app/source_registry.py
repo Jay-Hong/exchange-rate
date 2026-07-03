@@ -195,3 +195,53 @@ def validate_alert_source_asset(source: str, asset: str) -> Optional[str]:
             f"Use /api/notification-settings for bank/investing alerts."
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# 비교 알림 tab-scope 검증 (ADR-037 Decision 1/4)
+# ---------------------------------------------------------------------------
+
+# 탭별 비교 허용 (source, asset) 집합 — 해당 탭 그래프 catalog(graph_v2_intraday.TAB_1D_SERIES)의
+# axis_group=="krw" series와 1:1 (DXY 계열은 단위 불일치로 자동 제외).
+# ⚠️ 명시 상수 (graph_v2_intraday import 회피 — registry가 저수준 모듈). drift는
+# tests/test_comparison_api.py의 정합 잠금 테스트가 차단 (TAB_1D_SERIES 변경 시 함께 갱신).
+# ⚠️ 기존 validate_alert_source_asset 재사용 금지 (ADR-037 codex): 그 함수는 reference
+# (investing/은행)를 source 알림에서 거부하지만 비교알림은 reference가 1급 시민.
+_FX_BANKS_COMPARISON = ("kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs")   # Citi 제외
+
+COMPARISON_TAB_SOURCES: dict = {
+    "tether": frozenset(
+        {(ex, "usdt-krw") for ex in ("upbit", "bithumb", "coinone", "korbit", "gopax")}
+        | {("krx", "usd-krw-futures")}
+        | {("investing", "usd-krw"), ("kb", "usd-krw"), ("hana", "usd-krw")}
+    ),
+    "usd": frozenset({("investing", "usd-krw")} | {(b, "usd-krw") for b in _FX_BANKS_COMPARISON}),
+    "jpy": frozenset({("investing", "jpy-krw")} | {(b, "jpy-krw") for b in _FX_BANKS_COMPARISON}),
+    "eur": frozenset({("investing", "eur-krw")} | {(b, "eur-krw") for b in _FX_BANKS_COMPARISON}),
+}
+
+
+def validate_comparison_alert(
+    tab: str,
+    left_source: str,
+    left_asset: str,
+    right_source: str,
+    right_asset: str,
+) -> Optional[str]:
+    """비교 알림 (tab, left, right) 조합 검증 — 에러 메시지 반환 (정상이면 None).
+
+    ADR-037 Decision 1: within-tab only — left/right 모두 해당 탭 허용 집합 내 +
+    left != right (동일 source+asset 페어 차단). FastAPI 비의존 (main.py thin wrapper가
+    HTTPException 변환 — project_main_py_helper_placement 패턴).
+    """
+    allowed = COMPARISON_TAB_SOURCES.get(tab)
+    if allowed is None:
+        return f"Unknown tab '{tab}'. Allowed: {sorted(COMPARISON_TAB_SOURCES)}"
+    if (left_source, left_asset) == (right_source, right_asset):
+        return "left and right must differ (same source+asset pair)"
+    for side, source, asset in (("left", left_source, left_asset),
+                                ("right", right_source, right_asset)):
+        if (source, asset) not in allowed:
+            return (f"{side} ({source}:{asset}) is not allowed in tab '{tab}'. "
+                    f"Comparison alerts are within-tab only (KRW-axis series).")
+    return None

@@ -291,6 +291,110 @@ class SourceNotificationLogsListResponse(BaseModel):
 
 
 # ============================================================
+# Comparison Alerts: 비교 알림 스키마 (ADR-037 S3)
+# ============================================================
+
+class ComparisonAlertRequest(BaseModel):
+    """비교 알림 생성 요청. tab-scope/left≠right 검증은 source_registry.validate_comparison_alert
+    (400) — 여기선 형식만. threshold는 KRW 원 단위(Decision D), diff_type/operator enum 422."""
+    tab: str = Field(min_length=1)
+    left_source: str = Field(min_length=1)
+    left_asset: str = Field(min_length=1)
+    right_source: str = Field(min_length=1)
+    right_asset: str = Field(min_length=1)
+    diff_type: str
+    operator: str
+    threshold: float
+    is_enabled: bool = True
+    repeat_interval_sec: Optional[int] = Field(default=None)   # B2 (ADR-036): null=once
+
+    @field_validator("diff_type")
+    @classmethod
+    def _validate_diff_type(cls, v: str) -> str:
+        if v not in ("signed", "absolute"):
+            raise ValueError("diff_type must be 'signed' or 'absolute'")
+        return v
+
+    @field_validator("operator")
+    @classmethod
+    def _validate_operator(cls, v: str) -> str:
+        if v not in ("gte", "lte"):
+            raise ValueError("operator must be 'gte' or 'lte'")
+        return v
+
+    @field_validator("repeat_interval_sec")
+    @classmethod
+    def _validate_repeat_interval(cls, v: Optional[int]) -> Optional[int]:
+        return _validate_repeat_interval_sec(v)
+
+
+class ComparisonAlertUpdateRequest(BaseModel):
+    """비교 알림 수정 (PUT — v1은 is_enabled 토글 + repeat_interval_sec만.
+
+    pair/조건 변경은 삭제+재생성 (curated preset UI라 v1 단순화 — ADR-037 Decision 5).
+    repeat_interval_sec '미제공' vs '명시적 null(=once)' 구분은 main.py가 model_fields_set으로
+    판단 (기존 source PUT 패턴)."""
+    is_enabled: Optional[bool] = None
+    repeat_interval_sec: Optional[int] = Field(default=None)
+
+    @field_validator("repeat_interval_sec")
+    @classmethod
+    def _validate_repeat_interval(cls, v: Optional[int]) -> Optional[int]:
+        return _validate_repeat_interval_sec(v)
+
+
+class ComparisonAlertResponse(BaseModel):
+    """비교 알림 설정 응답."""
+    id: int
+    user_id: str
+    tab: str
+    left_source: str
+    left_asset: str
+    right_source: str
+    right_asset: str
+    diff_type: str
+    operator: str
+    threshold: float
+    is_enabled: bool
+    triggered: bool
+    repeat_interval_sec: Optional[int] = None
+    last_notified_spread: Optional[float] = None
+    created_at: str  # KST ISO 8601
+    updated_at: Optional[str] = None
+
+
+class ComparisonAlertsListResponse(BaseModel):
+    alerts: List[ComparisonAlertResponse]
+    total_count: int
+
+
+class ComparisonNotificationLogResponse(BaseModel):
+    """비교 알림 발송 히스토리 1건 — 발화 시점 스냅샷 (left/right rate + spread + observed_at)."""
+    id: int
+    setting_id: Optional[int] = None
+    tab: str
+    left_source: str
+    left_asset: str
+    right_source: str
+    right_asset: str
+    diff_type: str
+    operator: str
+    threshold: float
+    left_rate: float
+    right_rate: float
+    spread: float
+    left_observed_at: Optional[str] = None   # KST ISO 8601 (stale 설명 — ADR-037 codex B3)
+    right_observed_at: Optional[str] = None
+    is_repeat: bool
+    sent_at: str  # KST ISO 8601
+
+
+class ComparisonNotificationLogsListResponse(BaseModel):
+    logs: List[ComparisonNotificationLogResponse]
+    total_count: int  # 반환된 페이지 길이 (cap된 '최근 N건')
+
+
+# ============================================================
 # News: 뉴스 피드 스키마
 # ============================================================
 

@@ -3201,6 +3201,148 @@ def mark_source_setting_triggered(
         )
 
 
+def create_comparison_alert(
+    db: Session,
+    user_id: str,
+    tab: str,
+    left_source: str,
+    left_asset: str,
+    right_source: str,
+    right_asset: str,
+    diff_type: str,
+    operator: str,
+    threshold: float,
+    is_enabled: bool = True,
+    repeat_interval_sec: Optional[int] = None,
+) -> models.ComparisonAlert:
+    """비교 알림 생성 (ADR-037 dedup — 단일 알림 멱등 선례 계승).
+
+    (user_id, tab, left_*, right_*, diff_type, operator, threshold) exact match →
+    기존 설정 enabled 갱신. is_enabled=True 재활성화 시 triggered/last_notified 초기화.
+    A−B/B−A 순서 뒤집힘은 별개 취급 (v1 — preset이 방향 고정, ADR Open 6).
+    """
+    existing = db.query(models.ComparisonAlert).filter(
+        models.ComparisonAlert.user_id == user_id,
+        models.ComparisonAlert.tab == tab,
+        models.ComparisonAlert.left_source == left_source,
+        models.ComparisonAlert.left_asset == left_asset,
+        models.ComparisonAlert.right_source == right_source,
+        models.ComparisonAlert.right_asset == right_asset,
+        models.ComparisonAlert.diff_type == diff_type,
+        models.ComparisonAlert.operator == operator,
+        models.ComparisonAlert.threshold == threshold,
+    ).first()
+
+    if existing:
+        existing.enabled = is_enabled
+        existing.repeat_interval_sec = repeat_interval_sec
+        if is_enabled:
+            existing.triggered = False
+            existing.last_notified_at = None
+            existing.last_notified_spread = None
+        existing.updated_at = models.get_utc_now()
+        db.commit()
+        db.refresh(existing)
+        logger.info("비교 알림 재활성화 (중복)" if is_enabled else "비교 알림 비활성화 (중복)",
+                    extra={"setting_id": existing.id, "tab": tab, "is_enabled": is_enabled})
+        return existing
+
+    alert = models.ComparisonAlert(
+        user_id=user_id, tab=tab,
+        left_source=left_source, left_asset=left_asset,
+        right_source=right_source, right_asset=right_asset,
+        diff_type=diff_type, operator=operator, threshold=threshold,
+        enabled=is_enabled, triggered=False,
+        repeat_interval_sec=repeat_interval_sec,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    return alert
+
+
+def get_comparison_alerts(db: Session, user_id: str) -> List[models.ComparisonAlert]:
+    """사용자의 비교 알림 전체 (최신 생성순)."""
+    return (db.query(models.ComparisonAlert)
+            .filter(models.ComparisonAlert.user_id == user_id)
+            .order_by(models.ComparisonAlert.created_at.desc()).all())
+
+
+def update_comparison_alert(
+    db: Session,
+    setting_id: int,
+    user_id: str,
+    is_enabled: Optional[bool] = None,
+    repeat_interval_sec=_UNSET,   # sentinel(B2 공용) — 미제공 vs 명시적 null(=once) 구분
+) -> Optional[models.ComparisonAlert]:
+    """비교 알림 수정 (v1: is_enabled 토글 + repeat_interval_sec만 — ADR-037 Decision 5).
+
+    is_enabled=True 재활성화 → triggered/last_notified 초기화 (단일 알림 §7 선례).
+    repeat_interval_sec: sentinel(미제공)=변경 없음 / None=once 전환 / 정수=repeat (B2 3-state).
+    """
+    alert = db.query(models.ComparisonAlert).filter(
+        models.ComparisonAlert.id == setting_id,
+        models.ComparisonAlert.user_id == user_id,
+    ).first()
+    if alert is None:
+        return None
+
+    should_reset = False
+    if is_enabled is not None:
+        if is_enabled and not alert.enabled:
+            should_reset = True                    # 재활성화 → 재발화 가능 상태
+        alert.enabled = is_enabled
+
+    # B2 (ADR-036) §7/§8 — update_source_notification_setting 미러 (codex S3 blocker):
+    # interval 실제 변경 시 last_notified_* 리셋(이전 발화 시각이 새 설정을 suppress하는 것 방지),
+    # once↔repeat 모드 전환 시 clean active 시작(단 같은 PUT의 명시적 is_enabled=False 존중).
+    mode_transition = False
+    if repeat_interval_sec is not _UNSET:
+        if repeat_interval_sec != alert.repeat_interval_sec:
+            should_reset = True                    # §7: interval 변경 리셋
+            if (alert.repeat_interval_sec is None) != (repeat_interval_sec is None):
+                mode_transition = True             # §8: once↔repeat 전환
+        alert.repeat_interval_sec = repeat_interval_sec
+
+    if should_reset:
+        alert.triggered = False
+        alert.last_notified_at = None
+        alert.last_notified_spread = None
+    if mode_transition and is_enabled is not False:
+        alert.enabled = True
+    alert.updated_at = models.get_utc_now()
+    db.commit()
+    db.refresh(alert)
+    return alert
+
+
+def delete_comparison_alert(db: Session, setting_id: int, user_id: str) -> bool:
+    """비교 알림 삭제 (멱등 — 없으면 False). 로그는 setting_id nullable로 보존."""
+    deleted = db.query(models.ComparisonAlert).filter(
+        models.ComparisonAlert.id == setting_id,
+        models.ComparisonAlert.user_id == user_id,
+    ).delete()
+    db.commit()
+    return deleted > 0
+
+
+def get_comparison_notification_logs(
+    db: Session,
+    user_id: str,
+    tab: Optional[str] = None,
+    success_only: bool = True,
+    limit: int = 100,
+) -> List[models.ComparisonNotificationLog]:
+    """비교 알림 발송 히스토리 (sent_at DESC, success-only 기본 — source logs 선례)."""
+    q = db.query(models.ComparisonNotificationLog).filter(
+        models.ComparisonNotificationLog.user_id == user_id)
+    if tab:
+        q = q.filter(models.ComparisonNotificationLog.tab == tab)
+    if success_only:
+        q = q.filter(models.ComparisonNotificationLog.success == True)  # noqa: E712
+    return q.order_by(models.ComparisonNotificationLog.sent_at.desc()).limit(limit).all()
+
+
 def mark_comparison_alert_triggered(
     db: Session,
     setting_id: int,

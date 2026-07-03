@@ -3325,6 +3325,195 @@ async def get_source_notification_logs(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 비교 알림 API (/api/comparison-alerts) — ADR-037 S3
+# ═══════════════════════════════════════════════════════════════════════════════
+# within-tab v1: tab-scope 검증은 source_registry.validate_comparison_alert (main.py 밖 —
+# project_main_py_helper_placement). auth/premium 정책은 source-notification-* 와 동일.
+# 발화는 COMPARISON_ALERT_ENABLED flag (S2 evaluator) — API/스키마는 flag 무관 동작.
+
+_COMPARISON_LOG_DEFAULT_LIMIT = 100
+_COMPARISON_LOG_MAX_LIMIT = 200
+
+
+def _validate_comparison_alert_or_400(tab: str, left_source: str, left_asset: str,
+                                      right_source: str, right_asset: str) -> None:
+    """Thin wrapper — source_registry.validate_comparison_alert + HTTPException 변환."""
+    from app import source_registry
+    error = source_registry.validate_comparison_alert(
+        tab, left_source, left_asset, right_source, right_asset)
+    if error is not None:
+        raise HTTPException(status_code=400, detail=error)
+
+
+def build_comparison_alert_response(alert) -> schemas.ComparisonAlertResponse:
+    return schemas.ComparisonAlertResponse(
+        id=alert.id, user_id=alert.user_id, tab=alert.tab,
+        left_source=alert.left_source, left_asset=alert.left_asset,
+        right_source=alert.right_source, right_asset=alert.right_asset,
+        diff_type=alert.diff_type, operator=alert.operator, threshold=alert.threshold,
+        is_enabled=alert.enabled, triggered=alert.triggered,
+        repeat_interval_sec=alert.repeat_interval_sec,
+        last_notified_spread=alert.last_notified_spread,
+        created_at=crud.to_kst_isoformat(alert.created_at),
+        updated_at=crud.to_kst_isoformat(alert.updated_at) if alert.updated_at else None,
+    )
+
+
+def _invalidate_comparison_cache() -> None:
+    """비교알림 후보 캐시 무효화 — 다음 tick부터 즉시 반영 (TTL 10s 대기 회피)."""
+    from app.notifications.comparison_evaluator import get_comparison_evaluator
+    get_comparison_evaluator().invalidate_cache()
+
+
+@app.post("/api/comparison-alerts", response_model=schemas.ComparisonAlertResponse)
+async def create_comparison_alert(
+    request: Request,
+    body: schemas.ComparisonAlertRequest,
+    db: Session = Depends(get_db),
+):
+    """비교 알림 생성 (spread = left − right, ADR-037).
+
+    검증: tab-scope(within-tab, KRW축만 — 400) + diff_type/operator/repeat enum(422).
+    dedup: exact match → 기존 설정 enabled 갱신 (멱등).
+    """
+    user_id = await verify_firebase_token(request)
+    await require_premium(user_id, allow_empty=False)
+
+    _validate_comparison_alert_or_400(body.tab, body.left_source, body.left_asset,
+                                      body.right_source, body.right_asset)
+    try:
+        alert = crud.create_comparison_alert(
+            db=db, user_id=user_id, tab=body.tab,
+            left_source=body.left_source, left_asset=body.left_asset,
+            right_source=body.right_source, right_asset=body.right_asset,
+            diff_type=body.diff_type, operator=body.operator, threshold=body.threshold,
+            is_enabled=body.is_enabled, repeat_interval_sec=body.repeat_interval_sec,
+        )
+        _invalidate_comparison_cache()
+        logger.info("📊 비교 알림 생성", extra={
+            "event": "comparison_alert_create", "user_id": user_id, "tab": body.tab,
+            "left": f"{body.left_source}:{body.left_asset}",
+            "right": f"{body.right_source}:{body.right_asset}",
+            "diff_type": body.diff_type, "operator": body.operator, "threshold": body.threshold,
+        })
+        await notify_user_devices_sync(db, user_id)
+        return build_comparison_alert_response(alert)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("비교 알림 생성 실패", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/comparison-alerts", response_model=schemas.ComparisonAlertsListResponse)
+async def get_comparison_alerts(
+    request: Request,
+    tab: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """사용자의 비교 알림 목록 (tab 필터 선택)."""
+    user_id = await verify_firebase_token(request)
+    if not await require_premium(user_id, allow_empty=True):
+        return schemas.ComparisonAlertsListResponse(alerts=[], total_count=0)
+
+    alerts = crud.get_comparison_alerts(db=db, user_id=user_id)
+    if tab:
+        alerts = [a for a in alerts if a.tab == tab]
+    return schemas.ComparisonAlertsListResponse(
+        alerts=[build_comparison_alert_response(a) for a in alerts],
+        total_count=len(alerts),
+    )
+
+
+@app.put("/api/comparison-alerts/{setting_id}", response_model=schemas.ComparisonAlertResponse)
+async def update_comparison_alert(
+    request: Request,
+    setting_id: int,
+    body: schemas.ComparisonAlertUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """비교 알림 수정 — v1은 is_enabled 토글 + repeat_interval_sec만 (pair 변경 = 삭제+재생성)."""
+    user_id = await verify_firebase_token(request)
+    await require_premium(user_id, allow_empty=False)
+
+    repeat_kwargs = (
+        {"repeat_interval_sec": body.repeat_interval_sec}
+        if "repeat_interval_sec" in body.model_fields_set
+        else {}
+    )
+    updated = crud.update_comparison_alert(
+        db=db, setting_id=setting_id, user_id=user_id,
+        is_enabled=body.is_enabled, **repeat_kwargs,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Comparison alert not found")
+
+    _invalidate_comparison_cache()
+    logger.info("📊 비교 알림 수정", extra={
+        "event": "comparison_alert_update", "setting_id": setting_id,
+        "is_enabled": body.is_enabled,
+    })
+    await notify_user_devices_sync(db, user_id)
+    return build_comparison_alert_response(updated)
+
+
+@app.delete("/api/comparison-alerts/{setting_id}", response_model=schemas.DeleteResponse)
+async def delete_comparison_alert(
+    request: Request,
+    setting_id: int,
+    db: Session = Depends(get_db),
+):
+    """비교 알림 삭제 (멱등). 로그는 setting_id nullable로 보존."""
+    user_id = await verify_firebase_token(request)
+    await require_premium(user_id, allow_empty=False)
+
+    deleted = crud.delete_comparison_alert(db=db, setting_id=setting_id, user_id=user_id)
+    _invalidate_comparison_cache()
+    logger.info("📊 비교 알림 삭제", extra={
+        "event": "comparison_alert_delete", "setting_id": setting_id, "deleted": deleted,
+    })
+    await notify_user_devices_sync(db, user_id)
+    return schemas.DeleteResponse(
+        success=True,
+        message="Comparison alert deleted" if deleted else "Comparison alert already deleted",
+    )
+
+
+@app.get("/api/comparison-notification-logs",
+         response_model=schemas.ComparisonNotificationLogsListResponse)
+async def get_comparison_notification_logs(
+    request: Request,
+    tab: Optional[str] = None,
+    limit: int = _COMPARISON_LOG_DEFAULT_LIMIT,
+    db: Session = Depends(get_db),
+):
+    """비교 알림 발송 히스토리 — 발화 시점 스냅샷(left/right rate + spread + observed_at).
+
+    success=True 최신순, limit 1..200 (source-notification-logs 정책 동일).
+    premium: INACTIVE → 빈 목록 / PENDING → 503 / ACTIVE → 조회.
+    """
+    user_id = await verify_firebase_token(request)
+    if not await require_premium(user_id, allow_empty=True):
+        return schemas.ComparisonNotificationLogsListResponse(logs=[], total_count=0)
+
+    capped = max(1, min(limit, _COMPARISON_LOG_MAX_LIMIT))
+    logs = crud.get_comparison_notification_logs(
+        db=db, user_id=user_id, tab=tab, success_only=True, limit=capped)
+    items = [schemas.ComparisonNotificationLogResponse(
+        id=lg.id, setting_id=lg.setting_id, tab=lg.tab,
+        left_source=lg.left_source, left_asset=lg.left_asset,
+        right_source=lg.right_source, right_asset=lg.right_asset,
+        diff_type=lg.diff_type, operator=lg.operator, threshold=lg.threshold,
+        left_rate=lg.left_rate, right_rate=lg.right_rate, spread=lg.spread,
+        left_observed_at=crud.to_kst_isoformat(lg.left_observed_at) if lg.left_observed_at else None,
+        right_observed_at=crud.to_kst_isoformat(lg.right_observed_at) if lg.right_observed_at else None,
+        is_repeat=lg.is_repeat,
+        sent_at=crud.to_kst_isoformat(lg.sent_at),
+    ) for lg in logs]
+    return schemas.ComparisonNotificationLogsListResponse(logs=items, total_count=len(items))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 계정 삭제 API (Apple App Store 5.1.1(v) 준수)
 # ═══════════════════════════════════════════════════════════════════════════════
 
