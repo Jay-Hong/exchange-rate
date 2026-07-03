@@ -1575,23 +1575,23 @@ def start_scheduler():
     logger.info("✅ 그래프 캐시 갱신 스케줄 등록 (매분 03초)")
 
     # ═════════════════════════════════════════════════════════════
-    # 그래프 v2 테더 1d precompute: 10분 경계 + 12초 (*/10분 12초)
+    # 그래프 v2 intraday 1d precompute: 10분 경계 + 12초 (*/10분 12초, 테더+usd/jpy/eur 4탭)
     # ═════════════════════════════════════════════════════════════
-    # - 10분봉 close 직후 완료봉만 Redis(graph_v2:tab:tether:1d)에 갱신 (closed-bucket).
+    # - 10분봉 close 직후 완료봉만 Redis(graph_v2:tab:{tab}:1d)에 갱신 (closed-bucket, 탭별 순회).
     # - 12초 오프셋: 수집기/DB write가 경계 직후 살짝 늦을 수 있어 흡수.
-    # - 요청 경로(main.py)는 이 키를 read만, miss 시에만 rebuild. 진행 중 봉은 iOS live-tail.
+    # - 요청 경로(main.py)는 이 키를 read만, miss/stale-boundary 시에만 rebuild. 진행 중 봉은 iOS live-tail.
     # ─────────────────────────────────────────────────────────────
-    from app.graph_v2_intraday import precompute_tether_1d
+    from app.graph_v2_intraday import precompute_intraday_1d
 
     scheduler.add_job(
-        precompute_tether_1d,
+        precompute_intraday_1d,
         CronTrigger(minute='*/10', second=12, timezone=KST),
-        id="graph_v2_tether_1d_precompute",
+        id="graph_v2_intraday_1d_precompute",
         max_instances=1,
         coalesce=True
     )
 
-    logger.info("✅ 그래프 v2 테더 1d precompute 스케줄 등록 (*/10분 12초)")
+    logger.info("✅ 그래프 v2 intraday 1d precompute 스케줄 등록 (*/10분 12초, 4탭)")
 
     # ═════════════════════════════════════════════════════════════
     # DXY rollup: realtime → hourly/daily 집계

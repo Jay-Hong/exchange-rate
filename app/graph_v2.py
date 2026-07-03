@@ -2,19 +2,21 @@
 
 설계: [GRAPH_API_V2_CONTRACT.md](../GRAPH_API_V2_CONTRACT.md) §4/§5/§6/§9/§10.
 
-MVP 범위 (Codex/Claude 수렴):
-  - **supported period = 3m, 1y, 1w**. 1d는 v1 realtime path → endpoint(main.py)에서 400 unsupported_period.
+MVP 범위 (Codex/Claude 수렴 — 이후 1d intraday로 확장):
+  - **supported period = 3m, 1y, 1w** (전역 MVP_PERIODS). 1d는 별도 intraday 경로(graph_v2_intraday,
+    per-tab 10min precompute — 테더+usd/jpy/eur 4탭, GRAPH §13 item 5-6)로 endpoint에서 직접 serve.
   - 3m/1y hot path = source_daily_rates 단일 조회 / 1w = source_hourly_rates (period→granularity 분기, 외부/raw read 제거).
   - DXY는 source_daily/hourly_rates 아님 → market_index_rates(.daily/.hourly) 별도 reader (kind="market_index").
   - Hana 1w gap = 실관측 bucket 그대로 반환 (carry-forward/step render 미적용 — write 정책 일치, frontend render).
 
 문서=full target / 구현=MVP subset (비강제):
   - GRAPH §4 catalog matrix는 1d(은행 8개) 포함한 제품 full target.
-  - 본 모듈 상수는 **3m/1y/1w 인코딩** (1d는 v1 realtime). 1d v2 추가 시 확장.
+  - 본 모듈 상수는 **3m/1y/1w 인코딩** — 1d 구성은 graph_v2_intraday.TAB_1D_*가 소유(catalog에서 lookup).
 
 엔드포인트(main.py thin wiring):
   - GET /api/v2/graph/catalog → build_catalog()
-  - GET /api/v2/graph/tab?tab=&period= → build_tab(db, tab, period) (period∈{3m,1y,1w})
+  - GET /api/v2/graph/tab?tab=&period= → build_tab(db, tab, period) (period∈{3m,1y,1w};
+    period=1d는 main.py가 graph_v2_intraday serve 경로로 분기)
 
 v1 (/api/graph/{currency})는 변경 0 (legacy 공존, §12).
 """
@@ -338,13 +340,14 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
 # ─────────────────────────────────────────────────────────────
 
 def build_catalog() -> dict:
-    """전체 catalog (3m/1y/1w MVP + 테더 1d). DB 불필요 (정적 상수).
+    """전체 catalog (3m/1y/1w MVP + 전 탭 1d). DB 불필요 (정적 상수).
 
-    테더 1d는 10min 11 series(§4 line 54)로 장기(3m/1y/1w)의 5 series와 구성이 달라 별도 정의
-    (섞지 않음 — graph_v2_intraday). 다른 탭의 1d는 아직 v2 미지원(endpoint 400)이라 catalog 미노출.
-    supported_periods(전역)는 MVP_PERIODS 유지 — 1d는 tab-specific(테더 periods에만 존재).
+    1d는 10min intraday 구성(테더 11 / usd 10 / jpy·eur 9 — §3:49-54)으로 장기(3m/1y/1w)와 series
+    구성이 달라 별도 정의(섞지 않음 — graph_v2_intraday.TAB_1D_*). axis_groups는 장기(_TAB_SERIES)
+    기준이나 1d와 정합: usd는 장기에도 dxy(index) 포함, jpy/eur는 1d에도 DXY 미노출(§9:521).
+    supported_periods(전역)는 MVP_PERIODS 유지 — 1d는 tab-specific(periods dict에만 존재).
     """
-    from app.graph_v2_intraday import TETHER_1D_ALL_SERIES, TETHER_1D_DEFAULT_VISIBLE
+    from app.graph_v2_intraday import TAB_1D_ALL_SERIES, TAB_1D_DEFAULT_VISIBLE
 
     tabs = []
     for tab, series_ids in _TAB_SERIES.items():
@@ -354,10 +357,10 @@ def build_catalog() -> dict:
                 "all_series": list(series_ids),
                 "default_visible_series": list(_TAB_DEFAULT_VISIBLE[tab]),
             }
-        if tab == "tether":
+        if tab in TAB_1D_ALL_SERIES:
             periods["1d"] = {
-                "all_series": list(TETHER_1D_ALL_SERIES),
-                "default_visible_series": list(TETHER_1D_DEFAULT_VISIBLE),
+                "all_series": list(TAB_1D_ALL_SERIES[tab]),
+                "default_visible_series": list(TAB_1D_DEFAULT_VISIBLE[tab]),
             }
         tabs.append({
             "id": tab,

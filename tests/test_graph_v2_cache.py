@@ -74,13 +74,13 @@ class TestGraphV2Cache(unittest.TestCase):
         self.assertEqual(kwargs.get("ex"), 300)  # 1w TTL
 
     def test_unsupported_period_bypasses_cache(self):
-        """400(usd 1d, 아직 v2 미지원) → read-through 캐시 path 미진입 (get/set 미호출).
+        """400(미지원 period 5y) → read-through 캐시 path 미진입 (get/set 미호출).
 
-        (테더 1d는 이제 precompute path로 지원 → 미지원 케이스는 usd 1d로 검증.)
+        (1d는 이제 전 탭 intraday 지원 — usd 1d도 200. 미지원 케이스는 임의 period로 검증.)
         """
         with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)) as mget, \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset:
-            r = self.client.get("/api/v2/graph/tab?tab=usd&period=1d")
+            r = self.client.get("/api/v2/graph/tab?tab=usd&period=5y")
 
         self.assertEqual(r.status_code, 400)
         mget.assert_not_awaited()
@@ -103,8 +103,8 @@ class TestGraphV2Cache(unittest.TestCase):
 
         with patch("app.main.redis_cache.get", new=AsyncMock(side_effect=fake_get)), \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
-             patch("app.graph_v2_intraday.build_tether_1d_payload") as mbuild, \
-             patch("app.graph_v2_intraday.build_tether_1d_in_progress") as mseed:
+             patch("app.graph_v2_intraday.build_tab_1d_payload") as mbuild, \
+             patch("app.graph_v2_intraday.build_tab_1d_in_progress") as mseed:
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)
@@ -117,7 +117,7 @@ class TestGraphV2Cache(unittest.TestCase):
 
     def test_tether_1d_stale_boundary_rebuilds_closed(self):
         """테더 1d hit이지만 캐시 경계 stale(_in_progress_start_ts=0 < 현재 경계) → 경계 통과 후 precompute(:12)
-        전 창으로 판단, closed를 온디맨드 rebuild(build_tether_1d_payload 호출 + set) → cold-open ~12초 gap 제거.
+        전 창으로 판단, closed를 온디맨드 rebuild(build_tab_1d_payload 호출 + set) → cold-open ~12초 gap 제거.
         구 캐시(_in_progress_start_ts 부재)도 default 0이라 동일하게 rebuild(배포 직후 self-heal)."""
         stale_closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {"cached": True},
                         "_in_progress_start_ts": 0}   # 현재 경계 미만 = stale
@@ -134,8 +134,8 @@ class TestGraphV2Cache(unittest.TestCase):
 
         with patch("app.main.redis_cache.get", new=AsyncMock(side_effect=fake_get)), \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
-             patch("app.graph_v2_intraday.build_tether_1d_payload", return_value=rebuilt) as mbuild, \
-             patch("app.graph_v2_intraday.build_tether_1d_in_progress", return_value=seed):
+             patch("app.graph_v2_intraday.build_tab_1d_payload", return_value=rebuilt) as mbuild, \
+             patch("app.graph_v2_intraday.build_tab_1d_in_progress", return_value=seed):
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)
@@ -145,15 +145,34 @@ class TestGraphV2Cache(unittest.TestCase):
         set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
         self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d"), 1200)
 
+    def test_usd_1d_cache_miss_rebuilds_with_per_tab_key(self):
+        """usd 1d(FX 탭 intraday 신규 지원) miss → build_tab_1d_payload('usd') 호출 + per-tab 캐시 키
+        (graph_v2:tab:usd:1d[,:in_progress]) SET — 테더와 키 분리 확인."""
+        closed = {"tab": "usd", "period": "1d", "series": [], "metadata": {}}
+        seed = {"kb.usd": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
+        with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)), \
+             patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
+             patch("app.graph_v2_intraday.build_tab_1d_payload", return_value=closed) as mbuild, \
+             patch("app.graph_v2_intraday.build_tab_1d_in_progress", return_value=seed) as mseed:
+            r = self.client.get("/api/v2/graph/tab?tab=usd&period=1d")
+
+        self.assertEqual(r.status_code, 200)
+        mbuild.assert_called_once_with("usd")
+        mseed.assert_called_once_with("usd")
+        set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
+        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:usd:1d"), 1200)
+        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:usd:1d:in_progress"), 15)
+        self.assertEqual(r.json()["in_progress"], seed)
+
     def test_tether_1d_cache_miss_rebuilds_closed_and_in_progress(self):
-        """테더 1d miss(둘 다 None) → closed rebuild(build_tether_1d_payload, set TTL 1200) +
-        in_progress rebuild(build_tether_1d_in_progress, set in_progress key TTL 15). 응답에 seed 부착."""
+        """테더 1d miss(둘 다 None) → closed rebuild(build_tab_1d_payload, set TTL 1200) +
+        in_progress rebuild(build_tab_1d_in_progress, set in_progress key TTL 15). 응답에 seed 부착."""
         closed = {"tab": "tether", "period": "1d", "series": [], "metadata": {}}
         seed = {"upbit.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
         with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)), \
              patch("app.main.redis_cache.set", new=AsyncMock()) as mset, \
-             patch("app.graph_v2_intraday.build_tether_1d_payload", return_value=closed) as mbuild, \
-             patch("app.graph_v2_intraday.build_tether_1d_in_progress", return_value=seed) as mseed:
+             patch("app.graph_v2_intraday.build_tab_1d_payload", return_value=closed) as mbuild, \
+             patch("app.graph_v2_intraday.build_tab_1d_in_progress", return_value=seed) as mseed:
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)

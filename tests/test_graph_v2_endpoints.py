@@ -33,12 +33,28 @@ class TestGraphV2Endpoints(unittest.TestCase):
         self.assertEqual({t["id"] for t in body["tabs"]}, {"usd", "jpy", "eur", "tether"})
 
     def test_tab_unsupported_period_400(self):
-        r = self.client.get("/api/v2/graph/tab", params={"tab": "usd", "period": "1d"})
+        # (usd 1d는 이제 intraday 지원 → 미지원 케이스는 임의 period로 검증)
+        r = self.client.get("/api/v2/graph/tab", params={"tab": "usd", "period": "5y"})
         self.assertEqual(r.status_code, 400)
         body = r.json()
         self.assertEqual(body["error"], "unsupported_period")
         self.assertEqual(body["supported_periods"], ["3m", "1y", "1w"])
         self.assertEqual(body["fallback"]["type"], "legacy_graph_api")
+
+    def test_usd_1d_200_intraday(self):
+        """usd 1d — FX 탭 intraday 신규 지원. 빈 DB여도 200 + 10 series(8 banks+investing+dxy) + in_progress 키.
+        (redis 없음 → cache-aside가 실제 build — build_tab_1d_payload 경로 e2e.)"""
+        r = self.client.get("/api/v2/graph/tab", params={"tab": "usd", "period": "1d"})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["tab"], "usd")
+        self.assertEqual(body["metadata"]["bucket_size"], "10min")
+        ids = [s["id"] for s in body["series"]]
+        self.assertEqual(len(ids), 10)
+        self.assertNotIn("citi.usd", ids)
+        self.assertNotIn("dxy_futures", ids)
+        self.assertIn("in_progress", body)
+        self.assertEqual(r.headers.get("cache-control"), "no-store")
 
     def test_tab_1w_200_hourly(self):
         # 1w 이제 지원 (hourly). 빈 DB → 200 + bucket_size 1h + insufficient.

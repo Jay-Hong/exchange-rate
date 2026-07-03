@@ -2395,26 +2395,27 @@ async def get_v2_graph_catalog():
 _GRAPH_V2_CACHE_TTL_SECONDS = {"1w": 300, "3m": 1800, "1y": 1800}
 
 
-# 테더 1d miss-rebuild single-flight (process-local). precompute(scheduler */10)가 캐시를 warm하게
-# 유지하므로 miss는 드묾(cold start / cron 사망 + TTL 만료). ⚠️ 현 prod는 --workers 1이라 process-local
-# 로 충분 — multi-worker 전환 시 Redis SET NX EX 필요(redis_cache.set은 nx 미지원 → 별도 구현).
-_tether_1d_rebuild_lock = asyncio.Lock()
-_tether_1d_in_progress_lock = asyncio.Lock()
+# intraday 1d miss-rebuild single-flight (process-local, per-tab). precompute(scheduler */10)가 캐시를
+# warm하게 유지하므로 miss는 드묾(cold start / cron 사망 + TTL 만료). ⚠️ 현 prod는 --workers 1이라
+# process-local로 충분 — multi-worker 전환 시 Redis SET NX EX 필요(redis_cache.set은 nx 미지원 → 별도 구현).
+# lock은 tab별 lazy 생성(setdefault — 단일 이벤트 루프라 원자적).
+_intraday_1d_rebuild_locks: dict = {}
+_intraday_1d_in_progress_locks: dict = {}
 
 
-async def _serve_tether_1d_cached():
-    """테더 1d 응답 = closed-bucket payload + optional `in_progress` seed(현재 10분봉 high/low/close).
+async def _serve_intraday_1d_cached(tab: str):
+    """탭 1d 응답 = closed-bucket payload + optional `in_progress` seed(현재 10분봉 high/low/close).
 
     closed는 precompute 캐시(완료봉만). in_progress는 additive short-TTL cache-aside — cold-open/resync
     시 클라가 현재 봉 앞부분 high/low를 못 보는 문제 해소용 seed. 실패해도 seed만 생략(closed 정상),
     클라는 seed로 현재 봉을 채우고 없으면 client-only 누적 fallback. graph_v2_intraday.
     """
-    payload = await _get_tether_1d_closed()
-    payload["in_progress"] = await _get_tether_1d_in_progress()   # {} 가능(데이터 없음/실패) → 클라 fallback
+    payload = await _get_intraday_1d_closed(tab)
+    payload["in_progress"] = await _get_intraday_1d_in_progress(tab)   # {} 가능(데이터 없음/실패) → 클라 fallback
     return payload
 
 
-async def _get_tether_1d_closed() -> dict:
+async def _get_intraday_1d_closed(tab: str) -> dict:
     """closed-bucket payload — precompute key read, miss/stale 시 lock 아래 1회 rebuild(process-local single-flight).
 
     stale = 경계 통과 후 precompute(:12) 전 창. 캐시의 `_in_progress_start_ts`(build 시점 경계)가 현재
@@ -2424,12 +2425,13 @@ async def _get_tether_1d_closed() -> dict:
     import time
 
     from app.graph_v2_intraday import (
-        CACHE_KEY_TETHER_1D,
         CACHE_TTL_SECONDS,
         _bucket_align,
-        build_tether_1d_payload,
+        build_tab_1d_payload,
+        cache_key_1d,
     )
 
+    cache_key = cache_key_1d(tab)
     current_boundary = _bucket_align(int(time.time()))
 
     def _fresh(payload) -> bool:
@@ -2438,7 +2440,7 @@ async def _get_tether_1d_closed() -> dict:
         # isinstance로 걸러 rebuild(500 회피, codex hardening).
         return isinstance(payload, dict) and payload.get("_in_progress_start_ts", 0) >= current_boundary
 
-    cached = await redis_cache.get(CACHE_KEY_TETHER_1D)
+    cached = await redis_cache.get(cache_key)
     if cached is not None:
         try:
             payload = json.loads(cached)
@@ -2446,11 +2448,11 @@ async def _get_tether_1d_closed() -> dict:
                 return payload
             # stale-by-one-bucket (경계 통과, precompute 전) → 아래서 rebuild
         except (ValueError, TypeError):
-            logger.warning("graph_v2 테더 1d 캐시 parse 실패 — rebuild")
+            logger.warning("graph_v2 %s 1d 캐시 parse 실패 — rebuild", tab)
 
-    async with _tether_1d_rebuild_lock:
+    async with _intraday_1d_rebuild_locks.setdefault(tab, asyncio.Lock()):
         # lock 대기 중 다른 요청/precompute가 fresh하게 채웠을 수 있음 → double-check (중복 build 회피)
-        cached = await redis_cache.get(CACHE_KEY_TETHER_1D)
+        cached = await redis_cache.get(cache_key)
         if cached is not None:
             try:
                 payload = json.loads(cached)
@@ -2458,39 +2460,41 @@ async def _get_tether_1d_closed() -> dict:
                     return payload
             except (ValueError, TypeError):
                 pass
-        payload = await asyncio.to_thread(build_tether_1d_payload)
-        await redis_cache.set(CACHE_KEY_TETHER_1D, json.dumps(payload), ex=CACHE_TTL_SECONDS)
+        payload = await asyncio.to_thread(build_tab_1d_payload, tab)
+        await redis_cache.set(cache_key, json.dumps(payload), ex=CACHE_TTL_SECONDS)
         return payload
 
 
-async def _get_tether_1d_in_progress() -> dict:
+async def _get_intraday_1d_in_progress(tab: str) -> dict:
     """진행 중(현재) 10분봉 seed — short-TTL cache-aside(miss 시 lock 아래 현재 봉만 재계산).
     실패는 격리: 빈 dict 반환 → 클라는 seed 없이 client-only 누적 fallback(closed 그래프는 정상)."""
     from app.graph_v2_intraday import (
-        CACHE_KEY_TETHER_1D_IN_PROGRESS,
         IN_PROGRESS_TTL_SECONDS,
-        build_tether_1d_in_progress,
+        build_tab_1d_in_progress,
+        cache_key_1d_in_progress,
     )
+
+    cache_key = cache_key_1d_in_progress(tab)
     try:
-        cached = await redis_cache.get(CACHE_KEY_TETHER_1D_IN_PROGRESS)
+        cached = await redis_cache.get(cache_key)
         if cached is not None:
             return json.loads(cached)
-        async with _tether_1d_in_progress_lock:
-            cached = await redis_cache.get(CACHE_KEY_TETHER_1D_IN_PROGRESS)
+        async with _intraday_1d_in_progress_locks.setdefault(tab, asyncio.Lock()):
+            cached = await redis_cache.get(cache_key)
             if cached is not None:
                 return json.loads(cached)
-            seed = await asyncio.to_thread(build_tether_1d_in_progress)
-            await redis_cache.set(CACHE_KEY_TETHER_1D_IN_PROGRESS, json.dumps(seed), ex=IN_PROGRESS_TTL_SECONDS)
+            seed = await asyncio.to_thread(build_tab_1d_in_progress, tab)
+            await redis_cache.set(cache_key, json.dumps(seed), ex=IN_PROGRESS_TTL_SECONDS)
             return seed
     except Exception:
-        logger.warning("graph_v2 테더 1d in_progress seed 실패 — 생략(client-only fallback)", exc_info=True)
+        logger.warning("graph_v2 %s 1d in_progress seed 실패 — 생략(client-only fallback)", tab, exc_info=True)
         return {}
 
 
 @app.get("/api/v2/graph/tab")
 async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
     """탭×기간 모든 series 데이터. period∈{3m,1y,1w} = source_daily/hourly_rates read-through.
-    period=1d = 테더 전용 10min closed-bucket precompute(graph_v2_intraday)."""
+    period=1d = intraday 탭(테더+usd/jpy/eur) 10min closed-bucket precompute(graph_v2_intraday)."""
     from app.graph_v2 import build_tab, is_supported_period, known_tabs, MVP_PERIODS
 
     # 라이브 그래프(1d 10min 진행봉 + in_progress seed, 3m/1y/1w도 매일/매시 갱신)는 클라가 HTTP
@@ -2506,10 +2510,12 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             "detail": f"tab '{tab}' not found",
             "known_tabs": known_tabs(),
         })
-    # 1d — 테더만 지원(10min precompute). 다른 탭 1d는 아직 v2 미지원 → 400 + v1 hint.
+    # 1d — intraday 지원 탭(테더 + usd/jpy/eur, 10min precompute). 그 외 탭은 400 + v1 hint(미래 탭 방어).
     if period == "1d":
-        if tab == "tether":
-            return await _serve_tether_1d_cached()
+        from app.graph_v2_intraday import INTRADAY_TABS
+
+        if tab in INTRADAY_TABS:
+            return await _serve_intraday_1d_cached(tab)
         return JSONResponse(status_code=400, content={
             "error": "unsupported_period",
             "detail": f"period '1d' is not supported for tab '{tab}' in Graph API v2",
