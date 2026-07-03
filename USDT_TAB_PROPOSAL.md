@@ -302,6 +302,6 @@ KRX 미국달러선물은 기술보다 권리와 제공 범위가 더 큰 문제
 이전에 열려 있던 항목들의 처리 결과:
 
 1. ~~비교 기준 기본값~~ → **앱에서 사용자 선택 토글로 처리** (서버는 원시 rate만 제공, summary/diff 계산은 클라이언트 책임)
-2. ~~알림 반복형 여부~~ → **Phase 1은 1회성 통일** (USDT_PHASE1_DESIGN.md Alert Design 참조)
+2. ~~알림 반복형 여부~~ → **Phase 1은 1회성 통일** (USDT_PHASE1_DESIGN.md Alert Design 참조) — **superseded by B2(ADR-036) + 비교알림은 [ADR-037](DECISIONS.md)에서 `repeat_interval_sec` 적용 확정 (2026-07-03)**
 3. ~~크립토 그래프 범위~~ → **Phase 2로 연기** (Phase 1은 실시간 값 + 알림 중심)
 4. ~~백엔드 데이터 모델 세부 설계~~ → **USDT_PHASE1_DESIGN.md에서 확정 완료** (source_rates / source_notification_settings / source_notification_logs / comparison_alerts draft)

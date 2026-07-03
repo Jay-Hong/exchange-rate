@@ -241,6 +241,8 @@ ON source_notification_logs (user_id, sent_at);
 
 ### 4. `comparison_alerts` — Phase 3 draft only
 
+> 📌 **구현 설계는 [ADR-037](DECISIONS.md#adr-037-비교-알림-comparison-alerts--within-tab-v1--universal-schema--현행-evaluator-재매핑)로 잠금 (2026-07-03)**: within-tab v1(사용자 확정) + `tab` 컬럼/`repeat_interval_sec`(B2)/`comparison_notification_logs` 확장 + dual-trigger를 현행 evaluator 지점에 재매핑(Decision F superseded). 아래 draft는 historical 원안.
+
 Phase 1에서는 구현하지 않지만, source key 체계를 고정하기 위해 스키마 초안을 잡아 둔다.
 
 구조화된 4컬럼 방식 (문자열 canonical key 파싱 대신):

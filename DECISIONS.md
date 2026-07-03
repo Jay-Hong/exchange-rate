@@ -5730,6 +5730,139 @@ ALTER TABLE source_notification_settings ADD COLUMN repeat_interval_sec INTEGER 
 - `CLAUDE.md`: 양 테이블 스키마 표 정정(§13).
 - 테스트: delivery_allowed boundary(nil/미경과/경과/once 회귀) + naive/aware 회귀 + mark mode + §7/§8.
 
+## ADR-037: 비교 알림 (comparison alerts) — within-tab v1 + universal schema + 현행 evaluator 재매핑
+
+**날짜**: 2026-07-03
+**상태**: Proposed (설계 잠금 — 구현 미착수)
+**결정자**: Jay + Claude + Codex (3-way, within-tab은 사용자 확정)
+
+### Context
+
+신규 앱 비전의 핵심 차별 기능 = 소스 간 **가격 차이** 알림 (김프/역프/스프레드). 설계 자산은 이미 존재:
+[USDT_PHASE1_DESIGN.md §4](USDT_PHASE1_DESIGN.md)의 `comparison_alerts` 4컬럼 draft + unified lookup/
+dual-trigger 인프라 노트, [USDT_TAB_PROPOSAL.md Decision D](USDT_TAB_PROPOSAL.md)의 2축 조건 체계.
+단 draft 이후 지형 변화 3개를 반영해야 함: (1) B2 반복발송 land(ADR-036)로 "Phase 1은 1회성 통일"
+결정 stale, (2) Decision F(REST polling)는 WS fanout + evaluator composition으로 superseded —
+트리거 hook 지점 재매핑 필요, (3) 신규 앱 UX가 tab-based로 확정(그래프 v2 탭 전환 완료).
+
+### Decision 1 — v1 scope: within-tab only (사용자 확정 2026-07-03)
+
+비교는 **같은 탭 안의 소스끼리만** (테더/달러/엔화/유로 4탭, 뉴스 제외). 문서의 "모든 소스 타입 간
+자유 비교"(USDT_PHASE1_DESIGN §4 조합표)는 **스키마 가능성으로 보존**하되 제품 v1은 탭 내부로 제한.
+
+- **허용 소스 = 해당 탭 그래프 catalog의 `axis_group == "krw"` series** (단일 진실 소스 = graph v2
+  catalog·`TAB_1D_SERIES` — 그래프에 보이는 소스만 비교 가능, UX 일관):
+  - 테더: USDT 거래소 5 + krx.usd-krw-futures + investing/kb/hana(usd-krw) — asset 혼합 허용(전부 KRW 단위)
+  - 달러: investing + 8 banks (usd-krw)
+  - 엔화/유로: investing + 8 banks (jpy-krw / eur-krw)
+- **index 축(DXY 계열) 제외**: 지수(≈99)와 KRW rate(≈1500)는 단위가 달라 Decision D의 금액(원) diff가
+  무의미. `axis_group == "krw"` 필터가 자동 배제.
+- **`tab` 컬럼 명시 저장** (유도 아님): investing/kb/hana usd-krw가 테더·달러 양쪽 탭에 존재해
+  (left,right) 조합만으로 탭 유도가 **모호** (예: 인베스팅↔하나 usd는 두 탭 다 가능). 생성 시
+  클라이언트가 tab 명시 → 서버가 "그 탭의 허용 소스 집합 내 조합"인지 검증(cross-tab 조합 400).
+  GET `?tab=` 필터도 이 컬럼 사용.
+
+### Decision 2 — 스키마: draft 계승 + 3 확장
+
+`comparison_alerts` (USDT_PHASE1_DESIGN §4 draft 계승):
+`id / user_id / left_source / left_asset / right_source / right_asset / diff_type(signed|absolute) /
+operator(gte|lte) / threshold(REAL, KRW 원 단위) / enabled / triggered / last_notified_at /
+created_at / updated_at` + **확장 3개**:
+
+1. `tab TEXT NOT NULL` (Decision 1 — 모호성 근거로 명시 저장)
+2. `repeat_interval_sec INTEGER NULL` (B2/ADR-036 정책·enum·validator 그대로 재사용 — NULL=once.
+   구 "Phase 1은 1회성 통일"(USDT_TAB_PROPOSAL Open Decision 2)은 본 ADR로 **supersede**)
+3. `last_notified_spread REAL NULL` (단일 알림의 last_notified_rate 대응 — **signed raw spread 저장**
+   [absolute 평가값은 |spread|로 재계산 가능하므로 raw가 정보 보존]. repeat throttle 게이트는
+   `last_notified_at + repeat_interval_sec`만 사용 — 본 컬럼은 진단/히스토리 요약용, codex 확인)
+
+**인덱스** (codex blocker 2 — 고빈도 tick 경로 후보 조회): `(left_source, left_asset, enabled)` +
+`(right_source, right_asset, enabled)` + `(user_id, tab)` / logs `(user_id, sent_at)`. 추가로 tick당
+DB scan 금지 — 활성 비교알림 후보는 **기존 alert settings cache 패턴(alert_storage_backend TTL cache)
+재사용**으로 in-memory 조회.
+
+`comparison_notification_logs` (신규 — 단일 알림 로그 테이블 패턴 계승):
+`id / user_id / setting_id(NULL 허용 — 설정 삭제 후 로그 유지) / tab / left_source / left_asset /
+right_source / right_asset / diff_type / operator / threshold / **left_rate / right_rate / spread** /
+**left_observed_at / right_observed_at** / **is_repeat BOOLEAN** / success / error_message / sent_at`.
+- left_rate/right_rate/spread: 히스토리 row가 "발화 시점 양쪽 값 + 차이"를 표시 (사후 재계산 불가 —
+  발화 시점 스냅샷 필수).
+- left_observed_at/right_observed_at (codex blocker 3): stale gate 미도입(Open 3) 선택의 전제 조건 —
+  심야 은행 stale 값 기반 발화를 로그/FCM/히스토리에서 설명 가능해야 함. unified lookup이
+  (rate, observed_at) 튜플을 반환하고 FCM data에도 동봉.
+- is_repeat: 기존 source 로그에 없어 반복 여부 표시가 불가능했던 gap을 신규 테이블은 처음부터 회피
+  (FCM data의 is_repeat(ADR-036)와 동일 의미).
+
+### Decision 3 — 평가: unified lookup + dual-trigger를 **현행 evaluator 지점**에 hook
+
+- `get_latest_rate_unified(source, asset)` (USDT_PHASE1_DESIGN §4-A 계승): source_rates(USDT/KRX) /
+  bank_exchange_rates / investing_exchange_rates 투명 조회. **1차 구현은 Redis latest 우선**
+  (`latest:source:*` / `latest:bank:*` / `latest:investing:*` — ADR-026/029/031로 전 소스 커버) +
+  DB fallback. 비교식 `spread = left_rate − right_rate` (Decision D).
+- **dual-trigger**: left/right 어느 쪽 변해도 재평가 (§4-B 계승). hook 지점은 draft의 크롤러 경로가
+  아니라 **현행 alert 평가 지점** (Decision F superseded 반영):
+  - USDT 5: `UsdtAlertEvaluator` tick 경로 (coalescer 5s grain 뒤)
+  - KRX: `KrxAlertEvaluator` tick 경로 (close grace/세션 정책 승계)
+  - bank/investing: `process_rate_alerts` 경로 (FX shadow와 무관 — 비교알림은 greenfield라 shadow
+    파이프라인 접점 없음)
+- 반대편 값 fresh 조회는 unified lookup — 반대편이 stale(예: 은행 심야 미고시)이어도 마지막 관측값
+  기준 평가 (단일 알림과 동일 semantics, 별도 freshness gate는 v1 미도입 — Open 3).
+- 발사/반복/once semantics: ADR-036 evaluator 정책(delivery_allowed/mark mode 분기) 그대로 재사용.
+- **중복 발송 race 방지 (codex blocker 1)**: left/right 양쪽 hook이 같은 setting을 근접 시점에 칠 수
+  있고, 기존 `_in_flight_settings`는 evaluator 인스턴스 내부라 경로 간 미공유 → 비교알림은
+  **comparison setting id 기준 공유(모듈 수준) in-process claim**을 둔다. ⚠️ 3 hook의 실행 컨텍스트가
+  혼합(USDT/KRX=asyncio 루프, bank/investing `process_rate_alerts`=sync crawler/scheduler thread)이라
+  asyncio 단일 루프 가정만으론 부족 → **claim set은 `threading.Lock`으로 보호** (check-and-claim
+  atomic, codex 잔여 blocker 해소). 단일 프로세스(`--workers 1`) 전제는 유지 — DB conditional claim은
+  과설계로 기각(multi-process 전환 시 재평가, [[project_atomic_scope_usdt_krx]]와 동일 전제).
+
+### Decision 4 — API + 게이팅 + FCM
+
+- REST: `POST/GET/PUT/DELETE /api/comparison-alerts` + `GET /api/comparison-notification-logs`
+  (source-notification-* 4종 + logs 패턴 그대로 — auth/premium 게이팅 동일: INACTIVE 빈 목록 /
+  PENDING 503 / ACTIVE 조회, logs는 success-only + limit≤200).
+- 검증: tab ∈ {tether,usd,jpy,eur} + left/right 각각 해당 탭 허용 소스 집합 + left≠right(동일
+  source+asset 페어 차단) + diff_type/operator/threshold/repeat_interval_sec 형식 (400/422).
+  ⚠️ 기존 `source_registry.validate_alert_source_asset` **재사용 금지** (codex) — 그 함수는 reference
+  (investing/kb/hana)를 source 알림에서 거부하는데 비교알림은 reference가 1급 시민. 신규 tab-scope
+  검증 helper를 source_registry에 별도 구현 (main.py 밖 — [[project_main_py_helper_placement]]).
+- FCM payload `type: "comparison_alert"` (기존 앱은 unknown type 무시 — rate_alert/source_rate_alert
+  선례). data에 left/right source·rate, spread, is_repeat 포함.
+
+### Decision 5 — v1 UX: curated presets (free builder는 후속)
+
+- 탭별 "비교 알림" 섹션(단일 가격알림 섹션 아래 — USDT_TAB_PROPOSAL §B 계승) + **추천 조합 목록**
+  (예: 테더 = 김프[빗썸−인베스팅]/거래소 간/USDT−KRX선물, 달러 = 기준 대비 은행/은행 간)에서 선택 →
+  조건(diff_type·operator·threshold·repeat) 설정. 임의 조합 free builder는 스키마가 이미 감당하므로
+  후속 슬라이스에서 UI만 확장.
+- preset 구체 목록은 iOS 슬라이스에서 확정 (서버는 universal 검증이라 무관).
+- 히스토리 sheet는 SourceAlertHistorySheet 패턴 재사용 (spread 중심 row + is_repeat 뱃지).
+
+### Decision 6 — rollout: greenfield flag (shadow 불요)
+
+legacy 비교알림이 없으므로 FX cutover식 shadow/parity 불요. `COMPARISON_ALERT_ENABLED` env
+(default false) 하나로 evaluator 발화 게이트 — API/스키마는 flag 무관 land 가능(dead until flag).
+iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
+
+### Slices (구현 순서)
+
+1. **서버 S1**: models + migration script(멱등, 2 테이블) + schemas — behavior-change-0.
+2. **서버 S2**: `get_latest_rate_unified` + `process_comparison_alerts`(dual-trigger hook 3지점) +
+   FCM 발사 + logs 기록 + flag 게이트. 단위 테스트(경계/반복/once/모호 조합 검증).
+3. **서버 S3**: REST 5종 + premium 게이팅 + tab-scope 검증. endpoint 테스트.
+4. **iOS S4**: 비교 알림 섹션(테더 탭 먼저) + curated preset UI + 히스토리 sheet + FCM type 분기.
+5. **활성**: env flag + iOS canary end-to-end (F-3 절차) → 전 탭 확장.
+
+### Open (후속 결정)
+
+1. preset 목록 최종안 (iOS S4에서 — 서버 무관).
+2. % 기준 diff_type 축 추가 (v2+ — 스키마는 diff_type enum 확장으로 수용 가능).
+3. 반대편 stale freshness gate (v1은 마지막 관측값 평가하되 **per-side observed_at을 로그/FCM에 동봉**
+   [codex blocker 3 수용] — 심야 misleading 알림이 실측되면 gate 도입 재검토).
+4. cross-tab 비교 개방 여부 (스키마는 이미 수용 — 제품 판단만).
+5. KRX 재배포 권리 검토(§4-C)는 단일 KRX 알림 F-2/F-3 공개 선례로 v1 포함 판단 — 이슈 발생 시 tab
+   허용 집합에서 KRX만 제거하는 축소 경로 존재.
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -5797,4 +5930,5 @@ ALTER TABLE source_notification_settings ADD COLUMN repeat_interval_sec INTEGER 
 - 2026-06-06: ADR-035 D1 Investing daily append orchestrator 통합 + cron 첫 발화 검증 (production end-to-end, Claude+Codex 이중 독립) — backfill(2026-06-04까지)에서 멈춘 Investing을 매일 자동 갱신, KRX/Hana/Bithumb going-forward freshness parity. **(1) 구현** (`bef10eb`): verdict 계약(`app/daily_append_verdict.py`) `VALID_SKIPPED_REASONS` union에 `no_observation` 추가 + **orchestrator source-aware `valid_skipped_reasons`**(SOURCE_POLICY per-source subset + subset assert — Hana는 no_observation 비허용 / Investing은 weekend_no_changes 비허용 → 전역 추가의 정책 느슨화 회피) + `SOURCE_RUN_ALL`(bithumb→hana 3→investing 3) + resolve_run_units 다통화 일반화(`_MULTI_CURRENCY_SOURCES`) + build_investing_command + evaluate_source_result source-aware reason + Investing writer `--emit-daily-append-verdict`(단일일 written/skipped, **0-obs도 skipped/no_observation sentinel 방출 — exit-0-no-sentinel orchestrator FAIL 방지, Codex catch**; combo: --write 동반 + start==end 전용; multi-day 0-row fail-close 유지). 163 tests(writer verdict 4 + combo 2 + source-aware reason 4[investing no_observation PASS / investing weekend FAIL / hana no_observation FAIL — 정책 느슨화 회피 입증] + build_investing 3 + resolve 3 + 회귀). **(2) EC2 deploy** (build-only): `git pull` + `docker compose build fastapi`(cron이 쓰는 image 반영, running fastapi recreate 안 함 — orchestrator/writer/verdict은 script). dry-run smoke로 `--source investing` 3통화 인식 + command 확인. **(3) cron 첫 발화 검증** (2026-06-06 00:01 KST `--source all`): investing **2026-06-05** 3통화 written(usd C=1553.83 / jpy C=969.49[**quantize 6자리, artifact 0**] / eur C=1795.45, investing_observed_eod / observed_rollup, drift·OHLC·dup 0) + 동반 bithumb 1 + hana 3 → **cron summary 7 units 전부 PASS**. KRX는 cron unit 아니나 in-process close finalizer(CF 15:45)가 same-date(2026-06-05) row 1건 적재. totals **2194→2201**(bithumb 369 / hana 747 / krx 245 / investing 840). **이중 독립 verify**(Claude post-verify + Codex production read-only 일치). sanity cross-check: 같은 6/5 hana usd 1553.30 vs investing usd 1553.83(~0.5 KRW) / hana jpy 969.30 vs investing jpy 969.49 정합(독립 2 source 일치). **→ 4 source going-forward freshness 완성** (bithumb/hana/investing=cron `--source all` 00:01 KST + krx=in-process close finalizer 15:45 — source_daily_rates 매일 자동 최신). 후속(별도): ✅ Phase 2e v2 endpoint(source_daily_rates read 전환) — Phase 2e MVP land + 운영 deploy 완료 2026-06-06 / source_hourly_rates(1w).
 - 2026-06-06: ADR-035 Phase 2e MVP land — v2 graph endpoint (catalog + tab, source_daily_rates read, 3m/1y) (로컬 구현+테스트 + 운영 deploy 완료 2026-06-06) — canonical daily layer를 v2 그래프 endpoint가 직접 read하는 hot path 완성. write-side(4 source 적재) 완료 후 read-side 전환. **(1) graph_v2.py 로직** (`7bc1d65`): `app/graph_v2.py` — `build_catalog()`(3m/1y subset, usd/jpy/eur/tether tab × series + DXY 노출 탭만 index axis_group, §3/§9 근거) + `build_tab(db, tab, period)`(SERIES_REGISTRY id↔DB key 분리 + **kind dispatch**: source_daily_rates=get_range+row_to_dict / DXY=market_index_rates.daily). **동적 provenance**(distinct close_basis 1=single/2+=mixed[Hana만]) + per-point(mixed→close_basis/source_method, KRX→contract_code) + **insufficient partial coverage**(첫 row>start+7일, §6 — 빈 series뿐 아니라 신규 자산 미충족). **Codex 2 findings**(F1 insufficient partial / F2 DXY source priority investing>cnbc>else, crud.py `_dxy_query_single` 일치 — last-row dedup 회귀 차단). 12 tests. **(2) main.py thin wiring** (`9d43773`): `GET /api/v2/graph/catalog` + `/api/v2/graph/tab` — tab 404(unknown_tab) + period 400(unsupported_period + v1 fallback hint) + build_tab(asyncio.to_thread 비차단). 로직 0(graph_v2 호출만) / **v1 `/api/graph/{currency}` 변경 0**(legacy 공존 §12). **(3) endpoint harness** (`c7c218c`): `tests/conftest.py`(firebase stub + DATABASE_URL=file-backed sqlite, collection 시작 시 모든 import 전 — main.py firebase_admin+RDS 연결 회피, 재사용 가능, in-memory override + mkstemp fd close [Codex 2건]) + `tests/test_graph_v2_endpoints.py` 6종(catalog 200/unsupported 400/unknown tab 404/tab empty insufficient/v1 무변경, TestClient lifespan 미진입). **검증 18 tests**(graph_v2 12 + endpoint 6). **MVP 범위**: 3m/1y만(source_daily_rates 단일 조회), 1d=v1 realtime / 1w=source_hourly_rates(D3) 후속 → v2 1d/1w는 400 unsupported_period(insufficient_history와 분리 — 데이터는 v1에 있음). **문서=full target(§4) / 구현=MVP subset(3m/1y)** 비강제. **운영 deploy 완료 2026-06-06**(f04d9b8→0e52b7a recreate, image 9e2e3186; Claude+Codex 이중 독립 검증: catalog 200·tab usd 3m 200 series[77,63,79]·1d 400·v1 200·health healthy·KRX status=normal·ERROR 0; client 미연동이라 실사용 caller 0 — 프론트 cutover 별도). 후속(별도): source_hourly_rates(1w, Phase 2e+) / 프론트 client cutover. 상세: CLAUDE.md Phase 2e MVP anchor + [GRAPH_API_V2_CONTRACT.md §13](GRAPH_API_V2_CONTRACT.md).
 - 2026-06-11: ADR-034 §9 KRX daily append **6/11 회귀 canary PASS** — ⑥(ADR-035 D3 구 hourly hook 제거, `KrxCloseWindowWriter._sync_write` 수정) 운영 반영 후 첫 CF close. 15:46:00 `[krx_cf_append] INSERT date=2026-06-11 A75606 close=1531.2`, close_finalizer / observed_rollup / krx_cf_close_1545 / cf_session_point_count=5935 / KRX 248→249 / drift·OHLC·dup 0. 의미: hook 제거가 daily finalizer-tail(같은 `_sync_write` success path) 무손상 — unit trip-wire(shared writer False-arm)가 못 잡는 영역의 live 회귀 확증. **WS Case A** finalizer (정상 close frame 경로) — REST gate-checked write(`KRX_CLOSE_REST_WRITE_ENABLED`, 6/15 A75606 rollover 후 활성 판단) 미실증이라 KRX_CLOSE_SNAPSHOT_PLAN 직교. 기록 위치: CLAUDE.md Phase 2d KRX daily-append anchor + 본 changelog 2파일 (KRX_CANARY.md 선택·생략).
+- 2026-07-03: ADR-037 작성 (비교 알림 — within-tab v1[사용자 확정] + universal schema[tab 컬럼 명시: investing/kb/hana usd 테더·달러 겹침으로 유도 모호] + comparison_notification_logs[left_rate/right_rate/spread/is_repeat] + B2 repeat 재사용[구 "1회성 통일" supersede] + dual-trigger 현행 evaluator 재매핑[Decision F superseded] + curated presets v1 + greenfield flag rollout) — Proposed, 구현 미착수
 - 2026-06-29: ADR-036 작성 (가격알림 반복 발송 repeat_interval_sec, B2) — Proposed, 구현 미착수. **정책**(5라운드 codex 수렴): NULL=once(0/음수 reject) / interval enum 1m·5m·10m·30m·1h·2h·4h·6h·12h·1d(문서 §B2) / once=triggered+disable(현행), **repeat=triggered 미설정·enabled 유지·gate `last_notified_at+interval`(naive UTC)** / 조건 release 리셋 없음(재크로싱=B3) / OFF·threshold·condition·source·interval 변경 시 last_notified_at 리셋 + 모드전환 PUT 정규화 / dedup key interval 제외 / 발송마다 log row. **scope=FULL B2(bank+source)** but 구현 2 PR 위상(PR1 source→PR2 bank, "B2 완료"는 둘 다 후). 검토: codex LOCK OK + workflow ready-after-adr-edits(5-lens 구현가능성). **load-bearing gotcha 박제**: delivery_allowed 호출부(622/679) aware now vs last_notified_at naive → B2 뺄셈 TypeError → except 삼켜 repeat silent 미발화 → PR1 naive 정규화 필수. last_notified_at/rate 인프라 양 테이블 기존(CLAUDE.md notification_settings 스키마 누락은 PR1 정정). 후속: PR1(source) 착수.
