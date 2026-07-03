@@ -95,12 +95,13 @@ _AXIS_INDEX = {"unit": "INDEX", "decimals": 3, "side": "right"}
 #   USD: 8 banks(Citi 제외, ADR-033 Decision 4 — 수집은 유지) + investing + DXY(현물만 —
 #        dxy_futures는 테더 1d 전용, ADR-033 Decision 8).
 #   JPY/EUR: 8 banks + investing — DXY 계열 미노출(§9:521, 단일 KRW axis).
-#   은행 순서는 §4 all_series(investing 먼저 + 은행 알파벳 + dxy) 준수.
+#   은행 순서 = 앱 은행순서설정(Bank.displayCases) 순서 — investing 먼저 + kb/hana/shinhan/woori/
+#   ibk/nh/sc/bs + (usd만) dxy. 사용자 지정(2026-07-03): 토글/차트/은행별환율 섹션 순서 통일.
 # ─────────────────────────────────────────────────────────────
 
 _FX_1D_BANKS = [
-    ("bs", "부산은행"), ("hana", "하나은행"), ("ibk", "IBK기업은행"), ("kb", "KB국민은행"),
-    ("nh", "NH농협은행"), ("sc", "SC제일은행"), ("shinhan", "신한은행"), ("woori", "우리은행"),
+    ("kb", "KB국민은행"), ("hana", "하나은행"), ("shinhan", "신한은행"), ("woori", "우리은행"),
+    ("ibk", "IBK기업은행"), ("nh", "NH농협은행"), ("sc", "SC제일은행"), ("bs", "부산은행"),
 ]
 
 
@@ -131,13 +132,14 @@ TAB_1D_SERIES: dict = {
     "eur": _fx_1d_series("eur-krw"),
 }
 TAB_1D_ALL_SERIES = {tab: [s["id"] for s in specs] for tab, specs in TAB_1D_SERIES.items()}
-# 첫 진입 default 체크 ON (§4 default_visible_series) — usd는 §4:82 확정값,
-# jpy/eur는 usd 패턴 준용(investing/KB/하나, DXY 없음 — §4에 예시 미기재라 구현 확정, 계약 문서 반영).
+# 첫 진입 default 체크 ON (§4 default_visible_series). FX 3탭은 사용자 지정(2026-07-03):
+# 인베스팅 + 하나은행만 (usd의 dxy·kb도 기본 OFF — 소스가 많아 최소 2개로 시작, 나머지는 유저 토글).
+# 유저 토글 상태는 UserDefaults(graphv2_visible_<tab>)에 persist — 재시작해도 유지(user-off도 기억).
 TAB_1D_DEFAULT_VISIBLE = {
     "tether": ["bithumb.usdt-krw", "upbit.usdt-krw", "krx.usd-krw-futures", "dxy"],
-    "usd": ["investing.usd", "kb.usd", "hana.usd", "dxy"],
-    "jpy": ["investing.jpy", "kb.jpy", "hana.jpy"],
-    "eur": ["investing.eur", "kb.eur", "hana.eur"],
+    "usd": ["investing.usd", "hana.usd"],
+    "jpy": ["investing.jpy", "hana.jpy"],
+    "eur": ["investing.eur", "hana.eur"],
 }
 # 1d(intraday) 지원 탭 — main.py endpoint 분기/scheduler precompute 루프 기준.
 INTRADAY_TABS = tuple(TAB_1D_SERIES)

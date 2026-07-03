@@ -189,15 +189,16 @@ class TestCatalog1dIsolation(unittest.TestCase):
         self.assertNotEqual(len(tether["periods"]["3m"]["all_series"]), 11)
         self.assertNotIn("1d", catalog["supported_periods"])  # 전역은 MVP 유지(1d=tab-specific)
 
-        # usd 1d: §4:83 정확 목록 (순서 포함) — Citi 없음, dxy_futures 없음
+        # usd 1d: 앱 은행순서설정(Bank.displayCases) 순서 — Citi 없음, dxy_futures 없음, dxy 끝
         self.assertEqual(tabs["usd"]["periods"]["1d"]["all_series"], [
-            "investing.usd", "bs.usd", "hana.usd", "ibk.usd", "kb.usd",
-            "nh.usd", "sc.usd", "shinhan.usd", "woori.usd", "dxy",
+            "investing.usd", "kb.usd", "hana.usd", "shinhan.usd", "woori.usd",
+            "ibk.usd", "nh.usd", "sc.usd", "bs.usd", "dxy",
         ])
+        # default = 인베스팅 + 하나만 (사용자 지정 2026-07-03 — dxy/kb 기본 OFF, 소스多 최소 시작)
         self.assertEqual(tabs["usd"]["periods"]["1d"]["default_visible_series"],
-                         ["investing.usd", "kb.usd", "hana.usd", "dxy"])   # §4:82
+                         ["investing.usd", "hana.usd"])
 
-        # jpy/eur 1d: 9 series — DXY 계열 미노출 + Citi 없음
+        # jpy/eur 1d: 9 series — DXY 계열 미노출 + Citi 없음, default = 인베스팅+하나
         for tab_id in ("jpy", "eur"):
             all_series = tabs[tab_id]["periods"]["1d"]["all_series"]
             self.assertEqual(len(all_series), 9)
@@ -205,6 +206,8 @@ class TestCatalog1dIsolation(unittest.TestCase):
             self.assertFalse(any(s.startswith("citi.") for s in all_series))
             self.assertIn(f"investing.{tab_id}", all_series)
             self.assertIn(f"kb.{tab_id}", all_series)
+            self.assertEqual(tabs[tab_id]["periods"]["1d"]["default_visible_series"],
+                             [f"investing.{tab_id}", f"hana.{tab_id}"])
         # jpy/eur 장기(3m)는 investing+hana 2개 유지 (1d와 분리)
         self.assertEqual(len(tabs["jpy"]["periods"]["3m"]["all_series"]), 2)
 
