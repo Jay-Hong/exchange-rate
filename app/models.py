@@ -196,6 +196,82 @@ class SourceNotificationLog(Base):
     sent_at = Column(DateTime, default=get_utc_now, nullable=False)
 
 
+class ComparisonAlert(Base):
+    """비교 알림 설정 — 두 소스 간 가격 차이(spread = left − right) 조건 (ADR-037).
+
+    within-tab v1: left/right는 해당 tab 그래프 catalog의 axis_group=="krw" series만 허용
+    (서버 검증 — cross-tab 조합 400). tab은 명시 저장 — investing/kb/hana usd가 테더·달러
+    양쪽 탭에 존재해 (left,right)→tab 유도가 모호하기 때문.
+    dedup: (user_id, tab, left_*, right_*, diff_type, operator, threshold) exact match →
+    기존 설정 enabled 갱신(멱등, 단일 알림 선례). DB unique 제약 없음(앱 레벨).
+    """
+    __tablename__ = "comparison_alerts"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    tab = Column(String, nullable=False)          # 'tether' | 'usd' | 'jpy' | 'eur'
+    left_source = Column(String, nullable=False)
+    left_asset = Column(String, nullable=False)
+    right_source = Column(String, nullable=False)
+    right_asset = Column(String, nullable=False)
+    diff_type = Column(String, nullable=False)    # 'signed' | 'absolute'
+    operator = Column(String, nullable=False)     # 'gte' | 'lte'
+    threshold = Column(Float, nullable=False)     # KRW 원 단위 (Decision D — % 없음)
+    enabled = Column(Boolean, default=True, nullable=False)
+    triggered = Column(Boolean, default=False, nullable=False)
+    last_notified_at = Column(DateTime, nullable=True)
+    # signed raw spread 저장 (absolute 평가값은 |spread|로 재계산 가능 — 정보 보존, 진단용.
+    # repeat throttle 게이트는 last_notified_at + repeat_interval_sec만 사용).
+    last_notified_spread = Column(Float, nullable=True)
+    # B2 (ADR-036) 재사용: NULL=once, 정수=초 간격 반복 (enum validator 공유)
+    repeat_interval_sec = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=get_utc_now, nullable=False)
+    updated_at = Column(DateTime, default=get_utc_now, onupdate=get_utc_now, nullable=False)
+
+    __table_args__ = (
+        # dual-trigger 후보 조회 (tick의 (source,asset)이 left 또는 right인 활성 알림) — ADR-037 codex B2
+        Index('ix_comparison_alerts_left', 'left_source', 'left_asset', 'enabled'),
+        Index('ix_comparison_alerts_right', 'right_source', 'right_asset', 'enabled'),
+        Index('ix_comparison_alerts_user_tab', 'user_id', 'tab'),
+    )
+
+
+class ComparisonNotificationLog(Base):
+    """비교 알림 발송 히스토리 (ADR-037) — 발화 시점 양쪽 값 스냅샷 포함.
+
+    left_rate/right_rate/spread(signed raw): 사후 재계산 불가라 발화 시점 저장 필수.
+    left/right_observed_at: stale gate 미도입(ADR-037 Open 3)의 전제 — 심야 stale 값 기반
+    발화를 히스토리/FCM에서 설명 가능 (codex B3).
+    is_repeat: B2 반복 발송 여부 (기존 source 로그에 없던 gap을 신규 테이블은 처음부터 회피).
+    """
+    __tablename__ = "comparison_notification_logs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    setting_id = Column(Integer, nullable=True)   # ComparisonAlert.id (설정 삭제 후에도 로그 유지)
+    tab = Column(String, nullable=False)
+    left_source = Column(String, nullable=False)
+    left_asset = Column(String, nullable=False)
+    right_source = Column(String, nullable=False)
+    right_asset = Column(String, nullable=False)
+    diff_type = Column(String, nullable=False)
+    operator = Column(String, nullable=False)
+    threshold = Column(Float, nullable=False)
+    left_rate = Column(Float, nullable=False)
+    right_rate = Column(Float, nullable=False)
+    spread = Column(Float, nullable=False)        # signed raw (left − right)
+    left_observed_at = Column(DateTime, nullable=True)
+    right_observed_at = Column(DateTime, nullable=True)
+    is_repeat = Column(Boolean, default=False, nullable=False)
+    success = Column(Boolean, default=True, nullable=False)
+    error_message = Column(String, nullable=True)
+    sent_at = Column(DateTime, default=get_utc_now, nullable=False)
+
+    __table_args__ = (
+        Index('ix_comparison_notification_logs_user_sent', 'user_id', 'sent_at'),
+    )
+
+
 class SourceDailyRate(Base):
     """v2 장기 그래프 (3m/1y) hot path가 읽는 daily canonical row.
 
