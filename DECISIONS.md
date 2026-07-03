@@ -5781,6 +5781,15 @@ created_at / updated_at` + **확장 3개**:
 DB scan 금지 — 활성 비교알림 후보는 **기존 alert settings cache 패턴(alert_storage_backend TTL cache)
 재사용**으로 in-memory 조회.
 
+**dedup 정책** (2026-07-03 S1 체크포인트 보강 — 단일 알림 멱등 선례[crud.py create_source_notification_setting] 계승):
+`(user_id, tab, left_source, left_asset, right_source, right_asset, diff_type, operator, threshold)`
+**exact match → 새로 생성하지 않고 기존 설정 enabled 갱신** (enabled=true 시 triggered=false 리셋 —
+단일 알림과 동일). `tab` 포함: 모호 조합(inv↔hana usd)을 탭별 독립 관리 (제외 시 "달러 탭에서 만든
+알림이 테더 탭 목록에 없는데 생성은 거부" UX 혼란). **A−B vs B−A 순서 뒤집힘은 v1에서 별개 취급**
+(exact match만): absolute에선 동일 의미지만 curated presets가 방향을 고정해 UI상 뒤집힌 중복 생성
+경로가 없음 — canonical ordering 정규화는 signed 부호 반전까지 얽혀 과설계, free builder 개방 시
+재검토 (Open 6). DB unique 제약은 두지 않음(앱 레벨 멱등만 — 단일 알림 선례 동일).
+
 `comparison_notification_logs` (신규 — 단일 알림 로그 테이블 패턴 계승):
 `id / user_id / setting_id(NULL 허용 — 설정 삭제 후 로그 유지) / tab / left_source / left_asset /
 right_source / right_asset / diff_type / operator / threshold / **left_rate / right_rate / spread** /
@@ -5862,6 +5871,7 @@ iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
 4. cross-tab 비교 개방 여부 (스키마는 이미 수용 — 제품 판단만).
 5. KRX 재배포 권리 검토(§4-C)는 단일 KRX 알림 F-2/F-3 공개 선례로 v1 포함 판단 — 이슈 발생 시 tab
    허용 집합에서 KRX만 제거하는 축소 경로 존재.
+6. A−B/B−A canonical ordering (free builder 개방 시 — v1은 exact-match dedup + preset 방향 고정으로 회피).
 
 ## 문서 히스토리
 
