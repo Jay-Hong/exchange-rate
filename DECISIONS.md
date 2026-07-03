@@ -5807,7 +5807,9 @@ right_source / right_asset / diff_type / operator / threshold / **left_rate / ri
 - `get_latest_rate_unified(source, asset)` (USDT_PHASE1_DESIGN §4-A 계승): source_rates(USDT/KRX) /
   bank_exchange_rates / investing_exchange_rates 투명 조회. **1차 구현은 Redis latest 우선**
   (`latest:source:*` / `latest:bank:*` / `latest:investing:*` — ADR-026/029/031로 전 소스 커버) +
-  DB fallback. 비교식 `spread = left_rate − right_rate` (Decision D).
+  DB fallback. 반환은 `(rate, observed_at, origin)` — origin(redis|db)은 서버 구조화 로그까지만
+  기록(DB 로그 스키마엔 미저장 — stale 설명 책임은 observed_at[B3]이 담당, origin 영속화는 YAGNI).
+  비교식 `spread = left_rate − right_rate` (Decision D).
 - **dual-trigger**: left/right 어느 쪽 변해도 재평가 (§4-B 계승). hook 지점은 draft의 크롤러 경로가
   아니라 **현행 alert 평가 지점** (Decision F superseded 반영):
   - USDT 5: `UsdtAlertEvaluator` tick 경로 (coalescer 5s grain 뒤)
@@ -5819,11 +5821,17 @@ right_source / right_asset / diff_type / operator / threshold / **left_rate / ri
 - 발사/반복/once semantics: ADR-036 evaluator 정책(delivery_allowed/mark mode 분기) 그대로 재사용.
 - **중복 발송 race 방지 (codex blocker 1)**: left/right 양쪽 hook이 같은 setting을 근접 시점에 칠 수
   있고, 기존 `_in_flight_settings`는 evaluator 인스턴스 내부라 경로 간 미공유 → 비교알림은
-  **comparison setting id 기준 공유(모듈 수준) in-process claim**을 둔다. ⚠️ 3 hook의 실행 컨텍스트가
-  혼합(USDT/KRX=asyncio 루프, bank/investing `process_rate_alerts`=sync crawler/scheduler thread)이라
-  asyncio 단일 루프 가정만으론 부족 → **claim set은 `threading.Lock`으로 보호** (check-and-claim
-  atomic, codex 잔여 blocker 해소). 단일 프로세스(`--workers 1`) 전제는 유지 — DB conditional claim은
-  과설계로 기각(multi-process 전환 시 재평가, [[project_atomic_scope_usdt_krx]]와 동일 전제).
+  **comparison setting id 기준 in-process claim**을 둔다. ⚠️ 3 hook의 실행 컨텍스트가 혼합
+  (USDT/KRX=asyncio 루프, bank/investing `process_rate_alerts`=sync crawler/scheduler thread)이라
+  단순 공유 set만으론 부족 — codex 잔여 blocker에서 두 옵션(threading.Lock 보호 / 단일 루프 marshal)
+  중 **[S2 구현 확정 2026-07-03] 단일 event loop marshal 채택**: sync hook은
+  `topic_trigger_bridge.schedule_on_loop`로 main loop에 마샬링(FX shadow `_emit_fx_alert_shadow`
+  선례) → 모든 평가가 단일 `ComparisonAlertEvaluator` 인스턴스의 loop 컨텍스트에서 실행 →
+  기존 `_in_flight_settings` 패턴(add → try: send → finally: discard, 해제=persist 완료 후)
+  그대로 재사용, Lock 불요. ⚠️ marshal은 best-effort(loop 미등록/shutdown 시 False — tick 1회 소실
+  가능하나 크롤러 주기 재평가로 자기 치유, 기존 FX 단일 알림과 동일 그레인). 단일 프로세스
+  (`--workers 1`) 전제는 유지 — DB conditional claim은 과설계로 기각(multi-process 전환 시 재평가,
+  [[project_atomic_scope_usdt_krx]]와 동일 전제).
 
 ### Decision 4 — API + 게이팅 + FCM
 
