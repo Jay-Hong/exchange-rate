@@ -5895,7 +5895,9 @@ iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
 2. **테더 탭 비교알림 = 거래소 5개끼리만** (upbit/bithumb/coinone/korbit/gopax). cross-world
    (USDT vs 환율계) 비교는 김프알림이 전담 — 역할 분리.
 3. **김프(역프) 알림 신설 — 테더 탭 전용, signed 전담**: left(기준) ∈ 거래소 5 ×
-   right(비교) ∈ {hana, kb, investing} (+ krx는 ADR-038 게이트 열린 사용자만).
+   right(비교) ∈ {hana, kb, investing}. **krx는 A1 범위에서 제외** — ADR-038(entitlement)
+   구현 후 상대 집합에 추가 (codex 2026-07-04: A1이 미구현 게이트에 결합되는 것 방지,
+   김프 가치는 환율계 3소스 대비로 이미 성립).
    조건 = 김프 값(부호 있는 spread) + 이상(gte)/이하(lte) 토글. threshold 범위 sanity =
    현 시세의 ±50%. **signed+gte+음수 threshold 조합이 1급 시민** (구 "크로싱-백 포기" 판단은
    김프알림 도메인에서 뒤집힘 — 사용자 시나리오: 역프 −30 이하 알림→매매→김프 −10 이상
@@ -5906,8 +5908,9 @@ iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
 5. **달러/엔/유로 탭 비교알림 = 향후 과제** (섹션 자체 미배치 유지). 정책 확정분: DXY 제외
    탭 내 전 소스 absolute 비교 (+달러 탭은 krx 게이트 조건부).
 6. **서버 validation 재정의 (S3 보정)**: tether tab — absolute pair는 거래소 5끼리만 /
-   signed pair는 (거래소 5) × {hana, kb, investing, krx} (krx는 entitlement 검사 추가,
-   ADR-038). 위반 조합 400/403. usd/jpy/eur 허용 집합은 기존 유지(비교알림 개방 시 적용).
+   signed pair는 (거래소 5) × {hana, kb, investing} (krx는 ADR-038 후 추가 + entitlement
+   403). 위반 조합 400. **구 invariant(COMPARISON_TAB_SOURCES == 그래프 catalog krw series)는
+   폐기** — 그래프 표시 소스 ≠ 비교 허용 소스가 새 정책의 본질 (정합 잠금 테스트 교체). usd/jpy/eur 허용 집합은 기존 유지(비교알림 개방 시 적용).
    **invariant (codex 2026-07-04)**: absolute=일반 비교/signed=김프라는 섹션 구분은 이
    validation이 diff_type×pair 조합을 강제할 때만 성립 — 신규 구분 컬럼 불요의 전제.
    **threshold 부호 규칙**: absolute는 threshold ≥ 0 강제(음수 absolute gte는 항상 참에
