@@ -234,6 +234,11 @@ KIMCHI_COUNTER_SOURCES = frozenset({
     # ("krx", "usd-krw-futures") — ADR-038 게이트 구현 후 추가 (entitlement 403 동반)
 })
 
+# 서버 hard cap (codex 2026-07-04): 클라 UI는 ±1000(넓힘)이나 서버가 signed threshold를 무제한
+# 허용하면 API 직접 호출/구버전 클라로 이상값 유입 가능. 클라 범위와 결합하지 않는 관대한 절대
+# sanity 상한 — 기록된 최대 급등(+4232, 2025-10-11 빗썸 wick)의 2배 이상이라 정상값은 거부 안 함.
+COMPARISON_THRESHOLD_ABS_MAX = 10000.0
+
 
 def validate_comparison_alert(
     tab: str,
@@ -253,6 +258,10 @@ def validate_comparison_alert(
     right = (right_source, right_asset)
     if left == right:
         return "left and right must differ (same source+asset pair)"
+
+    # 공통 sanity 상한 (signed/absolute 모두) — API 직접호출/구버전 이상값 방어 (codex).
+    if abs(threshold) > COMPARISON_THRESHOLD_ABS_MAX:
+        return f"threshold out of range (|threshold| must be <= {COMPARISON_THRESHOLD_ABS_MAX:g})"
 
     if diff_type == "absolute":
         allowed = COMPARISON_ABSOLUTE_SOURCES.get(tab)

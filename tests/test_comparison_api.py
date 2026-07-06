@@ -102,6 +102,21 @@ class TestComparisonPolicy(unittest.TestCase):
 
     # -- canonical ordering ----------------------------------------------
 
+    def test_threshold_abs_hard_cap(self):
+        """서버 sanity 상한 ±10000 (codex) — signed/absolute 공통. 정상값(±1000)은 통과."""
+        # 넘김 → 거부
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "bithumb", "usdt-krw", "investing", "usd-krw", "signed", 10000.1))
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "bithumb", "usdt-krw", "investing", "usd-krw", "signed", -10000.1))
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "upbit", "usdt-krw", "bithumb", "usdt-krw", "absolute", 10001))
+        # 경계/정상 → 통과
+        self.assertIsNone(validate_comparison_alert(
+            "tether", "bithumb", "usdt-krw", "investing", "usd-krw", "signed", -1000))
+        self.assertIsNone(validate_comparison_alert(
+            "tether", "bithumb", "usdt-krw", "investing", "usd-krw", "signed", 10000))
+
     def test_canonicalize_absolute_pair(self):
         """(source,asset) 사전순 정규화 — A−B/B−A 동일 결과 (Open 6 absolute closed)."""
         a = canonicalize_absolute_pair("upbit", "usdt-krw", "bithumb", "usdt-krw")
