@@ -3330,14 +3330,21 @@ def get_comparison_notification_logs(
     db: Session,
     user_id: str,
     tab: Optional[str] = None,
+    diff_type: Optional[str] = None,
     success_only: bool = True,
     limit: int = 100,
 ) -> List[models.ComparisonNotificationLog]:
-    """비교 알림 발송 히스토리 (sent_at DESC, success-only 기본 — source logs 선례)."""
+    """비교 알림 발송 히스토리 (sent_at DESC, success-only 기본 — source logs 선례).
+
+    diff_type 필터: 'signed'=김프/역프 알림 히스토리 / 'absolute'=일반 비교 알림 히스토리
+    (ADR-037 Amendment — 두 섹션이 같은 테이블을 diff_type로 구분).
+    """
     q = db.query(models.ComparisonNotificationLog).filter(
         models.ComparisonNotificationLog.user_id == user_id)
     if tab:
         q = q.filter(models.ComparisonNotificationLog.tab == tab)
+    if diff_type:
+        q = q.filter(models.ComparisonNotificationLog.diff_type == diff_type)
     if success_only:
         q = q.filter(models.ComparisonNotificationLog.success == True)  # noqa: E712
     return q.order_by(models.ComparisonNotificationLog.sent_at.desc()).limit(limit).all()

@@ -3500,6 +3500,7 @@ async def delete_comparison_alert(
 async def get_comparison_notification_logs(
     request: Request,
     tab: Optional[str] = None,
+    diff_type: Optional[str] = None,   # 'signed'(김프) | 'absolute'(비교) — 섹션별 필터
     limit: int = _COMPARISON_LOG_DEFAULT_LIMIT,
     db: Session = Depends(get_db),
 ):
@@ -3514,7 +3515,7 @@ async def get_comparison_notification_logs(
 
     capped = max(1, min(limit, _COMPARISON_LOG_MAX_LIMIT))
     logs = crud.get_comparison_notification_logs(
-        db=db, user_id=user_id, tab=tab, success_only=True, limit=capped)
+        db=db, user_id=user_id, tab=tab, diff_type=diff_type, success_only=True, limit=capped)
     items = [schemas.ComparisonNotificationLogResponse(
         id=lg.id, setting_id=lg.setting_id, tab=lg.tab,
         left_source=lg.left_source, left_asset=lg.left_asset,

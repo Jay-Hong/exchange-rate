@@ -259,6 +259,27 @@ class TestComparisonCrud(unittest.TestCase):
         self.db.commit()
         return log
 
+    def test_logs_diff_type_filter(self):
+        """diff_type 필터 — signed=김프 / absolute=비교 히스토리 분리 (ADR-037 Amendment)."""
+        now = get_utc_now()
+        # signed(김프) 2 + absolute(비교) 1
+        for dt, op in (("signed", "gte"), ("signed", "lte"), ("absolute", "gte")):
+            self.db.add(models.ComparisonNotificationLog(
+                user_id="u1", setting_id=None, tab="tether",
+                left_source="bithumb", left_asset="usdt-krw",
+                right_source="hana" if dt == "signed" else "upbit",
+                right_asset="usd-krw" if dt == "signed" else "usdt-krw",
+                diff_type=dt, operator=op, threshold=1.0,
+                left_rate=1507.0, right_rate=1531.0, spread=-24.0,
+                is_repeat=False, success=True, sent_at=now))
+        self.db.commit()
+        kimchi = crud.get_comparison_notification_logs(self.db, "u1", diff_type="signed")
+        comp = crud.get_comparison_notification_logs(self.db, "u1", diff_type="absolute")
+        self.assertEqual(len(kimchi), 2)
+        self.assertTrue(all(l.diff_type == "signed" for l in kimchi))
+        self.assertEqual(len(comp), 1)
+        self.assertEqual(comp[0].diff_type, "absolute")
+
     def test_logs_filters_and_order(self):
         now = get_utc_now()
         self._add_log(sent_at=now - timedelta(minutes=3))
