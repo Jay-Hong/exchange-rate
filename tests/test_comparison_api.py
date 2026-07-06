@@ -1,13 +1,14 @@
-"""비교알림 S3 — tab-scope 검증 + CRUD (ADR-037).
+"""비교알림 A1 — 조합 정책 검증 + CRUD (ADR-037 Amendment 2026-07-04).
 
-endpoint wiring(auth/premium/cap)은 codex impl 리뷰로 검증 (source-notification 선례 —
-test_source_notification_logs.py 참조). 여기는 검증 helper + crud 레벨.
+endpoint wiring(auth/premium/cap)은 codex impl 리뷰로 검증 (source-notification 선례).
+여기는 정책 validator + canonical + crud 레벨.
 
-핵심:
-- validate_comparison_alert: within-tab/same-pair/unknown-tab/citi/index 차단
-- COMPARISON_TAB_SOURCES ↔ graph_v2_intraday.TAB_1D_SERIES **정합 잠금** (drift 차단 —
-  명시 상수가 카탈로그의 krw축 series와 어긋나면 여기서 red)
-- crud: create dedup(재활성화 리셋) / update sentinel 3-state / delete 멱등 / logs 필터
+정책 (Amendment — 제품 의미 분리):
+- absolute(일반 비교) = 탭별 대칭 집합. 테더는 거래소 5끼리만. threshold ≥ 0.
+  저장 전 canonical ordering (A−B/B−A dedup 중복 차단).
+- signed(김프/역프) = 테더 전용. left ∈ 거래소 5 × right ∈ {hana, kb, investing}.
+  threshold 부호 자유(음수=역프). krx는 ADR-038 후 추가.
+- 구 invariant(그래프 catalog krw series와 1:1)는 폐기 — 그래프 표시 ≠ 비교 허용.
 """
 from __future__ import annotations
 
@@ -19,73 +20,103 @@ from sqlalchemy.orm import sessionmaker
 
 from app import crud, models
 from app.models import get_utc_now
-from app.source_registry import COMPARISON_TAB_SOURCES, validate_comparison_alert
+from app.source_registry import (
+    COMPARISON_ABSOLUTE_SOURCES,
+    KIMCHI_BASE_SOURCES,
+    KIMCHI_COUNTER_SOURCES,
+    canonicalize_absolute_pair,
+    validate_comparison_alert,
+)
 
 
-class TestValidateComparisonAlert(unittest.TestCase):
+class TestComparisonPolicy(unittest.TestCase):
+    """Amendment 조합 정책 — diff_type이 정책을 가름."""
 
-    def test_valid_combos(self):
+    # -- absolute (일반 비교) --------------------------------------------
+
+    def test_absolute_tether_exchanges_only(self):
+        # 거래소 5끼리 OK
         self.assertIsNone(validate_comparison_alert(
-            "tether", "bithumb", "usdt-krw", "investing", "usd-krw"))   # 김프
+            "tether", "upbit", "usdt-krw", "bithumb", "usdt-krw", "absolute", 3.0))
         self.assertIsNone(validate_comparison_alert(
-            "tether", "upbit", "usdt-krw", "krx", "usd-krw-futures"))   # USDT vs 선물
+            "tether", "coinone", "usdt-krw", "gopax", "usdt-krw", "absolute", 1.0))
+        # cross-world(거래소 vs 환율계)는 absolute에서 거부 — 김프알림 전담
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "bithumb", "usdt-krw", "investing", "usd-krw", "absolute", 8.0))
+        # krx/참조도 absolute 비교 불가 (그래프에 있어도 — 구 invariant 폐기)
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "upbit", "usdt-krw", "krx", "usd-krw-futures", "absolute", 5.0))
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "investing", "usd-krw", "hana", "usd-krw", "absolute", 2.0))
+
+    def test_absolute_fx_tabs(self):
         self.assertIsNone(validate_comparison_alert(
-            "usd", "investing", "usd-krw", "kb", "usd-krw"))            # 기준 대비 은행
+            "usd", "investing", "usd-krw", "kb", "usd-krw", "absolute", 2.0))
         self.assertIsNone(validate_comparison_alert(
-            "usd", "shinhan", "usd-krw", "woori", "usd-krw"))           # 은행 간
+            "jpy", "shinhan", "jpy-krw", "woori", "jpy-krw", "absolute", 1.0))
+        # 탭 불일치 asset 거부
+        self.assertIsNotNone(validate_comparison_alert(
+            "jpy", "investing", "usd-krw", "kb", "jpy-krw", "absolute", 1.0))
+        # citi/dxy 거부
+        self.assertIsNotNone(validate_comparison_alert(
+            "usd", "citi", "usd-krw", "kb", "usd-krw", "absolute", 1.0))
+        self.assertIsNotNone(validate_comparison_alert(
+            "usd", "dxy", "dxy", "kb", "usd-krw", "absolute", 1.0))
+
+    def test_absolute_threshold_must_be_non_negative(self):
+        """음수 absolute gte는 항상 참에 수렴 — 422/400 (codex blocker)."""
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "upbit", "usdt-krw", "bithumb", "usdt-krw", "absolute", -1.0))
         self.assertIsNone(validate_comparison_alert(
-            "jpy", "investing", "jpy-krw", "hana", "jpy-krw"))
+            "tether", "upbit", "usdt-krw", "bithumb", "usdt-krw", "absolute", 0.0))
+
+    # -- signed (김프/역프) ----------------------------------------------
+
+    def test_signed_kimchi_tether_only(self):
+        # 거래소 × hana/kb/investing OK — threshold 음수(역프) 허용
         self.assertIsNone(validate_comparison_alert(
-            "eur", "kb", "eur-krw", "bs", "eur-krw"))
-
-    def test_same_pair_rejected(self):
+            "tether", "bithumb", "usdt-krw", "investing", "usd-krw", "signed", 8.0))
+        self.assertIsNone(validate_comparison_alert(
+            "tether", "upbit", "usdt-krw", "hana", "usd-krw", "signed", -30.0))
+        self.assertIsNone(validate_comparison_alert(
+            "tether", "gopax", "usdt-krw", "kb", "usd-krw", "signed", -10.0))
+        # 테더 외 탭 거부
         self.assertIsNotNone(validate_comparison_alert(
-            "usd", "kb", "usd-krw", "kb", "usd-krw"))
-
-    def test_cross_tab_rejected(self):
-        # usd 탭에서 usdt 소스 (테더 전용)
+            "usd", "investing", "usd-krw", "kb", "usd-krw", "signed", 2.0))
+        # left가 거래소 아님 / right가 상대 집합 아님
         self.assertIsNotNone(validate_comparison_alert(
-            "usd", "bithumb", "usdt-krw", "kb", "usd-krw"))
-        # 테더 탭에서 shinhan (테더 탭 그래프에 없음 — investing/kb/hana만)
+            "tether", "investing", "usd-krw", "bithumb", "usdt-krw", "signed", 8.0))
         self.assertIsNotNone(validate_comparison_alert(
-            "tether", "shinhan", "usd-krw", "investing", "usd-krw"))
-        # jpy 탭에서 usd asset
+            "tether", "bithumb", "usdt-krw", "upbit", "usdt-krw", "signed", 8.0))
+        # krx는 A1 범위 제외 (ADR-038 후 추가)
         self.assertIsNotNone(validate_comparison_alert(
-            "jpy", "investing", "usd-krw", "kb", "jpy-krw"))
+            "tether", "bithumb", "usdt-krw", "krx", "usd-krw-futures", "signed", 5.0))
 
-    def test_unknown_tab_and_index_and_citi(self):
+    def test_same_pair_and_unknown(self):
         self.assertIsNotNone(validate_comparison_alert(
-            "news", "kb", "usd-krw", "hana", "usd-krw"))
+            "tether", "upbit", "usdt-krw", "upbit", "usdt-krw", "absolute", 1.0))
         self.assertIsNotNone(validate_comparison_alert(
-            "usd", "dxy", "dxy", "kb", "usd-krw"))               # index 축 제외
+            "news", "upbit", "usdt-krw", "bithumb", "usdt-krw", "absolute", 1.0))
         self.assertIsNotNone(validate_comparison_alert(
-            "usd", "citi", "usd-krw", "kb", "usd-krw"))          # Citi 제외 (ADR-033 D4)
+            "tether", "upbit", "usdt-krw", "bithumb", "usdt-krw", "percent", 1.0))
 
-    def test_tab_sources_match_graph_catalog(self):
-        """정합 잠금 — COMPARISON_TAB_SOURCES == 탭 그래프 catalog의 krw축 (source, asset).
+    # -- canonical ordering ----------------------------------------------
 
-        ADR-037 Decision 1: 허용 소스의 단일 진실 소스 = graph_v2_intraday.TAB_1D_SERIES.
-        registry가 graph 모듈 import를 피해 명시 상수를 두므로, drift는 이 테스트가 차단.
-        (TAB_1D_SERIES 변경 시 COMPARISON_TAB_SOURCES도 함께 갱신할 것.)
-        """
-        from app.graph_v2_intraday import TAB_1D_SERIES
+    def test_canonicalize_absolute_pair(self):
+        """(source,asset) 사전순 정규화 — A−B/B−A 동일 결과 (Open 6 absolute closed)."""
+        a = canonicalize_absolute_pair("upbit", "usdt-krw", "bithumb", "usdt-krw")
+        b = canonicalize_absolute_pair("bithumb", "usdt-krw", "upbit", "usdt-krw")
+        self.assertEqual(a, b)
+        self.assertEqual(a, ("bithumb", "usdt-krw", "upbit", "usdt-krw"))   # 사전순
 
-        def krw_pairs(tab):
-            out = set()
-            for spec in TAB_1D_SERIES[tab]:
-                if spec.get("axis_group") != "krw":
-                    continue   # index(DXY 계열) 제외 — 단위 불일치
-                if spec["kind"] == "source":
-                    out.add((spec["source"], spec["asset"]))
-                elif spec["kind"] == "fx":
-                    out.add((spec["fx_source"], spec["currency"]))
-            return out
-
-        for tab in ("tether", "usd", "jpy", "eur"):
-            self.assertEqual(
-                COMPARISON_TAB_SOURCES[tab], krw_pairs(tab),
-                f"{tab}: COMPARISON_TAB_SOURCES가 TAB_1D_SERIES(krw축)와 어긋남 — 함께 갱신 필요",
-            )
+    def test_policy_sets_content(self):
+        """정책 집합 잠금 — 거래소 5 / 김프 상대 3 (krx 미포함 = A1 범위)."""
+        self.assertEqual(len(KIMCHI_BASE_SOURCES), 5)
+        self.assertEqual(KIMCHI_COUNTER_SOURCES, frozenset({
+            ("hana", "usd-krw"), ("kb", "usd-krw"), ("investing", "usd-krw")}))
+        self.assertEqual(COMPARISON_ABSOLUTE_SOURCES["tether"], KIMCHI_BASE_SOURCES)
+        for tab in ("usd", "jpy", "eur"):
+            self.assertEqual(len(COMPARISON_ABSOLUTE_SOURCES[tab]), 9)   # investing + 8 banks
 
 
 class TestComparisonCrud(unittest.TestCase):

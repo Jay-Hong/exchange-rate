@@ -3336,11 +3336,16 @@ _COMPARISON_LOG_MAX_LIMIT = 200
 
 
 def _validate_comparison_alert_or_400(tab: str, left_source: str, left_asset: str,
-                                      right_source: str, right_asset: str) -> None:
-    """Thin wrapper — source_registry.validate_comparison_alert + HTTPException 변환."""
+                                      right_source: str, right_asset: str,
+                                      diff_type: str, threshold: float) -> None:
+    """Thin wrapper — source_registry.validate_comparison_alert + HTTPException 변환.
+
+    ADR-037 Amendment: diff_type이 정책을 가름 (absolute=일반 비교[탭별 대칭 집합 + threshold≥0] /
+    signed=김프알림[테더 전용, 거래소×환율계]).
+    """
     from app import source_registry
     error = source_registry.validate_comparison_alert(
-        tab, left_source, left_asset, right_source, right_asset)
+        tab, left_source, left_asset, right_source, right_asset, diff_type, threshold)
     if error is not None:
         raise HTTPException(status_code=400, detail=error)
 
@@ -3380,12 +3385,23 @@ async def create_comparison_alert(
     await require_premium(user_id, allow_empty=False)
 
     _validate_comparison_alert_or_400(body.tab, body.left_source, body.left_asset,
-                                      body.right_source, body.right_asset)
+                                      body.right_source, body.right_asset,
+                                      body.diff_type, body.threshold)
+
+    # absolute는 저장 전 canonical ordering — A−B/B−A dedup 중복 차단 (ADR-037 Amendment).
+    left_source, left_asset = body.left_source, body.left_asset
+    right_source, right_asset = body.right_source, body.right_asset
+    if body.diff_type == "absolute":
+        from app import source_registry
+        left_source, left_asset, right_source, right_asset = (
+            source_registry.canonicalize_absolute_pair(
+                left_source, left_asset, right_source, right_asset))
+
     try:
         alert = crud.create_comparison_alert(
             db=db, user_id=user_id, tab=body.tab,
-            left_source=body.left_source, left_asset=body.left_asset,
-            right_source=body.right_source, right_asset=body.right_asset,
+            left_source=left_source, left_asset=left_asset,
+            right_source=right_source, right_asset=right_asset,
             diff_type=body.diff_type, operator=body.operator, threshold=body.threshold,
             is_enabled=body.is_enabled, repeat_interval_sec=body.repeat_interval_sec,
         )

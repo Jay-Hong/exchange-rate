@@ -198,27 +198,41 @@ def validate_alert_source_asset(source: str, asset: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# 비교 알림 tab-scope 검증 (ADR-037 Decision 1/4)
+# 비교 알림 조합 정책 (ADR-037 Amendment 2026-07-04 — 제품 의미 분리)
 # ---------------------------------------------------------------------------
+# ⚠️ 구 COMPARISON_TAB_SOURCES(그래프 catalog krw series와 1:1 invariant)는 폐기 —
+# 그래프 표시 소스 ≠ 비교 허용 소스가 새 정책의 본질 (테더 그래프엔 krx/참조가 있어도
+# 일반 비교는 거래소 5끼리만).
+#
+# 정책 (diff_type이 제품 의미를 가름 — validation이 이 invariant를 강제해야
+# "absolute=일반 비교 / signed=김프알림" 섹션 구분이 성립):
+#   - absolute("차이 벌어지면/좁혀지면") = 일반 비교알림. 탭별 대칭 pair 집합.
+#     threshold ≥ 0 강제 (음수 absolute gte는 항상 참에 수렴).
+#   - signed = 김프(역프) 알림. 테더 탭 전용 — left(기준) ∈ 거래소 5 ×
+#     right(비교 상대) ∈ {hana, kb, investing}. threshold 부호 자유 (음수=역프).
+#     krx는 ADR-038(entitlement) 구현 후 상대 집합에 추가.
+# ⚠️ 기존 validate_alert_source_asset 재사용 금지 (reference 거부 로직 상충).
 
-# 탭별 비교 허용 (source, asset) 집합 — 해당 탭 그래프 catalog(graph_v2_intraday.TAB_1D_SERIES)의
-# axis_group=="krw" series와 1:1 (DXY 계열은 단위 불일치로 자동 제외).
-# ⚠️ 명시 상수 (graph_v2_intraday import 회피 — registry가 저수준 모듈). drift는
-# tests/test_comparison_api.py의 정합 잠금 테스트가 차단 (TAB_1D_SERIES 변경 시 함께 갱신).
-# ⚠️ 기존 validate_alert_source_asset 재사용 금지 (ADR-037 codex): 그 함수는 reference
-# (investing/은행)를 source 알림에서 거부하지만 비교알림은 reference가 1급 시민.
 _FX_BANKS_COMPARISON = ("kb", "hana", "shinhan", "woori", "ibk", "nh", "sc", "bs")   # Citi 제외
 
-COMPARISON_TAB_SOURCES: dict = {
-    "tether": frozenset(
-        {(ex, "usdt-krw") for ex in ("upbit", "bithumb", "coinone", "korbit", "gopax")}
-        | {("krx", "usd-krw-futures")}
-        | {("investing", "usd-krw"), ("kb", "usd-krw"), ("hana", "usd-krw")}
-    ),
+_USDT_EXCHANGES = frozenset(
+    {(ex, "usdt-krw") for ex in ("upbit", "bithumb", "coinone", "korbit", "gopax")}
+)
+
+# absolute(일반 비교) 탭별 허용 (source, asset) — pair 양쪽 모두 이 집합 안 + left≠right.
+COMPARISON_ABSOLUTE_SOURCES: dict = {
+    "tether": _USDT_EXCHANGES,   # 거래소 5끼리만 (cross-world는 김프알림 전담)
     "usd": frozenset({("investing", "usd-krw")} | {(b, "usd-krw") for b in _FX_BANKS_COMPARISON}),
     "jpy": frozenset({("investing", "jpy-krw")} | {(b, "jpy-krw") for b in _FX_BANKS_COMPARISON}),
     "eur": frozenset({("investing", "eur-krw")} | {(b, "eur-krw") for b in _FX_BANKS_COMPARISON}),
 }
+
+# signed(김프/역프) — 테더 탭 전용. left=기준(거래소), right=비교 상대(환율계).
+KIMCHI_BASE_SOURCES = _USDT_EXCHANGES
+KIMCHI_COUNTER_SOURCES = frozenset({
+    ("hana", "usd-krw"), ("kb", "usd-krw"), ("investing", "usd-krw"),
+    # ("krx", "usd-krw-futures") — ADR-038 게이트 구현 후 추가 (entitlement 403 동반)
+})
 
 
 def validate_comparison_alert(
@@ -227,21 +241,55 @@ def validate_comparison_alert(
     left_asset: str,
     right_source: str,
     right_asset: str,
+    diff_type: str,
+    threshold: float,
 ) -> Optional[str]:
-    """비교 알림 (tab, left, right) 조합 검증 — 에러 메시지 반환 (정상이면 None).
+    """비교/김프 알림 조합 검증 — 에러 메시지 반환 (정상이면 None).
 
-    ADR-037 Decision 1: within-tab only — left/right 모두 해당 탭 허용 집합 내 +
-    left != right (동일 source+asset 페어 차단). FastAPI 비의존 (main.py thin wrapper가
-    HTTPException 변환 — project_main_py_helper_placement 패턴).
+    ADR-037 Amendment 2026-07-04: diff_type이 정책을 가름.
+    FastAPI 비의존 (main.py thin wrapper가 HTTPException 변환).
     """
-    allowed = COMPARISON_TAB_SOURCES.get(tab)
-    if allowed is None:
-        return f"Unknown tab '{tab}'. Allowed: {sorted(COMPARISON_TAB_SOURCES)}"
-    if (left_source, left_asset) == (right_source, right_asset):
+    left = (left_source, left_asset)
+    right = (right_source, right_asset)
+    if left == right:
         return "left and right must differ (same source+asset pair)"
-    for side, source, asset in (("left", left_source, left_asset),
-                                ("right", right_source, right_asset)):
-        if (source, asset) not in allowed:
-            return (f"{side} ({source}:{asset}) is not allowed in tab '{tab}'. "
-                    f"Comparison alerts are within-tab only (KRW-axis series).")
-    return None
+
+    if diff_type == "absolute":
+        allowed = COMPARISON_ABSOLUTE_SOURCES.get(tab)
+        if allowed is None:
+            return f"Unknown tab '{tab}'. Allowed: {sorted(COMPARISON_ABSOLUTE_SOURCES)}"
+        if threshold < 0:
+            return "absolute threshold must be >= 0"
+        for side, pair in (("left", left), ("right", right)):
+            if pair not in allowed:
+                return (f"{side} ({pair[0]}:{pair[1]}) is not allowed for absolute comparison "
+                        f"in tab '{tab}'.")
+        return None
+
+    if diff_type == "signed":
+        # 김프(역프) 알림 — 테더 탭 전용 (ADR-037 Amendment 3)
+        if tab != "tether":
+            return "signed (kimchi premium) alerts are only supported in tab 'tether'"
+        if left not in KIMCHI_BASE_SOURCES:
+            return (f"kimchi base ({left[0]}:{left[1]}) must be one of the 5 USDT exchanges")
+        if right not in KIMCHI_COUNTER_SOURCES:
+            return (f"kimchi counter ({right[0]}:{right[1]}) must be one of "
+                    f"hana/kb/investing (usd-krw)")
+        return None
+
+    return f"Unknown diff_type '{diff_type}' (signed | absolute)"
+
+
+def canonicalize_absolute_pair(
+    left_source: str, left_asset: str, right_source: str, right_asset: str,
+) -> tuple:
+    """absolute pair 정규화 — (source, asset) 사전순으로 (left, right) 정렬.
+
+    left/right 개념이 UI에서 소멸(|A−B|=|B−A|)했으므로 저장 전 정규화해 A−B/B−A
+    dedup 중복을 차단 (ADR-037 Open 6 absolute에 한해 closed). signed는 방향 의미
+    보존이라 미적용. 반환: (left_source, left_asset, right_source, right_asset).
+    """
+    a = (left_source, left_asset)
+    b = (right_source, right_asset)
+    lo, hi = (a, b) if a <= b else (b, a)
+    return (lo[0], lo[1], hi[0], hi[1])
