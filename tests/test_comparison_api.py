@@ -259,6 +259,65 @@ class TestComparisonCrud(unittest.TestCase):
         self.db.commit()
         return log
 
+    def test_update_threshold_operator_resets_and_revalidates(self):
+        """A4 편집 — threshold/operator 변경 시 §7 리셋 + 신정책 재검증."""
+        # 발송됨(once, triggered, disabled) 상태의 signed 알림
+        a = models.ComparisonAlert(
+            user_id="u1", tab="tether",
+            left_source="bithumb", left_asset="usdt-krw",
+            right_source="hana", right_asset="usd-krw",
+            diff_type="signed", operator="lte", threshold=-30.0,
+            enabled=False, triggered=True, repeat_interval_sec=None,
+            last_notified_at=get_utc_now(), last_notified_spread=-31.0)
+        self.db.add(a)
+        self.db.commit()
+        # threshold -30→-10 + operator lte→gte + 재활성화(edit sheet는 is_enabled=true 동반)
+        updated = crud.update_comparison_alert(
+            self.db, a.id, "u1", is_enabled=True, threshold=-10.0, operator="gte")
+        self.assertEqual(updated.threshold, -10.0)
+        self.assertEqual(updated.operator, "gte")
+        self.assertTrue(updated.enabled)            # 재활성화
+        self.assertFalse(updated.triggered)         # §7 리셋
+        self.assertIsNone(updated.last_notified_at)
+        self.assertIsNone(updated.last_notified_spread)
+
+    def test_update_absolute_negative_threshold_rejected(self):
+        """A4 편집 — absolute 알림을 음수 threshold로 편집 시 재검증 400 (endpoint helper)."""
+        from app.source_registry import validate_comparison_alert
+        a = models.ComparisonAlert(
+            user_id="u1", tab="tether",
+            left_source="bithumb", left_asset="usdt-krw",
+            right_source="upbit", right_asset="usdt-krw",
+            diff_type="absolute", operator="gte", threshold=2.0,
+            enabled=True, triggered=False)
+        self.db.add(a)
+        self.db.commit()
+        # 기존 pair/diff_type + 새 음수 threshold → validate가 에러 반환 (endpoint가 400 변환)
+        err = validate_comparison_alert(
+            a.tab, a.left_source, a.left_asset, a.right_source, a.right_asset,
+            a.diff_type, -5.0)
+        self.assertIsNotNone(err)
+        # hard cap 초과도 거부
+        err2 = validate_comparison_alert(
+            a.tab, a.left_source, a.left_asset, a.right_source, a.right_asset,
+            a.diff_type, 20000.0)
+        self.assertIsNotNone(err2)
+
+    def test_update_no_content_change_keeps_state(self):
+        """A4 편집 — threshold/operator 미제공(None)이면 값·triggered 불변 (기존 토글 경로 회귀)."""
+        a = models.ComparisonAlert(
+            user_id="u1", tab="tether",
+            left_source="bithumb", left_asset="usdt-krw",
+            right_source="upbit", right_asset="usdt-krw",
+            diff_type="absolute", operator="gte", threshold=3.0,
+            enabled=True, triggered=True)
+        self.db.add(a)
+        self.db.commit()
+        updated = crud.update_comparison_alert(self.db, a.id, "u1")  # 아무것도 안 바꿈
+        self.assertEqual(updated.threshold, 3.0)
+        self.assertEqual(updated.operator, "gte")
+        self.assertTrue(updated.triggered)          # 변경 없음 → 리셋 안 함
+
     def test_logs_diff_type_filter(self):
         """diff_type 필터 — signed=김프 / absolute=비교 히스토리 분리 (ADR-037 Amendment)."""
         now = get_utc_now()

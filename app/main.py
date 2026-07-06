@@ -3448,9 +3448,23 @@ async def update_comparison_alert(
     body: schemas.ComparisonAlertUpdateRequest,
     db: Session = Depends(get_db),
 ):
-    """비교 알림 수정 — v1은 is_enabled 토글 + repeat_interval_sec만 (pair 변경 = 삭제+재생성)."""
+    """비교 알림 수정 — A4: is_enabled + repeat + threshold + operator(방향).
+
+    pair(소스 조합)/diff_type은 편집 불가(삭제+재생성). threshold/operator 편집 시 신정책
+    재검증(pair/diff_type은 기존 값) — signed 음수 허용 / absolute≥0 / hard cap ±10000.
+    """
     user_id = await verify_firebase_token(request)
     await require_premium(user_id, allow_empty=False)
+
+    # A4: threshold/operator 편집이면 기존 pair/diff_type + 새 threshold로 재검증
+    if body.threshold is not None or body.operator is not None:
+        alert = crud.get_comparison_alert(db, setting_id, user_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Comparison alert not found")
+        new_threshold = body.threshold if body.threshold is not None else alert.threshold
+        _validate_comparison_alert_or_400(
+            alert.tab, alert.left_source, alert.left_asset,
+            alert.right_source, alert.right_asset, alert.diff_type, new_threshold)
 
     repeat_kwargs = (
         {"repeat_interval_sec": body.repeat_interval_sec}
@@ -3459,7 +3473,8 @@ async def update_comparison_alert(
     )
     updated = crud.update_comparison_alert(
         db=db, setting_id=setting_id, user_id=user_id,
-        is_enabled=body.is_enabled, **repeat_kwargs,
+        is_enabled=body.is_enabled,
+        threshold=body.threshold, operator=body.operator, **repeat_kwargs,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Comparison alert not found")
@@ -3468,6 +3483,7 @@ async def update_comparison_alert(
     logger.info("📊 비교 알림 수정", extra={
         "event": "comparison_alert_update", "setting_id": setting_id,
         "is_enabled": body.is_enabled,
+        "threshold": body.threshold, "operator": body.operator,
     })
     await notify_user_devices_sync(db, user_id)
     return build_comparison_alert_response(updated)

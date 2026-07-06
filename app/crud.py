@@ -3268,17 +3268,32 @@ def get_comparison_alerts(db: Session, user_id: str) -> List[models.ComparisonAl
             .order_by(models.ComparisonAlert.created_at.desc()).all())
 
 
+def get_comparison_alert(
+    db: Session, setting_id: int, user_id: str
+) -> Optional[models.ComparisonAlert]:
+    """단일 비교 알림 조회 (편집 전 pair/diff_type 재검증용 — A4)."""
+    return db.query(models.ComparisonAlert).filter(
+        models.ComparisonAlert.id == setting_id,
+        models.ComparisonAlert.user_id == user_id,
+    ).first()
+
+
 def update_comparison_alert(
     db: Session,
     setting_id: int,
     user_id: str,
     is_enabled: Optional[bool] = None,
+    threshold: Optional[float] = None,   # A4: 미제공=None (값으로서 None 없음) / 변경 시 §7 리셋
+    operator: Optional[str] = None,      # A4: 미제공=None / 'gte'|'lte' 방향 편집
     repeat_interval_sec=_UNSET,   # sentinel(B2 공용) — 미제공 vs 명시적 null(=once) 구분
 ) -> Optional[models.ComparisonAlert]:
-    """비교 알림 수정 (v1: is_enabled 토글 + repeat_interval_sec만 — ADR-037 Decision 5).
+    """비교 알림 수정 (A4: is_enabled + repeat + threshold + operator — ADR-037 A4).
 
     is_enabled=True 재활성화 → triggered/last_notified 초기화 (단일 알림 §7 선례).
+    threshold/operator 변경 → §7 리셋(재조정=재무장): triggered=false + last_notified 초기화.
+      → once '발송됨' 알림도 기준을 바꾸면(edit sheet가 is_enabled=true 동반) 재발화 가능.
     repeat_interval_sec: sentinel(미제공)=변경 없음 / None=once 전환 / 정수=repeat (B2 3-state).
+    pair/diff_type은 편집 불가 — 여기서 변경하지 않음 (삭제+재생성 경로).
     """
     alert = db.query(models.ComparisonAlert).filter(
         models.ComparisonAlert.id == setting_id,
@@ -3292,6 +3307,14 @@ def update_comparison_alert(
         if is_enabled and not alert.enabled:
             should_reset = True                    # 재활성화 → 재발화 가능 상태
         alert.enabled = is_enabled
+
+    # A4 편집 — threshold/operator 실제 변경 시 §7 리셋 (이전 발화가 새 기준을 suppress 방지).
+    if threshold is not None and threshold != alert.threshold:
+        should_reset = True
+        alert.threshold = threshold
+    if operator is not None and operator != alert.operator:
+        should_reset = True
+        alert.operator = operator
 
     # B2 (ADR-036) §7/§8 — update_source_notification_setting 미러 (codex S3 blocker):
     # interval 실제 변경 시 last_notified_* 리셋(이전 발화 시각이 새 설정을 suppress하는 것 방지),

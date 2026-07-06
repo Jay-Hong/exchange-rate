@@ -329,18 +329,28 @@ class ComparisonAlertRequest(BaseModel):
 
 
 class ComparisonAlertUpdateRequest(BaseModel):
-    """비교 알림 수정 (PUT — v1은 is_enabled 토글 + repeat_interval_sec만.
+    """비교 알림 수정 (PUT — A4 편집: is_enabled + repeat_interval_sec + threshold + operator.
 
-    pair/조건 변경은 삭제+재생성 (curated preset UI라 v1 단순화 — ADR-037 Decision 5).
+    pair(소스 조합)/diff_type 변경은 여전히 삭제+재생성 (dedup·canonical·signed 방향성·히스토리
+    해석 복잡도 회피 — ADR-037 A4). threshold/operator(방향)만 편집 → 재조정 워크플로 지원.
     repeat_interval_sec '미제공' vs '명시적 null(=once)' 구분은 main.py가 model_fields_set으로
-    판단 (기존 source PUT 패턴)."""
+    판단. threshold/operator는 미제공=None(값으로서 None 없음)이라 is-not-None으로 구분."""
     is_enabled: Optional[bool] = None
     repeat_interval_sec: Optional[int] = Field(default=None)
+    threshold: Optional[float] = None       # A4: 미제공=None / 값 변경 시 §7 리셋 (signed는 음수 허용)
+    operator: Optional[str] = None          # A4: 미제공=None / 'gte'|'lte' (방향 편집)
 
     @field_validator("repeat_interval_sec")
     @classmethod
     def _validate_repeat_interval(cls, v: Optional[int]) -> Optional[int]:
         return _validate_repeat_interval_sec(v)
+
+    @field_validator("operator")
+    @classmethod
+    def _validate_operator(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("gte", "lte"):
+            raise ValueError("operator must be 'gte' or 'lte'")
+        return v
 
 
 class ComparisonAlertResponse(BaseModel):
