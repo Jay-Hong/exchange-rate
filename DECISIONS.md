@@ -5881,6 +5881,124 @@ iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
    허용 집합에서 KRX만 제거하는 축소 경로 존재.
 6. A−B/B−A canonical ordering (free builder 개방 시 — v1은 exact-match dedup + preset 방향 고정으로 회피).
 
+### Amendment 2026-07-04 — 제품 의미 분리: 비교알림(absolute-only) + 김프/역프 알림(signed, 테더 전용)
+
+**배경**: S4 land 후 사용자 실사용 판단 — "9개 소스 × 4조건 조합은 개발자도 파악이 어렵다. UI 문제가
+아니라 조건 자체가 너무 광범위하다." A/B 생성 UI 시안(preset/자유조합)으로도 해소 불가 →
+**조건 축소가 아니라 제품 의미 분리**로 재정의 (사용자 + Codex + Claude 3-way 합의).
+
+**결정 (서버 스키마/evaluator 무변경 — UI·validation 계층 재구성)**:
+
+1. **일반 비교알림 = absolute만** ("차이 벌어지면"[gte] / "차이 좁혀지면"[lte]). signed
+   ("더 비싸지면/더 싸지면") 문구는 UI에서 제거 — 서버는 signed 평가 능력 유지(추후 확장).
+   absolute는 |A−B|=|B−A|라 **left/right(기준/상대) 개념 자체가 UI에서 소멸** — "두 소스 선택"만.
+2. **테더 탭 비교알림 = 거래소 5개끼리만** (upbit/bithumb/coinone/korbit/gopax). cross-world
+   (USDT vs 환율계) 비교는 김프알림이 전담 — 역할 분리.
+3. **김프(역프) 알림 신설 — 테더 탭 전용, signed 전담**: left(기준) ∈ 거래소 5 ×
+   right(비교) ∈ {hana, kb, investing} (+ krx는 ADR-038 게이트 열린 사용자만).
+   조건 = 김프 값(부호 있는 spread) + 이상(gte)/이하(lte) 토글. threshold 범위 sanity =
+   현 시세의 ±50%. **signed+gte+음수 threshold 조합이 1급 시민** (구 "크로싱-백 포기" 판단은
+   김프알림 도메인에서 뒤집힘 — 사용자 시나리오: 역프 −30 이하 알림→매매→김프 −10 이상
+   알림→반대매매. 서버는 원래 지원, UI만 개방). 저장은 동일 comparison_alerts 테이블 —
+   김프알림/비교알림 구분은 diff_type(signed/absolute)으로 자연 구분, 신규 컬럼 불요.
+4. **테더 탭 단일 가격알림에서 krx 제거** (iOS picker — 거래소 5만). KRX 단일 가격알림은
+   달러 탭(게이트 사용자, 후속)으로 이동. 그래프/시세 막대의 krx는 유지(게이트 조건부).
+5. **달러/엔/유로 탭 비교알림 = 향후 과제** (섹션 자체 미배치 유지). 정책 확정분: DXY 제외
+   탭 내 전 소스 absolute 비교 (+달러 탭은 krx 게이트 조건부).
+6. **서버 validation 재정의 (S3 보정)**: tether tab — absolute pair는 거래소 5끼리만 /
+   signed pair는 (거래소 5) × {hana, kb, investing, krx} (krx는 entitlement 검사 추가,
+   ADR-038). 위반 조합 400/403. usd/jpy/eur 허용 집합은 기존 유지(비교알림 개방 시 적용).
+   **invariant (codex 2026-07-04)**: absolute=일반 비교/signed=김프라는 섹션 구분은 이
+   validation이 diff_type×pair 조합을 강제할 때만 성립 — 신규 구분 컬럼 불요의 전제.
+   **threshold 부호 규칙**: absolute는 threshold ≥ 0 강제(음수 absolute gte는 항상 참에
+   수렴 — 422), signed는 음수 허용(김프 도메인).
+   **absolute canonical ordering**: left/right 개념이 UI에서 소멸했으므로 absolute 저장 시
+   (source,asset) 사전순으로 (left,right) 정규화 — A−B/B−A dedup 중복 차단 (ADR-037 Open 6을
+   absolute에 한해 closed; signed는 방향 의미 보존이라 비정규화 유지).
+   **기존 데이터 처리**: 신정책 위반 조합의 잔여 row(dev 계정 등)는 A1 배포 시점 one-time
+   cleanup(delete)으로 제거 — 생성/수정 validation이 이후 유입을 봉쇄하므로 evaluator에
+   정책 재검사 이중 로직은 두지 않음 (flag off + 실사용자 생성 0 시점이라 안전).
+7. **UI 결정 supersede**: Decision 5(curated presets) + 2026-07-04 자유조합/A·B 시안은 본
+   Amendment로 전면 supersede — 생성 UI는 "비교 알림"(absolute 2조건)과 "김프 알림"(signed,
+   김프 값+이상/이하)의 **별도 2개 섹션/시트**로 재구성.
+
+### Slices (Amendment 재스코프)
+
+- **A1 서버**: validation 재정의(조합 정책 테이블) + 김프 조합 krx entitlement 검사(ADR-038 의존).
+- **A2 iOS**: A/B 시트 폐기 → "비교 알림" 시트(소스 2택 + 벌어지면/좁혀지면 + 금액) +
+  "김프 알림" 섹션/시트(기준 거래소 + 비교 상대 + 김프 값[±] + 이상/이하) 분리.
+- **A3**: flag 활성 + canary (기존 계획 유지).
+
+## ADR-038: KRX 달러선물 노출 게이트 — 3단 게이트 + 별도 topic + entitlement 수동 부여
+
+**날짜**: 2026-07-04
+**상태**: Proposed (설계 잠금 — 구현 미착수)
+**결정자**: Jay + Claude + Codex (3-way)
+
+### Context
+
+KRX 달러선물은 [KRX_CANARY.md](KRX_CANARY.md) 정책상 optional source이며 시세 재배포 권리
+검토가 미완( ADR-037 Open 5). 전 사용자 공개 대신 **구독 + 운영자 승인 사용자에게만 노출**하고,
+상황에 따라 노출 수준을 단계적으로 조정할 수 있어야 한다. 현재 달러선물은 `usdt:krw` topic의
+optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic은 없음(legacy_policy.py:73 주석).
+
+### Decision 1 — 3단 게이트 (캐스케이드)
+
+| 게이트 | 주체 | 수단 | 닫히면 |
+|---|---|---|---|
+| **G1 user entitlement** | 운영자 | DB 수동 부여 (사용자별) | 해당 사용자만 KRX 미노출 |
+| **G2 server distribution** | 서버 env | `KRX_CLIENT_DISTRIBUTION_ENABLED` (신규) | 전 단말 KRX 미노출 (수집은 지속) |
+| **G3 collection** | 서버 env | `KRX_FUTURES_ENABLED` (기존) | 수집 자체 중단 |
+
+- **G1은 운영자 수동 부여** (사용자 확정 2026-07-04): 앱 내 입력 UI 없음 — 이스터에그/액세스
+  코드 방식은 **기각** (Apple 2.3.1 hidden features 리젝 리스크 + 수동 부여가 대상 사용자
+  직접 통제에 더 적합). 서버 DB 테이블(예: `user_entitlements(user_id, key='krx_futures',
+  granted_at)`)에 운영자가 직접 INSERT. 필요 시 관리 스크립트/admin API 후속.
+- **G2 범위 = 모든 client-facing KRX distribution** (codex 보강): topic 발행뿐 아니라
+  graph v2 catalog/tab의 krx series, topic snapshot/REST bootstrap, KRX 관련 알림 생성 전부 —
+  G2 off면 제외/403. "topic만 차단"으로 좁게 정의하면 무인증 graph 경로로 누출.
+- 판정 단일화: 클라는 게이트 3개를 조합 계산하지 않음 — **서버가 최종 `krx_visible` 단일
+  신호를 내려줌** (G3 ∧ G2 ∧ G1 ∧ premium). 전달 위치는 구현 시 확정(Open 1 — 후보:
+  구독 상태 API 확장 / 신규 GET /api/entitlements).
+
+### Decision 2 — 별도 topic `krx:usd-krw-futures` 신설 (옵션 B, 사용자 확정)
+
+- `usdt:krw` topic의 `usd_krw_futures` optional group **제거** → KRX는 독립 topic으로만 발행.
+  (신규 앱 미출시 — iOS 코드 동시 수정으로 마이그레이션 부담 없음. 구버전 운영 앱은 테더 탭
+  자체가 없어 무영향.)
+- entitled 단말만 이 topic 구독 (테더 탭 김프알림 비교소스/그래프 + 달러 탭 전 섹션).
+- G2 off → 서버가 topic 발행 중단 (payload 필터링 불요 — topic 단위 차단이 옵션 B 채택 근거).
+
+### Decision 3 — 강제선의 현실 (per-user 한계 명시)
+
+`/ws`는 **익명**(main.py:876 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
+(codex 지적, 코드 확인 2026-07-04). 1차 강제선:
+
+- **인증 있는 REST(알림 API) = G1+G2 서버 강제**: 김프알림 krx 조합 생성/수정 403,
+  KRX 단일 가격알림 403 — entitlement 검사 가능.
+- **무인증 REST(graph v2 catalog/tab, topic snapshot) = G2만 서버 강제** (codex 정정 —
+  graph v2는 인증이 없어 per-user 강제 불가): G2 off면 krx series 전역 제외, G2 on이면
+  per-user 노출은 클라 UI gate(krx_visible)가 담당.
+- **WS = global flag(G2) + 클라 UI gate**: G1 없는 단말이 krx topic을 구독해도 시세 payload를
+  받을 수 있으나(시세는 민감정보 아님 — 목적은 노출 제어) 클라가 그리지 않음. **완전한
+  per-user WS/무인증 REST 강제는 인증 도입 후속 과제** (Open 2).
+
+### Decision 4 — 노출 매트릭스 (게이트 all-open 시)
+
+- 테더 탭: 그래프 series + 시세 막대 + **김프알림 비교소스** (단일 가격알림/일반 비교알림에서는
+  제외 — ADR-037 Amendment 4).
+- 달러 탭: 그래프/은행별환율(시세)/가격알림/비교알림 **전 섹션 추가** (후속 구현).
+- 게이트 하나라도 닫히면: 양 탭 모든 KRX 표면 미노출 (krx_visible=false + REST 미포함 +
+  topic 미발행[G2] 또는 미데이터[G3]).
+
+### Open
+
+1. `krx_visible` 전달 위치 (구독 상태 API 확장 vs 신규 entitlements endpoint).
+2. WS 구독 인증 (per-user topic 강제 — 별도 트랙).
+3. entitlement 부여/회수 운영 도구 (초기엔 수동 SQL, 사용자 늘면 admin API).
+4. graph v2 catalog의 per-user 분기 (catalog가 현재 정적 — entitlement별 krx series 포함
+   여부를 어디서 분기할지: catalog 요청에 auth 추가 vs 클라 필터).
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
@@ -5948,5 +6066,6 @@ iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
 - 2026-06-06: ADR-035 D1 Investing daily append orchestrator 통합 + cron 첫 발화 검증 (production end-to-end, Claude+Codex 이중 독립) — backfill(2026-06-04까지)에서 멈춘 Investing을 매일 자동 갱신, KRX/Hana/Bithumb going-forward freshness parity. **(1) 구현** (`bef10eb`): verdict 계약(`app/daily_append_verdict.py`) `VALID_SKIPPED_REASONS` union에 `no_observation` 추가 + **orchestrator source-aware `valid_skipped_reasons`**(SOURCE_POLICY per-source subset + subset assert — Hana는 no_observation 비허용 / Investing은 weekend_no_changes 비허용 → 전역 추가의 정책 느슨화 회피) + `SOURCE_RUN_ALL`(bithumb→hana 3→investing 3) + resolve_run_units 다통화 일반화(`_MULTI_CURRENCY_SOURCES`) + build_investing_command + evaluate_source_result source-aware reason + Investing writer `--emit-daily-append-verdict`(단일일 written/skipped, **0-obs도 skipped/no_observation sentinel 방출 — exit-0-no-sentinel orchestrator FAIL 방지, Codex catch**; combo: --write 동반 + start==end 전용; multi-day 0-row fail-close 유지). 163 tests(writer verdict 4 + combo 2 + source-aware reason 4[investing no_observation PASS / investing weekend FAIL / hana no_observation FAIL — 정책 느슨화 회피 입증] + build_investing 3 + resolve 3 + 회귀). **(2) EC2 deploy** (build-only): `git pull` + `docker compose build fastapi`(cron이 쓰는 image 반영, running fastapi recreate 안 함 — orchestrator/writer/verdict은 script). dry-run smoke로 `--source investing` 3통화 인식 + command 확인. **(3) cron 첫 발화 검증** (2026-06-06 00:01 KST `--source all`): investing **2026-06-05** 3통화 written(usd C=1553.83 / jpy C=969.49[**quantize 6자리, artifact 0**] / eur C=1795.45, investing_observed_eod / observed_rollup, drift·OHLC·dup 0) + 동반 bithumb 1 + hana 3 → **cron summary 7 units 전부 PASS**. KRX는 cron unit 아니나 in-process close finalizer(CF 15:45)가 same-date(2026-06-05) row 1건 적재. totals **2194→2201**(bithumb 369 / hana 747 / krx 245 / investing 840). **이중 독립 verify**(Claude post-verify + Codex production read-only 일치). sanity cross-check: 같은 6/5 hana usd 1553.30 vs investing usd 1553.83(~0.5 KRW) / hana jpy 969.30 vs investing jpy 969.49 정합(독립 2 source 일치). **→ 4 source going-forward freshness 완성** (bithumb/hana/investing=cron `--source all` 00:01 KST + krx=in-process close finalizer 15:45 — source_daily_rates 매일 자동 최신). 후속(별도): ✅ Phase 2e v2 endpoint(source_daily_rates read 전환) — Phase 2e MVP land + 운영 deploy 완료 2026-06-06 / source_hourly_rates(1w).
 - 2026-06-06: ADR-035 Phase 2e MVP land — v2 graph endpoint (catalog + tab, source_daily_rates read, 3m/1y) (로컬 구현+테스트 + 운영 deploy 완료 2026-06-06) — canonical daily layer를 v2 그래프 endpoint가 직접 read하는 hot path 완성. write-side(4 source 적재) 완료 후 read-side 전환. **(1) graph_v2.py 로직** (`7bc1d65`): `app/graph_v2.py` — `build_catalog()`(3m/1y subset, usd/jpy/eur/tether tab × series + DXY 노출 탭만 index axis_group, §3/§9 근거) + `build_tab(db, tab, period)`(SERIES_REGISTRY id↔DB key 분리 + **kind dispatch**: source_daily_rates=get_range+row_to_dict / DXY=market_index_rates.daily). **동적 provenance**(distinct close_basis 1=single/2+=mixed[Hana만]) + per-point(mixed→close_basis/source_method, KRX→contract_code) + **insufficient partial coverage**(첫 row>start+7일, §6 — 빈 series뿐 아니라 신규 자산 미충족). **Codex 2 findings**(F1 insufficient partial / F2 DXY source priority investing>cnbc>else, crud.py `_dxy_query_single` 일치 — last-row dedup 회귀 차단). 12 tests. **(2) main.py thin wiring** (`9d43773`): `GET /api/v2/graph/catalog` + `/api/v2/graph/tab` — tab 404(unknown_tab) + period 400(unsupported_period + v1 fallback hint) + build_tab(asyncio.to_thread 비차단). 로직 0(graph_v2 호출만) / **v1 `/api/graph/{currency}` 변경 0**(legacy 공존 §12). **(3) endpoint harness** (`c7c218c`): `tests/conftest.py`(firebase stub + DATABASE_URL=file-backed sqlite, collection 시작 시 모든 import 전 — main.py firebase_admin+RDS 연결 회피, 재사용 가능, in-memory override + mkstemp fd close [Codex 2건]) + `tests/test_graph_v2_endpoints.py` 6종(catalog 200/unsupported 400/unknown tab 404/tab empty insufficient/v1 무변경, TestClient lifespan 미진입). **검증 18 tests**(graph_v2 12 + endpoint 6). **MVP 범위**: 3m/1y만(source_daily_rates 단일 조회), 1d=v1 realtime / 1w=source_hourly_rates(D3) 후속 → v2 1d/1w는 400 unsupported_period(insufficient_history와 분리 — 데이터는 v1에 있음). **문서=full target(§4) / 구현=MVP subset(3m/1y)** 비강제. **운영 deploy 완료 2026-06-06**(f04d9b8→0e52b7a recreate, image 9e2e3186; Claude+Codex 이중 독립 검증: catalog 200·tab usd 3m 200 series[77,63,79]·1d 400·v1 200·health healthy·KRX status=normal·ERROR 0; client 미연동이라 실사용 caller 0 — 프론트 cutover 별도). 후속(별도): source_hourly_rates(1w, Phase 2e+) / 프론트 client cutover. 상세: CLAUDE.md Phase 2e MVP anchor + [GRAPH_API_V2_CONTRACT.md §13](GRAPH_API_V2_CONTRACT.md).
 - 2026-06-11: ADR-034 §9 KRX daily append **6/11 회귀 canary PASS** — ⑥(ADR-035 D3 구 hourly hook 제거, `KrxCloseWindowWriter._sync_write` 수정) 운영 반영 후 첫 CF close. 15:46:00 `[krx_cf_append] INSERT date=2026-06-11 A75606 close=1531.2`, close_finalizer / observed_rollup / krx_cf_close_1545 / cf_session_point_count=5935 / KRX 248→249 / drift·OHLC·dup 0. 의미: hook 제거가 daily finalizer-tail(같은 `_sync_write` success path) 무손상 — unit trip-wire(shared writer False-arm)가 못 잡는 영역의 live 회귀 확증. **WS Case A** finalizer (정상 close frame 경로) — REST gate-checked write(`KRX_CLOSE_REST_WRITE_ENABLED`, 6/15 A75606 rollover 후 활성 판단) 미실증이라 KRX_CLOSE_SNAPSHOT_PLAN 직교. 기록 위치: CLAUDE.md Phase 2d KRX daily-append anchor + 본 changelog 2파일 (KRX_CANARY.md 선택·생략).
+- 2026-07-04: ADR-037 Amendment (제품 의미 분리 — 일반 비교알림 absolute-only[left/right 개념 UI 소멸] + 테더 비교=거래소 5끼리 + 김프/역프 알림 신설[테더 전용 signed, 음수 threshold 1급 시민 — 구 크로싱-백 포기 뒤집힘] + 테더 단일알림 krx 제거 + validation 재정의 + A/B 생성 UI 시안 supersede) + ADR-038 작성 (KRX 노출 게이트 — G1 entitlement 운영자 수동 부여[이스터에그/코드입력 기각, Apple 2.3.1] / G2 distribution env / G3 collection 기존 + 별도 topic krx:usd-krw-futures 신설[옵션 B, usdt:krw optional group 제거] + /ws 익명 한계 명시[REST 서버강제/WS 클라 gate]) — 둘 다 Proposed, 구현 미착수
 - 2026-07-03: ADR-037 작성 (비교 알림 — within-tab v1[사용자 확정] + universal schema[tab 컬럼 명시: investing/kb/hana usd 테더·달러 겹침으로 유도 모호] + comparison_notification_logs[left_rate/right_rate/spread/is_repeat] + B2 repeat 재사용[구 "1회성 통일" supersede] + dual-trigger 현행 evaluator 재매핑[Decision F superseded] + curated presets v1 + greenfield flag rollout) — Proposed, 구현 미착수
 - 2026-06-29: ADR-036 작성 (가격알림 반복 발송 repeat_interval_sec, B2) — Proposed, 구현 미착수. **정책**(5라운드 codex 수렴): NULL=once(0/음수 reject) / interval enum 1m·5m·10m·30m·1h·2h·4h·6h·12h·1d(문서 §B2) / once=triggered+disable(현행), **repeat=triggered 미설정·enabled 유지·gate `last_notified_at+interval`(naive UTC)** / 조건 release 리셋 없음(재크로싱=B3) / OFF·threshold·condition·source·interval 변경 시 last_notified_at 리셋 + 모드전환 PUT 정규화 / dedup key interval 제외 / 발송마다 log row. **scope=FULL B2(bank+source)** but 구현 2 PR 위상(PR1 source→PR2 bank, "B2 완료"는 둘 다 후). 검토: codex LOCK OK + workflow ready-after-adr-edits(5-lens 구현가능성). **load-bearing gotcha 박제**: delivery_allowed 호출부(622/679) aware now vs last_notified_at naive → B2 뺄셈 TypeError → except 삼켜 repeat silent 미발화 → PR1 naive 정규화 필수. last_notified_at/rate 인프라 양 테이블 기존(CLAUDE.md notification_settings 스키마 누락은 PR1 정정). 후속: PR1(source) 착수.
