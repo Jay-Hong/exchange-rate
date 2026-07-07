@@ -251,6 +251,52 @@ sent_at         DATETIME
 
 **source_registry**: 9개 소스 메타데이터는 `app/source_registry.py`의 `SourceDefinition` dataclass에서 관리 (canonical key는 DB 저장 안 함, 필요 시 `f"{source}:{asset}"`로 조합)
 
+### 비교/김프 알림 테이블 (ADR-037, 구현 완료)
+
+> 소스 간 가격 차이 알림. diff_type이 제품 의미를 가름 (signed=김프/역프 / absolute=일반 비교).
+> 상세: [ADR-037](DECISIONS.md#adr-037-비교-알림-comparison-alerts--within-tab-v1--universal-schema--현행-evaluator-재매핑)
+
+#### comparison_alerts
+
+```sql
+id                    INTEGER PRIMARY KEY
+user_id               TEXT NOT NULL (INDEX)
+tab                   TEXT NOT NULL         -- 'tether' (v1) | 'usd'|'jpy'|'eur' (스키마 예약)
+left_source           TEXT NOT NULL         -- 기준(김프) / 소스A(비교, canonical 정렬)
+left_asset            TEXT NOT NULL
+right_source          TEXT NOT NULL         -- 비교상대(김프) / 소스B(비교)
+right_asset           TEXT NOT NULL
+diff_type             TEXT NOT NULL         -- 'signed'(김프, 음수 허용) | 'absolute'(비교, ≥0)
+operator              TEXT NOT NULL         -- 'gte' | 'lte'
+threshold             REAL NOT NULL         -- KRW 원 단위 (Decision D, hard cap |t|≤10000)
+enabled               BOOLEAN DEFAULT TRUE
+triggered             BOOLEAN DEFAULT FALSE
+last_notified_at      DATETIME
+last_notified_spread  REAL
+repeat_interval_sec   INTEGER               -- NULL=once / 정수=반복 (B2 ADR-036 준용)
+created_at / updated_at DATETIME
+```
+
+dedup 멱등: `(user_id, tab, left_*, right_*, diff_type, operator, threshold)` exact-match → 신규 대신 기존 enabled 갱신 (A−B/B−A는 absolute canonical로 통합, signed는 방향 보존).
+
+#### comparison_notification_logs
+
+```sql
+id                INTEGER PRIMARY KEY
+user_id           TEXT NOT NULL (INDEX)
+setting_id        INTEGER NULL          -- 설정 삭제 후에도 로그 유지 (inline 스냅샷)
+tab / left_* / right_* / diff_type / operator / threshold   -- 발화 시점 스냅샷
+left_rate         REAL NOT NULL
+right_rate        REAL NOT NULL
+spread            REAL NOT NULL         -- signed raw (left − right)
+left_observed_at  DATETIME              -- 발화 시점 각 소스 관측 시각 (stale 진단)
+right_observed_at DATETIME
+is_repeat         BOOLEAN               -- repeat 모드 발화 여부 (payload-flag 계약)
+success           BOOLEAN NOT NULL
+error_message     TEXT
+sent_at           DATETIME
+```
+
 ## 데이터 관리 정책
 
 - **은행 데이터**: 30일분만 유지 (단기 비교용)
@@ -519,6 +565,19 @@ scheduler.add_job(
 - `GET /api/notification-settings` - 사용자 알림 설정 조회
 - `PUT /api/notification-settings/{id}` - 알림 설정 수정 (토글 ON/OFF)
 - `DELETE /api/notification-settings/{id}` - 알림 설정 삭제
+
+### 비교/김프 알림 API (ADR-037, 프리미엄 게이팅 + `COMPARISON_ALERT_ENABLED` 발화 게이트)
+
+> 소스 간 **가격 차이** 알림 — 비교(absolute, |차이|)/김프(signed, 방향 있는 spread). 발화(FCM)는
+> `COMPARISON_ALERT_ENABLED` flag가 게이트(off=dormant, CRUD은 flag 무관). 상세: [ADR-037](DECISIONS.md#adr-037-비교-알림-comparison-alerts--within-tab-v1--universal-schema--현행-evaluator-재매핑)
+
+- `POST /api/comparison-alerts` - 비교/김프 알림 생성 (diff_type=signed/absolute, tab-scope 검증 400 / canonical 정렬[absolute] / hard cap `abs(threshold)<=10000`)
+- `GET /api/comparison-alerts` - 알림 설정 조회
+- `PUT /api/comparison-alerts/{id}` - 수정 (is_enabled + repeat + threshold + operator[방향]. pair/diff_type 편집 불가 → 소스 변경은 클라이언트 삭제+재생성. 변경 시 §7 리셋)
+- `DELETE /api/comparison-alerts/{id}` - 삭제 (멱등, 로그는 setting_id nullable로 보존)
+- `GET /api/comparison-notification-logs` - 발송 히스토리 (success-only 최신순, `diff_type`/`tab` 필터, limit≤200, 프리미엄 게이팅)
+
+FCM payload `type: "comparison_alert"` (기존 앱은 unknown type 무시). dedup 멱등: 동일 조합(tab+left+right+diff_type+operator+threshold) 재생성 시 신규 대신 기존 enabled 갱신(iOS는 저장 전 중복 차단 UI).
 
 **알림 생성 요청 (POST):**
 
@@ -1150,7 +1209,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 **향후 Phase**:
 
 - Phase 2: 테더 탭 그래프 (DXY와 동일한 rollup 전략), KRX 달러선물 (재배포 권리 확인 후)
-- Phase 3: 비교 알림 (`comparison_alerts` 스키마는 Phase 1 설계 문서에서 잠김)
+- Phase 3: ✅ **비교/김프 알림 — 구현 완료·운영 활성** (ADR-037 + Amendment 2026-07-04 + A1~A5, 2026-07-06~07). `comparison_alerts`/`comparison_notification_logs` 테이블·REST 5종·evaluator(`COMPARISON_ALERT_ENABLED` 게이트)·iOS 비교/김프 2섹션+편집+소스편집(삭제+재생성)+중복차단. 상세: [ADR-037](DECISIONS.md#adr-037-비교-알림-comparison-alerts--within-tab-v1--universal-schema--현행-evaluator-재매핑)
 
 ### KRX 미국달러선물 (KIS Open API) — Stage 1 운영 + Close finalizer 2차 작업 배포 완료 (2026-05-17)
 
@@ -1319,4 +1378,5 @@ required면 [수정 전 확인 대기 모드]·[코드/문서 변경 검증 게�
 - ✅ **Phase 2e+ Tether 1d graph v2 — 10min closed-bucket precompute cache (서버 land)** (2026-06-30, commit `d1ce060`, 로컬 3386 tests + codex 리뷰 블로커 0): 테더 탭 1일 그래프(미구현)를 v2로 추가 — [GRAPH_API_V2_CONTRACT §4 line 54](GRAPH_API_V2_CONTRACT.md) 11 series(거래소 5 개별 + KRX + investing/KB/Hana USD + DXY + DXY_futures, 10min bucket). 장기(1w/3m/1y)는 거래소를 Bithumb 대표 1개로 줄여 5 series — **1d만 거래소 5개 개별**이라 가장 넓음. **1d는 1w/3m/1y(source_daily/hourly_rates read-through)와 데이터 경로가 달라**(10min ≠ daily/hourly) 별 모듈 [app/graph_v2_intraday.py](app/graph_v2_intraday.py): raw 테이블(source_rates/bank/investing/market_index realtime) → 10min bucketize + carry-forward(graph_cache `_bucketize`/`build_graph_series`/`build_dxy_graph_series` 재사용) + **closed-bucket only**(`_trim_in_progress`, 진행 중 봉은 iOS live-tail 담당). **cache-first precompute**(코덱스 5라운드 합의 — 1d는 최다 트래픽 + 무거운 24h 집계라 request-path read-through 부적합): cron `*/10 +12s` `precompute_tether_1d`가 `graph_v2:tab:tether:1d`(TTL 1200s = cron 사망 안전망) 갱신, 요청은 Redis read만 + miss 시 process-local `asyncio.Lock` single-flight rebuild(`--workers 1`; multi-worker 시 Redis SET NX EX 필요 — redis_cache.set은 nx 미지원, 주석). main.py `/api/v2/graph/tab` period=1d → 테더만 `_serve_tether_1d_cached`(다른 탭 1d는 400 + v1 hint 유지, 3m/1y/1w read-through 불변). build_catalog에 테더 1d(11 series, 장기 5와 분리, 전역 supported_periods는 MVP 유지=1d tab-specific). graph_cache `build_graph_series`/`build_dxy_graph_series`에 **optional now_kst 주입**(후방호환) — 11 series가 한 now로 일관 버킷 경계(codex 경계 race fix). 테스트: [tests/test_graph_v2_intraday.py](tests/test_graph_v2_intraday.py)(bucket_align/closed-bucket 경계 now=09:23→last 09:10/carry-forward dense/11 series/catalog isolation/dxy_futures carry-forward·all-empty) + cache hit·miss + catalog 갱신. precompute 22 SELECT/run(~132/h, codex 허용 — 배치 최적화는 측정 후). 후속: prod deploy + smoke / iOS `GraphV2Period.oneDay` + period bar + live-tail / 다른 탭 1d. 상세: [GRAPH_API_V2_CONTRACT §13](GRAPH_API_V2_CONTRACT.md).
 - ✅ **Phase 2e+ FX 3탭 1d graph v2 — intraday per-tab 일반화 (Slice A 서버)** (2026-07-03): 신규 앱 FX 탭 v2 전환의 서버 선행 — [GRAPH_API_V2_CONTRACT §3:49-54](GRAPH_API_V2_CONTRACT.md) 계약("1d 모든 은행")대로 usd/jpy/eur 1d를 v2로 개방(구 "테더만 1d, 다른 탭 400" supersede — GRAPH §13 item 6). `graph_v2_intraday`의 테더 하드코딩 → `TAB_1D_SERIES` per-tab dict: tether 11(불변) / **usd 10**(8 banks[Citi 제외, ADR-033 D4] + investing + dxy — dxy_futures 테더 전용 유지) / **jpy·eur 9**(8 banks + investing, DXY 미노출 §9:521). default_visible usd=investing/kb/hana/dxy(§4:82), jpy/eur=investing/kb/hana(usd 패턴 준용 확정). 신규 reader 0(기존 `build_graph_series`가 전 은행 일반화 — allowlist 없음). `build_tab_1d_payload(tab)`/`build_tab_1d_in_progress(tab)`/`precompute_intraday_1d()`(cron `*/10 +12s` 단일 job 4탭 순회, 탭별 build+SET 즉시 + per-tab 실패 격리) + per-tab 캐시 키/single-flight lock. 테더 1d의 stale-boundary rebuild/in_progress seed/no-store 계약 전부 승계. 쿼리량 22→78 SELECT/run. 후속: iOS 달러 탭 v2 교체(Slice B — GraphV2Section tab 주입 + fx topic public 접근자 + 8은행 선색/토글 일반화) → jpy/eur(Slice C).
 - ✅ **CI — GitHub Actions pytest** (2026-06-11, 세 리뷰어 수렴): push(master)+PR마다 전체 suite(2097 tests) 자동 회귀 → 수동 재실행 비용 제거. `.github/workflows/tests.yml`(Python 3.13[Dockerfile 일치] + pip cache + `requirements.lock.txt`[runtime 일치] + `requirements-test.txt` 설치 → `pytest tests/`; paths-ignore `**.md`[docs-only commit skip] + concurrency cancel + timeout 10) + `requirements-test.txt`(pytest==9.0.1; pytest-asyncio 미포함 — `pytest -p no:asyncio` 2097 passed로 inert 실측). **secret 불요 실측**(.env 숨김 → 2097 passed: conftest firebase stub + DB→sqlite tempfile 격리 + config getenv-default). production 무접촉. 첫 push = 첫 CI run(lock-버전 조합 실검증).
+- ✅ **비교/김프 알림 (ADR-037 + Amendment + A1~A5) — 구현·운영 활성** (2026-07-06~07): 소스 간 가격 차이 알림(diff_type=signed 김프 / absolute 비교). 서버 S1~S3(모델/evaluator/REST 5종) + A1(validation 재정의·canonical·hard cap ±10000·cleanup, `dab9118`+`8fea7ea`) + A3(`COMPARISON_ALERT_ENABLED=true` 운영 활성, 프리론치) + A4 편집(threshold/operator PUT + §7 리셋, `21c04c8` + 히스토리 diff_type 분리 `3682a5f`). iOS S4/A2(비교/김프 2섹션 + 생성 시트) + A4 편집(`f5872a2`) + A5 소스편집(pair 편집 = **삭제+재생성**, 새 id + 저장 전 중복 차단, `549ae3e`+`eab1e30`). **pair 편집 설계**(Workflow 3-lens + subject/proxy): 은행/거래소 알림도 subject 축(통화쌍/asset)은 잠겨 있고 바꾸는 건 proxy — 비교/김프의 pair는 subject 자체라 변경=새 알림 → client delete+create(서버 변경 0). 김프 counter에 krx 추가는 ADR-038 의존. 상세: [DECISIONS.md ADR-037](DECISIONS.md).
 - 🔜 CD(자동 배포) — 현재 배포는 수동(EC2 git pull + build + force-recreate). 필요 시 후속.

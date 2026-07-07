@@ -5932,6 +5932,48 @@ iOS canary(F-3 패턴: custom token 단말)로 end-to-end 검증 후 활성.
   "김프 알림" 섹션/시트(기준 거래소 + 비교 상대 + 김프 값[±] + 이상/이하) 분리.
 - **A3**: flag 활성 + canary (기존 계획 유지).
 
+### 구현 land 기록 (2026-07-06~07 — S1~S4 + A1~A5 완료·운영 활성)
+
+Amendment 재스코프 + 후속 편집 슬라이스가 모두 land. flag `COMPARISON_ALERT_ENABLED=true`
+운영 활성(2026-07-06, 프리론치 — 앱 미출시라 테스트 단말만 발화, 실행 컨테이너+.env 확인).
+서버 커밋은 exchange-rate repo, iOS는 fxi-ios repo.
+
+**서버 (exchange-rate)**:
+- **S1~S3** (`673bd9e`/`ec9f4a7`/`68cc9b9`): `comparison_alerts` + `comparison_notification_logs`
+  모델/마이그레이션 · unified lookup + dual-trigger evaluator(3 hook, flag-off dormant) ·
+  REST 5종 + tab-scope 검증 + schemas.
+- **A1** (`dab9118` + hard cap `8fea7ea`): validation 재정의(absolute=탭별 대칭 집합 +
+  threshold≥0 + canonical / signed=테더 전용 김프[거래소×hana/kb/investing]) +
+  `canonicalize_absolute_pair` + hard cap `abs(threshold)<=10000` + one-time cleanup 스크립트.
+  production cleanup 1건 삭제 후 dry-run 0.
+- **A3** (env, 코드 커밋 없음): `COMPARISON_ALERT_ENABLED=true` + force-recreate. iOS canary
+  성공(비교/김프 FCM 수신 + once/repeat/토글 + 로그/히스토리).
+- **A4 편집** (`21c04c8`): PUT에 threshold + operator(방향) 확장. 변경 시 §7 리셋
+  (triggered/last_notified 초기화 → once '발송됨' 재활성화). pair/diff_type은 편집 불가.
+  + 히스토리 diff_type 필터 분리(`3682a5f`, 김프/비교 섹션별 — `get_comparison_notification_logs`
+  에 diff_type 파라미터).
+
+**iOS (fxi-ios)**:
+- **S4** (`5cdf21b` 모델/Service/VM/FCM + `4d92afb` 섹션/시트/히스토리) / **A2** (`d32ec98`):
+  비교/김프 2개 섹션(diff_type 분리) + 생성 시트 각각(비교=거래소 2택+벌어지면/좁혀지면 /
+  김프=기준×상대+김프값[±100 기본, ±1000 넓은범위 세션1회]+이상/이하 가속 스테퍼).
+- **히스토리 섹션별 분리** (`0451c0e`): 김프/비교 히스토리 diff_type 필터 + 제목 분리.
+- **A4 편집** (`f5872a2`): row 탭 → 편집 시트(threshold/방향/반복).
+- **A5 소스 편집** (`549ae3e` + 깜빡임 fix `eab1e30`): pair 편집 가능 → **삭제+재생성**
+  (pair 변경 ≈ 새 알림, 새 id). 저장 전 중복 차단(생성/편집 둘 다, "이미 등록된 알림" +
+  저장 비활성). VM `duplicateAlert`(absolute set 비교/signed 방향/self 제외) +
+  `replacePairAlert`(create→delete, delete 실패는 `.oldNotDeleted` surface — 조용한 실패 금지).
+
+**pair 편집 설계 결정 (2026-07-07 — Workflow 3-lens + subject/proxy 분석)**: 단일 소스/은행
+알림이 "소스"를 바꿀 수 있는 건 그게 subject의 proxy/근사대체라서고(은행 알림도 통화쌍은
+`let` 고정, 거래소 알림도 asset=usdt-krw 고정 — subject 축은 잠김), 비교/김프의 pair는 그
+자체가 subject이며 threshold가 그 pair의 gap에 묶여 있어 pair 변경 = 다른 알림. → **삭제+재생성**이
+정합(서버 pair-mutating PUT 대신 client delete+create — 새 id·정직한 identity·서버 변경 0).
+중복 collision은 client `isDuplicate` 가드(테더/은행 알림 선례)로 처리 → 서버 신규 dedup 정책 불요.
+2:1 판정(단순성·의미정합 유지 vs 일관성 개방) 후 사용자가 delete+create 방식으로 개방 채택.
+
+**미결(ADR-038 의존)**: 김프 비교 상대에 krx 추가는 ADR-038(entitlement 게이트) 구현 후.
+
 ## ADR-038: KRX 달러선물 노출 게이트 — 3단 게이트 + 별도 topic + entitlement 수동 부여
 
 **날짜**: 2026-07-04
