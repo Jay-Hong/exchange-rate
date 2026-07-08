@@ -353,6 +353,16 @@ class ComparisonAlertUpdateRequest(BaseModel):
         return v
 
 
+class EntitlementsResponse(BaseModel):
+    """GET /api/entitlements — krx_visible 단일 신호 (ADR-038 Decision 1, Open 1 확정: 신규 endpoint).
+
+    premium PENDING이면 503 대신 200 + premium_pending=true (read API — fail-closed
+    krx_visible=false, 클라는 retry_after_seconds 후 재요청. codex Q2 합의 2026-07-08)."""
+    krx_visible: bool
+    premium_pending: bool = False
+    retry_after_seconds: Optional[int] = None
+
+
 class ComparisonAlertResponse(BaseModel):
     """비교 알림 설정 응답."""
     id: int

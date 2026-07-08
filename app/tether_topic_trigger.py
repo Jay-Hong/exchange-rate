@@ -445,7 +445,7 @@ async def _default_publish_tether_snapshot() -> bool:
     with get_db_context() as db:
         return await safe_publish_tether_tab_snapshot(
             db,
-            include_krx=app_config.KRX_TOPIC_INCLUDE,
+            include_krx=app_config.KRX_TOPIC_INCLUDE_EFFECTIVE,   # ADR-038 G2/G3 결합
         )
 
 

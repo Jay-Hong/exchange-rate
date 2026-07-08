@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats
+from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
 from app.cache import redis_cache, BROADCAST_CACHE_KEY
@@ -516,6 +516,18 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(refresh_write_mode_cache)
         await warmup_latest_rates()
 
+    # ADR-038 — KRX 게이트(G2/G3) flip 시 구 그래프 payload(krx 포함/미포함) 잔존 방지:
+    # 테더 탭 graph v2 캐시를 startup에서 무조건 DEL (env 변경 = force-recreate 전제라
+    # 이 지점이 flip 직후 유일한 훅. 방향 무관 안전 + rebuild 저렴[다음 요청/cron ≤22 SELECT]).
+    try:
+        await redis_cache.delete(
+            "graph_v2:tab:tether:1d", "graph_v2:tab:tether:1d:in_progress",
+            "graph_v2:tab:tether:1w", "graph_v2:tab:tether:3m", "graph_v2:tab:tether:1y",
+        )
+        logger.info("🧹 테더 graph v2 캐시 초기화 (ADR-038 KRX gate 정합)")
+    except Exception as cache_e:  # 캐시 DEL 실패는 비치명 (TTL 자연 만료로 수렴)
+        logger.warning(f"테더 graph 캐시 초기화 실패 (비치명): {cache_e}")
+
     # Firebase Admin SDK 초기화 (Phase 2 - FCM)
     if init_firebase():
         logger.info("✅ Firebase Admin SDK 초기화 완료")
@@ -760,7 +772,7 @@ async def broadcast_rates_once():
             # (호출자 책임 분리, KRX_BROADCAST_INCLUDE legacy 의미와 분리).
             await tether_topic_publisher.safe_publish_tether_tab_snapshot(
                 db,
-                include_krx=config.KRX_TOPIC_INCLUDE,
+                include_krx=config.KRX_TOPIC_INCLUDE_EFFECTIVE,   # ADR-038 G2/G3 결합
             )
 
             # PR Z-2c Step 3 — FX topic broadcast hook (fx:usd-krw/jpy-krw/eur-krw).
@@ -3081,6 +3093,9 @@ async def create_source_notification_setting(
     await require_premium(user_id, allow_empty=False)
 
     _validate_alert_source_asset_or_400(body.source, body.asset)
+    # ADR-038 G1/G2 — KRX 단일 가격알림 생성은 entitlement+게이트 필요 (403)
+    if (body.source, body.asset) == entitlements.KRX_PAIR:
+        _require_krx_alert_allowed_or_403(db, user_id)
 
     try:
         setting = crud.create_source_notification_setting(
@@ -3191,6 +3206,19 @@ async def update_source_notification_setting(
     new_asset = body.asset if body.asset is not None else setting.asset
     if body.source is not None or body.asset is not None:
         _validate_alert_source_asset_or_400(new_source, new_asset)
+
+    # ADR-038 G1/G2 — 최종 조합이 KRX면 gate. source/asset 미변경 PUT은 위 validator를
+    # 건너뛰므로(재활성 우회 경로) 최종 조합 기준 무조건 검사. 예외는 **끄기 전용** PUT뿐 —
+    # is_enabled=False 단독(다른 변경 필드 전무)만 허용 (권한 상실 사용자도 자기 알림은 끌 수
+    # 있어야). is_enabled=False에 변경을 얹은 요청은 gate (우회 차단 — codex Q7+blocker 1).
+    _disable_only = (
+        body.is_enabled is False
+        and body.source is None and body.asset is None
+        and body.condition is None and body.threshold is None
+        and "repeat_interval_sec" not in body.model_fields_set
+    )
+    if (new_source, new_asset) == entitlements.KRX_PAIR and not _disable_only:
+        _require_krx_alert_allowed_or_403(db, user_id)
 
     condition_value = body.condition.value if body.condition else None
 
@@ -3350,6 +3378,16 @@ def _validate_comparison_alert_or_400(tab: str, left_source: str, left_asset: st
         raise HTTPException(status_code=400, detail=error)
 
 
+def _require_krx_alert_allowed_or_403(db: Session, user_id: str) -> None:
+    """ADR-038 G1/G2 — KRX 알림 생성/재활성/변경 gate (thin wrapper — 본체 app/entitlements.py).
+
+    403 = 유효하지만 게이트/권한이 닫힌 조합 (구조적 무효 400과 구분 — codex Q5).
+    정상 클라 흐름에선 도달하지 않음 (krx_visible=false면 UI 자체 미노출)."""
+    error = entitlements.krx_alert_gate_error(db, user_id)
+    if error is not None:
+        raise HTTPException(status_code=403, detail=error)
+
+
 def build_comparison_alert_response(alert) -> schemas.ComparisonAlertResponse:
     return schemas.ComparisonAlertResponse(
         id=alert.id, user_id=alert.user_id, tab=alert.tab,
@@ -3387,6 +3425,11 @@ async def create_comparison_alert(
     _validate_comparison_alert_or_400(body.tab, body.left_source, body.left_asset,
                                       body.right_source, body.right_asset,
                                       body.diff_type, body.threshold)
+
+    # ADR-038 G1/G2 — 김프 비교상대 KRX는 entitlement+게이트 필요 (403).
+    # absolute는 거래소 5끼리만이라 KRX 불가(validator가 400) — signed counter만 검사.
+    if body.diff_type == "signed" and (body.right_source, body.right_asset) == entitlements.KRX_PAIR:
+        _require_krx_alert_allowed_or_403(db, user_id)
 
     # absolute는 저장 전 canonical ordering — A−B/B−A dedup 중복 차단 (ADR-037 Amendment).
     left_source, left_asset = body.left_source, body.left_asset
@@ -3456,15 +3499,28 @@ async def update_comparison_alert(
     user_id = await verify_firebase_token(request)
     await require_premium(user_id, allow_empty=False)
 
+    alert = crud.get_comparison_alert(db, setting_id, user_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Comparison alert not found")
+
     # A4: threshold/operator 편집이면 기존 pair/diff_type + 새 threshold로 재검증
     if body.threshold is not None or body.operator is not None:
-        alert = crud.get_comparison_alert(db, setting_id, user_id)
-        if alert is None:
-            raise HTTPException(status_code=404, detail="Comparison alert not found")
         new_threshold = body.threshold if body.threshold is not None else alert.threshold
         _validate_comparison_alert_or_400(
             alert.tab, alert.left_source, alert.left_asset,
             alert.right_source, alert.right_asset, alert.diff_type, new_threshold)
+
+    # ADR-038 G1/G2 — 기존 alert가 KRX counter(김프)면 **끄기 전용** PUT 외 전부 gate
+    # (재활성 우회 + "변경하며 끄기" 우회 둘 다 차단 — codex Q7+blocker 1).
+    _disable_only = (
+        body.is_enabled is False
+        and body.threshold is None and body.operator is None
+        and "repeat_interval_sec" not in body.model_fields_set
+    )
+    if (alert.diff_type == "signed"
+            and (alert.right_source, alert.right_asset) == entitlements.KRX_PAIR
+            and not _disable_only):
+        _require_krx_alert_allowed_or_403(db, user_id)
 
     repeat_kwargs = (
         {"repeat_interval_sec": body.repeat_interval_sec}
@@ -3509,6 +3565,27 @@ async def delete_comparison_alert(
         success=True,
         message="Comparison alert deleted" if deleted else "Comparison alert already deleted",
     )
+
+
+@app.get("/api/entitlements", response_model=schemas.EntitlementsResponse)
+async def get_entitlements(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """ADR-038 — krx_visible 단일 신호 (G3 ∧ G2 ∧ G1 ∧ premium). 클라는 게이트 조합을
+    계산하지 않고 이 값 하나로 KRX 표면(그래프 series/시세/알림 선택지) 노출을 결정.
+
+    premium PENDING → 503 대신 200 {krx_visible:false, premium_pending:true} (read API —
+    fail-closed + 클라 retry_after_seconds 후 재요청, codex Q2). INACTIVE → krx_visible=false.
+    """
+    user_id = await verify_firebase_token(request)
+    status = await verify_premium_status(user_id)
+    if status == PremiumStatus.PENDING:
+        return schemas.EntitlementsResponse(
+            krx_visible=False, premium_pending=True, retry_after_seconds=5)
+    visible = entitlements.compute_krx_visible(
+        db, user_id, premium_active=(status == PremiumStatus.ACTIVE))
+    return schemas.EntitlementsResponse(krx_visible=visible)
 
 
 @app.get("/api/comparison-notification-logs",

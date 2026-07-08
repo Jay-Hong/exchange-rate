@@ -2,7 +2,7 @@
 
 # 표준 라이브러리
 from datetime import datetime, timezone as dt_timezone
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, Text, func, text, CheckConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, Boolean, Index, Numeric, JSON, Text, func, text, CheckConstraint, UniqueConstraint
 
 # 로컬 애플리케이션
 from app.database import Base
@@ -271,6 +271,26 @@ class ComparisonNotificationLog(Base):
         Index('ix_comparison_notification_logs_user_sent', 'user_id', 'sent_at'),
     )
 
+
+
+class UserEntitlement(Base):
+    """ADR-038 G1 — 운영자 수동 부여 entitlement (예: key='krx_futures').
+
+    부여/회수 = scripts/grant_entitlement.py (앱 내 입력 UI 없음 — Apple 2.3.1 리젝 리스크로
+    이스터에그 방식 기각, ADR-038 Decision 1). krx_visible 판정 = G3 ∧ G2 ∧ G1(이 테이블) ∧
+    premium (app/entitlements.py). 일반 create_all 대상 (제어평면 CHECK-bearing 아님 —
+    CREATE_ALL_EXCLUDE 비대상, comparison_alerts 선례).
+    """
+    __tablename__ = "user_entitlements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    key = Column(String, nullable=False)               # 'krx_futures'
+    granted_at = Column(DateTime, default=get_utc_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "key", name="uq_user_entitlements_user_key"),
+    )
 
 class SourceDailyRate(Base):
     """v2 장기 그래프 (3m/1y) hot path가 읽는 daily canonical row.

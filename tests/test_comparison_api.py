@@ -88,8 +88,9 @@ class TestComparisonPolicy(unittest.TestCase):
             "tether", "investing", "usd-krw", "bithumb", "usdt-krw", "signed", 8.0))
         self.assertIsNotNone(validate_comparison_alert(
             "tether", "bithumb", "usdt-krw", "upbit", "usdt-krw", "signed", 8.0))
-        # krx는 A1 범위 제외 (ADR-038 후 추가)
-        self.assertIsNotNone(validate_comparison_alert(
+        # krx counter는 구조적으로 유효 (ADR-038 G1/G2 land 2026-07-08 — 게이트는 handler 403,
+        # test_krx_entitlement_gate.py에서 검증)
+        self.assertIsNone(validate_comparison_alert(
             "tether", "bithumb", "usdt-krw", "krx", "usd-krw-futures", "signed", 5.0))
 
     def test_same_pair_and_unknown(self):
@@ -125,10 +126,11 @@ class TestComparisonPolicy(unittest.TestCase):
         self.assertEqual(a, ("bithumb", "usdt-krw", "upbit", "usdt-krw"))   # 사전순
 
     def test_policy_sets_content(self):
-        """정책 집합 잠금 — 거래소 5 / 김프 상대 3 (krx 미포함 = A1 범위)."""
+        """정책 집합 잠금 — 거래소 5 / 김프 상대 4 (krx 포함 = ADR-038, 게이트는 handler)."""
         self.assertEqual(len(KIMCHI_BASE_SOURCES), 5)
         self.assertEqual(KIMCHI_COUNTER_SOURCES, frozenset({
-            ("hana", "usd-krw"), ("kb", "usd-krw"), ("investing", "usd-krw")}))
+            ("hana", "usd-krw"), ("kb", "usd-krw"), ("investing", "usd-krw"),
+            ("krx", "usd-krw-futures")}))
         self.assertEqual(COMPARISON_ABSOLUTE_SOURCES["tether"], KIMCHI_BASE_SOURCES)
         for tab in ("usd", "jpy", "eur"):
             self.assertEqual(len(COMPARISON_ABSOLUTE_SOURCES[tab]), 9)   # investing + 8 banks

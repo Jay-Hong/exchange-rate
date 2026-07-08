@@ -46,7 +46,7 @@ class TestBuildSnapshotSync(unittest.TestCase):
 
     def test_tether_topic_builds_with_include_krx(self):
         built = {"type": "snapshot", "version": 1, "data": {}}
-        with patch.object(config, "KRX_TOPIC_INCLUDE", True), \
+        with patch.object(config, "KRX_TOPIC_INCLUDE_EFFECTIVE", True), \
              patch("app.database.SessionLocal", MagicMock()), \
              patch(
                  "app.usdt_topic_payload.load_and_build_tether_tab_payload",
@@ -55,7 +55,7 @@ class TestBuildSnapshotSync(unittest.TestCase):
             payload = _build_snapshot_sync("usdt:krw")
         self.assertIsNotNone(payload)
         self.assertEqual(payload["topic"], "usdt:krw")
-        # include_krx는 config.KRX_TOPIC_INCLUDE 전달
+        # include_krx는 config.KRX_TOPIC_INCLUDE_EFFECTIVE 전달 (ADR-038 G2/G3 결합)
         self.assertEqual(mock_build.call_args.kwargs.get("include_krx"), True)
 
     def test_unsupported_topics_return_none(self):

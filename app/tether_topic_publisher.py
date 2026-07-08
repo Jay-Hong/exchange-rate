@@ -241,6 +241,9 @@ async def get_topic_telemetry() -> Dict[str, Any]:
         # PR Level 3 (Codex 권고): TOPIC_DISPATCHER_ENABLED와 분리해 KRX 포함
         # 여부를 별도 노출. 운영 중 "topic 켜져 있으나 KRX 격리" 상태 즉시 확인.
         "krx_topic_include": config.KRX_TOPIC_INCLUDE,
+        # ADR-038 — 실제 발행 판정값(G2/G3 결합). raw include=true여도 게이트 닫히면 false —
+        # 운영 관측 혼동 방지 (codex NB 2026-07-08).
+        "krx_topic_include_effective": config.KRX_TOPIC_INCLUDE_EFFECTIVE,
         "subscribed_connection_count": topic_dispatcher.registry.subscribed_connection_count,
     }
     # counter/last 기본값

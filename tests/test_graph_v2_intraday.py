@@ -8,6 +8,7 @@ conftest.py가 firebase stub + DATABASE_URL=sqlite를 import 전에 설정.
   - build_catalog: 테더 1d만 11 series, usd 등 다른 탭은 1d 미노출 (장기 5 series와 미혼합).
 """
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from app import models
@@ -27,6 +28,22 @@ from app.graph_v2_intraday import (
 )
 
 models.Base.metadata.create_all(engine)
+
+
+
+# ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
+# 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
+_KRX_GATES_OPEN = patch.multiple("app.config",
+                                 KRX_FUTURES_ENABLED=True,
+                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True)
+
+
+def setUpModule():
+    _KRX_GATES_OPEN.start()
+
+
+def tearDownModule():
+    _KRX_GATES_OPEN.stop()
 
 
 class TestBucketHelpers(unittest.TestCase):

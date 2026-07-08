@@ -98,7 +98,7 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
         db = SessionLocal()
         try:
             payload = load_and_build_tether_tab_payload(
-                db, include_krx=config.KRX_TOPIC_INCLUDE
+                db, include_krx=config.KRX_TOPIC_INCLUDE_EFFECTIVE   # ADR-038 G2/G3 결합
             )
         finally:
             db.close()

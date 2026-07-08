@@ -14,6 +14,7 @@
 build_tab(db, ...)은 db 주입이라 patch 불필요 — in-memory SQLite session 직접 전달.
 """
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime
 
 from sqlalchemy import create_engine
@@ -56,6 +57,22 @@ class _Base(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 1-3. catalog (DB 무관)
 # ---------------------------------------------------------------------------
+
+
+# ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
+# 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
+_KRX_GATES_OPEN = patch.multiple("app.config",
+                                 KRX_FUTURES_ENABLED=True,
+                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True)
+
+
+def setUpModule():
+    _KRX_GATES_OPEN.start()
+
+
+def tearDownModule():
+    _KRX_GATES_OPEN.stop()
+
 
 class TestCatalog(unittest.TestCase):
 

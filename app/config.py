@@ -271,6 +271,21 @@ TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower(
 # USDT/은행/Investing은 그대로 publish 유지.
 KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
 
+# ADR-038 G2 — 모든 client-facing KRX distribution 게이트 (topic group + graph v2 krx series +
+# KRX 알림 생성). G3(KRX_FUTURES_ENABLED, 수집)와 분리 — G2 off면 수집/DB/Redis는 지속하되
+# 단말 배포 표면만 차단. default false (안전) — 운영은 .env로 활성.
+KRX_CLIENT_DISTRIBUTION_ENABLED = os.getenv("KRX_CLIENT_DISTRIBUTION_ENABLED", "false").lower() == "true"
+
+# 파생 effective — "게이트 하나라도 닫히면 전 표면 미노출" (ADR-038 Decision 4).
+# G3 off면 수집 중단 후에도 Redis/DB 잔존값이 노출될 수 있어 G3도 client-facing 판정에 포함
+# (codex 보강 2026-07-08). graph v2 / entitlements 판정은 이 값(또는 두 flag 조합)을 사용.
+KRX_CLIENT_DISTRIBUTION_EFFECTIVE = KRX_FUTURES_ENABLED and KRX_CLIENT_DISTRIBUTION_ENABLED
+
+# topic surface 전용 파생 — 기존 KRX_TOPIC_INCLUDE(usdt:krw payload의 usd_krw_futures group
+# 포함 여부)에 G2/G3를 결합. include_krx 해석 3곳(main.py broadcast hook /
+# tether_topic_trigger / topic_initial_snapshot)이 이 값을 읽음.
+KRX_TOPIC_INCLUDE_EFFECTIVE = KRX_TOPIC_INCLUDE and KRX_CLIENT_DISTRIBUTION_EFFECTIVE
+
 # KRX_CLOSE_FINALIZER_ENABLED: KRX_CLOSE_SNAPSHOT_PLAN §5.2/§5.3 2차 작업 토글.
 # default true — Stage 3+ 정책 (WS-first close finalizer) 활성:
 #   - KrxDbWriter close grace window 진입 시 일반 path skip (F1 fix, Plan §5.2)

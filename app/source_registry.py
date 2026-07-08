@@ -231,7 +231,9 @@ COMPARISON_ABSOLUTE_SOURCES: dict = {
 KIMCHI_BASE_SOURCES = _USDT_EXCHANGES
 KIMCHI_COUNTER_SOURCES = frozenset({
     ("hana", "usd-krw"), ("kb", "usd-krw"), ("investing", "usd-krw"),
-    # ("krx", "usd-krw-futures") — ADR-038 게이트 구현 후 추가 (entitlement 403 동반)
+    # krx는 구조적으로 유효한 counter (ADR-038 G1/G2 land 2026-07-08) — 단 entitlement/G2/G3
+    # 게이트는 handler(main.py)가 403으로 강제. validator는 구조 유효성만 (순수성 유지, codex Q3).
+    ("krx", "usd-krw-futures"),
 })
 
 # 서버 hard cap (codex 2026-07-04): 클라 UI는 ±1000(넓힘)이나 서버가 signed threshold를 무제한

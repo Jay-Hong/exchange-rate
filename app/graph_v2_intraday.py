@@ -144,6 +144,41 @@ TAB_1D_DEFAULT_VISIBLE = {
 # 1d(intraday) 지원 탭 — main.py endpoint 분기/scheduler precompute 루프 기준.
 INTRADAY_TABS = tuple(TAB_1D_SERIES)
 
+
+def _krx_distribution_open() -> bool:
+    """ADR-038 G2/G3 — client-facing KRX 배포 허용 여부 (runtime 조합 — 테스트 patch 가능).
+
+    import-time 파생 상수(config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE)와 같은 의미지만, graph
+    accessor는 runtime에 두 flag를 직접 읽음 (env 변경=force-recreate 전제는 동일 —
+    함수화는 테스트에서 config attr patch를 살리기 위함).
+    """
+    from app import config
+    return config.KRX_FUTURES_ENABLED and config.KRX_CLIENT_DISTRIBUTION_ENABLED
+
+
+def tab_1d_specs(tab: str) -> list:
+    """탭 1d series spec 목록 — G2/G3 닫히면 krx 계열 제외 (ADR-038, 무인증 graph는 전역 게이트만).
+
+    build/precompute/in_progress 모든 경로가 이 accessor를 경유 → 게이트 일원화
+    (import-time 상수 TAB_1D_SERIES는 전체 집합 유지 — catalog 쪽도 동일 필터 적용).
+    """
+    specs = TAB_1D_SERIES[tab]
+    if _krx_distribution_open():
+        return specs
+    return [spec for spec in specs if not spec["id"].startswith("krx.")]
+
+
+def tab_1d_all_series(tab: str) -> list:
+    """catalog용 — G2/G3 반영 series id 목록."""
+    return [spec["id"] for spec in tab_1d_specs(tab)]
+
+
+def tab_1d_default_visible(tab: str) -> list:
+    """catalog용 — G2/G3 반영 default visible 목록."""
+    if _krx_distribution_open():
+        return list(TAB_1D_DEFAULT_VISIBLE[tab])
+    return [sid for sid in TAB_1D_DEFAULT_VISIBLE[tab] if not sid.startswith("krx.")]
+
 # 테더 별칭 (per-tab dict 도입 전 export — 기존 참조 호환)
 TETHER_1D_DEFAULT_VISIBLE = TAB_1D_DEFAULT_VISIBLE["tether"]
 TETHER_1D_ALL_SERIES = TAB_1D_ALL_SERIES["tether"]
@@ -362,7 +397,7 @@ def build_tab_1d_payload(tab: str) -> dict:
     in_progress_start_ts = _bucket_align(int(now_kst.timestamp()))   # 진행 중 버킷 시작 = 잘라낼 경계
     window_start_kst = now_kst - timedelta(hours=WINDOW_HOURS)
 
-    series_out = [_build_series_1d(spec, now_kst, in_progress_start_ts) for spec in TAB_1D_SERIES[tab]]
+    series_out = [_build_series_1d(spec, now_kst, in_progress_start_ts) for spec in tab_1d_specs(tab)]   # ADR-038 G2 accessor
 
     return {
         "tab": tab,
@@ -397,7 +432,7 @@ def build_tab_1d_in_progress(tab: str, now_kst: Optional[datetime] = None) -> di
     ip_iso = datetime.fromtimestamp(ip_start, tz=timezone.utc).astimezone(KST).isoformat()
     sampled_at = now_kst.isoformat()
     out: dict = {}
-    for spec in TAB_1D_SERIES[tab]:
+    for spec in tab_1d_specs(tab):   # ADR-038 G2 accessor
         raw, _ = _build_raw_1d(spec, now_kst)
         bucket = next((b for b in raw if int(b[0]) == ip_start), None)
         if bucket is None:

@@ -127,6 +127,27 @@ _TAB_DEFAULT_VISIBLE = {
 }
 
 
+def _krx_distribution_open() -> bool:
+    """ADR-038 G2/G3 — client-facing KRX 배포 허용 여부 (graph_v2_intraday와 동일 규칙)."""
+    from app import config
+    return config.KRX_FUTURES_ENABLED and config.KRX_CLIENT_DISTRIBUTION_ENABLED
+
+
+def _effective_tab_series(tab: str) -> list:
+    """탭 series id 목록 (3m/1y/1w 공유) — G2/G3 닫히면 krx 계열 제외 (ADR-038)."""
+    ids = _TAB_SERIES[tab]
+    if _krx_distribution_open():
+        return list(ids)
+    return [sid for sid in ids if not sid.startswith("krx.")]
+
+
+def _effective_default_visible(tab: str) -> list:
+    """default visible 목록 — G2/G3 반영 (catalog가 그대로 복사하므로 함께 필터)."""
+    if _krx_distribution_open():
+        return list(_TAB_DEFAULT_VISIBLE[tab])
+    return [sid for sid in _TAB_DEFAULT_VISIBLE[tab] if not sid.startswith("krx.")]
+
+
 def _tab_axis_groups(tab: str) -> dict:
     """탭의 axis_groups — DXY 포함 탭만 index group 추가 (§9)."""
     has_index = any(SERIES_REGISTRY[s]["axis_group"] == "index" for s in _TAB_SERIES[tab])
@@ -347,20 +368,22 @@ def build_catalog() -> dict:
     기준이나 1d와 정합: usd는 장기에도 dxy(index) 포함, jpy/eur는 1d에도 DXY 미노출(§9:521).
     supported_periods(전역)는 MVP_PERIODS 유지 — 1d는 tab-specific(periods dict에만 존재).
     """
-    from app.graph_v2_intraday import TAB_1D_ALL_SERIES, TAB_1D_DEFAULT_VISIBLE
+    from app.graph_v2_intraday import INTRADAY_TABS, tab_1d_all_series, tab_1d_default_visible
 
     tabs = []
-    for tab, series_ids in _TAB_SERIES.items():
+    for tab in _TAB_SERIES:
+        # ADR-038 G2/G3 — 무인증 catalog는 전역 게이트만 반영 (per-user는 클라 krx_visible gate)
+        series_ids = _effective_tab_series(tab)
         periods = {}
         for period in MVP_PERIODS:
             periods[period] = {
                 "all_series": list(series_ids),
-                "default_visible_series": list(_TAB_DEFAULT_VISIBLE[tab]),
+                "default_visible_series": _effective_default_visible(tab),
             }
-        if tab in TAB_1D_ALL_SERIES:
+        if tab in INTRADAY_TABS:
             periods["1d"] = {
-                "all_series": list(TAB_1D_ALL_SERIES[tab]),
-                "default_visible_series": list(TAB_1D_DEFAULT_VISIBLE[tab]),
+                "all_series": tab_1d_all_series(tab),
+                "default_visible_series": tab_1d_default_visible(tab),
             }
         tabs.append({
             "id": tab,
@@ -388,7 +411,7 @@ def build_tab(db, tab: str, period: str, today_kst: date | None = None) -> dict:
     granularity = PERIOD_GRANULARITY[period]
 
     series_out = []
-    for series_id in _TAB_SERIES[tab]:
+    for series_id in _effective_tab_series(tab):   # ADR-038 G2 accessor
         entry = SERIES_REGISTRY[series_id]
         if entry["kind"] == "source_daily_rates":
             series_out.append(_read_sdr_series(db, series_id, entry, start, end, granularity))
