@@ -6093,6 +6093,16 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   접근 대신 dict 그대로 `_normalize_entry`에 전달 (테스트도 실제 shape로 잠금).
 - tests: 44 계약 회귀 재작성 + `tests/test_krx_topic_publisher.py` 신규 16 + KRX snapshot
   positive 3 — 전체 3459 green.
+- **iOS 소비 슬라이스 land (2026-07-08, fxi-ios `dab40bd`)**: `setKrxVisible` flip이
+  krx topic 구독 lifecycle 관리(subscribe+REST bootstrap / unsubscribe+취소) +
+  `applyKrxSnapshot`이 tetherStore에 merge — 5개 소비처(usdtDisplayState/Kimchi liveRate/
+  GraphV2 live-tail/Source·ComparisonAlertAddSheet)가 tetherTopicRates 경유라 코드 변경 0.
+  codex 2 blocker 반영: ① krx 수신이 tether 신선도(lastTetherTopicAt)를 연장하지 않음 —
+  usdt:krw 발행 사망 시 stale entry fresh 취급으로 MODE 2 revert 무력화 방지(pre-split
+  full payload 재발행과 비등가; KRX 장마감 무발행이 정상이라 krx 자체 시간 staleness도
+  없음 — 종가 표시는 store 잔존으로 지속). ② in-memory fallback tetherReceived 가드 +
+  persist 게이트 — krx 단독 merge가 KRX 1행 렌더/KRX-only disk cache로 새는 경로 차단.
+  iOS 152 tests green.
 
 ## 문서 히스토리
 
