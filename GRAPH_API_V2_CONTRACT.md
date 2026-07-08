@@ -117,6 +117,16 @@ period별 `all_series` / `default_visible_series` 분리:
 - client 토글 라벨은 `Bank.displayName`(국민은행/기업은행/SC제일 등) — server label(KB국민은행 등)과
   다른 짧은 공식명. (server label은 진단/fallback용으로 보존.)
 
+**테더 default_visible / KRX 상호배타 정책** (ADR-038 D4 후속, 사용자 지정 2026-07-09):
+- 테더 `default_visible_series` base = `[upbit, bithumb, hana, krx]`(1d) / `[bithumb, hana, krx]`(장기).
+  **DXY 기본 OFF**(선물지수도 OFF).
+- server는 per-user 무인증이라 base에 `hana`·`krx` 둘 다 포함하고, **client가 `krxVisible`로 상호배타**:
+  krxVisible=true → `hana.usd` drop(krx 우선, 실선물 거래자) / krxVisible=false → `krx.*` drop(기존 필터).
+  결과: krx 단말 = 업비트+빗썸+달러선물, 비krx = 업비트+빗썸+하나(장기는 업비트 미존재라 자연 제외).
+- **테더/달러 그래프 토글 순서**: krx 있으면 참조군 맨 앞(krx → investing → kb → hana). 서버 all_series
+  순서와 별개로 client 참조군 정렬(`GraphV2Section.referencesOrder`).
+- **DXY ↔ DXY_futures 토글 상호배타**(테더 탭): 둘 다 OFF 허용, 하나 ON 중 다른 하나 ON 시 기존 OFF 전환.
+
 ## 5. Series metadata schema
 
 각 series는 catalog 안에 다음 metadata를 가진다 (Amendment 2026-05-27 — Hana 단일 source / KRX contract chain per-point metadata).

@@ -125,7 +125,10 @@ _TAB_DEFAULT_VISIBLE = {
     "usd": ["investing.usd", "hana.usd", "dxy"],
     "jpy": ["investing.jpy", "hana.jpy"],
     "eur": ["investing.eur", "hana.eur"],
-    "tether": ["bithumb.usdt-krw", "krx.usd-krw-futures", "dxy"],
+    # ADR-038 D4 후속 (2026-07-09) — 테더 기본 토글: 거래소 대표(bithumb) + 참조 1(hana/krx).
+    # base에 hana·krx 둘 다 포함, 클라가 krxVisible로 상호배타(krx 우선 → hana drop). DXY 기본 OFF.
+    # (장기는 upbit 미존재 series라 1d의 "업비트+빗썸+하나/krx"에서 업비트 자연 제외.)
+    "tether": ["bithumb.usdt-krw", "hana.usd", "krx.usd-krw-futures"],
 }
 
 

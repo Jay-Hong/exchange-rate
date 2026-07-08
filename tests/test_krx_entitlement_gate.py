@@ -157,6 +157,21 @@ class TestGraphV2KrxFilter(unittest.TestCase):
             # 비-krx series는 유지
             self.assertIn("bithumb.usdt-krw", _effective_tab_series("tether"))
 
+    def test_tether_default_visible_composition(self):
+        """ADR-038 D4 후속 (2026-07-09) — 테더 기본 토글 = 거래소 대표 + 참조(hana·krx 둘 다,
+        클라가 상호배타) + DXY 제거. gate on 기준 base 구성 잠금 (클라 swap은 iOS 테스트)."""
+        from app.graph_v2 import _effective_default_visible
+        from app.graph_v2_intraday import tab_1d_default_visible
+        with _patch_gates(True, True):
+            dv_1d = tab_1d_default_visible("tether")
+            self.assertEqual(set(dv_1d),
+                             {"upbit.usdt-krw", "bithumb.usdt-krw", "hana.usd", "krx.usd-krw-futures"})
+            self.assertNotIn("dxy", dv_1d)                 # DXY 기본 OFF (사용자 2026-07-09)
+            dv_long = _effective_default_visible("tether")
+            self.assertEqual(set(dv_long),
+                             {"bithumb.usdt-krw", "hana.usd", "krx.usd-krw-futures"})
+            self.assertNotIn("dxy", dv_long)               # 장기도 DXY 기본 OFF
+
     def test_intraday_specs_filtered(self):
         from app.graph_v2_intraday import tab_1d_specs, tab_1d_all_series, tab_1d_default_visible
         with _patch_gates(True, True):

@@ -145,7 +145,9 @@ TAB_1D_ALL_SERIES = {tab: [s["id"] for s in specs] for tab, specs in TAB_1D_SERI
 # 인베스팅 + 하나은행만 (usd의 dxy·kb도 기본 OFF — 소스가 많아 최소 2개로 시작, 나머지는 유저 토글).
 # 유저 토글 상태는 UserDefaults(graphv2_visible_<tab>)에 persist — 재시작해도 유지(user-off도 기억).
 TAB_1D_DEFAULT_VISIBLE = {
-    "tether": ["bithumb.usdt-krw", "upbit.usdt-krw", "krx.usd-krw-futures", "dxy"],
+    # ADR-038 D4 후속 (2026-07-09) — 테더 1d 기본 토글: 업비트+빗썸+참조 1(hana/krx, 클라 상호배타).
+    # DXY 기본 OFF. base에 hana·krx 둘 다 → krxVisible 단말은 hana drop, 비krx는 krx drop(기존 필터).
+    "tether": ["upbit.usdt-krw", "bithumb.usdt-krw", "hana.usd", "krx.usd-krw-futures"],
     "usd": ["investing.usd", "hana.usd"],
     "jpy": ["investing.jpy", "hana.jpy"],
     "eur": ["investing.eur", "hana.eur"],
