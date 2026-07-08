@@ -6121,7 +6121,19 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   usd live-tail 보충(krxTopicSourceRate 접근자 — fx topic 생존 시만 append, krx 자체
   신선도는 600s threshold). **배포 실측 함정 1건**: 3m/1y/1w read-through Redis 캐시가
   구 시리즈 구성을 TTL(≤30분)간 잔존 — lifespan purge를 테더 5키 → +usd 5키로 확장
-  (`c22c4e7`). 전 기간 points 실측(144/124/61/245). 잔여: ③ 가격알림 picker.
+  (`c22c4e7`). 전 기간 points 실측(144/124/61/245).
+- **D4 후속 krx 우선 정책 land (2026-07-09, 서버 `0b81ea1` 배포 / iOS `c969373`)**: 달러선물
+  활성 단말(=운영자 grant=실선물 거래자)은 krx를 양 탭 최상단·기본 표시 우선. **(1) 소스 순서**:
+  Bank/Source defaultOrder krx 맨 앞(비krx는 display 필터로 무영향). **(2) 테더 시세 기본 표시**:
+  SourcePreferenceManager.effectiveDefault(krxVisible) = 거래소 5 + (krx면 달러선물 else 하나),
+  investing/kb OFF — hasPersisted로 미수정 시 krxVisible live 추적/수정 후 고정. **(3) 테더 그래프
+  기본 토글**: 서버 default_visible base=[upbit,bithumb,hana,krx]에서 client가 상호배타(krx 단말
+  hana drop / 비krx krx drop), **DXY 기본 OFF**. flip 시 visible+initialized 페어 제거 후 재적용
+  (codex blocker — ensureVisible insert-only). **(4) 참조군 토글 순서** krx→investing→kb→hana.
+  **(5) 김프 비교소스** krx 우선. **(6) DXY↔선물지수 상호배타 토글**(테더). 시트 완료 무변경 시 apply
+  생략(hasPersisted 오고정 방지). codex 3라운드(default swap 미적용/hasPersisted 오고정/visible
+  미제거 residual) 반영. iOS 167 tests. ⚠️ 기존 단말은 initializedSeries가 옛 토글을 잠가 새 default가
+  소급 적용 안 됨(신규 설치/미수정만) — 필요 시 "기본값으로 초기화". 잔여: ③ 가격알림 picker.
 
 ## 문서 히스토리
 
