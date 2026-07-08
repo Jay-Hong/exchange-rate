@@ -193,7 +193,7 @@ class TestMarketIndexFuturesSeries(unittest.TestCase):
 class TestCatalog1dIsolation(unittest.TestCase):
 
     def test_all_tabs_1d_series_match_contract(self):
-        """전 탭 1d catalog가 §3/§4 계약 구성과 일치 — 테더 11 / usd 10 / jpy·eur 9.
+        """전 탭 1d catalog가 §3/§4 계약 구성과 일치 — 테더 11 / usd 11(krx) / jpy·eur 9.
         usd: 8 banks(Citi 제외) + investing + dxy(dxy_futures는 테더 전용).
         jpy/eur: 8 banks + investing — DXY 계열 미노출(§9:521)."""
         catalog = build_catalog()
@@ -206,11 +206,14 @@ class TestCatalog1dIsolation(unittest.TestCase):
         self.assertNotEqual(len(tether["periods"]["3m"]["all_series"]), 11)
         self.assertNotIn("1d", catalog["supported_periods"])  # 전역은 MVP 유지(1d=tab-specific)
 
-        # usd 1d: 앱 은행순서설정(Bank.displayCases) 순서 — Citi 없음, dxy_futures 없음, dxy 끝
+        # usd 1d: 인베스팅 → krx(ADR-038 D4 ②, 시세 행 순서 일치) → 8 banks(Citi 없음) → dxy
+        # (dxy_futures는 테더 전용). krx는 default OFF.
         self.assertEqual(tabs["usd"]["periods"]["1d"]["all_series"], [
-            "investing.usd", "kb.usd", "hana.usd", "shinhan.usd", "woori.usd",
-            "ibk.usd", "nh.usd", "sc.usd", "bs.usd", "dxy",
+            "investing.usd", "krx.usd-krw-futures", "kb.usd", "hana.usd", "shinhan.usd",
+            "woori.usd", "ibk.usd", "nh.usd", "sc.usd", "bs.usd", "dxy",
         ])
+        self.assertNotIn("krx.usd-krw-futures",
+                         tabs["usd"]["periods"]["1d"]["default_visible_series"])
         # default = 인베스팅 + 하나만 (사용자 지정 2026-07-03 — dxy/kb 기본 OFF, 소스多 최소 시작)
         self.assertEqual(tabs["usd"]["periods"]["1d"]["default_visible_series"],
                          ["investing.usd", "hana.usd"])

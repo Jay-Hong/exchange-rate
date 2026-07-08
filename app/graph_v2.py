@@ -110,7 +110,9 @@ _AXIS_INDEX = {"unit": "INDEX", "decimals": 3, "side": "right"}
 # ─────────────────────────────────────────────────────────────
 
 _TAB_SERIES = {
-    "usd": ["investing.usd", "hana.usd", "dxy"],
+    # usd의 krx: ADR-038 D4 ② (2026-07-08) — 달러 탭 전 기간 KRX 편입 (default OFF,
+    # G2/G3 게이트는 _effective_tab_series의 krx. prefix 필터가 자동 적용).
+    "usd": ["investing.usd", "krx.usd-krw-futures", "hana.usd", "dxy"],
     "jpy": ["investing.jpy", "hana.jpy"],
     "eur": ["investing.eur", "hana.eur"],
     "tether": ["bithumb.usdt-krw", "krx.usd-krw-futures", "investing.usd", "hana.usd", "dxy"],
@@ -363,7 +365,7 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
 def build_catalog() -> dict:
     """전체 catalog (3m/1y/1w MVP + 전 탭 1d). DB 불필요 (정적 상수).
 
-    1d는 10min intraday 구성(테더 11 / usd 10 / jpy·eur 9 — §3:49-54)으로 장기(3m/1y/1w)와 series
+    1d는 10min intraday 구성(테더 11 / usd 11[krx, ADR-038 D4 ②] / jpy·eur 9 — §3:49-54)으로 장기(3m/1y/1w)와 series
     구성이 달라 별도 정의(섞지 않음 — graph_v2_intraday.TAB_1D_*). axis_groups는 장기(_TAB_SERIES)
     기준이나 1d와 정합: usd는 장기에도 dxy(index) 포함, jpy/eur는 1d에도 DXY 미노출(§9:521).
     supported_periods(전역)는 MVP_PERIODS 유지 — 1d는 tab-specific(periods dict에만 존재).

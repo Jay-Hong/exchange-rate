@@ -182,14 +182,24 @@ class TestGraphV2KrxFilter(unittest.TestCase):
             self.assertIn("krx.usd-krw-futures", tether["periods"]["3m"]["all_series"])
             self.assertIn("krx.usd-krw-futures", tether["periods"]["1d"]["all_series"])
 
-    def test_non_tether_tabs_unaffected(self):
-        """usd/jpy/eur 탭은 krx 미포함 — 게이트 무관 불변 (회귀 가드)."""
+    def test_usd_tab_gated_like_tether(self):
+        """ADR-038 D4 ② — usd 탭도 krx 시리즈 편입: gate on=포함 / off=제외 (전 기간).
+        jpy/eur는 krx 없음 — 게이트 무관 불변 (회귀 가드)."""
         from app.graph_v2 import build_catalog
-        for gates in [(True, True), (True, False)]:
-            with _patch_gates(*gates):
-                catalog = build_catalog()
-                usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
-                self.assertEqual(len(usd["periods"]["1d"]["all_series"]), 10)
+        with _patch_gates(True, True):
+            catalog = build_catalog()
+            usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
+            self.assertIn("krx.usd-krw-futures", usd["periods"]["1d"]["all_series"])
+            self.assertIn("krx.usd-krw-futures", usd["periods"]["3m"]["all_series"])
+            # default OFF (2026-07-03 "최소 2개 시작" 결정과 정합)
+            self.assertNotIn("krx.usd-krw-futures", usd["periods"]["1d"]["default_visible_series"])
+        with _patch_gates(True, False):
+            catalog = build_catalog()
+            usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
+            for period in ("1d", "1w", "3m", "1y"):
+                self.assertNotIn("krx.usd-krw-futures", usd["periods"][period]["all_series"])
+            jpy = next(t for t in catalog["tabs"] if t["id"] == "jpy")
+            self.assertNotIn("krx.usd-krw-futures", jpy["periods"]["1d"]["all_series"])
 
 
 class TestConfigDerived(unittest.TestCase):

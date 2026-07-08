@@ -73,13 +73,19 @@ IN_PROGRESS_TTL_SECONDS = 15
 #         "market_index"(realtime; dxy는 build_dxy_graph_series 재사용, dxy_futures는 단일 source reader)
 # ─────────────────────────────────────────────────────────────
 
+# KRX 달러선물 1d spec — 테더/달러 탭 공유 (ADR-038 D4 ② 2026-07-08: usd 탭 전 기간 편입,
+# default OFF). dict()로 복사 삽입 — 탭별 목록이 같은 객체를 공유하지 않게.
+_KRX_1D_SPEC = {"id": "krx.usd-krw-futures", "kind": "source", "source": "krx",
+                "asset": "usd-krw-futures", "axis_group": "krw",
+                "label": "KRX 미국달러선물", "unit": "KRW", "decimals": 1}
+
 _TETHER_1D_SERIES: List[dict] = [
     {"id": "upbit.usdt-krw",      "kind": "source", "source": "upbit",   "asset": "usdt-krw",        "axis_group": "krw",   "label": "업비트",          "unit": "KRW",   "decimals": 2},
     {"id": "bithumb.usdt-krw",    "kind": "source", "source": "bithumb", "asset": "usdt-krw",        "axis_group": "krw",   "label": "빗썸",            "unit": "KRW",   "decimals": 2},
     {"id": "coinone.usdt-krw",    "kind": "source", "source": "coinone", "asset": "usdt-krw",        "axis_group": "krw",   "label": "코인원",          "unit": "KRW",   "decimals": 2},
     {"id": "korbit.usdt-krw",     "kind": "source", "source": "korbit",  "asset": "usdt-krw",        "axis_group": "krw",   "label": "코빗",            "unit": "KRW",   "decimals": 2},
     {"id": "gopax.usdt-krw",      "kind": "source", "source": "gopax",   "asset": "usdt-krw",        "axis_group": "krw",   "label": "고팍스",          "unit": "KRW",   "decimals": 2},
-    {"id": "krx.usd-krw-futures", "kind": "source", "source": "krx",     "asset": "usd-krw-futures", "axis_group": "krw",   "label": "KRX 미국달러선물", "unit": "KRW",   "decimals": 1},
+    dict(_KRX_1D_SPEC),   # 테더/달러 탭 공유 spec (ADR-038 D4 ②)
     {"id": "investing.usd",       "kind": "fx",     "fx_source": "investing", "currency": "usd-krw", "axis_group": "krw",   "label": "인베스팅",        "unit": "KRW",   "decimals": 2},
     {"id": "kb.usd",              "kind": "fx",     "fx_source": "kb",        "currency": "usd-krw", "axis_group": "krw",   "label": "KB국민은행",      "unit": "KRW",   "decimals": 2},
     {"id": "hana.usd",            "kind": "fx",     "fx_source": "hana",      "currency": "usd-krw", "axis_group": "krw",   "label": "하나은행",        "unit": "KRW",   "decimals": 2},
@@ -124,10 +130,13 @@ def _fx_1d_series(currency: str) -> List[dict]:
 _DXY_1D_SPEC = {"id": "dxy", "kind": "market_index", "instrument": "dxy",
                 "axis_group": "index", "label": "달러지수", "unit": "INDEX", "decimals": 3}
 
-# per-tab 1d series 정의 — 테더 11 / usd 10 / jpy 9 / eur 9 (계약 §3 매트릭스).
+# per-tab 1d series 정의 — 테더 11 / usd 11(krx 포함, ADR-038 D4 ②) / jpy 9 / eur 9 (계약 §3).
 TAB_1D_SERIES: dict = {
     "tether": _TETHER_1D_SERIES,
-    "usd": _fx_1d_series("usd-krw") + [dict(_DXY_1D_SPEC)],
+    # usd의 krx: ADR-038 D4 ② — investing 다음(시세 행 순서와 일치), default OFF
+    # (TAB_1D_DEFAULT_VISIBLE 불변). G2/G3 게이트는 krx. prefix 필터 자동 적용.
+    "usd": (lambda specs: specs[:1] + [dict(_KRX_1D_SPEC)] + specs[1:])(_fx_1d_series("usd-krw"))
+           + [dict(_DXY_1D_SPEC)],
     "jpy": _fx_1d_series("jpy-krw"),
     "eur": _fx_1d_series("eur-krw"),
 }

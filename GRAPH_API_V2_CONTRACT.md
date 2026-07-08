@@ -48,7 +48,7 @@ v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `
 
 | Tab | 1d (10min bucket) | 1w (1h bucket) | 3m / 1y (1d bucket) |
 | --- | --- | --- | --- |
-| USD | 8 banks (Citi 제외) + investing + DXY | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY hourly | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY daily |
+| USD | 8 banks (Citi 제외) + investing + **KRX (ADR-038 D4 ②, default OFF)** + DXY | investing + **KRX** + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY hourly | investing + **KRX** + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY daily |
 | JPY | 8 banks (Citi 제외) + investing | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) |
 | EUR | 8 banks (Citi 제외) + investing | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) | investing + Hana (observed_eod + official_historical_backfill 2-source 분리) |
 | Tether | 5 exchanges (Upbit/Bithumb/Coinone/Korbit/Gopax) + KRX + investing USD + KB USD + Hana USD + DXY + DXY_futures | Bithumb (대표, external_historical) + KRX (external_historical, contract chain) + investing USD + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY hourly | Bithumb (대표, external_historical 902d) + KRX (external_historical, contract chain) + investing USD + Hana (observed_eod + official_historical_backfill 2-source 분리) + DXY daily |
@@ -59,6 +59,11 @@ v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `
 - Hana 3m/1y: 2-source 분리 정책 (Amendment 후속) — `hana_observed_eod` canonical (앞으로) + `hana_official_historical_backfill` (과거 부족분). Investing은 Hana backfill에 미사용 (Hana series identity 유지). **Invariant (Step 4A, 2026-06-02)**: official backfill은 `hana_observed_eod` canonical row를 덮지 않음 (official→observed = overlap guard + conditional conflict update). 역방향(observed→official)은 기존 observed_eod post-write nullable validation rollback으로 차단. 경계 전환 정책(ADR-034 §10 Open) 결정 전까지 **양방향** overlap reject.
 - Hana 1w: Phase 2e 전 결정 (open question, §14 참조 — 후보 a/b/c)
 - KRX 1w: Phase 2e 전 결정 (open question, §14 참조 — 후보 a/b/c)
+- **USD 탭 KRX (ADR-038 D4 ②, 2026-07-08)**: 전 기간(1d/1w/3m/1y) 편입, 위치는 investing 다음
+  (시세 행 순서 일치), **default_visible 미포함**(기본 OFF — 2026-07-03 "최소 2개 시작" 결정 정합,
+  KRX는 사용자가 의도적으로 켜는 선물 보조지표). 데이터는 테더 탭 KRX와 동일 reader
+  (1d=source_rates / 1w=source_hourly_rates / 3m·1y=source_daily_rates). G2∧G3
+  (`KRX_CLIENT_DISTRIBUTION_EFFECTIVE`) off면 `krx.` prefix 필터로 전 기간 catalog/tab 제외.
 - DXY_futures는 1d only (1w/3m/1y catalog 미노출)
 - Citi는 모든 tab/period에서 catalog 미노출 (수집 layer 유지)
 - 은행은 1d catalog 8개 (Hana 외 7개는 외부 historical 미보유 — 1d only), 1w+ catalog는 Hana만 (Hana 자체 historical로)
@@ -80,19 +85,19 @@ Catalog 응답 예시 (USD 탭 일부):
       "periods": {
         "1d": {
           "default_visible_series": ["investing.usd", "hana.usd"],
-          "all_series": ["investing.usd", "kb.usd", "hana.usd", "shinhan.usd", "woori.usd", "ibk.usd", "nh.usd", "sc.usd", "bs.usd", "dxy"]
+          "all_series": ["investing.usd", "krx.usd-krw-futures", "kb.usd", "hana.usd", "shinhan.usd", "woori.usd", "ibk.usd", "nh.usd", "sc.usd", "bs.usd", "dxy"]
         },
         "1w": {
           "default_visible_series": ["investing.usd", "hana.usd", "dxy"],
-          "all_series": ["investing.usd", "hana.usd", "dxy"]
+          "all_series": ["investing.usd", "krx.usd-krw-futures", "hana.usd", "dxy"]
         },
         "3m": {
           "default_visible_series": ["investing.usd", "hana.usd", "dxy"],
-          "all_series": ["investing.usd", "hana.usd", "dxy"]
+          "all_series": ["investing.usd", "krx.usd-krw-futures", "hana.usd", "dxy"]
         },
         "1y": {
           "default_visible_series": ["investing.usd", "hana.usd", "dxy"],
-          "all_series": ["investing.usd", "hana.usd", "dxy"]
+          "all_series": ["investing.usd", "krx.usd-krw-futures", "hana.usd", "dxy"]
         }
       }
     }
@@ -621,7 +626,7 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
    - 외부 API hot path 제거 → 그래프 요청 시 `source_daily_rates` 단일 조회
 4. ✅ **Phase 2e MVP** (코드+테스트 + **운영 deploy 완료 2026-06-06**): v2 endpoint 2개 — `GET /api/v2/graph/catalog` + `GET /api/v2/graph/tab` (`app/graph_v2.py` 로직 + main.py thin wiring + endpoint harness, commits `7bc1d65`/`9d43773`/`c7c218c`). **MVP 범위 = 3m/1y만** (`source_daily_rates` 단일 조회 hot path) + DXY는 market_index_rates.daily reader. 1d=v1 realtime / 1w=source_hourly_rates(ADR-035 D3) 후속 → v2는 1d/1w **400 unsupported_period**(insufficient_history 아님 — 데이터는 v1에 있음, v1 fallback hint). **v1 `/api/graph/{currency}` 변경 0** (legacy 공존 §12). catalog 코드 상수 = MVP subset(3m/1y) — 본 문서 §4 full target(1d/1w 포함)과 비강제 분리. 18 tests(graph_v2 로직 12 + endpoint 6). 동적 provenance(single/mixed + per-point) + insufficient partial coverage. **운영 deploy 완료 2026-06-06** (HEAD 0e52b7a / image 9e2e3186; Claude+Codex 이중 독립 검증: catalog 200 / tab usd 3m 200 series[77,63,79] / 1d 400 / v1 200 / KRX status=normal / ERROR 0). 후속(별도): source_hourly_rates(1w, Phase 2e+) / 프론트 client cutover. 상세: [DECISIONS.md ADR-035](DECISIONS.md) + CLAUDE.md Phase 2e MVP anchor.
 5. ✅ **Phase 2e+ — 테더 1d (10min closed-bucket precompute)** (서버 land, commit `d1ce060`): §4 line 54 테더 1d(11 series — 거래소 5 개별 + KRX + investing/KB/Hana USD + DXY + DXY_futures, 10min bucket)를 v2로 구현. **Phase 2e MVP의 "1d=400"을 테더 한정으로 supersede** (다른 탭 1d는 여전 400 + v1 hint). 1d는 daily/hourly read-through와 데이터 경로가 달라 별 모듈 `app/graph_v2_intraday.py`: raw 테이블(source_rates/bank/investing/market_index realtime) → 10min bucketize + carry-forward(graph_cache `_bucketize` 재사용) + closed-bucket only(진행 중 봉은 iOS live-tail). **cache-first precompute** — cron `*/10 +12s`가 `graph_v2:tab:tether:1d`(TTL 1200s 안전망) 갱신, 요청은 Redis read + miss/**stale-boundary** 시 process-local single-flight rebuild(`--workers 1`; multi-worker 시 Redis NX EX). **stale-boundary 온디맨드 rebuild**: payload에 `_in_progress_start_ts`(build 시점 진행봉 경계) 심어, serve가 "캐시 경계 < 현재 경계"면 경계 통과 후 precompute(:12) 전 창이라 방금 닫힌 봉이 캐시에 아직 없다고 판단 → 온디맨드 rebuild로 즉시 반영(cold-open 후 직전 완료 봉 ~12초 누락 gap 제거, 실측 확정). 클라는 `_` prefix 내부 필드 무시(전방호환). catalog는 테더 1d(11 series) 노출, 전역 supported_periods는 MVP 유지(1d=tab-specific). 11 series가 한 `now_kst`로 일관 버킷 경계(graph_cache builder에 optional now_kst 주입). 전체 3386 tests. 후속: iOS `GraphV2Period.oneDay` + live-tail / 다른 탭 1d / precompute query 배치 최적화(현 22 SELECT/run, 측정 후).
-6. ✅ **FX 3탭 1d — intraday per-tab 일반화 (Slice A)** (2026-07-03): §3:49-54 계약의 FX 1d를 서버 구현 — item 5의 "다른 탭 1d는 여전 400"을 **supersede** (이제 4탭 전부 1d 200). `graph_v2_intraday`의 테더 하드코딩을 `TAB_1D_SERIES` per-tab dict로 일반화: tether 11(불변) / **usd 10**(8 banks[Citi 제외, ADR-033 D4] + investing + dxy — dxy_futures는 테더 전용 유지) / **jpy·eur 9**(8 banks + investing — DXY 계열 미노출 §9:521). reader는 기존 `build_graph_series` 재사용(은행 allowlist 없음 — 신규 reader 0). **은행 순서/default/라벨은 후속(2026-07-03)에서 사용자 지정으로 확정** — all_series 순서 = Bank.displayCases(investing/kb/hana/shinhan/woori/ibk/nh/sc/bs[+dxy]), default_visible = investing+hana만(usd dxy·kb 기본 OFF), client 토글 라벨 = Bank.displayName + 3×3 배치. `build_tab_1d_payload(tab)`/`build_tab_1d_in_progress(tab)`/`precompute_intraday_1d()`(cron `*/10 +12s` 단일 job이 4탭 순회, 탭별 build+SET 즉시 + per-tab 실패 격리) + per-tab 캐시 키 `graph_v2:tab:{tab}:1d[,:in_progress]` + main.py per-tab single-flight lock. stale-boundary rebuild/in_progress seed/no-store 계약 전부 승계. 쿼리량 22→78 SELECT/run(시간당 468). 후속: iOS 달러 탭 v2 교체(Slice B) → jpy/eur(Slice C).
+6. ✅ **FX 3탭 1d — intraday per-tab 일반화 (Slice A)** (2026-07-03) [usd 10은 ADR-038 D4 ②(2026-07-08)로 11(krx 편입) — 본 항목은 historical record]: §3:49-54 계약의 FX 1d를 서버 구현 — item 5의 "다른 탭 1d는 여전 400"을 **supersede** (이제 4탭 전부 1d 200). `graph_v2_intraday`의 테더 하드코딩을 `TAB_1D_SERIES` per-tab dict로 일반화: tether 11(불변) / **usd 10**(8 banks[Citi 제외, ADR-033 D4] + investing + dxy — dxy_futures는 테더 전용 유지) / **jpy·eur 9**(8 banks + investing — DXY 계열 미노출 §9:521). reader는 기존 `build_graph_series` 재사용(은행 allowlist 없음 — 신규 reader 0). **은행 순서/default/라벨은 후속(2026-07-03)에서 사용자 지정으로 확정** — all_series 순서 = Bank.displayCases(investing/kb/hana/shinhan/woori/ibk/nh/sc/bs[+dxy]), default_visible = investing+hana만(usd dxy·kb 기본 OFF), client 토글 라벨 = Bank.displayName + 3×3 배치. `build_tab_1d_payload(tab)`/`build_tab_1d_in_progress(tab)`/`precompute_intraday_1d()`(cron `*/10 +12s` 단일 job이 4탭 순회, 탭별 build+SET 즉시 + per-tab 실패 격리) + per-tab 캐시 키 `graph_v2:tab:{tab}:1d[,:in_progress]` + main.py per-tab single-flight lock. stale-boundary rebuild/in_progress seed/no-store 계약 전부 승계. 쿼리량 22→78 SELECT/run(시간당 468). 후속: iOS 달러 탭 v2 교체(Slice B) → jpy/eur(Slice C).
 
 7. **Phase 2f** (Later, optional): single series endpoint 추가 — 사용 패턴 확보 후.
 

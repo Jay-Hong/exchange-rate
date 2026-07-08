@@ -93,8 +93,11 @@ class TestCatalog(unittest.TestCase):
     def test_tab_composition(self):
         tabs = {t["id"]: t for t in G.build_catalog()["tabs"]}
         self.assertEqual(set(tabs), {"usd", "jpy", "eur", "tether"})
+        # ADR-038 D4 ② — usd 전 기간 krx 편입 (investing 다음, default OFF)
         self.assertEqual(tabs["usd"]["periods"]["3m"]["all_series"],
-                         ["investing.usd", "hana.usd", "dxy"])
+                         ["investing.usd", "krx.usd-krw-futures", "hana.usd", "dxy"])
+        self.assertNotIn("krx.usd-krw-futures",
+                         tabs["usd"]["periods"]["3m"]["default_visible_series"])
         self.assertEqual(tabs["jpy"]["periods"]["3m"]["all_series"],
                          ["investing.jpy", "hana.jpy"])
         self.assertNotIn("index", tabs["jpy"]["axis_groups"])   # JPY는 DXY 없음
