@@ -6133,7 +6133,20 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   **(5) 김프 비교소스** krx 우선. **(6) DXY↔선물지수 상호배타 토글**(테더). 시트 완료 무변경 시 apply
   생략(hasPersisted 오고정 방지). codex 3라운드(default swap 미적용/hasPersisted 오고정/visible
   미제거 residual) 반영. iOS 167 tests. ⚠️ 기존 단말은 initializedSeries가 옛 토글을 잠가 새 default가
-  소급 적용 안 됨(신규 설치/미수정만) — 필요 시 "기본값으로 초기화". 잔여: ③ 가격알림 picker.
+  소급 적용 안 됨(신규 설치/미수정만) — 필요 시 "기본값으로 초기화".
+- **D4 ③ 달러 탭 KRX 가격알림 land (2026-07-09, fxi-ios `a47e9e2`)**: KRX 단일 가격알림을
+  달러 탭에 편입. **서버 변경 0** (source API `/api/source-notification-settings`가 F-2로
+  derivative[krx] 이미 허용 + G1/G2 403 게이트 완비 — iOS만). 핵심 = **은행 알림/소스 알림은
+  별개 시스템**이라 KRX는 반드시 source API (은행 시트에 섞으면 잘못된 API + 두 모델 id 충돌).
+  `SourceAlertScope` enum(tether/usdKrx)으로 소스 알림 섹션/시트 파라미터화 재사용. **이중 노출
+  버그 수정**: `tetherTabSettings`가 usd-krw-futures를 포함해 KRX 알림이 테더 탭에도 뜨던 것 →
+  usdt-krw 전용으로 좁히고 usd 탭은 `usdKrxSettings`(usd-krw-futures) 파티션. liveRate는
+  `krxTopicSourceRate`(tether freshness 비결합 — 장마감 후 종가 유지). 섹션 게이트
+  (currency==.usdKrw ∧ krxVisible)가 편집-prefill/revoke orphan 자동 방어(미렌더). history
+  assetFilter 3콜사이트 통일(codex blocker). MVP: 임계값 정수(1원)/소스 30 쿼터 공유.
+  iOS 172 tests(SourceAlertScopeTests 5 + pbxproj 4엔트리 수동 — FXiTests 비동기화 그룹).
+  **D4 ① 시세 / ② 그래프 / ③ 가격알림 완료 → D4 남은 것 = 비교알림(별도 트랙)**. 잔여:
+  revoke full-cycle 실기기 + 푸시 문구.
 
 ## 문서 히스토리
 
