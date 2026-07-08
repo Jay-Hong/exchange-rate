@@ -1087,3 +1087,29 @@ F-3 활성 후 수행한 5/19~5/26 close finalizer 7일 운영 평가 (정책: `
 - `/app/logs/` host volume mount (container 재생성 시 file 보존)
 - `KrxCloseFinalizerStats` Redis/DB persist (process restart 시에도 누적 유지)
 - 위 3개는 향후 telemetry 보강 필요 시점에 별도 PR로 진입. 현재 운영 안정성 측면에서는 우선순위 낮음 (정상 영업일 WS path 운영 관찰 기반 신뢰).
+
+
+## ADR-038 entitlement 운영 규칙 (2026-07-08, G1/G2 land)
+
+KRX 노출은 3단 게이트(G3 수집 / G2 배포 `KRX_CLIENT_DISTRIBUTION_ENABLED` / G1
+`user_entitlements`) + premium으로 판정 — 서버가 `GET /api/entitlements`로 `krx_visible`
+단일 신호 제공, iOS가 전 표면 gate.
+
+**⚠️ 회수는 반드시 스크립트로 — 수동 SQL 금지**:
+
+```bash
+# 부여 (dry-run 기본 — --write로 적용)
+docker compose run --rm fastapi python scripts/grant_entitlement.py grant --user-id <UID> --write --allow-production-write
+# 회수 — entitlement 삭제 + 해당 사용자 KRX 알림(단일 + 김프 counter) 자동 disable
+docker compose run --rm fastapi python scripts/grant_entitlement.py revoke --user-id <UID> --write --allow-production-write
+# 조회
+docker compose run --rm fastapi python scripts/grant_entitlement.py list
+```
+
+근거: **evaluator는 발화 시점에 entitlement를 재검사하지 않음** (hot path DB 조회 회피 —
+ADR-038 codex Q4-(i) 합의). 회수 시 발송 차단의 실체는 revoke 스크립트의 알림 자동
+disable — entitlement row만 수동 삭제하면 기존 enabled KRX 알림이 계속 발송된다.
+재부여 후 알림 복구는 사용자가 리스트에서 직접 토글 ON (그 시점 gate 재통과).
+
+검증 이력 (2026-07-08 실기기 full cycle): grant→표면 노출 / revoke→4표면 숨김 + 알림
+4건 자동 OFF + 재활성·변경 403 (끄기/삭제만 허용) / re-grant→복구 정상.
