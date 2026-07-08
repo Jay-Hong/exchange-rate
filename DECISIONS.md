@@ -6103,6 +6103,17 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   없음 — 종가 표시는 store 잔존으로 지속). ② in-memory fallback tetherReceived 가드 +
   persist 게이트 — krx 단독 merge가 KRX 1행 렌더/KRX-only disk cache로 새는 경로 차단.
   iOS 152 tests green.
+- **D4 ① 달러 탭 시세 편입 land (2026-07-08, fxi-ios `8b4388d`)**: `Bank.krx` 신규
+  (displayCases 제외 — 가격알림 picker 오염 방지, ③에서 gate와 함께 편입) + defaultOrder
+  인베스팅 다음 + sanitize 위치 특례(기존 저장 사용자 동일 위치) + `displayState(for:)`
+  usd 탭 한정 주입. **표시 조건 = krxVisible ∧ store entry 존재** — FX/tether freshness
+  모두 비결합(신선도 3규칙: krx 수신은 tether 신선도 비연장 / krx 자체 시간 staleness 없음
+  [장마감 무발행 정상] / tetherReceived 가드). **시트 gate-off preference 유실 수정**
+  (codex blocker): sanitize 누락-append가 defaultOrder 기본값 재삽입 → gate-off 시트 완료
+  시 KRX 커스텀(위치/숨김) 리셋 — Bank/Source 양쪽 `mergingPreservedItems` merge-back
+  경유로 보존 + 테더 SourceCustomizeSheet의 동일 잠복 결함·reset 버튼 gate 누락도 동시
+  수정. iOS 159 tests green. 잔여: ② 그래프(서버 usd 탭 registry에 krx 시리즈 추가 필요 —
+  `_TAB_SERIES`/`TAB_1D_SERIES` 확인 완료) → ③ 가격알림 picker.
 
 ## 문서 히스토리
 
