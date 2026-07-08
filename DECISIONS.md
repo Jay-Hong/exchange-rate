@@ -6112,8 +6112,16 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   (codex blocker): sanitize 누락-append가 defaultOrder 기본값 재삽입 → gate-off 시트 완료
   시 KRX 커스텀(위치/숨김) 리셋 — Bank/Source 양쪽 `mergingPreservedItems` merge-back
   경유로 보존 + 테더 SourceCustomizeSheet의 동일 잠복 결함·reset 버튼 gate 누락도 동시
-  수정. iOS 159 tests green. 잔여: ② 그래프(서버 usd 탭 registry에 krx 시리즈 추가 필요 —
-  `_TAB_SERIES`/`TAB_1D_SERIES` 확인 완료) → ③ 가격알림 picker.
+  수정. iOS 159 tests green. (후속 polish `ba6529f`: BankIconView krx 아이콘을 테더
+  SourceIconView와 동일 렌더링으로 + 순서 시트 KRX 항목 달러 탭 전용[currency 컨텍스트].)
+- **D4 ② 달러 탭 그래프 편입 land (2026-07-08, 서버 `ae1928b`+`c22c4e7` 배포 / iOS `7ffec85`)**:
+  usd 탭 전 기간(1d/1w/3m/1y)에 krx 시리즈 (investing 다음, **default OFF** — 2026-07-03
+  "최소 2개 시작" 결정 정합). 게이트/reader 변경 0 — krx. prefix 필터 + 테더 탭과 동일
+  데이터. GRAPH §3/§4 개정. iOS는 기존 메커니즘 자동(필터/토글/라벨/색) + 유일 gap이던
+  usd live-tail 보충(krxTopicSourceRate 접근자 — fx topic 생존 시만 append, krx 자체
+  신선도는 600s threshold). **배포 실측 함정 1건**: 3m/1y/1w read-through Redis 캐시가
+  구 시리즈 구성을 TTL(≤30분)간 잔존 — lifespan purge를 테더 5키 → +usd 5키로 확장
+  (`c22c4e7`). 전 기간 points 실측(144/124/61/245). 잔여: ③ 가격알림 picker.
 
 ## 문서 히스토리
 
