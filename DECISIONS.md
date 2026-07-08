@@ -5977,7 +5977,7 @@ Amendment 재스코프 + 후속 편집 슬라이스가 모두 land. flag `COMPAR
 ## ADR-038: KRX 달러선물 노출 게이트 — 3단 게이트 + 별도 topic + entitlement 수동 부여
 
 **날짜**: 2026-07-04
-**상태**: Proposed (설계 잠금 — 구현 미착수)
+**상태**: G1/G2 서버 슬라이스 land + 운영 배포 (2026-07-08, `d1405e2`) — Decision 2(별도 topic)/달러 탭은 후속 슬라이스
 **결정자**: Jay + Claude + Codex (3-way)
 
 ### Context
@@ -6038,11 +6038,37 @@ optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic은 없음
 
 ### Open
 
-1. `krx_visible` 전달 위치 (구독 상태 API 확장 vs 신규 entitlements endpoint).
+1. ~~`krx_visible` 전달 위치~~ → **확정: 신규 GET /api/entitlements** (G1/G2 land — 단일 책임
+   +확장성, register-device/알림 목록 응답 얹기 기각. PENDING은 503 대신 200
+   {krx_visible:false, premium_pending:true, retry_after_seconds:5} — read fail-closed).
 2. WS 구독 인증 (per-user topic 강제 — 별도 트랙).
-3. entitlement 부여/회수 운영 도구 (초기엔 수동 SQL, 사용자 늘면 admin API).
-4. graph v2 catalog의 per-user 분기 (catalog가 현재 정적 — entitlement별 krx series 포함
-   여부를 어디서 분기할지: catalog 요청에 auth 추가 vs 클라 필터).
+3. ~~entitlement 부여/회수 운영 도구~~ → **scripts/grant_entitlement.py land** (grant/revoke/list,
+   dry-run default + production guard. revoke 시 해당 사용자 KRX 단일알림+김프 counter 알림
+   자동 disable — evaluator는 entitlement 재검사 안 함[hot path], 회수 시점 차단). admin API는 후속.
+4. ~~graph v2 catalog per-user 분기~~ → **확정: G2 전역 게이트만 서버 강제 + per-user는 클라
+   krx_visible gate** (무인증 유지 — catalog auth 추가 기각).
+
+### G1/G2 서버 슬라이스 land 기록 (2026-07-08, `d1405e2` — 배포/마이그레이션/grant 완료)
+
+- **G2 env**: `KRX_CLIENT_DISTRIBUTION_ENABLED`(default false, 운영 true) + 파생
+  `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=G3∧G2 — G3 off 시 Redis/DB 잔존값 노출도 차단, codex 보강)
+  + `KRX_TOPIC_INCLUDE_EFFECTIVE`(usdt:krw usd_krw_futures group 포함 3지점 교체:
+  broadcast hook / direct_coalesced trigger / WS·REST snapshot 공용 builder).
+- **G1**: `user_entitlements`(user_id+key UNIQUE) + migrate 스크립트 + `app/entitlements.py`
+  (FastAPI 비의존 — has_entitlement/krx_gates_open/krx_alert_gate_error/compute_krx_visible).
+- **알림 API 403 강제**: source POST/PUT + comparison POST/PUT(김프 counter krx —
+  KIMCHI_COUNTER_SOURCES에 krx 활성, 구조 유효성은 validator·게이트는 handler 분리).
+  PUT은 최종 조합 기준 무조건 검사 + 예외는 **끄기 전용**(is_enabled=False 단독)뿐 —
+  재활성/변경+끄기 동시/krx로 변경+끄기 우회 전부 차단 (codex blocker fix).
+- **graph v2**: 무인증이라 전역 게이트만 — runtime accessor로 catalog/tab/1d/in_progress/
+  precompute 전 경로에서 G3∧G2 off 시 krx series 제외 + lifespan startup 테더 그래프 캐시
+  5키 무조건 DEL(게이트 flip 잔존 방어).
+- **telemetry**: `krx_topic_include_effective` 추가 (raw include와 게이트 결합값 구분).
+- **운영 상태**: G3=G2=true(현 노출 유지) + Jay uid entitlement 부여 — 즉 배포 전후 사용자
+  가시 변화 0, 게이트 인프라만 활성. tests 3449 green (신규 14 + 기존 8 갱신).
+- **후속 슬라이스 순서** (codex 합의): ① iOS krx_visible 소비(전 KRX 표면 단일 gate + 김프
+  counter krx 추가) → ② 별도 topic krx:usd-krw-futures + usdt:krw group 제거(Decision 2) →
+  ③ 달러 탭 편입(Decision 4).
 
 ## 문서 히스토리
 
