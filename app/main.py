@@ -523,8 +523,11 @@ async def lifespan(app: FastAPI):
         await redis_cache.delete(
             "graph_v2:tab:tether:1d", "graph_v2:tab:tether:1d:in_progress",
             "graph_v2:tab:tether:1w", "graph_v2:tab:tether:3m", "graph_v2:tab:tether:1y",
+            # ADR-038 D4 ② — usd 탭도 krx 시리즈 편입: gate flip/시리즈 구성 변경 잔존 방어
+            "graph_v2:tab:usd:1d", "graph_v2:tab:usd:1d:in_progress",
+            "graph_v2:tab:usd:1w", "graph_v2:tab:usd:3m", "graph_v2:tab:usd:1y",
         )
-        logger.info("🧹 테더 graph v2 캐시 초기화 (ADR-038 KRX gate 정합)")
+        logger.info("🧹 테더/달러 graph v2 캐시 초기화 (ADR-038 KRX gate 정합)")
     except Exception as cache_e:  # 캐시 DEL 실패는 비치명 (TTL 자연 만료로 수렴)
         logger.warning(f"테더 graph 캐시 초기화 실패 (비치명): {cache_e}")
 
