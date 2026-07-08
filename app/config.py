@@ -263,13 +263,10 @@ if SOURCE_HOURLY_RETENTION_DAYS < 8:
 # Stage 3: publish_topic을 실제 source data hook에 연결 (5/19+ 권장).
 TOPIC_DISPATCHER_ENABLED = os.getenv("TOPIC_DISPATCHER_ENABLED", "false").lower() == "true"
 
-# Phase Z-2b Stage 3 Level 3 — 테더 topic 안 KRX 미국달러선물 포함 여부.
-# TOPIC_DISPATCHER_ENABLED와 의미 분리 (제거된 legacy KRX_BROADCAST_INCLUDE 재사용 X):
-#   - TOPIC_DISPATCHER_ENABLED: topic publish 전체 on/off
-#   - KRX_TOPIC_INCLUDE: 테더 topic payload에 usd_krw_futures key 포함 여부
-# KRX만 격리 가능 — KRX 데이터 이상 시 topic 전체 끌 필요 없이 KRX만 끄고
-# USDT/은행/Investing은 그대로 publish 유지.
-KRX_TOPIC_INCLUDE = os.getenv("KRX_TOPIC_INCLUDE", "false").lower() == "true"
+# (제거됨 2026-07-08, ADR-038 Decision 2) KRX_TOPIC_INCLUDE — usdt:krw payload의
+# usd_krw_futures group 포함 토글이었으나 group 자체가 제거됨. KRX는 독립 topic
+# krx:usd-krw-futures 전용이며 발행 게이트는 KRX_CLIENT_DISTRIBUTION_EFFECTIVE.
+# (.env에 잔존해도 무해 — 미참조.)
 
 # ADR-038 G2 — 모든 client-facing KRX distribution 게이트 (topic group + graph v2 krx series +
 # KRX 알림 생성). G3(KRX_FUTURES_ENABLED, 수집)와 분리 — G2 off면 수집/DB/Redis는 지속하되
@@ -280,11 +277,6 @@ KRX_CLIENT_DISTRIBUTION_ENABLED = os.getenv("KRX_CLIENT_DISTRIBUTION_ENABLED", "
 # G3 off면 수집 중단 후에도 Redis/DB 잔존값이 노출될 수 있어 G3도 client-facing 판정에 포함
 # (codex 보강 2026-07-08). graph v2 / entitlements 판정은 이 값(또는 두 flag 조합)을 사용.
 KRX_CLIENT_DISTRIBUTION_EFFECTIVE = KRX_FUTURES_ENABLED and KRX_CLIENT_DISTRIBUTION_ENABLED
-
-# topic surface 전용 파생 — 기존 KRX_TOPIC_INCLUDE(usdt:krw payload의 usd_krw_futures group
-# 포함 여부)에 G2/G3를 결합. include_krx 해석 3곳(main.py broadcast hook /
-# tether_topic_trigger / topic_initial_snapshot)이 이 값을 읽음.
-KRX_TOPIC_INCLUDE_EFFECTIVE = KRX_TOPIC_INCLUDE and KRX_CLIENT_DISTRIBUTION_EFFECTIVE
 
 # KRX_CLOSE_FINALIZER_ENABLED: KRX_CLOSE_SNAPSHOT_PLAN §5.2/§5.3 2차 작업 토글.
 # default true — Stage 3+ 정책 (WS-first close finalizer) 활성:
@@ -470,7 +462,7 @@ FX_ALERT_CUTOVER_CANARY_SETTING_IDS = frozenset(
 KRX_CLOSE_EVENT_LOG_ENABLED = os.getenv("KRX_CLOSE_EVENT_LOG_ENABLED", "true").lower() == "true"
 
 # Phase Z-2c — FX topic 발사 토글 (fx:usd-krw / fx:jpy-krw / fx:eur-krw).
-# TOPIC_DISPATCHER_ENABLED와 분리 (KRX_TOPIC_INCLUDE 패턴과 동일 철학):
+# TOPIC_DISPATCHER_ENABLED와 분리 (구 KRX_TOPIC_INCLUDE[제거됨]과 동일 철학):
 #   - TOPIC_DISPATCHER_ENABLED: topic dispatch 전체 on/off
 #   - FX_TOPIC_ENABLED: FX 3 topic 발사 여부 (단일 flag — per-currency 분리 X)
 # default OFF로 골격만 배포 — fx_topic_publisher 모듈 import 가능하나 main.py

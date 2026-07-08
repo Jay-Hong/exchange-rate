@@ -443,10 +443,8 @@ async def _default_publish_tether_snapshot() -> bool:
     from app.tether_topic_publisher import safe_publish_tether_tab_snapshot
 
     with get_db_context() as db:
-        return await safe_publish_tether_tab_snapshot(
-            db,
-            include_krx=app_config.KRX_TOPIC_INCLUDE_EFFECTIVE,   # ADR-038 G2/G3 결합
-        )
+        # ADR-038 Decision 2 — usdt:krw는 KRX group 미포함 (KRX는 독립 topic)
+        return await safe_publish_tether_tab_snapshot(db)
 
 
 _default_controller: Optional[TetherTopicTriggerController] = None

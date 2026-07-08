@@ -4,9 +4,11 @@
 현재 상태(snapshot)를 즉시 받도록 한다. 없으면 다음 publish(값 변경)까지 빈 화면 —
 조용한 시간대/주말엔 무한 대기 가능 = 신규 앱 출시 blocker (PREFLIGHT wf_0f5f9dcf 1순위 gap).
 
-scope: 실제 구현된 topic만 — fx:usd-krw / fx:jpy-krw / fx:eur-krw + usdt:krw.
+scope: 실제 구현된 topic만 — fx:usd-krw / fx:jpy-krw / fx:eur-krw + usdt:krw
++ krx:usd-krw-futures(ADR-038 D2 독립 topic — KRX_CLIENT_DISTRIBUTION_EFFECTIVE=true일 때만
+supported list 포함, G2 off면 snapshot 404 = 발행 중단과 동일 gate).
 DXY/news/graph는 publisher 미구현이라 범위 밖(매핑에 없으면 register는 유지하되 snapshot skip,
-forward-compatible). KRX는 독립 topic 아님(usdt:krw payload 안 optional group).
+forward-compatible).
 
 설계 (codex 019efdb3 검토 — 2 blocker 반영):
 - SessionLocal 생성+builder+close를 to_thread 내부 sync 함수에서 전부 처리. SQLAlchemy
@@ -18,7 +20,7 @@ forward-compatible). KRX는 독립 topic 아님(usdt:krw payload 안 optional gr
 - 빈 payload도 전송(builders는 빈 list/optional omission으로도 schema-valid snapshot 생성 —
   "빈 화면 방지" 목적상 skip 금지).
 - enable gate: fx는 FX_TOPIC_ENABLED(publisher와 일관) + TOPIC_DISPATCHER_ENABLED(caller가 이미
-  체크). usdt:krw는 TOPIC_DISPATCHER_ENABLED만(별도 TETHER flag 없음) + KRX 포함은 KRX_TOPIC_INCLUDE.
+  체크). usdt:krw는 TOPIC_DISPATCHER_ENABLED만(별도 TETHER flag 없음). KRX는 독립 topic(ADR-038 D2).
 - behavior-change-0: prod subscriber=0(테더 탭 미출시) + TOPIC_DISPATCHER_ENABLED default false
   → live 단말 영향 0. dev/test 구독자만 영향.
 
@@ -49,9 +51,15 @@ def supported_snapshot_topics() -> tuple:
     모듈 경량 유지(FX_TOPICS/TETHER_TOPIC).
     """
     from app.fx_topic_publisher import FX_TOPICS  # {asset: "fx:{asset}"}
+    from app.krx_topic_publisher import KRX_TOPIC  # "krx:usd-krw-futures"
     from app.tether_topic_publisher import TETHER_TOPIC  # "usdt:krw"
 
-    return tuple(FX_TOPICS.values()) + (TETHER_TOPIC,)
+    topics = tuple(FX_TOPICS.values()) + (TETHER_TOPIC,)
+    # ADR-038 Decision 2 — KRX 독립 topic은 G2/G3 열려 있을 때만 지원 목록에 포함
+    # (off면 REST 404 unknown_topic + WS snapshot skip — 발행/snapshot 자체 중단 계약).
+    if config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE:
+        topics += (KRX_TOPIC,)
+    return topics
 
 
 def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
@@ -97,13 +105,27 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
 
         db = SessionLocal()
         try:
-            payload = load_and_build_tether_tab_payload(
-                db, include_krx=config.KRX_TOPIC_INCLUDE_EFFECTIVE   # ADR-038 G2/G3 결합
-            )
+            # ADR-038 Decision 2 — usd_krw_futures group 제거: KRX는 독립 topic 전용
+            payload = load_and_build_tether_tab_payload(db)
         finally:
             db.close()
         payload["topic"] = topic
         return payload
+
+    from app.krx_topic_publisher import KRX_TOPIC, build_krx_topic_payload, load_krx_topic_entry
+    if topic == KRX_TOPIC:
+        # ADR-038 — G2/G3 off면 미지원 취급 (supported 목록과 일관)
+        if not config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE:
+            return None
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            entry = load_krx_topic_entry(db)   # Redis-first + DB fallback
+        finally:
+            db.close()
+        if entry is None:
+            return None   # 데이터 없음 — snapshot skip (구독 register는 유지)
+        return build_krx_topic_payload(entry)
 
     return None  # 미지원 topic(dxy/news/graph 등) — snapshot skip, register는 호출자가 유지
 

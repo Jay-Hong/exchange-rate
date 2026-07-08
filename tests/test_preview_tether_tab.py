@@ -1,8 +1,7 @@
 """scripts/preview_tether_tab.py 단위 테스트.
 
 검증:
-    - --include-krx → load_and_build에 include_krx=True 전달
-    - 기본 (no flag) → include_krx=False
+    - helper 호출 계약: db 위치 인자만 (ADR-038 D2 — include_krx 제거)
     - 기본 출력은 indent JSON, --compact는 single-line JSON
     - SessionLocal mock으로 실제 DB 미연결 (read-only 검증)
 """
@@ -40,28 +39,23 @@ class TestPreviewTetherTab(unittest.TestCase):
         # mock_helper 호출 인자 검증을 위해 함께 반환
         return captured.getvalue(), mock_helper, fake_db
 
-    # 1) --include-krx → helper에 include_krx=True 전달
-    def test_include_krx_flag_passes_true(self):
+    # 1) helper 호출 계약 — db 위치 인자만, kwargs 없음 (ADR-038 D2: include_krx 제거).
+    #    mock이라 시그니처 불일치를 못 잡는 함정 방지 — 실제 함수 시그니처와 교차 검증.
+    def test_helper_called_with_db_only(self):
+        import inspect
+        from app import usdt_topic_payload as utp
         out, mock_helper, fake_db = self._run_main(
-            ["--include-krx"],
-            payload={"type": "snapshot", "version": 1, "data": {}},
-        )
-        mock_helper.assert_called_once()
-        kwargs = mock_helper.call_args.kwargs
-        self.assertEqual(kwargs.get("include_krx"), True)
-        # db 인자 위치 검증
-        self.assertIs(mock_helper.call_args.args[0], fake_db)
-        # db.close() 호출 검증 (finally 블록)
-        fake_db.close.assert_called_once()
-
-    # 2) 기본 (no flag) → include_krx=False
-    def test_default_passes_include_krx_false(self):
-        out, mock_helper, _ = self._run_main(
             [],
             payload={"type": "snapshot", "version": 1, "data": {}},
         )
-        kwargs = mock_helper.call_args.kwargs
-        self.assertEqual(kwargs.get("include_krx"), False)
+        mock_helper.assert_called_once()
+        self.assertIs(mock_helper.call_args.args[0], fake_db)
+        self.assertEqual(mock_helper.call_args.kwargs, {})
+        # 실제 시그니처에 include_krx 부재 (mock 우회 회귀 차단, codex 019f4117)
+        sig = inspect.signature(utp.load_and_build_tether_tab_payload)
+        self.assertNotIn("include_krx", sig.parameters)
+        # db.close() 호출 검증 (finally 블록)
+        fake_db.close.assert_called_once()
 
     # 3) 기본 출력은 indent JSON (multi-line + 공백)
     def test_default_output_is_indented_json(self):

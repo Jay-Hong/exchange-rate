@@ -5977,15 +5977,16 @@ Amendment 재스코프 + 후속 편집 슬라이스가 모두 land. flag `COMPAR
 ## ADR-038: KRX 달러선물 노출 게이트 — 3단 게이트 + 별도 topic + entitlement 수동 부여
 
 **날짜**: 2026-07-04
-**상태**: G1/G2 서버 슬라이스 land + 운영 배포 (2026-07-08, `d1405e2`) — Decision 2(별도 topic)/달러 탭은 후속 슬라이스
+**상태**: G1/G2 서버 슬라이스 land + 운영 배포 (2026-07-08, `d1405e2`) + **Decision 2 서버 슬라이스 land (2026-07-08 — krx:usd-krw-futures 독립 topic + usdt:krw group 제거)** — iOS krx topic 구독/달러 탭은 후속 슬라이스
 **결정자**: Jay + Claude + Codex (3-way)
 
 ### Context
 
 KRX 달러선물은 [KRX_CANARY.md](KRX_CANARY.md) 정책상 optional source이며 시세 재배포 권리
 검토가 미완( ADR-037 Open 5). 전 사용자 공개 대신 **구독 + 운영자 승인 사용자에게만 노출**하고,
-상황에 따라 노출 수준을 단계적으로 조정할 수 있어야 한다. 현재 달러선물은 `usdt:krw` topic의
-optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic은 없음(legacy_policy.py:73 주석).
+상황에 따라 노출 수준을 단계적으로 조정할 수 있어야 한다. (작성 시점) 달러선물은 `usdt:krw`
+topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 없음 — Decision 2
+구현(2026-07-08)으로 독립 topic `krx:usd-krw-futures` 분리 완료.
 
 ### Decision 1 — 3단 게이트 (캐스케이드)
 
@@ -6069,6 +6070,29 @@ optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic은 없음
 - **후속 슬라이스 순서** (codex 합의): ① iOS krx_visible 소비(전 KRX 표면 단일 gate + 김프
   counter krx 추가) → ② 별도 topic krx:usd-krw-futures + usdt:krw group 제거(Decision 2) →
   ③ 달러 탭 편입(Decision 4).
+
+### Decision 2 서버 슬라이스 land 기록 (2026-07-08)
+
+- **신규 `app/krx_topic_publisher.py`**: `KRX_TOPIC="krx:usd-krw-futures"` +
+  `build_krx_topic_payload`(data.usd_krw_futures entry — 구 group과 동일 shape, iOS
+  TopicSourceEntry 하위호환) + `load_krx_topic_entry(db=None)`(Redis-first, db 제공 시만
+  crud legacy dict fallback — `_normalize_entry` 재사용) + `publish_krx_topic_snapshot`
+  (guard: dispatcher → `KRX_CLIENT_DISTRIBUTION_EFFECTIVE` → subscriber 0) +
+  `request_krx_topic_publish`(조기 gate skip 후 `schedule_on_loop` marshal — sync close
+  finalizer/async tick 양쪽 안전). KRX tick은 Redis writer가 이미 5초 coalesce라 **별도
+  coalescer 없는 경량 설계**.
+- **usdt:krw에서 KRX 완전 제거**: builder `krx_futures_rate` 파라미터/조립 블록 +
+  `include_krx` + `KRX_TOPIC_INCLUDE`/`KRX_TOPIC_INCLUDE_EFFECTIVE` env + telemetry
+  `krx_topic_include*` 필드 제거. krx_kis 3 trigger(DB-bound/Stage E/close finalizer)는
+  `request_krx_topic_publish`로 교체 (usdt:krw 재발행 폐기).
+- **snapshot/G2-off 계약**: `supported_snapshot_topics()`가 EFFECTIVE=true일 때만 krx topic
+  포함 — off면 WS snapshot skip + REST bootstrap 404 + 발행 중단 (동일 gate 3면 일치).
+- **legacy 410 안내 갱신**: `LEGACY_REMOVED_RATE_TOPICS["usd-krw-futures"]` = usdt:krw →
+  `krx:usd-krw-futures` (codex blocker — 구 안내는 KRX 제거된 topic으로 유도).
+- **codex blocker 2 fix**: crud `get_latest_source_rate`는 legacy dict 반환 — attribute
+  접근 대신 dict 그대로 `_normalize_entry`에 전달 (테스트도 실제 shape로 잠금).
+- tests: 44 계약 회귀 재작성 + `tests/test_krx_topic_publisher.py` 신규 16 + KRX snapshot
+  positive 3 — 전체 3459 green.
 
 ## 문서 히스토리
 

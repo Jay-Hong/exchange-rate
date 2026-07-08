@@ -193,16 +193,15 @@ class TestGraphV2KrxFilter(unittest.TestCase):
 
 
 class TestConfigDerived(unittest.TestCase):
-    """파생 상수 계산 규칙 잠금 — topic 3곳(include_krx)이 읽는 값."""
+    """파생 상수 계산 규칙 잠금 — client-facing KRX 판정의 단일 소스."""
 
     def test_effective_definition(self):
         from app import config
         self.assertEqual(
             config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE,
             config.KRX_FUTURES_ENABLED and config.KRX_CLIENT_DISTRIBUTION_ENABLED)
-        self.assertEqual(
-            config.KRX_TOPIC_INCLUDE_EFFECTIVE,
-            config.KRX_TOPIC_INCLUDE and config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE)
+        # (ADR-038 D2) KRX_TOPIC_INCLUDE_EFFECTIVE는 usdt:krw group 제거와 함께 삭제됨
+        self.assertFalse(hasattr(config, "KRX_TOPIC_INCLUDE_EFFECTIVE"))
 
 
 if __name__ == "__main__":

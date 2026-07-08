@@ -8,7 +8,6 @@
 사용:
     # 컨테이너 내부에서
     docker compose exec -T fastapi python scripts/preview_tether_tab.py
-    docker compose exec -T fastapi python scripts/preview_tether_tab.py --include-krx
     docker compose exec -T fastapi python scripts/preview_tether_tab.py --compact \\
         | jq '.data.usdt_krw'
 
@@ -23,7 +22,7 @@
 설계 원칙:
     - read-only — DB SELECT만, INSERT/UPDATE/DELETE 0
     - publish 효과 0 — `publish_topic` 호출 없음
-    - env flag 해석 없음 — `--include-krx`로 호출자가 명시
+    - KRX 없음 (ADR-038 D2) — usd_krw_futures는 독립 topic krx:usd-krw-futures
     - logger를 WARNING으로 격상 — stdout pure JSON 보장 (cron append 안전)
 """
 from __future__ import annotations
@@ -51,11 +50,6 @@ def main() -> int:
         description="테더 탭 payload preview (read-only)"
     )
     ap.add_argument(
-        "--include-krx",
-        action="store_true",
-        help="KRX 미국달러선물 포함 (default: 제외)",
-    )
-    ap.add_argument(
         "--compact",
         action="store_true",
         help="single-line JSON 출력 (jq 파이프 / JSONL append용). "
@@ -65,10 +59,8 @@ def main() -> int:
 
     db = SessionLocal()
     try:
-        payload = load_and_build_tether_tab_payload(
-            db,
-            include_krx=args.include_krx,
-        )
+        # ADR-038 D2: KRX는 독립 topic(krx:usd-krw-futures) — include_krx 옵션 제거
+        payload = load_and_build_tether_tab_payload(db)
     finally:
         db.close()
 

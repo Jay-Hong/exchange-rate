@@ -15,12 +15,12 @@ USDT_TOPIC_MIGRATION_PLAN §2 / ADR-028 합의된 topic-only Tether/KRX 출시 �
     4. **builder 내부 정렬**: 호출자가 정렬 안 해도 builder가 보장.
        - list 그룹 (usdt_krw, usd_krw_banks): SourceRegistry sort_order +
          BANK_DISPLAY_ORDER fallback, 미등록은 뒤로 + 코드순.
-       - singleton 그룹 (usd_krw_reference, usd_krw_futures): expected
-         source/asset만 허용, 아니면 키 누락 (schema 무결성 보호).
-    5. **None optional 키 누락**: investing_rate / krx_futures_rate가 None이면
-       해당 그룹 키 자체 누락 (forward-compat — 클라이언트는 없는 키 무시).
-    6. **env flag 직접 해석 X**: KRX 포함 여부는 호출자(wire-up)가 결정.
-       Builder는 받은 그대로 처리.
+       - singleton 그룹 (usd_krw_reference): expected source/asset만 허용,
+         아니면 키 누락 (schema 무결성 보호).
+    5. **None optional 키 누락**: investing_rate가 None이면 해당 그룹 키 자체
+       누락 (forward-compat — 클라이언트는 없는 키 무시).
+    6. **KRX 없음 (ADR-038 D2)**: usd_krw_futures group은 독립 topic
+       krx:usd-krw-futures로 분리 (app/krx_topic_publisher.py).
 
 Schema (version=1):
     {
@@ -29,14 +29,16 @@ Schema (version=1):
       "data": {
         "usdt_krw": [{"source", "asset", "rate", "timestamp", "rate_changed_at"}, ...],
         "usd_krw_banks": [...],         # entry shape: {source, asset, rate, timestamp}
-        "usd_krw_reference": {...},     # source="investing" + asset="usd-krw" only
-        "usd_krw_futures": {...}        # source="krx" + asset="usd-krw-futures" only (optional)
+        "usd_krw_reference": {...}      # source="investing" + asset="usd-krw" only
       }
 
+    KRX 달러선물은 ADR-038 D2로 usdt:krw에서 제거 — 전용 topic `krx:usd-krw-futures`
+    (app/krx_topic_publisher.py)로 분리. _normalize_entry는 krx publisher가 재사용.
+
     `rate_changed_at`(정밀 변경시각)는 **seen_at(5s bucket) alias를 쓰는 entry** — usdt_krw 거래소
-    + usd_krw_futures(KRX Stage E tick, Redis-served)에 추가 — same-bucket ordering 한계 해소
-    (REALTIME_V2_CLIENT_GUIDE §5, client merge = rate_changed_at ?? timestamp). bank/investing은
-    timestamp가 정밀이라 미부착. KRX DB fallback(get_latest_source_rate)도 정밀이라 미부착.
+    + usd-krw-futures(KRX Stage E tick, krx topic에서 Redis-served)에 추가 — same-bucket ordering
+    한계 해소 (REALTIME_V2_CLIENT_GUIDE §5, client merge = rate_changed_at ?? timestamp).
+    bank/investing은 timestamp가 정밀이라 미부착.
     }
 
     Entry 식별자는 (source, asset) tuple. 단말은 자체 registry로 표시명/아이콘/
@@ -54,7 +56,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from app.crud import (
     _bank_display_sort_key,
-    get_latest_source_rate,
     get_latest_source_rates_for_topic,
     select_a_latest_investing_rate_from_db,
     select_latest_bank_rates_from_db,
@@ -62,7 +63,6 @@ from app.crud import (
 from app.latest_rates_cache import (
     get_latest_bank_rate_from_sync_job,
     get_latest_investing_rate_from_sync_job,
-    get_latest_krx_rate_from_sync_job,
     get_latest_usdt_rate_from_sync_job,
 )
 from app.source_registry import get_source_definition, get_usdt_exchange_entries
@@ -72,7 +72,6 @@ if TYPE_CHECKING:
 
 # singleton 슬롯에 허용되는 expected (source, asset)
 _REFERENCE_EXPECTED: Tuple[str, str] = ("investing", "usd-krw")
-_FUTURES_EXPECTED: Tuple[str, str] = ("krx", "usd-krw-futures")
 
 # 테더 탭에 표시할 은행 source list (kb→hana 순서). select_latest_bank_rates_from_db
 # 가 9개 은행을 반환하면 이 상수 순서로만 필터/build → helper 출력 순서 안정.
@@ -175,7 +174,6 @@ def build_tether_tab_payload(
     usdt_rates: List[Dict[str, Any]],
     bank_rates: List[Dict[str, Any]],
     investing_rate: Optional[Dict[str, Any]] = None,
-    krx_futures_rate: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """테더 탭 snapshot payload 구성 (순수 함수, DB 의존 X).
 
@@ -185,10 +183,6 @@ def build_tether_tab_payload(
         investing_rate: USD/KRW Investing reference. legacy shape일 가능성 높음
             (`{"bank": "investing", "currency": "usd-krw", ...}`). expected source/asset
             아니면 키 누락.
-        krx_futures_rate: KRX 미국달러선물. expected source="krx" + asset="usd-krw-futures"
-            만 허용. None이면 키 누락. 호출자가 KRX 포함 여부 결정 (env flag 게이트는
-            호출자 책임).
-
     Returns:
         topic payload (topic 필드 없음 — wire-up 시점에 wrapper가 결정).
 
@@ -234,19 +228,8 @@ def build_tether_tab_payload(
             data["usd_krw_reference"] = normalized
         # 그 외: 키 누락 (schema 무결성 보호)
 
-    # KRX futures — singleton, expected source="krx" + asset="usd-krw-futures"
-    if krx_futures_rate is not None:
-        normalized = _normalize_entry(
-            krx_futures_rate,
-            fallback_source="krx",
-            fallback_asset="usd-krw-futures",
-        )
-        if normalized is not None and (
-            normalized["source"],
-            normalized["asset"],
-        ) == _FUTURES_EXPECTED:
-            data["usd_krw_futures"] = normalized
-        # 그 외: 키 누락
+    # (ADR-038 Decision 2) usd_krw_futures group 제거 — KRX는 krx:usd-krw-futures
+    # 독립 topic 전용 (app/krx_topic_publisher.py). 이 builder는 더 이상 KRX를 다루지 않음.
 
     return {
         "type": "snapshot",
@@ -257,8 +240,6 @@ def build_tether_tab_payload(
 
 def load_and_build_tether_tab_payload(
     db: "Session",
-    *,
-    include_krx: bool = False,
 ) -> Dict[str, Any]:
     """DB 통합 helper — 저장소별 dispatch 후 build_tether_tab_payload 호출.
 
@@ -276,15 +257,11 @@ def load_and_build_tether_tab_payload(
           Redis hit이면 사용, miss/stale이면 DB fallback.
         - bank/investing은 mirror cycle 갱신 가정 → `is_stale()` 적용 (interval×2 기준; 운영 120s).
           USDT(mirror skip)와 다른 환경 (ADR-026 vs ADR-029).
-        - KRX (asset=usd-krw-futures): include_krx=True일 때만 query.
-          False면 호출 자체 X (불필요 DB load 차단).
-          **KRX는 mirror skip + direct write 미구축 → DB query 유지** (별도 phase).
+        - KRX: (ADR-038 Decision 2) 이 builder에서 제거 — 독립 topic
+          krx:usd-krw-futures가 전담 (app/krx_topic_publisher.py).
 
     Args:
         db: SQLAlchemy Session.
-        include_krx: KRX 미국달러선물 포함 여부. 기본 False — KRX는 optional canary
-            라 호출자가 명시적으로 True 줄 때만 query + payload 포함. env flag
-            (KRX_FUTURES_ENABLED 등) 해석은 helper 외부 wire-up 호출자 책임.
 
     Returns:
         build_tether_tab_payload 결과 (topic 필드 없음 — wire-up 호출자가 결정).
@@ -340,17 +317,9 @@ def load_and_build_tether_tab_payload(
     if investing_rate is None:
         investing_rate = select_a_latest_investing_rate_from_db(db, "usd-krw")
 
-    # KRX — include_krx=True일 때만 query (False면 호출 0회).
-    # ADR-031: KRX Redis-first read + DB fallback. stale 가드 없음 (ADR-027 영역).
-    krx_futures_rate: Optional[Dict[str, Any]] = None
-    if include_krx:
-        krx_futures_rate = get_latest_krx_rate_from_sync_job("usd-krw-futures")
-        if krx_futures_rate is None:
-            krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")
 
     return build_tether_tab_payload(
         usdt_rates=usdt_rates,
         bank_rates=bank_rates,
         investing_rate=investing_rate,
-        krx_futures_rate=krx_futures_rate,
     )

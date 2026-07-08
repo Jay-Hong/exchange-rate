@@ -1703,18 +1703,13 @@ class KrxDbWriter:
             if self._last_tick is not None:
                 self._timer = asyncio.create_task(self._flush_after_window())
 
-        # Phase B.2 PR3: tether topic trigger 호출 — finally **밖** (책임 분리).
-        # Redis latest 실제 갱신 시점에만 발화 (의미적 정확성).
+        # Phase B.2 PR3 → ADR-038 Decision 2: Redis latest 갱신 시 KRX 독립 topic 발행
+        # (구 usdt:krw 재발행 대체 — KRX는 krx:usd-krw-futures 전용).
         if redis_write_success:
-            from app import tether_topic_trigger
-            from app.tether_topic_trigger import (
-                TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
-            )
+            from app import krx_topic_publisher
             try:
-                tether_topic_trigger.request_tether_topic_trigger(
-                    source=tick.get("source", "krx"),
-                    asset=tick["asset"],
-                    reason=TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+                krx_topic_publisher.request_krx_topic_publish(
+                    reason="krx_redis_write_success",
                 )
             except Exception:
                 logger.exception(
@@ -1791,7 +1786,7 @@ class KrxRedisLatestWriter:
         - `__call__` tick handler — 매 WS tick → tick-level Redis SET (USDT 5b-bis
           schema mirror, 5-field + in-memory state + 5s grain coalescing)
         - close grace window 안 tick은 skip (KrxCloseWindowWriter 단독 처리)
-        - KrxLatestWriteOutcome.SET 시점에만 `request_tether_topic_trigger` 발사
+        - KrxLatestWriteOutcome.SET 시점에만 `request_krx_topic_publish` 발사 (ADR-038 독립 topic)
           (trigger 발사 책임 이동 — DB-bound → tick-level)
     """
 
@@ -1870,17 +1865,12 @@ class KrxRedisLatestWriter:
             logger.exception("[krx_redis_latest_writer] tick write 예외 (격리)")
             return
 
-        # SET-only trigger (USDT 5d-a mirror)
+        # SET-only trigger (USDT 5d-a mirror) → ADR-038: KRX 독립 topic 발행
         if outcome is _latest_rates_cache.KrxLatestWriteOutcome.SET:
-            from app import tether_topic_trigger
-            from app.tether_topic_trigger import (
-                TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
-            )
+            from app import krx_topic_publisher
             try:
-                tether_topic_trigger.request_tether_topic_trigger(
-                    source=source,
-                    asset=asset,
-                    reason=TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+                krx_topic_publisher.request_krx_topic_publish(
+                    reason="krx_redis_write_success",
                 )
             except Exception:
                 logger.exception(
@@ -2253,10 +2243,6 @@ class KrxCloseWindowWriter:
         """
         from app import crud
         from app import latest_rates_cache
-        from app import tether_topic_trigger
-        from app.tether_topic_trigger import (
-            TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
-        )
         from app.database import get_db_context
         from decimal import InvalidOperation as _InvalidOperation
 
@@ -2333,16 +2319,15 @@ class KrxCloseWindowWriter:
                     "[krx_close_window] emit_krx_close_event 실패 (격리)",
                     exc_info=True,
                 )
-            # Tether topic trigger — KrxDbWriter pattern과 동일 (Redis write 성공 기반)
+            # KRX topic publish — KrxDbWriter pattern과 동일 (Redis write 성공 기반, ADR-038)
             try:
-                tether_topic_trigger.request_tether_topic_trigger(
-                    source=source,
-                    asset=asset,
-                    reason=TETHER_TRIGGER_REASON_KRX_REDIS_WRITE_SUCCESS,
+                from app import krx_topic_publisher
+                krx_topic_publisher.request_krx_topic_publish(
+                    reason="krx_close_finalizer",
                 )
             except Exception:
                 logger.exception(
-                    "[krx_close_window] tether topic trigger failed (격리)"
+                    "[krx_close_window] krx topic publish failed (격리)"
                 )
             # KRX daily-append (Unit 4b/4c) — CF 정규장 종가만 source_daily_rates에 append.
             # source_rates+Redis+flag 성공 후 호출. 실패는 전부 격리 (finalizer return True/흐름 영향 0).

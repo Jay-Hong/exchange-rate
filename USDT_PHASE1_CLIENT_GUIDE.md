@@ -398,12 +398,12 @@ Unsubscribe: {"type": "unsubscribe", "topics": ["usdt:krw"]}
 
 | key | type | 조건 |
 | --- | --- | --- |
-| `usd_krw_futures` | entry | `KRX_TOPIC_INCLUDE=true` + KRX 데이터 존재 시만 |
+| ~~`usd_krw_futures`~~ | entry | **제거됨 (ADR-038 D2, 2026-07-08)** — KRX는 독립 topic `krx:usd-krw-futures` ([REALTIME_V2_CLIENT_GUIDE §2.5](REALTIME_V2_CLIENT_GUIDE.md)) |
 
 list 그룹은 SourceRegistry sort_order로 서버 측 정렬됨. 단말은 받은 순서 그대로
 표시하면 됨 (재정렬 불필요).
 
-### `usd_krw_futures` (KRX 미국달러선물) — Optional 처리
+### `usd_krw_futures` (KRX 미국달러선물) — Optional 처리 [superseded — ADR-038 D2로 usdt:krw에서 제거, 독립 topic `krx:usd-krw-futures` 참조]
 
 **키 자체 부재 가능성**:
 
@@ -493,7 +493,6 @@ asset별 별도 entry가 필요하다 (예: `kb + usd-krw`, `kb + jpy-krw`, `kb 
 {
   "enabled": true,                          // TOPIC_DISPATCHER_ENABLED
   "topic": "usdt:krw",
-  "krx_topic_include": true,                // KRX_TOPIC_INCLUDE (legacy와 분리)
   "subscribed_connection_count": 2,
   "hook_called": 12345,
   "skipped_disabled": 0,

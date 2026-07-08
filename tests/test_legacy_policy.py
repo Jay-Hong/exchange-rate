@@ -121,14 +121,14 @@ class TestLegacyRemovedRateTopics(unittest.TestCase):
     def test_mapping_exact(self):
         """LEGACY_REMOVED_RATE_TOPICS 정확 매핑 회귀 보호.
 
-        현재 두 자산 모두 usdt:krw로 안내 (KRX futures는 usdt:krw topic의 optional
-        group). 미래에 KRX 독립 topic 도입 시 value 갱신.
+        usdt-krw → usdt:krw / usd-krw-futures → krx:usd-krw-futures
+        (ADR-038 D2 — KRX 독립 topic 분리, 2026-07-08).
         """
         self.assertEqual(
             LEGACY_REMOVED_RATE_TOPICS,
             {
                 "usdt-krw": "usdt:krw",
-                "usd-krw-futures": "usdt:krw",
+                "usd-krw-futures": "krx:usd-krw-futures",
             },
         )
 
@@ -139,7 +139,8 @@ class TestGetRemovedLegacyRateTopic(unittest.TestCase):
         self.assertEqual(get_removed_legacy_rate_topic("usdt-krw"), "usdt:krw")
 
     def test_usd_krw_futures_returns_topic(self):
-        self.assertEqual(get_removed_legacy_rate_topic("usd-krw-futures"), "usdt:krw")
+        self.assertEqual(
+            get_removed_legacy_rate_topic("usd-krw-futures"), "krx:usd-krw-futures")
 
     def test_allowed_asset_returns_none(self):
         """LEGACY_RATE_ASSETS 통과 자산은 제거 대상 X — None 반환."""
@@ -173,7 +174,7 @@ class TestBuildLegacyRemovedDetail(unittest.TestCase):
             {
                 "error": "legacy_rate_removed",
                 "currency": "usd-krw-futures",
-                "use_topic": "usdt:krw",
+                "use_topic": "krx:usd-krw-futures",
             },
         )
 

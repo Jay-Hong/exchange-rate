@@ -196,15 +196,13 @@ class TestKrxRedisLatestWriterCall(unittest.IsolatedAsyncioTestCase):
                  "app.latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level",
                  return_value=KrxLatestWriteOutcome.SET,
              ), patch(
-                 "app.tether_topic_trigger.request_tether_topic_trigger",
+                 "app.krx_topic_publisher.request_krx_topic_publish",
              ) as mock_trigger:
             await writer(self._make_payload(received_at="2026-05-26T10:00:00"))
 
         mock_trigger.assert_called_once()
-        kwargs = mock_trigger.call_args.kwargs
-        self.assertEqual(kwargs["source"], "krx")
-        self.assertEqual(kwargs["asset"], "usd-krw-futures")
-        self.assertEqual(kwargs["reason"], "krx_redis_write_success")
+        # ADR-038 D2: krx 독립 topic publish 요청 — reason만 전달 (source/asset은 topic 고정)
+        self.assertEqual(mock_trigger.call_args.kwargs["reason"], "krx_redis_write_success")
 
     async def test_skipped_outcome_no_trigger(self):
         """outcome=SKIPPED → trigger 미호출."""
@@ -215,7 +213,7 @@ class TestKrxRedisLatestWriterCall(unittest.IsolatedAsyncioTestCase):
                  "app.latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level",
                  return_value=KrxLatestWriteOutcome.SKIPPED,
              ), patch(
-                 "app.tether_topic_trigger.request_tether_topic_trigger",
+                 "app.krx_topic_publisher.request_krx_topic_publish",
              ) as mock_trigger:
             await writer(self._make_payload(received_at="2026-05-26T10:00:00"))
 
@@ -230,7 +228,7 @@ class TestKrxRedisLatestWriterCall(unittest.IsolatedAsyncioTestCase):
                  "app.latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level",
                  return_value=KrxLatestWriteOutcome.FAILED,
              ), patch(
-                 "app.tether_topic_trigger.request_tether_topic_trigger",
+                 "app.krx_topic_publisher.request_krx_topic_publish",
              ) as mock_trigger:
             await writer(self._make_payload(received_at="2026-05-26T10:00:00"))
 
@@ -244,7 +242,7 @@ class TestKrxRedisLatestWriterCall(unittest.IsolatedAsyncioTestCase):
              patch(
                  "app.latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level",
              ) as mock_helper, patch(
-                 "app.tether_topic_trigger.request_tether_topic_trigger",
+                 "app.krx_topic_publisher.request_krx_topic_publish",
              ) as mock_trigger:
             # CF close grace 15:45:00 ~ 15:46:00
             await writer(self._make_payload(
@@ -282,7 +280,7 @@ class TestKrxRedisLatestWriterCall(unittest.IsolatedAsyncioTestCase):
                  "app.latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level",
                  return_value=KrxLatestWriteOutcome.SET,
              ) as mock_helper, patch(
-                 "app.tether_topic_trigger.request_tether_topic_trigger",
+                 "app.krx_topic_publisher.request_krx_topic_publish",
              ):
             # 운영 payload 형식: KST naive ISO (tzinfo 정보 없음)
             await writer(self._make_payload(received_at="2026-05-26T10:00:00"))
@@ -303,7 +301,7 @@ class TestKrxRedisLatestWriterCall(unittest.IsolatedAsyncioTestCase):
                  "app.latest_rates_cache.set_latest_krx_rate_from_sync_job_tick_level",
                  return_value=KrxLatestWriteOutcome.SET,
              ) as mock_helper, patch(
-                 "app.tether_topic_trigger.request_tether_topic_trigger",
+                 "app.krx_topic_publisher.request_krx_topic_publish",
              ):
             # UTC aware ISO (2026-05-26 01:00 UTC = 2026-05-26 10:00 KST)
             await writer(self._make_payload(received_at="2026-05-26T01:00:00+00:00"))

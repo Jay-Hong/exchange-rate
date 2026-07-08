@@ -768,12 +768,10 @@ async def broadcast_rates_once():
             # (topic은 별개 채널). FF=false / subscriber 0이면 publisher 내부
             # guard로 즉시 return — builder/publish_topic 호출 0회. 예외 격리는
             # safe_publish_tether_tab_snapshot에서 처리 (broadcast 영향 X).
-            # PR Level 3: config.KRX_TOPIC_INCLUDE 전달 — wrapper는 env 미해석
+            # ADR-038 Decision 2: usdt:krw는 KRX 미포함 — KRX는 krx_topic_publisher 전담
             # (호출자 책임 분리, KRX_BROADCAST_INCLUDE legacy 의미와 분리).
-            await tether_topic_publisher.safe_publish_tether_tab_snapshot(
-                db,
-                include_krx=config.KRX_TOPIC_INCLUDE_EFFECTIVE,   # ADR-038 G2/G3 결합
-            )
+            # ADR-038 Decision 2 — usdt:krw는 KRX group 미포함 (KRX는 독립 topic)
+            await tether_topic_publisher.safe_publish_tether_tab_snapshot(db)
 
             # PR Z-2c Step 3 — FX topic broadcast hook (fx:usd-krw/jpy-krw/eur-krw).
             # tether와 같은 격리 원칙: is_changed 분기 안 + active_connections 분기
@@ -2581,8 +2579,9 @@ async def get_v2_topic_snapshot(topic: str):
     """topic 현재 snapshot REST bootstrap (WS 미연결/실패 시 cold-start fallback, OPEN 1).
 
     WS subscribe의 snapshot-on-subscribe와 **동일 builder**(`_build_snapshot_sync`) →
-    동일 schema(type/version/topic/data + usdt_krw/usd_krw_futures의 rate_changed_at + KRX
-    optional). client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
+    동일 schema(type/version/topic/data + usdt_krw/krx tick entry의 rate_changed_at).
+    KRX는 독립 topic krx:usd-krw-futures (ADR-038 D2 — G2 off면 supported 목록에서 제외
+    = 404). client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
     TOPIC_DISPATCHER_ENABLED off면 dormant(404). REALTIME_V2_CLIENT_GUIDE §3.
     """
     from app import config

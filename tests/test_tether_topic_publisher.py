@@ -3,7 +3,7 @@
 검증:
     - guard 동작 (FF=false / subscriber 0 → builder/publish 호출 0회)
     - 정상 path (FF=true + subscriber → builder + publish 1회)
-    - include_krx=False 고정 (호출 인자 검증)
+    - builder 호출에 include_krx kwargs 부재 (ADR-038 D2 — KRX 독립 topic)
     - publish_topic sent=0 시 wrapper False 반환
     - wrapper가 builder 반환 payload를 변형하지 않음 (Codex 권고: 무변형 계약)
 """
@@ -70,8 +70,9 @@ class TestPublishTetherTabSnapshot(unittest.IsolatedAsyncioTestCase):
         mock_build.assert_called_once()
         mock_pub.assert_awaited_once()
 
-    # 4) builder 호출 인자 include_krx=False
-    async def test_calls_builder_with_include_krx_false(self):
+    # 4) builder 호출 인자 — include_krx kwargs 부재
+    async def test_calls_builder_without_krx_kwargs(self):
+        """ADR-038 D2 — builder 호출에 include_krx kwargs 자체가 없음 (KRX는 독립 topic)."""
         db = MagicMock()
         ws = MagicMock()
         topic_dispatcher.registry.register(ws, [TETHER_TOPIC])
@@ -83,10 +84,9 @@ class TestPublishTetherTabSnapshot(unittest.IsolatedAsyncioTestCase):
                           new=AsyncMock(return_value=1)):
             await publish_tether_tab_snapshot(db)
 
-        # include_krx=False keyword로 호출됨
         mock_build.assert_called_once()
         call_args = mock_build.call_args
-        self.assertEqual(call_args.kwargs.get("include_krx"), False)
+        self.assertNotIn("include_krx", call_args.kwargs)
         # db도 그대로 전달
         self.assertIs(call_args.args[0], db)
 
@@ -444,135 +444,8 @@ class TestTopicTelemetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(telemetry["error"], 0)
 
 
-class TestIncludeKrxParameter(unittest.IsolatedAsyncioTestCase):
-    """PR Level 3 — include_krx 매개변수 wiring 검증.
-
-    핵심 계약:
-      - publish_tether_tab_snapshot(include_krx=True) → load_and_build에 True 전달
-      - default(include_krx=False) → load_and_build에 False 전달
-      - safe_publish_tether_tab_snapshot도 동일 전달
-      - get_topic_telemetry에 krx_topic_include 필드 노출
-    """
-
-    async def asyncSetUp(self):
-        self._original_registry = topic_dispatcher.registry
-        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
-
-    async def asyncTearDown(self):
-        topic_dispatcher.registry = self._original_registry
-
-    async def test_publish_passes_include_krx_true_to_builder(self):
-        """include_krx=True → load_and_build_tether_tab_payload에 True 전달."""
-        ws = MagicMock()
-        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
-
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
-                          return_value={"type": "snapshot", "version": 1, "data": {}}) as mock_build, \
-             patch.object(topic_dispatcher, "publish_topic",
-                          new=AsyncMock(return_value=1)):
-            await tether_topic_publisher.publish_tether_tab_snapshot(
-                MagicMock(), include_krx=True
-            )
-
-        mock_build.assert_called_once()
-        kwargs = mock_build.call_args.kwargs
-        self.assertEqual(kwargs.get("include_krx"), True)
-
-    async def test_publish_default_passes_include_krx_false(self):
-        """default(no flag) → include_krx=False (보수 default)."""
-        ws = MagicMock()
-        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
-
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
-                          return_value={"type": "snapshot", "version": 1, "data": {}}) as mock_build, \
-             patch.object(topic_dispatcher, "publish_topic",
-                          new=AsyncMock(return_value=1)):
-            await tether_topic_publisher.publish_tether_tab_snapshot(MagicMock())
-
-        kwargs = mock_build.call_args.kwargs
-        self.assertEqual(kwargs.get("include_krx"), False)
-
-    async def test_safe_publish_propagates_include_krx(self):
-        """safe wrapper도 include_krx를 publish_tether_tab_snapshot에 전달."""
-        ws = MagicMock()
-        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
-
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
-                          return_value={"type": "snapshot", "version": 1, "data": {}}) as mock_build, \
-             patch.object(topic_dispatcher, "publish_topic",
-                          new=AsyncMock(return_value=1)):
-            await tether_topic_publisher.safe_publish_tether_tab_snapshot(
-                MagicMock(), include_krx=True
-            )
-
-        kwargs = mock_build.call_args.kwargs
-        self.assertEqual(kwargs.get("include_krx"), True)
-
-    async def test_publisher_skips_when_only_other_topic_subscribed(self):
-        """Multi-topic 격리 (Codex 권고): fx:usd-krw만 구독한 ws가 있을 때
-        usdt:krw publisher는 builder 호출 X.
-
-        직전 subscribed_connection_count 기반 guard였으면 잘못 발화. 신규
-        subscriber_count(TETHER_TOPIC) guard로 정확 차단.
-        """
-        ws = MagicMock()
-        # fx:usd-krw만 구독 (usdt:krw 미구독)
-        topic_dispatcher.registry.register(ws, ["fx:usd-krw"])
-
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload") as mock_build, \
-             patch.object(topic_dispatcher, "publish_topic", new=AsyncMock()) as mock_pub:
-            result = await tether_topic_publisher.publish_tether_tab_snapshot(MagicMock())
-
-        self.assertFalse(result)
-        # builder/publish 호출 0회 (subscriber_count(usdt:krw)=0이라 차단)
-        mock_build.assert_not_called()
-        mock_pub.assert_not_called()
-
-    async def test_publisher_injects_topic_field_in_payload(self):
-        """publisher wrapper가 payload에 top-level "topic" 필드 주입 (Codex 권고).
-
-        Multi-topic 환경에서 단말 수신 메시지 식별용. builder는 topic-agnostic
-        유지 — publisher가 schema 책임.
-        """
-        ws = MagicMock()
-        topic_dispatcher.registry.register(ws, [tether_topic_publisher.TETHER_TOPIC])
-
-        # builder는 topic 필드 없는 payload 반환
-        builder_payload = {"type": "snapshot", "version": 1, "data": {}}
-
-        captured = {}
-
-        async def fake_publish(topic, payload):
-            captured["topic_arg"] = topic
-            captured["payload"] = payload
-            return 1
-
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(tether_topic_publisher, "load_and_build_tether_tab_payload",
-                          return_value=builder_payload), \
-             patch.object(topic_dispatcher, "publish_topic", new=AsyncMock(side_effect=fake_publish)):
-            await tether_topic_publisher.publish_tether_tab_snapshot(MagicMock())
-
-        # publish_topic에 전달된 payload에 topic 필드 포함
-        self.assertEqual(captured["topic_arg"], tether_topic_publisher.TETHER_TOPIC)
-        self.assertIn("topic", captured["payload"])
-        self.assertEqual(captured["payload"]["topic"], tether_topic_publisher.TETHER_TOPIC)
-
-    async def test_get_telemetry_exposes_krx_topic_include_field(self):
-        """get_topic_telemetry 반환에 config.KRX_TOPIC_INCLUDE 노출."""
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(config, "KRX_TOPIC_INCLUDE", True):
-            telemetry = await tether_topic_publisher.get_topic_telemetry()
-        self.assertEqual(telemetry["krx_topic_include"], True)
-
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
-             patch.object(config, "KRX_TOPIC_INCLUDE", False):
-            telemetry = await tether_topic_publisher.get_topic_telemetry()
-        self.assertEqual(telemetry["krx_topic_include"], False)
+# (ADR-038 Decision 2) TestIncludeKrxParameter 클래스 제거 — usdt:krw의 include_krx
+# wiring 계약 소멸 (KRX는 krx:usd-krw-futures 독립 topic, tests/test_krx_topic_publisher.py).
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
 > 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출). 서버 측 계약 closed — 잔여는 client 구현 + live enable(별도 GO).
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). **prod LIVE** (2026-06-27 확인:
-> `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED`/`KRX_TOPIC_INCLUDE` ON). 잔여 = **client release gate**
+> `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON). KRX는 2026-07-08부터 독립 topic
+> `krx:usd-krw-futures`(ADR-038 D2 — 구 `KRX_TOPIC_INCLUDE` env 제거). 잔여 = **client release gate**
 > (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).
 > 이 문서가 topic 계약의 **authoritative source**. [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md)
 > "Topic API" 섹션은 본 문서로 supersede(구현에 사용 금지).
@@ -15,12 +16,13 @@
 | `fx:usd-krw` | USD/KRW 은행(≤8, **Citi 제외** — `FX_TOPIC_BANK_ORDER`) + Investing reference | ✅ 구현 |
 | `fx:jpy-krw` | JPY/KRW 은행(≤8, Citi 제외) + reference | ✅ 구현 |
 | `fx:eur-krw` | EUR/KRW 은행(≤8, Citi 제외) + reference | ✅ 구현 |
-| `usdt:krw` | 테더 탭 (USDT 5거래소 + USD/KRW 은행[kb,hana] + reference + KRX 선물 optional) | ✅ 구현 |
+| `usdt:krw` | 테더 탭 (USDT 5거래소 + USD/KRW 은행[kb,hana] + reference) — **KRX 선물 미포함**(ADR-038 D2) | ✅ 구현 |
+| `krx:usd-krw-futures` | KRX 미국달러선물 단독 (ADR-038 D2 독립 topic — `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`[G2∧G3] on일 때만 발행/snapshot) | ✅ 구현 (2026-07-08) |
 
 **범위 밖 (topic publisher 미구현 — 구독해도 데이터 안 옴)**:
 - **DXY / news / graph**: 독립 topic 없음. DXY는 legacy broadcast `data.indices.dxy`, news/graph는 REST.
-- **KRX 미국달러선물**: 독립 `krx:*` topic 없음. `usdt:krw` payload 안 `data.usd_krw_futures` optional group으로만(`KRX_TOPIC_INCLUDE=true`일 때).
 - 미지원 topic을 subscribe하면 registry에는 등록되나 **snapshot은 오지 않음**(조용히 skip).
+  `krx:usd-krw-futures`도 게이트 off(`KRX_CLIENT_DISTRIBUTION_EFFECTIVE=false`)면 동일하게 조용히 skip.
 
 ## 1. 연결 + 구독 프로토콜
 
@@ -46,7 +48,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 ### 활성 조건 (서버 flag)
 
 - `TOPIC_DISPATCHER_ENABLED=true` 필요(전 topic). **현 prod는 ON**(2026-06-27 확인) → subscribe·snapshot 정상.
-- FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`는 `TOPIC_DISPATCHER_ENABLED`만(+ KRX 포함은 `KRX_TOPIC_INCLUDE`).
+- FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`는 `TOPIC_DISPATCHER_ENABLED`만. `krx:usd-krw-futures`는 추가로 `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=`KRX_FUTURES_ENABLED`∧`KRX_CLIENT_DISTRIBUTION_ENABLED`, ADR-038 G2·G3) 필요.
 - live 활성 = 별도 운영 GO (출시 직전).
 
 ### ack / error / auth
@@ -80,7 +82,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 - Entry 식별자 = **`(source, asset)` tuple**. 같은 source가 다른 asset 가능.
 - 서버는 표시명/아이콘/색상/정렬 **미전송**. 단말이 `(source, asset)`로 자체 registry lookup. 새 source 추가 시 단말 registry 갱신.
-- **`rate_changed_at`(optional, ISO8601 KST)**: `usdt_krw` 거래소 + `usd_krw_futures`(KRX) entry의 정밀 변경 시각(Redis-served 시). 이들 `timestamp`는 `seen_at`(5초 bucket)일 수 있어 merge ordering은 이 필드를 우선(§5). bank/investing/FX entry엔 없음(`timestamp`가 이미 정밀). client는 항상 `rate_changed_at ?? timestamp` 사용.
+- **`rate_changed_at`(optional, ISO8601 KST)**: `usdt_krw` 거래소 + `krx:usd-krw-futures` topic entry의 정밀 변경 시각(Redis-served 시). 이들 `timestamp`는 `seen_at`(5초 bucket)일 수 있어 merge ordering은 이 필드를 우선(§5). bank/investing/FX entry엔 없음(`timestamp`가 이미 정밀). client는 항상 `rate_changed_at ?? timestamp` 사용.
 
 ### 2.3 `fx:<asset>` data
 
@@ -97,12 +99,25 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 "data": {
   "usdt_krw": [ {entry + "rate_changed_at"}, ... ],  // USDT 5거래소 — entry에 rate_changed_at 추가(§5)
   "usd_krw_banks": [ {entry}, ... ],  // 은행 (kb, hana)
-  "usd_krw_reference": {entry},       // Optional — source="investing", asset="usd-krw"
-  "usd_krw_futures": {entry (+"rate_changed_at" when Redis-served)}  // Optional — source="krx", asset="usd-krw-futures" (KRX_TOPIC_INCLUDE 시만)
+  "usd_krw_reference": {entry}        // Optional — source="investing", asset="usd-krw"
 }
 ```
 
-**snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 + futures 1 = ≤9 entry. 작음.
+> ADR-038 D2 (2026-07-08): 구 `usd_krw_futures` optional group은 **제거** — KRX는 §2.5 독립 topic.
+
+### 2.5 `krx:usd-krw-futures` data (ADR-038 D2, 2026-07-08)
+
+```jsonc
+"data": {
+  "usd_krw_futures": {entry (+"rate_changed_at" when Redis-served)}  // source="krx", asset="usd-krw-futures"
+}
+```
+
+- entry shape는 구 usdt:krw group과 **동일**(TopicSourceEntry 하위호환) — group 키 이름도 유지.
+- 발행/snapshot 조건: `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(G2∧G3) on. off면 발행 중단 + REST 404 + WS snapshot skip.
+- per-user 노출은 클라 `krx_visible` gate 담당(GET /api/entitlements — WS 무인증, ADR-038 Decision 3).
+
+**snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` = 1 entry. 작음.
 
 ## 3. Bootstrap (초기 상태 획득)
 
@@ -117,10 +132,10 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 **REST bootstrap (WS 미연결/실패 시 권장 fallback)** — v2 endpoint:
 
 ```text
-GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw}
+GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw} (+ krx:usd-krw-futures — G2∧G3 on일 때만, off면 404 unknown_topic)
 ```
 
-- 응답 = **WS snapshot과 동일 schema**(`{type:"snapshot", version:1, topic, data}` + `usdt_krw`/`usd_krw_futures`의 `rate_changed_at` + KRX optional). 같은 builder 공유 → client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
+- 응답 = **WS snapshot과 동일 schema**(`{type:"snapshot", version:1, topic, data}` + usdt/krx tick entry의 `rate_changed_at`). 같은 builder 공유 → client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
 - 권장 흐름: **REST bootstrap(즉시 렌더) → WS subscribe → snapshot/live merge**(REST 응답을 §5 merge로 흡수, WS snapshot이 자연 갱신).
 - `Cache-Control: no-store`. 인증 없음(WS topic과 일관).
 - 응답 코드: 200(payload) / 404 `topics_disabled`(TOPIC_DISPATCHER_ENABLED off=출시 전) / 404 `unknown_topic`(+supported_topics) / 404 `topic_unavailable`(지원 topic이나 현재 미제공, 예 FX_TOPIC_ENABLED off).
@@ -135,7 +150,7 @@ GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-k
 - **Optional 그룹 누락 = 삭제 아님(v1 tombstone 없음)**:
   - *최초 부재*(키가 한 번도 안 온 경우): 미표시.
   - *중도 부재*(이전엔 왔는데 이번 메시지에 없음): **이전 값 유지**(v1엔 삭제 신호 없음).
-  - ⚠️ 운영 함의: `KRX_TOPIC_INCLUDE`를 끄면(`usd_krw_futures` 미전송) **이미 연결된 앱에서 KRX가 즉시 사라지지 않고 마지막 값이 남는다**. 즉시 제거가 필요하면 별도 신호 필요(v1 미지원).
+  - ⚠️ 운영 함의: `krx:usd-krw-futures` 게이트를 끄면(발행 중단) **이미 연결된 앱에서 KRX가 즉시 사라지지 않고 마지막 값이 남는다**(v1 tombstone 없음). 클라 측 즉시 제거는 `krx_visible`(GET /api/entitlements) refresh가 담당 — 서버 push 신호는 v1 미지원.
 
 ## 5. ⚠️ snapshot ↔ live race → merge 규칙 (필수 계약)
 
@@ -145,7 +160,7 @@ GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-k
 
 - **FX(은행/investing)**: `timestamp`=실제 값 변경 시각(정밀). `rate_changed_at` 없음 → `merge_at = timestamp`. merge 정확.
 - **USDT 5거래소(`usdt_krw` 그룹)**: `timestamp`=`seen_at`(5초 bucket alias)지만 **`rate_changed_at`(정밀 변경 시각)이 entry에 포함됨** → `merge_at = rate_changed_at`로 same-bucket 연속 변경도 정밀 ordering. (서버: Redis path `get_latest_usdt_rate_from_sync_job` + DB fallback `get_latest_source_rates_for_topic` 양쪽 노출.)
-- **KRX(`usd_krw_futures`)**: Stage E tick writer(`KRX_REDIS_TICK_WRITE_ENABLED`, 운영 활성)가 USDT와 동일한 5-field schema를 써서 `timestamp`=`seen_at`(5초 bucket)일 수 있음 → **Redis-served entry에 `rate_changed_at`(정밀) 포함**(USDT와 대칭). DB fallback 시엔 `timestamp`가 정밀이라 `rate_changed_at` 생략 → `merge_at = rate_changed_at ?? timestamp`로 일관 처리.
+- **KRX(`krx:usd-krw-futures` topic)**: Stage E tick writer(`KRX_REDIS_TICK_WRITE_ENABLED`, 운영 활성)가 USDT와 동일한 5-field schema를 써서 `timestamp`=`seen_at`(5초 bucket)일 수 있음 → **Redis-served entry에 `rate_changed_at`(정밀) 포함**(USDT와 대칭). DB fallback 시엔 `timestamp`가 정밀이라 `rate_changed_at` 생략 → `merge_at = rate_changed_at ?? timestamp`로 일관 처리.
 
 > 한계: `rate_changed_at`은 ms 해상도라 5초 bucket 문제는 해소되나, 진정한 total order(동일 ms 동시 변경)는 per-message `seq`가 필요(v1 미지원, 실질 영향 없음).
 

@@ -10,7 +10,7 @@ builder/helper와 publish_topic을 잇는 orchestration 계층 — Single Respon
 
 Level 1 (완료, 9215eaf):
     - publish_tether_tab_snapshot wrapper — guard로 FF=false / subscriber 0 시
-      builder/DB 호출 0 (hot path 비용 보호). include_krx=False 고정.
+      builder/DB 호출 0 (hot path 비용 보호).
 
 Level 2 (완료, 39c6592): broadcast cycle 임시 hook 연결.
     - broadcast_rates_once `is_changed` 분기 안에서 safe_publish_tether_tab_snapshot
@@ -32,7 +32,7 @@ Telemetry (Stage 3 추가, 2026-05-10):
     - last 상태: last_result / last_at_kst / last_error (str(exc)[:500])
 
 Level 3 / activation (5/19+):
-    - include_krx 정책 결정 (KRX_TOPIC_INCLUDE 신규 / KRX_BROADCAST_INCLUDE 재사용 /
+    - (구) include_krx 정책 결정 — ADR-038 Decision 2로 usdt:krw에서 KRX group 제거 (독립 topic /
       데이터 존재 게이트) 후 KRX 포함 wrapper 또는 매개변수 추가
     - TOPIC_DISPATCHER_ENABLED=true 활성화 + 클라이언트 release 동기화
     - dev/test client subscribe + 짧은 FF=true 시험으로 운영 검증
@@ -135,8 +135,6 @@ async def _record_topic_event(
 
 async def publish_tether_tab_snapshot(
     db: "Session",
-    *,
-    include_krx: bool = False,
 ) -> bool:
     """테더 탭 snapshot을 TETHER_TOPIC 구독자에게 publish.
 
@@ -146,11 +144,6 @@ async def publish_tether_tab_snapshot(
            (subscribed_connection_count 아님 — multi-topic 환경에서 fx:* 구독자
            때문에 부정확. 해당 topic 실제 구독자만 카운트.)
         둘 다 통과 시에만 load_and_build_tether_tab_payload 호출.
-
-    Args:
-        include_krx: KRX 미국달러선물 포함 여부 (호출자 결정, env flag 미해석).
-            main.py broadcast hook은 config.KRX_TOPIC_INCLUDE를 전달.
-            기본 False — wrapper 자체는 보수 default 유지.
 
     Telemetry: 각 분기에서 _record_topic_event 호출 (best-effort, broadcast 영향 X).
 
@@ -168,7 +161,7 @@ async def publish_tether_tab_snapshot(
         await _record_topic_event(result="skipped_no_subscribers")
         return False
 
-    payload = load_and_build_tether_tab_payload(db, include_krx=include_krx)
+    payload = load_and_build_tether_tab_payload(db)   # ADR-038: KRX group 미포함
     # Multi-topic 환경에서 단말이 수신 메시지의 topic 식별 가능하게 top-level
     # topic 필드 주입 (Codex 권고). builder는 topic-agnostic 유지 — publisher
     # wrapper가 schema 책임. dispatcher.publish_topic는 전달 계층 (자동 변형 X).
@@ -198,16 +191,11 @@ async def publish_tether_tab_snapshot(
 
 async def safe_publish_tether_tab_snapshot(
     db: "Session",
-    *,
-    include_krx: bool = False,
 ) -> bool:
     """예외 격리 wrapper — hot path 호출자가 try/except 안 써도 안전.
 
     publish_tether_tab_snapshot의 어떤 단계 예외도 False 반환 + logger.exception.
     broadcast/mirror 같은 hot path의 정상 흐름 보호 entrypoint.
-
-    Args:
-        include_krx: KRX 포함 여부 (publish_tether_tab_snapshot에 그대로 전달).
 
     Telemetry:
         진입 시 hook_called +1. 예외 시 error counter +1 + last_error 기록.
@@ -218,7 +206,7 @@ async def safe_publish_tether_tab_snapshot(
     await _record_topic_event(result="hook_entered", increment_hook=True)
 
     try:
-        return await publish_tether_tab_snapshot(db, include_krx=include_krx)
+        return await publish_tether_tab_snapshot(db)
     except Exception as exc:
         logger.exception("테더 topic publish 실패 (격리, hot path 영향 X)")
         await _record_topic_event(
@@ -240,10 +228,8 @@ async def get_topic_telemetry() -> Dict[str, Any]:
         "topic": TETHER_TOPIC,
         # PR Level 3 (Codex 권고): TOPIC_DISPATCHER_ENABLED와 분리해 KRX 포함
         # 여부를 별도 노출. 운영 중 "topic 켜져 있으나 KRX 격리" 상태 즉시 확인.
-        "krx_topic_include": config.KRX_TOPIC_INCLUDE,
-        # ADR-038 — 실제 발행 판정값(G2/G3 결합). raw include=true여도 게이트 닫히면 false —
-        # 운영 관측 혼동 방지 (codex NB 2026-07-08).
-        "krx_topic_include_effective": config.KRX_TOPIC_INCLUDE_EFFECTIVE,
+        # (ADR-038 Decision 2) krx_topic_include* 필드 제거 — usdt:krw는 더 이상 KRX를
+        # 포함하지 않음. KRX 발행 관측은 krx:usd-krw-futures topic 축.
         "subscribed_connection_count": topic_dispatcher.registry.subscribed_connection_count,
     }
     # counter/last 기본값

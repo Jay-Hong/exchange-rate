@@ -833,16 +833,14 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
             return_value=True,
         ), patch(
-            "app.tether_topic_trigger.request_tether_topic_trigger"
+            "app.krx_topic_publisher.request_krx_topic_publish"
         ) as mock_trigger:
             await writer(payload)
             await writer._timer
 
         mock_trigger.assert_called_once()
-        kwargs = mock_trigger.call_args.kwargs
-        self.assertEqual(kwargs["source"], "krx")
-        self.assertEqual(kwargs["asset"], "usd-krw-futures")
-        self.assertEqual(kwargs["reason"], "krx_redis_write_success")
+        # ADR-038 D2: krx 독립 topic publish — reason만 (source/asset은 topic 고정)
+        self.assertEqual(mock_trigger.call_args.kwargs["reason"], "krx_redis_write_success")
 
     async def test_trigger_not_called_when_inserted_false(self):
         """(2) _sync_db_write False (inserted=False) → trigger 미호출."""
@@ -853,7 +851,7 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
             return_value=False,
         ), patch(
-            "app.tether_topic_trigger.request_tether_topic_trigger"
+            "app.krx_topic_publisher.request_krx_topic_publish"
         ) as mock_trigger:
             await writer(payload)
             await writer._timer
@@ -878,7 +876,7 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "app.database.get_db_context"
         ), patch(
-            "app.tether_topic_trigger.request_tether_topic_trigger"
+            "app.krx_topic_publisher.request_krx_topic_publish"
         ) as mock_trigger:
             await writer(payload)
             await writer._timer
@@ -894,7 +892,7 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
             side_effect=RuntimeError("DB connection lost"),
         ), patch(
-            "app.tether_topic_trigger.request_tether_topic_trigger"
+            "app.krx_topic_publisher.request_krx_topic_publish"
         ) as mock_trigger, self.assertLogs("app.crawlers.krx_kis", level="WARNING"):
             await writer(payload)
             await writer._timer  # 예외 격리 — raise X
@@ -910,7 +908,7 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
             "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
             return_value=True,
         ), patch(
-            "app.tether_topic_trigger.request_tether_topic_trigger",
+            "app.krx_topic_publisher.request_krx_topic_publish",
             side_effect=RuntimeError("trigger boom"),
         ) as mock_trigger:
             await writer(payload)
@@ -921,9 +919,11 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer._timer.done())
 
     async def test_legacy_piggyback_mode_safety(self):
-        """(6) legacy_piggyback mode — controller request_trigger가 strict noop.
+        """(6→ADR-038 D2 재정의) KRX writer는 tether trigger controller를 더 이상 경유하지 않음.
 
-        Redis write True 후 trigger 호출이 일어나도 publish/timer 효과 0.
+        구 계약: legacy_piggyback mode에서 controller가 noop임을 검증.
+        신 계약: KRX Redis write 성공은 krx 독립 topic publish 요청만 발화 —
+        tether controller의 어떤 카운터도 증가하지 않아야 함 (usdt:krw 재발행 완전 분리).
         """
         from app.tether_topic_trigger import (
             MODE_LEGACY_PIGGYBACK,
@@ -944,15 +944,20 @@ class TestKrxDbWriterTetherTrigger(unittest.IsolatedAsyncioTestCase):
             with patch(
                 "app.crawlers.krx_kis.KrxDbWriter._sync_db_write",
                 return_value=True,
-            ):
+            ), patch(
+                "app.krx_topic_publisher.request_krx_topic_publish"
+            ) as mock_krx_publish:
                 await writer(payload)
                 await writer._timer
             await asyncio.sleep(0.02)
 
-            self.assertEqual(controller.stats.publish_skipped_legacy, 1)
+            # tether controller 완전 미경유 (ADR-038 D2)
+            self.assertEqual(controller.stats.publish_skipped_legacy, 0)
             self.assertEqual(controller.stats.trigger_count, 0)
             self.assertEqual(controller.pending_count, 0)
             publish_mock.assert_not_awaited()
+            # krx 독립 topic publish 요청은 발화
+            mock_krx_publish.assert_called_once()
         finally:
             await controller.close(timeout=0.05)
             reset_tether_topic_trigger_for_tests(None)

@@ -272,84 +272,60 @@ class TestKrxDbWriterRedisIntegration(unittest.TestCase):
 # Group 4 — builder Redis-first read
 # ---------------------------------------------------------------------------
 
-class TestTetherTabPayloadKrxRedisFirst(unittest.TestCase):
-    """load_and_build_tether_tab_payload의 KRX Redis-first 분기."""
-
-    def _build_helper_mocks(self, krx_redis_value):
-        """common patches for builder context."""
-        # USDT 5거래소 / 은행 2개 / Investing 등 다른 source는 정상 동작 가정
-        # KRX만 점검
-        from app import usdt_topic_payload as utp
-
-        usdt_value = {
-            "source": "upbit", "asset": "usdt-krw",
-            "rate": 1400.0, "timestamp": "2026-05-13T15:00:00+09:00",
-        }
-        bank_value = {
-            "source": "kb", "asset": "usd-krw",
-            "rate": 1485.0, "timestamp": "2026-05-13T15:00:00+09:00",
-        }
-        inv_value = {
-            "source": "investing", "asset": "usd-krw",
-            "rate": 1485.5, "timestamp": "2026-05-13T15:00:00+09:00",
-        }
-
-        return {
-            "krx_redis": patch.object(utp, "get_latest_krx_rate_from_sync_job",
-                                      return_value=krx_redis_value),
-            "krx_db": patch("app.usdt_topic_payload.get_latest_source_rate"),
-            "usdt": patch.object(utp, "get_latest_usdt_rate_from_sync_job",
-                                 return_value=usdt_value),
-            "bank": patch.object(utp, "get_latest_bank_rate_from_sync_job",
-                                 return_value=bank_value),
-            "inv": patch.object(utp, "get_latest_investing_rate_from_sync_job",
-                                return_value=inv_value),
-        }
+class TestKrxTopicEntryRedisFirst(unittest.TestCase):
+    """load_krx_topic_entry의 Redis-first + DB fallback (ADR-038 D2 — 구 usdt:krw builder
+    KRX Redis-first 계약을 krx_topic_publisher로 이관, 동일 계약)."""
 
     def test_redis_hit_skips_db_query(self):
         """KRX Redis hit → DB get_latest_source_rate 미호출."""
-        from app.usdt_topic_payload import load_and_build_tether_tab_payload
+        from app.krx_topic_publisher import load_krx_topic_entry
 
         krx_redis = {
             "source": "krx", "asset": "usd-krw-futures",
             "rate": 1485.0, "timestamp": "2026-05-13T15:00:00+09:00",
         }
-        mocks = self._build_helper_mocks(krx_redis)
         fake_db = MagicMock()
+        with patch("app.latest_rates_cache.get_latest_krx_rate_from_sync_job",
+                   return_value=krx_redis), \
+             patch("app.crud.get_latest_source_rate") as mock_db:
+            entry = load_krx_topic_entry(fake_db)
 
-        with mocks["krx_redis"], mocks["krx_db"] as mock_db, \
-             mocks["usdt"], mocks["bank"], mocks["inv"]:
-            payload = load_and_build_tether_tab_payload(fake_db, include_krx=True)
-
-        # ★ KRX DB query 미호출 (Redis hit 시)
         mock_db.assert_not_called()
-        # KRX 데이터 포함 확인
-        self.assertIn("usd_krw_futures", payload["data"])
-        self.assertEqual(payload["data"]["usd_krw_futures"]["rate"], 1485.0)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["rate"], 1485.0)
+        self.assertEqual((entry["source"], entry["asset"]), ("krx", "usd-krw-futures"))
 
     def test_redis_miss_falls_back_to_db(self):
-        """KRX Redis miss → DB get_latest_source_rate 호출."""
-        from app.usdt_topic_payload import load_and_build_tether_tab_payload
+        """KRX Redis miss → DB get_latest_source_rate 호출 (db 세션 제공 시)."""
+        from app.krx_topic_publisher import load_krx_topic_entry
 
-        krx_db_value = {
-            "source": "krx", "currency": "usd-krw-futures",
+        # crud.get_latest_source_rate 실제 반환 shape = legacy dict (bank/currency 키) —
+        # MagicMock attribute row로 잠그면 회귀를 못 잡음 (codex blocker 019f4117)
+        db_row = {
+            "currency": "usd-krw-futures", "bank": "krx",
             "rate": 1486.0, "timestamp": "2026-05-13T15:00:00+09:00",
-            "bank": "krx",
         }
-        mocks = self._build_helper_mocks(None)  # Redis miss
         fake_db = MagicMock()
+        with patch("app.latest_rates_cache.get_latest_krx_rate_from_sync_job",
+                   return_value=None), \
+             patch("app.crud.get_latest_source_rate", return_value=db_row) as mock_db:
+            entry = load_krx_topic_entry(fake_db)
 
-        with mocks["krx_redis"], \
-             patch("app.usdt_topic_payload.get_latest_source_rate",
-                   return_value=krx_db_value) as mock_db, \
-             mocks["usdt"], mocks["bank"], mocks["inv"]:
-            payload = load_and_build_tether_tab_payload(fake_db, include_krx=True)
-
-        # DB fallback 호출
         mock_db.assert_called_once_with(fake_db, "krx", "usd-krw-futures")
-        # KRX 데이터 DB 값으로 포함
-        self.assertIn("usd_krw_futures", payload["data"])
-        self.assertEqual(payload["data"]["usd_krw_futures"]["rate"], 1486.0)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["rate"], 1486.0)
+
+    def test_no_db_session_skips_fallback(self):
+        """db=None(publish hot path) → Redis miss 시 DB fallback 생략, None 반환."""
+        from app.krx_topic_publisher import load_krx_topic_entry
+
+        with patch("app.latest_rates_cache.get_latest_krx_rate_from_sync_job",
+                   return_value=None), \
+             patch("app.crud.get_latest_source_rate") as mock_db:
+            entry = load_krx_topic_entry(None)
+
+        mock_db.assert_not_called()
+        self.assertIsNone(entry)
 
 
 # ---------------------------------------------------------------------------

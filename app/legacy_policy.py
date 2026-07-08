@@ -70,11 +70,11 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
 
 # Legacy `/api/rates/{currency}` endpoint에서 영구 제거된 asset → 안내할 topic.
 # 새 단말은 topic API로 마이그레이션. 같은 topic이라도 의미가 다르면 별도 key로 분리.
-# usd-krw-futures는 현재 usdt:krw topic의 optional group(data.usd_krw_futures)이라
-# 동일 topic 안내. 미래에 KRX 독립 topic(예: krx:usd-krw-futures) 도입 시 value 갱신.
+# usd-krw-futures는 ADR-038 D2(2026-07-08)로 usdt:krw optional group에서 분리 —
+# 독립 topic krx:usd-krw-futures 안내 (app/krx_topic_publisher.KRX_TOPIC).
 LEGACY_REMOVED_RATE_TOPICS: Dict[str, str] = {
     "usdt-krw": "usdt:krw",
-    "usd-krw-futures": "usdt:krw",
+    "usd-krw-futures": "krx:usd-krw-futures",
 }
 
 
