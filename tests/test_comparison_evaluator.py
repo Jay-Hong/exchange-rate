@@ -11,6 +11,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from app import crud, models
+from app.crud import WIDE_GAP
 from app.database import SessionLocal, engine
 from app.models import get_utc_now
 from app.notifications.comparison_evaluator import (
@@ -333,7 +334,7 @@ class TestBuildPayloadMessages(unittest.TestCase):
         fresh = self._fresh(diff_type="absolute", operator="gte", threshold=3.0)
         title, body, data = ComparisonAlertEvaluator._build_payload(
             fresh, self._cand(fresh), self._rate(1509.0), self._rate(1505.0), spread=4.0)
-        self.assertEqual(title, "📊 업비트 ↔ 빗썸  차이  4원")
+        self.assertEqual(title, f"📊 업비트 ↔ 빗썸{WIDE_GAP}차이{WIDE_GAP}4원")
         self.assertEqual(body, "[ 3원 ↑이상 도달]")
         self.assertEqual(data["type"], "comparison_alert")
 
@@ -344,7 +345,7 @@ class TestBuildPayloadMessages(unittest.TestCase):
                             right_source="hana", right_asset="usd-krw")
         title, body, _ = ComparisonAlertEvaluator._build_payload(
             fresh, self._cand(fresh), self._rate(1483.3), self._rate(1508.0), spread=-24.7)
-        self.assertEqual(title, "📊 빗썸 - 하나  김프  -24.7 (-1.64%)")
+        self.assertEqual(title, f"📊 빗썸 - 하나{WIDE_GAP}김프{WIDE_GAP}-24.7 (-1.64%)")
         self.assertEqual(body, "[ -20 ↓이하 도달]")
 
     def test_signed_zero_right_rate_no_percent(self):
@@ -354,7 +355,7 @@ class TestBuildPayloadMessages(unittest.TestCase):
                             right_source="hana", right_asset="usd-krw")
         title, _, _ = ComparisonAlertEvaluator._build_payload(
             fresh, self._cand(fresh), self._rate(10.0), self._rate(0.0), spread=10.0)
-        self.assertEqual(title, "📊 빗썸 - 하나  김프  10")   # percent 없음
+        self.assertEqual(title, f"📊 빗썸 - 하나{WIDE_GAP}김프{WIDE_GAP}10")   # percent 없음
 
 
 class TestEmitGate(unittest.TestCase):

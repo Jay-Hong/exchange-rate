@@ -379,7 +379,7 @@ class ComparisonAlertEvaluator:
         # 푸시 문구 (사용자 2026-07-09): 소스명은 title로, 현재값은 title 마지막,
         # body는 목표/조건만. 비교(absolute)=↔·차이·N원 / 김프(signed)=-·김프·부호값(%).
         from app import source_registry
-        from app.crud import BANK_NAMES_KR, format_threshold
+        from app.crud import BANK_NAMES_KR, WIDE_GAP, format_threshold
 
         def _disp(src: str, asset: str) -> str:
             # registry(거래소·usd 은행) → BANK_NAMES_KR(FX 은행 jpy/eur·shinhan 등) → upper.
@@ -395,7 +395,7 @@ class ComparisonAlertEvaluator:
         threshold_str = format_threshold(fresh.threshold)
 
         if fresh.diff_type == "absolute":   # 비교
-            title = f"📊 {left_disp} ↔ {right_disp}  차이  {format_threshold(abs(spread))}원"
+            title = f"📊 {left_disp} ↔ {right_disp}{WIDE_GAP}차이{WIDE_GAP}{format_threshold(abs(spread))}원"
             body = f"[ {threshold_str}원 {arrow}{direction} 도달]"
         else:                               # signed (김프/역프)
             spread_str = format_threshold(spread)   # 부호 유지 (-24.7)
@@ -404,7 +404,7 @@ class ComparisonAlertEvaluator:
                 current = f"{spread_str} ({spread / rr * 100:.2f}%)"
             else:
                 current = spread_str
-            title = f"📊 {left_disp} - {right_disp}  김프  {current}"
+            title = f"📊 {left_disp} - {right_disp}{WIDE_GAP}김프{WIDE_GAP}{current}"
             body = f"[ {threshold_str} {arrow}{direction} 도달]"
         data = {
             "type": "comparison_alert",

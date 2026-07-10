@@ -71,6 +71,14 @@ class TestSourceAlertBackendBuildPayload(unittest.TestCase):
         self.assertIn("1399", title)            # 현재가 title (1399.00 → 1399)
         self.assertEqual(body, "[ 1400 ↓이하 도달 ]")
 
+    def test_build_payload_wide_gap_nbsp(self):
+        # 사용자 2026-07-09: 컬럼 사이는 NBSP 2개(합쳐지지 않는 넓은 간격), 이모지 뒤는 일반 1칸.
+        from app.crud import WIDE_GAP
+        title, _, _ = SourceAlertBackend().build_payload(_candidate(), Decimal("1455.5"))
+        self.assertIn(WIDE_GAP, title)               # 컬럼 사이 NBSP 존재
+        self.assertTrue(title.startswith("📈 "))     # 이모지 뒤 일반 스페이스 1칸
+        self.assertNotIn("  ", title)                # 일반 스페이스 2연속 없음(NBSP로 대체)
+
     def test_build_payload_krx_uses_display_name_no_asset(self):
         # ADR-038 ③ + 문구 정리: KRX title = "📈  달러선물  {현재가}" (asset 'USD-KRW-FUTURES' 미표시)
         cand = CachedAlertSetting(

@@ -87,20 +87,25 @@ ASSET_DISPLAY_KR = {
     "usdt-krw": "테더",
 }
 
+# 컬럼 사이 "넓은 간격" — non-breaking space 2개 (사용자 2026-07-09: 일반 스페이스보다 넓게).
+# iOS 알림은 연속 일반 스페이스를 1개로 합쳐 표시할 수 있어(collapse) NBSP로 간격을 보장한다.
+# 이모지 뒤·구분자(↔/-) 주변은 일반 스페이스 1칸(사용자 예시 패턴 = 이모지 뒤 1칸 / 컬럼 사이 넓게).
+WIDE_GAP = "\u00A0\u00A0"
+
 
 def build_bank_alert_title(icon: str, bank_kr: str, currency_kr: str, rate: float) -> str:
-    """은행 가격알림 title — 현재가를 마지막에 (예: '📈  하나은행  달러  1476.3')."""
-    return f"{icon}  {bank_kr}  {currency_kr}  {format_threshold(rate)}"
+    """은행 가격알림 title — 현재가를 마지막에 (예: '📈 하나은행  달러  1476.3', 컬럼 간격 NBSP)."""
+    return f"{icon} {bank_kr}{WIDE_GAP}{currency_kr}{WIDE_GAP}{format_threshold(rate)}"
 
 
 def build_source_alert_title(icon: str, source_display: str, asset: str, rate: float) -> str:
     """소스 가격알림 title — asset 표시명 있으면 삽입, KRX는 생략
-    (예: '📈  빗썸  테더  1505' / '📈  달러선물  1505.3')."""
+    (예: '📈 빗썸  테더  1505' / '📈 달러선물  1505.3', 컬럼 간격 NBSP)."""
     asset_label = ASSET_DISPLAY_KR.get(asset)
     rate_str = format_threshold(rate)
     if asset_label:
-        return f"{icon}  {source_display}  {asset_label}  {rate_str}"
-    return f"{icon}  {source_display}  {rate_str}"
+        return f"{icon} {source_display}{WIDE_GAP}{asset_label}{WIDE_GAP}{rate_str}"
+    return f"{icon} {source_display}{WIDE_GAP}{rate_str}"
 
 
 def build_rate_alert_body(threshold: float, condition: str) -> str:
