@@ -42,7 +42,7 @@ class SourceDefinition:
     phase1_enabled: bool = True
 
 
-# 기본 표시 순서: 인베스팅 → KB → 하나 → (미국달러F) → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗
+# 기본 표시 순서: 인베스팅 → KB → 하나 → (달러선물) → 업비트 → 빗썸 → 코인원 → 고팍스 → 코빗
 _ALL_SOURCES: tuple[SourceDefinition, ...] = (
     SourceDefinition(
         source="investing",
@@ -68,7 +68,7 @@ _ALL_SOURCES: tuple[SourceDefinition, ...] = (
     SourceDefinition(
         source="krx",
         asset="usd-krw-futures",
-        display_name="미국달러F",
+        display_name="달러선물",
         category="derivative",
         sort_order=40,
         # F-2 (2026-05-26): phase1_enabled=False → True. main.py wrapper

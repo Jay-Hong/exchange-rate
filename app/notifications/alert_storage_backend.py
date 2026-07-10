@@ -209,20 +209,14 @@ class SourceAlertBackend(AlertStorageBackend):
         format_threshold + source_registry display_name 사용. data["type"]="source_rate_alert".
         """
         from app import source_registry
-        from app.crud import format_threshold
+        from app.crud import build_rate_alert_body, build_source_alert_title
 
         definition = source_registry.get_source_definition(candidate.source, candidate.asset)
         source_display = definition.display_name if definition else candidate.source.upper()
-        asset_display = candidate.asset.upper()
 
         icon = "📈" if candidate.condition == "above" else "📉"
-        title = f"{icon}  {source_display}  {asset_display}"
-
-        condition_arrow = "↑" if candidate.condition == "above" else "↓"
-        condition_text = "이상" if candidate.condition == "above" else "이하"
-        threshold_str = format_threshold(candidate.threshold)
-        rate_str = f"{float(triggered_rate):.2f}"
-        body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
+        title = build_source_alert_title(icon, source_display, candidate.asset, float(triggered_rate))
+        body = build_rate_alert_body(candidate.threshold, candidate.condition)
 
         data = {
             "type": "source_rate_alert",
@@ -340,7 +334,12 @@ class FxNotificationBackend(AlertStorageBackend):
 
     def build_payload(self, candidate: "CachedAlertSetting", triggered_rate: Decimal) -> tuple[str, str, dict]:
         """legacy FX 형식 (crud.process_rate_alerts 2200-2226 mirror) — data["type"]="rate_alert"."""
-        from app.crud import BANK_NAMES_KR, CURRENCY_NAMES_KR, format_threshold
+        from app.crud import (
+            BANK_NAMES_KR,
+            CURRENCY_NAMES_KR,
+            build_bank_alert_title,
+            build_rate_alert_body,
+        )
 
         bank = candidate.source       # value pass-through
         currency = candidate.asset
@@ -348,13 +347,8 @@ class FxNotificationBackend(AlertStorageBackend):
         currency_kr = CURRENCY_NAMES_KR.get(currency, currency.upper())
 
         icon = "📈" if candidate.condition == "above" else "📉"
-        title = f"{icon}  {bank_kr}  {currency_kr}"
-
-        condition_arrow = "↑" if candidate.condition == "above" else "↓"
-        condition_text = "이상" if candidate.condition == "above" else "이하"
-        threshold_str = format_threshold(candidate.threshold)
-        rate_str = f"{float(triggered_rate):.2f}"
-        body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
+        title = build_bank_alert_title(icon, bank_kr, currency_kr, float(triggered_rate))
+        body = build_rate_alert_body(candidate.threshold, candidate.condition)
 
         data = {
             "type": "rate_alert",

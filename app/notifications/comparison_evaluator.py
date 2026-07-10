@@ -376,12 +376,36 @@ class ComparisonAlertEvaluator:
         # ADR-036 payload-flag 계약: is_repeat = **repeat 모드 여부**(repeat_interval_sec 존재) —
         # 첫 발화도 repeat면 true (클라 "repeat면 로컬 비활성화 금지" 판단 기준, codex B1).
         is_repeat = fresh.repeat_interval_sec is not None
+        # 푸시 문구 (사용자 2026-07-09): 소스명은 title로, 현재값은 title 마지막,
+        # body는 목표/조건만. 비교(absolute)=↔·차이·N원 / 김프(signed)=-·김프·부호값(%).
+        from app import source_registry
+        from app.crud import BANK_NAMES_KR, format_threshold
+
+        def _disp(src: str, asset: str) -> str:
+            # registry(거래소·usd 은행) → BANK_NAMES_KR(FX 은행 jpy/eur·shinhan 등) → upper.
+            # FX 비교(usd/jpy/eur) 소스 일부가 registry 미등록이라 대문자 코드 노출 방지 (codex 019f49d2).
+            d = source_registry.get_source_definition(src, asset)
+            name = d.display_name if d else BANK_NAMES_KR.get(src, src.upper())
+            return name.removesuffix("은행")   # title 컴팩트 (하나은행→하나, 국민은행→국민)
+
+        left_disp = _disp(candidate.left_source, candidate.left_asset)
+        right_disp = _disp(candidate.right_source, candidate.right_asset)
+        arrow = "↑" if fresh.operator == "gte" else "↓"
         direction = "이상" if fresh.operator == "gte" else "이하"
-        kind = "차이" if fresh.diff_type == "absolute" else "스프레드"
-        title = "📊 비교 알림"
-        body = (f"{candidate.left_source}:{candidate.left_asset} − "
-                f"{candidate.right_source}:{candidate.right_asset} {kind} "
-                f"{fresh.threshold:g}원 {direction} 도달 (현재 {spread:+.2f}원)")
+        threshold_str = format_threshold(fresh.threshold)
+
+        if fresh.diff_type == "absolute":   # 비교
+            title = f"📊 {left_disp} ↔ {right_disp}  차이  {format_threshold(abs(spread))}원"
+            body = f"[ {threshold_str}원 {arrow}{direction} 도달]"
+        else:                               # signed (김프/역프)
+            spread_str = format_threshold(spread)   # 부호 유지 (-24.7)
+            rr = float(right.rate)
+            if rr:
+                current = f"{spread_str} ({spread / rr * 100:.2f}%)"
+            else:
+                current = spread_str
+            title = f"📊 {left_disp} - {right_disp}  김프  {current}"
+            body = f"[ {threshold_str} {arrow}{direction} 도달]"
         data = {
             "type": "comparison_alert",
             "setting_id": str(fresh.setting_id),

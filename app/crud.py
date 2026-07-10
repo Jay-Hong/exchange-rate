@@ -78,6 +78,38 @@ def format_threshold(value: float) -> str:
     return formatted
 
 
+# ─── 푸시 알림 메시지 헬퍼 (사용자 2026-07-09) ─────────────────────────────────
+# 가격알림 title = "{icon}  {이름들}  {현재가}" (두 칸 간격, 현재가는 title 마지막),
+# body = "[ {목표} {화살표}{이상/이하} 도달 ]" (현재가 제거). 여러 빌더가 공유해 divergence 방지.
+
+# asset → title 표시명. KRX(usd-krw-futures)는 title에 asset 미표시(source_display만) → 미포함.
+ASSET_DISPLAY_KR = {
+    "usdt-krw": "테더",
+}
+
+
+def build_bank_alert_title(icon: str, bank_kr: str, currency_kr: str, rate: float) -> str:
+    """은행 가격알림 title — 현재가를 마지막에 (예: '📈  하나은행  달러  1476.3')."""
+    return f"{icon}  {bank_kr}  {currency_kr}  {format_threshold(rate)}"
+
+
+def build_source_alert_title(icon: str, source_display: str, asset: str, rate: float) -> str:
+    """소스 가격알림 title — asset 표시명 있으면 삽입, KRX는 생략
+    (예: '📈  빗썸  테더  1505' / '📈  달러선물  1505.3')."""
+    asset_label = ASSET_DISPLAY_KR.get(asset)
+    rate_str = format_threshold(rate)
+    if asset_label:
+        return f"{icon}  {source_display}  {asset_label}  {rate_str}"
+    return f"{icon}  {source_display}  {rate_str}"
+
+
+def build_rate_alert_body(threshold: float, condition: str) -> str:
+    """가격알림 body — 목표/조건만 (현재가는 title로 이동). 예: '[ 1475 ↑이상 도달 ]'."""
+    arrow = "↑" if condition == "above" else "↓"
+    text = "이상" if condition == "above" else "이하"
+    return f"[ {format_threshold(threshold)} {arrow}{text} 도달 ]"
+
+
 # KST 타임존 (UTC+9)
 KST = dt_timezone(timedelta(hours=9))
 
@@ -2448,14 +2480,8 @@ def process_rate_alerts(
                 currency_kr = CURRENCY_NAMES_KR.get(currency, currency.upper())
                 icon = "📈" if setting.condition == "above" else "📉"
 
-                title = f"{icon}  {bank_kr}  {currency_kr}"
-
-                condition_arrow = "↑" if setting.condition == "above" else "↓"
-                condition_text = "이상" if setting.condition == "above" else "이하"
-                threshold_str = format_threshold(setting.threshold)
-                rate_str = f"{rate:.2f}"
-
-                body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
+                title = build_bank_alert_title(icon, bank_kr, currency_kr, rate)
+                body = build_rate_alert_body(setting.threshold, setting.condition)
 
                 # data payload (앱에서 처리용)
                 # title/body 포함: 포그라운드에서도 동일한 메시지 표시 보장
@@ -3530,14 +3556,8 @@ def process_source_rate_alerts(
                 user_id = item["user_id"]
 
                 icon = "📈" if setting.condition == "above" else "📉"
-                title = f"{icon}  {source_display}  {asset_display}"
-
-                condition_arrow = "↑" if setting.condition == "above" else "↓"
-                condition_text = "이상" if setting.condition == "above" else "이하"
-                threshold_str = format_threshold(setting.threshold)
-                rate_str = f"{rate:.2f}"
-
-                body = f"[ {threshold_str} {condition_arrow}{condition_text} 도달 ]   {rate_str}"
+                title = build_source_alert_title(icon, source_display, asset, rate)
+                body = build_rate_alert_body(setting.threshold, setting.condition)
 
                 # FCM data payload. 기존 앱이 모르는 type이어도 무해하게 무시할 수 있도록
                 # 필드 타입을 string으로 유지 (기존 rate_alert와 동일 컨벤션).

@@ -55,8 +55,10 @@ class TestSourceAlertBackendBuildPayload(unittest.TestCase):
         self.assertEqual(data["condition"], "above")
         self.assertEqual(data["setting_id"], "1")
         self.assertIn("📈", title)
-        self.assertIn("1455.50", body)  # rate_str = f"{float(triggered_rate):.2f}"
-        self.assertIn("이상", body)
+        self.assertIn("업비트", title)          # display_name
+        self.assertIn("테더", title)            # asset 표시명 (usdt-krw → 테더)
+        self.assertIn("1455.5", title)          # 현재가는 title 마지막 (trailing zero 제거)
+        self.assertEqual(body, "[ 1450 ↑이상 도달 ]")   # body=목표/조건만
 
     def test_build_payload_below(self):
         cand = CachedAlertSetting(
@@ -66,8 +68,21 @@ class TestSourceAlertBackendBuildPayload(unittest.TestCase):
         title, body, data = SourceAlertBackend().build_payload(cand, Decimal("1399.0"))
         self.assertEqual(data["condition"], "below")
         self.assertIn("📉", title)
-        self.assertIn("이하", body)
-        self.assertIn("1399.00", body)
+        self.assertIn("1399", title)            # 현재가 title (1399.00 → 1399)
+        self.assertEqual(body, "[ 1400 ↓이하 도달 ]")
+
+    def test_build_payload_krx_uses_display_name_no_asset(self):
+        # ADR-038 ③ + 문구 정리: KRX title = "📈  달러선물  {현재가}" (asset 'USD-KRW-FUTURES' 미표시)
+        cand = CachedAlertSetting(
+            setting_id=7, user_id="u7", source="krx", asset="usd-krw-futures",
+            condition="above", threshold=1500.0, device_tokens=("t7",),
+        )
+        title, body, _ = SourceAlertBackend().build_payload(cand, Decimal("1505.3"))
+        self.assertIn("달러선물", title)             # display_name (구 '미국달러F' 아님)
+        self.assertNotIn("미국달러F", title)
+        self.assertNotIn("USD-KRW-FUTURES", title)   # asset 미표시
+        self.assertIn("1505.3", title)
+        self.assertEqual(body, "[ 1500 ↑이상 도달 ]")
 
     def test_build_payload_is_repeat_false_for_once(self):
         # B2 (ADR-036) payload-flag: repeat_interval_sec None(once) → "false" (str, FCM data 호환)
@@ -162,7 +177,8 @@ class TestFxNotificationBackend(unittest.TestCase):
         self.assertNotIn("asset", data)
         self.assertIn("📈", title)
         self.assertIn("국민은행", title)                  # BANK_NAMES_KR 적용
-        self.assertIn("1455.50", body)
+        self.assertIn("1455.5", title)                    # 현재가 title 마지막
+        self.assertEqual(body, "[ 1450 ↑이상 도달 ]")     # body=목표/조건만
         self.assertEqual(data["is_repeat"], "false")     # B2 (ADR-036): once 기본
 
     def test_build_payload_is_repeat_true(self):

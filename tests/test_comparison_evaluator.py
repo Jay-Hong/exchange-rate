@@ -306,6 +306,57 @@ class TestEvaluatorE2E(unittest.TestCase):
         self.assertEqual(len(self.sent), 0)
 
 
+class TestBuildPayloadMessages(unittest.TestCase):
+    """푸시 문구 포맷 잠금 (사용자 2026-07-09) — 비교(↔·차이·N원) / 김프(-·김프·부호값%)."""
+
+    def _fresh(self, **over):
+        d = dict(setting_id=1, enabled=True, triggered=False, tab="tether",
+                 left_source="upbit", left_asset="usdt-krw",
+                 right_source="bithumb", right_asset="usdt-krw",
+                 diff_type="absolute", operator="gte", threshold=3.0)
+        d.update(over)
+        return FreshComparisonSnapshot(**d)
+
+    def _cand(self, fresh):
+        return ComparisonCandidate(
+            setting_id=fresh.setting_id, user_id="u", tab=fresh.tab,
+            left_source=fresh.left_source, left_asset=fresh.left_asset,
+            right_source=fresh.right_source, right_asset=fresh.right_asset,
+            diff_type=fresh.diff_type, operator=fresh.operator, threshold=fresh.threshold,
+            device_tokens=("t",),
+        )
+
+    def _rate(self, v):
+        return UnifiedRate(rate=v, observed_at=get_utc_now(), origin="redis")
+
+    def test_absolute_comparison_message(self):
+        fresh = self._fresh(diff_type="absolute", operator="gte", threshold=3.0)
+        title, body, data = ComparisonAlertEvaluator._build_payload(
+            fresh, self._cand(fresh), self._rate(1509.0), self._rate(1505.0), spread=4.0)
+        self.assertEqual(title, "📊 업비트 ↔ 빗썸  차이  4원")
+        self.assertEqual(body, "[ 3원 ↑이상 도달]")
+        self.assertEqual(data["type"], "comparison_alert")
+
+    def test_signed_kimchi_message_with_percent(self):
+        # 빗썸(거래소) − 하나(환율): 김프, 부호값 + percent, 은행명 '은행' 접미 제거
+        fresh = self._fresh(diff_type="signed", operator="lte", threshold=-20.0,
+                            left_source="bithumb", left_asset="usdt-krw",
+                            right_source="hana", right_asset="usd-krw")
+        title, body, _ = ComparisonAlertEvaluator._build_payload(
+            fresh, self._cand(fresh), self._rate(1483.3), self._rate(1508.0), spread=-24.7)
+        self.assertEqual(title, "📊 빗썸 - 하나  김프  -24.7 (-1.64%)")
+        self.assertEqual(body, "[ -20 ↓이하 도달]")
+
+    def test_signed_zero_right_rate_no_percent(self):
+        # right.rate=0 → division 가드 (percent 생략)
+        fresh = self._fresh(diff_type="signed", operator="gte", threshold=5.0,
+                            left_source="bithumb", left_asset="usdt-krw",
+                            right_source="hana", right_asset="usd-krw")
+        title, _, _ = ComparisonAlertEvaluator._build_payload(
+            fresh, self._cand(fresh), self._rate(10.0), self._rate(0.0), spread=10.0)
+        self.assertEqual(title, "📊 빗썸 - 하나  김프  10")   # percent 없음
+
+
 class TestEmitGate(unittest.TestCase):
     """emit_comparison_observation flag gate — off면 zero-overhead (marshal 미시도)."""
 
