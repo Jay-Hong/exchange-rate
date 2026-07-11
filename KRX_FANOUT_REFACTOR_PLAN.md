@@ -237,7 +237,7 @@ WebSocket tick (KisFuturesClient)
 
 1. **SET-only ❌**: alert는 mirror layer (`KrxRedisLatestWriter`)의 `KrxLatestWriteOutcome.{SET,SKIPPED,FAILED}` 분기와 직교. 매 tick observation이 평가 대상. PriceAlertCoalescer 5초 wall-clock grain이 noise 차단.
 2. **Close grace skip ❌**: `KrxRedisLatestWriter.__call__`은 close grace tick (CF 15:45:00~15:45:59 / CM 06:00:00~06:00:59) skip (KrxCloseWindowWriter non-interference) — 그러나 `KrxAlertTickHandler.__call__`은 close grace tick **평가 진행**. 종가 crossing 알림 누락 차단이 alert 핵심 정책.
-3. **Session boundary drain**: PriceAlertCoalescer pending bucket은 다음 bucket tick 또는 `close()`까지 보류 — KRX는 1 client가 여러 session (CF↔CM) 전환이라 USDT 패턴 자동 적용 X. `KisFuturesClient._drain_alert_tick_handlers(timeout)` helper가 `_run_session` boundary return 전 + `stop()` 양쪽에서 명시 drain (외부 검토 #1 보강).
+3. **Session boundary drain**: PriceAlertCoalescer pending bucket은 다음 bucket tick 또는 `close()`까지 보류 — KRX는 1 client가 여러 session (CF↔CM) 전환이라 USDT 패턴 자동 적용 X. `KisFuturesClient._drain_alert_tick_handlers(timeout)` helper가 `_run_session` boundary return 전 + `stop()` 양쪽에서 명시 drain (외부 검토 #1 보강). **비교(김프)알림 대칭 (2026-07-11)**: `close()` flush 경로도 단일알림뿐 아니라 flush된 bucket마다 `_emit_comparison`을 tick 경로와 동일하게 발화 — drain이 막으려는 "마지막 bucket crossing 손실"이 비교알림에도 적용 (그전엔 단일알림만 재평가해 세션 경계 김프 crossing 누락 가능). fire-and-forget(비교 evaluator loop bridge), 세션 경계는 loop 생존이라 실행 보장.
 
 **non-interference 잠금** (Stage E와 직교): KrxCloseWindowWriter의 close grace window 일반 KrxDbWriter skip 정책 유지, close finalizer "window-end 1건 unconditional insert" 정책 미변경. F-1 alert evaluator는 mirror/DB writer와 다른 책임 layer라 Stage E close non-interference에 영향 0.
 

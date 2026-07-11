@@ -450,10 +450,21 @@ class UsdtAlertEvaluator:
         boundary 보존보다 alert 손실 방지를 우선 (§12.8.3 결정 #4).
         """
         flushed = self._coalescer.flush_pending()
+        emitted_pairs: set[tuple[str, str]] = set()
         for price_input in flushed:
             task = asyncio.create_task(self._evaluate_price_input_async(price_input))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+            # 비교알림 hook — tick 경로(schedule, line ~434)와 대칭. close/reconnect/KRX 세션 경계
+            # drain 시 마지막 coalescer bucket의 비교알림 crossing 누락 방지 (codex 2026-07-11).
+            # 이 flush는 KRX `_drain_alert_tick_handlers`(CF 15:45 / CF→CM 갭)가 마지막 bucket 손실을
+            # 막으려 존재하는데, 그동안 단일알림만 재평가하고 비교알림은 빠져 있었음. (source,asset)
+            # 중복 emit 회피. flag off면 _emit_comparison 내부 zero-overhead. fire-and-forget —
+            # 비교 evaluator 자체 loop bridge라 세션 경계(loop 생존) 실행 보장, shutdown은 best-effort.
+            pair = (price_input.source, price_input.asset)
+            if pair not in emitted_pairs:
+                emitted_pairs.add(pair)
+                _emit_comparison(price_input.source, price_input.asset)
 
         if not self._tasks:
             return
