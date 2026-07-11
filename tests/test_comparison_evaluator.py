@@ -334,8 +334,8 @@ class TestBuildPayloadMessages(unittest.TestCase):
         fresh = self._fresh(diff_type="absolute", operator="gte", threshold=3.0)
         title, body, data = ComparisonAlertEvaluator._build_payload(
             fresh, self._cand(fresh), self._rate(1509.0), self._rate(1505.0), spread=4.0)
-        self.assertEqual(title, f"📊 업비트 ↔ 빗썸{WIDE_GAP}차이{WIDE_GAP}4원")
-        self.assertEqual(body, "[ 3원 ↑이상 도달]")
+        self.assertEqual(title, f"📊 업비트 ↔ 빗썸{WIDE_GAP}차이{WIDE_GAP}4")
+        self.assertEqual(body, "[ 3 ↑이상 도달]")
         self.assertEqual(data["type"], "comparison_alert")
 
     def test_signed_kimchi_message_with_percent(self):

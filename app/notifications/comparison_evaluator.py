@@ -394,9 +394,9 @@ class ComparisonAlertEvaluator:
         direction = "이상" if fresh.operator == "gte" else "이하"
         threshold_str = format_threshold(fresh.threshold)
 
-        if fresh.diff_type == "absolute":   # 비교
-            title = f"📊 {left_disp} ↔ {right_disp}{WIDE_GAP}차이{WIDE_GAP}{format_threshold(abs(spread))}원"
-            body = f"[ {threshold_str}원 {arrow}{direction} 도달]"
+        if fresh.diff_type == "absolute":   # 비교 (거래소간 차이 — '원' 미표시, 사용자 2026-07-09)
+            title = f"📊 {left_disp} ↔ {right_disp}{WIDE_GAP}차이{WIDE_GAP}{format_threshold(abs(spread))}"
+            body = f"[ {threshold_str} {arrow}{direction} 도달]"
         else:                               # signed (김프/역프)
             spread_str = format_threshold(spread)   # 부호 유지 (-24.7)
             rr = float(right.rate)
