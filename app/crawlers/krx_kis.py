@@ -1969,6 +1969,11 @@ class KrxAlertTickHandler:
 
         env false 시 scheduler가 본 handler를 등록하지 X (defensive guard 유지).
         Close grace skip 없음 — alert는 모든 tick 평가 (종가 crossing 보존).
+
+        ⚠️ 운영 불변식 (codex 2026-07-10): KRX **비교알림**(김프 counter + usd absolute
+        달러선물 비교)의 관측(emit_comparison_observation)도 이 handler → evaluator 경유 —
+        KRX_ALERT_EVALUATOR_ENABLED=false면 KRX 단일 가격알림뿐 아니라 KRX 비교알림
+        발화도 함께 중단된다 (의도된 결합 — KRX tick 관측의 단일 진입점).
         """
         if not config.KRX_ALERT_EVALUATOR_ENABLED:
             return

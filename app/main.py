@@ -3428,9 +3428,11 @@ async def create_comparison_alert(
                                       body.right_source, body.right_asset,
                                       body.diff_type, body.threshold)
 
-    # ADR-038 G1/G2 — 김프 비교상대 KRX는 entitlement+게이트 필요 (403).
-    # absolute는 거래소 5끼리만이라 KRX 불가(validator가 400) — signed counter만 검사.
-    if body.diff_type == "signed" and (body.right_source, body.right_asset) == entitlements.KRX_PAIR:
+    # ADR-038 G1/G2 — KRX가 좌우 어느 쪽에든 포함되면 entitlement+게이트 필요 (403).
+    # signed(김프 counter)는 right만 가능(validator가 left=거래소 강제)하고, absolute는
+    # canonical 정렬로 krx가 left/right 어느 쪽이든 저장됨 → 양측 검사 (codex 2026-07-10).
+    if (entitlements.KRX_PAIR in ((body.left_source, body.left_asset),
+                                  (body.right_source, body.right_asset))):
         _require_krx_alert_allowed_or_403(db, user_id)
 
     # absolute는 저장 전 canonical ordering — A−B/B−A dedup 중복 차단 (ADR-037 Amendment).
@@ -3519,8 +3521,9 @@ async def update_comparison_alert(
         and body.threshold is None and body.operator is None
         and "repeat_interval_sec" not in body.model_fields_set
     )
-    if (alert.diff_type == "signed"
-            and (alert.right_source, alert.right_asset) == entitlements.KRX_PAIR
+    # KRX가 좌우 어느 쪽이든(signed 김프 counter + absolute 달러선물 비교) 게이트 (codex 2026-07-10)
+    if (entitlements.KRX_PAIR in ((alert.left_source, alert.left_asset),
+                                  (alert.right_source, alert.right_asset))
             and not _disable_only):
         _require_krx_alert_allowed_or_403(db, user_id)
 

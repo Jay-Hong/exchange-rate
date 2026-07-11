@@ -91,8 +91,11 @@ def cmd_revoke(user_id: str, key: str, write: bool) -> None:
 
     disable 대상:
       - source_notification_settings: (krx, usd-krw-futures) AND enabled=True
-      - comparison_alerts: diff_type='signed' AND right=(krx, usd-krw-futures) AND enabled=True
+      - comparison_alerts: KRX가 left 또는 right AND enabled=True
+        (signed 김프 counter[right] + usd absolute 달러선물 비교[canonical 정렬로 양쪽 가능])
     삭제가 아니라 disable — 재부여 시 사용자가 직접 재활성 가능 (그 시점 gate 통과 필요).
+    ⚠️ TOCTOU: evaluator가 refetch 통과 직후 revoke가 완료되면 진행 중이던 FCM 1건은
+    발송될 수 있음 — "회수 이후 절대 0건" 계약이 아닌 수용된 운영 race (codex 2026-07-10).
     """
     from app import models
     from app.database import get_db_context
@@ -111,16 +114,21 @@ def cmd_revoke(user_id: str, key: str, write: bool) -> None:
                                     models.SourceNotificationSetting.asset == KRX_ASSET,
                                     models.SourceNotificationSetting.enabled == True)  # noqa: E712
                             .all())
+            # KRX가 좌우 어느 쪽이든 disable — signed(김프 counter, right)뿐 아니라 usd absolute
+            # 비교(canonical 정렬로 krx가 left/right 어느 쪽이든 저장)까지 (codex 2026-07-10 —
+            # 구 signed+right 한정이면 회수 후 absolute KRX 비교알림이 계속 발사).
+            from sqlalchemy import and_, or_
             cmp_alerts = (db.query(models.ComparisonAlert)
                             .filter(models.ComparisonAlert.user_id == user_id,
-                                    models.ComparisonAlert.diff_type == "signed",
-                                    models.ComparisonAlert.right_source == KRX_SOURCE,
-                                    models.ComparisonAlert.right_asset == KRX_ASSET,
+                                    or_(and_(models.ComparisonAlert.left_source == KRX_SOURCE,
+                                             models.ComparisonAlert.left_asset == KRX_ASSET),
+                                        and_(models.ComparisonAlert.right_source == KRX_SOURCE,
+                                             models.ComparisonAlert.right_asset == KRX_ASSET)),
                                     models.ComparisonAlert.enabled == True)  # noqa: E712
                             .all())
 
         print(f"대상: entitlement={'있음' if ent else '없음(멱등)'} / "
-              f"KRX 단일알림 disable {len(src_alerts)}건 / 김프 counter disable {len(cmp_alerts)}건")
+              f"KRX 단일알림 disable {len(src_alerts)}건 / KRX 비교알림(김프 counter+달러선물 비교) disable {len(cmp_alerts)}건")
         for a in src_alerts:
             print(f"  source setting id={a.id} threshold={a.threshold} condition={a.condition}")
         for a in cmp_alerts:
@@ -138,7 +146,7 @@ def cmd_revoke(user_id: str, key: str, write: bool) -> None:
             a.enabled = False
         db.commit()
         print(f"[OK] 회수 완료: entitlement 삭제={'1' if ent else '0'}, "
-              f"단일알림 disable={len(src_alerts)}, 김프 disable={len(cmp_alerts)}")
+              f"단일알림 disable={len(src_alerts)}, 비교알림 disable={len(cmp_alerts)}")
 
 
 def main() -> None:

@@ -222,7 +222,11 @@ _USDT_EXCHANGES = frozenset(
 # absolute(일반 비교) 탭별 허용 (source, asset) — pair 양쪽 모두 이 집합 안 + left≠right.
 COMPARISON_ABSOLUTE_SOURCES: dict = {
     "tether": _USDT_EXCHANGES,   # 거래소 5끼리만 (cross-world는 김프알림 전담)
-    "usd": frozenset({("investing", "usd-krw")} | {(b, "usd-krw") for b in _FX_BANKS_COMPARISON}),
+    # usd의 krx: ADR-038 D4 비교알림 (2026-07-10) — 달러선물↔은행/인베스팅 절대차(현물-선물
+    # 스프레드). entitled 전용은 main.py 403 게이트(생성/수정, krx가 좌우 어느 쪽이든) +
+    # revoke 자동 disable이 담당. jpy/eur는 미포함.
+    "usd": frozenset({("investing", "usd-krw"), ("krx", "usd-krw-futures")}
+                     | {(b, "usd-krw") for b in _FX_BANKS_COMPARISON}),
     "jpy": frozenset({("investing", "jpy-krw")} | {(b, "jpy-krw") for b in _FX_BANKS_COMPARISON}),
     "eur": frozenset({("investing", "eur-krw")} | {(b, "eur-krw") for b in _FX_BANKS_COMPARISON}),
 }

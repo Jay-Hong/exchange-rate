@@ -49,6 +49,30 @@ class TestComparisonPolicy(unittest.TestCase):
         self.assertIsNotNone(validate_comparison_alert(
             "tether", "investing", "usd-krw", "hana", "usd-krw", "absolute", 2.0))
 
+    def test_absolute_usd_krx_allowed(self):
+        """ADR-038 D4 비교알림 (2026-07-10) — usd absolute에 달러선물↔은행/인베스팅 허용.
+
+        entitled 전용은 validator가 아닌 main.py 403 게이트 담당 (validator 순수성 —
+        김프 counter와 동일 구조). canonical 정렬로 krx가 좌/우 어느 쪽이든 가능."""
+        # krx ↔ 은행/인베스팅 (양방향 — canonical 이전 원본 방향 모두)
+        self.assertIsNone(validate_comparison_alert(
+            "usd", "krx", "usd-krw-futures", "hana", "usd-krw", "absolute", 5.0))
+        self.assertIsNone(validate_comparison_alert(
+            "usd", "investing", "usd-krw", "krx", "usd-krw-futures", "absolute", 3.0))
+        # jpy/eur는 여전히 거부 (usd 전용)
+        self.assertIsNotNone(validate_comparison_alert(
+            "jpy", "krx", "usd-krw-futures", "hana", "jpy-krw", "absolute", 5.0))
+        self.assertIsNotNone(validate_comparison_alert(
+            "eur", "hana", "eur-krw", "krx", "usd-krw-futures", "absolute", 5.0))
+        # tether absolute는 여전히 거래소 5끼리만 (Amendment 4 유지)
+        self.assertIsNotNone(validate_comparison_alert(
+            "tether", "upbit", "usdt-krw", "krx", "usd-krw-futures", "absolute", 5.0))
+        # canonical: krx는 사전순으로 hana 뒤 / shinhan 앞 — 양쪽 슬롯 모두 가능 실증
+        self.assertEqual(canonicalize_absolute_pair("hana", "usd-krw", "krx", "usd-krw-futures"),
+                         ("hana", "usd-krw", "krx", "usd-krw-futures"))
+        self.assertEqual(canonicalize_absolute_pair("shinhan", "usd-krw", "krx", "usd-krw-futures"),
+                         ("krx", "usd-krw-futures", "shinhan", "usd-krw"))
+
     def test_absolute_fx_tabs(self):
         self.assertIsNone(validate_comparison_alert(
             "usd", "investing", "usd-krw", "kb", "usd-krw", "absolute", 2.0))
@@ -132,8 +156,12 @@ class TestComparisonPolicy(unittest.TestCase):
             ("hana", "usd-krw"), ("kb", "usd-krw"), ("investing", "usd-krw"),
             ("krx", "usd-krw-futures")}))
         self.assertEqual(COMPARISON_ABSOLUTE_SOURCES["tether"], KIMCHI_BASE_SOURCES)
-        for tab in ("usd", "jpy", "eur"):
-            self.assertEqual(len(COMPARISON_ABSOLUTE_SOURCES[tab]), 9)   # investing + 8 banks
+        # usd = investing + 8 banks + krx(ADR-038 D4 비교알림, 2026-07-10 — entitled 게이트는 handler)
+        self.assertEqual(len(COMPARISON_ABSOLUTE_SOURCES["usd"]), 10)
+        self.assertIn(("krx", "usd-krw-futures"), COMPARISON_ABSOLUTE_SOURCES["usd"])
+        for tab in ("jpy", "eur"):
+            self.assertEqual(len(COMPARISON_ABSOLUTE_SOURCES[tab]), 9)   # investing + 8 banks (krx 없음)
+            self.assertNotIn(("krx", "usd-krw-futures"), COMPARISON_ABSOLUTE_SOURCES[tab])
 
 
 class TestComparisonCrud(unittest.TestCase):
@@ -362,3 +390,68 @@ class TestComparisonCrud(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestComparisonEndpointKrxGate(unittest.TestCase):
+    """POST /api/comparison-alerts의 KRX 403 게이트 — endpoint 레벨 잠금 (codex NB1).
+
+    분기 계약: KRX_PAIR가 left/right 어느 쪽이든(absolute 포함) `_require_krx_alert_allowed_or_403`
+    경유. 게이트 판정 자체(krx_alert_gate_error)는 helper 테스트가 커버 — 여기선 gate가
+    호출·적용되는지(403)와 통과 시 생성(200)만 잠금. auth/premium은 patch.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        cls.client = TestClient(app)
+
+    def _post(self, body, gate_error):
+        from unittest.mock import AsyncMock, patch as _patch
+        with _patch("app.main.verify_firebase_token", new=AsyncMock(return_value="gate-test-user")), \
+             _patch("app.main.require_premium", new=AsyncMock(return_value=None)), \
+             _patch("app.main.notify_user_devices_sync", new=AsyncMock(return_value=None)), \
+             _patch("app.entitlements.krx_alert_gate_error", return_value=gate_error):
+            return self.client.post("/api/comparison-alerts", json=body)
+
+    def _cleanup(self):
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            db.query(models.ComparisonAlert).filter(
+                models.ComparisonAlert.user_id == "gate-test-user").delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def tearDown(self):
+        self._cleanup()
+
+    def _krx_absolute_body(self, left=("krx", "usd-krw-futures"), right=("hana", "usd-krw")):
+        return {"tab": "usd", "left_source": left[0], "left_asset": left[1],
+                "right_source": right[0], "right_asset": right[1],
+                "diff_type": "absolute", "operator": "gte", "threshold": 5.0,
+                "is_enabled": True}
+
+    def test_absolute_krx_left_gated_403(self):
+        r = self._post(self._krx_absolute_body(), gate_error="krx_entitlement_required")
+        self.assertEqual(r.status_code, 403)
+
+    def test_absolute_krx_right_gated_403(self):
+        r = self._post(self._krx_absolute_body(left=("hana", "usd-krw"),
+                                               right=("krx", "usd-krw-futures")),
+                       gate_error="krx_entitlement_required")
+        self.assertEqual(r.status_code, 403)
+
+    def test_absolute_krx_entitled_creates_200(self):
+        r = self._post(self._krx_absolute_body(), gate_error=None)
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        # canonical 정렬: hana < krx → left=hana
+        self.assertEqual((data["left_source"], data["right_source"]), ("hana", "krx"))
+
+    def test_absolute_non_krx_no_gate(self):
+        # krx 무관 비교는 게이트 미경유 — gate_error가 있어도 200
+        body = self._krx_absolute_body(left=("investing", "usd-krw"), right=("kb", "usd-krw"))
+        r = self._post(body, gate_error="krx_entitlement_required")
+        self.assertEqual(r.status_code, 200, r.text)

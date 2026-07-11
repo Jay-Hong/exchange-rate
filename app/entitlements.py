@@ -54,7 +54,8 @@ def krx_alert_gate_error(db: Session, user_id: str) -> Optional[str]:
     - source POST: (source, asset) == KRX_PAIR
     - source PUT: 최종 조합 == KRX_PAIR AND is_enabled is not False
       (끄기 전용 PUT은 허용 — 권한 상실 사용자도 자기 알림을 끌 수 있어야. DELETE도 항상 허용)
-    - comparison POST/PUT: signed + counter == KRX_PAIR (PUT은 재활성 우회 차단 포함)
+    - comparison POST/PUT: KRX_PAIR가 left/right 어느 쪽이든 (signed 김프 counter +
+      usd absolute 달러선물 비교, ADR-038 D4 2026-07-10. PUT은 재활성 우회 차단 포함)
     """
     if not krx_gates_open():
         return "krx distribution is disabled"

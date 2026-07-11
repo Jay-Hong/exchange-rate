@@ -162,6 +162,22 @@ class TestUnifiedLookup(unittest.TestCase):
         with patch("app.latest_rates_cache.get_latest_usdt_rate_from_sync_job", return_value=None):
             self.assertIsNone(get_latest_rate_unified("bithumb", "usdt-krw"))
 
+    def test_krx_redis_hit_and_db_fallback(self):
+        """KRX 달러선물 — usd absolute 비교 발화 경로의 시세 조회 (ADR-038 D4, codex NB2)."""
+        # Redis hit
+        with patch("app.latest_rates_cache.get_latest_krx_rate_from_sync_job",
+                   return_value={"source": "krx", "asset": "usd-krw-futures", "rate": 1500.4,
+                                 "timestamp": "2026-07-10T10:00:00+09:00"}):
+            r = get_latest_rate_unified("krx", "usd-krw-futures")
+        self.assertEqual((r.rate, r.origin), (1500.4, "redis"))
+        # DB fallback (source_rates)
+        ts = get_utc_now()
+        self.db.add(models.SourceRate(source="krx", asset="usd-krw-futures", rate=1499.9, timestamp=ts))
+        self.db.commit()
+        with patch("app.latest_rates_cache.get_latest_krx_rate_from_sync_job", return_value=None):
+            r2 = get_latest_rate_unified("krx", "usd-krw-futures")
+        self.assertEqual((r2.rate, r2.origin), (1499.9, "db"))
+
 
 class TestMarkTriggered(unittest.TestCase):
     """mark_comparison_alert_triggered — once/repeat 분기 + last_notified_spread (signed raw)."""
@@ -222,6 +238,39 @@ class TestEvaluatorE2E(unittest.TestCase):
             return UnifiedRate(rate=right_rate, observed_at=get_utc_now(), origin="db")
         return patch("app.notifications.comparison_evaluator.get_latest_rate_unified",
                      side_effect=fake_unified)
+
+    def test_usd_absolute_krx_fires_e2e(self):
+        """ADR-038 D4 — usd absolute 달러선물↔하나 발화 E2E (codex NB2).
+
+        canonical 정렬로 (hana, krx) 저장 — krx tick 관측으로 평가돼 |spread|≥threshold 발사.
+        payload title은 달러선물 표시명 사용 (raw 코드 아님)."""
+        row = _mk_alert(self.db, tab="usd", diff_type="absolute", operator="gte", threshold=5.0,
+                        left_source="hana", left_asset="usd-krw",
+                        right_source="krx", right_asset="usd-krw-futures")
+
+        def fake_unified(source, asset):
+            if source == "hana":
+                return UnifiedRate(rate=1503.4, observed_at=get_utc_now(), origin="redis")
+            if source == "krx":
+                return UnifiedRate(rate=1510.0, observed_at=get_utc_now(), origin="redis")
+            return None
+
+        with patch("app.notifications.comparison_evaluator.get_latest_rate_unified",
+                   side_effect=fake_unified):
+            # krx tick 관측으로 진입 (KrxAlertTickHandler → _emit_comparison 경로 시뮬)
+            self._run(self.evaluator._evaluate_async("krx", "usd-krw-futures"))
+
+        self.assertEqual(len(self.sent), 1)
+        _, data = self.sent[0]
+        self.assertEqual(data["type"], "comparison_alert")
+        self.assertEqual(data["tab"], "usd")
+        self.assertEqual(data["diff_type"], "absolute")
+        # |1503.4 - 1510.0| = 6.6 ≥ 5 발사, spread는 signed raw
+        self.assertAlmostEqual(float(data["spread"]), -6.6, places=6)
+        self.assertEqual((data["left_source"], data["right_source"]), ("hana", "krx"))
+        row2 = self.db.query(models.ComparisonAlert).get(row.id)
+        self.db.refresh(row2)
+        self.assertFalse(row2.enabled)   # once → 발사 후 비활성
 
     def test_fires_and_persists_log(self):
         row = _mk_alert(self.db)   # 김프 gte 8
