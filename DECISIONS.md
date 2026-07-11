@@ -5977,7 +5977,10 @@ Amendment 재스코프 + 후속 편집 슬라이스가 모두 land. flag `COMPAR
 ## ADR-038: KRX 달러선물 노출 게이트 — 3단 게이트 + 별도 topic + entitlement 수동 부여
 
 **날짜**: 2026-07-04
-**상태**: G1/G2 서버 슬라이스 land + 운영 배포 (2026-07-08, `d1405e2`) + **Decision 2 서버 슬라이스 land (2026-07-08 — krx:usd-krw-futures 독립 topic + usdt:krw group 제거)** — iOS krx topic 구독/달러 탭은 후속 슬라이스
+**상태**: **사용자 노출 축 완료 (2026-07-10)** — G1/G2(d1405e2) · D2 독립 topic(487a245/dab40bd) ·
+D4 전 섹션(시세 8b4388d / 그래프 ae1928b / 가격알림 a47e9e2 / 비교알림 8137aa7·436e978) ·
+revoke full-cycle 실기기 · 푸시 문구 5종. **잔여 Open = 2번(WS per-user 인증)뿐** —
+Security/Access Hardening 트랙(비구독자 1h REST/구독자 WS 방향)에서 일괄 해소 예정.
 **결정자**: Jay + Claude + Codex (3-way)
 
 ### Context
@@ -6145,8 +6148,28 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   (currency==.usdKrw ∧ krxVisible)가 편집-prefill/revoke orphan 자동 방어(미렌더). history
   assetFilter 3콜사이트 통일(codex blocker). MVP: 임계값 정수(1원)/소스 30 쿼터 공유.
   iOS 172 tests(SourceAlertScopeTests 5 + pbxproj 4엔트리 수동 — FXiTests 비동기화 그룹).
-  **D4 ① 시세 / ② 그래프 / ③ 가격알림 완료 → D4 남은 것 = 비교알림(별도 트랙)**. 잔여:
-  revoke full-cycle 실기기 + 푸시 문구.
+- **D4 ④ 비교알림 편입 land (2026-07-10, 서버 `8137aa7` 배포 / iOS `436e978`) — Decision 4
+  전 섹션 완료**: usd 일반 비교알림(absolute)에 KRX 달러선물 허용(entitled 전용) + FX 3탭
+  (usd/jpy/eur) 비교알림 섹션 신설(환율알림 아래). **서버**: `COMPARISON_ABSOLUTE_SOURCES["usd"]`
+  에 krx 추가(jpy/eur/tether 불변) + POST/PUT 게이트 `KRX_PAIR in (left, right)`로 확장
+  (canonical 사전순 정렬로 krx가 양쪽 어느 슬롯이든 — codex가 구 signed+right 한정의 구멍
+  적발) + **revoke `or_(left==krx, right==krx)` 확장**(구 쿼리면 회수 후 absolute KRX 비교알림
+  계속 발사) + endpoint 403/200 게이트·revoke matrix·usd absolute E2E 테스트 — 3474 passed.
+  **운영 불변식**: KRX 비교알림 발화는 `KRX_ALERT_EVALUATOR_ENABLED` 전제(KrxAlertTickHandler가
+  비교 관측의 단일 진입점 — 의도된 결합). **iOS**: `ComparisonAlertScope`(.tether/.fx) 공용
+  일반화 — usd 소스 그리드는 [달러선물(krxVisible, 맨 앞 — krx 우선 정책)]+인베스팅+8은행,
+  jpy/eur는 9개. FX 은행 def는 Bank enum 동적 생성(`fxBankDefinition` — SourceRegistry.all
+  미등록으로 테더 목록 오염 방지) + find fallback(비교 리스트 raw 코드 → 한글). liveRate는
+  fx=fxTopicRates/krx=krxTopicSourceRate(비결합). sanitize는 usdtTabSources membership으로
+  명시화. 김프(signed)는 테더 전용 유지. JPY 정수 threshold는 MVP 수용(후속 후보). 180 tests.
+- **revoke full-cycle 실기기 검증 (2026-07-09~10)**: 회수(단일알림 3+김프 counter 1 자동
+  disable + 전 표면 동시 소멸) → 재부여(표면 복원 + disable 잔존 = 설계) 양방향 통과.
+- **푸시 문구 5종 정리 (2026-07-09~10, `3cfd168`+`22e9c23`+`fea46e2`)**: 현재가 title 마지막
+  (NBSP 2 간격 — iOS 일반 스페이스 collapse 방지), body=목표/조건만, KRX 표시명
+  "미국달러F"→"달러선물" 서버-앱 통일, 비교 '원' 제거, 김프 percent. 실기기 3종 수신 확인.
+- **후속 방향 (구현 보류)**: 비구독자=1시간 REST 스냅샷/구독자=WS 실시간 — WS 인증 도입 시
+  Open 2(per-user topic 강제)와 같은 hardening 트랙에서 일괄 해소 (memory:
+  project_security_hardening_direction). Open 2는 그 트랙 전까지 유지.
 
 ## 문서 히스토리
 
