@@ -266,6 +266,29 @@ class SourceNotificationSettingsListResponse(BaseModel):
     total_count: int
 
 
+class NotificationLogResponse(BaseModel):
+    """FX 은행 가격알림 발송 히스토리 1건 (사용자용).
+
+    SourceNotificationLogResponse 미러. condition/threshold는 히스토리 완전판 보강(2026-07-15)
+    이후 발송 row에만 존재 → old row 하위호환 Optional. sent_at은 main.py builder에서
+    crud.to_kst_isoformat() KST ISO8601로 채움 (naive UTC 직렬화로 iOS 디코더와 어긋나는 것 회피).
+    """
+    id: int
+    setting_id: Optional[int] = None
+    bank: str
+    currency: str
+    condition: Optional[str] = None  # "above" | "below" (보강 이전 old row는 None)
+    threshold: Optional[float] = None
+    rate: float                       # 발화 시점 환율 (triggered rate)
+    sent_at: str  # KST ISO 8601
+
+
+class NotificationLogsListResponse(BaseModel):
+    """FX 은행 가격알림 발송 히스토리 목록 응답 (최신순)."""
+    logs: List[NotificationLogResponse]
+    total_count: int  # 반환된 페이지 길이 (cap된 '최근 N건'; 전체 카운트 아님)
+
+
 class SourceNotificationLogResponse(BaseModel):
     """Source 기반 알림 발송 히스토리 1건 (사용자용).
 

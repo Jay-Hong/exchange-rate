@@ -108,7 +108,7 @@ class NotificationSetting(Base):
 
 
 class NotificationLog(Base):
-    """알림 발송 히스토리"""
+    """알림 발송 히스토리 (FX 은행 가격알림)"""
     __tablename__ = "notification_logs"
 
     id = Column(Integer, primary_key=True)
@@ -116,7 +116,11 @@ class NotificationLog(Base):
     setting_id = Column(Integer, nullable=True)  # NotificationSetting.id 참조
     bank = Column(String, nullable=False)
     currency = Column(String, nullable=False)
-    rate = Column(Float, nullable=False)
+    rate = Column(Float, nullable=False)          # 발화 시점 환율 (triggered rate)
+    # 사용자 히스토리 완전판(2026-07-15): 발화 조건 inline 스냅샷 — 설정 삭제 후에도 안전.
+    # source/comparison log와 동일 정책. nullable = 보강 이전 old row(NULL) 하위호환.
+    condition = Column(String, nullable=True)     # 'above' | 'below' (발화 시점 스냅샷)
+    threshold = Column(Float, nullable=True)      # 발화 시점 임계값
     success = Column(Boolean, default=True)
     error_message = Column(String, nullable=True)
     sent_at = Column(DateTime, default=get_utc_now)

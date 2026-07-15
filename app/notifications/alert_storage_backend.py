@@ -404,6 +404,8 @@ class FxCanaryBackend(FxNotificationBackend):
                     currency=candidate.asset,    # value pass-through (asset=currency)
                     rate=rate,
                     success=True,
+                    condition=candidate.condition,   # inline 스냅샷 (히스토리 완전판)
+                    threshold=candidate.threshold,
                 )
                 logger.info(
                     "🔔 FX canary FCM sent",

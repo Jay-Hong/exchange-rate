@@ -2337,7 +2337,9 @@ def create_notification_log(
     currency: str,
     rate: float,
     success: bool,
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None,
+    condition: Optional[str] = None,
+    threshold: Optional[float] = None,
 ) -> models.NotificationLog:
     """
     알림 발송 히스토리 기록
@@ -2351,6 +2353,8 @@ def create_notification_log(
         rate: 발송 시점의 환율
         success: 발송 성공 여부
         error_message: 에러 메시지 (선택)
+        condition: 발화 조건 스냅샷 'above'|'below' (히스토리 완전판 — 설정 삭제 후에도 표시)
+        threshold: 발화 임계값 스냅샷
 
     Returns:
         NotificationLog 객체
@@ -2362,12 +2366,46 @@ def create_notification_log(
         currency=currency,
         rate=rate,
         success=success,
-        error_message=error_message
+        error_message=error_message,
+        condition=condition,
+        threshold=threshold,
     )
     db.add(log)
     db.commit()
 
     return log
+
+
+def get_notification_logs(
+    db: Session,
+    user_id: str,
+    currency: Optional[str] = None,
+    success_only: bool = True,
+    limit: int = 100,
+) -> List[models.NotificationLog]:
+    """FX 은행 가격알림 발송 히스토리 조회 (최신순, 사용자용).
+
+    get_source_notification_logs와 동일 정책 — 사용자에게 '받은(발송 성공) 알림'을 보여주는
+    read 경로. 실패 row(success=False)는 운영 진단용이라 success_only=True 기본 제외.
+
+    스코프/안전:
+        - user_id는 호출자가 token에서 파생한 값만 전달 (cross-user 격리).
+        - currency는 SQL WHERE 필터 (append-only 테이블 fetch-all 회피).
+        - limit은 호출자가 cap (main.py 1..200). offset 없음 — '최근 N건'.
+        - condition/threshold는 보강 이전 old row에선 NULL (응답 Optional).
+    """
+    query = db.query(models.NotificationLog).filter(
+        models.NotificationLog.user_id == user_id
+    )
+    if currency:
+        query = query.filter(models.NotificationLog.currency == currency)
+    if success_only:
+        query = query.filter(models.NotificationLog.success.is_(True))
+    return (
+        query.order_by(models.NotificationLog.sent_at.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2515,7 +2553,7 @@ def process_rate_alerts(
                     mark_setting_triggered(db, setting.id, rate)
                     sent_count += 1
 
-                    # 발송 로그 기록
+                    # 발송 로그 기록 (condition/threshold inline 스냅샷 — 히스토리 완전판)
                     create_notification_log(
                         db=db,
                         user_id=user_id,
@@ -2523,7 +2561,9 @@ def process_rate_alerts(
                         bank=bank,
                         currency=currency,
                         rate=rate,
-                        success=True
+                        success=True,
+                        condition=setting.condition,
+                        threshold=setting.threshold,
                     )
 
                     logger.info(

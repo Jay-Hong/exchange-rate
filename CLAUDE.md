@@ -565,6 +565,7 @@ scheduler.add_job(
 - `GET /api/notification-settings` - 사용자 알림 설정 조회
 - `PUT /api/notification-settings/{id}` - 알림 설정 수정 (토글 ON/OFF)
 - `DELETE /api/notification-settings/{id}` - 알림 설정 삭제
+- `GET /api/notification-logs` - FX 은행 알림 발송 히스토리 (success-only 최신순, `currency` 필터, limit≤200, 프리미엄 게이팅) — 완전판 2026-07-15, condition/threshold inline 스냅샷(old row는 nullable). `notification_logs` 테이블
 
 ### 비교/김프 알림 API (ADR-037, 프리미엄 게이팅 + `COMPARISON_ALERT_ENABLED` 발화 게이트)
 

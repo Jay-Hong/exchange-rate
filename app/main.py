@@ -3045,6 +3045,26 @@ def build_source_notification_setting_response(
     )
 
 
+def build_notification_log_response(
+    log: models.NotificationLog,
+) -> schemas.NotificationLogResponse:
+    """NotificationLog(FX 은행 알림) DB 모델을 API 응답으로 변환.
+
+    build_source_notification_log_response 미러. condition/threshold는 보강 이전 old row에선
+    None. sent_at은 crud.to_kst_isoformat()로 KST(+09:00) ISO 직렬화(iOS 디코더 정합).
+    """
+    return schemas.NotificationLogResponse(
+        id=log.id,
+        setting_id=log.setting_id,
+        bank=log.bank,
+        currency=log.currency,
+        condition=log.condition,
+        threshold=log.threshold,
+        rate=log.rate,
+        sent_at=crud.to_kst_isoformat(log.sent_at),
+    )
+
+
 def build_source_notification_log_response(
     log: models.SourceNotificationLog,
 ) -> schemas.SourceNotificationLogResponse:
@@ -3341,6 +3361,49 @@ async def delete_source_notification_setting(
 
 
 # Source 알림 발송 히스토리 (테더 탭: USDT 거래소 + KRX 달러선물).
+# notification_logs(FX 은행) + source_notification_logs 공통 히스토리 조회 정책 (auth/premium 동일).
+_NOTIFICATION_LOG_DEFAULT_LIMIT = 100
+_NOTIFICATION_LOG_MAX_LIMIT = 200
+
+
+@app.get(
+    "/api/notification-logs",
+    response_model=schemas.NotificationLogsListResponse,
+)
+async def get_notification_logs(
+    request: Request,
+    currency: Optional[str] = None,
+    limit: int = _NOTIFICATION_LOG_DEFAULT_LIMIT,
+    db: Session = Depends(get_db),
+):
+    """FX 은행 가격알림 발송 히스토리 조회 (달러/엔/유로 탭 은행 알림).
+
+    사용자에게 '받은 알림' 히스토리를 보여준다 — 발송 성공(success=True) row만, 최신순
+    (sent_at DESC). 전송 실패 row는 운영 진단용이라 미노출. source-notification-logs 정책 동일.
+
+    Query Parameters:
+        currency: 통화쌍 필터 (선택, 예: usd-krw / jpy-krw / eur-krw)
+        limit: 1..200 (기본 100). offset 없음 — '최근 N건'. total_count는 페이지 길이.
+
+    premium 게이팅 (settings GET 동일): INACTIVE → 빈 목록 / PENDING → 503 / ACTIVE → 조회.
+    """
+    user_id = await verify_firebase_token(request)
+
+    if not await require_premium(user_id, allow_empty=True):
+        return schemas.NotificationLogsListResponse(logs=[], total_count=0)
+
+    capped_limit = max(1, min(limit, _NOTIFICATION_LOG_MAX_LIMIT))
+    logs = crud.get_notification_logs(
+        db=db,
+        user_id=user_id,
+        currency=currency,
+        success_only=True,
+        limit=capped_limit,
+    )
+    items = [build_notification_log_response(log) for log in logs]
+    return schemas.NotificationLogsListResponse(logs=items, total_count=len(items))
+
+
 # source_notification_logs의 최초 user-facing reader. settings GET과 auth/premium 정책 동일.
 _SOURCE_NOTIFICATION_LOG_DEFAULT_LIMIT = 100
 _SOURCE_NOTIFICATION_LOG_MAX_LIMIT = 200
