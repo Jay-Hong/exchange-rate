@@ -63,24 +63,26 @@ def migrate(dry_run: bool):
     print(f"모드: {'DRY-RUN' if dry_run else 'LIVE'}")
     print()
 
-    with engine.begin() as conn:
-        inspector = inspect(engine)
-        existing_tables = set(inspector.get_table_names())
+    # ⚠️ 컬럼별 개별 트랜잭션 (self-block 방지, 2026-07-16 사고 교훈):
+    # 하나의 engine.begin() 안에서 첫 ALTER(ACCESS EXCLUSIVE lock)를 잡은 뒤 다음 컬럼의
+    # column_exists()가 inspect(engine)로 **별도 connection**을 열어 같은 테이블 카탈로그를 읽으면
+    # 자기 lock을 기다려 application self-block(PG deadlock 감지 안 됨 — idle-in-transaction).
+    # → 각 ALTER를 자체 트랜잭션으로 즉시 commit해 lock을 먼저 해제, 다음 column_exists는 lock 없이 실행.
+    if _TABLE not in set(inspect(engine).get_table_names()):
+        print(f"[SKIP] {_TABLE} 테이블 없음 (create_all로 신규 생성됨)")
+        print("\n완료!")
+        return
 
-        if _TABLE not in existing_tables:
-            print(f"[SKIP] {_TABLE} 테이블 없음 (create_all로 신규 생성됨)")
-            print("\n완료!")
-            return
-
-        for column, pg_type, sqlite_type in _COLUMNS:
-            if column_exists(_TABLE, column):
-                print(f"[SKIP] {_TABLE}.{column} 이미 존재")
-                continue
-            col_type = pg_type if db_type == "postgresql" else sqlite_type
-            sql = f"ALTER TABLE {_TABLE} ADD COLUMN {column} {col_type} NULL"
-            print(f"[ADD] {_TABLE}.{column}")
-            print(f"  SQL: {sql}")
-            if not dry_run:
+    for column, pg_type, sqlite_type in _COLUMNS:
+        if column_exists(_TABLE, column):   # lock 미보유 상태에서 검사 (직전 ALTER 이미 commit)
+            print(f"[SKIP] {_TABLE}.{column} 이미 존재")
+            continue
+        col_type = pg_type if db_type == "postgresql" else sqlite_type
+        sql = f"ALTER TABLE {_TABLE} ADD COLUMN {column} {col_type} NULL"
+        print(f"[ADD] {_TABLE}.{column}")
+        print(f"  SQL: {sql}")
+        if not dry_run:
+            with engine.begin() as conn:    # 컬럼별 트랜잭션 → 즉시 commit → lock 해제
                 conn.execute(text(sql))
 
     print("\n완료!")
