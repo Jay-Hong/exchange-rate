@@ -960,41 +960,76 @@ def get_a_pair_of_banks_rates(pair: str, db: Session = Depends(get_db)):
     return result
 
 
-@app.get("/api/rates", response_model=schemas.ExchangeRatesResponse)
-def get_rates_for_mobile(db: Session = Depends(get_db)):
-    """모바일 앱과 AJAX용 플랫 배열 구조 API (폴백용)"""
+# /api/rates Redis-first (ADR-026) — DB 커넥션 풀(pool_size 3+overflow 2=5) 고갈로 인한
+# nginx `/api/` proxy_read_timeout 30s → 504를 격리. Redis read 상한(hang 방지).
+_API_RATES_REDIS_TIMEOUT_S = 2.0
+
+
+def _build_rates_flat_response(all_rates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """flat /api/rates 응답 구성. metadata.updated_at=현재 시각(기존 REST 계약 유지 — broadcast의
+    max rate timestamp 의미로 바꾸지 않음, codex). currencies/banks는 레거시 dead field 고정값."""
+    return {
+        "rates": all_rates,
+        "metadata": {
+            "updated_at": crud.to_kst_isoformat(datetime.now(dt_timezone.utc)),
+            "currencies": sorted(crud.SUPPORTED_CURRENCY_PAIRS),
+            "banks": sorted(crud.LEGACY_METADATA_BANKS),
+            "total_count": len(all_rates),
+        },
+    }
+
+
+def _fetch_all_rates_flat_owning_session() -> List[Dict[str, Any]]:
+    """DB fallback — worker thread에서 자체 Session 생성→조회→close (FastAPI Session을 thread로
+    넘기지 않음, codex). asyncio.to_thread로 호출돼 이벤트 루프가 풀 대기에 막히지 않게 한다."""
+    db = SessionLocal()
     try:
-        all_rates = crud.get_all_rates_flat(db=db)
+        return crud.get_all_rates_flat(db=db)
+    finally:
+        db.close()
 
-        # metadata.currencies/metadata.banks는 레거시 호환용 dead field.
-        # build_rates_payload와 동일한 정책으로 레거시 값 고정.
-        currencies = sorted(crud.SUPPORTED_CURRENCY_PAIRS)
-        banks = sorted(crud.LEGACY_METADATA_BANKS)
 
-        current_time = crud.to_kst_isoformat(datetime.now(dt_timezone.utc))
+@app.get("/api/rates", response_model=schemas.ExchangeRatesResponse)
+async def get_rates_for_mobile():
+    """모바일 앱/AJAX용 플랫 배열 API (폴백용).
 
-        return {
-            "rates": all_rates,
-            "metadata": {
-                "updated_at": current_time,
-                "currencies": currencies,
-                "banks": banks,
-                "total_count": len(all_rates)
-            }
-        }
+    Redis-first (ADR-026 broadcast hot path 재사용): DB 커넥션 풀(5) 고갈로 /api/rates가 30초 풀
+    대기 → nginx `/api/` proxy_read_timeout 30s → 504 되던 문제(2026-07-15 실측)를 격리한다.
+    - Redis hit(REDIS_LATEST_ENABLED + latest mirror 신선): DB 미접촉으로 즉시 반환.
+    - Redis off/miss/실패/timeout: DB fallback(worker thread에서 Session 소유 → 이벤트 루프 비차단).
+    - Redis·DB 모두 실패: 빈 200이 아니라 503 — 빈 200은 클라가 성공(빈 데이터)으로 처리해 캐시
+      fallback을 못 타므로(iOS A2 cache-first 계약, codex).
+    """
+    # 1. Redis-first (DB-free). 실패/timeout/빈 리스트는 모두 miss로 간주 → DB fallback.
+    if REDIS_LATEST_ENABLED:
+        redis_rates = None
+        fallback_reason = None
+        try:
+            redis_rates, _redis_dxy, meta = await asyncio.wait_for(
+                fetch_rates_from_redis(), timeout=_API_RATES_REDIS_TIMEOUT_S
+            )
+            fallback_reason = (meta or {}).get("fallback_reason")
+        except asyncio.TimeoutError:
+            fallback_reason = "redis_timeout"
+            logger.warning("api_rates_redis_timeout", extra={"timeout_s": _API_RATES_REDIS_TIMEOUT_S})
+        except Exception as e:
+            fallback_reason = "redis_error"
+            logger.warning("api_rates_redis_error", extra={"error": str(e)})
+        # 비어있지 않은 리스트만 hit — 빈 리스트 []는 비정상/불완전 mirror로 보고 DB fallback(codex).
+        # 정상 empty mirror는 latest:index miss로 None을 주므로 []는 기대되지 않는 상태.
+        if redis_rates:
+            return _build_rates_flat_response(redis_rates)
+        # miss/[]/실패 — 배포 후 hit율·회귀 진단용 이유 로깅(broad catch가 Redis 회귀를 조용히
+        # DB 부하로 바꾸지 않게, codex).
+        logger.info("api_rates_db_fallback", extra={"reason": fallback_reason or "empty_redis"})
 
+    # 2. DB fallback — worker thread에서 자체 Session 소유(이벤트 루프 비차단).
+    try:
+        all_rates = await asyncio.to_thread(_fetch_all_rates_flat_owning_session)
     except Exception as e:
-        # 에러 발생 시 빈 데이터 반환
-        return {
-            "rates": [],
-            "metadata": {
-                "updated_at": crud.to_kst_isoformat(datetime.now(dt_timezone.utc)),
-                "currencies": ["usd-krw", "jpy-krw", "eur-krw"], 
-                "banks": [],
-                "total_count": 0,
-                "error": str(e)
-            }
-        }
+        logger.warning("api_rates_db_fallback_failed", extra={"error": str(e)})
+        raise HTTPException(status_code=503, detail="rates temporarily unavailable")
+    return _build_rates_flat_response(all_rates)
 
 
 @app.get("/api/rates/{currency}")
