@@ -70,7 +70,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 
 ### 4.2 매시간 고정 갱신 계약
 - 매시간 재생성. `as_of`(시경계) + `generated_at`(조립 완료 시각, 한 기준시각서 graph range도 파생). keep-last-good(성공+non-empty일 때만 SET) + 원자적 Redis SETEX + long-TTL + 무료용 별도 키(`free:snapshot:{tab}:{period}`).
-- **serve 모델(구현 확정, codex 리뷰 반영)**: cron이 **Redis 단독 canonical writer**. serve = warm read(timeout 2s + serve-time 재검증[KRX fail-closed]) → miss/hang 시 process-local 공유 캐시 → DB single-flight rebuild(ADR-026 parity). serve는 **Redis에 쓰지 않음**(cron/serve write race 원천 제거). Redis hang은 wait_for + circuit로 bound.
+- **serve 모델(구현 확정, codex 리뷰 반영)**: cron이 **Redis 단독 canonical writer**. serve는 **cron canonical만 반환하고 DB로 재생성하지 않는다** — 이게 무료=1시간 고정의 핵심(serve가 DB 최신값으로 rebuild하면 같은 시간대에도 값이 바뀌어 유료 실시간 차등이 깨짐). serve = Redis canonical read(timeout 2s + serve-time 재검증[KRX/empty fail-closed] + circuit) → 성공값 process-local last-good 보존 → Redis 장애 시 마지막 canonical → **canonical 전무 시 503**(최신값 fabricate 금지). serve는 Redis/DB에 쓰지 않음.
 
 ### 4.3 최신 ↔ 무료 분리
 - 무료 그래프는 hourly `as_of` 별도 snapshot(최신 GraphV2 재사용 금지).
