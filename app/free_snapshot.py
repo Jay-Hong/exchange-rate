@@ -28,7 +28,8 @@ KST = timezone("Asia/Seoul")
 # 확장: FREE_SNAPSHOT_TABS 추가. 단 non-FX 탭(tether=usdt-krw)은 legacy_policy가 rate에서 usdt를 배제하므로
 # source_rates 기반 별도 rate reader가 필요(N4) — "튜플 추가만"으로는 rate가 빈다.
 FREE_SNAPSHOT_TABS = ("usd",)
-FREE_SNAPSHOT_PERIODS = ("1w", "3m", "1y")
+# 1d = intraday(10min closed-bucket) — 무료는 premium live-tail/in_progress 미포함, cron 시점 고정(ADR-039 A).
+FREE_SNAPSHOT_PERIODS = ("1d", "1w", "3m", "1y")
 TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "usdt-krw"}
 
 # cron이 매시간 갱신 → 정상 시 항상 warm. long-TTL = cron 장애 시에도 Redis canonical 최대 ~25h 유지.
@@ -65,9 +66,10 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
     """무료 스냅샷 payload 조립.
 
     as_of = 시(hour) 경계 clamp(매시간 고정 갱신 계약, §4.2 — 데이터 recency 아닌 cadence 마커).
-    graph range도 **as_of.date() 한 기준시각**에서 파생(N5 — 자정 경계 build가 as_of·range를 갈라놓지 않게).
     generated_at = 조립 **완료** 시각(build 후). rate = get_all_rates_flat(KRX-free) 중 TAB_ASSET[tab] 필터.
-    graph = build_tab(exclude_krx=True). 조립 후 _assert_krx_free로 fail-closed 재확인(KRX 유입 시 raise).
+    graph: **1w·3m·1y** = build_tab(exclude_krx=True), range를 as_of.date()에 고정(N5 — 자정 경계 정합) /
+    **1d** = graph_v2_intraday.build_tab_1d_payload(exclude_krx=True) closed-bucket(builder 자체 now 사용 —
+    1d는 rolling 24h window라 as_of.date()-alignment 대상 아님). 조립 후 _assert_krx_free로 fail-closed 재확인.
     """
     now_kst = now_kst or datetime.now(KST)
     as_of = now_kst.replace(minute=0, second=0, microsecond=0)
@@ -75,8 +77,15 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
     asset = TAB_ASSET[tab]
     rate_entries = [r for r in crud.get_all_rates_flat(db) if r.get("currency") == asset]
 
-    # N5: graph range를 as_of.date()에 고정 → as_of(시경계)와 graph range.end가 항상 일관.
-    graph = graph_v2.build_tab(db, tab, period, today_kst=as_of.date(), exclude_krx=True)
+    # graph: 1d=intraday(10min closed-bucket) / 1w·3m·1y=build_tab(daily/hourly). 둘 다 exclude_krx=True.
+    if period == "1d":
+        # 무료 1d = premium live-tail/in_progress 미포함 closed-bucket. free cron(:20)이 hourly-frozen 담당
+        # (premium intraday :12 */10과 별개 — 무료는 다음 free cron[:20]까지 ~1h 불변). build가 자체 세션 사용(db 인자 불요).
+        from app import graph_v2_intraday
+        graph = graph_v2_intraday.build_tab_1d_payload(tab, exclude_krx=True)
+    else:
+        # N5: graph range를 as_of.date()에 고정 → as_of(시경계)와 graph range.end가 항상 일관.
+        graph = graph_v2.build_tab(db, tab, period, today_kst=as_of.date(), exclude_krx=True)
 
     payload = {
         "tab": tab,

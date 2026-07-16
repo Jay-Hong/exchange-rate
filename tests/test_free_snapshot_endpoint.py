@@ -118,6 +118,22 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.json()["error"], "snapshot_unavailable")
 
+    def test_serves_1d_canonical(self):
+        # 1d가 이제 무료 지원 period → 400 아님. 10min bucket canonical이 validate 통과 + 서빙.
+        canonical = {
+            "tab": "usd", "period": "1d",
+            "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.usd", "data": [[123, 1.0, 2.0, 1385.0]]}],
+                      "bucket_size": "10min", "range": {"start": "2026-07-16", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "1d"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["graph"]["bucket_size"], "10min")
+
 
 if __name__ == "__main__":
     unittest.main()

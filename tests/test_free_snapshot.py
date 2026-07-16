@@ -110,6 +110,41 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
     assert datetime.fromisoformat(payload["generated_at"]) >= ao
 
 
+# ── 무료 1d (intraday, KRX 제외, hourly-frozen) — ADR-039 A ──────
+
+def test_free_tab_1d_specs_excludes_krx():
+    from app import graph_v2_intraday
+    # tether 1d엔 krx 있음 → 제외 확인
+    tether_ids = [s["id"] for s in graph_v2_intraday._free_tab_1d_specs("tether")]
+    assert not any(i.startswith("krx.") for i in tether_ids)
+    # usd 1d **도 krx 포함**(ADR-038 D4 ② 달러 탭 편입, TAB_1D_SERIES["usd"]) → exclude_krx가 load-bearing(제거 확인)
+    assert all(not i.startswith("krx.") for i in [s["id"] for s in graph_v2_intraday._free_tab_1d_specs("usd")])
+
+
+def test_build_free_snapshot_payload_1d_uses_intraday(monkeypatch):
+    from app import graph_v2_intraday
+    fake_rates = [{"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "t"}]
+    captured = {}
+
+    def fake_1d(tab, *, exclude_krx=False):
+        captured["exclude_krx"] = exclude_krx
+        return {
+            "tab": tab, "period": "1d",
+            "series": [{"id": "investing.usd", "data": [[123, 1, 2, 1385.0]]}],
+            "metadata": {"fetched_at": "x", "bucket_size": "10min", "range": {"start": "a", "end": "b"}},
+        }
+
+    monkeypatch.setattr(free_snapshot.crud, "get_all_rates_flat", lambda db: fake_rates)
+    monkeypatch.setattr(graph_v2_intraday, "build_tab_1d_payload", fake_1d)
+
+    payload = free_snapshot.build_free_snapshot_payload(None, "usd", "1d")
+    assert captured["exclude_krx"] is True                      # 무료 1d도 KRX 무조건 제외
+    assert payload["period"] == "1d"
+    assert payload["graph"]["bucket_size"] == "10min"           # intraday(build_tab 아님)
+    assert payload["rate"]["asset"] == "usd-krw"
+    assert "krx.usd-krw-futures" not in [s["id"] for s in payload["graph"]["series"]]
+
+
 # ── B1: serve-time 캐시 재검증 (오염 캐시 거부) ──────────────────
 
 def test_validate_snapshot_payload():

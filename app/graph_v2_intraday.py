@@ -398,17 +398,24 @@ def _build_series_1d(spec: dict, now_kst: datetime, in_progress_start_ts: int) -
     }
 
 
-def build_tab_1d_payload(tab: str) -> dict:
+def _free_tab_1d_specs(tab: str) -> list:
+    """무료 snapshot용 1d spec — KRX 계열 **무조건** 제외(게이트 무관, ADR-039). tab_1d_specs와 달리 G2/G3 안 봄."""
+    return [spec for spec in TAB_1D_SERIES[tab] if not spec["id"].startswith("krx.")]
+
+
+def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False) -> dict:
     """탭 1d 전체 series 조립(테더 11/usd 10/jpy·eur 9) → /api/v2/graph/tab 응답 shape.
 
     closed-bucket only(진행 중 10분봉 제외). 동기(get_db_context) — precompute cron + endpoint
     miss-rebuild(to_thread)에서 호출. tab은 INTRADAY_TABS 검증 후 진입 가정(KeyError=호출부 버그).
+    exclude_krx=True (ADR-039 무료): G2/G3 게이트 무관 KRX 무조건 제외. default False = 기존 intraday 경로 behavior-change-0.
     """
     now_kst = datetime.now(KST)
     in_progress_start_ts = _bucket_align(int(now_kst.timestamp()))   # 진행 중 버킷 시작 = 잘라낼 경계
     window_start_kst = now_kst - timedelta(hours=WINDOW_HOURS)
 
-    series_out = [_build_series_1d(spec, now_kst, in_progress_start_ts) for spec in tab_1d_specs(tab)]   # ADR-038 G2 accessor
+    specs = _free_tab_1d_specs(tab) if exclude_krx else tab_1d_specs(tab)   # ADR-039 / ADR-038 G2 accessor
+    series_out = [_build_series_1d(spec, now_kst, in_progress_start_ts) for spec in specs]
 
     return {
         "tab": tab,
