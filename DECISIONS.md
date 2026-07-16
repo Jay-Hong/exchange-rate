@@ -6176,7 +6176,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 **날짜**: 2026-07-17
 **상태**: **Proposed** (설계 수렴 rev5, codex 5-round 검토). 상세 설계 = [FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md). Final 승격엔 제품 결정 S4(유예 기간)·S5(KRX revoke latency) 필요.
 **결정자**: Jay + Claude + Codex (3-way)
-**닫는 것**: ADR-038 잔여 Open 2(WS per-user 인증) — 이 ADR의 WS 인증 계약(§8)이 해소.
+**닫을 예정 (Final 시)**: ADR-038 잔여 Open 2(WS per-user 인증) — 이 ADR의 WS 인증 계약(§8) **구현 완료 시** 해소. **현재 Proposed·미구현이라 Open 2는 유지**.
 
 ### 요약 (상세는 PLAN 문서)
 

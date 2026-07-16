@@ -148,7 +148,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 ## 9. 구현 체크리스트
 
 - [ ] 전 라우트 auth 감사 — 누수 0.
-- [ ] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2, 최저위험 먼저 — 데이터는 release 후).
+- [x] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2 land 2026-07-17: server `55ab1d8` / iOS `1b736f2` / Android `5f93409`. 데이터는 신규 앱 release 후 생성 — nginx deploy/reload + 실 로그 cp/cv/cb 확인 별도).
 - [ ] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2).
 - [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
