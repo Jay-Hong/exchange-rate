@@ -105,6 +105,19 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r2.status_code, 200)          # Redis miss여도 last-good
         self.assertEqual(r2.json(), canonical)         # 마지막 canonical 그대로(값 불변)
 
+    def test_malformed_redis_no_local_returns_503(self):
+        # 필수 필드 누락(as_of/generated_at 없음) canonical → validate 거부 → local 없음 → 503 (오염 200 방지).
+        bad = {
+            "tab": "usd", "period": "3m",
+            "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw"}]},
+            "graph": {"series": [{"id": "investing.usd", "data": [1]}], "range": {}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(bad))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,28 +113,30 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
 # ── B1: serve-time 캐시 재검증 (오염 캐시 거부) ──────────────────
 
 def test_validate_snapshot_payload():
+    # 완전한 canonical(precompute가 만드는 shape) — 강화된 검사 통과
     good = {
         "tab": "usd", "period": "3m",
-        "rate": {"entries": [{"currency": "usd-krw"}]},
-        "graph": {"series": [{"id": "investing.usd", "data": [1]}]},
+        "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
+        "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw"}]},
+        "graph": {"series": [{"id": "investing.usd", "data": [1]}], "range": {"start": "a", "end": "b"}},
     }
     assert free_snapshot.validate_snapshot_payload(good, "usd", "3m")
-    # 오염/이상 payload는 전부 거부(→ rebuild)
+    # 오염/이상 payload는 각 이유로 거부(→ last-good/503)
     assert not free_snapshot.validate_snapshot_payload(None, "usd", "3m")
     assert not free_snapshot.validate_snapshot_payload([1, 2], "usd", "3m")
     assert not free_snapshot.validate_snapshot_payload(good, "jpy", "3m")   # tab mismatch
     assert not free_snapshot.validate_snapshot_payload(good, "usd", "1y")   # period mismatch
+    # 강화(codex Medium): 필수 필드/타입/asset
+    assert not free_snapshot.validate_snapshot_payload({**good, "as_of": None}, "usd", "3m")          # as_of 누락/타입
     assert not free_snapshot.validate_snapshot_payload(
-        {"tab": "usd", "period": "3m", "rate": {"entries": []}, "graph": {"series": []}}, "usd", "3m")  # empty
-    krx = {
-        "tab": "usd", "period": "3m",
-        "rate": {"entries": [{"currency": "usd-krw"}]},
-        "graph": {"series": [{"id": "krx.usd-krw-futures", "data": [1]}]},
-    }
+        {**good, "rate": {"asset": "jpy-krw", "entries": [{"currency": "usd-krw"}]}}, "usd", "3m")     # asset 불일치
+    assert not free_snapshot.validate_snapshot_payload(
+        {**good, "rate": {"asset": "usd-krw", "entries": []}, "graph": {**good["graph"], "series": []}}, "usd", "3m")  # empty
+    krx = {**good, "graph": {**good["graph"], "series": [{"id": "krx.usd-krw-futures", "data": [1]}]}}
     assert not free_snapshot.validate_snapshot_payload(krx, "usd", "3m")   # KRX 오염 → 거부(B1)
-    # NB2: nested schema가 깨진 캐시(rate가 list)도 예외 아닌 False (fail-closed → rebuild)
+    # nested schema가 깨진 캐시(rate가 list)도 예외 아닌 False (fail-closed → last-good/503)
     assert not free_snapshot.validate_snapshot_payload(
-        {"tab": "usd", "period": "3m", "rate": [], "graph": {"series": "bad"}}, "usd", "3m")
+        {**good, "rate": [], "graph": {"series": "bad", "range": {}}}, "usd", "3m")
 
 
 # ── precompute keep-last-good (N2/N7) ──────────────────────────

@@ -119,6 +119,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 - **S3** 익명 무료 → RESOLVED = 인증 필수.
 - **S4 (제품 결정) legacy 유예 기간**: 기존 6개월([REALTIME:483]) 유지 vs 단축. 권고 = **양 플랫폼 <1% + 최소 30일**(codex, <500명+개편 감안) — 단 **미업데이트 사용자 지원 종료 수용** 결정 필요. **ADR-039에서 명시적 supersede**.
 - **S5 (제품 결정) KRX revoke 반영 지연**: bounded-lease(권고 v1, 최대 lease만큼 leak window 허용) vs 즉시 제거(UID registry + Redis 제어 이벤트, 별도 규모). 운영 민감도에 따라 확정.
+- **S6 (제품 결정, codex Medium) last-good 최대 stale 정책**: serve의 process-local last-good은 현재 **무기한**(Redis/cron 장기 장애 시 며칠 stale canonical도 반환 — 실시간 우회는 아님, `as_of`가 정직하게 old 표시). (a) 최대 stale N시간 초과 시 503 전환 vs (b) 무기한 유지 + 클라 UI에 stale 명시. **무료 client 연결 전 확정** 필요. 현재는 (b) 기본(가용성 우선). Redis canonical은 별개로 ~25h TTL(FREE_SNAPSHOT_TTL_SECONDS).
 
 > S4·S5는 첫 슬라이스(step 2)와 **독립** — Stage B / WS 구현 전까지 확정하면 됨.
 

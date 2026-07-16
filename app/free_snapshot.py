@@ -96,15 +96,23 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
 def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
     """cache-hit serve-time 재검증(B1 fail-closed) — 오염된 캐시(KRX/null/list/wrong-tab)를 그대로 반환하지 않게.
 
-    dict + tab/period 일치 + nonempty + KRX-free. 하나라도 실패(또는 malformed schema로 예외) → False.
-    _assert_krx_free는 이제 build 시점뿐 아니라 **serve 시점에도** 적용되어 진짜 단일 fail-closed 지점이 됨.
-    전체를 try/except로 감싼다 — nested schema가 깨진 캐시(예: rate가 list)도 예외(500) 아닌 False→last-good/503으로 폴백.
-    (완전한 schema validator는 아님 — as_of/range 누락처럼 접근 시 예외 없는 shape는 통과 가능. empty/타입예외/KRX 방어 목적.)
+    검사: dict / tab·period 일치 / as_of·generated_at str / rate dict+asset 일치+entries list /
+    graph dict+series list+range dict / nonempty / KRX-free. 하나라도 실패(또는 예외) → False → last-good/503.
+    _assert_krx_free는 build+serve 양쪽 적용(단일 fail-closed 지점). full Pydantic은 아니나 codex가 짚은
+    필수필드/asset/타입 gap을 닫음. 전체 try/except로 감싸 어떤 malformed shape도 500 아닌 False.
     """
     try:
         if not isinstance(payload, dict):
             return False
         if payload.get("tab") != tab or payload.get("period") != period:
+            return False
+        if not isinstance(payload.get("as_of"), str) or not isinstance(payload.get("generated_at"), str):
+            return False
+        rate = payload.get("rate")
+        if not isinstance(rate, dict) or rate.get("asset") != TAB_ASSET.get(tab) or not isinstance(rate.get("entries"), list):
+            return False
+        graph = payload.get("graph")
+        if not isinstance(graph, dict) or not isinstance(graph.get("series"), list) or not isinstance(graph.get("range"), dict):
             return False
         if not _snapshot_is_nonempty(payload):
             return False
