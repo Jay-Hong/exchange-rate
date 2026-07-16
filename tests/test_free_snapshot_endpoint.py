@@ -1,13 +1,15 @@
 """ADR-039 Step 3 — /api/v2/free/snapshot endpoint wiring 테스트.
 
 harness = conftest(firebase stub + sqlite). lifespan 미진입(context manager 미사용)이라 cron 미실행.
-redis 없음 → miss-rebuild가 빈 sqlite로 build → 200 (rate 빈 배열 / graph insufficient).
+serve는 cron canonical만 반환(DB 재생성 안 함). canonical 없음(Redis/local 비어있음) → 503. Redis mock으로 canonical 주입 검증.
 """
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app import models
 from app.database import engine
 from app.main import app
@@ -20,6 +22,9 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+
+    def setUp(self):
+        main_module._free_snapshot_local.clear()   # 테스트 간 last-good 격리(순서 의존 방지)
 
     def test_auth_failure_propagates(self):
         # 인증 실패(401)면 핸들러가 데이터/검증보다 먼저 401 전파 — 무인증 데이터 유출 없음.
@@ -48,19 +53,57 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["error"], "unsupported_period")
 
-    def test_usd_3m_200_miss_rebuild(self):
-        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):
+    def test_no_canonical_returns_503_never_fabricates(self):
+        # cron canonical 없음(Redis/local 비어있음) → serve는 DB 최신값으로 fabricate하지 않고 503.
+        # build를 raise로 패치해도 503이면 serve가 DB build를 호출하지 않음(무료=1시간 고정 불변식)을 잠근다.
+        from app import free_snapshot
+
+        def _boom(*a, **k):
+            raise AssertionError("serve가 DB build를 호출하면 안 됨 (1시간 고정 불변식)")
+
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(free_snapshot, "build_free_snapshot_payload", _boom):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_serves_redis_canonical_verbatim(self):
+        # serve는 cron canonical을 그대로 반환(DB rebuild 아님) → 같은 시간대 DB가 바뀌어도 응답 불변.
+        canonical = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:00:00+09:00",
+            "generated_at": "2026-07-17T14:20:03+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
             r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
         self.assertEqual(r.status_code, 200)
-        body = r.json()
-        self.assertEqual(body["tab"], "usd")
-        self.assertEqual(body["period"], "3m")
-        self.assertEqual(body["rate"]["asset"], "usd-krw")
-        self.assertIn("as_of", body)
-        self.assertIn("generated_at", body)
-        # KRX series 절대 없음 (무료 보안 핵심)
-        self.assertNotIn("krx.usd-krw-futures", [s["id"] for s in body["graph"]["series"]])
+        self.assertEqual(r.json(), canonical)   # verbatim — rebuild 아님
         self.assertEqual(r.headers.get("cache-control"), "no-store")
+
+    def test_redis_success_then_miss_serves_last_good(self):
+        # Redis 성공 → process-local last-good 보존 → 이후 Redis miss(None)여도 마지막 canonical 반환.
+        # keep-last-good(availability) + 1시간 고정(값 불변) 동시 확인.
+        canonical = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+                r1 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+            self.assertEqual(r1.status_code, 200)   # Redis 성공 → local seeded
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=None)):
+                r2 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r2.status_code, 200)          # Redis miss여도 last-good
+        self.assertEqual(r2.json(), canonical)         # 마지막 canonical 그대로(값 불변)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 """ADR-039 Step 3 — 무료(비구독) 매시간 고정 스냅샷 endpoint 지원 모듈.
 
 인증 필수·premium 불요·KRX 항상 제외. rate + real hourly graph를 매시간 경계로 고정 갱신한다.
-precompute(cron) → Redis SET, serve(main.py)는 warm read + miss 시 single-flight DB rebuild
-(ADR-026 parity — Redis SPOF로 무료 티어 blackout 방지). graph_v2_intraday의 sync precompute 관용구 이식.
+**cron(precompute)이 Redis 단독 canonical writer.** serve(main.py)는 canonical만 반환하고 **DB로 재생성하지
+않는다**(무료=1시간 고정 불변식 — serve가 DB 최신값으로 rebuild하면 같은 시간대에도 값이 바뀌어 유료 실시간
+차등이 깨짐). Redis 성공값을 process-local last-good 보존 → 장애 시 마지막 canonical → 전무 시 503.
+graph_v2_intraday의 sync precompute 관용구 이식.
 
 KRX 2중 제외: rate = legacy_policy allowlist가 이미 배제(krx∉LEGACY_RATE_SOURCES) / graph =
 graph_v2.build_tab(exclude_krx=True)의 _free_tab_series 무조건 필터. 조립 후 _assert_krx_free로 fail-closed 재확인.
@@ -28,7 +30,8 @@ FREE_SNAPSHOT_TABS = ("usd",)
 FREE_SNAPSHOT_PERIODS = ("1w", "3m", "1y")
 TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "usdt-krw"}
 
-# cron이 매시간 갱신 → 정상 시 항상 warm. long-TTL = cron 장애 시에도 keep-last-good 최대 ~25h 유지.
+# cron이 매시간 갱신 → 정상 시 항상 warm. long-TTL = cron 장애 시에도 Redis canonical 최대 ~25h 유지.
+# (serve의 process-local last-good은 별개로 프로세스 수명 동안 유지 — Redis TTL과 무관, availability 우선.)
 FREE_SNAPSHOT_TTL_SECONDS = 90000
 
 
@@ -95,7 +98,8 @@ def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
 
     dict + tab/period 일치 + nonempty + KRX-free. 하나라도 실패(또는 malformed schema로 예외) → False.
     _assert_krx_free는 이제 build 시점뿐 아니라 **serve 시점에도** 적용되어 진짜 단일 fail-closed 지점이 됨.
-    전체를 try/except로 감싼다 — nested schema가 깨진 캐시(예: rate가 list)도 예외(500) 아닌 False→rebuild로 폴백.
+    전체를 try/except로 감싼다 — nested schema가 깨진 캐시(예: rate가 list)도 예외(500) 아닌 False→last-good/503으로 폴백.
+    (완전한 schema validator는 아님 — as_of/range 누락처럼 접근 시 예외 없는 shape는 통과 가능. empty/타입예외/KRX 방어 목적.)
     """
     try:
         if not isinstance(payload, dict):
@@ -108,12 +112,6 @@ def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
         return True
     except Exception:
         return False
-
-
-def build_free_snapshot_with_session(tab: str, period: str) -> dict:
-    """자체 DB 세션으로 payload 조립 (serve miss-rebuild의 to_thread용 — SQLAlchemy 세션 thread 안전)."""
-    with get_db_context() as db:
-        return build_free_snapshot_payload(db, tab, period)
 
 
 def precompute_free_snapshots() -> None:
