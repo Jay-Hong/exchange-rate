@@ -146,6 +146,15 @@ def _effective_tab_series(tab: str) -> list:
     return [sid for sid in ids if not sid.startswith("krx.")]
 
 
+def _free_tab_series(tab: str) -> list:
+    """무료 snapshot용 series 목록 — KRX 계열 **무조건** 제외(ADR-039).
+
+    _effective_tab_series와 달리 G2/G3 게이트를 보지 않는다: 게이트가 열려도 무료엔 KRX가
+    절대 들어가면 안 됨(ADR-038 krx_visible에 premium 축이 있으므로 무료=KRX 불가).
+    """
+    return [sid for sid in _TAB_SERIES[tab] if not sid.startswith("krx.")]
+
+
 def _effective_default_visible(tab: str) -> list:
     """default visible 목록 — G2/G3 반영 (catalog가 그대로 복사하므로 함께 필터)."""
     if _krx_distribution_open():
@@ -404,19 +413,21 @@ def build_catalog() -> dict:
     }
 
 
-def build_tab(db, tab: str, period: str, today_kst: date | None = None) -> dict:
+def build_tab(db, tab: str, period: str, today_kst: date | None = None, *, exclude_krx: bool = False) -> dict:
     """탭×기간 모든 series 데이터 (§10 /api/v2/graph/tab 응답).
 
     호출 전 endpoint가 tab 존재 + period 지원(is_supported_period) 검증 가정.
     period→granularity (3m/1y=daily=source_daily_rates / 1w=hourly=source_hourly_rates).
+    exclude_krx=True (ADR-039 무료 snapshot): G2/G3 게이트 무관 KRX 무조건 제외. default False = premium 경로 behavior-change-0.
     """
     if today_kst is None:
         today_kst = datetime.now(tz=KST).date()
     start, end = period_range(period, today_kst)
     granularity = PERIOD_GRANULARITY[period]
 
+    series_ids = _free_tab_series(tab) if exclude_krx else _effective_tab_series(tab)   # ADR-039 / ADR-038 G2 accessor
     series_out = []
-    for series_id in _effective_tab_series(tab):   # ADR-038 G2 accessor
+    for series_id in series_ids:
         entry = SERIES_REGISTRY[series_id]
         if entry["kind"] == "source_daily_rates":
             series_out.append(_read_sdr_series(db, series_id, entry, start, end, granularity))

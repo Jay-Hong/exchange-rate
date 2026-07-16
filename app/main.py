@@ -2449,6 +2449,12 @@ _GRAPH_V2_CACHE_TTL_SECONDS = {"1w": 300, "3m": 1800, "1y": 1800}
 # lock은 tab별 lazy 생성(setdefault — 단일 이벤트 루프라 원자적).
 _intraday_1d_rebuild_locks: dict = {}
 _intraday_1d_in_progress_locks: dict = {}
+# ADR-039 무료 snapshot serve — miss-rebuild single-flight (key별 lazy lock, --workers 1 전제)
+_free_snapshot_rebuild_locks: dict = {}
+# process-local 최근 payload 캐시(B3) — Redis 다운/hang 중 lock 대기자·후속 요청이 재-rebuild 안 하고 공유.
+# key -> (payload, monotonic_deadline). TTL < cron 주기(3600s)라 canonical 갱신을 막지 않음.
+_free_snapshot_local: dict = {}
+_FREE_SNAPSHOT_LOCAL_TTL_SECONDS = 55
 
 
 async def _serve_intraday_1d_cached(tab: str):
@@ -2610,6 +2616,114 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
         cache_key, json.dumps(result), ex=_GRAPH_V2_CACHE_TTL_SECONDS.get(period, 1800)
     )
     return result
+
+
+async def _free_snapshot_cache_get(cache_key: str, tab: str, period: str):
+    """Redis GET(timeout — B2) + 역직렬화 + serve-time 재검증(B1). 유효 payload dict 또는 None(→rebuild).
+
+    timeout으로 Redis hang이 무한 대기하지 않고 miss로 폴백(/api/rates:1008 asyncio.wait_for 패턴).
+    validate_snapshot_payload로 오염 캐시(KRX/null/list/wrong-tab)를 거른다.
+    """
+    from app.free_snapshot import validate_snapshot_payload
+
+    try:
+        raw = await asyncio.wait_for(redis_cache.get(cache_key), timeout=2.0)
+    except asyncio.TimeoutError:
+        # hang(응답 정지)은 redis_cache 내부 except Exception이 CancelledError를 못 잡아 record_failure 누락(NB1).
+        # circuit에 직접 실패 기록 → 반복 hang 시 circuit open → 후속 GET fast-fail(무한 2s 대기 반복 방지).
+        # ⚠️ record_failure는 임계치에서 _persist_state(timeout 없는 Redis SET)를 호출하므로, Redis hang 중
+        #    이 SET이 또 무한 대기할 수 있다 → wait_for(0.5)로 bound. in-memory 상태(failure_count/state=open)는
+        #    persist SET **전에** 갱신되므로, SET이 취소돼도 circuit은 정상적으로 열린다(persist만 best-effort skip).
+        try:
+            await asyncio.wait_for(redis_cache.circuit.record_failure(), timeout=0.5)
+        except Exception:
+            pass
+        return None
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not validate_snapshot_payload(payload, tab, period):
+        logger.warning("free_snapshot %s/%s 캐시 검증 실패(오염/schema) — rebuild", tab, period)
+        return None
+    return payload
+
+
+def _free_snapshot_local_get(cache_key: str):
+    """process-local 최근 payload(B3) — Redis 불가 중 lock 대기자·후속 요청 공유(중복 rebuild 방지)."""
+    entry = _free_snapshot_local.get(cache_key)
+    if entry is None:
+        return None
+    payload, deadline = entry
+    if time.monotonic() > deadline:
+        return None
+    return payload
+
+
+def _free_snapshot_local_put(cache_key: str, payload: dict) -> None:
+    _free_snapshot_local[cache_key] = (payload, time.monotonic() + _FREE_SNAPSHOT_LOCAL_TTL_SECONDS)
+
+
+@app.get("/api/v2/free/snapshot")
+async def get_v2_free_snapshot(request: Request, response: Response, tab: str, period: str = "3m"):
+    """무료(비구독) 매시간 고정 스냅샷 — Firebase 인증만(premium 불요), KRX 제외 (ADR-039 §4.1).
+
+    precompute(cron :20)가 Redis 단독 canonical writer. serve는 warm read(timeout+재검증) + miss 시
+    single-flight DB rebuild(ADR-026 parity)를 하되 **Redis에 쓰지 않고 process-local에만 저장**(B4 — cron/serve
+    write race 원천 제거). Redis SPOF(다운/hang) 방어: timeout+circuit(B2/NB1) → process-local 공유(B3) → DB rebuild.
+    cache-hit도 매번 재검증(B1). 최신 표면(/api/v2/graph/tab 등)의 premium enforcement는 미접촉.
+    """
+    from app.free_snapshot import (
+        FREE_SNAPSHOT_PERIODS,
+        FREE_SNAPSHOT_TABS,
+        _snapshot_is_nonempty,
+        build_free_snapshot_with_session,
+        free_snapshot_key,
+    )
+
+    await verify_firebase_token(request)   # 로그인 필수(401/503), require_premium 미호출 → 무료 접근
+    if tab not in FREE_SNAPSHOT_TABS:
+        return JSONResponse(status_code=404, content={
+            "error": "unknown_tab",
+            "detail": f"tab '{tab}' is not free-available",
+            "free_tabs": list(FREE_SNAPSHOT_TABS),
+        })
+    if period not in FREE_SNAPSHOT_PERIODS:   # N6: endpoint·precompute 단일 진실소스
+        return JSONResponse(status_code=400, content={
+            "error": "unsupported_period",
+            "detail": f"period '{period}' not free-available",
+            "free_periods": list(FREE_SNAPSHOT_PERIODS),
+        })
+
+    response.headers["Cache-Control"] = "no-store"   # 서버가 freshness 소유 (graph/tab 관례)
+    cache_key = free_snapshot_key(tab, period)
+
+    cached = await _free_snapshot_cache_get(cache_key, tab, period)
+    if cached is not None:
+        return cached
+
+    # miss/오염/hang → single-flight rebuild (cold-start/Redis-gap/TTL-expiry 방어, ADR-026 parity)
+    async with _free_snapshot_rebuild_locks.setdefault(cache_key, asyncio.Lock()):
+        cached = await _free_snapshot_cache_get(cache_key, tab, period)   # double-check cron canonical
+        if cached is not None:
+            return cached
+        local = _free_snapshot_local_get(cache_key)   # B3: Redis miss/hang 중 공유 rebuild 결과
+        if local is not None:
+            return local
+        try:
+            payload = await asyncio.to_thread(build_free_snapshot_with_session, tab, period)
+        except Exception:
+            logger.exception("free_snapshot %s/%s rebuild 실패", tab, period)
+            return JSONResponse(status_code=503, content={"error": "snapshot_unavailable"})
+        if _snapshot_is_nonempty(payload):
+            # B4: serve는 Redis 미기록(cron 단독 canonical writer) → write race 없음. local에만 저장(공유).
+            # 빈 payload는 저장 생략(transient). Redis warm은 cron :20이 담당.
+            _free_snapshot_local_put(cache_key, payload)
+        return payload
 
 
 @app.get("/api/v2/topics/snapshot")

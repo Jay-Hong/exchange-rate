@@ -69,7 +69,8 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 - 신규 self-describing endpoint(예: `GET /api/v2/free/snapshot?tab=`), day-1 `verify_firebase_token`, premium 불요, **KRX series 미포함**.
 
 ### 4.2 매시간 고정 갱신 계약
-- 매시간 재생성. `as_of` + `generated_at`. keep-last-good + 원자적 Redis 교체 + TTL. 무료용 별도 Redis 키, read-only.
+- 매시간 재생성. `as_of`(시경계) + `generated_at`(조립 완료 시각, 한 기준시각서 graph range도 파생). keep-last-good(성공+non-empty일 때만 SET) + 원자적 Redis SETEX + long-TTL + 무료용 별도 키(`free:snapshot:{tab}:{period}`).
+- **serve 모델(구현 확정, codex 리뷰 반영)**: cron이 **Redis 단독 canonical writer**. serve = warm read(timeout 2s + serve-time 재검증[KRX fail-closed]) → miss/hang 시 process-local 공유 캐시 → DB single-flight rebuild(ADR-026 parity). serve는 **Redis에 쓰지 않음**(cron/serve write race 원천 제거). Redis hang은 wait_for + circuit로 bound.
 
 ### 4.3 최신 ↔ 무료 분리
 - 무료 그래프는 hourly `as_of` 별도 snapshot(최신 GraphV2 재사용 금지).
@@ -149,7 +150,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 
 - [ ] 전 라우트 auth 감사 — 누수 0.
 - [x] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2 land 2026-07-17: server `55ab1d8` / iOS `1b736f2` / Android `5f93409`. 데이터는 신규 앱 release 후 생성 — nginx deploy/reload + 실 로그 cp/cv/cb 확인 별도).
-- [ ] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2).
+- [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land 2026-07-17** (app/free_snapshot.py + GET /api/v2/free/snapshot + cron :20; workflow 설계+adversarial + codex 3-round[B1~B4/N5/N6/NB] 반영; 23 tests; MVP=usd·1w/3m/1y). 배포·client 소비는 후속.
 - [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease + reauth_required.
