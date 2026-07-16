@@ -6171,6 +6171,27 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
   Open 2(per-user topic 강제)와 같은 hardening 트랙에서 일괄 해소 (memory:
   project_security_hardening_direction). Open 2는 그 트랙 전까지 유지.
 
+## ADR-039: 무료/구독 차등 접근 모델 — hourly 무료 스냅샷 + 최신-데이터 인증 강제 + legacy 종료
+
+**날짜**: 2026-07-17
+**상태**: **Proposed** (설계 수렴 rev5, codex 5-round 검토). 상세 설계 = [FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md). Final 승격엔 제품 결정 S4(유예 기간)·S5(KRX revoke latency) 필요.
+**결정자**: Jay + Claude + Codex (3-way)
+**닫는 것**: ADR-038 잔여 Open 2(WS per-user 인증) — 이 ADR의 WS 인증 계약(§8)이 해소.
+
+### 요약 (상세는 PLAN 문서)
+
+- **문제**: 비구독=매시간 스냅샷 / 구독=실시간 WS 제품 방향인데, 최신 rate/graph endpoint 대부분 무인증(main.py 890~2620 auth 0건) → 페이월이 UI에만 존재.
+- **결정**: D1 hourly=Firebase 인증만(KRX 항상 제외) / D2 최신 realtime 표면=premium(KRX는 +entitlement, ADR-038 `krx_visible`) / D4 신규 앱 legacy fallback 금지 / D5 무료 그래프=real hourly.
+- **접근 강제**: 무인증 최신-데이터 endpoint 전수(11종) 식별 → **Stage A**(신규 표면 인증, 출시 시) + **Stage B**(legacy REST/WS 종료, 양 플랫폼 <1% + 유예).
+- **양 플랫폼**: iOS reference → Android 이식(Android는 완전 legacy). Stage B는 iOS·Android 양쪽 기준([REALTIME_ARCHITECTURE_PLAN.md:479](REALTIME_ARCHITECTURE_PLAN.md#L479) 계약 승계).
+- **WS 인증 계약(testable)**: subscribe payload 토큰 → `subscription_ack`(accepted/rejected) / `subscription_error`(invalid_token) / bounded-lease revoke.
+- **롤아웃**: dormant→flip(C6 규율). **첫 슬라이스 = client-version 관측 계측**(iOS·Android `X-Client-*` + nginx access log, enforcement/동작변경 없음) — 2026-07-17 구현.
+
+### 미결 (제품 결정, Final 전)
+
+- **S4** legacy 유예 기간: 기존 6개월([REALTIME_ARCHITECTURE_PLAN.md:483](REALTIME_ARCHITECTURE_PLAN.md#L483)) 유지 vs 단축(권고 <1%+30일). 명시적 supersede 필요.
+- **S5** KRX revoke 반영 지연: bounded-lease(권고 v1) vs 즉시 제거(별도 규모).
+
 ## 문서 히스토리
 
 - 2025-10-11: ADR-001, ADR-002, ADR-003 작성 (아키텍처 설계 단계)
