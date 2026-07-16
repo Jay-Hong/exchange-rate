@@ -14,6 +14,7 @@ import json
 import logging
 from datetime import datetime
 
+from pydantic import BaseModel, ConfigDict
 from pytz import timezone
 
 from app import crud, graph_v2
@@ -93,26 +94,54 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
     return payload
 
 
+# ── serve-time 캐시 재검증용 응답 스키마 (Pydantic, extra 필드 허용) ──
+# entry/point 내부는 검증 안 함(변동성 — valid 거부 회귀 회피). 구조+날짜형식+bucket_size+range만 엄격.
+class _FreeGraphRange(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    start: str
+    end: str
+
+
+class _FreeGraph(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    series: list[dict]
+    bucket_size: str
+    range: _FreeGraphRange
+
+
+class _FreeRate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    asset: str
+    entries: list[dict]
+
+
+class _FreeSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    tab: str
+    period: str
+    as_of: datetime          # ISO 파싱 → 'banana' 등 invalid date 거부
+    generated_at: datetime
+    rate: _FreeRate
+    graph: _FreeGraph
+
+
 def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
     """cache-hit serve-time 재검증(B1 fail-closed) — 오염된 캐시(KRX/null/list/wrong-tab)를 그대로 반환하지 않게.
 
-    검사: dict / tab·period 일치 / as_of·generated_at str / rate dict+asset 일치+entries list /
-    graph dict+series list+range dict / nonempty / KRX-free. 하나라도 실패(또는 예외) → False → last-good/503.
-    _assert_krx_free는 build+serve 양쪽 적용(단일 fail-closed 지점). full Pydantic은 아니나 codex가 짚은
-    필수필드/asset/타입 gap을 닫음. 전체 try/except로 감싸 어떤 malformed shape도 500 아닌 False.
+    검증: _FreeSnapshotModel(Pydantic) 스키마 — 구조 + as_of/generated_at **날짜 형식**(datetime 파싱 →
+    'banana' 등 거부) + rate.asset/entries(list) + graph.series(list) + **bucket_size**(str) + **range(start/end)**.
+    이후 tab/period 일치 + rate.asset==TAB_ASSET[tab] + nonempty + KRX-free. 하나라도 실패(또는 예외) → False → last-good/503.
+    ⚠️ **residual(정직)**: entry.rate 값 타입(문자열 rate 강제변환 통과)·graph point 내부는 미검증 —
+       valid canonical(변동성 큰 point 필드)을 실수로 거부해 실사용자 503 회귀하는 위험을 피하기 위함. 완전 value-level은 후속.
+    _assert_krx_free는 build+serve 양쪽 적용(단일 fail-closed 지점).
     """
     try:
         if not isinstance(payload, dict):
             return False
+        _FreeSnapshotModel.model_validate(payload)   # 스키마+날짜형식+bucket_size+range (ValidationError→except→False)
         if payload.get("tab") != tab or payload.get("period") != period:
             return False
-        if not isinstance(payload.get("as_of"), str) or not isinstance(payload.get("generated_at"), str):
-            return False
-        rate = payload.get("rate")
-        if not isinstance(rate, dict) or rate.get("asset") != TAB_ASSET.get(tab) or not isinstance(rate.get("entries"), list):
-            return False
-        graph = payload.get("graph")
-        if not isinstance(graph, dict) or not isinstance(graph.get("series"), list) or not isinstance(graph.get("range"), dict):
+        if payload.get("rate", {}).get("asset") != TAB_ASSET.get(tab):
             return False
         if not _snapshot_is_nonempty(payload):
             return False

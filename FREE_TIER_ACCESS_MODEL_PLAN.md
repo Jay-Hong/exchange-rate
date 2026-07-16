@@ -1,6 +1,6 @@
 # 무료/구독 차등 접근 모델 — ADR 초안 (Draft, rev5 · Proposed 후보)
 
-> **Status**: **Proposed ADR-039** (2026-07-17, [DECISIONS.md](DECISIONS.md) 등재) — 설계 수렴 rev5, codex 5-round. Final 승격엔 제품 결정 S4·S5 필요. **첫 슬라이스(client-version 관측 계측) 구현 완료 2026-07-17**.
+> **Status**: **Proposed ADR-039** (2026-07-17, [DECISIONS.md](DECISIONS.md) 등재) — 설계 수렴 rev5, codex 5-round. Final 승격엔 제품 결정 S4·S5·S6 필요. **첫 슬라이스(client-version 관측 계측) + step 3(USD 1w/3m/1y MVP 무료 hourly endpoint) 구현 완료 2026-07-17, 미배포**.
 > **Scope**: 비구독자 hourly 무료 스냅샷 + 최신-데이터 endpoint 접근 강제 + KRX entitlement 게이트 + iOS·Android 양 플랫폼 legacy 종료.
 > **닫는 것**: [ADR-038](DECISIONS.md#L5977) 잔여 Open 2(WS per-user 인증). `krx_visible = G3 ∧ G2 ∧ G1 ∧ premium` 전 표면 준수.
 > **supersede/연동**: [REALTIME_ARCHITECTURE_PLAN.md:479](REALTIME_ARCHITECTURE_PLAN.md#L479) 레거시 제거 계약(양 플랫폼 <1% + 6개월)을 §4.4/S4에서 명시적 조정. topic 계약 = [REALTIME_V2_CLIENT_GUIDE.md](REALTIME_V2_CLIENT_GUIDE.md). 전략 = iOS reference → Android 이식.
@@ -121,7 +121,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 - **S5 (제품 결정) KRX revoke 반영 지연**: bounded-lease(권고 v1, 최대 lease만큼 leak window 허용) vs 즉시 제거(UID registry + Redis 제어 이벤트, 별도 규모). 운영 민감도에 따라 확정.
 - **S6 (제품 결정, codex Medium) last-good 최대 stale 정책**: serve의 process-local last-good은 현재 **무기한**(Redis/cron 장기 장애 시 며칠 stale canonical도 반환 — 실시간 우회는 아님, `as_of`가 정직하게 old 표시). (a) 최대 stale N시간 초과 시 503 전환 vs (b) 무기한 유지 + 클라 UI에 stale 명시. **무료 client 연결 전 확정** 필요. 현재는 (b) 기본(가용성 우선). Redis canonical은 별개로 ~25h TTL(FREE_SNAPSHOT_TTL_SECONDS).
 
-> S4·S5는 첫 슬라이스(step 2)와 **독립** — Stage B / WS 구현 전까지 확정하면 됨.
+> S4·S5·S6는 서버 MVP(step 2·3)와 **독립** — S4/S5는 Stage B/WS 구현 전, S6는 무료 client 연결 전까지 확정하면 됨.
 
 ---
 
@@ -151,10 +151,11 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 
 - [ ] 전 라우트 auth 감사 — 누수 0.
 - [x] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2 land 2026-07-17: server `55ab1d8` / iOS `1b736f2` / Android `5f93409`. 데이터는 신규 앱 release 후 생성 — nginx deploy/reload + 실 로그 cp/cv/cb 확인 별도).
-- [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land 2026-07-17** (app/free_snapshot.py + GET /api/v2/free/snapshot + cron :20; workflow 설계+adversarial + codex 3-round[B1~B4/N5/N6/NB] 반영; 23 tests; MVP=usd·1w/3m/1y). 배포·client 소비는 후속.
+- [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land 2026-07-17, 미배포** (app/free_snapshot.py + GET /api/v2/free/snapshot + cron :20). workflow 설계+adversarial + **codex MCP 다라운드**: B1~B4/N5/N6/NB → **freshness 불변식(serve canonical-only, DB 재생성 제거)** → validator Pydantic 스키마. 26 tests. MVP=usd·1w/3m/1y. **validator residual**(entry.rate 값타입·point 내부)·**S6**(last-good stale)는 client 연결 전 마무리.
 - [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease + reauth_required.
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).
 - [ ] **제품 결정 S4(유예 기간·supersede) / S5(revoke latency) — Stage B/WS 전 확정**.
+- [ ] **제품 결정 S6(last-good 최대 stale) — 무료 client 연결 전 확정** + validator value-level 완결(entry.rate 타입/point 내부).

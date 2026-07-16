@@ -118,7 +118,7 @@ def test_validate_snapshot_payload():
         "tab": "usd", "period": "3m",
         "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
         "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw"}]},
-        "graph": {"series": [{"id": "investing.usd", "data": [1]}], "range": {"start": "a", "end": "b"}},
+        "graph": {"series": [{"id": "investing.usd", "data": [1]}], "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
     }
     assert free_snapshot.validate_snapshot_payload(good, "usd", "3m")
     # 오염/이상 payload는 각 이유로 거부(→ last-good/503)
@@ -130,6 +130,12 @@ def test_validate_snapshot_payload():
     assert not free_snapshot.validate_snapshot_payload({**good, "as_of": None}, "usd", "3m")          # as_of 누락/타입
     assert not free_snapshot.validate_snapshot_payload(
         {**good, "rate": {"asset": "jpy-krw", "entries": [{"currency": "usd-krw"}]}}, "usd", "3m")     # asset 불일치
+    # Pydantic 스키마(codex Medium — 값 레벨): invalid date / bucket_size 누락 / empty range
+    assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "banana"}, "usd", "3m")       # invalid date string
+    assert not free_snapshot.validate_snapshot_payload(
+        {**good, "graph": {"series": good["graph"]["series"], "range": good["graph"]["range"]}}, "usd", "3m")  # bucket_size 누락
+    assert not free_snapshot.validate_snapshot_payload(
+        {**good, "graph": {**good["graph"], "range": {}}}, "usd", "3m")   # empty range(start/end 없음)
     assert not free_snapshot.validate_snapshot_payload(
         {**good, "rate": {"asset": "usd-krw", "entries": []}, "graph": {**good["graph"], "series": []}}, "usd", "3m")  # empty
     krx = {**good, "graph": {**good["graph"], "series": [{"id": "krx.usd-krw-futures", "data": [1]}]}}
