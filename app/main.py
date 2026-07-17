@@ -2668,8 +2668,8 @@ def _free_snapshot_local_put(cache_key: str, payload: dict) -> None:
 async def get_v2_free_snapshot(request: Request, response: Response, tab: str, period: str = "3m"):
     """무료(비구독) 매시간 고정 스냅샷 — Firebase 인증만(premium 불요), KRX 제외 (ADR-039 §4.1).
 
-    **핵심 불변식(무료=1시간 고정)**: serve는 cron(:20)이 만든 canonical(hourly-fixed)만 반환하고 **DB로
-    재생성하지 않는다**. serve가 DB 최신값으로 rebuild하면 같은 시간대에도 값이 바뀌어 유료(실시간) 차등이 깨짐.
+    **핵심 불변식(무료=매시 고정, HH:30 basis)**: serve는 cron(매시 :30:19)이 만든 canonical(hourly-fixed,
+    `timestamp <= as_of` cutoff)만 반환하고 **DB로 재생성하지 않는다**. serve가 DB 최신값으로 rebuild하면 같은 시간대에도 값이 바뀌어 유료(실시간) 차등이 깨짐.
     Redis canonical read(timeout+재검증+circuit, B1/B2) → 성공값을 process-local last-good 보존 → Redis 장애 시
     마지막 canonical만 반환 → canonical이 아예 없으면(cold-start 전 첫 cron / 전면 손실) 503(최신값 fabricate 금지).
     빈/오염 payload도 validate가 거부 → last-good/503. 최신 표면(/api/v2/graph/tab 등)의 premium enforcement는 미접촉.

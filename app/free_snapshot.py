@@ -125,6 +125,26 @@ def _snapshot_is_nonempty(payload: dict) -> bool:
     return bool(rate_entries) and any(s.get("data") for s in series)
 
 
+def _assert_graph_within_as_of(payload: dict) -> None:
+    """fail-closed — 모든 graph point ts <= as_of (시간 계약 §4.2). 위반 시 raise → precompute가 SET 생략(keep-last-good).
+
+    정상 rollup(hourly/daily append + 1d closed-bucket now_kst=as_of)은 as_of 초과 bucket을 만들지 않지만,
+    1w 조회가 당일 23:59:59 inclusive라 백필 실수/오염 데이터의 우회가 구조적으로 가능(codex 2026-07-18) —
+    쿼리 신뢰가 아니라 최종 payload 검증으로 불변식을 잠근다.
+    """
+    as_of = datetime.fromisoformat(payload["as_of"])
+    for s in payload.get("graph", {}).get("series", []):
+        for p in s.get("data", []):
+            if not isinstance(p, dict):
+                continue   # 비-dict point는 이 timestamp 검사의 명시적 범위 밖(이 함수는 as_of 초과만 차단)
+            ts = p.get("ts")
+            if ts is None:
+                continue
+            if datetime.fromisoformat(ts) > as_of:
+                raise ValueError(
+                    f"graph point가 as_of 초과: series={s.get('id')!r} ts={ts} as_of={payload['as_of']}")
+
+
 def _assert_krx_free(payload: dict) -> None:
     """fail-closed — KRX가 rate/graph 어느 쪽에도 없어야 한다(N6, 무료엔 KRX 절대 불가). 위반 시 raise."""
     for s in payload.get("graph", {}).get("series", []):
@@ -173,7 +193,8 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
             "range": graph["metadata"]["range"],
         },
     }
-    _assert_krx_free(payload)   # fail-closed: KRX 유입 시 raise → caller가 setex 스킵
+    _assert_krx_free(payload)          # fail-closed: KRX 유입 시 raise → caller가 setex 스킵
+    _assert_graph_within_as_of(payload)  # fail-closed: as_of 초과 graph point 유입 시 raise → setex 스킵
     return payload
 
 
@@ -229,6 +250,7 @@ def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
         if not _snapshot_is_nonempty(payload):
             return False
         _assert_krx_free(payload)
+        _assert_graph_within_as_of(payload)   # 배포 전/오염 canonical의 as_of 초과 point가 last-good으로 seed되는 창 차단
         return True
     except Exception:
         return False

@@ -1605,13 +1605,16 @@ def start_scheduler():
 
     scheduler.add_job(
         precompute_free_snapshots,
-        CronTrigger(minute=30, timezone=KST),
+        # second=19: 정각 :30:00대의 알려진 동시-시작(cleanup_old_bank_data 03:30:01 / kb crawler
+        # second 15,35,55 / KB news 5분마다 :15 / OUT DXY :15)과 겹치지 않는 초 선택(codex 2026-07-18 —
+        # 동시 시작 감소 목적, cleanup 완료 보장은 아님). as_of는 basis_as_of(HH:30)라 발화 초와 무관.
+        CronTrigger(minute=30, second=19, timezone=KST),
         id="free_snapshot_precompute",
         max_instances=1,
         coalesce=True
     )
 
-    logger.info("✅ ADR-039 무료 hourly snapshot precompute 스케줄 등록 (매시 :30)")
+    logger.info("✅ ADR-039 무료 hourly snapshot precompute 스케줄 등록 (매시 :30:19)")
 
     # ═════════════════════════════════════════════════════════════
     # DXY rollup: realtime → hourly/daily 집계

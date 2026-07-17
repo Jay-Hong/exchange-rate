@@ -118,6 +118,24 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.json()["error"], "snapshot_unavailable")
 
+    def test_rejects_canonical_with_point_beyond_as_of(self):
+        # serve-time cutoff(codex 2026-07-18): as_of 초과 graph point를 가진 canonical(배포 전 구 데이터/오염)은
+        # validate가 거부 → local 없음 → 503 (last-good seed 차단).
+        bad = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:29:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.usd",
+                                  "data": [{"ts": "2026-07-17T15:00:00+09:00", "rate": 1385.0}]}],   # as_of 초과
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(bad))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
     def test_serves_1d_canonical(self):
         # 1d가 이제 무료 지원 period → 400 아님. 10min bucket canonical이 validate 통과 + 서빙.
         canonical = {

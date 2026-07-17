@@ -118,6 +118,32 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
     assert datetime.fromisoformat(payload["generated_at"]) >= ao
 
 
+def test_assert_graph_within_as_of():
+    """SET 전 fail-closed — graph point ts가 as_of 초과면 raise(백필/오염 우회 차단, codex 시간 계약)."""
+    base = {
+        "as_of": "2026-07-18T21:30:00+09:00",
+        "graph": {"series": [{"id": "investing.usd", "data": [
+            {"ts": "2026-07-18T21:00:00+09:00", "rate": 1400.0},   # 이하 → OK
+            {"ts": "2026-07-18T21:30:00+09:00", "rate": 1401.0},   # 정확히 경계 → OK (<=)
+        ]}]},
+    }
+    free_snapshot._assert_graph_within_as_of(base)   # 통과
+
+    over = {
+        "as_of": "2026-07-18T21:30:00+09:00",
+        "graph": {"series": [{"id": "hana.usd", "data": [
+            {"ts": "2026-07-18T22:00:00+09:00", "rate": 1402.0},   # 초과 → raise
+        ]}]},
+    }
+    with pytest.raises(ValueError):
+        free_snapshot._assert_graph_within_as_of(over)
+
+    # ts 없는 point(비-ts 스키마)는 이 함수 영역 아님 — 통과
+    free_snapshot._assert_graph_within_as_of(
+        {"as_of": "2026-07-18T21:30:00+09:00",
+         "graph": {"series": [{"id": "x", "data": [{"bucket_date": "2026-07-18", "rate": 1.0}]}]}})
+
+
 def test_basis_as_of_boundaries():
     """마지막 HH:30 경계 — minute>=30이면 이번 시, <30이면 직전 시(자정 경계 포함)."""
     def kst(y, mo, d, h, mi, s=0):
@@ -225,6 +251,11 @@ def test_validate_snapshot_payload():
     assert not free_snapshot.validate_snapshot_payload({**good, "as_of": None}, "usd", "3m")          # as_of 누락/타입
     assert not free_snapshot.validate_snapshot_payload(
         {**good, "rate": {"asset": "jpy-krw", "entries": [{"currency": "usd-krw"}]}}, "usd", "3m")     # asset 불일치
+    # serve-time as_of cutoff(codex 2026-07-18) — 배포 전/오염 canonical의 초과 point가 last-good으로 seed되는 창 차단
+    assert not free_snapshot.validate_snapshot_payload(
+        {**good, "graph": {"series": [{"id": "investing.usd",
+                                       "data": [{"ts": "2026-07-17T15:00:00+09:00", "rate": 1400.0}]}],   # as_of(14:00) 초과
+                           "bucket_size": "1d", "range": {"start": "a", "end": "b"}}}, "usd", "3m")
     # Pydantic 스키마(codex Medium — 값 레벨): invalid date / bucket_size 누락 / empty range
     assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "banana"}, "usd", "3m")       # invalid date string
     assert not free_snapshot.validate_snapshot_payload(
