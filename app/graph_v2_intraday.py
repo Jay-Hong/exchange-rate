@@ -403,14 +403,16 @@ def _free_tab_1d_specs(tab: str) -> list:
     return [spec for spec in TAB_1D_SERIES[tab] if not spec["id"].startswith("krx.")]
 
 
-def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False) -> dict:
+def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False, now_kst: Optional[datetime] = None) -> dict:
     """탭 1d 전체 series 조립(테더 11/usd 10/jpy·eur 9) → /api/v2/graph/tab 응답 shape.
 
     closed-bucket only(진행 중 10분봉 제외). 동기(get_db_context) — precompute cron + endpoint
     miss-rebuild(to_thread)에서 호출. tab은 INTRADAY_TABS 검증 후 진입 가정(KeyError=호출부 버그).
     exclude_krx=True (ADR-039 무료): G2/G3 게이트 무관 KRX 무조건 제외. default False = 기존 intraday 경로 behavior-change-0.
+    now_kst 주입(ADR-039 무료 as_of cutoff): 잘라낼 경계를 as_of로 고정 → cron 지연/온디맨드 재빌드에도
+    as_of 초과 봉이 못 들어옴(timestamp <= as_of 계약). default None = 기존 now (premium behavior-change-0).
     """
-    now_kst = datetime.now(KST)
+    now_kst = now_kst or datetime.now(KST)
     in_progress_start_ts = _bucket_align(int(now_kst.timestamp()))   # 진행 중 버킷 시작 = 잘라낼 경계
     window_start_kst = now_kst - timedelta(hours=WINDOW_HOURS)
 

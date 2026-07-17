@@ -1594,22 +1594,24 @@ def start_scheduler():
     logger.info("✅ 그래프 v2 intraday 1d precompute 스케줄 등록 (*/10분 12초, 4탭)")
 
     # ═════════════════════════════════════════════════════════════
-    # ADR-039 무료 hourly snapshot precompute: 매시 :20분 (무료 비구독 티어)
+    # ADR-039 무료 hourly snapshot precompute: 매시 :30분 (무료 비구독 티어)
     # ═════════════════════════════════════════════════════════════
     # - 매시간 고정 갱신 스냅샷(rate + real hourly graph, KRX 제외)을 Redis(free:snapshot:{tab}:{period})에 SET.
-    # - :20 offset: daily-append(:01) + hourly-append(:05/:07/:09) cron 이후라 최신 daily/hourly row 반영 + 00:01 race 회피(N5).
-    # - 요청 경로(main.py)는 이 canonical만 read(DB 재생성 안 함, 무료=1시간 고정) → Redis 장애 시 local last-good → 전무 시 503. enforcement 없음(무료=인증만).
+    # - :30 basis(사용자 2026-07-18): as_of=HH:30 + rate/graph는 timestamp<=as_of cutoff(시간 계약) —
+    #   09:00 개장 후 09:30 첫 무료 정보로 30분 만에 장 파악 가능. daily(:01)/hourly(:05/:07/:09/:11)
+    #   append cron 이후라 최신 canonical row 반영 + 00:01 race 회피(N5)는 :20 시절과 동일하게 성립.
+    # - 요청 경로(main.py)는 이 canonical만 read(DB 재생성 안 함, 무료=매시 고정) → Redis 장애 시 local last-good → 전무 시 503. enforcement 없음(무료=인증만).
     from app.free_snapshot import precompute_free_snapshots
 
     scheduler.add_job(
         precompute_free_snapshots,
-        CronTrigger(minute=20, timezone=KST),
+        CronTrigger(minute=30, timezone=KST),
         id="free_snapshot_precompute",
         max_instances=1,
         coalesce=True
     )
 
-    logger.info("✅ ADR-039 무료 hourly snapshot precompute 스케줄 등록 (매시 :20)")
+    logger.info("✅ ADR-039 무료 hourly snapshot precompute 스케줄 등록 (매시 :30)")
 
     # ═════════════════════════════════════════════════════════════
     # DXY rollup: realtime → hourly/daily 집계

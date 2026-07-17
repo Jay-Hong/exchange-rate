@@ -61,6 +61,24 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 - **캐시 = 전역 게이트(G2∧G3) 후 저장 → serve-time per-user(G1∧premium) 필터**. 개인화 결과 공용 키 재캐시 금지.
 - **무료 hourly precompute는 KRX 없는 별도 산출물**(무료 endpoint에 KRX가 아예 안 들어가므로 serve-time 필터 불요).
 
+### 3.2 KRX 존재 완전 비노출 계약 (사용자 지시 2026-07-17, authoritative)
+
+**비구독자는 KRX(미국달러선물)의 존재 자체를 알 수 없어야 한다.** KRX는 구독자 중에서도 서버 등록된
+일부(entitlement)만 보는 표면이므로, 무료 티어의 어떤 표면에도 다음을 포함하지 않는다:
+
+| 표면 | 계약 |
+|---|---|
+| 무료 rate payload | `bank=="krx"` / `currency=="usd-krw-futures"` (FX shape) **및** `source=="krx"` / `asset=="usd-krw-futures"` (topic-native shape, 테더 N4) 전부 제외. `_assert_krx_free`는 양 shape 검사 |
+| 무료 graph series | `krx.*` id 제외 (서버 `exclude_krx=True` + 클라 어댑터 strip 이중) |
+| 무료 UI | 잠금 티저/행/범례/아이콘/명칭 일절 금지 (잠금 카드로도 노출 금지 — codex 티저 제안 기각됨) |
+| Paywall 문구·기능 목록 | KRX 미언급 (구독 유도 문구에 "달러선물" 포함 금지) |
+| 접근성(VoiceOver) 라벨 | KRX 미언급 |
+| 소스/은행 설정 화면 | 무료 경로에서 KRX 항목 미노출 |
+
+- 구현 상태: 서버 3중(legacy allowlist + `exclude_krx` + `_assert_krx_free`) + iOS 3중(어댑터 series strip +
+  buildRatesState 명시 제외 + prepared 기반 토글). **테더 N4 land 전 `_assert_krx_free` source/asset shape 확장 필수**
+  (topic-native 우회 차단) — KRX가 잠깐이라도 무료 payload/UI에 들어가는 중간 상태 금지.
+
 ---
 
 ## 4. ADR 4축
@@ -68,8 +86,19 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 ### 4.1 인증된 무료 hourly endpoint
 - 신규 self-describing endpoint(예: `GET /api/v2/free/snapshot?tab=`), day-1 `verify_firebase_token`, premium 불요, **KRX series 미포함**.
 
-### 4.2 매시간 고정 갱신 계약
-- 매시간 재생성. `as_of`(시경계) + `generated_at`(조립 완료 시각, 한 기준시각서 graph range도 파생). keep-last-good(성공+non-empty일 때만 SET) + 원자적 Redis SETEX + long-TTL + 무료용 별도 키(`free:snapshot:{tab}:{period}`).
+### 4.2 매시간 고정 갱신 계약 — HH:30 basis (2026-07-18 개정)
+- **시간 계약(사용자 + codex 2026-07-18)**:
+  ```text
+  as_of:        매시 HH:30:00 (마지막 :30 경계. 09:00 개장 → 09:30 첫 무료 정보로 30분 만에 장 파악)
+  rates/graph:  timestamp <= as_of 인 마지막 데이터만 포함 (쿼리 불변식 — 라벨과 데이터 정합)
+  generated_at: 실제 스냅샷 조립 완료 시각
+  UI:           "매시 30분 갱신 · HH:30 기준"
+  ```
+- cutoff은 라벨이 아니라 **쿼리 불변식**: rate = `fetch_rate_entries_until`(`timestamp <= as_of` 각 소스 최신 1건),
+  1d graph = `build_tab_1d_payload(now_kst=as_of)`(잘라낼 경계=as_of 고정 — cron 지연/재빌드에도 초과 봉 유입 불가),
+  1w/3m/1y = hourly/daily canonical이라 as_of(HH:30) 초과 bucket 자체가 없음. 배경: :00 floor + 최신값 조회 시
+  "21:00 기준" 라벨에 21:19 값이 보이는 구조적 mismatch(사용자 실측 2026-07-18).
+- cron 매시 :30 발화. keep-last-good(성공+non-empty일 때만 SET) + 원자적 Redis SETEX + long-TTL + 무료용 별도 키(`free:snapshot:{tab}:{period}`).
 - **serve 모델(구현 확정, codex 리뷰 반영)**: cron이 **Redis 단독 canonical writer**. serve는 **cron canonical만 반환하고 DB로 재생성하지 않는다** — 이게 무료=1시간 고정의 핵심(serve가 DB 최신값으로 rebuild하면 같은 시간대에도 값이 바뀌어 유료 실시간 차등이 깨짐). serve = Redis canonical read(timeout 2s + serve-time 재검증[KRX/empty fail-closed] + circuit) → 성공값 process-local last-good 보존 → Redis 장애 시 마지막 canonical → **canonical 전무 시 503**(최신값 fabricate 금지). serve는 Redis/DB에 쓰지 않음.
 
 ### 4.3 최신 ↔ 무료 분리
@@ -151,7 +180,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 
 - [ ] 전 라우트 auth 감사 — 누수 0.
 - [x] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2 land 2026-07-17: server `55ab1d8` / iOS `1b736f2` / Android `5f93409`. 데이터는 신규 앱 release 후 생성 — nginx deploy/reload + 실 로그 cp/cv/cb 확인 별도).
-- [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land 2026-07-17, 미배포** (app/free_snapshot.py + GET /api/v2/free/snapshot + cron :20). workflow 설계+adversarial + **codex MCP 다라운드**: B1~B4/N5/N6/NB → **freshness 불변식(serve canonical-only, DB 재생성 제거)** → validator Pydantic 스키마. 26 tests. MVP=usd·1w/3m/1y. **validator residual**(entry.rate 값타입·point 내부)·**S6**(last-good stale)는 client 연결 전 마무리.
+- [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land + 배포 2026-07-17** (app/free_snapshot.py + GET /api/v2/free/snapshot, MVP=usd·1d/1w/3m/1y). workflow 설계+adversarial + **codex MCP 다라운드**: B1~B4/N5/N6/NB → **freshness 불변식(serve canonical-only, DB 재생성 제거)** → validator Pydantic 스키마. **2026-07-18 HH:30 basis 개정(§4.2)**: as_of=마지막 HH:30 + `timestamp <= as_of` cutoff 쿼리 불변식(fetch_rate_entries_until + build_tab_1d_payload now_kst 주입) + cron :30 — 구 :00 floor의 라벨↔데이터 mismatch(사용자 실측) 해소. **S6 확정**: last-good 무기한 + 나이별 escalation(2h soft/24h 강한 stale), 하드 503 금지. iOS USD reference slice land(987d161).
 - [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease + reauth_required.

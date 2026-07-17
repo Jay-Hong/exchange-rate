@@ -12,17 +12,23 @@ graph_v2.build_tab(exclude_krx=True)의 _free_tab_series 무조건 필터. 조�
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
+import pytz
 from pydantic import BaseModel, ConfigDict
 from pytz import timezone
+from sqlalchemy import and_, func
 
-from app import crud, graph_v2
+from app import crud, graph_v2, models
 from app.database import get_db_context
 
 logger = logging.getLogger("exchange_rate.free_snapshot")
 
 KST = timezone("Asia/Seoul")
+
+# 무료 스냅샷 basis = 매시 HH:30 (사용자 2026-07-18 — 09:00 개장 후 09:30 첫 정보로 30분 만에
+# 장 파악 가능 + as_of가 데이터보다 뒤(>=)라 "HH:30 기준" 라벨과 값이 정합). cron도 :30 발화.
+FREE_SNAPSHOT_BASIS_MINUTE = 30
 
 # MVP = usd only (달러 주력 탭 — investing.usd + hana.usd + dxy로 sdr/market_index 양 reader 검증).
 # 확장: FREE_SNAPSHOT_TABS 추가. 단 non-FX 탭(tether=usdt-krw)은 legacy_policy가 rate에서 usdt를 배제하므로
@@ -35,6 +41,73 @@ TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "us
 # cron이 매시간 갱신 → 정상 시 항상 warm. long-TTL = cron 장애 시에도 Redis canonical 최대 ~25h 유지.
 # (serve의 process-local last-good은 별개로 프로세스 수명 동안 유지 — Redis TTL과 무관, availability 우선.)
 FREE_SNAPSHOT_TTL_SECONDS = 90000
+
+
+def basis_as_of(now_kst: datetime) -> datetime:
+    """마지막 HH:30 경계 (무료 스냅샷 basis). now.minute>=30이면 이번 시 HH:30, 아니면 직전 시 HH:30."""
+    if now_kst.minute >= FREE_SNAPSHOT_BASIS_MINUTE:
+        return now_kst.replace(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=0, microsecond=0)
+    return (now_kst - timedelta(hours=1)).replace(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=0, microsecond=0)
+
+
+def fetch_rate_entries_until(db, asset: str, as_of_kst: datetime) -> list:
+    """as_of cutoff rate 조회 — `timestamp <= as_of`인 각 소스 최신 1건 (codex 시간 계약).
+
+    get_all_rates_flat(무조건 최신)을 쓰면 build 중 커밋된 as_of 초과 값이 유입돼 "HH:30 기준" 라벨과
+    데이터가 어긋난다(21:00 라벨에 21:19 값 — 사용자 실측 2026-07-18). cutoff을 쿼리 불변식으로 강제.
+    반환 shape은 legacy flat과 동일({currency, bank, rate, timestamp[KST ISO]}) — 기존 hot-path 함수 무접촉.
+    FX asset(usd/jpy/eur-krw) 전용 — investing + banks. 테더(usdt-krw)는 N4에서 source_rates 기반 별도.
+    """
+    cutoff_utc = as_of_kst.astimezone(pytz.utc).replace(tzinfo=None)   # DB timestamp = UTC naive
+    entries = []
+
+    inv = (
+        db.query(models.InvestingExchangeRate)
+        .filter(
+            models.InvestingExchangeRate.currency == asset,
+            models.InvestingExchangeRate.timestamp <= cutoff_utc,
+        )
+        .order_by(models.InvestingExchangeRate.timestamp.desc(), models.InvestingExchangeRate.id.desc())
+        .first()
+    )
+    if inv:
+        entries.append({
+            "currency": inv.currency,
+            "bank": "investing",
+            "rate": inv.rate,
+            "timestamp": crud.to_kst_isoformat(inv.timestamp),
+        })
+
+    ranked = (
+        db.query(
+            models.BankExchangeRate.id,
+            func.row_number().over(
+                partition_by=models.BankExchangeRate.bank,
+                order_by=[
+                    models.BankExchangeRate.timestamp.desc(),
+                    models.BankExchangeRate.id.desc(),
+                ],
+            ).label("rn"),
+        )
+        .filter(
+            models.BankExchangeRate.currency == asset,
+            models.BankExchangeRate.timestamp <= cutoff_utc,
+        )
+        .subquery()
+    )
+    records = (
+        db.query(models.BankExchangeRate)
+        .join(ranked, and_(models.BankExchangeRate.id == ranked.c.id, ranked.c.rn == 1))
+        .all()
+    )
+    records.sort(key=lambda r: crud._bank_display_sort_key(r.bank))
+    entries.extend({
+        "currency": r.currency,
+        "bank": r.bank,
+        "rate": r.rate,
+        "timestamp": crud.to_kst_isoformat(r.timestamp),
+    } for r in records)
+    return entries
 
 
 def free_snapshot_key(tab: str, period: str) -> str:
@@ -65,26 +138,27 @@ def _assert_krx_free(payload: dict) -> None:
 def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> dict:
     """무료 스냅샷 payload 조립.
 
-    as_of = 시(hour) 경계 clamp(매시간 고정 갱신 계약, §4.2 — 데이터 recency 아닌 cadence 마커).
-    generated_at = 조립 **완료** 시각(build 후). rate = get_all_rates_flat(KRX-free) 중 TAB_ASSET[tab] 필터.
-    graph: **1w·3m·1y** = build_tab(exclude_krx=True), range를 as_of.date()에 고정(N5 — 자정 경계 정합) /
-    **1d** = graph_v2_intraday.build_tab_1d_payload(exclude_krx=True) closed-bucket(builder 자체 now 사용 —
-    1d는 rolling 24h window라 as_of.date()-alignment 대상 아님). 조립 후 _assert_krx_free로 fail-closed 재확인.
+    시간 계약(codex 2026-07-18): as_of = 마지막 HH:30 경계 / rate·graph = `timestamp <= as_of`인
+    마지막 데이터만 / generated_at = 조립 완료 시각. 라벨("HH:30 기준")과 데이터가 쿼리 불변식으로 정합.
+    rate = fetch_rate_entries_until(cutoff, KRX-free는 legacy allowlist + _assert_krx_free).
+    graph: **1w·3m·1y** = build_tab(exclude_krx=True, today_kst=as_of.date()) — hourly/daily canonical이라
+    as_of(HH:30) 초과 bucket 자체가 없음 / **1d** = build_tab_1d_payload(now_kst=as_of 주입) —
+    잘라낼 경계=as_of 고정이라 cron 지연/재빌드에도 as_of 초과 봉 유입 불가. 조립 후 _assert_krx_free.
     """
     now_kst = now_kst or datetime.now(KST)
-    as_of = now_kst.replace(minute=0, second=0, microsecond=0)
+    as_of = basis_as_of(now_kst)
 
     asset = TAB_ASSET[tab]
-    rate_entries = [r for r in crud.get_all_rates_flat(db) if r.get("currency") == asset]
+    rate_entries = fetch_rate_entries_until(db, asset, as_of)
 
-    # graph: 1d=intraday(10min closed-bucket) / 1w·3m·1y=build_tab(daily/hourly). 둘 다 exclude_krx=True.
+    # graph: 1d=intraday(10min closed-bucket, as_of cutoff) / 1w·3m·1y=build_tab(daily/hourly). 둘 다 exclude_krx=True.
     if period == "1d":
-        # 무료 1d = premium live-tail/in_progress 미포함 closed-bucket. free cron(:20)이 hourly-frozen 담당
-        # (premium intraday :12 */10과 별개 — 무료는 다음 free cron[:20]까지 ~1h 불변). build가 자체 세션 사용(db 인자 불요).
+        # 무료 1d = premium live-tail/in_progress 미포함 closed-bucket. free cron(:30)이 hourly-frozen 담당
+        # (premium intraday :12 */10과 별개 — 무료는 다음 free cron[:30]까지 1h 불변). build가 자체 세션 사용(db 인자 불요).
         from app import graph_v2_intraday
-        graph = graph_v2_intraday.build_tab_1d_payload(tab, exclude_krx=True)
+        graph = graph_v2_intraday.build_tab_1d_payload(tab, exclude_krx=True, now_kst=as_of)
     else:
-        # N5: graph range를 as_of.date()에 고정 → as_of(시경계)와 graph range.end가 항상 일관.
+        # N5: graph range를 as_of.date()에 고정 → as_of와 graph range.end가 항상 일관.
         graph = graph_v2.build_tab(db, tab, period, today_kst=as_of.date(), exclude_krx=True)
 
     payload = {

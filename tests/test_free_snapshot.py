@@ -1,9 +1,10 @@
 """ADR-039 Step 3 — 무료 hourly snapshot 회귀 테스트.
 
-중점: KRX 제외(보안 핵심 — rate/graph 양쪽 fail-closed) + payload 조립(as_of 시경계·asset 필터) + keep-last-good invariant.
+중점: KRX 제외(보안 핵심 — rate/graph 양쪽 fail-closed) + 시간 계약(as_of=HH:30 basis +
+`timestamp <= as_of` cutoff — codex 2026-07-18) + payload 조립 + keep-last-good invariant.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -67,13 +68,12 @@ def test_build_tab_exclude_krx_drops_krx_even_when_gate_open(monkeypatch):
     assert "krx.usd-krw-futures" in prem_ids
 
 
-# ── payload 조립 (asset 필터 + as_of 시경계 + exclude_krx 전달) ──
+# ── payload 조립 (cutoff rate + as_of HH:30 경계 + exclude_krx 전달) ──
 
 def test_build_free_snapshot_payload_shapes(monkeypatch):
     fake_rates = [
         {"bank": "investing", "currency": "usd-krw", "rate": 1385.0, "timestamp": "t"},
         {"bank": "kb", "currency": "usd-krw", "rate": 1386.0, "timestamp": "t"},
-        {"bank": "kb", "currency": "jpy-krw", "rate": 960.0, "timestamp": "t"},  # 다른 asset → 제외
     ]
     fake_graph = {
         "series": [
@@ -89,7 +89,12 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
         captured["today_kst"] = today_kst
         return fake_graph
 
-    monkeypatch.setattr(free_snapshot.crud, "get_all_rates_flat", lambda db: fake_rates)
+    def fake_fetch_until(db, asset, as_of):
+        captured["cutoff_asset"] = asset
+        captured["cutoff_as_of"] = as_of
+        return [e for e in fake_rates if e["currency"] == asset]
+
+    monkeypatch.setattr(free_snapshot, "fetch_rate_entries_until", fake_fetch_until)
     monkeypatch.setattr(free_snapshot.graph_v2, "build_tab", fake_build_tab)
 
     payload = free_snapshot.build_free_snapshot_payload(None, "usd", "3m")
@@ -97,17 +102,69 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
     assert captured["exclude_krx"] is True   # 무료는 반드시 exclude_krx=True로 build_tab 호출
     # N5: graph range를 as_of.date()에 고정 (build_tab에 today_kst=as_of.date() 전달)
     assert captured["today_kst"] == datetime.fromisoformat(payload["as_of"]).date()
+    # 시간 계약: rate는 as_of cutoff 조회로, payload as_of와 동일 경계 전달
+    assert captured["cutoff_asset"] == "usd-krw"
+    assert captured["cutoff_as_of"].isoformat() == payload["as_of"]
     assert payload["tab"] == "usd" and payload["period"] == "3m"
     assert payload["rate"]["asset"] == "usd-krw"
-    assert len(payload["rate"]["entries"]) == 2   # jpy 제외
+    assert len(payload["rate"]["entries"]) == 2
     assert all(e["currency"] == "usd-krw" for e in payload["rate"]["entries"])
     assert payload["graph"]["bucket_size"] == "1d"
     assert payload["graph"]["range"]["end"] == "2026-07-17"
 
     ao = datetime.fromisoformat(payload["as_of"])
-    assert (ao.minute, ao.second, ao.microsecond) == (0, 0, 0)   # 시(hour) 경계 clamp
+    assert (ao.minute, ao.second, ao.microsecond) == (30, 0, 0)   # HH:30 basis 경계
     # generated_at은 실행 시각(as_of 이상)
     assert datetime.fromisoformat(payload["generated_at"]) >= ao
+
+
+def test_basis_as_of_boundaries():
+    """마지막 HH:30 경계 — minute>=30이면 이번 시, <30이면 직전 시(자정 경계 포함)."""
+    def kst(y, mo, d, h, mi, s=0):
+        return free_snapshot.KST.localize(datetime(y, mo, d, h, mi, s))
+
+    assert free_snapshot.basis_as_of(kst(2026, 7, 18, 21, 45)) == kst(2026, 7, 18, 21, 30)
+    assert free_snapshot.basis_as_of(kst(2026, 7, 18, 21, 30)) == kst(2026, 7, 18, 21, 30)   # 정확히 :30
+    assert free_snapshot.basis_as_of(kst(2026, 7, 18, 21, 29)) == kst(2026, 7, 18, 20, 30)
+    assert free_snapshot.basis_as_of(kst(2026, 7, 18, 0, 10)) == kst(2026, 7, 17, 23, 30)    # 자정 경계
+
+
+def test_fetch_rate_entries_until_cutoff_boundary():
+    """시간 계약(codex): `timestamp <= as_of`인 마지막 값만 — as_of 초과 값은 최신이어도 제외."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app import models
+
+    engine = create_engine("sqlite://")
+    models.Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    as_of = free_snapshot.KST.localize(datetime(2026, 7, 18, 21, 30))
+    cutoff = as_of.astimezone(free_snapshot.pytz.utc).replace(tzinfo=None)   # DB=UTC naive
+
+    # kb: as_of 이전 2건(구→신) + as_of 초과 1건 → 초과 제외, 이전 중 최신(1401) 선택
+    db.add(models.BankExchangeRate(bank="kb", currency="usd-krw", rate=1400.0, timestamp=cutoff - timedelta(minutes=20)))
+    db.add(models.BankExchangeRate(bank="kb", currency="usd-krw", rate=1401.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.add(models.BankExchangeRate(bank="kb", currency="usd-krw", rate=1499.0, timestamp=cutoff + timedelta(seconds=1)))
+    # hana: 정확히 as_of 경계값 → 포함(<=)
+    db.add(models.BankExchangeRate(bank="hana", currency="usd-krw", rate=1402.0, timestamp=cutoff))
+    # investing: 이전 1 + 초과 1 → 이전 값
+    db.add(models.InvestingExchangeRate(currency="usd-krw", rate=1398.0, timestamp=cutoff - timedelta(minutes=5)))
+    db.add(models.InvestingExchangeRate(currency="usd-krw", rate=1500.0, timestamp=cutoff + timedelta(minutes=2)))
+    # 다른 asset은 미포함
+    db.add(models.BankExchangeRate(bank="kb", currency="jpy-krw", rate=960.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.commit()
+
+    entries = free_snapshot.fetch_rate_entries_until(db, "usd-krw", as_of)
+    by_bank = {e["bank"]: e for e in entries}
+
+    assert by_bank["kb"]["rate"] == 1401.0          # 초과값(1499) 아님, 이전 중 최신
+    assert by_bank["hana"]["rate"] == 1402.0        # 경계 == 포함
+    assert by_bank["investing"]["rate"] == 1398.0   # 초과값(1500) 아님
+    assert all(e["currency"] == "usd-krw" for e in entries)
+    # timestamp는 KST ISO 문자열(legacy flat shape 미러)
+    assert all(isinstance(e["timestamp"], str) and "+09:00" in e["timestamp"] for e in entries)
 
 
 # ── 무료 1d (intraday, KRX 제외, hourly-frozen) — ADR-039 A ──────
@@ -126,19 +183,22 @@ def test_build_free_snapshot_payload_1d_uses_intraday(monkeypatch):
     fake_rates = [{"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "t"}]
     captured = {}
 
-    def fake_1d(tab, *, exclude_krx=False):
+    def fake_1d(tab, *, exclude_krx=False, now_kst=None):
         captured["exclude_krx"] = exclude_krx
+        captured["now_kst"] = now_kst
         return {
             "tab": tab, "period": "1d",
             "series": [{"id": "investing.usd", "data": [[123, 1, 2, 1385.0]]}],
             "metadata": {"fetched_at": "x", "bucket_size": "10min", "range": {"start": "a", "end": "b"}},
         }
 
-    monkeypatch.setattr(free_snapshot.crud, "get_all_rates_flat", lambda db: fake_rates)
+    monkeypatch.setattr(free_snapshot, "fetch_rate_entries_until", lambda db, asset, as_of: fake_rates)
     monkeypatch.setattr(graph_v2_intraday, "build_tab_1d_payload", fake_1d)
 
     payload = free_snapshot.build_free_snapshot_payload(None, "usd", "1d")
     assert captured["exclude_krx"] is True                      # 무료 1d도 KRX 무조건 제외
+    # 시간 계약: 1d builder에 now_kst=as_of 주입 → 잘라낼 경계=as_of(초과 봉 유입 불가)
+    assert captured["now_kst"].isoformat() == payload["as_of"]
     assert payload["period"] == "1d"
     assert payload["graph"]["bucket_size"] == "10min"           # intraday(build_tab 아님)
     assert payload["rate"]["asset"] == "usd-krw"
