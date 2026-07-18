@@ -164,9 +164,13 @@ def test_assert_rates_within_as_of():
     with pytest.raises(ValueError):
         free_snapshot._assert_rates_within_as_of(over)
 
-    # ts 없는/비-dict entry는 이 함수 영역 아님 — 통과
+    # timestamp 필수(codex 2026-07-18 완전 closure) — ts 없는 dict entry는 raise
+    with pytest.raises(ValueError):
+        free_snapshot._assert_rates_within_as_of(
+            {"as_of": "2026-07-18T21:30:00+09:00", "rate": {"entries": [{"bank": "kb"}]}})
+    # 비-dict entry는 이 함수 영역 아님(Pydantic이 거부) — skip(통과)
     free_snapshot._assert_rates_within_as_of(
-        {"as_of": "2026-07-18T21:30:00+09:00", "rate": {"entries": [{"bank": "kb"}, "junk"]}})
+        {"as_of": "2026-07-18T21:30:00+09:00", "rate": {"entries": ["junk"]}})
 
 
 def test_basis_as_of_boundaries():
@@ -263,7 +267,8 @@ def test_validate_snapshot_payload():
     good = {
         "tab": "usd", "period": "3m",
         "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",   # :30 grid
-        "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw"}]},
+        "rate": {"asset": "usd-krw", "entries": [
+            {"currency": "usd-krw", "timestamp": "2026-07-17T14:19:00+09:00"}]},   # ts 필수(<= as_of)
         "graph": {"series": [{"id": "investing.usd", "data": [1]}], "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
     }
     assert free_snapshot.validate_snapshot_payload(good, "usd", "3m")

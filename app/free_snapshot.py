@@ -149,14 +149,16 @@ def _assert_rates_within_as_of(payload: dict) -> None:
     """fail-closed — 모든 rate entry timestamp <= as_of (시간 계약 §4.2, graph와 대칭). build query가
     cutoff을 강제하지만, serve-time에 배포 전/오염 canonical(구 get_all_rates_flat = 무조건 최신이라 as_of
     초과 가능)이 유입되는 창을 차단(codex 2026-07-18 — validate가 graph만 검사하던 비대칭 해소).
-    ts 없거나 비-dict = 스키마 검증 영역(여기선 skip, KRX/nonempty/Pydantic이 커버)."""
+    timestamp는 **필수**(시간 계약 완전 closure — ts 없는 rate entry는 as_of 판정 불가라 fail-closed 거부,
+    codex 2026-07-18. 실 canonical은 fetch_rate_entries_until이 항상 ts 부여라 false-503 없음).
+    비-dict는 Pydantic(entries:list[dict])이 이미 거부."""
     as_of = datetime.fromisoformat(payload["as_of"])
     for e in payload.get("rate", {}).get("entries", []):
         if not isinstance(e, dict):
             continue
         ts = e.get("timestamp")
         if ts is None:
-            continue
+            raise ValueError(f"rate entry에 timestamp 없음(시간 계약 필수): bank={e.get('bank')!r}")
         if datetime.fromisoformat(ts) > as_of:
             raise ValueError(
                 f"rate entry가 as_of 초과: bank={e.get('bank')!r} ts={ts} as_of={payload['as_of']}")
