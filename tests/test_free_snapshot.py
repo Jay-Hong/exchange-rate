@@ -72,8 +72,8 @@ def test_build_tab_exclude_krx_drops_krx_even_when_gate_open(monkeypatch):
 
 def test_build_free_snapshot_payload_shapes(monkeypatch):
     fake_rates = [
-        {"bank": "investing", "currency": "usd-krw", "rate": 1385.0, "timestamp": "t"},
-        {"bank": "kb", "currency": "usd-krw", "rate": 1386.0, "timestamp": "t"},
+        {"bank": "investing", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2020-01-01T00:00:00+09:00"},
+        {"bank": "kb", "currency": "usd-krw", "rate": 1386.0, "timestamp": "2020-01-01T00:00:00+09:00"},
     ]
     fake_graph = {
         "series": [
@@ -144,6 +144,31 @@ def test_assert_graph_within_as_of():
          "graph": {"series": [{"id": "x", "data": [{"bucket_date": "2026-07-18", "rate": 1.0}]}]}})
 
 
+def test_assert_rates_within_as_of():
+    """SET 전 fail-closed — rate entry timestamp가 as_of 초과면 raise(구 get_all_rates_flat canonical 차단)."""
+    ok = {
+        "as_of": "2026-07-18T21:30:00+09:00",
+        "rate": {"entries": [
+            {"bank": "kb", "currency": "usd-krw", "rate": 1400.0, "timestamp": "2026-07-18T21:22:00+09:00"},
+            {"bank": "hana", "currency": "usd-krw", "rate": 1401.0, "timestamp": "2026-07-18T21:30:00+09:00"},  # 경계 == OK
+        ]},
+    }
+    free_snapshot._assert_rates_within_as_of(ok)   # 통과
+
+    over = {
+        "as_of": "2026-07-18T21:30:00+09:00",
+        "rate": {"entries": [
+            {"bank": "investing", "currency": "usd-krw", "rate": 1402.0, "timestamp": "2026-07-18T21:31:00+09:00"},  # 초과
+        ]},
+    }
+    with pytest.raises(ValueError):
+        free_snapshot._assert_rates_within_as_of(over)
+
+    # ts 없는/비-dict entry는 이 함수 영역 아님 — 통과
+    free_snapshot._assert_rates_within_as_of(
+        {"as_of": "2026-07-18T21:30:00+09:00", "rate": {"entries": [{"bank": "kb"}, "junk"]}})
+
+
 def test_basis_as_of_boundaries():
     """마지막 HH:30 경계 — minute>=30이면 이번 시, <30이면 직전 시(자정 경계 포함)."""
     def kst(y, mo, d, h, mi, s=0):
@@ -206,7 +231,7 @@ def test_free_tab_1d_specs_excludes_krx():
 
 def test_build_free_snapshot_payload_1d_uses_intraday(monkeypatch):
     from app import graph_v2_intraday
-    fake_rates = [{"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "t"}]
+    fake_rates = [{"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2020-01-01T00:00:00+09:00"}]
     captured = {}
 
     def fake_1d(tab, *, exclude_krx=False, now_kst=None):
@@ -237,11 +262,14 @@ def test_validate_snapshot_payload():
     # 완전한 canonical(precompute가 만드는 shape) — 강화된 검사 통과
     good = {
         "tab": "usd", "period": "3m",
-        "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",   # :30 grid
         "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw"}]},
         "graph": {"series": [{"id": "investing.usd", "data": [1]}], "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
     }
     assert free_snapshot.validate_snapshot_payload(good, "usd", "3m")
+    # HH:30 grid(codex 2026-07-18) — off-grid as_of(구 :00 floor / 오염) 거부 → 시간 계약 grid 수준 closure
+    assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "2026-07-17T14:00:00+09:00"}, "usd", "3m")
+    assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "2026-07-17T14:15:00+09:00"}, "usd", "3m")
     # 오염/이상 payload는 각 이유로 거부(→ last-good/503)
     assert not free_snapshot.validate_snapshot_payload(None, "usd", "3m")
     assert not free_snapshot.validate_snapshot_payload([1, 2], "usd", "3m")
@@ -254,8 +282,13 @@ def test_validate_snapshot_payload():
     # serve-time as_of cutoff(codex 2026-07-18) — 배포 전/오염 canonical의 초과 point가 last-good으로 seed되는 창 차단
     assert not free_snapshot.validate_snapshot_payload(
         {**good, "graph": {"series": [{"id": "investing.usd",
-                                       "data": [{"ts": "2026-07-17T15:00:00+09:00", "rate": 1400.0}]}],   # as_of(14:00) 초과
+                                       "data": [{"ts": "2026-07-17T15:00:00+09:00", "rate": 1400.0}]}],   # as_of(14:30) 초과
                            "bucket_size": "1d", "range": {"start": "a", "end": "b"}}}, "usd", "3m")
+    # serve-time rate cutoff(codex 2026-07-18) — graph와 대칭, 초과 rate entry canonical 거부
+    assert not free_snapshot.validate_snapshot_payload(
+        {**good, "rate": {"asset": "usd-krw", "entries": [
+            {"bank": "kb", "currency": "usd-krw", "rate": 1400.0, "timestamp": "2026-07-17T15:00:00+09:00"}]}},  # as_of(14:30) 초과
+        "usd", "3m")
     # Pydantic 스키마(codex Medium — 값 레벨): invalid date / bucket_size 누락 / empty range
     assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "banana"}, "usd", "3m")       # invalid date string
     assert not free_snapshot.validate_snapshot_payload(

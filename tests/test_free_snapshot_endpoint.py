@@ -71,8 +71,8 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         # serve는 cron canonical을 그대로 반환(DB rebuild 아님) → 같은 시간대 DB가 바뀌어도 응답 불변.
         canonical = {
             "tab": "usd", "period": "3m",
-            "as_of": "2026-07-17T14:00:00+09:00",
-            "generated_at": "2026-07-17T14:20:03+09:00",
+            "as_of": "2026-07-17T14:30:00+09:00",
+            "generated_at": "2026-07-17T14:30:20+09:00",
             "rate": {"asset": "usd-krw", "entries": [
                 {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
             "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
@@ -90,7 +90,7 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         # keep-last-good(availability) + 1시간 고정(값 불변) 동시 확인.
         canonical = {
             "tab": "usd", "period": "3m",
-            "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
             "rate": {"asset": "usd-krw", "entries": [
                 {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
             "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
@@ -136,11 +136,44 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.json()["error"], "snapshot_unavailable")
 
+    def test_rejects_canonical_with_rate_beyond_as_of(self):
+        # serve-time rate cutoff(codex 2026-07-18): as_of 초과 rate entry를 가진 canonical(구 get_all_rates_flat)은
+        # graph와 대칭으로 validate가 거부 → local 없음 → 503.
+        bad = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:45:00+09:00"}]},  # as_of 초과
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(bad))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_rejects_off_grid_as_of_canonical(self):
+        # serve-time HH:30 grid(codex 2026-07-18): as_of가 :30 아니면(구 :00 floor / 오염) 거부 → 503.
+        bad = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",   # off-grid :00
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T13:59:00+09:00"}]},   # as_of 이하(cutoff 통과)
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(bad))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)   # cutoff은 통과하나 off-grid라 거부
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
     def test_serves_1d_canonical(self):
         # 1d가 이제 무료 지원 period → 400 아님. 10min bucket canonical이 validate 통과 + 서빙.
         canonical = {
             "tab": "usd", "period": "1d",
-            "as_of": "2026-07-17T14:00:00+09:00", "generated_at": "2026-07-17T14:20:03+09:00",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
             "rate": {"asset": "usd-krw", "entries": [
                 {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
             "graph": {"series": [{"id": "investing.usd", "data": [[123, 1.0, 2.0, 1385.0]]}],

@@ -145,6 +145,32 @@ def _assert_graph_within_as_of(payload: dict) -> None:
                     f"graph point가 as_of 초과: series={s.get('id')!r} ts={ts} as_of={payload['as_of']}")
 
 
+def _assert_rates_within_as_of(payload: dict) -> None:
+    """fail-closed — 모든 rate entry timestamp <= as_of (시간 계약 §4.2, graph와 대칭). build query가
+    cutoff을 강제하지만, serve-time에 배포 전/오염 canonical(구 get_all_rates_flat = 무조건 최신이라 as_of
+    초과 가능)이 유입되는 창을 차단(codex 2026-07-18 — validate가 graph만 검사하던 비대칭 해소).
+    ts 없거나 비-dict = 스키마 검증 영역(여기선 skip, KRX/nonempty/Pydantic이 커버)."""
+    as_of = datetime.fromisoformat(payload["as_of"])
+    for e in payload.get("rate", {}).get("entries", []):
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("timestamp")
+        if ts is None:
+            continue
+        if datetime.fromisoformat(ts) > as_of:
+            raise ValueError(
+                f"rate entry가 as_of 초과: bank={e.get('bank')!r} ts={ts} as_of={payload['as_of']}")
+
+
+def _assert_as_of_on_grid(payload: dict) -> None:
+    """fail-closed — as_of가 HH:30:00 grid에 정렬됐는지 검증(무료 cron은 :30만 생성). 시간 계약을 grid
+    수준까지 닫는다 — off-grid canonical(구 :00 floor 배포 이전 / 오염)을 serve에서 거부(codex 2026-07-18).
+    cutoff(rate/graph <= as_of)만으론 as_of=14:00·rate=13:59 같은 off-grid consistent canonical이 통과."""
+    as_of = datetime.fromisoformat(payload["as_of"])
+    if (as_of.minute, as_of.second, as_of.microsecond) != (FREE_SNAPSHOT_BASIS_MINUTE, 0, 0):
+        raise ValueError(f"as_of가 :{FREE_SNAPSHOT_BASIS_MINUTE} grid 밖: {payload['as_of']}")
+
+
 def _assert_krx_free(payload: dict) -> None:
     """fail-closed — KRX가 rate/graph 어느 쪽에도 없어야 한다(N6, 무료엔 KRX 절대 불가). 위반 시 raise."""
     for s in payload.get("graph", {}).get("series", []):
@@ -193,8 +219,10 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
             "range": graph["metadata"]["range"],
         },
     }
-    _assert_krx_free(payload)          # fail-closed: KRX 유입 시 raise → caller가 setex 스킵
+    _assert_as_of_on_grid(payload)       # fail-closed: as_of가 :30 grid 아니면 raise (basis_as_of가 이미 보장, 방어적)
+    _assert_krx_free(payload)            # fail-closed: KRX 유입 시 raise → caller가 setex 스킵
     _assert_graph_within_as_of(payload)  # fail-closed: as_of 초과 graph point 유입 시 raise → setex 스킵
+    _assert_rates_within_as_of(payload)  # fail-closed: as_of 초과 rate entry 유입 시 raise (build는 방어적, cutoff query가 이미 보장)
     return payload
 
 
@@ -249,8 +277,10 @@ def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
             return False
         if not _snapshot_is_nonempty(payload):
             return False
+        _assert_as_of_on_grid(payload)        # off-grid(구 :00 floor / 오염) canonical 거부 — grid 수준 시간 계약
         _assert_krx_free(payload)
-        _assert_graph_within_as_of(payload)   # 배포 전/오염 canonical의 as_of 초과 point가 last-good으로 seed되는 창 차단
+        _assert_graph_within_as_of(payload)   # 배포 전/오염 canonical의 as_of 초과 graph point가 last-good으로 seed되는 창 차단
+        _assert_rates_within_as_of(payload)   # rate도 대칭(build query만 cutoff이라 구/오염 canonical의 초과 rate 차단)
         return True
     except Exception:
         return False
