@@ -275,6 +275,19 @@ def test_validate_snapshot_payload():
     # HH:30 grid(codex 2026-07-18) — off-grid as_of(구 :00 floor / 오염) 거부 → 시간 계약 grid 수준 closure
     assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "2026-07-17T14:00:00+09:00"}, "usd", "3m")
     assert not free_snapshot.validate_snapshot_payload({**good, "as_of": "2026-07-17T14:15:00+09:00"}, "usd", "3m")
+    # tz-aware as_of 강제(codex 2026-07-19) — naive as_of(fully-naive 오염)는 cutoff 비교가 무의미해 새므로 거부.
+    # rate ts도 naive로 맞춰 cutoff는 통과시키고 as_of tz-aware assert만으로 거부됨을 잠금.
+    assert not free_snapshot.validate_snapshot_payload(
+        {**good, "as_of": "2026-07-17T14:30:00",   # naive(on-grid, offset 없음)
+         "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw", "timestamp": "2026-07-17T14:19:00"}]}},
+        "usd", "3m")
+    # grid는 KST 정규화 후 판정(codex 2026-07-19) — offset 무관 tz-aware 허용. 두 반대 방향 반례:
+    assert free_snapshot.validate_snapshot_payload(       # +05:30 11:00 = 14:30 KST → 유효(offset raw minute=00 아님)
+        {**good, "as_of": "2026-07-17T11:00:00+05:30"}, "usd", "3m")
+    assert not free_snapshot.validate_snapshot_payload(   # +05:30 10:30 = 14:00 KST → off-grid 거부(fail-open 누수 차단)
+        {**good, "as_of": "2026-07-17T10:30:00+05:30",    # rate ts를 13:59 KST로 → cutoff 통과 → grid 단독 거부 잠금(codex)
+         "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw", "timestamp": "2026-07-17T13:59:00+09:00"}]}},
+        "usd", "3m")
     # 오염/이상 payload는 각 이유로 거부(→ last-good/503)
     assert not free_snapshot.validate_snapshot_payload(None, "usd", "3m")
     assert not free_snapshot.validate_snapshot_payload([1, 2], "usd", "3m")
@@ -375,3 +388,55 @@ def test_precompute_isolates_failure_keeps_others(monkeypatch):
     free_snapshot.precompute_free_snapshots()
     assert free_snapshot.free_snapshot_key("usd", "3m") not in fake.setex_keys   # 실패한 것만 빠짐
     assert free_snapshot.free_snapshot_key("usd", "1w") in fake.setex_keys       # 나머지는 SET
+
+
+# ─── attach_free_snapshot_domain (serve-time X축 domain, graph envelope, anchor=as_of) — ADR-039 X축 통일 ───
+
+def _free_canonical(period="3m", as_of="2026-07-19T10:30:00+09:00"):
+    return {
+        "tab": "usd", "period": period, "as_of": as_of, "generated_at": as_of,
+        "rate": {"asset": "usd-krw", "entries": [{"bank": "kb", "currency": "usd-krw", "rate": 1385.0}]},
+        "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-18", "rate": 1385.0}]}],
+                  "bucket_size": "1d", "range": {"start": "2026-04-20", "end": "2026-07-19"}},
+    }
+
+
+def test_attach_free_snapshot_domain_graph_envelope_fixed_start():
+    canonical = _free_canonical("3m")
+    out = free_snapshot.attach_free_snapshot_domain(canonical, "3m")
+    # domain은 graph 블록에(프리미엄=metadata와 다른 envelope). anchor=as_of.
+    assert out["graph"]["live_domain_mode"] == "fixed_start"
+    assert out["graph"]["domain_end_at"] == "2026-07-19T10:30:00+09:00"       # = as_of
+    assert out["graph"]["domain_start_at"] == "2026-04-20T00:00:00+09:00"     # (as_of 날짜 - 90) 00:00
+    assert out["graph"]["range"] == {"start": "2026-04-20", "end": "2026-07-19"}   # 기존 range 보존
+    assert "metadata" not in out                                              # 무료엔 metadata 없음
+    # 입력 불변 (canonical에 domain 없음 — Redis/last-good은 깨끗)
+    assert "domain_start_at" not in canonical["graph"]
+
+
+def test_attach_free_snapshot_domain_1d_rolling():
+    out = free_snapshot.attach_free_snapshot_domain(_free_canonical("1d"), "1d")
+    assert out["graph"]["live_domain_mode"] == "rolling"
+    assert out["graph"]["domain_start_at"] == "2026-07-18T10:30:00+09:00"     # as_of - 24h
+    assert out["graph"]["domain_end_at"] == "2026-07-19T10:30:00+09:00"       # = as_of
+
+
+def test_attach_free_snapshot_domain_normalizes_to_plus9():
+    # as_of가 다른 offset(UTC)이어도 출력 domain은 +09:00(같은 순간). 입력 offset을 +09:00로 강제하진 않음.
+    out = free_snapshot.attach_free_snapshot_domain(_free_canonical("3m", as_of="2026-07-19T01:30:00+00:00"), "3m")
+    assert out["graph"]["domain_end_at"] == "2026-07-19T10:30:00+09:00"       # 01:30 UTC = 10:30 KST
+
+
+def test_attach_free_snapshot_domain_naive_as_of_no_domain():
+    # naive as_of(오염/구 canonical) → domain 없이 canonical 그대로(503 아님, 클라 data-derived fallback).
+    canonical = _free_canonical("3m", as_of="2026-07-19T10:30:00")   # naive
+    out = free_snapshot.attach_free_snapshot_domain(canonical, "3m")
+    assert "domain_start_at" not in out["graph"]
+    assert out is canonical                                          # 그대로 반환(copy도 안 함)
+
+
+def test_attach_free_snapshot_domain_missing_as_of_no_domain():
+    canonical = {"tab": "usd", "period": "3m", "graph": {"series": []}}   # as_of 키 없음
+    out = free_snapshot.attach_free_snapshot_domain(canonical, "3m")
+    assert "domain_start_at" not in out["graph"]
+    assert out is canonical

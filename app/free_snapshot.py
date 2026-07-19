@@ -115,6 +115,30 @@ def free_snapshot_key(tab: str, period: str) -> str:
     return f"free:snapshot:{tab}:{period}"
 
 
+def attach_free_snapshot_domain(payload: dict, period: str) -> dict:
+    """무료 스냅샷 응답 **graph** 블록에 serve-time X축 domain 부착(anchor=as_of). 입력 payload 불변(중첩 graph 복사).
+
+    프리미엄과 envelope가 달라 별도 adapter — 프리미엄=metadata / 무료=flat graph(FreeGraphBlock). serve 시점에
+    부착하므로 canonical(Redis/last-good)은 domain 없이 깨끗하게 유지(검증 후 copy에만 부착 → 재검증 회귀 0).
+    as_of가 naive/파싱 실패면 domain 없이 canonical 그대로 반환 — 스냅샷 자체는 유효하므로 503 아님(클라가 data-derived로 fallback).
+    """
+    try:
+        as_of = datetime.fromisoformat(payload["as_of"])
+        if as_of.tzinfo is None:
+            raise ValueError("as_of timezone-naive")
+        domain = graph_v2.period_domain(period, as_of)   # anchor tz-aware → +09:00 정규화 출력
+    except (ValueError, KeyError, TypeError) as e:
+        logger.warning("free snapshot domain 부착 실패 — canonical 그대로 반환 (period=%s, err=%s)", period, e)
+        return payload
+    return {
+        **payload,
+        "graph": {
+            **payload.get("graph", {}),
+            **domain,
+        },
+    }
+
+
 def _snapshot_is_nonempty(payload: dict) -> bool:
     """rate entry 1개 이상 AND graph series 중 data 있는 것 1개 이상.
 
@@ -165,12 +189,19 @@ def _assert_rates_within_as_of(payload: dict) -> None:
 
 
 def _assert_as_of_on_grid(payload: dict) -> None:
-    """fail-closed — as_of가 HH:30:00 grid에 정렬됐는지 검증(무료 cron은 :30만 생성). 시간 계약을 grid
-    수준까지 닫는다 — off-grid canonical(구 :00 floor 배포 이전 / 오염)을 serve에서 거부(codex 2026-07-18).
-    cutoff(rate/graph <= as_of)만으론 as_of=14:00·rate=13:59 같은 off-grid consistent canonical이 통과."""
+    """fail-closed — as_of가 timezone-aware + HH:30:00 grid에 정렬됐는지 검증(무료 cron은 aware KST :30만 생성).
+    시간 계약을 grid 수준까지 닫는다 — off-grid canonical(구 :00 floor 배포 이전 / 오염)을 serve에서 거부(codex 2026-07-18).
+    cutoff(rate/graph <= as_of)만으론 as_of=14:00·rate=13:59 같은 off-grid consistent canonical이 통과.
+    **tz-aware 강제(codex 2026-07-19)**: as_of가 naive면 cutoff assert의 timestamp 비교가 무의미(naive-vs-naive면 예외
+    없이 통과)해 fully-naive 오염 canonical이 새어나감 → cutoff 토대인 as_of aware를 여기서 명시 거부(→ 503/last-good)."""
     as_of = datetime.fromisoformat(payload["as_of"])
-    if (as_of.minute, as_of.second, as_of.microsecond) != (FREE_SNAPSHOT_BASIS_MINUTE, 0, 0):
-        raise ValueError(f"as_of가 :{FREE_SNAPSHOT_BASIS_MINUTE} grid 밖: {payload['as_of']}")
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError(f"as_of가 timezone-naive: {payload['as_of']}")
+    # grid는 KST HH:30 개념(cron이 KST :30 발화) — offset 무관 정규화 후 판정(입력 offset raw minute 아님, codex 2026-07-19).
+    # cutoff assert들은 aware instant 비교라 이미 offset-무관이지만, minute은 offset 의존이라 여기서 KST로 변환.
+    as_of_kst = as_of.astimezone(KST)
+    if (as_of_kst.minute, as_of_kst.second, as_of_kst.microsecond) != (FREE_SNAPSHOT_BASIS_MINUTE, 0, 0):
+        raise ValueError(f"as_of가 :{FREE_SNAPSHOT_BASIS_MINUTE} grid 밖(KST): {payload['as_of']}")
 
 
 def _assert_krx_free(payload: dict) -> None:

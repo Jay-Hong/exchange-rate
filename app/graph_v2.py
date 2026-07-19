@@ -191,6 +191,53 @@ def period_range(period: str, today_kst: date) -> tuple[date, date]:
 
 
 # ─────────────────────────────────────────────────────────────
+# Serve-time X축 domain (ADR-039 그래프 X축 통일 — 탭 무관 공통 프레임)
+# ─────────────────────────────────────────────────────────────
+
+def period_domain(period: str, anchor: datetime) -> dict:
+    """serve-time 기준 X축 domain(클라 displayDomain 계약). anchor는 tz-aware여야 함
+    (프리미엄=serve-time now / 무료=as_of). 출력 timestamp는 KST(+09:00)로 정규화.
+
+    **canonical payload에 굽지 말고 serve 시점에 attach** — 전날 캐시도 오늘 domain을 받고, 같은 anchor면
+    탭 무관 동일 domain(빗썸 유무 등 데이터 커버리지에 X축이 흔들리지 않음). 클라는 이 domain으로 X축·눈금·
+    liveAnchor·줌clamp를 계산하고 실제 데이터 범위(historicalBounds)와는 분리.
+
+    - 1d: rolling 24h ([anchor-24h, anchor]) — 클라가 양끝을 render-now로 이동(폭 유지).
+    - 1w/3m/1y: fixed_start ((anchor KST날짜-N) 00:00 ~ anchor) — 클라가 start 유지·우측만 render-now로.
+      1w = today-7 00:00(정확 168h 아닌 달력 경계 — 금요일 종가관리 비교 목적, period_range와 동일 의도).
+    """
+    if anchor.tzinfo is None or anchor.utcoffset() is None:
+        # Python aware 정의 = tzinfo AND utcoffset() not None. naive는 astimezone이 시스템 로컬 tz를
+        # 가정(조용히 오해) → 계약상 명시 거부(호출부가 처리). tzinfo만 있고 utcoffset None인 degenerate도 거부.
+        raise ValueError("period_domain requires tz-aware anchor")
+    anchor = anchor.astimezone(KST)   # 방어적 — 날짜 경계·출력을 KST로 확정
+    if period == "1d":
+        return {
+            "domain_start_at": (anchor - timedelta(hours=24)).isoformat(),
+            "domain_end_at": anchor.isoformat(),
+            "live_domain_mode": "rolling",
+        }
+    days = PERIOD_DAYS[period]
+    start = datetime.combine(anchor.date() - timedelta(days=days), time(0, 0), tzinfo=KST)
+    return {
+        "domain_start_at": start.isoformat(),
+        "domain_end_at": anchor.isoformat(),
+        "live_domain_mode": "fixed_start",
+    }
+
+
+def attach_graph_v2_domain(payload: dict, domain: dict) -> dict:
+    """프리미엄 v2 응답에 serve-time domain을 **metadata**에 부착. 입력 payload 불변(중첩 metadata까지 복사)."""
+    return {
+        **payload,
+        "metadata": {
+            **payload.get("metadata", {}),
+            **domain,
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────
 # Provenance 조립 (source_daily_rates series — single/mixed 동적)
 # ─────────────────────────────────────────────────────────────
 

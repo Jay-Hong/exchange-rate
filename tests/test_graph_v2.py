@@ -16,6 +16,7 @@ build_tab(db, ...)은 db 주입이라 patch 불필요 — in-memory SQLite sessi
 import unittest
 from unittest.mock import patch
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -373,6 +374,76 @@ class TestPeriod1wHourly(_Base):
                     if s["id"] == "bithumb.usdt-krw")
         self.assertTrue(bith["provenance"]["insufficient_history"])    # start+6 > 2d (partial coverage)
         self.assertEqual(len(bith["data"]), 1)                         # partial이어도 data 반환
+
+
+class TestPeriodDomain(unittest.TestCase):
+    """serve-time X축 domain 정책 + 프리미엄 attach (ADR-039 그래프 X축 통일)."""
+
+    KST = ZoneInfo("Asia/Seoul")
+
+    def test_1d_rolling_24h(self):
+        anchor = datetime(2026, 7, 19, 10, 50, tzinfo=self.KST)
+        d = G.period_domain("1d", anchor)
+        self.assertEqual(d["live_domain_mode"], "rolling")
+        self.assertEqual(d["domain_start_at"], "2026-07-18T10:50:00+09:00")   # anchor-24h
+        self.assertEqual(d["domain_end_at"], "2026-07-19T10:50:00+09:00")
+
+    def test_long_fixed_start_period_boundary(self):
+        anchor = datetime(2026, 7, 19, 10, 50, tzinfo=self.KST)
+        cases = {   # start = (KST 날짜 - N) 00:00 KST
+            "1w": "2026-07-12T00:00:00+09:00",
+            "3m": "2026-04-20T00:00:00+09:00",
+            "1y": "2025-07-19T00:00:00+09:00",
+        }
+        for period, expected_start in cases.items():
+            d = G.period_domain(period, anchor)
+            self.assertEqual(d["live_domain_mode"], "fixed_start", period)
+            self.assertEqual(d["domain_start_at"], expected_start, period)
+            self.assertEqual(d["domain_end_at"], "2026-07-19T10:50:00+09:00", period)
+
+    def test_forces_plus9_from_utc_anchor(self):
+        # anchor가 UTC여도 출력·날짜 경계는 +09:00(같은 순간) — 서버 출력 timestamp는 항상 KST.
+        anchor_utc = datetime(2026, 7, 19, 1, 50, tzinfo=ZoneInfo("UTC"))   # = 10:50 KST
+        d = G.period_domain("1w", anchor_utc)
+        self.assertEqual(d["domain_start_at"], "2026-07-12T00:00:00+09:00")
+        self.assertEqual(d["domain_end_at"], "2026-07-19T10:50:00+09:00")
+
+    def test_naive_anchor_rejected(self):
+        with self.assertRaises(ValueError):
+            G.period_domain("1w", datetime(2026, 7, 19, 10, 50))   # naive → 계약상 거부
+
+    def test_utcoffset_none_anchor_rejected(self):
+        # tzinfo는 있으나 utcoffset()이 None인 degenerate도 Python 정의상 naive → 거부(조용한 로컬 해석 방지).
+        from datetime import tzinfo as _tzinfo
+
+        class _NoOffset(_tzinfo):
+            def utcoffset(self, dt): return None
+            def tzname(self, dt): return "X"
+
+        with self.assertRaises(ValueError):
+            G.period_domain("1w", datetime(2026, 7, 19, 10, 50, tzinfo=_NoOffset()))
+
+    def test_previous_day_cache_gets_today_domain(self):
+        # 전날 빌드된 캐시 payload도 serve 시점(오늘) anchor로 오늘 domain을 받는다(캐시 date-less 안전).
+        yesterday_payload = {"metadata": {"range": {"start": "2026-07-11", "end": "2026-07-18"}, "bucket_size": "1h"}}
+        today_anchor = datetime(2026, 7, 19, 9, 0, tzinfo=self.KST)
+        out = G.attach_graph_v2_domain(yesterday_payload, G.period_domain("1w", today_anchor))
+        self.assertEqual(out["metadata"]["domain_start_at"], "2026-07-12T00:00:00+09:00")   # 오늘-7
+        self.assertEqual(out["metadata"]["domain_end_at"], "2026-07-19T09:00:00+09:00")
+
+    def test_attach_premium_metadata_immutable(self):
+        pay = {"metadata": {"range": {"start": "2026-07-12", "end": "2026-07-19"}}, "series": []}
+        anchor = datetime(2026, 7, 19, 10, 50, tzinfo=self.KST)
+        out = G.attach_graph_v2_domain(pay, G.period_domain("1w", anchor))
+        self.assertNotIn("domain_start_at", pay["metadata"])          # 입력 불변
+        self.assertEqual(out["metadata"]["range"], {"start": "2026-07-12", "end": "2026-07-19"})   # 기존 보존
+        self.assertIn("domain_start_at", out["metadata"])             # domain 공존
+        self.assertEqual(out["series"], [])
+
+    def test_same_anchor_tab_independent_domain(self):
+        # 같은 anchor면 탭 무관 동일 domain(빗썸 유무 등 데이터 커버리지에 X축이 흔들리지 않음 — 근본 fix).
+        anchor = datetime(2026, 7, 19, 10, 50, tzinfo=self.KST)
+        self.assertEqual(G.period_domain("1w", anchor), G.period_domain("1w", anchor))
 
 
 if __name__ == "__main__":

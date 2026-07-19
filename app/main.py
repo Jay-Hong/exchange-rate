@@ -2547,7 +2547,14 @@ async def _get_intraday_1d_in_progress(tab: str) -> dict:
 async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
     """탭×기간 모든 series 데이터. period∈{3m,1y,1w} = source_daily/hourly_rates read-through.
     period=1d = intraday 탭(테더+usd/jpy/eur) 10min closed-bucket precompute(graph_v2_intraday)."""
-    from app.graph_v2 import build_tab, is_supported_period, known_tabs, MVP_PERIODS
+    from app.graph_v2 import (
+        MVP_PERIODS,
+        attach_graph_v2_domain,
+        build_tab,
+        is_supported_period,
+        known_tabs,
+        period_domain,
+    )
 
     # 라이브 그래프(1d 10min 진행봉 + in_progress seed, 3m/1y/1w도 매일/매시 갱신)는 클라가 HTTP
     # 캐시하면 cold-open에 stale 응답을 내줌 → no-store로 어떤 캐시 레이어도 저장 안 하게 함. iOS
@@ -2562,22 +2569,59 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             "detail": f"tab '{tab}' not found",
             "known_tabs": known_tabs(),
         })
+
+    # serve-time now — 요청당 1회(start/end 동일 anchor). 404 이후·모든 성공 경로 공통 domain 프레임(ADR-039 X축 통일).
+    anchor = datetime.now(KST)
+
     # 1d — intraday 지원 탭(테더 + usd/jpy/eur, 10min precompute). 그 외 탭은 400 + v1 hint(미래 탭 방어).
     if period == "1d":
         from app.graph_v2_intraday import INTRADAY_TABS
 
-        if tab in INTRADAY_TABS:
-            return await _serve_intraday_1d_cached(tab)
-        return JSONResponse(status_code=400, content={
-            "error": "unsupported_period",
-            "detail": f"period '1d' is not supported for tab '{tab}' in Graph API v2",
-            "supported_periods": list(MVP_PERIODS),
-            "fallback": {
-                "type": "legacy_graph_api",
-                "hint": "Use legacy /api/graph/{currency}?range=1d",
-            },
-        })
-    if not is_supported_period(period):
+        if tab not in INTRADAY_TABS:
+            return JSONResponse(status_code=400, content={
+                "error": "unsupported_period",
+                "detail": f"period '1d' is not supported for tab '{tab}' in Graph API v2",
+                "supported_periods": list(MVP_PERIODS),
+                "fallback": {
+                    "type": "legacy_graph_api",
+                    "hint": "Use legacy /api/graph/{currency}?range=1d",
+                },
+            })
+        payload = await _serve_intraday_1d_cached(tab)
+    elif is_supported_period(period):
+        # read-through Redis cache (graph_v2:tab:{tab}:{period}) — 동일 tab×period는 사용자 공통 +
+        # daily/hourly 저빈도 변경이라 캐시 효율 높음. Redis 장애/circuit-open 시 get None → miss →
+        # DB build로 자동 fallback (cache.py Circuit Breaker). live-tail은 client-side(topic)라 캐시가
+        # stale해도 그래프 끝 현재값엔 영향 없음. TTL-only(cron 무효화 없음). 404/400은 위에서 bypass.
+        # ⚠️ Redis에 굽는 건 domain 없는 원본만(캐시 date-less이라 자정 넘어 hit해도 stale domain 방지) — domain은 아래 serve-time attach.
+        cache_key = f"graph_v2:tab:{tab}:{period}"
+        cached = await redis_cache.get(cache_key)
+        payload = None
+        if cached is not None:
+            try:
+                parsed = json.loads(cached)
+            except (ValueError, TypeError):
+                # corrupt 캐시 → miss로 처리하고 rebuild (다음 set으로 자연 복구, delete 불필요)
+                parsed = None
+                logger.warning("graph_v2 캐시 parse 실패 — rebuild", extra={"cache_key": cache_key})
+            if isinstance(parsed, dict):
+                payload = parsed
+            elif parsed is not None:
+                # JSON-valid non-dict([], "x", 1)도 miss로 처리 — attach가 mapping 전제(1d 경로 isinstance 가드와 대칭).
+                logger.warning("graph_v2 캐시 non-dict — rebuild", extra={"cache_key": cache_key})
+        if payload is None:
+            def _build():
+                db = SessionLocal()
+                try:
+                    return build_tab(db, tab, period)
+                finally:
+                    db.close()
+
+            payload = await asyncio.to_thread(_build)
+            await redis_cache.set(
+                cache_key, json.dumps(payload), ex=_GRAPH_V2_CACHE_TTL_SECONDS.get(period, 1800)
+            )
+    else:
         # MVP 범위 밖 — insufficient_history 아님, 명시적 미지원 + v1 fallback hint
         return JSONResponse(status_code=400, content={
             "error": "unsupported_period",
@@ -2589,31 +2633,8 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             },
         })
 
-    # read-through Redis cache (graph_v2:tab:{tab}:{period}) — 동일 tab×period는 사용자 공통 +
-    # daily/hourly 저빈도 변경이라 캐시 효율 높음. Redis 장애/circuit-open 시 get None → miss →
-    # DB build로 자동 fallback (cache.py Circuit Breaker). live-tail은 client-side(topic)라 캐시가
-    # stale해도 그래프 끝 현재값엔 영향 없음. TTL-only(cron 무효화 없음). 404/400은 위에서 bypass.
-    cache_key = f"graph_v2:tab:{tab}:{period}"
-    cached = await redis_cache.get(cache_key)
-    if cached is not None:
-        try:
-            return json.loads(cached)
-        except (ValueError, TypeError):
-            # corrupt 캐시 → miss로 처리하고 rebuild (다음 set으로 자연 복구, delete 불필요)
-            logger.warning("graph_v2 캐시 parse 실패 — rebuild", extra={"cache_key": cache_key})
-
-    def _build():
-        db = SessionLocal()
-        try:
-            return build_tab(db, tab, period)
-        finally:
-            db.close()
-
-    result = await asyncio.to_thread(_build)
-    await redis_cache.set(
-        cache_key, json.dumps(result), ex=_GRAPH_V2_CACHE_TTL_SECONDS.get(period, 1800)
-    )
-    return result
+    # serve-time domain 부착(metadata) — 캐시 원본 불변(위 set은 원본만), copy에만. 1d/캐시-hit/캐시-miss 3경로 공통.
+    return attach_graph_v2_domain(payload, period_domain(period, anchor))
 
 
 async def _free_snapshot_cache_get(cache_key: str, tab: str, period: str):
@@ -2677,6 +2698,7 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
     from app.free_snapshot import (
         FREE_SNAPSHOT_PERIODS,
         FREE_SNAPSHOT_TABS,
+        attach_free_snapshot_domain,
         free_snapshot_key,
     )
 
@@ -2700,12 +2722,12 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
     # cron canonical만 서빙. validate가 empty/오염/KRX 거부(→ last-good/503). serve는 DB build 안 함.
     cached = await _free_snapshot_cache_get(cache_key, tab, period)
     if cached is not None:
-        _free_snapshot_local_put(cache_key, cached)   # last-good = 마지막 성공 canonical(Redis 장애 대비)
-        return cached
+        _free_snapshot_local_put(cache_key, cached)   # last-good = 마지막 성공 canonical(domain 없는 원본 보존)
+        return attach_free_snapshot_domain(cached, period)   # serve-time domain은 copy에만 (canonical 불변)
     # Redis miss/hang/오염 → 마지막 canonical(process-local last-good). **DB 최신값으로 fabricate 금지.**
     local = _free_snapshot_local_get(cache_key)
     if local is not None:
-        return local
+        return attach_free_snapshot_domain(local, period)
     # canonical 없음(첫 cron 전 cold-start + Redis empty / 전면 손실) → 503. 빈 payload도 여기로 귀결.
     return JSONResponse(status_code=503, content={"error": "snapshot_unavailable"})
 

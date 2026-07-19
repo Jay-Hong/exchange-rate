@@ -67,8 +67,9 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.json()["error"], "snapshot_unavailable")
 
-    def test_serves_redis_canonical_verbatim(self):
-        # serve는 cron canonical을 그대로 반환(DB rebuild 아님) → 같은 시간대 DB가 바뀌어도 응답 불변.
+    def test_serves_redis_canonical_with_serve_time_domain(self):
+        # serve는 cron canonical의 값(rate/series/range)은 그대로 반환(rebuild 아님)하고,
+        # serve-time X축 domain만 graph 블록에 부착(ADR-039 X축 통일). anchor=as_of, 3m=fixed_start.
         canonical = {
             "tab": "usd", "period": "3m",
             "as_of": "2026-07-17T14:30:00+09:00",
@@ -82,7 +83,16 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
              patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
             r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), canonical)   # verbatim — rebuild 아님
+        body = r.json()
+        # canonical 값 보존 (rebuild 아님)
+        self.assertEqual(body["rate"], canonical["rate"])
+        self.assertEqual(body["graph"]["series"], canonical["graph"]["series"])
+        self.assertEqual(body["graph"]["range"], canonical["graph"]["range"])
+        self.assertEqual(body["as_of"], canonical["as_of"])
+        # serve-time domain (graph envelope — 프리미엄 metadata와 다름)
+        self.assertEqual(body["graph"]["live_domain_mode"], "fixed_start")
+        self.assertEqual(body["graph"]["domain_end_at"], "2026-07-17T14:30:00+09:00")   # = as_of
+        self.assertEqual(body["graph"]["domain_start_at"], "2026-04-18T00:00:00+09:00")  # as_of 날짜(07-17)-90 00:00
         self.assertEqual(r.headers.get("cache-control"), "no-store")
 
     def test_redis_success_then_miss_serves_last_good(self):
@@ -103,7 +113,11 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
             with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=None)):
                 r2 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
         self.assertEqual(r2.status_code, 200)          # Redis miss여도 last-good
-        self.assertEqual(r2.json(), canonical)         # 마지막 canonical 그대로(값 불변)
+        body2 = r2.json()
+        self.assertEqual(body2["graph"]["series"], canonical["graph"]["series"])   # 마지막 canonical 값 불변
+        self.assertEqual(body2["graph"]["domain_end_at"], canonical["as_of"])      # + serve-time domain(anchor=as_of)
+        # 저장된 last-good은 domain 없는 canonical(원본 불변 — attach는 copy에만)
+        self.assertNotIn("domain_start_at", main_module._free_snapshot_local["free:snapshot:usd:3m"]["graph"])
 
     def test_malformed_redis_no_local_returns_503(self):
         # 필수 필드 누락(as_of/generated_at 없음) canonical → validate 거부 → local 없음 → 503 (오염 200 방지).
@@ -184,6 +198,59 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
             r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "1d"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["graph"]["bucket_size"], "10min")
+
+    def test_naive_as_of_canonical_rejected_503(self):
+        # P2#1 실제 endpoint 계약: naive as_of canonical은 attach의 fallback 이전에 validate가 as_of tz-aware assert로
+        # 거부 → last-good 없으면 503. attach의 canonical-그대로 fallback은 도달 불가한 defense-in-depth.
+        bad = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:30:00", "generated_at": "2026-07-17T14:30:20",   # naive
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},  # aware
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(bad))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_fully_naive_as_of_canonical_rejected_503(self):
+        # codex 2026-07-19: as_of와 모든 timestamp가 naive면 cutoff 비교(naive-vs-naive)가 예외 없이 통과 →
+        # as_of tz-aware assert가 없으면 fully-naive 오염 canonical이 새어 domain 없이 200. tz-aware assert로 503 잠금.
+        bad = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:30:00", "generated_at": "2026-07-17T14:30:20",   # naive
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00"}]},   # naive
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(bad))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_1d_serve_time_domain_rolling(self):
+        # 1d = rolling domain([as_of-24h, as_of]) — graph 블록에 부착.
+        canonical = {
+            "tab": "usd", "period": "1d",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.usd", "data": [[123, 1.0, 2.0, 1385.0]]}],
+                      "bucket_size": "10min", "range": {"start": "2026-07-16", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "1d"})
+        self.assertEqual(r.status_code, 200)
+        g = r.json()["graph"]
+        self.assertEqual(g["live_domain_mode"], "rolling")
+        self.assertEqual(g["domain_start_at"], "2026-07-16T14:30:00+09:00")   # as_of - 24h
+        self.assertEqual(g["domain_end_at"], "2026-07-17T14:30:00+09:00")     # = as_of
 
 
 if __name__ == "__main__":

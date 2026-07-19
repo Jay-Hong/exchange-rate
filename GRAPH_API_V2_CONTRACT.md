@@ -191,6 +191,41 @@ response 안 data point (KRX series만 contract_code 포함, date-to-contract ma
 
 data point 필드: `ts`(ISO8601 KST) · `rate`(=close) · `source` · **`high`/`low`**(optional, source_daily/hourly의 버킷 고가/저가 — client 단일 소스 음영 밴드용. `close_only` row는 high=low=close. row에 없으면 생략 → client nil → 밴드 미표시. DXY/market_index series는 미노출) · `close_basis`/`source_method`(mixed series per-point) · `contract_code`(KRX).
 
+### 5.1 Serve-time X축 domain (displayDomain 계약 — ADR-039 X축 통일)
+
+**문제**: 클라가 X축 범위를 series 데이터 min/max에서 유도하면, 같은 기간이라도 탭별로 데이터 커버리지가 달라
+X축 타임라인이 어긋난다(예: 테더 1주는 빗썸 첫 bucket이 07-12, 달러 1주는 investing 첫 bucket이 07-13 → 두 탭
+X축 시작이 다름). **해결**: 서버가 탭 무관 공통 domain을 **serve 시점에** 계산해 응답에 부착하고, 클라는 X축·눈금·
+liveAnchor·줌clamp를 이 domain으로 계산한다(실제 데이터 범위/극값은 별개로 historicalBounds 유지).
+
+**envelope (프리미엄 ≠ 무료)**:
+- 프리미엄 `/api/v2/graph/tab` → **`metadata`**에 부착: `metadata.domain_start_at`/`domain_end_at`/`live_domain_mode`
+- 무료 `/api/v2/free/snapshot` → **`graph`**에 부착(flat FreeGraphBlock, metadata wrapper 없음): `graph.domain_start_at`/…
+
+**필드**:
+| 필드 | 값 |
+| --- | --- |
+| `domain_start_at` | ISO8601 **+09:00** — X축 좌측 경계 |
+| `domain_end_at` | ISO8601 **+09:00** — X축 우측 경계 (anchor) |
+| `live_domain_mode` | `"rolling"`(1d) \| `"fixed_start"`(1w/3m/1y) |
+
+**정책** (`period_domain(period, anchor)`):
+- **1d = rolling**: `[anchor-24h, anchor]`. 클라는 양끝을 render-now로 이동(폭 24h 유지).
+- **1w/3m/1y = fixed_start**: `[(anchor KST날짜 - N) 00:00 KST, anchor]`. 클라는 start 고정·우측만 render-now로 확장.
+  - N: 1w=7 / 3m=90 / 1y=365. **1w는 정확 168h가 아닌 달력 경계**(today-7 00:00 — 금요일 종가관리 비교용, `period_range`와 동일 의도).
+
+**anchor**:
+- 프리미엄 = **serve-time now**(요청당 1회). 전날 빌드된 read-through 캐시도 오늘 domain을 받음(캐시는 date-less → domain을 굽지 않고 serve 시점 attach로 자정 경계 stale 방지).
+- 무료 = **as_of**(스냅샷 basis = 매시 HH:30). 매시 고정 불변식과 정합(값도 domain도 as_of 기준).
+
+**불변식**:
+- **출력 domain timestamp는 항상 +09:00**(anchor를 KST로 정규화). 입력(무료 as_of)은 tz-aware면 offset 무관 허용·KST 정규화, naive면 거부.
+- **canonical/캐시 원본 불변**: attach는 copy에만(Redis 캐시·last-good·free canonical은 domain 없이 깨끗 유지 → 재검증 회귀 0).
+- **무료 as_of 파싱 실패/naive**: `attach_free_snapshot_domain` helper는 domain 없이 canonical 그대로 반환(crash 방지 defense-in-depth, 입력 불변). **단 endpoint는 그 전에 `validate_snapshot_payload`가 as_of를 tz-aware(naive 명시 거부) + HH:30 grid + cutoff로 검증**해 bad as_of canonical을 거부(503 또는 last-good) → 이 helper fallback은 endpoint 경로에선 도달 불가. 정상 canonical(aware as_of)만 domain을 받고, fully-naive 오염 canonical도 as_of tz-aware assert에서 걸러진다(cutoff 비교가 naive-vs-naive면 무의미해 새는 것을 차단).
+- 404/400 오류 경로는 attach bypass.
+
+**클라(iOS) 적용**: `GraphV2PreparedTab.displayDomain`이 있으면 X축·눈금·liveAnchor·줌clamp를 domain으로 라우팅, 없으면(구 서버/파싱 실패) 기존 data-derived(historicalBounds)로 fallback. 데이터/극값 계산은 항상 historicalBounds.
+
 ## 6. Provenance / fallback schema
 
 `provenance` 객체 필드 (Amendment 2026-05-27 — Hana/Bithumb/KRX external_historical series의 `fallback_*` fields는 null. DXY 등 다른 series는 자체 provenance 정책에 따름):
