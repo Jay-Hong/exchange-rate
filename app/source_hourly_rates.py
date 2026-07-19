@@ -135,6 +135,29 @@ def get_range(
     )
 
 
+def get_last_before(
+    db: Session,
+    source: str,
+    asset: str,
+    before_ts: datetime,
+) -> "SourceHourlyRate | None":
+    """window 시작 bucket 직전(strictly before) 최신 hourly row 1건 (v2 carry_in seed).
+
+    before_ts = window 시작 bucket key(naive KST). STRICT '<' — start_ts는 get_range가 이미 포함
+    (ADR-039 carry_in slice 1).
+    """
+    return (
+        db.query(SourceHourlyRate)
+        .filter(
+            SourceHourlyRate.source == source,
+            SourceHourlyRate.asset == asset,
+            SourceHourlyRate.bucket_ts_kst < before_ts,
+        )
+        .order_by(SourceHourlyRate.bucket_ts_kst.desc())
+        .first()
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Upsert (idempotent + dialect 분기 + null overwrite 방지)
 # ─────────────────────────────────────────────────────────────

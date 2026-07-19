@@ -113,6 +113,29 @@ def get_range(
     )
 
 
+def get_last_before(
+    db: Session,
+    source: str,
+    asset: str,
+    before_date: date,
+) -> "SourceDailyRate | None":
+    """window 시작 직전(strictly before) 최신 daily row 1건 (v2 carry_in seed).
+
+    graph_cache.fetch_last_before의 source_daily_rates 대응. 단 STRICT '<' — before_date(window
+    시작일)는 get_range가 이미 [start,end]에 포함하므로 '<='면 data[0]와 중복(ADR-039 carry_in slice 1).
+    """
+    return (
+        db.query(SourceDailyRate)
+        .filter(
+            SourceDailyRate.source == source,
+            SourceDailyRate.asset == asset,
+            SourceDailyRate.date_kst < before_date,
+        )
+        .order_by(SourceDailyRate.date_kst.desc())
+        .first()
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Upsert (idempotent + dialect 분기 + COALESCE null overwrite 방지)
 # ─────────────────────────────────────────────────────────────

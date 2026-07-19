@@ -226,6 +226,31 @@ liveAnchor·줌clamp를 이 domain으로 계산한다(실제 데이터 범위/�
 
 **클라(iOS) 적용**: `GraphV2PreparedTab.displayDomain`이 있으면 X축·눈금·liveAnchor·줌clamp를 domain으로 라우팅, 없으면(구 서버/파싱 실패) 기존 data-derived(historicalBounds)로 fallback. 데이터/극값 계산은 항상 historicalBounds.
 
+### 5.2 series `carry_in` — 좌측 gap seed (ADR-039 slice 1)
+
+**문제**: fixed_start(1w/3m/1y) domain은 X축 좌측이 window 시작에 고정되는데, 실관측 데이터의 첫 bucket이 window 시작보다 늦으면(주말·휴일 gap) 좌측이 비어 보인다. **클라가 in-window 첫 관측값으로 backward-fill 하면 틀린다** — 주말 이슈로 gap 상승/하강한 경우 첫 in-window 값은 이미 점프 뒤라 이전 timeline을 왜곡한다.
+
+**해결**: 서버가 **window 시작 직전(strict `<`)의 마지막 실관측값**을 series별 `carry_in`으로 부착한다. 클라는 이를 forwardFilled **입력 배열의 seed**로 넣어 gap 구간을 이전 실제값으로 **평평하게(flat hold)** 유지한다. 근사·backward-fill이 아니라 timeline 직전의 진짜 관측값이다.
+
+**필드** (series 객체 내, nullable):
+| 필드 | 값 |
+| --- | --- |
+| `carry_in` | `{ "rate": float, "observed_at": ISO8601 +09:00 }` 또는 `null` |
+| `carry_in.rate` | window 시작 직전 마지막 실관측 close |
+| `carry_in.observed_at` | 그 관측의 bucket 시각(daily=00:00 KST / hourly=bucket_ts KST). **원래 관측 시각 보존**(window 시작으로 당기지 않음) |
+
+**정책**:
+- **source_daily_rates(3m/1y)** = `date_kst < window_start_date` 마지막 row. `observed_at` = 그 날짜 00:00 KST.
+- **source_hourly_rates(1w)** = `bucket_ts_kst < window_start_ts` 마지막 bucket. `observed_at` = 그 bucket_ts KST.
+- **DXY(market_index_rates)** = `timestamp < start_utc` 마지막 granularity row(1w=hourly/3m·1y=daily). 좌측 gap seed 회귀 방지 위해 DXY도 부착(4 series 모두 채움).
+- **strict `<`**: window 시작 당일/당시 bucket은 `carry_in`이 아니라 `data[]`에 들어간다(중복 금지). prior가 없으면 `null`.
+- **provenance 직교**: `carry_in` 유무는 `coverage_days`/`insufficient_history`/`data[]`에 영향 없음(순수 seed).
+- **1d(rolling)**: 미부착(dense bucketize라 좌측 빈칸 없음 — slice 2에서 sparse 전환 시 재검토).
+
+**클라 소비**: `carry_in`이 있으면 forwardFilled **입력**에 `(frameStart, rate)`를 맨 앞 seed로 prepend(**그리기 좌표는 frameStart** — `observed_at`은 위장하지 않고 `GraphV2PreparedSeries.carryIn` provenance로만 보존). → 첫 in-window 관측 전까지 flat hold. 클라 leading backward-fill(첫 in-window 값 채움)은 **제거**. `carry_in`이 null이면 seed 없음(데이터 첫 점부터 그림). 가드: `period.isFixedStart` + `!insufficient_history` + `displayDomain.start` 존재 + 첫 obs.ts > frameStart.
+
+> **gap 전환 렌더(slice 3 범위)**: seed는 forwardFilled 입력에 들어가 gap 구간을 flat hold 하지만, gap 끝 마지막 구간은 forwardFilled의 기존 hold 규칙(gap>1.5×bucket) + 클라 `LineMark` 선형보간이라 **1-bucket 램프**(완전 수직 step 아님)로 그려진다 — 이는 그래프 내부 gap과 **동일한** 기존 동작이다. 완전 step/gap-aware 전환은 slice 3에서 좌측·내부 gap을 함께 다룬다(slice 1은 값 교정: 첫값 backward-fill → 진짜 이전값 carry-forward).
+
 ## 6. Provenance / fallback schema
 
 `provenance` 객체 필드 (Amendment 2026-05-27 — Hana/Bithumb/KRX external_historical series의 `fallback_*` fields는 null. DXY 등 다른 series는 자체 provenance 정책에 따름):

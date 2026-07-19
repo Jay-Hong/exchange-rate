@@ -45,6 +45,10 @@ _COVERAGE_TOLERANCE_DAYS = {"daily": 7, "hourly": 2}
 # DXY(market_index_rates) source dedup 우선순위 — crud.py `_dxy_query_single`과 동일 (investing>cnbc>else).
 _DXY_SOURCE_PRIORITY = {"investing": 0, "cnbc": 1}
 
+# carry_in(pre-window 최신 bucket) 선별 시 pull하는 pre-window row 상한 — daily/hourly는 rollup이라
+# bucket당 source가 소수(≈3). desc 정렬 선두의 최신 bucket rows를 모두 담기 충분 + 무한 스캔 방지.
+_DXY_CARRY_SCAN_LIMIT = 50
+
 CATALOG_VERSION = "2026-05-27"
 
 
@@ -304,6 +308,17 @@ def _sdr_data_point(row, per_point_metadata: list, bucket_ts) -> dict:
     return point
 
 
+def _build_carry_in(row, bucket_ts) -> dict:
+    """window 시작 직전 마지막 실관측 row → carry_in {rate, observed_at} (ADR-039 slice 1).
+
+    observed_at = 그 row의 실제 관측 시각(daily=date_kst 00:00 KST / hourly=bucket_ts_kst KST) —
+    **window-start로 위장하지 않음**(주말 gap up/down 왜곡 방지; 클라는 frame start에 값만 그리고
+    observed_at은 provenance로 유지). rate = close(rate==close invariant), Numeric→float.
+    _bucket_ts closure 재사용 → data point ts와 동일 포맷.
+    """
+    return {"rate": float(row.close), "observed_at": bucket_ts(row)}
+
+
 # ─────────────────────────────────────────────────────────────
 # Reader — source_daily_rates series
 # ─────────────────────────────────────────────────────────────
@@ -315,22 +330,25 @@ def _read_sdr_series(db, series_id: str, entry: dict, start: date, end: date, gr
     granularity=hourly(1w): source_hourly_rates.get_range(datetime) + bucket_ts_kst(시 단위) bucket.
     """
     if granularity == "hourly":
-        from app.source_hourly_rates import get_range
+        from app.source_hourly_rates import get_last_before, get_range
         # bucket_ts_kst는 KST naive — KST [start 00:00, end 23:59:59] inclusive 경계로 조회
         start_ts = datetime.combine(start, time(0, 0))
         end_ts = datetime.combine(end, time(23, 59, 59))
         rows = get_range(db, entry["source"], entry["asset"], start_ts, end_ts)
+        carry_row = get_last_before(db, entry["source"], entry["asset"], start_ts)   # window 시작 직전 실관측(carry_in)
         def _bucket_date(r): return r.bucket_ts_kst.date()
         def _bucket_ts(r): return r.bucket_ts_kst.replace(tzinfo=KST).isoformat()
     else:
-        from app.source_daily_rates import get_range
+        from app.source_daily_rates import get_last_before, get_range
         rows = get_range(db, entry["source"], entry["asset"], start, end)
+        carry_row = get_last_before(db, entry["source"], entry["asset"], start)
         def _bucket_date(r): return r.date_kst
         def _bucket_ts(r): return datetime.combine(r.date_kst, time(0, 0), tzinfo=KST).isoformat()
 
     provenance = _assemble_sdr_provenance(entry, rows, start, _bucket_date, _COVERAGE_TOLERANCE_DAYS[granularity])
     per_point = provenance["per_point_metadata"]
     data = [_sdr_data_point(r, per_point, _bucket_ts) for r in rows]
+    carry_in = _build_carry_in(carry_row, _bucket_ts) if carry_row is not None else None
     return {
         "id": series_id,
         "label": entry["label"],
@@ -339,6 +357,7 @@ def _read_sdr_series(db, series_id: str, entry: dict, start: date, end: date, gr
         "decimals": entry["decimals"],
         "data": data,
         "provenance": provenance,
+        "carry_in": carry_in,   # ADR-039 slice 1 — 좌측 gap seed (없으면 null)
     }
 
 
@@ -406,6 +425,28 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
         "close_basis_mode": "single",   # market_index는 close_basis 개념 없음 — single 고정
         "per_point_metadata": [],
     }
+    # carry_in — window 시작 직전 마지막 bucket의 실관측 (ADR-039 slice 1, D10 override로 DXY 포함 — 좌측
+    # gap seed 회귀 방지). **in-window reader와 동일 _rank(source priority: investing>cnbc>else) + bucket
+    # dedup을 pre-window 최신 bucket에 적용** — 단순 timestamp-desc면 같은 bucket에서 늦은 yahoo가 investing을
+    # 이겨 v1 source priority 회귀(codex blocker). pre-window rows를 desc로 소량 pull(rollup granularity라
+    # bucket당 source 소수) → 최신 bucket 선별 → 그 bucket 안에서 min _rank. observed_at은 bucket-floored KST.
+    recent_before = (
+        db.query(MarketIndexRate)
+        .filter(
+            MarketIndexRate.instrument == entry["instrument"],
+            MarketIndexRate.granularity == granularity,
+            MarketIndexRate.timestamp < start_utc,
+        )
+        .order_by(MarketIndexRate.timestamp.desc())
+        .limit(_DXY_CARRY_SCAN_LIMIT)
+        .all()
+    )
+    if recent_before:
+        carry_bucket = _bucket_key(recent_before[0])   # 최신 bucket(desc 선두)
+        best = min((r for r in recent_before if _bucket_key(r) == carry_bucket), key=_rank)
+        carry_in = {"rate": float(best.rate), "observed_at": _bucket_ts(carry_bucket)}
+    else:
+        carry_in = None
     return {
         "id": series_id,
         "label": entry["label"],
@@ -414,6 +455,7 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
         "decimals": entry["decimals"],
         "data": data,
         "provenance": provenance,
+        "carry_in": carry_in,   # ADR-039 slice 1 (D10 override — DXY 포함)
     }
 
 

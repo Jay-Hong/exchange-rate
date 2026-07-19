@@ -2613,7 +2613,11 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             def _build():
                 db = SessionLocal()
                 try:
-                    return build_tab(db, tab, period)
+                    # today_kst=anchor.date() — domain(period_domain(anchor))과 데이터 window(period_range)를
+                    # **같은 anchor 날짜**로 고정. 미전달 시 build_tab이 자체 datetime.now()를 재호출 → 요청이
+                    # KST 자정을 가로지르면 domain frameStart와 data start가 1일 어긋나 carry_in seed가 backdated
+                    # (codex blocker). 캐시-hit-stale 경우는 client `first.ts > frameStart` 가드가 seed 스킵해 안전.
+                    return build_tab(db, tab, period, today_kst=anchor.date())
                 finally:
                     db.close()
 

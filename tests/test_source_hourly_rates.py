@@ -172,6 +172,30 @@ class TestSourceHourlyRatesHelper(unittest.TestCase):
         self.assertEqual(d["metadata_json"], {"point_count": 7})
         self.assertIsNone(d["contract_code"])               # None 보존
 
+    # --- get_last_before (v2 carry_in seed, ADR-039 §5.2) ---
+
+    def test_get_last_before_hourly_strictly_before(self):
+        # start_ts 직전/당시/이후 bucket → **직전(strict '<')** 1건만. start_ts 당시 bucket은 get_range가 이미 포함.
+        self._upsert(hour=12, close=1490.0)   # before
+        self._upsert(hour=14, close=1500.0)   # == start_ts
+        self._upsert(hour=15, close=1505.0)   # after
+        row = H.get_last_before(self.db, "bithumb", "usdt-krw", _bucket(14))
+        self.assertIsNotNone(row)
+        self.assertEqual(row.bucket_ts_kst, _bucket(12))   # start_ts(14)가 아니라 직전(12)
+        self.assertEqual(float(row.close), 1490.0)
+
+    def test_get_last_before_hourly_returns_most_recent_prior(self):
+        # 여러 직전 중 가장 최근(내림차순 first).
+        self._upsert(hour=10, close=1480.0)
+        self._upsert(hour=13, close=1495.0)   # 가장 최근 직전
+        row = H.get_last_before(self.db, "bithumb", "usdt-krw", _bucket(14))
+        self.assertEqual(row.bucket_ts_kst, _bucket(13))
+
+    def test_get_last_before_hourly_none_when_no_prior(self):
+        self._upsert(hour=14, close=1500.0)   # start_ts 당시만
+        self._upsert(hour=16, close=1505.0)   # 이후만
+        self.assertIsNone(H.get_last_before(self.db, "bithumb", "usdt-krw", _bucket(14)))
+
 
 if __name__ == "__main__":
     unittest.main()

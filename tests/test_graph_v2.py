@@ -15,7 +15,7 @@ build_tab(db, ...)은 db 주입이라 patch 불필요 — in-memory SQLite sessi
 """
 import unittest
 from unittest.mock import patch
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -234,6 +234,99 @@ class TestDxyMapping(_Base):
         d = next(p for p in dxy["data"] if p["ts"].startswith("2026-06-01"))
         self.assertEqual(d["rate"], 99.5)         # yahoo 77.7 아님
         self.assertEqual(d["source"], "investing")
+
+
+class TestCarryIn(_Base):
+    """carry_in — window 시작 직전 실관측 seed (ADR-039 slice 1, 좌측 gap 채움)."""
+
+    KST = ZoneInfo("Asia/Seoul")
+
+    def _daily_obs(self, d):
+        return datetime.combine(d, time(0, 0), tzinfo=self.KST).isoformat()
+
+    def _shr(self, source, asset, ts_kst, close):
+        from app.models import SourceHourlyRate
+        return SourceHourlyRate(source=source, asset=asset, bucket_ts_kst=ts_kst,
+                                rate=close, high=close, low=close, close=close,
+                                ohlc_quality="observed_rollup", close_basis="investing_observed_hourly",
+                                source_method="observed_rollup")
+
+    def test_daily_carry_in_present(self):
+        start, _ = G.period_range("3m", TODAY)              # 2026-03-08
+        prior = start - timedelta(days=2)
+        self._add(
+            _sdr("investing", "usd-krw", prior, 1380.0, "investing_observed_eod", "observed_rollup"),          # carry_in
+            _sdr("investing", "usd-krw", start + timedelta(days=1), 1390.0, "investing_observed_eod", "observed_rollup"),
+        )
+        inv = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "investing.usd")
+        self.assertEqual(inv["carry_in"], {"rate": 1380.0, "observed_at": self._daily_obs(prior)})
+
+    def test_hourly_carry_in_present(self):
+        start, _ = G.period_range("1w", TODAY)              # 2026-05-30
+        prior = datetime.combine(start - timedelta(days=1), time(10, 0))   # 이전날 10:00 (naive KST)
+        self._add(
+            self._shr("investing", "usd-krw", prior, 1360.0),                                                  # carry_in
+            self._shr("investing", "usd-krw", datetime.combine(start, time(9, 0)), 1365.0),
+        )
+        inv = next(s for s in G.build_tab(self.db, "usd", "1w", today_kst=TODAY)["series"] if s["id"] == "investing.usd")
+        self.assertEqual(inv["carry_in"], {"rate": 1360.0, "observed_at": prior.replace(tzinfo=self.KST).isoformat()})
+
+    def test_carry_in_null_when_no_prior(self):
+        start, _ = G.period_range("3m", TODAY)
+        self._add(_sdr("investing", "usd-krw", start + timedelta(days=1), 1390.0, "investing_observed_eod", "observed_rollup"))
+        inv = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "investing.usd")
+        self.assertIsNone(inv["carry_in"])
+
+    def test_carry_in_strict_before_no_overlap_with_start_day(self):
+        # start 당일 row + 그 이전 row → carry_in = 이전 row(≠ data[0]). strict '<' 잠금.
+        start, _ = G.period_range("3m", TODAY)
+        self._add(
+            _sdr("investing", "usd-krw", start - timedelta(days=3), 1370.0, "investing_observed_eod", "observed_rollup"),  # carry_in
+            _sdr("investing", "usd-krw", start, 1385.0, "investing_observed_eod", "observed_rollup"),                       # data[0]
+        )
+        inv = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "investing.usd")
+        self.assertEqual(inv["carry_in"]["rate"], 1370.0)
+        self.assertEqual(inv["data"][0]["rate"], 1385.0)
+        self.assertEqual(self._daily_obs(start - timedelta(days=3)), inv["carry_in"]["observed_at"])
+
+    def test_carry_in_orthogonal_to_provenance(self):
+        # carry_in 유무가 coverage/insufficient/data[]에 영향 없음.
+        start, _ = G.period_range("3m", TODAY)
+        self._add(_sdr("investing", "usd-krw", start + timedelta(days=1), 1390.0, "investing_observed_eod", "observed_rollup"))
+        p_no = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "investing.usd")["provenance"]
+        self._add(_sdr("investing", "usd-krw", start - timedelta(days=2), 1380.0, "investing_observed_eod", "observed_rollup"))
+        s2 = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "investing.usd")
+        self.assertIsNotNone(s2["carry_in"])
+        self.assertEqual(s2["provenance"]["coverage_days"], p_no["coverage_days"])
+        self.assertEqual(s2["provenance"]["insufficient_history"], p_no["insufficient_history"])
+        self.assertEqual(len(s2["data"]), 1)   # carry_in은 data[]에 안 들어감
+
+    def test_dxy_carry_in_present(self):
+        # D10 override — DXY(market_index)도 carry_in (좌측 gap seed 회귀 방지).
+        self._add(
+            MarketIndexRate(instrument="dxy", source="investing", rate=98.0,
+                            timestamp=datetime(2026, 3, 5, 1, 0), granularity="daily"),   # start(3/8) 이전 → carry_in
+            MarketIndexRate(instrument="dxy", source="investing", rate=100.2,
+                            timestamp=datetime(2026, 6, 1, 1, 0), granularity="daily"),
+        )
+        dxy = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "dxy")
+        self.assertIsNotNone(dxy["carry_in"])
+        self.assertEqual(dxy["carry_in"]["rate"], 98.0)
+
+    def test_dxy_carry_in_source_priority_investing_wins(self):
+        # codex blocker fix — carry_in도 in-window reader와 동일 _rank(source priority). pre-window 같은 KST
+        # date(3/5)에 investing + 더 늦은 yahoo → 최신 bucket 안에서 investing 우선(늦은 yahoo 아님).
+        self._add(
+            MarketIndexRate(instrument="dxy", source="investing", rate=98.0,
+                            timestamp=datetime(2026, 3, 5, 1, 0), granularity="daily"),
+            MarketIndexRate(instrument="dxy", source="yahoo", rate=55.5,
+                            timestamp=datetime(2026, 3, 5, 5, 0), granularity="daily"),   # 더 늦지만 priority 낮음
+            MarketIndexRate(instrument="dxy", source="investing", rate=100.2,
+                            timestamp=datetime(2026, 6, 1, 1, 0), granularity="daily"),   # in-window
+        )
+        dxy = next(s for s in G.build_tab(self.db, "usd", "3m", today_kst=TODAY)["series"] if s["id"] == "dxy")
+        self.assertIsNotNone(dxy["carry_in"])
+        self.assertEqual(dxy["carry_in"]["rate"], 98.0, "yahoo 55.5(늦음) 아니라 investing 98.0")
 
 
 # ---------------------------------------------------------------------------
