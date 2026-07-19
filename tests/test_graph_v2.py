@@ -538,6 +538,17 @@ class TestPeriodDomain(unittest.TestCase):
         anchor = datetime(2026, 7, 19, 10, 50, tzinfo=self.KST)
         self.assertEqual(G.period_domain("1w", anchor), G.period_domain("1w", anchor))
 
+    def test_domain_start_matches_data_window_for_same_anchor_date(self):
+        # 자정 race fix(codex): premium endpoint가 build_tab(today_kst=anchor.date())를 넘겨 domain(period_domain)과
+        # data window(period_range)가 같은 anchor 날짜를 쓴다. fixed_start 3종에서 domain_start_at.date() ==
+        # period_range start여야 carry_in(window 시작 strict '<')이 domain frameStart보다도 이르러 backdating 없음.
+        anchor = datetime(2026, 7, 19, 10, 50, tzinfo=self.KST)
+        for period in ("1w", "3m", "1y"):
+            d = G.period_domain(period, anchor)
+            dom_start_date = datetime.fromisoformat(d["domain_start_at"]).date()
+            win_start, _ = G.period_range(period, anchor.date())
+            self.assertEqual(dom_start_date, win_start, period)
+
 
 if __name__ == "__main__":
     unittest.main()
