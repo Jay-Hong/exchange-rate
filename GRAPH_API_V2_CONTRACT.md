@@ -226,6 +226,30 @@ liveAnchor·줌clamp를 이 domain으로 계산한다(실제 데이터 범위/�
 
 **클라(iOS) 적용**: `GraphV2PreparedTab.displayDomain`이 있으면 X축·눈금·liveAnchor·줌clamp를 domain으로 라우팅, 없으면(구 서버/파싱 실패) 기존 data-derived(historicalBounds)로 fallback. 데이터/극값 계산은 항상 historicalBounds.
 
+### 5.1b 무료 스냅샷 `refresh_not_before` (serve-time 재요청 권장 시각 — 클라 폴링 효율화)
+
+> **상태(2026-07-20)**: **서버 slice만 구현**(additive, **미소비**). iOS는 **아직 5분 폴링 유지** — 아래 "클라(iOS) 사용 계약"은 **iOS slice 적용 시 발효** 예정. 그때까지 서버는 필드를 부착하지만 클라는 무시(무영향).
+
+무료는 매시 :30 cron이 canonical을 굽는다(:30:19). 클라가 5분 폴링으로 hour-boundary를 확인하던 것을, 서버가 "이 시각 이후 재요청 권장"을 응답에 실어 **one-shot 스케줄**로 대체할 축을 제공한다(클라 전환은 iOS slice).
+
+**필드** (top-level, 성공 응답 2경로[Redis canonical / local last-good] 모두 부착):
+
+| 필드 | 값 |
+| --- | --- |
+| `refresh_not_before` | ISO8601 **+09:00** — 다음 재요청 권장 시각 (= 다음 HH:30 publish slot[now 초과] + 60초 = **HH:31:00**) |
+
+**anchor = serve-time now**(as_of 아님). `compute_refresh_not_before(now)` = 다음 :30 slot(now 초과) + `PRECOMPUTE_SECOND(19)+READY_MARGIN(41)`(=60s). **as_of가 stale(cron 지연)이어도 항상 미래 slot 반환** — stale 판단·recovery는 클라가 as_of로 별도 처리.
+
+**불변식**:
+
+- **"재요청 권장 시각"이지 새 데이터 존재 보장이 아니다.**
+- **canonical/캐시 원본 불변**: attach는 copy에만(domain과 동일 — Redis/last-good/free canonical엔 미저장).
+- **출력 +09:00**: naive now 거부, aware는 KST 정규화.
+- **503(canonical 전무)엔 미부착** (스냅샷 자체 없음). **additive** — 구 클라는 미인지 top-level 필드 무시.
+- cron 발화 타이밍(`FREE_SNAPSHOT_BASIS_MINUTE`/`PRECOMPUTE_SECOND`)은 scheduler와 compute가 **공유 상수**(ETC).
+
+**클라(iOS) 사용 계약**: `refresh_not_before` + 설치별·탭별 결정적 jitter(10~30s)로 **one-shot 스케줄**(매시 :31:10~:31:30 분산). 구 as_of(cron 지연) 관측 시 20→40→80 bounded backoff, 소진 후에도 저빈도 recovery one-shot으로 fresh까지(장기 안전망). 필드 누락→`as_of+1h+안전지연`, 과거→`now+min` clamp. 선택된 탭만 scheduler 활성.
+
 ### 5.2 series `carry_in` — 좌측 gap seed (ADR-039 slice 1)
 
 **문제**: fixed_start(1w/3m/1y) domain은 X축 좌측이 window 시작에 고정되는데, 실관측 데이터의 첫 bucket이 window 시작보다 늦으면(주말·휴일 gap) 좌측이 비어 보인다. **클라가 in-window 첫 관측값으로 backward-fill 하면 틀린다** — 주말 이슈로 gap 상승/하강한 경우 첫 in-window 값은 이미 점프 뒤라 이전 timeline을 왜곡한다.

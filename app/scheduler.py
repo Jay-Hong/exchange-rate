@@ -1601,20 +1601,28 @@ def start_scheduler():
     #   09:00 개장 후 09:30 첫 무료 정보로 30분 만에 장 파악 가능. daily(:01)/hourly(:05/:07/:09/:11)
     #   append cron 이후라 최신 canonical row 반영 + 00:01 race 회피(N5)는 :20 시절과 동일하게 성립.
     # - 요청 경로(main.py)는 이 canonical만 read(DB 재생성 안 함, 무료=매시 고정) → Redis 장애 시 local last-good → 전무 시 503. enforcement 없음(무료=인증만).
-    from app.free_snapshot import precompute_free_snapshots
+    from app.free_snapshot import (
+        FREE_SNAPSHOT_BASIS_MINUTE,
+        FREE_SNAPSHOT_PRECOMPUTE_SECOND,
+        precompute_free_snapshots,
+    )
 
     scheduler.add_job(
         precompute_free_snapshots,
+        # minute/second를 free_snapshot 공유 상수로 — refresh_not_before 계산이 이 타이밍을 기준(ETC, codex).
         # second=19: 정각 :30:00대의 알려진 동시-시작(cleanup_old_bank_data 03:30:01 / kb crawler
         # second 15,35,55 / KB news 5분마다 :15 / OUT DXY :15)과 겹치지 않는 초 선택(codex 2026-07-18 —
         # 동시 시작 감소 목적, cleanup 완료 보장은 아님). as_of는 basis_as_of(HH:30)라 발화 초와 무관.
-        CronTrigger(minute=30, second=19, timezone=KST),
+        CronTrigger(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=FREE_SNAPSHOT_PRECOMPUTE_SECOND, timezone=KST),
         id="free_snapshot_precompute",
         max_instances=1,
         coalesce=True
     )
 
-    logger.info("✅ ADR-039 무료 hourly snapshot precompute 스케줄 등록 (매시 :30:19)")
+    logger.info(
+        "✅ ADR-039 무료 hourly snapshot precompute 스케줄 등록 (매시 :%02d:%02d)",
+        FREE_SNAPSHOT_BASIS_MINUTE, FREE_SNAPSHOT_PRECOMPUTE_SECOND,
+    )
 
     # ═════════════════════════════════════════════════════════════
     # DXY rollup: realtime → hourly/daily 집계

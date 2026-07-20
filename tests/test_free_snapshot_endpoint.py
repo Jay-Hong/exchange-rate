@@ -119,6 +119,44 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         # 저장된 last-good은 domain 없는 canonical(원본 불변 — attach는 copy에만)
         self.assertNotIn("domain_start_at", main_module._free_snapshot_local["free:snapshot:usd:3m"]["graph"])
 
+    def test_refresh_not_before_attached_both_paths_not_stored_not_on_503(self):
+        # codex Medium 3 — refresh_not_before wiring 잠금:
+        # (1) Redis 성공 응답에 존재 + tz-aware +09:00 (2) local last-good 응답에도 존재
+        # (3) 저장된 canonical(_free_snapshot_local)엔 미저장 (4) 503엔 미부착.
+        from datetime import datetime
+
+        canonical = {
+            "tab": "usd", "period": "3m",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+            "rate": {"asset": "usd-krw", "entries": [
+                {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+                r1 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+            # (1) Redis 성공 → 필드 존재 + tz-aware +09:00
+            self.assertEqual(r1.status_code, 200)
+            rnb1 = r1.json()["refresh_not_before"]
+            parsed = datetime.fromisoformat(rnb1)
+            self.assertIsNotNone(parsed.tzinfo)
+            self.assertEqual(parsed.utcoffset().total_seconds(), 9 * 3600)   # +09:00
+            # (3) 저장된 last-good canonical엔 미저장(attach는 copy에만)
+            self.assertNotIn("refresh_not_before", main_module._free_snapshot_local["free:snapshot:usd:3m"])
+            # (2) Redis miss → local last-good 응답에도 부착
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=None)):
+                r2 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+            self.assertEqual(r2.status_code, 200)
+            self.assertIn("refresh_not_before", r2.json())
+        # (4) 503(canonical 전무)엔 미부착
+        main_module._free_snapshot_local.clear()
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=None)):
+            r3 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r3.status_code, 503)
+        self.assertNotIn("refresh_not_before", r3.json())
+
     def test_malformed_redis_no_local_returns_503(self):
         # 필수 필드 누락(as_of/generated_at 없음) canonical → validate 거부 → local 없음 → 503 (오염 200 방지).
         bad = {

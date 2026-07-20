@@ -29,6 +29,11 @@ KST = timezone("Asia/Seoul")
 # 무료 스냅샷 basis = 매시 HH:30 (사용자 2026-07-18 — 09:00 개장 후 09:30 첫 정보로 30분 만에
 # 장 파악 가능 + as_of가 데이터보다 뒤(>=)라 "HH:30 기준" 라벨과 값이 정합). cron도 :30 발화.
 FREE_SNAPSHOT_BASIS_MINUTE = 30
+# precompute cron 발화 초 — scheduler(CronTrigger)와 refresh_not_before 계산이 **공유**(ETC, codex): cron 타이밍
+# 변경 시 한 곳만 수정하면 응답 정책이 함께 따라감. :19 선택 근거(동시-시작 회피)는 scheduler 등록부 주석 참조.
+FREE_SNAPSHOT_PRECOMPUTE_SECOND = 19
+# refresh_not_before = basis slot(:30) + precompute_second(:19) + 이 여유(cron 완료 + Redis 전파). 합 60초 = :31:00.
+FREE_SNAPSHOT_REFRESH_READY_MARGIN_SECONDS = 41
 
 # MVP = usd only (달러 주력 탭 — investing.usd + hana.usd + dxy로 sdr/market_index 양 reader 검증).
 # 확장: FREE_SNAPSHOT_TABS 추가. 단 non-FX 탭(tether=usdt-krw)은 legacy_policy가 rate에서 usdt를 배제하므로
@@ -113,6 +118,40 @@ def fetch_rate_entries_until(db, asset: str, as_of_kst: datetime) -> list:
 def free_snapshot_key(tab: str, period: str) -> str:
     """무료 전용 Redis 키 (premium graph_v2:tab:* / latest:* 와 네임스페이스 분리 — §4.2/§3.1)."""
     return f"free:snapshot:{tab}:{period}"
+
+
+def compute_refresh_not_before(now_kst: datetime) -> datetime:
+    """serve-time "이 시각 이후 재요청 권장" — 다음 HH:30 publish slot(now 초과) + 60초 마진(=:31:00, cron :30:19+41s).
+
+    **serve-time now 기준**(as_of 무관)이라 stale canonical에도 항상 **미래** slot 반환 — client의 5분 폴링을
+    one-shot 스케줄로 대체하는 축. **데이터 존재 보장이 아니라 재요청 권장 시각**(stale 판단·recovery는 client가
+    as_of로 별도 처리). client는 여기에 설치별·탭별 결정적 jitter(10~30s)를 더해 매시 :31:10~:31:30로 부하 분산.
+    now.minute>=30이면 이번 시 publish는 지났으니 다음 시 :30, 아니면 이번 시 :30 (basis_as_of와 대칭 경계).
+    **+09:00 출력 계약(codex)**: naive 입력 거부, aware(UTC 등) 입력은 KST 정규화 → :30 grid·출력 offset 정확.
+    """
+    if now_kst.tzinfo is None:
+        raise ValueError("compute_refresh_not_before: now_kst must be timezone-aware (+09:00 출력 계약)")
+    now_kst = now_kst.astimezone(KST)   # UTC 등 aware 입력도 KST로 정규화(:30 경계 판정·+09:00 출력 정확)
+    slot = now_kst.replace(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=0, microsecond=0)
+    if slot <= now_kst:
+        slot += timedelta(hours=1)
+    return slot + timedelta(
+        seconds=FREE_SNAPSHOT_PRECOMPUTE_SECOND + FREE_SNAPSHOT_REFRESH_READY_MARGIN_SECONDS
+    )
+
+
+def attach_refresh_not_before(payload: dict, now_kst: datetime | None = None) -> dict:
+    """serve-time top-level `refresh_not_before`(ISO8601 +09:00) 부착 — canonical(Redis/last-good) 불변(copy에만).
+
+    성공 2경로(Redis canonical / local last-good) 모두에 부착. **항상 present**(stale canonical이어도 생략 안 함 —
+    stale은 client가 as_of로 판단). 구 client는 미인지 top-level 필드를 무시(additive, 무영향). now_kst 미지정 시
+    serve-time now(테스트는 compute_refresh_not_before에 고정 now 주입).
+    """
+    now_kst = now_kst or datetime.now(KST)
+    return {
+        **payload,
+        "refresh_not_before": compute_refresh_not_before(now_kst).isoformat(),
+    }
 
 
 def attach_free_snapshot_domain(payload: dict, period: str) -> dict:

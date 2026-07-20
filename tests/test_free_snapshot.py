@@ -184,6 +184,44 @@ def test_basis_as_of_boundaries():
     assert free_snapshot.basis_as_of(kst(2026, 7, 18, 0, 10)) == kst(2026, 7, 17, 23, 30)    # 자정 경계
 
 
+def test_compute_refresh_not_before():
+    """재요청 권장 시각 = 다음 HH:30 publish slot(now 초과) + 60초(:31). serve-time now 기준(as_of 무관), 항상 미래."""
+    def kst(y, mo, d, h, mi, s=0):
+        return free_snapshot.KST.localize(datetime(y, mo, d, h, mi, s))
+
+    # minute<30 → 이번 시 :31 (이번 시 publish 전이라 이번 :30 대기)
+    assert free_snapshot.compute_refresh_not_before(kst(2026, 7, 18, 21, 15)) == kst(2026, 7, 18, 21, 31)
+    # minute>30 → 다음 시 :31 (이번 시 publish 지남)
+    assert free_snapshot.compute_refresh_not_before(kst(2026, 7, 18, 21, 45)) == kst(2026, 7, 18, 22, 31)
+    # :30:30 (cron :30:19 직후) → 다음 시 :31 (이번 것 이미 받음 → redundant refetch 회피)
+    assert free_snapshot.compute_refresh_not_before(kst(2026, 7, 18, 21, 30, 30)) == kst(2026, 7, 18, 22, 31)
+    # 시/자정 경계
+    assert free_snapshot.compute_refresh_not_before(kst(2026, 7, 18, 23, 45)) == kst(2026, 7, 19, 0, 31)
+    # 항상 미래(one-shot 스케줄이 과거로 즉시 발화하지 않음)
+    now = kst(2026, 7, 18, 9, 5)
+    assert free_snapshot.compute_refresh_not_before(now) > now
+
+    # +09:00 출력 계약(codex Medium): naive 거부
+    with pytest.raises(ValueError):
+        free_snapshot.compute_refresh_not_before(datetime(2026, 7, 18, 21, 45))   # tz-naive
+    # aware(UTC) 입력 → KST 정규화 후 판정·출력(UTC 12:45 = KST 21:45 → 다음 시 :31, offset +09:00)
+    utc = free_snapshot.pytz.utc.localize(datetime(2026, 7, 18, 12, 45))
+    out = free_snapshot.compute_refresh_not_before(utc)
+    assert out == kst(2026, 7, 18, 22, 31)
+    assert out.utcoffset() == timedelta(hours=9)
+
+
+def test_attach_refresh_not_before_additive_and_immutable():
+    """top-level refresh_not_before 부착 — 원본 canonical 불변(copy), compute 값과 일치, 나머지 필드 보존."""
+    now = free_snapshot.KST.localize(datetime(2026, 7, 18, 21, 45))
+    canonical = {"as_of": "2026-07-18T21:30:00+09:00", "rate": {"entries": []}, "graph": {"series": []}}
+    out = free_snapshot.attach_refresh_not_before(canonical, now_kst=now)
+
+    assert datetime.fromisoformat(out["refresh_not_before"]) == free_snapshot.compute_refresh_not_before(now)
+    assert "refresh_not_before" not in canonical   # 원본 불변(canonical 미저장)
+    assert out["as_of"] == canonical["as_of"] and out["rate"] == canonical["rate"]   # 나머지 보존
+
+
 def test_fetch_rate_entries_until_cutoff_boundary():
     """시간 계약(codex): `timestamp <= as_of`인 마지막 값만 — as_of 초과 값은 최신이어도 제외."""
     from sqlalchemy import create_engine

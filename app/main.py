@@ -2703,6 +2703,7 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
         FREE_SNAPSHOT_PERIODS,
         FREE_SNAPSHOT_TABS,
         attach_free_snapshot_domain,
+        attach_refresh_not_before,
         free_snapshot_key,
     )
 
@@ -2724,14 +2725,16 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
     cache_key = free_snapshot_key(tab, period)
 
     # cron canonical만 서빙. validate가 empty/오염/KRX 거부(→ last-good/503). serve는 DB build 안 함.
+    # serve-time 부착 2종(canonical 불변, copy에만): graph domain + refresh_not_before(재요청 권장 시각 = 다음 :31,
+    # client 5분 폴링→one-shot 대체 축). 503(스냅샷 자체 없음)엔 부착 안 함.
     cached = await _free_snapshot_cache_get(cache_key, tab, period)
     if cached is not None:
         _free_snapshot_local_put(cache_key, cached)   # last-good = 마지막 성공 canonical(domain 없는 원본 보존)
-        return attach_free_snapshot_domain(cached, period)   # serve-time domain은 copy에만 (canonical 불변)
+        return attach_refresh_not_before(attach_free_snapshot_domain(cached, period))
     # Redis miss/hang/오염 → 마지막 canonical(process-local last-good). **DB 최신값으로 fabricate 금지.**
     local = _free_snapshot_local_get(cache_key)
     if local is not None:
-        return attach_free_snapshot_domain(local, period)
+        return attach_refresh_not_before(attach_free_snapshot_domain(local, period))
     # canonical 없음(첫 cron 전 cold-start + Redis empty / 전면 손실) → 503. 빈 payload도 여기로 귀결.
     return JSONResponse(status_code=503, content={"error": "snapshot_unavailable"})
 
