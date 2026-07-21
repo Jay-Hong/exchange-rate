@@ -40,10 +40,32 @@ def test_assert_krx_free_raises_on_krx_rate():
         free_snapshot._assert_krx_free(payload)
 
 
+def test_assert_krx_free_raises_on_krx_source_asset_shape():
+    """N4 — rate entry가 topic-native source/asset shape로 KRX(달러선물)를 실어도 차단(테더 대비)."""
+    for entry in ({"source": "krx", "asset": "usd-krw-futures"},
+                  {"source": "krx", "asset": "usdt-krw"},          # source만 krx여도
+                  {"source": "bithumb", "asset": "usd-krw-futures"}):  # asset만 futures여도
+        payload = {"graph": {"series": []}, "rate": {"entries": [entry]}}
+        with pytest.raises(ValueError):
+            free_snapshot._assert_krx_free(payload)
+
+
 def test_assert_krx_free_passes_clean():
     payload = {
         "graph": {"series": [{"id": "investing.usd", "data": [1]}]},
         "rate": {"entries": [{"bank": "kb", "currency": "usd-krw"}]},
+    }
+    free_snapshot._assert_krx_free(payload)  # no raise
+
+
+def test_assert_krx_free_passes_tether_source_asset_shape():
+    """N4 — 정상 테더 거래소 rate entry(source/asset shape, KRX 아님)는 통과."""
+    payload = {
+        "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [1]}]},
+        "rate": {"entries": [
+            {"source": "upbit", "asset": "usdt-krw", "rate": 1400.0},
+            {"source": "bithumb", "asset": "usdt-krw", "rate": 1401.0},
+        ]},
     }
     free_snapshot._assert_krx_free(payload)  # no raise
 

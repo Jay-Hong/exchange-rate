@@ -271,12 +271,17 @@ def _assert_as_of_on_grid(payload: dict) -> None:
 
 
 def _assert_krx_free(payload: dict) -> None:
-    """fail-closed — KRX가 rate/graph 어느 쪽에도 없어야 한다(N6, 무료엔 KRX 절대 불가). 위반 시 raise."""
+    """fail-closed — KRX가 rate/graph 어느 쪽에도 없어야 한다(N6, 무료엔 KRX 절대 불가). 위반 시 raise.
+
+    rate entry는 **두 shape 모두** 검사(N4 테더 대비): FX(legacy) shape `bank`/`currency` + topic-native(source_rates)
+    shape `source`/`asset`. 테더 rate 리더가 source/asset entry를 도입하므로 source=="krx"/asset=="usd-krw-futures"도
+    잠가 KRX(달러선물)가 무료 테더 snapshot에 새어들지 않게 한다(FREE_TIER §71 계약)."""
     for s in payload.get("graph", {}).get("series", []):
         if str(s.get("id", "")).startswith("krx."):
             raise ValueError(f"KRX series가 무료 snapshot에 유입: {s.get('id')!r}")
     for e in payload.get("rate", {}).get("entries", []):
-        if str(e.get("bank", "")) == "krx" or str(e.get("currency", "")) == "usd-krw-futures":
+        if (str(e.get("bank", "")) == "krx" or str(e.get("currency", "")) == "usd-krw-futures"
+                or str(e.get("source", "")) == "krx" or str(e.get("asset", "")) == "usd-krw-futures"):
             raise ValueError(f"KRX rate가 무료 snapshot에 유입: {e!r}")
 
 
