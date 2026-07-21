@@ -228,7 +228,7 @@ liveAnchor·줌clamp를 이 domain으로 계산한다(실제 데이터 범위/�
 
 ### 5.1b 무료 스냅샷 `refresh_not_before` (serve-time 재요청 권장 시각 — 클라 폴링 효율화)
 
-> **상태(2026-07-21)**: **서버 slice(7f4e69a) + iOS one-shot consumer(c31dfe9) 모두 구현**. 서버는 refresh_not_before 부착(additive), iOS는 5분 폴링+20초×9 재시도를 단일 scheduler로 교체(load-owns-reschedule / schedulerFetchingPeriod 소유권 / due-check nextEligibleAt 존중 / cancellation 분리 / 선택탭 게이트, codex 5라운드 하드닝, FXiTests 340 passed). **아직 미배포**: 서버 7f4e69a는 additive라 구 프로덕션 앱 무영향, iOS는 dev build로 E2E 검증 후 출시 예정. 배포 순서 = 서버 먼저 → 프로덕션 auth endpoint refresh_not_before smoke → iOS dev build one-shot 실측.
+> **상태(2026-07-21)**: **서버 slice(7f4e69a) + iOS one-shot consumer(c31dfe9→fb9d15c) 모두 구현**. 서버는 refresh_not_before 부착(additive), iOS는 5분 폴링+20초×9 재시도를 단일 scheduler로 교체(load-owns-reschedule / schedulerFetchingPeriod 소유권 / due-check nextEligibleAt 존중 / cancellation 분리 / 선택탭 게이트 / preload per-period 실패 cooldown, codex 7라운드 하드닝[최종 코드 finding 0], FXiTests 342 passed). **아직 미배포**: 서버 7f4e69a는 additive라 구 프로덕션 앱 무영향, iOS는 dev build로 E2E 검증 후 출시 예정. 배포 순서 = 서버 먼저 → 프로덕션 auth endpoint refresh_not_before smoke → iOS dev build one-shot 실측.
 
 무료는 매시 :30 cron이 canonical을 굽는다(:30:19). 클라가 5분 폴링으로 hour-boundary를 확인하던 것을, 서버가 "이 시각 이후 재요청 권장"을 응답에 실어 **one-shot 스케줄**로 대체할 축을 제공한다(클라 전환은 iOS slice).
 
