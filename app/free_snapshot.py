@@ -13,6 +13,7 @@ graph_v2.build_tab(exclude_krx=True)의 _free_tab_series 무조건 필터. 조�
 import json
 import logging
 from datetime import datetime, timedelta
+from typing import Literal
 
 import pytz
 from pydantic import BaseModel, ConfigDict
@@ -45,6 +46,10 @@ FREE_SNAPSHOT_TABS = ("usd", "jpy", "eur")
 # 1d = intraday(10min closed-bucket) — 무료는 premium live-tail/in_progress 미포함, cron 시점 고정(ADR-039 A).
 FREE_SNAPSHOT_PERIODS = ("1d", "1w", "3m", "1y")
 TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "usdt-krw"}
+# tab↔rate shape 계약(N4-2a codex Medium): usd/jpy/eur=flat rate 블록 / tether=grouped(source_grouped).
+# 오염된 canonical이 잘못된 shape을 다른 탭으로 서빙(예: grouped-USD → FX 클라에 entries 없는 200)하는
+# fail-closed acceptance surface 확대를 차단 — grouped를 쓰는 탭만 여기 등재(그 외는 flat 강제).
+_GROUPED_RATE_TABS = frozenset({"tether"})
 
 # cron이 매시간 갱신 → 정상 시 항상 warm. long-TTL = cron 장애 시에도 Redis canonical 최대 ~25h 유지.
 # (serve의 process-local last-good은 별개로 프로세스 수명 동안 유지 — Redis TTL과 무관, availability 우선.)
@@ -205,14 +210,46 @@ def attach_free_snapshot_domain(payload: dict, period: str) -> dict:
     }
 
 
+def _iter_rate_items(rate):
+    """rate 블록의 개별 rate item을 **shape 무관** 평탄 순회(generator).
+
+    non-empty·KRX·within-as_of 검증이 **동일 item 집합**을 보게 하는 단일 진실 소스(N4 테더 grouped 대비 —
+    검증기들이 flat entries만 전제해 grouped서 KRX 우회/KeyError 나던 것을 이 helper로 통일).
+    - grouped(`kind=="source_grouped"`): usdt_krw + usd_krw_banks 리스트 평탄 → usd_krw_reference(non-empty dict면 1개).
+      비-list 그룹·비-dict item은 스킵.
+    - flat(FX, kind 없음): entries 중 dict만.
+    - 비-dict rate/None: 아무것도 yield 안 함(방어).
+    """
+    if not isinstance(rate, dict):
+        return
+    if rate.get("kind") == "source_grouped":
+        for key in ("usdt_krw", "usd_krw_banks"):
+            group = rate.get(key)
+            if isinstance(group, list):
+                for item in group:
+                    if isinstance(item, dict):
+                        yield item
+        ref = rate.get("usd_krw_reference")
+        if isinstance(ref, dict) and ref:   # non-empty singleton dict면 1개(빈 dict=reference 부재 → 스킵)
+            yield ref
+    else:
+        entries = rate.get("entries")
+        if isinstance(entries, list):
+            for item in entries:
+                if isinstance(item, dict):
+                    yield item
+
+
 def _snapshot_is_nonempty(payload: dict) -> bool:
-    """rate entry 1개 이상 AND graph series 중 data 있는 것 1개 이상.
+    """rate item 1개 이상 AND graph series 중 data 있는 것 1개 이상.
 
     N2 — 빈 build가 이전 정상값을 setex로 덮어쓰는 것을 방지(성공-반환이어도 내용이 비면 SET 생략).
+    N4-2a — rate는 `_iter_rate_items`로 shape 무관 순회(grouped partial-source도 item≥1이면 충족 — 거래소 일부만
+    수집돼도 OK, 전부 필수 아님).
     """
-    rate_entries = payload.get("rate", {}).get("entries", [])
+    has_rate = any(True for _ in _iter_rate_items(payload.get("rate", {})))
     series = payload.get("graph", {}).get("series", [])
-    return bool(rate_entries) and any(s.get("data") for s in series)
+    return has_rate and any(s.get("data") for s in series)
 
 
 def _assert_graph_within_as_of(payload: dict) -> None:
@@ -241,17 +278,18 @@ def _assert_rates_within_as_of(payload: dict) -> None:
     초과 가능)이 유입되는 창을 차단(codex 2026-07-18 — validate가 graph만 검사하던 비대칭 해소).
     timestamp는 **필수**(시간 계약 완전 closure — ts 없는 rate entry는 as_of 판정 불가라 fail-closed 거부,
     codex 2026-07-18. 실 canonical은 fetch_rate_entries_until이 항상 ts 부여라 false-503 없음).
-    비-dict는 Pydantic(entries:list[dict])이 이미 거부."""
+    N4-2a — flat/grouped 모두 `_iter_rate_items`로 순회(비-dict item은 helper가 이미 스킵). 에러 메시지는
+    flat(bank)·grouped(source) 양쪽 식별자를 함께 표기."""
     as_of = datetime.fromisoformat(payload["as_of"])
-    for e in payload.get("rate", {}).get("entries", []):
-        if not isinstance(e, dict):
-            continue
+    for e in _iter_rate_items(payload.get("rate", {})):
         ts = e.get("timestamp")
         if ts is None:
-            raise ValueError(f"rate entry에 timestamp 없음(시간 계약 필수): bank={e.get('bank')!r}")
+            raise ValueError(
+                f"rate entry에 timestamp 없음(시간 계약 필수): bank={e.get('bank')!r} source={e.get('source')!r}")
         if datetime.fromisoformat(ts) > as_of:
             raise ValueError(
-                f"rate entry가 as_of 초과: bank={e.get('bank')!r} ts={ts} as_of={payload['as_of']}")
+                f"rate entry가 as_of 초과: bank={e.get('bank')!r} source={e.get('source')!r} "
+                f"ts={ts} as_of={payload['as_of']}")
 
 
 def _assert_as_of_on_grid(payload: dict) -> None:
@@ -270,6 +308,26 @@ def _assert_as_of_on_grid(payload: dict) -> None:
         raise ValueError(f"as_of가 :{FREE_SNAPSHOT_BASIS_MINUTE} grid 밖(KST): {payload['as_of']}")
 
 
+def _iter_all_rate_dicts(rate):
+    """KRX fail-closed 전용 — **shape·kind 무관** 모든 알려진 rate 컨테이너의 dict를 순회(generator).
+
+    `_iter_rate_items`가 `kind`로 flat(entries) **또는** grouped(3그룹) **한쪽만** 보는 것과 달리, 여기선
+    entries·usdt_krw·usd_krw_banks·usd_krw_reference를 **동시에** 훑는다. Pydantic `extra`가 반대 shape 컨테이너를
+    통과시키더라도(또는 미래에 loosen돼도) KRX가 어느 컨테이너로도 숨지 못하게 하는 최우선 불변식 방어
+    (N4-2a codex Blocker — hybrid payload KRX 우회). 정상 canonical은 한 shape만 채우므로 오버헤드 무시."""
+    if not isinstance(rate, dict):
+        return
+    for key in ("entries", "usdt_krw", "usd_krw_banks"):
+        group = rate.get(key)
+        if isinstance(group, list):
+            for item in group:
+                if isinstance(item, dict):
+                    yield item
+    ref = rate.get("usd_krw_reference")
+    if isinstance(ref, dict) and ref:
+        yield ref
+
+
 def _assert_krx_free(payload: dict) -> None:
     """fail-closed — KRX가 rate/graph 어느 쪽에도 없어야 한다(N6, 무료엔 KRX 절대 불가). 위반 시 raise.
 
@@ -279,7 +337,9 @@ def _assert_krx_free(payload: dict) -> None:
     for s in payload.get("graph", {}).get("series", []):
         if str(s.get("id", "")).startswith("krx."):
             raise ValueError(f"KRX series가 무료 snapshot에 유입: {s.get('id')!r}")
-    for e in payload.get("rate", {}).get("entries", []):
+    # N4-2a (codex Blocker) — _iter_rate_items(kind-조건부)가 아니라 _iter_all_rate_dicts(shape 무관 전 컨테이너)로
+    # 순회. hybrid/오염 payload가 반대 shape 컨테이너에 KRX를 숨겨 우회하는 hole을 닫는다(extra="forbid"와 이중 방어).
+    for e in _iter_all_rate_dicts(payload.get("rate", {})):
         if (str(e.get("bank", "")) == "krx" or str(e.get("currency", "")) == "usd-krw-futures"
                 or str(e.get("source", "")) == "krx" or str(e.get("asset", "")) == "usd-krw-futures"):
             raise ValueError(f"KRX rate가 무료 snapshot에 유입: {e!r}")
@@ -346,9 +406,30 @@ class _FreeGraph(BaseModel):
 
 
 class _FreeRate(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    """flat FX rate 블록(kind 없음) — {asset, entries}. N4 grouped 도입 후에도 FX는 그대로.
+
+    **extra="forbid"** (N4-2a codex Blocker): flat 블록에 grouped 컨테이너 키(usdt_krw/usd_krw_banks/
+    usd_krw_reference)를 extra로 얹은 hybrid를 schema 층에서 거부 — 그래야 반대 shape 컨테이너에 숨은 KRX가
+    검증기(kind-조건부 순회)를 우회해 서빙 JSON에 잔존하는 hole이 닫힘. rate 블록 필드는 우리 계약이라 고정
+    (신규 필드 추가 시 이 모델도 갱신 필요 — fail-closed validator라 strict가 정답)."""
+    model_config = ConfigDict(extra="forbid")
     asset: str
     entries: list[dict]
+
+
+class _FreeRateGrouped(BaseModel):
+    """grouped 테더 rate 블록(N4) — {kind, primary_asset, usdt_krw, usd_krw_banks, usd_krw_reference}.
+
+    kind는 `Literal["source_grouped"]` **필수** — plain union에서 flat(kind 없음)이 우연히 grouped로 매칭되지
+    않게 하는 discriminator 역할(단, discriminated union은 금지 — FX가 kind 없어 union_tag_not_found로 파손되므로).
+    **extra="forbid"** (N4-2a codex Blocker): grouped 블록에 flat 키(asset/entries)를 extra로 얹은 hybrid 거부
+    (역방향 KRX 우회 차단 — 대칭)."""
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["source_grouped"]
+    primary_asset: str
+    usdt_krw: list[dict]
+    usd_krw_banks: list[dict]
+    usd_krw_reference: dict
 
 
 class _FreeSnapshotModel(BaseModel):
@@ -357,7 +438,9 @@ class _FreeSnapshotModel(BaseModel):
     period: str
     as_of: datetime          # ISO 파싱 → 'banana' 등 invalid date 거부
     generated_at: datetime
-    rate: _FreeRate
+    # flat(FX)·grouped(테더 N4) 둘 다 허용 — **plain union**(Pydantic이 각 멤버를 시도). required 필드가 disjoint
+    # (flat=asset+entries / grouped=kind+primary_asset+3그룹)라 순서 무관 정확 매칭 + flat↔grouped 상호오매칭 없음.
+    rate: _FreeRate | _FreeRateGrouped
     graph: _FreeGraph
 
 
@@ -374,10 +457,21 @@ def validate_snapshot_payload(payload, tab: str, period: str) -> bool:
     try:
         if not isinstance(payload, dict):
             return False
-        _FreeSnapshotModel.model_validate(payload)   # 스키마+날짜형식+bucket_size+range (ValidationError→except→False)
+        _FreeSnapshotModel.model_validate(payload)   # 스키마(flat|grouped union)+날짜형식+bucket_size+range (ValidationError→except→False)
         if payload.get("tab") != tab or payload.get("period") != period:
             return False
-        if payload.get("rate", {}).get("asset") != TAB_ASSET.get(tab):
+        # asset 일치 + tab↔shape 결합 — grouped(테더)는 primary_asset, flat(FX)은 asset.
+        # (model_validate 통과라 rate는 dict 보장, 방어적 재확인.)
+        rate = payload.get("rate", {})
+        if not isinstance(rate, dict):
+            return False
+        is_grouped = rate.get("kind") == "source_grouped"
+        # N4-2a (codex Medium) — 탭이 기대하는 shape과 실제 shape이 일치해야 함. 불일치(오염 grouped-USD /
+        # flat-tether)는 fail-closed 거부(구 client에 깨진 200 반환 회귀 차단).
+        if is_grouped != (tab in _GROUPED_RATE_TABS):
+            return False
+        rate_asset = rate.get("primary_asset") if is_grouped else rate.get("asset")
+        if rate_asset != TAB_ASSET.get(tab):
             return False
         if not _snapshot_is_nonempty(payload):
             return False
@@ -429,7 +523,9 @@ def precompute_free_snapshots() -> None:
                         FREE_SNAPSHOT_TTL_SECONDS,
                         json.dumps(payload),
                     )
-                    written[f"{tab}/{period}"] = len(payload["rate"]["entries"])
+                    # N4-2a — grouped(테더)엔 "entries" 키가 없어 구 len(payload["rate"]["entries"])는 KeyError →
+                    # grouped 성공을 실패로 오기록. shape 무관 item 수로 집계.
+                    written[f"{tab}/{period}"] = sum(1 for _ in _iter_rate_items(payload.get("rate", {})))
                 except Exception:
                     logger.exception("free_snapshot %s/%s precompute 실패 — 격리(keep-last-good)", tab, period)
         logger.info("✅ free_snapshot precompute", extra={"written": written})

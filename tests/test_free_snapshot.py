@@ -567,3 +567,324 @@ def test_attach_free_snapshot_domain_missing_as_of_no_domain():
     out = free_snapshot.attach_free_snapshot_domain(canonical, "3m")
     assert "domain_start_at" not in out["graph"]
     assert out is canonical
+
+
+# ── N4-2a: grouped(source_grouped) rate shape 검증 계층 ─────────────
+# 테더 rate가 도입할 grouped shape을 flat과 함께 커버(리더/tuple/배포는 N4-2b/N4-3). payload는 손으로 구성.
+
+def _grouped_rate(*, usdt_krw=None, usd_krw_banks=None, usd_krw_reference=None, primary_asset="usdt-krw"):
+    """테스트용 grouped rate 블록 헬퍼 — 미지정 그룹은 빈 값(list/dict)."""
+    return {
+        "kind": "source_grouped",
+        "primary_asset": primary_asset,
+        "usdt_krw": [] if usdt_krw is None else usdt_krw,
+        "usd_krw_banks": [] if usd_krw_banks is None else usd_krw_banks,
+        "usd_krw_reference": {} if usd_krw_reference is None else usd_krw_reference,
+    }
+
+
+def test_iter_rate_items_flat():
+    """flat(FX)은 entries 중 dict만 순회."""
+    rate = {"asset": "usd-krw", "entries": [{"bank": "kb"}, {"bank": "hana"}]}
+    assert list(free_snapshot._iter_rate_items(rate)) == [{"bank": "kb"}, {"bank": "hana"}]
+
+
+def test_iter_rate_items_grouped_order_and_count():
+    """grouped은 usdt_krw → usd_krw_banks → usd_krw_reference 순서로 평탄(개수·순서)."""
+    rate = _grouped_rate(
+        usdt_krw=[{"source": "upbit"}, {"source": "bithumb"}],
+        usd_krw_banks=[{"source": "kb"}, {"source": "hana"}],
+        usd_krw_reference={"source": "investing"},
+    )
+    assert list(free_snapshot._iter_rate_items(rate)) == [
+        {"source": "upbit"}, {"source": "bithumb"},   # usdt_krw
+        {"source": "kb"}, {"source": "hana"},         # usd_krw_banks
+        {"source": "investing"},                      # usd_krw_reference (singleton)
+    ]
+
+
+def test_iter_rate_items_grouped_empty_reference_skipped():
+    """빈 reference dict(투자 참조 부재)는 스킵 — partial 자연 허용."""
+    rate = _grouped_rate(usdt_krw=[{"source": "upbit"}])   # banks/ref 비어있음
+    assert list(free_snapshot._iter_rate_items(rate)) == [{"source": "upbit"}]
+
+
+def test_iter_rate_items_defensive():
+    """비-dict rate/None/비-list 그룹/비-dict item 방어."""
+    assert list(free_snapshot._iter_rate_items(None)) == []
+    assert list(free_snapshot._iter_rate_items("junk")) == []
+    assert list(free_snapshot._iter_rate_items({})) == []                 # flat, entries 없음
+    assert list(free_snapshot._iter_rate_items({"entries": "notalist"})) == []
+    # flat + 비-dict item 스킵
+    assert list(free_snapshot._iter_rate_items(
+        {"entries": ["x", {"bank": "kb"}, 3]})) == [{"bank": "kb"}]
+    # grouped + 비-list 그룹/비-dict item/None ref 방어
+    assert list(free_snapshot._iter_rate_items(
+        {"kind": "source_grouped", "usdt_krw": ["x", {"source": "upbit"}],
+         "usd_krw_banks": "notalist", "usd_krw_reference": None})) == [{"source": "upbit"}]
+
+
+def test_assert_krx_free_grouped_blocks_each_group():
+    """grouped — KRX(source=='krx' 또는 asset=='usd-krw-futures')가 어느 그룹으로도 유입되면 차단(우회 방지)."""
+    krx_source = {"source": "krx", "asset": "usdt-krw", "timestamp": "2026-07-18T21:00:00+09:00"}
+    krx_asset = {"source": "bithumb", "asset": "usd-krw-futures", "timestamp": "2026-07-18T21:00:00+09:00"}
+    for kw in (
+        {"usdt_krw": [krx_source]},
+        {"usdt_krw": [krx_asset]},
+        {"usd_krw_banks": [krx_source]},
+        {"usd_krw_banks": [krx_asset]},
+        {"usd_krw_reference": krx_source},
+        {"usd_krw_reference": krx_asset},
+    ):
+        payload = {"graph": {"series": []}, "rate": _grouped_rate(**kw)}
+        with pytest.raises(ValueError):
+            free_snapshot._assert_krx_free(payload)
+
+
+def test_assert_krx_free_grouped_passes_clean():
+    """정상 grouped(거래소/은행/investing, KRX 아님)는 통과."""
+    payload = {"graph": {"series": [{"id": "bithumb.usdt-krw", "data": [1]}]},
+               "rate": _grouped_rate(
+                   usdt_krw=[{"source": "upbit", "asset": "usdt-krw"}],
+                   usd_krw_banks=[{"source": "kb", "asset": "usd-krw"}],
+                   usd_krw_reference={"source": "investing", "asset": "usd-krw"})}
+    free_snapshot._assert_krx_free(payload)   # no raise
+
+
+def test_assert_rates_within_as_of_grouped():
+    """grouped — 각 그룹 entry ts <= as_of 강제(future면 raise, ts 필수)."""
+    as_of = "2026-07-18T21:30:00+09:00"
+    ok = {"as_of": as_of, "rate": _grouped_rate(
+        usdt_krw=[{"source": "upbit", "asset": "usdt-krw", "timestamp": "2026-07-18T21:20:00+09:00"}],
+        usd_krw_banks=[{"source": "kb", "asset": "usd-krw", "timestamp": "2026-07-18T21:30:00+09:00"}],   # 경계 == OK
+        usd_krw_reference={"source": "investing", "asset": "usd-krw", "timestamp": "2026-07-18T21:00:00+09:00"})}
+    free_snapshot._assert_rates_within_as_of(ok)   # 통과
+
+    future = {"source": "x", "asset": "usdt-krw", "timestamp": "2026-07-18T22:00:00+09:00"}
+    for kw in ({"usdt_krw": [future]}, {"usd_krw_banks": [future]}, {"usd_krw_reference": future}):
+        over = {"as_of": as_of, "rate": _grouped_rate(**kw)}
+        with pytest.raises(ValueError):
+            free_snapshot._assert_rates_within_as_of(over)
+
+    # ts 없는 grouped entry → raise(시간 계약 필수)
+    with pytest.raises(ValueError):
+        free_snapshot._assert_rates_within_as_of(
+            {"as_of": as_of, "rate": _grouped_rate(usdt_krw=[{"source": "upbit", "asset": "usdt-krw"}])})
+
+
+def test_snapshot_is_nonempty_grouped_partial():
+    """grouped — 거래소 1개(또는 reference만)여도 nonempty True(partial) / 전부 빈 그룹이면 False."""
+    graph = {"series": [{"id": "bithumb.usdt-krw", "data": [1]}]}
+    # 거래소 1개만
+    assert free_snapshot._snapshot_is_nonempty(
+        {"rate": _grouped_rate(usdt_krw=[{"source": "upbit", "asset": "usdt-krw"}]), "graph": graph})
+    # reference만
+    assert free_snapshot._snapshot_is_nonempty(
+        {"rate": _grouped_rate(usd_krw_reference={"source": "investing", "asset": "usd-krw"}), "graph": graph})
+    # 전부 빈 그룹 → rate empty → False
+    assert not free_snapshot._snapshot_is_nonempty({"rate": _grouped_rate(), "graph": graph})
+    # rate 있지만 graph 비면 False (기존 조건 유지)
+    assert not free_snapshot._snapshot_is_nonempty(
+        {"rate": _grouped_rate(usdt_krw=[{"source": "upbit"}]), "graph": {"series": [{"data": []}]}})
+
+
+def test_free_rate_union_flat_and_grouped_and_malformed():
+    """_FreeSnapshotModel.rate union — flat(kind 없음)·grouped(source_grouped) 둘 다 통과, kind 없는 grouped-only 거부."""
+    from pydantic import ValidationError
+
+    from app.free_snapshot import _FreeSnapshotModel
+
+    base = {
+        "tab": "usd", "period": "3m",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+        "graph": {"series": [{"id": "investing.usd", "data": [1]}],
+                  "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
+    }
+    # flat 통과
+    _FreeSnapshotModel.model_validate({**base, "rate": {"asset": "usd-krw", "entries": [{"currency": "usd-krw"}]}})
+    # grouped 통과
+    _FreeSnapshotModel.model_validate({**base, "tab": "tether", "rate": _grouped_rate(
+        usdt_krw=[{"source": "upbit", "asset": "usdt-krw"}],
+        usd_krw_banks=[{"source": "kb", "asset": "usd-krw"}],
+        usd_krw_reference={"source": "investing", "asset": "usd-krw"})})
+    # malformed: kind 없이 grouped 그룹만 → flat(asset/entries)·grouped(kind) 둘 다 실패 → 거부
+    malformed = {**base, "tab": "tether", "rate": {
+        "primary_asset": "usdt-krw", "usdt_krw": [{"source": "upbit"}],
+        "usd_krw_banks": [], "usd_krw_reference": {}}}   # kind 없음
+    with pytest.raises(ValidationError):
+        _FreeSnapshotModel.model_validate(malformed)
+
+
+def test_validate_snapshot_payload_grouped_tether():
+    """grouped canonical(테더)이 validate_snapshot_payload 전 계층 통과(asset=primary_asset grouped-aware) +
+    primary_asset mismatch/KRX 유입 거부 + partial 통과."""
+    grouped_good = {
+        "tab": "tether", "period": "3m",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+        "rate": _grouped_rate(
+            usdt_krw=[{"source": "upbit", "asset": "usdt-krw", "rate": 1400.0, "timestamp": "2026-07-17T14:19:00+09:00"},
+                      {"source": "bithumb", "asset": "usdt-krw", "rate": 1401.0, "timestamp": "2026-07-17T14:20:00+09:00"}],
+            usd_krw_banks=[{"source": "kb", "asset": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}],
+            usd_krw_reference={"source": "investing", "asset": "usd-krw", "rate": 1386.0, "timestamp": "2026-07-17T14:18:00+09:00"}),
+        "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [{"bucket_date": "2026-07-16", "rate": 1401.0}]}],
+                  "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
+    }
+    assert free_snapshot.validate_snapshot_payload(grouped_good, "tether", "3m")
+    # primary_asset mismatch → 거부(grouped asset 체크)
+    assert not free_snapshot.validate_snapshot_payload(
+        {**grouped_good, "rate": {**grouped_good["rate"], "primary_asset": "usd-krw"}}, "tether", "3m")
+    # partial(거래소 1개만, banks/ref 비어있음)도 통과(nonempty True)
+    assert free_snapshot.validate_snapshot_payload(
+        {**grouped_good, "rate": _grouped_rate(
+            usdt_krw=[{"source": "upbit", "asset": "usdt-krw", "rate": 1400.0,
+                       "timestamp": "2026-07-17T14:19:00+09:00"}])}, "tether", "3m")
+    # grouped에 KRX 유입 → 거부(_assert_krx_free)
+    assert not free_snapshot.validate_snapshot_payload(
+        {**grouped_good, "rate": {**grouped_good["rate"], "usd_krw_banks": [
+            {"source": "krx", "asset": "usd-krw-futures", "rate": 1.0, "timestamp": "2026-07-17T14:19:00+09:00"}]}},
+        "tether", "3m")
+
+
+# ── N4-2a codex Blocker/Medium hardening (hybrid KRX 우회 + tab↔shape 결합) ──
+
+def test_iter_all_rate_dicts_scans_all_containers():
+    """_iter_all_rate_dicts는 kind 무관 entries+3그룹을 **동시에** 순회(KRX fail-closed 방어 — _iter_rate_items가
+    kind로 한쪽만 보는 것과 대비)."""
+    # hybrid: kind=grouped인데 entries도 있음 → 둘 다 순회
+    rate = {
+        "kind": "source_grouped", "primary_asset": "usdt-krw",
+        "usdt_krw": [{"source": "upbit"}], "usd_krw_banks": [{"source": "kb"}],
+        "usd_krw_reference": {"source": "investing"},
+        "entries": [{"bank": "krx"}],   # 반대 shape 컨테이너
+    }
+    got = list(free_snapshot._iter_all_rate_dicts(rate))
+    assert {"bank": "krx"} in got          # _iter_rate_items는 이걸 놓쳤음(kind=grouped라 entries 미검사)
+    assert {"source": "upbit"} in got and {"source": "investing"} in got
+    # 방어: 비-dict/None/비-list 그룹/빈 ref
+    assert list(free_snapshot._iter_all_rate_dicts(None)) == []
+    assert list(free_snapshot._iter_all_rate_dicts(
+        {"entries": "x", "usdt_krw": None, "usd_krw_reference": {}})) == []
+
+
+def test_krx_hybrid_bypass_blocked_grouped_with_krx_entries():
+    """codex Blocker — grouped payload에 entries=[KRX]를 extra로 얹어도 _assert_krx_free가 잡는다(scan-all)."""
+    rate = {
+        "kind": "source_grouped", "primary_asset": "usdt-krw",
+        "usdt_krw": [{"source": "upbit", "asset": "usdt-krw"}],
+        "usd_krw_banks": [], "usd_krw_reference": {},
+        "entries": [{"source": "krx", "asset": "usd-krw-futures", "timestamp": "2026-07-17T14:19:00+09:00"}],
+    }
+    with pytest.raises(ValueError):
+        free_snapshot._assert_krx_free({"graph": {"series": []}, "rate": rate})
+
+
+def test_krx_hybrid_bypass_blocked_flat_with_grouped_krx_field():
+    """codex Blocker 역방향 — flat payload에 usd_krw_banks=[KRX]를 extra로 얹어도 잡는다."""
+    rate = {
+        "asset": "usd-krw", "entries": [{"bank": "kb"}],
+        "usd_krw_banks": [{"source": "krx", "asset": "usd-krw-futures"}],   # grouped 컨테이너 extra
+    }
+    with pytest.raises(ValueError):
+        free_snapshot._assert_krx_free({"graph": {"series": []}, "rate": rate})
+
+
+def test_free_rate_forbid_rejects_hybrid_shape():
+    """extra="forbid" — 반대 shape 키를 얹은 hybrid는 schema 층(model_validate)에서 거부(양방향)."""
+    from pydantic import ValidationError
+
+    from app.free_snapshot import _FreeSnapshotModel
+    base = {
+        "tab": "tether", "period": "3m",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+        "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [1]}],
+                  "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
+    }
+    # grouped + entries(flat 키) extra → 두 union member 모두 실패
+    with pytest.raises(ValidationError):
+        _FreeSnapshotModel.model_validate({**base, "rate": {
+            **_grouped_rate(usdt_krw=[{"source": "upbit"}]), "entries": [{"bank": "krx"}]}})
+    # flat + usd_krw_banks(grouped 키) extra → 두 member 모두 실패
+    with pytest.raises(ValidationError):
+        _FreeSnapshotModel.model_validate({**base, "tab": "usd", "rate": {
+            "asset": "usd-krw", "entries": [{"bank": "kb"}], "usd_krw_banks": [{"source": "krx"}]}})
+
+
+def test_validate_hybrid_krx_bypass_end_to_end_blocked():
+    """codex Blocker end-to-end — hybrid KRX payload가 validate_snapshot_payload에서 False(서빙 안 됨)."""
+    grouped_krx = {
+        "tab": "tether", "period": "3m",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+        "rate": {
+            **_grouped_rate(usdt_krw=[{"source": "upbit", "asset": "usdt-krw", "rate": 1400.0,
+                                       "timestamp": "2026-07-17T14:19:00+09:00"}]),
+            "entries": [{"source": "krx", "asset": "usd-krw-futures", "rate": 1.0,
+                         "timestamp": "2026-07-17T14:19:00+09:00"}]},   # extra KRX 컨테이너
+        "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [{"bucket_date": "2026-07-16", "rate": 1401.0}]}],
+                  "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
+    }
+    assert not free_snapshot.validate_snapshot_payload(grouped_krx, "tether", "3m")
+
+
+def test_validate_tab_shape_coupling():
+    """codex Medium — tab↔shape 결합: canonical 짝만 통과, 오염 grouped-usd/flat-tether 거부."""
+    flat_usd = {
+        "tab": "usd", "period": "3m",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+        "rate": {"asset": "usd-krw", "entries": [{"bank": "kb", "currency": "usd-krw", "rate": 1385.0,
+                                                  "timestamp": "2026-07-17T14:19:00+09:00"}]},
+        "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": "2026-07-16", "rate": 1385.0}]}],
+                  "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
+    }
+    grouped_tether = {
+        "tab": "tether", "period": "3m",
+        "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+        "rate": _grouped_rate(usdt_krw=[{"source": "upbit", "asset": "usdt-krw", "rate": 1400.0,
+                                         "timestamp": "2026-07-17T14:19:00+09:00"}]),
+        "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [{"bucket_date": "2026-07-16", "rate": 1401.0}]}],
+                  "bucket_size": "1d", "range": {"start": "a", "end": "b"}},
+    }
+    # canonical 짝 통과
+    assert free_snapshot.validate_snapshot_payload(flat_usd, "usd", "3m")
+    assert free_snapshot.validate_snapshot_payload(grouped_tether, "tether", "3m")
+    # grouped-usd → 거부(usd는 flat 기대)
+    assert not free_snapshot.validate_snapshot_payload({**grouped_tether, "tab": "usd"}, "usd", "3m")
+    # flat-tether → 거부(tether는 grouped 기대)
+    assert not free_snapshot.validate_snapshot_payload({**flat_usd, "tab": "tether"}, "tether", "3m")
+
+
+def test_precompute_grouped_not_misrecorded_as_failure(monkeypatch):
+    """grouped payload도 written에 shape-무관 item 수로 집계 + 실패 오기록 없음(구 payload['rate']['entries'] KeyError 회귀 잠금)."""
+    calls = {"exception": [], "info": []}
+
+    class _FakeLogger:
+        def warning(self, *a, **k):
+            pass
+
+        def exception(self, *a, **k):
+            calls["exception"].append(a)
+
+        def info(self, *a, **k):
+            calls["info"].append((a, k))
+
+    def grouped_payload(db, tab, period):
+        return {
+            "tab": tab, "period": period,
+            "rate": _grouped_rate(
+                usdt_krw=[{"source": "upbit", "asset": "usdt-krw"}, {"source": "bithumb", "asset": "usdt-krw"}],
+                usd_krw_banks=[{"source": "kb", "asset": "usd-krw"}],
+                usd_krw_reference={"source": "investing", "asset": "usd-krw"}),   # 총 4 item
+            "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [1]}]},
+        }
+
+    fake = _patch_precompute(monkeypatch, grouped_payload)
+    monkeypatch.setattr(free_snapshot, "logger", _FakeLogger())
+    free_snapshot.precompute_free_snapshots()
+
+    # grouped를 KeyError로 실패 처리하지 않음
+    assert calls["exception"] == []
+    # 전부 SET(setex)
+    assert len(fake.setex_keys) == len(free_snapshot.FREE_SNAPSHOT_TABS) * len(free_snapshot.FREE_SNAPSHOT_PERIODS)
+    # written(info extra)에 grouped item 수(4) 집계
+    written = [k["extra"]["written"] for a, k in calls["info"]
+               if a and "✅" in str(a[0]) and k.get("extra", {}).get("written") is not None]
+    assert written and written[0]["usd/3m"] == 4
