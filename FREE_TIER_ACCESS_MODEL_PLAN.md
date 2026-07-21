@@ -150,7 +150,7 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 - **S5 (제품 결정) KRX revoke 반영 지연**: bounded-lease(권고 v1, 최대 lease만큼 leak window 허용) vs 즉시 제거(UID registry + Redis 제어 이벤트, 별도 규모). 운영 민감도에 따라 확정.
 - **S6 (제품 결정, codex Medium) last-good 최대 stale 정책**: serve의 process-local last-good은 현재 **무기한**(Redis/cron 장기 장애 시 며칠 stale canonical도 반환 — 실시간 우회는 아님, `as_of`가 정직하게 old 표시). (a) 최대 stale N시간 초과 시 503 전환 vs (b) 무기한 유지 + 클라 UI에 stale 명시. **App Store 출시(실사용자 client) 전 확정** 필요. 현행은 (a)/(b) 미확정 = **비결정 혼합**(process-local 생존 중 무기한 + Redis ~25h TTL → 25h+ 장애 시 재시작 여부로 stale-or-503). **권고 = 24h hard cutoff(서버 503 + 클라 렌더 중단)**. Redis canonical TTL = FREE_SNAPSHOT_TTL_SECONDS(90000s).
 
-> S4·S5·S6는 서버 MVP(step 2·3)와 **독립** — S4/S5는 Stage B/WS 구현 전, S6는 무료 client 연결 전까지 확정하면 됨.
+> S4·S5·S6는 서버 MVP(step 2·3)와 **독립** — S4/S5는 Stage B/WS 구현 전, S6는 App Store 출시(실사용자 client) 전까지 확정하면 됨.
 
 ---
 
