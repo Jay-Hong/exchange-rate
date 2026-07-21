@@ -39,10 +39,11 @@ FREE_SNAPSHOT_REFRESH_READY_MARGIN_SECONDS = 41
 # FX 탭(usd/jpy/eur) — bank/investing rate reader + source_daily/hourly canonical + 1d intraday를 통화 파라미터만
 # 바꿔 공유(usd=investing/hana/dxy·jpy/eur=investing/hana, 1d는 8은행+investing / jpy·eur는 DXY 미노출).
 # 프로덕션 read-only 실증(2026-07-21): jpy/eur 4기간 전부 non-empty(1d 9 series, 장기 2 series), asset 정확, KRX-free.
-# ⚠️ tether(usdt-krw)는 free rate reader(fetch_rate_entries_until)가 investing+banks만 직접 조회하고 source_rates를
-#    읽지 않아 rate가 빈다(거래소 데이터는 source_rates에만 존재) → source_rates 기반 별도 reader 필요(N4).
-#    (legacy_policy의 usdt 배제는 /api/rates 경로의 별개 정책 — free reader와 무관.) **FX 탭만** 이 튜플에 넣을 것.
-FREE_SNAPSHOT_TABS = ("usd", "jpy", "eur")
+# tether(usdt-krw)는 N4-2b grouped 리더(fetch_tether_grouped_rate_until — 거래소 5 source_rates +
+#    kb·hana·investing usd-krw)로 rate를 채워 포함. FX(usd/jpy/eur)는 flat entries 리더(fetch_rate_entries_until).
+#    tab↔shape 계약은 _GROUPED_RATE_TABS(tether=grouped / FX=flat, N4-2a) — build 분기·serve 재검증 모두 이 집합 기준.
+#    KRX는 어느 무료 탭에도 미노출(리더 조회 경로 부재 + _assert_krx_free). 신규 FX 탭은 flat, 신규 grouped 탭은 _GROUPED_RATE_TABS도 등재.
+FREE_SNAPSHOT_TABS = ("usd", "jpy", "eur", "tether")
 # 1d = intraday(10min closed-bucket) — 무료는 premium live-tail/in_progress 미포함, cron 시점 고정(ADR-039 A).
 FREE_SNAPSHOT_PERIODS = ("1d", "1w", "3m", "1y")
 TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "usdt-krw"}

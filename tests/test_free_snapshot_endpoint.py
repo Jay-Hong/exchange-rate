@@ -62,21 +62,21 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_unknown_free_tab_404(self):
-        # tether는 N4(source_rates rate reader) 전까지 무료 미허용 → 404 (auth 통과 후).
-        # FX 3탭(usd/jpy/eur)은 free_tabs에 포함 확인.
+        # 진짜 미등록 탭("gold")은 404 (auth 통과 후). free_tabs에 FX 3탭 + tether(N4-3 활성) 포함 확인.
         with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):
-            r = self.client.get("/api/v2/free/snapshot", params={"tab": "tether", "period": "3m"})
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "gold", "period": "3m"})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"], "unknown_tab")
         free_tabs = r.json()["free_tabs"]
-        for t in ("usd", "jpy", "eur"):
-            self.assertIn(t, free_tabs)
-        self.assertNotIn("tether", free_tabs)   # N4 경계 — tether는 아직 미허용
+        for t in ("usd", "jpy", "eur", "tether"):
+            self.assertIn(t, free_tabs)   # N4-3 — tether도 무료 허용
+        self.assertNotIn("gold", free_tabs)
+        self.assertNotIn("krx", free_tabs)   # KRX는 무료 탭 아님 (fail-closed)
 
-    def test_jpy_eur_are_free_tabs_not_404(self):
-        # FX jpy/eur는 무료 허용(FREE_SNAPSHOT_TABS) → tab 게이트 통과. canonical 없으면 503(unknown_tab 404 아님).
-        # Redis miss를 명시 mock해 503 결정성 확보(로컬/CI Redis에 canonical이 있어도 무관). 404였다면 tab 게이트 실패.
-        for tab in ("jpy", "eur"):
+    def test_jpy_eur_tether_are_free_tabs_not_404(self):
+        # FX jpy/eur + tether(N4-3)는 무료 허용(FREE_SNAPSHOT_TABS) → tab 게이트 통과. canonical 없으면
+        # 503(unknown_tab 404 아님). Redis miss 명시 mock으로 503 결정성. 404였다면 tab 게이트 실패.
+        for tab in ("jpy", "eur", "tether"):
             with self.subTest(tab=tab), \
                  patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
                  patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=None)):
@@ -99,6 +99,28 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
             r = self.client.get("/api/v2/free/snapshot", params={"tab": "jpy", "period": "3m"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["rate"]["asset"], "jpy-krw")   # FX 3탭 serve 계약 (usd-only 아님)
+
+    def test_serves_tether_grouped_canonical_200(self):
+        # tether grouped canonical(source_grouped) 있으면 200 + primary_asset/kind 보존 — N4-3 serve 계약.
+        # tab↔shape 결합(tether=grouped 허용) + grouped-aware 재검증(KRX-free/within-as_of) end-to-end 잠금.
+        canonical = {
+            "tab": "tether", "period": "3m",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+            "rate": {
+                "kind": "source_grouped", "primary_asset": "usdt-krw",
+                "usdt_krw": [{"source": "upbit", "asset": "usdt-krw", "rate": 1400.0, "timestamp": "2026-07-17T14:19:00+09:00"}],
+                "usd_krw_banks": [{"source": "kb", "asset": "usd-krw", "rate": 1385.0, "timestamp": "2026-07-17T14:19:00+09:00"}],
+                "usd_krw_reference": {"source": "investing", "asset": "usd-krw", "rate": 1384.0, "timestamp": "2026-07-17T14:18:00+09:00"},
+            },
+            "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [{"bucket_date": "2026-07-16", "rate": 1401.0}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "tether", "period": "3m"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["rate"]["kind"], "source_grouped")
+        self.assertEqual(r.json()["rate"]["primary_asset"], "usdt-krw")   # grouped serve 계약
 
     def test_unsupported_period_400(self):
         with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):

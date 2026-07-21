@@ -140,15 +140,18 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
     assert datetime.fromisoformat(payload["generated_at"]) >= ao
 
 
-def test_free_snapshot_tabs_are_fx_only():
-    """FREE_SNAPSHOT_TABS = FX 3탭(usd/jpy/eur). tether는 N4(source_rates rate reader) 전까지 제외 —
-    free rate reader가 investing+banks만 조회하고 source_rates(거래소 데이터)를 안 읽어 "튜플 추가만"으론 rate가 빔."""
-    assert free_snapshot.FREE_SNAPSHOT_TABS == ("usd", "jpy", "eur")
+def test_free_snapshot_tabs_include_tether():
+    """FREE_SNAPSHOT_TABS = FX 3탭(usd/jpy/eur) + tether(N4-3 활성 — N4-2b grouped 리더). 모든 탭은
+    TAB_ASSET 매핑 존재 + tab↔shape 계약(tether=grouped / FX=flat, _GROUPED_RATE_TABS)."""
+    assert free_snapshot.FREE_SNAPSHOT_TABS == ("usd", "jpy", "eur", "tether")
     for tab in free_snapshot.FREE_SNAPSHOT_TABS:
-        asset = free_snapshot.TAB_ASSET[tab]           # 모든 free tab은 asset 매핑 존재
-        assert asset in ("usd-krw", "jpy-krw", "eur-krw")
-        assert "usdt" not in asset                     # non-FX(tether) 아님
-    assert "tether" not in free_snapshot.FREE_SNAPSHOT_TABS
+        assert tab in free_snapshot.TAB_ASSET          # 모든 free tab은 asset 매핑 존재
+    # tab↔shape: tether만 grouped, FX 3탭은 flat(_GROUPED_RATE_TABS 단일 진실소스)
+    assert free_snapshot._GROUPED_RATE_TABS == frozenset({"tether"})
+    assert free_snapshot.TAB_ASSET["tether"] == "usdt-krw"
+    for fx in ("usd", "jpy", "eur"):
+        assert fx not in free_snapshot._GROUPED_RATE_TABS
+        assert free_snapshot.TAB_ASSET[fx] in ("usd-krw", "jpy-krw", "eur-krw")
 
 
 def test_build_free_snapshot_payload_asset_per_tab(monkeypatch):
