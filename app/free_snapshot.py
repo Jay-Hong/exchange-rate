@@ -147,6 +147,44 @@ def fetch_rate_entries_until(db, asset: str, as_of_kst: datetime) -> list:
     return entries
 
 
+def fetch_tether_grouped_rate_until(db, as_of_kst: datetime) -> dict:
+    """테더 무료 grouped rate 블록 — as_of cutoff (N4-2b). 유료 토픽 grouper(`build_tether_tab_payload`)
+    재사용으로 free↔paid의 shape·정렬·정규화·singleton 무결성 일치(iOS 단일 어댑터, DRY).
+
+    조립 (각 `timestamp <= as_of` 최신 1건):
+      - `usdt_krw`: 거래소 5 usdt-krw — `crud.get_source_rates_until`(source_rates cutoff, 신규).
+      - `usd_krw_banks`(kb·hana) + `usd_krw_reference`(investing): 은행/참조는 usdt-krw가 아니라 **usd-krw**
+        (김프 비교 기준). `fetch_rate_entries_until(db, "usd-krw", as_of)`(FX cutoff reader) 재사용 후
+        investing/kb·hana만 선별(다른 은행 drop) — 별도 cutoff 쿼리 불요.
+    `build_tether_tab_payload`가 legacy(bank/currency)→topic-native(source/asset) 정규화 + 정렬 + investing
+    singleton 무결성(expected (investing, usd-krw)만) 담당. 반환은 `_FreeRateGrouped` 계약
+    ({kind, primary_asset, 3그룹}) — investing 부재 시 usd_krw_reference={} (partial 자연 허용).
+    KRX는 어느 소스에도 없음(거래소/은행/investing만 조회) + `_assert_krx_free` belt-and-suspenders 이중 방어.
+    """
+    from app.usdt_topic_payload import (
+        TETHER_TAB_BANK_SOURCES,
+        TETHER_TAB_EXCHANGE_SOURCES,
+        build_tether_tab_payload,
+    )
+    cutoff_utc = as_of_kst.astimezone(pytz.utc).replace(tzinfo=None)   # DB timestamp = UTC naive
+    usdt_rates = crud.get_source_rates_until(
+        db, "usdt-krw", list(TETHER_TAB_EXCHANGE_SOURCES), cutoff_utc)
+    # 은행·investing = usd-krw FX cutoff reader 재사용 후 investing/kb·hana만 선별(flat {currency,bank,rate,timestamp}).
+    usd_flat = fetch_rate_entries_until(db, "usd-krw", as_of_kst)
+    investing_rate = next((e for e in usd_flat if e.get("bank") == "investing"), None)
+    bank_rates = [e for e in usd_flat if e.get("bank") in TETHER_TAB_BANK_SOURCES]
+    built = build_tether_tab_payload(
+        usdt_rates=usdt_rates, bank_rates=bank_rates, investing_rate=investing_rate)
+    data = built["data"]
+    return {
+        "kind": "source_grouped",
+        "primary_asset": TAB_ASSET["tether"],
+        "usdt_krw": data.get("usdt_krw", []),
+        "usd_krw_banks": data.get("usd_krw_banks", []),
+        "usd_krw_reference": data.get("usd_krw_reference", {}),   # 부재 시 {} (_FreeRateGrouped 키 필수, partial 허용)
+    }
+
+
 def free_snapshot_key(tab: str, period: str) -> str:
     """무료 전용 Redis 키 (premium graph_v2:tab:* / latest:* 와 네임스페이스 분리 — §4.2/§3.1)."""
     return f"free:snapshot:{tab}:{period}"
@@ -359,7 +397,11 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
     as_of = basis_as_of(now_kst)
 
     asset = TAB_ASSET[tab]
-    rate_entries = fetch_rate_entries_until(db, asset, as_of)
+    # rate 블록 — 테더(grouped)는 source_rates 거래소 5 + usd-krw 은행·investing 재조립 / FX는 flat entries.
+    if tab in _GROUPED_RATE_TABS:
+        rate_block = fetch_tether_grouped_rate_until(db, as_of)
+    else:
+        rate_block = {"asset": asset, "entries": fetch_rate_entries_until(db, asset, as_of)}
 
     # graph: 1d=intraday(10min closed-bucket, as_of cutoff) / 1w·3m·1y=build_tab(daily/hourly). 둘 다 exclude_krx=True.
     if period == "1d":
@@ -376,7 +418,7 @@ def build_free_snapshot_payload(db, tab: str, period: str, *, now_kst=None) -> d
         "period": period,
         "as_of": as_of.isoformat(),
         "generated_at": datetime.now(KST).isoformat(),   # N5: 조립 완료 시점
-        "rate": {"asset": asset, "entries": rate_entries},
+        "rate": rate_block,
         "graph": {
             "series": graph["series"],
             "bucket_size": graph["metadata"]["bucket_size"],

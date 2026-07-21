@@ -2800,6 +2800,55 @@ def get_latest_source_rates_for_topic(
     ]
 
 
+def get_source_rates_until(
+    db: Session,
+    asset: str,
+    sources: List[str],
+    cutoff_utc: datetime,
+) -> List[Dict[str, Any]]:
+    """`get_latest_source_rates_for_topic`의 **as_of cutoff 변형** (무료 스냅샷 테더 N4-2b 전용).
+
+    각 (source, asset)별 `timestamp <= cutoff_utc`인 최신 1건. 라이브 topic builder(무조건 최신)와 달리
+    "HH:30 기준" 라벨↔데이터 정합을 쿼리 불변식으로 강제(fetch_rate_entries_until와 동일한 시간 계약).
+    Redis 미경유(무료 build는 DB canonical 조회) — Z-2d legacy_policy 우회 topic 전용 fetcher와 같은 성격이나
+    본 함수는 **무료 스냅샷 build 경로 전용**(legacy `/api/rates*`에서 호출 금지 — KRX/USDT topic-only 노출 정책 위반).
+
+    Args:
+        db: SQLAlchemy session.
+        asset: 통화쌍/상품 (예: "usdt-krw").
+        sources: 조회할 source list — 출력 순서는 build_tether_tab_payload가 재정렬하므로 여기선 무관.
+        cutoff_utc: UTC naive 상한 (as_of_kst → utc → naive). DB timestamp도 UTC naive.
+
+    Returns:
+        [{"source", "asset", "rate", "timestamp"[KST ISO]}, ...] topic-native shape.
+        **rate_changed_at 미포함** — 무료 스냅샷은 정적(HH:30 고정)이라 live-merge 필드(seen_at alias)
+        의미가 없음(REALTIME_V2 §5는 라이브 topic 전용). 존재 source만 반환(부재는 누락 — partial 자연 허용).
+    """
+    entries: List[Dict[str, Any]] = []
+    for source in sources:
+        record = (
+            db.query(models.SourceRate)
+            .filter(
+                models.SourceRate.source == source,
+                models.SourceRate.asset == asset,
+                models.SourceRate.timestamp <= cutoff_utc,
+            )
+            .order_by(
+                models.SourceRate.timestamp.desc(),
+                models.SourceRate.id.desc(),
+            )
+            .first()
+        )
+        if record is not None:
+            entries.append({
+                "source": record.source,
+                "asset": record.asset,
+                "rate": record.rate,
+                "timestamp": to_kst_isoformat(record.timestamp),
+            })
+    return entries
+
+
 def _filter_source_entries_by_legacy_policy(
     entries: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:

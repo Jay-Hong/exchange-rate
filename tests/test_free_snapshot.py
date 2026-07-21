@@ -346,6 +346,121 @@ def test_fetch_rate_entries_until_cutoff_boundary():
     assert all(isinstance(e["timestamp"], str) and "+09:00" in e["timestamp"] for e in entries)
 
 
+# ── N4-2b: 테더 무료 grouped rate reader (cutoff-aware, build_tether_tab_payload 재사용) ──
+
+def _tether_test_db():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app import models
+    engine = create_engine("sqlite://")
+    models.Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+def test_get_source_rates_until_cutoff():
+    """source_rates cutoff 변형 — timestamp<=cutoff 최신 1건/source, rate_changed_at 미포함(정적), partial 누락."""
+    from app import crud, models
+    db = _tether_test_db()
+    as_of = free_snapshot.KST.localize(datetime(2026, 7, 18, 21, 30))
+    cutoff = as_of.astimezone(free_snapshot.pytz.utc).replace(tzinfo=None)
+
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1400.0, timestamp=cutoff - timedelta(minutes=10)))
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1401.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1499.0, timestamp=cutoff + timedelta(seconds=1)))  # 초과
+    db.add(models.SourceRate(source="bithumb", asset="usdt-krw", rate=1402.0, timestamp=cutoff))                       # 경계 포함
+    # coinone: 데이터 없음 → partial 누락. 다른 asset(krx futures) 미포함:
+    db.add(models.SourceRate(source="upbit", asset="usd-krw-futures", rate=9.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.commit()
+
+    rows = crud.get_source_rates_until(db, "usdt-krw", ["upbit", "bithumb", "coinone"], cutoff)
+    by_src = {r["source"]: r for r in rows}
+    assert by_src["upbit"]["rate"] == 1401.0        # 초과(1499) 아님, 이전 최신
+    assert by_src["bithumb"]["rate"] == 1402.0      # 경계 == 포함
+    assert "coinone" not in by_src                  # partial (누락)
+    assert all(r["asset"] == "usdt-krw" for r in rows)       # 다른 asset 미포함
+    assert all("rate_changed_at" not in r for r in rows)    # 정적 스냅샷 — live-merge 필드 없음
+    assert all("+09:00" in r["timestamp"] for r in rows)
+
+
+def test_fetch_tether_grouped_rate_until():
+    """grouped 블록 — usdt_krw(거래소 source_rates) + usd_krw_banks(kb·hana, 다른 은행 drop) +
+    usd_krw_reference(investing singleton), 각 cutoff. build_tether_tab_payload 재사용(topic-native shape)."""
+    from app import models
+    db = _tether_test_db()
+    as_of = free_snapshot.KST.localize(datetime(2026, 7, 18, 21, 30))
+    cutoff = as_of.astimezone(free_snapshot.pytz.utc).replace(tzinfo=None)
+
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1400.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.add(models.SourceRate(source="bithumb", asset="usdt-krw", rate=1401.0, timestamp=cutoff - timedelta(minutes=2)))
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1499.0, timestamp=cutoff + timedelta(seconds=1)))  # 초과 제외
+    db.add(models.BankExchangeRate(bank="kb", currency="usd-krw", rate=1385.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.add(models.BankExchangeRate(bank="hana", currency="usd-krw", rate=1386.0, timestamp=cutoff))
+    db.add(models.BankExchangeRate(bank="shinhan", currency="usd-krw", rate=1387.0, timestamp=cutoff))   # tether 탭 아님 → drop
+    db.add(models.InvestingExchangeRate(currency="usd-krw", rate=1384.0, timestamp=cutoff - timedelta(minutes=5)))
+    db.commit()
+
+    block = free_snapshot.fetch_tether_grouped_rate_until(db, as_of)
+    assert block["kind"] == "source_grouped" and block["primary_asset"] == "usdt-krw"
+    ex = {e["source"]: e for e in block["usdt_krw"]}
+    assert ex["upbit"]["rate"] == 1400.0 and ex["upbit"]["asset"] == "usdt-krw"   # 초과 아님
+    assert set(ex) == {"upbit", "bithumb"}                    # 나머지 거래소 누락 partial
+    assert all("rate_changed_at" not in e for e in block["usdt_krw"])   # 정적
+    banks = {e["source"]: e for e in block["usd_krw_banks"]}
+    assert set(banks) == {"kb", "hana"}                       # shinhan drop
+    assert banks["kb"]["asset"] == "usd-krw" and banks["kb"]["rate"] == 1385.0   # source/asset 정규화
+    ref = block["usd_krw_reference"]                          # investing singleton
+    assert ref["source"] == "investing" and ref["asset"] == "usd-krw" and ref["rate"] == 1384.0
+    assert "+09:00" in ref["timestamp"]
+    # KRX-free + within-as_of 통과(어느 소스에도 KRX 없음, 모든 ts <= as_of)
+    free_snapshot._assert_krx_free({"graph": {"series": []}, "rate": block})
+    free_snapshot._assert_rates_within_as_of({"as_of": as_of.isoformat(), "rate": block})
+
+
+def test_fetch_tether_grouped_rate_until_partial_no_investing_no_banks():
+    """investing/은행 부재 → usd_krw_reference={} · usd_krw_banks=[] (partial). nonempty는 거래소로 충족."""
+    from app import models
+    db = _tether_test_db()
+    as_of = free_snapshot.KST.localize(datetime(2026, 7, 18, 21, 30))
+    cutoff = as_of.astimezone(free_snapshot.pytz.utc).replace(tzinfo=None)
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1400.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.commit()
+
+    block = free_snapshot.fetch_tether_grouped_rate_until(db, as_of)
+    assert block["usd_krw_reference"] == {}          # investing 부재 → 키 present(빈 dict)
+    assert block["usd_krw_banks"] == []              # 은행 부재
+    assert len(block["usdt_krw"]) == 1
+    assert free_snapshot._snapshot_is_nonempty(      # 거래소 1개 + graph data → nonempty
+        {"rate": block, "graph": {"series": [{"id": "bithumb.usdt-krw", "data": [1]}]}})
+
+
+def test_build_free_snapshot_payload_tether_grouped(monkeypatch):
+    """build_free_snapshot_payload(tab='tether')가 grouped rate 블록 생성 + build-time asserts 통과(FX는 flat)."""
+    from app import models
+    db = _tether_test_db()
+    now = free_snapshot.KST.localize(datetime(2026, 7, 18, 21, 35))
+    as_of = free_snapshot.basis_as_of(now)   # 21:30
+    cutoff = as_of.astimezone(free_snapshot.pytz.utc).replace(tzinfo=None)
+    db.add(models.SourceRate(source="upbit", asset="usdt-krw", rate=1400.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.add(models.BankExchangeRate(bank="kb", currency="usd-krw", rate=1385.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.add(models.InvestingExchangeRate(currency="usd-krw", rate=1384.0, timestamp=cutoff - timedelta(minutes=1)))
+    db.commit()
+
+    def fake_build_tab(db_, tab, period, today_kst=None, exclude_krx=False):
+        assert tab == "tether" and exclude_krx is True
+        return {"series": [{"id": "bithumb.usdt-krw", "data": [{"bucket_date": "2026-07-16", "rate": 1401.0}]}],
+                "metadata": {"bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}}}
+    monkeypatch.setattr(free_snapshot.graph_v2, "build_tab", fake_build_tab)
+
+    payload = free_snapshot.build_free_snapshot_payload(db, "tether", "3m", now_kst=now)
+    assert payload["rate"]["kind"] == "source_grouped"
+    assert payload["rate"]["primary_asset"] == "usdt-krw"
+    assert [e["source"] for e in payload["rate"]["usdt_krw"]] == ["upbit"]
+    assert [e["source"] for e in payload["rate"]["usd_krw_banks"]] == ["kb"]
+    assert payload["rate"]["usd_krw_reference"]["source"] == "investing"
+    # 여기 도달 = build-time _assert_krx_free/_assert_rates_within_as_of/_assert_as_of_on_grid 모두 통과
+
+
 # ── 무료 1d (intraday, KRX 제외, hourly-frozen) — ADR-039 A ──────
 
 def test_free_tab_1d_specs_excludes_krx():
