@@ -50,12 +50,36 @@ TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "us
 # (serve의 process-local last-good은 별개로 프로세스 수명 동안 유지 — Redis TTL과 무관, availability 우선.)
 FREE_SNAPSHOT_TTL_SECONDS = 90000
 
+# S6 (제품 결정) — last-good **최대 stale 24h hard cutoff**. Redis 25h TTL + process-local 무기한(프로세스 생존
+# 중)의 "재시작 여부로 stale-or-503" 비결정 혼합을, as_of>=24h serve 거부로 일관 정책화. 정상 주말 무변동도 cron이
+# 매시 :30 fresh as_of로 재생성해 이 한계에 안 걸리고 **실제 장기 장애**(cron/데이터 24h+ 정지)만 차단. 환율 특성상
+# 24h+ old 값을 현재값처럼 노출하는 것보다 unavailable이 정직(codex+Claude 합의). 개별 소스 stale은 as_of로 못 잡음
+# → 별도 source-health 계약(후속). 클라도 동일 24h 컷(서버 503만으론 클라 last-good이 나이 무시라 불충분).
+FREE_SNAPSHOT_MAX_AGE_SECONDS = 86400
+
 
 def basis_as_of(now_kst: datetime) -> datetime:
     """마지막 HH:30 경계 (무료 스냅샷 basis). now.minute>=30이면 이번 시 HH:30, 아니면 직전 시 HH:30."""
     if now_kst.minute >= FREE_SNAPSHOT_BASIS_MINUTE:
         return now_kst.replace(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=0, microsecond=0)
     return (now_kst - timedelta(hours=1)).replace(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=0, microsecond=0)
+
+
+def is_snapshot_too_stale(payload: dict, now_kst: datetime | None = None) -> bool:
+    """S6 24h hard cutoff — payload as_of가 now보다 `FREE_SNAPSHOT_MAX_AGE_SECONDS`(24h) 이상 과거이거나
+    **미래**면 True(serve 거부 대상). serve 경로가 Redis/local 각 후보에 적용 — 둘 다 stale이면 503.
+
+    - age >= 24h: 경계 포함(정확히 24h도 차단). 정상 데이터(as_of=마지막 :30, 최대 ~1h old)는 여유 큼.
+    - age < 0 (as_of > now): 오염/시계 오차 fail-closed 거부(미래 데이터 노출 금지, graph/rate cutoff와 대칭).
+    - as_of 없거나 파싱 불가: fail-closed True(serve 거부).
+    now_kst 미지정 시 실제 now(KST). 테스트는 고정값 주입."""
+    now_kst = now_kst or datetime.now(KST)
+    try:
+        as_of = datetime.fromisoformat(payload["as_of"])
+        age = (now_kst - as_of).total_seconds()   # try 안: naive as_of(aware now과 뺄셈 TypeError)도 fail-closed
+    except (KeyError, ValueError, TypeError):
+        return True   # as_of 부재/파싱 불가/tz-naive → fail-closed
+    return age >= FREE_SNAPSHOT_MAX_AGE_SECONDS or age < 0
 
 
 def fetch_rate_entries_until(db, asset: str, as_of_kst: datetime) -> list:

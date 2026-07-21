@@ -157,6 +157,31 @@ def test_build_free_snapshot_payload_asset_per_tab(monkeypatch):
         assert free_snapshot._snapshot_is_nonempty(payload)
 
 
+def test_is_snapshot_too_stale():
+    """S6 24h hard cutoff — as_of age>=24h 또는 future면 True(serve 거부). 경계 포함 + fail-closed."""
+    from datetime import timedelta
+    now = datetime.fromisoformat("2026-07-21T12:30:00+09:00")
+
+    def p(dt):
+        return {"as_of": dt.isoformat() if hasattr(dt, "isoformat") else dt}
+
+    # fresh (1h old) → not stale
+    assert not free_snapshot.is_snapshot_too_stale(p(now - timedelta(hours=1)), now)
+    # 24h - 1s → not stale (경계 직전)
+    assert not free_snapshot.is_snapshot_too_stale(p(now - timedelta(seconds=86399)), now)
+    # 정확히 24h → stale (경계 포함, >=)
+    assert free_snapshot.is_snapshot_too_stale(p(now - timedelta(seconds=86400)), now)
+    # 25h old → stale
+    assert free_snapshot.is_snapshot_too_stale(p(now - timedelta(hours=25)), now)
+    # future as_of → stale (fail-closed, 미래 데이터 노출 금지)
+    assert free_snapshot.is_snapshot_too_stale(p(now + timedelta(minutes=5)), now)
+    # as_of 부재/파싱 불가 → stale (fail-closed)
+    assert free_snapshot.is_snapshot_too_stale({}, now)
+    assert free_snapshot.is_snapshot_too_stale({"as_of": "banana"}, now)
+    # tz-naive as_of(파싱되나 aware now과 뺄셈 TypeError) → fail-closed True (codex Low)
+    assert free_snapshot.is_snapshot_too_stale({"as_of": "2026-07-21T11:30:00"}, now)
+
+
 def test_assert_graph_within_as_of():
     """SET 전 fail-closed — graph point ts가 as_of 초과면 raise(백필/오염 우회 차단, codex 시간 계약)."""
     base = {

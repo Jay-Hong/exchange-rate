@@ -2705,6 +2705,7 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
         attach_free_snapshot_domain,
         attach_refresh_not_before,
         free_snapshot_key,
+        is_snapshot_too_stale,
     )
 
     await verify_firebase_token(request)   # 로그인 필수(401/503), require_premium 미호출 → 무료 접근
@@ -2727,15 +2728,17 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
     # cron canonical만 서빙. validate가 empty/오염/KRX 거부(→ last-good/503). serve는 DB build 안 함.
     # serve-time 부착 2종(canonical 불변, copy에만): graph domain + refresh_not_before(재요청 권장 시각 = 다음 :31,
     # client 5분 폴링→one-shot 대체 축). 503(스냅샷 자체 없음)엔 부착 안 함.
+    # S6 24h hard cutoff: Redis/local 각 후보를 개별 age 검사. fresh(<24h)한 첫 후보만 서빙,
+    # 둘 다 부재/24h+ stale이면 503. **stale Redis는 local에 미저장** — 더 최신일 수 있는 local 보존(codex).
     cached = await _free_snapshot_cache_get(cache_key, tab, period)
-    if cached is not None:
-        _free_snapshot_local_put(cache_key, cached)   # last-good = 마지막 성공 canonical(domain 없는 원본 보존)
+    if cached is not None and not is_snapshot_too_stale(cached):
+        _free_snapshot_local_put(cache_key, cached)   # last-good = 마지막 **fresh** canonical(domain 없는 원본 보존)
         return attach_refresh_not_before(attach_free_snapshot_domain(cached, period))
-    # Redis miss/hang/오염 → 마지막 canonical(process-local last-good). **DB 최신값으로 fabricate 금지.**
+    # Redis miss/hang/오염/**24h+ stale** → process-local last-good fallback(더 최신일 수 있음). **DB fabricate 금지.**
     local = _free_snapshot_local_get(cache_key)
-    if local is not None:
+    if local is not None and not is_snapshot_too_stale(local):
         return attach_refresh_not_before(attach_free_snapshot_domain(local, period))
-    # canonical 없음(첫 cron 전 cold-start + Redis empty / 전면 손실) → 503. 빈 payload도 여기로 귀결.
+    # 두 후보 다 없음/24h+ stale(S6 cutoff) → 503. 첫 cron 전 cold-start/전면 손실/빈 payload도 여기로 귀결.
     return JSONResponse(status_code=503, content={"error": "snapshot_unavailable"})
 
 

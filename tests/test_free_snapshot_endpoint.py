@@ -10,11 +10,27 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app import models
+from app import free_snapshot, models
 from app.database import engine
 from app.main import app
 
 models.Base.metadata.create_all(engine)
+
+
+def _usd_canonical(as_of: str, period: str = "3m") -> dict:
+    """valid usd canonical(schema/:30 grid/within-as_of/KRX-free) — S6 테스트용. rate ts는 as_of-11분."""
+    from datetime import datetime, timedelta
+    ao = datetime.fromisoformat(as_of)
+    rate_ts = (ao - timedelta(minutes=11)).isoformat()
+    d = ao.date().isoformat()
+    return {
+        "tab": "usd", "period": period,
+        "as_of": as_of, "generated_at": as_of,
+        "rate": {"asset": "usd-krw", "entries": [
+            {"bank": "kb", "currency": "usd-krw", "rate": 1385.0, "timestamp": rate_ts}]},
+        "graph": {"series": [{"id": "investing.usd", "data": [{"bucket_date": d, "rate": 1385.0}]}],
+                  "bucket_size": "1d", "range": {"start": "2020-01-01", "end": d}},
+    }
 
 
 class TestFreeSnapshotEndpoint(unittest.TestCase):
@@ -25,6 +41,12 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
 
     def setUp(self):
         main_module._free_snapshot_local.clear()   # 테스트 간 last-good 격리(순서 의존 방지)
+        # S6 24h cutoff — 기존 serve 테스트는 고정 as_of fixture(오늘 기준 >24h)라 age 로직과 무관하게
+        # domain/last-good 메커니즘만 검증하도록 클래스 전역 bypass. S6 cutoff 자체는 전용 test_s6_*가
+        # nested patch(return_value=True/side_effect)로 override해 실제 per-candidate 분기를 검증.
+        _stale_patcher = patch.object(free_snapshot, "is_snapshot_too_stale", return_value=False)
+        _stale_patcher.start()
+        self.addCleanup(_stale_patcher.stop)
 
     def test_auth_failure_propagates(self):
         # 인증 실패(401)면 핸들러가 데이터/검증보다 먼저 401 전파 — 무인증 데이터 유출 없음.
@@ -97,6 +119,50 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
             r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_s6_stale_canonical_returns_503(self):
+        # S6 24h hard cutoff — stale Redis canonical + local 부재 → serve 거부(503, stale 값 미노출).
+        # setUp 전역 bypass를 nested True로 override.
+        canonical = _usd_canonical("2026-07-17T14:30:00+09:00")
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(free_snapshot, "is_snapshot_too_stale", return_value=True), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_s6_both_stale_returns_503(self):
+        # Redis stale + local**도** stale → fresh 후보 0 → 503. local seed(fresh) 후 둘 다 stale로 전환(codex).
+        fresh = _usd_canonical("2026-07-20T14:30:00+09:00")
+        stale = _usd_canonical("2020-01-01T00:30:00+09:00")
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(fresh))):
+                r1 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+            self.assertEqual(r1.status_code, 200)   # fresh 서빙 → local seed
+            with patch.object(free_snapshot, "is_snapshot_too_stale", return_value=True), \
+                 patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(stale))):
+                r2 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r2.status_code, 503)   # 두 후보 모두 stale → 503
+        self.assertEqual(r2.json()["error"], "snapshot_unavailable")
+
+    def test_s6_stale_redis_falls_back_to_fresh_local(self):
+        # codex 정밀화 — Redis가 24h+ stale이어도 process-local last-good이 fresh면 그걸 serve(둘 다 stale일 때만 503).
+        # is_snapshot_too_stale를 as_of로 분기(2020=stale / 그 외=fresh)해 per-candidate 분기 결정성 검증.
+        fresh = _usd_canonical("2026-07-20T14:30:00+09:00")
+        stale = _usd_canonical("2020-01-01T00:30:00+09:00")
+
+        def _stale_by_asof(payload, now_kst=None):
+            return str(payload.get("as_of", "")).startswith("2020")
+
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(free_snapshot, "is_snapshot_too_stale", side_effect=_stale_by_asof):
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(fresh))):
+                r1 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+            self.assertEqual(r1.status_code, 200)   # fresh Redis 서빙 → local seed
+            with patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(stale))):
+                r2 = self.client.get("/api/v2/free/snapshot", params={"tab": "usd", "period": "3m"})
+        self.assertEqual(r2.status_code, 200)                       # stale Redis 무시, fresh local fallback
+        self.assertEqual(r2.json()["as_of"], fresh["as_of"])        # local(fresh) 값 반환(stale 아님)
 
     def test_serves_redis_canonical_with_serve_time_domain(self):
         # serve는 cron canonical의 값(rate/series/range)은 그대로 반환(rebuild 아님)하고,
