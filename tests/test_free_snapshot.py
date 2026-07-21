@@ -118,6 +118,45 @@ def test_build_free_snapshot_payload_shapes(monkeypatch):
     assert datetime.fromisoformat(payload["generated_at"]) >= ao
 
 
+def test_free_snapshot_tabs_are_fx_only():
+    """FREE_SNAPSHOT_TABS = FX 3탭(usd/jpy/eur). tether는 N4(source_rates rate reader) 전까지 제외 —
+    free rate reader가 investing+banks만 조회하고 source_rates(거래소 데이터)를 안 읽어 "튜플 추가만"으론 rate가 빔."""
+    assert free_snapshot.FREE_SNAPSHOT_TABS == ("usd", "jpy", "eur")
+    for tab in free_snapshot.FREE_SNAPSHOT_TABS:
+        asset = free_snapshot.TAB_ASSET[tab]           # 모든 free tab은 asset 매핑 존재
+        assert asset in ("usd-krw", "jpy-krw", "eur-krw")
+        assert "usdt" not in asset                     # non-FX(tether) 아님
+    assert "tether" not in free_snapshot.FREE_SNAPSHOT_TABS
+
+
+def test_build_free_snapshot_payload_asset_per_tab(monkeypatch):
+    """build_free_snapshot_payload가 각 FX 탭에 TAB_ASSET[tab]를 rate cutoff·payload asset으로 전달(통화 파라미터화).
+    jpy/eur가 usd 코드 경로를 그대로 재사용(별도 reader 없음)함을 잠근다."""
+    captured = {}
+
+    def fake_build_tab(db, tab, period, today_kst=None, exclude_krx=False):
+        captured["exclude_krx"] = exclude_krx
+        return {
+            "series": [{"id": f"investing.{tab}", "data": [{"bucket_date": "2026-07-16", "rate": 1.0}]}],
+            "metadata": {"bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+
+    def fake_fetch_until(db, asset, as_of):
+        captured["cutoff_asset"] = asset
+        return [{"bank": "investing", "currency": asset, "rate": 1.0, "timestamp": as_of.isoformat()}]
+
+    monkeypatch.setattr(free_snapshot, "fetch_rate_entries_until", fake_fetch_until)
+    monkeypatch.setattr(free_snapshot.graph_v2, "build_tab", fake_build_tab)
+
+    for tab, expected_asset in (("jpy", "jpy-krw"), ("eur", "eur-krw")):
+        payload = free_snapshot.build_free_snapshot_payload(None, tab, "3m")
+        assert payload["tab"] == tab
+        assert payload["rate"]["asset"] == expected_asset
+        assert captured["cutoff_asset"] == expected_asset
+        assert captured["exclude_krx"] is True
+        assert free_snapshot._snapshot_is_nonempty(payload)
+
+
 def test_assert_graph_within_as_of():
     """SET 전 fail-closed — graph point ts가 as_of 초과면 raise(백필/오염 우회 차단, codex 시간 계약)."""
     base = {
@@ -414,9 +453,10 @@ def test_precompute_sets_all_on_nonempty(monkeypatch):
 
 
 def test_precompute_isolates_failure_keeps_others(monkeypatch):
-    """한 (tab,period) build가 raise해도 나머지는 SET(격리 + keep-last-good)."""
+    """단일 (tab,period) build가 raise해도 나머지는 SET(격리 + keep-last-good) — 같은 period의 다른 탭까지.
+    FX 3탭 확장 후 격리 단위가 (tab,period) 단위임을 명시(period 단위가 아님)."""
     def flaky(db, tab, period):
-        if period == "3m":
+        if tab == "jpy" and period == "3m":   # 단일 (tab,period)만 실패
             raise RuntimeError("boom")
         return {"tab": tab, "period": period,
                 "rate": {"entries": [{"currency": "usd-krw"}]},
@@ -424,8 +464,10 @@ def test_precompute_isolates_failure_keeps_others(monkeypatch):
 
     fake = _patch_precompute(monkeypatch, flaky)
     free_snapshot.precompute_free_snapshots()
-    assert free_snapshot.free_snapshot_key("usd", "3m") not in fake.setex_keys   # 실패한 것만 빠짐
-    assert free_snapshot.free_snapshot_key("usd", "1w") in fake.setex_keys       # 나머지는 SET
+    assert free_snapshot.free_snapshot_key("jpy", "3m") not in fake.setex_keys   # 실패한 것만 빠짐
+    assert free_snapshot.free_snapshot_key("usd", "3m") in fake.setex_keys       # 같은 period 다른 탭 생존(cross-tab 격리)
+    assert free_snapshot.free_snapshot_key("eur", "3m") in fake.setex_keys       # 같은 period 다른 탭 생존
+    assert free_snapshot.free_snapshot_key("jpy", "1w") in fake.setex_keys       # 같은 탭 다른 period 생존
 
 
 # ─── attach_free_snapshot_domain (serve-time X축 domain, graph envelope, anchor=as_of) — ADR-039 X축 통일 ───

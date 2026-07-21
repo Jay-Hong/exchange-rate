@@ -40,12 +40,43 @@ class TestFreeSnapshotEndpoint(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_unknown_free_tab_404(self):
-        # jpy는 아직 무료 미허용(MVP=usd) → 404 (auth 통과 후)
+        # tether는 N4(source_rates rate reader) 전까지 무료 미허용 → 404 (auth 통과 후).
+        # FX 3탭(usd/jpy/eur)은 free_tabs에 포함 확인.
         with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):
-            r = self.client.get("/api/v2/free/snapshot", params={"tab": "jpy", "period": "3m"})
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "tether", "period": "3m"})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"], "unknown_tab")
-        self.assertIn("usd", r.json()["free_tabs"])
+        free_tabs = r.json()["free_tabs"]
+        for t in ("usd", "jpy", "eur"):
+            self.assertIn(t, free_tabs)
+        self.assertNotIn("tether", free_tabs)   # N4 경계 — tether는 아직 미허용
+
+    def test_jpy_eur_are_free_tabs_not_404(self):
+        # FX jpy/eur는 무료 허용(FREE_SNAPSHOT_TABS) → tab 게이트 통과. canonical 없으면 503(unknown_tab 404 아님).
+        # Redis miss를 명시 mock해 503 결정성 확보(로컬/CI Redis에 canonical이 있어도 무관). 404였다면 tab 게이트 실패.
+        for tab in ("jpy", "eur"):
+            with self.subTest(tab=tab), \
+                 patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+                 patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=None)):
+                r = self.client.get("/api/v2/free/snapshot", params={"tab": tab, "period": "3m"})
+            self.assertEqual(r.status_code, 503)
+            self.assertEqual(r.json()["error"], "snapshot_unavailable")
+
+    def test_serves_jpy_canonical_200(self):
+        # jpy canonical 있으면 200 + asset=jpy-krw 보존 — serve 계약(validate_snapshot_payload)이 FX 3탭에 적용됨을 잠금.
+        canonical = {
+            "tab": "jpy", "period": "3m",
+            "as_of": "2026-07-17T14:30:00+09:00", "generated_at": "2026-07-17T14:30:20+09:00",
+            "rate": {"asset": "jpy-krw", "entries": [
+                {"bank": "kb", "currency": "jpy-krw", "rate": 921.5, "timestamp": "2026-07-17T14:19:00+09:00"}]},
+            "graph": {"series": [{"id": "investing.jpy", "data": [{"bucket_date": "2026-07-16", "rate": 921.5}]}],
+                      "bucket_size": "1d", "range": {"start": "2026-04-18", "end": "2026-07-17"}},
+        }
+        with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch.object(main_module.redis_cache, "get", new=AsyncMock(return_value=json.dumps(canonical))):
+            r = self.client.get("/api/v2/free/snapshot", params={"tab": "jpy", "period": "3m"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["rate"]["asset"], "jpy-krw")   # FX 3탭 serve 계약 (usd-only 아님)
 
     def test_unsupported_period_400(self):
         with patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")):

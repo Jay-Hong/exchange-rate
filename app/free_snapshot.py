@@ -35,10 +35,13 @@ FREE_SNAPSHOT_PRECOMPUTE_SECOND = 19
 # refresh_not_before = basis slot(:30) + precompute_second(:19) + 이 여유(cron 완료 + Redis 전파). 합 60초 = :31:00.
 FREE_SNAPSHOT_REFRESH_READY_MARGIN_SECONDS = 41
 
-# MVP = usd only (달러 주력 탭 — investing.usd + hana.usd + dxy로 sdr/market_index 양 reader 검증).
-# 확장: FREE_SNAPSHOT_TABS 추가. 단 non-FX 탭(tether=usdt-krw)은 legacy_policy가 rate에서 usdt를 배제하므로
-# source_rates 기반 별도 rate reader가 필요(N4) — "튜플 추가만"으로는 rate가 빈다.
-FREE_SNAPSHOT_TABS = ("usd",)
+# FX 탭(usd/jpy/eur) — bank/investing rate reader + source_daily/hourly canonical + 1d intraday를 통화 파라미터만
+# 바꿔 공유(usd=investing/hana/dxy·jpy/eur=investing/hana, 1d는 8은행+investing / jpy·eur는 DXY 미노출).
+# 프로덕션 read-only 실증(2026-07-21): jpy/eur 4기간 전부 non-empty(1d 9 series, 장기 2 series), asset 정확, KRX-free.
+# ⚠️ tether(usdt-krw)는 free rate reader(fetch_rate_entries_until)가 investing+banks만 직접 조회하고 source_rates를
+#    읽지 않아 rate가 빈다(거래소 데이터는 source_rates에만 존재) → source_rates 기반 별도 reader 필요(N4).
+#    (legacy_policy의 usdt 배제는 /api/rates 경로의 별개 정책 — free reader와 무관.) **FX 탭만** 이 튜플에 넣을 것.
+FREE_SNAPSHOT_TABS = ("usd", "jpy", "eur")
 # 1d = intraday(10min closed-bucket) — 무료는 premium live-tail/in_progress 미포함, cron 시점 고정(ADR-039 A).
 FREE_SNAPSHOT_PERIODS = ("1d", "1w", "3m", "1y")
 TAB_ASSET = {"usd": "usd-krw", "jpy": "jpy-krw", "eur": "eur-krw", "tether": "usdt-krw"}
