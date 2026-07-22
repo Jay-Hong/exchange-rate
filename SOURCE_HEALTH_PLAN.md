@@ -1,7 +1,7 @@
 # Source-Health Plan (무료 스냅샷 소스별 건강 관측)
 
 > **상태: Proposed / Step 0(인벤토리 + shadow 계약 초안) / 구현 없음**
-> 검증: 5-agent Workflow 코드 인벤토리 + codex 2라운드 리뷰 + Claude 코드 재검증 (2026-07-22).
+> 검증: 5-agent Workflow 코드 인벤토리 + codex 다라운드 리뷰(인벤토리→계약 정정 반복) + Claude 코드 재검증 (2026-07-22).
 > 범위: ADR-039 무료(비구독) 매시간 스냅샷([FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md))이 노출하는 소스의 **개별 stall** 관측.
 > [free_snapshot.py:59-64](app/free_snapshot.py) 주석이 명시하듯 S6(24h whole-snapshot cutoff)는 스냅샷 전체 정지만 잡고 **개별 소스 stall은 못 잡는 층** — 이 문서가 그 후속 계약.
 > ⚠️ **구현 착수 전 §6 게이트 결정 필수.** 아래 설계는 여러 열린 결정을 포함하며, 코드는 shadow 관측(§5) 결과 검토 후 별도로 결정한다.
@@ -80,6 +80,7 @@
 | dxy | dxy_spot 상시 / dxy_futures=investing 종속 | investing과 동조 |
 
 - **collection_success 판정은 `collection_expected`일 때만** 수행(휴장이라도 crawler가 도는 창이면 stall=실장애). `market_expected=false`는 **value_changed 진단만** 마스킹(값 안 변함이 정상).
+- **collection_expected는 Bool이 아니라 interval-aware** (codex): stall 임계는 모드별 수집 주기(IN 10-60s / OUT 10-60min)에 맞춘 **`expected_interval`/`next_due_at + grace`**. + market_mode 외 억제 조건 반영 — admin `crawler_config` 비활성화 / Selenium queue 80%(20/25) 포화 거부([scheduler.py:437](app/scheduler.py)) / IBK 00:00-05 skip은 "설계상 미수집"이라 stall 아님(=`skipped`).
 - **재사용**: [market_mode.get_market_mode](app/market_mode.py)로 collection_expected 파생("설계상 off" vs "사망" 구분), [kr_holidays](app/calendars/kr_holidays.py)(realtime 연결 시)로 market_expected 공휴일 마스크.
 
 ---
@@ -101,19 +102,19 @@
 
 ## 6. 구현 순서 게이트 (codex 수정안, 결정 후 착수)
 
-1. **전 scheduled collector의 실행 결과를 `success / partial / failure / skipped` + `observed_assets`(유효 수집된 (source,asset) 집합)로 명시하는 계약 설계** — 현재 전 collector가 총실패를 삼킴(§2.1). 이 선행 없이는 crawler_stats 기반 shadow가 은행/investing/dxy 전반에서 무의미. **저장소(§6-4/D1/D4) 결정은 이 실행결과가 observed_assets를 반환한 다음** — crawler_stats(source 단위)는 per-asset 목표를 단독 충족 못 함(codex).
-2. **per-asset 유효-수집 성공 기준 정의** — "예외 없이 반환"이 아니라 "해당 (source,asset)의 유효 데이터를 실제로 받았나"(통화별 부분 실패 은닉 해소).
-3. **collection_expected/market_expected cadence + 공휴일 정책 정의** — market_mode + kr_holidays realtime 연결.
+1. **per-asset 유효-수집 성공 기준 정의 (선행)** — "예외 없이 반환"이 아니라 "해당 (source,asset)의 **유효 데이터**를 실제로 받았나"(통화별 부분 실패 은닉 해소). **이 정의 없이는 아래 success/partial/failure를 분류할 수 없다**(codex — validity가 결과 계약보다 먼저).
+2. **전 scheduled collector의 실행 결과 계약 설계** — 위 유효성 기준으로 `attempted_assets` / `observed_assets`(유효 관측) / `failed_assets` / `skip_reason`을 반환 → `success`(attempted 전부 관측) / `partial`(일부) / `failure`(0) / `skipped`(collection_expected=false) 분류. 현재 전 collector가 총실패를 삼킴(§2.1)이라 이 계약 선행 없이는 crawler_stats 기반 shadow가 무의미. **저장소(§6-4/D1/D4) 결정은 이 실행결과가 observed_assets를 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
+3. **collection_expected(interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected는 Bool이 아니라 **`expected_interval`/`next_due_at + grace`**(IN 10-60s vs OUT 10-60min로 stall 임계 상이) + 억제 조건(admin `crawler_config` 비활성화 / Selenium queue 80% 포화 거부 / IBK 00:00-05 skip)까지 반영. market_mode + kr_holidays realtime 연결.
 4. **timezone-aware heartbeat 저장 설계** — collection_success_at을 per-(source,asset) 영속(Redis/DB), tz-aware. USDT는 in-process liveness(is_stale/ticker-dead/task.done) export 포함.
-5. **1~2일 shadow 관측** (log-only).
+5. **≥7일 shadow 관측 + deterministic 휴일 테스트** (log-only) — 1~2일은 평일만 보고 끝나 BREAK/OUT·주말 전환 오탐을 검증 못 함(codex). 주간 모드 사이클(평일 IN/BREAK + 주말 OUT) 전체 + **주입식 공휴일 테스트**(실휴일 대기 불요)로 cadence 마스크 검증.
 6. **오탐률 확인 후 API/UI 계약 검토** (additive health 필드 → iOS 최소 배지, 확실한 장애만).
 
 ---
 
 ## 열린 결정 (미해결)
 
-- (D1) collection_success 저장: crawler_stats export vs source_registry TODO 기반 신규 필드 — **단, §6-1 실행결과(observed_assets 포함)가 정해진 뒤 결정**(crawler_stats는 source 단위라 per-asset 목표 단독 미충족).
-- (D2) §6-1 실행결과 계약을 크롤러 리팩터로 할지 wrapper 레벨로 우회할지. **성공 기준은 `observed_assets`/`valid_observation_count`(유효 관측 asset)이며 `changed_rows`(new_records_count)는 진단값** — new_records_count는 변경-시-INSERT라 정상 수집도 0건이라 **성공 판정에 사용 불가**(codex High).
+- (D1) collection_success 저장: crawler_stats export vs source_registry TODO 기반 신규 필드 — **단, §6-2 실행결과(observed_assets 포함)가 정해진 뒤 결정**(crawler_stats는 source 단위라 per-asset 목표 단독 미충족).
+- (D2) §6-2 실행결과 계약을 크롤러 리팩터로 할지 wrapper 레벨로 우회할지. **성공 기준은 `observed_assets`/`valid_observation_count`(유효 관측 asset)이며 `changed_rows`(new_records_count)는 진단값** — new_records_count는 변경-시-INSERT라 정상 수집도 0건이라 **성공 판정에 사용 불가**(codex High). §6-1(유효성 정의)이 이 기준의 선행.
 - (D3) USDT in-process liveness export 대상/형식(is_stale만 vs ticker-dead/task.done 포함), 5거래소 ticker-dead 공통화([§12.9.8①](USDT_WS_DESIGN_PLAN.md)) 선행 여부.
 - (D4) 영속 heartbeat 저장소(Redis vs DB) 및 multi-worker 대비 필요성 — shadow 관측 후.
 - (D5) Citi(수집O·표시X) 및 미표시 소스의 health를 관측만 할지 무시할지.
