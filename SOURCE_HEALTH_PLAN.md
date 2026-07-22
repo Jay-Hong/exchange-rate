@@ -80,7 +80,7 @@
 | dxy | dxy_spot 상시 / dxy_futures=investing 종속 | investing과 동조 |
 
 - **collection_success 판정은 `collection_expected`일 때만** 수행(휴장이라도 crawler가 도는 창이면 stall=실장애). `market_expected=false`는 **value_changed 진단만** 마스킹(값 안 변함이 정상).
-- **collection_expected는 Bool이 아니라 interval-aware** (codex): stall 임계는 모드별 수집 주기(IN 10-60s / OUT 10-60min)에 맞춘 **`expected_interval`/`next_due_at + grace`**. + market_mode 외 조건을 **정상 제외 vs health 영향으로 구분**(codex) — 정상 제외(계획된 미수집, `skipped`, stall 아님): admin `crawler_config` 비활성화 / mode off / IBK 00:00-05 transition. **health 영향**(반복 시 `degraded` 근거): Selenium queue 80%(20/25) 포화 거부([scheduler.py:437](app/scheduler.py))는 계획된 skip이 아니라 **시스템 압력에 의한 누락** / timeout / misfire.
+- **collection_expected는 eligibility + interval-aware** (codex): eligibility(`scheduled_off`/`admin_disabled`)이며 stall 임계는 모드별 주기(IN 10-60s / OUT 10-60min)에 맞춘 **`expected_interval`/`next_due_at + grace`**. dispatch·run 결과(queue_full=dispatch health / timeout=run failure / transition=run skip)는 collection_expected가 아니라 **§6-2 3계층 계약**에서 분리(사건 계층이 다름).
 - **재사용**: [market_mode.get_market_mode](app/market_mode.py)로 collection_expected 파생("설계상 off" vs "사망" 구분), [kr_holidays](app/calendars/kr_holidays.py)(realtime 연결 시)로 market_expected 공휴일 마스크.
 
 ---
@@ -103,8 +103,12 @@
 ## 6. 구현 순서 게이트 (codex 수정안, 결정 후 착수)
 
 1. **per-asset 유효-수집 성공 기준 정의 (선행)** — "예외 없이 반환"이 아니라 "해당 (source,asset)의 **유효 데이터**를 실제로 받았나"(통화별 부분 실패 은닉 해소). **이 정의 없이는 아래 success/partial/failure를 분류할 수 없다**(codex — validity가 결과 계약보다 먼저).
-2. **전 scheduled collector의 실행 결과 계약 설계** — 위 유효성 기준으로 `attempted_assets` / `observed_assets`(유효 관측) / `failed_assets` / `skip_reason`을 반환 → `success`(attempted 전부 관측) / `partial`(일부) / `failure`(0) / `skipped`(collection_expected=false) 분류. **`skip_reason` 분류(codex)**: 정상 제외(`admin_disabled` / `scheduled_off` / `transition_window` — health 무관, `skipped`) vs **health 영향**(`queue_full` / `timeout` / `misfire` / `backpressure` — 반복 시 `degraded`). 현재 전 collector가 총실패를 삼킴(§2.1)이라 이 계약 선행 없이는 crawler_stats 기반 shadow가 무의미. **저장소(§6-4/D1/D4) 결정은 이 실행결과가 observed_assets를 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
-3. **collection_expected(interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected는 Bool이 아니라 **`expected_interval`/`next_due_at + grace`**(IN 10-60s vs OUT 10-60min로 stall 임계 상이) + 억제 조건(admin `crawler_config` 비활성화 / Selenium queue 80% 포화 거부 / IBK 00:00-05 skip)까지 반영. market_mode + kr_holidays realtime 연결.
+2. **실행 결과를 3계층으로 분리하는 계약 설계**(codex — 사건 발생 위치가 달라 collector 결과 하나로 못 묶음):
+   - **eligibility**(스케줄러 등록 전): `enabled` / `scheduled_off`(mode) / `admin_disabled`(`crawler_config`) — collector 안 돎.
+   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:479](app/scheduler.py) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
+   - **run**(collector 실행): `success` / `partial` / `failure`(`failure_reason`=timeout 등) / `skipped`(`skip_reason`=transition_window, IBK 00:00-05 self-return [ibk.py:88](app/crawlers/ibk.py)). **timeout은 skip 아니라 run failure**(계획 skip과 재혼입 금지).
+   collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 전 collector가 총실패를 삼킴(§2.1)이라 이 계약 선행 없이 shadow 무의미. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
+3. **collection_expected(eligibility + interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected = eligibility(`scheduled_off`/`admin_disabled`)이며 timing은 Bool 아닌 **`expected_interval`/`next_due_at + grace`**(IN 10-60s vs OUT 10-60min). **dispatch(queue_full/misfire)·run(timeout/transition) 결과는 collection_expected가 아니라 §6-2 3계층** — queue 포화는 억제가 아니라 health 영향(§4·§6-2 정합). market_mode(eligibility 파생) + kr_holidays(market_expected) realtime 연결.
 4. **timezone-aware heartbeat 저장 설계** — collection_success_at을 per-(source,asset) 영속(Redis/DB), tz-aware. USDT는 in-process liveness(is_stale/ticker-dead/task.done) export 포함.
 5. **≥7일 shadow 관측 + deterministic 휴일 테스트** (log-only) — 1~2일은 평일만 보고 끝나 BREAK/OUT·주말 전환 오탐을 검증 못 함(codex). 주간 모드 사이클(평일 IN/BREAK + 주말 OUT) 전체 + **주입식 공휴일 테스트**(실휴일 대기 불요)로 cadence 마스크 검증.
 6. **오탐률 확인 후 API/UI 계약 검토** (additive health 필드 → iOS 최소 배지, 확실한 장애만).
