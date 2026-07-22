@@ -70,6 +70,35 @@ def test_assert_krx_free_passes_tether_source_asset_shape():
     free_snapshot._assert_krx_free(payload)  # no raise
 
 
+def test_assert_krx_free_raises_on_krx_graph_content_under_allowed_id():
+    """codex Medium 2 — 허용 ID(hana.usd)에 KRX가 content로 위장(point source 또는 provenance
+    close_basis/source_method=krx)돼도 차단. graph 측 ID-prefix만 보던 비대칭(rate는 content 체크)을 해소."""
+    # 각 마커 독립 검증(분기 대칭 잠금) — source / close_basis / source_method / contract_code 단독으로도 차단.
+    for point in ({"source": "krx"},
+                  {"source": "hana", "close_basis": "krx_cf_close_1545"},
+                  {"source": "hana", "source_method": "krx_openapi_daily"},
+                  {"source": "hana", "contract_code": "A75606"}):
+        payload = {
+            "graph": {"series": [{"id": "hana.usd", "data": [point]}]},   # 허용 ID인데 content가 KRX
+            "rate": {"entries": []},
+        }
+        with pytest.raises(ValueError):
+            free_snapshot._assert_krx_free(payload)
+
+
+def test_assert_krx_free_passes_clean_graph_content():
+    """정상 graph content(source=hana, 비-krx provenance, contract_code=None)는 통과 — over-strict 무."""
+    payload = {
+        "graph": {"series": [
+            {"id": "hana.usd", "data": [{"source": "hana", "close_basis": "hana_observed_eod",
+                                          "source_method": "observed_rollup", "contract_code": None}]},
+            {"id": "investing.usd", "data": [{"source": "investing"}]},
+        ]},
+        "rate": {"entries": [{"bank": "hana", "currency": "usd-krw"}]},
+    }
+    free_snapshot._assert_krx_free(payload)  # no raise (contract_code=None은 KRX 마커 아님)
+
+
 def test_free_tab_series_excludes_krx():
     ids = graph_v2._free_tab_series("usd")
     assert "krx.usd-krw-futures" not in ids

@@ -376,6 +376,18 @@ def _assert_krx_free(payload: dict) -> None:
     for s in payload.get("graph", {}).get("series", []):
         if str(s.get("id", "")).startswith("krx."):
             raise ValueError(f"KRX series가 무료 snapshot에 유입: {s.get('id')!r}")
+        # graph content-level KRX 방어(codex) — 허용 ID(hana.usd 등)에 KRX가 위장 유입돼도(point source 또는
+        # provenance close_basis/source_method가 krx) 차단. 무료 graph는 KRX-free라 정상 series는 이 마커가 없음
+        # (rate content 체크와 대칭 — id-prefix만 보던 graph 측 ID-only 비대칭 해소).
+        for p in s.get("data", []) or []:
+            if not isinstance(p, dict):
+                continue
+            if (str(p.get("source", "")) == "krx"
+                    or str(p.get("close_basis", "")).startswith("krx")
+                    or str(p.get("source_method", "")).startswith("krx")
+                    or p.get("contract_code") is not None):   # 무료 graph에서 contract_code는 KRX 전용 마커
+                raise ValueError(
+                    f"KRX가 graph series content에 위장 유입: id={s.get('id')!r} source={p.get('source')!r}")
     # N4-2a (codex Blocker) — _iter_rate_items(kind-조건부)가 아니라 _iter_all_rate_dicts(shape 무관 전 컨테이너)로
     # 순회. hybrid/오염 payload가 반대 shape 컨테이너에 KRX를 숨겨 우회하는 hole을 닫는다(extra="forbid"와 이중 방어).
     for e in _iter_all_rate_dicts(payload.get("rate", {})):
