@@ -194,7 +194,16 @@ lease 15분을 실제로 보장하려면 아래 4개가 계약이다. 각각 상
    - 왜: sweep-only면 실제 상한이 `15분 + sweep 주기`가 되어 문서의 "최대 15분"을 배신한다.
    - 왜 publisher가 아니라 registry: publisher가 `publish_topic`(app/topic_dispatcher.py:126)과
      `publish_topic_detailed`(:197) **둘**이고 앞으로 늘 수 있다. publisher마다 필터를 붙이면 drift하므로
-     단일 choke point인 조회 경계에서 막는다(`subscriber_count`/`subscribed_connection_count` guard도 동일 경로).
+     단일 choke point인 조회 경계에서 막는다.
+   - **1a. `get_subscribers`는 read-only 필터 — 만료분을 즉시 삭제하지 않는다.**
+     삭제까지 하면 sweep이 그 연결에 `reauth_required`를 보낼 근거를 잃는다.
+     **소유권 분리**: 조회 경계 = *강제*(전송 제외) / sweep = *생명주기*(통지 후 제거).
+     ⚠️ "스캔하는 김에 정리"가 자연스러운 최적화라 **테스트로 고정하지 않으면 조용히 깨진다.**
+     (통지가 늦어도 전송은 이미 막혀 있으므로 보안 상한은 sweep 지연과 무관하다.)
+   - **1b. 상속 경로 (정정)**: `get_subscribers`와 이를 호출하는 `subscriber_count`(:109)만 상속한다.
+     `subscribed_connection_count`(:98)는 `len(self._subscriptions)`를 **직접 반환**하므로 상속하지 않는다
+     — 전송 경로가 아니라 누수는 없지만 **expiry 미반영 관찰 지표**이며, 전송·인가 guard로 쓰면 안 된다.
+     (구 문구가 이 지표도 "동일 경로"라 적었던 것은 오류.)
 2. **재인증 replacement** — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다.
    `TopicRegistry.register`는 additive union(`existing.update(topics)`, :66)이라 "accepted만 추가"하면
    권한을 잃은 이전 등록이 그대로 남아 lease 만료까지 계속 수신된다.
@@ -207,6 +216,13 @@ lease 15분을 실제로 보장하려면 아래 4개가 계약이다. 각각 상
    - ack timeout **10초**, 실패 시 **1회 즉시 재시도** → 최악 완료 ≈ 12:20, 15:00까지 여유 ≈ 2분 40초.
    - 클라 타이머는 **monotonic**(wall-clock 점프 시 deadline 계산이 깨진다).
    - 서버 deadline이 단일 진실 소스 — 클라 타이밍은 그보다 앞서기 위한 것일 뿐이다.
+
+5. **시간 기준 = 서버도 monotonic** — 15분 상한의 소유자는 서버이므로 서버 deadline도 `time.monotonic()` 기반.
+   만료 판정은 **`now >= expires_at`**(경계 포함 = fail-closed)로 고정하고 테스트로 경계를 못 박는다.
+   - 왜: wall clock이 **역행**하면(NTP step, VM restore 등) `now >= expires_at`이 늦게 참이 되어 **15분을 초과**한다.
+     전진은 조기 만료라 안전한 방향. 재배포 권리 관련 상한이라 확률보다 **fail-closed 성질**이 우선.
+   - registry가 in-memory(`Dict[WebSocket, …]`)라 **프로세스 재시작 시 연결·구독이 함께 소멸** →
+     재시작 간 deadline 보존이 필요 없다. monotonic의 per-process 한계가 여기선 비용이 아니다.
 
 **Non-goal**: legacy 그래프 dead-code 삭제(별도 커밋) / 고급 rate-limiting(후속).
 
