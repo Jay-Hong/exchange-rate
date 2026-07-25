@@ -185,9 +185,9 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
   서버는 재인증 실패·미수신 시 15분 경계에서 제거. 즉시 revoke는 별도 후속.
 - 구현 시 **KRX per-user 강제 동시 해소**(ADR-038 Open 2 close).
 
-**§8.1 구현 계약 (test-first 전 확정, 2026-07-25 — codex 3 + Claude 1)**
+**§8.1 구현 계약 (test-first 전 확정, 2026-07-25 — codex 다라운드 + Claude 발견 1건[항목 3])**
 
-lease 15분을 실제로 보장하려면 아래 4개가 계약이다. 각각 상태 전이 테스트로 고정한다.
+lease 15분과 per-user 인가를 실제로 보장하려면 아래 **6개**가 계약이다. 각각 상태 전이 테스트로 고정한다.
 
 1. **만료 강제는 subscriber 조회 경계에서** — `TopicRegistry.get_subscribers`가 만료 구독을 제외한다.
    주기 sweep은 `reauth_required` 통지·메모리 정리용이며 **강제 수단이 아니다**.
@@ -208,6 +208,7 @@ lease 15분을 실제로 보장하려면 아래 4개가 계약이다. 각각 상
    `TopicRegistry.register`는 additive union(`existing.update(topics)`, :66)이라 "accepted만 추가"하면
    권한을 잃은 이전 등록이 그대로 남아 lease 만료까지 계속 수신된다.
    - 단, **이번 요청에 언급되지 않은** topic은 건드리지 않는다(증분 subscribe 보존).
+   - ⚠️ 이 "불변" 규칙은 **같은 UID 전제**에서만 성립한다. UID가 바뀌면 항목 6이 우선한다.
 3. **snapshot도 accepted-only** — `send_initial_snapshots`(:288)는 현재 **요청 topics 전체**로 호출된다.
    1C에서는 **accepted subset**으로만 호출해야 한다. 아니면 "검증 실패 topic은 registry 미등록"을 지켜도
    reject된 topic의 스냅샷이 즉시 1회 새어 나간다.
@@ -223,6 +224,21 @@ lease 15분을 실제로 보장하려면 아래 4개가 계약이다. 각각 상
      전진은 조기 만료라 안전한 방향. 재배포 권리 관련 상한이라 확률보다 **fail-closed 성질**이 우선.
    - registry가 in-memory(`Dict[WebSocket, …]`)라 **프로세스 재시작 시 연결·구독이 함께 소멸** →
      재시작 간 deadline 보존이 필요 없다. monotonic의 per-process 한계가 여기선 비용이 아니다.
+
+6. **연결당 UID 고정 — 계정 전환 leak 차단** (codex High)
+   WebSocket 하나는 임의 시점에 **정확히 하나의 UID**에 바인딩된다. 인증 성공한 subscribe 처리 시:
+   - 미바인딩 → 해당 UID로 바인딩
+   - 바인딩 UID **==** 토큰 UID → 항목 2의 증분 규칙 적용(언급 안 된 topic 불변)
+   - 바인딩 UID **!=** 토큰 UID → **그 ws의 기존 구독을 전부 제거**한 뒤 새 UID로 재바인딩하고 이번 요청을 신규 처리
+   - **왜**: 항목 2의 "언급 안 된 topic 불변"은 같은 UID 전제에서만 옳다. 계정 A로 KRX 구독 후 **같은 소켓에서**
+     B 토큰으로 일부 topic만 재구독하면 A의 KRX 등록이 최대 15분 잔존한다.
+   - **도달 가능성(실측 근거)**: 현 iOS는 `.signedOut`에서 WS를 내리지만(FXiApp.swift:124-126 `viewModel.stop()`),
+     **A→B 직접 전환은 `.signedOut`을 거치지 않는다** — AuthService listener가 `currentUser=B`인데 `authState`는
+     아직 `.signedIn(A)`인 창(1A 트랙에서 이미 문서화된 account-switch window). 소켓이 살아 있는 채 UID만 바뀐다.
+   - **서버 측 인가 경계이므로 클라가 소켓을 끊어준다는 가정에 기대지 않는다** — 악의·버그 클라와 무관하게 성립해야 한다.
+   - 제거는 **silent**(lease 만료가 아니므로 `reauth_required` 미발신). 새 `subscription_ack`이 권위 있는 응답이다.
+   - (더 엄격한 대안: UID 변경 시 `subscription_error`로 거부하고 재연결 요구. 클라 부담·재연결 스톰 때문에
+     v1은 교체 방식을 택한다. 운영상 필요해지면 승격 가능.)
 
 **Non-goal**: legacy 그래프 dead-code 삭제(별도 커밋) / 고급 rate-limiting(후속).
 
