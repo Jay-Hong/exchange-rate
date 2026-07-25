@@ -539,14 +539,41 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     "비용 없음"이 아니다 — 호출 비용과 **장애 표면이 하나 늘어난다**). ~11~12분/연결, **현 규모(<500명)에서
     수용 가능한 bounded cost**. 실패는 A6 `temporarily_unavailable` → C4(미연장 → 자연 만료).
 
-- **E3 REST twin 게이트가 롤아웃 선행 조건 (blocker)**
-  `GET /api/v2/topics/snapshot`(main.py:2745~)은 **`verify_firebase_token`이 없고** `TOPIC_DISPATCHER_ENABLED`로만
-  막혀 있다(off → 404). 그런데 **1C는 이 flag를 켜야 동작한다** — 즉 1C 활성화가 현재 flag-off로 완화 중인
+- **E3 REST twin 게이트가 롤아웃 선행 조건 (blocker)** — ✅ **서버 land 2026-07-25**
+  `GET /api/v2/topics/snapshot`은 **`verify_firebase_token`이 없고** `TOPIC_DISPATCHER_ENABLED`로만
+  막혀 있었다(off → 404). 그런데 **1C는 이 flag를 켜야 동작한다** — 즉 1C 활성화가 현재 flag-off로 완화 중인
   **무인증 KRX REST 경로를 되연다**(운영 완화 기록: route auth 감사).
   → **REST twin 인증·entitlement 게이트가 `TOPIC_DISPATCHER_ENABLED=true` *이전에* land해야 한다.**
-  404 본문의 `supported_topics` 에코(:2766)도 함께 검토.
   ⚠️ 이 때문에 §8-D의 "KRX per-user 강제 동시 해소(ADR-038 Open 2 close)"는 **WS만으로 성립하지 않는다** —
   REST twin 포함이 1C 범위임을 명시하거나, Open 2 close 주장을 축소해야 한다. **여기서는 범위에 포함한다.**
+
+  **구현된 계약** (`app/main.py` `get_v2_topic_snapshot` + `app/topic_initial_snapshot.visible_snapshot_topics_sync`):
+  1. **순서가 계약** — dormant flag → 인증 → premium → topic 판정.
+     flag는 인증보다 **앞**(dormant 계약 보존 + 불필요한 Firebase RTT 회피),
+     인증은 topic 판정보다 **앞**(미인증자가 `supported_topics`를 열거하지 못하게).
+  2. dormant 체크 다음이 **곧바로** `verify_firebase_token` — 인가 전에는 어떤 작업도 하지 않는다
+     (401 시 premium 판정·DB 세션·entitlement 조회·빌드 **전부 미도달**).
+  3. `require_premium(allow_empty=False)` → INACTIVE 403 / PENDING 503+Retry-After(공통 정책 재사용).
+  4. **per-user KRX**: `visible_snapshot_topics_sync()`가 전역 집합 ∧ `compute_krx_visible`(G3∧G2∧G1∧premium).
+     unknown_topic 판정과 `supported_topics` 에코가 **같은 함수**를 공유 — 갈리면 404 코드는 맞는데
+     목록으로 존재가 새는 회귀가 난다(§3.2). 전역 게이트 off면 세션 자체를 열지 않는다(장애 표면 축소).
+  5. **세션 수명이 계약**: `Depends(get_db)`를 쓰지 않는다. request-scoped 세션은 응답까지 커넥션을 쥐고,
+     그 뒤 builder가 **두 번째** 세션을 연다 → 좁은 풀(`pool_size=3 + max_overflow=2`)에서 bootstrap
+     동시 요청이 서로의 builder 커넥션을 기다린다. 가시성 조회는 `to_thread` 안에서 열고 **닫은 뒤**
+     builder가 시작하므로 요청당 동시 checkout은 1개. 동기 SELECT를 이벤트 루프에서 돌리지 않는 효과도 겸한다.
+  6. 모든 응답(200 + dormant/unknown_topic/topic_unavailable 404)에 `Cache-Control: no-store` —
+     200만 붙이면 private 캐시가 비-entitled의 KRX 404를 저장해 entitlement 부여 뒤에도 404가 남는다.
+  7. **19 테스트**(엔드포인트 12 + helper 7), 전부 **개별 무력화로 실패 확인**(10 시나리오).
+     기존 REST bootstrap 테스트 4건도 auth/premium patch를 추가 — patch가 필요해진 것 자체가 게이트 회귀 잠금이다.
+
+  **알려진 잔여(이 슬라이스 범위 밖)**: `require_premium`은 PENDING·INACTIVE가 **아닌 모든** 상태를 True로
+  접는다 → premium 상태가 새로 늘면 fail-open. 핸들러 쪽 하드코딩은 없앴지만(반환값 전달) 공통 helper의
+  ACTIVE-only 명시화는 15개 endpoint에 걸쳐 있어 별도 슬라이스로 둔다.
+
+  **잔여(같은 E3 범위, flag ON 전 필수)**: iOS `APIService`의 bootstrap 3종
+  (`fetchTetherSnapshot`/`fetchKrxSnapshot`/`fetchFxSnapshot`)이 **무인증 경로**라 flag ON 시 401을 받는다.
+  전부 `try?` 격리라 크래시는 없고 cold-start bootstrap만 조용히 사라진다 → **F 슬라이스에서 1B
+  인증 transport로 이관**. 운영은 현재 flag off라 이 시점의 사용자 영향은 0.
 
 #### F. iOS 슬라이스 입력 (여기서 잠그지 않음 — 슬라이스 2에서 코드와 함께 설계)
 
@@ -652,6 +679,8 @@ patch해 **D5 2단계 매트릭스가 자기 mock 검증**이 된다. (3) **인�
 - [x] **테더 N4 (무료 테더 탭 백엔드 + iOS N4-4 + graph 하드닝)** — 무료 테더 rate는 grouped shape(`kind="source_grouped"`: `usdt_krw`[거래소 5] + `usd_krw_banks`[kb·hana] + `usd_krw_reference`[investing singleton], `primary_asset="usdt-krw"`)로 도입(FX는 flat `{asset,entries}` 그대로). **N4-1 land**(58b9d9c): `_assert_krx_free`가 FX shape(bank/currency)뿐 아니라 topic-native shape(source/asset)도 검사 → 테더 KRX(달러선물) 우회 차단. **N4-2a land**(grouped-aware validation 리팩터, codex Blocker/Medium 2라운드 반영): `_iter_rate_items`(shape 무관 순회 단일 진실소스)로 nonempty·within-as_of·precompute 카운트 통일 + rate.asset(grouped=primary_asset) grouped-aware + **3중 hybrid/KRX 방어** — (1) `_FreeRate`/`_FreeRateGrouped` `extra="forbid"`(반대 shape 컨테이너 키를 extra로 얹은 hybrid를 schema서 거부, 양방향) (2) `_assert_krx_free`가 `_iter_all_rate_dicts`로 entries+3그룹을 **kind 무관 동시 스캔**(hybrid가 반대 컨테이너에 KRX를 숨기는 우회 폐쇄, belt-and-suspenders) (3) `_GROUPED_RATE_TABS` **tab↔shape 결합**(grouped-USD/flat-tether 오염 canonical을 fail-closed 거부 → 구 FX client 깨진 200 회귀 차단). graph 절반은 코드 완료(tether series 정의 + `exclude_krx` 필터). **N4-2b land**(cutoff-aware grouped tether reader): 유료 토픽 grouper `build_tether_tab_payload`(정규화·정렬·investing singleton 무결성) 재사용 + cutoff fetcher만 신규 — `crud.get_source_rates_until`(source_rates cutoff 변형, `timestamp<=as_of`, rate_changed_at 미포함[정적 스냅샷]) + `free_snapshot.fetch_tether_grouped_rate_until`(거래소 5=source_rates / kb·hana·investing=usd-krw는 기존 FX cutoff reader 재사용 후 선별) → `build_free_snapshot_payload` tab 분기(tether=grouped / FX=flat). free↔paid shape 일치(iOS 단일 어댑터). dup-source/wrong-asset은 각 source explicit query라 자연 차단(entitlement 우회 아님, KRX는 조회 경로에 아예 없음 + `_assert_krx_free` belt-and-suspenders). codex 2라운드(N4-2a Blocker/Medium + N4-2b) 통과. **N4-3 land + 배포 + 프로덕션 verify**(08db271, 2026-07-22): `FREE_SNAPSHOT_TABS`에 tether 추가(precompute 순회 + endpoint 게이트 단일 진실소스 → 자동 활성) + build 분기 + serve tab↔shape 결합. codex 3라운드 통과. EC2 배포(build+force-recreate) 후 precompute 트리거 + Redis canonical 직접 검증 — **4기간(1d/1w/3m/1y) 전부 validate=True / kind=source_grouped / primary_asset=usdt-krw / as_of=HH:30 / stale=False / rate=거래소5(upbit·bithumb·coinone·korbit·gopax)+kb·hana+investing / KRX series·rate 0 / graph 실데이터 non-empty(1d 10/10 각 144pt · 장기 4/4)**. 서버 활성은 dormant(엔드포인트 auth-gated, 소비 client는 App Store 배포 후). 테스트 free_snapshot 72 passed / 전체 3604. **N4-4 land + dev E2E PASS(2026-07-22)**: iOS grouped adapter(FreeRate flat/grouped, kind-peek)/group-aware allowlist(KRX fail-closed)/코어 탭(source 바)/그래프(거래소 5토글·DXY↔선물 상호배타·구역 프리미엄 정합)/3 알림 preview(거래소 가격·김프·비교, no-persist + malformed-rate 크래시 가드)/라우팅(테더-first, 인증 게이트). **+ graph fail-closed 하드닝(codex 6라운드 Blocker 0)**: per-tab ID allowlist(4탭 카탈로그 1:1) + envelope 결합(assertEnvelope/decodeAndValidate behavioral) + content-level KRX guard(서버 `_assert_krx_free` graph + 클라 `hasKrxContaminatedPoint`, 4마커 대칭) — 서버 257a05d 배포·검증 / iOS 1cfa978·778d294·9c255eb. 실사용자 노출은 App Store 배포(TOPIC_V2 arming, 별도 GO) 후.
 - [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
+- [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
+      §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C, S5 확정으로 착수 가능**
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).

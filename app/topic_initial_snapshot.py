@@ -62,6 +62,48 @@ def supported_snapshot_topics() -> tuple:
     return topics
 
 
+def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple:
+    """**per-user** 노출 topic 목록 = 전역 지원 집합 ∧ KRX 가시성 — `asyncio.to_thread` 전용
+    (ADR-039 §8.1 E3).
+
+    `supported_snapshot_topics()`는 전역 게이트(G2∧G3)까지만 좁힌다. REST bootstrap은 그 위에
+    per-user G1∧premium을 한 번 더 적용해야 §3.1 매트릭스("KRX WS·REST snapshot = Firebase +
+    premium + KRX entitlement")를 만족한다.
+
+    §3.2(KRX 존재 완전 비노출): entitlement 없는 사용자에게 KRX는 **미지원 topic과 구분 불가**여야
+    하므로 unknown_topic 판정과 `supported_topics` 에코가 **이 함수 하나**를 공유한다 — 둘이 갈리면
+    404 코드는 맞는데 목록으로 존재가 새는 회귀가 난다.
+
+    **세션 수명이 계약이다** (`_build_snapshot_sync`와 동일 규율):
+    SessionLocal 생성 → 조회 → close를 이 함수(=worker thread) 안에서 **완결**한다.
+    - 호출자(핸들러)가 request-scoped 세션을 들고 있으면, 그 커넥션을 쥔 채 뒤이어 builder가
+      **두 번째** SessionLocal을 연다. 운영 풀은 `pool_size=3 + max_overflow=2` = 5뿐이라
+      bootstrap 동시 요청 3건이면 서로의 builder 커넥션을 기다리다 pool timeout에 걸린다.
+    - 동기 SELECT를 이벤트 루프에서 직접 돌리면 RDS 순단 시 **worker 전체**(WS pong 포함)가 멈춘다.
+    - SQLAlchemy Session은 thread-unsafe라 thread 경계를 넘기지 않는다.
+
+    전역 게이트가 닫혀 있으면 세션을 **아예 열지 않는다** — 결과가 같은데 장애 표면만 늘기 때문.
+    반대로 열려 있으면 반드시 조회한다(fail-closed: 조회 실패는 예외로 전파 → 5xx, 조용한 False 아님).
+    """
+    from app import entitlements
+    from app.krx_topic_publisher import KRX_TOPIC
+
+    topics = supported_snapshot_topics()
+    if KRX_TOPIC not in topics:
+        return topics
+
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        visible = entitlements.compute_krx_visible(
+            db, user_id, premium_active=premium_active)
+    finally:
+        db.close()
+    if visible:
+        return topics
+    return tuple(t for t in topics if t != KRX_TOPIC)
+
+
 def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
     """주어진 topic의 현재 snapshot payload 빌드 — asyncio.to_thread 내부 sync 실행 전용.
 

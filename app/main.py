@@ -2743,24 +2743,50 @@ async def get_v2_free_snapshot(request: Request, response: Response, tab: str, p
 
 
 @app.get("/api/v2/topics/snapshot")
-async def get_v2_topic_snapshot(topic: str):
+async def get_v2_topic_snapshot(request: Request, topic: str):
     """topic 현재 snapshot REST bootstrap (WS 미연결/실패 시 cold-start fallback, OPEN 1).
 
     WS subscribe의 snapshot-on-subscribe와 **동일 builder**(`_build_snapshot_sync`) →
     동일 schema(type/version/topic/data + usdt_krw/krx tick entry의 rate_changed_at).
-    KRX는 독립 topic krx:usd-krw-futures (ADR-038 D2 — G2 off면 supported 목록에서 제외
-    = 404). client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
-    TOPIC_DISPATCHER_ENABLED off면 dormant(404). REALTIME_V2_CLIENT_GUIDE §3.
+    KRX는 독립 topic krx:usd-krw-futures (ADR-038 D2). client는 REST/WS 동일 merge 로직
+    (`rate_changed_at ?? timestamp`). REALTIME_V2_CLIENT_GUIDE §3.
+
+    **접근 게이트 (ADR-039 §8.1 E3)** — 이 endpoint는 WS topic의 REST twin이라 §3.1 매트릭스가
+    그대로 적용된다: Firebase 인증 + premium, KRX는 entitlement 추가.
+    게이트가 없으면 1C가 `TOPIC_DISPATCHER_ENABLED`를 켜는 순간(1C는 그 flag를 켜야 동작한다)
+    현재 flag-off로 완화 중인 **무인증 KRX REST 경로가 되열린다**.
+
+    순서가 계약이다:
+      1. dormant flag — 인증보다 **먼저**(dormant 계약 보존 + 불필요한 Firebase RTT 회피)
+      2. 인증 → 3. premium → 4. per-user topic 해석
+      인증을 topic 판정보다 앞에 둬야 미인증자가 supported 목록을 열거하지 못한다.
+
+    DB 세션은 `Depends(get_db)`로 받지 **않는다** — request-scoped 세션은 응답까지 커넥션을 쥐고,
+    그 뒤 builder가 두 번째 세션을 열어 좁은 풀(3+2)을 요청당 2개씩 소비한다.
+    가시성 조회는 `visible_snapshot_topics_sync`가 worker thread 안에서 열고 닫는다.
     """
     from app import config
-    from app.topic_initial_snapshot import _build_snapshot_sync, supported_snapshot_topics
+    from app.topic_initial_snapshot import (
+        _build_snapshot_sync, visible_snapshot_topics_sync)
+
+    # 개인화 응답(비-entitled의 KRX 404 포함) — 오류까지 캐시 금지. 200만 no-store면 private
+    # HTTP 캐시가 404를 휴리스틱 저장해 entitlement 부여 뒤에도 404가 남을 수 있다.
+    no_store = {"Cache-Control": "no-store"}
 
     if not config.TOPIC_DISPATCHER_ENABLED:
         # 출시 전 dormant — supported_topics 비노출 (codex 019efe2d)
-        return JSONResponse(status_code=404, content={"error": "topics_disabled"})
-    supported = supported_snapshot_topics()
+        return JSONResponse(status_code=404, content={"error": "topics_disabled"},
+                            headers=no_store)
+    user_id = await verify_firebase_token(request)          # 401 (부수효과 0 — 첫 실행문 계약)
+    # INACTIVE 403 / PENDING 503. 반환값을 그대로 쓴다 — `premium_active=True` 하드코딩은
+    # require_premium이 ACTIVE 외 상태를 raise한다는 전제에 묶여 상태가 늘면 fail-open이 된다.
+    premium_active = await require_premium(user_id, allow_empty=False)
+    # per-user KRX 가시성(G1) 적용 — 비-entitled에겐 KRX가 목록·판정 양쪽에서 사라져
+    # 미지원 topic과 구분 불가해진다 (§3.2).
+    supported = await asyncio.to_thread(
+        visible_snapshot_topics_sync, user_id, premium_active=premium_active)
     if topic not in supported:
-        return JSONResponse(status_code=404, content={
+        return JSONResponse(status_code=404, headers=no_store, content={
             "error": "unknown_topic",
             "detail": f"topic '{topic}' not supported",
             "supported_topics": list(supported),
@@ -2768,9 +2794,10 @@ async def get_v2_topic_snapshot(topic: str):
     payload = await asyncio.to_thread(_build_snapshot_sync, topic)
     if payload is None:
         # 지원 topic이지만 현재 미제공 (예: fx FX_TOPIC_ENABLED off) — WS publish 가능성과 일치
-        return JSONResponse(status_code=404, content={"error": "topic_unavailable", "topic": topic})
+        return JSONResponse(status_code=404, headers=no_store,
+                            content={"error": "topic_unavailable", "topic": topic})
     # latest 성격 — 캐시 금지 (codex 019efe2d). body는 WS snapshot과 동일 contract.
-    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+    return JSONResponse(content=payload, headers=no_store)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -172,6 +172,10 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
   release 동기화. 옵션: 5/12~5/17 중 dev/test client subscribe + 짧은 FF=true 시험으로
   실제 publish path 운영 검증.
 
+> ⚠️ **2026-07-25 갱신 — 아래 `TOPIC_DISPATCHER_ENABLED=true` 안내는 당시(2026-05) 기준 historical record다.**
+> 현재 flag ON은 ADR-039 §8.1 **E3**(REST twin 인증 게이트, land) + **1C**(WS 인증) + 클라 bootstrap 인증 이관을
+> 선행 조건으로 갖는다 — 이 문서 절차만 보고 켜지 말 것. 정본: [FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md) §8.1.
+
 #### Dev/test FF=true 시험 runbook (5/12~5/17 권장)
 
 도구: `scripts/subscribe_tether_topic.py` (로컬 python websockets 기반,

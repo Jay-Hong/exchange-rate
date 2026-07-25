@@ -2,8 +2,12 @@
 
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
 > 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출). 서버 측 계약 closed — 잔여는 client 구현 + live enable(별도 GO).
-> 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). **prod LIVE** (2026-06-27 확인:
-> `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON). KRX는 2026-07-08부터 독립 topic
+> 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
+> `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
+> `TOPIC_DISPATCHER_ENABLED=false`로 되돌렸다(2026-07-25 재확인: `topics/snapshot` → 404 `topics_disabled`).
+> 재활성화 선행 3조건(§1): ①**E3**(REST twin 인증 게이트, 2026-07-25 land) ②WS 인증(1C)
+> ③**클라 bootstrap 3종의 인증 transport 이관** — 그 뒤 별도 운영 GO.
+> KRX는 2026-07-08부터 독립 topic
 > `krx:usd-krw-futures`(ADR-038 D2 — 구 `KRX_TOPIC_INCLUDE` env 제거). 잔여 = **client release gate**
 > (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).
 > 이 문서가 topic 계약의 **authoritative source**. [USDT_PHASE1_CLIENT_GUIDE.md](USDT_PHASE1_CLIENT_GUIDE.md)
@@ -47,7 +51,10 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 ### 활성 조건 (서버 flag)
 
-- `TOPIC_DISPATCHER_ENABLED=true` 필요(전 topic). **현 prod는 ON**(2026-06-27 확인) → subscribe·snapshot 정상.
+- `TOPIC_DISPATCHER_ENABLED=true` 필요(전 topic). ⚠️ **현 prod는 OFF** — 2026-07-22 route auth 감사에서
+  무인증 누수 완화로 되돌렸다(2026-07-25 재확인: `topics/snapshot` → 404 `topics_disabled`).
+  구 "현 prod는 ON(2026-06-27 확인)"은 폐기. **재활성화 선행 조건**: ①서버 REST twin 인증 게이트(E3, 2026-07-25 land)
+  ②WS 인증(1C) ③**클라 bootstrap 3종의 인증 transport 이관** — ③ 없이 켜면 클라 cold-start bootstrap이 401로 조용히 사라진다.
 - FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`는 `TOPIC_DISPATCHER_ENABLED`만. `krx:usd-krw-futures`는 추가로 `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=`KRX_FUTURES_ENABLED`∧`KRX_CLIENT_DISTRIBUTION_ENABLED`, ADR-038 G2·G3) 필요.
 - live 활성 = 별도 운영 GO (출시 직전).
 
@@ -115,7 +122,10 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 - entry shape는 구 usdt:krw group과 **동일**(TopicSourceEntry 하위호환) — group 키 이름도 유지.
 - 발행/snapshot 조건: `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(G2∧G3) on. off면 발행 중단 + REST 404 + WS snapshot skip.
-- per-user 노출은 클라 `krx_visible` gate 담당(GET /api/entitlements — WS 무인증, ADR-038 Decision 3).
+- per-user 노출 — **경로별로 다르다**:
+  - **REST** `/api/v2/topics/snapshot`: **서버가 강제**(2026-07-25~, ADR-039 §8.1 E3). 비-entitled에겐 404 unknown_topic.
+  - **WS**: 아직 무인증이라 **클라 `krx_visible` gate 담당**(GET /api/entitlements, ADR-038 Decision 3).
+    1C(WS 인증) land 시 서버 강제로 전환 예정 — 그때까지 클라 gate를 제거하면 안 된다.
 
 **snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` = 1 entry. 작음.
 
@@ -132,13 +142,25 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 **REST bootstrap (WS 미연결/실패 시 권장 fallback)** — v2 endpoint:
 
 ```text
-GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw} (+ krx:usd-krw-futures — G2∧G3 on일 때만, off면 404 unknown_topic)
+GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw} (+ krx:usd-krw-futures — G2∧G3 on **이고 그 사용자에게 entitlement가 있을 때만**, 아니면 404 unknown_topic)
+Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
 ```
 
 - 응답 = **WS snapshot과 동일 schema**(`{type:"snapshot", version:1, topic, data}` + usdt/krx tick entry의 `rate_changed_at`). 같은 builder 공유 → client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
 - 권장 흐름: **REST bootstrap(즉시 렌더) → WS subscribe → snapshot/live merge**(REST 응답을 §5 merge로 흡수, WS snapshot이 자연 갱신).
-- `Cache-Control: no-store`. 인증 없음(WS topic과 일관).
-- 응답 코드: 200(payload) / 404 `topics_disabled`(TOPIC_DISPATCHER_ENABLED off=출시 전) / 404 `unknown_topic`(+supported_topics) / 404 `topic_unavailable`(지원 topic이나 현재 미제공, 예 FX_TOPIC_ENABLED off).
+- `Cache-Control: no-store` — 200과 이 endpoint가 직접 만드는 404 전부(개인화 응답이라 오류도 캐시 금지).
+  401/403/503은 공통 예외 경로라 헤더가 없다(휴리스틱 캐시 대상이 아님).
+- ⚠️ **인증·권한 필수 (2026-07-25 변경 — ADR-039 §8.1 E3)**: 구 "인증 없음"은 **폐기**.
+  이 endpoint는 WS topic의 REST twin이라 같은 권한 매트릭스를 따른다 — **Firebase 인증 + premium**,
+  KRX는 **+ entitlement**. 클라는 토큰 없이 호출하면 안 된다(1B 인증 transport 경유).
+  entitlement 없는 사용자에게 krx topic은 `unknown_topic` 404이고 `supported_topics` 에코에도
+  나타나지 않는다 — **미지원 topic과 구분 불가**(KRX 존재 비노출 계약).
+- 응답 코드: 200(payload) / **401**(토큰 없음·무효) / **403**(premium 아님) /
+  **503** — 두 원인: 구독 판정 PENDING(`Retry-After` 있음) **또는 인증 인프라 장애**(Firebase 미초기화/네트워크, `Retry-After` 없음).
+  ⚠️ 후자는 **토큰이 없어도** 401보다 먼저 나올 수 있다(초기화 확인이 헤더 검사보다 앞) → 클라는 503을 인증 실패로 처리하지 말고 재시도 대상으로 볼 것. /
+  404 `topics_disabled`(TOPIC_DISPATCHER_ENABLED off=출시 전) / 404 `unknown_topic`(+supported_topics) / 404 `topic_unavailable`(지원 topic이나 현재 미제공, 예 FX_TOPIC_ENABLED off).
+  **순서 = dormant flag → 인증 → premium → topic 판정**이므로, flag off면 미인증이어도 404이고,
+  미인증이면 unknown topic이어도 401이다(미인증자는 topic 목록을 열거할 수 없다).
 - legacy `/api/rates/{usdt-krw|usd-krw-futures}`는 여전히 410 Gone(use_topic) — 신규 앱은 위 v2 bootstrap 사용. FX legacy `/api/rates/{asset}`(legacy shape)도 v2 bootstrap으로 대체 권장.
 
 > ✅ (구 OPEN — usdt:krw REST bootstrap 부재)는 본 endpoint로 **해소**(2026-06-25). 전 topic(fx:*+usdt:krw) 통일 bootstrap.

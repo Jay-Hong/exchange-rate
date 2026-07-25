@@ -6028,6 +6028,11 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 - **무인증 REST(graph v2 catalog/tab, topic snapshot) = G2만 서버 강제** (codex 정정 —
   graph v2는 인증이 없어 per-user 강제 불가): G2 off면 krx series 전역 제외, G2 on이면
   per-user 노출은 클라 UI gate(krx_visible)가 담당.
+  - ⚠️ **Amendment 2026-07-25 (ADR-039 §8.1 E3 land)**: `GET /api/v2/topics/snapshot`은
+    **더 이상 무인증이 아니다** — Firebase + premium + (KRX는) G1 entitlement를 서버가 강제한다.
+    비-entitled에겐 krx topic이 `unknown_topic` 404 + `supported_topics` 에코 양쪽에서 빠져
+    **미지원 topic과 구분 불가**(§3.2 존재 비노출). `graph v2 catalog/tab`은 여전히 무인증이라
+    이 bullet이 그대로 적용된다(ADR-039 Stage B에서 해소 예정).
 - **WS = global flag(G2) + 클라 UI gate**: G1 없는 단말이 krx topic을 구독해도 시세 payload를
   받을 수 있으나(시세는 민감정보 아님 — 목적은 노출 제어) 클라가 그리지 않음. **완전한
   per-user WS/무인증 REST 강제는 인증 도입 후속 과제** (Open 2).

@@ -95,6 +95,77 @@ class TestSupportedSnapshotTopics(unittest.TestCase):
             )
 
 
+class TestVisibleSnapshotTopics(unittest.TestCase):
+    """visible_snapshot_topics_sync() = 전역 지원 집합 ∧ per-user KRX 가시성 (ADR-039 §8.1 E3).
+
+    §3.2 "KRX 존재 완전 비노출": entitlement 없는 사용자에게 KRX는 **미지원 topic과 구분 불가**여야
+    하므로, unknown_topic 판정과 supported 에코가 **같은 목록**을 써야 한다 → 단일 함수로 잠근다.
+
+    세션 수명도 이 함수 소관(`_build_snapshot_sync`와 동일 규율) — 핸들러가 request-scoped 세션을
+    들고 있으면 뒤이은 builder와 함께 요청당 커넥션 2개를 소비한다(운영 풀 3+2).
+    """
+
+    _KRX = "krx:usd-krw-futures"
+
+    def _visible(self, *, gate_on, krx_visible, user_id="u1", premium_active=True):
+        from app import config
+        from app.topic_initial_snapshot import visible_snapshot_topics_sync
+        fake_db = MagicMock()
+        with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", gate_on), \
+             patch("app.database.SessionLocal", return_value=fake_db) as mock_session, \
+             patch("app.entitlements.compute_krx_visible",
+                   return_value=krx_visible) as mock_compute:
+            topics = visible_snapshot_topics_sync(user_id, premium_active=premium_active)
+        return topics, mock_compute, mock_session, fake_db
+
+    def test_entitled_user_sees_krx(self):
+        topics, _, _, _ = self._visible(gate_on=True, krx_visible=True)
+        self.assertIn(self._KRX, topics)
+
+    def test_non_entitled_user_does_not_see_krx(self):
+        topics, _, _, _ = self._visible(gate_on=True, krx_visible=False)
+        self.assertNotIn(self._KRX, topics)
+        # 나머지 topic은 그대로 (과잉 필터 회귀 차단)
+        self.assertEqual(set(topics), {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw"})
+
+    def test_global_gate_off_skips_session_and_lookup(self):
+        """전역 게이트 off면 KRX가 애초에 없으므로 **세션도 열지 않는다**(불필요한 장애 표면 회피)."""
+        topics, mock_compute, mock_session, _ = self._visible(gate_on=False, krx_visible=True)
+        self.assertNotIn(self._KRX, topics)
+        mock_compute.assert_not_called()
+        mock_session.assert_not_called()
+
+    def test_session_closed_after_lookup(self):
+        """조회 후 즉시 close — 커넥션을 쥔 채 builder가 두 번째 세션을 열지 않게 한다."""
+        _, _, _, fake_db = self._visible(gate_on=True, krx_visible=True)
+        fake_db.close.assert_called_once()
+
+    def test_session_closed_even_when_lookup_raises(self):
+        """DB 순단 시에도 세션 누수 없음 + 예외는 그대로 전파(조용한 False 금지 = fail-closed)."""
+        from app import config
+        from app.topic_initial_snapshot import visible_snapshot_topics_sync
+        fake_db = MagicMock()
+        with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.database.SessionLocal", return_value=fake_db), \
+             patch("app.entitlements.compute_krx_visible",
+                   side_effect=RuntimeError("db down")):
+            with self.assertRaises(RuntimeError):
+                visible_snapshot_topics_sync("u1", premium_active=True)
+        fake_db.close.assert_called_once()
+
+    def test_user_id_and_premium_flag_are_forwarded(self):
+        """판정 대상 uid·premium은 호출자 소관 — 그대로 전달되어야 G1∧premium이 성립."""
+        _, mock_compute, _, fake_db = self._visible(
+            gate_on=True, krx_visible=True, user_id="caller-uid", premium_active=True)
+        mock_compute.assert_called_once_with(fake_db, "caller-uid", premium_active=True)
+
+    def test_premium_false_is_forwarded_not_assumed(self):
+        """premium=False를 그대로 넘겨야 fail-closed — 함수가 True로 가정하면 안 된다."""
+        _, mock_compute, _, fake_db = self._visible(
+            gate_on=True, krx_visible=False, premium_active=False)
+        mock_compute.assert_called_once_with(fake_db, "u1", premium_active=False)
+
+
 class TestKrxSnapshotBranch(unittest.TestCase):
     """_build_snapshot_sync krx:usd-krw-futures branch (ADR-038 D2 positive coverage).
 

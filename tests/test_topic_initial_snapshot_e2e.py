@@ -20,7 +20,7 @@ scope: connect→subscribe→snapshot 수신(fx + usdt) + reconnect→재수신.
 """
 import threading
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from app import config, models
 from app.database import engine
 from app.main import app
+from app.subscription import PremiumStatus
 
 models.Base.metadata.create_all(engine)  # 빈 테이블 (connect 초기 legacy payload용)
 
@@ -135,11 +136,22 @@ class TestSnapshotOnSubscribeE2E(unittest.TestCase):
 
 
 class TestTopicSnapshotRestBootstrap(unittest.TestCase):
-    """GET /api/v2/topics/snapshot — REST bootstrap (OPEN 1 해소). _build_snapshot_sync patch로 격리."""
+    """GET /api/v2/topics/snapshot — REST bootstrap (OPEN 1 해소). _build_snapshot_sync patch로 격리.
+
+    ⚠️ ADR-039 §8.1 E3 land 이후 이 endpoint는 **인증+premium**을 요구한다 → dormant 케이스를
+    제외한 모든 케이스가 auth/premium을 patch해야 한다(그 자체가 계약 문서).
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+
+    def _authed(self, uid="rest-twin-user"):
+        """인증 통과 + premium ACTIVE patch 쌍 (E3 게이트 통과용)."""
+        return (
+            patch("app.main.verify_firebase_token", new=AsyncMock(return_value=uid)),
+            patch("app.main.require_premium", new=AsyncMock(return_value=True)),
+        )
 
     def test_dormant_when_dispatcher_disabled(self):
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
@@ -150,7 +162,8 @@ class TestTopicSnapshotRestBootstrap(unittest.TestCase):
         self.assertNotIn("supported_topics", body)  # dormant 시 미노출 (codex 019efe2d)
 
     def test_unknown_topic_404(self):
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+        p_auth, p_prem = self._authed()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), p_auth, p_prem:
             r = self.client.get("/api/v2/topics/snapshot", params={"topic": "dxy"})
         self.assertEqual(r.status_code, 404)
         body = r.json()
@@ -160,7 +173,8 @@ class TestTopicSnapshotRestBootstrap(unittest.TestCase):
     def test_supported_topic_returns_snapshot_with_no_store(self):
         canned = {"type": "snapshot", "version": 1, "topic": "usdt:krw",
                   "data": {"_canned": True}}
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+        p_auth, p_prem = self._authed()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), p_auth, p_prem, \
              patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=canned):
             r = self.client.get("/api/v2/topics/snapshot", params={"topic": "usdt:krw"})
         self.assertEqual(r.status_code, 200)
@@ -169,11 +183,214 @@ class TestTopicSnapshotRestBootstrap(unittest.TestCase):
 
     def test_topic_unavailable_when_build_none(self):
         """지원 topic이나 _build_snapshot_sync None(예: fx FX_TOPIC_ENABLED off) → 404 topic_unavailable."""
-        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+        p_auth, p_prem = self._authed()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), p_auth, p_prem, \
              patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=None):
             r = self.client.get("/api/v2/topics/snapshot", params={"topic": "fx:usd-krw"})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"], "topic_unavailable")
+
+
+class TestTopicSnapshotRestAuthGate(unittest.TestCase):
+    """ADR-039 §8.1 **E3** — REST twin 인증·premium·KRX per-user 게이트.
+
+    배경: 이 endpoint는 `TOPIC_DISPATCHER_ENABLED`로만 막혀 있었다(off → 404). 그런데 1C는 그
+    flag를 켜야 동작하므로, 게이트 없이 flag를 켜면 **무인증 KRX REST 경로가 되열린다**
+    (운영은 현재 flag off로 완화 중). → flag ON *이전에* 이 게이트가 land해야 한다.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    def _get(self, topic="usdt:krw"):
+        return self.client.get("/api/v2/topics/snapshot", params={"topic": topic})
+
+    # ── 인증 ────────────────────────────────────────────────────────────────
+    def test_dormant_does_not_invoke_auth(self):
+        """flag off는 인증보다 먼저 — dormant 계약 보존 + 불필요한 Firebase RTT 회피."""
+        auth = AsyncMock(return_value="uid")
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False), \
+             patch("app.main.verify_firebase_token", new=auth):
+            r = self._get()
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["error"], "topics_disabled")
+        auth.assert_not_awaited()
+
+    def test_unauthenticated_401_and_no_downstream_work(self):
+        """401이면 premium 판정·DB 세션·entitlement 조회·빌드 **어디에도 도달하지 않는다**(부수효과 0).
+
+        ⚠️ `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`를 **켜고** 검사해야 한다 — 기본값 false에선
+        가시성 helper가 조기 반환해 DB를 안 건드리므로, 조회를 인증 앞으로 옮기는 회귀가 나도
+        `compute_krx_visible` 미호출 단언이 조용히 통과한다(vacuous). 세션 미오픈까지 함께 잠근다.
+        """
+        from fastapi import HTTPException
+
+        async def _raise_401(request, check_revoked=False):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        build = MagicMock(return_value=_canned_snapshot("usdt:krw"))
+        premium = AsyncMock(return_value=True)
+        krx = MagicMock(return_value=True)
+        session = MagicMock()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.main.verify_firebase_token", new=_raise_401), \
+             patch("app.main.require_premium", new=premium), \
+             patch("app.database.SessionLocal", new=session), \
+             patch("app.entitlements.compute_krx_visible", new=krx), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", new=build):
+            r = self._get()
+        self.assertEqual(r.status_code, 401)
+        premium.assert_not_awaited()
+        session.assert_not_called()
+        krx.assert_not_called()
+        build.assert_not_called()
+        self.assertNotIn("supported_topics", r.json())  # 미인증자는 topic 열거 불가
+
+    def test_authenticated_uid_is_used_for_premium_and_entitlement(self):
+        """인증이 돌려준 uid가 **그대로** premium·entitlement 판정에 쓰여야 한다
+        (상수/다른 uid로 판정하면 남의 권한으로 서빙된다)."""
+        premium = AsyncMock(return_value=True)
+        krx = MagicMock(return_value=True)
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.main.verify_firebase_token",
+                   new=AsyncMock(return_value="uid-from-token")), \
+             patch("app.main.require_premium", new=premium), \
+             patch("app.entitlements.compute_krx_visible", new=krx), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync",
+                   return_value=_canned_snapshot("usdt:krw")):
+            r = self._get()
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(premium.await_args.args[0], "uid-from-token")
+        self.assertEqual(krx.call_args.args[1], "uid-from-token")
+
+    def test_premium_verdict_is_forwarded_not_assumed(self):
+        """`premium_active`는 require_premium **반환값**이어야 한다(핸들러의 True 하드코딩 금지).
+
+        ⚠️ 이 테스트가 잠그는 건 핸들러의 하드코딩까지다. `require_premium` 자체는 PENDING·INACTIVE가
+        아닌 **모든** 상태를 True로 접으므로(main.py `require_premium`), premium 상태가 새로 늘 때의
+        fail-open은 그 공통 helper에서 별도로 막아야 한다 — 이 테스트의 보장 범위 밖.
+        """
+        krx = MagicMock(return_value=True)
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch("app.main.require_premium", new=AsyncMock(return_value=False)), \
+             patch("app.entitlements.compute_krx_visible", new=krx), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync",
+                   return_value=_canned_snapshot("usdt:krw")):
+            self._get()
+        self.assertIs(krx.call_args.kwargs["premium_active"], False)
+
+    def test_error_responses_are_no_store(self):
+        """개인화 404(비-entitled의 KRX 포함)도 캐시 금지 — private 캐시가 404를 저장하면
+        entitlement 부여 뒤에도 404가 남는다."""
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch("app.main.require_premium", new=AsyncMock(return_value=True)):
+            unknown = self._get(topic="dxy")
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
+            dormant = self._get()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch("app.main.require_premium", new=AsyncMock(return_value=True)), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=None):
+            unavailable = self._get(topic="fx:usd-krw")
+        for label, resp in (("unknown", unknown), ("dormant", dormant),
+                            ("unavailable", unavailable)):
+            with self.subTest(label):
+                self.assertEqual(resp.headers.get("cache-control"), "no-store")
+
+    def test_unauthenticated_unknown_topic_also_401(self):
+        """미인증이면 unknown topic도 401 — 인증이 topic 판정보다 먼저."""
+        from fastapi import HTTPException
+
+        async def _raise_401(request, check_revoked=False):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=_raise_401):
+            r = self._get(topic="dxy")
+        self.assertEqual(r.status_code, 401)
+
+    # ── premium ────────────────────────────────────────────────────────────
+    def test_premium_inactive_403_and_no_build(self):
+        build = MagicMock(return_value=_canned_snapshot("usdt:krw"))
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="free-user")), \
+             patch("app.main.verify_premium_status",
+                   new=AsyncMock(return_value=PremiumStatus.INACTIVE)), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", new=build):
+            r = self._get()
+        self.assertEqual(r.status_code, 403)
+        build.assert_not_called()
+
+    def test_premium_pending_503(self):
+        """PENDING은 거부가 아니라 **재시도**(require_premium 공통 정책) — 503 + Retry-After."""
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="pending-user")), \
+             patch("app.main.verify_premium_status",
+                   new=AsyncMock(return_value=PremiumStatus.PENDING)):
+            r = self._get()
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("retry-after", {k.lower() for k in r.headers})
+
+    def test_premium_active_serves(self):
+        canned = _canned_snapshot("usdt:krw")
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="paid-user")), \
+             patch("app.main.verify_premium_status",
+                   new=AsyncMock(return_value=PremiumStatus.ACTIVE)), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=canned):
+            r = self._get()
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), canned)
+
+    # ── KRX per-user (§3.2 존재 완전 비노출) ────────────────────────────────
+    def _krx_ctx(self, krx_visible):
+        """전역 KRX 게이트 on + per-user 가시성 주입."""
+        return (
+            patch.object(config, "TOPIC_DISPATCHER_ENABLED", True),
+            patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True),
+            patch("app.main.verify_firebase_token", new=AsyncMock(return_value="paid-user")),
+            patch("app.main.require_premium", new=AsyncMock(return_value=True)),
+            patch("app.entitlements.compute_krx_visible", return_value=krx_visible),
+        )
+
+    def test_krx_topic_hidden_from_non_entitled_premium_user(self):
+        """entitlement 없으면 KRX는 **미지원 topic과 구분 불가**해야 한다(존재 비노출)."""
+        build = MagicMock(return_value=_canned_snapshot("krx:usd-krw-futures"))
+        a, b, c, d, e = self._krx_ctx(krx_visible=False)
+        with a, b, c, d, e, \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", new=build):
+            r = self._get(topic="krx:usd-krw-futures")
+        self.assertEqual(r.status_code, 404)
+        body = r.json()
+        self.assertEqual(body["error"], "unknown_topic")
+        build.assert_not_called()
+        # 에코에도 존재하면 안 됨 — 404 코드만 맞추고 목록으로 새는 회귀 차단
+        self.assertNotIn("krx:usd-krw-futures", body["supported_topics"])
+
+    def test_supported_topics_echo_hides_krx_from_non_entitled(self):
+        """다른 unknown topic 요청의 에코에서도 KRX가 빠진다."""
+        a, b, c, d, e = self._krx_ctx(krx_visible=False)
+        with a, b, c, d, e:
+            r = self._get(topic="dxy")
+        body = r.json()
+        self.assertEqual(body["error"], "unknown_topic")
+        self.assertNotIn("krx:usd-krw-futures", body["supported_topics"])
+        self.assertIn("usdt:krw", body["supported_topics"])  # 다른 topic은 정상 노출
+
+    def test_krx_topic_served_to_entitled_user(self):
+        canned = _canned_snapshot("krx:usd-krw-futures")
+        a, b, c, d, e = self._krx_ctx(krx_visible=True)
+        with a, b, c, d, e, \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=canned):
+            r = self._get(topic="krx:usd-krw-futures")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), canned)
 
 
 if __name__ == "__main__":
