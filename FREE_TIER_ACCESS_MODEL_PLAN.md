@@ -195,9 +195,14 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
 - **A1 lease horizon** — lease 만료를 부여 시점이 아니라 **마지막 authoritative entitlement 확인 시각**에 고정한다.
   ```
-  authorization_valid_until = authoritative_verified_at + LEASE(15분)
-  lease_expires_at          = min(now + LEASE, authorization_valid_until)
+  lease_expires_at = min(
+      now                            + LEASE(15분),
+      premium_verified_at            + LEASE,   # RevenueCat entitlement (authoritative)
+      firebase_identity_verified_at  + LEASE,   # check_revoked=True 확인 (authoritative)
+  )
   ```
+  **authoritative한 것은 모두 같은 horizon 모델을 탄다** — entitlement든 identity(revocation)든,
+  마지막 확인 시점 + 15분을 넘겨 lease를 줄 수 없다. 특례 없음.
   - 왜: 권한 상실 시각 L 이전의 마지막 authoritative 확인 V(≤L)로 부여된 lease는 최대 `V+15 ≤ L+15`에 만료
     → **총 revoke 상한이 정확히 15분**. lease 15분 정책도 그대로 유지된다.
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
@@ -216,7 +221,13 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   외부 스토어 → RevenueCat 전파 지연은 서버 lease가 보장할 수 없다. 문서·운영 커뮤니케이션에서 이 경계를 흐리지 말 것.
 - **A4 REST와 분리** — REST의 stale fallback(최대 1시간, app/subscription.py:23)은 **그대로 유지**한다.
   strict 검증은 **WS 인가 경로에만** 적용한다(가용성 우선 표면과 권리 보호 표면의 정책을 분리).
-- **A5 single-flight** — 같은 UID의 동시 authoritative 검증은 1회로 합친다(다중 연결·다중 topic 요청).
+  - ⚠️ **webhook 무효화 범위 확장**: `invalidate_user_cache`(app/subscription.py:106)는 현재 `_cache`와 `_pending`만
+    지운다. 신규 **strict cache(`verified_at_monotonic`)와 single-flight 결과도 함께 무효화**하지 않으면
+    webhook 이후에도 **구 authoritative horizon을 재사용**한다(= 취소가 반영 안 됨).
+- **A5 single-flight (+ owner 격리)** — 같은 UID의 동시 authoritative 검증은 1회로 합친다(다중 연결·다중 topic).
+  - **한 WebSocket이 끊겨도 공유 검증 owner를 취소하지 않는다**(다른 연결이 그 결과를 기다린다).
+  - 실패·취소 후 슬롯은 **identity-safe하게 정리**돼 다음 요청이 다시 검증할 수 있어야 한다.
+  - 1B `FirebaseAuthTokenProvider`와 **같은 패턴** — 그 owner 격리·epoch 정리 테스트를 템플릿으로 재사용한다.
 - **A6 strict verifier 반환 계약** — WS 인가용 검증기는 `bool`이 아니라 3-state를 반환한다.
   ```
   active(verified_at_monotonic) | inactive(verified_at_monotonic) | temporarily_unavailable(retry_after_seconds)
@@ -250,7 +261,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **처리 순서**: B 토큰 **검증 성공 즉시** A의 구독 제거 → 이후 B의 premium 확인이 실패해도 **A 구독을 복원하지 않는다**.
     반대로 **B 토큰 자체가 무효면 A의 유효 lease는 건드리지 않는다**.
   - 제거는 `reauth_required`를 발신하지 않는다(lease 만료가 아님). **대신 ack이 결과 전체를 실어 권위를 갖는다** —
-    ack의 **`active_topics`(그 연결의 최종 구독 전체)** 로 클라가 서버 상태에 수렴한다(D2).
+    ack의 **`active_subscriptions`(그 연결의 최종 구독 전체 + topic별 generation·잔여 duration)** 로 클라가 서버 상태에 수렴한다(D2).
     ⚠️ ack이 **이번 요청 topic 결과만** 담으면, B가 일부 topic만 요청했을 때 클라는 언급되지 않은 A 시절 topic을
     여전히 accepted로 오인한다 — "ack이 권위 있는 응답"이 사실이 되려면 전체 상태를 실어야 한다.
   - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS FXiApp.swift:124-126은 signedOut에서만 WS stop /
@@ -266,10 +277,15 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     send hang 시 다음 sweep이 **같은 generation을 중복 통지**한다.
   - 제거·갱신은 `(ws, topic, lease_generation)` **CAS** — 자기 세대일 때만. 갱신된 generation은 보존된다.
   - `send_json` 실패·timeout 시 **소켓 전체를 정리**한다(부분 상태 잔존 금지).
+  - **claim된 항목(`claimed_expired`)은 제거 전이라도 `get_subscribers`·`send_if_authorized`에서 즉시 제외**된다.
+    아니면 통지를 보내는 동안 live publish가 다시 통과한다.
 - **C4 일시적 실패는 registry를 바꾸지 않는다** — Firebase 인증서/네트워크 장애(main.py:2827 → 503)나
   RevenueCat PENDING(main.py:73 → 503)을 `invalid_token`/`premium_required`로 접으면 **기존 구독을 잘못 제거**한다.
   → 전체-요청 오류 `temporarily_unavailable`(retryable)을 추가하고, 이 경우 **registry 불변 + lease 미연장**.
   기존 lease는 원래 시각에 만료되므로 장애가 길어지면 자연히 fail-closed로 수렴한다.
+  - **클라 재시도는 잔여 lease를 넘기지 않는다**: `retry_at = min(retry_after_seconds, lease_remaining − safety)`.
+    남은 시간이 부족하면 기다리지 말고 **즉시 재인증 또는 reconnect**한다
+    (`retry_after`를 곧이곧대로 기다리다 lease가 만료되면 데이터가 끊긴 뒤에야 복구를 시작하게 된다).
 
 #### D. wire 계약 추가 (§8 확장)
 
@@ -277,7 +293,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 
 - **D1 lease는 topic별** — 한 ack 안의 accepted들은 같은 순간 갱신되니 duration이 같지만,
   **이번 요청에 없던 기존 topic은 자기 lease를 유지**한다. 따라서 generation·duration은 topic 단위 필드다.
-- **D2 `subscription_ack` schema**
+- **D2 `subscription_ack` schema** — subscribe/unsubscribe **공통 응답**(D8).
   ```json
   {
     "type": "subscription_ack",
@@ -287,14 +303,20 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
       {"topic": "fx:usd-krw", "lease_generation": 12, "lease_duration_seconds": 660}
     ],
     "rejected_topics": [{"topic": "krx:usd-krw-futures", "error": "krx_entitlement_required"}],
-    "active_topics": ["fx:usd-krw"]
+    "active_subscriptions": [
+      {"topic": "fx:usd-krw", "lease_generation": 12, "lease_duration_seconds": 660}
+    ]
   }
   ```
-  - **`lease_generation`(topic별)**: 클라가 늦게 도착한 구 `reauth_required`를 **무시**할 수 있게 하는 유일한 수단.
-    ack에 없으면 D3와 대조 불가 → 필수.
-  - **`identity_generation`(연결별)**: UID 재바인딩·reconnect 세대. 구 세대 ack은 클라가 폐기한다.
-  - **`active_topics`**: 그 연결의 **최종 구독 전체**. C1의 UID 전환 전량 제거가 클라에 전달되는 경로다
-    (이번 요청 topic 결과만으로는 미언급 topic의 제거를 알 수 없다).
+  - **`accepted_topics` = 이번 요청의 결과** / **`active_subscriptions` = 연결의 최종 상태 전체**. 역할이 다르다.
+  - `active_subscriptions`는 **문자열 목록이 아니라 topic별 `lease_generation` + 남은 `lease_duration_seconds`**를
+    싣는다. 문자열만으로는 **이번 요청에 없던 기존 topic의 lease 상태를 복구할 수 없어**, 클라가 상태를 잃었거나
+    UID reset 후 전체 수렴할 때 부족하다(= ack이 "권위 있는 상태"가 되지 못한다).
+  - **`lease_generation`(topic별)**: 늦게 도착한 구 `reauth_required`를 무시하는 유일한 수단(D3와 대조).
+  - **`identity_generation`(연결별)**: **같은 소켓에서의 UID 재바인딩만** 표현한다.
+    ⚠️ **reconnect는 표현하지 못한다** — 새 WebSocket은 서버 상태가 처음부터 시작하므로 구 소켓 ack과
+    새 소켓 ack을 전역적으로 구분할 수 없다. **reconnect·구 receive task 격리는 클라가 소유한
+    local `connectionGeneration`**이 담당한다(F).
 - **D3 `reauth_required` schema** — ack과 대조 가능해야 하므로 **topic별 generation**을 싣는다.
   ```json
   {"type": "reauth_required", "topics": [{"topic": "krx:usd-krw-futures", "lease_generation": 12}], "reason": "lease_expired"}
@@ -334,27 +356,52 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | `request_id` | UUID 문자열, 36자 고정 |
   | 중복 topic | **first-occurrence 순서로 제거**(정규화) |
   값은 조정 가능하지만 **미정 상태로 test-first에 들어가지 않는다**.
+  - ⚠️ **frame 상한은 앱 레벨만으로 강제할 수 없다** — `handle_client_message(raw_text)`가 실행되는 시점엔
+    ASGI 서버가 **이미 frame 전체를 메모리에 받은 뒤**다(main.py:928 `await websocket.receive_text()`).
+    실제 자원 보호가 목적이라면 **Uvicorn/WebSocket `max_size` 또는 프록시 계층에서도 16 KiB를 강제**하고
+    초과 시 **close code 1009**로 끊어야 한다. 앱 레벨 `len()` 검사는 프로토콜 검증(방어 심화)일 뿐이다.
+    → 배포 설정(uvicorn 인자/nginx)도 계약의 일부이며 테스트 대상.
+
+- **D8 인증된 `unsubscribe` 계약 (§8 원문 공백)** — §8은 subscribe/ack/reauth만 정의했으나 **iOS는 unsubscribe를
+  실제로 쓴다**(ExchangeRateViewModel.swift:333 — KRX 권한 해제 시). 현재 `sendTopicCommand`는 request_id도 ack도
+  없는 **fire-and-forget**이라, 유실되면 서버·클라 상태가 **lease 만료까지 어긋난다**.
+  → **unsubscribe도 `request_id`를 갖고 `subscription_ack`(D2)를 받는다.** ack의 `active_subscriptions`가
+  최종 상태를 확정한다.
+  - 불변식: **상태를 바꾸는 모든 클라 메시지는 `request_id`를 갖고, ack이 `active_subscriptions` 전체를 반환한다.**
+  - (대안이던 `subscribe(replace_all=true)`는 증분 subscribe를 유지하는 현 설계와 덜 맞아 채택하지 않음.)
+- **D9 오류 코드 완결** — 테스트 가능하려면 값이 확정돼야 한다.
+  | 상황 | 응답 |
+  |---|---|
+  | malformed payload / 형식 위반 | `invalid_request` (전체-요청) |
+  | D7 상한 위반 | `request_too_large` (전송 가능 시) 또는 **close 1009**(프레임 계층) |
+  | 일시 장애 | `temporarily_unavailable` + **`retry_after_seconds`** |
+  | `request_id` UUID 형식 오류 | `invalid_request` |
+  | `topics` 빈 목록 / 중복 정규화 후 빈 목록 | `invalid_request` (no-op 아님 — 조용한 실패 금지) |
+  | 인증된 unsubscribe 성공·실패 | `subscription_ack` (D8, 동일 schema) |
 
 #### E. 롤아웃·정책
 
 - **E1 capability flag 분리** — `TOPIC_DISPATCHER_ENABLED=false`면 subscribe를 **조용히 무시**하므로(:266 부근)
   신규 클라는 ack timeout만 반복한다. **인증 protocol capability를 publisher flag와 분리**하거나,
   인증 형식 요청에는 `topics_disabled` ack를 반환한다. 구형 무인증 메시지만 silent-ignore로 남긴다.
-- **E2 `check_revoked` 정책 = 바인딩 시 `True` / 정기 갱신 시 `False`** (절충).
-  - **최초 UID 바인딩 · UID 변경 시 `True`** — 새 identity가 들어오는 순간은 revoked/disabled 세션을 막는다.
-  - **같은 UID의 정기 lease 갱신은 `False`** — 11~12분마다 Firebase `get_user()` RTT를 추가하지 않는다.
-  - ⚠️ 구 문서가 든 근거("`True`면 일시 실패가 401로 표면화돼 C4와 충돌")는 **부분적으로 틀렸다** —
-    오류 매핑을 고치면 해결되므로 본질적 충돌이 아니다. 실제 근거는 **RTT 비용**과, KRX 취소가
-    Firebase revocation이 아니라 **RevenueCat entitlement 경로**로 흘러 A1이 이미 상한을 잡는다는 점이다.
-  - **명시적 잔여 보안 정책(승인 대상)**: 이미 연결된 세션은 계정 삭제·비활성화 후에도
-    **ID token 자연 만료(최대 약 1시간)까지** topic 접근이 유지될 수 있다.
-    완화: 계정 삭제 경로는 자체적으로 `check_revoked=True`(main.py:3897)를 쓰고 클라도 teardown한다.
-    운영 요구가 생기면 정기 갱신도 `True`로 승격한다(오류 매핑 정비 동반).
+- **E2 `check_revoked` = A1 horizon에 통합** (별도 정책 waiver 폐기).
+  - `firebase_identity_verified_at`을 **entitlement와 동일한 authoritative horizon**으로 취급한다(A1의 3-way min).
+    → `check_revoked=True`는 **매 메시지가 아니라 horizon 갱신 시에만** 수행하면서도,
+    삭제·비활성 계정 접근이 **최대 15분**으로 제한된다.
+  - ⚠️ 구 안(최초 바인딩만 `True`, 이후 최대 ~1시간 허용)은 **폐기**. 그 안은
+    "삭제된 계정이 ID token 자연 만료까지 접근 가능"이라는 **별도 보안 정책 승인**을 요구했는데,
+    horizon 통합이 **추가 비용 없이**(갱신 주기가 같음) 그 잔여를 없앤다 — 특례를 둘 이유가 없다.
+  - 비용: horizon 갱신마다 Firebase `get_user()` RTT 1회가 RevenueCat 조회와 **같은 주기**로 추가된다
+    (~11~12분/연결, 500명 기준 여유). 실패는 A6 `temporarily_unavailable` → C4(미연장 → 자연 만료).
 
 #### F. iOS 슬라이스 입력 (여기서 잠그지 않음 — 슬라이스 2에서 코드와 함께 설계)
 
-> ⚠️ 단 **ack/`reauth_required` schema(D2·D3) · 재인증 공식(D6) · UID reset 수렴 방식(C1·D2 `active_topics`)은
-> 서버 wire 설계**이므로 D/C에서 이미 확정했다. 아래는 그 계약을 소비하는 **클라 내부 구조**만이다.
+> ⚠️ 단 **ack/`reauth_required` schema(D2·D3) · 재인증 공식(D6) · unsubscribe ack(D8) ·
+> UID reset 수렴 방식(C1·D2 `active_subscriptions`)은 서버 wire 설계**이므로 D/C에서 이미 확정했다.
+> 아래는 그 계약을 소비하는 **클라 내부 구조**만이다.
+>
+> **`connectionGeneration`은 클라 소유**다 — 서버 `identity_generation`은 같은 소켓의 UID 재바인딩만 표현하므로
+> reconnect 식별에 쓸 수 없다(D2). 구 receive task·구 request_id의 결과 폐기는 클라 generation이 담당한다.
 
 
 - `subscribedTopics` 단일 Set(WebSocketService.swift:27)을 **desired / pending request / accepted**로 분리.
@@ -381,13 +428,25 @@ send 실패 시 소켓 정리, 일부 topic 만료 시 나머지 유지) / 바�
 
 보강(codex 감사):
 ack의 topic별 `lease_generation` ↔ 늦게 온 구 `reauth_required` 무시 /
-UID 변경 ack의 `active_topics`가 전체 상태로 수렴(미언급 topic 제거가 클라에 전달) /
+UID 변경 ack의 `active_subscriptions`가 전체 상태로 수렴(미언급 topic 제거가 클라에 전달) /
 **wall clock 역행에도 strict horizon 불변**(A1 monotonic 축) /
 connection lock 안에서 sweep↔재인증 **양방향** 순서 /
 만료 claim 후 통지 timeout·중복 sweep 없음 /
 **10분 lease → 6~7분 재인증** 계산(D6) / `temporarily_unavailable`의 `retry_after_seconds` /
 D7 상한 **각각의 경계값**(frame 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
 **invalid token은 기존 UID·lease 불변** / 구 `request_id` ack과 구 `identity_generation` ack 무시.
+
+보강 2차(codex 감사):
+인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음) /
+`active_subscriptions`가 **미언급 기존 topic의 generation·잔여 duration까지** 실어 클라가 상태 복구 가능 /
+서버 `identity_generation`은 **같은 소켓 UID 재바인딩만** 표현(reconnect 식별은 클라 `connectionGeneration`) /
+**identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
+frame 상한이 **ASGI/프록시 계층에서 강제**되고 초과 시 close 1009 /
+`invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
+`retry_at = min(retry_after, lease_remaining − safety)` — 재시도가 잔여 lease를 넘기지 않음 /
+strict verifier single-flight의 **owner 격리·정리**(한 소켓 종료가 공유 owner를 취소하지 않음, 1B 테스트 템플릿) /
+**claim된 항목이 `get_subscribers`·`send_if_authorized`에서 즉시 제외**(통지 중 live publish 통과 금지) /
+**webhook이 strict cache·single-flight 결과까지 무효화**(구 horizon 재사용 금지).
 
 #### H. 동반 문서 갱신 (구현 커밋에서)
 
