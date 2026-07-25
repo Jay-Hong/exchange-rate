@@ -46,27 +46,48 @@ class TestUnauthenticatedGraphKrxFailClosed(unittest.TestCase):
             self.assertTrue(entitlements.krx_gates_open(),
                             "전역 게이트가 안 열리면 아래 검사들이 무의미해진다")
 
-    def test_accessors_default_to_krx_hidden(self):
-        """krx 포함은 **호출자가 명시적으로** `krx_visible=True`를 줘야 한다 — default는 숨김.
+    #: 사용자에게 실제로 서빙되는 진입점 — 여기 빠지면 그 경로가 통째로 무방비다.
+    #: (도출이 0건이 되는 vacuous 실패를 막는 하한이기도 하다.)
+    _REQUIRED_ENTRY_POINTS = {
+        "app.graph_v2.build_catalog",
+        "app.graph_v2.build_tab",
+        "app.graph_v2.strip_krx_if_not_allowed",
+        "app.graph_v2_intraday.build_tab_1d_payload",
+        "app.graph_v2_intraday.build_tab_1d_in_progress",
+    }
 
-        env flag가 아니라 파라미터라, `.env` 한 줄로 §3.2 위반 상태를 켤 수 없다(codex).
-        무인증 endpoint(`/api/v2/graph/tab`·`/catalog`)는 넘길 사용자가 없어 항상 default를 쓴다.
+    def test_every_krx_visible_function_defaults_to_hidden(self):
+        """`krx_visible`을 받는 **모든** 함수의 default가 False + keyword-only인지.
+
+        목록을 **하드코딩하지 않고 모듈에서 도출**한다:
+        (a) 새 함수를 추가하며 목록에 넣는 걸 잊으면 그 경로가 조용히 무방비가 되고,
+        (b) 하드코딩 목록은 개수를 보고할 때 틀리기 쉽다(실제로 세 번 틀렸다 — codex 지적).
+        도출하면 둘 다 사라진다.
+
+        keyword-only까지 보는 이유: positional로 받을 수 있으면 인자 순서 실수로 의도치 않게
+        True가 들어갈 수 있다.
         """
         import inspect
-        from app.graph_v2 import (_effective_tab_series, _effective_default_visible,
-                                  build_catalog, build_tab, strip_krx_if_not_allowed)
-        from app.graph_v2_intraday import (tab_1d_specs, tab_1d_all_series,
-                                           tab_1d_default_visible, build_tab_1d_payload,
-                                           build_tab_1d_in_progress)
-        # krx_visible을 받는 **전 함수** — 하나라도 빠지면 그 경로가 무방비로 남는다.
-        for fn in (_effective_tab_series, _effective_default_visible, build_catalog,
-                   build_tab, strip_krx_if_not_allowed,
-                   tab_1d_specs, tab_1d_all_series, tab_1d_default_visible,
-                   build_tab_1d_payload, build_tab_1d_in_progress):
-            with self.subTest(fn=fn.__name__):
+        from app import graph_v2, graph_v2_intraday
+
+        discovered = set()
+        for module in (graph_v2, graph_v2_intraday):
+            for name, fn in sorted(vars(module).items()):
+                if not inspect.isfunction(fn) or fn.__module__ != module.__name__:
+                    continue
                 param = inspect.signature(fn).parameters.get("krx_visible")
-                self.assertIsNotNone(param, f"{fn.__name__}에 krx_visible 파라미터가 없다")
-                self.assertIs(param.default, False, f"{fn.__name__} default가 fail-closed가 아니다")
+                if param is None:
+                    continue
+                qualified = f"{module.__name__}.{name}"
+                discovered.add(qualified)
+                with self.subTest(fn=qualified):
+                    self.assertIs(param.default, False,
+                                  f"{qualified} default가 fail-closed(False)가 아니다")
+                    self.assertIs(param.kind, inspect.Parameter.KEYWORD_ONLY,
+                                  f"{qualified} krx_visible이 keyword-only가 아니다")
+
+        missing = self._REQUIRED_ENTRY_POINTS - discovered
+        self.assertFalse(missing, f"krx_visible 파라미터가 없는 진입점: {sorted(missing)}")
 
     def test_long_period_series_exclude_krx_even_with_gates_open(self):
         from app.graph_v2 import _effective_tab_series, _effective_default_visible
