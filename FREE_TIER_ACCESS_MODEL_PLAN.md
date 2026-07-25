@@ -219,15 +219,21 @@
   **∧ `is_transient_db_error`**(영구 SQLSTATE deny-list: 28000·28P01·3D000·42501) →
   503 `{"error": "temporarily_unavailable"}`(WS `subscription_error`와 같은 어휘) + no-store,
   **Retry-After 없음**(PENDING 초 단위 신호와 충돌 + DB failover는 분 단위라 storm. 대신 가이드에
-  클라 지수 backoff + jitter를 계약으로 고정), 판정·빌드 **양쪽** 감쌈(한쪽만 감싸면 상태코드가
-  topic 종류에 따라 갈린다).
+  **유한 재시도**를 계약으로 고정 — 3회 상한 + 조기종료 + 취소 4조건), 판정·빌드 **양쪽** 감쌈
+  (한쪽만 감싸면 상태코드가 topic 종류에 따라 갈린다).
   ⛔ `except Exception`은 물론 **`except SQLAlchemyError`도 너무 넓다**(ProgrammingError·
   InvalidRequestError 등 영구 결함 포함). 클래스만으로도 부족해(PEP 249 `OperationalError`는
   인증 실패·DB 부재 같은 영구 케이스 포함) SQLSTATE deny-list를 덧댔다 —
   **allow-list가 아닌 이유**: connect 실패/failover가 SQLSTATE 없이 도착해(psycopg 3.3 실측:
   도달 불가 호스트 → `OperationalError`, `sqlstate is None`) allow-list면 **가장 중요한 케이스가
-  500**이 된다. 비용 비대칭도 같은 방향(미지→transient는 bounded 재시도 낭비 / transient→permanent는
+  500**이 된다. 비용 비대칭도 같은 방향(미지→transient는 재시도 낭비 / transient→permanent는
   회복 가능한 상태 포기).
+  ⚠️ **단 그 비대칭은 재시도가 유한할 때만 성립한다** — codex 지적. 초안은 "bounded 재시도"라고
+  적었지만 가이드엔 backoff 모양만 있고 **종료 조건이 없어** 계약상 무기한이었다. 이 endpoint는
+  best-effort 가속기(정본은 WS snapshot)이므로 **3회 상한 + snapshot 도착 시 조기종료 + lifecycle·
+  generation·게이트 변경 시 취소**를 가이드 §3에 명시해 전제를 실제로 만들었다.
+  (현 iOS는 이미 만족 — KRX는 `krxBootstrapMaxAttempts=3`, tether/fx는 재시도 자체가 없다.
+  위험은 "다음 구현자가 backoff만 보고 무기한 루프를 만드는 것"이었다.)
 - 두 flag 모두 2026-07-22 route auth 감사 완화 이후 false다.
 
 ---

@@ -168,10 +168,24 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   ⚠️ 인증 인프라 장애는 **토큰이 없어도** 401보다 먼저 나올 수 있다(초기화 확인이 헤더 검사보다 앞).
   ⚠️ `temporarily_unavailable`은 WS `subscription_error`의 같은 이름과 **같은 의미**(판정 불가)지만,
   REST 쪽은 `Retry-After`를 주지 않는다 — 5초 재시도를 지시하면 DB failover 동안 storm이 된다.
-  **헤더가 없다는 사실만으로는 storm이 막히지 않으므로 클라 재시도를 계약으로 고정한다**:
-  `temporarily_unavailable` 503은 **지수 backoff + jitter**(초기 ≥2s, 배수 2, **상한 60s**,
-  full jitter)로만 재시도하고, cold-start bootstrap처럼 여러 topic을 동시에 요청하는 경로는
-  **topic별 독립 타이머**를 쓴다(동시 4~5건이 같은 시각에 재시도하지 않도록).
+  **헤더가 없다는 사실만으로는 storm이 막히지 않으므로 클라 재시도를 계약으로 고정한다.**
+
+  ⚠️ 전제: 이 endpoint는 **best-effort 가속기**지 데이터 경로의 정본이 아니다(정본은 §3 PRIMARY의
+  WS snapshot). 그래서 재시도는 **짧고 유한**해야 한다 — 긴 backoff는 의미가 없다. 수 초 뒤엔 WS
+  snapshot이 이미 도착해 있을 가능성이 높고, 그때 도착한 REST 응답은 §5 merge에서 구값으로 버려진다.
+
+  | 항목 | 계약 |
+  |---|---|
+  | 총 시도 | **3회 이내**(첫 시도 포함). 소진하면 **포기하고 WS snapshot에 맡긴다** — 무기한 재시도 금지 |
+  | backoff | 0.5s → 1.5s(±20% jitter). 마지막 값 이후는 재사용 |
+  | 조기 종료 | 그 topic의 snapshot을 이미 받았으면(WS/다른 경로) 남은 시도 취소 |
+  | 취소 | 앱 background 전환 · 연결 generation 변경 · 게이트/권한 변경 시 즉시 |
+  | 동시성 | **topic별 독립 타이머** — cold-start 4~5건이 같은 시각에 재시도하지 않도록 |
+  | 재시도 **대상 아님** | 401 · 403 · 404 3종(상태가 바뀌어야 해소된다) |
+
+  ℹ️ 참조 구현: iOS `ExchangeRateViewModel.bootstrapKrxWithRetry`(`krxBootstrapMaxAttempts = 3`,
+  `krxBootstrapBackoffsSeconds = [0.5, 1.5]`, WS-wins revision 체크 + 취소 4조건).
+  tether/fx bootstrap은 현재 **재시도 없음**(1회 시도 후 WS에 위임) — 그것도 이 계약을 만족한다.
 
   **404 세 종류** — 전부 재시도 무의미(상태가 바뀌어야 해소된다):
   `topics_disabled`(`TOPIC_DISPATCHER_ENABLED` off = 출시 전) /
