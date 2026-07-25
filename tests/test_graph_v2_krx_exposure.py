@@ -1,19 +1,25 @@
-"""무인증 graph v2 표면의 KRX fail-closed 게이트 (ADR-039 §3.1 / §6.1, 2026-07-26).
+"""무인증 graph v2 표면의 KRX fail-closed 계약 (ADR-039 §3.1 / §6.1, 2026-07-26).
 
 `GET /api/v2/graph/tab`·`/catalog`은 **인증이 없는데** series 목록을 `krx_gates_open()`(G2∧G3)
 **만으로** 정했다. 즉 `KRX_CLIENT_DISTRIBUTION_ENABLED=true`로 되돌리는 순간 무인증 caller가
-KRX 그래프 series를 받는다 — E3가 REST twin에서 막은 것과 **같은 누수**가 sibling에 남아 있었다.
+KRX 그래프 series를 받았다 — E3가 REST twin에서 막은 것과 **같은 누수**가 sibling에 남아 있었다.
+
+현재 구조: krx.* 포함 여부는 **호출자가 넘기는 `krx_visible`(default False)**이 정한다.
+env flag가 아니다 — flag는 per-user 게이트를 만들지 않은 채 `.env` 한 줄로 §3.2 위반을 켤 수 있어
+기각했다. 이 endpoint들엔 인증이 없어 넘길 사용자가 없으므로 실제 호출자는 항상 default를 쓴다.
 
 이 파일이 잠그는 것:
-1. **전역 게이트를 전부 열어도** 무인증 graph 표면에 `krx.*`가 나타나지 않는다(3m/1y/1w + 1d + catalog)
-2. 그 이유가 `krx_unauthenticated_graph_exposure_allowed()` 상수라는 것 — 이 값을 True로 바꾸면
-   여기가 red가 되어 "per-user 게이트가 실제로 있는가"를 묻게 된다
+1. **전역 게이트를 열어도** 무인증 graph 표면에 `krx.*`가 나타나지 않는다(3m/1y/1w + 1d + catalog)
+2. `krx_visible`을 받는 **모든** 함수의 default가 False + keyword-only
+   (목록 하드코딩이 아니라 모듈에서 도출 — `test_every_krx_visible_function_defaults_to_hidden`)
 3. 내용 레벨 검사 — series 목록뿐 아니라 **응답 JSON 어디에도** 'krx' 문자열이 없다
    (무료 snapshot의 `_assert_krx_free`와 같은 belt-and-suspenders)
+4. **캐시 hit도 우회할 수 없다** — serve-time strip (`TestCachedPayloadCannotBypassGate`)
 
-⚠️ 전역 게이트 patch는 **3개**가 필요하다(`KRX_FUTURES_ENABLED` ∧ `KRX_CLIENT_DISTRIBUTION_ENABLED`
-= runtime 조합). 하나라도 빠지면 게이트가 애초에 닫혀 있어 이 테스트가 vacuous해진다 —
-`test_gates_are_actually_open_in_fixture`가 그걸 막는다.
+⚠️ `_gates_open()`이 patch하는 flag가 **하나라도 빠지면** 전역 게이트가 애초에 닫혀 있어 이 파일의
+검사들이 vacuous해진다 — `test_gates_are_actually_open_in_fixture`가 그걸 막는다.
+(개수를 적지 않는 이유는 [[feedback_self_verification_discipline]] I — 손으로 센 숫자는 틀린다.
+실제로 이 문장의 구 버전이 2개를 나열해 놓고 "3개"라고 적고 있었다.)
 """
 import json
 import unittest
@@ -133,10 +139,11 @@ class TestUnauthenticatedGraphKrxFailClosed(unittest.TestCase):
 class TestCachedPayloadCannotBypassGate(unittest.TestCase):
     """**캐시 hit 우회 차단** (codex Major, 2026-07-26).
 
-    `/api/v2/graph/tab`은 Redis read-through 캐시라 **cache hit은 build를 안 거친다**.
-    승인 flag가 true였을 때 구워진 payload는 flag를 끈 뒤에도 TTL(최대 30분) 동안 살아 있고,
-    startup DEL은 예외를 비치명으로 흡수해서(main.py) 최종 방어선이 못 된다.
-    → serve-time `strip_krx_if_not_allowed`가 3경로 공통 exit에서 한 번 더 막는다.
+    `/api/v2/graph/tab`은 **사용자 공통** Redis read-through 캐시라 **cache hit은 build를 안 거친다**
+    → build 시점과 다른 판정으로 서빙될 수 있다. 과거 배포가 krx를 포함한 채 구운 payload는
+    TTL(최대 30분) 동안 남고, startup DEL은 예외를 비치명으로 흡수해서(main.py) 최종 방어선이 못 된다.
+    → serve-time `strip_krx_if_not_allowed`가 3경로(장기 hit / 1d closed / 1d in_progress)
+    공통 exit에서 한 번 더 막는다.
 
     여기서는 **오염된 캐시를 직접 주입**해 재현한다(빌더를 거치지 않는 경로).
     """
