@@ -52,6 +52,38 @@ TRANSIENT_DB_ERRORS = (
     sqlalchemy_exc.DisconnectionError,
 )
 
+# 클래스만으로는 못 거르는 **명백한 영구 오류** — `OperationalError`로 도착하지만 재시도로 절대
+# 안 풀리는 설정·권한 문제다 (codex Medium: PEP 249 OperationalError는 "data source name is not
+# found" 같은 영구 케이스도 포함한다).
+PERMANENT_DB_SQLSTATES = frozenset({
+    "28000",   # invalid_authorization_specification
+    "28P01",   # invalid_password
+    "3D000",   # invalid_catalog_name (DB 없음)
+    "42501",   # insufficient_privilege
+})
+
+
+def is_transient_db_error(exc: BaseException) -> bool:
+    """이 DB 오류가 **재시도로 해소될 수 있는가** (503 vs 500).
+
+    **폴라리티가 계약이다 — 모르면 transient로 본다(deny-list).**
+    allow-list(아는 것만 transient, 나머지 re-raise)는 반대로 위험하다: 가장 중요한 transient인
+    **connect 실패·failover가 SQLSTATE 없이 도착**하기 때문이다. psycopg 3.3 실측 — 도달 불가
+    호스트 연결 시 `OperationalError`이고 `sqlstate is None`(libpq 클라이언트측 오류라 서버
+    응답 코드가 없다). allow-list면 그 케이스가 500이 되어 **이 503의 존재 이유가 사라진다.**
+
+    비용 비대칭도 같은 방향이다: 미지의 오류를 transient로 접으면 총체적 장애 동안 bounded 재시도가
+    낭비될 뿐이지만(그 상황엔 어차피 전 endpoint가 죽는다), transient를 permanent로 접으면
+    **회복 가능한 상태를 포기**한다.
+
+    ⚠️ 남은 부정확: `InterfaceError`의 use-after-close 같은 코드 결함은 SQLSTATE가 없어 여기서
+    transient로 분류된다. `logger.exception`이 실제 클래스·traceback을 남기므로 진단은 가능하다.
+    flip 후 `topic_snapshot_db_unavailable` 실 telemetry가 쌓이면 그때 정밀화한다(추측으로 SQLSTATE
+    allow-list를 짜면 위 connect 케이스를 깬다).
+    """
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return sqlstate not in PERMANENT_DB_SQLSTATES
+
 # HTTP Basic Auth 설정
 security = HTTPBasic()
 
@@ -2832,12 +2864,15 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
                 "supported_topics": list(access.supported_topics),
             })
         payload = await asyncio.to_thread(_build_snapshot_sync, topic)
-    except TRANSIENT_DB_ERRORS:
+    except TRANSIENT_DB_ERRORS as db_exc:
         # DB 순단 = 인프라 transient지 결함이 아니다 → 503(구 동작은 plain 500이라 클라 재시도
         # 분류에서 빠졌다). 판정·빌드를 **함께** 감싼다 — 한쪽만 감싸면 상태코드가 topic 종류에
         # 따라 갈린다(비-게이팅 topic은 판정 경로를 안 타므로).
-        # ⛔ 경계는 `TRANSIENT_DB_ERRORS`(좁은 4종)다 — `except Exception`은 물론
-        # `except SQLAlchemyError`도 너무 넓다(ProgrammingError·InvalidRequestError 등 영구 결함 포함).
+        # ⛔ 경계는 `TRANSIENT_DB_ERRORS`(좁은 4종) + `is_transient_db_error`(영구 SQLSTATE 배제)다 —
+        # `except Exception`은 물론 `except SQLAlchemyError`도 너무 넓고(ProgrammingError·
+        # InvalidRequestError 등 영구 결함 포함), 클래스만으로도 부족하다(인증 실패는 OperationalError).
+        if not is_transient_db_error(db_exc):
+            raise   # 영구 설정·권한 오류 — 503으로 접으면 무한 재시도로 안내하게 된다
         # `Retry-After`도 없다: 이 헤더는 구독 판정 PENDING(초 단위) 신호로 이미 쓰이고,
         # DB failover는 분 단위라 5초 재시도를 지시하면 storm이 된다.
         logger.exception("topic snapshot DB 순단 — 503",

@@ -454,8 +454,10 @@ class TestTopicSnapshotTransientDbFailure(unittest.TestCase):
     클라 재시도 분류에서 빠졌다. 인프라 transient는 결함이 아니므로 **503**이 의미상 맞다.
 
     계약:
-    - `SQLAlchemyError` **만** 변환한다 — 그 밖의 예외는 그대로 500으로 올려 **버그를 가리지 않는다**.
-      (pool `sqlalchemy.exc.TimeoutError`·DBAPI wrap 모두 `SQLAlchemyError` 하위라 커버된다.)
+    - 경계는 **`TRANSIENT_DB_ERRORS` 4종**(`OperationalError`/`InterfaceError`/`TimeoutError`[풀 고갈]/
+      `DisconnectionError`) **∧ `is_transient_db_error`**(영구 SQLSTATE deny-list). 그 밖은 그대로
+      500으로 올려 **버그를 가리지 않는다**. `SQLAlchemyError` 전체는 ProgrammingError·
+      InvalidRequestError 등 영구 결함을 포함해 **너무 넓다**(codex Major).
     - 바디는 이 endpoint의 오류 schema(`{"error": ...}`)를 따르고 WS twin과 **같은 어휘**
       (`temporarily_unavailable`, §8-C "판정 불가")를 쓴다.
     - **`Retry-After` 없음** — 이 헤더는 구독 판정 PENDING(초 단위)의 신호로 이미 쓰이고 있고,
@@ -535,6 +537,50 @@ class TestTopicSnapshotTransientDbFailure(unittest.TestCase):
                     self._get("krx:usd-krw-futures", visibility_exc=exc)
                 with self.assertRaises(type(exc)):
                     self._get("usdt:krw", build_exc=exc)
+
+    def test_permanent_config_errors_are_not_masked(self):
+        """클래스만으로는 못 거르는 영구 오류 — 인증 실패·DB 부재는 `OperationalError`로 온다.
+
+        재시도로 절대 안 풀리므로 503(재시도 안내)이 아니라 500이어야 한다 (codex Medium).
+        """
+        from sqlalchemy.exc import OperationalError
+
+        class _Orig(Exception):
+            def __init__(self, sqlstate):
+                self.sqlstate = sqlstate
+
+        for state, label in (("28P01", "invalid_password"), ("3D000", "invalid_catalog_name"),
+                             ("28000", "invalid_authorization"), ("42501", "insufficient_privilege")):
+            with self.subTest(sqlstate=state, label=label):
+                exc = OperationalError("SELECT 1", {}, _Orig(state))
+                with self.assertRaises(OperationalError):
+                    self._get("krx:usd-krw-futures", visibility_exc=exc)
+
+    def test_connect_failure_without_sqlstate_is_transient(self):
+        """⚠️ **가장 중요한 케이스** — RDS 도달 불가/failover는 서버 응답이 없어 SQLSTATE가 없다.
+
+        psycopg 3.3 실측: 도달 불가 호스트 연결 → `OperationalError`, `sqlstate is None`.
+        SQLSTATE allow-list였다면 이게 500이 되어 이 503의 존재 이유가 사라진다 —
+        그래서 분류는 **deny-list**(모르면 transient)다.
+        """
+        from sqlalchemy.exc import OperationalError
+
+        class _Orig(Exception):
+            sqlstate = None
+
+        r, _, _ = self._get("krx:usd-krw-futures",
+                            visibility_exc=OperationalError("connect", {}, _Orig()))
+        self._assert_transient(r)
+
+    def test_unknown_sqlstate_is_transient(self):
+        """모르는 SQLSTATE도 transient — 회복 가능한 상태를 포기하는 쪽이 더 나쁜 오류다."""
+        from sqlalchemy.exc import OperationalError
+
+        class _Orig(Exception):
+            sqlstate = "53300"   # too_many_connections (실제로 transient)
+
+        r, _, _ = self._get("usdt:krw", build_exc=OperationalError("x", {}, _Orig()))
+        self._assert_transient(r)
 
     def test_real_resolver_db_failure_keeps_krx_indistinguishable(self):
         """helper를 mock하지 않고 **실제 resolver + to_thread를 관통**시켜 §3.2를 확인한다.

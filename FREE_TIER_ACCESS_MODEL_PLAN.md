@@ -214,11 +214,20 @@
   올렸다(계약 식별자. iOS는 `version`을 decode만 하고 기능적으로 쓰지 않아 무해).
 - **pre-flip 필수 항목** (`TOPIC_DISPATCHER_ENABLED=true` 전, 단순 후속 아님):
   ① iOS bootstrap 3종 인증 이관 ② 1C WS 인증
-  ③ ~~entitlement 조회 실패의 HTTP 계약~~ → ✅ **land 2026-07-26**: `except SQLAlchemyError` →
+  ③ ~~entitlement 조회 실패의 HTTP 계약~~ → ✅ **land 2026-07-26**: 경계 = `TRANSIENT_DB_ERRORS`
+  (`OperationalError`/`InterfaceError`/`TimeoutError`[풀 고갈]/`DisconnectionError` **4종**)
+  **∧ `is_transient_db_error`**(영구 SQLSTATE deny-list: 28000·28P01·3D000·42501) →
   503 `{"error": "temporarily_unavailable"}`(WS `subscription_error`와 같은 어휘) + no-store,
-  **Retry-After 없음**(PENDING 초 단위 신호와 충돌 + DB failover는 분 단위라 storm),
-  판정·빌드 **양쪽** 감쌈(한쪽만 감싸면 상태코드가 topic 종류에 따라 갈린다).
-  `except Exception` 금지 — 영구 결함을 무한 재시도로 안내하게 된다.
+  **Retry-After 없음**(PENDING 초 단위 신호와 충돌 + DB failover는 분 단위라 storm. 대신 가이드에
+  클라 지수 backoff + jitter를 계약으로 고정), 판정·빌드 **양쪽** 감쌈(한쪽만 감싸면 상태코드가
+  topic 종류에 따라 갈린다).
+  ⛔ `except Exception`은 물론 **`except SQLAlchemyError`도 너무 넓다**(ProgrammingError·
+  InvalidRequestError 등 영구 결함 포함). 클래스만으로도 부족해(PEP 249 `OperationalError`는
+  인증 실패·DB 부재 같은 영구 케이스 포함) SQLSTATE deny-list를 덧댔다 —
+  **allow-list가 아닌 이유**: connect 실패/failover가 SQLSTATE 없이 도착해(psycopg 3.3 실측:
+  도달 불가 호스트 → `OperationalError`, `sqlstate is None`) allow-list면 **가장 중요한 케이스가
+  500**이 된다. 비용 비대칭도 같은 방향(미지→transient는 bounded 재시도 낭비 / transient→permanent는
+  회복 가능한 상태 포기).
 - 두 flag 모두 2026-07-22 route auth 감사 완화 이후 false다.
 
 ---

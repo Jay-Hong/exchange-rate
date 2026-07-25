@@ -171,8 +171,13 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   **헤더가 없다는 사실만으로는 storm이 막히지 않으므로 클라 재시도를 계약으로 고정한다**:
   `temporarily_unavailable` 503은 **지수 backoff + jitter**(초기 ≥2s, 배수 2, **상한 60s**,
   full jitter)로만 재시도하고, cold-start bootstrap처럼 여러 topic을 동시에 요청하는 경로는
-  **topic별 독립 타이머**를 쓴다(동시 4~5건이 같은 시각에 재시도하지 않도록). /
-  404 `topics_disabled`(TOPIC_DISPATCHER_ENABLED off=출시 전) / 404 `unknown_topic`(+supported_topics) / 404 `topic_unavailable`(지원 topic이나 현재 미제공, 예 FX_TOPIC_ENABLED off).
+  **topic별 독립 타이머**를 쓴다(동시 4~5건이 같은 시각에 재시도하지 않도록).
+
+  **404 세 종류** — 전부 재시도 무의미(상태가 바뀌어야 해소된다):
+  `topics_disabled`(`TOPIC_DISPATCHER_ENABLED` off = 출시 전) /
+  `unknown_topic`(+`supported_topics`. **미지원 topic과 미인가 KRX가 동일 응답**) /
+  `topic_unavailable`(지원 topic이나 현재 미제공, 예 `FX_TOPIC_ENABLED` off).
+
   **순서 = dormant flag → 인증 → premium → topic 판정**이므로, flag off면 미인증이어도 404이고,
   미인증이면 unknown topic이어도 401이다(미인증자는 topic 목록을 열거할 수 없다).
 - legacy `/api/rates/{usdt-krw|usd-krw-futures}`는 여전히 410 Gone(use_topic) — 신규 앱은 위 v2 bootstrap 사용. FX legacy `/api/rates/{asset}`(legacy shape)도 v2 bootstrap으로 대체 권장.
