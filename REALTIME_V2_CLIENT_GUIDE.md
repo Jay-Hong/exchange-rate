@@ -179,13 +179,21 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   | 총 시도 | **3회 이내**(첫 시도 포함). 소진하면 **포기하고 WS snapshot에 맡긴다** — 무기한 재시도 금지 |
   | backoff | 0.5s → 1.5s(±20% jitter). 마지막 값 이후는 재사용 |
   | 조기 종료 | 그 topic의 snapshot을 이미 받았으면(WS/다른 경로) 남은 시도 취소 |
-  | 취소 | 앱 background 전환 · 연결 generation 변경 · 게이트/권한 변경 시 즉시 |
+  | 취소 | **① 계정(UID) 변경 ② 게이트/권한 변경 ③ 앱 background 전환 ④ 연결 generation 변경** 시 즉시 |
   | 동시성 | **topic별 독립 타이머** — cold-start 4~5건이 같은 시각에 재시도하지 않도록 |
   | 재시도 **대상 아님** | 401 · 403 · 404 3종(상태가 바뀌어야 해소된다) |
 
   ℹ️ 참조 구현: iOS `ExchangeRateViewModel.bootstrapKrxWithRetry`(`krxBootstrapMaxAttempts = 3`,
-  `krxBootstrapBackoffsSeconds = [0.5, 1.5]`, WS-wins revision 체크 + 취소 4조건).
-  tether/fx bootstrap은 현재 **재시도 없음**(1회 시도 후 WS에 위임) — 그것도 이 계약을 만족한다.
+  `krxBootstrapBackoffsSeconds = [0.5, 1.5]`, WS-wins revision 체크). tether/fx bootstrap은 현재
+  **재시도 없음**(1회 시도 후 WS에 위임).
+
+  ⚠️ **현 iOS가 아직 만족하지 못하는 항목**(2026-07-26 실측, 인증 이관 슬라이스에서 구현):
+  KRX가 거는 가드는 **task cancellation · entitlement(krxVisible) · topic gate · snapshot revision**
+  뿐이다 — 위 표의 **① UID 변경**과 **③ background · ④ 연결 generation**은 미구현이다.
+  특히 ①은 인증 이관 후 **보안 이슈가 된다**: `FXiApp`의 authState 핸들러는 `.signedOut`에서만
+  `viewModel.stop()`을 부르므로 **A→B 직접 계정 전환은 bootstrap task를 취소하지 않고**,
+  세 호출부 어디도 응답 적용 전에 UID를 재대조하지 않는다 → A 토큰으로 승인된 응답이 B 세션에
+  적용될 수 있다. **요청 시작 시 UID/auth generation을 캡처하고 적용 직전에 재대조**해야 한다.
 
   **404 세 종류** — 전부 재시도 무의미(상태가 바뀌어야 해소된다):
   `topics_disabled`(`TOPIC_DISPATCHER_ENABLED` off = 출시 전) /
