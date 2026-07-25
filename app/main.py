@@ -71,6 +71,18 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
 
 
 async def require_premium(user_id: str, allow_empty: bool) -> bool:
+    """프리미엄 게이트 — **허용은 ACTIVE에만** (fail-closed).
+
+    구 코드는 "PENDING·INACTIVE가 아니면 True"였다. `PremiumStatus`가 정확히 3값이고
+    `verify_premium_status`의 모든 return이 그 3값이라 **오늘은 동치**지만(behavior-change-0,
+    tests/test_require_premium.py 6-case 매트릭스가 영수증), 새 상태가 추가되면 그 상태가
+    자동으로 프리미엄 통과가 된다 — 게이트의 기본값이 '허용'이면 안 된다.
+    (`/api/entitlements`는 이미 `status == ACTIVE`로 fail-closed였다. 여기만 예외였다.)
+
+    알 수 없는 상태는 **INACTIVE와 동일 처리**한다 — fail-closed이면서 `allow_empty` 계약을
+    보존한다. 여기서 503을 던지면 `allow_empty=True` read endpoint(알림/로그 조회)가
+    잠재 fail-open에서 **실제 장애**로 바뀐다. 가드가 만든 회귀가 가드가 막는 결함보다 커진다.
+    """
     premium_status = await verify_premium_status(user_id)
 
     if premium_status == PremiumStatus.PENDING:
@@ -80,15 +92,22 @@ async def require_premium(user_id: str, allow_empty: bool) -> bool:
             headers={"Retry-After": PENDING_RETRY_AFTER_SECONDS},
         )
 
-    if premium_status == PremiumStatus.INACTIVE:
-        if allow_empty:
-            return False
-        raise HTTPException(
-            status_code=403,
-            detail="Premium subscription required",
+    if premium_status == PremiumStatus.ACTIVE:
+        return True
+
+    if premium_status != PremiumStatus.INACTIVE:
+        # 현 enum 3값에선 도달 불가. 조용히 거부하면 enum 확장 사고를 운영이 못 본다.
+        logger.error(
+            "알 수 없는 premium 상태 — fail-closed 처리",
+            extra={"event": "premium_status_unknown", "premium_status": str(premium_status)},
         )
 
-    return True
+    if allow_empty:
+        return False
+    raise HTTPException(
+        status_code=403,
+        detail="Premium subscription required",
+    )
 
 
 async def notify_user_devices_sync(db: Session, user_id: str):
