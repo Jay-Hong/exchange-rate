@@ -6174,7 +6174,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 ## ADR-039: 무료/구독 차등 접근 모델 — hourly 무료 스냅샷 + 최신-데이터 인증 강제 + legacy 종료
 
 **날짜**: 2026-07-17
-**상태**: **Proposed** (설계 수렴 rev5, codex 5-round 검토). 상세 설계 = [FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md). Final 승격엔 제품 결정 S4(유예 기간)·S5(KRX revoke latency) 필요.
+**상태**: **Proposed** (설계 수렴 rev5, codex 5-round 검토). 상세 설계 = [FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md). Final 승격엔 제품 결정 **S4(유예 기간)만** 남음 — S5(KRX revoke latency)는 2026-07-25 bounded-lease v1 15분으로 확정.
 **결정자**: Jay + Claude + Codex (3-way)
 **닫을 예정 (Final 시)**: ADR-038 잔여 Open 2(WS per-user 인증) — 이 ADR의 WS 인증 계약(§8) **구현 완료 시** 해소. **현재 Proposed·미구현이라 Open 2는 유지**.
 
@@ -6190,7 +6190,11 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 ### 미결 (제품 결정, Final 전)
 
 - **S4** legacy 유예 기간: 기존 6개월([REALTIME_ARCHITECTURE_PLAN.md:483](REALTIME_ARCHITECTURE_PLAN.md#L483)) 유지 vs 단축(권고 <1%+30일). 명시적 supersede 필요.
-- **S5** KRX revoke 반영 지연: bounded-lease(권고 v1) vs 즉시 제거(별도 규모).
+  ⚠️ S4는 *legacy 종료 시점* 결정이라 **Stage B 게이트** — WS 인증(1C) 구현의 블로커는 아니다.
+- **S5** KRX revoke 반영 지연 — **RESOLVED = bounded-lease v1, 15분**(2026-07-25). 즉시 제거(UID registry + Redis 제어
+  이벤트)는 별도 후속. 서버 lease 15분 / 클라 재인증 ~12분+jitter / 만료 시 topic 제거 + `reauth_required`.
+  leak window를 가르는 건 토큰 신선도가 아니라 **서버의 UID 기준 entitlement 재조회 주기**.
+  상세·구현 규모 실사는 [FREE_TIER_ACCESS_MODEL_PLAN.md §7 S5 / §8](FREE_TIER_ACCESS_MODEL_PLAN.md).
 
 ## 문서 히스토리
 
