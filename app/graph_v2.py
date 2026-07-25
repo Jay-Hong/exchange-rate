@@ -149,14 +149,17 @@ def strip_krx_if_not_allowed(payload, *, krx_visible: bool = False):
     """**serve-time** fail-closed — 승인되지 않았으면 응답에서 krx.* 를 제거한다 (codex Major).
 
     build 경로(`_effective_tab_series` / `tab_1d_specs`) 필터와 **의도적으로 중복**이다:
-    `/api/v2/graph/tab`은 Redis read-through 캐시라 **cache hit은 build를 안 거친다**.
-    승인 flag가 true였을 때 구워진 payload는 flag를 끈 뒤에도 TTL(최대 30분) 동안 살아 있고,
-    startup DEL은 best-effort(예외를 비치명으로 흡수)라 최종 방어선이 못 된다.
-    → 무료 snapshot의 `_assert_krx_free`와 같은 belt-and-suspenders.
+    `/api/v2/graph/tab`은 사용자 공통 Redis read-through 캐시라 **cache hit은 build를 안 거친다**.
+    build 시점과 다른 판정으로 서빙될 수 있는 구조이므로, 응답 직전에 한 번 더 막는다
+    (무료 snapshot의 `_assert_krx_free`와 같은 belt-and-suspenders).
 
     `series`(list, 장기·1d 공통)와 `in_progress`(dict, 1d seed) 두 shape를 모두 훑는다.
     원본을 변형하지 않고 copy-on-write — 캐시 객체가 공유될 수 있다.
-    실제로 제거가 일어나면 **캐시 잔존이 관측된 것**이므로 WARNING을 남긴다.
+
+    **현재(subset 캐시) WARNING의 의미**: 프로덕션 호출자는 전부 `krx_visible=False`라 캐시에
+    krx가 들어갈 일이 없다 → 제거가 실제로 일어났다면 **구 배포가 남긴 캐시 잔존**이다(관측 가치 O).
+    ⚠️ per-user 게이트 slice에서 캐시를 superset(krx 포함)으로 바꾸면 제거가 **정상 동작**이 되므로
+    그때 WARNING은 debug로 격하해야 한다 — 안 그러면 매 비인가 요청마다 노이즈가 된다.
     """
     if krx_visible or not isinstance(payload, dict):
         return payload

@@ -53,12 +53,16 @@ class TestUnauthenticatedGraphKrxFailClosed(unittest.TestCase):
         무인증 endpoint(`/api/v2/graph/tab`·`/catalog`)는 넘길 사용자가 없어 항상 default를 쓴다.
         """
         import inspect
-        from app.graph_v2 import _effective_tab_series, _effective_default_visible, build_catalog
+        from app.graph_v2 import (_effective_tab_series, _effective_default_visible,
+                                  build_catalog, build_tab, strip_krx_if_not_allowed)
         from app.graph_v2_intraday import (tab_1d_specs, tab_1d_all_series,
-                                           tab_1d_default_visible, build_tab_1d_payload)
+                                           tab_1d_default_visible, build_tab_1d_payload,
+                                           build_tab_1d_in_progress)
+        # krx_visible을 받는 **전 함수** — 하나라도 빠지면 그 경로가 무방비로 남는다.
         for fn in (_effective_tab_series, _effective_default_visible, build_catalog,
+                   build_tab, strip_krx_if_not_allowed,
                    tab_1d_specs, tab_1d_all_series, tab_1d_default_visible,
-                   build_tab_1d_payload):
+                   build_tab_1d_payload, build_tab_1d_in_progress):
             with self.subTest(fn=fn.__name__):
                 param = inspect.signature(fn).parameters.get("krx_visible")
                 self.assertIsNotNone(param, f"{fn.__name__}에 krx_visible 파라미터가 없다")
