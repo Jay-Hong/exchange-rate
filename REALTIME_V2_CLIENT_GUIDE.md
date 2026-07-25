@@ -190,10 +190,25 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   ⚠️ **현 iOS가 아직 만족하지 못하는 항목**(2026-07-26 실측, 인증 이관 슬라이스에서 구현):
   KRX가 거는 가드는 **task cancellation · entitlement(krxVisible) · topic gate · snapshot revision**
   뿐이다 — 위 표의 **① UID 변경**과 **③ background · ④ 연결 generation**은 미구현이다.
-  특히 ①은 인증 이관 후 **보안 이슈가 된다**: `FXiApp`의 authState 핸들러는 `.signedOut`에서만
-  `viewModel.stop()`을 부르므로 **A→B 직접 계정 전환은 bootstrap task를 취소하지 않고**,
-  세 호출부 어디도 응답 적용 전에 UID를 재대조하지 않는다 → A 토큰으로 승인된 응답이 B 세션에
-  적용될 수 있다. **요청 시작 시 UID/auth generation을 캡처하고 적용 직전에 재대조**해야 한다.
+  ①은 **defense-in-depth**로 넣는다(2026-07-26 재평가 — 구 "보안 이슈가 된다" 표현은 과했다):
+  - **메커니즘은 실재**한다 — `FXiApp` authState 핸들러는 `.signedOut`에서만 `viewModel.stop()`을
+    부르고(`.signedIn`은 alert VM만 reset), 세 호출부 어디도 응답 적용 전 UID를 재대조하지 않는다.
+  - **그러나 오늘 도달 경로는 막혀 있다**: `LoginView`가 `.signedOut`에서만 렌더되므로 계정 교체는
+    항상 signedOut 프레임을 거쳐 `stop()`이 task를 취소한다. 게다가 **이 endpoint의 payload는
+    사용자 독립**이다(`_build_snapshot_sync(topic)`은 topic만 받고 E3는 *접근*만 게이팅) →
+    교차 적용돼도 값 차이가 없다. entitlement에 민감한 KRX는 모든 렌더 지점이 `krxVisible`
+    fail-close를 통과한다.
+  - **실도달 잔여 1갈래**: B의 `start()`가 초기 fetch 실패 + 캐시 없음으로 조기 return하면 세
+    launcher에 도달하지 못해 **A의 task가 취소되지 않은 채 생존**한다. KRX 재시도 루프가 그 수명을
+    초 단위로 늘린다.
+  → **요청 시작 시 UID를 캡처하고 mutation 직전에 재대조**한다(auth generation은 부적합 — 같은 계정
+  강제 refresh에도 증가하고 로그아웃엔 증가하지 않아 계정 동일성 술어가 아니다).
+
+  ⚠️ **fence가 덮지 못하는 것**(별 트랙): fence는 *write*를 지키지 `retention`을 지키지 않는다.
+  `stop()`은 `tetherStore`/`fxStore`/수신 플래그만 비우고 **`appState`와 로컬 캐시는 남긴다**
+  (`cached_topic_rates` 등 캐시 키에 uid 스코프 없음, `SourcePreferenceManager`는 signedOut에서
+  reset되지 않음) → 계정 전환 후 첫 프레임에 이전 계정의 화면·소스 구성이 보일 수 있다.
+  값 자체는 공개 시장데이터라 심각도는 낮지만 **fence로는 원리적으로 닿지 않는다.**
 
   **404 세 종류** — 전부 재시도 무의미(상태가 바뀌어야 해소된다):
   `topics_disabled`(`TOPIC_DISPATCHER_ENABLED` off = 출시 전) /
