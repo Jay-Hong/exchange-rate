@@ -46,9 +46,23 @@ class TestUnauthenticatedGraphKrxFailClosed(unittest.TestCase):
             self.assertTrue(entitlements.krx_gates_open(),
                             "전역 게이트가 안 열리면 아래 검사들이 무의미해진다")
 
-    def test_exposure_predicate_is_closed(self):
-        """per-user 게이트가 없는 동안은 상수 False — True로 바꾸려면 게이트부터 만들어야 한다."""
-        self.assertFalse(entitlements.krx_unauthenticated_graph_exposure_allowed())
+    def test_accessors_default_to_krx_hidden(self):
+        """krx 포함은 **호출자가 명시적으로** `krx_visible=True`를 줘야 한다 — default는 숨김.
+
+        env flag가 아니라 파라미터라, `.env` 한 줄로 §3.2 위반 상태를 켤 수 없다(codex).
+        무인증 endpoint(`/api/v2/graph/tab`·`/catalog`)는 넘길 사용자가 없어 항상 default를 쓴다.
+        """
+        import inspect
+        from app.graph_v2 import _effective_tab_series, _effective_default_visible, build_catalog
+        from app.graph_v2_intraday import (tab_1d_specs, tab_1d_all_series,
+                                           tab_1d_default_visible, build_tab_1d_payload)
+        for fn in (_effective_tab_series, _effective_default_visible, build_catalog,
+                   tab_1d_specs, tab_1d_all_series, tab_1d_default_visible,
+                   build_tab_1d_payload):
+            with self.subTest(fn=fn.__name__):
+                param = inspect.signature(fn).parameters.get("krx_visible")
+                self.assertIsNotNone(param, f"{fn.__name__}에 krx_visible 파라미터가 없다")
+                self.assertIs(param.default, False, f"{fn.__name__} default가 fail-closed가 아니다")
 
     def test_long_period_series_exclude_krx_even_with_gates_open(self):
         from app.graph_v2 import _effective_tab_series, _effective_default_visible
@@ -179,18 +193,17 @@ class TestCachedPayloadCannotBypassGate(unittest.TestCase):
         self.assertIn("hana.usd", body["in_progress"])          # seed가 실제로 실렸고
         self.assertNotIn("krx.usd-krw-futures", body["in_progress"])  # krx만 빠졌다
 
-    def test_cached_krx_survives_when_exposure_is_approved(self):
-        """대조군 — 승인된 상태에서는 필터가 걸리지 않는다(과잉 차단 아님)."""
-        async def _fake_get(key):
-            return self._poisoned() if key == "graph_v2:tab:usd:3m" else None
+    def test_strip_is_a_noop_for_entitled_callers(self):
+        """대조군 — `krx_visible=True`면 필터가 걸리지 않는다(과잉 차단 아님).
 
-        a, b = _gates_open()
-        with a, b, \
-             patch.object(config, "KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE", True), \
-             patch("app.main.redis_cache.get", new=_fake_get), \
-             patch("app.main.redis_cache.set", new=AsyncMock(return_value=None)):
-            r = self.client.get("/api/v2/graph/tab", params={"tab": "usd", "period": "3m"})
-        self.assertIn("krx.usd-krw-futures", [s["id"] for s in r.json()["series"]])
+        per-user 게이트가 land하면 endpoint가 이 값을 넘기게 된다.
+        """
+        import json as _json
+        from app.graph_v2 import strip_krx_if_not_allowed
+        payload = _json.loads(self._poisoned())
+        kept = strip_krx_if_not_allowed(payload, krx_visible=True)
+        self.assertIs(kept, payload)                       # copy조차 만들지 않는다
+        self.assertIn("krx.usd-krw-futures", [s["id"] for s in kept["series"]])
 
 
 if __name__ == "__main__":

@@ -156,37 +156,32 @@ TAB_1D_DEFAULT_VISIBLE = {
 INTRADAY_TABS = tuple(TAB_1D_SERIES)
 
 
-def _unauthenticated_krx_series_allowed() -> bool:
-    """무인증 graph 표면이 krx.* series를 실을 수 있는가 (ADR-039 §3.1/§6.1).
+# ADR-039 §3.1/§6.1 (2026-07-26) — 무인증 graph 표면의 krx.* 노출은 **호출자가 전달하는
+# per-user 판정**(`krx_visible`)에 달려 있다. env flag가 **아니다**: flag로 두면 per-user 게이트를
+# 만들지 않은 채 `.env` 한 줄로 §3.2 위반 상태를 켤 수 있다(codex 지적). 이 endpoint들엔 인증이
+# 없으므로 실제 호출자는 항상 default False를 쓰고, per-user 게이트가 land하면 그때 실제 판정을
+# 넘기면 된다 — 파라미터가 이미 자리에 있다.
 
-    판정 본체는 `entitlements.krx_unauthenticated_graph_exposure_allowed()` **하나** —
-    G3 ∧ G2 ∧ 무인증 노출 승인. 여기서 AND를 다시 조립하지 않는다(같은 보안 규칙이 두 모듈에
-    복제되면 drift한다 — codex 지적).
-    """
-    from app import entitlements
-    return entitlements.krx_unauthenticated_graph_exposure_allowed()
-
-
-def tab_1d_specs(tab: str) -> list:
+def tab_1d_specs(tab: str, *, krx_visible: bool = False) -> list:
     """탭 1d series spec 목록 — 무인증 표면이라 krx 계열은 fail-closed 제외 (ADR-039 §3.1).
 
     build/precompute/in_progress 모든 경로가 이 accessor를 경유 → 게이트 일원화
     (import-time 상수 TAB_1D_SERIES는 전체 집합 유지 — catalog 쪽도 동일 필터 적용).
     """
     specs = TAB_1D_SERIES[tab]
-    if _unauthenticated_krx_series_allowed():
+    if krx_visible:
         return specs
     return [spec for spec in specs if not spec["id"].startswith("krx.")]
 
 
-def tab_1d_all_series(tab: str) -> list:
-    """catalog용 — series 목록과 같은 게이트."""
-    return [spec["id"] for spec in tab_1d_specs(tab)]
+def tab_1d_all_series(tab: str, *, krx_visible: bool = False) -> list:
+    """catalog용 — series 목록과 같은 판정."""
+    return [spec["id"] for spec in tab_1d_specs(tab, krx_visible=krx_visible)]
 
 
-def tab_1d_default_visible(tab: str) -> list:
-    """catalog용 — series 목록과 같은 게이트."""
-    if _unauthenticated_krx_series_allowed():
+def tab_1d_default_visible(tab: str, *, krx_visible: bool = False) -> list:
+    """catalog용 — series 목록과 같은 판정."""
+    if krx_visible:
         return list(TAB_1D_DEFAULT_VISIBLE[tab])
     return [sid for sid in TAB_1D_DEFAULT_VISIBLE[tab] if not sid.startswith("krx.")]
 
@@ -403,7 +398,9 @@ def _free_tab_1d_specs(tab: str) -> list:
     return [spec for spec in TAB_1D_SERIES[tab] if not spec["id"].startswith("krx.")]
 
 
-def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False, now_kst: Optional[datetime] = None) -> dict:
+def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False,
+                         krx_visible: bool = False,
+                         now_kst: Optional[datetime] = None) -> dict:
     """탭 1d 전체 series 조립(테더 11/usd 10/jpy·eur 9) → /api/v2/graph/tab 응답 shape.
 
     closed-bucket only(진행 중 10분봉 제외). 동기(get_db_context) — precompute cron + endpoint
@@ -416,7 +413,8 @@ def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False, now_kst: Option
     in_progress_start_ts = _bucket_align(int(now_kst.timestamp()))   # 진행 중 버킷 시작 = 잘라낼 경계
     window_start_kst = now_kst - timedelta(hours=WINDOW_HOURS)
 
-    specs = _free_tab_1d_specs(tab) if exclude_krx else tab_1d_specs(tab)   # ADR-039 / ADR-038 G2 accessor
+    specs = (_free_tab_1d_specs(tab) if exclude_krx
+             else tab_1d_specs(tab, krx_visible=krx_visible))   # ADR-039 fail-closed default
     series_out = [_build_series_1d(spec, now_kst, in_progress_start_ts) for spec in specs]
 
     return {
@@ -439,7 +437,8 @@ def build_tab_1d_payload(tab: str, *, exclude_krx: bool = False, now_kst: Option
     }
 
 
-def build_tab_1d_in_progress(tab: str, now_kst: Optional[datetime] = None) -> dict:
+def build_tab_1d_in_progress(tab: str, now_kst: Optional[datetime] = None, *,
+                             krx_visible: bool = False) -> dict:
     """탭의 진행 중(현재) 10분봉만 per-series 추출 — cold-open/resync seed용. closed payload와 별개 short-TTL.
 
     readers는 full 24h를 만들지만 in_progress_start_ts(align(now)) 버킷 1개만 취함(readers 재사용 =
@@ -452,7 +451,7 @@ def build_tab_1d_in_progress(tab: str, now_kst: Optional[datetime] = None) -> di
     ip_iso = datetime.fromtimestamp(ip_start, tz=timezone.utc).astimezone(KST).isoformat()
     sampled_at = now_kst.isoformat()
     out: dict = {}
-    for spec in tab_1d_specs(tab):   # ADR-038 G2 accessor
+    for spec in tab_1d_specs(tab, krx_visible=krx_visible):   # ADR-039 fail-closed default
         raw, _ = _build_raw_1d(spec, now_kst)
         bucket = next((b for b in raw if int(b[0]) == ip_start), None)
         if bucket is None:

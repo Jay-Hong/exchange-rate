@@ -64,12 +64,12 @@
 | KRX WS·REST snapshot | Firebase + premium + KRX entitlement |
 | Graph catalog/tab의 KRX series | ⚠️ **미구현** — 아래 경고 참조 |
 
-> 🔴 **graph v2 행은 목표이지 현재 상태가 아니다 (2026-07-25 정정).** `GET /api/v2/graph/tab`·
-> `/catalog`은 **무인증**이고 `_effective_tab_series`(app/graph_v2.py)가 **전역 게이트(G2∧G3)만**
-> 본다 — per-user 필터가 없다. ADR-038 Decision 3이 이미 그렇게 명시하고 있는데 이 표만 반대로
-> 적혀 있었다. **귀결: `KRX_CLIENT_DISTRIBUTION_ENABLED=true`로 되돌리는 순간 무인증 caller가
-> KRX 그래프 series를 받는다**(§3.2 위반). 현재 그 flag가 false라 노출은 0 — 즉 **완화가 곧
-> 유일한 방어선**이다. §6 롤아웃의 2-flag 게이트 참조.
+> 🔴 **graph v2 행은 "제외"까지만 참이고 per-user 판정은 아직 없다 (2026-07-26 현재).**
+> 구 상태: `_effective_tab_series`가 전역 게이트(G2∧G3)만 봐서 `KRX_CLIENT_DISTRIBUTION_ENABLED=true`
+> 한 줄로 **무인증 caller가 KRX 그래프를 받았다**(ADR-038 D3가 수용한 절충이나 §3.1과 모순).
+> 현 상태: 무인증 경로는 **어떤 flag로도 krx를 싣지 않는다**(`krx_visible: bool = False` 파라미터
+> + serve-time strip, §6.1). 남은 것은 **entitled 사용자에게 다시 보여주는 per-user 게이트** —
+> 그게 land해야 이 행이 완전히 참이 된다.
 
 - 판정 = 서버 단일 `krx_visible = G3 ∧ G2 ∧ G1 ∧ premium`. 클라 조합 금지.
 - **캐시 = 전역 게이트(G2∧G3) 후 저장 → serve-time per-user(G1∧premium) 필터**. 개인화 결과 공용 키 재캐시 금지.
@@ -162,41 +162,43 @@
 6. **TestFlight/내부 테스트**(양 플랫폼): 로그인·무료·구독·재연결·토큰 만료·KRX entitlement grant/revoke.
 7. **Stage A enforcement ON** + 재검증 후 출시.
 
-### 6.1 KRX 관련 flag는 **셋**이고 선행 조건이 다르다 (2026-07-25 분리 → 07-26 셋으로)
-
-"KRX를 켠다"를 flag 하나로 이해하면 한쪽 게이트만 닫고 다른 쪽을 여는 사고가 난다.
+### 6.1 KRX 관련 flag는 **둘**이고, 무인증 graph의 KRX는 **flag가 아니라 파라미터**다 (2026-07-26 확정)
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
-| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ③ **iOS bootstrap 3종 인증 이관** | 🔴 false |
-| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot. ~~+ 무인증 graph의 KRX series~~ → **분리됨** | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
-| `KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`<br>(2026-07-26 신설) | **무인증** `/api/v2/graph/tab`·`/catalog`의 krx.* series | **graph v2 per-user 게이트**(§3.1 graph 행) — **미구현**. 이 flag를 켜는 것 = §3.2를 무인증 표면에서 포기하는 명시적 결정 | 🔴 false |
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land ② **1C WS 인증** ③ **iOS bootstrap 3종 인증 이관** ④ **entitlement 조회 실패 503**(아래) | 🔴 false |
+| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
 
-- ①②③을 다 채우고 `TOPIC_DISPATCHER_ENABLED`만 켜는 것은 안전하다(KRX는 G2가 닫혀 있어
-  supported 목록에서 빠진다).
-- ⚠️ **구 문장 폐기**: "`KRX_CLIENT_DISTRIBUTION_ENABLED`를 켜면 graph가 무인증으로 KRX를
-  노출한다"는 **2026-07-26 코드 변경으로 더 이상 참이 아니다**. 그 노출은 `krx.*` series 결정에서
-  분리돼 `KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`(default false)로 옮겼다 —
-  `app/entitlements.krx_unauthenticated_graph_exposure_allowed()` + graph_v2 /
-  graph_v2_intraday의 `_unauthenticated_krx_series_allowed()`. 즉 **문서 경고가 아니라
-  실행 가능한 guard**다(tests/test_graph_v2_krx_exposure.py가 전역 게이트를 다 열어도
-  catalog/tab/1d 어디에도 `krx.*`가 없음을 잠근다).
-- **guard는 2중이다** — build 경로(series accessor)만 막으면 **캐시 hit이 우회한다**:
-  `/api/v2/graph/tab`은 Redis read-through라 hit 시 build를 안 거치고, 승인 상태로 구워진 payload가
-  TTL(최대 30분) 살아 있으며 startup DEL은 예외를 비치명으로 흡수한다(codex Major, 실제 probe로 재현).
-  → 3경로(장기 캐시 hit / 1d closed / 1d in_progress) 공통 exit에 **serve-time
-  `strip_krx_if_not_allowed`**를 둔다: `series` 리스트 + 1d `in_progress` seed 두 shape를 훑고,
-  실제 제거가 일어나면 WARNING(`graph_v2_krx_stripped`)을 남겨 캐시 잔존을 관측 가능하게 한다.
-- **왜 노출 자체를 제거하지 않았나**: 이 노출은 실수가 아니라 **명세된 계약**이다 —
-  ADR-038 D3(Open 2, 클라 `krx_visible` gate 담당) + D4(탭별 series 구성) + GRAPH_API_V2_CONTRACT
-  §3/§4 + 12개 계약 테스트. 서버가 일방적으로 빼면 entitled 사용자가 그래프에서 KRX를 잃는다.
-  계약은 유지하되 **사고로 열리지 않게** 승인 축만 분리했다.
+**무인증 graph v2(`/api/v2/graph/tab`·`/catalog`)의 krx.\* series는 어떤 flag로도 열리지 않는다.**
+`_effective_tab_series` / `tab_1d_specs` / `build_catalog` / `build_tab` 등이 **호출자가 넘기는
+`krx_visible: bool = False`**로 결정한다. 이 endpoint들엔 인증이 없어 넘길 사용자가 없으므로
+실제 호출자는 항상 default(False)를 쓴다.
+
+- **왜 env flag가 아닌가** (2026-07-26, codex 2R 수렴): 초안은 `KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`
+  라는 default-false 승인 flag였다. 그러나 그 flag의 **유일한 용도가 §3.2 위반 상태를 켜는 것**이라,
+  per-user 게이트를 만들지 않은 채 `.env` 한 줄로 열 수 있는 통로가 남는다. 파라미터는 그 통로를
+  없애면서도 계약 테스트가 `krx_visible=True`로 **entitled 구성을 그대로 검증**하게 해준다 —
+  "계약 보존 vs 우회 통로 제거"가 trade-off가 아니었다.
+- **왜 노출 자체를 삭제하지 않았나**: krx-in-graph는 실수가 아니라 **명세된 계약**이다(ADR-038 D3
+  Open 2 + D4, GRAPH_API_V2_CONTRACT §3/§4). 파라미터 default를 False로 두면 노출은 닫히고
+  계약은 코드·테스트에 남는다. per-user 게이트가 land하면 endpoint가 실제 판정을 넘기면 끝 —
+  **파라미터가 이미 자리에 있다.**
+- **guard는 2중이다**: build 경로(series accessor)만 막으면 **캐시 hit이 우회한다**
+  (`/api/v2/graph/tab`은 Redis read-through라 hit 시 build를 안 거치고, 과거에 krx가 포함된 채
+  구워진 payload가 TTL[최대 30분] 살아 있으며 startup DEL은 예외를 비치명으로 흡수한다 —
+  codex Major, 실제 probe로 재현). → 3경로(장기 hit / 1d closed / 1d in_progress) **공통 exit**에
+  serve-time `strip_krx_if_not_allowed(payload, krx_visible=False)`: `series` 리스트 +
+  `in_progress` seed 두 shape를 copy-on-write로 훑고, 제거가 실제로 일어나면
+  WARNING(`graph_v2_krx_stripped`)으로 캐시 잔존을 관측 가능하게 한다.
+- **startup fail-fast는 기각**: CLAUDE.md "KRX optional source — baseline은 KRX 없이 항상 정상 동작"
+  위반이고, 단일 인스턴스라 KRX **설정** 하나로 전면 장애가 된다. 노출되는 건 선물 가격 시계열
+  (개인정보 아님)이라 서비스 중단과 균형이 맞지 않는다. → 해당 표면만 serve-time fail-closed.
+- **catalog version**: 기본 응답에서 krx가 영구 제외되므로 `CATALOG_VERSION`을 `2026-07-26`으로
+  올렸다(계약 식별자. iOS는 `version`을 decode만 하고 기능적으로 쓰지 않아 무해).
 - **pre-flip 필수 항목** (`TOPIC_DISPATCHER_ENABLED=true` 전, 단순 후속 아님):
   ① iOS bootstrap 3종 인증 이관 ② 1C WS 인증 ③ **entitlement 조회 실패의 HTTP 계약**
   (현재 plain 500 → `{"error":"entitlement_unavailable"}` 503, Retry-After 없음, builder 경로 포함).
-- 현재 셋 다 false다 — 앞의 둘은 2026-07-22 route auth 감사 완화로, 셋째는 2026-07-26 신설 시
-  default false로(감사 시점엔 존재하지 않았다).
-8. **양 플랫폼 legacy <1% + 유예(S4) 충족 시** Stage B 제거.
+- 두 flag 모두 2026-07-22 route auth 감사 완화 이후 false다.
 
 ---
 

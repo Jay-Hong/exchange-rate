@@ -33,14 +33,14 @@ models.Base.metadata.create_all(engine)
 
 # ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
 # 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
-# ADR-039 §6.1 (2026-07-26) — 무인증 graph의 krx 노출은 **별도 승인 flag** 뒤로 분리됐다
-# (`KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`, default false). G2 한 줄로 무인증 KRX가
-# 열리는 사고를 막기 위한 것. 이 모듈은 그 flag가 **켜진** 상태의 계약을 잠근다 —
-# 꺼진 기본 상태는 tests/test_graph_v2_krx_exposure.py.
+# ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
+# 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
+# ADR-039 §6.1(2026-07-26): krx.* 포함 여부는 이제 **호출자가 넘기는 `krx_visible`**이 정한다
+# (default False). 무인증 endpoint는 항상 default를 쓰므로, 아래 테스트가 krx를 기대하는
+# 곳은 `krx_visible=True`를 명시한다 — 무인증 기본 동작은 tests/test_graph_v2_krx_exposure.py.
 _KRX_GATES_OPEN = patch.multiple("app.config",
                                  KRX_FUTURES_ENABLED=True,
-                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True,
-                                 KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE=True)
+                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True)
 
 
 def setUpModule():
@@ -133,7 +133,7 @@ class TestBuildTether1dPayload(unittest.TestCase):
         db.commit()
         db.close()
 
-        payload = build_tab_1d_payload("tether")
+        payload = build_tab_1d_payload("tether", krx_visible=True)
         self.assertEqual(payload["tab"], "tether")
         self.assertEqual(payload["period"], "1d")
         self.assertEqual(payload["metadata"]["bucket_size"], "10min")
@@ -200,8 +200,11 @@ class TestCatalog1dIsolation(unittest.TestCase):
     def test_all_tabs_1d_series_match_contract(self):
         """전 탭 1d catalog가 §3/§4 계약 구성과 일치 — 테더 11 / usd 11(krx) / jpy·eur 9.
         usd: 8 banks(Citi 제외) + investing + dxy(dxy_futures는 테더 전용).
-        jpy/eur: 8 banks + investing — DXY 계열 미노출(§9:521)."""
-        catalog = build_catalog()
+        jpy/eur: 8 banks + investing — DXY 계열 미노출(§9:521).
+
+        krx 포함 구성은 `krx_visible=True`(= per-user 게이트 land 후 entitled 사용자)에서 검증한다 —
+        무인증 endpoint의 기본(krx 제외) 구성은 tests/test_graph_v2_krx_exposure.py (ADR-039 §6.1)."""
+        catalog = build_catalog(krx_visible=True)
         tabs = {t["id"]: t for t in catalog["tabs"]}
 
         tether = tabs["tether"]
@@ -248,7 +251,7 @@ class TestCatalog1dIsolation(unittest.TestCase):
 
     def test_usd_1d_payload_builds_with_bank_series(self):
         """usd 1d payload — 10 series 조립 + 은행 kind=fx reader 경로 동작(빈 DB여도 series 존재)."""
-        payload = build_tab_1d_payload("usd")
+        payload = build_tab_1d_payload("usd", krx_visible=True)
         self.assertEqual(payload["tab"], "usd")
         ids = [s["id"] for s in payload["series"]]
         self.assertEqual(ids, TAB_1D_ALL_SERIES["usd"])

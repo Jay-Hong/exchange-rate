@@ -62,14 +62,14 @@ class _Base(unittest.TestCase):
 
 # ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
 # 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
-# ADR-039 §6.1 (2026-07-26) — 무인증 graph의 krx 노출은 **별도 승인 flag** 뒤로 분리됐다
-# (`KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`, default false). G2 한 줄로 무인증 KRX가
-# 열리는 사고를 막기 위한 것. 이 모듈은 그 flag가 **켜진** 상태의 계약을 잠근다 —
-# 꺼진 기본 상태는 tests/test_graph_v2_krx_exposure.py.
+# ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
+# 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
+# ADR-039 §6.1(2026-07-26): krx.* 포함 여부는 이제 **호출자가 넘기는 `krx_visible`**이 정한다
+# (default False). 무인증 endpoint는 항상 default를 쓰므로, 아래 테스트가 krx를 기대하는
+# 곳은 `krx_visible=True`를 명시한다 — 무인증 기본 동작은 tests/test_graph_v2_krx_exposure.py.
 _KRX_GATES_OPEN = patch.multiple("app.config",
                                  KRX_FUTURES_ENABLED=True,
-                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True,
-                                 KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE=True)
+                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True)
 
 
 def setUpModule():
@@ -83,7 +83,7 @@ def tearDownModule():
 class TestCatalog(unittest.TestCase):
 
     def test_catalog_3m_1y_1w(self):
-        cat = G.build_catalog()
+        cat = G.build_catalog(krx_visible=True)
         self.assertEqual(cat["supported_periods"], ["3m", "1y", "1w"])  # 전역 MVP (1d=tab-specific)
         tabs = {t["id"]: t for t in cat["tabs"]}
         # 전 탭: 1d(10min intraday precompute) + 장기 노출 (FX 1d = Slice A 확장, §3:49-54)
@@ -97,7 +97,7 @@ class TestCatalog(unittest.TestCase):
         self.assertFalse(G.is_supported_period("1d"))  # 1d만 v1 realtime → 미지원
 
     def test_tab_composition(self):
-        tabs = {t["id"]: t for t in G.build_catalog()["tabs"]}
+        tabs = {t["id"]: t for t in G.build_catalog(krx_visible=True)["tabs"]}
         self.assertEqual(set(tabs), {"usd", "jpy", "eur", "tether"})
         # ADR-038 D4 ② — usd 전 기간 krx 편입 (investing 다음, default OFF)
         self.assertEqual(tabs["usd"]["periods"]["3m"]["all_series"],
@@ -188,7 +188,8 @@ class TestKrxContractCode(_Base):
             _sdr("krx", "usd-krw-futures", date(2026, 6, 1), 1530.0,
                  "krx_cf_close_1545", "close_finalizer", contract_code="A75606"),
         )
-        krx = next(s for s in G.build_tab(self.db, "tether", "3m", today_kst=TODAY)["series"]
+        krx = next(s for s in G.build_tab(self.db, "tether", "3m", today_kst=TODAY,
+                                           krx_visible=True)["series"]
                    if s["id"] == "krx.usd-krw-futures")
         self.assertIn("contract_code", krx["provenance"]["per_point_metadata"])
         self.assertEqual(krx["data"][0]["contract_code"], "A75605")
@@ -422,7 +423,8 @@ class TestPeriod1wHourly(_Base):
 
     def test_1w_krx_no_hourly_insufficient(self):
         # KRX는 source_hourly_rates 미적재 → 빈 series → insufficient_history (자연 처리)
-        krx = next(s for s in G.build_tab(self.db, "tether", "1w", today_kst=TODAY)["series"]
+        krx = next(s for s in G.build_tab(self.db, "tether", "1w", today_kst=TODAY,
+                                           krx_visible=True)["series"]
                    if s["id"] == "krx.usd-krw-futures")
         self.assertEqual(krx["data"], [])
         self.assertTrue(krx["provenance"]["insufficient_history"])

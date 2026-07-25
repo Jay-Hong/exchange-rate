@@ -106,22 +106,19 @@ def test_free_tab_series_excludes_krx():
 
 
 def test_build_tab_exclude_krx_drops_krx_even_when_gate_open(monkeypatch):
-    """게이트(G2/G3)가 열려도 exclude_krx=True면 KRX 제외 — 무료 fail-open 방어.
+    """entitled(krx_visible=True)여도 exclude_krx=True면 KRX 제외 — 무료 fail-open 방어.
 
-    ⚠️ 대조군(exclude_krx=False → KRX 포함)이 성립하려면 ADR-039 §6.1의 무인증 노출 승인
-    flag도 켜야 한다. 안 켜면 양쪽 다 KRX가 없어 이 테스트가 **vacuous**해진다.
+    ⚠️ 대조군(exclude_krx=False → KRX 포함)이 성립하려면 `krx_visible=True`가 필요하다.
+    안 주면 양쪽 다 KRX가 없어 이 테스트가 **vacuous**해진다 (ADR-039 §6.1 fail-closed default).
     """
-    monkeypatch.setattr(config, "KRX_FUTURES_ENABLED", True)                    # G3
-    monkeypatch.setattr(config, "KRX_CLIENT_DISTRIBUTION_ENABLED", True)        # G2
-    monkeypatch.setattr(config, "KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE", True)  # 무인증 노출 승인
     monkeypatch.setattr(graph_v2, "_read_sdr_series", lambda db, sid, entry, s, e, g: {"id": sid, "data": []})
     monkeypatch.setattr(graph_v2, "_read_market_index_series", lambda db, sid, entry, s, e, g: {"id": sid, "data": []})
 
-    free_ids = [s["id"] for s in graph_v2.build_tab(None, "usd", "3m", exclude_krx=True)["series"]]
+    free_ids = [s["id"] for s in graph_v2.build_tab(None, "usd", "3m", exclude_krx=True, krx_visible=True)["series"]]
     assert "krx.usd-krw-futures" not in free_ids
 
-    # 대조: exclude_krx=False + 게이트 열림 → KRX 포함 (premium 경로 behavior-change-0)
-    prem_ids = [s["id"] for s in graph_v2.build_tab(None, "usd", "3m", exclude_krx=False)["series"]]
+    # 대조: exclude_krx=False + entitled → KRX 포함 (premium 경로 behavior-change-0)
+    prem_ids = [s["id"] for s in graph_v2.build_tab(None, "usd", "3m", exclude_krx=False, krx_visible=True)["series"]]
     assert "krx.usd-krw-futures" in prem_ids
 
 

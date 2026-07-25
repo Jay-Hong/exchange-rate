@@ -50,7 +50,7 @@ _DXY_SOURCE_PRIORITY = {"investing": 0, "cnbc": 1}
 # bucket당 source가 소수(≈3). desc 정렬 선두의 최신 bucket rows를 모두 담기 충분 + 무한 스캔 방지.
 _DXY_CARRY_SCAN_LIMIT = 50
 
-CATALOG_VERSION = "2026-05-27"
+CATALOG_VERSION = "2026-07-26"
 
 
 logger = logging.getLogger("exchange_rate.graph_v2")
@@ -139,18 +139,13 @@ _TAB_DEFAULT_VISIBLE = {
 }
 
 
-def _unauthenticated_krx_series_allowed() -> bool:
-    """무인증 graph 표면이 krx.* series를 실을 수 있는가 (ADR-039 §3.1/§6.1).
+# ADR-039 §3.1/§6.1 (2026-07-26) — 무인증 graph 표면의 krx.* 노출은 **호출자가 전달하는
+# per-user 판정**(`krx_visible`)에 달려 있다. env flag가 **아니다**: flag로 두면 per-user 게이트를
+# 만들지 않은 채 `.env` 한 줄로 §3.2 위반 상태를 켤 수 있다(codex 지적). 이 endpoint들엔 인증이
+# 없으므로 실제 호출자는 항상 default False를 쓰고, per-user 게이트가 land하면 그때 실제 판정을
+# 넘기면 된다 — 파라미터가 이미 자리에 있다.
 
-    판정 본체는 `entitlements.krx_unauthenticated_graph_exposure_allowed()` **하나** —
-    G3 ∧ G2 ∧ 무인증 노출 승인. 여기서 AND를 다시 조립하지 않는다(같은 보안 규칙이 두 모듈에
-    복제되면 drift한다 — codex 지적).
-    """
-    from app import entitlements
-    return entitlements.krx_unauthenticated_graph_exposure_allowed()
-
-
-def strip_krx_if_not_allowed(payload):
+def strip_krx_if_not_allowed(payload, *, krx_visible: bool = False):
     """**serve-time** fail-closed — 승인되지 않았으면 응답에서 krx.* 를 제거한다 (codex Major).
 
     build 경로(`_effective_tab_series` / `tab_1d_specs`) 필터와 **의도적으로 중복**이다:
@@ -163,7 +158,7 @@ def strip_krx_if_not_allowed(payload):
     원본을 변형하지 않고 copy-on-write — 캐시 객체가 공유될 수 있다.
     실제로 제거가 일어나면 **캐시 잔존이 관측된 것**이므로 WARNING을 남긴다.
     """
-    if _unauthenticated_krx_series_allowed() or not isinstance(payload, dict):
+    if krx_visible or not isinstance(payload, dict):
         return payload
 
     out = payload
@@ -189,10 +184,10 @@ def strip_krx_if_not_allowed(payload):
     return out
 
 
-def _effective_tab_series(tab: str) -> list:
-    """탭 series id 목록 (3m/1y/1w 공유) — 무인증 표면이라 krx 계열은 fail-closed 제외."""
+def _effective_tab_series(tab: str, *, krx_visible: bool = False) -> list:
+    """탭 series id 목록 (3m/1y/1w 공유) — `krx_visible`이 아니면 krx 계열 제외 (fail-closed default)."""
     ids = _TAB_SERIES[tab]
-    if _unauthenticated_krx_series_allowed():
+    if krx_visible:
         return list(ids)
     return [sid for sid in ids if not sid.startswith("krx.")]
 
@@ -206,9 +201,9 @@ def _free_tab_series(tab: str) -> list:
     return [sid for sid in _TAB_SERIES[tab] if not sid.startswith("krx.")]
 
 
-def _effective_default_visible(tab: str) -> list:
-    """default visible 목록 — series 목록과 **같은 게이트** (catalog가 그대로 복사하므로 함께 필터)."""
-    if _unauthenticated_krx_series_allowed():
+def _effective_default_visible(tab: str, *, krx_visible: bool = False) -> list:
+    """default visible 목록 — series 목록과 **같은 판정** (catalog가 그대로 복사하므로 함께 필터)."""
+    if krx_visible:
         return list(_TAB_DEFAULT_VISIBLE[tab])
     return [sid for sid in _TAB_DEFAULT_VISIBLE[tab] if not sid.startswith("krx.")]
 
@@ -510,7 +505,7 @@ def _read_market_index_series(db, series_id: str, entry: dict, start: date, end:
 # build_catalog / build_tab
 # ─────────────────────────────────────────────────────────────
 
-def build_catalog() -> dict:
+def build_catalog(*, krx_visible: bool = False) -> dict:
     """전체 catalog (3m/1y/1w MVP + 전 탭 1d). DB 불필요 (정적 상수).
 
     1d는 10min intraday 구성(테더 11 / usd 11[krx, ADR-038 D4 ②] / jpy·eur 9 — §3:49-54)으로 장기(3m/1y/1w)와 series
@@ -523,17 +518,19 @@ def build_catalog() -> dict:
     tabs = []
     for tab in _TAB_SERIES:
         # ADR-039 §3.1 — 무인증 catalog는 krx 계열 fail-closed 제외 (per-user 게이트 land 전까지)
-        series_ids = _effective_tab_series(tab)
+        series_ids = _effective_tab_series(tab, krx_visible=krx_visible)
         periods = {}
         for period in MVP_PERIODS:
             periods[period] = {
                 "all_series": list(series_ids),
-                "default_visible_series": _effective_default_visible(tab),
+                "default_visible_series": _effective_default_visible(
+                    tab, krx_visible=krx_visible),
             }
         if tab in INTRADAY_TABS:
             periods["1d"] = {
-                "all_series": tab_1d_all_series(tab),
-                "default_visible_series": tab_1d_default_visible(tab),
+                "all_series": tab_1d_all_series(tab, krx_visible=krx_visible),
+                "default_visible_series": tab_1d_default_visible(
+                    tab, krx_visible=krx_visible),
             }
         tabs.append({
             "id": tab,
@@ -549,7 +546,8 @@ def build_catalog() -> dict:
     }
 
 
-def build_tab(db, tab: str, period: str, today_kst: date | None = None, *, exclude_krx: bool = False) -> dict:
+def build_tab(db, tab: str, period: str, today_kst: date | None = None, *,
+              exclude_krx: bool = False, krx_visible: bool = False) -> dict:
     """탭×기간 모든 series 데이터 (§10 /api/v2/graph/tab 응답).
 
     호출 전 endpoint가 tab 존재 + period 지원(is_supported_period) 검증 가정.
@@ -561,7 +559,10 @@ def build_tab(db, tab: str, period: str, today_kst: date | None = None, *, exclu
     start, end = period_range(period, today_kst)
     granularity = PERIOD_GRANULARITY[period]
 
-    series_ids = _free_tab_series(tab) if exclude_krx else _effective_tab_series(tab)   # ADR-039 / ADR-038 G2 accessor
+    # exclude_krx(무료 snapshot)는 krx_visible을 무조건 덮는 hard override — 중복이지만
+    # 의도적 belt-and-suspenders(`_assert_krx_free`와 같은 계열).
+    series_ids = (_free_tab_series(tab) if exclude_krx
+                  else _effective_tab_series(tab, krx_visible=krx_visible))
     series_out = []
     for series_id in series_ids:
         entry = SERIES_REGISTRY[series_id]

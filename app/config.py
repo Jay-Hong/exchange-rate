@@ -278,18 +278,6 @@ KRX_CLIENT_DISTRIBUTION_ENABLED = os.getenv("KRX_CLIENT_DISTRIBUTION_ENABLED", "
 # (codex 보강 2026-07-08). graph v2 / entitlements 판정은 이 값(또는 두 flag 조합)을 사용.
 KRX_CLIENT_DISTRIBUTION_EFFECTIVE = KRX_FUTURES_ENABLED and KRX_CLIENT_DISTRIBUTION_ENABLED
 
-# ADR-039 §3.1/§6.1 (2026-07-26) — **무인증** graph v2 표면(`/api/v2/graph/tab`·`/catalog`)의
-# krx.* series 노출 승인. G2와 **분리**된 두 번째 flag, default false.
-#
-# 왜 분리했나: 저 두 endpoint는 인증이 없는데 series 목록을 G2∧G3만으로 정했다 →
-# `KRX_CLIENT_DISTRIBUTION_ENABLED=true` **한 줄**로 무인증 caller에게 KRX 그래프가 열린다.
-# E3가 REST twin(`/api/v2/topics/snapshot`)에서 막은 것과 같은 누수다.
-# 이 노출 자체는 실수가 아니라 명세된 계약이므로(ADR-038 D3 Open 2 + D4, GRAPH_API_V2_CONTRACT
-# §3/§4) 계약은 유지하되 **사고로 열리지 않게** 승인 축을 분리했다.
-# ⚠️ 이 flag를 켜는 것 = §3.2("KRX 존재 완전 비노출")를 무인증 표면에서 포기하는 명시적 결정.
-# ADR-039 §3.1의 서버 per-user 필터가 land하면 이 flag는 제거되고 판정으로 대체된다.
-KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE = os.getenv(
-    "KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE", "false").lower() == "true"
 
 # KRX_CLOSE_FINALIZER_ENABLED: KRX_CLOSE_SNAPSHOT_PLAN §5.2/§5.3 2차 작업 토글.
 # default true — Stage 3+ 정책 (WS-first close finalizer) 활성:

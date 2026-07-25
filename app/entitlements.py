@@ -47,33 +47,6 @@ def krx_gates_open() -> bool:
     return config.KRX_FUTURES_ENABLED and config.KRX_CLIENT_DISTRIBUTION_ENABLED
 
 
-def krx_unauthenticated_graph_exposure_allowed() -> bool:
-    """무인증 graph v2 표면(`/api/v2/graph/tab`·`/catalog`)이 KRX series를 실어도 되는가.
-
-    **G2(`KRX_CLIENT_DISTRIBUTION_ENABLED`)와 분리된 두 번째 승인 flag**
-    (`KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`, default **false**) — ADR-039 §3.1/§6.1, 2026-07-26.
-
-    문제: 이 두 endpoint는 **인증이 없는데** series 목록을 `krx_gates_open()`(G2∧G3)**만으로**
-    정했다. 즉 `KRX_CLIENT_DISTRIBUTION_ENABLED=true` **한 줄**로 무인증 caller에게 KRX 그래프
-    series가 열린다. E3가 REST twin(`/api/v2/topics/snapshot`)에서 막은 것과 **같은 누수**다.
-
-    왜 flag를 없애지 않고 분리했나: 이 노출은 **실수가 아니라 명세된 계약**이다 —
-    ADR-038 Decision 3이 "per-user 노출은 클라 `krx_visible` gate 담당"으로 수용했고(Open 2),
-    D4가 탭별 series 구성을 정했으며 `GRAPH_API_V2_CONTRACT` §3/§4와 12개 테스트가 잠그고 있다.
-    서버가 일방적으로 빼면 entitled 사용자가 그래프에서 KRX를 잃는다. 그래서 계약은 그대로 두되
-    **사고로 열리지 않게** 두 번째 flag로 분리했다 — 이름 자체가 무엇을 여는지 말한다.
-
-    ADR-039 §3.1은 서버 per-user 강제를 요구한다(= 더 강한 계약). 그 게이트가 land하면 이 함수는
-    per-user 판정으로 교체되고 flag는 제거된다. 그 전까지 **이 flag를 켜는 것은 §3.2 위반을
-    감수하는 명시적 결정**이다.
-
-    ⚠️ **완전한 판정**을 여기서 돌려준다(G3 ∧ G2 ∧ 승인). graph 모듈이 각자 AND를 조립하면
-    같은 보안 규칙이 두 곳에 복제돼 drift한다 — 두 모듈은 이 함수만 호출한다.
-    """
-    from app import config
-    return krx_gates_open() and config.KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE
-
-
 def krx_alert_gate_error(db: Session, user_id: str) -> Optional[str]:
     """KRX 알림 생성/재활성/변경 허용 판정 — None=허용 / str=403 사유.
 

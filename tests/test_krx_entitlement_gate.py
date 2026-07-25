@@ -143,90 +143,81 @@ class TestKimchiCounterPolicy(unittest.TestCase):
             "tether", "krx", "usd-krw-futures", "hana", "usd-krw", "signed", 3.0))
 
 
-class TestGraphV2KrxFilter(unittest.TestCase):
-    """무인증 graph v2의 krx 계열 노출 계약 (ADR-038 D3 Open 2 + D4).
+class TestGraphV2KrxSeriesComposition(unittest.TestCase):
+    """graph v2 krx 계열 구성 계약 (ADR-038 D3 Open 2 + D4).
 
-    ⚠️ ADR-039 §6.1(2026-07-26)에서 이 노출은 **별도 승인 flag**
-    (`KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`, default false) 뒤로 분리됐다 —
-    G2 한 줄로 무인증 KRX가 열리는 사고를 막기 위해서다. 계약 자체는 그대로라
-    이 클래스는 flag를 **켜고** 검증한다. 꺼진 기본 상태(= 오늘의 운영)는
-    tests/test_graph_v2_krx_exposure.py.
+    ⚠️ **2026-07-26 축 변경**: 구 `TestGraphV2KrxFilter`는 "전역 게이트(G3∧G2)가 열리면 무인증
+    catalog/tab에 krx가 실린다"를 잠갔다. ADR-039 §3.1이 서버 per-user 강제를 요구하므로 그 축은
+    **호출자가 넘기는 `krx_visible`**로 바뀌었다(env flag 아님 — flag는 게이트 없이 `.env` 한 줄로
+    §3.2 위반을 켤 수 있어 기각). 무인증 endpoint는 항상 default False를 쓰므로 여기 `krx_visible=True`
+    케이스는 **per-user 게이트가 land한 뒤 entitled 사용자가 볼 구성**을 미리 잠근다.
+
+    전역 게이트 자체의 판정은 `TestEntitlementsGates.test_krx_gates_open` / `compute_krx_visible`,
+    무인증 경로의 기본(False) 동작은 tests/test_graph_v2_krx_exposure.py.
     """
 
-    def setUp(self):
-        exposure = patch("app.config.KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE", True)
-        exposure.start()
-        self.addCleanup(exposure.stop)
+    _KRX = "krx.usd-krw-futures"
 
-    def test_long_period_series_filtered(self):
+    def test_long_period_series_visible_only_when_entitled(self):
         from app.graph_v2 import _effective_tab_series, _effective_default_visible
-        with _patch_gates(True, True):
-            self.assertIn("krx.usd-krw-futures", _effective_tab_series("tether"))
-            self.assertIn("krx.usd-krw-futures", _effective_default_visible("tether"))
-        with _patch_gates(True, False):
-            self.assertNotIn("krx.usd-krw-futures", _effective_tab_series("tether"))
-            self.assertNotIn("krx.usd-krw-futures", _effective_default_visible("tether"))
-            # 비-krx series는 유지
-            self.assertIn("bithumb.usdt-krw", _effective_tab_series("tether"))
+        self.assertIn(self._KRX, _effective_tab_series("tether", krx_visible=True))
+        self.assertIn(self._KRX, _effective_default_visible("tether", krx_visible=True))
+        self.assertNotIn(self._KRX, _effective_tab_series("tether"))          # default False
+        self.assertNotIn(self._KRX, _effective_default_visible("tether"))
+        # 비-krx series는 유지 (과잉 필터 회귀 차단)
+        self.assertIn("bithumb.usdt-krw", _effective_tab_series("tether"))
 
     def test_tether_default_visible_composition(self):
         """ADR-038 D4 후속 (2026-07-09) — 테더 기본 토글 = 거래소 대표 + 참조(hana·krx 둘 다,
-        클라가 상호배타) + DXY 제거. gate on 기준 base 구성 잠금 (클라 swap은 iOS 테스트)."""
+        클라가 상호배타) + DXY 제거. entitled 기준 base 구성 잠금 (클라 swap은 iOS 테스트)."""
         from app.graph_v2 import _effective_default_visible
         from app.graph_v2_intraday import tab_1d_default_visible
-        with _patch_gates(True, True):
-            dv_1d = tab_1d_default_visible("tether")
-            self.assertEqual(set(dv_1d),
-                             {"upbit.usdt-krw", "bithumb.usdt-krw", "hana.usd", "krx.usd-krw-futures"})
-            self.assertNotIn("dxy", dv_1d)                 # DXY 기본 OFF (사용자 2026-07-09)
-            dv_long = _effective_default_visible("tether")
-            self.assertEqual(set(dv_long),
-                             {"bithumb.usdt-krw", "hana.usd", "krx.usd-krw-futures"})
-            self.assertNotIn("dxy", dv_long)               # 장기도 DXY 기본 OFF
+        dv_1d = tab_1d_default_visible("tether", krx_visible=True)
+        self.assertEqual(set(dv_1d),
+                         {"upbit.usdt-krw", "bithumb.usdt-krw", "hana.usd", self._KRX})
+        self.assertNotIn("dxy", dv_1d)                 # DXY 기본 OFF (사용자 2026-07-09)
+        dv_long = _effective_default_visible("tether", krx_visible=True)
+        self.assertEqual(set(dv_long), {"bithumb.usdt-krw", "hana.usd", self._KRX})
+        self.assertNotIn("dxy", dv_long)               # 장기도 DXY 기본 OFF
 
-    def test_intraday_specs_filtered(self):
+    def test_intraday_specs_composition(self):
         from app.graph_v2_intraday import tab_1d_specs, tab_1d_all_series, tab_1d_default_visible
-        with _patch_gates(True, True):
-            self.assertIn("krx.usd-krw-futures", tab_1d_all_series("tether"))
-        with _patch_gates(False, True):   # G3 off도 동일 차단 (codex 보강 — 잔존값 노출 방지)
-            ids = tab_1d_all_series("tether")
-            self.assertNotIn("krx.usd-krw-futures", ids)
-            self.assertEqual(len(ids), 10)   # 테더 11 → 10
-            self.assertNotIn("krx.usd-krw-futures", tab_1d_default_visible("tether"))
-            self.assertTrue(all(s["id"] != "krx.usd-krw-futures" for s in tab_1d_specs("tether")))
+        self.assertIn(self._KRX, tab_1d_all_series("tether", krx_visible=True))
+        ids = tab_1d_all_series("tether")              # default False
+        self.assertNotIn(self._KRX, ids)
+        self.assertEqual(len(ids), 10)                 # 테더 11 → 10
+        self.assertNotIn(self._KRX, tab_1d_default_visible("tether"))
+        self.assertTrue(all(s["id"] != self._KRX for s in tab_1d_specs("tether")))
 
-    def test_catalog_reflects_gate(self):
+    def test_catalog_reflects_krx_visible(self):
         from app.graph_v2 import build_catalog
-        with _patch_gates(True, False):
-            catalog = build_catalog()
-            tether = next(t for t in catalog["tabs"] if t["id"] == "tether")
-            for period, spec in tether["periods"].items():
-                self.assertNotIn("krx.usd-krw-futures", spec["all_series"], period)
-                self.assertNotIn("krx.usd-krw-futures", spec["default_visible_series"], period)
-        with _patch_gates(True, True):
-            catalog = build_catalog()
-            tether = next(t for t in catalog["tabs"] if t["id"] == "tether")
-            self.assertIn("krx.usd-krw-futures", tether["periods"]["3m"]["all_series"])
-            self.assertIn("krx.usd-krw-futures", tether["periods"]["1d"]["all_series"])
+        catalog = build_catalog()                      # default False = 무인증 endpoint 경로
+        tether = next(t for t in catalog["tabs"] if t["id"] == "tether")
+        for period, spec in tether["periods"].items():
+            self.assertNotIn(self._KRX, spec["all_series"], period)
+            self.assertNotIn(self._KRX, spec["default_visible_series"], period)
+        catalog = build_catalog(krx_visible=True)
+        tether = next(t for t in catalog["tabs"] if t["id"] == "tether")
+        self.assertIn(self._KRX, tether["periods"]["3m"]["all_series"])
+        self.assertIn(self._KRX, tether["periods"]["1d"]["all_series"])
 
-    def test_usd_tab_gated_like_tether(self):
-        """ADR-038 D4 ② — usd 탭도 krx 시리즈 편입: gate on=포함 / off=제외 (전 기간).
-        jpy/eur는 krx 없음 — 게이트 무관 불변 (회귀 가드)."""
+    def test_usd_tab_composed_like_tether(self):
+        """ADR-038 D4 ② — usd 탭도 krx 시리즈 편입: entitled=포함 / 아니면 제외 (전 기간).
+        jpy/eur는 krx 없음 — 판정 무관 불변 (회귀 가드)."""
         from app.graph_v2 import build_catalog
-        with _patch_gates(True, True):
-            catalog = build_catalog()
-            usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
-            self.assertIn("krx.usd-krw-futures", usd["periods"]["1d"]["all_series"])
-            self.assertIn("krx.usd-krw-futures", usd["periods"]["3m"]["all_series"])
-            # default OFF (2026-07-03 "최소 2개 시작" 결정과 정합)
-            self.assertNotIn("krx.usd-krw-futures", usd["periods"]["1d"]["default_visible_series"])
-        with _patch_gates(True, False):
-            catalog = build_catalog()
-            usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
-            for period in ("1d", "1w", "3m", "1y"):
-                self.assertNotIn("krx.usd-krw-futures", usd["periods"][period]["all_series"])
-            jpy = next(t for t in catalog["tabs"] if t["id"] == "jpy")
-            self.assertNotIn("krx.usd-krw-futures", jpy["periods"]["1d"]["all_series"])
+        catalog = build_catalog(krx_visible=True)
+        usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
+        self.assertIn(self._KRX, usd["periods"]["1d"]["all_series"])
+        self.assertIn(self._KRX, usd["periods"]["3m"]["all_series"])
+        # default OFF (2026-07-03 "최소 2개 시작" 결정과 정합)
+        self.assertNotIn(self._KRX, usd["periods"]["1d"]["default_visible_series"])
+        jpy = next(t for t in catalog["tabs"] if t["id"] == "jpy")
+        self.assertNotIn(self._KRX, jpy["periods"]["1d"]["all_series"])
+
+        catalog = build_catalog()
+        usd = next(t for t in catalog["tabs"] if t["id"] == "usd")
+        for period in ("1d", "1w", "3m", "1y"):
+            self.assertNotIn(self._KRX, usd["periods"][period]["all_series"])
 
 
 class TestConfigDerived(unittest.TestCase):
