@@ -62,9 +62,14 @@ class _Base(unittest.TestCase):
 
 # ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
 # 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
+# ADR-039 §6.1 (2026-07-26) — 무인증 graph의 krx 노출은 **별도 승인 flag** 뒤로 분리됐다
+# (`KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`, default false). G2 한 줄로 무인증 KRX가
+# 열리는 사고를 막기 위한 것. 이 모듈은 그 flag가 **켜진** 상태의 계약을 잠근다 —
+# 꺼진 기본 상태는 tests/test_graph_v2_krx_exposure.py.
 _KRX_GATES_OPEN = patch.multiple("app.config",
                                  KRX_FUTURES_ENABLED=True,
-                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True)
+                                 KRX_CLIENT_DISTRIBUTION_ENABLED=True,
+                                 KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE=True)
 
 
 def setUpModule():

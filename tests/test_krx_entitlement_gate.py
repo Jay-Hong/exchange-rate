@@ -144,7 +144,19 @@ class TestKimchiCounterPolicy(unittest.TestCase):
 
 
 class TestGraphV2KrxFilter(unittest.TestCase):
-    """무인증 graph v2는 전역 게이트(G3∧G2)만 반영 — off면 krx 계열 전 표면 제외."""
+    """무인증 graph v2의 krx 계열 노출 계약 (ADR-038 D3 Open 2 + D4).
+
+    ⚠️ ADR-039 §6.1(2026-07-26)에서 이 노출은 **별도 승인 flag**
+    (`KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`, default false) 뒤로 분리됐다 —
+    G2 한 줄로 무인증 KRX가 열리는 사고를 막기 위해서다. 계약 자체는 그대로라
+    이 클래스는 flag를 **켜고** 검증한다. 꺼진 기본 상태(= 오늘의 운영)는
+    tests/test_graph_v2_krx_exposure.py.
+    """
+
+    def setUp(self):
+        exposure = patch("app.config.KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE", True)
+        exposure.start()
+        self.addCleanup(exposure.stop)
 
     def test_long_period_series_filtered(self):
         from app.graph_v2 import _effective_tab_series, _effective_default_visible

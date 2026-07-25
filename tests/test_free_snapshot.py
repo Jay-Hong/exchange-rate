@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app import free_snapshot, graph_v2
+from app import config, free_snapshot, graph_v2
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────
@@ -106,8 +106,14 @@ def test_free_tab_series_excludes_krx():
 
 
 def test_build_tab_exclude_krx_drops_krx_even_when_gate_open(monkeypatch):
-    """게이트(G2/G3)가 열려도 exclude_krx=True면 KRX 제외 — 무료 fail-open 방어."""
-    monkeypatch.setattr(graph_v2, "_krx_distribution_open", lambda: True)  # 게이트 열림
+    """게이트(G2/G3)가 열려도 exclude_krx=True면 KRX 제외 — 무료 fail-open 방어.
+
+    ⚠️ 대조군(exclude_krx=False → KRX 포함)이 성립하려면 ADR-039 §6.1의 무인증 노출 승인
+    flag도 켜야 한다. 안 켜면 양쪽 다 KRX가 없어 이 테스트가 **vacuous**해진다.
+    """
+    monkeypatch.setattr(config, "KRX_FUTURES_ENABLED", True)                    # G3
+    monkeypatch.setattr(config, "KRX_CLIENT_DISTRIBUTION_ENABLED", True)        # G2
+    monkeypatch.setattr(config, "KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE", True)  # 무인증 노출 승인
     monkeypatch.setattr(graph_v2, "_read_sdr_series", lambda db, sid, entry, s, e, g: {"id": sid, "data": []})
     monkeypatch.setattr(graph_v2, "_read_market_index_series", lambda db, sid, entry, s, e, g: {"id": sid, "data": []})
 
@@ -496,7 +502,7 @@ def test_build_free_snapshot_payload_tether_grouped(monkeypatch):
 # ── 무료 1d (intraday, KRX 제외, hourly-frozen) — ADR-039 A ──────
 
 def test_free_tab_1d_specs_excludes_krx():
-    from app import graph_v2_intraday
+    from app import config, graph_v2_intraday
     # tether 1d엔 krx 있음 → 제외 확인
     tether_ids = [s["id"] for s in graph_v2_intraday._free_tab_1d_specs("tether")]
     assert not any(i.startswith("krx.") for i in tether_ids)

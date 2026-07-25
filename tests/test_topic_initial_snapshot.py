@@ -166,6 +166,82 @@ class TestVisibleSnapshotTopics(unittest.TestCase):
         mock_compute.assert_called_once_with(fake_db, "u1", premium_active=False)
 
 
+class TestResolveSnapshotTopicAccess(unittest.TestCase):
+    """`resolve_snapshot_topic_access_sync` — 판정 + 조회 범위 (ADR-039 §8.1 E3).
+
+    per-user 판정이 결과를 바꿀 수 없는 요청은 entitlement를 조회하지 않는다(견고성).
+    그 shortcut이 안전한 근거가 `per_user_gated_snapshot_topics()`와
+    `visible_snapshot_topics_sync`의 필터가 **같은 지식**이라는 것 — 아래 trip-wire가 잠근다.
+    """
+
+    _KRX = "krx:usd-krw-futures"
+
+    def _resolve(self, topic, *, gate_on=True, krx_visible=False):
+        from app import config
+        from app.topic_initial_snapshot import resolve_snapshot_topic_access_sync
+        with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", gate_on), \
+             patch("app.database.SessionLocal", return_value=MagicMock()) as sess, \
+             patch("app.entitlements.compute_krx_visible",
+                   return_value=krx_visible) as compute:
+            access = resolve_snapshot_topic_access_sync(topic, "u1", premium_active=True)
+        return access, compute, sess
+
+    def test_non_gated_topic_allowed_without_lookup(self):
+        for topic in ("usdt:krw", "fx:usd-krw", "fx:jpy-krw", "fx:eur-krw"):
+            with self.subTest(topic=topic):
+                access, compute, sess = self._resolve(topic)
+                self.assertTrue(access.allowed)
+                compute.assert_not_called()
+                sess.assert_not_called()
+
+    def test_allowed_result_carries_no_topic_list(self):
+        """200 경로는 목록을 싣지 않는다 — 타입으로 못박아 호출부가 실수로 노출 못 하게."""
+        access, _, _ = self._resolve("usdt:krw")
+        self.assertIsNone(access.supported_topics)
+
+    def test_gated_topic_consults_entitlement(self):
+        access, compute, _ = self._resolve(self._KRX, krx_visible=False)
+        self.assertFalse(access.allowed)
+        compute.assert_called_once()
+        self.assertNotIn(self._KRX, access.supported_topics)
+
+    def test_gated_topic_allowed_when_entitled(self):
+        access, compute, _ = self._resolve(self._KRX, krx_visible=True)
+        self.assertTrue(access.allowed)
+        self.assertIsNone(access.supported_topics)
+
+    def test_unknown_topic_consults_entitlement_for_the_echo(self):
+        """⛔ 미지원 topic을 조회 없이 조기 반환하면 에코에 KRX가 실린다 — 그 최적화 금지."""
+        access, compute, _ = self._resolve("dxy", krx_visible=False)
+        self.assertFalse(access.allowed)
+        compute.assert_called_once()
+        self.assertNotIn(self._KRX, access.supported_topics)
+
+    def test_gate_registry_covers_every_per_user_filtered_topic(self):
+        """**trip-wire** — `visible_snapshot_topics_sync`가 걸러내는 topic은 전부
+        `per_user_gated_snapshot_topics()`에 등록돼 있어야 한다.
+
+        새 per-user 필터를 등록 없이 추가하면 shortcut이 그 topic을 무조건 허용해
+        **판정 우회 + 존재 노출**이 동시에 난다. 여기서 먼저 red가 된다.
+        """
+        from app import config
+        from app.topic_initial_snapshot import (
+            per_user_gated_snapshot_topics,
+            supported_snapshot_topics,
+            visible_snapshot_topics_sync,
+        )
+        with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.database.SessionLocal", return_value=MagicMock()), \
+             patch("app.entitlements.compute_krx_visible", return_value=False):
+            supported = set(supported_snapshot_topics())
+            visible = set(visible_snapshot_topics_sync("u1", premium_active=True))
+        filtered = supported - visible
+        self.assertTrue(filtered, "필터가 아무것도 안 걸러내면 이 trip-wire가 vacuous해진다")
+        self.assertTrue(
+            filtered <= per_user_gated_snapshot_topics(),
+            f"per-user 필터 대상인데 registry 미등록: {filtered - per_user_gated_snapshot_topics()}")
+
+
 class TestKrxSnapshotBranch(unittest.TestCase):
     """_build_snapshot_sync krx:usd-krw-futures branch (ADR-038 D2 positive coverage).
 

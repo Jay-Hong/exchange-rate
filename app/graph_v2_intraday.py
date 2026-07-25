@@ -156,37 +156,37 @@ TAB_1D_DEFAULT_VISIBLE = {
 INTRADAY_TABS = tuple(TAB_1D_SERIES)
 
 
-def _krx_distribution_open() -> bool:
-    """ADR-038 G2/G3 — client-facing KRX 배포 허용 여부 (runtime 조합 — 테스트 patch 가능).
+def _unauthenticated_krx_series_allowed() -> bool:
+    """무인증 graph 표면이 krx.* series를 실을 수 있는가 (ADR-039 §3.1/§6.1).
 
-    import-time 파생 상수(config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE)와 같은 의미지만, graph
-    accessor는 runtime에 두 flag를 직접 읽음 (env 변경=force-recreate 전제는 동일 —
-    함수화는 테스트에서 config attr patch를 살리기 위함).
+    판정 본체는 `entitlements.krx_unauthenticated_graph_exposure_allowed()` **하나** —
+    G3 ∧ G2 ∧ 무인증 노출 승인. 여기서 AND를 다시 조립하지 않는다(같은 보안 규칙이 두 모듈에
+    복제되면 drift한다 — codex 지적).
     """
-    from app import config
-    return config.KRX_FUTURES_ENABLED and config.KRX_CLIENT_DISTRIBUTION_ENABLED
+    from app import entitlements
+    return entitlements.krx_unauthenticated_graph_exposure_allowed()
 
 
 def tab_1d_specs(tab: str) -> list:
-    """탭 1d series spec 목록 — G2/G3 닫히면 krx 계열 제외 (ADR-038, 무인증 graph는 전역 게이트만).
+    """탭 1d series spec 목록 — 무인증 표면이라 krx 계열은 fail-closed 제외 (ADR-039 §3.1).
 
     build/precompute/in_progress 모든 경로가 이 accessor를 경유 → 게이트 일원화
     (import-time 상수 TAB_1D_SERIES는 전체 집합 유지 — catalog 쪽도 동일 필터 적용).
     """
     specs = TAB_1D_SERIES[tab]
-    if _krx_distribution_open():
+    if _unauthenticated_krx_series_allowed():
         return specs
     return [spec for spec in specs if not spec["id"].startswith("krx.")]
 
 
 def tab_1d_all_series(tab: str) -> list:
-    """catalog용 — G2/G3 반영 series id 목록."""
+    """catalog용 — series 목록과 같은 게이트."""
     return [spec["id"] for spec in tab_1d_specs(tab)]
 
 
 def tab_1d_default_visible(tab: str) -> list:
-    """catalog용 — G2/G3 반영 default visible 목록."""
-    if _krx_distribution_open():
+    """catalog용 — series 목록과 같은 게이트."""
+    if _unauthenticated_krx_series_allowed():
         return list(TAB_1D_DEFAULT_VISIBLE[tab])
     return [sid for sid in TAB_1D_DEFAULT_VISIBLE[tab] if not sid.startswith("krx.")]
 

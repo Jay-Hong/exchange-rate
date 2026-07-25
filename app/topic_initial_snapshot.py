@@ -33,7 +33,7 @@ timestamp-merge 계약(구값으로 신값 덮지 않기, V2 client guide 항목
 """
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 from app import config
 
@@ -60,6 +60,62 @@ def supported_snapshot_topics() -> tuple:
     if config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE:
         topics += (KRX_TOPIC,)
     return topics
+
+
+def per_user_gated_snapshot_topics() -> frozenset:
+    """per-user 판정(entitlement)이 **필요한** topic 집합.
+
+    `visible_snapshot_topics_sync`의 필터와 이 집합은 **같은 지식**이라 반드시 함께 움직여야 한다.
+    갈리면 `resolve_snapshot_topic_access_sync`의 shortcut이 새 게이팅 topic을 무조건 허용해
+    **판정 우회 + 존재 노출**이 동시에 난다 → 집합대수 trip-wire 테스트가 잠근다
+    (`set(supported) - set(visible) ⊆ per_user_gated_snapshot_topics()`).
+    """
+    from app.krx_topic_publisher import KRX_TOPIC
+    return frozenset({KRX_TOPIC})
+
+
+class SnapshotTopicAccess(NamedTuple):
+    """topic 접근 판정 결과.
+
+    `supported_topics`는 **거부일 때만** 채운다 — 허용 응답(200)은 목록을 싣지 않기 때문이다.
+    이 결합을 반환 타입에 넣어, 호출부가 200에 목록을 실으려면 여기부터 바꾸게 만든다.
+    """
+    allowed: bool
+    supported_topics: Optional[tuple]
+
+
+def resolve_snapshot_topic_access_sync(
+    topic: str, user_id: str, *, premium_active: bool
+) -> SnapshotTopicAccess:
+    """topic 접근 판정 — `asyncio.to_thread` 전용 (ADR-039 §8.1 E3).
+
+    **per-user 판정이 결과를 바꿀 수 없는 요청은 entitlement를 조회하지 않는다.**
+    이건 최적화가 아니라 **견고성 속성**이다: FX/USDT builder는 Redis-first라 warm이면 DB 커넥션을
+    0개 쓰는데, 무조건 entitlement를 조회하면 그 요청이 **DB 필수 요청으로 승격**된다 —
+    entitlement DB 순단 하나로 entitlement와 무관한 FX bootstrap이 죽고, 콜드런치 4건(FX 3 동시 +
+    tether 1)이 좁은 풀(3+2)을 동시에 문다.
+
+    등가성: `visible ⊆ supported` ∧ `supported \\ visible ⊆ per_user_gated` 이므로
+    `topic ∈ supported ∧ topic ∉ per_user_gated ⟹ topic ∈ visible`. 즉 판정 결과가 항상 같고,
+    허용 경로는 목록을 싣지 않으므로 §3.2도 그대로다.
+
+    ⛔ **더 나가지 말 것**: "미지원 topic은 어차피 거부니 조회 없이 전역 목록으로 반환"은
+    (a) 에코에 KRX가 실려 존재가 노출되고 (b) 비-entitled KRX(조회 1회)와 미지원 topic(0회)이
+    지연으로 갈린다 — §3.2 두 축이 동시에 깨진다. `test_unknown_topic_still_consults_entitlement`가
+    이 회귀를 red로 만든다.
+
+    ℹ️ `premium_active`는 premium **게이트가 아니다** — premium 강제는 호출부(`require_premium`)
+    소관이고 이 값은 `compute_krx_visible`에 그대로 전달될 뿐이다. shortcut이 이 값을 보지 않는 건
+    비-KRX topic의 판정이 premium과 무관하기 때문이다(어느 값이든 결과 동일).
+    """
+    global_topics = supported_snapshot_topics()
+    if topic in global_topics and topic not in per_user_gated_snapshot_topics():
+        return SnapshotTopicAccess(True, None)
+
+    visible = visible_snapshot_topics_sync(user_id, premium_active=premium_active)
+    if topic in visible:
+        return SnapshotTopicAccess(True, None)
+    return SnapshotTopicAccess(False, visible)
 
 
 def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple:

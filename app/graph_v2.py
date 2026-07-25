@@ -22,6 +22,7 @@ v1 (/api/graph/{currency})는 변경 0 (legacy 공존, §12).
 """
 
 # 표준 라이브러리
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -51,6 +52,8 @@ _DXY_CARRY_SCAN_LIMIT = 50
 
 CATALOG_VERSION = "2026-05-27"
 
+
+logger = logging.getLogger("exchange_rate.graph_v2")
 
 def _is_insufficient_history(first_date, start_date, tolerance_days) -> bool:
     """series가 요청 period 시작을 못 채우면 true (빈 series 또는 첫 데이터가 start+tolerance 초과).
@@ -136,16 +139,60 @@ _TAB_DEFAULT_VISIBLE = {
 }
 
 
-def _krx_distribution_open() -> bool:
-    """ADR-038 G2/G3 — client-facing KRX 배포 허용 여부 (graph_v2_intraday와 동일 규칙)."""
-    from app import config
-    return config.KRX_FUTURES_ENABLED and config.KRX_CLIENT_DISTRIBUTION_ENABLED
+def _unauthenticated_krx_series_allowed() -> bool:
+    """무인증 graph 표면이 krx.* series를 실을 수 있는가 (ADR-039 §3.1/§6.1).
+
+    판정 본체는 `entitlements.krx_unauthenticated_graph_exposure_allowed()` **하나** —
+    G3 ∧ G2 ∧ 무인증 노출 승인. 여기서 AND를 다시 조립하지 않는다(같은 보안 규칙이 두 모듈에
+    복제되면 drift한다 — codex 지적).
+    """
+    from app import entitlements
+    return entitlements.krx_unauthenticated_graph_exposure_allowed()
+
+
+def strip_krx_if_not_allowed(payload):
+    """**serve-time** fail-closed — 승인되지 않았으면 응답에서 krx.* 를 제거한다 (codex Major).
+
+    build 경로(`_effective_tab_series` / `tab_1d_specs`) 필터와 **의도적으로 중복**이다:
+    `/api/v2/graph/tab`은 Redis read-through 캐시라 **cache hit은 build를 안 거친다**.
+    승인 flag가 true였을 때 구워진 payload는 flag를 끈 뒤에도 TTL(최대 30분) 동안 살아 있고,
+    startup DEL은 best-effort(예외를 비치명으로 흡수)라 최종 방어선이 못 된다.
+    → 무료 snapshot의 `_assert_krx_free`와 같은 belt-and-suspenders.
+
+    `series`(list, 장기·1d 공통)와 `in_progress`(dict, 1d seed) 두 shape를 모두 훑는다.
+    원본을 변형하지 않고 copy-on-write — 캐시 객체가 공유될 수 있다.
+    실제로 제거가 일어나면 **캐시 잔존이 관측된 것**이므로 WARNING을 남긴다.
+    """
+    if _unauthenticated_krx_series_allowed() or not isinstance(payload, dict):
+        return payload
+
+    out = payload
+    series = payload.get("series")
+    if isinstance(series, list):
+        kept = [s for s in series
+                if not (isinstance(s, dict) and str(s.get("id", "")).startswith("krx."))]
+        if len(kept) != len(series):
+            out = {**out, "series": kept}
+
+    in_progress = payload.get("in_progress")
+    if isinstance(in_progress, dict):
+        kept_ip = {k: v for k, v in in_progress.items() if not str(k).startswith("krx.")}
+        if len(kept_ip) != len(in_progress):
+            out = {**out, "in_progress": kept_ip}
+
+    if out is not payload:
+        logger.warning(
+            "graph v2 응답에서 미승인 krx series 제거 — 캐시 잔존 (ADR-039 §6.1)",
+            extra={"event": "graph_v2_krx_stripped", "tab": payload.get("tab"),
+                   "period": payload.get("period")},
+        )
+    return out
 
 
 def _effective_tab_series(tab: str) -> list:
-    """탭 series id 목록 (3m/1y/1w 공유) — G2/G3 닫히면 krx 계열 제외 (ADR-038)."""
+    """탭 series id 목록 (3m/1y/1w 공유) — 무인증 표면이라 krx 계열은 fail-closed 제외."""
     ids = _TAB_SERIES[tab]
-    if _krx_distribution_open():
+    if _unauthenticated_krx_series_allowed():
         return list(ids)
     return [sid for sid in ids if not sid.startswith("krx.")]
 
@@ -160,8 +207,8 @@ def _free_tab_series(tab: str) -> list:
 
 
 def _effective_default_visible(tab: str) -> list:
-    """default visible 목록 — G2/G3 반영 (catalog가 그대로 복사하므로 함께 필터)."""
-    if _krx_distribution_open():
+    """default visible 목록 — series 목록과 **같은 게이트** (catalog가 그대로 복사하므로 함께 필터)."""
+    if _unauthenticated_krx_series_allowed():
         return list(_TAB_DEFAULT_VISIBLE[tab])
     return [sid for sid in _TAB_DEFAULT_VISIBLE[tab] if not sid.startswith("krx.")]
 
@@ -475,7 +522,7 @@ def build_catalog() -> dict:
 
     tabs = []
     for tab in _TAB_SERIES:
-        # ADR-038 G2/G3 — 무인증 catalog는 전역 게이트만 반영 (per-user는 클라 krx_visible gate)
+        # ADR-039 §3.1 — 무인증 catalog는 krx 계열 fail-closed 제외 (per-user 게이트 land 전까지)
         series_ids = _effective_tab_series(tab)
         periods = {}
         for period in MVP_PERIODS:

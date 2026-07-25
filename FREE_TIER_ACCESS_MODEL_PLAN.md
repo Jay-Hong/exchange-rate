@@ -162,22 +162,40 @@
 6. **TestFlight/내부 테스트**(양 플랫폼): 로그인·무료·구독·재연결·토큰 만료·KRX entitlement grant/revoke.
 7. **Stage A enforcement ON** + 재검증 후 출시.
 
-### 6.1 KRX 관련 flag는 **둘**이고 선행 조건이 다르다 (2026-07-25 분리)
+### 6.1 KRX 관련 flag는 **셋**이고 선행 조건이 다르다 (2026-07-25 분리 → 07-26 셋으로)
 
-두 flag를 하나로 묶어 생각하면 한쪽 게이트만 닫고 다른 쪽을 여는 사고가 난다.
+"KRX를 켠다"를 flag 하나로 이해하면 한쪽 게이트만 닫고 다른 쪽을 여는 사고가 난다.
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
 | `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ③ **iOS bootstrap 3종 인증 이관** | 🔴 false |
-| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | **무인증** `/api/v2/graph/tab`·`/catalog`의 KRX series + KRX topic 발행/snapshot | **graph v2 per-user 게이트**(§3.1 표의 graph 행) — **미구현** | 🔴 false |
+| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot. ~~+ 무인증 graph의 KRX series~~ → **분리됨** | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
+| `KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`<br>(2026-07-26 신설) | **무인증** `/api/v2/graph/tab`·`/catalog`의 krx.* series | **graph v2 per-user 게이트**(§3.1 graph 행) — **미구현**. 이 flag를 켜는 것 = §3.2를 무인증 표면에서 포기하는 명시적 결정 | 🔴 false |
 
 - ①②③을 다 채우고 `TOPIC_DISPATCHER_ENABLED`만 켜는 것은 안전하다(KRX는 G2가 닫혀 있어
   supported 목록에서 빠진다).
-- 반대로 **`KRX_CLIENT_DISTRIBUTION_ENABLED`를 먼저 켜면 graph v2가 무인증으로 KRX를 노출한다** —
-  E3가 REST twin에서 막은 것과 같은 누수가 sibling 표면에서 열린다. 이 flag는 graph 게이트가
-  land할 때까지 **단독으로 켜지 말 것**.
-- 두 flag 모두 2026-07-22 route auth 감사에서 완화 목적으로 false가 되었고, 그 완화가 현재
-  graph 쪽 **유일한** 방어선이다.
+- ⚠️ **구 문장 폐기**: "`KRX_CLIENT_DISTRIBUTION_ENABLED`를 켜면 graph가 무인증으로 KRX를
+  노출한다"는 **2026-07-26 코드 변경으로 더 이상 참이 아니다**. 그 노출은 `krx.*` series 결정에서
+  분리돼 `KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`(default false)로 옮겼다 —
+  `app/entitlements.krx_unauthenticated_graph_exposure_allowed()` + graph_v2 /
+  graph_v2_intraday의 `_unauthenticated_krx_series_allowed()`. 즉 **문서 경고가 아니라
+  실행 가능한 guard**다(tests/test_graph_v2_krx_exposure.py가 전역 게이트를 다 열어도
+  catalog/tab/1d 어디에도 `krx.*`가 없음을 잠근다).
+- **guard는 2중이다** — build 경로(series accessor)만 막으면 **캐시 hit이 우회한다**:
+  `/api/v2/graph/tab`은 Redis read-through라 hit 시 build를 안 거치고, 승인 상태로 구워진 payload가
+  TTL(최대 30분) 살아 있으며 startup DEL은 예외를 비치명으로 흡수한다(codex Major, 실제 probe로 재현).
+  → 3경로(장기 캐시 hit / 1d closed / 1d in_progress) 공통 exit에 **serve-time
+  `strip_krx_if_not_allowed`**를 둔다: `series` 리스트 + 1d `in_progress` seed 두 shape를 훑고,
+  실제 제거가 일어나면 WARNING(`graph_v2_krx_stripped`)을 남겨 캐시 잔존을 관측 가능하게 한다.
+- **왜 노출 자체를 제거하지 않았나**: 이 노출은 실수가 아니라 **명세된 계약**이다 —
+  ADR-038 D3(Open 2, 클라 `krx_visible` gate 담당) + D4(탭별 series 구성) + GRAPH_API_V2_CONTRACT
+  §3/§4 + 12개 계약 테스트. 서버가 일방적으로 빼면 entitled 사용자가 그래프에서 KRX를 잃는다.
+  계약은 유지하되 **사고로 열리지 않게** 승인 축만 분리했다.
+- **pre-flip 필수 항목** (`TOPIC_DISPATCHER_ENABLED=true` 전, 단순 후속 아님):
+  ① iOS bootstrap 3종 인증 이관 ② 1C WS 인증 ③ **entitlement 조회 실패의 HTTP 계약**
+  (현재 plain 500 → `{"error":"entitlement_unavailable"}` 503, Retry-After 없음, builder 경로 포함).
+- 현재 셋 다 false다 — 앞의 둘은 2026-07-22 route auth 감사 완화로, 셋째는 2026-07-26 신설 시
+  default false로(감사 시점엔 존재하지 않았다).
 8. **양 플랫폼 legacy <1% + 유예(S4) 충족 시** Stage B 제거.
 
 ---
@@ -619,8 +637,8 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 
   | 항목 | 결정 | 근거 / 재개 트리거 |
   |---|---|---|
-  | lazy entitlement shortcut<br>(비-KRX topic이면 entitlement 조회 생략) | **채택 안 함** | 분석은 옳다(게이트 ON이면 콜드런치 4건이 불필요한 SELECT, Redis-warm FX bootstrap이 DB 0→1 커넥션으로 승격). 그러나 **오늘 실제 SELECT는 0회**(양 flag off)라 측정 불가이고, §3.2의 힘은 "판정과 에코가 **같은 함수**"라는 한 문장으로 검증된다는 점인데 shortcut은 그걸 예외절 달린 문단으로 바꾼다. 재개 = `KRX_CLIENT_DISTRIBUTION_ENABLED` ON + endpoint live + **실측된** pool wait. ⛔ **그때도 금지**: "미지원 topic은 어차피 거부니 DB 없이 조기 반환"은 (a) 에코에 KRX가 실려 존재가 노출되고 (b) 비-entitled KRX(SELECT 1회)와 unknown(0회)이 지연으로 갈린다 — §3.2 두 축 동시 붕괴. |
-  | entitlement DB 장애 → 503 | **1C PR로 이월** | 현재 예외는 plain **500**(exception handler 0건)이라 클라 재시도 분류에서 빠진다. 다만 오늘 소비자가 없고(dormant + iOS `try?`), 제대로 하려면 builder 경로까지 함께 감싸야 한다(한쪽만 고치면 상태코드가 flag 상태에 따라 뒤집힌다). 형태: `except SQLAlchemyError` → `{"error": "entitlement_unavailable"}` + no-store, **Retry-After 없음**(503+Retry-After = "구독 판정 중"이라는 기존 클라 계약을 흐린다), `except Exception` 금지. |
+  | ~~lazy entitlement shortcut 채택 안 함~~ → **채택** (2026-07-26 번복) | ✅ 구현 | **"최적화 vs 계약 명료성" 프레이밍이 틀렸다** — 이건 **견고성 속성**이다. FX/USDT builder는 Redis-first라 warm이면 DB 커넥션 0개인데, 무조건 조회하면 그 요청이 **DB 필수로 승격**된다 → entitlement DB 순단 하나로 entitlement와 무관한 FX bootstrap이 죽는다(콜드런치 FX 3 동시 + tether 1). §3.2는 등가성(`visible ⊆ supported` ∧ `supported \ visible ⊆ per_user_gated`)으로 보존되고, 위험했던 두 갈래는 **테스트로 봉인**: `per_user_gated_snapshot_topics()` registry + 집합대수 trip-wire(새 per-user 필터를 등록 없이 추가 → red) + "미지원 topic도 조회한다" 회귀(⛔ 조기 반환 금지). |
+  | entitlement DB 장애 → 503 | **1C PR로 이월 — 단 §6.1의 pre-flip 필수 항목**(단순 후속 아님) | 현재 예외는 plain **500**(exception handler 0건)이라 클라 재시도 분류에서 빠진다. 다만 오늘 소비자가 없고(dormant + iOS `try?`), 제대로 하려면 builder 경로까지 함께 감싸야 한다(한쪽만 고치면 상태코드가 flag 상태에 따라 뒤집힌다). 형태: `except SQLAlchemyError` → `{"error": "entitlement_unavailable"}` + no-store, **Retry-After 없음**(503+Retry-After = "구독 판정 중"이라는 기존 클라 계약을 흐린다), `except Exception` 금지. |
   | `topic` 입력 상한 | **D7 확정까지 보류** | WS는 D7이 64자를 두는데 REST twin엔 상한이 없다. twin 한쪽만 선결정하면 반대 방향 비대칭이 생긴다. XSS·로그인젝션은 nosniff + percent-encoded access log로 이미 차단. |
   | 거부 관측(로그·카운터) | **1C rollout 체크리스트** | 401/403/404-krx가 무성(無聲)이라 "iOS bootstrap 미이관" 잔여 리스크가 양쪽에서 조용히 실패한다. dormant 동안은 볼 소비자가 없다. |
 

@@ -250,7 +250,11 @@ class TestTopicSnapshotRestAuthGate(unittest.TestCase):
 
     def test_authenticated_uid_is_used_for_premium_and_entitlement(self):
         """인증이 돌려준 uid가 **그대로** premium·entitlement 판정에 쓰여야 한다
-        (상수/다른 uid로 판정하면 남의 권한으로 서빙된다)."""
+        (상수/다른 uid로 판정하면 남의 권한으로 서빙된다).
+
+        게이팅 topic(krx)으로 요청해야 entitlement 경로까지 관통한다 — 비-게이팅 topic은
+        판정이 결과를 못 바꿔 조회를 생략하기 때문(`resolve_snapshot_topic_access_sync`).
+        """
         premium = AsyncMock(return_value=True)
         krx = MagicMock(return_value=True)
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
@@ -260,8 +264,8 @@ class TestTopicSnapshotRestAuthGate(unittest.TestCase):
              patch("app.main.require_premium", new=premium), \
              patch("app.entitlements.compute_krx_visible", new=krx), \
              patch("app.topic_initial_snapshot._build_snapshot_sync",
-                   return_value=_canned_snapshot("usdt:krw")):
-            r = self._get()
+                   return_value=_canned_snapshot("krx:usd-krw-futures")):
+            r = self._get(topic="krx:usd-krw-futures")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(premium.await_args.args[0], "uid-from-token")
         self.assertEqual(krx.call_args.args[1], "uid-from-token")
@@ -280,8 +284,8 @@ class TestTopicSnapshotRestAuthGate(unittest.TestCase):
              patch("app.main.require_premium", new=AsyncMock(return_value=False)), \
              patch("app.entitlements.compute_krx_visible", new=krx), \
              patch("app.topic_initial_snapshot._build_snapshot_sync",
-                   return_value=_canned_snapshot("usdt:krw")):
-            self._get()
+                   return_value=_canned_snapshot("krx:usd-krw-futures")):
+            self._get(topic="krx:usd-krw-futures")
         self.assertIs(krx.call_args.kwargs["premium_active"], False)
 
     def test_error_responses_are_no_store(self):
@@ -391,6 +395,56 @@ class TestTopicSnapshotRestAuthGate(unittest.TestCase):
             r = self._get(topic="krx:usd-krw-futures")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), canned)
+
+
+class TestTopicSnapshotEntitlementLookupScope(unittest.TestCase):
+    """entitlement 조회는 **판정을 바꿀 수 있는 요청에서만** 일어난다 (ADR-039 §8.1 E3).
+
+    견고성 속성: FX/USDT builder는 Redis-first라 warm이면 DB 커넥션 0개다. 무조건 조회하면
+    그 요청이 DB 필수로 승격돼, entitlement DB 순단 하나로 entitlement와 무관한 FX bootstrap이
+    죽고 콜드런치 4건(FX 3 동시 + tether 1)이 좁은 풀(3+2)을 동시에 문다.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    def _probe(self, topic):
+        """(compute_krx_visible mock, SessionLocal mock, 응답)"""
+        krx = MagicMock(return_value=False)
+        session = MagicMock()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch("app.main.require_premium", new=AsyncMock(return_value=True)), \
+             patch("app.database.SessionLocal", new=session), \
+             patch("app.entitlements.compute_krx_visible", new=krx), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync",
+                   side_effect=_canned_snapshot):
+            r = self.client.get("/api/v2/topics/snapshot", params={"topic": topic})
+        return krx, session, r
+
+    def test_known_non_gated_topic_skips_entitlement_lookup(self):
+        """usdt:krw / fx:* 는 KRX 가시성이 판정을 못 바꾼다 → 조회·세션 0."""
+        for topic in ("usdt:krw", "fx:usd-krw"):
+            with self.subTest(topic=topic):
+                krx, session, r = self._probe(topic)
+                self.assertEqual(r.status_code, 200)
+                krx.assert_not_called()
+                session.assert_not_called()
+
+    def test_unknown_topic_still_consults_entitlement(self):
+        """⛔ 미지원 topic을 조회 없이 조기 반환하면 §3.2가 깨진다 — 에코에 KRX가 실리고,
+        비-entitled KRX(조회 1회)와 지연으로 갈린다. 그 '다음 최적화'를 여기서 금지한다."""
+        krx, session, r = self._probe("dxy")
+        self.assertEqual(r.status_code, 404)
+        krx.assert_called_once()
+        self.assertNotIn("krx:usd-krw-futures", r.json()["supported_topics"])
+
+    def test_gated_topic_consults_entitlement(self):
+        krx, session, r = self._probe("krx:usd-krw-futures")
+        self.assertEqual(r.status_code, 404)
+        krx.assert_called_once()
 
 
 class TestTopicSnapshotKrxCascadeIntegration(unittest.TestCase):

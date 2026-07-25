@@ -2573,6 +2573,7 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
         is_supported_period,
         known_tabs,
         period_domain,
+        strip_krx_if_not_allowed,
     )
 
     # 라이브 그래프(1d 10min 진행봉 + in_progress seed, 3m/1y/1w도 매일/매시 갱신)는 클라가 HTTP
@@ -2656,6 +2657,9 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             },
         })
 
+    # serve-time KRX fail-closed — 캐시 hit은 build 필터를 안 거치므로 여기서 한 번 더 (ADR-039 §6.1).
+    # 이 지점이 1d/캐시-hit/캐시-miss 3경로 공통 exit이라 우회 경로가 없다.
+    payload = strip_krx_if_not_allowed(payload)
     # serve-time domain 부착(metadata) — 캐시 원본 불변(위 set은 원본만), copy에만. 1d/캐시-hit/캐시-miss 3경로 공통.
     return attach_graph_v2_domain(payload, period_domain(period, anchor))
 
@@ -2786,7 +2790,7 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     """
     from app import config
     from app.topic_initial_snapshot import (
-        _build_snapshot_sync, visible_snapshot_topics_sync)
+        _build_snapshot_sync, resolve_snapshot_topic_access_sync)
 
     # 개인화 응답(비-entitled의 KRX 404 포함) — 오류까지 캐시 금지. 200만 no-store면 private
     # HTTP 캐시가 404를 휴리스틱 저장해 entitlement 부여 뒤에도 404가 남을 수 있다.
@@ -2801,14 +2805,15 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     # require_premium이 ACTIVE 외 상태를 raise한다는 전제에 묶여 상태가 늘면 fail-open이 된다.
     premium_active = await require_premium(user_id, allow_empty=False)
     # per-user KRX 가시성(G1) 적용 — 비-entitled에겐 KRX가 목록·판정 양쪽에서 사라져
-    # 미지원 topic과 구분 불가해진다 (§3.2).
-    supported = await asyncio.to_thread(
-        visible_snapshot_topics_sync, user_id, premium_active=premium_active)
-    if topic not in supported:
+    # 미지원 topic과 구분 불가해진다 (§3.2). 판정이 결과를 바꿀 수 없는 요청(비-게이팅 topic)은
+    # entitlement를 조회하지 않는다 — FX/USDT bootstrap이 entitlement DB에 묶이지 않도록.
+    access = await asyncio.to_thread(
+        resolve_snapshot_topic_access_sync, topic, user_id, premium_active=premium_active)
+    if not access.allowed:
         return JSONResponse(status_code=404, headers=no_store, content={
             "error": "unknown_topic",
             "detail": f"topic '{topic}' not supported",
-            "supported_topics": list(supported),
+            "supported_topics": list(access.supported_topics),
         })
     payload = await asyncio.to_thread(_build_snapshot_sync, topic)
     if payload is None:
