@@ -393,5 +393,109 @@ class TestTopicSnapshotRestAuthGate(unittest.TestCase):
         self.assertEqual(r.json(), canned)
 
 
+class TestTopicSnapshotKrxCascadeIntegration(unittest.TestCase):
+    """KRX 게이트 캐스케이드를 **stub 없이** HTTP 경로로 관통시킨다 (ADR-039 §8.1 E3).
+
+    위 `TestTopicSnapshotRestAuthGate`의 KRX 케이스는 전역 게이트를 patch하고 `compute_krx_visible`도
+    mock한다 → 잠기는 것이 boolean 배선뿐이다. 실제 `krx_gates_open()` · `has_entitlement()` ·
+    `user_entitlements` row와의 결합은 이 endpoint 경로에서 무검증으로 남는다.
+
+    여기서는 **entitlement row 유/무만으로** 200/404가 갈리는지 본다.
+
+    ⚠️ flag patch가 셋 다 필요하다: `supported_snapshot_topics()`는 import-time 파생 상수
+    `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`를, `krx_gates_open()`은 runtime `KRX_FUTURES_ENABLED` ∧
+    `KRX_CLIENT_DISTRIBUTION_ENABLED`를 읽는다(KRX topic 계열은 EFFECTIVE, graph v2 계열은 runtime
+    accessor라는 리포 관례 — 통일 리팩터는 `krx_topic_publisher`까지 번져 별 슬라이스). 셋 중 하나라도
+    빠지면 조용히 통과한다.
+    """
+
+    _KRX = "krx:usd-krw-futures"
+    _UID = "krx-cascade-user"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+        models.Base.metadata.create_all(engine)
+
+    def tearDown(self):
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            db.query(models.UserEntitlement).filter(
+                models.UserEntitlement.user_id == self._UID).delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def _grant(self):
+        from app.database import SessionLocal
+        from app.entitlements import KRX_FUTURES_ENTITLEMENT_KEY
+        db = SessionLocal()
+        try:
+            db.add(models.UserEntitlement(user_id=self._UID, key=KRX_FUTURES_ENTITLEMENT_KEY))
+            db.commit()
+        finally:
+            db.close()
+
+    def _get_krx(self):
+        canned = _canned_snapshot(self._KRX)
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_ENABLED", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value=self._UID)), \
+             patch("app.main.require_premium", new=AsyncMock(return_value=True)), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", return_value=canned):
+            return self.client.get("/api/v2/topics/snapshot", params={"topic": self._KRX})
+
+    def test_without_entitlement_row_404(self):
+        r = self._get_krx()
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["error"], "unknown_topic")
+        self.assertNotIn(self._KRX, r.json()["supported_topics"])
+
+    def test_with_entitlement_row_200(self):
+        self._grant()
+        r = self._get_krx()
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["topic"], self._KRX)
+
+    def test_entitlement_is_scoped_to_the_authenticated_user(self):
+        """다른 사용자의 row가 있어도 이 사용자에겐 안 보인다(uid 결합 실검증)."""
+        from app.database import SessionLocal
+        from app.entitlements import KRX_FUTURES_ENTITLEMENT_KEY
+        db = SessionLocal()
+        try:
+            db.add(models.UserEntitlement(user_id="somebody-else",
+                                          key=KRX_FUTURES_ENTITLEMENT_KEY))
+            db.commit()
+            r = self._get_krx()
+        finally:
+            db.query(models.UserEntitlement).filter(
+                models.UserEntitlement.user_id == "somebody-else").delete()
+            db.commit()
+            db.close()
+        self.assertEqual(r.status_code, 404)
+
+
+class TestTopicSnapshotRouteHasNoRequestScopedSession(unittest.TestCase):
+    """`Depends(get_db)` 금지 계약을 회귀로 잠근다 (codex Major, ADR-039 §8.1 E3 item 5).
+
+    request-scoped 세션은 응답까지 커넥션을 쥐고, 그 뒤 builder가 **두 번째** SessionLocal을 연다 →
+    운영 풀(`pool_size=3 + max_overflow=2`)에서 bootstrap 동시 요청이 서로의 builder 커넥션을
+    기다린다. 리뷰로 한 번 잡혔지만 **되돌려도 green**이었던 속성이라 여기서 못박는다.
+    """
+
+    def test_route_declares_no_db_dependency(self):
+        from app.main import get_db
+
+        route = next(r for r in app.routes
+                     if getattr(r, "path", None) == "/api/v2/topics/snapshot")
+        deps = [d.call for d in route.dependant.dependencies]
+        self.assertNotIn(get_db, deps,
+                         "topics/snapshot은 request-scoped 세션을 받으면 안 된다 — "
+                         "가시성 조회는 to_thread 안에서 열고 닫는다(E3 item 5)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

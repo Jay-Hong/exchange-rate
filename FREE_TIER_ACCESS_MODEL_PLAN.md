@@ -14,18 +14,25 @@
 
 ### 1.1 무인증 최신-데이터 endpoint 전수 (2026-07-17)
 
-main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"과 "공개=차단 대상"은 별개:
+작성 시점(2026-07-17) main.py 890~2620 `verify_firebase_token`/`require_premium` 0건.
+"호출 확인"과 "공개=차단 대상"은 별개:
 
-| endpoint | main.py | 신규앱 caller | 차단 |
+| endpoint | 신규앱 caller | 차단 | 상태 |
 |---|---|---|---|
-| `/api/rates` | :992 | iOS ✅ / Android ✅([FXiApiService.kt:25]) | B |
-| `/api/rates/{currency}` · `/api/banks/{pair}` · `/api/investing/{pair}` | :1035/:954/:945 | ❌ (공개=차단대상) | B |
-| `/ws` legacy `type:rates` | :889 | iOS ✅ / Android ✅([WebSocketService.kt:177]) | B |
-| `/api/graph/{currency}` | :2130 | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt:28]) | B |
-| `/api/v2/graph/tab` · `/api/v2/topics/snapshot` · topic WS · `/api/v2/graph/catalog` | :2542/:2615/:889/:2434 | iOS ✅ / **Android ❌(v2 미사용)** | **A** |
-| `/api/news` | :2057 | iOS·Android | §7 S2 |
+| `/api/rates` | iOS ✅ / Android ✅([FXiApiService.kt:25]) | B | 무인증 |
+| `/api/rates/{currency}` · `/api/banks/{pair}` · `/api/investing/{pair}` | ❌ (공개=차단대상) | B | 무인증 |
+| `/ws` legacy `type:rates` | iOS ✅ / Android ✅([WebSocketService.kt:177]) | B | 무인증 |
+| `/api/graph/{currency}` | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt:28]) | B | 무인증 |
+| `/api/v2/topics/snapshot` | iOS ✅ / **Android ❌** | **A** | ✅ **인증+premium+per-user KRX (E3, 2026-07-25)** |
+| `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | 🔴 **무인증 잔여** — §3.1 아래 경고 |
+| topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | 🔴 무인증 잔여 — 1C |
+| `/api/news` | iOS·Android | §7 S2 | 무인증 |
 
 > ⚠️ **Android = 완전 legacy**(v2 grep 0건). 운영 v1.2.2 실사용은 §5 측정.
+> ⚠️ 라인 번호는 자주 어긋나 **제거**했다(구 `:2615`는 실제 `:2745`였다) — 심볼명으로 찾을 것.
+> ⚠️ **무인증 표면은 endpoint 목록이 전부가 아니다**: `/openapi.json` · `/docs` · `/redoc`이
+> prod에서 무인증 200이다(2026-07-25 실측 — 49 paths, `/admin/api/*` 라우트명 전부 + 핸들러
+> docstring + `EntitlementsResponse.krx_visible` 필드명 포함). §3.2 각주 참조.
 
 ---
 
@@ -55,7 +62,14 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 | hourly 무료 스냅샷 | **Firebase 인증만 + KRX 항상 제외**(codex High — 무료엔 KRX 불포함, premium+entitled는 최신 경로 사용) |
 | 최신 Graph/topic/catalog (비-KRX) | Firebase + premium |
 | KRX WS·REST snapshot | Firebase + premium + KRX entitlement |
-| Graph catalog/tab의 KRX series | entitlement 없으면 서버 제외 (ADR-038 G2) |
+| Graph catalog/tab의 KRX series | ⚠️ **미구현** — 아래 경고 참조 |
+
+> 🔴 **graph v2 행은 목표이지 현재 상태가 아니다 (2026-07-25 정정).** `GET /api/v2/graph/tab`·
+> `/catalog`은 **무인증**이고 `_effective_tab_series`(app/graph_v2.py)가 **전역 게이트(G2∧G3)만**
+> 본다 — per-user 필터가 없다. ADR-038 Decision 3이 이미 그렇게 명시하고 있는데 이 표만 반대로
+> 적혀 있었다. **귀결: `KRX_CLIENT_DISTRIBUTION_ENABLED=true`로 되돌리는 순간 무인증 caller가
+> KRX 그래프 series를 받는다**(§3.2 위반). 현재 그 flag가 false라 노출은 0 — 즉 **완화가 곧
+> 유일한 방어선**이다. §6 롤아웃의 2-flag 게이트 참조.
 
 - 판정 = 서버 단일 `krx_visible = G3 ∧ G2 ∧ G1 ∧ premium`. 클라 조합 금지.
 - **캐시 = 전역 게이트(G2∧G3) 후 저장 → serve-time per-user(G1∧premium) 필터**. 개인화 결과 공용 키 재캐시 금지.
@@ -74,6 +88,16 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 | Paywall 문구·기능 목록 | KRX 미언급 (구독 유도 문구에 "달러선물" 포함 금지) |
 | 접근성(VoiceOver) 라벨 | KRX 미언급 |
 | 소스/은행 설정 화면 | 무료 경로에서 KRX 항목 미노출 |
+
+> ⚠️ **이 계약의 범위 = 런타임 응답 표면** (2026-07-25 명시). topic 이름 `krx:usd-krw-futures`
+> 자체는 (a) `REALTIME_V2_CLIENT_GUIDE.md` §0/§2.5에 공개 문서화돼 있고 (b) prod `/openapi.json`·
+> `/docs`가 무인증이라 핸들러 docstring·`EntitlementsResponse.krx_visible` 필드명으로 노출된다
+> (2026-07-25 curl 실측). 즉 §3.2가 실제로 보장하는 것은 **"제품 표면(응답 payload·UI·문구·알림)에
+> KRX가 나타나지 않는다"**이지 "이름을 절대 알 수 없다"가 아니다.
+> 이 한정을 적어두지 않으면 후속 검토가 OpenAPI 노출을 §3.2 위반 blocker로 과대평가한다
+> (실제로 한 번 그렇게 보고됐다). **더 엄격히 가려면** prod에서 `docs_url`/`openapi_url`/`redoc_url`을
+> 끄거나 `verify_admin` 뒤로 옮기는 별 슬라이스가 필요하다 — 무인증 API 맵이 `/admin/api/*`
+> 라우트명까지 담고 있어 KRX와 무관하게도 권장된다(미착수).
 
 - 구현 상태: 서버 3중(legacy allowlist + `exclude_krx` + `_assert_krx_free`) + iOS 3중(어댑터 series strip +
   buildRatesState 명시 제외 + prepared 기반 토글). **테더 N4 land 전 `_assert_krx_free` source/asset shape 확장 필수**
@@ -137,6 +161,23 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
 5. **Android 이식**(iOS reference 경화 후, 완전 legacy라 topic client 신규 구현). ℹ️ **REST Authorization interceptor는 이미 보유**([NetworkModule:37]) → REST 인증 거의 free, WS subscribe payload 토큰만 추가.
 6. **TestFlight/내부 테스트**(양 플랫폼): 로그인·무료·구독·재연결·토큰 만료·KRX entitlement grant/revoke.
 7. **Stage A enforcement ON** + 재검증 후 출시.
+
+### 6.1 KRX 관련 flag는 **둘**이고 선행 조건이 다르다 (2026-07-25 분리)
+
+두 flag를 하나로 묶어 생각하면 한쪽 게이트만 닫고 다른 쪽을 여는 사고가 난다.
+
+| flag | 여는 표면 | 선행 조건 | 상태 |
+|---|---|---|---|
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ③ **iOS bootstrap 3종 인증 이관** | 🔴 false |
+| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | **무인증** `/api/v2/graph/tab`·`/catalog`의 KRX series + KRX topic 발행/snapshot | **graph v2 per-user 게이트**(§3.1 표의 graph 행) — **미구현** | 🔴 false |
+
+- ①②③을 다 채우고 `TOPIC_DISPATCHER_ENABLED`만 켜는 것은 안전하다(KRX는 G2가 닫혀 있어
+  supported 목록에서 빠진다).
+- 반대로 **`KRX_CLIENT_DISTRIBUTION_ENABLED`를 먼저 켜면 graph v2가 무인증으로 KRX를 노출한다** —
+  E3가 REST twin에서 막은 것과 같은 누수가 sibling 표면에서 열린다. 이 flag는 graph 게이트가
+  land할 때까지 **단독으로 켜지 말 것**.
+- 두 flag 모두 2026-07-22 route auth 감사에서 완화 목적으로 false가 되었고, 그 완화가 현재
+  graph 쪽 **유일한** 방어선이다.
 8. **양 플랫폼 legacy <1% + 유예(S4) 충족 시** Stage B 제거.
 
 ---
@@ -561,14 +602,30 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
      그 뒤 builder가 **두 번째** 세션을 연다 → 좁은 풀(`pool_size=3 + max_overflow=2`)에서 bootstrap
      동시 요청이 서로의 builder 커넥션을 기다린다. 가시성 조회는 `to_thread` 안에서 열고 **닫은 뒤**
      builder가 시작하므로 요청당 동시 checkout은 1개. 동기 SELECT를 이벤트 루프에서 돌리지 않는 효과도 겸한다.
-  6. 모든 응답(200 + dormant/unknown_topic/topic_unavailable 404)에 `Cache-Control: no-store` —
-     200만 붙이면 private 캐시가 비-entitled의 KRX 404를 저장해 entitlement 부여 뒤에도 404가 남는다.
-  7. **19 테스트**(엔드포인트 12 + helper 7), 전부 **개별 무력화로 실패 확인**(10 시나리오).
-     기존 REST bootstrap 테스트 4건도 auth/premium patch를 추가 — patch가 필요해진 것 자체가 게이트 회귀 잠금이다.
+  6. **핸들러가 직접 만드는 응답 전부**(200 + dormant/unknown_topic/topic_unavailable 404)에
+     `Cache-Control: no-store`. 200만 붙이면 private 캐시가 비-entitled의 KRX 404를 저장해
+     entitlement 부여 뒤에도 404가 남는다(404는 RFC 9110 §15.1 휴리스틱 캐시 대상, iOS는
+     `.useProtocolCachePolicy`). **401/403/503엔 없다** — `HTTPException` → Starlette 기본 핸들러
+     경로이고 이 앱엔 exception handler·middleware가 0건이라 주입 지점이 없다. 세 코드 모두
+     휴리스틱 캐시 대상이 **아니라**(RFC 9110 §15.1 목록에 부재) 준수 캐시는 저장 자체를 못 하므로
+     실질 위험 0. ⚠️ 단 이 응답들은 사용자별 개인화인데 `Vary: Authorization`이 없다 —
+     **no-store 4개소가 유일한 방어선**이다. 앞단에 CDN을 두거나 max-age를 추가하면 즉시 교차사용자 누수.
+  7. **23 테스트**(엔드포인트 12 + KRX 캐스케이드 통합 3 + 라우트 계약 1 + helper 7),
+     전부 **개별 무력화로 실패 확인**(14 시나리오). 기존 REST bootstrap 테스트 **3건**도 auth/premium
+     patch를 추가(dormant 케이스는 의도적 미패치 — 인증 이전에 반환되므로) — patch가 필요해진 것
+     자체가 게이트 회귀 잠금이다.
 
-  **알려진 잔여(이 슬라이스 범위 밖)**: `require_premium`은 PENDING·INACTIVE가 **아닌 모든** 상태를 True로
-  접는다 → premium 상태가 새로 늘면 fail-open. 핸들러 쪽 하드코딩은 없앴지만(반환값 전달) 공통 helper의
-  ACTIVE-only 명시화는 15개 endpoint에 걸쳐 있어 별도 슬라이스로 둔다.
+  **의도적으로 안 한 것 (결정 + 재개 트리거)** — codex 후속 리뷰 + 6렌즈/3적대 감사 수렴:
+
+  | 항목 | 결정 | 근거 / 재개 트리거 |
+  |---|---|---|
+  | lazy entitlement shortcut<br>(비-KRX topic이면 entitlement 조회 생략) | **채택 안 함** | 분석은 옳다(게이트 ON이면 콜드런치 4건이 불필요한 SELECT, Redis-warm FX bootstrap이 DB 0→1 커넥션으로 승격). 그러나 **오늘 실제 SELECT는 0회**(양 flag off)라 측정 불가이고, §3.2의 힘은 "판정과 에코가 **같은 함수**"라는 한 문장으로 검증된다는 점인데 shortcut은 그걸 예외절 달린 문단으로 바꾼다. 재개 = `KRX_CLIENT_DISTRIBUTION_ENABLED` ON + endpoint live + **실측된** pool wait. ⛔ **그때도 금지**: "미지원 topic은 어차피 거부니 DB 없이 조기 반환"은 (a) 에코에 KRX가 실려 존재가 노출되고 (b) 비-entitled KRX(SELECT 1회)와 unknown(0회)이 지연으로 갈린다 — §3.2 두 축 동시 붕괴. |
+  | entitlement DB 장애 → 503 | **1C PR로 이월** | 현재 예외는 plain **500**(exception handler 0건)이라 클라 재시도 분류에서 빠진다. 다만 오늘 소비자가 없고(dormant + iOS `try?`), 제대로 하려면 builder 경로까지 함께 감싸야 한다(한쪽만 고치면 상태코드가 flag 상태에 따라 뒤집힌다). 형태: `except SQLAlchemyError` → `{"error": "entitlement_unavailable"}` + no-store, **Retry-After 없음**(503+Retry-After = "구독 판정 중"이라는 기존 클라 계약을 흐린다), `except Exception` 금지. |
+  | `topic` 입력 상한 | **D7 확정까지 보류** | WS는 D7이 64자를 두는데 REST twin엔 상한이 없다. twin 한쪽만 선결정하면 반대 방향 비대칭이 생긴다. XSS·로그인젝션은 nosniff + percent-encoded access log로 이미 차단. |
+  | 거부 관측(로그·카운터) | **1C rollout 체크리스트** | 401/403/404-krx가 무성(無聲)이라 "iOS bootstrap 미이관" 잔여 리스크가 양쪽에서 조용히 실패한다. dormant 동안은 볼 소비자가 없다. |
+
+  **해소됨**: `require_premium` fail-open은 별 슬라이스로 미루려 했으나 **behavior-change-0가
+  증명되어**(enum 3값 × 모든 return 경로가 enum) 즉시 처리했다 — 커밋 `fa351ef`.
 
   **잔여(같은 E3 범위, flag ON 전 필수)**: iOS `APIService`의 bootstrap 3종
   (`fetchTetherSnapshot`/`fetchKrxSnapshot`/`fetchFxSnapshot`)이 **무인증 경로**라 flag ON 시 401을 받는다.
