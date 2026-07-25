@@ -185,6 +185,29 @@ main.py 890~2620 `verify_firebase_token`/`require_premium` 0건. "호출 확인"
   서버는 재인증 실패·미수신 시 15분 경계에서 제거. 즉시 revoke는 별도 후속.
 - 구현 시 **KRX per-user 강제 동시 해소**(ADR-038 Open 2 close).
 
+**§8.1 구현 계약 (test-first 전 확정, 2026-07-25 — codex 3 + Claude 1)**
+
+lease 15분을 실제로 보장하려면 아래 4개가 계약이다. 각각 상태 전이 테스트로 고정한다.
+
+1. **만료 강제는 subscriber 조회 경계에서** — `TopicRegistry.get_subscribers`가 만료 구독을 제외한다.
+   주기 sweep은 `reauth_required` 통지·메모리 정리용이며 **강제 수단이 아니다**.
+   - 왜: sweep-only면 실제 상한이 `15분 + sweep 주기`가 되어 문서의 "최대 15분"을 배신한다.
+   - 왜 publisher가 아니라 registry: publisher가 `publish_topic`(app/topic_dispatcher.py:126)과
+     `publish_topic_detailed`(:197) **둘**이고 앞으로 늘 수 있다. publisher마다 필터를 붙이면 drift하므로
+     단일 choke point인 조회 경계에서 막는다(`subscriber_count`/`subscribed_connection_count` guard도 동일 경로).
+2. **재인증 replacement** — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다.
+   `TopicRegistry.register`는 additive union(`existing.update(topics)`, :66)이라 "accepted만 추가"하면
+   권한을 잃은 이전 등록이 그대로 남아 lease 만료까지 계속 수신된다.
+   - 단, **이번 요청에 언급되지 않은** topic은 건드리지 않는다(증분 subscribe 보존).
+3. **snapshot도 accepted-only** — `send_initial_snapshots`(:288)는 현재 **요청 topics 전체**로 호출된다.
+   1C에서는 **accepted subset**으로만 호출해야 한다. 아니면 "검증 실패 topic은 registry 미등록"을 지켜도
+   reject된 topic의 스냅샷이 즉시 1회 새어 나간다.
+4. **재인증 타이밍 상한** — 재인증 시작 = **`12분 − U(0,60s)`** ∈ [11:00, 12:00] (**하향 jitter만**).
+   - ±jitter는 최악이 13분+가 되어 deadline 여유가 줄어든다. 하향 전용이면 최악이 12:00으로 고정.
+   - ack timeout **10초**, 실패 시 **1회 즉시 재시도** → 최악 완료 ≈ 12:20, 15:00까지 여유 ≈ 2분 40초.
+   - 클라 타이머는 **monotonic**(wall-clock 점프 시 deadline 계산이 깨진다).
+   - 서버 deadline이 단일 진실 소스 — 클라 타이밍은 그보다 앞서기 위한 것일 뿐이다.
+
 **Non-goal**: legacy 그래프 dead-code 삭제(별도 커밋) / 고급 rate-limiting(후속).
 
 ---
