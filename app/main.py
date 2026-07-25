@@ -29,6 +29,8 @@ from app import config
 from app.config import REDIS_LATEST_ENABLED
 from app.latest_rates_cache import fetch_rates_from_redis, warmup_latest_rates
 from app.notifications.fcm import init_firebase, is_firebase_initialized, send_fcm_data_only
+from sqlalchemy import exc as sqlalchemy_exc
+
 from app.subscription import verify_premium_status, PremiumStatus
 from app.webhooks import router as webhooks_router
 
@@ -36,6 +38,19 @@ from app.webhooks import router as webhooks_router
 logger = logging.getLogger("exchange_rate.main")
 
 PENDING_RETRY_AFTER_SECONDS = "5"
+
+# DB **인프라 transient**만 — 재시도가 의미 있는 것들. 503 변환 경계다.
+# ⛔ `SQLAlchemyError` 전체를 쓰면 안 된다: `ProgrammingError`(잘못된 SQL/누락 테이블),
+# `InvalidRequestError`·`ResourceClosedError`·`ArgumentError`·`CompileError`(ORM 사용 결함),
+# `IntegrityError`·`DataError`(데이터 결함)가 전부 하위라 **영구 결함을 무한 재시도로 안내**하게 된다
+# (codex Major 2026-07-26). 아래 4종은 connect 실패 / 네트워크 단절 / statement timeout /
+# 풀 고갈 / failover를 커버하고 위 결함들은 걸리지 않는다(계층 실측 + 회귀 테스트로 잠금).
+TRANSIENT_DB_ERRORS = (
+    sqlalchemy_exc.OperationalError,
+    sqlalchemy_exc.InterfaceError,
+    sqlalchemy_exc.TimeoutError,        # 풀 고갈 (pool_size=3 + max_overflow=2)
+    sqlalchemy_exc.DisconnectionError,
+)
 
 # HTTP Basic Auth 설정
 security = HTTPBasic()
@@ -2807,15 +2822,28 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     # per-user KRX 가시성(G1) 적용 — 비-entitled에겐 KRX가 목록·판정 양쪽에서 사라져
     # 미지원 topic과 구분 불가해진다 (§3.2). 판정이 결과를 바꿀 수 없는 요청(비-게이팅 topic)은
     # entitlement를 조회하지 않는다 — FX/USDT bootstrap이 entitlement DB에 묶이지 않도록.
-    access = await asyncio.to_thread(
-        resolve_snapshot_topic_access_sync, topic, user_id, premium_active=premium_active)
-    if not access.allowed:
-        return JSONResponse(status_code=404, headers=no_store, content={
-            "error": "unknown_topic",
-            "detail": f"topic '{topic}' not supported",
-            "supported_topics": list(access.supported_topics),
-        })
-    payload = await asyncio.to_thread(_build_snapshot_sync, topic)
+    try:
+        access = await asyncio.to_thread(
+            resolve_snapshot_topic_access_sync, topic, user_id, premium_active=premium_active)
+        if not access.allowed:
+            return JSONResponse(status_code=404, headers=no_store, content={
+                "error": "unknown_topic",
+                "detail": f"topic '{topic}' not supported",
+                "supported_topics": list(access.supported_topics),
+            })
+        payload = await asyncio.to_thread(_build_snapshot_sync, topic)
+    except TRANSIENT_DB_ERRORS:
+        # DB 순단 = 인프라 transient지 결함이 아니다 → 503(구 동작은 plain 500이라 클라 재시도
+        # 분류에서 빠졌다). 판정·빌드를 **함께** 감싼다 — 한쪽만 감싸면 상태코드가 topic 종류에
+        # 따라 갈린다(비-게이팅 topic은 판정 경로를 안 타므로).
+        # ⛔ 경계는 `TRANSIENT_DB_ERRORS`(좁은 4종)다 — `except Exception`은 물론
+        # `except SQLAlchemyError`도 너무 넓다(ProgrammingError·InvalidRequestError 등 영구 결함 포함).
+        # `Retry-After`도 없다: 이 헤더는 구독 판정 PENDING(초 단위) 신호로 이미 쓰이고,
+        # DB failover는 분 단위라 5초 재시도를 지시하면 storm이 된다.
+        logger.exception("topic snapshot DB 순단 — 503",
+                         extra={"event": "topic_snapshot_db_unavailable", "topic": topic})
+        return JSONResponse(status_code=503, headers=no_store,
+                            content={"error": "temporarily_unavailable"})
     if payload is None:
         # 지원 topic이지만 현재 미제공 (예: fx FX_TOPIC_ENABLED off) — WS publish 가능성과 일치
         return JSONResponse(status_code=404, headers=no_store,

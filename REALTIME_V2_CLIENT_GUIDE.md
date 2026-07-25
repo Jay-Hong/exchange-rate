@@ -148,16 +148,30 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
 
 - 응답 = **WS snapshot과 동일 schema**(`{type:"snapshot", version:1, topic, data}` + usdt/krx tick entry의 `rate_changed_at`). 같은 builder 공유 → client는 REST/WS 동일 merge 로직(`rate_changed_at ?? timestamp`).
 - 권장 흐름: **REST bootstrap(즉시 렌더) → WS subscribe → snapshot/live merge**(REST 응답을 §5 merge로 흡수, WS snapshot이 자연 갱신).
-- `Cache-Control: no-store` — 200과 이 endpoint가 직접 만드는 404 전부(개인화 응답이라 오류도 캐시 금지).
-  401/403/503은 공통 예외 경로라 헤더가 없다(휴리스틱 캐시 대상이 아님).
+- `Cache-Control: no-store` — 이 endpoint가 **직접 만드는 응답 전부**(200 · 404 3종 · DB 순단 503).
+  401/403/PENDING 503은 `HTTPException` 공통 예외 경로라 헤더가 없다 — 세 코드 모두 휴리스틱 캐시
+  대상이 아니라(RFC 9110 §15.1 목록에 부재) 준수 캐시는 저장 자체를 못 한다.
 - ⚠️ **인증·권한 필수 (2026-07-25 변경 — ADR-039 §8.1 E3)**: 구 "인증 없음"은 **폐기**.
   이 endpoint는 WS topic의 REST twin이라 같은 권한 매트릭스를 따른다 — **Firebase 인증 + premium**,
   KRX는 **+ entitlement**. 클라는 토큰 없이 호출하면 안 된다(1B 인증 transport 경유).
   entitlement 없는 사용자에게 krx topic은 `unknown_topic` 404이고 `supported_topics` 에코에도
   나타나지 않는다 — **미지원 topic과 구분 불가**(KRX 존재 비노출 계약).
 - 응답 코드: 200(payload) / **401**(토큰 없음·무효) / **403**(premium 아님) /
-  **503** — 두 원인: 구독 판정 PENDING(`Retry-After` 있음) **또는 인증 인프라 장애**(Firebase 미초기화/네트워크, `Retry-After` 없음).
-  ⚠️ 후자는 **토큰이 없어도** 401보다 먼저 나올 수 있다(초기화 확인이 헤더 검사보다 앞) → 클라는 503을 인증 실패로 처리하지 말고 재시도 대상으로 볼 것. /
+  **503** — **세 원인, 전부 재시도 대상**(인증 실패로 처리하지 말 것). 구분은 **본문**으로 한다:
+
+  | 원인 | 본문 | `Retry-After` | 재시도 감각 |
+  |---|---|---|---|
+  | 구독 판정 PENDING | `{"detail": "Subscription status pending..."}` | **있음**(5) | 초 단위 |
+  | 인증 인프라 장애(Firebase 미초기화/네트워크) | `{"detail": "..."}` | 없음 | 클라 backoff |
+  | **DB 순단**(entitlement 조회·snapshot 빌드) | `{"error": "temporarily_unavailable"}` | 없음 | 클라 backoff, **분 단위**(RDS failover) |
+
+  ⚠️ 인증 인프라 장애는 **토큰이 없어도** 401보다 먼저 나올 수 있다(초기화 확인이 헤더 검사보다 앞).
+  ⚠️ `temporarily_unavailable`은 WS `subscription_error`의 같은 이름과 **같은 의미**(판정 불가)지만,
+  REST 쪽은 `Retry-After`를 주지 않는다 — 5초 재시도를 지시하면 DB failover 동안 storm이 된다.
+  **헤더가 없다는 사실만으로는 storm이 막히지 않으므로 클라 재시도를 계약으로 고정한다**:
+  `temporarily_unavailable` 503은 **지수 backoff + jitter**(초기 ≥2s, 배수 2, **상한 60s**,
+  full jitter)로만 재시도하고, cold-start bootstrap처럼 여러 topic을 동시에 요청하는 경로는
+  **topic별 독립 타이머**를 쓴다(동시 4~5건이 같은 시각에 재시도하지 않도록). /
   404 `topics_disabled`(TOPIC_DISPATCHER_ENABLED off=출시 전) / 404 `unknown_topic`(+supported_topics) / 404 `topic_unavailable`(지원 topic이나 현재 미제공, 예 FX_TOPIC_ENABLED off).
   **순서 = dormant flag → 인증 → premium → topic 판정**이므로, flag off면 미인증이어도 404이고,
   미인증이면 unknown topic이어도 401이다(미인증자는 topic 목록을 열거할 수 없다).

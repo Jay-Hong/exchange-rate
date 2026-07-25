@@ -447,6 +447,136 @@ class TestTopicSnapshotEntitlementLookupScope(unittest.TestCase):
         krx.assert_called_once()
 
 
+class TestTopicSnapshotTransientDbFailure(unittest.TestCase):
+    """DB 순단의 HTTP 계약 (ADR-039 §6.1 pre-flip 필수, 2026-07-26).
+
+    entitlement 조회/빌드가 DB 장애로 실패하면 지금까지 **plain 500**(exception handler 0건)이라
+    클라 재시도 분류에서 빠졌다. 인프라 transient는 결함이 아니므로 **503**이 의미상 맞다.
+
+    계약:
+    - `SQLAlchemyError` **만** 변환한다 — 그 밖의 예외는 그대로 500으로 올려 **버그를 가리지 않는다**.
+      (pool `sqlalchemy.exc.TimeoutError`·DBAPI wrap 모두 `SQLAlchemyError` 하위라 커버된다.)
+    - 바디는 이 endpoint의 오류 schema(`{"error": ...}`)를 따르고 WS twin과 **같은 어휘**
+      (`temporarily_unavailable`, §8-C "판정 불가")를 쓴다.
+    - **`Retry-After` 없음** — 이 헤더는 구독 판정 PENDING(초 단위)의 신호로 이미 쓰이고 있고,
+      DB failover는 분 단위라 5초 재시도를 지시하면 storm이 된다. 클라 자체 backoff에 맡긴다.
+    - §3.2: DB 장애에서도 **비-entitled KRX와 미지원 topic의 응답이 구분 불가**여야 한다.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+
+    def _get(self, topic, *, visibility_exc=None, build_exc=None):
+        from app.topic_initial_snapshot import SnapshotTopicAccess
+
+        visibility = (MagicMock(side_effect=visibility_exc) if visibility_exc
+                      else MagicMock(return_value=SnapshotTopicAccess(True, None)))
+        build = (MagicMock(side_effect=build_exc) if build_exc
+                 else MagicMock(return_value=_canned_snapshot(topic)))
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+             patch("app.main.require_premium", new=AsyncMock(return_value=True)), \
+             patch("app.topic_initial_snapshot.resolve_snapshot_topic_access_sync",
+                   new=visibility), \
+             patch("app.topic_initial_snapshot._build_snapshot_sync", new=build):
+            r = self.client.get("/api/v2/topics/snapshot", params={"topic": topic})
+        return r, visibility, build
+
+    def _assert_transient(self, r):
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"error": "temporarily_unavailable"})
+        self.assertEqual(r.headers.get("cache-control"), "no-store")
+        self.assertNotIn("retry-after", {k.lower() for k in r.headers})
+
+    def test_entitlement_lookup_db_failure_is_503(self):
+        from sqlalchemy.exc import OperationalError
+        exc = OperationalError("SELECT 1", {}, Exception("connection lost"))
+        r, _, build = self._get("krx:usd-krw-futures", visibility_exc=exc)
+        self._assert_transient(r)
+        build.assert_not_called()          # 인가 판정 전이라 빌드에 도달하면 안 된다
+
+    def test_pool_timeout_is_503(self):
+        """`sqlalchemy.exc.TimeoutError`(풀 고갈)도 같은 계약 — 좁은 풀(3+2)에서 실현 가능하다."""
+        from sqlalchemy.exc import TimeoutError as SATimeoutError
+        r, _, _ = self._get("krx:usd-krw-futures", visibility_exc=SATimeoutError("pool"))
+        self._assert_transient(r)
+
+    def test_builder_db_failure_is_503(self):
+        """빌드 경로도 같이 감싸야 한다 — 한쪽만 고치면 상태코드가 topic 종류에 따라 갈린다."""
+        from sqlalchemy.exc import OperationalError
+        exc = OperationalError("SELECT 1", {}, Exception("connection lost"))
+        r, _, _ = self._get("usdt:krw", build_exc=exc)
+        self._assert_transient(r)
+
+    def test_non_db_exception_is_not_masked(self):
+        """`except Exception`이었다면 **영구 결함이 무한 재시도로 안내**된다 — 500으로 남긴다."""
+        with self.assertRaises(ValueError):
+            self._get("usdt:krw", build_exc=ValueError("programming bug"))
+
+    def test_sqlalchemy_programming_errors_are_not_masked(self):
+        """⚠️ **`except SQLAlchemyError`는 너무 넓다** — 이 음성 테스트가 그걸 잡는다 (codex Major).
+
+        구 초안은 `SQLAlchemyError` 전체를 잡고 "그 밖은 500"이라 주장했는데, 아래 예외들이 전부
+        그 하위라 **영구 결함이 503(재시도 안내)으로 오분류**됐다. `ValueError`만으로 검증한
+        음성 테스트로는 이 회귀를 못 잡는다 — 같은 계열에서 골라야 한다.
+        """
+        from sqlalchemy.exc import ProgrammingError, InvalidRequestError, ResourceClosedError
+
+        cases = [
+            ProgrammingError("SELECT x", {}, Exception("relation does not exist")),  # migration 누락
+            InvalidRequestError("bad join"),                                          # ORM 사용 결함
+            ResourceClosedError("session closed"),                                    # 상태 결함
+        ]
+        for exc in cases:
+            with self.subTest(exc=type(exc).__name__):
+                with self.assertRaises(type(exc)):
+                    self._get("krx:usd-krw-futures", visibility_exc=exc)
+                with self.assertRaises(type(exc)):
+                    self._get("usdt:krw", build_exc=exc)
+
+    def test_real_resolver_db_failure_keeps_krx_indistinguishable(self):
+        """helper를 mock하지 않고 **실제 resolver + to_thread를 관통**시켜 §3.2를 확인한다.
+
+        위 `_get`은 `resolve_snapshot_topic_access_sync`를 통째로 mock하므로 "handler seam에서
+        예외가 나면 503"만 증명한다. 여기서는 **실제 entitlement 조회 지점**
+        (`compute_krx_visible`)에서 DB 예외를 내 KRX와 미지원 topic이 상태·본문·헤더까지
+        구분 불가한지 본다.
+        """
+        from sqlalchemy.exc import OperationalError
+        exc = OperationalError("SELECT 1", {}, Exception("down"))
+
+        def _fetch(topic):
+            with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+                 patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+                 patch("app.main.verify_firebase_token", new=AsyncMock(return_value="uid")), \
+                 patch("app.main.require_premium", new=AsyncMock(return_value=True)), \
+                 patch("app.database.SessionLocal", return_value=MagicMock()), \
+                 patch("app.entitlements.compute_krx_visible", side_effect=exc):
+                return self.client.get("/api/v2/topics/snapshot", params={"topic": topic})
+
+        krx = _fetch("krx:usd-krw-futures")
+        unknown = _fetch("dxy")
+        self._assert_transient(krx)
+        self.assertEqual(krx.status_code, unknown.status_code)
+        self.assertEqual(krx.json(), unknown.json())
+        self.assertEqual(krx.headers.get("cache-control"), unknown.headers.get("cache-control"))
+        self.assertEqual(krx.headers.get("retry-after"), unknown.headers.get("retry-after"))
+
+    def test_krx_and_unknown_topic_are_indistinguishable_under_db_failure(self):
+        """§3.2 — DB가 죽어도 비-entitled KRX와 미지원 topic의 응답이 같아야 한다.
+
+        (둘 다 per-user 판정 경로를 타므로 같은 지점에서 실패한다.)
+        """
+        from sqlalchemy.exc import OperationalError
+        exc = OperationalError("SELECT 1", {}, Exception("down"))
+        krx, _, _ = self._get("krx:usd-krw-futures", visibility_exc=exc)
+        unknown, _, _ = self._get("dxy", visibility_exc=exc)
+        self.assertEqual((krx.status_code, krx.json()), (unknown.status_code, unknown.json()))
+        self._assert_transient(krx)
+
+
 class TestTopicSnapshotKrxCascadeIntegration(unittest.TestCase):
     """KRX 게이트 캐스케이드를 **stub 없이** HTTP 경로로 관통시킨다 (ADR-039 §8.1 E3).
 

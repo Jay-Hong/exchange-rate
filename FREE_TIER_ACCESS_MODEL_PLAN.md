@@ -213,8 +213,12 @@
 - **catalog version**: 기본 응답에서 krx가 영구 제외되므로 `CATALOG_VERSION`을 `2026-07-26`으로
   올렸다(계약 식별자. iOS는 `version`을 decode만 하고 기능적으로 쓰지 않아 무해).
 - **pre-flip 필수 항목** (`TOPIC_DISPATCHER_ENABLED=true` 전, 단순 후속 아님):
-  ① iOS bootstrap 3종 인증 이관 ② 1C WS 인증 ③ **entitlement 조회 실패의 HTTP 계약**
-  (현재 plain 500 → `{"error":"entitlement_unavailable"}` 503, Retry-After 없음, builder 경로 포함).
+  ① iOS bootstrap 3종 인증 이관 ② 1C WS 인증
+  ③ ~~entitlement 조회 실패의 HTTP 계약~~ → ✅ **land 2026-07-26**: `except SQLAlchemyError` →
+  503 `{"error": "temporarily_unavailable"}`(WS `subscription_error`와 같은 어휘) + no-store,
+  **Retry-After 없음**(PENDING 초 단위 신호와 충돌 + DB failover는 분 단위라 storm),
+  판정·빌드 **양쪽** 감쌈(한쪽만 감싸면 상태코드가 topic 종류에 따라 갈린다).
+  `except Exception` 금지 — 영구 결함을 무한 재시도로 안내하게 된다.
 - 두 flag 모두 2026-07-22 route auth 감사 완화 이후 false다.
 
 ---
@@ -657,7 +661,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | 항목 | 결정 | 근거 / 재개 트리거 |
   |---|---|---|
   | ~~lazy entitlement shortcut 채택 안 함~~ → **채택** (2026-07-26 번복) | ✅ 구현 | **"최적화 vs 계약 명료성" 프레이밍이 틀렸다** — 이건 **견고성 속성**이다. FX/USDT builder는 Redis-first라 warm이면 DB 커넥션 0개인데, 무조건 조회하면 그 요청이 **DB 필수로 승격**된다 → entitlement DB 순단 하나로 entitlement와 무관한 FX bootstrap이 죽는다(콜드런치 FX 3 동시 + tether 1). §3.2는 등가성(`visible ⊆ supported` ∧ `supported \ visible ⊆ per_user_gated`)으로 보존되고, 위험했던 두 갈래는 **테스트로 봉인**: `per_user_gated_snapshot_topics()` registry + 집합대수 trip-wire(새 per-user 필터를 등록 없이 추가 → red) + "미지원 topic도 조회한다" 회귀(⛔ 조기 반환 금지). |
-  | entitlement DB 장애 → 503 | **1C PR로 이월 — 단 §6.1의 pre-flip 필수 항목**(단순 후속 아님) | 현재 예외는 plain **500**(exception handler 0건)이라 클라 재시도 분류에서 빠진다. 다만 오늘 소비자가 없고(dormant + iOS `try?`), 제대로 하려면 builder 경로까지 함께 감싸야 한다(한쪽만 고치면 상태코드가 flag 상태에 따라 뒤집힌다). 형태: `except SQLAlchemyError` → `{"error": "entitlement_unavailable"}` + no-store, **Retry-After 없음**(503+Retry-After = "구독 판정 중"이라는 기존 클라 계약을 흐린다), `except Exception` 금지. |
+  | entitlement DB 장애 → 503 | ✅ **land 2026-07-26**(1C 이월에서 앞당김 — 형태 확정 + 컨텍스트 유효) | 구 동작은 plain **500**(exception handler 0건)이라 클라 재시도 분류에서 빠졌다. 최종 형태: **`TRANSIENT_DB_ERRORS` 4종**(`OperationalError`/`InterfaceError`/`TimeoutError`[풀 고갈]/`DisconnectionError`) → `{"error": "temporarily_unavailable"}`(WS §8-C와 같은 어휘) + no-store, **Retry-After 없음**(그 헤더는 PENDING 초 단위 신호. DB failover는 분 단위 → 클라 지수 backoff 계약으로 대체), **판정·빌드 양쪽** 감쌈. ⛔ 초안의 `except SQLAlchemyError`는 **너무 넓었다**(ProgrammingError·InvalidRequestError 등 영구 결함 포함) — codex Major, 음성 테스트를 `ValueError`로만 써서 못 잡았다. |
   | `topic` 입력 상한 | **D7 확정까지 보류** | WS는 D7이 64자를 두는데 REST twin엔 상한이 없다. twin 한쪽만 선결정하면 반대 방향 비대칭이 생긴다. XSS·로그인젝션은 nosniff + percent-encoded access log로 이미 차단. |
   | 거부 관측(로그·카운터) | **1C rollout 체크리스트** | 401/403/404-krx가 무성(無聲)이라 "iOS bootstrap 미이관" 잔여 리스크가 양쪽에서 조용히 실패한다. dormant 동안은 볼 소비자가 없다. |
 
