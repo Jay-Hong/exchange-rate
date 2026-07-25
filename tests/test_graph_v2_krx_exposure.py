@@ -18,8 +18,8 @@ env flag가 아니다 — flag는 per-user 게이트를 만들지 않은 채 `.e
 
 ⚠️ `_gates_open()`이 patch하는 flag가 **하나라도 빠지면** 전역 게이트가 애초에 닫혀 있어 이 파일의
 검사들이 vacuous해진다 — `test_gates_are_actually_open_in_fixture`가 그걸 막는다.
-(개수를 적지 않는 이유는 [[feedback_self_verification_discipline]] I — 손으로 센 숫자는 틀린다.
-실제로 이 문장의 구 버전이 2개를 나열해 놓고 "3개"라고 적고 있었다.)
+(개수를 적지 않는 이유: 손으로 센 숫자는 drift한다 — 이 문장의 구 버전이 실제로 2개를 나열해
+놓고 "3개"라고 적고 있었다. 목록·개수는 코드에서 도출하고 산문은 도출 지점만 가리킨다.)
 """
 import json
 import unittest

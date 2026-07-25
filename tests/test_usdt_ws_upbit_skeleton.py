@@ -1322,7 +1322,7 @@ class TestUpbitDbWriter(unittest.IsolatedAsyncioTestCase):
             elapsed = time.time() - start
             # 즉시 반환 검증 — load-tolerant bound. (_sync_db_write가 patch라 동기 write여도
             # instant이므로 timing은 본질적 약함; 0.01s는 full-suite CPU 부하서 wall-clock jitter로
-            # flaky[[feedback_flaky_sleep_async_tests]]. non-blocking 핵심은 아래 _timer defer로 검증.)
+            # flaky했다. non-blocking 핵심은 아래 _timer defer로 검증.)
             self.assertLess(elapsed, 1.0)
             self.assertIsNotNone(writer._timer)
             await writer.close()
