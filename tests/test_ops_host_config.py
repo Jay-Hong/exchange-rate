@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGROTATE = REPO_ROOT / "ops" / "logrotate" / "fxi-nginx"
 JOURNALD = REPO_ROOT / "ops" / "systemd" / "zz-fxi-limits.conf"
 INSTALLER = REPO_ROOT / "ops" / "install-host-config.sh"
+LEGACY_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "legacy_journald_limits.conf"
 
 
 class TestNginxLogrotateConfig(unittest.TestCase):
@@ -89,7 +90,9 @@ class TestJournaldDropInOrdering(unittest.TestCase):
         소유 마커가 있을 때만 지우고 없으면 중단해야 한다(codex).
         """
         text = INSTALLER.read_text()
-        self.assertIn('grep -q "fxi-managed:"', text, "소유 확인 없이 지우면 안 된다")
+        self.assertIn("grep -Fxq", text,
+                      "부분 문자열이 아니라 마커 **줄 전체**를 정확 비교해야 한다")
+        self.assertIn("^# fxi-managed: ", text, "기대 마커를 정본에서 뽑아 써야 한다")
         self.assertIn("중단:", text, "마커가 없으면 중단해야 한다")
 
     def test_legacy_migration_accepts_pre_marker_canonical(self):
@@ -98,17 +101,30 @@ class TestJournaldDropInOrdering(unittest.TestCase):
         구 정본 해시를 알고 있으므로 정확히 일치하면 우리 것으로 인정해야 한다.
         아니면 구 버전에서 올라온 호스트가 자기 파일을 남의 것으로 보고 중단한다(codex).
         """
-        import subprocess
+        import hashlib
         text = INSTALLER.read_text()
         self.assertIn("legacy_known_sha256=", text, "구 정본 해시 기반 마이그레이션 경로가 없다")
         embedded = re.search(r"legacy_known_sha256=([0-9a-f]{64})", text).group(1)
-        actual = subprocess.run(
-            ["git", "show", "b65bc24:ops/systemd/journald-limits.conf"],
-            cwd=REPO_ROOT, capture_output=True).stdout
-        self.assertTrue(actual, "구 정본을 git에서 읽지 못했다")
-        import hashlib
+        # ⚠️ `git show <구커밋>`에 의존하면 안 된다 — Actions checkout은 fetch-depth 1(shallow)이라
+        #    구 커밋이 없어 CI에서만 실패한다(실제로 1322c59가 그렇게 red였다).
+        #    구 정본을 **fixture로 체크인**해 CI와 로컬이 같은 것을 보게 한다.
+        actual = LEGACY_FIXTURE.read_bytes()
+        self.assertTrue(actual, "구 정본 fixture가 비어 있다")
         self.assertEqual(embedded, hashlib.sha256(actual).hexdigest(),
-                         "박아둔 해시가 실제 구 정본과 다르다 — 마이그레이션이 동작하지 않는다")
+                         "박아둔 해시가 구 정본 fixture와 다르다 — 마이그레이션이 동작하지 않는다")
+
+    def test_legacy_fixture_matches_history_when_available(self):
+        """전체 clone에서는 fixture가 실제 git 히스토리와 같은지도 본다(shallow면 skip).
+
+        fixture가 히스토리에서 떨어져 나가면 마이그레이션 대상이 실물과 달라진다.
+        """
+        import subprocess
+        out = subprocess.run(["git", "show", "b65bc24:ops/systemd/journald-limits.conf"],
+                             cwd=REPO_ROOT, capture_output=True)
+        if out.returncode != 0 or not out.stdout:
+            self.skipTest("shallow clone — 구 커밋 없음")
+        self.assertEqual(out.stdout, LEGACY_FIXTURE.read_bytes(),
+                         "fixture가 실제 구 정본과 다르다")
 
     def test_legacy_migration_requires_exact_match(self):
         """부분 일치로 지우면 안 된다 — 남이 손댄 파일도 우리 것으로 오인한다."""

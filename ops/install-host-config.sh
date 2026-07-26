@@ -27,7 +27,10 @@ install_config() {
   legacy_known_sha256=577af35dbfa6781dfd884b121d040725d80859b1affdd9460ecf69119f226bfe
   if [ -e "$legacy" ]; then
     legacy_sha256=$(sha256sum "$legacy" | cut -d' ' -f1)
-    if grep -q "fxi-managed:" "$legacy" || [ "$legacy_sha256" = "$legacy_known_sha256" ]; then
+    # ⚠️ 부분 문자열(`grep -q "fxi-managed:"`)로 보면 다른 도구가 같은 접두사를 써도 지워진다.
+    #    정본이 실제로 쓰는 **마커 줄 전체**를 `-Fxq`로 정확 비교한다.
+    expected_marker=$(grep -m1 '^# fxi-managed: ' "$HERE/systemd/zz-fxi-limits.conf")
+    if grep -Fxq "$expected_marker" "$legacy" || [ "$legacy_sha256" = "$legacy_known_sha256" ]; then
       rm -f "$legacy"
       echo "구 FXi 파일 제거: $legacy"
     else
