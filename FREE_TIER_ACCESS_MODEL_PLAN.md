@@ -324,7 +324,7 @@
 | `invalid_token` | 전체 | 토큰 무효·만료·revoked |
 | `temporarily_unavailable` | **전체(항상)** | 인증·권한을 **판정할 수 없음**. **`retry_after_seconds` 동반**, registry 불변 |
 | `invalid_request` | 전체 | 형식 위반 / UUID 오류 / 빈 topics / 중복 정규화 후 빈 목록 |
-| `request_too_large` | 전체 | 상한 위반(프레임 계층은 **close 1009**) |
+| `request_too_large` | 전체 | 상한 위반(전송 계층은 **close 1009** — 클라이언트 관측) |
 | `topics_disabled` | per-topic | 서버 topic 기능 off |
 | `unknown_topic` | per-topic | 미지원 topic |
 | `premium_required` | per-topic | 구독 필요 |
@@ -629,7 +629,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | 상황 | 응답 |
   |---|---|
   | malformed payload / 형식 위반 | `invalid_request` (전체-요청) |
-  | D7 상한 위반 | `request_too_large` (전송 가능 시) 또는 **close 1009**(프레임 계층) |
+  | D7 상한 위반 | `request_too_large` (전송 가능 시) 또는 **close 1009**(전송 계층, 클라이언트 관측) |
   | 일시 장애 | `temporarily_unavailable` + **`retry_after_seconds`** |
   | `request_id` UUID 형식 오류 | `invalid_request` |
   | `topics` 빈 목록 / 중복 정규화 후 빈 목록 | `invalid_request` (no-op 아님 — 조용한 실패 금지) |
@@ -760,7 +760,7 @@ D7 상한 **각각의 경계값**(frame 16KiB / topics 8 / topic 64자 / request
 `active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
 서버 `identity_generation`은 **같은 소켓 UID 재바인딩만** 표현(reconnect 식별은 클라 `connectionGeneration`) /
 **identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
-frame 상한이 **ASGI/프록시 계층에서 강제**되고 초과 시 close 1009 /
+**message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
 `invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
 `retry_at = min(retry_after, lease_remaining − safety)` — 재시도가 잔여 lease를 넘기지 않음 /
 strict verifier single-flight의 **owner 격리·정리**(한 소켓 종료가 공유 owner를 취소하지 않음, 1B 테스트 템플릿) /
@@ -775,7 +775,8 @@ strict verifier single-flight의 **owner 격리·정리**(한 소켓 종료가 �
 `retry_at`이 음수가 되지 않고 `lease_remaining <= safety`면 즉시 재인증 /
 **ack 유실 후 재시도 idempotency**(상태 불변, 최종 ack이 진실, snapshot 중복 허용) /
 `active_subscriptions`가 **lock 아래 단일 snapshot**·duration은 floor·**≤0이면 미포함** /
-`--ws-max-size 16384` 적용 + **close 1009** ASGI 통합 확인 /
+`--ws websockets --ws-max-size 16384` 적용 + **subprocess 서버에 붙은 클라이언트가 close 1009 관측** /
+(⚠️ ASGI 앱은 legacy impl에서 **1006**을 본다 — §D7 참조. 구 "ASGI 통합 확인" 문구는 폐기) /
 §8 canonical schema ↔ §8.1 불변식 **상호 정합**(두 곳이 다른 구현을 유도하지 않음).
 
 보강 4차(6렌즈 병렬 감사):

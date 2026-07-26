@@ -91,6 +91,17 @@ class TestDeploymentTripWire(unittest.TestCase):
         for key in ("command:", "entrypoint:"):
             self.assertNotIn(key, body, f"fastapi 서비스가 {key}로 CMD를 덮어쓴다")
 
+    def test_docker_md_reproduces_the_real_cmd(self):
+        """`DOCKER.md`가 Dockerfile CMD를 **통째로 복제**한다 — 드리프트하면 따라 만든 배포에서
+        상한이 조용히 사라진다(실제로 이번에 어긋나 있었다). 두 CMD 줄이 정확히 같아야 한다.
+        """
+        docker_md = (REPO_ROOT / "DOCKER.md").read_text()
+        cmd_lines = [ln.strip() for ln in docker_md.splitlines() if ln.startswith("CMD [")]
+        self.assertEqual(len(cmd_lines), 1, "DOCKER.md의 CMD 복제본이 1개여야 한다")
+        real = [ln.strip() for ln in (REPO_ROOT / "Dockerfile").read_text().splitlines()
+                if ln.startswith("CMD [")]
+        self.assertEqual(cmd_lines[0], real[-1], "DOCKER.md 복제본이 Dockerfile과 어긋났다")
+
     def test_pinned_impl_is_importable(self):
         """`--ws websockets` 고정은 이 모듈이 있어야 성립한다(없으면 uvicorn이 기동 실패)."""
         __import__("uvicorn.protocols.websockets.websockets_impl")

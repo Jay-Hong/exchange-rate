@@ -44,6 +44,9 @@ import/runtime error 없는지 짧게 확인하려면 (선택):
 DATABASE_URL=sqlite:////tmp/usdt_smoke.db \
 USDT_WS_UPBIT_ENABLED=true \
   uvicorn app.main:app --host 0.0.0.0 --port 8000
+# ⚠️ 이건 import/runtime 확인용 **로컬 스모크**다 — 배포 명령이 아니다.
+#    프로덕션 WS 옵션(--ws websockets --ws-max-size 16384)이 의도적으로 빠져 있으니
+#    이 줄을 배포에 복사하지 말 것. 정본은 리포의 `Dockerfile` CMD.
 # 30초~1분 관찰: lifecycle log + first tick
 # Ctrl+C로 종료. production 영향 없음.
 ```
