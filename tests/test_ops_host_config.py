@@ -6,8 +6,12 @@
 
 여기서 잠그는 건 "설치됐는가"가 아니라 **"정본이 무해하게 약해지지 않았는가"**다 —
 특히 `postrotate`의 USR1은 지우면 **조용히** 망가진다: nginx가 rename된 inode에 계속 써서
-새 파일이 0바이트로 남고, 디스크는 계속 찬다. 실제 설치·동작 검증은
-`ops/install-host-config.sh --verify`가 담당한다(테스트에서 호스트를 만질 수 없다).
+새 파일이 0바이트로 남고, 디스크는 계속 찬다. 실제 설치·동작 검증은 호스트에서
+`ops/install-host-config.sh`가 담당한다(테스트에서 호스트를 만질 수 없다):
+`--check`(비파괴 동기화·문법·실효값) / `--install`(복구) / `--verify-reopen`(⚠️ 강제 rotation).
+
+⚠️ 이 파일 안의 다른 `--verify` 언급은 **제거된 구 플래그에 대한 역사 서술**이다(왜 이름을
+바꿨는지). 지시가 아니므로 그대로 둔다.
 """
 import re
 import unittest
