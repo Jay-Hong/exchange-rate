@@ -746,9 +746,17 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 - `[client]` — 서버가 관측할 수 없다. 클라가 구현·검증해야 한다.
 - `[both]` — **한쪽만 잠그면 계약이 성립하지 않는다.** 서버만 테스트하면 클라가 미구현이어도 green이다.
 
-**계약 행 78개** (2026-07-26 기준: server 54 / client 12 / both 12). 이 수는 **행 블록 안**
-(`§8 기본:`부터 `보강 4차` 끝까지)의 태그만 센 것이다 — 위 범례·커버리지 문단·harness 요약부의
-태그를 함께 세면 **틀린다**(실제로 한 번 그렇게 세어 86으로 잘못 보고했다). 행이 늘면 이 수도 갱신할 것.
+**계약 행 78개** (2026-07-26 기준: server 54 / client 12 / both 12).
+아래 `G-ROWS-BEGIN`/`G-ROWS-END` 마커 **사이**의 태그만 센 값이다. 재산출:
+
+```bash
+awk '/G-ROWS-BEGIN/,/G-ROWS-END/' FREE_TIER_ACCESS_MODEL_PLAN.md \
+  | grep -o '`\[\(server\|client\|both\)\]`' | sort | uniq -c
+```
+
+⚠️ 마커를 쓰는 이유: "§8 기본:부터"처럼 **본문에도 등장하는 문자열**로 범위를 적으면 세는 사람마다
+시작점이 달라진다(그 문구 자체가 매치돼 커버리지 문단까지 포함되면 54/13/13이 나온다). 범위 없는
+개수는 재현이 안 된다 — 실제로 파일 전체를 세어 86으로 잘못 보고한 적이 있다. 행이 늘면 이 수도 갱신할 것.
 
 ⚠️ **커버리지 실측 (2026-07-26)**: `subscription_ack`·`reauth_required`·`lease_id`·`accepted_topics`·
 `rejected_topics`는 서버(`app/`, `tests/`)·iOS(`FXi/`, `FXiTests/`) **모두 0건**이고, iOS 테스트는
@@ -757,6 +765,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 `snapshot 중복 timestamp-merge`는 `TopicSnapshotMergerTests`가 순수 함수 수준으로 이미 덮는다.
 없는 것은 그 merge가 **실제 WS 수신 경로를 거쳐** 적용되는 통합 검증이다.
 
+<!-- G-ROWS-BEGIN -->
 §8 기본: `[both]` request_id 상관관계 / `[server]` 중복 subscribe / `[both]` 부분 reject /
 `[both]` token refresh / `[both]` reconnect / `[both]` lease 만료.
 A: `[server]` horizon 계산(캐시 4분 → lease ~11분) / `[server]` stale fallback으로 연장 안 됨 /
@@ -827,6 +836,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[both]` **재인증 idempotency = topic 집합 불변이되 lease는 갱신됨** /
 `[client]` snapshot 중복은 **timestamp-merge**로 적용 /
 `[server]` **epoch 폐기 결과로 lease를 발급하지 않음** / `[server]` flag off → `topic_unavailable`(accepted 금지).
+<!-- G-ROWS-END -->
 
 **⚠️ 테스트 harness 선행 요건**(없으면 계약을 지워도 green인 가짜 통과가 기본형):
 (1) **clock 주입 seam** — ✅ **wall 축 land (2026-07-26)**: `Clock(wall: Callable[[], datetime])` +
