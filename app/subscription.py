@@ -2,50 +2,29 @@
 
 # 표준 라이브러리
 from collections import OrderedDict
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 import logging
-from typing import Callable, Optional
+from typing import Optional
 
 # 서드파티 라이브러리
 import httpx
 
 # 로컬 애플리케이션
+from app.clock import Clock, system_clock
 from app.config import REVENUECAT_API_KEY
 
 logger = logging.getLogger("exchange_rate.subscription")
 
 REVENUECAT_API_URL = "https://api.revenuecat.com/v1"
 
-
-@dataclass(frozen=True)
-class Clock:
-    """시간 소스 주입점 (ADR-039 §8.1 harness 선행 (1)).
-
-    이 모듈의 TTL·만료 판정이 `datetime.now()`를 메서드 안에서 직접 읽던 것을 대체한다.
-    **값이 아니라 콜러블을 주입한다**:
-    - 판정 지점들이 `_check_revenuecat_entitlement`의 HTTP 왕복을 사이에 두고 흩어져 있다.
-      패스 시작 시각 하나를 공유하면 `cached_at`이 호출 *이전* 시각으로 찍혀 캐시가 그만큼
-      일찍 만료된다(behavior change). ⚠️ `httpx.AsyncClient(timeout=5.0)`은 **단계별**
-      (connect/read/write/pool) 5초라 왕복 총시간의 상한이 5초인 것이 **아니다** — 편차는
-      더 클 수 있다.
-    - `get`(miss)·`state`(미등록)는 클럭을 **읽기 전에** 반환한다. 호출부에서 미리 평가하면
-      그 laziness가 깨진다.
-
-    ⚠️ **monotonic 축은 lease 도입(§8.1 A1 horizon) 때 이 클래스에 필드로 추가한다.**
-    그때 `time.monotonic()`을 판정 지점에서 직접 호출하지 말 것 — wall 축이 겪은 문제를
-    그대로 반복하게 된다. 지금 넣지 않는 이유는 소비자가 없어 아무 테스트도 그 필드의
-    *의미*를 검증할 수 없기 때문이다. 추가 비용은 `Clock` 생성자와 조립부(`system_clock`,
-    테스트 `_clock`)뿐이고 **5개 판정 지점의 시그니처는 다시 바뀌지 않는다**.
-    """
-
-    wall: Callable[[], datetime]
-
-
-def system_clock() -> Clock:
-    """프로덕션 기본 클럭 (aware UTC)."""
-    return Clock(wall=lambda: datetime.now(timezone.utc))
+# ⚠️ `Clock`/`system_clock`의 **정본은 `app/clock.py`**다 (ADR-039 §8.1 harness 선행 (1)).
+#    여기서는 아래 5개 TTL 판정 지점이 쓰기 위해 가져올 뿐이며 re-export가 아니다 —
+#    `__all__`에도 없고, 다른 모듈은 `app.clock`에서 직접 가져와야 한다
+#    (`tests/test_clock.py::TestCanonicalImportPath`가 AST로 잠근다).
+#    이 모듈의 판정 지점은 `clock.wall()`만 읽는다. `clock.mono()`는 §8.1 A4의 strict cache
+#    (`verified_at_monotonic`)가 들어오는 날 처음 쓰이며, 그때까지 테스트의 `_clock`이
+#    poison callable로 그 사실을 잠근다.
 
 # LRU 캐시: 크기 제한 + TTL + Stale fallback
 CACHE_MAX_SIZE = 1000
@@ -293,8 +272,7 @@ async def verify_premium(user_id: str, *, clock: Optional[Clock] = None) -> bool
 
 
 __all__ = [
-    "Clock",
-    "system_clock",
+    # ⚠️ `Clock`/`system_clock`은 의도적으로 없다 — 정본은 `app/clock.py`.
     "verify_premium",
     "verify_premium_status",
     "PremiumStatus",

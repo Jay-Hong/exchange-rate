@@ -24,11 +24,11 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from app import subscription
+from app.clock import Clock          # 정본은 app.clock (§8.1 harness (1) — 2026-07-27 이동)
 from app.subscription import (
     CACHE_STALE_TTL,
     CACHE_TTL,
     PENDING_TTL,
-    Clock,
     EntitlementCache,
     PendingCache,
     PremiumStatus,
@@ -55,13 +55,31 @@ class _RecordingClock:
         return value
 
 
-def _clock(*instants: datetime):
-    """`Clock` 생성 단일 지점.
+def _poison_mono() -> float:
+    """이 모듈은 monotonic 축을 읽지 않는다 — 그 계약을 실행 시점에 잠그는 trip-wire.
 
-    lease 도입 시 monotonic 축이 추가돼도 개별 테스트를 고치지 않도록 여기서만 조립한다.
+    결정적 fake(카운터)를 넣으면 subscription이 mono를 읽기 시작해도 아무도 모른다.
+    §8.1 A4의 strict cache(`verified_at_monotonic`)가 이 모듈로 들어오는 날 여기가 red가
+    되어 "wall 축 전용" 전제를 **명시적으로** 재검토하게 만든다.
+    """
+    raise AssertionError(
+        "app/subscription.py는 wall 축만 읽는다 — mono 소비가 생겼다면 이 전제를 갱신할 것 "
+        "(ADR-039 §8.1 A4 strict cache)"
+    )
+
+
+def _clock(*instants: datetime):
+    """`Clock` 생성 단일 지점 (wall 축 전용).
+
+    lease 도입으로 `Clock.mono`가 필수 필드가 됐지만 **반환 shape은 2-tuple 그대로**다
+    (호출부 61곳 무변경, 두 번째 원소는 계속 wall recorder — `rec.calls` 단언 6곳이 산다).
+
+    ⚠️ 두 축을 **독립 제어**해야 하는 lease 테스트는 `tests/test_topic_lease.py`가 자체
+    `_clock`을 갖는다. 이 리포는 test 파일 간 헬퍼 import가 0건이라 조립부가 둘로 나뉜다 —
+    `Clock`에 축이 또 늘면 **두 곳 다** 고칠 것(`app/clock.py` docstring의 조립부 목록 참조).
     """
     recorder = _RecordingClock(*instants)
-    return Clock(wall=recorder), recorder
+    return Clock(wall=recorder, mono=_poison_mono), recorder
 
 
 class TestEntitlementCacheBoundaries(unittest.TestCase):

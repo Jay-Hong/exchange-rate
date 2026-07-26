@@ -398,6 +398,30 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - 구현 노트: `Clock.mono`는 **기본값 없이 필수 주입**한다(wall과 동일). 기본값을 주면 호출부가
     빠뜨려도 실클럭으로 조용히 동작해 테스트에 실시간이 섞인다 — wall 축에서 같은 이유로 필수로 했다.
   lease deadline과 `authoritative_verified_at`은 **같은 monotonic 축**이어야 한다(A1 마지막 항목 — 축이 섞이면 상한 증명이 무의미).
+
+  ✅ **A1/A2 산술 land (2026-07-27)** — `app/topic_lease.py`(`LEASE_MAX_SECONDS` /
+  `compute_lease_expiry` / `is_expired`) + `app/clock.py`(`Clock.mono` 필수 주입 +
+  `system_clock`). **순수 계산기만**이고 저장·배선은 후속이다(닫힌 G 행은 G 절 하단 참조).
+  구현하며 확정한 세 계약:
+  - **계산기는 `Clock`이 아니라 `now_mono: float`를 받는다.** D1("한 ack의 accepted들은 **같은
+    순간** 갱신")·D2("lock 아래 **단일 snapshot**")를 지키려면 `now`를 **호출부가 요청당 1회**
+    읽어 그 요청의 전 topic에 공유해야 한다. 계산기가 스스로 시각을 만들면 그 성질을 단위
+    테스트로 잠글 수 없다(harness (5) `sweep_once(now)`, `app/atomic_retry.py`와 같은 형태).
+    ⚠️ B1 전송 직전 재검증은 **새로** 읽는다 — 그 시점의 만료 여부를 봐야 하므로.
+  - **비유한 입력 fail-closed** — `compute_lease_expiry`는 `ValueError`, `is_expired`는 만료로
+    접는다. `min`이 NaN을 첫 인자일 때만 전파해(`min(1.0, nan, 2.0) == 1.0`) 가드가 없으면 NaN
+    horizon이 조용히 무시되고 **상한 전량** lease가 나간다. `inf` sentinel은 영구 lease가 된다.
+  - **gross future skew 거부**(신규 계약) — 관측 시각이 `now`보다
+    `MAX_VERIFIED_AT_FUTURE_SKEW_SECONDS`(= `LEASE_MAX_SECONDS`에서 파생) 넘게 미래면
+    `ValueError`. 축 혼동(`time.time()` 값 혼입)이면 `min`이 `now`를 골라 **항상 상한 전량**
+    lease가 나가 A1의 "총 revoke 상한 15분" 증명이 조용히 무효가 되는데, 그 실패가 정상 동작과
+    구별되지 않기 때문이다. 미세한 미래는 `min`이 clamp하므로 통과시킨다.
+    ⚠️ 이 `ValueError`는 **프로그래밍 오류**다 — 배선 슬라이스에서 광범위 `except Exception`이
+    이것을 C4 `temporarily_unavailable`(retryable)로 접으면 재시도 storm이 된다.
+  - ⚠️ **primitive가 막지 못하는 것**: 세 인자가 **모두** wall epoch면 서로의 관계가 정상이라
+    가드를 통과한다(결과 = epoch+900 → 진짜 monotonic now와 비교 시 수십 년간 미만료). 축 보증은
+    배선 슬라이스 몫 — 세 값이 같은 주입 `Clock.mono`에서 나올 것 / A6의 `active`만 계산기에
+    도달할 것 / 계산 결과가 이미 만료면 등록·ack accepted를 하지 않을 것.
   wall clock 역행(NTP step / VM restore) 시 상한을 넘긴다(전진은 조기 만료 = 안전한 방향).
   registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
 - **A3 "15분"의 기준점** — **우리가 권한 상실을 authoritative하게 관측한 시점**부터다.
@@ -847,6 +871,24 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[server]` **epoch 폐기 결과로 lease를 발급하지 않음** / `[server]` flag off → `topic_unavailable`(accepted 금지).
 <!-- G-ROWS-END -->
 
+**진행 상황 — A1/A2 산술 슬라이스 (2026-07-27)**
+⚠️ 아래는 마커 **밖**에 둔다. 안에 쓰면 `[server]` 같은 태그가 커버리지 집계(54/12/12)에 섞인다.
+
+- **닫힘**: `[server]` `now == expires_at` 경계 만료 / `[server]` `CACHE_TTL < LEASE` 불변식
+  (`tests/test_topic_lease.py`, 11개 무력화 전부 red 확인 — survivor 0).
+- **산술만 닫힘(절반 열림)**: `[server]` horizon 계산(캐시 4분 → lease ~11분) — 3-way min의
+  **계산**은 잠겼으나 캐시가 `verified_at_monotonic`을 **저장**한다는 절반은 미검증.
+- **열림(이 슬라이스로 닫히지 않음)** — 각각 필요한 선행이 다르다:
+  `[server]` wall clock 역행에도 strict horizon 불변(strict cache **저장·재사용** 경로) /
+  `[server]` stale fallback으로 연장 안 됨(A6 3-state verifier — 현행 `PremiumStatus`에는
+  fresh/stale 구분이 없고 최대 1시간 stale로 ACTIVE가 나온다) /
+  `[server]` single-flight(A5 owner·epoch) / `[server]` identity horizon이 토큰 단위(저장 키) /
+  `[server]` webhook epoch fence.
+- ⚠️ **"최소 lease 10분"을 이 슬라이스 근거로 주장하지 말 것** — `CACHE_TTL < LEASE`는 3-way min의
+  *entitlement 항*에만 거는 상한이다. 10분 하한은 `firebase_identity_verified_at ≈ now`라는 E2
+  전제가 함께 있어야 하며, 그 전제가 깨진 경우는 `TestStaleIdentity`가 **10분 미만·이미 만료**로
+  실증한다.
+
 **⚠️ 테스트 harness 선행 요건**(없으면 계약을 지워도 green인 가짜 통과가 기본형):
 (1) **clock 주입 seam** — ✅ **wall 축 land (2026-07-26)**: `Clock(wall: Callable[[], datetime])` +
 `system_clock()`을 `app/subscription.py`의 5개 판정 지점 전부에 배선, 커버리지 0건이던 모듈에
@@ -854,17 +896,29 @@ baseline 38건 추가(`tests/test_subscription_clock.py`). **값이 아니라 �
 패스 시작 시각을 공유하면 `cached_at`이 RevenueCat HTTP 왕복 *이전* 시각으로 찍히고
 (`timeout=5.0`은 **단계별** 값이라 왕복 총시간 상한이 아니다),
 `get`(miss)·`state`(미등록)의 lazy 읽기도 깨진다(둘 다 무력화로 실증).
-⚠️ **(1)은 아직 미완**: `verified_at_monotonic`(monotonic 축)은 소비자(A1 horizon)와 함께 도입한다.
-`Clock`이 이미 배선돼 있어 **5개 TTL 판정 지점의 함수 시그니처는 다시 바뀌지 않는다**.
-단 `mono`는 기본값 없이 **필수 주입**이므로 `Clock` 생성자와 **모든 조립부는 바뀐다**
-(현재 2곳: `system_clock` / 테스트 `_clock`). "시그니처 변경 0"이라 뭉뚱그리면 안 된다 —
-그 표현은 판정 지점에만 맞다(코드 쪽 `Clock` docstring은 처음부터 이 범위로 적혀 있었다).
-**그때까지 G의 `wall clock 역행에도 strict horizon 불변` 행은 착수 금지** — 단일 wall seam으로는
-그 행이 가짜 통과한다. (⚠️ 이 문서 규약대로 **심볼 앵커**로 적는다. 초안은 `:726`이라 적었는데
-이후 편집으로 실제 위치가 밀려 어긋났다 — 규약을 만든 문장이 규약을 어겼다.)
-⚠️ **그 행을 닫는 조건**: monotonic 축 도입만으로는 부족하다. 계산기가 wall을 무시한다는 것만
-증명될 뿐이고, `verified_at_monotonic`의 **저장·재사용 경로**(strict cache + verifier 배선)까지
-있어야 실제 불변식이 검증된다. (2) **Firebase 예외→verdict 매핑 seam** — ✅ **2a land (2026-07-26)**:
+✅ **monotonic 축 land (2026-07-27)** — `mono: Callable[[], float]`가 **기본값 없는 필수 필드**로
+추가되고 `system_clock`이 `time.monotonic`에 배선됐다. 소비자는 A1 계산기(`compute_lease_expiry`,
+A2 참조)이며 호출부가 `clock.mono()`를 요청당 1회 읽어 `now_mono`로 넘긴다.
+
+- ⚠️ **정본 모듈이 `app/subscription.py` → `app/clock.py`로 이동했다**(re-export 없음). 이유는
+  §8.1 A4가 만드는 **prospective 순환**이다 — `invalidate_user_cache`가 strict cache·single-flight
+  결과까지 무효화하게 되면 `subscription → WS 인가` 엣지가 생기고, `Clock`이 subscription에 남으면
+  WS 인가 쪽의 import가 역엣지가 된다. `app/clock.py`는 **stdlib only**로 유지한다.
+  `app/subscription.py`는 자기 판정 지점을 위해 가져다 쓸 뿐이고 `__all__`에 없다 —
+  `app.subscription` 경유 import는 `tests/test_clock.py::TestCanonicalImportPath`가 AST로 막는다.
+  (subscription의 기본 클럭 patch 대상은 **소비자 네임스페이스** `app.subscription.system_clock`.)
+- **5개 TTL 판정 지점의 시그니처는 바뀌지 않았다.** 바뀐 것은 `Clock` 생성자와 조립부이고,
+  이제 **3곳**이다: `system_clock` / `tests/test_subscription_clock.py`의 `_clock`(wall 전용, mono는
+  호출 시 실패하는 **poison** — "subscription은 mono를 읽지 않는다"의 trip-wire) /
+  `tests/test_topic_lease.py`의 `_clock`(두 축 독립 제어). 축이 또 늘면 세 곳 다 고칠 것.
+  ⚠️ 호출부 **61곳**(`[0]` 51 + 언팩 10)은 2-tuple 반환을 유지해 무변경이다 — "조립부 2곳"과
+  "호출부 61곳"은 다른 축의 수치이니 섞지 말 것.
+
+⚠️ **그래도 G의 `wall clock 역행에도 strict horizon 불변` 행은 열려 있다.** monotonic 축 도입만으로는
+부족하다 — 계산기가 wall을 무시한다는 것만 증명될 뿐이고, `verified_at_monotonic`의
+**저장·재사용 경로**(strict cache + verifier 배선)까지 있어야 실제 불변식이 검증된다.
+(⚠️ 이 문서 규약대로 **심볼 앵커**로 적는다. 초안은 `:726`이라 적었는데 이후 편집으로 실제 위치가
+밀려 어긋났다 — 규약을 만든 문장이 규약을 어겼다.) (2) **Firebase 예외→verdict 매핑 seam** — ✅ **2a land (2026-07-26)**:
 conftest가 `firebase_admin.auth`/`.exceptions`의 **예외 속성만 진짜 클래스**로 제공(나머지는 MagicMock 유지)
 + `google.auth`는 미설치 시에만 stub. 19건 추가(`tests/test_firebase_auth_mapping.py`), 기존 3693건 무영향.
   - **계층까지 재현한다**: firebase-admin v6.9.0에서 `Expired`·`Revoked`가 `InvalidIdToken`의 **하위**라
@@ -910,7 +964,9 @@ iOS는 `subscribedTopics` Set만 단언하고 연결·수신 상태기계를 구
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
-- [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C, S5 확정으로 착수 가능**
+- [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C 진행 중**
+      — A1/A2 **산술** land(2026-07-27, `app/clock.py` + `app/topic_lease.py`, 배포 없음).
+      다음은 strict cache 저장(`verified_at_monotonic`) → A6 3-state verifier → A5 single-flight → 배선.
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).
 - [x] **제품 결정 S5(revoke latency) = bounded-lease v1 15분 확정(2026-07-25)** — §7 S5 / §8 만료 항목 참조.
