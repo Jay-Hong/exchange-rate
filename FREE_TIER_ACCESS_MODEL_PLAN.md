@@ -455,7 +455,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **(d) identity 단조성**: 동시 처리가 되면 C1의 UID 재바인딩이 **도착 순서에만** 의존해선 안 된다.
     늦게 도착한 구 UID subscribe(또는 C4 retry)가 새 바인딩을 되돌리지 못하도록 **토큰 `auth_time`(또는 클라
     identity epoch) 기준 단조 비교**로 구 요청을 폐기한다.
-  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 프레임 1건이
+  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 메시지 1건이
     새 UID로 갈 수 있다 → 전송도 lock 안에서 하거나, 전송 직후 결과를 폐기할 수 있어야 한다(B4와 일관).
 
 #### C. 상태 전이
@@ -573,8 +573,9 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | `request_id` | UUID 문자열, 36자 고정 |
   | 중복 topic | **first-occurrence 순서로 제거**(정규화) |
   값은 조정 가능하지만 **미정 상태로 test-first에 들어가지 않는다**.
-  - ⚠️ **frame 상한은 앱 레벨만으로 강제할 수 없다** — `handle_client_message(raw_text)`가 실행되는 시점엔
-    ASGI 서버가 **이미 frame 전체를 메모리에 받은 뒤**다(`app/main.py`의 `await websocket.receive_text()`).
+  - ⚠️ **message 상한은 앱 레벨만으로 강제할 수 없다** — `handle_client_message(raw_text)`가 실행되는 시점엔
+    ASGI 서버가 **분할 frame을 합쳐 message 전체를 이미 메모리에 받은 뒤**다
+    (`app/main.py`의 `await websocket.receive_text()`).
     실제 자원 보호가 목적이라면 **Uvicorn/WebSocket `max_size` 또는 프록시 계층에서도 16 KiB를 강제**하고
     초과 시 **close code 1009**로 끊어야 한다. 앱 레벨 `len()` 검사는 프로토콜 검증(방어 심화)일 뿐이다.
     → 배포 설정도 계약의 일부이며 테스트 대상.
@@ -582,7 +583,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     nginx의 `client_max_body_size`는 **HTTP body 전용이라 WebSocket 업그레이드 후 상한을 보장하지 않는다**.
 
     ✅ **land (2026-07-26)** — Dockerfile CMD에 **`--ws websockets --ws-max-size 16384`**,
-    `tests/test_ws_frame_limit.py` 8건. lock 정확 버전(uvicorn 0.44.0 / websockets 16.0) 실측 기반:
+    `tests/test_ws_message_limit.py` 8건. lock 정확 버전(uvicorn 0.44.0 / websockets 16.0) 실측 기반:
 
     - ⚠️ **수용 기준 정정**: 구 문구 "ASGI 통합 테스트에서 close 1009 확인"은 **원리적으로 불가능**하다.
       legacy impl의 `fail_connection`이 피어 close 프레임을 파싱하지 않아 **ASGI 앱은 1006**(=일반 네트워크
@@ -643,7 +644,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     현행 iOS도 무토큰이다(WebSocketService.swift, payload = `{type, topics}`). 구 문서의
     "구형 무인증 메시지만 silent-ignore로 남긴다"는 **오서술**이었다.
   - **인증 강제 ON**: `id_token` 없는 subscribe는 **등록하지 않고** `subscription_error`(`invalid_token`)를 보낸다.
-    `request_id`가 없으면 **`request_id: null`로 응답**한다(§8-B error frame에서 nullable 허용) — 조용한 실패 금지.
+    `request_id`가 없으면 **`request_id: null`로 응답**한다(§8-B error 메시지에서 nullable 허용) — 조용한 실패 금지.
     `unsubscribe`는 D8대로 `id_token` 없이 정상 처리(fail-open).
   - **중간 상태(§6 step 3, enforcement OFF)**: 인증 capability는 배포하되 **강제하지 않는다** —
     무토큰 subscribe는 **기존대로 등록**되고 lease·sweep·`reauth_required`가 **돌지 않는다**(전원 무기한).
@@ -752,7 +753,7 @@ UID 변경 ack의 `active_subscriptions`가 전체 상태로 수렴(미언급 to
 connection lock 안에서 sweep↔재인증 **양방향** 순서 /
 만료 claim 후 통지 timeout·중복 sweep 없음 /
 **10분 lease → 6~7분 재인증** 계산(D6) / `temporarily_unavailable`의 `retry_after_seconds` /
-D7 상한 **각각의 경계값**(frame 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
+D7 상한 **각각의 경계값**(message 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
 **invalid token은 기존 UID·lease 불변** / 구 `request_id` ack과 구 `identity_generation` ack 무시.
 
 보강 2차(codex 감사):
@@ -815,7 +816,7 @@ conftest가 `firebase_admin.auth`/`.exceptions`의 **예외 속성만 진짜 클
   subscribe 경로가 아직 토큰을 읽지 않는다. **2b**에서 token-string 기반 verifier + WS verdict translator와
   함께 검증한다. 또 `check_revoked=True` 경로의 Firebase 계열 오류(`UserDisabledError` 등)를 generic 401로
   둘지 `temporarily_unavailable`로 승격할지는 **2b 전 별도 결정**이다(현행은 401 fail-closed). (3) **인터리빙 강제 hook** — 임계구역에 await가 없으면
-단일 스레드에서 race가 물리적으로 안 나 **B4 lock/C3 CAS를 지워도 green**. (4) ✅ **land (2026-07-26)** — uvicorn subprocess harness(`tests/test_ws_frame_limit.py`).
+단일 스레드에서 race가 물리적으로 안 나 **B4 lock/C3 CAS를 지워도 green**. (4) ✅ **land (2026-07-26)** — uvicorn subprocess harness(`tests/test_ws_message_limit.py`).
 TestClient는 프레이밍 계층이 없어 검증 불가라는 판단은 맞았으나, **실서버로 바꿔도 서버측 단언은 불가능**하다
 (앱은 1006을 본다 — §D7 참조). 계약은 클라 관측 1009. 하니스는 실앱이 아니라 최소 ASGI 앱을 띄우고
 (conftest stub이 subprocess에 전달되지 않으므로), **Dockerfile CMD를 구조 파싱해 그 토큰을 재사용**한다

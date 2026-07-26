@@ -3,7 +3,8 @@
 ## 왜 "frame"이 아니라 "message"인가
 
 `--ws-max-size`는 **incoming message** 크기 상한이고, 분할 전송된 frame들의 **합산**에 적용된다
-(websockets `legacy/protocol.py`). 계획 문서가 "frame 상한"이라 부르던 것을 여기서는 message로 적는다.
+(websockets `legacy/protocol.py`). 계획 문서도 구 "frame 상한" 표현을 message로 정정했다 —
+분할 frame 각각이 상한 이하여도 합산이 넘으면 끊긴다(이 파일의 fragmented 테스트가 그걸 잠근다).
 
 ## 계약이 서버가 아니라 **클라이언트** 관측인 이유 (실측)
 

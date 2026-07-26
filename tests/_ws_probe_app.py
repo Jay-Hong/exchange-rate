@@ -5,7 +5,7 @@
 타는데, `tests/conftest.py`의 sys.modules stub과 sqlite 강제는 **pytest 프로세스에만** 적용돼
 subprocess에는 전달되지 않는다 → 불필요한 실패 표면만 늘어난다.
 
-"우리 배포가 실제로 그 플래그를 준다"는 연결은 `test_ws_frame_limit.py`의 Dockerfile trip-wire가
+"우리 배포가 실제로 그 플래그를 준다"는 연결은 `test_ws_message_limit.py`의 Dockerfile trip-wire가
 담당하고, 하니스는 **그 CMD 토큰을 그대로 재사용**해 플래그를 따로 하드코딩하지 않는다.
 """
 

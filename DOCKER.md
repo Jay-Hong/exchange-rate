@@ -812,7 +812,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:8000/health || exit 1
 
-# 실행 (⚠️ 정본은 리포의 `Dockerfile` — 여기는 복제본이다. tests/test_ws_frame_limit.py가 두 CMD가
+# 실행 (⚠️ 정본은 리포의 `Dockerfile` — 여기는 복제본이다. tests/test_ws_message_limit.py가 두 CMD가
 #  일치하는지 잠근다. `--ws websockets`는 fail-fast 고정, `--ws-max-size`는 WS 메시지 상한이며
 #  둘 중 하나라도 빠지면 상한이 조용히 사라진다 — ADR-039 §8.1 D7)
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws", "websockets", "--ws-max-size", "16384"]
