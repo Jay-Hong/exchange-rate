@@ -97,6 +97,29 @@ class TestInstaller(unittest.TestCase):
         self.assertRegex(text, r'\$after.*-gt.*\$before', "rotation 후 새 파일 증가를 비교해야 한다")
         self.assertIn("exit 1", text, "검증 실패 시 non-zero로 끝나야 한다")
 
+    def test_check_compares_installed_against_canonical(self):
+        """문법만 보면 호스트에서 USR1·rotate 상한을 손으로 지워도 통과한다 —
+        그러면 "정본"이 이름뿐이다. 설치본과 **동일성**을 봐야 계약이 성립한다(codex).
+        """
+        text = INSTALLER.read_text()
+        check_body = text[text.index("check() {"):text.index("verify_reopen() {")]
+        self.assertIn("cmp -s", check_body, "정본↔설치본 비교가 없다")
+        self.assertIn("/etc/logrotate.d/fxi-nginx", check_body)
+        self.assertIn("/etc/systemd/journald.conf.d/limits.conf", check_body)
+        self.assertIn("exit 1", check_body, "drift를 발견하면 non-zero로 끝나야 한다")
+
+    def test_check_uses_effective_journald_value(self):
+        """journald는 drop-in 병합이라 **파일이 맞아도 후순위가 덮을 수 있다**.
+
+        실측: 우리 drop-in 뒤에 `/usr/lib/systemd/journald.conf.d/syslog.conf`가 온다.
+        systemd는 뒤에 오는 정의가 이기므로 `tail -1`(마지막)이 실효값이다.
+        """
+        text = INSTALLER.read_text()
+        check_body = text[text.index("check() {"):text.index("verify_reopen() {")]
+        self.assertIn("cat-config", check_body)
+        self.assertIn("tail -1", check_body,
+                      "마지막 값을 봐야 후순위 drop-in 재정의를 검출한다")
+
     def test_reopen_check_targets_the_local_nginx(self):
         """공인 DNS로 쏘면 호스트 교체 중(DNS 전환 전) **구 서버**를 때려 오판한다.
 

@@ -22,10 +22,45 @@ install_config() {
 }
 
 check() {   # 비파괴 — 로그를 건드리지 않는다
+  local drift=0
+
+  # (1) 정본 ↔ 설치본 **동일성**. 문법만 보면 호스트에서 USR1이나 rotate 상한을 손으로 지워도
+  #     통과한다 — 그러면 "정본" 계약이 이름뿐이다.
+  echo "--- 정본 ↔ 설치본 ---"
+  for pair in "logrotate/fxi-nginx:/etc/logrotate.d/fxi-nginx" \
+              "systemd/journald-limits.conf:/etc/systemd/journald.conf.d/limits.conf"; do
+    src="$HERE/${pair%%:*}"; dst="${pair##*:}"
+    if cmp -s "$src" "$dst"; then
+      echo "OK   $dst"
+    else
+      echo "DRIFT $dst 가 정본과 다르다:" >&2
+      diff -u "$src" "$dst" 2>&1 | head -20 >&2 || true
+      drift=1
+    fi
+  done
+
   echo "--- logrotate 문법 (dry-run) ---"
   logrotate -d /etc/logrotate.d/fxi-nginx >/dev/null && echo "OK"
-  echo "--- journald 상한 ---"
-  systemd-analyze cat-config systemd/journald.conf | grep -E '^(SystemMaxUse|SystemKeepFree)='
+
+  # (2) journald는 drop-in 병합이라 **파일이 맞아도 후순위가 덮을 수 있다**
+  #     (실측: 우리 drop-in 뒤에 /usr/lib/systemd/journald.conf.d/syslog.conf가 온다).
+  #     systemd는 뒤에 오는 정의가 이기므로 **마지막 값 = 실효값**으로 비교한다.
+  echo "--- journald 실효값 (후순위 drop-in 재정의 검출) ---"
+  for key in SystemMaxUse SystemKeepFree; do
+    want=$(grep -E "^${key}=" "$HERE/systemd/journald-limits.conf" | tail -1)
+    got=$(systemd-analyze cat-config systemd/journald.conf | grep -E "^${key}=" | tail -1)
+    if [ "$want" = "$got" ]; then
+      echo "OK   $got"
+    else
+      echo "DRIFT 실효값 '$got' ≠ 정본 '$want' (후순위 drop-in이 덮었을 수 있다)" >&2
+      drift=1
+    fi
+  done
+
+  if [ "$drift" -ne 0 ]; then
+    echo "→ 재설치하려면: sudo $0" >&2
+    exit 1
+  fi
 }
 
 verify_reopen() {   # ⚠️ 파괴적 — 강제 rotation 발생
