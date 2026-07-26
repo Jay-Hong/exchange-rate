@@ -785,20 +785,22 @@ docker image prune -f        # dangling(untagged) 이미지만 — 태그된 롤
 
 nginx access/error는 **bind mount 파일에 직접** 쓰므로 Docker json-file rotation도 journald도
 적용되지 않는다. 실측: 설정 없이 `access.log`가 **275MB**까지 자라 있었다.
-`/etc/logrotate.d/fxi-nginx` (daily / size 50M / rotate 7 / compress) + `postrotate`에서
-`docker kill --signal=USR1 exchange-rate-nginx` — **USR1이 없으면 nginx가 rename된 inode에 계속 써서
-새 파일이 0바이트로 남는 silent failure**가 된다. 설치 후 트래픽을 넣어 **새 파일이 자라는지 반드시 확인**할 것.
 
-**journald 영구 상한** (한 번만 설정, 실측 892MB → 92MB):
+**정본은 `ops/logrotate/fxi-nginx`** — 여기 수치를 다시 적지 않는다(중복 서술은 반드시 어긋난다.
+실제로 정본에서 `daily`를 뺀 뒤에도 이 문단이 한동안 `daily`라고 안내하고 있었다).
 
+```bash
+sudo ops/install-host-config.sh                  # 설치 + 점검 + USR1 실증
+sudo ops/install-host-config.sh --check          # 비파괴 점검 (상시 안전)
+sudo ops/install-host-config.sh --verify-reopen  # ⚠️ 파괴적: 강제 rotation
 ```
-# /etc/systemd/journald.conf.d/limits.conf
-[Journal]
-SystemMaxUse=200M
-SystemKeepFree=2G
-```
-일회성 정리는 `sudo journalctl --rotate --vacuum-size=100M` — **`--rotate`가 없으면 archived만**
-대상이라 active journal이 남는다.
+
+**USR1이 없으면** nginx가 rename된 inode에 계속 써서 새 파일이 0바이트로 남는 **silent failure**가
+된다 — 설치 후 `--verify-reopen`이 실제 증가를 비교해 그걸 검출한다.
+
+**journald 영구 상한** — 정본은 `ops/systemd/journald-limits.conf`, 설치는 위 스크립트가 함께 한다
+(실측 892MB → 92MB). 일회성 정리는 `sudo journalctl --rotate --vacuum-size=100M` —
+**`--rotate`가 없으면 archived만** 대상이라 active journal이 남는다.
 
 ### 배포 시 주의사항
 

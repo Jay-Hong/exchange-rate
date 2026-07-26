@@ -71,20 +71,40 @@ class TestJournaldConfig(unittest.TestCase):
 
 
 class TestInstaller(unittest.TestCase):
-    def test_installs_both_configs_and_verifies(self):
+    def test_installs_both_configs(self):
         text = INSTALLER.read_text()
         self.assertTrue(INSTALLER.stat().st_mode & 0o111, "실행 권한이 없다")
         self.assertIn("logrotate/fxi-nginx", text)
         self.assertIn("systemd/journald-limits.conf", text)
-        self.assertIn("--verify", text)
 
-    def test_verify_detects_silent_usr1_failure(self):
-        """검증이 '문법 OK'로 끝나면 안 된다 — 실제로 새 파일이 자라는지 봐야 한다."""
+    def test_destructive_and_nondestructive_modes_are_separated(self):
+        """`logrotate -f`는 **실제 로그를 회전**시킨다 — 반복 실행하면 `rotate 7`을 밀어내
+        과거 로그가 조기 삭제된다. 상시 점검(`--check`)은 그걸 하면 안 된다.
+
+        초안은 그 파괴적 동작을 `--verify`("검증만")라는 이름 뒤에 숨겼다.
+        """
+        text = INSTALLER.read_text()
+        self.assertIn("--check", text, "비파괴 점검 모드가 있어야 한다")
+        self.assertIn("--verify-reopen", text, "파괴적 모드는 이름으로 드러나야 한다")
+        check_body = text[text.index("check() {"):text.index("verify_reopen() {")]
+        self.assertNotIn("logrotate -f", check_body,
+                         "비파괴 모드가 강제 rotation을 하면 이름이 거짓말이 된다")
+
+    def test_reopen_check_detects_silent_usr1_failure(self):
+        """실증이 '문법 OK'로 끝나면 안 된다 — 실제로 새 파일이 자라는지 봐야 한다."""
         text = INSTALLER.read_text()
         self.assertIn("logrotate -f", text, "강제 rotation 없이는 재오픈을 확인할 수 없다")
-        self.assertRegex(text, r"after.*-gt.*before|\-gt \"\$before\"",
-                         "rotation 후 새 파일 증가를 비교해야 한다")
+        self.assertRegex(text, r'\$after.*-gt.*\$before', "rotation 후 새 파일 증가를 비교해야 한다")
         self.assertIn("exit 1", text, "검증 실패 시 non-zero로 끝나야 한다")
+
+    def test_reopen_check_targets_the_local_nginx(self):
+        """공인 DNS로 쏘면 호스트 교체 중(DNS 전환 전) **구 서버**를 때려 오판한다.
+
+        `--resolve`로 로컬을 확정해야 이 호스트의 로그가 자라는지 보는 검사가 된다.
+        """
+        text = INSTALLER.read_text()
+        self.assertIn("--resolve fxi.kr:443:127.0.0.1", text,
+                      "검증 트래픽이 이 호스트의 nginx로 간다는 보장이 필요하다")
 
 
 if __name__ == "__main__":
