@@ -179,10 +179,11 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   | 총 시도 | **3회 이내**(첫 시도 포함). 소진하면 **포기하고 WS snapshot에 맡긴다** — 무기한 재시도 금지 |
   | backoff | 0.5s → 1.5s(±20% jitter). 마지막 값 이후는 재사용 |
   | 조기 종료 | 그 topic의 snapshot을 이미 받았으면(WS/다른 경로) 남은 시도 취소 |
-  | 취소(즉시) | **① 계정(UID) 변경 ② 게이트/권한 변경** — in-flight task를 실제로 cancel |
-  | latency fence | **③ background ④ 연결 generation** — 요청은 계속 실행하되 **예산 초과 응답을 폐기**(아래) |
+  | 취소(즉시) | **① 계정(UID) 변경 ② 게이트/권한 변경** — in-flight task를 **실제로 cancel**(명시 배선) **+** 적용 직전 UID 재대조(취소 전 완료된 응답용) |
+  | latency guard | **이벤트 무관 · 요청 latency 10초 상한** — 예산 초과 응답 폐기(아래). ⚠️ background·연결 generation을 **감지하지 않는다** |
   | 동시성 | **topic별 독립 타이머** — cold-start 4~5건이 같은 시각에 재시도하지 않도록 |
   | 재시도 **대상 아님** | 401 · 403 · 404 3종(상태가 바뀌어야 해소된다) |
+  | 토큰 획득 실패 | **정적 분류 금지** — 캡처 UID == live UID일 때만 bounded retry(Firebase mint 일시 실패). UID가 없거나 바뀌었으면 **즉시 terminal + 취소**(로그아웃·계정 전환). `CancellationError`는 감싸지 않고 그대로 전파 |
 
   ℹ️ 참조 구현: iOS `ExchangeRateViewModel.bootstrapKrxWithRetry`(`krxBootstrapMaxAttempts = 3`,
   `krxBootstrapBackoffsSeconds = [0.5, 1.5]`, WS-wins revision 체크). tether/fx bootstrap은 현재
@@ -191,15 +192,22 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   ⚠️ **현 iOS가 아직 만족하지 못하는 항목**(2026-07-26 실측, 인증 이관 슬라이스에서 구현):
   KRX가 거는 가드는 **task cancellation · entitlement(krxVisible) · topic gate · snapshot revision**
   뿐이다 — 위 표의 **① UID 변경**과 **③ background · ④ 연결 generation**은 미구현이다.
-  ⚠️ ③④를 "클라에 개념이 없으니 계약에서 뺀다"로 처리하지 **않는다**(codex). 단조 merge(§5)는
-  **값 오염만** 막고, 늦게 도착한 응답도 `tetherReceived`/`lastTetherTopicAt`·`fxReceivedAssets`/
-  `lastFxTopicAt`를 **무조건 갱신**해 topic을 fresh로 오인시킨다 → legacy fallback을 최대 45초 억제.
-  ③④는 task cancellation이 아니라 **latency acceptance fence**로 닫는다.
+  ⚠️ **background·연결 generation은 "이벤트 취소 조건"에서 내린다**(2026-07-26 최종, codex).
+  구 표기는 이벤트 계약처럼 적어 놓고 기전은 시간만 검사해 **표와 구현이 불일치**했다.
+
+  근거 — **이벤트 crossing 자체는 무해**하다: 실제 해악은 늦게 도착한 응답이
+  `tetherReceived`/`lastTetherTopicAt`·`fxReceivedAssets`/`lastFxTopicAt`를 **무조건 갱신**해
+  topic을 fresh로 오인시키는 것(→ legacy fallback 최대 45초 억제)인데, 이건 **경과 시간**의 함수다.
+  background 직후 3초 만에 도착한 응답은 데이터가 실제로 신선하고 freshness 마킹도 정확하다
+  (그 뒤 5분 backgrounded면 `now - lastTopicAt`이 45초를 넘어 정상적으로 stale 판정된다).
+  reconnect 직전 발행돼 직후 도착한 응답도 마찬가지다. → **일반 latency 상한이 해악을 정확히 덮고,
+  이벤트 세대 카운터는 오탐(빠른 응답 폐기)만 늘린다.**
 
   **latency budget 계약** (test-first 가능한 수준으로 확정, 2026-07-26):
 
   | 항목 | 값 / 규칙 |
   |---|---|
+  | 적용 범위 | **모든 bootstrap 응답**(이벤트 조건 없음) |
   | 예산 | **10초**. 요청 **발행** 시각 → 적용 직전까지의 경과 |
   | 시계 | **`ContinuousClock`**(monotonic, 기기 sleep 중에도 진행). wall-clock `Date`는 NTP·사용자 변경으로 점프 가능해 부적합 |
   | 캡처 단위 | **시도마다 재캡처** — 예산은 요청 1건의 latency지 bootstrap 세션 전체가 아니다(안 그러면 KRX 3회차가 1회차 경과를 물려받아 오폐기) |
