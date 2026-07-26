@@ -84,15 +84,42 @@ class TestJournaldDropInOrdering(unittest.TestCase):
             self.assertGreater(name, distro,
                                f"{name}이 {distro}보다 먼저 정렬되면 그쪽 정의가 이긴다")
 
-    def test_installer_removes_legacy_name(self):
-        """이름을 바꾸면 구 파일이 남아 정의가 둘이 된다."""
-        self.assertIn("rm -f /etc/systemd/journald.conf.d/limits.conf", INSTALLER.read_text())
+    def test_installer_removes_legacy_only_when_fxi_owned(self):
+        """`limits.conf`는 **흔한 이름**이라 관리자가 만든 다른 파일일 수 있다 —
+        소유 마커가 있을 때만 지우고 없으면 중단해야 한다(codex).
+        """
+        text = INSTALLER.read_text()
+        self.assertIn('grep -q "fxi-managed:"', text, "소유 확인 없이 지우면 안 된다")
+        self.assertIn("중단:", text, "마커가 없으면 중단해야 한다")
+
+    def test_canonical_files_carry_ownership_marker(self):
+        """소유 판별이 가능하려면 정본 자체에 마커가 있어야 한다."""
+        for path in (LOGROTATE, JOURNALD):
+            self.assertIn("fxi-managed:", path.read_text(), f"{path.name}에 소유 마커가 없다")
 
     def test_override_guidance_does_not_say_reinstall(self):
         """override는 **재설치로 안 고쳐진다** — 같은 이름을 다시 복사해도 순서가 그대로다(codex)."""
         text = INSTALLER.read_text()
         self.assertIn("재설치로는 안 고쳐진다", text)
         self.assertIn("cat-config", text, "범인 drop-in을 찾는 방법을 안내해야 한다")
+
+    def test_drift_guidance_is_split_by_kind(self):
+        """공통 종료부가 무조건 "재설치"를 안내하면 override에서 **자기모순**이 된다 —
+        게다가 무기명 실행은 강제 rotation까지 한다. 종류별로 갈려야 한다(codex).
+        """
+        text = INSTALLER.read_text()
+        self.assertIn("file_drift", text)
+        self.assertIn("override_drift", text)
+        self.assertIn("--install", text, "재설치 안내는 강제 rotation 없는 모드를 가리켜야 한다")
+        # 공통 종료부에 무조건 재설치를 안내하는 옛 문구가 남아 있으면 안 된다
+        self.assertNotIn("→ 재설치하려면: sudo $0\"", text)
+
+    def test_install_mode_does_not_force_rotation(self):
+        """복구 경로가 강제 rotation을 동반하면 "복구하려다 로그를 잃는다"."""
+        text = INSTALLER.read_text()
+        case_body = text[text.index("case \"${1:-}\""):]
+        self.assertRegex(case_body, r"--install\)\s+install_config; check ;;",
+                         "--install은 install+check만 해야 한다(verify_reopen 금지)")
 
 
 class TestInstaller(unittest.TestCase):

@@ -2,7 +2,8 @@
 # 호스트 설정(로그 rotation) 설치·점검. 호스트 교체·복구 시 이 스크립트가 정본이다.
 #
 #   sudo ops/install-host-config.sh                  # 설치 + 비파괴 점검 + USR1 실증(최초 1회)
-#   sudo ops/install-host-config.sh --check          # 비파괴 점검만 (문법·상한). 언제든 안전
+#   sudo ops/install-host-config.sh --check          # 비파괴 점검만 (동기화·문법·실효값). 언제든 안전
+#   sudo ops/install-host-config.sh --install        # 설치/복구 + 점검 (강제 rotation 없음)
 #   sudo ops/install-host-config.sh --verify-reopen  # ⚠️ 파괴적: 강제 rotation으로 USR1 실증
 #
 # ⚠️ `--verify-reopen`은 `logrotate -f`로 **실제 로그를 강제 회전**한다. 반복 실행하면 작은
@@ -16,15 +17,27 @@ NGINX_LOG_DIR=/home/ubuntu/exchange-rate/volumes/logs/nginx
 install_config() {
   install -m 0644 "$HERE/logrotate/fxi-nginx" /etc/logrotate.d/fxi-nginx
   install -d /etc/systemd/journald.conf.d
-  # 구 이름(limits.conf)이 남아 있으면 정의가 둘이 되고 정렬상 먼저 와 혼란을 준다 — 제거.
-  rm -f /etc/systemd/journald.conf.d/limits.conf
+  # 구 이름(limits.conf)이 남아 있으면 정의가 둘이 되고 정렬상 먼저 와 혼란을 준다.
+  # ⚠️ 다만 `limits.conf`는 **흔한 이름**이라 관리자가 만든 다른 파일일 수 있다 —
+  #    FXi 소유 마커가 있을 때만 지우고, 없으면 **중단**한다(남의 설정을 말없이 지우지 않는다).
+  legacy=/etc/systemd/journald.conf.d/limits.conf
+  if [ -e "$legacy" ]; then
+    if grep -q "fxi-managed:" "$legacy"; then
+      rm -f "$legacy"
+      echo "구 FXi 파일 제거: $legacy"
+    else
+      echo "중단: $legacy 가 존재하지만 FXi 소유 마커가 없다 — 다른 주체의 설정일 수 있다." >&2
+      echo "  내용을 확인하고 직접 처리한 뒤 다시 실행할 것: sudo cat $legacy" >&2
+      exit 1
+    fi
+  fi
   install -m 0644 "$HERE/systemd/zz-fxi-limits.conf" /etc/systemd/journald.conf.d/zz-fxi-limits.conf
   systemctl restart systemd-journald
   echo "설치 완료: /etc/logrotate.d/fxi-nginx, /etc/systemd/journald.conf.d/zz-fxi-limits.conf"
 }
 
 check() {   # 비파괴 — 로그를 건드리지 않는다
-  local drift=0
+  local file_drift=0 override_drift=0
 
   # (1) 정본 ↔ 설치본 **동일성**. 문법만 보면 호스트에서 USR1이나 rotate 상한을 손으로 지워도
   #     통과한다 — 그러면 "정본" 계약이 이름뿐이다.
@@ -37,7 +50,7 @@ check() {   # 비파괴 — 로그를 건드리지 않는다
     else
       echo "DRIFT $dst 가 정본과 다르다:" >&2
       diff -u "$src" "$dst" 2>&1 | head -20 >&2 || true
-      drift=1
+      file_drift=1
     fi
   done
 
@@ -59,14 +72,20 @@ check() {   # 비파괴 — 로그를 건드리지 않는다
       echo "  → 우리 파일보다 **뒤에 정렬되는** drop-in이 같은 키를 정의했다. 재설치로는 안 고쳐진다." >&2
       echo "  → 범인 확인: systemd-analyze cat-config systemd/journald.conf | grep -n '^# /\|^${key}='" >&2
       echo "  → 그 파일을 고치거나, 정본 이름을 더 뒤로 정렬되게 바꿔야 한다(현재 zz- 접두사)." >&2
-      drift=1
+      override_drift=1
     fi
   done
 
-  if [ "$drift" -ne 0 ]; then
-    echo "→ 재설치하려면: sudo $0" >&2
-    exit 1
+  # ⚠️ 안내는 drift **종류별**로 갈린다. override에 "재설치"를 안내하면 (a) 문제가 안 고쳐지고
+  #    (b) 무기명 실행이 `--verify-reopen`까지 돌려 **강제 rotation**까지 일으킨다.
+  if [ "$file_drift" -ne 0 ]; then
+    echo "→ 파일 drift는 재설치로 복구된다: sudo $0 --install" >&2
+    echo "   (무기명 실행 \`sudo $0\`은 강제 rotation까지 하므로 복구 목적이면 --install을 쓸 것)" >&2
   fi
+  if [ "$override_drift" -ne 0 ]; then
+    echo "→ override drift는 **재설치로 안 고쳐진다** — 위 안내대로 범인 drop-in을 처리할 것." >&2
+  fi
+  [ "$file_drift" -eq 0 ] && [ "$override_drift" -eq 0 ] || exit 1
 }
 
 verify_reopen() {   # ⚠️ 파괴적 — 강제 rotation 발생
@@ -90,7 +109,8 @@ verify_reopen() {   # ⚠️ 파괴적 — 강제 rotation 발생
 
 case "${1:-}" in
   --check)         check ;;
+  --install)       install_config; check ;;          # 복구용 — 강제 rotation 없음
   --verify-reopen) verify_reopen ;;
   "")              install_config; check; verify_reopen ;;
-  *) echo "usage: $0 [--check | --verify-reopen]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--check | --install | --verify-reopen]" >&2; exit 2 ;;
 esac

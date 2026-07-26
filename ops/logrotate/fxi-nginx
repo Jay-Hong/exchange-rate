@@ -1,4 +1,5 @@
 # FXi nginx 로그 rotation — /etc/logrotate.d/fxi-nginx 로 설치 (정본은 이 파일).
+# fxi-managed: ops/logrotate/fxi-nginx
 #
 # 왜 필요한가: nginx access/error는 컨테이너 stdout이 아니라 **bind mount 파일**에 직접 쓴다
 # (compose `./volumes/logs/nginx:/var/log/nginx`). 따라서 docker-compose의 json-file rotation도
@@ -12,7 +13,8 @@
 #
 # ⚠️ `postrotate`의 USR1은 **load-bearing**이다. 없으면 nginx가 rename된 inode에 계속 써서
 #    새 파일이 0바이트로 남는 **silent failure**가 된다(디스크는 계속 참).
-#    설치 후 반드시 `ops/install-host-config.sh --verify`로 새 파일이 자라는지 확인할 것.
+#    설치 후 `ops/install-host-config.sh --verify-reopen`이 새 파일이 자라는지 비교해 검출한다
+#    (⚠️ 그 모드는 강제 rotation을 하므로 상시 점검은 `--check`).
 /home/ubuntu/exchange-rate/volumes/logs/nginx/*.log {
     size 50M
     rotate 7
