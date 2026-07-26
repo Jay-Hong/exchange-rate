@@ -179,7 +179,8 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   | 총 시도 | **3회 이내**(첫 시도 포함). 소진하면 **포기하고 WS snapshot에 맡긴다** — 무기한 재시도 금지 |
   | backoff | 0.5s → 1.5s(±20% jitter). 마지막 값 이후는 재사용 |
   | 조기 종료 | 그 topic의 snapshot을 이미 받았으면(WS/다른 경로) 남은 시도 취소 |
-  | 취소 | **① 계정(UID) 변경 ② 게이트/권한 변경 ③ 앱 background 전환 ④ 연결 generation 변경** 시 즉시 |
+  | 취소(즉시) | **① 계정(UID) 변경 ② 게이트/권한 변경** — in-flight task를 실제로 cancel |
+  | latency fence | **③ background ④ 연결 generation** — 요청은 계속 실행하되 **예산 초과 응답을 폐기**(아래) |
   | 동시성 | **topic별 독립 타이머** — cold-start 4~5건이 같은 시각에 재시도하지 않도록 |
   | 재시도 **대상 아님** | 401 · 403 · 404 3종(상태가 바뀌어야 해소된다) |
 
@@ -193,8 +194,26 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   ⚠️ ③④를 "클라에 개념이 없으니 계약에서 뺀다"로 처리하지 **않는다**(codex). 단조 merge(§5)는
   **값 오염만** 막고, 늦게 도착한 응답도 `tetherReceived`/`lastTetherTopicAt`·`fxReceivedAssets`/
   `lastFxTopicAt`를 **무조건 갱신**해 topic을 fresh로 오인시킨다 → legacy fallback을 최대 45초 억제.
-  ③④는 **미구현 gap으로 유지**하고, 그 실제 해악(늦은 응답의 신선도 오마킹)은 fence와 같은 지점에서
-  **응답 나이 상한**으로 닫는다 — 요청 발행 시각을 함께 캡처해 지나치게 오래된 응답은 적용하지 않는다.
+  ③④는 task cancellation이 아니라 **latency acceptance fence**로 닫는다.
+
+  **latency budget 계약** (test-first 가능한 수준으로 확정, 2026-07-26):
+
+  | 항목 | 값 / 규칙 |
+  |---|---|
+  | 예산 | **10초**. 요청 **발행** 시각 → 적용 직전까지의 경과 |
+  | 시계 | **`ContinuousClock`**(monotonic, 기기 sleep 중에도 진행). wall-clock `Date`는 NTP·사용자 변경으로 점프 가능해 부적합 |
+  | 캡처 단위 | **시도마다 재캡처** — 예산은 요청 1건의 latency지 bootstrap 세션 전체가 아니다(안 그러면 KRX 3회차가 1회차 경과를 물려받아 오폐기) |
+  | 초과 시 | **요청 실패와 동일 취급** — 값 merge ❌ / `tetherReceived`·`fxReceivedAssets` ❌ / `lastTetherTopicAt`·`lastFxTopicAt` ❌ / `krxSnapshotRevision` bump ❌. 그리고 **재시도하지 않고 종료**(가속기 창이 이미 지났고 WS가 정본) |
+  | 테스트 seam | 기존 `nowProvider: () -> Date`(staleness 전용) 옆에 **별도 monotonic provider** 주입 — 두 시계는 역할이 다르므로 합치지 않는다 |
+
+  **왜 10초인가**: (a) 이 fence가 막으려는 해악의 척도인 `topicStalenessThresholdSeconds = 45`보다
+  충분히 작아야 신선도 오마킹이 창의 일부에 그친다 (b) 정상 latency(sub-second)보다 충분히 커서
+  좋은 응답을 버리지 않는다 (c) 10초를 넘으면 WS snapshot이 이미 도착했을 가능성이 높아 bootstrap의
+  존재 이유(cold-start 가속)가 사라진다.
+
+  ⚠️ **이름이 계약이다 — 이건 "응답 나이"가 아니라 "요청 latency 예산"이다**(codex). 서버가 응답
+  직전에 **fresh** snapshot을 만들었어도 요청이 느렸으면 폐기된다. best-effort 경로라 **의도적으로
+  보수적**으로 택했다 — 정본은 WS snapshot이고, 애매하면 버리는 쪽이 신선도를 잘못 마킹하는 것보다 낫다.
   ①은 **인가 경계**다(2026-07-26 최종. 앞선 "defense-in-depth로 격하" 판단은 **철회** — 아래 두 근거).
 
   **근거 1 — 리포가 이 시나리오 클래스를 이미 두 번 방어하기로 결론냈다.**
@@ -213,8 +232,10 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   → **요청 시작 시 UID를 캡처하고 mutation 직전 live UID와 재대조**한다(auth generation은 부적합 —
   같은 계정 강제 refresh에도 증가하고 로그아웃엔 증가하지 않아 계정 동일성 술어가 아니다).
 
-  ℹ️ 추가로 확인된 실도달 경로: B의 `start()`가 초기 fetch 실패 + 캐시 없음으로 조기 return하면 세
-  launcher에 도달하지 못해 **A의 task가 취소되지 않은 채 생존**한다(KRX 재시도 루프가 수명 연장).
+  ℹ️ 부수 관찰(**독립 도달 경로가 아님** — 위 직접 UID 전환이 이미 전제다): 그 전제 위에서 B의
+  `start()`가 초기 fetch 실패 + 캐시 없음으로 조기 return하면 세 launcher에 도달하지 못해 A의 task를
+  덮어쓸 기회조차 없어져 **생존 시간이 늘어난다**(KRX 재시도 루프가 추가 연장). 도달성 근거가 아니라
+  **노출 창 확대 요인**으로 읽을 것.
 
   ⚠️ **fence가 덮지 못하는 것**(별 트랙): fence는 *write*를 지키지 `retention`을 지키지 않는다.
   `stop()`은 `tetherStore`/`fxStore`/수신 플래그만 비우고 **`appState`와 로컬 캐시는 남긴다**
