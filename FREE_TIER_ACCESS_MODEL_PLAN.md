@@ -380,9 +380,10 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
   - **stale fallback 결과로는 lease를 연장하지 않는다.** horizon이 부족하면 authoritative 갱신을 시도한다.
   - **불변식**: `CACHE_TTL < LEASE`. 아니면 lease가 0으로 수렴해 재인증 storm이 된다.
-    현재 `CACHE_TTL=5분`(app/subscription.py:47) < 15분 → 최소 lease 10분 보장.
+    현재 `CACHE_TTL=5분`(`app/subscription.py`의 `CACHE_TTL`) < 15분 → 최소 lease 10분 보장.
+    (⚠️ 이 절의 `app/subscription.py` 참조는 **심볼 앵커**다 — 라인 번호는 같은 커밋 안에서도 밀린다. 실제로 2026-07-26 seam 커밋에서 4건이 5줄씩 어긋났다. 다시 숫자로 바꾸지 말 것.)
   - ⚠️ **`authoritative_verified_at`도 monotonic이어야 한다**(A2와 같은 축). 현행 캐시는 wall clock으로
-    나이를 잰다(`age = clock.wall() - cached_at`, app/subscription.py:71 — 2026-07-26 seam 이후) — wall clock이
+    나이를 잰다(`EntitlementCache.get`의 `age = clock.wall() - cached_at` — 2026-07-26 seam 이후) — wall clock이
     역행하면 캐시가 실제보다 **젊게** 보여 horizon이 늘어나고 상한 증명이 깨진다.
     → WS strict 경로용으로 **`verified_at_monotonic`을 별도 저장**한다(REST 경로의 wall-clock 나이 계산은 불변, A4).
 - **A2 시간 기준** — 서버 deadline은 `time.monotonic()`, 만료 판정은 **`now >= expires_at`**(경계 포함 = fail-closed).
@@ -391,9 +392,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
 - **A3 "15분"의 기준점** — **우리가 권한 상실을 authoritative하게 관측한 시점**부터다.
   외부 스토어 → RevenueCat 전파 지연은 서버 lease가 보장할 수 없다. 문서·운영 커뮤니케이션에서 이 경계를 흐리지 말 것.
-- **A4 REST와 분리** — REST의 stale fallback(최대 1시간, app/subscription.py:48)은 **그대로 유지**한다.
+- **A4 REST와 분리** — REST의 stale fallback(최대 1시간, `app/subscription.py`의 `CACHE_STALE_TTL`)은 **그대로 유지**한다.
   strict 검증은 **WS 인가 경로에만** 적용한다(가용성 우선 표면과 권리 보호 표면의 정책을 분리).
-  - ⚠️ **webhook 무효화 범위 확장 + epoch fence**: `invalidate_user_cache`(app/subscription.py:144)는 현재
+  - ⚠️ **webhook 무효화 범위 확장 + epoch fence**: `invalidate_user_cache`(`app/subscription.py`)는 현재
     `_cache`와 `_pending`만 지운다. 신규 **strict cache(`verified_at_monotonic`)와 single-flight 결과도 함께 무효화**해야
     한다. **그것만으로는 부족하다** — `검증 시작 → webhook invalidate → 구 검증이 ACTIVE로 완료 → cache 재기록`
     경쟁이 남는다. **UID별 epoch를 증가**시키고 owner가 **캡처한 epoch와 일치할 때만 결과를 게시**한다
