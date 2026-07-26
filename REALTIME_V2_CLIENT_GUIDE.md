@@ -189,10 +189,12 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   `krxBootstrapBackoffsSeconds = [0.5, 1.5]`, WS-wins revision 체크). tether/fx bootstrap은 현재
   **재시도 없음**(1회 시도 후 WS에 위임).
 
-  ⚠️ **현 iOS가 아직 만족하지 못하는 항목**(2026-07-26 실측, 인증 이관 슬라이스에서 구현):
+  ⚠️ **현 iOS 미구현 = ① UID 변경 하나뿐**(2026-07-26 실측, 인증 이관 슬라이스에서 구현):
   KRX가 거는 가드는 **task cancellation · entitlement(krxVisible) · topic gate · snapshot revision**
-  뿐이다 — 위 표의 **① UID 변경**과 **③ background · ④ 연결 generation**은 미구현이다.
-  ⚠️ **background·연결 generation은 "이벤트 취소 조건"에서 내린다**(2026-07-26 최종, codex).
+  뿐이라 **UID 변경 시 명시 취소도, 적용 직전 UID 재대조도 없다**. ②는 기존 가드가 충족한다.
+  (**③ background · ④ 연결 generation은 계약 항목이 아니다** — 아래에서 내렸으므로 "미구현 gap"으로
+  읽지 말 것. generation fence를 새로 만들면 오탐만 늘린다.)
+  ⚠️ **background·연결 generation을 "이벤트 취소 조건"에서 내린 근거**(2026-07-26 최종, codex).
   구 표기는 이벤트 계약처럼 적어 놓고 기전은 시간만 검사해 **표와 구현이 불일치**했다.
 
   근거 — **이벤트 crossing 자체는 무해**하다: 실제 해악은 늦게 도착한 응답이
