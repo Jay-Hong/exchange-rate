@@ -381,7 +381,10 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **stale fallback 결과로는 lease를 연장하지 않는다.** horizon이 부족하면 authoritative 갱신을 시도한다.
   - **불변식**: `CACHE_TTL < LEASE`. 아니면 lease가 0으로 수렴해 재인증 storm이 된다.
     현재 `CACHE_TTL=5분`(`app/subscription.py`의 `CACHE_TTL`) < 15분 → 최소 lease 10분 보장.
-    (⚠️ 이 절의 `app/subscription.py` 참조는 **심볼 앵커**다 — 라인 번호는 같은 커밋 안에서도 밀린다. 실제로 2026-07-26 seam 커밋에서 4건이 5줄씩 어긋났다. 다시 숫자로 바꾸지 말 것.)
+    (⚠️ **이 문서의 코드 참조 규약**: `파일:라인`이 아니라 **심볼 앵커**를 쓴다 — 라인은 같은 커밋
+    안에서도 밀린다. 실측 사례 2건: 2026-07-26 seam 커밋에서 `app/subscription.py` 4건이 5줄씩,
+    §B5·§D7의 `main.py:928`은 실제 994행이라 66줄 어긋나 있었다. 다시 숫자로 바꾸지 말 것 —
+    **다른 줄을 가리키는 각주 포인터도 같은 이유로 금지**한다.)
   - ⚠️ **`authoritative_verified_at`도 monotonic이어야 한다**(A2와 같은 축). 현행 캐시는 wall clock으로
     나이를 잰다(`EntitlementCache.get`의 `age = clock.wall() - cached_at` — 2026-07-26 seam 이후) — wall clock이
     역행하면 캐시가 실제보다 **젊게** 보여 horizon이 늘어나고 상한 증명이 깨진다.
@@ -441,7 +444,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
 - **B5 연결당 처리 모델 (하나의 결정 — 개별 수정 시 서로 상충)**
   현행 `/ws`는 `while True: data = await receive_text(); await handle_client_message(...)`
-  (`app/main.py`의 `websocket_endpoint` — 라인 대신 **심볼 앵커**, :383 각주 참조)로
+  (`app/main.py`의 `websocket_endpoint` — 라인 대신 **심볼 앵커**)로
   **연결당 완전 직렬**이다. 1C의 subscribe는 Firebase RTT + RevenueCat(timeout 5.0s) + E2 `get_user()` RTT를 포함하므로
   그대로 두면 그 뒤의 `unsubscribe`·`ping`이 **큐잉된다**.
   - **(a) 직렬 유지 불가**: D8 fail-open이 **시간축에서 무력화**되고(제거가 인증 뒤에 줄 섬),
