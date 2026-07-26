@@ -20,13 +20,19 @@ install_config() {
   # 구 이름(limits.conf)이 남아 있으면 정의가 둘이 되고 정렬상 먼저 와 혼란을 준다.
   # ⚠️ 다만 `limits.conf`는 **흔한 이름**이라 관리자가 만든 다른 파일일 수 있다 —
   #    FXi 소유 마커가 있을 때만 지우고, 없으면 **중단**한다(남의 설정을 말없이 지우지 않는다).
+  #    ⚠️ 마커는 나중에(44253a3) 도입했다 — 그 이전(b65bc24~12ec084)에 설치된 **우리 파일**에는
+  #    마커가 없다. 그 내용의 sha256을 알고 있으므로 정확히 일치하면 우리 것으로 인정한다.
+  #    (내용이 조금이라도 다르면 남이 손댔거나 남의 파일이므로 중단 — 정확 일치만 허용.)
   legacy=/etc/systemd/journald.conf.d/limits.conf
+  legacy_known_sha256=577af35dbfa6781dfd884b121d040725d80859b1affdd9460ecf69119f226bfe
   if [ -e "$legacy" ]; then
-    if grep -q "fxi-managed:" "$legacy"; then
+    legacy_sha256=$(sha256sum "$legacy" | cut -d' ' -f1)
+    if grep -q "fxi-managed:" "$legacy" || [ "$legacy_sha256" = "$legacy_known_sha256" ]; then
       rm -f "$legacy"
       echo "구 FXi 파일 제거: $legacy"
     else
-      echo "중단: $legacy 가 존재하지만 FXi 소유 마커가 없다 — 다른 주체의 설정일 수 있다." >&2
+      echo "중단: $legacy 가 FXi 소유가 아니다(마커 없음, 구 정본 해시와도 불일치)." >&2
+      echo "  sha256=$legacy_sha256" >&2
       echo "  내용을 확인하고 직접 처리한 뒤 다시 실행할 것: sudo cat $legacy" >&2
       exit 1
     fi

@@ -92,6 +92,29 @@ class TestJournaldDropInOrdering(unittest.TestCase):
         self.assertIn('grep -q "fxi-managed:"', text, "소유 확인 없이 지우면 안 된다")
         self.assertIn("중단:", text, "마커가 없으면 중단해야 한다")
 
+    def test_legacy_migration_accepts_pre_marker_canonical(self):
+        """마커는 나중에 도입했다 — **그 이전에 설치된 우리 파일**에는 마커가 없다.
+
+        구 정본 해시를 알고 있으므로 정확히 일치하면 우리 것으로 인정해야 한다.
+        아니면 구 버전에서 올라온 호스트가 자기 파일을 남의 것으로 보고 중단한다(codex).
+        """
+        import subprocess
+        text = INSTALLER.read_text()
+        self.assertIn("legacy_known_sha256=", text, "구 정본 해시 기반 마이그레이션 경로가 없다")
+        embedded = re.search(r"legacy_known_sha256=([0-9a-f]{64})", text).group(1)
+        actual = subprocess.run(
+            ["git", "show", "b65bc24:ops/systemd/journald-limits.conf"],
+            cwd=REPO_ROOT, capture_output=True).stdout
+        self.assertTrue(actual, "구 정본을 git에서 읽지 못했다")
+        import hashlib
+        self.assertEqual(embedded, hashlib.sha256(actual).hexdigest(),
+                         "박아둔 해시가 실제 구 정본과 다르다 — 마이그레이션이 동작하지 않는다")
+
+    def test_legacy_migration_requires_exact_match(self):
+        """부분 일치로 지우면 안 된다 — 남이 손댄 파일도 우리 것으로 오인한다."""
+        text = INSTALLER.read_text()
+        self.assertIn('[ "$legacy_sha256" = "$legacy_known_sha256" ]', text)
+
     def test_canonical_files_carry_ownership_marker(self):
         """소유 판별이 가능하려면 정본 자체에 마커가 있어야 한다."""
         for path in (LOGROTATE, JOURNALD):
