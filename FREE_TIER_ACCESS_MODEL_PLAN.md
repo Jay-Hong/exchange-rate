@@ -735,6 +735,41 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 
 #### G. 테스트 매트릭스 (착수 단위)
 
+**소유 규약 (harness 선행 (6), 2026-07-26)** — 각 행이 **어느 쪽에 테스트가 있어야 하는지**를 정한다.
+서버 테스트가 클라 계약까지 덮는다고 착각하는 것을 막는 게 목적이다.
+
+- **아래 분류는 2026-07-26 기준 기존 행에 대한 것**이고, 나열되지 않은 기존 행은 `server`다.
+  ⚠️ **신규 행은 명시 태그 필수** — 태그 없는 신규 행은 `server`가 아니라 **미분류**로 보고 착수 전에
+  분류한다. (기본값을 `server`로 두면 태그를 잊었을 때 "서버가 덮는다"로 읽혀 **이 규약의 목적과
+  정반대 방향으로 fail-open**한다.)
+- **`client`** — 서버가 관측할 수 없고 클라가 구현·검증해야 하는 것:
+  `새 request_id 재시도`(D4) / `D6 재인증 공식`(10분 lease → 6~7분) / `retry_at` 산식과 음수 방지 /
+  `최소 잔여 기준 타이머`(혼합 lease) / `구 request_id·구 identity_generation ack 무시` /
+  `늦게 온 구 reauth_required 무시` / `snapshot 중복 timestamp-merge 적용` /
+  **F 계열 4종(G에 행이 없어 누락돼 있었다)**: `desired/pending/accepted 분리 + revoke·unsubscribe 후
+  늦은 snapshot 폐기` / `batch subscribe`(현행은 topic별 송신 — `resendSubscriptions` 루프) /
+  `reconnect 후 connectionGeneration으로 구 receive task **데이터**까지 폐기`(구 ack만이 아니다) /
+  `suspend 경과 반영 + foreground에서 lease 불확실 시 **데이터 적용 전** 재인증·reconnect`.
+- **`both`** — 한쪽만 잠그면 계약이 성립하지 않는 것:
+  `request_id 상관관계`(서버 에코 ⊥ 클라 폐기) / `부분 reject`(서버가 accepted·rejected 반환 ⊥
+  클라가 accepted만 신뢰하고 그 외 snapshot 무시) / `token refresh` / `reconnect` / `lease 만료` /
+  `ack 유실 후 재시도 idempotency` /
+  **`active_subscriptions` 계열 3종** — `UID 변경 시 전체 상태 수렴` / `인증된 unsubscribe의 ack 수렴` /
+  `미언급 기존 topic까지 실어 상태 복구`. 셋 다 서버가 전체 snapshot을 **보내는** 것과 클라가 로컬
+  accepted 상태를 **교체하는** 것이 모두 필요하다 — 서버만 테스트하면 클라가 fire-and-forget으로 남아도
+  green이다. 실제로 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없는 fire-and-forget이다.
+- `ack lease_duration_seconds` / `reauth_required schema·lease_id`는 **서버 producer 행으로 유지**하되,
+  클라 측 검증은 순수 계산 비교가 아니라 **실제 wire decode**를 포함해야 한다(아니면 사실상 `both`).
+
+⚠️ **커버리지 실측 (2026-07-26)** — `subscription_ack`·`reauth_required`·`lease_id`·`accepted_topics`·
+`rejected_topics`는 서버(`app/`, `tests/`)와 iOS(`FXi/`, `FXiTests/`) **모두 0건**이고, iOS 테스트는
+`WebSocketService`를 의존성으로 생성만 해 `subscribedTopics` Set만 단언한다(연결·수신 상태기계 미구동).
+→ **1C WebSocket 상태기계 커버리지는 양쪽 0**이다.
+단 "`client`/`both` 행 **전체**가 0"은 아니다 — 예컨대 `snapshot 중복 timestamp-merge`는
+`TopicSnapshotMergerTests`가 **순수 함수 수준으로 이미 덮는다**. 없는 것은 그 merge가 **실제 WS 수신
+경로를 거쳐** 적용되는 통합 검증이다. 어느 쪽이든 `client`/`both` 행은 서버 구현이 끝나도 자동으로
+덮이지 않는다 — 별도 iOS 하니스가 선행돼야 한다.
+
 §8 기본: request_id 상관관계 / 중복 subscribe / 부분 reject / token refresh / reconnect / lease 만료.
 A: horizon 계산(캐시 4분 → lease ~11분) / stale fallback으로 연장 안 됨 / `CACHE_TTL < LEASE` 불변식 /
 `now == expires_at` 경계 만료 / single-flight.
@@ -820,8 +855,11 @@ conftest가 `firebase_admin.auth`/`.exceptions`의 **예외 속성만 진짜 클
 TestClient는 프레이밍 계층이 없어 검증 불가라는 판단은 맞았으나, **실서버로 바꿔도 서버측 단언은 불가능**하다
 (앱은 1006을 본다 — §D7 참조). 계약은 클라 관측 1009. 하니스는 실앱이 아니라 최소 ASGI 앱을 띄우고
 (conftest stub이 subprocess에 전달되지 않으므로), **Dockerfile CMD를 구조 파싱해 그 토큰을 재사용**한다
-— 테스트가 플래그를 따로 하드코딩하면 프로덕션 설정과 조용히 갈라진다. (5) sweeper는 `sweep_once(now)` 순수 함수 + 등록 분리. (6) G 각 행에 **소유
-(server|ios) 태그** — iOS엔 WebSocketService 구동 테스트가 없다.
+— 테스트가 플래그를 따로 하드코딩하면 프로덕션 설정과 조용히 갈라진다. (5) sweeper는 `sweep_once(now)` 순수 함수 + 등록 분리. (6) ✅ **land (2026-07-26)** — G 소유 규약
+(기본값 server + `client`/`both` 명시 목록). "iOS엔 WebSocketService 구동 테스트가 없다"는 실측 확인:
+iOS는 `subscribedTopics` Set만 단언하고 연결·수신 상태기계를 구동하지 않는다. 덧붙여 **1C 프로토콜
+심볼은 서버·iOS 양쪽 모두 0건**이라, 소유 태그는 "현재 커버리지"가 아니라 **테스트가 어디 있어야
+하는지**를 정하는 것이다.
 
 #### H. 동반 문서 갱신 (구현 커밋에서)
 
