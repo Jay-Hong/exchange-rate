@@ -109,6 +109,13 @@ services:
         condition: service_healthy
     expose:
       - "8000"
+    # 컨테이너 stdout 로그 무한 증가 방지 (rotation 없으면 json-log가 계속 자란다).
+    # ⚠️ 기존 컨테이너에는 자동 적용되지 않는다 — 다음 `--force-recreate` 시 반영됨.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     deploy:
       resources:
         limits:

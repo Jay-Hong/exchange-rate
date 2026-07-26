@@ -744,6 +744,9 @@ docker compose logs -f
 docker compose down -v
 
 # 2. 모든 Docker 리소스 정리
+#    ⚠️ 운영 서버에서 금지: `-a`는 **컨테이너가 안 쓰는 태그 이미지까지** 지운다 →
+#    배포 시 잡아둔 롤백 이미지(`exchange-rate-fastapi:rollback-*`)가 사라져 되돌릴 수 없다.
+#    운영에서는 `docker builder prune -f --max-used-space 2GB`(위 "정리 작업")를 쓸 것.
 docker system prune -a -f
 
 # 3. 재빌드 및 시작
@@ -756,16 +759,38 @@ docker compose logs -f
 ### 유용한 Docker 명령어
 
 #### 정리 작업
+
+**배포 후 표준 절차 (2026-07-26 신설)** — 디스크 고갈의 주원인은 이미지·로그가 아니라
+**build cache**다. 실측: 사용률 80%(여유 5.9G) 상태에서 build cache가 **12.94GB**(회수 가능 100%,
+522개)였고, 이미지 전체는 1.96GB뿐이었다. 정리 후 **36%(여유 18G)**.
+
 ```bash
-# 중지된 컨테이너만 제거
-docker container prune -f
-
-# 사용하지 않는 이미지 제거
-docker image prune -f
-
-# 빌드 캐시 제거
-docker builder prune -f
+# 매 배포 후 실행 (2GB만 남겨 다음 빌드 속도 유지)
+docker builder prune -f --max-used-space 2GB
+docker system df          # Build Cache 항목 확인
+df -h /                   # 70% 초과 경고 / 80% 초과면 배포 전 정리
 ```
+
+> ⚠️ **플래그는 설치 버전 기준**: Docker 28.5.1의 `docker builder prune`은 `--max-used-space`를
+> 받고 **`--keep-storage`는 없다**(구버전 이름). 다른 호스트에서는 `docker builder prune --help`로
+> 먼저 확인할 것 — 문서에 적힌 이름이 그 서버에서 유효하다는 보장이 없다.
+
+```bash
+# 그 외
+docker container prune -f    # 중지된 컨테이너만
+docker image prune -f        # dangling(untagged) 이미지만 — 태그된 롤백 이미지는 보존된다
+```
+
+**journald 영구 상한** (한 번만 설정, 실측 892MB → 92MB):
+
+```
+# /etc/systemd/journald.conf.d/limits.conf
+[Journal]
+SystemMaxUse=200M
+SystemKeepFree=2G
+```
+일회성 정리는 `sudo journalctl --rotate --vacuum-size=100M` — **`--rotate`가 없으면 archived만**
+대상이라 active journal이 남는다.
 
 ### 배포 시 주의사항
 
@@ -773,6 +798,11 @@ docker builder prune -f
 2. **캐시 활용**: `--no-cache`는 빌드 시간이 오래 걸리므로 문제가 있을 때만 사용
 3. **로그 확인**: 배포 후 반드시 로그를 확인하여 정상 작동 여부 체크
 4. **단계적 접근**: 간단한 명령어부터 시도하고, 문제가 있을 때만 전체 클린 빌드 수행
+5. **롤백 앵커**: 운영 배포 전 현재 이미지에 태그를 박아 둔다 —
+   `docker tag $(docker inspect exchange-rate-app --format '{{.Image}}') exchange-rate-fastapi:rollback-<날짜>`.
+   되돌릴 때는 그 태그를 `latest`로 다시 붙이고 `--force-recreate`. 안정화 전까지 이 이미지를 지우지 말 것.
+6. **디스크 기준**: 배포 전 `df -h /` — **70% 초과 경고 / 80% 초과면 정리 후 배포**.
+   빌드는 수 GB 캐시를 만들므로 여유가 없으면 배포 도중 실패한다.
 
 ## 크롤링 리스크 대응
 
