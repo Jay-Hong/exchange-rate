@@ -775,9 +775,21 @@ baseline 38건 추가(`tests/test_subscription_clock.py`). **값이 아니라 �
 `get`(miss)·`state`(미등록)의 lazy 읽기도 깨진다(둘 다 무력화로 실증).
 ⚠️ **(1)은 아직 미완**: `verified_at_monotonic`(monotonic 축)은 소비자(A1 horizon)와 함께 도입한다.
 `Clock`이 이미 배선돼 있어 필드 추가는 시그니처 변경 0이다. **그때까지 :726 "wall clock 역행에도
-strict horizon 불변" 행은 착수 금지** — 단일 wall seam으로는 그 행이 가짜 통과한다. (2) **Firebase 예외→verdict 매핑 seam** — 현행 conftest가
-`firebase_admin.auth`를 MagicMock으로 강제해 except 절이 실행되지 않고, 테스트가 `verify_firebase_token`을 통째
-patch해 **D5 2단계 매트릭스가 자기 mock 검증**이 된다. (3) **인터리빙 강제 hook** — 임계구역에 await가 없으면
+strict horizon 불변" 행은 착수 금지** — 단일 wall seam으로는 그 행이 가짜 통과한다. (2) **Firebase 예외→verdict 매핑 seam** — ✅ **2a land (2026-07-26)**:
+conftest가 `firebase_admin.auth`/`.exceptions`의 **예외 속성만 진짜 클래스**로 제공(나머지는 MagicMock 유지)
++ `google.auth`는 미설치 시에만 stub. 19건 추가(`tests/test_firebase_auth_mapping.py`), 기존 3693건 무영향.
+  - **계층까지 재현한다**: firebase-admin v6.9.0에서 `Expired`·`Revoked`가 `InvalidIdToken`의 **하위**라
+    `verify_firebase_token`의 except 순서(Revoked → Expired → Invalid)가 load-bearing이다. 형제로 stub하면
+    순서 뒤바꿈 회귀가 **매핑 테스트를 통과한다**(합성 무력화로 실증) → `TestStubFidelity`가 그 전제를 잠근다.
+  - **부모 속성 명시 배선 필수**: `from firebase_admin import auth`(main.py)는 부모 MagicMock의 자동 생성
+    속성을 돌려줘 `sys.modules["firebase_admin.auth"]`와 **다른 객체**가 된다(실증). 둘 다 배선해야 한다.
+  - **로컬/CI 격차 해소**: 종전 로컬은 `google.auth` 미설치로 `verify_firebase_token` 본문 진입 자체가
+    ImportError, CI는 진입 가능해 `decoded_token["uid"]`가 MagicMock을 반환했다.
+  ⚠️ **(2)는 아직 미완**: 2a가 잠근 것은 **HTTP 401/503 의미 경계**다. D5 2단계의 wire verdict
+  (`invalid_token` / `temporarily_unavailable`)는 **여기서 검증되지 않는다** — `app/topic_dispatcher.py`의
+  subscribe 경로가 아직 토큰을 읽지 않는다. **2b**에서 token-string 기반 verifier + WS verdict translator와
+  함께 검증한다. 또 `check_revoked=True` 경로의 Firebase 계열 오류(`UserDisabledError` 등)를 generic 401로
+  둘지 `temporarily_unavailable`로 승격할지는 **2b 전 별도 결정**이다(현행은 401 fail-closed). (3) **인터리빙 강제 hook** — 임계구역에 await가 없으면
 단일 스레드에서 race가 물리적으로 안 나 **B4 lock/C3 CAS를 지워도 green**. (4) close 1009는 TestClient로 검증 불가
 → **uvicorn subprocess harness**. (5) sweeper는 `sweep_once(now)` 순수 함수 + 등록 분리. (6) G 각 행에 **소유
 (server|ios) 태그** — iOS엔 WebSocketService 구동 테스트가 없다.

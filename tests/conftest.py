@@ -19,9 +19,114 @@ from unittest.mock import MagicMock
 import pytest
 
 # 1. firebase_admin chain stub (main.py import 시 실제 init/creds 회피) — force(설치 여부 무관)
-for _m in ("firebase_admin", "firebase_admin.credentials", "firebase_admin.messaging",
-           "firebase_admin.auth", "firebase_admin.exceptions"):
-    sys.modules[_m] = MagicMock()
+#
+# ⚠️ 예외 속성만은 **진짜 클래스**여야 한다 (ADR-039 §8.1 harness 선행 (2)).
+#    `except <MagicMock 속성>`은 `TypeError: catching classes that do not inherit from
+#    BaseException`을 내므로, MagicMock 일변도 stub에서는 `verify_firebase_token`의 6개 except와
+#    `fcm.py`의 `except FirebaseError`가 **실행조차 되지 않는다** → 매핑 검증 불가.
+#
+# 계층까지 재현하는 이유: firebase-admin v6.9.0에서 `Expired`·`Revoked`가 `InvalidIdToken`의
+# **하위**라, `verify_firebase_token`의 except 순서(Revoked → Expired → Invalid)가 load-bearing이다.
+# 형제로 만들면 순서 뒤바꿈 회귀가 통과한다. `.code`는 `fcm.py`가 catch 직후 읽는다.
+# (실물 대조는 tests/test_firebase_auth_mapping.py::TestStubFidelity가 담당.)
+
+
+class _StubFirebaseError(Exception):
+    """firebase_admin.exceptions.FirebaseError 대응 — `code`/`cause`/`http_response` 보유."""
+
+    def __init__(self, code, message, cause=None, http_response=None):
+        Exception.__init__(self, message)
+        self._code, self._cause, self._http_response = code, cause, http_response
+
+    @property
+    def code(self):
+        return self._code
+
+    @property
+    def cause(self):
+        return self._cause
+
+    @property
+    def http_response(self):
+        return self._http_response
+
+
+class _StubInvalidArgumentError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "INVALID_ARGUMENT", message, cause, http_response)
+
+
+class _StubUnknownError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "UNKNOWN", message, cause, http_response)
+
+
+class _StubInvalidIdTokenError(_StubInvalidArgumentError):
+    pass
+
+
+class _StubExpiredIdTokenError(_StubInvalidIdTokenError):
+    def __init__(self, message, cause):          # SDK는 cause가 **필수**
+        _StubInvalidIdTokenError.__init__(self, message, cause)
+
+
+class _StubRevokedIdTokenError(_StubInvalidIdTokenError):
+    def __init__(self, message):                  # SDK는 message 하나
+        _StubInvalidIdTokenError.__init__(self, message)
+
+
+class _StubCertificateFetchError(_StubUnknownError):
+    def __init__(self, message, cause):
+        _StubUnknownError.__init__(self, message, cause)
+
+
+_firebase = MagicMock()
+_fb_auth = MagicMock()
+_fb_exceptions = MagicMock()
+_fb_auth.RevokedIdTokenError = _StubRevokedIdTokenError
+_fb_auth.ExpiredIdTokenError = _StubExpiredIdTokenError
+_fb_auth.InvalidIdTokenError = _StubInvalidIdTokenError
+_fb_auth.CertificateFetchError = _StubCertificateFetchError
+_fb_exceptions.FirebaseError = _StubFirebaseError
+
+# ⚠️ sys.modules 등록만으로는 부족하다: `from firebase_admin import auth`(app/main.py)는 부모
+#    MagicMock의 **자동 생성 속성**을 돌려줘 sys.modules 항목과 **다른 객체**가 된다(실증).
+#    반면 `from firebase_admin.exceptions import FirebaseError`(fcm.py)는 sys.modules를 탄다.
+#    두 경로가 같은 객체를 보도록 부모 속성을 명시 배선한다.
+_firebase.auth = _fb_auth
+_firebase.exceptions = _fb_exceptions
+sys.modules["firebase_admin"] = _firebase
+sys.modules["firebase_admin.auth"] = _fb_auth
+sys.modules["firebase_admin.exceptions"] = _fb_exceptions
+for _m in ("firebase_admin.credentials", "firebase_admin.messaging"):
+    _sub = MagicMock()
+    sys.modules[_m] = _sub
+    setattr(_firebase, _m.rsplit(".", 1)[1], _sub)
+
+# 1b. google.auth는 conftest가 stub하지 않아 **로컬에서 verify_firebase_token 본문 진입 자체가
+#     ImportError**였다(app/main.py가 함수 안에서 import). CI(lock)에는 설치돼 있어 로컬/CI가
+#     갈렸다. 설치돼 있으면 실물을 쓰고(최대 충실도), 없을 때만 stub한다 — `TransportError`가
+#     진짜 예외 클래스이기만 하면 계약(→503)은 두 환경에서 동일하다.
+try:  # pragma: no cover - 환경에 따라 갈림
+    import google.auth.exceptions  # noqa: F401
+except ImportError:
+    _google = sys.modules.get("google") or MagicMock()
+    _google_auth = MagicMock()
+    _google_auth_exceptions = MagicMock()
+
+    class _StubGoogleAuthError(Exception):
+        pass
+
+    class _StubTransportError(_StubGoogleAuthError):
+        pass
+
+    _google_auth_exceptions.GoogleAuthError = _StubGoogleAuthError
+    _google_auth_exceptions.TransportError = _StubTransportError
+    _google_auth.exceptions = _google_auth_exceptions
+    _google.auth = _google_auth
+    sys.modules["google"] = _google
+    sys.modules["google.auth"] = _google_auth
+    sys.modules["google.auth.exceptions"] = _google_auth_exceptions
 
 # 2. DATABASE_URL → file-backed sqlite tempfile 강제 (RDS 연결 회피).
 #    sqlite:///:memory:는 connection/thread별 분리 DB → endpoint(asyncio.to_thread 새 connection)에서
