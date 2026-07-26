@@ -28,6 +28,7 @@ A5 single-flight / registry·sweeper 배선은 범위 밖이다.
    mutation을 잡지 못할 수 있는 여유가 생긴다.
 3. **부정 단언에는 positive control**(`tests/test_subscription_clock.py` 규약 계승).
 """
+import inspect
 import math
 import unittest
 from datetime import datetime, timezone
@@ -321,18 +322,45 @@ class TestStaleIdentity(unittest.TestCase):
         self.assertTrue(is_expired(now_mono=NOW, expires_at_mono=expiry))
 
 
-class TestCallPatternIsMonotonicOnly(unittest.TestCase):
-    """호출부 계약: **요청당 `clock.mono()` 1회**를 읽어 전 topic에 같은 `now`를 쓴다.
+class TestDocumentedCallerPattern(unittest.TestCase):
+    """호출부가 **따라야 할** 패턴의 실행 가능한 예시: 요청당 `clock.mono()` 1회 → 전 topic 공유.
 
-    D2가 `active_subscriptions`를 "lock 아래 **단일 snapshot**"으로 요구하므로, 계산기가
-    스스로 시각을 만들면(clock 주입 형태) 이 성질을 단위 테스트로 잠글 수 없다.
+    ⚠️ **이 클래스는 호출부 계약을 강제하지 못한다.** 이 슬라이스에 `compute_lease_expiry`의
+    프로덕션 소비자가 0개이므로, 훗날 WS 배선이 topic마다 시각을 다시 읽어도 여기는 계속
+    green이다 — 패턴을 테스트 코드가 스스로 만들기 때문이다. 실제 강제는 ack/registry
+    호출부를 구동하는 **배선 슬라이스의 통합 테스트** 몫이다(G `[server] active_subscriptions가
+    lock 아래 단일 snapshot` 행).
 
-    ⚠️ 여기서 wall 호출 0회를 단언한다고 G의 strict-horizon 행이 닫히지는 않는다
-    (파일 docstring 참조). 이건 **forward trip-wire**다 — 계산기가 나중에 `Clock`을 받아
-    wall을 읽는 형태로 바뀌면 여기가 red가 된다.
+    그래서 여기서 실제로 잠기는 것만 적으면:
+    1. 문서화된 패턴을 따르면 한 요청의 전 topic이 **같은 expiry**를 받고 값이 정확하다.
+    2. lease 경로가 **wall 축을 건드리지 않는다**(wall recorder 호출 0회).
+    3. 계산기가 `clock`을 받지 않는다는 **시그니처 결정**(아래 전용 테스트).
+
+    2번을 근거로 G의 `wall clock 역행에도 strict horizon 불변` 행을 닫지 말 것 —
+    계산기가 wall을 입력으로 갖지 않는다는 구조적 사실일 뿐이다(파일 docstring 참조).
     """
 
-    def test_one_mono_read_serves_every_topic_in_the_request(self):
+    def test_calculator_takes_no_clock(self):
+        """D1/D2 결정(계산기는 시각을 스스로 만들지 않는다)을 **명시적으로** 잠근다.
+
+        이게 없으면 "clock 주입으로 되돌리기"는 다른 테스트들의 `TypeError`로만 드러나
+        *우연히* 잡힌다 — 증상만 보이고 원인은 안 보인다. 되돌리려면 이 테스트를 먼저
+        지워야 하고, 그러면 결정을 뒤집었다는 사실이 diff에 남는다.
+        """
+        for func, expected in (
+            (compute_lease_expiry,
+             ["now_mono", "premium_verified_at_mono", "firebase_identity_verified_at_mono"]),
+            (is_expired, ["now_mono", "expires_at_mono"]),
+        ):
+            with self.subTest(func=func.__name__):
+                params = inspect.signature(func).parameters
+                self.assertEqual(list(params), expected, "시각은 값으로 주입한다(§8.1 D1/D2)")
+                self.assertTrue(
+                    all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params.values()),
+                    "전부 keyword-only — 위치 인자로 두 시각을 뒤바꾸는 사고를 막는다",
+                )
+
+    def test_documented_pattern_gives_every_topic_the_same_expiry(self):
         clock = _clock(
             wall=[datetime(2026, 1, 1, tzinfo=timezone.utc)],
             mono=[NOW, NOW + 5.0, NOW + 9.0],       # 두 번째부터 전진 — 재읽기 시 값이 갈린다

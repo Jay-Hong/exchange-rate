@@ -398,6 +398,12 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - 구현 노트: `Clock.mono`는 **기본값 없이 필수 주입**한다(wall과 동일). 기본값을 주면 호출부가
     빠뜨려도 실클럭으로 조용히 동작해 테스트에 실시간이 섞인다 — wall 축에서 같은 이유로 필수로 했다.
   lease deadline과 `authoritative_verified_at`은 **같은 monotonic 축**이어야 한다(A1 마지막 항목 — 축이 섞이면 상한 증명이 무의미).
+  **그 축을 wall로 두면** wall clock 역행(NTP step / VM restore) 시 상한을 넘긴다(전진은 조기 만료 =
+  안전한 방향). ⚠️ 이 위험은 **deadline 쪽에서는 해소됐고**(2026-07-27 monotonic land)
+  `authoritative_verified_at` 쪽에는 **아직 남아 있다** — `EntitlementCache.get`이 여전히
+  `age = clock.wall() - cached_at`으로 나이를 잰다. `verified_at_monotonic` 저장(A1 마지막 항목)이
+  그것을 닫는다.
+  registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
 
   ✅ **A1/A2 산술 land (2026-07-27)** — `app/topic_lease.py`(`LEASE_MAX_SECONDS` /
   `compute_lease_expiry` / `is_expired`) + `app/clock.py`(`Clock.mono` 필수 주입 +
@@ -422,8 +428,10 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     가드를 통과한다(결과 = epoch+900 → 진짜 monotonic now와 비교 시 수십 년간 미만료). 축 보증은
     배선 슬라이스 몫 — 세 값이 같은 주입 `Clock.mono`에서 나올 것 / A6의 `active`만 계산기에
     도달할 것 / 계산 결과가 이미 만료면 등록·ack accepted를 하지 않을 것.
-  wall clock 역행(NTP step / VM restore) 시 상한을 넘긴다(전진은 조기 만료 = 안전한 방향).
-  registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
+  - ⚠️ **"요청당 mono 1회"는 아직 강제되지 않는다.** float 주입이 그 강제를 *가능하게* 만들 뿐,
+    계산기의 프로덕션 소비자가 0개라 잠글 대상이 없다. `tests/test_topic_lease.py`의
+    `TestDocumentedCallerPattern`은 **실행 가능한 사용 예시 + 시그니처 잠금**이고, 실제 강제는
+    ack/registry 호출부를 구동하는 **배선 슬라이스의 통합 테스트** 몫이다.
 - **A3 "15분"의 기준점** — **우리가 권한 상실을 authoritative하게 관측한 시점**부터다.
   외부 스토어 → RevenueCat 전파 지연은 서버 lease가 보장할 수 없다. 문서·운영 커뮤니케이션에서 이 경계를 흐리지 말 것.
 - **A4 REST와 분리** — REST의 stale fallback(최대 1시간, `app/subscription.py`의 `CACHE_STALE_TTL`)은 **그대로 유지**한다.
