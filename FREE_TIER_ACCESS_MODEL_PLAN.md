@@ -735,97 +735,94 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 
 #### G. 테스트 매트릭스 (착수 단위)
 
-**소유 규약 (harness 선행 (6), 2026-07-26)** — 각 행이 **어느 쪽에 테스트가 있어야 하는지**를 정한다.
-서버 테스트가 클라 계약까지 덮는다고 착각하는 것을 막는 게 목적이다.
+**소유 규약 (harness 선행 (6), 2026-07-26)** — **모든 행에 `[server]`/`[client]`/`[both]` 태그를 붙인다.
+기본값은 없다.** 태그 없는 행은 미분류이며 착수 전에 분류한다.
 
-- **아래 분류는 2026-07-26 기준 기존 행에 대한 것**이고, 나열되지 않은 기존 행은 `server`다.
-  ⚠️ **신규 행은 명시 태그 필수** — 태그 없는 신규 행은 `server`가 아니라 **미분류**로 보고 착수 전에
-  분류한다. (기본값을 `server`로 두면 태그를 잊었을 때 "서버가 덮는다"로 읽혀 **이 규약의 목적과
-  정반대 방향으로 fail-open**한다.)
-- **`client`** — 서버가 관측할 수 없고 클라가 구현·검증해야 하는 것:
-  `새 request_id 재시도`(D4) / `D6 재인증 공식`(10분 lease → 6~7분) / `retry_at` 산식과 음수 방지 /
-  `최소 잔여 기준 타이머`(혼합 lease) / `구 request_id·구 identity_generation ack 무시` /
-  `늦게 온 구 reauth_required 무시` / `snapshot 중복 timestamp-merge 적용` /
-  **F 계열 4종(G에 행이 없어 누락돼 있었다)**: `desired/pending/accepted 분리 + revoke·unsubscribe 후
-  늦은 snapshot 폐기` / `batch subscribe`(현행은 topic별 송신 — `resendSubscriptions` 루프) /
-  `reconnect 후 connectionGeneration으로 구 receive task **데이터**까지 폐기`(구 ack만이 아니다) /
-  `suspend 경과 반영 + foreground에서 lease 불확실 시 **데이터 적용 전** 재인증·reconnect`.
-- **`both`** — 한쪽만 잠그면 계약이 성립하지 않는 것:
-  `request_id 상관관계`(서버 에코 ⊥ 클라 폐기) / `부분 reject`(서버가 accepted·rejected 반환 ⊥
-  클라가 accepted만 신뢰하고 그 외 snapshot 무시) / `token refresh` / `reconnect` / `lease 만료` /
-  `ack 유실 후 재시도 idempotency` /
-  **`active_subscriptions` 계열 3종** — `UID 변경 시 전체 상태 수렴` / `인증된 unsubscribe의 ack 수렴` /
-  `미언급 기존 topic까지 실어 상태 복구`. 셋 다 서버가 전체 snapshot을 **보내는** 것과 클라가 로컬
-  accepted 상태를 **교체하는** 것이 모두 필요하다 — 서버만 테스트하면 클라가 fire-and-forget으로 남아도
-  green이다. 실제로 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없는 fire-and-forget이다.
-- `ack lease_duration_seconds` / `reauth_required schema·lease_id`는 **서버 producer 행으로 유지**하되,
-  클라 측 검증은 순수 계산 비교가 아니라 **실제 wire decode**를 포함해야 한다(아니면 사실상 `both`).
+이유: 기본값을 두면 태그를 잊었을 때 조용히 그 기본값으로 읽힌다. "무태그 = server"는 이 규약의 목적
+(**서버 테스트가 클라 계약까지 덮는다는 착각 방지**)과 **정반대 방향으로 fail-open**한다. 날짜 기준
+규칙("이전 행은 server")도 미래 독자가 어떤 행이 '기존'인지 판별할 수 없어 성립하지 않는다.
 
-⚠️ **커버리지 실측 (2026-07-26)** — `subscription_ack`·`reauth_required`·`lease_id`·`accepted_topics`·
-`rejected_topics`는 서버(`app/`, `tests/`)와 iOS(`FXi/`, `FXiTests/`) **모두 0건**이고, iOS 테스트는
+- `[server]` — 서버 테스트로 완결된다.
+- `[client]` — 서버가 관측할 수 없다. 클라가 구현·검증해야 한다.
+- `[both]` — **한쪽만 잠그면 계약이 성립하지 않는다.** 서버만 테스트하면 클라가 미구현이어도 green이다.
+
+⚠️ **커버리지 실측 (2026-07-26)**: `subscription_ack`·`reauth_required`·`lease_id`·`accepted_topics`·
+`rejected_topics`는 서버(`app/`, `tests/`)·iOS(`FXi/`, `FXiTests/`) **모두 0건**이고, iOS 테스트는
 `WebSocketService`를 의존성으로 생성만 해 `subscribedTopics` Set만 단언한다(연결·수신 상태기계 미구동).
-→ **1C WebSocket 상태기계 커버리지는 양쪽 0**이다.
-단 "`client`/`both` 행 **전체**가 0"은 아니다 — 예컨대 `snapshot 중복 timestamp-merge`는
-`TopicSnapshotMergerTests`가 **순수 함수 수준으로 이미 덮는다**. 없는 것은 그 merge가 **실제 WS 수신
-경로를 거쳐** 적용되는 통합 검증이다. 어느 쪽이든 `client`/`both` 행은 서버 구현이 끝나도 자동으로
-덮이지 않는다 — 별도 iOS 하니스가 선행돼야 한다.
+→ **1C WebSocket 상태기계 커버리지는 양쪽 0**. 단 `[client]`/`[both]` 행 *전체*가 0인 건 아니다 —
+`snapshot 중복 timestamp-merge`는 `TopicSnapshotMergerTests`가 순수 함수 수준으로 이미 덮는다.
+없는 것은 그 merge가 **실제 WS 수신 경로를 거쳐** 적용되는 통합 검증이다.
 
-§8 기본: request_id 상관관계 / 중복 subscribe / 부분 reject / token refresh / reconnect / lease 만료.
-A: horizon 계산(캐시 4분 → lease ~11분) / stale fallback으로 연장 안 됨 / `CACHE_TTL < LEASE` 불변식 /
-`now == expires_at` 경계 만료 / single-flight.
-B: 만료 후 publish 0건(**sweep 미실행 상태에서도**) / 조회~전송 지연 중 만료 시 전송 차단 / snapshot도 동일 차단 /
-`get_subscribers`가 만료분 미삭제 / 소켓별 송신 순서(ack → live → snapshot).
-C: UID 변경 시 전량 제거 / B premium 실패해도 A 미복원 / B 토큰 무효면 A 불변 / 같은 UID면 언급 안 된 topic 불변 /
-reject된 구 등록 제거 / 구 sweep이 갱신된 lease 미제거(CAS) / transient 실패 시 registry 불변·lease 미연장.
-D: ack `lease_duration_seconds` / `reauth_required` schema·`lease_id` / 새 request_id 재시도 / **오류 단계 matrix**(D5 단계별 — 구 "우선순위" 폐기) / 입력 상한.
-E: capability flag off에서 인증 요청에 ack 반환 / sweeper lifecycle(lifespan 1 task, 예외 후 지속, 연결별 통지 1회,
-send 실패 시 소켓 정리, 일부 topic 만료 시 나머지 유지) / **identity horizon 갱신 시 `check_revoked=True`**(E2 — 구 "정기 갱신 False" 폐기).
+§8 기본: `[both]` request_id 상관관계 / `[server]` 중복 subscribe / `[both]` 부분 reject /
+`[both]` token refresh / `[both]` reconnect / `[both]` lease 만료.
+A: `[server]` horizon 계산(캐시 4분 → lease ~11분) / `[server]` stale fallback으로 연장 안 됨 /
+`[server]` `CACHE_TTL < LEASE` 불변식 / `[server]` `now == expires_at` 경계 만료 / `[server]` single-flight.
+B: `[server]` 만료 후 publish 0건(**sweep 미실행 상태에서도**) / `[server]` 조회~전송 지연 중 만료 시 전송 차단 /
+`[server]` snapshot도 동일 차단 / `[server]` `get_subscribers`가 만료분 미삭제 /
+`[server]` 소켓별 송신 순서(ack → live → snapshot).
+C: `[server]` UID 변경 시 전량 제거 / `[server]` B premium 실패해도 A 미복원 / `[server]` B 토큰 무효면 A 불변 /
+`[server]` 같은 UID면 언급 안 된 topic 불변 / `[server]` reject된 구 등록 제거 /
+`[server]` 구 sweep이 갱신된 lease 미제거(CAS) / `[server]` transient 실패 시 registry 불변·lease 미연장.
+D: `[both]` ack `lease_duration_seconds`(서버 산출 ⊥ 클라 **실제 wire decode** — 순수 계산 비교로는 부족) /
+`[both]` `reauth_required` schema·`lease_id`(동일) / `[client]` 새 request_id 재시도 /
+`[server]` **오류 단계 matrix**(D5 단계별 — 구 "우선순위" 폐기) / `[server]` 입력 상한.
+E: `[server]` capability flag off에서 인증 요청에 ack 반환 / `[server]` sweeper lifecycle(lifespan 1 task,
+예외 후 지속, 연결별 통지 1회, send 실패 시 소켓 정리, 일부 topic 만료 시 나머지 유지) /
+`[server]` **identity horizon 갱신 시 `check_revoked=True`**(E2 — 구 "정기 갱신 False" 폐기).
+F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
+`[client]` desired/pending/accepted 분리 + revoke·unsubscribe 후 늦은 snapshot 폐기 /
+`[client]` batch subscribe(현행은 `resendSubscriptions`가 topic별 루프) /
+`[client]` reconnect 후 `connectionGeneration`으로 구 receive task **데이터**까지 폐기(구 ack만이 아니다) /
+`[client]` suspend 경과 반영 + foreground에서 lease 불확실 시 **데이터 적용 전** 재인증·reconnect.
 
 보강(codex 감사):
-ack의 topic별 `lease_id` ↔ 늦게 온 구 `reauth_required` 무시 /
-UID 변경 ack의 `active_subscriptions`가 전체 상태로 수렴(미언급 topic 제거가 클라에 전달) /
-**wall clock 역행에도 strict horizon 불변**(A1 monotonic 축) /
-connection lock 안에서 sweep↔재인증 **양방향** 순서 /
-만료 claim 후 통지 timeout·중복 sweep 없음 /
-**10분 lease → 6~7분 재인증** 계산(D6) / `temporarily_unavailable`의 `retry_after_seconds` /
-D7 상한 **각각의 경계값**(message 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
-**invalid token은 기존 UID·lease 불변** / 구 `request_id` ack과 구 `identity_generation` ack 무시.
+`[client]` ack의 topic별 `lease_id` ↔ 늦게 온 구 `reauth_required` 무시 /
+`[both]` UID 변경 ack의 `active_subscriptions`가 전체 상태로 수렴(서버 산출 ⊥ 클라가 로컬 accepted를 **교체**) /
+`[server]` **wall clock 역행에도 strict horizon 불변**(A1 monotonic 축) /
+`[server]` connection lock 안에서 sweep↔재인증 **양방향** 순서 /
+`[server]` 만료 claim 후 통지 timeout·중복 sweep 없음 /
+`[client]` **10분 lease → 6~7분 재인증** 계산(D6) / `[server]` `temporarily_unavailable`의 `retry_after_seconds` /
+`[server]` D7 상한 **각각의 경계값**(message 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
+`[server]` **invalid token은 기존 UID·lease 불변** / `[client]` 구 `request_id` ack과 구 `identity_generation` ack 무시.
 
 보강 2차(codex 감사):
-인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음) /
-`active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
-서버 `identity_generation`은 **같은 소켓 UID 재바인딩만** 표현(reconnect 식별은 클라 `connectionGeneration`) /
-**identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
-**message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
-`invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
-`retry_at = min(retry_after, lease_remaining − safety)` — 재시도가 잔여 lease를 넘기지 않음 /
-strict verifier single-flight의 **owner 격리·정리**(한 소켓 종료가 공유 owner를 취소하지 않음, 1B 테스트 템플릿) /
-**claim된 항목이 `get_subscribers`·`send_if_authorized`에서 즉시 제외**(통지 중 live publish 통과 금지) /
-**webhook이 strict cache·single-flight 결과까지 무효화**(구 horizon 재사용 금지).
+`[both]` 인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음 — 서버만 잠그면
+클라가 fire-and-forget으로 남아도 green. 실측: 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없다) /
+`[both]` `active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
+`[server]` 서버 `identity_generation`은 **같은 소켓 UID 재바인딩만** 표현(reconnect 식별은 클라 `connectionGeneration`) /
+`[server]` **identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
+`[server]` **message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
+`[server]` `invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
+`[client]` `retry_at = min(retry_after, lease_remaining − safety)` — 재시도가 잔여 lease를 넘기지 않음 /
+`[server]` strict verifier single-flight의 **owner 격리·정리**(한 소켓 종료가 공유 owner를 취소하지 않음, 1B 테스트 템플릿) /
+`[server]` **claim된 항목이 `get_subscribers`·`send_if_authorized`에서 즉시 제외**(통지 중 live publish 통과 금지) /
+`[server]` **webhook이 strict cache·single-flight 결과까지 무효화**(구 horizon 재사용 금지).
 
 보강 3차(codex 감사):
-**unsubscribe는 토큰 없이도 성공**(만료·revoked·Firebase 장애에서도 제거됨 = fail-open) + `removed_topics`·`operation` /
-**`lease_id` 재사용 금지**(제거 후 재구독 / UID 변경 후 재등록에서 구 `reauth_required`가 새 lease와 불일치) /
-**identity horizon이 토큰 단위**(같은 UID의 새 토큰 검증을 revoked 구 토큰이 공유하지 못함) /
-**webhook epoch fence**(검증 시작 → invalidate → 구 검증 완료가 cache를 되살리지 못함) /
-`retry_at`이 음수가 되지 않고 `lease_remaining <= safety`면 즉시 재인증 /
-**ack 유실 후 재시도 idempotency**(상태 불변, 최종 ack이 진실, snapshot 중복 허용) /
-`active_subscriptions`가 **lock 아래 단일 snapshot**·duration은 floor·**≤0이면 미포함** /
-`--ws websockets --ws-max-size 16384` 적용 + **subprocess 서버에 붙은 클라이언트가 close 1009 관측** /
+`[server]` **unsubscribe는 토큰 없이도 성공**(만료·revoked·Firebase 장애에서도 제거됨 = fail-open) + `removed_topics`·`operation` /
+`[server]` **`lease_id` 재사용 금지**(제거 후 재구독 / UID 변경 후 재등록에서 구 `reauth_required`가 새 lease와 불일치) /
+`[server]` **identity horizon이 토큰 단위**(같은 UID의 새 토큰 검증을 revoked 구 토큰이 공유하지 못함) /
+`[server]` **webhook epoch fence**(검증 시작 → invalidate → 구 검증 완료가 cache를 되살리지 못함) /
+`[client]` `retry_at`이 음수가 되지 않고 `lease_remaining <= safety`면 즉시 재인증 /
+`[both]` **ack 유실 후 재시도 idempotency**(클라의 새 request_id 재시도 ⊥ 서버의 topic-set 불변·lease 갱신) /
+`[server]` `active_subscriptions`가 **lock 아래 단일 snapshot**·duration은 floor·**≤0이면 미포함** /
+`[server]` `--ws websockets --ws-max-size 16384` 적용 + **subprocess 서버에 붙은 클라이언트가 close 1009 관측** /
 (⚠️ ASGI 앱은 legacy impl에서 **1006**을 본다 — §D7 참조. 구 "ASGI 통합 확인" 문구는 폐기) /
-§8 canonical schema ↔ §8.1 불변식 **상호 정합**(두 곳이 다른 구현을 유도하지 않음).
+`[server]` §8 canonical schema ↔ §8.1 불변식 **상호 정합**(두 곳이 다른 구현을 유도하지 않음).
 
 보강 4차(6렌즈 병렬 감사):
-**`temporarily_unavailable`이 어느 단계에서 나도 전체-요청 + registry 불변**(RevenueCat 장애가 구독을 지우지 않음) /
-**entitlement DB 순단이 krx 등록을 지우지 않음**(transient ≠ 권한 없음) /
-**무토큰 subscribe = 등록 거부 + `request_id: null` 오류**(조용한 실패 없음) / **enforcement-OFF 중간 상태에서
-lease·sweep 미동작** / **REST twin 게이트가 flag ON보다 먼저**(무인증 KRX 재개방 방지) /
-**전송 실패는 소켓 종료**(부분 삭제 후 유지 금지 — ack이 거짓이 되지 않음) /
-**연결당 동시 dispatch에서 unsubscribe·ping이 subscribe 뒤에 막히지 않음**(pong timeout 내) /
-**구 UID subscribe가 새 바인딩을 되돌리지 못함**(auth_time 단조) / **lock 안 I/O timeout** /
-**최소 잔여 기준 타이머**(혼합 lease에서 짧은 topic이 먼저 만료되지 않음) /
-**재인증 idempotency = topic 집합 불변이되 lease는 갱신됨** / snapshot 중복은 **timestamp-merge**로 적용 /
-**epoch 폐기 결과로 lease를 발급하지 않음** / flag off → `topic_unavailable`(accepted 금지).
+`[server]` **`temporarily_unavailable`이 어느 단계에서 나도 전체-요청 + registry 불변**(RevenueCat 장애가 구독을 지우지 않음) /
+`[server]` **entitlement DB 순단이 krx 등록을 지우지 않음**(transient ≠ 권한 없음) /
+`[server]` **무토큰 subscribe = 등록 거부 + `request_id: null` 오류**(조용한 실패 없음) /
+`[server]` **enforcement-OFF 중간 상태에서 lease·sweep 미동작** /
+`[server]` **REST twin 게이트가 flag ON보다 먼저**(무인증 KRX 재개방 방지) /
+`[server]` **전송 실패는 소켓 종료**(부분 삭제 후 유지 금지 — ack이 거짓이 되지 않음) /
+`[server]` **연결당 동시 dispatch에서 unsubscribe·ping이 subscribe 뒤에 막히지 않음**(pong timeout 내) /
+`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(auth_time 단조) / `[server]` **lock 안 I/O timeout** /
+`[client]` **최소 잔여 기준 타이머**(혼합 lease에서 짧은 topic이 먼저 만료되지 않음) /
+`[both]` **재인증 idempotency = topic 집합 불변이되 lease는 갱신됨** /
+`[client]` snapshot 중복은 **timestamp-merge**로 적용 /
+`[server]` **epoch 폐기 결과로 lease를 발급하지 않음** / `[server]` flag off → `topic_unavailable`(accepted 금지).
 
 **⚠️ 테스트 harness 선행 요건**(없으면 계약을 지워도 green인 가짜 통과가 기본형):
 (1) **clock 주입 seam** — ✅ **wall 축 land (2026-07-26)**: `Clock(wall: Callable[[], datetime])` +
@@ -856,7 +853,8 @@ TestClient는 프레이밍 계층이 없어 검증 불가라는 판단은 맞았
 (앱은 1006을 본다 — §D7 참조). 계약은 클라 관측 1009. 하니스는 실앱이 아니라 최소 ASGI 앱을 띄우고
 (conftest stub이 subprocess에 전달되지 않으므로), **Dockerfile CMD를 구조 파싱해 그 토큰을 재사용**한다
 — 테스트가 플래그를 따로 하드코딩하면 프로덕션 설정과 조용히 갈라진다. (5) sweeper는 `sweep_once(now)` 순수 함수 + 등록 분리. (6) ✅ **land (2026-07-26)** — G 소유 규약
-(기본값 server + `client`/`both` 명시 목록). "iOS엔 WebSocketService 구동 테스트가 없다"는 실측 확인:
+(**모든 행에 `[server]`/`[client]`/`[both]` 태그, 기본값 없음** — 기본값을 두면 태그를 잊었을 때
+그 값으로 조용히 읽혀 규약의 목적과 반대로 fail-open한다). "iOS엔 WebSocketService 구동 테스트가 없다"는 실측 확인:
 iOS는 `subscribedTopics` Set만 단언하고 연결·수신 상태기계를 구동하지 않는다. 덧붙여 **1C 프로토콜
 심볼은 서버·iOS 양쪽 모두 0건**이라, 소유 태그는 "현재 커버리지"가 아니라 **테스트가 어디 있어야
 하는지**를 정하는 것이다.
