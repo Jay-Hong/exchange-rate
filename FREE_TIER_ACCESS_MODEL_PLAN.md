@@ -750,7 +750,9 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 아래 `G-ROWS-BEGIN`/`G-ROWS-END` 마커 **사이**의 태그만 센 값이다. 재산출:
 
 ```bash
-awk '/G-ROWS-BEGIN/,/G-ROWS-END/' FREE_TIER_ACCESS_MODEL_PLAN.md \
+# ⚠️ 패턴을 ^...$ 로 **줄 전체 고정**할 것. 앵커가 없으면 이 설명·명령 줄이 먼저 매치돼
+#    awk가 불필요한 범위를 하나 더 처리한다(지금은 그 구간에 태그가 없어 우연히 맞을 뿐이다).
+awk '/^<!-- G-ROWS-BEGIN -->$/,/^<!-- G-ROWS-END -->$/' FREE_TIER_ACCESS_MODEL_PLAN.md \
   | grep -o '`\[\(server\|client\|both\)\]`' | sort | uniq -c
 ```
 
