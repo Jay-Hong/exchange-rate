@@ -114,18 +114,28 @@ RevenueCat 응답에서 `subscriber.entitlements.premium`을 조회한다.
 
 ### 8.1 `app/subscription.py`
 
+- `Clock` (frozen dataclass, `wall: Callable[[], datetime]`) + `system_clock()`
+  - 시간 소스 주입점 (ADR-039 §8.1 harness 선행 (1)). **값이 아니라 콜러블**을 주입한다 —
+    판정 지점들이 RevenueCat HTTP 왕복(timeout 5s)을 사이에 두고 흩어져 있어 패스 시작 시각
+    하나를 공유하면 `cached_at`이 호출 *이전* 시각으로 찍힌다. `get`(miss)·`state`(미등록)의
+    lazy 읽기도 호출부 선평가로는 보존되지 않는다.
+  - monotonic 축은 lease 도입(§8.1 A1) 때 이 클래스에 추가 — 판정 지점에서 `time.monotonic()` 직접 호출 금지
 - `EntitlementCache` (OrderedDict 기반 LRU)
-  - `get(user_id) -> (value|None, is_fresh)`
-  - `set(user_id, is_premium)`
-  - `invalidate(user_id)`
-- `verify_premium_status(user_id) -> PremiumStatus`
+  - `get(user_id, *, clock) -> (value|None, is_fresh)`
+  - `set(user_id, is_premium, *, clock)`
+  - ⚠️ `clock`은 **필수**다(기본값 없음). 기본값을 주면 호출부가 빠뜨려도 실클럭으로 조용히
+    동작해 seam이 무의미해진다. `EntitlementCache`가 `__all__`에 있어 이 둘은 **source-breaking**
+    시그니처 변경이다 — 리포 내부 호출자는 전부 갱신됐고 런타임 동작 변화는 0이다
+  - `invalidate(user_id)` / `clear()` (test 용도)
+- `verify_premium_status(user_id, *, clock=None) -> PremiumStatus`
   - 캐시 조회
   - 없거나 stale이면 RevenueCat API 호출
   - 200/404만 캐시, 4xx/5xx는 캐시하지 않음
   - API 실패 + stale 캐시 → stale 값 반환 (유료 사용자 보호)
   - API 실패 + 캐시 없음 → PENDING 반환 (API 정상화 후 TTL 만료 시 INACTIVE)
-- `verify_premium(user_id) -> bool`
-  - `verify_premium_status` 래퍼 (ACTIVE면 True)
+- `verify_premium(user_id, *, clock=None) -> bool`
+  - `verify_premium_status` 래퍼 (ACTIVE면 True). clock을 그대로 전달 — export된 표면이라
+    여기서 막으면 wrapper 경유 결정적 테스트가 불가능해진다
 - `invalidate_user_cache(user_id)`
   - Webhook에서 호출
 
@@ -151,11 +161,13 @@ RevenueCat 응답에서 `subscriber.entitlements.premium`을 조회한다.
 
 ## 9. 테스트 체크리스트
 
-- `verify_premium()` 단위 테스트
-  - 200/404 캐시 동작
-  - 4xx/5xx 미캐시
-  - stale fallback 동작
-  - lifetime entitlement (`expires_date: null`) 활성 판정
+- ✅ `verify_premium()` 단위 테스트 — `tests/test_subscription_clock.py` (38건, 2026-07-26)
+  - 200/404 캐시 동작 / 4xx/5xx 미캐시 / stale fallback / lifetime entitlement
+  - + TTL 경계 3종(`age == CACHE_TTL`은 stale / `age == CACHE_STALE_TTL`은 삭제 /
+    pending `now == expires_at`은 active) · RevenueCat `expires_dt == now`는 만료
+  - + 상태머신 **주요 분기** baseline (fresh short-circuit / stale+성공 / stale+실패 fallback /
+    miss+실패 / miss+inactive의 pending none·active·expired). ⚠️ 완전한 곱 매트릭스는 아니다
+  - ⚠️ 이 파일 이전엔 `app/subscription.py` 커버리지가 **0건**이었다
 - Webhook Authorization 헤더 검증 테스트
   - 정상/누락/불일치
   - `aliases` 포함 payload 캐시 무효화

@@ -380,9 +380,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
   - **stale fallback 결과로는 lease를 연장하지 않는다.** horizon이 부족하면 authoritative 갱신을 시도한다.
   - **불변식**: `CACHE_TTL < LEASE`. 아니면 lease가 0으로 수렴해 재인증 storm이 된다.
-    현재 `CACHE_TTL=5분`(app/subscription.py:22) < 15분 → 최소 lease 10분 보장.
+    현재 `CACHE_TTL=5분`(app/subscription.py:47) < 15분 → 최소 lease 10분 보장.
   - ⚠️ **`authoritative_verified_at`도 monotonic이어야 한다**(A2와 같은 축). 현행 캐시는 wall clock으로
-    나이를 잰다(`age = datetime.now(timezone.utc) - cached_at`, app/subscription.py:46) — wall clock이
+    나이를 잰다(`age = clock.wall() - cached_at`, app/subscription.py:71 — 2026-07-26 seam 이후) — wall clock이
     역행하면 캐시가 실제보다 **젊게** 보여 horizon이 늘어나고 상한 증명이 깨진다.
     → WS strict 경로용으로 **`verified_at_monotonic`을 별도 저장**한다(REST 경로의 wall-clock 나이 계산은 불변, A4).
 - **A2 시간 기준** — 서버 deadline은 `time.monotonic()`, 만료 판정은 **`now >= expires_at`**(경계 포함 = fail-closed).
@@ -391,9 +391,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
 - **A3 "15분"의 기준점** — **우리가 권한 상실을 authoritative하게 관측한 시점**부터다.
   외부 스토어 → RevenueCat 전파 지연은 서버 lease가 보장할 수 없다. 문서·운영 커뮤니케이션에서 이 경계를 흐리지 말 것.
-- **A4 REST와 분리** — REST의 stale fallback(최대 1시간, app/subscription.py:23)은 **그대로 유지**한다.
+- **A4 REST와 분리** — REST의 stale fallback(최대 1시간, app/subscription.py:48)은 **그대로 유지**한다.
   strict 검증은 **WS 인가 경로에만** 적용한다(가용성 우선 표면과 권리 보호 표면의 정책을 분리).
-  - ⚠️ **webhook 무효화 범위 확장 + epoch fence**: `invalidate_user_cache`(app/subscription.py:108)는 현재
+  - ⚠️ **webhook 무효화 범위 확장 + epoch fence**: `invalidate_user_cache`(app/subscription.py:144)는 현재
     `_cache`와 `_pending`만 지운다. 신규 **strict cache(`verified_at_monotonic`)와 single-flight 결과도 함께 무효화**해야
     한다. **그것만으로는 부족하다** — `검증 시작 → webhook invalidate → 구 검증이 ACTIVE로 완료 → cache 재기록`
     경쟁이 남는다. **UID별 epoch를 증가**시키고 owner가 **캡처한 epoch와 일치할 때만 결과를 게시**한다
@@ -766,8 +766,15 @@ lease·sweep 미동작** / **REST twin 게이트가 flag ON보다 먼저**(무�
 **epoch 폐기 결과로 lease를 발급하지 않음** / flag off → `topic_unavailable`(accepted 금지).
 
 **⚠️ 테스트 harness 선행 요건**(없으면 계약을 지워도 green인 가짜 통과가 기본형):
-(1) **clock 주입 seam** — `EntitlementCache`가 `datetime.now()`를 메서드 안에서 직접 읽음. `verified_at_monotonic`
-저장 위치와 함께 주입 가능해야 함. (2) **Firebase 예외→verdict 매핑 seam** — 현행 conftest가
+(1) **clock 주입 seam** — ✅ **wall 축 land (2026-07-26)**: `Clock(wall: Callable[[], datetime])` +
+`system_clock()`을 `app/subscription.py`의 5개 판정 지점 전부에 배선, 커버리지 0건이던 모듈에
+baseline 38건 추가(`tests/test_subscription_clock.py`). **값이 아니라 콜러블**을 주입한다 —
+패스 시작 시각을 공유하면 `cached_at`이 RevenueCat HTTP 왕복 *이전* 시각으로 찍히고
+(`timeout=5.0`은 **단계별** 값이라 왕복 총시간 상한이 아니다),
+`get`(miss)·`state`(미등록)의 lazy 읽기도 깨진다(둘 다 무력화로 실증).
+⚠️ **(1)은 아직 미완**: `verified_at_monotonic`(monotonic 축)은 소비자(A1 horizon)와 함께 도입한다.
+`Clock`이 이미 배선돼 있어 필드 추가는 시그니처 변경 0이다. **그때까지 :726 "wall clock 역행에도
+strict horizon 불변" 행은 착수 금지** — 단일 wall seam으로는 그 행이 가짜 통과한다. (2) **Firebase 예외→verdict 매핑 seam** — 현행 conftest가
 `firebase_admin.auth`를 MagicMock으로 강제해 except 절이 실행되지 않고, 테스트가 `verify_firebase_token`을 통째
 patch해 **D5 2단계 매트릭스가 자기 mock 검증**이 된다. (3) **인터리빙 강제 hook** — 임계구역에 await가 없으면
 단일 스레드에서 race가 물리적으로 안 나 **B4 lock/C3 CAS를 지워도 green**. (4) close 1009는 TestClient로 검증 불가
