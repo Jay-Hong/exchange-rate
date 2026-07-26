@@ -9,6 +9,17 @@
 # 배포: docker compose up -d
 # ═════════════════════════════════════════════════════════════
 
+# 컨테이너 stdout 로그 무한 증가 방지 — **모든 서비스에 적용**한다.
+# ⚠️ 이건 Docker json-file(=stdout) 한정이다. nginx access/error는 bind mount 파일에 직접 쓰므로
+#    이 설정도 journald도 적용되지 않는다 → 호스트 logrotate(/etc/logrotate.d/fxi-nginx)가 담당한다.
+#    (2026-07-26: 설정 없이 access.log가 275MB까지 자라 있었다.)
+# ⚠️ 기존 컨테이너에는 자동 적용되지 않는다 — 다음 `--force-recreate` 시 반영.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   # ─────────────────────────────────────
   # Redis (Cache)
@@ -45,6 +56,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
 
   # ─────────────────────────────────────
   # Nginx (Reverse Proxy + HTTPS)
@@ -83,6 +95,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging: *default-logging
 
   # ─────────────────────────────────────
   # FastAPI (App + Crawler + SQLite + Selenium)
@@ -109,13 +122,7 @@ services:
         condition: service_healthy
     expose:
       - "8000"
-    # 컨테이너 stdout 로그 무한 증가 방지 (rotation 없으면 json-log가 계속 자란다).
-    # ⚠️ 기존 컨테이너에는 자동 적용되지 않는다 — 다음 `--force-recreate` 시 반영됨.
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
+    logging: *default-logging
     deploy:
       resources:
         limits:

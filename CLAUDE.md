@@ -781,6 +781,14 @@ docker container prune -f    # 중지된 컨테이너만
 docker image prune -f        # dangling(untagged) 이미지만 — 태그된 롤백 이미지는 보존된다
 ```
 
+**nginx 로그 (호스트 logrotate — 위 Docker rotation 대상 아님)**:
+
+nginx access/error는 **bind mount 파일에 직접** 쓰므로 Docker json-file rotation도 journald도
+적용되지 않는다. 실측: 설정 없이 `access.log`가 **275MB**까지 자라 있었다.
+`/etc/logrotate.d/fxi-nginx` (daily / size 50M / rotate 7 / compress) + `postrotate`에서
+`docker kill --signal=USR1 exchange-rate-nginx` — **USR1이 없으면 nginx가 rename된 inode에 계속 써서
+새 파일이 0바이트로 남는 silent failure**가 된다. 설치 후 트래픽을 넣어 **새 파일이 자라는지 반드시 확인**할 것.
+
 **journald 영구 상한** (한 번만 설정, 실측 892MB → 92MB):
 
 ```
