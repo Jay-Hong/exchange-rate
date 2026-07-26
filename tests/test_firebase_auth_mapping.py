@@ -193,10 +193,18 @@ class TestFcmFirebaseErrorBranch(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_unregistered_token_is_not_retried(self):
+        """⚠️ 게이트는 `is_firebase_initialized()`가 아니라 **모듈 전역 `_firebase_initialized`**다.
+
+        초안은 helper를 patch했는데 `send_fcm_notification`은 그 helper를 **호출하지 않는다**
+        (`if not _firebase_initialized:` → `init_firebase()`). 그런데도 로컬에서는 통과했다 —
+        gitignore된 `firebase-service-account.json`이 **개발자 머신에만 있어** `init_firebase()`가
+        성공했기 때문이다. CI에는 그 파일이 없어 early return하고 `send`가 0회 호출됐다.
+        → 테스트가 **로컬 인증 파일 존재 여부에 의존**하고 있었다. 실제 게이트를 patch해 환경 독립으로 만든다.
+        """
         from app.notifications import fcm
         send = MagicMock(side_effect=fb_exceptions.FirebaseError("UNREGISTERED", "gone"))
         with patch.object(fcm, "messaging", MagicMock(send=send)), \
-             patch.object(fcm, "is_firebase_initialized", return_value=True):
+             patch.object(fcm, "_firebase_initialized", True):
             success, error = await fcm.send_fcm_notification("tok", "t", "b")
         self.assertFalse(success)
         self.assertEqual(send.call_count, 1, "무효 토큰은 재시도 무의미 — 1회로 끝나야 한다")
