@@ -126,6 +126,6 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # --ws-max-size 16384 : incoming **message** 상한(분할 frame 합산). ADR-039 §8.1 D7.
 #   앱 레벨 len() 검사는 receive_text() 이후라 이미 전량 수신한 뒤다 → 서버 계층 강제가 필요하다.
 #
-# 계약 회귀 방지: tests/test_ws_frame_limit.py 가 이 CMD를 구조 파싱해 두 옵션을 잠그고,
+# 계약 회귀 방지: tests/test_ws_message_limit.py 가 이 CMD를 구조 파싱해 두 옵션을 잠그고,
 # 하니스도 **이 토큰을 재사용**한다(테스트가 플래그를 따로 하드코딩하지 않음).
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws", "websockets", "--ws-max-size", "16384"]
