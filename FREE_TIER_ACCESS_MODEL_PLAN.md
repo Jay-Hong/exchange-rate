@@ -746,6 +746,10 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 - `[client]` — 서버가 관측할 수 없다. 클라가 구현·검증해야 한다.
 - `[both]` — **한쪽만 잠그면 계약이 성립하지 않는다.** 서버만 테스트하면 클라가 미구현이어도 green이다.
 
+**계약 행 78개** (2026-07-26 기준: server 54 / client 12 / both 12). 이 수는 **행 블록 안**
+(`§8 기본:`부터 `보강 4차` 끝까지)의 태그만 센 것이다 — 위 범례·커버리지 문단·harness 요약부의
+태그를 함께 세면 **틀린다**(실제로 한 번 그렇게 세어 86으로 잘못 보고했다). 행이 늘면 이 수도 갱신할 것.
+
 ⚠️ **커버리지 실측 (2026-07-26)**: `subscription_ack`·`reauth_required`·`lease_id`·`accepted_topics`·
 `rejected_topics`는 서버(`app/`, `tests/`)·iOS(`FXi/`, `FXiTests/`) **모두 0건**이고, iOS 테스트는
 `WebSocketService`를 의존성으로 생성만 해 `subscribedTopics` Set만 단언한다(연결·수신 상태기계 미구동).
