@@ -567,7 +567,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 - **D7 입력 상한 (테스트 가능한 실제 값)** — "상한이 필요하다"만으로는 테스트할 수 없다. 초기값:
   | 항목 | 값 |
   |---|---|
-  | frame 크기 | 16 KiB |
+  | **message** 크기 | 16 KiB (분할 frame **합산** — `max_size`는 message 상한이지 frame 상한이 아니다) |
   | `topics` 개수 | ≤ 8 (현재 사용 6: fx×3 · usdt:krw · krx · dxy 예약) |
   | topic 문자열 길이 | ≤ 64자 |
   | `request_id` | UUID 문자열, 36자 고정 |
@@ -578,10 +578,30 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     실제 자원 보호가 목적이라면 **Uvicorn/WebSocket `max_size` 또는 프록시 계층에서도 16 KiB를 강제**하고
     초과 시 **close code 1009**로 끊어야 한다. 앱 레벨 `len()` 검사는 프로토콜 검증(방어 심화)일 뿐이다.
     → 배포 설정도 계약의 일부이며 테스트 대상.
-    **실사(2026-07-25)**: 현재 `Dockerfile:118`의 uvicorn 실행에 **`--ws-max-size`가 없고**,
-    `nginx/nginx.conf:50`의 `client_max_body_size 10M`은 **HTTP body 전용이라 WebSocket 업그레이드 후
-    frame 상한을 보장하지 않는다**. → 실행 옵션에 **`--ws-max-size 16384`** 추가 + ASGI 통합 테스트에서
-    **close 1009** 확인.
+    **실사(2026-07-25)**: 당시 Dockerfile의 uvicorn 실행에 **`--ws-max-size`가 없고**,
+    nginx의 `client_max_body_size`는 **HTTP body 전용이라 WebSocket 업그레이드 후 상한을 보장하지 않는다**.
+
+    ✅ **land (2026-07-26)** — Dockerfile CMD에 **`--ws websockets --ws-max-size 16384`**,
+    `tests/test_ws_frame_limit.py` 8건. lock 정확 버전(uvicorn 0.44.0 / websockets 16.0) 실측 기반:
+
+    - ⚠️ **수용 기준 정정**: 구 문구 "ASGI 통합 테스트에서 close 1009 확인"은 **원리적으로 불가능**하다.
+      legacy impl의 `fail_connection`이 피어 close 프레임을 파싱하지 않아 **ASGI 앱은 1006**(=일반 네트워크
+      단절과 같은 코드)을 본다. 계약은 **클라이언트가 관측한 1009**다.
+      → **알려진 한계**: 서버 로그만으로 oversize 남용과 평범한 단절을 구분할 수 없다. "close 1009 로그로
+      확인" 류 운영 기준은 채택 불가.
+    - **`--ws websockets` 동반 고정이 필수**다. `auto`는 websockets 미설치 시 wsproto로 내려가는데
+      **0.44.0의 wsproto는 `max_size`를 무시**하고(0.46.0부터 지원) wsproto는 lock에 이미 있어 기동
+      실패조차 하지 않는다 = **조용한 fail-open**. 명시 고정하면 uvicorn이 기동 자체를 실패한다(fail-fast).
+      ⚠️ 이 fail-open 경로는 **행동 테스트로 관측되지 않는다**(현 env에선 auto도 legacy로 귀결) —
+      Dockerfile trip-wire가 유일한 방어다.
+    - ⚠️ **업그레이드 게이트**: uvicorn **0.50.0(2026-07-04)부터 `auto` 기본이 `websockets-sansio`이고
+      legacy는 deprecated**다. 올릴 때 sansio 전환을 검토할 것 — 실측상 sansio는 **앱이 1009+reason을 직접
+      관측**해 위 관측 공백이 해소된다(0.44.0에서도 동작 확인). 전환 시 Dockerfile CMD와 테스트 기대값을 함께 변경.
+    - **후속 위험(별건)**: `--ws-max-size`는 **다수의 작은 메시지** 공격을 막지 않는다. legacy 기본 큐는 32이고
+      nginx `/ws`에는 API와 달리 rate/connection limit이 없다 → `--ws-max-queue` + 연결당 메시지 rate는 별도 항목.
+    - **16 KiB 근거 주의**: "현행 정상 인바운드 최대 112 B" 같은 *현재* 트래픽 기준으로 축소 판단하지 말 것.
+      1C canonical subscribe는 Firebase `id_token`(JWT) + UUID `request_id`를 싣고 topics ≤ 8 × 64자를 허용하므로
+      **계약상 정상 요청**이 훨씬 크다. 축소하려면 실제 토큰 길이 측정이 선행돼야 한다.
 
 - **D-const 상수 확정** (D7의 자기 원칙 "미정 상태로 test-first 금지"를 상수에도 적용)
   | 상수 | 값 | 근거 |
@@ -794,8 +814,11 @@ conftest가 `firebase_admin.auth`/`.exceptions`의 **예외 속성만 진짜 클
   subscribe 경로가 아직 토큰을 읽지 않는다. **2b**에서 token-string 기반 verifier + WS verdict translator와
   함께 검증한다. 또 `check_revoked=True` 경로의 Firebase 계열 오류(`UserDisabledError` 등)를 generic 401로
   둘지 `temporarily_unavailable`로 승격할지는 **2b 전 별도 결정**이다(현행은 401 fail-closed). (3) **인터리빙 강제 hook** — 임계구역에 await가 없으면
-단일 스레드에서 race가 물리적으로 안 나 **B4 lock/C3 CAS를 지워도 green**. (4) close 1009는 TestClient로 검증 불가
-→ **uvicorn subprocess harness**. (5) sweeper는 `sweep_once(now)` 순수 함수 + 등록 분리. (6) G 각 행에 **소유
+단일 스레드에서 race가 물리적으로 안 나 **B4 lock/C3 CAS를 지워도 green**. (4) ✅ **land (2026-07-26)** — uvicorn subprocess harness(`tests/test_ws_frame_limit.py`).
+TestClient는 프레이밍 계층이 없어 검증 불가라는 판단은 맞았으나, **실서버로 바꿔도 서버측 단언은 불가능**하다
+(앱은 1006을 본다 — §D7 참조). 계약은 클라 관측 1009. 하니스는 실앱이 아니라 최소 ASGI 앱을 띄우고
+(conftest stub이 subprocess에 전달되지 않으므로), **Dockerfile CMD를 구조 파싱해 그 토큰을 재사용**한다
+— 테스트가 플래그를 따로 하드코딩하면 프로덕션 설정과 조용히 갈라진다. (5) sweeper는 `sweep_once(now)` 순수 함수 + 등록 분리. (6) G 각 행에 **소유
 (server|ios) 태그** — iOS엔 WebSocketService 구동 테스트가 없다.
 
 #### H. 동반 문서 갱신 (구현 커밋에서)

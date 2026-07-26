@@ -115,4 +115,17 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # 실행
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+#
+# --ws websockets : impl **명시 고정**. `auto`는 버전·설치상태에 따라 다른 impl로 귀결한다 —
+#   websockets가 빠지면 wsproto로 내려가는데 uvicorn 0.44.0의 wsproto는 `max_size`를 **무시**하고
+#   (0.46.0부터 지원) wsproto는 이미 lock에 있어 기동 실패조차 하지 않는다 = 조용한 fail-open.
+#   명시하면 websockets 없는 env에서 uvicorn이 기동 자체를 실패한다(fail-fast).
+#   ⚠️ uvicorn 0.50.0(2026-07-04)부터 `auto` 기본이 websockets-sansio이고 legacy는 deprecated다.
+#   업그레이드 시 sansio 전환을 검토할 것 — 앱이 close 1009+reason을 직접 봐 관측 공백이 해소된다
+#   (현재 legacy는 앱에 1006을 준다 = 일반 단절과 구분 불가).
+# --ws-max-size 16384 : incoming **message** 상한(분할 frame 합산). ADR-039 §8.1 D7.
+#   앱 레벨 len() 검사는 receive_text() 이후라 이미 전량 수신한 뒤다 → 서버 계층 강제가 필요하다.
+#
+# 계약 회귀 방지: tests/test_ws_frame_limit.py 가 이 CMD를 구조 파싱해 두 옵션을 잠그고,
+# 하니스도 **이 토큰을 재사용**한다(테스트가 플래그를 따로 하드코딩하지 않음).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws", "websockets", "--ws-max-size", "16384"]
