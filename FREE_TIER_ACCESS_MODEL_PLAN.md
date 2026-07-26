@@ -440,7 +440,8 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - 인증·RevenueCat·DB 조회도 lock 밖에서 하고, lock 안에서 UID/`lease_id`를 재확인한 뒤 전이를 확정한다.
 
 - **B5 연결당 처리 모델 (하나의 결정 — 개별 수정 시 서로 상충)**
-  현행 `/ws`는 `while True: data = await receive_text(); await handle_client_message(...)`(main.py:928-929)로
+  현행 `/ws`는 `while True: data = await receive_text(); await handle_client_message(...)`
+  (`app/main.py`의 `websocket_endpoint` — 라인 대신 **심볼 앵커**, :383 각주 참조)로
   **연결당 완전 직렬**이다. 1C의 subscribe는 Firebase RTT + RevenueCat(timeout 5.0s) + E2 `get_user()` RTT를 포함하므로
   그대로 두면 그 뒤의 `unsubscribe`·`ping`이 **큐잉된다**.
   - **(a) 직렬 유지 불가**: D8 fail-open이 **시간축에서 무력화**되고(제거가 인증 뒤에 줄 섬),
@@ -570,7 +571,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | 중복 topic | **first-occurrence 순서로 제거**(정규화) |
   값은 조정 가능하지만 **미정 상태로 test-first에 들어가지 않는다**.
   - ⚠️ **frame 상한은 앱 레벨만으로 강제할 수 없다** — `handle_client_message(raw_text)`가 실행되는 시점엔
-    ASGI 서버가 **이미 frame 전체를 메모리에 받은 뒤**다(main.py:928 `await websocket.receive_text()`).
+    ASGI 서버가 **이미 frame 전체를 메모리에 받은 뒤**다(`app/main.py`의 `await websocket.receive_text()`).
     실제 자원 보호가 목적이라면 **Uvicorn/WebSocket `max_size` 또는 프록시 계층에서도 16 KiB를 강제**하고
     초과 시 **close code 1009**로 끊어야 한다. 앱 레벨 `len()` 검사는 프로토콜 검증(방어 심화)일 뿐이다.
     → 배포 설정도 계약의 일부이며 테스트 대상.
