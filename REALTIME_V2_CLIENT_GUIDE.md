@@ -190,19 +190,31 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   ⚠️ **현 iOS가 아직 만족하지 못하는 항목**(2026-07-26 실측, 인증 이관 슬라이스에서 구현):
   KRX가 거는 가드는 **task cancellation · entitlement(krxVisible) · topic gate · snapshot revision**
   뿐이다 — 위 표의 **① UID 변경**과 **③ background · ④ 연결 generation**은 미구현이다.
-  ①은 **defense-in-depth**로 넣는다(2026-07-26 재평가 — 구 "보안 이슈가 된다" 표현은 과했다):
-  - **메커니즘은 실재**한다 — `FXiApp` authState 핸들러는 `.signedOut`에서만 `viewModel.stop()`을
-    부르고(`.signedIn`은 alert VM만 reset), 세 호출부 어디도 응답 적용 전 UID를 재대조하지 않는다.
-  - **그러나 오늘 도달 경로는 막혀 있다**: `LoginView`가 `.signedOut`에서만 렌더되므로 계정 교체는
-    항상 signedOut 프레임을 거쳐 `stop()`이 task를 취소한다. 게다가 **이 endpoint의 payload는
-    사용자 독립**이다(`_build_snapshot_sync(topic)`은 topic만 받고 E3는 *접근*만 게이팅) →
-    교차 적용돼도 값 차이가 없다. entitlement에 민감한 KRX는 모든 렌더 지점이 `krxVisible`
-    fail-close를 통과한다.
-  - **실도달 잔여 1갈래**: B의 `start()`가 초기 fetch 실패 + 캐시 없음으로 조기 return하면 세
-    launcher에 도달하지 못해 **A의 task가 취소되지 않은 채 생존**한다. KRX 재시도 루프가 그 수명을
-    초 단위로 늘린다.
-  → **요청 시작 시 UID를 캡처하고 mutation 직전에 재대조**한다(auth generation은 부적합 — 같은 계정
-  강제 refresh에도 증가하고 로그아웃엔 증가하지 않아 계정 동일성 술어가 아니다).
+  ⚠️ ③④를 "클라에 개념이 없으니 계약에서 뺀다"로 처리하지 **않는다**(codex). 단조 merge(§5)는
+  **값 오염만** 막고, 늦게 도착한 응답도 `tetherReceived`/`lastTetherTopicAt`·`fxReceivedAssets`/
+  `lastFxTopicAt`를 **무조건 갱신**해 topic을 fresh로 오인시킨다 → legacy fallback을 최대 45초 억제.
+  ③④는 **미구현 gap으로 유지**하고, 그 실제 해악(늦은 응답의 신선도 오마킹)은 fence와 같은 지점에서
+  **응답 나이 상한**으로 닫는다 — 요청 발행 시각을 함께 캡처해 지나치게 오래된 응답은 적용하지 않는다.
+  ①은 **인가 경계**다(2026-07-26 최종. 앞선 "defense-in-depth로 격하" 판단은 **철회** — 아래 두 근거).
+
+  **근거 1 — 리포가 이 시나리오 클래스를 이미 두 번 방어하기로 결론냈다.**
+  `EntitlementsManager.refresh`의 계정 소유권 gate 주석: *"reset을 거치지 않는 **직접 UID 전환**에서도
+  B가 A의 krxVisible=true를 물려받지 않게"*(codex blocker 019f641a). `FXiApp`의 `ContentView().id(userId)`도
+  *"UID 전환 시 이전 유저 KRX-gated VM 재사용 구조적 차단"*(codex High). `LoginView`가 `.signedOut`에서만
+  렌더된다는 사실은 **Firebase auth listener가 반드시 signedOut을 방출한다는 보장이 아니다** —
+  리포는 그 보장에 기대지 않기로 이미 정했다. bootstrap만 예외로 둘 이유가 없다.
+
+  **근거 2 — "payload가 사용자 독립이니 값 차이 0"은 KRX에서 성립하지 않는다.**
+  값 자체는 같아도 **받을 권리가 다르다**: A(entitled)는 200 + KRX 데이터, B(비-entitled)는 404다.
+  A의 200이 B 세션에 적용되면 B가 **권한 없는 데이터를 받는 것**이다. `krxVisible` fail-close는
+  `refresh()` **안**에 있어 `.signedIn` → Task hop 만큼 async 창이 남고, 늦게 도착한 A 응답이 그 창과
+  경쟁한다. (fx/usdt는 값·권한 모두 동일해 실제로 무해 — KRX가 경계다.)
+
+  → **요청 시작 시 UID를 캡처하고 mutation 직전 live UID와 재대조**한다(auth generation은 부적합 —
+  같은 계정 강제 refresh에도 증가하고 로그아웃엔 증가하지 않아 계정 동일성 술어가 아니다).
+
+  ℹ️ 추가로 확인된 실도달 경로: B의 `start()`가 초기 fetch 실패 + 캐시 없음으로 조기 return하면 세
+  launcher에 도달하지 못해 **A의 task가 취소되지 않은 채 생존**한다(KRX 재시도 루프가 수명 연장).
 
   ⚠️ **fence가 덮지 못하는 것**(별 트랙): fence는 *write*를 지키지 `retention`을 지키지 않는다.
   `stop()`은 `tetherStore`/`fxStore`/수신 플래그만 비우고 **`appState`와 로컬 캐시는 남긴다**
