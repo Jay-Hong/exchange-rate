@@ -380,7 +380,12 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
   - **stale fallback 결과로는 lease를 연장하지 않는다.** horizon이 부족하면 authoritative 갱신을 시도한다.
   - **불변식**: `CACHE_TTL < LEASE`. 아니면 lease가 0으로 수렴해 재인증 storm이 된다.
-    현재 `CACHE_TTL=5분`(`app/subscription.py`의 `CACHE_TTL`) < 15분 → 최소 lease 10분 보장.
+    현재 `CACHE_TTL=5분`(`app/subscription.py`의 `CACHE_TTL`) < 15분.
+    ⚠️ **"최소 lease 10분"은 `CACHE_TTL < LEASE`만으로 성립하지 않는다** — 그건 entitlement 항에만
+    거는 상한이다. 3-way min이므로 **`firebase_identity_verified_at ≈ now`라는 E2 전제**가 함께 있어야
+    한다(E2는 `check_revoked=True`를 horizon 갱신 시에 수행하므로 갱신 직후엔 성립).
+    identity 확인이 오래됐다면 결과는 10분보다 짧거나 **이미 만료**일 수 있다 — 그 stale identity
+    케이스도 테스트 대상이다.
     (⚠️ **이 문서의 코드 참조 규약**: `파일:라인`이 아니라 **심볼 앵커**를 쓴다 — 라인은 같은 커밋
     안에서도 밀린다. 실측 사례 2건: 2026-07-26 seam 커밋에서 `app/subscription.py` 4건이 5줄씩,
     §B5·§D7의 `main.py:928`은 실제 994행이라 66줄 어긋나 있었다. 다시 숫자로 바꾸지 말 것 —
@@ -390,6 +395,8 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     역행하면 캐시가 실제보다 **젊게** 보여 horizon이 늘어나고 상한 증명이 깨진다.
     → WS strict 경로용으로 **`verified_at_monotonic`을 별도 저장**한다(REST 경로의 wall-clock 나이 계산은 불변, A4).
 - **A2 시간 기준** — 서버 deadline은 `time.monotonic()`, 만료 판정은 **`now >= expires_at`**(경계 포함 = fail-closed).
+  - 구현 노트: `Clock.mono`는 **기본값 없이 필수 주입**한다(wall과 동일). 기본값을 주면 호출부가
+    빠뜨려도 실클럭으로 조용히 동작해 테스트에 실시간이 섞인다 — wall 축에서 같은 이유로 필수로 했다.
   lease deadline과 `authoritative_verified_at`은 **같은 monotonic 축**이어야 한다(A1 마지막 항목 — 축이 섞이면 상한 증명이 무의미).
   wall clock 역행(NTP step / VM restore) 시 상한을 넘긴다(전진은 조기 만료 = 안전한 방향).
   registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
@@ -848,8 +855,13 @@ baseline 38건 추가(`tests/test_subscription_clock.py`). **값이 아니라 �
 (`timeout=5.0`은 **단계별** 값이라 왕복 총시간 상한이 아니다),
 `get`(miss)·`state`(미등록)의 lazy 읽기도 깨진다(둘 다 무력화로 실증).
 ⚠️ **(1)은 아직 미완**: `verified_at_monotonic`(monotonic 축)은 소비자(A1 horizon)와 함께 도입한다.
-`Clock`이 이미 배선돼 있어 필드 추가는 시그니처 변경 0이다. **그때까지 :726 "wall clock 역행에도
-strict horizon 불변" 행은 착수 금지** — 단일 wall seam으로는 그 행이 가짜 통과한다. (2) **Firebase 예외→verdict 매핑 seam** — ✅ **2a land (2026-07-26)**:
+`Clock`이 이미 배선돼 있어 필드 추가는 시그니처 변경 0이다.
+**그때까지 G의 `wall clock 역행에도 strict horizon 불변` 행은 착수 금지** — 단일 wall seam으로는
+그 행이 가짜 통과한다. (⚠️ 이 문서 규약대로 **심볼 앵커**로 적는다. 초안은 `:726`이라 적었는데
+이후 편집으로 실제 위치가 밀려 어긋났다 — 규약을 만든 문장이 규약을 어겼다.)
+⚠️ **그 행을 닫는 조건**: monotonic 축 도입만으로는 부족하다. 계산기가 wall을 무시한다는 것만
+증명될 뿐이고, `verified_at_monotonic`의 **저장·재사용 경로**(strict cache + verifier 배선)까지
+있어야 실제 불변식이 검증된다. (2) **Firebase 예외→verdict 매핑 seam** — ✅ **2a land (2026-07-26)**:
 conftest가 `firebase_admin.auth`/`.exceptions`의 **예외 속성만 진짜 클래스**로 제공(나머지는 MagicMock 유지)
 + `google.auth`는 미설치 시에만 stub. 19건 추가(`tests/test_firebase_auth_mapping.py`), 기존 3693건 무영향.
   - **계층까지 재현한다**: firebase-admin v6.9.0에서 `Expired`·`Revoked`가 `InvalidIdToken`의 **하위**라
