@@ -798,7 +798,7 @@ sudo ops/install-host-config.sh --verify-reopen  # ⚠️ 파괴적: 강제 rota
 **USR1이 없으면** nginx가 rename된 inode에 계속 써서 새 파일이 0바이트로 남는 **silent failure**가
 된다 — 설치 후 `--verify-reopen`이 실제 증가를 비교해 그걸 검출한다.
 
-**journald 영구 상한** — 정본은 `ops/systemd/journald-limits.conf`, 설치는 위 스크립트가 함께 한다
+**journald 영구 상한** — 정본은 `ops/systemd/zz-fxi-limits.conf`, 설치는 위 스크립트가 함께 한다
 (실측 892MB → 92MB). 일회성 정리는 `sudo journalctl --rotate --vacuum-size=100M` —
 **`--rotate`가 없으면 archived만** 대상이라 active journal이 남는다.
 

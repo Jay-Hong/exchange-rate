@@ -16,9 +16,11 @@ NGINX_LOG_DIR=/home/ubuntu/exchange-rate/volumes/logs/nginx
 install_config() {
   install -m 0644 "$HERE/logrotate/fxi-nginx" /etc/logrotate.d/fxi-nginx
   install -d /etc/systemd/journald.conf.d
-  install -m 0644 "$HERE/systemd/journald-limits.conf" /etc/systemd/journald.conf.d/limits.conf
+  # 구 이름(limits.conf)이 남아 있으면 정의가 둘이 되고 정렬상 먼저 와 혼란을 준다 — 제거.
+  rm -f /etc/systemd/journald.conf.d/limits.conf
+  install -m 0644 "$HERE/systemd/zz-fxi-limits.conf" /etc/systemd/journald.conf.d/zz-fxi-limits.conf
   systemctl restart systemd-journald
-  echo "설치 완료: /etc/logrotate.d/fxi-nginx, /etc/systemd/journald.conf.d/limits.conf"
+  echo "설치 완료: /etc/logrotate.d/fxi-nginx, /etc/systemd/journald.conf.d/zz-fxi-limits.conf"
 }
 
 check() {   # 비파괴 — 로그를 건드리지 않는다
@@ -28,7 +30,7 @@ check() {   # 비파괴 — 로그를 건드리지 않는다
   #     통과한다 — 그러면 "정본" 계약이 이름뿐이다.
   echo "--- 정본 ↔ 설치본 ---"
   for pair in "logrotate/fxi-nginx:/etc/logrotate.d/fxi-nginx" \
-              "systemd/journald-limits.conf:/etc/systemd/journald.conf.d/limits.conf"; do
+              "systemd/zz-fxi-limits.conf:/etc/systemd/journald.conf.d/zz-fxi-limits.conf"; do
     src="$HERE/${pair%%:*}"; dst="${pair##*:}"
     if cmp -s "$src" "$dst"; then
       echo "OK   $dst"
@@ -47,12 +49,16 @@ check() {   # 비파괴 — 로그를 건드리지 않는다
   #     systemd는 뒤에 오는 정의가 이기므로 **마지막 값 = 실효값**으로 비교한다.
   echo "--- journald 실효값 (후순위 drop-in 재정의 검출) ---"
   for key in SystemMaxUse SystemKeepFree; do
-    want=$(grep -E "^${key}=" "$HERE/systemd/journald-limits.conf" | tail -1)
+    want=$(grep -E "^${key}=" "$HERE/systemd/zz-fxi-limits.conf" | tail -1)
     got=$(systemd-analyze cat-config systemd/journald.conf | grep -E "^${key}=" | tail -1)
     if [ "$want" = "$got" ]; then
       echo "OK   $got"
     else
-      echo "DRIFT 실효값 '$got' ≠ 정본 '$want' (후순위 drop-in이 덮었을 수 있다)" >&2
+      # ⚠️ 이 경우 **재설치로는 해결되지 않는다** — 같은 파일명을 다시 복사해도 정렬 순서는 그대로다.
+      echo "DRIFT 실효값 '$got' ≠ 정본 '$want'" >&2
+      echo "  → 우리 파일보다 **뒤에 정렬되는** drop-in이 같은 키를 정의했다. 재설치로는 안 고쳐진다." >&2
+      echo "  → 범인 확인: systemd-analyze cat-config systemd/journald.conf | grep -n '^# /\|^${key}='" >&2
+      echo "  → 그 파일을 고치거나, 정본 이름을 더 뒤로 정렬되게 바꿔야 한다(현재 zz- 접두사)." >&2
       drift=1
     fi
   done

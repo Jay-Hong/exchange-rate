@@ -15,7 +15,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGROTATE = REPO_ROOT / "ops" / "logrotate" / "fxi-nginx"
-JOURNALD = REPO_ROOT / "ops" / "systemd" / "journald-limits.conf"
+JOURNALD = REPO_ROOT / "ops" / "systemd" / "zz-fxi-limits.conf"
 INSTALLER = REPO_ROOT / "ops" / "install-host-config.sh"
 
 
@@ -70,12 +70,37 @@ class TestJournaldConfig(unittest.TestCase):
         self.assertRegex(text, re.compile(r"^SystemKeepFree=\d+[KMG]?$", re.M))
 
 
+class TestJournaldDropInOrdering(unittest.TestCase):
+    """drop-in은 **파일명 lexical 순서**로 처리되고 뒤가 이긴다 — 이름이 계약이다."""
+
+    def test_name_sorts_after_distro_dropins(self):
+        """관례인 `NN-` 숫자 접두사는 접두사 없는 배포판 파일에 **진다**(숫자 < 소문자).
+
+        실측: `90-fxi-limits.conf` < `limits.conf` < `syslog.conf` < `zz-fxi-limits.conf`.
+        디스크 안전 상한이라 조용히 덮이면 안 되므로 마지막으로 정렬되는 이름을 쓴다.
+        """
+        name = JOURNALD.name
+        for distro in ("syslog.conf", "99-default.conf", "limits.conf"):
+            self.assertGreater(name, distro,
+                               f"{name}이 {distro}보다 먼저 정렬되면 그쪽 정의가 이긴다")
+
+    def test_installer_removes_legacy_name(self):
+        """이름을 바꾸면 구 파일이 남아 정의가 둘이 된다."""
+        self.assertIn("rm -f /etc/systemd/journald.conf.d/limits.conf", INSTALLER.read_text())
+
+    def test_override_guidance_does_not_say_reinstall(self):
+        """override는 **재설치로 안 고쳐진다** — 같은 이름을 다시 복사해도 순서가 그대로다(codex)."""
+        text = INSTALLER.read_text()
+        self.assertIn("재설치로는 안 고쳐진다", text)
+        self.assertIn("cat-config", text, "범인 drop-in을 찾는 방법을 안내해야 한다")
+
+
 class TestInstaller(unittest.TestCase):
     def test_installs_both_configs(self):
         text = INSTALLER.read_text()
         self.assertTrue(INSTALLER.stat().st_mode & 0o111, "실행 권한이 없다")
         self.assertIn("logrotate/fxi-nginx", text)
-        self.assertIn("systemd/journald-limits.conf", text)
+        self.assertIn("systemd/zz-fxi-limits.conf", text)
 
     def test_destructive_and_nondestructive_modes_are_separated(self):
         """`logrotate -f`는 **실제 로그를 회전**시킨다 — 반복 실행하면 `rotate 7`을 밀어내
@@ -105,7 +130,7 @@ class TestInstaller(unittest.TestCase):
         check_body = text[text.index("check() {"):text.index("verify_reopen() {")]
         self.assertIn("cmp -s", check_body, "정본↔설치본 비교가 없다")
         self.assertIn("/etc/logrotate.d/fxi-nginx", check_body)
-        self.assertIn("/etc/systemd/journald.conf.d/limits.conf", check_body)
+        self.assertIn("/etc/systemd/journald.conf.d/zz-fxi-limits.conf", check_body)
         self.assertIn("exit 1", check_body, "drift를 발견하면 non-zero로 끝나야 한다")
 
     def test_check_uses_effective_journald_value(self):
