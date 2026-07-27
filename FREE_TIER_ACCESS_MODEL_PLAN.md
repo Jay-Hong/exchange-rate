@@ -399,10 +399,13 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     빠뜨려도 실클럭으로 조용히 동작해 테스트에 실시간이 섞인다 — wall 축에서 같은 이유로 필수로 했다.
   lease deadline과 `authoritative_verified_at`은 **같은 monotonic 축**이어야 한다(A1 마지막 항목 — 축이 섞이면 상한 증명이 무의미).
   **그 축을 wall로 두면** wall clock 역행(NTP step / VM restore) 시 상한을 넘긴다(전진은 조기 만료 =
-  안전한 방향). ⚠️ 이 위험은 **deadline 쪽에서는 해소됐고**(2026-07-27 monotonic land)
-  `authoritative_verified_at` 쪽에는 **아직 남아 있다** — `EntitlementCache.get`이 여전히
-  `age = clock.wall() - cached_at`으로 나이를 잰다. `verified_at_monotonic` 저장(A1 마지막 항목)이
-  그것을 닫는다.
+  안전한 방향). ⚠️ 이 위험은 **deadline 축에서는 해소됐고**(2026-07-27 monotonic land)
+  **horizon 입력 축에는 아직 남아 있다** — WS 인가가 쓸 수 있는 유일한 관측 나이가 아직
+  `EntitlementCache.get`의 wall 기반 계산뿐이기 때문이다.
+  ⛔ **닫는 방법을 오해하지 말 것**: 그 wall 계산을 monotonic으로 **바꾸는 게 아니다**.
+  A4대로 REST의 stale fallback과 wall-clock TTL은 **그대로 유지**하고, WS strict 경로가 그 REST 캐시를
+  **인가 horizon 입력으로 쓰지 않도록** `verified_at_monotonic`을 **별도 저장·사용**해 분리한다
+  (A1 마지막 항목). 즉 해법은 *교체*가 아니라 *경로 분리*다.
   registry가 in-memory라 프로세스 재시작 시 연결·구독이 함께 소멸 → 재시작 간 deadline 보존이 불필요하다.
 
   ✅ **A1/A2 산술 land (2026-07-27)** — `app/topic_lease.py`(`LEASE_MAX_SECONDS` /
