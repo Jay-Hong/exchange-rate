@@ -269,8 +269,6 @@ class TestAdapterEquivalence(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(subscription._result_to_legacy_tuple(result), (False, False))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestUnexpectedErrorsPropagate(unittest.IsolatedAsyncioTestCase):
@@ -453,3 +451,7 @@ class TestViolationAttribution(unittest.IsolatedAsyncioTestCase):
         for expected, payload in cases:
             with self.subTest(expected=expected, payload=payload):
                 self.assertEqual(await self._detail(payload), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

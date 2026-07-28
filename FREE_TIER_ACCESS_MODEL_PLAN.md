@@ -559,8 +559,15 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
   - **양성 관측**(`active=True`, `disabled=False`)은 **A1 horizon이 이미 상한**을 건다(보안 방향).
   - **부정 관측**은 horizon을 타지 않으므로 **별도 bound가 필요**하다(가용성 방향).
-    `token_revoked`만은 예외 — 파생 판정이고 그 토큰에 대해 monotone이라 갱신이 무의미하다.
-    반면 `disabled=True` / `not_found=True`는 **재활성화·uid 재생성**이 가능해 monotone이 아니다.
+    `token_revoked`에는 **상수가 없다** — 저장된 관측이 아니라 요청마다 `iat`로 파생하는 판정이라
+    "갱신" 개념 자체가 없기 때문이다. 반면 `disabled=True` / `not_found=True`는 **재활성화·uid 재생성**이
+    가능해 monotone이 아니라서 상한이 필요하다.
+    ⛔ 이걸 "stale record라도 revoke는 즉시 판정" 최적화로 읽지 말 것 — **구현은 record 신선도를 먼저 본다**
+    (stale + revoke 증명 → `NeedsVerification`, 재검증 후 `Inactive`로 결과는 같고 RTT 1회를 더 쓴다).
+    최적화하려면 (a) watermark 단조성상 *stale이 "revoked"면 건전 / "not revoked"면 불건전*이라
+    **revoke 술어에만** 적용해야 하고, (b) 실측상 freshness 앞에 단락을 넣으면 SDK와 맞춘
+    `disabled > revoked` 우선순위가 **깨진다**. 정확성 이득 0이라 채택하지 않았다
+    (`tests/test_strict_authz.py::TestStaleRecordDoesNotShortCircuitRevoke`가 현 동작을 못 박는다).
   - 상수 2개는 **값이 같아도 독립**이다(파생 관계로 묶지 말 것 — 위험 프로파일이 다르다):
 
     ```

@@ -388,8 +388,6 @@ class TestComparisonCrud(unittest.TestCase):
         self.assertEqual(len(limited), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestComparisonEndpointKrxGate(unittest.TestCase):
@@ -455,3 +453,7 @@ class TestComparisonEndpointKrxGate(unittest.TestCase):
         body = self._krx_absolute_body(left=("investing", "usd-krw"), right=("kb", "usd-krw"))
         r = self._post(body, gate_error="krx_entitlement_required")
         self.assertEqual(r.status_code, 200, r.text)
+
+
+if __name__ == "__main__":
+    unittest.main()

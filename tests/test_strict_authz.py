@@ -309,8 +309,6 @@ class TestNeedsVerificationIsNotAWireVerdict(unittest.TestCase):
         self.assertEqual(_derive(premium=None).concern, Concern.PREMIUM)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestRevocationAxesAreValidated(unittest.TestCase):
@@ -417,3 +415,38 @@ class TestEpochIsInertHere(unittest.TestCase):
         }
         self.assertEqual(len(outs), 1, "epoch은 파생에 영향을 주지 않는다(의도)")
         self.assertEqual(outs.pop(), _derive())
+
+
+class TestStaleRecordDoesNotShortCircuitRevoke(unittest.TestCase):
+    """현재 동작을 **명시적으로** 못 박는다 — 우연이 아니라 결정이다.
+
+    stale record가 이미 revoke를 증명해도 신선도 검사가 먼저라 `NeedsVerification`이 나온다.
+    결과는 재검증 후 `Inactive`로 같고 RTT 1회를 더 쓸 뿐이다.
+
+    ⚠️ 이걸 최적화하려면 **한 방향으로만 건전**함을 지켜야 한다 — watermark는 단조 증가하므로
+    *stale이 "revoked"면 fresh도 revoked*(건전)지만 *stale이 "not revoked"라 해도 fresh는
+    revoked일 수 있다*(불건전). 같은 record의 `disabled`/`NotFound`는 monotone이 아니므로
+    최적화는 **revoke 술어에만** 적용해야 한다. 이 테스트가 red가 되면 그 최적화를 넣은 것이니,
+    위 비대칭이 지켜졌는지 함께 확인할 것.
+
+    ⚠️ 실측(2026-07-28 mutation): freshness 게이트 앞에 revoke 단락을 넣으면 이 테스트뿐 아니라
+    `TestDecisionOrder::test_disabled_beats_revoked`도 red가 된다 — disabled 검사가 revoke보다
+    **뒤로 밀리기** 때문이다. 즉 그 최적화는 SDK와 맞춘 `disabled > revoked` 우선순위도 함께
+    보존해야 하며, 공짜가 아니다.
+    """
+
+    def test_stale_record_with_revoke_proof_still_needs_verification(self):
+        revoked_ms = (IAT + 500) * 1000
+        stale = _identity(tokens_valid_after_ms=revoked_ms,
+                          verified_at_mono=NOW - LEASE_MAX_SECONDS - 1)
+        self.assertEqual(_derive(identity=stale), NeedsVerification(concern=Concern.IDENTITY))
+
+    def test_fresh_record_with_same_proof_rejects(self):
+        """positive control — 신선하면 같은 증명으로 즉시 거부한다."""
+        revoked_ms = (IAT + 500) * 1000
+        self.assertEqual(_derive(identity=_identity(tokens_valid_after_ms=revoked_ms)),
+                         Inactive(reason=InactiveReason.TOKEN_REVOKED))
+
+
+if __name__ == "__main__":
+    unittest.main()

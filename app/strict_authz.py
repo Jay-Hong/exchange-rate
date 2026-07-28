@@ -33,8 +33,18 @@ watermark를 초로 넘기거나 `iat`를 ms로 넘기거나 둘 중 하나가 `
   lease밖에 못 주므로, **계산해서 만료를 발견하는 대신 lookup 단계에서 재검증으로 보낸다**.
 - **부정 관측**은 A1 horizon을 타지 않으므로 별도 상한이 필요하다. 아니면 결제한 사용자가
   webhook 유실 시 **영구 거부**된다.
-- ⚠️ `token_revoked`만은 예외 — 그 토큰에 대해 monotone이라(watermark 단조↑, `iat` 고정)
-  갱신이 무의미하다. 반면 `disabled`/`not_found`는 재활성화·uid 재생성이 가능해 monotone이 아니다.
+- ⚠️ `token_revoked`에는 **별도 상수가 없다** — 그건 저장된 관측이 아니라 요청마다 `iat`로
+  파생하는 판정이라 "갱신" 개념 자체가 없기 때문이다. 반면 `disabled`/`not_found`는
+  재활성화·uid 재생성이 가능해 monotone이 아니라서 상한이 필요하다.
+  ⛔ 단 **구현은 record 신선도를 먼저 본다** — stale record가 이미 revoke를 증명하더라도
+  `NeedsVerification`이 나온다(결과는 재검증 후 `Inactive`로 같고, RTT 1회를 더 쓸 뿐이다).
+  이걸 최적화하려면 **한 방향으로만 건전**하다는 점을 지켜야 한다: watermark는 단조 증가하므로
+  *stale이 "revoked"라고 하면 fresh도 revoked*(건전)지만, *stale이 "not revoked"라고 해도
+  fresh는 revoked일 수 있다*(불건전). 그리고 같은 record의 `disabled`/`NotFound`는 monotone이
+  아니므로 **그 최적화는 revoke 술어에만** 적용해야 한다. 실측상 freshness 게이트 앞에 단락을
+  넣으면 SDK와 맞춘 `disabled > revoked` 우선순위도 함께 깨진다. 지금은 채택하지 않았다 —
+  정확성 이득이 0이고(결과 동일) 비대칭 분기의 미묘함이 비용보다 크다
+  (`tests/test_strict_authz.py::TestStaleRecordDoesNotShortCircuitRevoke`가 현 동작을 못 박는다).
 
 ## 이 모듈의 비-책임
 
