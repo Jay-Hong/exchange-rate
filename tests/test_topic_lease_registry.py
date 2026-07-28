@@ -1184,7 +1184,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSendAuthorizationChecksIdentity(unittest.IsolatedAsyncioTestCase):
-    """§B1 — **전송 직전** 재검증은 캡처한 `(uid, lease_id)`와 정확히 일치해야 한다(계획 616행).
+    """§B1 — **전송 직전** 재검증은 캡처한 `(uid, lease_id)`와 정확히 일치해야 한다(§B1 검사 항목).
 
     ⛔ `authorized_lease`는 §B2(조회 경계 필터)의 답이지 §B1의 답이 아니다. 실측:
 
@@ -1579,6 +1579,32 @@ class TestIssuanceBoundaryMatchesTheAdvertisedInteger(unittest.IsolatedAsyncioTe
         ack = captured["ack"]
         self.assertTrue({s.topic for s in ack.accepted} <= {s.topic for s in ack.active},
                         "ack이 수락했다고 한 topic이 최종 상태에 없다")
+
+
+class TestDocumentationAnchors(unittest.IsolatedAsyncioTestCase):
+    """⛔ 계획을 **행번호로 인용하지 않는다** — 계획을 한 줄만 고쳐도 인용이 전부 어긋난다.
+
+    이 규칙을 세운 커밋의 **바로 다음 커밋에서 내가 다시 어겼다**(테스트 docstring에 행번호
+    인용 1건). 사람이 지키는 규칙으로는 부족하다는 증거라 기계로 잠근다.
+    범위는 규칙이 선언된 두 파일이다 — 리포 전체 강제는 이 슬라이스의 범위 밖이다
+    (실측: 지금 이 패턴을 쓰는 파일은 이 두 개뿐이었다).
+    """
+
+    def test_no_plan_line_number_citations(self):
+        import pathlib
+        import re
+
+        cited = re.compile(r"계획\s*\d+\s*행")
+        root = pathlib.Path(__file__).resolve().parents[1]
+        for name in ("app/topic_lease_registry.py", "tests/test_topic_lease_registry.py"):
+            hits = [
+                f"{name}:{number}"
+                for number, line in enumerate(
+                    (root / name).read_text(encoding="utf-8").splitlines(), 1
+                )
+                if cited.search(line)
+            ]
+            self.assertEqual(hits, [], "§ 섹션 앵커를 쓸 것 — 행번호는 계획 편집마다 어긋난다")
 
 
 class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
