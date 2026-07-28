@@ -73,7 +73,7 @@ class RejectReason(str, Enum):
     STALE_EPOCH = "stale_epoch"    # 무효화됨 → snapshot부터 다시 떠서 재검증
     REGRESSION = "regression"      # 다른 owner가 이미 **더 새로운** 관측을 썼다 → 재시도 불필요
     UNKNOWN_UID = "unknown_uid"    # snapshot 없이 쓰려 함(또는 축출됨) → snapshot부터
-    CONFLICT = "conflict"          # **같은 시각**에 내용이 다른 관측 — 한 순간이 두 상태일 수 없다
+    CONFLICT = "conflict"          # **같은 시각**에 내용이 다른 관측 — 둘 다 버리고 재검증 강제
 
 
 @dataclass(frozen=True)
@@ -247,11 +247,20 @@ class StrictObservationCache:
         with self._lock:
             if uid not in self._epochs:
                 return False
-            self._next_epoch += 1
-            self._epochs[uid] = self._next_epoch
-            self._premium.pop(uid, None)
-            self._identity.pop(uid, None)
+            self._invalidate_locked(uid)
             return True
+
+    def _invalidate_locked(self, uid: str) -> int:
+        """lock을 **이미 쥔 상태에서** 무효화한다 — 새 generation 할당 + 관측 폐기.
+
+        ⚠️ `bump()`를 부르지 않는다. `threading.Lock`은 재진입 불가라 자기 자신을 다시 잡으면
+        **서버가 멈춘다** — 이 모듈의 lock 계약이 경고하는 바로 그 경우다.
+        """
+        self._next_epoch += 1
+        self._epochs[uid] = self._next_epoch
+        self._premium.pop(uid, None)
+        self._identity.pop(uid, None)
+        return self._next_epoch
 
     # ── 저장 ─────────────────────────────────────────────────────────────
     def put_premium(
@@ -299,12 +308,20 @@ class StrictObservationCache:
             if observation.verified_at_mono == existing.verified_at_mono and observation != existing:
                 # 동률을 받아주는 근거는 **"같은 관측의 재기록은 무해하다"**였다. 내용이 다르면
                 # 그 근거가 성립하지 않는다 — 한 순간이 active이면서 inactive일 수는 없다.
-                # 실측: `inactive@100` 뒤 `active@100`이 둘 다 통과해 **취소가 되살아났다**.
-                # 어느 쪽이 진짜인지 알 수 없으므로 **먼저 기록된 쪽을 지킨다**(보수적).
+                #
+                # ⛔ "먼저 기록된 쪽을 지킨다"는 **보수적이지 않다** — 순서 의존일 뿐이다. 실측:
+                #     premium  active→inactive  → active 생존   = 해지가 막힌다
+                #     identity enabled→disabled → enabled 생존  = 계정 비활성화가 막힌다
+                # 도착 순서가 어느 값이 남을지를 정하고, 절반의 경우 **허용 쪽**이 이긴다.
+                #
+                # 어느 값도 신뢰할 수 없으므로 **둘 다 버리고 재검증을 강제한다**(fail-closed).
+                # 내용을 보고 "안전한 쪽"을 고르지 않는다 — 저장소는 관측을 담을 뿐 정책을
+                # 갖지 않는다(§A6-1: verdict는 요청별 파생이다).
+                new_epoch = self._invalidate_locked(uid)
                 return PutRejected(
                     reason=RejectReason.CONFLICT,
                     expected_epoch=expected_epoch,
-                    current_epoch=current,
+                    current_epoch=new_epoch,
                 )
 
         slot[uid] = observation

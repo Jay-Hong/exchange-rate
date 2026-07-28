@@ -286,37 +286,68 @@ class TestMonotonicGuard(_CacheTest):
             self.cache.put_premium(_premium(e, at=100.0), expected_epoch=e), PutAccepted
         )
 
-    def test_conflicting_observation_at_equal_timestamp_is_rejected(self):
-        """⛔ 실측 재현 — `inactive@100` 뒤 `active@100`이 둘 다 통과해 **취소가 되살아났다**.
+    def test_conflict_invalidates_both_directions_premium(self):
+        """⛔ 실측 재현 — "먼저 기록된 쪽 유지"는 **순서 의존**이라 보수적이지 않았다.
 
-        한 순간이 active이면서 inactive일 수는 없다. 어느 쪽이 진짜인지 알 수 없으므로
-        **먼저 기록된 쪽을 지킨다**.
+            inactive→active → inactive 생존 (막힘)
+            active→inactive → **active 생존 = 해지가 막힌다**
+
+        어느 값도 신뢰할 수 없으므로 둘 다 버리고 재검증을 강제한다. **양방향 모두** 검사한다.
         """
+        for first_active, second_active in ((False, True), (True, False)):
+            with self.subTest(order=f"{first_active}→{second_active}"):
+                cache = StrictObservationCache()
+                e = cache.snapshot(UID).epoch
+                cache.put_premium(_premium(e, active=first_active, at=100.0), expected_epoch=e)
+                result = cache.put_premium(_premium(e, active=second_active, at=100.0), expected_epoch=e)
+                self.assertIsInstance(result, PutRejected)
+                self.assertEqual(result.reason, RejectReason.CONFLICT)
+                snap = cache.snapshot(UID)
+                self.assertIsNone(snap.premium, "충돌 후 어느 값도 남으면 안 된다")
+                self.assertNotEqual(snap.epoch, e, "재검증을 강제하려면 epoch가 전진해야 한다")
+
+    def test_conflict_invalidates_both_directions_identity(self):
+        """⛔ 실측 재현 — `enabled→disabled`에서 **계정 비활성화가 막혔다**."""
+        for first_disabled, second_disabled in ((True, False), (False, True)):
+            with self.subTest(order=f"{first_disabled}→{second_disabled}"):
+                cache = StrictObservationCache()
+                e = cache.snapshot(UID).epoch
+                cache.put_identity(_identity(e, disabled=first_disabled, at=100.0), expected_epoch=e)
+                result = cache.put_identity(_identity(e, disabled=second_disabled, at=100.0), expected_epoch=e)
+                self.assertIsInstance(result, PutRejected)
+                self.assertEqual(result.reason, RejectReason.CONFLICT)
+                snap = cache.snapshot(UID)
+                self.assertIsNone(snap.identity, "충돌 후 어느 값도 남으면 안 된다")
+                self.assertNotEqual(snap.epoch, e)
+
+    def test_conflict_fences_in_flight_writes(self):
+        """무효화이므로 그 epoch를 캡처한 진행 중 검증은 전부 거부돼야 한다."""
         e = self.epoch()
-        cancelled = _premium(e, active=False, at=100.0)
-        self.cache.put_premium(cancelled, expected_epoch=e)
-        result = self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
-        self.assertIsInstance(result, PutRejected)
-        self.assertEqual(result.reason, RejectReason.CONFLICT)
-        self.assertEqual(self.cache.snapshot(UID).premium, cancelled)
+        self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
+        self.cache.put_premium(_premium(e, active=False, at=100.0), expected_epoch=e)  # 충돌
+        late = self.cache.put_identity(_identity(e, at=300.0), expected_epoch=e)
+        self.assertIsInstance(late, PutRejected)
+        self.assertEqual(late.reason, RejectReason.STALE_EPOCH)
+
+    def test_conflict_drops_the_other_concern_too(self):
+        """epoch는 UID당 하나라 무효화는 두 concern을 함께 덮는다 — 과잉이지만 fail-closed다."""
+        e = self.epoch()
+        self.cache.put_identity(_identity(e, at=50.0), expected_epoch=e)
+        self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
+        self.cache.put_premium(_premium(e, active=False, at=100.0), expected_epoch=e)  # 충돌
+        self.assertIsNone(self.cache.snapshot(UID).identity)
 
     def test_conflict_is_distinguishable_from_regression(self):
         """호출자의 다음 행동이 다르다 — 충돌은 시계 해상도/중복 검증 신호다."""
         e = self.epoch()
         self.cache.put_premium(_premium(e, active=False, at=100.0), expected_epoch=e)
         conflict = self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
-        regression = self.cache.put_premium(_premium(e, active=False, at=50.0), expected_epoch=e)
-        self.assertNotEqual(conflict.reason, regression.reason)
 
-    def test_identity_conflict_at_equal_timestamp_is_rejected(self):
-        """premium만이 아니라 identity에도 같은 규칙이 적용돼야 한다."""
-        e = self.epoch()
-        first = _identity(e, disabled=True, at=100.0)
-        self.cache.put_identity(first, expected_epoch=e)
-        result = self.cache.put_identity(_identity(e, disabled=False, at=100.0), expected_epoch=e)
-        self.assertIsInstance(result, PutRejected)
-        self.assertEqual(result.reason, RejectReason.CONFLICT)
-        self.assertEqual(self.cache.snapshot(UID).identity, first)
+        other = StrictObservationCache()
+        e2 = other.snapshot(UID).epoch
+        other.put_premium(_premium(e2, active=False, at=100.0), expected_epoch=e2)
+        regression = other.put_premium(_premium(e2, active=False, at=50.0), expected_epoch=e2)
+        self.assertNotEqual(conflict.reason, regression.reason)
 
     def test_guard_is_per_concern(self):
         e = self.epoch()
