@@ -14,12 +14,23 @@ shield가 없으면 **한 WebSocket이 끊기는 것만으로 그 uid의 공유 
 다른 연결이 전부 실패한다. 그래서 task를 `ensure_future`로 **떼어 놓고**, 생성자를 포함한
 **모든** 대기자가 `shield`로 기다린다. 어느 대기자의 취소도 검증 자체를 죽이지 못한다.
 
-## 결과를 실어 나르지 않는다
+## 관측이 아니라 **종결 방식**을 나른다
 
-`run()`은 항상 `None`이다. 대기자는 flight가 끝난 뒤 **저장소에서 다시 읽어** 재파생한다.
-저장소가 유일한 rendezvous point이므로 (a) 쓰기가 거부됐으면 관측이 없어 자연히 재검증으로
-이어지고, (b) 판정이 **토큰마다** 달라지는 성질(§A6-1의 저장/파생 분리)이 그대로 유지된다 —
-관측을 값으로 넘기면 그 두 성질이 깨진다.
+`run()`은 factory의 반환값을 그대로 돌려준다. 계약은 **"관측을 나르지 않는다"**이지
+"아무것도 나르지 않는다"가 아니다 — 그 구분이 load-bearing이다:
+
+- **관측을 나르면 안 되는 이유**: 판정이 **토큰마다** 달라야 하는데(§A6-1의 저장/파생 분리),
+  관측을 값으로 넘기면 대기자가 남의 토큰 기준 판정을 물려받는다. 대기자는 flight 종료 후
+  **저장소에서 다시 읽어** 재파생해야 한다.
+- **종결 방식은 날라야 하는 이유** (실측): 안 나르면 대기자가 전부 "저장소에 아무것도 없네"를
+  보고 **각자 다시 owner가 된다**. 초안이 그랬고, 결과는 *합치기가 장애 때 완전히 사라지는 것*이었다:
+
+      정상 N=20 → provider 호출 **1**회
+      장애 N=14 → provider 호출 **14**회 (= single-flight 없는 것과 동일)
+      장애 N=20 → 그 재-루프가 검증기의 반복 예산을 소진해 `StrictVerifierConfigError` **6건**
+                  (= "죽은 API key" 경보가 provider 장애에 오발화)
+
+  종결 방식은 uid·epoch·concern에만 의존하고 **토큰과 무관**하므로 공유해도 판정이 섞이지 않는다.
 
 ## 키 granularity — `(uid, epoch, concern)`
 
@@ -50,6 +61,15 @@ import asyncio
 from typing import Awaitable, Callable, Hashable
 
 
+class SharedFlightCancelled(RuntimeError):
+    """공유 flight가 **내 요청이 아닌** 이유로 취소됐다 — 재시도 가능한 도메인 오류.
+
+    `CancelledError`를 그대로 퍼뜨리면 `BaseException`이라 배선의 `except Exception`을 통과해
+    대기자 전원의 registry 구독이 삭제된다. 그래서 여기서 도메인 오류로 바꾼다.
+    ⛔ 단 **내가 취소를 요청한 경우는 바꾸지 않는다** — 그건 진짜 취소이고 삼키면 종료가 막힌다.
+    """
+
+
 class StrictSingleFlight:
     """키가 같은 동시 호출을 하나의 detached task로 합친다."""
 
@@ -58,11 +78,11 @@ class StrictSingleFlight:
         self._started = 0
         self._joined = 0
 
-    async def run(self, key: Hashable, factory: Callable[[], Awaitable]) -> None:
-        """`key`에 대해 `factory()`를 **최대 1회** 실행하고, 끝날 때까지 기다린다.
+    async def run(self, key: Hashable, factory: Callable[[], Awaitable]):
+        """`key`에 대해 `factory()`를 **최대 1회** 실행하고, 그 **종결 방식**을 돌려준다.
 
-        반환값은 항상 `None`이다(위 "결과를 실어 나르지 않는다"). 예외는 모든 대기자에게 전파된다 —
-        합치기의 의미가 "같은 시도를 공유한다"이므로 실패도 공유하는 게 맞다.
+        factory는 관측이 아니라 종결 방식(저장됨 / 판정 불가 / 설정 오류)을 돌려줘야 한다.
+        예외는 모든 대기자에게 전파된다 — 합치기의 의미가 "같은 시도를 공유한다"이므로.
         """
         task = self._flights.get(key)
         if task is None:
@@ -77,8 +97,23 @@ class StrictSingleFlight:
 
         # ⚠️ 생성자도 **shield로** 기다린다. 생성자만 맨몸으로 기다리면 그 소켓이 끊길 때
         # 검증이 죽어, 기다리던 다른 연결이 전부 실패한다(실측으로 확인).
-        await asyncio.shield(task)
-        return None
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # ⚠️ shield는 **안쪽** task가 취소되면 그 취소를 모든 대기자에게 퍼뜨린다.
+            # `CancelledError`는 `BaseException`이라 `main.py:998`의 `except Exception`에
+            # 안 걸리고, 대기자 전원이 `finally`로 떨어져 **각 연결의 구독이 통째로 삭제**된다
+            # (C4 "registry 불변" 위반). flight는 detached라 주인이 없으므로, 내가 취소를
+            # 요청하지 않았는데 task가 취소됐다면 그건 **내 취소가 아니다** — 도메인 오류로 바꾼다.
+            # ⚠️ `_self_cancel_requests() == 0` 조건은 **판별 테스트를 만들지 못했다**.
+            # 갈리는 지점은 "task가 이미 취소로 종료됐고 **동시에** 내가 자기 취소를 요청한"
+            # 순간인데, shield가 안쪽 완료 즉시 깨우기 때문에 그 인터리빙을 구성하지 못했다.
+            # 그래도 남긴다 — 이 조건은 변환이 일어나는 범위를 **좁히기만** 하고(=fail-safe 방향),
+            # 없앴다가 진짜 종료 취소를 삼키면 프로세스가 안 죽는다. 필요하다고 주장하지는 않는다.
+            if task.cancelled() and _self_cancel_requests() == 0:
+                raise SharedFlightCancelled(f"공유 flight가 취소됐다: {key!r}") from None
+            raise
+
 
     def _release(self, key: Hashable, done: asyncio.Task) -> None:
         """완료된 task의 슬롯을 비운다.
@@ -96,3 +131,12 @@ class StrictSingleFlight:
     def stats(self) -> dict:
         """계측: `started`는 실제 authority 호출 횟수, `joined`는 그 덕에 아낀 횟수."""
         return {"started": self._started, "joined": self._joined}
+
+
+def _self_cancel_requests() -> int:
+    """현재 task에 걸린 취소 요청 수 (없으면 0). Python 3.11+의 `Task.cancelling()`."""
+    current = asyncio.current_task()
+    if current is None:
+        return 0
+    cancelling = getattr(current, "cancelling", None)
+    return cancelling() if cancelling is not None else 0

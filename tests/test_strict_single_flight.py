@@ -12,12 +12,16 @@
 """
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from app.strict_authz import InactiveReason
 from app.strict_cache import StrictObservationCache
-from app.strict_single_flight import StrictSingleFlight
+from app.strict_single_flight import SharedFlightCancelled, StrictSingleFlight
 from app.strict_verifier import (
     IdentityFound,
+    IdentityUnavailable,
+    StrictVerifierConfigError,
+    TemporarilyUnavailable,
     VerifiedActive,
     VerifiedInactive,
     verify_strict,
@@ -62,14 +66,18 @@ class TestCollapsing(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(runs), 4)
 
-    async def test_run_carries_no_value(self):
-        """§A5 계약 — 공유 flight는 관측을 실어 나르지 않는다. waiter는 저장소에서 다시 읽는다."""
+    async def test_run_carries_the_terminal_outcome(self):
+        """§A5 계약 — 나르는 것은 **종결 방식**이지 관측이 아니다.
+
+        관측을 나르면 대기자가 남의 토큰 기준 판정을 물려받는다(§A6-1). 반대로 종결 방식마저
+        안 나르면 대기자가 전부 각자 owner가 되어 **장애 때 합치기가 사라진다**(실측).
+        """
         flight = StrictSingleFlight()
 
         async def factory():
-            return "값을 돌려줘도"
+            return "unavailable"
 
-        self.assertIsNone(await flight.run(("u", 1, "premium"), factory))
+        self.assertEqual(await flight.run(("u", 1, "premium"), factory), "unavailable")
 
 
 class TestCancellationIsolation(unittest.IsolatedAsyncioTestCase):
@@ -251,6 +259,187 @@ class TestKeyIncludesEpoch(unittest.IsolatedAsyncioTestCase):
         )
         gate.set()
         await asyncio.gather(first, second, return_exceptions=True)
+
+
+class TestOutageStillCollapses(unittest.IsolatedAsyncioTestCase):
+    """⛔ 회귀 잠금 — 합치기의 이득이 **정확히 필요한 순간**에 사라지던 결함.
+
+    초안은 flight가 종결 방식을 안 날라서, 대기자들이 전부 "저장소에 아무것도 없네"를 보고
+    각자 다시 owner가 됐다. 실측:
+
+        정상 N=20 → provider 1회
+        장애 N=14 → provider **14회** (= single-flight 없는 것과 동일)
+        장애 N=20 → 그 재-루프가 반복 예산을 태워 `StrictVerifierConfigError` **6건**
+                    (= "죽은 API key" 경보가 provider 장애에 오발화)
+    """
+
+    async def _run_outage(self, n):
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+        calls = []
+
+        async def identity(uid):
+            calls.append(uid)
+            await asyncio.sleep(0.005)
+            return IdentityUnavailable(code="UNAVAILABLE")
+
+        async def premium(uid):
+            return Determined(is_premium=True)
+
+        results = await asyncio.gather(*(
+            verify_strict(UID, token_iat_seconds=IAT, clock=_Clock(), cache=cache,
+                          premium_provider=premium, identity_provider=identity,
+                          single_flight=flight)
+            for _ in range(n)
+        ), return_exceptions=True)
+        return calls, results
+
+    async def test_outage_collapses_to_one_provider_call(self):
+        calls, results = await self._run_outage(14)
+        self.assertEqual(len(calls), 1, "장애 때 합치기가 사라졌다")
+        self.assertTrue(all(isinstance(r, TemporarilyUnavailable) for r in results))
+
+    async def test_outage_does_not_fire_the_config_error_alarm(self):
+        """⛔ 그 경보는 '우리 설정 결함' 전용이다 — provider 장애에 울리면 운영자를 오도한다."""
+        calls, results = await self._run_outage(20)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            [r for r in results if isinstance(r, StrictVerifierConfigError)], [],
+            "provider 장애가 죽은-API-key 경보를 울렸다",
+        )
+
+
+class TestHungProviderDoesNotBrickTheKey(unittest.IsolatedAsyncioTestCase):
+    """⛔ 회귀 잠금 — 멈춘 provider가 그 키를 **영구 점유**하던 결함.
+
+    실측(수정 전): owner 취소 후에도 `in_flight=1`이 유지되고 뒤이은 연결 3건이 전부 매달렸다.
+    """
+
+    async def test_timeout_releases_the_slot_and_later_requests_get_an_answer(self):
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+        calls = []
+
+        async def identity(uid):
+            calls.append(uid)
+            await asyncio.Event().wait()   # 영원히
+
+        async def premium(uid):
+            return Determined(is_premium=True)
+
+        def _verify():
+            return verify_strict(UID, token_iat_seconds=IAT, clock=_Clock(), cache=cache,
+                                 premium_provider=premium, identity_provider=identity,
+                                 single_flight=flight)
+
+        with patch("app.strict_verifier.PROVIDER_TIMEOUT_SECONDS", 0.02):
+            owner = asyncio.create_task(_verify())
+            while not calls:
+                await asyncio.sleep(0)
+            owner.cancel()
+            try:
+                await owner
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(0.05)
+            self.assertEqual(flight.in_flight_count(), 0, "멈춘 flight가 키를 영구 점유했다")
+
+            later = await asyncio.gather(*(_verify() for _ in range(3)), return_exceptions=True)
+        self.assertTrue(
+            all(isinstance(r, TemporarilyUnavailable) for r in later),
+            "뒤이은 연결이 답을 못 받고 매달렸다",
+        )
+
+
+class TestFlightCancellationIsNotClientCancellation(unittest.IsolatedAsyncioTestCase):
+    """⛔ `CancelledError`는 `BaseException`이라 배선의 `except Exception`을 통과한다.
+
+    그대로 퍼뜨리면 대기자 전원이 `finally`로 떨어져 **각 연결의 구독이 통째로 삭제**된다
+    (C4 "registry 불변" 위반). flight는 detached라 주인이 없으므로 도메인 오류로 바꾼다.
+    """
+
+    async def test_shared_flight_cancellation_becomes_a_domain_error(self):
+        flight = StrictSingleFlight()
+        started = asyncio.Event()
+        key = ("u", 1, "premium")
+
+        async def factory():
+            started.set()
+            await asyncio.sleep(10)
+
+        waiter = asyncio.create_task(flight.run(key, factory))
+        await started.wait()
+        await asyncio.sleep(0)
+        flight._flights[key].cancel()          # 대기자가 아니라 **flight 자체**를 취소
+
+        with self.assertRaises(SharedFlightCancelled):
+            await waiter
+
+    async def test_self_cancellation_still_propagates(self):
+        """⛔ 내가 요청한 취소까지 삼키면 종료가 막힌다."""
+        flight = StrictSingleFlight()
+        started = asyncio.Event()
+
+        async def factory():
+            started.set()
+            await asyncio.sleep(10)
+
+        waiter = asyncio.create_task(flight.run(("u", 1, "premium"), factory))
+        await started.wait()
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+
+    async def test_self_cancellation_wins_even_when_the_flight_is_also_cancelled(self):
+        """둘 다 취소된 경우에도 `CancelledError`가 나온다.
+
+        ⚠️ 이건 **판별 테스트가 아니다** — `_self_cancel_requests()` 조건을 지워도 통과한다.
+        `waiter.cancel()` 시점엔 task가 아직 '취소로 종료' 상태가 아니라 `task.cancelled()`가
+        False이기 때문이다. 갈리는 인터리빙은 구성하지 못했다(구현 주석 참조). 현재 동작을
+        기록해 두는 용도다.
+        """
+        flight = StrictSingleFlight()
+        started = asyncio.Event()
+        key = ("u", 1, "premium")
+
+        async def factory():
+            started.set()
+            await asyncio.sleep(10)
+
+        waiter = asyncio.create_task(flight.run(key, factory))
+        await started.wait()
+        await asyncio.sleep(0)
+
+        waiter.cancel()                     # 내가 요청한 취소
+        flight._flights[key].cancel()       # 동시에 flight도 취소
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+
+
+class TestConfigErrorInstancesAreNotShared(unittest.IsolatedAsyncioTestCase):
+    """⛔ 예외 **인스턴스**를 공유하면 배선이 `__context__`를 얹어 한 연결의 로그에 다른 연결의
+    상태가 찍힌다. 메시지만 넘기고 각자 자기 인스턴스로 raise한다."""
+
+    async def test_each_caller_gets_its_own_exception_object(self):
+        from app.subscription import ProviderMisconfigured
+
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+
+        async def identity(uid):
+            return IdentityFound(disabled=False, tokens_valid_after_ms=WATERMARK_MS)
+
+        async def premium(uid):
+            await asyncio.sleep(0.005)
+            return ProviderMisconfigured(status=401)
+
+        results = await asyncio.gather(*(
+            verify_strict(UID, token_iat_seconds=IAT, clock=_Clock(), cache=cache,
+                          premium_provider=premium, identity_provider=identity,
+                          single_flight=flight)
+            for _ in range(3)
+        ), return_exceptions=True)
+
+        self.assertTrue(all(isinstance(r, StrictVerifierConfigError) for r in results))
+        self.assertEqual(len({id(r) for r in results}), 3, "예외 인스턴스가 공유됐다")
 
 
 class TestVerifierIntegration(unittest.IsolatedAsyncioTestCase):

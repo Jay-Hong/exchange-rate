@@ -43,7 +43,9 @@ registry 불변 + lease 미연장)가 성립하지 않고, 장애가 곧 대량 
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from enum import Enum
 from typing import Union
 
 from app.strict_authz import (
@@ -80,6 +82,20 @@ MAX_CONTENTION_RETRIES = 3
 # 논리 버그 대비 backstop. 위 규칙상 반복은 `(경쟁 예산+1) × concern 2개`로 이미 닫히므로
 # 여기에 도달하면 **우리 버그**다 — 조용히 retryable로 접지 않고 시끄럽게 실패시킨다.
 _ITERATION_BACKSTOP = 2 * (MAX_CONTENTION_RETRIES + 2) + 4
+
+# provider 1회 호출의 시간 상한. §D6의 ack timeout이 **10초**이고 이 루프는 identity → premium을
+# **직렬로** 부르므로, 두 번 다 상한을 채워도 8초로 그 안에 들어온다.
+# ⚠️ 상한이 없으면 멈춘 provider가 그 (uid, epoch, concern) flight를 **영구 점유**한다 —
+# 실측: owner 취소 후에도 `in_flight=1`이 유지되고 뒤이은 연결 3건이 전부 매달렸다.
+PROVIDER_TIMEOUT_SECONDS = 4.0
+
+
+class _FlightOutcome(str, Enum):
+    """flight의 **종결 방식**. 관측이 아니라서 대기자와 공유해도 판정이 섞이지 않는다."""
+
+    STORED = "stored"            # 관측이 저장됐다 → 저장소에서 다시 읽어 재파생
+    UNAVAILABLE = "unavailable"  # authority 판정 불가 → 그대로 TemporarilyUnavailable
+    CONFIG_ERROR = "config"      # 우리 설정·계약 오류 → 각자 **자기 인스턴스**로 raise
 
 
 # ── identity authority 결과 (premium 쪽 typed provider와 대칭) ──────────────
@@ -264,45 +280,56 @@ async def verify_strict(
 
         # ⚠️ 조회 결과가 판정 불가면 **아무것도 저장하지 않는다**.
         # 판정 불가를 저장하면 그 창 동안 재시도가 무의미해진다.
-        outcome: dict = {}
+        put_result: dict = {}
+        config_message: dict = {}
 
-        async def _fetch_and_store() -> None:
-            """A5가 합치는 단위 — authority 조회 + CAS 저장까지가 한 flight다.
-
-            조회와 저장을 한 덩어리로 두는 건 **설계 선택**이다 — 합쳐진 대기자가 같은 관측을
-            각자 쓰는 상황 자체를 없앤다. (저장소의 CAS·동률 규칙이 그 상황도 처리하므로
-            "이렇게 안 하면 깨진다"고 주장하지는 않는다.)
-            """
-            if concern is Concern.IDENTITY:
-                obs = _identity_observation(
-                    await identity_provider(uid), uid=uid, snapshot=snapshot, clock=clock
-                )
-            else:
-                obs = _premium_observation(
-                    await premium_provider(uid), uid=uid, snapshot=snapshot, clock=clock
-                )
-            outcome["observation"] = obs
+        async def _fetch_and_store():
+            """A5가 합치는 단위 — authority 조회 + CAS 저장. **종결 방식**을 돌려준다."""
+            provider = identity_provider if concern is Concern.IDENTITY else premium_provider
+            to_observation = (
+                _identity_observation if concern is Concern.IDENTITY else _premium_observation
+            )
+            try:
+                # ⚠️ provider 호출 자체에 상한을 건다. 멈춘 provider가 flight를 영구 점유하면
+                # 그 키가 죽고 뒤이은 연결이 전부 매달린다(실측).
+                raw = await asyncio.wait_for(provider(uid), timeout=PROVIDER_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                return _FlightOutcome.UNAVAILABLE
+            try:
+                obs = to_observation(raw, uid=uid, snapshot=snapshot, clock=clock)
+            except StrictVerifierConfigError as exc:
+                # ⚠️ 예외 **인스턴스**를 공유하면 배선이 그 위에 `__context__`를 얹어 한 연결의
+                # 로그에 다른 연결의 상태가 찍힌다. 메시지만 넘겨 각자 자기 인스턴스로 raise한다.
+                config_message["message"] = str(exc)
+                return _FlightOutcome.CONFIG_ERROR
             if obs is None:
-                return
-            outcome["put"] = (
+                return _FlightOutcome.UNAVAILABLE
+            put_result["put"] = (
                 cache.put_identity(obs, expected_epoch=snapshot.epoch)
                 if concern is Concern.IDENTITY
                 else cache.put_premium(obs, expected_epoch=snapshot.epoch)
             )
+            return _FlightOutcome.STORED
 
         if single_flight is None:
-            await _fetch_and_store()
+            flight_outcome = await _fetch_and_store()
         else:
-            # ⚠️ flight가 끝나도 **그 결과값을 쓰지 않는다** — 다음 반복이 저장소에서 다시 읽어
-            # 재파생한다(§A5). 합쳐진 대기자는 `outcome`이 비어 있는 게 정상이다.
-            await single_flight.run((uid, snapshot.epoch, concern), _fetch_and_store)
-            if not outcome:
-                continue  # 다른 요청이 대신 처리했다 — 저장소에서 확인하러 돌아간다
+            flight_outcome = await single_flight.run(
+                (uid, snapshot.epoch, concern), _fetch_and_store
+            )
 
-        if outcome["observation"] is None:
+        if flight_outcome is _FlightOutcome.CONFIG_ERROR:
+            raise StrictVerifierConfigError(
+                config_message.get("message", f"{concern.value} provider 설정·계약 오류")
+            )
+        if flight_outcome is _FlightOutcome.UNAVAILABLE:
+            # ⚠️ 합쳐진 대기자도 **여기서 끝낸다**. 저장소를 다시 보게 하면 "아무것도 없네"를 보고
+            # 각자 다시 owner가 되어, 장애 때 합치기가 사라지고 반복 예산까지 태운다(실측).
             return TemporarilyUnavailable(concern=concern)
 
-        if isinstance(outcome["put"], PutAccepted):
+        if "put" not in put_result:
+            continue  # 다른 요청이 저장을 마쳤다 — 저장소에서 확인하러 돌아간다
+        if isinstance(put_result["put"], PutAccepted):
             written_in_epoch.add(concern)
             continue  # 진행 — 다음 반복이 나머지 concern을 본다
         contention_left -= 1
