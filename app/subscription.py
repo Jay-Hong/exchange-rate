@@ -2,10 +2,11 @@
 
 # 표준 라이브러리
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 import logging
-from typing import Optional
+from typing import Optional, Union
 
 # 서드파티 라이브러리
 import httpx
@@ -138,16 +139,83 @@ def invalidate_user_cache(user_id: str) -> None:
     _pending.clear(user_id)
 
 
-async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[bool, bool]:
+@dataclass(frozen=True)
+class Determined:
+    """RevenueCat이 **authoritative하게 판정**했다 (200 파싱 성공, 또는 404=신규 사용자)."""
+
+    is_premium: bool
+
+
+@dataclass(frozen=True)
+class ProviderUnavailable:
+    """일시적 장애 — 재시도로 나을 수 있다. 408 / 429 / 5xx / 네트워크 예외.
+
+    ⚠️ `status`는 HTTP 응답이 있었을 때만 채운다. 네트워크 예외는 응답 자체가 없으므로 `None` —
+    있는 척하면 텔레메트리가 거짓이 된다.
     """
-    RevenueCat REST API로 구독 상태 확인 (Async)
-    Returns: (is_premium, should_cache)
-      - should_cache=True: 정상 응답, 캐시해도 안전
-      - should_cache=False: 일시적 오류, 캐시하면 유료 사용자 차단 위험
+
+    status: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ProviderMisconfigured:
+    """**우리 설정** 문제 — 401 / 403 / API key 미설정. 재시도로 낫지 않는다.
+
+    ⚠️ 이걸 `ProviderUnavailable`로 접으면 클라가 영원히 재시도하고 운영자는 알람을 못 받는다.
+    반대로 429를 여기 넣으면 rate limit이 **영구 설정 오류로 오분류**된다.
+    """
+
+    status: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class BadRequest:
+    """400 — 우리가 잘못 보냈다. 프로그래밍 오류이지 사용자 상태가 아니다."""
+
+    status: int = 400
+
+
+@dataclass(frozen=True)
+class ProtocolViolation:
+    """응답이 계약을 벗어났다 — JSON/날짜 파싱 실패, 예상 밖 4xx. 계약 변경 신호."""
+
+    detail: str
+
+
+# strict WS 인가 경로(§8.1 A6)가 소비할 축. REST는 아래 adapter로 되접는다.
+RevenueCatResult = Union[
+    Determined, ProviderUnavailable, ProviderMisconfigured, BadRequest, ProtocolViolation
+]
+
+# 재시도로 나을 수 있는 상태 코드 (§8.1 A4-1).
+# ⚠️ "4xx 대 5xx"로 나누지 말 것 — 408·429가 4xx라 config 오류로 오분류된다.
+_TRANSIENT_STATUSES = frozenset({408, 429})
+_MISCONFIGURED_STATUSES = frozenset({401, 403})
+
+
+async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatResult:
+    """RevenueCat 조회 결과를 **분류해서** 돌려준다 (ADR-039 §8.1 A4-1).
+
+    구 `_check_revenuecat_entitlement`는 성격이 다른 5개 실패를 전부 `(False, False)`로
+    평탄화했다 — config 오류 / 계약 위반 / transient가 구분되지 않아, strict 경로가 그대로
+    소비하면 §8.1 A6의 3-bucket 계약(terminal / transient / 내부 예외)이 깨진다.
+
+    ⚠️ **축 주의**: `expires_dt > clock.wall()`의 wall 축은 **구독 유효성** 판정이라 맞다.
+    lease horizon의 monotonic 축(§8.1 A2)과 목적이 다르므로 "일관성" 명목으로 바꾸지 말 것.
+    비교는 **strict `>`** — 정확히 만료 시각이면 만료다(characterization으로 잠금).
+
+    ⚠️ **`premium` 객체의 truthiness가 분기를 가른다** — 빈 dict는 "구독 없음"이지 lifetime이
+    아니다. lifetime은 truthy 객체에 `expires_date`가 없는 경우다(리팩터 전 실측 확인).
+
+    ⚠️ **N-3 이관 예정**: strict 소비자가 생기면 이 provider는 leaf 모듈로 옮긴다 —
+    `invalidate_user_cache`가 strict cache를 무효화하게 되면(A4) `subscription → strict`
+    엣지가 생겨, strict가 provider 때문에 subscription을 import하면 **순환**이 된다
+    (`app/clock.py`가 분리된 것과 같은 이유). 지금 옮기지 않는 이유는 이 커밋을
+    **behavior-change-0 증명에만** 집중시키기 위해서다.
     """
     if not REVENUECAT_API_KEY:
         logger.error("REVENUECAT_API_KEY 미설정")
-        return (False, False)
+        return ProviderMisconfigured()
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -160,47 +228,76 @@ async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[
             )
 
         if response.status_code == 200:
-            # ✅ 성공: 구독 상태 확인 후 캐시
             try:
                 data = response.json()
             except ValueError:
                 logger.warning("RevenueCat API JSON 파싱 실패", extra={"user_id": user_id})
-                return (False, False)
+                return ProtocolViolation(detail="json")
 
             entitlements = data.get("subscriber", {}).get("entitlements", {})
             premium = entitlements.get("premium")
 
             if not premium:
-                return (False, True)  # 구독 없음 (정상 확인)
+                return Determined(is_premium=False)  # 구독 없음 (정상 확인)
 
             expires = premium.get("expires_date")
             if not expires:
                 # lifetime entitlement
-                return (True, True)
+                return Determined(is_premium=True)
 
             try:
                 expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
             except Exception:
                 logger.warning("RevenueCat expires_date 파싱 실패", extra={"user_id": user_id})
-                return (False, False)
+                return ProtocolViolation(detail="expires_date")
 
-            return (expires_dt > clock.wall(), True)
+            return Determined(is_premium=expires_dt > clock.wall())
 
         if response.status_code == 404:
             # ✅ 사용자 없음: 새 사용자, "비구독"으로 캐시 OK
-            return (False, True)
+            return Determined(is_premium=False)
 
-        # ❌ 4xx/5xx 오류: 캐시하지 않음 (일시적 장애 가능성)
+        status = response.status_code
         logger.warning(
             "RevenueCat API 응답 오류",
-            extra={"status": response.status_code, "user_id": user_id},
+            extra={"status": status, "user_id": user_id},
         )
-        return (False, False)
+        if status in _TRANSIENT_STATUSES or status >= 500:
+            return ProviderUnavailable(status=status)
+        if status in _MISCONFIGURED_STATUSES:
+            return ProviderMisconfigured(status=status)
+        if status == 400:
+            return BadRequest()
+        return ProtocolViolation(detail=f"unexpected status {status}")
 
     except Exception as e:
-        # ❌ 네트워크 오류: 캐시하지 않음
         logger.warning("RevenueCat API 호출 실패", extra={"error": str(e)})
-        return (False, False)
+        return ProviderUnavailable()
+
+
+def _result_to_legacy_tuple(result: RevenueCatResult) -> tuple[bool, bool]:
+    """REST adapter — typed 결과를 기존 `(is_premium, should_cache)`로 **그대로** 되접는다.
+
+    `Determined`만 `should_cache=True`이고 나머지 4변종은 전부 `(False, False)`다.
+    구분력은 strict(N-3)가 쓰고, **REST의 관측 가능한 동작은 한 비트도 바뀌지 않는다**(A4).
+    """
+    if isinstance(result, Determined):
+        return (result.is_premium, True)
+    return (False, False)
+
+
+async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[bool, bool]:
+    """
+    RevenueCat REST API로 구독 상태 확인 (Async)
+    Returns: (is_premium, should_cache)
+      - should_cache=True: 정상 응답, 캐시해도 안전
+      - should_cache=False: 일시적 오류, 캐시하면 유료 사용자 차단 위험
+
+    ⚠️ 이 함수는 **REST 전용 adapter**로 남는다. `tests/test_subscription_clock.py`가
+    `patch.object(subscription, "_check_revenuecat_entitlement", ...)`로 이 이름을 잡으므로
+    모듈 레벨 함수 위치를 옮기지 말 것. strict 경로는 `fetch_revenuecat_result`를 쓴다.
+    """
+    return _result_to_legacy_tuple(await fetch_revenuecat_result(user_id, clock=clock))
 
 
 async def verify_premium_status(user_id: str, *, clock: Optional[Clock] = None) -> PremiumStatus:
