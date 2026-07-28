@@ -89,6 +89,67 @@ _fb_auth.InvalidIdTokenError = _StubInvalidIdTokenError
 _fb_auth.CertificateFetchError = _StubCertificateFetchError
 _fb_exceptions.FirebaseError = _StubFirebaseError
 
+# ── identity provider(A6)가 분기하는 예외들 ────────────────────────────────
+# ⚠️ MRO와 생성자 arity는 **v6.9.0 소스에서 직접 읽었다**:
+#   exceptions.py  : NotFoundError / PermissionDeniedError / ResourceExhaustedError /
+#                    UnavailableError 는 모두 FirebaseError 직계
+#   _auth_utils.py : UserNotFoundError·ConfigurationNotFoundError·TenantNotFoundError 가
+#                    **NotFoundError의 형제** — 이게 provider 매핑의 핵심 함정이다
+#                    (형제를 NotFound로 접으면 프로젝트 오설정이 "전 계정 삭제"가 된다)
+#   `UserNotFoundError.__init__(self, message)` 만 arity가 다르다.
+
+
+class _StubNotFoundError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "NOT_FOUND", message, cause, http_response)
+
+
+class _StubPermissionDeniedError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "PERMISSION_DENIED", message, cause, http_response)
+
+
+class _StubResourceExhaustedError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "RESOURCE_EXHAUSTED", message, cause, http_response)
+
+
+class _StubUnavailableError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "UNAVAILABLE", message, cause, http_response)
+
+
+class _StubUserNotFoundError(_StubNotFoundError):
+    def __init__(self, message):            # ⚠️ SDK와 동일하게 **message 하나만**
+        _StubNotFoundError.__init__(self, message)
+
+
+class _StubConfigurationNotFoundError(_StubNotFoundError):
+    pass
+
+
+class _StubTenantNotFoundError(_StubNotFoundError):
+    pass
+
+
+class _StubInsufficientPermissionError(_StubPermissionDeniedError):
+    pass
+
+
+class _StubTooManyAttemptsTryLaterError(_StubResourceExhaustedError):
+    pass
+
+
+_fb_exceptions.NotFoundError = _StubNotFoundError
+_fb_exceptions.PermissionDeniedError = _StubPermissionDeniedError
+_fb_exceptions.ResourceExhaustedError = _StubResourceExhaustedError
+_fb_exceptions.UnavailableError = _StubUnavailableError
+_fb_auth.UserNotFoundError = _StubUserNotFoundError
+_fb_auth.ConfigurationNotFoundError = _StubConfigurationNotFoundError
+_fb_auth.TenantNotFoundError = _StubTenantNotFoundError
+_fb_auth.InsufficientPermissionError = _StubInsufficientPermissionError
+_fb_auth.TooManyAttemptsTryLaterError = _StubTooManyAttemptsTryLaterError
+
 # ⚠️ sys.modules 등록만으로는 부족하다: `from firebase_admin import auth`(app/main.py)는 부모
 #    MagicMock의 **자동 생성 속성**을 돌려줘 sys.modules 항목과 **다른 객체**가 된다(실증).
 #    반면 `from firebase_admin.exceptions import FirebaseError`(fcm.py)는 sys.modules를 탄다.
@@ -120,8 +181,16 @@ except ImportError:
     class _StubTransportError(_StubGoogleAuthError):
         pass
 
+    class _StubRefreshError(_StubGoogleAuthError):
+        pass
+
+    class _StubDefaultCredentialsError(_StubGoogleAuthError):
+        pass
+
     _google_auth_exceptions.GoogleAuthError = _StubGoogleAuthError
     _google_auth_exceptions.TransportError = _StubTransportError
+    _google_auth_exceptions.RefreshError = _StubRefreshError
+    _google_auth_exceptions.DefaultCredentialsError = _StubDefaultCredentialsError
     _google_auth.exceptions = _google_auth_exceptions
     _google.auth = _google_auth
     sys.modules["google"] = _google

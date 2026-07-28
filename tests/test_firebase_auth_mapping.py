@@ -64,6 +64,43 @@ class TestStubFidelity(unittest.TestCase):
         # 형제로 만들면 except 순서 회귀를 못 잡는다 — 그 실패를 여기서 먼저 드러낸다
         self.assertFalse(issubclass(fb_auth.CertificateFetchError, fb_auth.InvalidIdTokenError))
 
+    def test_identity_provider_error_mro_matches_sdk(self):
+        """A6 identity provider가 분기하는 예외들 — v6.9.0 소스에서 읽은 계약.
+
+        ⛔ 핵심: `UserNotFoundError`와 `ConfigurationNotFoundError`/`TenantNotFoundError`가
+        **형제**다. 형제를 NotFound로 접으면 프로젝트 오설정이 "전 계정 삭제"가 된다.
+        """
+        self.assertTrue(issubclass(fb_auth.UserNotFoundError, fb_exceptions.NotFoundError))
+        self.assertTrue(issubclass(fb_auth.ConfigurationNotFoundError, fb_exceptions.NotFoundError))
+        self.assertTrue(issubclass(fb_auth.TenantNotFoundError, fb_exceptions.NotFoundError))
+        for sibling in (fb_auth.ConfigurationNotFoundError, fb_auth.TenantNotFoundError):
+            self.assertFalse(
+                issubclass(sibling, fb_auth.UserNotFoundError),
+                "형제를 하위로 만들면 '오설정 = 전 계정 삭제' 회귀를 못 잡는다",
+            )
+        self.assertTrue(
+            issubclass(fb_auth.InsufficientPermissionError, fb_exceptions.PermissionDeniedError)
+        )
+        self.assertTrue(
+            issubclass(fb_auth.TooManyAttemptsTryLaterError, fb_exceptions.ResourceExhaustedError)
+        )
+        for cls in (fb_exceptions.NotFoundError, fb_exceptions.PermissionDeniedError,
+                    fb_exceptions.ResourceExhaustedError, fb_exceptions.UnavailableError):
+            self.assertTrue(issubclass(cls, fb_exceptions.FirebaseError))
+
+    def test_user_not_found_takes_only_a_message(self):
+        """SDK의 `UserNotFoundError.__init__(self, message)` — 형제들과 arity가 다르다."""
+        fb_auth.UserNotFoundError("gone")
+        fb_auth.ConfigurationNotFoundError("cfg", None, None)
+
+    def test_google_auth_credential_errors_are_not_firebase_errors(self):
+        """⛔ `except FirebaseError`만 쓰면 서비스 계정 키 폐기가 통째로 새어 나간다."""
+        from google.auth import exceptions as ga
+
+        for cls in (ga.RefreshError, ga.DefaultCredentialsError, ga.TransportError):
+            self.assertTrue(issubclass(cls, ga.GoogleAuthError))
+            self.assertFalse(issubclass(cls, fb_exceptions.FirebaseError))
+
     def test_module_identity_is_shared(self):
         """`firebase_admin.auth`와 `firebase_admin.exceptions`가 같은 루트를 공유해야 한다.
 
