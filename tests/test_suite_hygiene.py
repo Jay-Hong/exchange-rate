@@ -35,17 +35,63 @@ import unittest
 
 _TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
-# guard 본문이 이걸 호출하면 **그 지점에서 스위트가 확정된다**(또는 프로세스가 끝난다).
-# `unittest.main`은 `exit=` 값과 무관하게 포함한다 — 실측상 `exit=False`도 위험하기 때문이다.
-_SUITE_RUNNERS = frozenset({
-    ("unittest", "main"),
-    ("main",),          # `from unittest import main`
-})
-_TERMINAL_CALLS = _SUITE_RUNNERS | frozenset({
-    ("sys", "exit"),
-    ("exit",),
-    ("os", "_exit"),
-})
+# 이걸 호출하면 **그 지점에서 스위트가 확정된다**(또는 프로세스가 끝난다).
+# `unittest.main`은 `exit=` 값과 무관하다 — 실측상 `exit=False`도 위험하기 때문이다.
+#
+# ⚠️ 이름을 **하드코딩하지 않는다**. `import unittest as ut` / `from unittest import main as run`
+# 같은 alias는 문자열 비교로 못 잡는다(실측: 정의 3 / 직접 실행 `Ran 1 test`인데 위반 0).
+# 그래서 각 파일의 import를 읽어 **그 파일에서 실제로 그 함수를 가리키는 이름**을 만든다.
+_SUITE_ORIGINS = {("unittest", "main")}
+_EXIT_ORIGINS = {("sys", "exit"), ("os", "_exit")}
+
+
+def _resolve_runner_names(tree: ast.Module) -> tuple[set, set]:
+    """(스위트 실행 이름, terminal 이름) — 이 모듈의 import를 반영해 해석한다."""
+    suite: set = set()
+    terminal: set = {("exit",)}  # builtin
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                for mod, func in _SUITE_ORIGINS:
+                    if alias.name == mod:
+                        suite.add((local, func))
+                for mod, func in _EXIT_ORIGINS:
+                    if alias.name == mod:
+                        terminal.add((local, func))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if (node.module, alias.name) in _SUITE_ORIGINS:
+                    suite.add((local,))
+                if (node.module, alias.name) in _EXIT_ORIGINS:
+                    terminal.add((local,))
+    return suite, terminal | suite
+
+
+def _is_main_guard(node: ast.stmt) -> bool:
+    """정확히 `__name__ == "__main__"` 인가 (좌우 순서는 허용).
+
+    ⚠️ `"__main__" in ast.dump(...)` 같은 문자열 매칭은 **부정형을 guard로 오인**한다.
+    실측: `if __name__ != "__main__": unittest.main(...)`은 직접 실행 시 **아무것도 돌리지
+    않고**(출력 없음, exit 0) import 시에는 스위트를 돌린다 — 정확히 반대다. 그런데 구
+    검사기는 이걸 정상 guard로 보고 세 검사 모두 통과시켰다.
+    """
+    if not isinstance(node, ast.If):
+        return False
+    test = node.test
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return False
+    if not isinstance(test.ops[0], ast.Eq):
+        return False
+    left, right = test.left, test.comparators[0]
+    return any(
+        isinstance(name, ast.Name)
+        and name.id == "__name__"
+        and isinstance(const, ast.Constant)
+        and const.value == "__main__"
+        for name, const in ((left, right), (right, left))
+    )
 
 
 def _dotted_call_name(node: ast.Call) -> tuple[str, ...] | None:
@@ -66,7 +112,7 @@ _CONDITIONAL_STMTS = (
 )
 
 
-def _is_terminal_guard(guard: ast.If) -> bool:
+def _is_terminal_guard(guard: ast.If, terminal: set) -> bool:
     """이 guard가 실행되면 뒤의 정의가 스위트에 못 들어가는가.
 
     ⚠️ guard 본문의 **직속 문장만** 본다. 조건부 안에 있는 호출은 실행된다는 보장이 없어
@@ -83,7 +129,7 @@ def _is_terminal_guard(guard: ast.If) -> bool:
         if isinstance(stmt, _CONDITIONAL_STMTS):
             continue
         for node in ast.walk(stmt):
-            if isinstance(node, ast.Call) and _dotted_call_name(node) in _TERMINAL_CALLS:
+            if isinstance(node, ast.Call) and _dotted_call_name(node) in terminal:
                 return True
     return False
 
@@ -114,14 +160,12 @@ def _outermost_definitions_after(stmts, anchor_lineno: int, out: list[str]) -> N
             _outermost_definitions_after(handler.body, anchor_lineno, out)
 
 
-def _terminal_guards(tree: ast.Module) -> list[ast.If]:
+def _terminal_guards(tree: ast.Module, terminal: set) -> list[ast.If]:
     """top-level `__main__` guard 중 **terminal**인 것만 (등장 순서)."""
     return [
         node
         for node in tree.body
-        if isinstance(node, ast.If)
-        and "__main__" in ast.dump(node.test)
-        and _is_terminal_guard(node)
+        if _is_main_guard(node) and _is_terminal_guard(node, terminal)
     ]
 
 
@@ -142,10 +186,10 @@ def _definitions_after_main_guard(source: str) -> list[str]:
     끝으로 옮기는 것으로 항상 해소된다.
     """
     tree = ast.parse(source)
-    terminal = _terminal_guards(tree)
-    if not terminal:
+    guards = _terminal_guards(tree, _resolve_runner_names(tree)[1])
+    if not guards:
         return []
-    anchor = terminal[0].lineno
+    anchor = guards[0].lineno
     offenders: list[str] = []
     for node in tree.body:
         if node.lineno <= anchor:
@@ -170,19 +214,38 @@ def _unguarded_suite_runners(source: str) -> list[int]:
     각 스크립트의 `main(...)`을 부르는 정상 코드였다.
     """
     tree = ast.parse(source)
+    suite, _ = _resolve_runner_names(tree)
     lines: list[int] = []
-    for node in tree.body:
-        if isinstance(node, ast.If) and "__main__" in ast.dump(node.test):
-            continue
+    _scan_for_unguarded(tree.body, False, suite, lines)
+    return sorted(lines)
+
+
+def _scan_for_unguarded(stmts, in_guard: bool, suite: set, out: list[int]) -> None:
+    """진짜 `__main__` guard 안이 아닌 곳의 스위트 실행 호출을 모은다.
+
+    ⚠️ 조건부라고 무조건 넘기면 안 된다 — `if __name__ != "__main__":` 안의 호출은 import
+    시점에 **실제로 실행된다**(실측). 반대로 진짜 guard의 `else` 가지는 보호되지 않는다.
+    """
+    for node in stmts:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+            continue  # 메서드 본문은 import 시점에 실행되지 않는다
         if isinstance(node, _CONDITIONAL_STMTS):
+            body_guard = in_guard or _is_main_guard(node)
+            for field in ("body", "orelse", "finalbody"):
+                branch = getattr(node, field, None)
+                if isinstance(branch, list):
+                    _scan_for_unguarded(
+                        branch, body_guard if field == "body" else in_guard, suite, out
+                    )
+            for handler in getattr(node, "handlers", None) or []:
+                _scan_for_unguarded(handler.body, in_guard, suite, out)
             continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Call) and _dotted_call_name(sub) in _SUITE_RUNNERS:
-                lines.append(node.lineno)
+        if in_guard:
+            continue
+        for sub_node in ast.walk(node):
+            if isinstance(sub_node, ast.Call) and _dotted_call_name(sub_node) in suite:
+                out.append(node.lineno)
                 break
-    return lines
 
 
 def _extra_terminal_guards(source: str) -> int:
@@ -192,7 +255,8 @@ def _extra_terminal_guards(source: str) -> int:
     정의를 "끝에 guard가 있으니 괜찮다"고 오독하게 만든다 — 실제로 그 배치가 이 검사기의
     구 버전을 통과시켰다. 배치 자체를 금지한다.
     """
-    return max(0, len(_terminal_guards(ast.parse(source))) - 1)
+    tree = ast.parse(source)
+    return max(0, len(_terminal_guards(tree, _resolve_runner_names(tree)[1])) - 1)
 
 
 _GUARD = 'if __name__ == "__main__":\n    unittest.main()\n'
@@ -333,6 +397,59 @@ class TestNoDefinitionsAfterMainGuard(unittest.TestCase):
             "class TestMain(unittest.TestCase):\n"
             "    def test_runs(self):\n        main(['--flag'])\n" + _GUARD
         )
+        self.assertEqual(_unguarded_suite_runners(src), [])
+
+    def test_negated_guard_is_not_a_guard(self):
+        """⛔ 회귀 잠금 — `!=` 오타. 직접 실행은 **아무것도 안 돌리고**(출력 없음, exit 0)
+        import 시 스위트가 돈다. 구 문자열 매칭은 이걸 정상 guard로 봤다."""
+        src = (
+            "import unittest\n"
+            "class TestOne(unittest.TestCase):\n    def test_a(self):\n        pass\n"
+            'if __name__ != "__main__":\n    unittest.main(exit=False)\n'
+        )
+        self.assertEqual(_unguarded_suite_runners(src), [6])
+        self.assertEqual(_terminal_guards(ast.parse(src), _resolve_runner_names(ast.parse(src))[1]), [])
+
+    def test_reversed_operand_order_is_still_a_guard(self):
+        """`"__main__" == __name__`도 정상 guard다 — 잡으면 오탐."""
+        src = 'import unittest\nif "__main__" == __name__:\n    unittest.main()\n'
+        self.assertEqual(_unguarded_suite_runners(src), [])
+        self.assertEqual(len(_terminal_guards(ast.parse(src), _resolve_runner_names(ast.parse(src))[1])), 1)
+
+    def test_module_alias_is_resolved(self):
+        """⛔ 회귀 잠금 — `import unittest as ut`(실측 Ran 1 / 정의 3)."""
+        src = (
+            "import unittest as ut\n"
+            'if __name__ == "__main__":\n    ut.main()\n'
+            "\nclass TestAfter(ut.TestCase):\n    pass\n"
+        )
+        self.assertEqual(_definitions_after_main_guard(src), ["TestAfter"])
+
+    def test_function_alias_is_resolved(self):
+        """⛔ 회귀 잠금 — `from unittest import main as run`(실측 Ran 1 / 정의 3)."""
+        src = (
+            "from unittest import main as run\nimport unittest\n"
+            'if __name__ == "__main__":\n    run()\n'
+            "\nclass TestAfter(unittest.TestCase):\n    pass\n"
+        )
+        self.assertEqual(_definitions_after_main_guard(src), ["TestAfter"])
+
+    def test_guard_else_branch_is_not_protected(self):
+        """guard의 `else`는 **import 시 실행된다** — 보호 구간이 아니다.
+
+        실측: 직접 실행은 아무것도 안 돌리고(`Ran` 없음), import 시 `Ran 1 test`.
+        (mutation N6 생존으로 발견된 미검증 속성)
+        """
+        src = (
+            "import unittest\n"
+            "class TestOne(unittest.TestCase):\n    def test_a(self):\n        pass\n"
+            'if __name__ == "__main__":\n    pass\nelse:\n    unittest.main(exit=False)\n'
+        )
+        self.assertEqual(_unguarded_suite_runners(src), [8])
+
+    def test_unrelated_main_import_is_not_a_suite_runner(self):
+        """`from mymod import main`은 스위트 실행이 아니다 — 잡으면 오탐."""
+        src = "from mymod import main\nmain()\n"
         self.assertEqual(_unguarded_suite_runners(src), [])
 
     def test_bare_imported_main_counts(self):
