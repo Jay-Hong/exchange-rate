@@ -1278,15 +1278,68 @@ class TestResultTypeMatchesConnectionLiveness(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(signalled, dead,
                                  f"{name}: tombstone={dead}인데 종단 신호={signalled}")
 
-    async def test_only_one_terminal_type_exists(self):
-        """⛔ 종단 타입이 둘이면 호출자가 둘 다 알아야 한다 — 하나만 알면 그게 곧 결함이다."""
+    def test_result_union_is_exactly_the_documented_four(self):
+        """⛔ 호출자가 분기해야 하는 **결과 타입 집합**을 공개 union으로 못 박는다.
+
+        구 버전은 이름이 `Failed`/`Terminated`로 끝나는 클래스만 셌다. 그러면
+        `ConnectionClosed` 같은 이름으로 종단 결과가 하나 더 들어와도 통과하고(실측 SURVIVED),
+        union에서 하나가 조용히 **빠져도** 통과한다(실측 SURVIVED). 이름 규칙이 아니라
+        **계약 표면 자체**를 본다.
+
+        새 멤버가 생기면 이 테스트가 먼저 깨진다 — 그때 "이것이 종단인가"를 판단하고 호출자의
+        close 분기를 함께 고치라는 뜻이다.
+        ⚠️ "그중 종단은 정확히 하나"라는 **의미**는 이 테스트가 지지 않는다(타입 이름으로는 알
+        수 없다). 그건 행동 테스트가 진다 — `test_every_abort_path_agrees_with_its_result_type`,
+        `test_retryable_discard_really_is_retryable`, `test_plain_rejection_keeps_the_connection_usable`.
+        """
+        import typing
+
         import app.topic_lease_registry as module
 
-        terminal_names = {
-            name for name in dir(module)
-            if name.endswith("Failed") or name.endswith("Terminated")
-        }
-        self.assertEqual(terminal_names, {"ConnectionTerminated"})
+        self.assertEqual(
+            set(typing.get_args(module.TransitionResult)),
+            {module.Applied, module.Discarded, module.Rejected, module.ConnectionTerminated},
+        )
+
+    def test_every_result_constructed_on_a_return_path_is_in_the_union(self):
+        """⛔ union만 고정하면 "union 밖 타입을 반환"하는 경로는 못 막는다.
+
+        전이 진입점과 결과를 만드는 두 helper의 `return` 경로에서 생성되는 **모듈 정의 타입**은
+        전부 union 안이어야 한다.
+        ⚠️ 한계: 검사 범위가 세 메서드 이름이다. 결과를 만드는 helper가 더 생기면 여기 추가해야
+        한다 — 완전 강제는 아니고, 개선점은 이름 규칙이 아니라 **반환 경로**를 본다는 것이다.
+        """
+        import ast
+        import inspect
+        import typing
+
+        import app.topic_lease_registry as module
+
+        tree = ast.parse(inspect.getsource(module))
+        module_types = {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
+        registry = next(n for n in tree.body
+                        if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        result_makers = {"apply_subscribe", "_abort_locked", "_terminate_locked"}
+        constructed = set()
+        for method in registry.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if method.name not in result_makers:
+                continue
+            for returned in ast.walk(method):
+                if not isinstance(returned, ast.Return):
+                    continue
+                for node in ast.walk(returned):
+                    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id in module_types):
+                        constructed.add(node.func.id)
+
+        # ⚠️ 탐지기 자기 검사 — 아무것도 못 찾으면 아래 부분집합 단언이 **공허하게** 통과한다.
+        self.assertTrue(constructed, "반환 경로에서 결과 타입을 하나도 못 찾았다 — 탐지기 고장")
+        allowed = {t.__name__ for t in typing.get_args(module.TransitionResult)}
+        self.assertLessEqual(
+            constructed, allowed, f"union 밖 타입을 반환한다: {sorted(constructed - allowed)}"
+        )
 
     async def test_retryable_discard_really_is_retryable(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
