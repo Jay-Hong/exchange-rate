@@ -227,8 +227,8 @@ class AckState:
 
     - `accepted` — 이번 요청에서 새로 발급한 lease(요청 순서, 중복 제거).
     - `removed` — 이번 요청의 결과로 **더 이상 활성이 아닌** topic. producer는 두 가지다:
-      §C1의 UID purge와 §C2의 reject eviction(§D2의 `removed_topics` producer 목록). ⚠️ 제거된 topic을 같은 요청이 다시
-      잡으면 여기 넣지 않는다 — 그건 제거가 아니라 **교체**이고, 두 목록에 동시에 실으면 모순이다.
+      §C2의 reject eviction **하나**다(§D2). ⛔ 구 문서는 §C1의 UID purge도 producer로 들었는데
+      B5(d) 결정으로 purge 규칙 자체가 폐기됐다.
       ⚠️ `removed`는 **상태 델타**다: 거부됐지만 원래 활성이 아니던 topic은 들어가지 않는다.
     - `active` — 그 연결의 **최종 상태 전체**(topic 정렬). 이번 요청에 없던 기존 topic도 포함.
     """
@@ -238,10 +238,11 @@ class AckState:
     uid: Optional[str]
     # §8-B — subscribe/unsubscribe가 **같은 schema**를 쓰므로 구분자가 필요하다.
     operation: str
-    # §D2 `identity_generation` — **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
-    # ⛔ strict cache의 `snapshot.epoch`을 쓰면 안 된다: 그건 **UID별**이고 최초 관측 순서로
-    #    할당돼 먼저 본 UID가 더 작은 값을 갖는다 → A→B 재바인딩에서 **감소**하고, "구
-    #    identity_generation ack 무시"를 지키는 클라가 유효한 새 ack을 버린다(실측 A=2→B=1).
+    # §D2 `identity_generation` — ⚠️ **B5(d) 결정으로 의미가 소진됐다**: 표현하려던 "같은 소켓의
+    #    UID 재바인딩"이 불가능해져(cross-UID는 연결 종료) 바인딩 후 **상수 1**이다. schema에서
+    #    제거할지 새 의미를 줄지는 wire 슬라이스가 정한다.
+    # ⛔ 역사적 주의(새 의미를 준다면 유효): strict cache의 `snapshot.epoch`을 쓰면 안 된다 —
+    #    **UID별**이고 최초 관측 순서로 할당돼 순서 판별이 뒤집힌다(실측 A=2→B=1).
     identity_generation: int
     accepted: tuple
     removed: tuple
@@ -339,7 +340,8 @@ class TopicLeaseRegistry:
         # 막는다. ws가 살아 있는 동안만 유지되면 충분하므로(되살릴 주체도 ws를 들고 있다) 여기서도
         # 약한 참조를 쓴다.
         self._closed: "weakref.WeakSet" = weakref.WeakSet()
-        # ws -> int. D2의 연결별 `identity_generation` (미바인딩 0, 최초 바인딩 1, 재바인딩마다 +1).
+        # ws -> int. §D2의 연결별 `identity_generation` (미바인딩 0 / 바인딩 시 1 / 이후 불변 —
+        # B5(d)로 재바인딩이 불가능해졌다).
         self._generations: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> {topic: lease_id}. §C3 claim-then-notify — **제거 전이라도** 인가에서 제외된다.
         self._claimed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
@@ -436,8 +438,8 @@ class TopicLeaseRegistry:
 
         `topics`는 이 요청에서 **수락된** topic, `rejected_topics`는 **거부된** topic이다
         (per-topic 판정은 상위 §D5 3~5단계가 한다). 둘 다 **빈 리스트가 정상**이다:
-        premium이 전부 거부돼도 §C1 purge는 커밋돼야 한다(§C1 처리 순서 — "B의 premium 확인이
-        실패해도 A 구독을 복원하지 않는다").
+        premium이 전부 거부돼도 §C2 eviction은 커밋돼야 한다 — 접근을 줄이는 전이를 발급 성공에
+        종속시키면 권한을 잃은 topic이 계속 흐른다.
 
         ⚠️ `rejected_topics`가 필요한 이유는 §C2다: "인증 성공한 subscribe에서
         **reject된 topic은 registry에서 제거**한다". accepted만 받으면 권한을 잃은 기존 등록이
@@ -498,7 +500,7 @@ class TopicLeaseRegistry:
 
             try:
                 # ⚠️ 축·유한성 **입력 검증은 topics와 무관하게 항상** 돈다. 구 버전은 검증까지
-                #    `if topics:` 안에 넣어, 순수 purge 요청이 wall epoch 혼입 상태로 조용히
+                #    `if topics:` 안에 넣어, 제거만 하는 요청이 wall epoch 혼입 상태로 조용히
                 #    통과했다(`compute_lease_expiry`의 gross-skew 가드가 무력화됐다).
                 expiry = compute_lease_expiry(
                     now_mono=now_mono,
@@ -694,8 +696,10 @@ class TopicLeaseRegistry:
 
         ⛔ **§B1의 답이 아니다.** B1은 *전송 직전* 재검증이라 호출자가 **캡처한** identity
         `(uid, lease_id)`와 대조해야 한다 — 그건 `authorizes_send`다. 여기서 non-None만 보고
-        보내면 실측된 두 구멍이 열린다: 같은 UID 재인증으로 L1→L2가 교체돼도 통과하고,
-        cross-UID 재바인딩 뒤에는 A로 내린 결정이 B의 소켓에 적용된다.
+        보내면 같은 UID 재인증으로 L1→L2가 교체돼도 통과한다(실측).
+        ⚠️ 실측 당시의 두 번째 구멍(cross-UID 재바인딩 뒤 A의 결정이 B의 소켓에 적용)은 B5(d)
+        결정으로 **경로 자체가 사라졌다** — `uid` 축은 이제 재바인딩 방어가 아니라 **호출부 오류**
+        방어다(한 연결은 평생 한 UID라 같은 ws에서 캡처했다면 항상 일치한다).
         조회 단계에는 캡처된 identity가 아직 없으므로 두 조항을 한 메서드로 합칠 수 없다.
 
         ⛔ 구 이름은 `active_lease`였고 시각을 받지 않았다 — docstring은 "인가 응답"이라
@@ -738,7 +742,7 @@ class TopicLeaseRegistry:
             # 남을 이유: 청소 방식은 정확성이 "모든 교체 경로가 청소를 기억하는가"에 걸리고,
             # 이 버그가 정확히 그렇게 생겼다. 남은 표식은 존재하지 않는 lease를 가리켜도
             # id가 다르므로 무해하다. ⚠️ 수거자 서술 정정: **현행 lease가 남아 있는 경우에만**
-            # 성공한 sweep의 `remove_locked`가 걷고, evict·purge로 lease가 사라진 topic의 표식은
+            # 성공한 sweep의 `remove_locked`가 걷고, evict·unsubscribe로 lease가 사라진 topic의 표식은
             # CAS가 항상 False라 **teardown/GC만이** 걷는다(실측). 엔트리는 topic당 1개 상한이고
             # 연결과 함께 회수되므로 유계·무해하다.
             return None
@@ -757,8 +761,9 @@ class TopicLeaseRegistry:
 
         ⛔ identity를 **필수 입력**으로 받는 이유: 조회 결과의 `is not None`만 보는 것이 가장
         자연스러운 사용법인데, 그러면 조회와 전송 사이에 lease가 **교체**된 경우를 못 막는다
-        (실측: 같은 UID 재인증 L1→L2, cross-UID 재바인딩 A→B 둘 다 통과했다). registry가
-        직접 대조해야 그 오용이 불가능해진다.
+        (실측: 같은 UID 재인증 L1→L2가 통과했다). registry가 직접 대조해야 그 오용이 불가능해진다.
+        ⚠️ 실측 당시 함께 통과했던 cross-UID 변종(A→B)은 B5(d)로 경로가 사라졌다 — `lease_id`
+        축이 여전히 load-bearing이고, `uid` 축은 호출부 오류 방어로 남는다.
 
         ⚠️ 캡처 시점에 유효했던 lease가 재인증으로 교체되면 그 tick은 여기서 떨어진다.
         의도된 동작이다 — 다음 발행 주기가 새 lease를 캡처한다.
@@ -768,8 +773,9 @@ class TopicLeaseRegistry:
         중인 발행 작업이 **몇 개인지**를 정하지 않는다. `publish_topic`에는 직렬화 장치가 없고
         호출부도 topic별 단일 in-flight를 보장하지 않으므로, 겹친 fanout이 모두 떨어질 수 있다.
         상한이 필요하면 **발행 직렬화를 별도 계약으로** 세워야 한다.
-        ⚠️ 이 검사와 **실제 `await send_json` 사이**의 재바인딩은 여전히 남는다(§B5(e)) —
-        그건 전송을 lock 안에서 하거나 전송 결과를 폐기하는 별개 결정이다.
+        ⚠️ 이 검사와 **실제 `await send_json` 사이**의 창은 남지만, B5(d) 이후 그 사이에 **UID가
+        바뀌는 일은 없다**(live 소켓 재바인딩 불가). 남는 것은 같은 UID의 lease 교체·만료뿐이라
+        유출이 아니라 늦은 tick 1건이다(§B5(e) 정정).
         """
         lease = self.authorized_lease(ws, topic, now_mono=now_mono)
         if lease is None:

@@ -10,7 +10,7 @@ test-first로 잠근 뒤에 최소 배선해야 원인 분리가 된다.
 3. `등록(비활성) → is_current(snapshot) → ack → 활성화`
 4. **요청 단위 트랜잭션** — 한 요청 = lock 1회 = ack 1건 = 전부 아니면 전무
 5. ack이 **권위 있는 상태 전체**를 싣는다(D2: 기존 topic 포함, lock 아래 단일 snapshot)
-6. §C1 cross-UID = **purge 후 재바인딩**(거부가 아니다)
+6. §C1 cross-UID = **tombstone + 종료**(B5(d) — purge 후 재바인딩은 폐기)
 7. ack 실패 = **연결 사망**(tombstone) — 취소해도 이미 버퍼에 들어간 ack은 배달될 수 있다
 8. `send_ack` 재진입은 **hang이 아니라 raise**
 9. 요청당 단일 `now_mono` + 3-way lease 계산
@@ -1076,12 +1076,13 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
 
 
 class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
-    """§D2 — `identity_generation`은 **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
+    """§D2 — `identity_generation`. ⚠️ **B5(d)로 의미가 소진돼 바인딩 후 상수 1**이다.
 
     ⛔ strict cache의 `snapshot.epoch`을 실으면 안 된다. 그건 **UID별**이고 최초 관측 순서로
-    할당되므로, 먼저 관측된 UID B의 epoch가 나중에 관측된 A보다 **작다**. A→B 재바인딩 ack의
-    generation이 감소하고, G 매트릭스가 요구하는 "구 `identity_generation` ack 무시"를 지키는
-    클라는 **유효한 새 ack을 버린다**. (실측: A=2 → B=1)
+    할당되므로, 먼저 관측된 UID B의 epoch가 나중에 관측된 A보다 **작다**(실측 A=2 → B=1).
+    ⚠️ 그 결함이 성립하던 재바인딩 경로는 B5(d)로 사라졌고, G 매트릭스의 "구 generation ack 무시"
+    요구도 열린 항목으로 내려갔다. 이 클래스는 이제 **값이 상수임**을 잠근다 — 새 의미를 부여할 때
+    같은 함정(캐시 epoch 재사용)에 빠지지 않도록 근거를 남겨 둔다.
     """
 
     async def test_starts_at_one_on_first_bind(self):
@@ -1092,7 +1093,7 @@ class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(registry.identity_generation(ws), 1)
 
     async def test_unchanged_for_same_uid_reauth(self):
-        """재인증은 재바인딩이 아니다 — 올리면 클라가 자기 상태를 불필요하게 버린다."""
+        """같은 UID 재인증에서 올리면 클라가 자기 상태를 불필요하게 버린다."""
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
         await _apply(registry, cache, ws, [TOPIC])
@@ -1134,7 +1135,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
     """⛔ **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다.**
 
     되돌아가려면 그만큼의 접근이 계속 살아 있어야 하는데, 그게 정확히 C1/C2가 막으려는 상태다.
-    구 구현은 purge·eviction을 **발급 성공에 종속**시켜, 세 중단 경로(만료 horizon / fence
+    구 구현은 축소(당시 purge·eviction)를 **발급 성공에 종속**시켜, 세 중단 경로(만료 horizon / fence
     실패 / 축 위반)에서 전부 fail-open이었다 — 실측: B의 소켓에서 A의 lease가 계속 인가됨.
 
     ⚠️ "제거만 커밋하고 ack을 보낸다"는 대안도 있으나 중단 경로마다 부분 커밋 규칙이 생겨
@@ -1182,7 +1183,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0))
 
-    async def test_axis_violation_with_pending_purge_closes_the_connection(self):
+    async def test_axis_violation_with_pending_eviction_closes_the_connection(self):
         """축 위반(wall epoch 혼입 등)은 예외로 크게 터지지만, 그 전에 접근은 닫혀야 한다.
 
         ⛔ 그리고 **예외 채널에도 종단 신호가 있어야** 한다 — tombstone만 찍고 원래 예외를
@@ -1257,7 +1258,8 @@ class TestSendAuthorizationChecksIdentity(unittest.IsolatedAsyncioTestCase):
     ⛔ `authorized_lease`는 §B2(조회 경계 필터)의 답이지 §B1의 답이 아니다. 실측:
 
       같은 UID 재인증  : L1 캡처 → L2로 교체 → 재확인이 L2를 돌려줘 **L1 기준 결정이 통과**
-      cross-UID 재바인딩: 캡처 uid=A → 현재 uid=B → **A로 내린 결정이 B의 소켓에 적용**
+      cross-UID 재바인딩: 캡처 uid=A → 현재 uid=B → A로 내린 결정이 B의 소켓에 적용
+                        (⚠️ 이 변종은 B5(d)로 **경로가 사라졌다** — `uid` 축은 이제 호출부 오류 방어다)
 
     `is not None`만 보는 것이 가장 자연스러운 사용법이라, identity를 **필수 입력**으로 받아
     registry가 직접 대조해야 그 오용이 불가능해진다.

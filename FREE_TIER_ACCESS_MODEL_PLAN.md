@@ -663,7 +663,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     정확히 갈린다). 지금은 직렬 endpoint라 예외가 상위 루프를 빠져나가 teardown으로 이어져
     가려지지만, B5(b) task-spawn 배선에서는 task 예외가 소켓 종료로 연결되지 않으면 다시
     무데이터·무오류 상태가 된다.
-  - **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다** — C1 purge나 C2 eviction이 예정된 요청이
+  - **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다** — C2 eviction이 예정된 요청이
     어떤 이유로든(만료 horizon · fence 실패 · 축 위반 예외 · ack 실패 · 취소) 중단되면 그 연결을
     **닫는다**(tombstone). ⛔ 되돌리면 그만큼의 접근이 계속 살아 있어야 하는데, 그게 정확히
     C1/C2가 막으려는 상태다. 실측(구 구현): 만료 horizon·fence·ValueError 세 경로 모두에서
@@ -689,7 +689,10 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **(b) 결정 = 메시지 dispatch는 연결별 동시(task spawn), 상태 전이는 B4 lock으로 직렬화.**
     무거운 I/O(토큰 검증·entitlement·snapshot build)는 lock 밖, 전이·송신만 lock 안.
   - **(c) lock 안 I/O에는 timeout 필수**(D-const) — 역압 걸린 클라가 자기 lock을 물고 unsubscribe를 봉쇄하면 안 된다.
-  - **(d) identity 단조성**: 동시 처리가 되면 C1의 UID 재바인딩이 **도착 순서에만** 의존해선 안 된다.
+  - **(d) identity 단조성** — ✅ **해소됨(B5(d), 2026-07-29)**: live 소켓의 UID 재바인딩 자체를
+    없앴으므로(cross-UID = 연결 종료, C1) 도착 순서에 의존할 전이가 남지 않는다. 아래는 그 결정에
+    이른 분석 기록이다.
+    동시 처리가 되면 C1의 UID 재바인딩이 **도착 순서에만** 의존해선 안 된다.
     늦게 도착한 구 UID subscribe(또는 C4 retry)가 새 바인딩을 되돌리지 못하도록 구 요청을 폐기해야 한다.
     - ⛔ **`auth_time` 기준 단조 비교는 폐기 (2026-07-27)**. 두 가지로 성립하지 않는다:
       (1) refresh에서 `auth_time`이 **유지**되므로 같은 세션 안의 두 요청(= C4 retry)을 정렬하지 못한다.
@@ -704,13 +707,17 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
       분리해야 해서 wire·상태기계·양 플랫폼 테스트 부담이 커진다.
       ⚠️ 클라 generation은 **적용 여부만** 정하고 **어떤 신원을 부여할지는 여전히 토큰 검증이 정한다** —
       권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
-  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 메시지 1건이
-    새 UID로 갈 수 있다 → 전송도 lock 안에서 하거나, 전송 직후 결과를 폐기할 수 있어야 한다(B4와 일관).
+  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield** — ⚠️ **원래 우려(그 사이 UID
+    재바인딩이 끼어 in-flight 메시지가 새 UID로 감)는 B5(d) 결정으로 소멸했다**: live 소켓의
+    재바인딩이 불가능하고, cross-UID는 tombstone + 종료라 그 소켓으로는 인가 자체가 0이 된다.
+    남는 것은 **같은 UID**의 lease 교체·만료뿐이라 유출이 아니다(늦은 tick 1건이 구 lease 기준으로
+    나갈 수 있을 뿐). 그래서 전송을 lock 안으로 넣을 이유는 사라졌고, 오히려 넣으면 느린 한 연결이
+    fanout 전체를 지연시킨다(C-API 6 참조).
     - ⛔ 단 **publish fanout이 연결 lock을 잡으면 안 된다**. `publish_topic`은 구독자를 **순차 루프**로
       돌므로(`app/topic_dispatcher.py`), 역압 연결 A가 ack으로 자기 lock을 최대 5초 쥔 사이 루프가 A에서
       막히면 **B·C의 tick까지 5초 밀린다** — 연결별 lock으로 얻으려던 격리가 통째로 사라진다.
-      → B1 재검증은 **lock-free 조회**(lease identity + 만료 비교)로 두고, (e)의 좁은 경쟁(재바인딩
-      직전 in-flight 1건)은 감수하거나 fanout을 연결별로 격리한 뒤에 lock을 도입한다.
+      → B1 재검증은 **lock-free 조회**(lease identity + 만료 비교)로 둔다. (e)의 원래 경쟁은
+      B5(d) 결정으로 소멸했고, 남는 것은 같은 UID의 lease 교체·만료로 인한 늦은 tick 1건이다.
 
 #### C. 상태 전이
 
@@ -727,19 +734,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     탐지돼 그 연결이 종료될 뿐, **상태를 되돌릴 수 없다**.
   - **클라 측**: UID 직접 전환을 감지하면 오류 응답을 기다리지 말고 **선제적으로 재연결**한다.
     desired topics는 유지하고 구 connection task만 폐기한 뒤 새 연결에서 다시 subscribe한다.
-  - ⛔ 아래 "처리 순서"·"제거는 reauth_required를 발신하지 않는다" 문단은 purge 정책의 잔재다 —
-    **폐기된 규칙의 세부**이므로 구현 근거로 쓰지 말 것(기록으로만 남긴다).
-  - **처리 순서**: B 토큰 **검증 성공 즉시** A의 구독 제거 → 이후 B의 premium 확인이 실패해도 **A 구독을 복원하지 않는다**.
-    반대로 **B 토큰 자체가 무효면 A의 유효 lease는 건드리지 않는다**.
-  - 제거는 `reauth_required`를 발신하지 않는다(lease 만료가 아님). **대신 ack이 결과 전체를 실어 권위를 갖는다** —
-    ack의 **`active_subscriptions`(그 연결의 최종 구독 전체 + topic별 `lease_id`·잔여 duration)** 로 클라가 서버 상태에 수렴한다(D2).
-    ⚠️ ack이 **이번 요청 topic 결과만** 담으면, B가 일부 topic만 요청했을 때 클라는 언급되지 않은 A 시절 topic을
-    여전히 accepted로 오인한다 — "ack이 권위 있는 응답"이 사실이 되려면 전체 상태를 실어야 한다.
-  - **purge된 topic을 같은 요청이 다시 잡으면 `removed_topics`에 넣지 않는다** — 그건 제거가 아니라
-    **교체**이고(새 `lease_id`), 한 topic을 `removed`와 `accepted`에 동시에 실으면 클라가 모순된 지시를 받는다.
-    `active_subscriptions`가 새 `lease_id`로 이미 권위를 갖는다.
-  - ✅ **미결 해소(2026-07-29)**: purge 규칙을 폐기하고 **거부 + 재연결**로 확정했다(B5(d)).
-    구 미결 서술("purge는 적용 여부를 정하지 않는다")은 그 결정의 근거였고, 결정 내용은 위에 있다.
+  - ⚠️ 구 purge 정책의 세부 절차(처리 순서 · `removed_topics` 교체 규칙 등)는 **삭제했다**.
+    정본에 폐기된 지시를 "기록용"으로 남기면 현재형 지시로 읽힌다 — 이력은 git이 갖는다.
+    ack이 전체 상태를 실어 권위를 갖는다는 요구는 purge와 무관하게 유효하며 **D2가 정본**이다.
 
   - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS FXiApp.swift:124-126은 signedOut에서만 WS stop /
     AuthService listener의 account-switch window). 소켓이 살아 있는 채 UID만 바뀐다.
@@ -816,12 +813,15 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    - `authorizes_send(ws, topic, *, uid, lease_id, now_mono)` = **B1 전송 직전 인가**.
      위에 더해 캡처한 `(uid, lease_id)`와 정확히 대조한다. 생존 규칙은 B2 메서드에 위임한다.
    ⚠️ 한때 B2 메서드 하나를 "B1까지 답한다"고 표시했는데 **과대주장이었다** — 실측: 같은 UID
-   재인증으로 L1→L2가 교체돼도 `is not None`이 통과했고, cross-UID 재바인딩 뒤에는 A로 내린
-   결정이 B의 소켓에 적용됐다. identity를 **필수 입력**으로 받아야 그 오용이 불가능해진다.
+   재인증으로 L1→L2가 교체돼도 `is not None`이 통과했다. identity를 **필수 입력**으로 받아야
+   그 오용이 불가능해진다.
+   ⚠️ 실측 당시 함께 통과했던 cross-UID 변종은 B5(d)로 **경로가 사라졌다** — `lease_id` 축이
+   load-bearing이고, `uid` 축은 이제 호출부 오류 방어다(한 연결은 평생 한 UID).
    시각도 두 메서드 모두 필수 인자다(기본값이 생기면 안전장치가 조용히 꺼진다).
    ⚠️ C3 sweep은 둘 다 쓸 수 없다 — 찾아야 하는 것이 정확히 여기서 걸러지는 **만료된** lease다.
    그건 1번(열거 API)의 몫이고, **이 메서드들을 만료 무시로 되돌려 재사용하지 말 것**.
-   ⚠️ B1 검사와 **실제 `await send_json` 사이**의 재바인딩은 여전히 열려 있다(B5(e)).
+   ⚠️ B1 검사와 **실제 `await send_json` 사이**의 창은 남지만, B5(d) 이후 그 사이 **UID는 바뀌지
+   않는다** — 남는 것은 같은 UID의 lease 교체·만료로 인한 늦은 tick 1건이다(유출 아님).
    ⚠️ **재인증 시 몇 tick이 떨어지는지는 발행 직렬화 계약에 달려 있다** — `publish_topic`에는
    직렬화 장치가 없고 호출부도 topic별 단일 in-flight를 보장하지 않으므로, 구 lease를 캡처한
    채 겹쳐 있던 fanout이 모두 떨어질 수 있다. "재인증 주기가 6~7분이니 topic당 최대 1 tick"은
@@ -872,15 +872,17 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   - **`lease_id`(topic별, 재사용 불가 opaque)**: 늦게 도착한 구 `reauth_required`를 무시하는 유일한 수단(D3와 대조).
     ⚠️ **정수 generation을 topic별로 0부터 다시 세면 안 된다** — 제거 후 재구독 시 초기화돼 **과거
     `reauth_required`가 새 lease와 오인 일치**한다. 연결 수명 동안 **단조 증가하는 counter** 또는 opaque id를 쓴다.
-  - **`identity_generation`(연결별)**: **같은 소켓에서의 UID 재바인딩만** 표현한다.
-    ⚠️ **B5(d) 결정으로 재바인딩이 불가능해져 이 값은 바인딩 후 항상 1이다** — 정보를 싣지 않는다.
-    schema 안정성을 위해 남길지 제거할지는 **wire 슬라이스에서 결정**한다(지금 단독으로 빼지 않는다).
-    ⛔ **strict cache의 UID epoch을 그대로 실으면 안 된다.** 그 epoch은 **UID별**이고 최초 관측
-    순서로 할당되므로, 먼저 관측된 UID가 더 작은 값을 갖는다 → A→B 재바인딩에서 generation이
-    **감소**하고, G의 "구 `identity_generation` ack 무시"를 지키는 클라가 **유효한 새 ack을 버린다**
-    (실측: B를 먼저 관측하면 A=2 → B=1). registry가 **연결별로 소유**하고
-    미바인딩 0 / 최초 바인딩 1 / 재바인딩마다 +1로 단조 증가시킨다. 같은 UID 재인증은 **불변**이다
-    (재바인딩이 아니므로, 올리면 클라가 자기 상태를 불필요하게 버린다).
+  - **`identity_generation`(연결별)** — ⚠️ **B5(d) 결정으로 의미가 소진됐다.**
+    이 필드는 "같은 소켓에서의 UID 재바인딩"을 표현하려던 것인데, 그 재바인딩이 **불가능**해졌다
+    (cross-UID = 연결 종료, C1). registry는 미바인딩 0 / 바인딩 시 1로 두고 **이후 변하지 않는다**.
+    즉 **상수라 stale-ack 판별에 쓸 수 없다**.
+    → **열린 항목**: wire 슬라이스가 (a) schema에서 제거하거나 (b) 새 의미를 확정한다.
+    그 전까지 클라에 "구 `identity_generation` ack 무시"를 요구하지 않는다(G 매트릭스 참조).
+    ⛔ **역사적 주의(새 의미를 부여한다면 그대로 유효)**: strict cache의 UID epoch을 그대로 실으면
+    안 된다. 그 epoch은 **UID별**이고 최초 관측 순서로 할당돼 먼저 관측된 UID가 더 작은 값을 갖는다
+    → 재바인딩에서 generation이 **감소**하고 순서 판별이 뒤집힌다(실측: B를 먼저 관측하면 A=2 → B=1).
+    구 규칙("미바인딩 0 / 최초 1 / 재바인딩마다 +1, 같은 UID 재인증은 불변")은 폐기된 재바인딩
+    경로를 전제한 것이라 더는 지시가 아니다.
     ⚠️ **reconnect는 표현하지 못한다** — 새 WebSocket은 서버 상태가 처음부터 시작하므로 구/신 소켓 ack을
     전역 구분할 수 없다. **reconnect·구 receive task 격리는 클라 소유 `connectionGeneration`**이 담당한다(F).
 - **D3 `reauth_required` schema** — ack과 대조 가능해야 하므로 **topic별 `lease_id`**를 싣는다.
@@ -1103,8 +1105,8 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 > UID reset 수렴 방식(C1·D2 `active_subscriptions`)은 서버 wire 설계**이므로 D/C에서 이미 확정했다.
 > 아래는 그 계약을 소비하는 **클라 내부 구조**만이다.
 >
-> **`connectionGeneration`은 클라 소유**다 — 서버 `identity_generation`은 같은 소켓의 UID 재바인딩만 표현하므로
-> reconnect 식별에 쓸 수 없다(D2). 구 receive task·구 request_id의 결과 폐기는 클라 `connectionGeneration`이 담당한다.
+> **`connectionGeneration`은 클라 소유**다 — 서버 `identity_generation`은 reconnect 식별에 쓸 수 없고
+> (D2), B5(d) 이후로는 **상수**라 어떤 순서 판별에도 쓸 수 없다. 구 receive task·구 request_id의 결과 폐기는 클라 `connectionGeneration`이 담당한다.
 
 
 - `subscribedTopics` 단일 Set(WebSocketService.swift:27)을 **desired / pending request / accepted**로 분리.
@@ -1181,13 +1183,15 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[server]` 만료 claim 후 통지 timeout·중복 sweep 없음 /
 `[client]` **10분 lease → 6~7분 재인증** 계산(D6) / `[server]` `temporarily_unavailable`의 `retry_after_seconds` /
 `[server]` D7 상한 **각각의 경계값**(message 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
-`[server]` **invalid token은 기존 UID·lease 불변** / `[client]` 구 `request_id` ack과 구 `identity_generation` ack 무시.
+`[server]` **invalid token은 기존 UID·lease 불변** / `[client]` 구 `request_id` ack 무시.
+⚠️ "구 `identity_generation` ack 무시"는 **열린 항목**으로 내렸다 — B5(d)로 그 값이 상수가 돼
+판별에 쓸 수 없다(D2). wire 슬라이스가 필드를 제거하거나 새 의미를 확정한 뒤 다시 세운다.
 
 보강 2차(codex 감사):
 `[both]` 인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음 — 서버만 잠그면
 클라가 fire-and-forget으로 남아도 green. 실측: 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없다) /
 `[both]` `active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
-`[server]` 서버 `identity_generation`은 **같은 소켓 UID 재바인딩만** 표현(reconnect 식별은 클라 `connectionGeneration`) /
+`[server]` ⚠️ 서버 `identity_generation`은 B5(d) 이후 **상수 1**이라 이 행은 보류(reconnect 식별은 클라 `connectionGeneration`) /
 `[server]` **identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
 `[server]` **message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
 `[server]` `invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
