@@ -128,6 +128,26 @@ class ReentrantRegistryCall(RuntimeError):
     """
 
 
+class LockNotHeld(RuntimeError):
+    """`*_locked` 메서드를 연결 lock 없이 불렀다.
+
+    ⛔ 이들은 **상태 변경**이라 lock 없이 부르면 §B4 우회로가 된다. private으로 두면 sweep이
+    쓸 수 없고(같은 lock 안에서 claim→통지→제거를 해야 한다), public으로 두면 잘못 불릴 수
+    있으므로 **호출 시점에 검사**한다.
+    """
+
+
+@dataclass(frozen=True)
+class ClaimedLease:
+    """sweep이 만료로 claim한 항목. 통지·CAS 제거의 근거다.
+
+    ⚠️ `Lease`와 같은 이유로 `ws`를 담지 않는다(약한 참조 무력화).
+    """
+
+    topic: str
+    lease_id: str
+
+
 @dataclass(frozen=True)
 class Lease:
     """활성 구독 하나. `lease_id`가 CAS 토큰이다.
@@ -282,6 +302,8 @@ class TopicLeaseRegistry:
         self._ack_owner: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> int. D2의 연결별 `identity_generation` (미바인딩 0, 최초 바인딩 1, 재바인딩마다 +1).
         self._generations: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # ws -> {topic: lease_id}. §C3 claim-then-notify — **제거 전이라도** 인가에서 제외된다.
+        self._claimed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
     # ── lock ────────────────────────────────────────────────────────────
     def connection_lock(self, ws) -> asyncio.Lock:
@@ -612,6 +634,11 @@ class TopicLeaseRegistry:
         """
         if ws in self._closed:
             return None
+        if topic in self._claimed.get(ws, {}):
+            # §C3 — claim된 항목은 **제거 전이라도** 즉시 제외된다. 아니면 통지를 보내는 동안
+            # live publish가 그 lease로 다시 통과한다. ⚠️ 만료 시각만으로는 못 막는다 —
+            # 이 판정은 호출자가 넘긴 `now`를 쓰므로, 통지 중 tick이 과거 시각을 쓰면 통과한다.
+            return None
         lease = self._active.get(ws, {}).get(topic)
         if lease is None:
             return None
@@ -683,15 +710,68 @@ class TopicLeaseRegistry:
         """
         self._guard_reentrant(ws)
         async with self.connection_lock(ws):
-            return self._remove_locked(ws, topic, lease_id)
+            return self.remove_locked(ws, topic, lease_id)
 
-    def _remove_locked(self, ws, topic: str, lease_id: str) -> bool:
-        """**lock을 쥔 상태에서만** 부른다."""
+    # ── §C3 sweep primitives (모두 **연결 lock을 쥔 상태에서만**) ────────────
+    def _require_lock(self, ws) -> None:
+        """⛔ lock 없이 상태를 바꾸면 §B4 우회로다. 조용히 통과시키지 않는다."""
+        if not self.connection_lock(ws).locked():
+            raise LockNotHeld(
+                "연결 lock을 쥔 상태에서만 부를 수 있다 — sweep은 claim→통지→제거를 "
+                "한 lock 안에서 수행해야 한다(§C3)."
+            )
+
+    def connections_snapshot(self) -> list:
+        """lease를 가진 연결의 **스냅샷 목록**(§C3 sweep 열거).
+
+        ⚠️ 스냅샷인 이유: 순회 도중 다른 task가 연결을 추가·제거하거나 GC가 약한 키를
+        수거하면 live view 순회가 깨진다. 스냅샷은 순회 동안 대상을 **강하게** 잡으므로
+        중간에 사라지지 않는다(대신 그 사이 사라진 연결은 다음 주기가 본다).
+        """
+        return list(self._active.keys())
+
+    def claim_expired_locked(self, ws, *, now_mono: float) -> tuple:
+        """만료 lease를 **원자적으로 claim**한다(§C3 claim-then-notify).
+
+        claim된 항목은 제거 전이라도 `authorized_lease`·`authorizes_send`에서 즉시 빠진다 —
+        그게 이 표식의 **유일한** 역할이다.
+
+        ⛔ **이미 claim된 topic을 건너뛰지 않는다.** 처음엔 "중복 통지 방지"로 그 가드를 뒀는데
+        mutation에서 살아남아 조사해 보니, 이 설계에서는 불필요할 뿐 아니라 **유해**했다:
+        통지는 lock 안에서 일어나고 실패·hang은 소켓 정리로 끝나므로 claim이 남는 경로는
+        **취소**뿐인데, 그때 가드가 있으면 그 lease는 통지도 제거도 영영 못 받는다(실측:
+        인가에서만 빠진 채 좀비로 남는다 — fail-closed지만 클라는 재인증 신호를 못 받아
+        자기 D6 타이머까지 방치된다). 다시 담아야 다음 주기가 **자가 복구**한다.
+        중복 통지는 §D3상 무해하다 — 클라는 자기가 들고 있는 `lease_id`와 일치하면 적용한다.
+        """
+        self._require_lock(ws)
+        already = self._claimed.setdefault(ws, {})
+        claimed = []
+        for topic, lease in self._active.get(ws, {}).items():
+            if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
+                already[topic] = lease.lease_id
+                claimed.append(ClaimedLease(topic=topic, lease_id=lease.lease_id))
+        if not already:
+            self._claimed.pop(ws, None)
+        return tuple(claimed)
+
+    def remove_locked(self, ws, topic: str, lease_id: str) -> bool:
+        """`(ws, topic, lease_id)` **CAS** 제거 — **lock을 쥔 상태에서만**.
+
+        ⚠️ id를 안 보면 구 sweep이 **갱신된** lease를 지워 살아 있는 구독이 사라진다.
+        claim 표식도 함께 지운다 — 같은 topic이 새로 발급되면 그건 claim 대상이 아니다.
+        """
+        self._require_lock(ws)
         topics = self._active.get(ws, {})
         lease = topics.get(topic)
         if lease is None or lease.lease_id != lease_id:
             return False
         del topics[topic]
+        claimed = self._claimed.get(ws)
+        if claimed is not None and claimed.get(topic) == lease_id:
+            del claimed[topic]
+            if not claimed:
+                self._claimed.pop(ws, None)
         return True
 
     async def remove_websocket(self, ws) -> None:
@@ -709,4 +789,5 @@ class TopicLeaseRegistry:
             self._pending.pop(ws, None)
             self._uids.pop(ws, None)
             self._generations.pop(ws, None)
+            self._claimed.pop(ws, None)
             self._closed.add(ws)

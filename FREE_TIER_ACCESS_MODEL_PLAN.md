@@ -773,15 +773,21 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 > 지금 만들지 않는 이유는 호출자가 없기 때문이다(검증 불가능한 기계장치는 만들지 않는다) —
 > 그러나 해당 슬라이스는 **이 목록을 시그니처 변경 예산으로 잡고** 시작해야 한다.
 
-1. **연결·lease 열거** (C3) — 지금은 `(ws, topic)`을 이미 알아야 조회된다. sweeper가 만료 항목을
-   찾을 방법이 없어 D-const의 "만료→통지 10초"가 구현 불가. 우회하면 dispatcher가 **두 번째 live
-   대상 집합**을 들게 되고, 그건 B4 순서 보장을 되돌린다.
+1. ~~**연결·lease 열거** (C3)~~ — **닫힘**. `connections_snapshot()`이 live view가 아니라
+   **스냅샷**을 준다(순회 중 추가·제거·GC로 깨지지 않고, 그 사이 사라진 연결은 다음 주기가 본다).
 2. **topic→구독자 인덱스** (B2/B3) — registry에 topic 키 구조가 없어 `get_subscribers`의 만료 필터가
    놓일 자리가 없다. B3가 요구하는 **비대칭 상속**(`subscriber_count`는 상속 / `subscribed_connection_count`는 미상속)도 진술 불가.
-3. **`claimed_expired` 상태 + 조회 즉시 제외** (C3) — claim 표식과 그 mutator가 없다. 없으면 연속
-   sweep이 같은 `lease_id`를 **중복 통지**하고, 통지하는 동안 live publish가 계속 통과한다.
-4. **lock 보유 상태의 제거 경로 + bounded-try lock 획득** (C3/B4) — `remove()`가 lock을 재획득하므로
-   claim→notify→remove를 한 lock 안에서 쓸 수 없다(재진입 시 데드락). sweeper의 비blocking 획득도 필요.
+3. ~~**`claimed_expired` 상태 + 조회 즉시 제외** (C3)~~ — **닫힘**. `claim_expired_locked`가
+   원자적으로 표식을 남기고, 표식이 있는 topic은 `authorized_lease`·`authorizes_send`에서 즉시
+   빠진다. ⚠️ 만료 시각만으로는 못 막는다 — 인가 판정은 **호출자가 넘긴 `now`**를 쓰므로 통지 중
+   tick이 과거 시각을 쓰면 통과한다. 표식이 그 축을 닫는다.
+   ⛔ **"이미 claim된 것은 건너뛴다"를 넣지 말 것.** 이 설계에서 중복 통지 경로는 없고(통지는
+   lock 안, hang·실패는 소켓 정리), 그 가드는 **취소** 경로에서 통지도 제거도 못 받는 좀비를
+   만든다(실측). 다시 담아야 다음 주기가 자가 복구한다.
+4. ~~**lock 보유 상태의 제거 경로 + bounded-try lock 획득** (C3/B4)~~ — **닫힘**.
+   `remove_locked`가 public이고 lock 미보유 시 `LockNotHeld`로 시끄럽게 실패한다(조용한 §B4
+   우회로 방지). 획득은 `asyncio.wait_for(lock.acquire(), timeout)` + 경합 시 **그 연결만 skip**
+   (실측 py3.13: timeout된 acquire는 lock을 누수하지 않는다 — 회귀 테스트로 잠금).
 5. **`apply_unsubscribe`(요청 단위)** (D8) — topic별 `remove()`는 lock을 N번 잡아, subscribe에서 금지한
    tearing을 그대로 재도입한다. 또 wire의 unsubscribe는 `lease_id`를 싣지 않아 read-then-update가 되고,
    재인증과 경쟁하면 CAS가 실패해 **사용자가 끈 구독이 lease 만료까지 계속 흐른다**.
