@@ -29,6 +29,7 @@ from app.strict_verifier import (
     IdentityMisconfigured,
     IdentityNotFound,
     IdentityUnavailable,
+    StrictVerifierConfigError,
     TemporarilyUnavailable,
     VerifiedActive,
     VerifiedInactive,
@@ -204,37 +205,42 @@ class TestConfigAndProgrammingErrorsPropagate(unittest.TestCase):
     "그 변환이 없음을 mutation 테스트로 잠근다"고 요구한다.
     """
 
-    def test_misconfigured_provider_raises(self):
-        with self.assertRaises(Exception) as ctx:
-            _run(premium_provider=_Provider(ProviderMisconfigured(status=401)))
-        self.assertNotIsInstance(ctx.exception, AssertionError)
+    def test_permanent_provider_faults_raise_the_exact_wiring_type(self):
+        """⛔ **정확한 타입**을 단언한다 — 배선 계약이 "타입으로 구분"이기 때문이다.
 
-    def test_bad_request_raises(self):
-        with self.assertRaises(Exception):
-            _run(premium_provider=_Provider(BadRequest()))
+        `assertRaises(Exception)`로 두면 `RuntimeError`나 `ValueError`로 바뀌어도 green이라,
+        정작 지켜야 할 성질(배선이 타입으로 잡아 전용 카운터를 올린다)이 잠기지 않는다.
+        """
+        cases = {
+            "premium misconfigured": dict(premium_provider=_Provider(ProviderMisconfigured(status=401))),
+            "premium bad request": dict(premium_provider=_Provider(BadRequest())),
+            "premium protocol violation": dict(
+                premium_provider=_Provider(ProtocolViolation(detail="entitlements not a dict"))
+            ),
+            "identity misconfigured": dict(
+                identity_provider=_Provider(IdentityMisconfigured(code="PERMISSION_DENIED"))
+            ),
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaises(StrictVerifierConfigError):
+                    _run(**kwargs)
 
-    def test_protocol_violation_raises(self):
-        with self.assertRaises(Exception):
-            _run(premium_provider=_Provider(ProtocolViolation(detail="entitlements not a dict")))
-
-    def test_identity_misconfigured_raises(self):
-        """premium `ProviderMisconfigured`와 대칭 — 영구 결함을 transient로 접으면 storm이 된다."""
-        with self.assertRaises(Exception) as ctx:
-            _run(identity_provider=_Provider(IdentityMisconfigured(code="PERMISSION_DENIED")))
-        self.assertNotIsInstance(ctx.exception, AssertionError)
-
-    def test_axis_violation_from_derive_verdict_propagates(self):
-        """`derive_verdict`가 축 위반에 raise하는 것을 삼키면 안 된다."""
-        with self.assertRaises(ValueError):
+    def test_axis_violation_is_not_a_config_error(self):
+        """축 위반은 **우리 코드 버그**라 설정 오류와 구분돼야 한다 — 대응 주체가 다르다."""
+        with self.assertRaises(ValueError) as ctx:
             _run(
                 identity_provider=_Provider(
                     IdentityFound(disabled=False, tokens_valid_after_ms=IAT)  # ms 자리에 초를 넣음
                 )
             )
+        self.assertNotIsInstance(ctx.exception, StrictVerifierConfigError)
 
-    def test_provider_exception_propagates(self):
-        with self.assertRaises(RuntimeError):
+    def test_arbitrary_provider_exception_is_not_a_config_error(self):
+        """adapter가 던진 임의 예외를 설정 오류로 오분류하면 카운터가 오염된다."""
+        with self.assertRaises(RuntimeError) as ctx:
             _run(premium_provider=_Provider(RuntimeError("boom")))
+        self.assertNotIsInstance(ctx.exception, StrictVerifierConfigError)
 
 
 class TestFenceHandoff(unittest.TestCase):

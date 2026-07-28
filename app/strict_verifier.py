@@ -23,10 +23,11 @@ registry 불변 + lease 미연장)가 성립하지 않고, 장애가 곧 대량 
 1. **`VerifiedActive.snapshot`을 그대로 넘겨 fence한다** — `등록(비활성) → cache.is_current(snapshot)
    → 활성화`(§A4). ⛔ 호출자가 `cache.snapshot(uid)`을 **다시 뜨면 fence가 무의미해진다**:
    `snapshot()`은 없는 uid에 generation을 할당하는 **쓰기**라 다시 뜬 값은 언제나 '현행'이다.
-2. **`StrictVerifierConfigError`는 타입으로 잡는다.** ⛔ `except Exception`으로 뭉개면 안 되고,
-   반대로 **놓치면 연결이 끊기고 그 연결의 registry 항목이 통째로 지워진다**(C4의 "registry 불변"과
-   정반대). 잡아서 `temporarily_unavailable` + 긴 `retry_after`로 접되, **전용 카운터와 ERROR 로그**를
-   남긴다 — 이건 우리 설정 결함이라 사람이 봐야 한다.
+2. **`StrictVerifierConfigError`를 타입으로 잡아 변환한다** (정책은 그 클래스 docstring에 정본).
+   ⛔ `except Exception`으로 뭉개지 말 것(§A6-1이 금지하는 조용한 세탁) — 그렇다고 **놓치면 더
+   나쁘다**: `main.py:998`→`finally:1006`이 그 연결의 registry 구독을 통째로 지우고 클라엔 오류
+   프레임도 안 간다. 타입으로 잡아 `temporarily_unavailable` + `retry_after`를 상한값으로 주고,
+   **transient와 분리된 카운터 + ERROR 로그**를 남긴다. registry와 기존 lease는 건드리지 않는다.
 3. **`retry_after_seconds`에 하향 jitter를 넣는다** — 여기서 주는 값은 기본값일 뿐이다. 전역 장애에서
    전원이 같은 초에 복귀하면 herd가 유지된다(§D6가 재인증 타이머에 `U(0,60)`을 넣은 것과 같은 이유).
 4. **provider 호출에 시간 상한을 건다** — 이 루프에는 deadline이 없다. `httpx` timeout은 **단계별**이라
@@ -166,9 +167,25 @@ StrictVerification = Union[VerifiedActive, VerifiedInactive, TemporarilyUnavaila
 class StrictVerifierConfigError(RuntimeError):
     """공급자 설정·계약 위반. **verdict가 아니다**(§A6-1).
 
-    ⛔ 이걸 `TemporarilyUnavailable`로 바꾸지 말 것 — API key 오설정이나 응답 스키마 붕괴는
-    재시도해도 낫지 않는데 retryable로 접으면 전 사용자가 무한 재시도 storm을 만든다.
-    캐시하지도 않고 wire 오류로도 접지 않는다. 위로 전파해 **시끄럽게** 실패시킨다.
+    ## 정책 (2026-07-28 확정 — 층을 나눠서 읽어야 한다)
+
+    - **이 모듈은 절대 변환하지 않는다.** `TemporarilyUnavailable`을 돌려주지도, 캐시하지도
+      않는다. API key 오설정이나 응답 스키마 붕괴는 재시도해도 낫지 않아서, 검증기가 이걸
+      retryable 결과로 접으면 전 사용자가 무한 재시도 storm을 만든다. 그래서 **raise**한다.
+    - **배선 경계는 타입으로 잡아 반드시 변환한다.** 그냥 전파시키면 안 된다 — 실측:
+      `app/main.py:998`의 `except Exception`이 루프를 빠져나가고 `finally`(:1003-1007)가
+      `registry.remove_websocket()`을 불러 **그 연결의 구독이 통째로 삭제**되며, 클라에는
+      오류 프레임조차 가지 않는다. C4의 "registry 불변"과 정반대이고, 클라의 즉시 재연결이
+      retry_after보다 빨라 **storm이 오히려 더 조인다**.
+
+    두 문장은 모순이 아니다 — §A6-1이 금지하는 것은 *광범위 `except Exception`에 의한 조용한
+    세탁*이고, 여기서 요구하는 것은 *타입 기반의 의도된 변환 + 계측*이다. §8-C의
+    `temporarily_unavailable` 정의 자체가 "인증·권한을 **판정할 수 없음**"이라 죽은 API key도
+    그 정의에 정확히 들어간다. 운영자 신호는 wire가 아니라 **전용 카운터와 ERROR 로그**가 낸다.
+
+    잠글 성질 3개(배선 슬라이스의 mutation 대상): (a) 이 모듈 안에 광범위 `except`가 없다,
+    (b) 배선의 catch가 **타입 기반**이고 transient와 **다른 카운터**를 올린다,
+    (c) 설정 오류가 registry 항목과 기존 lease를 **바꾸지 않는다**.
     """
 
 

@@ -567,9 +567,19 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     재검증 자체를 건너뛴다(§8-C상 `temporarily_unavailable`은 전체-요청 + retry_after + registry 불변).
   - **`TemporarilyUnavailable.reason`** = 판정 불가 사유만. ⛔ **구매 전파(propagation)를 여기 넣지 말 것** —
     RevenueCat이 authoritative inactive를 반환했으므로 "판정 불가"가 아니다(§A4-1).
-  - **programming·config 오류는 verdict가 아니다.** 내부 예외로 전파하고 **캐시하지 않으며 wire 오류로도 접지 않는다.**
+  - **programming·config 오류는 verdict가 아니다.** 검증기는 내부 예외로 전파하고 **캐시하지 않는다.**
     상위의 광범위 `except Exception`이 이를 `temporarily_unavailable`(retryable)로 바꾸면 재시도 storm이 되므로,
     **그 변환이 없음을 mutation 테스트로 잠근다**(docstring caveat만으로는 강제가 아니다).
+    - **정정 (2026-07-28) — "wire 오류로도 접지 않는다"는 *배선 경계*에는 적용되지 않는다.**
+      금지 대상은 **광범위 `except`에 의한 조용한 세탁**이지, 타입 기반의 의도된 변환이 아니다.
+      그냥 전파시키면 **더 나쁘다** — 실측: `app/main.py:998`의 `except Exception`이 루프를 빠져나가고
+      `finally`(:1003-1007)가 `registry.remove_websocket()`을 불러 **그 연결의 구독이 통째로 삭제**되며
+      클라에는 오류 프레임도 가지 않는다(§8-A "조용한 실패 금지" 위반 + C4 "registry 불변"과 정반대).
+      클라의 즉시 재연결이 `retry_after`보다 빨라 storm도 오히려 조인다.
+    - **단일 정책**: 검증기 = 변환 **금지**(raise) / 배선 경계 = **타입 기반** catch로 변환 **필수**
+      (`temporarily_unavailable` + `retry_after` 상한값, transient와 **분리된 카운터** + ERROR 로그,
+      registry·기존 lease 불변). §8-C의 `temporarily_unavailable` 정의가 "인증·권한을 **판정할 수 없음**"이라
+      죽은 API key도 그 정의에 들어간다 — 운영자 신호는 wire가 아니라 카운터·로그가 낸다.
 
   **A6-2 관측 신선도 (freshness는 verdict가 아니라 관측에 붙는다)**
 
