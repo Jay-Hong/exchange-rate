@@ -9,6 +9,10 @@
   갱신된 lease를 지우면 살아 있는 구독이 사라진다.
 - **연결별 `asyncio.Lock`**: UID binding · lease CAS · ack 자료 확정이 한 lock 아래 있어야
   찢어지지 않는다. 전역 lock이면 한 느린 연결이 전체를 막는다.
+- **고정 순서**(§B4): `등록(비활성) → is_current 재확인 → **ack 송신** → 활성화`.
+  ack이 활성화보다 **먼저**여야 한다 — 아니면 클라가 ack을 받기 전에 live 메시지가 먼저 도착하고,
+  통지 순서가 역전된다(계획 632행). 그래서 `issue`가 **sender를 주입받아** 순서를 강제한다:
+  호출자는 활성화를 앞당길 방법이 없다.
 - **소비 fence 순서**(§A4): `등록(비활성) → cache.is_current(snapshot) → 활성화`.
   등록을 먼저 하는 이유는, 재확인이 **등록 이후**여야 그 사이 무효화를 볼 수 있기 때문이다.
   재확인 **이후**의 무효화는 정상 발급 직후 webhook과 구별되지 않는 통상적 중도 무효화이고,
@@ -18,8 +22,10 @@
 
 ## 이 모듈이 하지 않는 것
 
-- **전송**. `issue`는 ack에 필요한 자료만 돌려주고 I/O는 하지 않는다 — lock을 쥔 채 `await
-  send_json`을 하면 느린 구독자 하나가 그 연결의 모든 상태 전이를 막는다.
+- **snapshot 전송**. 무겁기 때문에 build는 lock 밖이고, **전송 직전 lock을 다시 잡아** lease를
+  재검증한다(§B1과 결합). 그건 배선의 일이다.
+  ⚠️ 반면 **ack은 lock 안**이다(§B4 629행) — 한때 이 문서가 "전송은 lock 밖"이라고 뭉뚱그렸는데
+  **틀렸다**. ack까지 밖으로 내보내면 §B4의 고정 순서를 지킬 방법이 없다.
 - **만료 sweep·재인증 통지**(§C3의 claim-then-notify) — 다음 조각.
 - **dispatcher 배선**. 기존 `registry.register()` 우회가 남지 않았음을 확인하는 것은 배선 슬라이스의 일이다.
 
@@ -36,6 +42,10 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 from app.topic_lease import compute_lease_expiry, is_expired
+
+# ack 송신 상한. §D6의 클라 ack timeout이 10초라 그보다 작아야 클라가 먼저 포기하지 않는다.
+# ⚠️ 상한이 없으면 멈춘 클라가 **연결 lock을 무한 점유**해 그 연결의 모든 상태 전이가 막힌다.
+ACK_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -74,13 +84,25 @@ class Discarded:
 
 
 @dataclass(frozen=True)
+class AckFailed:
+    """ack을 못 보냈다 — lease를 **발급하지 않았다**.
+
+    ⚠️ 호출자는 §B2a에 따라 **소켓을 닫아야** 한다. 전송 실패는 연결이 죽은 것으로 간주한다 —
+    부분 삭제 후 소켓 유지는 "ack이 광고한 상태"가 무통지로 거짓이 되는 길이다.
+    무효화(`Discarded`)와 구분되는 이유: 그쪽은 재시도가 맞고 이쪽은 연결 종료가 맞다.
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True)
 class Rejected:
     """이 연결에서 받을 수 없는 요청. 상태를 바꾸지 않았다."""
 
     reason: str
 
 
-IssueResult = Union[Issued, Discarded, Rejected]
+IssueResult = Union[Issued, Discarded, Rejected, AckFailed]
 
 
 class TopicLeaseRegistry:
@@ -121,10 +143,15 @@ class TopicLeaseRegistry:
         now_mono: float,
         premium_verified_at_mono: float,
         identity_verified_at_mono: float,
+        send_ack,
     ) -> IssueResult:
-        """`등록(비활성) → is_current → 활성화`를 **한 lock 안에서** 수행한다.
+        """`등록(비활성) → is_current → **ack** → 활성화`를 **한 lock 안에서** 수행한다.
 
         ⚠️ `now_mono`는 호출자가 요청 경계에서 **1회** 읽은 값이다. 이 모듈은 시계를 읽지 않는다.
+
+        ⚠️ `send_ack`는 **필수**다(기본값 없음). 선택으로 두면 배선이 한 번 빠뜨렸을 때 ack 없이
+        활성화되어 §B4 순서가 조용히 깨진다. `await send_ack(lease)`는 **lock을 쥔 채** 실행된다 —
+        ⛔ 그 안에서 이 registry를 다시 부르면 `asyncio.Lock`은 재진입 불가라 **데드락**이다.
         """
         async with self.connection_lock(ws):
             if ws in self._closed:
@@ -161,7 +188,15 @@ class TopicLeaseRegistry:
                 # 2) 재확인 — 검증을 만든 **그 snapshot**으로. 다시 뜨면 fence가 자기 자신을 통과한다.
                 if not cache.is_current(snapshot):
                     return Discarded()
-                # 3) 활성화 — 여기서부터 전송 대상이다.
+                # 3) ack — **활성화보다 먼저**(§B4 632행). 실패하면 발급하지 않는다.
+                try:
+                    await asyncio.wait_for(send_ack(lease), timeout=ACK_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    return AckFailed(reason="ack_timeout")
+                except Exception as exc:  # noqa: BLE001 — 전송 실패는 연결 사망으로 본다(§B2a)
+                    return AckFailed(reason=type(exc).__name__)
+
+                # 4) 활성화 — 여기서부터 live 전송 대상이다.
                 self._uids[ws] = uid
                 self._active.setdefault(ws, {})[topic] = lease
                 return Issued(ws=ws, lease=lease)

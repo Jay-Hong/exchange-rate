@@ -14,10 +14,13 @@ test-first로 잠근 뒤에 최소 배선해야 원인 분리가 된다.
 """
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from app.strict_cache import StrictObservationCache
 from app.topic_lease import LEASE_MAX_SECONDS
 from app.topic_lease_registry import (
+    ACK_TIMEOUT_SECONDS,
+    AckFailed,
     Discarded,
     Issued,
     Rejected,
@@ -38,6 +41,10 @@ class _WS:
         return f"<WS {self.name}>"
 
 
+async def _noop_ack(lease):
+    """ack 자체를 검증하지 않는 테스트용 — 순서는 별도 클래스가 본다."""
+
+
 def _fresh(cache=None, uid=UID):
     cache = cache or StrictObservationCache()
     return cache, cache.snapshot(uid)
@@ -52,7 +59,7 @@ class TestIdentityAndStates(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         result = await registry.issue(
             ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
-            now_mono=1000.0, premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+            now_mono=1000.0, premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=_noop_ack,
         )
         self.assertIsInstance(result, Issued)
         lease = result.lease
@@ -69,7 +76,7 @@ class TestIdentityAndStates(unittest.IsolatedAsyncioTestCase):
             _, snapshot = _fresh(cache)
             result = await registry.issue(
                 ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
-                premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+                premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=_noop_ack,
             )
             ids.add(result.lease.lease_id)
         self.assertEqual(len(ids), 3)
@@ -82,7 +89,7 @@ class TestIdentityAndStates(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
                              now_mono=1000.0, premium_verified_at_mono=1000.0,
-                             identity_verified_at_mono=1000.0)
+                             identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         self.assertIsNotNone(registry.active_lease(ws, TOPIC))
 
 
@@ -98,7 +105,7 @@ class TestFenceOrdering(unittest.IsolatedAsyncioTestCase):
 
         result = await registry.issue(
             ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
-            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=_noop_ack,
         )
         self.assertIsInstance(result, Discarded)
         self.assertIsNone(registry.active_lease(ws, TOPIC), "폐기했는데 흔적이 남았다")
@@ -124,7 +131,7 @@ class TestFenceOrdering(unittest.IsolatedAsyncioTestCase):
         cache.is_current = spy
         await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
                              now_mono=1000.0, premium_verified_at_mono=1000.0,
-                             identity_verified_at_mono=1000.0)
+                             identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         self.assertTrue(observed.get("registered_at_recheck"), "재확인 시점에 등록돼 있지 않았다")
         self.assertIsNone(observed.get("visible_at_recheck"),
                           "활성화 전인데 전송 대상으로 보였다")
@@ -139,7 +146,7 @@ class TestUidBinding(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
                              now_mono=1000.0, premium_verified_at_mono=1000.0,
-                             identity_verified_at_mono=1000.0)
+                             identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         self.assertEqual(registry.bound_uid(ws), UID)
 
     async def test_cross_uid_subscribe_on_a_live_socket_is_rejected(self):
@@ -154,14 +161,14 @@ class TestUidBinding(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
                              now_mono=1000.0, premium_verified_at_mono=1000.0,
-                             identity_verified_at_mono=1000.0)
+                             identity_verified_at_mono=1000.0, send_ack=_noop_ack)
 
         other_cache = StrictObservationCache()
         other_snapshot = other_cache.snapshot("uid-2")
         result = await registry.issue(
             ws=ws, topic="fx:usd-krw", uid="uid-2", snapshot=other_snapshot,
             cache=other_cache, now_mono=1000.0, premium_verified_at_mono=1000.0,
-            identity_verified_at_mono=1000.0,
+            identity_verified_at_mono=1000.0, send_ack=_noop_ack,
         )
         self.assertIsInstance(result, Rejected)
         self.assertIsNone(registry.active_lease(ws, "fx:usd-krw"))
@@ -177,7 +184,7 @@ class TestUidBinding(unittest.IsolatedAsyncioTestCase):
             snap = c.snapshot(uid)
             await registry.issue(ws=ws, topic=TOPIC, uid=uid, snapshot=snap, cache=c,
                                  now_mono=1000.0, premium_verified_at_mono=1000.0,
-                                 identity_verified_at_mono=1000.0)
+                                 identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         self.assertEqual(registry.connection_count(), 2)
         self.assertEqual({registry.bound_uid(ws) for ws in sockets}, {"uid-1", "uid-2"})
 
@@ -192,7 +199,7 @@ class TestLeaseComputation(unittest.IsolatedAsyncioTestCase):
             ws=_WS(), topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
             now_mono=1000.0,
             premium_verified_at_mono=940.0,       # 가장 오래된 축
-            identity_verified_at_mono=980.0,
+            identity_verified_at_mono=980.0, send_ack=_noop_ack,
         )
         self.assertAlmostEqual(result.lease.expires_at_mono, 940.0 + LEASE_MAX_SECONDS)
 
@@ -226,7 +233,7 @@ class TestConnectionLock(unittest.IsolatedAsyncioTestCase):
             order.append(f"enter:{topic}")
             result = await registry.issue(
                 ws=ws, topic=topic, uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
-                premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+                premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=_noop_ack,
             )
             order.append(f"exit:{topic}")
             return result
@@ -248,37 +255,156 @@ class TestConnectionLock(unittest.IsolatedAsyncioTestCase):
         lock_b = registry.connection_lock(_WS("b"))
         self.assertIsNot(lock_a, lock_b)
 
-    def test_critical_section_has_no_await_other_than_the_lock(self):
-        """⛔ 이 불변식이 깨지는 순간 lock이 **load-bearing이 된다**.
+    async def test_ack_under_lock_actually_excludes_a_concurrent_issue(self):
+        """⛔ 이제 lock이 **실제로** load-bearing이다.
 
-        오늘 `issue`의 임계구역에는 lock 획득 말고 `await`가 없다 — 그래서 event loop가 자연히
-        직렬화하고, lock을 지워도 테스트가 통과한다(mutation 생존으로 확인). 즉 지금 lock은
-        **구조적 요구(§B4)이자 중복**이다.
-
-        누군가 그 안에 `await`(예: ack 전송, 비동기 저장소)를 넣으면 그때부터 lock 없이는
-        UID 바인딩·CAS가 찢어진다. 그 변경을 여기서 red로 드러낸다 — lock을 지우는 회귀는
-        못 잡아도, **중복을 안전하게 만드는 전제**가 사라지는 것은 잡는다.
+        한때는 임계구역에 `await`가 없어 event loop가 자연 직렬화했고, lock을 지워도 테스트가
+        통과했다. 그래서 "임계구역에 await가 없음"을 AST로 잠가 두었는데 — **그 테스트가 지금
+        red를 냈다.** ack이 lock 안으로 들어오면서 전제가 사라졌기 때문이다. 설계대로다.
+        이제 그 자리에 **행동 기반** 상호배제 검증을 둔다.
         """
-        import ast
-        import inspect
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        _, snapshot = _fresh(cache)
+        release = asyncio.Event()
+        order = []
 
-        import app.topic_lease_registry as module
+        async def slow_ack(lease):
+            order.append("ack:start")
+            await release.wait()
+            order.append("ack:end")
 
-        tree = ast.parse(inspect.getsource(module))
-        issue = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.AsyncFunctionDef) and n.name == "issue"
-        )
-        awaits = [n for n in ast.walk(issue) if isinstance(n, ast.Await)]
-        self.assertEqual(
-            awaits, [],
-            "임계구역에 await가 생겼다 — 이제 연결별 lock이 실제로 필요하다",
-        )
+        first = asyncio.create_task(registry.issue(
+            ws=ws, topic="a", uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=slow_ack,
+        ))
+        while "ack:start" not in order:
+            await asyncio.sleep(0)
+
+        async def quick_ack(lease):
+            order.append("second:ack")
+
+        second = asyncio.create_task(registry.issue(
+            ws=ws, topic="b", uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=quick_ack,
+        ))
+        try:
+            await asyncio.sleep(0.03)
+            self.assertNotIn("second:ack", order, "ack 구간에 다른 subscribe가 끼어들었다")
+        finally:
+            release.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+        self.assertEqual(order, ["ack:start", "ack:end", "second:ack"])
 
     async def test_lock_is_stable_per_connection(self):
         registry = TopicLeaseRegistry()
         ws = _WS()
         self.assertIs(registry.connection_lock(ws), registry.connection_lock(ws))
+
+
+class TestAckPrecedesActivation(unittest.IsolatedAsyncioTestCase):
+    """⛔ §B4 순서 고정 — **`ack` → registry 활성화 → `snapshot`**.
+
+    계획: "없으면 **ack 이전 live 수신**, stale 통지 역전". 구 API는 활성화 후 `Issued`를
+    돌려줘서 호출자가 ack을 **활성화 뒤에만** 보낼 수 있었다 — 순서를 지킬 방법이 없었다.
+    그래서 sender를 **주입받아** registry가 순서를 강제한다(호출자가 뒤집을 수 없다).
+    """
+
+    async def test_ack_is_sent_while_the_lease_is_still_inactive(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        _, snapshot = _fresh(cache)
+        seen = {}
+
+        async def send_ack(lease):
+            seen["active_at_ack"] = registry.active_lease(ws, TOPIC)
+            seen["pending_at_ack"] = registry.has_pending(ws, TOPIC)
+
+        result = await registry.issue(
+            ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+            send_ack=send_ack,
+        )
+        self.assertIsInstance(result, Issued)
+        self.assertIsNone(seen["active_at_ack"], "ack 시점에 이미 live 대상이었다")
+        self.assertTrue(seen["pending_at_ack"])
+        self.assertIsNotNone(registry.active_lease(ws, TOPIC), "ack 뒤 활성화되지 않았다")
+
+    async def test_ack_runs_under_the_connection_lock(self):
+        """§B4 — ack 송신도 **같은 lock**으로 직렬화한다(계획 629행)."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        _, snapshot = _fresh(cache)
+        observed = {}
+
+        async def send_ack(lease):
+            observed["locked"] = registry.connection_lock(ws).locked()
+
+        await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
+                             now_mono=1000.0, premium_verified_at_mono=1000.0,
+                             identity_verified_at_mono=1000.0, send_ack=send_ack)
+        self.assertTrue(observed.get("locked"), "ack이 lock 밖에서 나갔다")
+
+
+class TestAckFailureLeavesNothingActive(unittest.IsolatedAsyncioTestCase):
+    """⛔ ack이 실패했는데 lease가 살아 있으면, 클라는 모르는 구독이 teardown까지 남는다."""
+
+    async def _issue(self, registry, cache, ws, send_ack):
+        _, snapshot = _fresh(cache)
+        return await registry.issue(
+            ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=send_ack,
+        )
+
+    async def test_ack_exception_discards_the_lease(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+
+        async def failing(lease):
+            raise ConnectionResetError("socket gone")
+
+        result = await self._issue(registry, cache, ws, failing)
+        self.assertIsInstance(result, AckFailed)
+        self.assertIsNone(registry.active_lease(ws, TOPIC))
+        self.assertFalse(registry.has_pending(ws, TOPIC), "pending이 남았다")
+
+    async def test_ack_timeout_discards_the_lease(self):
+        """⛔ 멈춘 클라가 **연결 lock을 무한 점유**하면 그 연결의 모든 상태 전이가 막힌다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+
+        async def stalling(lease):
+            await asyncio.sleep(60)
+
+        with patch("app.topic_lease_registry.ACK_TIMEOUT_SECONDS", 0.02):
+            result = await self._issue(registry, cache, ws, stalling)
+        self.assertIsInstance(result, AckFailed)
+        self.assertIsNone(registry.active_lease(ws, TOPIC))
+        self.assertFalse(registry.connection_lock(ws).locked(), "lock이 남았다")
+
+    async def test_ack_timeout_is_below_the_client_ack_deadline(self):
+        """§D6 클라 ack timeout이 10초다 — 그보다 길면 클라가 먼저 포기한다."""
+        self.assertLess(ACK_TIMEOUT_SECONDS, 10)
+
+    async def test_failure_is_distinguishable_from_invalidation(self):
+        """호출자의 대응이 다르다 — ack 실패는 §B2a로 **소켓을 닫고**, 무효화는 재시도다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+
+        async def failing(lease):
+            raise ConnectionResetError()
+
+        ack_failed = await self._issue(registry, cache, _WS("a"), failing)
+
+        ws_b, other_cache = _WS("b"), StrictObservationCache()
+        snap = other_cache.snapshot(UID)
+        other_cache.bump(UID)
+        discarded = await registry.issue(
+            ws=ws_b, topic=TOPIC, uid=UID, snapshot=snap, cache=other_cache, now_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+            send_ack=lambda lease: asyncio.sleep(0),
+        )
+        self.assertNotEqual(type(ack_failed), type(discarded))
+        self.assertIsInstance(discarded, Discarded)
 
 
 class TestWeakCleanupActuallyWorks(unittest.IsolatedAsyncioTestCase):
@@ -296,7 +422,7 @@ class TestWeakCleanupActuallyWorks(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
                              now_mono=1000.0, premium_verified_at_mono=1000.0,
-                             identity_verified_at_mono=1000.0)
+                             identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         self.assertEqual(registry.connection_count(), 1)
 
         del ws                                  # handler가 비정상 종료해 정리를 못 부른 상황
@@ -319,7 +445,7 @@ class TestExpiredHorizonIsNotIssued(unittest.IsolatedAsyncioTestCase):
             ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
             now_mono=2000.0,
             premium_verified_at_mono=1000.0,     # 1000 + 900 = 1900 < now
-            identity_verified_at_mono=1000.0,
+            identity_verified_at_mono=1000.0, send_ack=_noop_ack,
         )
         self.assertIsInstance(result, Rejected)
         self.assertIsNone(registry.active_lease(ws, TOPIC), "만료된 lease가 활성화됐다")
@@ -331,7 +457,7 @@ class TestExpiredHorizonIsNotIssued(unittest.IsolatedAsyncioTestCase):
         result = await registry.issue(
             ws=_WS(), topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
             now_mono=1000.0 + LEASE_MAX_SECONDS,   # 정확히 경계
-            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=_noop_ack,
         )
         self.assertIsInstance(result, Rejected)
 
@@ -423,13 +549,13 @@ class TestTeardownDoesNotBreakLockIdentity(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
                              now_mono=1000.0, premium_verified_at_mono=1000.0,
-                             identity_verified_at_mono=1000.0)
+                             identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         await registry.remove_websocket(ws)
 
         _, snapshot2 = _fresh(cache)
         result = await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot2, cache=cache,
                                       now_mono=1000.0, premium_verified_at_mono=1000.0,
-                                      identity_verified_at_mono=1000.0)
+                                      identity_verified_at_mono=1000.0, send_ack=_noop_ack)
         self.assertIsInstance(result, Rejected)
         self.assertIsNone(registry.active_lease(ws, TOPIC), "teardown 뒤 구독이 되살아났다")
 
@@ -441,7 +567,7 @@ class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
         _, snapshot = _fresh(cache)
         return await registry.issue(
             ws=ws, topic=topic, uid=UID, snapshot=snapshot, cache=cache, now_mono=1000.0,
-            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0, send_ack=_noop_ack,
         )
 
     async def test_removal_requires_the_matching_lease_id(self):
