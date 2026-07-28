@@ -323,6 +323,42 @@ class TestLazyBindingActuallyRuns(unittest.TestCase):
         self.assertTrue(all(isinstance(r, IdentityFound) for r in results),
                         f"경쟁이 오분류를 만들었다: {[type(r).__name__ for r in results]}")
 
+    def test_app_acquisition_failure_is_not_reported_as_a_bad_uid(self):
+        """⛔ app 초기화 실패가 **UID 검증 실패로 둔갑**하면 안 된다.
+
+        기본 app이 없거나(`_default_credential()`) named app 초기화가 실패하면 마지막
+        `get_app()`도 `ValueError`를 내고, 그게 분류기에 도달해 유효한 uid가
+        `INVALID_UID`로 기록된다. 두 원인은 대응 주체가 완전히 다르다 —
+        전자는 배포·자격증명 문제, 후자는 호출자가 넘긴 값 문제다.
+        """
+        def failing_init(credential=None, options=None, name="[DEFAULT]"):
+            raise ValueError("cannot initialise")
+
+        self.fb.initialize_app = failing_init
+        self._apps.pop("[DEFAULT]", None)          # 기본 app도 없다
+
+        result = asyncio.run(FirebaseIdentityProvider()("perfectly-valid-uid"))
+        self.assertIsInstance(result, IdentityMisconfigured)
+        self.assertNotEqual(
+            result.code, "INVALID_UID", "app 초기화 실패가 UID 문제로 보고됐다"
+        )
+
+    def test_app_acquisition_failure_with_a_working_default_app(self):
+        """⛔ 위 테스트와 **다른 경로**를 밟는다.
+
+        기본 app이 살아 있으면 `_default_credential()`은 성공하고, 실패는 `initialize_app`과
+        마지막 `get_app`에서만 난다. 두 감싸기(자격증명 쪽 / 마지막 get_app 쪽)가 **서로를
+        가려주기** 때문에, 각각을 독립으로 잠그려면 두 경로가 다 필요하다.
+        """
+        def failing_init(credential=None, options=None, name="[DEFAULT]"):
+            raise ValueError("quota exceeded")
+
+        self.fb.initialize_app = failing_init      # 기본 app은 그대로 둔다
+
+        result = asyncio.run(FirebaseIdentityProvider()("perfectly-valid-uid"))
+        self.assertIsInstance(result, IdentityMisconfigured)
+        self.assertEqual(result.code, "APP_INIT_FAILED")
+
     def test_duplicate_initialisation_is_recovered_not_raised(self):
         """⛔ lock 밖에서 남이 먼저 만들었을 때 `ValueError`를 그대로 내면 `INVALID_UID`로 둔갑한다."""
         provider = FirebaseIdentityProvider()
@@ -341,31 +377,42 @@ class _FakeDefaultApp:
 
 
 class TestIntegrationWithVerifierAndSingleFlight(unittest.IsolatedAsyncioTestCase):
-    """⛔ codex 완료 게이트 2개 — registry 없이 **지금** 검증 가능하다(내가 배선 슬라이스로 미뤘었다).
+    """⛔ codex 완료 게이트 2개 — **실제 `FirebaseIdentityProvider`를 검증기에 주입해서** 본다.
 
-        (a) provider의 자체 timeout 뒤 공유 flight가 실제로 종료돼 `in_flight_count() == 0`
+        (a) provider의 SDK timeout 뒤 공유 flight가 실제로 종료돼 `in_flight_count() == 0`
         (b) 이후 요청이 **새 provider 호출**로 성공
 
-    provider의 SDK timeout을 여기서는 짧은 sleep + `IdentityUnavailable` 반환으로 모사한다 —
-    실물 SDK는 `httpTimeout` 경과 후 transient 오류를 내므로 같은 모양이다.
+    ⚠️ 구 버전은 별도 `async def identity()` fake가 `IdentityUnavailable`을 그냥 돌려줬다.
+    그러면 이 adapter의 `to_thread`·SDK timeout 종료·예외 분류가 single-flight와 어떻게 맞물리는지
+    **하나도 검증되지 않는다**. 여기서는 **동기** `get_user` fake가 SDK 상한만큼 실제로 블록한 뒤
+    SDK의 timeout 예외를 던진다 — 실물과 같은 모양이다.
     """
 
-    async def test_timeout_releases_the_flight_and_the_next_request_succeeds(self):
+    async def test_sdk_timeout_releases_the_flight_and_the_next_request_succeeds(self):
+        import threading
+
+        from firebase_admin import exceptions
+
         from app.strict_cache import StrictObservationCache
         from app.strict_single_flight import StrictSingleFlight
         from app.strict_verifier import TemporarilyUnavailable, VerifiedActive, verify_strict
         from app.subscription import Determined
 
         cache, flight = StrictObservationCache(), StrictSingleFlight()
-        calls = []
         sdk_timeout = 0.05
+        calls = []
+        in_thread = threading.Event()
 
-        async def identity(uid):
+        def get_user(uid, app=None):
+            """동기 SDK 흉내 — 상한까지 **실제로 블록**한 뒤 timeout 예외를 낸다."""
             calls.append(uid)
-            await asyncio.sleep(sdk_timeout)          # SDK가 자기 상한까지 버티다가
+            in_thread.set()
+            time.sleep(sdk_timeout)
             if len(calls) == 1:
-                return IdentityUnavailable(code="DEADLINE_EXCEEDED")   # 첫 번째는 timeout
-            return IdentityFound(disabled=False, tokens_valid_after_ms=1_699_999_900_000)
+                raise exceptions.DeadlineExceededError("timeout", cause=None)
+            return _FakeUser()
+
+        provider = FirebaseIdentityProvider(get_user=get_user)
 
         async def premium(uid):
             return Determined(is_premium=True)
@@ -377,17 +424,107 @@ class TestIntegrationWithVerifierAndSingleFlight(unittest.IsolatedAsyncioTestCas
         def _verify():
             return verify_strict("uid-x", token_iat_seconds=1_700_000_000, clock=_Clock(),
                                  cache=cache, premium_provider=premium,
-                                 identity_provider=identity, single_flight=flight)
+                                 identity_provider=provider, single_flight=flight)
 
         first = await _verify()
-        self.assertIsInstance(first, TemporarilyUnavailable)
+        self.assertIsInstance(first, TemporarilyUnavailable,
+                              "SDK timeout이 3-state로 접히지 않았다")
+        self.assertTrue(in_thread.is_set(), "to_thread 경로를 안 탔다")
         # (a) provider가 자기 상한 안에 끝냈으므로 flight도 끝나 있어야 한다
-        self.assertEqual(flight.in_flight_count(), 0, "timeout 뒤 flight가 슬롯을 안 놨다")
+        self.assertEqual(flight.in_flight_count(), 0, "SDK timeout 뒤 flight가 슬롯을 안 놨다")
 
         # (b) 다음 요청은 **새 호출**로 성공한다
         second = await _verify()
         self.assertIsInstance(second, VerifiedActive)
         self.assertEqual(len(calls), 2, "새 provider 호출 없이 성공했다면 낡은 결과를 쓴 것이다")
+
+    async def test_blocking_sdk_call_does_not_stall_the_event_loop(self):
+        """⛔ 동기 SDK를 `to_thread` 없이 부르면 **broadcast 포함 전체 loop가 멈춘다**.
+
+        이 리포의 broadcast는 매초 도는 loop 작업이다. 검증 한 건이 그 초를 잡아먹으면
+        전 사용자 데이터가 밀린다.
+        """
+        from app.strict_cache import StrictObservationCache
+        from app.strict_single_flight import StrictSingleFlight
+        from app.strict_verifier import VerifiedActive, verify_strict
+        from app.subscription import Determined
+
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+
+        def get_user(uid, app=None):
+            time.sleep(0.15)               # 동기 SDK가 실제로 블록하는 시간
+            return _FakeUser()
+
+        provider = FirebaseIdentityProvider(get_user=get_user)
+
+        async def premium(uid):
+            return Determined(is_premium=True)
+
+        class _Clock:
+            def mono(self):
+                return time.monotonic()
+
+        ticks = []
+
+        async def ticker():
+            while True:
+                await asyncio.sleep(0.005)
+                ticks.append(1)
+
+        verification = asyncio.create_task(
+            verify_strict("uid-z", token_iat_seconds=1_700_000_000, clock=_Clock(), cache=cache,
+                          premium_provider=premium, identity_provider=provider,
+                          single_flight=flight)
+        )
+        tick_task = asyncio.create_task(ticker())
+        result = await verification
+        # ⚠️ **검증이 끝난 순간**에 세야 한다. ticker를 끝까지 기다린 뒤 세면 항상 20이라
+        # 단언이 공허해진다(그렇게 썼다가 mutation이 생존했다).
+        ticks_during_verification = len(ticks)
+        tick_task.cancel()
+        try:
+            await tick_task
+        except asyncio.CancelledError:
+            pass
+
+        self.assertIsInstance(result, VerifiedActive)
+        self.assertGreaterEqual(
+            ticks_during_verification, 10,
+            f"동기 호출이 event loop를 붙잡았다 — 검증 중 tick {ticks_during_verification}회",
+        )
+
+    async def test_concurrent_requests_share_one_sdk_call(self):
+        """실제 adapter를 통해서도 합치기가 동작하는가 — `to_thread`가 끼어도."""
+        from app.strict_cache import StrictObservationCache
+        from app.strict_single_flight import StrictSingleFlight
+        from app.strict_verifier import VerifiedActive, verify_strict
+        from app.subscription import Determined
+
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+        calls = []
+
+        def get_user(uid, app=None):
+            calls.append(uid)
+            time.sleep(0.02)
+            return _FakeUser()
+
+        provider = FirebaseIdentityProvider(get_user=get_user)
+
+        async def premium(uid):
+            return Determined(is_premium=True)
+
+        class _Clock:
+            def mono(self):
+                return time.monotonic()
+
+        results = await asyncio.gather(*(
+            verify_strict("uid-y", token_iat_seconds=1_700_000_000, clock=_Clock(), cache=cache,
+                          premium_provider=premium, identity_provider=provider,
+                          single_flight=flight)
+            for _ in range(5)
+        ))
+        self.assertTrue(all(isinstance(r, VerifiedActive) for r in results))
+        self.assertEqual(len(calls), 1, "실제 adapter 경로에서 합치기가 안 됐다")
 
 
 if __name__ == "__main__":

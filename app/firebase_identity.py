@@ -181,7 +181,11 @@ def _classify(exc: BaseException) -> IdentityResult:
         ):
             return IdentityMisconfigured(code="CREDENTIALS_ERROR")
 
-    # (7) `validate_uid`의 `ValueError` — `derive_verdict`의 축 가드와 타입이 겹치므로
+    # (7a) app 획득 실패 — uid와 **무관**하다. 반드시 (7b)보다 먼저 본다.
+    if isinstance(exc, _AppAcquisitionError):
+        return IdentityMisconfigured(code="APP_INIT_FAILED")
+
+    # (7b) `validate_uid`의 `ValueError` — `derive_verdict`의 축 가드와 타입이 겹치므로
     #     여기서 **반드시** 접는다. 안 접으면 우리 코드 버그로 오분류된다.
     #     ⚠️ 이 분기가 정당한 근거는 **app 초기화가 `ValueError`를 밖으로 내지 않기** 때문이다
     #     (`_acquire_app` 참조). 그 보장이 깨지면 초기화 경쟁이 여기서 `INVALID_UID`로 둔갑한다 —
@@ -208,6 +212,15 @@ def _google_auth_exceptions():
 
 
 _APP_INIT_LOCK = threading.Lock()
+
+
+class _AppAcquisitionError(Exception):
+    """이름 있는 app을 얻지 못했다 — **UID 문제가 아니다**.
+
+    ⚠️ 이 타입이 없으면 app 초기화의 `ValueError`가 `validate_uid`의 `ValueError`와 합쳐져,
+    유효한 uid가 `INVALID_UID`로 기록된다(실측 재현). 대응 주체가 완전히 다르다 —
+    전자는 배포·자격증명 문제, 후자는 호출자가 넘긴 값 문제다.
+    """
 
 
 def _acquire_app(app_name: str):
@@ -240,7 +253,13 @@ def _acquire_app(app_name: str):
                 name=app_name,
             )
         except ValueError:
-            return firebase_admin.get_app(app_name)      # 그 사이 만들어졌다
+            pass
+        try:
+            return firebase_admin.get_app(app_name)      # 그 사이 만들어졌다면 그걸 쓴다
+        except ValueError as exc:
+            # ⚠️ 여기서 **반드시** 타입을 바꾼다. 맨 `ValueError`로 나가면 `validate_uid`의
+            # 것과 합쳐져 유효한 uid가 `INVALID_UID`로 기록된다(실측 재현).
+            raise _AppAcquisitionError(f"{app_name} app을 얻지 못했다: {exc}") from exc
 
 
 def _lazy_get_user(app_name: str):
@@ -255,6 +274,16 @@ def _lazy_get_user(app_name: str):
 
 
 def _default_credential():
+    """기본 app의 자격증명. 기본 app이 없으면 **app 문제**이지 uid 문제가 아니다.
+
+    ⚠️ 이 감싸기는 **결과를 바꾸지 않는다**(mutation 등가 확인) — 호출부의 `except ValueError`가
+    삼킨 뒤 마지막 `get_app`이 같은 버킷으로 보내기 때문이다. 그래도 남긴다: 실패 원인을
+    **그 자리에서** 드러내고(fail-fast), 호출부 구조가 바뀌어도 uid 버킷과 안 섞인다.
+    필요하다고 주장하지는 않는다.
+    """
     import firebase_admin
 
-    return firebase_admin.get_app().credential
+    try:
+        return firebase_admin.get_app().credential
+    except ValueError as exc:
+        raise _AppAcquisitionError(f"기본 app이 없어 자격증명을 못 얻는다: {exc}") from exc
