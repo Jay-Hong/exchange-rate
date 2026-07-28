@@ -132,6 +132,8 @@ SCENARIOS = [
     ("subscriber is str", _FakeResponse(200, {"subscriber": "nope"}),               (False, False), ProtocolViolation),
     ("premium is str",    _FakeResponse(200, _entitlement_payload("yes")),          (False, False), ProtocolViolation),
     ("expires is number", _FakeResponse(200, _entitlement_payload({"expires_date": 12345})), (False, False), ProtocolViolation),
+    # tz 없는 날짜 — aware/naive 비교라 TypeError. 계약 위반이므로 예외가 아니라 ProtocolViolation.
+    ("expires without tz", _FakeResponse(200, _entitlement_payload({"product_identifier": "p", "expires_date": "2026-06-01T00:00:00"})), (False, False), ProtocolViolation),
 ]
 
 
@@ -308,3 +310,53 @@ class TestUnexpectedErrorsPropagate(unittest.IsolatedAsyncioTestCase):
             with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
                 with self.assertRaises(RuntimeError):
                     await fetch_revenuecat_result("u", clock=_clock())
+
+
+class TestMalformedBodyStillPassesAsAuthoritative(unittest.IsolatedAsyncioTestCase):
+    """⚠️ **알려진 gap — N-3으로 이월**. 여기 값들은 계약 위반인데 `Determined`로 통과한다.
+
+    실측(2026-07-28):
+
+    | 입력 | typed | legacy(REST) |
+    |---|---|---|
+    | `{}` / `subscriber` 누락 / `premium=[]` | `Determined(False)` | `(False, True)` |
+    | `expires_date=""` / `0` | `Determined(True)` ← **프리미엄 부여** | `(True, True)` |
+
+    누락 키의 `{}` 기본값과 truthiness 분기 때문이며, strict가 이걸 **관측으로 저장**하면
+    정상 사용자를 "구독 없음"으로 굳히거나 malformed 값으로 프리미엄을 줄 수 있다.
+
+    **이번 슬라이스에서 고치지 않는 이유**: `ProtocolViolation`으로 바꾸면 legacy 튜플이
+    `(False, True)`→`(False, False)`, `(True, True)`→`(False, False)`로 **REST 동작이 바뀐다**.
+    이번 GO는 "REST behavior-change-0"이라 그 변경은 범위 밖이다(별도 승인 필요).
+
+    → 그래서 **현재 동작을 그대로 못 박아 둔다**. N-3에서 조이면 이 클래스가 red가 되고,
+    그 red가 곧 **REST에 미치는 영향의 목록**이 된다(조용히 바뀌지 않게 하는 장치).
+    """
+
+    CASES = [
+        ("body {}", {}, (False, True), True),
+        ("subscriber 누락", {"other": 1}, (False, True), True),
+        ("premium=[]", _entitlement_payload([]), (False, True), True),
+        ('expires_date=""', _entitlement_payload({"product_identifier": "p", "expires_date": ""}), (True, True), True),
+        ("expires_date=0", _entitlement_payload({"product_identifier": "p", "expires_date": 0}), (True, True), True),
+    ]
+
+    async def test_current_behavior_is_pinned(self):
+        for label, payload, legacy, is_determined in self.CASES:
+            with self.subTest(case=label):
+                with _patch_http(_FakeResponse(200, payload)):
+                    with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                        typed = await fetch_revenuecat_result("u", clock=_clock())
+                with _patch_http(_FakeResponse(200, payload)):
+                    with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                        got = await _check_revenuecat_entitlement("u", clock=_clock())
+                self.assertEqual(isinstance(typed, Determined), is_determined, label)
+                self.assertEqual(got, legacy, label)
+
+    async def test_empty_expires_date_currently_grants_premium(self):
+        """가장 위험한 항목을 따로 세운다 — malformed 입력에 **프리미엄이 부여**된다."""
+        payload = _entitlement_payload({"product_identifier": "p", "expires_date": ""})
+        with _patch_http(_FakeResponse(200, payload)):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                typed = await fetch_revenuecat_result("u", clock=_clock())
+        self.assertEqual(typed, Determined(is_premium=True), "N-3에서 조일 때 여기가 red가 된다")

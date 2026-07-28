@@ -268,7 +268,16 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
             logger.warning("RevenueCat expires_date 파싱 실패", extra={"user_id": user_id})
             return ProtocolViolation(detail="expires_date")
 
-        return Determined(is_premium=expires_dt > clock.wall())
+        # ⚠️ 샘플링 지점 유지 — 파싱 **후**에 한 번 읽는다(구 코드의 `expires_dt > clock.wall()`와 동일).
+        now = clock.wall()
+        try:
+            return Determined(is_premium=expires_dt > now)
+        except TypeError:
+            # offset 없는 날짜(`"2026-06-01T00:00:00"`)면 aware/naive 비교라 TypeError다.
+            # RevenueCat 형식은 `Z`를 포함하므로 이건 **계약 위반**이지 우리 버그가 아니다.
+            # REST 결과는 `(False, False)`로 이전과 동일 — 예외가 전파되든 여기서 접히든 같다.
+            logger.warning("RevenueCat expires_date tz 누락", extra={"user_id": user_id})
+            return ProtocolViolation(detail="expires_date_naive")
 
     if response.status_code == 404:
         # ✅ 사용자 없음: 새 사용자, "비구독"으로 캐시 OK
