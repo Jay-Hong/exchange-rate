@@ -56,7 +56,7 @@ class TestIdentityAndStates(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(result, Issued)
         lease = result.lease
-        self.assertIs(lease.ws, ws)
+        self.assertIs(result.ws, ws)
         self.assertEqual((lease.topic, lease.uid, lease.epoch), (TOPIC, UID, snapshot.epoch))
         self.assertTrue(lease.lease_id)
 
@@ -169,13 +169,17 @@ class TestUidBinding(unittest.IsolatedAsyncioTestCase):
 
     async def test_different_connections_may_hold_different_uids(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
-        for name, uid in (("a", "uid-1"), ("b", "uid-2")):
+        # ⚠️ 연결 참조를 **붙들어야** 한다 — registry는 약한 참조라 놓으면 즉시 사라진다
+        # (실제 handler는 소켓을 붙들고 있으므로 이게 정상 조건이다).
+        sockets = [_WS("a"), _WS("b")]
+        for ws, uid in zip(sockets, ("uid-1", "uid-2")):
             c = StrictObservationCache()
             snap = c.snapshot(uid)
-            await registry.issue(ws=_WS(name), topic=TOPIC, uid=uid, snapshot=snap, cache=c,
+            await registry.issue(ws=ws, topic=TOPIC, uid=uid, snapshot=snap, cache=c,
                                  now_mono=1000.0, premium_verified_at_mono=1000.0,
                                  identity_verified_at_mono=1000.0)
         self.assertEqual(registry.connection_count(), 2)
+        self.assertEqual({registry.bound_uid(ws) for ws in sockets}, {"uid-1", "uid-2"})
 
 
 class TestLeaseComputation(unittest.IsolatedAsyncioTestCase):
@@ -277,6 +281,97 @@ class TestConnectionLock(unittest.IsolatedAsyncioTestCase):
         self.assertIs(registry.connection_lock(ws), registry.connection_lock(ws))
 
 
+class TestWeakCleanupActuallyWorks(unittest.IsolatedAsyncioTestCase):
+    """⛔ `WeakKeyDictionary`는 **키만** 약하다.
+
+    값(`Lease`)이 `ws`를 강하게 잡으면 `dict → Lease → ws` 경로가 키를 살려 둔다 —
+    약한 참조로 바꾼 의미가 통째로 사라진다.
+    """
+
+    async def test_connection_is_collected_when_the_handler_drops_it(self):
+        import gc
+
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        _, snapshot = _fresh(cache)
+        await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
+                             now_mono=1000.0, premium_verified_at_mono=1000.0,
+                             identity_verified_at_mono=1000.0)
+        self.assertEqual(registry.connection_count(), 1)
+
+        del ws                                  # handler가 비정상 종료해 정리를 못 부른 상황
+        gc.collect()
+        self.assertEqual(registry.connection_count(), 0, "값이 키를 살려 두고 있다")
+
+
+class TestExpiredHorizonIsNotIssued(unittest.IsolatedAsyncioTestCase):
+    """⛔ 이미 만료된 horizon으로 lease를 발급하면 **태어날 때부터 죽은** 구독이 된다.
+
+    검증기의 freshness 게이트가 보통 막아 주지만, 이 모듈은 **독립 모듈**이라 그 불변식에
+    기대면 안 된다 — 죽은 lease를 조용히 발급하는 쪽이 바로 여기이기 때문이다.
+    """
+
+    async def test_expired_expiry_is_rejected(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        _, snapshot = _fresh(cache)
+        result = await registry.issue(
+            ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
+            now_mono=2000.0,
+            premium_verified_at_mono=1000.0,     # 1000 + 900 = 1900 < now
+            identity_verified_at_mono=1000.0,
+        )
+        self.assertIsInstance(result, Rejected)
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "만료된 lease가 활성화됐다")
+
+    async def test_boundary_is_inclusive(self):
+        """§A2 — `now >= expires_at`이 만료다(fail-closed)."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        _, snapshot = _fresh(cache)
+        result = await registry.issue(
+            ws=_WS(), topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
+            now_mono=1000.0 + LEASE_MAX_SECONDS,   # 정확히 경계
+            premium_verified_at_mono=1000.0, identity_verified_at_mono=1000.0,
+        )
+        self.assertIsInstance(result, Rejected)
+
+
+class TestRemoveIsNotAB4Bypass(unittest.IsolatedAsyncioTestCase):
+    """⛔ `remove`가 연결 lock을 안 잡으면 **B4 우회로**가 된다.
+
+    오늘은 임계구역에 `await`가 없어 우연히 직렬이라 동작으로는 구분되지 않는다(mutation 생존).
+    그래서 **구조**를 잠근다 — 다음 조각인 sweep의 claim/CAS가 들어오는 순간 이게 load-bearing이
+    되는데, 그때 red로 드러나는 것보다 지금 못 박는 편이 낫다.
+    """
+
+    def test_remove_acquires_the_connection_lock(self):
+        import ast
+        import inspect
+
+        import app.topic_lease_registry as module
+
+        tree = ast.parse(inspect.getsource(module))
+        remove = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "remove"
+        )
+        locks = [
+            n for n in ast.walk(remove)
+            if isinstance(n, ast.AsyncWith)
+            and any("connection_lock" in ast.dump(item.context_expr) for item in n.items)
+        ]
+        self.assertEqual(len(locks), 1, "remove가 연결 lock을 잡지 않는다")
+
+    def test_public_mutators_are_async_so_the_lock_is_expressible(self):
+        """동기 public 변경 API가 생기면 lock을 잡을 자리가 없다."""
+        import inspect
+
+        from app.topic_lease_registry import TopicLeaseRegistry as R
+
+        for name in ("issue", "remove"):
+            self.assertTrue(inspect.iscoroutinefunction(getattr(R, name)), f"{name}이 동기다")
+
+
 class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
     """§C3 — 제거·갱신은 `(ws, topic, lease_id)` CAS다."""
 
@@ -293,9 +388,9 @@ class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
         ws = _WS()
         first = await self._issue(registry, cache, ws)
         second = await self._issue(registry, cache, ws)      # 갱신
-        self.assertFalse(registry.remove(ws, TOPIC, first.lease.lease_id), "구 id로 지워졌다")
+        self.assertFalse(await registry.remove(ws, TOPIC, first.lease.lease_id), "구 id로 지워졌다")
         self.assertIsNotNone(registry.active_lease(ws, TOPIC))
-        self.assertTrue(registry.remove(ws, TOPIC, second.lease.lease_id))
+        self.assertTrue(await registry.remove(ws, TOPIC, second.lease.lease_id))
         self.assertIsNone(registry.active_lease(ws, TOPIC))
 
     async def test_remove_websocket_clears_everything_for_that_connection(self):

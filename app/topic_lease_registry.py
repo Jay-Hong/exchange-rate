@@ -35,14 +35,19 @@ import weakref
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from app.topic_lease import compute_lease_expiry
+from app.topic_lease import compute_lease_expiry, is_expired
 
 
 @dataclass(frozen=True)
 class Lease:
-    """활성 구독 하나. `lease_id`가 CAS 토큰이다."""
+    """활성 구독 하나. `lease_id`가 CAS 토큰이다.
 
-    ws: object
+    ⚠️ **`ws`를 담지 않는다.** 연결은 이 lease가 저장된 **키**이고, 값이 키를 강하게 참조하면
+    `WeakKeyDictionary`가 통째로 무력화된다(`dict → Lease → ws` 경로가 키를 살려 둔다).
+    실측: handler가 정리를 못 부르고 연결이 사라져도 `connection_count`가 1로 남았다.
+    호출자가 ws가 필요하면 `Issued.ws`를 쓴다 — 그건 반환값이라 수명이 짧다.
+    """
+
     topic: str
     uid: str
     lease_id: str
@@ -52,8 +57,12 @@ class Lease:
 
 @dataclass(frozen=True)
 class Issued:
-    """발급 성공. `lease`의 내용이 ack의 근거다(전송은 호출자가 lock 밖에서)."""
+    """발급 성공. `lease`의 내용이 ack의 근거다(전송은 호출자가 lock 밖에서).
 
+    `ws`는 **여기에만** 있다 — 저장 구조에 넣으면 약한 참조가 무력화된다.
+    """
+
+    ws: object
     lease: Lease
 
 
@@ -122,7 +131,6 @@ class TopicLeaseRegistry:
                 return Rejected(reason="uid_rebinding_on_live_socket")
 
             lease = Lease(
-                ws=ws,
                 topic=topic,
                 uid=uid,
                 lease_id=uuid.uuid4().hex,
@@ -133,6 +141,12 @@ class TopicLeaseRegistry:
                     firebase_identity_verified_at_mono=identity_verified_at_mono,
                 ),
             )
+            # ⛔ 3-way min이 이미 지났으면 **태어날 때부터 죽은** lease다. 검증기의 freshness
+            # 게이트가 보통 막아 주지만 이 모듈은 독립이라 그 불변식에 기대면 안 된다 —
+            # 죽은 lease를 조용히 발급하는 쪽이 바로 여기다. 경계는 포함(§A2, fail-closed).
+            if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
+                return Rejected(reason="lease_horizon_already_expired")
+
             # 1) 등록(비활성) — 재확인이 **등록 이후**여야 그 사이 무효화를 본다.
             self._pending.setdefault(ws, {})[topic] = lease
             try:
@@ -142,7 +156,7 @@ class TopicLeaseRegistry:
                 # 3) 활성화 — 여기서부터 전송 대상이다.
                 self._uids[ws] = uid
                 self._active.setdefault(ws, {})[topic] = lease
-                return Issued(lease=lease)
+                return Issued(ws=ws, lease=lease)
             finally:
                 self._pending.get(ws, {}).pop(topic, None)
 
@@ -162,11 +176,19 @@ class TopicLeaseRegistry:
         return len(self._uids)
 
     # ── 제거 ────────────────────────────────────────────────────────────
-    def remove(self, ws, topic: str, lease_id: str) -> bool:
+    async def remove(self, ws, topic: str, lease_id: str) -> bool:
         """`(ws, topic, lease_id)` **CAS**. 자기 lease일 때만 지운다(§C3).
 
         ⚠️ id를 안 보면 구 sweep이 **갱신된** lease를 지워 살아 있는 구독이 사라진다.
+        ⚠️ **연결 lock을 잡는다.** 안 잡으면 이 API가 B4 우회로가 된다 — 오늘은 내부에 `await`가
+        없어 우연히 직렬이지만, 다음 조각인 sweep의 claim/CAS가 들어오면 곧바로 깨진다.
+        이미 lock을 쥔 곳에서는 `_remove_locked`를 쓴다.
         """
+        async with self.connection_lock(ws):
+            return self._remove_locked(ws, topic, lease_id)
+
+    def _remove_locked(self, ws, topic: str, lease_id: str) -> bool:
+        """**lock을 쥔 상태에서만** 부른다."""
         topics = self._active.get(ws, {})
         lease = topics.get(topic)
         if lease is None or lease.lease_id != lease_id:
