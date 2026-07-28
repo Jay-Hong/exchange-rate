@@ -788,11 +788,14 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    `remove_locked`가 public이고 lock 미보유 시 `LockNotHeld`로 시끄럽게 실패한다(조용한 §B4
    우회로 방지). 획득은 `asyncio.wait_for(lock.acquire(), timeout)` + 경합 시 **그 연결만 skip**
    (실측 py3.13: timeout된 acquire는 lock을 누수하지 않는다 — 회귀 테스트로 잠금).
-5. **`apply_unsubscribe`(요청 단위)** (D8) — topic별 `remove()`는 lock을 N번 잡아, subscribe에서 금지한
-   tearing을 그대로 재도입한다. 또 wire의 unsubscribe는 `lease_id`를 싣지 않아 read-then-update가 되고,
-   재인증과 경쟁하면 CAS가 실패해 **사용자가 끈 구독이 lease 만료까지 계속 흐른다**.
-   ⚠️ **tombstone 위에서도 제거는 성립해야 한다** — D8은 fail-open을 금지한다(subscribe의 거부 규칙을
-   그대로 재사용하면 정확히 반대가 된다).
+5. ~~**`apply_unsubscribe`(요청 단위)** (D8)~~ — **닫힘**. lock 1회 · ack 1건 · 제거는 **topic 단위**
+   (사용자 의도라 그 사이 재인증으로 lease가 갱신됐어도 제거가 맞다 — §C3 sweep의 `lease_id` CAS와
+   의도적으로 대조된다: 그쪽은 자기가 **관측한 그 lease**에만 행동해야 한다).
+   `id_token`·uid·snapshot·cache를 **인자로도 받지 않는다** — 받으면 배선이 검증에 쓰고 싶어진다.
+   ⛔ 순서가 `apply_subscribe`와 **반대**다: 여기는 `제거 → ack`, 저기는 `ack → 활성화`. 규칙은 하나 —
+   **위험한 쪽을 나중에** 둔다(subscribe는 "클라가 모르는 데이터가 먼저 오는 것", unsubscribe는
+   "끄라고 한 데이터가 ack을 기다리는 동안 계속 흐르는 것"). ack이 실패해도 **제거는 되돌리지 않는다**.
+   tombstone 위에서도 제거는 수행하고 ack만 생략한 뒤 종단으로 답한다.
 6. ~~**B1/B2 강제 지점 조회**~~ — **닫힘**. B1과 B2는 **서로 다른 조항**이라 한 메서드로
    합칠 수 없다(조회 단계에는 캡처된 identity가 아직 없다). 두 메서드로 나눴다:
    - `authorized_lease(ws, topic, *, now_mono)` = **B2 조회 경계 필터**. tombstone + 만료,
@@ -813,8 +816,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    필요하면 배선 슬라이스가 발행 직렬화를 **별도 계약**으로 세울 것.
 7. **B5(d) stale 방어 파라미터** — 클라 소유 identity generation을 받든 reject 모드를 두든 **시그니처가 바뀐다**.
    C1의 purge는 "적용하기로 한" 전이의 의미만 정하고 "적용할지"는 정하지 않는다(위 C1 미결 참조).
-8. **ack의 `operation`과 per-topic 거부 사유** (§8-B/D2) — 지금 ack은 registry(accepted/removed/active)와
-   caller(rejected/operation/request_id)가 **반씩 조립**한다. "lock 아래 단일 snapshot"이 절반만 성립한다.
+8. **ack의 per-topic 거부 사유** (§8-B/D2) — `operation`은 registry가 싣는다(D8과 함께 닫힘).
+   남은 것은 `rejected_topics`의 사유 문자열로, 지금은 caller가 조립한다 — "lock 아래 단일 snapshot"이
+   그만큼만 성립한다.
 9. **lease 없는 등록 모드** (E1 중간 상태) — 무토큰 subscribe를 legacy `register()`로 우회시키면 live 대상
    집합이 둘이 되고, flip이 E1가 피하려던 all-or-nothing 사건이 된다.
 10. **epoch 인덱스** — `Lease.epoch`은 저장만 되고 **한 번도 읽히지 않는다**. uid→lease 인덱스가 없어

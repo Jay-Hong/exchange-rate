@@ -205,7 +205,11 @@ class AckState:
     - `active` — 그 연결의 **최종 상태 전체**(topic 정렬). 이번 요청에 없던 기존 topic도 포함.
     """
 
-    uid: str
+    # ⚠️ §8-B ack schema에는 `uid`가 없다 — 호출자의 상관·로깅용으로만 싣는다.
+    #    §D8 unsubscribe는 `id_token` 불요라 미바인딩 연결에서는 None일 수 있다.
+    uid: Optional[str]
+    # §8-B — subscribe/unsubscribe가 **같은 schema**를 쓰므로 구분자가 필요하다.
+    operation: str
     # §D2 `identity_generation` — **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
     # ⛔ strict cache의 `snapshot.epoch`을 쓰면 안 된다: 그건 **UID별**이고 최초 관측 순서로
     #    할당돼 먼저 본 UID가 더 작은 값을 갖는다 → A→B 재바인딩에서 **감소**하고, "구
@@ -521,7 +525,7 @@ class TopicLeaseRegistry:
 
                     # 3) ack 자료 확정 — post-transition 상태를 **여기서 한 번** 만든다(§D2).
                     ack = self._build_ack_locked(
-                        uid=uid, generation=generation, now_mono=now_mono,
+                        uid=uid, operation="subscribe", generation=generation, now_mono=now_mono,
                         new_leases=new_leases, removed=removed, final=final,
                     )
 
@@ -624,7 +628,8 @@ class TopicLeaseRegistry:
         current = self._generations.get(ws, 0)
         return current + 1 if (bound is None or bound != uid) else current
 
-    def _build_ack_locked(self, *, uid, generation, now_mono, new_leases, removed, final) -> AckState:
+    def _build_ack_locked(self, *, uid, operation, generation, now_mono, new_leases,
+                          removed, final) -> AckState:
         """**lock을 쥔 상태에서만** 부른다 — 단일 snapshot이어야 D2가 성립한다.
 
         전이 계획(`removed`/`final`)은 호출부가 이미 확정해 넘긴다. 여기서 다시 계산하면
@@ -632,6 +637,7 @@ class TopicLeaseRegistry:
         """
         return AckState(
             uid=uid,
+            operation=operation,
             identity_generation=generation,
             accepted=tuple(self._as_subscription(l, now_mono) for l in new_leases.values()),
             removed=removed,
@@ -781,6 +787,69 @@ class TopicLeaseRegistry:
         async with self.hold_connection_lock(ws):
             return self.remove_locked(ws, topic, lease_id)
 
+    async def apply_unsubscribe(self, *, ws, topics, now_mono: float, send_ack) -> TransitionResult:
+        """§D8 — 구독 해제. **인증에 종속되지 않는다**(`id_token` 불요).
+
+        계획: "`unsubscribe`를 인증 성공에 종속시키면 **권한 축소가 실패**한다. 토큰 만료·
+        revocation·Firebase 장애 시 제거가 막혀 사용자가 끄라고 한 데이터가 lease 만료까지
+        계속 흐른다." 그래서 uid·snapshot·cache·premium 축을 **인자로도 받지 않는다** —
+        받으면 배선이 그것을 검증에 쓰고 싶어진다.
+
+        ⛔ **순서가 `apply_subscribe`와 반대다**: 여기서는 `제거 → ack`이고, subscribe는
+        `ack → 활성화`다. 규칙은 하나다 — **위험한 쪽을 나중에** 둔다. subscribe에서 위험한
+        것은 "클라가 모르는 데이터가 먼저 오는 것"이고, unsubscribe에서 위험한 것은 "끄라고 한
+        데이터가 ack을 기다리는 동안 계속 흐르는 것"이다.
+        그래서 ack이 실패해도 **제거는 되돌리지 않는다**(fail-open) — 되돌리면 정확히 그 데이터가
+        다시 흐른다. 연결은 종단 처리하고 클라는 재연결로 상태를 다시 확정한다.
+
+        ⛔ 제거는 **topic 단위**다 — `lease_id` CAS가 아니다. wire의 unsubscribe는 `lease_id`를
+        싣지 않고(§8-A), 무엇보다 이건 **사용자 의도**라 그 사이 재인증으로 lease가 갱신됐어도
+        여전히 제거가 맞다. (§C3 sweep이 CAS인 것과 대조된다 — 그쪽은 자기가 **관측한 그 lease**에
+        대해서만 행동해야 한다.)
+
+        idempotent다 — 원래 없던 topic은 조용히 넘어가고 `removed`에도 넣지 않는다(상태 델타).
+        """
+        self._guard_reentrant(ws)
+        async with self.hold_connection_lock(ws):
+            current = self._active.get(ws, {})
+            departing = {t for t in topics if t in current}
+            final = {t: l for t, l in current.items() if t not in departing}
+            removed = tuple(sorted(departing))
+
+            # 1) 제거를 **먼저** 커밋한다(위 순서 규칙).
+            self._active[ws] = final
+            for topic in departing:
+                self._drop_claim_locked(ws, topic)
+
+            if ws in self._closed:
+                # ⛔ 제거는 이미 했다 — tombstone에서 거부하면 D8이 제거를 보장해야 하는 바로 그
+                #    실패 경로에서 축소가 막힌다. ack만 생략하고 종단으로 답한다(소켓이 죽었다).
+                return ConnectionTerminated(reason="connection_closed")
+
+            # 2) ack — 이번 요청 결과 + 최종 상태 전체(§D2).
+            ack = self._build_ack_locked(
+                uid=self._uids.get(ws), operation="unsubscribe",
+                generation=self._generations.get(ws, 0), now_mono=now_mono,
+                new_leases={}, removed=removed, final=final,
+            )
+            try:
+                async with asyncio.timeout(ACK_TIMEOUT_SECONDS) as budget:
+                    confirmed = await send_ack(ack)
+            except asyncio.CancelledError:
+                self._closed.add(ws)
+                raise
+            except Exception as exc:  # noqa: BLE001 — 전송 실패는 연결 사망으로 본다(§B2a)
+                return self._terminate_locked(ws, type(exc).__name__)
+            if budget.expired():
+                return self._terminate_locked(ws, "ack_confirmed_after_deadline")
+            if confirmed is not True:
+                return self._terminate_locked(ws, "ack_not_confirmed")
+            return Applied(ws=ws, ack=ack)
+
+    def topics_for_test(self, ws) -> tuple:
+        """활성 topic 이름 목록 — tombstone과 무관한 **상태 위생** 검증용(인가에 쓰지 말 것)."""
+        return tuple(sorted(self._active.get(ws, {})))
+
     # ── §C3 sweep primitives (모두 **연결 lock을 쥔 상태에서만**) ────────────
     def _require_lock(self, ws) -> None:
         """⛔ lock 없이 상태를 바꾸면 §B4 우회로다. 조용히 통과시키지 않는다."""
@@ -811,6 +880,19 @@ class TopicLeaseRegistry:
         지점에서 부활하지 않도록.
         """
         return self._claimed.get(ws, {}).get(lease.topic) == lease.lease_id
+
+    def _drop_claim_locked(self, ws, topic: str) -> None:
+        """그 topic의 claim 표식을 지운다 — **표식 변경의 단일 경로**.
+
+        ⚠️ 무조건 지운다. 부르는 쪽은 이미 그 topic의 lease를 없앤 뒤이므로, 표식이 그 lease를
+        가리켰든 (취소로 남은) 구 lease를 가리켰든 **어느 쪽도 더는 의미가 없다**.
+        """
+        claimed = self._claimed.get(ws)
+        if claimed is None:
+            return
+        claimed.pop(topic, None)
+        if not claimed:
+            self._claimed.pop(ws, None)
 
     def claimed_topics(self, ws) -> tuple:
         """claim 표식이 걸린 topic 목록 — 상태 위생 검증용(인가 판정에 쓰지 말 것)."""
@@ -853,11 +935,7 @@ class TopicLeaseRegistry:
         if lease is None or lease.lease_id != lease_id:
             return False
         del topics[topic]
-        claimed = self._claimed.get(ws)
-        if claimed is not None and claimed.get(topic) == lease_id:
-            del claimed[topic]
-            if not claimed:
-                self._claimed.pop(ws, None)
+        self._drop_claim_locked(ws, topic)
         return True
 
     async def remove_websocket(self, ws) -> None:

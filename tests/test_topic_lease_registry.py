@@ -907,8 +907,10 @@ class TestMutatorsAreNotB4Bypasses(unittest.IsolatedAsyncioTestCase):
         tree = ast.parse(inspect.getsource(module))
         registry = next(n for n in ast.walk(tree)
                         if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        # ⚠️ 표식 **변경**은 `_drop_claim_locked` 하나로 좁혔고, **조회**는 `_is_claimed` 하나다.
+        #    `apply_unsubscribe`가 직접 만지려다 이 trip-wire에 걸려 그렇게 정리됐다.
         allowed = {"_is_claimed", "claimed_topics", "claim_expired_locked",
-                   "remove_locked", "teardown_locked", "__init__"}
+                   "_drop_claim_locked", "teardown_locked", "__init__"}
         touching = set()
         for method in registry.body:
             if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1685,6 +1687,145 @@ class TestDocumentationAnchors(unittest.IsolatedAsyncioTestCase):
                 if cited.search(line)
             ]
             self.assertEqual(hits, [], "§ 섹션 앵커를 쓸 것 — 행번호는 계획 편집마다 어긋난다")
+
+
+class TestUnsubscribeIsFailOpen(unittest.IsolatedAsyncioTestCase):
+    """§D8 — `unsubscribe`는 **접근을 줄이는** 작업이라 인증 성공에 종속되면 안 된다.
+
+    계획: "`unsubscribe`를 인증 성공에 종속시키면 권한 축소가 실패한다. 토큰 만료·revocation·
+    Firebase 장애 시 제거가 막혀 **사용자가 끄라고 한 데이터가 lease 만료까지 계속 흐른다**."
+    → `id_token` 불요, premium/entitlement 재검증 없이 **idempotent하게 제거한 뒤 ack**.
+
+    ⚠️ 그래서 subscribe와 **순서가 반대**다. subscribe는 `ack → 활성화`(활성화가 ack을 앞서면
+    클라가 모르는 데이터가 먼저 온다). unsubscribe는 `제거 → ack`(ack을 기다리는 동안 끄라고 한
+    데이터가 계속 흐르면 안 된다). 두 경우 모두 **위험한 쪽이 나중**이다.
+    """
+
+    async def _subscribed(self, topics=(TOPIC, OTHER)):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, list(topics))
+        return registry, ws
+
+    async def test_active_topic_is_removed_and_reported(self):
+        registry, ws = await self._subscribed()
+        result = await registry.apply_unsubscribe(
+            ws=ws, topics=[TOPIC], now_mono=1000.0, send_ack=_ok_ack
+        )
+        self.assertIsInstance(result, Applied)
+        self.assertEqual(result.ack.removed, (TOPIC,))
+        self.assertEqual({s.topic for s in result.ack.active}, {OTHER})
+        self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0))
+
+    async def test_unknown_topic_is_idempotent_and_not_reported(self):
+        """제거는 **상태 델타**다 — 원래 없던 topic은 "제거됨"이 아니다."""
+        registry, ws = await self._subscribed()
+        result = await registry.apply_unsubscribe(
+            ws=ws, topics=["never:subscribed"], now_mono=1000.0, send_ack=_ok_ack
+        )
+        self.assertEqual(result.ack.removed, ())
+        self.assertEqual({s.topic for s in result.ack.active}, {TOPIC, OTHER})
+
+    async def test_unmentioned_topics_are_untouched(self):
+        registry, ws = await self._subscribed()
+        await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                         send_ack=_ok_ack)
+        self.assertIsNotNone(registry.authorized_lease(ws, OTHER, now_mono=1000.0))
+
+    async def test_removal_is_committed_before_the_ack(self):
+        """⛔ ack을 기다리는 동안 사용자가 끄라고 한 데이터가 계속 흐르면 안 된다."""
+        registry, ws = await self._subscribed()
+        observed = {}
+
+        async def probing(ack):
+            observed["still_authorized"] = registry.authorized_lease(ws, TOPIC, now_mono=1000.0)
+            return True
+
+        await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                         send_ack=probing)
+        self.assertIsNone(observed["still_authorized"], "ack 시점에 아직 인가되고 있었다")
+
+    async def test_removal_survives_an_ack_failure(self):
+        """⛔ fail-open — ack이 실패해도 축소는 유지된다(되돌리면 끈 데이터가 다시 흐른다)."""
+        registry, ws = await self._subscribed()
+
+        async def failing(ack):
+            raise ConnectionResetError()
+
+        result = await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                                  send_ack=failing)
+        self.assertIsInstance(result, ConnectionTerminated)
+        # ⚠️ `authorized_lease`는 tombstone에서 fail-closed라 되돌렸든 아니든 None이다 —
+        #    관측 도구가 못 된다(이 세션에서 같은 가림에 두 번 당했다). 상태를 직접 본다.
+        self.assertNotIn(TOPIC, registry.topics_for_test(ws), "ack 실패에 제거를 되돌렸다")
+        self.assertIn(OTHER, registry.topics_for_test(ws), "무관한 topic까지 지웠다")
+
+    async def test_removal_works_on_a_terminated_connection(self):
+        """⛔ tombstone에서 제거를 거부하면, D8이 제거를 보장해야 하는 바로 그 실패 경로에서 막힌다."""
+        registry, ws = await self._subscribed()
+
+        async def failing(ack):
+            raise ConnectionResetError()
+
+        await _apply(registry, StrictObservationCache(), ws, ["usdt:krw"], send_ack=failing)
+        self.assertIsInstance(
+            await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                             send_ack=_ok_ack),
+            ConnectionTerminated,
+        )
+        self.assertEqual(registry.claimed_topics(ws), ())
+        self.assertNotIn(TOPIC, registry.topics_for_test(ws))
+
+    async def test_unconfirmed_ack_terminates_but_keeps_the_removal(self):
+        """§B4와 같은 확인 계약 + §D8의 fail-open이 **동시에** 성립해야 한다."""
+        registry, ws = await self._subscribed()
+
+        async def silent(ack):
+            return None
+
+        result = await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                                  send_ack=silent)
+        self.assertIsInstance(result, ConnectionTerminated)
+        self.assertEqual(result.reason, "ack_not_confirmed")
+        self.assertNotIn(TOPIC, registry.topics_for_test(ws))
+
+    async def test_ack_names_the_operation(self):
+        """§8-B — subscribe/unsubscribe가 **같은 schema**를 쓰므로 구분자가 필요하다."""
+        registry, ws = await self._subscribed()
+        result = await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                                  send_ack=_ok_ack)
+        self.assertEqual(result.ack.operation, "unsubscribe")
+
+    async def test_subscribe_ack_names_its_own_operation(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        result = await _apply(registry, cache, _WS(), [TOPIC])
+        self.assertEqual(result.ack.operation, "subscribe")
+
+    async def test_one_request_sends_exactly_one_ack(self):
+        registry, ws = await self._subscribed()
+        calls = []
+
+        async def counting(ack):
+            calls.append(ack)
+            return True
+
+        await registry.apply_unsubscribe(ws=ws, topics=[TOPIC, OTHER], now_mono=1000.0,
+                                         send_ack=counting)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(set(calls[0].removed), {TOPIC, OTHER})
+
+    async def test_no_authentication_arguments_are_required(self):
+        """⛔ 인증 인자를 받으면 배선이 그것을 검증에 쓰고 싶어진다 — D8은 그걸 금지한다."""
+        import inspect
+
+        from app.topic_lease_registry import TopicLeaseRegistry as R
+
+        params = set(inspect.signature(R.apply_unsubscribe).parameters)
+        self.assertEqual(params & {"uid", "snapshot", "cache", "premium_verified_at_mono",
+                                   "identity_verified_at_mono"}, set())
+        for name in ("ws", "topics", "now_mono", "send_ack"):
+            self.assertIs(inspect.signature(R.apply_unsubscribe).parameters[name].default,
+                          inspect.Parameter.empty, f"{name}에 기본값이 생겼다")
 
 
 class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
