@@ -95,6 +95,10 @@ class TopicLeaseRegistry:
         self._active: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()   # ws -> {topic: Lease}
         self._pending: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()  # ws -> {topic: Lease}
         self._uids: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()     # ws -> uid
+        # ⚠️ **closed tombstone.** teardown 뒤에도 남아 있던 dispatch task가 lease를 되살리는 것을
+        # 막는다. ws가 살아 있는 동안만 유지되면 충분하므로(되살릴 주체도 ws를 들고 있다) 여기서도
+        # 약한 참조를 쓴다.
+        self._closed: "weakref.WeakSet" = weakref.WeakSet()
 
     # ── lock ────────────────────────────────────────────────────────────
     def connection_lock(self, ws) -> asyncio.Lock:
@@ -123,6 +127,10 @@ class TopicLeaseRegistry:
         ⚠️ `now_mono`는 호출자가 요청 경계에서 **1회** 읽은 값이다. 이 모듈은 시계를 읽지 않는다.
         """
         async with self.connection_lock(ws):
+            if ws in self._closed:
+                # teardown이 끝난 연결이다. 되살리면 "끊긴 소켓에 살아 있는 구독"이 생긴다.
+                return Rejected(reason="connection_closed")
+
             bound = self._uids.get(ws)
             if bound is not None and bound != uid:
                 # §C1 — 한 소켓이 두 사용자 권한을 섞으면 안 된다. 두 대안 중 **거부**를 택했다
@@ -196,9 +204,17 @@ class TopicLeaseRegistry:
         del topics[topic]
         return True
 
-    def remove_websocket(self, ws) -> None:
-        """연결 종료 정리 — **그 연결 것만**."""
-        self._active.pop(ws, None)
-        self._pending.pop(ws, None)
-        self._uids.pop(ws, None)
-        self._locks.pop(ws, None)
+    async def remove_websocket(self, ws) -> None:
+        """연결 종료 정리 — **그 연결 것만**, **연결 lock 아래에서**.
+
+        ⚠️ lock을 안 잡으면 B4 우회로가 된다 — 다른 task가 `issue` 중일 때 상태가 통째로 사라진다.
+        ⚠️ **lock 항목은 지우지 않는다.** 지우면 누가 구 lock을 쥔 채로 teardown이 지나갔을 때
+        다음 `connection_lock(ws)`이 **새 lock**을 만들어, 같은 연결에 대해 서로 다른 두 lock을
+        동시에 쥘 수 있다(상호배제 붕괴, 실측 재현). 연결이 사라지면 weak dictionary가 알아서
+        정리하므로 수동 삭제할 이유가 없다.
+        """
+        async with self.connection_lock(ws):
+            self._active.pop(ws, None)
+            self._pending.pop(ws, None)
+            self._uids.pop(ws, None)
+            self._closed.add(ws)

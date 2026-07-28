@@ -368,8 +368,70 @@ class TestRemoveIsNotAB4Bypass(unittest.IsolatedAsyncioTestCase):
 
         from app.topic_lease_registry import TopicLeaseRegistry as R
 
-        for name in ("issue", "remove"):
+        # ⚠️ 구 버전은 `issue`/`remove`만 봐서 `remove_websocket` 우회로를 놓쳤다 —
+        # 이름이 "public mutators"인데 목록이 그만큼을 담지 못했다.
+        for name in ("issue", "remove", "remove_websocket"):
             self.assertTrue(inspect.iscoroutinefunction(getattr(R, name)), f"{name}이 동기다")
+
+
+class TestTeardownDoesNotBreakLockIdentity(unittest.IsolatedAsyncioTestCase):
+    """⛔ `remove_websocket`이 lock 항목을 지우면 **상호배제가 깨진다**.
+
+    누가 구 lock을 쥔 채로 teardown이 지나가면, 다음 `connection_lock(ws)`은 **새 lock**을 만들어
+    돌려준다 → 같은 연결에 대해 서로 다른 두 lock을 **동시에** 쥘 수 있다.
+    연결이 사라지면 weak dictionary가 알아서 정리하므로 수동 삭제할 이유가 없다.
+    """
+
+    async def test_lock_identity_survives_teardown(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        lock = registry.connection_lock(ws)
+        await registry.remove_websocket(ws)
+        self.assertIs(registry.connection_lock(ws), lock, "teardown이 lock을 바꿔치기했다")
+
+    async def test_teardown_waits_for_the_connection_lock(self):
+        """⛔ teardown이 lock을 안 잡으면 B4 우회로다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        done = asyncio.Event()
+        released = asyncio.Event()
+
+        async def holder():
+            async with registry.connection_lock(ws):
+                await released.wait()
+
+        held = asyncio.create_task(holder())
+        # ⚠️ lock이 **실제로** 잡혔음을 확인하고 진행한다. `sleep(0)` 한 번으로 가정하면
+        # 스케줄 순서에 따라 teardown이 먼저 잡아 테스트가 흔들린다.
+        while not registry.connection_lock(ws).locked():
+            await asyncio.sleep(0)
+
+        teardown = asyncio.create_task(registry.remove_websocket(ws))
+        teardown.add_done_callback(lambda _: done.set())
+        try:
+            await asyncio.sleep(0.05)
+            self.assertFalse(done.is_set(), "lock을 쥔 구간에 teardown이 끼어들었다")
+        finally:
+            # ⚠️ 단언이 실패해도 반드시 풀어 준다 — 안 그러면 대기 task가 남아 테스트가 매달린다.
+            released.set()
+            await asyncio.gather(held, teardown, return_exceptions=True)
+
+    async def test_reissue_after_teardown_is_rejected(self):
+        """⛔ teardown 뒤 남아 있던 dispatch task가 lease를 **되살리면** 안 된다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        _, snapshot = _fresh(cache)
+        await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot, cache=cache,
+                             now_mono=1000.0, premium_verified_at_mono=1000.0,
+                             identity_verified_at_mono=1000.0)
+        await registry.remove_websocket(ws)
+
+        _, snapshot2 = _fresh(cache)
+        result = await registry.issue(ws=ws, topic=TOPIC, uid=UID, snapshot=snapshot2, cache=cache,
+                                      now_mono=1000.0, premium_verified_at_mono=1000.0,
+                                      identity_verified_at_mono=1000.0)
+        self.assertIsInstance(result, Rejected)
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "teardown 뒤 구독이 되살아났다")
 
 
 class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
@@ -398,7 +460,7 @@ class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
         ws, other = _WS("a"), _WS("b")
         await self._issue(registry, cache, ws)
         await self._issue(registry, cache, other)
-        registry.remove_websocket(ws)
+        await registry.remove_websocket(ws)
         self.assertIsNone(registry.active_lease(ws, TOPIC))
         self.assertIsNone(registry.bound_uid(ws))
         self.assertIsNotNone(registry.active_lease(other, TOPIC), "남의 연결까지 지웠다")
