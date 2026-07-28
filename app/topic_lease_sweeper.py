@@ -52,7 +52,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 
-from app.topic_lease_registry import ConnectionLockBusy
+from app.topic_lease_registry import ConnectionLockBusy, cancellation_fence
 
 # 경합 시 대기 상한. **짧아야** 한다 — 이 값이 곧 한 연결이 sweep 사이클을 붙드는 상한이고,
 # D-const의 "만료→통지 10초"는 연결 수에 비례하면 안 된다.
@@ -126,8 +126,9 @@ async def sweep_once(
                     #    삼키면 `wait_for`는 **예산 시점에 반환하지 않고** 늦게 온 `True`를
                     #    정상 반환값으로 준다(실측: 예산 0.01s인데 0.05s 뒤 완료·True).
                     #    `budget.expired()`가 그 경우를 **시계를 읽지 않고** 구별한다.
-                    async with asyncio.timeout(notify_timeout) as budget:
-                        confirmed = await send_reauth(ws, claimed)
+                    with cancellation_fence():
+                        async with asyncio.timeout(notify_timeout) as budget:
+                            confirmed = await send_reauth(ws, claimed)
                 except asyncio.CancelledError:
                     # ⛔ 구조적 취소는 그대로 전파한다 — 감싸면 asyncio의 취소 전파가 깨진다.
                     raise

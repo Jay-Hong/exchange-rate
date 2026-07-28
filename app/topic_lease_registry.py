@@ -159,6 +159,27 @@ class ClaimedLease:
     lease_id: str
 
 
+@contextlib.contextmanager
+def cancellation_fence():
+    """블록 안에서 **외부** 취소가 삼켜졌는지 검출한다.
+
+    주입된 sender가 `CancelledError`를 삼키고 정상 반환하면 `await`는 정상 종료하고, 호출자는
+    그것을 **성공으로 읽는다** — 실측: teardown 취소가 무력화돼 `Applied`로 끝나고(`cancelled()`
+    False / `cancelling()` 1), sweep에서는 취소된 통지를 성공으로 보고 lease를 지웠다.
+
+    바깥 프레임의 `cancelling()`이 **외부** 취소에서만 0→1로 남는다(예산 만료는 `asyncio.timeout`이
+    `uncancel()`해서 0→0). 그 차이를 여기서 한 번만 구현한다 — 세 곳(ack·unsubscribe·reauth)에
+    손으로 복제했다가 두 곳을 빠뜨린 것이 이 helper가 생긴 이유다.
+
+    ⚠️ 예외가 전파되면 검사에 도달하지 않는다(의도) — 그때는 그 예외가 이미 실패를 말한다.
+    """
+    task = asyncio.current_task()
+    before = task.cancelling() if task is not None else 0
+    yield
+    if task is not None and task.cancelling() > before:
+        raise asyncio.CancelledError()
+
+
 @dataclass(frozen=True)
 class Lease:
     """활성 구독 하나. `lease_id`가 CAS 토큰이다.
@@ -530,14 +551,13 @@ class TopicLeaseRegistry:
                     )
 
                     # 4) ack 송신 — **활성화보다 먼저**(§B4).
-                    task = asyncio.current_task()
-                    cancelling_before = task.cancelling() if task is not None else 0
                     try:
                         # ⛔ `wait_for`가 아니라 `asyncio.timeout`인 이유: sender가 취소를
                         #    삼키면 `wait_for`는 예산 시점에 반환하지 않고 늦은 `True`를
                         #    정상 반환값으로 준다. `budget.expired()`가 시계 없이 구별한다.
-                        async with asyncio.timeout(ACK_TIMEOUT_SECONDS) as budget:
-                            confirmed = await send_ack(ack)
+                        with cancellation_fence():
+                            async with asyncio.timeout(ACK_TIMEOUT_SECONDS) as budget:
+                                confirmed = await send_ack(ack)
                     except asyncio.TimeoutError:
                         # ⚠️ 셋이 여기서 구별되지 않는다: 우리 예산 만료 / **전송 계층**의
                         #    `TimeoutError`(3.11+에서 `OSError` 계열) / sender가 스스로 건 timeout.
@@ -550,15 +570,6 @@ class TopicLeaseRegistry:
                         raise
                     except Exception as exc:  # noqa: BLE001 — 전송 실패는 연결 사망으로 본다(§B2a)
                         return self._terminate_locked(ws, type(exc).__name__)
-
-                    # ⛔ sender가 **외부** 취소를 삼키고 정상 반환한 경우를 여기서 잡는다.
-                    #    예산 만료는 `wait_for`가 `uncancel()`하므로 `cancelling()`이 0→0이고,
-                    #    외부 취소만 0→1로 남는다(실측 py3.13). 즉 "삼키면 무조건 속는다"는
-                    #    **실제보다 넓은 주장**이었다 — teardown 취소는 공짜로 fail-close된다.
-                    #    (예산 만료를 삼키고 True를 반환하는 경우는 여전히 구별 불가다.)
-                    if task is not None and task.cancelling() > cancelling_before:
-                        self._closed.add(ws)
-                        raise asyncio.CancelledError()
 
                     if budget.expired():
                         # 예산이 지난 뒤 도착한 성공 보고 — ack이 제때 못 나갔는데 활성화하면
@@ -833,9 +844,13 @@ class TopicLeaseRegistry:
                 new_leases={}, removed=removed, final=final,
             )
             try:
-                async with asyncio.timeout(ACK_TIMEOUT_SECONDS) as budget:
-                    confirmed = await send_ack(ack)
+                with cancellation_fence():
+                    async with asyncio.timeout(ACK_TIMEOUT_SECONDS) as budget:
+                        confirmed = await send_ack(ack)
+            except asyncio.TimeoutError:
+                return self._terminate_locked(ws, "ack_timeout")
             except asyncio.CancelledError:
+                # ⚠️ 제거는 되돌리지 않는다(fail-open) — 되돌리면 끈 데이터가 다시 흐른다.
                 self._closed.add(ws)
                 raise
             except Exception as exc:  # noqa: BLE001 — 전송 실패는 연결 사망으로 본다(§B2a)

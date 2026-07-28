@@ -678,6 +678,39 @@ class TestNotificationFailureCleansTheSocket(unittest.IsolatedAsyncioTestCase):
         outcome = await asyncio.wait_for(sweep, timeout=5)
         self.assertEqual(outcome.close_failed, 1, "예산 뒤 끝난 close를 성공으로 봤다")
 
+    async def test_swallowed_external_cancellation_does_not_remove_the_lease(self):
+        """⛔ 취소된 통지를 성공으로 보고 구독을 지우면 클라는 재인증 신호를 못 받는다.
+
+        실측(구 구현): gather는 `CancelledError`를 올렸지만 **자식이 그 전에 lease를 제거**했다.
+        바깥 계약만 보면 정상이라 눈에 띄지 않는다.
+        """
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        entered = asyncio.Event()
+
+        async def swallowing(target, claimed):
+            entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return True
+            return True
+
+        async def noop_close(target):
+            pass
+
+        task = asyncio.create_task(
+            sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=swallowing,
+                       close_connection=noop_close)
+        )
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIn(TOPIC, registry.topics_for_test(ws),
+                      "취소된 통지를 성공으로 보고 구독을 지웠다")
+
     async def test_sender_that_does_not_confirm_is_a_failure(self):
         """§B4의 `send_ack`와 같은 계약 — 제어 흐름은 배달의 증거가 아니다."""
         registry = TopicLeaseRegistry()

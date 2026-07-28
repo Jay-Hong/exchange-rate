@@ -892,6 +892,43 @@ class TestMutatorsAreNotB4Bypasses(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertEqual(len(owning), 1, f"{name}이 소유 기록 획득 경로를 쓰지 않는다")
 
+    def test_every_injected_sender_is_wrapped_in_the_cancellation_fence(self):
+        """⛔ 검사를 손으로 복제하면 빠뜨린다 — 실제로 두 곳(unsubscribe·sweep)을 빠뜨렸다.
+
+        주입된 sender를 `await`하는 지점은 전부 `cancellation_fence()` 안이어야 한다.
+        """
+        import ast
+        import inspect
+
+        import app.topic_lease_registry as registry_module
+        import app.topic_lease_sweeper as sweeper_module
+
+        senders = {"send_ack", "send_reauth"}
+        for module in (registry_module, sweeper_module):
+            tree = ast.parse(inspect.getsource(module))
+            fenced = set()
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.With) and any(
+                    isinstance(i.context_expr, ast.Call)
+                    and getattr(i.context_expr.func, "id", None) == "cancellation_fence"
+                    for i in node.items
+                )):
+                    continue
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name):
+                        fenced.add(inner.func.id)
+            called = {
+                node.func.id for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in senders
+            }
+            self.assertTrue(called or module is registry_module,
+                            f"{module.__name__}: sender 호출을 못 찾았다 — 탐지기 고장")
+            self.assertLessEqual(
+                called, fenced,
+                f"{module.__name__}: fence 밖에서 sender를 부른다: {sorted(called - fenced)}",
+            )
+
     def test_claim_marks_are_read_only_through_the_lease_aware_helper(self):
         """⛔ `_claimed`를 topic 문자열로 읽는 지점이 **하나라도 새로 생기면** 영구 차단이 부활한다.
 
@@ -1788,6 +1825,33 @@ class TestUnsubscribeIsFailOpen(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ConnectionTerminated)
         self.assertEqual(result.reason, "ack_not_confirmed")
         self.assertNotIn(TOPIC, registry.topics_for_test(ws))
+
+    async def test_swallowed_external_cancellation_is_not_success(self):
+        """⛔ sender가 teardown 취소를 삼키고 `True`를 돌려주면 `Applied`로 정상 종료됐다.
+
+        실측: 결과=Applied, `cancelled()`=False, `cancelling()`=1 — 즉 dispatcher의 teardown
+        취소가 무력화돼 연결 정리가 누락될 수 있다. subscribe 경로에는 이 검사가 있었는데
+        unsubscribe에는 없었다(같은 검사를 두 곳에 손으로 복제한 결과).
+        ⚠️ 제거는 유지된다 — fail-open이라 되돌리지 않는다.
+        """
+        registry, ws = await self._subscribed()
+
+        async def swallowing(ack):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return True
+            return True
+
+        task = asyncio.create_task(
+            registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                       send_ack=swallowing)
+        )
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertNotIn(TOPIC, registry.topics_for_test(ws), "fail-open 제거를 되돌렸다")
 
     async def test_ack_names_the_operation(self):
         """§8-B — subscribe/unsubscribe가 **같은 schema**를 쓰므로 구분자가 필요하다."""
