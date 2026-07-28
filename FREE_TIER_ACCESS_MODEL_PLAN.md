@@ -371,10 +371,20 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   ```
   **authoritative한 것은 모두 같은 horizon 모델을 탄다** — entitlement든 identity(revocation)든,
   마지막 확인 시점 + 15분을 넘겨 lease를 줄 수 없다. 특례 없음.
-  - ⚠️ **identity horizon은 UID가 아니라 *토큰*에 묶인다**. UID 단위로 캐시하면 **같은 UID의 새 토큰 검증 결과를
-    revoked된 구 토큰이 공유**해 권한이 섞인다. 토큰 fingerprint/`auth_time`에 묶거나,
-    UID별 **`tokens_valid_after_timestamp`를 캐시하고 각 토큰의 `auth_time`과 비교**한다.
+  - ⚠️ **identity horizon은 UID가 아니라 *토큰*에 묶인다**. UID 단위로 **verdict를** 캐시하면 **같은 UID의 새 토큰
+    검증 결과를 revoked된 구 토큰이 공유**해 권한이 섞인다.
     (entitlement horizon은 UID 단위가 맞다 — 권한은 계정 속성이다.)
+    - ✅ **해법 확정 (2026-07-27, SDK 소스 검증)**: UID 단위로 **관측(authority record)** 을 캐시하고
+      **verdict는 요청별로 파생**한다 → UID 키를 쓰면서도 공유 사고가 구조적으로 불가능하다(§A6 2계층).
+    - ⛔ **`auth_time`이 아니라 `iat`로 비교한다.** firebase-admin v6.9.0의
+      `_check_jwt_revoked_or_disabled`가 쓰는 술어는
+      `verified_claims['iat'] * 1000 < user.tokens_valid_after_timestamp` 이다(`_auth_client.py`, 소스 확인).
+      `auth_time`은 세션 최초 로그인 시각으로 **고정**되고 `iat`는 갱신마다 전진하므로
+      (`auth_time ≤ iat`), `auth_time`으로 대체하면 SDK보다 **엄격한 다른 술어**가 된다 —
+      단위 테스트로는 드러나지 않는 의미 버그다. **구 서술("각 토큰의 `auth_time`과 비교")은 폐기.**
+    - **단위**: `tokens_valid_after_timestamp`는 **밀리초** epoch(`_user_mgt.py`: `1000 * int(valid_since)`),
+      `iat`는 **초** epoch. 축을 섞으면 **모든 토큰이 revoked로 오판**된다. 비교는 strict `<`
+      (같으면 revoked 아님), **disabled를 revoked보다 먼저** 검사, `clock_skew_seconds`는 이 비교에 **미적용**.
   - 왜: 권한 상실 시각 L 이전의 마지막 authoritative 확인 V(≤L)로 부여된 lease는 최대 `V+15 ≤ L+15`에 만료
     → **총 revoke 상한이 정확히 15분**. lease 15분 정책도 그대로 유지된다.
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
@@ -446,6 +456,63 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     (1B provider의 owner/epoch 패턴과 개념 동일).
     ⚠️ **게시만이 아니라 소비(lease 발급)까지 fence**해야 한다 — 폐기된 검증 결과로 새 15분 lease를 발급하면
     무효화가 무의미하다.
+    - ⚠️ **lookup-time epoch 검사만으로는 게시 fence가 되지 않는다** (2026-07-27). 그건 *소비*만 막는다 —
+      구 owner가 쓰기 자체를 하면 **이미 기록된 fresh 항목을 덮어써** 멀쩡한 상태를 파괴한다.
+      → `put(result, expected_epoch=N)`이 **쓰기 시점에** 현재 epoch와 비교해 불일치면 **쓰기를 거부**한다(CAS).
+      compare와 store 사이에 `await`가 없어야 하고(단일 event loop에서의 원자성), ⚠️ **그 전제는 소유권 계약**이다 —
+      리포에 `asyncio.to_thread`가 다수 있고 동기 DB 조회(`app/entitlements.py`의 `has_entitlement`)가
+      그 안으로 들어갈 자연스러운 후보라, **작은 `threading.Lock`으로 epoch+cache를 함께 보호**한다
+      (`asyncio.Lock`은 스레드를 직렬화하지 못해 오답). fence 삭제 mutation이 red인지가 검증 기준.
+
+- **A4-1 REST `PremiumStatus`를 strict가 재사용하지 않는다 (2026-07-27)**
+  - `PremiumStatus.PENDING`은 **두 의미가 이미 섞인 REST 상태**다. `should_cache=True`(정상 응답) +
+    `is_premium=False` + 캐시 없음이면 `_pending.mark()` 후 **PENDING**을 반환한다(TTL 12초) —
+    즉 **구매 전파 유예**이지 "판정 불가"가 아니다. 판정 불가 PENDING은 `should_cache=False` 분기다.
+    → `PENDING == temporarily_unavailable` 매핑은 **"구독 없음"과 "RevenueCat 장애"를 한 값으로 접는다**(C4 위반).
+  - ⛔ **`_check_revenuecat_entitlement`도 관측 레벨 API가 아니다.** `(False, False)` 반환 지점이 5개이고
+    성격이 전부 다르다 — API key 미설정(config) / JSON 파싱 실패(계약 위반) / `expires_date` 파싱 실패 /
+    4xx·5xx 일괄(config ⊎ transient 혼합) / `except Exception`(transient ⊎ programming).
+    strict가 이걸 그대로 소비하면 A6-1의 3-bucket 계약이 즉시 깨진다.
+    → **typed provider**를 더 아래에 두고 REST·strict가 각자 정책을 얹는다:
+    `Determined(is_premium)`(200 파싱 성공 / 404) · `ProviderUnavailable`(408·429·5xx·네트워크) ·
+    `ProviderMisconfigured`(401·403) · `BadRequest`(400) · `ProtocolViolation`(그 외 4xx·파싱 실패).
+    ⚠️ *"4xx 대 5xx"로만 나누면 **429를 영구 config 오류로 오분류**한다.*
+    ⚠️ **REST는 behavior-change-0** — 위 4개 비-Determined를 전부 현행 `should_cache=False` 경로로 매핑해
+    `PremiumStatus`·pending grace·stale fallback·clock 샘플링 지점을 그대로 보존한다.
+  - **구매 전파 유예는 strict에 상속하지 않는다.** 정상 inactive는 **즉시** `Inactive(premium_inactive)`.
+    유예를 채택하려면 별도 내부 상태가 필요한데(관측 저장소는 덮어쓰므로 "첫 inactive"를 알 수 없다),
+    그 대신 아래 6′로 수렴시킨다.
+
+- **A4-2 webhook 무효화 정책 — allowlist는 벤더 어휘라 조용히 낡는다 (2026-07-27, 공식 문서 검증)**
+  - 현행 `invalidate_events`는 5종인데 문서의 이벤트는 그보다 많고 **닫힌 집합이 아니다**
+    (*"We may add new fields or event types in the future without changing the API version."*).
+    누락분은 대부분 **grant 방향**(`NON_RENEWING_PURCHASE` / `TEMPORARY_ENTITLEMENT_GRANT` /
+    `REFUND_REVERSED` / `PURCHASE_REDEEMED` …)이라 구멍이 **가용성 쪽**에 난다.
+    ⚠️ *"revoke 방향은 완전하다"고 단정하지 말 것* — `CANCELLATION`은 *"canceled **or refunded**… auto-renewal
+    setting **may still be active**"*라 즉시 revoke가 아니다. **이벤트 이름에서 access 영향을 추론하지 않는다.**
+  - ⛔ **"모든 이벤트 무효화"도 안전하지 않다.** 무효화는 재조회 지연이 아니라 **증거 폐기**다 —
+    공급자 장애 중에 fresh REST 캐시를 지우면 stale fallback(A4)이 사라져 **503으로 떨어진다**.
+    그리고 `PAYWALL_*` / `TEST` / `EXPERIMENT_ENROLLMENT` / `VIRTUAL_CURRENCY_TRANSACTION` 같은
+    비-entitlement·고빈도 이벤트도 실재한다.
+  - → **정책**: **strict epoch와 REST 무효화를 분리**한다. 무효화 공격성은 **그 경로의 실패 자세와 일치**해야 한다
+    (strict=fail-closed → 공격적 OK / REST=가용성 우선 → 보수적).
+    - **strict**: **unknown → invalidate**(vendor drift에 fail-safe). 초기 denylist는 **`TEST` 단독**.
+      `SUBSCRIBER_ALIAS`는 deprecated여도 **invalidate 유지** — aliasing은 App User ID를 병합해
+      *"어느 alias로 조회해도 같은 결과"*가 되므로 **같은 uid의 entitlement 조회 결과가 달라진다**.
+    - **REST `invalidate_user_cache`**: **기존 동작 유지**(A4). 확장은 별도 결정.
+  - ⚠️ **`PAYWALL_*` prefix로 전수 제외는 불가능**하다 — *"uses the default event names below **unless you
+    configure custom Paywall event names**"*. 코드가 이름으로 완전성을 증명할 수 없으므로,
+    대시보드 소스 필터(*"(Optional) Filter the kinds of events…"*, 다중 integration 지원)는 **볼륨 감소용**으로만 쓰고
+    **runbook에 전제·점검 절차**를 남기되 **코드는 그것을 신뢰하지 않는다**.
+  - **denylist 확장 절차**: 빈도는 **조사 트리거이지 정당화가 아니다** — 문서·payload로 **무관함을 입증한 뒤에만** 추가한다.
+    denylist·대시보드 필터는 **부하 최적화 계층**이고, 정확성은 ① unknown→invalidate ② payload로 상태를 추론하지 않음,
+    이 둘에서만 나온다. (`TEST`가 *"purchase-like sample payload"*로 `entitlement_ids`까지 실어 와도 안전한 이유다.)
+  - **계측**: strict·REST **분리 카운터**(안 나누면 strict가 만든 부하를 귀속할 수 없다). event type은
+    **bounded known + `other`** 로 집계하고(커스텀 이름 때문에 원문 label은 cardinality가 열린다),
+    **unknown 원문은 rate-limited structured log** — 이게 denylist 확장의 **유일한 입력**이다
+    (전부 `other`로 뭉치면 그 신호가 사라진다). ⚠️ *"strict 무효화는 잃는 게 없다"는 과장* —
+    보안 방향이 안전할 뿐 **가용성과 호출량은 실제 손실**이다.
+
 - **A5 single-flight (+ owner 격리)** — 같은 UID의 동시 authoritative 검증은 1회로 합친다(다중 연결·다중 topic).
   - **한 WebSocket이 끊겨도 공유 검증 owner를 취소하지 않는다**(다른 연결이 그 결과를 기다린다).
   - 실패·취소 후 슬롯은 **identity-safe하게 정리**돼 다음 요청이 다시 검증할 수 있어야 한다.
@@ -458,6 +525,51 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   ```
   - **`active`만 horizon을 연장**한다. `inactive`는 즉시 reject, `temporarily_unavailable`은 C4(registry 불변 + lease 미연장).
   - `bool`로는 "권한 없음"과 "확인 불가"를 구분할 수 없어 C4가 성립하지 않는다.
+
+  **A6-1 저장·파생 2계층 (2026-07-27 확정 — 이걸 먼저 고정해야 나머지가 안 흔들린다)**
+
+  **verdict는 저장하지 않는다. 저장하는 것은 관측(observation)이고 verdict는 요청별로 파생한다.**
+  verdict를 저장하면 (a) UID 단위 `Inactive`를 같은 UID의 **새 토큰이 상속**하고, (b) 신선도 판단이
+  **쓰기 시점에 박혀** read 시점 정책(freshness)을 적용할 자리가 없어진다.
+
+  | 계층 | 내용 |
+  |---|---|
+  | **저장 (UID 키, concern별 분리)** | `PremiumObservation(active: bool, verified_at_mono, epoch)` / `IdentityAuthorityFound(disabled, tokens_valid_after_ms, verified_at_mono, epoch)` \| `IdentityAuthorityNotFound(verified_at_mono, epoch)` |
+  | **파생 (요청별: 관측 + 토큰 claims)** | `Active(...)` \| `Inactive(reason, ...)` \| `TemporarilyUnavailable(reason, retry_after_seconds)` |
+
+  - **identity는 합타입**(Found/NotFound) — `not_found=True`인데 watermark가 존재하는 불가능 상태를 만들 수 없다.
+    타입 검사기가 없는 리포라도 이득이 있다: NotFound에서 `.tokens_valid_after_ms` 접근이 **오용 지점에서 즉시**
+    `AttributeError`가 된다(평면+`Optional`은 `None`이 산술까지 흘러 한 단계 늦게 터진다).
+  - **entitlement는 합타입 불필요** — RevenueCat 404는 *"신규 사용자 = 비구독"*으로 접히므로
+    (`_check_revenuecat_entitlement`) not-found 변종이 없고 `active: bool` 두 값이 대칭이다.
+  - **`Inactive.reason`** = `premium_inactive` \| `token_revoked` \| `account_disabled` \| `account_deleted`.
+    `token_revoked`는 **저장 대상이 아니다** — `(uid, iat)` 단위 파생 판정이며, watermark 단조 증가 + `iat` 고정이라
+    그 토큰에 대해서만 영구적이다. 새 토큰은 같은 record에서 `Active`를 파생한다.
+  - **`TemporarilyUnavailable.reason`** = 판정 불가 사유만. ⛔ **구매 전파(propagation)를 여기 넣지 말 것** —
+    RevenueCat이 authoritative inactive를 반환했으므로 "판정 불가"가 아니다(§A4-1).
+  - **programming·config 오류는 verdict가 아니다.** 내부 예외로 전파하고 **캐시하지 않으며 wire 오류로도 접지 않는다.**
+    상위의 광범위 `except Exception`이 이를 `temporarily_unavailable`(retryable)로 바꾸면 재시도 storm이 되므로,
+    **그 변환이 없음을 mutation 테스트로 잠근다**(docstring caveat만으로는 강제가 아니다).
+
+  **A6-2 관측 신선도 (freshness는 verdict가 아니라 관측에 붙는다)**
+
+  - **양성 관측**(`active=True`, `disabled=False`)은 **A1 horizon이 이미 상한**을 건다(보안 방향).
+  - **부정 관측**은 horizon을 타지 않으므로 **별도 bound가 필요**하다(가용성 방향).
+    `token_revoked`만은 예외 — 파생 판정이고 그 토큰에 대해 monotone이라 갱신이 무의미하다.
+    반면 `disabled=True` / `not_found=True`는 **재활성화·uid 재생성**이 가능해 monotone이 아니다.
+  - 상수 2개는 **값이 같아도 독립**이다(파생 관계로 묶지 말 것 — 위험 프로파일이 다르다):
+
+    ```
+    PREMIUM_INACTIVE_RECHECK_SECONDS  = 300.0   # 결제한 사용자가 거부 상태로 남는 시간. 흔함 → 측정 후 짧아질 수 있음
+    IDENTITY_NEGATIVE_RECHECK_SECONDS = 300.0   # disabled=True / NotFound 둘 다. 관리자 조치라 드묾
+    ```
+
+    둘 다 **측정 전 보수적 기본값**이다. ⚠️ 부하는 window가 아니라 **요청 간격 R과 window H의 관계**로 정해진다 —
+    `R ≫ H`면 어느 값이든 매 요청이 miss라 등가다(D6 재인증 ~11~12분 기준). 실제 위험은 **빠른 재시도 클라**이고
+    그건 상수가 아니라 rate limit으로 다룬다.
+  - **`iat` 강제 miss**(더 새로운 토큰이 오면 부정 관측을 무효화)는 *"Firebase가 disabled·deleted 계정의 토큰
+    재발급을 차단하는가"*가 미검증이라 **v1 correctness에서 제외**한다. 확인 후 **보조 최적화**로 추가하며,
+    창을 좁히는 방향으로만 작동한다.
 
 #### B. 강제 지점
 
@@ -495,8 +607,17 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     무거운 I/O(토큰 검증·entitlement·snapshot build)는 lock 밖, 전이·송신만 lock 안.
   - **(c) lock 안 I/O에는 timeout 필수**(D-const) — 역압 걸린 클라가 자기 lock을 물고 unsubscribe를 봉쇄하면 안 된다.
   - **(d) identity 단조성**: 동시 처리가 되면 C1의 UID 재바인딩이 **도착 순서에만** 의존해선 안 된다.
-    늦게 도착한 구 UID subscribe(또는 C4 retry)가 새 바인딩을 되돌리지 못하도록 **토큰 `auth_time`(또는 클라
-    identity epoch) 기준 단조 비교**로 구 요청을 폐기한다.
+    늦게 도착한 구 UID subscribe(또는 C4 retry)가 새 바인딩을 되돌리지 못하도록 구 요청을 폐기해야 한다.
+    - ⛔ **`auth_time` 기준 단조 비교는 폐기 (2026-07-27)**. 두 가지로 성립하지 않는다:
+      (1) refresh에서 `auth_time`이 **유지**되므로 같은 세션 안의 두 요청(= C4 retry)을 정렬하지 못한다.
+      (2) 초 단위 타임스탬프라 **서로 다른 사용자가 같은 값을 가질 수 있어** 전순서 자체가 아니다.
+    - ⛔ **서버 관측 도착 순서로도 복원 불가**. 단일 WebSocket은 TCP 순서 보장이라 도착 역전이 없고,
+      실제 실패 모드는 **클라가 stale intent를 나중에 보내는 것**(구 UID 요청의 지연 재시도)이다.
+      서버는 그것을 최신 요청으로 볼 수밖에 없고, 구 UID의 토큰이 아직 유효하면 **검증으로도 거를 수 없다**.
+    - → **의도 순서는 클라만 안다**. 클라 소유의 identity generation(요청 구성 시점에 단조 증가)을 실어
+      보내거나, 서버가 **live 소켓의 cross-UID subscribe를 거부**하고 재연결을 요구한다(둘 중 택일, C1에서 결정).
+      ⚠️ 클라 generation은 **적용 여부만** 정하고 **어떤 신원을 부여할지는 여전히 토큰 검증이 정한다** —
+      권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
   - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 메시지 1건이
     새 UID로 갈 수 있다 → 전송도 lock 안에서 하거나, 전송 직후 결과를 폐기할 수 있어야 한다(B4와 일관).
 
@@ -755,6 +876,23 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   (`fetchTetherSnapshot`/`fetchKrxSnapshot`/`fetchFxSnapshot`)이 **무인증 경로**라 flag ON 시 401을 받는다.
   전부 `try?` 격리라 크래시는 없고 cold-start bootstrap만 조용히 사라진다 → **F 슬라이스에서 1B
   인증 transport로 이관**. 운영은 현재 flag off라 이 시점의 사용자 영향은 0.
+
+- **E4 구매 수렴 end-to-end 계약 — enforcement 활성화 blocker (2026-07-27, E3와 동급)**
+
+  서버측 무효화·freshness만으로는 **구매가 수렴하지 않는다.** 둘 다 *"서버가 다시 물어볼 준비"*를 시킬 뿐
+  아무 일도 일으키지 않기 때문이다 — 실제 복구는 **클라의 다음 subscribe**가 트리거인데,
+  `premium_required`는 **terminal**이라 클라가 재시도하지 않는다. 그래서 5분이 지나도, webhook이 와도
+  **그 연결은 거부 상태로 남는다.**
+
+  → 활성화 전에 **"구매 완료 → 제한된 refresh/backoff → active ack"** 클라 경로가 필요하다.
+  - ⚠️ **forced refresh도 즉시 복구가 아니다** — 우리 캐시만 우회할 뿐 RevenueCat 자신의 전파 지연은 못 넘는다.
+    구매 직후면 다시 `Determined(is_premium=False)`를 받는다. 따라서 계약은 *"한 번 호출로 복구"*가 아니라
+    **"제한된 재시도로 수렴"**이며 **single-flight + rate limit + bounded backoff가 필수**다
+    (없으면 RevenueCat이 가장 느린 구간에 클라가 몰아친다).
+  - 계약은 구매 전용이 아니라 일반형이다: **"거부됨 → 이제 허용됨" 전이는 전부 클라 재요청이 필요**하므로
+    (KRX entitlement 부여도 동일) `premium_required` terminal성의 **예외 트리거**를 정의해야 한다.
+  - 서버측 forced-refresh 진입점은 A4-1의 무효화 primitive를 **재사용**하는 또 다른 호출자일 뿐이라
+    추가 설계 부담은 없다 — 남는 건 클라 계약과 rate limit이다.
 
 #### F. iOS 슬라이스 입력 (여기서 잠그지 않음 — 슬라이스 2에서 코드와 함께 설계)
 
