@@ -20,8 +20,8 @@ import unittest
 
 from app.strict_cache import StrictObservationCache
 from app.topic_lease import LEASE_MAX_SECONDS
-from app.topic_lease_registry import LockNotHeld, TopicLeaseRegistry
-from app.topic_lease_sweeper import sweep_once
+from app.topic_lease_registry import ConnectionLockBusy, LockNotHeld, TopicLeaseRegistry
+from app.topic_lease_sweeper import sweep_once as _sweep_once
 
 UID = "uid-1"
 TOPIC = "krx:usd-krw-futures"
@@ -45,6 +45,16 @@ async def _ok_ack(ack):
 async def _ok_reauth(ws, claimed):
     """정상 sender — **`True` 반환이 계약이다**(§B4의 `send_ack`와 같은 이유)."""
     return True
+
+
+async def _noop_close(ws):
+    """소켓 close는 배선의 I/O다 — 테스트는 호출 사실만 본다."""
+
+
+async def sweep_once(registry, **kwargs):
+    """`close_connection`을 기본 제공하는 테스트 wrapper (필수 인자 자체는 별도 테스트가 잠근다)."""
+    kwargs.setdefault("close_connection", _noop_close)
+    return await _sweep_once(registry, **kwargs)
 
 
 async def _subscribe(registry, ws, topics, *, uid=UID, cache=None, now_mono=ISSUED_AT):
@@ -339,6 +349,231 @@ class TestLockAcquisitionIsBounded(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(held, return_exceptions=True)
         await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=capture, lock_timeout=0.02)
         self.assertEqual(sent, [ws])
+
+
+class TestStaleClaimNeverBlocksANewLease(unittest.IsolatedAsyncioTestCase):
+    """⛔ claim은 **topic이 아니라 lease**에 걸린다.
+
+    취소로 L1 claim이 남은 뒤 재인증이 L2를 발급하면, topic 존재만 보는 제외는 **유효한 새
+    lease를 영구 차단**한다(실측: L2 인가 None, 다음 sweep은 미만료 L2를 claim하지 않아
+    notified=0·removed=0으로 복구도 없다). 직전 좀비보다 나쁘다 — 그쪽은 만료된 lease였고
+    이쪽은 방금 정당하게 발급된 lease다.
+    """
+
+    async def _stale_claim(self, registry, ws):
+        entered = asyncio.Event()
+
+        async def stalling(target, claimed):
+            entered.set()
+            await asyncio.sleep(60)
+            return True
+
+        task = asyncio.create_task(
+            sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=stalling)
+        )
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_reissued_lease_authorizes_despite_a_stale_claim(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        cache = await _subscribe(registry, ws, [TOPIC])
+        await self._stale_claim(registry, ws)
+        await _subscribe(registry, ws, [TOPIC], cache=cache, now_mono=EXPIRED_AT)
+        self.assertIsNotNone(
+            registry.authorized_lease(ws, TOPIC, now_mono=EXPIRED_AT),
+            "재발급된 lease가 구 claim에 막혔다",
+        )
+
+    async def test_reissue_clears_the_stale_claim(self):
+        """읽기 경로의 id 대조만으로도 막히진 않지만, 표식을 남겨 두면 다음 사이클의 근거가 흐려진다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        cache = await _subscribe(registry, ws, [TOPIC])
+        await self._stale_claim(registry, ws)
+        await _subscribe(registry, ws, [TOPIC], cache=cache, now_mono=EXPIRED_AT)
+
+        sent = []
+
+        async def capture(target, claimed):
+            sent.extend(c.topic for c in claimed)
+            return True
+
+        # 새 lease는 아직 미만료 → 통지 대상이 아니어야 한다
+        await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=capture)
+        self.assertEqual(sent, [])
+        self.assertIsNotNone(registry.authorized_lease(ws, TOPIC, now_mono=EXPIRED_AT))
+
+    async def test_purged_topic_does_not_leave_a_blocking_claim(self):
+        """§C1 purge·§C2 eviction으로 사라진 topic의 claim도 새 구독을 막으면 안 된다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        await self._stale_claim(registry, ws)
+        # cross-UID 재바인딩 → purge 후 같은 topic 재구독
+        await _subscribe(registry, ws, [TOPIC], uid="uid-2", now_mono=EXPIRED_AT)
+        self.assertIsNotNone(registry.authorized_lease(ws, TOPIC, now_mono=EXPIRED_AT))
+
+
+class TestLockOwnershipIsChecked(unittest.IsolatedAsyncioTestCase):
+    """⛔ `asyncio.Lock.locked()`는 **누가** 쥐었는지 모른다 — 다른 task가 쥐어도 True다.
+
+    실측: task A가 lock을 쥔 동안 task B의 `claim_expired_locked()`가 성공했다. 즉 lock 보유
+    검사가 장식이었고 public primitive가 그대로 §B4 우회로였다. 소유 task를 추적해야 한다.
+    """
+
+    async def test_another_tasks_lock_does_not_satisfy_the_check(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        released = asyncio.Event()
+        result = {}
+
+        async def holder():
+            async with registry.hold_connection_lock(ws):
+                await released.wait()
+
+        held = asyncio.create_task(holder())
+        while not registry.connection_lock(ws).locked():
+            await asyncio.sleep(0)
+
+        async def intruder():
+            try:
+                registry.claim_expired_locked(ws, now_mono=EXPIRED_AT)
+                result["bypassed"] = True
+            except LockNotHeld:
+                result["blocked"] = True
+
+        await asyncio.create_task(intruder())
+        released.set()
+        await held
+        self.assertEqual(result, {"blocked": True}, "남의 lock으로 §B4를 우회했다")
+
+    async def test_the_owning_task_passes(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        async with registry.hold_connection_lock(ws):
+            self.assertEqual(len(registry.claim_expired_locked(ws, now_mono=EXPIRED_AT)), 1)
+
+    async def test_ownership_does_not_outlive_the_block(self):
+        """⛔ 소유 기록이 남으면 lock을 놓은 뒤에도 `*_locked`가 통과한다 — 검사가 무의미해진다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        async with registry.hold_connection_lock(ws):
+            pass
+        with self.assertRaises(LockNotHeld):
+            registry.claim_expired_locked(ws, now_mono=EXPIRED_AT)
+
+    async def test_busy_lock_raises_a_dedicated_error(self):
+        """⛔ `asyncio.TimeoutError`로 알리면 본문이 던진 timeout과 구별되지 않는다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        released = asyncio.Event()
+
+        async def holder():
+            async with registry.hold_connection_lock(ws):
+                await released.wait()
+
+        held = asyncio.create_task(holder())
+        while not registry.connection_lock(ws).locked():
+            await asyncio.sleep(0)
+        try:
+            with self.assertRaises(ConnectionLockBusy):
+                async with registry.hold_connection_lock(ws, timeout=0.02):
+                    pass
+        finally:
+            released.set()
+            await held
+
+    async def test_ownership_and_lock_are_released_on_cancellation(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        entered = asyncio.Event()
+
+        async def holder():
+            async with registry.hold_connection_lock(ws):
+                entered.set()
+                await asyncio.sleep(60)
+
+        task = asyncio.create_task(holder())
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(registry.connection_lock(ws).locked(), "lock이 남았다")
+        async with registry.hold_connection_lock(ws):
+            pass                                   # 소유 기록도 정리됐어야 재획득이 정상 동작
+
+
+class TestTerminationClosesTheSocket(unittest.IsolatedAsyncioTestCase):
+    """⛔ registry 정리만으로는 §C3의 "소켓 전체 정리"가 아니다 — 실제 close 경로가 필요하다.
+
+    §B2a도 "전송 실패는 연결이 죽은 것으로 간주하고 **소켓을 닫는다**"이다. registry는 I/O를
+    하지 않으므로 close는 주입받아야 하고, `send_ack`와 같은 이유로 **필수 인자**다.
+    """
+
+    async def test_close_is_called_for_the_failed_connection(self):
+        registry = TopicLeaseRegistry()
+        doomed, healthy = _WS("doomed"), _WS("healthy")
+        await _subscribe(registry, doomed, [TOPIC])
+        await _subscribe(registry, healthy, [TOPIC], uid="uid-2")
+        closed = []
+
+        async def failing(target, claimed):
+            if target is doomed:
+                raise ConnectionResetError()
+            return True
+
+        async def closer(target):
+            closed.append(target)
+
+        await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                         close_connection=closer)
+        self.assertEqual(closed, [doomed], "실패한 연결만 닫아야 한다")
+
+    async def test_close_runs_after_the_lock_is_released(self):
+        """⛔ lock을 쥔 채 close하면 stalled transport에서 그 연결의 모든 전이가 막힌다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        observed = {}
+
+        async def failing(target, claimed):
+            raise ConnectionResetError()
+
+        async def closer(target):
+            observed["locked"] = registry.connection_lock(target).locked()
+
+        await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                         close_connection=closer)
+        self.assertFalse(observed.get("locked", True), "close가 lock 안에서 실행됐다")
+
+    async def test_a_failing_close_does_not_abort_the_cycle(self):
+        registry = TopicLeaseRegistry()
+        first, second = _WS("a"), _WS("b")
+        await _subscribe(registry, first, [TOPIC])
+        await _subscribe(registry, second, [TOPIC], uid="uid-2")
+
+        async def failing(target, claimed):
+            raise ConnectionResetError()
+
+        async def bad_close(target):
+            raise OSError("already gone")
+
+        outcome = await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                                   close_connection=bad_close)
+        self.assertEqual(outcome.terminated, 2, "close 실패가 사이클을 끊었다")
+        self.assertEqual(outcome.close_failed, 2)
+
+    async def test_close_connection_is_mandatory(self):
+        """§B4의 `send_ack`와 같은 논리 — 선택으로 두면 배선이 한 번 빠뜨렸을 때 조용히 안 닫힌다."""
+        registry = TopicLeaseRegistry()
+        with self.assertRaises(TypeError):
+            await _sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=_ok_reauth)
 
 
 class TestNotificationFailureCleansTheSocket(unittest.IsolatedAsyncioTestCase):

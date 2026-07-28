@@ -102,6 +102,7 @@ fail-closed로 막는다. 호출자의 소켓 close 의무는 그 위에 얹힌�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import uuid
 import weakref
@@ -125,6 +126,14 @@ class ReentrantRegistryCall(RuntimeError):
 
     판정 기준이 ws가 아니라 **task 동일성**인 이유: 무관한 task(sweep·teardown)가 같은 연결의
     lock을 기다리는 것은 **정상**이다. ws만 보면 그 정당한 대기까지 오탐한다.
+    """
+
+
+class ConnectionLockBusy(RuntimeError):
+    """연결 lock을 상한 안에 못 잡았다 — 호출자는 **그 연결만 건너뛴다**(§C3).
+
+    ⚠️ `asyncio.TimeoutError`로 알리면 **본문이 던진 timeout과 구별되지 않는다**(전송 계층
+    `TimeoutError`도 같은 타입이다). 획득 실패는 전용 타입이어야 호출자가 안전히 분기한다.
     """
 
 
@@ -304,6 +313,10 @@ class TopicLeaseRegistry:
         self._generations: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> {topic: lease_id}. §C3 claim-then-notify — **제거 전이라도** 인가에서 제외된다.
         self._claimed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # ws -> weakref(lock을 쥔 task). `Lock.locked()`는 **누가** 쥐었는지 모르므로
+        # (다른 task가 쥐어도 True — 실측으로 §B4 우회 성공) 소유자를 따로 기록한다.
+        # ⚠️ `_ack_owner`와 같은 이유로 약한 참조다(task 프레임이 ws를 잡는다).
+        self._lock_owner: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
     # ── lock ────────────────────────────────────────────────────────────
     def connection_lock(self, ws) -> asyncio.Lock:
@@ -313,6 +326,35 @@ class TopicLeaseRegistry:
             lock = asyncio.Lock()
             self._locks[ws] = lock
         return lock
+
+    @contextlib.asynccontextmanager
+    async def hold_connection_lock(self, ws, *, timeout: Optional[float] = None):
+        """연결 lock을 잡고 **소유 task를 기록**한다 — `*_locked` 검사의 근거다.
+
+        `timeout`을 주면 상한 안에 못 잡을 때 `ConnectionLockBusy`다(§C3 sweeper는 경합 시
+        그 연결만 건너뛴다 — 무한 대기하면 무관한 연결의 통지가 밀린다).
+
+        ⚠️ 실측(py3.13): timeout된 `lock.acquire()`는 lock을 **누수하지 않는다**.
+        ⚠️ `connection_lock(ws)`을 직접 잡는 것도 여전히 가능하지만 그때는 소유 기록이 없어
+        `*_locked`를 부를 수 없다 — 의도된 것이다(registry 상태 변경은 이 경로로만).
+        """
+        lock = self.connection_lock(ws)
+        if timeout is None:
+            await lock.acquire()
+        else:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise ConnectionLockBusy(f"연결 lock 경합 — 다음 주기로 미룬다: {ws!r}") from None
+        task = asyncio.current_task()
+        self._lock_owner[ws] = weakref.ref(task) if task is not None else None
+        try:
+            yield
+        finally:
+            # ⚠️ 순서: 소유 기록을 먼저 지운다. release 뒤에 지우면 그 사이 lock을 잡은
+            #    다른 task가 **우리 기록을 보고** 통과할 수 있다.
+            self._lock_owner.pop(ws, None)
+            lock.release()
 
     def _guard_reentrant(self, ws) -> None:
         """⛔ **lock을 잡기 전에** 부른다 — 잡은 뒤면 이미 늦어서 그대로 hang한다."""
@@ -376,7 +418,7 @@ class TopicLeaseRegistry:
                 f"topic이 accepted와 rejected에 동시에 있다: {sorted(contradictory)}"
             )
         self._guard_reentrant(ws)
-        async with self.connection_lock(ws):
+        async with self.hold_connection_lock(ws):
             if ws in self._closed:
                 # teardown이 끝났거나 앞선 전이가 연결을 죽인 상태다. 되살리면 "끊긴 소켓에
                 # 살아 있는 구독" 또는 "서버가 버린 lease를 클라가 가졌다고 믿는 상태"가 생긴다.
@@ -634,13 +676,23 @@ class TopicLeaseRegistry:
         """
         if ws in self._closed:
             return None
-        if topic in self._claimed.get(ws, {}):
-            # §C3 — claim된 항목은 **제거 전이라도** 즉시 제외된다. 아니면 통지를 보내는 동안
-            # live publish가 그 lease로 다시 통과한다. ⚠️ 만료 시각만으로는 못 막는다 —
-            # 이 판정은 호출자가 넘긴 `now`를 쓰므로, 통지 중 tick이 과거 시각을 쓰면 통과한다.
-            return None
         lease = self._active.get(ws, {}).get(topic)
         if lease is None:
+            return None
+        if self._claimed.get(ws, {}).get(topic) == lease.lease_id:
+            # §C3 — claim된 lease는 **제거 전이라도** 즉시 제외된다. 아니면 통지를 보내는 동안
+            # live publish가 그 lease로 다시 통과한다. ⚠️ 만료 시각만으로는 못 막는다 —
+            # 이 판정은 호출자가 넘긴 `now`를 쓰므로, 통지 중 tick이 과거 시각을 쓰면 통과한다.
+            #
+            # ⛔ **topic이 아니라 `lease_id`로 대조한다.** topic 존재만 보면, 취소로 남은 구
+            # claim이 **재발급된 새 lease를 영구 차단**한다(실측: 다음 sweep은 미만료 새 lease를
+            # claim하지 않아 복구도 없다). claim은 그 lease에 걸린 것이지 topic에 건 것이 아니다.
+            #
+            # ⚠️ 그래서 "재발급 커밋에서 구 claim을 지운다"는 **별도 청소가 필요 없다.** 한때
+            # 둘 다 넣었는데 mutation에서 **양쪽 다 생존**했다 — 서로 잉여였다. 대조 방식이
+            # 남을 이유: 청소 방식은 정확성이 "모든 교체 경로가 청소를 기억하는가"에 걸리고,
+            # 이 버그가 정확히 그렇게 생겼다. 남은 표식은 존재하지 않는 lease를 가리켜도
+            # id가 다르므로 무해하고, 성공한 sweep의 `remove_locked`와 teardown이 걷어 간다.
             return None
         if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
             return None
@@ -709,13 +761,15 @@ class TopicLeaseRegistry:
         이미 lock을 쥔 곳에서는 `_remove_locked`를 쓴다.
         """
         self._guard_reentrant(ws)
-        async with self.connection_lock(ws):
+        async with self.hold_connection_lock(ws):
             return self.remove_locked(ws, topic, lease_id)
 
     # ── §C3 sweep primitives (모두 **연결 lock을 쥔 상태에서만**) ────────────
     def _require_lock(self, ws) -> None:
         """⛔ lock 없이 상태를 바꾸면 §B4 우회로다. 조용히 통과시키지 않는다."""
-        if not self.connection_lock(ws).locked():
+        ref = self._lock_owner.get(ws)
+        owner = ref() if ref is not None else None
+        if owner is None or owner is not asyncio.current_task():
             raise LockNotHeld(
                 "연결 lock을 쥔 상태에서만 부를 수 있다 — sweep은 claim→통지→제거를 "
                 "한 lock 안에서 수행해야 한다(§C3)."
@@ -784,7 +838,7 @@ class TopicLeaseRegistry:
         정리하므로 수동 삭제할 이유가 없다.
         """
         self._guard_reentrant(ws)
-        async with self.connection_lock(ws):
+        async with self.hold_connection_lock(ws):
             self._active.pop(ws, None)
             self._pending.pop(ws, None)
             self._uids.pop(ws, None)
