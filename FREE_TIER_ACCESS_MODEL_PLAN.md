@@ -710,6 +710,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   `TopicRegistry.register`가 additive union(`existing.update(topics)`, :68)이라 "accepted만 추가"하면
   권한 잃은 이전 등록이 lease 만료까지 잔존한다.
   **이번 요청에 언급되지 않은 topic은 불변**(증분 subscribe 보존) — 단 **같은 UID 전제**이며 UID 변경 시 C1이 우선한다.
+  - **구현**: `apply_subscribe`가 accepted와 **`rejected_topics`를 함께** 받는다. accepted만 받는 API로는
+    이 조항을 표현할 수 없다 — 권한 잃은 기존 등록이 lease 만료까지(최대 15분) 살아남는다.
+    제거는 **실제로 활성이던 것만** 대상이고, 그 결과가 `removed_topics`다(= **상태 델타**이지
+    이번 요청의 거부 목록이 아니다. 거부됐지만 원래 없던 topic은 제거된 것이 아니다).
+    한 topic이 accepted이면서 rejected이면 D5 단계상 불가능한 입력이므로 **호출부 계약 위반으로 크게 실패**시킨다.
 - **C3 sweep ↔ 재인증 CAS (claim-then-notify)** — sweep이 만료 항목을 캡처한 뒤 `await send_json` 하는 동안
   재인증이 lease를 갱신하면 **구 sweep이 새 lease를 제거**할 수 있다.
   - **lock 안에서 만료 `lease_id`를 원자적으로 claim/mark** → 그 다음 통지 → 제거. "발신 후 제거"만으로는
@@ -756,6 +761,12 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     ⚠️ **정수 generation을 topic별로 0부터 다시 세면 안 된다** — 제거 후 재구독 시 초기화돼 **과거
     `reauth_required`가 새 lease와 오인 일치**한다. 연결 수명 동안 **단조 증가하는 counter** 또는 opaque id를 쓴다.
   - **`identity_generation`(연결별)**: **같은 소켓에서의 UID 재바인딩만** 표현한다.
+    ⛔ **strict cache의 UID epoch을 그대로 실으면 안 된다.** 그 epoch은 **UID별**이고 최초 관측
+    순서로 할당되므로, 먼저 관측된 UID가 더 작은 값을 갖는다 → A→B 재바인딩에서 generation이
+    **감소**하고, G의 "구 `identity_generation` ack 무시"를 지키는 클라가 **유효한 새 ack을 버린다**
+    (실측: B를 먼저 관측하면 A=2 → B=1). registry가 **연결별로 소유**하고
+    미바인딩 0 / 최초 바인딩 1 / 재바인딩마다 +1로 단조 증가시킨다. 같은 UID 재인증은 **불변**이다
+    (재바인딩이 아니므로, 올리면 클라가 자기 상태를 불필요하게 버린다).
     ⚠️ **reconnect는 표현하지 못한다** — 새 WebSocket은 서버 상태가 처음부터 시작하므로 구/신 소켓 ack을
     전역 구분할 수 없다. **reconnect·구 receive task 격리는 클라 소유 `connectionGeneration`**이 담당한다(F).
 - **D3 `reauth_required` schema** — ack과 대조 가능해야 하므로 **topic별 `lease_id`**를 싣는다.

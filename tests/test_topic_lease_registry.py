@@ -57,12 +57,12 @@ def _fresh(cache=None, uid=UID):
     return cache, cache.snapshot(uid)
 
 
-async def _apply(registry, cache, ws, topics, *, uid=UID, snapshot=None,
+async def _apply(registry, cache, ws, topics, *, uid=UID, snapshot=None, rejected=(),
                  now_mono=1000.0, premium=1000.0, identity=1000.0, send_ack=_ok_ack):
     if snapshot is None:
         snapshot = cache.snapshot(uid)
     return await registry.apply_subscribe(
-        ws=ws, uid=uid, topics=topics, snapshot=snapshot, cache=cache,
+        ws=ws, uid=uid, topics=topics, rejected_topics=rejected, snapshot=snapshot, cache=cache,
         now_mono=now_mono, premium_verified_at_mono=premium,
         identity_verified_at_mono=identity, send_ack=send_ack,
     )
@@ -269,18 +269,16 @@ class TestAckCarriesAuthoritativeState(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(registry.active_lease(ws, TOPIC),
                              "C3이 통지할 대상을 registry가 조용히 지웠다")
 
-    async def test_ack_names_the_identity_generation_it_was_built_under(self):
+    async def test_ack_names_the_bound_uid(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
-        snapshot = cache.snapshot(UID)
         captured = {}
 
         async def capture(ack):
             captured["ack"] = ack
             return True
 
-        await _apply(registry, cache, ws, [TOPIC], snapshot=snapshot, send_ack=capture)
-        self.assertEqual(captured["ack"].identity_generation, snapshot.epoch)
+        await _apply(registry, cache, ws, [TOPIC], send_ack=capture)
         self.assertEqual(captured["ack"].uid, UID)
 
     async def test_applied_returns_the_same_ack_that_was_sent(self):
@@ -360,8 +358,10 @@ class TestCrossUidPurge(unittest.IsolatedAsyncioTestCase):
         other = StrictObservationCache()
         result = await _apply(registry, other, ws, [OTHER], uid="uid-2", send_ack=failing)
         self.assertIsInstance(result, AckFailed)
+        # ⚠️ `bound_uid`는 **기록**이라 tombstone과 무관하게 보인다 — 여기서 반쯤 넘어간 UID를 잡는다.
+        #    인가 응답인 `active_lease`는 tombstone에서 fail-closed라 아래처럼 전부 None이다.
         self.assertEqual(registry.bound_uid(ws), UID, "UID가 반쯤 넘어갔다")
-        self.assertIsNotNone(registry.active_lease(ws, TOPIC), "purge만 커밋됐다")
+        self.assertIsNone(registry.active_lease(ws, OTHER), "새 lease가 활성화됐다")
 
     async def test_retaken_topic_is_not_reported_as_removed(self):
         """같은 topic을 새 UID가 다시 잡으면 **교체**다 — removed와 accepted에 동시에 실으면 모순이다."""
@@ -587,6 +587,27 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
             result = await _apply(registry, cache, ws, [TOPIC], send_ack=swallowing)
         self.assertIsInstance(result, AckFailed)
         self.assertIsNone(registry.active_lease(ws, TOPIC))
+
+    async def test_pre_existing_leases_stop_authorizing_after_an_ack_failure(self):
+        """⛔ tombstone이 **신규 전이만** 막으면 부족하다.
+
+        close가 지연되거나 실패하면, 죽었다고 판정한 소켓으로 **기존 UID의 데이터가 계속**
+        나간다. cross-UID 상황에서는 그게 곧 entitlement 우회다: A의 KRX lease가 살아 있는
+        채로 클라는 (늦게 도착한 ack을 보고) B 세션이라고 믿는다.
+        → 인가 응답인 `active_lease`가 tombstone에서 **즉시 fail-closed**여야 한다.
+        """
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        self.assertIsNotNone(registry.active_lease(ws, TOPIC))
+
+        async def failing(ack):
+            raise ConnectionResetError()
+
+        self.assertIsInstance(await _apply(registry, cache, ws, [OTHER], send_ack=failing),
+                              AckFailed)
+        self.assertIsNone(registry.active_lease(ws, TOPIC),
+                          "죽었다고 판정한 소켓의 기존 lease가 여전히 인가된다")
 
     async def test_ack_timeout_is_below_the_client_ack_deadline(self):
         """§D6 클라 ack timeout이 10초다 — 그보다 길면 클라가 먼저 포기한다."""
@@ -866,6 +887,129 @@ class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(registry.active_lease(ws, TOPIC))
         self.assertIsNone(registry.bound_uid(ws))
         self.assertIsNotNone(registry.active_lease(other, TOPIC), "남의 연결까지 지웠다")
+
+
+class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
+    """§C2 — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다(계획 709행).
+
+    ⛔ accepted만 받으면 권한을 잃은 기존 등록이 **lease 만료까지 잔존**한다(710~711행).
+    같은 UID 재인증에서 KRX entitlement를 잃어도 최대 15분 더 KRX 데이터가 나간다는 뜻이다.
+    D2는 `removed_topics`의 producer로 "C2의 reject eviction"을 명시한다.
+    """
+
+    async def test_rejected_topic_that_was_active_is_evicted(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [OTHER, TOPIC])
+
+        result = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC])
+        self.assertIsInstance(result, Applied)
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "권한 잃은 구독이 만료까지 살아남았다")
+        self.assertEqual(result.ack.removed, (TOPIC,))
+        self.assertEqual({s.topic for s in result.ack.active}, {OTHER})
+
+    async def test_unmentioned_topics_are_untouched(self):
+        """계획 712행 — 이번 요청에 **언급되지 않은** topic은 불변(증분 subscribe 보존)."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC, OTHER, "usdt:krw"])
+
+        result = await _apply(registry, cache, ws, [], rejected=[TOPIC])
+        self.assertIsNone(registry.active_lease(ws, TOPIC))
+        self.assertIsNotNone(registry.active_lease(ws, OTHER), "언급 없던 topic이 지워졌다")
+        self.assertIsNotNone(registry.active_lease(ws, "usdt:krw"))
+        self.assertEqual({s.topic for s in result.ack.active}, {OTHER, "usdt:krw"})
+
+    async def test_rejected_topic_that_was_not_active_is_not_reported_removed(self):
+        """거부됐지만 원래 없던 topic은 **제거된 것이 아니다** — removed는 상태 델타다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        result = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC])
+        self.assertEqual(result.ack.removed, ())
+
+    async def test_eviction_is_not_committed_when_the_ack_fails(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+
+        async def failing(ack):
+            raise ConnectionResetError()
+
+        result = await _apply(registry, cache, ws, [], rejected=[TOPIC], send_ack=failing)
+        self.assertIsInstance(result, AckFailed)
+        # tombstone fail-closed라 조회는 None이지만, 커밋되지 않았음은 generation으로 본다.
+        self.assertEqual(registry.identity_generation(ws), 1, "실패한 요청이 상태를 진전시켰다")
+
+    async def test_eviction_and_purge_can_happen_in_one_request(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC, OTHER])
+
+        other = StrictObservationCache()
+        result = await _apply(registry, other, ws, [], uid="uid-2", rejected=[TOPIC])
+        # purge가 둘 다 걷어 간다 — eviction 집합이 purge 집합의 부분집합이라도 중복 보고는 없다.
+        self.assertEqual(result.ack.removed, tuple(sorted((TOPIC, OTHER))))
+        self.assertEqual(result.ack.active, ())
+
+    async def test_topic_both_accepted_and_rejected_is_a_caller_bug(self):
+        """⛔ D5 단계상 한 topic이 둘 다일 수 없다. 조용히 한쪽을 고르면 나중에 물린다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        with self.assertRaises(ValueError):
+            await _apply(registry, cache, _WS(), [TOPIC], rejected=[TOPIC])
+
+
+class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
+    """D2(계획 758행) — `identity_generation`은 **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
+
+    ⛔ strict cache의 `snapshot.epoch`을 실으면 안 된다. 그건 **UID별**이고 최초 관측 순서로
+    할당되므로, 먼저 관측된 UID B의 epoch가 나중에 관측된 A보다 **작다**. A→B 재바인딩 ack의
+    generation이 감소하고, G 매트릭스가 요구하는 "구 `identity_generation` ack 무시"를 지키는
+    클라는 **유효한 새 ack을 버린다**. (실측: A=2 → B=1)
+    """
+
+    async def test_starts_at_one_on_first_bind(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        result = await _apply(registry, cache, ws, [TOPIC])
+        self.assertEqual(result.ack.identity_generation, 1)
+        self.assertEqual(registry.identity_generation(ws), 1)
+
+    async def test_unchanged_for_same_uid_reauth(self):
+        """재인증은 재바인딩이 아니다 — 올리면 클라가 자기 상태를 불필요하게 버린다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        result = await _apply(registry, cache, ws, [OTHER])
+        self.assertEqual(result.ack.identity_generation, 1)
+
+    async def test_increases_on_rebinding_even_when_the_uid_epoch_decreases(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        cache = StrictObservationCache()
+        snap_b_early = cache.snapshot("uid-B")      # 먼저 할당 → 낮은 epoch
+        snap_a = cache.snapshot("uid-A")            # 나중 할당 → 높은 epoch
+        self.assertLess(snap_b_early.epoch, snap_a.epoch, "전제가 성립하지 않는다")
+
+        first = await _apply(registry, cache, ws, [TOPIC], uid="uid-A", snapshot=snap_a)
+        second = await _apply(registry, cache, ws, [TOPIC], uid="uid-B",
+                              snapshot=cache.snapshot("uid-B"))
+        self.assertEqual(first.ack.identity_generation, 1)
+        self.assertEqual(second.ack.identity_generation, 2, "재바인딩에서 generation이 감소했다")
+
+    async def test_is_not_advanced_when_the_ack_fails(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+
+        async def failing(ack):
+            raise ConnectionResetError()
+
+        other = StrictObservationCache()
+        await _apply(registry, other, ws, [OTHER], uid="uid-2", send_ack=failing)
+        self.assertEqual(registry.identity_generation(ws), 1, "실패한 재바인딩이 세대를 올렸다")
+
+    async def test_unbound_connection_has_generation_zero(self):
+        self.assertEqual(TopicLeaseRegistry().identity_generation(_WS()), 0)
 
 
 if __name__ == "__main__":

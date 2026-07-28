@@ -141,13 +141,18 @@ class AckState:
     드롭됐다고 결론짓는데 서버는 곧바로 그 topic을 발행하기 시작한다.
 
     - `accepted` — 이번 요청에서 새로 발급한 lease(요청 순서, 중복 제거).
-    - `removed` — 이번 요청의 결과로 **더 이상 활성이 아닌** topic. 지금 producer는 §C1의
-      UID purge뿐이다(계획 708행). ⚠️ purge된 topic을 같은 요청이 다시 잡으면 여기 넣지
-      않는다 — 그건 제거가 아니라 **교체**이고, 두 목록에 동시에 실으면 모순이다.
+    - `removed` — 이번 요청의 결과로 **더 이상 활성이 아닌** topic. producer는 두 가지다:
+      §C1의 UID purge와 §C2의 reject eviction(계획 743행). ⚠️ 제거된 topic을 같은 요청이 다시
+      잡으면 여기 넣지 않는다 — 그건 제거가 아니라 **교체**이고, 두 목록에 동시에 실으면 모순이다.
+      ⚠️ `removed`는 **상태 델타**다: 거부됐지만 원래 활성이 아니던 topic은 들어가지 않는다.
     - `active` — 그 연결의 **최종 상태 전체**(topic 정렬). 이번 요청에 없던 기존 topic도 포함.
     """
 
     uid: str
+    # D2(계획 758행) — **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
+    # ⛔ strict cache의 `snapshot.epoch`을 쓰면 안 된다: 그건 **UID별**이고 최초 관측 순서로
+    #    할당돼 먼저 본 UID가 더 작은 값을 갖는다 → A→B 재바인딩에서 **감소**하고, "구
+    #    identity_generation ack 무시"를 지키는 클라가 유효한 새 ack을 버린다(실측 A=2→B=1).
     identity_generation: int
     accepted: tuple
     removed: tuple
@@ -216,6 +221,8 @@ class TopicLeaseRegistry:
         # `ws`를 잡고 있어서, 강하게 담으면 `dict → task → frame → ws`로 키가 되살아난다
         # (`Lease`에 ws를 안 담는 것과 같은 이유).
         self._ack_owner: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # ws -> int. D2의 연결별 `identity_generation` (미바인딩 0, 최초 바인딩 1, 재바인딩마다 +1).
+        self._generations: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
     # ── lock ────────────────────────────────────────────────────────────
     def connection_lock(self, ws) -> asyncio.Lock:
@@ -245,6 +252,7 @@ class TopicLeaseRegistry:
         ws,
         uid: str,
         topics: Sequence[str],
+        rejected_topics: Sequence[str] = (),
         snapshot,
         cache,
         now_mono: float,
@@ -257,16 +265,28 @@ class TopicLeaseRegistry:
         `등록(비활성) → is_current → ack 1건 → 일괄 활성화`를 **lock 1회 안에서** 수행하고,
         ack 실패·fence 실패면 **아무 변경도 적용하지 않는다**.
 
-        `topics`는 이 요청에서 **수락된** topic만 담는다 — capability/entitlement/premium
-        per-topic 거부는 상위(§D5 3~5단계)가 걸러 낸 뒤다. 그래서 **빈 리스트가 정상**이다:
+        `topics`는 이 요청에서 **수락된** topic, `rejected_topics`는 **거부된** topic이다
+        (per-topic 판정은 상위 §D5 3~5단계가 한다). 둘 다 **빈 리스트가 정상**이다:
         premium이 전부 거부돼도 §C1 purge는 커밋돼야 한다(계획 665행 — "B의 premium 확인이
-        실패해도 A 구독을 복원하지 않는다"). 거부된 topic 목록은 ack 봉투를 만드는 호출자가
-        싣는다(registry는 wire schema를 모른다).
+        실패해도 A 구독을 복원하지 않는다").
+
+        ⚠️ `rejected_topics`가 필요한 이유는 §C2다(계획 709행): "인증 성공한 subscribe에서
+        **reject된 topic은 registry에서 제거**한다". accepted만 받으면 권한을 잃은 기존 등록이
+        **lease 만료까지 잔존**해(710~711행), 같은 UID 재인증에서 KRX entitlement를 잃어도
+        최대 15분 더 데이터가 나간다. **언급되지 않은 topic은 불변**이다(712행, 증분 subscribe 보존).
+        거부 사유 문자열은 ack 봉투를 만드는 호출자가 싣는다(registry는 wire schema를 모른다).
 
         ⚠️ `now_mono`는 호출자가 요청 경계에서 **1회** 읽은 값이다. 이 모듈은 시계를 읽지 않는다.
         ⚠️ `send_ack`는 **필수**다(기본값 없음). 선택으로 두면 배선이 한 번 빠뜨렸을 때 ack 없이
         활성화되어 §B4 순서가 조용히 깨진다. 계약은 모듈 docstring "`send_ack` 계약" 참조.
         """
+        contradictory = set(topics) & set(rejected_topics)
+        if contradictory:
+            # ⛔ D5 단계상 한 topic이 accepted이면서 rejected일 수 없다. 조용히 한쪽을 고르면
+            #    "거부했는데 발급됐다"가 배선 버그로 남는다. 호출부 계약 위반이므로 크게 실패한다.
+            raise ValueError(
+                f"topic이 accepted와 rejected에 동시에 있다: {sorted(contradictory)}"
+            )
         self._guard_reentrant(ws)
         async with self.connection_lock(ws):
             if ws in self._closed:
@@ -311,6 +331,22 @@ class TopicLeaseRegistry:
                         expires_at_mono=expiry,
                     )
 
+            # 전이 계획을 **여기서 한 번** 확정한다 — lock을 쥐고 있으므로 ack 송신 중에도
+            # 아무도 `_active`를 바꿀 수 없고, 따라서 ack이 광고한 상태와 커밋이 정확히 같다.
+            current = self._active.get(ws, {})
+            if purge:
+                departing = set(current)                       # §C1 — 전부 걷어 낸다
+            else:
+                # §C2 — 거부된 topic 중 **실제로 활성이던 것**만 제거 대상이다.
+                # 언급되지 않은 topic은 불변(계획 712행, 증분 subscribe 보존).
+                departing = {t for t in rejected_topics if t in current}
+            surviving = {t: l for t, l in current.items() if t not in departing}
+            final = dict(surviving)
+            final.update(new_leases)
+            # 같은 요청이 다시 잡은 topic은 제거가 아니라 **교체**다.
+            removed = tuple(sorted(t for t in departing if t not in new_leases))
+            generation = self._next_generation_locked(ws, bound=bound, uid=uid)
+
             # 1) 등록(비활성) — 전 topic 한꺼번에. 재확인이 **등록 이후**여야 그 사이 무효화를 본다.
             pending = self._pending.setdefault(ws, {})
             pending.update(new_leases)
@@ -322,8 +358,8 @@ class TopicLeaseRegistry:
 
                 # 3) ack 자료 확정 — post-transition 상태를 **여기서 한 번** 만든다(D2 713행).
                 ack = self._build_ack_locked(
-                    ws, uid=uid, epoch=snapshot.epoch, now_mono=now_mono,
-                    new_leases=new_leases, purge=purge,
+                    uid=uid, generation=generation, now_mono=now_mono,
+                    new_leases=new_leases, removed=removed, final=final,
                 )
 
                 # 4) ack 송신 — **활성화보다 먼저**(§B4 632행).
@@ -350,11 +386,10 @@ class TopicLeaseRegistry:
                     return self._ack_failed_locked(ws, "ack_not_confirmed")
 
                 # 5) 커밋 — 전부 함께. 여기서부터 live 전송 대상이다.
-                active = self._active.setdefault(ws, {})
-                if purge:
-                    active.clear()
-                active.update(new_leases)
+                #    ack을 만든 **바로 그** `final`을 통째로 넣는다 — 다시 계산하면 둘이 갈린다.
+                self._active[ws] = final
                 self._uids[ws] = uid
+                self._generations[ws] = generation
                 return Applied(ws=ws, ack=ack)
             finally:
                 leftover = self._pending.get(ws)
@@ -373,23 +408,24 @@ class TopicLeaseRegistry:
         self._closed.add(ws)
         return AckFailed(reason=reason)
 
-    def _build_ack_locked(self, ws, *, uid, epoch, now_mono, new_leases, purge) -> AckState:
-        """**lock을 쥔 상태에서만** 부른다 — 단일 snapshot이어야 D2가 성립한다."""
-        current = self._active.get(ws, {})
-        if purge:
-            surviving: dict = {}
-            # 같은 요청이 다시 잡은 topic은 제거가 아니라 **교체**다 — 두 목록에 동시에
-            # 실으면 모순이고, `active`가 어차피 새 `lease_id`로 권위를 갖는다.
-            removed = tuple(sorted(t for t in current if t not in new_leases))
-        else:
-            surviving = dict(current)
-            removed = ()
+    def _next_generation_locked(self, ws, *, bound, uid) -> int:
+        """D2의 연결별 `identity_generation` — **같은 소켓의 UID 재바인딩만** 표현한다(계획 758행).
 
-        final = dict(surviving)
-        final.update(new_leases)
+        미바인딩 → 1(최초 바인딩) / 재바인딩 → +1 / 같은 UID 재인증 → **불변**.
+        ⚠️ 같은 UID 재인증에서 올리면 클라가 자기 상태를 불필요하게 버린다(재바인딩이 아니다).
+        """
+        current = self._generations.get(ws, 0)
+        return current + 1 if (bound is None or bound != uid) else current
+
+    def _build_ack_locked(self, *, uid, generation, now_mono, new_leases, removed, final) -> AckState:
+        """**lock을 쥔 상태에서만** 부른다 — 단일 snapshot이어야 D2가 성립한다.
+
+        전이 계획(`removed`/`final`)은 호출부가 이미 확정해 넘긴다. 여기서 다시 계산하면
+        ack이 광고하는 상태와 실제 커밋이 갈릴 수 있다.
+        """
         return AckState(
             uid=uid,
-            identity_generation=epoch,
+            identity_generation=generation,
             accepted=tuple(self._as_subscription(l, now_mono) for l in new_leases.values()),
             removed=removed,
             # ⚠️ 만료된 기존 lease는 **광고하지 않는다**(계획 715행: `≤ 0`이면 넣지 않는다).
@@ -413,18 +449,35 @@ class TopicLeaseRegistry:
 
     # ── 조회 ────────────────────────────────────────────────────────────
     def active_lease(self, ws, topic: str) -> Optional[Lease]:
-        """**활성** lease만 보인다 — 미활성은 존재하되 전송 대상이 아니다.
+        """**인가 응답**이다 — 이 연결에서 지금 이 topic을 보낼 수 있는가.
 
+        **활성** lease만 보인다(미활성은 존재하되 전송 대상이 아니다).
         lock을 잡지 않는다(§B1 전송 직전 재검증이 이 경로를 쓴다 — 거기서 lock을 잡으면
         느린 한 연결의 ack이 fanout 전체를 지연시킨다).
+
+        ⛔ **tombstone에서 즉시 fail-closed다.** tombstone이 신규 전이만 막으면 부족하다:
+        호출자의 close가 지연되거나 실패하면 죽었다고 판정한 소켓으로 **기존 UID의 데이터가
+        계속** 나간다. cross-UID 상황에서는 그게 곧 entitlement 우회다 — A의 KRX lease가
+        살아 있는 채로, 클라는 (늦게 배달된 ack을 보고) B 세션이라고 믿는다.
         """
+        if ws in self._closed:
+            return None
         return self._active.get(ws, {}).get(topic)
+
+    def identity_generation(self, ws) -> int:
+        """D2의 연결별 generation. 미바인딩은 0."""
+        return self._generations.get(ws, 0)
 
     def has_pending(self, ws, topic: str) -> bool:
         """등록됐지만 아직 활성화되지 않았는가 (fence 순서 검증용)."""
         return topic in self._pending.get(ws, {})
 
     def bound_uid(self, ws) -> Optional[str]:
+        """현재 바인딩된 UID — **기록**이다.
+
+        ⚠️ 인가 판정에 쓰지 말 것. tombstone을 보지 않으므로 죽은 연결에서도 값이 남는다.
+        인가는 `active_lease`(fail-closed)를 거친다.
+        """
         return self._uids.get(ws)
 
     def connection_count(self) -> int:
@@ -465,4 +518,5 @@ class TopicLeaseRegistry:
             self._active.pop(ws, None)
             self._pending.pop(ws, None)
             self._uids.pop(ws, None)
+            self._generations.pop(ws, None)
             self._closed.add(ws)
