@@ -18,8 +18,14 @@ live publish가 그 lease로 다시 통과한다 — 통지와 제거 사이는 
 ack이 최대 `ACK_TIMEOUT_SECONDS` 동안 연결 lock을 쥐므로(§B4), 단일 sweeper가 순회하며
 무한 대기하면 역압 연결 K개에 대해 한 사이클이 최대 5s×K 늘어난다. 그러면 **무관한 다른
 연결**의 만료 통지가 D-const의 "만료→통지 10초" 관측 계약을 넘긴다(보안 상한은 §B1이
-지키므로 유출은 아니다). 경합하면 그 연결만 건너뛰고 다음 주기로 미룬다 — 지연 상한이
-sweep 주기 1회로 유지된다.
+지키므로 유출은 아니다). 경합하면 그 연결만 건너뛰고 다음 주기로 미룬다.
+
+⚠️ 그런데 **bounded acquire만으로는 부족하다** — 그건 "lock을 기다리는 시간"만 묶을 뿐,
+연결별 작업을 직렬로 돌리면 통지 자체가 K에 비례해 누적된다(실측: 4연결의 통지 시작이
+0.000/0.051/0.102/0.154초). 그래서 연결별 작업을 **동시에** 돌린다. 사이클 길이는 K가 아니라
+**한 연결의 최악값**(lock + notify + close)으로 묶인다.
+⚠️ 정확히 적자면 "만료→통지"의 실제 상한은 sweep 주기 + 그 최악값이다 — 계획 D-const의
+"주기 = 최대 지연"은 사이클이 주기에 비해 짧다는 전제의 단순화다.
 
 ⚠️ 실측 전제(py3.13): `asyncio.wait_for(lock.acquire(), timeout=...)`가 timeout돼도 lock을
 **남기지 않는다**(보유자 해제 후 `locked()`가 False, 재획득 성공). 이 성질이 깨지는 런타임에서는
@@ -98,25 +104,19 @@ async def sweep_once(
     WebSocket의 두 번째 `close()`는 `RuntimeError`다), 그때마다 `close_failed`가 오른다 —
     이 카운터를 단독 경보 조건으로 쓰지 말 것.
     """
-    scanned = notified = removed = skipped_busy = terminated = close_failed = 0
-
-    doomed: list = []
-
-    for ws in registry.connections_snapshot():
-        scanned += 1
-        terminate = False
-        # ⛔ busy 포착을 **획득에만** 묶는다. `async with` 전체를 감싸면 본문 어디서
-        #    `ConnectionLockBusy`가 나도 "정상 경합"으로 집계돼, 통지도 제거도 안 한 사이클이
-        #    §C3의 "지연 상한 = sweep 주기 1회" 근거를 조용히 무너뜨린다.
+    async def _visit(ws) -> SweepOutcome:
+        """한 연결의 `claim → 통지 → 정리 → close`. **연결별로 독립**이라 서로 기다리지 않는다."""
         held = contextlib.AsyncExitStack()
         try:
             await held.enter_async_context(
                 registry.hold_connection_lock(ws, timeout=lock_timeout)
             )
         except ConnectionLockBusy:
-            # 그 연결만 건너뛴다 — 무한 대기하면 무관한 연결의 통지가 밀린다.
-            skipped_busy += 1
-            continue
+            # 그 연결만 건너뛴다 — 다음 주기가 처리한다.
+            return SweepOutcome(scanned=1, skipped_busy=1)
+
+        terminate = False
+        notified = removed = 0
         try:
             claimed = registry.claim_expired_locked(ws, now_mono=now_mono)
             if claimed:
@@ -135,7 +135,7 @@ async def sweep_once(
                         # 반환하면 `wait_for`도 정상 반환한다).
                         terminate = True
                     else:
-                        notified += 1
+                        notified = 1
                         for entry in claimed:
                             if registry.remove_locked(ws, entry.topic, entry.lease_id):
                                 removed += 1
@@ -146,33 +146,37 @@ async def sweep_once(
                     #    (2) release→재획득 창에 경쟁 subscribe가 끼어 **죽은 연결에 900초
                     #    lease**가 발급된다(실측: `Applied` ack이 실제로 나갔다).
                     registry.teardown_locked(ws)
-                    doomed.append(ws)
         finally:
             await held.aclose()
 
-    async def _close(target) -> bool:
+        if not terminate:
+            return SweepOutcome(scanned=1, notified=notified, removed=removed)
+
+        # close는 **lock 밖**이다 — stalled transport가 그 연결의 모든 전이를 막으면 안 된다.
         try:
-            await asyncio.wait_for(close_connection(target), timeout=close_timeout)
-            return True
+            await asyncio.wait_for(close_connection(ws), timeout=close_timeout)
         except asyncio.CancelledError:
             # ⚠️ 이 절은 **방어적 문서**다 — `CancelledError`는 `BaseException`이라 아래
             #    `except Exception`이 애초에 잡지 않는다. 의도를 남기려고 명시한다.
             raise
-        except Exception:  # noqa: BLE001 — 이미 죽은 소켓이면 close도 실패한다.
-            return False
+        except Exception:  # noqa: BLE001 — 이미 죽은 소켓이면 close도 실패한다(정상 경합 포함).
+            return SweepOutcome(scanned=1, terminated=1, close_failed=1)
+        return SweepOutcome(scanned=1, terminated=1)
 
-    # ⛔ close는 **연결 간 순서가 없는 순수 I/O**라 직렬로 두면 K개가 합산돼 사이클이 D-const의
-    #    sweep 주기를 넘긴다(상한 2s·정지 소켓 10개면 20s). 정리는 이미 끝났으므로 동시에 한다.
-    if doomed:
-        results = await asyncio.gather(*(_close(ws) for ws in doomed))
-        close_failed = sum(1 for ok in results if not ok)
-        terminated = len(doomed)
+    # ⛔ **연결별로 동시에** 돈다. 직렬이면 사이클이 연결 수 K에 비례하고(실측: 통지 시작이
+    #    0.000/0.051/0.102/0.154초로 누적) 기본값에서는 정지 연결 3개만으로 D-const의
+    #    "만료→통지 10초"를 넘긴다. 각 작업은 **서로 다른 연결 lock**을 잡으므로 §B4의
+    #    직렬화 계약(연결 단위)은 그대로다.
+    # ⚠️ fan-out에 상한을 두지 않는다 — 상한 C를 두면 사이클이 다시 ceil(K/C)에 비례해
+    #    보장이 깨진다. 무거운 부분(통지·close)은 **만료 lease를 가진 연결**에만 발생하고,
+    #    나머지는 lock 획득 + 동기 claim으로 끝난다.
+    results = await asyncio.gather(*(_visit(ws) for ws in registry.connections_snapshot()))
 
     return SweepOutcome(
-        scanned=scanned,
-        notified=notified,
-        removed=removed,
-        skipped_busy=skipped_busy,
-        terminated=terminated,
-        close_failed=close_failed,
+        scanned=sum(r.scanned for r in results),
+        notified=sum(r.notified for r in results),
+        removed=sum(r.removed for r in results),
+        skipped_busy=sum(r.skipped_busy for r in results),
+        terminated=sum(r.terminated for r in results),
+        close_failed=sum(r.close_failed for r in results),
     )

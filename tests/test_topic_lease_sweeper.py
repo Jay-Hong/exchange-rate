@@ -665,6 +665,38 @@ class TestTerminationIsBounded(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.close_failed, 1, "멈춘 close가 계수되지 않았다")
         self.assertEqual(notified, [victim], "멈춘 close가 무관한 연결의 통지를 막았다")
 
+    async def test_notifications_do_not_accumulate_across_connections(self):
+        """⛔ **통지**가 직렬이면 사이클이 연결 수에 비례한다 — D-const가 재는 축이 바로 이것이다.
+
+        실측(구 구현): 4연결의 통지 시작이 0.000 / 0.051 / 0.102 / 0.154초로 누적됐다.
+        기본값(notify 5s)이면 정지 연결 3개만으로 마지막 통지가 10초 계약을 넘는다.
+        lock 획득 상한도 같이 누적된다.
+
+        ⚠️ 연결별 작업은 **서로 다른 lock**을 잡으므로 병렬화해도 직렬화 계약을 깨지 않는다.
+        """
+        registry = TopicLeaseRegistry()
+        sockets = [_WS(f"s{i}") for i in range(4)]
+        for index, ws in enumerate(sockets):
+            await _subscribe(registry, ws, [TOPIC], uid=f"uid-{index}")
+
+        loop = asyncio.get_running_loop()
+        started_at = []
+
+        async def stalling(target, claimed):
+            started_at.append(loop.time())
+            await asyncio.sleep(60)
+            return True
+
+        async def noop_close(target):
+            pass
+
+        await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=stalling,
+                         close_connection=noop_close, notify_timeout=0.05, close_timeout=0.05)
+        self.assertEqual(len(started_at), 4)
+        spread = max(started_at) - min(started_at)
+        self.assertLess(spread, 0.05,
+                        f"통지가 직렬로 누적됐다 (시작 시각 편차 {spread:.3f}s)")
+
     async def test_stalled_closes_do_not_accumulate_across_connections(self):
         """⛔ 직렬이면 K개가 합산돼 사이클이 주기를 넘긴다 — close는 연결 간 순서가 없다."""
         registry = TopicLeaseRegistry()
@@ -853,12 +885,19 @@ class TestClaimRequiresTheLock(unittest.IsolatedAsyncioTestCase):
                     for h in node.handlers)
         ]
         self.assertEqual(len(guarded), 1, "busy handler를 못 찾았다 — 탐지기 고장")
-        body_calls = {
-            node.func.attr for node in ast.walk(guarded[0].body[0] if guarded[0].body else guarded[0])
+        # ⚠️ try **본문 전체**를 훑는다. 한때 `body[0]`(첫 문장)만 봐서, 두 번째 문장으로
+        #    추가된 호출을 놓쳤다(실측 SURVIVED) — 탐지기가 자기 범위를 좁게 잡은 사례다.
+        guarded_calls = {
+            node.func.attr
+            for statement in guarded[0].body
+            for node in ast.walk(statement)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         }
-        self.assertNotIn("claim_expired_locked", body_calls, "busy 포착이 본문을 감쌌다")
-        self.assertNotIn("remove_locked", body_calls, "busy 포착이 본문을 감쌌다")
+        # 자기 검사 — 획득 호출조차 못 찾으면 아래 단언이 **공허하게** 통과한다.
+        self.assertIn("enter_async_context", guarded_calls, "탐지기가 획득 호출을 못 찾았다")
+        for forbidden in ("claim_expired_locked", "remove_locked", "teardown_locked"):
+            self.assertNotIn(forbidden, guarded_calls,
+                             f"busy 포착이 본문({forbidden})을 감쌌다")
 
     async def test_removal_without_the_lock_raises(self):
         registry = TopicLeaseRegistry()
