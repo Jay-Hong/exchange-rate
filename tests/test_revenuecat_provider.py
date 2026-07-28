@@ -28,13 +28,16 @@ import httpx
 from app import subscription
 from app.clock import Clock
 from app.subscription import (
+    CACHE_TTL,
     BadRequest,
     Determined,
     ProviderMisconfigured,
     ProviderUnavailable,
     ProtocolViolation,
+    PremiumStatus,
     _check_revenuecat_entitlement,
     fetch_revenuecat_result,
+    verify_premium_status,
 )
 
 T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -91,9 +94,10 @@ _PAST = "2025-06-01T00:00:00Z"
 #      premium={}                      -> (False, True)   ← lifetime 아님
 #      premium={product_identifier:…}  -> (True,  True)   ← 진짜 lifetime (expires_date 없음)
 #    초안에서 lifetime 픽스처를 `{}`로 잡아 기대값을 (True, True)로 적었다가 characterization이 잡았다.
+#    ⚠️ 그 truthiness 분기 자체가 hardening 대상이 됐다 — 지금은 **키 존재 + 타입**으로 판정한다.
 _ACTIVE = {"product_identifier": "p", "expires_date": _FUTURE}
 _EXPIRED = {"product_identifier": "p", "expires_date": _PAST}
-_LIFETIME = {"product_identifier": "lifetime_x"}
+_LIFETIME = {"product_identifier": "onetime", "expires_date": None}  # 공식 샘플 형태
 _BAD_DATE = {"product_identifier": "p", "expires_date": "not-a-date"}
 
 
@@ -109,11 +113,10 @@ def _no_premium_key_payload():
 
 SCENARIOS = [
     ("200 active",        _FakeResponse(200, _entitlement_payload(_ACTIVE)),        (True, True),   Determined),
-    ("200 lifetime",      _FakeResponse(200, _entitlement_payload(_LIFETIME)),      (True, True),   Determined),
+    ("200 lifetime(null)", _FakeResponse(200, _entitlement_payload(_LIFETIME)),      (True, True),   Determined),
     ("200 expired",       _FakeResponse(200, _entitlement_payload(_EXPIRED)),       (False, True),  Determined),
-    ("200 empty premium", _FakeResponse(200, _entitlement_payload({})),             (False, True),  Determined),
-    ("200 null premium",  _FakeResponse(200, _entitlement_payload(None)),           (False, True),  Determined),
-    ("200 no premium key", _FakeResponse(200, _no_premium_key_payload()),           (False, True),  Determined),
+    ("premium 키 누락",    _FakeResponse(200, _no_premium_key_payload()),            (False, True),  Determined),
+    ("entitlements {}",   _FakeResponse(200, {"subscriber": {"entitlements": {}}}), (False, True),  Determined),
     ("404 unknown user",  _FakeResponse(404),                                       (False, True),  Determined),
     ("400 bad request",   _FakeResponse(400),                                       (False, False), BadRequest),
     ("401 unauthorized",  _FakeResponse(401),                                       (False, False), ProviderMisconfigured),
@@ -124,16 +127,23 @@ SCENARIOS = [
     ("503 unavailable",   _FakeResponse(503),                                       (False, False), ProviderUnavailable),
     ("409 unexpected 4xx", _FakeResponse(409),                                      (False, False), ProtocolViolation),
     ("malformed JSON",    _FakeResponse(200, raises=ValueError("not json")),        (False, False), ProtocolViolation),
-    ("malformed date",    _FakeResponse(200, _entitlement_payload(_BAD_DATE)),      (False, False), ProtocolViolation),
     ("transport error",   httpx.ConnectError("connection reset"),                   (False, False), ProviderUnavailable),
     ("read timeout",      httpx.ReadTimeout("slow"),                                (False, False), ProviderUnavailable),
-    # 응답 **형식** 위반 — 구 broad except에서는 전부 ProviderUnavailable(retryable)로 접혔다.
+    # ── 형식 위반 (§8.1 A4-1 hardening) ─────────────────────────────────────────
     ("body not an object", _FakeResponse(200, [1, 2, 3]),                           (False, False), ProtocolViolation),
+    ("subscriber 누락",    _FakeResponse(200, {}),                                   (False, False), ProtocolViolation),
     ("subscriber is str", _FakeResponse(200, {"subscriber": "nope"}),               (False, False), ProtocolViolation),
+    ("entitlements 누락",  _FakeResponse(200, {"subscriber": {}}),                   (False, False), ProtocolViolation),
+    ("entitlements is str", _FakeResponse(200, {"subscriber": {"entitlements": "x"}}), (False, False), ProtocolViolation),
+    ("premium null",      _FakeResponse(200, _entitlement_payload(None)),           (False, False), ProtocolViolation),
+    ("premium []",        _FakeResponse(200, _entitlement_payload([])),             (False, False), ProtocolViolation),
+    ("premium {}",        _FakeResponse(200, _entitlement_payload({})),             (False, False), ProtocolViolation),
     ("premium is str",    _FakeResponse(200, _entitlement_payload("yes")),          (False, False), ProtocolViolation),
-    ("expires is number", _FakeResponse(200, _entitlement_payload({"expires_date": 12345})), (False, False), ProtocolViolation),
-    # tz 없는 날짜 — aware/naive 비교라 TypeError. 계약 위반이므로 예외가 아니라 ProtocolViolation.
-    ("expires without tz", _FakeResponse(200, _entitlement_payload({"product_identifier": "p", "expires_date": "2026-06-01T00:00:00"})), (False, False), ProtocolViolation),
+    ("expires_date 키 누락", _FakeResponse(200, _entitlement_payload({"product_identifier": "p"})), (False, False), ProtocolViolation),
+    ("expires_date \"\"",  _FakeResponse(200, _entitlement_payload({"product_identifier": "p", "expires_date": ""})), (False, False), ProtocolViolation),
+    ("expires_date 숫자",  _FakeResponse(200, _entitlement_payload({"product_identifier": "p", "expires_date": 12345})), (False, False), ProtocolViolation),
+    ("expires_date 형식오류", _FakeResponse(200, _entitlement_payload(_BAD_DATE)),   (False, False), ProtocolViolation),
+    ("expires_date tz 없음", _FakeResponse(200, _entitlement_payload({"product_identifier": "p", "expires_date": "2026-06-01T00:00:00"})), (False, False), ProtocolViolation),
 ]
 
 
@@ -287,76 +297,147 @@ class TestUnexpectedErrorsPropagate(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(RuntimeError):
                     await fetch_revenuecat_result("u", clock=clock)
 
-    async def test_date_block_does_not_swallow_arbitrary_exceptions(self):
-        """`expires_date` 해석 블록도 **좁게** 잡아야 한다.
-
-        ⚠️ 이 테스트가 없으면 그 블록의 `except (AttributeError, TypeError, ValueError)`를
-        `except Exception`으로 되돌려도 **아무 테스트도 red가 되지 않는다**(무력화로 실증).
-        형식 오류(ValueError·TypeError·AttributeError)는 ProtocolViolation이 맞지만,
-        그 밖의 예외는 우리 버그이므로 전파돼야 한다.
-        """
-
-        class _ExplodingExpires:
-            def __bool__(self):
-                return True
-
-            def replace(self, *args, **kwargs):
-                raise RuntimeError("bug in our parsing")
-
-        payload = _entitlement_payload(
-            {"product_identifier": "p", "expires_date": _ExplodingExpires()}
-        )
-        with _patch_http(_FakeResponse(200, payload)):
-            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
-                with self.assertRaises(RuntimeError):
-                    await fetch_revenuecat_result("u", clock=_clock())
+    # ⚠️ `test_date_block_does_not_swallow_arbitrary_exceptions`는 **삭제**했다 —
+    #    hardening이 `isinstance(expires, str)`를 먼저 검사하게 되면서 그 테스트가 겨냥한
+    #    "임의 객체의 `.replace()`가 터지는" 경로가 **도달 불가**해졌다. 남은 계약(예상 밖 예외
+    #    전파)은 위 두 테스트 + `test_clock_failure_is_not_swallowed_as_unavailable`이 덮는다.
 
 
-class TestMalformedBodyStillPassesAsAuthoritative(unittest.IsolatedAsyncioTestCase):
-    """⚠️ **알려진 gap — N-3으로 이월**. 여기 값들은 계약 위반인데 `Determined`로 통과한다.
+class TestMalformedIsNotAuthoritative(unittest.IsolatedAsyncioTestCase):
+    """§8.1 A4-1 hardening — malformed 200을 **authoritative 상태로 캐시하지 않는다**.
 
-    실측(2026-07-28):
+    이전 동작(실측, 2026-07-28):
 
-    | 입력 | typed | legacy(REST) |
-    |---|---|---|
-    | `{}` / `subscriber` 누락 / `premium=[]` | `Determined(False)` | `(False, True)` |
-    | `expires_date=""` / `0` | `Determined(True)` ← **프리미엄 부여** | `(True, True)` |
+    | 입력 | typed | legacy | 문제 |
+    |---|---|---|---|
+    | `{}` / `premium=[]` | `Determined(False)` | `(False, True)` | 유료 사용자 강등 + 캐시 |
+    | `expires_date=""` / 숫자 | `Determined(True)` | `(True, True)` | **빈 값에 프리미엄 부여** |
 
-    누락 키의 `{}` 기본값과 truthiness 분기 때문이며, strict가 이걸 **관측으로 저장**하면
-    정상 사용자를 "구독 없음"으로 굳히거나 malformed 값으로 프리미엄을 줄 수 있다.
-
-    **이번 슬라이스에서 고치지 않는 이유**: `ProtocolViolation`으로 바꾸면 legacy 튜플이
-    `(False, True)`→`(False, False)`, `(True, True)`→`(False, False)`로 **REST 동작이 바뀐다**.
-    이번 GO는 "REST behavior-change-0"이라 그 변경은 범위 밖이다(별도 승인 필요).
-
-    → 그래서 **현재 동작을 그대로 못 박아 둔다**. N-3에서 조이면 이 클래스가 red가 되고,
-    그 red가 곧 **REST에 미치는 영향의 목록**이 된다(조용히 바뀌지 않게 하는 장치).
+    ⚠️ 이건 A4의 stale fallback을 **제거**하는 변경이 아니라 **복원**이다 —
+    `(False, False)`로 보내면 stale 캐시가 있으면 fallback, 없으면 PENDING이 된다.
     """
 
-    CASES = [
-        ("body {}", {}, (False, True), True),
-        ("subscriber 누락", {"other": 1}, (False, True), True),
-        ("premium=[]", _entitlement_payload([]), (False, True), True),
-        ('expires_date=""', _entitlement_payload({"product_identifier": "p", "expires_date": ""}), (True, True), True),
-        ("expires_date=0", _entitlement_payload({"product_identifier": "p", "expires_date": 0}), (True, True), True),
-    ]
-
-    async def test_current_behavior_is_pinned(self):
-        for label, payload, legacy, is_determined in self.CASES:
+    async def test_no_malformed_input_yields_authoritative_determined(self):
+        malformed = [
+            ("body {}", {}),
+            ("subscriber str", {"subscriber": "x"}),
+            ("entitlements 누락", {"subscriber": {}}),
+            ("premium null", _entitlement_payload(None)),
+            ("premium []", _entitlement_payload([])),
+            ("premium {}", _entitlement_payload({})),
+            ("premium str", _entitlement_payload("yes")),
+            ("expires 키 누락", _entitlement_payload({"product_identifier": "p"})),
+            ('expires ""', _entitlement_payload({"product_identifier": "p", "expires_date": ""})),
+            ("expires 숫자", _entitlement_payload({"product_identifier": "p", "expires_date": 0})),
+        ]
+        for label, payload in malformed:
             with self.subTest(case=label):
                 with _patch_http(_FakeResponse(200, payload)):
                     with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
                         typed = await fetch_revenuecat_result("u", clock=_clock())
+                self.assertIsInstance(typed, ProtocolViolation, label)
                 with _patch_http(_FakeResponse(200, payload)):
                     with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
-                        got = await _check_revenuecat_entitlement("u", clock=_clock())
-                self.assertEqual(isinstance(typed, Determined), is_determined, label)
-                self.assertEqual(got, legacy, label)
+                        legacy = await _check_revenuecat_entitlement("u", clock=_clock())
+                self.assertEqual(legacy, (False, False), label)
 
-    async def test_empty_expires_date_currently_grants_premium(self):
-        """가장 위험한 항목을 따로 세운다 — malformed 입력에 **프리미엄이 부여**된다."""
-        payload = _entitlement_payload({"product_identifier": "p", "expires_date": ""})
+    async def test_valid_no_subscription_is_still_authoritative(self):
+        """positive control — 정상 "구독 없음"까지 위반으로 접으면 안 된다."""
+        for label, payload in [
+            ("premium 키 누락", _no_premium_key_payload()),
+            ("entitlements {}", {"subscriber": {"entitlements": {}}}),
+        ]:
+            with self.subTest(case=label):
+                with _patch_http(_FakeResponse(200, payload)):
+                    with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                        typed = await fetch_revenuecat_result("u", clock=_clock())
+                self.assertEqual(typed, Determined(is_premium=False), label)
+
+    async def test_lifetime_requires_explicit_null(self):
+        """공식 샘플이 `"expires_date": null`이므로 **명시적 null만** lifetime이다."""
+        with _patch_http(_FakeResponse(200, _entitlement_payload(_LIFETIME))):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                self.assertEqual(
+                    await fetch_revenuecat_result("u", clock=_clock()),
+                    Determined(is_premium=True),
+                )
+
+
+class TestStaleFallbackRestoredForMalformed(unittest.IsolatedAsyncioTestCase):
+    """이 hardening이 실제로 지키려는 것 — **stale 캐시를 가진 유료 사용자 보호**.
+
+    구 동작에서는 malformed 200이 `should_cache=True`로 통과해 캐시의 `True`를 `False`로
+    덮어써 INACTIVE로 강등시켰다. 같은 상황에서 503(진짜 장애)은 ACTIVE를 유지했다 —
+    **쓰레기 데이터가 장애보다 더 신뢰받는** 역전이었다.
+    """
+
+    def setUp(self):
+        subscription._cache.clear()
+        subscription._pending.clear_all()
+
+    tearDown = setUp
+
+    async def _status_with_stale_paid_cache(self, payload):
+        subscription._cache.set("u", True, clock=_clock(T0))
+        later = T0 + CACHE_TTL + timedelta(minutes=1)
         with _patch_http(_FakeResponse(200, payload)):
             with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
-                typed = await fetch_revenuecat_result("u", clock=_clock())
-        self.assertEqual(typed, Determined(is_premium=True), "N-3에서 조일 때 여기가 red가 된다")
+                return await verify_premium_status("u", clock=_clock(later))
+
+    async def test_malformed_does_not_demote_stale_paying_user(self):
+        for label, payload in [
+            ("body {}", {}),
+            ("premium []", _entitlement_payload([])),
+            ("premium {}", _entitlement_payload({})),
+            ('expires ""', _entitlement_payload({"product_identifier": "p", "expires_date": ""})),
+        ]:
+            with self.subTest(case=label):
+                self.setUp()
+                status = await self._status_with_stale_paid_cache(payload)
+                self.assertEqual(status, PremiumStatus.ACTIVE, label)
+
+    async def test_authoritative_inactive_still_demotes(self):
+        """positive control — **정상** "구독 없음"은 여전히 강등시켜야 한다.
+
+        이게 없으면 "전부 ACTIVE 반환"하는 구현도 위 테스트를 통과한다.
+        """
+        status = await self._status_with_stale_paid_cache(_no_premium_key_payload())
+        self.assertEqual(status, PremiumStatus.INACTIVE)
+
+
+class TestViolationAttribution(unittest.IsolatedAsyncioTestCase):
+    """`ProtocolViolation.detail`이 **실제 위반 지점**을 가리켜야 한다.
+
+    ⚠️ 이게 없으면 규칙이 서로를 가려도 아무 테스트가 red가 되지 않는다 — 무력화로 실증했다:
+    `premium`의 "비어 있지 않은 dict" 검사를 지우면 `{}`가 `expires_date` 규칙에 걸려
+    **여전히 ProtocolViolation**이라 타입 단언만으로는 통과한다. 그러면 운영자가 로그에서
+    `field=expires_date_missing`을 보고 엉뚱한 곳을 찾게 된다.
+
+    detail은 `_shape_violation`이 그대로 로그 `extra={"field": ...}`에도 싣는 값이라,
+    이 테스트가 곧 **로그 진단 정확도**의 계약이다.
+    """
+
+    async def _detail(self, payload):
+        with _patch_http(_FakeResponse(200, payload)):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                result = await fetch_revenuecat_result("u", clock=_clock())
+        self.assertIsInstance(result, ProtocolViolation)
+        return result.detail
+
+    async def test_each_violation_names_its_own_field(self):
+        cases = [
+            ("body", [1, 2, 3]),
+            ("subscriber", {"subscriber": "x"}),
+            ("entitlements", {"subscriber": {"entitlements": "x"}}),
+            ("premium", _entitlement_payload(None)),
+            ("premium", _entitlement_payload([])),
+            ("premium", _entitlement_payload({})),          # ← 규칙이 서로 가리는지 잡는 핵심
+            ("expires_date_missing", _entitlement_payload({"product_identifier": "p"})),
+            ("expires_date_value", _entitlement_payload({"product_identifier": "p", "expires_date": ""})),
+            ("expires_date_value", _entitlement_payload({"product_identifier": "p", "expires_date": 7})),
+            ("expires_date", _entitlement_payload(_BAD_DATE)),
+            ("expires_date_naive", _entitlement_payload({"product_identifier": "p", "expires_date": "2026-06-01T00:00:00"})),
+        ]
+        for expected, payload in cases:
+            with self.subTest(expected=expected, payload=payload):
+                self.assertEqual(await self._detail(payload), expected)

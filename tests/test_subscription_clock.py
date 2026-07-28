@@ -227,15 +227,15 @@ def _revenuecat(payload=None, status_code: int = 200, bad_json: bool = False):
 def _entitlement(expires: str | None, present: bool = True):
     """RevenueCat 응답 fixture.
 
-    ⚠️ lifetime은 `premium`이 **truthy이면서** `expires_date`가 없는 경우다.
-    빈 dict를 쓰면 `if not premium`에 걸려 "구독 없음" 분기로 가버려, lifetime 테스트와
-    no-entitlement 테스트가 **같은 경로를 보게 된다**(초안이 그랬다 — 테스트가 잡았다).
+    ⚠️ lifetime은 `expires_date`가 **명시적 `null`**인 경우다(키 누락이 아니다).
+    RevenueCat API v1 `GET /subscribers` 응답 예시가 그 형태다 —
+    `{"pro_cat": {"expires_date": null, "product_identifier": "onetime", ...}}`.
+    2026-07-28 malformed-200 hardening(§8.1 A4-1) 전에는 **키 누락도** lifetime으로 통과했고,
+    이 fixture가 그 형태였다. 키 누락은 이제 `ProtocolViolation`이므로 명시적 null로 바꾼다.
     """
     if not present:
         return {"subscriber": {"entitlements": {}}}
-    premium = {"product_identifier": "premium_yearly"}
-    if expires:
-        premium["expires_date"] = expires
+    premium = {"product_identifier": "premium_yearly", "expires_date": expires}
     return {"subscriber": {"entitlements": {"premium": premium}}}
 
 

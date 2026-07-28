@@ -193,6 +193,12 @@ _TRANSIENT_STATUSES = frozenset({408, 429})
 _MISCONFIGURED_STATUSES = frozenset({401, 403})
 
 
+def _shape_violation(user_id: str, field: str) -> "ProtocolViolation":
+    """응답 형식 위반을 한 곳에서 로깅·분류한다. `field`가 곧 위반 지점이다."""
+    logger.warning("RevenueCat 응답 형식 오류", extra={"user_id": user_id, "field": field})
+    return ProtocolViolation(detail=field)
+
+
 async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatResult:
     """RevenueCat 조회 결과를 **분류해서** 돌려준다 (ADR-039 §8.1 A4-1).
 
@@ -241,29 +247,54 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
             logger.warning("RevenueCat API JSON 파싱 실패", extra={"user_id": user_id})
             return ProtocolViolation(detail="json")
 
-        # 응답 **형식**이 계약을 벗어난 경우 — dict가 아닌 body, 문자열 entitlements 등.
-        # 누락 키의 `{}` 기본값 의미는 그대로 두고(= 구독 없음), **타입이 틀린 경우만** 위반으로 본다.
-        try:
-            entitlements = data.get("subscriber", {}).get("entitlements", {})
-            premium = entitlements.get("premium")
-            expires = premium.get("expires_date") if premium else None
-        except (AttributeError, TypeError) as e:
-            logger.warning(
-                "RevenueCat 응답 형식 오류", extra={"user_id": user_id, "error": str(e)}
-            )
-            return ProtocolViolation(detail="shape")
+        # ── 응답 형식 검증 (§8.1 A4-1) ─────────────────────────────────────────
+        # 규칙과 1:1 대응하도록 **명시적으로** 검사한다. 구 코드는 누락 키를 `{}`로 접고
+        # truthiness로 분기해 malformed를 authoritative로 통과시켰다.
+        #
+        # ⚠️ 왜 중요한가(실측): stale 캐시를 가진 **유료 사용자**에게
+        #   - 503 장애가 오면      → A4 stale fallback이 돌아 ACTIVE 유지 ✅
+        #   - malformed 200이 오면 → `should_cache=True`로 `False`가 덮어써져 **INACTIVE로 강등** ❌
+        # 즉 쓰레기 데이터가 진짜 장애보다 더 신뢰받고 있었다. malformed를 ProtocolViolation으로
+        # 돌려 `(False, False)` 경로에 태우면 **stale fallback이 복원**된다(A4 제거가 아니라 복원).
+        #
+        # 스키마 근거(RevenueCat API v1 `GET /subscribers` 응답 예시):
+        #   "entitlements": {"pro_cat": {"expires_date": null, "product_identifier": "onetime", ...}}
+        # → lifetime은 **키 누락이 아니라 명시적 `null`**이다. 따라서 키 누락은 계약 위반으로 본다.
+        if not isinstance(data, dict):
+            return _shape_violation(user_id, "body")
+        subscriber = data.get("subscriber")
+        if not isinstance(subscriber, dict):
+            return _shape_violation(user_id, "subscriber")
+        entitlements = subscriber.get("entitlements")
+        if not isinstance(entitlements, dict):
+            return _shape_violation(user_id, "entitlements")
 
-        if not premium:
-            return Determined(is_premium=False)  # 구독 없음 (정상 확인)
+        # 구독 없음의 정상 표현: `entitlements`에 premium 키가 **없다**.
+        if "premium" not in entitlements:
+            return Determined(is_premium=False)
 
-        if not expires:
-            # lifetime entitlement
-            return Determined(is_premium=True)
+        premium = entitlements["premium"]
+        if not isinstance(premium, dict) or not premium:
+            # null / [] / "yes" / 0 / **{}** — 전부 malformed entitlement 객체다.
+            # ⚠️ `{}`를 lifetime으로 읽으면 **빈 객체에 프리미엄이 부여**된다.
+            return _shape_violation(user_id, "premium")
+
+        if "expires_date" not in premium:
+            # 위 스키마상 lifetime도 키를 갖는다 → 누락은 위반.
+            # 운영에서 이게 뜨면 스키마 변경 신호이므로 detail을 구분해 남긴다.
+            return _shape_violation(user_id, "expires_date_missing")
+
+        expires = premium["expires_date"]
+        if expires is None:
+            return Determined(is_premium=True)  # lifetime (명시적 null)
+
+        if not isinstance(expires, str) or not expires:
+            # "" 또는 숫자 — 구 코드는 falsy라 **lifetime으로 통과**시켰다.
+            return _shape_violation(user_id, "expires_date_value")
 
         try:
             expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-        except (AttributeError, TypeError, ValueError):
-            # 문자열이 아니거나 형식이 틀림 — 둘 다 계약 위반이다.
+        except ValueError:
             # ⚠️ `except Exception`으로 넓히지 말 것: 프로그래밍 오류를 삼킨다.
             logger.warning("RevenueCat expires_date 파싱 실패", extra={"user_id": user_id})
             return ProtocolViolation(detail="expires_date")
