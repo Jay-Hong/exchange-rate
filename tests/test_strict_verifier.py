@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from app.strict_authz import Concern, InactiveReason
 from app.strict_cache import StrictObservationCache
+from app.strict_single_flight import StrictSingleFlight
 from app.subscription import (
     BadRequest,
     Determined,
@@ -77,6 +78,7 @@ def _run(**overrides):
         cache=StrictObservationCache(),
         premium_provider=_Provider(Determined(is_premium=True)),
         identity_provider=_Provider(IdentityFound(disabled=False, tokens_valid_after_ms=WATERMARK_MS)),
+        single_flight=StrictSingleFlight(),
     )
     kwargs.update(overrides)
     return asyncio.run(verify_strict(**kwargs)), kwargs

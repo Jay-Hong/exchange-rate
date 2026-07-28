@@ -90,6 +90,12 @@ MAX_CONTENTION_RETRIES = 3
 _ITERATION_BACKSTOP = 2 * (MAX_CONTENTION_RETRIES + 2) + 4
 
 # **한 요청 전체**의 시간 상한(§D6의 ack timeout 10초 아래). 호출별 상한이 아니다.
+#
+# 계약: **호출자는 이 시각에 반환한다.** shield된 공유 flight만 계속 돌아 뒤이은 요청이 그 결과를
+# 재사용한다. ⚠️ "이미 시작한 호출은 끝까지 기다려 답을 낸다"고 적었던 구 문구는 **거짓**이었다 —
+# 주입 시계만 전진하는 fake clock 테스트에서 나온 결론이라 event loop 시간이 안 흘러 `wait_for`가
+# 발화하지 않았다. 실제 시간 재측정: 비용 40ms × 3회 / 상한 100ms → **101ms에
+# `TemporarilyUnavailable`**(구 표는 `VerifiedActive`라고 했다).
 # ⚠️ 구 주석은 "호출 2번이니 4초×2=8초"라고 적었는데 **틀렸다** — 무효화 경쟁이 끼면 같은
 # concern을 다시 조회하므로 호출이 3회 이상 될 수 있다. 실측(축소): 호출별 60ms 상한인데
 # 전체 154ms / 조회 3회. 그래서 호출별이 아니라 **절대 monotonic deadline**으로 잡는다.
@@ -253,7 +259,7 @@ async def verify_strict(
     cache: StrictObservationCache,
     premium_provider,
     identity_provider,
-    single_flight=None,
+    single_flight,
 ) -> StrictVerification:
     """관측이 부족하면 authority에 물어 채운 뒤 3-state를 돌려준다.
 
@@ -359,17 +365,15 @@ async def verify_strict(
         if remaining <= 0:
             # ⚠️ 이 명시 검사는 **오늘 기준 중복**이다 — 아래 `wait_for`에 음수 timeout이 가도
             # 같은 결과가 나오고 provider 호출도 늘지 않는다(실측: 둘 다 `calls=ii`).
+            # (그 실측도 fake clock 조건이었다 — 실제 시간에서는 `wait_for`가 먼저 발화한다.)
             # 그래도 남긴다: `wait_for(timeout<=0)`의 거동에 의존하지 않고 의도를 코드로 드러내기
             # 위해서다. 필요하다고 주장하지는 않는다(mutation 생존을 인정한다).
             return TemporarilyUnavailable(concern=concern)
         try:
-            if single_flight is None:
-                flight_outcome = await asyncio.wait_for(_fetch_and_store(), timeout=remaining)
-            else:
-                flight_outcome = await asyncio.wait_for(
-                    single_flight.run((uid, snapshot.epoch, concern), _fetch_and_store),
-                    timeout=remaining,
-                )
+            flight_outcome = await asyncio.wait_for(
+                single_flight.run((uid, snapshot.epoch, concern), _fetch_and_store),
+                timeout=remaining,
+            )
         except asyncio.TimeoutError:
             # 호출자만 포기한다. flight는 계속 돌며 슬롯을 쥐고 있으므로 작업이 곱해지지 않는다.
             return TemporarilyUnavailable(concern=concern)

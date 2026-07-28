@@ -457,54 +457,66 @@ class TestUncancellableWorkDoesNotMultiply(unittest.IsolatedAsyncioTestCase):
 class TestWholeRequestDeadline(unittest.IsolatedAsyncioTestCase):
     """⛔ 회귀 잠금 — 상한은 **호출별이 아니라 요청 전체**여야 한다.
 
-    무효화 경쟁이 끼면 같은 concern을 다시 조회하므로 호출이 3회 이상 될 수 있다.
-    실측(수정 전): 호출별 60ms 상한인데 전체 154ms / 조회 3회 — `2 × 상한`이라는 가정이 틀렸다.
+    ## deadline의 의미 (실제 시간으로 재측정해 **정정**)
 
-    ## deadline의 의미 (실측으로 확정)
+    **호출자는 전체 deadline에 반환한다.** shield된 공유 flight만 계속 돌아, 뒤이은 요청이 그
+    결과를 재사용한다.
 
-    deadline은 **새 호출을 시작할지**를 가른다. 이미 시작한 호출은 끝나서 답을 낸다 —
-    다 된 판정을 상한 초과를 이유로 버리는 건 손해다. 그래서 최종 경과가 상한을 조금 넘을 수 있다.
+    ⚠️ 구 버전은 주입 시계만 전진시키는 fake clock을 썼다. 그러면 event loop 시간이 안 흘러
+    `wait_for`가 **발화하지 않고**, 루프 상단의 명시 검사만 남는다. 그 인공 세계에서 나온 표로
+    "이미 시작한 호출은 끝까지 기다려 답을 낸다"고 적었는데 **거짓**이었다. 실제 시간 재측정:
 
-    ⚠️ 벽시계 창(`elapsed < 0.4s`)으로 재던 구 단언은 상한 80ms 대비 **5배 초과까지 통과**했다.
-    주입 시계를 수동 전진시켜 (호출 비용, 상한) → (결과, 호출 횟수)를 결정론적으로 고정한다.
+        비용/상한      구 fake-clock 표          실제 시간
+        10ms/100ms    VerifiedActive  iip      VerifiedActive          iip   34ms
+        40ms/100ms    VerifiedActive  iip   →  **TemporarilyUnavailable iip  101ms**
+        60ms/100ms    TemporarilyUnav ii       TemporarilyUnavailable  ii   101ms
+        60ms/ 50ms    TemporarilyUnav i        TemporarilyUnavailable  i     51ms
+
+    그래서 이 테스트는 provider가 **실제로** 시간을 쓰고 주입 시계도 `time.monotonic`이다 —
+    production과 두 시계가 일치하는 조건에서만 계약이 검증된다.
     """
 
     async def _run(self, cost_per_call, deadline):
         cache, flight = StrictObservationCache(), StrictSingleFlight()
-        clock = _SteppingClock()
         calls = []
 
         async def identity(uid):
             calls.append("i")
             if len(calls) == 1:
                 cache.bump(uid)          # 첫 조회 중 무효화 → 재조회 유발
-            clock.advance(cost_per_call)
+            await asyncio.sleep(cost_per_call)
             return IdentityFound(disabled=False, tokens_valid_after_ms=WATERMARK_MS)
 
         async def premium(uid):
             calls.append("p")
-            clock.advance(cost_per_call)
+            await asyncio.sleep(cost_per_call)
             return Determined(is_premium=True)
 
+        started = time.monotonic()
         with patch("app.strict_verifier.VERIFY_DEADLINE_SECONDS", deadline):
-            result = await verify_strict(UID, token_iat_seconds=IAT, clock=clock, cache=cache,
+            result = await verify_strict(UID, token_iat_seconds=IAT, clock=_RealClock(), cache=cache,
                                          premium_provider=premium, identity_provider=identity,
                                          single_flight=flight)
-        return result, "".join(calls)
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(cost_per_call * 1.5)   # 배경 flight 정리
+        return result, "".join(calls), elapsed, flight
 
-    async def test_deadline_bounds_how_many_calls_may_start(self):
-        table = [
-            # (호출 비용, 상한, 기대 결과, 기대 호출열)
-            (0.01, 0.10, VerifiedActive, "iip"),          # 여유 → 경쟁 재조회까지 완주
-            (0.04, 0.10, VerifiedActive, "iip"),          # 3회째가 상한을 넘겨 끝나도 답은 낸다
-            (0.06, 0.10, TemporarilyUnavailable, "ii"),   # 3회째를 **시작하지 못한다**
-            (0.06, 0.05, TemporarilyUnavailable, "i"),    # 2회째를 시작하지 못한다
-        ]
-        for cost, deadline, expected_type, expected_calls in table:
+    async def test_caller_returns_at_the_deadline(self):
+        for cost, deadline, expected_type, expected_calls in (
+            (0.01, 0.10, VerifiedActive, "iip"),          # 여유 → 완주
+            (0.04, 0.10, TemporarilyUnavailable, "iip"),  # ⛔ 구 표가 Active라고 했던 행
+            (0.06, 0.10, TemporarilyUnavailable, "ii"),
+            (0.06, 0.05, TemporarilyUnavailable, "i"),
+        ):
             with self.subTest(cost=cost, deadline=deadline):
-                result, calls = await self._run(cost, deadline)
+                result, calls, elapsed, flight = await self._run(cost, deadline)
                 self.assertIsInstance(result, expected_type)
                 self.assertEqual(calls, expected_calls)
+                self.assertLess(elapsed, deadline * 2, f"deadline을 크게 넘겼다: {elapsed:.3f}s")
+                if expected_type is TemporarilyUnavailable:
+                    # 일찍 포기한 게 아니라 **deadline까지 기다렸다가** 반환했음을 잠근다.
+                    self.assertGreaterEqual(elapsed, deadline * 0.8)
+                self.assertEqual(flight.in_flight_count(), 0, "배경 flight가 슬롯을 안 놨다")
 
 
 class TestFlightCancellationIsFoldedIntoThreeState(unittest.IsolatedAsyncioTestCase):
@@ -595,6 +607,24 @@ class TestConfigErrorInstancesAreNotShared(unittest.IsolatedAsyncioTestCase):
             with self.subTest(kind=expected_kind.value):
                 results = await self._gather_config_errors(provider_result, n=3)
                 self.assertEqual({r.kind for r in results}, {expected_kind})
+
+
+class TestSingleFlightInjectionIsFailClosed(unittest.TestCase):
+    """⛔ `single_flight`에 기본값을 두면 배선에서 한 번 빠뜨렸을 때 **조용히 비활성**된다.
+
+    그러면 호출자 쪽 `wait_for`가 `to_thread` 코루틴만 취소하고 실제 스레드는 남아, 다음 요청이
+    새 작업을 시작한다 — 앞서 닫은 "작업 곱하기"가 그대로 재발한다. 소비자가 0인 지금 필수 인자로
+    두는 게 안전하다.
+
+    ⚠️ 모든 테스트가 인자를 명시로 넘기므로, 이 성질은 **시그니처를 직접 봐야** 잠긴다
+    (기본값을 되살리는 mutation이 그 전까지 생존했다).
+    """
+
+    def test_single_flight_has_no_default(self):
+        import inspect
+
+        param = inspect.signature(verify_strict).parameters["single_flight"]
+        self.assertIs(param.default, inspect.Parameter.empty, "기본값이 생기면 조용히 비활성된다")
 
 
 class TestVerifierIntegration(unittest.IsolatedAsyncioTestCase):
