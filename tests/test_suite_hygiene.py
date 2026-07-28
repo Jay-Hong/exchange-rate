@@ -37,9 +37,11 @@ _TESTS_DIR = pathlib.Path(__file__).resolve().parent
 
 # guard 본문이 이걸 호출하면 **그 지점에서 스위트가 확정된다**(또는 프로세스가 끝난다).
 # `unittest.main`은 `exit=` 값과 무관하게 포함한다 — 실측상 `exit=False`도 위험하기 때문이다.
-_TERMINAL_CALLS = frozenset({
+_SUITE_RUNNERS = frozenset({
     ("unittest", "main"),
     ("main",),          # `from unittest import main`
+})
+_TERMINAL_CALLS = _SUITE_RUNNERS | frozenset({
     ("sys", "exit"),
     ("exit",),
     ("os", "_exit"),
@@ -59,12 +61,57 @@ def _dotted_call_name(node: ast.Call) -> tuple[str, ...] | None:
     return tuple(reversed(parts))
 
 
+_CONDITIONAL_STMTS = (
+    ast.If, ast.Try, ast.For, ast.While, ast.With, ast.AsyncFor, ast.AsyncWith,
+)
+
+
 def _is_terminal_guard(guard: ast.If) -> bool:
-    """이 guard가 실행되면 뒤의 정의가 스위트에 못 들어가는가."""
-    for node in ast.walk(guard):
-        if isinstance(node, ast.Call) and _dotted_call_name(node) in _TERMINAL_CALLS:
-            return True
+    """이 guard가 실행되면 뒤의 정의가 스위트에 못 들어가는가.
+
+    ⚠️ guard 본문의 **직속 문장만** 본다. 조건부 안에 있는 호출은 실행된다는 보장이 없어
+    terminal이 아니다 — `ast.walk`로 통째로 뒤지면 아래 같은 **정상 코드가 오탐**된다
+    (실측: 3개 정의 전부 실행되는데 검출기는 위반이라고 했다):
+
+        if __name__ == "__main__":
+            try:
+                import json          # 항상 성공 → exit 분기는 실행되지 않는다
+            except ImportError:
+                sys.exit("needs json")
+    """
+    for stmt in guard.body:
+        if isinstance(stmt, _CONDITIONAL_STMTS):
+            continue
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _dotted_call_name(node) in _TERMINAL_CALLS:
+                return True
     return False
+
+
+def _outermost_definitions_after(stmts, anchor_lineno: int, out: list[str]) -> None:
+    """앵커 뒤의 **가장 바깥** 클래스/함수 정의를 모은다 (중첩 포함, 메서드는 제외).
+
+    ⚠️ `tree.body`만 훑으면 안 된다 — 뒤에 덧붙인 클래스를 `if`로 감싸면 `tree.body`의
+    원소가 `ClassDef`가 아니라 `If`라서 **보이지 않는다**. 실측: 아래는 3개 중 1개만
+    실행되는데(`Ran 1 test`) top-level 스캔은 위반 0을 반환했다.
+
+        if __name__ == "__main__":
+            unittest.main()
+
+        if sys.version_info >= (3, 10):
+            class TestNestedAfterGuard(unittest.TestCase): ...
+    """
+    for node in stmts:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.lineno > anchor_lineno:
+                out.append(node.name)
+            continue  # 메서드까지 보고하지 않는다
+        for field in ("body", "orelse", "finalbody"):
+            branch = getattr(node, field, None)
+            if isinstance(branch, list):
+                _outermost_definitions_after(branch, anchor_lineno, out)
+        for handler in getattr(node, "handlers", None) or []:
+            _outermost_definitions_after(handler.body, anchor_lineno, out)
 
 
 def _terminal_guards(tree: ast.Module) -> list[ast.If]:
@@ -79,22 +126,63 @@ def _terminal_guards(tree: ast.Module) -> list[ast.If]:
 
 
 def _definitions_after_main_guard(source: str) -> list[str]:
-    """**첫** terminal guard 뒤에 정의된 top-level 클래스/함수 이름.
+    """**첫** terminal guard 뒤에 남아 있는 것 — 이름을 알 수 있으면 이름, 아니면 종류.
 
     ⚠️ 앵커는 **첫** guard다(마지막이 아니다). 마지막을 앵커로 삼으면 "guard → 클래스 →
     guard" 배치에서 결과가 `[]`가 되어 **결함을 그대로 통과시킨다**(2026-07-28 실측).
+
+    ⚠️ 판정 대상은 "정의"가 아니라 **문장 전부**다. 정의만 보면 아래를 놓친다(실측 Ran 1/3):
+
+        if __name__ == "__main__":
+            unittest.main()
+
+        TestHost.test_appended = lambda self: None   # ast.Assign — 정의가 아니다
+
+    terminal guard 뒤에는 아무 문장도 없어야 한다. 이 규칙은 단순하고, 위반은 guard를
+    끝으로 옮기는 것으로 항상 해소된다.
     """
     tree = ast.parse(source)
     terminal = _terminal_guards(tree)
     if not terminal:
         return []
-    anchor = terminal[0]
-    return [
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.lineno > anchor.lineno
-    ]
+    anchor = terminal[0].lineno
+    offenders: list[str] = []
+    for node in tree.body:
+        if node.lineno <= anchor:
+            continue
+        named: list[str] = []
+        _outermost_definitions_after([node], anchor, named)
+        offenders.extend(named or [f"{type(node).__name__} at line {node.lineno}"])
+    return offenders
+
+
+def _unguarded_suite_runners(source: str) -> list[int]:
+    """guard **밖**에서 스위트를 돌리는 module-level 호출의 줄 번호.
+
+    `unittest.main(module=__name__, exit=False, argv=[...])`을 guard 없이 파일 중간에 두면
+    pytest가 import하는 것만으로 스위트가 돌고, 그 아래 정의는 직접 실행에서 누락된다
+    (실측 Ran 1 / 정의 3). 테스트 파일에서 이 형태는 언제나 결함이다.
+
+    ⚠️ 클래스/함수 **안으로는 내려가지 않는다**. 메서드 본문의 호출은 import 시점에 실행되지
+    않기 때문이다. 이걸 빠뜨리면 스크립트 자체의 `main()`을 호출하는 평범한 테스트가 오탐된다
+    — 실측으로 `test_krx_baseline_extract.py`, `test_observe_kis_master.py`,
+    `test_usdt_ws_baseline_extract.py` 3개가 걸렸고, 셋 다 `TestMain*` 클래스 안에서
+    각 스크립트의 `main(...)`을 부르는 정상 코드였다.
+    """
+    tree = ast.parse(source)
+    lines: list[int] = []
+    for node in tree.body:
+        if isinstance(node, ast.If) and "__main__" in ast.dump(node.test):
+            continue
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if isinstance(node, _CONDITIONAL_STMTS):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and _dotted_call_name(sub) in _SUITE_RUNNERS:
+                lines.append(node.lineno)
+                break
+    return lines
 
 
 def _extra_terminal_guards(source: str) -> int:
@@ -155,7 +243,10 @@ class TestNoDefinitionsAfterMainGuard(unittest.TestCase):
             + "\nclass TestHiddenByTrailingGuard(unittest.TestCase):\n    pass\n\n"
             + _GUARD
         )
-        self.assertEqual(_definitions_after_main_guard(hidden), ["TestHiddenByTrailingGuard"])
+        self.assertEqual(
+            _definitions_after_main_guard(hidden),
+            ["TestHiddenByTrailingGuard", "If at line 8"],  # 뒤따르는 guard 자체도 잔여 문장이다
+        )
         self.assertEqual(_extra_terminal_guards(hidden), 1)
 
     def test_exit_false_is_still_terminal(self):
@@ -176,6 +267,73 @@ class TestNoDefinitionsAfterMainGuard(unittest.TestCase):
         )
         self.assertEqual(_definitions_after_main_guard(src), [])
         self.assertEqual(_extra_terminal_guards(src), 0)
+
+    def test_definitions_nested_in_a_conditional_are_still_caught(self):
+        """⛔ 회귀 잠금 — top-level 스캔만 하면 놓치던 배치(실측 Ran 1 / 정의 3)."""
+        src = (
+            "import sys\nimport unittest\n"
+            + _GUARD
+            + "\nif sys.version_info >= (3, 10):\n"
+            "    class TestNestedAfterGuard(unittest.TestCase):\n        pass\n"
+        )
+        self.assertEqual(_definitions_after_main_guard(src), ["TestNestedAfterGuard"])
+
+    def test_conditional_exit_inside_guard_is_not_terminal(self):
+        """⛔ 오탐 잠금 — 실행되지 않는 분기의 `sys.exit`(실측 Ran 3 / 정의 3 = 안전)."""
+        src = (
+            "import sys\nimport unittest\n"
+            'if __name__ == "__main__":\n'
+            "    try:\n        import json\n    except ImportError:\n"
+            '        sys.exit("needs json")\n'
+            "\nclass TestAfter(unittest.TestCase):\n    pass\n" + _GUARD
+        )
+        self.assertEqual(_definitions_after_main_guard(src), [])
+        self.assertEqual(_extra_terminal_guards(src), 0)
+
+    def test_methods_are_not_reported_as_offenders(self):
+        """보고 단위는 **가장 바깥** 정의다 — 메서드까지 나열하면 메시지가 소음이 된다."""
+        src = (
+            "import unittest\n"
+            + _GUARD
+            + "\nclass TestAfter(unittest.TestCase):\n"
+            "    def test_one(self):\n        pass\n"
+            "    def test_two(self):\n        pass\n"
+        )
+        self.assertEqual(_definitions_after_main_guard(src), ["TestAfter"])
+
+    def test_statements_appended_after_guard_are_caught(self):
+        """⛔ 회귀 잠금 — 정의가 아닌 문장으로 테스트를 덧붙이는 형태(실측 Ran 1 / 정의 3)."""
+        src = (
+            "import unittest\n"
+            "class TestHost(unittest.TestCase):\n    pass\n"
+            + _GUARD
+            + "\nTestHost.test_appended = lambda self: None\n"
+        )
+        self.assertEqual(_definitions_after_main_guard(src), ["Assign at line 7"])
+
+    def test_no_module_runs_the_suite_outside_a_guard(self):
+        offenders = {
+            path.name: lines
+            for path in sorted(_TESTS_DIR.glob("test_*.py"))
+            if (lines := _unguarded_suite_runners(path.read_text(encoding="utf-8")))
+        }
+        self.assertEqual(offenders, {}, "guard 밖 `unittest.main()`은 import만으로 스위트를 돌린다")
+
+    def test_unguarded_runner_detector_is_not_vacuous(self):
+        """positive/negative control."""
+        bad = "import unittest\nunittest.main(exit=False)\nclass T(unittest.TestCase):\n    pass\n"
+        self.assertEqual(_unguarded_suite_runners(bad), [2])
+        self.assertEqual(_unguarded_suite_runners("import unittest\n" + _GUARD), [])
+
+    def test_call_inside_a_method_is_not_module_level(self):
+        """⛔ 오탐 잠금 — 스크립트 자체의 `main()`을 부르는 평범한 테스트(실측 3개 파일이 걸렸다)."""
+        src = (
+            "import unittest\n"
+            "from mymod import main\n"
+            "class TestMain(unittest.TestCase):\n"
+            "    def test_runs(self):\n        main(['--flag'])\n" + _GUARD
+        )
+        self.assertEqual(_unguarded_suite_runners(src), [])
 
     def test_bare_imported_main_counts(self):
         """`from unittest import main` 형태도 앵커다 — 이름만 다르고 위험은 같다."""
