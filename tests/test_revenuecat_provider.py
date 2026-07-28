@@ -8,7 +8,8 @@ JSON 파싱 실패(계약 위반) / `expires_date` 파싱 실패 / 4xx·5xx 일�
 `except Exception`(transient ⊎ programming). strict WS 인가 경로가 이걸 그대로 소비하면
 §8.1 A6의 3-bucket 계약(terminal / transient / 내부 예외)이 즉시 깨진다.
 
-그래서 **아래에 typed provider를 두고 REST adapter가 기존 동작을 그대로 되접는다.**
+그래서 **아래에 typed provider를 두고 REST adapter가 되접는다** — 예외·전송·HTTP 상태
+경로는 구 동작 그대로이고, **malformed 200만 §8.1 A4-1 hardening에서 의도적으로 바꿨다**.
 이 파일의 표는 리팩터 *이전*에 작성해 **현행 코드에 21건 전수 대조**한 뒤 시작했다 —
 기대값을 내 독해가 아니라 실행 결과로 확정하기 위해서다(실제로 초안의 lifetime 기대값이 틀렸다).
 
@@ -152,10 +153,16 @@ SCENARIOS = [
 
 
 class TestLegacyTupleCharacterization(unittest.IsolatedAsyncioTestCase):
-    """리팩터 전후로 `(is_premium, should_cache)`가 **한 비트도** 달라지지 않아야 한다.
+    """`(is_premium, should_cache)` 매핑을 표로 잠근다.
 
     ⚠️ 이 표에서 `(False, False)` 행이 여러 개인 것이 **핵심**이다 — typed provider가 내부적으로
-    5가지로 구분해도 REST가 보는 결과는 전부 동일해야 한다.
+    5가지로 구분해도 **REST가 보는 결과는 하나로 합쳐진다**.
+
+    ⚠️ **"리팩터 전후 불변"은 이제 전 행에 대해 참이 아니다.** 이름의 characterization은 이 표의
+    *출발점*을 가리킨다 — 리팩터 전 현행 코드에 21건을 전수 대조해 기대값을 실측으로 확정했다.
+    이후 §8.1 A4-1 hardening에서 **malformed 200 행의 기대값은 승인 아래 의도적으로 바뀌었고**,
+    바뀐 행의 근거는 `TestMalformedIsNotAuthoritative`가 따로 잠근다.
+    불변인 것: **정상·예외·전송·HTTP 상태 경로**의 REST 결과.
     """
 
     async def test_each_scenario_preserves_legacy_tuple(self):
@@ -218,7 +225,8 @@ class TestTypedResult(unittest.IsolatedAsyncioTestCase):
     async def test_429_is_not_misconfigured(self):
         """rate limit을 config 오류로 접으면 **영구 포기 + 허위 알람**이 된다.
 
-        "4xx 대 5xx"로만 나누는 mutation을 잡는 유일한 단언 계열이다.
+        "4xx 대 5xx"로만 나누는 mutation은 이 테스트와 시나리오 표의 429 행이 함께 잡는다
+        (무력화 시 2건 red).
         """
         with _patch_http(_FakeResponse(429)), patch.object(subscription, "REVENUECAT_API_KEY", "k"):
             got = await fetch_revenuecat_result("u", clock=_clock())

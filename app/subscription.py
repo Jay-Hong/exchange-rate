@@ -332,10 +332,15 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
 
 
 def _result_to_legacy_tuple(result: RevenueCatResult) -> tuple[bool, bool]:
-    """REST adapter — typed 결과를 기존 `(is_premium, should_cache)`로 **그대로** 되접는다.
+    """REST adapter — typed 결과를 `(is_premium, should_cache)`로 되접는 **단일 지점**.
 
     `Determined`만 `should_cache=True`이고 나머지 4변종은 전부 `(False, False)`다.
-    구분력은 strict(N-3)가 쓰고, **REST의 관측 가능한 동작은 한 비트도 바뀌지 않는다**(A4).
+    구분력은 strict(N-3)가 쓴다.
+
+    ⚠️ **범위**: 이 매핑으로 **예외·전송·HTTP 상태 경로의 REST 동작은 구 코드와 동일**하다.
+    반면 **malformed 200의 분류는 §8.1 A4-1 hardening에서 의도적으로 바꿨다**
+    (구 `(False, True)`/`(True, True)` → 신 `(False, False)`).
+    ⛔ 따라서 "REST 동작이 한 비트도 바뀌지 않는다"고 적지 말 것 — 더는 사실이 아니다.
     """
     if isinstance(result, Determined):
         return (result.is_premium, True)
@@ -346,8 +351,12 @@ async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[
     """
     RevenueCat REST API로 구독 상태 확인 (Async)
     Returns: (is_premium, should_cache)
-      - should_cache=True: 정상 응답, 캐시해도 안전
-      - should_cache=False: 일시적 오류, 캐시하면 유료 사용자 차단 위험
+      - should_cache=True: **authoritative 판정**(200 파싱 성공 / 404=신규 사용자), 캐시해도 안전
+      - should_cache=False: **판정을 신뢰할 수 없음** — 일시 장애(408·429·5xx·전송) / 설정 오류
+        (401·403·API key 미설정) / 응답 형식 위반 / 400 / 예상 밖 내부 예외.
+        캐시하면 유료 사용자 차단 위험이라 stale fallback·PENDING 경로로 보낸다.
+        ⚠️ 구 docstring은 이걸 "일시적 오류"로만 적었는데, 지금은 성격이 다른 5개 부류를 포함한다
+        (그 구분은 `fetch_revenuecat_result`의 typed 결과가 갖고 있고 strict가 쓴다).
 
     ⚠️ 이 함수는 **REST 전용 adapter**로 남는다. `tests/test_subscription_clock.py`가
     `patch.object(subscription, "_check_revenuecat_entitlement", ...)`로 이 이름을 잡으므로
