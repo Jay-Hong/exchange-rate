@@ -470,11 +470,15 @@ class TopicLeaseRegistry:
                 # ⚠️ 호출자가 아직 안 닫았을 수 있으므로 **종단 결과**로 답한다(close 재촉).
                 return self._terminate_locked(ws, "connection_closed")
 
-            # §C1 — 바인딩 UID != 토큰 UID면 **그 ws의 기존 구독 전부 제거** 후 재바인딩
-            # (§C1). 거부가 아니다: 거부하면 A의 구독이 B의 소켓에서 계속 살아 있고,
-            # §D2가 `removed_topics`의 producer로 명시한 "C1의 UID purge"가 성립하지 않는다.
+            # §C1 — 한 소켓은 **평생 한 UID**다. 바인딩 UID != 토큰 UID면 **tombstone 후 종료**한다.
+            # ⛔ 단순 거부로 연결을 살려 두면 안 된다 — 구 UID 데이터가 계속 전송될 수 있다.
+            # ⛔ 구 규칙(purge + rebind)은 **폐기**됐다(B5(d) 결정): purge는 *적용하기로 한* 전이의
+            #    의미만 정하고 *적용할지*는 정하지 않아, 지연 도착한 구 UID subscribe(C4 retry,
+            #    구 토큰은 아직 유효)가 새 UID의 구독을 purge하고 되돌려 놓을 수 있었다 —
+            #    거부 정책이면 무해했을 요청이 purge에서는 **파괴적**이었다.
             bound = self._uids.get(ws)
-            purge = bound is not None and bound != uid
+            if bound is not None and bound != uid:
+                return self._terminate_locked(ws, "reconnect_required")
 
             # ── 전이 계획을 **발급보다 먼저** 확정한다 ─────────────────────────────
             # ⛔ 순서가 중요하다. 구 버전은 만료 horizon에서 여기 오기 전에 early return 해서
@@ -482,12 +486,10 @@ class TopicLeaseRegistry:
             #    rejected 있음)에서 거부된 topic이 그대로 살아남고, cross-UID에서는 B의 소켓이
             #    A의 lease로 계속 인가됐다(§C1 "검증 성공 즉시 A의 구독 제거" 위반).
             current = self._active.get(ws, {})
-            if purge:
-                departing = set(current)                       # §C1 — 전부 걷어 낸다
-            else:
-                # §C2 — 거부된 topic 중 **실제로 활성이던 것**만 제거 대상이다.
-                # 언급되지 않은 topic은 불변(§C2, 증분 subscribe 보존).
-                departing = {t for t in rejected_topics if t in current}
+            # §C2 — 거부된 topic 중 **실제로 활성이던 것**만 제거 대상이다.
+            # 언급되지 않은 topic은 불변(§C2, 증분 subscribe 보존).
+            # ⚠️ B5(d) 결정 이후 이것이 `removed`의 **유일한** producer다(§C1 purge 폐기).
+            departing = {t for t in rejected_topics if t in current}
             # ⛔ **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다.** 되돌아가려면 그만큼의
             #    접근이 계속 살아 있어야 하는데, 그게 정확히 §C1/§C2가 막으려는 상태다.
             #    중단 경로마다 부분 커밋 규칙을 만드는 대신 tombstone **하나로** 접근을 0으로
@@ -538,9 +540,11 @@ class TopicLeaseRegistry:
                 surviving = {t: l for t, l in current.items() if t not in departing}
                 final = dict(surviving)
                 final.update(new_leases)
-                # 같은 요청이 다시 잡은 topic은 제거가 아니라 **교체**다.
-                removed = tuple(sorted(t for t in departing if t not in new_leases))
-                generation = self._next_generation_locked(ws, bound=bound, uid=uid)
+                # ⚠️ `departing ∩ new_leases`는 공집합이다 — `departing ⊆ rejected_topics`이고
+                #    accepted∩rejected는 입력에서 거부되기 때문이다. purge 시절엔 "다시 잡은
+                #    topic은 교체"라는 필터가 필요했지만 그 producer가 사라져 **죽은 분기**가 됐다.
+                removed = tuple(sorted(departing))
+                generation = self._next_generation_locked(ws, bound=bound)
 
                 # 1) 등록(비활성) — 전 topic 한꺼번에. 재확인이 **등록 이후**여야 그 사이 무효화를 본다.
                 pending = self._pending.setdefault(ws, {})
@@ -637,14 +641,16 @@ class TopicLeaseRegistry:
         self._closed.add(ws)
         return ConnectionTerminated(reason=reason)
 
-    def _next_generation_locked(self, ws, *, bound, uid) -> int:
-        """D2의 연결별 `identity_generation` — **같은 소켓의 UID 재바인딩만** 표현한다(§D2).
+    def _next_generation_locked(self, ws, *, bound) -> int:
+        """§D2의 연결별 `identity_generation`.
 
-        미바인딩 → 1(최초 바인딩) / 재바인딩 → +1 / 같은 UID 재인증 → **불변**.
-        ⚠️ 같은 UID 재인증에서 올리면 클라가 자기 상태를 불필요하게 버린다(재바인딩이 아니다).
+        미바인딩 → 1(최초 바인딩) / 이후 → **불변**.
+        ⚠️ B5(d) 결정으로 **재바인딩 자체가 불가능**해져(cross-UID는 연결 종료) 이 값은 바인딩
+        후 항상 1이다 — 정보를 싣지 않는다. schema에서 뺄지는 wire 슬라이스가 정한다.
+        구 구현의 `bound != uid` → +1 분기는 도달 불가라 제거했다(죽은 코드).
         """
         current = self._generations.get(ws, 0)
-        return current + 1 if (bound is None or bound != uid) else current
+        return current + 1 if bound is None else current
 
     def _build_ack_locked(self, *, uid, operation, generation, now_mono, new_leases,
                           removed, final) -> AckState:

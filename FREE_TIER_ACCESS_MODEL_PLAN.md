@@ -286,6 +286,7 @@
 ```json
 {"type":"subscription_error","request_id":"<uuid>","error":"invalid_token"}
 {"type":"subscription_error","request_id":"<uuid>","error":"temporarily_unavailable","retry_after_seconds":5}
+{"type":"subscription_error","request_id":"<uuid>","error":"reconnect_required"}
 ```
 
 **성공 ack** (subscribe/unsubscribe **공통**):
@@ -696,8 +697,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     - ⛔ **서버 관측 도착 순서로도 복원 불가**. 단일 WebSocket은 TCP 순서 보장이라 도착 역전이 없고,
       실제 실패 모드는 **클라가 stale intent를 나중에 보내는 것**(구 UID 요청의 지연 재시도)이다.
       서버는 그것을 최신 요청으로 볼 수밖에 없고, 구 UID의 토큰이 아직 유효하면 **검증으로도 거를 수 없다**.
-    - → **의도 순서는 클라만 안다**. 클라 소유의 identity generation(요청 구성 시점에 단조 증가)을 실어
-      보내거나, 서버가 **live 소켓의 cross-UID subscribe를 거부**하고 재연결을 요구한다(둘 중 택일, C1에서 결정).
+    - → **의도 순서는 클라만 안다**. ✅ **결정(2026-07-29): 후자 — 서버가 live 소켓의 cross-UID
+      subscribe를 거부하고 재연결을 요구한다**(C1 참조). 전자(클라 소유 generation)는 "subscribe마다
+      증가" 형태로는 **불완전**하다: C4 재시도가 새 generation을 받으면 stale 요청이 오히려 최신으로
+      보인다. 정확히 구현하려면 원래 identity intent의 generation을 재시도에서도 보존하고 `request_id`와
+      분리해야 해서 wire·상태기계·양 플랫폼 테스트 부담이 커진다.
       ⚠️ 클라 generation은 **적용 여부만** 정하고 **어떤 신원을 부여할지는 여전히 토큰 검증이 정한다** —
       권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
   - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 메시지 1건이
@@ -710,8 +714,21 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
 #### C. 상태 전이
 
-- **C1 연결당 UID 고정** — WebSocket 하나는 임의 시점에 **정확히 하나의 UID**에 바인딩된다.
-  - 미바인딩 → 바인딩 / 바인딩 UID == 토큰 UID → C2 증분 규칙 / 바인딩 UID != 토큰 UID → **그 ws의 기존 구독 전부 제거** 후 재바인딩.
+- **C1 연결당 UID 고정** — WebSocket 하나는 **평생 정확히 하나의 UID**에 바인딩된다.
+  - 미바인딩 → 바인딩 / 바인딩 UID == 토큰 UID → C2 증분 규칙 /
+    바인딩 UID != 토큰 UID → **tombstone + `reconnect_required` + 연결 종료**.
+  - ⛔ **live 소켓의 purge + rebind 규칙은 폐기됐다**(B5(d) 결정, 2026-07-29). 새 UID는
+    **새 연결에서만** 바인딩된다. 단순 거부로 연결을 살려 두는 것도 안 된다 — 구 UID 데이터가
+    계속 전송될 수 있으므로 tombstone 후 종료해야 한다.
+  - **근거**: purge는 *적용하기로 한* 전이의 의미만 정하고 *적용할지*는 정하지 않는다. B5(d)의
+    stale 요청 방어가 없으면 A→B 전환 뒤 지연 도착한 **구 UID subscribe**(C4 retry, A 토큰은
+    아직 유효)가 B의 구독을 purge하고 A로 재바인딩한다 — 거부 정책이면 무해했을 요청이
+    purge에서는 **파괴적**이다. 종료 정책에서는 stale 요청이 새 연결에 도착해도 cross-UID로
+    탐지돼 그 연결이 종료될 뿐, **상태를 되돌릴 수 없다**.
+  - **클라 측**: UID 직접 전환을 감지하면 오류 응답을 기다리지 말고 **선제적으로 재연결**한다.
+    desired topics는 유지하고 구 connection task만 폐기한 뒤 새 연결에서 다시 subscribe한다.
+  - ⛔ 아래 "처리 순서"·"제거는 reauth_required를 발신하지 않는다" 문단은 purge 정책의 잔재다 —
+    **폐기된 규칙의 세부**이므로 구현 근거로 쓰지 말 것(기록으로만 남긴다).
   - **처리 순서**: B 토큰 **검증 성공 즉시** A의 구독 제거 → 이후 B의 premium 확인이 실패해도 **A 구독을 복원하지 않는다**.
     반대로 **B 토큰 자체가 무효면 A의 유효 lease는 건드리지 않는다**.
   - 제거는 `reauth_required`를 발신하지 않는다(lease 만료가 아님). **대신 ack이 결과 전체를 실어 권위를 갖는다** —
@@ -721,13 +738,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **purge된 topic을 같은 요청이 다시 잡으면 `removed_topics`에 넣지 않는다** — 그건 제거가 아니라
     **교체**이고(새 `lease_id`), 한 topic을 `removed`와 `accepted`에 동시에 실으면 클라가 모순된 지시를 받는다.
     `active_subscriptions`가 새 `lease_id`로 이미 권위를 갖는다.
-  - ⛔ **미결(배선 진입 전 필수) — 이 purge는 B5(d)의 stale 요청 방어와 결합되어야 한다.**
-    purge는 *적용하기로 한* cross-UID 전이의 **의미**만 정하고, *적용할지*는 정하지 않는다.
-    방어가 없으면 A→B 전환 뒤 지연 도착한 **구 UID(A) subscribe**(C4 retry, A 토큰은 아직 유효)가
-    **B의 구독을 purge하고 A로 재바인딩**한다 — reject 정책이었다면 무해했을 요청이 purge에서는
-    **파괴적**이 된다. B5(d)의 "둘 중 택일"은 C1에서 결정된다고 적혀 있으나 **아직 결정되지 않았다**
-    (클라 소유 identity generation은 §8-B에 필드가 없다). registry는 이 전이를 그대로 구현했으므로,
-    **배선 슬라이스는 B5(d)를 닫기 전에 진입하면 안 된다.**
+  - ✅ **미결 해소(2026-07-29)**: purge 규칙을 폐기하고 **거부 + 재연결**로 확정했다(B5(d)).
+    구 미결 서술("purge는 적용 여부를 정하지 않는다")은 그 결정의 근거였고, 결정 내용은 위에 있다.
+
   - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS FXiApp.swift:124-126은 signedOut에서만 WS stop /
     AuthService listener의 account-switch window). 소켓이 살아 있는 채 UID만 바뀐다.
     그리고 이건 **서버 측 인가 경계**라 클라 teardown 가정에 기대면 안 된다.
@@ -814,8 +827,10 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    채 겹쳐 있던 fanout이 모두 떨어질 수 있다. "재인증 주기가 6~7분이니 topic당 최대 1 tick"은
    **성립하지 않는다**(주기는 교체 빈도를 정할 뿐 동시 캡처 수를 정하지 않는다). 상한이
    필요하면 배선 슬라이스가 발행 직렬화를 **별도 계약**으로 세울 것.
-7. **B5(d) stale 방어 파라미터** — 클라 소유 identity generation을 받든 reject 모드를 두든 **시그니처가 바뀐다**.
-   C1의 purge는 "적용하기로 한" 전이의 의미만 정하고 "적용할지"는 정하지 않는다(위 C1 미결 참조).
+7. ~~**B5(d) stale 방어 파라미터**~~ — **닫힘(결정으로 소멸)**. cross-UID를 **거부 + 재연결**로
+   확정해(C1) 파라미터 자체가 필요 없어졌다. 서버는 tombstone 후 `reconnect_required`를 보내고
+   연결을 종료하며, 새 UID는 새 연결에서만 바인딩된다.
+
 8. **ack의 per-topic 거부 사유** (§8-B/D2) — `operation`은 registry가 싣는다(D8과 함께 닫힘).
    남은 것은 `rejected_topics`의 사유 문자열로, 지금은 caller가 조립한다 — "lock 아래 단일 snapshot"이
    그만큼만 성립한다.
@@ -841,8 +856,10 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   구현이 갈린다). 여기서는 필드의 *의미*만 규정한다.
   - **`operation`**: `subscribe` | `unsubscribe`. 같은 schema를 쓰므로 구분자가 필요하다.
   - **`accepted_topics` / `rejected_topics` / `removed_topics` = 이번 요청의 결과.**
-    `removed_topics`의 producer는 **unsubscribe(D8)** 뿐 아니라 **C1의 UID purge**와 **C2의 reject eviction**도
-    포함한다(그래서 `operation: "subscribe"` 응답에도 값이 찰 수 있다).
+    `removed_topics`의 producer는 **unsubscribe(D8)** 와 **C2의 reject eviction**이다(후자 때문에
+    `operation: "subscribe"` 응답에도 값이 찰 수 있다).
+    ⛔ 구 문서는 "C1의 UID purge"도 producer로 들었는데, B5(d) 결정으로 **purge 규칙 자체가 폐기**돼
+    더는 producer가 아니다.
   - **`active_subscriptions` = 그 연결의 최종 상태 전체.** 문자열 목록이 아니라 topic별 `lease_id` + 남은
     `lease_duration_seconds`를 싣는다 — 문자열만으로는 **이번 요청에 없던 기존 topic의 lease 상태를 복구할 수 없어**,
     클라가 상태를 잃었거나 UID reset 후 수렴할 때 부족하다(= ack이 "권위 있는 상태"가 되지 못한다).
@@ -856,6 +873,8 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     ⚠️ **정수 generation을 topic별로 0부터 다시 세면 안 된다** — 제거 후 재구독 시 초기화돼 **과거
     `reauth_required`가 새 lease와 오인 일치**한다. 연결 수명 동안 **단조 증가하는 counter** 또는 opaque id를 쓴다.
   - **`identity_generation`(연결별)**: **같은 소켓에서의 UID 재바인딩만** 표현한다.
+    ⚠️ **B5(d) 결정으로 재바인딩이 불가능해져 이 값은 바인딩 후 항상 1이다** — 정보를 싣지 않는다.
+    schema 안정성을 위해 남길지 제거할지는 **wire 슬라이스에서 결정**한다(지금 단독으로 빼지 않는다).
     ⛔ **strict cache의 UID epoch을 그대로 실으면 안 된다.** 그 epoch은 **UID별**이고 최초 관측
     순서로 할당되므로, 먼저 관측된 UID가 더 작은 값을 갖는다 → A→B 재바인딩에서 generation이
     **감소**하고, G의 "구 `identity_generation` ack 무시"를 지키는 클라가 **유효한 새 ack을 버린다**
@@ -981,6 +1000,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | `request_id` UUID 형식 오류 | `invalid_request` |
   | `topics` 빈 목록 / 중복 정규화 후 빈 목록 | `invalid_request` (no-op 아님 — 조용한 실패 금지) |
   | 인증된 unsubscribe 성공·실패 | `subscription_ack` (D8, 동일 schema) |
+  | live 소켓의 cross-UID subscribe | `reconnect_required` (전체-요청) + **tombstone + 연결 종료**(C1) |
 
 #### E. 롤아웃·정책
 

@@ -413,14 +413,23 @@ class TestStaleClaimNeverBlocksANewLease(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, [])
         self.assertIsNotNone(registry.authorized_lease(ws, TOPIC, now_mono=EXPIRED_AT))
 
-    async def test_purged_topic_does_not_leave_a_blocking_claim(self):
-        """§C1 purge·§C2 eviction으로 사라진 topic의 claim도 새 구독을 막으면 안 된다."""
+    async def test_evicted_topic_does_not_leave_a_blocking_claim(self):
+        """§C2 eviction으로 사라진 topic의 claim도 나중 재구독을 막으면 안 된다.
+
+        ⚠️ 구 버전은 §C1 cross-UID purge로 이 상황을 만들었는데, B5(d) 결정으로 그 경로가
+        연결 종료가 됐다(purge 폐기). eviction이 남은 유일한 축소 producer다.
+        """
         registry = TopicLeaseRegistry()
         ws = _WS()
-        await _subscribe(registry, ws, [TOPIC])
+        cache = await _subscribe(registry, ws, [TOPIC])
         await self._stale_claim(registry, ws)
-        # cross-UID 재바인딩 → purge 후 같은 topic 재구독
-        await _subscribe(registry, ws, [TOPIC], uid="uid-2", now_mono=EXPIRED_AT)
+        # 권한 상실로 evict → 나중에 다시 구독
+        await registry.apply_subscribe(
+            ws=ws, uid=UID, topics=[], rejected_topics=[TOPIC], snapshot=cache.snapshot(UID),
+            cache=cache, now_mono=EXPIRED_AT, premium_verified_at_mono=EXPIRED_AT,
+            identity_verified_at_mono=EXPIRED_AT, send_ack=_ok_ack,
+        )
+        await _subscribe(registry, ws, [TOPIC], cache=cache, now_mono=EXPIRED_AT)
         self.assertIsNotNone(registry.authorized_lease(ws, TOPIC, now_mono=EXPIRED_AT))
 
 
