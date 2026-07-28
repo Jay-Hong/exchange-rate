@@ -577,16 +577,23 @@ class TopicLeaseRegistry:
 
     # ── 조회 ────────────────────────────────────────────────────────────
     def authorized_lease(self, ws, topic: str, *, now_mono: float) -> Optional[Lease]:
-        """**인가 응답** — 이 연결에서 **지금** 이 topic을 보낼 수 있는가(§B1).
+        """**§B2 조회 경계 필터** — 이 연결이 지금 이 topic을 받을 자격이 있는가.
 
-        §B1의 검사 항목 전부를 한 호출로 답한다: 활성 lease가 존재하고(미활성은 존재하되
-        전송 대상이 아니다), tombstone이 없고, **아직 만료되지 않았다**.
+        활성 lease가 존재하고(미활성은 존재하되 전송 대상이 아니다), tombstone이 없고,
+        **아직 만료되지 않았다**. read-only다 — 만료분을 제외할 뿐 지우지 않는다(지우면
+        sweep이 `reauth_required`를 보낼 근거를 잃는다, §B2).
+
+        ⛔ **§B1의 답이 아니다.** B1은 *전송 직전* 재검증이라 호출자가 **캡처한** identity
+        `(uid, lease_id)`와 대조해야 한다 — 그건 `authorizes_send`다. 여기서 non-None만 보고
+        보내면 실측된 두 구멍이 열린다: 같은 UID 재인증으로 L1→L2가 교체돼도 통과하고,
+        cross-UID 재바인딩 뒤에는 A로 내린 결정이 B의 소켓에 적용된다.
+        조회 단계에는 캡처된 identity가 아직 없으므로 두 조항을 한 메서드로 합칠 수 없다.
 
         ⛔ 구 이름은 `active_lease`였고 시각을 받지 않았다 — docstring은 "인가 응답"이라
         주장하면서 §B1이 요구하는 `now < expires_at`을 **보지 않았다**(실측: 만료 10000초
         뒤에도 lease를 반환). sweep이 늦거나 아직 미배선이면 그 답을 믿는 전송 경로가
         영원히 통과한다. 그래서 시각을 **필수 인자**로 만들었다 — 만료를 확인하지 않은
-        답 자체를 얻을 수 없어야 오용이 불가능하다(메서드를 둘로 나누면 틀린 쪽을 고를 수 있다).
+        답 자체를 얻을 수 없어야 오용이 불가능하다.
 
         만료 판정은 `is_expired`에 위임한다 — 경계 포함·비유한 fail-closed 규약(§A2)을
         여기서 다시 쓰면 두 곳이 어긋난다.
@@ -611,6 +618,31 @@ class TopicLeaseRegistry:
         if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
             return None
         return lease
+
+    def authorizes_send(
+        self, ws, topic: str, *, uid: str, lease_id: str, now_mono: float
+    ) -> bool:
+        """**§B1 전송 직전 인가** — 캡처한 `(uid, lease_id)`로 지금 보내도 되는가.
+
+        계획 §B1의 검사 항목 그대로다: `lease identity(ws, topic, uid, lease_id)` +
+        `now < expires_at`. 생존 규칙(tombstone·만료)은 `authorized_lease`에 **위임**한다 —
+        여기서 다시 쓰면 §B2 필터와 두 곳이 어긋난다.
+
+        ⛔ identity를 **필수 입력**으로 받는 이유: 조회 결과의 `is not None`만 보는 것이 가장
+        자연스러운 사용법인데, 그러면 조회와 전송 사이에 lease가 **교체**된 경우를 못 막는다
+        (실측: 같은 UID 재인증 L1→L2, cross-UID 재바인딩 A→B 둘 다 통과했다). registry가
+        직접 대조해야 그 오용이 불가능해진다.
+
+        ⚠️ 재인증 직후의 한 tick이 이 검사로 떨어질 수 있다(캡처한 L1이 이미 L2로 교체됨).
+        의도된 것이다 — 다음 발행 주기가 L2를 캡처한다. §D6상 재인증은 6~7분 간격이라
+        topic당 최대 1 tick이다.
+        ⚠️ 이 검사와 **실제 `await send_json` 사이**의 재바인딩은 여전히 남는다(§B5(e)) —
+        그건 전송을 lock 안에서 하거나 전송 결과를 폐기하는 별개 결정이다.
+        """
+        lease = self.authorized_lease(ws, topic, now_mono=now_mono)
+        if lease is None:
+            return False
+        return lease.uid == uid and lease.lease_id == lease_id
 
     def identity_generation(self, ws) -> int:
         """§D2의 연결별 generation. 미바인딩은 0.

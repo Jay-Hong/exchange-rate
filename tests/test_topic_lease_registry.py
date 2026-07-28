@@ -1183,8 +1183,111 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
                               "축 검증이 돌지 않았다")
 
 
-class TestAuthorizationAnswersB1(unittest.IsolatedAsyncioTestCase):
-    """§B1 — 인가 조회는 "지금 보낼 수 있는가"에 답한다(계획 616행: identity + `now < expires_at`).
+class TestSendAuthorizationChecksIdentity(unittest.IsolatedAsyncioTestCase):
+    """§B1 — **전송 직전** 재검증은 캡처한 `(uid, lease_id)`와 정확히 일치해야 한다(계획 616행).
+
+    ⛔ `authorized_lease`는 §B2(조회 경계 필터)의 답이지 §B1의 답이 아니다. 실측:
+
+      같은 UID 재인증  : L1 캡처 → L2로 교체 → 재확인이 L2를 돌려줘 **L1 기준 결정이 통과**
+      cross-UID 재바인딩: 캡처 uid=A → 현재 uid=B → **A로 내린 결정이 B의 소켓에 적용**
+
+    `is not None`만 보는 것이 가장 자연스러운 사용법이라, identity를 **필수 입력**으로 받아
+    registry가 직접 대조해야 그 오용이 불가능해진다.
+    """
+
+    async def _issue(self, registry, cache, ws, uid=UID, topic=TOPIC):
+        await _apply(registry, cache, ws, [topic], uid=uid)
+        return registry.authorized_lease(ws, topic, now_mono=1000.0)
+
+    async def test_renewed_lease_does_not_authorize_the_captured_one(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        captured = await self._issue(registry, cache, ws)
+        renewed = await self._issue(registry, cache, ws)
+        self.assertNotEqual(captured.lease_id, renewed.lease_id, "전제가 성립하지 않는다")
+
+        self.assertFalse(
+            registry.authorizes_send(ws, TOPIC, uid=UID, lease_id=captured.lease_id,
+                                     now_mono=1000.0),
+            "교체된 lease가 구 캡처 기준 전송을 인가한다",
+        )
+        self.assertTrue(
+            registry.authorizes_send(ws, TOPIC, uid=UID, lease_id=renewed.lease_id,
+                                     now_mono=1000.0)
+        )
+
+    async def test_rebound_uid_does_not_authorize_the_captured_decision(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        captured = await self._issue(registry, cache, ws, uid="uid-A")
+        await self._issue(registry, StrictObservationCache(), ws, uid="uid-B")
+        self.assertFalse(
+            registry.authorizes_send(ws, TOPIC, uid="uid-A", lease_id=captured.lease_id,
+                                     now_mono=1000.0),
+            "A로 내린 결정이 B의 소켓에서 통과한다",
+        )
+
+    async def test_uid_mismatch_alone_blocks_the_send(self):
+        """⛔ `lease_id`만 보면 uid 축이 열린다 — 둘 다 대조해야 §B1의 identity가 성립한다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        lease = await self._issue(registry, cache, ws)
+        self.assertFalse(
+            registry.authorizes_send(ws, TOPIC, uid="someone-else", lease_id=lease.lease_id,
+                                     now_mono=1000.0)
+        )
+
+    async def test_expired_lease_does_not_authorize_a_send(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        lease = await self._issue(registry, cache, ws)
+        self.assertFalse(
+            registry.authorizes_send(ws, TOPIC, uid=UID, lease_id=lease.lease_id,
+                                     now_mono=1000.0 + LEASE_MAX_SECONDS)
+        )
+
+    async def test_tombstone_blocks_the_send(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        lease = await self._issue(registry, cache, ws)
+
+        async def failing(ack):
+            raise ConnectionResetError()
+
+        await _apply(registry, cache, ws, [OTHER], send_ack=failing)
+        self.assertFalse(
+            registry.authorizes_send(ws, TOPIC, uid=UID, lease_id=lease.lease_id,
+                                     now_mono=1000.0)
+        )
+
+    async def test_unknown_topic_is_not_authorized(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        lease = await self._issue(registry, cache, ws)
+        self.assertFalse(
+            registry.authorizes_send(ws, "never:subscribed", uid=UID,
+                                     lease_id=lease.lease_id, now_mono=1000.0)
+        )
+
+    def test_send_authorization_delegates_the_liveness_rules(self):
+        """⛔ tombstone·만료 규칙을 여기서 다시 쓰면 §B2 필터와 두 곳이 어긋난다."""
+        import ast
+        import inspect
+
+        import app.topic_lease_registry as module
+
+        tree = ast.parse(inspect.getsource(module))
+        registry = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        method = next(n for n in registry.body
+                      if isinstance(n, ast.FunctionDef) and n.name == "authorizes_send")
+        called = {n.func.attr for n in ast.walk(method)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        self.assertIn("authorized_lease", called, "생존 규칙을 직접 구현했다")
+
+
+class TestLookupBoundaryFilter(unittest.IsolatedAsyncioTestCase):
+    """§B2 — 조회 경계 필터. **캡처된 identity가 아직 없는** 단계의 1차 방어다.
 
     ⛔ 구 `active_lease`는 docstring으로 "인가 응답"을 자처하면서 시각을 받지 않았다 —
     실측: 만료 10000초 뒤에도 lease를 반환했다. sweep이 늦거나 아직 미배선이면 그 답을 믿는
@@ -1499,6 +1602,7 @@ class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
                 "now_mono", "premium_verified_at_mono", "identity_verified_at_mono", "send_ack",
             ),
             R.authorized_lease: ("ws", "topic", "now_mono"),
+            R.authorizes_send: ("ws", "topic", "uid", "lease_id", "now_mono"),
         }
         for func, names in required.items():
             signature = inspect.signature(func)
