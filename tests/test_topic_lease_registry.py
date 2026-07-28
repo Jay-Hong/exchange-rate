@@ -26,6 +26,7 @@ from app.topic_lease_registry import (
     AckState,
     Applied,
     ConnectionTerminated,
+    ConnectionTerminatedError,
     Discarded,
     Rejected,
     ReentrantRegistryCall,
@@ -1097,12 +1098,54 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(registry.active_lease(ws, TOPIC))
 
     async def test_axis_violation_with_pending_purge_closes_the_connection(self):
-        """축 위반(wall epoch 혼입 등)은 예외로 크게 터지지만, 그 전에 접근은 닫혀야 한다."""
+        """축 위반(wall epoch 혼입 등)은 예외로 크게 터지지만, 그 전에 접근은 닫혀야 한다.
+
+        ⛔ 그리고 **예외 채널에도 종단 신호가 있어야** 한다 — tombstone만 찍고 원래 예외를
+        그대로 던지면, `ConnectionTerminated`만 분기하는 호출자는 close 필요성을 알 수 없다.
+        지금은 직렬 endpoint라 예외가 상위 루프를 빠져나가 teardown으로 이어지지만,
+        §B5(b) task-spawn 배선에서는 task 예외가 소켓 종료로 연결되지 않으면 다시
+        무데이터·무오류 상태가 된다.
+        """
         registry, cache, ws = await self._armed()
         other = StrictObservationCache()
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ConnectionTerminatedError) as caught:
             await _apply(registry, other, ws, [OTHER], uid="uid-2", premium=float("nan"))
+        self.assertIsInstance(caught.exception.__cause__, ValueError,
+                              "원인이 끊겨 진단이 사라졌다")
         self.assertIsNone(registry.active_lease(ws, TOPIC), "예외 경로가 fail-open이었다")
+
+    async def test_axis_violation_without_reduction_propagates_raw(self):
+        """⛔ 줄일 것이 없으면 연결은 멀쩡하다 — 감싸면 배선이 멀쩡한 연결을 닫는다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        with self.assertRaises(ValueError):
+            await _apply(registry, cache, ws, [TOPIC], premium=float("nan"))
+        self.assertNotIsInstance(await _apply(registry, cache, ws, [TOPIC]),
+                                 ConnectionTerminated)
+
+    async def test_cancellation_is_never_wrapped(self):
+        """⛔ `CancelledError`를 감싸면 asyncio의 **구조적 취소가 깨진다**.
+
+        `wait_for`·`TaskGroup`이 그 예외로 동작하므로, 감싸는 순간 취소가 전파되지 않는다.
+        (`CancelledError`는 `Exception`이 아니라 `BaseException`이라 감싸기 대상에서 자연히
+        빠진다 — 실측으로 확인한 전제다.)
+        """
+        registry, cache, ws = await self._armed()
+        other = StrictObservationCache()
+        entered = asyncio.Event()
+
+        async def stalling(ack):
+            entered.set()
+            await asyncio.sleep(30)
+            return True
+
+        task = asyncio.create_task(
+            _apply(registry, other, ws, [OTHER], uid="uid-2", send_ack=stalling)
+        )
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
 
     async def test_abort_without_any_reduction_leaves_the_connection_usable(self):
         """⛔ 오탐 금지 — 줄일 게 없던 중단까지 연결을 죽이면 정상 webhook 경쟁이 연결을 끊는다."""
@@ -1120,8 +1163,10 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         ws = _WS()
         await _apply(registry, cache, ws, [TOPIC])
         other = StrictObservationCache()
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ConnectionTerminatedError) as caught:
             await _apply(registry, other, ws, [], uid="uid-2", premium=float("nan"))
+        self.assertIsInstance(caught.exception.__cause__, ValueError,
+                              "축 검증이 돌지 않았다")
 
 
 class TestResultTypeMatchesConnectionLiveness(unittest.IsolatedAsyncioTestCase):
@@ -1198,6 +1243,40 @@ class TestResultTypeMatchesConnectionLiveness(unittest.IsolatedAsyncioTestCase):
                     isinstance(result, ConnectionTerminated), dead,
                     f"{name}: 결과 타입({type(result).__name__})과 연결 생존(dead={dead})이 어긋난다",
                 )
+
+    async def test_tombstone_always_produces_a_terminal_signal_on_either_channel(self):
+        """⛔ tombstone을 찍는 **모든** 이탈은 종단 신호를 낸다 — 결과면 `ConnectionTerminated`,
+        예외면 `ConnectionTerminatedError`. 한쪽만 지키면 다른 쪽으로 close 의무가 샌다.
+        """
+        async def returns_terminal():
+            registry, cache, ws = await self._armed()
+            snapshot = cache.snapshot(UID)
+            cache.bump(UID)
+            try:
+                r = await _apply(registry, cache, ws, [], rejected=[TOPIC], snapshot=snapshot)
+                return registry, cache, ws, r, None
+            except BaseException as exc:                     # pragma: no cover - 방어
+                return registry, cache, ws, None, exc
+
+        async def raises_terminal():
+            registry, cache, ws = await self._armed()
+            other = StrictObservationCache()
+            try:
+                r = await _apply(registry, other, ws, [OTHER], uid="uid-2", premium=float("nan"))
+                return registry, cache, ws, r, None
+            except BaseException as exc:
+                return registry, cache, ws, None, exc
+
+        for name, scenario in (("fence+축소(결과)", returns_terminal),
+                               ("축위반+축소(예외)", raises_terminal)):
+            with self.subTest(scenario=name):
+                registry, cache, ws, result, exc = await scenario()
+                signalled = isinstance(result, ConnectionTerminated) or isinstance(
+                    exc, ConnectionTerminatedError
+                )
+                dead = await self._is_dead(registry, cache, ws)
+                self.assertEqual(signalled, dead,
+                                 f"{name}: tombstone={dead}인데 종단 신호={signalled}")
 
     async def test_only_one_terminal_type_exists(self):
         """⛔ 종단 타입이 둘이면 호출자가 둘 다 알아야 한다 — 하나만 알면 그게 곧 결함이다."""

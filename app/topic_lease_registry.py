@@ -59,8 +59,11 @@
 "죽은 연결에 재시도"가 되살아난다 — 실제로 그랬다(축소가 예정된 중단이 tombstone을 찍고도
 `Discarded`를 반환해, 계약대로 재시도한 호출자가 영원히 `connection_closed`를 받았다).
 진단은 `reason`이 지고, 타입은 **행동**을 진다.
-⚠️ `CancelledError`가 전파되는 경로(취소 arm / 삼킨 외부 취소)도 tombstone을 찍는다 —
-그쪽은 이미 teardown 중이라 결과값이 아니라 예외로 나간다.
+**예외 채널에도 같은 규칙이 적용된다** — 접근 축소 중 예외가 나면 tombstone을 찍고
+`ConnectionTerminatedError`로 감싸 던진다(원인은 `__cause__`). tombstone을 찍는 이탈은
+결과든 예외든 **반드시 종단 신호를 낸다**.
+⚠️ 단 `CancelledError`는 감싸지 않고 그대로 전파한다(취소 arm / 삼킨 외부 취소) — asyncio의
+구조적 취소가 그 예외로 동작하고, 그쪽은 이미 teardown 중이라 소켓이 닫힌다.
 
 ## ack 실패 = **연결 사망**(§B2a), "발급 안 함"이 아니다
 
@@ -214,6 +217,28 @@ class Rejected:
     """
 
     reason: str
+
+
+class ConnectionTerminatedError(RuntimeError):
+    """**예외 채널의 종단 신호** — `ConnectionTerminated`의 쌍둥이. 호출자는 소켓을 닫는다.
+
+    ⛔ 이게 없으면 계약에 구멍이 난다: 접근 축소 중에 예외(예: 축 위반 `ValueError`)가 나면
+    tombstone은 찍히는데 **결과값이 없어**, `ConnectionTerminated`만 분기하는 호출자는 close
+    필요성을 알 수 없다. 현행 직렬 endpoint는 예외가 상위 루프를 빠져나가 teardown으로
+    이어져 가려지지만, §B5(b) task-spawn 배선에서는 task 예외가 소켓 종료로 연결되지 않으면
+    다시 무데이터·무오류 상태가 된다.
+
+    원인은 `__cause__`로 chaining한다 — 타입이 **행동**을, `__cause__`가 **진단**을 진다
+    (결과 채널에서 타입/`reason`이 나눠 지는 것과 같은 규칙).
+
+    ⚠️ **`Exception`만 감싼다.** `CancelledError`를 감싸면 asyncio의 구조적 취소가 그 예외로
+    동작하므로 취소 전파가 깨지고, `SystemExit`/`KeyboardInterrupt`를 감싸면 프로세스 종료가
+    막힌다. 셋 다 `BaseException`이라 `isinstance(exc, Exception)` 하나로 정확히 갈린다(실측).
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(f"연결을 닫아야 한다 (원인: {reason})")
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -474,12 +499,18 @@ class TopicLeaseRegistry:
                             leftover.pop(topic, None)
                         if not leftover:
                             self._pending.pop(ws, None)
-            except BaseException:
+            except BaseException as exc:
                 # ⛔ 여기까지 오는 이탈은 `compute_lease_expiry`의 축 위반(ValueError) 같은
                 #    **예외**다. 접근 축소가 예정돼 있었으면 예외로 나가기 전에 닫는다 —
                 #    아니면 호출자가 teardown할 때까지 구 UID의 lease가 계속 인가된다.
-                if reduces_access:
-                    self._closed.add(ws)
+                if not reduces_access:
+                    # 줄일 것이 없었으면 연결은 멀쩡하다. 감싸면 배선이 멀쩡한 연결을 닫는다.
+                    raise
+                self._closed.add(ws)
+                # tombstone을 찍었으면 **이 채널에도** 종단 신호를 실어야 계약이 닫힌다.
+                # `Exception`만 감싸는 이유는 `ConnectionTerminatedError` docstring 참조.
+                if isinstance(exc, Exception):
+                    raise ConnectionTerminatedError(type(exc).__name__) from exc
                 raise
 
     def _abort_locked(self, ws, result, reduces_access: bool):

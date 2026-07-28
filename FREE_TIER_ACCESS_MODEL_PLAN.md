@@ -654,6 +654,14 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     축소가 예정된 중단이 tombstone을 찍으면서 `Discarded`를 그대로 반환해, 그 타입의 계약대로
     재시도한 호출자가 영원히 `connection_closed`를 받았다 — 클라는 데이터도 오류도 없는 상태에
     갇힌다(D2가 "ack이 권위"라고 못박은 바로 그 실패 모드).
+    ⛔ **예외 채널도 같은 규칙을 받는다.** 접근 축소 중 예외(축 위반 등)가 나면 tombstone은
+    찍히는데 결과값이 없어, 결과 타입만 분기하는 호출자는 close 필요성을 알 수 없다. 전용 예외
+    (`ConnectionTerminatedError`, 원인은 `__cause__`)로 감싸 던진다. ⚠️ `CancelledError`는
+    **감싸지 않는다** — asyncio의 구조적 취소가 그 예외로 동작하므로 감싸면 취소 전파가 깨진다
+    (`SystemExit`/`KeyboardInterrupt`도 마찬가지. 셋 다 `BaseException`이라 `Exception`만 감싸면
+    정확히 갈린다). 지금은 직렬 endpoint라 예외가 상위 루프를 빠져나가 teardown으로 이어져
+    가려지지만, B5(b) task-spawn 배선에서는 task 예외가 소켓 종료로 연결되지 않으면 다시
+    무데이터·무오류 상태가 된다.
   - **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다** — C1 purge나 C2 eviction이 예정된 요청이
     어떤 이유로든(만료 horizon · fence 실패 · 축 위반 예외 · ack 실패 · 취소) 중단되면 그 연결을
     **닫는다**(tombstone). ⛔ 되돌리면 그만큼의 접근이 계속 살아 있어야 하는데, 그게 정확히
@@ -791,6 +799,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     "epoch N의 lease 전부 revoke"를 실행할 수 없다(태그가 현재 장식이다).
 11. **D7 상한의 마지막 방어** — registry 경계에서 미강제(50 topic 요청도 수락된다). 1단계 소유가 맞지만
     registry가 최종 방어선이다.
+12. **두 채널을 모두 close로 라우팅** (B5(b) 배선 의무) — registry는 종단 신호를 결과
+    (`ConnectionTerminated`)와 예외(`ConnectionTerminatedError`) **양쪽**에 싣는다. task-spawn
+    dispatch에서는 **task 예외가 기본적으로 소켓을 닫지 않으므로**, 두 채널을 모두 소켓 종료로
+    잇는 supervisor가 필요하다. 타입만으로는 부족하고 그 타입을 받는 핸들러가 있어야 한다 —
+    통합 테스트로 "종단 신호 → 소켓 close"를 잠글 것.
 
 #### D. wire 계약 추가 (§8 확장)
 
