@@ -60,6 +60,7 @@ from app.strict_authz import (
     derive_verdict,
 )
 from app.strict_cache import PutAccepted, StrictObservationCache, StrictSnapshot
+from app.strict_single_flight import SharedFlightCancelled
 from app.subscription import (
     BadRequest,
     Determined,
@@ -83,11 +84,11 @@ MAX_CONTENTION_RETRIES = 3
 # 여기에 도달하면 **우리 버그**다 — 조용히 retryable로 접지 않고 시끄럽게 실패시킨다.
 _ITERATION_BACKSTOP = 2 * (MAX_CONTENTION_RETRIES + 2) + 4
 
-# provider 1회 호출의 시간 상한. §D6의 ack timeout이 **10초**이고 이 루프는 identity → premium을
-# **직렬로** 부르므로, 두 번 다 상한을 채워도 8초로 그 안에 들어온다.
-# ⚠️ 상한이 없으면 멈춘 provider가 그 (uid, epoch, concern) flight를 **영구 점유**한다 —
-# 실측: owner 취소 후에도 `in_flight=1`이 유지되고 뒤이은 연결 3건이 전부 매달렸다.
-PROVIDER_TIMEOUT_SECONDS = 4.0
+# **한 요청 전체**의 시간 상한(§D6의 ack timeout 10초 아래). 호출별 상한이 아니다.
+# ⚠️ 구 주석은 "호출 2번이니 4초×2=8초"라고 적었는데 **틀렸다** — 무효화 경쟁이 끼면 같은
+# concern을 다시 조회하므로 호출이 3회 이상 될 수 있다. 실측(축소): 호출별 60ms 상한인데
+# 전체 154ms / 조회 3회. 그래서 호출별이 아니라 **절대 monotonic deadline**으로 잡는다.
+VERIFY_DEADLINE_SECONDS = 8.0
 
 
 class _FlightOutcome(str, Enum):
@@ -95,7 +96,35 @@ class _FlightOutcome(str, Enum):
 
     STORED = "stored"            # 관측이 저장됐다 → 저장소에서 다시 읽어 재파생
     UNAVAILABLE = "unavailable"  # authority 판정 불가 → 그대로 TemporarilyUnavailable
-    CONFIG_ERROR = "config"      # 우리 설정·계약 오류 → 각자 **자기 인스턴스**로 raise
+
+
+class ConfigFaultKind(str, Enum):
+    """설정·계약 결함의 **경계 있는** 분류.
+
+    대응 주체가 다르다 — 죽은 API key는 즉시 호출, 스키마 drift는 계약 재검토다. 메시지 문자열은
+    `repr(result)`를 담아 cardinality가 열려 있으므로 **카운터는 이 enum으로** 집계해야 한다
+    (계획이 webhook event type에 같은 규율을 요구한다).
+    """
+
+    IDENTITY_MISCONFIGURED = "identity_misconfigured"
+    IDENTITY_UNKNOWN_VALUE = "identity_unknown_value"
+    PREMIUM_MISCONFIGURED = "premium_misconfigured"
+    PREMIUM_BAD_REQUEST = "premium_bad_request"
+    PREMIUM_PROTOCOL_VIOLATION = "premium_protocol_violation"
+    PREMIUM_UNKNOWN_VALUE = "premium_unknown_value"
+
+
+@dataclass(frozen=True)
+class ConfigFault:
+    """flight가 나르는 설정 결함. **frozen**이라 공유해도 `__context__`가 얹히지 않는다.
+
+    ⚠️ 이걸 값으로 나르지 않으면 대기자들은 owner의 closure를 못 보고 **내용 없는 stub**을
+    받는다 — 실측: 6건 중 5건이 provider payload도 HTTP status도 없는 문자열이었다.
+    운영자 신호가 로그인데 83%가 비면 계약이 깨진 것이다.
+    """
+
+    kind: ConfigFaultKind
+    message: str
 
 
 # ── identity authority 결과 (premium 쪽 typed provider와 대칭) ──────────────
@@ -202,7 +231,13 @@ class StrictVerifierConfigError(RuntimeError):
     잠글 성질 3개(배선 슬라이스의 mutation 대상): (a) 이 모듈 안에 광범위 `except`가 없다,
     (b) 배선의 catch가 **타입 기반**이고 transient와 **다른 카운터**를 올린다,
     (c) 설정 오류가 registry 항목과 기존 lease를 **바꾸지 않는다**.
+
+    `kind`는 경계 있는 분류다 — **카운터는 이걸로** 집계하고 메시지는 로그에만 쓴다.
     """
+
+    def __init__(self, message: str, *, kind: ConfigFaultKind) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 async def verify_strict(
@@ -225,6 +260,7 @@ async def verify_strict(
     ⚠️ 매 반복마다 snapshot을 **새로** 뜬다. I/O를 가로지른 로컬 관측을 재사용하면 그 사이의
     무효화를 못 보고, 동시에 존재한 적 없는 쌍으로 판정하게 된다.
     """
+    deadline_mono = clock.mono() + VERIFY_DEADLINE_SECONDS
     contention_left = MAX_CONTENTION_RETRIES
     written_in_epoch: set = set()
     seen_epoch = None
@@ -281,7 +317,6 @@ async def verify_strict(
         # ⚠️ 조회 결과가 판정 불가면 **아무것도 저장하지 않는다**.
         # 판정 불가를 저장하면 그 창 동안 재시도가 무의미해진다.
         put_result: dict = {}
-        config_message: dict = {}
 
         async def _fetch_and_store():
             """A5가 합치는 단위 — authority 조회 + CAS 저장. **종결 방식**을 돌려준다."""
@@ -289,19 +324,23 @@ async def verify_strict(
             to_observation = (
                 _identity_observation if concern is Concern.IDENTITY else _premium_observation
             )
-            try:
-                # ⚠️ provider 호출 자체에 상한을 건다. 멈춘 provider가 flight를 영구 점유하면
-                # 그 키가 죽고 뒤이은 연결이 전부 매달린다(실측).
-                raw = await asyncio.wait_for(provider(uid), timeout=PROVIDER_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
-                return _FlightOutcome.UNAVAILABLE
+            # ⚠️ 여기엔 상한을 걸지 않는다. `wait_for`는 `asyncio.to_thread`의 **실제 작업을
+            # 멈추지 못한다** — Python은 스레드를 취소할 수 없다. factory 안에서 상한을 걸면
+            # 슬롯만 비고 스레드는 계속 돌아, 다음 요청이 **같은 작업을 또 시작**한다
+            # (실측: 실행 중 스레드 1 → 2). t3.small의 기본 executor는 6 스레드라 몇 번만
+            # 반복돼도 리포 전역의 `to_thread` 86곳이 함께 막힌다.
+            # → 상한은 **호출자 쪽**에 건다(아래). flight는 실제 작업이 끝날 때까지 슬롯을
+            #   쥐고 있으므로 뒤이은 요청은 새 스레드를 만들지 않고 **같은 flight에 붙는다**.
+            # ⚠️ 그래도 provider는 **자기 작업에 스스로 상한을 걸어야 한다**(SDK timeout).
+            #   이건 우리가 강제할 수 없는 provider 계약이다.
+            raw = await provider(uid)
             try:
                 obs = to_observation(raw, uid=uid, snapshot=snapshot, clock=clock)
             except StrictVerifierConfigError as exc:
                 # ⚠️ 예외 **인스턴스**를 공유하면 배선이 그 위에 `__context__`를 얹어 한 연결의
-                # 로그에 다른 연결의 상태가 찍힌다. 메시지만 넘겨 각자 자기 인스턴스로 raise한다.
-                config_message["message"] = str(exc)
-                return _FlightOutcome.CONFIG_ERROR
+                # 로그에 다른 연결의 상태가 찍힌다. 그래서 frozen 값으로 바꿔 나른다 —
+                # 그러면 대기자도 owner와 **같은 내용**을 받으면서 각자 자기 인스턴스를 만든다.
+                return ConfigFault(kind=exc.kind, message=str(exc))
             if obs is None:
                 return _FlightOutcome.UNAVAILABLE
             put_result["put"] = (
@@ -311,17 +350,28 @@ async def verify_strict(
             )
             return _FlightOutcome.STORED
 
-        if single_flight is None:
-            flight_outcome = await _fetch_and_store()
-        else:
-            flight_outcome = await single_flight.run(
-                (uid, snapshot.epoch, concern), _fetch_and_store
-            )
+        remaining = deadline_mono - clock.mono()
+        if remaining <= 0:
+            return TemporarilyUnavailable(concern=concern)
+        try:
+            if single_flight is None:
+                flight_outcome = await asyncio.wait_for(_fetch_and_store(), timeout=remaining)
+            else:
+                flight_outcome = await asyncio.wait_for(
+                    single_flight.run((uid, snapshot.epoch, concern), _fetch_and_store),
+                    timeout=remaining,
+                )
+        except asyncio.TimeoutError:
+            # 호출자만 포기한다. flight는 계속 돌며 슬롯을 쥐고 있으므로 작업이 곱해지지 않는다.
+            return TemporarilyUnavailable(concern=concern)
+        except SharedFlightCancelled:
+            # ⚠️ 공유 flight가 취소됐다. 이걸 그냥 올려보내면 `main.py:998`의 `except Exception`에
+            # 걸려 **이 연결의 registry 구독이 삭제**된다(C4 위반). 도메인 오류로 바꾸는 것만으론
+            # 부족했고 — **여기서 3-state로 접어야** 비로소 닫힌다.
+            return TemporarilyUnavailable(concern=concern)
 
-        if flight_outcome is _FlightOutcome.CONFIG_ERROR:
-            raise StrictVerifierConfigError(
-                config_message.get("message", f"{concern.value} provider 설정·계약 오류")
-            )
+        if isinstance(flight_outcome, ConfigFault):
+            raise StrictVerifierConfigError(flight_outcome.message, kind=flight_outcome.kind)
         if flight_outcome is _FlightOutcome.UNAVAILABLE:
             # ⚠️ 합쳐진 대기자도 **여기서 끝낸다**. 저장소를 다시 보게 하면 "아무것도 없네"를 보고
             # 각자 다시 owner가 되어, 장애 때 합치기가 사라지고 반복 예산까지 태운다(실측).
@@ -359,8 +409,13 @@ def _identity_observation(result: IdentityResult, *, uid: str, snapshot, clock):
         return None
     if isinstance(result, IdentityMisconfigured):
         # premium 쪽 `ProviderMisconfigured`와 대칭 — 영구 결함은 verdict가 아니다(§A6-1).
-        raise StrictVerifierConfigError(f"identity provider 설정 오류: {result!r}")
-    raise StrictVerifierConfigError(f"identity provider가 모르는 값을 돌려줬다: {result!r}")
+        raise StrictVerifierConfigError(
+            f"identity provider 설정 오류: {result!r}", kind=ConfigFaultKind.IDENTITY_MISCONFIGURED
+        )
+    raise StrictVerifierConfigError(
+        f"identity provider가 모르는 값을 돌려줬다: {result!r}",
+        kind=ConfigFaultKind.IDENTITY_UNKNOWN_VALUE,
+    )
 
 
 def _premium_observation(result, *, uid: str, snapshot, clock):
@@ -376,5 +431,15 @@ def _premium_observation(result, *, uid: str, snapshot, clock):
         return None
     if isinstance(result, (ProviderMisconfigured, BadRequest, ProtocolViolation)):
         # §A6-1 — 설정·계약 오류는 verdict가 아니다. 재시도해도 낫지 않는다.
-        raise StrictVerifierConfigError(f"entitlement provider 설정·계약 오류: {result!r}")
-    raise StrictVerifierConfigError(f"entitlement provider가 모르는 값을 돌려줬다: {result!r}")
+        kind = {
+            ProviderMisconfigured: ConfigFaultKind.PREMIUM_MISCONFIGURED,
+            BadRequest: ConfigFaultKind.PREMIUM_BAD_REQUEST,
+            ProtocolViolation: ConfigFaultKind.PREMIUM_PROTOCOL_VIOLATION,
+        }[type(result)]
+        raise StrictVerifierConfigError(
+            f"entitlement provider 설정·계약 오류: {result!r}", kind=kind
+        )
+    raise StrictVerifierConfigError(
+        f"entitlement provider가 모르는 값을 돌려줬다: {result!r}",
+        kind=ConfigFaultKind.PREMIUM_UNKNOWN_VALUE,
+    )
