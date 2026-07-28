@@ -17,8 +17,12 @@ firebase-admin v6.9.0 `_check_jwt_revoked_or_disabled`의 술어를 그대로 �
     user.disabled                                  -> 거부 (revoked보다 **먼저**)
     claims["iat"] * 1000 < tokens_valid_after_ms   -> revoked (**strict `<`**)
 
-⚠️ **단위**: watermark는 **밀리초**(`1000 * int(valid_since)`), `iat`는 **초**. 축을 섞으면
-`1.7e9 < 1.7e12`가 참이 되어 **모든 토큰이 revoked로 오판**된다.
+⚠️ **단위**: watermark는 **밀리초**(`1000 * int(valid_since)`), `iat`는 **초**.
+⛔ 위험한 방향은 과차단이 아니라 **과허용(fail-open)**이다 — 이 모듈이 `* 1000`을 스스로 하므로
+"전부 revoked로 오판"되는 방향은 **도달 불가**하고, 실제로 남는 호출부 실수는 전부 반대다:
+watermark를 초로 넘기거나 `iat`를 ms로 넘기거나 둘 중 하나가 `NaN`이면 비교가 False가 되어
+**revoke된 토큰이 그대로 통과**한다(감사에서 4종 전부 재현). 그래서 아래 `derive_verdict`가
+두 피연산자의 **축 규모를 검증**한다 — 구 docstring은 안전한 방향만 경고해 잘못된 안심을 줬다.
 ⚠️ `auth_time`으로 대체하지 말 것 — 세션 최초 로그인 시각으로 **고정**돼 갱신마다 전진하는
 `iat`와 다르다(`auth_time <= iat`). SDK보다 엄격한 **다른 술어**가 되며 단위 테스트로는 안 드러난다.
 ⚠️ `clock_skew_seconds`는 이 비교에 **적용되지 않는다**(SDK도 서명/exp 검증에만 쓴다).
@@ -58,11 +62,43 @@ PREMIUM_INACTIVE_RECHECK_SECONDS = 300.0
 #    premium=흔함/결제 직후, identity=드묾/관리자 조치. 한쪽만 조정할 날이 온다.
 IDENTITY_NEGATIVE_RECHECK_SECONDS = 300.0
 
+# 관측 시각이 `now`보다 미래일 수 있는 허용 폭 — **여기서 허용한 s초는 각 horizon에 그대로 가산된다**.
+# ⛔ `topic_lease.MAX_VERIFIED_AT_FUTURE_SKEW_SECONDS`(=900)를 재사용하면 안 된다. 그 값의 근거는
+#    "3-way `min`이 clamp하므로 표현력 손실 0"인데, **신선도에서 `verified_at`은 clamp되는 floor가
+#    아니라 horizon을 재는 anchor**라 근거가 전이되지 않는다. 실제로 900을 쓰면 음성 관측의
+#    상한이 문서값 300초가 아니라 **1200초(4×)**가 됐다(감사 실측).
+# ⛔ `min(verified, now)` clamp로도 해결되지 않는다 — 미래 구간에서 `now < now + horizon`이 항상
+#    참이라 창이 그대로 s+horizon이다(실측 확인). **밴드를 좁히는 것만이 해법**이다.
+# 단일 monotonic 시계에서 관측은 판정보다 먼저 쓰이므로 정상 skew는 0이다. 이 값은 샘플링 지터용.
+MAX_OBSERVATION_FUTURE_SKEW_SECONDS = 1.0
+
+# revocation 비교 피연산자의 축 sanity 범위. 규모가 두 자릿수 이상 어긋나면 단위 오배선이다.
+# `tokens_valid_after_ms == 0`은 **never-revoked**를 뜻하므로 반드시 허용한다(SDK가 그렇게 준다).
+_WATERMARK_MS_MIN = 10**12          # ≈2001년을 ms로
+_WATERMARK_MS_MAX = 10**14
+_IAT_SECONDS_MIN = 10**9            # ≈2001년을 초로
+_IAT_SECONDS_MAX = 10**11
+
+
+def _require_bool(value: object, label: str) -> None:
+    """⚠️ truthiness로 소비되는 필드는 **타입을 강제**한다.
+
+    저장 슬라이스가 Redis hash(값이 항상 문자열)나 느슨한 역직렬화를 쓰면 `"false"` / `"0"`이
+    **참으로 접혀 비구독자가 통과**한다. 역직렬화 경계에서 bool 복원을 강제하는 효과가 있다.
+    """
+    if type(value) is not bool:
+        raise ValueError(f"{label}: bool이어야 — got {value!r}")
+
+
+def _require_uid(value: object, label: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label}: 비어 있지 않은 str이어야 — got {value!r}")
+
 
 # ── 관측 (저장 대상 — UID 키) ────────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PremiumObservation:
     """RevenueCat entitlement를 authoritative하게 관측한 결과.
 
@@ -72,22 +108,37 @@ class PremiumObservation:
     두 의미를 이미 섞고 있는** REST 전용 상태다.
     """
 
+    uid: str
     active: bool
     verified_at_mono: float
     epoch: int
 
+    def __post_init__(self) -> None:
+        _require_bool(self.active, "PremiumObservation.active")
+        _require_uid(self.uid, "PremiumObservation.uid")
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, kw_only=True)
 class IdentityAuthorityFound:
     """`get_user()`가 돌려준 계정 권위 정보. **verdict가 아니라 관측**이다."""
 
+    uid: str
     disabled: bool
     tokens_valid_after_ms: int
     verified_at_mono: float
     epoch: int
 
+    def __post_init__(self) -> None:
+        _require_bool(self.disabled, "IdentityAuthorityFound.disabled")
+        _require_uid(self.uid, "IdentityAuthorityFound.uid")
+        if type(self.tokens_valid_after_ms) is not int:
+            raise ValueError(
+                f"IdentityAuthorityFound.tokens_valid_after_ms: int이어야 — "
+                f"got {self.tokens_valid_after_ms!r}"
+            )
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, kw_only=True)
 class IdentityAuthorityNotFound:
     """계정이 존재하지 않는다(`UserNotFoundError`).
 
@@ -97,8 +148,12 @@ class IdentityAuthorityNotFound:
     한 단계 늦게 터진다).
     """
 
+    uid: str
     verified_at_mono: float
     epoch: int
+
+    def __post_init__(self) -> None:
+        _require_uid(self.uid, "IdentityAuthorityNotFound.uid")
 
 
 IdentityObservation = Union[IdentityAuthorityFound, IdentityAuthorityNotFound]
@@ -163,7 +218,9 @@ def premium_observation_is_fresh(obs: PremiumObservation, *, now_mono: float) ->
 
     양성에 lease 상한을 쓰는 이유: 그보다 오래된 관측으로는 A1 horizon상 **이미 만료된 lease**밖에
     못 준다. 계산해서 만료를 발견하는 것보다 lookup 단계에서 재검증으로 보내는 편이 안전하다
-    (A1의 "stale fallback 결과로는 lease를 연장하지 않는다"가 구조로 참이 된다).
+    ⚠️ 이 규칙이 bound하는 것은 **관측 레코드의 나이**뿐이다. A1의 "stale fallback 결과로는
+    lease를 연장하지 않는다"는 *stale fallback 값을 관측으로 승격하지 않는다*는 **별개 불변식**이고
+    (`PremiumObservation`에는 출처를 표현할 필드도 없다), 그 G 행은 A6 verifier 슬라이스가 진다.
     """
     horizon = LEASE_MAX_SECONDS if obs.active else PREMIUM_INACTIVE_RECHECK_SECONDS
     return _within(obs.verified_at_mono, now_mono=now_mono, horizon=horizon)
@@ -184,18 +241,64 @@ def identity_observation_is_fresh(obs: IdentityObservation, *, now_mono: float) 
 def _within(verified_at_mono: float, *, now_mono: float, horizon: float) -> bool:
     """`now < verified_at + horizon` — 경계는 **stale**(`app.topic_lease.is_expired`와 같은 규약).
 
-    비유한 입력은 판정 불가이므로 stale로 접는다(fail-closed).
+    ⚠️ **축 위반은 조용히 넘기지 않고 `ValueError`로 전파**한다(A6-1: programming 오류는 verdict가
+    아니다). 이유는 이 경로에서 실패가 **완전히 무성(無聲)이기 때문**이다 — wall epoch(~1.7e9)가
+    `verified_at_mono`로 새면 `now(~1e5) < 1.7e9 + 300`이 항상 참이라 **음성 관측이 영구 fresh**가
+    되고, `premium_inactive` / `account_disabled` / `account_deleted`가 재검증 상한을 우회해
+    정상 사용자가 **영구 거부**된다(실측 확인).
+    ⚠️ `topic_lease.compute_lease_expiry`의 gross-skew 가드는 이걸 못 막는다 — **음성 verdict는
+    lease 계산을 아예 거치지 않는다.** 같은 위험을 한쪽에만 걸어 둔 비대칭이었다.
+
+    ⚠️ `topic_lease.is_expired`는 같은 상황에서 **만료로 접고 raise하지 않는다** — 그건 B1
+    전송 직전 hot path라 예외가 더 나쁘기 때문이다. 여기는 subscribe당 1회 파생 경로다.
     """
     if not (math.isfinite(verified_at_mono) and math.isfinite(now_mono)):
-        return False
+        raise ValueError(
+            f"strict_authz: 시각은 finite여야 — verified_at={verified_at_mono!r} now={now_mono!r}"
+        )
+    if verified_at_mono > now_mono + MAX_OBSERVATION_FUTURE_SKEW_SECONDS:
+        raise ValueError(
+            "strict_authz: verified_at_mono가 now보다 "
+            f"{MAX_OBSERVATION_FUTURE_SKEW_SECONDS}s 넘게 미래 — monotonic 축 위반 의심 "
+            f"(got {verified_at_mono!r}, now={now_mono!r})"
+        )
     return now_mono < verified_at_mono + horizon
 
 
 # ── 파생 ────────────────────────────────────────────────────────────────────
 
 
+def _require_revocation_axes(token_iat_seconds: object, tokens_valid_after_ms: int) -> None:
+    """이 슬라이스에서 **가장 중요한 가드** — revocation 비교의 두 피연산자 축을 검증한다.
+
+    ⚠️ 이 비교가 revoke를 결정하는 **유일한 지점**인데, 도달 가능한 오배선이 전부 fail-open이다
+    (감사 실측): watermark를 초로 / `iat`를 ms로 / 둘 중 하나가 `NaN` → 전부 비교가 False가 되어
+    **revoked 토큰이 통과**한다. 게다가 그 결과 관측은 *양성*(found+enabled)이라 신선도가 True로
+    유지되고, 만료 후 재검증도 같은 잘못된 값을 다시 기록해 **영구적**이다.
+
+    `_within`이 시각 축에 거는 것과 **같은 강도**의 정책이다 — 같은 함수 안의 두 수치 비교가
+    정반대 정책을 쓰고 있었다.
+    """
+    if type(token_iat_seconds) is not int:
+        raise ValueError(f"token_iat_seconds: int이어야(초 epoch) — got {token_iat_seconds!r}")
+    if not (_IAT_SECONDS_MIN <= token_iat_seconds < _IAT_SECONDS_MAX):
+        raise ValueError(
+            f"token_iat_seconds 축 위반 — 초 epoch이어야 하는데 {token_iat_seconds!r} "
+            f"(ms를 넘기지 않았는지 확인)"
+        )
+    # 0 = never revoked (SDK가 `validSince` 부재 시 0을 준다) — 반드시 허용한다.
+    if tokens_valid_after_ms == 0:
+        return
+    if not (_WATERMARK_MS_MIN <= tokens_valid_after_ms < _WATERMARK_MS_MAX):
+        raise ValueError(
+            f"tokens_valid_after_ms 축 위반 — 밀리초여야 하는데 {tokens_valid_after_ms!r} "
+            f"(초를 넘기지 않았는지 확인)"
+        )
+
+
 def derive_verdict(
     *,
+    uid: str,
     now_mono: float,
     premium: PremiumObservation | None,
     identity: IdentityObservation | None,
@@ -209,9 +312,24 @@ def derive_verdict(
     판정 순서는 §8.1 D5의 단계 순서를 따른다 — **identity(인증)가 premium(인가)보다 먼저**.
     identity 안에서는 SDK와 같이 **disabled가 revoked보다 먼저**다(둘 다 해당하면 disabled가 이긴다).
 
+    ⚠️ **`epoch` fence는 이 함수가 지지 않는다.** 관측에 `epoch` 필드가 실려 있지만 여기서는
+    **어떤 판정에도 쓰이지 않는다**(inertness 회귀 테스트로 잠금). 소비(lease 발급) 시점 fence는
+    호출부/저장소 몫이다(§8.1 A4 "게시만이 아니라 소비까지 fence"). 즉 이 계층이 구조로 강제하는
+    것은 **시간 신선도와 uid 결속**뿐이고, 세대(epoch) 결속은 **아직 호출부 약속**이다 —
+    다음 슬라이스가 "이미 방어됨"으로 가정하지 말 것.
+
     Args:
+        uid: 이 요청의 주체. 두 관측의 `uid`와 일치해야 한다.
         token_iat_seconds: 검증된 ID token의 `iat` 클레임(**초**). `auth_time`이 아니다.
     """
+    _require_uid(uid, "derive_verdict.uid")
+    # ⚠️ 주체 결속 — 관측이 **이 요청의 uid 것인지** 확인한다. 없으면 A의 identity + B의 premium을
+    #    섞어 넣어도 그대로 Active가 나온다(무료 사용자가 타인의 구독으로 인가). 이건 데이터 상태가
+    #    아니라 **배선 버그**이므로 verdict로 접지 않고 전파한다.
+    for obs, label in ((premium, "premium"), (identity, "identity")):
+        if obs is not None and obs.uid != uid:
+            raise ValueError(f"derive_verdict: {label} 관측의 uid 불일치 — {obs.uid!r} != {uid!r}")
+
     if identity is None or not identity_observation_is_fresh(identity, now_mono=now_mono):
         return NeedsVerification(concern=Concern.IDENTITY)
 
@@ -220,6 +338,7 @@ def derive_verdict(
     if identity.disabled:
         return Inactive(reason=InactiveReason.ACCOUNT_DISABLED)
     # ⚠️ `iat`(초) → ms 로 올려서 비교한다. strict `<` — 같으면 revoked 아님.
+    _require_revocation_axes(token_iat_seconds, identity.tokens_valid_after_ms)
     if token_iat_seconds * 1000 < identity.tokens_valid_after_ms:
         return Inactive(reason=InactiveReason.TOKEN_REVOKED)
 

@@ -75,11 +75,13 @@ def compute_lease_expiry(
         now_mono: 요청 경계에서 **1회** 읽은 `clock.mono()`.
         premium_verified_at_mono: RevenueCat entitlement를 authoritative하게 관측한 시각.
             **UID 단위**가 맞다 — 권한은 계정 속성이다. stale fallback 결과로는 갱신하지 않는다.
-        firebase_identity_verified_at_mono: `check_revoked=True` 확인 시각.
-            ⚠️ 이 값은 **검증된 토큰**(fingerprint / `auth_time`) 단위로 관측·저장돼야 한다 —
-            UID 키로 캐시하면 revoked된 구 토큰이 같은 UID의 새 토큰 검증 결과를 공유해
-            권한이 섞인다(A1). 이름이 `premium_*`과 대칭이라고 같은 키 공간이 아니다.
-            실제 저장 키 강제는 strict cache 슬라이스의 몫이다.
+        firebase_identity_verified_at_mono: 계정 권위(`get_user`) 관측 시각.
+            **UID 단위 저장이 맞다** — 저장하는 것이 *verdict*가 아니라 *관측*(disabled +
+            `tokens_valid_after_ms`)이고, 토큰별 판정은 요청마다 `iat`로 파생하기 때문이다
+            (`app/strict_authz.py`). 그래서 revoked된 구 토큰과 새 토큰이 **같은 record에서
+            서로 다른 verdict**를 얻어 A1의 권한 혼입 우려가 구조적으로 해소된다.
+            ⛔ 구 서술("검증된 토큰 fingerprint/`auth_time` 단위로 저장")은 **폐기**됐다 —
+            SDK 술어가 `auth_time`이 아니라 `iat`이고(§8.1 A1), 토큰 단위 키는 불필요하다.
 
     Raises:
         ValueError: 비유한 입력, 또는 관측 시각이 `now`보다

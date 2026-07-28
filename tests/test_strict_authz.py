@@ -33,8 +33,10 @@ from app.strict_authz import (
     identity_observation_is_fresh,
     premium_observation_is_fresh,
 )
+from app.strict_authz import MAX_OBSERVATION_FUTURE_SKEW_SECONDS
 from app.topic_lease import LEASE_MAX_SECONDS
 
+UID = "uid-alice"
 NOW = 1000.0
 IAT = 1_700_000_000          # 초 epoch
 WATERMARK_BEFORE = (IAT - 60) * 1000   # 토큰 발급 **전**에 revoke → 이 토큰은 유효
@@ -42,19 +44,26 @@ WATERMARK_AFTER = (IAT + 60) * 1000    # 토큰 발급 **후**에 revoke → 이
 
 
 def _identity(**kw):
-    base = dict(disabled=False, tokens_valid_after_ms=WATERMARK_BEFORE, verified_at_mono=NOW, epoch=1)
+    base = dict(uid=UID, disabled=False, tokens_valid_after_ms=WATERMARK_BEFORE,
+                verified_at_mono=NOW, epoch=1)
     base.update(kw)
     return IdentityAuthorityFound(**base)
 
 
 def _premium(**kw):
-    base = dict(active=True, verified_at_mono=NOW, epoch=1)
+    base = dict(uid=UID, active=True, verified_at_mono=NOW, epoch=1)
     base.update(kw)
     return PremiumObservation(**base)
 
 
+def _not_found(**kw):
+    base = dict(uid=UID, verified_at_mono=NOW, epoch=1)
+    base.update(kw)
+    return IdentityAuthorityNotFound(**base)
+
+
 def _derive(**kw):
-    base = dict(now_mono=NOW, premium=_premium(), identity=_identity(), token_iat_seconds=IAT)
+    base = dict(uid=UID, now_mono=NOW, premium=_premium(), identity=_identity(), token_iat_seconds=IAT)
     base.update(kw)
     return derive_verdict(**base)
 
@@ -111,7 +120,7 @@ class TestDecisionOrder(unittest.TestCase):
     """순서가 곧 계약이다 — 어느 reason이 나오는지가 wire 오류코드를 정한다."""
 
     def test_deleted_beats_everything(self):
-        v = _derive(identity=IdentityAuthorityNotFound(verified_at_mono=NOW, epoch=1),
+        v = _derive(identity=_not_found(),
                     premium=_premium(active=False))
         self.assertEqual(v, Inactive(reason=InactiveReason.ACCOUNT_DELETED))
 
@@ -162,7 +171,7 @@ class TestFreshnessCannotBeBypassed(unittest.TestCase):
 
     def test_stale_not_found_identity_needs_verification(self):
         """uid는 재생성될 수 있다."""
-        stale = IdentityAuthorityNotFound(verified_at_mono=NOW - IDENTITY_NEGATIVE_RECHECK_SECONDS, epoch=1)
+        stale = _not_found(verified_at_mono=NOW - IDENTITY_NEGATIVE_RECHECK_SECONDS)
         self.assertEqual(_derive(identity=stale), NeedsVerification(concern=Concern.IDENTITY))
 
 
@@ -187,12 +196,86 @@ class TestFreshnessPredicates(unittest.TestCase):
         self.assertTrue(identity_observation_is_fresh(_identity(verified_at_mono=old), now_mono=NOW))
         self.assertFalse(identity_observation_is_fresh(_identity(disabled=True, verified_at_mono=old), now_mono=NOW))
 
-    def test_non_finite_is_stale(self):
-        """비유한 입력은 판정 불가 → stale(fail-closed)."""
+    def test_non_finite_raises(self):
+        """비유한 입력은 **계약 위반**이므로 verdict로 접지 않고 전파한다(A6-1).
+
+        ⚠️ `topic_lease.is_expired`는 같은 상황에서 만료로 접는다 — 그건 B1 전송 직전 hot path라
+        예외가 더 나쁘기 때문이다. 여기는 subscribe당 1회 파생 경로라 시끄러운 편이 낫다.
+        """
         for bad in (math.nan, math.inf, -math.inf):
             with self.subTest(bad=bad):
-                self.assertFalse(premium_observation_is_fresh(_premium(verified_at_mono=bad), now_mono=NOW))
-                self.assertFalse(premium_observation_is_fresh(_premium(), now_mono=bad))
+                with self.assertRaises(ValueError):
+                    premium_observation_is_fresh(_premium(verified_at_mono=bad), now_mono=NOW)
+                with self.assertRaises(ValueError):
+                    premium_observation_is_fresh(_premium(), now_mono=bad)
+
+
+class TestAxisViolationIsNotSilent(unittest.TestCase):
+    """⚠️ **음성 관측의 무성(無聲) 영구 거부**를 막는다.
+
+    wall epoch(~1.7e9)가 `verified_at_mono`로 새면 `now(~1e5) < 1.7e9 + 300`이 항상 참이라
+    음성 관측이 **영구 fresh**가 되고, 재검증 상한이 통째로 우회돼 정상 사용자가 영원히
+    거부된다. 실측(수정 전):
+
+        premium 음성 fresh?   True
+        identity disabled fresh? True
+        identity notfound fresh? True
+        → verdict: Inactive(premium_inactive)   ← 300초가 지나도 재검증되지 않음
+
+    ⚠️ `topic_lease.compute_lease_expiry`의 gross-skew 가드는 **이 경로를 보호하지 못한다** —
+    음성 verdict는 lease 계산을 아예 거치지 않는다. 같은 위험을 한쪽에만 걸어 둔 비대칭이었다.
+    """
+
+    WALL_EPOCH = 1_753_000_000.0
+
+    def test_future_negative_premium_raises(self):
+        with self.assertRaises(ValueError):
+            premium_observation_is_fresh(
+                _premium(active=False, verified_at_mono=self.WALL_EPOCH), now_mono=NOW
+            )
+
+    def test_future_disabled_identity_raises(self):
+        with self.assertRaises(ValueError):
+            identity_observation_is_fresh(
+                _identity(disabled=True, verified_at_mono=self.WALL_EPOCH), now_mono=NOW
+            )
+
+    def test_future_not_found_identity_raises(self):
+        with self.assertRaises(ValueError):
+            identity_observation_is_fresh(
+                _not_found(verified_at_mono=self.WALL_EPOCH), now_mono=NOW
+            )
+
+    def test_derive_verdict_propagates_instead_of_denying_forever(self):
+        """파생 경로에서도 삼키지 않는다 — 조용한 `Inactive` 대신 예외."""
+        with self.assertRaises(ValueError):
+            _derive(premium=_premium(active=False, verified_at_mono=self.WALL_EPOCH))
+
+    def test_future_positive_observation_also_raises(self):
+        """양성도 마찬가지다 — 축 위반은 polarity와 무관하다."""
+        with self.assertRaises(ValueError):
+            premium_observation_is_fresh(_premium(verified_at_mono=self.WALL_EPOCH), now_mono=NOW)
+
+    def test_small_future_skew_is_tolerated(self):
+        """positive control — 미세한 미래(샘플링 지터)까지 막으면 과차단이다."""
+        self.assertTrue(premium_observation_is_fresh(
+            _premium(verified_at_mono=NOW + MAX_OBSERVATION_FUTURE_SKEW_SECONDS), now_mono=NOW))
+
+    def test_tolerance_band_is_small_because_it_is_additive(self):
+        """⚠️ 허용 skew는 **각 horizon에 그대로 가산**되므로 작아야 한다.
+
+        `topic_lease.MAX_VERIFIED_AT_FUTURE_SKEW_SECONDS`(=900)를 재사용했을 때 음성 관측 상한이
+        문서값 300초가 아니라 **1200초**가 됐다(실측). clamp로도 안 고쳐진다 — 미래 구간에서
+        `now < now + horizon`이 항상 참이라 창이 그대로 s+horizon이다.
+        """
+        self.assertLessEqual(MAX_OBSERVATION_FUTURE_SKEW_SECONDS, 5.0,
+                             "가산되는 값이므로 horizon 대비 무시할 수준이어야")
+        at = NOW + MAX_OBSERVATION_FUTURE_SKEW_SECONDS
+        self.assertTrue(premium_observation_is_fresh(_premium(verified_at_mono=at), now_mono=NOW))
+        with self.assertRaises(ValueError):
+            premium_observation_is_fresh(
+                _premium(verified_at_mono=math.nextafter(at, math.inf)), now_mono=NOW
+            )
 
 
 class TestConstants(unittest.TestCase):
@@ -228,3 +311,109 @@ class TestNeedsVerificationIsNotAWireVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRevocationAxesAreValidated(unittest.TestCase):
+    """⚠️ **감사에서 나온 fail-open 4종** — revoke 판정의 유일한 비교가 무방비였다.
+
+    수정 전 실측(전부 `Active` = revoke 무력화):
+
+        A 정상(revoked여야)  -> Inactive   ← 대조군만 정상
+        B watermark를 초로   -> Active
+        C iat를 ms로         -> Active
+        D watermark NaN      -> Active
+        E iat NaN            -> Active
+
+    같은 함수의 시각 축(`_within`)은 이미 `ValueError`를 던지고 있었는데, 정작 **인증 취소를
+    결정하는 비교**만 검증이 없었다. 게다가 그 결과 관측은 *양성*(found+enabled)이라 신선도가
+    유지돼 재검증 트리거조차 없고, 재검증해도 같은 값이 다시 기록돼 **영구적**이었다.
+    """
+
+    REVOKED_MS = (IAT + 500) * 1000
+
+    def test_watermark_in_seconds_raises(self):
+        with self.assertRaises(ValueError):
+            _derive(identity=_identity(tokens_valid_after_ms=self.REVOKED_MS // 1000))
+
+    def test_iat_in_milliseconds_raises(self):
+        with self.assertRaises(ValueError):
+            _derive(token_iat_seconds=IAT * 1000)
+
+    def test_non_int_operands_raise(self):
+        with self.assertRaises(ValueError):
+            _derive(token_iat_seconds=float(IAT))
+        with self.assertRaises(ValueError):
+            _identity(tokens_valid_after_ms=float(self.REVOKED_MS))
+
+    def test_never_revoked_zero_is_allowed(self):
+        """positive control — SDK는 `validSince` 부재 시 **0**을 준다. 막으면 안 된다."""
+        self.assertIsInstance(_derive(identity=_identity(tokens_valid_after_ms=0)), Active)
+
+    def test_correct_axes_still_work(self):
+        """positive control — 정상 축은 그대로 통과·거부한다."""
+        self.assertEqual(_derive(identity=_identity(tokens_valid_after_ms=self.REVOKED_MS)),
+                         Inactive(reason=InactiveReason.TOKEN_REVOKED))
+
+
+class TestSubjectBinding(unittest.TestCase):
+    """관측이 **이 요청의 uid 것인지** 확인한다.
+
+    없으면 A의 identity + B의 premium을 섞어 넣어도 `Active`가 나온다 — 무료 사용자가 타인의
+    구독으로 인가된다. 이 계층은 신선도를 "호출부 약속으로는 강제할 수 없다"며 내재화했으면서,
+    더 직접적인 **주체 결속**은 약속으로 남겨 뒀었다(검사할 필드조차 없었다).
+    """
+
+    def test_mixed_uid_raises(self):
+        with self.assertRaises(ValueError):
+            _derive(premium=_premium(uid="uid-bob"))
+        with self.assertRaises(ValueError):
+            _derive(identity=_identity(uid="uid-bob"))
+
+    def test_matching_uid_passes(self):
+        self.assertIsInstance(_derive(), Active)
+
+    def test_empty_uid_rejected(self):
+        with self.assertRaises(ValueError):
+            _premium(uid="")
+        with self.assertRaises(ValueError):
+            _derive(uid="")
+
+
+class TestConstructionSafety(unittest.TestCase):
+    """`kw_only` — 위치 인자 생성이 **인접한 두 int**를 조용히 뒤바꿀 수 있었다.
+
+    `IdentityAuthorityFound(False, watermark, now, epoch)`에서 watermark ↔ epoch을 바꾸면
+    `iat*1000 < 7`이 항상 False라 **어떤 토큰도 revoked로 판정되지 않았다**(fail-open).
+    프로덕션 소비자가 0인 지금이 **깨질 코드 없이 강제할 수 있는 유일한 시점**이었다.
+    """
+
+    def test_positional_construction_is_rejected(self):
+        with self.assertRaises(TypeError):
+            IdentityAuthorityFound(UID, False, 0, NOW, 1)
+        with self.assertRaises(TypeError):
+            PremiumObservation(UID, True, NOW, 1)
+
+    def test_truthy_strings_are_rejected(self):
+        """저장 슬라이스가 Redis hash를 쓰면 `"false"`가 참으로 접혀 비구독자가 통과한다."""
+        for bad in ("false", "0", 1, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    _premium(active=bad)
+                with self.assertRaises(ValueError):
+                    _identity(disabled=bad)
+
+
+class TestEpochIsInertHere(unittest.TestCase):
+    """⚠️ `epoch`은 이 계층의 **어떤 판정에도 쓰이지 않는다** — 계약으로 못 박는다.
+
+    필드가 관측에 실려 있어 "여기서 검사되겠거니" 오해하기 쉽다. 소비(lease 발급) 시점 fence는
+    호출부/저장소 몫이므로(§8.1 A4), 다음 슬라이스가 **"이미 방어됨"으로 가정하지 못하게** 한다.
+    """
+
+    def test_verdict_is_identical_regardless_of_epoch(self):
+        outs = {
+            _derive(premium=_premium(epoch=e), identity=_identity(epoch=-e))
+            for e in (0, -1, 1, 7, 10**9)
+        }
+        self.assertEqual(len(outs), 1, "epoch은 파생에 영향을 주지 않는다(의도)")
+        self.assertEqual(outs.pop(), _derive())
