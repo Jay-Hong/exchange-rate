@@ -16,6 +16,7 @@ test-first로 잠근 뒤에 최소 배선해야 원인 분리가 된다.
 9. 요청당 단일 `now_mono` + 3-way lease 계산
 """
 import asyncio
+import typing
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +29,7 @@ from app.topic_lease_registry import (
     ConnectionTerminated,
     ConnectionTerminatedError,
     Discarded,
+    TransitionResult,
     Rejected,
     ReentrantRegistryCall,
     TopicLeaseRegistry,
@@ -62,11 +64,20 @@ async def _apply(registry, cache, ws, topics, *, uid=UID, snapshot=None, rejecte
                  now_mono=1000.0, premium=1000.0, identity=1000.0, send_ack=_ok_ack):
     if snapshot is None:
         snapshot = cache.snapshot(uid)
-    return await registry.apply_subscribe(
+    result = await registry.apply_subscribe(
         ws=ws, uid=uid, topics=topics, rejected_topics=rejected, snapshot=snapshot, cache=cache,
         now_mono=now_mono, premium_verified_at_mono=premium,
         identity_verified_at_mono=identity, send_ack=send_ack,
     )
+    # ⛔ **거의 모든 테스트가 지나가는 지점**이라, 여기서 보면 "반환값은 공개 union 안"이
+    #    스위트 전체에 강제된다. 그전에는 이 성질이 **우연히** 지켜졌다 — 행동 테스트들이
+    #    정확한 타입을 단언한 덕이었고, 부수효과만 보는 테스트는 union 밖 타입도 통과시켰다.
+    #    AST trip-wire는 `return X(...)` 형태만 보므로 `r = X(...); return r`이나 별칭 생성을
+    #    놓친다(실측). 이 단언이 그 구멍을 메운다.
+    assert type(result) in typing.get_args(TransitionResult), (
+        f"union 밖 결과 타입이 반환됐다: {type(result).__name__}"
+    )
+    return result
 
 
 class TestIdentityAndStates(unittest.IsolatedAsyncioTestCase):
@@ -1301,13 +1312,17 @@ class TestResultTypeMatchesConnectionLiveness(unittest.IsolatedAsyncioTestCase):
             {module.Applied, module.Discarded, module.Rejected, module.ConnectionTerminated},
         )
 
-    def test_every_result_constructed_on_a_return_path_is_in_the_union(self):
-        """⛔ union만 고정하면 "union 밖 타입을 반환"하는 경로는 못 막는다.
+    def test_directly_constructed_return_values_are_in_the_union(self):
+        """소스 수준 trip-wire — `return X(...)`로 **직접 생성**되는 타입만 본다.
 
-        전이 진입점과 결과를 만드는 두 helper의 `return` 경로에서 생성되는 **모듈 정의 타입**은
-        전부 union 안이어야 한다.
-        ⚠️ 한계: 검사 범위가 세 메서드 이름이다. 결과를 만드는 helper가 더 생기면 여기 추가해야
-        한다 — 완전 강제는 아니고, 개선점은 이름 규칙이 아니라 **반환 경로**를 본다는 것이다.
+        ⚠️ **이름이 약속하는 범위를 정확히 적는다.** 이 테스트는 "모든 반환 경로"를 보장하지
+        않는다. 실측으로 확인한 사각지대:
+          - `result = ConnectionClosed(...)` 다음 `return result` (Return 안에 Call이 없다)
+          - 별칭·attribute 경유 생성(`return _make(...)`) — func가 모듈 타입 이름이 아니다
+          - `result_makers`에 없는 새 helper를 통한 반환
+        AST에 dataflow를 붙여 이걸 메우는 대신, **실제 반환값**을 보는 `_apply`의 런타임 단언이
+        본 그물이다(탐지기를 키우면 탐지기 자체가 버그 원천이 된다 — 이 세션에서 두 번 겪었다).
+        이 테스트는 테스트가 **실행하지 않는** 반환 경로에 대한 보조 방어로 남긴다.
         """
         import ast
         import inspect
