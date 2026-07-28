@@ -630,6 +630,26 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   registry를 갱신하는 read-then-update 경쟁이 남는다. 같은 lock이 **UID binding · lease CAS · ack/`reauth_required` 송신 ·
   registry 활성화**를 함께 직렬화해야 한다.
   - 순서 고정: **`ack` → registry 활성화(live 대상 편입) → `snapshot`**. 없으면 ack 이전 live 수신, stale 통지 역전.
+  - **요청 단위 트랜잭션 (구현: `app/topic_lease_registry.py`의 `apply_subscribe`)** —
+    한 subscribe 요청 = **lock 1회 · ack 1건 · 전부 아니면 전무**. topic 단위 API로는 성립할 수 없다:
+    (i) topic마다 ack을 보내면 §8-B의 "요청당 1건"과 클라의 `request_id` 상관이 깨지고,
+    (ii) 마지막 topic에서만 ack을 보내면 앞의 topic들이 **ack보다 먼저 활성화**되어 위 순서 고정이 무효가 된다.
+    또 topic마다 lock을 잡았다 놓으면 그 사이 sweep·unsubscribe가 끼어들어 ack이
+    **한 번도 존재한 적 없는 상태**를 광고할 수 있다(D2의 "단일 snapshot" 위반).
+  - **ack 자료는 registry가 만들어 sender에 넘긴다** — sender가 registry 조회로 만들면 그 시점
+    새 lease는 아직 미활성이라 **보이지 않는다**. ack이 방금 수락한 topic을 빠뜨리고, 클라는 구독이
+    드롭됐다고 결론짓는데 서버는 곧바로 그 topic을 발행한다.
+  - **`send_ack` 계약** — lock을 쥔 채 실행되므로: ① 성공 시 `True` 반환(⛔ `wait_for`의 제어 흐름은
+    배달의 증거가 아니다 — sender가 `CancelledError`를 삼키고 정상 반환하면 `wait_for`도 **정상 반환**한다),
+    ② `CancelledError`를 삼키거나 shield 금지, ③ **자체 timeout 금지**(예산은 registry 소유. sender가 던진
+    `TimeoutError`는 우리 예산 만료와 구별 불가라 호출자 버그가 "죽은 클라"로 오분류된다),
+    ④ registry 재진입 금지(`asyncio.Lock`은 재진입 불가 → hang. 구현은 **task 동일성**으로 감지해
+    `ReentrantRegistryCall`로 시끄럽게 실패시킨다. ws만 보면 sweep·teardown의 정당한 대기까지 오탐한다).
+  - **ack 실패 = 연결 사망**(B2a와 동일 정책) — "발급 안 함"으로 끝내면 안 된다.
+    취소는 이미 transport 버퍼에 들어간 프레임을 **되돌리지 못하므로**(websockets legacy는 프레임 전체를
+    버퍼에 넣은 뒤 drain을 await한다), 역압이 풀리면 그 ack이 **나중에 배달**된다 →
+    클라만 lease를 가졌다고 믿고 서버엔 없는 상태(데이터 0·오류 0·통지 대상 lease도 없음).
+    → registry가 직접 tombstone을 찍어 같은 소켓의 재발급을 fail-closed로 막고, 호출자는 소켓을 닫는다.
   - **snapshot build는 lock 밖**에서(무거움), **전송 직전 lock을 다시 잡아 lease를 재검증**한다(B1과 결합).
   - 인증·RevenueCat·DB 조회도 lock 밖에서 하고, lock 안에서 UID/`lease_id`를 재확인한 뒤 전이를 확정한다.
 
@@ -657,6 +677,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
       권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
   - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 메시지 1건이
     새 UID로 갈 수 있다 → 전송도 lock 안에서 하거나, 전송 직후 결과를 폐기할 수 있어야 한다(B4와 일관).
+    - ⛔ 단 **publish fanout이 연결 lock을 잡으면 안 된다**. `publish_topic`은 구독자를 **순차 루프**로
+      돌므로(`app/topic_dispatcher.py`), 역압 연결 A가 ack으로 자기 lock을 최대 5초 쥔 사이 루프가 A에서
+      막히면 **B·C의 tick까지 5초 밀린다** — 연결별 lock으로 얻으려던 격리가 통째로 사라진다.
+      → B1 재검증은 **lock-free 조회**(lease identity + 만료 비교)로 두고, (e)의 좁은 경쟁(재바인딩
+      직전 in-flight 1건)은 감수하거나 fanout을 연결별로 격리한 뒤에 lock을 도입한다.
 
 #### C. 상태 전이
 
@@ -668,6 +693,16 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     ack의 **`active_subscriptions`(그 연결의 최종 구독 전체 + topic별 `lease_id`·잔여 duration)** 로 클라가 서버 상태에 수렴한다(D2).
     ⚠️ ack이 **이번 요청 topic 결과만** 담으면, B가 일부 topic만 요청했을 때 클라는 언급되지 않은 A 시절 topic을
     여전히 accepted로 오인한다 — "ack이 권위 있는 응답"이 사실이 되려면 전체 상태를 실어야 한다.
+  - **purge된 topic을 같은 요청이 다시 잡으면 `removed_topics`에 넣지 않는다** — 그건 제거가 아니라
+    **교체**이고(새 `lease_id`), 한 topic을 `removed`와 `accepted`에 동시에 실으면 클라가 모순된 지시를 받는다.
+    `active_subscriptions`가 새 `lease_id`로 이미 권위를 갖는다.
+  - ⛔ **미결(배선 진입 전 필수) — 이 purge는 B5(d)의 stale 요청 방어와 결합되어야 한다.**
+    purge는 *적용하기로 한* cross-UID 전이의 **의미**만 정하고, *적용할지*는 정하지 않는다.
+    방어가 없으면 A→B 전환 뒤 지연 도착한 **구 UID(A) subscribe**(C4 retry, A 토큰은 아직 유효)가
+    **B의 구독을 purge하고 A로 재바인딩**한다 — reject 정책이었다면 무해했을 요청이 purge에서는
+    **파괴적**이 된다. B5(d)의 "둘 중 택일"은 C1에서 결정된다고 적혀 있으나 **아직 결정되지 않았다**
+    (클라 소유 identity generation은 §8-B에 필드가 없다). registry는 이 전이를 그대로 구현했으므로,
+    **배선 슬라이스는 B5(d)를 닫기 전에 진입하면 안 된다.**
   - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS FXiApp.swift:124-126은 signedOut에서만 WS stop /
     AuthService listener의 account-switch window). 소켓이 살아 있는 채 UID만 바뀐다.
     그리고 이건 **서버 측 인가 경계**라 클라 teardown 가정에 기대면 안 된다.
@@ -680,6 +715,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **lock 안에서 만료 `lease_id`를 원자적으로 claim/mark** → 그 다음 통지 → 제거. "발신 후 제거"만으로는
     send hang 시 다음 sweep이 **같은 `lease_id`를 중복 통지**한다.
   - 제거·갱신은 `(ws, topic, lease_id)` **CAS** — 자기 lease일 때만. 갱신된 lease는 보존된다.
+  - ⚠️ **sweeper의 lock 획득은 blocking이 아니다** — ack이 최대 `ACK_TIMEOUT_SECONDS` 동안 연결 lock을
+    쥐므로(B4), 단일 sweeper가 연결을 순회하며 무한 대기하면 역압 연결 K개에 대해 한 사이클이
+    최대 5s×K 늘어난다. 그러면 **무관한 다른 연결**의 만료 통지가 D-const의 "만료→통지 10초"
+    관측 계약을 넘긴다(보안 상한은 B1이 지키므로 유출은 아니다).
+    → 짧은 상한으로 시도하고 경합 시 **그 연결만 건너뛰어 다음 사이클로 미룬다**(지연 상한이 sweep 주기 1회로 유지).
   - `send_json` 실패·timeout 시 **소켓 전체를 정리**한다(부분 상태 잔존 금지).
   - **claim된 항목(`claimed_expired`)은 제거 전이라도 `get_subscribers`·`send_if_authorized`에서 즉시 제외**된다.
     아니면 통지를 보내는 동안 live publish가 다시 통과한다.
