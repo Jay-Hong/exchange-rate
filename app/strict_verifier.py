@@ -197,6 +197,7 @@ async def verify_strict(
     cache: StrictObservationCache,
     premium_provider,
     identity_provider,
+    single_flight=None,
 ) -> StrictVerification:
     """관측이 부족하면 authority에 물어 채운 뒤 3-state를 돌려준다.
 
@@ -263,23 +264,45 @@ async def verify_strict(
 
         # ⚠️ 조회 결과가 판정 불가면 **아무것도 저장하지 않는다**.
         # 판정 불가를 저장하면 그 창 동안 재시도가 무의미해진다.
-        if concern is Concern.IDENTITY:
-            observation = _identity_observation(
-                await identity_provider(uid), uid=uid, snapshot=snapshot, clock=clock
+        outcome: dict = {}
+
+        async def _fetch_and_store() -> None:
+            """A5가 합치는 단위 — authority 조회 + CAS 저장까지가 한 flight다.
+
+            조회와 저장을 한 덩어리로 두는 건 **설계 선택**이다 — 합쳐진 대기자가 같은 관측을
+            각자 쓰는 상황 자체를 없앤다. (저장소의 CAS·동률 규칙이 그 상황도 처리하므로
+            "이렇게 안 하면 깨진다"고 주장하지는 않는다.)
+            """
+            if concern is Concern.IDENTITY:
+                obs = _identity_observation(
+                    await identity_provider(uid), uid=uid, snapshot=snapshot, clock=clock
+                )
+            else:
+                obs = _premium_observation(
+                    await premium_provider(uid), uid=uid, snapshot=snapshot, clock=clock
+                )
+            outcome["observation"] = obs
+            if obs is None:
+                return
+            outcome["put"] = (
+                cache.put_identity(obs, expected_epoch=snapshot.epoch)
+                if concern is Concern.IDENTITY
+                else cache.put_premium(obs, expected_epoch=snapshot.epoch)
             )
+
+        if single_flight is None:
+            await _fetch_and_store()
         else:
-            observation = _premium_observation(
-                await premium_provider(uid), uid=uid, snapshot=snapshot, clock=clock
-            )
-        if observation is None:
+            # ⚠️ flight가 끝나도 **그 결과값을 쓰지 않는다** — 다음 반복이 저장소에서 다시 읽어
+            # 재파생한다(§A5). 합쳐진 대기자는 `outcome`이 비어 있는 게 정상이다.
+            await single_flight.run((uid, snapshot.epoch, concern), _fetch_and_store)
+            if not outcome:
+                continue  # 다른 요청이 대신 처리했다 — 저장소에서 확인하러 돌아간다
+
+        if outcome["observation"] is None:
             return TemporarilyUnavailable(concern=concern)
 
-        put = (
-            cache.put_identity(observation, expected_epoch=snapshot.epoch)
-            if concern is Concern.IDENTITY
-            else cache.put_premium(observation, expected_epoch=snapshot.epoch)
-        )
-        if isinstance(put, PutAccepted):
+        if isinstance(outcome["put"], PutAccepted):
             written_in_epoch.add(concern)
             continue  # 진행 — 다음 반복이 나머지 concern을 본다
         contention_left -= 1

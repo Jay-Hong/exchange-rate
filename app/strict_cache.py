@@ -174,7 +174,8 @@ class StrictObservationCache:
 
     공유 flight의 결과는 관측 값을 실어 나르지 않는다. waiter는 flight 완료 후 `snapshot()`을
     **다시 떠서** 재파생한다 — 그러면 거부된 경우 관측이 없어 자연히 `NeedsVerification`이 되고
-    다음 owner가 된다. flight 키는 `(uid, epoch)`다.
+    다음 owner가 된다. flight 키는 **`(uid, epoch, concern)`** — 정본과 그 근거는
+    `app/strict_single_flight.py`에 있다.
     """
 
     def __init__(self) -> None:
