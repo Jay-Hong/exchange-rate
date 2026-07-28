@@ -576,21 +576,41 @@ class TopicLeaseRegistry:
         )
 
     # ── 조회 ────────────────────────────────────────────────────────────
-    def active_lease(self, ws, topic: str) -> Optional[Lease]:
-        """**인가 응답**이다 — 이 연결에서 지금 이 topic을 보낼 수 있는가.
+    def authorized_lease(self, ws, topic: str, *, now_mono: float) -> Optional[Lease]:
+        """**인가 응답** — 이 연결에서 **지금** 이 topic을 보낼 수 있는가(§B1).
 
-        **활성** lease만 보인다(미활성은 존재하되 전송 대상이 아니다).
-        lock을 잡지 않는다(§B1 전송 직전 재검증이 이 경로를 쓴다 — 거기서 lock을 잡으면
-        느린 한 연결의 ack이 fanout 전체를 지연시킨다).
+        §B1의 검사 항목 전부를 한 호출로 답한다: 활성 lease가 존재하고(미활성은 존재하되
+        전송 대상이 아니다), tombstone이 없고, **아직 만료되지 않았다**.
+
+        ⛔ 구 이름은 `active_lease`였고 시각을 받지 않았다 — docstring은 "인가 응답"이라
+        주장하면서 §B1이 요구하는 `now < expires_at`을 **보지 않았다**(실측: 만료 10000초
+        뒤에도 lease를 반환). sweep이 늦거나 아직 미배선이면 그 답을 믿는 전송 경로가
+        영원히 통과한다. 그래서 시각을 **필수 인자**로 만들었다 — 만료를 확인하지 않은
+        답 자체를 얻을 수 없어야 오용이 불가능하다(메서드를 둘로 나누면 틀린 쪽을 고를 수 있다).
+
+        만료 판정은 `is_expired`에 위임한다 — 경계 포함·비유한 fail-closed 규약(§A2)을
+        여기서 다시 쓰면 두 곳이 어긋난다.
+
+        lock을 잡지 않는다(§B5(e) — 전송 경로에서 연결 lock을 잡으면 느린 한 연결의 ack이
+        fanout 전체를 지연시킨다).
 
         ⛔ **tombstone에서 즉시 fail-closed다.** tombstone이 신규 전이만 막으면 부족하다:
         호출자의 close가 지연되거나 실패하면 죽었다고 판정한 소켓으로 **기존 UID의 데이터가
         계속** 나간다. cross-UID 상황에서는 그게 곧 entitlement 우회다 — A의 KRX lease가
         살아 있는 채로, 클라는 (늦게 배달된 ack을 보고) B 세션이라고 믿는다.
+
+        ⚠️ **C3 sweep은 이 메서드를 쓸 수 없다** — sweep이 찾아야 하는 것은 정확히 여기서
+        걸러지는 **만료된** lease다. 그건 열거 API(C-API 1)의 몫이고, 그 슬라이스가 자기
+        접근자를 갖는다. **이 메서드를 만료 무시로 되돌려 sweep에 재사용하지 말 것.**
         """
         if ws in self._closed:
             return None
-        return self._active.get(ws, {}).get(topic)
+        lease = self._active.get(ws, {}).get(topic)
+        if lease is None:
+            return None
+        if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
+            return None
+        return lease
 
     def identity_generation(self, ws) -> int:
         """§D2의 연결별 generation. 미바인딩은 0.
@@ -607,7 +627,7 @@ class TopicLeaseRegistry:
         """현재 바인딩된 UID — **기록**이다.
 
         ⚠️ 인가 판정에 쓰지 말 것. tombstone을 보지 않으므로 죽은 연결에서도 값이 남는다.
-        인가는 `active_lease`(fail-closed)를 거친다.
+        인가는 `authorized_lease`(만료+tombstone fail-closed)를 거친다.
         """
         return self._uids.get(ws)
 
@@ -620,7 +640,7 @@ class TopicLeaseRegistry:
 
         ⚠️ id를 안 보면 구 sweep이 **갱신된** lease를 지워 살아 있는 구독이 사라진다.
         ⚠️ **연결 lock을 잡는다.** 안 잡으면 이 API가 B4 우회로가 된다.
-        ⚠️ **tombstone을 보지 않는다** — `active_lease`와 의도적으로 비대칭이다. 죽은 연결에서도
+        ⚠️ **tombstone을 보지 않는다** — `authorized_lease`와 의도적으로 비대칭이다. 죽은 연결에서도
         teardown·sweep의 정리는 계속 돌아야 하고, 이건 인가 응답이 아니라 **상태 변경**이다.
         이미 lock을 쥔 곳에서는 `_remove_locked`를 쓴다.
         """

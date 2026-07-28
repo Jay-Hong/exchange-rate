@@ -787,8 +787,12 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    재인증과 경쟁하면 CAS가 실패해 **사용자가 끈 구독이 lease 만료까지 계속 흐른다**.
    ⚠️ **tombstone 위에서도 제거는 성립해야 한다** — D8은 fail-open을 금지한다(subscribe의 거부 규칙을
    그대로 재사용하면 정확히 반대가 된다).
-6. **B1을 한 번에 답하는 조회** — `active_lease`는 `now`를 받지 않아 **만료를 보지 않는다**. "인가 응답"으로
-   문서화해 놓고 만료 확인이 빠져 있어, sweeper가 늦거나 미배선이면 만료 후에도 계속 통과한다.
+6. ~~**B1을 한 번에 답하는 조회**~~ — **닫힘**. `authorized_lease(ws, topic, *, now_mono)`가
+   identity + tombstone + `now < expires_at`을 한 호출로 답한다. 시각은 **필수 인자**다 —
+   만료를 확인하지 않은 답 자체를 얻을 수 없어야 오용이 불가능하다(메서드를 둘로 나누면
+   틀린 쪽을 고를 수 있다). 만료 판정은 `is_expired`에 위임한다(§A2 경계 규약 단일 소스).
+   ⚠️ C3 sweep은 이걸 쓸 수 없다 — 찾아야 하는 것이 정확히 여기서 걸러지는 **만료된** lease다.
+   그건 1번(열거 API)의 몫이고, **이 메서드를 만료 무시로 되돌려 재사용하지 말 것**.
 7. **B5(d) stale 방어 파라미터** — 클라 소유 identity generation을 받든 reject 모드를 두든 **시그니처가 바뀐다**.
    C1의 purge는 "적용하기로 한" 전이의 의미만 정하고 "적용할지"는 정하지 않는다(위 C1 미결 참조).
 8. **ack의 `operation`과 per-topic 거부 사유** (§8-B/D2) — 지금 ack은 registry(accepted/removed/active)와
