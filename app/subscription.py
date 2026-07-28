@@ -217,6 +217,9 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
         logger.error("REVENUECAT_API_KEY 미설정")
         return ProviderMisconfigured()
 
+    # ⚠️ **전송 예외만** 여기서 잡는다. 광범위 `except Exception`으로 감싸면 응답 **형식 오류**와
+    #    우리 쪽 **프로그래밍 오류**까지 retryable로 접혀 A6-1의 3-bucket 계약이 무너진다
+    #    (실측: JSON이 list / `premium`이 문자열 / `subscriber`가 문자열 → 전부 ProviderUnavailable이었다).
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
@@ -226,53 +229,63 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
                     "Content-Type": "application/json",
                 },
             )
-
-        if response.status_code == 200:
-            try:
-                data = response.json()
-            except ValueError:
-                logger.warning("RevenueCat API JSON 파싱 실패", extra={"user_id": user_id})
-                return ProtocolViolation(detail="json")
-
-            entitlements = data.get("subscriber", {}).get("entitlements", {})
-            premium = entitlements.get("premium")
-
-            if not premium:
-                return Determined(is_premium=False)  # 구독 없음 (정상 확인)
-
-            expires = premium.get("expires_date")
-            if not expires:
-                # lifetime entitlement
-                return Determined(is_premium=True)
-
-            try:
-                expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-            except Exception:
-                logger.warning("RevenueCat expires_date 파싱 실패", extra={"user_id": user_id})
-                return ProtocolViolation(detail="expires_date")
-
-            return Determined(is_premium=expires_dt > clock.wall())
-
-        if response.status_code == 404:
-            # ✅ 사용자 없음: 새 사용자, "비구독"으로 캐시 OK
-            return Determined(is_premium=False)
-
-        status = response.status_code
-        logger.warning(
-            "RevenueCat API 응답 오류",
-            extra={"status": status, "user_id": user_id},
-        )
-        if status in _TRANSIENT_STATUSES or status >= 500:
-            return ProviderUnavailable(status=status)
-        if status in _MISCONFIGURED_STATUSES:
-            return ProviderMisconfigured(status=status)
-        if status == 400:
-            return BadRequest()
-        return ProtocolViolation(detail=f"unexpected status {status}")
-
-    except Exception as e:
+    except httpx.RequestError as e:
+        # 연결·타임아웃·읽기 실패 등 실제 전송 계층 오류 (`ConnectError`/`ReadTimeout` 등의 상위 타입)
         logger.warning("RevenueCat API 호출 실패", extra={"error": str(e)})
         return ProviderUnavailable()
+
+    if response.status_code == 200:
+        try:
+            data = response.json()
+        except ValueError:
+            logger.warning("RevenueCat API JSON 파싱 실패", extra={"user_id": user_id})
+            return ProtocolViolation(detail="json")
+
+        # 응답 **형식**이 계약을 벗어난 경우 — dict가 아닌 body, 문자열 entitlements 등.
+        # 누락 키의 `{}` 기본값 의미는 그대로 두고(= 구독 없음), **타입이 틀린 경우만** 위반으로 본다.
+        try:
+            entitlements = data.get("subscriber", {}).get("entitlements", {})
+            premium = entitlements.get("premium")
+            expires = premium.get("expires_date") if premium else None
+        except (AttributeError, TypeError) as e:
+            logger.warning(
+                "RevenueCat 응답 형식 오류", extra={"user_id": user_id, "error": str(e)}
+            )
+            return ProtocolViolation(detail="shape")
+
+        if not premium:
+            return Determined(is_premium=False)  # 구독 없음 (정상 확인)
+
+        if not expires:
+            # lifetime entitlement
+            return Determined(is_premium=True)
+
+        try:
+            expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError):
+            # 문자열이 아니거나 형식이 틀림 — 둘 다 계약 위반이다.
+            # ⚠️ `except Exception`으로 넓히지 말 것: 프로그래밍 오류를 삼킨다.
+            logger.warning("RevenueCat expires_date 파싱 실패", extra={"user_id": user_id})
+            return ProtocolViolation(detail="expires_date")
+
+        return Determined(is_premium=expires_dt > clock.wall())
+
+    if response.status_code == 404:
+        # ✅ 사용자 없음: 새 사용자, "비구독"으로 캐시 OK
+        return Determined(is_premium=False)
+
+    status = response.status_code
+    logger.warning(
+        "RevenueCat API 응답 오류",
+        extra={"status": status, "user_id": user_id},
+    )
+    if status in _TRANSIENT_STATUSES or status >= 500:
+        return ProviderUnavailable(status=status)
+    if status in _MISCONFIGURED_STATUSES:
+        return ProviderMisconfigured(status=status)
+    if status == 400:
+        return BadRequest()
+    return ProtocolViolation(detail=f"unexpected status {status}")
 
 
 def _result_to_legacy_tuple(result: RevenueCatResult) -> tuple[bool, bool]:
@@ -296,8 +309,18 @@ async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[
     ⚠️ 이 함수는 **REST 전용 adapter**로 남는다. `tests/test_subscription_clock.py`가
     `patch.object(subscription, "_check_revenuecat_entitlement", ...)`로 이 이름을 잡으므로
     모듈 레벨 함수 위치를 옮기지 말 것. strict 경로는 `fetch_revenuecat_result`를 쓴다.
+
+    ⚠️ **광범위 `except`가 여기에만 있는 이유**: provider는 예상 밖 예외를 **그대로 전파**해야
+    strict(§8.1 A6-1)가 programming 오류를 retryable로 오인하지 않는다. 반면 REST는 구 동작이
+    "무슨 예외든 `(False, False)`"였으므로 **그 되접기를 이 adapter가 떠안는다** —
+    behavior-change-0은 provider가 아니라 여기서 지켜진다.
     """
-    return _result_to_legacy_tuple(await fetch_revenuecat_result(user_id, clock=clock))
+    try:
+        result = await fetch_revenuecat_result(user_id, clock=clock)
+    except Exception as e:  # noqa: BLE001 — REST 호환 경계(위 docstring). strict는 이걸 하지 않는다.
+        logger.warning("RevenueCat API 호출 실패", extra={"error": str(e)})
+        return (False, False)
+    return _result_to_legacy_tuple(result)
 
 
 async def verify_premium_status(user_id: str, *, clock: Optional[Clock] = None) -> PremiumStatus:

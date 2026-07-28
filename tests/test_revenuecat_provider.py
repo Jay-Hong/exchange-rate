@@ -23,6 +23,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import httpx
+
 from app import subscription
 from app.clock import Clock
 from app.subscription import (
@@ -123,7 +125,13 @@ SCENARIOS = [
     ("409 unexpected 4xx", _FakeResponse(409),                                      (False, False), ProtocolViolation),
     ("malformed JSON",    _FakeResponse(200, raises=ValueError("not json")),        (False, False), ProtocolViolation),
     ("malformed date",    _FakeResponse(200, _entitlement_payload(_BAD_DATE)),      (False, False), ProtocolViolation),
-    ("network error",     RuntimeError("connection reset"),                         (False, False), ProviderUnavailable),
+    ("transport error",   httpx.ConnectError("connection reset"),                   (False, False), ProviderUnavailable),
+    ("read timeout",      httpx.ReadTimeout("slow"),                                (False, False), ProviderUnavailable),
+    # 응답 **형식** 위반 — 구 broad except에서는 전부 ProviderUnavailable(retryable)로 접혔다.
+    ("body not an object", _FakeResponse(200, [1, 2, 3]),                           (False, False), ProtocolViolation),
+    ("subscriber is str", _FakeResponse(200, {"subscriber": "nope"}),               (False, False), ProtocolViolation),
+    ("premium is str",    _FakeResponse(200, _entitlement_payload("yes")),          (False, False), ProtocolViolation),
+    ("expires is number", _FakeResponse(200, _entitlement_payload({"expires_date": 12345})), (False, False), ProtocolViolation),
 ]
 
 
@@ -206,9 +214,9 @@ class TestTypedResult(unittest.IsolatedAsyncioTestCase):
             got = await fetch_revenuecat_result("u", clock=_clock())
         self.assertEqual(got.status, 503)
 
-    async def test_network_error_has_no_status(self):
+    async def test_transport_error_has_no_status(self):
         """HTTP 응답이 없었으므로 status는 None — 있는 척하면 텔레메트리가 거짓이 된다."""
-        with _patch_http(RuntimeError("boom")), patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+        with _patch_http(httpx.ConnectError("boom")), patch.object(subscription, "REVENUECAT_API_KEY", "k"):
             got = await fetch_revenuecat_result("u", clock=_clock())
         self.assertIsInstance(got, ProviderUnavailable)
         self.assertIsNone(got.status)
@@ -239,3 +247,64 @@ class TestAdapterEquivalence(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnexpectedErrorsPropagate(unittest.IsolatedAsyncioTestCase):
+    """A6-1 핵심 — **programming 오류는 verdict가 아니다.**
+
+    provider는 예상 밖 예외를 **그대로 전파**해야 strict 경로가 그것을 retryable로 오인하지
+    않는다. REST 호환(`(False, False)`)은 **adapter가 떠안는다**.
+
+    ⚠️ 이 클래스가 잡는 회귀: provider를 광범위 `except Exception`으로 되돌리는 변경.
+    구 코드가 정확히 그랬고, JSON이 list인 경우·`premium`이 문자열인 경우까지
+    `ProviderUnavailable`(retryable)로 접혔다(실측 확인 후 이 슬라이스에서 교정).
+    """
+
+    async def test_provider_propagates_unexpected_exception(self):
+        with _patch_http(RuntimeError("bug in our code")):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                with self.assertRaises(RuntimeError):
+                    await fetch_revenuecat_result("u", clock=_clock())
+
+    async def test_adapter_absorbs_it_for_rest_compatibility(self):
+        """같은 예외가 REST에서는 구 동작 그대로 `(False, False)`여야 한다."""
+        with _patch_http(RuntimeError("bug in our code")):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                got = await _check_revenuecat_entitlement("u", clock=_clock())
+        self.assertEqual(got, (False, False))
+
+    async def test_clock_failure_is_not_swallowed_as_unavailable(self):
+        """주입 clock이 터지는 건 우리 버그다 — retryable로 접히면 원인이 영영 안 보인다."""
+
+        def _boom() -> datetime:
+            raise RuntimeError("clock exploded")
+
+        clock = Clock(wall=_boom, mono=lambda: 0.0)
+        with _patch_http(_FakeResponse(200, _entitlement_payload(_ACTIVE))):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                with self.assertRaises(RuntimeError):
+                    await fetch_revenuecat_result("u", clock=clock)
+
+    async def test_date_block_does_not_swallow_arbitrary_exceptions(self):
+        """`expires_date` 해석 블록도 **좁게** 잡아야 한다.
+
+        ⚠️ 이 테스트가 없으면 그 블록의 `except (AttributeError, TypeError, ValueError)`를
+        `except Exception`으로 되돌려도 **아무 테스트도 red가 되지 않는다**(무력화로 실증).
+        형식 오류(ValueError·TypeError·AttributeError)는 ProtocolViolation이 맞지만,
+        그 밖의 예외는 우리 버그이므로 전파돼야 한다.
+        """
+
+        class _ExplodingExpires:
+            def __bool__(self):
+                return True
+
+            def replace(self, *args, **kwargs):
+                raise RuntimeError("bug in our parsing")
+
+        payload = _entitlement_payload(
+            {"product_identifier": "p", "expires_date": _ExplodingExpires()}
+        )
+        with _patch_http(_FakeResponse(200, payload)):
+            with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+                with self.assertRaises(RuntimeError):
+                    await fetch_revenuecat_result("u", clock=_clock())
