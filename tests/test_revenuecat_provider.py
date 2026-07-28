@@ -152,7 +152,7 @@ SCENARIOS = [
 ]
 
 
-class TestLegacyTupleCharacterization(unittest.IsolatedAsyncioTestCase):
+class TestLegacyTupleContract(unittest.IsolatedAsyncioTestCase):
     """`(is_premium, should_cache)` 매핑을 표로 잠근다.
 
     ⚠️ 이 표에서 `(False, False)` 행이 여러 개인 것이 **핵심**이다 — typed provider가 내부적으로
@@ -165,7 +165,7 @@ class TestLegacyTupleCharacterization(unittest.IsolatedAsyncioTestCase):
     불변인 것: **정상·예외·전송·HTTP 상태 경로**의 REST 결과.
     """
 
-    async def test_each_scenario_preserves_legacy_tuple(self):
+    async def test_each_scenario_matches_current_rest_contract(self):
         for label, result, expected, _variant in SCENARIOS:
             with self.subTest(scenario=label):
                 with _patch_http(result), patch.object(subscription, "REVENUECAT_API_KEY", "k"):
