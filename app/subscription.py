@@ -210,14 +210,17 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
     lease horizon의 monotonic 축(§8.1 A2)과 목적이 다르므로 "일관성" 명목으로 바꾸지 말 것.
     비교는 **strict `>`** — 정확히 만료 시각이면 만료다(characterization으로 잠금).
 
-    ⚠️ **`premium` 객체의 truthiness가 분기를 가른다** — 빈 dict는 "구독 없음"이지 lifetime이
-    아니다. lifetime은 truthy 객체에 `expires_date`가 없는 경우다(리팩터 전 실측 확인).
+    ⚠️ **판정 기준은 truthiness가 아니라 "키 존재 + 타입"이다** (2026-07-28 hardening).
+    lifetime은 **명시적 `"expires_date": null`**이고, 키 누락 / `premium == {}` / `""` / 숫자는
+    전부 `ProtocolViolation`이다. 구 코드는 truthiness로 분기해 `{}`를 "구독 없음"으로,
+    `expires_date` 누락과 `""`를 **lifetime으로** 통과시켰다 — malformed 입력에 프리미엄이
+    부여되는 경로였다. ⛔ 그 서술로 되돌리지 말 것(정확한 규칙은 아래 본문 주석).
 
     ⚠️ **N-3 이관 예정**: strict 소비자가 생기면 이 provider는 leaf 모듈로 옮긴다 —
     `invalidate_user_cache`가 strict cache를 무효화하게 되면(A4) `subscription → strict`
     엣지가 생겨, strict가 provider 때문에 subscription을 import하면 **순환**이 된다
-    (`app/clock.py`가 분리된 것과 같은 이유). 지금 옮기지 않는 이유는 이 커밋을
-    **behavior-change-0 증명에만** 집중시키기 위해서다.
+    (`app/clock.py`가 분리된 것과 같은 이유). 도입 슬라이스를 REST 회귀 증명에 집중시키려고
+    미뤘고, 이관 자체는 순수 이동이라 위 계약 테스트가 그대로 잠근다.
     """
     if not REVENUECAT_API_KEY:
         logger.error("REVENUECAT_API_KEY 미설정")
@@ -352,8 +355,9 @@ async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[
 
     ⚠️ **광범위 `except`가 여기에만 있는 이유**: provider는 예상 밖 예외를 **그대로 전파**해야
     strict(§8.1 A6-1)가 programming 오류를 retryable로 오인하지 않는다. 반면 REST는 구 동작이
-    "무슨 예외든 `(False, False)`"였으므로 **그 되접기를 이 adapter가 떠안는다** —
-    behavior-change-0은 provider가 아니라 여기서 지켜진다.
+    "무슨 예외든 `(False, False)`"였으므로 **그 되접기를 이 adapter가 떠안는다**.
+    ⚠️ 범위 주의 — 이 adapter가 보존하는 것은 **예외 경로**의 구 동작이다. malformed 200의
+    분류(§8.1 A4-1 hardening)는 **의도적으로 승인된 REST 동작 변경**이라 여기서 되돌리지 않는다.
     """
     try:
         result = await fetch_revenuecat_result(user_id, clock=clock)

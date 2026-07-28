@@ -9,12 +9,14 @@ JSON 파싱 실패(계약 위반) / `expires_date` 파싱 실패 / 4xx·5xx 일�
 §8.1 A6의 3-bucket 계약(terminal / transient / 내부 예외)이 즉시 깨진다.
 
 그래서 **아래에 typed provider를 두고 REST adapter가 기존 동작을 그대로 되접는다.**
-이 파일의 절반은 그 되접기가 **behavior-change-0**임을 잠그는 characterization이다 —
-리팩터 *이전*에 작성해 현행 코드에서 green임을 확인하고, 리팩터 이후에도 green이어야 한다.
+이 파일의 표는 리팩터 *이전*에 작성해 **현행 코드에 21건 전수 대조**한 뒤 시작했다 —
+기대값을 내 독해가 아니라 실행 결과로 확정하기 위해서다(실제로 초안의 lifetime 기대값이 틀렸다).
 
-⚠️ **behavior-change-0의 최강 증거는 이 파일이 아니라 `tests/test_subscription_clock.py`가
-무수정으로 green이라는 사실**이다(상태머신 + 샘플링 지점 + laziness까지 잠근 38+건).
-그 파일을 한 줄이라도 고쳐야 한다면 그건 동작 변경 신호다.
+⚠️ **이력**: typed provider 도입까지는 `tests/test_subscription_clock.py`가 **무수정 green**인
+것이 behavior-change-0의 증거였다. 이후 malformed-200 hardening(§8.1 A4-1)이 **승인된 REST 동작
+변경**을 포함하면서 그 파일의 lifetime fixture 1건이 red가 되어 갱신됐다 — 규칙이 의도대로
+"변경을 드러내는" 역할을 한 것이다. 지금도 **그 파일의 red는 REST 동작이 바뀐다는 신호**이므로
+승인 없이 고치지 말 것.
 
 ⚠️ **축 주의**: `expires_dt > clock.wall()`의 wall 축은 **구독 유효성** 판정이라 맞다.
 lease horizon의 monotonic 축(§8.1 A2)과 목적이 다르므로 "일관성" 명목으로 바꾸지 말 것.
@@ -89,12 +91,14 @@ def _patch_http(result):
 _FUTURE = "2026-06-01T00:00:00Z"
 _PAST = "2025-06-01T00:00:00Z"
 
-# ⚠️ `premium` 객체의 **truthiness가 분기를 가른다** — 현행 코드가 `if not premium: return (False, True)`
-#    이므로 **빈 dict는 "구독 없음"으로 접힌다**. 리팩터 전 실측으로 확인했다:
-#      premium={}                      -> (False, True)   ← lifetime 아님
-#      premium={product_identifier:…}  -> (True,  True)   ← 진짜 lifetime (expires_date 없음)
-#    초안에서 lifetime 픽스처를 `{}`로 잡아 기대값을 (True, True)로 적었다가 characterization이 잡았다.
-#    ⚠️ 그 truthiness 분기 자체가 hardening 대상이 됐다 — 지금은 **키 존재 + 타입**으로 판정한다.
+# 현행 계약(§8.1 A4-1 hardening) — 판정은 **키 존재 + 타입**이고 truthiness 분기는 폐기됐다:
+#      premium={pid, expires_date: null}  -> lifetime            <- 공식 샘플 형태
+#      premium={pid}  (expires_date 누락)  -> ProtocolViolation
+#      premium={} / null / [] / "yes"      -> ProtocolViolation
+#      entitlements에 premium 키 없음       -> 정상 inactive
+# 이력: 구 코드는 truthiness로 분기해 빈 dict를 "구독 없음"으로, expires_date 누락과 ""를
+#    lifetime으로 통과시켰다. 초안에서 lifetime 픽스처를 빈 dict로 잡아 기대값을 (True, True)로
+#    적었다가 리팩터 전 characterization이 잡았고, 그 분기 자체가 이후 hardening 대상이 됐다.
 _ACTIVE = {"product_identifier": "p", "expires_date": _FUTURE}
 _EXPIRED = {"product_identifier": "p", "expires_date": _PAST}
 _LIFETIME = {"product_identifier": "onetime", "expires_date": None}  # 공식 샘플 형태
