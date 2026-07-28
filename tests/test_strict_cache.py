@@ -1,10 +1,13 @@
 """N-3b strict cache store — WS strict 인가용 관측 저장소.
 
-계약의 근거는 `FREE_TIER_ACCESS_MODEL_PLAN.md` §8.1 A4 / A6-1 / A6-2다.
+계약 근거: `FREE_TIER_ACCESS_MODEL_PLAN.md` §8.1 A4 / A6-1 / A6-2.
 
-이 파일은 **test-first**로 작성됐다. 각 테스트는 불변식 하나씩을 잠그고, 그 불변식이
-load-bearing인지는 mutation으로 확인한다(구현 커밋 메시지에 결과 기록).
+test-first로 작성됐다. 각 테스트가 불변식 하나를 잠그고, load-bearing 여부는 mutation으로 확인한다.
+
+⚠️ **epoch 절대값을 단언하지 않는다** — 전역 단조 시퀀스라 uid 간 값이 비연속이다.
+epoch은 항상 `snapshot()`에서 얻는다(그게 capture primitive다).
 """
+import math
 import threading
 import unittest
 
@@ -16,6 +19,7 @@ from app.strict_authz import (
 from app.strict_cache import (
     PutAccepted,
     PutRejected,
+    RejectReason,
     StrictObservationCache,
 )
 
@@ -23,11 +27,11 @@ UID = "uid-1"
 WATERMARK_MS = 1_700_000_000_000
 
 
-def _premium(*, uid=UID, active=True, at=100.0, epoch=0):
+def _premium(epoch, *, uid=UID, active=True, at=100.0):
     return PremiumObservation(uid=uid, active=active, verified_at_mono=at, epoch=epoch)
 
 
-def _identity(*, uid=UID, disabled=False, at=100.0, epoch=0):
+def _identity(epoch, *, uid=UID, disabled=False, at=100.0):
     return IdentityAuthorityFound(
         uid=uid,
         disabled=disabled,
@@ -37,158 +41,348 @@ def _identity(*, uid=UID, disabled=False, at=100.0, epoch=0):
     )
 
 
-class TestBasicRoundTrip(unittest.TestCase):
+class _CacheTest(unittest.TestCase):
     def setUp(self):
         self.cache = StrictObservationCache()
 
-    def test_new_uid_starts_at_epoch_zero_with_no_observations(self):
-        self.assertEqual(self.cache.current_epoch(UID), 0)
-        self.assertIsNone(self.cache.get_premium(UID))
-        self.assertIsNone(self.cache.get_identity(UID))
+    def epoch(self, uid=UID):
+        return self.cache.snapshot(uid).epoch
+
+
+class TestBasicRoundTrip(_CacheTest):
+    def test_snapshot_of_a_new_uid_allocates_and_has_no_observations(self):
+        snap = self.cache.snapshot(UID)
+        self.assertEqual(snap.uid, UID)
+        self.assertGreater(snap.epoch, 0)
+        self.assertIsNone(snap.premium)
+        self.assertIsNone(snap.identity)
 
     def test_put_with_matching_epoch_is_accepted_and_readable(self):
-        obs = _premium()
-        result = self.cache.put_premium(obs, expected_epoch=0)
-        self.assertEqual(result, PutAccepted(epoch=0))
-        self.assertEqual(self.cache.get_premium(UID), obs)
+        obs = _premium(self.epoch())
+        self.assertIsInstance(self.cache.put_premium(obs, expected_epoch=obs.epoch), PutAccepted)
+        self.assertEqual(self.cache.snapshot(UID).premium, obs)
 
     def test_concerns_are_stored_independently(self):
-        self.cache.put_premium(_premium(), expected_epoch=0)
-        self.assertIsNone(self.cache.get_identity(UID))
-        self.cache.put_identity(_identity(), expected_epoch=0)
-        self.assertIsNotNone(self.cache.get_premium(UID))
+        e = self.epoch()
+        self.cache.put_premium(_premium(e), expected_epoch=e)
+        self.assertIsNone(self.cache.snapshot(UID).identity)
+        self.cache.put_identity(_identity(e), expected_epoch=e)
+        self.assertIsNotNone(self.cache.snapshot(UID).premium)
 
     def test_uids_are_isolated(self):
-        self.cache.put_premium(_premium(uid="a"), expected_epoch=0)
-        self.assertIsNone(self.cache.get_premium("b"))
+        e = self.epoch("a")
+        self.cache.put_premium(_premium(e, uid="a"), expected_epoch=e)
+        self.assertIsNone(self.cache.snapshot("b").premium)
 
     def test_not_found_identity_round_trips(self):
-        obs = IdentityAuthorityNotFound(uid=UID, verified_at_mono=100.0, epoch=0)
-        self.assertEqual(self.cache.put_identity(obs, expected_epoch=0), PutAccepted(epoch=0))
-        self.assertEqual(self.cache.get_identity(UID), obs)
+        e = self.epoch()
+        obs = IdentityAuthorityNotFound(uid=UID, verified_at_mono=100.0, epoch=e)
+        self.assertIsInstance(self.cache.put_identity(obs, expected_epoch=e), PutAccepted)
+        self.assertEqual(self.cache.snapshot(UID).identity, obs)
 
 
-class TestEpochFence(unittest.TestCase):
-    """§8.1 A4 — 게시(put)와 소비(get)를 **둘 다** fence해야 한다."""
+class TestCoherentSnapshot(_CacheTest):
+    """§A4 — 소비(lease)까지 fence하려면 **일관된** 읽기와 재확인 수단이 있어야 한다."""
 
-    def setUp(self):
-        self.cache = StrictObservationCache()
+    def test_snapshot_returns_both_concerns_and_the_epoch_together(self):
+        e = self.epoch()
+        self.cache.put_premium(_premium(e), expected_epoch=e)
+        self.cache.put_identity(_identity(e), expected_epoch=e)
+        snap = self.cache.snapshot(UID)
+        self.assertEqual(snap.epoch, e)
+        self.assertIsNotNone(snap.premium)
+        self.assertIsNotNone(snap.identity)
 
-    def test_bump_increments_epoch_and_drops_observations(self):
-        self.cache.put_premium(_premium(), expected_epoch=0)
-        self.cache.put_identity(_identity(), expected_epoch=0)
-        self.assertEqual(self.cache.bump(UID), 1)
-        self.assertEqual(self.cache.current_epoch(UID), 1)
-        self.assertIsNone(self.cache.get_premium(UID))
-        self.assertIsNone(self.cache.get_identity(UID))
+    def test_concern_wise_reads_are_not_exposed(self):
+        """⛔ 표현할 수 없으면 실수할 수 없다 — 따로 읽으면 **동시에 존재한 적 없는 쌍**이 된다.
+
+        두 read 사이에 `bump`가 끼면 premium은 epoch N, identity는 N+1이 되는데
+        `derive_verdict`는 둘 다 필요하고 epoch은 보지 않는다.
+        """
+        for name in ("get_premium", "get_identity", "current_epoch"):
+            self.assertFalse(hasattr(self.cache, name), f"{name}이 노출되면 straddle이 기본 경로가 된다")
+
+    def test_is_current_detects_invalidation_after_the_snapshot(self):
+        snap = self.cache.snapshot(UID)
+        self.assertTrue(self.cache.is_current(snap))
+        self.cache.bump(UID)
+        self.assertFalse(self.cache.is_current(snap), "무효화 후 lease를 발급하면 fence가 무의미하다")
+
+    def test_is_current_is_false_when_the_entry_is_gone(self):
+        snap = self.cache.snapshot(UID)
+        self.cache.clear()
+        self.assertFalse(self.cache.is_current(snap))
+
+
+class TestEpochFence(_CacheTest):
+    def test_bump_allocates_a_new_epoch_and_drops_observations(self):
+        e = self.epoch()
+        self.cache.put_premium(_premium(e), expected_epoch=e)
+        self.cache.put_identity(_identity(e), expected_epoch=e)
+        self.assertTrue(self.cache.bump(UID))
+        snap = self.cache.snapshot(UID)
+        self.assertNotEqual(snap.epoch, e)
+        self.assertIsNone(snap.premium)
+        self.assertIsNone(snap.identity)
 
     def test_stale_epoch_put_is_rejected(self):
         """검증 시작 → webhook invalidate → 구 검증 완료. 그 쓰기는 거부돼야 한다."""
-        captured = self.cache.current_epoch(UID)
+        captured = self.epoch()
         self.cache.bump(UID)
-        result = self.cache.put_premium(_premium(epoch=captured), expected_epoch=captured)
-        self.assertEqual(result, PutRejected(expected_epoch=0, current_epoch=1))
-        self.assertIsNone(self.cache.get_premium(UID))
+        result = self.cache.put_premium(_premium(captured), expected_epoch=captured)
+        self.assertIsInstance(result, PutRejected)
+        self.assertEqual(result.reason, RejectReason.STALE_EPOCH)
+        self.assertIsNone(self.cache.snapshot(UID).premium)
 
     def test_rejected_put_does_not_clobber_a_fresh_record(self):
-        """⛔ 핵심 — lookup 시점 검사만으로는 이걸 못 막는다(§A4 2026-07-27).
+        """⛔ 핵심 — lookup 시점 검사만으로는 못 막는다(§A4 2026-07-27).
 
-        구 owner가 **쓰기 자체를 하면** 이미 기록된 fresh 항목이 파괴된다. CAS는 쓰기를 막는다.
+        구 owner가 **쓰기 자체를 하면** 이미 기록된 fresh 항목이 파괴된다.
         """
-        stale_epoch = self.cache.current_epoch(UID)
+        stale = self.epoch()
         self.cache.bump(UID)
-        fresh = _premium(active=True, at=200.0, epoch=1)
-        self.cache.put_premium(fresh, expected_epoch=1)
+        current = self.epoch()
+        fresh = _premium(current, active=True, at=200.0)
+        self.cache.put_premium(fresh, expected_epoch=current)
 
         rejected = self.cache.put_premium(
-            _premium(active=False, at=100.0, epoch=stale_epoch), expected_epoch=stale_epoch
+            _premium(stale, active=False, at=100.0), expected_epoch=stale
         )
-
         self.assertIsInstance(rejected, PutRejected)
-        self.assertEqual(self.cache.get_premium(UID), fresh)  # 그대로 살아 있어야 한다
+        self.assertEqual(self.cache.snapshot(UID).premium, fresh)
 
-    def test_future_epoch_put_is_also_rejected(self):
-        """위조·버그로 앞선 epoch를 들고 와도 통과하면 안 된다 (CAS는 '같음'이지 '이상'이 아니다)."""
-        result = self.cache.put_premium(_premium(epoch=5), expected_epoch=5)
-        self.assertEqual(result, PutRejected(expected_epoch=5, current_epoch=0))
-        self.assertIsNone(self.cache.get_premium(UID))
+    def test_put_without_a_snapshot_is_rejected_not_created(self):
+        """⛔ ABA 방지 — `put`이 없는 항목을 만들면 축출 후 stale write가 통과한다."""
+        result = self.cache.put_premium(_premium(1), expected_epoch=1)
+        self.assertIsInstance(result, PutRejected)
+        self.assertEqual(result.reason, RejectReason.UNKNOWN_UID)
+        self.assertIsNone(self.cache.snapshot(UID).premium)
+
+    def test_epoch_is_not_reused_after_the_entry_disappears(self):
+        """⛔ 실측 재현 — uid별 0-기반이면 항목이 사라진 뒤 stale put이 **통과**했다."""
+        captured = self.epoch()
+        self.cache.clear()
+        self.cache.snapshot(UID)  # 재생성
+        result = self.cache.put_premium(_premium(captured), expected_epoch=captured)
+        self.assertIsInstance(result, PutRejected)
+
+    def test_epoch_is_not_reused_when_a_bump_preceded_the_disappearance(self):
+        """⛔ 실측 재현 — `bump`가 전역 시퀀스를 쓰지 않으면 여기서 ABA가 난다.
+
+        bump가 `uid별 +1`이면 전역 카운터는 그대로여서, 항목 소멸 후 재생성 시 전역 카운터가
+        **bump가 만든 값과 같은 값**을 내준다. 실측: captured=2, recreated=2 → `PutAccepted`.
+        (bump 없는 위 테스트만으로는 이 경로를 못 밟는다.)
+        """
+        self.cache.snapshot(UID)
+        self.cache.bump(UID)
+        captured = self.epoch()
+        self.cache.clear()
+        self.cache.snapshot(UID)  # 재생성
+        result = self.cache.put_premium(_premium(captured), expected_epoch=captured)
+        self.assertIsInstance(result, PutRejected)
+
+    def test_bump_on_an_unknown_uid_is_a_noop(self):
+        """webhook은 alias마다 돈다 — 연결 없는 사용자로 항목을 새게 하지 않는다."""
+        self.assertFalse(self.cache.bump("never-seen"))
 
     def test_bump_is_per_uid(self):
-        self.cache.put_premium(_premium(uid="a"), expected_epoch=0)
+        e = self.epoch("a")
+        self.cache.put_premium(_premium(e, uid="a"), expected_epoch=e)
+        self.cache.snapshot("b")
         self.cache.bump("b")
-        self.assertIsNotNone(self.cache.get_premium("a"))
-        self.assertEqual(self.cache.current_epoch("a"), 0)
+        self.assertIsNotNone(self.cache.snapshot("a").premium)
+        self.assertEqual(self.cache.snapshot("a").epoch, e)
 
 
-class TestObservationEpochMustMatch(unittest.TestCase):
-    """관측이 스스로 들고 있는 `epoch`와 CAS 인자가 어긋나면 **오용**이다.
+class TestProgrammingErrorsRaise(_CacheTest):
+    """§A6-1 — programming 오류는 verdict가 아니다. 캐시하지도, wire 오류로 접지도 않는다."""
 
-    두 곳에 같은 상태가 있으면 반드시 어긋난다. 저장 시점에 일치를 강제해 그 가능성을 없앤다.
-    """
-
-    def setUp(self):
-        self.cache = StrictObservationCache()
-
-    def test_mismatched_observation_epoch_is_rejected_as_programming_error(self):
+    def test_mismatched_observation_epoch_raises(self):
+        e = self.epoch()
         with self.assertRaises(ValueError):
-            self.cache.put_premium(_premium(epoch=3), expected_epoch=0)
+            self.cache.put_premium(_premium(e + 999), expected_epoch=e)
 
-    def test_mismatched_uid_is_rejected_as_programming_error(self):
+    def test_mismatched_uid_raises(self):
+        e = self.epoch()
         with self.assertRaises(ValueError):
-            self.cache.put_premium(_premium(uid="other"), expected_epoch=0, key=UID)
+            self.cache.put_premium(_premium(e, uid="other"), expected_epoch=e, key=UID)
+
+    def test_wall_clock_instead_of_monotonic_raises(self):
+        """⛔ 실측 — 받아주면 역행 가드가 그 값에 눌러앉아 uid가 **영구 브릭**된다.
+
+        오염 후 정직한 재검증이 전부 거부됐고 `derive_verdict`는 매 요청 raise했다.
+        """
+        e = self.epoch()
+        with self.assertRaises(ValueError):
+            self.cache.put_premium(_premium(e, at=1.79e9), expected_epoch=e)
+
+    def test_nan_raises(self):
+        """⛔ 실측 — NaN 비교는 **항상 False**라 역행 가드를 통째로 무장 해제한다."""
+        e = self.epoch()
+        with self.assertRaises(ValueError):
+            self.cache.put_premium(_premium(e, at=math.nan), expected_epoch=e)
+
+    def test_infinity_raises(self):
+        e = self.epoch()
+        with self.assertRaises(ValueError):
+            self.cache.put_premium(_premium(e, at=math.inf), expected_epoch=e)
+
+    def test_negative_raises(self):
+        e = self.epoch()
+        with self.assertRaises(ValueError):
+            self.cache.put_premium(_premium(e, at=-1.0), expected_epoch=e)
 
 
-class TestMonotonicGuard(unittest.TestCase):
+class TestMonotonicGuard(_CacheTest):
     """같은 epoch 안에서도 **역행 쓰기**를 막아야 한다.
-
-    epoch가 같으면 CAS는 통과한다. 그런데 겹친 두 검증에서 **느린 쪽이 나중에 끝나면**
-    오래된 관측이 새 관측을 덮는다:
 
         A 시작(t0) → B 시작(t1) → B 완료(t2, inactive) → A 완료(t3, t0의 active)
 
-    결과적으로 **취소된 구독이 freshness 창만큼 되살아난다**(보안 방향 손실). 리포의
-    USDT Redis `<` 역행 가드와 같은 문제다.
+    A가 B를 덮으면 **취소된 구독이 freshness 창만큼 되살아난다**(보안 방향 손실).
     """
 
-    def setUp(self):
-        self.cache = StrictObservationCache()
-
     def test_older_observation_does_not_overwrite_newer(self):
-        newer = _premium(active=False, at=200.0)
-        self.cache.put_premium(newer, expected_epoch=0)
-        result = self.cache.put_premium(_premium(active=True, at=100.0), expected_epoch=0)
+        e = self.epoch()
+        newer = _premium(e, active=False, at=200.0)
+        self.cache.put_premium(newer, expected_epoch=e)
+        result = self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
         self.assertIsInstance(result, PutRejected)
-        self.assertEqual(self.cache.get_premium(UID), newer)
+        self.assertEqual(result.reason, RejectReason.REGRESSION)
+        self.assertEqual(self.cache.snapshot(UID).premium, newer)
+
+    def test_regression_and_stale_epoch_are_distinguishable(self):
+        """거부 사유가 다르면 호출자의 다음 행동도 다르다 — 하나로 뭉치면 알 수 없다."""
+        e = self.epoch()
+        self.cache.put_premium(_premium(e, at=200.0), expected_epoch=e)
+        regression = self.cache.put_premium(_premium(e, at=100.0), expected_epoch=e)
+        self.cache.bump(UID)
+        stale = self.cache.put_premium(_premium(e, at=300.0), expected_epoch=e)
+        self.assertNotEqual(regression.reason, stale.reason)
 
     def test_newer_observation_overwrites(self):
-        self.cache.put_premium(_premium(active=True, at=100.0), expected_epoch=0)
-        newer = _premium(active=False, at=200.0)
-        self.assertEqual(self.cache.put_premium(newer, expected_epoch=0), PutAccepted(epoch=0))
-        self.assertEqual(self.cache.get_premium(UID), newer)
+        e = self.epoch()
+        self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
+        newer = _premium(e, active=False, at=200.0)
+        self.assertIsInstance(self.cache.put_premium(newer, expected_epoch=e), PutAccepted)
+        self.assertEqual(self.cache.snapshot(UID).premium, newer)
 
     def test_equal_timestamp_is_accepted_as_refresh(self):
-        """동률은 거부하지 않는다 — 같은 관측의 재기록은 무해하고, 거부하면 재시도를 유발한다."""
-        first = _premium(at=100.0)
-        self.cache.put_premium(first, expected_epoch=0)
-        self.assertIsInstance(self.cache.put_premium(_premium(at=100.0), expected_epoch=0), PutAccepted)
+        """동률은 거부하지 않는다 — 재기록은 무해하고 거부하면 재시도를 유발한다."""
+        e = self.epoch()
+        self.cache.put_premium(_premium(e, at=100.0), expected_epoch=e)
+        self.assertIsInstance(
+            self.cache.put_premium(_premium(e, at=100.0), expected_epoch=e), PutAccepted
+        )
 
     def test_guard_is_per_concern(self):
-        """premium의 시각이 identity의 쓰기를 막으면 안 된다."""
-        self.cache.put_premium(_premium(at=500.0), expected_epoch=0)
-        self.assertIsInstance(self.cache.put_identity(_identity(at=100.0), expected_epoch=0), PutAccepted)
+        e = self.epoch()
+        self.cache.put_premium(_premium(e, at=500.0), expected_epoch=e)
+        self.assertIsInstance(
+            self.cache.put_identity(_identity(e, at=100.0), expected_epoch=e), PutAccepted
+        )
 
     def test_bump_clears_the_monotonic_floor(self):
-        """무효화 후에는 더 오래된 시각의 관측도 받아야 한다 — 아니면 재검증이 영영 못 쓰인다."""
-        self.cache.put_premium(_premium(at=500.0), expected_epoch=0)
+        """무효화 후에는 더 오래된 시각도 받아야 한다 — 아니면 재검증 결과가 영영 못 쓰인다."""
+        e = self.epoch()
+        self.cache.put_premium(_premium(e, at=500.0), expected_epoch=e)
         self.cache.bump(UID)
-        result = self.cache.put_premium(_premium(at=100.0, epoch=1), expected_epoch=1)
-        self.assertIsInstance(result, PutAccepted)
+        e2 = self.epoch()
+        self.assertIsInstance(
+            self.cache.put_premium(_premium(e2, at=100.0), expected_epoch=e2), PutAccepted
+        )
+
+
+class _BlockingObservation:
+    """lock 안에서 **멈추는** 관측 스탠드인.
+
+    `_put_locked`는 역행 검사에서 `observation.verified_at_mono`를 읽는다. 그 읽기가 블록하면
+    스레드는 **lock을 쥔 채** 멈춘다 — 상호배제를 결정론적으로 관찰할 이음매다.
+    """
+
+    def __init__(self, uid, epoch, entered, release):
+        self.uid = uid
+        self.epoch = epoch
+        self._entered = entered
+        self._release = release
+        self._reads = 0
+
+    @property
+    def verified_at_mono(self):
+        self._reads += 1
+        if self._reads == 2:  # 1회차는 lock 밖 검증(_require_match), 2회차가 lock 안
+            self._entered.set()
+            self._release.wait(timeout=10)
+        return 999.0
+
+
+class TestSnapshotCoherenceTripWire(unittest.TestCase):
+    """`snapshot`은 두 concern을 **한 번의 lock 획득 안에서** 읽어야 한다.
+
+    따로 획득하면 그 사이 `bump`가 끼어 premium은 epoch N, identity는 N+1인 — 실제로는
+    동시에 존재한 적 없는 — 쌍이 조립되고, 그 쌍으로 `derive_verdict`가 `Active`를 내면
+    무효화된 관측으로 lease가 나간다.
+
+    ⚠️ 이건 **구조적** 성질이라 밖에서 관찰할 수 없다. 이음매를 심어 봐도 블록 지점이 항상
+    어느 한 획득 **안**이라, 분리 획득이든 단일 획득이든 `bump`는 똑같이 대기한다 —
+    구분이 안 된다(실측). 그래서 계획이 A1에서 쓴 것과 같은 **AST trip-wire**로 잠근다.
+    """
+
+    def test_snapshot_acquires_the_lock_exactly_once(self):
+        import ast
+        import inspect
+
+        import app.strict_cache as module
+
+        tree = ast.parse(inspect.getsource(module))
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "snapshot"
+        )
+        acquisitions = [n for n in ast.walk(fn) if isinstance(n, (ast.With, ast.AsyncWith))]
+        self.assertEqual(
+            len(acquisitions),
+            1,
+            "snapshot이 lock을 두 번 이상 잡으면 그 사이가 일관성 구멍이 된다",
+        )
+
+
+class TestMutualExclusion(unittest.TestCase):
+    """경쟁은 확률적이라 "동시에 두드리기"로는 lock 제거를 못 잡는다(GIL 때문에 dict 연산이
+    원자적으로 보인다). 한 스레드를 lock 안에 붙잡고 다른 스레드가 **진입 못 함**을 관찰한다.
+    """
+
+    def test_bump_cannot_interleave_with_an_in_progress_put(self):
+        cache = StrictObservationCache()
+        epoch = cache.snapshot(UID).epoch
+        cache.put_premium(_premium(epoch, at=100.0), expected_epoch=epoch)
+
+        entered, release, bump_done = threading.Event(), threading.Event(), threading.Event()
+        blocker = _BlockingObservation(UID, epoch, entered, release)
+
+        writer = threading.Thread(target=lambda: cache.put_premium(blocker, expected_epoch=epoch))
+        writer.start()
+        self.assertTrue(entered.wait(timeout=5), "writer가 lock 구간에 진입하지 못했다")
+
+        bumper = threading.Thread(target=lambda: (cache.bump(UID), bump_done.set()))
+        bumper.start()
+        try:
+            self.assertFalse(
+                bump_done.wait(timeout=0.5), "lock을 쥔 put 중에 bump가 끼어들었다 — 상호배제 없음"
+            )
+        finally:
+            release.set()
+            writer.join(timeout=5)
+            bumper.join(timeout=5)
+
+        self.assertTrue(bump_done.is_set(), "release 후 bump가 완료되지 않았다 (deadlock)")
+        self.assertIsNone(cache.snapshot(UID).premium)
 
 
 class TestThreadSafety(unittest.TestCase):
-    """`threading.Lock`이어야 하는 이유는 리포에 `asyncio.to_thread`가 86곳 있고
-    동기 DB 조회(`app/entitlements.py:28 has_entitlement`)가 그 안으로 들어갈 후보이기 때문이다.
-    `asyncio.Lock`은 스레드를 직렬화하지 못한다.
+    """`threading.Lock`이어야 하는 이유: 리포에 `asyncio.to_thread`가 86곳 있고 동기 DB 조회
+    (`app/entitlements.py:28 has_entitlement`)가 그 안으로 들어갈 후보다. `asyncio.Lock`은
+    스레드를 직렬화하지 못한다.
     """
 
     def test_concurrent_puts_and_bumps_never_tear_state(self):
@@ -200,16 +394,13 @@ class TestThreadSafety(unittest.TestCase):
             try:
                 barrier.wait(timeout=5)
                 for i in range(200):
-                    epoch = cache.current_epoch(UID)
-                    try:
-                        cache.put_premium(
-                            _premium(at=float(n * 1000 + i), epoch=epoch), expected_epoch=epoch
-                        )
-                    except ValueError:
-                        pass  # epoch가 그 사이 올라간 경우 — 경쟁의 정상 결과
+                    snap = cache.snapshot(UID)
+                    cache.put_premium(
+                        _premium(snap.epoch, at=float(n * 1000 + i)), expected_epoch=snap.epoch
+                    )
                     if i % 50 == 0:
                         cache.bump(UID)
-            except BaseException as exc:  # noqa: BLE001 - 스레드 예외를 본 스레드로 옮긴다
+            except BaseException as exc:  # noqa: BLE001 — 스레드 예외를 본 스레드로 옮긴다
                 errors.append(exc)
 
         threads = [threading.Thread(target=writer, args=(n,)) for n in range(8)]
@@ -220,80 +411,18 @@ class TestThreadSafety(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertFalse(any(t.is_alive() for t in threads), "스레드가 lock에 갇혔다")
-        stored = cache.get_premium(UID)
-        if stored is not None:
-            # 저장된 게 있으면 반드시 현재 epoch 것이어야 한다 (찢어진 상태 부재)
-            self.assertEqual(stored.epoch, cache.current_epoch(UID))
-
-
-class _BlockingObservation:
-    """lock 안에서 **멈추는** 관측 스탠드인.
-
-    `_put_locked`는 역행 검사에서 `observation.verified_at_mono`를 읽는다. 그 읽기가 블록하면
-    스레드는 **lock을 쥔 채** 멈춘다 — 상호배제를 결정론적으로 관찰할 수 있는 이음매다.
-    """
-
-    def __init__(self, uid, epoch, entered, release):
-        self.uid = uid
-        self.epoch = epoch
-        self._entered = entered
-        self._release = release
-        self._blocked_once = False
-
-    @property
-    def verified_at_mono(self):
-        if not self._blocked_once:
-            self._blocked_once = True
-            self._entered.set()
-            self._release.wait(timeout=10)
-        return 999.0
-
-
-class TestMutualExclusion(unittest.TestCase):
-    """lock이 **실제로 상호배제를 제공하는지**.
-
-    경쟁은 확률적이라 "동시에 두드려 보기"로는 lock 제거를 못 잡는다(GIL 때문에 dict 연산이
-    원자적으로 보인다). 그래서 한 스레드를 lock 안에 붙잡아 두고 다른 스레드가 **진입하지
-    못함**을 직접 관찰한다.
-    """
-
-    def test_bump_cannot_interleave_with_an_in_progress_put(self):
-        cache = StrictObservationCache()
-        cache.put_premium(_premium(at=100.0), expected_epoch=0)  # existing 만들기
-
-        entered, release = threading.Event(), threading.Event()
-        bump_done = threading.Event()
-        blocker = _BlockingObservation(UID, 0, entered, release)
-
-        writer = threading.Thread(target=lambda: cache.put_premium(blocker, expected_epoch=0))
-        writer.start()
-        self.assertTrue(entered.wait(timeout=5), "writer가 lock 구간에 진입하지 못했다")
-
-        bumper = threading.Thread(target=lambda: (cache.bump(UID), bump_done.set()))
-        bumper.start()
-        try:
-            # writer가 lock을 쥔 동안 bump는 **완료될 수 없다**.
-            self.assertFalse(
-                bump_done.wait(timeout=0.5),
-                "lock을 쥔 put 중에 bump가 끼어들었다 — 상호배제 없음",
-            )
-        finally:
-            release.set()
-            writer.join(timeout=5)
-            bumper.join(timeout=5)
-
-        self.assertTrue(bump_done.is_set(), "release 후 bump가 완료되지 않았다 (deadlock)")
-        self.assertIsNone(cache.get_premium(UID), "bump가 마지막이므로 관측은 비어야 한다")
+        snap = cache.snapshot(UID)
+        if snap.premium is not None:
+            self.assertEqual(snap.premium.epoch, snap.epoch, "찢어진 상태")
 
 
 class TestIsolationHelpers(unittest.TestCase):
     def test_clear_resets_everything(self):
         cache = StrictObservationCache()
-        cache.put_premium(_premium(), expected_epoch=0)
-        cache.bump(UID)
+        e = cache.snapshot(UID).epoch
+        cache.put_premium(_premium(e), expected_epoch=e)
         cache.clear()
-        self.assertEqual(cache.current_epoch(UID), 0)
-        self.assertIsNone(self.__class__ and cache.get_premium(UID))
+        self.assertIsNone(cache.snapshot(UID).premium)
 
 
 if __name__ == "__main__":

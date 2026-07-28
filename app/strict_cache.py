@@ -37,8 +37,10 @@ epoch 읽기·비교·저장이 한 lock 안에서 원자적이어야 한다.
 """
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Union
 
 from app.strict_authz import (
@@ -49,12 +51,28 @@ from app.strict_authz import (
 
 IdentityObservation = Union[IdentityAuthorityFound, IdentityAuthorityNotFound]
 
+# monotonic 값이 이 이상이면 **wall clock을 잘못 넘긴 것**이다 (1e9초 ≈ 31.7년 uptime,
+# 반면 지금의 wall epoch는 ≈1.79e9). `strict_authz._IAT_SECONDS_MIN`과 같은 크기-축 판별 관용구다.
+# 이 가드가 없으면 오염된 값 하나가 역행 가드에 눌러앉아 그 uid를 **영구히 브릭**한다(실측).
+_MONOTONIC_SUSPICION_CEILING = 10**9
+
 
 @dataclass(frozen=True)
 class PutAccepted:
     """쓰기가 반영됐다."""
 
     epoch: int
+
+
+class RejectReason(str, Enum):
+    """거부 **사유** — 호출자의 다음 행동이 다르다.
+
+    타입 하나로 뭉치면 "다시 시도해야 하나"를 알 수 없다(실측: 두 경우가 반환값으로 구분 불가였다).
+    """
+
+    STALE_EPOCH = "stale_epoch"    # 무효화됨 → snapshot부터 다시 떠서 재검증
+    REGRESSION = "regression"      # 다른 owner가 이미 **더 새로운** 관측을 썼다 → 재시도 불필요
+    UNKNOWN_UID = "unknown_uid"    # snapshot 없이 쓰려 함(또는 축출됨) → snapshot부터
 
 
 @dataclass(frozen=True)
@@ -65,8 +83,25 @@ class PutRejected:
     이 결과로 **lease를 발급해서는 안 된다**(§A4 — 소비까지 fence).
     """
 
+    reason: RejectReason
     expected_epoch: int
-    current_epoch: int
+    current_epoch: Optional[int]
+
+
+@dataclass(frozen=True)
+class StrictSnapshot:
+    """한 번의 lock 획득으로 읽은 **일관된** 상태.
+
+    ⚠️ 두 concern을 따로 읽으면 **동시에 존재한 적 없는 쌍**을 조립하게 된다 — 두 read 사이에
+    `bump`가 끼면 premium은 epoch N, identity는 N+1이 된다. `derive_verdict`는 둘 다 필요하고
+    `epoch`은 보지 않으므로, 일관성은 여기서 보장해야 한다. 그래서 concern별 read는 **노출하지
+    않는다** — 표현할 수 없으면 실수할 수 없다.
+    """
+
+    uid: str
+    epoch: int
+    premium: Optional[PremiumObservation]
+    identity: Optional[IdentityObservation]
 
 
 PutResult = Union[PutAccepted, PutRejected]
@@ -88,44 +123,112 @@ def _require_match(observation, *, key: str, expected_epoch: int) -> None:
             f"observation.epoch={observation.epoch} != expected_epoch={expected_epoch} — "
             "캡처한 epoch와 관측이 어긋난다"
         )
+    at = observation.verified_at_mono
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
+        # NaN은 특히 위험하다 — 비교가 **항상 False**라 역행 가드를 통째로 무장 해제한다(실측).
+        raise ValueError(f"verified_at_mono가 유한한 수가 아니다: {at!r}")
+    if at < 0:
+        raise ValueError(f"verified_at_mono가 음수다: {at!r}")
+    if at >= _MONOTONIC_SUSPICION_CEILING:
+        raise ValueError(
+            f"verified_at_mono={at!r}는 monotonic이 아니라 **wall clock**으로 보인다 "
+            f"(>= {_MONOTONIC_SUSPICION_CEILING}). 축을 섞으면 그 uid가 영구히 브릭된다."
+        )
 
 
 class StrictObservationCache:
     """UID 키, concern별로 분리된 관측 저장소 + UID별 epoch.
 
-    epoch는 **UID당 하나**이고 두 concern을 함께 덮는다(§A4 "UID별 epoch"). 과잉 무효화는
-    fail-closed(재검증할 뿐)이고 과소 무효화는 안전하지 않으므로, 모호하면 과잉이 맞다.
-    ⚠️ 다만 비용은 있다 — entitlement와 무관한 고빈도 webhook(§A4-2의 `PAYWALL_*`)이
-    identity 관측까지 떨어뜨려 Firebase 왕복이 한 번 더 든다. concern별 epoch 분리는
-    측정 후 결정할 일이고, 그때 바꿀 지점은 **이 클래스 하나**다.
+    ## epoch는 **전역 단조 증가**다 (uid별 0-기반이 아니다)
+
+    per-uid로 0부터 세면 항목이 사라졌다 재생성될 때 **같은 값이 재사용**되어, 그 사이에 캡처된
+    stale write가 CAS를 조용히 통과한다(ABA). 실측으로 재현했다. 계획이 `lease_id`에 이미 같은
+    규칙을 두고 있다(§8.1 "정수 generation을 0부터 다시 세면 안 된다").
+    → 그래서 (a) `snapshot()`이 처음 보는 uid에 generation을 **할당**하고(=capture primitive라
+    쓰기를 겸한다), (b) `put_*`는 **없는 항목을 만들지 않으며**, (c) `bump()`는 없는 uid에 대해
+    아무것도 하지 않고 `False`를 돌려준다(연결 없는 사용자에게 온 webhook이 항목을 새지 않게).
+
+    ⚠️ **테스트에서 epoch 절대값(`== 1` 등)을 단언하지 말 것** — 전역 시퀀스라 uid 간 값이 비연속이다.
+
+    ## 메모리
+
+    지금은 bound가 없다. 1C에서 `snapshot()`은 **인증된** uid로만 도달하므로 증가는 익명
+    트래픽이 아니라 실제 사용자 수에 묶인다. 나중에 LRU를 넣는다면 **epoch 항목까지 축출하면
+    위 ABA가 되살아난다** — 축출 후에는 `put`이 `UNKNOWN_UID`로 fail-closed되므로 add-on은
+    안전하지만, 그 비대칭(관측 맵은 버려도 되고 generation은 안 된다)을 지키는 게 조건이다.
+
+    ## lock 계약 (지키지 않으면 서버가 멈춘다)
+
+    `threading.Lock`은 재진입 불가다. critical section 안에서는 **dict 읽기/쓰기와 정수 증가만**
+    한다 — `await`·I/O·블로킹 로깅·호출자 콜백·store 재진입 금지. 현재 lock 안의 유일한 외부
+    접근은 frozen dataclass의 속성 읽기다.
+
+    ## 단일 프로세스 전제
+
+    운영은 `--workers 1`(`Dockerfile:131`). 워커를 늘리면 워커마다 독립된 저장소·generation을
+    가져 **webhook 무효화가 그 워커에만 적용된다** — A1의 15분 상한 자체는 유지되지만 revoke
+    지연이 사실상 lease 길이까지 늘어난다. 그때는 공유 저장소로 옮겨야 한다.
+
+    ## A5(single-flight) 앞선 계약
+
+    공유 flight의 결과는 관측 값을 실어 나르지 않는다. waiter는 flight 완료 후 `snapshot()`을
+    **다시 떠서** 재파생한다 — 그러면 거부된 경우 관측이 없어 자연히 `NeedsVerification`이 되고
+    다음 owner가 된다. flight 키는 `(uid, epoch)`다.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._next_epoch = 0
         self._epochs: dict[str, int] = {}
         self._premium: dict[str, PremiumObservation] = {}
         self._identity: dict[str, IdentityObservation] = {}
 
-    # ── epoch ────────────────────────────────────────────────────────────
-    def current_epoch(self, uid: str) -> int:
-        """검증 시작 전에 캡처한다. 이 값을 그대로 `put(expected_epoch=)`에 넘긴다.
+    # ── 읽기 (유일한 read API) ────────────────────────────────────────────
+    def snapshot(self, uid: str) -> StrictSnapshot:
+        """검증 시작 **전에** 뜬다. 반환된 `epoch`을 그대로 `put(expected_epoch=)`에 넘긴다.
 
-        ⚠️ 캡처와 put 사이는 당연히 열려 있다 — 그 창을 닫는 게 CAS의 목적이다.
+        신선도는 여기서 보지 않는다 — `derive_verdict`가 요청 시점에 평가한다(§A6-2).
+
+        ⚠️ 읽기지만 **상태를 만든다**(처음 보는 uid에 generation 할당). capture primitive라서다.
         """
         with self._lock:
-            return self._epochs.get(uid, 0)
+            epoch = self._epochs.get(uid)
+            if epoch is None:
+                self._next_epoch += 1
+                epoch = self._next_epoch
+                self._epochs[uid] = epoch
+            return StrictSnapshot(
+                uid=uid,
+                epoch=epoch,
+                premium=self._premium.get(uid),
+                identity=self._identity.get(uid),
+            )
 
-    def bump(self, uid: str) -> int:
-        """무효화 — epoch를 올리고 그 UID의 관측을 **버린다**.
+    def is_current(self, snapshot: StrictSnapshot) -> bool:
+        """lease 발급 **직전에** 다시 확인한다 (§A4 — 게시만이 아니라 소비까지 fence).
 
-        진행 중인 검증은 이 시점부터 `PutRejected`가 된다.
+        `put`이 통과했더라도 그 뒤에 무효화가 들어올 수 있다. 이 검사는 lease를 등록하는
+        critical section **안에서** 해야 한다 — 밖에서 하면 창이 옮겨갈 뿐이다.
         """
         with self._lock:
-            epoch = self._epochs.get(uid, 0) + 1
-            self._epochs[uid] = epoch
+            return self._epochs.get(snapshot.uid) == snapshot.epoch
+
+    # ── 무효화 ───────────────────────────────────────────────────────────
+    def bump(self, uid: str) -> bool:
+        """무효화 — generation을 새로 할당하고 그 UID의 관측을 **버린다**.
+
+        진행 중인 검증은 이 시점부터 거부된다. 모르는 uid면 아무것도 하지 않고 `False`
+        (연결 없는 사용자에게 온 webhook이 항목을 새지 않게 — webhook은 alias마다 돈다).
+        반환값은 strict 전용 계측의 입력이기도 하다(§A4-2).
+        """
+        with self._lock:
+            if uid not in self._epochs:
+                return False
+            self._next_epoch += 1
+            self._epochs[uid] = self._next_epoch
             self._premium.pop(uid, None)
             self._identity.pop(uid, None)
-            return epoch
+            return True
 
     # ── 저장 ─────────────────────────────────────────────────────────────
     def put_premium(
@@ -146,32 +249,41 @@ class StrictObservationCache:
 
     def _put_locked(self, slot: dict, uid: str, observation, expected_epoch: int) -> PutResult:
         """lock을 **잡은 채로** 비교하고 저장한다 — 그 사이에 `await`도 I/O도 없어야 한다."""
-        current = self._epochs.get(uid, 0)
+        current = self._epochs.get(uid)
+        if current is None:
+            # snapshot 없이 쓰려 함(또는 축출됨). 항목을 **만들지 않는다** — 만들면 ABA가 열린다.
+            return PutRejected(
+                reason=RejectReason.UNKNOWN_UID, expected_epoch=expected_epoch, current_epoch=None
+            )
         if current != expected_epoch:
-            return PutRejected(expected_epoch=expected_epoch, current_epoch=current)
+            return PutRejected(
+                reason=RejectReason.STALE_EPOCH,
+                expected_epoch=expected_epoch,
+                current_epoch=current,
+            )
 
         existing = slot.get(uid)
         if existing is not None and observation.verified_at_mono < existing.verified_at_mono:
             # 같은 epoch 안의 **역행 쓰기**. CAS는 epoch만 보므로 이걸 못 막는다.
             # 겹친 두 검증에서 느린 쪽이 나중에 끝나면 오래된 관측이 새 관측을 덮고,
             # 취소된 구독이 freshness 창만큼 되살아난다(보안 방향 손실).
-            return PutRejected(expected_epoch=expected_epoch, current_epoch=current)
+            return PutRejected(
+                reason=RejectReason.REGRESSION,
+                expected_epoch=expected_epoch,
+                current_epoch=current,
+            )
 
         slot[uid] = observation
         return PutAccepted(epoch=current)
 
-    # ── 조회 ─────────────────────────────────────────────────────────────
-    # 신선도는 여기서 보지 않는다 — `derive_verdict`가 요청 시점에 평가한다(§A6-2).
-    def get_premium(self, uid: str) -> Optional[PremiumObservation]:
-        with self._lock:
-            return self._premium.get(uid)
-
-    def get_identity(self, uid: str) -> Optional[IdentityObservation]:
-        with self._lock:
-            return self._identity.get(uid)
-
     def clear(self) -> None:
-        """테스트 격리용 — 운영 경로에서 부르지 말 것."""
+        """테스트 격리용 — 운영 경로에서 부르지 말 것.
+
+        ⚠️ generation 카운터는 **되감지 않는다**. 되감으면 clear 이전에 캡처된 epoch가 다시
+        유효해져 stale write가 통과한다(ABA) — 실측으로 이 테스트가 잡아냈다. 관측 맵은 버려도
+        안전하지만(재검증 유도 = fail-closed) generation 재사용은 안전하지 않다는 **비대칭**이
+        여기서도 그대로 적용된다.
+        """
         with self._lock:
             self._epochs.clear()
             self._premium.clear()
