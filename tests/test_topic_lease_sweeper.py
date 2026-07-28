@@ -20,7 +20,12 @@ import unittest
 
 from app.strict_cache import StrictObservationCache
 from app.topic_lease import LEASE_MAX_SECONDS
-from app.topic_lease_registry import ConnectionLockBusy, LockNotHeld, TopicLeaseRegistry
+from app.topic_lease_registry import (
+    ConnectionLockBusy,
+    LockNotHeld,
+    ReentrantRegistryCall,
+    TopicLeaseRegistry,
+)
 from app.topic_lease_sweeper import sweep_once as _sweep_once
 
 UID = "uid-1"
@@ -387,8 +392,10 @@ class TestStaleClaimNeverBlocksANewLease(unittest.IsolatedAsyncioTestCase):
             "재발급된 lease가 구 claim에 막혔다",
         )
 
-    async def test_reissue_clears_the_stale_claim(self):
-        """읽기 경로의 id 대조만으로도 막히진 않지만, 표식을 남겨 두면 다음 사이클의 근거가 흐려진다."""
+    async def test_reissued_unexpired_lease_is_not_notified(self):
+        """⚠️ 구 이름은 `test_reissue_clears_the_stale_claim`이었는데 **코드가 하지 않는 계약을
+        이름으로 광고**했다(청소 로직은 잉여로 제거했고, 이 단언은 청소 유무와 무관하다 —
+        양방향 무감지 실측). 실제로 잠그는 것으로 개명한다."""
         registry = TopicLeaseRegistry()
         ws = _WS()
         cache = await _subscribe(registry, ws, [TOPIC])
@@ -625,6 +632,188 @@ class TestNotificationFailureCleansTheSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.terminated, 1)
 
 
+class TestTerminationIsBounded(unittest.IsolatedAsyncioTestCase):
+    """⛔ terminate 경로가 모듈 자신의 교리를 깨면 안 된다 — lock 0.05s · notify 5.0s인데
+    close만 무제한이면 D-const의 "만료→통지 10초"가 무너진다.
+
+    실측: 응답 없는 피어 하나로 사이클이 25초 안에 끝나지 않았고 `close_failed`도 0이라
+    telemetry에 보이지도 않았다. 운영 상한 근거: uvicorn은 websockets `close_timeout`
+    기본 10s를 쓰고 `close()`는 최악 4×close_timeout이 걸릴 수 있다.
+    """
+
+    async def test_a_stalled_close_does_not_hang_the_cycle(self):
+        registry = TopicLeaseRegistry()
+        doomed, victim = _WS("doomed"), _WS("victim")
+        await _subscribe(registry, doomed, [TOPIC])
+        await _subscribe(registry, victim, [TOPIC], uid="uid-2")
+        notified = []
+
+        async def reauth(target, claimed):
+            if target is doomed:
+                raise ConnectionResetError()
+            notified.append(target)
+            return True
+
+        async def stalling_close(target):
+            await asyncio.sleep(60)
+
+        outcome = await asyncio.wait_for(
+            sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=reauth,
+                       close_connection=stalling_close, close_timeout=0.05),
+            timeout=5,
+        )
+        self.assertEqual(outcome.close_failed, 1, "멈춘 close가 계수되지 않았다")
+        self.assertEqual(notified, [victim], "멈춘 close가 무관한 연결의 통지를 막았다")
+
+    async def test_stalled_closes_do_not_accumulate_across_connections(self):
+        """⛔ 직렬이면 K개가 합산돼 사이클이 주기를 넘긴다 — close는 연결 간 순서가 없다."""
+        registry = TopicLeaseRegistry()
+        sockets = [_WS(f"s{i}") for i in range(4)]
+        for index, ws in enumerate(sockets):
+            await _subscribe(registry, ws, [TOPIC], uid=f"uid-{index}")
+
+        async def failing(target, claimed):
+            raise ConnectionResetError()
+
+        async def stalling_close(target):
+            await asyncio.sleep(60)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        outcome = await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                                   close_connection=stalling_close, close_timeout=0.1)
+        elapsed = loop.time() - started
+        self.assertEqual(outcome.terminated, 4)
+        self.assertLess(elapsed, 0.35, f"close가 직렬로 합산됐다 ({elapsed:.2f}s)")
+
+
+class TestTeardownPrecedesClose(unittest.IsolatedAsyncioTestCase):
+    """⛔ 순서(정리 → close)는 주석이 아니라 **계약**이어야 한다.
+
+    실측: 순서를 뒤집은 mutant가 30 테스트를 전부 통과했다. 그런데 차이는 관측 가능하다 —
+    close가 진행되는 동안(최악 수십 초) close-먼저 변형은 살아 있는 다른 topic의 전송을
+    **계속 인가**한다. 그게 `authorized_lease`가 tombstone을 즉시 fail-closed로 만든 이유다.
+    """
+
+    async def test_state_is_already_fail_closed_when_close_runs(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        cache = await _subscribe(registry, ws, [TOPIC], now_mono=ISSUED_AT)
+        await _subscribe(registry, ws, [OTHER], cache=cache, now_mono=EXPIRED_AT)
+        live = registry.authorized_lease(ws, OTHER, now_mono=EXPIRED_AT)
+        observed = {}
+
+        async def failing(target, claimed):
+            raise ConnectionResetError()
+
+        async def closer(target):
+            observed["uid"] = registry.bound_uid(target)
+            observed["send"] = registry.authorizes_send(
+                target, OTHER, uid=UID, lease_id=live.lease_id, now_mono=EXPIRED_AT
+            )
+
+        await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                         close_connection=closer)
+        self.assertIsNone(observed["uid"], "close 시점에 아직 정리되지 않았다")
+        self.assertFalse(observed["send"], "죽었다고 판정한 소켓이 여전히 인가된다")
+
+    async def test_no_lease_can_be_issued_in_the_termination_window(self):
+        """⛔ 정리를 위해 lock을 **다시 잡으면** 그 사이 경쟁 subscribe가 900초 lease를 받는다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        observed = {}
+
+        async def failing(target, claimed):
+            raise ConnectionResetError()
+
+        async def closer(target):
+            observed["result"] = await _subscribe_result(registry, target)
+
+        await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                         close_connection=closer)
+        self.assertEqual(type(observed["result"]).__name__, "ConnectionTerminated")
+
+
+class TestReentrancyIsLoudEverywhere(unittest.IsolatedAsyncioTestCase):
+    """⛔ 재진입 감지가 ack 창에서만 동작하면 sweep·unsubscribe 경로는 **조용히 hang**한다.
+
+    실측: 다음 슬라이스(§C-API 5 `apply_unsubscribe`)의 가장 자연스러운 배선
+    `async with hold_connection_lock(ws): await registry.remove(...)`가 영구 정지했다.
+    lock 소유 기록이 이미 있는데 재진입 가드가 그걸 안 봤다.
+    """
+
+    async def test_registry_call_inside_a_held_lock_raises(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        lease = registry.authorized_lease(ws, TOPIC, now_mono=ISSUED_AT)
+        async with registry.hold_connection_lock(ws):
+            with self.assertRaises(ReentrantRegistryCall):
+                await asyncio.wait_for(registry.remove(ws, TOPIC, lease.lease_id), timeout=2)
+
+    async def test_nested_hold_by_the_same_task_raises(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        async with registry.hold_connection_lock(ws):
+            with self.assertRaises(ReentrantRegistryCall):
+                await asyncio.wait_for(
+                    _enter_nested(registry, ws), timeout=2
+                )
+
+    async def test_non_positive_timeout_is_rejected(self):
+        """⛔ `timeout=0`은 "즉시 한 번 시도"가 아니라 **항상 busy**다(wait_for 특수 경로).
+
+        그러면 전 연결이 skip되어 통지가 영영 안 나가는데 로그에는 "경합 중"으로만 보인다.
+        """
+        registry = TopicLeaseRegistry()
+        with self.assertRaises(ValueError):
+            async with registry.hold_connection_lock(_WS(), timeout=0):
+                pass
+
+    async def test_body_raised_busy_is_not_counted_as_contention(self):
+        """⛔ 획득 실패와 본문 예외를 같은 handler가 잡으면 거짓 skip이 된다."""
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+
+        async def raises_busy(target, claimed):
+            raise ConnectionLockBusy("본문에서 발생")
+
+        outcome = await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=raises_busy)
+        self.assertEqual(outcome.skipped_busy, 0, "본문 예외가 경합으로 집계됐다")
+        self.assertEqual(outcome.terminated, 1)
+
+
+async def _enter_nested(registry, ws):
+    async with registry.hold_connection_lock(ws):
+        return None
+
+
+async def _subscribe_result(registry, ws, *, uid="uid-9", now_mono=EXPIRED_AT):
+    cache = StrictObservationCache()
+    return await registry.apply_subscribe(
+        ws=ws, uid=uid, topics=[OTHER], rejected_topics=(), snapshot=cache.snapshot(uid),
+        cache=cache, now_mono=now_mono, premium_verified_at_mono=now_mono,
+        identity_verified_at_mono=now_mono, send_ack=_ok_ack,
+    )
+
+
+class TestClaimMarkHousekeeping(unittest.IsolatedAsyncioTestCase):
+    """⛔ 표식 청소는 "(b) 청소 로직을 뺀" 결정의 **근거로 인용된 줄**이다 — 잠겨 있어야 한다."""
+
+    async def test_removal_clears_the_claim_mark(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        async with registry.hold_connection_lock(ws):
+            claimed = registry.claim_expired_locked(ws, now_mono=EXPIRED_AT)
+            self.assertTrue(registry.claimed_topics(ws))
+            self.assertTrue(registry.remove_locked(ws, claimed[0].topic, claimed[0].lease_id))
+            self.assertEqual(registry.claimed_topics(ws), (),
+                             "제거했는데 claim 표식이 남았다")
+
+
 class TestClaimRequiresTheLock(unittest.IsolatedAsyncioTestCase):
     """⛔ claim은 상태 변경이다 — lock 없이 부르면 §B4 우회로가 된다."""
 
@@ -634,6 +823,42 @@ class TestClaimRequiresTheLock(unittest.IsolatedAsyncioTestCase):
         await _subscribe(registry, ws, [TOPIC])
         with self.assertRaises(LockNotHeld):
             registry.claim_expired_locked(ws, now_mono=EXPIRED_AT)
+
+    async def test_teardown_without_the_lock_raises(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        with self.assertRaises(LockNotHeld):
+            registry.teardown_locked(ws)
+
+    def test_busy_handler_does_not_wrap_the_body(self):
+        """⛔ 획득 실패 포착이 본문까지 감싸면 본문의 `ConnectionLockBusy`가 **거짓 skip**이 된다.
+
+        ⚠️ 오늘은 본문에 lock 획득이 없어 **관측 가능한 차이가 없다** — 행동 테스트로는 잡히지
+        않는다(실측: 구 형태로 되돌려도 전부 green). 그래서 잠그는 대상은 동작이 아니라 **형태**다:
+        `except ConnectionLockBusy`가 붙은 try에는 획득만 들어간다. 다음 슬라이스가 본문에
+        획득을 하나 추가하는 순간(예: cross-connection 정리) 이 구조가 유일한 방어다.
+        """
+        import ast
+        import inspect
+
+        import app.topic_lease_sweeper as module
+
+        tree = ast.parse(inspect.getsource(module))
+        func = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "sweep_once")
+        guarded = [
+            node for node in ast.walk(func) if isinstance(node, ast.Try)
+            and any(h.type is not None and getattr(h.type, "id", None) == "ConnectionLockBusy"
+                    for h in node.handlers)
+        ]
+        self.assertEqual(len(guarded), 1, "busy handler를 못 찾았다 — 탐지기 고장")
+        body_calls = {
+            node.func.attr for node in ast.walk(guarded[0].body[0] if guarded[0].body else guarded[0])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        self.assertNotIn("claim_expired_locked", body_calls, "busy 포착이 본문을 감쌌다")
+        self.assertNotIn("remove_locked", body_calls, "busy 포착이 본문을 감쌌다")
 
     async def test_removal_without_the_lock_raises(self):
         registry = TopicLeaseRegistry()

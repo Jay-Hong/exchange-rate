@@ -42,6 +42,7 @@ registry 재진입 금지. 실패·timeout·무확인은 전부 **소켓 전체 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 
 from app.topic_lease_registry import ConnectionLockBusy
@@ -52,6 +53,12 @@ LOCK_ACQUIRE_TIMEOUT_SECONDS = 0.05
 
 # 통지 송신 상한. §B4의 ack 예산과 같은 이유 — 멈춘 클라가 연결 lock을 무한 점유하면 안 된다.
 NOTIFY_TIMEOUT_SECONDS = 5.0
+
+# close 송신 상한. ⛔ 없으면 모듈이 스스로 금지한 무제한 대기를 새 I/O로 다시 들인다 —
+# uvicorn은 websockets `close_timeout` 기본 10s를 쓰고 `close()`는 최악 4×close_timeout이
+# 걸릴 수 있다(실측: 응답 없는 피어 하나로 사이클이 25초 안에 끝나지 않았고 `close_failed`도
+# 0이라 telemetry에 보이지도 않았다).
+CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,7 @@ async def sweep_once(
     close_connection,
     lock_timeout: float = LOCK_ACQUIRE_TIMEOUT_SECONDS,
     notify_timeout: float = NOTIFY_TIMEOUT_SECONDS,
+    close_timeout: float = CLOSE_TIMEOUT_SECONDS,
 ) -> SweepOutcome:
     """만료 lease를 한 바퀴 claim·통지·제거한다.
 
@@ -85,17 +93,33 @@ async def sweep_once(
     ⚠️ `close_connection`은 **필수**다(기본값 없음). registry 정리만으로는 §C3의 "소켓 전체
     정리"가 아니다 — §B2a도 전송 실패를 연결 사망으로 보고 **소켓을 닫으라**고 한다. 선택으로
     두면 배선이 한 번 빠뜨렸을 때 죽은 소켓이 조용히 살아남는다(`send_ack`와 같은 논리).
+    ⚠️ `close_connection`은 **idempotent**해야 한다. §B2a가 dispatcher의 전송 실패에도 close를
+    요구하므로 이미 닫힌 소켓을 sweeper가 다시 닫는 경합은 정상 운영에서 흔하고(starlette
+    WebSocket의 두 번째 `close()`는 `RuntimeError`다), 그때마다 `close_failed`가 오른다 —
+    이 카운터를 단독 경보 조건으로 쓰지 말 것.
     """
     scanned = notified = removed = skipped_busy = terminated = close_failed = 0
+
+    doomed: list = []
 
     for ws in registry.connections_snapshot():
         scanned += 1
         terminate = False
+        # ⛔ busy 포착을 **획득에만** 묶는다. `async with` 전체를 감싸면 본문 어디서
+        #    `ConnectionLockBusy`가 나도 "정상 경합"으로 집계돼, 통지도 제거도 안 한 사이클이
+        #    §C3의 "지연 상한 = sweep 주기 1회" 근거를 조용히 무너뜨린다.
+        held = contextlib.AsyncExitStack()
         try:
-            async with registry.hold_connection_lock(ws, timeout=lock_timeout):
-                claimed = registry.claim_expired_locked(ws, now_mono=now_mono)
-                if not claimed:
-                    continue
+            await held.enter_async_context(
+                registry.hold_connection_lock(ws, timeout=lock_timeout)
+            )
+        except ConnectionLockBusy:
+            # 그 연결만 건너뛴다 — 무한 대기하면 무관한 연결의 통지가 밀린다.
+            skipped_busy += 1
+            continue
+        try:
+            claimed = registry.claim_expired_locked(ws, now_mono=now_mono)
+            if claimed:
                 try:
                     confirmed = await asyncio.wait_for(
                         send_reauth(ws, claimed), timeout=notify_timeout
@@ -115,23 +139,34 @@ async def sweep_once(
                         for entry in claimed:
                             if registry.remove_locked(ws, entry.topic, entry.lease_id):
                                 removed += 1
-        except ConnectionLockBusy:
-            # 그 연결만 건너뛴다 — 무한 대기하면 무관한 연결의 통지가 밀린다.
-            skipped_busy += 1
-            continue
+                if terminate:
+                    # ⛔ 정리는 **이미 쥔 lock 아래에서** 한다. `remove_websocket`으로 재획득하면
+                    #    (1) 상한이 없어 §C3가 없애려던 head-of-line이 되살아나고(실측: 무관한
+                    #    연결의 통지 5.00s 지연, 그런데 `skipped_busy=0`이라 안 보인다)
+                    #    (2) release→재획득 창에 경쟁 subscribe가 끼어 **죽은 연결에 900초
+                    #    lease**가 발급된다(실측: `Applied` ack이 실제로 나갔다).
+                    registry.teardown_locked(ws)
+                    doomed.append(ws)
+        finally:
+            await held.aclose()
 
-        if terminate:
-            # ⛔ **lock을 놓은 뒤** 정리·close한다. `remove_websocket`이 같은 lock을 잡으므로
-            #    안에서 부르면 데드락이고, stalled transport의 close는 그 연결의 모든 전이를 막는다.
-            # ⚠️ 순서: registry 정리가 먼저다 — 즉시 fail-closed로 만든 뒤에 I/O를 한다.
-            await registry.remove_websocket(ws)
-            try:
-                await close_connection(ws)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 — 이미 죽은 소켓이면 close도 실패한다.
-                close_failed += 1
-            terminated += 1
+    async def _close(target) -> bool:
+        try:
+            await asyncio.wait_for(close_connection(target), timeout=close_timeout)
+            return True
+        except asyncio.CancelledError:
+            # ⚠️ 이 절은 **방어적 문서**다 — `CancelledError`는 `BaseException`이라 아래
+            #    `except Exception`이 애초에 잡지 않는다. 의도를 남기려고 명시한다.
+            raise
+        except Exception:  # noqa: BLE001 — 이미 죽은 소켓이면 close도 실패한다.
+            return False
+
+    # ⛔ close는 **연결 간 순서가 없는 순수 I/O**라 직렬로 두면 K개가 합산돼 사이클이 D-const의
+    #    sweep 주기를 넘긴다(상한 2s·정지 소켓 10개면 20s). 정리는 이미 끝났으므로 동시에 한다.
+    if doomed:
+        results = await asyncio.gather(*(_close(ws) for ws in doomed))
+        close_failed = sum(1 for ok in results if not ok)
+        terminated = len(doomed)
 
     return SweepOutcome(
         scanned=scanned,

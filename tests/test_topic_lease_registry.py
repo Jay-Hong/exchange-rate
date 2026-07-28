@@ -837,19 +837,63 @@ class TestExpiredHorizonIsNotIssued(unittest.IsolatedAsyncioTestCase):
 class TestMutatorsAreNotB4Bypasses(unittest.IsolatedAsyncioTestCase):
     """⛔ 연결 lock을 안 잡는 public 변경 API가 있으면 그게 **B4 우회로**다."""
 
-    def test_remove_acquires_the_connection_lock(self):
+    def test_public_mutators_acquire_the_owning_lock(self):
+        """⛔ **소유를 기록하는** 획득 경로여야 한다.
+
+        구 버전은 `"connection_lock" in ast.dump(...)`로 판정했는데, 그 문자열은
+        `hold_connection_lock`의 **부분 문자열**이라 소유 기록 없는 구 형태로 되돌려도
+        그대로 통과했다(실측 BLIND). 게다가 `remove` 하나만 봤다 — 리포 최대 전이인
+        `apply_subscribe`의 소유 계약은 어떤 테스트도 관측하지 않았다.
+        """
         import ast
         import inspect
 
         import app.topic_lease_registry as module
 
         tree = ast.parse(inspect.getsource(module))
-        remove = next(n for n in ast.walk(tree)
-                      if isinstance(n, ast.AsyncFunctionDef) and n.name == "remove")
-        locks = [n for n in ast.walk(remove)
-                 if isinstance(n, ast.AsyncWith)
-                 and any("connection_lock" in ast.dump(i.context_expr) for i in n.items)]
-        self.assertEqual(len(locks), 1, "remove가 연결 lock을 잡지 않는다")
+        registry = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        for name in ("apply_subscribe", "remove", "remove_websocket"):
+            method = next(n for n in registry.body
+                          if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+            owning = [
+                item for node in ast.walk(method) if isinstance(node, ast.AsyncWith)
+                for item in node.items
+                if isinstance(item.context_expr, ast.Call)
+                and isinstance(item.context_expr.func, ast.Attribute)
+                and item.context_expr.func.attr == "hold_connection_lock"
+            ]
+            self.assertEqual(len(owning), 1, f"{name}이 소유 기록 획득 경로를 쓰지 않는다")
+
+    def test_claim_marks_are_read_only_through_the_lease_aware_helper(self):
+        """⛔ `_claimed`를 topic 문자열로 읽는 지점이 **하나라도 새로 생기면** 영구 차단이 부활한다.
+
+        §C-API 2(`get_subscribers` topic 인덱스)가 열려 있어 그 슬라이스가 가장 자연스러운
+        형태(`if topic in self._claimed...`)로 제외를 재구현할 여지가 크다. 읽기 지점을
+        `_is_claimed`(Lease를 받는다) 하나로 묶어 잘못된 질문 자체를 표현 불가능하게 한다.
+        """
+        import ast
+        import inspect
+
+        import app.topic_lease_registry as module
+
+        tree = ast.parse(inspect.getsource(module))
+        registry = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        allowed = {"_is_claimed", "claimed_topics", "claim_expired_locked",
+                   "remove_locked", "teardown_locked", "__init__"}
+        touching = set()
+        for method in registry.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(method):
+                if isinstance(node, ast.Attribute) and node.attr == "_claimed":
+                    touching.add(method.name)
+        self.assertTrue(touching, "탐지기가 `_claimed` 접근을 하나도 못 찾았다 — 고장")
+        self.assertLessEqual(
+            touching, allowed,
+            f"`_claimed`를 새 지점에서 읽는다: {sorted(touching - allowed)} — `_is_claimed`를 쓸 것",
+        )
 
     def test_public_mutators_are_async_so_the_lock_is_expressible(self):
         import inspect

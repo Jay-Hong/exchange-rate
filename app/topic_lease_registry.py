@@ -305,17 +305,17 @@ class TopicLeaseRegistry:
         # 막는다. ws가 살아 있는 동안만 유지되면 충분하므로(되살릴 주체도 ws를 들고 있다) 여기서도
         # 약한 참조를 쓴다.
         self._closed: "weakref.WeakSet" = weakref.WeakSet()
-        # ws -> weakref(ack을 실행 중인 task). ⚠️ **약한 참조로 담는다** — task의 프레임이
-        # `ws`를 잡고 있어서, 강하게 담으면 `dict → task → frame → ws`로 키가 되살아난다
-        # (`Lease`에 ws를 안 담는 것과 같은 이유).
-        self._ack_owner: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> int. D2의 연결별 `identity_generation` (미바인딩 0, 최초 바인딩 1, 재바인딩마다 +1).
         self._generations: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> {topic: lease_id}. §C3 claim-then-notify — **제거 전이라도** 인가에서 제외된다.
         self._claimed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> weakref(lock을 쥔 task). `Lock.locked()`는 **누가** 쥐었는지 모르므로
         # (다른 task가 쥐어도 True — 실측으로 §B4 우회 성공) 소유자를 따로 기록한다.
-        # ⚠️ `_ack_owner`와 같은 이유로 약한 참조다(task 프레임이 ws를 잡는다).
+        # ⚠️ **약한 참조**다 — task 프레임이 `ws`를 잡으므로 강하게 담으면 키가 되살아난다.
+        # ⚠️ 한때 ack 창 전용 `_ack_owner` 장부를 따로 뒀는데 **상위집합에 흡수**했다:
+        #    `apply_subscribe`의 lock 보유 구간이 ack 창을 완전히 포함하므로 중복이었고,
+        #    분리해 두면 재진입 감지가 ack 창에서만 동작해 sweep·unsubscribe 경로는 조용히
+        #    hang한다(실측: `async with hold_connection_lock: await remove(...)` 영구 정지).
         self._lock_owner: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
     # ── lock ────────────────────────────────────────────────────────────
@@ -338,6 +338,17 @@ class TopicLeaseRegistry:
         ⚠️ `connection_lock(ws)`을 직접 잡는 것도 여전히 가능하지만 그때는 소유 기록이 없어
         `*_locked`를 부를 수 없다 — 의도된 것이다(registry 상태 변경은 이 경로로만).
         """
+        if timeout is not None and timeout <= 0:
+            # ⛔ `wait_for(timeout<=0)`은 코루틴을 Task로 감싼 뒤 첫 step 전에 취소하므로
+            #    **한가한 lock에서도 항상** busy가 된다(실측). 배선이 "기다리지 말고 한 번만
+            #    시도" 의도로 0을 넣으면 전 연결이 skip되고 통지가 영영 안 나가는데, 로그에는
+            #    정상 신호인 "경합 중"으로만 보인다. 조용한 무력화라 입력에서 거부한다.
+            raise ValueError(
+                f"timeout은 양수여야 한다(0은 '즉시 시도'가 아니라 '항상 실패'): {timeout!r}"
+            )
+        # ⛔ 같은 task의 중첩 진입은 `asyncio.Lock`이 재진입 불가라 **조용히 hang**한다 —
+        #    소유자를 알면서 hang하는 것은 §B4의 "시끄럽게 실패" 규칙과 정반대다.
+        self._guard_reentrant(ws)
         lock = self.connection_lock(ws)
         if timeout is None:
             await lock.acquire()
@@ -358,14 +369,15 @@ class TopicLeaseRegistry:
 
     def _guard_reentrant(self, ws) -> None:
         """⛔ **lock을 잡기 전에** 부른다 — 잡은 뒤면 이미 늦어서 그대로 hang한다."""
-        ref = self._ack_owner.get(ws)
+        ref = self._lock_owner.get(ws)
         if ref is None:
             return
         owner = ref()
         if owner is not None and owner is asyncio.current_task():
             raise ReentrantRegistryCall(
-                "send_ack 안에서 registry를 다시 불렀다 — 연결 lock은 재진입 불가다. "
-                "sender는 렌더링·전송만 하고 상태 전이는 apply_subscribe가 소유한다."
+                "이미 이 연결 lock을 쥔 task가 registry를 다시 불렀다 — 재진입 불가라 그대로 "
+                "두면 영구 hang이다. 주입된 sender(ack·reauth)는 렌더링·전송만 하고, lock을 "
+                "쥔 코드는 `*_locked` 계열을 쓴다."
             )
 
     # ── 요청 단위 전이 ──────────────────────────────────────────────────
@@ -417,7 +429,6 @@ class TopicLeaseRegistry:
             raise ValueError(
                 f"topic이 accepted와 rejected에 동시에 있다: {sorted(contradictory)}"
             )
-        self._guard_reentrant(ws)
         async with self.hold_connection_lock(ws):
             if ws in self._closed:
                 # teardown이 끝났거나 앞선 전이가 연결을 죽인 상태다. 되살리면 "끊긴 소켓에
@@ -515,8 +526,6 @@ class TopicLeaseRegistry:
                     # 4) ack 송신 — **활성화보다 먼저**(§B4).
                     task = asyncio.current_task()
                     cancelling_before = task.cancelling() if task is not None else 0
-                    if task is not None:
-                        self._ack_owner[ws] = weakref.ref(task)
                     try:
                         confirmed = await asyncio.wait_for(
                             send_ack(ack), timeout=ACK_TIMEOUT_SECONDS
@@ -533,8 +542,6 @@ class TopicLeaseRegistry:
                         raise
                     except Exception as exc:  # noqa: BLE001 — 전송 실패는 연결 사망으로 본다(§B2a)
                         return self._terminate_locked(ws, type(exc).__name__)
-                    finally:
-                        self._ack_owner.pop(ws, None)
 
                     # ⛔ sender가 **외부** 취소를 삼키고 정상 반환한 경우를 여기서 잡는다.
                     #    예산 만료는 `wait_for`가 `uncancel()`하므로 `cancelling()`이 0→0이고,
@@ -679,7 +686,7 @@ class TopicLeaseRegistry:
         lease = self._active.get(ws, {}).get(topic)
         if lease is None:
             return None
-        if self._claimed.get(ws, {}).get(topic) == lease.lease_id:
+        if self._is_claimed(ws, lease):
             # §C3 — claim된 lease는 **제거 전이라도** 즉시 제외된다. 아니면 통지를 보내는 동안
             # live publish가 그 lease로 다시 통과한다. ⚠️ 만료 시각만으로는 못 막는다 —
             # 이 판정은 호출자가 넘긴 `now`를 쓰므로, 통지 중 tick이 과거 시각을 쓰면 통과한다.
@@ -692,7 +699,10 @@ class TopicLeaseRegistry:
             # 둘 다 넣었는데 mutation에서 **양쪽 다 생존**했다 — 서로 잉여였다. 대조 방식이
             # 남을 이유: 청소 방식은 정확성이 "모든 교체 경로가 청소를 기억하는가"에 걸리고,
             # 이 버그가 정확히 그렇게 생겼다. 남은 표식은 존재하지 않는 lease를 가리켜도
-            # id가 다르므로 무해하고, 성공한 sweep의 `remove_locked`와 teardown이 걷어 간다.
+            # id가 다르므로 무해하다. ⚠️ 수거자 서술 정정: **현행 lease가 남아 있는 경우에만**
+            # 성공한 sweep의 `remove_locked`가 걷고, evict·purge로 lease가 사라진 topic의 표식은
+            # CAS가 항상 False라 **teardown/GC만이** 걷는다(실측). 엔트리는 topic당 1개 상한이고
+            # 연결과 함께 회수되므로 유계·무해하다.
             return None
         if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
             return None
@@ -760,7 +770,6 @@ class TopicLeaseRegistry:
         teardown·sweep의 정리는 계속 돌아야 하고, 이건 인가 응답이 아니라 **상태 변경**이다.
         이미 lock을 쥔 곳에서는 `_remove_locked`를 쓴다.
         """
-        self._guard_reentrant(ws)
         async with self.hold_connection_lock(ws):
             return self.remove_locked(ws, topic, lease_id)
 
@@ -783,6 +792,21 @@ class TopicLeaseRegistry:
         중간에 사라지지 않는다(대신 그 사이 사라진 연결은 다음 주기가 본다).
         """
         return list(self._active.keys())
+
+    def _is_claimed(self, ws, lease: Lease) -> bool:
+        """이 **lease**가 sweep에 claim됐는가 (§C3).
+
+        ⛔ **`Lease`를 받는다 — topic 문자열로는 물을 수 없다.** topic 존재만 보는 제외는
+        취소로 남은 구 claim이 **재발급된 새 lease를 영구 차단**하게 만든다(실측). 시각을
+        필수 인자로 만들어 만료 미확인 답을 못 얻게 한 것과 같은 수법으로, 잘못된 질문 자체를
+        표현 불가능하게 한다 — §C-API 2의 `get_subscribers` 필터가 생길 때 같은 버그가 새
+        지점에서 부활하지 않도록.
+        """
+        return self._claimed.get(ws, {}).get(lease.topic) == lease.lease_id
+
+    def claimed_topics(self, ws) -> tuple:
+        """claim 표식이 걸린 topic 목록 — 상태 위생 검증용(인가 판정에 쓰지 말 것)."""
+        return tuple(sorted(self._claimed.get(ws, {})))
 
     def claim_expired_locked(self, ws, *, now_mono: float) -> tuple:
         """만료 lease를 **원자적으로 claim**한다(§C3 claim-then-notify).
@@ -837,11 +861,22 @@ class TopicLeaseRegistry:
         동시에 쥘 수 있다(상호배제 붕괴, 실측 재현). 연결이 사라지면 weak dictionary가 알아서
         정리하므로 수동 삭제할 이유가 없다.
         """
-        self._guard_reentrant(ws)
         async with self.hold_connection_lock(ws):
-            self._active.pop(ws, None)
-            self._pending.pop(ws, None)
-            self._uids.pop(ws, None)
-            self._generations.pop(ws, None)
-            self._claimed.pop(ws, None)
-            self._closed.add(ws)
+            self.teardown_locked(ws)
+
+    def teardown_locked(self, ws) -> None:
+        """`remove_websocket`의 **lock 보유판**.
+
+        ⛔ 이미 lock을 쥔 곳(§C3 sweep의 terminate 경로)이 `remove_websocket`을 부르면 재획득이
+        필요한데, 그 재획득은 (1) 상한이 없어 §C3가 없애려던 head-of-line이 되살아나고
+        (실측: 무관한 연결의 통지가 5.00s 밀렸는데 `skipped_busy=0`이라 telemetry에도 안 보였다)
+        (2) release→재획득 **창**에 경쟁 subscribe가 끼어 죽은 연결에 900초 lease를 발급받는다
+        (실측: `Applied` + `lease_duration_seconds=900` ack이 실제로 나갔다).
+        """
+        self._require_lock(ws)
+        self._active.pop(ws, None)
+        self._pending.pop(ws, None)
+        self._uids.pop(ws, None)
+        self._generations.pop(ws, None)
+        self._claimed.pop(ws, None)
+        self._closed.add(ws)
