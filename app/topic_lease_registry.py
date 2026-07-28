@@ -34,10 +34,12 @@
    `CancelledError`를 삼키고 정상 반환하면 `wait_for`는 **정상 반환**한다
    (`asyncio.Timeout.__aexit__`는 예외가 실제로 전파될 때만 `TimeoutError`로 바꾼다).
    반환값 계약이 "그냥 `await ws.send_json(...)`만 하고 끝나는" 흔한 형태를 잡는다.
-   ⚠️ 한계는 **한쪽뿐이다**(구 서술 "삼키면 무조건 속는다"는 실제보다 넓었다):
-   삼킨 뒤 `True`를 돌려줘도, **외부** 취소는 바깥 프레임의 `cancelling()`이 0→1로 남아
-   검출된다(예산 만료는 `wait_for`가 `uncancel()`해서 0→0). 즉 teardown 취소는 fail-close되고,
-   **예산 만료를 삼킨 경우만** 여전히 구별 불가다. 아래 2·3은 규칙일 뿐 강제되지 않는다.
+   ⚠️ 삼킨 뒤 `True`를 돌려줘도 **두 경우 모두 검출된다**: **외부** 취소는 바깥 프레임의
+   `cancelling()`이 0→1로 남고(예산 만료는 `uncancel()`로 0→0), **예산 만료**는
+   `asyncio.timeout(...).expired()`가 잡는다. ⛔ 구 서술 "예산 만료를 삼킨 경우만 구별 불가"는
+   **틀렸다** — `wait_for`만 보고 내린 결론이었고, `asyncio.timeout`은 시계 없이 구별한다(실측).
+   ⚠️ 다만 검출은 **거부**일 뿐 강제 종료가 아니다 — 비협조 sender는 그만큼 lock을 붙든다.
+   아래 2·3은 규칙일 뿐 강제되지 않는다.
 2. **`CancelledError`를 삼키거나 shield하지 말 것.** shield하면 여기서는 실패로 접었는데
    ack은 실제로 나간다 — 서버가 버린 lease를 클라가 가졌다고 믿게 된다.
 3. **자체 timeout을 걸지 말 것.** 예산은 이 모듈(`ACK_TIMEOUT_SECONDS`)이 소유한다.
@@ -527,9 +529,11 @@ class TopicLeaseRegistry:
                     task = asyncio.current_task()
                     cancelling_before = task.cancelling() if task is not None else 0
                     try:
-                        confirmed = await asyncio.wait_for(
-                            send_ack(ack), timeout=ACK_TIMEOUT_SECONDS
-                        )
+                        # ⛔ `wait_for`가 아니라 `asyncio.timeout`인 이유: sender가 취소를
+                        #    삼키면 `wait_for`는 예산 시점에 반환하지 않고 늦은 `True`를
+                        #    정상 반환값으로 준다. `budget.expired()`가 시계 없이 구별한다.
+                        async with asyncio.timeout(ACK_TIMEOUT_SECONDS) as budget:
+                            confirmed = await send_ack(ack)
                     except asyncio.TimeoutError:
                         # ⚠️ 셋이 여기서 구별되지 않는다: 우리 예산 만료 / **전송 계층**의
                         #    `TimeoutError`(3.11+에서 `OSError` 계열) / sender가 스스로 건 timeout.
@@ -552,6 +556,10 @@ class TopicLeaseRegistry:
                         self._closed.add(ws)
                         raise asyncio.CancelledError()
 
+                    if budget.expired():
+                        # 예산이 지난 뒤 도착한 성공 보고 — ack이 제때 못 나갔는데 활성화하면
+                        # 클라는 자기가 구독한 줄 모르는 상태가 된다.
+                        return self._terminate_locked(ws, "ack_confirmed_after_deadline")
                     if confirmed is not True:
                         return self._terminate_locked(ws, "ack_not_confirmed")
 

@@ -651,6 +651,33 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0), "취소를 삼켰는데 활성화됐다")
 
+    async def test_late_ack_after_the_budget_is_not_success(self):
+        """⛔ 예산이 지난 뒤 도착한 `True`를 성공으로 인정하면 안 된다.
+
+        ⚠️ 이 모듈 문서는 한때 "예산 만료를 삼킨 경우만 여전히 구별 불가"라고 적었는데
+        **틀렸다** — `asyncio.timeout(...).expired()`가 시계를 읽지 않고 구별한다(실측).
+        인정하면 ack이 실제로 못 나갔는데 lease가 활성화되고, 클라는 자기가 구독한 줄 모른다.
+        """
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        release = asyncio.Event()
+
+        async def swallowing(ack):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await release.wait()
+                return True
+            return True
+
+        with patch("app.topic_lease_registry.ACK_TIMEOUT_SECONDS", 0.01):
+            task = asyncio.create_task(_apply(registry, cache, ws, [TOPIC], send_ack=swallowing))
+            await asyncio.sleep(0.03)
+            release.set()
+            result = await asyncio.wait_for(task, timeout=5)
+        self.assertIsInstance(result, ConnectionTerminated)
+        self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0))
+
     async def test_ack_timeout_is_below_the_client_ack_deadline(self):
         """§D6 클라 ack timeout이 10초다 — 그보다 길면 클라가 먼저 포기한다."""
         self.assertLess(ACK_TIMEOUT_SECONDS, 10)

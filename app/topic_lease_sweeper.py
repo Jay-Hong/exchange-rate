@@ -35,7 +35,8 @@ ack이 최대 `ACK_TIMEOUT_SECONDS` 동안 연결 lock을 쥐므로(§B4), 단�
 
 `await send_reauth(ws, claimed)`는 **연결 lock을 쥔 채** 실행되며 §B4의 `send_ack`와 같은
 규칙을 받는다: 성공 시 `True` 반환(제어 흐름은 배달의 증거가 아니다) · 자체 timeout 금지 ·
-registry 재진입 금지. 실패·timeout·무확인은 전부 **소켓 전체 정리**다(§C3 — 부분 상태 잔존 금지).
+registry 재진입 금지 · **취소에 협조할 것**(삼키면 예산이 무의미해진다 — 늦은 성공은 거부되지만
+사이클이 그만큼 늘어난다). 실패·timeout·무확인은 전부 **소켓 전체 정리**다(§C3 — 부분 상태 잔존 금지).
 
 ## 이 모듈이 하지 않는 것
 
@@ -121,18 +122,22 @@ async def sweep_once(
             claimed = registry.claim_expired_locked(ws, now_mono=now_mono)
             if claimed:
                 try:
-                    confirmed = await asyncio.wait_for(
-                        send_reauth(ws, claimed), timeout=notify_timeout
-                    )
+                    # ⛔ `wait_for`가 아니라 `asyncio.timeout`을 쓰는 이유: callback이 취소를
+                    #    삼키면 `wait_for`는 **예산 시점에 반환하지 않고** 늦게 온 `True`를
+                    #    정상 반환값으로 준다(실측: 예산 0.01s인데 0.05s 뒤 완료·True).
+                    #    `budget.expired()`가 그 경우를 **시계를 읽지 않고** 구별한다.
+                    async with asyncio.timeout(notify_timeout) as budget:
+                        confirmed = await send_reauth(ws, claimed)
                 except asyncio.CancelledError:
                     # ⛔ 구조적 취소는 그대로 전파한다 — 감싸면 asyncio의 취소 전파가 깨진다.
                     raise
                 except Exception:  # noqa: BLE001 — timeout 포함. 전송 실패는 연결 사망으로 본다.
                     terminate = True
                 else:
-                    if confirmed is not True:
-                        # §B4와 같은 계약: 제어 흐름은 배달의 증거가 아니다(취소를 삼키고 정상
-                        # 반환하면 `wait_for`도 정상 반환한다).
+                    if budget.expired() or confirmed is not True:
+                        # §B4와 같은 계약: 제어 흐름은 배달의 증거가 아니다. 예산이 지난 뒤
+                        # 도착한 `True`도 성공이 아니다 — 그때 lease를 지우면 통지가 못 나간
+                        # 채 구독만 사라져 클라는 재인증 신호를 받지 못한다.
                         terminate = True
                     else:
                         notified = 1
@@ -154,7 +159,10 @@ async def sweep_once(
 
         # close는 **lock 밖**이다 — stalled transport가 그 연결의 모든 전이를 막으면 안 된다.
         try:
-            await asyncio.wait_for(close_connection(ws), timeout=close_timeout)
+            async with asyncio.timeout(close_timeout) as budget:
+                await close_connection(ws)
+            if budget.expired():
+                return SweepOutcome(scanned=1, terminated=1, close_failed=1)
         except asyncio.CancelledError:
             # ⚠️ 이 절은 **방어적 문서**다 — `CancelledError`는 `BaseException`이라 아래
             #    `except Exception`이 애초에 잡지 않는다. 의도를 남기려고 명시한다.
@@ -174,9 +182,12 @@ async def sweep_once(
     #    나머지를 취소하지도 대기하지도 않는다 — 실측: 사이클이 예외로 끝난 시점에 sibling이
     #    여전히 lock을 쥐고 있었고 그 뒤 lease 제거까지 수행했다. 다음 주기와 겹치면 중복
     #    통지·claim 경쟁이 된다.
-    # ⚠️ sibling **취소**가 아니라 **완료 대기**를 고른 이유: 취소는 성공 직전의 통지까지
-    #    죽인다. 그리고 모든 `_visit`은 이미 상한(lock·notify·close)을 갖고 있어 대기가 무한할
-    #    수 없다 — 그 상한들이 이 선택을 안전하게 만든다.
+    # ⚠️ sibling **취소**가 아니라 **완료 대기**를 고른 이유: 취소는 성공 직전의 통지까지 죽인다.
+    # ⚠️ "모든 `_visit`이 상한을 가져 대기가 무한할 수 없다"는 **조건부**다 — 주입된 callback이
+    #    취소에 협조할 때만 성립한다(실측: 취소를 삼키는 callback에서 예산 0.01s가 0.05s+로
+    #    늘어났다). 비협조 callback은 순수 asyncio로 강제 종료할 수 없어 TaskGroup(취소)을
+    #    골랐어도 마찬가지다 — 선택은 유지하되 근거를 조건부로 적는다. 진짜 상한이 필요하면
+    #    **transport 계층**(소켓 close·abort)에서 와야 하고 그건 배선의 몫이다.
     results = await asyncio.gather(
         *(_visit(ws) for ws in registry.connections_snapshot()), return_exceptions=True
     )

@@ -619,6 +619,65 @@ class TestNotificationFailureCleansTheSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome.terminated, 1)
         self.assertIsNone(registry.bound_uid(ws))
 
+    async def test_late_confirmation_after_the_budget_is_not_success(self):
+        """⛔ 예산이 지난 뒤 도착한 `True`를 성공으로 인정하면 안 된다.
+
+        `wait_for`는 callback이 취소를 삼키면 **예산 시점에 반환하지 않고**, 늦게 온 `True`를
+        정상 반환값으로 준다(실측: 예산 0.01s인데 0.05s 뒤 완료, 반환 True). 그러면 통지가
+        실제로는 나가지 못했는데 lease가 제거된다 — 클라는 재인증 신호를 못 받는다.
+        `asyncio.timeout(...).expired()`가 **시계를 읽지 않고** 그 경우를 구별한다.
+        """
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        release = asyncio.Event()
+
+        async def swallowing(target, claimed):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await release.wait()          # 취소를 삼키고 계속 산다
+                return True                   # 예산이 지난 뒤의 성공 보고
+            return True
+
+        async def noop_close(target):
+            pass
+
+        sweep = asyncio.create_task(
+            sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=swallowing,
+                       close_connection=noop_close, notify_timeout=0.01, close_timeout=0.05)
+        )
+        await asyncio.sleep(0.03)
+        release.set()
+        outcome = await asyncio.wait_for(sweep, timeout=5)
+        self.assertEqual(outcome.notified, 0, "예산 뒤 도착한 True를 성공으로 인정했다")
+        self.assertEqual(outcome.removed, 0, "통지도 못 했는데 lease를 제거했다")
+        self.assertEqual(outcome.terminated, 1)
+
+    async def test_late_close_after_the_budget_is_counted_as_failure(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        release = asyncio.Event()
+
+        async def failing(target, claimed):
+            raise ConnectionResetError()
+
+        async def swallowing_close(target):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await release.wait()
+
+        sweep = asyncio.create_task(
+            sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=failing,
+                       close_connection=swallowing_close, close_timeout=0.01)
+        )
+        await asyncio.sleep(0.03)
+        release.set()
+        outcome = await asyncio.wait_for(sweep, timeout=5)
+        self.assertEqual(outcome.close_failed, 1, "예산 뒤 끝난 close를 성공으로 봤다")
+
     async def test_sender_that_does_not_confirm_is_a_failure(self):
         """§B4의 `send_ack`와 같은 계약 — 제어 흐름은 배달의 증거가 아니다."""
         registry = TopicLeaseRegistry()
