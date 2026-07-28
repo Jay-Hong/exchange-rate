@@ -30,14 +30,19 @@ registry 불변 + lease 미연장)가 성립하지 않고, 장애가 곧 대량 
    **transient와 분리된 카운터 + ERROR 로그**를 남긴다. registry와 기존 lease는 건드리지 않는다.
 3. **`retry_after_seconds`에 하향 jitter를 넣는다** — 여기서 주는 값은 기본값일 뿐이다. 전역 장애에서
    전원이 같은 초에 복귀하면 herd가 유지된다(§D6가 재인증 타이머에 `U(0,60)`을 넣은 것과 같은 이유).
-4. **provider 호출에 시간 상한을 건다** — 이 루프에는 deadline이 없다. `httpx` timeout은 **단계별**이라
-   왕복 총시간 상한이 아니고, `asyncio.to_thread`는 취소되지 않는다. §D6의 ack timeout(10초)보다
-   길어지면 클라가 새 request_id로 재시도해 같은 uid의 검증이 **2배**가 된다(A5 전까지 특히).
+4. **provider가 자기 작업에 스스로 상한을 건다**(SDK/transport timeout). 이 루프의
+   `VERIFY_DEADLINE_SECONDS`는 **호출자**만 풀어 준다 — `asyncio.to_thread`의 실제 작업은
+   취소되지 않고, `httpx` timeout도 **단계별**이라 왕복 총시간 상한이 아니다.
+   ⚠️ **그래서 provider가 끝나지 않으면 그 (uid, epoch, concern)은 영구히 열등 상태다**:
+   호출자는 매번 `temporarily_unavailable`을 받고(=매달리지 않고) 작업도 곱해지지 않지만,
+   **복구는 오직 provider가 스스로 끝날 때만** 일어난다(실측: 4회 시도 → provider 호출 1,
+   `in_flight`은 1로 유지). Firebase adapter는 동기 SDK를 `to_thread`로 감쌀 예정이므로
+   여기서 timeout을 반드시 구현하고, **타임아웃 후 `in_flight_count()==0`과 다음 호출 성공**을
+   통합 테스트로 잠가야 이 항목이 완전히 닫힌다.
 
 ## 이 슬라이스가 하지 않는 것
 
-- **A5 single-flight** — 같은 uid의 동시 검증 합치기. 다음 슬라이스.
-- **firebase 기반 identity provider 구현** — 배선 슬라이스.
+- **firebase 기반 identity provider 구현** — 다음 슬라이스. 위 4번이 그 슬라이스의 필수 과제다.
 - **lease 발급·registry 반영** — 배선 슬라이스. 소비 fence 계약은 §A4(등록 → `is_current` 1회
   재확인 → 활성화)를 따른다.
 """
@@ -352,6 +357,10 @@ async def verify_strict(
 
         remaining = deadline_mono - clock.mono()
         if remaining <= 0:
+            # ⚠️ 이 명시 검사는 **오늘 기준 중복**이다 — 아래 `wait_for`에 음수 timeout이 가도
+            # 같은 결과가 나오고 provider 호출도 늘지 않는다(실측: 둘 다 `calls=ii`).
+            # 그래도 남긴다: `wait_for(timeout<=0)`의 거동에 의존하지 않고 의도를 코드로 드러내기
+            # 위해서다. 필요하다고 주장하지는 않는다(mutation 생존을 인정한다).
             return TemporarilyUnavailable(concern=concern)
         try:
             if single_flight is None:

@@ -43,6 +43,19 @@ class _Clock:
         return 1000.0
 
 
+class _SteppingClock:
+    """수동으로 전진시키는 monotonic — deadline을 **결정론적으로** 검사한다."""
+
+    def __init__(self, start=1000.0):
+        self._now = start
+
+    def mono(self):
+        return self._now
+
+    def advance(self, seconds):
+        self._now += seconds
+
+
 class _RealClock:
     """실제 monotonic.
 
@@ -325,14 +338,16 @@ class TestOutageStillCollapses(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class TestHungProviderDoesNotBrickTheKey(unittest.IsolatedAsyncioTestCase):
-    """⛔ 회귀 잠금 — 멈춘 provider가 그 키를 **영구 점유**하던 결함.
+class TestHungProviderKeepsCallersResponsive(unittest.IsolatedAsyncioTestCase):
+    """멈춘 provider에서 **보장되는 것과 안 되는 것**을 정확히 나눈다.
 
-    실측(수정 전): owner 취소 후에도 뒤이은 연결 3건이 전부 매달렸다.
+    보장: (a) 호출자는 매번 답을 받는다(매달리지 않는다), (b) 작업이 곱해지지 않는다.
+    ⛔ **보장 안 되는 것: 복구.** flight는 실제 작업이 끝날 때까지 슬롯을 쥐므로, provider가
+    영원히 안 끝나면 그 키는 영구히 열등 상태다(매 요청 `temporarily_unavailable`).
+    복구는 **오직 provider가 스스로 끝날 때만** 일어난다 — 그래서 provider의 자체 timeout이
+    이 설계의 나머지 절반이고, Firebase adapter 슬라이스의 필수 과제다.
 
-    ⚠️ 상한은 **호출자 쪽**에 있다. flight는 실제 작업이 끝날 때까지 슬롯을 쥔다 — 그래야
-    뒤이은 요청이 새 작업을 시작하지 않고 **같은 flight에 붙는다**. 그래서 `in_flight_count()`가
-    1로 남는 건 정상이고, 잠가야 할 것은 (a) 호출자가 답을 받는가 (b) 작업이 곱해지지 않는가다.
+    ⚠️ 구 이름은 "키가 brick되지 않는다"였는데 **과대주장**이었다. 위 실측대로 soft brick은 남는다.
     """
 
     async def test_later_requests_get_an_answer_instead_of_hanging(self):
@@ -358,6 +373,41 @@ class TestHungProviderDoesNotBrickTheKey(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(first, TemporarilyUnavailable)
         self.assertTrue(all(isinstance(r, TemporarilyUnavailable) for r in later))
         self.assertEqual(len(calls), 1, "뒤이은 요청이 같은 flight에 안 붙고 새 작업을 시작했다")
+        self.assertEqual(flight.in_flight_count(), 1, "복구되지 않는다는 사실 자체를 기록해 둔다")
+
+    async def test_recovery_happens_only_when_the_provider_finishes(self):
+        """⛔ 복구 조건을 명시적으로 잠근다 — provider가 끝나야 비로소 다음 요청이 성공한다."""
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+        release = asyncio.Event()
+        calls = []
+
+        async def identity(uid):
+            calls.append(uid)
+            await release.wait()
+            return IdentityFound(disabled=False, tokens_valid_after_ms=WATERMARK_MS)
+
+        async def premium(uid):
+            return Determined(is_premium=True)
+
+        def _verify(deadline):
+            return patch("app.strict_verifier.VERIFY_DEADLINE_SECONDS", deadline)
+
+        with _verify(0.02):
+            self.assertIsInstance(
+                await verify_strict(UID, token_iat_seconds=IAT, clock=_Clock(), cache=cache,
+                                    premium_provider=premium, identity_provider=identity,
+                                    single_flight=flight),
+                TemporarilyUnavailable,
+            )
+        release.set()                       # provider가 드디어 끝난다
+        await asyncio.sleep(0.01)
+        self.assertEqual(flight.in_flight_count(), 0, "끝난 flight가 슬롯을 안 놨다")
+
+        result = await verify_strict(UID, token_iat_seconds=IAT, clock=_Clock(), cache=cache,
+                                     premium_provider=premium, identity_provider=identity,
+                                     single_flight=flight)
+        self.assertIsInstance(result, VerifiedActive)
+        self.assertEqual(len(calls), 1, "복구에 새 authority 호출이 필요했다면 합치기가 샌 것이다")
 
 
 class TestUncancellableWorkDoesNotMultiply(unittest.IsolatedAsyncioTestCase):
@@ -409,98 +459,52 @@ class TestWholeRequestDeadline(unittest.IsolatedAsyncioTestCase):
 
     무효화 경쟁이 끼면 같은 concern을 다시 조회하므로 호출이 3회 이상 될 수 있다.
     실측(수정 전): 호출별 60ms 상한인데 전체 154ms / 조회 3회 — `2 × 상한`이라는 가정이 틀렸다.
+
+    ## deadline의 의미 (실측으로 확정)
+
+    deadline은 **새 호출을 시작할지**를 가른다. 이미 시작한 호출은 끝나서 답을 낸다 —
+    다 된 판정을 상한 초과를 이유로 버리는 건 손해다. 그래서 최종 경과가 상한을 조금 넘을 수 있다.
+
+    ⚠️ 벽시계 창(`elapsed < 0.4s`)으로 재던 구 단언은 상한 80ms 대비 **5배 초과까지 통과**했다.
+    주입 시계를 수동 전진시켜 (호출 비용, 상한) → (결과, 호출 횟수)를 결정론적으로 고정한다.
     """
 
-    async def test_contention_retries_cannot_exceed_the_deadline(self):
+    async def _run(self, cost_per_call, deadline):
         cache, flight = StrictObservationCache(), StrictSingleFlight()
+        clock = _SteppingClock()
         calls = []
 
         async def identity(uid):
-            calls.append(uid)
+            calls.append("i")
             if len(calls) == 1:
-                cache.bump(uid)            # 첫 조회 중 무효화 → 재조회 유발
-            await asyncio.sleep(0.05)
+                cache.bump(uid)          # 첫 조회 중 무효화 → 재조회 유발
+            clock.advance(cost_per_call)
             return IdentityFound(disabled=False, tokens_valid_after_ms=WATERMARK_MS)
 
         async def premium(uid):
-            await asyncio.sleep(0.05)
+            calls.append("p")
+            clock.advance(cost_per_call)
             return Determined(is_premium=True)
 
-        started = time.monotonic()
-        with patch("app.strict_verifier.VERIFY_DEADLINE_SECONDS", 0.08):
-            result = await verify_strict(UID, token_iat_seconds=IAT, clock=_RealClock(), cache=cache,
+        with patch("app.strict_verifier.VERIFY_DEADLINE_SECONDS", deadline):
+            result = await verify_strict(UID, token_iat_seconds=IAT, clock=clock, cache=cache,
                                          premium_provider=premium, identity_provider=identity,
                                          single_flight=flight)
-        elapsed = time.monotonic() - started
+        return result, "".join(calls)
 
-        self.assertIsInstance(result, TemporarilyUnavailable)
-        self.assertLess(elapsed, 0.4, f"전체 상한을 넘겼다: {elapsed:.3f}s")
-
-
-class TestFlightCancellationIsNotClientCancellation(unittest.IsolatedAsyncioTestCase):
-    """⛔ `CancelledError`는 `BaseException`이라 배선의 `except Exception`을 통과한다.
-
-    그대로 퍼뜨리면 대기자 전원이 `finally`로 떨어져 **각 연결의 구독이 통째로 삭제**된다
-    (C4 "registry 불변" 위반). flight는 detached라 주인이 없으므로 도메인 오류로 바꾼다.
-    """
-
-    async def test_shared_flight_cancellation_becomes_a_domain_error(self):
-        flight = StrictSingleFlight()
-        started = asyncio.Event()
-        key = ("u", 1, "premium")
-
-        async def factory():
-            started.set()
-            await asyncio.sleep(10)
-
-        waiter = asyncio.create_task(flight.run(key, factory))
-        await started.wait()
-        await asyncio.sleep(0)
-        flight._flights[key].cancel()          # 대기자가 아니라 **flight 자체**를 취소
-
-        with self.assertRaises(SharedFlightCancelled):
-            await waiter
-
-    async def test_self_cancellation_still_propagates(self):
-        """⛔ 내가 요청한 취소까지 삼키면 종료가 막힌다."""
-        flight = StrictSingleFlight()
-        started = asyncio.Event()
-
-        async def factory():
-            started.set()
-            await asyncio.sleep(10)
-
-        waiter = asyncio.create_task(flight.run(("u", 1, "premium"), factory))
-        await started.wait()
-        await asyncio.sleep(0)
-        waiter.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await waiter
-
-    async def test_self_cancellation_wins_even_when_the_flight_is_also_cancelled(self):
-        """둘 다 취소된 경우에도 `CancelledError`가 나온다.
-
-        ⚠️ 이건 **판별 테스트가 아니다** — `_self_cancel_requests()` 조건을 지워도 통과한다.
-        `waiter.cancel()` 시점엔 task가 아직 '취소로 종료' 상태가 아니라 `task.cancelled()`가
-        False이기 때문이다. 갈리는 인터리빙은 구성하지 못했다(구현 주석 참조). 현재 동작을
-        기록해 두는 용도다.
-        """
-        flight = StrictSingleFlight()
-        started = asyncio.Event()
-        key = ("u", 1, "premium")
-
-        async def factory():
-            started.set()
-            await asyncio.sleep(10)
-
-        waiter = asyncio.create_task(flight.run(key, factory))
-        await started.wait()
-        await asyncio.sleep(0)
-
-        waiter.cancel()                     # 내가 요청한 취소
-        flight._flights[key].cancel()       # 동시에 flight도 취소
-        with self.assertRaises(asyncio.CancelledError):
-            await waiter
+    async def test_deadline_bounds_how_many_calls_may_start(self):
+        table = [
+            # (호출 비용, 상한, 기대 결과, 기대 호출열)
+            (0.01, 0.10, VerifiedActive, "iip"),          # 여유 → 경쟁 재조회까지 완주
+            (0.04, 0.10, VerifiedActive, "iip"),          # 3회째가 상한을 넘겨 끝나도 답은 낸다
+            (0.06, 0.10, TemporarilyUnavailable, "ii"),   # 3회째를 **시작하지 못한다**
+            (0.06, 0.05, TemporarilyUnavailable, "i"),    # 2회째를 시작하지 못한다
+        ]
+        for cost, deadline, expected_type, expected_calls in table:
+            with self.subTest(cost=cost, deadline=deadline):
+                result, calls = await self._run(cost, deadline)
+                self.assertIsInstance(result, expected_type)
+                self.assertEqual(calls, expected_calls)
 
 
 class TestFlightCancellationIsFoldedIntoThreeState(unittest.IsolatedAsyncioTestCase):
