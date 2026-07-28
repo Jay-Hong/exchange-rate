@@ -170,13 +170,35 @@ async def sweep_once(
     # ⚠️ fan-out에 상한을 두지 않는다 — 상한 C를 두면 사이클이 다시 ceil(K/C)에 비례해
     #    보장이 깨진다. 무거운 부분(통지·close)은 **만료 lease를 가진 연결**에만 발생하고,
     #    나머지는 lock 획득 + 동기 claim으로 끝난다.
-    results = await asyncio.gather(*(_visit(ws) for ws in registry.connections_snapshot()))
+    # ⛔ `return_exceptions=True`가 **필수**다. 기본 `gather`는 첫 예외를 즉시 전파하면서
+    #    나머지를 취소하지도 대기하지도 않는다 — 실측: 사이클이 예외로 끝난 시점에 sibling이
+    #    여전히 lock을 쥐고 있었고 그 뒤 lease 제거까지 수행했다. 다음 주기와 겹치면 중복
+    #    통지·claim 경쟁이 된다.
+    # ⚠️ sibling **취소**가 아니라 **완료 대기**를 고른 이유: 취소는 성공 직전의 통지까지
+    #    죽인다. 그리고 모든 `_visit`은 이미 상한(lock·notify·close)을 갖고 있어 대기가 무한할
+    #    수 없다 — 그 상한들이 이 선택을 안전하게 만든다.
+    results = await asyncio.gather(
+        *(_visit(ws) for ws in registry.connections_snapshot()), return_exceptions=True
+    )
+
+    outcomes = [r for r in results if not isinstance(r, BaseException)]
+    failures = [r for r in results if isinstance(r, BaseException)]
+    for failure in failures:
+        if not isinstance(failure, Exception):
+            # `CancelledError`·`SystemExit`·`KeyboardInterrupt`는 결과값으로 삼키지 않는다 —
+            # 감싸면 구조적 취소와 프로세스 종료가 막힌다(registry의 같은 규칙과 동형).
+            raise failure
+    if failures:
+        # 하나만 던지면 나머지 진단이 사라진다. 여럿이면 그대로 묶어 올린다.
+        raise failures[0] if len(failures) == 1 else BaseExceptionGroup(
+            "sweep 방문 실패", failures
+        )
 
     return SweepOutcome(
-        scanned=sum(r.scanned for r in results),
-        notified=sum(r.notified for r in results),
-        removed=sum(r.removed for r in results),
-        skipped_busy=sum(r.skipped_busy for r in results),
-        terminated=sum(r.terminated for r in results),
-        close_failed=sum(r.close_failed for r in results),
+        scanned=sum(r.scanned for r in outcomes),
+        notified=sum(r.notified for r in outcomes),
+        removed=sum(r.removed for r in outcomes),
+        skipped_busy=sum(r.skipped_busy for r in outcomes),
+        terminated=sum(r.terminated for r in outcomes),
+        close_failed=sum(r.close_failed for r in outcomes),
     )

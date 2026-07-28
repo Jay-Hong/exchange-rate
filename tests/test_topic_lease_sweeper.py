@@ -719,6 +719,94 @@ class TestTerminationIsBounded(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 0.35, f"close가 직렬로 합산됐다 ({elapsed:.2f}s)")
 
 
+class TestNoVisitOutlivesTheCycle(unittest.IsolatedAsyncioTestCase):
+    """⛔ `sweep_once`가 끝났는데 살아 있는 방문 task가 있으면 다음 주기와 **겹친다**.
+
+    기본 `asyncio.gather`는 첫 예외를 즉시 전파하고 나머지를 **취소하지도 대기하지도 않는다**.
+    실측: 한 연결의 programming error로 `sweep_once`가 예외 종료한 시점에 sibling은 여전히
+    lock을 쥐고 있었고, 그 뒤에 lease 제거까지 수행했다 — 중복 통지·claim 경쟁의 씨앗이다.
+
+    ⚠️ sibling **취소**가 아니라 **완료 대기**를 택했다: 취소는 성공 직전의 통지까지 죽이고,
+    모든 `_visit`은 이미 상한(lock·notify·close)을 갖고 있어 대기가 무한할 수 없다.
+    """
+
+    async def _two_connections(self):
+        registry = TopicLeaseRegistry()
+        boom, slow = _WS("boom"), _WS("slow")
+        await _subscribe(registry, boom, [TOPIC], uid="uid-boom")
+        await _subscribe(registry, slow, [TOPIC], uid="uid-slow")
+        return registry, boom, slow
+
+    @staticmethod
+    def _explode_on(registry, targets):
+        original = registry.claim_expired_locked
+
+        def exploding(ws, *, now_mono):
+            if ws in targets:
+                raise RuntimeError(f"programming error: {ws!r}")
+            return original(ws, now_mono=now_mono)
+
+        registry.claim_expired_locked = exploding
+
+    async def test_siblings_finish_before_the_failure_surfaces(self):
+        registry, boom, slow = await self._two_connections()
+        self._explode_on(registry, {boom})
+        finished = []
+
+        async def slow_reauth(target, claimed):
+            await asyncio.sleep(0.05)
+            finished.append(target)
+            return True
+
+        async def noop_close(target):
+            pass
+
+        with self.assertRaises(RuntimeError):
+            await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=slow_reauth,
+                             close_connection=noop_close)
+        self.assertEqual(finished, [slow], "sibling이 아직 진행 중인데 사이클이 끝났다")
+        self.assertFalse(registry.connection_lock(slow).locked(),
+                         "sibling이 lock을 쥔 채 사이클 밖으로 살아남았다")
+
+    async def test_structural_exceptions_are_not_downgraded_into_a_group(self):
+        """⛔ `CancelledError`를 group으로 묶으면 asyncio의 취소 전파가 깨진다.
+
+        `SystemExit`·`KeyboardInterrupt`도 같다 — 묶으면 프로세스 종료가 막힌다.
+        registry의 `ConnectionTerminatedError` 감싸기에서 `Exception`만 감싼 것과 같은 규칙이다.
+        """
+        registry, boom, slow = await self._two_connections()
+        original = registry.claim_expired_locked
+
+        def exploding(ws, *, now_mono):
+            if ws is boom:
+                raise asyncio.CancelledError()
+            if ws is slow:
+                raise RuntimeError("평범한 실패")
+            return original(ws, now_mono=now_mono)
+
+        registry.claim_expired_locked = exploding
+
+        async def noop_close(target):
+            pass
+
+        with self.assertRaises(asyncio.CancelledError):
+            await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=_ok_reauth,
+                             close_connection=noop_close)
+
+    async def test_every_failure_is_surfaced_not_just_the_first(self):
+        """⛔ 여럿이 실패했는데 하나만 던지면 나머지 진단이 조용히 사라진다."""
+        registry, boom, slow = await self._two_connections()
+        self._explode_on(registry, {boom, slow})
+
+        async def noop_close(target):
+            pass
+
+        with self.assertRaises(BaseExceptionGroup) as caught:
+            await sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=_ok_reauth,
+                             close_connection=noop_close)
+        self.assertEqual(len(caught.exception.exceptions), 2)
+
+
 class TestTeardownPrecedesClose(unittest.IsolatedAsyncioTestCase):
     """⛔ 순서(정리 → close)는 주석이 아니라 **계약**이어야 한다.
 
