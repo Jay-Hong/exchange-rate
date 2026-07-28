@@ -934,7 +934,7 @@ class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
 class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
     """§C2 — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다(§C2).
 
-    ⛔ accepted만 받으면 권한을 잃은 기존 등록이 **lease 만료까지 잔존**한다(710~711행).
+    ⛔ accepted만 받으면 권한을 잃은 기존 등록이 **lease 만료까지 잔존**한다(§C2).
     같은 UID 재인증에서 KRX entitlement를 잃어도 최대 15분 더 KRX 데이터가 나간다는 뜻이다.
     §D2는 `removed_topics`의 producer로 "C2의 reject eviction"을 명시한다.
     """
@@ -1584,8 +1584,15 @@ class TestIssuanceBoundaryMatchesTheAdvertisedInteger(unittest.IsolatedAsyncioTe
 class TestDocumentationAnchors(unittest.IsolatedAsyncioTestCase):
     """⛔ 계획을 **행번호로 인용하지 않는다** — 계획을 한 줄만 고쳐도 인용이 전부 어긋난다.
 
-    이 규칙을 세운 커밋의 **바로 다음 커밋에서 내가 다시 어겼다**(테스트 docstring에 행번호
-    인용 1건). 사람이 지키는 규칙으로는 부족하다는 증거라 기계로 잠근다.
+    이 규칙을 세운 커밋의 **바로 다음 커밋에서 내가 다시 어겼다**. 사람이 지키는 규칙으로는
+    부족하다는 증거라 기계로 잠갔는데, **그 trip-wire도 처음엔 틀렸다**: 정규식이 "계획"
+    접두사를 요구해서 접두사 없는 인용을 전부 놓쳤다. 그래서 "위반 1건뿐"·"전량 제거"라고
+    보고했지만 실제로는 6건이 남아 있었다(그중 2건은 섹션 앵커와 행번호를 **함께** 쓴 형태).
+
+    ⛔ **교훈: 검사는 내가 기억하는 형태가 아니라 내가 선언한 규칙의 모양이어야 한다.**
+    검증에 쓴 grep도 같은 접두사를 박아 둬서 같은 눈먼 지점을 공유했다 — 규칙과 검사가
+    같은 오해를 공유하면 검사는 통과 도장을 찍어 줄 뿐이다.
+
     범위는 규칙이 선언된 두 파일이다 — 리포 전체 강제는 이 슬라이스의 범위 밖이다
     (실측: 지금 이 패턴을 쓰는 파일은 이 두 개뿐이었다).
     """
@@ -1594,7 +1601,9 @@ class TestDocumentationAnchors(unittest.IsolatedAsyncioTestCase):
         import pathlib
         import re
 
-        cited = re.compile(r"계획\s*\d+\s*행")
+        # 접두사를 요구하지 않는다. 범위 인용(`N~M행`)도 잡는다.
+        # ⚠️ `발행`·`진행`·`행동`은 앞에 숫자가 없어 매치되지 않는다(실측 확인).
+        cited = re.compile(r"\d+\s*(?:~\s*\d+\s*)?행")
         root = pathlib.Path(__file__).resolve().parents[1]
         for name in ("app/topic_lease_registry.py", "tests/test_topic_lease_registry.py"):
             hits = [

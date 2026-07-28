@@ -14,7 +14,7 @@
   (i) ack 3건은 §8-B의 "요청당 1건"과 클라의 `request_id` 상관을 깨고, (ii) 마지막에만 ack을
   보내면 앞의 두 topic이 **ack보다 먼저 활성화**된다(§B4 순서 고정의 pre-ack live 수신).
   게다가 topic마다 lock을 잡았다 놓으면 그 사이 sweep·unsubscribe가 끼어들어, ack이
-  **한 번도 존재한 적 없는 상태**를 광고할 수 있다(D2 713행 "단일 snapshot" 위반).
+  **한 번도 존재한 적 없는 상태**를 광고할 수 있다(§D2의 "단일 snapshot" 위반).
 - **고정 순서**(§B4): `등록(비활성) → is_current 재확인 → **ack 송신** → 활성화`.
   ack이 활성화보다 **먼저**여야 한다 — 아니면 클라가 ack을 받기 전에 live 메시지가 먼저 도착하고,
   통지 순서가 역전된다(§B4 순서 고정). 그래서 `apply_subscribe`가 **sender를 주입받아** 순서를
@@ -78,7 +78,7 @@ fail-closed로 막는다. 호출자의 소켓 close 의무는 그 위에 얹힌�
 
 - **snapshot 전송**. 무겁기 때문에 build는 lock 밖이고, **전송 직전 lock을 다시 잡아** lease를
   재검증한다(§B1과 결합). 그건 배선의 일이다.
-  ⚠️ 반면 **ack은 lock 안**이다(§B4 629행) — 한때 이 문서가 "전송은 lock 밖"이라고 뭉뚱그렸는데
+  ⚠️ 반면 **ack은 lock 안**이다(§B4) — 한때 이 문서가 "전송은 lock 밖"이라고 뭉뚱그렸는데
   **틀렸다**. ack까지 밖으로 내보내면 §B4의 고정 순서를 지킬 방법이 없다.
 - **만료 sweep·재인증 통지**(§C3의 claim-then-notify) — 다음 조각.
   ⚠️ sweep은 연결 lock을 **무한 대기로 잡으면 안 된다**: ack이 최대 `ACK_TIMEOUT_SECONDS`
@@ -331,8 +331,8 @@ class TopicLeaseRegistry:
 
         ⚠️ `rejected_topics`가 필요한 이유는 §C2다: "인증 성공한 subscribe에서
         **reject된 topic은 registry에서 제거**한다". accepted만 받으면 권한을 잃은 기존 등록이
-        **lease 만료까지 잔존**해(710~711행), 같은 UID 재인증에서 KRX entitlement를 잃어도
-        최대 15분 더 데이터가 나간다. **언급되지 않은 topic은 불변**이다(712행, 증분 subscribe 보존).
+        **lease 만료까지 잔존**해(§C2), 같은 UID 재인증에서 KRX entitlement를 잃어도
+        최대 15분 더 데이터가 나간다. **언급되지 않은 topic은 불변**이다(§C2, 증분 subscribe 보존).
         거부 사유 문자열은 ack 봉투를 만드는 호출자가 싣는다(registry는 wire schema를 모른다).
 
         ⛔ **`temporarily_unavailable`을 `rejected_topics`에 넣지 말 것**(§C4). 여기 들어온
@@ -363,7 +363,7 @@ class TopicLeaseRegistry:
 
             # §C1 — 바인딩 UID != 토큰 UID면 **그 ws의 기존 구독 전부 제거** 후 재바인딩
             # (§C1). 거부가 아니다: 거부하면 A의 구독이 B의 소켓에서 계속 살아 있고,
-            # 708행이 `removed_topics`의 producer로 명시한 "C1의 UID purge"가 성립하지 않는다.
+            # §D2가 `removed_topics`의 producer로 명시한 "C1의 UID purge"가 성립하지 않는다.
             bound = self._uids.get(ws)
             purge = bound is not None and bound != uid
 
