@@ -43,19 +43,6 @@ class _Clock:
         return 1000.0
 
 
-class _SteppingClock:
-    """수동으로 전진시키는 monotonic — deadline을 **결정론적으로** 검사한다."""
-
-    def __init__(self, start=1000.0):
-        self._now = start
-
-    def mono(self):
-        return self._now
-
-    def advance(self, seconds):
-        self._now += seconds
-
-
 class _RealClock:
     """실제 monotonic.
 
