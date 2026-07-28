@@ -1726,6 +1726,48 @@ class TestDocumentationAnchors(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(hits, [], "§ 섹션 앵커를 쓸 것 — 행번호는 계획 편집마다 어긋난다")
 
 
+class TestCancellationFence(unittest.IsolatedAsyncioTestCase):
+    """⛔ 외부 취소는 **다른 예외보다 우선**해야 한다.
+
+    구 구현은 `yield` 뒤에 검사를 뒀다 — 블록이 예외를 던지면 검사에 **도달하지 않는다**.
+    나는 그걸 "의도"라고 적으면서 "그 예외가 이미 실패를 말한다"를 근거로 들었는데 **틀렸다**:
+    예외는 "이 작업이 실패했다"를 말하고 취소는 "이 task를 접어라"를 말한다. 호출자가 예외를
+    결과값으로 바꾸는 순간(ConnectionTerminated) 후자만 사라진다 — 실측 확인.
+    """
+
+    async def test_cancellation_wins_over_an_exception_raised_after_swallowing(self):
+        from app.topic_lease_registry import cancellation_fence
+
+        async def body():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise ConnectionResetError("소켓도 죽었다")
+
+        async def run():
+            with cancellation_fence():
+                await body()
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError) as caught:
+            await task
+        self.assertIsInstance(caught.exception.__context__, ConnectionResetError,
+                              "원래 예외가 진단에서 사라졌다")
+
+    async def test_an_ordinary_exception_is_untouched_without_cancellation(self):
+        """⛔ 오탐 금지 — 취소가 없었으면 원래 예외가 그대로 나가야 한다."""
+        from app.topic_lease_registry import cancellation_fence
+
+        async def run():
+            with cancellation_fence():
+                raise ValueError("평범한 실패")
+
+        with self.assertRaises(ValueError):
+            await run()
+
+
 class TestUnsubscribeIsFailOpen(unittest.IsolatedAsyncioTestCase):
     """§D8 — `unsubscribe`는 **접근을 줄이는** 작업이라 인증 성공에 종속되면 안 된다.
 
@@ -1825,6 +1867,30 @@ class TestUnsubscribeIsFailOpen(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ConnectionTerminated)
         self.assertEqual(result.reason, "ack_not_confirmed")
         self.assertNotIn(TOPIC, registry.topics_for_test(ws))
+
+    async def test_swallowed_cancellation_wins_over_a_later_exception(self):
+        """⛔ 취소를 삼킨 뒤 **다른 예외**를 던져도 취소가 우선해야 한다.
+
+        실측(구 구현): 결과=ConnectionTerminated / `cancelled()`=False / `cancelling()`=1 —
+        예외가 결과값으로 변환되면서 teardown 신호가 사라졌다.
+        """
+        registry, ws = await self._subscribed()
+
+        async def swallow_then_raise(ack):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise ConnectionResetError("소켓도 죽었다")
+
+        task = asyncio.create_task(
+            registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                       send_ack=swallow_then_raise)
+        )
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertNotIn(TOPIC, registry.topics_for_test(ws), "fail-open 제거를 되돌렸다")
 
     async def test_swallowed_external_cancellation_is_not_success(self):
         """⛔ sender가 teardown 취소를 삼키고 `True`를 돌려주면 `Applied`로 정상 종료됐다.

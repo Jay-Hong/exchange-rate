@@ -171,13 +171,20 @@ def cancellation_fence():
     `uncancel()`해서 0→0). 그 차이를 여기서 한 번만 구현한다 — 세 곳(ack·unsubscribe·reauth)에
     손으로 복제했다가 두 곳을 빠뜨린 것이 이 helper가 생긴 이유다.
 
-    ⚠️ 예외가 전파되면 검사에 도달하지 않는다(의도) — 그때는 그 예외가 이미 실패를 말한다.
+    ⛔ 검사는 **`finally`**에 있다. 한때 `yield` 뒤에 두고 "예외가 전파되면 검사에 도달하지
+    않는다(의도) — 그때는 그 예외가 이미 실패를 말한다"고 적었는데 **틀렸다**: 예외는 "이 작업이
+    실패했다"를, 취소는 "이 task를 접어라"를 말하는 **다른 축**이다. 호출자가 예외를 결과값으로
+    바꾸는 순간(`ConnectionTerminated`) 취소 신호만 사라진다 — 실측: sender가 취소를 삼킨 뒤
+    다른 예외를 던지자 `cancelled()`=False / `cancelling()`=1로 정상 종료했다.
+    그래서 취소가 **다른 예외보다 우선**한다. 원래 예외는 `__context__`로 보존된다.
     """
     task = asyncio.current_task()
     before = task.cancelling() if task is not None else 0
-    yield
-    if task is not None and task.cancelling() > before:
-        raise asyncio.CancelledError()
+    try:
+        yield
+    finally:
+        if task is not None and task.cancelling() > before:
+            raise asyncio.CancelledError()
 
 
 @dataclass(frozen=True)

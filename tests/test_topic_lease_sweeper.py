@@ -711,6 +711,32 @@ class TestNotificationFailureCleansTheSocket(unittest.IsolatedAsyncioTestCase):
         self.assertIn(TOPIC, registry.topics_for_test(ws),
                       "취소된 통지를 성공으로 보고 구독을 지웠다")
 
+    async def test_swallowed_cancellation_wins_over_a_later_exception(self):
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+        await _subscribe(registry, ws, [TOPIC])
+        entered = asyncio.Event()
+
+        async def swallow_then_raise(target, claimed):
+            entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise ConnectionResetError("소켓도 죽었다")
+
+        async def noop_close(target):
+            pass
+
+        task = asyncio.create_task(
+            sweep_once(registry, now_mono=EXPIRED_AT, send_reauth=swallow_then_raise,
+                       close_connection=noop_close)
+        )
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIn(TOPIC, registry.topics_for_test(ws), "취소 중에 구독을 지웠다")
+
     async def test_sender_that_does_not_confirm_is_a_failure(self):
         """§B4의 `send_ack`와 같은 계약 — 제어 흐름은 배달의 증거가 아니다."""
         registry = TopicLeaseRegistry()
