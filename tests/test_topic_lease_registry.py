@@ -115,7 +115,7 @@ class TestRequestIsOneTransaction(unittest.IsolatedAsyncioTestCase):
 
     ⛔ topic 단위 API로는 이게 불가능했다. 3 topic 요청에서 가능한 배선은 둘뿐이고 둘 다
     깨진다: (i) ack 3건 = §8-B의 "요청당 1건" 위반, (ii) 마지막에만 ack = 앞의 두 topic이
-    **ack보다 먼저 활성화**(계획 632행의 pre-ack live 수신 부활).
+    **ack보다 먼저 활성화**(§B4 순서 고정의 pre-ack live 수신 부활).
     """
 
     async def test_one_request_sends_exactly_one_ack(self):
@@ -188,10 +188,10 @@ class TestRequestIsOneTransaction(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAckCarriesAuthoritativeState(unittest.IsolatedAsyncioTestCase):
-    """계약 5 — ack은 **그 연결의 최종 상태 전체**를 싣는다(D2, 계획 710~715행).
+    """계약 5 — ack은 **그 연결의 최종 상태 전체**를 싣는다(§D2).
 
     ⛔ 이번 요청 topic만 실으면, 클라는 언급되지 않은 기존 topic을 여전히 accepted로
-    오인한다(계획 669행). 그래서 registry가 lock 아래에서 만들어 sender에게 **넘긴다** —
+    오인한다(§C1 — ack 권위). 그래서 registry가 lock 아래에서 만들어 sender에게 **넘긴다** —
     sender가 조회로 만들면 그 시점 새 lease는 아직 `_pending`이라 보이지도 않는다.
     """
 
@@ -230,7 +230,7 @@ class TestAckCarriesAuthoritativeState(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.lease_duration_seconds, int(LEASE_MAX_SECONDS))
 
     async def test_remaining_duration_is_floored_not_rounded(self):
-        """계획 714행 — 내림(floor)이다. 올림하면 만료 뒤를 살아 있다고 광고한다."""
+        """§D2 — 내림(floor)이다. 올림하면 만료 뒤를 살아 있다고 광고한다."""
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
         await _apply(registry, cache, ws, [TOPIC], now_mono=1000.0, premium=999.4, identity=1000.0)
@@ -247,7 +247,7 @@ class TestAckCarriesAuthoritativeState(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remaining[TOPIC], 898)
 
     async def test_expired_existing_lease_is_not_advertised_as_active(self):
-        """계획 715행 — `≤ 0`이면 넣지 않는다. **만료를 "활성"으로 광고 금지.**
+        """§D2 — `≤ 0`이면 넣지 않는다. **만료를 "활성"으로 광고 금지.**
 
         ⚠️ 그렇다고 registry에서 지우지는 않는다 — 실제 제거·`reauth_required` 통지는
         C3 sweep의 소유다. 여기서 조용히 지우면 그 통지가 영영 나가지 않는다.
@@ -296,10 +296,10 @@ class TestAckCarriesAuthoritativeState(unittest.IsolatedAsyncioTestCase):
 
 
 class TestCrossUidPurge(unittest.IsolatedAsyncioTestCase):
-    """계약 6 — §C1은 **purge 후 재바인딩**이다(계획 664행), 거부가 아니다.
+    """계약 6 — §C1은 **purge 후 재바인딩**이다(§C1), 거부가 아니다.
 
-    ⛔ 한때 이 모듈은 cross-UID를 `Rejected`로 막았다. 그건 계획 664·665·708행과 정면으로
-    충돌한다 — 708행은 `removed_topics`의 producer로 "C1의 UID purge"를 **명시**한다.
+    ⛔ 한때 이 모듈은 cross-UID를 `Rejected`로 막았다. 그건 §C1의 전이 규칙·처리 순서 및 §D2의 producer 목록과 정면으로
+    충돌한다 — §D2는 `removed_topics`의 producer로 "C1의 UID purge"를 **명시**한다.
     """
 
     async def test_first_subscribe_binds_the_connection(self):
@@ -329,7 +329,7 @@ class TestCrossUidPurge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({s.topic for s in captured["ack"].active}, {OTHER})
 
     async def test_purge_happens_even_when_no_topic_is_accepted(self):
-        """계획 665행 — B의 premium 확인이 실패해도 A 구독을 **복원하지 않는다**.
+        """§C1 처리 순서 — B의 premium 확인이 실패해도 A 구독을 **복원하지 않는다**.
 
         premium이 per-topic으로 전부 reject되면 accepted가 빈 요청이 registry에 도달한다.
         그때도 purge는 커밋돼야 한다 — 아니면 B의 소켓이 A의 데이터를 계속 받는다.
@@ -608,6 +608,33 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
                               AckFailed)
         self.assertIsNone(registry.active_lease(ws, TOPIC),
                           "죽었다고 판정한 소켓의 기존 lease가 여전히 인가된다")
+
+    async def test_swallowed_external_cancellation_does_not_commit(self):
+        """⛔ sender가 **외부** 취소를 삼키고 `True`를 돌려주면 커밋돼 버렸다(실측 `Applied`).
+
+        모듈 문서는 "삼키면 무조건 속는다"고 적었는데 **실제보다 넓은 주장**이었다:
+        바깥 프레임의 `cancelling()`이 예산 만료에서는 0→0(`wait_for`가 `uncancel()`),
+        외부 취소에서는 0→1로 갈린다(실측, py3.13). 예산 만료는 여전히 구별 불가지만
+        **teardown의 취소를 삼키는 경우는 공짜로 fail-close**할 수 있다.
+        """
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        entered = asyncio.Event()
+
+        async def swallowing(ack):
+            entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                return True                      # 삼키고 성공 반환
+            return True
+
+        task = asyncio.create_task(_apply(registry, cache, ws, [TOPIC], send_ack=swallowing))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "취소를 삼켰는데 활성화됐다")
 
     async def test_ack_timeout_is_below_the_client_ack_deadline(self):
         """§D6 클라 ack timeout이 10초다 — 그보다 길면 클라가 먼저 포기한다."""
@@ -890,11 +917,11 @@ class TestRemovalCas(unittest.IsolatedAsyncioTestCase):
 
 
 class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
-    """§C2 — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다(계획 709행).
+    """§C2 — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다(§C2).
 
     ⛔ accepted만 받으면 권한을 잃은 기존 등록이 **lease 만료까지 잔존**한다(710~711행).
     같은 UID 재인증에서 KRX entitlement를 잃어도 최대 15분 더 KRX 데이터가 나간다는 뜻이다.
-    D2는 `removed_topics`의 producer로 "C2의 reject eviction"을 명시한다.
+    §D2는 `removed_topics`의 producer로 "C2의 reject eviction"을 명시한다.
     """
 
     async def test_rejected_topic_that_was_active_is_evicted(self):
@@ -909,7 +936,7 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({s.topic for s in result.ack.active}, {OTHER})
 
     async def test_unmentioned_topics_are_untouched(self):
-        """계획 712행 — 이번 요청에 **언급되지 않은** topic은 불변(증분 subscribe 보존)."""
+        """§C2 — 이번 요청에 **언급되지 않은** topic은 불변(증분 subscribe 보존)."""
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
         await _apply(registry, cache, ws, [TOPIC, OTHER, "usdt:krw"])
@@ -935,10 +962,16 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
         async def failing(ack):
             raise ConnectionResetError()
 
+        lease_id = registry.active_lease(ws, TOPIC).lease_id
         result = await _apply(registry, cache, ws, [], rejected=[TOPIC], send_ack=failing)
         self.assertIsInstance(result, AckFailed)
-        # tombstone fail-closed라 조회는 None이지만, 커밋되지 않았음은 generation으로 본다.
-        self.assertEqual(registry.identity_generation(ws), 1, "실패한 요청이 상태를 진전시켰다")
+        # ⚠️ `active_lease`는 tombstone에서 fail-closed라 여기선 관측 도구가 못 된다.
+        #    `remove()`의 CAS는 tombstone을 보지 않으므로 "그 lease가 아직 존재하는가"를 답한다.
+        #    ⛔ 구 버전은 `identity_generation == 1`을 단언했는데, 같은 UID 재인증에서는
+        #    커밋 여부와 무관하게 항상 참이라 **공허**했다 — 제거를 ack 전에 커밋하는 변이가
+        #    전체 스위트를 통과했다(실측).
+        self.assertTrue(await registry.remove(ws, TOPIC, lease_id),
+                        "ack이 실패했는데 제거가 커밋됐다(all-or-nothing 위반)")
 
     async def test_eviction_and_purge_can_happen_in_one_request(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
@@ -959,7 +992,7 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
 
 
 class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
-    """D2(계획 758행) — `identity_generation`은 **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
+    """§D2 — `identity_generation`은 **연결별**이고 **같은 소켓의 UID 재바인딩만** 표현한다.
 
     ⛔ strict cache의 `snapshot.epoch`을 실으면 안 된다. 그건 **UID별**이고 최초 관측 순서로
     할당되므로, 먼저 관측된 UID B의 epoch가 나중에 관측된 A보다 **작다**. A→B 재바인딩 ack의
@@ -1010,6 +1043,132 @@ class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
 
     async def test_unbound_connection_has_generation_zero(self):
         self.assertEqual(TopicLeaseRegistry().identity_generation(_WS()), 0)
+
+
+class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
+    """⛔ **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다.**
+
+    되돌아가려면 그만큼의 접근이 계속 살아 있어야 하는데, 그게 정확히 C1/C2가 막으려는 상태다.
+    구 구현은 purge·eviction을 **발급 성공에 종속**시켜, 세 중단 경로(만료 horizon / fence
+    실패 / 축 위반)에서 전부 fail-open이었다 — 실측: B의 소켓에서 A의 lease가 계속 인가됨.
+
+    ⚠️ "제거만 커밋하고 ack을 보낸다"는 대안도 있으나 중단 경로마다 부분 커밋 규칙이 생겨
+    표면이 넓어진다. tombstone은 **한 메커니즘**으로 모든 중단 경로에서 접근을 0으로 만든다
+    (의도한 축소보다 크거나 같으므로 항상 안전한 쪽이다).
+    """
+
+    async def _armed(self, uid=UID):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC, OTHER], uid=uid)
+        return registry, cache, ws
+
+    async def test_expired_horizon_with_pending_eviction_closes_the_connection(self):
+        registry, cache, ws = await self._armed()
+        result = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC],
+                              now_mono=2000.0, premium=1000.0, identity=1000.0)
+        self.assertIsInstance(result, Rejected)
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "거부된 topic이 계속 인가된다")
+
+    async def test_expired_horizon_with_pending_purge_closes_the_connection(self):
+        registry, cache, ws = await self._armed()
+        other = StrictObservationCache()
+        result = await _apply(registry, other, ws, [OTHER], uid="uid-2",
+                              now_mono=2000.0, premium=1000.0, identity=1000.0)
+        self.assertIsInstance(result, Rejected)
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "B 소켓에서 A의 lease가 계속 인가된다")
+        self.assertIsNone(registry.active_lease(ws, OTHER))
+
+    async def test_fence_failure_with_pending_eviction_closes_the_connection(self):
+        registry, cache, ws = await self._armed()
+        snapshot = cache.snapshot(UID)
+        cache.bump(UID)
+        result = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC], snapshot=snapshot)
+        self.assertIsInstance(result, Discarded)
+        self.assertIsNone(registry.active_lease(ws, TOPIC))
+
+    async def test_fence_failure_with_pending_purge_closes_the_connection(self):
+        registry, cache, ws = await self._armed()
+        other = StrictObservationCache()
+        snapshot = other.snapshot("uid-2")
+        other.bump("uid-2")
+        result = await _apply(registry, other, ws, [OTHER], uid="uid-2", snapshot=snapshot)
+        self.assertIsInstance(result, Discarded)
+        self.assertIsNone(registry.active_lease(ws, TOPIC))
+
+    async def test_axis_violation_with_pending_purge_closes_the_connection(self):
+        """축 위반(wall epoch 혼입 등)은 예외로 크게 터지지만, 그 전에 접근은 닫혀야 한다."""
+        registry, cache, ws = await self._armed()
+        other = StrictObservationCache()
+        with self.assertRaises(ValueError):
+            await _apply(registry, other, ws, [OTHER], uid="uid-2", premium=float("nan"))
+        self.assertIsNone(registry.active_lease(ws, TOPIC), "예외 경로가 fail-open이었다")
+
+    async def test_abort_without_any_reduction_leaves_the_connection_usable(self):
+        """⛔ 오탐 금지 — 줄일 게 없던 중단까지 연결을 죽이면 정상 webhook 경쟁이 연결을 끊는다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        snapshot = cache.snapshot(UID)
+        cache.bump(UID)
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC], snapshot=snapshot),
+                              Discarded)
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Applied)
+
+    async def test_pure_purge_still_validates_the_time_axis(self):
+        """⛔ 만료 **판정**만 `topics`에 걸어야 한다 — 입력 검증까지 건너뛰면 축 혼입이 조용해진다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        other = StrictObservationCache()
+        with self.assertRaises(ValueError):
+            await _apply(registry, other, ws, [], uid="uid-2", premium=float("nan"))
+
+
+class TestIssuanceBoundaryMatchesTheAdvertisedInteger(unittest.IsolatedAsyncioTestCase):
+    """⛔ ack이 자기모순이면 안 된다 — `accepted`에 있는데 `active`에 없는 topic.
+
+    발급 판정은 **raw float**(`now >= expires_at`)인데 광고는 **내림 정수**라, 잔여가
+    0<x<1인 lease는 발급되어 `accepted`에 실리고 `active`에서는 `>0` 필터에 걸려 빠진다.
+    실측: `accepted=[(krx, 0)]` / `active=[]`. 클라는 구독이 드롭됐다고 결론짓는데 서버는
+    곧바로 발행을 시작하고, D6 공식상 duration 0은 **즉시 재구독**이라 루프가 된다.
+    → 발급 경계를 광고하는 정수에 맞춘다.
+    """
+
+    async def test_sub_second_lease_is_not_issued(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        result = await _apply(registry, cache, ws, [TOPIC],
+                              now_mono=1000.0, premium=100.4, identity=1000.0)
+        self.assertIsInstance(result, Rejected)
+        self.assertIsNone(registry.active_lease(ws, TOPIC))
+
+    async def test_accepted_is_always_a_subset_of_active(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        captured = {}
+
+        async def capture(ack):
+            captured["ack"] = ack
+            return True
+
+        await _apply(registry, cache, ws, [TOPIC, OTHER], send_ack=capture,
+                     now_mono=1000.0, premium=101.0, identity=1000.0)
+        ack = captured["ack"]
+        self.assertTrue({s.topic for s in ack.accepted} <= {s.topic for s in ack.active},
+                        "ack이 수락했다고 한 topic이 최종 상태에 없다")
+
+
+class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
+    """⛔ `send_ack`와 같은 논리 — 선택 인자로 두면 배선이 한 번 빠뜨렸을 때 §C2가 조용히 꺼진다."""
+
+    async def test_rejected_topics_is_mandatory(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        with self.assertRaises(TypeError):
+            await registry.apply_subscribe(
+                ws=_WS(), uid=UID, topics=[TOPIC], snapshot=cache.snapshot(UID), cache=cache,
+                now_mono=1000.0, premium_verified_at_mono=1000.0,
+                identity_verified_at_mono=1000.0, send_ack=_ok_ack,
+            )
 
 
 if __name__ == "__main__":

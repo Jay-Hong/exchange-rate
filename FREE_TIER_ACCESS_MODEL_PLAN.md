@@ -645,6 +645,14 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     `TimeoutError`는 우리 예산 만료와 구별 불가라 호출자 버그가 "죽은 클라"로 오분류된다),
     ④ registry 재진입 금지(`asyncio.Lock`은 재진입 불가 → hang. 구현은 **task 동일성**으로 감지해
     `ReentrantRegistryCall`로 시끄럽게 실패시킨다. ws만 보면 sweep·teardown의 정당한 대기까지 오탐한다).
+  - **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다** — C1 purge나 C2 eviction이 예정된 요청이
+    어떤 이유로든(만료 horizon · fence 실패 · 축 위반 예외 · ack 실패 · 취소) 중단되면 그 연결을
+    **닫는다**(tombstone). ⛔ 되돌리면 그만큼의 접근이 계속 살아 있어야 하는데, 그게 정확히
+    C1/C2가 막으려는 상태다. 실측(구 구현): 만료 horizon·fence·ValueError 세 경로 모두에서
+    B의 소켓이 A의 lease로 계속 인가됐다 — 제거가 **발급 성공에 종속**돼 있었기 때문이다.
+    중단 경로마다 부분 커밋 규칙을 만드는 대신 tombstone 하나로 접근을 0으로 만든다
+    (의도한 축소보다 크거나 같으므로 항상 안전한 쪽). ⚠️ 줄일 것이 없던 중단은 해당 없음 —
+    정상 webhook 경쟁이 멀쩡한 연결을 끊으면 안 된다.
   - **ack 실패 = 연결 사망**(B2a와 동일 정책) — "발급 안 함"으로 끝내면 안 된다.
     취소는 이미 transport 버퍼에 들어간 프레임을 **되돌리지 못하므로**(websockets legacy는 프레임 전체를
     버퍼에 넣은 뒤 drain을 await한다), 역압이 풀리면 그 ack이 **나중에 배달**된다 →
@@ -740,6 +748,41 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     `lease_remaining <= safety`면 대기 0 — 기다리지 말고 **즉시 재인증 또는 reconnect**한다
     (`retry_after`를 곧이곧대로 기다리다 lease가 만료되면 데이터가 끊긴 뒤에야 복구를 시작하게 된다).
 
+#### C-API. registry API 선결 요구사항 (배선·sweep 슬라이스 진입 전)
+
+> 같은 실패가 세 번 반복됐다 — "계획이 요구하는데 registry API가 그것을 표현할 수 없다"
+> (① ack이 lock 밖 → ② topic 단위 ack → ③ C2 eviction·tombstone 조회·연결별 generation).
+> 매번 시그니처가 바뀌었다. 네 번째를 없애기 위해 **남은 항목을 미리 열거**한다.
+> 지금 만들지 않는 이유는 호출자가 없기 때문이다(검증 불가능한 기계장치는 만들지 않는다) —
+> 그러나 해당 슬라이스는 **이 목록을 시그니처 변경 예산으로 잡고** 시작해야 한다.
+
+1. **연결·lease 열거** (C3) — 지금은 `(ws, topic)`을 이미 알아야 조회된다. sweeper가 만료 항목을
+   찾을 방법이 없어 D-const의 "만료→통지 10초"가 구현 불가. 우회하면 dispatcher가 **두 번째 live
+   대상 집합**을 들게 되고, 그건 B4 순서 보장을 되돌린다.
+2. **topic→구독자 인덱스** (B2/B3) — registry에 topic 키 구조가 없어 `get_subscribers`의 만료 필터가
+   놓일 자리가 없다. B3가 요구하는 **비대칭 상속**(`subscriber_count`는 상속 / `subscribed_connection_count`는 미상속)도 진술 불가.
+3. **`claimed_expired` 상태 + 조회 즉시 제외** (C3) — claim 표식과 그 mutator가 없다. 없으면 연속
+   sweep이 같은 `lease_id`를 **중복 통지**하고, 통지하는 동안 live publish가 계속 통과한다.
+4. **lock 보유 상태의 제거 경로 + bounded-try lock 획득** (C3/B4) — `remove()`가 lock을 재획득하므로
+   claim→notify→remove를 한 lock 안에서 쓸 수 없다(재진입 시 데드락). sweeper의 비blocking 획득도 필요.
+5. **`apply_unsubscribe`(요청 단위)** (D8) — topic별 `remove()`는 lock을 N번 잡아, subscribe에서 금지한
+   tearing을 그대로 재도입한다. 또 wire의 unsubscribe는 `lease_id`를 싣지 않아 read-then-update가 되고,
+   재인증과 경쟁하면 CAS가 실패해 **사용자가 끈 구독이 lease 만료까지 계속 흐른다**.
+   ⚠️ **tombstone 위에서도 제거는 성립해야 한다** — D8은 fail-open을 금지한다(subscribe의 거부 규칙을
+   그대로 재사용하면 정확히 반대가 된다).
+6. **B1을 한 번에 답하는 조회** — `active_lease`는 `now`를 받지 않아 **만료를 보지 않는다**. "인가 응답"으로
+   문서화해 놓고 만료 확인이 빠져 있어, sweeper가 늦거나 미배선이면 만료 후에도 계속 통과한다.
+7. **B5(d) stale 방어 파라미터** — 클라 소유 identity generation을 받든 reject 모드를 두든 **시그니처가 바뀐다**.
+   C1의 purge는 "적용하기로 한" 전이의 의미만 정하고 "적용할지"는 정하지 않는다(위 C1 미결 참조).
+8. **ack의 `operation`과 per-topic 거부 사유** (§8-B/D2) — 지금 ack은 registry(accepted/removed/active)와
+   caller(rejected/operation/request_id)가 **반씩 조립**한다. "lock 아래 단일 snapshot"이 절반만 성립한다.
+9. **lease 없는 등록 모드** (E1 중간 상태) — 무토큰 subscribe를 legacy `register()`로 우회시키면 live 대상
+   집합이 둘이 되고, flip이 E1가 피하려던 all-or-nothing 사건이 된다.
+10. **epoch 인덱스** — `Lease.epoch`은 저장만 되고 **한 번도 읽히지 않는다**. uid→lease 인덱스가 없어
+    "epoch N의 lease 전부 revoke"를 실행할 수 없다(태그가 현재 장식이다).
+11. **D7 상한의 마지막 방어** — registry 경계에서 미강제(50 topic 요청도 수락된다). 1단계 소유가 맞지만
+    registry가 최종 방어선이다.
+
 #### D. wire 계약 추가 (§8 확장)
 
 A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 달라지므로**, scalar 필드로는 표현할 수 없다.
@@ -757,6 +800,10 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     클라가 상태를 잃었거나 UID reset 후 수렴할 때 부족하다(= ack이 "권위 있는 상태"가 되지 못한다).
     - **connection lock 아래 단일 snapshot**에서 생성한다(B4). topic마다 다른 시점에 읽으면 모순된 상태를 내보낸다.
     - 남은 duration은 **내림(floor)** 정수 초. **≤ 0이면 이미 만료**이므로 넣지 않는다(만료를 "활성"으로 광고 금지).
+    - ⛔ **`accepted_topics` ⊆ `active_subscriptions`** — 발급 경계를 **광고하는 정수와 맞춘다**.
+      판정만 raw float(`now >= expires_at`)로 하면 잔여 0<x<1인 lease가 발급돼 `accepted`에는
+      실리는데 `active`의 `≤0` 규칙에는 걸려 빠진다(실측 `accepted=[(t,0)]` / `active=[]`).
+      클라는 드롭으로 결론짓는데 서버는 발행을 시작하고, D6상 duration 0은 **즉시 재구독**이라 루프가 된다.
   - **`lease_id`(topic별, 재사용 불가 opaque)**: 늦게 도착한 구 `reauth_required`를 무시하는 유일한 수단(D3와 대조).
     ⚠️ **정수 generation을 topic별로 0부터 다시 세면 안 된다** — 제거 후 재구독 시 초기화돼 **과거
     `reauth_required`가 새 lease와 오인 일치**한다. 연결 수명 동안 **단조 증가하는 counter** 또는 opaque id를 쓴다.
