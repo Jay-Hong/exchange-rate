@@ -73,6 +73,7 @@ class RejectReason(str, Enum):
     STALE_EPOCH = "stale_epoch"    # 무효화됨 → snapshot부터 다시 떠서 재검증
     REGRESSION = "regression"      # 다른 owner가 이미 **더 새로운** 관측을 썼다 → 재시도 불필요
     UNKNOWN_UID = "unknown_uid"    # snapshot 없이 쓰려 함(또는 축출됨) → snapshot부터
+    CONFLICT = "conflict"          # **같은 시각**에 내용이 다른 관측 — 한 순간이 두 상태일 수 없다
 
 
 @dataclass(frozen=True)
@@ -205,10 +206,32 @@ class StrictObservationCache:
             )
 
     def is_current(self, snapshot: StrictSnapshot) -> bool:
-        """lease 발급 **직전에** 다시 확인한다 (§A4 — 게시만이 아니라 소비까지 fence).
+        """이 snapshot의 epoch가 아직 현행인가. **시점 확인이지 상호배제가 아니다.**
 
-        `put`이 통과했더라도 그 뒤에 무효화가 들어올 수 있다. 이 검사는 lease를 등록하는
-        critical section **안에서** 해야 한다 — 밖에서 하면 창이 옮겨갈 뿐이다.
+        ⛔ 구 docstring은 "lease를 등록하는 critical section 안에서 호출하면 된다"고 했는데
+        **틀렸다**. `bump()`는 이 저장소의 lock만 잡으므로, 호출자가 B4 연결 lock을 쥐고 있어도
+        `bump`를 배제하지 못한다. 어떤 외부 lock 아래에서 불러도 이 검사 하나로는 fence가 안 된다.
+
+        ## 올바른 사용 — 등록 후 1회 재확인 (§A4 "소비(lease 발급)까지 fence")
+
+            snap = store.snapshot(uid)          # epoch 캡처 (검증 I/O 시작 전)
+            ... 검증 I/O ...
+            store.put_*(obs, expected_epoch=snap.epoch)
+            lease = 등록(비활성, epoch=snap.epoch)   # ← 먼저 등록
+            if not store.is_current(snap): 폐기   # ← 그 다음 1회 재확인
+            lease 활성화
+
+        **왜 이걸로 충분한가**: epoch는 전진만 하므로 재확인 이전에 들어온 `bump`는 **반드시**
+        잡힌다. 재확인 이후에 들어온 `bump`는 *정상적으로 발급된 lease 직후에 webhook이 온 것*과
+        구별되지 않는다 — 즉 설계가 이미 수용하는 통상적인 중도 무효화이고, `compute_lease_expiry`가
+        `verified_at_mono`에 고정된 3-way min이라 `expiry <= premium_verified_at + LEASE_MAX
+        < bump 시각 + LEASE_MAX`로 **A1/A3의 15분 상한 안**이다. 공유 lock이 필요 없다.
+
+        ⛔ **이걸 "매 전송마다 검사"로 확대하지 말 것.** §A4는 *발급*을 fence하라 하고 B1의 검사
+        항목에는 epoch 항이 없다. 확대하면 A4-2의 `unknown → invalidate`(denylist는 `TEST` 단독)와
+        곱해져, 권한이 오히려 **강해진** 사용자의 live lease까지 `RENEWAL`·`PAYWALL_*` 같은
+        고빈도·비-entitlement 이벤트마다 중도에 끊는다 — 지키는 것 거의 없이 가용성만 잃고,
+        S5(15분)라는 제품 결정을 조용히 0으로 재가격한다.
         """
         with self._lock:
             return self._epochs.get(snapshot.uid) == snapshot.epoch
@@ -263,15 +286,26 @@ class StrictObservationCache:
             )
 
         existing = slot.get(uid)
-        if existing is not None and observation.verified_at_mono < existing.verified_at_mono:
-            # 같은 epoch 안의 **역행 쓰기**. CAS는 epoch만 보므로 이걸 못 막는다.
-            # 겹친 두 검증에서 느린 쪽이 나중에 끝나면 오래된 관측이 새 관측을 덮고,
-            # 취소된 구독이 freshness 창만큼 되살아난다(보안 방향 손실).
-            return PutRejected(
-                reason=RejectReason.REGRESSION,
-                expected_epoch=expected_epoch,
-                current_epoch=current,
-            )
+        if existing is not None:
+            if observation.verified_at_mono < existing.verified_at_mono:
+                # 같은 epoch 안의 **역행 쓰기**. CAS는 epoch만 보므로 이걸 못 막는다.
+                # 겹친 두 검증에서 느린 쪽이 나중에 끝나면 오래된 관측이 새 관측을 덮고,
+                # 취소된 구독이 freshness 창만큼 되살아난다(보안 방향 손실).
+                return PutRejected(
+                    reason=RejectReason.REGRESSION,
+                    expected_epoch=expected_epoch,
+                    current_epoch=current,
+                )
+            if observation.verified_at_mono == existing.verified_at_mono and observation != existing:
+                # 동률을 받아주는 근거는 **"같은 관측의 재기록은 무해하다"**였다. 내용이 다르면
+                # 그 근거가 성립하지 않는다 — 한 순간이 active이면서 inactive일 수는 없다.
+                # 실측: `inactive@100` 뒤 `active@100`이 둘 다 통과해 **취소가 되살아났다**.
+                # 어느 쪽이 진짜인지 알 수 없으므로 **먼저 기록된 쪽을 지킨다**(보수적).
+                return PutRejected(
+                    reason=RejectReason.CONFLICT,
+                    expected_epoch=expected_epoch,
+                    current_epoch=current,
+                )
 
         slot[uid] = observation
         return PutAccepted(epoch=current)

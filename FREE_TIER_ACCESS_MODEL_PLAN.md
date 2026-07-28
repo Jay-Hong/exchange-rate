@@ -456,6 +456,22 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     (1B provider의 owner/epoch 패턴과 개념 동일).
     ⚠️ **게시만이 아니라 소비(lease 발급)까지 fence**해야 한다 — 폐기된 검증 결과로 새 15분 lease를 발급하면
     무효화가 무의미하다.
+    - **소비 fence 방식 확정 (2026-07-28)** — `등록(비활성) → is_current 1회 재확인 → 활성화` 순서다.
+      `snapshot()`의 epoch를 lease에 실어 두고 **활성화 직전에 한 번** 재확인한다.
+      - **왜 충분한가**: epoch는 전진만 하므로 재확인 **이전**의 `bump`는 반드시 잡힌다. 재확인 **이후**의
+        `bump`는 *정상 발급 직후 webhook이 온 것*과 구별되지 않는 통상적 중도 무효화이고,
+        `compute_lease_expiry`가 `verified_at_mono`에 고정된 3-way min이라
+        `expiry <= premium_verified_at + LEASE_MAX < bump 시각 + LEASE_MAX` — **A1/A3의 15분 상한 안**이다.
+        따라서 공유 lock도, registry↔store 결합도 필요 없다.
+      - ⛔ **`is_current()`만으로는 fence가 아니다** — `bump()`는 strict cache의 lock만 잡으므로
+        **B4 lock을 쥔 채 호출해도 배제되지 않는다**. (구 문구 "critical section 안에서 호출"은 오류였다.)
+      - ⛔ **매 전송마다 epoch를 검사하지 말 것.** 이 조항이 fence하라는 것은 *발급*이고 **B1의 검사 항목에
+        epoch 항은 없다**(§B1). 확대하면 A4-2의 `unknown → invalidate`(denylist `TEST` 단독)와 곱해져
+        `RENEWAL`·`PAYWALL_*` 같은 고빈도·비-entitlement 이벤트마다 — 권한이 오히려 **강해진** 사용자까지 —
+        live lease를 중도에 끊는다. 지키는 것은 거의 없고 S5(15분)를 조용히 0으로 재가격한다.
+      - ⚠️ 정정: 이 경쟁의 피해를 **"A1 상한이 깨진다"로 정당화하지 말 것** — 위 3-way min 때문에 깨지지 않는다.
+        근거는 (1) 이 조항이 발급 fence를 명문으로 요구한다는 것, (2) epoch tagging이 있어야 후속
+        bump-driven revoke가 완전해진다는 것, 둘뿐이다.
     - ⚠️ **lookup-time epoch 검사만으로는 게시 fence가 되지 않는다** (2026-07-27). 그건 *소비*만 막는다 —
       구 owner가 쓰기 자체를 하면 **이미 기록된 fresh 항목을 덮어써** 멀쩡한 상태를 파괴한다.
       → `put(result, expected_epoch=N)`이 **쓰기 시점에** 현재 epoch와 비교해 불일치면 **쓰기를 거부**한다(CAS).

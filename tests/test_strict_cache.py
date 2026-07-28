@@ -108,6 +108,18 @@ class TestCoherentSnapshot(_CacheTest):
         self.cache.bump(UID)
         self.assertFalse(self.cache.is_current(snap), "무효화 후 lease를 발급하면 fence가 무의미하다")
 
+    def test_is_current_is_a_point_in_time_check_not_mutual_exclusion(self):
+        """⛔ 계약 잠금 — 이 검사는 반환 직후 무효화될 수 있다.
+
+        `bump()`는 이 저장소의 lock만 잡으므로 호출자가 어떤 외부 lock을 쥐고 있어도 배제되지
+        않는다. 그래서 계약은 "등록 → 1회 재확인 → 활성화"이지 "확인했으니 안전"이 아니다.
+        (구 docstring이 정확히 그 반대를 지시하고 있었다.)
+        """
+        snap = self.cache.snapshot(UID)
+        self.assertTrue(self.cache.is_current(snap))
+        self.cache.bump(UID)          # 반환 직후 무효화가 들어오는 상황
+        self.assertFalse(self.cache.is_current(snap))
+
     def test_is_current_is_false_when_the_entry_is_gone(self):
         snap = self.cache.snapshot(UID)
         self.cache.clear()
@@ -266,13 +278,45 @@ class TestMonotonicGuard(_CacheTest):
         self.assertIsInstance(self.cache.put_premium(newer, expected_epoch=e), PutAccepted)
         self.assertEqual(self.cache.snapshot(UID).premium, newer)
 
-    def test_equal_timestamp_is_accepted_as_refresh(self):
-        """동률은 거부하지 않는다 — 재기록은 무해하고 거부하면 재시도를 유발한다."""
+    def test_identical_observation_at_equal_timestamp_is_idempotent(self):
+        """동률을 받는 근거는 **"같은 관측의 재기록은 무해하다"**뿐이다."""
         e = self.epoch()
         self.cache.put_premium(_premium(e, at=100.0), expected_epoch=e)
         self.assertIsInstance(
             self.cache.put_premium(_premium(e, at=100.0), expected_epoch=e), PutAccepted
         )
+
+    def test_conflicting_observation_at_equal_timestamp_is_rejected(self):
+        """⛔ 실측 재현 — `inactive@100` 뒤 `active@100`이 둘 다 통과해 **취소가 되살아났다**.
+
+        한 순간이 active이면서 inactive일 수는 없다. 어느 쪽이 진짜인지 알 수 없으므로
+        **먼저 기록된 쪽을 지킨다**.
+        """
+        e = self.epoch()
+        cancelled = _premium(e, active=False, at=100.0)
+        self.cache.put_premium(cancelled, expected_epoch=e)
+        result = self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
+        self.assertIsInstance(result, PutRejected)
+        self.assertEqual(result.reason, RejectReason.CONFLICT)
+        self.assertEqual(self.cache.snapshot(UID).premium, cancelled)
+
+    def test_conflict_is_distinguishable_from_regression(self):
+        """호출자의 다음 행동이 다르다 — 충돌은 시계 해상도/중복 검증 신호다."""
+        e = self.epoch()
+        self.cache.put_premium(_premium(e, active=False, at=100.0), expected_epoch=e)
+        conflict = self.cache.put_premium(_premium(e, active=True, at=100.0), expected_epoch=e)
+        regression = self.cache.put_premium(_premium(e, active=False, at=50.0), expected_epoch=e)
+        self.assertNotEqual(conflict.reason, regression.reason)
+
+    def test_identity_conflict_at_equal_timestamp_is_rejected(self):
+        """premium만이 아니라 identity에도 같은 규칙이 적용돼야 한다."""
+        e = self.epoch()
+        first = _identity(e, disabled=True, at=100.0)
+        self.cache.put_identity(first, expected_epoch=e)
+        result = self.cache.put_identity(_identity(e, disabled=False, at=100.0), expected_epoch=e)
+        self.assertIsInstance(result, PutRejected)
+        self.assertEqual(result.reason, RejectReason.CONFLICT)
+        self.assertEqual(self.cache.snapshot(UID).identity, first)
 
     def test_guard_is_per_concern(self):
         e = self.epoch()
