@@ -23,9 +23,9 @@ from app.strict_cache import StrictObservationCache
 from app.topic_lease import LEASE_MAX_SECONDS
 from app.topic_lease_registry import (
     ACK_TIMEOUT_SECONDS,
-    AckFailed,
     AckState,
     Applied,
+    ConnectionTerminated,
     Discarded,
     Rejected,
     ReentrantRegistryCall,
@@ -158,7 +158,7 @@ class TestRequestIsOneTransaction(unittest.IsolatedAsyncioTestCase):
             raise ConnectionResetError("socket gone")
 
         result = await _apply(registry, cache, ws, [TOPIC, OTHER], send_ack=failing)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC))
         self.assertIsNone(registry.active_lease(ws, OTHER))
         self.assertFalse(registry.has_pending(ws, TOPIC))
@@ -357,7 +357,7 @@ class TestCrossUidPurge(unittest.IsolatedAsyncioTestCase):
 
         other = StrictObservationCache()
         result = await _apply(registry, other, ws, [OTHER], uid="uid-2", send_ack=failing)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         # ⚠️ `bound_uid`는 **기록**이라 tombstone과 무관하게 보인다 — 여기서 반쯤 넘어간 UID를 잡는다.
         #    인가 응답인 `active_lease`는 tombstone에서 fail-closed라 아래처럼 전부 None이다.
         self.assertEqual(registry.bound_uid(ws), UID, "UID가 반쯤 넘어갔다")
@@ -531,9 +531,9 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
             raise ConnectionResetError("socket gone")
 
         result = await _apply(registry, cache, ws, [TOPIC], send_ack=failing)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         again = await _apply(registry, cache, ws, [TOPIC])
-        self.assertIsInstance(again, Rejected)
+        self.assertIsInstance(again, ConnectionTerminated)
         self.assertEqual(again.reason, "connection_closed")
 
     async def test_ack_timeout_releases_the_lock_and_marks_dead(self):
@@ -546,10 +546,10 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.topic_lease_registry.ACK_TIMEOUT_SECONDS", 0.02):
             result = await _apply(registry, cache, ws, [TOPIC], send_ack=stalling)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertEqual(result.reason, "ack_timeout")
         self.assertFalse(registry.connection_lock(ws).locked(), "lock이 남았다")
-        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Rejected)
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), ConnectionTerminated)
 
     async def test_sender_that_does_not_confirm_is_a_failure(self):
         """계약 — `send_ack`는 `True`를 돌려줘야 한다.
@@ -568,7 +568,7 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
             return None       # `await ws.send_json(...)`만 하고 끝나는 가장 흔한 형태
 
         result = await _apply(registry, cache, ws, [TOPIC], send_ack=silent)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertEqual(result.reason, "ack_not_confirmed")
         self.assertIsNone(registry.active_lease(ws, TOPIC))
 
@@ -585,7 +585,7 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.topic_lease_registry.ACK_TIMEOUT_SECONDS", 0.02):
             result = await _apply(registry, cache, ws, [TOPIC], send_ack=swallowing)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC))
 
     async def test_pre_existing_leases_stop_authorizing_after_an_ack_failure(self):
@@ -605,7 +605,7 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
             raise ConnectionResetError()
 
         self.assertIsInstance(await _apply(registry, cache, ws, [OTHER], send_ack=failing),
-                              AckFailed)
+                              ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC),
                           "죽었다고 판정한 소켓의 기존 lease가 여전히 인가된다")
 
@@ -672,7 +672,7 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
         # 취소도 **배달 여부 불명**이라 timeout과 같은 fail-closed다. teardown이 취소한
         # 경우엔 어차피 `remove_websocket`이 tombstone을 찍지만, 그렇지 않은 취소
         # (per-message task를 감독자가 접는 경우)에는 여기가 유일한 방어다.
-        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Rejected)
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), ConnectionTerminated)
 
 
 class TestSenderReentrancyRaisesInsteadOfHanging(unittest.IsolatedAsyncioTestCase):
@@ -706,7 +706,7 @@ class TestSenderReentrancyRaisesInsteadOfHanging(unittest.IsolatedAsyncioTestCas
                 _apply(registry, cache, ws, [TOPIC], send_ack=reentrant)
             )
         self.assertIn("raised", seen, "재진입이 hang했다(또는 조용히 통과했다)")
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertEqual(result.reason, "ReentrantRegistryCall")
 
     async def test_sender_calling_remove_raises(self):
@@ -878,13 +878,13 @@ class TestTeardownDoesNotBreakLockIdentity(unittest.IsolatedAsyncioTestCase):
             released.set()
             await asyncio.gather(held, teardown, return_exceptions=True)
 
-    async def test_reissue_after_teardown_is_rejected(self):
+    async def test_reissue_after_teardown_is_terminal(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
         await _apply(registry, cache, ws, [TOPIC])
         await registry.remove_websocket(ws)
         result = await _apply(registry, cache, ws, [TOPIC])
-        self.assertIsInstance(result, Rejected)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC), "teardown 뒤 구독이 되살아났다")
 
 
@@ -964,7 +964,7 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
 
         lease_id = registry.active_lease(ws, TOPIC).lease_id
         result = await _apply(registry, cache, ws, [], rejected=[TOPIC], send_ack=failing)
-        self.assertIsInstance(result, AckFailed)
+        self.assertIsInstance(result, ConnectionTerminated)
         # ⚠️ `active_lease`는 tombstone에서 fail-closed라 여기선 관측 도구가 못 된다.
         #    `remove()`의 CAS는 tombstone을 보지 않으므로 "그 lease가 아직 존재하는가"를 답한다.
         #    ⛔ 구 버전은 `identity_generation == 1`을 단언했는데, 같은 UID 재인증에서는
@@ -1067,7 +1067,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         registry, cache, ws = await self._armed()
         result = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC],
                               now_mono=2000.0, premium=1000.0, identity=1000.0)
-        self.assertIsInstance(result, Rejected)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC), "거부된 topic이 계속 인가된다")
 
     async def test_expired_horizon_with_pending_purge_closes_the_connection(self):
@@ -1075,7 +1075,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         other = StrictObservationCache()
         result = await _apply(registry, other, ws, [OTHER], uid="uid-2",
                               now_mono=2000.0, premium=1000.0, identity=1000.0)
-        self.assertIsInstance(result, Rejected)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC), "B 소켓에서 A의 lease가 계속 인가된다")
         self.assertIsNone(registry.active_lease(ws, OTHER))
 
@@ -1084,7 +1084,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         snapshot = cache.snapshot(UID)
         cache.bump(UID)
         result = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC], snapshot=snapshot)
-        self.assertIsInstance(result, Discarded)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC))
 
     async def test_fence_failure_with_pending_purge_closes_the_connection(self):
@@ -1093,7 +1093,7 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         snapshot = other.snapshot("uid-2")
         other.bump("uid-2")
         result = await _apply(registry, other, ws, [OTHER], uid="uid-2", snapshot=snapshot)
-        self.assertIsInstance(result, Discarded)
+        self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.active_lease(ws, TOPIC))
 
     async def test_axis_violation_with_pending_purge_closes_the_connection(self):
@@ -1122,6 +1122,112 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         other = StrictObservationCache()
         with self.assertRaises(ValueError):
             await _apply(registry, other, ws, [], uid="uid-2", premium=float("nan"))
+
+
+class TestResultTypeMatchesConnectionLiveness(unittest.IsolatedAsyncioTestCase):
+    """⛔ **결과 타입 == 연결 생존 여부.** 둘이 어긋나면 호출자는 알 방법이 없다.
+
+    실측된 결함: 축소가 예정된 중단은 tombstone을 찍으면서도 `Discarded`를 그대로
+    돌려줬다 — 그 타입의 계약은 "연결은 멀쩡하니 재시도"인데, 재시도는 영원히
+    `connection_closed`를 받는다. 클라는 데이터도 오류도 없는 상태에 갇힌다.
+
+    그래서 종단 결과 타입을 **하나로** 둔다. 둘 이상이면 호출자가 전부 알아야 하고,
+    하나라도 놓치면 같은 함정이 재생된다.
+    """
+
+    async def _armed(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC, OTHER])
+        return registry, cache, ws
+
+    async def _is_dead(self, registry, cache, ws):
+        """후속 요청이 종단으로 막히는가 = tombstone이 찍혔는가."""
+        result = await _apply(registry, cache, ws, [TOPIC])
+        return isinstance(result, ConnectionTerminated) and result.reason == "connection_closed"
+
+    async def test_every_abort_path_agrees_with_its_result_type(self):
+        async def fence_with_reduction():
+            registry, cache, ws = await self._armed()
+            snapshot = cache.snapshot(UID)
+            cache.bump(UID)
+            r = await _apply(registry, cache, ws, [], rejected=[TOPIC], snapshot=snapshot)
+            return registry, cache, ws, r
+
+        async def fence_without_reduction():
+            registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+            ws = _WS()
+            snapshot = cache.snapshot(UID)
+            cache.bump(UID)
+            r = await _apply(registry, cache, ws, [TOPIC], snapshot=snapshot)
+            return registry, cache, ws, r
+
+        async def expired_with_reduction():
+            registry, cache, ws = await self._armed()
+            r = await _apply(registry, cache, ws, [OTHER], rejected=[TOPIC],
+                             now_mono=2000.0, premium=1000.0, identity=1000.0)
+            return registry, cache, ws, r
+
+        async def expired_without_reduction():
+            registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+            ws = _WS()
+            r = await _apply(registry, cache, ws, [TOPIC],
+                             now_mono=2000.0, premium=1000.0, identity=1000.0)
+            return registry, cache, ws, r
+
+        async def ack_failure():
+            registry, cache, ws = await self._armed()
+
+            async def failing(ack):
+                raise ConnectionResetError()
+
+            r = await _apply(registry, cache, ws, ["usdt:krw"], send_ack=failing)
+            return registry, cache, ws, r
+
+        for name, scenario in (
+            ("fence+축소", fence_with_reduction),
+            ("fence-축소없음", fence_without_reduction),
+            ("만료+축소", expired_with_reduction),
+            ("만료-축소없음", expired_without_reduction),
+            ("ack 실패", ack_failure),
+        ):
+            with self.subTest(scenario=name):
+                registry, cache, ws, result = await scenario()
+                dead = await self._is_dead(registry, cache, ws)
+                self.assertEqual(
+                    isinstance(result, ConnectionTerminated), dead,
+                    f"{name}: 결과 타입({type(result).__name__})과 연결 생존(dead={dead})이 어긋난다",
+                )
+
+    async def test_only_one_terminal_type_exists(self):
+        """⛔ 종단 타입이 둘이면 호출자가 둘 다 알아야 한다 — 하나만 알면 그게 곧 결함이다."""
+        import app.topic_lease_registry as module
+
+        terminal_names = {
+            name for name in dir(module)
+            if name.endswith("Failed") or name.endswith("Terminated")
+        }
+        self.assertEqual(terminal_names, {"ConnectionTerminated"})
+
+    async def test_retryable_discard_really_is_retryable(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        snapshot = cache.snapshot(UID)
+        cache.bump(UID)
+        result = await _apply(registry, cache, ws, [TOPIC], snapshot=snapshot)
+        self.assertIsInstance(result, Discarded)
+        self.assertNotIsInstance(result, ConnectionTerminated)
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Applied)
+
+    async def test_plain_rejection_keeps_the_connection_usable(self):
+        """축소가 없던 만료 거부는 연결을 죽이지 않는다 — 재인증 후 그대로 쓸 수 있다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        result = await _apply(registry, cache, ws, [TOPIC],
+                              now_mono=2000.0, premium=1000.0, identity=1000.0)
+        self.assertIsInstance(result, Rejected)
+        self.assertNotIsInstance(result, ConnectionTerminated)
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Applied)
 
 
 class TestIssuanceBoundaryMatchesTheAdvertisedInteger(unittest.IsolatedAsyncioTestCase):

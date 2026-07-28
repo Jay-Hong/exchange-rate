@@ -46,6 +46,22 @@
 4. **이 registry를 다시 부르지 말 것.** `asyncio.Lock`은 재진입 불가다 — 재진입은 hang이
    아니라 `ReentrantRegistryCall`로 시끄럽게 실패한다(아래).
 
+## 결과 4종 — **타입이 호출자의 행동을 정한다**
+
+| 결과 | 연결 | 호출자 |
+| --- | --- | --- |
+| `Applied` | 살아 있음 | ack은 이미 나갔다. 이후 snapshot 전송(§B1) |
+| `Discarded` | 살아 있음 | **재시도** |
+| `Rejected` | 살아 있음 | 클라에 오류 통지 |
+| `ConnectionTerminated` | **죽음** | **소켓을 닫는다** |
+
+⛔ 종단 타입은 **하나뿐이다**. 원인별로 나누면 호출자가 전부 알아야 하고, 하나라도 놓치면
+"죽은 연결에 재시도"가 되살아난다 — 실제로 그랬다(축소가 예정된 중단이 tombstone을 찍고도
+`Discarded`를 반환해, 계약대로 재시도한 호출자가 영원히 `connection_closed`를 받았다).
+진단은 `reason`이 지고, 타입은 **행동**을 진다.
+⚠️ `CancelledError`가 전파되는 경로(취소 arm / 삼킨 외부 취소)도 tombstone을 찍는다 —
+그쪽은 이미 teardown 중이라 결과값이 아니라 예외로 나간다.
+
 ## ack 실패 = **연결 사망**(§B2a), "발급 안 함"이 아니다
 
 ⛔ 취소는 이미 transport 버퍼에 들어간 프레임을 **되돌리지 못한다**(websockets legacy는
@@ -181,31 +197,42 @@ class Applied:
 class Discarded:
     """재확인에서 무효화가 확인돼 **아무것도 적용하지 않았다**. registry에 흔적이 없다.
 
-    호출자 대응은 **재시도**다(연결은 멀쩡하다) — `AckFailed`와 정반대다.
+    호출자 대응은 **재시도**다 — 그리고 이 타입이 돌아왔다면 연결은 **정말로 멀쩡하다**.
+    ⚠️ 한때 이 계약이 거짓이었다: 접근 축소가 예정된 중단도 tombstone을 찍으면서 `Discarded`를
+    돌려줘, 계약대로 재시도한 호출자가 영원히 `connection_closed`를 받았다(클라는 데이터도
+    오류도 없는 상태에 갇힌다). 지금은 그 경우 `ConnectionTerminated`가 나간다.
     """
 
     reason: str = "invalidated_before_activation"
 
 
 @dataclass(frozen=True)
-class AckFailed:
-    """ack을 못 보냈다(또는 배달을 확인할 수 없다) — **연결이 죽은 것으로 본다**(§B2a).
+class Rejected:
+    """이 요청을 받을 수 없다. 상태를 바꾸지 않았고 **연결은 멀쩡하다**.
 
-    적용된 변경은 없고, registry가 tombstone을 찍어 같은 소켓의 재발급을 막았다.
-    ⚠️ 호출자는 소켓을 **닫아야** 한다 — 이 모듈은 I/O를 하지 않는다.
+    호출자 대응은 클라에 오류를 알리는 것이다(닫지 않는다).
     """
 
     reason: str
 
 
 @dataclass(frozen=True)
-class Rejected:
-    """이 연결에서 받을 수 없는 요청. 상태를 바꾸지 않았다."""
+class ConnectionTerminated:
+    """**연결이 죽었다 — 호출자는 소켓을 닫아야 한다.** registry는 I/O를 하지 않는다.
+
+    `reason`은 원인 진단이고(예: `ack_timeout` / `ack_not_confirmed` / 예외 이름 /
+    `invalidated_before_activation` / `lease_horizon_already_expired` / `connection_closed`),
+    **행동은 언제나 close 하나**다. 그래서 종단 타입을 **하나만** 둔다.
+
+    ⚠️ 원인별로 타입을 나누고 싶은 유혹이 있는데(구 `ConnectionTerminated`가 그랬다), 그러면 호출자가
+    종단 타입을 **전부** 알아야 하고 하나라도 놓치면 "죽은 연결에 재시도"가 되살아난다.
+    진단은 `reason`이 지고, 타입은 **행동**을 진다.
+    """
 
     reason: str
 
 
-TransitionResult = Union[Applied, Discarded, Rejected, AckFailed]
+TransitionResult = Union[Applied, Discarded, Rejected, ConnectionTerminated]
 
 
 class TopicLeaseRegistry:
@@ -304,9 +331,10 @@ class TopicLeaseRegistry:
         self._guard_reentrant(ws)
         async with self.connection_lock(ws):
             if ws in self._closed:
-                # teardown이 끝났거나 ack이 실패한 연결이다. 되살리면 "끊긴 소켓에 살아 있는
-                # 구독" 또는 "서버가 버린 lease를 클라가 가졌다고 믿는 상태"가 생긴다.
-                return Rejected(reason="connection_closed")
+                # teardown이 끝났거나 앞선 전이가 연결을 죽인 상태다. 되살리면 "끊긴 소켓에
+                # 살아 있는 구독" 또는 "서버가 버린 lease를 클라가 가졌다고 믿는 상태"가 생긴다.
+                # ⚠️ 호출자가 아직 안 닫았을 수 있으므로 **종단 결과**로 답한다(close 재촉).
+                return self._terminate_locked(ws, "connection_closed")
 
             # §C1 — 바인딩 UID != 토큰 UID면 **그 ws의 기존 구독 전부 제거** 후 재바인딩
             # (§C1). 거부가 아니다: 거부하면 A의 구독이 B의 소켓에서 계속 살아 있고,
@@ -408,14 +436,14 @@ class TopicLeaseRegistry:
                         # ⚠️ 셋이 여기서 구별되지 않는다: 우리 예산 만료 / **전송 계층**의
                         #    `TimeoutError`(3.11+에서 `OSError` 계열) / sender가 스스로 건 timeout.
                         #    전부 fail-closed로 접는다 — 진단 문자열이 이 모호함을 안고 간다.
-                        return self._ack_failed_locked(ws, "ack_timeout")
+                        return self._terminate_locked(ws, "ack_timeout")
                     except asyncio.CancelledError:
                         # ⛔ 반환값으로 바꾸지 않는다 — teardown의 구조적 취소가 조용히 삼켜진다.
                         #    같은 fail-closed 정리는 하고 다시 던진다.
                         self._closed.add(ws)
                         raise
                     except Exception as exc:  # noqa: BLE001 — 전송 실패는 연결 사망으로 본다(§B2a)
-                        return self._ack_failed_locked(ws, type(exc).__name__)
+                        return self._terminate_locked(ws, type(exc).__name__)
                     finally:
                         self._ack_owner.pop(ws, None)
 
@@ -429,7 +457,7 @@ class TopicLeaseRegistry:
                         raise asyncio.CancelledError()
 
                     if confirmed is not True:
-                        return self._ack_failed_locked(ws, "ack_not_confirmed")
+                        return self._terminate_locked(ws, "ack_not_confirmed")
 
                     # 5) 커밋 — 전부 함께. 여기서부터 live 전송 대상이다.
                     #    ack을 만든 **바로 그** `final`을 통째로 넣는다 — 다시 계산하면 둘이 갈린다.
@@ -455,23 +483,27 @@ class TopicLeaseRegistry:
                 raise
 
     def _abort_locked(self, ws, result, reduces_access: bool):
-        """중단 — 접근 축소가 예정돼 있었으면 **닫고** 나간다.
+        """중단 — 접근 축소가 예정돼 있었으면 **닫고, 결과 타입도 종단으로** 바꾼다.
 
         ⛔ 되돌리면 그만큼의 접근이 계속 살아 있게 되고, 그게 정확히 §C1/§C2가 막으려는
         상태다. tombstone은 의도한 축소보다 **크거나 같은** 축소라 항상 안전한 쪽이다.
+
+        ⛔ **타입을 함께 바꾸는 것이 핵심이다.** tombstone만 찍고 `Discarded`를 돌려주면
+        그 타입의 계약("재시도")이 거짓이 되고, 호출자는 죽은 연결에 영원히 재시도한다.
+        `reason`은 그대로 넘겨 원인 진단을 보존한다.
         """
-        if reduces_access:
-            self._closed.add(ws)
-        return result
+        if not reduces_access:
+            return result
+        return self._terminate_locked(ws, result.reason)
 
-    def _ack_failed_locked(self, ws, reason: str) -> AckFailed:
-        """ack 실패 = **연결 사망**(§B2a). 변경은 적용하지 않고 tombstone만 찍는다.
+    def _terminate_locked(self, ws, reason: str) -> ConnectionTerminated:
+        """연결 사망 확정 — tombstone을 찍고 **종단 결과**를 돌려준다(§B2a).
 
-        ⛔ "발급 안 함"으로 끝내면 안 되는 이유는 모듈 docstring 참조 — 취소된 ack이
-        나중에 배달될 수 있어, 클라만 lease를 가졌다고 믿는 상태가 남는다.
+        ⛔ ack 실패를 "발급 안 함"으로 끝내면 안 되는 이유는 모듈 docstring 참조 — 취소된
+        ack이 나중에 배달될 수 있어, 클라만 lease를 가졌다고 믿는 상태가 남는다.
         """
         self._closed.add(ws)
-        return AckFailed(reason=reason)
+        return ConnectionTerminated(reason=reason)
 
     def _next_generation_locked(self, ws, *, bound, uid) -> int:
         """D2의 연결별 `identity_generation` — **같은 소켓의 UID 재바인딩만** 표현한다(§D2).
