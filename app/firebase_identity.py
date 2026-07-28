@@ -36,7 +36,7 @@ IdentityMisconfigured` 로 접는다. 판정은 하지 않는다 — 그건 `der
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+import threading
 
 from app.strict_verifier import (
     IdentityFound,
@@ -82,9 +82,68 @@ class FirebaseIdentityProvider:
         )
 
 
+def _permanent_firebase_errors():
+    """재시도해도 낫지 않는 것들 (v6.9.0 `exceptions.py` 전수에서 분류).
+
+    ⚠️ **이 목록은 결과를 바꾸지 않는다 — 문서다.** 미분류 `FirebaseError`의 기본이 이미 영구
+    쪽이라(아래 (5)), 여기서 이름을 빼도 같은 버킷으로 간다(mutation 등가 확인).
+    load-bearing인 것은 **transient 목록** 쪽이다 — 거기서 이름을 빼면 백오프하면 나을 오류가
+    영구로 접혀 사용자가 영영 거부된다(`ResourceExhaustedError` 제거 mutation이 red다).
+    그래도 명시해 둔다: 어느 것이 왜 영구인지가 다음 사람에게 필요한 정보다.
+    """
+    from firebase_admin import exceptions
+
+    # ⚠️ `hasattr`만으로는 부족하다 — 테스트 stub은 MagicMock이라 **없는 이름도 True**이고
+    # 타입이 아닌 값을 돌려준다. 그게 `isinstance` 인자로 들어가면 TypeError가 난다(실측).
+    return _existing_types(
+        exceptions,
+        (
+            "InvalidArgumentError",      # 400 — 우리 요청이 잘못됐다
+            "FailedPreconditionError",
+            "OutOfRangeError",
+            "UnauthenticatedError",      # 401 — **죽은 자격증명**
+            "PermissionDeniedError",     # 403
+            "ConflictError",
+            "AlreadyExistsError",
+            "DataLossError",
+        ),
+    )
+
+
+def _transient_firebase_errors():
+    """백오프하면 나을 수 있는 것들."""
+    from firebase_admin import exceptions
+
+    return _existing_types(
+        exceptions,
+        (
+            "AbortedError",
+            "ResourceExhaustedError",    # 429 — 4xx지만 transient
+            "CancelledError",
+            "UnknownError",
+            "InternalError",             # 500
+            "UnavailableError",          # 503
+            "DeadlineExceededError",
+        ),
+    )
+
+
+def _existing_types(module, names) -> tuple:
+    """모듈에 **실제 타입으로** 존재하는 것만. stub의 MagicMock을 걸러낸다."""
+    found = []
+    for name in names:
+        value = getattr(module, name, None)
+        if isinstance(value, type):
+            found.append(value)
+    return tuple(found)
+
+
 def _classify(exc: BaseException) -> IdentityResult:
     """예외 → 버킷. **순서가 계약이다.**"""
     from firebase_admin import auth, exceptions
+
+    _PERMANENT_FIREBASE_ERRORS = _permanent_firebase_errors()
+    _TRANSIENT_FIREBASE_ERRORS = _transient_firebase_errors()
 
     # (1) 계정 없음은 **정확히 `UserNotFoundError`만**. 형제를 여기 넣으면 오설정이 "전 계정 삭제"가 된다.
     if isinstance(exc, auth.UserNotFoundError):
@@ -94,17 +153,22 @@ def _classify(exc: BaseException) -> IdentityResult:
     if isinstance(exc, exceptions.NotFoundError):
         return IdentityMisconfigured(code=_code_of(exc))
 
-    # (3) 권한 상실 = 영구. 재시도해도 낫지 않는다.
-    if isinstance(exc, exceptions.PermissionDeniedError):
+    # (3) **영구** 결함들. ⛔ 이걸 transient로 접으면 죽은 자격증명이 **retry storm**이 된다 —
+    #     `UnauthenticatedError`(401)가 정확히 그 경우다.
+    if isinstance(exc, _PERMANENT_FIREBASE_ERRORS):
         return IdentityMisconfigured(code=_code_of(exc))
 
-    # (4) rate limit은 4xx지만 **transient**다 — 영구로 접으면 백오프로 나을 것을 영영 못 쓴다.
-    if isinstance(exc, exceptions.ResourceExhaustedError):
+    # (4) **transient** 결함들. rate limit(`ResourceExhaustedError`)은 4xx지만 여기 속한다 —
+    #     영구로 접으면 백오프하면 나을 것을 영영 못 쓴다.
+    if isinstance(exc, _TRANSIENT_FIREBASE_ERRORS):
         return IdentityUnavailable(code=_code_of(exc))
 
-    # (5) 그 밖의 FirebaseError는 transient로 본다(5xx·네트워크).
+    # (5) 분류되지 않은 `FirebaseError`(SDK가 나중에 추가할 수 있다)는 **영구 쪽**으로 보낸다.
+    #     비대칭이 근거다: 영구를 transient로 보면 조용한 storm이고, transient를 영구로 보면
+    #     시끄럽지만 배선이 어차피 `temporarily_unavailable`로 접으므로 **알게 된다**.
+    #     계획이 webhook 미지 이벤트에 쓰는 "unknown → fail-safe"와 같은 자세다.
     if isinstance(exc, exceptions.FirebaseError):
-        return IdentityUnavailable(code=_code_of(exc))
+        return IdentityMisconfigured(code=_code_of(exc))
 
     # (6) google.auth — **FirebaseError가 아니다**. 자격증명은 영구, 전송은 transient.
     google_auth_exceptions = _google_auth_exceptions()
@@ -119,6 +183,9 @@ def _classify(exc: BaseException) -> IdentityResult:
 
     # (7) `validate_uid`의 `ValueError` — `derive_verdict`의 축 가드와 타입이 겹치므로
     #     여기서 **반드시** 접는다. 안 접으면 우리 코드 버그로 오분류된다.
+    #     ⚠️ 이 분기가 정당한 근거는 **app 초기화가 `ValueError`를 밖으로 내지 않기** 때문이다
+    #     (`_acquire_app` 참조). 그 보장이 깨지면 초기화 경쟁이 여기서 `INVALID_UID`로 둔갑한다 —
+    #     실측으로 그 오분류를 재현한 적이 있다.
     if isinstance(exc, ValueError):
         return IdentityMisconfigured(code="INVALID_UID")
 
@@ -140,23 +207,49 @@ def _google_auth_exceptions():
     return google_auth_exceptions
 
 
-def _lazy_get_user(app_name: str):
-    """실물 SDK 바인딩. **함수 안에서** import한다(리포 관용구)."""
+_APP_INIT_LOCK = threading.Lock()
 
-    def _get_user(uid: str):
-        import firebase_admin
-        from firebase_admin import auth
 
+def _acquire_app(app_name: str):
+    """이름 있는 app을 얻는다. 없으면 **한 번만** 만든다.
+
+    ⚠️ TOCTOU — 서로 다른 uid가 동시에 최초 접근하면 둘 다 `get_app()`에 실패하고 둘 다
+    `initialize_app()`을 부른다. 두 번째는 `ValueError`("app already exists")를 내는데, 그게
+    분류기까지 흘러가면 **`INVALID_UID`로 오분류**된다(실측 재현: 초기화 2회 + 한 요청 오분류).
+    → lock으로 직렬화하고, 그래도 중복이면 `get_app()`으로 **되찾는다**(경쟁의 정상 결과).
+
+    ⚠️ 여기서 `ValueError`를 밖으로 내보내지 않는 것이 계약이다 — 그래야 분류기에 도달하는
+    `ValueError`는 `validate_uid`의 것뿐이라고 말할 수 있다.
+    """
+    import firebase_admin
+
+    try:
+        return firebase_admin.get_app(app_name)
+    except ValueError:
+        pass
+    with _APP_INIT_LOCK:
         try:
-            app = firebase_admin.get_app(app_name)
+            return firebase_admin.get_app(app_name)      # lock 대기 중 남이 만들었을 수 있다
         except ValueError:
+            pass
+        try:
             # ⚠️ 기본 app을 재사용하지 않는다 — FCM의 timeout까지 바뀐다.
-            app = firebase_admin.initialize_app(
+            return firebase_admin.initialize_app(
                 _default_credential(),
                 {"httpTimeout": FIREBASE_HTTP_TIMEOUT_SECONDS},
                 name=app_name,
             )
-        return auth.get_user(uid, app=app)
+        except ValueError:
+            return firebase_admin.get_app(app_name)      # 그 사이 만들어졌다
+
+
+def _lazy_get_user(app_name: str):
+    """실물 SDK 바인딩. **함수 안에서** import한다(리포 관용구)."""
+
+    def _get_user(uid: str):
+        from firebase_admin import auth
+
+        return auth.get_user(uid, app=_acquire_app(app_name))
 
     return _get_user
 

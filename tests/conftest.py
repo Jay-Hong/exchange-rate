@@ -96,7 +96,9 @@ _fb_exceptions.FirebaseError = _StubFirebaseError
 #   _auth_utils.py : UserNotFoundError·ConfigurationNotFoundError·TenantNotFoundError 가
 #                    **NotFoundError의 형제** — 이게 provider 매핑의 핵심 함정이다
 #                    (형제를 NotFound로 접으면 프로젝트 오설정이 "전 계정 삭제"가 된다)
-#   `UserNotFoundError.__init__(self, message)` 만 arity가 다르다.
+#   ⚠️ 정정: 한때 "UserNotFoundError만 arity가 다르다"고 적었는데 **틀렸다**. 원문은
+#      `def __init__(self, message, cause=None, http_response=None)` 로 형제와 동일하다.
+#      regex 추출 실수를 stub과 fidelity 테스트에 그대로 고정했었다.
 
 
 class _StubNotFoundError(_StubFirebaseError):
@@ -120,8 +122,7 @@ class _StubUnavailableError(_StubFirebaseError):
 
 
 class _StubUserNotFoundError(_StubNotFoundError):
-    def __init__(self, message):            # ⚠️ SDK와 동일하게 **message 하나만**
-        _StubNotFoundError.__init__(self, message)
+    pass                                    # SDK도 형제와 **동일 arity**다 (아래 주석 참조)
 
 
 class _StubConfigurationNotFoundError(_StubNotFoundError):
@@ -140,6 +141,32 @@ class _StubTooManyAttemptsTryLaterError(_StubResourceExhaustedError):
     pass
 
 
+class _StubUnauthenticatedError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "UNAUTHENTICATED", message, cause, http_response)
+
+
+class _StubFailedPreconditionError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "FAILED_PRECONDITION", message, cause, http_response)
+
+
+class _StubInternalError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "INTERNAL", message, cause, http_response)
+
+
+class _StubDeadlineExceededError(_StubFirebaseError):
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "DEADLINE_EXCEEDED", message, cause, http_response)
+
+
+_fb_exceptions.InvalidArgumentError = _StubInvalidArgumentError
+_fb_exceptions.UnknownError = _StubUnknownError
+_fb_exceptions.UnauthenticatedError = _StubUnauthenticatedError
+_fb_exceptions.FailedPreconditionError = _StubFailedPreconditionError
+_fb_exceptions.InternalError = _StubInternalError
+_fb_exceptions.DeadlineExceededError = _StubDeadlineExceededError
 _fb_exceptions.NotFoundError = _StubNotFoundError
 _fb_exceptions.PermissionDeniedError = _StubPermissionDeniedError
 _fb_exceptions.ResourceExhaustedError = _StubResourceExhaustedError

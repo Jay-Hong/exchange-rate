@@ -88,10 +88,25 @@ class TestStubFidelity(unittest.TestCase):
                     fb_exceptions.ResourceExhaustedError, fb_exceptions.UnavailableError):
             self.assertTrue(issubclass(cls, fb_exceptions.FirebaseError))
 
-    def test_user_not_found_takes_only_a_message(self):
-        """SDK의 `UserNotFoundError.__init__(self, message)` — 형제들과 arity가 다르다."""
-        fb_auth.UserNotFoundError("gone")
-        fb_auth.ConfigurationNotFoundError("cfg", None, None)
+    def test_not_found_family_shares_one_arity(self):
+        """⚠️ 정정 — 한때 "UserNotFoundError만 arity가 다르다"고 적고 그대로 잠갔는데 **틀렸다**.
+
+        v6.9.0 원문: `def __init__(self, message, cause=None, http_response=None)` 로
+        형제와 동일하다. regex 추출 실수를 stub과 이 테스트에 함께 고정했던 사례다.
+        """
+        for cls in (fb_auth.UserNotFoundError, fb_auth.ConfigurationNotFoundError,
+                    fb_auth.TenantNotFoundError):
+            with self.subTest(cls=cls.__name__):
+                cls("msg")
+                cls("msg", None, None)
+
+    def test_permanent_firebase_errors_exist_as_distinct_types(self):
+        """⛔ 이들을 transient로 접으면 **죽은 자격증명이 retry storm**이 된다."""
+        for name in ("UnauthenticatedError", "FailedPreconditionError", "InvalidArgumentError"):
+            with self.subTest(name=name):
+                cls = getattr(fb_exceptions, name)
+                self.assertTrue(issubclass(cls, fb_exceptions.FirebaseError))
+                self.assertFalse(issubclass(cls, fb_exceptions.UnavailableError))
 
     def test_google_auth_credential_errors_are_not_firebase_errors(self):
         """⛔ `except FirebaseError`만 쓰면 서비스 계정 키 폐기가 통째로 새어 나간다."""

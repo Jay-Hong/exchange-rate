@@ -26,6 +26,7 @@
       ⇒ `except FirebaseError`만 쓰면 서비스 계정 키 폐기가 통째로 새어 나간다.
 """
 import asyncio
+import time
 import unittest
 
 from app.strict_verifier import (
@@ -124,6 +125,29 @@ class TestErrorBuckets(unittest.TestCase):
             IdentityUnavailable,
         )
 
+    def test_permanent_firebase_errors_are_misconfigured(self):
+        """⛔ 이걸 transient로 접으면 **죽은 자격증명이 retry storm**이 된다.
+
+        `UnauthenticatedError`(401)가 정확히 그 경우다 — 재시도해도 영원히 401이다.
+        """
+        from firebase_admin import exceptions
+
+        for name in ("UnauthenticatedError", "FailedPreconditionError", "InvalidArgumentError"):
+            with self.subTest(name=name):
+                exc_cls = getattr(exceptions, name)
+                self.assertIsInstance(_run(_raiser(exc_cls("boom"))), IdentityMisconfigured)
+
+    def test_unclassified_firebase_error_defaults_to_permanent(self):
+        """⛔ SDK가 나중에 추가할 타입은 **영구 쪽**으로 보낸다.
+
+        비대칭이 근거다 — 영구를 transient로 보면 **조용한 storm**이고, transient를 영구로 보면
+        시끄럽지만 배선이 어차피 `temporarily_unavailable`로 접으므로 **알게 된다**.
+        """
+        from firebase_admin import exceptions
+
+        unclassified = exceptions.FirebaseError("SOME_FUTURE_CODE", "not in either list")
+        self.assertIsInstance(_run(_raiser(unclassified)), IdentityMisconfigured)
+
     def test_transient_firebase_error_is_unavailable(self):
         from firebase_admin import exceptions
 
@@ -187,6 +211,183 @@ class TestTransportTimeout(unittest.TestCase):
         provider = FirebaseIdentityProvider(get_user=lambda uid, app=None: _FakeUser())
         self.assertIsNotNone(provider.app_name)
         self.assertNotEqual(provider.app_name, "[DEFAULT]")
+
+
+class TestLazyBindingActuallyRuns(unittest.TestCase):
+    """⛔ 앞 테스트들은 전부 `get_user`를 주입해 **실제 lazy 경로를 한 번도 안 돈다**.
+
+    "기본 app 미접촉"도 문자열만 봤을 뿐, timeout 전달·named app 사용·초기화 경쟁을 검증하지
+    못했다. 여기서 SDK 모듈을 가짜로 두고 그 경로를 직접 돌린다.
+    """
+
+    def setUp(self):
+        import firebase_admin
+
+        self.fb = firebase_admin
+        self.init_calls = []
+        self.get_user_calls = []
+        self._apps = {}
+        self._orig = (firebase_admin.get_app, firebase_admin.initialize_app)
+
+        def get_app(name="[DEFAULT]"):
+            if name not in self._apps:
+                raise ValueError(f"no app {name}")
+            return self._apps[name]
+
+        def initialize_app(credential=None, options=None, name="[DEFAULT]"):
+            self.init_calls.append((name, options))
+            if name in self._apps:
+                raise ValueError("app already exists")
+            self._apps[name] = f"app:{name}"
+            return self._apps[name]
+
+        self._apps["[DEFAULT]"] = _FakeDefaultApp()
+        firebase_admin.get_app = get_app
+        firebase_admin.initialize_app = initialize_app
+
+        from firebase_admin import auth
+
+        self._orig_get_user = getattr(auth, "get_user", None)
+        auth.get_user = lambda uid, app=None: (
+            self.get_user_calls.append((uid, app)) or _FakeUser()
+        )
+
+    def tearDown(self):
+        self.fb.get_app, self.fb.initialize_app = self._orig
+        from firebase_admin import auth
+
+        if self._orig_get_user is not None:
+            auth.get_user = self._orig_get_user
+
+    def test_named_app_is_created_with_the_lowered_timeout(self):
+        provider = FirebaseIdentityProvider()          # 주입 없음 → lazy 경로
+        result = asyncio.run(provider(UID))
+        self.assertIsInstance(result, IdentityFound)
+        self.assertEqual(len(self.init_calls), 1)
+        name, options = self.init_calls[0]
+        self.assertEqual(name, provider.app_name)
+        self.assertNotEqual(name, "[DEFAULT]", "기본 app을 만들면 FCM timeout이 바뀐다")
+        self.assertEqual(options, {"httpTimeout": FIREBASE_HTTP_TIMEOUT_SECONDS})
+        self.assertEqual(self.get_user_calls[0][1], f"app:{name}", "named app으로 안 불렀다")
+
+    def test_second_call_reuses_the_app(self):
+        provider = FirebaseIdentityProvider()
+        asyncio.run(provider(UID))
+        asyncio.run(provider("uid-2"))
+        self.assertEqual(len(self.init_calls), 1, "매 호출마다 app을 다시 만들었다")
+
+    def test_concurrent_first_touch_initialises_once(self):
+        """⛔ TOCTOU 회귀 잠금 — 실측(수정 전): 초기화 2회 + 한 요청이 `INVALID_UID`로 오분류.
+
+        ⚠️ 그냥 스레드를 동시에 던지면 경쟁 창이 좁아 **안 잡힌다**(lock을 지워도 통과했다).
+        첫 초기화를 **붙잡아** 두 번째 스레드가 반드시 그 창 안에 들어오게 만든다.
+        """
+        import threading
+
+        entered, release = threading.Event(), threading.Event()
+        real_init = self.fb.initialize_app
+        first = {"done": False}
+
+        def blocking_init(credential=None, options=None, name="[DEFAULT]"):
+            if not first["done"]:
+                first["done"] = True
+                entered.set()
+                release.wait(timeout=5)      # 초기화를 창 안에 붙잡아 둔다
+            return real_init(credential, options, name)
+
+        self.fb.initialize_app = blocking_init
+        provider = FirebaseIdentityProvider()
+        results, errors = [], []
+
+        def worker(n):
+            try:
+                results.append(asyncio.run(provider(f"uid-{n}")))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=(1,))
+        t1.start()
+        self.assertTrue(entered.wait(timeout=5), "첫 초기화가 창에 진입하지 못했다")
+        t2 = threading.Thread(target=worker, args=(2,))
+        t2.start()
+        # t2가 lock에 막혀 있어야 한다 — 안 막히면 두 번째 초기화가 시작된다
+        t2.join(timeout=0.3)
+        blocked = t2.is_alive()
+        release.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        self.assertTrue(blocked, "두 번째 스레드가 초기화 창에 함께 들어갔다 (lock 없음)")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.init_calls), 1, "초기화 경쟁이 app을 여러 번 만들었다")
+        self.assertTrue(all(isinstance(r, IdentityFound) for r in results),
+                        f"경쟁이 오분류를 만들었다: {[type(r).__name__ for r in results]}")
+
+    def test_duplicate_initialisation_is_recovered_not_raised(self):
+        """⛔ lock 밖에서 남이 먼저 만들었을 때 `ValueError`를 그대로 내면 `INVALID_UID`로 둔갑한다."""
+        provider = FirebaseIdentityProvider()
+        real_init = self.fb.initialize_app
+
+        def racing_init(credential=None, options=None, name="[DEFAULT]"):
+            self._apps.setdefault(name, f"app:{name}")   # 남이 먼저 만든 상황
+            return real_init(credential, options, name)  # → ValueError
+
+        self.fb.initialize_app = racing_init
+        self.assertIsInstance(asyncio.run(provider(UID)), IdentityFound)
+
+
+class _FakeDefaultApp:
+    credential = object()
+
+
+class TestIntegrationWithVerifierAndSingleFlight(unittest.IsolatedAsyncioTestCase):
+    """⛔ codex 완료 게이트 2개 — registry 없이 **지금** 검증 가능하다(내가 배선 슬라이스로 미뤘었다).
+
+        (a) provider의 자체 timeout 뒤 공유 flight가 실제로 종료돼 `in_flight_count() == 0`
+        (b) 이후 요청이 **새 provider 호출**로 성공
+
+    provider의 SDK timeout을 여기서는 짧은 sleep + `IdentityUnavailable` 반환으로 모사한다 —
+    실물 SDK는 `httpTimeout` 경과 후 transient 오류를 내므로 같은 모양이다.
+    """
+
+    async def test_timeout_releases_the_flight_and_the_next_request_succeeds(self):
+        from app.strict_cache import StrictObservationCache
+        from app.strict_single_flight import StrictSingleFlight
+        from app.strict_verifier import TemporarilyUnavailable, VerifiedActive, verify_strict
+        from app.subscription import Determined
+
+        cache, flight = StrictObservationCache(), StrictSingleFlight()
+        calls = []
+        sdk_timeout = 0.05
+
+        async def identity(uid):
+            calls.append(uid)
+            await asyncio.sleep(sdk_timeout)          # SDK가 자기 상한까지 버티다가
+            if len(calls) == 1:
+                return IdentityUnavailable(code="DEADLINE_EXCEEDED")   # 첫 번째는 timeout
+            return IdentityFound(disabled=False, tokens_valid_after_ms=1_699_999_900_000)
+
+        async def premium(uid):
+            return Determined(is_premium=True)
+
+        class _Clock:
+            def mono(self):
+                return time.monotonic()
+
+        def _verify():
+            return verify_strict("uid-x", token_iat_seconds=1_700_000_000, clock=_Clock(),
+                                 cache=cache, premium_provider=premium,
+                                 identity_provider=identity, single_flight=flight)
+
+        first = await _verify()
+        self.assertIsInstance(first, TemporarilyUnavailable)
+        # (a) provider가 자기 상한 안에 끝냈으므로 flight도 끝나 있어야 한다
+        self.assertEqual(flight.in_flight_count(), 0, "timeout 뒤 flight가 슬롯을 안 놨다")
+
+        # (b) 다음 요청은 **새 호출**로 성공한다
+        second = await _verify()
+        self.assertIsInstance(second, VerifiedActive)
+        self.assertEqual(len(calls), 2, "새 provider 호출 없이 성공했다면 낡은 결과를 쓴 것이다")
 
 
 if __name__ == "__main__":
