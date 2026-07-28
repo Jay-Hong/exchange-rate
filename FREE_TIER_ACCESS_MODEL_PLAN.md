@@ -371,7 +371,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   ```
   **authoritative한 것은 모두 같은 horizon 모델을 탄다** — entitlement든 identity(revocation)든,
   마지막 확인 시점 + 15분을 넘겨 lease를 줄 수 없다. 특례 없음.
-  - ⚠️ **identity horizon은 UID가 아니라 *토큰*에 묶인다**. UID 단위로 **verdict를** 캐시하면 **같은 UID의 새 토큰
+  - ⚠️ **identity *verdict*는 토큰 단위다 — 단, *관측*은 UID 키가 맞다**(§A6-1 해법). UID 단위로 **verdict를** 캐시하면 **같은 UID의 새 토큰
     검증 결과를 revoked된 구 토큰이 공유**해 권한이 섞인다.
     (entitlement horizon은 UID 단위가 맞다 — 권한은 계정 속성이다.)
     - ✅ **해법 확정 (2026-07-27, SDK 소스 검증)**: UID 단위로 **관측(authority record)** 을 캐시하고
@@ -535,7 +535,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   | 계층 | 내용 |
   |---|---|
   | **저장 (UID 키, concern별 분리)** | `PremiumObservation(active: bool, verified_at_mono, epoch)` / `IdentityAuthorityFound(disabled, tokens_valid_after_ms, verified_at_mono, epoch)` \| `IdentityAuthorityNotFound(verified_at_mono, epoch)` |
-  | **파생 (요청별: 관측 + 토큰 claims)** | `Active(...)` \| `Inactive(reason, ...)` \| `TemporarilyUnavailable(reason, retry_after_seconds)` |
+  | **파생 (요청별: 관측 + 토큰 claims)** | `Active(premium_verified_at_mono, identity_verified_at_mono)` \| `Inactive(reason)` \| `NeedsVerification(concern)` |
 
   - **identity는 합타입**(Found/NotFound) — `not_found=True`인데 watermark가 존재하는 불가능 상태를 만들 수 없다.
     타입 검사기가 없는 리포라도 이득이 있다: NotFound에서 `.tokens_valid_after_ms` 접근이 **오용 지점에서 즉시**
@@ -545,6 +545,10 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **`Inactive.reason`** = `premium_inactive` \| `token_revoked` \| `account_disabled` \| `account_deleted`.
     `token_revoked`는 **저장 대상이 아니다** — `(uid, iat)` 단위 파생 판정이며, watermark 단조 증가 + `iat` 고정이라
     그 토큰에 대해서만 영구적이다. 새 토큰은 같은 record에서 `Active`를 파생한다.
+  - ⚠️ **`TemporarilyUnavailable`은 파생 verdict가 아니라 verifier(I/O) 반환**이다 (2026-07-28 정정).
+    파생 계층이 관측이 없거나 낡았을 때 돌리는 것은 **`NeedsVerification(concern)`** — 내부 제어
+    신호이지 wire 상태가 아니다. 둘을 섞으면 "아직 안 물어봤다"가 retryable **장애**로 클라에 나가고
+    재검증 자체를 건너뛴다(§8-C상 `temporarily_unavailable`은 전체-요청 + retry_after + registry 불변).
   - **`TemporarilyUnavailable.reason`** = 판정 불가 사유만. ⛔ **구매 전파(propagation)를 여기 넣지 말 것** —
     RevenueCat이 authoritative inactive를 반환했으므로 "판정 불가"가 아니다(§A4-1).
   - **programming·config 오류는 verdict가 아니다.** 내부 예외로 전파하고 **캐시하지 않으며 wire 오류로도 접지 않는다.**
@@ -996,7 +1000,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 보강 3차(codex 감사):
 `[server]` **unsubscribe는 토큰 없이도 성공**(만료·revoked·Firebase 장애에서도 제거됨 = fail-open) + `removed_topics`·`operation` /
 `[server]` **`lease_id` 재사용 금지**(제거 후 재구독 / UID 변경 후 재등록에서 구 `reauth_required`가 새 lease와 불일치) /
-`[server]` **identity horizon이 토큰 단위**(같은 UID의 새 토큰 검증을 revoked 구 토큰이 공유하지 못함) /
+`[server]` **identity verdict가 토큰 단위**(관측은 UID 키 — 같은 UID의 새 토큰 검증을 revoked 구 토큰이 공유하지 못함) /
 `[server]` **webhook epoch fence**(검증 시작 → invalidate → 구 검증 완료가 cache를 되살리지 못함) /
 `[client]` `retry_at`이 음수가 되지 않고 `lease_remaining <= safety`면 즉시 재인증 /
 `[both]` **ack 유실 후 재시도 idempotency**(클라의 새 request_id 재시도 ⊥ 서버의 topic-set 불변·lease 갱신) /
@@ -1013,7 +1017,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[server]` **REST twin 게이트가 flag ON보다 먼저**(무인증 KRX 재개방 방지) /
 `[server]` **전송 실패는 소켓 종료**(부분 삭제 후 유지 금지 — ack이 거짓이 되지 않음) /
 `[server]` **연결당 동시 dispatch에서 unsubscribe·ping이 subscribe 뒤에 막히지 않음**(pong timeout 내) /
-`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(auth_time 단조) / `[server]` **lock 안 I/O timeout** /
+`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(⛔ `auth_time` 단조는 폐기 — 클라 소유 identity generation 또는 live 소켓 cross-UID 거부, C1에서 택일) / `[server]` **lock 안 I/O timeout** /
 `[client]` **최소 잔여 기준 타이머**(혼합 lease에서 짧은 topic이 먼저 만료되지 않음) /
 `[both]` **재인증 idempotency = topic 집합 불변이되 lease는 갱신됨** /
 `[client]` snapshot 중복은 **timestamp-merge**로 적용 /
@@ -1031,7 +1035,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
   `[server]` wall clock 역행에도 strict horizon 불변(strict cache **저장·재사용** 경로) /
   `[server]` stale fallback으로 연장 안 됨(A6 3-state verifier — 현행 `PremiumStatus`에는
   fresh/stale 구분이 없고 최대 1시간 stale로 ACTIVE가 나온다) /
-  `[server]` single-flight(A5 owner·epoch) / `[server]` identity horizon이 토큰 단위(저장 키) /
+  `[server]` single-flight(A5 owner·epoch) / `[server]` identity 관측이 **UID 키 저장 + 토큰별 `iat` 파생**을 실제 저장 경로에서도 유지(⛔ 구 "토큰 fingerprint/`auth_time` 저장 키" 전략은 폐기) /
   `[server]` webhook epoch fence.
 - ⚠️ **"최소 lease 10분"을 이 슬라이스 근거로 주장하지 말 것** — `CACHE_TTL < LEASE`는 3-way min의
   *entitlement 항*에만 거는 상한이다. 10분 하한은 `firebase_identity_verified_at ≈ now`라는 E2
