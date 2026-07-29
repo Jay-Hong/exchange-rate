@@ -656,9 +656,14 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
         ⛔ **필요조건이지 충분조건이 아니다.** `< 10`이라고 클라가 먼저 포기하지 않는다는
         뜻이 **아니다** — 클라의 10초는 요청→ack **전체**를 재는데 그 앞에 상한 없는 lock
         대기가 있고, 알려진 몫(검증 8s + 송신 5s)만 더해도 이미 13s > 10s다(§D-const).
-        여기서 막는 건 좁은 실패 하나다: 예산이 10s 이상이면 **예산 안에서 성공한** ack이
+        이 단언이 겨냥하는 좁은 실패: 예산이 10s 이상이면 **예산 안에서 성공한** ack이
         클라가 이미 포기한 뒤일 수 있고, 그러면 서버는 클라가 버린 lease를 활성화한다.
         구 이름·docstring은 이 필요조건을 충분조건처럼 적었다.
+
+        ⛔ 다만 **이 단언 단독으로는 그 축을 못 막는다** — `ACK`만 키우는 변이는 잡지만
+        `ACK`와 `CLIENT_ACK`가 **같이** 움직이면 green이다(실측: `ACK 5.0→1.0` +
+        `CLIENT_ACK 10.0→3600.0` → 이 단언 green, red는 리터럴 pin 2건뿐).
+        그 축을 실제로 잡는 것은 `TestRegistryConstantsArePinned`의 절대값 pin이다.
         """
         self.assertLess(ACK_TIMEOUT_SECONDS, CLIENT_ACK_TIMEOUT_SECONDS)
 
@@ -1982,13 +1987,17 @@ class TestRegistryConstantsArePinned(unittest.TestCase):
     """
 
     def test_ack_timeout_is_pinned(self):
-        """D-const 표 `ACK_TIMEOUT_SECONDS` 행과 짝. 근거 칸 `8s + 5s = 13s` 산술의 5도 이 값이다."""
+        """D-const 표 `ACK_TIMEOUT_SECONDS` 행 · 근거 칸 `8s + 5s = 13s` 산술의 5가 이 값이다.
+
+        ⛔ 잠그는 것은 **코드 기본값뿐**이다 — 표 쪽을 고쳐도 red는 나지 않는다(doc→code 비구속).
+        """
         self.assertEqual(ACK_TIMEOUT_SECONDS, 5.0)
 
     def test_client_ack_timeout_is_pinned(self):
         """⚠️ **이 값의 소유자는 iOS repo다.**
 
-        red는 "문서(§D6)와 서버 측 **기록**이 어긋났다"는 뜻이지 클라가 어긋났다는 뜻이 **아니다**.
+        red의 뜻은 **서버 코드의 기록값이 10.0에서 벗어났다**는 것뿐이다. 클라가 어긋났다는 뜻이
+        **아니고**, 반대로 §D6 쪽이 바뀌면 red는 **안 난다**(doc→code 비구속, 실측 확인).
         서버는 이 값을 강제하지 않는다 — `assertLess(ACK, CLIENT_ACK)`의 입력일 뿐이다.
 
         ⛔ 클라 값과 묶는 통합 테스트는 **지금 지을 수 없다**(실측 2026-07-29): iOS

@@ -470,11 +470,23 @@ class TestEpochFencing(unittest.TestCase):
 
 
 class TestVerifierDeadlineIsPinned(unittest.TestCase):
-    """실측(2026-07-29): `8.0→80.0`이 전체 스위트 생존했다 — 행동 테스트가 전부 예산을 주입한다.
+    """**코드 기본값만 잠근다.** 계획 문서 쪽은 지키지 않는다.
 
-    이 값은 D-const `ACK_TIMEOUT_SECONDS` 행 **근거 칸 산문**에 `8s + 5s = 13s > 10s`로도
-    인용돼 있다. 값 칸이 아니라 산문이라 표를 파싱하는 어떤 검사도 이 쌍을 못 본다 —
-    그래서 여기 리터럴 pin이 그 산문의 유일한 red다.
+    실측(2026-07-29): pin 없이 `8.0→80.0`이 전체 스위트 생존했다. 이 상수의 행동은
+    `tests/test_strict_single_flight.py`가 `patch("app.strict_verifier.VERIFY_DEADLINE_SECONDS", …)`로
+    **주입해서** 검증하므로, 기본값 자체는 어떤 테스트도 읽지 않았다.
+
+    ⛔ 이 값은 D-const `ACK_TIMEOUT_SECONDS` 행 **근거 칸 산문**에 `8s + 5s = 13s > 10s`로도
+    인용돼 있지만, **이 pin은 그 산문을 지키지 않는다** — 실측: 문서의 `8s`를 `6s`로 바꿔도
+    전체 스위트 green이다. 계획 문서는 doc→code 방향이 비구속이라고 D-const가 스스로 밝힌다.
+    코드를 바꾸면 red가 나서 산문을 함께 고칠 기회가 생길 뿐, 산문 단독 변경은 무증상이다.
+
+    ⛔ 생존은 **런타임 결함이 아니다** — "기본값 변경을 탐지하지 못했다"는 뜻일 뿐이다.
+
+    ⚠️ 코드 방향에서도 이 pin이 **유일한 red는 아니다**: 5.0 아래로 내리면
+    `tests/test_firebase_identity.py::TestTransportTimeout::test_timeout_is_below_the_verifier_deadline`
+    (`FIREBASE_HTTP_TIMEOUT_SECONDS` < deadline)도 함께 red다. 이 pin이 단독으로 잡는 것은
+    **상향 드리프트**다.
     """
 
     def test_verify_deadline_is_pinned(self):
