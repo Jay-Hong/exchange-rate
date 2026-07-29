@@ -157,7 +157,9 @@ class LockNotHeld(RuntimeError):
 class ClaimedLease:
     """sweep이 만료로 claim한 항목. 통지·CAS 제거의 근거다.
 
-    ⚠️ `Lease`와 같은 이유로 `ws`를 담지 않는다(약한 참조 무력화).
+    ⚠️ `ws`를 담지 않는 이유는 `Lease`와 **다르다** — registry는 이 객체를 **보관하지 않고**
+    호출자에게 돌려줄 뿐이라 약한 참조 논거가 적용되지 않는다. 담지 않는 진짜 이유는 호출자가
+    이미 `ws`를 갖고 이 목록을 받기 때문이다(중복 + 수명 혼동 방지).
     """
 
     topic: str
@@ -405,8 +407,10 @@ class TopicLeaseRegistry:
         try:
             yield
         finally:
-            # ⚠️ 순서: 소유 기록을 먼저 지운다. release 뒤에 지우면 그 사이 lock을 잡은
-            #    다른 task가 **우리 기록을 보고** 통과할 수 있다.
+            # ⚠️ 근거 정정: 한때 "release 뒤에 지우면 그 사이 다른 task가 우리 기록을 보고
+            #    통과한다"고 적었는데 **성립하지 않는다** — 두 문장 사이에 `await`가 없어 끼어들
+            #    지점이 없다(실측: release 직후 문장이 대기 task보다 먼저 실행된다).
+            #    두 순서는 등가이고, 이 순서를 쓰는 이유는 "소유 해제 → lock 해제"가 읽기 쉬워서다.
             self._lock_owner.pop(ws, None)
             lock.release()
 

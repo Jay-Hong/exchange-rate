@@ -1286,15 +1286,22 @@ class TestSendAuthorizationChecksIdentity(unittest.IsolatedAsyncioTestCase):
                                      now_mono=1000.0)
         )
 
-    async def test_rebound_uid_does_not_authorize_the_captured_decision(self):
+    async def test_a_cross_uid_attempt_stops_the_captured_decision(self):
+        """⚠️ 이름 정정: 이 테스트가 잠그는 것은 **uid 축 대조**가 아니라 **tombstone**이다.
+
+        B5(d) 이후 cross-UID는 연결 종료라 `authorizes_send`가 False인 이유는 uid 불일치가 아니라
+        tombstone이다 — 구 이름(`..._rebound_uid_...`)은 존재하지 않는 계약을 광고했다.
+        uid 축 자체는 `test_uid_mismatch_alone_blocks_the_send`가 잠근다(호출부 오류 방어).
+        """
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
         captured = await self._issue(registry, cache, ws, uid="uid-A")
-        await self._issue(registry, StrictObservationCache(), ws, uid="uid-B")
+        terminated = await _apply(registry, StrictObservationCache(), ws, [TOPIC], uid="uid-B")
+        self.assertIsInstance(terminated, ConnectionTerminated)
         self.assertFalse(
             registry.authorizes_send(ws, TOPIC, uid="uid-A", lease_id=captured.lease_id,
                                      now_mono=1000.0),
-            "A로 내린 결정이 B의 소켓에서 통과한다",
+            "종료 판정 뒤에도 캡처한 결정이 통과한다",
         )
 
     async def test_uid_mismatch_alone_blocks_the_send(self):
