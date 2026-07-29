@@ -580,7 +580,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     - **정정 (2026-07-28) — "wire 오류로도 접지 않는다"는 *배선 경계*에는 적용되지 않는다.**
       금지 대상은 **광범위 `except`에 의한 조용한 세탁**이지, 타입 기반의 의도된 변환이 아니다.
       그냥 전파시키면 **더 나쁘다** — 실측: `app/main.py`의 `except Exception`이 루프를 빠져나가고
-      `finally`(:1003-1007)가 `registry.remove_websocket()`을 불러 **그 연결의 구독이 통째로 삭제**되며
+      `websocket_endpoint`의 `finally`가 `registry.remove_websocket()`을 불러 **그 연결의 구독이 통째로 삭제**되며
       클라에는 오류 프레임도 가지 않는다(§8-A "조용한 실패 금지" 위반 + C4 "registry 불변"과 정반대).
       클라의 즉시 재연결이 `retry_after`보다 빨라 storm도 오히려 조인다.
     - **단일 정책**: 검증기 = 변환 **금지**(raise) / 배선 경계 = **타입 기반** catch로 변환 **필수**
@@ -624,14 +624,14 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 - **B2 조회 경계 필터는 1차 방어** — `get_subscribers`는 만료분을 제외하되 **read-only**(즉시 삭제 금지).
   삭제까지 하면 sweep이 `reauth_required`를 보낼 근거를 잃는다.
   **소유권**: 조회·전송 경계 = *강제* / sweep = *생명주기*(통지 후 제거).
-- **B2a 전송 실패 시 registry 정책** — 현행 3곳(`topic_dispatcher.py`, `:223`, `topic_initial_snapshot.py`)이
+- **B2a 전송 실패 시 registry 정책** — 현행 3곳(`topic_dispatcher.py`의 `publish_topic`·`publish_topic_detailed`, `topic_initial_snapshot.py`의 전송 경로)이
   send 실패에서 `registry.remove_websocket(ws)` = **그 연결의 전 topic을 통지 없이 삭제 + 소켓은 유지**한다.
   1C에서 이대로 두면 **ack이 N개를 광고한 직후 snapshot 1건 실패로 N개가 사라지고**, 클라는 유효 lease를 믿고
   다음 재인증까지(최대 ~12분) 무데이터·무오류 상태가 된다 — "ack이 권위 있는 상태"(D2)가 무통지로 거짓이 된다.
   → **전송 실패는 연결이 죽은 것으로 간주하고 소켓을 닫는다**(C3의 sweep 실패 처리와 동일 정책).
   부분 삭제 후 소켓 유지 금지 — 클라가 재연결하면 ack으로 상태를 다시 확정한다.
-- **B3 상속 경로** — `get_subscribers`와 이를 호출하는 `subscriber_count`(:109)만 필터를 상속한다.
-  `subscribed_connection_count`(:99)는 `len(self._subscriptions)` 직접 반환이라 **미상속** —
+- **B3 상속 경로** — `get_subscribers`와 이를 호출하는 `subscriber_count`만 필터를 상속한다.
+  `subscribed_connection_count`는 `len(self._subscriptions)` 직접 반환이라 **미상속** —
   expiry 미반영 관찰 지표이며 **전송·인가 guard로 쓰지 말 것**.
 - **B4 연결별 state-transition lock** — send만 잠그면 부족하다. sweep이 만료 상태를 **읽은 뒤** 재인증이
   registry를 갱신하는 read-then-update 경쟁이 남는다. 같은 lock이 **UID binding · lease CAS · ack/`reauth_required` 송신 ·
@@ -756,11 +756,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     정본에 폐기된 지시를 "기록용"으로 남기면 현재형 지시로 읽힌다 — 이력은 git이 갖는다.
     ack이 전체 상태를 실어 권위를 갖는다는 요구는 purge와 무관하게 유효하며 **D2가 정본**이다.
 
-  - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS FXiApp.swift-126은 signedOut에서만 WS stop /
+  - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS `FXiApp.swift`의 signedOut 분기에서만 WS stop /
     AuthService listener의 account-switch window). 소켓이 살아 있는 채 UID만 바뀐다.
     그리고 이건 **서버 측 인가 경계**라 클라 teardown 가정에 기대면 안 된다.
 - **C2 재인증 replacement** — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다.
-  `TopicRegistry.register`가 additive union(`existing.update(topics)`, :68)이라 "accepted만 추가"하면
+  `TopicRegistry.register`가 additive union(`existing.update(topics)`)이라 "accepted만 추가"하면
   권한 잃은 이전 등록이 lease 만료까지 잔존한다.
   **이번 요청에 언급되지 않은 topic은 불변**(증분 subscribe 보존) — 단 **같은 UID 전제**이며 UID 변경 시 C1이 우선한다.
   - **구현**: `apply_subscribe`가 accepted와 **`rejected_topics`를 함께** 받는다. accepted만 받는 API로는
@@ -876,14 +876,20 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 > ⚠️ 이 절은 "감사 완료"가 아니라 **그 감사가 찾은 것의 처리 상태**다 — 4 렌즈가 놓친 것이 없다는
 > 증명은 아니다.
 
-1. ✅ **`파일:라인` 포인터 19곳 제거** — 파일 경로만 남겼다(실측으로 최소 4곳이 다른 줄을 가리켰다:
-   `app/main.py:889`→`**timings,`, `topic_initial_snapshot.py:176`→import 문 등). 심볼이 필요한
-   곳은 주변 문장이 이미 이름을 부른다.
+1. ⚠️ **`파일:라인` 포인터 — 부분 처리(완료 아님)**. `file.py:NNN` 형태 19곳은 제거했으나
+   (실측으로 최소 4곳이 다른 줄을 가리켰다: `app/main.py:889`→`**timings,`,
+   `topic_initial_snapshot.py:176`→import 문), **정규식 일괄 처리가 두 곳을 손상시켰다**
+   (`FXiApp.swift:124-126`→`.swift-126`, `topic_dispatcher.py:278-285`→`.py-285` — 범위 표기를
+   자름). 손상 2곳과 문장 안의 bare `(:NNN)` 6곳을 심볼 앵커로 복구했다.
+   ⛔ 그래도 "제거 완료"라고 적지 않는다 — 이 문서 전체를 규칙 기준으로 훑은 것이 아니라
+   패턴에 걸린 것만 처리했다. 남은 bare 참조가 더 있을 수 있다.
 2. ✅ **"만료→통지 최대 지연"의 정본을 D-const로 통일** — 세 문서에 세 값이 있었다. 정본 식은
    `(연속 skip + 1) × 주기 + (lock + notify + close)`이고 **유한 상한이 아니다**. C3·sweeper
    docstring은 그 파생으로만 서술한다.
 3. ✅ **D-const에 `LOCK_ACQUIRE_TIMEOUT_SECONDS`·`NOTIFY_TIMEOUT_SECONDS`·`CLOSE_TIMEOUT_SECONDS`
    추가** — 셋 다 위 식의 항인데 표에 없었다("미정 상태로 test-first 금지"를 상수에도 적용).
+   ⚠️ 추가하면서 기존 "notify send timeout (C3) 5s" 행을 지우지 않아 **같은 정책이 두 행에서
+   정의**됐다 — 중복 행을 제거했다(정본은 `NOTIFY_TIMEOUT_SECONDS`).
 4. ✅ **테스트 이름-단언 불일치 정정** — `..._rebound_uid_...`는 uid 축을 잠그는 것처럼 읽혔으나
    실제로는 tombstone이 이유였다. 이름·docstring을 그에 맞추고 종단 판정을 명시 단언에 추가했다.
 5. ✅ **`ClaimedLease`의 `ws` 배제 근거 재작성** — `Lease`와 같은 약한 참조 논거를 적었으나
@@ -1030,8 +1036,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | `NOTIFY_TIMEOUT_SECONDS` | **5.0s** | `reauth_required` 송신 1회 예산 |
   | `CLOSE_TIMEOUT_SECONDS` | **5.0s** | 통지 실패 후 소켓 close 1회 예산 |
   | **만료→통지 관측 지연** | (연속 skip + 1) × 주기 + (lock + notify + close) | ⛔ **유한 상한이 아니다** — lock 획득에 공정성·aging이 없어 연속 skip에 상한이 없다(C3). 여기가 **정본**이고, C3·sweeper docstring은 이 식의 파생으로만 서술한다. 전송 강제는 B1이 지되 그건 **판정** 상한이다(§B5(e)) |
-  | notify send timeout (C3) | **5s** | 초과 시 소켓 정리(B2a와 동일 정책) |
-  | lock 안 I/O timeout (B5c) | **5s** | 역압 클라가 lock을 물지 못하게 |
+  | `ACK_TIMEOUT_SECONDS` | **5.0s** | `subscription_ack` 송신 1회 예산. B5(c) "lock 안 I/O에는 timeout 필수"의 구현체다 — 역압 클라가 lock을 물지 못하게. ⛔ `< 10`(클라 ack timeout)이 "클라가 먼저 포기하지 않는다"를 **함의하지 않는다**: 클라의 10초는 요청→ack **전체**를 재는데 그 앞에 상한 없는 lock 대기가 있다 |
   | `retry_after_seconds` | 정수 초, **1~30** | 서버가 산출해 전송. 클라는 C4 공식으로 clamp |
   값은 조정 가능하지만 **테스트는 이 값을 기대값으로 쓴다**.
 
@@ -1061,7 +1066,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 
 - **E1 capability flag 분리 + 무토큰 subscribe 처리 (중간 상태 정의)**
   - ⚠️ **현행 코드 정정**: `TOPIC_DISPATCHER_ENABLED=true`면 무토큰 subscribe는 무시가 아니라
-    **`registry.register()` + snapshot 전송**된다(topic_dispatcher.py-285 — `id_token`/`request_id` 검사 없음).
+    **`registry.register()` + snapshot 전송**된다(`topic_dispatcher.py`의 `subscribe` 분기 — `id_token`/`request_id` 검사 없음).
     현행 iOS도 무토큰이다(WebSocketService.swift, payload = `{type, topics}`). 구 문서의
     "구형 무인증 메시지만 silent-ignore로 남긴다"는 **오서술**이었다.
   - **인증 강제 ON**: `id_token` 없는 subscribe는 **등록하지 않고** `subscription_error`(`invalid_token`)를 보낸다.
@@ -1164,7 +1169,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 
 - `subscribedTopics` 단일 Set(WebSocketService.swift)을 **desired / pending request / accepted**로 분리.
   accepted가 아닌 topic의 snapshot은 무시(현재는 revoke·unsubscribe 후 늦게 온 snapshot이 그대로 적용된다).
-- **batch subscribe** — `resendSubscriptions`(:185)가 topic마다 개별 전송한다. 연결 시 desired 전체를 **한 요청**으로
+- **batch subscribe** — `resendSubscriptions`가 topic마다 개별 전송한다. 연결 시 desired 전체를 **한 요청**으로
   보내고 이후 KRX 변화만 증분 처리(토큰 검증·premium 확인·ack timer·snapshot 작업의 4중 복제 제거, D1 startup 목표와 정합).
 - **토큰 복구** — `subscription_error.invalid_token`에서 **1B provider의 forced refresh를 single-flight로 1회**만 수행하고
   **새 request_id**로 재전송. 두 번째 거부는 재시도하지 않는다. 계정전환·`connectionGeneration` 변경 이후 도착한 ack은 무시.
