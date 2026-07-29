@@ -129,6 +129,80 @@ ACK_TIMEOUT_SECONDS = 5.0
 CLIENT_ACK_TIMEOUT_SECONDS = 10.0
 
 
+@dataclass(frozen=True)
+class SubscriberGrant:
+    """fanout 1회분의 **인가 근거** — 조회와 같은 스냅샷에서 identity를 함께 나른다.
+
+    ⛔ 이게 없으면 §B1 재검증이 tautology가 된다: 전송 직전에 registry를 **다시 조회**해
+    identity를 얻으면 그 사이 교체된 lease를 캡처해 항상 통과한다(실측 결함 — 같은 UID
+    재인증 L1→L2). grant는 **조회 시점의** `(uid, lease_id)`를 고정한다.
+
+    ⚠️ `ws`를 강하게 잡지만 **반환값 전용**이다 — registry에 저장하지 않는다(`Lease`가 `ws`를
+    담지 않기로 한 것과 같은 근거: 약한 참조 무력화).
+
+    `uid`/`lease_id`가 둘 다 None이면 **무토큰 등록**(§E1 중간 상태)이다. 짝 불변식으로
+    "반쪽 grant"라는 불가능한 상태를 생성 시점에 거부한다.
+    """
+
+    ws: object
+    topic: str
+    uid: Optional[str]
+    lease_id: Optional[str]
+
+    def __post_init__(self) -> None:
+        if (self.uid is None) != (self.lease_id is None):
+            raise ValueError(
+                "uid와 lease_id는 둘 다 있거나 둘 다 None이어야 한다 — "
+                "반쪽 grant는 인가 판정에서 어느 축을 믿을지 정할 수 없다"
+            )
+
+
+MAX_UNLEASED_TOPICS = 8
+"""§D7 — 한 무토큰 연결이 보유할 수 있는 topic 수 상한(누적 기준).
+
+⚠️ §D5의 **1단계는 payload validation**이지 인증이 아니다 — 토큰 유무와 무관하게 같은 wire
+메시지에 적용되고 D7 상한의 1차 소유도 거기다. 여기서 무토큰 경로에만 거는 이유는 §C-API 11이
+요구하는 "최종 방어선"을 leased 경로까지 넓히는 것이 이번 슬라이스 범위 밖이기 때문이다.
+⛔ 따라서 "registry가 유일한 방어선"이 **아니다** — 실제로 먼저 걸리는 것은 전송 계층 상한
+(`--ws-max-size 16384`)이고, 나머지 D7 축(빈 topics·request_id 형식 등)은 여기서 안 본다.
+"""
+
+MAX_TOPIC_LENGTH = 64
+"""§D7 — topic 문자열 길이 상한."""
+
+
+@dataclass(frozen=True)
+class UnleasedApplied:
+    """무토큰 등록/해제 성공 — 그 연결의 **최종** 무토큰 구독 전체(정렬)."""
+
+    ws: object
+    topics: tuple
+
+
+UnleasedResult = Union["UnleasedApplied", "Rejected", "ConnectionTerminated"]
+"""무토큰 세계 전용 결과 union.
+
+⛔ `TransitionResult`(정확히 4종)에 섞지 않는다 — 그 union은 subscribe/unsubscribe 호출자의
+분기 계약이고 구조 테스트가 잠그고 있다. 종단·거부는 **행동이 같으므로 재사용**한다.
+"""
+
+
+class UnleasedRegistrationDisabled(RuntimeError):
+    """강제 모드인데 무토큰 등록을 시도했다 = 배선 버그.
+
+    ⛔ 조용한 무시가 아니라 예외인 이유: 조용히 무시하면 "강제 ON인데 등록이 안 됐다"가
+    정상 흐름과 구분되지 않아, 배선이 그 경로를 타고 있다는 사실이 영영 드러나지 않는다.
+    """
+
+
+class UnleasedRoutingError(RuntimeError):
+    """두 세계 간 오라우팅 — leased 연결에 무토큰 API를 부르거나 그 반대.
+
+    ⛔ 조용한 no-op이면 **거짓 ack + 데이터 계속**이 된다(실측: 현행 `apply_unsubscribe`는
+    무토큰 ws에 대해 `removed=()`인 성공 ack을 낸다).
+    """
+
+
 class ReentrantRegistryCall(RuntimeError):
     """`send_ack` 안에서 registry를 다시 불렀다 — `asyncio.Lock`은 재진입 불가다.
 
@@ -336,7 +410,34 @@ TransitionResult = Union[Applied, Discarded, Rejected, ConnectionTerminated]
 class TopicLeaseRegistry:
     """연결별 lock 아래에서 lease를 발급·보관한다."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, unleased_registration=None) -> None:
+        """`unleased_registration=None`이 **기본값이자 안전한 끝**(strict)이다.
+
+        frozenset을 주면 §E1 enforcement-OFF 중간 상태가 되고 **그 집합이 곧 topic allowlist**다 —
+        allowlist 없이 모드를 켜는 것이 표현 불가능하다.
+
+        ⛔ 임의 집합을 그대로 받지 않는다. per-user 판정이 필요한 topic(KRX)이 무토큰 세계에
+        들어가면 그게 곧 **entitlement 우회**이므로, 생성자가
+        `unleased_registration_topics()`(= supported − per_user_gated)의 **부분집합**임을 강제한다.
+        부분집합을 허용하는 이유는 단계적 rollout(예: fx만 먼저)을 막지 않기 위해서다.
+        """
+        if unleased_registration is not None:
+            from app.topic_initial_snapshot import unleased_registration_topics
+
+            allowed = unleased_registration_topics()
+            requested = frozenset(unleased_registration)
+            if not requested:
+                raise ValueError(
+                    "빈 allowlist로 무토큰 등록을 켤 수 없다 — 켰는데 아무것도 등록되지 않는 "
+                    "상태는 strict와 구분되지 않아 배선 오류를 숨긴다"
+                )
+            forbidden = requested - allowed
+            if forbidden:
+                raise ValueError(
+                    f"per-user 판정이 필요한 topic을 무토큰 allowlist에 넣을 수 없다: "
+                    f"{sorted(forbidden)} (허용 집합: {sorted(allowed)})"
+                )
+            unleased_registration = requested
         # ⚠️ **약한 참조로 연결 객체를 직접 키에 쓴다.** `id(ws)`를 키로 쓰면 연결이 GC된 뒤
         # 그 id가 재사용되어 **새 연결이 남의 UID 바인딩·lease를 물려받는다** — handler가
         # 비정상 종료해 `remove_websocket`이 안 불린 경우 실제로 도달 가능하다.
@@ -351,6 +452,18 @@ class TopicLeaseRegistry:
         self._closed: "weakref.WeakSet" = weakref.WeakSet()
         # ws -> {topic: lease_id}. §C3 claim-then-notify — **제거 전이라도** 인가에서 제외된다.
         self._claimed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+        # ws -> frozenset[str]. **lease 없는 등록**(§E1 중간 상태). `_active`/`_uids`와 **배타**다.
+        # strict 모드면 `None` — "비어 있다"와 "있을 수 없다"를 자료형으로 가른다.
+        # 약한 참조여야 한다: 강하면 `Lease`가 `ws`를 담지 않기로 한 근거가 그대로 무너진다.
+        # 값이 frozenset인 이유 — 갱신이 항상 **교체**라 별칭·순회 중 변형 위험이 없다.
+        self._unleased = (
+            weakref.WeakKeyDictionary() if unleased_registration is not None else None
+        )
+        # 모드의 **단일 진실 소스**: permissive ⟺ not None. 동시에 topic allowlist다.
+        # `__init__`에서 1회 대입하고 setter를 두지 않는다 → 살아 있는 registry의 모드 전환이
+        # 표현 불가능하다. flip은 프로세스 교체이고(config는 import-time getenv 1회 + env 변경에
+        # `--force-recreate` 필요) 그때 무토큰 등록은 **전부 소멸**한다.
+        self._unleased_allowlist = unleased_registration
         # ws -> weakref(lock을 쥔 task). `Lock.locked()`는 **누가** 쥐었는지 모르므로
         # (다른 task가 쥐어도 True — 실측으로 §B4 우회 성공) 소유자를 따로 기록한다.
         # ⚠️ **약한 참조**다 — task 프레임이 `ws`를 잡으므로 강하게 담으면 키가 되살아난다.
@@ -474,7 +587,7 @@ class TopicLeaseRegistry:
                 f"topic이 accepted와 rejected에 동시에 있다: {sorted(contradictory)}"
             )
         async with self.hold_connection_lock(ws):
-            if ws in self._closed:
+            if self._tombstoned(ws):
                 # teardown이 끝났거나 앞선 전이가 연결을 죽인 상태다. 되살리면 "끊긴 소켓에
                 # 살아 있는 구독" 또는 "서버가 버린 lease를 클라가 가졌다고 믿는 상태"가 생긴다.
                 # ⚠️ 호출자가 아직 안 닫았을 수 있으므로 **종단 결과**로 답한다(close 재촉).
@@ -486,6 +599,13 @@ class TopicLeaseRegistry:
             #    의미만 정하고 *적용할지*는 정하지 않아, 지연 도착한 구 UID subscribe(C4 retry,
             #    구 토큰은 아직 유효)가 새 UID의 구독을 purge하고 되돌려 놓을 수 있었다 —
             #    거부 정책이면 무해했을 요청이 purge에서는 **파괴적**이었다.
+            if self._unleased is not None and self._unleased.get(ws):
+                # ⛔ 한 소켓은 leased **또는** unauthenticated 하나다. 전환하려면 재연결한다.
+                #    lock을 잡은 뒤 판정하는 것이 요점 — `apply_subscribe`는 ack await 동안
+                #    lock을 쥐고 있으므로, 그 창에 무토큰 등록이 끼어들 수 없다.
+                raise UnleasedRoutingError(
+                    "무토큰 등록된 연결에 leased subscribe를 부를 수 없다 — 재연결이 필요하다"
+                )
             bound = self._uids.get(ws)
             if bound is not None and bound != uid:
                 return self._terminate_locked(ws, "reconnect_required")
@@ -723,7 +843,7 @@ class TopicLeaseRegistry:
         걸러지는 **만료된** lease다. 그건 열거 API(C-API 1)의 몫이고, 그 슬라이스가 자기
         접근자를 갖는다. **이 메서드를 만료 무시로 되돌려 sweep에 재사용하지 말 것.**
         """
-        if ws in self._closed:
+        if self._tombstoned(ws):
             return None
         lease = self._active.get(ws, {}).get(topic)
         if lease is None:
@@ -751,6 +871,77 @@ class TopicLeaseRegistry:
         if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
             return None
         return lease
+
+    def subscribers(self, topic: str, *, now_mono: float) -> tuple:
+        """§B2 조회 경계 + §C-API 2 — 이 topic을 지금 받을 자격이 있는 연결 전부.
+
+        **생존 규칙을 여기서 재구현하지 않는다** — 후보를 `authorized_lease`에 위임한다.
+        상속이 아니라 **동일 함수**라 두 답이 갈릴 자리가 없다.
+
+        ⛔ **tuple이 계약이다**(generator 금지). 호출자는 이 결과를 `await ws.send_json` 사이에서
+        소비하는데, 그 창에 다른 연결의 커밋(`self._active[ws] = final` — 신규 키 삽입)이 끼면
+        지연 순회가 `RuntimeError: dictionary changed size during iteration`으로 깨진다.
+        `connections_snapshot()`이 같은 이유로 스냅샷인 것과 같은 규율이다.
+        ⚠️ 스냅샷은 "그때 자격이 있었다"만 말한다 — **"지금도 보내도 된다"는 `authorizes_grant`**가
+        답한다. 둘은 한 계약의 두 절반이다.
+
+        ⚠️ 구현은 `_active` **전수 스캔**이고 topic→ws 역인덱스를 두지 않는다(§C-API 2 구현 형태
+        결정). 인덱스는 같은 사실의 두 번째 표현이라 동기화 지점이 늘고 어긋남이 조용하며,
+        만료가 per-lease·시간 의존이라 인덱스가 흡수하지도 못한다. legacy `get_subscribers`도
+        이미 전수 스캔이다.
+        """
+        grants = []
+        for ws, leases in self._active.items():
+            if topic not in leases:
+                continue
+            lease = self.authorized_lease(ws, topic, now_mono=now_mono)
+            if lease is None:
+                continue
+            grants.append(
+                SubscriberGrant(ws=ws, topic=topic, uid=lease.uid, lease_id=lease.lease_id)
+            )
+        if self._unleased is not None:
+            # §E1 중간 상태 — 무토큰 등록도 fanout 대상이다(아니면 flip이 all-or-nothing이 된다).
+            for ws in list(self._unleased.keys()):
+                if self._alive_unleased(ws, topic):
+                    grants.append(SubscriberGrant(ws=ws, topic=topic, uid=None, lease_id=None))
+        return tuple(grants)
+
+    def subscriber_count(self, topic: str, *, now_mono: float) -> int:
+        """§B3의 **상속하는 쪽** — publisher guard.
+
+        본문이 `len(self.subscribers(...))` 한 줄인 것이 요점이다: 상속을 docstring 약속이 아니라
+        **호출 관계**로 만들어 두 답이 갈릴 자리를 없앤다(legacy도 `len(get_subscribers(topic))`
+        이었으므로 계승이다).
+        """
+        return len(self.subscribers(topic, now_mono=now_mono))
+
+    def grant_for(self, ws, topic: str, *, now_mono: float) -> Optional[SubscriberGrant]:
+        """단일 `(ws, topic)` 조회 — snapshot 경로처럼 전수 스캔이 부적절한 곳이 쓴다."""
+        lease = self.authorized_lease(ws, topic, now_mono=now_mono)
+        if lease is None:
+            if self._alive_unleased(ws, topic):
+                return SubscriberGrant(ws=ws, topic=topic, uid=None, lease_id=None)
+            return None
+        return SubscriberGrant(ws=ws, topic=topic, uid=lease.uid, lease_id=lease.lease_id)
+
+    def authorizes_grant(self, grant: SubscriberGrant, *, now_mono: float) -> bool:
+        """§B1 전송 직전 인가의 grant 형식 — `authorizes_send`에 **위임**한다.
+
+        ⛔ 생존 규칙을 여기서 다시 쓰면 §B2 필터와 두 곳이 갈린다(AST trip-wire로 잠금).
+        무토큰 grant(`lease_id is None`)는 **두 갈래**다:
+        - strict(`_unleased is None`) → 항상 **False**. 그런 grant는 외부 유입이거나 배선
+          오류이므로 fail-closed가 맞다.
+        - permissive → `_alive_unleased`(tombstone + 현재 멤버십)에 위임. **True일 수 있다** —
+          §E1 중간 상태에서 무토큰 등록도 fanout 대상이기 때문이다.
+        ⛔ "무토큰은 §B1에서 어차피 False"로 읽지 말 것 — 배선이 그렇게 읽고 자기 쪽 판정을
+        하나 더 만들면 이 함수가 위임으로 없애려던 이중 판정이 그대로 부활한다.
+        """
+        if grant.lease_id is None or grant.uid is None:
+            return self._alive_unleased(grant.ws, grant.topic)
+        return self.authorizes_send(
+            grant.ws, grant.topic, uid=grant.uid, lease_id=grant.lease_id, now_mono=now_mono
+        )
 
     def authorizes_send(
         self, ws, topic: str, *, uid: str, lease_id: str, now_mono: float
@@ -793,6 +984,61 @@ class TopicLeaseRegistry:
         """등록됐지만 아직 활성화되지 않았는가 (fence 순서 검증용)."""
         return topic in self._pending.get(ws, {})
 
+    def _is_leased_world(self, ws) -> bool:
+        """이 연결이 **leased 세계**인가.
+
+        ⚠️ `_active`의 비어 있음만 보면 **틀린다** — 전 topic을 해제해도 UID 바인딩은 연결 수명
+        동안 유지되고(실측: `bound_uid`가 남고 `_active[ws]`는 빈 dict), 그 연결에 무토큰 등록을
+        허용하면 한 소켓이 양쪽 세계에 존재하게 된다.
+        """
+        return ws in self._uids or bool(self._active.get(ws))
+
+    def registration_kind(self, ws) -> str:
+        """`"leased"` | `"unauthenticated"` | `"none"` — 배선의 **라우팅 입력**.
+
+        unsubscribe는 토큰을 싣지 않으므로(§D8) 배선이 wire만 보고 두 세계를 구분할 수 없다.
+        ⛔ 양쪽에 동시에 있으면 우선순위를 정하지 않고 **폭발한다** — 그 상태 자체가 불변식
+        위반이고, 조용히 한쪽을 고르면 어느 쪽 규칙이 적용됐는지 영영 알 수 없다.
+        """
+        leased = self._is_leased_world(ws)
+        unleased = bool(self._unleased.get(ws)) if self._unleased is not None else False
+        if leased and unleased:
+            raise UnleasedRoutingError(
+                "한 연결이 leased·unauthenticated 양쪽에 존재한다 — 불변식 위반"
+            )
+        if leased:
+            return "leased"
+        return "unauthenticated" if unleased else "none"
+
+    def _alive_unleased(self, ws, topic: str) -> bool:
+        """무토큰 등록의 **생존 술어** — tombstone + 현재 멤버십.
+
+        만료 개념이 없다(§E1 "전원 무기한"). 멤버십을 보는 이유는 이미 발급된 grant가
+        `apply_unleased_unsubscribe` 뒤에도 통과하면 끈 데이터가 계속 흐르기 때문이다.
+        """
+        if self._unleased is None or self._tombstoned(ws):
+            return False
+        return topic in self._unleased.get(ws, frozenset())
+
+    def unleased_registration_enabled(self) -> bool:
+        """모드 조회. ⚠️ 인가 판정에 쓰지 말 것 — 라우팅·진단용이다."""
+        return self._unleased_allowlist is not None
+
+    def unleased_topics_for_test(self, ws) -> tuple:
+        """상태 위생 검증용(인가 판정 금지) — `topics_for_test`와 같은 부류."""
+        if self._unleased is None:
+            return ()
+        return tuple(sorted(self._unleased.get(ws, frozenset())))
+
+    def _tombstoned(self, ws) -> bool:
+        """`_closed` **읽기**의 단일 지점.
+
+        ⚠️ 쓰기(`_closed.add`)는 여러 경로가 내리는 게 맞다 — 종단 판정의 출처는 하나가 아니다.
+        좁히는 것은 **읽기**다: 무토큰 세계 분기가 생기면 인라인 판정이 하나 더 늘고, 그때부터
+        두 곳이 갈릴 수 있다. `_claimed`/`_is_claimed`가 같은 이유로 이미 좁혀져 있다.
+        """
+        return ws in self._closed
+
     def bound_uid(self, ws) -> Optional[str]:
         """현재 바인딩된 UID — **기록**이다.
 
@@ -800,6 +1046,24 @@ class TopicLeaseRegistry:
         인가는 `authorized_lease`(만료+tombstone fail-closed)를 거친다.
         """
         return self._uids.get(ws)
+
+    def connections_with_subscriptions(self) -> int:
+        """§B3의 **상속하지 않는 쪽** — 구독을 가진 연결 수(만료·claim·tombstone 무관).
+
+        ⛔ **topic도 시각도 받지 않는다.** legacy `subscribed_connection_count`의 오용은
+        "틀린 값"이 아니라 **"틀린 질문"**이었다 — 단말이 `fx:usd-krw`만 구독해도 1이라
+        `usdt:krw` publisher가 오판했다. arity가 per-topic guard 사용을 불가능하게 한다.
+        여기에 만료를 반영하고 싶어지면 **시그니처를 바꿔야 하고**, 그 변경이 리뷰에 걸린다.
+
+        ⚠️ `len(self._active)`이면 **틀린다**: 전 topic을 해제한 연결은 빈 dict로 남는다
+        (`apply_unsubscribe`가 `final`을 그대로 대입). 비어 있지 않은 항목만 센다.
+        ⚠️ `connection_count()`(= UID 바인딩 수)와 **같은 값이 아니고, 다른 것이 정상**이다 —
+        전 topic을 해제해도 바인딩은 연결 수명 동안 유지된다(실측).
+        """
+        leased = sum(1 for leases in self._active.values() if leases)
+        if self._unleased is None:
+            return leased
+        return leased + sum(1 for topics in self._unleased.values() if topics)
 
     def connection_count(self) -> int:
         return len(self._uids)
@@ -840,17 +1104,28 @@ class TopicLeaseRegistry:
         idempotent다 — 원래 없던 topic은 조용히 넘어가고 `removed`에도 넣지 않는다(상태 델타).
         """
         async with self.hold_connection_lock(ws):   # 재진입 가드는 이 CM이 진입부에서 한다
+            if self._unleased is not None and self._unleased.get(ws):
+                # ⛔ 조용한 no-op이면 **거짓 ack + 데이터 계속**이다(실측: 현행은 `removed=()`인
+                #    성공 ack을 낸다). 무토큰 세계는 `apply_unleased_unsubscribe`가 처리한다.
+                raise UnleasedRoutingError(
+                    "무토큰 등록된 연결에 leased unsubscribe를 부를 수 없다"
+                )
             current = self._active.get(ws, {})
             departing = {t for t in topics if t in current}
             final = {t: l for t, l in current.items() if t not in departing}
             removed = tuple(sorted(departing))
 
             # 1) 제거를 **먼저** 커밋한다(위 순서 규칙).
-            self._active[ws] = final
+            # ⚠️ 원래 항목이 없고 지울 것도 없으면 **대입하지 않는다** — 빈 dict를 심으면
+            #    그 연결이 `connections_snapshot()`에 등장해 sweep이 매 주기 방문한다
+            #    (실측: 구독한 적 없는 ws에 unsubscribe → `_active[ws] = {}` 생성).
+            #    §D8 idempotency는 유지된다 — 결과는 여전히 `Applied(removed=())`다.
+            if final or ws in self._active:
+                self._active[ws] = final
             for topic in departing:
                 self._drop_claim_locked(ws, topic)
 
-            if ws in self._closed:
+            if self._tombstoned(ws):
                 # ⛔ 제거는 이미 했다 — tombstone에서 거부하면 D8이 제거를 보장해야 하는 바로 그
                 #    실패 경로에서 축소가 막힌다. ack만 생략하고 종단으로 답한다(소켓이 죽었다).
                 return ConnectionTerminated(reason="connection_closed")
@@ -878,6 +1153,68 @@ class TopicLeaseRegistry:
             if confirmed is not True:
                 return self._terminate_locked(ws, "ack_not_confirmed")
             return Applied(ws=ws, ack=ack)
+
+    async def apply_unleased_subscribe(self, *, ws, topics) -> "UnleasedResult":
+        """§E1 중간 상태 — **lease 없는** 등록. ack 없음(무토큰 클라는 `request_id`가 없다).
+
+        ⛔ **같은 연결 lock을 탄다.** 안 잡으면 leased subscribe가 ack을 기다리는 창(= suspension
+        point)에 끼어들어 한 소켓이 양쪽 세계에 존재하게 된다 — 단일 event loop라는 사실로는
+        막히지 않는다.
+
+        allowlist 밖 topic이 하나라도 섞이면 **전체를 원자적으로 거부**한다(부분 커밋 금지) —
+        부분 커밋은 클라가 무엇이 등록됐는지 알 수 없는 상태를 만들고, 여기엔 그걸 알려줄 ack이
+        없다.
+        """
+        if self._unleased is None:
+            raise UnleasedRegistrationDisabled(
+                "강제 모드에서는 무토큰 등록이 존재할 수 없다 — 배선이 이 경로를 타면 안 된다"
+            )
+        async with self.hold_connection_lock(ws):
+            if self._tombstoned(ws):
+                return ConnectionTerminated(reason="connection_closed")
+            if self._is_leased_world(ws):
+                raise UnleasedRoutingError(
+                    "leased 연결에 무토큰 등록을 부를 수 없다 — 재연결이 필요하다"
+                )
+            # §D7 중복은 first-occurrence 정규화. dict.fromkeys가 순서를 보존하면서 O(n)이다
+            # (list `in`은 O(n²)이라 distinct가 많은 무인증 메시지에서 lock을 쥔 채 loop를 막는다).
+            requested = list(dict.fromkeys(topics))
+            if any(len(topic) > MAX_TOPIC_LENGTH for topic in requested):
+                return Rejected(reason="request_too_large")
+            if any(topic not in self._unleased_allowlist for topic in requested):
+                return Rejected(reason="authentication_required")
+            final = self._unleased.get(ws, frozenset()) | frozenset(requested)
+            if len(final) > MAX_UNLEASED_TOPICS:
+                return Rejected(reason="request_too_large")
+            # ⚠️ U1과 대칭 — 빈 요청이 빈 항목을 심으면 그 연결이 매 fanout의 `_unleased` 순회에
+            #    끼고 "두 세계 배타" 서술과도 눈으로 안 맞는다(`_active` 쪽에서 방금 없앤 패턴).
+            if final or ws in self._unleased:
+                self._unleased[ws] = final
+            return UnleasedApplied(ws=ws, topics=tuple(sorted(final)))
+
+    async def apply_unleased_unsubscribe(self, *, ws, topics) -> "UnleasedResult":
+        """중간 상태의 구독 해제 — **모드와 무관하게 항상 제거**한다(§D8 fail-open과 같은 방향).
+
+        ⚠️ `send_ack`을 **인자로도 받지 않는다** — 이 세계에는 ack 프로토콜이 없다.
+        tombstone이어도 제거는 수행하고 종단으로 답한다(§D8의 제거→보고 순서).
+        """
+        async with self.hold_connection_lock(ws):
+            if self._is_leased_world(ws):
+                raise UnleasedRoutingError(
+                    "leased 연결에 무토큰 unsubscribe를 부를 수 없다"
+                )
+            if self._unleased is None:
+                remaining = frozenset()
+            else:
+                current = self._unleased.get(ws, frozenset())
+                remaining = current - frozenset(topics)
+                if remaining:
+                    self._unleased[ws] = remaining
+                elif ws in self._unleased:
+                    del self._unleased[ws]
+            if self._tombstoned(ws):
+                return ConnectionTerminated(reason="connection_closed")
+            return UnleasedApplied(ws=ws, topics=tuple(sorted(remaining)))
 
     def topics_for_test(self, ws) -> tuple:
         """활성 topic 이름 목록 — tombstone과 무관한 **상태 위생** 검증용(인가에 쓰지 말 것)."""
@@ -997,4 +1334,6 @@ class TopicLeaseRegistry:
         self._pending.pop(ws, None)
         self._uids.pop(ws, None)
         self._claimed.pop(ws, None)
+        if self._unleased is not None:
+            self._unleased.pop(ws, None)
         self._closed.add(ws)

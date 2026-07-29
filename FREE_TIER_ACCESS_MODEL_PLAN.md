@@ -809,8 +809,21 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
 1. ~~**연결·lease 열거** (C3)~~ — **닫힘**. `connections_snapshot()`이 live view가 아니라
    **스냅샷**을 준다(순회 중 추가·제거·GC로 깨지지 않고, 그 사이 사라진 연결은 다음 주기가 본다).
-2. **topic→구독자 인덱스** (B2/B3) — registry에 topic 키 구조가 없어 `get_subscribers`의 만료 필터가
+2. ~~**topic 조회 API** (B2/B3)~~ — **닫힘(2026-07-29 land)**. `subscribers(topic, *, now_mono)` /
+   `subscriber_count`(= `len(subscribers(...))`, 상속) / `connections_with_subscriptions()`
+   (topic·시각 미수용, 미상속) / `grant_for` / `authorizes_grant`. 아래는 그때의 문제 서술이다 —
+   registry에 topic으로 묻는 진입점이 없어 `get_subscribers`의 만료 필터가
    놓일 자리가 없다. B3가 요구하는 **비대칭 상속**(`subscriber_count`는 상속 / `subscribed_connection_count`는 미상속)도 진술 불가.
+   ⚠️ **구현 형태 결정 (2026-07-29)**: 요구의 실체는 "만료 필터가 놓일 자리 + B3 비대칭을 진술할 수 있는
+   API"이고, **현 구현은 `_active` 전수 스캔**이다 — topic→ws 역인덱스를 **만들지 않는다**.
+   근거: (i) 인덱스는 같은 사실의 **두 번째 표현**이라 동기화 지점(subscribe 커밋[dict 통째 교체]·
+   unsubscribe·`remove_locked`·`teardown_locked`·§C2 eviction·GC)이 생기고 어긋남이 **데이터 0·오류 0**으로
+   조용하다. (ii) 만료는 per-lease·시간 의존이라 인덱스가 흡수하지 못해 후보마다 `authorized_lease`가
+   여전히 돈다 — 인덱스가 아끼는 것은 비구독 연결의 상수 시간뿐이다. (iii) legacy `get_subscribers`도
+   **이미 전수 스캔**이라 성능 프로필이 바뀌지 않는다(배선 회귀 시 원인이 갈리지 않는다).
+   ⛔ 성능 수치는 근거로 쓰지 않았다 — 후보 설계들의 벤치가 4배 엇갈렸고 재측정하지 않았다.
+   **번복 조건**: K ≥ 2000 ∧ 구독률 낮음 ∧ 질의율 높음이 **측정**될 때 별 슬라이스로 인덱스 도입.
+   API 모양이 topic 질의라 저장을 바꿔도 호출자는 안 바뀐다(되돌리는 비용이 registry 내부에 갇힌다).
 3. ~~**`claimed_expired` 상태 + 조회 즉시 제외** (C3)~~ — **닫힘**. `claim_expired_locked`가
    원자적으로 표식을 남기고, 표식이 있는 topic은 `authorized_lease`·`authorizes_send`에서 즉시
    빠진다. ⚠️ 만료 시각만으로는 못 막는다 — 인가 판정은 **호출자가 넘긴 `now`**를 쓰므로 통지 중
@@ -860,11 +873,15 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 8. **ack의 per-topic 거부 사유** (§8-B/D2) — `operation`은 registry가 싣는다(D8과 함께 닫힘).
    남은 것은 `rejected_topics`의 사유 문자열로, 지금은 caller가 조립한다 — "lock 아래 단일 snapshot"이
    그만큼만 성립한다.
-9. **lease 없는 등록 모드** (E1 중간 상태) — 무토큰 subscribe를 legacy `register()`로 우회시키면 live 대상
-   집합이 둘이 되고, flip이 E1가 피하려던 all-or-nothing 사건이 된다.
+9. ~~**lease 없는 등록 모드** (E1 중간 상태)~~ — **registry API 닫힘(2026-07-29 land) / 배선 미결**.
+   `__init__(*, unleased_registration=frozenset|None)` 1회 확정 + `apply_unleased_subscribe`/
+   `apply_unleased_unsubscribe` + `registration_kind` 3-state. 무토큰 subscribe를 legacy
+   `register()`로 우회시키면 live 대상 집합이 둘이 되고, flip이 E1가 피하려던 all-or-nothing
+   사건이 된다 — 그래서 같은 registry 안의 별도 세계로 지었다. **배선이 이 API를 쓰는 것은 다음 슬라이스.**
 10. **epoch 인덱스** — `Lease.epoch`은 저장만 되고 **한 번도 읽히지 않는다**. uid→lease 인덱스가 없어
     "epoch N의 lease 전부 revoke"를 실행할 수 없다(태그가 현재 장식이다).
-11. **D7 상한의 마지막 방어** — registry 경계에서 미강제(50 topic 요청도 수락된다). 1단계 소유가 맞지만
+11. **D7 상한의 마지막 방어 (leased 경로 한정, 축소됨)** — ⚠️ 무토큰 경로는 2026-07-29에 registry가
+    강제한다(topic ≤8 누적 / 문자열 ≤64자). **leased 경로는 여전히 미강제**다. 1단계 소유가 맞지만
     registry가 최종 방어선이다.
 12. **두 채널을 모두 close로 라우팅** (B5(b) 배선 의무) — registry는 종단 신호를 결과
     (`ConnectionTerminated`)와 예외(`ConnectionTerminatedError`) **양쪽**에 싣는다. task-spawn
@@ -966,12 +983,12 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 **결정 (2026-07-29)** — 위 1·2를 확정한다.
 
 - **(1) fanout 소유권 = lease registry 단일 진실 소스.** legacy `register()`를 제거하고
-  publish가 lease registry의 topic 역인덱스(C-API 2)에 묻는다. 근거: 대안(legacy 권위 +
+  publish가 lease registry의 topic 조회 API(C-API 2)에 묻는다. 근거: 대안(legacy 권위 +
   per-ws 필터)은 중간 상태에서 "무바인딩이면 통과"라는 **fail-open 판정**을 요구하는데,
   그 신호원 `bound_uid`는 tombstone을 보지 않아 docstring이 인가에 쓰지 말라고 못박는다.
   또 제거 경로가 `remove_websocket`(legacy)과 tombstone 둘로 갈려 §B2a·finally·§C2가
   서로 다른 집합을 건드리게 된다. 단일 소스면 `teardown_locked` 하나로 수렴한다.
-  ⛔ **대가**: C-API 2(topic 역인덱스)와 **C-API 9(lease 없는 등록 모드)를 같은 설계에서**
+  ⛔ **대가**: C-API 2(topic 조회 API)와 **C-API 9(lease 없는 등록 모드)를 같은 설계에서**
   지어야 한다 — 단일 소스에서는 E1 enforcement-off 중간 상태가 registry의 새 모드 없이는
   성립하지 않는다. 이 둘을 분리해 결정하면 서로 모순되는 답이 나온다.
 - **(2) 클라 subscribe 요청 단위 = 배칭(1 메시지 N topic).** registry의 "1 요청 = lock 1회 =
@@ -1174,6 +1191,17 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     무토큰 subscribe는 **기존대로 등록**되고 lease·sweep·`reauth_required`가 **돌지 않는다**(전원 무기한).
     토큰이 실린 subscribe만 인증·lease 경로를 탄다. 이래야 dormant→flip이 all-or-nothing이 아니게 된다.
   - **강제 전환 시점**에 구 클라(무토큰)는 topic을 잃는다 → **Stage B 유예(S4)와 같은 시점**에 묶어야 한다.
+  - ⛔ **모드는 프로세스 고정이고 연결은 sticky다** (2026-07-29 확정). `app/config.py`는 import 시
+    `getenv` 1회이고 env 변경에 `--force-recreate`가 필요하므로 **in-process flip 경로가 없다**.
+    registry는 모드를 **생성자에서 1회** 확정하고 setter를 두지 않는다 → 살아 있는 registry의 모드
+    전환이 표현 불가능하다. 따라서 flip = 새 프로세스 = 무토큰 등록 **전부 소멸**이고, 우회로가
+    flip을 건너 살아남는 경로가 구조적으로 없다(drain·reap primitive 불요 — 호출자 없는 기계장치가 된다).
+    한 연결은 leased **또는** unauthenticated 하나다. ⚠️ 다만 **양방향 대칭이 아니다**(실측):
+    `leased → unauthenticated`는 UID 바인딩이 연결 수명 동안 남아(전 topic을 해제해도 유지)
+    **영구 차단**되지만, `unauthenticated → leased`는 무토큰 등록이 **0이 되면** 그 연결이
+    `none` 상태가 되어 재연결 없이 진입할 수 있다. 방향이 무인증→검증완료라 권한 상승은
+    아니지만, 배선이 "세계가 연결 수명 동안 고정"을 전제로 라우팅·세션 상태를 캐시하면
+    그 전제가 깨진다. **무토큰 멤버십은 승계되지 않는다**(leased 등록은 빈 상태에서 시작).
 
 - **E2 `check_revoked` = A1 horizon에 통합** (별도 정책 waiver 폐기).
   - `firebase_identity_verified_at`을 **entitlement와 동일한 authoritative horizon**으로 취급한다(A1의 3-way min).

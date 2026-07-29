@@ -17,15 +17,21 @@ test-first로 잠근 뒤에 최소 배선해야 원인 분리가 된다.
 """
 import asyncio
 import typing
+import pathlib
 import unittest
 from unittest.mock import patch
 
 from app.strict_cache import StrictObservationCache
+from app.topic_initial_snapshot import unleased_registration_topics
 from app.topic_lease import LEASE_MAX_SECONDS
 from app.topic_lease_registry import (
     ACK_TIMEOUT_SECONDS,
     CLIENT_ACK_TIMEOUT_SECONDS,
     AckState,
+    SubscriberGrant,
+    UnleasedApplied,
+    UnleasedRegistrationDisabled,
+    UnleasedRoutingError,
     Applied,
     ConnectionTerminated,
     ConnectionTerminatedError,
@@ -36,7 +42,10 @@ from app.topic_lease_registry import (
     TopicLeaseRegistry,
 )
 
+_REGISTRY_SRC = pathlib.Path(__file__).resolve().parent.parent / "app" / "topic_lease_registry.py"
+
 UID = "uid-1"
+TOPIC_FX = "fx:usd-krw"
 TOPIC = "krx:usd-krw-futures"
 OTHER = "fx:usd-krw"
 
@@ -1983,6 +1992,508 @@ class TestRegistryConstantsArePinned(unittest.TestCase):
         편의가 아니라 정확성 전제다 — 없으면 재연결 시 구 ack이 신 구독을 오염시킨다.
         """
         self.assertEqual(CLIENT_ACK_TIMEOUT_SECONDS, 10.0)
+
+class TestTombstoneIsReadThroughOneHelper(unittest.TestCase):
+    """`_closed` **읽기**는 `_tombstoned` 하나를 거친다.
+
+    ⚠️ 쓰기(`_closed.add`)는 대상이 아니다 — 종단 판정은 여러 경로가 내리는 게 맞다.
+    읽기가 흩어지면 무토큰 세계 분기가 4번째 인라인 판정을 만들고, 그때부터 두 곳이 갈릴 수 있다
+    (`_claimed`/`_is_claimed`가 같은 이유로 이미 좁혀져 있고 trip-wire까지 있다).
+    """
+
+    def test_closed_membership_is_read_only_through_the_helper(self):
+        import ast
+        src = pathlib.Path(_REGISTRY_SRC).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        cls = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        offenders = []
+        for fn in cls.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if fn.name == "_tombstoned":
+                continue
+            for node in ast.walk(fn):
+                # `x in self._closed` / `x not in self._closed`
+                if isinstance(node, ast.Compare) and any(
+                    isinstance(op, (ast.In, ast.NotIn)) for op in node.ops
+                ):
+                    for cmp_ in node.comparators:
+                        if (isinstance(cmp_, ast.Attribute) and cmp_.attr == "_closed"
+                                and isinstance(cmp_.value, ast.Name) and cmp_.value.id == "self"):
+                            offenders.append(fn.name)
+        self.assertEqual(offenders, [], f"`_closed` 인라인 읽기가 남았다: {offenders}")
+
+    def test_the_helper_exists_and_is_the_detector_target(self):
+        """⛔ 탐지기 자기검사 — `_tombstoned`가 사라지면 위 테스트가 **공허하게** 통과한다."""
+        self.assertTrue(hasattr(TopicLeaseRegistry, "_tombstoned"))
+        import ast
+        src = pathlib.Path(_REGISTRY_SRC).read_text(encoding="utf-8")
+        cls = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        helper = next(f for f in cls.body
+                      if isinstance(f, ast.FunctionDef) and f.name == "_tombstoned")
+        reads = [n for n in ast.walk(helper)
+                 if isinstance(n, ast.Attribute) and n.attr == "_closed"]
+        self.assertTrue(reads, "helper가 정작 `_closed`를 읽지 않는다 — 탐지기가 엉뚱한 것을 잠그고 있다")
+
+
+class TestObservationCounterIsAsymmetric(unittest.IsolatedAsyncioTestCase):
+    """§B3 — 세는 축 둘이 **다른 질문**에 답한다. 시그니처가 그 비대칭을 진술한다.
+
+    legacy `subscribed_connection_count`의 오용은 "틀린 값"이 아니라 **"틀린 질문"**이었다
+    (단말이 `fx:usd-krw`만 구독해도 1이라 `usdt:krw` publisher가 오판). 그래서 새 API는
+    **topic도 시각도 받지 않는다** — per-topic guard로 쓰는 것 자체가 표현 불가능하다.
+    """
+
+    async def test_connection_with_no_remaining_topics_is_not_counted(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+
+        async def ack(_):
+            return True
+
+        await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0, send_ack=ack)
+        self.assertEqual(registry.connections_with_subscriptions(), 0)
+        # ⚠️ 같은 상태에서 `connection_count`는 1이다 — UID 바인딩은 연결 수명 동안 유지된다.
+        self.assertEqual(registry.connection_count(), 1, "UID 바인딩이 사라졌다")
+
+    async def test_expired_only_connection_is_still_counted(self):
+        """⛔ 관찰 축은 만료를 반영하지 **않는다**. 인가 축과 한 테스트에 두어 비대칭을 잠근다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        far = 1000.0 + LEASE_MAX_SECONDS + 1
+        self.assertEqual(registry.connections_with_subscriptions(), 1, "관찰 축이 만료를 반영했다")
+        self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=far), "인가 축이 만료를 놓쳤다")
+
+    def test_observation_counter_takes_no_topic_and_no_clock(self):
+        """시그니처가 오용을 막는다 — 인자가 늘면 red."""
+        import inspect
+        params = list(inspect.signature(TopicLeaseRegistry.connections_with_subscriptions).parameters)
+        self.assertEqual(params, ["self"])
+
+    async def test_unsubscribe_on_unknown_connection_creates_no_entry(self):
+        """⛔ 구독한 적 없는 연결에 빈 항목을 심으면 그 자체가 상태 누수다.
+
+        실측(수정 전): `apply_unsubscribe` → `Applied` 반환 + `_active[ws] = {}` 생성 →
+        `connections_snapshot()`에 등장 → **sweep이 매 주기 방문**한다.
+        """
+        registry = TopicLeaseRegistry()
+        ws = _WS()
+
+        async def ack(_):
+            return True
+
+        result = await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0,
+                                                  send_ack=ack)
+        self.assertIsInstance(result, Applied, "§D8 idempotency — 없던 구독 해제는 조용히 성공한다")
+        self.assertNotIn(ws, registry.connections_snapshot(), "빈 항목이 생겼다")
+        self.assertEqual(registry.connections_with_subscriptions(), 0)
+
+
+class TestSubscriberQueryBoundary(unittest.IsolatedAsyncioTestCase):
+    """§B2 조회 경계 + §C-API 2 — topic으로 묻고, 생존 규칙은 `authorized_lease`가 **정의**한다.
+
+    ⛔ 필터를 여기서 **재구현하지 않는다**(상속이 아니라 동일 함수). 재구현하면 두 답이 갈리고,
+    이 파일의 claim trip-wire가 이미 그 형태를 경고하고 있다.
+    """
+
+    async def _one(self, registry, cache, ws, topics=(TOPIC,)):
+        return await _apply(registry, cache, ws, list(topics))
+
+    async def test_subscribers_excludes_expired_without_sweep(self):
+        """sweep이 안 돌아도 만료는 빠진다 — 인가는 sweep의 부지런함에 의존하지 않는다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await self._one(registry, cache, ws)
+        far = 1000.0 + LEASE_MAX_SECONDS + 1
+        self.assertEqual(registry.subscribers(TOPIC, now_mono=1000.0)[0].ws, ws)
+        self.assertEqual(registry.subscribers(TOPIC, now_mono=far), ())
+
+    async def test_subscribers_excludes_claimed_before_removal(self):
+        """§C3 — claim된 lease는 **제거 전이라도** 빠진다(통지 중 live publish 통과 금지)."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await self._one(registry, cache, ws)
+        far = 1000.0 + LEASE_MAX_SECONDS + 1
+        async with registry.hold_connection_lock(ws):
+            registry.claim_expired_locked(ws, now_mono=far)
+        self.assertEqual(registry.subscribers(TOPIC, now_mono=1000.0), (),
+                         "claim된 lease가 조회를 통과했다")
+
+    async def test_subscribers_excludes_tombstoned_connection(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await self._one(registry, cache, ws)
+        await registry.remove_websocket(ws)
+        self.assertEqual(registry.subscribers(TOPIC, now_mono=1000.0), ())
+
+    async def test_subscribers_excludes_pending_leases(self):
+        """§B4 순서의 **관측 가능성** — ack 대기 중 lease는 fanout 대상이 아니다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        seen = []
+
+        async def ack(_):
+            seen.append(registry.subscribers(TOPIC, now_mono=1000.0))
+            return True
+
+        await _apply(registry, cache, ws, [TOPIC], send_ack=ack)
+        self.assertEqual(seen, [()], "ack 이전에 이미 live 대상이었다")
+        self.assertEqual(len(registry.subscribers(TOPIC, now_mono=1000.0)), 1)
+
+    async def test_subscribers_returns_a_materialized_snapshot(self):
+        """⛔ generator면 소비 중 다른 연결의 커밋이 순회를 깬다 — tuple이 계약이다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        first = _WS("a")
+        await self._one(registry, cache, first)
+        result = registry.subscribers(TOPIC, now_mono=1000.0)
+        self.assertIsInstance(result, tuple)
+        await _apply(registry, StrictObservationCache(), _WS("b"), [TOPIC], uid="uid-2")
+        self.assertEqual([g.ws for g in result], [first], "스냅샷이 나중 커밋에 오염됐다")
+
+    async def test_subscriber_count_equals_len_of_subscribers(self):
+        """§B3 **상속하는 쪽** — 상속을 약속이 아니라 호출 관계로 만든다."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        for i, name in enumerate("abc"):
+            await _apply(registry, StrictObservationCache(), _WS(name), [TOPIC], uid=f"uid-{i}")
+        for now in (1000.0, 1000.0 + LEASE_MAX_SECONDS + 1):
+            self.assertEqual(registry.subscriber_count(TOPIC, now_mono=now),
+                             len(registry.subscribers(TOPIC, now_mono=now)))
+
+    def test_query_apis_require_an_explicit_clock(self):
+        """시각을 기본값 있는 인자로 만들면 '만료 미확인 답'을 얻을 수 있게 된다."""
+        import inspect
+        for name in ("subscribers", "subscriber_count", "grant_for"):
+            sig = inspect.signature(getattr(TopicLeaseRegistry, name))
+            param = sig.parameters["now_mono"]
+            self.assertIs(param.default, inspect.Parameter.empty, f"{name}의 now_mono에 기본값이 있다")
+            self.assertIs(param.kind, inspect.Parameter.KEYWORD_ONLY, f"{name}의 now_mono가 위치 인자다")
+
+
+class TestGrantIsTheSendTimeIdentity(unittest.IsolatedAsyncioTestCase):
+    """§B1 — grant가 `(ws, topic, uid, lease_id)`를 **조회와 같은 스냅샷에서** 나른다.
+
+    재조회로 identity를 다시 캡처하면 교체된 lease를 잡아 재검증이 tautology가 된다(실측 결함).
+    """
+
+    async def test_grant_pairs_uid_and_lease_id(self):
+        with self.assertRaises(ValueError):
+            SubscriberGrant(ws=_WS(), topic=TOPIC, uid=UID, lease_id=None)
+        with self.assertRaises(ValueError):
+            SubscriberGrant(ws=_WS(), topic=TOPIC, uid=None, lease_id="x")
+
+    async def test_grant_for_returns_none_when_not_authorized(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        self.assertIsNone(registry.grant_for(ws, TOPIC, now_mono=1000.0))
+        await _apply(registry, cache, ws, [TOPIC])
+        self.assertIsNotNone(registry.grant_for(ws, TOPIC, now_mono=1000.0))
+        far = 1000.0 + LEASE_MAX_SECONDS + 1
+        self.assertIsNone(registry.grant_for(ws, TOPIC, now_mono=far), "만료를 놓쳤다")
+
+    async def test_authorizes_grant_false_after_lease_replacement(self):
+        """같은 UID 재인증으로 L1→L2 교체 시 구 grant는 죽는다(`lease_id` 축이 load-bearing)."""
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        old = registry.grant_for(ws, TOPIC, now_mono=1000.0)
+        await _apply(registry, cache, ws, [TOPIC])
+        self.assertFalse(registry.authorizes_grant(old, now_mono=1000.0))
+        fresh = registry.grant_for(ws, TOPIC, now_mono=1000.0)
+        self.assertTrue(registry.authorizes_grant(fresh, now_mono=1000.0))
+
+    async def test_authorizes_grant_false_after_tombstone(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        grant = registry.grant_for(ws, TOPIC, now_mono=1000.0)
+        await registry.remove_websocket(ws)
+        self.assertFalse(registry.authorizes_grant(grant, now_mono=1000.0))
+
+    def test_authorizes_grant_delegates_instead_of_reimplementing(self):
+        """AST — 생존 규칙을 다시 쓰면 §B2 필터와 두 곳이 갈린다."""
+        import ast
+        src = pathlib.Path(_REGISTRY_SRC).read_text(encoding="utf-8")
+        cls = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        fn = next(f for f in cls.body
+                  if isinstance(f, ast.FunctionDef) and f.name == "authorizes_grant")
+        names = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+        self.assertNotIn("_active", names)
+        self.assertNotIn("_closed", names)
+        self.assertIn("authorizes_send", names, "위임하지 않는다 — 규칙을 재구현했다")
+
+
+PERMISSIVE = frozenset({TOPIC_FX})
+
+
+def _permissive():
+    return TopicLeaseRegistry(unleased_registration=PERMISSIVE)
+
+
+class TestUnleasedModeIsProcessFixed(unittest.TestCase):
+    """§C-API 9 / §E1 — 모드는 생성자에서 1회 확정되고 setter가 없다.
+
+    flip = 새 프로세스(config는 import-time getenv 1회 + env 변경에 `--force-recreate`)이므로
+    무토큰 등록은 flip 시점에 **전부 소멸**한다 → 우회로가 flip을 건너 살아남을 수 없다.
+    """
+
+    def test_strict_is_the_default(self):
+        self.assertFalse(TopicLeaseRegistry().unleased_registration_enabled())
+        self.assertTrue(_permissive().unleased_registration_enabled())
+
+    def test_empty_allowlist_is_rejected_at_construction(self):
+        """켰는데 아무것도 등록 못 하는 상태는 strict와 구분되지 않아 배선 오류를 숨긴다."""
+        with self.assertRaises(ValueError):
+            TopicLeaseRegistry(unleased_registration=frozenset())
+
+    def test_per_user_gated_topic_cannot_enter_the_allowlist(self):
+        """⛔ 이게 없으면 생성자 호출자의 선의가 유일한 방어다 = entitlement 우회."""
+        from app.topic_initial_snapshot import per_user_gated_snapshot_topics
+
+        gated = next(iter(per_user_gated_snapshot_topics()))
+        with self.assertRaises(ValueError):
+            TopicLeaseRegistry(unleased_registration=frozenset({gated}))
+
+    def test_allowlist_is_derived_by_subtraction_not_enumeration(self):
+        """새 게이팅 topic이 생기면 **자동으로** 빠진다 — 목록 갱신을 기억할 필요가 없다."""
+        from app.topic_initial_snapshot import (
+            per_user_gated_snapshot_topics,
+            unleased_registration_topics,
+        )
+
+        self.assertEqual(unleased_registration_topics() & per_user_gated_snapshot_topics(),
+                         frozenset())
+
+    def test_mode_is_assigned_only_in_init(self):
+        """AST — setter가 생기면 red(살아 있는 registry의 모드 전환은 표현 불가능해야 한다)."""
+        import ast
+        src = pathlib.Path(_REGISTRY_SRC).read_text(encoding="utf-8")
+        cls = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.ClassDef) and n.name == "TopicLeaseRegistry")
+        writers = set()
+        for fn in cls.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, ast.Attribute) and tgt.attr == "_unleased_allowlist":
+                            writers.add(fn.name)
+        self.assertEqual(writers, {"__init__"}, f"모드 대입 지점: {sorted(writers)}")
+
+
+class TestUnleasedWorldIsExclusive(unittest.IsolatedAsyncioTestCase):
+    """한 소켓은 leased **또는** unauthenticated 하나다. 섞이면 시끄럽게 실패한다."""
+
+    async def test_strict_registry_raises_loudly_on_unleased_registration(self):
+        with self.assertRaises(UnleasedRegistrationDisabled):
+            await TopicLeaseRegistry().apply_unleased_subscribe(ws=_WS(), topics=[TOPIC_FX])
+
+    async def test_leased_connection_cannot_register_unleased(self):
+        registry, cache = _permissive(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        with self.assertRaises(UnleasedRoutingError):
+            await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+
+    async def test_leased_predicate_survives_full_unsubscribe(self):
+        """⛔ `_active`의 비어 있음만 보면 틀린다 — UID 바인딩은 연결 수명 동안 남는다."""
+        registry, cache = _permissive(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+
+        async def ack(_):
+            return True
+
+        await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0, send_ack=ack)
+        self.assertEqual(registry.topics_for_test(ws), ())
+        self.assertEqual(registry.registration_kind(ws), "leased", "바인딩된 연결이 none이 됐다")
+        with self.assertRaises(UnleasedRoutingError):
+            await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+
+    async def test_unleased_connection_cannot_use_leased_unsubscribe(self):
+        """현행 결함 재현 방지: 조용한 no-op은 **거짓 ack + 데이터 계속**이다."""
+        registry = _permissive()
+        ws = _WS()
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+
+        async def ack(_):
+            return True
+
+        with self.assertRaises(UnleasedRoutingError):
+            await registry.apply_unsubscribe(ws=ws, topics=[TOPIC_FX], now_mono=1000.0,
+                                             send_ack=ack)
+
+    async def test_registration_kind_is_three_state(self):
+        registry = _permissive()
+        self.assertEqual(registry.registration_kind(_WS()), "none")
+        unleased = _WS("u")
+        await registry.apply_unleased_subscribe(ws=unleased, topics=[TOPIC_FX])
+        self.assertEqual(registry.registration_kind(unleased), "unauthenticated")
+        leased = _WS("l")
+        await _apply(registry, StrictObservationCache(), leased, [TOPIC])
+        self.assertEqual(registry.registration_kind(leased), "leased")
+
+
+class TestUnleasedRegistrationContract(unittest.IsolatedAsyncioTestCase):
+    """등록 자체의 계약 — allowlist 원자 거부 · D7 상한 · 무기한 · tombstone."""
+
+    async def test_topic_outside_allowlist_registers_nothing(self):
+        """부분 커밋 금지 — 이 세계엔 무엇이 등록됐는지 알려줄 ack이 없다."""
+        registry = _permissive()
+        ws = _WS()
+        result = await registry.apply_unleased_subscribe(
+            ws=ws, topics=[TOPIC_FX, "usdt:krw"])
+        self.assertIsInstance(result, Rejected)
+        self.assertEqual(result.reason, "authentication_required")
+        self.assertEqual(registry.unleased_topics_for_test(ws), (), "부분 커밋됐다")
+
+    async def test_d7_caps_are_enforced_cumulatively(self):
+        registry = TopicLeaseRegistry(
+            unleased_registration=unleased_registration_topics())
+        ws = _WS()
+        result = await registry.apply_unleased_subscribe(ws=ws, topics=["x" * 65])
+        self.assertIsInstance(result, Rejected)
+        self.assertEqual(result.reason, "request_too_large")
+        with patch("app.topic_lease_registry.MAX_UNLEASED_TOPICS", 2):
+            await registry.apply_unleased_subscribe(ws=ws, topics=["fx:usd-krw", "fx:jpy-krw"])
+            over = await registry.apply_unleased_subscribe(ws=ws, topics=["fx:eur-krw"])
+        self.assertIsInstance(over, Rejected, "누적 상한이 강제되지 않았다")
+        self.assertEqual(registry.unleased_topics_for_test(ws), ("fx:jpy-krw", "fx:usd-krw"))
+
+    async def test_unleased_entry_never_expires(self):
+        """§E1 '전원 무기한' — 만료 개념 자체가 없다."""
+        registry = _permissive()
+        ws = _WS()
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+        for now in (1000.0, 1000.0 + LEASE_MAX_SECONDS * 100):
+            self.assertEqual(len(registry.subscribers(TOPIC_FX, now_mono=now)), 1)
+
+    async def test_tombstoned_socket_is_excluded_everywhere(self):
+        """죽었다고 판정한 소켓으로 데이터가 계속 나가면 그게 곧 우회다."""
+        registry = _permissive()
+        ws = _WS()
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+        grant = registry.grant_for(ws, TOPIC_FX, now_mono=1000.0)
+        await registry.remove_websocket(ws)
+        self.assertEqual(registry.subscribers(TOPIC_FX, now_mono=1000.0), ())
+        self.assertFalse(registry.authorizes_grant(grant, now_mono=1000.0))
+        self.assertEqual(registry.unleased_topics_for_test(ws), (), "teardown이 정리하지 않았다")
+
+    async def test_grant_dies_after_unleased_unsubscribe(self):
+        registry = _permissive()
+        ws = _WS()
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+        grant = registry.grant_for(ws, TOPIC_FX, now_mono=1000.0)
+        self.assertTrue(registry.authorizes_grant(grant, now_mono=1000.0))
+        await registry.apply_unleased_unsubscribe(ws=ws, topics=[TOPIC_FX])
+        self.assertFalse(registry.authorizes_grant(grant, now_mono=1000.0),
+                         "끈 데이터가 계속 흐른다")
+
+    async def test_unleased_unsubscribe_takes_no_sender(self):
+        """이 세계엔 ack 프로토콜이 없다 — 시그니처가 그것을 진술한다."""
+        import inspect
+        params = set(inspect.signature(
+            TopicLeaseRegistry.apply_unleased_unsubscribe).parameters)
+        self.assertNotIn("send_ack", params)
+        self.assertNotIn("now_mono", params)
+
+    async def test_strict_registry_rejects_a_foreign_unleased_grant(self):
+        """무토큰 세계를 모르는 registry가 그런 grant를 받으면 fail-closed다."""
+        foreign = SubscriberGrant(ws=_WS(), topic=TOPIC_FX, uid=None, lease_id=None)
+        self.assertFalse(TopicLeaseRegistry().authorizes_grant(foreign, now_mono=1000.0))
+
+    async def test_observation_counter_sums_both_worlds(self):
+        registry = _permissive()
+        # ⚠️ ws를 **변수에 담아 살려 둔다** — `_active`/`_unleased`가 둘 다 weak key라
+        #    인자로만 넘기면 await 뒤 GC가 회수해 0이 나온다(실측: 이 테스트가 그렇게 처음 red).
+        unleased, leased = _WS("u"), _WS("l")
+        await registry.apply_unleased_subscribe(ws=unleased, topics=[TOPIC_FX])
+        await _apply(registry, StrictObservationCache(), leased, [TOPIC])
+        self.assertEqual(registry.connections_with_subscriptions(), 2)
+
+    async def test_weak_keys_release_both_worlds(self):
+        """위 테스트가 처음 red였던 이유를 **계약으로** 잠근다 — 연결이 사라지면 자동 회수된다."""
+        import gc
+
+        registry = _permissive()
+        ws = _WS("gone")
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+        self.assertEqual(registry.connections_with_subscriptions(), 1)
+        del ws
+        gc.collect()
+        self.assertEqual(registry.connections_with_subscriptions(), 0,
+                         "무토큰 저장소가 강한 참조를 쥐고 있다")
+
+
+class TestWorldTransitionIsOneWay(unittest.IsolatedAsyncioTestCase):
+    """§E1 sticky 모드는 **양방향 대칭이 아니다** — 문서가 한때 절대문으로 적었던 것을 잠근다.
+
+    ⚠️ 이 클래스가 존재하는 이유: "전환하려면 재연결한다"고 확정문으로 적었는데 실측에서
+    `unauthenticated → leased`가 재연결 없이 성립했다. 방향이 무인증→검증완료라 권한 상승은
+    아니지만, 배선이 "세계는 연결 수명 동안 고정"을 전제로 캐시하면 그 전제가 깨진다.
+    """
+
+    async def test_leased_to_unauthenticated_is_permanently_blocked(self):
+        """UID 바인딩이 연결 수명 동안 남아 **영구 차단**된다(전 topic을 해제해도)."""
+        registry, cache = _permissive(), StrictObservationCache()
+        ws = _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+
+        async def ack(_):
+            return True
+
+        await registry.apply_unsubscribe(ws=ws, topics=[TOPIC], now_mono=1000.0, send_ack=ack)
+        with self.assertRaises(UnleasedRoutingError):
+            await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+
+    async def test_unauthenticated_to_leased_is_possible_once_empty(self):
+        """⛔ 등록이 0이 되면 `none`이 되고 그때는 leased 진입이 **가능하다**(재연결 불요)."""
+        registry, cache = _permissive(), StrictObservationCache()
+        ws = _WS()
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+        self.assertEqual(registry.registration_kind(ws), "unauthenticated")
+        await registry.apply_unleased_unsubscribe(ws=ws, topics=[TOPIC_FX])
+        self.assertEqual(registry.registration_kind(ws), "none")
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Applied)
+        self.assertEqual(registry.registration_kind(ws), "leased")
+        self.assertEqual(registry.topics_for_test(ws), (TOPIC,),
+                         "무토큰 멤버십이 leased 세계로 승계됐다")
+
+    async def test_empty_unleased_request_creates_no_entry(self):
+        """U1과 대칭 — 빈 요청이 빈 항목을 심으면 매 fanout 순회에 낀다."""
+        registry = _permissive()
+        ws = _WS()
+        result = await registry.apply_unleased_subscribe(ws=ws, topics=[])
+        self.assertIsInstance(result, UnleasedApplied)
+        self.assertEqual(registry.registration_kind(ws), "none")
+        self.assertEqual(registry.unleased_topics_for_test(ws), ())
+
+
+class TestUnleasedAuthorizationIsNotAlwaysFalse(unittest.IsolatedAsyncioTestCase):
+    """§B1 진입점의 무토큰 분기가 **두 갈래**임을 잠근다.
+
+    ⚠️ docstring이 한때 "무토큰 grant는 여기서 False다"라고 적어 두고 같은 커밋에서
+    permissive 분기를 갖고 있었다. 배선이 그 문장을 읽고 자기 쪽 판정을 하나 더 만들면
+    이 함수가 위임으로 없애려던 이중 판정이 부활한다.
+    """
+
+    async def test_permissive_authorizes_a_live_unleased_grant(self):
+        registry = _permissive()
+        ws = _WS()
+        await registry.apply_unleased_subscribe(ws=ws, topics=[TOPIC_FX])
+        grant = registry.grant_for(ws, TOPIC_FX, now_mono=1000.0)
+        self.assertTrue(registry.authorizes_grant(grant, now_mono=1000.0),
+                        "permissive에서 무토큰 grant가 인가되지 않았다 — §E1 중간 상태가 성립하지 않는다")
+
+    async def test_strict_refuses_the_same_shape(self):
+        same = SubscriberGrant(ws=_WS(), topic=TOPIC_FX, uid=None, lease_id=None)
+        self.assertFalse(TopicLeaseRegistry().authorizes_grant(same, now_mono=1000.0))
+
 
 if __name__ == "__main__":
     unittest.main()

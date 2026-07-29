@@ -74,6 +74,20 @@ def per_user_gated_snapshot_topics() -> frozenset:
     return frozenset({KRX_TOPIC})
 
 
+def unleased_registration_topics() -> frozenset:
+    """무토큰 등록(§E1 enforcement-OFF 중간 상태)이 허용되는 topic 집합.
+
+    ⛔ **열거가 아니라 뺄셈이다** — `supported − per_user_gated`. per-user 판정이 필요한 topic을
+    이 목록에 넣는 것이 **정의상 불가능**하고, 새 게이팅 topic이 생기면 자동으로 제외된다.
+    열거였다면 KRX처럼 나중에 추가된 게이팅 topic을 누군가 빠뜨리는 순간 무토큰 우회가 열린다.
+
+    ⚠️ `supported_snapshot_topics()`가 config(`KRX_CLIENT_DISTRIBUTION_EFFECTIVE`)에 의존하므로
+    이 집합도 프로세스 시작 시점 config를 반영한다 — registry가 생성자에서 1회 확정하는 것과
+    같은 수명이다.
+    """
+    return frozenset(supported_snapshot_topics()) - per_user_gated_snapshot_topics()
+
+
 class SnapshotTopicAccess(NamedTuple):
     """topic 접근 판정 결과.
 
