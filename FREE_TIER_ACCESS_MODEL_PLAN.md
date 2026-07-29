@@ -307,6 +307,9 @@
 }
 ```
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
+- ⚠️ **`identity_generation`은 열린 항목이다** — B5(d) 결정으로 값이 **상수 1**이 돼 순서 판별에 쓸 수
+  없다(§8.1 D2). **dispatcher는 이 필드의 값에 의존하지 말 것.** 제거할지 새 의미를 줄지는 wire
+  슬라이스가 정하며, 그때까지 위 예시의 `3`은 **형식 예시일 뿐 계약이 아니다**.
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.
 - **`active_subscriptions` = 그 연결의 최종 상태 전체**(topic별 `lease_id` + 남은 duration). 클라는 이걸로 수렴한다.
 - **`lease_id`는 재사용 불가한 opaque 값**(§8.1 D2) — 정수 generation을 쓰면 제거 후 재구독 시 초기화돼
@@ -707,12 +710,18 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
       분리해야 해서 wire·상태기계·양 플랫폼 테스트 부담이 커진다.
       ⚠️ 클라 generation은 **적용 여부만** 정하고 **어떤 신원을 부여할지는 여전히 토큰 검증이 정한다** —
       권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
-  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield** — ⚠️ **원래 우려(그 사이 UID
-    재바인딩이 끼어 in-flight 메시지가 새 UID로 감)는 B5(d) 결정으로 소멸했다**: live 소켓의
-    재바인딩이 불가능하고, cross-UID는 tombstone + 종료라 그 소켓으로는 인가 자체가 0이 된다.
-    남는 것은 **같은 UID**의 lease 교체·만료뿐이라 유출이 아니다(늦은 tick 1건이 구 lease 기준으로
-    나갈 수 있을 뿐). 그래서 전송을 lock 안으로 넣을 이유는 사라졌고, 오히려 넣으면 느린 한 연결이
-    fanout 전체를 지연시킨다(C-API 6 참조).
+  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield** — ⚠️ **열린 항목(축소됐을 뿐
+    소멸하지 않았다)**. 한때 "B5(d)로 소멸했다"고 적었는데 **틀렸다**: tombstone은 **이미 통과한
+    판정을 소급 취소하지 않는다**. 실측 순서 — ① 발행 task가 `authorizes_send` 통과 →
+    ② cross-UID 요청이 tombstone → ③ 그 task가 `send_json` 실행(그 시점 재판정하면 False인데도
+    이미 나간다). 즉 **UID 전환 직후 구 UID 데이터 1건이 전달될 수 있다.**
+    - 위험의 **모양이 바뀌었다**: 서버 쪽 바인딩은 A로 일관되고 lease도 유효하다. 어긋난 것은
+      **클라의 신원**(이미 B로 전환)이다.
+    - ⛔ **서버만으로는 닫히지 않는다** — 요청이 도착하기 **전에** 이미 발사된 메시지는 send lock으로도
+      막지 못한다. 1차 닫힘은 **클라 소유 `connectionGeneration`으로 구 연결 결과를 폐기**하는 것이고(F),
+      서버 측 축소는 연결별 writer 격리 후 send lock이다.
+    - 그래서 전송을 지금 lock 안으로 넣지는 않는다 — 잔여 위험을 없애지 못하면서 느린 한 연결이
+      fanout 전체를 지연시킨다(C-API 6 참조).
     - ⛔ 단 **publish fanout이 연결 lock을 잡으면 안 된다**. `publish_topic`은 구독자를 **순차 루프**로
       돌므로(`app/topic_dispatcher.py`), 역압 연결 A가 ack으로 자기 lock을 최대 5초 쥔 사이 루프가 A에서
       막히면 **B·C의 tick까지 5초 밀린다** — 연결별 lock으로 얻으려던 격리가 통째로 사라진다.
@@ -820,8 +829,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    시각도 두 메서드 모두 필수 인자다(기본값이 생기면 안전장치가 조용히 꺼진다).
    ⚠️ C3 sweep은 둘 다 쓸 수 없다 — 찾아야 하는 것이 정확히 여기서 걸러지는 **만료된** lease다.
    그건 1번(열거 API)의 몫이고, **이 메서드들을 만료 무시로 되돌려 재사용하지 말 것**.
-   ⚠️ B1 검사와 **실제 `await send_json` 사이**의 창은 남지만, B5(d) 이후 그 사이 **UID는 바뀌지
-   않는다** — 남는 것은 같은 UID의 lease 교체·만료로 인한 늦은 tick 1건이다(유출 아님).
+   ⚠️ B1 검사와 **실제 `await send_json` 사이**의 창은 **열려 있다**(B5(e)). B5(d)로 서버 쪽
+   바인딩은 흔들리지 않게 됐지만, tombstone이 이미 통과한 판정을 소급 취소하지는 못해 **UID 전환
+   직후 구 UID 데이터 1건**이 나갈 수 있다(실측). 닫는 것은 클라 `connectionGeneration`이다.
    ⚠️ **재인증 시 몇 tick이 떨어지는지는 발행 직렬화 계약에 달려 있다** — `publish_topic`에는
    직렬화 장치가 없고 호출부도 topic별 단일 in-flight를 보장하지 않으므로, 구 lease를 캡처한
    채 겹쳐 있던 fanout이 모두 떨어질 수 있다. "재인증 주기가 6~7분이니 topic당 최대 1 tick"은

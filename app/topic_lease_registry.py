@@ -773,9 +773,12 @@ class TopicLeaseRegistry:
         중인 발행 작업이 **몇 개인지**를 정하지 않는다. `publish_topic`에는 직렬화 장치가 없고
         호출부도 topic별 단일 in-flight를 보장하지 않으므로, 겹친 fanout이 모두 떨어질 수 있다.
         상한이 필요하면 **발행 직렬화를 별도 계약으로** 세워야 한다.
-        ⚠️ 이 검사와 **실제 `await send_json` 사이**의 창은 남지만, B5(d) 이후 그 사이에 **UID가
-        바뀌는 일은 없다**(live 소켓 재바인딩 불가). 남는 것은 같은 UID의 lease 교체·만료뿐이라
-        유출이 아니라 늦은 tick 1건이다(§B5(e) 정정).
+        ⚠️ 이 검사와 **실제 `await send_json` 사이**의 창은 **열려 있다**(§B5(e)). B5(d)로 서버 쪽
+        바인딩은 흔들리지 않지만, tombstone은 **이미 통과한 이 판정을 소급 취소하지 못한다** —
+        실측: ① 여기서 True → ② cross-UID 요청이 tombstone → ③ 그 task가 전송(그 시점 재판정하면
+        False인데도 나간다). UID 전환 직후 **구 UID 데이터 1건**이 도달할 수 있고, 서버만으로는
+        닫히지 않는다(요청 도착 **전에** 발사된 메시지는 send lock으로도 못 막는다).
+        1차 닫힘은 클라 소유 `connectionGeneration`의 구 연결 결과 폐기다.
         """
         lease = self.authorized_lease(ws, topic, now_mono=now_mono)
         if lease is None:
