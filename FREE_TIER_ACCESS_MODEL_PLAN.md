@@ -295,7 +295,7 @@
   "type": "subscription_ack",
   "request_id": "<uuid>",
   "operation": "subscribe",
-  "identity_generation": 3,
+  "identity_generation": 1,
   "accepted_topics": [
     {"topic": "fx:usd-krw", "lease_id": "c7f1…", "lease_duration_seconds": 660}
   ],
@@ -307,9 +307,13 @@
 }
 ```
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
-- ⚠️ **`identity_generation`은 열린 항목이다** — B5(d) 결정으로 값이 **상수 1**이 돼 순서 판별에 쓸 수
-  없다(§8.1 D2). **dispatcher는 이 필드의 값에 의존하지 말 것.** 제거할지 새 의미를 줄지는 wire
-  슬라이스가 정하며, 그때까지 위 예시의 `3`은 **형식 예시일 뿐 계약이 아니다**.
+- ⚠️ **`identity_generation`은 열린 항목이다** — B5(d) 결정으로 순서 판별에 쓸 수 없다(§8.1 D2).
+  **dispatcher는 이 필드의 값에 의존하지 말 것.** 제거할지 새 의미를 줄지는 wire 슬라이스가 정한다.
+  ⚠️ 구현이 낼 수 있는 값 집합은 **{0, 1}**이다(실측): subscribe ack은 바인딩 후 항상 1
+  (`_next_generation_locked`는 미바인딩→1 / 이후 불변, cross-UID는 그 앞에서 연결 종료),
+  unsubscribe ack은 `_generations.get(ws, 0)`이라 **미바인딩 연결에서 0**이다.
+  구 예시값 `3`은 도달 불가라 1로 고쳤다 — "상수 1"이라고 적었던 서술도 unsubscribe를 빠뜨린
+  부정확이었다.
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.
 - **`active_subscriptions` = 그 연결의 최종 상태 전체**(topic별 `lease_id` + 남은 duration). 클라는 이걸로 수렴한다.
 - **`lease_id`는 재사용 불가한 opaque 값**(§8.1 D2) — 정수 generation을 쓰면 제거 후 재구독 시 초기화돼
@@ -869,6 +873,32 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     잇는 supervisor가 필요하다. 타입만으로는 부족하고 그 타입을 받는 핸들러가 있어야 한다 —
     통합 테스트로 "종단 신호 → 소켓 close"를 잠글 것.
 
+#### C-INV. 배선 슬라이스의 **코드로 강제되지 않는** 불변식 (2026-07-29 감사에서 신규 발견)
+
+> C-API가 "registry가 표현할 수 없는 것"의 목록이라면, 여기는 **registry가 표현하지만 지키게
+> 만들지는 못하는 것**의 목록이다. 전부 산문에만 있어 호출부가 어기면 조용히 깨진다.
+
+1. ⛔ **stale fallback에서 `premium_verified_at_mono`를 전진시키지 말 것.**
+   A1의 "노출 상한 15분"은 `CACHE_TTL = 5분 < LEASE_MAX = 900s` 관계에서 나온다. 그런데
+   `app/subscription.py`에는 `CACHE_STALE_TTL = 1시간` fallback 경로가 따로 있고,
+   `compute_lease_expiry`는 `now_mono` / `premium_verified_at_mono` /
+   `firebase_identity_verified_at_mono` **float 3개만** 받는다 — 그 관측이 fresh였는지
+   stale이었는지 **알 방법이 없다**. 배선이 stale hit에서도 horizon을 전진시키면 상한이
+   조용히 **최대 1시간**이 된다. 계산기는 이 오용을 표현 불가능하게 만들지 못한다.
+   ⚠️ 관련 정정: 이 상한을 webhook 무효화가 지탱한다고 읽으면 틀린다 —
+   `StrictObservationCache.bump()`는 **프로덕션 호출자가 0**이다(실측). 지탱하는 것은 TTL 관계뿐이다.
+
+2. ⛔ **`has_entitlement` 실패를 "권한 없음"으로 접지 말 것.**
+   `app/entitlements.has_entitlement`는 row 존재 여부의 `is not None`만 돌려주므로
+   **실패 신호가 없다**(실측). 호출부가 `try/except → False`라는 가장 흔한 패턴을 쓰면
+   **DB 순단 = 정상 구독자의 구독 영구 삭제**가 된다 — 거부된 topic은 `rejected_topics`를
+   거쳐 `departing`으로 실제 제거되기 때문이다. 이는 §C4("transient면 registry 불변")의
+   정면 위반이다. transient는 `temporarily_unavailable`로 **요청을 접어야** 하고,
+   registry를 건드려선 안 된다.
+
+> 두 항목 모두 "있으면 좋다"가 아니라 **슬라이스의 정확성 전제**다. 지금 코드 가드를 넣지
+> 않는 이유는 호출자가 없어서다(C-API와 같은 규율) — 배선 슬라이스가 가드를 함께 짓는다.
+
 #### C-CLAIM. 문서 부정확 감사 (2026-07-29)
 
 > 같은 반올림 실수가 세 번 반복돼(재인증 "topic당 1 tick" / purge 파급 "전부·소멸" / B5(e) "1건")
@@ -898,8 +928,34 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    기록을 보고 통과한다"는 **성립하지 않는다**(두 문장 사이에 `await`가 없다, 실측). 두 순서는
    등가이며 가독성 때문에 현 순서를 쓴다.
 
-⚠️ **배선 전 남은 블로커**(문서 부정확과 별개): §B5(e) 잔여(클라 `connectionGeneration`) ·
-`identity_generation`의 wire 결정(제거 vs 재정의).
+⚠️ **잔여 항목 재분류 (2026-07-29 감사)** — 구 문장은 아래 둘을 "배선 전 블로커"로 묶었으나,
+둘 다 **배선 방향을 굳히지 않는다**. 진짜 블로커는 따로 있다.
+
+- §B5(e) 잔여(클라 `connectionGeneration`) → **배선 블로커가 아니라 1C 활성화 게이트**다.
+  서버 코드 변경이 0인 클라 측 펜스라 늦게 정해도 서버 구조가 잘못 굳지 않는다
+  (iOS·Android 모두 `connectionGeneration` 부재 실측). 다만 **활성화** 전에는 정해야 한다 —
+  안 정하면 UID 전환 직후 in-flight 전부가 도달할 수 있고 상한이 없다.
+- `identity_generation`의 wire 결정 → **배선과 직교**하다. 소비자가 서버·iOS·Android 모두
+  0이고(실측) 재추가가 additive(양 클라가 미지 키 무시)라, 언제 정해도 blast radius가 같다.
+
+⛔ **진짜 배선 블로커**(정하지 않으면 틀린 방향으로 굳는 것):
+1. **fanout 대상 집합의 소유권** — lease registry를 단일 진실 소스로 삼을 것인가
+   (legacy `register()` 제거), 아니면 legacy 인덱스를 fanout 권위로 두고 per-ws
+   `authorizes_send` 필터를 얹을 것인가. 오늘 publish 대상은 lease를 모르는
+   `TopicRegistry.get_subscribers`뿐이고 `authorizes_send`는 프로덕션 호출자가 0이다(실측).
+   이 결정이 §B2a 전송 실패 3곳 · `websocket_endpoint` finally · §C2 eviction의 **제거 경로가
+   어느 집합에 붙는지**를 함께 정하므로, 나중에 뒤집으면 비용이 그 경로들에 흩어진다.
+   ⚠️ C-API 9(lease 없는 등록 모드)는 별개 항목이 아니라 **이 결정의 결과**다 —
+   legacy가 권위면 중간 상태가 자연히 성립하고, lease가 단일 진실 소스면 새 모드가 필요하다.
+2. **클라 subscribe 요청 단위** — registry는 "1 요청 = lock 1회 = ack 1건 = 전부 아니면 전무"를
+   구조로 강제하는데, 현행 iOS는 topic 1개짜리 메시지를 topic 수만큼 보낸다(실측).
+   재연결 1회 = 인증 사이클 N회가 한 연결에서 직렬로 줄 서므로, 배칭(1 메시지 N topic)으로
+   갈지 현행 단위를 유지하고 dispatch 모델(직렬 §B5(a) vs task-spawn §B5(b))로 흡수할지
+   정해야 한다.
+3. **종단 신호 → 소켓 close 라우팅**(C-API 12) — 선택지는 없고 "해야 할 것"이지만,
+   빠뜨리면 실패 모드가 구조로 굳는다: `handle_client_message`는 `-> None`이라 결과를 위로
+   올릴 수 없고 `websocket_endpoint`의 finally는 close를 부르지 않는다(실측). 그 위에 lease를
+   얹으면 tombstone된 연결이 **데이터 0 · 오류 0**에 갇힌다.
 
 #### D. wire 계약 추가 (§8 확장)
 
@@ -1265,7 +1321,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[both]` 인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음 — 서버만 잠그면
 클라가 fire-and-forget으로 남아도 green. 실측: 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없다) /
 `[both]` `active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
-`[server]` ⚠️ 서버 `identity_generation`은 B5(d) 이후 **상수 1**이라 이 행은 보류(reconnect 식별은 클라 `connectionGeneration`) /
+`[server]` ⚠️ 서버 `identity_generation`은 B5(d) 이후 값 집합이 **{0, 1}**(subscribe 후 1 / 미바인딩 unsubscribe 0)이라 이 행은 보류(reconnect 식별은 클라 `connectionGeneration`) /
 `[server]` **identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
 `[server]` **message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
 `[server]` `invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
