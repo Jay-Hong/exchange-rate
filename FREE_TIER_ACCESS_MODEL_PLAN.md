@@ -883,8 +883,14 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    `app/subscription.py`에는 `CACHE_STALE_TTL = 1시간` fallback 경로가 따로 있고,
    `compute_lease_expiry`는 `now_mono` / `premium_verified_at_mono` /
    `firebase_identity_verified_at_mono` **float 3개만** 받는다 — 그 관측이 fresh였는지
-   stale이었는지 **알 방법이 없다**. 배선이 stale hit에서도 horizon을 전진시키면 상한이
-   조용히 **최대 1시간**이 된다. 계산기는 이 오용을 표현 불가능하게 만들지 못한다.
+   stale이었는지 **알 방법이 없다**.
+
+   정상 동작의 노출 상한은 **15분**이다(권위 관측 T0 기준 `T0 + LEASE_MAX`). 배선이 stale
+   hit에서 horizon을 `now`로 전진시키면 **약 1시간 15분**이 된다 — `EntitlementCache.get`은
+   `age >= CACHE_STALE_TTL`에서만 항목을 버리므로 stale은 **1시간 직전까지** 쓰이고, 그
+   마지막 hit가 horizon을 `T0+1시간`으로 밀면 거기서 다시 최대 900s lease가 나간다.
+   ⚠️ 한때 여기 "최대 1시간"이라고 적었는데 **마지막 lease 한 겹을 빠뜨린 과소평가**였다.
+   계산기는 이 오용을 표현 불가능하게 만들지 못한다.
    ⚠️ 관련 정정: 이 상한을 webhook 무효화가 지탱한다고 읽으면 틀린다 —
    `StrictObservationCache.bump()`는 **프로덕션 호출자가 0**이다(실측). 지탱하는 것은 TTL 관계뿐이다.
 
@@ -935,8 +941,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   서버 코드 변경이 0인 클라 측 펜스라 늦게 정해도 서버 구조가 잘못 굳지 않는다
   (iOS·Android 모두 `connectionGeneration` 부재 실측). 다만 **활성화** 전에는 정해야 한다 —
   안 정하면 UID 전환 직후 in-flight 전부가 도달할 수 있고 상한이 없다.
-- `identity_generation`의 wire 결정 → **배선과 직교**하다. 소비자가 서버·iOS·Android 모두
-  0이고(실측) 재추가가 additive(양 클라가 미지 키 무시)라, 언제 정해도 blast radius가 같다.
+- `identity_generation`의 wire 결정 → 배선 **방향**은 굳히지 않지만 **비용이 시한부**다.
+  ⚠️ "언제 정해도 blast radius가 같다"고 적었던 것은 **소비자가 0인 지금만** 참이다 —
+  클라가 이 필드를 **필수**로 모델링한 뒤 제거하면 breaking이다(Swift Codable은 누락 필드에서
+  decode 실패하고, Android의 `ignoreUnknownKeys=true`는 *잉여* 키만 봐준다).
+  신규 앱 개편이 진행 중이라 그 창은 닫히는 중이다 → **배선 전에 제거**가 가장 싸다.
 
 ⛔ **진짜 배선 블로커**(정하지 않으면 틀린 방향으로 굳는 것):
 1. **fanout 대상 집합의 소유권** — lease registry를 단일 진실 소스로 삼을 것인가
@@ -956,6 +965,26 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
    빠뜨리면 실패 모드가 구조로 굳는다: `handle_client_message`는 `-> None`이라 결과를 위로
    올릴 수 없고 `websocket_endpoint`의 finally는 close를 부르지 않는다(실측). 그 위에 lease를
    얹으면 tombstone된 연결이 **데이터 0 · 오류 0**에 갇힌다.
+
+**결정 (2026-07-29)** — 위 1·2를 확정한다.
+
+- **(1) fanout 소유권 = lease registry 단일 진실 소스.** legacy `register()`를 제거하고
+  publish가 lease registry의 topic 역인덱스(C-API 2)에 묻는다. 근거: 대안(legacy 권위 +
+  per-ws 필터)은 중간 상태에서 "무바인딩이면 통과"라는 **fail-open 판정**을 요구하는데,
+  그 신호원 `bound_uid`는 tombstone을 보지 않아 docstring이 인가에 쓰지 말라고 못박는다.
+  또 제거 경로가 `remove_websocket`(legacy)과 tombstone 둘로 갈려 §B2a·finally·§C2가
+  서로 다른 집합을 건드리게 된다. 단일 소스면 `teardown_locked` 하나로 수렴한다.
+  ⛔ **대가**: C-API 2(topic 역인덱스)와 **C-API 9(lease 없는 등록 모드)를 같은 설계에서**
+  지어야 한다 — 단일 소스에서는 E1 enforcement-off 중간 상태가 registry의 새 모드 없이는
+  성립하지 않는다. 이 둘을 분리해 결정하면 서로 모순되는 답이 나온다.
+- **(2) 클라 subscribe 요청 단위 = 배칭(1 메시지 N topic).** registry의 "1 요청 = lock 1회 =
+  ack 1건 = 전부 아니면 전무"와 1:1로 맞고, 재연결 1회당 인증 사이클이 N회에서 1회로 준다.
+  현행 iOS는 topic 1개짜리 메시지를 topic 수만큼 보내므로(실측) iOS 변경이 따른다.
+  Android는 topic subscribe 경로 자체가 없어 영향 0.
+  ⚠️ 부수 효과: 배칭은 iOS가 `send`마다 독립 `Task`를 spawn해 생기는 **순서 보장 불확실성**
+  (`URLSessionWebSocketTask.send`의 순서 보장 여부 미확인)도 함께 줄인다 — 메시지가 1건이면
+  순서 문제가 사라진다.
+
 
 #### D. wire 계약 추가 (§8 확장)
 
