@@ -85,7 +85,8 @@ fail-closed로 막는다. 호출자의 소켓 close 의무는 그 위에 얹힌�
 - **만료 sweep·재인증 통지**(§C3의 claim-then-notify) — 다음 조각.
   ⚠️ sweep은 연결 lock을 **무한 대기로 잡으면 안 된다**: ack이 최대 `ACK_TIMEOUT_SECONDS`
   동안 그 lock을 쥐므로, 단일 sweeper가 순회하며 무한 대기하면 역압 연결 K개에 대해 한 사이클이
-  최대 5s×K 늘어나 D-const의 "만료→통지 10초" 관측 계약이 **무관한 다른 연결에서** 깨진다.
+  최대 5s×K 늘어나, D-const 관측 지연 식의 `(lock + notify + close)` 항이 **무관한 다른
+  연결에서** K배가 된다(= 연결 간 격리 붕괴). ⛔ D-const에 "만료→통지 10초" 상한은 **없다**.
 - **dispatcher 배선**. 기존 `registry.register()` 우회가 남지 않았음을 확인하는 것은 배선
   슬라이스의 일이다. ⚠️ 그 슬라이스의 가장 자연스러운 최소 편집(= `register()`를 그대로 두고
   뒤에 `apply_subscribe`를 부르기)은 **여기서 고친 순서를 그대로 되돌린다** — live 대상 집합이

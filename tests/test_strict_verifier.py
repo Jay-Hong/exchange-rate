@@ -26,6 +26,7 @@ from app.subscription import (
 )
 from app.strict_cache import PutAccepted, PutRejected, RejectReason
 from app.strict_verifier import (
+    VERIFY_DEADLINE_SECONDS,
     IdentityFound,
     IdentityMisconfigured,
     IdentityNotFound,
@@ -467,6 +468,17 @@ class TestEpochFencing(unittest.TestCase):
         self.assertLessEqual(len(calls), 6, "재시도가 사실상 무한이면 장애 시 storm이 된다")
         self.assertGreater(len(calls), 1, "한 번도 재시도하지 않으면 정상 경쟁에서 실패한다")
 
+
+class TestVerifierDeadlineIsPinned(unittest.TestCase):
+    """실측(2026-07-29): `8.0→80.0`이 전체 스위트 생존했다 — 행동 테스트가 전부 예산을 주입한다.
+
+    이 값은 D-const `ACK_TIMEOUT_SECONDS` 행 **근거 칸 산문**에 `8s + 5s = 13s > 10s`로도
+    인용돼 있다. 값 칸이 아니라 산문이라 표를 파싱하는 어떤 검사도 이 쌍을 못 본다 —
+    그래서 여기 리터럴 pin이 그 산문의 유일한 red다.
+    """
+
+    def test_verify_deadline_is_pinned(self):
+        self.assertEqual(VERIFY_DEADLINE_SECONDS, 8.0)
 
 if __name__ == "__main__":
     unittest.main()

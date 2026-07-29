@@ -11,8 +11,11 @@ registry와 **별도 모듈**로 먼저 만든다. registry를 그렇게 만들�
    publish가 다시 통과한다(§C3).
 3. 제거는 `(ws, topic, lease_id)` **CAS** — 갱신된 lease는 보존된다.
 4. **sweeper의 lock 획득은 blocking이 아니다** — 경합하면 그 연결만 건너뛰고 다음 주기로
-   미룬다. 무한 대기하면 역압 연결 K개에 대해 한 사이클이 5s×K 늘어나, **무관한 다른
-   연결**의 통지가 D-const의 "만료→통지 10초" 관측 계약을 넘긴다(§C3).
+   미룬다. 무한 대기하면 역압 연결 K개에 대해 한 사이클이 5s×K 늘어나, D-const 관측 지연
+   식의 `(lock + notify + close)` 항이 **그 연결 자신의 몫**이 아니라 K배가 된다 —
+   **무관한 다른 연결**의 통지 지연이 남의 역압에 좌우된다(§C3).
+   ⛔ D-const에 "만료→통지 10초" 같은 **상한은 없다**(유한 상한이 아니다). 여기서 지키는
+   것은 상한이 아니라 **연결 간 격리**다.
 5. 통지 실패·timeout → **그 소켓 전체 정리**(부분 상태 잔존 금지, §C3).
 """
 import asyncio
@@ -26,7 +29,12 @@ from app.topic_lease_registry import (
     ReentrantRegistryCall,
     TopicLeaseRegistry,
 )
-from app.topic_lease_sweeper import sweep_once as _sweep_once
+from app.topic_lease_sweeper import (
+    CLOSE_TIMEOUT_SECONDS,
+    LOCK_ACQUIRE_TIMEOUT_SECONDS,
+    NOTIFY_TIMEOUT_SECONDS,
+    sweep_once as _sweep_once,
+)
 
 UID = "uid-1"
 TOPIC = "krx:usd-krw-futures"
@@ -271,8 +279,9 @@ class TestLockAcquisitionIsBounded(unittest.IsolatedAsyncioTestCase):
     """계약 4 — ⛔ sweeper가 연결 lock을 **무한 대기하면 안 된다**.
 
     ack이 최대 `ACK_TIMEOUT_SECONDS` 동안 그 lock을 쥐므로, 순회하며 무한 대기하면 역압
-    연결 K개에 대해 한 사이클이 5s×K 늘어난다 → **무관한 다른 연결**의 만료 통지가
-    "만료→통지 10초" 관측 계약을 넘긴다.
+    연결 K개에 대해 한 사이클이 5s×K 늘어난다 → **무관한 다른 연결**의 만료 통지 지연이
+    남의 역압에 비례한다. ⛔ 넘는 대상이 되는 "10초 상한"은 D-const에 **없다** —
+    깨지는 것은 상한이 아니라 **연결 간 격리**다.
     """
 
     async def test_busy_connection_is_skipped_and_others_still_swept(self):
@@ -768,7 +777,8 @@ class TestNotificationFailureCleansTheSocket(unittest.IsolatedAsyncioTestCase):
 
 class TestTerminationIsBounded(unittest.IsolatedAsyncioTestCase):
     """⛔ terminate 경로가 모듈 자신의 교리를 깨면 안 된다 — lock 0.05s · notify 5.0s인데
-    close만 무제한이면 D-const의 "만료→통지 10초"가 무너진다.
+    close만 무제한이면 D-const 관측 지연 식의 `close` 항이 **무한**이 되어, 그 연결의 통지
+    지연뿐 아니라(§C3) 식 자체가 의미를 잃는다. (D-const에 "10초 상한"은 없다.)
 
     실측: 응답 없는 피어 하나로 사이클이 25초 안에 끝나지 않았고 `close_failed`도 0이라
     telemetry에 보이지도 않았다. 운영 상한 근거: uvicorn은 websockets `close_timeout`
@@ -800,10 +810,11 @@ class TestTerminationIsBounded(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notified, [victim], "멈춘 close가 무관한 연결의 통지를 막았다")
 
     async def test_notifications_do_not_accumulate_across_connections(self):
-        """⛔ **통지**가 직렬이면 사이클이 연결 수에 비례한다 — D-const가 재는 축이 바로 이것이다.
+        """⛔ **통지**가 직렬이면 사이클이 연결 수에 비례한다 — 격리가 깨지는 축이 이것이다.
 
         실측(구 구현): 4연결의 통지 시작이 0.000 / 0.051 / 0.102 / 0.154초로 누적됐다.
-        기본값(notify 5s)이면 정지 연결 3개만으로 마지막 통지가 10초 계약을 넘는다.
+        기본값(notify 5s)이면 정지 연결 3개만으로 마지막 연결의 통지가 15초 뒤로 밀린다 —
+        자기 잘못이 아닌데도. (넘는 대상이 되는 "10초 계약"은 D-const에 **없다**.)
         lock 획득 상한도 같이 누적된다.
 
         ⚠️ 연결별 작업은 **서로 다른 lock**을 잡으므로 병렬화해도 직렬화 계약을 깨지 않는다.
@@ -1130,6 +1141,26 @@ class TestClaimRequiresTheLock(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LockNotHeld):
             registry.remove_locked(ws, TOPIC, lease.lease_id)
 
+
+class TestSweeperConstantsArePinned(unittest.TestCase):
+    """이 파일의 모든 행동 테스트는 timeout을 **주입**한다 — 그래서 기본값은 아무도 안 본다.
+
+    실측(2026-07-29): pin 없이 `NOTIFY 5.0→60.0` / `LOCK_ACQUIRE 0.05→5.0` /
+    `CLOSE 5.0→60.0` 셋 다 전체 스위트 4192 passed로 **생존**했다. 주입 설계의 대가다 —
+    행동은 잠기지만 기본값은 안 잠긴다. 여기가 그 유일한 red다.
+
+    ⛔ 이건 **일치**를 강제할 뿐 **정확성**을 강제하지 않는다. red가 나면 "어느 쪽이 맞나"를
+    판단해라 — 코드에 맞춰 이 리터럴을 고치는 습관이 들면 이 테스트는 드리프트 은폐 도구가 된다.
+    """
+
+    def test_lock_acquire_timeout_is_pinned(self):
+        self.assertEqual(LOCK_ACQUIRE_TIMEOUT_SECONDS, 0.05)
+
+    def test_notify_timeout_is_pinned(self):
+        self.assertEqual(NOTIFY_TIMEOUT_SECONDS, 5.0)
+
+    def test_close_timeout_is_pinned(self):
+        self.assertEqual(CLOSE_TIMEOUT_SECONDS, 5.0)
 
 if __name__ == "__main__":
     unittest.main()

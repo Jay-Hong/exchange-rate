@@ -1975,5 +1975,33 @@ class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class TestRegistryConstantsArePinned(unittest.TestCase):
+    """`assertLess(ACK, CLIENT_ACK)` 관계 단언만으로는 **둘이 같이 움직이면** 통과한다.
+
+    실측(2026-07-29): `ACK 5.0→1.0`, `CLIENT_ACK 10.0→3600.0` 둘 다 전체 스위트 생존.
+    """
+
+    def test_ack_timeout_is_pinned(self):
+        """D-const 표 `ACK_TIMEOUT_SECONDS` 행과 짝. 근거 칸 `8s + 5s = 13s` 산술의 5도 이 값이다."""
+        self.assertEqual(ACK_TIMEOUT_SECONDS, 5.0)
+
+    def test_client_ack_timeout_is_pinned(self):
+        """⚠️ **이 값의 소유자는 iOS repo다.**
+
+        red는 "문서(§D6)와 서버 측 **기록**이 어긋났다"는 뜻이지 클라가 어긋났다는 뜻이 **아니다**.
+        서버는 이 값을 강제하지 않는다 — `assertLess(ACK, CLIENT_ACK)`의 입력일 뿐이다.
+
+        ⛔ 클라 값과 묶는 통합 테스트는 **지금 지을 수 없다**(실측 2026-07-29): iOS
+        `WebSocketService`의 subscribe는 fire-and-forget이고 수신 switch에 `ack` case가 없어
+        ack이 와도 폐기된다. Android는 topic subscribe 송신 경로 자체가 없다. 서버
+        `topic_dispatcher`도 ack을 보내지 않는다(이 모듈은 아직 미배선 harness). 지금 통합
+        테스트를 짜면 **양쪽 다 아무것도 안 해서 통과**하는 vacuous green이다.
+
+        묶기 위한 선행조건: ① dispatcher ack 배선 → ② 클라 request_id + 대기 테이블 + 타이머 +
+        1회 재시도(§D4) → ③ 클라 connectionGeneration(구 소켓 ack 폐기, §B5(e)). ③은 테스트
+        편의가 아니라 정확성 전제다 — 없으면 재연결 시 구 ack이 신 구독을 오염시킨다.
+        """
+        self.assertEqual(CLIENT_ACK_TIMEOUT_SECONDS, 10.0)
+
 if __name__ == "__main__":
     unittest.main()
