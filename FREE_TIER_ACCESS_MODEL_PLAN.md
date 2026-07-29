@@ -1036,7 +1036,7 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | `NOTIFY_TIMEOUT_SECONDS` | **5.0s** | `reauth_required` 송신 1회 예산 |
   | `CLOSE_TIMEOUT_SECONDS` | **5.0s** | 통지 실패 후 소켓 close 1회 예산 |
   | **만료→통지 관측 지연** | (연속 skip + 1) × 주기 + (lock + notify + close) | ⛔ **유한 상한이 아니다** — lock 획득에 공정성·aging이 없어 연속 skip에 상한이 없다(C3). 여기가 **정본**이고, C3·sweeper docstring은 이 식의 파생으로만 서술한다. 전송 강제는 B1이 지되 그건 **판정** 상한이다(§B5(e)) |
-  | `ACK_TIMEOUT_SECONDS` | **5.0s** | `subscription_ack` 송신 1회 예산. B5(c) "lock 안 I/O에는 timeout 필수"의 구현체다 — 역압 클라가 lock을 물지 못하게. ⛔ `< 10`(클라 ack timeout)이 "클라가 먼저 포기하지 않는다"를 **함의하지 않는다**: 클라의 10초는 요청→ack **전체**를 재는데 그 앞에 상한 없는 lock 대기가 있다 |
+  | `ACK_TIMEOUT_SECONDS` | **5.0s** | `subscription_ack` 송신 1회 예산. B5(c) "lock 안 I/O에는 timeout 필수"의 구현체다 — 역압 클라가 lock을 물지 못하게. ⛔ `< 10`(클라 ack timeout)이 "클라가 먼저 포기하지 않는다"를 **함의하지 않는다**: 클라의 10초는 요청→ack **전체**를 재는데 그 앞에 상한 없는 lock 대기가 있고, 알려진 몫만 더해도 `VERIFY_DEADLINE_SECONDS` 8s + 5s = **13s > 10s**다. 요청→ack 상한은 **아직 계약이 아니다** |
   | `retry_after_seconds` | 정수 초, **1~30** | 서버가 산출해 전송. 클라는 C4 공식으로 clamp |
   값은 조정 가능하지만 **테스트는 이 값을 기대값으로 쓴다**.
 

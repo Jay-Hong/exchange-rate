@@ -122,6 +122,11 @@ from app.topic_lease import compute_lease_expiry, is_expired
 #    요청→ack 상한이 필요하면 lock 획득에도 예산을 두고 **그 합**을 계약으로 잡아야 한다.
 ACK_TIMEOUT_SECONDS = 5.0
 
+# §D6가 정한 **클라이언트** ack timeout. 서버가 강제하는 값이 아니라 **계약값의 기록**이다
+# (정본은 §D6). 여기 두는 이유는 `ACK_TIMEOUT_SECONDS`를 유도하는 제약이 매직 넘버로
+# 테스트에 박히지 않게 하기 위해서다 — D-const 중복 정본 사고와 같은 부류.
+CLIENT_ACK_TIMEOUT_SECONDS = 10.0
+
 
 class ReentrantRegistryCall(RuntimeError):
     """`send_ack` 안에서 registry를 다시 불렀다 — `asyncio.Lock`은 재진입 불가다.

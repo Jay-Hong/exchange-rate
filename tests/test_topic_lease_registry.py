@@ -24,6 +24,7 @@ from app.strict_cache import StrictObservationCache
 from app.topic_lease import LEASE_MAX_SECONDS
 from app.topic_lease_registry import (
     ACK_TIMEOUT_SECONDS,
+    CLIENT_ACK_TIMEOUT_SECONDS,
     AckState,
     Applied,
     ConnectionTerminated,
@@ -649,9 +650,17 @@ class TestAckFailureKillsTheConnection(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ConnectionTerminated)
         self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0))
 
-    async def test_ack_timeout_is_below_the_client_ack_deadline(self):
-        """§D6 클라 ack timeout이 10초다 — 그보다 길면 클라가 먼저 포기한다."""
-        self.assertLess(ACK_TIMEOUT_SECONDS, 10)
+    async def test_ack_send_budget_alone_cannot_exhaust_the_client_deadline(self):
+        """§D6 클라 ack timeout(10s)을 **ack 송신 한 단계만으로** 태워선 안 된다.
+
+        ⛔ **필요조건이지 충분조건이 아니다.** `< 10`이라고 클라가 먼저 포기하지 않는다는
+        뜻이 **아니다** — 클라의 10초는 요청→ack **전체**를 재는데 그 앞에 상한 없는 lock
+        대기가 있고, 알려진 몫(검증 8s + 송신 5s)만 더해도 이미 13s > 10s다(§D-const).
+        여기서 막는 건 좁은 실패 하나다: 예산이 10s 이상이면 **예산 안에서 성공한** ack이
+        클라가 이미 포기한 뒤일 수 있고, 그러면 서버는 클라가 버린 lease를 활성화한다.
+        구 이름·docstring은 이 필요조건을 충분조건처럼 적었다.
+        """
+        self.assertLess(ACK_TIMEOUT_SECONDS, CLIENT_ACK_TIMEOUT_SECONDS)
 
     async def test_invalidation_does_not_kill_the_connection(self):
         """무효화는 **재시도**가 맞다 — ack 실패(연결 종료)와 대응이 다르다."""
