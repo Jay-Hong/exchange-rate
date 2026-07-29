@@ -327,7 +327,13 @@ class TestLockAcquisitionIsBounded(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(registry.connection_lock(ws).locked(), "실패한 획득이 lock을 남겼다")
 
     async def test_skipped_connection_is_swept_on_the_next_cycle(self):
-        """지연 상한이 sweep 주기 **1회**로 유지된다 — 건너뛴 것은 다음 주기가 처리한다."""
+        """건너뛴 연결은 **다음 주기가 다시 시도한다**.
+
+        ⚠️ 이 테스트가 잠그는 것은 **재시도**이지 지연 **상한**이 아니다 — 여기서는 보유자가
+        놓아 주지만, 실제로는 lock 획득에 공정성·aging이 없어 점유가 이어지면 **연속 skip 횟수에
+        상한이 없다**. 상한이 필요하면 escalation(n회 연속 시 blocking 획득 또는 강제 teardown)을
+        계약으로 세워야 한다.
+        """
         registry = TopicLeaseRegistry()
         ws = _WS()
         await _subscribe(registry, ws, [TOPIC])
@@ -417,7 +423,8 @@ class TestStaleClaimNeverBlocksANewLease(unittest.IsolatedAsyncioTestCase):
         """§C2 eviction으로 사라진 topic의 claim도 나중 재구독을 막으면 안 된다.
 
         ⚠️ 구 버전은 §C1 cross-UID purge로 이 상황을 만들었는데, B5(d) 결정으로 그 경로가
-        연결 종료가 됐다(purge 폐기). eviction이 남은 유일한 축소 producer다.
+        연결 종료가 됐다(purge 폐기). `apply_subscribe`에서는 eviction이 유일한 축소 producer다
+        (`apply_unsubscribe`도 `removed`를 채우지만 그건 별 진입점이다).
         """
         registry = TopicLeaseRegistry()
         ws = _WS()
@@ -854,7 +861,8 @@ class TestNoVisitOutlivesTheCycle(unittest.IsolatedAsyncioTestCase):
     lock을 쥐고 있었고, 그 뒤에 lease 제거까지 수행했다 — 중복 통지·claim 경쟁의 씨앗이다.
 
     ⚠️ sibling **취소**가 아니라 **완료 대기**를 택했다: 취소는 성공 직전의 통지까지 죽이고,
-    모든 `_visit`은 이미 상한(lock·notify·close)을 갖고 있어 대기가 무한할 수 없다.
+    모든 `_visit`이 상한(lock·notify·close)을 갖는다는 것은 **조건부**다 — 주입된 callback이
+    취소에 협조할 때만 성립한다(비협조 callback은 순수 asyncio로 강제 종료할 수 없다).
     """
 
     async def _two_connections(self):

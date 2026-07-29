@@ -113,8 +113,13 @@ from typing import Optional, Sequence, Union
 
 from app.topic_lease import compute_lease_expiry, is_expired
 
-# ack 송신 상한. §D6의 클라 ack timeout이 10초라 그보다 작아야 클라가 먼저 포기하지 않는다.
-# ⚠️ 상한이 없으면 멈춘 클라가 **연결 lock을 무한 점유**해 그 연결의 모든 상태 전이가 막힌다.
+# **`send_ack` 한 번**의 송신 상한. ⚠️ 상한이 없으면 멈춘 클라가 **연결 lock을 무한 점유**해
+# 그 연결의 모든 상태 전이가 막힌다.
+# ⛔ `5 < 10`이 "클라가 먼저 포기하지 않는다"를 **함의하지 않는다**: §D6의 클라 10초는
+#    요청 도착→ack 수신 **전체**를 재는데, 그 사이에 상한 없는 lock 대기
+#    (`hold_connection_lock(ws)` — timeout 없음)와 lock 밖 인증·entitlement I/O가 있다.
+#    같은 연결에 전이가 여러 개 큐잉되면 각각이 이 예산을 통째로 쓸 수 있다.
+#    요청→ack 상한이 필요하면 lock 획득에도 예산을 두고 **그 합**을 계약으로 잡아야 한다.
 ACK_TIMEOUT_SECONDS = 5.0
 
 
@@ -226,9 +231,11 @@ class AckState:
     드롭됐다고 결론짓는데 서버는 곧바로 그 topic을 발행하기 시작한다.
 
     - `accepted` — 이번 요청에서 새로 발급한 lease(요청 순서, 중복 제거).
-    - `removed` — 이번 요청의 결과로 **더 이상 활성이 아닌** topic. producer는 두 가지다:
-      §C2의 reject eviction **하나**다(§D2). ⛔ 구 문서는 §C1의 UID purge도 producer로 들었는데
-      B5(d) 결정으로 purge 규칙 자체가 폐기됐다.
+    - `removed` — 이번 요청의 결과로 **더 이상 활성이 아닌** topic. producer는 **둘**이다:
+      `apply_subscribe`의 §C2 reject eviction과 `apply_unsubscribe`(§D8).
+      ⛔ 구 문서는 §C1의 UID purge도 들었는데 B5(d) 결정으로 그 규칙이 폐기됐다.
+      ⚠️ 한때 "§C2 하나뿐"이라고 적었는데 **틀렸다** — 같은 커밋 계열에서 내가 만든 D8 경로를
+      빠뜨렸다(실측: unsubscribe ack의 `removed`가 채워진다).
       ⚠️ `removed`는 **상태 델타**다: 거부됐지만 원래 활성이 아니던 topic은 들어가지 않는다.
     - `active` — 그 연결의 **최종 상태 전체**(topic 정렬). 이번 요청에 없던 기존 topic도 포함.
     """
@@ -548,7 +555,13 @@ class TopicLeaseRegistry:
                 removed = tuple(sorted(departing))
                 generation = self._next_generation_locked(ws, bound=bound)
 
-                # 1) 등록(비활성) — 전 topic 한꺼번에. 재확인이 **등록 이후**여야 그 사이 무효화를 본다.
+                # 1) 등록(비활성) — 전 topic 한꺼번에.
+                #    ⚠️ 근거 정정: "재확인이 등록 이후여야 그 사이 무효화를 본다"고 적었는데
+                #    **성립하지 않는다** — 이 두 줄 사이에 `await`가 없어 다른 task가 끼어들
+                #    지점 자체가 없다. §A4 fence의 실제 내용은 "검증 I/O **뒤에**, 활성화 **전에**
+                #    캡처한 snapshot으로 1회 재확인"이고 그건 아래 2)가 지고 있다.
+                #    `_pending`이 하는 일은 **ack await 구간**(진짜 suspension point)에서 lease가
+                #    "존재하되 인가하지 않는" 상태로 관측되게 하는 것이다(§B4 순서의 관측 가능성).
                 pending = self._pending.setdefault(ws, {})
                 pending.update(new_leases)
                 try:
@@ -742,8 +755,10 @@ class TopicLeaseRegistry:
             # 남을 이유: 청소 방식은 정확성이 "모든 교체 경로가 청소를 기억하는가"에 걸리고,
             # 이 버그가 정확히 그렇게 생겼다. 남은 표식은 존재하지 않는 lease를 가리켜도
             # id가 다르므로 무해하다. ⚠️ 수거자 서술 정정: **현행 lease가 남아 있는 경우에만**
-            # 성공한 sweep의 `remove_locked`가 걷고, evict·unsubscribe로 lease가 사라진 topic의 표식은
-            # CAS가 항상 False라 **teardown/GC만이** 걷는다(실측). 엔트리는 topic당 1개 상한이고
+            # 성공한 sweep의 `remove_locked`와 `apply_unsubscribe`(departing마다 `_drop_claim_locked`
+            # 호출)가 즉시 걷는다. **§C2 evict 경로만** 표식을 남기고 그건 teardown/GC가 걷는다.
+            # ⚠️ 한때 "evict·unsubscribe 둘 다 teardown/GC만이 걷는다(실측)"라고 적었는데 **틀렸다** —
+            # unsubscribe에 청소를 넣은 뒤 이 주석을 갱신하지 않았다. 엔트리는 topic당 1개 상한이고
             # 연결과 함께 회수되므로 유계·무해하다.
             return None
         if is_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono):
@@ -844,8 +859,7 @@ class TopicLeaseRegistry:
 
         idempotent다 — 원래 없던 topic은 조용히 넘어가고 `removed`에도 넣지 않는다(상태 델타).
         """
-        self._guard_reentrant(ws)
-        async with self.hold_connection_lock(ws):
+        async with self.hold_connection_lock(ws):   # 재진입 가드는 이 CM이 진입부에서 한다
             current = self._active.get(ws, {})
             departing = {t for t in topics if t in current}
             final = {t: l for t, l in current.items() if t not in departing}

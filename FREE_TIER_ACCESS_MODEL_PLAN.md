@@ -326,6 +326,7 @@
 | 코드 | 범위 | 의미 |
 |---|---|---|
 | `invalid_token` | 전체 | 토큰 무효·만료·revoked |
+| `reconnect_required` | 전체 | live 소켓의 cross-UID subscribe — **tombstone + 연결 종료**(§8.1 C1) |
 | `temporarily_unavailable` | **전체(항상)** | 인증·권한을 **판정할 수 없음**. **`retry_after_seconds` 동반**, registry 불변 |
 | `invalid_request` | 전체 | 형식 위반 / UUID 오류 / 빈 topics / 중복 정규화 후 빈 목록 |
 | `request_too_large` | 전체 | 상한 위반(전송 계층은 **close 1009** — 클라이언트 관측) |
@@ -390,7 +391,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
       `iat`는 **초** epoch. 축을 섞으면 **모든 토큰이 revoked로 오판**된다. 비교는 strict `<`
       (같으면 revoked 아님), **disabled를 revoked보다 먼저** 검사, `clock_skew_seconds`는 이 비교에 **미적용**.
   - 왜: 권한 상실 시각 L 이전의 마지막 authoritative 확인 V(≤L)로 부여된 lease는 최대 `V+15 ≤ L+15`에 만료
-    → **총 revoke 상한이 정확히 15분**. lease 15분 정책도 그대로 유지된다.
+    → **인가 판정의 총 revoke 상한이 정확히 15분**. lease 15분 정책도 그대로 유지된다.
+    ⚠️ **배달 상한은 아니다** — 이미 §B1 판정을 통과해 in-flight인 전송은 §B5(e)의 열린 창에
+    속해 유한 상한이 없다. 사용자 대면 문구도 "판정" 기준임을 밝힐 것.
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
   - **stale fallback 결과로는 lease를 연장하지 않는다.** horizon이 부족하면 authoritative 갱신을 시도한다.
   - **불변식**: `CACHE_TTL < LEASE`. 아니면 lease가 0으로 수렴해 재인증 storm이 된다.
@@ -774,7 +777,12 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     쥐므로(B4), 단일 sweeper가 연결을 순회하며 무한 대기하면 역압 연결 K개에 대해 한 사이클이
     최대 5s×K 늘어난다. 그러면 **무관한 다른 연결**의 만료 통지가 D-const의 "만료→통지 10초"
     관측 계약을 넘긴다(보안 상한은 B1이 지키므로 유출은 아니다).
-    → 짧은 상한으로 시도하고 경합 시 **그 연결만 건너뛰어 다음 사이클로 미룬다**(지연 상한이 sweep 주기 1회로 유지).
+    → 짧은 상한으로 시도하고 경합 시 **그 연결만 건너뛰어 다음 사이클로 미룬다**.
+    ⚠️ **"지연 상한이 sweep 주기 1회"는 성립하지 않는다**: lock 획득에 공정성·aging이 없어 점유가
+    이어지면 **연속 skip 횟수에 상한이 없다**(실측: 3회 연속 skip). 게다가 정지한 피어 하나만으로
+    한 사이클이 `lock + notify + close ≈ 10.05s`에 달해 그 자체로 주기 전체를 쓴다.
+    관측 지연 = (연속 skip 수 + 1) × 주기 + 한 연결의 최악 사이클. 진짜 상한이 필요하면
+    escalation을 계약으로 세울 것.
   - `send_json` 실패·timeout 시 **소켓 전체를 정리**한다(부분 상태 잔존 금지).
   - **claim된 항목(`claimed_expired`)은 제거 전이라도 `get_subscribers`·`send_if_authorized`에서 즉시 제외**된다.
     아니면 통지를 보내는 동안 live publish가 다시 통과한다.
@@ -862,6 +870,25 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     dispatch에서는 **task 예외가 기본적으로 소켓을 닫지 않으므로**, 두 채널을 모두 소켓 종료로
     잇는 supervisor가 필요하다. 타입만으로는 부족하고 그 타입을 받는 핸들러가 있어야 한다 —
     통합 테스트로 "종단 신호 → 소켓 close"를 잠글 것.
+
+#### C-CLAIM. 남은 문서 부정확 (배선 전 처리, 2026-07-29 감사)
+
+> 같은 반올림 실수가 세 번 반복돼(재인증 "topic당 1 tick" / purge 파급 "전부·소멸" / B5(e) "1건")
+> 계획 §8·§8.1과 두 lease 모듈의 **정량·절대·필요성 주장**을 4 렌즈로 전수 감사했다. 아래는 그중
+> **이번에 고치지 못한** 것들이다 — 고친 것은 각 조항 본문에 반영했다.
+
+1. **`파일:라인` 포인터 12곳** — 이 문서 스스로 "행번호 인용 금지"를 세웠는데 §8·§8.1에 `main.py:2771`
+   류가 남아 있고 **최소 4곳이 실제로 다른 줄을 가리킨다**. 심볼 앵커로 바꿀 것.
+2. **"만료 → `reauth_required` 최대 지연"이 세 문서에서 세 값** — D-const(10s) / sweeper docstring
+   (주기 + 한 연결 최악값) / C3(주기 1회). 하나로 정하고 나머지를 그 파생으로 적을 것.
+3. **D-const에 `CLOSE_TIMEOUT_SECONDS`·`LOCK_ACQUIRE_TIMEOUT_SECONDS`가 없다** — 둘 다 위 지연의
+   항인데 표에 없다. "미정 상태로 test-first 금지" 규칙을 상수에도 적용할 것.
+4. **`test_rebound_uid_does_not_authorize_the_captured_decision`** — 이름·docstring이 약속하는 계약을
+   단언이 검사하지 않는다(B5(d) 이후 그 경로가 사라져 다른 이유로 통과한다).
+5. **`ClaimedLease`의 `ws` 배제 근거** — `Lease`와 같은 이유로 적었으나 registry가 이 객체를
+   **보관하지 않으므로** 약한 참조 논거가 적용되지 않는다. 근거를 다시 쓰거나 삭제할 것.
+6. **`hold_connection_lock`의 finally 순서 근거** — "release 뒤에 지우면 다른 task가 우리 기록을 보고
+   통과한다"고 적었으나 그 실패 모드가 양방향으로 불가능하다는 지적이 있다. 재검증 필요.
 
 #### D. wire 계약 추가 (§8 확장)
 
@@ -1177,7 +1204,8 @@ A: `[server]` horizon 계산(캐시 4분 → lease ~11분) / `[server]` stale fa
 B: `[server]` 만료 후 publish 0건(**sweep 미실행 상태에서도**) / `[server]` 조회~전송 지연 중 만료 시 전송 차단 /
 `[server]` snapshot도 동일 차단 / `[server]` `get_subscribers`가 만료분 미삭제 /
 `[server]` 소켓별 송신 순서(ack → live → snapshot).
-C: `[server]` UID 변경 시 전량 제거 / `[server]` B premium 실패해도 A 미복원 / `[server]` B 토큰 무효면 A 불변 /
+C: `[server]` **cross-UID는 tombstone + `reconnect_required` + 연결 종료**(B5(d) — 구 "UID 변경 시 전량 제거 /
+B premium 실패해도 A 미복원 / B 토큰 무효면 A 불변"은 폐기된 purge 계약) / `[server]` 새 UID는 새 연결에서만 바인딩 /
 `[server]` 같은 UID면 언급 안 된 topic 불변 / `[server]` reject된 구 등록 제거 /
 `[server]` 구 sweep이 갱신된 lease 미제거(CAS) / `[server]` transient 실패 시 registry 불변·lease 미연장.
 D: `[both]` ack `lease_duration_seconds`(서버 산출 ⊥ 클라 **실제 wire decode** — 순수 계산 비교로는 부족) /
@@ -1237,7 +1265,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[server]` **REST twin 게이트가 flag ON보다 먼저**(무인증 KRX 재개방 방지) /
 `[server]` **전송 실패는 소켓 종료**(부분 삭제 후 유지 금지 — ack이 거짓이 되지 않음) /
 `[server]` **연결당 동시 dispatch에서 unsubscribe·ping이 subscribe 뒤에 막히지 않음**(pong timeout 내) /
-`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(⛔ `auth_time` 단조는 폐기 — 클라 소유 identity generation 또는 live 소켓 cross-UID 거부, C1에서 택일) / `[server]` **lock 안 I/O timeout** /
+`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(✅ B5(d) 확정: live 소켓 cross-UID = tombstone + 종료. `auth_time` 단조·클라 generation 안은 모두 폐기) / `[server]` **lock 안 I/O timeout** /
 `[client]` **최소 잔여 기준 타이머**(혼합 lease에서 짧은 topic이 먼저 만료되지 않음) /
 `[both]` **재인증 idempotency = topic 집합 불변이되 lease는 갱신됨** /
 `[client]` snapshot 중복은 **timestamp-merge**로 적용 /
