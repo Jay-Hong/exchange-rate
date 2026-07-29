@@ -776,8 +776,10 @@ class TopicLeaseRegistry:
         ⚠️ 이 검사와 **실제 `await send_json` 사이**의 창은 **열려 있다**(§B5(e)). B5(d)로 서버 쪽
         바인딩은 흔들리지 않지만, tombstone은 **이미 통과한 이 판정을 소급 취소하지 못한다** —
         실측: ① 여기서 True → ② cross-UID 요청이 tombstone → ③ 그 task가 전송(그 시점 재판정하면
-        False인데도 나간다). UID 전환 직후 **구 UID 데이터 1건**이 도달할 수 있고, 서버만으로는
-        닫히지 않는다(요청 도착 **전에** 발사된 메시지는 send lock으로도 못 막는다).
+        False인데도 나간다). UID 전환 직후 **이미 이 판정을 통과한 in-flight 발행 전부**가 도달할 수
+        있다 — ⛔ "1건"이 아니다. topic별 단일 in-flight 보장이 없어(publish 직렬화 계약 부재)
+        **유한 상한이 없다**(실측: topic 3 × 겹친 tick 2 = 6건).
+        서버만으로는 닫히지 않는다(요청 도착 **전에** 발사된 메시지는 send lock으로도 못 막는다) —
         1차 닫힘은 클라 소유 `connectionGeneration`의 구 연결 결과 폐기다.
         """
         lease = self.authorized_lease(ws, topic, now_mono=now_mono)
