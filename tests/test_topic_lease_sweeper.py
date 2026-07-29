@@ -1149,8 +1149,11 @@ class TestSweeperConstantsArePinned(unittest.TestCase):
     ⚠️ 이유는 "행동 테스트가 timeout을 주입해서"가 **아니다**(구 docstring이 그렇게 적었고
     틀렸다). 실측: 이 파일의 `sweep_once(` 호출 36건 중 **26건은 timeout kwarg를 하나도 주지
     않아 기본값으로 돈다**. 기본값을 안 보는 게 아니라, 행동 테스트가 **값에 둔감**한 것이다 —
-    양수이기만 하면 통과한다. 실측: `LOCK_ACQUIRE 0.05→5.0`(상향)과 `0.05→0.0005`(하향)
-    **둘 다** 이 파일에서 pin 1건만 red(51 passed).
+    양수이기만 하면 통과한다. 실측(이 파일, 전부 pin 1건만 red / 51 passed):
+    `LOCK_ACQUIRE 0.05 → 0.0005 · 5.0 · 60.0 · 600.0`.
+
+    이유: **경합을 만드는 테스트는 기본값을 쓰지 않는다** — `lock_timeout=0.02`를 명시
+    주입한다(4곳). 기본값으로 도는 26건은 경합이 없어 값이 얼마든 즉시 획득한다.
 
     ⛔ 단 `0.0` 이하는 예외다 — `hold_connection_lock`이 ValueError로 거부해 스위트가
     **hang**한다(실측: 100초 내 미종료). red가 아니라 hang이라 원인 파악이 더 어렵다.

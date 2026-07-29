@@ -483,10 +483,18 @@ class TestVerifierDeadlineIsPinned(unittest.TestCase):
 
     ⛔ 생존은 **런타임 결함이 아니다** — "기본값 변경을 탐지하지 못했다"는 뜻일 뿐이다.
 
-    ⚠️ 코드 방향에서도 이 pin이 **유일한 red는 아니다**: 5.0 아래로 내리면
-    `tests/test_firebase_identity.py::TestTransportTimeout::test_timeout_is_below_the_verifier_deadline`
-    (`FIREBASE_HTTP_TIMEOUT_SECONDS` < deadline)도 함께 red다. 이 pin이 단독으로 잡는 것은
-    **상향 드리프트**다.
+    ⚠️ 코드 방향에서도 이 pin이 **유일한 red는 아니다**. 실측 경계(2026-07-29, 전체 스위트):
+
+        deadline <= 5.0        → 2 red (pin + TestTransportTimeout)   [4.0 · 5.0 확인]
+        5.0 < deadline != 8.0  → 1 red (pin 단독)                     [5.5 · 6.0 · 20.0 확인]
+        deadline == 8.0        → green
+
+    `tests/test_firebase_identity.py::TestTransportTimeout::test_timeout_is_below_the_verifier_deadline`이
+    `assertLess(FIREBASE_HTTP_TIMEOUT_SECONDS, VERIFY_DEADLINE_SECONDS)`(=5 < deadline)이라
+    **5.0 자신도 red**다 — 엄격 부등호이므로 경계는 "5.0 아래"가 아니라 "5.0 이하"다.
+
+    ⛔ 따라서 이 pin이 단독으로 잡는 범위는 **"상향"이 아니라 5.0 초과인 모든 비-8.0 값**이다.
+    5.0~8.0 사이의 **하향** 변경(6.0 등)도 pin만 잡는다.
     """
 
     def test_verify_deadline_is_pinned(self):
