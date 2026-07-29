@@ -2258,15 +2258,39 @@ class TestUnleasedModeIsProcessFixed(unittest.TestCase):
         with self.assertRaises(ValueError):
             TopicLeaseRegistry(unleased_registration=frozenset({gated}))
 
-    def test_allowlist_is_derived_by_subtraction_not_enumeration(self):
-        """새 게이팅 topic이 생기면 **자동으로** 빠진다 — 목록 갱신을 기억할 필요가 없다."""
+    def test_allowlist_excludes_every_per_user_filtered_topic(self):
+        """**trip-wire** — 실제로 per-user 필터에 걸리는 topic은 무토큰 allowlist에 없어야 한다.
+
+        ⛔ 구 버전은 `unleased_registration_topics() & per_user_gated_snapshot_topics() == ∅`를
+        단언했는데 **공허했다**: allowlist가 `supported − per_user_gated`이므로 `(A−B)&B = ∅`은
+        집합 항등식이라 `per_user_gated`의 내용과 **무관하게** 항상 통과한다.
+
+        그래서 걸러지는 집합을 **behavior**(`visible_snapshot_topics_sync`)에서 유도한다 —
+        allowlist와 **다른 출처**라 실제로 물 수 있다. 게이팅 topic이 `per_user_gated`에 등록되지
+        않으면 allowlist에 남고, 그러면 여기서 red가 된다.
+
+        ⚠️ 이 검사도 게이팅이 `visible_snapshot_topics_sync` 안에서 일어날 때만 본다 — 다른 축에
+        게이트를 만들면 놓친다(helper docstring의 같은 단서 참조).
+        """
+        from unittest.mock import MagicMock
+
+        from app import config
         from app.topic_initial_snapshot import (
-            per_user_gated_snapshot_topics,
+            supported_snapshot_topics,
             unleased_registration_topics,
+            visible_snapshot_topics_sync,
         )
 
-        self.assertEqual(unleased_registration_topics() & per_user_gated_snapshot_topics(),
-                         frozenset())
+        with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.database.SessionLocal", return_value=MagicMock()), \
+             patch("app.entitlements.compute_krx_visible", return_value=False):
+            supported = set(supported_snapshot_topics())
+            visible = set(visible_snapshot_topics_sync("u1", premium_active=True))
+            allowlist = unleased_registration_topics()
+        filtered = supported - visible
+        self.assertTrue(filtered, "필터가 아무것도 안 걸러내면 이 검사가 vacuous해진다")
+        self.assertEqual(allowlist & filtered, frozenset(),
+                         f"per-user 필터 대상이 무토큰 allowlist에 있다: {sorted(allowlist & filtered)}")
 
     def test_mode_is_assigned_only_in_init(self):
         """AST — setter가 생기면 red(살아 있는 registry의 모드 전환은 표현 불가능해야 한다)."""

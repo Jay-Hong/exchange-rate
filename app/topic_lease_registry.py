@@ -20,7 +20,10 @@
   통지 순서가 역전된다(§B4 순서 고정). 그래서 `apply_subscribe`가 **sender를 주입받아** 순서를
   강제한다: 호출자는 활성화를 앞당길 방법이 없다.
 - **소비 fence 순서**(§A4): `등록(비활성) → cache.is_current(snapshot) → 활성화`.
-  등록을 먼저 하는 이유는, 재확인이 **등록 이후**여야 그 사이 무효화를 볼 수 있기 때문이다.
+  ⛔ 한때 "재확인이 **등록 이후**여야 그 사이 무효화를 본다"고 적었는데 **성립하지 않는다** —
+  두 문장 사이에 `await`가 없어 끼어들 지점 자체가 없다(본문 `apply_subscribe`가 이미 정정했고
+  이 요약만 낡아 있었다). §A4 fence의 실제 내용은 "검증 I/O **뒤에**, 활성화 **전에** 캡처한
+  snapshot으로 1회 재확인"이다.
   재확인 **이후**의 무효화는 정상 발급 직후 webhook과 구별되지 않는 통상적 중도 무효화이고,
   `compute_lease_expiry`가 관측 시각에 고정된 3-way min이라 A1/A3의 상한 안이다.
 - **요청당 단일 `now_mono`**: 이 모듈은 **시계를 스스로 읽지 않는다**. 호출자가 요청 경계에서
@@ -618,7 +621,9 @@ class TopicLeaseRegistry:
             current = self._active.get(ws, {})
             # §C2 — 거부된 topic 중 **실제로 활성이던 것**만 제거 대상이다.
             # 언급되지 않은 topic은 불변(§C2, 증분 subscribe 보존).
-            # ⚠️ B5(d) 결정 이후 이것이 `removed`의 **유일한** producer다(§C1 purge 폐기).
+            # ⚠️ §C1 purge 폐기 이후 **이 함수 안에서는** 유일한 `removed` producer다.
+            #    ⛔ 전역으로 유일한 것은 아니다 — `apply_unsubscribe`에도 별도 producer가 있다
+            #      (거기서는 사용자 의도로 지우는 topic이 `departing`이 된다).
             departing = {t for t in rejected_topics if t in current}
             # ⛔ **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다.** 되돌아가려면 그만큼의
             #    접근이 계속 살아 있어야 하는데, 그게 정확히 §C1/§C2가 막으려는 상태다.
