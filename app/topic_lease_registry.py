@@ -253,12 +253,6 @@ class AckState:
     uid: Optional[str]
     # §8-B — subscribe/unsubscribe가 **같은 schema**를 쓰므로 구분자가 필요하다.
     operation: str
-    # §D2 `identity_generation` — ⚠️ **B5(d) 결정으로 의미가 소진됐다**: 표현하려던 "같은 소켓의
-    #    UID 재바인딩"이 불가능해져(cross-UID는 연결 종료) 바인딩 후 **상수 1**이다. schema에서
-    #    제거할지 새 의미를 줄지는 wire 슬라이스가 정한다.
-    # ⛔ 역사적 주의(새 의미를 준다면 유효): strict cache의 `snapshot.epoch`을 쓰면 안 된다 —
-    #    **UID별**이고 최초 관측 순서로 할당돼 순서 판별이 뒤집힌다(실측 A=2→B=1).
-    identity_generation: int
     accepted: tuple
     removed: tuple
     active: tuple
@@ -355,9 +349,6 @@ class TopicLeaseRegistry:
         # 막는다. ws가 살아 있는 동안만 유지되면 충분하므로(되살릴 주체도 ws를 들고 있다) 여기서도
         # 약한 참조를 쓴다.
         self._closed: "weakref.WeakSet" = weakref.WeakSet()
-        # ws -> int. §D2의 연결별 `identity_generation` (미바인딩 0 / 바인딩 시 1 / 이후 불변 —
-        # B5(d)로 재바인딩이 불가능해졌다).
-        self._generations: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> {topic: lease_id}. §C3 claim-then-notify — **제거 전이라도** 인가에서 제외된다.
         self._claimed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
         # ws -> weakref(lock을 쥔 task). `Lock.locked()`는 **누가** 쥐었는지 모르므로
@@ -563,7 +554,6 @@ class TopicLeaseRegistry:
                 #    accepted∩rejected는 입력에서 거부되기 때문이다. purge 시절엔 "다시 잡은
                 #    topic은 교체"라는 필터가 필요했지만 그 producer가 사라져 **죽은 분기**가 됐다.
                 removed = tuple(sorted(departing))
-                generation = self._next_generation_locked(ws, bound=bound)
 
                 # 1) 등록(비활성) — 전 topic 한꺼번에.
                 #    ⚠️ 근거 정정: "재확인이 등록 이후여야 그 사이 무효화를 본다"고 적었는데
@@ -582,7 +572,7 @@ class TopicLeaseRegistry:
 
                     # 3) ack 자료 확정 — post-transition 상태를 **여기서 한 번** 만든다(§D2).
                     ack = self._build_ack_locked(
-                        uid=uid, operation="subscribe", generation=generation, now_mono=now_mono,
+                        uid=uid, operation="subscribe", now_mono=now_mono,
                         new_leases=new_leases, removed=removed, final=final,
                     )
 
@@ -620,7 +610,6 @@ class TopicLeaseRegistry:
                     #       C3 sweep이 이 dict 참조를 캐시하면 안 된다 — 매번 다시 읽을 것.
                     self._active[ws] = final
                     self._uids[ws] = uid
-                    self._generations[ws] = generation
                     return Applied(ws=ws, ack=ack)
                 finally:
                     leftover = self._pending.get(ws)
@@ -666,18 +655,7 @@ class TopicLeaseRegistry:
         self._closed.add(ws)
         return ConnectionTerminated(reason=reason)
 
-    def _next_generation_locked(self, ws, *, bound) -> int:
-        """§D2의 연결별 `identity_generation`.
-
-        미바인딩 → 1(최초 바인딩) / 이후 → **불변**.
-        ⚠️ B5(d) 결정으로 **재바인딩 자체가 불가능**해져(cross-UID는 연결 종료) 이 값은 바인딩
-        후 항상 1이다 — 정보를 싣지 않는다. schema에서 뺄지는 wire 슬라이스가 정한다.
-        구 구현의 `bound != uid` → +1 분기는 도달 불가라 제거했다(죽은 코드).
-        """
-        current = self._generations.get(ws, 0)
-        return current + 1 if bound is None else current
-
-    def _build_ack_locked(self, *, uid, operation, generation, now_mono, new_leases,
+    def _build_ack_locked(self, *, uid, operation, now_mono, new_leases,
                           removed, final) -> AckState:
         """**lock을 쥔 상태에서만** 부른다 — 단일 snapshot이어야 D2가 성립한다.
 
@@ -687,7 +665,6 @@ class TopicLeaseRegistry:
         return AckState(
             uid=uid,
             operation=operation,
-            identity_generation=generation,
             accepted=tuple(self._as_subscription(l, now_mono) for l in new_leases.values()),
             removed=removed,
             # ⚠️ 만료된 기존 lease는 **광고하지 않는다**(§D2: `≤ 0`이면 넣지 않는다).
@@ -812,13 +789,6 @@ class TopicLeaseRegistry:
             return False
         return lease.uid == uid and lease.lease_id == lease_id
 
-    def identity_generation(self, ws) -> int:
-        """§D2의 연결별 generation. 미바인딩은 0.
-
-        ⚠️ `bound_uid`와 같은 **기록**이다 — tombstone을 보지 않는다. 인가에 쓰지 말 것.
-        """
-        return self._generations.get(ws, 0)
-
     def has_pending(self, ws, topic: str) -> bool:
         """등록됐지만 아직 활성화되지 않았는가 (fence 순서 검증용)."""
         return topic in self._pending.get(ws, {})
@@ -888,7 +858,7 @@ class TopicLeaseRegistry:
             # 2) ack — 이번 요청 결과 + 최종 상태 전체(§D2).
             ack = self._build_ack_locked(
                 uid=self._uids.get(ws), operation="unsubscribe",
-                generation=self._generations.get(ws, 0), now_mono=now_mono,
+                now_mono=now_mono,
                 new_leases={}, removed=removed, final=final,
             )
             try:
@@ -1026,6 +996,5 @@ class TopicLeaseRegistry:
         self._active.pop(ws, None)
         self._pending.pop(ws, None)
         self._uids.pop(ws, None)
-        self._generations.pop(ws, None)
         self._claimed.pop(ws, None)
         self._closed.add(ws)

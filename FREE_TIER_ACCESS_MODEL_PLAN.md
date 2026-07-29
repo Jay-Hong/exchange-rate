@@ -295,7 +295,6 @@
   "type": "subscription_ack",
   "request_id": "<uuid>",
   "operation": "subscribe",
-  "identity_generation": 1,
   "accepted_topics": [
     {"topic": "fx:usd-krw", "lease_id": "c7f1…", "lease_duration_seconds": 660}
   ],
@@ -307,13 +306,12 @@
 }
 ```
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
-- ⚠️ **`identity_generation`은 열린 항목이다** — B5(d) 결정으로 순서 판별에 쓸 수 없다(§8.1 D2).
-  **dispatcher는 이 필드의 값에 의존하지 말 것.** 제거할지 새 의미를 줄지는 wire 슬라이스가 정한다.
-  ⚠️ 구현이 낼 수 있는 값 집합은 **{0, 1}**이다(실측): subscribe ack은 바인딩 후 항상 1
-  (`_next_generation_locked`는 미바인딩→1 / 이후 불변, cross-UID는 그 앞에서 연결 종료),
-  unsubscribe ack은 `_generations.get(ws, 0)`이라 **미바인딩 연결에서 0**이다.
-  구 예시값 `3`은 도달 불가라 1로 고쳤다 — "상수 1"이라고 적었던 서술도 unsubscribe를 빠뜨린
-  부정확이었다.
+- ⛔ **`identity_generation`은 schema에서 제거됐다** (2026-07-29). B5(d)로 재바인딩이 불가능해져
+  값이 상수가 됐고(정보 0), 소비자가 서버·iOS·Android 모두 0인 동안이 제거 비용이 가장 싼
+  창이었다 — 클라가 **필수** 필드로 모델링한 뒤 빼면 breaking이다. 서버 내부의 `_generations`·
+  생성 함수·조회 API도 함께 제거했다(필드만 빼면 dead machinery로 남는다).
+  되살린다면 **strict cache의 UID epoch을 그대로 싣지 말 것** — UID별이고 최초 관측 순서로
+  할당돼 순서 판별이 뒤집힌다(실측 A=2→B=1).
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.
 - **`active_subscriptions` = 그 연결의 최종 상태 전체**(topic별 `lease_id` + 남은 duration). 클라는 이걸로 수렴한다.
 - **`lease_id`는 재사용 불가한 opaque 값**(§8.1 D2) — 정수 generation을 쓰면 제거 후 재구독 시 초기화돼
@@ -716,7 +714,8 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
       보인다. 정확히 구현하려면 원래 identity intent의 generation을 재시도에서도 보존하고 `request_id`와
       분리해야 해서 wire·상태기계·양 플랫폼 테스트 부담이 커진다.
       ⚠️ 클라 generation은 **적용 여부만** 정하고 **어떤 신원을 부여할지는 여전히 토큰 검증이 정한다** —
-      권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
+      권한 위임이 아니다. (구 D2의 서버 소유 `identity_generation`은 2026-07-29 제거돼
+      이름 충돌 우려가 사라졌다 — 되살린다면 다시 확인할 것.)
   - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield** — ⚠️ **열린 항목(축소됐을 뿐
     소멸하지 않았다)**. 한때 "B5(d)로 소멸했다"고 적었는데 **틀렸다**: tombstone은 **이미 통과한
     판정을 소급 취소하지 않는다**. 실측 순서 — ① 발행 task가 `authorizes_send` 통과 →
@@ -941,11 +940,9 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   서버 코드 변경이 0인 클라 측 펜스라 늦게 정해도 서버 구조가 잘못 굳지 않는다
   (iOS·Android 모두 `connectionGeneration` 부재 실측). 다만 **활성화** 전에는 정해야 한다 —
   안 정하면 UID 전환 직후 in-flight 전부가 도달할 수 있고 상한이 없다.
-- `identity_generation`의 wire 결정 → 배선 **방향**은 굳히지 않지만 **비용이 시한부**다.
-  ⚠️ "언제 정해도 blast radius가 같다"고 적었던 것은 **소비자가 0인 지금만** 참이다 —
-  클라가 이 필드를 **필수**로 모델링한 뒤 제거하면 breaking이다(Swift Codable은 누락 필드에서
-  decode 실패하고, Android의 `ignoreUnknownKeys=true`는 *잉여* 키만 봐준다).
-  신규 앱 개편이 진행 중이라 그 창은 닫히는 중이다 → **배선 전에 제거**가 가장 싸다.
+- ~~`identity_generation`의 wire 결정~~ → **2026-07-29 제거로 닫힘.** 소비자가 0인 창에서
+  wire·내부 machinery를 함께 제거했다. (한때 "언제 정해도 blast radius가 같다"고 적었는데
+  **소비자가 0인 동안만** 참이었다 — 클라가 필수 필드로 모델링한 뒤 빼면 breaking이다.)
 
 ⛔ **진짜 배선 블로커**(정하지 않으면 틀린 방향으로 굳는 것):
 1. **fanout 대상 집합의 소유권** — lease registry를 단일 진실 소스로 삼을 것인가
@@ -981,9 +978,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   ack 1건 = 전부 아니면 전무"와 1:1로 맞고, 재연결 1회당 인증 사이클이 N회에서 1회로 준다.
   현행 iOS는 topic 1개짜리 메시지를 topic 수만큼 보내므로(실측) iOS 변경이 따른다.
   Android는 topic subscribe 경로 자체가 없어 영향 0.
-  ⚠️ 부수 효과: 배칭은 iOS가 `send`마다 독립 `Task`를 spawn해 생기는 **순서 보장 불확실성**
-  (`URLSessionWebSocketTask.send`의 순서 보장 여부 미확인)도 함께 줄인다 — 메시지가 1건이면
-  순서 문제가 사라진다.
+  ⚠️ 부수 효과(**범위 한정**): 배칭은 iOS가 `send`마다 독립 `Task`를 spawn해 생기는 순서 보장
+  불확실성(`URLSessionWebSocketTask.send`의 순서 보장 여부 미확인)을 **재연결 배치 안에서만**
+  없앤다 — 그 N건이 1건이 되기 때문이다. ⛔ 이후 **독립적인 subscribe/unsubscribe 요청 사이의**
+  순서는 여전히 보장되지 않는다(예: KRX 토글 off→on은 별개 메시지 2건). 그 축이 필요하면
+  `request_id` 상관이나 클라 측 직렬화를 별도 계약으로 세워야 한다.
 
 
 #### D. wire 계약 추가 (§8 확장)
@@ -1012,12 +1011,11 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   - **`lease_id`(topic별, 재사용 불가 opaque)**: 늦게 도착한 구 `reauth_required`를 무시하는 유일한 수단(D3와 대조).
     ⚠️ **정수 generation을 topic별로 0부터 다시 세면 안 된다** — 제거 후 재구독 시 초기화돼 **과거
     `reauth_required`가 새 lease와 오인 일치**한다. 연결 수명 동안 **단조 증가하는 counter** 또는 opaque id를 쓴다.
-  - **`identity_generation`(연결별)** — ⚠️ **B5(d) 결정으로 의미가 소진됐다.**
-    이 필드는 "같은 소켓에서의 UID 재바인딩"을 표현하려던 것인데, 그 재바인딩이 **불가능**해졌다
-    (cross-UID = 연결 종료, C1). registry는 미바인딩 0 / 바인딩 시 1로 두고 **이후 변하지 않는다**.
-    즉 **상수라 stale-ack 판별에 쓸 수 없다**.
-    → **열린 항목**: wire 슬라이스가 (a) schema에서 제거하거나 (b) 새 의미를 확정한다.
-    그 전까지 클라에 "구 `identity_generation` ack 무시"를 요구하지 않는다(G 매트릭스 참조).
+  - ~~**`identity_generation`(연결별)**~~ — **제거됨 (2026-07-29).** "같은 소켓에서의 UID
+    재바인딩"을 표현하려던 필드인데 B5(d)로 그 재바인딩이 **불가능**해져(cross-UID = 연결 종료,
+    C1) 상수가 됐다 — stale-ack 판별에 쓸 수 없었다. wire·내부 상태·조회 API를 함께 제거했고,
+    클라에 "구 generation ack 무시"를 요구하지 않는다. 재연결 식별은 클라 `connectionGeneration`
+    소유다(§B5(e)).
     ⛔ **역사적 주의(새 의미를 부여한다면 그대로 유효)**: strict cache의 UID epoch을 그대로 실으면
     안 된다. 그 epoch은 **UID별**이고 최초 관측 순서로 할당돼 먼저 관측된 UID가 더 작은 값을 갖는다
     → 재바인딩에서 generation이 **감소**하고 순서 판별이 뒤집힌다(실측: B를 먼저 관측하면 A=2 → B=1).
@@ -1263,8 +1261,9 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 > UID reset 수렴 방식(C1·D2 `active_subscriptions`)은 서버 wire 설계**이므로 D/C에서 이미 확정했다.
 > 아래는 그 계약을 소비하는 **클라 내부 구조**만이다.
 >
-> **`connectionGeneration`은 클라 소유**다 — 서버 `identity_generation`은 reconnect 식별에 쓸 수 없고
-> (D2), B5(d) 이후로는 **상수**라 어떤 순서 판별에도 쓸 수 없다. 구 receive task·구 request_id의 결과 폐기는 클라 `connectionGeneration`이 담당한다.
+> **`connectionGeneration`은 클라 소유**다 — 서버에는 대응물이 **없다**(구 `identity_generation`은
+> B5(d)로 상수가 돼 순서 판별에 쓸 수 없었고 2026-07-29 제거됐다). 구 receive task·구 request_id의
+> 결과 폐기는 클라 `connectionGeneration`이 담당한다.
 
 
 - `subscribedTopics` 단일 Set(WebSocketService.swift)을 **desired / pending request / accepted**로 분리.
@@ -1343,14 +1342,13 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[client]` **10분 lease → 6~7분 재인증** 계산(D6) / `[server]` `temporarily_unavailable`의 `retry_after_seconds` /
 `[server]` D7 상한 **각각의 경계값**(message 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
 `[server]` **invalid token은 기존 UID·lease 불변** / `[client]` 구 `request_id` ack 무시.
-⚠️ "구 `identity_generation` ack 무시"는 **열린 항목**으로 내렸다 — B5(d)로 그 값이 상수가 돼
-판별에 쓸 수 없다(D2). wire 슬라이스가 필드를 제거하거나 새 의미를 확정한 뒤 다시 세운다.
+⚠️ "구 `identity_generation` ack 무시"는 **요구하지 않는다** — 필드가 2026-07-29 제거됐다(D2).
+구 결과 폐기는 클라 `connectionGeneration`이 진다(§B5(e)).
 
 보강 2차(codex 감사):
 `[both]` 인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음 — 서버만 잠그면
 클라가 fire-and-forget으로 남아도 green. 실측: 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없다) /
 `[both]` `active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
-`[server]` ⚠️ 서버 `identity_generation`은 B5(d) 이후 값 집합이 **{0, 1}**(subscribe 후 1 / 미바인딩 unsubscribe 0)이라 이 행은 보류(reconnect 식별은 클라 `connectionGeneration`) /
 `[server]` **identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
 `[server]` **message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
 `[server]` `invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /

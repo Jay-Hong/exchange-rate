@@ -1076,7 +1076,7 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result, ConnectionTerminated)
         # ⚠️ `authorized_lease`는 tombstone에서 fail-closed라 여기선 관측 도구가 못 된다.
         #    `remove()`의 CAS는 tombstone을 보지 않으므로 "그 lease가 아직 존재하는가"를 답한다.
-        #    ⛔ 구 버전은 `identity_generation == 1`을 단언했는데, 같은 UID 재인증에서는
+        #    ⛔ 구 버전은 `identity_generation == 1`을 단언했는데(그 필드는 이후 제거됐다), 같은 UID 재인증에서는
         #    커밋 여부와 무관하게 항상 참이라 **공허**했다 — 제거를 ack 전에 커밋하는 변이가
         #    전체 스위트를 통과했다(실측).
         self.assertTrue(await registry.remove(ws, TOPIC, lease_id),
@@ -1089,49 +1089,24 @@ class TestC2RejectEviction(unittest.IsolatedAsyncioTestCase):
             await _apply(registry, cache, _WS(), [TOPIC], rejected=[TOPIC])
 
 
-class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
-    """§D2 — `identity_generation`. ⚠️ **B5(d)로 의미가 소진돼 바인딩 후 상수 1**이다.
+class TestFirstBindIsAtomic(unittest.IsolatedAsyncioTestCase):
+    """바인딩은 ack이 확인된 뒤에만 커밋된다 — 실패한 첫 바인딩은 UID를 남기지 않는다.
 
-    ⛔ strict cache의 `snapshot.epoch`을 실으면 안 된다. 그건 **UID별**이고 최초 관측 순서로
-    할당되므로, 먼저 관측된 UID B의 epoch가 나중에 관측된 A보다 **작다**(실측 A=2 → B=1).
-    ⚠️ 그 결함이 성립하던 재바인딩 경로는 B5(d)로 사라졌고, G 매트릭스의 "구 generation ack 무시"
-    요구도 열린 항목으로 내려갔다. 이 클래스는 이제 **값이 상수임**을 잠근다 — 새 의미를 부여할 때
-    같은 함정(캐시 epoch 재사용)에 빠지지 않도록 근거를 남겨 둔다.
+    ⚠️ 이 클래스는 구 `TestConnectionIdentityGeneration`의 잔존물이다. `identity_generation`은
+    B5(d)로 의미가 소진돼(재바인딩 불가 → 바인딩 후 상수) wire·내부 machinery 전부 제거했다.
+    그러나 그 클래스가 **generation을 통해 우연히 잠그고 있던** 성질 하나는 제거 대상이 아니라
+    여기로 옮겼다 — 실패한 첫 바인딩이 상태를 남기지 않는다는 것. 전수 확인 결과 이 성질을
+    잠그는 다른 테스트가 없었다(`bound_uid`를 보는 곳은 `remove_websocket` 테스트뿐이었다).
+
+    ⛔ 구 클래스가 잠그던 나머지는 여기 없다. 근거: cross-UID → `ConnectionTerminated`는
+    `test_a_cross_uid_attempt_stops_the_captured_decision`이 이미 잠근다(중복이었다).
+    "값이 상수"·"미바인딩은 0"은 필드와 함께 사라진 계약이라 잠글 대상이 없다.
+
+    ⛔ 역사적 주의(서버 측 generation을 되살린다면 유효): strict cache의 `snapshot.epoch`을
+    쓰면 안 된다 — **UID별**이고 최초 관측 순서로 할당돼 순서 판별이 뒤집힌다(실측 A=2→B=1).
     """
 
-    async def test_starts_at_one_on_first_bind(self):
-        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
-        ws = _WS()
-        result = await _apply(registry, cache, ws, [TOPIC])
-        self.assertEqual(result.ack.identity_generation, 1)
-        self.assertEqual(registry.identity_generation(ws), 1)
-
-    async def test_unchanged_for_same_uid_reauth(self):
-        """같은 UID 재인증에서 올리면 클라가 자기 상태를 불필요하게 버린다."""
-        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
-        ws = _WS()
-        await _apply(registry, cache, ws, [TOPIC])
-        result = await _apply(registry, cache, ws, [OTHER])
-        self.assertEqual(result.ack.identity_generation, 1)
-
-    async def test_rebinding_is_impossible_so_the_generation_never_advances(self):
-        """⚠️ B5(d) 결정으로 재바인딩 자체가 불가능해져 이 값은 바인딩 후 **항상 1**이다.
-
-        구 테스트는 "재바인딩에서 감소하지 않는다"를 잠갔는데(그때는 그게 실제 결함이었다),
-        이제 그 경로가 연결 종료로 끝난다. 값이 정보를 싣지 않으므로 schema에서 뺄지는
-        wire 슬라이스가 정한다 — 지금은 **상수임을 명시적으로** 잠근다.
-        """
-        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
-        ws = _WS()
-        first = await _apply(registry, cache, ws, [TOPIC])
-        again = await _apply(registry, cache, ws, [OTHER])
-        self.assertEqual((first.ack.identity_generation, again.ack.identity_generation), (1, 1))
-        self.assertIsInstance(
-            await _apply(registry, StrictObservationCache(), ws, [TOPIC], uid="uid-B"),
-            ConnectionTerminated,
-        )
-
-    async def test_is_not_advanced_when_the_first_bind_fails(self):
+    async def test_a_failed_first_bind_leaves_no_uid(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
 
@@ -1139,10 +1114,7 @@ class TestConnectionIdentityGeneration(unittest.IsolatedAsyncioTestCase):
             raise ConnectionResetError()
 
         await _apply(registry, cache, ws, [TOPIC], send_ack=failing)
-        self.assertEqual(registry.identity_generation(ws), 0, "실패한 바인딩이 세대를 올렸다")
-
-    async def test_unbound_connection_has_generation_zero(self):
-        self.assertEqual(TopicLeaseRegistry().identity_generation(_WS()), 0)
+        self.assertIsNone(registry.bound_uid(ws), "실패한 바인딩이 UID를 남겼다")
 
 
 class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
