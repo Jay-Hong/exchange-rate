@@ -63,6 +63,7 @@ FALLBACK = "img:old"
 #    가려진다(실측으로 그렇게 가려졌다). images는 축약, image inspect / inspect는 sha256: 전체.
 NEW_SHORT, OLD_SHORT = "newid0000000", "oldid0000000"
 NEW_ID = "sha256:" + NEW_SHORT + "a" * 52
+BUILT_ID = "sha256:" + "bui1d0000000" + "c" * 52
 OLD_ID = "sha256:" + OLD_SHORT + "b" * 52
 
 
@@ -81,64 +82,67 @@ class _Harness:
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
-        (tmp / "running").write_text(OLD_ID, encoding="utf-8")
-        (tmp / "latest").write_text(FALLBACK, encoding="utf-8")
         (tmp / "calls").write_text("", encoding="utf-8")
         # ⚠️ lock 경로는 **정본 파일을 갈아끼워** 옮긴다 — 개별 env 손잡이는 없앴다
         #    (양쪽이 따로 움직이면 상호배제가 깨지므로).
         self.ops = _install_ops(tmp)
         fake = self.bin / "docker"
+        # ⚠️ **태그 테이블을 가진 더블**. 누적된 bash 패치워크(latest 파일 + id override)로는
+        #    임의 태그(`…:sha-<gitsha>`)를 해소할 수 없었다 — 준비 단계가 만드는 immutable 태그가
+        #    바로 그것이다. 실 docker처럼 name→id 매핑을 들고, `images`는 축약 /
+        #    `image inspect`는 전체 ID를 준다(그 형식 차이가 과거 결함의 원인이었다).
         fake.write_text(textwrap.dedent(f"""\
-            #!/usr/bin/env bash
-            TMP={tmp}
-            echo "$*" >> "$TMP/calls"
-            FAIL="{','.join(fail)}"
-            MISSING="{','.join(missing)}"
-            FAIL_TAG_NTH={fail_tag_nth}
-            FAIL_UP_NTH={fail_up_nth}
-            case "$1" in
-              images)
-                # 축약 ID — 스크립트가 이걸 쓰면 inspect(전체 ID)와 어긋나 수렴이 영구 실패한다.
-                T="$2"; [ "$T" = "img:latest" ] && T=$(cat "$TMP/latest")
-                case "$T" in
-                  {TARGET}) echo {NEW_SHORT} ;;
-                  {FALLBACK}) echo {OLD_SHORT} ;;
-                esac ;;
-              image)
-                # docker image inspect <tag> --format '{{{{.Id}}}}' — 전체 ID. 없는 태그는 비영 종료.
-                # ⚠️ 실 docker처럼 `img:latest`는 **그 태그가 가리키는 이미지**로 해석해야 한다 —
-                #    안 하면 수렴 판정의 latest 대조가 구조적으로 실패해 happy path가 red가 된다.
-                T="$3"; [ "$T" = "img:latest" ] && T=$(cat "$TMP/latest")
-                for m in ${{MISSING//,/ }}; do [ "$T" = "$m" ] && exit 1; done
-                case "$T" in
-                  {TARGET}) echo {NEW_ID} ;;
-                  {FALLBACK}) echo {OLD_ID} ;;
-                  *) exit 1 ;;
-                esac ;;
-              tag)
-                N=$(( $(cat "$TMP/tagn" 2>/dev/null || echo 0) + 1 )); echo $N > "$TMP/tagn"
-                case ",$FAIL," in *,tag,*) exit 1 ;; esac
-                [ "$FAIL_TAG_NTH" -eq "$N" ] && exit 1     # 선택적: N번째 tag만 실패
-                echo "$2" > "$TMP/latest" ;;
-              inspect) cat "$TMP/running" ;;
-              compose)
-                shift
-                if [ "$1" = "up" ]; then
-                  M=$(( $(cat "$TMP/upn" 2>/dev/null || echo 0) + 1 )); echo $M > "$TMP/upn"
-                  case ",$FAIL," in *,up,*) exit 1 ;; esac
-                  [ "$FAIL_UP_NTH" -eq "$M" ] && exit 1     # 선택적: M번째 up만 실패
-                  {"" if apply_recreate else "exit 0  # recreate 미적용 시뮬"}
-                  L=$(cat "$TMP/latest")
-                  case "$L" in
-                    {TARGET}) echo {NEW_ID} > "$TMP/running" ;;
-                    {FALLBACK}) echo {OLD_ID} > "$TMP/running" ;;
-                  esac
-                elif [ "$1" = "exec" ]; then
-                  {'''echo '{"status":"healthy","message":"ok"}' ''' if healthy
-                   else '''echo '{"status":"unhealthy","message":"degraded"}' '''}
-                fi ;;
-            esac
-            exit 0
+            #!/usr/bin/env python3
+            import json, os, pathlib, sys
+            TMP = pathlib.Path({str(tmp)!r})
+            ST = TMP / "state.json"
+            FAIL = {list(fail)!r}
+            MISSING = {list(missing)!r}
+            FAIL_TAG_NTH, FAIL_UP_NTH = {fail_tag_nth}, {fail_up_nth}
+            APPLY = {bool(apply_recreate)!r}
+            HEALTHY = {bool(healthy)!r}
+            NEW, OLD, BUILT = {NEW_ID!r}, {OLD_ID!r}, {BUILT_ID!r}
+            if ST.exists():
+                s = json.loads(ST.read_text())
+            else:
+                s = {{"tags": {{{TARGET!r}: NEW, {FALLBACK!r}: OLD, "img:latest": OLD}},
+                      "running": OLD, "tagn": 0, "upn": 0}}
+            (TMP / "calls").open("a").write(" ".join(sys.argv[1:]) + "\\n")
+            def save():
+                ST.write_text(json.dumps(s))
+            a = sys.argv[1:]
+            def out(x):
+                print(x)
+            if a[:1] == ["images"]:
+                i = s["tags"].get(a[1])
+                if i: out(i.replace("sha256:", "")[:12])          # 축약 ID
+            elif a[:2] == ["image", "inspect"]:
+                tag = a[2]
+                if tag in MISSING or tag not in s["tags"]:
+                    save(); sys.exit(1)
+                out(s["tags"][tag])                                # 전체 ID
+            elif a[:1] == ["inspect"]:
+                out(s["running"])
+            elif a[:1] == ["tag"]:
+                s["tagn"] += 1
+                if "tag" in FAIL or s["tagn"] == FAIL_TAG_NTH:
+                    save(); sys.exit(1)
+                src = a[1] if a[1].startswith("sha256:") else s["tags"].get(a[1])
+                if not src:
+                    save(); sys.exit(1)
+                s["tags"][a[2]] = src
+            elif a[:2] == ["compose", "build"]:
+                s["tags"]["img:latest"] = BUILT                    # 실 compose처럼 latest 이동
+            elif a[:2] == ["compose", "up"]:
+                s["upn"] += 1
+                if "up" in FAIL or s["upn"] == FAIL_UP_NTH:
+                    save(); sys.exit(1)
+                if APPLY:
+                    s["running"] = s["tags"].get("img:latest", s["running"])
+            elif a[:2] == ["compose", "exec"]:
+                out('{{"status":"healthy","message":"ok"}}' if HEALTHY
+                    else '{{"status":"unhealthy","message":"degraded"}}')
+            save()
             """), encoding="utf-8")
         fake.chmod(0o755)
         # 가짜 flock — LOCKED 파일이 있으면 획득 실패(cron이 쥐고 있는 상황).
@@ -169,7 +173,7 @@ class _Harness:
         self.kill_on = kill_on
 
     def run(self, *, target=TARGET, fallback=FALLBACK, timeout=60, now_utc="00:20",
-            extra_args=()):
+            extra_args=(), env_extra=None):
         env = dict(
             os.environ,
             NOW_UTC=now_utc,
@@ -184,7 +188,8 @@ class _Harness:
         )
         proc = subprocess.Popen(
             ["bash", str(self.ops / "deploy-fastapi.sh"),
-             "--target", target, "--fallback", fallback, *extra_args],
+             *(("--target", target) if target else ()),
+             "--fallback", fallback, *extra_args],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         if self.kill_on:
@@ -199,13 +204,31 @@ class _Harness:
         out, _ = proc.communicate(timeout=timeout)
         return proc.returncode, out
 
+    def _state(self):
+        """상태 파일이 없으면 **초기 상태**를 돌려준다 — docker 호출이 0이면 상태 무변화다.
+
+        ⚠️ 빈 dict를 돌려주면 "거부인데 상태가 바뀌었나" 단언이 `None != FALLBACK`으로 오탐한다.
+        """
+        import json
+        f = self.tmp / "state.json"
+        if not f.exists():
+            return {"tags": {TARGET: NEW_ID, FALLBACK: OLD_ID, "img:latest": OLD_ID},
+                    "running": OLD_ID}
+        return json.loads(f.read_text())
+
     @property
     def latest(self):
-        return (self.tmp / "latest").read_text(encoding="utf-8").strip()
+        """latest 가 가리키는 **태그 이름**(구 하네스와 같은 의미를 유지한다)."""
+        st = self._state()
+        lid = st.get("tags", {}).get("img:latest")
+        for name, i in st.get("tags", {}).items():
+            if i == lid and name in (TARGET, FALLBACK):
+                return name
+        return lid
 
     @property
     def running(self):
-        return (self.tmp / "running").read_text(encoding="utf-8").strip()
+        return self._state().get("running")
 
 
 class TestDeployScript(unittest.TestCase):
@@ -458,6 +481,58 @@ class TestDeployScript(unittest.TestCase):
         rc, out = h.run()
         self.assertNotEqual(rc, 0, f"signal 뒤 성공으로 종료했다: {out}")
 
+
+class TestPrepareUnderLock(unittest.TestCase):
+    """⛔ **준비(pull·build)도 lock 안이어야 한다.**
+
+    compose의 fastapi 서비스는 `image:` 키가 없어 `docker compose build`가 **`latest`를 움직인다**
+    (실측: 2026-07-30 배포에서 build 직후 latest=신 / running=구 = split). 그 순간 cron은 신
+    이미지, web은 구 이미지다. `git pull`도 host의 launcher를 즉시 바꾼다.
+    그래서 lock을 쥔 뒤 pull·build를 하고, build가 움직인 `latest`를 **즉시 복원**한다.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory(); self.addCleanup(self._td.cleanup)
+        self.tmp = pathlib.Path(self._td.name)
+
+    def _git(self, *, pull_ok=True):
+        g = self.tmp / "bin" / "git"
+        g.parent.mkdir(parents=True, exist_ok=True)
+        g.write_text("#!/usr/bin/env bash\n"
+                     'if [ "$1" = "pull" ]; then ' + ("exit 0" if pull_ok else "exit 1") + "; fi\n"
+                     'if [ "$1" = "rev-parse" ]; then echo deadbee; fi\nexit 0\n', encoding="utf-8")
+        g.chmod(0o755); return g
+
+    def test_prepare_builds_immutable_tag_and_restores_latest(self):
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("sha-deadbee", out, "immutable 태그를 쓰지 않았다")
+        self.assertIn("복원", out, "build가 움직인 latest 를 복원하지 않았다")
+
+    def test_prepare_refuses_when_pull_fails(self):
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git(pull_ok=False))})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("git pull", out)
+
+    def test_prepare_and_target_together_are_refused(self):
+        h = _Harness(self.tmp)
+        rc, out = h.run(extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 2, out)
+
+    def test_prepare_happens_after_the_lock_is_held(self):
+        """⛔ lock을 못 잡으면 **build도 pull도 하지 않는다** — 준비가 lock 밖이면 split이 열린다."""
+        (self.tmp / "LOCKED").write_text("1", encoding="utf-8")
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 4, out)
+        self.assertNotIn("[prepare]", out, "lock 없이 준비를 시작했다")
 
 if __name__ == "__main__":
     unittest.main()

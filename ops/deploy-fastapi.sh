@@ -16,13 +16,16 @@
 #    **일시적 창**은 막지 못한다 — 그 사이 cron이 발화하면 검증되지 않은 조합이 실제로 한 번 돈다.
 #    이 창은 이 스크립트가 만든 것이 아니라 `latest`를 배포와 cron이 **공유하는 토폴로지**의
 #    성질이고, 그동안의 수동 배포에도 있었다.
-#    **근본 해법은 배포와 cron 5개가 공유하는 host lock**이다(아래 FOLLOW-UP). 그것이 들어오기
-#    전까지는 이 스크립트가 **cron 발화 가능 구간에서 실행을 거부**해 창이 겹치지 않게 한다.
+#    **근본 해법은 배포와 cron 5개가 공유하는 host lock**이고 그것이 **구현됐다**(아래).
+#    cron은 `ops/cron-job.sh <job>` launcher를 통해 같은 lock을 잡고, 이 스크립트는 **준비부터
+#    수렴까지** 그 lock을 쥔다. cron 충돌 가드는 그 위의 belt-and-braces다.
 #
-# FOLLOW-UP (별도 슬라이스 — 호스트 crontab 변경이라 이 저장소 테스트로 강제할 수 없다):
-#   crontab 5줄을 `flock -w 0 /var/lock/fxi-deploy.lock docker compose run --rm fastapi ...` 형태로
-#   감싸고, 이 스크립트는 retag 전부터 수렴 완료까지 같은 lock을 잡는다. 그러면 일시적 창에서도
-#   cron이 **대기**하거나 **건너뛴다**. crontab을 안 바꾸면 배포 쪽만 lock을 잡아도 무의미하다.
+# ⛔ **준비(pull·build)도 lock 안이어야 한다.** compose의 fastapi 서비스는 `image:` 키가 없어
+#    `docker compose build fastapi`가 **`latest`를 움직인다**(실측: build 직후 latest=신 /
+#    running=구 = split). 그 순간 cron은 신 이미지, web은 구 이미지다. `git pull`도 host의
+#    `ops/cron-job.sh`를 즉시 바꿔 **새 launcher가 구 이미지를 호출**할 수 있다.
+#    그래서 `--prepare-from <ref>`가 pull·build를 lock 안에서 수행하고, build가 움직인 `latest`를
+#    **즉시 복원**한 뒤 immutable 태그(`…:sha-<gitsha>`)로 고정한다 — cron은 그 전이를 못 본다.
 #
 # 사용:
 #   ops/deploy-fastapi.sh --target exchange-rate-fastapi:pending-<sha> \
@@ -46,6 +49,7 @@ CONTAINER="${CONTAINER:-exchange-rate-app}"
 
 CRON_MARGIN="${CRON_MARGIN:-4}"
 ALLOW_CRON_WINDOW=no
+PREPARE_REF=""
 TARGET=""
 FALLBACK=""
 while [ $# -gt 0 ]; do
@@ -54,10 +58,17 @@ while [ $# -gt 0 ]; do
         --fallback) FALLBACK="${2:?--fallback 값 필요}"; shift 2 ;;
         --service)  SERVICE="${2:?}"; shift 2 ;;
         --allow-cron-window) ALLOW_CRON_WINDOW=yes; shift ;;
+        --prepare-from) PREPARE_REF="${2:?--prepare-from 값 필요}"; shift 2 ;;
         *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$TARGET" ]   || { echo "--target 필수" >&2; exit 2; }
+# ⚠️ `--prepare-from`이면 target을 **우리가 만든다** — 그때는 `--target`을 받지 않는다
+#    (받으면 "빌드한 것"과 "배포할 것"이 갈릴 수 있다).
+if [ -n "$PREPARE_REF" ] && [ -n "$TARGET" ]; then
+    echo "--prepare-from 과 --target 은 함께 쓸 수 없다 (target은 빌드 결과로 정해진다)" >&2
+    exit 2
+fi
+[ -n "$TARGET" ] || [ -n "$PREPARE_REF" ] || { echo "--target 또는 --prepare-from 필수" >&2; exit 2; }
 [ -n "$FALLBACK" ] || { echo "--fallback 필수" >&2; exit 2; }
 
 cd "$COMPOSE_DIR"
@@ -137,8 +148,7 @@ if ! "$FLOCK_BIN" -w 0 200; then
     echo "거부: 다른 작업이 $FXI_DEPLOY_LOCK 을 쥐고 있다 (cron 실행 중일 가능성). 나중에 다시 시도." >&2
     exit 4
 fi
-echo "[lock] 획득 — 수렴 완료까지 유지한다"
-# ★ lock은 스크립트 종료 시 fd 200이 닫히며 자동 해제된다(retag 전부터 수렴 후까지 덮는다).
+echo "[lock] 획득 — 준비부터 수렴 완료까지 유지한다"
 
 # ── cron 충돌 가드 (상태 변경 **전**) ────────────────────────────────────────
 # 실측 crontab(UTC): 매시 :05 :07 :09 :11 + 매일 15:01. 배포 예산(recreate + health 최대 90s)이
@@ -200,11 +210,15 @@ is_healthy() {
 
 # ── preflight: 어느 상태도 바꾸기 **전에** 두 태그가 실제로 존재하는지 확인한다.
 #    없는 태그로 진행하면 tag가 실패하고 그 뒤 복구도 대상이 없어 손쓸 수 없다.
-TARGET_ID="$(image_id "$TARGET")"
 FALLBACK_ID="$(image_id "$FALLBACK")"
-[ -n "$TARGET_ID" ]   || { echo "PREFLIGHT 실패: target 태그 없음 ($TARGET) — 상태 무변화" >&2; exit 1; }
 [ -n "$FALLBACK_ID" ] || { echo "PREFLIGHT 실패: fallback 태그 없음 ($FALLBACK) — 상태 무변화" >&2; exit 1; }
-echo "[preflight] target=$TARGET($TARGET_ID) fallback=$FALLBACK($FALLBACK_ID)"
+if [ -z "$PREPARE_REF" ]; then
+    TARGET_ID="$(image_id "$TARGET")"
+    [ -n "$TARGET_ID" ] || { echo "PREFLIGHT 실패: target 태그 없음 ($TARGET) — 상태 무변화" >&2; exit 1; }
+    echo "[preflight] target=$TARGET($TARGET_ID) fallback=$FALLBACK($FALLBACK_ID)"
+else
+    echo "[preflight] fallback=$FALLBACK($FALLBACK_ID) / target은 lock 안에서 빌드한다"
+fi
 
 # ── 목표 도달 판정: health **그리고** running == 기대 ID **그리고** latest 태그 == 기대 ID.
 #    ⛔ health만 보면 recreate가 조용히 미적용된 경우(구 컨테이너가 그대로 healthy)를 성공으로 오판한다.
@@ -259,6 +273,36 @@ recover() {
 trap 'recover; exit 1' HUP INT TERM
 trap recover EXIT
 # ★ 여기부터 상태를 바꾼다 — trap 무장 이후여야 한다.
+
+if [ -n "$PREPARE_REF" ]; then
+    # ⛔ 여기서부터가 준비 단계다. **lock을 쥔 뒤** 하는 것이 요점 — pull이 launcher를 바꾸고
+    #    build가 `latest`를 움직이는 두 전이를 cron이 관측하지 못하게 한다.
+    GIT_BIN="${GIT_BIN:-git}"
+    "$GIT_BIN" pull --ff-only origin "$PREPARE_REF" >/dev/null 2>&1 \
+        || { echo "거부: git pull --ff-only origin $PREPARE_REF 실패" >&2; exit 1; }
+    _SHA="$("$GIT_BIN" rev-parse --short HEAD)"
+    TARGET="exchange-rate-fastapi:sha-$_SHA"
+    echo "[prepare] ref=$PREPARE_REF sha=$_SHA target=$TARGET"
+
+    # build 전 `latest`를 기억한다 — compose build가 그것을 움직이므로 즉시 복원해야 한다.
+    _PRE_LATEST_ID="$(image_id "$LATEST_TAG")"
+    "$DOCKER_BIN" compose build "$SERVICE" </dev/null >/dev/null 2>&1 \
+        || { echo "거부: compose build 실패" >&2; exit 1; }
+    _BUILT_ID="$(image_id "$LATEST_TAG")"
+    [ -n "$_BUILT_ID" ] || { echo "거부: build 후 이미지를 찾을 수 없다" >&2; exit 1; }
+
+    # immutable 태그로 고정하고 `latest`를 **원상 복구** — 여기까지 cron은 lock에 막혀 있다.
+    "$DOCKER_BIN" tag "$_BUILT_ID" "$TARGET" </dev/null \
+        || { echo "거부: immutable 태그 실패" >&2; exit 1; }
+    if [ -n "$_PRE_LATEST_ID" ] && [ "$_PRE_LATEST_ID" != "$_BUILT_ID" ]; then
+        "$DOCKER_BIN" tag "$_PRE_LATEST_ID" "$LATEST_TAG" </dev/null \
+            || { echo "거부: build가 움직인 latest 복원 실패" >&2; exit 1; }
+        echo "[prepare] build가 움직인 latest 를 복원했다 (split 방지)"
+    fi
+    TARGET_ID="$(image_id "$TARGET")"
+    [ -n "$TARGET_ID" ] || { echo "거부: immutable 태그가 해소되지 않는다" >&2; exit 1; }
+fi
+# ★ lock은 스크립트 종료 시 fd 200이 닫히며 자동 해제된다(retag 전부터 수렴 후까지 덮는다).
 
 "$DOCKER_BIN" tag "$TARGET" "$LATEST_TAG" </dev/null
 echo "[tag] $LATEST_TAG -> $TARGET"
