@@ -64,58 +64,6 @@ class TestStubFidelity(unittest.TestCase):
         # 형제로 만들면 except 순서 회귀를 못 잡는다 — 그 실패를 여기서 먼저 드러낸다
         self.assertFalse(issubclass(fb_auth.CertificateFetchError, fb_auth.InvalidIdTokenError))
 
-    def test_identity_provider_error_mro_matches_sdk(self):
-        """A6 identity provider가 분기하는 예외들 — v6.9.0 소스에서 읽은 계약.
-
-        ⛔ 핵심: `UserNotFoundError`와 `ConfigurationNotFoundError`/`TenantNotFoundError`가
-        **형제**다. 형제를 NotFound로 접으면 프로젝트 오설정이 "전 계정 삭제"가 된다.
-        """
-        self.assertTrue(issubclass(fb_auth.UserNotFoundError, fb_exceptions.NotFoundError))
-        self.assertTrue(issubclass(fb_auth.ConfigurationNotFoundError, fb_exceptions.NotFoundError))
-        self.assertTrue(issubclass(fb_auth.TenantNotFoundError, fb_exceptions.NotFoundError))
-        for sibling in (fb_auth.ConfigurationNotFoundError, fb_auth.TenantNotFoundError):
-            self.assertFalse(
-                issubclass(sibling, fb_auth.UserNotFoundError),
-                "형제를 하위로 만들면 '오설정 = 전 계정 삭제' 회귀를 못 잡는다",
-            )
-        self.assertTrue(
-            issubclass(fb_auth.InsufficientPermissionError, fb_exceptions.PermissionDeniedError)
-        )
-        self.assertTrue(
-            issubclass(fb_auth.TooManyAttemptsTryLaterError, fb_exceptions.ResourceExhaustedError)
-        )
-        for cls in (fb_exceptions.NotFoundError, fb_exceptions.PermissionDeniedError,
-                    fb_exceptions.ResourceExhaustedError, fb_exceptions.UnavailableError):
-            self.assertTrue(issubclass(cls, fb_exceptions.FirebaseError))
-
-    def test_not_found_family_shares_one_arity(self):
-        """⚠️ 정정 — 한때 "UserNotFoundError만 arity가 다르다"고 적고 그대로 잠갔는데 **틀렸다**.
-
-        v6.9.0 원문: `def __init__(self, message, cause=None, http_response=None)` 로
-        형제와 동일하다. regex 추출 실수를 stub과 이 테스트에 함께 고정했던 사례다.
-        """
-        for cls in (fb_auth.UserNotFoundError, fb_auth.ConfigurationNotFoundError,
-                    fb_auth.TenantNotFoundError):
-            with self.subTest(cls=cls.__name__):
-                cls("msg")
-                cls("msg", None, None)
-
-    def test_permanent_firebase_errors_exist_as_distinct_types(self):
-        """⛔ 이들을 transient로 접으면 **죽은 자격증명이 retry storm**이 된다."""
-        for name in ("UnauthenticatedError", "FailedPreconditionError", "InvalidArgumentError"):
-            with self.subTest(name=name):
-                cls = getattr(fb_exceptions, name)
-                self.assertTrue(issubclass(cls, fb_exceptions.FirebaseError))
-                self.assertFalse(issubclass(cls, fb_exceptions.UnavailableError))
-
-    def test_google_auth_credential_errors_are_not_firebase_errors(self):
-        """⛔ `except FirebaseError`만 쓰면 서비스 계정 키 폐기가 통째로 새어 나간다."""
-        from google.auth import exceptions as ga
-
-        for cls in (ga.RefreshError, ga.DefaultCredentialsError, ga.TransportError):
-            self.assertTrue(issubclass(cls, ga.GoogleAuthError))
-            self.assertFalse(issubclass(cls, fb_exceptions.FirebaseError))
-
     def test_module_identity_is_shared(self):
         """`firebase_admin.auth`와 `firebase_admin.exceptions`가 같은 루트를 공유해야 한다.
 

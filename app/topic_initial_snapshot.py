@@ -74,28 +74,6 @@ def per_user_gated_snapshot_topics() -> frozenset:
     return frozenset({KRX_TOPIC})
 
 
-def unleased_registration_topics() -> frozenset:
-    """무토큰 등록(§E1 enforcement-OFF 중간 상태)이 허용되는 topic 집합.
-
-    ⛔ **열거가 아니라 뺄셈이다** — `supported − per_user_gated`. per-user 판정이 필요한 topic을
-    이 목록에 넣는 것이 **정의상 불가능**하다 — `per_user_gated_snapshot_topics()`에 등록된
-    topic은 뺄셈으로 반드시 빠진다.
-    ⛔ 그러나 "새 게이팅 topic이 **자동으로** 제외된다"고 읽으면 **과장이다**: 자동 제외는
-    그 topic이 `per_user_gated_snapshot_topics()`에 **등록됐을 때만** 성립하고, 그 집합은
-    수동 열거(`frozenset({KRX_TOPIC})`)다. 등록을 강제하는 것은 별도 trip-wire
-    (`test_gate_registry_covers_every_per_user_filtered_topic`)이고, 그것도 게이팅이
-    `visible_snapshot_topics_sync` **안에서** 일어날 때만 본다. 다른 축에 게이트를 만들면
-    두 검사 모두 놓친다 — topic별 정책 메타데이터를 단일 정본으로 만드는 것이 근본 해법이고
-    그건 이 슬라이스 밖이다.
-    열거였다면 KRX처럼 나중에 추가된 게이팅 topic을 누군가 빠뜨리는 순간 무토큰 우회가 열린다.
-
-    ⚠️ `supported_snapshot_topics()`가 config(`KRX_CLIENT_DISTRIBUTION_EFFECTIVE`)에 의존하므로
-    이 집합도 프로세스 시작 시점 config를 반영한다 — registry가 생성자에서 1회 확정하는 것과
-    같은 수명이다.
-    """
-    return frozenset(supported_snapshot_topics()) - per_user_gated_snapshot_topics()
-
-
 class SnapshotTopicAccess(NamedTuple):
     """topic 접근 판정 결과.
 

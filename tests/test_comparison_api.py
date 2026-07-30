@@ -387,9 +387,6 @@ class TestComparisonCrud(unittest.TestCase):
         limited = crud.get_comparison_notification_logs(self.db, "u1", limit=1)
         self.assertEqual(len(limited), 1)
 
-
-
-
 class TestComparisonEndpointKrxGate(unittest.TestCase):
     """POST /api/comparison-alerts의 KRX 403 게이트 — endpoint 레벨 잠금 (codex NB1).
 

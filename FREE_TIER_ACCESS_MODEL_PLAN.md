@@ -19,10 +19,10 @@
 
 | endpoint | 신규앱 caller | 차단 | 상태 |
 |---|---|---|---|
-| `/api/rates` | iOS ✅ / Android ✅([FXiApiService.kt]) | B | 무인증 |
+| `/api/rates` | iOS ✅ / Android ✅([FXiApiService.kt:25]) | B | 무인증 |
 | `/api/rates/{currency}` · `/api/banks/{pair}` · `/api/investing/{pair}` | ❌ (공개=차단대상) | B | 무인증 |
-| `/ws` legacy `type:rates` | iOS ✅ / Android ✅([WebSocketService.kt]) | B | 무인증 |
-| `/api/graph/{currency}` | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt]) | B | 무인증 |
+| `/ws` legacy `type:rates` | iOS ✅ / Android ✅([WebSocketService.kt:177]) | B | 무인증 |
+| `/api/graph/{currency}` | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt:28]) | B | 무인증 |
 | `/api/v2/topics/snapshot` | iOS ✅ / **Android ❌** | **A** | ✅ **인증+premium+per-user KRX (E3, 2026-07-25)** |
 | `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | 🔴 **무인증 잔여** — §3.1 아래 경고 |
 | topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | 🔴 무인증 잔여 — 1C |
@@ -146,7 +146,7 @@
 - **Primary = App Store Connect · Play Console 버전별 활성 기기 비율**(우리 계측 독립, 로그아웃 사용자 포함, 봇 무관). 종료 조건 <1%의 authoritative source.
 - **Secondary(서버 보조)**:
   - **iOS legacy**: `FXi/1` UA(약한 신호, REST 토큰 없음 — [APIService] Authorization 전무).
-  - **Android legacy**: **Firebase Bearer 토큰 첨부**([NetworkModule.kt] auth interceptor → 모든 요청에 `Authorization: Bearer`) → "유효 토큰 + X-Client-* 없음 + legacy endpoint" 조합으로 **실사용자↔봇 구분 + UID 카운트 가능**(봇은 유효 토큰 없음). 서버가 legacy endpoint에서 토큰 presence/UID를 로깅해야 활용.
+  - **Android legacy**: **Firebase Bearer 토큰 첨부**([NetworkModule.kt:37] auth interceptor → 모든 요청에 `Authorization: Bearer`) → "유효 토큰 + X-Client-* 없음 + legacy endpoint" 조합으로 **실사용자↔봇 구분 + UID 카운트 가능**(봇은 유효 토큰 없음). 서버가 legacy endpoint에서 토큰 presence/UID를 로깅해야 활용.
   - 신규 앱: X-Client-* 헤더.
 - **⚠️ client metadata는 출시+채택 후에야 데이터 생성**(§6 step 2는 capability 배포일 뿐 — 관측은 신규 앱 release 이후). 필요 시 **telemetry-only 중간 버전** 선출시 옵션.
 
@@ -254,8 +254,8 @@
     10분 lease를 받고 12분에 갱신하면 이미 만료다.
   - **핵심**: leak window를 가르는 건 토큰 신선도가 아니라 **서버의 entitlement 재조회 주기**다. 클라가 캐시 ID token을
     보내도(Firebase는 만료 전까지 캐시 반환) 서버가 UID 기준으로 premium/KRX entitlement를 다시 조회하므로 권한 변화는 정확히 반영된다.
-  - ⚠️ **구현 규모 실사(코드 확인 2026-07-25)**: "lease timer만 추가"가 아니다. `TopicRegistry`(app/topic_dispatcher.py)는
-    `Dict[WebSocket, Set[str]]`라 **per-subscription 메타데이터가 없고**, `/ws`(app/main.py)는 **현재 무인증**이다.
+  - ⚠️ **구현 규모 실사(코드 확인 2026-07-25)**: "lease timer만 추가"가 아니다. `TopicRegistry`(app/topic_dispatcher.py:46)는
+    `Dict[WebSocket, Set[str]]`라 **per-subscription 메타데이터가 없고**, `/ws`(app/main.py:889)는 **현재 무인증**이다.
     → 필요한 것 = (a) subscribe 경로 인증 (b) (ws, topic)별 uid·만료 메타 (c) 만료 sweep (d) `reauth_required` 발신.
 - **S6 (제품 결정, codex Medium) last-good 최대 stale 정책**: serve의 process-local last-good은 현재 **무기한**(Redis/cron 장기 장애 시 며칠 stale canonical도 반환 — 실시간 우회는 아님, `as_of`가 정직하게 old 표시). (a) 최대 stale N시간 초과 시 503 전환 vs (b) 무기한 유지 + 클라 UI에 stale 명시. **결정 = (a) 24h hard cutoff** (2026-07-21, 코덱스+Claude+사용자). 구 비결정 혼합(process-local 생존 중 무기한 + Redis ~25h TTL → 재시작 여부로 stale-or-503)을 (now-as_of)>=24h serve 거부로 일관화. **서버+iOS 구현 완료**(서버 d9e60ab: `is_snapshot_too_stale` per-candidate age + stale Redis가 fresh local 안 덮음 / iOS 7050bd3: `.unavailable` + isTooStale age>=24h[future clock-skew 허용] + gated current·displayData[sticky 포함] + **fetch-독립 expiryTask**로 SwiftUI 시간-미관찰 in-flight 만료 공백까지 폐쇄 + 뷰 전파). codex Blocker/High/Medium 0. source-level staleness는 별도 source-health.
 
@@ -286,7 +286,6 @@
 ```json
 {"type":"subscription_error","request_id":"<uuid>","error":"invalid_token"}
 {"type":"subscription_error","request_id":"<uuid>","error":"temporarily_unavailable","retry_after_seconds":5}
-{"type":"subscription_error","request_id":"<uuid>","error":"reconnect_required"}
 ```
 
 **성공 ack** (subscribe/unsubscribe **공통**):
@@ -295,6 +294,7 @@
   "type": "subscription_ack",
   "request_id": "<uuid>",
   "operation": "subscribe",
+  "identity_generation": 3,
   "accepted_topics": [
     {"topic": "fx:usd-krw", "lease_id": "c7f1…", "lease_duration_seconds": 660}
   ],
@@ -306,12 +306,6 @@
 }
 ```
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
-- ⛔ **`identity_generation`은 schema에서 제거됐다** (2026-07-29). B5(d)로 재바인딩이 불가능해져
-  값이 상수가 됐고(정보 0), 소비자가 서버·iOS·Android 모두 0인 동안이 제거 비용이 가장 싼
-  창이었다 — 클라가 **필수** 필드로 모델링한 뒤 빼면 breaking이다. 서버 내부의 `_generations`·
-  생성 함수·조회 API도 함께 제거했다(필드만 빼면 dead machinery로 남는다).
-  되살린다면 **strict cache의 UID epoch을 그대로 싣지 말 것** — UID별이고 최초 관측 순서로
-  할당돼 순서 판별이 뒤집힌다(실측 A=2→B=1).
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.
 - **`active_subscriptions` = 그 연결의 최종 상태 전체**(topic별 `lease_id` + 남은 duration). 클라는 이걸로 수렴한다.
 - **`lease_id`는 재사용 불가한 opaque 값**(§8.1 D2) — 정수 generation을 쓰면 제거 후 재구독 시 초기화돼
@@ -328,7 +322,6 @@
 | 코드 | 범위 | 의미 |
 |---|---|---|
 | `invalid_token` | 전체 | 토큰 무효·만료·revoked |
-| `reconnect_required` | 전체 | live 소켓의 cross-UID subscribe — **tombstone + 연결 종료**(§8.1 C1) |
 | `temporarily_unavailable` | **전체(항상)** | 인증·권한을 **판정할 수 없음**. **`retry_after_seconds` 동반**, registry 불변 |
 | `invalid_request` | 전체 | 형식 위반 / UUID 오류 / 빈 topics / 중복 정규화 후 빈 목록 |
 | `request_too_large` | 전체 | 상한 위반(전송 계층은 **close 1009** — 클라이언트 관측) |
@@ -336,7 +329,7 @@
 | `unknown_topic` | per-topic | 미지원 topic |
 | `premium_required` | per-topic | 구독 필요 |
 | `krx_entitlement_required` | per-topic | KRX entitlement 필요 |
-| `topic_unavailable` | per-topic | topic 자체가 서버에서 비활성(개별 flag off) — REST twin이 이미 사용(main.py) |
+| `topic_unavailable` | per-topic | topic 자체가 서버에서 비활성(개별 flag off) — REST twin이 이미 사용(main.py:2771) |
 
 **flag → 코드 매핑** (없으면 "accepted + lease인데 데이터가 영원히 안 오는" 상태가 생긴다):
 
@@ -363,6 +356,22 @@
 
 ### §8.1 1C 구현 설계 (test-first 기준선, 2026-07-25 확정)
 
+> ⛔ **이 절의 상세 설계는 그대로 구현하지 않는다 (2026-07-30, ADR-040).**
+> 이 설계를 따라 만든 구현(인가 계층·lease registry·정리 주기 작업 등 8개 모듈 3,533줄 +
+> 테스트 8,945줄)은 **소비자를 한 번도 갖지 못한 채** 81커밋 동안 자랐고, 그 과정에서 이 절이
+> 전제한 것 여럿이 반증됐다(노출 상한 산술 · 관측 시각의 출처 · 실패를 접는 방향과 위치 ·
+> 요청 단위). 그 구현은 태그 `archive/adr039-dormant-2026-07-30`에 보존하고 폐기했다.
+>
+> **재시작 계약과 남긴 교훈은 `DECISIONS.md`의 ADR-040**에 있다 — 착수 전에 그것을 먼저 읽을 것.
+> 이 절은 **아이디어 출처**로만 유효하다: 여기 적힌 개별 조항(A1~A4 / B1~B5 / C1~C4 / D5~D8)을
+> 구현 대상 목록으로 읽으면 같은 실패를 반복한다. 최소 수직 슬라이스가 필요로 하는 능력만
+> 골라 다시 정의하고, 관측 캐시·요청 합치기·정리 주기 작업·별도 관측 저장소는 넣지 않는다.
+>
+> ⚠️ 아래 본문에는 폐기 시점에 **부정확한 것으로 확인된 서술**이 남아 있다(파일:라인 포인터가
+> 어긋난 곳, 유한 상한을 과소평가한 곳, wire 필드 `identity_generation`처럼 이후 제거된 것).
+> 사실 확인 없이 인용하지 말 것.
+
+
 §8 wire contract 위에, "lease 15분"과 per-user 인가를 **실제로** 보장하기 위한 구현 경계.
 codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭스가 착수 단위**다.
 
@@ -378,7 +387,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   ```
   **authoritative한 것은 모두 같은 horizon 모델을 탄다** — entitlement든 identity(revocation)든,
   마지막 확인 시점 + 15분을 넘겨 lease를 줄 수 없다. 특례 없음.
-  - ⚠️ **identity *verdict*는 토큰 단위다 — 단, *관측*은 UID 키가 맞다**(§A6-1 해법). UID 단위로 **verdict를** 캐시하면 **같은 UID의 새 토큰
+  - ⚠️ **identity horizon은 UID가 아니라 *토큰*에 묶인다**. UID 단위로 **verdict를** 캐시하면 **같은 UID의 새 토큰
     검증 결과를 revoked된 구 토큰이 공유**해 권한이 섞인다.
     (entitlement horizon은 UID 단위가 맞다 — 권한은 계정 속성이다.)
     - ✅ **해법 확정 (2026-07-27, SDK 소스 검증)**: UID 단위로 **관측(authority record)** 을 캐시하고
@@ -393,9 +402,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
       `iat`는 **초** epoch. 축을 섞으면 **모든 토큰이 revoked로 오판**된다. 비교는 strict `<`
       (같으면 revoked 아님), **disabled를 revoked보다 먼저** 검사, `clock_skew_seconds`는 이 비교에 **미적용**.
   - 왜: 권한 상실 시각 L 이전의 마지막 authoritative 확인 V(≤L)로 부여된 lease는 최대 `V+15 ≤ L+15`에 만료
-    → **인가 판정의 총 revoke 상한이 정확히 15분**. lease 15분 정책도 그대로 유지된다.
-    ⚠️ **배달 상한은 아니다** — 이미 §B1 판정을 통과해 in-flight인 전송은 §B5(e)의 열린 창에
-    속해 유한 상한이 없다. 사용자 대면 문구도 "판정" 기준임을 밝힐 것.
+    → **총 revoke 상한이 정확히 15분**. lease 15분 정책도 그대로 유지된다.
   - 4분 전 확인한 캐시를 쓰면 이번 lease는 약 11분만 부여된다(짧아진 만큼 클라가 더 일찍 재인증).
   - **stale fallback 결과로는 lease를 연장하지 않는다.** horizon이 부족하면 authoritative 갱신을 시도한다.
   - **불변식**: `CACHE_TTL < LEASE`. 아니면 lease가 0으로 수렴해 재인증 storm이 된다.
@@ -407,7 +414,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     케이스도 테스트 대상이다.
     (⚠️ **이 문서의 코드 참조 규약**: `파일:라인`이 아니라 **심볼 앵커**를 쓴다 — 라인은 같은 커밋
     안에서도 밀린다. 실측 사례 2건: 2026-07-26 seam 커밋에서 `app/subscription.py` 4건이 5줄씩,
-    §B5·§D7의 `main.py`은 실제 994행이라 66줄 어긋나 있었다. 다시 숫자로 바꾸지 말 것 —
+    §B5·§D7의 `main.py:928`은 실제 994행이라 66줄 어긋나 있었다. 다시 숫자로 바꾸지 말 것 —
     **다른 줄을 가리키는 각주 포인터도 같은 이유로 금지**한다.)
   - ⚠️ **`authoritative_verified_at`도 monotonic이어야 한다**(A2와 같은 축). 현행 캐시는 wall clock으로
     나이를 잰다(`EntitlementCache.get`의 `age = clock.wall() - cached_at` — 2026-07-26 seam 이후) — wall clock이
@@ -465,22 +472,6 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     (1B provider의 owner/epoch 패턴과 개념 동일).
     ⚠️ **게시만이 아니라 소비(lease 발급)까지 fence**해야 한다 — 폐기된 검증 결과로 새 15분 lease를 발급하면
     무효화가 무의미하다.
-    - **소비 fence 방식 확정 (2026-07-28)** — `등록(비활성) → is_current 1회 재확인 → 활성화` 순서다.
-      `snapshot()`의 epoch를 lease에 실어 두고 **활성화 직전에 한 번** 재확인한다.
-      - **왜 충분한가**: epoch는 전진만 하므로 재확인 **이전**의 `bump`는 반드시 잡힌다. 재확인 **이후**의
-        `bump`는 *정상 발급 직후 webhook이 온 것*과 구별되지 않는 통상적 중도 무효화이고,
-        `compute_lease_expiry`가 `verified_at_mono`에 고정된 3-way min이라
-        `expiry <= premium_verified_at + LEASE_MAX < bump 시각 + LEASE_MAX` — **A1/A3의 15분 상한 안**이다.
-        따라서 공유 lock도, registry↔store 결합도 필요 없다.
-      - ⛔ **`is_current()`만으로는 fence가 아니다** — `bump()`는 strict cache의 lock만 잡으므로
-        **B4 lock을 쥔 채 호출해도 배제되지 않는다**. (구 문구 "critical section 안에서 호출"은 오류였다.)
-      - ⛔ **매 전송마다 epoch를 검사하지 말 것.** 이 조항이 fence하라는 것은 *발급*이고 **B1의 검사 항목에
-        epoch 항은 없다**(§B1). 확대하면 A4-2의 `unknown → invalidate`(denylist `TEST` 단독)와 곱해져
-        `RENEWAL`·`PAYWALL_*` 같은 고빈도·비-entitlement 이벤트마다 — 권한이 오히려 **강해진** 사용자까지 —
-        live lease를 중도에 끊는다. 지키는 것은 거의 없고 S5(15분)를 조용히 0으로 재가격한다.
-      - ⚠️ 정정: 이 경쟁의 피해를 **"A1 상한이 깨진다"로 정당화하지 말 것** — 위 3-way min 때문에 깨지지 않는다.
-        근거는 (1) 이 조항이 발급 fence를 명문으로 요구한다는 것, (2) epoch tagging이 있어야 후속
-        bump-driven revoke가 완전해진다는 것, 둘뿐이다.
     - ⚠️ **lookup-time epoch 검사만으로는 게시 fence가 되지 않는다** (2026-07-27). 그건 *소비*만 막는다 —
       구 owner가 쓰기 자체를 하면 **이미 기록된 fresh 항목을 덮어써** 멀쩡한 상태를 파괴한다.
       → `put(result, expected_epoch=N)`이 **쓰기 시점에** 현재 epoch와 비교해 불일치면 **쓰기를 거부**한다(CAS).
@@ -560,7 +551,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   | 계층 | 내용 |
   |---|---|
   | **저장 (UID 키, concern별 분리)** | `PremiumObservation(active: bool, verified_at_mono, epoch)` / `IdentityAuthorityFound(disabled, tokens_valid_after_ms, verified_at_mono, epoch)` \| `IdentityAuthorityNotFound(verified_at_mono, epoch)` |
-  | **파생 (요청별: 관측 + 토큰 claims)** | `Active(premium_verified_at_mono, identity_verified_at_mono)` \| `Inactive(reason)` \| `NeedsVerification(concern)` |
+  | **파생 (요청별: 관측 + 토큰 claims)** | `Active(...)` \| `Inactive(reason, ...)` \| `TemporarilyUnavailable(reason, retry_after_seconds)` |
 
   - **identity는 합타입**(Found/NotFound) — `not_found=True`인데 watermark가 존재하는 불가능 상태를 만들 수 없다.
     타입 검사기가 없는 리포라도 이득이 있다: NotFound에서 `.tokens_valid_after_ms` 접근이 **오용 지점에서 즉시**
@@ -570,39 +561,18 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **`Inactive.reason`** = `premium_inactive` \| `token_revoked` \| `account_disabled` \| `account_deleted`.
     `token_revoked`는 **저장 대상이 아니다** — `(uid, iat)` 단위 파생 판정이며, watermark 단조 증가 + `iat` 고정이라
     그 토큰에 대해서만 영구적이다. 새 토큰은 같은 record에서 `Active`를 파생한다.
-  - ⚠️ **`TemporarilyUnavailable`은 파생 verdict가 아니라 verifier(I/O) 반환**이다 (2026-07-28 정정).
-    파생 계층이 관측이 없거나 낡았을 때 돌리는 것은 **`NeedsVerification(concern)`** — 내부 제어
-    신호이지 wire 상태가 아니다. 둘을 섞으면 "아직 안 물어봤다"가 retryable **장애**로 클라에 나가고
-    재검증 자체를 건너뛴다(§8-C상 `temporarily_unavailable`은 전체-요청 + retry_after + registry 불변).
   - **`TemporarilyUnavailable.reason`** = 판정 불가 사유만. ⛔ **구매 전파(propagation)를 여기 넣지 말 것** —
     RevenueCat이 authoritative inactive를 반환했으므로 "판정 불가"가 아니다(§A4-1).
-  - **programming·config 오류는 verdict가 아니다.** 검증기는 내부 예외로 전파하고 **캐시하지 않는다.**
+  - **programming·config 오류는 verdict가 아니다.** 내부 예외로 전파하고 **캐시하지 않으며 wire 오류로도 접지 않는다.**
     상위의 광범위 `except Exception`이 이를 `temporarily_unavailable`(retryable)로 바꾸면 재시도 storm이 되므로,
     **그 변환이 없음을 mutation 테스트로 잠근다**(docstring caveat만으로는 강제가 아니다).
-    - **정정 (2026-07-28) — "wire 오류로도 접지 않는다"는 *배선 경계*에는 적용되지 않는다.**
-      금지 대상은 **광범위 `except`에 의한 조용한 세탁**이지, 타입 기반의 의도된 변환이 아니다.
-      그냥 전파시키면 **더 나쁘다** — 실측: `app/main.py`의 `except Exception`이 루프를 빠져나가고
-      `websocket_endpoint`의 `finally`가 `registry.remove_websocket()`을 불러 **그 연결의 구독이 통째로 삭제**되며
-      클라에는 오류 프레임도 가지 않는다(§8-A "조용한 실패 금지" 위반 + C4 "registry 불변"과 정반대).
-      클라의 즉시 재연결이 `retry_after`보다 빨라 storm도 오히려 조인다.
-    - **단일 정책**: 검증기 = 변환 **금지**(raise) / 배선 경계 = **타입 기반** catch로 변환 **필수**
-      (`temporarily_unavailable` + `retry_after` 상한값, transient와 **분리된 카운터** + ERROR 로그,
-      registry·기존 lease 불변). §8-C의 `temporarily_unavailable` 정의가 "인증·권한을 **판정할 수 없음**"이라
-      죽은 API key도 그 정의에 들어간다 — 운영자 신호는 wire가 아니라 카운터·로그가 낸다.
 
   **A6-2 관측 신선도 (freshness는 verdict가 아니라 관측에 붙는다)**
 
   - **양성 관측**(`active=True`, `disabled=False`)은 **A1 horizon이 이미 상한**을 건다(보안 방향).
   - **부정 관측**은 horizon을 타지 않으므로 **별도 bound가 필요**하다(가용성 방향).
-    `token_revoked`에는 **상수가 없다** — 저장된 관측이 아니라 요청마다 `iat`로 파생하는 판정이라
-    "갱신" 개념 자체가 없기 때문이다. 반면 `disabled=True` / `not_found=True`는 **재활성화·uid 재생성**이
-    가능해 monotone이 아니라서 상한이 필요하다.
-    ⛔ 이걸 "stale record라도 revoke는 즉시 판정" 최적화로 읽지 말 것 — **구현은 record 신선도를 먼저 본다**
-    (stale + revoke 증명 → `NeedsVerification`, 재검증 후 `Inactive`로 결과는 같고 RTT 1회를 더 쓴다).
-    최적화하려면 (a) watermark 단조성상 *stale이 "revoked"면 건전 / "not revoked"면 불건전*이라
-    **revoke 술어에만** 적용해야 하고, (b) 실측상 freshness 앞에 단락을 넣으면 SDK와 맞춘
-    `disabled > revoked` 우선순위가 **깨진다**. 정확성 이득 0이라 채택하지 않았다
-    (`tests/test_strict_authz.py::TestStaleRecordDoesNotShortCircuitRevoke`가 현 동작을 못 박는다).
+    `token_revoked`만은 예외 — 파생 판정이고 그 토큰에 대해 monotone이라 갱신이 무의미하다.
+    반면 `disabled=True` / `not_found=True`는 **재활성화·uid 재생성**이 가능해 monotone이 아니다.
   - 상수 2개는 **값이 같아도 독립**이다(파생 관계로 묶지 말 것 — 위험 프로파일이 다르다):
 
     ```
@@ -620,70 +590,25 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 #### B. 강제 지점
 
 - **B1 전송 직전 인가 (`send_if_authorized`)** — 최종 강제는 **각 send 직전**이다. live publish와 초기 snapshot 모두.
-  - 왜: `get_subscribers`(app/topic_dispatcher.py) 결과를 루프에서 `await send_json`하므로, 느린 구독자가 있으면
+  - 왜: `get_subscribers`(app/topic_dispatcher.py:144) 결과를 루프에서 `await send_json`하므로, 느린 구독자가 있으면
     조회와 실제 전송 사이 간격이 벌어진다. 조회 시점 필터만으로는 경계를 넘긴 전송을 못 막는다.
   - 검사 항목: lease identity(ws, topic, uid, **`lease_id`**) + `now < expires_at`.
 - **B2 조회 경계 필터는 1차 방어** — `get_subscribers`는 만료분을 제외하되 **read-only**(즉시 삭제 금지).
   삭제까지 하면 sweep이 `reauth_required`를 보낼 근거를 잃는다.
   **소유권**: 조회·전송 경계 = *강제* / sweep = *생명주기*(통지 후 제거).
-- **B2a 전송 실패 시 registry 정책** — 현행 3곳(`topic_dispatcher.py`의 `publish_topic`·`publish_topic_detailed`, `topic_initial_snapshot.py`의 전송 경로)이
+- **B2a 전송 실패 시 registry 정책** — 현행 3곳(`topic_dispatcher.py:155`, `:223`, `topic_initial_snapshot.py:176`)이
   send 실패에서 `registry.remove_websocket(ws)` = **그 연결의 전 topic을 통지 없이 삭제 + 소켓은 유지**한다.
   1C에서 이대로 두면 **ack이 N개를 광고한 직후 snapshot 1건 실패로 N개가 사라지고**, 클라는 유효 lease를 믿고
   다음 재인증까지(최대 ~12분) 무데이터·무오류 상태가 된다 — "ack이 권위 있는 상태"(D2)가 무통지로 거짓이 된다.
   → **전송 실패는 연결이 죽은 것으로 간주하고 소켓을 닫는다**(C3의 sweep 실패 처리와 동일 정책).
   부분 삭제 후 소켓 유지 금지 — 클라가 재연결하면 ack으로 상태를 다시 확정한다.
-- **B3 상속 경로** — `get_subscribers`와 이를 호출하는 `subscriber_count`만 필터를 상속한다.
-  `subscribed_connection_count`는 `len(self._subscriptions)` 직접 반환이라 **미상속** —
+- **B3 상속 경로** — `get_subscribers`와 이를 호출하는 `subscriber_count`(:109)만 필터를 상속한다.
+  `subscribed_connection_count`(:99)는 `len(self._subscriptions)` 직접 반환이라 **미상속** —
   expiry 미반영 관찰 지표이며 **전송·인가 guard로 쓰지 말 것**.
 - **B4 연결별 state-transition lock** — send만 잠그면 부족하다. sweep이 만료 상태를 **읽은 뒤** 재인증이
   registry를 갱신하는 read-then-update 경쟁이 남는다. 같은 lock이 **UID binding · lease CAS · ack/`reauth_required` 송신 ·
   registry 활성화**를 함께 직렬화해야 한다.
   - 순서 고정: **`ack` → registry 활성화(live 대상 편입) → `snapshot`**. 없으면 ack 이전 live 수신, stale 통지 역전.
-  - **요청 단위 트랜잭션 (구현: `app/topic_lease_registry.py`의 `apply_subscribe`)** —
-    한 subscribe 요청 = **lock 1회 · ack 1건 · 전부 아니면 전무**. topic 단위 API로는 성립할 수 없다:
-    (i) topic마다 ack을 보내면 §8-B의 "요청당 1건"과 클라의 `request_id` 상관이 깨지고,
-    (ii) 마지막 topic에서만 ack을 보내면 앞의 topic들이 **ack보다 먼저 활성화**되어 위 순서 고정이 무효가 된다.
-    또 topic마다 lock을 잡았다 놓으면 그 사이 sweep·unsubscribe가 끼어들어 ack이
-    **한 번도 존재한 적 없는 상태**를 광고할 수 있다(D2의 "단일 snapshot" 위반).
-  - **ack 자료는 registry가 만들어 sender에 넘긴다** — sender가 registry 조회로 만들면 그 시점
-    새 lease는 아직 미활성이라 **보이지 않는다**. ack이 방금 수락한 topic을 빠뜨리고, 클라는 구독이
-    드롭됐다고 결론짓는데 서버는 곧바로 그 topic을 발행한다.
-  - **`send_ack` 계약** — lock을 쥔 채 실행되므로: ① 성공 시 `True` 반환(⛔ `wait_for`의 제어 흐름은
-    배달의 증거가 아니다 — sender가 `CancelledError`를 삼키고 정상 반환하면 `wait_for`도 **정상 반환**한다),
-    ② `CancelledError`를 삼키거나 shield 금지, ③ **자체 timeout 금지**(예산은 registry 소유. sender가 던진
-    `TimeoutError`는 우리 예산 만료와 구별 불가라 호출자 버그가 "죽은 클라"로 오분류된다),
-    ④ registry 재진입 금지(`asyncio.Lock`은 재진입 불가 → hang. 구현은 **task 동일성**으로 감지해
-    `ReentrantRegistryCall`로 시끄럽게 실패시킨다. ws만 보면 sweep·teardown의 정당한 대기까지 오탐한다).
-  - **결과 타입이 호출자의 행동을 정한다** — `Applied`(연결 생존, ack 이미 나감) /
-    `Discarded`(연결 생존, **재시도**) / `Rejected`(연결 생존, 클라에 오류 통지) /
-    `ConnectionTerminated`(**연결 사망 → 소켓을 닫는다**).
-    ⛔ **종단 타입은 하나뿐이어야 한다.** 원인별로 나누면 호출자가 전부 알아야 하고, 하나라도
-    놓치면 "죽은 연결에 재시도"가 되살아난다. 진단은 `reason`이 지고 타입은 **행동**을 진다.
-    ⛔ 그리고 **tombstone을 찍는 모든 경로는 종단 타입으로 답해야 한다.** 실측된 결함: 접근
-    축소가 예정된 중단이 tombstone을 찍으면서 `Discarded`를 그대로 반환해, 그 타입의 계약대로
-    재시도한 호출자가 영원히 `connection_closed`를 받았다 — 클라는 데이터도 오류도 없는 상태에
-    갇힌다(D2가 "ack이 권위"라고 못박은 바로 그 실패 모드).
-    ⛔ **예외 채널도 같은 규칙을 받는다.** 접근 축소 중 예외(축 위반 등)가 나면 tombstone은
-    찍히는데 결과값이 없어, 결과 타입만 분기하는 호출자는 close 필요성을 알 수 없다. 전용 예외
-    (`ConnectionTerminatedError`, 원인은 `__cause__`)로 감싸 던진다. ⚠️ `CancelledError`는
-    **감싸지 않는다** — asyncio의 구조적 취소가 그 예외로 동작하므로 감싸면 취소 전파가 깨진다
-    (`SystemExit`/`KeyboardInterrupt`도 마찬가지. 셋 다 `BaseException`이라 `Exception`만 감싸면
-    정확히 갈린다). 지금은 직렬 endpoint라 예외가 상위 루프를 빠져나가 teardown으로 이어져
-    가려지지만, B5(b) task-spawn 배선에서는 task 예외가 소켓 종료로 연결되지 않으면 다시
-    무데이터·무오류 상태가 된다.
-  - **접근을 줄이는 전이는 중단돼도 되돌아가지 않는다** — C2 eviction이 예정된 요청이
-    어떤 이유로든(만료 horizon · fence 실패 · 축 위반 예외 · ack 실패 · 취소) 중단되면 그 연결을
-    **닫는다**(tombstone). ⛔ 되돌리면 그만큼의 접근이 계속 살아 있어야 하는데, 그게 정확히
-    C1/C2가 막으려는 상태다. 실측(구 구현): 만료 horizon·fence·ValueError 세 경로 모두에서
-    B의 소켓이 A의 lease로 계속 인가됐다 — 제거가 **발급 성공에 종속**돼 있었기 때문이다.
-    중단 경로마다 부분 커밋 규칙을 만드는 대신 tombstone 하나로 접근을 0으로 만든다
-    (의도한 축소보다 크거나 같으므로 항상 안전한 쪽). ⚠️ 줄일 것이 없던 중단은 해당 없음 —
-    정상 webhook 경쟁이 멀쩡한 연결을 끊으면 안 된다.
-  - **ack 실패 = 연결 사망**(B2a와 동일 정책) — "발급 안 함"으로 끝내면 안 된다.
-    취소는 이미 transport 버퍼에 들어간 프레임을 **되돌리지 못하므로**(websockets legacy는 프레임 전체를
-    버퍼에 넣은 뒤 drain을 await한다), 역압이 풀리면 그 ack이 **나중에 배달**된다 →
-    클라만 lease를 가졌다고 믿고 서버엔 없는 상태(데이터 0·오류 0·통지 대상 lease도 없음).
-    → registry가 직접 tombstone을 찍어 같은 소켓의 재발급을 fail-closed로 막고, 호출자는 소켓을 닫는다.
   - **snapshot build는 lock 밖**에서(무거움), **전송 직전 lock을 다시 잡아 lease를 재검증**한다(B1과 결합).
   - 인증·RevenueCat·DB 조회도 lock 밖에서 하고, lock 안에서 UID/`lease_id`를 재확인한 뒤 전이를 확정한다.
 
@@ -697,10 +622,7 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
   - **(b) 결정 = 메시지 dispatch는 연결별 동시(task spawn), 상태 전이는 B4 lock으로 직렬화.**
     무거운 I/O(토큰 검증·entitlement·snapshot build)는 lock 밖, 전이·송신만 lock 안.
   - **(c) lock 안 I/O에는 timeout 필수**(D-const) — 역압 걸린 클라가 자기 lock을 물고 unsubscribe를 봉쇄하면 안 된다.
-  - **(d) identity 단조성** — ✅ **해소됨(B5(d), 2026-07-29)**: live 소켓의 UID 재바인딩 자체를
-    없앴으므로(cross-UID = 연결 종료, C1) 도착 순서에 의존할 전이가 남지 않는다. 아래는 그 결정에
-    이른 분석 기록이다.
-    동시 처리가 되면 C1의 UID 재바인딩이 **도착 순서에만** 의존해선 안 된다.
+  - **(d) identity 단조성**: 동시 처리가 되면 C1의 UID 재바인딩이 **도착 순서에만** 의존해선 안 된다.
     늦게 도착한 구 UID subscribe(또는 C4 retry)가 새 바인딩을 되돌리지 못하도록 구 요청을 폐기해야 한다.
     - ⛔ **`auth_time` 기준 단조 비교는 폐기 (2026-07-27)**. 두 가지로 성립하지 않는다:
       (1) refresh에서 `auth_time`이 **유지**되므로 같은 세션 안의 두 요청(= C4 retry)을 정렬하지 못한다.
@@ -708,87 +630,40 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     - ⛔ **서버 관측 도착 순서로도 복원 불가**. 단일 WebSocket은 TCP 순서 보장이라 도착 역전이 없고,
       실제 실패 모드는 **클라가 stale intent를 나중에 보내는 것**(구 UID 요청의 지연 재시도)이다.
       서버는 그것을 최신 요청으로 볼 수밖에 없고, 구 UID의 토큰이 아직 유효하면 **검증으로도 거를 수 없다**.
-    - → **의도 순서는 클라만 안다**. ✅ **결정(2026-07-29): 후자 — 서버가 live 소켓의 cross-UID
-      subscribe를 거부하고 재연결을 요구한다**(C1 참조). 전자(클라 소유 generation)는 "subscribe마다
-      증가" 형태로는 **불완전**하다: C4 재시도가 새 generation을 받으면 stale 요청이 오히려 최신으로
-      보인다. 정확히 구현하려면 원래 identity intent의 generation을 재시도에서도 보존하고 `request_id`와
-      분리해야 해서 wire·상태기계·양 플랫폼 테스트 부담이 커진다.
+    - → **의도 순서는 클라만 안다**. 클라 소유의 identity generation(요청 구성 시점에 단조 증가)을 실어
+      보내거나, 서버가 **live 소켓의 cross-UID subscribe를 거부**하고 재연결을 요구한다(둘 중 택일, C1에서 결정).
       ⚠️ 클라 generation은 **적용 여부만** 정하고 **어떤 신원을 부여할지는 여전히 토큰 검증이 정한다** —
-      권한 위임이 아니다. (구 D2의 서버 소유 `identity_generation`은 2026-07-29 제거돼
-      이름 충돌 우려가 사라졌다 — 되살린다면 다시 확인할 것.)
-  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield** — ⚠️ **열린 항목(축소됐을 뿐
-    소멸하지 않았다)**. 한때 "B5(d)로 소멸했다"고 적었는데 **틀렸다**: tombstone은 **이미 통과한
-    판정을 소급 취소하지 않는다**. 실측 순서 — ① 발행 task가 `authorizes_send` 통과 →
-    ② cross-UID 요청이 tombstone → ③ 그 task가 `send_json` 실행(그 시점 재판정하면 False인데도
-    이미 나간다). 즉 **UID 전환 직후 구 UID 데이터가 전달될 수 있다.**
-    ⛔ **"1건"이 아니다.** tombstone 시점에 **이미 B1을 통과해 in-flight인 발행 전부**가 나간다.
-    topic별 단일 in-flight 보장이 없으므로(publish 직렬화 계약 부재) **유한 상한이 없다** —
-    실측: topic 3개 × 겹친 tick 2회 = **6건**이 tombstone 이후 전송됐다.
-    - 위험의 **모양이 바뀌었다**: 서버 쪽 바인딩은 A로 일관되고 lease도 유효하다. 어긋난 것은
-      **클라의 신원**(이미 B로 전환)이다.
-    - ⛔ **서버만으로는 닫히지 않는다** — 요청이 도착하기 **전에** 이미 발사된 메시지는 send lock으로도
-      막지 못한다. 1차 닫힘은 **클라 소유 `connectionGeneration`으로 구 연결 결과를 폐기**하는 것이고(F),
-      서버 측 축소는 연결별 writer 격리 후 send lock이다.
-      ⚠️ 클라 테스트는 **여러 건이 동시에 도착하는** 형태여야 한다 — 1건만 폐기하는 테스트는
-      실제 잔여(상한 없는 다건)를 잠그지 못한다.
-    - 그래서 전송을 지금 lock 안으로 넣지는 않는다 — 잔여 위험을 없애지 못하면서 느린 한 연결이
-      fanout 전체를 지연시킨다(C-API 6 참조).
-    - ⛔ 단 **publish fanout이 연결 lock을 잡으면 안 된다**. `publish_topic`은 구독자를 **순차 루프**로
-      돌므로(`app/topic_dispatcher.py`), 역압 연결 A가 ack으로 자기 lock을 최대 5초 쥔 사이 루프가 A에서
-      막히면 **B·C의 tick까지 5초 밀린다** — 연결별 lock으로 얻으려던 격리가 통째로 사라진다.
-      → B1 재검증은 **lock-free 조회**(lease identity + 만료 비교)로 둔다. (e)의 잔여는
-      **열려 있고**(위 (e) 참조) send lock으로도 닫히지 않으므로, lock을 넣어 fanout을
-      지연시킬 이유가 없다.
+      권한 위임이 아니다. ⚠️ D2의 서버 소유 `identity_generation`과 **이름이 충돌하지 않게** 할 것.
+  - **(e) send 직전 재검증(B1)과 실제 `await send_json` 사이의 yield**에 UID 재바인딩이 끼면 in-flight 메시지 1건이
+    새 UID로 갈 수 있다 → 전송도 lock 안에서 하거나, 전송 직후 결과를 폐기할 수 있어야 한다(B4와 일관).
 
 #### C. 상태 전이
 
-- **C1 연결당 UID 고정** — WebSocket 하나는 **평생 정확히 하나의 UID**에 바인딩된다.
-  - 미바인딩 → 바인딩 / 바인딩 UID == 토큰 UID → C2 증분 규칙 /
-    바인딩 UID != 토큰 UID → **tombstone + `reconnect_required` + 연결 종료**.
-  - ⛔ **live 소켓의 purge + rebind 규칙은 폐기됐다**(B5(d) 결정, 2026-07-29). 새 UID는
-    **새 연결에서만** 바인딩된다. 단순 거부로 연결을 살려 두는 것도 안 된다 — 구 UID 데이터가
-    계속 전송될 수 있으므로 tombstone 후 종료해야 한다.
-  - **근거**: purge는 *적용하기로 한* 전이의 의미만 정하고 *적용할지*는 정하지 않는다. B5(d)의
-    stale 요청 방어가 없으면 A→B 전환 뒤 지연 도착한 **구 UID subscribe**(C4 retry, A 토큰은
-    아직 유효)가 B의 구독을 purge하고 A로 재바인딩한다 — 거부 정책이면 무해했을 요청이
-    purge에서는 **파괴적**이다. 종료 정책에서는 stale 요청이 새 연결에 도착해도 cross-UID로
-    탐지돼 그 연결이 종료될 뿐, **상태를 되돌릴 수 없다**.
-  - **클라 측**: UID 직접 전환을 감지하면 오류 응답을 기다리지 말고 **선제적으로 재연결**한다.
-    desired topics는 유지하고 구 connection task만 폐기한 뒤 새 연결에서 다시 subscribe한다.
-  - ⚠️ 구 purge 정책의 세부 절차(처리 순서 · `removed_topics` 교체 규칙 등)는 **삭제했다**.
-    정본에 폐기된 지시를 "기록용"으로 남기면 현재형 지시로 읽힌다 — 이력은 git이 갖는다.
-    ack이 전체 상태를 실어 권위를 갖는다는 요구는 purge와 무관하게 유효하며 **D2가 정본**이다.
-
-  - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS `FXiApp.swift`의 signedOut 분기에서만 WS stop /
+- **C1 연결당 UID 고정** — WebSocket 하나는 임의 시점에 **정확히 하나의 UID**에 바인딩된다.
+  - 미바인딩 → 바인딩 / 바인딩 UID == 토큰 UID → C2 증분 규칙 / 바인딩 UID != 토큰 UID → **그 ws의 기존 구독 전부 제거** 후 재바인딩.
+  - **처리 순서**: B 토큰 **검증 성공 즉시** A의 구독 제거 → 이후 B의 premium 확인이 실패해도 **A 구독을 복원하지 않는다**.
+    반대로 **B 토큰 자체가 무효면 A의 유효 lease는 건드리지 않는다**.
+  - 제거는 `reauth_required`를 발신하지 않는다(lease 만료가 아님). **대신 ack이 결과 전체를 실어 권위를 갖는다** —
+    ack의 **`active_subscriptions`(그 연결의 최종 구독 전체 + topic별 `lease_id`·잔여 duration)** 로 클라가 서버 상태에 수렴한다(D2).
+    ⚠️ ack이 **이번 요청 topic 결과만** 담으면, B가 일부 topic만 요청했을 때 클라는 언급되지 않은 A 시절 topic을
+    여전히 accepted로 오인한다 — "ack이 권위 있는 응답"이 사실이 되려면 전체 상태를 실어야 한다.
+  - **도달 가능성**: A→B 직접 전환은 `.signedOut`을 거치지 않는다(iOS FXiApp.swift:124-126은 signedOut에서만 WS stop /
     AuthService listener의 account-switch window). 소켓이 살아 있는 채 UID만 바뀐다.
     그리고 이건 **서버 측 인가 경계**라 클라 teardown 가정에 기대면 안 된다.
 - **C2 재인증 replacement** — 인증 성공한 subscribe에서 **reject된 topic은 registry에서 제거**한다.
-  `TopicRegistry.register`가 additive union(`existing.update(topics)`)이라 "accepted만 추가"하면
+  `TopicRegistry.register`가 additive union(`existing.update(topics)`, :68)이라 "accepted만 추가"하면
   권한 잃은 이전 등록이 lease 만료까지 잔존한다.
   **이번 요청에 언급되지 않은 topic은 불변**(증분 subscribe 보존) — 단 **같은 UID 전제**이며 UID 변경 시 C1이 우선한다.
-  - **구현**: `apply_subscribe`가 accepted와 **`rejected_topics`를 함께** 받는다. accepted만 받는 API로는
-    이 조항을 표현할 수 없다 — 권한 잃은 기존 등록이 lease 만료까지(최대 15분) 살아남는다.
-    제거는 **실제로 활성이던 것만** 대상이고, 그 결과가 `removed_topics`다(= **상태 델타**이지
-    이번 요청의 거부 목록이 아니다. 거부됐지만 원래 없던 topic은 제거된 것이 아니다).
-    한 topic이 accepted이면서 rejected이면 D5 단계상 불가능한 입력이므로 **호출부 계약 위반으로 크게 실패**시킨다.
 - **C3 sweep ↔ 재인증 CAS (claim-then-notify)** — sweep이 만료 항목을 캡처한 뒤 `await send_json` 하는 동안
   재인증이 lease를 갱신하면 **구 sweep이 새 lease를 제거**할 수 있다.
   - **lock 안에서 만료 `lease_id`를 원자적으로 claim/mark** → 그 다음 통지 → 제거. "발신 후 제거"만으로는
     send hang 시 다음 sweep이 **같은 `lease_id`를 중복 통지**한다.
   - 제거·갱신은 `(ws, topic, lease_id)` **CAS** — 자기 lease일 때만. 갱신된 lease는 보존된다.
-  - ⚠️ **sweeper의 lock 획득은 blocking이 아니다** — ack이 최대 `ACK_TIMEOUT_SECONDS` 동안 연결 lock을
-    쥐므로(B4), 단일 sweeper가 연결을 순회하며 무한 대기하면 역압 연결 K개에 대해 한 사이클이
-    최대 5s×K 늘어난다. 그러면 **무관한 다른 연결**의 만료 통지가 D-const의 "만료→통지 10초"
-    관측 계약을 넘긴다(보안 상한은 B1이 지키므로 유출은 아니다).
-    → 짧은 상한으로 시도하고 경합 시 **그 연결만 건너뛰어 다음 사이클로 미룬다**.
-    ⚠️ **"지연 상한이 sweep 주기 1회"는 성립하지 않는다** — 관측 지연 식의 **정본은 D-const**이고
-    유한 상한이 아니다(lock 획득에 공정성·aging이 없어 연속 skip에 상한이 없다 — 실측 3회 연속).
-    진짜 상한이 필요하면 escalation(n회 연속 시 blocking 획득 또는 강제 teardown)을 계약으로 세울 것.
   - `send_json` 실패·timeout 시 **소켓 전체를 정리**한다(부분 상태 잔존 금지).
   - **claim된 항목(`claimed_expired`)은 제거 전이라도 `get_subscribers`·`send_if_authorized`에서 즉시 제외**된다.
     아니면 통지를 보내는 동안 live publish가 다시 통과한다.
-- **C4 일시적 실패는 registry를 바꾸지 않는다** — Firebase 인증서/네트워크 장애(main.py → 503)나
-  RevenueCat PENDING(main.py → 503)을 `invalid_token`/`premium_required`로 접으면 **기존 구독을 잘못 제거**한다.
+- **C4 일시적 실패는 registry를 바꾸지 않는다** — Firebase 인증서/네트워크 장애(main.py:2827 → 503)나
+  RevenueCat PENDING(main.py:73 → 503)을 `invalid_token`/`premium_required`로 접으면 **기존 구독을 잘못 제거**한다.
   → 전체-요청 오류 `temporarily_unavailable`(retryable)을 추가하고, 이 경우 **registry 불변 + lease 미연장**.
   - ⚠️ **transient 소스는 Firebase·RevenueCat만이 아니다**: KRX `has_entitlement`(app/entitlements.py)는
     **캐시 없는 동기 DB 조회**라 DB 순단 시 False로 접히면 C2 replacement가 **정상 사용자의 krx 등록을 제거**한다.
@@ -798,344 +673,6 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
     `retry_at = max(0, min(retry_after_seconds, lease_remaining − safety))`.
     `lease_remaining <= safety`면 대기 0 — 기다리지 말고 **즉시 재인증 또는 reconnect**한다
     (`retry_after`를 곧이곧대로 기다리다 lease가 만료되면 데이터가 끊긴 뒤에야 복구를 시작하게 된다).
-
-#### C-API. registry API 선결 요구사항 (배선·sweep 슬라이스 진입 전)
-
-> 같은 실패가 세 번 반복됐다 — "계획이 요구하는데 registry API가 그것을 표현할 수 없다"
-> (① ack이 lock 밖 → ② topic 단위 ack → ③ C2 eviction·tombstone 조회·연결별 generation).
-> 매번 시그니처가 바뀌었다. 네 번째를 없애기 위해 **남은 항목을 미리 열거**한다.
-> 지금 만들지 않는 이유는 호출자가 없기 때문이다(검증 불가능한 기계장치는 만들지 않는다) —
-> 그러나 해당 슬라이스는 **이 목록을 시그니처 변경 예산으로 잡고** 시작해야 한다.
-
-1. ~~**연결·lease 열거** (C3)~~ — **닫힘**. `connections_snapshot()`이 live view가 아니라
-   **스냅샷**을 준다(순회 중 추가·제거·GC로 깨지지 않고, 그 사이 사라진 연결은 다음 주기가 본다).
-2. ~~**topic 조회 API** (B2/B3)~~ — **닫힘(2026-07-29 land)**. `subscribers(topic, *, now_mono)` /
-   `subscriber_count`(= `len(subscribers(...))`, 상속) / `connections_with_subscriptions()`
-   (topic·시각 미수용, 미상속) / `grant_for` / `authorizes_grant`. 아래는 그때의 문제 서술이다 —
-   registry에 topic으로 묻는 진입점이 없어 `get_subscribers`의 만료 필터가
-   놓일 자리가 없다. B3가 요구하는 **비대칭 상속**(`subscriber_count`는 상속 / `subscribed_connection_count`는 미상속)도 진술 불가.
-   ⚠️ **구현 형태 결정 (2026-07-29)**: 요구의 실체는 "만료 필터가 놓일 자리 + B3 비대칭을 진술할 수 있는
-   API"이고, **현 구현은 `_active` 전수 스캔**이다 — topic→ws 역인덱스를 **만들지 않는다**.
-   근거: (i) 인덱스는 같은 사실의 **두 번째 표현**이라 동기화 지점(subscribe 커밋[dict 통째 교체]·
-   unsubscribe·`remove_locked`·`teardown_locked`·§C2 eviction·GC)이 생기고 어긋남이 **데이터 0·오류 0**으로
-   조용하다. (ii) 만료는 per-lease·시간 의존이라 인덱스가 흡수하지 못해 후보마다 `authorized_lease`가
-   여전히 돈다 — 인덱스가 아끼는 것은 비구독 연결의 상수 시간뿐이다. (iii) legacy `get_subscribers`도
-   **이미 전수 스캔**이라 성능 프로필이 바뀌지 않는다(배선 회귀 시 원인이 갈리지 않는다).
-   ⛔ 성능 수치는 근거로 쓰지 않았다 — 후보 설계들의 벤치가 4배 엇갈렸고 재측정하지 않았다.
-   **번복 조건**: K ≥ 2000 ∧ 구독률 낮음 ∧ 질의율 높음이 **측정**될 때 별 슬라이스로 인덱스 도입.
-   API 모양이 topic 질의라 저장을 바꿔도 호출자는 안 바뀐다(되돌리는 비용이 registry 내부에 갇힌다).
-3. ~~**`claimed_expired` 상태 + 조회 즉시 제외** (C3)~~ — **닫힘**. `claim_expired_locked`가
-   원자적으로 표식을 남기고, 표식이 있는 topic은 `authorized_lease`·`authorizes_send`에서 즉시
-   빠진다. ⚠️ 만료 시각만으로는 못 막는다 — 인가 판정은 **호출자가 넘긴 `now`**를 쓰므로 통지 중
-   tick이 과거 시각을 쓰면 통과한다. 표식이 그 축을 닫는다.
-   ⛔ **"이미 claim된 것은 건너뛴다"를 넣지 말 것.** 이 설계에서 중복 통지 경로는 없고(통지는
-   lock 안, hang·실패는 소켓 정리), 그 가드는 **취소** 경로에서 통지도 제거도 못 받는 좀비를
-   만든다(실측). 다시 담아야 다음 주기가 자가 복구한다.
-4. ~~**lock 보유 상태의 제거 경로 + bounded-try lock 획득** (C3/B4)~~ — **닫힘**.
-   `remove_locked`가 public이고 lock 미보유 시 `LockNotHeld`로 시끄럽게 실패한다(조용한 §B4
-   우회로 방지). 획득은 `asyncio.wait_for(lock.acquire(), timeout)` + 경합 시 **그 연결만 skip**
-   (실측 py3.13: timeout된 acquire는 lock을 누수하지 않는다 — 회귀 테스트로 잠금).
-5. ~~**`apply_unsubscribe`(요청 단위)** (D8)~~ — **닫힘**. lock 1회 · ack 1건 · 제거는 **topic 단위**
-   (사용자 의도라 그 사이 재인증으로 lease가 갱신됐어도 제거가 맞다 — §C3 sweep의 `lease_id` CAS와
-   의도적으로 대조된다: 그쪽은 자기가 **관측한 그 lease**에만 행동해야 한다).
-   `id_token`·uid·snapshot·cache를 **인자로도 받지 않는다** — 받으면 배선이 검증에 쓰고 싶어진다.
-   ⛔ 순서가 `apply_subscribe`와 **반대**다: 여기는 `제거 → ack`, 저기는 `ack → 활성화`. 규칙은 하나 —
-   **위험한 쪽을 나중에** 둔다(subscribe는 "클라가 모르는 데이터가 먼저 오는 것", unsubscribe는
-   "끄라고 한 데이터가 ack을 기다리는 동안 계속 흐르는 것"). ack이 실패해도 **제거는 되돌리지 않는다**.
-   tombstone 위에서도 제거는 수행하고 ack만 생략한 뒤 종단으로 답한다.
-6. ~~**B1/B2 강제 지점 조회**~~ — **닫힘**. B1과 B2는 **서로 다른 조항**이라 한 메서드로
-   합칠 수 없다(조회 단계에는 캡처된 identity가 아직 없다). 두 메서드로 나눴다:
-   - `authorized_lease(ws, topic, *, now_mono)` = **B2 조회 경계 필터**. tombstone + 만료,
-     read-only(지우지 않는다 — 지우면 sweep이 통지 근거를 잃는다).
-   - `authorizes_send(ws, topic, *, uid, lease_id, now_mono)` = **B1 전송 직전 인가**.
-     위에 더해 캡처한 `(uid, lease_id)`와 정확히 대조한다. 생존 규칙은 B2 메서드에 위임한다.
-   ⚠️ 한때 B2 메서드 하나를 "B1까지 답한다"고 표시했는데 **과대주장이었다** — 실측: 같은 UID
-   재인증으로 L1→L2가 교체돼도 `is not None`이 통과했다. identity를 **필수 입력**으로 받아야
-   그 오용이 불가능해진다.
-   ⚠️ 실측 당시 함께 통과했던 cross-UID 변종은 B5(d)로 **경로가 사라졌다** — `lease_id` 축이
-   load-bearing이고, `uid` 축은 이제 호출부 오류 방어다(한 연결은 평생 한 UID).
-   시각도 두 메서드 모두 필수 인자다(기본값이 생기면 안전장치가 조용히 꺼진다).
-   ⚠️ C3 sweep은 둘 다 쓸 수 없다 — 찾아야 하는 것이 정확히 여기서 걸러지는 **만료된** lease다.
-   그건 1번(열거 API)의 몫이고, **이 메서드들을 만료 무시로 되돌려 재사용하지 말 것**.
-   ⚠️ B1 검사와 **실제 `await send_json` 사이**의 창은 **열려 있다**(B5(e)). B5(d)로 서버 쪽
-   바인딩은 흔들리지 않게 됐지만, tombstone이 이미 통과한 판정을 소급 취소하지는 못해 **이미 B1을
-   통과한 in-flight 발행 전부**가 나갈 수 있다(실측 6건, 유한 상한 없음). 닫는 것은 클라
-   `connectionGeneration`이다.
-   ⚠️ **재인증 시 몇 tick이 떨어지는지는 발행 직렬화 계약에 달려 있다** — `publish_topic`에는
-   직렬화 장치가 없고 호출부도 topic별 단일 in-flight를 보장하지 않으므로, 구 lease를 캡처한
-   채 겹쳐 있던 fanout이 모두 떨어질 수 있다. "재인증 주기가 6~7분이니 topic당 최대 1 tick"은
-   **성립하지 않는다**(주기는 교체 빈도를 정할 뿐 동시 캡처 수를 정하지 않는다). 상한이
-   필요하면 배선 슬라이스가 발행 직렬화를 **별도 계약**으로 세울 것.
-7. ~~**B5(d) stale 방어 파라미터**~~ — **닫힘(결정으로 소멸)**. cross-UID를 **거부 + 재연결**로
-   확정해(C1) 파라미터 자체가 필요 없어졌다. 서버는 tombstone 후 `reconnect_required`를 보내고
-   연결을 종료하며, 새 UID는 새 연결에서만 바인딩된다.
-
-8. **ack의 per-topic 거부 사유** (§8-B/D2) — `operation`은 registry가 싣는다(D8과 함께 닫힘).
-   남은 것은 `rejected_topics`의 사유 문자열로, 지금은 caller가 조립한다 — "lock 아래 단일 snapshot"이
-   그만큼만 성립한다.
-9. ~~**lease 없는 등록 모드** (E1 중간 상태)~~ — **registry API 닫힘(2026-07-29 land) / 배선 미결**.
-   `__init__(*, unleased_registration=frozenset|None)` 1회 확정 + `apply_unleased_subscribe`/
-   `apply_unleased_unsubscribe` + `registration_kind` 3-state. 무토큰 subscribe를 legacy
-   `register()`로 우회시키면 live 대상 집합이 둘이 되고, flip이 E1가 피하려던 all-or-nothing
-   사건이 된다 — 그래서 같은 registry 안의 별도 세계로 지었다. **배선이 이 API를 쓰는 것은 다음 슬라이스.**
-10. **epoch 인덱스** — `Lease.epoch`은 저장만 되고 **한 번도 읽히지 않는다**. uid→lease 인덱스가 없어
-    "epoch N의 lease 전부 revoke"를 실행할 수 없다(태그가 현재 장식이다).
-11. **D7 상한의 마지막 방어 (leased 경로 한정, 축소됨)** — ⚠️ 무토큰 경로는 2026-07-29에 registry가
-    강제한다(topic ≤8 누적 / 문자열 ≤64자). **leased 경로는 여전히 미강제**다. 1단계 소유가 맞지만
-    registry가 최종 방어선이다.
-12. **두 채널을 모두 close로 라우팅** (B5(b) 배선 의무) — registry는 종단 신호를 결과
-    (`ConnectionTerminated`)와 예외(`ConnectionTerminatedError`) **양쪽**에 싣는다. task-spawn
-    dispatch에서는 **task 예외가 기본적으로 소켓을 닫지 않으므로**, 두 채널을 모두 소켓 종료로
-    잇는 supervisor가 필요하다. 타입만으로는 부족하고 그 타입을 받는 핸들러가 있어야 한다 —
-    통합 테스트로 "종단 신호 → 소켓 close"를 잠글 것.
-
-#### C-INV. 배선 슬라이스의 **코드로 강제되지 않는** 불변식 (2026-07-29 감사에서 신규 발견)
-
-> C-API가 "registry가 표현할 수 없는 것"의 목록이라면, 여기는 **registry가 표현하지만 지키게
-> 만들지는 못하는 것**의 목록이다. 전부 산문에만 있어 호출부가 어기면 조용히 깨진다.
->
-> ⚠️ **아래 1·2를 읽기 전에**: 두 항목의 *요구*("stale로 horizon을 전진시키지 말 것" /
-> "실패를 권한 없음으로 접지 말 것")는 **여전히 유효한 정본**이다. 다만 1의 *도달 경로 진단*과
-> 2에 대해 제안됐던 *해결안*은 2026-07-30 감사에서 정정됐다 — 그 절(§C-INV 후속 감사)을 함께
-> 읽을 것. 여기만 읽고 해결안을 고르면 틀린다.
-
-1. ⛔ **stale fallback에서 `premium_verified_at_mono`를 전진시키지 말 것.**
-   A1의 "노출 상한 15분"은 `CACHE_TTL = 5분 < LEASE_MAX = 900s` 관계에서 나온다. 그런데
-   `app/subscription.py`에는 `CACHE_STALE_TTL = 1시간` fallback 경로가 따로 있고,
-   `compute_lease_expiry`는 `now_mono` / `premium_verified_at_mono` /
-   `firebase_identity_verified_at_mono` **float 3개만** 받는다 — 그 관측이 fresh였는지
-   stale이었는지 **알 방법이 없다**.
-
-   정상 동작의 노출 상한은 **15분**이다(권위 관측 T0 기준 `T0 + LEASE_MAX`). 배선이 stale
-   hit에서 horizon을 `now`로 전진시키면 **약 1시간 15분**이 된다 — `EntitlementCache.get`은
-   `age >= CACHE_STALE_TTL`에서만 항목을 버리므로 stale은 **1시간 직전까지** 쓰이고, 그
-   마지막 hit가 horizon을 `T0+1시간`으로 밀면 거기서 다시 최대 900s lease가 나간다.
-   ⚠️ 한때 여기 "최대 1시간"이라고 적었는데 **마지막 lease 한 겹을 빠뜨린 과소평가**였다.
-   계산기는 이 오용을 표현 불가능하게 만들지 못한다.
-   ⚠️ 관련 정정: 이 상한을 webhook 무효화가 지탱한다고 읽으면 틀린다 —
-   `StrictObservationCache.bump()`는 **프로덕션 호출자가 0**이다(실측). 지탱하는 것은 TTL 관계뿐이다.
-
-2. ⛔ **`has_entitlement` 실패를 "권한 없음"으로 접지 말 것.**
-   `app/entitlements.has_entitlement`는 row 존재 여부의 `is not None`만 돌려주므로
-   **실패 신호가 없다**(실측). 호출부가 `try/except → False`라는 가장 흔한 패턴을 쓰면
-   **DB 순단 = 정상 구독자의 구독 영구 삭제**가 된다 — 거부된 topic은 `rejected_topics`를
-   거쳐 `departing`으로 실제 제거되기 때문이다. 이는 §C4("transient면 registry 불변")의
-   정면 위반이다. transient는 `temporarily_unavailable`로 **요청을 접어야** 하고,
-   registry를 건드려선 안 된다.
-
-> 두 항목 모두 "있으면 좋다"가 아니라 **슬라이스의 정확성 전제**다. 지금 코드 가드를 넣지
-> 않는 이유는 호출자가 없어서다(C-API와 같은 규율) — 배선 슬라이스가 가드를 함께 짓는다.
-
-##### C-INV 후속 감사 (2026-07-30) — 위 2건의 **원인 진단이 불완전했고**, 목록도 불완전했다
-
-가드를 설계하려고 4 렌즈 + codex로 검증한 결과, 위 서술이 지목한 지점이 실제 메커니즘이 아니었다.
-
-⛔ **정정 1 — C-INV 1에는 도달 경로가 둘이고, 구 서술은 그중 하나만 봤다.**
-구 본문은 "`compute_lease_expiry`가 float 3개만 받아 fresh/stale을 알 수 없다"를 원인으로 적었다.
-그 문장 자체는 사실이지만 **그 경로는 이번 슬라이스가 좁혔고**(authorization 토큰), 남은 —
-그리고 더 조용한 — 경로는 관측 **스탬프**다.
-`strict_verifier._premium_observation`은 provider가 `Determined`를 주면 무조건
-`verified_at_mono=clock.mono()`(= **변환 시점**)를 찍는다. `Determined`는 필드가 `is_premium`
-하나라 *언제 관측됐는지 나를 방법이 없다*. 그래서 provider가 오래된 객체를 **재반환**하면
-(생성 0회) 그 값이 방금 관측된 것으로 승격된다 — TTL이 없으면 노출 상한은 "1시간 15분"이 아니라
-**무한**이다. `Determined(` 생성 위치를 제한하는 트립와이어 안은 이 때문에 **기각**했다
-(허용 파일이 1시간 stale 캐시를 소유한 그 모듈이기도 하다).
-⛔ **C-INV 1은 여전히 열려 있다.** 닫으려면 관측 시각이 authority 응답과 함께 와야 하고
-(`Determined`/`IdentityFound`에 `observed_at_mono` 필수 필드), 그 스탬프는 **호출 직전**에
-읽어야 한다(응답 시점에 찍으면 진실 시각을 초과할 수 있다 — authority 데이터가 참이었던 시각은
-`[호출 시작, 응답]` 구간 안이므로 응답에 anchor하면 그것을 **넘길 수 있다**. 취소 불가한
-`to_thread` 경로에서는 그 구간이 길어질 수 있다. ⚠️ 구체 지연 수치는 **측정하지 않았다** —
-한때 "55초"라고 적었는데 리포에 근거가 없는 시나리오 값이었다). 이는 `app/subscription.py`의 "wall 축만 읽는다" 계약을 넘는 결정이고
-(`tests/test_subscription_clock.py`의 `_poison_mono`가 **의도적으로** 그 날 red가 되게 잠가 뒀다),
-같은 파일이 예고한 **N-3 provider leaf 이관**과 함께 가야 한다. 별도 슬라이스.
-
-⛔ **정정 2 — C-INV 2에 3-state 값을 도입하는 안은 아무것도 닫지 않는다.**
-값으로 넘기면 `if not isinstance(obs, Granted): rejected.append(topic)` 한 줄이 그대로 살아 있다
-(그리고 `apply_subscribe` docstring이 이미 "이 구분은 `Sequence[str]` 시그니처로는 강제되지
-않는다"고 적어 뒀다). 닫는 형태는 **예외 전파**다 — raise는 `rejected_topics`에 append할 수 없다.
-판정기도 새로 만들지 않는다: REST twin이 쓰는 `visible_snapshot_topics_sync`를 재사용해야
-§3.2(KRX 존재 비노출)의 "판정기는 하나"가 유지되고, 세션도 그 함수가 thread 안에서 열고 닫는다
-(호출자 소유 세션은 풀 5개를 잠식한다). 경계에서 `except Exception`(BaseException 아님)으로
-받아 **전체-요청 `temporarily_unavailable`**로 접고, transient와 영구를 **다른 카운터**로 센다.
-✅ 방향 판정: `transient=False`(영구 SQLSTATE)도 **"판정 불가"**다 — "권한 없음"으로 접으면
-row가 실제로 있는 정상 사용자가 DB 설정 장애로 축출된다. 리포가 이미 같은 결정을 세 곳에서 했다
-(`map_config_error`가 영구 결함을 `temporarily_unavailable`로 매핑 / 영구 3종은 raise /
-snapshot resolver는 "조용한 False 아님").
-
-🟡 **좁힘(닫힘 아님) — 위 두 항목이 시야에 두지 않은 가장 넓은 우회로** (2026-07-30 이 슬라이스)
-`apply_subscribe`가 `uid`·`snapshot`·두 관측 시각을 **각각** 받았다. 그래서 배선이 이미 배포된
-`verify_premium_status`(stale hit이 `PremiumStatus.ACTIVE`)를 쓰고 `premium_verified_at_mono`에
-지금 시각을 넣는 것만으로 상한이 깨졌고, **`Determined`도 `PremiumObservation`도 등장하지 않아
-어떤 타입 가드도 발화하지 않았다**. 또 "A의 snapshot + uid=B"가 표현 가능해 fence는 A의 epoch를
-보는데 lease는 B로 발급될 수 있었다(§C1 우회).
-→ `strict_wire.Accepted`를 **authorization 토큰**으로 만들고(`map_verification`이 `uid`를
-`snapshot.uid`에서 **파생**, `__post_init__`이 주체 일치·유한성을 강제) `apply_subscribe`는 그
-묶음 하나만 받는다. registry는 `strict_*`를 import하지 않는 독립 계층이라 **같은 주체 구조
-불변식을 스스로 다시** 검사한다(`_unpack_authorization`, 유한성은 제외 — 아래 참조).
-그 중복의 정당화(=import 부재)를 AST 테스트가 잠근다.
-
-**정확히 무엇이 닫혔고 무엇이 안 닫혔는가** (과대주장 방지):
-- ✅ 닫힘: `uid`·관측 시각을 **따로 지어 넣는** 실수 — 그 인자가 사라졌다.
-- ✅ 닫힘: 묶음이 **선언한** 주체와 snapshot의 주체가 다른 조합.
-- ⛔ **안 닫힘 — snapshot provenance.** `snapshot`은 duck-typed라
-  `SimpleNamespace(uid=…, epoch=<현행 epoch>)`이면 그대로 `Applied`가 된다(실측).
-  "실제 `cache.snapshot()`에서 왔다"는 아무도 검증하지 않는다. 즉 배선이 **의도적으로**
-  묶음을 지어내는 것은 여전히 가능하다 — in-process 타입으로는 막을 수 없는 부류다.
-- ⛔ **안 닫힘 — 값의 권위(①).** C-INV 1이 그대로 열려 있다.
-
-⚠️ **이 슬라이스가 스스로 만든 회귀와 그 교훈** (codex 재현): 구조 검증을 lock **전에** 두자,
-A로 lease를 받은 연결에 uid 불일치 묶음 + `rejected_topics=[T]`를 주면 `ValueError`가 먼저 나가
-**A의 lease가 생존**했다 — 반면 구조가 정상인 cross-UID는 `ConnectionTerminated`로 접근을 제거한다.
-같은 "다른 주체가 왔다"인데 **해석할 수 없는 쪽이 더 관대**했다(방향이 거꾸로). 검증을 lock 안
-C1 앞으로 옮기고, 잃을 접근이 있으면 축 위반과 같은 정책(tombstone + 종단 신호)으로 닫는다.
-→ 교훈: **검증의 위치가 정책이다.** 같은 검사를 어디서 하느냐가 fail-closed 방향을 바꾼다.
-
-⚠️ **위치가 계약이었다 (이 슬라이스에서 실측한 회귀)**: `_unpack_authorization`에 유한성 검사를
-넣자 lock 안 `compute_lease_expiry`의 fail-closed 경로를 **앞질러**, 축 위반 시 접근 축소를
-커밋하고 tombstone하는 정책이 무력화됐다(거부된 topic이 계속 흐르는데 호출자는 예외만 받는 상태).
-기존 2 테스트가 잡았고, 유한성은 제자리에 두고 "여기서 검사하지 않음"을 테스트로 **일부러** 잠갔다.
-
-⚠️ **판정기가 텍스트를 보고 있었다**: `test_registry_does_not_read_a_clock_itself`가
-`inspect.getsource`로 `"clock.mono"` 문자열을 찾아서, *막으려는 안티패턴을 docstring에 적은 것*
-만으로 red가 됐다. AST 접근 검사 + `time` 미import 단언으로 교체했다.
-⛔ 한때 "별칭 경유도 잡혀 강도가 올라갔다"고 적었는데 **틀렸다** — `x = clock; x.mono()`는
-dotted 이름이 `x.mono`라 AST도 놓친다(data-flow 미추적). 바뀐 것은 **정확도**(서술을 코드로
-오인하지 않음)이고 커버리지는 그대로다. 남은 구멍: 그 별칭 경유와 `getattr(clock, "mono")()`.
-
-##### C-INV 3~7 — 같은 종류로 **새로 발견된** 강제 안 된 불변식 (2026-07-30)
-
-3. ⛔ **G1(KRX entitlement) 축에는 관측·신선도·상한이 아예 없다.** `compute_lease_expiry`는
-   float **3개**(now / premium / identity)만 받고 `Lease`에도 entitlement 축이 없다.
-   premium은 `premium_observation_is_fresh`가 `LEASE_MAX`에서 막지만 **G1은 막을 코드가 없다** —
-   배선이 가시성 판정을 연결 단위로 메모하면(자연스러운 선택이다) 운영자가 row를 회수해도
-   재인증마다 통과해 lease가 **무한 갱신**된다. 상한이 15분이 아니라 없다.
-   → 결정 필요: (i) 3번째 관측 축으로 승격(4-way min) 또는 (ii) "매 subscribe마다 무조건 재조회"를
-   코드로 강제(가시성 결과를 연결·프로세스에 저장 금지 + 회귀 테스트).
-4. ⛔ **teardown 호출에 `await`가 없다.** `app/main.py`의 finally는
-   `topic_dispatcher.registry.remove_websocket(websocket)`(sync)인데 lease registry의 동명 메서드는
-   `async def`다. 결정 (1)로 registry를 갈아 끼우면서 이 줄을 그대로 두면 코루틴만 만들어지고 버려져
-   **tombstone이 찍히지 않는다** → `authorizes_send`가 영구 True → 죽은 소켓에 매 tick 전송.
-   단위 테스트는 이 finally를 구동하지 않아 못 잡는다. 배선 커밋에 통합 테스트 필수.
-5. ⛔ **transient 판정기가 `Exception`에 total이 아니다.** `TRANSIENT_DB_ERRORS`는 4종뿐이라
-   `ProgrammingError` 등은 `except`를 **탈출**하고, 그러면 `main.py`의 광범위 `except Exception` →
-   finally가 **그 연결의 구독을 통째로 삭제**한다(C-INV 2가 막으려던 topic 1개 제거보다 파괴적).
-   경계 catch는 `except Exception`으로 total해야 하고 그 안에서 transient/영구를 가른다.
-6. ⚠️ **identity 축에 동형의 provenance 구멍.** `_identity_observation`도 `clock.mono()`를 변환
-   시점에 찍고 `IdentityFound`에 관측 시각이 없다. Firebase adapter가 오늘은 authority를 직접
-   부르지만, fallback wrapper가 생기면 premium과 같은 stale 세탁이 된다. `to_thread` 작업은
-   **취소 불가**라 hang 시 창이 더 크다. C-INV 1을 premium만 고치면 이 축이 남아,
-   `strict_authz`가 기록한 "같은 위험을 한쪽에만 걸어 둔 비대칭"이 재현된다.
-8. ⛔ **authorization 토큰은 `ws`에 묶이지 않는다.** A의 **정품** 토큰을 B의 소켓에 적용하면
-   `Applied`가 되고 `bound_uid(ws_B)`가 A가 된다(실측) — B의 소켓이 A의 premium 관측으로
-   KRX fanout 대상이 된다. B의 진짜 토큰이 오면 §C1이 닫지만 **첫 요청의 누수는 이미 일어난 뒤**다.
-   registry는 transport identity를 입력으로 받지 않아 스스로 검사할 수 없다 → 배선이 검증 결과를
-   **연결 스코프로 소유**해야 하고(모듈 전역·single-flight 결과 재사용 금지), 그 규율에 회귀
-   테스트가 필요하다. 즉 이번 토큰이 닫은 것은 **uid 필드 축**이고 **연결 축은 열려 있다**.
-9. ⚠️ **`strict_cache.is_current`가 미등록 uid에 fail-open이다** — `self._epochs.get(snapshot.uid)
-   == snapshot.epoch`라 둘 다 `None`이면 통과한다(실측). 배선이 `StrictSnapshot`을 그대로 나르지
-   않고 자기 DTO로 감싸면 §A4의 소비 fence가 상시 통과하고, 그 상태는 정상 발급과 구별되지 않는다.
-   (이번 슬라이스 범위 밖 — `strict_cache` 쪽 수정이다.)
-7. ⚠️ **양성 freshness horizon == `LEASE_MAX`라 "fresh인데 못 쓰는" 1초 창.**
-   fresh ⟺ `now < v+900`, 사용 가능 ⟺ `now ≤ v+899`(정수 초 광고와 맞춘 floor). 그 사이에서
-   `derive_verdict`는 `Active`를 주는데 `apply_subscribe`가 요청 전체를
-   `lease_horizon_already_expired`로 접는다 — 문서가 약속한 "재검증으로 보낸다"가 아니다.
-   방향은 fail-closed. 두 경계가 같은 상수에서 파생됨을 잠그거나 양성 horizon을 낮출 것.
-
-##### 이 감사에서 내린 범위 판정
-
-| 제안 | 판정 | 근거 |
-| --- | --- | --- |
-| transient 경계를 `app/db_errors.py`로 추출 | **별도 슬라이스에서 포함** | patch 대상 0건이라 순수. 단 폴라리티 정당화("모르면 transient")가 **HTTP 1회 재시도** 문맥이라 무한 재시도 소비자(WS 재인증)는 자기 계층에 상한이 필요하다 |
-| `has_entitlement` 3-state 값 반환 | **폐기** | 위 정정 2 |
-| `Determined(` 단일 생성지점 AST | **폐기** | 위 정정 1 |
-| `observed_at_mono` 필수 필드 (양 축) | **별도 슬라이스, C-INV 1의 본체** | live REST 경로 + `_poison_mono` 게이트 + N-3 이관과 동반 |
-| `apply_subscribe` authorization 토큰 | **이 슬라이스에서 완료** | 호출자 0인 지금이 blast radius 최소 |
-
-⚠️ **변이 점수의 증명 범위**: 이 슬라이스는 23개 변이를 전부 KILLED 했지만, 그것이 증명하는 것은
-"열거한 각 검사가 테스트에 관측된다"뿐이다. **검사를 우회하는 새 호출 형태**(예: 구 인자를
-optional로 되살리기 — 실제로 전량 green이었고 별도 단언을 추가해 닫았다)나 **운영 경로 도달성**
-(현재 호출자 0)은 증명하지 않는다. 변이 점수를 "우회로 없음"의 근거로 쓰면 그 경계를 넘는다.
-
-#### C-CLAIM. 문서 부정확 감사 (2026-07-29)
-
-> 같은 반올림 실수가 세 번 반복돼(재인증 "topic당 1 tick" / purge 파급 "전부·소멸" / B5(e) "1건")
-> 계획 §8·§8.1과 두 lease 모듈의 **정량·절대·필요성 주장**을 4 렌즈로 감사했다.
-> ⚠️ 이 절은 "감사 완료"가 아니라 **그 감사가 찾은 것의 처리 상태**다 — 4 렌즈가 놓친 것이 없다는
-> 증명은 아니다.
-
-1. ⚠️ **`파일:라인` 포인터 — 부분 처리(완료 아님)**. `file.py:NNN` 형태 19곳은 제거했으나
-   (실측으로 최소 4곳이 다른 줄을 가리켰다: `app/main.py:889`→`**timings,`,
-   `topic_initial_snapshot.py:176`→import 문), **정규식 일괄 처리가 두 곳을 손상시켰다**
-   (`FXiApp.swift:124-126`→`.swift-126`, `topic_dispatcher.py:278-285`→`.py-285` — 범위 표기를
-   자름). 손상 2곳과 문장 안의 bare `(:NNN)` 6곳을 심볼 앵커로 복구했다.
-   ⛔ 그래도 "제거 완료"라고 적지 않는다 — 이 문서 전체를 규칙 기준으로 훑은 것이 아니라
-   패턴에 걸린 것만 처리했다. 남은 bare 참조가 더 있을 수 있다.
-2. ✅ **"만료→통지 최대 지연"의 정본을 D-const로 통일** — 세 문서에 세 값이 있었다. 정본 식은
-   `(연속 skip + 1) × 주기 + (lock + notify + close)`이고 **유한 상한이 아니다**. C3·sweeper
-   docstring은 그 파생으로만 서술한다.
-3. ✅ **D-const에 `LOCK_ACQUIRE_TIMEOUT_SECONDS`·`NOTIFY_TIMEOUT_SECONDS`·`CLOSE_TIMEOUT_SECONDS`
-   추가** — 셋 다 위 식의 항인데 표에 없었다("미정 상태로 test-first 금지"를 상수에도 적용).
-   ⚠️ 추가하면서 기존 "notify send timeout (C3) 5s" 행을 지우지 않아 **같은 정책이 두 행에서
-   정의**됐다 — 중복 행을 제거했다(정본은 `NOTIFY_TIMEOUT_SECONDS`).
-4. ✅ **테스트 이름-단언 불일치 정정** — `..._rebound_uid_...`는 uid 축을 잠그는 것처럼 읽혔으나
-   실제로는 tombstone이 이유였다. 이름·docstring을 그에 맞추고 종단 판정을 명시 단언에 추가했다.
-5. ✅ **`ClaimedLease`의 `ws` 배제 근거 재작성** — `Lease`와 같은 약한 참조 논거를 적었으나
-   registry가 이 객체를 **보관하지 않아** 적용되지 않는다. 진짜 이유(호출자가 이미 ws를 갖는다)로 교체.
-6. ✅ **`hold_connection_lock` finally 순서 근거 정정** — "release 뒤에 지우면 다른 task가 우리
-   기록을 보고 통과한다"는 **성립하지 않는다**(두 문장 사이에 `await`가 없다, 실측). 두 순서는
-   등가이며 가독성 때문에 현 순서를 쓴다.
-
-⚠️ **잔여 항목 재분류 (2026-07-29 감사)** — 구 문장은 아래 둘을 "배선 전 블로커"로 묶었으나,
-둘 다 **배선 방향을 굳히지 않는다**. 진짜 블로커는 따로 있다.
-
-- §B5(e) 잔여(클라 `connectionGeneration`) → **배선 블로커가 아니라 1C 활성화 게이트**다.
-  서버 코드 변경이 0인 클라 측 펜스라 늦게 정해도 서버 구조가 잘못 굳지 않는다
-  (iOS·Android 모두 `connectionGeneration` 부재 실측). 다만 **활성화** 전에는 정해야 한다 —
-  안 정하면 UID 전환 직후 in-flight 전부가 도달할 수 있고 상한이 없다.
-- ~~`identity_generation`의 wire 결정~~ → **2026-07-29 제거로 닫힘.** 소비자가 0인 창에서
-  wire·내부 machinery를 함께 제거했다. (한때 "언제 정해도 blast radius가 같다"고 적었는데
-  **소비자가 0인 동안만** 참이었다 — 클라가 필수 필드로 모델링한 뒤 빼면 breaking이다.)
-
-⛔ **진짜 배선 블로커**(정하지 않으면 틀린 방향으로 굳는 것):
-1. **fanout 대상 집합의 소유권** — lease registry를 단일 진실 소스로 삼을 것인가
-   (legacy `register()` 제거), 아니면 legacy 인덱스를 fanout 권위로 두고 per-ws
-   `authorizes_send` 필터를 얹을 것인가. 오늘 publish 대상은 lease를 모르는
-   `TopicRegistry.get_subscribers`뿐이고 `authorizes_send`는 프로덕션 호출자가 0이다(실측).
-   이 결정이 §B2a 전송 실패 3곳 · `websocket_endpoint` finally · §C2 eviction의 **제거 경로가
-   어느 집합에 붙는지**를 함께 정하므로, 나중에 뒤집으면 비용이 그 경로들에 흩어진다.
-   ⚠️ C-API 9(lease 없는 등록 모드)는 별개 항목이 아니라 **이 결정의 결과**다 —
-   legacy가 권위면 중간 상태가 자연히 성립하고, lease가 단일 진실 소스면 새 모드가 필요하다.
-2. **클라 subscribe 요청 단위** — registry는 "1 요청 = lock 1회 = ack 1건 = 전부 아니면 전무"를
-   구조로 강제하는데, 현행 iOS는 topic 1개짜리 메시지를 topic 수만큼 보낸다(실측).
-   재연결 1회 = 인증 사이클 N회가 한 연결에서 직렬로 줄 서므로, 배칭(1 메시지 N topic)으로
-   갈지 현행 단위를 유지하고 dispatch 모델(직렬 §B5(a) vs task-spawn §B5(b))로 흡수할지
-   정해야 한다.
-3. **종단 신호 → 소켓 close 라우팅**(C-API 12) — 선택지는 없고 "해야 할 것"이지만,
-   빠뜨리면 실패 모드가 구조로 굳는다: `handle_client_message`는 `-> None`이라 결과를 위로
-   올릴 수 없고 `websocket_endpoint`의 finally는 close를 부르지 않는다(실측). 그 위에 lease를
-   얹으면 tombstone된 연결이 **데이터 0 · 오류 0**에 갇힌다.
-
-**결정 (2026-07-29)** — 위 1·2를 확정한다.
-
-- **(1) fanout 소유권 = lease registry 단일 진실 소스.** legacy `register()`를 제거하고
-  publish가 lease registry의 topic 조회 API(C-API 2)에 묻는다. 근거: 대안(legacy 권위 +
-  per-ws 필터)은 중간 상태에서 "무바인딩이면 통과"라는 **fail-open 판정**을 요구하는데,
-  그 신호원 `bound_uid`는 tombstone을 보지 않아 docstring이 인가에 쓰지 말라고 못박는다.
-  또 제거 경로가 `remove_websocket`(legacy)과 tombstone 둘로 갈려 §B2a·finally·§C2가
-  서로 다른 집합을 건드리게 된다. 단일 소스면 `teardown_locked` 하나로 수렴한다.
-  ⛔ **대가**: C-API 2(topic 조회 API)와 **C-API 9(lease 없는 등록 모드)를 같은 설계에서**
-  지어야 한다 — 단일 소스에서는 E1 enforcement-off 중간 상태가 registry의 새 모드 없이는
-  성립하지 않는다. 이 둘을 분리해 결정하면 서로 모순되는 답이 나온다.
-- **(2) 클라 subscribe 요청 단위 = 배칭(1 메시지 N topic).** registry의 "1 요청 = lock 1회 =
-  ack 1건 = 전부 아니면 전무"와 1:1로 맞고, 재연결 1회당 인증 사이클이 N회에서 1회로 준다.
-  현행 iOS는 topic 1개짜리 메시지를 topic 수만큼 보내므로(실측) iOS 변경이 따른다.
-  Android는 topic subscribe 경로 자체가 없어 영향 0.
-  ⚠️ 부수 효과(**범위 한정**): 배칭은 iOS가 `send`마다 독립 `Task`를 spawn해 생기는 순서 보장
-  불확실성(`URLSessionWebSocketTask.send`의 순서 보장 여부 미확인)을 **재연결 배치 안에서만**
-  없앤다 — 그 N건이 1건이 되기 때문이다. ⛔ 이후 **독립적인 subscribe/unsubscribe 요청 사이의**
-  순서는 여전히 보장되지 않는다(예: KRX 토글 off→on은 별개 메시지 2건). 그 축이 필요하면
-  `request_id` 상관이나 클라 측 직렬화를 별도 계약으로 세워야 한다.
-
 
 #### D. wire 계약 추가 (§8 확장)
 
@@ -1147,32 +684,17 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   구현이 갈린다). 여기서는 필드의 *의미*만 규정한다.
   - **`operation`**: `subscribe` | `unsubscribe`. 같은 schema를 쓰므로 구분자가 필요하다.
   - **`accepted_topics` / `rejected_topics` / `removed_topics` = 이번 요청의 결과.**
-    `removed_topics`의 producer는 **unsubscribe(D8)** 와 **C2의 reject eviction**이다(후자 때문에
-    `operation: "subscribe"` 응답에도 값이 찰 수 있다).
-    ⛔ 구 문서는 "C1의 UID purge"도 producer로 들었는데, B5(d) 결정으로 **purge 규칙 자체가 폐기**돼
-    더는 producer가 아니다.
+    `removed_topics`의 producer는 **unsubscribe(D8)** 뿐 아니라 **C1의 UID purge**와 **C2의 reject eviction**도
+    포함한다(그래서 `operation: "subscribe"` 응답에도 값이 찰 수 있다).
   - **`active_subscriptions` = 그 연결의 최종 상태 전체.** 문자열 목록이 아니라 topic별 `lease_id` + 남은
     `lease_duration_seconds`를 싣는다 — 문자열만으로는 **이번 요청에 없던 기존 topic의 lease 상태를 복구할 수 없어**,
     클라가 상태를 잃었거나 UID reset 후 수렴할 때 부족하다(= ack이 "권위 있는 상태"가 되지 못한다).
     - **connection lock 아래 단일 snapshot**에서 생성한다(B4). topic마다 다른 시점에 읽으면 모순된 상태를 내보낸다.
     - 남은 duration은 **내림(floor)** 정수 초. **≤ 0이면 이미 만료**이므로 넣지 않는다(만료를 "활성"으로 광고 금지).
-    - ⛔ **`accepted_topics` ⊆ `active_subscriptions`** — 발급 경계를 **광고하는 정수와 맞춘다**.
-      판정만 raw float(`now >= expires_at`)로 하면 잔여 0<x<1인 lease가 발급돼 `accepted`에는
-      실리는데 `active`의 `≤0` 규칙에는 걸려 빠진다(실측 `accepted=[(t,0)]` / `active=[]`).
-      클라는 드롭으로 결론짓는데 서버는 발행을 시작하고, D6상 duration 0은 **즉시 재구독**이라 루프가 된다.
   - **`lease_id`(topic별, 재사용 불가 opaque)**: 늦게 도착한 구 `reauth_required`를 무시하는 유일한 수단(D3와 대조).
     ⚠️ **정수 generation을 topic별로 0부터 다시 세면 안 된다** — 제거 후 재구독 시 초기화돼 **과거
     `reauth_required`가 새 lease와 오인 일치**한다. 연결 수명 동안 **단조 증가하는 counter** 또는 opaque id를 쓴다.
-  - ~~**`identity_generation`(연결별)**~~ — **제거됨 (2026-07-29).** "같은 소켓에서의 UID
-    재바인딩"을 표현하려던 필드인데 B5(d)로 그 재바인딩이 **불가능**해져(cross-UID = 연결 종료,
-    C1) 상수가 됐다 — stale-ack 판별에 쓸 수 없었다. wire·내부 상태·조회 API를 함께 제거했고,
-    클라에 "구 generation ack 무시"를 요구하지 않는다. 재연결 식별은 클라 `connectionGeneration`
-    소유다(§B5(e)).
-    ⛔ **역사적 주의(새 의미를 부여한다면 그대로 유효)**: strict cache의 UID epoch을 그대로 실으면
-    안 된다. 그 epoch은 **UID별**이고 최초 관측 순서로 할당돼 먼저 관측된 UID가 더 작은 값을 갖는다
-    → 재바인딩에서 generation이 **감소**하고 순서 판별이 뒤집힌다(실측: B를 먼저 관측하면 A=2 → B=1).
-    구 규칙("미바인딩 0 / 최초 1 / 재바인딩마다 +1, 같은 UID 재인증은 불변")은 폐기된 재바인딩
-    경로를 전제한 것이라 더는 지시가 아니다.
+  - **`identity_generation`(연결별)**: **같은 소켓에서의 UID 재바인딩만** 표현한다.
     ⚠️ **reconnect는 표현하지 못한다** — 새 WebSocket은 서버 상태가 처음부터 시작하므로 구/신 소켓 ack을
     전역 구분할 수 없다. **reconnect·구 receive task 격리는 클라 소유 `connectionGeneration`**이 담당한다(F).
 - **D3 `reauth_required` schema** — ack과 대조 가능해야 하므로 **topic별 `lease_id`**를 싣는다.
@@ -1266,32 +788,14 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   |---|---|---|
   | `LEASE` 상한 | **900s** | S5 |
   | `safety` (D6·C4) | **30s** | ack RTT + 처리 여유. D6의 180s 마진과 별개 — C4 재시도 판정용 |
-  | sweep 주기 | **10s** | 만료 후 **다음 사이클까지의 대기**. ⛔ 이 값은 "만료→통지 최대 지연"이 **아니다** |
-  | `LOCK_ACQUIRE_TIMEOUT_SECONDS` | **0.05s** | 경합 중이라 **건너뛰는** 연결이 사이클을 붙드는 상한(C3) |
-  | `NOTIFY_TIMEOUT_SECONDS` | **5.0s** | `reauth_required` 송신 1회 예산 |
-  | `CLOSE_TIMEOUT_SECONDS` | **5.0s** | 통지 실패 후 소켓 close 1회 예산 |
-  | **만료→통지 관측 지연** | (연속 skip + 1) × 주기 + (lock + notify + close) | ⛔ **유한 상한이 아니다** — lock 획득에 공정성·aging이 없어 연속 skip에 상한이 없다(C3). 여기가 **정본**이고, C3·sweeper docstring은 이 식의 파생으로만 서술한다. 전송 강제는 B1이 지되 그건 **판정** 상한이다(§B5(e)) |
-  | `ACK_TIMEOUT_SECONDS` | **5.0s** | `subscription_ack` 송신 1회 예산. B5(c) "lock 안 I/O에는 timeout 필수"의 구현체다 — 역압 클라가 lock을 물지 못하게. ⛔ `< 10`(클라 ack timeout)이 "클라가 먼저 포기하지 않는다"를 **함의하지 않는다**: 클라의 10초는 요청→ack **전체**를 재는데 그 앞에 상한 없는 lock 대기가 있고, 알려진 몫만 더해도 `VERIFY_DEADLINE_SECONDS` 8s + 5s = **13s > 10s**다. 요청→ack 상한은 **아직 계약이 아니다** |
+  | sweep 주기 | **10s** | = 만료 → `reauth_required` **최대 지연**(사용자 관측 계약). 전송 강제는 B1이므로 보안 상한과 무관 |
+  | notify send timeout (C3) | **5s** | 초과 시 소켓 정리(B2a와 동일 정책) |
+  | lock 안 I/O timeout (B5c) | **5s** | 역압 클라가 lock을 물지 못하게 |
   | `retry_after_seconds` | 정수 초, **1~30** | 서버가 산출해 전송. 클라는 C4 공식으로 clamp |
-  ⚠️ **이 표와 코드의 일치는 기계가 보증하지 않는다.** 잠긴 것은 코드 방향뿐이다 —
-  `LOCK_ACQUIRE`/`NOTIFY`/`CLOSE`/`ACK`/`LEASE`(→`LEASE_MAX_SECONDS`)는 각 모듈 테스트가
-  **절대값 리터럴로 pin**하고, `retry_after_seconds`의 1~30은 `strict_verifier`가 강제 +
-  경계값 `(0, 31, -1)` 거부 테스트가 잠근다. 그러나 **이 표를 고쳐도 red가 나지 않는다**
-  (doc→code 방향 비구속). `safety` 30s와 sweep 주기 10s는 대응 코드 상수 자체가 없고,
-  '만료→통지 관측 지연'은 수식이라 대조 대상이 아니다.
-
-  **결정(2026-07-29): 이 표를 파싱해 코드와 대조하는 트립와이어는 짓지 않는다.** 근거:
-  (1) 대조 가능한 쌍 전수에서 **수치 불일치 0건** — 이 저장소에서 값 드리프트는 아직
-  한 번도 관측되지 않았다. 관측된 드리프트는 전부 **의미 귀속**(폐기된 계약 인용, 거짓
-  안심 주석)이고 값 비교기는 그걸 영원히 못 본다. (2) 값 칸만 보는 설계는
-  `VERIFY_DEADLINE_SECONDS`(8s)가 **근거 칸 산문**에만 있어 구조적으로 놓친다 =
-  false coverage. (3) 이 문서는 매 세션 편집되므로 행 수·표기 단언이 순수 편집에도
-  red를 내고, 그 마찰은 표의 화석화나 '문서를 코드에 맞춰 고치기'(= 드리프트 은폐)로 간다.
-  **번복 조건**: 값 드리프트가 실제로 1건이라도 관측되면 그때 짓는다. 그때도 전 행 자동
-  대조가 아니라 명시 화이트리스트 + 양방향 집합 동일성 + 정규화기 자기시험이 전제다.
+  값은 조정 가능하지만 **테스트는 이 값을 기대값으로 쓴다**.
 
 - **D8 `unsubscribe` 계약 = ack 필수 + fail-open (§8 원문 공백)** — §8은 subscribe/ack/reauth만 정의했으나
-  **iOS는 unsubscribe를 실제로 쓴다**(ExchangeRateViewModel.swift — KRX 권한 해제 시). 현재
+  **iOS는 unsubscribe를 실제로 쓴다**(ExchangeRateViewModel.swift:333 — KRX 권한 해제 시). 현재
   `sendTopicCommand`는 request_id도 ack도 없는 **fire-and-forget**이라, 유실되면 서버·클라 상태가
   **lease 만료까지 어긋난다**. → **unsubscribe도 `request_id` + `subscription_ack`**(§8-B).
   - 불변식: **상태를 바꾸는 모든 클라 메시지는 `request_id`를 갖고, ack이 `active_subscriptions` 전체를 반환한다.**
@@ -1310,13 +814,12 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
   | `request_id` UUID 형식 오류 | `invalid_request` |
   | `topics` 빈 목록 / 중복 정규화 후 빈 목록 | `invalid_request` (no-op 아님 — 조용한 실패 금지) |
   | 인증된 unsubscribe 성공·실패 | `subscription_ack` (D8, 동일 schema) |
-  | live 소켓의 cross-UID subscribe | `reconnect_required` (전체-요청) + **tombstone + 연결 종료**(C1) |
 
 #### E. 롤아웃·정책
 
 - **E1 capability flag 분리 + 무토큰 subscribe 처리 (중간 상태 정의)**
   - ⚠️ **현행 코드 정정**: `TOPIC_DISPATCHER_ENABLED=true`면 무토큰 subscribe는 무시가 아니라
-    **`registry.register()` + snapshot 전송**된다(`topic_dispatcher.py`의 `subscribe` 분기 — `id_token`/`request_id` 검사 없음).
+    **`registry.register()` + snapshot 전송**된다(topic_dispatcher.py:278-285 — `id_token`/`request_id` 검사 없음).
     현행 iOS도 무토큰이다(WebSocketService.swift, payload = `{type, topics}`). 구 문서의
     "구형 무인증 메시지만 silent-ignore로 남긴다"는 **오서술**이었다.
   - **인증 강제 ON**: `id_token` 없는 subscribe는 **등록하지 않고** `subscription_error`(`invalid_token`)를 보낸다.
@@ -1326,17 +829,6 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
     무토큰 subscribe는 **기존대로 등록**되고 lease·sweep·`reauth_required`가 **돌지 않는다**(전원 무기한).
     토큰이 실린 subscribe만 인증·lease 경로를 탄다. 이래야 dormant→flip이 all-or-nothing이 아니게 된다.
   - **강제 전환 시점**에 구 클라(무토큰)는 topic을 잃는다 → **Stage B 유예(S4)와 같은 시점**에 묶어야 한다.
-  - ⛔ **모드는 프로세스 고정이고 연결은 sticky다** (2026-07-29 확정). `app/config.py`는 import 시
-    `getenv` 1회이고 env 변경에 `--force-recreate`가 필요하므로 **in-process flip 경로가 없다**.
-    registry는 모드를 **생성자에서 1회** 확정하고 setter를 두지 않는다 → 살아 있는 registry의 모드
-    전환이 표현 불가능하다. 따라서 flip = 새 프로세스 = 무토큰 등록 **전부 소멸**이고, 우회로가
-    flip을 건너 살아남는 경로가 구조적으로 없다(drain·reap primitive 불요 — 호출자 없는 기계장치가 된다).
-    한 연결은 leased **또는** unauthenticated 하나다. ⚠️ 다만 **양방향 대칭이 아니다**(실측):
-    `leased → unauthenticated`는 UID 바인딩이 연결 수명 동안 남아(전 topic을 해제해도 유지)
-    **영구 차단**되지만, `unauthenticated → leased`는 무토큰 등록이 **0이 되면** 그 연결이
-    `none` 상태가 되어 재연결 없이 진입할 수 있다. 방향이 무인증→검증완료라 권한 상승은
-    아니지만, 배선이 "세계가 연결 수명 동안 고정"을 전제로 라우팅·세션 상태를 캐시하면
-    그 전제가 깨진다. **무토큰 멤버십은 승계되지 않는다**(leased 등록은 빈 상태에서 시작).
 
 - **E2 `check_revoked` = A1 horizon에 통합** (별도 정책 waiver 폐기).
   - `firebase_identity_verified_at`을 **entitlement와 동일한 authoritative horizon**으로 취급한다(A1의 3-way min).
@@ -1424,14 +916,13 @@ A1로 lease가 **가변**이 되고 증분 subscribe로 **topic마다 lease가 �
 > UID reset 수렴 방식(C1·D2 `active_subscriptions`)은 서버 wire 설계**이므로 D/C에서 이미 확정했다.
 > 아래는 그 계약을 소비하는 **클라 내부 구조**만이다.
 >
-> **`connectionGeneration`은 클라 소유**다 — 서버에는 대응물이 **없다**(구 `identity_generation`은
-> B5(d)로 상수가 돼 순서 판별에 쓸 수 없었고 2026-07-29 제거됐다). 구 receive task·구 request_id의
-> 결과 폐기는 클라 `connectionGeneration`이 담당한다.
+> **`connectionGeneration`은 클라 소유**다 — 서버 `identity_generation`은 같은 소켓의 UID 재바인딩만 표현하므로
+> reconnect 식별에 쓸 수 없다(D2). 구 receive task·구 request_id의 결과 폐기는 클라 `connectionGeneration`이 담당한다.
 
 
-- `subscribedTopics` 단일 Set(WebSocketService.swift)을 **desired / pending request / accepted**로 분리.
+- `subscribedTopics` 단일 Set(WebSocketService.swift:27)을 **desired / pending request / accepted**로 분리.
   accepted가 아닌 topic의 snapshot은 무시(현재는 revoke·unsubscribe 후 늦게 온 snapshot이 그대로 적용된다).
-- **batch subscribe** — `resendSubscriptions`가 topic마다 개별 전송한다. 연결 시 desired 전체를 **한 요청**으로
+- **batch subscribe** — `resendSubscriptions`(:185)가 topic마다 개별 전송한다. 연결 시 desired 전체를 **한 요청**으로
   보내고 이후 KRX 변화만 증분 처리(토큰 검증·premium 확인·ack timer·snapshot 작업의 4중 복제 제거, D1 startup 목표와 정합).
 - **토큰 복구** — `subscription_error.invalid_token`에서 **1B provider의 forced refresh를 single-flight로 1회**만 수행하고
   **새 request_id**로 재전송. 두 번째 거부는 재시도하지 않는다. 계정전환·`connectionGeneration` 변경 이후 도착한 ack은 무시.
@@ -1480,8 +971,7 @@ A: `[server]` horizon 계산(캐시 4분 → lease ~11분) / `[server]` stale fa
 B: `[server]` 만료 후 publish 0건(**sweep 미실행 상태에서도**) / `[server]` 조회~전송 지연 중 만료 시 전송 차단 /
 `[server]` snapshot도 동일 차단 / `[server]` `get_subscribers`가 만료분 미삭제 /
 `[server]` 소켓별 송신 순서(ack → live → snapshot).
-C: `[server]` **cross-UID는 tombstone + `reconnect_required` + 연결 종료**(B5(d) — 구 "UID 변경 시 전량 제거 /
-B premium 실패해도 A 미복원 / B 토큰 무효면 A 불변"은 폐기된 purge 계약) / `[server]` 새 UID는 새 연결에서만 바인딩 /
+C: `[server]` UID 변경 시 전량 제거 / `[server]` B premium 실패해도 A 미복원 / `[server]` B 토큰 무효면 A 불변 /
 `[server]` 같은 UID면 언급 안 된 topic 불변 / `[server]` reject된 구 등록 제거 /
 `[server]` 구 sweep이 갱신된 lease 미제거(CAS) / `[server]` transient 실패 시 registry 불변·lease 미연장.
 D: `[both]` ack `lease_duration_seconds`(서버 산출 ⊥ 클라 **실제 wire decode** — 순수 계산 비교로는 부족) /
@@ -1504,14 +994,13 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[server]` 만료 claim 후 통지 timeout·중복 sweep 없음 /
 `[client]` **10분 lease → 6~7분 재인증** 계산(D6) / `[server]` `temporarily_unavailable`의 `retry_after_seconds` /
 `[server]` D7 상한 **각각의 경계값**(message 16KiB / topics 8 / topic 64자 / request_id 36자 / 중복 first-occurrence) /
-`[server]` **invalid token은 기존 UID·lease 불변** / `[client]` 구 `request_id` ack 무시.
-⚠️ "구 `identity_generation` ack 무시"는 **요구하지 않는다** — 필드가 2026-07-29 제거됐다(D2).
-구 결과 폐기는 클라 `connectionGeneration`이 진다(§B5(e)).
+`[server]` **invalid token은 기존 UID·lease 불변** / `[client]` 구 `request_id` ack과 구 `identity_generation` ack 무시.
 
 보강 2차(codex 감사):
 `[both]` 인증된 unsubscribe의 ack + `active_subscriptions` 수렴(유실 시 상태 불일치 없음 — 서버만 잠그면
 클라가 fire-and-forget으로 남아도 green. 실측: 현행 iOS `unsubscribe`는 `request_id`도 ack 처리도 없다) /
 `[both]` `active_subscriptions`가 **미언급 기존 topic의 `lease_id`·잔여 duration까지** 실어 클라가 상태 복구 가능 /
+`[server]` 서버 `identity_generation`은 **같은 소켓 UID 재바인딩만** 표현(reconnect 식별은 클라 `connectionGeneration`) /
 `[server]` **identity horizon**(`check_revoked=True` 시점 + 15분)으로 삭제·비활성 계정 접근이 15분 내 종료 /
 `[server]` **message** 상한이 **서버(uvicorn) 계층에서 강제**되고 초과 시 **클라이언트가** close 1009 관측 /
 `[server]` `invalid_request`(malformed · UUID 오류 · 빈 topics · 중복 정규화 후 빈 목록) /
@@ -1523,7 +1012,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 보강 3차(codex 감사):
 `[server]` **unsubscribe는 토큰 없이도 성공**(만료·revoked·Firebase 장애에서도 제거됨 = fail-open) + `removed_topics`·`operation` /
 `[server]` **`lease_id` 재사용 금지**(제거 후 재구독 / UID 변경 후 재등록에서 구 `reauth_required`가 새 lease와 불일치) /
-`[server]` **identity verdict가 토큰 단위**(관측은 UID 키 — 같은 UID의 새 토큰 검증을 revoked 구 토큰이 공유하지 못함) /
+`[server]` **identity horizon이 토큰 단위**(같은 UID의 새 토큰 검증을 revoked 구 토큰이 공유하지 못함) /
 `[server]` **webhook epoch fence**(검증 시작 → invalidate → 구 검증 완료가 cache를 되살리지 못함) /
 `[client]` `retry_at`이 음수가 되지 않고 `lease_remaining <= safety`면 즉시 재인증 /
 `[both]` **ack 유실 후 재시도 idempotency**(클라의 새 request_id 재시도 ⊥ 서버의 topic-set 불변·lease 갱신) /
@@ -1540,7 +1029,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
 `[server]` **REST twin 게이트가 flag ON보다 먼저**(무인증 KRX 재개방 방지) /
 `[server]` **전송 실패는 소켓 종료**(부분 삭제 후 유지 금지 — ack이 거짓이 되지 않음) /
 `[server]` **연결당 동시 dispatch에서 unsubscribe·ping이 subscribe 뒤에 막히지 않음**(pong timeout 내) /
-`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(✅ B5(d) 확정: live 소켓 cross-UID = tombstone + 종료. `auth_time` 단조·클라 generation 안은 모두 폐기) / `[server]` **lock 안 I/O timeout** /
+`[server]` **구 UID subscribe가 새 바인딩을 되돌리지 못함**(auth_time 단조) / `[server]` **lock 안 I/O timeout** /
 `[client]` **최소 잔여 기준 타이머**(혼합 lease에서 짧은 topic이 먼저 만료되지 않음) /
 `[both]` **재인증 idempotency = topic 집합 불변이되 lease는 갱신됨** /
 `[client]` snapshot 중복은 **timestamp-merge**로 적용 /
@@ -1558,7 +1047,7 @@ F(클라 계약 — 종전 G에 행이 없어 통째로 누락돼 있었다):
   `[server]` wall clock 역행에도 strict horizon 불변(strict cache **저장·재사용** 경로) /
   `[server]` stale fallback으로 연장 안 됨(A6 3-state verifier — 현행 `PremiumStatus`에는
   fresh/stale 구분이 없고 최대 1시간 stale로 ACTIVE가 나온다) /
-  `[server]` single-flight(A5 owner·epoch) / `[server]` identity 관측이 **UID 키 저장 + 토큰별 `iat` 파생**을 실제 저장 경로에서도 유지(⛔ 구 "토큰 fingerprint/`auth_time` 저장 키" 전략은 폐기) /
+  `[server]` single-flight(A5 owner·epoch) / `[server]` identity horizon이 토큰 단위(저장 키) /
   `[server]` webhook epoch fence.
 - ⚠️ **"최소 lease 10분"을 이 슬라이스 근거로 주장하지 말 것** — `CACHE_TTL < LEASE`는 3-way min의
   *entitlement 항*에만 거는 상한이다. 10분 하한은 `firebase_identity_verified_at ≈ now`라는 E2

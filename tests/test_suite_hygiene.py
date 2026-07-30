@@ -15,9 +15,14 @@
 
 실측 격차(수정 전):
 
-    test_strict_authz        직접 32 / pytest 43   ← revocation 축·uid 결속·생성 안전성 누락
-    test_revenuecat_provider 직접 11 / pytest 20
-    test_comparison_api      직접 21 / pytest 25
+    test_revenuecat_provider 직접 11 / pytest 20   ← guard 뒤 4개 클래스가 수집조차 안 됨
+
+⚠️ **격차가 곧 guard 탓은 아니다** (2026-07-30 실측). 위 파일은 guard만 파일 끝으로 옮기자
+11 → 20으로 회복됐다(pytest와 일치) — guard가 원인이다. 반면 `test_comparison_api`는 이동 전후
+모두 21이고 pytest는 25다: 그 4개 격차는 **직접 실행이 `conftest.py`를 로드하지 않아** 스텁이
+없고 한 클래스가 `setUpClass`에서 죽는 것이다(그 클래스는 애초에 직접 실행이 불가능하다).
+그래서 이 검사기는 **격차를 재는 것이 아니라 guard 뒤 정의의 존재만** 본다 — 그것이 유일하게
+guard에 귀속되는 성질이다.
 
 앞의 둘은 `cat >>`로 클래스를 덧붙이다 **한 세션에 두 번** 만든 것이고, 셋째는 그 전부터
 있었다. 습관에서 반복되는 결함이라 메모리나 리뷰가 아니라 **테스트로** 막는다.
