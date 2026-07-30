@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# fastapi 이미지 전환 배포 — 태그 전환 + recreate + 검증 + 실패 복구를 **한 단위**로 수행한다.
+#
+# 왜 스크립트인가: 이 절차를 메모리의 복사 코드로 두는 동안 셸 제어흐름 결함을 **연속 3번** 냈다
+# (① 실행 전 차단만 막고 runtime 원자성 없음 → ② signal trap 반환 후 본문이 계속돼 rc=0 오탐
+#  → ③ set -u만 써서 실패 명령이 통과 + 성공 조건이 health뿐이라 recreate 미적용을 성공으로 오판).
+# 복사 코드는 검증 대상이 아니므로 같은 부류가 계속 재발한다. tests/test_ops_deploy_fastapi.py가
+# 실패 주입으로 이 파일의 8개 경로를 잠근다.
+#
+# 왜 원자성이 필요한가: 이 서버의 cron 5개가 전부 `docker compose run --rm fastapi ...`이고
+# **`latest` 태그를 쓴다**. 태그만 바뀌고 recreate가 안 되면 **cron은 신 이미지 / 웹은 구 이미지**인
+# split 상태가 되고, 그 조합은 아무도 검증한 적이 없다.
+#
+# 사용:
+#   ops/deploy-fastapi.sh --target exchange-rate-fastapi:pending-<sha> \
+#                         --fallback exchange-rate-fastapi:rollback-<date>
+#   (롤백은 두 인자를 스왑한다 — 방향만 다른 같은 절차다.)
+#
+# 테스트 seam (프로덕션에서는 건드리지 않는다):
+#   DOCKER_BIN / HEALTH_RETRIES / HEALTH_SLEEP / COMPOSE_DIR
+# ⚠️ `set -e`는 **defense-in-depth**다 — 실제 게이트는 아래 `converged_to`(running == target)이고,
+#    변이 실측상 `set -u`로 되돌려도 테스트는 전부 green이다(수렴 검사가 tag 실패를 이미 잡는다).
+#    그래도 두는 이유: 수렴 검사가 못 보는 실패(예: cd 실패)를 조용히 통과시키지 않기 위해서다.
+set -Eeuo pipefail
+
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+HEALTH_RETRIES="${HEALTH_RETRIES:-18}"
+HEALTH_SLEEP="${HEALTH_SLEEP:-5}"
+COMPOSE_DIR="${COMPOSE_DIR:-$HOME/exchange-rate}"
+LATEST_TAG="${LATEST_TAG:-exchange-rate-fastapi:latest}"
+SERVICE="${SERVICE:-fastapi}"
+CONTAINER="${CONTAINER:-exchange-rate-app}"
+
+TARGET=""
+FALLBACK=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target)   TARGET="${2:?--target 값 필요}"; shift 2 ;;
+        --fallback) FALLBACK="${2:?--fallback 값 필요}"; shift 2 ;;
+        --service)  SERVICE="${2:?}"; shift 2 ;;
+        *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
+    esac
+done
+[ -n "$TARGET" ]   || { echo "--target 필수" >&2; exit 2; }
+[ -n "$FALLBACK" ] || { echo "--fallback 필수" >&2; exit 2; }
+
+cd "$COMPOSE_DIR"
+
+image_id() { "$DOCKER_BIN" images "$1" --format '{{.ID}}' </dev/null 2>/dev/null | head -1; }
+running_id() {
+    "$DOCKER_BIN" inspect "$CONTAINER" --format '{{.Image}}' </dev/null 2>/dev/null | head -1
+}
+is_healthy() {
+    # ⛔ `grep -q healthy`로 쓰면 안 된다 — **"unhealthy"에도 매치된다**(실패 주입 테스트가 잡았다).
+    #    상태 필드를 그대로 대조한다. 공백 유무는 직렬화 설정에 따라 달라질 수 있어 허용한다.
+    "$DOCKER_BIN" compose exec -T "$SERVICE" \
+        curl -s --max-time 5 http://localhost:8000/health </dev/null 2>/dev/null \
+        | grep -Eq '"status" *: *"healthy"'
+}
+
+# ── preflight: 어느 상태도 바꾸기 **전에** 두 태그가 실제로 존재하는지 확인한다.
+#    없는 태그로 진행하면 tag가 실패하고 그 뒤 복구도 대상이 없어 손쓸 수 없다.
+TARGET_ID="$(image_id "$TARGET")"
+FALLBACK_ID="$(image_id "$FALLBACK")"
+[ -n "$TARGET_ID" ]   || { echo "PREFLIGHT 실패: target 태그 없음 ($TARGET) — 상태 무변화" >&2; exit 1; }
+[ -n "$FALLBACK_ID" ] || { echo "PREFLIGHT 실패: fallback 태그 없음 ($FALLBACK) — 상태 무변화" >&2; exit 1; }
+echo "[preflight] target=$TARGET($TARGET_ID) fallback=$FALLBACK($FALLBACK_ID)"
+
+# ── 목표 도달 판정: health **그리고** running image ID == 기대 ID.
+#    ⛔ health만 보면 recreate가 조용히 미적용된 경우(구 컨테이너가 그대로 healthy)를 성공으로 오판한다.
+converged_to() {
+    local want="$1" i
+    for i in $(seq 1 "$HEALTH_RETRIES"); do
+        if is_healthy && [ "$(running_id)" = "$want" ]; then
+            echo "  수렴 확인 (~$((i * HEALTH_SLEEP))s, image=$want)"
+            return 0
+        fi
+        sleep "$HEALTH_SLEEP"
+    done
+    return 1
+}
+
+RECOVERED=no
+recover() {
+    # ⛔ 진입 즉시 자기 trap을 해제한다 — 아래 명령들이 다시 trap을 발화시키면 무한 재귀가 된다.
+    trap - EXIT HUP INT TERM
+    [ "$RECOVERED" = no ] || return 0
+    RECOVERED=yes
+    echo "!!! 미완 — FALLBACK($FALLBACK)으로 복구한다" >&2
+    "$DOCKER_BIN" tag "$FALLBACK" "$LATEST_TAG" </dev/null \
+        || echo "  ✗ 태그 복구 실패 — 수동 개입 필요" >&2
+    "$DOCKER_BIN" compose up -d --force-recreate "$SERVICE" </dev/null >/dev/null 2>&1 \
+        || echo "  ✗ 복구 recreate 실패 — 수동 개입 필요" >&2
+    if converged_to "$FALLBACK_ID"; then
+        echo "  복구 완료 — fallback 이미지로 수렴" >&2
+    else
+        echo "  ✗✗ 복구 후에도 미수렴 — 즉시 수동 개입 필요" >&2
+    fi
+}
+
+# ⛔ signal과 EXIT은 **다른 handler**여야 한다. bash signal trap은 handler가 반환하면 **본문을 계속
+#    실행**하므로(격리 실험 실측: 통합 handler → TERM → trap → 본문 계속 → rc=0 / 분리 → rc=1),
+#    signal 쪽은 명시적으로 종료해야 한다.
+#    ⚠️ 이 분리는 **테스트로 잠겨 있지 않다** — 오탐이 나는 창(수렴 확인 직후 `trap -` 직전)을
+#    재현하려면 본 스크립트 PID로 signal을 보내야 하는데 가짜 docker에서는 명령 치환 서브셸이
+#    가로막아 실패했다. 타이밍 의존 테스트를 CI에 넣지 않기로 하고 구조로만 닫았다.
+#    ⛔ 그러므로 이 두 줄을 통합 handler로 "단순화"하지 말 것 — 테스트가 red를 내지 않는다.
+trap 'recover; exit 1' HUP INT TERM
+trap recover EXIT
+# ★ 여기부터 상태를 바꾼다 — trap 무장 이후여야 한다.
+
+"$DOCKER_BIN" tag "$TARGET" "$LATEST_TAG" </dev/null
+echo "[tag] $LATEST_TAG -> $TARGET"
+
+"$DOCKER_BIN" compose up -d --force-recreate "$SERVICE" </dev/null >/dev/null 2>&1
+echo "[recreate] 요청 완료"
+
+if ! converged_to "$TARGET_ID"; then
+    echo "!!! 목표 이미지로 수렴하지 못했다" >&2
+    exit 1   # EXIT trap이 recover를 수행한다
+fi
+
+# ★ 목표 수렴을 확인한 **뒤에만** 해제한다.
+trap - EXIT HUP INT TERM
+echo "[완료] running == $TARGET ($TARGET_ID), health OK"
+exit 0
