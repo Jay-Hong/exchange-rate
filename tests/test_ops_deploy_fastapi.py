@@ -139,6 +139,8 @@ class _Harness:
                     save(); sys.exit(1)
                 s["tags"][a[2]] = src
             elif "build" in a and a[:1] == ["compose"]:
+                if "build" in FAIL:
+                    save(); sys.exit(1)
                 # 별 프로젝트로 빌드하면 **live latest 를 건드리지 않는다**(프로젝트명이 이미지명).
                 proj = a[a.index("-p") + 1] if "-p" in a else "exchange-rate"
                 s["tags"][f"{{proj}}-fastapi:latest"] = BUILT
@@ -196,6 +198,7 @@ class _Harness:
             LATEST_TAG="img:latest",
             FLOCK_BIN=str(self.bin / "flock"),
             CRONTAB_BIN=str(self.bin / "crontab"),
+            **(env_extra or {}),
         )
         proc = subprocess.Popen(
             ["bash", str(self.ops / "deploy-fastapi.sh"),
@@ -514,13 +517,15 @@ class TestPrepareUnderLock(unittest.TestCase):
 
     FULL_SHA = "d" * 40
 
-    def _git(self, *, pull_ok=True, fetch_ok=True, lockconf_changed=False, worktree_ok=True):
+    def _git(self, *, fetch_ok=True, runtime_changed=False, worktree_ok=True):
         """git 더블 — fetch/rev-parse FETCH_HEAD/worktree/diff/pull 을 모델링한다.
 
         ⚠️ live worktree를 **pull하지 않는** 것이 이 경로의 계약이므로, `pull` 호출 여부와 시점을
         기록해 테스트가 관측한다(준비 단계에서 불리면 계약 위반).
         """
-        g = self.tmp / "bin" / "git"
+        # ⚠️ 이름을 `git`으로 두면 PATH 로 해소돼 `GIT_BIN` 주입이 **검증되지 않는다**
+        #    (실측: env_extra 가 env 에 안 들어갔는데도 테스트가 통과했다).
+        g = self.tmp / "bin" / "git-fake"
         g.parent.mkdir(parents=True, exist_ok=True)
         g.write_text(f"""#!/usr/bin/env bash
 echo "$*" >> {self.tmp}/git_calls
@@ -529,9 +534,16 @@ case "$1" in
   rev-parse)
     # ⚠️ `--short` 를 **존중**한다 — 무시하면 "축약 SHA로 되돌리는" 변이가 보이지 않는다(실측 생존).
     if [ "$2" = "--short" ]; then echo {self.FULL_SHA[:7]}; else echo {self.FULL_SHA}; fi ;;
-  diff)      {"exit 1" if lockconf_changed else "exit 0"} ;;
+  diff)
+    # ⚠️ pathspec 을 **존중**한다 — 무시하면 `_RUNTIME_PATHS` 를 좁히는 변이가 보이지 않는다
+    #    (실측 생존). 변경은 `ops/cron-job.sh` 에 있다고 모델링한다.
+    if [ "{runtime_changed}" = "True" ]; then
+      for p in "$@"; do
+        case "$p" in ops|ops/cron-job.sh) exit 1 ;; esac
+      done
+    fi
+    exit 0 ;;
   worktree)  {"exit 0" if worktree_ok else "exit 1"} ;;
-  pull)      {"exit 0" if pull_ok else "exit 1"} ;;
 esac
 exit 0
 """, encoding="utf-8")
@@ -558,16 +570,20 @@ exit 0
         self.assertIn("-p fxi-build", h.calls, "별 compose 프로젝트로 빌드하지 않았다")
         self.assertIn("worktree add", self.git_calls, "별 worktree 를 쓰지 않았다")
 
-    def test_live_worktree_is_pulled_only_after_convergence(self):
-        """⛔ pull은 **수렴 성공 뒤**다 — 먼저 하면 실패 시 신 launcher + 구 이미지가 남는다."""
+    def test_live_worktree_is_never_pulled(self):
+        """⛔ pull을 **트랜잭션에서 뺀다** — 넣으면 pull 성공 직후 signal에서 세대가 갈린다.
+
+        구 구현은 수렴 뒤 pull했고, 그 창에서 `recover()`는 이미지만 되돌려 **신 launcher + 구
+        이미지**가 남았다(실측 지적). 소스 롤백은 실행 중 스크립트를 덮어쓰므로 트랜잭션에 넣을 수
+        없다 → preflight가 runtime 파일 변경을 거부하는 것으로 대체했다.
+        """
         h = _Harness(self.tmp)
         rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
                         env_extra={"GIT_BIN": str(self._git())})
         self.assertEqual(rc, 0, out)
-        self.assertLess(out.index("수렴 확인"), out.index("[finalize]"),
-                        "수렴 확인보다 먼저 pull했다")
         calls = [l.split()[0] for l in self.git_calls.strip().splitlines()]
-        self.assertEqual(calls[-1], "pull", f"pull이 마지막 git 호출이 아니다: {calls}")
+        self.assertNotIn("pull", calls, f"live worktree 를 pull했다: {calls}")
+        self.assertIn("그대로 둔다", out)
 
     def test_build_failure_leaves_live_worktree_untouched(self):
         """실패 시 live는 손대지 않은 상태(구 launcher + 구 이미지 = **일관**)로 남아야 한다."""
@@ -577,13 +593,19 @@ exit 0
         self.assertEqual(rc, 1, out)
         self.assertNotIn("pull", self.git_calls, "실패했는데 live worktree 를 pull했다")
 
-    def test_ref_that_changes_lock_conf_is_refused(self):
-        """⛔ lock 경로 전환은 이 절차로 안전하지 않다 — 구 lock을 쥔 배포와 신 lock cron이 공존한다."""
+    def test_ref_that_changes_runtime_files_is_refused(self):
+        """⛔ **runtime이 live worktree에서 읽는 파일**(`ops/`·`docker-compose.yml`)이 바뀌면 거부.
+
+        이미지만 원자적으로 바꿀 수 있으므로, 그 파일들이 바뀌면 "이미지는 신 세대 / 그 파일들은
+        구 세대"가 되고 한 트랜잭션에 넣을 방법이 없다 → host-config migration이 필요하다.
+        ⚠️ 이 거부가 두 High(정본 변경 미검증 / pull-signal 창)를 **함께** 닫는다.
+        """
         h = _Harness(self.tmp)
         rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
-                        env_extra={"GIT_BIN": str(self._git(lockconf_changed=True))})
+                        env_extra={"GIT_BIN": str(self._git(runtime_changed=True))})
         self.assertEqual(rc, 1, out)
-        self.assertIn("lock.conf", out)
+        self.assertIn("runtime이 읽는 파일", out)
+        self.assertIn("host-config migration", out)
         self.assertNotIn("worktree add", self.git_calls, "거부인데 빌드를 시작했다")
 
     def test_fetch_failure_is_refused_before_any_build(self):
@@ -600,14 +622,30 @@ exit 0
         self.assertEqual(rc, 1, out)
         self.assertIn("worktree", out)
 
-    def test_finalize_pull_failure_rolls_the_image_back(self):
-        """⛔ 이미지는 전환됐는데 pull이 실패하면 세대가 갈린다 → 이미지도 되돌려 맞춘다."""
-        h = _Harness(self.tmp)
+    def test_temp_worktree_is_cleaned_when_build_itself_fails(self):
+        """⛔ build가 실패하면 inline 정리에 **도달하지 못한다** — trap만이 정리할 수 있다.
+
+        ⚠️ `fail=("up",)`로는 이 성질이 안 잡힌다(build 성공 후 inline `cleanup_worktree`가 이미
+        불려 관측이 가려진다 — 실측: recover 의 정리를 제거하는 변이가 생존했다).
+        """
+        h = _Harness(self.tmp, fail=("build",))
         rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
-                        env_extra={"GIT_BIN": str(self._git(pull_ok=False))})
+                        env_extra={"GIT_BIN": str(self._git())})
         self.assertEqual(rc, 1, out)
-        self.assertIn("launcher가 구 세대", out)
-        self.assertIn("복구", out, "이미지를 되돌리지 않았다")
+        self.assertIn("worktree remove", self.git_calls,
+                      "build 실패 경로에서 worktree 를 정리하지 않았다(trap 미연결)")
+
+    def test_temp_worktree_is_cleaned_on_failure(self):
+        """⛔ build 중 실패·종료 시 임시 worktree 정리가 **종료 처리에 연결**돼야 한다.
+
+        연결되지 않으면 /tmp 디렉터리와 git worktree metadata가 남는다(실측 지적).
+        """
+        h = _Harness(self.tmp, fail=("up",))
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("worktree remove", self.git_calls,
+                      "실패 경로에서 worktree 를 정리하지 않았다")
 
     def test_existing_tag_pointing_elsewhere_is_refused(self):
         """⛔ 같은 SHA 태그가 **이미 다른 이미지**를 가리키면 덮어쓰지 않고 거부한다.

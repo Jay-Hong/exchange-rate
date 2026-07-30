@@ -241,10 +241,21 @@ converged_to() {
     return 1
 }
 
+_BUILD_WT=""
+cleanup_worktree() {
+    [ -n "$_BUILD_WT" ] || return 0
+    "${GIT_BIN:-git}" worktree remove --force "$_BUILD_WT" >/dev/null 2>&1 || true
+    rm -rf "$_BUILD_WT" >/dev/null 2>&1 || true
+    _BUILD_WT=""
+}
+
 RECOVERED=no
 recover() {
     # ⛔ 진입 즉시 자기 trap을 해제한다 — 아래 명령들이 다시 trap을 발화시키면 무한 재귀가 된다.
     trap - EXIT HUP INT TERM
+    # ⚠️ 임시 worktree 정리는 **복구보다 먼저**, 그리고 반드시 여기서도 한다 — build 중 종료되면
+    #    /tmp 디렉터리와 git worktree metadata가 남는다(실측 지적).
+    cleanup_worktree
     [ "$RECOVERED" = no ] || return 0
     RECOVERED=yes
     echo "!!! 미완 — FALLBACK($FALLBACK)으로 복구한다" >&2
@@ -287,10 +298,24 @@ if [ -n "$PREPARE_REF" ]; then
     _SHA="$("$GIT_BIN" rev-parse FETCH_HEAD)"        # ⛔ **전체 SHA** — 축약은 충돌 가능
     [ -n "$_SHA" ] || { echo "거부: FETCH_HEAD 를 해소할 수 없다" >&2; exit 1; }
 
-    # ⛔ lock 정본 경로가 바뀌는 ref는 거부한다 — 그 전환은 이 절차로 안전하게 못 한다
-    #    (구 lock을 쥔 배포와 신 lock을 잡는 cron이 공존한다). 의도적 수동 마이그레이션이 필요하다.
-    if ! "$GIT_BIN" diff --quiet HEAD FETCH_HEAD -- ops/lock.conf; then
-        echo "거부: 이 ref가 ops/lock.conf 를 바꾼다 — lock 경로 전환은 수동 절차가 필요하다." >&2
+    # ⛔ **runtime이 live worktree에서 읽는 파일이 바뀌면 거부한다.**
+    #    이 스크립트는 **이미지만** 원자적으로 바꿀 수 있다. cron은 live worktree의
+    #    `ops/*.sh`(launcher·정본·lock.conf)와 `docker-compose.yml`을 읽으므로, 대상 커밋이
+    #    그것들을 바꾸면 "이미지는 신 세대 / 그 파일들은 구 세대"가 되고 이 스크립트로는 그 둘을
+    #    한 트랜잭션에 넣을 수 없다(pull을 끼우면 pull 성공 직후 signal에서 세대가 갈린다 — 실측 지적).
+    #    ⚠️ `app/`·`scripts/`는 bind-mount가 **아니라**(마운트는 data·logs·firebase json 3개, 실측)
+    #      runtime에 영향이 없다. 그래서 그것들이 바뀌는 배포는 이미지 전환만으로 완결된다.
+    _RUNTIME_PATHS="ops docker-compose.yml"
+    if ! "$GIT_BIN" diff --quiet HEAD FETCH_HEAD -- $_RUNTIME_PATHS; then
+        echo "거부: 이 ref가 runtime이 읽는 파일을 바꾼다 — 이미지 전환만으로 완결되지 않는다." >&2
+        echo "  변경된 경로:" >&2
+        # ⚠️ `|| true` 필수 — `git diff`는 변경이 있으면 **비영 종료**이고, 진단 출력용 파이프라인이
+        #    `set -e`에 잡히면 남은 안내 메시지가 통째로 사라진다(같은 부류를 이미 한 번 겪었다).
+        "$GIT_BIN" diff --name-only HEAD FETCH_HEAD -- $_RUNTIME_PATHS 2>/dev/null \
+            | sed 's/^/    /' >&2 || true
+        echo "  이 부류는 **host-config migration**이 필요하다(launcher·crontab·compose를 함께 옮기는" >&2
+        echo "  별도 절차). versioned release directory + 원자적 symlink 전환이 근본 해법이고" >&2
+        echo "  이 스크립트 범위 밖이다 — 지금은 거부가 정직한 답이다." >&2
         exit 1
     fi
 
@@ -301,7 +326,6 @@ if [ -n "$PREPARE_REF" ]; then
     _EXISTING="$(image_id "$TARGET")"
 
     _BUILD_WT="$(mktemp -d)"
-    cleanup_worktree() { "$GIT_BIN" worktree remove --force "$_BUILD_WT" >/dev/null 2>&1 || true; }
     "$GIT_BIN" worktree add --detach "$_BUILD_WT" FETCH_HEAD >/dev/null 2>&1 \
         || { echo "거부: build worktree 생성 실패" >&2; exit 1; }
 
@@ -310,7 +334,10 @@ if [ -n "$PREPARE_REF" ]; then
     _BUILD_PROJECT="fxi-build"
     if ! "$DOCKER_BIN" compose -p "$_BUILD_PROJECT" -f "$_BUILD_WT/docker-compose.yml" \
             build "$SERVICE" </dev/null >/dev/null 2>&1; then
-        echo "거부: build 실패 (live worktree·latest 무변화)" >&2; cleanup_worktree; exit 1
+        # ⚠️ 여기서 inline 정리를 하지 **않는다** — 하면 trap 의 정리가 가려져(테스트가 구별 못 함)
+        #    signal 경로에서 worktree 가 남는 결함이 회귀해도 red 가 안 난다(실측 생존).
+        #    정리는 종료 처리(trap)가 단독으로 진다.
+        echo "거부: build 실패 (live worktree·latest 무변화)" >&2; exit 1
     fi
     _BUILT_ID="$(image_id "$_BUILD_PROJECT-$SERVICE:latest")"
     cleanup_worktree
@@ -340,20 +367,21 @@ if ! converged_to "$TARGET_ID"; then
     exit 1   # EXIT trap이 recover를 수행한다
 fi
 
-# ── live worktree 갱신은 **수렴 성공 뒤**, 아직 lock 안에서 ────────────────────
-# 순서가 요점: 실패하면 live는 손대지 않은 상태(구 launcher + 구 이미지 = 일관)로 남는다.
-# cron은 이 시점까지 lock에 막혀 있으므로 launcher·이미지 전이를 관측하지 못한다.
+# ⛔ **live worktree를 pull하지 않는다.** 구 구현은 수렴 뒤 pull했는데, pull 성공 직후
+#    HUP/TERM이 오면 recover가 **이미지만** 되돌려 신 launcher + 구 이미지가 남았다(실측 지적).
+#    pull을 트랜잭션에 넣으면 그 창을 닫을 수 없고(소스 롤백은 실행 중 스크립트를 덮어쓴다),
+#    **빼는 것**이 유일한 닫는 방법이다. 위 preflight가 runtime 파일 변경을 거부하므로
+#    live worktree의 launcher·compose는 대상 커밋과 **의미상 동일**하고, 남는 차이(`app/` 등)는
+#    bind-mount가 아니라 runtime에 영향이 없다.
+#    ⚠️ 따라서 `git log`는 배포된 것을 반영하지 않는다 — 배포 기록은 **immutable 이미지 태그**
+#      (`…:sha-<full>`)와 `docker inspect`가 진다. live 소스 갱신은 언제든 별도로 하면 되고,
+#      실패해도 아무것도 불일치하지 않는다.
 if [ -n "$PREPARE_REF" ]; then
-    if "$GIT_BIN" pull --ff-only origin "$PREPARE_REF" >/dev/null 2>&1; then
-        echo "[finalize] live worktree 를 $PREPARE_REF 로 갱신했다 (launcher·이미지 같은 세대)"
-    else
-        echo "!!! 이미지는 전환됐으나 live worktree 갱신 실패 — launcher가 구 세대다." >&2
-        echo "    수동으로 \`git pull --ff-only origin $PREPARE_REF\` 후 crontab 정본을 재확인할 것." >&2
-        exit 1   # EXIT trap이 recover 수행 → 이미지도 fallback으로 되돌려 세대를 맞춘다
-    fi
+    echo "[finalize] live worktree 는 그대로 둔다 (runtime 파일 동일 — 배포 기록은 이미지 태그)"
 fi
 
 # ★ 목표 수렴을 확인한 **뒤에만** 해제한다.
+cleanup_worktree
 trap - EXIT HUP INT TERM
 echo "[완료] running == $TARGET ($TARGET_ID), health OK"
 exit 0
