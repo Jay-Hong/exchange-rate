@@ -49,7 +49,7 @@ class _Harness:
 
     def __init__(self, tmp: pathlib.Path, *, fail=(), apply_recreate=True,
                  healthy=True, kill_on=None, missing=(),
-                 fail_tag_nth=0, fail_up_nth=0):
+                 fail_tag_nth=0, fail_up_nth=0, cron_wrapped=True):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
@@ -110,6 +110,21 @@ class _Harness:
             exit 0
             """), encoding="utf-8")
         fake.chmod(0o755)
+        # 가짜 flock — LOCKED 파일이 있으면 획득 실패(cron이 쥐고 있는 상황).
+        fl = self.bin / "flock"
+        fl.write_text(f'#!/usr/bin/env bash\n[ -f {tmp}/LOCKED ] && exit 1\nexit 0\n',
+                      encoding="utf-8")
+        fl.chmod(0o755)
+        # 가짜 crontab — 5줄 전부 flock으로 감싼 형태를 기본으로 낸다(감싸이지 않은 경우도 재현).
+        ct = self.bin / "crontab"
+        wrapped = "yes" if cron_wrapped else "no"
+        lines = []
+        for m in (5, 7, 9, 11):
+            pre = f"{self.bin}/flock -w 600 {tmp}/deploy.lock " if cron_wrapped else ""
+            lines.append(f"{m} * * * * cd ~/x && {pre}/usr/bin/docker compose run --rm fastapi python s.py")
+        body = "\n".join(lines)
+        ct.write_text(f'#!/usr/bin/env bash\ncat <<EOF\n{body}\nEOF\n', encoding="utf-8")
+        ct.chmod(0o755)
         self.kill_on = kill_on
 
     def run(self, *, target=TARGET, fallback=FALLBACK, timeout=60, now_utc="00:20",
@@ -123,6 +138,9 @@ class _Harness:
             HEALTH_SLEEP="0",
             COMPOSE_DIR=str(self.tmp),
             LATEST_TAG="img:latest",
+            LOCK_FILE=str(self.tmp / "deploy.lock"),
+            FLOCK_BIN=str(self.bin / "flock"),
+            CRONTAB_BIN=str(self.bin / "crontab"),
         )
         proc = subprocess.Popen(
             ["bash", str(SCRIPT), "--target", target, "--fallback", fallback, *extra_args],
@@ -156,6 +174,43 @@ class TestDeployScript(unittest.TestCase):
         self.tmp = pathlib.Path(self._td.name)
         self.addCleanup(self._td.cleanup)
 
+    def test_unwrapped_cron_is_refused(self):
+        """⛔ crontab이 lock을 잡지 않으면 **배포 쪽만 잡아도 무의미**하다 — 산문 경고가 아니라 게이트다.
+
+        감싸이지 않은 cron은 배포가 lock을 쥐고 있어도 그대로 실행되어 일시적 split에 끼어든다.
+        """
+        h = _Harness(self.tmp, cron_wrapped=False)
+        rc, out = h.run()
+        self.assertEqual(rc, 5, out)
+        self.assertIn("lock으로 감싸여", out)
+        self.assertEqual(h.latest, FALLBACK, "거부인데 상태가 바뀌었다")
+
+    def test_deploy_refuses_when_lock_is_held(self):
+        """⛔ 비대칭 정책 — 배포는 lock 획득 실패 시 **즉시 거부**한다(대기하지 않는다).
+
+        대기하면 긴 cron 뒤에 붙어 예산·타이밍 가정이 전부 깨진다. 반대로 cron은 대기해야 한다
+        (`-w 0`이면 daily append가 조용히 건너뛰어 데이터 공백이 된다).
+        """
+        (self.tmp / "LOCKED").write_text("1", encoding="utf-8")
+        h = _Harness(self.tmp)
+        rc, out = h.run()
+        self.assertEqual(rc, 4, out)
+        self.assertIn("쥐고 있다", out)
+        self.assertEqual(h.latest, FALLBACK)
+
+    def test_cron_firing_minute_itself_is_refused(self):
+        """⛔ **현재 분이 곧 발화 분**인 경우. 실측으로 통과했던 경계다.
+
+        구 산술은 `m > mm`(현재 분 제외) + margin 비교 `<`를 써서 `00:11`을 "54분", `15:01`을
+        "4분"으로 판정해 **통과**시켰다. `-ge` / `-le`로 고쳤다.
+        """
+        for now in ("00:05", "00:07", "00:09", "00:11", "15:01"):
+            with self.subTest(now=now):
+                h = _Harness(self.tmp)
+                rc, out = h.run(now_utc=now)
+                self.assertEqual(rc, 3, out)
+                self.assertIn("0분 뒤", out)
+
     def test_cron_window_is_refused_before_any_mutation(self):
         """⛔ retag~recreate 사이의 **일시적 split** 구간에 cron이 겹치면 검증되지 않은 조합이 실제로 돈다.
 
@@ -163,7 +218,11 @@ class TestDeployScript(unittest.TestCase):
         그 발화에 닿을 수 있으면 **상태를 바꾸기 전에** 거부해야 한다.
         ⚠️ 이 가드는 host lock(flock)의 **대체가 아니라 임시 방편**이다 — 예산 초과 배포는 여전히 겹친다.
         """
-        for now, why in [("00:04", ":05 직전"), ("00:06", ":07 직전"),
+        # ⛔ `("00:01", 4)` / `("14:57", 4)`는 **LEFT == margin** 인 경계다 — 이 케이스가 없으면
+        #    margin 비교를 `-le` → `-lt`로 바꾸는 변이가 **생존한다**(실측으로 생존했다).
+        for now, why in [("00:01", ":05까지 정확히 margin(4)분"),
+                         ("14:57", "15:01까지 정확히 margin(4)분"),
+                         ("00:04", ":05 직전"), ("00:06", ":07 직전"),
                          ("14:58", "15:01 직전"), ("15:00", "15:01 직전")]:
             with self.subTest(now=now, why=why):
                 h = _Harness(self.tmp)

@@ -62,17 +62,59 @@ done
 
 cd "$COMPOSE_DIR"
 
+# ── host lock (선행 조건) ────────────────────────────────────────────────────
+# cron 5개와 **공유**하는 lock이 있어야 일시적 split 구간에 cron이 끼어드는 것을 실제로 막는다.
+# ⛔ **비대칭 정책**: cron은 **대기**(`flock -w <초>`)하고 배포는 **즉시 거부**(`flock -w 0`)한다.
+#    - cron을 `-w 0`으로 두면 daily append가 **조용히 건너뛰어 데이터 공백**이 된다.
+#    - 배포를 대기시키면 긴 cron 뒤에 붙어 예산·타이밍 가정이 전부 깨진다.
+# ⛔ **crontab이 lock을 잡도록 바뀌지 않으면 배포 쪽만 잡아도 무의미하다.** 그래서 산문 경고가
+#    아니라 **preflight 게이트**로 확인한다 — 감싸이지 않은 cron 줄이 있으면 실행을 거부한다.
+FLOCK_BIN="${FLOCK_BIN:-flock}"
+CRONTAB_BIN="${CRONTAB_BIN:-crontab}"
+LOCK_FILE="${LOCK_FILE:-/var/lock/fxi-deploy.lock}"
+ALLOW_UNLOCKED_CRON="${ALLOW_UNLOCKED_CRON:-no}"
+
+cron_run_lines() { "$CRONTAB_BIN" -l 2>/dev/null | grep -c 'docker compose run --rm fastapi' || true; }
+cron_wrapped_lines() {
+    "$CRONTAB_BIN" -l 2>/dev/null \
+        | grep -c "$FLOCK_BIN .*$LOCK_FILE.*docker compose run --rm fastapi" || true
+}
+_TOTAL="$(cron_run_lines)"; _WRAPPED="$(cron_wrapped_lines)"
+if [ "$ALLOW_UNLOCKED_CRON" != yes ] && [ "$_TOTAL" != "$_WRAPPED" ]; then
+    cat >&2 <<EOF
+거부: cron ${_TOTAL}줄 중 ${_WRAPPED}줄만 lock으로 감싸여 있다 ($LOCK_FILE).
+  감싸이지 않은 cron은 배포가 lock을 잡고 있어도 그대로 실행되어 일시적 split에 끼어든다.
+  crontab을 아래 형태로 바꾼 뒤 다시 실행할 것 (cron은 **대기**, 배포는 **거부** — 비대칭):
+    5 * * * * cd ~/exchange-rate && $FLOCK_BIN -w 600 $LOCK_FILE /usr/bin/docker compose run --rm fastapi ...
+  (테스트·긴급용 우회: ALLOW_UNLOCKED_CRON=yes — 그 경우 split 위험을 감수한다)
+EOF
+    exit 5
+fi
+echo "[lock-preflight] cron ${_WRAPPED}/${_TOTAL} 줄이 lock으로 감싸여 있다"
+
+exec 200>"$LOCK_FILE"
+if ! "$FLOCK_BIN" -w 0 200; then
+    echo "거부: 다른 작업이 $LOCK_FILE 을 쥐고 있다 (cron 실행 중일 가능성). 나중에 다시 시도." >&2
+    exit 4
+fi
+echo "[lock] 획득 — 수렴 완료까지 유지한다"
+# ★ lock은 스크립트 종료 시 fd 200이 닫히며 자동 해제된다(retag 전부터 수렴 후까지 덮는다).
+
 # ── cron 충돌 가드 (상태 변경 **전**) ────────────────────────────────────────
 # 실측 crontab(UTC): 매시 :05 :07 :09 :11 + 매일 15:01. 배포 예산(recreate + health 최대 90s)이
 # 그 발화에 겹치면 **일시적 split 구간에서 cron이 검증되지 않은 조합을 실행**한다.
-# ⚠️ 이 가드는 host lock의 **대체가 아니라 임시 방편**이다 — 예산을 초과하는 배포는 여전히 겹칠 수 있다.
+# ⛔ **시각 산술만으로는 근본적으로 닫히지 않는다** — :11에 시작된 작업이 :12에 아직 돌고 있는지
+#    시계로는 알 수 없다. 그래서 아래 **host lock이 선행 조건**이고, 이 가드는 그 위의 belt-and-braces다
+#    (lock을 잡으려 대기하는 대신 애초에 겹칠 시각을 피한다).
 minutes_to_next_cron() {
     local hh="$1" mm="$2" best=9999 m cand
+    # ⛔ `-gt`가 아니라 `-ge`다 — **현재 분이 곧 발화 분**일 수 있다(실측: 00:11이 "54분"으로 통과했다).
     for m in 5 7 9 11; do
-        if [ "$m" -gt "$mm" ]; then cand=$(( m - mm )); [ "$cand" -lt "$best" ] && best="$cand"; fi
+        if [ "$m" -ge "$mm" ]; then cand=$(( m - mm )); [ "$cand" -lt "$best" ] && best="$cand"; fi
     done
     cand=$(( 60 - mm + 5 )); [ "$cand" -lt "$best" ] && best="$cand"   # 다음 시각 최초 발화
-    if [ "$hh" -eq 15 ] && [ "$mm" -lt 1 ]; then
+    # ⛔ `-lt 1`이면 15:01 **정각**을 놓친다(실측: 15:01이 "4분"으로 통과했다).
+    if [ "$hh" -eq 15 ] && [ "$mm" -le 1 ]; then
         cand=$(( 1 - mm )); [ "$cand" -lt "$best" ] && best="$cand"     # 같은 시각 15:01
     fi
     if [ "$hh" -eq 14 ]; then
@@ -84,7 +126,8 @@ if [ "$ALLOW_CRON_WINDOW" = no ]; then
     NOW_HM="${NOW_UTC:-$(date -u +%H:%M)}"
     _HH=$(( 10#${NOW_HM%%:*} )); _MM=$(( 10#${NOW_HM##*:} ))
     LEFT="$(minutes_to_next_cron "$_HH" "$_MM")"
-    if [ "$LEFT" -lt "$CRON_MARGIN" ]; then
+    # ⛔ `-lt`면 margin과 **정확히 같은** 시각이 통과한다(실측: LEFT=4, margin=4가 통과했다).
+    if [ "$LEFT" -le "$CRON_MARGIN" ]; then
         echo "거부: ${LEFT}분 뒤 cron이 발화한다 (UTC ${NOW_HM}, margin=${CRON_MARGIN}분)." >&2
         echo "  일시적 split 구간에 cron이 겹치면 검증되지 않은 조합이 실행된다." >&2
         echo "  cron 발화 후 다시 시도하거나, 불가피하면 --allow-cron-window 로 명시 우회." >&2
