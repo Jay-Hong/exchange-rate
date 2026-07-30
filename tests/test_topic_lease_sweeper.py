@@ -22,6 +22,7 @@ import asyncio
 import unittest
 
 from app.strict_cache import StrictObservationCache
+from app.strict_wire import Accepted
 from app.topic_lease import LEASE_MAX_SECONDS
 from app.topic_lease_registry import (
     ConnectionLockBusy,
@@ -35,6 +36,14 @@ from app.topic_lease_sweeper import (
     NOTIFY_TIMEOUT_SECONDS,
     sweep_once as _sweep_once,
 )
+
+
+def _auth(cache, uid, at_mono):
+    """§B4 검증 묶음 — **실제** `strict_wire.Accepted`(테스트 double 아님)."""
+    return Accepted(
+        snapshot=cache.snapshot(uid), premium_verified_at_mono=at_mono,
+        identity_verified_at_mono=at_mono, uid=uid,
+    )
 
 UID = "uid-1"
 TOPIC = "krx:usd-krw-futures"
@@ -73,9 +82,8 @@ async def sweep_once(registry, **kwargs):
 async def _subscribe(registry, ws, topics, *, uid=UID, cache=None, now_mono=ISSUED_AT):
     cache = cache or StrictObservationCache()
     await registry.apply_subscribe(
-        ws=ws, uid=uid, topics=topics, rejected_topics=(), snapshot=cache.snapshot(uid),
-        cache=cache, now_mono=now_mono, premium_verified_at_mono=now_mono,
-        identity_verified_at_mono=now_mono, send_ack=_ok_ack,
+        ws=ws, topics=topics, rejected_topics=(), cache=cache, now_mono=now_mono,
+        authorization=_auth(cache, uid, now_mono), send_ack=_ok_ack,
     )
     return cache
 
@@ -441,9 +449,8 @@ class TestStaleClaimNeverBlocksANewLease(unittest.IsolatedAsyncioTestCase):
         await self._stale_claim(registry, ws)
         # 권한 상실로 evict → 나중에 다시 구독
         await registry.apply_subscribe(
-            ws=ws, uid=UID, topics=[], rejected_topics=[TOPIC], snapshot=cache.snapshot(UID),
-            cache=cache, now_mono=EXPIRED_AT, premium_verified_at_mono=EXPIRED_AT,
-            identity_verified_at_mono=EXPIRED_AT, send_ack=_ok_ack,
+            ws=ws, topics=[], rejected_topics=[TOPIC], cache=cache, now_mono=EXPIRED_AT,
+            authorization=_auth(cache, UID, EXPIRED_AT), send_ack=_ok_ack,
         )
         await _subscribe(registry, ws, [TOPIC], cache=cache, now_mono=EXPIRED_AT)
         self.assertIsNotNone(registry.authorized_lease(ws, TOPIC, now_mono=EXPIRED_AT))
@@ -1059,9 +1066,8 @@ async def _enter_nested(registry, ws):
 async def _subscribe_result(registry, ws, *, uid="uid-9", now_mono=EXPIRED_AT):
     cache = StrictObservationCache()
     return await registry.apply_subscribe(
-        ws=ws, uid=uid, topics=[OTHER], rejected_topics=(), snapshot=cache.snapshot(uid),
-        cache=cache, now_mono=now_mono, premium_verified_at_mono=now_mono,
-        identity_verified_at_mono=now_mono, send_ack=_ok_ack,
+        ws=ws, topics=[OTHER], rejected_topics=(), cache=cache, now_mono=now_mono,
+        authorization=_auth(cache, uid, now_mono), send_ack=_ok_ack,
     )
 
 

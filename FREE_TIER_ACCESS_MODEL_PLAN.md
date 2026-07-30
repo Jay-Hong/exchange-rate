@@ -893,6 +893,11 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
 > C-API가 "registry가 표현할 수 없는 것"의 목록이라면, 여기는 **registry가 표현하지만 지키게
 > 만들지는 못하는 것**의 목록이다. 전부 산문에만 있어 호출부가 어기면 조용히 깨진다.
+>
+> ⚠️ **아래 1·2를 읽기 전에**: 두 항목의 *요구*("stale로 horizon을 전진시키지 말 것" /
+> "실패를 권한 없음으로 접지 말 것")는 **여전히 유효한 정본**이다. 다만 1의 *도달 경로 진단*과
+> 2에 대해 제안됐던 *해결안*은 2026-07-30 감사에서 정정됐다 — 그 절(§C-INV 후속 감사)을 함께
+> 읽을 것. 여기만 읽고 해결안을 고르면 틀린다.
 
 1. ⛔ **stale fallback에서 `premium_verified_at_mono`를 전진시키지 말 것.**
    A1의 "노출 상한 15분"은 `CACHE_TTL = 5분 < LEASE_MAX = 900s` 관계에서 나온다. 그런데
@@ -920,6 +925,136 @@ codex 다라운드 감사 + 코드 실사로 수렴. **G의 테스트 매트릭�
 
 > 두 항목 모두 "있으면 좋다"가 아니라 **슬라이스의 정확성 전제**다. 지금 코드 가드를 넣지
 > 않는 이유는 호출자가 없어서다(C-API와 같은 규율) — 배선 슬라이스가 가드를 함께 짓는다.
+
+##### C-INV 후속 감사 (2026-07-30) — 위 2건의 **원인 진단이 불완전했고**, 목록도 불완전했다
+
+가드를 설계하려고 4 렌즈 + codex로 검증한 결과, 위 서술이 지목한 지점이 실제 메커니즘이 아니었다.
+
+⛔ **정정 1 — C-INV 1에는 도달 경로가 둘이고, 구 서술은 그중 하나만 봤다.**
+구 본문은 "`compute_lease_expiry`가 float 3개만 받아 fresh/stale을 알 수 없다"를 원인으로 적었다.
+그 문장 자체는 사실이지만 **그 경로는 이번 슬라이스가 좁혔고**(authorization 토큰), 남은 —
+그리고 더 조용한 — 경로는 관측 **스탬프**다.
+`strict_verifier._premium_observation`은 provider가 `Determined`를 주면 무조건
+`verified_at_mono=clock.mono()`(= **변환 시점**)를 찍는다. `Determined`는 필드가 `is_premium`
+하나라 *언제 관측됐는지 나를 방법이 없다*. 그래서 provider가 오래된 객체를 **재반환**하면
+(생성 0회) 그 값이 방금 관측된 것으로 승격된다 — TTL이 없으면 노출 상한은 "1시간 15분"이 아니라
+**무한**이다. `Determined(` 생성 위치를 제한하는 트립와이어 안은 이 때문에 **기각**했다
+(허용 파일이 1시간 stale 캐시를 소유한 그 모듈이기도 하다).
+⛔ **C-INV 1은 여전히 열려 있다.** 닫으려면 관측 시각이 authority 응답과 함께 와야 하고
+(`Determined`/`IdentityFound`에 `observed_at_mono` 필수 필드), 그 스탬프는 **호출 직전**에
+읽어야 한다(응답 시점에 찍으면 진실 시각을 초과할 수 있다 — authority 데이터가 참이었던 시각은
+`[호출 시작, 응답]` 구간 안이므로 응답에 anchor하면 그것을 **넘길 수 있다**. 취소 불가한
+`to_thread` 경로에서는 그 구간이 길어질 수 있다. ⚠️ 구체 지연 수치는 **측정하지 않았다** —
+한때 "55초"라고 적었는데 리포에 근거가 없는 시나리오 값이었다). 이는 `app/subscription.py`의 "wall 축만 읽는다" 계약을 넘는 결정이고
+(`tests/test_subscription_clock.py`의 `_poison_mono`가 **의도적으로** 그 날 red가 되게 잠가 뒀다),
+같은 파일이 예고한 **N-3 provider leaf 이관**과 함께 가야 한다. 별도 슬라이스.
+
+⛔ **정정 2 — C-INV 2에 3-state 값을 도입하는 안은 아무것도 닫지 않는다.**
+값으로 넘기면 `if not isinstance(obs, Granted): rejected.append(topic)` 한 줄이 그대로 살아 있다
+(그리고 `apply_subscribe` docstring이 이미 "이 구분은 `Sequence[str]` 시그니처로는 강제되지
+않는다"고 적어 뒀다). 닫는 형태는 **예외 전파**다 — raise는 `rejected_topics`에 append할 수 없다.
+판정기도 새로 만들지 않는다: REST twin이 쓰는 `visible_snapshot_topics_sync`를 재사용해야
+§3.2(KRX 존재 비노출)의 "판정기는 하나"가 유지되고, 세션도 그 함수가 thread 안에서 열고 닫는다
+(호출자 소유 세션은 풀 5개를 잠식한다). 경계에서 `except Exception`(BaseException 아님)으로
+받아 **전체-요청 `temporarily_unavailable`**로 접고, transient와 영구를 **다른 카운터**로 센다.
+✅ 방향 판정: `transient=False`(영구 SQLSTATE)도 **"판정 불가"**다 — "권한 없음"으로 접으면
+row가 실제로 있는 정상 사용자가 DB 설정 장애로 축출된다. 리포가 이미 같은 결정을 세 곳에서 했다
+(`map_config_error`가 영구 결함을 `temporarily_unavailable`로 매핑 / 영구 3종은 raise /
+snapshot resolver는 "조용한 False 아님").
+
+🟡 **좁힘(닫힘 아님) — 위 두 항목이 시야에 두지 않은 가장 넓은 우회로** (2026-07-30 이 슬라이스)
+`apply_subscribe`가 `uid`·`snapshot`·두 관측 시각을 **각각** 받았다. 그래서 배선이 이미 배포된
+`verify_premium_status`(stale hit이 `PremiumStatus.ACTIVE`)를 쓰고 `premium_verified_at_mono`에
+지금 시각을 넣는 것만으로 상한이 깨졌고, **`Determined`도 `PremiumObservation`도 등장하지 않아
+어떤 타입 가드도 발화하지 않았다**. 또 "A의 snapshot + uid=B"가 표현 가능해 fence는 A의 epoch를
+보는데 lease는 B로 발급될 수 있었다(§C1 우회).
+→ `strict_wire.Accepted`를 **authorization 토큰**으로 만들고(`map_verification`이 `uid`를
+`snapshot.uid`에서 **파생**, `__post_init__`이 주체 일치·유한성을 강제) `apply_subscribe`는 그
+묶음 하나만 받는다. registry는 `strict_*`를 import하지 않는 독립 계층이라 **같은 주체 구조
+불변식을 스스로 다시** 검사한다(`_unpack_authorization`, 유한성은 제외 — 아래 참조).
+그 중복의 정당화(=import 부재)를 AST 테스트가 잠근다.
+
+**정확히 무엇이 닫혔고 무엇이 안 닫혔는가** (과대주장 방지):
+- ✅ 닫힘: `uid`·관측 시각을 **따로 지어 넣는** 실수 — 그 인자가 사라졌다.
+- ✅ 닫힘: 묶음이 **선언한** 주체와 snapshot의 주체가 다른 조합.
+- ⛔ **안 닫힘 — snapshot provenance.** `snapshot`은 duck-typed라
+  `SimpleNamespace(uid=…, epoch=<현행 epoch>)`이면 그대로 `Applied`가 된다(실측).
+  "실제 `cache.snapshot()`에서 왔다"는 아무도 검증하지 않는다. 즉 배선이 **의도적으로**
+  묶음을 지어내는 것은 여전히 가능하다 — in-process 타입으로는 막을 수 없는 부류다.
+- ⛔ **안 닫힘 — 값의 권위(①).** C-INV 1이 그대로 열려 있다.
+
+⚠️ **이 슬라이스가 스스로 만든 회귀와 그 교훈** (codex 재현): 구조 검증을 lock **전에** 두자,
+A로 lease를 받은 연결에 uid 불일치 묶음 + `rejected_topics=[T]`를 주면 `ValueError`가 먼저 나가
+**A의 lease가 생존**했다 — 반면 구조가 정상인 cross-UID는 `ConnectionTerminated`로 접근을 제거한다.
+같은 "다른 주체가 왔다"인데 **해석할 수 없는 쪽이 더 관대**했다(방향이 거꾸로). 검증을 lock 안
+C1 앞으로 옮기고, 잃을 접근이 있으면 축 위반과 같은 정책(tombstone + 종단 신호)으로 닫는다.
+→ 교훈: **검증의 위치가 정책이다.** 같은 검사를 어디서 하느냐가 fail-closed 방향을 바꾼다.
+
+⚠️ **위치가 계약이었다 (이 슬라이스에서 실측한 회귀)**: `_unpack_authorization`에 유한성 검사를
+넣자 lock 안 `compute_lease_expiry`의 fail-closed 경로를 **앞질러**, 축 위반 시 접근 축소를
+커밋하고 tombstone하는 정책이 무력화됐다(거부된 topic이 계속 흐르는데 호출자는 예외만 받는 상태).
+기존 2 테스트가 잡았고, 유한성은 제자리에 두고 "여기서 검사하지 않음"을 테스트로 **일부러** 잠갔다.
+
+⚠️ **판정기가 텍스트를 보고 있었다**: `test_registry_does_not_read_a_clock_itself`가
+`inspect.getsource`로 `"clock.mono"` 문자열을 찾아서, *막으려는 안티패턴을 docstring에 적은 것*
+만으로 red가 됐다. AST 접근 검사 + `time` 미import 단언으로 교체했다.
+⛔ 한때 "별칭 경유도 잡혀 강도가 올라갔다"고 적었는데 **틀렸다** — `x = clock; x.mono()`는
+dotted 이름이 `x.mono`라 AST도 놓친다(data-flow 미추적). 바뀐 것은 **정확도**(서술을 코드로
+오인하지 않음)이고 커버리지는 그대로다. 남은 구멍: 그 별칭 경유와 `getattr(clock, "mono")()`.
+
+##### C-INV 3~7 — 같은 종류로 **새로 발견된** 강제 안 된 불변식 (2026-07-30)
+
+3. ⛔ **G1(KRX entitlement) 축에는 관측·신선도·상한이 아예 없다.** `compute_lease_expiry`는
+   float **3개**(now / premium / identity)만 받고 `Lease`에도 entitlement 축이 없다.
+   premium은 `premium_observation_is_fresh`가 `LEASE_MAX`에서 막지만 **G1은 막을 코드가 없다** —
+   배선이 가시성 판정을 연결 단위로 메모하면(자연스러운 선택이다) 운영자가 row를 회수해도
+   재인증마다 통과해 lease가 **무한 갱신**된다. 상한이 15분이 아니라 없다.
+   → 결정 필요: (i) 3번째 관측 축으로 승격(4-way min) 또는 (ii) "매 subscribe마다 무조건 재조회"를
+   코드로 강제(가시성 결과를 연결·프로세스에 저장 금지 + 회귀 테스트).
+4. ⛔ **teardown 호출에 `await`가 없다.** `app/main.py`의 finally는
+   `topic_dispatcher.registry.remove_websocket(websocket)`(sync)인데 lease registry의 동명 메서드는
+   `async def`다. 결정 (1)로 registry를 갈아 끼우면서 이 줄을 그대로 두면 코루틴만 만들어지고 버려져
+   **tombstone이 찍히지 않는다** → `authorizes_send`가 영구 True → 죽은 소켓에 매 tick 전송.
+   단위 테스트는 이 finally를 구동하지 않아 못 잡는다. 배선 커밋에 통합 테스트 필수.
+5. ⛔ **transient 판정기가 `Exception`에 total이 아니다.** `TRANSIENT_DB_ERRORS`는 4종뿐이라
+   `ProgrammingError` 등은 `except`를 **탈출**하고, 그러면 `main.py`의 광범위 `except Exception` →
+   finally가 **그 연결의 구독을 통째로 삭제**한다(C-INV 2가 막으려던 topic 1개 제거보다 파괴적).
+   경계 catch는 `except Exception`으로 total해야 하고 그 안에서 transient/영구를 가른다.
+6. ⚠️ **identity 축에 동형의 provenance 구멍.** `_identity_observation`도 `clock.mono()`를 변환
+   시점에 찍고 `IdentityFound`에 관측 시각이 없다. Firebase adapter가 오늘은 authority를 직접
+   부르지만, fallback wrapper가 생기면 premium과 같은 stale 세탁이 된다. `to_thread` 작업은
+   **취소 불가**라 hang 시 창이 더 크다. C-INV 1을 premium만 고치면 이 축이 남아,
+   `strict_authz`가 기록한 "같은 위험을 한쪽에만 걸어 둔 비대칭"이 재현된다.
+8. ⛔ **authorization 토큰은 `ws`에 묶이지 않는다.** A의 **정품** 토큰을 B의 소켓에 적용하면
+   `Applied`가 되고 `bound_uid(ws_B)`가 A가 된다(실측) — B의 소켓이 A의 premium 관측으로
+   KRX fanout 대상이 된다. B의 진짜 토큰이 오면 §C1이 닫지만 **첫 요청의 누수는 이미 일어난 뒤**다.
+   registry는 transport identity를 입력으로 받지 않아 스스로 검사할 수 없다 → 배선이 검증 결과를
+   **연결 스코프로 소유**해야 하고(모듈 전역·single-flight 결과 재사용 금지), 그 규율에 회귀
+   테스트가 필요하다. 즉 이번 토큰이 닫은 것은 **uid 필드 축**이고 **연결 축은 열려 있다**.
+9. ⚠️ **`strict_cache.is_current`가 미등록 uid에 fail-open이다** — `self._epochs.get(snapshot.uid)
+   == snapshot.epoch`라 둘 다 `None`이면 통과한다(실측). 배선이 `StrictSnapshot`을 그대로 나르지
+   않고 자기 DTO로 감싸면 §A4의 소비 fence가 상시 통과하고, 그 상태는 정상 발급과 구별되지 않는다.
+   (이번 슬라이스 범위 밖 — `strict_cache` 쪽 수정이다.)
+7. ⚠️ **양성 freshness horizon == `LEASE_MAX`라 "fresh인데 못 쓰는" 1초 창.**
+   fresh ⟺ `now < v+900`, 사용 가능 ⟺ `now ≤ v+899`(정수 초 광고와 맞춘 floor). 그 사이에서
+   `derive_verdict`는 `Active`를 주는데 `apply_subscribe`가 요청 전체를
+   `lease_horizon_already_expired`로 접는다 — 문서가 약속한 "재검증으로 보낸다"가 아니다.
+   방향은 fail-closed. 두 경계가 같은 상수에서 파생됨을 잠그거나 양성 horizon을 낮출 것.
+
+##### 이 감사에서 내린 범위 판정
+
+| 제안 | 판정 | 근거 |
+| --- | --- | --- |
+| transient 경계를 `app/db_errors.py`로 추출 | **별도 슬라이스에서 포함** | patch 대상 0건이라 순수. 단 폴라리티 정당화("모르면 transient")가 **HTTP 1회 재시도** 문맥이라 무한 재시도 소비자(WS 재인증)는 자기 계층에 상한이 필요하다 |
+| `has_entitlement` 3-state 값 반환 | **폐기** | 위 정정 2 |
+| `Determined(` 단일 생성지점 AST | **폐기** | 위 정정 1 |
+| `observed_at_mono` 필수 필드 (양 축) | **별도 슬라이스, C-INV 1의 본체** | live REST 경로 + `_poison_mono` 게이트 + N-3 이관과 동반 |
+| `apply_subscribe` authorization 토큰 | **이 슬라이스에서 완료** | 호출자 0인 지금이 blast radius 최소 |
+
+⚠️ **변이 점수의 증명 범위**: 이 슬라이스는 23개 변이를 전부 KILLED 했지만, 그것이 증명하는 것은
+"열거한 각 검사가 테스트에 관측된다"뿐이다. **검사를 우회하는 새 호출 형태**(예: 구 인자를
+optional로 되살리기 — 실제로 전량 green이었고 별도 단언을 추가해 닫았다)나 **운영 경로 도달성**
+(현재 호출자 0)은 증명하지 않는다. 변이 점수를 "우회로 없음"의 근거로 쓰면 그 경계를 넘는다.
 
 #### C-CLAIM. 문서 부정확 감사 (2026-07-29)
 

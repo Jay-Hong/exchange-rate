@@ -409,6 +409,74 @@ class ConnectionTerminated:
 
 TransitionResult = Union[Applied, Discarded, Rejected, ConnectionTerminated]
 
+_MISSING_UID = object()   # `None`을 유효한 uid로 오인하지 않기 위한 sentinel
+
+_AUTHORIZATION_FIELDS = (
+    "uid",
+    "snapshot",
+    "premium_verified_at_mono",
+    "identity_verified_at_mono",
+)
+
+
+def _unpack_authorization(authorization) -> tuple:
+    """검증 묶음에서 lease 발급 입력 4개를 꺼낸다 (`strict_wire.Accepted` 모양).
+
+    ⚠️ **범위**: 여기서 보는 것은 "이 묶음이 **누구의** 판정인가"(주체 구조)뿐이다.
+    유한성은 `Accepted.__post_init__`과 lock 안 `compute_lease_expiry`가 보고(아래 참조),
+    snapshot이 진짜 `cache.snapshot()`에서 왔는지는 **아무도 보지 않는다**(duck-typed 통과 실측).
+
+    ⛔ **이 모듈은 `strict_*`를 import 하지 않는다** — 그 독립성이 "registry의 불변식이 검증기의
+    불변식에 기대지 않는다"를 구조로 말해 주기 때문이다(`compute_lease_expiry` 호출부 주석 참조).
+    그래서 타입이 아니라 **모양**으로 받고, `Accepted.__post_init__`과 **같은 불변식을 다시**
+    검사한다. 중복이 아니라 계층 독립의 대가다 — 여기 오는 객체가 그 클래스라는 보장이 없다.
+
+    ⚠️ 폴라리티: 필드가 없으면 **거부**다. `getattr(..., 0.0)` 같은 기본값을 주면 배선이
+    빠뜨린 순간 `premium_verified_at_mono=0.0`이 조용히 흐르고, 그 값은
+    `compute_lease_expiry`의 3-way min에서 **항상 과거**라 lease가 태어날 때부터 죽는다 —
+    fail-closed 방향이라 눈에 띄지도 않는다(무증상 전면 거부).
+
+    ⚠️ **호출 위치가 계약이다**: 이 함수는 `apply_subscribe`의 **lock 안**에서 불린다.
+    lock 전에 부르면 구조 위반이 C1/C2 축소보다 먼저 실패해 기존 lease가 살아남는다(실측).
+
+    ⚠️ **남은 비대칭 (열린 항목)**: 같은 부류인 `topics ∩ rejected_topics`의 `ValueError`는
+    여전히 lock 전이라 그 경로는 접근을 줄이지 않는다. 이번 범위에서 건드리지 않았다 —
+    기존 동작이고 테스트가 잠그고 있다. 배선이 붙을 때 함께 볼 것.
+
+    Raises:
+        ValueError: 필드 누락 / uid가 빈 문자열·비-str / `snapshot`에 uid 없음 / `snapshot.uid != uid`.
+    """
+    missing = [f for f in _AUTHORIZATION_FIELDS if not hasattr(authorization, f)]
+    if missing:
+        raise ValueError(
+            f"authorization에 필드가 없다: {missing} — 검증 묶음이 아니다 ({authorization!r})"
+        )
+    uid = authorization.uid
+    snapshot = authorization.snapshot
+    premium = authorization.premium_verified_at_mono
+    identity = authorization.identity_verified_at_mono
+
+    if not isinstance(uid, str) or not uid:
+        raise ValueError(f"authorization.uid: 비어 있지 않은 str이어야 — got {uid!r}")
+    # ⛔ fail-closed — uid를 확인할 수 없는 snapshot은 주체를 확정할 수 없다.
+    snapshot_uid = getattr(snapshot, "uid", _MISSING_UID)
+    if snapshot_uid is _MISSING_UID:
+        raise ValueError(f"authorization.snapshot에 uid가 없다: {snapshot!r}")
+    if snapshot_uid != uid:
+        # §C1 — 이 불일치가 통과하면 fence는 snapshot 주체의 epoch를 보는데 lease는 `uid`로
+        # 발급된다(= 다른 주체의 판정으로 인가). 조용히 한쪽을 고르면 안 된다.
+        raise ValueError(
+            "authorization: uid와 snapshot.uid가 다르다 — 한 주체의 판정이 아니다 "
+            f"(uid={uid!r}, snapshot.uid={snapshot_uid!r})"
+        )
+    # ⛔ **유한성·축 검증은 여기서 하지 않는다.** 그건 lock 안에서 `compute_lease_expiry`가
+    #    이미 하고, **위치가 계약**이다: 축 위반이어도 그 전에 접근 축소(eviction) 계획이
+    #    확정돼 tombstone + `ConnectionTerminatedError`로 닫힌다(§"중단돼도 되돌아가지 않는다").
+    #    실측(2026-07-30): 여기서 NaN을 미리 거부하자 그 fail-closed 경로를 앞질러
+    #    **거부된 topic이 계속 흐르는데 호출자는 예외만 받는** 상태가 됐다 — 기존 2 테스트가 잡았다.
+    #    이 함수는 "이 묶음이 **누구의** 판정인가"만 본다(구조), 값의 유효성은 제자리에서 본다.
+    return uid, snapshot, premium, identity
+
 
 class TopicLeaseRegistry:
     """연결별 lock 아래에서 lease를 발급·보관한다."""
@@ -545,14 +613,11 @@ class TopicLeaseRegistry:
         self,
         *,
         ws,
-        uid: str,
         topics: Sequence[str],
         rejected_topics: Sequence[str],
-        snapshot,
+        authorization,
         cache,
         now_mono: float,
-        premium_verified_at_mono: float,
-        identity_verified_at_mono: float,
         send_ack,
     ) -> TransitionResult:
         """한 subscribe 요청을 **한 트랜잭션으로** 적용한다.
@@ -577,6 +642,24 @@ class TopicLeaseRegistry:
         거부로 넘기면 **정상 사용자의 구독이 영구 제거**된다. "권한 없음"과 "판정 불가"를
         호출부에서 갈라야 하고, 후자는 전체-요청 오류라 애초에 이 함수에 도달하지 않는다.
         ⚠️ 이 구분은 `Sequence[str]` 시그니처로는 강제되지 않는다 — 호출부 규율이다.
+
+        ## `authorization` — 왜 네 값을 따로 받지 않는가 (2026-07-30)
+
+        구 서명은 `uid`·`snapshot`·`premium_verified_at_mono`·`identity_verified_at_mono`를
+        **각각** 받았다. 그래서 배선이 이미 배포된 `verify_premium_status`(stale hit이
+        `PremiumStatus.ACTIVE`를 돌려준다)를 쓰고 `premium_verified_at_mono=clock.mono()`를 넣는
+        것만으로 A1의 노출 상한이 깨졌고, **`Determined`도 `PremiumObservation`도 등장하지 않아
+        어떤 타입 가드도 발화하지 않았다**. 또 "A의 snapshot + uid=B"가 표현 가능해서
+        fence(`cache.is_current(snapshot)`)는 A의 epoch를 보는데 lease는 B로 발급될 수 있었다.
+
+        이제 검증 묶음 하나만 받는다. ⛔ **무엇이 닫히고 무엇이 안 닫히는지 정확히**:
+        - 닫힘: 배선이 `uid`와 관측 시각을 **따로 지어 넣는** 실수(그 인자가 없어졌다).
+        - 닫힘: 묶음이 **선언한** 주체와 snapshot의 주체가 다른 조합(`_unpack_authorization`).
+        - ⛔ **안 닫힘 — snapshot의 provenance.** `snapshot`은 duck-typed라
+          `SimpleNamespace(uid=..., epoch=<현행 epoch>)`이면 그대로 통과한다(실측: `Applied`).
+          "실제 `cache.snapshot()`에서 왔다"는 아무도 검증하지 않는다.
+        - ⛔ **안 닫힘 — 값의 권위(§C-INV 1).** 관측 스탬프 축은 별도 슬라이스다.
+        여기를 "우회로 닫힘"으로 세지 말 것 — **좁혔을 뿐**이다.
 
         ⚠️ `now_mono`는 호출자가 요청 경계에서 **1회** 읽은 값이다. 이 모듈은 시계를 읽지 않는다.
         ⚠️ `send_ack`는 **필수**다(기본값 없음). 선택으로 두면 배선이 한 번 빠뜨렸을 때 ack 없이
@@ -609,6 +692,30 @@ class TopicLeaseRegistry:
                 raise UnleasedRoutingError(
                     "무토큰 등록된 연결에 leased subscribe를 부를 수 없다 — 재연결이 필요하다"
                 )
+            # ── authorization 해체 — **lock 안이어야 한다** ─────────────────────
+            # ⛔ 구 배치(lock 전)는 **바로 아래 C1 경로보다 덜 fail-closed했다**. 실측(2026-07-30):
+            #    A로 발급된 lease가 있는 연결에 uid 불일치 묶음 + `rejected_topics=[T]`를 주면
+            #      구조 위반(lock 전 raise) → ValueError, **A의 lease 생존**, tombstone 없음
+            #      구조 정상 cross-UID     → ConnectionTerminated, A의 lease 제거
+            #    같은 "다른 주체가 왔다"인데 **해석할 수 없는 쪽이 더 관대**했다 — 방향이 거꾸로다.
+            #    주체를 확정할 수 없으면 구 UID 데이터가 계속 나갈 가능성을 배제할 수 없으므로,
+            #    잃을 접근이 있으면 축 위반과 **같은 정책**으로 닫는다(§"중단돼도 되돌아가지 않는다").
+            try:
+                (
+                    uid,
+                    snapshot,
+                    premium_verified_at_mono,
+                    identity_verified_at_mono,
+                ) = _unpack_authorization(authorization)
+            except ValueError as exc:
+                if not self._active.get(ws):
+                    # 잃을 접근이 없으면 연결은 멀쩡하다 — 감싸면 배선이 멀쩡한 연결을 닫는다
+                    # (축 위반의 `not reduces_access` 분기와 동일한 근거).
+                    raise
+                self._closed.add(ws)
+                # tombstone을 찍었으면 **이 채널에도** 종단 신호를 실어야 계약이 닫힌다.
+                raise ConnectionTerminatedError("malformed_authorization") from exc
+
             bound = self._uids.get(ws)
             if bound is not None and bound != uid:
                 return self._terminate_locked(ws, "reconnect_required")

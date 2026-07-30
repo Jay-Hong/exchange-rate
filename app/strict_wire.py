@@ -30,6 +30,7 @@ registry도 lease도 건드리지 않는다(카운터 제외). 그래야 배선�
 from __future__ import annotations
 
 import logging
+import math
 import random
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -41,6 +42,8 @@ from app.strict_verifier import (
     VerifiedActive,
     VerifiedInactive,
 )
+
+_MISSING = object()   # `None`을 유효한 uid로 오인하지 않기 위한 sentinel
 
 logger = logging.getLogger("exchange_rate.strict_wire")
 
@@ -58,15 +61,53 @@ JITTER_FRACTION = 0.4
 
 @dataclass(frozen=True)
 class Accepted:
-    """판정 통과. **`snapshot`을 그대로 들고 간다.**
+    """판정 통과. **`snapshot`을 그대로 들고 간다.** lease 발급의 **authorization 토큰**이다.
 
     ⚠️ 배선이 `cache.snapshot(uid)`을 다시 뜨면 §A4의 소비 fence가 자기 자신을 통과시킨다
     (`snapshot()`은 없는 uid에 generation을 할당하는 쓰기다). 그래서 여기서 떨어뜨리면 안 된다.
+
+    ## 왜 네 값이 **한 객체**로 묶여 있는가 (2026-07-30)
+
+    구 `apply_subscribe`는 `uid`·`snapshot`·두 관측 시각을 **각각 따로** 받았다. 그래서 배선이
+    이미 배포된 `verify_premium_status`(stale hit이 `PremiumStatus.ACTIVE`를 돌려준다 —
+    `app/subscription.py`의 4단계 fallback)를 쓰고 `premium_verified_at_mono=clock.mono()`를
+    넣는 것만으로 A1의 노출 상한이 무력화됐고, **어떤 타입 가드도 발화하지 않았다**
+    (`Determined`도 `PremiumObservation`도 등장하지 않는 경로다).
+
+    ⛔ `uid`는 **`snapshot.uid`에서 파생**된다(`map_verification`). 따로 받으면 "A의 snapshot +
+    uid=B" 조합이 표현 가능해지고, 그때 fence(`cache.is_current(snapshot)`)는 A의 epoch를 보는데
+    lease는 B의 것으로 발급된다 — 무료 사용자 B가 A의 premium 관측으로 인가된다.
+    여기서 둘을 묶고 `__post_init__`이 일치를 강제하므로 그 조합이 **표현 불가**다.
+
+    ⚠️ 이 토큰이 막는 것은 **위 두 실수**뿐이다. 값 자체의 권위는 보증하지 못한다 —
+    누구든 이 생성자를 직접 부를 수 있다(§C-INV 1은 관측 스탬프 축에서 따로 닫아야 한다).
+    그래서 생성 지점을 이 모듈로 못박는 AST 트립와이어가 짝이다.
     """
 
     snapshot: object
     premium_verified_at_mono: float
     identity_verified_at_mono: float
+    uid: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.uid, str) or not self.uid:
+            raise ValueError(f"Accepted.uid: 비어 있지 않은 str이어야 — got {self.uid!r}")
+        # ⛔ fail-closed: uid를 확인할 수 없는 snapshot은 거부한다. `getattr(..., None)`로
+        #    조용히 넘기면 검사가 **있는 척만** 하게 된다(가장 위험한 실패 모드).
+        snapshot_uid = getattr(self.snapshot, "uid", _MISSING)
+        if snapshot_uid is _MISSING:
+            raise ValueError(
+                f"Accepted.snapshot에 uid가 없다 — 주체를 확정할 수 없다: {self.snapshot!r}"
+            )
+        if snapshot_uid != self.uid:
+            raise ValueError(
+                "Accepted: uid와 snapshot.uid가 다르다 — 한 주체의 판정이 아니다 "
+                f"(uid={self.uid!r}, snapshot.uid={snapshot_uid!r})"
+            )
+        for name in ("premium_verified_at_mono", "identity_verified_at_mono"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"Accepted.{name}: finite 수여야 — got {v!r}")
 
 
 @dataclass(frozen=True)
@@ -105,6 +146,8 @@ def map_verification(verification, *, rng=random) -> WireResult:
             snapshot=verification.snapshot,
             premium_verified_at_mono=verification.premium_verified_at_mono,
             identity_verified_at_mono=verification.identity_verified_at_mono,
+            # ⛔ 파생이 요점이다 — 별도 인자로 받으면 불일치가 표현 가능해진다.
+            uid=verification.snapshot.uid,
         )
 
     if isinstance(verification, VerifiedInactive):

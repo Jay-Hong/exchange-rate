@@ -16,12 +16,15 @@ test-first로 잠근 뒤에 최소 배선해야 원인 분리가 된다.
 9. 요청당 단일 `now_mono` + 3-way lease 계산
 """
 import asyncio
+import math
+import types
 import typing
 import pathlib
 import unittest
 from unittest.mock import patch
 
 from app.strict_cache import StrictObservationCache
+from app.strict_wire import Accepted
 from app.topic_initial_snapshot import unleased_registration_topics
 from app.topic_lease import LEASE_MAX_SECONDS
 from app.topic_lease_registry import (
@@ -70,14 +73,54 @@ def _fresh(cache=None, uid=UID):
     return cache, cache.snapshot(uid)
 
 
+_UNSET = object()   # ⛔ `None`을 sentinel로 쓰면 `uid=None`을 **테스트할 수 없다**(실측: red)
+
+
+def _raw_auth(*, uid=_UNSET, snapshot=None, premium=1000.0, identity=1000.0, omit=()):
+    """`Accepted`의 검증을 **우회하는** 최소 묶음 — registry 자체 검증에 도달하기 위한 것.
+
+    ⛔ 왜 필요한가: `topic_lease_registry`는 `strict_*`를 **import 하지 않는다**(의도된 계층
+    독립 — registry의 불변식이 검증기의 불변식에 기대지 않는다는 것을 구조로 말한다). 따라서
+    registry는 같은 불변식을 **스스로** 검사해야 하고, 그 검사는 wire 계층을 통과할 수 없는
+    입력으로만 테스트할 수 있다. 실제 `Accepted`로 NaN을 만들려 하면 `__post_init__`이 먼저
+    거부해 **registry 코드에 도달하지 못한다**(실측: 이 이관에서 그 3건이 red가 됐다).
+
+    ⚠️ 그래서 이 double은 "테스트 편의"가 아니라 **계층 독립의 테스트 도구**다. 일상 경로는
+    `_apply`가 실제 `Accepted`를 쓴다 — 두 계층이 갈리면 그쪽이 red가 된다.
+    """
+    fields = {
+        "uid": UID if uid is _UNSET else uid,
+        "snapshot": snapshot,
+        "premium_verified_at_mono": premium,
+        "identity_verified_at_mono": identity,
+    }
+    for name in omit:
+        del fields[name]
+    return types.SimpleNamespace(**fields)
+
+
+async def _apply_raw(registry, cache, ws, topics, *, authorization, rejected=(),
+                     now_mono=1000.0, send_ack=None):
+    """`_apply`와 같은 경로를 타지만 묶음을 **그대로** 넘긴다(검증 우회 double 전용)."""
+    return await registry.apply_subscribe(
+        ws=ws, topics=topics, rejected_topics=rejected, cache=cache, now_mono=now_mono,
+        authorization=authorization, send_ack=send_ack or _ok_ack,
+    )
+
+
 async def _apply(registry, cache, ws, topics, *, uid=UID, snapshot=None, rejected=(),
                  now_mono=1000.0, premium=1000.0, identity=1000.0, send_ack=_ok_ack):
     if snapshot is None:
         snapshot = cache.snapshot(uid)
     result = await registry.apply_subscribe(
-        ws=ws, uid=uid, topics=topics, rejected_topics=rejected, snapshot=snapshot, cache=cache,
-        now_mono=now_mono, premium_verified_at_mono=premium,
-        identity_verified_at_mono=identity, send_ack=send_ack,
+        ws=ws, topics=topics, rejected_topics=rejected, cache=cache, now_mono=now_mono,
+        # ⚠️ **실제** `strict_wire.Accepted`를 쓴다 — 테스트 전용 double을 쓰면 registry의
+        #    `_unpack_authorization`과 wire의 `__post_init__`이 갈려도 스위트가 green이다.
+        authorization=Accepted(
+            snapshot=snapshot, premium_verified_at_mono=premium,
+            identity_verified_at_mono=identity, uid=uid,
+        ),
+        send_ack=send_ack,
     )
     # ⛔ **거의 모든 테스트가 지나가는 지점**이라, 여기서 보면 "반환값은 공개 union 안"이
     #    스위트 전체에 강제된다. 그전에는 이 성질이 **우연히** 지켜졌다 — 행동 테스트들이
@@ -445,13 +488,60 @@ class TestLeaseComputation(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_registry_does_not_read_a_clock_itself(self):
+        """⛔ 판정기는 **코드**를 봐야 한다 — 구 버전은 `getsource` 텍스트를 봤다.
+
+        실측(2026-07-30): `apply_subscribe` docstring에 *막으려는 안티패턴*으로
+        `premium_verified_at_mono=clock.mono()`를 적었더니 이 테스트가 red가 됐다. 텍스트
+        검색은 **주석·docstring·문자열을 코드와 구별하지 못한다** — 즉 이 판정기는
+        "시계를 읽는가"가 아니라 "그 글자가 파일에 있는가"를 보고 있었다.
+        (같은 부류의 실패가 이 세션에서 반복됐다: 판정기가 아는 형태만 본다.)
+
+        AST로 보면 실제 접근만 잡히고 서술은 자유롭다.
+        ⛔ **강도가 올라간다고 적었던 것은 틀렸다**(2026-07-30 codex 지적, 재확인함):
+        `x = clock; x.mono()`는 dotted 이름이 `x.mono`라 AST 판정기도 **놓친다** — data-flow를
+        추적하지 않으므로 별칭 경유는 두 방식 모두 미검출이다. 바뀐 것은 **정확도**(서술을
+        코드로 오인하지 않음)이지 커버리지가 아니다.
+        ⚠️ 남은 구멍: 위 별칭 **경유 호출**과 `getattr(clock, "mono")()`.
+        **별개로** `time` 모듈 미import를 함께 단언한다 — 이쪽은 `import time as t` /
+        `from time import monotonic` 같은 별칭 **import**까지 잡는다(`alias.name` 기준).
+        그 경로가 없으면 `time.*`는 애초에 접근 불가다.
+        """
+        import ast
         import inspect
 
         import app.topic_lease_registry as module
 
-        source = inspect.getsource(module)
-        for forbidden in ("time.monotonic", "time.time", "clock.mono"):
-            self.assertNotIn(forbidden, source, f"{forbidden} 를 직접 읽고 있다")
+        tree = ast.parse(inspect.getsource(module))
+
+        def dotted(node):
+            parts = []
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value
+            if isinstance(node, ast.Name):
+                parts.append(node.id)
+                return ".".join(reversed(parts))
+            return None
+
+        forbidden = {"time.monotonic", "time.time", "clock.mono", "clock.wall"}
+        found = {
+            name
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and (name := dotted(n)) in forbidden
+        }
+        self.assertEqual(found, set(), f"시계를 직접 읽고 있다: {sorted(found)}")
+
+        imported = {
+            alias.name.split(".")[0]
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Import)
+            for alias in n.names
+        } | {
+            n.module.split(".")[0]
+            for n in ast.walk(tree)
+            if isinstance(n, ast.ImportFrom) and n.module
+        }
+        self.assertNotIn("time", imported, "`time`을 import했다 — 시계 접근 경로가 열렸다")
 
 
 class TestConnectionLock(unittest.IsolatedAsyncioTestCase):
@@ -1189,7 +1279,10 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         """
         registry, cache, ws = await self._armed()
         with self.assertRaises(ConnectionTerminatedError) as caught:
-            await _apply(registry, cache, ws, [], rejected=[TOPIC], premium=float("nan"))
+            await _apply_raw(
+                registry, cache, ws, [], rejected=[TOPIC],
+                authorization=_raw_auth(snapshot=cache.snapshot(UID), premium=float("nan")),
+            )
         self.assertIsInstance(caught.exception.__cause__, ValueError,
                               "원인이 끊겨 진단이 사라졌다")
         self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0), "예외 경로가 fail-open이었다")
@@ -1199,7 +1292,10 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         ws = _WS()
         with self.assertRaises(ValueError):
-            await _apply(registry, cache, ws, [TOPIC], premium=float("nan"))
+            await _apply_raw(
+                registry, cache, ws, [TOPIC],
+                authorization=_raw_auth(snapshot=cache.snapshot(UID), premium=float("nan")),
+            )
         self.assertNotIsInstance(await _apply(registry, cache, ws, [TOPIC]),
                                  ConnectionTerminated)
 
@@ -1242,7 +1338,10 @@ class TestAbortedAccessReductionIsFailClosed(unittest.IsolatedAsyncioTestCase):
         ws = _WS()
         await _apply(registry, cache, ws, [TOPIC])
         with self.assertRaises(ConnectionTerminatedError) as caught:
-            await _apply(registry, cache, ws, [], rejected=[TOPIC], premium=float("nan"))
+            await _apply_raw(
+                registry, cache, ws, [], rejected=[TOPIC],
+                authorization=_raw_auth(snapshot=cache.snapshot(UID), premium=float("nan")),
+            )
         self.assertIsInstance(caught.exception.__cause__, ValueError,
                               "축 검증이 돌지 않았다")
 
@@ -1937,8 +2036,10 @@ class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
 
         required = {
             R.apply_subscribe: (
-                "ws", "uid", "topics", "rejected_topics", "snapshot", "cache",
-                "now_mono", "premium_verified_at_mono", "identity_verified_at_mono", "send_ack",
+                # ⚠️ `uid`/`snapshot`/두 관측 시각은 **`authorization` 묶음 안으로** 들어갔다
+                #    (2026-07-30) — 따로 받으면 배선이 `clock.mono()`를 직접 넣을 수 있었다.
+                "ws", "topics", "rejected_topics", "authorization", "cache",
+                "now_mono", "send_ack",
             ),
             R.authorized_lease: ("ws", "topic", "now_mono"),
             R.authorizes_send: ("ws", "topic", "uid", "lease_id", "now_mono"),
@@ -1951,13 +2052,41 @@ class TestMandatoryInputs(unittest.IsolatedAsyncioTestCase):
                     f"{func.__name__}({name}=)에 기본값이 생겼다 — 배선이 빠뜨리면 조용히 통과한다",
                 )
 
+    def test_apply_subscribe_takes_no_authentication_arguments_beside_the_bundle(self):
+        """⛔ **좁힌 서명 자체가 잠겨 있어야 한다** — 아니면 되돌리는 데 한 줄이면 된다.
+
+        실측(2026-07-30, Workflow 적대적 반증을 통과한 유일한 high): 구 인자를 *optional*로
+        되살리는 변이(`premium_verified_at_mono: float = None` + `None`일 때만 묶음 값 사용)를
+        걸면 **전체 4303 테스트가 baseline과 동일하게 green**이었다. 그 상태에서 배선이
+        `premium_verified_at_mono=clock.mono()`를 넘기면 이번 변경이 막으려던 바로 그
+        노출(1시간 전 관측으로 15분 lease 갱신)이 **테스트 신호 없이** 복귀한다.
+        `uid=`/`snapshot=`을 되살리는 변이도 전량 green이었고 그때 §C1이 되열렸다.
+
+        ⛔ **denylist가 아니라 정확한 집합**으로 단언한다. 이름 목록을 금지하는 형태
+        (`params & {...} == set()`, `apply_unsubscribe`가 쓰는 형태)는 `ctx`/`token`/
+        `verified` 같은 **새 이름**을 통과시킨다. 집합 동등은 그 축까지 닫는다.
+        """
+        import inspect
+
+        from app.topic_lease_registry import TopicLeaseRegistry as R
+
+        params = set(inspect.signature(R.apply_subscribe).parameters)
+        self.assertEqual(
+            params,
+            {"self", "ws", "topics", "rejected_topics", "authorization", "cache",
+             "now_mono", "send_ack"},
+            "apply_subscribe의 인자 집합이 바뀌었다 — 인증 값이 묶음 밖으로 되살아났는지 확인할 것",
+        )
+
     async def test_rejected_topics_is_mandatory(self):
         registry, cache = TopicLeaseRegistry(), StrictObservationCache()
         with self.assertRaises(TypeError):
             await registry.apply_subscribe(
-                ws=_WS(), uid=UID, topics=[TOPIC], snapshot=cache.snapshot(UID), cache=cache,
-                now_mono=1000.0, premium_verified_at_mono=1000.0,
-                identity_verified_at_mono=1000.0, send_ack=_ok_ack,
+                ws=_WS(), topics=[TOPIC], cache=cache, now_mono=1000.0, send_ack=_ok_ack,
+                authorization=Accepted(
+                    snapshot=cache.snapshot(UID), premium_verified_at_mono=1000.0,
+                    identity_verified_at_mono=1000.0, uid=UID,
+                ),
             )
 
 
@@ -2517,6 +2646,188 @@ class TestUnleasedAuthorizationIsNotAlwaysFalse(unittest.IsolatedAsyncioTestCase
     async def test_strict_refuses_the_same_shape(self):
         same = SubscriberGrant(ws=_WS(), topic=TOPIC_FX, uid=None, lease_id=None)
         self.assertFalse(TopicLeaseRegistry().authorizes_grant(same, now_mono=1000.0))
+
+
+class TestAuthorizationBundleIsValidatedIndependently(unittest.IsolatedAsyncioTestCase):
+    """registry는 `strict_*`를 **import 하지 않는다** → 같은 불변식을 스스로 검사해야 한다.
+
+    ⚠️ 이 중복은 낭비가 아니라 **계층 독립의 대가**다. registry가 wire 계층을 import하면
+    "registry의 불변식이 검증기의 불변식에 기대지 않는다"는 주장이 검증 불가가 되고, 순환
+    import도 생긴다. 그래서 타입이 아니라 **모양**으로 받고 다시 검사한다.
+    """
+
+    def test_registry_does_not_import_the_strict_layer(self):
+        """⛔ 이것이 위 중복 검증의 **유일한 정당화**다 — 깨지면 중복이 그냥 중복이 된다."""
+        import ast
+        import inspect
+
+        import app.topic_lease_registry as module
+
+        tree = ast.parse(inspect.getsource(module))
+        strict = sorted(
+            {
+                alias.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Import)
+                for alias in n.names
+                if "strict" in alias.name
+            }
+            | {
+                n.module
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and n.module and "strict" in n.module
+            }
+            # ⚠️ `from . import strict_wire`는 `n.module`이 `None`(또는 `""`)이라 위 두 집합에
+            #    안 걸린다 — 가장 자연스러운 상대 import가 판정기를 통과했다(codex).
+            | {
+                alias.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom)
+                for alias in n.names
+                if "strict" in alias.name
+            }
+        )
+        self.assertEqual(strict, [], f"strict 계층을 import했다: {strict}")
+
+    async def test_every_authorization_field_is_mandatory(self):
+        """⛔ 기대 목록을 **literal로** 적는다 — 검사 대상 상수를 반복 기준으로 쓰면 공허하다.
+
+        실측(2026-07-30, codex): 구 버전은 `for omit in _AUTHORIZATION_FIELDS`로 돌아서
+        **그 상수에서 `"uid"`를 지워도 생존**했다(기대 목록이 함께 줄어든다). 판정기가 판정
+        대상을 ground truth로 쓰면 안 된다 — 이 세션에서 반복된 실패 패턴이다.
+        """
+        from app.topic_lease_registry import _AUTHORIZATION_FIELDS
+
+        expected = ("uid", "snapshot", "premium_verified_at_mono", "identity_verified_at_mono")
+        self.assertEqual(
+            tuple(_AUTHORIZATION_FIELDS), expected,
+            "필수 필드 집합이 바뀌었다 — 의도한 변경이면 이 literal도 함께 갱신할 것",
+        )
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        for omit in expected:
+            with self.subTest(omit=omit), self.assertRaises(ValueError) as caught:
+                await _apply_raw(
+                    registry, cache, _WS(), [TOPIC],
+                    authorization=_raw_auth(snapshot=cache.snapshot(UID), omit=(omit,)),
+                )
+            self.assertIn(omit, str(caught.exception))
+
+    async def test_uid_must_match_the_snapshot_subject(self):
+        """§C1 — 통과하면 fence는 snapshot 주체의 epoch를 보는데 lease는 `uid`로 발급된다.
+
+        즉 무료 사용자 B의 소켓이 A의 premium 관측으로 인가될 수 있었다.
+        """
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        with self.assertRaises(ValueError) as caught:
+            await _apply_raw(
+                registry, cache, _WS(), [TOPIC],
+                authorization=_raw_auth(uid="other-uid", snapshot=cache.snapshot(UID)),
+            )
+        self.assertIn("한 주체의 판정이 아니다", str(caught.exception))
+
+    async def test_snapshot_without_uid_is_refused(self):
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        with self.assertRaises(ValueError) as caught:
+            await _apply_raw(
+                registry, cache, _WS(), [TOPIC],
+                authorization=_raw_auth(snapshot=object()),
+            )
+        self.assertIn("uid가 없다", str(caught.exception))
+
+    async def test_uid_must_be_a_non_empty_string(self):
+        """⛔ snapshot이 **같은 나쁜 값**을 갖는 경우로 검사한다 — 아니면 불일치 검사가 대신 잡는다.
+
+        실측(2026-07-30): `snapshot=cache.snapshot(UID)` 고정으로 썼더니 non-empty 검사를 지워도
+        green이었다(변이 생존). `uid=None` + `snapshot.uid=None`은 **주체 없는 authorization**이고,
+        그게 통과하면 `self._uids[ws] = None`이 되어 §C1의 "한 소켓 한 UID"가 무의미해진다.
+        """
+        registry, cache = TopicLeaseRegistry(), StrictObservationCache()
+        for bad in ("", None, 0, b"uid"):
+            mirror = type("_Mirror", (), {"uid": bad, "epoch": 1})()
+            with self.subTest(uid=bad), self.assertRaises(ValueError) as caught:
+                await _apply_raw(
+                    registry, cache, _WS(), [TOPIC],
+                    authorization=_raw_auth(uid=bad, snapshot=mirror),
+                )
+            self.assertIn("비어 있지 않은 str", str(caught.exception),
+                          "불일치 검사가 대신 잡았다 — non-empty를 잠그지 않는다")
+
+    async def test_malformed_authorization_closes_a_connection_that_has_access(self):
+        """⛔ **인접 경로와 방향이 같아야 한다.** 실측 회귀(2026-07-30 codex):
+
+        A로 lease를 받은 연결에 "다른 주체가 왔다"는 요청이 오는 두 형태 —
+
+            구조 정상 cross-UID  → `ConnectionTerminated`,        A의 lease 제거
+            구조 위반(해석 불가) → `ValueError`(lock 전), **A의 lease 생존**
+
+        같은 사건인데 **해석할 수 없는 쪽이 더 관대**했다. 주체를 확정할 수 없으면 구 UID
+        데이터가 계속 나갈 가능성을 배제할 수 없으므로 닫는 것이 유일하게 안전한 쪽이다.
+        (`_unpack_authorization`을 lock 안으로 옮기고 축 위반과 같은 정책을 적용해 고쳤다.)
+        """
+        registry, cache, ws = TopicLeaseRegistry(), StrictObservationCache(), _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        self.assertIsNotNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0))
+
+        with self.assertRaises(ConnectionTerminatedError) as caught:
+            await _apply_raw(
+                registry, cache, ws, [], rejected=[TOPIC],
+                authorization=_raw_auth(uid="other-uid", snapshot=cache.snapshot(UID)),
+            )
+        self.assertIsInstance(caught.exception.__cause__, ValueError, "원인이 끊겼다")
+        self.assertIsNone(registry.authorized_lease(ws, TOPIC, now_mono=1000.0),
+                          "접근이 남았다 — fail-open이다")
+
+    async def test_malformed_authorization_on_a_fresh_connection_propagates_raw(self):
+        """⛔ 잃을 접근이 없으면 감싸지 않는다 — 감싸면 배선이 멀쩡한 연결을 닫는다.
+
+        축 위반의 `not reduces_access` 분기와 **같은 근거**다(그 대칭을 여기서 잠근다).
+        """
+        registry, cache, ws = TopicLeaseRegistry(), StrictObservationCache(), _WS()
+        with self.assertRaises(ValueError) as caught:
+            await _apply_raw(
+                registry, cache, ws, [TOPIC],
+                authorization=_raw_auth(uid="other-uid", snapshot=cache.snapshot(UID)),
+            )
+        self.assertNotIsInstance(caught.exception, ConnectionTerminatedError)
+        # 연결은 멀쩡하다 — 정상 요청이 여전히 통과해야 한다.
+        self.assertIsInstance(await _apply(registry, cache, ws, [TOPIC]), Applied)
+
+    async def test_unpacking_happens_under_the_connection_lock(self):
+        """⛔ **위치가 계약이다** — lock 전이면 위 두 성질이 성립할 수 없다.
+
+        구조 검증이 lock 밖이면 tombstone을 찍을 수도, 접근 축소를 판단할 수도 없다.
+        직접적인 관찰: tombstone된 연결은 구조 위반보다 **먼저** 종단 결과를 받아야 한다
+        (lock 밖 검증이면 `ValueError`가 앞질러 나가 호출자가 close 필요성을 알 수 없다).
+        """
+        registry, cache, ws = TopicLeaseRegistry(), StrictObservationCache(), _WS()
+        await _apply(registry, cache, ws, [TOPIC])
+        await registry.remove_websocket(ws)          # tombstone
+        result = await _apply_raw(
+            registry, cache, ws, [TOPIC],
+            authorization=_raw_auth(uid="other-uid", snapshot=cache.snapshot(UID)),
+        )
+        self.assertIsInstance(result, ConnectionTerminated,
+                              "구조 검증이 tombstone 분기를 앞질렀다 — lock 밖이다")
+
+    def test_unpacking_deliberately_does_not_validate_finiteness(self):
+        """⛔ **위치가 계약이다.** 유한성은 lock 안 `compute_lease_expiry`가 본다.
+
+        실측(2026-07-30): 편의로 여기서 NaN을 미리 거부했더니, 축 위반이어도 접근 축소를
+        커밋하고 닫는 fail-closed 경로(§"중단돼도 되돌아가지 않는다")를 **앞질러서**
+        "거부된 topic이 계속 흐르는데 호출자는 예외만 받는" 상태가 됐다.
+
+        그래서 이 테스트는 "검사하지 않음"을 **일부러** 잠근다 — 다음 사람이 친절하게
+        추가하면 여기가 red가 되고, 그 red가 이 주석을 읽게 만든다.
+        """
+        from app.topic_lease_registry import _unpack_authorization
+
+        cache = StrictObservationCache()
+        uid, snapshot, premium, identity = _unpack_authorization(
+            _raw_auth(snapshot=cache.snapshot(UID), premium=float("nan"))
+        )
+        self.assertEqual(uid, UID)
+        self.assertTrue(math.isnan(premium), "여기서 걸러졌다 — fail-closed 경로를 앞지른다")
+        self.assertEqual(identity, 1000.0)
 
 
 if __name__ == "__main__":
