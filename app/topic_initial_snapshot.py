@@ -62,6 +62,29 @@ def supported_snapshot_topics() -> tuple:
     return topics
 
 
+def is_snapshot_topic_enabled(topic: str) -> bool:
+    """개별 availability flag 가 지금 켜져 있는가 — `supported_snapshot_topics()` 와 **직교**하다.
+
+    ⛔ 두 축을 섞으면 §8-C 의 `unknown_topic`(미지원)과 `topic_unavailable`(flag off)을 구분할 수
+    없다. `supported_snapshot_topics()` 는 docstring 그대로 **구현상 지원 집합**이고 availability
+    gate 와 무관하다 — 그래서 그것만 보고 판정하면 **flag off 인 topic 이 accept 된다**
+    (실측 재현: `FX_TOPIC_ENABLED=false` 인데 ack·registry 모두 fx 를 활성으로 기록).
+    §8-C 가 경고한 "accepted 인데 데이터가 영원히 안 오는 상태"가 정확히 그것이다.
+
+    ⚠️ **이 함수가 그 지식의 단일 소스다.** `_build_snapshot_sync` 도 이것을 쓴다 — 두 곳에
+    같은 flag 검사를 두면 갈리는 순간 subscribe 판정과 실제 발사가 어긋난다.
+
+    - fx:* → `FX_TOPIC_ENABLED`
+    - usdt:krw → builder 에 flag 검사가 없다(항상 enabled)
+    - krx → 배포 flag 가 이미 `supported_snapshot_topics()` 에 반영돼 있어 여기서 중복 판정하지 않는다
+    """
+    from app.fx_topic_publisher import FX_TOPICS
+
+    if topic in set(FX_TOPICS.values()):
+        return config.FX_TOPIC_ENABLED
+    return True
+
+
 def per_user_gated_snapshot_topics() -> frozenset:
     """per-user 판정(entitlement)이 **필요한** topic 집합.
 
@@ -179,7 +202,8 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
 
     if topic in fx_asset_by_topic:
         # fx snapshot은 FX_TOPIC_ENABLED 존중(publisher _publish_fx_snapshot과 일관 — off면 미발사).
-        if not config.FX_TOPIC_ENABLED:
+        # ⚠️ 판정은 `is_snapshot_topic_enabled` 가 소유한다 — subscribe 분류와 같은 소스여야 한다.
+        if not is_snapshot_topic_enabled(topic):
             return None
         asset = fx_asset_by_topic[topic]
         from app.database import SessionLocal

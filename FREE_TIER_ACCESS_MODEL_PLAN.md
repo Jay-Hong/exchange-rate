@@ -311,7 +311,7 @@
 lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들어 내는 것**이고, 빼면 코드가 정본과 다른
 **제3의 계약**을 만든다. 그래서 단계를 명시한다 — 구현은 자기 단계의 행을 그대로 따른다.
 
-| 필드 | Stage 1 (인증 + ack, **현재**) | Stage 2 (lease 도입) |
+| 필드 | Stage 1 (**인증된 subscribe 전용**, 현재) | Stage 2 (lease 도입) |
 | --- | --- | --- |
 | `type` / `request_id` / `operation` | 그대로 | 그대로 |
 | `accepted_topics` | `[{"topic": …}]` | `+ lease_id`, `+ lease_duration_seconds` |
@@ -327,10 +327,24 @@ lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들�
 reconnect를 전역 구분할 수 없다"는 이유로 제거 결정이 있었다. 그 판단 자체는 archive와 함께
 보류 상태이고, **필수 필드로 모델링한 뒤 빼면 breaking**이므로 소비자가 생길 때 결정한다.
 
+⛔ **Stage 1은 `subscribe`만이다.** 위 ack은 정본에서 subscribe/unsubscribe **공통**이지만,
+현행 `unsubscribe`는 registry에서 제거만 하고 **프레임을 0개 보낸다**(실측). 표를 "Stage 1 현재"로
+읽어 unsubscribe ack이 있다고 오해하지 말 것 — 그건 별도 red 테스트로 구현한다.
+(한때 이 표가 그 범위를 적지 않아 과대표현이었다 — codex 지적.)
+
 ⚠️ **Stage 1의 알려진 공백 (의도적)**: `TOPIC_DISPATCHER_ENABLED` off일 때 정본은 전 topic
 `topics_disabled`를 요구하지만, 현행 구현은 그 지점에서 **조용히 무시**한다(기존 동작). 그 경로를
 바꾸면 프로덕션의 현재 상태(flag off)를 건드리고, 오늘 그 조합을 보내는 클라가 없다 —
 별도 red 테스트와 함께 닫는다. **누락이 아니라 기록된 유예다.**
+
+⚠️ **판정기 부재의 처리**: per-user 판정이 필요한 topic이 지원 집합에 들어 있는데(배포 flag on)
+WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다 → ERROR 로그 + 전체-요청
+`temporarily_unavailable`. `topic_unavailable`을 쓰면 안 된다 — 그 코드는 "개별 flag off"를 뜻하고,
+flag가 켜진 상태에 쓰면 운영자가 flag를 보고 코드와 모순을 겪는다.
+
+⚠️ **timeout 은 다음 슬라이스 필수**: 검증 SDK 호출에 상한이 없으면 멈춘 작업마다 요청 task가
+무기한 남고 재연결 시 thread 작업이 누적된다. `to_thread` 작업은 **취소되지 않으므로** timeout을
+넣는 슬라이스가 그 성질을 함께 다뤄야 한다.
 
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.

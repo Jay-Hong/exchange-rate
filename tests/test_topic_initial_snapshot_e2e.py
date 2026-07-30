@@ -881,6 +881,78 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         # 인증자가 **메시지의 토큰으로 정확히 1회** 불렸는가 (codex: 토큰·호출 횟수 단언)
         authz.assert_awaited_once_with("token-spike")
 
+    def test_disabled_topic_is_not_accepted(self):
+        """⛔ availability flag 가 off 인 topic 을 accept 하면 **데이터가 영원히 안 온다**.
+
+        실측 재현(codex): `FX_TOPIC_ENABLED=false` 인데 ack 과 registry 모두 fx 를 활성으로
+        기록했다. 원인은 `supported_snapshot_topics()` 만 보고 판정한 것 — 그 집합은 docstring
+        그대로 **구현상 지원**이고 availability gate 와 무관하다.
+        """
+        patchers = self._patchers()
+        patchers["fx_flag"] = patch.object(config, "FX_TOPIC_ENABLED", False)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({
+                    "type": "subscribe", "request_id": "off-1",
+                    "id_token": "t", "topics": ["fx:usd-krw"],
+                })
+                msg = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(msg.get("accepted_topics"), [], "flag off 인 topic 을 accept 했다")
+        self.assertEqual(
+            msg.get("rejected_topics"), [{"topic": "fx:usd-krw", "error": "topic_unavailable"}],
+        )
+        self.assertEqual(
+            msg.get("active_subscriptions"), [], "flag off 인 topic 이 registry 에 등록됐다",
+        )
+
+    def test_unjudgeable_gated_topic_fails_the_whole_request(self):
+        """⛔ 판정기가 없는데 배포 flag 가 켜져 있으면 **transient 가 아니라 설정 결함**이다.
+
+        `topic_unavailable`(개별 flag off) 로 돌려주면 운영자가 flag 를 보고 코드와 모순을 겪는다
+        (codex Medium). §8-C 에 `internal_error` 가 없으므로 전체-요청 `temporarily_unavailable`
+        + ERROR 로그가 남은 정확한 선택이다.
+        """
+        patchers = self._patchers()
+        patchers["krx_flag"] = patch.object(
+            config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                # ⛔ 운영자 신호도 계약이다 — debug로 격하되면 설정 결함이 조용히 지나간다.
+                with self.assertLogs("exchange_rate.topic_dispatcher", level="ERROR"):
+                    ws.send_json({
+                        "type": "subscribe", "request_id": "gated-1",
+                        "id_token": "t", "topics": ["fx:usd-krw", KRX_TOPIC],
+                    })
+                    msg = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "temporarily_unavailable")
+        self.assertEqual(msg.get("request_id"), "gated-1")
+        self.assertIn("retry_after_seconds", msg, "§8-C 는 이 코드에 retry_after 동반을 요구한다")
+
+    def test_snapshot_builder_uses_the_same_availability_predicate(self):
+        """⛔ subscribe 분류와 snapshot 발사가 **같은 판정기**를 써야 한다.
+
+        ⚠️ 이 테스트가 잠그는 방식: **판정기를 patch** 해서 builder 가 그것을 따르는지 본다.
+        builder 가 config flag 를 직접 읽으면 patch 가 무효가 되어 payload 가 나오고 red 가 된다 —
+        즉 "단일 소스"가 AST 검사 없이 **행동으로** 잠긴다.
+        (변이 실측: 이 테스트가 없을 때 builder 의 판정기 호출을 제거해도 전 스위트가 green 이었다.)
+        """
+        from app import topic_initial_snapshot as tis
+
+        with patch.object(config, "FX_TOPIC_ENABLED", True), \
+             patch.object(tis, "is_snapshot_topic_enabled", return_value=False):
+            self.assertIsNone(
+                tis._build_snapshot_sync("fx:usd-krw"),
+                "builder 가 availability 판정기를 무시했다 — 분류와 발사가 갈린다",
+            )
+
 
 class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
     """`verify_ws_subscribe_token` **본문** — E2E 는 이 함수를 통째로 fake 하므로 미검증이다.
@@ -902,7 +974,8 @@ class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
              ) as verify:
             uid = await app_main.verify_ws_subscribe_token("tok-9")
         self.assertEqual(uid, "uid-9")
-        verify.assert_called_once_with("tok-9")
+        # ⛔ `check_revoked=True` 가 계약이다 — False 면 revoke 된 토큰이 통과해 accept 된다.
+        verify.assert_called_once_with("tok-9", check_revoked=True)
 
     async def test_verification_runs_off_the_event_loop_thread(self):
         """⛔ 동기 SDK 호출이 loop 스레드에서 돌면 **그 프로세스의 모든 연결이 함께 멈춘다**.
@@ -916,7 +989,7 @@ class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
         loop_thread = threading.current_thread()
         seen = []
 
-        def _record(token):
+        def _record(token, **kwargs):
             seen.append(threading.current_thread())
             return {"uid": "uid-off"}
 

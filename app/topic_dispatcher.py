@@ -304,6 +304,7 @@ async def handle_client_message(
     if msg_type == "subscribe":
         # lazy import로 dispatcher import 그래프 경량 유지(builder 체인은 첫 subscribe 시 로드).
         from app.topic_initial_snapshot import (
+            is_snapshot_topic_enabled,
             per_user_gated_snapshot_topics,
             send_initial_snapshots,
             supported_snapshot_topics,
@@ -329,13 +330,32 @@ async def handle_client_message(
         supported = set(supported_snapshot_topics())   # flag-aware (KRX는 배포 flag 조건부)
         gated = per_user_gated_snapshot_topics()       # per-user 판정이 필요한 topic
 
+        # ⛔ **판정 불가는 per-topic이 아니라 전체-요청이다**(§8-C). per-user 판정이 필요한 topic이
+        #    지원 집합에 **들어 있는데**(배포 flag on) 이 슬라이스엔 판정기가 없다 — 그건 transient가
+        #    아니라 **설정 결함**이므로 운영자 신호(ERROR)를 내고 요청을 접는다. 한때 이 경우에도
+        #    `topic_unavailable`을 돌려줬는데 **틀렸다**(codex): §8-C에서 그 코드는 "topic 자체가
+        #    서버에서 비활성(개별 flag off)"을 뜻하고, flag가 켜진 상태에 그걸 쓰면 운영자가 flag를
+        #    보고 코드와 모순을 겪는다.
+        unjudgeable = [t for t in topics if t in gated and t in supported]
+        if unjudgeable:
+            logger.error(
+                "per-user 판정이 필요한 topic이 지원 집합에 있으나 WS 판정기가 없다 — 설정 결함",
+                extra={"topics": unjudgeable},
+            )
+            await websocket.send_json({
+                "type": "subscription_error",
+                "request_id": msg.get("request_id"),
+                "error": "temporarily_unavailable",
+                # §8-C는 이 코드에 retry_after 동반을 요구한다. 값·jitter 정책은 별도 슬라이스.
+                "retry_after_seconds": 5,
+            })
+            return
+
         accepted_names, accepted, rejected = [], [], []
         for topic in topics:                          # 요청 순서 보존
-            if topic in gated:
-                # ⚠️ 이 슬라이스는 entitlement를 판정하지 않는다 → **accept할 수 없다.**
-                #    flag off면 지원 집합에도 없고, flag on이어도 인가 수단이 없다 — 어느 쪽이든
-                #    "서버가 이 topic을 아직 줄 수 없다"가 사실이므로 `topic_unavailable`이다.
-                #    판정이 들어오면 `premium_required`/`krx_entitlement_required`로 갈린다.
+            if topic in gated or not is_snapshot_topic_enabled(topic):
+                # 배포/개별 flag가 off라 지금 발사되지 않는 topic — §8-C `topic_unavailable`.
+                # (gated인데 여기 온 것은 supported 밖 = 배포 flag off인 경우뿐이다. 위 guard 참조.)
                 rejected.append({"topic": topic, "error": "topic_unavailable"})
             elif topic not in supported:
                 rejected.append({"topic": topic, "error": "unknown_topic"})

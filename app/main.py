@@ -2919,7 +2919,11 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
 
     if not is_firebase_initialized():
         raise RuntimeError("Firebase not initialized")
-    decoded = await asyncio.to_thread(auth.verify_id_token, id_token)
+    # ⛔ `check_revoked=True` — §8-C의 `invalid_token`은 "무효·만료·**revoked**"를 포함한다.
+    #    False면 revoke된 토큰이 검증을 통과해 **accept**된다(이 슬라이스에 실재한 구멍이었다).
+    #    대가: subscribe마다 Firebase user record 조회가 1회 더 붙는다. lease가 들어오면 그 조회를
+    #    lease horizon에 통합해 매 요청 비용을 없애는 것이 다음 단계다(지금은 horizon이 없다).
+    decoded = await asyncio.to_thread(auth.verify_id_token, id_token, check_revoked=True)
     return decoded["uid"]
 
 
