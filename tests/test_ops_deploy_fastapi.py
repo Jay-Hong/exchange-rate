@@ -112,9 +112,11 @@ class _Harness:
         fake.chmod(0o755)
         self.kill_on = kill_on
 
-    def run(self, *, target=TARGET, fallback=FALLBACK, timeout=60):
+    def run(self, *, target=TARGET, fallback=FALLBACK, timeout=60, now_utc="00:20",
+            extra_args=()):
         env = dict(
             os.environ,
+            NOW_UTC=now_utc,
             PATH=f"{self.bin}:{os.environ['PATH']}",
             DOCKER_BIN="docker",
             HEALTH_RETRIES="2",
@@ -123,7 +125,7 @@ class _Harness:
             LATEST_TAG="img:latest",
         )
         proc = subprocess.Popen(
-            ["bash", str(SCRIPT), "--target", target, "--fallback", fallback],
+            ["bash", str(SCRIPT), "--target", target, "--fallback", fallback, *extra_args],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         if self.kill_on:
@@ -153,6 +155,35 @@ class TestDeployScript(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory()
         self.tmp = pathlib.Path(self._td.name)
         self.addCleanup(self._td.cleanup)
+
+    def test_cron_window_is_refused_before_any_mutation(self):
+        """⛔ retag~recreate 사이의 **일시적 split** 구간에 cron이 겹치면 검증되지 않은 조합이 실제로 돈다.
+
+        실측 crontab(UTC): 매시 :05 :07 :09 :11 + 매일 15:01. 배포 예산(recreate + health 최대 90s)이
+        그 발화에 닿을 수 있으면 **상태를 바꾸기 전에** 거부해야 한다.
+        ⚠️ 이 가드는 host lock(flock)의 **대체가 아니라 임시 방편**이다 — 예산 초과 배포는 여전히 겹친다.
+        """
+        for now, why in [("00:04", ":05 직전"), ("00:06", ":07 직전"),
+                         ("14:58", "15:01 직전"), ("15:00", "15:01 직전")]:
+            with self.subTest(now=now, why=why):
+                h = _Harness(self.tmp)
+                rc, out = h.run(now_utc=now)
+                self.assertEqual(rc, 3, out)
+                self.assertIn("거부", out)
+                self.assertEqual(h.latest, FALLBACK, "거부인데 상태가 바뀌었다")
+
+    def test_outside_cron_window_proceeds(self):
+        for now in ("00:12", "00:20", "00:59", "13:30"):
+            with self.subTest(now=now):
+                tmp = pathlib.Path(__import__("tempfile").mkdtemp())
+                rc, out = _Harness(tmp).run(now_utc=now)
+                self.assertEqual(rc, 0, out)
+
+    def test_cron_guard_can_be_overridden_loudly(self):
+        h = _Harness(self.tmp)
+        rc, out = h.run(now_utc="00:04", extra_args=("--allow-cron-window",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("allow-cron-window", out, "우회가 조용히 지나갔다")
 
     def test_happy_path_converges_and_exits_zero(self):
         h = _Harness(self.tmp)

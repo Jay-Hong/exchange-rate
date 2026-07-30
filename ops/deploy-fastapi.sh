@@ -12,6 +12,18 @@
 # **`latest` 태그를 쓴다**. 태그만 바뀌고 recreate가 안 되면 **cron은 신 이미지 / 웹은 구 이미지**인
 # split 상태가 되고, 그 조합은 아무도 검증한 적이 없다.
 #
+# ⛔ **이 스크립트가 막는 것은 *지속적인* split이다.** retag 직후부터 recreate 완료까지의
+#    **일시적 창**은 막지 못한다 — 그 사이 cron이 발화하면 검증되지 않은 조합이 실제로 한 번 돈다.
+#    이 창은 이 스크립트가 만든 것이 아니라 `latest`를 배포와 cron이 **공유하는 토폴로지**의
+#    성질이고, 그동안의 수동 배포에도 있었다.
+#    **근본 해법은 배포와 cron 5개가 공유하는 host lock**이다(아래 FOLLOW-UP). 그것이 들어오기
+#    전까지는 이 스크립트가 **cron 발화 가능 구간에서 실행을 거부**해 창이 겹치지 않게 한다.
+#
+# FOLLOW-UP (별도 슬라이스 — 호스트 crontab 변경이라 이 저장소 테스트로 강제할 수 없다):
+#   crontab 5줄을 `flock -w 0 /var/lock/fxi-deploy.lock docker compose run --rm fastapi ...` 형태로
+#   감싸고, 이 스크립트는 retag 전부터 수렴 완료까지 같은 lock을 잡는다. 그러면 일시적 창에서도
+#   cron이 **대기**하거나 **건너뛴다**. crontab을 안 바꾸면 배포 쪽만 lock을 잡아도 무의미하다.
+#
 # 사용:
 #   ops/deploy-fastapi.sh --target exchange-rate-fastapi:pending-<sha> \
 #                         --fallback exchange-rate-fastapi:rollback-<date>
@@ -32,6 +44,8 @@ LATEST_TAG="${LATEST_TAG:-exchange-rate-fastapi:latest}"
 SERVICE="${SERVICE:-fastapi}"
 CONTAINER="${CONTAINER:-exchange-rate-app}"
 
+CRON_MARGIN="${CRON_MARGIN:-4}"
+ALLOW_CRON_WINDOW=no
 TARGET=""
 FALLBACK=""
 while [ $# -gt 0 ]; do
@@ -39,6 +53,7 @@ while [ $# -gt 0 ]; do
         --target)   TARGET="${2:?--target 값 필요}"; shift 2 ;;
         --fallback) FALLBACK="${2:?--fallback 값 필요}"; shift 2 ;;
         --service)  SERVICE="${2:?}"; shift 2 ;;
+        --allow-cron-window) ALLOW_CRON_WINDOW=yes; shift ;;
         *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
     esac
 done
@@ -46,6 +61,39 @@ done
 [ -n "$FALLBACK" ] || { echo "--fallback 필수" >&2; exit 2; }
 
 cd "$COMPOSE_DIR"
+
+# ── cron 충돌 가드 (상태 변경 **전**) ────────────────────────────────────────
+# 실측 crontab(UTC): 매시 :05 :07 :09 :11 + 매일 15:01. 배포 예산(recreate + health 최대 90s)이
+# 그 발화에 겹치면 **일시적 split 구간에서 cron이 검증되지 않은 조합을 실행**한다.
+# ⚠️ 이 가드는 host lock의 **대체가 아니라 임시 방편**이다 — 예산을 초과하는 배포는 여전히 겹칠 수 있다.
+minutes_to_next_cron() {
+    local hh="$1" mm="$2" best=9999 m cand
+    for m in 5 7 9 11; do
+        if [ "$m" -gt "$mm" ]; then cand=$(( m - mm )); [ "$cand" -lt "$best" ] && best="$cand"; fi
+    done
+    cand=$(( 60 - mm + 5 )); [ "$cand" -lt "$best" ] && best="$cand"   # 다음 시각 최초 발화
+    if [ "$hh" -eq 15 ] && [ "$mm" -lt 1 ]; then
+        cand=$(( 1 - mm )); [ "$cand" -lt "$best" ] && best="$cand"     # 같은 시각 15:01
+    fi
+    if [ "$hh" -eq 14 ]; then
+        cand=$(( 60 - mm + 1 )); [ "$cand" -lt "$best" ] && best="$cand" # 다음 시각이 15:01
+    fi
+    echo "$best"
+}
+if [ "$ALLOW_CRON_WINDOW" = no ]; then
+    NOW_HM="${NOW_UTC:-$(date -u +%H:%M)}"
+    _HH=$(( 10#${NOW_HM%%:*} )); _MM=$(( 10#${NOW_HM##*:} ))
+    LEFT="$(minutes_to_next_cron "$_HH" "$_MM")"
+    if [ "$LEFT" -lt "$CRON_MARGIN" ]; then
+        echo "거부: ${LEFT}분 뒤 cron이 발화한다 (UTC ${NOW_HM}, margin=${CRON_MARGIN}분)." >&2
+        echo "  일시적 split 구간에 cron이 겹치면 검증되지 않은 조합이 실행된다." >&2
+        echo "  cron 발화 후 다시 시도하거나, 불가피하면 --allow-cron-window 로 명시 우회." >&2
+        exit 3
+    fi
+    echo "[cron-guard] 다음 발화까지 ${LEFT}분 (margin ${CRON_MARGIN}) — 통과"
+else
+    echo "[cron-guard] ⚠️ --allow-cron-window — 일시적 split에 cron이 겹칠 수 있다" >&2
+fi
 
 # ⛔ `docker images --format '{{.ID}}'`를 쓰면 안 된다 — **축약 ID**(12자, prefix 없음)를 준다.
 #    비교 대상인 `docker inspect <container> --format '{{.Image}}'`는 **`sha256:` 전체 ID**다.
