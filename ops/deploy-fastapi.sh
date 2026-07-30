@@ -47,7 +47,15 @@ done
 
 cd "$COMPOSE_DIR"
 
-image_id() { "$DOCKER_BIN" images "$1" --format '{{.ID}}' </dev/null 2>/dev/null | head -1; }
+# ⛔ `docker images --format '{{.ID}}'`를 쓰면 안 된다 — **축약 ID**(12자, prefix 없음)를 준다.
+#    비교 대상인 `docker inspect <container> --format '{{.Image}}'`는 **`sha256:` 전체 ID**다.
+#    실측(운영 서버): images → `48434889c5d6` / inspect → `sha256:48434889c5d6…a25563`.
+#    두 형식을 그대로 비교하면 수렴 판정이 **영구 실패**하고, 그러면 recover가 성공한 배포를
+#    자동 롤백한 뒤 그것도 검증 실패로 보고한다. `docker image inspect --format '{{.Id}}'`로
+#    양쪽을 전체 ID로 통일한다(실측: inspect의 `{{.Image}}`와 문자열 동일).
+image_id() {
+    "$DOCKER_BIN" image inspect "$1" --format '{{.Id}}' </dev/null 2>/dev/null | head -1 || true
+}
 running_id() {
     "$DOCKER_BIN" inspect "$CONTAINER" --format '{{.Image}}' </dev/null 2>/dev/null | head -1
 }

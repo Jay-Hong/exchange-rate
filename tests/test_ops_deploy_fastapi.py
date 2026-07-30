@@ -33,8 +33,11 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "ops" / "deploy-fastap
 
 TARGET = "img:new"
 FALLBACK = "img:old"
-NEW_ID = "newid000000"
-OLD_ID = "oldid000000"
+# ⚠️ 실제 docker의 형식 차이를 **그대로 모델링**한다 — 같은 형식을 주면 short/full 혼용 결함이
+#    가려진다(실측으로 그렇게 가려졌다). images는 축약, image inspect / inspect는 sha256: 전체.
+NEW_SHORT, OLD_SHORT = "newid0000000", "oldid0000000"
+NEW_ID = "sha256:" + NEW_SHORT + "a" * 52
+OLD_ID = "sha256:" + OLD_SHORT + "b" * 52
 
 
 class _Harness:
@@ -61,11 +64,18 @@ class _Harness:
             MISSING="{','.join(missing)}"
             case "$1" in
               images)
-                for m in ${{MISSING//,/ }}; do [ "$2" = "$m" ] && exit 0; done
+                # 축약 ID — 스크립트가 이걸 쓰면 inspect(전체 ID)와 어긋나 수렴이 영구 실패한다.
                 case "$2" in
+                  {TARGET}) echo {NEW_SHORT} ;;
+                  {FALLBACK}) echo {OLD_SHORT} ;;
+                esac ;;
+              image)
+                # docker image inspect <tag> --format '{{{{.Id}}}}' — 전체 ID. 없는 태그는 비영 종료.
+                for m in ${{MISSING//,/ }}; do [ "$3" = "$m" ] && exit 1; done
+                case "$3" in
                   {TARGET}) echo {NEW_ID} ;;
                   {FALLBACK}) echo {OLD_ID} ;;
-                  *) : ;;
+                  *) exit 1 ;;
                 esac ;;
               tag)
                 case ",$FAIL," in *,tag,*) exit 1 ;; esac
@@ -139,6 +149,23 @@ class TestDeployScript(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(h.latest, TARGET)
         self.assertEqual(h.running, NEW_ID)
+
+    def test_double_models_the_real_id_format_difference(self):
+        """⛔ 더블 자기검사 — `images`(축약)와 `image inspect`(전체)가 **다른 형식**을 주어야 한다.
+
+        더블이 두 명령에 같은 형식을 반환하던 동안 short/full 혼용 결함이 **가려졌다**(실측:
+        운영에서 `images`=`48434889c5d6` / `inspect`=`sha256:48434889c5d6…a25563`).
+        이 검사가 없으면 누군가 더블을 "단순화"해 그 은폐가 되돌아온다.
+        """
+        h = _Harness(self.tmp)
+        env = dict(os.environ, PATH=f"{h.bin}:{os.environ['PATH']}")
+        short = subprocess.run(["docker", "images", TARGET, "--format", "{{.ID}}"],
+                               env=env, capture_output=True, text=True).stdout.strip()
+        full = subprocess.run(["docker", "image", "inspect", TARGET, "--format", "{{.Id}}"],
+                              env=env, capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(short, full, "더블이 형식 차이를 모델링하지 않는다")
+        self.assertTrue(full.startswith("sha256:"))
+        self.assertFalse(short.startswith("sha256:"))
 
     def test_missing_target_tag_changes_nothing(self):
         """preflight — 없는 태그로 진행하면 복구 대상도 없어 손쓸 수 없다."""
