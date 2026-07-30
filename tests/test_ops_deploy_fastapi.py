@@ -69,6 +69,10 @@ class _Harness:
         (tmp / "running").write_text(OLD_ID, encoding="utf-8")
         (tmp / "latest").write_text(FALLBACK, encoding="utf-8")
         (tmp / "calls").write_text("", encoding="utf-8")
+        # ⚠️ lock 경로는 **정본 파일을 갈아끼워** 옮긴다 — 개별 env 손잡이는 없앴다
+        #    (양쪽이 따로 움직이면 상호배제가 깨지므로).
+        (tmp / "lock.conf").write_text(f"FXI_DEPLOY_LOCK={tmp}/deploy.lock\n",
+                                       encoding="utf-8")
         fake = self.bin / "docker"
         fake.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
@@ -161,7 +165,7 @@ class _Harness:
             HEALTH_SLEEP="0",
             COMPOSE_DIR=str(self.tmp),
             LATEST_TAG="img:latest",
-            LOCK_FILE=str(self.tmp / "deploy.lock"),
+            FXI_LOCK_CONF=str(self.tmp / "lock.conf"),
             FLOCK_BIN=str(self.bin / "flock"),
             CRONTAB_BIN=str(self.bin / "crontab"),
             CRON_JOB_SCRIPT=str(REPO / "ops" / "cron-job.sh"),

@@ -71,7 +71,15 @@ cd "$COMPOSE_DIR"
 #    아니라 **preflight 게이트**로 확인한다 — 감싸이지 않은 cron 줄이 있으면 실행을 거부한다.
 FLOCK_BIN="${FLOCK_BIN:-flock}"
 CRONTAB_BIN="${CRONTAB_BIN:-crontab}"
-LOCK_FILE="${LOCK_FILE:-/var/lock/fxi-deploy.lock}"
+# ── lock 경로: 단일 정본 (ops/lock.conf) ─────────────────────────────────────
+# ⛔ 개별 fallback 금지. 재정의는 `FXI_LOCK_CONF`로 **정본 파일을 갈아끼우는 것**뿐이고,
+#    그러면 배포·cron·wrapper가 함께 움직여 상호배제가 유지된다.
+_HERE_LOCK="$(cd "$(dirname "$0")" && pwd)"
+FXI_LOCK_CONF="${FXI_LOCK_CONF:-$_HERE_LOCK/lock.conf}"
+[ -f "$FXI_LOCK_CONF" ] || { echo "lock 정본이 없다: $FXI_LOCK_CONF" >&2; exit 5; }
+# shellcheck source=/dev/null
+. "$FXI_LOCK_CONF"
+: "${FXI_DEPLOY_LOCK:?lock 정본에 FXI_DEPLOY_LOCK 이 없다}"
 ALLOW_UNLOCKED_CRON="${ALLOW_UNLOCKED_CRON:-no}"
 
 CRON_JOB_SCRIPT="${CRON_JOB_SCRIPT:-ops/cron-job.sh}"
@@ -121,9 +129,9 @@ fi
 _TOTAL="$(printf '%s\n' "$_declared" | grep -c . || true)"
 echo "[lock-preflight] crontab ${_TOTAL}줄 전부 선언됨 (정본 + $CRON_ALLOWLIST)"
 
-exec 200>"$LOCK_FILE"
+exec 200>"$FXI_DEPLOY_LOCK"
 if ! "$FLOCK_BIN" -w 0 200; then
-    echo "거부: 다른 작업이 $LOCK_FILE 을 쥐고 있다 (cron 실행 중일 가능성). 나중에 다시 시도." >&2
+    echo "거부: 다른 작업이 $FXI_DEPLOY_LOCK 을 쥐고 있다 (cron 실행 중일 가능성). 나중에 다시 시도." >&2
     exit 4
 fi
 echo "[lock] 획득 — 수렴 완료까지 유지한다"

@@ -7,6 +7,11 @@ class TestCronWithLock(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory(); self.addCleanup(self.td.cleanup)
         self.tmp = pathlib.Path(self.td.name); self.bin = self.tmp / "bin"; self.bin.mkdir()
 
+    def _conf(self):
+        c = self.tmp / "lock.conf"
+        c.write_text(f"FXI_DEPLOY_LOCK={self.tmp}/l.lock\n", encoding="utf-8")
+        return c
+
     def _flock(self, *, acquires=True):
         """⚠️ 인자를 **기록**한다 — 정책의 계약은 "flock을 어떻게 부르는가"이므로 성공/실패만
         보는 가짜로는 `-w 0`과 무한 대기를 구별할 수 없다(실측: 그 변이가 생존했다)."""
@@ -22,7 +27,7 @@ class TestCronWithLock(unittest.TestCase):
 
     def _run(self, *args, acquires=True):
         env = dict(os.environ, FLOCK_BIN=str(self._flock(acquires=acquires)),
-                   LOCK_FILE=str(self.tmp / "l.lock"), CRON_LOCK_WAIT="7")
+                   FXI_LOCK_CONF=str(self._conf()), CRON_LOCK_WAIT="7")
         r = subprocess.run(["bash", str(W), *args], env=env, capture_output=True, text=True, timeout=60)
         return r.returncode, r.stdout + r.stderr
 

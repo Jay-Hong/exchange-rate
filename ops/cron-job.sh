@@ -19,9 +19,15 @@
 set -Eeuo pipefail
 
 # ── lock 정본 (배포·wrapper·cron이 공유) ─────────────────────────────────────
-# ⛔ crontab이 이 값을 덮을 수 없다 — 정본 줄에 env 대입이 없고, 배포가 정확 일치를 요구한다.
-#    테스트만 FXI_LOCK_FILE로 덮는다(프로덕션 crontab에는 그 대입이 존재할 수 없다).
-FXI_LOCK_FILE="${FXI_LOCK_FILE:-/var/lock/fxi-deploy.lock}"
+# ── lock 경로: 단일 정본 (ops/lock.conf) ─────────────────────────────────────
+# ⛔ 개별 fallback 금지. 재정의는 `FXI_LOCK_CONF`로 **정본 파일을 갈아끼우는 것**뿐이고,
+#    그러면 배포·cron·wrapper가 함께 움직여 상호배제가 유지된다.
+_HERE_LOCK="$(cd "$(dirname "$0")" && pwd)"
+FXI_LOCK_CONF="${FXI_LOCK_CONF:-$_HERE_LOCK/lock.conf}"
+[ -f "$FXI_LOCK_CONF" ] || { echo "lock 정본이 없다: $FXI_LOCK_CONF" >&2; exit 5; }
+# shellcheck source=/dev/null
+. "$FXI_LOCK_CONF"
+: "${FXI_DEPLOY_LOCK:?lock 정본에 FXI_DEPLOY_LOCK 이 없다}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WRAPPER="${WRAPPER:-$HERE/cron-with-lock.sh}"
@@ -68,6 +74,5 @@ SPEC="${SPEC#*|}"          # log 버림
 ARGS="$SPEC"
 
 # shellcheck disable=SC2086  # ARGS는 이 파일이 소유하는 고정 문자열이다(외부 입력 아님)
-FXI_LOCK_FILE="$FXI_LOCK_FILE" LOCK_FILE="$FXI_LOCK_FILE" \
-    exec "$WRAPPER" --policy "$POLICY" -- \
+exec "$WRAPPER" --policy "$POLICY" -- \
         "$DOCKER_BIN" compose run --rm fastapi python $ARGS
