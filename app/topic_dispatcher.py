@@ -42,6 +42,9 @@ from app import config
 
 logger = logging.getLogger("exchange_rate.topic_dispatcher")
 
+# 설정 결함(판정기 부재) 응답의 retry 동반값. §8-C 는 "동반"만 요구하고 정책은 별도 슬라이스다.
+_CONFIG_FAULT_RETRY_AFTER_SECONDS = 5
+
 
 class TopicRegistry:
     """WebSocket ↔ topic 구독 관계 in-memory registry.
@@ -310,7 +313,19 @@ async def handle_client_message(
             supported_snapshot_topics,
         )
 
+        from app.topic_wire import SubscribeAuthFailed, build_subscription_error
+
         id_token = msg.get("id_token")
+        if id_token is not None and (not isinstance(id_token, str) or not id_token):
+            # ⛔ 형식 위반은 **인증 이전 단계**다(§8-C `invalid_request`). 여기서 걸러 두면
+            #    SDK 가 토큰과 무관한 bare `ValueError` 를 던지는 경로가 아예 사라진다 —
+            #    그 예외는 자격 오류도 판정 불가도 아니라 어느 코드에도 맞지 않는다.
+            await websocket.send_json(
+                build_subscription_error(
+                    request_id=msg.get("request_id"), error="invalid_request"
+                )
+            )
+            return
         if id_token is None:
             # ⚠️ **무토큰 = 기존 동작 그대로**(등록 + snapshot, ack 없음). 강제 전환을 여기서
             #    하면 안 된다 — enforcement는 capability와 분리돼야 하고(§E1), 현행 클라가
@@ -320,8 +335,21 @@ async def handle_client_message(
             await send_initial_snapshots(websocket, topics)
             return
 
-        # 토큰이 실린 요청만 인증 경로를 탄다. 실패는 raise되어 연결이 정리된다(위 docstring).
-        await authorize_subscribe(id_token)
+        # 토큰이 실린 요청만 인증 경로를 탄다.
+        try:
+            await authorize_subscribe(id_token)
+        except SubscribeAuthFailed as failure:
+            # ⚠️ **연결과 registry 는 불변이다.** §8-C 의 두 코드는 전체-요청 범위이므로 요청만
+            #    접는다 — 구 동작은 예외가 상위로 올라가 연결이 닫히고 그 연결의 **다른 구독까지**
+            #    사라졌다. 그 차이는 소켓에서만 관측된다.
+            await websocket.send_json(
+                build_subscription_error(
+                    request_id=msg.get("request_id"),
+                    error=failure.error,
+                    retry_after_seconds=failure.retry_after_seconds,
+                )
+            )
+            return
         # ⚠️ uid를 **저장하지 않는다** — lease 바인딩이 없는 지금 저장하면 소비자 없는 상태가
         #    되고, 그것이 폐기된 트랙의 형태였다. uid는 lease 슬라이스에서 쓴다.
 
@@ -342,13 +370,15 @@ async def handle_client_message(
                 "per-user 판정이 필요한 topic이 지원 집합에 있으나 WS 판정기가 없다 — 설정 결함",
                 extra={"topics": unjudgeable},
             )
-            await websocket.send_json({
-                "type": "subscription_error",
-                "request_id": msg.get("request_id"),
-                "error": "temporarily_unavailable",
-                # §8-C는 이 코드에 retry_after 동반을 요구한다. 값·jitter 정책은 별도 슬라이스.
-                "retry_after_seconds": 5,
-            })
+            # ⚠️ 설정 결함 응답도 **같은 생성 경로**를 지난다 — 오류 프레임이 두 형태로
+            #    갈리지 않게 하는 것이 `build_subscription_error` 의 존재 이유다.
+            await websocket.send_json(
+                build_subscription_error(
+                    request_id=msg.get("request_id"),
+                    error="temporarily_unavailable",
+                    retry_after_seconds=_CONFIG_FAULT_RETRY_AFTER_SECONDS,
+                )
+            )
             return
 
         accepted_names, accepted, rejected = [], [], []

@@ -75,6 +75,40 @@ class _StubRevokedIdTokenError(_StubInvalidIdTokenError):
         _StubInvalidIdTokenError.__init__(self, message)
 
 
+class _StubNotFoundError(_StubFirebaseError):
+    """firebase-admin 6.9.0 `exceptions.NotFoundError` — `FirebaseError` **직하**."""
+
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "NOT_FOUND", message, cause, http_response)
+
+
+class _StubUserNotFoundError(_StubNotFoundError):
+    """`_auth_utils.UserNotFoundError` — `NotFoundError` 직하."""
+
+
+class _StubConfigurationNotFoundError(_StubNotFoundError):
+    """`_auth_utils.ConfigurationNotFoundError` — `UserNotFoundError` 의 **형제**다.
+
+    ⛔ 이 형제 관계가 매핑의 핵심이다. 부모 `NotFoundError` 로 뭉치면 **우리 프로젝트 설정
+    결함**이 "계정 없음"(자격 오류)으로 보고된다. stub 이 이걸 하위로 만들면 매핑 테스트가
+    전부 가짜 green 이 되므로 계층 자체를 별도 단언으로 잠근다.
+    """
+
+
+class _StubUserDisabledError(_StubInvalidArgumentError):
+    """`_auth_utils.UserDisabledError` — `InvalidIdTokenError` 의 **형제**다.
+
+    둘 다 `InvalidArgumentError` 직하이므로 `except InvalidIdTokenError` 로는 잡히지 않는다.
+    """
+
+
+class _StubUnavailableError(_StubFirebaseError):
+    """`exceptions.UnavailableError` — `check_revoked=True` 가 여는 lookup 실패군의 대표."""
+
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "UNAVAILABLE", message, cause, http_response)
+
+
 class _StubCertificateFetchError(_StubUnknownError):
     def __init__(self, message, cause):
         _StubUnknownError.__init__(self, message, cause)
@@ -88,6 +122,14 @@ _fb_auth.ExpiredIdTokenError = _StubExpiredIdTokenError
 _fb_auth.InvalidIdTokenError = _StubInvalidIdTokenError
 _fb_auth.CertificateFetchError = _StubCertificateFetchError
 _fb_exceptions.FirebaseError = _StubFirebaseError
+# ⚠️ 계층은 wire 에서 보이지 않는다 — 위 형제 관계가 틀리면 매핑 테스트가 가짜 green 이 되므로
+#    `tests/test_firebase_auth_mapping.py` 의 fidelity 단언이 이 계층을 직접 잠근다.
+_fb_exceptions.NotFoundError = _StubNotFoundError
+_fb_exceptions.UnavailableError = _StubUnavailableError
+_fb_auth.NotFoundError = _StubNotFoundError
+_fb_auth.UserNotFoundError = _StubUserNotFoundError
+_fb_auth.ConfigurationNotFoundError = _StubConfigurationNotFoundError
+_fb_auth.UserDisabledError = _StubUserDisabledError
 
 # ⚠️ sys.modules 등록만으로는 부족하다: `from firebase_admin import auth`(app/main.py)는 부모
 #    MagicMock의 **자동 생성 속성**을 돌려줘 sys.modules 항목과 **다른 객체**가 된다(실증).

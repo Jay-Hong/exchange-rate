@@ -211,5 +211,49 @@ class TestFcmFirebaseErrorBranch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("UNREGISTERED", str(error))
 
 
+class TestStubHierarchyFidelityForWsMapping(unittest.TestCase):
+    """stub 의 **형제 관계**를 잠근다 — 계층이 틀리면 WS 매핑 테스트가 전부 가짜 green 이 된다.
+
+    근거: firebase-admin **6.9.0 원문**(requirements.lock.txt 의 pin)에서 직접 확인했다.
+    로컬에는 firebase_admin 이 설치돼 있지 않아 **stub 계층이 곧 테스트의 진실**이므로,
+    그 계층이 실물과 어긋나면 매핑이 의미를 잃는다.
+
+        _auth_utils.py:331  InvalidIdTokenError(exceptions.InvalidArgumentError)
+        _auth_utils.py:399  UserDisabledError(exceptions.InvalidArgumentError)   ← 형제
+        _auth_utils.py:356  UserNotFoundError(exceptions.NotFoundError)
+        _auth_utils.py:390  ConfigurationNotFoundError(exceptions.NotFoundError) ← 형제
+        _token_gen.py:435   ExpiredIdTokenError(InvalidIdTokenError)             ← 하위
+        _token_gen.py:442   RevokedIdTokenError(InvalidIdTokenError)             ← 하위
+    """
+
+    def test_user_disabled_is_a_sibling_of_invalid_id_token(self):
+        from firebase_admin import auth
+
+        self.assertFalse(
+            issubclass(auth.UserDisabledError, auth.InvalidIdTokenError),
+            "stub 이 형제를 하위로 만들었다 — `except InvalidIdTokenError` 가 계정 비활성화를 "
+            "잡아 버려 매핑 테스트가 가짜 green 이 된다",
+        )
+
+    def test_configuration_not_found_is_a_sibling_of_user_not_found(self):
+        from firebase_admin import auth
+
+        self.assertFalse(
+            issubclass(auth.ConfigurationNotFoundError, auth.UserNotFoundError),
+            "stub 이 형제를 하위로 만들었다 — 우리 설정 결함이 '계정 없음'으로 보고된다",
+        )
+        self.assertTrue(
+            issubclass(auth.ConfigurationNotFoundError, auth.NotFoundError),
+            "부모 관계가 없으면 NotFound 계열 절이 아무것도 잡지 않는다",
+        )
+
+    def test_expired_and_revoked_are_subclasses_of_invalid(self):
+        """이 관계가 있어야 WS 가 세 타입을 **한 절**로 접을 수 있다(순서 무관)."""
+        from firebase_admin import auth
+
+        for name in ("ExpiredIdTokenError", "RevokedIdTokenError"):
+            with self.subTest(name=name):
+                self.assertTrue(issubclass(getattr(auth, name), auth.InvalidIdTokenError))
+
 if __name__ == "__main__":
     unittest.main()

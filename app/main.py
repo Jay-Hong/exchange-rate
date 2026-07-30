@@ -2893,6 +2893,74 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
 # Phase 2: Firebase Auth + FCM 알림 API
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# §8-C `temporarily_unavailable` 동반값. 정책·jitter 는 별도 슬라이스이므로 보수적 고정값이다.
+WS_AUTH_RETRY_AFTER_SECONDS = 5
+
+
+def _classify_ws_subscribe_auth_failure(exc: BaseException):
+    """인증 실패 예외 → `(§8-C wire 코드, retry_after)` 또는 **분류 불가면 `None`**.
+
+    ⛔ **broad catch 금지 — isinstance 를 좁은 것부터.** `.code` 문자열로 키잉해선 안 된다:
+    6.9.0 소스 확인 결과 `UserDisabledError.code == InvalidIdTokenError.code ==
+    "INVALID_ARGUMENT"` 이고 `CertificateFetchError.code == "UNKNOWN"` 을 다른 타입과 공유한다.
+
+    ⚠️ **MRO 함정 두 개**(firebase-admin 6.9.0 원문에서 확인):
+    - `UserDisabledError` 는 `InvalidIdTokenError` 의 하위가 **아니라 형제**다(둘 다
+      `InvalidArgumentError` 직하). 그래서 `except InvalidIdTokenError` 로는 잡히지 않는다.
+    - `ConfigurationNotFoundError` 는 `UserNotFoundError` 의 **형제**다(둘 다 `NotFoundError` 직하).
+      부모로 뭉치면 **우리 프로젝트 설정 결함이 "계정 없음"** 이 되어, 장애 중 전 사용자에게
+      재인증을 지시하고 그 재인증도 같은 이유로 실패한다.
+
+    ⚠️ `Revoked`/`Expired` 는 `Invalid` 의 **하위**라 한 절로 충분하다 — 세 타입이 같은 verdict 라
+    REST(`verify_firebase_token`)처럼 except **순서가 load-bearing 하지 않다**.
+    """
+    from firebase_admin import auth, exceptions as fb_exceptions
+    from google.auth import exceptions as google_auth_exceptions
+
+    from app.topic_wire import FirebaseNotInitialized
+
+    # ── invalid_token — 자격 자체를 못 쓴다. 클라 재인증이 유일한 해법이다. ──
+    if isinstance(exc, auth.InvalidIdTokenError):     # Revoked/Expired 포함(하위)
+        return "invalid_token", None
+    if isinstance(exc, auth.UserDisabledError):
+        # ⚠️ 두 코드 어디에도 정확히 맞지 않는 terminal 상태다. `temporarily_unavailable` 로 주면
+        #    retry_after 때문에 영구 재시도 루프가 되고, `invalid_token` 이면 클라 재인증이
+        #    Firebase 에서 실패해 자연 종결된다 → least-bad 는 invalid_token 이다.
+        logger.warning("WS subscribe: 비활성 계정", extra={"reason": "user_disabled"})
+        return "invalid_token", None
+    if isinstance(exc, auth.UserNotFoundError):
+        # 토큰 발급 후 계정 삭제 — 자격이 죽었다.
+        return "invalid_token", None
+
+    # ── temporarily_unavailable — 판정할 수 없다. registry 는 불변이어야 한다. ──
+    if isinstance(exc, fb_exceptions.NotFoundError):
+        # 위 `UserNotFoundError` 절을 지나 여기 오는 것은 **형제들**이다(Configuration/Tenant/
+        # Email NotFound + 미매핑 404). 전부 우리 설정 결함 계열이므로 운영자 신호를 낸다.
+        logger.error(
+            "WS subscribe: Firebase NotFound 계열 — 설정 결함 의심",
+            extra={"exc_type": type(exc).__name__},
+        )
+        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+    if isinstance(exc, FirebaseNotInitialized):
+        logger.error("WS subscribe: Firebase 미초기화")
+        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+    if isinstance(exc, fb_exceptions.FirebaseError):
+        # 인증서 조회 실패 + `check_revoked=True` 가 여는 accounts:lookup 실패 전군
+        # (Unavailable / DeadlineExceeded / Internal / ResourceExhausted / PermissionDenied …).
+        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+    if isinstance(exc, google_auth_exceptions.GoogleAuthError):
+        # ⚠️ 서비스계정 토큰 갱신 실패(`RefreshError`)는 FirebaseError 도 requests 예외도 **아니라**
+        #    SDK 변환 그물을 통과해 날것으로 올라온다. 부모를 잡아 `TransportError` 까지 함께 덮는다.
+        #    `retryable` 속성을 판정 근거로 쓰지 않는다 — 기본이 False 라 키 폐기·클럭 스큐도
+        #    섞이는데, 어느 쪽이든 **클라 재인증으로는 해결되지 않는다**.
+        logger.error(
+            "WS subscribe: google-auth 실패", extra={"exc_type": type(exc).__name__}
+        )
+        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+
+    return None
+
+
 async def verify_ws_subscribe_token(id_token: str) -> str:
     """WS subscribe 메시지의 `id_token` 검증 → uid.
 
@@ -2917,13 +2985,28 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
 
     from firebase_admin import auth
 
+    from app.topic_wire import FirebaseNotInitialized, SubscribeAuthFailed
+
     if not is_firebase_initialized():
-        raise RuntimeError("Firebase not initialized")
+        raise SubscribeAuthFailed(
+            *_classify_ws_subscribe_auth_failure(FirebaseNotInitialized("not initialized"))
+        )
     # ⛔ `check_revoked=True` — §8-C의 `invalid_token`은 "무효·만료·**revoked**"를 포함한다.
     #    False면 revoke된 토큰이 검증을 통과해 **accept**된다(이 슬라이스에 실재한 구멍이었다).
     #    대가: subscribe마다 Firebase user record 조회가 1회 더 붙는다. lease가 들어오면 그 조회를
     #    lease horizon에 통합해 매 요청 비용을 없애는 것이 다음 단계다(지금은 horizon이 없다).
-    decoded = await asyncio.to_thread(auth.verify_id_token, id_token, check_revoked=True)
+    try:
+        decoded = await asyncio.to_thread(
+            auth.verify_id_token, id_token, check_revoked=True
+        )
+    except BaseException as exc:  # noqa: BLE001 — 분류 후 분류 불가면 그대로 재전파한다
+        verdict = _classify_ws_subscribe_auth_failure(exc)
+        if verdict is None:
+            # ⛔ 분류 불가는 **삼키지 않는다.** 우리 버그·미지의 상태를 wire 오류로 접으면
+            #    클라가 영구 재시도하고 운영자는 신호를 못 받는다. 그대로 올려 연결이 정리되게
+            #    한다(현행 동작과 같다) — 상위 `except Exception` 이 traceback 을 남긴다.
+            raise
+        raise SubscribeAuthFailed(*verdict) from exc
     return decoded["uid"]
 
 

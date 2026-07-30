@@ -30,6 +30,7 @@ from app import config, models
 from app.database import engine
 from app.krx_topic_publisher import KRX_TOPIC
 from app import main as app_main
+from app import topic_dispatcher
 from app.main import app
 from app.subscription import PremiumStatus
 
@@ -730,6 +731,17 @@ class TestTopicSnapshotRouteHasNoRequestScopedSession(unittest.TestCase):
                          "가시성 조회는 to_thread 안에서 열고 닫는다(E3 item 5)")
 
 
+def _google_auth_error(message):
+    """`google.auth` 는 로컬 미설치라 conftest 가 **진짜 예외 클래스**로 stub 한다.
+
+    설치된 CI 에서는 실물을 쓴다 — 어느 환경이든 `GoogleAuthError` 하위이므로 계약은 동일하다
+    (그 이유가 `tests/conftest.py` 의 google.auth 분기 주석에 적혀 있다).
+    """
+    from google.auth import exceptions as google_auth_exceptions
+
+    return google_auth_exceptions.GoogleAuthError(message)
+
+
 def _receive_json_or_fail(ws, fail, timeout=2.0):
     """`ws.receive_json()` 을 thread+join 으로 감싼다 — 미전달 시 hang 대신 fast fail.
 
@@ -990,6 +1002,187 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 "builder 가 availability 판정기를 무시했다 — 분류와 발사가 갈린다",
             )
 
+    def _subscribe_and_receive(self, *, verifier_raises=None, request_id="err-1",
+                               topics=("fx:usd-krw",), extra=None, ping_after=False):
+        """공통 경로 — verifier 의 side_effect 만 갈아 끼운다(새 harness 금지)."""
+        patchers = self._patchers()
+        if verifier_raises is not None:
+            patchers["verify_token"] = patch(
+                "app.main.verify_ws_subscribe_token",
+                new=AsyncMock(side_effect=verifier_raises),
+            )
+        if extra:
+            patchers.update(extra)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                payload = {"type": "subscribe", "request_id": request_id,
+                           "id_token": "tok", "topics": list(topics)}
+                ws.send_json(payload)
+                msg = _receive_json_or_fail(ws, self.fail)
+                pong = None
+                if ping_after:
+                    # ⛔ **연결 생존**이 계약이다 — §8-C 의 두 코드는 전체-요청 범위이므로
+                    #    요청만 접혀야 하고 연결·registry 는 불변이어야 한다.
+                    ws.send_text("ping")
+                    pong = _receive_json_or_fail(ws, self.fail)
+                subs = topic_dispatcher.registry.get_subscriptions(ws)
+        return msg, pong, subs
+
+    def test_revoked_token_becomes_invalid_token_and_keeps_the_connection(self):
+        """⛔ 현행은 프레임 **0개 + 연결 종료**였다 — 그 차이는 소켓에서만 보인다."""
+        from app.topic_wire import SubscribeAuthFailed
+
+        msg, pong, subs = self._subscribe_and_receive(
+            verifier_raises=SubscribeAuthFailed("invalid_token"), ping_after=True,
+        )
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "invalid_token")
+        self.assertEqual(msg.get("request_id"), "err-1")
+        self.assertNotIn(
+            "retry_after_seconds", msg,
+            "죽은 자격에 retry_after 를 붙이면 클라가 영구 재시도한다",
+        )
+        self.assertEqual(pong, {"type": "pong"}, "연결이 닫혔다 — 요청만 접어야 한다")
+        self.assertEqual(subs, set(), "실패한 요청이 registry 를 바꿨다")
+
+    def test_unavailable_verdict_carries_retry_after(self):
+        from app.topic_wire import SubscribeAuthFailed
+
+        msg, _, subs = self._subscribe_and_receive(
+            verifier_raises=SubscribeAuthFailed("temporarily_unavailable", 5),
+        )
+        self.assertEqual(msg.get("error"), "temporarily_unavailable")
+        self.assertIs(type(msg.get("retry_after_seconds")), int, "정수여야 한다")
+        self.assertGreaterEqual(msg.get("retry_after_seconds"), 1)
+        self.assertEqual(subs, set())
+
+    def test_config_fault_frame_matches_the_auth_failure_frame(self):
+        """⛔ 두 경로가 **같은 생성자**를 지나는지는 두 프레임을 비교해야만 보인다."""
+        from app.topic_wire import SubscribeAuthFailed
+
+        auth_frame, _, _ = self._subscribe_and_receive(
+            verifier_raises=SubscribeAuthFailed("temporarily_unavailable", 5),
+            request_id="same-1",
+        )
+        cfg_frame, _, _ = self._subscribe_and_receive(
+            request_id="same-1", topics=("fx:usd-krw", KRX_TOPIC),
+            extra={"krx_flag": patch.object(
+                config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True)},
+        )
+        self.assertEqual(
+            sorted(auth_frame), sorted(cfg_frame),
+            "설정 결함 프레임과 인증 실패 프레임의 키가 다르다 — 생성 경로가 갈렸다",
+        )
+        self.assertEqual(auth_frame["type"], cfg_frame["type"])
+        self.assertEqual(auth_frame["error"], cfg_frame["error"])
+
+    def test_malformed_id_token_is_a_request_format_error(self):
+        """형식 위반은 인증 **이전** 단계다 — SDK 의 토큰-무관 ValueError 경로를 없앤다."""
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "bad-1",
+                              "id_token": 42, "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(msg.get("error"), "invalid_request")
+        self.assertNotIn("retry_after_seconds", msg)
+
+    def _subscribe_with_real_verifier(self, sdk_error, request_id="sdk-1"):
+        """⛔ **verifier 를 fake 하지 않는다** — SDK 를 fake 해 실제 분류기를 경계에서 관측한다.
+
+        `_patchers()` 는 `verify_ws_subscribe_token` 을 통째로 교체하므로 그걸로는 예외 분류가
+        검증되지 않는다(그 사실은 별도 단위 테스트가 기록한다). 여기서는 verifier fake 를 빼고
+        `firebase_admin.auth.verify_id_token` 이 SDK 예외를 던지게 한다.
+        """
+        import firebase_admin
+
+        patchers = self._patchers()
+        del patchers["verify_token"]                    # 실제 verifier 가 돈다
+        patchers["fb_initialized"] = patch(
+            "app.main.is_firebase_initialized", return_value=True
+        )
+        patchers["fb_verify"] = patch.object(
+            firebase_admin.auth, "verify_id_token", side_effect=sdk_error
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": request_id,
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+                subs = topic_dispatcher.registry.get_subscriptions(ws)
+        return msg, subs
+
+    def test_sdk_exceptions_split_by_type_not_by_parent_catch(self):
+        """⛔ **broad/부모 catch 금지**를 타입으로 지켰는지 보는 유일한 테스트.
+
+        세 케이스가 함께 있어야 의미가 있다:
+        - `UserDisabledError` 는 `InvalidIdTokenError` 의 **형제**라 그 절로는 안 잡힌다.
+        - `ConfigurationNotFoundError` 는 `UserNotFoundError` 의 **형제**다 — 부모
+          `NotFoundError` 로 뭉치는 변이는 **이 케이스에서만** red 가 된다.
+        """
+        import firebase_admin
+
+        auth = firebase_admin.auth
+        # (예외, 기대 wire 코드, retry_after 동반?, 운영자 ERROR 신호 필요?)
+        # ⚠️ 이름 문자열로 분기하지 않는다 — stub 클래스는 `_Stub…` 로 이름이 달라
+        #    리터럴 매칭이 **한 번도 발화하지 않았다**(변이 생존으로 발견).
+        cases = [
+            (auth.RevokedIdTokenError("revoked"), "invalid_token", False, False),
+            (auth.UserDisabledError("disabled"), "invalid_token", False, False),
+            (auth.UserNotFoundError("gone"), "invalid_token", False, False),
+            (auth.ConfigurationNotFoundError("no cfg"), "temporarily_unavailable", True, True),
+            # ⚠️ 실물 `CertificateFetchError.__init__(self, message, cause)` 는 cause 가 **필수**다
+            #    (6.9.0 `_token_gen.py:431`). stub 이 그걸 그대로 반영해 내 호출 실수를 잡았다.
+            (auth.CertificateFetchError("certs", None), "temporarily_unavailable", True, False),
+            # ⚠️ 서비스계정 토큰 갱신 실패는 **FirebaseError 도 requests 예외도 아니라** SDK 변환
+            #    그물을 통과해 날것으로 올라온다 → 별 절이 필요하다(부모 `GoogleAuthError` 를 잡아
+            #    `RefreshError`·`TransportError` 를 함께 덮는다).
+            (_google_auth_error("refresh failed"), "temporarily_unavailable", True, True),
+        ]
+        # ⛔ 설정 결함 계열은 **운영자 신호(ERROR)** 도 계약이다 — 그것이 그 절의 고유 가치다.
+        #    변이 실측: NotFound 절을 지우면 verdict 는 FirebaseError 절로 흘러 **동일**해서
+        #    verdict 단언만으론 생존한다. 로그를 함께 봐야 그 절이 잠긴다.
+        for exc, expected_error, wants_retry, wants_error_log in cases:
+            with self.subTest(exc=type(exc).__name__):
+                if wants_error_log:
+                    with self.assertLogs("exchange_rate.main", level="ERROR"):
+                        msg, subs = self._subscribe_with_real_verifier(exc)
+                else:
+                    msg, subs = self._subscribe_with_real_verifier(exc)
+                self.assertEqual(msg.get("type"), "subscription_error")
+                self.assertEqual(msg.get("error"), expected_error)
+                self.assertEqual(
+                    "retry_after_seconds" in msg, wants_retry,
+                    "retry_after 동반 규칙이 코드와 맞지 않는다",
+                )
+                self.assertEqual(subs, set(), "실패가 registry 를 바꿨다")
+
+    def test_unclassifiable_exception_is_not_swallowed(self):
+        """⛔ 분류 불가를 wire 오류로 접으면 우리 버그가 조용해지고 클라가 영구 재시도한다.
+
+        관측: 프레임이 오지 않고 연결이 끊긴다(상위 handler 가 traceback 을 남긴다).
+        """
+        msg_box = {}
+        try:
+            msg_box["msg"], _ = self._subscribe_with_real_verifier(
+                ZeroDivisionError("우리 버그")
+            )
+        except Exception as exc:      # noqa: BLE001 — 연결 종료가 기대 동작이다
+            msg_box["closed"] = type(exc).__name__
+        self.assertNotIn(
+            "msg", msg_box,
+            f"분류 불가를 wire 프레임으로 접었다: {msg_box.get('msg')}",
+        )
+
 
 class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
     """`verify_ws_subscribe_token` **본문** — E2E 는 이 함수를 통째로 fake 하므로 미검증이다.
@@ -1042,10 +1235,19 @@ class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_refuses_when_firebase_is_not_initialized(self):
-        """⛔ 미초기화를 통과시키면 검증 없는 uid 가 흐른다."""
+        """⛔ 미초기화를 통과시키면 검증 없는 uid 가 흐른다.
+
+        ⚠️ 계약이 바뀌었다: 구 버전은 bare `RuntimeError` 였다. 이제 **판정 불가**로 분류돼
+        `SubscribeAuthFailed("temporarily_unavailable", …)` 이다 — 자격 오류가 아니라 우리 쪽
+        상태이므로 클라에 재인증을 지시하면 안 된다.
+        """
+        from app.topic_wire import SubscribeAuthFailed
+
         with patch("app.main.is_firebase_initialized", return_value=False):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(SubscribeAuthFailed) as caught:
                 await app_main.verify_ws_subscribe_token("tok")
+        self.assertEqual(caught.exception.error, "temporarily_unavailable")
+        self.assertGreaterEqual(caught.exception.retry_after_seconds, 1)
 
 
 if __name__ == "__main__":
