@@ -305,6 +305,33 @@
   ]
 }
 ```
+#### 8-B-stage — **단계형 wire (2026-07-30 개정)**
+
+⚠️ 위 ack은 **lease 기계를 전제**한다(`lease_id` / `lease_duration_seconds` / `identity_generation`).
+lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들어 내는 것**이고, 빼면 코드가 정본과 다른
+**제3의 계약**을 만든다. 그래서 단계를 명시한다 — 구현은 자기 단계의 행을 그대로 따른다.
+
+| 필드 | Stage 1 (인증 + ack, **현재**) | Stage 2 (lease 도입) |
+| --- | --- | --- |
+| `type` / `request_id` / `operation` | 그대로 | 그대로 |
+| `accepted_topics` | `[{"topic": …}]` | `+ lease_id`, `+ lease_duration_seconds` |
+| `rejected_topics` | `[{"topic": …, "error": …}]` | 그대로 |
+| `removed_topics` | `[]` (제거 전이 미구현) | §C2 eviction 결과 |
+| `active_subscriptions` | `[{"topic": …}]` (연결 최종 상태) | `+ lease_id`, `+ lease_duration_seconds` |
+| `identity_generation` | **보류(미포함)** | 재검토 후 결정 |
+
+⛔ **컨테이너 형태는 Stage 1부터 최종형(객체 배열)이다.** 문자열 배열로 시작하면 lease가 들어올 때
+클라가 shape를 바꿔야 한다 — 그 비용을 피하는 것이 이 표의 요점이다.
+
+⚠️ `identity_generation` 보류 근거: 폐기된 트랙에서 "소비자 0 + 새 소켓은 서버 상태가 처음부터라
+reconnect를 전역 구분할 수 없다"는 이유로 제거 결정이 있었다. 그 판단 자체는 archive와 함께
+보류 상태이고, **필수 필드로 모델링한 뒤 빼면 breaking**이므로 소비자가 생길 때 결정한다.
+
+⚠️ **Stage 1의 알려진 공백 (의도적)**: `TOPIC_DISPATCHER_ENABLED` off일 때 정본은 전 topic
+`topics_disabled`를 요구하지만, 현행 구현은 그 지점에서 **조용히 무시**한다(기존 동작). 그 경로를
+바꾸면 프로덕션의 현재 상태(flag off)를 건드리고, 오늘 그 조합을 보내는 클라가 없다 —
+별도 red 테스트와 함께 닫는다. **누락이 아니라 기록된 유예다.**
+
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.
 - **`active_subscriptions` = 그 연결의 최종 상태 전체**(topic별 `lease_id` + 남은 duration). 클라는 이걸로 수렴한다.

@@ -306,6 +306,7 @@ async def handle_client_message(
         from app.topic_initial_snapshot import (
             per_user_gated_snapshot_topics,
             send_initial_snapshots,
+            supported_snapshot_topics,
         )
 
         id_token = msg.get("id_token")
@@ -323,20 +324,44 @@ async def handle_client_message(
         # ⚠️ uid를 **저장하지 않는다** — lease 바인딩이 없는 지금 저장하면 소비자 없는 상태가
         #    되고, 그것이 폐기된 트랙의 형태였다. uid는 lease 슬라이스에서 쓴다.
 
-        gated = per_user_gated_snapshot_topics()
-        accepted = [t for t in topics if t not in gated]
-        rejected = [t for t in topics if t in gated]
+        # ⛔ **"게이트가 아니면 허용"은 틀렸다.** 구 판정은 미지원 topic(`not:a:topic`)까지
+        #    accept하고 registry에 등록했다(실측 재현). 지원 집합을 **명시적으로** 봐야 한다.
+        supported = set(supported_snapshot_topics())   # flag-aware (KRX는 배포 flag 조건부)
+        gated = per_user_gated_snapshot_topics()       # per-user 판정이 필요한 topic
 
-        # ⚠️ **ack이 데이터보다 먼저다.** 등록·snapshot을 먼저 하면 클라가 ack 전에 데이터를
-        #    받아 "요청이 수락됐는지" 모르는 상태로 처리하게 된다.
+        accepted_names, accepted, rejected = [], [], []
+        for topic in topics:                          # 요청 순서 보존
+            if topic in gated:
+                # ⚠️ 이 슬라이스는 entitlement를 판정하지 않는다 → **accept할 수 없다.**
+                #    flag off면 지원 집합에도 없고, flag on이어도 인가 수단이 없다 — 어느 쪽이든
+                #    "서버가 이 topic을 아직 줄 수 없다"가 사실이므로 `topic_unavailable`이다.
+                #    판정이 들어오면 `premium_required`/`krx_entitlement_required`로 갈린다.
+                rejected.append({"topic": topic, "error": "topic_unavailable"})
+            elif topic not in supported:
+                rejected.append({"topic": topic, "error": "unknown_topic"})
+            else:
+                accepted_names.append(topic)
+                accepted.append({"topic": topic})
+
+        if accepted_names:
+            registry.register(websocket, accepted_names)
+
+        # ⚠️ **ack이 데이터보다 먼저다.** snapshot을 먼저 보내면 클라가 ack 전에 데이터를 받아
+        #    "요청이 수락됐는지" 모르는 상태로 처리하게 된다. registry 등록은 ack 앞이어야
+        #    `active_subscriptions`가 연결의 **최종 상태**를 담을 수 있다(§8-B).
         await websocket.send_json({
             "type": "subscription_ack",
             "request_id": msg.get("request_id"),
+            "operation": "subscribe",
             "accepted_topics": accepted,
             "rejected_topics": rejected,
+            # 제거 전이(§C2 eviction)는 이 슬라이스에 없다 — 항상 빈 목록이다(§8-B-stage).
+            "removed_topics": [],
+            "active_subscriptions": [
+                {"topic": t} for t in sorted(registry.get_subscriptions(websocket))
+            ],
         })
-        if accepted:
-            registry.register(websocket, accepted)
-            await send_initial_snapshots(websocket, accepted)
+        if accepted_names:
+            await send_initial_snapshots(websocket, accepted_names)
     else:  # unsubscribe
         registry.unregister(websocket, topics)

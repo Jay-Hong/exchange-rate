@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 from app import config, models
 from app.database import engine
 from app.krx_topic_publisher import KRX_TOPIC
+from app import main as app_main
 from app.main import app
 from app.subscription import PremiumStatus
 
@@ -846,9 +847,13 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                     "type": "subscribe",
                     "request_id": "spike-1",
                     "id_token": "token-spike",
-                    # ⛔ 유료(per-user 판정) topic을 **함께** 보낸다. identity만 확인하고 이것을
-                    #    accept하면 *인가된 것처럼 보이는* 유료 데이터 유출이라 무인증보다 나쁘다.
-                    "topics": ["fx:usd-krw", KRX_TOPIC],
+                    # ⛔ 세 종류를 **함께** 보낸다:
+                    #    - 무료 지원 topic → accept
+                    #    - 유료(per-user 판정) topic → identity만 확인하고 accept하면
+                    #      *인가된 것처럼 보이는* 유료 데이터 유출이라 무인증보다 나쁘다
+                    #    - 미지원 topic → 구 판정("게이트가 아니면 허용")은 이걸 accept하고
+                    #      registry에 등록했다(실측 재현)
+                    "topics": ["fx:usd-krw", KRX_TOPIC, "not:a:topic"],
                 })
                 msg = _receive_json_or_fail(ws, self.fail)
         self.assertEqual(
@@ -856,13 +861,81 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             f"인증된 subscribe 에 ack 이 오지 않았다 — 실제 수신: {msg.get('type')!r}",
         )
         self.assertEqual(msg.get("request_id"), "spike-1", "ack 이 요청과 상관되지 않는다")
-        self.assertEqual(msg.get("accepted_topics"), ["fx:usd-krw"])
+        # ⛔ **정본 §8-B의 객체 배열**이다 — 문자열 배열로 두면 lease 필드가 들어올 때 클라가
+        #    shape를 바꿔야 하고, 그게 코드가 만든 제3의 계약이었다(§8-B-stage 표).
+        self.assertEqual(msg.get("operation"), "subscribe", "같은 schema라 구분자가 필요하다")
+        self.assertEqual(msg.get("accepted_topics"), [{"topic": "fx:usd-krw"}])
         self.assertEqual(
-            msg.get("rejected_topics"), [KRX_TOPIC],
-            "identity만 확인하고 per-user 판정 topic을 accept했다",
+            msg.get("rejected_topics"),
+            [
+                {"topic": KRX_TOPIC, "error": "topic_unavailable"},
+                {"topic": "not:a:topic", "error": "unknown_topic"},
+            ],
+            "topic 분류가 정본 오류 코드와 다르다 (per-user 판정 vs 미지원)",
+        )
+        self.assertEqual(msg.get("removed_topics"), [], "이 슬라이스엔 제거 전이가 없다")
+        self.assertEqual(
+            msg.get("active_subscriptions"), [{"topic": "fx:usd-krw"}],
+            "ack이 연결의 최종 상태를 담지 않는다 — 클라가 이걸로 수렴한다",
         )
         # 인증자가 **메시지의 토큰으로 정확히 1회** 불렸는가 (codex: 토큰·호출 횟수 단언)
         authz.assert_awaited_once_with("token-spike")
+
+
+class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
+    """`verify_ws_subscribe_token` **본문** — E2E 는 이 함수를 통째로 fake 하므로 미검증이다.
+
+    실측(codex): 본문을 `return "uid"` 로 바꿔도 위 E2E 는 통과한다. **seam 배선**과
+    **검증자 본문**은 다른 주장이므로 따로 잠근다.
+
+    ⚠️ 이 테스트가 잠그지 **않는** 것: Firebase 예외 → wire 오류 코드 매핑(`invalid_token` /
+    `temporarily_unavailable`). 그건 다음 슬라이스이고, 그때 REST 쪽 분류와의 중복을 함께 정리한다
+    (codex Medium: 지금은 SDK 호출 한 줄만 겹치지만 분류가 들어오면 진짜 중복이 된다).
+    """
+
+    async def test_returns_the_uid_from_the_decoded_token(self):
+        import firebase_admin
+
+        with patch("app.main.is_firebase_initialized", return_value=True), \
+             patch.object(
+                 firebase_admin.auth, "verify_id_token", return_value={"uid": "uid-9"}
+             ) as verify:
+            uid = await app_main.verify_ws_subscribe_token("tok-9")
+        self.assertEqual(uid, "uid-9")
+        verify.assert_called_once_with("tok-9")
+
+    async def test_verification_runs_off_the_event_loop_thread(self):
+        """⛔ 동기 SDK 호출이 loop 스레드에서 돌면 **그 프로세스의 모든 연결이 함께 멈춘다**.
+
+        ⚠️ **시간으로 재지 않는다.** 부하 아래서 흔들리기 때문이다 — 대신 검증이 실제로 어느
+        스레드에서 돌았는지 본다(결정적). 이 테스트 본문은 loop 스레드에서 돌므로 그것과
+        비교하면 오프로드 여부가 정확히 갈린다.
+        """
+        import firebase_admin
+
+        loop_thread = threading.current_thread()
+        seen = []
+
+        def _record(token):
+            seen.append(threading.current_thread())
+            return {"uid": "uid-off"}
+
+        with patch("app.main.is_firebase_initialized", return_value=True), \
+             patch.object(firebase_admin.auth, "verify_id_token", side_effect=_record):
+            uid = await app_main.verify_ws_subscribe_token("tok-off")
+
+        self.assertEqual(uid, "uid-off")
+        self.assertEqual(len(seen), 1, "검증이 정확히 1회 돌지 않았다")
+        self.assertIsNot(
+            seen[0], loop_thread,
+            "검증이 event loop 스레드에서 돌았다 — 인증서 조회가 걸리면 전 연결이 멈춘다",
+        )
+
+    async def test_refuses_when_firebase_is_not_initialized(self):
+        """⛔ 미초기화를 통과시키면 검증 없는 uid 가 흐른다."""
+        with patch("app.main.is_firebase_initialized", return_value=False):
+            with self.assertRaises(RuntimeError):
+                await app_main.verify_ws_subscribe_token("tok")
 
 
 if __name__ == "__main__":

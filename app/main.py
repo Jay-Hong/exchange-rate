@@ -2904,14 +2904,23 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
     `invalid_token` / `temporarily_unavailable`)으로 매핑하는 것은 다음 red 테스트의 주제다 —
     지금 만들면 관측할 소비자가 없는 코드가 된다.
 
-    ⚠️ `auth.verify_id_token`은 동기 호출이라 event loop를 잡는다. `verify_firebase_token`도
-    같은 형태이므로 이 슬라이스는 기존과 일관되게 두고, 오프로딩은 실제 지연이 측정된 뒤 다룬다.
+    ⛔ `auth.verify_id_token`은 **동기 호출**이므로 `asyncio.to_thread`로 loop 밖에서 돈다.
+    한때 "기존 REST와 일관되게 두고 측정 후 다룬다"고 적었는데 **틀렸다**(codex): 이 SDK는
+    공개키 캐시가 만료되면 인증서를 네트워크로 가져오고, 그 I/O가 loop를 잡으면 **그 프로세스의
+    모든 WS 연결과 HTTP 요청이 함께 멈춘다**. 재연결 폭주 시 subscribe가 동시에 몰리는 경로라
+    "측정 후"로 미룰 성질이 아니다.
+    ⚠️ 남은 것: `to_thread`의 작업은 **취소되지 않는다** — 호출자가 timeout으로 포기해도 스레드는
+    계속 돈다. 이 슬라이스에는 timeout이 없으므로 아직 문제가 되지 않고, timeout을 넣는 슬라이스가
+    그 성질을 함께 다뤄야 한다.
     """
+    import asyncio
+
     from firebase_admin import auth
 
     if not is_firebase_initialized():
         raise RuntimeError("Firebase not initialized")
-    return auth.verify_id_token(id_token)["uid"]
+    decoded = await asyncio.to_thread(auth.verify_id_token, id_token)
+    return decoded["uid"]
 
 
 async def verify_firebase_token(request: Request, check_revoked: bool = False) -> str:
