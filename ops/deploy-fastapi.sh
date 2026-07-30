@@ -74,14 +74,13 @@ CRONTAB_BIN="${CRONTAB_BIN:-crontab}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/fxi-deploy.lock}"
 ALLOW_UNLOCKED_CRON="${ALLOW_UNLOCKED_CRON:-no}"
 
-MIN_CRON_WAIT="${MIN_CRON_WAIT:-600}"
+CRON_WRAPPER="${CRON_WRAPPER:-ops/cron-with-lock.sh}"
 
-# ⛔ preflight는 **fail-closed**여야 한다. 구 버전은 두 경로에서 fail-open이었다(실측):
-#    ① cron이 `flock -w 0`이어도 "감쌈"으로 통과 — 정규식이 lock 파일만 보고 **대기 정책**을
-#       안 봤다. `-w 0`은 경합 시 cron이 **조용히 건너뛴다** = 이 lock이 막으려던 데이터 공백.
-#    ② `crontab -l` 실패를 `|| true`가 **빈 crontab으로 세탁**해 "0/0 감쌈"으로 통과.
-#    그래서 (a) crontab을 **한 번만** 읽고 조회 실패 시 거부, (b) 대상 줄이 0이면 거부,
-#    (c) 주석을 제외한 **각 줄**의 wrapper와 대기 정책을 개별 검증한다.
+# ⛔ **shell 행을 파싱하지 않는다.** 파싱하던 동안 fail-open이 세 번 연속 나왔다(실측):
+#    `flock -n` / `flock --timeout 0` / `flock -w0` 이 전부 "무한 대기"로 통과했다. 옵션 문법
+#    whitelist는 놓친 표기가 **위험한 쪽으로** 통과하는 구조라 계속 샌다.
+#    그래서 정책을 **이름**으로 옮겼다(`ops/cron-with-lock.sh --policy wait|block`) — 여기서는
+#    그 토큰만 확인한다. 정책의 의미는 wrapper가 지고, 그쪽은 자기 테스트로 잠긴다.
 if ! CRON_SNAPSHOT="$("$CRONTAB_BIN" -l 2>/dev/null)"; then
     echo "거부: crontab 조회 실패 — cron의 lock 적용 여부를 확인할 수 없다." >&2
     echo "  (조회 실패를 '감쌈 0/0'으로 통과시키던 구 동작이 fail-open이었다)" >&2
@@ -90,20 +89,20 @@ fi
 
 _TOTAL=0; _BAD=0
 while IFS= read -r _line; do
-    case "$_line" in ''|'#'*) continue ;; esac
-    case "$_line" in *"docker compose run --rm fastapi"*) ;; *) continue ;; esac
+    # ⛔ 선행 공백 뒤 주석도 주석이다(실측: `  # ...`가 활성 cron으로 계산됐다).
+    case "$_line" in ''|*[!' ']*) ;; *) continue ;; esac
+    _stripped="${_line#"${_line%%[![:space:]]*}"}"
+    case "$_stripped" in ''|'#'*) continue ;; esac
+    case "$_stripped" in *"docker compose run --rm fastapi"*) ;; *) continue ;; esac
     _TOTAL=$(( _TOTAL + 1 ))
-    case "$_line" in
-        *flock*"$LOCK_FILE"*"docker compose run"*) ;;
-        *) echo "  ✗ lock 미적용: $_line" >&2; _BAD=$(( _BAD + 1 )); continue ;;
+    case "$_stripped" in
+        *"$CRON_WRAPPER"*"--policy wait"*|*"$CRON_WRAPPER"*"--policy block"*) ;;
+        *) echo "  ✗ 정책 wrapper 미적용: $_stripped" >&2; _BAD=$(( _BAD + 1 )) ;;
     esac
-    # 대기 정책: `-w` 없음(무한 대기) 허용 / `-w N`은 N >= MIN_CRON_WAIT / `-w 0`은 거부.
-    _W="$(printf '%s\n' "$_line" | sed -n 's/.*flock[[:space:]]\{1,\}-w[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p')"
-    if [ -n "$_W" ] && [ "$_W" -lt "$MIN_CRON_WAIT" ]; then
-        echo "  ✗ 대기가 너무 짧다 (-w $_W < $MIN_CRON_WAIT): $_line" >&2
-        echo "    경합 시 cron이 건너뛰어 데이터 공백이 된다 — cron은 **대기**해야 한다." >&2
-        _BAD=$(( _BAD + 1 ))
-    fi
+    # ⛔ raw flock 병용 금지 — wrapper 밖에서 lock 정책을 다시 정하면 검증 대상이 아니게 된다.
+    case "$_stripped" in
+        *flock*) echo "  ✗ raw flock 병용: $_stripped" >&2; _BAD=$(( _BAD + 1 )) ;;
+    esac
 done <<EOF
 $CRON_SNAPSHOT
 EOF
@@ -112,20 +111,19 @@ if [ "$ALLOW_UNLOCKED_CRON" != yes ] && { [ "$_TOTAL" -lt 1 ] || [ "$_BAD" -gt 0
     cat >&2 <<EOF
 거부: cron lock preflight 실패 (대상 ${_TOTAL}줄, 부적합 ${_BAD}줄).
   대상 줄이 0이면 crontab이 바뀌었거나 조회가 비어 있다는 뜻이므로 그것도 거부한다.
-  요구 형태 (cron은 **대기**, 배포는 **거부** — 비대칭):
-    5 * * * * cd ~/exchange-rate && $FLOCK_BIN -w 600 $LOCK_FILE /usr/bin/docker compose run --rm fastapi ...
+  요구 형태 — 정책을 **이름으로** 준다(shell 옵션 표기 금지):
+    # hourly (skip해도 다음 회차가 idempotent re-roll로 회복한다)
+    5 * * * * cd ~/exchange-rate && $CRON_WRAPPER --policy wait  -- /usr/bin/docker compose run --rm fastapi python scripts/hourly_...
+    # daily (그 날 row를 한 번만 쓰므로 skip이 곧 데이터 공백이다)
+    1 15 * * * cd ~/exchange-rate && $CRON_WRAPPER --policy block -- /usr/bin/docker compose run --rm fastapi python scripts/daily_...
+  ⚠️ 위 두 줄의 정책 배정은 **권고**다 — hourly=wait / daily=block 근거는 회복 가능성 차이다.
+     block은 stuck lock에서 hang, wait는 timeout 시 skip — 어느 실패를 받아들일지가 운영 결정이고
+     이 스크립트는 **둘 다 허용**하되 즉시-skip 표기(raw flock -n 등)만 거부한다.
   (테스트·긴급용 우회: ALLOW_UNLOCKED_CRON=yes — split 위험을 감수한다)
 EOF
     exit 5
 fi
-echo "[lock-preflight] cron ${_TOTAL}줄 전부 lock + 대기 정책 통과 (min -w ${MIN_CRON_WAIT})"
-
-# ⚠️ **열린 운영 결정** — `-w N`은 N초 뒤 여전히 **건너뛴다**. 완전히 닫으려면 cron이 `-w` 없이
-#    무한 대기하거나, timeout 시 명시적 재실행·경보 계약이 있어야 한다. 둘 다 대가가 있다
-#    (무한 대기는 stuck lock에서 조용히 멈춤 / timeout은 skip). 판단에 필요한 사실:
-#    **hourly append는 최근 2일을 idempotent re-roll하므로 한 시간 skip은 다음 시간이 회복한다.**
-#    반면 **daily(`--source all`)는 그 날 row를 한 번만 쓰므로 skip이 곧 공백**이다.
-#    → 정책을 job별로 다르게 잡을 수 있다. 이 스크립트는 그 결정을 하지 않고 **최소 대기만 강제**한다.
+echo "[lock-preflight] cron ${_TOTAL}줄 전부 정책 wrapper 사용 ($CRON_WRAPPER)"
 
 exec 200>"$LOCK_FILE"
 if ! "$FLOCK_BIN" -w 0 200; then
