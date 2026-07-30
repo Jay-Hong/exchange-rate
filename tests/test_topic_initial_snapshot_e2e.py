@@ -936,6 +936,43 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(msg.get("request_id"), "gated-1")
         self.assertIn("retry_after_seconds", msg, "§8-C 는 이 코드에 retry_after 동반을 요구한다")
 
+    def test_subscribe_classification_uses_the_same_availability_predicate(self):
+        """⛔ **양 방향을 다 잠근다.** builder 쪽만 잠그면 dispatcher 가 갈라져도 green 이다.
+
+        실측(codex 지적 → 변이로 재현): dispatcher 가 판정기를 버리고
+        `topic.startswith("fx:") and not config.FX_TOPIC_ENABLED` 를 직접 읽게 바꿨더니
+        **전체 3817개가 그대로 green** 이었다 — FX-off E2E 는 답이 같아 통과하고, builder
+        단일소스 테스트는 dispatcher 를 보지 않기 때문이다.
+
+        여기서는 **flag 는 켜 두고 판정기만 False 로** patch 한다. dispatcher 가 판정기를 통하지
+        않으면 topic 이 accept 되어 red 가 된다 — 즉 "같은 지식의 단일 소스"가 양쪽에서 잠긴다.
+        """
+        from app import topic_initial_snapshot as tis
+
+        patchers = self._patchers()
+        patchers["fx_flag"] = patch.object(config, "FX_TOPIC_ENABLED", True)
+        patchers["availability_predicate"] = patch.object(
+            tis, "is_snapshot_topic_enabled", return_value=False
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({
+                    "type": "subscribe", "request_id": "pred-1",
+                    "id_token": "t", "topics": ["fx:usd-krw"],
+                })
+                msg = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(
+            msg.get("accepted_topics"), [],
+            "dispatcher 가 availability 판정기를 통하지 않았다 — 지식이 두 곳으로 갈렸다",
+        )
+        self.assertEqual(
+            msg.get("rejected_topics"),
+            [{"topic": "fx:usd-krw", "error": "topic_unavailable"}],
+        )
+
     def test_snapshot_builder_uses_the_same_availability_predicate(self):
         """⛔ subscribe 분류와 snapshot 발사가 **같은 판정기**를 써야 한다.
 
