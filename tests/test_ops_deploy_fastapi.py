@@ -78,7 +78,7 @@ class _Harness:
                  healthy=True, kill_on=None, missing=(),
                  fail_tag_nth=0, fail_up_nth=0, cron_wrapped=True,
                  cron_wait=600, cron_query_fails=False, cron_commented=False,
-                 cron_lines=None):
+                 cron_lines=None, preseed_tags=None):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
@@ -86,6 +86,13 @@ class _Harness:
         # ⚠️ lock 경로는 **정본 파일을 갈아끼워** 옮긴다 — 개별 env 손잡이는 없앴다
         #    (양쪽이 따로 움직이면 상호배제가 깨지므로).
         self.ops = _install_ops(tmp)
+        if preseed_tags:
+            # ⚠️ 태그가 **이미 다른 이미지**를 가리키는 상황을 만든다(immutable 위반 재현).
+            import json
+            st = {"tags": {TARGET: NEW_ID, FALLBACK: OLD_ID, "img:latest": OLD_ID},
+                  "running": OLD_ID, "tagn": 0, "upn": 0}
+            st["tags"].update(preseed_tags)
+            (tmp / "state.json").write_text(json.dumps(st), encoding="utf-8")
         fake = self.bin / "docker"
         # ⚠️ **태그 테이블을 가진 더블**. 누적된 bash 패치워크(latest 파일 + id override)로는
         #    임의 태그(`…:sha-<gitsha>`)를 해소할 수 없었다 — 준비 단계가 만드는 immutable 태그가
@@ -131,8 +138,12 @@ class _Harness:
                 if not src:
                     save(); sys.exit(1)
                 s["tags"][a[2]] = src
-            elif a[:2] == ["compose", "build"]:
-                s["tags"]["img:latest"] = BUILT                    # 실 compose처럼 latest 이동
+            elif "build" in a and a[:1] == ["compose"]:
+                # 별 프로젝트로 빌드하면 **live latest 를 건드리지 않는다**(프로젝트명이 이미지명).
+                proj = a[a.index("-p") + 1] if "-p" in a else "exchange-rate"
+                s["tags"][f"{{proj}}-fastapi:latest"] = BUILT
+                if proj == "exchange-rate":
+                    s["tags"]["img:latest"] = BUILT                # 구 경로(같은 프로젝트) 회귀용
             elif a[:2] == ["compose", "up"]:
                 s["upn"] += 1
                 if "up" in FAIL or s["upn"] == FAIL_UP_NTH:
@@ -203,6 +214,11 @@ class _Harness:
             proc.send_signal(self.kill_on)
         out, _ = proc.communicate(timeout=timeout)
         return proc.returncode, out
+
+    @property
+    def calls(self):
+        f = self.tmp / "calls"
+        return f.read_text(encoding="utf-8") if f.exists() else ""
 
     def _state(self):
         """상태 파일이 없으면 **초기 상태**를 돌려준다 — docker 호출이 0이면 상태 무변화다.
@@ -496,28 +512,116 @@ class TestPrepareUnderLock(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory(); self.addCleanup(self._td.cleanup)
         self.tmp = pathlib.Path(self._td.name)
 
-    def _git(self, *, pull_ok=True):
+    FULL_SHA = "d" * 40
+
+    def _git(self, *, pull_ok=True, fetch_ok=True, lockconf_changed=False, worktree_ok=True):
+        """git 더블 — fetch/rev-parse FETCH_HEAD/worktree/diff/pull 을 모델링한다.
+
+        ⚠️ live worktree를 **pull하지 않는** 것이 이 경로의 계약이므로, `pull` 호출 여부와 시점을
+        기록해 테스트가 관측한다(준비 단계에서 불리면 계약 위반).
+        """
         g = self.tmp / "bin" / "git"
         g.parent.mkdir(parents=True, exist_ok=True)
-        g.write_text("#!/usr/bin/env bash\n"
-                     'if [ "$1" = "pull" ]; then ' + ("exit 0" if pull_ok else "exit 1") + "; fi\n"
-                     'if [ "$1" = "rev-parse" ]; then echo deadbee; fi\nexit 0\n', encoding="utf-8")
+        g.write_text(f"""#!/usr/bin/env bash
+echo "$*" >> {self.tmp}/git_calls
+case "$1" in
+  fetch)     {"exit 0" if fetch_ok else "exit 1"} ;;
+  rev-parse)
+    # ⚠️ `--short` 를 **존중**한다 — 무시하면 "축약 SHA로 되돌리는" 변이가 보이지 않는다(실측 생존).
+    if [ "$2" = "--short" ]; then echo {self.FULL_SHA[:7]}; else echo {self.FULL_SHA}; fi ;;
+  diff)      {"exit 1" if lockconf_changed else "exit 0"} ;;
+  worktree)  {"exit 0" if worktree_ok else "exit 1"} ;;
+  pull)      {"exit 0" if pull_ok else "exit 1"} ;;
+esac
+exit 0
+""", encoding="utf-8")
         g.chmod(0o755); return g
 
-    def test_prepare_builds_immutable_tag_and_restores_latest(self):
+    @property
+    def git_calls(self):
+        f = self.tmp / "git_calls"
+        return f.read_text(encoding="utf-8") if f.exists() else ""
+
+    def test_prepare_uses_full_sha_and_never_touches_live_latest(self):
+        """⛔ 준비는 **별 worktree + 별 compose 프로젝트**로 빌드해 live `latest`를 안 건드린다.
+
+        구 구현은 live worktree에서 `docker compose build`를 돌려 `latest`를 움직인 뒤 복원했다 —
+        복원 사이 창이 있었고, 무엇보다 **pull이 launcher를 먼저 바꿔** 실패 시 세대가 갈렸다.
+        태그는 **전체 SHA**다(축약은 충돌 가능하고 재빌드가 기존 태그를 덮는다).
+        """
         h = _Harness(self.tmp)
         rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
                         env_extra={"GIT_BIN": str(self._git())})
         self.assertEqual(rc, 0, out)
-        self.assertIn("sha-deadbee", out, "immutable 태그를 쓰지 않았다")
-        self.assertIn("복원", out, "build가 움직인 latest 를 복원하지 않았다")
+        self.assertIn(f"sha-{self.FULL_SHA}", out, "전체 SHA 태그를 쓰지 않았다")
+        self.assertNotIn("복원", out, "live latest 를 움직였다(별 프로젝트 빌드가 아니다)")
+        self.assertIn("-p fxi-build", h.calls, "별 compose 프로젝트로 빌드하지 않았다")
+        self.assertIn("worktree add", self.git_calls, "별 worktree 를 쓰지 않았다")
 
-    def test_prepare_refuses_when_pull_fails(self):
+    def test_live_worktree_is_pulled_only_after_convergence(self):
+        """⛔ pull은 **수렴 성공 뒤**다 — 먼저 하면 실패 시 신 launcher + 구 이미지가 남는다."""
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 0, out)
+        self.assertLess(out.index("수렴 확인"), out.index("[finalize]"),
+                        "수렴 확인보다 먼저 pull했다")
+        calls = [l.split()[0] for l in self.git_calls.strip().splitlines()]
+        self.assertEqual(calls[-1], "pull", f"pull이 마지막 git 호출이 아니다: {calls}")
+
+    def test_build_failure_leaves_live_worktree_untouched(self):
+        """실패 시 live는 손대지 않은 상태(구 launcher + 구 이미지 = **일관**)로 남아야 한다."""
+        h = _Harness(self.tmp, fail=("up",))
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("pull", self.git_calls, "실패했는데 live worktree 를 pull했다")
+
+    def test_ref_that_changes_lock_conf_is_refused(self):
+        """⛔ lock 경로 전환은 이 절차로 안전하지 않다 — 구 lock을 쥔 배포와 신 lock cron이 공존한다."""
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git(lockconf_changed=True))})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("lock.conf", out)
+        self.assertNotIn("worktree add", self.git_calls, "거부인데 빌드를 시작했다")
+
+    def test_fetch_failure_is_refused_before_any_build(self):
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git(fetch_ok=False))})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("fetch", out)
+
+    def test_worktree_failure_is_refused(self):
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git(worktree_ok=False))})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("worktree", out)
+
+    def test_finalize_pull_failure_rolls_the_image_back(self):
+        """⛔ 이미지는 전환됐는데 pull이 실패하면 세대가 갈린다 → 이미지도 되돌려 맞춘다."""
         h = _Harness(self.tmp)
         rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
                         env_extra={"GIT_BIN": str(self._git(pull_ok=False))})
         self.assertEqual(rc, 1, out)
-        self.assertIn("git pull", out)
+        self.assertIn("launcher가 구 세대", out)
+        self.assertIn("복구", out, "이미지를 되돌리지 않았다")
+
+    def test_existing_tag_pointing_elsewhere_is_refused(self):
+        """⛔ 같은 SHA 태그가 **이미 다른 이미지**를 가리키면 덮어쓰지 않고 거부한다.
+
+        덮어쓰면 immutable의 의미가 사라진다 — 같은 SHA가 다른 결과를 낸다는 신호(dirty tree·
+        base image 변동)를 조용히 지워 버린다.
+        ⚠️ 이 케이스가 없으면 그 거부를 제거하는 변이가 **생존한다**(실측).
+        """
+        tag = f"exchange-rate-fastapi:sha-{self.FULL_SHA}"
+        h = _Harness(self.tmp, preseed_tags={tag: OLD_ID})
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git())})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("immutable 위반", out)
 
     def test_prepare_and_target_together_are_refused(self):
         h = _Harness(self.tmp)
@@ -526,13 +630,15 @@ class TestPrepareUnderLock(unittest.TestCase):
         self.assertEqual(rc, 2, out)
 
     def test_prepare_happens_after_the_lock_is_held(self):
-        """⛔ lock을 못 잡으면 **build도 pull도 하지 않는다** — 준비가 lock 밖이면 split이 열린다."""
+        """⛔ lock을 못 잡으면 fetch도 build도 하지 않는다."""
         (self.tmp / "LOCKED").write_text("1", encoding="utf-8")
         h = _Harness(self.tmp)
         rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
                         env_extra={"GIT_BIN": str(self._git())})
         self.assertEqual(rc, 4, out)
         self.assertNotIn("[prepare]", out, "lock 없이 준비를 시작했다")
+        self.assertEqual(self.git_calls.strip(), "", "lock 없이 git을 만졌다")
+
 
 if __name__ == "__main__":
     unittest.main()

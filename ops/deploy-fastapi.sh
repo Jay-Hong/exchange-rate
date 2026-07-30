@@ -275,32 +275,57 @@ trap recover EXIT
 # ★ 여기부터 상태를 바꾼다 — trap 무장 이후여야 한다.
 
 if [ -n "$PREPARE_REF" ]; then
-    # ⛔ 여기서부터가 준비 단계다. **lock을 쥔 뒤** 하는 것이 요점 — pull이 launcher를 바꾸고
-    #    build가 `latest`를 움직이는 두 전이를 cron이 관측하지 못하게 한다.
+    # ⛔ **live worktree를 pull하지 않는다.** pull은 host의 `ops/cron-job.sh`·`lock.conf`를 즉시
+    #    바꾸는데, 그 뒤 build나 health가 실패하면 recover는 **이미지만** 되돌려 launcher와 이미지
+    #    세대가 갈린다(신 launcher + 구 이미지). 더 나쁘게, pull된 커밋이 `lock.conf` 경로를 바꾸면
+    #    진행 중 배포는 **구 lock**을 쥔 채이고 새 cron은 **신 lock**을 잡아 즉시 동시 실행된다.
+    #    그래서 **별 worktree**에서 빌드하고, live worktree 갱신은 **수렴 성공 뒤**에 한다
+    #    (실패하면 live는 손대지 않은 상태로 남는다 — launcher·이미지가 함께 구 세대다).
     GIT_BIN="${GIT_BIN:-git}"
-    "$GIT_BIN" pull --ff-only origin "$PREPARE_REF" >/dev/null 2>&1 \
-        || { echo "거부: git pull --ff-only origin $PREPARE_REF 실패" >&2; exit 1; }
-    _SHA="$("$GIT_BIN" rev-parse --short HEAD)"
+    "$GIT_BIN" fetch origin "$PREPARE_REF" >/dev/null 2>&1 \
+        || { echo "거부: git fetch origin $PREPARE_REF 실패" >&2; exit 1; }
+    _SHA="$("$GIT_BIN" rev-parse FETCH_HEAD)"        # ⛔ **전체 SHA** — 축약은 충돌 가능
+    [ -n "$_SHA" ] || { echo "거부: FETCH_HEAD 를 해소할 수 없다" >&2; exit 1; }
+
+    # ⛔ lock 정본 경로가 바뀌는 ref는 거부한다 — 그 전환은 이 절차로 안전하게 못 한다
+    #    (구 lock을 쥔 배포와 신 lock을 잡는 cron이 공존한다). 의도적 수동 마이그레이션이 필요하다.
+    if ! "$GIT_BIN" diff --quiet HEAD FETCH_HEAD -- ops/lock.conf; then
+        echo "거부: 이 ref가 ops/lock.conf 를 바꾼다 — lock 경로 전환은 수동 절차가 필요하다." >&2
+        exit 1
+    fi
+
     TARGET="exchange-rate-fastapi:sha-$_SHA"
     echo "[prepare] ref=$PREPARE_REF sha=$_SHA target=$TARGET"
 
-    # build 전 `latest`를 기억한다 — compose build가 그것을 움직이므로 즉시 복원해야 한다.
-    _PRE_LATEST_ID="$(image_id "$LATEST_TAG")"
-    "$DOCKER_BIN" compose build "$SERVICE" </dev/null >/dev/null 2>&1 \
-        || { echo "거부: compose build 실패" >&2; exit 1; }
-    _BUILT_ID="$(image_id "$LATEST_TAG")"
-    [ -n "$_BUILT_ID" ] || { echo "거부: build 후 이미지를 찾을 수 없다" >&2; exit 1; }
+    # ⛔ 같은 SHA를 재빌드해 기존 태그를 **덮어쓰지** 않는다 — immutable의 의미가 사라진다.
+    _EXISTING="$(image_id "$TARGET")"
 
-    # immutable 태그로 고정하고 `latest`를 **원상 복구** — 여기까지 cron은 lock에 막혀 있다.
+    _BUILD_WT="$(mktemp -d)"
+    cleanup_worktree() { "$GIT_BIN" worktree remove --force "$_BUILD_WT" >/dev/null 2>&1 || true; }
+    "$GIT_BIN" worktree add --detach "$_BUILD_WT" FETCH_HEAD >/dev/null 2>&1 \
+        || { echo "거부: build worktree 생성 실패" >&2; exit 1; }
+
+    # 별 compose 프로젝트명 → 빌드 결과가 `<project>-fastapi:latest`라 **live latest를 안 건드린다**
+    # (compose 파일에 `name:`이 없어 프로젝트명이 이미지명을 정한다 — 실측).
+    _BUILD_PROJECT="fxi-build"
+    if ! "$DOCKER_BIN" compose -p "$_BUILD_PROJECT" -f "$_BUILD_WT/docker-compose.yml" \
+            build "$SERVICE" </dev/null >/dev/null 2>&1; then
+        echo "거부: build 실패 (live worktree·latest 무변화)" >&2; cleanup_worktree; exit 1
+    fi
+    _BUILT_ID="$(image_id "$_BUILD_PROJECT-$SERVICE:latest")"
+    cleanup_worktree
+    [ -n "$_BUILT_ID" ] || { echo "거부: build 결과 이미지를 찾을 수 없다" >&2; exit 1; }
+
+    if [ -n "$_EXISTING" ] && [ "$_EXISTING" != "$_BUILT_ID" ]; then
+        echo "거부: $TARGET 가 이미 **다른** 이미지($_EXISTING)를 가리킨다 — immutable 위반." >&2
+        echo "  같은 SHA가 다른 결과를 낸다는 뜻이다(dirty tree·base image 변동 등). 원인을 먼저 볼 것." >&2
+        exit 1
+    fi
     "$DOCKER_BIN" tag "$_BUILT_ID" "$TARGET" </dev/null \
         || { echo "거부: immutable 태그 실패" >&2; exit 1; }
-    if [ -n "$_PRE_LATEST_ID" ] && [ "$_PRE_LATEST_ID" != "$_BUILT_ID" ]; then
-        "$DOCKER_BIN" tag "$_PRE_LATEST_ID" "$LATEST_TAG" </dev/null \
-            || { echo "거부: build가 움직인 latest 복원 실패" >&2; exit 1; }
-        echo "[prepare] build가 움직인 latest 를 복원했다 (split 방지)"
-    fi
     TARGET_ID="$(image_id "$TARGET")"
     [ -n "$TARGET_ID" ] || { echo "거부: immutable 태그가 해소되지 않는다" >&2; exit 1; }
+    echo "[prepare] live worktree·latest 무변화 — 전환 성공 뒤에 pull한다"
 fi
 # ★ lock은 스크립트 종료 시 fd 200이 닫히며 자동 해제된다(retag 전부터 수렴 후까지 덮는다).
 
@@ -313,6 +338,19 @@ echo "[recreate] 요청 완료"
 if ! converged_to "$TARGET_ID"; then
     echo "!!! 목표 이미지로 수렴하지 못했다" >&2
     exit 1   # EXIT trap이 recover를 수행한다
+fi
+
+# ── live worktree 갱신은 **수렴 성공 뒤**, 아직 lock 안에서 ────────────────────
+# 순서가 요점: 실패하면 live는 손대지 않은 상태(구 launcher + 구 이미지 = 일관)로 남는다.
+# cron은 이 시점까지 lock에 막혀 있으므로 launcher·이미지 전이를 관측하지 못한다.
+if [ -n "$PREPARE_REF" ]; then
+    if "$GIT_BIN" pull --ff-only origin "$PREPARE_REF" >/dev/null 2>&1; then
+        echo "[finalize] live worktree 를 $PREPARE_REF 로 갱신했다 (launcher·이미지 같은 세대)"
+    else
+        echo "!!! 이미지는 전환됐으나 live worktree 갱신 실패 — launcher가 구 세대다." >&2
+        echo "    수동으로 \`git pull --ff-only origin $PREPARE_REF\` 후 crontab 정본을 재확인할 것." >&2
+        exit 1   # EXIT trap이 recover 수행 → 이미지도 fallback으로 되돌려 세대를 맞춘다
+    fi
 fi
 
 # ★ 목표 수렴을 확인한 **뒤에만** 해제한다.

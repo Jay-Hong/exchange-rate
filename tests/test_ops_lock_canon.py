@@ -74,26 +74,21 @@ class TestLockCanon(unittest.TestCase):
                 src = (OPS / name).read_text(encoding="utf-8")
                 self.assertIsNone(pat.search(src), f"{name}에 env 손잡이가 있다")
 
-    def test_each_script_opens_the_installed_canon_lock(self):
-        """⛔ **각 스크립트를 실제로 실행**해 그 설치의 lock 파일을 여는지 관측한다.
+    def test_wrapper_opens_the_installed_canon_lock(self):
+        """`cron-with-lock.sh`가 **그 설치의** lock 파일을 여는지 관측한다.
 
-        ⚠️ 구 버전은 루프 변수 `script`를 쓰지 않고 같은 conf를 세 번 source해 **공허**했다 —
-        한 스크립트가 다른 기본 정본을 쓰도록 바뀌어도 통과했다(실측 지적).
-        여기서는 `exec 200>"$FXI_DEPLOY_LOCK"`가 파일을 **생성**하는 사실을 관측한다.
+        ⚠️ 구 이름은 `..._each_script_...`였는데 실제로는 wrapper만 검사했다 —
+        `cron-job.sh`는 `continue`로 건너뛰고 deploy는 반복 대상에도 없었다(지적 정확).
+        launcher는 `test_cron_job_uses_the_installed_wrapper_and_lock`이,
+        deploy는 `tests/test_ops_deploy_fastapi.py`의 lock 계열이 각각 덮는다.
         """
-        for name in ("cron-with-lock.sh", "cron-job.sh"):
-            with self.subTest(script=name):
-                root = pathlib.Path(tempfile.mkdtemp()); self.addCleanup(
-                    shutil.rmtree, root, ignore_errors=True)
-                ops, lock, fl = _install(root)
-                args = (["--policy", "wait", "--", "true"] if name == "cron-with-lock.sh"
-                        else ["--print-crontab"])
-                if name == "cron-job.sh":
-                    continue   # --print-crontab 은 lock을 열지 않는다(정본 출력 전용)
-                subprocess.run(["bash", str(ops / name), *args],
-                               env=dict(os.environ, FLOCK_BIN=str(fl)),
-                               capture_output=True, text=True, timeout=30)
-                self.assertTrue(lock.exists(), f"{name}이 설치 정본의 lock을 열지 않았다")
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        ops, lock, fl = _install(root)
+        subprocess.run(["bash", str(ops / "cron-with-lock.sh"), "--policy", "wait", "--", "true"],
+                       env=dict(os.environ, FLOCK_BIN=str(fl)),
+                       capture_output=True, text=True, timeout=30)
+        self.assertTrue(lock.exists(), "설치 정본의 lock 을 열지 않았다")
 
     def test_cron_job_uses_the_installed_wrapper_and_lock(self):
         """launcher → wrapper → lock 경로가 **설치 안에서** 이어지는지 실행으로 확인."""
