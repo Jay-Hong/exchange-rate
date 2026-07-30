@@ -229,7 +229,12 @@ async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSe
     return TopicSendCounts(attempted=attempted, sent=sent, enabled=True)
 
 
-async def handle_client_message(websocket: "WebSocket", raw_text: str) -> None:
+async def handle_client_message(
+    websocket: "WebSocket",
+    raw_text: str,
+    *,
+    authorize_subscribe,
+) -> None:
     """Client → server WebSocket 메시지 dispatcher (PR Z-2b Stage 2).
 
     처리 메시지:
@@ -246,6 +251,27 @@ async def handle_client_message(websocket: "WebSocket", raw_text: str) -> None:
     main.py에 두지 않은 이유: WebSocket integration 없이 단위 테스트 가능 (firebase_admin
     같은 main.py의 무거운 import-time 의존성 회피). topic 메시지 dispatch는 dispatcher
     의 자연스러운 책임이며, ping/pong은 keep-alive로 같이 처리해 main.py 부담 최소화.
+
+    ## `authorize_subscribe` — 인증 seam (ADR-040 첫 수직 슬라이스)
+
+    `authorize_subscribe(id_token) -> uid` (async). **기본값이 없다.** 이 모듈은 firebase를
+    import할 수 없으므로(위 문단) 검증자는 진입점이 주입한다.
+
+    ⛔ **기본값을 주지 말 것.** `authorize_subscribe=None`으로 두면 호출자가 빠뜨린 순간
+    인증이 **조용히 사라진다**(fail-open). 필수 keyword-only면 그 실수가 `TypeError`가 된다.
+
+    ⚠️ **이 seam이 확인하는 것은 identity뿐이다.** entitlement(유료 판정)는 확인하지 않는다 —
+    그래서 아래에서 **per-user 판정이 필요한 topic은 accept하지 않는다**. identity만 확인하고
+    그 topic을 받으면 *인가된 것처럼 보이는* 유료 데이터 유출이 되어 무인증보다 나쁘다.
+    entitlement 판정은 다음 red 테스트의 주제다.
+
+    ⛔ **REST의 premium 게이트를 여기에 재사용하지 말 것.** 그것은 외부 장애 시 stale 캐시를
+    ACTIVE로 돌려주는 **가용성 우선** 정책이라, lease 권한 판정에 쓰면 오래된 판정이 방금 확인한
+    것으로 승격된다(폐기된 트랙의 핵심 결함).
+
+    ⚠️ **실패 경로는 아직 없다.** `authorize_subscribe`가 raise하면 예외가 그대로 올라가
+    상위 루프가 연결을 정리한다(접근 0 = fail-closed). `subscription_error` 프레임 매핑은
+    다음 red 테스트에서 만든다 — 지금 만들면 소비자 없는 코드가 된다.
     """
     if raw_text == "ping":
         await websocket.send_json({"type": "pong"})
@@ -276,12 +302,41 @@ async def handle_client_message(websocket: "WebSocket", raw_text: str) -> None:
         return
 
     if msg_type == "subscribe":
-        registry.register(websocket, topics)
-        # snapshot-on-subscribe (realtime topic release readiness): 구독 직후 현재 상태를
-        # 즉시 전송 → 신규 topic-only 앱이 다음 publish까지 빈 화면으로 시작하는 것 방지.
         # lazy import로 dispatcher import 그래프 경량 유지(builder 체인은 첫 subscribe 시 로드).
-        from app.topic_initial_snapshot import send_initial_snapshots
+        from app.topic_initial_snapshot import (
+            per_user_gated_snapshot_topics,
+            send_initial_snapshots,
+        )
 
-        await send_initial_snapshots(websocket, topics)
+        id_token = msg.get("id_token")
+        if id_token is None:
+            # ⚠️ **무토큰 = 기존 동작 그대로**(등록 + snapshot, ack 없음). 강제 전환을 여기서
+            #    하면 안 된다 — enforcement는 capability와 분리돼야 하고(§E1), 현행 클라가
+            #    무토큰이라 무조건 요구하면 구 클라가 topic을 잃는다. 그 전환은 legacy 유예와
+            #    같은 시점에 묶인 별도 결정이다.
+            registry.register(websocket, topics)
+            await send_initial_snapshots(websocket, topics)
+            return
+
+        # 토큰이 실린 요청만 인증 경로를 탄다. 실패는 raise되어 연결이 정리된다(위 docstring).
+        await authorize_subscribe(id_token)
+        # ⚠️ uid를 **저장하지 않는다** — lease 바인딩이 없는 지금 저장하면 소비자 없는 상태가
+        #    되고, 그것이 폐기된 트랙의 형태였다. uid는 lease 슬라이스에서 쓴다.
+
+        gated = per_user_gated_snapshot_topics()
+        accepted = [t for t in topics if t not in gated]
+        rejected = [t for t in topics if t in gated]
+
+        # ⚠️ **ack이 데이터보다 먼저다.** 등록·snapshot을 먼저 하면 클라가 ack 전에 데이터를
+        #    받아 "요청이 수락됐는지" 모르는 상태로 처리하게 된다.
+        await websocket.send_json({
+            "type": "subscription_ack",
+            "request_id": msg.get("request_id"),
+            "accepted_topics": accepted,
+            "rejected_topics": rejected,
+        })
+        if accepted:
+            registry.register(websocket, accepted)
+            await send_initial_snapshots(websocket, accepted)
     else:  # unsubscribe
         registry.unregister(websocket, topics)

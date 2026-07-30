@@ -6462,6 +6462,22 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - ⚠️ 로컬에서 Redis(`redis:6379`)는 도달 불가라 호출마다 **전체 트레이스백이 로그로** 나온다.
   앱은 degrade 하고 진행하므로 기능에는 문제가 없지만, 테스트 출력이 묻히므로 로그를 낮추거나
   Redis 계층을 주입 가능하게 만들 것.
+- ⛔ **정정 (codex Blocker)**: 한때 "lifespan 미진입이 이미 외부 호출을 없앤다"고 적었는데 **틀렸다**.
+  lifespan 회피가 막는 것은 **스케줄러·크롤러**뿐이고, **요청 경로는 그대로 외부를 부른다** —
+  `/ws` 핸들러는 연결 즉시 `SessionLocal()`(DB) + `await redis_cache.get(BROADCAST_CACHE_KEY)`(Redis)를
+  호출한다(`app/main.py`의 `websocket_endpoint` 앞부분). 실제로 lifespan 미진입 프로브에서 Redis
+  트레이스백이 났다는 사실이 그 증거다. **앞으로 subscribe 핸들러는 Firebase·RevenueCat도 부르게
+  되므로**, 이 오해를 남겨 두면 스파이크가 그 두 곳에 **실제 호출**을 하게 된다(KIS 사고와 같은 부류).
+  요청 경로 네트워크를 막는 것은 **fake 주입**이다.
+- ✅ **새 harness를 만들지 말 것 — 이미 있다.** `tests/test_topic_initial_snapshot_e2e.py`가 같은
+  `/ws` 경계를 쓰면서 필요한 fake를 전부 명시적으로 주입한다(내가 프로브를 짤 때 이걸 못 찾고 더
+  나쁜 버전을 재발명했다):
+  `TestClient(app)` **`with` 없이** / `patch.object(config, "TOPIC_DISPATCHER_ENABLED", True)` /
+  `patch("app.topic_initial_snapshot._build_snapshot_sync", …)` /
+  `patch("app.main.redis_cache.get", AsyncMock(return_value=None))` /
+  `patch("app.main.verify_firebase_token", …)` / `patch("app.main.require_premium", …)` /
+  그리고 `receive_json`을 thread+join으로 감싸 **미전달을 hang 대신 fast fail**로 바꾸는 헬퍼.
 - ⚠️ 소켓을 monkeypatch 해 외부 연결을 차단하려 했더니 **Redis 재시도 경로에서 행**이 났다
-  (실측: 180초 timeout). 네트워크 격리는 그 방식으로 하지 말 것 — lifespan 미진입이 이미 외부
-  호출을 없앤다.
+  (실측: 180초 timeout). 네트워크 격리를 그 방식으로 하지 말 것 — **fake 주입**으로 할 것.
+- ⚠️ **이름 규율**: 서버 E2E가 통과해도 iOS 토큰·ack 처리가 끝나기 전에는 **"제품 E2E"라 부르지 말 것**
+  (codex). 서버 경계 E2E와 제품 E2E는 다른 주장이다.

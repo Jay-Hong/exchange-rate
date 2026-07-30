@@ -992,7 +992,9 @@ async def websocket_endpoint(websocket: WebSocket):
         # 연결 유지 (클라이언트로부터 메시지 대기)
         while True:
             data = await websocket.receive_text()
-            await topic_dispatcher.handle_client_message(websocket, data)
+            await topic_dispatcher.handle_client_message(
+                websocket, data, authorize_subscribe=verify_ws_subscribe_token
+            )
     except WebSocketDisconnect:
         logger.info("🔌 클라이언트 연결 해제")
     except Exception:
@@ -2890,6 +2892,27 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Phase 2: Firebase Auth + FCM 알림 API
 # ═══════════════════════════════════════════════════════════════════════════════
+
+async def verify_ws_subscribe_token(id_token: str) -> str:
+    """WS subscribe 메시지의 `id_token` 검증 → uid.
+
+    ⛔ `verify_firebase_token`을 재사용할 수 없다 — 그쪽은 `Request`를 받아 **Authorization
+    헤더**에서 토큰을 꺼낸다. WS는 토큰이 **메시지 본문**에 있다.
+
+    ⚠️ 이 슬라이스는 **성공 경로만** 다룬다. 실패 시 예외가 그대로 올라가 WebSocket 루프가
+    연결을 정리한다(접근 0 = fail-closed). 오류를 wire 프레임(`subscription_error` +
+    `invalid_token` / `temporarily_unavailable`)으로 매핑하는 것은 다음 red 테스트의 주제다 —
+    지금 만들면 관측할 소비자가 없는 코드가 된다.
+
+    ⚠️ `auth.verify_id_token`은 동기 호출이라 event loop를 잡는다. `verify_firebase_token`도
+    같은 형태이므로 이 슬라이스는 기존과 일관되게 두고, 오프로딩은 실제 지연이 측정된 뒤 다룬다.
+    """
+    from firebase_admin import auth
+
+    if not is_firebase_initialized():
+        raise RuntimeError("Firebase not initialized")
+    return auth.verify_id_token(id_token)["uid"]
+
 
 async def verify_firebase_token(request: Request, check_revoked: bool = False) -> str:
     """

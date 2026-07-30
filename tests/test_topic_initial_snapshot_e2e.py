@@ -18,6 +18,7 @@ flakiness 방어 (feedback_flaky_sleep_async_tests):
 scope: connect→subscribe→snapshot 수신(fx + usdt) + reconnect→재수신. send-failure cleanup은
 단위 테스트(test_topic_initial_snapshot.py), live/synthetic publish 수신은 별도 follow-up.
 """
+import contextlib
 import threading
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +28,7 @@ from fastapi.testclient import TestClient
 # conftest.py가 firebase stub + DATABASE_URL=sqlite를 import 전에 설정.
 from app import config, models
 from app.database import engine
+from app.krx_topic_publisher import KRX_TOPIC
 from app.main import app
 from app.subscription import PremiumStatus
 
@@ -725,6 +727,142 @@ class TestTopicSnapshotRouteHasNoRequestScopedSession(unittest.TestCase):
         self.assertNotIn(get_db, deps,
                          "topics/snapshot은 request-scoped 세션을 받으면 안 된다 — "
                          "가시성 조회는 to_thread 안에서 열고 닫는다(E3 item 5)")
+
+
+def _receive_json_or_fail(ws, fail, timeout=2.0):
+    """`ws.receive_json()` 을 thread+join 으로 감싼다 — 미전달 시 hang 대신 fast fail.
+
+    `TestSnapshotOnSubscribeE2E._receive_json` 과 같은 이유(TestClient receive_json 자체엔
+    timeout 이 없다). 그 메서드를 그대로 쓰려면 상속이 필요해, 모듈 레벨로 하나 둔다.
+    """
+    box = {}
+
+    def _recv():
+        try:
+            box["msg"] = ws.receive_json()
+        except Exception as exc:  # noqa: BLE001 — 그대로 재전파
+            box["err"] = exc
+
+    th = threading.Thread(target=_recv, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        fail(f"ws.receive_json {timeout}s timeout — 서버가 아무것도 보내지 않았다")
+    if "err" in box:
+        raise box["err"]
+    return box["msg"]
+
+
+class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
+    """1C 재시작의 **첫 수직 슬라이스** — 인증된 subscribe 는 ack 을 받아야 한다 (ADR-040).
+
+    ## 이 테스트가 존재하는 이유
+
+    폐기된 트랙의 실패 원인은 "실제 진입점이 코드를 한 번도 호출하지 않은 채 부품을 키운 것"이었다.
+    그래서 이 슬라이스는 **경계에서 관측되는 것부터** 정의한다 — 실제 `/ws` 소켓으로 subscribe 를
+    보내고, `subscription_ack` 또는 연결 종료를 **그 소켓에서** 본다. helper 를 직접 호출하는
+    테스트는 이 자리에 두지 않는다(그것이 폐기된 트랙의 형태였다).
+
+    ## harness 규율 (ADR-040 "스파이크 harness 제약")
+
+    - `TestClient(app)` 을 **`with` 없이** → lifespan 미진입(스케줄러·크롤러 미시작).
+    - ⛔ 그것만으로는 부족하다 — **요청 경로**가 그대로 외부를 부른다(`/ws` 는 연결 즉시 DB +
+      Redis). 그래서 Redis·snapshot builder·Firebase·premium 을 **명시적으로 fake** 한다.
+      fake 를 빼면 이 테스트는 실제 외부 서비스를 호출한다.
+    - 이 클래스는 위 `TestSnapshotOnSubscribeE2E` 가 확립한 패턴을 확장한 것이다(새 harness 아님).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)  # context manager 미사용 → lifespan 미진입
+
+    def _patchers(self):
+        """FF on + 외부 의존 전부 fake — **이름으로** 돌려준다.
+
+        ⛔ 위치 튜플로 돌려주다 실패했다(실측): `redis_cache.set` fake를 추가하자 인덱스가
+        밀려 엉뚱한 patcher를 집었고, `with` 에 하나를 빠뜨려 **premium fake가 아예 걸리지
+        않았다**. 커지는 튜플을 위치로 푸는 형태 자체가 원인이라 dict + ExitStack로 바꿨다.
+        """
+        return {
+            "dispatcher_flag": patch.object(config, "TOPIC_DISPATCHER_ENABLED", True),
+            "fx_flag": patch.object(config, "FX_TOPIC_ENABLED", True),
+            "snapshot_builder": patch(
+                "app.topic_initial_snapshot._build_snapshot_sync",
+                side_effect=_canned_snapshot,
+            ),
+            "redis_get": patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)),
+            # ⛔ `get`만 fake하면 부족하다 — miss 시 핸들러가 `redis_cache.set`을 부르므로
+            #    그 호출이 **실제 Redis 연결**을 시도한다(codex).
+            "redis_set": patch("app.main.redis_cache.set", new=AsyncMock(return_value=None)),
+            "verify_token": patch(
+                "app.main.verify_ws_subscribe_token",
+                new=AsyncMock(return_value="uid-spike"),
+            ),
+            # ⛔ premium을 True로 patch하지 **않는다**. FX는 per-user 판정 대상이 아니므로
+            #    이 경로가 premium을 부르면 그것이 결함이다. 부르면 실패하게 두면 그 실수가
+            #    **실제 RevenueCat 호출** 대신 red가 된다(patch를 제거하면 실제 호출이 나간다).
+            "premium_must_not_be_called": patch(
+                "app.main.require_premium",
+                new=AsyncMock(side_effect=AssertionError(
+                    "FX subscribe 경로가 premium 게이트를 불렀다 — REST 정책 재사용은 금지다"
+                )),
+            ),
+        }
+
+    def test_authorize_subscribe_is_required_and_keyword_only(self):
+        """⛔ 기본값이 생기면 호출자가 빠뜨린 순간 인증이 **조용히** 사라진다(fail-open).
+
+        직전 슬라이스의 교훈: 서명을 좁히는 변경은 **그 서명 자체를 잠그는 단언**이 없으면
+        한 줄로 되돌아간다(구 인자를 optional로 되살리는 변이가 전체 스위트를 통과했다).
+        """
+        import inspect
+
+        from app.topic_dispatcher import handle_client_message as target
+
+        param = inspect.signature(target).parameters["authorize_subscribe"]
+        self.assertIs(
+            param.default, inspect.Parameter.empty,
+            "authorize_subscribe에 기본값이 생겼다 — 빠뜨리면 인증이 조용히 꺼진다",
+        )
+        self.assertIs(
+            param.kind, inspect.Parameter.KEYWORD_ONLY,
+            "positional로 바뀌면 인자 순서 실수가 조용히 통과한다",
+        )
+
+    def test_authenticated_subscribe_receives_a_subscription_ack(self):
+        """⛔ 현재 red 다 — 서버는 `id_token` 을 보지 않고 ack 도 보내지 않는다.
+
+        red 의 형태가 timeout 이 아니라 **명확한 타입 불일치**여야 한다: 지금은 subscribe 직후
+        `snapshot` 이 오므로, 그 사실이 그대로 실패 메시지에 드러난다.
+        """
+        patchers = self._patchers()
+        authz = patchers["verify_token"].new
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():      # ⛔ 전부 enter — 하나도 빠뜨리지 않는다
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)      # 연결 직후 legacy rates 프레임 소비
+                ws.send_json({
+                    "type": "subscribe",
+                    "request_id": "spike-1",
+                    "id_token": "token-spike",
+                    # ⛔ 유료(per-user 판정) topic을 **함께** 보낸다. identity만 확인하고 이것을
+                    #    accept하면 *인가된 것처럼 보이는* 유료 데이터 유출이라 무인증보다 나쁘다.
+                    "topics": ["fx:usd-krw", KRX_TOPIC],
+                })
+                msg = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(
+            msg.get("type"), "subscription_ack",
+            f"인증된 subscribe 에 ack 이 오지 않았다 — 실제 수신: {msg.get('type')!r}",
+        )
+        self.assertEqual(msg.get("request_id"), "spike-1", "ack 이 요청과 상관되지 않는다")
+        self.assertEqual(msg.get("accepted_topics"), ["fx:usd-krw"])
+        self.assertEqual(
+            msg.get("rejected_topics"), [KRX_TOPIC],
+            "identity만 확인하고 per-user 판정 topic을 accept했다",
+        )
+        # 인증자가 **메시지의 토큰으로 정확히 1회** 불렸는가 (codex: 토큰·호출 횟수 단언)
+        authz.assert_awaited_once_with("token-spike")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,18 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, topic_dispatcher
-from app.topic_dispatcher import handle_client_message
+from app.topic_dispatcher import handle_client_message as _real_handle_client_message
+
+# 이 파일의 주제는 **무토큰(legacy) 경로**다 — 인증 seam은 그 경로를 타지 않는다.
+# `authorize_subscribe`가 필수 kwarg가 됐으므로(fail-open 방지) 여기서 한 번만 채운다.
+# ⛔ 인증 경로의 계약은 이 래퍼가 아니라 실제 `/ws` 경계 테스트가 검증한다
+#    (tests/test_topic_initial_snapshot_e2e.py — TestAuthenticatedSubscribeIsAcknowledged).
+_UNUSED_AUTHZ = AsyncMock(side_effect=AssertionError("무토큰 경로는 인증자를 부르지 않아야 한다"))
+
+
+async def handle_client_message(ws, raw_text, **kwargs):
+    kwargs.setdefault("authorize_subscribe", _UNUSED_AUTHZ)
+    return await _real_handle_client_message(ws, raw_text, **kwargs)
 
 
 def _fresh_registry_swap():
