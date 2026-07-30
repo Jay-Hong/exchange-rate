@@ -32,6 +32,21 @@ import unittest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
+def _install_ops(root):
+    """⚠️ ops 스크립트와 lock 정본을 **함께** 복사한다.
+
+    정본 위치·lock 경로의 env 손잡이를 전부 없앴으므로(별도 프로세스에 전파되지 않아 배제가
+    깨지던 결함) 테스트도 **설치 단위**로 격리한다 = 프로덕션과 같은 형태.
+    """
+    import shutil
+    ops = root / "ops"
+    ops.mkdir(parents=True, exist_ok=True)
+    for name in ("deploy-fastapi.sh", "cron-with-lock.sh", "cron-job.sh", "cron-allowlist.txt"):
+        shutil.copy2(REPO / "ops" / name, ops / name)
+    (ops / "lock.conf").write_text(f"FXI_DEPLOY_LOCK={root}/deploy.lock\n", encoding="utf-8")
+    return ops
+
+
 def _canonical():
     return subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
                           capture_output=True, text=True, check=True).stdout.splitlines()
@@ -71,8 +86,7 @@ class _Harness:
         (tmp / "calls").write_text("", encoding="utf-8")
         # ⚠️ lock 경로는 **정본 파일을 갈아끼워** 옮긴다 — 개별 env 손잡이는 없앴다
         #    (양쪽이 따로 움직이면 상호배제가 깨지므로).
-        (tmp / "lock.conf").write_text(f"FXI_DEPLOY_LOCK={tmp}/deploy.lock\n",
-                                       encoding="utf-8")
+        self.ops = _install_ops(tmp)
         fake = self.bin / "docker"
         fake.write_text(textwrap.dedent(f"""\
             #!/usr/bin/env bash
@@ -155,7 +169,7 @@ class _Harness:
         self.kill_on = kill_on
 
     def run(self, *, target=TARGET, fallback=FALLBACK, timeout=60, now_utc="00:20",
-            extra_args=(), allowlist_path=None):
+            extra_args=()):
         env = dict(
             os.environ,
             NOW_UTC=now_utc,
@@ -165,14 +179,12 @@ class _Harness:
             HEALTH_SLEEP="0",
             COMPOSE_DIR=str(self.tmp),
             LATEST_TAG="img:latest",
-            FXI_LOCK_CONF=str(self.tmp / "lock.conf"),
             FLOCK_BIN=str(self.bin / "flock"),
             CRONTAB_BIN=str(self.bin / "crontab"),
-            CRON_JOB_SCRIPT=str(REPO / "ops" / "cron-job.sh"),
-            CRON_ALLOWLIST=str(allowlist_path or (REPO / "ops" / "cron-allowlist.txt")),
         )
         proc = subprocess.Popen(
-            ["bash", str(SCRIPT), "--target", target, "--fallback", fallback, *extra_args],
+            ["bash", str(self.ops / "deploy-fastapi.sh"),
+             "--target", target, "--fallback", fallback, *extra_args],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         if self.kill_on:
@@ -249,7 +261,9 @@ class TestDeployScript(unittest.TestCase):
 
     def test_missing_allowlist_file_is_refused(self):
         """⛔ allowlist 파일이 없으면 **확인 불가**다 → 거부(실측: 존재 검사 제거 변이가 생존했다)."""
-        rc, out = _Harness(self.tmp).run(allowlist_path=self.tmp / "nope.txt")
+        h = _Harness(self.tmp)
+        (h.ops / "cron-allowlist.txt").unlink()
+        rc, out = h.run()
         self.assertEqual(rc, 5, out)
         self.assertIn("allowlist 파일이 없다", out)
 

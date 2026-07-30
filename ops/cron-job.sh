@@ -19,18 +19,19 @@
 set -Eeuo pipefail
 
 # ── lock 정본 (배포·wrapper·cron이 공유) ─────────────────────────────────────
-# ── lock 경로: 단일 정본 (ops/lock.conf) ─────────────────────────────────────
-# ⛔ 개별 fallback 금지. 재정의는 `FXI_LOCK_CONF`로 **정본 파일을 갈아끼우는 것**뿐이고,
-#    그러면 배포·cron·wrapper가 함께 움직여 상호배제가 유지된다.
-_HERE_LOCK="$(cd "$(dirname "$0")" && pwd)"
-FXI_LOCK_CONF="${FXI_LOCK_CONF:-$_HERE_LOCK/lock.conf}"
-[ -f "$FXI_LOCK_CONF" ] || { echo "lock 정본이 없다: $FXI_LOCK_CONF" >&2; exit 5; }
+# ── lock 경로: 단일 정본 (같은 디렉터리의 lock.conf) ─────────────────────────
+# ⛔ **env 재정의 없음.** `FXI_LOCK_CONF` 같은 손잡이를 두면 결함이 한 단계 이동할 뿐이다 —
+#    배포와 cron은 **별도 프로세스**이므로 한쪽 환경만 바꿀 수 있고, 그러면 배제가 사라진다
+#    ("재정의하면 함께 움직인다"는 내 추론이 틀렸다: cron daemon의 환경에는 전파되지 않는다).
+#    테스트는 스크립트와 정본을 임시 디렉터리에 **함께 복사**해 실행한다(설치 단위로 격리).
+_HERE="$(cd "$(dirname "$0")" && pwd)"
+LOCK_CONF="$_HERE/lock.conf"
+[ -f "$LOCK_CONF" ] || { echo "lock 정본이 없다: $LOCK_CONF" >&2; exit 5; }
 # shellcheck source=/dev/null
-. "$FXI_LOCK_CONF"
+. "$LOCK_CONF"
 : "${FXI_DEPLOY_LOCK:?lock 정본에 FXI_DEPLOY_LOCK 이 없다}"
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-WRAPPER="${WRAPPER:-$HERE/cron-with-lock.sh}"
+WRAPPER="$_HERE/cron-with-lock.sh"
 DOCKER_BIN="${DOCKER_BIN:-/usr/bin/docker}"
 
 # ── job 표 (이름 → 정책 + 명령 + 로그) ──────────────────────────────────────

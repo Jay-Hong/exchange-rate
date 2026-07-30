@@ -7,10 +7,18 @@ class TestCronWithLock(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory(); self.addCleanup(self.td.cleanup)
         self.tmp = pathlib.Path(self.td.name); self.bin = self.tmp / "bin"; self.bin.mkdir()
 
-    def _conf(self):
-        c = self.tmp / "lock.conf"
-        c.write_text(f"FXI_DEPLOY_LOCK={self.tmp}/l.lock\n", encoding="utf-8")
-        return c
+    def _install(self):
+        """⚠️ 스크립트와 정본을 함께 복사한다 — 정본 위치 env 손잡이를 없앴다."""
+        import shutil
+        ops = self.tmp / "ops"
+        if not ops.exists():
+            ops.mkdir(parents=True)
+            for n in ("cron-with-lock.sh", "cron-job.sh", "lock.conf"):
+                if n == "lock.conf":
+                    (ops / n).write_text(f"FXI_DEPLOY_LOCK={self.tmp}/l.lock\n", encoding="utf-8")
+                else:
+                    shutil.copy2(W.parent / n, ops / n)
+        return ops
 
     def _flock(self, *, acquires=True):
         """⚠️ 인자를 **기록**한다 — 정책의 계약은 "flock을 어떻게 부르는가"이므로 성공/실패만
@@ -27,8 +35,8 @@ class TestCronWithLock(unittest.TestCase):
 
     def _run(self, *args, acquires=True):
         env = dict(os.environ, FLOCK_BIN=str(self._flock(acquires=acquires)),
-                   FXI_LOCK_CONF=str(self._conf()), CRON_LOCK_WAIT="7")
-        r = subprocess.run(["bash", str(W), *args], env=env, capture_output=True, text=True, timeout=60)
+                   CRON_LOCK_WAIT="7")
+        r = subprocess.run(["bash", str(self._install() / "cron-with-lock.sh"), *args], env=env, capture_output=True, text=True, timeout=60)
         return r.returncode, r.stdout + r.stderr
 
     def test_wait_policy_runs_the_command(self):

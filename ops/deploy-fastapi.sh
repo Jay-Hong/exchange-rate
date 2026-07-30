@@ -71,18 +71,21 @@ cd "$COMPOSE_DIR"
 #    아니라 **preflight 게이트**로 확인한다 — 감싸이지 않은 cron 줄이 있으면 실행을 거부한다.
 FLOCK_BIN="${FLOCK_BIN:-flock}"
 CRONTAB_BIN="${CRONTAB_BIN:-crontab}"
-# ── lock 경로: 단일 정본 (ops/lock.conf) ─────────────────────────────────────
-# ⛔ 개별 fallback 금지. 재정의는 `FXI_LOCK_CONF`로 **정본 파일을 갈아끼우는 것**뿐이고,
-#    그러면 배포·cron·wrapper가 함께 움직여 상호배제가 유지된다.
-_HERE_LOCK="$(cd "$(dirname "$0")" && pwd)"
-FXI_LOCK_CONF="${FXI_LOCK_CONF:-$_HERE_LOCK/lock.conf}"
-[ -f "$FXI_LOCK_CONF" ] || { echo "lock 정본이 없다: $FXI_LOCK_CONF" >&2; exit 5; }
+# ── lock 경로: 단일 정본 (같은 디렉터리의 lock.conf) ─────────────────────────
+# ⛔ **env 재정의 없음.** `FXI_LOCK_CONF` 같은 손잡이를 두면 결함이 한 단계 이동할 뿐이다 —
+#    배포와 cron은 **별도 프로세스**이므로 한쪽 환경만 바꿀 수 있고, 그러면 배제가 사라진다
+#    ("재정의하면 함께 움직인다"는 내 추론이 틀렸다: cron daemon의 환경에는 전파되지 않는다).
+#    테스트는 스크립트와 정본을 임시 디렉터리에 **함께 복사**해 실행한다(설치 단위로 격리).
+_HERE="$(cd "$(dirname "$0")" && pwd)"
+LOCK_CONF="$_HERE/lock.conf"
+[ -f "$LOCK_CONF" ] || { echo "lock 정본이 없다: $LOCK_CONF" >&2; exit 5; }
 # shellcheck source=/dev/null
-. "$FXI_LOCK_CONF"
+. "$LOCK_CONF"
 : "${FXI_DEPLOY_LOCK:?lock 정본에 FXI_DEPLOY_LOCK 이 없다}"
 ALLOW_UNLOCKED_CRON="${ALLOW_UNLOCKED_CRON:-no}"
 
-CRON_JOB_SCRIPT="${CRON_JOB_SCRIPT:-ops/cron-job.sh}"
+# ⛔ 위치도 env로 바꿀 수 없다 — 설치 단위 밖의 정본을 가리키면 검증이 무의미해진다.
+CRON_JOB_SCRIPT="$_HERE/cron-job.sh"
 
 # ⛔ **substring으로 shell 의미를 추정하지 않는다.** 추정하던 동안 fail-open이 다섯 번 나왔고
 #    마지막 셋이 원리적이었다(실측 — 전부 통과했다):
@@ -105,7 +108,7 @@ fi
 #    (실측: `docker  compose`[공백 2개] / `docker-compose`). 무엇을 고르든 그 밖의 표기가 남는다.
 #    그래서 **모든 비주석 줄**이 정본이거나 `ops/cron-allowlist.txt`에 선언돼 있어야 한다.
 #    선언되지 않은 줄은 lock 밖에서 docker를 돌릴 수 있으므로 거부한다.
-CRON_ALLOWLIST="${CRON_ALLOWLIST:-ops/cron-allowlist.txt}"
+CRON_ALLOWLIST="$_HERE/cron-allowlist.txt"
 if [ ! -f "$CRON_ALLOWLIST" ]; then
     echo "거부: cron allowlist 파일이 없다 ($CRON_ALLOWLIST)" >&2; exit 5
 fi
