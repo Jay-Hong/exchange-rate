@@ -93,22 +93,33 @@ if ! CRON_EXPECTED="$("$CRON_JOB_SCRIPT" --print-crontab 2>/dev/null)"; then
     exit 5
 fi
 
-# 실제 crontab에서 **대상 줄**만 뽑는다: cron-job.sh 또는 docker compose run 을 언급하는 비주석 줄.
-# (둘 중 하나만 보면, 정본을 지우고 raw docker 줄을 넣는 우회가 열린다.)
-_actual="$(printf '%s\n' "$CRON_SNAPSHOT" | sed -e 's/^[[:space:]]*//' \
-    | grep -v '^#' | grep -E 'cron-job\.sh|docker compose run --rm fastapi' | sort || true)"
-_expected="$(printf '%s\n' "$CRON_EXPECTED" | sed -e 's/^[[:space:]]*//' | sort)"
+# ⛔ **대상 줄을 고르지 않는다.** 고르던 동안 수집 자체를 회피하는 형태가 통과했다
+#    (실측: `docker  compose`[공백 2개] / `docker-compose`). 무엇을 고르든 그 밖의 표기가 남는다.
+#    그래서 **모든 비주석 줄**이 정본이거나 `ops/cron-allowlist.txt`에 선언돼 있어야 한다.
+#    선언되지 않은 줄은 lock 밖에서 docker를 돌릴 수 있으므로 거부한다.
+CRON_ALLOWLIST="${CRON_ALLOWLIST:-ops/cron-allowlist.txt}"
+if [ ! -f "$CRON_ALLOWLIST" ]; then
+    echo "거부: cron allowlist 파일이 없다 ($CRON_ALLOWLIST)" >&2; exit 5
+fi
+# ⚠️ `|| true` 필수 — 비주석 줄이 0개면 `grep`이 1을 반환하고 `set -e`가 스크립트를 **조용히**
+#    죽인다(rc=1, 메시지 없음). fail-closed이긴 하나 진단이 사라져 원인을 알 수 없다(실측).
+_strip() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^#' | grep -v '^$' | sort || true; }
+_actual="$(printf '%s\n' "$CRON_SNAPSHOT" | _strip)"
+_declared="$( { printf '%s\n' "$CRON_EXPECTED"; cat "$CRON_ALLOWLIST"; } | _strip )"
 
-if [ "$ALLOW_UNLOCKED_CRON" != yes ] && [ "$_actual" != "$_expected" ]; then
-    echo "거부: crontab이 정본과 다르다. 정본은 \`$CRON_JOB_SCRIPT --print-crontab\`이다." >&2
-    echo "--- 실제 ---" >&2; printf '%s\n' "$_actual" >&2
-    echo "--- 정본 ---" >&2; printf '%s\n' "$_expected" >&2
-    echo "  ⚠️ 정본 줄에는 정책·docker 명령·env 대입이 **없다** — launcher가 소유한다." >&2
-    echo "  (테스트·긴급용 우회: ALLOW_UNLOCKED_CRON=yes — split 위험을 감수한다)" >&2
+if [ "$ALLOW_UNLOCKED_CRON" != yes ] && [ "$_actual" != "$_declared" ]; then
+    echo "거부: crontab이 선언된 집합과 다르다." >&2
+    echo "  정본: \`$CRON_JOB_SCRIPT --print-crontab\` / 그 외 허용: $CRON_ALLOWLIST" >&2
+    echo "--- 선언되지 않은 줄 ---" >&2
+    comm -23 <(printf '%s\n' "$_actual") <(printf '%s\n' "$_declared") >&2 || true
+    echo "--- 선언됐는데 없는 줄 ---" >&2
+    comm -13 <(printf '%s\n' "$_actual") <(printf '%s\n' "$_declared") >&2 || true
+    echo "  ⚠️ 선언되지 않은 줄은 lock 밖에서 docker를 돌릴 수 있다 — 그래서 거부한다." >&2
+    echo "  (테스트·긴급용 우회: ALLOW_UNLOCKED_CRON=yes)" >&2
     exit 5
 fi
-_TOTAL="$(printf '%s\n' "$_expected" | grep -c . || true)"
-echo "[lock-preflight] crontab ${_TOTAL}줄이 정본과 문자열 동일 ($CRON_JOB_SCRIPT)"
+_TOTAL="$(printf '%s\n' "$_declared" | grep -c . || true)"
+echo "[lock-preflight] crontab ${_TOTAL}줄 전부 선언됨 (정본 + $CRON_ALLOWLIST)"
 
 exec 200>"$LOCK_FILE"
 if ! "$FLOCK_BIN" -w 0 200; then

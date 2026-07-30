@@ -30,6 +30,16 @@ import textwrap
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _canonical():
+    return subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
+                          capture_output=True, text=True, check=True).stdout.splitlines()
+
+
+def _allowlisted():
+    raw = (REPO / "ops" / "cron-allowlist.txt").read_text(encoding="utf-8").splitlines()
+    return [l.strip() for l in raw if l.strip() and not l.strip().startswith("#")]
 SCRIPT = REPO / "ops" / "deploy-fastapi.sh"
 
 TARGET = "img:new"
@@ -123,8 +133,7 @@ class _Harness:
         if cron_lines is not None:
             lines = list(cron_lines)
         else:
-            canon = subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
-                                   capture_output=True, text=True, check=True).stdout.splitlines()
+            canon = _canonical() + _allowlisted()
             if cron_commented:
                 lines = [f"  # {l}" for l in canon]
             elif not cron_wrapped:
@@ -142,7 +151,7 @@ class _Harness:
         self.kill_on = kill_on
 
     def run(self, *, target=TARGET, fallback=FALLBACK, timeout=60, now_utc="00:20",
-            extra_args=()):
+            extra_args=(), allowlist_path=None):
         env = dict(
             os.environ,
             NOW_UTC=now_utc,
@@ -156,6 +165,7 @@ class _Harness:
             FLOCK_BIN=str(self.bin / "flock"),
             CRONTAB_BIN=str(self.bin / "crontab"),
             CRON_JOB_SCRIPT=str(REPO / "ops" / "cron-job.sh"),
+            CRON_ALLOWLIST=str(allowlist_path or (REPO / "ops" / "cron-allowlist.txt")),
         )
         proc = subprocess.Popen(
             ["bash", str(SCRIPT), "--target", target, "--fallback", fallback, *extra_args],
@@ -212,7 +222,7 @@ class TestDeployScript(unittest.TestCase):
                 tmp = pathlib.Path(__import__("tempfile").mkdtemp())
                 rc, out = _Harness(tmp, cron_lines=[form]).run()
                 self.assertEqual(rc, 5, out)
-                self.assertIn("정본과 다르다", out)
+                self.assertIn("선언된 집합과 다르다", out)
 
     def test_extra_raw_docker_line_is_refused(self):
         """⛔ 정본 5줄이 **다 있으면서** raw docker 줄이 하나 더 있으면 그 줄은 lock 밖에서 돈다.
@@ -220,19 +230,28 @@ class TestDeployScript(unittest.TestCase):
         ⚠️ 이 케이스가 없으면 수집 grep에서 `docker compose run` 대안을 빼는 변이가 **생존한다**
         (실측). 정본만 수집하면 추가된 raw 줄이 애초에 비교 대상에 안 들어와 통과한다.
         """
-        canon = subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
-                               capture_output=True, text=True, check=True).stdout.splitlines()
-        extra = ("13 * * * * cd ~/x && /usr/bin/docker compose run --rm fastapi "
-                 "python scripts/rogue.py")
-        rc, out = _Harness(self.tmp, cron_lines=canon + [extra]).run()
+        for form, why in [
+            ("/usr/bin/docker compose run --rm fastapi python rogue.py", "직접"),
+            ("/usr/bin/docker  compose run --rm  fastapi python rogue.py", "공백 2개"),
+            ("/usr/bin/docker-compose run --rm fastapi python rogue.py", "docker-compose"),
+            ("bash -c 'exec /usr/bin/docker compose run --rm fastapi python rogue.py'", "bash -c"),
+        ]:
+            with self.subTest(why=why):
+                extra = f"13 * * * * cd ~/x && {form}"
+                tmp = pathlib.Path(__import__("tempfile").mkdtemp())
+                rc, out = _Harness(tmp, cron_lines=_canonical() + _allowlisted() + [extra]).run()
+                self.assertEqual(rc, 5, out)
+                self.assertIn("선언되지 않은", out)
+
+    def test_missing_allowlist_file_is_refused(self):
+        """⛔ allowlist 파일이 없으면 **확인 불가**다 → 거부(실측: 존재 검사 제거 변이가 생존했다)."""
+        rc, out = _Harness(self.tmp).run(allowlist_path=self.tmp / "nope.txt")
         self.assertEqual(rc, 5, out)
-        self.assertIn("정본과 다르다", out)
+        self.assertIn("allowlist 파일이 없다", out)
 
     def test_partial_canonical_crontab_is_refused(self):
         """정본 일부만 있으면 거부 — 줄이 사라진 것도 잡아야 한다."""
-        canon = subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
-                               capture_output=True, text=True, check=True).stdout.splitlines()
-        rc, out = _Harness(self.tmp, cron_lines=canon[:2]).run()
+        rc, out = _Harness(self.tmp, cron_lines=_canonical()[:2] + _allowlisted()).run()
         self.assertEqual(rc, 5, out)
 
     def test_crontab_query_failure_is_refused(self):
@@ -250,7 +269,7 @@ class TestDeployScript(unittest.TestCase):
         h = _Harness(self.tmp, cron_commented=True)
         rc, out = h.run()
         self.assertEqual(rc, 5, out)
-        self.assertIn("정본과 다르다", out, "선행 공백 뒤 주석이 활성 cron으로 계산됐다")
+        self.assertIn("선언된 집합과 다르다", out, "선행 공백 뒤 주석이 활성 cron으로 계산됐다")
 
     def test_unwrapped_cron_is_refused(self):
         """⛔ crontab이 lock을 잡지 않으면 **배포 쪽만 잡아도 무의미**하다 — 산문 경고가 아니라 게이트다.
@@ -260,7 +279,7 @@ class TestDeployScript(unittest.TestCase):
         h = _Harness(self.tmp, cron_wrapped=False)
         rc, out = h.run()
         self.assertEqual(rc, 5, out)
-        self.assertIn("정본과 다르다", out)
+        self.assertIn("선언된 집합과 다르다", out)
         self.assertEqual(h.latest, FALLBACK, "거부인데 상태가 바뀌었다")
 
     def test_deploy_refuses_when_lock_is_held(self):

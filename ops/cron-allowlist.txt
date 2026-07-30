@@ -1,0 +1,11 @@
+# FXi가 관리하지 않는 host cron 줄의 **선언 목록**.
+#
+# 왜 필요한가: 배포 preflight가 "docker를 실행하는 줄"을 substring으로 골라내던 동안,
+# 수집 자체를 회피하는 형태가 통과했다(실측: `docker  compose` 공백 2개 / `docker-compose`).
+# 무엇을 고르든 그 밖의 표기가 남기 때문이다. 그래서 **고르지 않는다** — 모든 비주석 crontab 줄은
+# `ops/cron-job.sh --print-crontab`의 정본이거나 이 파일에 **정확히** 선언돼 있어야 한다.
+# 선언되지 않은 줄이 하나라도 있으면 배포가 거부한다(그 줄이 lock 밖에서 docker를 돌릴 수 있다).
+#
+# 형식: 주석(#)과 빈 줄을 제외한 각 줄이 crontab 줄과 **문자열로 동일**해야 한다.
+# 새 host cron을 추가하면 여기에도 추가할 것. 그 마찰이 이 파일의 목적이다.
+55 20 26 4 * /home/ubuntu/scripts/monday_reopen_exec.sh
