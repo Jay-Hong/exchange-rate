@@ -75,13 +75,20 @@ FALLBACK_ID="$(image_id "$FALLBACK")"
 [ -n "$FALLBACK_ID" ] || { echo "PREFLIGHT 실패: fallback 태그 없음 ($FALLBACK) — 상태 무변화" >&2; exit 1; }
 echo "[preflight] target=$TARGET($TARGET_ID) fallback=$FALLBACK($FALLBACK_ID)"
 
-# ── 목표 도달 판정: health **그리고** running image ID == 기대 ID.
+# ── 목표 도달 판정: health **그리고** running == 기대 ID **그리고** latest 태그 == 기대 ID.
 #    ⛔ health만 보면 recreate가 조용히 미적용된 경우(구 컨테이너가 그대로 healthy)를 성공으로 오판한다.
+#    ⛔ `latest`까지 봐야 하는 이유 — 이 서버의 cron 5개가 `docker compose run`으로 **latest를 쓴다**.
+#       `latest`와 running이 갈리면 그게 곧 split(cron 한쪽 / 웹 다른쪽)이다. running만 보는 판정은
+#       **복구 경로에서 특히 위험하다**: retag 실패 + 복구 recreate 실패면 latest=target·running=fallback인
+#       split인데 "복구 완료"를 출력한다(선택적 실패 주입으로 재현 —
+#       `test_recovery_without_retag_is_not_reported_as_success`).
 converged_to() {
     local want="$1" i
     for i in $(seq 1 "$HEALTH_RETRIES"); do
-        if is_healthy && [ "$(running_id)" = "$want" ]; then
-            echo "  수렴 확인 (~$((i * HEALTH_SLEEP))s, image=$want)"
+        if is_healthy \
+           && [ "$(running_id)" = "$want" ] \
+           && [ "$(image_id "$LATEST_TAG")" = "$want" ]; then
+            echo "  수렴 확인 (~$((i * HEALTH_SLEEP))s, image=$want, latest 일치)"
             return 0
         fi
         sleep "$HEALTH_SLEEP"
@@ -96,6 +103,10 @@ recover() {
     [ "$RECOVERED" = no ] || return 0
     RECOVERED=yes
     echo "!!! 미완 — FALLBACK($FALLBACK)으로 복구한다" >&2
+    # ⚠️ 태그 복구가 실패해도 **recreate는 계속한다**(외부 검토의 "중단" 권고와 다른 선택).
+    #    근거: 여기서 멈추면 latest=target·running=fallback인 **split이 남는다**. 계속하면 running이
+    #    latest(=target)를 따라가 최소한 **일관된** 상태가 되고, 그때 아래 수렴 검사가 fallback에
+    #    도달하지 못했음을 **loud하게** 알린다. 즉 "일관 + 시끄러운 실패" > "split + 조용한 성공".
     "$DOCKER_BIN" tag "$FALLBACK" "$LATEST_TAG" </dev/null \
         || echo "  ✗ 태그 복구 실패 — 수동 개입 필요" >&2
     "$DOCKER_BIN" compose up -d --force-recreate "$SERVICE" </dev/null >/dev/null 2>&1 \

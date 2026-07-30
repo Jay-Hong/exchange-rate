@@ -48,7 +48,8 @@ class _Harness:
     """
 
     def __init__(self, tmp: pathlib.Path, *, fail=(), apply_recreate=True,
-                 healthy=True, kill_on=None, missing=()):
+                 healthy=True, kill_on=None, missing=(),
+                 fail_tag_nth=0, fail_up_nth=0):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
@@ -62,29 +63,39 @@ class _Harness:
             echo "$*" >> "$TMP/calls"
             FAIL="{','.join(fail)}"
             MISSING="{','.join(missing)}"
+            FAIL_TAG_NTH={fail_tag_nth}
+            FAIL_UP_NTH={fail_up_nth}
             case "$1" in
               images)
                 # 축약 ID — 스크립트가 이걸 쓰면 inspect(전체 ID)와 어긋나 수렴이 영구 실패한다.
-                case "$2" in
+                T="$2"; [ "$T" = "img:latest" ] && T=$(cat "$TMP/latest")
+                case "$T" in
                   {TARGET}) echo {NEW_SHORT} ;;
                   {FALLBACK}) echo {OLD_SHORT} ;;
                 esac ;;
               image)
                 # docker image inspect <tag> --format '{{{{.Id}}}}' — 전체 ID. 없는 태그는 비영 종료.
-                for m in ${{MISSING//,/ }}; do [ "$3" = "$m" ] && exit 1; done
-                case "$3" in
+                # ⚠️ 실 docker처럼 `img:latest`는 **그 태그가 가리키는 이미지**로 해석해야 한다 —
+                #    안 하면 수렴 판정의 latest 대조가 구조적으로 실패해 happy path가 red가 된다.
+                T="$3"; [ "$T" = "img:latest" ] && T=$(cat "$TMP/latest")
+                for m in ${{MISSING//,/ }}; do [ "$T" = "$m" ] && exit 1; done
+                case "$T" in
                   {TARGET}) echo {NEW_ID} ;;
                   {FALLBACK}) echo {OLD_ID} ;;
                   *) exit 1 ;;
                 esac ;;
               tag)
+                N=$(( $(cat "$TMP/tagn" 2>/dev/null || echo 0) + 1 )); echo $N > "$TMP/tagn"
                 case ",$FAIL," in *,tag,*) exit 1 ;; esac
+                [ "$FAIL_TAG_NTH" -eq "$N" ] && exit 1     # 선택적: N번째 tag만 실패
                 echo "$2" > "$TMP/latest" ;;
               inspect) cat "$TMP/running" ;;
               compose)
                 shift
                 if [ "$1" = "up" ]; then
+                  M=$(( $(cat "$TMP/upn" 2>/dev/null || echo 0) + 1 )); echo $M > "$TMP/upn"
                   case ",$FAIL," in *,up,*) exit 1 ;; esac
+                  [ "$FAIL_UP_NTH" -eq "$M" ] && exit 1     # 선택적: M번째 up만 실패
                   {"" if apply_recreate else "exit 0  # recreate 미적용 시뮬"}
                   L=$(cat "$TMP/latest")
                   case "$L" in
@@ -213,6 +224,24 @@ class TestDeployScript(unittest.TestCase):
         rc, out = h.run()
         self.assertEqual(rc, 1, out)
         self.assertEqual(h.latest, FALLBACK)
+
+    def test_recovery_without_retag_is_not_reported_as_success(self):
+        """⛔ **복구 성공 판정에 `latest == want`가 빠지면 split을 "복구 완료"로 보고한다.**
+
+        재현(선택적 실패 주입): 배포 recreate가 성공을 답하되 **미적용**(running은 fallback) →
+        목표 수렴 실패 → recover 진입 → **retag 실패**(latest는 target에 남는다) +
+        **복구 recreate 실패**(running은 fallback). 이때 health OK이고 running == fallback이므로
+        `latest`를 보지 않는 판정은 **"복구 완료 — fallback 이미지로 수렴"**을 출력한다.
+        그런데 실제 상태는 `latest`=target / `running`=fallback = **cron 신 / 웹 구 split**이다.
+
+        ⚠️ rc는 두 경우 모두 1이다(본문이 이미 exit 1). 그래서 **메시지**를 단언한다 —
+        운영자가 "복구 완료"를 읽고 split을 놓치는 것이 이 결함의 실해다.
+        """
+        h = _Harness(self.tmp, apply_recreate=False, fail_tag_nth=2, fail_up_nth=2)
+        rc, out = h.run()
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("복구 완료", out, f"split인데 복구 완료로 보고했다:\n{out}")
+        self.assertIn("미수렴", out, out)
 
     def test_sigterm_after_tag_does_not_report_success(self):
         """⛔ **M3** — bash signal trap은 handler 반환 후 **본문을 계속** 실행한다.
