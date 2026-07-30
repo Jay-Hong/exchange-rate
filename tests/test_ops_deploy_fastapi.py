@@ -49,7 +49,8 @@ class _Harness:
 
     def __init__(self, tmp: pathlib.Path, *, fail=(), apply_recreate=True,
                  healthy=True, kill_on=None, missing=(),
-                 fail_tag_nth=0, fail_up_nth=0, cron_wrapped=True):
+                 fail_tag_nth=0, fail_up_nth=0, cron_wrapped=True,
+                 cron_wait=600, cron_query_fails=False, cron_commented=False):
         self.tmp = tmp
         self.bin = tmp / "bin"
         self.bin.mkdir(parents=True, exist_ok=True)
@@ -117,13 +118,16 @@ class _Harness:
         fl.chmod(0o755)
         # 가짜 crontab — 5줄 전부 flock으로 감싼 형태를 기본으로 낸다(감싸이지 않은 경우도 재현).
         ct = self.bin / "crontab"
-        wrapped = "yes" if cron_wrapped else "no"
         lines = []
         for m in (5, 7, 9, 11):
-            pre = f"{self.bin}/flock -w 600 {tmp}/deploy.lock " if cron_wrapped else ""
-            lines.append(f"{m} * * * * cd ~/x && {pre}/usr/bin/docker compose run --rm fastapi python s.py")
+            pre = f"{self.bin}/flock -w {cron_wait} {tmp}/deploy.lock " if cron_wrapped else ""
+            mark = "# " if cron_commented else ""
+            lines.append(f"{mark}{m} * * * * cd ~/x && {pre}/usr/bin/docker compose run --rm fastapi python s.py")
         body = "\n".join(lines)
-        ct.write_text(f'#!/usr/bin/env bash\ncat <<EOF\n{body}\nEOF\n', encoding="utf-8")
+        if cron_query_fails:
+            ct.write_text('#!/usr/bin/env bash\nexit 1\n', encoding="utf-8")
+        else:
+            ct.write_text(f'#!/usr/bin/env bash\ncat <<EOF\n{body}\nEOF\n', encoding="utf-8")
         ct.chmod(0o755)
         self.kill_on = kill_on
 
@@ -174,6 +178,35 @@ class TestDeployScript(unittest.TestCase):
         self.tmp = pathlib.Path(self._td.name)
         self.addCleanup(self._td.cleanup)
 
+    def test_cron_with_zero_wait_is_refused(self):
+        """⛔ **fail-open 반례 ①** — `flock -w 0`은 경합 시 cron이 **조용히 건너뛴다**.
+
+        그게 이 lock이 막으려던 데이터 공백이다. 구 preflight는 lock **파일만** 보고 대기 정책을
+        안 봐서 "1/1 감쌈"으로 통과시켰다(실측).
+        """
+        h = _Harness(self.tmp, cron_wait=0)
+        rc, out = h.run()
+        self.assertEqual(rc, 5, out)
+        self.assertIn("대기가 너무 짧다", out)
+        self.assertEqual(h.latest, FALLBACK)
+
+    def test_crontab_query_failure_is_refused(self):
+        """⛔ **fail-open 반례 ②** — 구 버전은 `|| true`가 조회 실패를 **빈 crontab으로 세탁**해
+        "0/0 감쌈"으로 통과시켰다(실측). 확인 불가는 거부여야 한다.
+        """
+        h = _Harness(self.tmp, cron_query_fails=True)
+        rc, out = h.run()
+        self.assertEqual(rc, 5, out)
+        self.assertIn("조회 실패", out)
+        self.assertEqual(h.latest, FALLBACK)
+
+    def test_zero_target_lines_is_refused(self):
+        """대상 줄이 0이면 crontab이 바뀌었거나 조회가 비었다는 뜻 — 그것도 거부다."""
+        h = _Harness(self.tmp, cron_commented=True)
+        rc, out = h.run()
+        self.assertEqual(rc, 5, out)
+        self.assertIn("대상 0줄", out)
+
     def test_unwrapped_cron_is_refused(self):
         """⛔ crontab이 lock을 잡지 않으면 **배포 쪽만 잡아도 무의미**하다 — 산문 경고가 아니라 게이트다.
 
@@ -182,7 +215,7 @@ class TestDeployScript(unittest.TestCase):
         h = _Harness(self.tmp, cron_wrapped=False)
         rc, out = h.run()
         self.assertEqual(rc, 5, out)
-        self.assertIn("lock으로 감싸여", out)
+        self.assertIn("lock 미적용", out)
         self.assertEqual(h.latest, FALLBACK, "거부인데 상태가 바뀌었다")
 
     def test_deploy_refuses_when_lock_is_held(self):
