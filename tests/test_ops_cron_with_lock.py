@@ -63,5 +63,43 @@ class TestCronWithLock(unittest.TestCase):
         rc, out = self._run("--policy", "wait")
         self.assertEqual(rc, 2, out)
 
+class TestCronJobTable(unittest.TestCase):
+    """job 표의 **정책 배정**을 잠근다 — 표만 있고 테스트가 없으면 조용히 뒤집힌다.
+
+    ⚠️ 실측: `daily-all`을 `block` → `wait`로 바꾸는 변이가 **생존했다**. 그건 daily append가
+    timeout 시 건너뛰어 **그 날 row가 비는 것**을 허용하는 회귀다(hourly는 다음 회차가 회복하지만
+    daily는 회복하지 않는다).
+    """
+
+    JOB = pathlib.Path(__file__).resolve().parent.parent / "ops" / "cron-job.sh"
+
+    def _spec(self, job):
+        r = subprocess.run(["bash", "-c",
+                            f'source /dev/stdin <<<"$(sed -n \'/^job_spec()/,/^}}/p\' {self.JOB})"; job_spec {job}'],
+                           capture_output=True, text=True)
+        return r.stdout.strip()
+
+    def test_daily_never_skips(self):
+        self.assertTrue(self._spec("daily-all").startswith("block|"),
+                        f"daily가 skip 가능 정책이다: {self._spec('daily-all')!r}")
+
+    def test_hourly_may_skip_because_it_self_heals(self):
+        for job in ("hourly-bithumb", "hourly-investing", "hourly-hana", "hourly-krx"):
+            with self.subTest(job=job):
+                self.assertTrue(self._spec(job).startswith("wait|"), self._spec(job))
+
+    def test_unknown_job_is_refused(self):
+        r = subprocess.run(["bash", str(self.JOB), "no-such-job"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_print_crontab_has_no_policy_or_docker_or_env(self):
+        """⛔ 정본 줄에 정책·docker 명령·env 대입이 있으면 crontab이 다시 임의 shell이 된다."""
+        out = subprocess.run(["bash", str(self.JOB), "--print-crontab"],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertTrue(out.strip())
+        for bad in ("--policy", "docker", "flock", "LOCK_FILE="):
+            self.assertNotIn(bad, out, f"정본 줄에 {bad} 가 있다")
+
+
 if __name__ == "__main__":
     unittest.main()

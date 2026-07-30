@@ -74,56 +74,41 @@ CRONTAB_BIN="${CRONTAB_BIN:-crontab}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/fxi-deploy.lock}"
 ALLOW_UNLOCKED_CRON="${ALLOW_UNLOCKED_CRON:-no}"
 
-CRON_WRAPPER="${CRON_WRAPPER:-ops/cron-with-lock.sh}"
+CRON_JOB_SCRIPT="${CRON_JOB_SCRIPT:-ops/cron-job.sh}"
 
-# ⛔ **shell 행을 파싱하지 않는다.** 파싱하던 동안 fail-open이 세 번 연속 나왔다(실측):
-#    `flock -n` / `flock --timeout 0` / `flock -w0` 이 전부 "무한 대기"로 통과했다. 옵션 문법
-#    whitelist는 놓친 표기가 **위험한 쪽으로** 통과하는 구조라 계속 샌다.
-#    그래서 정책을 **이름**으로 옮겼다(`ops/cron-with-lock.sh --policy wait|block`) — 여기서는
-#    그 토큰만 확인한다. 정책의 의미는 wrapper가 지고, 그쪽은 자기 테스트로 잠긴다.
+# ⛔ **substring으로 shell 의미를 추정하지 않는다.** 추정하던 동안 fail-open이 다섯 번 나왔고
+#    마지막 셋이 원리적이었다(실측 — 전부 통과했다):
+#      ① `… --policy wait -- true && docker compose run …`  (wrapper가 lock을 놓은 뒤 docker 실행)
+#      ② `LOCK_FILE=/tmp/other.lock … -- docker compose run …` (배포와 다른 lock = 상호배제 아님)
+#      ③ `--policy waiter` (substring 매치 → 통과, 런타임에만 실패)
+#    줄이 임의 shell인 한 무엇을 확인해도 그 **옆에서** 다른 일을 할 수 있다.
+#    그래서 crontab에서 임의성을 없앴다 — `ops/cron-job.sh <job>`이 정책과 docker 명령을 둘 다
+#    소유하고, 여기서는 crontab이 그 정본 출력과 **문자열로 같은지**만 본다(추정 0).
 if ! CRON_SNAPSHOT="$("$CRONTAB_BIN" -l 2>/dev/null)"; then
     echo "거부: crontab 조회 실패 — cron의 lock 적용 여부를 확인할 수 없다." >&2
-    echo "  (조회 실패를 '감쌈 0/0'으로 통과시키던 구 동작이 fail-open이었다)" >&2
+    exit 5
+fi
+if ! CRON_EXPECTED="$("$CRON_JOB_SCRIPT" --print-crontab 2>/dev/null)"; then
+    echo "거부: 정본 crontab을 생성할 수 없다 ($CRON_JOB_SCRIPT --print-crontab)" >&2
     exit 5
 fi
 
-_TOTAL=0; _BAD=0
-while IFS= read -r _line; do
-    # ⛔ 선행 공백 뒤 주석도 주석이다(실측: `  # ...`가 활성 cron으로 계산됐다).
-    case "$_line" in ''|*[!' ']*) ;; *) continue ;; esac
-    _stripped="${_line#"${_line%%[![:space:]]*}"}"
-    case "$_stripped" in ''|'#'*) continue ;; esac
-    case "$_stripped" in *"docker compose run --rm fastapi"*) ;; *) continue ;; esac
-    _TOTAL=$(( _TOTAL + 1 ))
-    case "$_stripped" in
-        *"$CRON_WRAPPER"*"--policy wait"*|*"$CRON_WRAPPER"*"--policy block"*) ;;
-        *) echo "  ✗ 정책 wrapper 미적용: $_stripped" >&2; _BAD=$(( _BAD + 1 )) ;;
-    esac
-    # ⛔ raw flock 병용 금지 — wrapper 밖에서 lock 정책을 다시 정하면 검증 대상이 아니게 된다.
-    case "$_stripped" in
-        *flock*) echo "  ✗ raw flock 병용: $_stripped" >&2; _BAD=$(( _BAD + 1 )) ;;
-    esac
-done <<EOF
-$CRON_SNAPSHOT
-EOF
+# 실제 crontab에서 **대상 줄**만 뽑는다: cron-job.sh 또는 docker compose run 을 언급하는 비주석 줄.
+# (둘 중 하나만 보면, 정본을 지우고 raw docker 줄을 넣는 우회가 열린다.)
+_actual="$(printf '%s\n' "$CRON_SNAPSHOT" | sed -e 's/^[[:space:]]*//' \
+    | grep -v '^#' | grep -E 'cron-job\.sh|docker compose run --rm fastapi' | sort || true)"
+_expected="$(printf '%s\n' "$CRON_EXPECTED" | sed -e 's/^[[:space:]]*//' | sort)"
 
-if [ "$ALLOW_UNLOCKED_CRON" != yes ] && { [ "$_TOTAL" -lt 1 ] || [ "$_BAD" -gt 0 ]; }; then
-    cat >&2 <<EOF
-거부: cron lock preflight 실패 (대상 ${_TOTAL}줄, 부적합 ${_BAD}줄).
-  대상 줄이 0이면 crontab이 바뀌었거나 조회가 비어 있다는 뜻이므로 그것도 거부한다.
-  요구 형태 — 정책을 **이름으로** 준다(shell 옵션 표기 금지):
-    # hourly (skip해도 다음 회차가 idempotent re-roll로 회복한다)
-    5 * * * * cd ~/exchange-rate && $CRON_WRAPPER --policy wait  -- /usr/bin/docker compose run --rm fastapi python scripts/hourly_...
-    # daily (그 날 row를 한 번만 쓰므로 skip이 곧 데이터 공백이다)
-    1 15 * * * cd ~/exchange-rate && $CRON_WRAPPER --policy block -- /usr/bin/docker compose run --rm fastapi python scripts/daily_...
-  ⚠️ 위 두 줄의 정책 배정은 **권고**다 — hourly=wait / daily=block 근거는 회복 가능성 차이다.
-     block은 stuck lock에서 hang, wait는 timeout 시 skip — 어느 실패를 받아들일지가 운영 결정이고
-     이 스크립트는 **둘 다 허용**하되 즉시-skip 표기(raw flock -n 등)만 거부한다.
-  (테스트·긴급용 우회: ALLOW_UNLOCKED_CRON=yes — split 위험을 감수한다)
-EOF
+if [ "$ALLOW_UNLOCKED_CRON" != yes ] && [ "$_actual" != "$_expected" ]; then
+    echo "거부: crontab이 정본과 다르다. 정본은 \`$CRON_JOB_SCRIPT --print-crontab\`이다." >&2
+    echo "--- 실제 ---" >&2; printf '%s\n' "$_actual" >&2
+    echo "--- 정본 ---" >&2; printf '%s\n' "$_expected" >&2
+    echo "  ⚠️ 정본 줄에는 정책·docker 명령·env 대입이 **없다** — launcher가 소유한다." >&2
+    echo "  (테스트·긴급용 우회: ALLOW_UNLOCKED_CRON=yes — split 위험을 감수한다)" >&2
     exit 5
 fi
-echo "[lock-preflight] cron ${_TOTAL}줄 전부 정책 wrapper 사용 ($CRON_WRAPPER)"
+_TOTAL="$(printf '%s\n' "$_expected" | grep -c . || true)"
+echo "[lock-preflight] crontab ${_TOTAL}줄이 정본과 문자열 동일 ($CRON_JOB_SCRIPT)"
 
 exec 200>"$LOCK_FILE"
 if ! "$FLOCK_BIN" -w 0 200; then

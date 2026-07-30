@@ -29,7 +29,8 @@ import sys
 import textwrap
 import unittest
 
-SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "ops" / "deploy-fastapi.sh"
+REPO = pathlib.Path(__file__).resolve().parent.parent
+SCRIPT = REPO / "ops" / "deploy-fastapi.sh"
 
 TARGET = "img:new"
 FALLBACK = "img:old"
@@ -122,11 +123,16 @@ class _Harness:
         if cron_lines is not None:
             lines = list(cron_lines)
         else:
-            lines = []
-            for m in (5, 7, 9, 11):
-                pre = "ops/cron-with-lock.sh --policy wait -- " if cron_wrapped else ""
-                mark = "  # " if cron_commented else ""
-                lines.append(f"{mark}{m} * * * * cd ~/x && {pre}/usr/bin/docker compose run --rm fastapi python s.py")
+            canon = subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
+                                   capture_output=True, text=True, check=True).stdout.splitlines()
+            if cron_commented:
+                lines = [f"  # {l}" for l in canon]
+            elif not cron_wrapped:
+                lines = [l.replace("ops/cron-job.sh daily-all",
+                                   "/usr/bin/docker compose run --rm fastapi python s.py")
+                         for l in canon]
+            else:
+                lines = canon
         body = "\n".join(lines)
         if cron_query_fails:
             ct.write_text('#!/usr/bin/env bash\nexit 1\n', encoding="utf-8")
@@ -149,6 +155,7 @@ class _Harness:
             LOCK_FILE=str(self.tmp / "deploy.lock"),
             FLOCK_BIN=str(self.bin / "flock"),
             CRONTAB_BIN=str(self.bin / "crontab"),
+            CRON_JOB_SCRIPT=str(REPO / "ops" / "cron-job.sh"),
         )
         proc = subprocess.Popen(
             ["bash", str(SCRIPT), "--target", target, "--fallback", fallback, *extra_args],
@@ -182,45 +189,51 @@ class TestDeployScript(unittest.TestCase):
         self.tmp = pathlib.Path(self._td.name)
         self.addCleanup(self._td.cleanup)
 
-    def test_raw_flock_option_forms_are_all_refused(self):
-        """⛔ **fail-open 반례 전수** — shell 옵션 파싱이 세 번 연속 샜다(실측 전부 통과했다):
+    def test_substring_bypasses_are_all_refused(self):
+        """⛔ **substring 검사의 원리적 한계** — 줄이 임의 shell이면 무엇을 확인해도 그 **옆에서**
+        다른 일을 할 수 있다. 실측으로 전부 통과했던 세 형태:
 
-            flock -n           → 즉시 실패 = skip인데 "무한 대기"로 통과
-            flock --timeout 0  → -w 의 long form인데 미인식
-            flock -w0          → 공백 없는 표기라 정규식 미매치
+            ① `--policy wait -- true && docker compose run …`  (wrapper가 lock을 놓은 뒤 docker)
+            ② `LOCK_FILE=/tmp/other.lock … -- docker compose run …` (배포와 다른 lock)
+            ③ `--policy waiter` (substring 매치 → 통과, 런타임에만 실패)
 
-        그래서 파서를 없애고 정책을 **이름**으로 옮겼다(`--policy wait|block`). 이제 raw flock은
-        형태와 무관하게 거부된다 — 놓친 표기가 위험한 쪽으로 통과하는 구조 자체를 없앤 것이다.
+        그래서 crontab에서 임의성을 없애고 **정본과의 문자열 동일성**만 본다.
         """
-        for form in ("flock -n", "flock --timeout 0", "flock -w0", "flock -w 600"):
-            with self.subTest(form=form):
-                line = (f"5 * * * * cd ~/x && {form} /tmp/t.lock "
-                        "/usr/bin/docker compose run --rm fastapi python s.py")
+        forms = [
+            "5 * * * * cd ~/x && ops/cron-with-lock.sh --policy wait -- true && "
+            "/usr/bin/docker compose run --rm fastapi python s.py",
+            "5 * * * * cd ~/x && LOCK_FILE=/tmp/o.lock ops/cron-with-lock.sh --policy wait -- "
+            "/usr/bin/docker compose run --rm fastapi python s.py",
+            "5 * * * * cd ~/x && ops/cron-with-lock.sh --policy waiter -- "
+            "/usr/bin/docker compose run --rm fastapi python s.py",
+        ]
+        for form in forms:
+            with self.subTest(form=form[:60]):
                 tmp = pathlib.Path(__import__("tempfile").mkdtemp())
-                rc, out = _Harness(tmp, cron_lines=[line]).run()
+                rc, out = _Harness(tmp, cron_lines=[form]).run()
                 self.assertEqual(rc, 5, out)
+                self.assertIn("정본과 다르다", out)
 
-    def test_wrapper_plus_raw_flock_is_refused(self):
-        """⛔ wrapper를 쓰면서 raw flock을 **병용**하면 lock 정책이 wrapper 밖에서 다시 정해진다.
+    def test_extra_raw_docker_line_is_refused(self):
+        """⛔ 정본 5줄이 **다 있으면서** raw docker 줄이 하나 더 있으면 그 줄은 lock 밖에서 돈다.
 
-        그 순간 정책이 검증 대상 밖으로 나가므로 거부한다. ⚠️ 이 케이스가 없으면 raw-flock 검사를
-        무력화하는 변이가 **생존한다**(실측 — 다른 테스트들은 wrapper 부재로 이미 걸려서 구별 못 함).
+        ⚠️ 이 케이스가 없으면 수집 grep에서 `docker compose run` 대안을 빼는 변이가 **생존한다**
+        (실측). 정본만 수집하면 추가된 raw 줄이 애초에 비교 대상에 안 들어와 통과한다.
         """
-        line = ("5 * * * * cd ~/x && ops/cron-with-lock.sh --policy wait -- "
-                "flock -n /tmp/l /usr/bin/docker compose run --rm fastapi python s.py")
-        tmp = pathlib.Path(__import__("tempfile").mkdtemp())
-        rc, out = _Harness(tmp, cron_lines=[line]).run()
+        canon = subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
+                               capture_output=True, text=True, check=True).stdout.splitlines()
+        extra = ("13 * * * * cd ~/x && /usr/bin/docker compose run --rm fastapi "
+                 "python scripts/rogue.py")
+        rc, out = _Harness(self.tmp, cron_lines=canon + [extra]).run()
         self.assertEqual(rc, 5, out)
-        self.assertIn("raw flock 병용", out)
+        self.assertIn("정본과 다르다", out)
 
-    def test_wrapper_policies_are_accepted(self):
-        for policy in ("wait", "block"):
-            with self.subTest(policy=policy):
-                line = (f"5 * * * * cd ~/x && ops/cron-with-lock.sh --policy {policy} -- "
-                        "/usr/bin/docker compose run --rm fastapi python s.py")
-                tmp = pathlib.Path(__import__("tempfile").mkdtemp())
-                rc, out = _Harness(tmp, cron_lines=[line]).run()
-                self.assertEqual(rc, 0, out)
+    def test_partial_canonical_crontab_is_refused(self):
+        """정본 일부만 있으면 거부 — 줄이 사라진 것도 잡아야 한다."""
+        canon = subprocess.run(["bash", str(REPO / "ops" / "cron-job.sh"), "--print-crontab"],
+                               capture_output=True, text=True, check=True).stdout.splitlines()
+        rc, out = _Harness(self.tmp, cron_lines=canon[:2]).run()
+        self.assertEqual(rc, 5, out)
 
     def test_crontab_query_failure_is_refused(self):
         """⛔ **fail-open 반례 ②** — 구 버전은 `|| true`가 조회 실패를 **빈 crontab으로 세탁**해
@@ -237,7 +250,7 @@ class TestDeployScript(unittest.TestCase):
         h = _Harness(self.tmp, cron_commented=True)
         rc, out = h.run()
         self.assertEqual(rc, 5, out)
-        self.assertIn("대상 0줄", out, "선행 공백 뒤 주석이 활성 cron으로 계산됐다")
+        self.assertIn("정본과 다르다", out, "선행 공백 뒤 주석이 활성 cron으로 계산됐다")
 
     def test_unwrapped_cron_is_refused(self):
         """⛔ crontab이 lock을 잡지 않으면 **배포 쪽만 잡아도 무의미**하다 — 산문 경고가 아니라 게이트다.
@@ -247,7 +260,7 @@ class TestDeployScript(unittest.TestCase):
         h = _Harness(self.tmp, cron_wrapped=False)
         rc, out = h.run()
         self.assertEqual(rc, 5, out)
-        self.assertIn("정책 wrapper 미적용", out)
+        self.assertIn("정본과 다르다", out)
         self.assertEqual(h.latest, FALLBACK, "거부인데 상태가 바뀌었다")
 
     def test_deploy_refuses_when_lock_is_held(self):
