@@ -202,7 +202,7 @@ class _Harness:
         )
         proc = subprocess.Popen(
             ["bash", str(self.ops / "deploy-fastapi.sh"),
-             *(("--target", target) if target else ()),
+             *(("--target", target, "--emergency") if target else ()),
              "--fallback", fallback, *extra_args],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
@@ -439,12 +439,20 @@ class TestDeployScript(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(h.latest, FALLBACK)
 
-    def test_tag_failure_recovers_and_fails(self):
-        """⛔ set -u만 쓰던 구 버전은 여기서 계속 진행해 rc=0을 냈다."""
+    def test_tag_failure_fails_without_rolling_back(self):
+        """`docker tag` 가 실패하면 `latest` 는 **바뀌지 않았다** → 되돌릴 것이 없다.
+
+        ⛔ 구 테스트는 여기서 `"복구"` 를 단언해 **과잉 롤백을 계약으로 고정**하고 있었다.
+        상태 변경 전 실패에 운영을 되돌리고 재시작하는 것이 바로 이번에 고친 결함이다.
+        (원래 이 테스트의 목적은 `set -u` 만 쓰던 구 버전이 계속 진행해 rc=0 을 내던 것을 잠그는
+         것이었고, 그 부분은 rc=1 단언이 그대로 유지한다.)
+        """
         h = _Harness(self.tmp, fail=("tag",))
         rc, out = h.run()
         self.assertEqual(rc, 1, out)
-        self.assertIn("복구", out)
+        self.assertIn("되돌리지 않는다", out)
+        self.assertEqual(h.latest, FALLBACK, "latest 가 바뀌었다")
+        self.assertNotIn("compose up", h.calls, "상태 변경 전인데 재시작했다")
 
     def test_recreate_failure_restores_latest(self):
         h = _Harness(self.tmp, fail=("up",))
@@ -517,7 +525,7 @@ class TestPrepareUnderLock(unittest.TestCase):
 
     FULL_SHA = "d" * 40
 
-    def _git(self, *, fetch_ok=True, runtime_changed=False, worktree_ok=True):
+    def _git(self, *, fetch_ok=True, runtime_changed=False, worktree_ok=True, dirty=False):
         """git 더블 — fetch/rev-parse FETCH_HEAD/worktree/diff/pull 을 모델링한다.
 
         ⚠️ live worktree를 **pull하지 않는** 것이 이 경로의 계약이므로, `pull` 호출 여부와 시점을
@@ -530,6 +538,7 @@ class TestPrepareUnderLock(unittest.TestCase):
         g.write_text(f"""#!/usr/bin/env bash
 echo "$*" >> {self.tmp}/git_calls
 case "$1" in
+  status)    {'echo " M ops/cron-job.sh"' if dirty else ':'} ;;
   fetch)     {"exit 0" if fetch_ok else "exit 1"} ;;
   rev-parse)
     # ⚠️ `--short` 를 **존중**한다 — 무시하면 "축약 SHA로 되돌리는" 변이가 보이지 않는다(실측 생존).
@@ -660,6 +669,52 @@ exit 0
                         env_extra={"GIT_BIN": str(self._git())})
         self.assertEqual(rc, 1, out)
         self.assertIn("immutable 위반", out)
+
+    def test_pre_mutation_refusals_do_not_roll_back_production(self):
+        """⛔ **상태를 바꾸기 전 거부가 운영을 되돌려선 안 된다.**
+
+        실측 결함: trap이 준비 단계 **전에** 무장돼 fetch 실패·runtime 변경 거부·worktree 생성 실패가
+        모두 `recover()`로 들어가 `tag fallback latest` + `compose up --force-recreate`를 호출했다 —
+        **잘못된 ref나 네트워크 오류만으로 운영을 되돌리고 재시작**했다. 안전장치가 위험원이 됐다.
+        cleanup은 항상 하되 이미지 롤백은 `latest` 전환 성공 뒤에만 활성화한다.
+        """
+        for label, kw in [("fetch 실패", dict(fetch_ok=False)),
+                          ("runtime 변경", dict(runtime_changed=True)),
+                          ("worktree 실패", dict(worktree_ok=False)),
+                          ("dirty runtime", dict(dirty=True))]:
+            with self.subTest(label=label):
+                tmp = pathlib.Path(__import__("tempfile").mkdtemp())
+                h = _Harness(tmp)
+                rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                                env_extra={"GIT_BIN": str(self._git(**kw))})
+                self.assertEqual(rc, 1, out)
+                self.assertNotIn("tag img:old img:latest", h.calls,
+                                 f"{label}: 상태 변경 전인데 롤백했다")
+                self.assertNotIn("compose up", h.calls,
+                                 f"{label}: 상태 변경 전인데 컨테이너를 재시작했다")
+                self.assertIn("되돌리지 않는다", out)
+
+    def test_dirty_runtime_files_are_refused(self):
+        """⛔ 커밋 비교만으로는 **live worktree의 로컬 수정본**을 놓친다 — 무엇이 도는지 확정 불가."""
+        h = _Harness(self.tmp)
+        rc, out = h.run(target=None, extra_args=("--prepare-from", "master"),
+                        env_extra={"GIT_BIN": str(self._git(dirty=True))})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("수정돼 있다", out)
+        self.assertNotIn("worktree add", self.git_calls, "거부인데 빌드를 시작했다")
+
+    def test_target_without_emergency_is_refused(self):
+        """⛔ `--target` 은 runtime 동일성 검사를 **우회**한다 → 긴급 롤백 전용으로 격리한다."""
+        h = _Harness(self.tmp)
+        proc = __import__("subprocess").run(
+            ["bash", str(h.ops / "deploy-fastapi.sh"), "--target", TARGET, "--fallback", FALLBACK],
+            env=dict(__import__("os").environ, PATH=f"{h.bin}:{__import__('os').environ['PATH']}",
+                     DOCKER_BIN="docker", NOW_UTC="00:20", COMPOSE_DIR=str(self.tmp),
+                     LATEST_TAG="img:latest", FLOCK_BIN=str(h.bin / "flock"),
+                     CRONTAB_BIN=str(h.bin / "crontab"), HEALTH_RETRIES="2", HEALTH_SLEEP="0"),
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("긴급 롤백 전용", proc.stdout + proc.stderr)
 
     def test_prepare_and_target_together_are_refused(self):
         h = _Harness(self.tmp)

@@ -24,8 +24,12 @@
 #    `docker compose build fastapi`가 **`latest`를 움직인다**(실측: build 직후 latest=신 /
 #    running=구 = split). 그 순간 cron은 신 이미지, web은 구 이미지다. `git pull`도 host의
 #    `ops/cron-job.sh`를 즉시 바꿔 **새 launcher가 구 이미지를 호출**할 수 있다.
-#    그래서 `--prepare-from <ref>`가 pull·build를 lock 안에서 수행하고, build가 움직인 `latest`를
-#    **즉시 복원**한 뒤 immutable 태그(`…:sha-<gitsha>`)로 고정한다 — cron은 그 전이를 못 본다.
+#    그래서 `--prepare-from <ref>`는 **별 worktree + 별 compose 프로젝트**로 빌드해 live `latest`를
+#    아예 건드리지 않고, immutable 태그(`…:sha-<full>`)로 고정한 뒤 그것만 원자적으로 전환한다.
+#    ⛔ **live worktree를 pull하지 않는다** — pull을 트랜잭션에 넣으면 pull 성공 직후 signal에서
+#      이미지만 되돌아 세대가 갈리고, 소스 롤백은 실행 중 스크립트를 덮어써 넣을 수도 없다.
+#      대신 대상 커밋이 runtime 파일(ops/·compose)을 바꾸면 **거부**한다 — 그 부류는
+#      host-config migration(versioned release dir + 원자적 symlink)이 필요하고 범위 밖이다.
 #
 # 사용:
 #   ops/deploy-fastapi.sh --target exchange-rate-fastapi:pending-<sha> \
@@ -49,6 +53,7 @@ CONTAINER="${CONTAINER:-exchange-rate-app}"
 
 CRON_MARGIN="${CRON_MARGIN:-4}"
 ALLOW_CRON_WINDOW=no
+EMERGENCY=no
 PREPARE_REF=""
 TARGET=""
 FALLBACK=""
@@ -59,6 +64,7 @@ while [ $# -gt 0 ]; do
         --service)  SERVICE="${2:?}"; shift 2 ;;
         --allow-cron-window) ALLOW_CRON_WINDOW=yes; shift ;;
         --prepare-from) PREPARE_REF="${2:?--prepare-from 값 필요}"; shift 2 ;;
+        --emergency) EMERGENCY=yes; shift ;;
         *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
     esac
 done
@@ -69,6 +75,15 @@ if [ -n "$PREPARE_REF" ] && [ -n "$TARGET" ]; then
     exit 2
 fi
 [ -n "$TARGET" ] || [ -n "$PREPARE_REF" ] || { echo "--target 또는 --prepare-from 필수" >&2; exit 2; }
+# ⛔ **forward deploy는 `--prepare-from` 만**이다. `--target` 경로는 이미지 존재만 확인하고
+#    runtime 동일성 검사(ops/·compose)를 **완전히 우회**하므로 "runtime 파일이 안 바뀌는 배포만
+#    허용"이 성립하지 않는다(실측 지적). 긴급 롤백 전용으로 격리하고 명시 플래그를 요구한다.
+if [ -n "$TARGET" ] && [ "$EMERGENCY" != yes ]; then
+    echo "거부: --target 은 **긴급 롤백 전용**이다 — runtime 동일성 검사를 우회한다." >&2
+    echo "  정상 배포는 --prepare-from <ref> 를 쓸 것(대상 커밋의 ops/·compose 를 검사한다)." >&2
+    echo "  이미 준비된 이미지로 되돌려야 한다면 --emergency 를 함께 줄 것." >&2
+    exit 2
+fi
 [ -n "$FALLBACK" ] || { echo "--fallback 필수" >&2; exit 2; }
 
 cd "$COMPOSE_DIR"
@@ -249,6 +264,14 @@ cleanup_worktree() {
     _BUILD_WT=""
 }
 
+# ⛔ **상태를 실제로 바꾼 뒤에만** 이미지 롤백을 활성화한다.
+#    실측 결함: trap이 준비 단계 **전에** 무장돼 있어 fetch 실패·runtime 변경 거부·worktree 생성
+#    실패 같은 **상태 변경 전 거부**가 모두 `recover()`로 들어가 `tag fallback latest` +
+#    `compose up --force-recreate`를 호출했다 — 잘못된 ref나 네트워크 오류만으로 **운영을 되돌리고
+#    재시작**했다. 안전장치가 위험원이 된 경우다.
+#    cleanup은 항상 하고, 롤백은 이 플래그가 yes 일 때만 한다.
+_MUTATED=no
+
 RECOVERED=no
 recover() {
     # ⛔ 진입 즉시 자기 trap을 해제한다 — 아래 명령들이 다시 trap을 발화시키면 무한 재귀가 된다.
@@ -258,6 +281,10 @@ recover() {
     cleanup_worktree
     [ "$RECOVERED" = no ] || return 0
     RECOVERED=yes
+    if [ "$_MUTATED" = no ]; then
+        echo "  (상태 변경 전 실패 — 이미지를 되돌리지 않는다)" >&2
+        return 0
+    fi
     echo "!!! 미완 — FALLBACK($FALLBACK)으로 복구한다" >&2
     # ⚠️ 태그 복구가 실패해도 **recreate는 계속한다**(외부 검토의 "중단" 권고와 다른 선택).
     #    근거: 여기서 멈추면 latest=target·running=fallback인 **split이 남는다**. 계속하면 running이
@@ -306,6 +333,14 @@ if [ -n "$PREPARE_REF" ]; then
     #    ⚠️ `app/`·`scripts/`는 bind-mount가 **아니라**(마운트는 data·logs·firebase json 3개, 실측)
     #      runtime에 영향이 없다. 그래서 그것들이 바뀌는 배포는 이미지 전환만으로 완결된다.
     _RUNTIME_PATHS="ops docker-compose.yml"
+    # ⛔ 커밋 비교만으로는 **live worktree의 로컬 수정본**을 놓친다 — HEAD와 FETCH_HEAD의 ops/·compose가
+    #    같아도 디스크의 그것들은 다를 수 있다(실측 지적). 대상 비교 **전에** fail-closed로 거부한다.
+    _DIRTY="$("$GIT_BIN" status --porcelain -- $_RUNTIME_PATHS 2>/dev/null || true)"
+    if [ -n "$_DIRTY" ]; then
+        echo "거부: live worktree 의 runtime 파일이 수정돼 있다 — 무엇이 도는지 확정할 수 없다." >&2
+        printf '%s\n' "$_DIRTY" | sed 's/^/    /' >&2
+        exit 1
+    fi
     if ! "$GIT_BIN" diff --quiet HEAD FETCH_HEAD -- $_RUNTIME_PATHS; then
         echo "거부: 이 ref가 runtime이 읽는 파일을 바꾼다 — 이미지 전환만으로 완결되지 않는다." >&2
         echo "  변경된 경로:" >&2
@@ -352,11 +387,12 @@ if [ -n "$PREPARE_REF" ]; then
         || { echo "거부: immutable 태그 실패" >&2; exit 1; }
     TARGET_ID="$(image_id "$TARGET")"
     [ -n "$TARGET_ID" ] || { echo "거부: immutable 태그가 해소되지 않는다" >&2; exit 1; }
-    echo "[prepare] live worktree·latest 무변화 — 전환 성공 뒤에 pull한다"
+    echo "[prepare] live worktree·latest 무변화 (별 worktree·별 프로젝트 빌드)"
 fi
 # ★ lock은 스크립트 종료 시 fd 200이 닫히며 자동 해제된다(retag 전부터 수렴 후까지 덮는다).
 
 "$DOCKER_BIN" tag "$TARGET" "$LATEST_TAG" </dev/null
+_MUTATED=yes          # ★ 여기서부터 롤백이 의미를 가진다
 echo "[tag] $LATEST_TAG -> $TARGET"
 
 "$DOCKER_BIN" compose up -d --force-recreate "$SERVICE" </dev/null >/dev/null 2>&1
