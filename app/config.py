@@ -556,3 +556,37 @@ FIREBASE_CREDENTIALS_PATH = os.getenv(
 # RevenueCat 설정 (Phase 3 - 서버 사이드 구독 검증)
 REVENUECAT_API_KEY = os.getenv("REVENUECAT_API_KEY", "")
 REVENUECAT_WEBHOOK_AUTH_KEY = os.getenv("REVENUECAT_WEBHOOK_AUTH_KEY", "")
+
+# ── WS subscribe 인증 시간 계약 (ADR-040 timeout 슬라이스) ────────────────────
+# 두 축이 **함께** 있어야 한다. 측정으로 확인한 것:
+#   · caller deadline 만으로는 간섭이 줄지 않는다 — T=8.0 고정에서 D 를 2.0→0.5 로 4배 낮춰도
+#     동거 `to_thread` 작업 지연이 7966→7978ms(변화 없음). 지배항은 **실행 중 작업 시간**이다.
+#   · 반대로 실행 중 작업 시간(T)을 낮추면 지연이 그에 비례해 내려간다.
+# 그래서 ① wire deadline 만 넣으면 "호출자는 빨리 포기하는데 프로세스는 계속 막혀 있는" 상태가 된다.
+
+# ② SDK transport 상한 — 인증 전용 named app 의 `httpTimeout`(**per-attempt**).
+# ⚠️ **측정 없음, 보수적 기본값.** 두 제약으로 좁혔다:
+#   (a) 서울 EC2 → Google `accounts:lookup` warm RTT 대비 여유,
+#   (b) **프로세스 기동 후 첫 subscribe 1건은 콜드 인증서 fetch(TLS+GET)를 이 안에 끝내야 한다**
+#       — 1~2초면 그 1건이 상시 `temporarily_unavailable` 이 된다.
+# 무엇을 재면 정해지나: flag ON 후 `verify_ws_subscribe_token` 벽시계 p50/p99 를 **콜드 첫 호출과
+# 분리해서** 측정 → `T = p99 × 3`.
+WS_AUTH_HTTP_TIMEOUT_SECONDS = 5
+
+# ① wire deadline — dispatcher 가 호출자 대기를 끊는 상한. **측정 없음**(= 2T).
+WS_AUTH_WIRE_DEADLINE_SECONDS = 10
+
+# §8-C `temporarily_unavailable` 동반값 (일시 장애).
+WS_AUTH_RETRY_AFTER_SECONDS = 5
+
+# ⛔ 재시도로 낫지 않는 결함(서버측 401/403·설정 결함·미초기화)은 같은 간격을 주면 안 된다 —
+#    분류해 놓고 5초마다 재시도를 지시하면 retry storm 이 되고 운영자 신호가 희석된다.
+WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = 30
+
+# ⛔ **D ≤ T 면 ②가 죽은 코드가 된다** — transport 상한이 발동하기 전에 호출자가 먼저 포기하므로
+#    낮춘 `httpTimeout` 이 아무것도 바꾸지 않는다. 그 상태를 import 시점에 막는다.
+if WS_AUTH_WIRE_DEADLINE_SECONDS <= WS_AUTH_HTTP_TIMEOUT_SECONDS:
+    raise ValueError(
+        "WS_AUTH_WIRE_DEADLINE_SECONDS 는 WS_AUTH_HTTP_TIMEOUT_SECONDS 보다 커야 한다 — "
+        f"got D={WS_AUTH_WIRE_DEADLINE_SECONDS} T={WS_AUTH_HTTP_TIMEOUT_SECONDS}"
+    )

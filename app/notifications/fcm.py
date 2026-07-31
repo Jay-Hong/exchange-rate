@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from app import config
 import firebase_admin
 from firebase_admin import credentials, messaging
 from firebase_admin.exceptions import FirebaseError
@@ -20,8 +21,18 @@ from app.config import FIREBASE_CREDENTIALS_PATH
 
 logger = logging.getLogger("exchange_rate.notifications.fcm")
 
-# Firebase 초기화 상태
+# Firebase 초기화 상태 (**DEFAULT app 전용** — named app 은 아래 `_ws_auth_app` 이 따로 추적한다)
 _firebase_initialized = False
+
+# ⚠️ credential 을 모듈에 보관한다. 구 코드는 `init_firebase` 안의 **지역 변수**였고, named app 이
+#    같은 자격증명을 재사용하려면 보관이 선행돼야 한다(안 하면 Certificate 재파싱 + 토큰 캐시 이중화).
+_credential = None
+
+# WS subscribe 인증 전용 app. **왜 별 app 인가**: `httpTimeout` 은 firebase-admin 이
+# `app.options` 에서 **app 단위**로 읽는다(6.9.0 `_auth_client.py:42`, `messaging.py:470` 이
+# 각각 자기 app 을 본다). 그래서 인증 transport 상한을 낮춰도 FCM 발송은 영향이 없다.
+WS_AUTH_APP_NAME = "ws-auth"
+_ws_auth_app = None
 
 
 def init_firebase() -> bool:
@@ -40,8 +51,10 @@ def init_firebase() -> bool:
         return False
 
     try:
+        global _credential
         cred = credentials.Certificate(str(cred_path))
         firebase_admin.initialize_app(cred)
+        _credential = cred
         _firebase_initialized = True
         logger.info("Firebase Admin SDK 초기화 완료")
         return True
@@ -51,6 +64,51 @@ def init_firebase() -> bool:
             extra={"error": str(e)}
         )
         return False
+
+
+def init_ws_auth_app() -> bool:
+    """WS subscribe 인증 전용 named app 초기화 — 낮은 `httpTimeout` 을 이 app 에만 건다.
+
+    ⛔ **지연 초기화 금지.** 검증은 `asyncio.to_thread` 안에서 도는데, 거기서 처음 만들면 동시
+    진입 시 `initialize_app` 이 중복 호출돼 `ValueError` 가 난다. 기동 시 `init_firebase()`
+    직후 **1회** 부른다.
+
+    ⚠️ 재진입 안전: 이미 있으면 `get_app` 으로 집는다(테스트가 모듈을 여러 번 초기화한다).
+    """
+    global _ws_auth_app
+
+    if _ws_auth_app is not None:
+        return True
+    if not init_firebase() or _credential is None:
+        return False
+    try:
+        try:
+            _ws_auth_app = firebase_admin.get_app(WS_AUTH_APP_NAME)
+        except ValueError:
+            _ws_auth_app = firebase_admin.initialize_app(
+                _credential,
+                {"httpTimeout": config.WS_AUTH_HTTP_TIMEOUT_SECONDS},
+                name=WS_AUTH_APP_NAME,
+            )
+        logger.info(
+            "WS 인증 전용 Firebase app 초기화 완료",
+            extra={"http_timeout": config.WS_AUTH_HTTP_TIMEOUT_SECONDS},
+        )
+        return True
+    except Exception:
+        logger.exception("WS 인증 전용 Firebase app 초기화 실패")
+        _ws_auth_app = None
+        return False
+
+
+def ws_auth_app():
+    """인증 전용 app 또는 `None`(미준비).
+
+    ⛔ 호출부는 **`None` 을 반드시 처리**해야 한다. `is_firebase_initialized()` 는 DEFAULT app 만
+    추적하므로, 그것만 보고 `get_app(WS_AUTH_APP_NAME)` 을 부르면 미준비 상태에서 `ValueError` 가
+    나고 그건 분류기가 모르는 예외라 **연결이 끊긴다**(§8-C 프레임이 아니라).
+    """
+    return _ws_auth_app
 
 
 def is_firebase_initialized() -> bool:

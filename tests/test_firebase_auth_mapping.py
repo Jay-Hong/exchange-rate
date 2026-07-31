@@ -255,5 +255,60 @@ class TestStubHierarchyFidelityForWsMapping(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(issubclass(getattr(auth, name), auth.InvalidIdTokenError))
 
+class TestWsAuthAppInitialization(unittest.TestCase):
+    """R4 — 인증 전용 app 이 **낮춘 httpTimeout 을 싣고** 만들어지고, **1회만** 만들어진다.
+
+    ⛔ 지연 초기화 금지의 이유: 검증은 `asyncio.to_thread` 안에서 돌아 동시 진입 시
+    `initialize_app` 이 중복 호출돼 `ValueError` 가 난다. 기동 시 1회여야 한다.
+    """
+
+    def setUp(self):
+        from app.notifications import fcm
+
+        self._fcm = fcm
+        self._saved_app = fcm._ws_auth_app
+        self._saved_cred = fcm._credential
+        fcm._ws_auth_app = None
+        fcm._credential = object()
+
+    def tearDown(self):
+        self._fcm._ws_auth_app = self._saved_app
+        self._fcm._credential = self._saved_cred
+
+    def test_named_app_carries_the_configured_http_timeout(self):
+        import firebase_admin
+
+        from app import config
+
+        created = object()
+        with patch.object(self._fcm, "init_firebase", return_value=True), \
+             patch.object(firebase_admin, "get_app", side_effect=ValueError("none")), \
+             patch.object(firebase_admin, "initialize_app", return_value=created) as init:
+            self.assertTrue(self._fcm.init_ws_auth_app())
+        self.assertIs(self._fcm.ws_auth_app(), created)
+        args, kwargs = init.call_args
+        self.assertEqual(
+            args[1], {"httpTimeout": config.WS_AUTH_HTTP_TIMEOUT_SECONDS},
+            "httpTimeout 이 실리지 않으면 transport 상한이 기본 120초 그대로다",
+        )
+        self.assertEqual(kwargs.get("name"), self._fcm.WS_AUTH_APP_NAME)
+
+    def test_initialization_is_idempotent(self):
+        import firebase_admin
+
+        created = object()
+        with patch.object(self._fcm, "init_firebase", return_value=True), \
+             patch.object(firebase_admin, "get_app", side_effect=ValueError("none")), \
+             patch.object(firebase_admin, "initialize_app", return_value=created) as init:
+            self.assertTrue(self._fcm.init_ws_auth_app())
+            self.assertTrue(self._fcm.init_ws_auth_app())
+        self.assertEqual(init.call_count, 1, "중복 초기화는 ValueError 를 낸다")
+
+    def test_accessor_is_none_before_initialization(self):
+        """⛔ `None` 을 돌려줘야 호출부가 §8-C 프레임으로 접을 수 있다 — 예외를 던지면
+        분류기가 모르는 상태가 되어 **연결이 끊긴다**."""
+        self.assertIsNone(self._fcm.ws_auth_app())
+
+
 if __name__ == "__main__":
     unittest.main()

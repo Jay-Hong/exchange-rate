@@ -28,7 +28,12 @@ from app.cache import redis_cache, BROADCAST_CACHE_KEY
 from app import config
 from app.config import REDIS_LATEST_ENABLED
 from app.latest_rates_cache import fetch_rates_from_redis, warmup_latest_rates
-from app.notifications.fcm import init_firebase, is_firebase_initialized, send_fcm_data_only
+from app.notifications.fcm import (
+    init_firebase,
+    init_ws_auth_app,
+    is_firebase_initialized,
+    send_fcm_data_only,
+)
 from sqlalchemy import exc as sqlalchemy_exc
 
 from app.subscription import verify_premium_status, PremiumStatus
@@ -599,6 +604,9 @@ async def lifespan(app: FastAPI):
 
     # Firebase Admin SDK 초기화 (Phase 2 - FCM)
     if init_firebase():
+        # ⛔ **지연 초기화 금지** — 검증은 `to_thread` 안에서 돌아 동시 진입 시 `initialize_app`
+        #    중복 호출로 ValueError 가 난다. 기동 시 1회만 만든다.
+        init_ws_auth_app()
         logger.info("✅ Firebase Admin SDK 초기화 완료")
     else:
         logger.warning("⚠️ Firebase Admin SDK 초기화 실패 (FCM 비활성화)")
@@ -2893,16 +2901,11 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
 # Phase 2: Firebase Auth + FCM 알림 API
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# §8-C `temporarily_unavailable` 동반값. jitter·백오프 정책은 별도 슬라이스라 고정값이다.
-WS_AUTH_RETRY_AFTER_SECONDS = 5
+# §8-C 동반값은 `app/config.py` 가 소유한다 — dispatcher(deadline 경로)도 같은 값을 써야 하고,
+# dispatcher 는 main.py 를 import 할 수 없기 때문이다.
+WS_AUTH_RETRY_AFTER_SECONDS = config.WS_AUTH_RETRY_AFTER_SECONDS
 
-# ⛔ **재시도로 낫지 않는** 결함(서버측 401/403, 설정 결함)은 같은 간격을 주면 안 된다.
-#    "재시도로 낫지 않는다"고 분류해 놓고 5초마다 재시도를 지시하면 (a) 클라가 retry storm 을
-#    만들고 (b) 요청마다 ERROR 가 쌓여 **운영자 신호가 오히려 희석된다**(codex Medium).
-#    §8-C 는 `retry_after_seconds` 동반만 규정하고 값·원인별 차등을 금지하지 않는다.
-#    ⚠️ 이것은 완화이지 해결이 아니다 — 서버는 클라의 **총 시도 상한을 강제할 수 없다**.
-#    그 계약(백오프·총 시도 상한)은 클라 배선 슬라이스의 몫이고, 여기서는 빈도만 6배 낮춘다.
-WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = 30
+WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
 
 
 def _classify_ws_subscribe_auth_failure(exc: BaseException):
@@ -3023,9 +3026,15 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
 
     from firebase_admin import auth
 
+    from app.notifications.fcm import ws_auth_app
     from app.topic_wire import FirebaseNotInitialized, SubscribeAuthFailed
 
-    if not is_firebase_initialized():
+    # ⛔ **DEFAULT app 만 보면 안 된다.** `is_firebase_initialized()` 는 DEFAULT app 전용
+    #    플래그라, 그것만 확인하고 인증 전용 app 을 쓰면 미준비 상태에서 `None` 이 흘러가거나
+    #    `get_app` 이 `ValueError` 를 던진다 — 둘 다 분류기가 모르는 상태라 재전파되어
+    #    **연결이 끊긴다**(§8-C 프레임이 아니라). 두 조건을 함께 본다.
+    auth_app = ws_auth_app()
+    if not is_firebase_initialized() or auth_app is None:
         raise SubscribeAuthFailed(
             *_classify_ws_subscribe_auth_failure(FirebaseNotInitialized("not initialized"))
         )
@@ -3034,8 +3043,10 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
     #    대가: subscribe마다 Firebase user record 조회가 1회 더 붙는다. lease가 들어오면 그 조회를
     #    lease horizon에 통합해 매 요청 비용을 없애는 것이 다음 단계다(지금은 horizon이 없다).
     try:
+        # ⛔ `app=` 를 빠뜨리면 DEFAULT app 이 쓰여 **낮춘 `httpTimeout` 이 통째로 no-op** 이
+        #    된다 — 그런데 프레임·로그·타이밍 어디에도 흔적이 남지 않는다(호출 인자만이 증거다).
         decoded = await asyncio.to_thread(
-            auth.verify_id_token, id_token, check_revoked=True
+            auth.verify_id_token, id_token, app=auth_app, check_revoked=True
         )
     except BaseException as exc:  # noqa: BLE001 — 분류 후 분류 불가면 그대로 재전파한다
         verdict = _classify_ws_subscribe_auth_failure(exc)

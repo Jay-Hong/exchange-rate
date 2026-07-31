@@ -18,6 +18,7 @@ flakiness 방어 (feedback_flaky_sleep_async_tests):
 scope: connect→subscribe→snapshot 수신(fx + usdt) + reconnect→재수신. send-failure cleanup은
 단위 테스트(test_topic_initial_snapshot.py), live/synthetic publish 수신은 별도 follow-up.
 """
+import asyncio
 import contextlib
 import threading
 import unittest
@@ -1114,6 +1115,10 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         patchers["fb_initialized"] = patch(
             "app.main.is_firebase_initialized", return_value=True
         )
+        # ⚠️ 가드는 **DEFAULT app 과 인증 전용 app 을 함께** 본다 — 후자를 빼면 미초기화로 접힌다.
+        patchers["auth_app"] = patch(
+            "app.notifications.fcm.ws_auth_app", return_value=object()
+        )
         patchers["fb_verify"] = patch.object(
             firebase_admin.auth, "verify_id_token", side_effect=sdk_error
         )
@@ -1215,6 +1220,122 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             f"분류 불가를 wire 프레임으로 접었다: {msg_box.get('msg')}",
         )
 
+    def test_verifier_that_never_finishes_yields_a_transient_frame(self):
+        """R1 — wire deadline 이 **dispatcher 에** 있다는 것까지 이 테스트 하나가 잠근다.
+
+        harness 는 verifier 를 **통째로** 교체한다. deadline 이 verifier 안에 있으면 fake 에는
+        없으므로 프레임이 오지 않고 hang → `_receive_json_or_fail` 이 fast-fail 한다.
+        즉 "프레임이 온다"가 곧 "deadline 이 호출부에 있다"이다 — 별도 위치 단언이 필요 없다.
+
+        ⚠️ **타이밍 단언 없음.** deadline 을 0.05 로 낮춰 하니스 join(2s)보다 훨씬 작게 만들면,
+        CI 부하가 늘어도 결론이 안 바뀐다(상한이 아니라 하한만 남는다).
+        """
+        never = asyncio.Event()
+
+        async def _hang(*_a, **_k):
+            await never.wait()          # ⛔ `AsyncMock(side_effect=lambda: sleep())` 은 await 되지
+                                        #    않아 즉시 통과한다 — 반드시 실제 코루틴이어야 한다.
+        patchers = self._patchers()
+        patchers["verify_token"] = patch("app.main.verify_ws_subscribe_token", new=_hang)
+        patchers["deadline"] = patch.object(config, "WS_AUTH_WIRE_DEADLINE_SECONDS", 0.05)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                with self.assertLogs("exchange_rate.topic_dispatcher", level="WARNING"):
+                    ws.send_json({"type": "subscribe", "request_id": "dl-1",
+                                  "id_token": "tok", "topics": ["fx:usd-krw"]})
+                    msg = _receive_json_or_fail(ws, self.fail)
+                ws.send_text("ping")
+                pong = _receive_json_or_fail(ws, self.fail)
+                subs = topic_dispatcher.registry.get_subscriptions(ws)
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "temporarily_unavailable")
+        self.assertEqual(msg.get("retry_after_seconds"), config.WS_AUTH_RETRY_AFTER_SECONDS)
+        self.assertEqual(pong, {"type": "pong"}, "deadline 이 연결을 닫았다 — 요청만 접어야 한다")
+        self.assertEqual(subs, set())
+
+    def test_unprepared_auth_app_yields_a_frame_not_a_dropped_connection(self):
+        """R2 — named app 미준비를 분류하지 않으면 **연결이 끊긴다**(프레임이 아니라).
+
+        `is_firebase_initialized()` 는 DEFAULT app 전용이라 그것만 보면 이 상태를 못 잡는다.
+        그 차이는 소켓에서만 보인다 — 단위로는 둘 다 "예외"라 구별되지 않는다.
+        """
+        import firebase_admin
+
+        patchers = self._patchers()
+        del patchers["verify_token"]                     # 실제 verifier 가 돈다
+        patchers["fb_initialized"] = patch(
+            "app.main.is_firebase_initialized", return_value=True
+        )
+        patchers["auth_app"] = patch(
+            "app.notifications.fcm.ws_auth_app", return_value=None
+        )
+        patchers["fb_verify"] = patch.object(
+            firebase_admin.auth, "verify_id_token",
+            side_effect=AssertionError("app 미준비인데 검증을 시도했다"),
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                with self.assertLogs("exchange_rate.main", level="ERROR"):
+                    ws.send_json({"type": "subscribe", "request_id": "noapp-1",
+                                  "id_token": "tok", "topics": ["fx:usd-krw"]})
+                    msg = _receive_json_or_fail(ws, self.fail)
+                ws.send_text("ping")
+                pong = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(msg.get("error"), "temporarily_unavailable")
+        self.assertEqual(
+            msg.get("retry_after_seconds"),
+            config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS,
+            "미준비는 재시도로 낫지 않는다 — 짧은 간격을 주면 storm 이 된다",
+        )
+        self.assertEqual(pong, {"type": "pong"}, "연결이 끊겼다")
+
+    def test_verification_is_bound_to_the_auth_app(self):
+        """R3 — `app=` 를 빠뜨리면 **낮춘 httpTimeout 이 통째로 no-op** 인데 흔적이 없다.
+
+        `httpTimeout` 은 firebase-admin 이 `app.options` 에서 **app 단위**로 읽으므로, DEFAULT
+        app 으로 검증하면 상한이 120초 그대로다. 프레임·로그·타이밍 어디에도 차이가 없어
+        **호출 인자만이 증거**다.
+
+        ⚠️ 여기서 실제 app 객체의 options 를 단언하지 않는다 — conftest 가 `firebase_admin` 을
+        MagicMock 으로 stub 하므로 로컬에서 영구 red 가 된다. options 는 아래 단위 테스트가 본다.
+        """
+        import firebase_admin
+
+        sentinel = object()
+        captured = {}
+
+        def _capture(token, **kwargs):
+            captured.update(kwargs)
+            return {"uid": "uid-app"}
+
+        patchers = self._patchers()
+        del patchers["verify_token"]
+        patchers["fb_initialized"] = patch(
+            "app.main.is_firebase_initialized", return_value=True
+        )
+        patchers["auth_app"] = patch(
+            "app.notifications.fcm.ws_auth_app", return_value=sentinel
+        )
+        patchers["fb_verify"] = patch.object(
+            firebase_admin.auth, "verify_id_token", side_effect=_capture
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "app-1",
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                _receive_json_or_fail(ws, self.fail)
+        self.assertIs(captured.get("app"), sentinel, "DEFAULT app 으로 검증했다 — ②가 no-op 이다")
+        self.assertIs(captured.get("check_revoked"), True)
+
 
 class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
     """`verify_ws_subscribe_token` **본문** — E2E 는 이 함수를 통째로 fake 하므로 미검증이다.
@@ -1231,13 +1352,16 @@ class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
         import firebase_admin
 
         with patch("app.main.is_firebase_initialized", return_value=True), \
+             patch("app.notifications.fcm.ws_auth_app", return_value=object()), \
              patch.object(
                  firebase_admin.auth, "verify_id_token", return_value={"uid": "uid-9"}
              ) as verify:
             uid = await app_main.verify_ws_subscribe_token("tok-9")
         self.assertEqual(uid, "uid-9")
         # ⛔ `check_revoked=True` 가 계약이다 — False 면 revoke 된 토큰이 통과해 accept 된다.
-        verify.assert_called_once_with("tok-9", check_revoked=True)
+        self.assertEqual(verify.call_args.args, ("tok-9",))
+        self.assertIs(verify.call_args.kwargs["check_revoked"], True)
+        self.assertIn("app", verify.call_args.kwargs, "인증 전용 app 이 전달되지 않았다")
 
     async def test_verification_runs_off_the_event_loop_thread(self):
         """⛔ 동기 SDK 호출이 loop 스레드에서 돌면 **그 프로세스의 모든 연결이 함께 멈춘다**.
@@ -1256,6 +1380,7 @@ class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
             return {"uid": "uid-off"}
 
         with patch("app.main.is_firebase_initialized", return_value=True), \
+             patch("app.notifications.fcm.ws_auth_app", return_value=object()), \
              patch.object(firebase_admin.auth, "verify_id_token", side_effect=_record):
             uid = await app_main.verify_ws_subscribe_token("tok-off")
 

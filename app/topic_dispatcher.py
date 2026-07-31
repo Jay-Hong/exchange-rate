@@ -30,6 +30,7 @@ Phase Z-2b의 backend topic 분배 인프라.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -43,7 +44,7 @@ from app import config
 logger = logging.getLogger("exchange_rate.topic_dispatcher")
 
 # 설정 결함(판정기 부재) 응답의 retry 동반값. §8-C 는 "동반"만 요구하고 정책은 별도 슬라이스다.
-_CONFIG_FAULT_RETRY_AFTER_SECONDS = 5
+_CONFIG_FAULT_RETRY_AFTER_SECONDS = config.WS_AUTH_RETRY_AFTER_SECONDS
 
 
 class TopicRegistry:
@@ -337,7 +338,31 @@ async def handle_client_message(
 
         # 토큰이 실린 요청만 인증 경로를 탄다.
         try:
-            await authorize_subscribe(id_token)
+            # ⛔ **deadline 은 여기(dispatcher)에 있어야 한다.** 검증자 안에 두면 E2E harness 가
+            #    검증자를 통째로 fake 하므로 `/ws` 경계에서 영영 관측되지 않는다.
+            #    ⚠️ 이것이 막는 것은 **호출자 대기**뿐이다 — `to_thread` 작업은 취소되지 않으므로
+            #    실행 중 스레드는 계속 돈다(직접 재현). 그 잔여는 SDK transport 상한(인증 전용
+            #    named app 의 `httpTimeout`)이 맡는다. 두 축이 함께 있어야 의미가 있다.
+            await asyncio.wait_for(
+                authorize_subscribe(id_token),
+                timeout=config.WS_AUTH_WIRE_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # ⚠️ WARNING 인 이유: 이건 **일시 장애**다(재시도로 나을 수 있다). ERROR 로 올리면
+            #    "재시도 간격이 길어야 한다"는 결합 규칙과 어긋나고, 고빈도 생산자라 신호가 희석된다.
+            #    다만 로그가 **아예 없으면** D 를 튜닝할 근거가 영영 안 생긴다.
+            logger.warning(
+                "WS subscribe 인증이 wire deadline 을 넘었다",
+                extra={"deadline_seconds": config.WS_AUTH_WIRE_DEADLINE_SECONDS},
+            )
+            await websocket.send_json(
+                build_subscription_error(
+                    request_id=msg.get("request_id"),
+                    error="temporarily_unavailable",
+                    retry_after_seconds=config.WS_AUTH_RETRY_AFTER_SECONDS,
+                )
+            )
+            return
         except SubscribeAuthFailed as failure:
             # ⚠️ **연결과 registry 는 불변이다.** §8-C 의 두 코드는 전체-요청 범위이므로 요청만
             #    접는다 — 구 동작은 예외가 상위로 올라가 연결이 닫히고 그 연결의 **다른 구독까지**

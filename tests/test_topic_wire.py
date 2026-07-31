@@ -7,6 +7,7 @@
 조합만 넘기면 강제를 통째로 지워도 스위트가 green 이기 때문이다(변이 실측: `emitter: 필수 조합
 검사 제거` / `금지 조합 검사 제거` 둘 다 **생존**했다). 그래서 여기서 직접 잠근다.
 """
+import pathlib
 import unittest
 
 from app.topic_wire import (
@@ -124,6 +125,46 @@ class TestSubscribeAuthFailed(unittest.TestCase):
         """⛔ 전용 타입이라야 `RuntimeError` 를 통째로 잡는 실수를 피할 수 있다."""
         self.assertTrue(issubclass(FirebaseNotInitialized, RuntimeError))
         self.assertIsNot(FirebaseNotInitialized, RuntimeError)
+
+
+class TestAuthTimeConstants(unittest.TestCase):
+    """R5 — 두 시간 축의 **관계**가 계약이다.
+
+    ⛔ `D ≤ T` 면 transport 상한이 발동하기 전에 호출자가 먼저 포기하므로 낮춘 `httpTimeout` 이
+    아무것도 바꾸지 않는다 — 축2 가 **죽은 코드**가 된다. 그 상태를 import 시점에 막는다.
+    """
+
+    def test_wire_deadline_exceeds_the_transport_timeout(self):
+        from app import config
+
+        self.assertGreater(
+            config.WS_AUTH_WIRE_DEADLINE_SECONDS,
+            config.WS_AUTH_HTTP_TIMEOUT_SECONDS,
+            "D ≤ T 면 transport 상한이 영영 발동하지 않는다",
+        )
+
+    def test_config_import_refuses_a_violating_pair(self):
+        """⛔ 단언만 있으면 상수를 바꾼 사람이 이 테스트를 지우고 끝낼 수 있다 —
+        **import 자체가 거부**하는지 본다."""
+        import importlib
+        from unittest.mock import patch
+
+        from app import config
+
+        src = pathlib.Path(config.__file__).read_text(encoding="utf-8")
+        self.assertIn(
+            "raise ValueError", src.split("WS_AUTH_WIRE_DEADLINE_SECONDS <=")[-1][:400],
+            "불변식이 import 시점에 강제되지 않는다",
+        )
+
+    def test_persistent_faults_wait_longer_than_transient_ones(self):
+        from app import config
+
+        self.assertGreater(
+            config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS,
+            config.WS_AUTH_RETRY_AFTER_SECONDS,
+            "재시도로 낫지 않는 결함에 같은 간격을 주면 retry storm 이 된다",
+        )
 
 
 if __name__ == "__main__":
