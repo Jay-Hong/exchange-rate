@@ -742,6 +742,13 @@ def _google_auth_error(message):
     return google_auth_exceptions.GoogleAuthError(message)
 
 
+def _firebase_error(class_name, message):
+    """`firebase_admin.exceptions` 의 특정 예외 인스턴스. 로컬은 stub, CI 는 실물."""
+    from firebase_admin import exceptions as fb_exceptions
+
+    return getattr(fb_exceptions, class_name)(message)
+
+
 def _receive_json_or_fail(ws, fail, timeout=2.0):
     """`ws.receive_json()` 을 thread+join 으로 감싼다 — 미전달 시 hang 대신 fast fail.
 
@@ -1138,7 +1145,11 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         cases = [
             (auth.RevokedIdTokenError("revoked"), "invalid_token", False, False),
             (auth.UserDisabledError("disabled"), "invalid_token", False, False),
-            (auth.UserNotFoundError("gone"), "invalid_token", False, False),
+            # ⛔ **자격 오류가 아니다.** 6.9.0 `_user_mgt.py:598` 은 `accounts:lookup` 응답이
+            #    falsy 이거나 `users` 필드가 없기만 해도 같은 예외를 던진다 — 계정 삭제와 공급자
+            #    응답 손상이 **구별 불가**다. 손상을 자격 오류로 접으면 장애 중 정상 사용자
+            #    **전원**이 재인증을 요구받는다(codex High).
+            (auth.UserNotFoundError("gone"), "temporarily_unavailable", True, False),
             (auth.ConfigurationNotFoundError("no cfg"), "temporarily_unavailable", True, True),
             # ⚠️ 실물 `CertificateFetchError.__init__(self, message, cause)` 는 cause 가 **필수**다
             #    (6.9.0 `_token_gen.py:431`). stub 이 그걸 그대로 반영해 내 호출 실수를 잡았다.
@@ -1147,17 +1158,27 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             #    그물을 통과해 날것으로 올라온다 → 별 절이 필요하다(부모 `GoogleAuthError` 를 잡아
             #    `RefreshError`·`TransportError` 를 함께 덮는다).
             (_google_auth_error("refresh failed"), "temporarily_unavailable", True, True),
+            # ⛔ 재시도로 낫지 않는 **서버측** 자격 오류(401/403)는 wire 값이 같아도 **운영자
+            #    신호**가 있어야 한다 — 없으면 죽은 서비스계정 키를 클라가 5초마다 재시도하는
+            #    동안 서버는 아무것도 모른다.
+            (_firebase_error("PermissionDeniedError", "403"), "temporarily_unavailable", True, True),
+            (_firebase_error("UnauthenticatedError", "401"), "temporarily_unavailable", True, True),
         ]
         # ⛔ 설정 결함 계열은 **운영자 신호(ERROR)** 도 계약이다 — 그것이 그 절의 고유 가치다.
         #    변이 실측: NotFound 절을 지우면 verdict 는 FirebaseError 절로 흘러 **동일**해서
         #    verdict 단언만으론 생존한다. 로그를 함께 봐야 그 절이 잠긴다.
         for exc, expected_error, wants_retry, wants_error_log in cases:
             with self.subTest(exc=type(exc).__name__):
+                # ⛔ 플래그는 **양방향**이다. `False` 를 "검사 안 함"으로 두면 ERROR 를 남발하는
+                #    변이가 생존한다 — 실측: `UserNotFoundError` 절을 지우면 형제 절로 흘러
+                #    verdict 는 **동일**하고 로그만 WARNING→ERROR 로 바뀌는데, 그건 정상 사건인
+                #    계정 삭제마다 운영자에게 거짓 경보를 울리는 것이다(늑대 소년).
                 if wants_error_log:
                     with self.assertLogs("exchange_rate.main", level="ERROR"):
                         msg, subs = self._subscribe_with_real_verifier(exc)
                 else:
-                    msg, subs = self._subscribe_with_real_verifier(exc)
+                    with self.assertNoLogs("exchange_rate.main", level="ERROR"):
+                        msg, subs = self._subscribe_with_real_verifier(exc)
                 self.assertEqual(msg.get("type"), "subscription_error")
                 self.assertEqual(msg.get("error"), expected_error)
                 self.assertEqual(

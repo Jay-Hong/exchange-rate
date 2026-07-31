@@ -10,6 +10,7 @@
 import unittest
 
 from app.topic_wire import (
+    WHOLE_REQUEST_ERRORS,
     FirebaseNotInitialized,
     SubscribeAuthFailed,
     build_subscription_error,
@@ -72,6 +73,42 @@ class TestRetryAfterCoupling(unittest.TestCase):
             request_id="r", error="temporarily_unavailable", retry_after_seconds=3600
         )
         self.assertEqual(frame["retry_after_seconds"], 3600)
+
+
+class TestErrorVocabulary(unittest.TestCase):
+    """§8-C 의 **전체-요청 코드**만 프레임이 된다.
+
+    ⛔ 어휘를 강제하지 않으면 오타나 즉흥 코드가 정상 프레임으로 나가 코드가 **제3의 계약**을
+    만든다(실측: `error="typo_not_in_section_8"` 이 그대로 통과했다 — codex Medium).
+    """
+
+    def test_unknown_codes_are_rejected(self):
+        for bad in ("typo_not_in_section_8", "", "INVALID_TOKEN", None):
+            with self.subTest(error=bad), self.assertRaises(ValueError):
+                build_subscription_error(request_id="r", error=bad)
+
+    def test_per_topic_codes_are_rejected(self):
+        """per-topic 코드는 ack 의 `rejected_topics` 에 실린다 — 여기 오면 계약 혼선이다."""
+        for per_topic in (
+            "unknown_topic", "topic_unavailable", "premium_required",
+            "krx_entitlement_required", "topics_disabled",
+        ):
+            with self.subTest(error=per_topic), self.assertRaises(ValueError):
+                build_subscription_error(request_id="r", error=per_topic)
+
+    def test_every_allowed_code_can_actually_build_a_frame(self):
+        """⛔ 자기검사 — 허용 목록이 비거나 좁아지면 이 테스트가 먼저 깨진다."""
+        self.assertEqual(
+            WHOLE_REQUEST_ERRORS,
+            {"invalid_token", "temporarily_unavailable", "invalid_request", "request_too_large"},
+        )
+        for code in sorted(WHOLE_REQUEST_ERRORS):
+            with self.subTest(error=code):
+                retry = 5 if code == "temporarily_unavailable" else None
+                frame = build_subscription_error(
+                    request_id="r", error=code, retry_after_seconds=retry
+                )
+                self.assertEqual(frame["error"], code)
 
 
 class TestSubscribeAuthFailed(unittest.TestCase):

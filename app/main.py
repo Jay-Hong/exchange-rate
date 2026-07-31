@@ -2919,6 +2919,12 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
 
     from app.topic_wire import FirebaseNotInitialized
 
+    # 재시도로 낫지 않는 **서버측** 자격 오류 (HTTP 401/403 → 6.9.0 `_utils.py:51-52`).
+    _PERSISTENT_FIREBASE_FAULTS = (
+        fb_exceptions.UnauthenticatedError,
+        fb_exceptions.PermissionDeniedError,
+    )
+
     # ── invalid_token — 자격 자체를 못 쓴다. 클라 재인증이 유일한 해법이다. ──
     if isinstance(exc, auth.InvalidIdTokenError):     # Revoked/Expired 포함(하위)
         return "invalid_token", None
@@ -2928,14 +2934,25 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
         #    Firebase 에서 실패해 자연 종결된다 → least-bad 는 invalid_token 이다.
         logger.warning("WS subscribe: 비활성 계정", extra={"reason": "user_disabled"})
         return "invalid_token", None
-    if isinstance(exc, auth.UserNotFoundError):
-        # 토큰 발급 후 계정 삭제 — 자격이 죽었다.
-        return "invalid_token", None
 
     # ── temporarily_unavailable — 판정할 수 없다. registry 는 불변이어야 한다. ──
+    if isinstance(exc, auth.UserNotFoundError):
+        # ⛔ **자격 오류로 접지 않는다.** 이 예외는 계정 삭제를 증명하지 못한다 —
+        #    6.9.0 `_user_mgt.py:598` 은 `accounts:lookup` 응답이 **falsy 이거나 `users` 필드가
+        #    없기만 해도** 같은 예외를 던진다. 즉 "계정 삭제"와 "공급자 응답 손상"이 구별 불가다.
+        #    비대칭이 방향을 정한다: 손상을 자격 오류로 접으면 장애 중 **정상 사용자 전원**이
+        #    재인증을 요구받고(그 재인증도 같은 이유로 실패한다), 반대로 접으면 삭제된 계정
+        #    하나가 재시도할 뿐이다. 대량 중단 쪽이 져야 한다.
+        #    ⚠️ WARNING 인 이유: 계정 삭제는 **정상 사건**이라 ERROR 는 소음이 된다. 공급자 손상은
+        #    같은 신호가 **집단으로** 뜨는 형태로 드러난다.
+        logger.warning(
+            "WS subscribe: 사용자 레코드 없음 — 계정 삭제와 공급자 응답 손상을 구별할 수 없다",
+            extra={"exc_type": type(exc).__name__},
+        )
+        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
     if isinstance(exc, fb_exceptions.NotFoundError):
-        # 위 `UserNotFoundError` 절을 지나 여기 오는 것은 **형제들**이다(Configuration/Tenant/
-        # Email NotFound + 미매핑 404). 전부 우리 설정 결함 계열이므로 운영자 신호를 낸다.
+        # 여기 오는 것은 `UserNotFoundError` 의 **형제들**이다(Configuration/Tenant/Email
+        # NotFound + 미매핑 404). 전부 우리 설정 결함 계열이므로 운영자 신호를 낸다.
         logger.error(
             "WS subscribe: Firebase NotFound 계열 — 설정 결함 의심",
             extra={"exc_type": type(exc).__name__},
@@ -2944,9 +2961,19 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
     if isinstance(exc, FirebaseNotInitialized):
         logger.error("WS subscribe: Firebase 미초기화")
         return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+    if isinstance(exc, _PERSISTENT_FIREBASE_FAULTS):
+        # ⛔ **재시도로 낫지 않는 서버측 자격 오류**(401/403)다. 일반 FirebaseError 와 같은 절에
+        #    두면 클라는 5초마다 재시도하는데 **서버에는 신호가 없다** — 죽은 서비스계정 키나
+        #    회수된 권한을 영영 못 찾는다. wire 값은 같지만(§8-C 에 internal_error 가 없다)
+        #    운영자 축은 분리해야 한다.
+        logger.error(
+            "WS subscribe: Firebase 서버 자격 오류 — 재시도로 낫지 않는다",
+            extra={"exc_type": type(exc).__name__},
+        )
+        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
     if isinstance(exc, fb_exceptions.FirebaseError):
-        # 인증서 조회 실패 + `check_revoked=True` 가 여는 accounts:lookup 실패 전군
-        # (Unavailable / DeadlineExceeded / Internal / ResourceExhausted / PermissionDenied …).
+        # 일시 장애군: 인증서 조회 실패 + `check_revoked=True` 가 여는 accounts:lookup 실패
+        # (Unavailable / DeadlineExceeded / Internal / ResourceExhausted / Unknown …).
         return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
     if isinstance(exc, google_auth_exceptions.GoogleAuthError):
         # ⚠️ 서비스계정 토큰 갱신 실패(`RefreshError`)는 FirebaseError 도 requests 예외도 **아니라**

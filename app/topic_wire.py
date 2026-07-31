@@ -22,6 +22,18 @@ from __future__ import annotations
 
 from typing import Optional
 
+# §8-C 의 **전체-요청** 오류 코드 전부. per-topic 코드(`unknown_topic` / `topic_unavailable` /
+# `premium_required` / `krx_entitlement_required` / `topics_disabled`)는 ack 의 `rejected_topics`
+# 에 실리므로 여기 오지 않는다.
+# ⛔ 어휘를 강제하지 않으면 오타나 즉흥 코드가 정상 프레임으로 나가 **코드가 제3의 계약을
+#    만든다**(실측: `error="typo_not_in_section_8"` 이 그대로 통과했다).
+WHOLE_REQUEST_ERRORS = frozenset({
+    "invalid_token",
+    "temporarily_unavailable",
+    "invalid_request",
+    "request_too_large",
+})
+
 # §8-C: 이 코드는 `retry_after_seconds` 를 **반드시** 동반한다. 클라의 재시도 공식 입력이다.
 _ERRORS_REQUIRING_RETRY_AFTER = frozenset({"temporarily_unavailable"})
 
@@ -65,9 +77,16 @@ def build_subscription_error(
     ⚠️ 상한은 강제하지 않는다 — 정본 §8-C 는 "동반"만 요구하고 값·jitter 정책은 별도 슬라이스다.
     여기서 임의 상한을 박으면 그 정책을 **코드가 먼저 결정**해 버린다.
 
+    ⛔ `error` 는 §8-C 의 **전체-요청 코드**여야 한다. per-topic 코드나 즉흥 문자열은 거부한다.
+
     Raises:
-        ValueError: 위 결합 규칙 위반.
+        ValueError: 어휘 밖 코드, 또는 위 결합 규칙 위반.
     """
+    if error not in WHOLE_REQUEST_ERRORS:
+        raise ValueError(
+            f"§8-C 의 전체-요청 오류 코드가 아니다: {error!r} — "
+            f"허용: {sorted(WHOLE_REQUEST_ERRORS)}"
+        )
     if error in _ERRORS_REQUIRING_RETRY_AFTER:
         if (
             isinstance(retry_after_seconds, bool)

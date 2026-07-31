@@ -342,9 +342,25 @@ WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다
 `temporarily_unavailable`. `topic_unavailable`을 쓰면 안 된다 — 그 코드는 "개별 flag off"를 뜻하고,
 flag가 켜진 상태에 쓰면 운영자가 flag를 보고 코드와 모순을 겪는다.
 
-⚠️ **timeout 은 다음 슬라이스 필수**: 검증 SDK 호출에 상한이 없으면 멈춘 작업마다 요청 task가
-무기한 남고 재연결 시 thread 작업이 누적된다. `to_thread` 작업은 **취소되지 않으므로** timeout을
-넣는 슬라이스가 그 성질을 함께 다뤄야 한다.
+⚠️ **timeout 은 다음 슬라이스 필수 — 그리고 축이 두 개다** (2026-07-30 정정):
+
+1. **wire deadline** — 호출자가 기다리는 시간의 상한. **dispatcher 에** 걸어야 한다: E2E harness 가
+   verifier 를 통째로 fake 하므로 verifier 안에 두면 `/ws` 경계에서 영원히 관측되지 않는다.
+2. **SDK transport 상한** — 1번만으론 부족하다. `asyncio.to_thread` 작업은 **취소되지 않으므로**
+   호출자가 포기해도 스레드는 계속 돌며 **공유 executor** 슬롯을 점유한다(직접 재현). 그 pool 은
+   `min(32, cpu+4)` 이고 리포의 `to_thread` 호출부가 함께 쓴다 — 인증 대기가 snapshot·DB 작업까지
+   밀어낸다.
+
+⛔ **정정**: 한때 "`httpTimeout` 은 프로세스 전역이라 FCM 까지 조인다"고 적었는데 **틀렸다**(codex).
+firebase-admin 6.9.0 은 `app.options.get("httpTimeout", …)` 로 **app 별**로 읽고
+(`_auth_client.py:42` 와 `messaging.py:470` 이 각각 자기 app 을 본다), `initialize_app(..., name=…)`
+로 named app 을 만들 수 있으며 `verify_id_token(id_token, app=…)` 이 그 app 을 받는다.
+즉 **인증 전용 named app 으로 transport 상한을 FCM 과 분리**할 수 있다 — "전역이라 못 한다"는
+근거는 성립하지 않는다.
+
+⚠️ 그래도 SDK 재시도가 남는다: `accounts:lookup` 은 per-attempt 120초 기본 + status 재시도 4회
+(`_http_client.py:41-52`)라, transport 상한을 낮추지 않으면 한 subscribe 가 분 단위로 스레드를
+점유할 수 있다.
 
 - `operation`: `"subscribe"` | `"unsubscribe"` — 같은 schema를 쓰므로 구분자가 필요하다.
 - `accepted_topics`/`rejected_topics`/`removed_topics` = **이번 요청의 결과**.

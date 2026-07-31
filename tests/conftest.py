@@ -109,6 +109,20 @@ class _StubUnavailableError(_StubFirebaseError):
         _StubFirebaseError.__init__(self, "UNAVAILABLE", message, cause, http_response)
 
 
+class _StubUnauthenticatedError(_StubFirebaseError):
+    """`exceptions.UnauthenticatedError` — HTTP 401. **재시도로 낫지 않는** 서버측 자격 오류."""
+
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "UNAUTHENTICATED", message, cause, http_response)
+
+
+class _StubPermissionDeniedError(_StubFirebaseError):
+    """`exceptions.PermissionDeniedError` — HTTP 403. 위와 같은 부류."""
+
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "PERMISSION_DENIED", message, cause, http_response)
+
+
 class _StubCertificateFetchError(_StubUnknownError):
     def __init__(self, message, cause):
         _StubUnknownError.__init__(self, message, cause)
@@ -126,6 +140,8 @@ _fb_exceptions.FirebaseError = _StubFirebaseError
 #    `tests/test_firebase_auth_mapping.py` 의 fidelity 단언이 이 계층을 직접 잠근다.
 _fb_exceptions.NotFoundError = _StubNotFoundError
 _fb_exceptions.UnavailableError = _StubUnavailableError
+_fb_exceptions.UnauthenticatedError = _StubUnauthenticatedError
+_fb_exceptions.PermissionDeniedError = _StubPermissionDeniedError
 _fb_auth.NotFoundError = _StubNotFoundError
 _fb_auth.UserNotFoundError = _StubUserNotFoundError
 _fb_auth.ConfigurationNotFoundError = _StubConfigurationNotFoundError
