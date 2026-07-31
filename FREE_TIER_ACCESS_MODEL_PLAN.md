@@ -367,14 +367,26 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   되고, 1초면 빠질 큐를 대량 거절한다. 이 워크로드의 모양과 정반대다.
 - 🔲 **격리(인증 전용 executor) = 미결.** 이건 admission control 이 **아니다** — 거절하지 않고
   자원을 나눌 뿐이라 새 wire 결과가 없다. 측정: 동거 작업 p99 **3967ms → 31ms**.
-  ⚠️ 대가: 워커 수 W 가 곧 인증 처리 용량(W/T)이라 잘못 잡으면 스스로 문턱을 낮춘다. 그리고
-  `/ws` 프레임으로 관측되지 않아 구조 트립와이어로만 잠긴다.
+  ⚠️ 대가: 워커 수 W 가 곧 인증 처리 용량(W/T)이라 잘못 잡으면 스스로 문턱을 낮춘다.
+  ⛔ **"5줄 격리"라고 적었던 것은 과소평가다**(codex Medium). 실제로 다뤄야 하는 것:
+    · **수명주기** — 모듈 전역 pool 의 생성·종료(앱 shutdown 에서 안 닫으면 스레드가 남는다),
+    · **kwargs** — `loop.run_in_executor(ex, func, *args)` 는 **키워드 인자를 받지 않는다**
+      (`functools.partial` 필요). 현행 호출은 `check_revoked=`/`app=` 를 키워드로 넘긴다,
+    · **큐 적체** — 전용 pool 도 `SimpleQueue` 라 무제한이다. 격리는 *동거인* 을 지킬 뿐
+      인증 자신의 적체는 그대로다.
+  ⛔ **"구조 트립와이어로만 잠긴다"도 틀렸다**(codex Medium): **기본 executor 를 점유해 놓고**
+    인증이 진행되는지 보면 **행동으로** 검증된다 — 격리가 없으면 인증이 함께 막힌다.
 - 🔲 **ingress 상한(nginx `/ws`) = 미결.** 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
   **없다**(주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다. 즉 인증 이전 단계에서
   토큰 flood 를 막는 것이 없다. **호스트 config 변경이라 별도 승인이 필요하다.**
 
 ⚠️ 큐 자체는 caller deadline 이 드레인하지만(취소가 concurrent future 로 전파돼 dequeue 시 skip),
 큐 **크기**는 유입률 × deadline 이고 고정 상한이 없다 — 위 두 항목이 그 상한을 정하는 자리다.
+
+⚠️ **dormant 의 범위 정정**: `TOPIC_DISPATCHER_ENABLED=false` 가 막는 것은 **요청 경로**뿐이다.
+인증 전용 named app 초기화는 **flag 와 무관하게 startup 에서 실행**되므로, 다음 배포에서
+프로세스마다 Firebase app 이 하나 더 생긴다(실패해도 로그 후 `None` 이라 서비스 영향은 없다).
+"flag off 라 이 경로는 프로덕션에서 아직 돌지 않는다"는 서술은 **요청 경로에만** 정확하다.
 
 ⚠️ 그래도 SDK 재시도가 남는다: `accounts:lookup` 은 per-attempt 120초 기본 + status 재시도 4회
 (`_http_client.py:41-52`)라, transport 상한을 낮추지 않으면 한 subscribe 가 분 단위로 스레드를

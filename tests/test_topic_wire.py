@@ -136,13 +136,15 @@ class TestAuthTimeConstants(unittest.TestCase):
     즉 유효한 설정을 막는 게이트였다. 그래서 이 클래스는 **관계가 아니라 현재 선택**을 기록한다.
     """
 
-    def test_current_choice_preserves_the_sdk_error_taxonomy(self):
-        """현재 D > T 를 택한 이유는 불변식이 아니라 **의미**다.
+    def test_records_the_current_tuning_choice(self):
+        """현재 D > T 는 **튜닝 선택**을 기록한 것이다 — 불변식도, 보장도 아니다.
 
-        D > T 면 SDK 가 먼저 끝나 그 오류 분류(`invalid_token` / 일시 장애)가 클라에 도달한다.
-        D < T 면 느린 검증이 전부 deadline 으로 뭉쳐져 §8-C 타입 경계가 그 구간에서 사라진다.
-        ⚠️ 이 단언이 red 가 되면 **버그가 아니라 정책 변경**이다 — 위 trade-off 를 다시 판단하고
-        이 docstring 을 고칠 것. 값만 맞추고 지나가지 말 것.
+        ⛔ 한때 이 테스트가 "분류 보존"을 주장했는데 **과장이었다**(codex Medium): T 는
+        per-attempt 상한이고 한 번의 검증은 인증서 조회 + 계정 조회 × (1 + 재시도) + backoff 를
+        합치므로, 그 총합은 D 를 넘을 수 있다. 따라서 D > T 여도 느린 실패는 deadline 으로 뭉쳐진다.
+
+        ⚠️ 이 단언이 red 가 되면 **버그가 아니라 튜닝 변경**이다 — 값만 맞추고 지나가지 말고
+        위 사실을 근거로 D·T 를 함께 다시 정할 것.
         """
         from app import config
 
