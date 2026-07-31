@@ -128,33 +128,27 @@ class TestSubscribeAuthFailed(unittest.TestCase):
 
 
 class TestAuthTimeConstants(unittest.TestCase):
-    """R5 — 두 시간 축의 **관계**가 계약이다.
+    """두 시간 축은 **독립**이다 — 관계를 불변식으로 강제하지 않는다.
 
-    ⛔ `D ≤ T` 면 transport 상한이 발동하기 전에 호출자가 먼저 포기하므로 낮춘 `httpTimeout` 이
-    아무것도 바꾸지 않는다 — 축2 가 **죽은 코드**가 된다. 그 상태를 import 시점에 막는다.
+    ⛔ 한때 `D > T` 를 import 시점에 강제했고 근거를 "D ≤ T 면 transport 상한이 죽은 코드"라고
+    적었는데 **그 근거가 거짓이었다**(codex High, 재현 확인): 호출자가 포기해도 `to_thread`
+    worker 는 취소되지 않고 **SDK 자체 상한 T 에 종료된다**(D=0.05/T=0.20 → worker 0.205s).
+    즉 유효한 설정을 막는 게이트였다. 그래서 이 클래스는 **관계가 아니라 현재 선택**을 기록한다.
     """
 
-    def test_wire_deadline_exceeds_the_transport_timeout(self):
+    def test_current_choice_preserves_the_sdk_error_taxonomy(self):
+        """현재 D > T 를 택한 이유는 불변식이 아니라 **의미**다.
+
+        D > T 면 SDK 가 먼저 끝나 그 오류 분류(`invalid_token` / 일시 장애)가 클라에 도달한다.
+        D < T 면 느린 검증이 전부 deadline 으로 뭉쳐져 §8-C 타입 경계가 그 구간에서 사라진다.
+        ⚠️ 이 단언이 red 가 되면 **버그가 아니라 정책 변경**이다 — 위 trade-off 를 다시 판단하고
+        이 docstring 을 고칠 것. 값만 맞추고 지나가지 말 것.
+        """
         from app import config
 
         self.assertGreater(
             config.WS_AUTH_WIRE_DEADLINE_SECONDS,
             config.WS_AUTH_HTTP_TIMEOUT_SECONDS,
-            "D ≤ T 면 transport 상한이 영영 발동하지 않는다",
-        )
-
-    def test_config_import_refuses_a_violating_pair(self):
-        """⛔ 단언만 있으면 상수를 바꾼 사람이 이 테스트를 지우고 끝낼 수 있다 —
-        **import 자체가 거부**하는지 본다."""
-        import importlib
-        from unittest.mock import patch
-
-        from app import config
-
-        src = pathlib.Path(config.__file__).read_text(encoding="utf-8")
-        self.assertIn(
-            "raise ValueError", src.split("WS_AUTH_WIRE_DEADLINE_SECONDS <=")[-1][:400],
-            "불변식이 import 시점에 강제되지 않는다",
         )
 
     def test_persistent_faults_wait_longer_than_transient_ones(self):

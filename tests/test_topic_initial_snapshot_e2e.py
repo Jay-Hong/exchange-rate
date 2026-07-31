@@ -1256,6 +1256,38 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(pong, {"type": "pong"}, "deadline 이 연결을 닫았다 — 요청만 접어야 한다")
         self.assertEqual(subs, set())
 
+    def test_verifier_raised_timeout_is_not_reported_as_a_wire_deadline(self):
+        """⛔ 검증자가 스스로 던진 `TimeoutError` 를 deadline 초과로 기록하면 **D 를 튜닝할
+        telemetry 가 오염된다**(codex Medium).
+
+        ⚠️ 이론이 아니다: 3.10+ 에서 `socket.timeout is TimeoutError` 라 SDK 내부 소켓 timeout 이
+        그대로 이 타입으로 도착할 수 있다. `wait_for` 는 두 경우를 **같은 예외**로 주므로
+        `asyncio.timeout` + `expired()` 로 갈라야 구분된다.
+
+        관측: deadline 프레임이 오지 **않고**(분류 불가라 재전파) 연결이 끊긴다.
+        """
+        async def _raise_timeout(*_a, **_k):
+            raise TimeoutError("SDK 내부 소켓 timeout")
+
+        patchers = self._patchers()
+        patchers["verify_token"] = patch("app.main.verify_ws_subscribe_token", new=_raise_timeout)
+        got = {}
+        try:
+            with contextlib.ExitStack() as stack:
+                for patcher in patchers.values():
+                    stack.enter_context(patcher)
+                with self.client.websocket_connect("/ws") as ws:
+                    _receive_json_or_fail(ws, self.fail)
+                    ws.send_json({"type": "subscribe", "request_id": "vt-1",
+                                  "id_token": "tok", "topics": ["fx:usd-krw"]})
+                    got["msg"] = _receive_json_or_fail(ws, self.fail, timeout=1.0)
+        except Exception:      # noqa: BLE001 — 연결 종료가 기대 동작이다
+            pass
+        self.assertNotIn(
+            "msg", got,
+            f"검증자의 TimeoutError 를 wire deadline 으로 접었다: {got.get('msg')}",
+        )
+
     def test_unprepared_auth_app_yields_a_frame_not_a_dropped_connection(self):
         """R2 — named app 미준비를 분류하지 않으면 **연결이 끊긴다**(프레임이 아니라).
 

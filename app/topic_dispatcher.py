@@ -343,11 +343,18 @@ async def handle_client_message(
             #    ⚠️ 이것이 막는 것은 **호출자 대기**뿐이다 — `to_thread` 작업은 취소되지 않으므로
             #    실행 중 스레드는 계속 돈다(직접 재현). 그 잔여는 SDK transport 상한(인증 전용
             #    named app 의 `httpTimeout`)이 맡는다. 두 축이 함께 있어야 의미가 있다.
-            await asyncio.wait_for(
-                authorize_subscribe(id_token),
-                timeout=config.WS_AUTH_WIRE_DEADLINE_SECONDS,
-            )
+            # ⛔ `wait_for` 대신 `asyncio.timeout` 을 쓰는 이유: `wait_for` 는 **실제 deadline
+            #    초과**와 **검증자 안에서 올라온 `TimeoutError`** 를 같은 예외로 준다. 후자를
+            #    "wire deadline 초과"로 기록하면 D 를 튜닝할 telemetry 가 오염된다 —
+            #    ⚠️ 그리고 이건 이론이 아니다: 3.10+ 에서 `socket.timeout is TimeoutError` 라
+            #    SDK 내부 소켓 timeout 이 그대로 이 타입으로 도착할 수 있다.
+            async with asyncio.timeout(config.WS_AUTH_WIRE_DEADLINE_SECONDS) as deadline_cm:
+                await authorize_subscribe(id_token)
         except asyncio.TimeoutError:
+            if not deadline_cm.expired():
+                # 검증자가 스스로 던진 TimeoutError — 분류되지 않은 예외다. 우리 계약은
+                # **분류 불가를 삼키지 않는다**(재전파 → 상위가 traceback 을 남기고 연결 정리).
+                raise
             # ⚠️ WARNING 인 이유: 이건 **일시 장애**다(재시도로 나을 수 있다). ERROR 로 올리면
             #    "재시도 간격이 길어야 한다"는 결합 규칙과 어긋나고, 고빈도 생산자라 신호가 희석된다.
             #    다만 로그가 **아예 없으면** D 를 튜닝할 근거가 영영 안 생긴다.

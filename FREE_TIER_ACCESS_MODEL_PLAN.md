@@ -358,6 +358,24 @@ firebase-admin 6.9.0 은 `app.options.get("httpTimeout", …)` 로 **app 별**�
 즉 **인증 전용 named app 으로 transport 상한을 FCM 과 분리**할 수 있다 — "전역이라 못 한다"는
 근거는 성립하지 않는다.
 
+#### 자원 상한 — 열린 항목 2건 (flag ON 전 결정 필요)
+
+timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두 개념을 뭉쳐 기각했다. 분리한다.
+
+- ⛔ **admission control(semaphore 즉시거절) = 기각 유지.** 측정: 유입 0.2×용량에서 성공 120→**18**,
+  거절 0→**102**. 배포 재연결은 평균 유입이 낮아도 **동시 도착**이라 `sem.locked()` 가 즉시 참이
+  되고, 1초면 빠질 큐를 대량 거절한다. 이 워크로드의 모양과 정반대다.
+- 🔲 **격리(인증 전용 executor) = 미결.** 이건 admission control 이 **아니다** — 거절하지 않고
+  자원을 나눌 뿐이라 새 wire 결과가 없다. 측정: 동거 작업 p99 **3967ms → 31ms**.
+  ⚠️ 대가: 워커 수 W 가 곧 인증 처리 용량(W/T)이라 잘못 잡으면 스스로 문턱을 낮춘다. 그리고
+  `/ws` 프레임으로 관측되지 않아 구조 트립와이어로만 잠긴다.
+- 🔲 **ingress 상한(nginx `/ws`) = 미결.** 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
+  **없다**(주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다. 즉 인증 이전 단계에서
+  토큰 flood 를 막는 것이 없다. **호스트 config 변경이라 별도 승인이 필요하다.**
+
+⚠️ 큐 자체는 caller deadline 이 드레인하지만(취소가 concurrent future 로 전파돼 dequeue 시 skip),
+큐 **크기**는 유입률 × deadline 이고 고정 상한이 없다 — 위 두 항목이 그 상한을 정하는 자리다.
+
 ⚠️ 그래도 SDK 재시도가 남는다: `accounts:lookup` 은 per-attempt 120초 기본 + status 재시도 4회
 (`_http_client.py:41-52`)라, transport 상한을 낮추지 않으면 한 subscribe 가 분 단위로 스레드를
 점유할 수 있다.

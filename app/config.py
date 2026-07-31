@@ -583,10 +583,14 @@ WS_AUTH_RETRY_AFTER_SECONDS = 5
 #    분류해 놓고 5초마다 재시도를 지시하면 retry storm 이 되고 운영자 신호가 희석된다.
 WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = 30
 
-# ⛔ **D ≤ T 면 ②가 죽은 코드가 된다** — transport 상한이 발동하기 전에 호출자가 먼저 포기하므로
-#    낮춘 `httpTimeout` 이 아무것도 바꾸지 않는다. 그 상태를 import 시점에 막는다.
-if WS_AUTH_WIRE_DEADLINE_SECONDS <= WS_AUTH_HTTP_TIMEOUT_SECONDS:
-    raise ValueError(
-        "WS_AUTH_WIRE_DEADLINE_SECONDS 는 WS_AUTH_HTTP_TIMEOUT_SECONDS 보다 커야 한다 — "
-        f"got D={WS_AUTH_WIRE_DEADLINE_SECONDS} T={WS_AUTH_HTTP_TIMEOUT_SECONDS}"
-    )
+# ⛔ **한때 여기 `D > T` 를 import 시점에 강제했는데 그 불변식은 거짓이었다**(codex High, 재현 확인).
+#    근거로 적었던 "D ≤ T 면 transport 상한이 발동하기 전에 호출자가 포기하므로 ②가 죽은 코드"는
+#    **틀렸다** — 호출자가 포기해도 `to_thread` worker 는 취소되지 않고 계속 돌다가 **SDK 자체
+#    상한 T 에 종료된다**. 실측(D=0.05 / T=0.20): 호출자 반환 0.051s, worker 종료 **0.205s**.
+#    즉 두 축은 독립이고 D<T 도 유효한 설정이다(빨리 포기 + 스레드 점유는 여전히 T 로 유한).
+#    유효한 설정을 막는 게이트였으므로 제거했다.
+#
+# ⚠️ 다만 **의미 차이는 있다** — 이건 불변식이 아니라 정책 선택이다:
+#    · D > T (현재): SDK 가 먼저 끝나므로 그 오류 분류(invalid_token / 일시 장애)가 클라에 도달한다.
+#    · D < T:        느린 검증이 전부 deadline 으로 뭉쳐져 **§8-C 타입 경계가 그 구간에서 사라진다**.
+#    지금은 분류를 보존하는 쪽(D > T)을 택했고, 그 이유가 이 주석이다.
