@@ -1185,6 +1185,17 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                     "retry_after_seconds" in msg, wants_retry,
                     "retry_after 동반 규칙이 코드와 맞지 않는다",
                 )
+                if wants_retry:
+                    # ⛔ **"재시도로 낫지 않는다"고 분류한 것에 짧은 간격을 주면 안 된다.**
+                    #    운영자 신호(ERROR)가 뜬 결함은 재시도로 해소되지 않으므로, 같은 5초를
+                    #    주면 클라가 retry storm 을 만들고 그 요청마다 ERROR 가 쌓여 신호가
+                    #    희석된다(codex Medium). 두 축은 **함께 움직여야** 한다.
+                    self.assertEqual(
+                        msg["retry_after_seconds"] > app_main.WS_AUTH_RETRY_AFTER_SECONDS,
+                        wants_error_log,
+                        "운영자 신호 여부와 재시도 간격이 어긋났다 — "
+                        f"error_log={wants_error_log} retry={msg['retry_after_seconds']}",
+                    )
                 self.assertEqual(subs, set(), "실패가 registry 를 바꿨다")
 
     def test_unclassifiable_exception_is_not_swallowed(self):

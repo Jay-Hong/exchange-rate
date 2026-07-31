@@ -2893,8 +2893,16 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
 # Phase 2: Firebase Auth + FCM 알림 API
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# §8-C `temporarily_unavailable` 동반값. 정책·jitter 는 별도 슬라이스이므로 보수적 고정값이다.
+# §8-C `temporarily_unavailable` 동반값. jitter·백오프 정책은 별도 슬라이스라 고정값이다.
 WS_AUTH_RETRY_AFTER_SECONDS = 5
+
+# ⛔ **재시도로 낫지 않는** 결함(서버측 401/403, 설정 결함)은 같은 간격을 주면 안 된다.
+#    "재시도로 낫지 않는다"고 분류해 놓고 5초마다 재시도를 지시하면 (a) 클라가 retry storm 을
+#    만들고 (b) 요청마다 ERROR 가 쌓여 **운영자 신호가 오히려 희석된다**(codex Medium).
+#    §8-C 는 `retry_after_seconds` 동반만 규정하고 값·원인별 차등을 금지하지 않는다.
+#    ⚠️ 이것은 완화이지 해결이 아니다 — 서버는 클라의 **총 시도 상한을 강제할 수 없다**.
+#    그 계약(백오프·총 시도 상한)은 클라 배선 슬라이스의 몫이고, 여기서는 빈도만 6배 낮춘다.
+WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = 30
 
 
 def _classify_ws_subscribe_auth_failure(exc: BaseException):
@@ -2957,10 +2965,10 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
             "WS subscribe: Firebase NotFound 계열 — 설정 결함 의심",
             extra={"exc_type": type(exc).__name__},
         )
-        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+        return "temporarily_unavailable", WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
     if isinstance(exc, FirebaseNotInitialized):
         logger.error("WS subscribe: Firebase 미초기화")
-        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+        return "temporarily_unavailable", WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
     if isinstance(exc, _PERSISTENT_FIREBASE_FAULTS):
         # ⛔ **재시도로 낫지 않는 서버측 자격 오류**(401/403)다. 일반 FirebaseError 와 같은 절에
         #    두면 클라는 5초마다 재시도하는데 **서버에는 신호가 없다** — 죽은 서비스계정 키나
@@ -2970,7 +2978,7 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
             "WS subscribe: Firebase 서버 자격 오류 — 재시도로 낫지 않는다",
             extra={"exc_type": type(exc).__name__},
         )
-        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+        return "temporarily_unavailable", WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
     if isinstance(exc, fb_exceptions.FirebaseError):
         # 일시 장애군: 인증서 조회 실패 + `check_revoked=True` 가 여는 accounts:lookup 실패
         # (Unavailable / DeadlineExceeded / Internal / ResourceExhausted / Unknown …).
@@ -2983,7 +2991,7 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
         logger.error(
             "WS subscribe: google-auth 실패", extra={"exc_type": type(exc).__name__}
         )
-        return "temporarily_unavailable", WS_AUTH_RETRY_AFTER_SECONDS
+        return "temporarily_unavailable", WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
 
     return None
 
@@ -2994,19 +3002,22 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
     ⛔ `verify_firebase_token`을 재사용할 수 없다 — 그쪽은 `Request`를 받아 **Authorization
     헤더**에서 토큰을 꺼낸다. WS는 토큰이 **메시지 본문**에 있다.
 
-    ⚠️ 이 슬라이스는 **성공 경로만** 다룬다. 실패 시 예외가 그대로 올라가 WebSocket 루프가
-    연결을 정리한다(접근 0 = fail-closed). 오류를 wire 프레임(`subscription_error` +
-    `invalid_token` / `temporarily_unavailable`)으로 매핑하는 것은 다음 red 테스트의 주제다 —
-    지금 만들면 관측할 소비자가 없는 코드가 된다.
+    실패는 `_classify_ws_subscribe_auth_failure`가 §8-C 어휘로 분류해 firebase-free 예외
+    `SubscribeAuthFailed(error, retry_after)`로 던진다. dispatcher가 그것을 받아 요청만 접고
+    **연결과 registry는 불변**이다. 분류 불가는 **삼키지 않고** 그대로 재전파한다.
+    ⛔ 한때 여기 "이 슬라이스는 성공 경로만 다룬다"고 적혀 있었다 — 오류 매핑이 land 된 뒤에도
+    남아 코드와 **정반대**였다(codex Low). 이 트랙에서 산문이 코드를 못 따라간 네 번째다.
 
     ⛔ `auth.verify_id_token`은 **동기 호출**이므로 `asyncio.to_thread`로 loop 밖에서 돈다.
     한때 "기존 REST와 일관되게 두고 측정 후 다룬다"고 적었는데 **틀렸다**(codex): 이 SDK는
     공개키 캐시가 만료되면 인증서를 네트워크로 가져오고, 그 I/O가 loop를 잡으면 **그 프로세스의
     모든 WS 연결과 HTTP 요청이 함께 멈춘다**. 재연결 폭주 시 subscribe가 동시에 몰리는 경로라
     "측정 후"로 미룰 성질이 아니다.
-    ⚠️ 남은 것: `to_thread`의 작업은 **취소되지 않는다** — 호출자가 timeout으로 포기해도 스레드는
-    계속 돈다. 이 슬라이스에는 timeout이 없으므로 아직 문제가 되지 않고, timeout을 넣는 슬라이스가
-    그 성질을 함께 다뤄야 한다.
+    ⚠️ 남은 것: **이 슬라이스에는 timeout이 없다.** `to_thread` 작업은 취소되지 않으므로 호출자가
+    포기해도 실행 중 스레드는 계속 돈다(직접 재현). 단 **시작 전** 큐 대기분은 취소가 전파돼
+    실행되지 않는다(측정: pool=2·20건 부하에서 무관 작업 지연이 취소 없으면 4.04s, 전원 취소 시
+    0.41s ≈ 실행 중 1건 시간). 즉 caller deadline이 큐 누적은 막지만 **실행 중 작업 시간만큼의
+    간섭은 남는다** — timeout 슬라이스가 그 잔여를 SDK transport 상한으로 함께 다뤄야 한다.
     """
     import asyncio
 
