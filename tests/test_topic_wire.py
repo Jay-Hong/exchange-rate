@@ -268,46 +268,102 @@ class TestGuideExamplesAreConstructible(unittest.TestCase):
     """
 
     GUIDE = pathlib.Path(__file__).resolve().parent.parent / "REALTIME_V2_CLIENT_GUIDE.md"
+    START_MARKER = "<!-- topic-wire-examples:start -->"
+    END_MARKER = "<!-- topic-wire-examples:end -->"
 
     def _documented_frames(self):
-        """가이드의 ```jsonc 블록에서 subscription_* 프레임만 뽑는다."""
+        """전용 wire 블록의 모든 최상위 JSON 객체를 파싱한다.
+
+        파싱 실패를 건너뛰면 예시가 늘어난 뒤 깨진 하나가 개수 하한 뒤로 숨을 수 있다. 따라서
+        전용 마커 안에서는 객체 하나라도 파싱할 수 없거나 중괄호가 닫히지 않으면 즉시 실패한다.
+        """
         import json
         import re
 
         text = self.GUIDE.read_text(encoding="utf-8")
+        self.assertEqual(text.count(self.START_MARKER), 1, "wire 예시 시작 마커는 정확히 하나여야 한다")
+        self.assertEqual(text.count(self.END_MARKER), 1, "wire 예시 종료 마커는 정확히 하나여야 한다")
+        section = text.split(self.START_MARKER, 1)[1].split(self.END_MARKER, 1)[0]
+        blocks = re.findall(r"```jsonc\n(.*?)```", section, re.S)
+        self.assertEqual(len(blocks), 1, "wire 예시는 전용 jsonc 블록 하나에 있어야 한다")
+
+        # JSON 문자열 안의 `//`는 보존하고 문자열 밖 line comment만 제거한다.
+        uncommented_lines = []
+        for line in blocks[0].splitlines():
+            kept = []
+            in_string = False
+            escaped = False
+            i = 0
+            while i < len(line):
+                ch = line[i]
+                if in_string:
+                    kept.append(ch)
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_string = False
+                elif ch == '"':
+                    in_string = True
+                    kept.append(ch)
+                elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                    break
+                else:
+                    kept.append(ch)
+                i += 1
+            uncommented_lines.append("".join(kept))
+        stripped = "\n".join(uncommented_lines)
+
         frames = []
-        for block in re.findall(r"```jsonc\n(.*?)```", text, re.S):
-            stripped = "\n".join(re.sub(r"\s*//.*$", "", line) for line in block.splitlines())
-            # 한 블록에 객체가 여러 개일 수 있다 — 최상위 `{...}` 단위로 자른다.
-            depth, start = 0, None
-            for i, ch in enumerate(stripped):
-                if ch == "{":
-                    if depth == 0:
-                        start = i
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0 and start is not None:
-                        try:
-                            obj = json.loads(stripped[start:i + 1])
-                        except ValueError:
-                            obj = None      # 다른 스키마 예시(생략표기 등)는 건너뛴다
-                        if isinstance(obj, dict) and str(obj.get("type", "")).startswith("subscription_"):
-                            frames.append(obj)
-                        start = None
+        depth, start = 0, None
+        in_string = False
+        escaped = False
+        for i, ch in enumerate(stripped):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                self.assertGreater(depth, 0, "wire 예시에 여는 중괄호 없는 닫는 중괄호가 있다")
+                depth -= 1
+                if depth == 0 and start is not None:
+                    raw = stripped[start:i + 1]
+                    try:
+                        obj = json.loads(raw)
+                    except ValueError as exc:
+                        self.fail(f"wire 예시 JSON을 파싱할 수 없다: {exc}: {raw}")
+                    self.assertIsInstance(obj, dict, "wire 예시 최상위 값은 객체여야 한다")
+                    frames.append(obj)
+                    start = None
+        self.assertFalse(in_string, "wire 예시에 닫히지 않은 문자열이 있다")
+        self.assertEqual(depth, 0, "wire 예시에 닫히지 않은 중괄호가 있다")
         return frames
 
     def test_every_documented_frame_is_what_the_builder_emits(self):
         frames = self._documented_frames()
-        # ⛔ 자기검사 — 추출이 깨지면 "0개 검사"로 **공허하게** 통과한다.
-        self.assertGreaterEqual(
-            len(frames), 3,
-            f"가이드에서 subscription_* 예시를 못 찾았다({len(frames)}개) — 추출기가 깨졌거나 문서가 바뀌었다",
-        )
-        kinds = {f["type"] for f in frames}
+        identities = [
+            (frame.get("type"), frame.get("operation") or frame.get("error"))
+            for frame in frames
+        ]
         self.assertEqual(
-            kinds, {"subscription_ack", "subscription_error"},
-            "ack 과 error 예시가 **둘 다** 있어야 한다 — 한쪽만 있으면 계약이 반쪽이다",
+            identities,
+            [
+                ("subscription_ack", "subscribe"),
+                ("subscription_error", "invalid_request"),
+                ("subscription_error", "temporarily_unavailable"),
+            ],
+            "wire 예시의 추가·제거·종류 변경은 검사 기대값도 명시적으로 갱신해야 한다",
         )
 
         for frame in frames:
@@ -331,6 +387,27 @@ class TestGuideExamplesAreConstructible(unittest.TestCase):
                     "가이드의 예시가 서버가 만드는 프레임과 다르다 — 신규 소비자가 "
                     "**존재하지 않는 shape** 로 decoder 를 쓰게 된다",
                 )
+
+    def test_malformed_example_is_not_hidden_by_the_other_examples(self):
+        """파싱 불가 예시는 다른 정상 예시가 충분히 많아도 건너뛰지 않는다."""
+        import tempfile
+
+        text = self.GUIDE.read_text(encoding="utf-8")
+        malformed = text.replace(
+            '"error": "invalid_request"',
+            '"error": invalid_request',
+            1,
+        )
+        self.assertNotEqual(malformed, text, "mutation anchor가 사라졌다")
+        with tempfile.TemporaryDirectory() as tmp:
+            original = self.GUIDE
+            try:
+                self.GUIDE = pathlib.Path(tmp) / "guide.md"
+                self.GUIDE.write_text(malformed, encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, "파싱할 수 없다"):
+                    self._documented_frames()
+            finally:
+                self.GUIDE = original
 
 
 if __name__ == "__main__":

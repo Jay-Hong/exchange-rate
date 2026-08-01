@@ -111,6 +111,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 #### 정확한 wire 형태 (Stage 1 — 이 문서만으로 decoder 를 쓸 수 있어야 한다)
 
+<!-- topic-wire-examples:start -->
 ```jsonc
 // 성공 / 부분 성공
 {
@@ -141,6 +142,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
   "retry_after_seconds": 5
 }
 ```
+<!-- topic-wire-examples:end -->
 
 ⚠️ **`accepted_topics`/`rejected_topics`/`active_subscriptions` 는 Stage 1 부터 객체 배열**이다
 (문자열 배열이 아니다). Stage 2 에서 `lease_id`·`lease_duration_seconds` 가 **필드로 추가**되므로,

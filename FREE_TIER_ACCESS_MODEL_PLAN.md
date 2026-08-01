@@ -430,6 +430,28 @@ in-flight 슬롯을 덮어쓸 수 있다 — id 가 충돌하지 않아도 **슬
 fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로 행동 테스트가 가능하다
 (서버 쪽 직렬 처리는 타이밍을 결정적으로 못 만들어 AST 검사로 갔지만, 클라는 반대다).
 
+#### 다음 iOS 작업은 세 슬라이스로 분리한다
+
+⛔ `reconciler + 1 in-flight + batching + retry` 를 한 번에 넣지 않는다. 특히
+`temporarily_unavailable` 재시도가 처음 캡처한 subscribe 배치를 그대로 보관하면, 대기 중 들어온
+unsubscribe 의도를 무시하고 사용자가 끈 topic 을 다시 살릴 수 있다.
+
+1. **연결 귀속 reconciler + 1 in-flight만 구현**한다. retry와 batching은 넣지 않는다.
+   ack/error/disconnect/timeout이 **현재 연결의 현재 요청 하나만** 해소한다. ack은 서버가 준
+   `active_subscriptions`를 적용한 뒤 현재 `subscribedTopics`(우리 의도)와 `confirmedTopics`의 차이를
+   다시 계산한다.
+   error/timeout은 미충족 의도를 남기되 **같은 차이를 즉시 다시 보내지 않는다** — 그러면 retry를
+   안 넣었다는 말과 달리 `temporarily_unavailable`에서 무한 즉시 재시도가 생긴다. 재개는 새 연결이나
+   사용자 의도 변경처럼 명시된 외부 trigger가 맡고, 자동 timer retry는 3단계 전까지 없다.
+2. **배칭을 별도 추가**한다. 재연결 시점의 현재 차이만 한 요청으로 보내며, 오래전에 캡처한 topic
+   배열을 큐에 보존하지 않는다.
+3. **bounded retry를 마지막에 추가**한다. retry timer는 연결 또는 사용자 의도가 바뀌면 취소·대체되고,
+   발화 시 원 요청을 재전송하지 않고 **그 시점의 현재 차이**를 다시 계산한다. unsubscribe 같은 최신
+   축소 의도는 subscribe retry 뒤에서 기다리지 않는다.
+
+각 슬라이스는 반대 방향도 잠근다: 구 연결/구 요청은 현재 상태를 바꾸지 못하고, 같은 사건이 현재
+연결/현재 요청에 속하면 정상적으로 다음 reconciliation을 진행해야 한다.
+
 **결정 (U1~U8)** — 정본이 규정하지 않아 이번에 정하고 기록한다.
 
 | # | 결정 | 근거 |
@@ -630,7 +652,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C 진행 중**
       — A1/A2 **산술** land(2026-07-27, `app/clock.py` + `app/topic_lease.py`, 배포 없음).
-      다음은 strict cache 저장(`verified_at_monotonic`) → A6 3-state verifier → A5 single-flight → 배선.
+      ⛔ 구 `strict cache → 3-state verifier → single-flight` 순서는 ADR-040에서 **폐기**됐다.
+      현재 Stage 1 ack/error/auth timeout과 iOS 토큰·ack/error 소비까지 land. 다음은 위 순서대로
+      **iOS 연결 귀속 reconciler + 1 in-flight → 배칭 → bounded retry**이며, 그 뒤 서버 lease 발급과
+      publish 직전 인가를 수직 연결한다. 관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).
 - [x] **제품 결정 S5(revoke latency) = bounded-lease v1 15분 확정(2026-07-25)** — §7 S5 / §8 만료 항목 참조.
