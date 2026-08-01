@@ -430,7 +430,33 @@ in-flight 슬롯을 덮어쓸 수 있다 — id 가 충돌하지 않아도 **슬
 fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로 행동 테스트가 가능하다
 (서버 쪽 직렬 처리는 타이밍을 결정적으로 못 만들어 AST 검사로 갔지만, 클라는 반대다).
 
-#### 다음 iOS 작업은 세 슬라이스로 분리한다
+#### ⛔ **순서 개정 (2026-08-01) — 배칭이 먼저 land 했고, reconciler 는 보류다**
+
+아래 3-슬라이스 분해는 `reconciler + 1 in-flight` 를 **1단계**로 뒀는데, 적대적 검토가 그 전제를
+깼다. 실제로 land 한 것은 **배칭만**이다(iOS `093333a`).
+
+⛔ **1 in-flight 는 독립 실패를 직렬 실패로 바꾼다.** 현행은 topic 들이 토큰을 **동시에**
+기다려 늦게 와도 함께 복구되지만, 직렬화하면 느린 첫 토큰에서 **정확히 하나가 그 연결 동안
+소실**되고 정렬 규칙이 그걸 결정론적으로 고정한다(회복 = 재연결/토글뿐). 즉 배칭 없이 넣으면
+**현행 대비 순수 회귀**다.
+
+그리고 목표였던 **재연결당 Firebase 검증 N→1** 은 reconciler 없이 얻어졌다 — 재전송의 delta 는
+자명하게 "구독 전체"이고 이미 그걸 보내고 있었다(형태만 N개였다). delta 계산 기계가 살 것이 없다.
+
+⚠️ **reconciler 는 기각이 아니라 보류다.** lease(§8-B Stage 2)가 per-topic 상태(만료·갱신)를
+만들면 그때 "현재 상태에서 다시 계산"이 실제 소비자를 얻는다. 그 전에는 소비자 없는 기계다.
+
+아래 분해와 그때 발견된 제약(rejected 배제 / 보류 delta / timeout 정책)은 **그 시점에 다시
+읽을 것** — 특히 다음 세 사실은 여전히 유효하다:
+- flag-off ack 은 전 topic rejected + `active_subscriptions` 빈 배열 → "ack 이면 delta 재계산"
+  규칙은 **무한 루프**가 된다(운영 flag 가 off 라 첫 연결부터).
+- subscribe 는 **register → ack** 순서라 ack 유실 시 상태가 갈리고, 그 갈림은 **축소 방향에서
+  해롭다**(끄려 해도 unsubscribe 를 만들지 않아 서버가 계속 보낸다).
+- ⛔ "timeout 이면 연결을 폐기" 는 **재연결 storm** 이 된다: `parseMessage` 가 프레임 수신마다
+  `reconnectAttempts = 0` 을 하고 서버는 연결 직후 legacy payload 를 **항상** 보내므로
+  backoff 상한이 영영 걸리지 않는다.
+
+#### (보류) 다음 iOS 작업은 세 슬라이스로 분리한다
 
 ⛔ `reconciler + 1 in-flight + batching + retry` 를 한 번에 넣지 않는다. 특히
 `temporarily_unavailable` 재시도가 처음 캡처한 subscribe 배치를 그대로 보관하면, 대기 중 들어온
