@@ -1,7 +1,12 @@
 # REALTIME_V2_CLIENT_GUIDE — topic 구독 클라이언트 계약 (신규 iOS/Android 앱)
 
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
-> 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출). 서버 측 계약 closed — 잔여는 client 구현 + live enable(별도 GO).
+> 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출).
+> ⛔ **"서버 측 계약 closed" 는 그 2건에 한정된다** (2026-08-01 축소). 서버 §8 WS 인증(1C)은
+> **진행 중**이다 — `subscription_ack`/`subscription_error` 와 종결 프레임 계약(§8-B-term)은 land
+> 했지만 **bounded lease(15분) · reauth_required · publish 직전 인가**는 아직 없고, dispatcher 는
+> **uid 를 저장하지 않는다**(lease 바인딩이 없어 저장하면 소비자 없는 상태가 된다).
+> 이 문서를 "서버가 다 됐다"로 읽고 활성화를 앞당기지 말 것 — 활성화 선행 조건은 아래 3조건이다.
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
 > `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
 > `TOPIC_DISPATCHER_ENABLED=false`로 되돌렸다(2026-07-25 재확인: `topics/snapshot` → 404 `topics_disabled`).
@@ -42,11 +47,18 @@ Unsubscribe: {"type":"unsubscribe", "request_id":"<opaque-id>",
 Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 ```
 
-⛔ **`request_id` 와 `id_token` 을 빠뜨리지 말 것** (2026-08-01 개정). 구 예시는 둘 다 없었는데,
-그대로 구현하면 §E1 **미식별 경로**로 들어간다 — 인증도 받지 않고 **ack 도 오지 않아** 요청의
-성공·실패를 알 수 없다. 서버는 `request_id` **키** 또는 `id_token` **값** 중 하나라도 있으면
-"식별된 요청"으로 보고 반드시 답한다(§8-B-term). `request_id` 는 **opaque 문자열**이며 UUID 를
-강제하지 않는다 — 서버는 echo 만 한다.
+⛔ **필수 필드는 verb 마다 다르다** (2026-08-01 개정). 구 예시는 둘 다 없었는데, 그대로
+구현하면 §E1 **미식별 경로**로 들어간다 — 인증도 받지 않고 **ack 도 오지 않아** 요청의
+성공·실패를 알 수 없다.
+
+| verb | `request_id` | `id_token` |
+| --- | --- | --- |
+| `subscribe` | **필수** | **필수** (§8-A) |
+| `unsubscribe` | **필수** | **불요** — §8-A: 권한을 *축소*하는 작업이라 fail-open. 보내도 무시되지만, ⚠️ 토큰을 실었다면 `request_id` 는 반드시 있어야 한다(없으면 `invalid_request`) |
+
+서버는 `request_id` **키** 또는 `id_token` **값** 중 하나라도 있으면 "식별된 요청"으로 보고
+반드시 답한다(§8-B-term). `request_id` 는 **opaque 문자열**이며 UUID 를 강제하지 않는다 —
+서버는 echo 만 한다.
 
 ### 서버 → 클라이언트 메시지 종류 (⚠️ /ws는 legacy와 공유)
 
@@ -95,6 +107,42 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
     오분류였다 — 그것만 보고 설계하면 그 경로에서 큐가 멈춘다.)
 - **미식별 요청**(구 클라 — `request_id` 도 `id_token` 도 없음)은 **동작 불변**이다: 조용히
   등록되고 **snapshot 수신 자체가 성공 신호**다. 이 합집합이 구 클라 보호막이다.
+
+#### 정확한 wire 형태 (Stage 1 — 이 문서만으로 decoder 를 쓸 수 있어야 한다)
+
+```jsonc
+// 성공 / 부분 성공
+{
+  "type": "subscription_ack",
+  "request_id": "<opaque-id>",     // 요청의 id 를 그대로 echo — ack 은 **null 이 아니다**
+  "operation": "subscribe",        // | "unsubscribe"  (같은 schema 라 이 필드로 구분)
+  "accepted_topics":      [{"topic": "fx:usd-krw"}],
+  "rejected_topics":      [{"topic": "krx:usd-krw-futures", "error": "topic_unavailable"}],
+  "removed_topics":       [],      // Stage 1 은 **항상 빈 배열** (§C2 eviction 축, 요청 결과 아님)
+  "active_subscriptions": [{"topic": "fx:usd-krw"}]   // ← **연결의 최종 상태**. 이것으로 수렴하라
+}
+
+// 전체-요청 실패
+{
+  "type": "subscription_error",
+  "request_id": "<opaque-id>",     // ⚠️ **nullable** — 요청에서 id 를 읽을 수 없었으면 null
+  "error": "invalid_request",
+  "retry_after_seconds": 5         // `temporarily_unavailable` 일 때만 동반. 그 외엔 **필드 자체가 없다**
+}
+```
+
+⚠️ **`accepted_topics`/`rejected_topics`/`active_subscriptions` 는 Stage 1 부터 객체 배열**이다
+(문자열 배열이 아니다). Stage 2 에서 `lease_id`·`lease_duration_seconds` 가 **필드로 추가**되므로,
+지금 객체로 디코드해 두면 그때 shape 를 바꾸지 않아도 된다. `identity_generation` 은 Stage 1 에 없다.
+⚠️ 정렬: `active_subscriptions` 는 **사전순**, `accepted_topics`/`rejected_topics` 는 **요청 순서**.
+
+**오류 코드 — 실리는 위치가 다르다:**
+
+| 범위 | 코드 | 위치 |
+| --- | --- | --- |
+| 전체-요청 | `invalid_token` · `temporarily_unavailable` · `invalid_request` · `request_too_large` | `subscription_error.error` |
+| per-topic | `topics_disabled` · `unknown_topic` · `topic_unavailable` · `premium_required` · `krx_entitlement_required` | ack 의 `rejected_topics[].error` |
+
 - **인증**: 무토큰 subscribe 는 여전히 동작한다(§E1 중간 상태). `id_token` 을 실으면 서버가
   Firebase 로 검증한다(revoked 포함). **강제 전환은 별도 결정**이다.
 
