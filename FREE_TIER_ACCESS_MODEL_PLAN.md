@@ -398,7 +398,10 @@ load-bearing 이다.** 이 문장이 다음 슬라이스 설계에 그대로 들
 | **U7** | unsubscribe 는 `supported_snapshot_topics()` 를 **조회하지 않는다** | 그 집합은 flag-aware 다. 축소 연산에 flag-aware 검증을 붙이면 이득 없이 실패 모드만 는다(배포 flag 가 꺼지면 이미 든 구독을 못 빼는 형태) |
 | **U8** | flag-off ack 은 **인증 이전**에 나간다 → **ack 수신은 인증 통과를 뜻하지 않는다** | `topics_disabled` 는 §8-C 에서 per-topic 이라 전체-요청 오류로 만들 수 없다. 쓰레기 토큰도 이 ack 을 받으므로 클라는 ack 을 인증 증거로 읽으면 안 된다 |
 
-**선언된 동작 변화 3건** (구 클라 영향 0 — 셋 다 `request_id` 를 보내는 요청에만 해당):
+**선언된 동작 변화 4건** — 구 클라 영향 0. 근거는 **U1 의 합집합 그 자체**다: §E1 클라는
+`request_id` 도 `id_token` 도 보내지 않으므로 **미식별**이고, 넷 다 식별된 요청에만 발화한다.
+(⛔ 한때 이 줄이 "셋 다 `request_id` 를 보내는 요청"이라고 적었는데, 4번은 `request_id` 가
+**없는** token-bearing unsubscribe 라 제목과 목록이 어긋나 있었다.)
 
 1. `request_id` 가 빈 문자열/비문자열인 **unsubscribe 는 이제 거부된다**(구: 조용히 해제).
    §8-A 의 "축소는 fail-open" 은 *토큰* 축이고, echo 할 id 가 없으면 ack 자체를 만들 수 없다 —
