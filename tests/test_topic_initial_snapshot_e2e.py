@@ -750,6 +750,18 @@ def _firebase_error(class_name, message):
     return getattr(fb_exceptions, class_name)(message)
 
 
+def _registry_connection_count():
+    """구독 중인 연결 수 (registry 는 모듈 전역 싱글톤이라 **증분**으로만 의미가 있다).
+
+    ⛔ `registry.get_subscriptions(ws)` 로 단언하지 말 것 — 그 `ws` 는 **클라 쪽 객체**이고
+    registry 는 **서버 쪽 WebSocket** 을 키로 쓴다. 그래서 `== set()` 단언이 코드와 무관하게
+    **언제나 참**이었다(실측: 등록이 실제로 일어난 경우에도 빈 집합이었다).
+    """
+    from app import topic_dispatcher
+
+    return topic_dispatcher.registry.subscribed_connection_count
+
+
 def _receive_json_or_fail(ws, fail, timeout=2.0):
     """`ws.receive_json()` 을 thread+join 으로 감싼다 — 미전달 시 hang 대신 fast fail.
 
@@ -1026,6 +1038,7 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 stack.enter_context(patcher)
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
                 payload = {"type": "subscribe", "request_id": request_id,
                            "id_token": "tok", "topics": list(topics)}
                 ws.send_json(payload)
@@ -1036,14 +1049,14 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                     #    요청만 접혀야 하고 연결·registry 는 불변이어야 한다.
                     ws.send_text("ping")
                     pong = _receive_json_or_fail(ws, self.fail)
-                subs = topic_dispatcher.registry.get_subscriptions(ws)
-        return msg, pong, subs
+                delta = _registry_connection_count() - before
+        return msg, pong, delta
 
     def test_revoked_token_becomes_invalid_token_and_keeps_the_connection(self):
         """⛔ 현행은 프레임 **0개 + 연결 종료**였다 — 그 차이는 소켓에서만 보인다."""
         from app.topic_wire import SubscribeAuthFailed
 
-        msg, pong, subs = self._subscribe_and_receive(
+        msg, pong, delta = self._subscribe_and_receive(
             verifier_raises=SubscribeAuthFailed("invalid_token"), ping_after=True,
         )
         self.assertEqual(msg.get("type"), "subscription_error")
@@ -1054,18 +1067,18 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             "죽은 자격에 retry_after 를 붙이면 클라가 영구 재시도한다",
         )
         self.assertEqual(pong, {"type": "pong"}, "연결이 닫혔다 — 요청만 접어야 한다")
-        self.assertEqual(subs, set(), "실패한 요청이 registry 를 바꿨다")
+        self.assertEqual(delta, 0, "실패한 요청이 registry 를 바꿨다")
 
     def test_unavailable_verdict_carries_retry_after(self):
         from app.topic_wire import SubscribeAuthFailed
 
-        msg, _, subs = self._subscribe_and_receive(
+        msg, _, delta = self._subscribe_and_receive(
             verifier_raises=SubscribeAuthFailed("temporarily_unavailable", 5),
         )
         self.assertEqual(msg.get("error"), "temporarily_unavailable")
         self.assertIs(type(msg.get("retry_after_seconds")), int, "정수여야 한다")
         self.assertGreaterEqual(msg.get("retry_after_seconds"), 1)
-        self.assertEqual(subs, set())
+        self.assertEqual(delta, 0)
 
     def test_config_fault_frame_matches_the_auth_failure_frame(self):
         """⛔ 두 경로가 **같은 생성자**를 지나는지는 두 프레임을 비교해야만 보인다."""
@@ -1127,11 +1140,12 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 stack.enter_context(patcher)
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
                 ws.send_json({"type": "subscribe", "request_id": request_id,
                               "id_token": "tok", "topics": ["fx:usd-krw"]})
                 msg = _receive_json_or_fail(ws, self.fail)
-                subs = topic_dispatcher.registry.get_subscriptions(ws)
-        return msg, subs
+                delta = _registry_connection_count() - before
+        return msg, delta
 
     def test_sdk_exceptions_split_by_type_not_by_parent_catch(self):
         """⛔ **broad/부모 catch 금지**를 타입으로 지켰는지 보는 유일한 테스트.
@@ -1180,10 +1194,10 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 #    계정 삭제마다 운영자에게 거짓 경보를 울리는 것이다(늑대 소년).
                 if wants_error_log:
                     with self.assertLogs("exchange_rate.main", level="ERROR"):
-                        msg, subs = self._subscribe_with_real_verifier(exc)
+                        msg, delta = self._subscribe_with_real_verifier(exc)
                 else:
                     with self.assertNoLogs("exchange_rate.main", level="ERROR"):
-                        msg, subs = self._subscribe_with_real_verifier(exc)
+                        msg, delta = self._subscribe_with_real_verifier(exc)
                 self.assertEqual(msg.get("type"), "subscription_error")
                 self.assertEqual(msg.get("error"), expected_error)
                 self.assertEqual(
@@ -1201,7 +1215,7 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                         "운영자 신호 여부와 재시도 간격이 어긋났다 — "
                         f"error_log={wants_error_log} retry={msg['retry_after_seconds']}",
                     )
-                self.assertEqual(subs, set(), "실패가 registry 를 바꿨다")
+                self.assertEqual(delta, 0, "실패가 registry 를 바꿨다")
 
     def test_unclassifiable_exception_is_not_swallowed(self):
         """⛔ 분류 불가를 wire 오류로 접으면 우리 버그가 조용해지고 클라가 영구 재시도한다.
@@ -1243,18 +1257,19 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 stack.enter_context(patcher)
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
                 with self.assertLogs("exchange_rate.topic_dispatcher", level="WARNING"):
                     ws.send_json({"type": "subscribe", "request_id": "dl-1",
                                   "id_token": "tok", "topics": ["fx:usd-krw"]})
                     msg = _receive_json_or_fail(ws, self.fail)
                 ws.send_text("ping")
                 pong = _receive_json_or_fail(ws, self.fail)
-                subs = topic_dispatcher.registry.get_subscriptions(ws)
+                delta = _registry_connection_count() - before
         self.assertEqual(msg.get("type"), "subscription_error")
         self.assertEqual(msg.get("error"), "temporarily_unavailable")
         self.assertEqual(msg.get("retry_after_seconds"), config.WS_AUTH_RETRY_AFTER_SECONDS)
         self.assertEqual(pong, {"type": "pong"}, "deadline 이 연결을 닫았다 — 요청만 접어야 한다")
-        self.assertEqual(subs, set())
+        self.assertEqual(delta, 0)
 
     def test_verifier_raised_timeout_is_not_reported_as_a_wire_deadline(self):
         """⛔ 검증자가 스스로 던진 `TimeoutError` 를 deadline 초과로 기록하면 **D 를 튜닝할
@@ -1367,6 +1382,86 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 _receive_json_or_fail(ws, self.fail)
         self.assertIs(captured.get("app"), sentinel, "DEFAULT app 으로 검증했다 — ②가 no-op 이다")
         self.assertIs(captured.get("check_revoked"), True)
+
+    def test_authenticated_subscribe_without_request_id_is_refused(self):
+        """⛔ id 없는 인증 subscribe 가 `request_id: null` 인 **ack** 을 받고 있었다(실측 재현).
+
+        그건 두 가지를 동시에 깬다: §8-A 의 "상태 변경 메시지는 id 를 갖고 ack 을 받는다", 그리고
+        ack 을 **필수 필드**로 모델링한 클라의 디코드. 검증은 **인증 이전**이라 registry 는 불변이다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
+                ws.send_json({"type": "subscribe", "id_token": "tok",
+                              "topics": ["fx:usd-krw"]})       # request_id 없음
+                msg = _receive_json_or_fail(ws, self.fail)
+                delta = _registry_connection_count() - before
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "invalid_request")
+        self.assertIsNone(msg.get("request_id"), "echo 할 id 가 없으면 null 이어야 한다")
+        self.assertEqual(delta, 0, "거부된 요청이 registry 를 바꿨다")
+
+    def test_untokened_subscribe_still_works_without_a_request_id(self):
+        """⚠️ 반대 방향 — §E1 중간 상태의 구 클라는 id 도 토큰도 보내지 않는다.
+
+        인증 경로의 검증을 **무토큰 경로까지** 확대하면 그 클라가 topic 을 잃는다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
+                ws.send_json({"type": "subscribe", "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+                delta = _registry_connection_count() - before
+        self.assertEqual(msg.get("type"), "snapshot", "무토큰 경로가 깨졌다")
+        self.assertEqual(delta, 1, "무토큰 경로가 등록하지 않았다")
+
+    def test_client_message_handling_is_awaited_not_fire_and_forget(self):
+        """⛔ **클라가 이 성질에 의존한다** — ack 을 받은 순서대로 상태를 수렴시킨다.
+
+        서버가 메시지를 fire-and-forget 으로 처리하면 느린 요청의 ack 이 뒤늦게 도착해 최신 상태를
+        되돌릴 수 있다. 현행 루프는 `await handle_client_message(...)` 라 그 역전이 **구조적으로
+        불가능**하다.
+
+        ⚠️ **왜 행동 테스트가 아니라 구조 검사인가**: 타이밍으로 잡으려 했더니 `create_task` 로
+        바꾼 변이가 **생존**했다(실측) — TestClient 는 다른 스레드에서 메시지를 보내므로 "첫
+        핸들러가 진입한 뒤"를 결정적으로 만들 수 없고, gate 를 너무 일찍 풀면 인터리빙 창 자체가
+        안 생긴다. 시간에 기대는 단언은 CI 부하에서 흔들리기도 한다. 그래서 **AST 로** 본다 —
+        이 성질에 대해서는 그것이 유일하게 결정적인 관측이다.
+        """
+        import ast as _ast
+        import inspect
+
+        from app import main as _main
+
+        source = inspect.getsource(_main.websocket_endpoint)
+        tree = _ast.parse(source.lstrip())
+        awaited = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Await) and isinstance(node.value, _ast.Call):
+                func = node.value.func
+                if isinstance(func, _ast.Attribute):
+                    awaited.add(func.attr)
+        calls = {
+            n.func.attr
+            for n in _ast.walk(tree)
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+        }
+        self.assertIn(
+            "handle_client_message", calls,
+            "핸들러 호출이 사라졌다 — 이 검사가 공허해졌다(자기검사)",
+        )
+        self.assertIn(
+            "handle_client_message", awaited,
+            "메시지 처리가 await 되지 않는다 — ack 역전이 가능해지고 클라의 순서 수렴 전제가 깨진다",
+        )
 
 
 class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):

@@ -327,13 +327,21 @@ lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들�
 reconnect를 전역 구분할 수 없다"는 이유로 제거 결정이 있었다. 그 판단 자체는 archive와 함께
 보류 상태이고, **필수 필드로 모델링한 뒤 빼면 breaking**이므로 소비자가 생길 때 결정한다.
 
-⚠️ **`subscription_error` 의 `request_id` 는 nullable 이다** (2026-08-01 기록). 위 예시는 UUID 만
-보여 주지만, 구현은 요청이 **파싱되기 전에** 실패할 수 있다 — `id_token` 형식 위반처럼 payload
-검증 단계에서 거부하면 서버가 그 요청의 id 를 모를 수 있고, `request_id` 키가 없으면 `null` 을 싣는다.
-**ack 은 다르다**: 우리 요청에 대한 응답이므로 항상 echo 되고, 클라는 **필수**로 받는다.
-⛔ 한때 클라 주석이 "§8-B 가 error 에서만 nullable 을 허용한다"고 적었는데 **그 근거가 이 문서에
-없었다**(codex Low — `rg "nullable|request_id.*null"` 0건). 구현이 그렇게 동작하므로 여기에
-계약으로 적어 근거를 만든다.
+⚠️ **`subscription_error` 의 `request_id` 는 nullable 이다** (2026-08-01 기록).
+
+정확한 근거는 **요청이 id 자체를 갖지 못한 경우**다 — `request_id` 필드가 없거나 문자열이 아니거나,
+JSON 이 dict 로 파싱되지 않은 경우. 그때 서버는 echo 할 것이 없으므로 `null` 을 싣는다.
+⛔ 한때 여기 "`id_token` 형식 위반처럼 파싱되기 전에 실패하면 id 를 모른다"고 적었는데 **틀렸다**
+(codex Low): dict 가 파싱됐다면 `id_token` 유효성과 **무관하게** `request_id` 는 이미 읽을 수 있다.
+
+**ack 은 nullable 이 아니다.** 인증 경로는 `request_id` 를 **검증 후 진행**하므로(없으면
+`invalid_request` + `request_id: null` 로 종료, registry 불변) ack 에 도달한 요청은 반드시 id 를
+갖는다. 클라가 필수 필드로 모델링해도 안전하다.
+⛔ 한때 이 검증이 없어 **id 없는 인증 subscribe 가 `request_id: null` 인 ack 을 받았고**, 그것이
+클라 디코드를 깨뜨렸다(실측 재현) — 문서의 "항상 echo" 서술과 코드가 모순이었다.
+
+⚠️ 무토큰 경로(§E1 중간 상태)에는 `request_id` 를 요구하지 않는다 — 그 클라는 id 를 보내지 않고
+ack 도 받지 않는다. 요구하면 구 클라가 topic 을 잃는다.
 
 ⛔ **Stage 1은 `subscribe`만이다.** 위 ack은 정본에서 subscribe/unsubscribe **공통**이지만,
 현행 `unsubscribe`는 registry에서 제거만 하고 **프레임을 0개 보낸다**(실측). 표를 "Stage 1 현재"로

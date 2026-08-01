@@ -317,6 +317,22 @@ async def handle_client_message(
         from app.topic_wire import SubscribeAuthFailed, build_subscription_error
 
         id_token = msg.get("id_token")
+        if id_token is not None:
+            # ⛔ **인증 경로는 `request_id` 를 요구한다**(§8-A: 상태를 바꾸는 메시지는 id 를 갖고
+            #    ack 을 받는다). 없으면 `request_id: null` 인 ack 이 나가는데, 그건 "항상 echo 된다"는
+            #    ack 계약과 모순이고 **필수 필드로 모델링한 클라의 디코드를 깨뜨린다**(실측 재현).
+            #    ⚠️ 검증은 **인증 이전**이다 — 여기서 거부하면 registry 는 불변이다.
+            #    ⚠️ 무토큰 경로에는 요구하지 않는다: §E1 중간 상태의 구 클라는 id 를 보내지 않고
+            #       ack 도 받지 않는다. 여기서 요구하면 그 클라가 topic 을 잃는다.
+            request_id = msg.get("request_id")
+            if not isinstance(request_id, str) or not request_id:
+                await websocket.send_json(
+                    build_subscription_error(
+                        # id 를 모르거나 쓸 수 없는 요청이므로 **null 로 응답**한다(§8-B-stage).
+                        request_id=None, error="invalid_request"
+                    )
+                )
+                return
         if id_token is not None and (not isinstance(id_token, str) or not id_token):
             # ⛔ 형식 위반은 **인증 이전 단계**다(§8-C `invalid_request`). 여기서 걸러 두면
             #    SDK 가 토큰과 무관한 bare `ValueError` 를 던지는 경로가 아예 사라진다 —
