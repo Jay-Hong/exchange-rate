@@ -25,17 +25,28 @@
 
 **범위 밖 (topic publisher 미구현 — 구독해도 데이터 안 옴)**:
 - **DXY / news / graph**: 독립 topic 없음. DXY는 legacy broadcast `data.indices.dxy`, news/graph는 REST.
-- 미지원 topic을 subscribe하면 registry에는 등록되나 **snapshot은 오지 않음**(조용히 skip).
-  `krx:usd-krw-futures`도 게이트 off(`KRX_CLIENT_DISTRIBUTION_EFFECTIVE=false`)면 동일하게 조용히 skip.
+- 미지원 topic / 게이트 off 인 `krx:usd-krw-futures` 의 처리는 **요청이 식별됐는지에 따라 갈린다**
+  (2026-08-01 개정 — 구 서술 "registry에는 등록되나 조용히 skip"은 미식별 경로에만 참이다):
+  - **식별된 요청** → ack 의 `rejected_topics` 에 `unknown_topic` / `topic_unavailable` 로 실리고
+    **registry 에 등록되지 않는다**.
+  - **미식별 요청**(구 클라) → 등록은 되고 snapshot 만 조용히 skip (기존 동작 유지).
 
 ## 1. 연결 + 구독 프로토콜
 
 ```text
 URL:         wss://fxi.kr/ws            (legacy broadcast와 동일 endpoint 공유)
-Subscribe:   {"type": "subscribe",   "topics": ["fx:usd-krw", "usdt:krw"]}
-Unsubscribe: {"type": "unsubscribe", "topics": ["usdt:krw"]}
+Subscribe:   {"type":"subscribe",   "request_id":"<opaque-id>", "id_token":"<firebase>",
+              "topics":["fx:usd-krw","usdt:krw"]}
+Unsubscribe: {"type":"unsubscribe", "request_id":"<opaque-id>",
+              "topics":["usdt:krw"]}          // id_token 불요 (§8-A: 축소는 fail-open)
 Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 ```
+
+⛔ **`request_id` 와 `id_token` 을 빠뜨리지 말 것** (2026-08-01 개정). 구 예시는 둘 다 없었는데,
+그대로 구현하면 §E1 **미식별 경로**로 들어간다 — 인증도 받지 않고 **ack 도 오지 않아** 요청의
+성공·실패를 알 수 없다. 서버는 `request_id` **키** 또는 `id_token` **값** 중 하나라도 있으면
+"식별된 요청"으로 보고 반드시 답한다(§8-B-term). `request_id` 는 **opaque 문자열**이며 UUID 를
+강제하지 않는다 — 서버는 echo 만 한다.
 
 ### 서버 → 클라이언트 메시지 종류 (⚠️ /ws는 legacy와 공유)
 
@@ -43,6 +54,8 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 | --- | --- | --- |
 | `"rates"` | **연결 직후 1건 자동** (legacy 초기 payload) + legacy broadcast cycle | **무시** (topic 클라이언트 대상 아님) |
 | `"snapshot"` | subscribe 직후 + 값 변경 시 | **처리** — `payload["topic"]`으로 분기 |
+| `"subscription_ack"` | **식별된** subscribe/unsubscribe 의 성공·부분성공 | **처리** — `active_subscriptions` 가 연결의 최종 상태다 (§아래 ack 계약) |
+| `"subscription_error"` | 식별된 요청의 전체-요청 실패 | **처리** — `error` 코드로 terminal / 재시도 판정 |
 | `"pong"` | `"ping"` 응답 | keep-alive |
 
 > **🔴 필수**: 신규 앱은 **`type=="snapshot"` 이고 `topic` 필드가 있는 메시지만** topic payload로 decode한다.
@@ -73,10 +86,13 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
   | 형식 위반 — 빈 topics · 미지 `type` · `request_id` 누락/비문자열 | `subscription_error` `invalid_request` |
   | 자격 실패 / 판정 불가 | `invalid_token` / `temporarily_unavailable`(+`retry_after_seconds`) |
 
-- ⛔ **"항상 프레임 하나"로 설계하지 말 것.** 프레임 0개 + 연결 종료인 경로가 4종 있다:
-  분류 불가 인증 예외 · 16KB 초과(전송 계층 close **1009**) · 반쯤 닫힌 소켓 ·
-  비-JSON/비-dict(서버가 `request_id` 를 읽을 수 없다).
-  → **disconnect 를 모든 in-flight 의 종결 신호로 처리하고 timeout 을 유지해야 한다.**
+- ⛔ **"항상 프레임 하나"로 설계하지 말 것.** 프레임 0개인 경로가 있고 **둘로 갈린다**:
+  - **연결 종료를 동반** — 분류 불가 인증 예외 · 16KB 초과(전송 계층 close **1009**) ·
+    반쯤 닫힌 소켓. → **disconnect 를 모든 in-flight 의 종결 신호로** 처리하면 닫힌다.
+  - **연결이 살아 있음** — 비-JSON / 비-dict 입력(서버가 `request_id` 를 읽을 수 없어 답할
+    대상이 없다). ⛔ 여기서는 disconnect 가 **영영 오지 않으므로 timeout 이 유일한 종결 수단**이다.
+  → 두 축을 **모두** 구현해야 한다. (구 서술은 비-JSON/비-dict 를 "연결 종료" 쪽에 넣었는데
+    오분류였다 — 그것만 보고 설계하면 그 경로에서 큐가 멈춘다.)
 - **미식별 요청**(구 클라 — `request_id` 도 `id_token` 도 없음)은 **동작 불변**이다: 조용히
   등록되고 **snapshot 수신 자체가 성공 신호**다. 이 합집합이 구 클라 보호막이다.
 - **인증**: 무토큰 subscribe 는 여전히 동작한다(§E1 중간 상태). `id_token` 을 실으면 서버가
