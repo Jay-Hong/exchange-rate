@@ -416,5 +416,58 @@ class TestGuideExamplesAreConstructible(unittest.TestCase):
                 self.GUIDE = original
 
 
+class TestEveryPublisherGoesThroughTheLeaseGate(unittest.TestCase):
+    """⛔ **발행 경로는 하나도 빠짐없이 lease 게이트를 지나야 한다.**
+
+    실측: `publish_topic` 에만 게이트를 넣었더니 sibling 인 `publish_topic_detailed` 가
+    `registry.get_subscribers()` 를 직접 불러 **만료된 lease 로 전송**했다 — 그리고 그 함수는
+    `atomic_fx_live` 라는 **live caller** 를 가진다.
+
+    ⚠️ 구조 검사인 이유: 새 발행 함수는 **아직 없으므로** 행동 테스트를 쓸 대상이 없다.
+    이 검사는 "다음 사람이 같은 우회를 만들지 못하게" 하는 것이 목적이다.
+    """
+
+    def test_no_publisher_reads_the_raw_subscriber_set(self):
+        import ast
+        import pathlib as _pathlib
+
+        source = (_pathlib.Path(__file__).resolve().parent.parent
+                  / "app" / "topic_dispatcher.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        offenders = []
+        allowed = {"leased_subscribers"}          # 게이트 자신
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name in allowed or not node.name.startswith(("publish", "_publish")):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "get_subscribers"):
+                    offenders.append(node.name)
+        self.assertEqual(
+            offenders, [],
+            "발행 함수가 raw 구독자 집합을 직접 읽는다 — 그 경로만 lease 게이트를 우회한다: "
+            f"{offenders}",
+        )
+
+    def test_the_detector_would_catch_a_bypass(self):
+        """⛔ 자기검사 — 검출기가 아무것도 못 찾는 형태면 위 테스트는 공허하다."""
+        import ast
+
+        tree = ast.parse(
+            "async def publish_bad(topic):\n"
+            "    return registry.get_subscribers(topic)\n"
+        )
+        found = [
+            n.name for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef)
+            and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == "get_subscribers" for c in ast.walk(n))
+        ]
+        self.assertEqual(found, ["publish_bad"])
+
+
 if __name__ == "__main__":
     unittest.main()

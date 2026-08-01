@@ -1975,6 +1975,51 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             "lease 지평이 인증 I/O 만큼 늘어났다 — 느린 인증일수록 revoke 상한이 길어진다",
         )
 
+    def test_ack_reports_remaining_lease_not_the_original_duration(self):
+        """⛔ ack 은 **그 시점의 남은 시간**을 실어야 한다(정본 §8-B: "topic별 lease_id + 남은
+        duration"). 발급 당시 값을 되풀이하면, 900초 lease 를 받고 600초 뒤 다른 topic 을
+        해제했을 때 실제 잔여 300초인데 ack 이 다시 900 을 말한다 — 클라가 그걸로 timer 를
+        재설정하면 **서버 만료보다 늦게 재인증**해 데이터가 조용히 끊긴다.
+        """
+        from app import topic_dispatcher as dispatcher
+
+        fake_now = {"mono": 200.0}
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                dispatcher, "lease_clock",
+                lambda: SimpleNamespace(mono=lambda: fake_now["mono"], wall=lambda: None),
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "rem-1", "id_token": "tok",
+                              "topics": ["fx:usd-krw", "usdt:krw"]})
+                first = self._receive_for(ws, "rem-1")
+
+                fake_now["mono"] += 600.0                  # lease 소비 600초
+                ws.send_json({"type": "unsubscribe", "request_id": "rem-2",
+                              "topics": ["usdt:krw"]})
+                second = self._receive_for(ws, "rem-2")
+
+                fake_now["mono"] += 400.0                  # 총 1000초 → 이미 만료
+                ws.send_json({"type": "unsubscribe", "request_id": "rem-3",
+                              "topics": ["not:subscribed"]})
+                third = self._receive_for(ws, "rem-3")
+
+        self.assertEqual([x["lease_duration_seconds"] for x in first["accepted_topics"]],
+                         [900, 900], "발급 직후엔 전체 구간이어야 한다")
+        remaining = second["active_subscriptions"]
+        self.assertEqual([x["topic"] for x in remaining], ["fx:usd-krw"])
+        self.assertEqual(remaining[0]["lease_duration_seconds"], 300,
+                         "ack 이 발급 당시 duration 을 되풀이했다 — 클라 timer 가 만료를 넘긴다")
+        self.assertEqual(
+            third["active_subscriptions"][0]["lease_duration_seconds"], 0,
+            "만료된 lease 는 **0** 이어야 한다 — 필드를 빼면 무토큰 구독과 구분되지 않아 "
+            "클라가 무제한으로 오해한다",
+        )
+
     def test_untokened_subscription_has_no_lease_and_still_receives(self):
         """⚠️ §E1 — 무토큰 구독은 lease 가 **없고**, 그래도 발행은 도달해야 한다.
 

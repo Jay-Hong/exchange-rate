@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from app.clock import system_clock as lease_clock
 from app.topic_lease import (
     LEASE_MAX_SECONDS,
-    compute_lease_expiry,
+    compute_identity_only_lease_expiry,
     is_expired as is_lease_expired,
 )
 
@@ -50,7 +50,19 @@ class TopicLease:
     lease_id: str
     uid: str
     expires_at_mono: float
-    duration_seconds: int
+
+    def remaining_seconds(self, now_mono: float) -> int:
+        """**지금 기준 남은 시간**. 음수는 0 으로 접는다.
+
+        ⛔ 발급 당시 duration 을 저장해 매 ack 에 되풀이하면 안 된다 — 900초 lease 를 받고
+        600초 뒤 다른 topic 을 unsubscribe 하면 실제 잔여는 300초인데 ack 이 다시 900 을
+        말한다. 클라가 그걸로 timer 를 재설정하면 **서버 만료보다 늦게 재인증**해 데이터가
+        조용히 끊긴다. 그래서 저장하는 진실은 `expires_at_mono` **하나**다.
+
+        ⚠️ `0` 은 "이미 만료 — 지금 재인증하라"는 뜻이다(필드를 빼면 무토큰 구독과
+        구분되지 않아 클라가 *무제한*으로 오해한다).
+        """
+        return max(0, int(self.expires_at_mono - now_mono))
 
 from app.topic_wire import (
     SubscribeAuthFailed,
@@ -169,6 +181,37 @@ class TopicRegistry:
 registry = TopicRegistry()
 
 
+def _lease_wire_map(websocket: "WebSocket", topics: Iterable[str]) -> Dict[str, tuple]:
+    """ack 에 실을 `{topic: (lease_id, 남은 초)}`. lease 없는(무토큰) topic 은 빠진다."""
+    now_mono = lease_clock().mono()
+    out: Dict[str, tuple] = {}
+    for topic in topics:
+        lease = registry.get_lease(websocket, topic)
+        if lease is not None:
+            out[topic] = (lease.lease_id, lease.remaining_seconds(now_mono))
+    return out
+
+
+def leased_subscribers(topic: str) -> Set["WebSocket"]:
+    """lease 가 살아 있는 구독자만. ⛔ **모든 발행 경로가 공유하는 단일 게이트**다.
+
+    발급 시점 검사만으로는 S5 의 15분 revoke 상한이 보증이 되지 않는다 — 그 사이 자격이
+    죽어도 계속 나간다. 그래서 **전송 직전**에 다시 본다.
+
+    ⛔ 발행 함수가 `registry.get_subscribers()` 를 직접 부르면 그 경로만 게이트를 우회한다 —
+    실제로 `publish_topic_detailed` 가 그랬고, 그건 live caller 를 가진 함수다.
+    ⚠️ `now` 는 **1회**만 읽는다. 구독자마다 읽으면 같은 배치 안에서 판정이 갈린다.
+    ⚠️ 만료된 구독을 registry 에서 **지우지는 않는다**(정리는 disconnect / 재구독 축).
+    """
+    now_mono = lease_clock().mono()
+    return {
+        ws
+        for ws in registry.get_subscribers(topic)
+        if (lease := registry.get_lease(ws, topic)) is None
+        or not is_lease_expired(now_mono=now_mono, expires_at_mono=lease.expires_at_mono)
+    }
+
+
 async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
     """주어진 topic 구독자 전체에게 payload send.
 
@@ -187,24 +230,12 @@ async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
     if not config.TOPIC_DISPATCHER_ENABLED:
         return 0
 
-    subscribers = registry.get_subscribers(topic)
+    subscribers = leased_subscribers(topic)
     if not subscribers:
         return 0
 
-    # ⛔ **전송 직전에 lease 를 다시 본다.** 발급 시점 검사만으로는 S5 의 15분 revoke 상한이
-    #    보증이 되지 않는다 — 그 사이 자격이 죽어도 계속 나간다.
-    # ⚠️ `now` 는 이 publish 에서 **1회**만 읽는다. 구독자마다 읽으면 같은 배치 안에서
-    #    판정 기준이 달라진다.
-    now_mono = lease_clock().mono()
-
     sent = 0
     for ws in subscribers:
-        lease = registry.get_lease(ws, topic)
-        if lease is not None and is_lease_expired(
-            now_mono=now_mono, expires_at_mono=lease.expires_at_mono
-        ):
-            # 만료 = **전송 0**. registry 에서 지우지는 않는다(정리는 disconnect / 재구독 축).
-            continue
         try:
             await ws.send_json(payload)
             sent += 1
@@ -267,7 +298,10 @@ async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSe
     if not config.TOPIC_DISPATCHER_ENABLED:
         return TopicSendCounts(attempted=0, sent=0, enabled=False)
 
-    subscribers = registry.get_subscribers(topic)
+    # ⛔ **`registry.get_subscribers` 를 직접 부르지 않는다.** 한때 이 함수만 그렇게 해서
+    #    lease 게이트를 통째로 우회했고, 이 함수는 **live caller 를 가진다**
+    #    (`atomic_fx_live`). 발행 경로는 전부 `leased_subscribers()` 를 지난다.
+    subscribers = leased_subscribers(topic)
     if not subscribers:
         return TopicSendCounts(attempted=0, sent=0, enabled=True)
 
@@ -592,23 +626,18 @@ async def handle_client_message(
             #    premium 항은 **구속하지 않는 값**이어야 하고 `now` 가 그것이다 —
             #    "방금 premium 을 확인했다"는 주장이 아니다.
             now_mono = lease_clock().mono()
-            expires_at_mono = compute_lease_expiry(
+            # ⚠️ **identity 축 하나**로 계산한다 — 여기까지 오는 topic 은 per-user 판정
+            #    대상이 아니다(gated 는 위에서 접힌다). 유료 topic 을 accept 하게 되면
+            #    `compute_lease_expiry` 를 **실제 premium 관측 시각과 함께** 불러야 한다.
+            expires_at_mono = compute_identity_only_lease_expiry(
                 now_mono=now_mono,
-                # ⚠️ **premium 은 이 슬라이스에서 관측된 적이 없다.** 여기까지 오는 topic 은
-                #    per-user 판정 대상이 아니고(gated 는 위에서 접힌다), 따라서 premium 은
-                #    **제약이 아니다** — `now` 는 "구속하지 않음"을 뜻하지 "방금 확인했다"가
-                #    아니다. 유료 topic 을 accept 하려면 **실제 관측 시각을 돌려주는 판정기**가
-                #    먼저 있어야 하고, 그때 이 인자는 그 값으로 바뀐다.
-                premium_verified_at_mono=now_mono,
-                firebase_identity_verified_at_mono=identity_observed_at_mono,
+                identity_verified_at_mono=identity_observed_at_mono,
             )
-            duration_seconds = int(expires_at_mono - now_mono)
             leases = {
                 topic: TopicLease(
                     lease_id=uuid.uuid4().hex,
                     uid=uid,
                     expires_at_mono=expires_at_mono,
-                    duration_seconds=duration_seconds,
                 )
                 for topic in accepted_names
             }
@@ -624,11 +653,7 @@ async def handle_client_message(
                 accepted=accepted_names,
                 rejected=rejected,
                 active=registry.get_subscriptions(websocket),
-                leases={
-                    topic: (lease.lease_id, lease.duration_seconds)
-                    for topic in registry.get_subscriptions(websocket)
-                    if (lease := registry.get_lease(websocket, topic)) is not None
-                },
+                leases=_lease_wire_map(websocket, registry.get_subscriptions(websocket)),
             )
         )
         if accepted_names:
@@ -657,10 +682,6 @@ async def handle_client_message(
                     #    lease 가 빠지면 A·B 구독 후 A 만 해제했을 때 B 의 만료를 잃는다.
                     # ⚠️ 제거된 topic 이 `accepted_topics` 에 lease 없이 실리는 것과는 별개다
                     #    (제거된 구독엔 lease 가 없다 — U4).
-                    leases={
-                        topic: (lease.lease_id, lease.duration_seconds)
-                        for topic in remaining
-                        if (lease := registry.get_lease(websocket, topic)) is not None
-                    },
+                    leases=_lease_wire_map(websocket, remaining),
                 )
             )

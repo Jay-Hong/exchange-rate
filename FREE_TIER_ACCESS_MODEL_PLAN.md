@@ -719,11 +719,21 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C 진행 중**
-      ✅ **서버 lease 수직 슬라이스 land** — /ws subscribe → 인증 → 15분 lease → ack(`lease_id`/`lease_duration_seconds`)
-      → registry 저장 → **publish 직전 재확인**(만료 시 전송 0) → disconnect 시 제거, 한 E2E 로 잠금.
-      ⚠️ 무토큰(§E1) 구독은 lease **없이** 계속 수신한다(인증된 적이 없어 철회할 자격도 없다).
+      ✅ **무료 topic identity lease land** — /ws subscribe → Firebase 검증 → 15분 lease
+      (**identity 축만**) → ack(`lease_id` + **남은** duration) → registry 저장 →
+      **모든 발행 경로가 지나는 단일 lease 게이트**(만료 시 전송 0) → disconnect 시 제거, 한 E2E.
+      ⚠️ 무토큰(§E1)은 **무료 topic 만** lease 없이 수신한다. gated topic 은 무토큰으로 등록되지
+      않는다(등록하면 lease 부재가 "무제한"이라 **무인증 유료 데이터 우회**).
       ⛔ 무토큰 재구독이 **기존 lease 를 지우지 못한다** — 지우면 인증된 구독이 무제한이 되는 우회다.
-      잔여 = **iOS lease 소비**(최단 만료 전 재인증) + **request timeout**. 그 전까지 flag off 유지.
+
+      ⛔ **KRX per-user 판정은 아직 없다.** 토큰을 실은 KRX 요청은 판정기 부재로 전체 요청이
+      `temporarily_unavailable` 로 접힌다 — entitled 성공 경로도, non-entitled 거부 경로도
+      **구현·검증되지 않았다**. 한때 이 항목을 "슬라이스 land, 잔여는 iOS 뿐"으로 적었는데
+      **과대 서술**이었다(codex). socket UID 결속을 미룬 판단도 **이 범위 안에서만** 유효하다.
+
+      잔여 = ① **KRX per-user 판정**(실제 premium+entitlement 관측 시각 + socket UID 결속 +
+      성공·거부 E2E) ② **iOS lease 소비**(최단 만료 전 재인증) ③ **request timeout**.
+      그 전까지 flag off 유지.
       — A1/A2 **산술** land(2026-07-27, `app/clock.py` + `app/topic_lease.py`, 배포 없음).
       ⛔ 구 `strict cache → 3-state verifier → single-flight` 순서는 ADR-040에서 **폐기**됐다.
       현재 Stage 1 ack/error/auth timeout, iOS 토큰·ack/error 소비, **iOS 재연결 배칭**(N→1)까지 land.

@@ -126,6 +126,29 @@ def compute_lease_expiry(
     ) + LEASE_MAX_SECONDS
 
 
+def compute_identity_only_lease_expiry(
+    *,
+    now_mono: float,
+    identity_verified_at_mono: float,
+) -> float:
+    """**premium 제약이 없는** topic 의 lease 만료 (identity 축 하나만).
+
+    ⛔ 호출부에서 `compute_lease_expiry(premium_verified_at_mono=now_mono, …)` 를 쓰지 말 것.
+    그 인자는 위 docstring 이 **"authoritative RevenueCat 관측 시각"** 으로 정의한다 —
+    관측한 적 없는 값을 넣으면 주석을 아무리 달아도 **타입 계약을 어긴다**(codex Medium).
+    "premium 은 제약이 아니다"라는 사실은 **이 함수의 이름**이 표현하고, `now` 를 넘겨
+    구속하지 않게 만드는 것은 여기 한 곳에서만 일어난다.
+
+    ⚠️ 유료 topic 을 accept 하게 되면 이 함수가 아니라 `compute_lease_expiry` 를 **실제 관측
+    시각과 함께** 불러야 한다.
+    """
+    return compute_lease_expiry(
+        now_mono=now_mono,
+        premium_verified_at_mono=now_mono,
+        firebase_identity_verified_at_mono=identity_verified_at_mono,
+    )
+
+
 def is_expired(*, now_mono: float, expires_at_mono: float) -> bool:
     """A2 만료 판정 — **경계 포함**(`now >= expires_at`)이 계약이다(fail-closed).
 
