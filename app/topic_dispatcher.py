@@ -252,11 +252,20 @@ async def handle_client_message(
       - {"type": "subscribe", "topics": [str, ...]} (JSON) → topic 구독
       - {"type": "unsubscribe", "topics": [str, ...]} (JSON) → topic 구독 해제
 
-    정책:
-      - FF=false면 subscribe/unsubscribe 메시지를 silently 무시 (Stage 1 docstring
-        과 일치 — register/unregister는 순수 연산이지만 호출 게이트는 Stage 2가 담당).
-      - JSON 파싱 실패 / non-dict / unknown type → 조용히 무시 (legacy/forward-compat).
-      - topics가 list[str]이 아니면 debug 로그 후 무시 (잘못된 client 보호).
+    정책 — **식별된 요청은 반드시 종결된다** (§8-B-term):
+
+    "식별된" = `request_id` 키를 실었거나 `id_token` 값을 실은 요청. 그런 요청에는
+    **종결 프레임 하나 또는 연결 종료**가 보장된다(⛔ "항상 프레임 하나"는 거짓 —
+    분류 불가 인증 예외 / 16KB 초과 close 1009 / 반쯤 닫힌 소켓은 0 프레임이다).
+      - FF=false → 전 topic `topics_disabled` 인 **ack**(§8-C 에서 per-topic 코드다).
+        registry 는 불변. ⚠️ 이 ack 은 인증 **이전**이라 ack 수신 ≠ 인증 통과.
+      - topics 형식 위반(비-list / 비-str 원소 / **빈 목록**) → `invalid_request`.
+      - 미지 `type` → `invalid_request`.
+      - 인증 실패 → §8-C 코드로 매핑된 `subscription_error`(연결·registry 불변).
+
+    미식별 요청(§E1 구 클라: `request_id` 도 `id_token` 도 없음)은 **동작이 불변**이다 —
+    등록/해제는 되고 프레임은 0개. JSON 파싱 실패 / non-dict / 미식별 미지 type 도
+    조용히 무시한다(legacy 평문이 흐르는 경계라 오류를 쏘면 스팸이 된다).
 
     main.py에 두지 않은 이유: WebSocket integration 없이 단위 테스트 가능 (firebase_admin
     같은 main.py의 무거운 import-time 의존성 회피). topic 메시지 dispatch는 dispatcher
@@ -279,9 +288,11 @@ async def handle_client_message(
     ACTIVE로 돌려주는 **가용성 우선** 정책이라, lease 권한 판정에 쓰면 오래된 판정이 방금 확인한
     것으로 승격된다(폐기된 트랙의 핵심 결함).
 
-    ⚠️ **실패 경로는 아직 없다.** `authorize_subscribe`가 raise하면 예외가 그대로 올라가
-    상위 루프가 연결을 정리한다(접근 0 = fail-closed). `subscription_error` 프레임 매핑은
-    다음 red 테스트에서 만든다 — 지금 만들면 소비자 없는 코드가 된다.
+    ⚠️ **실패 경로 매핑은 구현돼 있다**(§8-C). `SubscribeAuthFailed` 는 요청만 접고
+    연결·registry 는 **불변**이다 — 구 동작은 예외가 상위로 올라가 연결이 닫히고 그 연결의
+    **다른 구독까지** 사라졌다. 다만 **분류 불가** 예외는 여전히 재전파한다: 우리 버그·미지의
+    상태를 wire 오류로 접으면 클라가 영구 재시도하고 운영자는 신호를 못 받는다.
+    그 경로가 위 "또는 연결 종료"의 실체다.
     """
     if raw_text == "ping":
         await websocket.send_json({"type": "pong"})
@@ -296,8 +307,6 @@ async def handle_client_message(
         return
 
     msg_type = msg.get("type")
-    if msg_type not in ("subscribe", "unsubscribe"):
-        return  # ping은 위에서 처리, 그 외 unknown type은 forward-compat 무시
 
     # ── 이 요청은 **ack 을 받는 요청인가** (§8-A) ────────────────────────────────
     #    §8-A: 상태를 바꾸는 메시지는 `request_id` 를 갖고 ack 을 받는다. 그 계약을 지키는
@@ -326,6 +335,19 @@ async def handle_client_message(
             )
             return
         request_id = raw_request_id
+
+    if msg_type not in ("subscribe", "unsubscribe"):
+        # ⛔ **식별된 요청은 미지 타입이어도 종결한다.** 한때 여기서 무조건 return 했고
+        #    근거를 "forward-compat"이라 적었는데, request/response 에서 그건 **역방향으로
+        #    해롭다**: 서버보다 새 클라가 모르는 타입을 보내면 "미지원"을 배우는 대신
+        #    **매단다**. 오타 하나(`subscrbe`)로도 같은 일이 난다.
+        # ⚠️ 미식별(=id 를 안 실은) 미지 타입은 여전히 침묵이다 — `/ws` 는 legacy 평문·잡음이
+        #    흐르는 경계이고 그쪽엔 기다리는 요청자가 없다.
+        if identified:
+            await websocket.send_json(
+                build_subscription_error(request_id=request_id, error="invalid_request")
+            )
+        return
 
     if msg_type == "subscribe" and identified and (
         not isinstance(id_token, str) or not id_token

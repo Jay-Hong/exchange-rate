@@ -380,6 +380,7 @@ ack 도 받지 않는다. 요구하면 구 클라가 topic 을 잃는다.
 | 분류 불가 인증 예외 | `app/main.py` 가 재전파 — "분류 불가는 삼키지 않는다" |
 | 16KB 초과 메시지 | uvicorn `--ws-max-size 16384` → transport close **1009**. §8-C 의 `request_too_large` 도 "전송 계층은 close 1009"로 규정한다 |
 | 반쯤 닫힌 소켓 | `send_json` 자체가 실패 |
+| **비-JSON / 비-dict 입력** | 서버가 `request_id` 를 **읽을 수 없다** — 클라는 식별된 요청을 보냈다고 믿어도 서버에겐 미식별이다 |
 
 → **클라 큐는 disconnect 를 모든 in-flight 의 종결 신호로 처리해야 하고, timeout 은 여전히
 load-bearing 이다.** 이 문장이 다음 슬라이스 설계에 그대로 들어간다.
@@ -402,9 +403,17 @@ load-bearing 이다.** 이 문장이 다음 슬라이스 설계에 그대로 들
 1. `request_id` 가 빈 문자열/비문자열인 **unsubscribe 는 이제 거부된다**(구: 조용히 해제).
    §8-A 의 "축소는 fail-open" 은 *토큰* 축이고, echo 할 id 가 없으면 ack 자체를 만들 수 없다 —
    ack 없는 unregister 가 바로 이 슬라이스가 삭제하는 침묵이다. **fail-closed 를 택한다.**
-2. `topics: []` 는 `invalid_request` 다(구: 검사를 통과해 **유령 registry entry** 를 만들었다 —
-   `all([])` 가 True 라서. 그 entry 는 admin 카운터만 오염시켰다).
-3. flag-off 와 topics 형식 오류가 **식별된 요청에 한해** 프레임을 받는다.
+2. `topics: []` 는 `invalid_request` 다. 구 동작은 `all([])` 가 True 라 검사를 통과했고,
+   **두 경로에서 서로 다르게** 잘못됐다 — ⛔ 한때 이 줄이 둘을 뭉쳐 적었다(codex Low):
+   - **무토큰 legacy 경로**: `registry.register(ws, [])` 가 **무조건** 호출돼 빈 entry 를
+     만들었다(`setdefault`) → **유령 entry** 로 admin 카운터만 오염.
+   - **인증 경로**: `if accepted_names` 가드 덕에 registry 는 **건드리지 않았고**, 대신
+     성공과 구분되지 않는 **빈 ack** 이 나갔다.
+3. flag-off·topics 형식 오류·**미지 `type`** 이 **식별된 요청에 한해** 프레임을 받는다.
+   ⚠️ 미지 type 을 종결시키는 이유: "unknown type 은 forward-compat 으로 무시"가
+   request/response 에서는 **역방향으로 해롭다** — 서버보다 새 클라가 모르는 타입을 보내면
+   "미지원"을 배우는 대신 **매단다**. 오타 하나(`subscrbe`)로도 같은 일이 난다.
+   미식별 미지 type 은 여전히 침묵이다(기다리는 요청자가 없다).
 
 ⚠️ **판정기 부재의 처리**: per-user 판정이 필요한 topic이 지원 집합에 들어 있는데(배포 flag on)
 WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다 → ERROR 로그 + 전체-요청

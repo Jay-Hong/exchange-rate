@@ -1664,6 +1664,44 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(msg.get("request_id"), "nt-1")
         self.assertEqual(delta, 0, "종결시킨 요청이 blind register 를 했다")
 
+    def test_identified_request_of_unknown_type_is_terminated(self):
+        """⛔ `type` 검사가 식별 판정보다 **앞**이라 오타 하나가 침묵으로 새고 있었다.
+
+        ⚠️ "unknown type 은 forward-compat 으로 무시"는 request/response 에서 **역방향으로
+        해롭다**: 서버보다 새 클라가 모르는 타입을 보내면 "미지원"을 배우는 대신 **매단다**.
+        정직한 답은 `invalid_request` 다 — 클라가 즉시 degrade 할 수 있다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
+                ws.send_json({"type": "subscrbe", "request_id": "typo-1",   # 오타
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+                delta = _registry_connection_count() - before
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "invalid_request")
+        self.assertEqual(msg.get("request_id"), "typo-1")
+        self.assertEqual(delta, 0)
+
+    def test_unidentified_unknown_type_stays_silent(self):
+        """⚠️ 반대 방향 — id 를 안 실은 미지 타입은 여전히 조용히 무시한다(forward-compat).
+
+        `/ws` 는 legacy 평문·잡음이 흐르는 경계이고, 그쪽엔 기다리는 요청자가 없다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                frames = self._probe_then_collect(ws, {"type": "renew_lease",
+                                                       "topics": ["fx:usd-krw"]})
+        self.assertEqual(frames, [], f"미식별 미지 타입에 프레임이 나갔다: {frames!r}")
+
     def test_active_subscriptions_are_sorted(self):
         """⛔ 정렬은 **정본에 없고 코드에만 있던 계약**이라 재작성에서 조용히 사라질 뻔했다.
 
