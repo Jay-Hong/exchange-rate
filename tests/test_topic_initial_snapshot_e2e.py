@@ -2020,6 +2020,48 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             "클라가 무제한으로 오해한다",
         )
 
+    def test_detailed_publisher_counts_only_lease_eligible_attempts(self):
+        """⚠️ `attempted` 는 **lease 게이트 이후** 수다 — "전송 자격이 있어 실제로 시도한 대상".
+
+        ⛔ 그래서 **등록자는 있는데 전부 만료**면 `attempted == 0` 이고 downstream 이
+        `NO_SUBSCRIBERS` 로 분류한다. 운영상 "아무도 안 본다"와 "다들 재인증을 못 하고 있다"는
+        다른 사건이므로, lease 가 실제로 발화하면 만료-skip 수를 따로 세야 한다.
+        지금은 소비자가 없어 **의미만 고정**한다.
+        """
+        from app import topic_dispatcher as dispatcher
+
+        fake_now = {"mono": 300.0}
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                dispatcher, "lease_clock",
+                lambda: SimpleNamespace(mono=lambda: fake_now["mono"], wall=lambda: None),
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "det-1", "id_token": "tok",
+                              "topics": ["fx:usd-krw"]})
+                self._receive_for(ws, "det-1")
+
+                portal = ws.portal
+                live = portal.call(dispatcher.publish_topic_detailed,
+                                   "fx:usd-krw", {"type": "snapshot"})
+                fake_now["mono"] += 901.0
+                expired = portal.call(dispatcher.publish_topic_detailed,
+                                      "fx:usd-krw", {"type": "snapshot"})
+                still_registered = len(dispatcher.registry.get_subscribers("fx:usd-krw"))
+
+        self.assertEqual((live.attempted, live.sent), (1, 1), "유효 lease 인데 시도가 없었다")
+        self.assertEqual(
+            (expired.attempted, expired.sent), (0, 0),
+            "만료된 구독이 detailed publisher 의 게이트를 통과했다",
+        )
+        self.assertTrue(expired.enabled, "flag 는 켜져 있다 — enabled 까지 꺼지면 원인이 흐려진다")
+        self.assertEqual(still_registered, 1,
+                         "만료가 registry 를 지웠다 — 정리는 disconnect / 재구독 축이다")
+
     def test_untokened_subscription_has_no_lease_and_still_receives(self):
         """⚠️ §E1 — 무토큰 구독은 lease 가 **없고**, 그래도 발행은 도달해야 한다.
 

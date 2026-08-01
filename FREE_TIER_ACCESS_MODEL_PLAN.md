@@ -731,6 +731,12 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       **구현·검증되지 않았다**. 한때 이 항목을 "슬라이스 land, 잔여는 iOS 뿐"으로 적었는데
       **과대 서술**이었다(codex). socket UID 결속을 미룬 판단도 **이 범위 안에서만** 유효하다.
 
+      ⚠️ **과도기 결정 — 만료 lease 는 `duration 0` 으로 남긴다.** 최종 계약은 *만료 시 registry
+      제거 + `reauth_required`* 이지만, 그 전까지는 `active_subscriptions` 에 남긴 채 `0` 을 싣는다.
+      필드를 빼면 **무토큰(§E1) 구독과 구분되지 않아** 클라가 *무제한*으로 오해하기 때문이다.
+      ⛔ 클라 계약: `0` = **"즉시 재인증"**(≠ "타이머 없음"). iOS lease 소비 슬라이스에서
+      **양방향 테스트**로 잠글 것 — 0 을 무시하면 그 topic 이 조용히 죽는다.
+
       잔여 = ① **KRX per-user 판정**(실제 premium+entitlement 관측 시각 + socket UID 결속 +
       성공·거부 E2E) ② **iOS lease 소비**(최단 만료 전 재인증) ③ **request timeout**.
       그 전까지 flag off 유지.

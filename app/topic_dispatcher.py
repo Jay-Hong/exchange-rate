@@ -286,9 +286,16 @@ class TopicSendCounts:
 async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSendCounts:
     """publish_topic의 additive rich-outcome sibling — TopicSendCounts 반환 (C6-4, dormant).
 
-    publish_topic(line 125)과 **동일 로직**: FF early-return / subscriber snapshot / per-client send
+    publish_topic(line 125)과 **동일 로직**: FF early-return / **lease 게이트** / per-client send
     격리(remove_websocket + 동일 warning + continue). 차이는 bare int 대신 (attempted, sent, enabled)
     반환 → NO_SUBSCRIBERS(attempted==0) vs ALL_FAILED(attempted>0, sent==0)를 분리 가능.
+
+    ⚠️ **`attempted` 는 lease 게이트 *이후* 수다** — "전송 자격이 있어 실제로 시도한 대상"이지
+    raw 구독자 수가 아니다(2026-08-01 변경). 따라서 **등록자는 있는데 전부 만료**면
+    `attempted == 0` 이라 downstream 이 `NO_SUBSCRIBERS` 로 분류한다.
+    ⛔ 그 둘은 운영상 다른 사건이다("아무도 안 본다" vs "다들 재인증을 못 하고 있다").
+    lease 가 실제로 발화하기 시작하면 **만료-skip 수를 별도로 세는** 것이 맞다 — 지금은 소비자가
+    없어 필드를 늘리지 않고 이 한계를 기록만 한다.
 
     **behavior-change-0**: publish_topic은 byte-identical 유지 — 이 함수가 delegate target이 아님
     (delegation은 live 본문 rewrite라 C7로 defer; parity test가 publish_topic == detailed().sent +
@@ -299,8 +306,10 @@ async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSe
         return TopicSendCounts(attempted=0, sent=0, enabled=False)
 
     # ⛔ **`registry.get_subscribers` 를 직접 부르지 않는다.** 한때 이 함수만 그렇게 해서
-    #    lease 게이트를 통째로 우회했고, 이 함수는 **live caller 를 가진다**
-    #    (`atomic_fx_live`). 발행 경로는 전부 `leased_subscribers()` 를 지난다.
+    #    lease 게이트를 통째로 우회했다. 발행 경로는 전부 `leased_subscribers()` 를 지난다.
+    #    ⚠️ 한때 이 주석이 "live caller 를 가진다"고 적었는데 **과장이었다**(codex):
+    #       `atomic_fx_live` 는 호출 코드는 있으나 **live 진입점이 없는 dormant 모듈**이다.
+    #       위험은 "지금 새고 있다"가 아니라 **"활성화되는 순간 샌다"** 이다.
     subscribers = leased_subscribers(topic)
     if not subscribers:
         return TopicSendCounts(attempted=0, sent=0, enabled=True)

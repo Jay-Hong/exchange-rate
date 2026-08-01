@@ -3,9 +3,13 @@
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
 > 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출).
 > ⛔ **"서버 측 계약 closed" 는 그 2건에 한정된다** (2026-08-01 축소). 서버 §8 WS 인증(1C)은
-> **진행 중**이다 — `subscription_ack`/`subscription_error` 와 종결 프레임 계약(§8-B-term)은 land
-> 했지만 **bounded lease(15분) · reauth_required · publish 직전 인가**는 아직 없고, dispatcher 는
-> **uid 를 저장하지 않는다**(lease 바인딩이 없어 저장하면 소비자 없는 상태가 된다).
+> **진행 중**이다. 현재 land 된 것:
+> `subscription_ack`/`subscription_error` + 종결 프레임 계약(§8-B-term) / **무료 topic 의
+> identity lease(15분, ack 에 `lease_id` + 남은 duration)** / **uid 를 lease 에 바인딩** /
+> **모든 발행 경로가 지나는 lease 게이트**(만료 시 전송 0).
+> ⛔ **아직 없는 것**: **KRX per-user 판정**(토큰을 실은 KRX 요청은 판정기 부재로 전체 요청이
+> `temporarily_unavailable` 로 접힌다 — entitled 성공도 non-entitled 거부도 미구현) /
+> `reauth_required` 프레임 / 만료 시 registry 제거 / **클라 request timeout**.
 > 이 문서를 "서버가 다 됐다"로 읽고 활성화를 앞당기지 말 것 — 활성화 선행 조건은 아래 3조건이다.
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
 > `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
@@ -147,6 +151,13 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 ⚠️ **컨테이너는 객체 배열**이다(문자열 배열이 아니다). **Stage 2 에서 `lease_id`·
 `lease_duration_seconds` 가 필드로 추가됐다** — 컨테이너 형태는 그대로이므로 Stage 1 형태로
 디코드해 둔 클라는 shape 를 바꾸지 않아도 된다. `identity_generation` 은 아직 없다.
+
+⚠️ **`lease_duration_seconds: 0` 은 "타이머 없음"이 아니라 "이미 만료 — 지금 재인증하라"다**
+(2026-08-01 과도기 결정). 서버는 만료된 구독을 **registry 에서 지우지 않고** `active_subscriptions`
+에 남긴 채 `0` 을 싣는다. 필드를 아예 빼면 **무토큰(§E1) 구독과 구분되지 않아** 클라가 그 topic 을
+*무제한*으로 오해하기 때문이다. 그 상태에서 발행은 **이미 0** 이다(게이트가 막는다).
+⛔ 최종 계약은 *만료 시 registry 제거 + `reauth_required` 프레임*이고, 이건 그 전 단계다 —
+클라는 `0` 을 받으면 **즉시 재인증**해야 하며, "만료됐으니 무시"로 처리하면 그 topic 이 조용히 죽는다.
 
 ⛔ **lease 는 topic 별로 붙는다.** 붙는 곳: 인증된 subscribe 의 `accepted_topics`, **그리고
 어느 ack 이든 `active_subscriptions` 에 남아 있는 구독**(`operation="unsubscribe"` 포함 —
