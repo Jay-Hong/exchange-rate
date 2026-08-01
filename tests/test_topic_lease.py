@@ -1,7 +1,9 @@
 """`app/topic_lease.py` — A1 lease horizon 산술 + A2 만료 판정 (순수 primitive).
 
-ADR-039 §8.1 A1/A2. **계산기만** 다룬다 — strict cache / A6 3-state verifier /
-A5 single-flight / registry·sweeper 배선은 범위 밖이다.
+ADR-039 §8.1 A1/A2. **계산기만** 다룬다 — registry·sweeper 배선은 범위 밖이다.
+
+⛔ 한때 여기 "strict cache / A6 3-state verifier / A5 single-flight" 를 현재 계획처럼 적었는데
+그 설계는 **ADR-040 리셋에서 폐기**됐다.
 
 ⚠️ **이 파일이 닫지 않는 §8.1 G 행** (귀속을 흐리지 않기 위해 먼저 적는다):
 
@@ -15,7 +17,7 @@ A5 single-flight / registry·sweeper 배선은 범위 밖이다.
   `[server] horizon 계산(캐시 4분 → lease ~11분)`의 **저장 절반** — 모두 후속.
 
 ⚠️ `CACHE_TTL < LEASE_MAX_SECONDS`가 **"최소 lease 10분"을 뜻하지 않는다**: 그 부등식은
-3-way min의 *entitlement 항*에만 걸리는 상한이다. 10분 하한은
+3-way min의 *premium(RevenueCat) 항*에만 걸리는 상한이다. 10분 하한은
 `firebase_identity_verified_at ≈ now`라는 E2 전제가 함께 있을 때만 성립하며, 그 전제가
 깨진 경우(stale identity)는 아래 `TestStaleIdentity`가 **10분 미만·이미 만료**로 실증한다.
 
@@ -35,6 +37,7 @@ from datetime import datetime, timezone
 
 from app.clock import Clock
 from app.subscription import CACHE_TTL
+from app import topic_lease as _lease_mod
 from app.topic_lease import (
     LEASE_MAX_SECONDS,
     MAX_VERIFIED_AT_FUTURE_SKEW_SECONDS,
@@ -84,8 +87,11 @@ class TestLeaseConstant(unittest.TestCase):
         """
         self.assertLess(CACHE_TTL.total_seconds(), LEASE_MAX_SECONDS)
 
-    def test_entitlement_term_alone_cannot_shrink_lease_below_10_minutes(self):
-        """위 부등식이 **entitlement 항에만** 거는 상한임을 계산기로 실증.
+    def test_premium_term_alone_cannot_shrink_lease_below_10_minutes(self):
+        """위 부등식이 **premium(RevenueCat) 항에만** 거는 상한임을 계산기로 실증.
+
+        ⚠️ 이름 주의 — KRX **entitlement**(우리 DB row)는 `compute_gated_lease_expiry` 의
+        **별 축**이다. 둘 다 "entitlement" 라 부르면 어느 권위의 상한인지 구분되지 않는다.
 
         identity가 신선(E2 전제)하면 entitlement가 TTL 끝까지 늙어도 lease ≥ 600s.
         """
@@ -402,6 +408,90 @@ class TestDocumentedCallerPattern(unittest.TestCase):
             )
         self.assertEqual(results, [NOW + 660.0] * 3)
         self.assertEqual(clock.wall.calls, 3, "wall은 테스트가 직접 움직였다(positive control)")
+
+
+class TestGatedLeaseFourAxes(unittest.TestCase):
+    """⛔ 4축 API 를 **테스트 0건**으로 추가했었다(codex High). 기존 스위트는 3축만 본다.
+
+    KRX **entitlement** 는 우리 DB row 라 RevenueCat premium 과 **다른 권위**다 — 독립적인
+    철회 축이므로 자기 horizon 을 가져야 한다.
+    """
+
+    NOW = 10_000.0
+
+    def _expiry(self, *, identity=None, premium=None, entitlement=None):
+        return _lease_mod.compute_gated_lease_expiry(
+            now_mono=self.NOW,
+            identity_verified_at_mono=self.NOW if identity is None else identity,
+            premium_verified_at_mono=self.NOW if premium is None else premium,
+            entitlement_verified_at_mono=self.NOW if entitlement is None else entitlement,
+        )
+
+    def test_each_axis_binds_independently(self):
+        """⛔ 축마다 **단독으로** 최솟값이 될 때 결과가 그 축을 따라야 한다 — 한 축을 계산에서
+        빼는 변이는 그 축의 케이스에서만 red 가 된다."""
+        for name, kwargs, oldest in (
+            ("identity", {"identity": self.NOW - 300}, self.NOW - 300),
+            ("premium", {"premium": self.NOW - 200}, self.NOW - 200),
+            ("entitlement", {"entitlement": self.NOW - 100}, self.NOW - 100),
+        ):
+            with self.subTest(axis=name):
+                self.assertEqual(self._expiry(**kwargs),
+                                 oldest + _lease_mod.LEASE_MAX_SECONDS)
+
+    def test_the_oldest_axis_wins_when_several_are_stale(self):
+        self.assertEqual(
+            self._expiry(identity=self.NOW - 50, premium=self.NOW - 400,
+                         entitlement=self.NOW - 120),
+            self.NOW - 400 + _lease_mod.LEASE_MAX_SECONDS,
+        )
+
+    def test_entitlement_axis_is_not_dominated_away(self):
+        """⛔ "DB 조회가 RC 뒤라 entitlement 는 항상 지배당한다"는 **런타임 순서 논증**이다 —
+        조회에 캐시가 붙으면 entitlement 관측이 premium 보다 **과거**가 된다. 그때 축이 없으면
+        lease 가 entitlement 지평을 넘는다(= revoke 상한 초과)."""
+        cached = self.NOW - 600                     # 캐시 히트: RC 보다 훨씬 과거
+        self.assertEqual(
+            self._expiry(premium=self.NOW - 10, entitlement=cached),
+            cached + _lease_mod.LEASE_MAX_SECONDS,
+            "entitlement 축이 계산에서 빠졌다 — 캐시가 붙는 순간 상한이 깨진다",
+        )
+
+    def test_every_axis_rejects_non_finite_and_future_skew(self):
+        for axis in ("identity", "premium", "entitlement"):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(axis=axis, value=bad), self.assertRaises(ValueError):
+                    self._expiry(**{axis: bad})
+            with self.subTest(axis=axis, value="future"), self.assertRaises(ValueError):
+                self._expiry(**{axis: self.NOW
+                                + _lease_mod.MAX_VERIFIED_AT_FUTURE_SKEW_SECONDS + 1})
+
+    def test_empty_observations_is_refused(self):
+        """⛔ 관측이 하나도 없으면 lease 근거가 없다. 방치하면 `min(float)` 이
+        `TypeError: 'float' object is not iterable` 로 죽는다 — fail-open 은 아니지만
+        (값을 돌려주지 않는다) 호출부 실수를 **쓸모없는 메시지**로 알린다."""
+        with self.assertRaises(ValueError):
+            _lease_mod._lease_expiry_from_observations(now_mono=self.NOW, observations={})
+
+    def test_public_signatures_are_keyword_only_and_distinct(self):
+        """⛔ 서명을 **정확한 집합**으로 잠근다 — denylist 면 새 인자가 통과한다.
+        identity-only 가 premium 관측을 **요구하지 않는** 것도 여기서 잠긴다."""
+        for fn, expected in (
+            (_lease_mod.compute_identity_only_lease_expiry,
+             {"now_mono", "identity_verified_at_mono"}),
+            (_lease_mod.compute_lease_expiry,
+             {"now_mono", "premium_verified_at_mono", "firebase_identity_verified_at_mono"}),
+            (_lease_mod.compute_gated_lease_expiry,
+             {"now_mono", "identity_verified_at_mono", "premium_verified_at_mono",
+              "entitlement_verified_at_mono"}),
+        ):
+            params = inspect.signature(fn).parameters
+            with self.subTest(fn=fn.__name__):
+                self.assertEqual(set(params), expected)
+                self.assertTrue(
+                    all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params.values()),
+                    "위치 인자를 허용하면 축이 조용히 뒤바뀔 수 있다",
+                )
 
 
 if __name__ == "__main__":
