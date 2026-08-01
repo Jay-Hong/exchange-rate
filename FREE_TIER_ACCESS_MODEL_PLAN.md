@@ -443,8 +443,25 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
 그리고 목표였던 **재연결당 Firebase 검증 N→1** 은 reconciler 없이 얻어졌다 — 재전송의 delta 는
 자명하게 "구독 전체"이고 이미 그걸 보내고 있었다(형태만 N개였다). delta 계산 기계가 살 것이 없다.
 
-⚠️ **reconciler 는 기각이 아니라 보류다.** lease(§8-B Stage 2)가 per-topic 상태(만료·갱신)를
-만들면 그때 "현재 상태에서 다시 계산"이 실제 소비자를 얻는다. 그 전에는 소비자 없는 기계다.
+⚠️ **reconciler 는 기각이 아니라 보류다.** 근거는 **"이번 슬라이스에 불필요"** 까지다 —
+⛔ 한때 "lease 전에는 소비자가 없다"고 적었는데 **과했다**(codex Medium): `active_subscriptions`
+와 `confirmedTopics` 는 **이미 per-topic 상태**다. lease 는 그 위에 만료·갱신 축을 더할 뿐이다.
+
+⛔ **활성화 blocker 2건 — 배칭은 land 했지만 이 슬라이스는 닫히지 않았다.**
+
+1. **재시도 없는 배칭 = 전체 실패 결합.** 배치는 서버 인증 **1회**를 공유하므로
+   `temporarily_unavailable` 이면 **전 topic 이 함께 실패**하고, 클라는 pending 만 지우고
+   재시도하지 않는다. 구 N-요청에서는 일부가 살아남을 수 있었다.
+   확률로 보면 배칭은 *"전부 성공"* 을 올리고 *"적어도 하나 성공"* 을 낮춘다 — UI 에서는
+   후자가 더 아프다(라이브가 통째로 죽는다). **bounded retry 가 활성화 전 필수**이고, 발화 시
+   원 배치가 아니라 **그 시점의 `subscribedTopics`** 로 재계산해야 한다(오래된 캡처가 최신
+   의도를 덮는 형태를 이 트랙은 이미 두 번 겪었다 — ack 순번 필터 / 캡처된 retry 배치).
+   ⚠️ 현재 운영 flag 가 off 라 **운영 영향은 0**이다. 그래서 blocker 이지 회귀가 아니다.
+
+2. **subscription recovery budget** — 재연결 횟수와 **별도** 예산을 두고 유효한
+   `subscription_ack` 에서만 리셋한다. 그러면 "timeout 시 연결 폐기"를 storm 없이 쓸 수 있다.
+   ⛔ `reconnectAttempts` 를 그대로 쓰면 안 된다: `parseMessage` 가 **아무 유효 프레임**에나
+   그걸 0으로 만들고 서버는 연결 직후 legacy payload 를 **항상** 보내므로 상한이 영영 안 걸린다.
 
 아래 분해와 그때 발견된 제약(rejected 배제 / 보류 delta / timeout 정책)은 **그 시점에 다시
 읽을 것** — 특히 다음 세 사실은 여전히 유효하다:
@@ -679,9 +696,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C 진행 중**
       — A1/A2 **산술** land(2026-07-27, `app/clock.py` + `app/topic_lease.py`, 배포 없음).
       ⛔ 구 `strict cache → 3-state verifier → single-flight` 순서는 ADR-040에서 **폐기**됐다.
-      현재 Stage 1 ack/error/auth timeout과 iOS 토큰·ack/error 소비까지 land. 다음은 위 순서대로
-      **iOS 연결 귀속 reconciler + 1 in-flight → 배칭 → bounded retry**이며, 그 뒤 서버 lease 발급과
-      publish 직전 인가를 수직 연결한다. 관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
+      현재 Stage 1 ack/error/auth timeout, iOS 토큰·ack/error 소비, **iOS 재연결 배칭**(N→1)까지 land.
+      ⛔ 구 "reconciler + 1 in-flight → 배칭" 순서는 **개정됐다** — 배칭이 먼저 land 했고 reconciler 는
+      보류다(위 "순서 개정" 절). 다음은 **활성화 blocker 2건**(같은 절) → 서버 lease 발급 +
+      publish 직전 인가. 관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).
 - [x] **제품 결정 S5(revoke latency) = bounded-lease v1 15분 확정(2026-07-25)** — §7 S5 / §8 만료 항목 참조.
