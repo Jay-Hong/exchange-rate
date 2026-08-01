@@ -20,6 +20,7 @@ scope: connect→subscribe→snapshot 수신(fx + usdt) + reconnect→재수신.
 """
 import asyncio
 import contextlib
+from types import SimpleNamespace
 import threading
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -750,6 +751,11 @@ def _firebase_error(class_name, message):
     return getattr(fb_exceptions, class_name)(message)
 
 
+def _run(coro):
+    """동기 테스트에서 async 함수를 돌린다 (TestClient 컨텍스트 유지)."""
+    return asyncio.run(coro)
+
+
 def _registry_connection_count():
     """구독 중인 연결 수 (registry 는 모듈 전역 싱글톤이라 **증분**으로만 의미가 있다).
 
@@ -896,7 +902,13 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         # ⛔ **정본 §8-B의 객체 배열**이다 — 문자열 배열로 두면 lease 필드가 들어올 때 클라가
         #    shape를 바꿔야 하고, 그게 코드가 만든 제3의 계약이었다(§8-B-stage 표).
         self.assertEqual(msg.get("operation"), "subscribe", "같은 schema라 구분자가 필요하다")
-        self.assertEqual(msg.get("accepted_topics"), [{"topic": "fx:usd-krw"}])
+        # §8-B-stage **Stage 2** — 컨테이너 형태는 그대로고 **필드만 는다**(lease).
+        accepted = msg.get("accepted_topics") or []
+        self.assertEqual([x["topic"] for x in accepted], ["fx:usd-krw"])
+        self.assertEqual(
+            set(accepted[0]), {"topic", "lease_id", "lease_duration_seconds"},
+            "인증된 accept 는 lease 를 실어야 한다(§8-B Stage 2)",
+        )
         self.assertEqual(
             msg.get("rejected_topics"),
             [
@@ -907,7 +919,7 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         )
         self.assertEqual(msg.get("removed_topics"), [], "이 슬라이스엔 제거 전이가 없다")
         self.assertEqual(
-            msg.get("active_subscriptions"), [{"topic": "fx:usd-krw"}],
+            msg.get("active_subscriptions"), accepted,
             "ack이 연결의 최종 상태를 담지 않는다 — 클라가 이걸로 수렴한다",
         )
         # 인증자가 **메시지의 토큰으로 정확히 1회** 불렸는가 (codex: 토큰·호출 횟수 단언)
@@ -1783,6 +1795,122 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             ["usdt:krw", "fx:eur-krw", "fx:usd-krw"],
             "accepted_topics 는 **요청 순서**를 보존해야 한다 — 두 축의 정렬 정책은 다르다",
         )
+
+    # ── §8-B Stage 2 — lease 수직 슬라이스 ──────────────────────────────────────
+    #
+    # ⛔ **한 E2E 에서 전 경로가 돌아야 한다.** helper 단위 테스트로는 "실제로 연결됐다"를
+    #    증명하지 못한다 — 이 트랙은 소비자 없는 기계를 만들어 한 번 리셋했다.
+    #    경로: /ws subscribe → 인증 → lease 발급 → ack 에 lease → registry 저장
+    #          → publish 직전 재확인 → 만료 시 전송 0 → disconnect 시 제거
+
+    def test_lease_is_issued_enforced_at_publish_and_removed_on_disconnect(self):
+        from app import topic_dispatcher as dispatcher
+
+        fake_now = {"mono": 1000.0}
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                dispatcher, "lease_clock",
+                lambda: SimpleNamespace(mono=lambda: fake_now["mono"],
+                                        wall=lambda: None),
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "lease-1",
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                ack = _receive_json_or_fail(ws, self.fail)
+
+                # ① ack 이 lease 를 싣는다 (§8-B Stage 2)
+                accepted = ack.get("accepted_topics") or []
+                self.assertEqual(len(accepted), 1, f"수락되지 않았다: {ack!r}")
+                lease_id = accepted[0].get("lease_id")
+                duration = accepted[0].get("lease_duration_seconds")
+                self.assertIsInstance(lease_id, str)
+                self.assertTrue(lease_id, "lease_id 가 비어 있다")
+                self.assertIsInstance(duration, int)
+                self.assertTrue(0 < duration <= 900,
+                                f"lease 는 15분 이하여야 한다 — got {duration}")
+                self.assertEqual(
+                    ack.get("active_subscriptions"), accepted,
+                    "active_subscriptions 도 같은 lease 를 실어야 한다(§8-B-stage Stage 2)",
+                )
+
+                # ② publish 가 실제로 도달한다 (lease 유효 구간)
+                sent_live = _run(dispatcher.publish_topic(
+                    "fx:usd-krw", {"type": "snapshot", "t": 1}))
+                self.assertEqual(sent_live, 1, "lease 가 유효한데 publish 가 도달하지 않았다")
+
+                # ③ **인가되지 않은 KRX 는 publish 0** — 애초에 등록되지 않는다
+                sent_krx = _run(dispatcher.publish_topic(KRX_TOPIC, {"type": "snapshot"}))
+                self.assertEqual(sent_krx, 0, "인가되지 않은 KRX topic 에 전송이 나갔다")
+
+                # ④ 만료 뒤에는 **전송 0** (publish 직전 재확인, fail-closed)
+                fake_now["mono"] += 901.0
+                sent_expired = _run(dispatcher.publish_topic("fx:usd-krw",
+                                                             {"type": "snapshot", "t": 2}))
+                self.assertEqual(sent_expired, 0,
+                                 "만료된 lease 로 publish 가 나갔다 — revoke 상한이 무의미해진다")
+                after_expiry = _registry_connection_count()
+
+            # ⑤ disconnect 시 제거
+        self.assertEqual(after_expiry, 1, "만료가 registry 를 지우면 안 된다(정리는 별 축)")
+        self.assertEqual(_registry_connection_count(), 0, "disconnect 후에도 registry 에 남았다")
+
+    def test_untokened_resubscribe_cannot_clear_an_existing_lease(self):
+        """⛔ **lease 우회**: 토큰으로 lease 를 받은 뒤 **무토큰 재구독**으로 그 lease 를 지우면
+        그 구독은 legacy(무제한)가 되어 **15분 revoke 상한이 무력화**된다.
+
+        우리 클라는 이 조합을 만들지 않지만, 그게 방어를 빼도 되는 이유는 아니다 —
+        wire 는 아무나 말할 수 있다.
+        """
+        from app import topic_dispatcher as dispatcher
+
+        fake_now = {"mono": 5000.0}
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                dispatcher, "lease_clock",
+                lambda: SimpleNamespace(mono=lambda: fake_now["mono"], wall=lambda: None),
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "bypass-1",
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                _receive_json_or_fail(ws, self.fail)                 # ack (lease 발급)
+
+                ws.send_json({"type": "subscribe", "topics": ["fx:usd-krw"]})   # 무토큰 재구독
+                _receive_json_or_fail(ws, self.fail)                 # snapshot
+
+                fake_now["mono"] += 901.0
+                sent = _run(dispatcher.publish_topic("fx:usd-krw", {"type": "snapshot"}))
+        self.assertEqual(
+            sent, 0,
+            "무토큰 재구독이 lease 를 지웠다 — 인증된 구독이 무제한이 된다(fail-open)",
+        )
+
+    def test_untokened_subscription_has_no_lease_and_still_receives(self):
+        """⚠️ §E1 — 무토큰 구독은 lease 가 **없고**, 그래도 발행은 도달해야 한다.
+
+        lease 는 *인증된* 구독의 revoke 상한을 위한 것이다. 무토큰 구독은 인증된 적이 없어
+        철회할 자격도 없다 — 여기에 lease 를 요구하면 구 클라가 조용히 데이터를 잃는다.
+        (enforcement 와 capability 의 분리 — §E1.)
+        """
+        from app import topic_dispatcher as dispatcher
+
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "topics": ["fx:usd-krw"]})
+                self.assertEqual(_receive_json_or_fail(ws, self.fail).get("type"), "snapshot")
+                sent = _run(dispatcher.publish_topic("fx:usd-krw", {"type": "snapshot"}))
+        self.assertEqual(sent, 1, "무토큰 구독이 발행을 못 받는다 — §E1 이 깨졌다")
 
     def test_client_message_handling_is_awaited_not_fire_and_forget(self):
         """⛔ **클라가 이 성질에 의존한다** — ack 을 받은 순서대로 상태를 수렴시킨다.

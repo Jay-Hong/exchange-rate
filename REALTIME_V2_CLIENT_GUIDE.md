@@ -118,10 +118,10 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
   "type": "subscription_ack",
   "request_id": "<opaque-id>",     // 요청의 id 를 그대로 echo — ack 은 **null 이 아니다**
   "operation": "subscribe",        // | "unsubscribe"  (같은 schema 라 이 필드로 구분)
-  "accepted_topics":      [{"topic": "fx:usd-krw"}],
+  "accepted_topics":      [{"topic": "fx:usd-krw", "lease_id": "c7f1a2", "lease_duration_seconds": 900}],
   "rejected_topics":      [{"topic": "krx:usd-krw-futures", "error": "topic_unavailable"}],
-  "removed_topics":       [],      // Stage 1 은 **항상 빈 배열** (§C2 eviction 축, 요청 결과 아님)
-  "active_subscriptions": [{"topic": "fx:usd-krw"}]   // ← **연결의 최종 상태**. 이것으로 수렴하라
+  "removed_topics":       [],      // **항상 빈 배열** (§C2 eviction 축, 요청 결과 아님)
+  "active_subscriptions": [{"topic": "fx:usd-krw", "lease_id": "c7f1a2", "lease_duration_seconds": 900}]
 }
 
 // 전체-요청 실패 — ⛔ **두 형태다.** 아래 결합 규칙은 서버 builder 가 생성 시점에 강제한다.
@@ -144,9 +144,16 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 ```
 <!-- topic-wire-examples:end -->
 
-⚠️ **`accepted_topics`/`rejected_topics`/`active_subscriptions` 는 Stage 1 부터 객체 배열**이다
-(문자열 배열이 아니다). Stage 2 에서 `lease_id`·`lease_duration_seconds` 가 **필드로 추가**되므로,
-지금 객체로 디코드해 두면 그때 shape 를 바꾸지 않아도 된다. `identity_generation` 은 Stage 1 에 없다.
+⚠️ **컨테이너는 객체 배열**이다(문자열 배열이 아니다). **Stage 2 에서 `lease_id`·
+`lease_duration_seconds` 가 필드로 추가됐다** — 컨테이너 형태는 그대로이므로 Stage 1 형태로
+디코드해 둔 클라는 shape 를 바꾸지 않아도 된다. `identity_generation` 은 아직 없다.
+
+⛔ **lease 필드는 *인증된 subscribe 의 accept* 에만 붙는다.** 붙지 않는 경우:
+`operation="unsubscribe"` 의 ack / flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
+⚠️ **lease 는 `active_subscriptions` 에도 실린다** — 그게 연결의 최종 상태이므로 클라는 여기서
+각 topic 의 만료를 읽는다. 서버는 **전송 직전에 lease 를 다시 확인**하고, 만료된 구독에는
+프레임을 보내지 않는다(§8.1 S5 의 15분 revoke 상한). 클라는 **가장 이른 만료 전에** 재인증해야
+한다 — 그 전까지 그 topic 은 조용히 멈춘다.
 ⚠️ 정렬: `active_subscriptions` 는 **사전순**, `accepted_topics`/`rejected_topics` 는 **요청 순서**.
 
 **오류 코드 — 실리는 위치가 다르다:**

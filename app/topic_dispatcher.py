@@ -32,6 +32,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from dataclasses import dataclass
+
+from app.clock import system_clock as lease_clock
+from app.topic_lease import (
+    LEASE_MAX_SECONDS,
+    compute_lease_expiry,
+    is_expired as is_lease_expired,
+)
+
+
+@dataclass(frozen=True)
+class TopicLease:
+    """(연결, topic) 에 묶인 구독 lease. **monotonic 축**이다(wall 과 섞지 말 것)."""
+
+    lease_id: str
+    uid: str
+    expires_at_mono: float
+    duration_seconds: int
 
 from app.topic_wire import (
     SubscribeAuthFailed,
@@ -40,7 +59,7 @@ from app.topic_wire import (
 )
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Set
+from typing import Optional, TYPE_CHECKING, Any, Dict, Iterable, Set
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -65,17 +84,29 @@ class TopicRegistry:
     """
 
     def __init__(self) -> None:
-        self._subscriptions: Dict["WebSocket", Set[str]] = {}
+        # topic → lease. **`None` = 무토큰(§E1) 구독** — lease 가 없는 것이 정상이고,
+        # 그런 구독에는 publish 가 그대로 도달한다(인증된 적이 없어 철회할 자격도 없다).
+        self._subscriptions: Dict["WebSocket", Dict[str, Optional[TopicLease]]] = {}
 
-    def register(self, websocket: "WebSocket", topics: Iterable[str]) -> Set[str]:
+    def register(
+        self,
+        websocket: "WebSocket",
+        topics: Iterable[str],
+        leases: Optional[Dict[str, "TopicLease"]] = None,
+    ) -> Set[str]:
         """websocket을 주어진 topic들에 구독자로 등록.
 
         Returns:
             업데이트 후 해당 websocket의 구독 topic 전체 (idempotent — 기존 +
             신규 합집합).
         """
-        existing = self._subscriptions.setdefault(websocket, set())
-        existing.update(topics)
+        existing = self._subscriptions.setdefault(websocket, {})
+        for topic in topics:
+            lease = (leases or {}).get(topic)
+            # ⛔ 제공되지 않은 lease 로 **기존 lease 를 지우지 않는다.** 지우면 인증된 구독이
+            #    무토큰 재구독 하나로 legacy(무제한)가 되어 **fail-open** 이다.
+            if lease is not None or topic not in existing:
+                existing[topic] = lease
         return set(existing)
 
     def unregister(self, websocket: "WebSocket", topics: Iterable[str]) -> Set[str]:
@@ -87,7 +118,8 @@ class TopicRegistry:
         existing = self._subscriptions.get(websocket)
         if existing is None:
             return set()
-        existing.difference_update(topics)
+        for topic in topics:
+            existing.pop(topic, None)
         if not existing:
             self._subscriptions.pop(websocket, None)
             return set()
@@ -101,9 +133,13 @@ class TopicRegistry:
         """주어진 topic을 구독 중인 websocket 집합 반환 (snapshot)."""
         return {ws for ws, topics in self._subscriptions.items() if topic in topics}
 
+    def get_lease(self, websocket: "WebSocket", topic: str) -> Optional["TopicLease"]:
+        """(연결, topic) 의 lease. 무토큰(§E1) 구독이면 `None`."""
+        return self._subscriptions.get(websocket, {}).get(topic)
+
     def get_subscriptions(self, websocket: "WebSocket") -> Set[str]:
         """websocket의 현재 구독 topic 집합 (snapshot)."""
-        return set(self._subscriptions.get(websocket, set()))
+        return set(self._subscriptions.get(websocket, {}))
 
     @property
     def subscribed_connection_count(self) -> int:
@@ -155,8 +191,20 @@ async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
     if not subscribers:
         return 0
 
+    # ⛔ **전송 직전에 lease 를 다시 본다.** 발급 시점 검사만으로는 S5 의 15분 revoke 상한이
+    #    보증이 되지 않는다 — 그 사이 자격이 죽어도 계속 나간다.
+    # ⚠️ `now` 는 이 publish 에서 **1회**만 읽는다. 구독자마다 읽으면 같은 배치 안에서
+    #    판정 기준이 달라진다.
+    now_mono = lease_clock().mono()
+
     sent = 0
     for ws in subscribers:
+        lease = registry.get_lease(ws, topic)
+        if lease is not None and is_lease_expired(
+            now_mono=now_mono, expires_at_mono=lease.expires_at_mono
+        ):
+            # 만료 = **전송 0**. registry 에서 지우지는 않는다(정리는 disconnect / 재구독 축).
+            continue
         try:
             await ws.send_json(payload)
             sent += 1
@@ -442,7 +490,7 @@ async def handle_client_message(
             #    ⚠️ 그리고 이건 이론이 아니다: 3.10+ 에서 `socket.timeout is TimeoutError` 라
             #    SDK 내부 소켓 timeout 이 그대로 이 타입으로 도착할 수 있다.
             async with asyncio.timeout(config.WS_AUTH_WIRE_DEADLINE_SECONDS) as deadline_cm:
-                await authorize_subscribe(id_token)
+                uid = await authorize_subscribe(id_token)
         except asyncio.TimeoutError:
             if not deadline_cm.expired():
                 # 검증자가 스스로 던진 TimeoutError — 분류되지 않은 예외다. 우리 계약은
@@ -475,8 +523,8 @@ async def handle_client_message(
                 )
             )
             return
-        # ⚠️ uid를 **저장하지 않는다** — lease 바인딩이 없는 지금 저장하면 소비자 없는 상태가
-        #    되고, 그것이 폐기된 트랙의 형태였다. uid는 lease 슬라이스에서 쓴다.
+        # ⚠️ uid 는 이제 **lease 에 바인딩된다**(아래). 한때 "소비자가 없어 저장하지 않는다"고
+        #    적었는데, 이 슬라이스가 그 소비자를 만들었다.
 
         # ⛔ **"게이트가 아니면 허용"은 틀렸다.** 구 판정은 미지원 topic(`not:a:topic`)까지
         #    accept하고 registry에 등록했다(실측 재현). 지원 집합을 **명시적으로** 봐야 한다.
@@ -517,8 +565,32 @@ async def handle_client_message(
             else:
                 accepted_names.append(topic)
 
+        leases: Dict[str, TopicLease] = {}
         if accepted_names:
-            registry.register(websocket, accepted_names)
+            # ⛔ **`now` 는 여기서 1회만 읽는다.** topic 마다 읽으면 같은 요청 안에서 만료가
+            #    갈린다.
+            # ⚠️ 3-way min 의 세 항에 **같은 값**을 넘긴다. 이 슬라이스에서 실제 관측은
+            #    identity 검증 시각 하나뿐이고, 여기서 accept 되는 topic 들은 per-user
+            #    premium 판정 대상이 아니다(gated topic 은 위에서 이미 접혔다). 따라서
+            #    premium 항은 **구속하지 않는 값**이어야 하고 `now` 가 그것이다 —
+            #    "방금 premium 을 확인했다"는 주장이 아니다.
+            verified_at_mono = lease_clock().mono()
+            expires_at_mono = compute_lease_expiry(
+                now_mono=verified_at_mono,
+                premium_verified_at_mono=verified_at_mono,
+                firebase_identity_verified_at_mono=verified_at_mono,
+            )
+            duration_seconds = int(expires_at_mono - verified_at_mono)
+            leases = {
+                topic: TopicLease(
+                    lease_id=uuid.uuid4().hex,
+                    uid=uid,
+                    expires_at_mono=expires_at_mono,
+                    duration_seconds=duration_seconds,
+                )
+                for topic in accepted_names
+            }
+            registry.register(websocket, accepted_names, leases=leases)
 
         # ⚠️ **ack이 데이터보다 먼저다.** snapshot을 먼저 보내면 클라가 ack 전에 데이터를 받아
         #    "요청이 수락됐는지" 모르는 상태로 처리하게 된다. registry 등록은 ack 앞이어야
@@ -530,6 +602,11 @@ async def handle_client_message(
                 accepted=accepted_names,
                 rejected=rejected,
                 active=registry.get_subscriptions(websocket),
+                leases={
+                    topic: (lease.lease_id, lease.duration_seconds)
+                    for topic in registry.get_subscriptions(websocket)
+                    if (lease := registry.get_lease(websocket, topic)) is not None
+                },
             )
         )
         if accepted_names:

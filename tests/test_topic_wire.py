@@ -375,12 +375,18 @@ class TestGuideExamplesAreConstructible(unittest.TestCase):
                         retry_after_seconds=frame.get("retry_after_seconds"),
                     )
                 else:
+                    documented_leases = {
+                        x["topic"]: (x["lease_id"], x["lease_duration_seconds"])
+                        for x in frame["accepted_topics"] + frame["active_subscriptions"]
+                        if "lease_id" in x
+                    }
                     rebuilt = build_subscription_ack(
                         request_id=frame["request_id"],
                         operation=frame["operation"],
                         accepted=[x["topic"] for x in frame["accepted_topics"]],
                         rejected=[(x["topic"], x["error"]) for x in frame["rejected_topics"]],
                         active=[x["topic"] for x in frame["active_subscriptions"]],
+                        leases=documented_leases or None,
                     )
                 self.assertEqual(
                     rebuilt, frame,

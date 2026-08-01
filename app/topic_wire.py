@@ -20,7 +20,7 @@ import-time 의존성이 단위 테스트를 깨뜨린다). 그런데 인증 실
 """
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Mapping, Optional, Sequence, Tuple
 
 # §8-C 의 **전체-요청** 오류 코드 전부. per-topic 코드(`unknown_topic` / `topic_unavailable` /
 # `premium_required` / `krx_entitlement_required` / `topics_disabled`)는 ack 의 `rejected_topics`
@@ -133,6 +133,7 @@ def build_subscription_ack(
     accepted: Sequence[str],
     rejected: Sequence[Tuple[str, str]],
     active: Iterable[str],
+    leases: Optional[Mapping[str, Tuple[str, int]]] = None,
 ) -> dict:
     """§8-B / §8-B-stage Stage 1 의 `subscription_ack`. **ack 프레임은 전부 여기서 나온다.**
 
@@ -173,12 +174,20 @@ def build_subscription_ack(
                 f"§8-C 의 per-topic 오류 코드가 아니다: {error!r} (topic={topic!r}) — "
                 f"허용: {sorted(PER_TOPIC_ERRORS)}"
             )
+    def _entry(topic: str) -> dict:
+        entry: dict = {"topic": topic}
+        lease = (leases or {}).get(topic)
+        if lease is not None:
+            # §8-B-stage Stage 2 — 컨테이너 형태는 Stage 1 부터 최종형이라 **필드만 는다**.
+            entry["lease_id"], entry["lease_duration_seconds"] = lease
+        return entry
+
     return {
         "type": "subscription_ack",
         "request_id": request_id,
         "operation": operation,
-        "accepted_topics": [{"topic": t} for t in accepted],
+        "accepted_topics": [_entry(t) for t in accepted],
         "rejected_topics": [{"topic": t, "error": e} for t, e in rejected],
         "removed_topics": [],
-        "active_subscriptions": [{"topic": t} for t in sorted(active)],
+        "active_subscriptions": [_entry(t) for t in sorted(active)],
     }
