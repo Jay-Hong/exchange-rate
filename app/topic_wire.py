@@ -20,7 +20,7 @@ import-time 의존성이 단위 테스트를 깨뜨린다). 그런데 인증 실
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional, Sequence, Tuple
 
 # §8-C 의 **전체-요청** 오류 코드 전부. per-topic 코드(`unknown_topic` / `topic_unavailable` /
 # `premium_required` / `krx_entitlement_required` / `topics_disabled`)는 ack 의 `rejected_topics`
@@ -33,6 +33,19 @@ WHOLE_REQUEST_ERRORS = frozenset({
     "invalid_request",
     "request_too_large",
 })
+
+# §8-C 의 **per-topic** 오류 코드 전부. ack 의 `rejected_topics` 에만 실린다.
+# ⛔ 위 주석이 말로만 적어 두던 집합을 **실행 가능한 형태**로 올린다 — ack builder 가 이걸로
+#    검증하지 않으면 오타·즉흥 코드가 rejected 항목에 그대로 실려 나간다.
+PER_TOPIC_ERRORS = frozenset({
+    "topics_disabled",
+    "unknown_topic",
+    "premium_required",
+    "krx_entitlement_required",
+    "topic_unavailable",
+})
+
+_ACK_OPERATIONS = frozenset({"subscribe", "unsubscribe"})
 
 # §8-C: 이 코드는 `retry_after_seconds` 를 **반드시** 동반한다. 클라의 재시도 공식 입력이다.
 _ERRORS_REQUIRING_RETRY_AFTER = frozenset({"temporarily_unavailable"})
@@ -111,3 +124,61 @@ def build_subscription_error(
     if retry_after_seconds is not None:
         frame["retry_after_seconds"] = retry_after_seconds
     return frame
+
+
+def build_subscription_ack(
+    *,
+    request_id: str,
+    operation: str,
+    accepted: Sequence[str],
+    rejected: Sequence[Tuple[str, str]],
+    active: Iterable[str],
+) -> dict:
+    """§8-B / §8-B-stage Stage 1 의 `subscription_ack`. **ack 프레임은 전부 여기서 나온다.**
+
+    ## 왜 인자가 **문자열**인가 (객체가 아니라)
+
+    ⛔ 호출자가 `[{"topic": t}, …]` 를 만들어 넘기면 컨테이너 형태가 **호출자 규율**이 된다.
+    정본 §8-B-stage 의 ⛔ 항목("컨테이너는 Stage 1 부터 최종형 객체 배열")은 그렇게 지켜지지
+    않는다 — 한 호출자가 문자열 배열을 넘기면 그대로 나간다. 그리고 그 사고는 **조용하다**:
+    클라(iOS)의 `activeSubscriptions` 는 non-optional 객체 배열이라 형태가 어긋나면 디코드가
+    통째로 실패하고, 그러면 "프레임 0개"와 **구분되지 않는다**(pending 이 영영 안 지워진다).
+    그래서 wrap 을 여기서 한다 — 형태를 규율이 아니라 **타입**으로 만든다.
+
+    ⛔ `removed_topics` 는 **인자가 아니다.** Stage 1 에서 항상 `[]` 이고(§C2 eviction 미구현),
+    인자로 두면 "클라가 요청한 unsubscribe 결과"를 담고 싶은 유혹이 생긴다 — 그건 다른 축이다.
+
+    ⚠️ **정렬 정책이 축마다 다르다.** `accepted`/`rejected` 는 **요청 순서 보존**(호출자가 그
+    순서로 넘긴다), `active` 만 **사전순 정렬**한다. `active` 의 입력이 `set` 이라 정렬하지 않으면
+    `PYTHONHASHSEED` 에 따라 프로세스마다 wire 순서가 달라진다. 이 정렬은 정본에 없고 코드에만
+    있던 계약이라, 여기 적어 두지 않으면 다음 재작성에서 조용히 사라진다(실제로 그럴 뻔했다).
+
+    Raises:
+        ValueError: `request_id` 가 non-empty 문자열이 아니거나(ack 은 nullable 이 **아니다**),
+            `operation` 이 §8-B 어휘 밖이거나, `rejected` 의 오류 코드가 §8-C per-topic 어휘 밖.
+    """
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError(
+            "ack 의 request_id 는 non-empty 문자열이어야 한다 — "
+            "ack 은 nullable 이 아니다(§8-B-stage). "
+            f"got {request_id!r}"
+        )
+    if operation not in _ACK_OPERATIONS:
+        raise ValueError(
+            f"§8-B 의 operation 이 아니다: {operation!r} — 허용: {sorted(_ACK_OPERATIONS)}"
+        )
+    for topic, error in rejected:
+        if error not in PER_TOPIC_ERRORS:
+            raise ValueError(
+                f"§8-C 의 per-topic 오류 코드가 아니다: {error!r} (topic={topic!r}) — "
+                f"허용: {sorted(PER_TOPIC_ERRORS)}"
+            )
+    return {
+        "type": "subscription_ack",
+        "request_id": request_id,
+        "operation": operation,
+        "accepted_topics": [{"topic": t} for t in accepted],
+        "rejected_topics": [{"topic": t, "error": e} for t, e in rejected],
+        "removed_topics": [],
+        "active_subscriptions": [{"topic": t} for t in sorted(active)],
+    }

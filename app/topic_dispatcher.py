@@ -32,6 +32,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+from app.topic_wire import (
+    SubscribeAuthFailed,
+    build_subscription_ack,
+    build_subscription_error,
+)
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Set
@@ -293,16 +299,89 @@ async def handle_client_message(
     if msg_type not in ("subscribe", "unsubscribe"):
         return  # ping은 위에서 처리, 그 외 unknown type은 forward-compat 무시
 
-    if not config.TOPIC_DISPATCHER_ENABLED:
-        # FF=false: Stage 2 wiring 차단. registry 변경 X.
+    # ── 이 요청은 **ack 을 받는 요청인가** (§8-A) ────────────────────────────────
+    #    §8-A: 상태를 바꾸는 메시지는 `request_id` 를 갖고 ack 을 받는다. 그 계약을 지키는
+    #    클라만 "식별된" 요청이고, **식별된 요청은 반드시 종결 프레임을 받는다**(아래 불변식).
+    #
+    #    ⛔ **truthiness 로 판별하지 말 것.** `request_id: ""` 를 legacy 로 분류하면 조용히
+    #       처리되고 클라의 in-flight 슬롯이 영영 안 풀린다 — 그게 이 검사가 없애려는 정지다.
+    #       그래서 **키 존재**로 본다. 값 검증은 그 다음이다.
+    #    ⛔ subscribe 를 `id_token` **값** 존재만으로 판별하면 `{"request_id":…, "id_token":null}`
+    #       이 미식별로 새어 blind register + 프레임 0개가 된다(적대적 검토가 찾은 구멍).
+    #       두 축의 **합집합**이라야 그 shape 가 종결된다.
+    #    ⚠️ 구 클라(§E1)는 둘 다 보내지 않으므로 미식별로 남는다 — 동작 불변이 그 보호다.
+    id_token = msg.get("id_token") if msg_type == "subscribe" else None
+    identified = ("request_id" in msg) or (id_token is not None)
+
+    request_id = None
+    if identified:
+        raw_request_id = msg.get("request_id")
+        if not isinstance(raw_request_id, str) or not raw_request_id:
+            # id 를 모르거나 쓸 수 없는 요청이므로 **null 로 응답**한다(§8-B-stage).
+            # ⚠️ unsubscribe 도 여기서 접힌다 = **fail-closed**. §8-A 의 "축소는 fail-open" 은
+            #    *토큰* 축이고, echo 할 id 가 없으면 ack 자체를 만들 수 없다 — ack 없는
+            #    unregister 가 바로 이 검사가 삭제하는 침묵이다.
+            await websocket.send_json(
+                build_subscription_error(request_id=None, error="invalid_request")
+            )
+            return
+        request_id = raw_request_id
+
+    if msg_type == "subscribe" and identified and (
+        not isinstance(id_token, str) or not id_token
+    ):
+        # ⛔ 형식 위반은 **인증 이전 단계**다(§8-C `invalid_request`). 여기서 걸러 두면
+        #    SDK 가 토큰과 무관한 bare `ValueError` 를 던지는 경로가 아예 사라진다 —
+        #    그 예외는 자격 오류도 판정 불가도 아니라 어느 코드에도 맞지 않는다.
+        #    ⚠️ `id_token` 부재(=request_id 로만 식별된 subscribe)도 여기 걸린다: §8-A 의
+        #       subscribe 는 토큰을 동반한다.
+        await websocket.send_json(
+            build_subscription_error(request_id=request_id, error="invalid_request")
+        )
         return
 
+    # ── topics 형식 — **flag 앞**이어야 flag-off ack 의 rejected 목록을 만들 수 있다 ──────
     topics = msg.get("topics")
-    if not isinstance(topics, list) or not all(isinstance(t, str) for t in topics):
+    if (
+        not isinstance(topics, list)
+        or not topics
+        or not all(isinstance(t, str) for t in topics)
+    ):
+        # ⛔ 빈 리스트도 거부한다(§8-C "빈 topics"). `all()` 은 빈 시퀀스에서 True 라
+        #    현행 검사를 **통과했고**, 그러면 성공과 구분되지 않는 빈 ack 이 나간다.
         logger.debug(
             "topic message: invalid topics payload",
-            extra={"type": msg_type, "topics_type": type(topics).__name__},
+            extra={
+                "type": msg_type,
+                "topics_type": type(topics).__name__,
+                "topics_len": len(topics) if isinstance(topics, list) else None,
+            },
         )
+        if identified:
+            await websocket.send_json(
+                build_subscription_error(request_id=request_id, error="invalid_request")
+            )
+        return
+
+    if not config.TOPIC_DISPATCHER_ENABLED:
+        # FF=false: Stage 2 wiring 차단. **registry 변경 X.**
+        # ⚠️ 응답은 전체-요청 오류가 아니라 **전부 rejected 된 ack** 이다 — §8-C 에서
+        #    `topics_disabled` 는 per-topic 범위이고, 전체-요청 코드 4개에 그건 없다.
+        # ⚠️ 이 ack 은 **인증 이전**에 나간다 → *ack 수신은 인증 통과를 뜻하지 않는다*.
+        #    (REST twin 도 같은 순서다: flag 404 가 토큰 검증보다 앞이다.)
+        # ⚠️ registry 를 안 바꾸는 선택이 unsubscribe 에서도 관측되지 않는 이유: flag 는
+        #    import 시점 상수라 한 연결의 수명 동안 불변이고, 등록은 이 검사 **뒤**에서만
+        #    일어난다 → flag-off 프로세스의 연결은 애초에 뺄 구독이 없다.
+        if identified:
+            await websocket.send_json(
+                build_subscription_ack(
+                    request_id=request_id,
+                    operation=msg_type,
+                    accepted=[],
+                    rejected=[(t, "topics_disabled") for t in topics],
+                    active=registry.get_subscriptions(websocket),
+                )
+            )
         return
 
     if msg_type == "subscribe":
@@ -314,35 +393,6 @@ async def handle_client_message(
             supported_snapshot_topics,
         )
 
-        from app.topic_wire import SubscribeAuthFailed, build_subscription_error
-
-        id_token = msg.get("id_token")
-        if id_token is not None:
-            # ⛔ **인증 경로는 `request_id` 를 요구한다**(§8-A: 상태를 바꾸는 메시지는 id 를 갖고
-            #    ack 을 받는다). 없으면 `request_id: null` 인 ack 이 나가는데, 그건 "항상 echo 된다"는
-            #    ack 계약과 모순이고 **필수 필드로 모델링한 클라의 디코드를 깨뜨린다**(실측 재현).
-            #    ⚠️ 검증은 **인증 이전**이다 — 여기서 거부하면 registry 는 불변이다.
-            #    ⚠️ 무토큰 경로에는 요구하지 않는다: §E1 중간 상태의 구 클라는 id 를 보내지 않고
-            #       ack 도 받지 않는다. 여기서 요구하면 그 클라가 topic 을 잃는다.
-            request_id = msg.get("request_id")
-            if not isinstance(request_id, str) or not request_id:
-                await websocket.send_json(
-                    build_subscription_error(
-                        # id 를 모르거나 쓸 수 없는 요청이므로 **null 로 응답**한다(§8-B-stage).
-                        request_id=None, error="invalid_request"
-                    )
-                )
-                return
-        if id_token is not None and (not isinstance(id_token, str) or not id_token):
-            # ⛔ 형식 위반은 **인증 이전 단계**다(§8-C `invalid_request`). 여기서 걸러 두면
-            #    SDK 가 토큰과 무관한 bare `ValueError` 를 던지는 경로가 아예 사라진다 —
-            #    그 예외는 자격 오류도 판정 불가도 아니라 어느 코드에도 맞지 않는다.
-            await websocket.send_json(
-                build_subscription_error(
-                    request_id=msg.get("request_id"), error="invalid_request"
-                )
-            )
-            return
         if id_token is None:
             # ⚠️ **무토큰 = 기존 동작 그대로**(등록 + snapshot, ack 없음). 강제 전환을 여기서
             #    하면 안 된다 — enforcement는 capability와 분리돼야 하고(§E1), 현행 클라가
@@ -380,7 +430,7 @@ async def handle_client_message(
             )
             await websocket.send_json(
                 build_subscription_error(
-                    request_id=msg.get("request_id"),
+                    request_id=request_id,
                     error="temporarily_unavailable",
                     retry_after_seconds=config.WS_AUTH_RETRY_AFTER_SECONDS,
                 )
@@ -392,7 +442,7 @@ async def handle_client_message(
             #    사라졌다. 그 차이는 소켓에서만 관측된다.
             await websocket.send_json(
                 build_subscription_error(
-                    request_id=msg.get("request_id"),
+                    request_id=request_id,
                     error=failure.error,
                     retry_after_seconds=failure.retry_after_seconds,
                 )
@@ -422,24 +472,23 @@ async def handle_client_message(
             #    갈리지 않게 하는 것이 `build_subscription_error` 의 존재 이유다.
             await websocket.send_json(
                 build_subscription_error(
-                    request_id=msg.get("request_id"),
+                    request_id=request_id,
                     error="temporarily_unavailable",
                     retry_after_seconds=_CONFIG_FAULT_RETRY_AFTER_SECONDS,
                 )
             )
             return
 
-        accepted_names, accepted, rejected = [], [], []
+        accepted_names, rejected = [], []
         for topic in topics:                          # 요청 순서 보존
             if topic in gated or not is_snapshot_topic_enabled(topic):
                 # 배포/개별 flag가 off라 지금 발사되지 않는 topic — §8-C `topic_unavailable`.
                 # (gated인데 여기 온 것은 supported 밖 = 배포 flag off인 경우뿐이다. 위 guard 참조.)
-                rejected.append({"topic": topic, "error": "topic_unavailable"})
+                rejected.append((topic, "topic_unavailable"))
             elif topic not in supported:
-                rejected.append({"topic": topic, "error": "unknown_topic"})
+                rejected.append((topic, "unknown_topic"))
             else:
                 accepted_names.append(topic)
-                accepted.append({"topic": topic})
 
         if accepted_names:
             registry.register(websocket, accepted_names)
@@ -447,19 +496,35 @@ async def handle_client_message(
         # ⚠️ **ack이 데이터보다 먼저다.** snapshot을 먼저 보내면 클라가 ack 전에 데이터를 받아
         #    "요청이 수락됐는지" 모르는 상태로 처리하게 된다. registry 등록은 ack 앞이어야
         #    `active_subscriptions`가 연결의 **최종 상태**를 담을 수 있다(§8-B).
-        await websocket.send_json({
-            "type": "subscription_ack",
-            "request_id": msg.get("request_id"),
-            "operation": "subscribe",
-            "accepted_topics": accepted,
-            "rejected_topics": rejected,
-            # 제거 전이(§C2 eviction)는 이 슬라이스에 없다 — 항상 빈 목록이다(§8-B-stage).
-            "removed_topics": [],
-            "active_subscriptions": [
-                {"topic": t} for t in sorted(registry.get_subscriptions(websocket))
-            ],
-        })
+        await websocket.send_json(
+            build_subscription_ack(
+                request_id=request_id,
+                operation="subscribe",
+                accepted=accepted_names,
+                rejected=rejected,
+                active=registry.get_subscriptions(websocket),
+            )
+        )
         if accepted_names:
             await send_initial_snapshots(websocket, accepted_names)
     else:  # unsubscribe
-        registry.unregister(websocket, topics)
+        # ⚠️ `unregister` 는 제거분이 아니라 **잔여**를 돌려준다 — 그게 곧 ack 의
+        #    `active_subscriptions`(연결 최종 상태)다.
+        remaining = registry.unregister(websocket, topics)
+        if identified:
+            # ⚠️ `accepted` = 요청된 topic **전부**(idempotent). 구독한 적 없는 topic 도
+            #    accepted 다 — 요청의 목표 상태("구독하지 않음")가 달성됐고, §8-C 의 닫힌
+            #    per-topic 어휘에 "미구독" 코드가 없다.
+            # ⛔ 지원 집합(`supported_snapshot_topics`)을 **조회하지 않는다**: 그 집합은
+            #    flag-aware 라, KRX 배포 flag 가 꺼진 뒤 `unknown_topic` 으로 거부하면
+            #    이미 들고 있는 구독을 영영 뺄 수 없게 된다. 축소 연산에 flag-aware 검증을
+            #    붙이면 이득 없이 실패 모드만 는다.
+            await websocket.send_json(
+                build_subscription_ack(
+                    request_id=request_id,
+                    operation="unsubscribe",
+                    accepted=list(topics),
+                    rejected=[],
+                    active=remaining,
+                )
+            )

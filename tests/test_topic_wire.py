@@ -11,9 +11,11 @@ import pathlib
 import unittest
 
 from app.topic_wire import (
+    PER_TOPIC_ERRORS,
     WHOLE_REQUEST_ERRORS,
     FirebaseNotInitialized,
     SubscribeAuthFailed,
+    build_subscription_ack,
     build_subscription_error,
 )
 
@@ -161,6 +163,96 @@ class TestAuthTimeConstants(unittest.TestCase):
             config.WS_AUTH_RETRY_AFTER_SECONDS,
             "재시도로 낫지 않는 결함에 같은 간격을 주면 retry storm 이 된다",
         )
+
+
+class TestSubscriptionAck(unittest.TestCase):
+    """§8-B ack 의 **형태**를 호출자 규율이 아니라 타입으로 강제한다.
+
+    ⛔ 형태가 어긋난 ack 은 **조용한 사고**다: 클라(iOS)의 `activeSubscriptions` 는
+    non-optional 객체 배열이라 디코드가 통째로 실패하고, 그러면 "프레임 0개"와 구분되지 않아
+    in-flight 슬롯이 영영 안 풀린다. 그래서 wrap 을 builder 안에서 한다.
+    """
+
+    def _ack(self, **kw):
+        base = dict(request_id="r", operation="subscribe",
+                    accepted=[], rejected=[], active=[])
+        base.update(kw)
+        return build_subscription_ack(**base)
+
+    def test_containers_are_object_arrays(self):
+        """⛔ 정본 §8-B-stage: 컨테이너는 Stage 1 부터 최종형(객체 배열)이다."""
+        frame = self._ack(accepted=["fx:usd-krw"],
+                          rejected=[("krx:usd-krw-futures", "topic_unavailable")],
+                          active=["fx:usd-krw"])
+        self.assertEqual(
+            frame,
+            {
+                "type": "subscription_ack",
+                "request_id": "r",
+                "operation": "subscribe",
+                "accepted_topics": [{"topic": "fx:usd-krw"}],
+                "rejected_topics": [
+                    {"topic": "krx:usd-krw-futures", "error": "topic_unavailable"}
+                ],
+                "removed_topics": [],
+                "active_subscriptions": [{"topic": "fx:usd-krw"}],
+            },
+        )
+
+    def test_active_is_sorted_but_accepted_keeps_request_order(self):
+        """⚠️ 두 축의 정렬 정책이 **다르다**. 하나로 통일하면 둘 중 하나가 깨진다.
+
+        `active` 의 입력은 `set` 이라 정렬하지 않으면 `PYTHONHASHSEED` 에 따라 프로세스마다
+        wire 순서가 달라진다. `accepted` 는 클라가 보낸 순서를 되비춘다.
+        """
+        frame = self._ack(accepted=["usdt:krw", "fx:eur-krw"],
+                          active={"usdt:krw", "fx:eur-krw", "fx:usd-krw"})
+        self.assertEqual([x["topic"] for x in frame["active_subscriptions"]],
+                         ["fx:eur-krw", "fx:usd-krw", "usdt:krw"])
+        self.assertEqual([x["topic"] for x in frame["accepted_topics"]],
+                         ["usdt:krw", "fx:eur-krw"])
+
+    def test_removed_topics_is_not_an_argument(self):
+        """⛔ 인자가 아니라 **항상 `[]`**. 인자로 두면 unsubscribe 결과를 담고 싶어지는데,
+        `removed_topics` 는 §C2 eviction 축이라 다른 것이다."""
+        import inspect
+        self.assertNotIn("removed_topics",
+                         inspect.signature(build_subscription_ack).parameters)
+        self.assertEqual(self._ack(accepted=["fx:usd-krw"])["removed_topics"], [])
+
+    def test_request_id_must_be_a_non_empty_string(self):
+        """⛔ **ack 은 nullable 이 아니다**(§8-B-stage) — 클라가 필수 필드로 모델링한다."""
+        for bad in (None, "", 123, True):
+            with self.subTest(request_id=bad), self.assertRaises(ValueError):
+                self._ack(request_id=bad)
+
+    def test_operation_vocabulary_is_enforced(self):
+        for bad in ("resubscribe", "", None, "SUBSCRIBE"):
+            with self.subTest(operation=bad), self.assertRaises(ValueError):
+                self._ack(operation=bad)
+        for good in ("subscribe", "unsubscribe"):
+            with self.subTest(operation=good):
+                self.assertEqual(self._ack(operation=good)["operation"], good)
+
+    def test_rejection_reasons_must_be_per_topic_codes(self):
+        """⛔ per-topic 어휘 밖(오타·전체-요청 코드)이면 프레임을 만들 수 없다."""
+        for bad in ("typo_not_in_section_8", "invalid_token", "temporarily_unavailable"):
+            with self.subTest(error=bad), self.assertRaises(ValueError):
+                self._ack(rejected=[("fx:usd-krw", bad)])
+
+    def test_every_per_topic_code_can_build_a_rejection(self):
+        """⛔ 자기검사 — 허용 목록이 비거나 좁아지면 이 테스트가 먼저 깨진다."""
+        self.assertEqual(
+            PER_TOPIC_ERRORS,
+            {"topics_disabled", "unknown_topic", "premium_required",
+             "krx_entitlement_required", "topic_unavailable"},
+        )
+        self.assertFalse(PER_TOPIC_ERRORS & WHOLE_REQUEST_ERRORS,
+                         "per-topic 과 전체-요청 어휘가 겹치면 범위 구분이 무너진다")
+        for code in sorted(PER_TOPIC_ERRORS):
+            with self.subTest(error=code):
+                frame = self._ack(rejected=[("fx:usd-krw", code)])
+                self.assertEqual(frame["rejected_topics"][0]["error"], code)
 
 
 if __name__ == "__main__":

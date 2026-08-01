@@ -1472,6 +1472,224 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(msg.get("type"), "subscription_ack")
         self.assertEqual(delta, 1, "정상 요청이 등록되지 않았다")
 
+    # ── 종결 프레임 불변식 ────────────────────────────────────────────────────
+    #
+    # ⚠️ 정확한 문장은 **"식별된 요청은 종결 프레임 1개 **또는 연결 종료**를 받는다"** 이다.
+    #    "항상 프레임 1개"는 **거짓**이고, 그걸 다음 슬라이스의 큐가 믿으면 정확히 예전처럼
+    #    멈춘다. 프레임 0개 + 연결 종료인 경로가 실제로 있다(적대적 검토가 찾음, 코드 확인):
+    #      - 분류 불가 인증 예외 → `app/main.py` 가 그대로 재전파 → 상위 `except` → 연결 정리
+    #      - 16KB 초과 메시지 → uvicorn `--ws-max-size 16384` 가 transport 에서 close 1009
+    #        (정본 §8-C 도 `request_too_large` 를 "전송 계층은 close 1009"로 규정한다)
+    #      - 반쯤 닫힌 소켓에서 `send_json` 자체가 실패
+    #    → 클라 큐는 **disconnect 를 모든 in-flight 의 종결 신호로** 처리해야 하고 timeout 은
+    #      여전히 load-bearing 이다.
+
+    def _receive_for(self, ws, request_id, limit=8):
+        """`request_id` 가 일치하는 프레임이 올 때까지 읽는다.
+
+        ⚠️ subscribe 성공은 ack **뒤에 snapshot 프레임을 더 보낸다** — 그냥 다음 프레임을
+           읽으면 그걸 집는다(실측으로 red 를 봤다).
+        """
+        for _ in range(limit):
+            msg = _receive_json_or_fail(ws, self.fail)
+            if msg.get("request_id") == request_id:
+                return msg
+        self.fail(f"request_id={request_id!r} 응답이 오지 않았다")
+
+    def _probe_then_collect(self, ws, sent):
+        """`sent` 를 보낸 뒤 **probe** 를 보내, probe 응답 **앞의** 프레임만 모은다.
+
+        ⛔ 프레임 type 으로 경계를 판별하지 말 것 — flag-off 응답도 probe 응답도 둘 다
+           `subscription_ack` 이라 "under-test 를 놓치고 probe 만 잡은" 변이가 통과한다.
+           경계는 **probe 전용 request_id** 로 판별한다.
+        """
+        ws.send_json(sent)
+        # ⛔ probe 는 **registry 를 건드리면 안 된다.** 한때 probe 를 정상 subscribe 로 뒀더니
+        #    probe 자신이 등록해 카운터를 되돌렸고, "해제가 반영되지 않았다"는 **거짓 red** 가
+        #    났다(실측). 빈 topics 는 종결되면서 아무것도 등록하지 않는다.
+        ws.send_json({"type": "subscribe", "request_id": "PROBE", "id_token": "tok",
+                      "topics": []})
+        collected = []
+        for _ in range(8):
+            msg = _receive_json_or_fail(ws, self.fail)
+            if msg.get("request_id") == "PROBE":
+                return collected
+            collected.append(msg)
+        self.fail(f"probe 응답이 오지 않았다 — 수집: {collected!r}")
+
+    def test_identified_unsubscribe_is_acknowledged(self):
+        """⛔ unsubscribe 가 **프레임을 0개** 보내고 있었다(실측 확인).
+
+        그건 조용한 실패이고(§8-A "조용한 실패 금지"), 클라의 in-flight 슬롯을 영영 잡아 둔다 —
+        실제로 현재 iOS dev 빌드는 매 unsubscribe 마다 `pendingRequests` 항목을 누수 중이다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                # 사전 등록 — 이게 없으면 아래 단언이 빈 registry 에서 **공허하게** 통과한다.
+                ws.send_json({"type": "subscribe", "request_id": "pre", "id_token": "tok",
+                              "topics": ["fx:usd-krw", "usdt:krw"]})
+                pre_ack = self._receive_for(ws, "pre")
+                before = _registry_connection_count()
+
+                ws.send_json({"type": "unsubscribe", "request_id": "u-1",
+                              "topics": ["usdt:krw"]})
+                msg = self._receive_for(ws, "u-1")
+                partial = _registry_connection_count()
+
+                # positive control — 남은 것까지 빼면 카운터가 **실제로 움직인다**.
+                ws.send_json({"type": "unsubscribe", "request_id": "u-2",
+                              "topics": ["fx:usd-krw"]})
+                last = self._receive_for(ws, "u-2")
+                after = _registry_connection_count()
+
+        self.assertEqual(len(pre_ack.get("accepted_topics", [])), 2, "사전 등록이 실패했다")
+        self.assertEqual(msg.get("type"), "subscription_ack")
+        self.assertEqual(msg.get("operation"), "unsubscribe", "같은 schema라 구분자가 필요하다")
+        self.assertEqual(msg.get("request_id"), "u-1")
+        self.assertEqual(msg.get("accepted_topics"), [{"topic": "usdt:krw"}])
+        self.assertEqual(msg.get("active_subscriptions"), [{"topic": "fx:usd-krw"}],
+                         "ack 이 연결의 최종 상태를 담지 않았다")
+        self.assertEqual(msg.get("removed_topics"), [], "§C2 eviction 축은 Stage 1 에서 빈다")
+        self.assertEqual(last.get("active_subscriptions"), [])
+        self.assertEqual((before, partial, after), (1, 1, 0),
+                         "positive control 실패 — 이 카운터는 부분 해제로는 안 움직인다")
+
+    def test_unidentified_unsubscribe_still_unregisters_silently(self):
+        """⚠️ 반대 방향 — §E1 구 클라는 `request_id` 를 보내지 않고 ack 도 받지 않는다.
+
+        여기에 프레임을 보내거나 해제를 거부하면 구 클라가 구독을 못 뺀다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "topics": ["fx:usd-krw"]})   # 무토큰 등록
+                _receive_json_or_fail(ws, self.fail)                            # snapshot
+                before = _registry_connection_count()
+                frames = self._probe_then_collect(
+                    ws, {"type": "unsubscribe", "topics": ["fx:usd-krw"]})
+                after = _registry_connection_count()
+        self.assertEqual(frames, [], f"구 클라의 unsubscribe 에 프레임이 나갔다: {frames!r}")
+        self.assertEqual((before, after), (1, 0), "구 클라의 해제가 반영되지 않았다")
+
+    def test_identified_requests_are_acknowledged_when_topics_are_disabled(self):
+        """⛔ flag off 가 **조용히 무시**하고 있었다 — 운영이 지금 그 상태다(실측 확인).
+
+        ⚠️ 응답은 전체-요청 오류가 아니라 **전부 rejected 된 ack** 이다: §8-C 에서
+        `topics_disabled` 는 per-topic 범위이고 전체-요청 코드 4개에 없다.
+        ⚠️ 이 ack 은 **인증 이전**에 나간다 → ack 수신이 인증 통과를 뜻하지 않는다.
+        """
+        patchers = self._patchers()
+        patchers["dispatcher_flag"] = patch.object(config, "TOPIC_DISPATCHER_ENABLED", False)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
+                for payload in (
+                    {"type": "subscribe", "request_id": "off-s", "id_token": "쓰레기",
+                     "topics": ["fx:usd-krw", "usdt:krw"]},
+                    {"type": "unsubscribe", "request_id": "off-u", "topics": ["fx:usd-krw"]},
+                ):
+                    ws.send_json(payload)
+                    msg = _receive_json_or_fail(ws, self.fail)
+                    with self.subTest(op=payload["type"]):
+                        self.assertEqual(msg.get("type"), "subscription_ack")
+                        self.assertEqual(msg.get("operation"), payload["type"])
+                        self.assertEqual(msg.get("accepted_topics"), [])
+                        self.assertEqual(
+                            msg.get("rejected_topics"),
+                            [{"topic": t, "error": "topics_disabled"}
+                             for t in payload["topics"]],
+                        )
+                        self.assertEqual(msg.get("active_subscriptions"), [])
+                delta = _registry_connection_count() - before
+        self.assertEqual(delta, 0, "flag off 인데 registry 가 바뀌었다")
+
+    def test_topics_payload_failures_terminate_identified_requests(self):
+        """⛔ 빈 목록과 잘못된 payload 가 **침묵**이었다 — 식별된 요청이면 큐가 멈춘다.
+
+        ⚠️ 빈 리스트는 `all([])` 가 True 라 현행 검사를 **통과**했고, 그러면 성공과 구분되지
+        않는 빈 ack 이 나갔다. §8-C 는 "빈 topics" 를 `invalid_request` 로 규정한다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                for label, payload in (
+                    ("빈 목록", {"type": "subscribe", "request_id": "e-1", "id_token": "tok",
+                                "topics": []}),
+                    ("문자열", {"type": "subscribe", "request_id": "e-2", "id_token": "tok",
+                               "topics": "fx:usd-krw"}),
+                    ("비문자 원소", {"type": "unsubscribe", "request_id": "e-3",
+                                  "topics": ["fx:usd-krw", 7]}),
+                    ("누락", {"type": "unsubscribe", "request_id": "e-4"}),
+                ):
+                    ws.send_json(payload)
+                    msg = _receive_json_or_fail(ws, self.fail)
+                    with self.subTest(case=label):
+                        self.assertEqual(msg.get("type"), "subscription_error")
+                        self.assertEqual(msg.get("error"), "invalid_request")
+                        self.assertEqual(msg.get("request_id"), payload["request_id"])
+
+    def test_subscribe_with_request_id_but_no_token_is_terminated(self):
+        """⛔ `{"request_id": …, "id_token": null}` 이 **미식별로 새던** 구멍이다.
+
+        `id_token` **값** 존재만으로 판별하면 이 shape 가 무토큰 경로로 흘러 blind register +
+        프레임 0개가 된다 — 클라는 id 를 발급했으므로 in-flight 슬롯이 영영 안 풀린다.
+        판별자를 두 축의 **합집합**으로 두면 §8-A 위반으로 종결된다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
+                ws.send_json({"type": "subscribe", "request_id": "nt-1",
+                              "id_token": None, "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+                delta = _registry_connection_count() - before
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "invalid_request")
+        self.assertEqual(msg.get("request_id"), "nt-1")
+        self.assertEqual(delta, 0, "종결시킨 요청이 blind register 를 했다")
+
+    def test_active_subscriptions_are_sorted(self):
+        """⛔ 정렬은 **정본에 없고 코드에만 있던 계약**이라 재작성에서 조용히 사라질 뻔했다.
+
+        입력이 `set` 이라 정렬하지 않으면 `PYTHONHASHSEED` 에 따라 wire 순서가 프로세스마다
+        달라진다. 기존 ack 단언은 전부 원소 1개라 이걸 못 잡았다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "srt", "id_token": "tok",
+                              "topics": ["usdt:krw", "fx:eur-krw", "fx:usd-krw"]})
+                msg = self._receive_for(ws, "srt")
+        self.assertEqual(
+            [x["topic"] for x in msg["active_subscriptions"]],
+            ["fx:eur-krw", "fx:usd-krw", "usdt:krw"],
+            "active_subscriptions 가 사전순이 아니다 — 순서가 비결정이 된다",
+        )
+        self.assertEqual(
+            [x["topic"] for x in msg["accepted_topics"]],
+            ["usdt:krw", "fx:eur-krw", "fx:usd-krw"],
+            "accepted_topics 는 **요청 순서**를 보존해야 한다 — 두 축의 정렬 정책은 다르다",
+        )
+
     def test_client_message_handling_is_awaited_not_fire_and_forget(self):
         """⛔ **클라가 이 성질에 의존한다** — ack 을 받은 순서대로 상태를 수렴시킨다.
 

@@ -275,8 +275,8 @@
 상태를 바꾸는 모든 메시지는 **`request_id`를 갖고 ack을 받는다**(조용한 실패 금지).
 
 ```json
-{"type":"subscribe",   "request_id":"<uuid>", "id_token":"<firebase>", "topics":["fx:usd-krw", …]}
-{"type":"unsubscribe", "request_id":"<uuid>", "topics":["krx:usd-krw-futures", …]}
+{"type":"subscribe",   "request_id":"<opaque-id>", "id_token":"<firebase>", "topics":["fx:usd-krw", …]}
+{"type":"unsubscribe", "request_id":"<opaque-id>", "topics":["krx:usd-krw-futures", …]}
 ```
 - `unsubscribe`에는 **`id_token`이 필요 없다** — 권한을 **축소**하는 작업이라 fail-open이다(§8.1 D8).
 
@@ -284,15 +284,15 @@
 
 **전체-요청 실패** (토큰 자체 무효 / 형식 위반 / 일시 장애):
 ```json
-{"type":"subscription_error","request_id":"<uuid>","error":"invalid_token"}
-{"type":"subscription_error","request_id":"<uuid>","error":"temporarily_unavailable","retry_after_seconds":5}
+{"type":"subscription_error","request_id":"<opaque-id>","error":"invalid_token"}
+{"type":"subscription_error","request_id":"<opaque-id>","error":"temporarily_unavailable","retry_after_seconds":5}
 ```
 
 **성공 ack** (subscribe/unsubscribe **공통**):
 ```json
 {
   "type": "subscription_ack",
-  "request_id": "<uuid>",
+  "request_id": "<opaque-id>",
   "operation": "subscribe",
   "identity_generation": 3,
   "accepted_topics": [
@@ -311,10 +311,10 @@
 lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들어 내는 것**이고, 빼면 코드가 정본과 다른
 **제3의 계약**을 만든다. 그래서 단계를 명시한다 — 구현은 자기 단계의 행을 그대로 따른다.
 
-| 필드 | Stage 1 (**인증된 subscribe 전용**, 현재) | Stage 2 (lease 도입) |
+| 필드 | Stage 1 (subscribe + unsubscribe + flag-off, 현재 — §8-B-term) | Stage 2 (lease 도입) |
 | --- | --- | --- |
 | `type` / `request_id` / `operation` | 그대로 | 그대로 |
-| `accepted_topics` | `[{"topic": …}]` | `+ lease_id`, `+ lease_duration_seconds` |
+| `accepted_topics` | `[{"topic": …}]` | `+ lease_id`, `+ lease_duration_seconds` (⚠️ `operation="unsubscribe"` 는 예외 — U4) |
 | `rejected_topics` | `[{"topic": …, "error": …}]` | 그대로 |
 | `removed_topics` | `[]` (제거 전이 미구현) | §C2 eviction 결과 |
 | `active_subscriptions` | `[{"topic": …}]` (연결 최종 상태) | `+ lease_id`, `+ lease_duration_seconds` |
@@ -349,7 +349,7 @@ reconnect를 전역 구분할 수 없다"는 이유로 제거 결정이 있었�
 ⚠️ **`request_id` 는 opaque 문자열이다 — UUID 를 강제하지 않는다** (2026-08-01 확정, codex Medium).
 
 한때 §8-C 가 `invalid_request` 의 사유로 "UUID 오류"를 적었는데, 그 문구는 §8-A **예시**의
-`"<uuid>"` 에서 흘러온 것이지 제약이 아니었다. 코드는 non-empty 문자열만 보므로 문서와 코드가
+`"<uuid>"` 였던 데서 흘러온 것이지 제약이 아니었다(그래서 예시도 `<opaque-id>` 로 고쳤다). 코드는 non-empty 문자열만 보므로 문서와 코드가
 어긋나 있었고, 어느 쪽으로 맞출지 정해야 했다. **opaque 로 확정한다**:
 
 - 서버는 request_id 를 **echo 만 한다** — 색인도, 중복 제거도, 저장도 하지 않는다. 형식은
@@ -365,15 +365,46 @@ reconnect를 전역 구분할 수 없다"는 이유로 제거 결정이 있었�
 ⚠️ 무토큰 경로(§E1 중간 상태)에는 `request_id` 를 요구하지 않는다 — 그 클라는 id 를 보내지 않고
 ack 도 받지 않는다. 요구하면 구 클라가 topic 을 잃는다.
 
-⛔ **Stage 1은 `subscribe`만이다.** 위 ack은 정본에서 subscribe/unsubscribe **공통**이지만,
-현행 `unsubscribe`는 registry에서 제거만 하고 **프레임을 0개 보낸다**(실측). 표를 "Stage 1 현재"로
-읽어 unsubscribe ack이 있다고 오해하지 말 것 — 그건 별도 red 테스트로 구현한다.
-(한때 이 표가 그 범위를 적지 않아 과대표현이었다 — codex 지적.)
+#### 8-B-term — **종결 프레임 계약** (2026-08-01, 두 공백 해소)
 
-⚠️ **Stage 1의 알려진 공백 (의도적)**: `TOPIC_DISPATCHER_ENABLED` off일 때 정본은 전 topic
-`topics_disabled`를 요구하지만, 현행 구현은 그 지점에서 **조용히 무시**한다(기존 동작). 그 경로를
-바꾸면 프로덕션의 현재 상태(flag off)를 건드리고, 오늘 그 조합을 보내는 클라가 없다 —
-별도 red 테스트와 함께 닫는다. **누락이 아니라 기록된 유예다.**
+위 두 유예(unsubscribe ack 부재 / flag-off 침묵)는 **닫혔다.** 계기는 다음 슬라이스의 클라
+명령 큐다: 연결당 1 in-flight 로 두고 ack·error·timeout 까지 다음 명령을 막으면, **응답 없는
+경로가 매번 큐를 timeout 까지 정지**시킨다. 그래서 큐보다 **먼저** 서버가 답하게 만든다.
+
+**불변식** — *식별된 요청은 **정확히 하나의 종결 프레임 또는 연결 종료**를 받는다.*
+
+⛔ "항상 프레임 하나"라고 적으면 **거짓**이다. 프레임 0개 + 연결 종료인 경로가 실재한다:
+
+| 0-프레임 경로 | 근거 |
+| --- | --- |
+| 분류 불가 인증 예외 | `app/main.py` 가 재전파 — "분류 불가는 삼키지 않는다" |
+| 16KB 초과 메시지 | uvicorn `--ws-max-size 16384` → transport close **1009**. §8-C 의 `request_too_large` 도 "전송 계층은 close 1009"로 규정한다 |
+| 반쯤 닫힌 소켓 | `send_json` 자체가 실패 |
+
+→ **클라 큐는 disconnect 를 모든 in-flight 의 종결 신호로 처리해야 하고, timeout 은 여전히
+load-bearing 이다.** 이 문장이 다음 슬라이스 설계에 그대로 들어간다.
+
+**결정 (U1~U8)** — 정본이 규정하지 않아 이번에 정하고 기록한다.
+
+| # | 결정 | 근거 |
+| --- | --- | --- |
+| **U1** | "식별된 요청" = `request_id` **키 존재** ∪ `id_token` **값 존재** | 둘 다 없으면 §E1 구 클라 → 동작 불변이 그 보호다. ⛔ truthiness 로 보면 `request_id: ""` 가 legacy 로 새어 조용히 처리된다. ⛔ subscribe 를 `id_token` 값만으로 보면 `{"request_id":…,"id_token":null}` 이 미식별로 새어 **blind register + 0 프레임** — 클라는 id 를 발급했으므로 영구 정지다 |
+| **U2** | unsubscribe 의 `accepted_topics` = 요청 topic **전부**(idempotent) | 구독한 적 없어도 목표 상태("구독 안 함")가 달성됐고, §8-C 의 닫힌 per-topic 어휘에 "미구독" 코드가 없다 |
+| **U3** | `removed_topics` 는 **항상 `[]`** | §C2 eviction 축이지 요청 결과 축이 아니다. builder 의 **인자에서 제외**해 규율이 아니라 타입으로 만든다 |
+| **U4** | Stage 2 에서도 `operation="unsubscribe"` 의 `accepted_topics` 는 lease 필드를 **갖지 않는다** | 제거된 topic 에 lease 가 없다 |
+| **U5** | flag-off 는 subscribe·unsubscribe 모두 reject-all, **registry 불변** | ⚠️ 이 선택은 **운영에서 관측되지 않는다**: flag 는 import 시점 상수라 한 연결의 수명 동안 불변이고 등록은 flag 검사 **뒤**에서만 일어난다 → flag-off 프로세스의 연결은 애초에 뺄 구독이 없다. 관측 불가하므로 **현행 동작(무변경)을 유지**한다 |
+| **U6** | 검사 순서 = 형식 → flag → 인증 → per-topic | flag-off 에서 무인증 Firebase RTT 를 열지 않는다. REST twin 도 같은 순서다(flag 404 가 토큰 검증 앞) |
+| **U7** | unsubscribe 는 `supported_snapshot_topics()` 를 **조회하지 않는다** | 그 집합은 flag-aware 다. 축소 연산에 flag-aware 검증을 붙이면 이득 없이 실패 모드만 는다(배포 flag 가 꺼지면 이미 든 구독을 못 빼는 형태) |
+| **U8** | flag-off ack 은 **인증 이전**에 나간다 → **ack 수신은 인증 통과를 뜻하지 않는다** | `topics_disabled` 는 §8-C 에서 per-topic 이라 전체-요청 오류로 만들 수 없다. 쓰레기 토큰도 이 ack 을 받으므로 클라는 ack 을 인증 증거로 읽으면 안 된다 |
+
+**선언된 동작 변화 3건** (구 클라 영향 0 — 셋 다 `request_id` 를 보내는 요청에만 해당):
+
+1. `request_id` 가 빈 문자열/비문자열인 **unsubscribe 는 이제 거부된다**(구: 조용히 해제).
+   §8-A 의 "축소는 fail-open" 은 *토큰* 축이고, echo 할 id 가 없으면 ack 자체를 만들 수 없다 —
+   ack 없는 unregister 가 바로 이 슬라이스가 삭제하는 침묵이다. **fail-closed 를 택한다.**
+2. `topics: []` 는 `invalid_request` 다(구: 검사를 통과해 **유령 registry entry** 를 만들었다 —
+   `all([])` 가 True 라서. 그 entry 는 admin 카운터만 오염시켰다).
+3. flag-off 와 topics 형식 오류가 **식별된 요청에 한해** 프레임을 받는다.
 
 ⚠️ **판정기 부재의 처리**: per-user 판정이 필요한 topic이 지원 집합에 들어 있는데(배포 flag on)
 WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다 → ERROR 로그 + 전체-요청
