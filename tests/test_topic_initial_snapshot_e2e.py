@@ -1423,6 +1423,55 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(msg.get("type"), "snapshot", "무토큰 경로가 깨졌다")
         self.assertEqual(delta, 1, "무토큰 경로가 등록하지 않았다")
 
+    def test_request_id_is_opaque_not_a_uuid(self):
+        """⚠️ **UUID 를 강제하지 않는다** (2026-08-01 확정, codex Medium).
+
+        정본 §8-C 가 한때 `invalid_request` 사유로 "UUID 오류"를 적었지만, 그 문구는 §8-A **예시**
+        의 `"<uuid>"` 에서 흘러온 것이지 제약이 아니었다. 서버는 request_id 를 **echo 만** 하므로
+        형식이 서버 쪽 의미를 갖지 않고, 강제하면 counter·ULID 를 쓰는 클라가 보호 효과 없이
+        거부된다. 이 테스트는 그 결정을 잠근다 — UUID 검증을 넣는 변이가 여기서 죽는다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "counter-7",
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+        self.assertEqual(msg.get("type"), "subscription_ack",
+                         "UUID 가 아닌 id 가 거부됐다 — opaque 계약 위반")
+        self.assertEqual(msg.get("request_id"), "counter-7", "id 가 그대로 echo 되지 않았다")
+
+    def test_non_dict_input_is_ignored_without_a_frame(self):
+        """⚠️ 비-JSON / 비-dict 입력에는 **프레임을 보내지 않는다**.
+
+        `/ws` 는 legacy 평문도 받는 경계라, 아무 텍스트에나 오류를 쏘면 구 클라에 스팸이 된다.
+        ⛔ 한때 정본이 이 경로도 "nullable request_id 오류를 받는다"고 읽히게 적었는데 **틀렸다**
+        (codex Low) — 이 테스트가 실제 동작 쪽을 잠근다.
+
+        ⚠️ "프레임이 없다"는 뒤이은 **정상 요청의 ack 이 첫 프레임**인 것으로 확인한다. 그냥
+        기다리면 blocking 이라 "없음"을 관측할 수 없다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = _registry_connection_count()
+                ws.send_text("이건 JSON 이 아니다")
+                ws.send_json(["dict 가 아닌 배열"])
+                ws.send_json({"type": "subscribe", "request_id": "after-junk",
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                msg = _receive_json_or_fail(ws, self.fail)
+                delta = _registry_connection_count() - before
+        self.assertEqual(msg.get("request_id"), "after-junk",
+                         f"쓰레기 입력이 프레임을 만들었다 — 첫 프레임: {msg!r}")
+        self.assertEqual(msg.get("type"), "subscription_ack")
+        self.assertEqual(delta, 1, "정상 요청이 등록되지 않았다")
+
     def test_client_message_handling_is_awaited_not_fire_and_forget(self):
         """⛔ **클라가 이 성질에 의존한다** — ack 을 받은 순서대로 상태를 수렴시킨다.
 
