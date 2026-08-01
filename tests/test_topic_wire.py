@@ -255,5 +255,83 @@ class TestSubscriptionAck(unittest.TestCase):
                 self.assertEqual(frame["rejected_topics"][0]["error"], code)
 
 
+class TestGuideExamplesAreConstructible(unittest.TestCase):
+    """⛔ **핸드오프 가이드에 적힌 프레임은 서버가 실제로 만들 수 있어야 한다.**
+
+    `REALTIME_V2_CLIENT_GUIDE.md` 는 CLAUDE.md 가 "신규 앱 핸드오프 **단일 계약**"으로 지정한
+    문서다 — Android 는 그걸 보고 decoder 를 쓴다. 그런데 실측으로 두 번,
+    **서버가 생성할 수 없는 프레임**이 예시로 실려 있었다:
+      - `error="invalid_request"` + `retry_after_seconds=5` (builder 가 `ValueError` 로 거부하는 조합)
+      - 문자열 배열 컨테이너(구 초안)
+
+    사람이 대조하는 것으로는 반복해서 놓친다. 그래서 **예시를 실제 builder 에 통과시킨다.**
+    """
+
+    GUIDE = pathlib.Path(__file__).resolve().parent.parent / "REALTIME_V2_CLIENT_GUIDE.md"
+
+    def _documented_frames(self):
+        """가이드의 ```jsonc 블록에서 subscription_* 프레임만 뽑는다."""
+        import json
+        import re
+
+        text = self.GUIDE.read_text(encoding="utf-8")
+        frames = []
+        for block in re.findall(r"```jsonc\n(.*?)```", text, re.S):
+            stripped = "\n".join(re.sub(r"\s*//.*$", "", line) for line in block.splitlines())
+            # 한 블록에 객체가 여러 개일 수 있다 — 최상위 `{...}` 단위로 자른다.
+            depth, start = 0, None
+            for i, ch in enumerate(stripped):
+                if ch == "{":
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            obj = json.loads(stripped[start:i + 1])
+                        except ValueError:
+                            obj = None      # 다른 스키마 예시(생략표기 등)는 건너뛴다
+                        if isinstance(obj, dict) and str(obj.get("type", "")).startswith("subscription_"):
+                            frames.append(obj)
+                        start = None
+        return frames
+
+    def test_every_documented_frame_is_what_the_builder_emits(self):
+        frames = self._documented_frames()
+        # ⛔ 자기검사 — 추출이 깨지면 "0개 검사"로 **공허하게** 통과한다.
+        self.assertGreaterEqual(
+            len(frames), 3,
+            f"가이드에서 subscription_* 예시를 못 찾았다({len(frames)}개) — 추출기가 깨졌거나 문서가 바뀌었다",
+        )
+        kinds = {f["type"] for f in frames}
+        self.assertEqual(
+            kinds, {"subscription_ack", "subscription_error"},
+            "ack 과 error 예시가 **둘 다** 있어야 한다 — 한쪽만 있으면 계약이 반쪽이다",
+        )
+
+        for frame in frames:
+            with self.subTest(frame=frame.get("error") or frame.get("operation")):
+                if frame["type"] == "subscription_error":
+                    rebuilt = build_subscription_error(
+                        request_id=frame["request_id"],
+                        error=frame["error"],
+                        retry_after_seconds=frame.get("retry_after_seconds"),
+                    )
+                else:
+                    rebuilt = build_subscription_ack(
+                        request_id=frame["request_id"],
+                        operation=frame["operation"],
+                        accepted=[x["topic"] for x in frame["accepted_topics"]],
+                        rejected=[(x["topic"], x["error"]) for x in frame["rejected_topics"]],
+                        active=[x["topic"] for x in frame["active_subscriptions"]],
+                    )
+                self.assertEqual(
+                    rebuilt, frame,
+                    "가이드의 예시가 서버가 만드는 프레임과 다르다 — 신규 소비자가 "
+                    "**존재하지 않는 shape** 로 decoder 를 쓰게 된다",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

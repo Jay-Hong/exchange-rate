@@ -57,7 +57,8 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 | `unsubscribe` | **필수** | **불요** — §8-A: 권한을 *축소*하는 작업이라 fail-open. 보내도 무시되지만, ⚠️ 토큰을 실었다면 `request_id` 는 반드시 있어야 한다(없으면 `invalid_request`) |
 
 서버는 `request_id` **키** 또는 `id_token` **값** 중 하나라도 있으면 "식별된 요청"으로 보고
-반드시 답한다(§8-B-term). `request_id` 는 **opaque 문자열**이며 UUID 를 강제하지 않는다 —
+**반드시 종결시킨다**(§8-B-term). ⚠️ "반드시 답한다"가 아니다 — 종결은 *프레임 하나* **또는**
+*연결 종료*이고, 비-JSON/비-dict 처럼 **둘 다 오지 않는** 경로도 있다(아래 0-프레임 절). `request_id` 는 **opaque 문자열**이며 UUID 를 강제하지 않는다 —
 서버는 echo 만 한다.
 
 ### 서버 → 클라이언트 메시지 종류 (⚠️ /ws는 legacy와 공유)
@@ -122,12 +123,22 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
   "active_subscriptions": [{"topic": "fx:usd-krw"}]   // ← **연결의 최종 상태**. 이것으로 수렴하라
 }
 
-// 전체-요청 실패
+// 전체-요청 실패 — ⛔ **두 형태다.** 아래 결합 규칙은 서버 builder 가 생성 시점에 강제한다.
+//    (한 프레임에 둘을 섞은 예시를 쓰면 안 된다 — 그 조합은 서버가 만들 수 없다.)
+
+// (i) 재시도 불가 — `retry_after_seconds` **필드 자체가 없다**
 {
   "type": "subscription_error",
   "request_id": "<opaque-id>",     // ⚠️ **nullable** — 요청에서 id 를 읽을 수 없었으면 null
-  "error": "invalid_request",
-  "retry_after_seconds": 5         // `temporarily_unavailable` 일 때만 동반. 그 외엔 **필드 자체가 없다**
+  "error": "invalid_request"       // | "invalid_token" | "request_too_large"
+}
+
+// (ii) 재시도 가능 — `temporarily_unavailable` **만** 이 필드를 동반한다(항상 동반한다)
+{
+  "type": "subscription_error",
+  "request_id": "<opaque-id>",
+  "error": "temporarily_unavailable",
+  "retry_after_seconds": 5
 }
 ```
 
