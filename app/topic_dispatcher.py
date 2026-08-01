@@ -319,7 +319,12 @@ async def handle_client_message(
     #       이 미식별로 새어 blind register + 프레임 0개가 된다(적대적 검토가 찾은 구멍).
     #       두 축의 **합집합**이라야 그 shape 가 종결된다.
     #    ⚠️ 구 클라(§E1)는 둘 다 보내지 않으므로 미식별로 남는다 — 동작 불변이 그 보호다.
-    id_token = msg.get("id_token") if msg_type == "subscribe" else None
+    #    ⛔ `id_token` 을 **타입별로 읽지 말 것.** 한때 `msg_type == "subscribe"` 일 때만 읽었고,
+    #       그래서 `{"type":"subscrbe","id_token":"tok"}` 이 미식별로 새어 0 프레임이었다
+    #       (실측 재현) — U1 이 문서에만 있고 코드에는 **반만** 있었다. `id_token` 존재는
+    #       **신 프로토콜 클라 신호**이므로 타입과 무관하게 식별 축이다. 오타 하나로 같은
+    #       shape 가 갈리면 안 된다.
+    id_token = msg.get("id_token")
     identified = ("request_id" in msg) or (id_token is not None)
 
     request_id = None

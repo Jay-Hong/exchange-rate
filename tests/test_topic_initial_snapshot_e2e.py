@@ -1496,6 +1496,18 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 return msg
         self.fail(f"request_id={request_id!r} 응답이 오지 않았다")
 
+    def _receive_terminal(self, ws, limit=8):
+        """`snapshot` 을 건너뛰고 **종결 프레임**(ack/error)을 읽는다.
+
+        ⚠️ subscribe 성공은 ack **뒤에 snapshot 을 더 보낸다** — `request_id` 가 null 인
+           오류를 기다릴 땐 id 로 못 거르므로 타입으로 건너뛴다.
+        """
+        for _ in range(limit):
+            msg = _receive_json_or_fail(ws, self.fail)
+            if msg.get("type") in ("subscription_ack", "subscription_error"):
+                return msg
+        self.fail("종결 프레임이 오지 않았다")
+
     def _probe_then_collect(self, ws, sent):
         """`sent` 를 보낸 뒤 **probe** 를 보내, probe 응답 **앞의** 프레임만 모은다.
 
@@ -1664,13 +1676,24 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(msg.get("request_id"), "nt-1")
         self.assertEqual(delta, 0, "종결시킨 요청이 blind register 를 했다")
 
-    def test_identified_request_of_unknown_type_is_terminated(self):
-        """⛔ `type` 검사가 식별 판정보다 **앞**이라 오타 하나가 침묵으로 새고 있었다.
+    def test_unknown_type_termination_covers_both_identification_axes(self):
+        """⛔ U1 의 식별은 **두 축의 합집합**이다 — 각 축을 **독립으로** 잠근다.
 
-        ⚠️ "unknown type 은 forward-compat 으로 무시"는 request/response 에서 **역방향으로
-        해롭다**: 서버보다 새 클라가 모르는 타입을 보내면 "미지원"을 배우는 대신 **매단다**.
-        정직한 답은 `invalid_request` 다 — 클라가 즉시 degrade 할 수 있다.
+        한때 이 테스트가 `request_id` 와 `id_token` 을 **동시에** 넣어, request_id 축만으로
+        통과했다. 그동안 `id_token` 만 실은 미지 타입은 **0 프레임**이었다(실측 재현) —
+        `id_token` 을 `msg_type == "subscribe"` 일 때만 읽었기 때문이다. 즉 U1 이 문서에만
+        있고 코드에는 반만 있었다.
+
+        ⚠️ `id_token` 존재는 **신 프로토콜 클라 신호**다. 그런 클라가 인식 못 하는 타입을
+        보냈으면 그 사실을 알려야 한다 — 오타 하나(`subscrbe`)로 같은 shape 가 갈리면 안 된다.
+        §E1 구 클라는 토큰을 보내지 않으므로 영향 0이다.
         """
+        cases = (
+            ("request_id 축", {"type": "subscrbe", "request_id": "axis-r",
+                               "topics": ["fx:usd-krw"]}, "axis-r"),
+            ("id_token 축", {"type": "subscrbe", "id_token": "tok",
+                             "topics": ["fx:usd-krw"]}, None),
+        )
         patchers = self._patchers()
         with contextlib.ExitStack() as stack:
             for patcher in patchers.values():
@@ -1678,17 +1701,23 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
                 before = _registry_connection_count()
-                ws.send_json({"type": "subscrbe", "request_id": "typo-1",   # 오타
-                              "id_token": "tok", "topics": ["fx:usd-krw"]})
-                msg = _receive_json_or_fail(ws, self.fail)
+                results = []
+                for _, payload, _expected in cases:
+                    ws.send_json(payload)
+                    results.append(_receive_json_or_fail(ws, self.fail))
                 delta = _registry_connection_count() - before
-        self.assertEqual(msg.get("type"), "subscription_error")
-        self.assertEqual(msg.get("error"), "invalid_request")
-        self.assertEqual(msg.get("request_id"), "typo-1")
+        for (label, _payload, expected_id), msg in zip(cases, results):
+            with self.subTest(axis=label):
+                self.assertEqual(msg.get("type"), "subscription_error")
+                self.assertEqual(msg.get("error"), "invalid_request")
+                self.assertEqual(
+                    msg.get("request_id"), expected_id,
+                    "echo 할 id 가 없으면 null 이어야 한다(§8-B-stage)",
+                )
         self.assertEqual(delta, 0)
 
     def test_unidentified_unknown_type_stays_silent(self):
-        """⚠️ 반대 방향 — id 를 안 실은 미지 타입은 여전히 조용히 무시한다(forward-compat).
+        """⚠️ 세 번째 경우 — 두 축 **모두 없으면** 침묵을 유지한다(forward-compat).
 
         `/ws` 는 legacy 평문·잡음이 흐르는 경계이고, 그쪽엔 기다리는 요청자가 없다.
         """
@@ -1701,6 +1730,33 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 frames = self._probe_then_collect(ws, {"type": "renew_lease",
                                                        "topics": ["fx:usd-krw"]})
         self.assertEqual(frames, [], f"미식별 미지 타입에 프레임이 나갔다: {frames!r}")
+
+    def test_token_bearing_unsubscribe_without_request_id_is_terminated(self):
+        """⚠️ **선언된 동작 변화** — 토큰을 실은 unsubscribe 도 `request_id` 를 요구한다.
+
+        §8-A 의 unsubscribe 는 토큰이 없다. 토큰을 실었다는 것은 **신 프로토콜 클라**라는
+        신호이므로 `request_id` 도 있어야 한다. 구 동작은 조용히 해제였고, 이제 거부한다 —
+        echo 할 id 가 없으면 ack 을 만들 수 없고, ack 없는 unregister 가 바로 이 계약이
+        삭제하는 침묵이다. §E1 구 클라는 토큰을 보내지 않으므로 영향 0이다.
+        """
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "pre-t", "id_token": "tok",
+                              "topics": ["fx:usd-krw"]})
+                self._receive_for(ws, "pre-t")
+                before = _registry_connection_count()
+                ws.send_json({"type": "unsubscribe", "id_token": "tok",
+                              "topics": ["fx:usd-krw"]})
+                msg = self._receive_terminal(ws)
+                delta = _registry_connection_count() - before
+        self.assertEqual(msg.get("type"), "subscription_error")
+        self.assertEqual(msg.get("error"), "invalid_request")
+        self.assertIsNone(msg.get("request_id"))
+        self.assertEqual(delta, 0, "거부된 요청이 구독을 해제했다")
 
     def test_active_subscriptions_are_sorted(self):
         """⛔ 정렬은 **정본에 없고 코드에만 있던 계약**이라 재작성에서 조용히 사라질 뻔했다.

@@ -389,7 +389,7 @@ load-bearing 이다.** 이 문장이 다음 슬라이스 설계에 그대로 들
 
 | # | 결정 | 근거 |
 | --- | --- | --- |
-| **U1** | "식별된 요청" = `request_id` **키 존재** ∪ `id_token` **값 존재** | 둘 다 없으면 §E1 구 클라 → 동작 불변이 그 보호다. ⛔ truthiness 로 보면 `request_id: ""` 가 legacy 로 새어 조용히 처리된다. ⛔ subscribe 를 `id_token` 값만으로 보면 `{"request_id":…,"id_token":null}` 이 미식별로 새어 **blind register + 0 프레임** — 클라는 id 를 발급했으므로 영구 정지다 |
+| **U1** | "식별된 요청" = `request_id` **키 존재** ∪ `id_token` **값 존재**. ⚠️ 두 축 모두 **`type` 과 무관**하게 본다 | 둘 다 없으면 §E1 구 클라 → 동작 불변이 그 보호다. ⛔ truthiness 로 보면 `request_id: ""` 가 legacy 로 새어 조용히 처리된다. ⛔ subscribe 를 `id_token` 값만으로 보면 `{"request_id":…,"id_token":null}` 이 미식별로 새어 **blind register + 0 프레임** — 클라는 id 를 발급했으므로 영구 정지다 |
 | **U2** | unsubscribe 의 `accepted_topics` = 요청 topic **전부**(idempotent) | 구독한 적 없어도 목표 상태("구독 안 함")가 달성됐고, §8-C 의 닫힌 per-topic 어휘에 "미구독" 코드가 없다 |
 | **U3** | `removed_topics` 는 **항상 `[]`** | §C2 eviction 축이지 요청 결과 축이 아니다. builder 의 **인자에서 제외**해 규율이 아니라 타입으로 만든다 |
 | **U4** | Stage 2 에서도 `operation="unsubscribe"` 의 `accepted_topics` 는 lease 필드를 **갖지 않는다** | 제거된 topic 에 lease 가 없다 |
@@ -414,6 +414,14 @@ load-bearing 이다.** 이 문장이 다음 슬라이스 설계에 그대로 들
    request/response 에서는 **역방향으로 해롭다** — 서버보다 새 클라가 모르는 타입을 보내면
    "미지원"을 배우는 대신 **매단다**. 오타 하나(`subscrbe`)로도 같은 일이 난다.
    미식별 미지 type 은 여전히 침묵이다(기다리는 요청자가 없다).
+4. **토큰을 실은 `unsubscribe`** 도 `request_id` 를 요구한다(구: 조용히 해제).
+   §8-A 의 unsubscribe 는 토큰이 없으므로, 토큰을 실었다는 것은 **신 프로토콜 클라 신호**다.
+   §E1 구 클라는 토큰을 보내지 않으므로 영향 0이다.
+
+⛔ **U1 의 두 축은 `type` 과 무관하다.** 한때 `id_token` 을 `msg_type == "subscribe"` 일 때만
+읽었고, 그래서 `{"type":"subscrbe","id_token":"tok"}` 이 미식별로 새어 0 프레임이었다(실측).
+U1 이 문서에만 있고 코드에는 **반만** 있던 것이다 — 세 경우(`request_id` 만 / `id_token` 만 /
+둘 다 없음)를 각각 독립으로 잠근다. 축을 동시에 넣은 테스트는 한 축만 검증한다.
 
 ⚠️ **판정기 부재의 처리**: per-user 판정이 필요한 topic이 지원 집합에 들어 있는데(배포 flag on)
 WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다 → ERROR 로그 + 전체-요청
