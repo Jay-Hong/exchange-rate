@@ -327,6 +327,14 @@ lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들�
 reconnect를 전역 구분할 수 없다"는 이유로 제거 결정이 있었다. 그 판단 자체는 archive와 함께
 보류 상태이고, **필수 필드로 모델링한 뒤 빼면 breaking**이므로 소비자가 생길 때 결정한다.
 
+⚠️ **`subscription_error` 의 `request_id` 는 nullable 이다** (2026-08-01 기록). 위 예시는 UUID 만
+보여 주지만, 구현은 요청이 **파싱되기 전에** 실패할 수 있다 — `id_token` 형식 위반처럼 payload
+검증 단계에서 거부하면 서버가 그 요청의 id 를 모를 수 있고, `request_id` 키가 없으면 `null` 을 싣는다.
+**ack 은 다르다**: 우리 요청에 대한 응답이므로 항상 echo 되고, 클라는 **필수**로 받는다.
+⛔ 한때 클라 주석이 "§8-B 가 error 에서만 nullable 을 허용한다"고 적었는데 **그 근거가 이 문서에
+없었다**(codex Low — `rg "nullable|request_id.*null"` 0건). 구현이 그렇게 동작하므로 여기에
+계약으로 적어 근거를 만든다.
+
 ⛔ **Stage 1은 `subscribe`만이다.** 위 ack은 정본에서 subscribe/unsubscribe **공통**이지만,
 현행 `unsubscribe`는 registry에서 제거만 하고 **프레임을 0개 보낸다**(실측). 표를 "Stage 1 현재"로
 읽어 unsubscribe ack이 있다고 오해하지 말 것 — 그건 별도 red 테스트로 구현한다.
