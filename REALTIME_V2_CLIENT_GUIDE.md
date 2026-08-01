@@ -60,8 +60,27 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 
 ### ack / error / auth
 
-- **subscribe 성공/실패 ack 없음**. invalid JSON / unknown type / invalid topics / FF-off / 미지원 topic 모두 **조용히 무시**(error 응답 없음). **snapshot 수신 자체가 성공 신호**.
-- **현재 `/ws` topic 구독에 인증 없음**(Firebase 검증 X). 알림 API와 달리 공개 read-only 스트림.
+⚠️ **2026-08-01 개정.** 구 서술("subscribe 성공/실패 ack 없음 … 모두 조용히 무시")은 **폐기**됐다.
+
+- **식별된 요청은 ack/error 를 받는다** (§8-B-term). "식별된" = `request_id` **키**를 실었거나
+  `id_token` **값**을 실은 요청. 그런 요청에는 **종결 프레임 하나 또는 연결 종료**가 보장된다.
+
+  | 상황 | 응답 |
+  | --- | --- |
+  | 성공 | `subscription_ack` — `operation` 으로 subscribe/unsubscribe 구분, **`active_subscriptions` 가 연결의 최종 상태**(클라는 이것으로 수렴한다) |
+  | FF-off | 전 topic `topics_disabled` 인 **ack**(§8-C 에서 per-topic 코드다). ⚠️ **인증 이전**에 나가므로 **ack 수신 ≠ 인증 통과** |
+  | 미지원 topic / 개별 flag off | ack 의 `rejected_topics` (`unknown_topic` / `topic_unavailable`) |
+  | 형식 위반 — 빈 topics · 미지 `type` · `request_id` 누락/비문자열 | `subscription_error` `invalid_request` |
+  | 자격 실패 / 판정 불가 | `invalid_token` / `temporarily_unavailable`(+`retry_after_seconds`) |
+
+- ⛔ **"항상 프레임 하나"로 설계하지 말 것.** 프레임 0개 + 연결 종료인 경로가 4종 있다:
+  분류 불가 인증 예외 · 16KB 초과(전송 계층 close **1009**) · 반쯤 닫힌 소켓 ·
+  비-JSON/비-dict(서버가 `request_id` 를 읽을 수 없다).
+  → **disconnect 를 모든 in-flight 의 종결 신호로 처리하고 timeout 을 유지해야 한다.**
+- **미식별 요청**(구 클라 — `request_id` 도 `id_token` 도 없음)은 **동작 불변**이다: 조용히
+  등록되고 **snapshot 수신 자체가 성공 신호**다. 이 합집합이 구 클라 보호막이다.
+- **인증**: 무토큰 subscribe 는 여전히 동작한다(§E1 중간 상태). `id_token` 을 실으면 서버가
+  Firebase 로 검증한다(revoked 포함). **강제 전환은 별도 결정**이다.
 
 ## 2. Payload schema (version=1)
 

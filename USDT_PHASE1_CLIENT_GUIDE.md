@@ -333,8 +333,10 @@ Unsubscribe: {"type": "unsubscribe", "topics": ["usdt:krw"]}
 ```
 
 - Subscribe 메시지 전송 → 서버 registry 등록 → topic 변경 발생 시 snapshot 수신
-- `TOPIC_DISPATCHER_ENABLED=false` 시 subscribe 메시지는 silently ignore
-  (기존 client 호환)
+- `TOPIC_DISPATCHER_ENABLED=false` 시 (2026-08-01 개정):
+  - **식별된 요청**(`request_id` 키 또는 `id_token` 값 동반) → 전 topic `topics_disabled` 인
+    **ack** 을 받는다. 조용히 무시되지 않는다.
+  - **미식별 요청**(구 client) → silently ignore (기존 호환 유지)
 
 ### Topic 이름
 
