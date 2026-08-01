@@ -255,7 +255,10 @@ class TopicSendCounts:
     """publish_topic_detailed의 rich-outcome 반환 — bare int(sent)가 뭉개는 3-way 0 분리 (C6-4, §5.4).
 
     Fields:
-        attempted: send 시도한 구독자 수 (get_subscribers snapshot 크기). FF-off/구독자 0이면 0.
+        attempted: **lease 유효성 검사를 통과해 실제 전송 대상으로 선택된 수**
+            (raw 구독자 수가 **아니다** — 2026-08-01 변경). FF-off / 구독자 0 / **전원 만료**면 0.
+            ⛔ 마지막 경우가 `NO_SUBSCRIBERS`와 구분되지 않는 한계는 `publish_topic_detailed`
+            docstring 참조.
         sent: per-client send 성공 수 (불변: sent <= attempted).
         enabled: send 시점 ``config.TOPIC_DISPATCHER_ENABLED`` (FF). **TOPIC_DISPATCHER_ENABLED만
             의미** — fx publish의 FX_TOPIC_ENABLED(별개 flag)와 무관. FF-off(enabled=False)와
