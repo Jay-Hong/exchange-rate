@@ -148,8 +148,13 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 `lease_duration_seconds` 가 필드로 추가됐다** — 컨테이너 형태는 그대로이므로 Stage 1 형태로
 디코드해 둔 클라는 shape 를 바꾸지 않아도 된다. `identity_generation` 은 아직 없다.
 
-⛔ **lease 필드는 *인증된 subscribe 의 accept* 에만 붙는다.** 붙지 않는 경우:
-`operation="unsubscribe"` 의 ack / flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
+⛔ **lease 는 topic 별로 붙는다.** 붙는 곳: 인증된 subscribe 의 `accepted_topics`, **그리고
+어느 ack 이든 `active_subscriptions` 에 남아 있는 구독**(`operation="unsubscribe"` 포함 —
+클라가 그걸로 재인증 시점을 잡는다). 붙지 않는 곳: unsubscribe 로 **제거된** topic /
+flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
+
+⚠️ **무토큰 구독은 무료 topic 만 가능하다.** per-user 판정이 필요한 topic(`krx:*`)은 무토큰으로
+등록되지 않는다 — lease 없는 구독을 무제한으로 취급하면 무인증 유료 데이터 우회가 되기 때문이다.
 ⚠️ **lease 는 `active_subscriptions` 에도 실린다** — 그게 연결의 최종 상태이므로 클라는 여기서
 각 topic 의 만료를 읽는다. 서버는 **전송 직전에 lease 를 다시 확인**하고, 만료된 구독에는
 프레임을 보내지 않는다(§8.1 S5 의 15분 revoke 상한). 클라는 **가장 이른 만료 전에** 재인증해야

@@ -101,9 +101,13 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
                 ws,
                 '{"type": "subscribe", "topics": ["usdt:krw", "krx:usd-krw-futures"]}',
             )
+        # ⛔ **구 기대값은 취약점이었다**: 무토큰 subscribe 가 `krx:usd-krw-futures` 까지
+        #    등록하면, publish 가 lease 부재를 "무제한"으로 취급하므로 **무인증 유료 데이터
+        #    우회**가 된다. 무토큰 경로는 이제 **무료 topic 만** 등록한다(§E1 은 무료 범위
+        #    안에서의 기존 동작 보존이다).
         self.assertEqual(
             topic_dispatcher.registry.get_subscriptions(ws),
-            {"usdt:krw", "krx:usd-krw-futures"},
+            {"usdt:krw"},
         )
 
     async def test_subscribe_triggers_initial_snapshot(self):

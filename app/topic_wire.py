@@ -135,7 +135,7 @@ def build_subscription_ack(
     active: Iterable[str],
     leases: Optional[Mapping[str, Tuple[str, int]]] = None,
 ) -> dict:
-    """§8-B / §8-B-stage Stage 1 의 `subscription_ack`. **ack 프레임은 전부 여기서 나온다.**
+    """§8-B 의 `subscription_ack`. **ack 프레임은 전부 여기서 나온다.** (현재 §8-B-stage **Stage 2**)
 
     ## 왜 인자가 **문자열**인가 (객체가 아니라)
 
@@ -146,8 +146,12 @@ def build_subscription_ack(
     통째로 실패하고, 그러면 "프레임 0개"와 **구분되지 않는다**(pending 이 영영 안 지워진다).
     그래서 wrap 을 여기서 한다 — 형태를 규율이 아니라 **타입**으로 만든다.
 
-    ⛔ `removed_topics` 는 **인자가 아니다.** Stage 1 에서 항상 `[]` 이고(§C2 eviction 미구현),
-    인자로 두면 "클라가 요청한 unsubscribe 결과"를 담고 싶은 유혹이 생긴다 — 그건 다른 축이다.
+    ⛔ `removed_topics` 는 **인자가 아니다.** 항상 `[]` 이고(§C2 eviction 미구현), 인자로 두면
+    "클라가 요청한 unsubscribe 결과"를 담고 싶은 유혹이 생긴다 — 그건 다른 축이다.
+
+    ⚠️ `leases` 는 **topic 별로** 붙는다. `operation="unsubscribe"` 의 ack 도
+    `active_subscriptions`(= 남아 있는 구독)에는 lease 를 실어야 한다 — 클라가 그걸로 재인증
+    시점을 잡기 때문이다. 제거된 topic 이 `accepted_topics` 에 lease 없이 실리는 것과는 별개다.
 
     ⚠️ **정렬 정책이 축마다 다르다.** `accepted`/`rejected` 는 **요청 순서 보존**(호출자가 그
     순서로 넘긴다), `active` 만 **사전순 정렬**한다. `active` 의 입력이 `set` 이라 정렬하지 않으면

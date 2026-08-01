@@ -751,9 +751,19 @@ def _firebase_error(class_name, message):
     return getattr(fb_exceptions, class_name)(message)
 
 
-def _run(coro):
-    """동기 테스트에서 async 함수를 돌린다 (TestClient 컨텍스트 유지)."""
-    return asyncio.run(coro)
+def _publish_on_app_loop(ws, topic, payload):
+    """`publish_topic` 을 **TestClient 가 앱을 돌리는 그 이벤트 루프**에서 실행한다.
+
+    ⛔ `asyncio.run()` 으로 부르면 **다른 스레드의 새 루프**에서 서버 쪽 WebSocket 객체의
+    `send_json` 을 건드린다. registry 는 "단일 FastAPI 루프"를 전제하므로(그 파일 주석),
+    그 방식은 우연히 통과할 뿐 실제 배선을 검증하지 못한다(codex Medium).
+    `WebSocketTestSession.__enter__` 가 만든 portal 이 곧 그 루프다.
+    """
+    from app import topic_dispatcher as dispatcher
+
+    portal = getattr(ws, "portal", None)
+    assert portal is not None, "TestClient 세션이 portal 을 노출하지 않는다 — 앱 루프 검증 불가"
+    return portal.call(dispatcher.publish_topic, topic, payload)
 
 
 def _registry_connection_count():
@@ -1575,8 +1585,14 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(msg.get("operation"), "unsubscribe", "같은 schema라 구분자가 필요하다")
         self.assertEqual(msg.get("request_id"), "u-1")
         self.assertEqual(msg.get("accepted_topics"), [{"topic": "usdt:krw"}])
-        self.assertEqual(msg.get("active_subscriptions"), [{"topic": "fx:usd-krw"}],
+        # §8-B Stage 2 — **남아 있는 구독의 lease 를 잃지 않는다**(클라 재인증 timer 의 입력).
+        remaining = msg.get("active_subscriptions") or []
+        self.assertEqual([x["topic"] for x in remaining], ["fx:usd-krw"],
                          "ack 이 연결의 최종 상태를 담지 않았다")
+        self.assertEqual(
+            set(remaining[0]), {"topic", "lease_id", "lease_duration_seconds"},
+            "unsubscribe ack 이 남은 구독의 lease 를 잃었다 — 재인증 시점을 알 수 없게 된다",
+        )
         self.assertEqual(msg.get("removed_topics"), [], "§C2 eviction 축은 Stage 1 에서 빈다")
         self.assertEqual(last.get("active_subscriptions"), [])
         self.assertEqual((before, partial, after), (1, 1, 0),
@@ -1838,18 +1854,16 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 )
 
                 # ② publish 가 실제로 도달한다 (lease 유효 구간)
-                sent_live = _run(dispatcher.publish_topic(
-                    "fx:usd-krw", {"type": "snapshot", "t": 1}))
+                sent_live = _publish_on_app_loop(ws, "fx:usd-krw", {"type": "snapshot", "t": 1})
                 self.assertEqual(sent_live, 1, "lease 가 유효한데 publish 가 도달하지 않았다")
 
                 # ③ **인가되지 않은 KRX 는 publish 0** — 애초에 등록되지 않는다
-                sent_krx = _run(dispatcher.publish_topic(KRX_TOPIC, {"type": "snapshot"}))
+                sent_krx = _publish_on_app_loop(ws, KRX_TOPIC, {"type": "snapshot"})
                 self.assertEqual(sent_krx, 0, "인가되지 않은 KRX topic 에 전송이 나갔다")
 
                 # ④ 만료 뒤에는 **전송 0** (publish 직전 재확인, fail-closed)
                 fake_now["mono"] += 901.0
-                sent_expired = _run(dispatcher.publish_topic("fx:usd-krw",
-                                                             {"type": "snapshot", "t": 2}))
+                sent_expired = _publish_on_app_loop(ws, "fx:usd-krw", {"type": "snapshot", "t": 2})
                 self.assertEqual(sent_expired, 0,
                                  "만료된 lease 로 publish 가 나갔다 — revoke 상한이 무의미해진다")
                 after_expiry = _registry_connection_count()
@@ -1857,6 +1871,35 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             # ⑤ disconnect 시 제거
         self.assertEqual(after_expiry, 1, "만료가 registry 를 지우면 안 된다(정리는 별 축)")
         self.assertEqual(_registry_connection_count(), 0, "disconnect 후에도 registry 에 남았다")
+
+    def test_untokened_subscribe_cannot_reach_a_per_user_gated_topic(self):
+        """⛔ **유료 데이터 우회.** 무토큰 경로가 요청 topic 을 **분류 없이** 등록하면, per-user
+        판정이 필요한 KRX 가 **lease 없이** 등록되고 publish 는 lease 부재를 "무제한"으로
+        취급한다 → 무인증으로 유료 데이터를 받는다.
+
+        §E1 이 보존하는 것은 **무료 topic 의 기존 동작**이지 "아무 topic 이나 무인증 허용"이 아니다.
+
+        ⚠️ 이 테스트는 **KRX 배포 flag 를 켠 상태**에서 돈다. 끈 상태로 `publish == 0` 만 보면
+        인가 로직이 하나도 없어도 통과한다 — 내가 처음 쓴 단언이 정확히 그 형태였다.
+        """
+        from app import topic_dispatcher as dispatcher
+
+        patchers = self._patchers()
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                before = len(dispatcher.registry.get_subscribers(KRX_TOPIC))
+                ws.send_json({"type": "subscribe", "topics": ["fx:usd-krw", KRX_TOPIC]})
+                _receive_json_or_fail(ws, self.fail)        # 무료 topic snapshot
+                krx_subs = len(dispatcher.registry.get_subscribers(KRX_TOPIC)) - before
+                sent = _publish_on_app_loop(ws, KRX_TOPIC, {"type": "snapshot"})
+                free_subs = len(dispatcher.registry.get_subscribers("fx:usd-krw"))
+        self.assertEqual(krx_subs, 0, "무토큰 구독이 per-user gated topic 에 등록됐다")
+        self.assertEqual(sent, 0, "무인증 연결로 유료 topic 이 전송됐다")
+        self.assertGreater(free_subs, 0, "무료 topic 까지 막혔다 — §E1 이 깨졌다(반대 방향)")
 
     def test_untokened_resubscribe_cannot_clear_an_existing_lease(self):
         """⛔ **lease 우회**: 토큰으로 lease 를 받은 뒤 **무토큰 재구독**으로 그 lease 를 지우면
@@ -1886,10 +1929,50 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 _receive_json_or_fail(ws, self.fail)                 # snapshot
 
                 fake_now["mono"] += 901.0
-                sent = _run(dispatcher.publish_topic("fx:usd-krw", {"type": "snapshot"}))
+                sent = _publish_on_app_loop(ws, "fx:usd-krw", {"type": "snapshot"})
         self.assertEqual(
             sent, 0,
             "무토큰 재구독이 lease 를 지웠다 — 인증된 구독이 무제한이 된다(fail-open)",
+        )
+
+    def test_lease_horizon_starts_before_the_auth_call_not_after(self):
+        """⛔ 인증 I/O 가 걸린 시간만큼 **15분 경계가 늘어나면 안 된다**(fail-open).
+
+        검증 결과가 반영하는 상태는 아무리 늦어도 **호출 시작 시점**이다. 끝난 시각을 쓰면
+        느린 인증일수록 revoke 상한이 길어진다 — 정확히 반대 방향이다.
+
+        ⚠️ 검증자가 즉시 반환하면 두 시각이 같아 이 성질이 **관측되지 않는다**(실측: 그래서
+        변이가 생존했다). 그래서 검증자 안에서 fake 시계를 전진시킨다.
+        """
+        from app import topic_dispatcher as dispatcher
+
+        fake_now = {"mono": 100.0}
+        auth_io_seconds = 30.0
+
+        async def slow_verify(_id_token):
+            fake_now["mono"] += auth_io_seconds     # 인증 I/O 가 30초 걸렸다
+            return "uid-slow"
+
+        patchers = self._patchers()
+        patchers["verify_token"] = patch("app.main.verify_ws_subscribe_token",
+                                         new=AsyncMock(side_effect=slow_verify))
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                dispatcher, "lease_clock",
+                lambda: SimpleNamespace(mono=lambda: fake_now["mono"], wall=lambda: None),
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "slow-1",
+                              "id_token": "tok", "topics": ["fx:usd-krw"]})
+                ack = _receive_json_or_fail(ws, self.fail)
+
+        duration = (ack.get("accepted_topics") or [{}])[0].get("lease_duration_seconds")
+        self.assertEqual(
+            duration, int(900 - auth_io_seconds),
+            "lease 지평이 인증 I/O 만큼 늘어났다 — 느린 인증일수록 revoke 상한이 길어진다",
         )
 
     def test_untokened_subscription_has_no_lease_and_still_receives(self):
@@ -1909,7 +1992,7 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 _receive_json_or_fail(ws, self.fail)
                 ws.send_json({"type": "subscribe", "topics": ["fx:usd-krw"]})
                 self.assertEqual(_receive_json_or_fail(ws, self.fail).get("type"), "snapshot")
-                sent = _run(dispatcher.publish_topic("fx:usd-krw", {"type": "snapshot"}))
+                sent = _publish_on_app_loop(ws, "fx:usd-krw", {"type": "snapshot"})
         self.assertEqual(sent, 1, "무토큰 구독이 발행을 못 받는다 — §E1 이 깨졌다")
 
     def test_client_message_handling_is_awaited_not_fire_and_forget(self):

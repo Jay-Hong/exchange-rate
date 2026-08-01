@@ -473,8 +473,21 @@ async def handle_client_message(
             #    하면 안 된다 — enforcement는 capability와 분리돼야 하고(§E1), 현행 클라가
             #    무토큰이라 무조건 요구하면 구 클라가 topic을 잃는다. 그 전환은 legacy 유예와
             #    같은 시점에 묶인 별도 결정이다.
-            registry.register(websocket, topics)
-            await send_initial_snapshots(websocket, topics)
+            #
+            # ⛔ **다만 topic 은 분류한다.** 요청한 것을 그대로 등록하면 per-user 판정이 필요한
+            #    topic(KRX)이 **lease 없이** 등록되고, publish 는 lease 부재를 "무제한"으로
+            #    취급하므로 **무인증 유료 데이터 우회**가 된다(실측 재현).
+            #    §E1 이 보존하는 것은 *무료 topic 의 기존 동작*이지 "아무 topic 이나 무인증
+            #    허용"이 아니다 — enforcement 분리는 **무료 범위 안에서**의 이야기다.
+            free_topics = [
+                topic
+                for topic in topics
+                if topic in set(supported_snapshot_topics())
+                and topic not in per_user_gated_snapshot_topics()
+            ]
+            if free_topics:
+                registry.register(websocket, free_topics)
+                await send_initial_snapshots(websocket, free_topics)
             return
 
         # 토큰이 실린 요청만 인증 경로를 탄다.
@@ -489,6 +502,10 @@ async def handle_client_message(
             #    "wire deadline 초과"로 기록하면 D 를 튜닝할 telemetry 가 오염된다 —
             #    ⚠️ 그리고 이건 이론이 아니다: 3.10+ 에서 `socket.timeout is TimeoutError` 라
             #    SDK 내부 소켓 timeout 이 그대로 이 타입으로 도착할 수 있다.
+            # ⛔ identity 관측 시각은 **호출 전**을 쓴다. 호출이 끝난 시각을 쓰면 인증 I/O
+            #    시간만큼 15분 경계가 **늘어난다**(fail-open). 검증 결과가 반영하는 상태는
+            #    아무리 늦어도 호출 시작 시점이므로, 그쪽이 보수적이다.
+            identity_observed_at_mono = lease_clock().mono()
             async with asyncio.timeout(config.WS_AUTH_WIRE_DEADLINE_SECONDS) as deadline_cm:
                 uid = await authorize_subscribe(id_token)
         except asyncio.TimeoutError:
@@ -574,13 +591,18 @@ async def handle_client_message(
             #    premium 판정 대상이 아니다(gated topic 은 위에서 이미 접혔다). 따라서
             #    premium 항은 **구속하지 않는 값**이어야 하고 `now` 가 그것이다 —
             #    "방금 premium 을 확인했다"는 주장이 아니다.
-            verified_at_mono = lease_clock().mono()
+            now_mono = lease_clock().mono()
             expires_at_mono = compute_lease_expiry(
-                now_mono=verified_at_mono,
-                premium_verified_at_mono=verified_at_mono,
-                firebase_identity_verified_at_mono=verified_at_mono,
+                now_mono=now_mono,
+                # ⚠️ **premium 은 이 슬라이스에서 관측된 적이 없다.** 여기까지 오는 topic 은
+                #    per-user 판정 대상이 아니고(gated 는 위에서 접힌다), 따라서 premium 은
+                #    **제약이 아니다** — `now` 는 "구속하지 않음"을 뜻하지 "방금 확인했다"가
+                #    아니다. 유료 topic 을 accept 하려면 **실제 관측 시각을 돌려주는 판정기**가
+                #    먼저 있어야 하고, 그때 이 인자는 그 값으로 바뀐다.
+                premium_verified_at_mono=now_mono,
+                firebase_identity_verified_at_mono=identity_observed_at_mono,
             )
-            duration_seconds = int(expires_at_mono - verified_at_mono)
+            duration_seconds = int(expires_at_mono - now_mono)
             leases = {
                 topic: TopicLease(
                     lease_id=uuid.uuid4().hex,
@@ -630,5 +652,15 @@ async def handle_client_message(
                     accepted=list(topics),
                     rejected=[],
                     active=remaining,
+                    # ⛔ **남아 있는 구독의 lease 를 잃지 않는다.** `active_subscriptions` 는
+                    #    연결의 최종 상태이고 클라는 그걸로 재인증 timer 를 잡는다 — 여기서
+                    #    lease 가 빠지면 A·B 구독 후 A 만 해제했을 때 B 의 만료를 잃는다.
+                    # ⚠️ 제거된 topic 이 `accepted_topics` 에 lease 없이 실리는 것과는 별개다
+                    #    (제거된 구독엔 lease 가 없다 — U4).
+                    leases={
+                        topic: (lease.lease_id, lease.duration_seconds)
+                        for topic in remaining
+                        if (lease := registry.get_lease(websocket, topic)) is not None
+                    },
                 )
             )
