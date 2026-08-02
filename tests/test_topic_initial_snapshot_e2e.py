@@ -26,6 +26,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 # conftest.py가 firebase stub + DATABASE_URL=sqlite를 import 전에 설정.
 from app import config, models, topic_dispatcher
@@ -1221,8 +1222,10 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 stack.enter_context(patcher)
             # ⚠️ 루트에서 잡는다 — 어느 모듈이 ERROR 를 내든 걸린다.
             logs = stack.enter_context(self.assertLogs(level="DEBUG"))
-            closed = False
-            try:
+            # ⛔ 이 두 값은 **서로 배타**여야 한다. 예전 형태(`closed = True` 를 try 와 except
+            #    양쪽에서 세팅)는 **항상 참**이라 `identity.bind` 를 통째로 지워도 통과했다(실측).
+            disconnected, saw_second_ack = False, False
+            with contextlib.suppress(WebSocketDisconnect):
                 with self.client.websocket_connect("/ws") as ws:
                     _receive_json_or_fail(ws, self.fail)
                     ws.send_json({"type": "subscribe", "request_id": "x-uid-1",
@@ -1230,13 +1233,17 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                     self._receive_for(ws, "x-uid-1")
                     ws.send_json({"type": "subscribe", "request_id": "x-uid-2",
                                   "id_token": "tok-b", "topics": [A]})
-                    with self.assertRaises(Exception):
-                        for _ in range(4):
-                            _receive_json_or_fail(ws, self.fail)
-                    closed = True
-            except Exception:
-                closed = True
-        self.assertTrue(closed, "cross-UID 인데 연결이 살아 있다 — 소켓 소유권이 없다")
+                    try:
+                        while True:
+                            frame = ws.receive_json()
+                            if frame.get("request_id") == "x-uid-2":
+                                saw_second_ack = True      # 다른 UID 를 **받아줬다**
+                                break
+                    except WebSocketDisconnect:
+                        disconnected = True
+        self.assertFalse(saw_second_ack,
+                         "다른 UID 의 구독에 응답했다 — 한 소켓이 두 사람의 권한을 섞는다")
+        self.assertTrue(disconnected, "cross-UID 인데 연결이 살아 있다 — 소켓 소유권이 없다")
         errors = [r for r in logs.records if r.levelno >= 40]
         self.assertEqual(errors, [],
                          f"정상 정책 종료가 ERROR 를 남겼다 — {[r.getMessage() for r in errors]}")
