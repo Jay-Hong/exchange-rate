@@ -10,8 +10,8 @@ Phase Z-2b의 backend topic 분배 인프라.
     - Stage 2 (이 모듈 + main.py 통합): handle_client_message — WebSocket 클라이언트
                        메시지 dispatch (ping/pong 보존, subscribe/unsubscribe 분기).
                        config.TOPIC_DISPATCHER_ENABLED=true시 register 가능.
-    - Stage 3 (5/19+): publish_topic을 source data hook (crud.insert_source_rate
-                       등)에 연결.
+    - Stage 3: ✅ land — `publish_topic` 은 crud hook 이 아니라 topic publisher 모듈
+                       (tether / fx / krx)에서 호출된다.
 
 설계 원칙:
     - registry는 in-memory (per-process). cluster scale 단계에선 Redis pub/sub
@@ -88,14 +88,13 @@ from app import config
 
 logger = logging.getLogger("exchange_rate.topic_dispatcher")
 
-# 설정 결함(판정기 부재) 응답의 retry 동반값. §8-C 는 "동반"만 요구하고 정책은 별도 슬라이스다.
 
 
 class TopicRegistry:
     """WebSocket ↔ topic 구독 관계 in-memory registry.
 
-    Stage 1: Stage 2 main.py 통합 전까지 register 호출 경로 없음.
-    publish_topic이 호출되어도 subscribers 0으로 효과적 no-op.
+    ⛔ 저장하는 `TopicLease` 가 `leased_subscribers()` **전송 게이트의 단일 근거**다 —
+    registry 를 우회해 `_subscriptions` 를 직접 읽는 발행 경로를 만들면 그 게이트가 사라진다.
 
     thread-safety: FastAPI/Starlette WebSocket lifecycle은 단일 event loop
     위에서 직렬화. 별도 lock 미필요 (asyncio.Lock 도입은 cross-task race
@@ -145,7 +144,12 @@ class TopicRegistry:
         return set(existing)
 
     def remove_websocket(self, websocket: "WebSocket") -> None:
-        """websocket 연결 종료 시 모든 구독 정리. main.py disconnect hook에서 호출 예정."""
+        """websocket 연결 종료 시 모든 구독 정리.
+
+        main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다(idempotent).
+        ⚠️ 후자 때문에 이 메서드는 "연결이 죽었다"의 동의어가 아니다 — UID 결속을 registry 에
+        두면 안 되는 이유가 그것이다(`ConnectionIdentity` docstring).
+        """
         self._subscriptions.pop(websocket, None)
 
     def get_subscribers(self, topic: str) -> Set["WebSocket"]:
@@ -183,8 +187,8 @@ class TopicRegistry:
         return len(self.get_subscribers(topic))
 
 
-# 싱글톤 — main.py / publish 호출자가 공유.
-# Stage 1에선 호출자 없음 (test/wire-up 준비용).
+# 싱글톤 — main.py / publish 호출자가 공유하는 **프로세스 전역 구독·lease 상태**.
+# ⛔ 재바인딩·재초기화하면 살아 있는 구독과 lease 가 통째로 소실된다.
 registry = TopicRegistry()
 
 
@@ -382,9 +386,10 @@ async def handle_client_message(
     인증이 **조용히 사라진다**(fail-open). 필수 keyword-only면 그 실수가 `TypeError`가 된다.
 
     ⚠️ **이 seam이 확인하는 것은 identity뿐이다.** entitlement(유료 판정)는 확인하지 않는다 —
-    그래서 아래에서 **per-user 판정이 필요한 topic은 accept하지 않는다**. identity만 확인하고
-    그 topic을 받으면 *인가된 것처럼 보이는* 유료 데이터 유출이 되어 무인증보다 나쁘다.
-    entitlement 판정은 다음 red 테스트의 주제다.
+    그래서 gated topic 은 이 seam 이 아니라 `authorize_gated_subscription`
+    (`app/topic_authorization.py`) 의 verdict 로 판정하고, `Granted` 일 때만 **4축 lease** 와
+    함께 accept 한다. identity만 확인하고 그 topic을 받으면 *인가된 것처럼 보이는* 유료 데이터
+    유출이 되어 무인증보다 나쁘다 — 그래서 두 축을 **다른 함수**로 갈라 둔다.
 
     ⛔ **REST의 premium 게이트를 여기에 재사용하지 말 것.** 그것은 외부 장애 시 stale 캐시를
     ACTIVE로 돌려주는 **가용성 우선** 정책이라, lease 권한 판정에 쓰면 오래된 판정이 방금 확인한

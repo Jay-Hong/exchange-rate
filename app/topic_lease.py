@@ -147,7 +147,10 @@ def compute_lease_expiry(
             ⚠️ 이 값은 **검증된 토큰**(fingerprint / `auth_time`) 단위로 관측·저장돼야 한다 —
             UID 키로 캐시하면 revoked된 구 토큰이 같은 UID의 새 토큰 검증 결과를 공유해
             권한이 섞인다(A1). 이름이 `premium_*`과 대칭이라고 같은 키 공간이 아니다.
-            실제 저장 키 강제는 strict cache 슬라이스의 몫이다.
+            ⚠️ 지금은 **캐시 자체가 없다** — `verify_ws_subscribe_token` 이 매 subscribe 마다
+            `verify_id_token(check_revoked=True)` 를 부른다(`app/main.py`). 그래서 이 위험은
+            현존이 아니라 **잠재**다. 강제를 미루던 strict cache 슬라이스는 ADR-040 에서
+            **폐기**됐으므로(이 파일 모듈 docstring), 캐시를 넣는 사람이 그때 키 공간을 함께 정한다.
 
     Raises:
         ValueError: 비유한 입력, 또는 관측 시각이 `now`보다
@@ -180,8 +183,10 @@ def compute_identity_only_lease_expiry(
     "premium 은 제약이 아니다"라는 사실은 **이 함수의 이름**이 표현하고, `now` 를 넘겨
     구속하지 않게 만드는 것은 여기 한 곳에서만 일어난다.
 
-    ⚠️ 유료 topic 을 accept 하게 되면 이 함수가 아니라 `compute_lease_expiry` 를 **실제 관측
-    시각과 함께** 불러야 한다.
+    ⚠️ 유료 topic 은 **이미 accept 한다** — 그 경로는 이 함수가 아니라 축에 맞는 계산기를 쓴다:
+    per-user 판정이 붙는 현행 KRX 는 `compute_gated_lease_expiry`(4축), premium 만 보는 가상의
+    경로라면 `compute_lease_expiry`(3축). ⚠️ `compute_lease_expiry` 는 **현재 프로덕션 호출자가
+    없다**(테스트만 쓴다) — 지우기 전에 3축 소비자가 생길지부터 볼 것.
     """
     return _lease_expiry_from_observations(
         now_mono=now_mono,

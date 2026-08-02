@@ -56,8 +56,9 @@ class SubscribeAuthFailed(Exception):
 
     ⚠️ 이 예외는 "연결을 닫아라"가 아니라 **"이 요청을 이 코드로 접어라"**를 뜻한다.
     §8-C 의 두 코드는 전체-요청 범위이므로 연결과 registry 는 **불변**이어야 한다 —
-    그 구분이 이 타입의 존재 이유다(현행은 어떤 raise 든 연결 자체가 닫혀 그 연결의 다른
-    구독까지 사라진다).
+    그 구분이 이 타입의 존재 이유다 — **구 동작**은 어떤 raise 든 연결이 닫혀 그 연결의 다른
+    구독까지 사라졌다. 현행은 두 코드를 프레임으로 보내고 **연결·registry 는 불변**이다
+    (`app/topic_dispatcher.py` 의 `SubscribeAuthFailed` 처리).
     """
 
     def __init__(self, error: str, retry_after_seconds: Optional[int] = None):

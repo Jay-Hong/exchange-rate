@@ -14,7 +14,10 @@ ADR-039 §8.1 A1/A2. **계산기만** 다룬다 — registry·sweeper 배선은 
   캐시로 ACTIVE를 돌려주고(`app/subscription.py`의 `CACHE_STALE_TTL`) 반환 타입에
   fresh/stale 구분이 없다. 그 구분은 A6 3-state verifier가 만든다.
 - `[server] single-flight` / `[server] identity horizon이 토큰 단위` /
-  `[server] horizon 계산(캐시 4분 → lease ~11분)`의 **저장 절반** — 모두 후속.
+  `[server] horizon 계산(캐시 4분 → lease ~11분)`의 **저장 절반**.
+  ⚠️ **모두 후속은 아니다** — identity horizon 의 관측·저장·재사용은 `app/topic_dispatcher.py`
+  에 land 했고 e2e 가 잠근다. 남은 것은 **관측 캐시와 single-flight** 이고, 그건 실제 병목을
+  측정하기 전에는 넣지 않는다(ADR-040).
 
 ⚠️ `CACHE_TTL < LEASE_MAX_SECONDS`가 **"최소 lease 10분"을 뜻하지 않는다**: 그 부등식은
 3-way min의 *premium(RevenueCat) 항*에만 걸리는 상한이다. 10분 하한은

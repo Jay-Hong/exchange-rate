@@ -4,12 +4,26 @@
 > 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출).
 > ⛔ **"서버 측 계약 closed" 는 그 2건에 한정된다** (2026-08-01 축소). 서버 §8 WS 인증(1C)은
 > **진행 중**이다. 현재 land 된 것:
-> `subscription_ack`/`subscription_error` + 종결 프레임 계약(§8-B-term) / **무료 topic 의
-> identity lease(15분, ack 에 `lease_id` + 남은 duration)** / **uid 를 lease 에 바인딩** /
-> **모든 발행 경로가 지나는 lease 게이트**(만료 시 전송 0).
-> ⛔ **아직 없는 것**: **KRX per-user 판정**(토큰을 실은 KRX 요청은 판정기 부재로 전체 요청이
-> `temporarily_unavailable` 로 접힌다 — entitled 성공도 non-entitled 거부도 미구현) /
-> `reauth_required` 프레임 / 만료 시 registry 제거 / **클라 request timeout**.
+> `subscription_ack`/`subscription_error` + 종결 프레임 계약(§8-B-term) / **topic 별 lease**
+> (ack 에 `lease_id` + **남은** duration, 상한 15분) / **uid 를 lease 에 바인딩** /
+> **모든 발행 경로가 지나는 lease 게이트**(만료 시 전송 0) /
+> **KRX per-user 판정**(2026-08-02 `4a45173`).
+>
+> ⚠️ **lease 는 topic 마다 길이가 다를 수 있다.** 만료는 *부여 시각*이 아니라 **가장 오래된
+> authoritative 관측**에서 흐른다 — 무료 topic 은 identity 1축이지만 `krx:*` 는 identity ·
+> premium · entitlement 3축을 함께 보므로 **같은 요청 안에서도 KRX 가 먼저 만료될 수 있다**.
+> 클라는 topic 별 duration 을 각각 읽어야 한다(가장 긴 것 하나로 타이머를 잡으면 KRX 가 조용히 죽는다).
+>
+> **KRX per-user 판정의 세 갈래** (§8-C 범위가 다르다):
+> - **entitled** → `accepted_topics` 에 lease 와 함께 실린다.
+> - **자격 없음** → **per-topic 거부**다. `rejected_topics` 에 `premium_required` 또는
+>   `krx_entitlement_required` 로 실리고 **같은 요청의 무료 topic 은 그대로 수락된다**.
+>   이미 갖고 있던 KRX 구독이 있으면 **즉시 철회**된다(만료를 기다리지 않는다).
+> - **판정 불가**(제공자·DB 장애, 인가 지연) → 그때만 **전체 요청**이 `temporarily_unavailable`
+>   로 접히고 **registry 는 하나도 바뀌지 않는다**(무료 topic 조차 새로 등록되지 않는다).
+>
+> ⛔ **아직 없는 것**: `reauth_required` 프레임 / 만료 시 registry 제거 / **클라 request timeout** /
+> **클라 lease 소비**(재인증 타이머).
 > 이 문서를 "서버가 다 됐다"로 읽고 활성화를 앞당기지 말 것 — 활성화 선행 조건은 아래 3조건이다.
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
 > `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
@@ -38,7 +52,10 @@
   (2026-08-01 개정 — 구 서술 "registry에는 등록되나 조용히 skip"은 미식별 경로에만 참이다):
   - **식별된 요청** → ack 의 `rejected_topics` 에 `unknown_topic` / `topic_unavailable` 로 실리고
     **registry 에 등록되지 않는다**.
-  - **미식별 요청**(구 클라) → 등록은 되고 snapshot 만 조용히 skip (기존 동작 유지).
+  - **미식별 요청**(구 클라) → **ack 이 없어 조용히 무시**된다. ⛔ 등록되는 것은 **지원되는 무료
+    topic 뿐**이다 — 미지원 topic 과 `krx:*` 는 **registry 에 들어가지 않는다**(2026-08-02
+    `4a45173` 개정). 무토큰으로 gated topic 을 등록하면 lease 가 없고, 발행은 lease 부재를
+    "무제한"으로 취급해 **무인증 유료 데이터 우회**가 된다(실측 재현).
 
 ## 1. 연결 + 구독 프로토콜
 
@@ -249,8 +266,13 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
 - 발행/snapshot 조건: `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(G2∧G3) on. off면 발행 중단 + REST 404 + WS snapshot skip.
 - per-user 노출 — **경로별로 다르다**:
   - **REST** `/api/v2/topics/snapshot`: **서버가 강제**(2026-07-25~, ADR-039 §8.1 E3). 비-entitled에겐 404 unknown_topic.
-  - **WS**: 아직 무인증이라 **클라 `krx_visible` gate 담당**(GET /api/entitlements, ADR-038 Decision 3).
-    1C(WS 인증) land 시 서버 강제로 전환 예정 — 그때까지 클라 gate를 제거하면 안 된다.
+  - **WS**: **서버 강제 구현됨**(2026-08-02 `4a45173`) — 무토큰은 `krx:*` 를 registry 에 **등록조차
+    하지 않고**, 토큰이 실리면 premium ⊥ entitlement 판정 후 자격 없으면 ack 의 `rejected_topics`
+    에 `krx_entitlement_required`(또는 `premium_required`)로 실리고 기존 구독은 즉시 철회된다.
+    ⛔ **그래도 클라 `krx_visible` gate(GET /api/entitlements, ADR-038 Decision 3)는 유지한다.**
+    ⚠️ **"1C 서버 land = 클라 gate 제거 가능" 이 아니다.** 위 강제는 `TOPIC_DISPATCHER_ENABLED`
+    가 켜져야 **한 줄이라도 돈다** — 꺼져 있는 동안은 구독 경로 자체가 없다. 제거 조건은
+    **flag ON 이후 + 클라가 lease·request timeout 계약을 소비한 뒤**다.
 
 **snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` = 1 entry. 작음.
 

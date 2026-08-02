@@ -6197,7 +6197,11 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 - **S4** legacy 유예 기간: 기존 6개월([REALTIME_ARCHITECTURE_PLAN.md:483](REALTIME_ARCHITECTURE_PLAN.md#L483)) 유지 vs 단축(권고 <1%+30일). 명시적 supersede 필요.
   ⚠️ S4는 *legacy 종료 시점* 결정이라 **Stage B 게이트** — WS 인증(1C) 구현의 블로커는 아니다.
 - **S5** KRX revoke 반영 지연 — **RESOLVED = bounded-lease v1, 15분**(2026-07-25). 즉시 제거(UID registry + Redis 제어
-  이벤트)는 별도 후속. 서버 lease 15분 / 클라 재인증 ~12분+jitter / 만료 시 topic 제거 + `reauth_required`.
+  이벤트)는 별도 후속. 서버 lease **상한** 15분 / 클라 재인증 ~12분+jitter / 만료 시 topic 제거 +
+  `reauth_required`. ⚠️ **실값은 상한보다 짧을 수 있다** — 만료는 부여 시각이 아니라 *가장 오래된
+  authoritative 관측*에서 흐르므로, 관측 축이 많은 KRX(identity·premium·entitlement)는 무료 topic
+  보다 먼저 만료된다. **만료 시 topic 제거 + `reauth_required` 는 설계이고 아직 미구현이다**
+  (과도기: 만료 lease 를 `duration 0` 으로 남긴다 — FREE_TIER_ACCESS_MODEL_PLAN.md §8).
   leak window를 가르는 건 토큰 신선도가 아니라 **서버의 UID 기준 entitlement 재조회 주기**.
   상세·구현 규모 실사는 [FREE_TIER_ACCESS_MODEL_PLAN.md §7 S5 / §8](FREE_TIER_ACCESS_MODEL_PLAN.md).
 

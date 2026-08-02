@@ -3019,7 +3019,9 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
     # ⛔ `check_revoked=True` — §8-C의 `invalid_token`은 "무효·만료·**revoked**"를 포함한다.
     #    False면 revoke된 토큰이 검증을 통과해 **accept**된다(이 슬라이스에 실재한 구멍이었다).
     #    대가: subscribe마다 Firebase user record 조회가 1회 더 붙는다. lease가 들어오면 그 조회를
-    #    lease horizon에 통합해 매 요청 비용을 없애는 것이 다음 단계다(지금은 horizon이 없다).
+    #    lease horizon에 통합해 매 요청 비용을 없애는 것은 **아직 하지 않았다**.
+    #    ⚠️ horizon 자체는 land 했다(`app/topic_lease.py`) — 남은 것은 *검증 결과를 캐시해*
+    #    재사용하는 부분이고, 그건 실제 병목을 측정한 뒤에 넣는다(ADR-040).
     try:
         # ⛔ `app=` 를 빠뜨리면 DEFAULT app 이 쓰여 **낮춘 `httpTimeout` 이 통째로 no-op** 이
         #    된다 — 그런데 프레임·로그·타이밍 어디에도 흔적이 남지 않는다(호출 인자만이 증거다).

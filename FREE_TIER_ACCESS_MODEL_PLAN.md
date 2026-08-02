@@ -257,6 +257,9 @@
   - ⚠️ **구현 규모 실사(코드 확인 2026-07-25)**: "lease timer만 추가"가 아니다. `TopicRegistry`(app/topic_dispatcher.py:46)는
     `Dict[WebSocket, Set[str]]`라 **per-subscription 메타데이터가 없고**, `/ws`(app/main.py:889)는 **현재 무인증**이다.
     → 필요한 것 = (a) subscribe 경로 인증 (b) (ws, topic)별 uid·만료 메타 (c) 만료 sweep (d) `reauth_required` 발신.
+    **(a)·(b) 는 land 됐다**(2026-08-02 `4a45173` — `TopicRegistry` 가 topic 별 `TopicLease{lease_id, uid,
+    expires_at_mono}` 를 갖고, `/ws` subscribe 는 토큰이 실리면 Firebase 검증을 거친다). **잔여 = (c)·(d)**.
+    ⚠️ 위 실사 자체는 폐기 대상이 아니다 — "lease timer만 추가"가 아니었다는 판단이 정확했다.
 - **S6 (제품 결정, codex Medium) last-good 최대 stale 정책**: serve의 process-local last-good은 현재 **무기한**(Redis/cron 장기 장애 시 며칠 stale canonical도 반환 — 실시간 우회는 아님, `as_of`가 정직하게 old 표시). (a) 최대 stale N시간 초과 시 503 전환 vs (b) 무기한 유지 + 클라 UI에 stale 명시. **결정 = (a) 24h hard cutoff** (2026-07-21, 코덱스+Claude+사용자). 구 비결정 혼합(process-local 생존 중 무기한 + Redis ~25h TTL → 재시작 여부로 stale-or-503)을 (now-as_of)>=24h serve 거부로 일관화. **서버+iOS 구현 완료**(서버 d9e60ab: `is_snapshot_too_stale` per-candidate age + stale Redis가 fresh local 안 덮음 / iOS 7050bd3: `.unavailable` + isTooStale age>=24h[future clock-skew 허용] + gated current·displayData[sticky 포함] + **fetch-독립 expiryTask**로 SwiftUI 시간-미관찰 in-flight 만료 공백까지 폐쇄 + 뷰 전파). codex Blocker/High/Medium 0. source-level staleness는 별도 source-health.
 
 > S4·S5·S6는 서버 MVP(step 2·3)와 **독립**. S5=WS(1C) 전 확정 필요했고 **2026-07-25 확정 완료** /
@@ -311,13 +314,13 @@
 lease가 없는 단계에서 그 필드를 채우면 **없는 사실을 만들어 내는 것**이고, 빼면 코드가 정본과 다른
 **제3의 계약**을 만든다. 그래서 단계를 명시한다 — 구현은 자기 단계의 행을 그대로 따른다.
 
-| 필드 | Stage 1 (subscribe + unsubscribe + flag-off, 현재 — §8-B-term) | Stage 2 (lease 도입) |
+| 필드 | Stage 1 (subscribe + unsubscribe + flag-off — §8-B-term, **구 단계**) | Stage 2 (lease 도입) — **현재** |
 | --- | --- | --- |
 | `type` / `request_id` / `operation` | 그대로 | 그대로 |
 | `accepted_topics` | `[{"topic": …}]` | ✅ **land** — `+ lease_id`, `+ lease_duration_seconds` (⚠️ `operation="unsubscribe"` 는 예외 — U4) |
 | `rejected_topics` | `[{"topic": …, "error": …}]` | 그대로 |
 | `removed_topics` | `[]` (제거 전이 미구현) | §C2 eviction 결과 |
-| `active_subscriptions` | `[{"topic": …}]` (연결 최종 상태) | `+ lease_id`, `+ lease_duration_seconds` |
+| `active_subscriptions` | `[{"topic": …}]` (구 shape) | ✅ **land** — `+ lease_id`, `+ lease_duration_seconds` (subscribe·unsubscribe ack 양쪽) |
 | `identity_generation` | **보류(미포함)** | 재검토 후 결정 |
 
 ⛔ **컨테이너 형태는 Stage 1부터 최종형(객체 배열)이다.** 문자열 배열로 시작하면 lease가 들어올 때
@@ -562,9 +565,21 @@ U1 이 문서에만 있고 코드에는 **반만** 있던 것이다 — 세 경�
 둘 다 없음)를 각각 독립으로 잠근다. 축을 동시에 넣은 테스트는 한 축만 검증한다.
 
 ⚠️ **판정기 부재의 처리**: per-user 판정이 필요한 topic이 지원 집합에 들어 있는데(배포 flag on)
-WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다 → ERROR 로그 + 전체-요청
-`temporarily_unavailable`. `topic_unavailable`을 쓰면 안 된다 — 그 코드는 "개별 flag off"를 뜻하고,
-flag가 켜진 상태에 쓰면 운영자가 flag를 보고 코드와 모순을 겪는다.
+WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다. `topic_unavailable`을 쓰면 안 된다 —
+그 코드는 "개별 flag off"를 뜻하고, flag가 켜진 상태에 쓰면 운영자가 flag를 보고 코드와 모순을 겪는다.
+
+⛔ **구현은 이 문단과 다르다 — 열린 결정이다**(2026-08-02 `4a45173` 확인). 여기엔 "ERROR 로그 +
+전체-요청 `temporarily_unavailable`"이라고 적혀 있으나, 실제로는 `assert_single_gated_topic()`
+(`app/topic_authorization.py`)이 **`RuntimeError` 를 올리고 아무도 잡지 않는다** — 판정기가 일반
+`Exception` 을 의도적으로 삼키지 않기 때문이다(같은 파일: *프로그래밍 오류를 가용성 verdict 로
+바꾸면 클라는 재시도 가능한 정상 결과로 읽고 서버는 영영 안 낫는다*). 결과는 `app/main.py` 의
+`except Exception` → `logger.exception` + finally 정리 = **ERROR 로그 + 연결 종료**다.
+§8-B-term 은 연결 종료도 종결로 인정하므로 계약 위반은 아니다.
+
+**어느 쪽을 택할지는 미결이다**: (a) 문서대로 프레임을 보내면 클라가 **영영 성공 못 할 재시도**를
+한다(설정 결함은 재시도로 안 낫는다). (b) 현행대로 두면 그 요청뿐 아니라 **연결의 다른 구독까지**
+사라진다. 두 번째 gated topic 을 추가하는 슬라이스에서 함께 정한다 — 그 전까지는 트립와이어가
+**배포 전에** 터지게 하는 것이 목적이므로 현행으로 둔다.
 
 ✅ **timeout — 구현 완료. 축은 두 개이고 계약은 아래와 같다** (2026-07-30 도입 / 2026-08-02 범위 축소):
 
@@ -735,9 +750,15 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       않는다(등록하면 lease 부재가 "무제한"이라 **무인증 유료 데이터 우회**).
       ⛔ 무토큰 재구독이 **기존 lease 를 지우지 못한다** — 지우면 인증된 구독이 무제한이 되는 우회다.
 
-      ⛔ **KRX per-user 판정은 아직 없다.** 토큰을 실은 KRX 요청은 판정기 부재로 전체 요청이
-      `temporarily_unavailable` 로 접힌다 — entitled 성공 경로도, non-entitled 거부 경로도
-      **구현·검증되지 않았다**. 한때 이 항목을 "슬라이스 land, 잔여는 iOS 뿐"으로 적었는데
+      ✅ **KRX per-user 판정 land (2026-08-02 `4a45173`).** 토큰을 실은 KRX 요청은
+      `app/topic_authorization.py` 의 `authorize_gated_subscription` 이 premium ⊥ entitlement
+      2축으로 판정한다 — entitled 는 4축 lease 와 함께 accept, 자격 없으면 **per-topic** 거부
+      (`premium_required` / `krx_entitlement_required`) + 기존 KRX 구독 즉시 철회,
+      **판정 불가일 때만** 전체 요청이 `temporarily_unavailable` 로 접힌다(registry 불변).
+      12축 E2E 를 **변이 확인까지** 마쳤다(아래 체크리스트).
+
+      ⚠️ (2026-08-02 이전 상태 기록 — 지금은 위가 맞다) 이 자리에 "판정기 부재로 전체 요청이
+      접힌다"고 적혀 있었다. 그 전에는 반대로 "슬라이스 land, 잔여는 iOS 뿐"으로 적었는데
       **과대 서술**이었다(codex). socket UID 결속을 미룬 판단도 **이 범위 안에서만** 유효하다.
 
       ⚠️ **과도기 결정 — 만료 lease 는 `duration 0` 으로 남긴다.** 최종 계약은 *만료 시 registry
@@ -806,10 +827,13 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       그 전까지 flag off 유지.
       — A1/A2 **산술** land(2026-07-27, `app/clock.py` + `app/topic_lease.py`, 배포 없음).
       ⛔ 구 `strict cache → 3-state verifier → single-flight` 순서는 ADR-040에서 **폐기**됐다.
-      현재 Stage 1 ack/error/auth timeout, iOS 토큰·ack/error 소비, **iOS 재연결 배칭**(N→1)까지 land.
+      현재 **Stage 2 wire**(lease 실린 ack) + 서버 lease 발급 + **publish 직전 lease 게이트** +
+      **KRX per-user 판정**(`4a45173`)까지 land. iOS 는 토큰·ack/error 소비 + 재연결 배칭(N→1) +
+      `temporarily_unavailable` 제한 재시도까지.
       ⛔ 구 "reconciler + 1 in-flight → 배칭" 순서는 **개정됐다** — 배칭이 먼저 land 했고 reconciler 는
-      보류다(위 "순서 개정" 절). 다음은 **활성화 blocker 2건**(같은 절) → 서버 lease 발급 +
-      publish 직전 인가. 관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
+      보류다(위 "순서 개정" 절). **서버 lease 발급 + publish 직전 인가는 land 했다** —
+      다음은 **② iOS lease 소비**(최단 만료 전 재인증, `duration: 0` = "지금 재인증") +
+      **③ 클라 request timeout**(활성화 blocker). 관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).
 - [x] **제품 결정 S5(revoke latency) = bounded-lease v1 15분 확정(2026-07-25)** — §7 S5 / §8 만료 항목 참조.

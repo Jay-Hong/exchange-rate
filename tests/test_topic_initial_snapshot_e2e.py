@@ -912,10 +912,13 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertIs(identity_param.kind, inspect.Parameter.KEYWORD_ONLY)
 
     def test_authenticated_subscribe_receives_a_subscription_ack(self):
-        """⛔ 현재 red 다 — 서버는 `id_token` 을 보지 않고 ack 도 보내지 않는다.
+        """인증된 subscribe 는 토큰 검증 뒤 **ack 을 snapshot 보다 먼저** 받는다.
 
-        red 의 형태가 timeout 이 아니라 **명확한 타입 불일치**여야 한다: 지금은 subscribe 직후
-        `snapshot` 이 오므로, 그 사실이 그대로 실패 메시지에 드러난다.
+        ack 은 `request_id` 로 요청과 상관되고, `accepted_topics` 항목은 `lease_id` +
+        `lease_duration_seconds` 를 싣는다(§8-B Stage 2).
+
+        ⚠️ 순서가 계약이다 — snapshot 이 먼저 오면 클라는 *무엇에 대한* snapshot 인지 모른 채
+        상태를 갱신하게 된다. 실패 메시지가 그 사실을 그대로 드러내도록 **타입을 먼저** 본다.
         """
         patchers = self._patchers()
         authz = patchers["verify_token"].new
@@ -2581,8 +2584,9 @@ class TestWsSubscribeTokenVerifier(unittest.IsolatedAsyncioTestCase):
     **검증자 본문**은 다른 주장이므로 따로 잠근다.
 
     ⚠️ 이 테스트가 잠그지 **않는** 것: Firebase 예외 → wire 오류 코드 매핑(`invalid_token` /
-    `temporarily_unavailable`). 그건 다음 슬라이스이고, 그때 REST 쪽 분류와의 중복을 함께 정리한다
-    (codex Medium: 지금은 SDK 호출 한 줄만 겹치지만 분류가 들어오면 진짜 중복이 된다).
+    `temporarily_unavailable`). 그건 `_classify_ws_subscribe_auth_failure`(`app/main.py`) 소유이고
+    같은 파일의 `test_sdk_exceptions_split_by_type_not_by_parent_catch` 가 잠근다 — 이 클래스는
+    **검증자 본문만** 본다(codex Medium: REST 쪽 분류와의 중복 정리는 여전히 미해결).
     """
 
     async def test_returns_the_uid_from_the_decoded_token(self):
