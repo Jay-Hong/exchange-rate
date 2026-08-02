@@ -452,12 +452,18 @@ identity 충돌 코드가 없다 — `invalid_token` 은 "토큰이 유효했다
 close → 재연결 → B 가 첫 소유자로 결속 → 정상*이다. 여기서 재연결을 막으면 **계정 전환이
 복구 불가능해진다**.
 
-⛔ **다만 "1008 이면 재연결" 을 일반 규칙으로 굳히지 말 것.** `1008` 은 **일반 정책 위반 코드**이고
-서버는 `reason` 도 싣지 않는다 — 지금 이 규칙이 성립하는 이유는 오직 **발신 지점이 하나뿐**이기
-때문이다(`app/topic_dispatcher.py` 단 1곳, `tests/test_topic_wire.py` 의
-`TestPolicyCloseCodeHasExactlyOneSender` 가 잠근다). 두 번째 사유가 생기면 클라는 둘을 **구분할 수
-없고** 이 문단은 틀린 지시가 된다. 그때는 **먼저 구분 가능한 신호**(private `4xxx` code 또는 안정적
-`reason`)를 정의하고 이 절을 갱신해야 한다 — 위 트립와이어가 그 순서를 강제한다.
+⛔ **다만 "1008이면 재연결"을 일반 규칙으로 굳히지 말 것.** `1008`은 일반 정책 위반 코드이고
+서버는 `reason`도 싣지 않는다. 현재 서버 구현에서 확인된 직접 발신 사유는 cross-UID 충돌
+한 가지이며, `test_cross_uid_closes_the_connection_without_error_logs`가 그 경로에서 실제
+`1008`이 나가는 동작을 잠근다.
+
+⚠️ 이것은 **현재 구현 상태에 대한 관측**이지, 두 번째 정책 사유를 자동으로 막는 정적 불변식이
+아니다. 다른 정책 종료 사유를 추가할 때는 먼저 private `4xxx` code 또는 안정적인 `reason`처럼
+클라이언트가 구분할 수 있는 신호를 정의하고, 이 절과 클라이언트 정책을 함께 갱신해야 한다.
+
+ℹ️ FastAPI는 WebSocket endpoint의 dependency·parameter 검증 실패를 자체적으로 `1008`로
+종료할 수 있다. 현재 `/ws`는 검증 대상 파라미터가 없어 해당하지 않지만, endpoint 시그니처나
+dependency를 추가할 때는 이 절의 "현재 발신 사유 한 가지" 전제를 다시 확인해야 한다.
 
 ℹ️ **지금 클라가 할 일은 없다.** 현재 iOS 는 close code 를 **읽지 않고** 모든 수신 오류를
 **기존 reconnect 경로**로 접는데(2026-08-02 실측: `WebSocketService.swift` 에 `closeCode` 참조
