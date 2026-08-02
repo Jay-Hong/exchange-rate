@@ -493,8 +493,9 @@ class TestPolicyCloseCodeIsSentFromOneIdentityConflictSite(unittest.TestCase):
         원리적으로 구분 불가다.
       - **프레임워크·ASGI 레벨**: raw ASGI `{"type": "websocket.close", "code": ...}` 를 send 로
         직접 보내기 / send 채널을 감싸는 미들웨어 / 서버 설정(`--ws-max-size` 의 1009 등).
-      - **트리 밖**: `app/` 바깥 모듈, `app/` 안의 **비-.py** 소스를 동적 로드, `app/` 안의
-        **심볼릭 링크 디렉터리**(`rglob` 가 따라가지 않음 — 실측).
+      - **트리 밖**: **비-.py** 소스를 동적 로드, **심볼릭 링크 디렉터리**
+        (`rglob` 가 따라가지 않음 — 실측), `skip` 목록에 든 디렉터리.
+        ⚠️ `app/` **바깥 최상위 모듈**은 한때 여기 있었으나 스캔 루트를 리포 전체로 넓혀 닫았다.
       - ⚠️ **FastAPI 자체가 1008 을 보낼 수 있다**: WebSocket 엔드포인트에 검증 대상 파라미터를
         추가하면 검증 실패 시 프레임워크가 1008 로 닫는다. 현재 `/ws` 는 `websocket` 하나만
         받아 해당 없음 — **파라미터를 추가하는 순간** 이 절과 가이드 §6 을 함께 봐야 한다.
@@ -600,20 +601,34 @@ class TestPolicyCloseCodeIsSentFromOneIdentityConflictSite(unittest.TestCase):
         import ast
         import pathlib as _pathlib
 
-        app_dir = _pathlib.Path(__file__).resolve().parent.parent / "app"
+        repo = _pathlib.Path(__file__).resolve().parent.parent
+        # ⛔ 스캔 루트는 **리포 전체**다 — `app/` 로 한정하면 최상위 모듈(예: 루트
+        #    `ws_policy_close.py`)에 정책 close 를 두고 app 이 import 하는 형태를 **파일을
+        #    열어보지도 못한다**(적대적 검증에서 실제로 green 이 났다). 실측: tests/ 제외 리포
+        #    전체에서 '인자 있는 `.close(...)`' 는 정확히 1건(아래 기대값)이라 넓혀도 오탐 0.
+        skip = {"tests", "__pycache__", ".git", ".venv", "venv", "node_modules"}
+        sources = [q for q in sorted(repo.rglob("*.py"))
+                   if not any(part in skip or part.startswith(".") for part in q.parts)]
         found = []
         conflict_lines = {}
         raises = []
+        scanned = []
         # ⚠️ **상대 경로**로 키를 잡는다 — basename 으로 잡으면 `app/sources/topic_dispatcher.py`
         #    같은 동명 파일이 handler-scope 검사를 덮어써 통과시킨다(적대적 검증에서 나왔다).
-        for path in sorted(app_dir.rglob("*.py")):
-            rel = str(path.relative_to(app_dir))
+        for path in sources:
+            rel = str(path.relative_to(repo))
+            scanned.append(rel)
             tree = ast.parse(path.read_text(encoding="utf-8"))
             conflict_lines[rel] = self._identity_conflict_handler_lines(tree)
             for lineno in self._policy_raise_sites(tree):
                 raises.append((rel, lineno))
             for lineno, code in self._close_sites(tree):
                 found.append((rel, lineno, code))
+
+        # ⛔ 범위 가정이 깨지면 **침묵하지 말 것** — 스캔이 정작 dispatcher 를 못 봤는데
+        #    "위반 0건" 으로 green 이 나는 것이 가장 나쁜 실패다.
+        self.assertIn("app/topic_dispatcher.py", scanned,
+                      f"스캔이 dispatcher 를 보지 못했다 — 범위가 깨졌다: {len(scanned)} files")
 
         self.assertEqual(
             raises, [],
@@ -623,15 +638,15 @@ class TestPolicyCloseCodeIsSentFromOneIdentityConflictSite(unittest.TestCase):
 
         self.assertEqual(
             [(rel, code) for rel, _, code in found],
-            [("topic_dispatcher.py", 1008)],
+            [("app/topic_dispatcher.py", 1008)],
             "WebSocket close code 발신 지점이 바뀌었다 — 1008 이 더 이상 cross-UID 와 1:1 이\n"
             "아니게 되면 REALTIME_V2_CLIENT_GUIDE §6 의 복구 규칙이 틀린 지시가 된다.\n"
             f"먼저 구분 가능한 신호(private 4xxx / stable reason)를 정하고 §6 을 갱신할 것: {found}",
         )
         aliases = []
-        for path in sorted(app_dir.rglob("*.py")):
+        for path in sources:
             for lineno in self._close_aliases(ast.parse(path.read_text(encoding="utf-8"))):
-                aliases.append((str(path.relative_to(app_dir)), lineno))
+                aliases.append((str(path.relative_to(repo)), lineno))
         self.assertEqual(
             aliases, [],
             "`close` 를 이름에 담았다 — 검출기가 추적할 수 없어 정책 close 가 숨는다. "
