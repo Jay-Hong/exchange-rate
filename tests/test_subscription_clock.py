@@ -59,12 +59,12 @@ def _poison_mono() -> float:
     """이 모듈은 monotonic 축을 읽지 않는다 — 그 계약을 실행 시점에 잠그는 trip-wire.
 
     결정적 fake(카운터)를 넣으면 subscription이 mono를 읽기 시작해도 아무도 모른다.
-    §8.1 A4의 strict cache(`verified_at_monotonic`)가 이 모듈로 들어오는 날 여기가 red가
+    관측 캐시(`verified_at_monotonic`)가 이 모듈로 들어오는 날 여기가 red가
     되어 "wall 축 전용" 전제를 **명시적으로** 재검토하게 만든다.
     """
     raise AssertionError(
         "app/subscription.py는 wall 축만 읽는다 — mono 소비가 생겼다면 이 전제를 갱신할 것 "
-        "(ADR-039 §8.1 A4 strict cache)"
+        "(관측 캐시 도입 시 — 구 §8.1 A4 strict cache 설계는 ADR-040 에서 폐기)"
     )
 
 

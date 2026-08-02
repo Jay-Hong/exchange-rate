@@ -62,7 +62,8 @@ D1("한 ack 안의 accepted들은 **같은 순간** 갱신")과 D2("`active_subs
 ⚠️ 아래는 `compute_lease_expiry`(3축) 기준 서술이지만, **축 개수와 무관하게** 성립한다.
 관측 시각들이 **모두** wall epoch로 들어오면 서로의 관계가 정상이라 gross-skew 가드를 통과한다
 (결과는 epoch+900이 되어 진짜 monotonic now와 비교 시 수십 년간 미만료). 축 보증은 배선
-슬라이스가 져야 한다 — 모든 값이 같은 주입 `Clock.mono`에서 나오고, A6의 `active`만 계산기에
+슬라이스가 져야 한다 — 모든 값이 같은 주입 `Clock.mono`에서 나오고, **판정기가 통과시킨**
+결과(`app/topic_authorization.py` 의 `Granted`)만 계산기에
 도달하며, 이미 만료로 계산되면 등록·ack accepted를 하지 않는다는 것까지.
 """
 from __future__ import annotations

@@ -1244,8 +1244,18 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                                     return "second_ack"     # 다른 UID 를 **받아줬다**
                         except WebSocketDisconnect as exc:
                             # ⛔ **close code 까지 본다.** "닫혔다"만 보면 구현을 1000(정상 종료)로
-                            #    바꿔도 통과한다 — 그러면 클라는 이걸 **평범한 종료**로 읽고 같은
-                            #    토큰으로 곧장 재연결한다(1008 은 정책 위반이라 그러지 않는다).
+                            #    바꿔도 통과한다 — 문서화된 상수(`SubscribeIdentityConflict`
+                            #    docstring 의 **정책 위반 close(1008)**)가 조용히 흘러내린다.
+                            #    1000 으로 닫으면 로그·중간 프록시에서 **정상 종료와 구분되지 않고**,
+                            #    무엇보다 클라가 나중에 구분하고 싶어져도 **재료가 없다**.
+                            #
+                            # ⚠️ 이 단언이 증명하는 것은 **서버 wire 가 1008 을 보낸다**는 것뿐이다.
+                            #    한때 여기 "1000 이면 클라가 곧장 재연결해 충돌이 영원히 반복된다"고
+                            #    적었는데 **거짓이었다**(codex, iOS 코드 실측): iOS 는 close code 를
+                            #    **어디서도 읽지 않고**(`WebSocketService.swift` 에 `closeCode`
+                            #    참조 0건) 모든 수신 오류를 같은 재연결로 접는다. 게다가 재연결하면
+                            #    `ConnectionIdentity` 가 새로 생기므로(`app/main.py` — 연결당 1회)
+                            #    새 UID 가 그냥 결속돼 **충돌은 반복되지 않는다**.
                             return f"disconnected:{exc.code}"
                         except Exception as exc:            # noqa: BLE001 — 진단용
                             return f"error:{type(exc).__name__}"

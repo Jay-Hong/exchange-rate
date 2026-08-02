@@ -23,7 +23,7 @@ REVENUECAT_API_URL = "https://api.revenuecat.com/v1"
 #    여기서는 아래 5개 TTL 판정 지점이 쓰기 위해 가져올 뿐이며 re-export가 아니다 —
 #    `__all__`에도 없고, 다른 모듈은 `app.clock`에서 직접 가져와야 한다
 #    (`tests/test_clock.py::TestCanonicalImportPath`가 AST로 잠근다).
-#    이 모듈의 판정 지점은 `clock.wall()`만 읽는다. `clock.mono()`는 §8.1 A4의 strict cache
+#    이 모듈의 판정 지점은 `clock.wall()`만 읽는다. `clock.mono()`는 lease horizon 관측
 #    (`verified_at_monotonic`)가 들어오는 날 처음 쓰이며, 그때까지 테스트의 `_clock`이
 #    poison callable로 그 사실을 잠근다.
 
@@ -182,7 +182,11 @@ class ProtocolViolation:
     detail: str
 
 
-# strict WS 인가 경로(§8.1 A6)가 소비할 축. REST는 아래 adapter로 되접는다.
+# **WS 인가 경로가 소비하는 축.** REST는 아래 adapter로 되접는다.
+# ⛔ 구 번호 `§8.1 A6` 는 ADR-040 에서 **폐기된 설계**의 것이다 — 아래 주석들의 그 표기도
+#    같다. 다만 **3-bucket 계약(terminal / transient / 내부 예외 재전파) 자체는 살아 있다**:
+#    현재 소비자는 `app/topic_authorization.py` 의 `classify_premium` /
+#    `authorize_gated_subscription` 이고, 각각 `Denied` / `Unavailable` / 재전파로 접는다.
 RevenueCatResult = Union[
     Determined, ProviderUnavailable, ProviderMisconfigured, BadRequest, ProtocolViolation
 ]
@@ -216,11 +220,14 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
     `expires_date` 누락과 `""`를 **lifetime으로** 통과시켰다 — malformed 입력에 프리미엄이
     부여되는 경로였다. ⛔ 그 서술로 되돌리지 말 것(정확한 규칙은 아래 본문 주석).
 
-    ⚠️ **N-3 이관 예정**: strict 소비자가 생기면 이 provider는 leaf 모듈로 옮긴다 —
-    `invalidate_user_cache`가 strict cache를 무효화하게 되면(A4) `subscription → strict`
-    엣지가 생겨, strict가 provider 때문에 subscription을 import하면 **순환**이 된다
-    (`app/clock.py`가 분리된 것과 같은 이유). 도입 슬라이스를 REST 회귀 증명에 집중시키려고
-    미뤘고, 이관 자체는 순수 이동이라 위 계약 테스트가 그대로 잠근다.
+    ⚠️ **leaf 이관은 보류다** (구 "N-3 이관 예정"). WS 소비자는 이미 생겼지만
+    (`app/topic_authorization.py`) 순환은 **아직 없다** — 그 모듈이 이 함수를 **함수 본문에서
+    지연 import** 하기 때문이다(`authorize_gated_subscription` 안의 `from app.subscription
+    import fetch_revenuecat_result`). 순환 위험을 만들던 구 근거(`invalidate_user_cache` 가
+    strict cache 를 무효화하는 경로)는 ADR-040 에서 **폐기**됐다.
+    ⚠️ 다만 지연 import 는 **순환을 없앤 게 아니라 미룬 것**이다 — 소비자가 module-level import
+    로 바꾸거나 관측 캐시를 넣어 역방향 엣지가 생기면 그때 이 provider 를 leaf 로 옮긴다.
+    이관 자체는 순수 이동이라 위 계약 테스트가 그대로 잠근다.
     """
     if not REVENUECAT_API_KEY:
         logger.error("REVENUECAT_API_KEY 미설정")

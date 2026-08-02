@@ -11,7 +11,7 @@ ADR-039 §8.1 harness 선행 (1). wall 축은 2026-07-26에 `app/subscription.py
 - 증명하지 않는다: §8.1 G의 `[server] wall clock 역행에도 strict horizon 불변`.
   harness (1)이 그 행을 닫는 조건을 못 박아 뒀다 — "monotonic 축 도입만으로는 부족하다.
   계산기가 wall을 무시한다는 것만 증명될 뿐이고, `verified_at_monotonic`의 **저장·재사용
-  경로**(strict cache + verifier 배선)까지 있어야 실제 불변식이 검증된다."
+  경로**(관측 캐시 + 배선)까지 있어야 실제 불변식이 검증된다."
   → 여기서 축 독립을 단언하더라도 **그 행은 열려 있다**.
 
 `_clock` 헬퍼를 `tests/test_subscription_clock.py`와 공유하지 않는 이유: 이 리포는 test 파일

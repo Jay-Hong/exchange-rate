@@ -23,7 +23,7 @@ TTL·만료 판정이 `datetime.now()` / `time.monotonic()`을 메서드 안에�
 
 lease horizon(WS 인가)이 RevenueCat 결제 모듈에 결합되지 않게 하기 위해서다. 근거는
 "결제와 인가는 다른 관심사"보다 구체적이다 — §8.1 A4가 `invalidate_user_cache`
-(`app/subscription.py`)로 하여금 신규 **strict cache·single-flight 결과까지** 무효화하게
+(`app/subscription.py`)로 하여금 신규 **관측 캐시 결과까지** 무효화하게
 규정하므로 `subscription → WS 인가` 엣지가 생길 예정이다. `Clock`이 subscription에 남으면
 WS 인가 쪽이 그것을 import하는 **역엣지**로 순환이 된다. (⚠️ **prospective**다 — 오늘은
 `app/config.py`가 app을 import하지 않아 어느 배치도 순환이 아니다.)

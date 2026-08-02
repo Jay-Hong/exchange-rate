@@ -441,6 +441,22 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
 - 재구독 시 §3대로 **현재 snapshot 다시 수신**(resync). 별도 resync 프로토콜 불요. 서버측 snapshot 캐시/증분 resync는 v1 미구현.
 - **권고 클라이언트 정책**: 재연결 exponential backoff(예 1s→2s→…→30s cap), keep-alive `"ping"` 주기(예 30s) — 서버는 raw `"ping"`에 `{"type":"pong"}` 응답만.
 
+### close code — `1008`(정책 위반)의 의미와 **올바른 대응**
+
+한 연결에 **다른 UID** 가 나타나면 서버는 프레임이 아니라 **`close(1008)`** 으로 끝낸다(§8-C 어휘에
+identity 충돌 코드가 없다 — `invalid_token` 은 "토큰이 유효했다"는 사실과 어긋나고,
+`temporarily_unavailable` 은 `retry_after_seconds` 를 강제해 영영 성공 못 할 재시도가 된다).
+
+⛔ **`1008` 을 terminal 로 처리하지 말 것 — 재연결이 곧 정상 복구 경로다.** UID 결속은
+**연결당 하나**라 새 연결에서는 비어 있는 상태로 시작한다. 그래서 계정 전환(A → B) 직후의
+전형적인 흐름은 *기존 연결에서 B 가 거부 → 1008 → 재연결 → B 가 첫 소유자로 결속 → 정상*이다.
+여기서 재연결을 막으면 **계정 전환이 복구 불가능해진다**.
+
+ℹ️ 현재 iOS 는 close code 를 **읽지 않고** 모든 수신 오류를 같은 재연결로 접는다(2026-08-02 실측:
+`WebSocketService.swift` 에 `closeCode` 참조 0건) — 결과적으로 위 계약과 일치한다. 서버가 `1008`
+을 보내는 것은 **로그·프록시에서 정상 종료와 구분**하고, 클라가 나중에 구분하고 싶어질 때 재료를
+남겨 두기 위해서다. 구분해서 무엇을 할지는 **열린 결정**이다(반복 거부 감지 시 backoff 확대 등).
+
 ## 7. versioning / forward-compat
 
 - `version=1` 고정. 비호환 변경 시에만 bump(단말 release 동기화 후 lock-in).

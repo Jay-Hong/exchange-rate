@@ -7,8 +7,11 @@
 scope: 실제 구현된 topic만 — fx:usd-krw / fx:jpy-krw / fx:eur-krw + usdt:krw
 + krx:usd-krw-futures(ADR-038 D2 독립 topic — KRX_CLIENT_DISTRIBUTION_EFFECTIVE=true일 때만
 supported list 포함, G2 off면 snapshot 404 = 발행 중단과 동일 gate).
-DXY/news/graph는 publisher 미구현이라 범위 밖(매핑에 없으면 register는 유지하되 snapshot skip,
-forward-compatible).
+DXY/news/graph는 publisher 미구현이라 범위 밖.
+⚠️ 구 서술("매핑에 없으면 register 는 유지하되 snapshot skip")은 **더 이상 맞지 않는다**
+(2026-08-02 `4a45173`): 무토큰 경로는 `supported_snapshot_topics()` 안이면서 gated 가 아닌
+topic 만 등록하고, 식별된 요청은 미지원 topic 을 `rejected_topics` 로 접는다 — 어느 경로도
+**미지원 topic 을 registry 에 넣지 않는다**.
 
 설계 (codex 019efdb3 검토 — 2 blocker 반영):
 - SessionLocal 생성+builder+close를 to_thread 내부 sync 함수에서 전부 처리. SQLAlchemy

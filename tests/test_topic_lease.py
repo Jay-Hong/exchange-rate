@@ -12,7 +12,11 @@ ADR-039 §8.1 A1/A2. **계산기만** 다룬다 — registry·sweeper 배선은 
   계산기가 wall을 **입력으로 갖지 않는다**는 구조적 사실뿐이다.
 - `[server] stale fallback으로 연장 안 됨` — `verify_premium_status`가 최대 1시간 stale
   캐시로 ACTIVE를 돌려주고(`app/subscription.py`의 `CACHE_STALE_TTL`) 반환 타입에
-  fresh/stale 구분이 없다. 그 구분은 A6 3-state verifier가 만든다.
+  fresh/stale 구분이 없다.
+  ⚠️ **다만 WS 인가 경로는 그 함수를 아예 쓰지 않는다** — `app/topic_authorization.py` 가
+  캐시 없는 `fetch_revenuecat_result` 를 직접 부르고(그 모듈 상단이 `verify_premium_status`
+  재사용을 금지한다), 관측 시각을 **호출 직전**에 찍는다. 그래서 이 행은 *REST 경로*의
+  이야기다. 구분을 만들 예정이던 `A6 3-state verifier` 는 ADR-040 에서 **폐기**됐다.
 - `[server] single-flight` / `[server] identity horizon이 토큰 단위` /
   `[server] horizon 계산(캐시 4분 → lease ~11분)`의 **저장 절반**.
   ⚠️ **모두 후속은 아니다** — identity horizon 의 관측·저장·재사용은 `app/topic_dispatcher.py`

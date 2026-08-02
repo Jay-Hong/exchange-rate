@@ -20,8 +20,9 @@ Phase Z-2b의 backend topic 분배 인프라.
     - publish_topic은 send 실패를 격리 (한 클라이언트 disconnect가 다른
       구독자에 영향 X).
     - FF=false면 `publish_topic`은 즉시 0 반환(no-op). `register`/`unregister`는
-      순수 registry 연산이며, Stage 2에서 main.py WebSocket handler가 flag를 보고
-      호출 여부를 결정한다 (Stage 1엔 호출자 없음).
+      순수 registry 연산이며, main.py WebSocket handler가 flag를 보고 호출 여부를
+      결정한다. ✅ 그 배선은 land 했다 — `register`/`unregister` 는 구독 경로와
+      disconnect 경로에서 실제로 불린다.
 
 참고:
     - REALTIME_ARCHITECTURE_PLAN.md §5 (topic 채널 분리)
