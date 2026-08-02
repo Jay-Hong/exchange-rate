@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 # conftest.py가 firebase stub + DATABASE_URL=sqlite를 import 전에 설정.
-from app import config, models
+from app import config, models, topic_dispatcher
 from app.database import engine
 from app.krx_topic_publisher import KRX_TOPIC
 from app import main as app_main
@@ -993,72 +993,88 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             msg.get("active_subscriptions"), [], "flag off 인 topic 이 registry 에 등록됐다",
         )
 
-    def _subscribe_with_rc(self, rc_result, *, topics, request_id, expect_logs=None):
-        """KRX 를 포함해 subscribe 하고 첫 프레임을 돌려준다. **RC leaf 만** 교체한다.
+    def _existing_then_failing_request(self, rc_result, *, request_id, expect_logs=None):
+        """무료 구독 A 를 **먼저 만든 뒤** `[새 무료 B, KRX]` 요청을 실패시킨다.
 
-        ⛔ 판정기나 dispatcher 를 mock 하지 않는다 — 그러면 검증하려는 경로가 통째로 빠진다.
-        provider/DB **leaf** 만 fake 해서 실제 판정기·배선을 통과시킨다.
+        ⛔ 빈 registry 에서 `before == after == 0` 만 보면 **"불변"이 아니라 "증가 안 함"** 만
+        검증된다 — 기존 구독을 **지우는** 변이(`remove_websocket`)도 통과한다(codex High).
+        그래서 지울 것이 **있는** 상태를 만든다.
         """
+        A, B = "fx:usd-krw", "fx:jpy-krw"
         patchers = self._patchers()
         patchers["revenuecat_must_not_be_called"] = patch(
             "app.subscription.fetch_revenuecat_result", new=AsyncMock(return_value=rc_result)
         )
+        counts = {}
         with contextlib.ExitStack() as stack:
             for patcher in patchers.values():
                 stack.enter_context(patcher)
             stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
-            logs = stack.enter_context(expect_logs) if expect_logs else None
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
-                before = _registry_connection_count()
+                ws.send_json({"type": "subscribe", "request_id": f"{request_id}-pre",
+                              "id_token": "tok", "topics": [A]})
+                pre_ack = self._receive_for(ws, f"{request_id}-pre")
+                counts["A_before"] = ws.portal.call(
+                    topic_dispatcher.registry.subscriber_count, A
+                )
+
+                logs = stack.enter_context(expect_logs) if expect_logs else None
                 ws.send_json({"type": "subscribe", "request_id": request_id,
-                              "id_token": "tok", "topics": list(topics)})
-                frame = _receive_json_or_fail(ws, self.fail)
-                delta = _registry_connection_count() - before
-        return frame, delta, logs
+                              "id_token": "tok", "topics": [B, KRX_TOPIC]})
+                frame = self._receive_terminal(ws)
+                counts["A_after"] = ws.portal.call(
+                    topic_dispatcher.registry.subscriber_count, A
+                )
+                counts["B_after"] = ws.portal.call(
+                    topic_dispatcher.registry.subscriber_count, B
+                )
+                counts["krx_after"] = ws.portal.call(
+                    topic_dispatcher.registry.subscriber_count, KRX_TOPIC
+                )
+                # ⚠️ 연결은 **살아 있어야** 한다 — 판정 불가는 요청을 접는 것이지 연결을 끊는
+                #    것이 아니다(끊기면 클라가 재연결 폭주를 한다).
+                ws.send_text("ping")
+                counts["pong"] = _receive_json_or_fail(ws, self.fail).get("type")
+        self.assertEqual(len(pre_ack.get("accepted_topics", [])), 1, "사전 구독이 실패했다")
+        return frame, counts, logs
+
+    def _assert_whole_request_folded(self, counts):
+        self.assertEqual(counts["A_before"], 1, "사전 구독이 registry 에 없다 — 전제가 깨졌다")
+        self.assertEqual(counts["A_after"], 1,
+                         "기존 구독이 사라졌다 — 판정 불가는 **불변**이어야 한다")
+        self.assertEqual(counts["B_after"], 0, "판정 불가인데 무료 topic 이 새로 등록됐다")
+        self.assertEqual(counts["krx_after"], 0, "판정 불가인데 KRX 가 등록됐다")
+        self.assertEqual(counts["pong"], "pong", "판정 불가가 연결을 끊었다")
 
     def test_provider_transient_folds_the_whole_request_and_leaves_registry_untouched(self):
         """⛔ 판정 **불가**는 per-topic 이 아니라 **전체 요청**이다(§8-C) — 무료 topic 조차
-        새로 등록하지 않는다. 자격을 모르는 상태에서 부분 수락하면 "인가된 것처럼 보이는"
-        상태가 만들어진다.
-        """
+        새로 등록하지 않고, **기존 구독도 건드리지 않는다**."""
         from app import subscription
 
-        frame, delta, _ = self._subscribe_with_rc(
-            subscription.ProviderUnavailable(),
-            topics=("fx:usd-krw", KRX_TOPIC), request_id="prov-t",
-        )
+        frame, counts, _ = self._existing_then_failing_request(
+            subscription.ProviderUnavailable(), request_id="prov-t")
         self.assertEqual(frame.get("type"), "subscription_error")
         self.assertEqual(frame.get("error"), "temporarily_unavailable")
-        self.assertEqual(frame.get("retry_after_seconds"),
-                         config.WS_AUTH_RETRY_AFTER_SECONDS)
-        self.assertEqual(delta, 0, "판정 불가인데 registry 가 바뀌었다 — 무료 topic 도 안 된다")
+        self.assertEqual(frame.get("retry_after_seconds"), config.WS_AUTH_RETRY_AFTER_SECONDS)
+        self._assert_whole_request_folded(counts)
 
     def test_provider_persistent_uses_the_long_retry_after(self):
-        """⛔ 설정·프로토콜 결함은 **재시도로 낫지 않는다** — 짧은 간격을 주면 안 낫는 것을
-        계속 두드린다. 그리고 **정책 승격 ERROR** 가 남아야 한다: "우리가 이 결과를 영구
-        결함으로 판정했다"는 leaf 가 모르는 사실이라 leaf 로그로 대체되지 않는다.
-        """
+        """⛔ 설정·프로토콜 결함은 **재시도로 낫지 않는다**. 그리고 **정책 승격 ERROR** 가
+        남아야 한다 — "우리가 영구 결함으로 판정했다"는 leaf 가 모르는 사실이다."""
         from app import subscription
 
-        frame, delta, logs = self._subscribe_with_rc(
-            subscription.ProviderMisconfigured(status=401),
-            topics=("fx:usd-krw", KRX_TOPIC), request_id="prov-p",
-            expect_logs=self.assertLogs("exchange_rate.topic_authorization", level="ERROR"),
-        )
+        frame, counts, logs = self._existing_then_failing_request(
+            subscription.ProviderMisconfigured(status=401), request_id="prov-p",
+            expect_logs=self.assertLogs("exchange_rate.topic_authorization", level="ERROR"))
         self.assertEqual(frame.get("error"), "temporarily_unavailable")
-        self.assertEqual(
-            frame.get("retry_after_seconds"),
-            config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS,
-            "영구 결함에 짧은 재시도 간격을 줬다",
-        )
-        self.assertEqual(delta, 0)
+        self.assertEqual(frame.get("retry_after_seconds"),
+                         config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS,
+                         "영구 결함에 짧은 재시도 간격을 줬다")
+        self._assert_whole_request_folded(counts)
         promotions = [r for r in logs.records if r.levelname == "ERROR"]
-        self.assertEqual(
-            len(promotions), 1,
-            f"정책 승격 ERROR 가 정확히 1건이 아니다({len(promotions)}건) — "
-            "0이면 신호가 없고, 2 이상이면 leaf 로그와 중복이다",
-        )
+        self.assertEqual(len(promotions), 1,
+                         f"정책 승격 ERROR 가 정확히 1건이 아니다({len(promotions)}건)")
 
     def test_subscribe_classification_uses_the_same_availability_predicate(self):
         """⛔ **양 방향을 다 잠근다.** builder 쪽만 잠그면 dispatcher 가 갈라져도 green 이다.
