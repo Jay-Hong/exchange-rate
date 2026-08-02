@@ -510,9 +510,15 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
 
 | 원안 | 상태 |
 | --- | --- |
-| ① 연결 귀속 reconciler + 1 in-flight | ❌ **미구현 — 기각·보류**. 재전송 delta 는 자명하게 "구독 전체"라 reconciler 가 불필요했고, 1 in-flight 는 독립 실패를 **직렬 실패**로 바꿔(느린 토큰에서 topic 하나가 그 연결 동안 소실) 순수 비용이었다(`WebSocketService.resendSubscriptions` 주석). 그 주석이 "lease(Stage 2) 가 per-topic 상태를 만들 때 재검토"라고 적어 두었고 **그 Stage 2 는 이제 land 했다** — 재검토 trigger 는 도달했으나 아직 결정하지 않았다. |
+| ①-a **1 in-flight 큐** | ❌ **기각(닫힘)**. 독립 실패를 **직렬 실패**로 바꾼다 — 느린 토큰 하나에 다른 topic 이 그 연결 동안 통째로 소실된다. 재검토해도 결론은 같아 여기서 닫는다. |
+| ①-b **연결 귀속 reconciler** | 🟡 **열어 둔다 — 소비자가 실재한다**(2026-08-03 재검토). 원안 근거("재전송 delta 는 자명하게 구독 전체")는 **재연결 경로에 한해** 맞다. 하지만 코드 전수 확인 결과 **연결이 멀쩡한 채로 의도가 미확정으로 남는 경로가 하나 있다**: `performTopicCommand` 의 `catch` 는 `forgetPending` 만 하고 재시도하지 않는데, 그 `try` 안에는 **`tokenProvider.currentToken()`** 이 있다(`WebSocketService.swift:255`). 토큰 취득이 실패하면(만료 임박 refresh + 일시적 네트워크 장애 등) 요청은 **서버에 닿지도 않아** ⓐ watchdog 은 **송신 후** 무장이라 못 잡고 ⓑ bounded retry 는 서버 오류 프레임이 있어야 도므로 못 잡는다. `confirmedTopics` 는 **쓰기만 되고 `subscribedTopics` 와 비교되는 곳이 없으며**(전수 grep), `resendSubscriptions()` 호출처는 **연결 수립 2곳뿐**이다. → 그 topic 은 **재연결 전까지 조용히 미구독**으로 남는다. |
 | ② 배칭 | ✅ land (`093333a` + lost-wakeup·부분 stale `2255694`) |
 | ③ bounded retry | ✅ land (`163b403`) — 단 **원안 메커니즘이 아니다**. 원안은 "발화 시 그 시점의 현재 차이를 재계산"(reconciler 기반)이었으나, 실제는 `pendingRequests` 에 보관한 **실제 송신 범위**를 재전송하고 **의도 교차는 송신 지점(`performTopicCommand`)이** 한다. 결과(사용자가 끈 topic 을 되살리지 않음)는 같고 경로가 다르다. |
+
+⚠️ **분류**: ①-b 의 이 공백은 `reauth_required` 공백과 **같은 등급**이다 — 연결 단위 조용한
+per-topic 중단이고 데이터 누수가 아니다. 그래서 **활성화 blocker 로는 올리지 않되**, "소비자 없음"
+으로 닫지도 않는다. ⛔ 해법이 꼭 reconciler 여야 하는 것도 아니다 — 그 `catch` 에 bounded retry 를
+붙이는 쪽이 더 작을 수 있다. **열린 것은 "이 공백을 어떻게 메울지"이고, 후속 슬라이스에서 정한다.**
 
 아래 원문은 그대로 둔다(당시 설계 기록).
 
