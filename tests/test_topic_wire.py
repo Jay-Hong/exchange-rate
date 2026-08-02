@@ -471,62 +471,227 @@ class TestEveryPublisherGoesThroughTheLeaseGate(unittest.TestCase):
         self.assertEqual(found, ["publish_bad"])
 
 
-class TestPolicyCloseCodeHasExactlyOneSender(unittest.TestCase):
-    """⛔ `1008` 은 **일반 정책 위반 코드**이고 서버는 `reason` 도 싣지 않는다.
+class TestPolicyCloseCodeIsSentFromOneIdentityConflictSite(unittest.TestCase):
+    """⛔ **문법적 직접 호출 지점 검사**다 — "정책 사유가 하나" 를 보장하지 **않는다**.
 
-    지금은 발신 지점이 **하나**뿐이라 "1008 = cross-UID identity 충돌" 이 참이고, 그래서
-    핸드오프 가이드 §6 이 *"1008 이면 terminal 로 처리하지 말고 재연결하라"* 고 적을 수 있다
-    (계정 전환의 정상 복구 경로가 바로 재연결이기 때문).
+    `1008` 은 표준의 **일반 정책 위반 코드**이고 서버는 `reason` 도 싣지 않는다. 그래서
+    "이 close 가 무슨 사유인지" 는 **호출 지점이 어디냐로만** 구분된다 — 지금은 cross-UID
+    (`except SubscribeIdentityConflict`) 한 곳뿐이라 `REALTIME_V2_CLIENT_GUIDE §6` 이
+    *"cross-UID 면 재연결이 정상 복구"* 라고 적을 수 있다(그 절은 **1008 일반**에 대한 규칙이
+    아니다 — 좁혀 두었다).
 
-    ⛔ **두 번째 발신자가 생기는 순간 그 규칙이 조용히 틀린다** — 클라는 두 사유를 구분할 수
-    없는데 가이드는 여전히 하나로 뭉뚱그려 지시한다(codex Medium). 그때는 먼저 **구분 가능한
-    신호**(private `4xxx` code 또는 안정적 `reason`)를 정의하고 §6 을 갱신해야 한다.
-    이 검사가 그 순서를 강제한다.
+    ## 무엇을 덮는가 (자기검사가 증명한다)
+
+    `app/**/*.py` 안의 **직접 attribute 호출** `<expr>.close(...)`. code 가 리터럴이 아니어도
+    (`code=CONST` / `close(f())` / `close(**opts)`) **fail-closed 로 기록**해 단언을 실패시킨다.
+    곁들여 `close` 를 이름에 담는 것과 `getattr(ws, "close")`, `WebSocketException` 도 **금지**한다
+    — 추적할 수 없으니 쓰지 못하게 막는 쪽을 택했다(현재 셋 다 0건이라 비용이 없다).
+
+    ## ⛔ 무엇을 덮지 못하는가 (적대적 검증으로 실측한 경계 — 조용한 상한이 아니다)
+
+      - **helper 다중화**: 한 호출 지점이 여러 사유를 인자로 받아 같은 close 를 실행. AST 로는
+        원리적으로 구분 불가다.
+      - **프레임워크·ASGI 레벨**: raw ASGI `{"type": "websocket.close", "code": ...}` 를 send 로
+        직접 보내기 / send 채널을 감싸는 미들웨어 / 서버 설정(`--ws-max-size` 의 1009 등).
+      - **트리 밖**: `app/` 바깥 모듈, `app/` 안의 **비-.py** 소스를 동적 로드, `app/` 안의
+        **심볼릭 링크 디렉터리**(`rglob` 가 따라가지 않음 — 실측).
+      - ⚠️ **FastAPI 자체가 1008 을 보낼 수 있다**: WebSocket 엔드포인트에 검증 대상 파라미터를
+        추가하면 검증 실패 시 프레임워크가 1008 로 닫는다. 현재 `/ws` 는 `websocket` 하나만
+        받아 해당 없음 — **파라미터를 추가하는 순간** 이 절과 가이드 §6 을 함께 봐야 한다.
+
+    이 경계 밖은 검사로 막을 수 없다. 유일한 방어는 **사유를 늘릴 때 가이드부터 갱신하는 규율**이다.
     """
 
     @staticmethod
     def _close_sites(tree):
-        """`*.close(code=...)` 호출의 (lineno, code 값). `db.close()` 는 `code` 가 없어 제외된다."""
+        """`<expr>.close(...)` 중 **close code 를 지정한** 호출의 `(lineno, code)`.
+
+        ⛔ **fail-closed 가 핵심이다**: `code=` 가 있거나 positional 인자가 있는데 값이 정수
+        **리터럴이 아니면 `None` 으로 기록**한다 — 그래야 최종 단언이 실패한다. 리터럴만 세면
+        `close(code=POLICY_VIOLATION)` / `close(get_code())` 같은 두 번째 발신자가 **조용히
+        통과**한다(codex Blocker — 이 리포에서 "판정기가 아는 형태만 본다"로 반복된 실패다).
+        `**kwargs` 언패킹도 같은 이유로 `None` 이다.
+
+        ⚠️ 인자 없는 `db.close()` / `ws.close()` 는 대상이 아니다 — 전자는 WebSocket 이 아니고
+        후자는 code 를 지정하지 않는 **정상 종료(1000)** 라 정책 신호가 아니다.
+        """
         import ast
         sites = []
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "close"):
                 continue
-            for kw in node.keywords:
-                if kw.arg == "code":
-                    value = kw.value.value if isinstance(kw.value, ast.Constant) else None
-                    sites.append((node.lineno, value))
+            code_kw = [kw for kw in node.keywords if kw.arg == "code"]
+            if code_kw:
+                value = code_kw[0].value
+                sites.append((node.lineno,
+                              value.value if isinstance(value, ast.Constant) else None))
+            elif node.args:
+                first = node.args[0]
+                literal = isinstance(first, ast.Constant) and isinstance(first.value, int)
+                sites.append((node.lineno, first.value if literal else None))
+            elif any(kw.arg is None for kw in node.keywords):     # close(**opts)
+                sites.append((node.lineno, None))
         return sites
 
-    def test_policy_close_has_exactly_one_sender(self):
+    @staticmethod
+    def _close_aliases(tree):
+        """`x = <expr>.close` — **close 를 이름에 담는** 지점.
+
+        ⛔ 검출기는 데이터 흐름을 추적하지 않는다. 한때 `Name(id="close")` 도 매칭해 alias 를
+        지원하는 척했는데, 그건 `close(...)` 라는 **아무 함수**나 오인하면서
+        `finish = ws.close` 는 놓치는 **오탐·누락 동시 발생**이었다(codex Medium).
+        그래서 추적하는 대신 **금지**한다 — 현재 `app/` 에 이 패턴은 0건이라 비용이 없다.
+        """
+        import ast
+        out = []
+        for node in ast.walk(tree):
+            value = getattr(node, "value", None)
+            if (isinstance(node, (ast.Assign, ast.AnnAssign))
+                    and isinstance(value, ast.Attribute) and value.attr == "close"):
+                out.append(node.lineno)
+            # `getattr(ws, "close")(...)` — 이름을 문자열로 감춰 attribute 호출을 피하는 형태.
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr" and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value == "close"):
+                out.append(node.lineno)
+        return out
+
+    @staticmethod
+    def _policy_raise_sites(tree):
+        """`WebSocketException(...)` 생성 지점 — **close 를 부르지 않고** 정책 종료를 만드는 경로.
+
+        Starlette 의 정식 관용구라 누군가 자연스럽게 쓸 수 있는데, `close()` 호출이 없어 위
+        검출기가 통째로 놓친다(적대적 검증에서 실제로 나온 형태). 현재 `app/` 사용 0건이라
+        **금지가 무료**다 — 쓰려면 가이드 §6 부터 갱신하라는 뜻이다.
+        """
+        import ast
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if name == "WebSocketException":
+                    out.append(node.lineno)
+        return out
+
+    @staticmethod
+    def _identity_conflict_handler_lines(tree):
+        """`except SubscribeIdentityConflict:` 블록이 덮는 줄 번호 집합.
+
+        ⚠️ 이것이 **사유를 코드에 묶는 유일한 장치**다 — 1008 자체는 사유를 말하지 않으므로
+        "그 핸들러 안에 있다" 가 지금 아는 전부다.
+        """
+        import ast
+        covered = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler) or node.type is None:
+                continue
+            name = getattr(node.type, "id", None) or getattr(node.type, "attr", None)
+            if name != "SubscribeIdentityConflict":
+                continue
+            for inner in ast.walk(node):
+                if hasattr(inner, "lineno"):
+                    covered.add(inner.lineno)
+        return covered
+
+    def test_the_only_policy_close_is_the_identity_conflict_one(self):
         import ast
         import pathlib as _pathlib
 
         app_dir = _pathlib.Path(__file__).resolve().parent.parent / "app"
         found = []
+        conflict_lines = {}
+        raises = []
+        # ⚠️ **상대 경로**로 키를 잡는다 — basename 으로 잡으면 `app/sources/topic_dispatcher.py`
+        #    같은 동명 파일이 handler-scope 검사를 덮어써 통과시킨다(적대적 검증에서 나왔다).
         for path in sorted(app_dir.rglob("*.py")):
-            for lineno, code in self._close_sites(ast.parse(path.read_text(encoding="utf-8"))):
-                found.append((path.name, lineno, code))
+            rel = str(path.relative_to(app_dir))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            conflict_lines[rel] = self._identity_conflict_handler_lines(tree)
+            for lineno in self._policy_raise_sites(tree):
+                raises.append((rel, lineno))
+            for lineno, code in self._close_sites(tree):
+                found.append((rel, lineno, code))
+
         self.assertEqual(
-            [(name, code) for name, _, code in found],
-            [("topic_dispatcher.py", 1008)],
-            "WebSocket close code 발신 지점이 바뀌었다 — 1008 이 더 이상 'cross-UID' 와 1:1 이\n"
-            "아니게 되면 REALTIME_V2_CLIENT_GUIDE §6 의 재연결 규칙이 틀린 지시가 된다.\n"
-            f"먼저 구분 가능한 신호(private 4xxx / stable reason)를 정하고 §6 을 갱신할 것: {found}",
+            raises, [],
+            "`WebSocketException` 으로 정책 종료를 만들면 close 검출기가 통째로 놓친다 — "
+            f"쓰려면 REALTIME_V2_CLIENT_GUIDE §6 부터 갱신할 것: {raises}",
         )
 
-    def test_the_detector_would_catch_a_second_sender(self):
-        """⛔ 자기검사 — 검출기가 아무것도 못 찾는 형태면 위 테스트는 공허하다."""
+        self.assertEqual(
+            [(rel, code) for rel, _, code in found],
+            [("topic_dispatcher.py", 1008)],
+            "WebSocket close code 발신 지점이 바뀌었다 — 1008 이 더 이상 cross-UID 와 1:1 이\n"
+            "아니게 되면 REALTIME_V2_CLIENT_GUIDE §6 의 복구 규칙이 틀린 지시가 된다.\n"
+            f"먼저 구분 가능한 신호(private 4xxx / stable reason)를 정하고 §6 을 갱신할 것: {found}",
+        )
+        aliases = []
+        for path in sorted(app_dir.rglob("*.py")):
+            for lineno in self._close_aliases(ast.parse(path.read_text(encoding="utf-8"))):
+                aliases.append((str(path.relative_to(app_dir)), lineno))
+        self.assertEqual(
+            aliases, [],
+            "`close` 를 이름에 담았다 — 검출기가 추적할 수 없어 정책 close 가 숨는다. "
+            f"직접 호출(`ws.close(code=...)`)로 둘 것: {aliases}",
+        )
+
+        name, lineno, _ = found[0]
+        self.assertIn(
+            lineno, conflict_lines[name],
+            "1008 close 가 `except SubscribeIdentityConflict` 밖으로 나갔다 — 그 순간 코드가\n"
+            "가리키는 사유가 불명확해진다(가이드 §6 은 cross-UID 로 좁혀 적혀 있다).",
+        )
+
+    def test_the_detector_is_fail_closed_on_dynamic_code_values(self):
+        """⛔ 자기검사 — **비리터럴 code 를 놓치면 검출기 전체가 fail-open** 이다.
+
+        리터럴만 세던 구 버전은 `close(code=POLICY_VIOLATION)` 을 아예 기록하지 않아, 두 번째
+        발신자를 추가해도 최종 단언이 **green** 이었다(codex Blocker).
+        """
         import ast
 
         tree = ast.parse(
-            "async def evict(ws, db):\n"
-            "    db.close()\n"                       # code 없음 → 세면 안 된다
-            "    await ws.close(code=1008)\n"
-            "    await ws.close(code=4001)\n"
+            "async def evict(ws, db, opts):\n"
+            "    db.close()\n"                       # 인자 없음 → 정책 신호 아님
+            "    await ws.close()\n"                 # code 미지정(1000) → 정책 신호 아님
+            "    await ws.close(code=1008)\n"        # 리터럴 keyword
+            "    await ws.close(4001)\n"             # 리터럴 positional
+            "    await ws.close(code=POLICY_VIOLATION)\n"   # 동적 keyword → None
+            "    await ws.close(get_close_code())\n"        # 동적 positional → None
+            "    await ws.close(**opts)\n"                  # 언패킹 → None
         )
-        self.assertEqual([code for _, code in self._close_sites(tree)], [1008, 4001])
+        self.assertEqual(
+            [code for _, code in self._close_sites(tree)],
+            [1008, 4001, None, None, None],
+            "동적 code 를 놓치면 두 번째 발신자가 조용히 통과한다",
+        )
+
+    def test_the_alias_ban_detector_finds_a_stashed_close(self):
+        """⛔ 자기검사 — alias 금지가 실제로 발화하는지. (추적이 아니라 **금지**가 방어다.)"""
+        import ast
+
+        tree = ast.parse("def f(ws):\n    finish = ws.close\n    return finish\n")
+        self.assertEqual(self._close_aliases(tree), [2])
+        self.assertEqual(self._close_aliases(ast.parse("def g(ws):\n    x = ws.send\n")), [])
+
+    def test_the_handler_scope_detector_would_notice_a_move(self):
+        """⛔ 자기검사 — 핸들러 범위 검출기가 실제로 안팎을 가르는지."""
+        import ast
+
+        tree = ast.parse(
+            "async def f(ws):\n"
+            "    try:\n"
+            "        bind()\n"
+            "    except SubscribeIdentityConflict:\n"
+            "        await ws.close(code=1008)\n"    # line 5 — 안
+            "    await ws.close(code=1008)\n"        # line 6 — 밖
+        )
+        covered = self._identity_conflict_handler_lines(tree)
+        self.assertIn(5, covered)
+        self.assertNotIn(6, covered)
 
 
 class TestConnectionIdentityBinding(unittest.TestCase):

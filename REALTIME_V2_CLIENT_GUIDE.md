@@ -459,10 +459,19 @@ close → 재연결 → B 가 첫 소유자로 결속 → 정상*이다. 여기�
 없고** 이 문단은 틀린 지시가 된다. 그때는 **먼저 구분 가능한 신호**(private `4xxx` code 또는 안정적
 `reason`)를 정의하고 이 절을 갱신해야 한다 — 위 트립와이어가 그 순서를 강제한다.
 
-ℹ️ **지금 클라가 할 일은 없다.** 현재 iOS 는 close code 를 **읽지 않고** 모든 수신 오류를 같은
-bounded reconnect 로 접는데(2026-08-02 실측: `WebSocketService.swift` 에 `closeCode` 참조 0건),
-그 동작이 위 복구 경로와 이미 일치한다. 서버가 `1008` 을 보내는 것은 **로그·프록시에서 정상 종료와
-구분**하고 나중에 구분하고 싶어질 때 재료를 남겨 두기 위해서다.
+ℹ️ **지금 클라가 할 일은 없다.** 현재 iOS 는 close code 를 **읽지 않고** 모든 수신 오류를
+**기존 reconnect 경로**로 접는데(2026-08-02 실측: `WebSocketService.swift` 에 `closeCode` 참조
+0건), 그 동작이 위 복구 경로와 이미 일치한다. 서버가 `1008` 을 보내는 것은 **로그·프록시에서
+정상 종료와 구분**하고 나중에 구분하고 싶어질 때 재료를 남겨 두기 위해서다.
+
+⚠️ **그 reconnect 경로는 실질적으로 bounded 가 아니다** — `maxReconnectAttempts` 상한이 있지만
+`reconnectAttempts` 가 **프레임 수신마다 0 으로 리셋**되고(`WebSocketService.swift` 의
+`.connected` 전이) 서버는 **연결 직후 legacy payload 를 항상** 보낸다(`app/main.py` 의 `/ws`).
+그래서 매 사이클이 `0 → 1` 을 반복해 상한에 영영 닿지 않는다
+([FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md) §8 이 같은 것을 **reconnect
+storm** 조건으로 이미 기록해 두었다).
+cross-UID 에서는 재연결이 곧 성공이라 루프가 자연히 끝나지만, **영구적으로 실패하는 `1008` 사유가
+새로 생기면 그것은 ~2초 간격 무한 재연결이 된다** — 두 번째 사유를 정의할 때 반드시 함께 볼 것.
 
 ## 7. versioning / forward-compat
 
