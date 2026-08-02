@@ -1239,8 +1239,11 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                             while True:
                                 if ws.receive_json().get("request_id") == "x-uid-2":
                                     return "second_ack"     # 다른 UID 를 **받아줬다**
-                        except WebSocketDisconnect:
-                            return "disconnected"
+                        except WebSocketDisconnect as exc:
+                            # ⛔ **close code 까지 본다.** "닫혔다"만 보면 구현을 1000(정상 종료)로
+                            #    바꿔도 통과한다 — 그러면 클라는 이걸 **평범한 종료**로 읽고 같은
+                            #    토큰으로 곧장 재연결한다(1008 은 정책 위반이라 그러지 않는다).
+                            return f"disconnected:{exc.code}"
                         except Exception as exc:            # noqa: BLE001 — 진단용
                             return f"error:{type(exc).__name__}"
 
@@ -1254,8 +1257,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         outcome = box.get("outcome", "hung")
         self.assertNotEqual(outcome, "second_ack",
                             "다른 UID 의 구독에 응답했다 — 한 소켓이 두 사람의 권한을 섞는다")
-        self.assertEqual(outcome, "disconnected",
-                         f"cross-UID 인데 연결이 정리되지 않았다 — outcome={outcome}")
+        self.assertEqual(outcome, "disconnected:1008",
+                         f"cross-UID 종료가 **정책 위반(1008)** 이 아니다 — outcome={outcome}")
         errors = [r for r in logs.records if r.levelno >= 40]
         self.assertEqual(errors, [],
                          f"정상 정책 종료가 ERROR 를 남겼다 — {[r.getMessage() for r in errors]}")
