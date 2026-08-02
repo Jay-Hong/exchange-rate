@@ -148,6 +148,12 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 ```
 <!-- topic-wire-examples:end -->
 
+⚠️ **`retry_after_seconds` 는 서버가 매 응답마다 고르는 값이다 — 위 예시의 `5` 를 상수로 굳히지
+말 것.** 같은 `temporarily_unavailable` 이라도 **재시도로 풀리는 장애**(제공자 일시 오류, DB 커넥션
+단절, 인가 deadline)와 **재시도로 안 풀리는 결함**(DB 권한·카탈로그 오류 등)에 서로 다른 간격이
+실린다. 후자를 짧은 간격으로 재시도하면 모든 클라가 고장 난 백엔드를 훨씬 자주 두드린다 — 값을
+나눠 둔 이유가 그것이다. **받은 값을 그대로 쓰고**, 필드가 없을 때만 클라 기본값을 쓴다.
+
 ⚠️ **컨테이너는 객체 배열**이다(문자열 배열이 아니다). **Stage 2 에서 `lease_id`·
 `lease_duration_seconds` 가 필드로 추가됐다** — 컨테이너 형태는 그대로이므로 Stage 1 형태로
 디코드해 둔 클라는 shape 를 바꾸지 않아도 된다. `identity_generation` 은 아직 없다.

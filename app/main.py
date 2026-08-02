@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
+from app import topic_wire
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -958,15 +959,29 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         db.close()
     
+    # ⛔ **연결당 하나** — 스코프가 곧 수명이라 별도 정리가 필요 없다(registry 에 두면
+    #    publish 송신 실패 격리에서 증발해 fail-open 창이 생긴다).
+    connection_identity = topic_wire.ConnectionIdentity()
+
     try:
         # 연결 유지 (클라이언트로부터 메시지 대기)
         while True:
             data = await websocket.receive_text()
             await topic_dispatcher.handle_client_message(
-                websocket, data, authorize_subscribe=verify_ws_subscribe_token
+                websocket, data,
+                authorize_subscribe=verify_ws_subscribe_token,
+                identity=connection_identity,
             )
     except WebSocketDisconnect:
         logger.info("🔌 클라이언트 연결 해제")
+    except topic_wire.SubscribeIdentityConflict as conflict:
+        # ⚠️ **정상적인 정책 종료다 — ERROR 를 남기지 않는다.** 한 소켓에 다른 UID 가 나타나면
+        #    rebind 하지 않고 1008 로 닫는다(dispatcher 가 이미 close 를 시도했다).
+        #    아래 `finally` 가 registry·manager 정리를 그대로 수행한다.
+        logger.info(
+            "🔒 cross-UID — 연결 종료",
+            extra={"bound_uid": conflict.bound_uid, "presented_uid": conflict.presented_uid},
+        )
     except Exception:
         # PR Z-2b Stage 2 (Codex 권고): send_json 실패 / handler unhandled error 등
         # 모든 비정상 경로에서도 finally로 정리. 기존엔 except WebSocketDisconnect만

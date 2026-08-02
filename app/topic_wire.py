@@ -66,6 +66,71 @@ class SubscribeAuthFailed(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+class ConnectionIdentity:
+    """한 WebSocket 연결의 **UID 소유권**. 연결당 **하나**, endpoint 가 만들어 주입한다.
+
+    ⛔ 상태를 registry 나 `websocket.state` 에 두지 않는 이유:
+      - registry 는 `remove_websocket` 이 **publish 송신 실패 격리**에서도 불린다 →
+        연결이 살아 있는 채 결속만 증발하는 **fail-open 창**이 생긴다.
+      - `websocket.state` 는 단위 테스트의 `MagicMock` 에서 `state.uid` 가 **None 이 아니라**
+        MagicMock 이라 첫 인증부터 충돌로 오판된다(실측).
+    연결-지역 객체는 **스코프가 곧 수명**이라 정리 자체가 필요 없다.
+
+    ⚠️ 결속은 **premium·entitlement 결과와 무관하게** identity 성공 직후 일어난다 —
+    Denied/Unavailable 요청도 같은 소켓 소유권을 유지해야 한다.
+    """
+
+    __slots__ = ("_uid",)
+
+    def __init__(self) -> None:
+        self._uid = None
+
+    @property
+    def uid(self):
+        return self._uid
+
+    def bind(self, uid: str) -> None:
+        """첫 UID 가 연결을 소유한다. 같은 UID 재시도는 허용, 다른 UID 는 **거부**.
+
+        ⛔ `bind(None)`/`bind("")` 를 미결속과 구분하지 못하면, 그 뒤 **아무 UID 나 충돌 없이**
+        통과한다. 그래서 값 자체를 먼저 검증한다.
+        ⛔ **purge/rebind 하지 않는다** — 다른 UID 를 받아들이면 한 소켓이 두 사람의 권한을
+        섞는다. fail-closed 는 연결 종료다.
+        """
+        if not isinstance(uid, str) or not uid:
+            raise ValueError(f"결속할 수 없는 uid: {uid!r}")
+        if self._uid is None:
+            self._uid = uid
+            return
+        if self._uid != uid:
+            raise SubscribeIdentityConflict(bound_uid=self._uid, presented_uid=uid)
+
+
+class SubscribeIdentityConflict(Exception):
+    """한 소켓에 **다른 UID** 가 나타났다 — 인증 실패 verdict 가 아니라 **연결 제어 신호**다.
+
+    ⛔ `SubscribeAuthFailed` 와 정확히 **반대 의미**다: 저건 "이 요청을 이 코드로 접어라",
+    이건 **"연결을 닫아라"**. 형제 타입으로 두는 이유가 그 구분이다.
+
+    ⛔ **`subscription_error` 프레임을 보내지 않는다.** §8-C 어휘에 identity 충돌 코드가 없고,
+    기존 코드를 재사용하면 둘 다 거짓이 된다:
+      - `invalid_token` → 토큰은 **유효했다**. 갱신해도 uid 가 같아 클라가 자력으로 못 빠져나온다.
+      - `temporarily_unavailable` → `retry_after_seconds` 를 **강제 동반**하므로 영영 성공하지
+        못할 재시도 폭풍이 된다.
+    즉흥 코드를 만드는 대신 **정책 위반 close(1008)** 로 종결한다.
+
+    ⚠️ **close 만으로는 끝나지 않는다**(실측): endpoint loop 는 handler 반환 후 무조건 다음
+    `receive_text()` 로 가고, 닫힌 소켓에서 그것은 `RuntimeError` 다 → `except Exception` 에
+    걸려 **정상적인 정책 종료가 매번 ERROR traceback 을 남긴다**. 그래서 이 예외가 loop 를
+    종결시키고, endpoint 는 `WebSocketDisconnect` 옆에서 **정상 정책 종료**로 처리한다.
+    """
+
+    def __init__(self, *, bound_uid: str, presented_uid: str):
+        super().__init__("소켓에 결속된 UID 와 다른 UID 가 제시됐다")
+        self.bound_uid = bound_uid
+        self.presented_uid = presented_uid
+
+
 class FirebaseNotInitialized(RuntimeError):
     """Firebase SDK 미초기화 — **자격 문제가 아니라 우리 쪽 상태**다.
 

@@ -17,6 +17,8 @@ from app.topic_wire import (
     SubscribeAuthFailed,
     build_subscription_ack,
     build_subscription_error,
+    ConnectionIdentity,
+    SubscribeIdentityConflict,
 )
 
 
@@ -467,6 +469,36 @@ class TestEveryPublisherGoesThroughTheLeaseGate(unittest.TestCase):
                     and c.func.attr == "get_subscribers" for c in ast.walk(n))
         ]
         self.assertEqual(found, ["publish_bad"])
+
+
+class TestConnectionIdentityBinding(unittest.TestCase):
+    """⛔ 이 가드는 **테스트가 하나도 없었다**(변이가 찾아냈다). 뚫리면 falsy 결속 이후
+    **아무 UID 나** 충돌 없이 통과한다 — cross-UID 방어 전체가 무의미해진다."""
+
+    def test_falsy_uid_is_refused_rather_than_silently_unbound(self):
+        for bad in (None, "", 0, b"uid"):
+            with self.subTest(uid=bad):
+                identity = ConnectionIdentity()
+                with self.assertRaises(ValueError):
+                    identity.bind(bad)
+                self.assertIsNone(
+                    identity.uid, f"거부해 놓고 {bad!r} 를 결속했다")
+                # ⛔ **핵심**: 거부 뒤에도 소유권은 비어 있어야 하고, 그 다음 정상 UID 가
+                #    첫 소유자가 되어야 한다(빈 결속이 소유권을 삼키면 안 된다).
+                identity.bind("uid-real")
+                self.assertEqual(identity.uid, "uid-real")
+
+    def test_same_uid_rebinds_but_a_different_one_conflicts(self):
+        identity = ConnectionIdentity()
+        identity.bind("uid-a")
+        identity.bind("uid-a")                     # 토큰 갱신 — 허용
+        self.assertEqual(identity.uid, "uid-a")
+        with self.assertRaises(SubscribeIdentityConflict) as ctx:
+            identity.bind("uid-b")
+        self.assertEqual((ctx.exception.bound_uid, ctx.exception.presented_uid),
+                         ("uid-a", "uid-b"))
+        self.assertEqual(identity.uid, "uid-a",
+                         "충돌 뒤 소유권이 새 UID 로 넘어갔다 — 거부의 의미가 없다")
 
 
 if __name__ == "__main__":
