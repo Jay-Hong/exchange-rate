@@ -503,7 +503,18 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
   `reconnectAttempts = 0` 을 하고 서버는 연결 직후 legacy payload 를 **항상** 보내므로
   backoff 상한이 영영 걸리지 않는다.
 
-#### (보류→완료) 다음 iOS 작업은 세 슬라이스로 분리한다 — **역사 기록**(세 슬라이스 모두 land, 2026-08-02~03)
+#### 다음 iOS 작업은 세 슬라이스로 분리한다 — **폐기된 원안의 역사 기록**
+
+⛔ 직전 개정에서 이 절을 "세 슬라이스 모두 land" 로 적었는데 **틀렸다**(검증 없이 맥락으로 추론한
+단정 — 아래 번호 목록을 읽지 않았다). 실제 상태는 이렇다:
+
+| 원안 | 상태 |
+| --- | --- |
+| ① 연결 귀속 reconciler + 1 in-flight | ❌ **미구현 — 기각·보류**. 재전송 delta 는 자명하게 "구독 전체"라 reconciler 가 불필요했고, 1 in-flight 는 독립 실패를 **직렬 실패**로 바꿔(느린 토큰에서 topic 하나가 그 연결 동안 소실) 순수 비용이었다(`WebSocketService.resendSubscriptions` 주석). 그 주석이 "lease(Stage 2) 가 per-topic 상태를 만들 때 재검토"라고 적어 두었고 **그 Stage 2 는 이제 land 했다** — 재검토 trigger 는 도달했으나 아직 결정하지 않았다. |
+| ② 배칭 | ✅ land (`093333a` + lost-wakeup·부분 stale `2255694`) |
+| ③ bounded retry | ✅ land (`163b403`) — 단 **원안 메커니즘이 아니다**. 원안은 "발화 시 그 시점의 현재 차이를 재계산"(reconciler 기반)이었으나, 실제는 `pendingRequests` 에 보관한 **실제 송신 범위**를 재전송하고 **의도 교차는 송신 지점(`performTopicCommand`)이** 한다. 결과(사용자가 끈 topic 을 되살리지 않음)는 같고 경로가 다르다. |
+
+아래 원문은 그대로 둔다(당시 설계 기록).
 
 ⛔ `reconciler + 1 in-flight + batching + retry` 를 한 번에 넣지 않는다. 특히
 `temporarily_unavailable` 재시도가 처음 캡처한 subscribe 배치를 그대로 보관하면, 대기 중 들어온

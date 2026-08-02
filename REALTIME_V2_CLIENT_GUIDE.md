@@ -27,9 +27,18 @@
 > ⚠️ **이 2건은 활성화 blocker 로 분류하지 않는다**(2026-08-03). 만료는 **모든 발행이 지나는 단일
 > lease gate 가 fail-closed** 로 막아 **데이터가 새지 않고 조용해질 뿐**이고, 클라는 만료 **전에**
 > 선제 재인증한다(`lease − 180s − U(0,60)`, `duration: 0` = 즉시 재인증, bounded retry + watchdog).
-> registry 잔여 항목도 연결 종료 시 사라진다. ⛔ **남는 위험은 하나** — 재인증이 반복 실패하면
-> 그 topic 이 **서버 신호 없이 조용히 멈춘다**. 그게 `reauth_required` 가 메울 공백이고, 운영
-> GO 시점에 이 위험을 판단한다.
+> registry 잔여 항목도 연결 종료 시 사라진다.
+> ⛔ **주요 사용자 영향은 하나** — 재인증이 반복 실패하면 그 topic 이 **서버 신호 없이 조용히
+> 멈춘다**. 그게 `reauth_required` 가 메울 공백이다.
+> ⚠️ **다만 "위험은 그것뿐"이 아니다** — 만료 registry 를 제거하지 않으면 **장기 연결**에서
+> 만료 항목이 계속 남아 (i) `active_subscriptions` 에 `duration: 0` 으로 반복 노출되고,
+> (ii) `registry.subscriber_count()` 를 부풀린다. (ii) 는 관측 왜곡에 그치지 않는다 —
+> **krx · fx · tether 세 publisher 가 모두** `subscriber_count(topic) == 0` 을 **빌드 비용 차단**
+> 으로 쓰므로(`app/krx_topic_publisher.py` · `app/fx_topic_publisher.py` · `app/tether_topic_publisher.py`),
+> 그 단축이 무력화되어 **아무도 받지 않을 payload 를 매번 만든다**(전송 자체는 per-lease gate 가
+> 막는다 — 보안 누수가 아니라 낭비·관측 문제다).
+> → 운영 GO 는 "조용한 중단" 뿐 아니라 **이 stale registry 비용까지 수용**하는 결정이다.
+> 비-blocker 로 둘지는 그대로 제품 결정으로 남긴다.
 > ✅ **클라 축은 land 했다**(2026-08-02~03): **lease 소비**(최단 만료 기준 재인증 타이머,
 > `duration: 0` = "지금 재인증" — iOS `1f6040e`/`a826dbf`) · **request timeout**(송신 직후 무장,
 > 20초 무응답 → 같은 연결에서 새 `request_id` 재전송, 기존 재시도 상한 공유 — `cbc1c0f`/`f1e72c9`) ·
