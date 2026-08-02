@@ -471,6 +471,64 @@ class TestEveryPublisherGoesThroughTheLeaseGate(unittest.TestCase):
         self.assertEqual(found, ["publish_bad"])
 
 
+class TestPolicyCloseCodeHasExactlyOneSender(unittest.TestCase):
+    """⛔ `1008` 은 **일반 정책 위반 코드**이고 서버는 `reason` 도 싣지 않는다.
+
+    지금은 발신 지점이 **하나**뿐이라 "1008 = cross-UID identity 충돌" 이 참이고, 그래서
+    핸드오프 가이드 §6 이 *"1008 이면 terminal 로 처리하지 말고 재연결하라"* 고 적을 수 있다
+    (계정 전환의 정상 복구 경로가 바로 재연결이기 때문).
+
+    ⛔ **두 번째 발신자가 생기는 순간 그 규칙이 조용히 틀린다** — 클라는 두 사유를 구분할 수
+    없는데 가이드는 여전히 하나로 뭉뚱그려 지시한다(codex Medium). 그때는 먼저 **구분 가능한
+    신호**(private `4xxx` code 또는 안정적 `reason`)를 정의하고 §6 을 갱신해야 한다.
+    이 검사가 그 순서를 강제한다.
+    """
+
+    @staticmethod
+    def _close_sites(tree):
+        """`*.close(code=...)` 호출의 (lineno, code 값). `db.close()` 는 `code` 가 없어 제외된다."""
+        import ast
+        sites = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "close"):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "code":
+                    value = kw.value.value if isinstance(kw.value, ast.Constant) else None
+                    sites.append((node.lineno, value))
+        return sites
+
+    def test_policy_close_has_exactly_one_sender(self):
+        import ast
+        import pathlib as _pathlib
+
+        app_dir = _pathlib.Path(__file__).resolve().parent.parent / "app"
+        found = []
+        for path in sorted(app_dir.rglob("*.py")):
+            for lineno, code in self._close_sites(ast.parse(path.read_text(encoding="utf-8"))):
+                found.append((path.name, lineno, code))
+        self.assertEqual(
+            [(name, code) for name, _, code in found],
+            [("topic_dispatcher.py", 1008)],
+            "WebSocket close code 발신 지점이 바뀌었다 — 1008 이 더 이상 'cross-UID' 와 1:1 이\n"
+            "아니게 되면 REALTIME_V2_CLIENT_GUIDE §6 의 재연결 규칙이 틀린 지시가 된다.\n"
+            f"먼저 구분 가능한 신호(private 4xxx / stable reason)를 정하고 §6 을 갱신할 것: {found}",
+        )
+
+    def test_the_detector_would_catch_a_second_sender(self):
+        """⛔ 자기검사 — 검출기가 아무것도 못 찾는 형태면 위 테스트는 공허하다."""
+        import ast
+
+        tree = ast.parse(
+            "async def evict(ws, db):\n"
+            "    db.close()\n"                       # code 없음 → 세면 안 된다
+            "    await ws.close(code=1008)\n"
+            "    await ws.close(code=4001)\n"
+        )
+        self.assertEqual([code for _, code in self._close_sites(tree)], [1008, 4001])
+
+
 class TestConnectionIdentityBinding(unittest.TestCase):
     """⛔ 이 가드는 **테스트가 하나도 없었다**(변이가 찾아냈다). 뚫리면 falsy 결속 이후
     **아무 UID 나** 충돌 없이 통과한다 — cross-UID 방어 전체가 무의미해진다."""

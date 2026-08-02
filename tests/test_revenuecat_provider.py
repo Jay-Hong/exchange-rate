@@ -272,10 +272,11 @@ class TestAdapterEquivalence(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(subscription._result_to_legacy_tuple(result), (False, False))
 
 class TestUnexpectedErrorsPropagate(unittest.IsolatedAsyncioTestCase):
-    """A6-1 핵심 — **programming 오류는 verdict가 아니다.**
+    """**programming 오류는 verdict가 아니다.**
 
-    provider는 예상 밖 예외를 **그대로 전파**해야 strict 경로가 그것을 retryable로 오인하지
-    않는다. REST 호환(`(False, False)`)은 **adapter가 떠안는다**.
+    provider는 예상 밖 예외를 **그대로 전파**해야 **WS 인가 경로**
+    (`app/topic_authorization.py` — 일반 `Exception` 을 의도적으로 잡지 않는다)가 그것을
+    retryable로 오인하지 않는다. REST 호환(`(False, False)`)은 **adapter가 떠안는다**.
 
     ⚠️ 이 클래스가 잡는 회귀: provider를 광범위 `except Exception`으로 되돌리는 변경.
     구 코드가 정확히 그랬고, JSON이 list인 경우·`premium`이 문자열인 경우까지

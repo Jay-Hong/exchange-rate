@@ -207,8 +207,9 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
     """RevenueCat 조회 결과를 **분류해서** 돌려준다 (ADR-039 §8.1 A4-1).
 
     구 `_check_revenuecat_entitlement`는 성격이 다른 5개 실패를 전부 `(False, False)`로
-    평탄화했다 — config 오류 / 계약 위반 / transient가 구분되지 않아, strict 경로가 그대로
-    소비하면 §8.1 A6의 3-bucket 계약(terminal / transient / 내부 예외)이 깨진다.
+    평탄화했다 — config 오류 / 계약 위반 / transient가 구분되지 않아, **WS 인가 경로**
+    (`app/topic_authorization.py`)가 그대로 소비하면 3-bucket 계약
+    (terminal / transient / 내부 예외)이 깨진다.
 
     ⚠️ **축 주의**: `expires_dt > clock.wall()`의 wall 축은 **구독 유효성** 판정이라 맞다.
     lease horizon의 monotonic 축(§8.1 A2)과 목적이 다르므로 "일관성" 명목으로 바꾸지 말 것.
@@ -342,7 +343,7 @@ def _result_to_legacy_tuple(result: RevenueCatResult) -> tuple[bool, bool]:
     """REST adapter — typed 결과를 `(is_premium, should_cache)`로 되접는 **단일 지점**.
 
     `Determined`만 `should_cache=True`이고 나머지 4변종은 전부 `(False, False)`다.
-    구분력은 strict(N-3)가 쓴다.
+    구분력은 **WS 인가 경로**(`app/topic_authorization.py`)가 쓴다.
 
     ⚠️ **범위**: 이 매핑으로 **예외·전송·HTTP 상태 경로의 REST 동작은 구 코드와 동일**하다.
     반면 **malformed 200의 분류는 §8.1 A4-1 hardening에서 의도적으로 바꿨다**
@@ -363,14 +364,17 @@ async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[
         (401·403·API key 미설정) / 응답 형식 위반 / 400 / 예상 밖 내부 예외.
         캐시하면 유료 사용자 차단 위험이라 stale fallback·PENDING 경로로 보낸다.
         ⚠️ 구 docstring은 이걸 "일시적 오류"로만 적었는데, 지금은 성격이 다른 5개 부류를 포함한다
-        (그 구분은 `fetch_revenuecat_result`의 typed 결과가 갖고 있고 strict가 쓴다).
+        (그 구분은 `fetch_revenuecat_result`의 typed 결과가 갖고 있고
+         **WS 인가 경로**(`app/topic_authorization.py`)가 쓴다).
 
     ⚠️ 이 함수는 **REST 전용 adapter**로 남는다. `tests/test_subscription_clock.py`가
     `patch.object(subscription, "_check_revenuecat_entitlement", ...)`로 이 이름을 잡으므로
-    모듈 레벨 함수 위치를 옮기지 말 것. strict 경로는 `fetch_revenuecat_result`를 쓴다.
+    모듈 레벨 함수 위치를 옮기지 말 것. **WS 인가 경로**(`app/topic_authorization.py`)는
+    `fetch_revenuecat_result`를 쓴다.
 
     ⚠️ **광범위 `except`가 여기에만 있는 이유**: provider는 예상 밖 예외를 **그대로 전파**해야
-    strict(§8.1 A6-1)가 programming 오류를 retryable로 오인하지 않는다. 반면 REST는 구 동작이
+    **WS 인가 경로**(`app/topic_authorization.py` — 일반 `Exception` 을 의도적으로 잡지 않는다)가
+    programming 오류를 retryable로 오인하지 않는다. 반면 REST는 구 동작이
     "무슨 예외든 `(False, False)`"였으므로 **그 되접기를 이 adapter가 떠안는다**.
     ⚠️ 범위 주의 — 이 adapter가 보존하는 것은 **예외 경로**의 구 동작이다. malformed 200의
     분류(§8.1 A4-1 hardening)는 **의도적으로 승인된 REST 동작 변경**이라 여기서 되돌리지 않는다.

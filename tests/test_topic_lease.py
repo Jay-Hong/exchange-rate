@@ -10,13 +10,15 @@ ADR-039 §8.1 A1/A2. **계산기만** 다룬다 — registry·sweeper 배선은 
 - `[server] wall clock 역행에도 strict horizon 불변` — harness (1)이 못 박은 대로
   `verified_at_monotonic`의 **저장·재사용 경로**가 있어야 닫힌다. 여기서 증명되는 것은
   계산기가 wall을 **입력으로 갖지 않는다**는 구조적 사실뿐이다.
-- `[server] stale fallback으로 연장 안 됨` — `verify_premium_status`가 최대 1시간 stale
-  캐시로 ACTIVE를 돌려주고(`app/subscription.py`의 `CACHE_STALE_TTL`) 반환 타입에
-  fresh/stale 구분이 없다.
-  ⚠️ **다만 WS 인가 경로는 그 함수를 아예 쓰지 않는다** — `app/topic_authorization.py` 가
-  캐시 없는 `fetch_revenuecat_result` 를 직접 부르고(그 모듈 상단이 `verify_premium_status`
-  재사용을 금지한다), 관측 시각을 **호출 직전**에 찍는다. 그래서 이 행은 *REST 경로*의
-  이야기다. 구분을 만들 예정이던 `A6 3-state verifier` 는 ADR-040 에서 **폐기**됐다.
+- ~~`[server] stale fallback으로 연장 안 됨`~~ — **WS 에서는 구조적으로 닫혔다.**
+  `app/topic_authorization.py` 가 캐시 없는 `fetch_premium` provider
+  (`fetch_revenuecat_result`)를 직접 부르고, 그 모듈 상단이 `verify_premium_status` 재사용을
+  **금지**한다 — stale 캐시가 lease 를 연장할 경로 자체가 없다. 관측 시각도 호출 **직전**에
+  찍는다.
+  ⚠️ `verify_premium_status` 의 1시간 stale fallback(`CACHE_STALE_TTL`)은 **REST 경로의**
+  별개 문제로 남아 있다 — 그건 가용성 우선 정책이고 이 파일의 관심사가 아니다.
+  ⛔ 구분을 만들 예정이던 `A6 3-state verifier` 는 ADR-040 에서 **폐기**됐다. 이 행을 다시
+  "후속 작업 필요" 로 읽지 말 것.
 - `[server] single-flight` / `[server] identity horizon이 토큰 단위` /
   `[server] horizon 계산(캐시 4분 → lease ~11분)`의 **저장 절반**.
   ⚠️ **모두 후속은 아니다** — identity horizon 의 관측·저장·재사용은 `app/topic_dispatcher.py`
