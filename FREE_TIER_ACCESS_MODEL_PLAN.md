@@ -763,8 +763,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 
       E2E 체크리스트 — 테스트 **+ 변이 확인**까지 끝난 것만 `[x]`:
       - [ ] `entitled_subscription_receives_a_four_axis_lease`
-      - [ ] `premium_denial_skips_the_database_and_revokes_existing_krx`
-      - [ ] `entitlement_denial_revokes_existing_krx`
+      - [x] `premium_denial_skips_the_database_and_revokes_existing_krx` — DB 증가량 0 은
+        **grant 이후 delta** 로 본다(최초 grant 가 이미 DB 를 부르므로 총 호출 수로 보면 틀린다)
+      - [x] `entitlement_denial_revokes_existing_krx` — 두 축 모두 **publish positive control**
+        동반: 철회 *전* KRX publish 가 1 이어야 한다. `leased_subscribers` 를 `set()` 으로
+        고장 내면 후단 `0` 은 그대로 통과하고 **positive control 만** 발화함을 확인했다
       - [x] `provider_transient_folds_the_whole_request_and_leaves_registry_untouched`
       - [x] `provider_persistent_uses_the_long_retry_after` — retry_after=30 ∧ registry 불변 ∧
         **정책 승격 ERROR 정확히 1건**(leaf 의 원인 로그와 별개 — 그 승격은 leaf 가 모르는 사실이다)
