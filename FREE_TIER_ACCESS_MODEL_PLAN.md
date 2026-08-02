@@ -726,7 +726,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
-- [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required. **← 1C 진행 중**
+- [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required.
+      **← 1C 진행 중 — 서버 축은 land 완료, 잔여는 클라(iOS lease 소비) + request timeout**
       ✅ **무료 topic identity lease land** — /ws subscribe → Firebase 검증 → 15분 lease
       (**identity 축만**) → ack(`lease_id` + **남은** duration) → registry 저장 →
       **모든 발행 경로가 지나는 단일 lease 게이트**(만료 시 전송 0) → disconnect 시 제거, 한 E2E.
@@ -745,17 +746,22 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⛔ 클라 계약: `0` = **"즉시 재인증"**(≠ "타이머 없음"). iOS lease 소비 슬라이스에서
       **양방향 테스트**로 잠글 것 — 0 을 무시하면 그 topic 이 조용히 죽는다.
 
-      잔여 = ① **KRX per-user 판정** ② **iOS lease 소비**(최단 만료 전 재인증) ③ **request timeout**.
+      잔여 = ~~① KRX per-user 판정~~ **✅ land** ② **iOS lease 소비**(최단 만료 전 재인증)
+      ③ **request timeout**(활성화 blocker).
 
       ⚠️ ①의 완료 조건은 **숫자가 아니라 이름 목록**이다("8축" 같은 요약은 provider/DB 의
       transient·persistent 를 각각 세면 어긋난다 — codex).
 
-      ⛔ **부분 land 금지.** production diff 에는 UID 결속 · cross-UID 종료 · Denied 즉시 철회 ·
-      4축 lease · mixed-request 원자성 · deadline 처리가 이미 들어 있는데, **아래 12개 완료 조건이
-      전부 미검증**이다. (⚠️ "E2E 커버리지 0" 은 **과대 표현**이다 — 공유 deadline 경계 테스트와
-      기존 lease 발행 E2E 는 이미 통과 중이다. 정확히는 **핵심 신규 경로 대부분이 E2E 미검증**이다.)
+      **① land 완료 (2026-08-02, `4a45173`, CI run 30731908679 = `3924 passed / 2 skipped`).**
+      12개 완료 조건 전부 `[x]` — 각각 **변이 확인**까지 마친 뒤에만 체크했다.
+      `wip/krx-per-user-checkpoint` 를 `--squash` 로 단일 커밋 land. **prod flag 는 계속 off.**
+
+      ⛔ **부분 land 금지**(당시 상태 기록): production diff 에 UID 결속 · cross-UID 종료 ·
+      Denied 즉시 철회 · 4축 lease · mixed-request 원자성 · deadline 처리가 이미 들어 있는데
+      12개 완료 조건이 전부 미검증이었다. (⚠️ "E2E 커버리지 0" 은 **과대 표현**이었다 — 공유
+      deadline 경계 테스트와 기존 lease 발행 E2E 는 이미 통과 중이었다.)
       stale 테스트만 교체해 green 을 만들면 *"새 구현이 맞다"* 가 아니라 *"옛 기대값이 사라졌다"* 만
-      증명한다. 아래가 **전부 `[x]` 가 된 뒤에** land 한다.
+      증명한다.
 
       ⛔ **checkpoint 브랜치는 `--squash` 로만 합친다.** WIP 커밋 자체가 red 이므로 일반 merge 하면
       **master 이력에 실패 커밋이 남아 `git bisect` 가 깨진다**. 완료 후
