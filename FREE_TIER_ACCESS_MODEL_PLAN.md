@@ -762,7 +762,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       `git merge --squash wip/…` 로 단일 diff 를 만들고 **전체 검증 뒤 새 커밋**으로 land 한다.
 
       E2E 체크리스트 — 테스트 **+ 변이 확인**까지 끝난 것만 `[x]`:
-      - [ ] `entitled_subscription_receives_a_four_axis_lease`
+      - [x] `entitled_subscription_receives_a_four_axis_lease` — ⚠️ 실행이 순차라 identity 가
+        **언제나** 최소다 → 그 배치만으로는 "min of 4" 와 "identity only" 를 구분 못 한다.
+        축마다 낡은 관측을 만들어 **duration 이 달라지는지**(800/810/820) 로 지배력을 본다 +
+        `now` 는 바닥(관측이 전부 미래여도 900 초과 금지)
       - [x] `premium_denial_skips_the_database_and_revokes_existing_krx` — DB 증가량 0 은
         **grant 이후 delta** 로 본다(최초 grant 가 이미 DB 를 부르므로 총 호출 수로 보면 틀린다)
       - [x] `entitlement_denial_revokes_existing_krx` — 두 축 모두 **publish positive control**
@@ -771,8 +774,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       - [x] `provider_transient_folds_the_whole_request_and_leaves_registry_untouched`
       - [x] `provider_persistent_uses_the_long_retry_after` — retry_after=30 ∧ registry 불변 ∧
         **정책 승격 ERROR 정확히 1건**(leaf 의 원인 로그와 별개 — 그 승격은 leaf 가 모르는 사실이다)
-      - [ ] `db_transient_folds_the_whole_request`
-      - [ ] `db_permanent_folds_the_whole_request`
+      - [x] `db_transient_folds_the_whole_request` — 짧은 retry_after ∧ registry 불변(양방향)
+      - [x] `db_permanent_folds_the_whole_request` — 긴 retry_after ∧ **ERROR 정확히 1건**.
+        두 축은 **서로를 죽이는 변이가 다르다**(오분류 방향이 반대) — 각각 확인했다
       - [ ] `gated_authorization_deadline_warns_once_and_changes_nothing`
       - [ ] `same_uid_reauthentication_succeeds`
       - [ ] `cross_uid_closes_the_connection_without_error_logs`
