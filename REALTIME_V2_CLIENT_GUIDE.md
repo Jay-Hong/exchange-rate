@@ -22,8 +22,12 @@
 > - **판정 불가**(제공자·DB 장애, 인가 지연) → 그때만 **전체 요청**이 `temporarily_unavailable`
 >   로 접히고 **registry 는 하나도 바뀌지 않는다**(무료 topic 조차 새로 등록되지 않는다).
 >
-> ⛔ **아직 없는 것**: `reauth_required` 프레임 / 만료 시 registry 제거 / **클라 request timeout** /
-> **클라 lease 소비**(재인증 타이머).
+> ⛔ **아직 없는 것**: `reauth_required` 프레임 / 만료 시 registry 제거.
+> ✅ **클라 축은 land 했다**(2026-08-02~03): **lease 소비**(최단 만료 기준 재인증 타이머,
+> `duration: 0` = "지금 재인증" — iOS `1f6040e`/`a826dbf`) · **request timeout**(송신 직후 무장,
+> 20초 무응답 → 같은 연결에서 새 `request_id` 재전송, 기존 재시도 상한 공유 — `cbc1c0f`/`f1e72c9`) ·
+> **구매 직후 `premium_required` 복구**(서버 stable `krx_visible=true` 확정 → 기록된 topic 만
+> 재구독 — `b83b99b`/`0eb91a1`).
 > 이 문서를 "서버가 다 됐다"로 읽고 활성화를 앞당기지 말 것 — 활성화 선행 조건은 아래 3조건이다.
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
 > `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
@@ -272,7 +276,7 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
     ⛔ **그래도 클라 `krx_visible` gate(GET /api/entitlements, ADR-038 Decision 3)는 유지한다.**
     ⚠️ **"1C 서버 land = 클라 gate 제거 가능" 이 아니다.** 위 강제는 `TOPIC_DISPATCHER_ENABLED`
     가 켜져야 **한 줄이라도 돈다** — 꺼져 있는 동안은 구독 경로 자체가 없다. 제거 조건은
-    **flag ON 이후 + 클라가 lease·request timeout 계약을 소비한 뒤**다.
+    **flag ON 이후**다 — 클라의 lease·request timeout 소비는 2026-08-02~03 에 land 했다.
 
 **snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` = 1 entry. 작음.
 

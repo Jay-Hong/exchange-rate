@@ -25,7 +25,7 @@
 | `/api/graph/{currency}` | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt:28]) | B | 무인증 |
 | `/api/v2/topics/snapshot` | iOS ✅ / **Android ❌** | **A** | ✅ **인증+premium+per-user KRX (E3, 2026-07-25)** |
 | `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | 🔴 **무인증 잔여** — §3.1 아래 경고 |
-| topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | 🔴 무인증 잔여 — 1C |
+| topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | 🟡 **서버 인증 land**(1C `4a45173` — 토큰 검증 + UID 결속 + KRX per-user + lease publish gate). prod flag OFF, 활성화 GO 대기 |
 | `/api/news` | iOS·Android | §7 S2 | 무인증 |
 
 > ⚠️ **Android = 완전 legacy**(v2 grep 0건). 운영 v1.2.2 실사용은 §5 측정.
@@ -255,7 +255,7 @@
   - **핵심**: leak window를 가르는 건 토큰 신선도가 아니라 **서버의 entitlement 재조회 주기**다. 클라가 캐시 ID token을
     보내도(Firebase는 만료 전까지 캐시 반환) 서버가 UID 기준으로 premium/KRX entitlement를 다시 조회하므로 권한 변화는 정확히 반영된다.
   - ⚠️ **구현 규모 실사(코드 확인 2026-07-25)**: "lease timer만 추가"가 아니다. `TopicRegistry`(app/topic_dispatcher.py:46)는
-    `Dict[WebSocket, Set[str]]`라 **per-subscription 메타데이터가 없고**, `/ws`(app/main.py:889)는 **현재 무인증**이다.
+    `Dict[WebSocket, Set[str]]`라 **per-subscription 메타데이터가 없고**, `/ws`(app/main.py:889)는 **당시 무인증**이었다(→ 아래 land 기록 참조).
     → 필요한 것 = (a) subscribe 경로 인증 (b) (ws, topic)별 uid·만료 메타 (c) 만료 sweep (d) `reauth_required` 발신.
     **(a)·(b) 는 land 됐다**(2026-08-02 `4a45173` — `TopicRegistry` 가 topic 별 `TopicLease{lease_id, uid,
     expires_at_mono}` 를 갖고, `/ws` subscribe 는 토큰이 실리면 Firebase 검증을 거친다). **잔여 = (c)·(d)**.
@@ -462,7 +462,7 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
    **연결 귀속**(대기 중 재연결을 건너면 발화 금지).
    ⚠️ 운영 flag off 라 운영 영향 0이었다 — blocker 이지 회귀가 아니었다.
 
-2. ⏸ **[보류·활성화 전 필수] request timeout** — ⛔ **"소비자 없음"이 아니다.**
+2. ✅ **[land 2026-08-02 `cbc1c0f`/`f1e72c9`] request timeout** — ⛔ **"소비자 없음"이 아니었다.**
 
    한때 여기에 *"우리 클라는 항상 유효한 식별 요청을 보내므로 서버가 종결 프레임을 주거나
    연결이 죽고, ping/pong 이 ≤40초에 잡는다 → 도달 불가"* 라고 적었는데 **틀렸다**(codex High,
@@ -475,8 +475,10 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
    아니다.** 그리고 버전 스큐(= 디코드가 깨질 바로 그 상황)에서 필요해지므로, 없으면 가장
    필요한 순간에 없다. lease 재인증에서는 응답 유실이 **만료를 넘길** 수 있어 더 중요해진다.
 
-   **보류 사유는 순서다** — 응답 deadline 이 실제 만료 동작과 결합되는 **iOS lease 소비
-   슬라이스**에서 함께 구현한다. ⚠️ **활성화 전 필수 항목으로 남긴다.**
+   **순서대로 iOS lease 소비 슬라이스 뒤에 구현했다**: 송신 **성공 직후** 무장(등록 시점이 아니다 —
+   느린 토큰 왕복이 무응답으로 오판된다) → 20초 무응답 → 같은 연결에서 **새 `request_id`** 로 재전송.
+   상관 제거와 watchdog 취소는 한 함수(`takePending`)가 원자적으로 한다. ⚠️ 20초/5초는 **측정된 wire
+   계약이 아니라 초기 클라 정책값**이며 canary p99 후 조정한다.
 
    ⛔ **설계 정정 — "timeout 시 연결 폐기 + 별도 recovery budget" 은 폐기한다**(codex 자신의
    이전 권고 철회, 나도 동의). 서버의 두 연산이 **멱등**이기 때문이다(subscribe=합집합 /
@@ -722,13 +724,23 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   ⚠️ **잔여(flag ON 전 필수)**: iOS `APIService`의 bootstrap 3종이 아직 무인증 경로라 flag ON 시
   401을 받는다. 전부 `try?` 격리라 크래시는 없고 cold-start bootstrap만 조용히 사라진다 →
   인증 transport로 이관 필요. 운영은 현재 flag off라 사용자 영향 0.
-- **구매 수렴 계약이 enforcement 활성화의 blocker다.** 서버측 무효화·freshness만으로는 구매가
-  수렴하지 않는다 — 둘 다 "서버가 다시 물어볼 준비"만 시키고, 실제 복구 트리거는 **클라의 다음
-  subscribe**인데 `premium_required`가 **terminal**이라 클라가 재시도하지 않는다. 그래서 시간이
-  지나도, webhook이 와도 그 연결은 거부 상태로 남는다. 활성화 전에 "구매 완료 → 제한된
-  refresh/backoff → 정상 ack" 클라 경로가 필요하다.
-  ⚠️ forced refresh도 즉시 복구가 아니다 — 우리 캐시만 우회할 뿐 RevenueCat 자신의 전파 지연은
-  못 넘는다(구매 직후면 다시 "구독 없음"을 받는다).
+- ✅ **구매 수렴 계약 land**(2026-08-03 `b83b99b`/`0eb91a1`). 문제는 정확히 이랬다: 서버측
+  무효화·freshness는 "서버가 다시 물어볼 준비"만 시키고 실제 복구 트리거는 **클라의 다음
+  subscribe**인데, `premium_required` 로 거부된 topic 은 클라가 **기록조차 하지 않아**(로그 한 줄)
+  재연결 전까지 거부 상태로 남았다.
+  **계약**: 거부를 기록하고, 서버의 **stable `krx_visible=true`** 확정마다 **기록된 topic 만**
+  재구독한다.
+  ⛔ 승인 신호를 로컬 RevenueCat `isPremium` 전환이나 `premium_pending == false` 로 잡으면 **안 된다** —
+  서버는 PENDING 에만 `premium_pending=true` 를 싣고 **ACTIVE 와 INACTIVE 를 같은 모양으로** 준다
+  (`GET /api/entitlements`). 게다가 그 응답은 클라에서 stable success 로 처리되어 pending retry 를
+  **취소**하고 freshness 까지 기록하므로 "잘못 승인해도 다음 refresh 가 고쳐준다"는 안전망도 없다.
+  `krx_visible=true` 는 `G3 ∧ G2 ∧ G1 ∧ premium` 을 전부 통과한 결과라 gated 재구독이 수락될
+  조건과 정확히 일치한다(gated topic 이 KRX 하나뿐이라는 전제는 `assert_single_gated_topic()` 이
+  fail-closed 로 강제).
+  ⛔ **`onChange` 가 아니라 stable true 를 적용할 때마다** 발화한다 — 고쳐야 할 핵심 경로가
+  **true→true 재확정**이기 때문이다.
+  ⚠️ RevenueCat 전파 지연은 여전히 존재하지만, 서버가 아직 못 본 동안에는 `krx_visible` 이 true 가
+  되지 않으므로 **잘못된 시점에 재구독하지 않는다**.
 - **`check_revoked`는 별도 정책이 아니라 인가 상한에 통합**한다 — 계정 삭제·비활성도 같은 상한 안에서 종료.
 
 ## 9. 구현 체크리스트
@@ -742,7 +754,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required.
-      **← 1C 진행 중 — 서버 축은 land 완료, 잔여는 클라(iOS lease 소비) + request timeout**
+      **← 1C — 서버 축 land 완료 + 클라 축(lease 소비 · request timeout · 구매 복구) land 완료.
+      잔여 = `reauth_required` / 만료 registry 제거 / **iOS bootstrap 3종 인증 transport 이관** +
+      **별도 운영 GO**. 이 체크박스는 앞의 두 미구현 때문에 아직 닫지 않는다.**
       ✅ **무료 topic identity lease land** — /ws subscribe → Firebase 검증 → 15분 lease
       (**identity 축만**) → ack(`lease_id` + **남은** duration) → registry 저장 →
       **모든 발행 경로가 지나는 단일 lease 게이트**(만료 시 전송 0) → disconnect 시 제거, 한 E2E.
@@ -764,11 +778,12 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⚠️ **과도기 결정 — 만료 lease 는 `duration 0` 으로 남긴다.** 최종 계약은 *만료 시 registry
       제거 + `reauth_required`* 이지만, 그 전까지는 `active_subscriptions` 에 남긴 채 `0` 을 싣는다.
       필드를 빼면 **무토큰(§E1) 구독과 구분되지 않아** 클라가 *무제한*으로 오해하기 때문이다.
-      ⛔ 클라 계약: `0` = **"즉시 재인증"**(≠ "타이머 없음"). iOS lease 소비 슬라이스에서
-      **양방향 테스트**로 잠글 것 — 0 을 무시하면 그 topic 이 조용히 죽는다.
+      ⛔ 클라 계약: `0` = **"즉시 재인증"**(≠ "타이머 없음"). ✅ iOS lease 소비 슬라이스에서
+      **양방향 테스트**로 잠갔다 — 같은 lease_id 의 반복 `0` 은 lease_id 기록으로 억제하되(경합),
+      **새 lease_id 의 첫 `0` 은 즉시 발화**한다(반대 방향 대조군).
 
-      잔여 = ~~① KRX per-user 판정~~ **✅ land** ② **iOS lease 소비**(최단 만료 전 재인증)
-      ③ **request timeout**(활성화 blocker).
+      잔여 = ~~① KRX per-user 판정~~ **✅ land** ~~② iOS lease 소비~~ **✅ land**
+      ~~③ request timeout~~ **✅ land**. 남은 활성화 조건은 iOS bootstrap 3종 인증 이관 + 운영 GO.
 
       ⚠️ ①의 완료 조건은 **숫자가 아니라 이름 목록**이다("8축" 같은 요약은 provider/DB 의
       transient·persistent 를 각각 세면 어긋난다 — codex).
@@ -832,8 +847,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       `temporarily_unavailable` 제한 재시도까지.
       ⛔ 구 "reconciler + 1 in-flight → 배칭" 순서는 **개정됐다** — 배칭이 먼저 land 했고 reconciler 는
       보류다(위 "순서 개정" 절). **서버 lease 발급 + publish 직전 인가는 land 했다** —
-      다음은 **② iOS lease 소비**(최단 만료 전 재인증, `duration: 0` = "지금 재인증") +
-      **③ 클라 request timeout**(활성화 blocker). 관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
+      **② iOS lease 소비**(최단 만료 전 재인증, `duration: 0` = "지금 재인증")와
+      **③ 클라 request timeout** 은 2026-08-02~03 에 land 했다.
+      관측 cache·single-flight는 실제 병목 측정 전에는 넣지 않는다.
 - [ ] 웹 디버그 페이지 Stage B.
 - [ ] Stage B 측정: store console primary + 서버 보조(iOS UA / Android 토큰+UID).
 - [x] **제품 결정 S5(revoke latency) = bounded-lease v1 15분 확정(2026-07-25)** — §7 S5 / §8 만료 항목 참조.

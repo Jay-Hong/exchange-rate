@@ -1,7 +1,9 @@
 """KRX 달러선물 독립 topic publisher (ADR-038 Decision 2 — `krx:usd-krw-futures`).
 
 usdt:krw optional group(usd_krw_futures) 시대를 종료하고 KRX를 전용 topic으로 분리:
-- entitled 단말만 이 topic을 구독 (per-user는 클라 krx_visible gate — WS 무인증, Decision 3).
+- entitled 단말만 이 topic을 구독. ⚠️ **per-user 판정은 이제 서버 WS 가 한다**(1C `4a45173` —
+  토큰 검증 + UID 결속 + KRX entitlement + lease publish gate). 구 주석의 "WS 무인증이라 클라
+  krx_visible gate 가 담당"은 **낡았다**; 클라 gate 는 표시 축으로 유지된다(ADR-038 Decision 3).
 - G2/G3(KRX_CLIENT_DISTRIBUTION_EFFECTIVE) off → 발행/snapshot 자체 중단
   (payload 필터링 불요 — topic 단위 차단이 옵션 B 채택 근거).
 
