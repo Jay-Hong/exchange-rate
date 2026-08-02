@@ -993,33 +993,72 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             msg.get("active_subscriptions"), [], "flag off 인 topic 이 registry 에 등록됐다",
         )
 
-    def test_unjudgeable_gated_topic_fails_the_whole_request(self):
-        """⛔ 판정기가 없는데 배포 flag 가 켜져 있으면 **transient 가 아니라 설정 결함**이다.
+    def _subscribe_with_rc(self, rc_result, *, topics, request_id, expect_logs=None):
+        """KRX 를 포함해 subscribe 하고 첫 프레임을 돌려준다. **RC leaf 만** 교체한다.
 
-        `topic_unavailable`(개별 flag off) 로 돌려주면 운영자가 flag 를 보고 코드와 모순을 겪는다
-        (codex Medium). §8-C 에 `internal_error` 가 없으므로 전체-요청 `temporarily_unavailable`
-        + ERROR 로그가 남은 정확한 선택이다.
+        ⛔ 판정기나 dispatcher 를 mock 하지 않는다 — 그러면 검증하려는 경로가 통째로 빠진다.
+        provider/DB **leaf** 만 fake 해서 실제 판정기·배선을 통과시킨다.
         """
         patchers = self._patchers()
-        patchers["krx_flag"] = patch.object(
-            config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result", new=AsyncMock(return_value=rc_result)
         )
         with contextlib.ExitStack() as stack:
             for patcher in patchers.values():
                 stack.enter_context(patcher)
+            stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+            logs = stack.enter_context(expect_logs) if expect_logs else None
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
-                # ⛔ 운영자 신호도 계약이다 — debug로 격하되면 설정 결함이 조용히 지나간다.
-                with self.assertLogs("exchange_rate.topic_dispatcher", level="ERROR"):
-                    ws.send_json({
-                        "type": "subscribe", "request_id": "gated-1",
-                        "id_token": "t", "topics": ["fx:usd-krw", KRX_TOPIC],
-                    })
-                    msg = _receive_json_or_fail(ws, self.fail)
-        self.assertEqual(msg.get("type"), "subscription_error")
-        self.assertEqual(msg.get("error"), "temporarily_unavailable")
-        self.assertEqual(msg.get("request_id"), "gated-1")
-        self.assertIn("retry_after_seconds", msg, "§8-C 는 이 코드에 retry_after 동반을 요구한다")
+                before = _registry_connection_count()
+                ws.send_json({"type": "subscribe", "request_id": request_id,
+                              "id_token": "tok", "topics": list(topics)})
+                frame = _receive_json_or_fail(ws, self.fail)
+                delta = _registry_connection_count() - before
+        return frame, delta, logs
+
+    def test_provider_transient_folds_the_whole_request_and_leaves_registry_untouched(self):
+        """⛔ 판정 **불가**는 per-topic 이 아니라 **전체 요청**이다(§8-C) — 무료 topic 조차
+        새로 등록하지 않는다. 자격을 모르는 상태에서 부분 수락하면 "인가된 것처럼 보이는"
+        상태가 만들어진다.
+        """
+        from app import subscription
+
+        frame, delta, _ = self._subscribe_with_rc(
+            subscription.ProviderUnavailable(),
+            topics=("fx:usd-krw", KRX_TOPIC), request_id="prov-t",
+        )
+        self.assertEqual(frame.get("type"), "subscription_error")
+        self.assertEqual(frame.get("error"), "temporarily_unavailable")
+        self.assertEqual(frame.get("retry_after_seconds"),
+                         config.WS_AUTH_RETRY_AFTER_SECONDS)
+        self.assertEqual(delta, 0, "판정 불가인데 registry 가 바뀌었다 — 무료 topic 도 안 된다")
+
+    def test_provider_persistent_uses_the_long_retry_after(self):
+        """⛔ 설정·프로토콜 결함은 **재시도로 낫지 않는다** — 짧은 간격을 주면 안 낫는 것을
+        계속 두드린다. 그리고 **정책 승격 ERROR** 가 남아야 한다: "우리가 이 결과를 영구
+        결함으로 판정했다"는 leaf 가 모르는 사실이라 leaf 로그로 대체되지 않는다.
+        """
+        from app import subscription
+
+        frame, delta, logs = self._subscribe_with_rc(
+            subscription.ProviderMisconfigured(status=401),
+            topics=("fx:usd-krw", KRX_TOPIC), request_id="prov-p",
+            expect_logs=self.assertLogs("exchange_rate.topic_authorization", level="ERROR"),
+        )
+        self.assertEqual(frame.get("error"), "temporarily_unavailable")
+        self.assertEqual(
+            frame.get("retry_after_seconds"),
+            config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS,
+            "영구 결함에 짧은 재시도 간격을 줬다",
+        )
+        self.assertEqual(delta, 0)
+        promotions = [r for r in logs.records if r.levelname == "ERROR"]
+        self.assertEqual(
+            len(promotions), 1,
+            f"정책 승격 ERROR 가 정확히 1건이 아니다({len(promotions)}건) — "
+            "0이면 신호가 없고, 2 이상이면 leaf 로그와 중복이다",
+        )
 
     def test_subscribe_classification_uses_the_same_availability_predicate(self):
         """⛔ **양 방향을 다 잠근다.** builder 쪽만 잠그면 dispatcher 가 갈라져도 green 이다.
@@ -1132,26 +1171,6 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertIs(type(msg.get("retry_after_seconds")), int, "정수여야 한다")
         self.assertGreaterEqual(msg.get("retry_after_seconds"), 1)
         self.assertEqual(delta, 0)
-
-    def test_config_fault_frame_matches_the_auth_failure_frame(self):
-        """⛔ 두 경로가 **같은 생성자**를 지나는지는 두 프레임을 비교해야만 보인다."""
-        from app.topic_wire import SubscribeAuthFailed
-
-        auth_frame, _, _ = self._subscribe_and_receive(
-            verifier_raises=SubscribeAuthFailed("temporarily_unavailable", 5),
-            request_id="same-1",
-        )
-        cfg_frame, _, _ = self._subscribe_and_receive(
-            request_id="same-1", topics=("fx:usd-krw", KRX_TOPIC),
-            extra={"krx_flag": patch.object(
-                config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True)},
-        )
-        self.assertEqual(
-            sorted(auth_frame), sorted(cfg_frame),
-            "설정 결함 프레임과 인증 실패 프레임의 키가 다르다 — 생성 경로가 갈렸다",
-        )
-        self.assertEqual(auth_frame["type"], cfg_frame["type"])
-        self.assertEqual(auth_frame["error"], cfg_frame["error"])
 
     def test_malformed_id_token_is_a_request_format_error(self):
         """형식 위반은 인증 **이전** 단계다 — SDK 의 토큰-무관 ValueError 경로를 없앤다."""
