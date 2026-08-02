@@ -450,7 +450,7 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
 ⛔ 한때 "lease 전에는 소비자가 없다"고 적었는데 **과했다**(codex Medium): `active_subscriptions`
 와 `confirmedTopics` 는 **이미 per-topic 상태**다. lease 는 그 위에 만료·갱신 축을 더할 뿐이다.
 
-⛔ **활성화 blocker 2건 — 배칭은 land 했지만 이 슬라이스는 닫히지 않았다.**
+⛔ **활성화 blocker 2건** — ✅ **둘 다 닫혔다**(2026-08-02). 아래는 그 경위 기록이다.
 
 1. ✅ **[닫힘] 재시도 없는 배칭 = 전체 실패 결합** (iOS `163b403`).
    배치는 서버 인증 **1회**를 공유하므로 그 한 번이 실패하면 **전 topic 이 함께 실패**한다 —
@@ -503,7 +503,7 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
   `reconnectAttempts = 0` 을 하고 서버는 연결 직후 legacy payload 를 **항상** 보내므로
   backoff 상한이 영영 걸리지 않는다.
 
-#### (보류) 다음 iOS 작업은 세 슬라이스로 분리한다
+#### (보류→완료) 다음 iOS 작업은 세 슬라이스로 분리한다 — **역사 기록**(세 슬라이스 모두 land, 2026-08-02~03)
 
 ⛔ `reconciler + 1 in-flight + batching + retry` 를 한 번에 넣지 않는다. 특히
 `temporarily_unavailable` 재시도가 처음 캡처한 subscribe 배치를 그대로 보관하면, 대기 중 들어온
@@ -711,10 +711,15 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 
 구현 설계와 달리 아래는 **현행 코드·운영에 대한 사실**이라 그대로 살아 있다.
 
-- **무토큰 subscribe는 현재 무시되지 않고 실제로 등록된다.** topic dispatch flag가 켜지면
-  `id_token`/`request_id` 검사 없이 registry 등록 + snapshot 전송이 일어난다(`app/topic_dispatcher.py`의
-  subscribe 분기). 현행 iOS도 무토큰 payload(`{type, topics}`)를 보낸다. 구 문서의 "구형 무인증
-  메시지는 silent-ignore" 서술은 **오서술이었다**.
+- ~~**무토큰 subscribe는 현재 무시되지 않고 실제로 등록된다.**~~ **← 2026-08-02 superseded.**
+  ⚠️ 아래는 **리셋 당시(2026-08-01 이전) 사실**이며 현재 계약이 아니다: *"flag 가 켜지면
+  `id_token`/`request_id` 검사 없이 registry 등록 + snapshot 전송이 일어난다. 현행 iOS 도 무토큰
+  payload(`{type, topics}`) 를 보낸다."* 구 문서의 "구형 무인증 메시지는 silent-ignore" 가
+  오서술이었다는 지적 자체는 유효했다.
+  ✅ **현재 계약**(1C `4a45173` + iOS `216fde0` 이후): 무토큰 요청은 **비-gated 무료 topic 만**
+  등록된다 — `krx:*` 같은 gated topic 은 무토큰으로 **등록조차 되지 않는다**(등록하면 lease 부재가
+  "무제한"이 되어 무인증 유료 데이터 우회가 된다). 그리고 **현행 iOS 는 `request_id` 와 `id_token`
+  을 싣는다** — 즉 **식별된 요청**이고 flag-off 서버에서도 `topics_disabled` ack 을 받는다.
 - **enforcement는 capability와 분리해야 한다.** 인증 capability를 배포하되 강제하지 않는 중간 상태
   (무토큰은 기존대로 등록되고 만료·재인증이 돌지 않음)가 있어야 dormant→flip이 all-or-nothing이 아니다.
   ⚠️ **강제 전환 시점에 구 클라(무토큰)는 topic을 잃는다** → legacy 유예(S4)와 **같은 시점**에 묶어야 한다.

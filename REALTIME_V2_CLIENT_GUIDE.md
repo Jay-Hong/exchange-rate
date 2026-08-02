@@ -2,8 +2,9 @@
 
 > **상태**: Proposed/Draft (2026-06-25, codex 019efdf0+019efe0b 검토 반영). 신규 topic-consuming 앱 출시용 **단일 핸드오프 계약**.
 > 초기 OPEN 2건 모두 해소: usdt:krw REST bootstrap(§3, `/api/v2/topics/snapshot`) + USDT/KRX same-bucket ordering(§5, `rate_changed_at` 노출).
-> ⛔ **"서버 측 계약 closed" 는 그 2건에 한정된다** (2026-08-01 축소). 서버 §8 WS 인증(1C)은
-> **진행 중**이다. 현재 land 된 것:
+> ⛔ **"서버 측 계약 closed" 는 그 2건에 한정된다** (2026-08-01 축소). 서버 §8 WS 인증(1C)의
+> **활성화 필수 부분은 완료**이고, `reauth_required` / 만료 lease registry 제거 **2건은 후속 계약**
+> 으로 분리한다(2026-08-03 — 근거는 아래 "아직 없는 것" 절). 현재 land 된 것:
 > `subscription_ack`/`subscription_error` + 종결 프레임 계약(§8-B-term) / **topic 별 lease**
 > (ack 에 `lease_id` + **남은** duration, 상한 15분) / **uid 를 lease 에 바인딩** /
 > **모든 발행 경로가 지나는 lease 게이트**(만료 시 전송 0) /
@@ -23,6 +24,12 @@
 >   로 접히고 **registry 는 하나도 바뀌지 않는다**(무료 topic 조차 새로 등록되지 않는다).
 >
 > ⛔ **아직 없는 것**: `reauth_required` 프레임 / 만료 시 registry 제거.
+> ⚠️ **이 2건은 활성화 blocker 로 분류하지 않는다**(2026-08-03). 만료는 **모든 발행이 지나는 단일
+> lease gate 가 fail-closed** 로 막아 **데이터가 새지 않고 조용해질 뿐**이고, 클라는 만료 **전에**
+> 선제 재인증한다(`lease − 180s − U(0,60)`, `duration: 0` = 즉시 재인증, bounded retry + watchdog).
+> registry 잔여 항목도 연결 종료 시 사라진다. ⛔ **남는 위험은 하나** — 재인증이 반복 실패하면
+> 그 topic 이 **서버 신호 없이 조용히 멈춘다**. 그게 `reauth_required` 가 메울 공백이고, 운영
+> GO 시점에 이 위험을 판단한다.
 > ✅ **클라 축은 land 했다**(2026-08-02~03): **lease 소비**(최단 만료 기준 재인증 타이머,
 > `duration: 0` = "지금 재인증" — iOS `1f6040e`/`a826dbf`) · **request timeout**(송신 직후 무장,
 > 20초 무응답 → 같은 연결에서 새 `request_id` 재전송, 기존 재시도 상한 공유 — `cbc1c0f`/`f1e72c9`) ·
@@ -32,8 +39,10 @@
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
 > `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
 > `TOPIC_DISPATCHER_ENABLED=false`로 되돌렸다(2026-07-25 재확인: `topics/snapshot` → 404 `topics_disabled`).
-> 재활성화 선행 3조건(§1): ①**E3**(REST twin 인증 게이트, 2026-07-25 land) ②WS 인증(1C)
-> ③**클라 bootstrap 3종의 인증 transport 이관** — 그 뒤 별도 운영 GO.
+> 재활성화 선행 3조건(§1): ①**E3**(REST twin 인증 게이트, 2026-07-25 land) ②**WS 인증(1C) —
+> 활성화 필수 부분 land**(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구,
+> 2026-08-02~03; 후속 2건은 위 참조) ③**클라 bootstrap 3종의 인증 transport 이관**(잔여)
+> — 그 뒤 별도 운영 GO.
 > KRX는 2026-07-08부터 독립 topic
 > `krx:usd-krw-futures`(ADR-038 D2 — 구 `KRX_TOPIC_INCLUDE` env 제거). 잔여 = **client release gate**
 > (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).
@@ -275,8 +284,15 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
     에 `krx_entitlement_required`(또는 `premium_required`)로 실리고 기존 구독은 즉시 철회된다.
     ⛔ **그래도 클라 `krx_visible` gate(GET /api/entitlements, ADR-038 Decision 3)는 유지한다.**
     ⚠️ **"1C 서버 land = 클라 gate 제거 가능" 이 아니다.** 위 강제는 `TOPIC_DISPATCHER_ENABLED`
-    가 켜져야 **한 줄이라도 돈다** — 꺼져 있는 동안은 구독 경로 자체가 없다. 제거 조건은
-    **flag ON 이후**다 — 클라의 lease·request timeout 소비는 2026-08-02~03 에 land 했다.
+    가 켜져야 **한 줄이라도 돈다** — 꺼져 있는 동안은 구독 경로 자체가 없다.
+    ⛔ **그리고 flag ON 도 제거 조건이 아니다.** 한때 여기 "제거 조건은 flag ON 이후"라고 적었는데
+    **틀렸다**: flag ON 이 만드는 것은 *"WS subscribe 사전 필터가 중복이 되는 시점"* 일 뿐이다.
+    `krx_visible` 은 WS 뿐 아니라 **그래프 series · 소스 목록 · 알림 선택지**까지 gate 하는데,
+    `/api/v2/graph/*` 는 **여전히 무인증**이다(KRX 는 `krx_visible` **파라미터** default false 로만
+    빠진다). 그 표면에서는 클라 gate 가 아직 **1차 강제선**이다.
+    → **전역 gate 제거 조건 = graph v2 에 서버 per-user 강제가 생긴 뒤**(ADR-039 Stage B 계열).
+    ⚠️ 클라의 lease·request timeout 소비는 2026-08-02~03 에 land 했다(그건 제거 조건이 아니라
+    활성화 조건이었다).
 
 **snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` = 1 entry. 작음.
 
