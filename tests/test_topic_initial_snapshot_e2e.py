@@ -1224,7 +1224,7 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             logs = stack.enter_context(self.assertLogs(level="DEBUG"))
             # ⛔ 이 두 값은 **서로 배타**여야 한다. 예전 형태(`closed = True` 를 try 와 except
             #    양쪽에서 세팅)는 **항상 참**이라 `identity.bind` 를 통째로 지워도 통과했다(실측).
-            disconnected, saw_second_ack = False, False
+            box = {}
             with contextlib.suppress(WebSocketDisconnect):
                 with self.client.websocket_connect("/ws") as ws:
                     _receive_json_or_fail(ws, self.fail)
@@ -1233,17 +1233,29 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                     self._receive_for(ws, "x-uid-1")
                     ws.send_json({"type": "subscribe", "request_id": "x-uid-2",
                                   "id_token": "tok-b", "topics": [A]})
-                    try:
-                        while True:
-                            frame = ws.receive_json()
-                            if frame.get("request_id") == "x-uid-2":
-                                saw_second_ack = True      # 다른 UID 를 **받아줬다**
-                                break
-                    except WebSocketDisconnect:
-                        disconnected = True
-        self.assertFalse(saw_second_ack,
-                         "다른 UID 의 구독에 응답했다 — 한 소켓이 두 사람의 권한을 섞는다")
-        self.assertTrue(disconnected, "cross-UID 인데 연결이 살아 있다 — 소켓 소유권이 없다")
+
+                    def drain():
+                        try:
+                            while True:
+                                if ws.receive_json().get("request_id") == "x-uid-2":
+                                    return "second_ack"     # 다른 UID 를 **받아줬다**
+                        except WebSocketDisconnect:
+                            return "disconnected"
+                        except Exception as exc:            # noqa: BLE001 — 진단용
+                            return f"error:{type(exc).__name__}"
+
+                    # ⛔ **daemon thread 로 시간을 건다.** 그냥 읽으면 "닫지도 답하지도 않는"
+                    #    회귀에서 테스트가 **red 가 아니라 행**이 된다(실측: `close(1008)` 를
+                    #    지운 변이가 10분 타임아웃까지 매달렸다). 행은 CI 에서 실패보다 나쁘다.
+                    worker = threading.Thread(
+                        target=lambda: box.update(outcome=drain()), daemon=True)
+                    worker.start()
+                    worker.join(timeout=5)
+        outcome = box.get("outcome", "hung")
+        self.assertNotEqual(outcome, "second_ack",
+                            "다른 UID 의 구독에 응답했다 — 한 소켓이 두 사람의 권한을 섞는다")
+        self.assertEqual(outcome, "disconnected",
+                         f"cross-UID 인데 연결이 정리되지 않았다 — outcome={outcome}")
         errors = [r for r in logs.records if r.levelno >= 40]
         self.assertEqual(errors, [],
                          f"정상 정책 종료가 ERROR 를 남겼다 — {[r.getMessage() for r in errors]}")
