@@ -766,6 +766,15 @@ def _publish_on_app_loop(ws, topic, payload):
     return portal.call(dispatcher.publish_topic, topic, payload)
 
 
+def _granted_verdict():
+    """판정기를 통과한 것처럼 보이는 최소 verdict (관측 시각은 현재 mono 축)."""
+    from app import topic_authorization as ta
+    from app.clock import system_clock
+
+    now = system_clock().mono()
+    return ta.Granted(premium_observed_at_mono=now, entitlement_observed_at_mono=now)
+
+
 def _registry_connection_count():
     """구독 중인 연결 수 (registry 는 모듈 전역 싱글톤이라 **증분**으로만 의미가 있다).
 
@@ -850,6 +859,20 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             # ⛔ premium을 True로 patch하지 **않는다**. FX는 per-user 판정 대상이 아니므로
             #    이 경로가 premium을 부르면 그것이 결함이다. 부르면 실패하게 두면 그 실수가
             #    **실제 RevenueCat 호출** 대신 red가 된다(patch를 제거하면 실제 호출이 나간다).
+            # ⛔ **외부 호출 fail-closed.** 실측: 새 인가 경로가 `fetch_revenuecat_result` 를
+            #    직접 부르는데 harness 는 `main.require_premium` 만 fake 해서, KRX E2E 가
+            #    **실제 RevenueCat 에 HTTPS 요청을 보냈다**(GET /v1/subscribers/... 200 OK).
+            #    이름으로 지키는 fake 는 경로가 바뀌면 아무것도 막지 못한다 → leaf 를 막는다.
+            "revenuecat_must_not_be_called": patch(
+                "app.subscription.fetch_revenuecat_result",
+                new=AsyncMock(side_effect=AssertionError(
+                    "이 테스트는 RevenueCat 을 부르면 안 된다 — 부른다면 fake 를 명시하라")),
+            ),
+            "db_session_must_not_be_opened": patch(
+                "app.database.SessionLocal",
+                side_effect=AssertionError(
+                    "이 테스트는 DB 세션을 열면 안 된다 — 부른다면 fake 를 명시하라"),
+            ),
             "premium_must_not_be_called": patch(
                 "app.main.require_premium",
                 new=AsyncMock(side_effect=AssertionError(
@@ -877,6 +900,14 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             param.kind, inspect.Parameter.KEYWORD_ONLY,
             "positional로 바뀌면 인자 순서 실수가 조용히 통과한다",
         )
+        # ⛔ `identity` 도 **기본값 없는 keyword-only** 여야 한다 — 기본값을 주면 주입을
+        #    빠뜨린 순간 UID 결속이 **조용히 사라진다**(cross-UID 가 통과한다).
+        identity_param = inspect.signature(target).parameters["identity"]
+        self.assertIs(
+            identity_param.default, inspect.Parameter.empty,
+            "identity 에 기본값이 생기면 주입 누락이 조용한 결속 소실이 된다",
+        )
+        self.assertIs(identity_param.kind, inspect.Parameter.KEYWORD_ONLY)
 
     def test_authenticated_subscribe_receives_a_subscription_ack(self):
         """⛔ 현재 red 다 — 서버는 `id_token` 을 보지 않고 ack 도 보내지 않는다.
@@ -2081,6 +2112,52 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 self.assertEqual(_receive_json_or_fail(ws, self.fail).get("type"), "snapshot")
                 sent = _publish_on_app_loop(ws, "fx:usd-krw", {"type": "snapshot"})
         self.assertEqual(sent, 1, "무토큰 구독이 발행을 못 받는다 — §E1 이 깨졌다")
+
+    def test_auth_stages_share_one_absolute_deadline(self):
+        """⛔ 단계마다 새 timeout 을 시작하면 상한이 **단계 수만큼 곱해진다**(identity 10s +
+        gated 10s = 20s). config 는 이 값을 "호출자 대기를 끊는 상한"(**단수**)으로 정의한다.
+
+        ⚠️ **sleep 으로 재현하지 않는다**(codex): "0.5초 예산 / 각 단계 0.35초" 식 누적 테스트는
+        CI 부하로 **첫 단계만 예산을 넘겨도 통과**해 거짓 green 이 된다 — 공유 여부를 전혀
+        검증하지 못한다. 대신 `timeout_at` 을 passthrough 로 감싸 **두 호출이 정확히 같은
+        `when` 을 받는지** 본다. 그게 "공유 절대 deadline"의 정의 그 자체다.
+        """
+        from app import topic_dispatcher as dispatcher
+
+        seen_when = []
+        real_timeout_at = asyncio.timeout_at
+
+        def recording_timeout_at(when):
+            seen_when.append(when)
+            return real_timeout_at(when)
+
+        patchers = self._patchers()
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result",
+            new=AsyncMock(return_value=SimpleNamespace(is_premium=True)),
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+            stack.enter_context(patch.object(
+                dispatcher, "authorize_gated_subscription",
+                new=AsyncMock(return_value=_granted_verdict()),
+            ))
+            stack.enter_context(patch.object(dispatcher.asyncio, "timeout_at",
+                                             recording_timeout_at))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "dl-share",
+                              "id_token": "tok", "topics": ["fx:usd-krw", KRX_TOPIC]})
+                self._receive_for(ws, "dl-share")
+
+        self.assertEqual(len(seen_when), 2,
+                         f"인증 단계가 2회 timeout 을 열지 않았다: {seen_when!r}")
+        self.assertEqual(
+            seen_when[0], seen_when[1],
+            "두 단계가 **서로 다른** deadline 을 열었다 — 상한이 단계 수만큼 곱해진다",
+        )
 
     def test_client_message_handling_is_awaited_not_fire_and_forget(self):
         """⛔ **클라가 이 성질에 의존한다** — ack 을 받은 순서대로 상태를 수렴시킨다.

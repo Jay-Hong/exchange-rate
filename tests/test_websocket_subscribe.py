@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, topic_dispatcher
+from app import topic_wire
 from app.topic_dispatcher import handle_client_message as _real_handle_client_message
 
 # 이 파일의 주제는 **무토큰(legacy) 경로**다 — 인증 seam은 그 경로를 타지 않는다.
@@ -32,6 +33,17 @@ def _fresh_registry_swap():
     return original
 
 
+async def _dispatch(ws, raw_text, **kwargs):
+    """`handle_client_message` 를 단위 테스트용 기본값과 함께 부른다.
+
+    ⚠️ `identity` 는 **필수 keyword-only** 다(기본값을 주면 주입을 빠뜨린 순간 UID 결속이
+    조용히 사라진다). 테스트마다 새 holder 를 만들면 **cross-UID 를 영영 관측할 수 없으므로**,
+    같은 연결을 흉내 내야 하는 테스트는 holder 를 직접 넘긴다.
+    """
+    kwargs.setdefault("identity", topic_wire.ConnectionIdentity())
+    return await handle_client_message(ws, raw_text, **kwargs)
+
+
 class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
@@ -48,14 +60,14 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         """legacy ping text → pong JSON. 기존 동작 보존."""
         ws = MagicMock()
         ws.send_json = AsyncMock()
-        await handle_client_message(ws, "ping")
+        await _dispatch(ws, "ping")
         ws.send_json.assert_awaited_once_with({"type": "pong"})
 
     async def test_ping_does_not_register_topics(self):
         """ping은 registry에 영향 X."""
         ws = MagicMock()
         ws.send_json = AsyncMock()
-        await handle_client_message(ws, "ping")
+        await _dispatch(ws, "ping")
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
 
     # ─────────────────────────────────────────────────────────────
@@ -67,7 +79,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         ws = MagicMock()
         ws.send_json = AsyncMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "subscribe", "topics": ["usdt:krw"]}'
             )
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
@@ -79,7 +91,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         # 사전 등록 — FF=true 컨텍스트에서 등록됐다고 가정
         topic_dispatcher.registry.register(ws, ["usdt:krw"])
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "unsubscribe", "topics": ["usdt:krw"]}'
             )
         # 변경 X
@@ -97,7 +109,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         # send_initial_snapshots를 no-op으로 patch(snapshot 로직은 test_topic_initial_snapshot.py).
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
              patch("app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()):
-            await handle_client_message(
+            await _dispatch(
                 ws,
                 '{"type": "subscribe", "topics": ["usdt:krw", "krx:usd-krw-futures"]}',
             )
@@ -117,7 +129,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
              patch(
                  "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
              ) as mock_snap:
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "subscribe", "topics": ["fx:usd-krw"]}'
             )
         mock_snap.assert_awaited_once_with(ws, ["fx:usd-krw"])
@@ -130,7 +142,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         ws = MagicMock()
         topic_dispatcher.registry.register(ws, ["usdt:krw", "krx:usd-krw-futures"])
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "unsubscribe", "topics": ["usdt:krw"]}'
             )
         self.assertEqual(
@@ -147,7 +159,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         ws = MagicMock()
         ws.send_json = AsyncMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(ws, "garbage{")
+            await _dispatch(ws, "garbage{")
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
         ws.send_json.assert_not_called()
 
@@ -156,16 +168,16 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         ws = MagicMock()
         ws.send_json = AsyncMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(ws, '["subscribe", "usdt:krw"]')
-            await handle_client_message(ws, '"hello"')
-            await handle_client_message(ws, "42")
+            await _dispatch(ws, '["subscribe", "usdt:krw"]')
+            await _dispatch(ws, '"hello"')
+            await _dispatch(ws, "42")
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
 
     async def test_unknown_type_ignored(self):
         """forward-compat: 모르는 type은 조용히 무시 (예외 X, registry 무변경)."""
         ws = MagicMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "future_feature", "topics": ["x"]}'
             )
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
@@ -174,14 +186,14 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         """topics 필드 누락 → debug 로그 + 무시."""
         ws = MagicMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(ws, '{"type": "subscribe"}')
+            await _dispatch(ws, '{"type": "subscribe"}')
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
 
     async def test_subscribe_with_non_list_topics_ignored(self):
         """topics가 string 등 list가 아니면 무시."""
         ws = MagicMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "subscribe", "topics": "usdt:krw"}'
             )
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
@@ -190,7 +202,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         """topics 안에 string 아닌 element (int 등) 섞여 있으면 전체 무시."""
         ws = MagicMock()
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
-            await handle_client_message(
+            await _dispatch(
                 ws, '{"type": "subscribe", "topics": ["usdt:krw", 42]}'
             )
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)

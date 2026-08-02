@@ -37,9 +37,16 @@ from dataclasses import dataclass
 
 from app.clock import system_clock as lease_clock
 from app.topic_lease import (
-    LEASE_MAX_SECONDS,
+    compute_gated_lease_expiry,
     compute_identity_only_lease_expiry,
     is_expired as is_lease_expired,
+)
+from app.topic_authorization import (
+    Denied as GatedDenied,
+    Granted as GatedGranted,
+    Unavailable as GatedUnavailable,
+    UnavailableKind,
+    authorize_gated_subscription,
 )
 
 
@@ -66,6 +73,7 @@ class TopicLease:
 
 from app.topic_wire import (
     SubscribeAuthFailed,
+    SubscribeIdentityConflict,
     build_subscription_ack,
     build_subscription_error,
 )
@@ -81,7 +89,6 @@ from app import config
 logger = logging.getLogger("exchange_rate.topic_dispatcher")
 
 # 설정 결함(판정기 부재) 응답의 retry 동반값. §8-C 는 "동반"만 요구하고 정책은 별도 슬라이스다.
-_CONFIG_FAULT_RETRY_AFTER_SECONDS = config.WS_AUTH_RETRY_AFTER_SECONDS
 
 
 class TopicRegistry:
@@ -338,6 +345,7 @@ async def handle_client_message(
     raw_text: str,
     *,
     authorize_subscribe,
+    identity,
 ) -> None:
     """Client → server WebSocket 메시지 dispatcher (PR Z-2b Stage 2).
 
@@ -552,7 +560,22 @@ async def handle_client_message(
             #    시간만큼 15분 경계가 **늘어난다**(fail-open). 검증 결과가 반영하는 상태는
             #    아무리 늦어도 호출 시작 시점이므로, 그쪽이 보수적이다.
             identity_observed_at_mono = lease_clock().mono()
-            async with asyncio.timeout(config.WS_AUTH_WIRE_DEADLINE_SECONDS) as deadline_cm:
+            # ⛔ **인증 단계 전체에 하나의 절대 deadline** 이다. 단계마다 새 timeout 을
+            #    시작하면 상한이 단계 수만큼 곱해진다 — config 는 이 값을 **"identity + gated
+            #    인가의 누적 상한"** 으로 정의하는데, identity 9초 + gated 9초가 각각 통과하면
+            #    18초가 되어 그 정의를 어긴다.
+            #
+            # ⚠️ **범위는 "인증 단계 누적"까지다** — registry 변경과 ack 송신은 이 창 **밖**이라
+            #    "10초 안에 ack"을 보장하지 않는다. 그 보장을 원하면 창을 넓혀야 하고, 그건
+            #    별도 결정이다(codex Medium).
+            # ⛔ 한때 이 주석이 iOS `topicCommandTimeout` 을 근거로 들었는데 **그 상수는
+            #    존재하지 않는다**(실측 0건) — **폐기한 reconciler 계획**의 값을 배포된 코드처럼
+            #    인용했다. 클라의 명령 응답 timeout 은 아직 **미구현**이고, 구현될 때 이 상한을
+            #    전제로 잡아야 한다.
+            request_deadline_at = (
+                asyncio.get_running_loop().time() + config.WS_AUTH_WIRE_DEADLINE_SECONDS
+            )
+            async with asyncio.timeout_at(request_deadline_at) as deadline_cm:
                 uid = await authorize_subscribe(id_token)
         except asyncio.TimeoutError:
             if not deadline_cm.expired():
@@ -586,86 +609,149 @@ async def handle_client_message(
                 )
             )
             return
-        # ⚠️ uid 는 이제 **lease 에 바인딩된다**(아래). 한때 "소비자가 없어 저장하지 않는다"고
-        #    적었는데, 이 슬라이스가 그 소비자를 만들었다.
+        # ⛔ **UID 결속은 여기다** — identity 성공 직후, premium 판정 **전**. Denied/Unavailable
+        #    요청도 같은 소켓 소유권을 유지해야 한다.
+        try:
+            identity.bind(uid)
+        except SubscribeIdentityConflict:
+            # ⚠️ close 를 시도하되 **실패해도 예외를 올린다** — 올리지 않으면 endpoint loop 가
+            #    닫힌 소켓을 다시 읽어 `RuntimeError` 를 내고, 정상적인 정책 종료가 매번
+            #    **ERROR traceback** 을 남긴다(실측).
+            # ⛔ `subscription_error` 프레임은 보내지 않는다 — cross-UID 의 결과는 프레임이
+            #    아니라 연결 종료다(§8-C 어휘에 해당 코드가 없다).
+            try:
+                await websocket.close(code=1008)
+            except Exception:
+                logger.debug("cross-UID close 실패 — 예외는 그대로 올린다", exc_info=True)
+            raise
 
         # ⛔ **"게이트가 아니면 허용"은 틀렸다.** 구 판정은 미지원 topic(`not:a:topic`)까지
         #    accept하고 registry에 등록했다(실측 재현). 지원 집합을 **명시적으로** 봐야 한다.
         supported = set(supported_snapshot_topics())   # flag-aware (KRX는 배포 flag 조건부)
         gated = per_user_gated_snapshot_topics()       # per-user 판정이 필요한 topic
 
-        # ⛔ **판정 불가는 per-topic이 아니라 전체-요청이다**(§8-C). per-user 판정이 필요한 topic이
-        #    지원 집합에 **들어 있는데**(배포 flag on) 이 슬라이스엔 판정기가 없다 — 그건 transient가
-        #    아니라 **설정 결함**이므로 운영자 신호(ERROR)를 내고 요청을 접는다. 한때 이 경우에도
-        #    `topic_unavailable`을 돌려줬는데 **틀렸다**(codex): §8-C에서 그 코드는 "topic 자체가
-        #    서버에서 비활성(개별 flag off)"을 뜻하고, flag가 켜진 상태에 그걸 쓰면 운영자가 flag를
-        #    보고 코드와 모순을 겪는다.
-        unjudgeable = [t for t in topics if t in gated and t in supported]
-        if unjudgeable:
-            logger.error(
-                "per-user 판정이 필요한 topic이 지원 집합에 있으나 WS 판정기가 없다 — 설정 결함",
-                extra={"topics": unjudgeable},
-            )
-            # ⚠️ 설정 결함 응답도 **같은 생성 경로**를 지난다 — 오류 프레임이 두 형태로
-            #    갈리지 않게 하는 것이 `build_subscription_error` 의 존재 이유다.
-            await websocket.send_json(
-                build_subscription_error(
-                    request_id=request_id,
-                    error="temporarily_unavailable",
-                    retry_after_seconds=_CONFIG_FAULT_RETRY_AFTER_SECONDS,
-                )
-            )
-            return
-
-        accepted_names, rejected = [], []
+        # ── ① 분류 — registry 는 **아직 건드리지 않는다** ────────────────────────
+        gated_requested = [t for t in topics if t in gated and t in supported]
+        free_accepted, rejected = [], []
         for topic in topics:                          # 요청 순서 보존
+            if topic in gated and topic in supported:
+                continue                              # verdict 가 결정한다(②)
             if topic in gated or not is_snapshot_topic_enabled(topic):
                 # 배포/개별 flag가 off라 지금 발사되지 않는 topic — §8-C `topic_unavailable`.
-                # (gated인데 여기 온 것은 supported 밖 = 배포 flag off인 경우뿐이다. 위 guard 참조.)
+                # (gated인데 여기 온 것은 supported 밖 = 배포 flag off인 경우뿐이다.)
                 rejected.append((topic, "topic_unavailable"))
             elif topic not in supported:
                 rejected.append((topic, "unknown_topic"))
             else:
-                accepted_names.append(topic)
+                free_accepted.append(topic)
 
+        # ── ② gated 인가 판정 ────────────────────────────────────────────────
+        verdict = None
+        # ⚠️ deadline verdict 는 **판정기를 지나지 않는다** → 그 경로의 transient WARNING 을
+        #    아무도 남기지 않는다. 이 flag 가 아래 한 줄의 레벨을 정한다(문자열 keying 회피).
+        deadline_hit = False
+        if gated_requested:
+            try:
+                # ⛔ 인가 구간에도 **상한**이 필요하다. RC 는 자체 timeout 이 있지만 entitlement
+                #    `to_thread` 는 없고, 풀 획득 기본 대기(30s)가 wire deadline(10s)보다 길다 —
+                #    상한이 없으면 §8-B-term "식별된 요청은 반드시 종결된다"가 깨진다.
+                # ⚠️ **같은 절대 deadline** 을 공유한다 — identity 가 이미 쓴 시간만큼 예산이
+                #    줄어든 상태로 시작한다.
+                async with asyncio.timeout_at(request_deadline_at) as gate_cm:
+                    verdict = await authorize_gated_subscription(
+                        uid, mono=lambda: lease_clock().mono()
+                    )
+            except asyncio.TimeoutError:
+                if not gate_cm.expired():
+                    raise                              # 판정기 내부 TimeoutError — 분류 불가
+                deadline_hit = True
+                verdict = GatedUnavailable(
+                    UnavailableKind.TRANSIENT, "authorization_deadline"
+                )
+
+            if isinstance(verdict, GatedUnavailable):
+                # ⛔ **registry 를 하나도 바꾸지 않고** 전체 요청을 접는다(§8-C whole-request).
+                #    무료 topic 조차 **새로 등록하지 않는다** — 판정 불가는 per-topic 이 아니다.
+                persistent = verdict.kind is UnavailableKind.PERSISTENT
+                # ⚠️ **원인 로깅은 판정기 소유**(레벨 + traceback). 여기서는 **wire 결과**만
+                #    남긴다 — 둘 다 레벨을 정하면 영구 장애 하나에 ERROR 가 두 건이 되어
+                #    운영 신호가 희석된다.
+                # ⚠️ 기본은 **wire 결과만**(INFO) — 원인 로그는 판정기/leaf 소유다.
+                #    다만 deadline 은 그쪽을 지나지 않으므로 여기가 유일한 신호다 → WARNING.
+                (logger.warning if deadline_hit else logger.info)(
+                    "gated topic 인가 판정 불가 — 전체 요청을 접는다",
+                    extra={"reason": verdict.reason, "kind": verdict.kind.value,
+                           "topics": gated_requested},
+                )
+                await websocket.send_json(
+                    build_subscription_error(
+                        request_id=request_id,
+                        error="temporarily_unavailable",
+                        retry_after_seconds=(
+                            config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
+                            if persistent
+                            else config.WS_AUTH_RETRY_AFTER_SECONDS
+                        ),
+                    )
+                )
+                return
+
+        # ── ③ registry 변경 — 여기서만, 그리고 한 번에 ──────────────────────────
+        # ⛔ **`now` 는 1회만 읽는다.** topic 마다 읽으면 같은 요청 안에서 만료가 갈린다.
+        now_mono = lease_clock().mono()
         leases: Dict[str, TopicLease] = {}
-        if accepted_names:
-            # ⛔ **`now` 는 여기서 1회만 읽는다.** topic 마다 읽으면 같은 요청 안에서 만료가
-            #    갈린다.
-            # ⚠️ 3-way min 의 세 항에 **같은 값**을 넘긴다. 이 슬라이스에서 실제 관측은
-            #    identity 검증 시각 하나뿐이고, 여기서 accept 되는 topic 들은 per-user
-            #    premium 판정 대상이 아니다(gated topic 은 위에서 이미 접혔다). 따라서
-            #    premium 항은 **구속하지 않는 값**이어야 하고 `now` 가 그것이다 —
-            #    "방금 premium 을 확인했다"는 주장이 아니다.
-            now_mono = lease_clock().mono()
-            # ⚠️ **identity 축 하나**로 계산한다 — 여기까지 오는 topic 은 per-user 판정
-            #    대상이 아니다(gated 는 위에서 접힌다). 유료 topic 을 accept 하게 되면
-            #    `compute_lease_expiry` 를 **실제 premium 관측 시각과 함께** 불러야 한다.
-            expires_at_mono = compute_identity_only_lease_expiry(
+
+        if isinstance(verdict, GatedDenied):
+            # ⛔ **즉시 철회.** 방금 authoritative 한 부정 관측을 얻었다 — 안 지우면 기존 lease 가
+            #    만료될 때까지 계속 발행되고, ack 이 `rejected_topics` 와 `active_subscriptions`
+            #    로 **서로 모순된 두 문장**을 말한다.
+            registry.unregister(websocket, gated_requested)
+            rejected.extend((topic, verdict.error) for topic in gated_requested)
+        elif isinstance(verdict, GatedGranted):
+            # ⚠️ **4축** — identity·premium·entitlement 는 서로 다른 권위다.
+            gated_expiry = compute_gated_lease_expiry(
+                now_mono=now_mono,
+                identity_verified_at_mono=identity_observed_at_mono,
+                premium_verified_at_mono=verdict.premium_observed_at_mono,
+                entitlement_verified_at_mono=verdict.entitlement_observed_at_mono,
+            )
+            leases.update({
+                topic: TopicLease(lease_id=uuid.uuid4().hex, uid=uid,
+                                  expires_at_mono=gated_expiry)
+                for topic in gated_requested
+            })
+
+        if free_accepted:
+            # ⚠️ **identity 축 하나** — 여기 오는 topic 은 per-user 판정 대상이 아니다.
+            free_expiry = compute_identity_only_lease_expiry(
                 now_mono=now_mono,
                 identity_verified_at_mono=identity_observed_at_mono,
             )
-            leases = {
-                topic: TopicLease(
-                    lease_id=uuid.uuid4().hex,
-                    uid=uid,
-                    expires_at_mono=expires_at_mono,
-                )
-                for topic in accepted_names
-            }
+            leases.update({
+                topic: TopicLease(lease_id=uuid.uuid4().hex, uid=uid,
+                                  expires_at_mono=free_expiry)
+                for topic in free_accepted
+            })
+
+        accepted_set = set(leases)
+        accepted_names = [t for t in topics if t in accepted_set]   # 요청 순서 보존
+        if accepted_names:
             registry.register(websocket, accepted_names, leases=leases)
 
+        # ── ④ 모든 변경이 끝난 뒤 **정확히 한 번** snapshot ──────────────────────
         # ⚠️ **ack이 데이터보다 먼저다.** snapshot을 먼저 보내면 클라가 ack 전에 데이터를 받아
-        #    "요청이 수락됐는지" 모르는 상태로 처리하게 된다. registry 등록은 ack 앞이어야
-        #    `active_subscriptions`가 연결의 **최종 상태**를 담을 수 있다(§8-B).
+        #    "요청이 수락됐는지" 모르는 상태로 처리하게 된다.
+        # ⛔ 이 지점이 ③ **뒤**여야 한다 — mixed [free, KRX] 에서 Denied 를 처리하고 무료 등록까지
+        #    마친 상태를 담아야 `rejected_topics` 와 `active_subscriptions` 가 모순되지 않는다.
+        active = registry.get_subscriptions(websocket)
         await websocket.send_json(
             build_subscription_ack(
                 request_id=request_id,
                 operation="subscribe",
                 accepted=accepted_names,
                 rejected=rejected,
-                active=registry.get_subscriptions(websocket),
-                leases=_lease_wire_map(websocket, registry.get_subscriptions(websocket)),
+                active=active,
+                leases=_lease_wire_map(websocket, active),
             )
         )
         if accepted_names:

@@ -566,10 +566,18 @@ WS 판정기가 없으면, 그건 transient가 아니라 **설정 결함**이다
 `temporarily_unavailable`. `topic_unavailable`을 쓰면 안 된다 — 그 코드는 "개별 flag off"를 뜻하고,
 flag가 켜진 상태에 쓰면 운영자가 flag를 보고 코드와 모순을 겪는다.
 
-⚠️ **timeout 은 다음 슬라이스 필수 — 그리고 축이 두 개다** (2026-07-30 정정):
+✅ **timeout — 구현 완료. 축은 두 개이고 계약은 아래와 같다** (2026-07-30 도입 / 2026-08-02 범위 축소):
 
-1. **wire deadline** — 호출자가 기다리는 시간의 상한. **dispatcher 에** 걸어야 한다: E2E harness 가
-   verifier 를 통째로 fake 하므로 verifier 안에 두면 `/ws` 경계에서 영원히 관측되지 않는다.
+1. **wire deadline** — **identity + gated 인가의 누적 상한**. **dispatcher 에** 걸어야 한다:
+   E2E harness 가 verifier 를 통째로 fake 하므로 verifier 안에 두면 `/ws` 경계에서 영원히
+   관측되지 않는다.
+   ⚠️ **범위 축소 (2026-08-02)**: 한때 "호출자가 기다리는 시간의 상한"이라고 적어 **전체 응답
+   상한**처럼 읽혔는데, 실제로 이 창이 덮는 것은 **인증 두 단계까지**다 — registry 변경과 ack
+   송신은 밖이다. 그 보장을 원하면 창을 넓혀야 하고 그건 별도 결정이다.
+   ⛔ **단계마다 새로 시작하지 않는다.** 그러면 상한이 단계 수만큼 곱해진다(identity 10s +
+   gated 10s = 20s). dispatcher 가 요청 시작에 절대 시각을 잡아 두 단계가 **공유**한다 —
+   그 성질은 `timeout_at` 의 `when` 이 두 호출에서 같은지로 잠근다(시간 의존 테스트는
+   CI 부하에서 거짓 green 이 된다).
 2. **SDK transport 상한** — 1번만으론 부족하다. `asyncio.to_thread` 작업은 **취소되지 않으므로**
    호출자가 포기해도 스레드는 계속 돌며 **공유 executor** 슬롯을 점유한다(직접 재현). 그 pool 은
    `min(32, cpu+4)` 이고 리포의 `to_thread` 호출부가 함께 쓴다 — 인증 대기가 snapshot·DB 작업까지
@@ -737,8 +745,38 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⛔ 클라 계약: `0` = **"즉시 재인증"**(≠ "타이머 없음"). iOS lease 소비 슬라이스에서
       **양방향 테스트**로 잠글 것 — 0 을 무시하면 그 topic 이 조용히 죽는다.
 
-      잔여 = ① **KRX per-user 판정**(실제 premium+entitlement 관측 시각 + socket UID 결속 +
-      성공·거부 E2E) ② **iOS lease 소비**(최단 만료 전 재인증) ③ **request timeout**.
+      잔여 = ① **KRX per-user 판정** ② **iOS lease 소비**(최단 만료 전 재인증) ③ **request timeout**.
+
+      ⚠️ ①의 완료 조건은 **숫자가 아니라 이름 목록**이다("8축" 같은 요약은 provider/DB 의
+      transient·persistent 를 각각 세면 어긋난다 — codex).
+
+      ⛔ **부분 land 금지.** production diff 에는 UID 결속 · cross-UID 종료 · Denied 즉시 철회 ·
+      4축 lease · mixed-request 원자성 · deadline 처리가 이미 들어 있는데, **아래 12개 완료 조건이
+      전부 미검증**이다. (⚠️ "E2E 커버리지 0" 은 **과대 표현**이다 — 공유 deadline 경계 테스트와
+      기존 lease 발행 E2E 는 이미 통과 중이다. 정확히는 **핵심 신규 경로 대부분이 E2E 미검증**이다.)
+      stale 테스트만 교체해 green 을 만들면 *"새 구현이 맞다"* 가 아니라 *"옛 기대값이 사라졌다"* 만
+      증명한다. 아래가 **전부 `[x]` 가 된 뒤에** land 한다.
+
+      ⛔ **checkpoint 브랜치는 `--squash` 로만 합친다.** WIP 커밋 자체가 red 이므로 일반 merge 하면
+      **master 이력에 실패 커밋이 남아 `git bisect` 가 깨진다**. 완료 후
+      `git merge --squash wip/…` 로 단일 diff 를 만들고 **전체 검증 뒤 새 커밋**으로 land 한다.
+
+      E2E 체크리스트 — 테스트 **+ 변이 확인**까지 끝난 것만 `[x]`:
+      - [ ] `entitled_subscription_receives_a_four_axis_lease`
+      - [ ] `premium_denial_skips_the_database_and_revokes_existing_krx`
+      - [ ] `entitlement_denial_revokes_existing_krx`
+      - [ ] `provider_transient_folds_the_whole_request_and_leaves_registry_untouched`
+      - [ ] `provider_persistent_uses_the_long_retry_after` — retry_after=30 ∧ registry 불변 ∧
+        **정책 승격 ERROR 정확히 1건**(leaf 의 원인 로그와 별개 — 그 승격은 leaf 가 모르는 사실이다)
+      - [ ] `db_transient_folds_the_whole_request`
+      - [ ] `db_permanent_folds_the_whole_request`
+      - [ ] `gated_authorization_deadline_warns_once_and_changes_nothing`
+      - [ ] `same_uid_reauthentication_succeeds`
+      - [ ] `cross_uid_closes_the_connection_without_error_logs`
+      - [ ] `mixed_request_keeps_free_topics_when_krx_is_denied`
+      - [ ] `mixed_request_registers_nothing_when_authorization_is_unavailable`
+      ⛔ 철회 축들은 **시계를 전진시키지 않은 채** 검증한다 — 전진시키면 만료 게이트가 대신
+      통과시켜 단언이 공허해진다.
       그 전까지 flag off 유지.
       — A1/A2 **산술** land(2026-07-27, `app/clock.py` + `app/topic_lease.py`, 배포 없음).
       ⛔ 구 `strict cache → 3-state verifier → single-flight` 순서는 ADR-040에서 **폐기**됐다.

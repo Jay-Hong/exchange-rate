@@ -573,7 +573,10 @@ REVENUECAT_WEBHOOK_AUTH_KEY = os.getenv("REVENUECAT_WEBHOOK_AUTH_KEY", "")
 # 분리해서** 측정 → `T = p99 × 3`.
 WS_AUTH_HTTP_TIMEOUT_SECONDS = 5
 
-# ① wire deadline — dispatcher 가 호출자 대기를 끊는 상한. **측정 없음**(= 2T).
+# ① wire deadline — **identity + gated 인가의 누적 상한**. **측정 없음**(= 2T).
+# ⚠️ 범위 주의: registry 변경과 ack 송신은 이 창 **밖**이다 — "이 시간 안에 ack"을 보장하지
+#    않는다. 그리고 단계마다 새로 시작하지 않는다(그러면 상한이 단계 수만큼 곱해진다) —
+#    dispatcher 가 요청 시작에 절대 시각을 잡아 두 단계가 **공유**한다.
 WS_AUTH_WIRE_DEADLINE_SECONDS = 10
 
 # §8-C `temporarily_unavailable` 동반값 (일시 장애).
