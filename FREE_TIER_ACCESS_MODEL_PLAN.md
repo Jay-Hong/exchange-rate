@@ -765,8 +765,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       - [ ] `entitled_subscription_receives_a_four_axis_lease`
       - [ ] `premium_denial_skips_the_database_and_revokes_existing_krx`
       - [ ] `entitlement_denial_revokes_existing_krx`
-      - [ ] `provider_transient_folds_the_whole_request_and_leaves_registry_untouched`
-      - [ ] `provider_persistent_uses_the_long_retry_after` — retry_after=30 ∧ registry 불변 ∧
+      - [x] `provider_transient_folds_the_whole_request_and_leaves_registry_untouched`
+      - [x] `provider_persistent_uses_the_long_retry_after` — retry_after=30 ∧ registry 불변 ∧
         **정책 승격 ERROR 정확히 1건**(leaf 의 원인 로그와 별개 — 그 승격은 leaf 가 모르는 사실이다)
       - [ ] `db_transient_folds_the_whole_request`
       - [ ] `db_permanent_folds_the_whole_request`
