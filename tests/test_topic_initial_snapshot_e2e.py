@@ -995,7 +995,7 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         )
 
     def _existing_then_failing_request(self, rc_result, *, request_id, expect_logs=None,
-                                       entitlement_error=None):
+                                       entitlement_error=None, rc_override=None):
         """무료 구독 A 를 **먼저 만든 뒤** `[새 무료 B, KRX]` 요청을 실패시킨다.
 
         ⛔ 빈 registry 에서 `before == after == 0` 만 보면 **"불변"이 아니라 "증가 안 함"** 만
@@ -1005,7 +1005,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         A, B = "fx:usd-krw", "fx:jpy-krw"
         patchers = self._patchers()
         patchers["revenuecat_must_not_be_called"] = patch(
-            "app.subscription.fetch_revenuecat_result", new=AsyncMock(return_value=rc_result)
+            "app.subscription.fetch_revenuecat_result",
+            new=(rc_override if rc_override is not None else AsyncMock(return_value=rc_result)),
         )
         if entitlement_error is not None:
             # ⚠️ DB 축을 고장 낼 때만 — 세션은 열리고 **쿼리에서** 깨져야 한다(관측 시각은 이미 찍힌 뒤).
@@ -1149,6 +1150,127 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(len(logs.records), 1,
                          f"영구 DB 결함의 ERROR 가 정확히 1건이 아니다 — {logs.output}")
         self._assert_whole_request_folded(counts)
+
+    def test_gated_authorization_deadline_warns_once_and_changes_nothing(self):
+        """⛔ 인가가 창을 넘기면 **판정 불가**다 — 여기가 유일한 신호라 WARNING 1건이어야 한다.
+
+        ⚠️ identity 단계의 deadline WARNING 과 **다른 지점**이다. 그쪽은 이미 로그를 남기지만
+        gated 단계는 판정기를 지나지 않아 dispatcher 가 유일한 소유자다.
+        """
+        from app import subscription
+
+        async def never_returns(user_id, **kw):
+            await asyncio.sleep(3600)
+            return subscription.Determined(is_premium=True)          # 도달 불가
+
+        with patch.object(config, "WS_AUTH_WIRE_DEADLINE_SECONDS", 0.05):
+            with self.assertLogs("exchange_rate.topic_dispatcher", level="WARNING") as logs:
+                frame, counts, _ = self._existing_then_failing_request(
+                    None, request_id="gated-deadline", rc_override=never_returns)
+        self.assertEqual(frame.get("error"), "temporarily_unavailable")
+        self.assertEqual(frame.get("retry_after_seconds"), config.WS_AUTH_RETRY_AFTER_SECONDS,
+                         "deadline 은 transient 다 — 영구 장애용 긴 간격을 주면 안 된다")
+        warnings = [r for r in logs.records if "판정 불가" in r.getMessage()]
+        self.assertEqual(len(warnings), 1,
+                         f"gated deadline WARNING 이 정확히 1건이 아니다 — {logs.output}")
+        self._assert_whole_request_folded(counts)
+
+    def test_same_uid_reauthentication_succeeds(self):
+        """⛔ 같은 UID 의 재인증은 **정상**이다 — 토큰 갱신마다 연결을 끊으면 lease 갱신 자체가
+        불가능해진다."""
+        A, B = "fx:usd-krw", "fx:jpy-krw"
+        with contextlib.ExitStack() as stack:
+            for patcher in self._patchers().values():
+                stack.enter_context(patcher)
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "reauth-1",
+                              "id_token": "tok-old", "topics": [A]})
+                first = self._receive_for(ws, "reauth-1")
+                ws.send_json({"type": "subscribe", "request_id": "reauth-2",
+                              "id_token": "tok-new", "topics": [B]})
+                second = self._receive_for(ws, "reauth-2")
+                counts = {k: ws.portal.call(topic_dispatcher.registry.subscriber_count, k)
+                          for k in (A, B)}
+                ws.send_text("ping")
+                # ⚠️ subscribe 가 만든 snapshot 프레임이 앞에 있을 수 있다 — **유형으로** 찾는다.
+                pong = None
+                for _ in range(6):
+                    if _receive_json_or_fail(ws, self.fail).get("type") == "pong":
+                        pong = "pong"
+                        break
+        self.assertEqual([x["topic"] for x in first["accepted_topics"]], [A])
+        self.assertEqual([x["topic"] for x in second["accepted_topics"]], [B],
+                         "같은 UID 재인증이 거부됐다")
+        self.assertEqual(sorted(x["topic"] for x in second["active_subscriptions"]),
+                         sorted([A, B]),
+                         "재인증이 기존 구독을 잃었다")
+        self.assertEqual(counts, {A: 1, B: 1})
+        self.assertEqual(pong, "pong", "같은 UID 재인증이 연결을 끊었다")
+
+    def test_cross_uid_closes_the_connection_without_error_logs(self):
+        """⛔ 다른 UID 는 **연결 종료**다(§8-C 어휘에 코드가 없다). 그리고 그 정상 정책 종료가
+        ERROR traceback 을 남기면 안 된다 — 남기면 운영 신호가 매번 오염된다."""
+        A = "fx:usd-krw"
+        uids = iter(["uid-first", "uid-second"])
+        patchers = self._patchers()
+        patchers["verify_token"] = patch("app.main.verify_ws_subscribe_token",
+                                         new=AsyncMock(side_effect=lambda *a, **k: next(uids)))
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            # ⚠️ 루트에서 잡는다 — 어느 모듈이 ERROR 를 내든 걸린다.
+            logs = stack.enter_context(self.assertLogs(level="DEBUG"))
+            closed = False
+            try:
+                with self.client.websocket_connect("/ws") as ws:
+                    _receive_json_or_fail(ws, self.fail)
+                    ws.send_json({"type": "subscribe", "request_id": "x-uid-1",
+                                  "id_token": "tok-a", "topics": [A]})
+                    self._receive_for(ws, "x-uid-1")
+                    ws.send_json({"type": "subscribe", "request_id": "x-uid-2",
+                                  "id_token": "tok-b", "topics": [A]})
+                    with self.assertRaises(Exception):
+                        for _ in range(4):
+                            _receive_json_or_fail(ws, self.fail)
+                    closed = True
+            except Exception:
+                closed = True
+        self.assertTrue(closed, "cross-UID 인데 연결이 살아 있다 — 소켓 소유권이 없다")
+        errors = [r for r in logs.records if r.levelno >= 40]
+        self.assertEqual(errors, [],
+                         f"정상 정책 종료가 ERROR 를 남겼다 — {[r.getMessage() for r in errors]}")
+
+    def test_mixed_request_keeps_free_topics_when_krx_is_denied(self):
+        """⛔ per-topic 거부는 **같은 요청의 무료 topic 을 새로 등록**하는 것을 막지 않는다.
+
+        ⚠️ 철회 축(`_grant_then_deny`)과 다른 경로다 — 저기는 **이미 등록된** 무료 구독의
+        보존이고, 여기는 **처음 등록**이다(등록 분기 자체가 다르다).
+        """
+        from app import subscription
+
+        A = "fx:usd-krw"
+        patchers = self._patchers()
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result",
+            new=AsyncMock(return_value=subscription.Determined(is_premium=False)))
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": "mixed-deny",
+                              "id_token": "tok", "topics": [A, KRX_TOPIC]})
+                ack = self._receive_for(ws, "mixed-deny")
+                free_sent = _publish_on_app_loop(ws, A, {"type": "snapshot"})
+                krx_sent = _publish_on_app_loop(ws, KRX_TOPIC, {"type": "snapshot"})
+        self.assertEqual([x["topic"] for x in ack["accepted_topics"]], [A],
+                         "KRX 거부가 같은 요청의 무료 topic 까지 막았다")
+        self.assertEqual([(x["topic"], x["error"]) for x in ack["rejected_topics"]],
+                         [(KRX_TOPIC, "premium_required")])
+        self.assertEqual(free_sent, 1, "수락했다고 ack 해 놓고 발행이 도달하지 않는다")
+        self.assertEqual(krx_sent, 0, "거부한 KRX 로 발행이 나갔다")
 
     def _grant_then_deny(self, *, deny_via, request_id):
         """KRX grant 를 만든 뒤 **시계를 전진시키지 않고** 거부로 뒤집는다.
