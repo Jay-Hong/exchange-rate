@@ -777,11 +777,24 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       - [x] `db_transient_folds_the_whole_request` — 짧은 retry_after ∧ registry 불변(양방향)
       - [x] `db_permanent_folds_the_whole_request` — 긴 retry_after ∧ **ERROR 정확히 1건**.
         두 축은 **서로를 죽이는 변이가 다르다**(오분류 방향이 반대) — 각각 확인했다
-      - [ ] `gated_authorization_deadline_warns_once_and_changes_nothing`
-      - [ ] `same_uid_reauthentication_succeeds`
-      - [ ] `cross_uid_closes_the_connection_without_error_logs`
-      - [ ] `mixed_request_keeps_free_topics_when_krx_is_denied`
-      - [ ] `mixed_request_registers_nothing_when_authorization_is_unavailable`
+      - [x] `gated_authorization_deadline_warns_once_and_changes_nothing` — WARNING 정확히 1건
+        (판정기를 안 지나므로 dispatcher 가 유일 소유자) ∧ transient retry_after
+      - [x] `same_uid_reauthentication_succeeds` — 토큰 갱신마다 끊으면 lease 갱신 자체가
+        불가능해진다. `bind` 를 "언제나 충돌" 로 만든 변이가 죽인다
+      - [x] `cross_uid_closes_the_connection_without_error_logs` — ⚠️ **처음 형태는 공허했다**:
+        `closed = True` 를 try 와 except 양쪽에서 세팅해 항상 참이라 `identity.bind` 를 통째로
+        지워도 통과했다(실측). 배타 3결과(disconnected / second_ack / **hung**)로 교체.
+        `close(1008)` 제거 변이는 red 가 아니라 **행**이었어서 daemon thread + join(5s) 로
+        시간을 걸었다 — CI 에서 행은 실패보다 나쁘다.
+        ⚠️ 이 변이가 `ConnectionIdentity` **무커버리지**도 드러냈다 → `tests/test_topic_wire.py`
+        `TestConnectionIdentityBinding` 신설(falsy 거부 후 소유권 공백 유지 / 충돌 후 소유권 불변)
+      - [x] `mixed_request_keeps_free_topics_when_krx_is_denied` — 철회 축과 **다른 분기**다
+        (저기는 기존 구독 보존, 여기는 **처음 등록**) ∧ 무료 publish 1 / KRX 0
+      - [x] `mixed_request_registers_nothing_when_authorization_is_unavailable` — ⚠️ **단독
+        테스트는 없다.** `_assert_whole_request_folded` 의 `B_after == 0` 이 판정 불가 4축
+        (provider transient/persistent · DB transient/permanent · gated deadline)에서 **매번**
+        같은 요청의 무료 topic 을 검사한다. 그 속성 자체를 겨냥한 변이(`GatedUnavailable` 분기에서
+        무료만 미리 등록)가 **네 축을 동시에 죽인다** — 근거는 중복이 아니라 4중이다
       ⛔ 철회 축들은 **시계를 전진시키지 않은 채** 검증한다 — 전진시키면 만료 게이트가 대신
       통과시켜 단언이 공허해진다.
       그 전까지 flag off 유지.
