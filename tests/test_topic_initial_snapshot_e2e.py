@@ -35,6 +35,7 @@ from app import main as app_main
 from app import topic_dispatcher
 from app.main import app
 from app.subscription import PremiumStatus
+from app.topic_lease import LEASE_MAX_SECONDS
 
 models.Base.metadata.create_all(engine)  # 빈 테이블 (connect 초기 legacy payload용)
 
@@ -993,7 +994,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             msg.get("active_subscriptions"), [], "flag off 인 topic 이 registry 에 등록됐다",
         )
 
-    def _existing_then_failing_request(self, rc_result, *, request_id, expect_logs=None):
+    def _existing_then_failing_request(self, rc_result, *, request_id, expect_logs=None,
+                                       entitlement_error=None):
         """무료 구독 A 를 **먼저 만든 뒤** `[새 무료 B, KRX]` 요청을 실패시킨다.
 
         ⛔ 빈 registry 에서 `before == after == 0` 만 보면 **"불변"이 아니라 "증가 안 함"** 만
@@ -1005,10 +1007,17 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         patchers["revenuecat_must_not_be_called"] = patch(
             "app.subscription.fetch_revenuecat_result", new=AsyncMock(return_value=rc_result)
         )
+        if entitlement_error is not None:
+            # ⚠️ DB 축을 고장 낼 때만 — 세션은 열리고 **쿼리에서** 깨져야 한다(관측 시각은 이미 찍힌 뒤).
+            patchers["db_session_must_not_be_opened"] = patch(
+                "app.database.SessionLocal", new=MagicMock())
         counts = {}
         with contextlib.ExitStack() as stack:
             for patcher in patchers.values():
                 stack.enter_context(patcher)
+            if entitlement_error is not None:
+                stack.enter_context(patch("app.entitlements.has_entitlement",
+                                          side_effect=entitlement_error))
             stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
@@ -1046,6 +1055,100 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(counts["B_after"], 0, "판정 불가인데 무료 topic 이 새로 등록됐다")
         self.assertEqual(counts["krx_after"], 0, "판정 불가인데 KRX 가 등록됐다")
         self.assertEqual(counts["pong"], "pong", "판정 불가가 연결을 끊었다")
+
+    def test_entitled_subscription_receives_a_four_axis_lease(self):
+        """⛔ lease 는 **네 관측 중 가장 오래된 것**에서 만료한다.
+
+        ⚠️ **함정**: 실제 실행은 identity→premium→entitlement→now 순차라 identity 가 언제나
+        최소다 — 그 배치만 보면 *"min of 4"* 와 *"identity 만 본다"* 를 **구분할 수 없다**.
+        그래서 각 축이 (미래의 캐시처럼) 낡은 관측으로 도착한 상황을 **축마다** 만들고,
+        그 축이 실제로 만료를 지배하는지 **서로 다른 duration** 으로 본다.
+        """
+        from app import subscription, topic_dispatcher as dispatcher
+
+        NOW = 4000.0
+        for axis, script in (
+            ("identity",    [3900.0, 3950.0, 3960.0, NOW]),
+            ("premium",     [3950.0, 3910.0, 3960.0, NOW]),
+            ("entitlement", [3950.0, 3960.0, 3920.0, NOW]),
+            # ⚠️ `now` 는 **바닥**이다 — 관측이 모두 미래여도 lease 가 15분을 넘으면 안 된다.
+            ("now_is_floor", [3950.0, 3960.0, 3970.0, 3900.0]),
+        ):
+            with self.subTest(axis=axis):
+                ticks = list(script)
+
+                def mono():
+                    return ticks.pop(0) if ticks else script[-1]
+
+                patchers = self._patchers()
+                patchers["revenuecat_must_not_be_called"] = patch(
+                    "app.subscription.fetch_revenuecat_result",
+                    new=AsyncMock(return_value=subscription.Determined(is_premium=True)))
+                patchers["db_session_must_not_be_opened"] = patch(
+                    "app.database.SessionLocal", new=MagicMock())
+                with contextlib.ExitStack() as stack:
+                    for patcher in patchers.values():
+                        stack.enter_context(patcher)
+                    stack.enter_context(patch.object(
+                        config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+                    stack.enter_context(patch("app.entitlements.has_entitlement",
+                                              return_value=True))
+                    stack.enter_context(patch.object(
+                        dispatcher, "lease_clock",
+                        lambda: SimpleNamespace(mono=mono, wall=lambda: None)))
+                    with self.client.websocket_connect("/ws") as ws:
+                        _receive_json_or_fail(ws, self.fail)
+                        ws.send_json({"type": "subscribe", "request_id": f"axis-{axis}",
+                                      "id_token": "tok", "topics": [KRX_TOPIC]})
+                        ack = self._receive_for(ws, f"axis-{axis}")
+
+                accepted = ack.get("accepted_topics", [])
+                self.assertEqual([x["topic"] for x in accepted], [KRX_TOPIC],
+                                 "자격이 있는데 KRX 가 수락되지 않았다")
+                self.assertTrue(accepted[0].get("lease_id"), "gated accept 에 lease_id 가 없다")
+                expected = min(script) + LEASE_MAX_SECONDS - script[-1]
+                self.assertEqual(
+                    accepted[0]["lease_duration_seconds"], int(expected),
+                    f"{axis} 축이 만료를 지배하지 못했다 — 그 축을 빼도 통과하는 lease 다",
+                )
+                self.assertLessEqual(accepted[0]["lease_duration_seconds"], LEASE_MAX_SECONDS,
+                                     "lease 가 15분을 넘었다 — revoke 상한이 무너진다")
+
+    def test_db_transient_folds_the_whole_request(self):
+        """⛔ DB 인프라 장애는 **판정 불가**다 — 거부가 아니라 전체 요청을 접는다."""
+        from app import subscription
+        from sqlalchemy import exc as sqlalchemy_exc
+
+        frame, counts, _ = self._existing_then_failing_request(
+            subscription.Determined(is_premium=True), request_id="db-transient",
+            entitlement_error=sqlalchemy_exc.OperationalError("SELECT 1", {}, Exception("down")),
+        )
+        self.assertEqual(frame.get("error"), "temporarily_unavailable")
+        self.assertEqual(frame.get("retry_after_seconds"),
+                         config.WS_AUTH_RETRY_AFTER_SECONDS,
+                         "transient 인데 영구 장애용 긴 retry_after 를 줬다")
+        self._assert_whole_request_folded(counts)
+
+    def test_db_permanent_folds_the_whole_request(self):
+        """⛔ 영구 결함(권한/카탈로그)은 **긴 retry_after + ERROR** 다 — 짧은 재시도로 안내하면
+        클라 전체가 무의미한 폭주를 한다."""
+        from app import subscription
+        from sqlalchemy import exc as sqlalchemy_exc
+
+        orig = Exception("permission denied")
+        orig.sqlstate = "42501"                       # insufficient_privilege
+        with self.assertLogs("exchange_rate.topic_authorization", level="ERROR") as logs:
+            frame, counts, _ = self._existing_then_failing_request(
+                subscription.Determined(is_premium=True), request_id="db-permanent",
+                entitlement_error=sqlalchemy_exc.OperationalError("SELECT 1", {}, orig),
+            )
+        self.assertEqual(frame.get("error"), "temporarily_unavailable")
+        self.assertEqual(frame.get("retry_after_seconds"),
+                         config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS,
+                         "영구 결함인데 짧은 retry_after 를 줬다")
+        self.assertEqual(len(logs.records), 1,
+                         f"영구 DB 결함의 ERROR 가 정확히 1건이 아니다 — {logs.output}")
+        self._assert_whole_request_folded(counts)
 
     def _grant_then_deny(self, *, deny_via, request_id):
         """KRX grant 를 만든 뒤 **시계를 전진시키지 않고** 거부로 뒤집는다.
