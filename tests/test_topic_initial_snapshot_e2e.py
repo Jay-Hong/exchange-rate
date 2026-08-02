@@ -1047,6 +1047,98 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(counts["krx_after"], 0, "판정 불가인데 KRX 가 등록됐다")
         self.assertEqual(counts["pong"], "pong", "판정 불가가 연결을 끊었다")
 
+    def _grant_then_deny(self, *, deny_via, request_id):
+        """KRX grant 를 만든 뒤 **시계를 전진시키지 않고** 거부로 뒤집는다.
+
+        ⛔ **시계를 움직이면 안 된다** — 움직이면 만료 게이트가 대신 publish 를 막아
+        "철회했다"는 단언이 **공허해진다**(만료와 철회를 구분할 수 없다).
+        ⛔ **positive control 필수** — denial *전* publish 가 1 이어야 한다. 후단 0 만 보면
+        publisher 자체가 고장 나도 통과한다(codex).
+        """
+        from app import subscription, topic_dispatcher as dispatcher
+
+        A = "fx:usd-krw"
+        state = {"premium": True, "entitled": True, "db_calls": 0}
+        fixed = {"mono": 4000.0}
+
+        async def rc(user_id, **kw):
+            return subscription.Determined(is_premium=state["premium"])
+
+        def entitlement_query(db, user_id, key):
+            state["db_calls"] += 1
+            return state["entitled"]
+
+        patchers = self._patchers()
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result", new=rc)
+        patchers["db_session_must_not_be_opened"] = patch(
+            "app.database.SessionLocal", new=MagicMock())
+        out = {}
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+            stack.enter_context(patch("app.entitlements.has_entitlement", new=entitlement_query))
+            stack.enter_context(patch.object(
+                dispatcher, "lease_clock",
+                lambda: SimpleNamespace(mono=lambda: fixed["mono"], wall=lambda: None)))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({"type": "subscribe", "request_id": f"{request_id}-grant",
+                              "id_token": "tok", "topics": [A, KRX_TOPIC]})
+                grant = self._receive_for(ws, f"{request_id}-grant")
+
+                # ⛔ positive control — 철회 **전에** 실제로 도달한다.
+                out["krx_before"] = ws.portal.call(
+                    dispatcher.publish_topic, KRX_TOPIC, {"type": "snapshot"})
+                db_calls_after_grant = state["db_calls"]
+
+                state.update(deny_via)                 # premium 또는 entitlement 를 뒤집는다
+                ws.send_json({"type": "subscribe", "request_id": request_id,
+                              "id_token": "tok", "topics": [A, KRX_TOPIC]})
+                out["deny_ack"] = self._receive_for(ws, request_id)
+
+                out["db_delta"] = state["db_calls"] - db_calls_after_grant
+                # ⚠️ **같은 고정 시각**이다 — 0 이 나오면 원인은 만료가 아니라 철회다.
+                out["krx_after"] = ws.portal.call(
+                    dispatcher.publish_topic, KRX_TOPIC, {"type": "snapshot"})
+                out["free_after"] = ws.portal.call(
+                    dispatcher.publish_topic, A, {"type": "snapshot"})
+        self.assertEqual(len(grant.get("accepted_topics", [])), 2, "grant 가 실패했다")
+        self.assertEqual(out["krx_before"], 1,
+                         "철회 **전**에도 KRX publish 가 0 이다 — positive control 실패")
+        return out
+
+    def _assert_krx_revoked(self, out, expected_error):
+        ack = out["deny_ack"]
+        self.assertEqual(
+            [(x["topic"], x["error"]) for x in ack["rejected_topics"]],
+            [(KRX_TOPIC, expected_error)],
+        )
+        self.assertNotIn(
+            KRX_TOPIC, [x["topic"] for x in ack["active_subscriptions"]],
+            "거부해 놓고 active_subscriptions 에 남겼다 — ack 이 자기모순을 말한다",
+        )
+        self.assertIn("fx:usd-krw", [x["topic"] for x in ack["active_subscriptions"]],
+                      "per-topic 거부가 무료 구독까지 지웠다")
+        self.assertEqual(out["krx_after"], 0,
+                         "부정 관측 뒤에도 유료 데이터가 나간다 — 즉시 철회가 안 됐다")
+        self.assertEqual(out["free_after"], 1, "무료 topic 발행까지 막혔다")
+
+    def test_premium_denial_skips_the_database_and_revokes_existing_krx(self):
+        """⛔ premium 이 없으면 **entitlement 조회 0회** — 없는 권한을 위해 커넥션(3+2)을 쓰지
+        않는다. ⚠️ 최초 grant 는 DB 를 부르므로 **grant 이후 증가량**으로 봐야 한다(codex)."""
+        out = self._grant_then_deny(deny_via={"premium": False}, request_id="deny-prem")
+        self._assert_krx_revoked(out, "premium_required")
+        self.assertEqual(out["db_delta"], 0,
+                         "premium 이 없는데 entitlement DB 를 조회했다")
+
+    def test_entitlement_denial_revokes_existing_krx(self):
+        """⛔ premium 은 있으나 entitlement 가 없으면 **per-topic** 거부다 — 무료 topic 은 산다."""
+        out = self._grant_then_deny(deny_via={"entitled": False}, request_id="deny-ent")
+        self._assert_krx_revoked(out, "krx_entitlement_required")
+        self.assertEqual(out["db_delta"], 1, "entitlement 를 조회하지 않고 거부했다")
+
     def test_provider_transient_folds_the_whole_request_and_leaves_registry_untouched(self):
         """⛔ 판정 **불가**는 per-topic 이 아니라 **전체 요청**이다(§8-C) — 무료 topic 조차
         새로 등록하지 않고, **기존 구독도 건드리지 않는다**."""
