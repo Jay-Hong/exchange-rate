@@ -166,7 +166,7 @@
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
-| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **선행조건 4/4 충족, 남은 것은 운영 GO** | 🔴 false |
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **기능 선행조건 4/4 충족.** ⛔ 그러나 **여기서 끝이 아니다** — §자원 상한의 **열린 항목 2건**(인증 전용 executor / nginx `/ws` ingress 상한)이 여전히 *flag ON 전 결정 필요*이고, 그 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 남는다 | 🔴 false |
 | `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
 
 **무인증 graph v2(`/api/v2/graph/tab`·`/catalog`)의 krx.\* series는 어떤 flag로도 열리지 않는다.**
@@ -662,7 +662,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       인증 자신의 적체는 그대로다.
   ⛔ **"구조 트립와이어로만 잠긴다"도 틀렸다**(codex Medium): **기본 executor 를 점유해 놓고**
     인증이 진행되는지 보면 **행동으로** 검증된다 — 격리가 없으면 인증이 함께 막힌다.
-- 🔲 **ingress 상한(nginx `/ws`) = 미결.** 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
+- 🔲 **ingress 상한(nginx `/ws`) = 미결.** ⚠️ **2026-08-03 확인**: 이 2건은 기능 선행조건(§3.1 표)이
+  4/4 충족된 뒤에도 **여전히 열려 있다**. GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
+  "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
   **없다**(주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다. 즉 인증 이전 단계에서
   토큰 flood 를 막는 것이 없다. **호스트 config 변경이라 별도 승인이 필요하다.**
 
@@ -829,7 +831,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 
       잔여 = ~~① KRX per-user 판정~~ **✅ land** ~~② iOS lease 소비~~ **✅ land**
       ~~③ request timeout~~ **✅ land**. ~~iOS bootstrap 3종 인증 이관~~ **✅ land 2026-07-26**.
-      → 남은 활성화 조건은 **운영 GO 하나**다(수용할 위험은 위 §1 표와 GUIDE 참조).
+      → **기능 선행조건은 4/4 충족**이다. ⛔ 다만 "운영 GO 하나만 남았다"고 쓰지 말 것 — 남은 것은
+      셋이다: (1) §자원 상한 **열린 항목 2건**(인증 전용 executor · nginx `/ws` ingress 상한)의
+      **명시적 결정**(구현 또는 위험 수용 — 후속 최적화로 **자동 이월 금지**), (2) 수용 항목
+      (조용한 중단 · stale registry 비용)을 포함한 **운영 GO**, (3) **활성화 실행 절차**
+      (서버 flag → prod smoke → Release arming → phased rollout, iOS `TOPIC_V2_RELEASE_RUNBOOK.md`).
 
       ⚠️ ①의 완료 조건은 **숫자가 아니라 이름 목록**이다("8축" 같은 요약은 provider/DB 의
       transient·persistent 를 각각 세면 어긋난다 — codex).

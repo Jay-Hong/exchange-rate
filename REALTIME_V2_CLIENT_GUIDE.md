@@ -24,6 +24,10 @@
 >   로 접히고 **registry 는 하나도 바뀌지 않는다**(무료 topic 조차 새로 등록되지 않는다).
 >
 > ⛔ **아직 없는 것**: `reauth_required` 프레임 / 만료 시 registry 제거.
+> ⚠️ **`reauth_required` 는 서버-only 슬라이스가 아니다**(2026-08-03 확인): 현행 iOS 는 그 type 의
+> 모델·파서가 **아예 없어** envelope 분기에서 unknown 으로 버린다. 닫으려면 서버 eviction + wire
+> 프레임 + **iOS 소비**(모델 · 파서 · 현재 lease/topic 소유권 확인 · 현재 의도 재대조 · 중복 송신
+> 방지)까지 **한 수직 슬라이스**여야 한다. 반면 **만료 registry 제거는 서버 단독으로 먼저** 할 수 있다.
 > ⚠️ **이 2건은 활성화 blocker 로 분류하지 않는다**(2026-08-03). 만료는 **모든 발행이 지나는 단일
 > lease gate 가 fail-closed** 로 막아 **데이터가 새지 않고 조용해질 뿐**이고, 클라는 만료 **전에**
 > 선제 재인증한다(`lease − 180s − U(0,60)`, `duration: 0` = 즉시 재인증, bounded retry + watchdog).
@@ -53,8 +57,11 @@
 > 2026-08-02~03; 후속 2건은 위 참조) ③**클라 bootstrap 3종의 인증 transport 이관** — ✅ **land**
 > (2026-07-26 iOS `4cb050f`: `TopicSnapshotService` 가 `AuthedRESTTransport` 로 3종을 보내고,
 > 전용 테스트가 `Authorization: Bearer` 부착을 잠근다).
-> → **선행 3조건 모두 충족.** 남은 것은 **별도 운영 GO** 하나이며, 그 GO 는 위 "아직 없는 것" 절의
-> 수용 항목(조용한 중단 · stale registry 비용)을 함께 받아들이는 결정이다.
+> → **기능 선행 3조건 모두 충족.** ⛔ 다만 "GO 하나만 남았다"가 **아니다**: 서버 PLAN §자원 상한의
+> **열린 항목 2건**(인증 전용 executor · nginx `/ws` ingress 상한)이 *flag ON 전 결정 필요*로 남아
+> 있고, GO 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming
+> → phased rollout)가 있다. GO 는 위 "아직 없는 것" 절의 수용 항목(조용한 중단 · stale registry
+> 비용)까지 함께 받아들이는 결정이다.
 > KRX는 2026-07-08부터 독립 topic
 > `krx:usd-krw-futures`(ADR-038 D2 — 구 `KRX_TOPIC_INCLUDE` env 제거). 잔여 = **client release gate**
 > (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).
