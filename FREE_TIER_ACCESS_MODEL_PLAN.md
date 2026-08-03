@@ -524,8 +524,17 @@ fake channel 로 재개 시점을 **결정적으로** 제어할 수 있으므로
 - 같은 형태(응답 없음 + 연결 생존)인 **request timeout 을 활성화 blocker 로 뒀던 기준과도 모순**이었다.
 
 ✅ **해소 — reconciler 도 1 in-flight 도 만들지 않았다.** `performTopicCommand` 의 `catch` 를
-분류해 기존 retry 체인에 연결했다: 취소 · 인코딩 오류 · `notAuthenticated`(로그아웃·계정 전환)는
-재시도하지 않고, 토큰/전송 실패만 **현재 채널에 귀속된** bounded retry 대상이다. `attempt` 는
+분류해 기존 retry 체인에 연결했다: 취소 · 인코딩 오류 · `notAuthenticated` 는 재시도하지 않고,
+토큰/전송 실패만 **현재 채널에 귀속된** bounded retry 대상이다.
+⛔ **그런데 그 배제만으로는 부족했다**(2026-08-03 추가 수정): `.notAuthenticated` 는 "로그아웃·계정
+전환"이 아니라 **"토큰을 못 얻은 것 전부"** 이고, Firebase 는 네트워크 실패를 `URLError` 가 아니라
+`FIRAuthErrorDomain`/`networkError`(17020)로 던진다(SDK 소스 실측: `AuthBackend` →
+`AuthErrorUtils.networkError`). `mappedTokenError` 가 그걸 `.notAuthenticated` 로 접고 있어
+**정작 고치려던 실 네트워크 실패가 이 복구를 우회**했다(테스트는 `URLError` 를 직접 던져 매핑을
+건너뛴 false green 이었다). → `mappedTokenError` 가 Firebase network 오류를 **transport 채널로
+정규화**한다(underlying 보존, 없으면 합성). 새 오류 타입을 만들지 않은 이유는 소비자가 넷인데
+(`EntitlementsManager.isRetryable`·`AlertRetryPolicy`·`FreeSnapshotViewModel`·WS) 이미 전부
+`URLError` 를 transient 로 알고 있어, 한 곳만 빠뜨려도 같은 결함이 재발하기 때문이다. `attempt` 는
 오류 응답·무응답과 **공유**하고(예산 곱셈 없음), 재시도는 원 JSON 이 아니라 **범위**를 넘겨
 송신 지점이 그때의 의도와 다시 교차한다.
 
