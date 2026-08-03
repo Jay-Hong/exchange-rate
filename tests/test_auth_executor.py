@@ -10,6 +10,7 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -332,6 +333,44 @@ def test_execution_time_is_recorded_by_the_worker_not_the_cancelled_caller(monke
     assert during["execution_ms_max"] == 0.0, "worker 가 끝나기 전에 execution 을 확정했다"
     assert after["execution_ms_max"] > 0, "worker 종료 뒤에도 실제 execution 이 기록되지 않았다"
     assert after["never_started"] == 0, "실행 중 취소를 never_started 로 오분류했다"
+
+
+def test_completed_worker_is_not_counted_as_cancelled_while_running():
+    """⛔ **반대 방향.** 기존 취소 테스트는 worker 를 계속 막아 두므로 "이미 끝난 worker" 를 보지
+    못한다. `future.cancelled()` 로 판정하면 worker 가 **정상 완료**했는데 event loop 가 결과 전달을
+    아직 못 한 창에서 `not cancelled()` 가 참이 되어 **완료된 건을 '실행 중 취소'로 오분류**한다
+    (실측: outcome=ok 인데 caller_cancelled_while_running=1). 부하가 클 때 — W 를 재려는 바로 그
+    상황에서 — 전달이 늦어 자주 생기므로 W 판단을 왜곡한다.
+    """
+    finished = threading.Event()
+
+    async def scenario():
+        auth_executor.reset_auth_executor_metrics()
+        auth_executor.start_auth_executor(1)
+        task = asyncio.create_task(
+            auth_executor.run_in_auth_executor(lambda: (finished.set(), "ok")[1])
+        )
+        await asyncio.sleep(0)                     # submit 까지만 진행
+        # ⛔ 여기서 **loop 를 일부러 붙잡는다** — 그래야 worker 완료 콜백이 큐에만 남고
+        #    "끝났는데 아직 전달되지 않은" 창이 만들어진다. (yield 하면 그 창이 사라진다.)
+        deadline = time.monotonic() + 5
+        while not finished.is_set() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert finished.is_set(), "worker 가 끝나지 않았다 — 전제가 깨졌다"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(2000):
+            if auth_executor.auth_executor_metrics()["count"] >= 1:
+                break
+            await asyncio.sleep(0.001)
+        return auth_executor.auth_executor_metrics()
+
+    m = _run(scenario())
+    assert m["by_outcome"].get("ok") == 1, "worker 는 정상 완료했어야 한다"
+    assert m["caller_cancelled_while_running"] == 0, \
+        "이미 끝난 worker 를 '실행 중 취소'로 셌다 — W 판단이 왜곡된다"
+    assert m["never_started"] == 0
 
 
 def test_queued_cancellation_is_recorded_and_logged_with_nulls(monkeypatch, caplog):

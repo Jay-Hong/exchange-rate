@@ -27,7 +27,6 @@ subscribe 인증이 몰리면 같은 pool 을 쓰는 다른 작업(atomic loader
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 import threading
 import time
@@ -206,8 +205,16 @@ async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: 
     if executor is None:
         raise AuthExecutorNotReady("인증 전용 executor 가 없다")
     submitted = time.monotonic()
+    # ⛔ **`future.cancelled()` 로 "실행 중"을 판정하지 말 것.** 그건 *시작 전 취소* 에만 참이라,
+    #    worker 가 **이미 정상 완료**했는데 event loop 가 결과 전달을 아직 못 한 창에서도
+    #    `not cancelled()` 가 참이 되어 완료된 건을 "실행 중 취소"로 **오분류**한다(재현 완료).
+    #    하필 부하가 클 때 — 즉 W 를 재려는 바로 그 상황에서 — 전달이 늦어 자주 생긴다.
+    #    → worker 가 직접 올리는 두 이벤트로 판정한다.
+    started_evt = threading.Event()
+    finished_evt = threading.Event()
 
     def _timed() -> T:
+        started_evt.set()
         started = time.monotonic()
         queue_wait_ms = (started - submitted) * 1000.0
         outcome = "ok"
@@ -218,6 +225,7 @@ async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: 
             raise
         finally:
             _record(queue_wait_ms, (time.monotonic() - started) * 1000.0, outcome)
+            finished_evt.set()          # ⚠️ 기록 **뒤에** 올린다 — "끝났다"가 "기록됐다"를 함의하게
 
     future = executor.submit(_timed)
 
@@ -231,7 +239,8 @@ async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: 
     try:
         return await asyncio.wrap_future(future)
     except asyncio.CancelledError:
-        if not future.cancelled():
-            # 이미 실행 중이다 — worker 가 나중에 진짜 execution 을 남긴다.
+        # 시작 전 취소는 done callback 이 `never_started` 로 잡고, **이미 끝난** 건은 아무것도
+        # 올리지 않는다(worker 가 제 값을 이미 남겼다). 남는 것이 진짜 "실행 중 취소"다.
+        if started_evt.is_set() and not finished_evt.is_set():
             _record_caller_cancelled_while_running()
         raise
