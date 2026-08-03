@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import topic_wire
+from app import auth_executor, topic_wire
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -574,6 +574,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️ Firebase Admin SDK 초기화 실패 (FCM 비활성화)")
 
+    # ⛔ Firebase 초기화 성패와 **무관하게** 띄운다 — 인증 경로는 executor 부재를 fail-closed 로
+    #    다루므로(fallback 없음), 여기서 조건부로 만들면 미기동이 곧 전면 인증 실패가 된다.
+    #    ThreadPoolExecutor 는 스레드를 **submit 시점에 지연 생성**하므로 유휴 비용은 사실상 0이다.
+    auth_executor.start_auth_executor(config.WS_AUTH_EXECUTOR_WORKERS)
+
     # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
     db = SessionLocal()
     try:
@@ -631,6 +636,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
+
+    # ⛔ **여기서 먼저 끊는다.** 종료 중에 큐에만 있는 인증을 굳이 다 돌릴 이유가 없고,
+    #    `cancel_futures=True` 가 그걸 실행 없이 취소한다. 실행 중인 것은 SDK `httpTimeout` 이 끊는다.
+    #    ⚠️ 재진입 — 다음 lifespan 은 **새 executor** 를 만든다(종료된 pool 재사용 금지).
+    auth_executor.shutdown_auth_executor()
 
     # §6.6.2 C1 — bridge 신규 enqueue 차단(drain 전) + 큐된 callback flush + fx drain.
     # 순서: 차단 → barrier(큐된 bridge callback 실행 완료 → flush task 생성) →
@@ -3025,7 +3035,10 @@ async def verify_ws_subscribe_token(id_token: str) -> str:
     try:
         # ⛔ `app=` 를 빠뜨리면 DEFAULT app 이 쓰여 **낮춘 `httpTimeout` 이 통째로 no-op** 이
         #    된다 — 그런데 프레임·로그·타이밍 어디에도 흔적이 남지 않는다(호출 인자만이 증거다).
-        decoded = await asyncio.to_thread(
+        # ⛔ `asyncio.to_thread` 가 아니다 — 그건 loop 의 **기본** executor 를 쓰므로 재연결
+        #    폭주 시 동거 작업(atomic loader/store, DB selector)이 함께 밀린다(p99 3967ms).
+        #    전용 pool 로 분리한다(31ms). ⚠️ 격리일 뿐 **큐 상한은 아니다**.
+        decoded = await auth_executor.run_in_auth_executor(
             auth.verify_id_token, id_token, app=auth_app, check_revoked=True
         )
     except BaseException as exc:  # noqa: BLE001 — 분류 후 분류 불가면 그대로 재전파한다

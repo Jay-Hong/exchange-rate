@@ -25,6 +25,20 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app import auth_executor
+
+
+def setUpModule():
+    """⛔ **프로덕션 lifespan 을 흉내낸다.** `verify_ws_subscribe_token` 은 인증 전용 executor 를
+    쓰고, 없으면 **fail-closed** 로 던진다(fallback 없음 — fallback 은 격리를 조용히 무효화한다).
+    ⚠️ 이 fixture 가 없어서 12개가 red 였던 것은 그 fail-closed 가 **실제로 작동한다는 증거**다.
+    """
+    auth_executor.start_auth_executor(2)
+
+
+def tearDownModule():
+    auth_executor.shutdown_auth_executor()
+
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 

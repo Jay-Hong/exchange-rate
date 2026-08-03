@@ -573,6 +573,14 @@ REVENUECAT_WEBHOOK_AUTH_KEY = os.getenv("REVENUECAT_WEBHOOK_AUTH_KEY", "")
 # 분리해서** 측정 → `T = p99 × 3`.
 WS_AUTH_HTTP_TIMEOUT_SECONDS = 5
 
+# ③ 격리 — 인증 전용 executor 의 worker 수 W.
+# ⛔ **admission control 이 아니다**(즉시거절 semaphore 는 기각됐다). 거절 없이 자원만 나눈다.
+# ⚠️ **이 기본값은 측정으로 정해진 값이 아니다.** W 는 곧 인증 처리 용량(W/T)이라 낮게 잡으면
+#    스스로 문턱을 낮춘다. flag ON 전에 **W 별 처리량 + 동거 작업 p99** 로 정하고 GO 기록에
+#    남길 것 — 이 자리에 임의 값을 두고 "안전 기본값"이라 부르지 말 것.
+# ⚠️ 그리고 이건 **큐 상한이 아니다** — pool 의 작업 큐는 `SimpleQueue` 라 무제한이다.
+WS_AUTH_EXECUTOR_WORKERS = int(os.getenv("WS_AUTH_EXECUTOR_WORKERS", "4"))
+
 # ① wire deadline — **identity + gated 인가의 누적 상한**. **측정 없음**(= 2T).
 # ⚠️ 범위 주의: registry 변경과 ack 송신은 이 창 **밖**이다 — "이 시간 안에 ack"을 보장하지
 #    않는다. 그리고 단계마다 새로 시작하지 않는다(그러면 상한이 단계 수만큼 곱해진다) —
