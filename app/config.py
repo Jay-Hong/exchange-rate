@@ -581,6 +581,10 @@ WS_AUTH_HTTP_TIMEOUT_SECONDS = 5
 # ⚠️ 그리고 이건 **큐 상한이 아니다** — pool 의 작업 큐는 `SimpleQueue` 라 무제한이다.
 WS_AUTH_EXECUTOR_WORKERS = int(os.getenv("WS_AUTH_EXECUTOR_WORKERS", "4"))
 
+# W canary 계측 — per-call 구조화 로그. ⚠️ **canary 기간에만 켠다**(재연결 폭주에서 subscribe 마다
+# 한 줄이면 로그가 는다). 집계 카운터는 flag 와 무관하게 항상 쌓인다.
+WS_AUTH_EXECUTOR_LOG_TIMINGS = os.getenv("WS_AUTH_EXECUTOR_LOG_TIMINGS", "false").lower() == "true"
+
 # ① wire deadline — **identity + gated 인가의 누적 상한**. **측정 없음**(= 2T).
 # ⚠️ 범위 주의: registry 변경과 ack 송신은 이 창 **밖**이다 — "이 시간 안에 ack"을 보장하지
 #    않는다. 그리고 단계마다 새로 시작하지 않는다(그러면 상한이 단계 수만큼 곱해진다) —

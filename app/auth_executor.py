@@ -29,8 +29,12 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
+
+from app import config
 
 logger = logging.getLogger("exchange_rate.auth_executor")
 
@@ -42,6 +46,64 @@ class AuthExecutorNotReady(RuntimeError):
 
 
 _executor: ThreadPoolExecutor | None = None
+_configured_workers: int = 0
+
+# ── W canary 계측 ───────────────────────────────────────────────────────────
+# ⛔ **총 wall time 만 보면 W 부족과 Firebase 지연을 구분할 수 없다** — 그게 W 를 정하려는 canary 의
+#    전부인데. 그래서 **큐 대기(queue_wait)** 와 **실행(execution)** 을 나눠 기록한다.
+# ⚠️ 토큰·UID 는 기록하지 않는다.
+_metrics_lock = threading.Lock()
+_metrics: dict[str, Any] = {
+    "count": 0,
+    "queue_wait_ms_sum": 0.0,
+    "queue_wait_ms_max": 0.0,
+    "execution_ms_sum": 0.0,
+    "execution_ms_max": 0.0,
+    "never_started": 0,      # 큐에서 취소돼 worker 에 닿지 못한 건수
+    "by_outcome": {},
+}
+
+
+def auth_executor_metrics() -> dict[str, Any]:
+    """읽기 전용 스냅샷(진단·테스트). ⚠️ 집계라 분포는 못 준다 — 분포가 필요하면 아래 per-call
+    구조화 로그를 canary 기간에만 켠다(`WS_AUTH_EXECUTOR_LOG_TIMINGS`)."""
+    with _metrics_lock:
+        snapshot = dict(_metrics)
+        snapshot["by_outcome"] = dict(_metrics["by_outcome"])
+    snapshot["max_workers"] = _configured_workers
+    return snapshot
+
+
+def reset_auth_executor_metrics() -> None:
+    with _metrics_lock:
+        _metrics.update(count=0, queue_wait_ms_sum=0.0, queue_wait_ms_max=0.0,
+                        execution_ms_sum=0.0, execution_ms_max=0.0, never_started=0)
+        _metrics["by_outcome"] = {}
+
+
+def _record(queue_wait_ms: float | None, execution_ms: float | None, outcome: str) -> None:
+    with _metrics_lock:
+        _metrics["count"] += 1
+        _metrics["by_outcome"][outcome] = _metrics["by_outcome"].get(outcome, 0) + 1
+        if queue_wait_ms is None:
+            _metrics["never_started"] += 1
+            return
+        _metrics["queue_wait_ms_sum"] += queue_wait_ms
+        _metrics["queue_wait_ms_max"] = max(_metrics["queue_wait_ms_max"], queue_wait_ms)
+        if execution_ms is not None:
+            _metrics["execution_ms_sum"] += execution_ms
+            _metrics["execution_ms_max"] = max(_metrics["execution_ms_max"], execution_ms)
+    if config.WS_AUTH_EXECUTOR_LOG_TIMINGS:
+        # ⚠️ canary 기간에만 켠다 — 재연결 폭주에서 subscribe 마다 한 줄이면 로그가 는다.
+        logger.info(
+            "ws_auth_timing",
+            extra={
+                "queue_wait_ms": round(queue_wait_ms, 1),
+                "execution_ms": round(execution_ms, 1) if execution_ms is not None else None,
+                "outcome": outcome,
+                "max_workers": _configured_workers,
+            },
+        )
 
 
 def start_auth_executor(max_workers: int) -> None:
@@ -59,6 +121,8 @@ def start_auth_executor(max_workers: int) -> None:
         # 이미 살아 있으면 그대로 둔다(중복 startup 방어). 새로 만들면 구 pool 이 누수된다.
         return
     _executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ws-auth")
+    global _configured_workers
+    _configured_workers = max_workers
     logger.info("✅ 인증 전용 executor 기동", extra={"max_workers": max_workers})
 
 
@@ -109,12 +173,42 @@ def is_auth_executor_running() -> bool:
 async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
     """인증 호출을 **이 pool 에서만** 돌린다.
 
-    ⛔ `loop.run_in_executor` 는 **키워드 인자를 받지 않는다** — `functools.partial` 로 감싸야
-    한다. 이걸 빠뜨리면 `app=`/`check_revoked=` 가 조용히 사라지고, 그러면 DEFAULT app 이 쓰여
-    낮춘 `httpTimeout` 이 통째로 no-op 이 되며 revoked 토큰이 통과한다(둘 다 흔적이 안 남는다).
+    ⛔ `loop.run_in_executor` 는 **키워드 인자를 받지 않는다.** 여기서는 `_timed` **클로저**가
+    `*args, **kwargs` 를 그대로 나른다. 이 경로가 깨지면 `app=`/`check_revoked=` 가 조용히
+    사라지고 — DEFAULT app 이 쓰여 낮춘 `httpTimeout` 이 통째로 no-op 이 되며 revoked 토큰이
+    통과한다(둘 다 프레임·로그 어디에도 흔적이 안 남는다). 그래서 전용 테스트로 잠근다.
     """
     executor = _executor
     if executor is None:
         raise AuthExecutorNotReady("인증 전용 executor 가 없다")
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
+    submitted = time.monotonic()
+    # ⚠️ worker **스레드가** 채운다 — 큐에서 취소되면 비어 있고, 그게 "실행되지 않았다"의 증거다.
+    timings: dict[str, float] = {}
+
+    def _timed() -> T:
+        timings["started"] = time.monotonic()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            timings["finished"] = time.monotonic()
+
+    # ⛔ `loop.run_in_executor` 는 **위치 인자만** 받는다 — 그래서 인자·키워드를 **클로저**(`_timed`)
+    #    가 나른다. (한때 `functools.partial(_timed)` 로 한 번 더 감쌌는데 `_timed` 는 인자가 없어
+    #    **아무 일도 하지 않았다** — 변이로 확인하고 걷어냈다. 계약을 지키는 것은 클로저다.)
+    try:
+        result = await loop.run_in_executor(executor, _timed)
+    except BaseException as exc:
+        _record(*_split(submitted, timings), outcome=type(exc).__name__)
+        raise
+    _record(*_split(submitted, timings), outcome="ok")
+    return result
+
+
+def _split(submitted: float, timings: dict[str, float]) -> tuple[float | None, float | None]:
+    """제출→worker 시작(queue wait) 과 worker 내부 실행(execution) 을 **나눈다**."""
+    started = timings.get("started")
+    if started is None:
+        return None, None                       # 큐에서 취소 — worker 에 닿지 못했다
+    finished = timings.get("finished", started)
+    return (started - submitted) * 1000.0, (finished - started) * 1000.0

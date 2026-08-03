@@ -643,54 +643,59 @@ async def lifespan(app: FastAPI):
     #    scheduler 종료가 한 줄도 못 돈다(배포 중 grace 만료 시 통째로 날아간다).
     _auth_executor_closing = auth_executor.begin_auth_executor_shutdown()
 
-    # §6.6.2 C1 — bridge 신규 enqueue 차단(drain 전) + 큐된 callback flush + fx drain.
-    # 순서: 차단 → barrier(큐된 bridge callback 실행 완료 → flush task 생성) →
-    # fx drain(그 task까지 drain, orphan 방지) → tether drain → (이후) scheduler 종료.
-    from app import topic_trigger_bridge, fx_topic_trigger
-    topic_trigger_bridge.signal_shutdown()
-    await topic_trigger_bridge.drain_loop_callbacks()
-    # §6.1 canary (B2): bridge callback drain 후 canary evaluator의 pending real FCM task drain.
-    # (canary 비활성이면 evaluator 미생성 → no-op.) bridge drain 뒤여야 ev.schedule된 task까지 포함.
-    from app.notifications import fx_alert_shadow
-    await fx_alert_shadow.close_fx_canary_evaluator()
-    await fx_topic_trigger.shutdown_fx_topic_trigger()
+    # ⛔ **drain 중 예외가 나도 합류는 해야 한다** — 건너뛰면 다음 lifespan 이 구 worker
+    #    스레드와 겹친다(`TestClient` 는 lifespan 을 여러 번 연다).
+    try:
 
-    # Phase B.2 PR1 — pending tether topic trigger flush 정리.
-    await tether_topic_trigger.shutdown_tether_topic_trigger()
+        # §6.6.2 C1 — bridge 신규 enqueue 차단(drain 전) + 큐된 callback flush + fx drain.
+        # 순서: 차단 → barrier(큐된 bridge callback 실행 완료 → flush task 생성) →
+        # fx drain(그 task까지 drain, orphan 방지) → tether drain → (이후) scheduler 종료.
+        from app import topic_trigger_bridge, fx_topic_trigger
+        topic_trigger_bridge.signal_shutdown()
+        await topic_trigger_bridge.drain_loop_callbacks()
+        # §6.1 canary (B2): bridge callback drain 후 canary evaluator의 pending real FCM task drain.
+        # (canary 비활성이면 evaluator 미생성 → no-op.) bridge drain 뒤여야 ev.schedule된 task까지 포함.
+        from app.notifications import fx_alert_shadow
+        await fx_alert_shadow.close_fx_canary_evaluator()
+        await fx_topic_trigger.shutdown_fx_topic_trigger()
 
-    # §12.9.8 ② + KRX task-death — collector 재시작 로직(USDT supervisor + KRX reconcile)이
-    #   shutdown 체인 중 종료되는 task/client를 되살리지 못하도록 공유 flag set. USDT/KRX
-    #   shutdown 진입 전 필수 — stop()/task await 구간 globals not-None window를 'None skip'
-    #   만으론 못 막음 (main.py shutdown 순서 직접 확인).
-    scheduler.signal_collector_shutdown_initiated()
+        # Phase B.2 PR1 — pending tether topic trigger flush 정리.
+        await tether_topic_trigger.shutdown_tether_topic_trigger()
 
-    # USDT WebSocket Upbit client 종료
-    await scheduler.shutdown_usdt_ws_upbit_client()
+        # §12.9.8 ② + KRX task-death — collector 재시작 로직(USDT supervisor + KRX reconcile)이
+        #   shutdown 체인 중 종료되는 task/client를 되살리지 못하도록 공유 flag set. USDT/KRX
+        #   shutdown 진입 전 필수 — stop()/task await 구간 globals not-None window를 'None skip'
+        #   만으론 못 막음 (main.py shutdown 순서 직접 확인).
+        scheduler.signal_collector_shutdown_initiated()
 
-    # USDT WebSocket Bithumb client 종료 (Phase B.3 Stage U2)
-    await scheduler.shutdown_usdt_ws_bithumb_client()
+        # USDT WebSocket Upbit client 종료
+        await scheduler.shutdown_usdt_ws_upbit_client()
 
-    # USDT WebSocket Coinone client 종료 (Phase B.4 Stage C2)
-    await scheduler.shutdown_usdt_ws_coinone_client()
+        # USDT WebSocket Bithumb client 종료 (Phase B.3 Stage U2)
+        await scheduler.shutdown_usdt_ws_bithumb_client()
 
-    # USDT WebSocket Korbit client 종료 (Phase B.5 Stage K2)
-    await scheduler.shutdown_usdt_ws_korbit_client()
+        # USDT WebSocket Coinone client 종료 (Phase B.4 Stage C2)
+        await scheduler.shutdown_usdt_ws_coinone_client()
 
-    # USDT WebSocket Gopax client 종료 (Phase B.6 Stage G1)
-    await scheduler.shutdown_usdt_ws_gopax_client()
+        # USDT WebSocket Korbit client 종료 (Phase B.5 Stage K2)
+        await scheduler.shutdown_usdt_ws_korbit_client()
 
-    # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
-    await scheduler.shutdown_krx_futures_client()
+        # USDT WebSocket Gopax client 종료 (Phase B.6 Stage G1)
+        await scheduler.shutdown_usdt_ws_gopax_client()
 
-    # Selenium Queue Worker 종료
-    await scheduler.shutdown_selenium_queue()
+        # KRX 미국달러선물 client 종료 (bootstrap 진행 중도 안전 cancel)
+        await scheduler.shutdown_krx_futures_client()
 
-    # 스케줄러 종료
-    scheduler.scheduler.shutdown()
+        # Selenium Queue Worker 종료
+        await scheduler.shutdown_selenium_queue()
 
-    # ⚠️ **여기서 마무리한다** — 위 drain 들이 loop 를 쓰는 동안 인증 worker 는 자기 스레드에서
-    #    끝나가고, 다음 lifespan 이 구 스레드와 겹치지 않도록 마지막에 합류시킨다.
-    await auth_executor.await_auth_executor_shutdown(_auth_executor_closing)
+        # 스케줄러 종료
+        scheduler.scheduler.shutdown()
+
+    finally:
+        # ⚠️ **여기서 마무리한다** — 위 drain 들이 loop 를 쓰는 동안 인증 worker 는 자기 스레드에서
+        #    끝나가고, 다음 lifespan 이 구 스레드와 겹치지 않도록 마지막에 합류시킨다.
+        await auth_executor.await_auth_executor_shutdown(_auth_executor_closing)
 
 async def build_graph_buckets() -> dict:
     """

@@ -233,6 +233,129 @@ def test_shutdown_cancels_queue_and_next_start_uses_a_fresh_executor():
     assert _run(second_lifespan()) == "second-ok"
 
 
+def test_production_two_phase_shutdown_keeps_the_event_loop_running():
+    """⛔ **프로덕션 경로를 직접 구동한다.** 기존 테스트는 동기 편의 함수
+    `shutdown_auth_executor()` 만 썼는데, 프로덕션 lifespan 은 `begin_...` + `await_...` 를 **따로**
+    부른다 — 그래서 `await_...` 를 no-op 으로 만들어도 기존 테스트는 통과했다(false green).
+
+    이 테스트가 잠그는 것이 분리의 **이유** 그 자체다: worker 가 막혀 있는 동안에도
+    **event loop 는 계속 돌아야** 뒤따르는 drain(trigger/crawler/scheduler)이 실행된다.
+    """
+    release = threading.Event()
+    entered = threading.Event()
+    ran_queued = threading.Event()
+
+    def blocker():
+        entered.set()
+        release.wait(timeout=10)
+
+    async def scenario():
+        auth_executor.start_auth_executor(1)                    # W=1 — 큐를 만들기 쉽게
+        running = asyncio.create_task(auth_executor.run_in_auth_executor(blocker))
+        for _ in range(2000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert entered.is_set(), "worker 가 점유되지 않았다 — 전제가 깨졌다"
+        queued = asyncio.create_task(auth_executor.run_in_auth_executor(ran_queued.set))
+        await asyncio.sleep(0)
+
+        # ── 1단계: 차단만 ──
+        closing = auth_executor.begin_auth_executor_shutdown()
+        assert closing is not None
+        assert not auth_executor.is_auth_executor_running(), "전역이 비워지지 않았다"
+        with pytest.raises(auth_executor.AuthExecutorNotReady):
+            await auth_executor.run_in_auth_executor(lambda: "new-submit")   # 신규 submit fail-closed
+
+        # ── 2단계: 대기는 아직 끝나면 안 된다 ──
+        awaiting = asyncio.create_task(auth_executor.await_auth_executor_shutdown(closing))
+        heartbeats = 0
+        for _ in range(50):
+            await asyncio.sleep(0.001)
+            heartbeats += 1                                     # ← loop 가 살아 있다는 증거
+            if awaiting.done():
+                break
+        assert not awaiting.done(), "worker 가 막혀 있는데 대기가 끝났다 — 합류를 안 한 것이다"
+        assert heartbeats >= 50, "event loop 가 멈췄다 — 이 분리의 이유가 사라진다"
+
+        # ── worker 해제 → 합류 완료, 다음 executor 정상 기동 ──
+        release.set()
+        await asyncio.wait_for(awaiting, timeout=10)
+        await asyncio.gather(running, queued, return_exceptions=True)
+        assert queued.cancelled(), "큐 항목이 취소되지 않았다"
+        assert not ran_queued.is_set(), "취소된 큐 항목이 실행됐다"
+
+        auth_executor.start_auth_executor(2)
+        return await auth_executor.run_in_auth_executor(lambda: "next-lifespan-ok")
+
+    assert _run(scenario()) == "next-lifespan-ok"
+
+
+def test_queue_wait_and_execution_time_are_recorded_separately():
+    """⛔ 총 wall time 만 보면 **W 부족과 Firebase 지연을 구분할 수 없다** — 그게 W canary 의 전부다."""
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocker():
+        entered.set()
+        release.wait(timeout=10)
+
+    async def scenario():
+        auth_executor.reset_auth_executor_metrics()
+        auth_executor.start_auth_executor(1)
+        running = asyncio.create_task(auth_executor.run_in_auth_executor(blocker))
+        for _ in range(2000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.001)
+        # worker 가 막힌 동안 제출 → 이 건의 **queue wait 가 길고 execution 은 짧아야** 한다.
+        queued = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: "ok"))
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(running, queued)
+        return auth_executor.auth_executor_metrics()
+
+    m = _run(scenario())
+    assert m["count"] == 2
+    assert m["by_outcome"]["ok"] == 2
+    assert m["never_started"] == 0
+    assert m["max_workers"] == 1
+    # 큐에 걸린 건이 있으므로 대기 최댓값은 0보다 크고, 실행 최댓값은 blocker(≈release 까지)가 지배한다.
+    assert m["queue_wait_ms_max"] > 0, "queue wait 가 기록되지 않았다"
+    assert m["execution_ms_max"] > 0, "execution 이 기록되지 않았다"
+
+
+def test_cancelled_before_start_is_recorded_as_never_started():
+    """큐에서 취소된 건은 **worker 에 닿지 못했다** — queue wait/execution 이 아니라 그 사실을 남긴다."""
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocker():
+        entered.set()
+        release.wait(timeout=10)
+
+    async def scenario():
+        auth_executor.reset_auth_executor_metrics()
+        auth_executor.start_auth_executor(1)
+        running = asyncio.create_task(auth_executor.run_in_auth_executor(blocker))
+        for _ in range(2000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.001)
+        queued = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: "never"))
+        await asyncio.sleep(0)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        return auth_executor.auth_executor_metrics()
+
+    m = _run(scenario())
+    assert m["never_started"] == 1, "큐 취소가 never_started 로 기록되지 않았다"
+    assert "CancelledError" in m["by_outcome"]
+
+
 def test_repeated_start_does_not_leak_a_second_pool():
     """중복 startup 방어 — 새로 만들면 구 pool 이 누수된다(스레드가 남는다)."""
 
