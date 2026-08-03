@@ -651,13 +651,37 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - ⛔ **admission control(semaphore 즉시거절) = 기각 유지.** 측정: 유입 0.2×용량에서 성공 120→**18**,
   거절 0→**102**. 배포 재연결은 평균 유입이 낮아도 **동시 도착**이라 `sem.locked()` 가 즉시 참이
   되고, 1초면 빠질 큐를 대량 거절한다. 이 워크로드의 모양과 정반대다.
-- 🔲 **격리(인증 전용 executor) = 미결.** 이건 admission control 이 **아니다** — 거절하지 않고
-  자원을 나눌 뿐이라 새 wire 결과가 없다. 측정: 동거 작업 p99 **3967ms → 31ms**.
+- ✅ **격리(인증 전용 executor) = land**(2026-08-03, `app/auth_executor.py`). 이건 admission control 이
+  **아니다** — 거절하지 않고 자원을 나눌 뿐이라 새 wire 결과가 없다. 측정: 동거 작업 p99
+  **3967ms → 31ms**.
+
+  ⚠️ **결정이 남은 것은 구현이 아니라 `W` 값이다.** `WS_AUTH_EXECUTOR_WORKERS` 기본 4는
+  **측정값이 아니라 초기값**이고, 운영은 **2 vCPU** 다. W 는 곧 인증 처리 용량(W/T)이라 낮으면
+  스스로 문턱을 낮춘다.
+
+  **W canary 측정 계획** (flag ON 전 확정 → GO 기록에 숫자로 남긴다)
+
+  1. **시점**: 서버 `TOPIC_DISPATCHER_ENABLED=true` 만 켜고 **Release app arming 전**. 통제된
+     canary 여야 한다 — 앱을 먼저 arm 하면 유입을 우리가 못 정한다.
+  2. **수단**: 상시 집계 `GET /admin/api/ws-auth-executor-metrics` + 분포가 필요하면 canary
+     기간에만 `WS_AUTH_EXECUTOR_LOG_TIMINGS=true`(재연결 폭주에서 subscribe 마다 한 줄이라 상시 금지).
+  3. **분리해서 본다** — 이것이 계측의 요점이다. 총 wall time 만 보면 **W 부족과 Firebase 지연을
+     구분할 수 없다**:
+     · `queue_wait_ms` 지배 → **W 부족** 신호(W 를 올린다),
+     · `execution_ms` 지배 → **Firebase/네트워크** 신호(W 를 올려도 안 낫는다. `httpTimeout`·
+       콜드 인증서 fetch 쪽을 본다),
+     · `never_started` > 0 → 큐에서 취소된 건 = **과부하**. 즉시 조사.
+     · `caller_cancelled_while_running` → wire deadline 발화 빈도. execution 분포와 함께 읽는다.
+  4. **동거 영향을 함께 본다** — 애초 목표가 그것이다(3967→31). 일반 `to_thread` 경로 p99 를
+     같은 창에서 관측한다. 격리가 되고 있는데 동거 p99 가 나빠지면 원인은 W 가 아니다.
+  5. **조정·rollback 기준을 숫자로 확정한 뒤** phased rollout 으로 넘어간다.
+     ⚠️ 그 숫자는 **canary 결과에서 나온다** — 지금 여기 임의 값을 적지 않는다. rollback 은
+     `TOPIC_DISPATCHER_ENABLED=false`(W 조정으로 잡히지 않을 때).
   ⚠️ 대가: 워커 수 W 가 곧 인증 처리 용량(W/T)이라 잘못 잡으면 스스로 문턱을 낮춘다.
   ⛔ **"5줄 격리"라고 적었던 것은 과소평가다**(codex Medium). 실제로 다뤄야 하는 것:
     · **수명주기** — 모듈 전역 pool 의 생성·종료(앱 shutdown 에서 안 닫으면 스레드가 남는다),
-    · **kwargs** — `loop.run_in_executor(ex, func, *args)` 는 **키워드 인자를 받지 않는다**
-      (`functools.partial` 필요). 현행 호출은 `check_revoked=`/`app=` 를 키워드로 넘긴다,
+    · **kwargs** — `loop.run_in_executor(ex, func, *args)` 는 **키워드 인자를 받지 않는다**.
+      현행 호출은 `check_revoked=`/`app=` 를 키워드로 넘긴다 — 구현에서는 클로저가 나른다,
     · **큐 적체** — 전용 pool 도 `SimpleQueue` 라 무제한이다. 격리는 *동거인* 을 지킬 뿐
       인증 자신의 적체는 그대로다.
   ⛔ **"구조 트립와이어로만 잠긴다"도 틀렸다**(codex Medium): **기본 executor 를 점유해 놓고**
@@ -676,6 +700,29 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       필요하면 per-connection 명령 빈도·동시성 **관측부터** 한다.
   ⚠️ 값은 `/api/` 의 3r/s + conn 10 을 **복사하지 말 것** — handshake rate 와 동시 연결 수의
   **운영 로그**를 근거로 제안값을 만든다(트래픽 모양이 다르다: WS 는 장수명 1연결).
+
+  **제안서 (값 없음 — 관측이 먼저다)**
+
+  ⛔ 이 절은 **숫자를 제안하지 않는다.** 관측 없이 넣은 상한은 정상 사용자를 막거나(NAT) 아무것도
+  못 막는다(연결 내부). 아래 3단계를 거친 뒤에야 값을 쓴다. 호스트 config 변경이라 **적용은 별도
+  승인**이다.
+
+  1. **관측(선행)** — 무엇을 재는가:
+     · `/ws` **handshake rate**: nginx access log 의 `/ws` 요청(101 업그레이드) 초당/분당 분포.
+       ⚠️ 재연결 폭주(배포·네트워크 회복)의 **피크**가 정상 상한을 정한다 — 평균이 아니다.
+     · **동시 연결 수**와 그 추이(피크/유지). WS 는 장수명이라 conn 상한의 지배 요인이다.
+     · **IP 당 연결 수 분포** — 이게 NAT 판단의 근거다. 상위 IP 가 실제로 몇 연결을 잡는지 모르면
+       `limit_conn` 값은 추측이다.
+  2. **값 도출** — 피크 × 여유배수. 여유배수는 "정상 재연결 폭주를 통과시킨다"를 기준으로 정하고,
+     `limit_conn` 은 **IP 당 연결 수 분포의 상위 꼬리**를 덮게 잡는다(모바일 NAT).
+     ⚠️ `limit_req burst`/`nodelay` 는 재연결 폭주에서 특히 중요하다 — burst 없이 rate 만 걸면
+     동시 도착이 즉시 거절된다(admission control 을 기각한 것과 **같은 이유**다).
+  3. **적용·검증** — canary 시간대에 넣고 `limit_req_status`/`limit_conn_status` 로 **실제 거절
+     건수**를 본다. 거절이 0이 아니면 정상 사용자를 자르고 있는지부터 확인한다.
+
+  ⛔ **연결 내부 subscribe 남용은 이 항목으로 닫히지 않는다** — 별도 잔여 위험이다(위 참조).
+  닫으려면 **per-connection 명령 빈도·동시성 관측**이 선행이고, 그건 nginx 가 아니라 dispatcher
+  쪽 계측이다. 이 제안서를 근거로 "flood 방어 완료"라고 쓰지 말 것.
 
 ⚠️ 큐 자체는 caller deadline 이 드레인하지만(취소가 concurrent future 로 전파돼 dequeue 시 skip),
 큐 **크기**는 유입률 × deadline 이고 고정 상한이 없다 — 위 두 항목이 그 상한을 정하는 자리다.
