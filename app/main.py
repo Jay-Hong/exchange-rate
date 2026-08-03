@@ -1562,9 +1562,13 @@ async def get_ws_auth_executor_metrics():
     ⛔ 총 wall time 만 보면 **W 부족과 Firebase 지연을 구분할 수 없다** — 그게 W 를 정하려는
     canary 의 전부다. 그래서 제출→worker 시작(`queue_wait_ms_*`)과 worker 내부 실행
     (`execution_ms_*`)을 나눠 센다.
-    ⚠️ 계측 소유자는 **worker** 다 — 호출자가 wire deadline 으로 취소돼도 스레드는 계속 돌고,
-    실제 execution 은 worker 종료 시점에 기록된다(`caller_cancelled_while_running` 은 그 발생만 센다).
-    `never_started` = 큐에서 취소돼 worker 에 닿지 못한 건 = **과부하 신호**.
+    ⚠️ 계측 소유자는 **worker** 다 — 호출자가 취소돼도 스레드는 계속 돌고, 실제 execution 은
+    worker 종료 시점에 기록된다.
+    ⛔ **두 카운터를 원인으로 읽지 말 것.** 관측 사실은 이것뿐이다:
+      · `never_started` = worker **시작 전** 취소. 과부하일 수도 있지만 **shutdown 의
+        `cancel_futures`** 나 연결 종료도 같은 값을 올린다 → 배포·종료 시각과 상관 분석 필요.
+      · `caller_cancelled_while_running` = worker **실행 중** caller task 취소. wire deadline
+        전용이 **아니다**(연결 종료·상위 취소 포함) → deadline 로그와 함께 읽는다.
     ⚠️ 집계라 분포는 없다 — 분포가 필요하면 canary 기간에만 `WS_AUTH_EXECUTOR_LOG_TIMINGS=true`.
     process-local(재시작 reset), reset route 없음, 토큰·UID 미기록, never-crash.
     """

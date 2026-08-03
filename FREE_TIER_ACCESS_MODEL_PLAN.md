@@ -166,7 +166,7 @@
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
-| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **기능 선행조건 4/4 충족.** ⛔ 그러나 **여기서 끝이 아니다** — §자원 상한의 **열린 항목 2건**(인증 전용 executor / nginx `/ws` ingress 상한)이 여전히 *flag ON 전 결정 필요*이고, 그 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 남는다 | 🔴 false |
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **기능 선행조건 4/4 충족.** ⛔ 그러나 **여기서 끝이 아니다** — §자원 상한의 **열린 항목 2건**(**`W` 확정** / **nginx 관측·상한 결정**)이 여전히 남아 있고 — executor 구현 자체는 land 했다 —, 그 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 남는다 | 🔴 false |
 | `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
 
 **무인증 graph v2(`/api/v2/graph/tab`·`/catalog`)의 krx.\* series는 어떤 flag로도 열리지 않는다.**
@@ -659,10 +659,24 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   **측정값이 아니라 초기값**이고, 운영은 **2 vCPU** 다. W 는 곧 인증 처리 용량(W/T)이라 낮으면
   스스로 문턱을 낮춘다.
 
-  **W canary 측정 계획** (flag ON 전 확정 → GO 기록에 숫자로 남긴다)
+  ⛔ **절차가 순환하지 않게 나눈다**(2026-08-04 정정). 한때 "W 확정 = flag ON 전 조건"이라고 적고
+  측정은 flag ON 이후라고 적었는데, 그러면 **실행 자체가 불가능**하다(W←측정←flag ON←W).
+  → **4단계로 분리한다**:
 
-  1. **시점**: 서버 `TOPIC_DISPATCHER_ENABLED=true` 만 켜고 **Release app arming 전**. 통제된
-     canary 여야 한다 — 앱을 먼저 arm 하면 유입을 우리가 못 정한다.
+  | 단계 | 내용 | Release arming |
+  | --- | --- | --- |
+  | ① **Canary GO** | `W=4` 를 **canary 한정 provisional 값**으로 **명시 수용**. 부하 **공급원·규모·기간·즉시 중단 조건**을 확정. | OFF |
+  | ② **서버 canary 실행** | `TOPIC_DISPATCHER_ENABLED=true`. 측정. | OFF |
+  | ③ **W 확정** | 측정 결과로 `W` 와 조정·rollback **숫자 기준**을 기록. | OFF |
+  | ④ **Release GO** | smoke 통과 후 arming → phased release. | ON |
+
+  ⚠️ **부하 공급원을 반드시 정한다** — Release 앱이 OFF 인 동안에는 **자연 인증 트래픽이 거의 없다**.
+  DEBUG 기기 몇 대인지, 별도 부하 도구인지, 몇 연결 × 몇 초인지 정하지 않으면 canary 는 아무것도
+  재지 못한다(빈 창을 "여유 있다"로 오독하게 된다).
+
+  **W canary 측정 계획** (위 ②에서 실행 → ③에서 숫자 확정)
+
+  1. **시점**: 위 ② — 서버 flag 만 켠 상태, **Release arming 전**. 통제된 canary 여야 한다.
   2. **수단**: 상시 집계 `GET /admin/api/ws-auth-executor-metrics` + 분포가 필요하면 canary
      기간에만 `WS_AUTH_EXECUTOR_LOG_TIMINGS=true`(재연결 폭주에서 subscribe 마다 한 줄이라 상시 금지).
   3. **분리해서 본다** — 이것이 계측의 요점이다. 총 wall time 만 보면 **W 부족과 Firebase 지연을
@@ -670,8 +684,13 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
      · `queue_wait_ms` 지배 → **W 부족** 신호(W 를 올린다),
      · `execution_ms` 지배 → **Firebase/네트워크** 신호(W 를 올려도 안 낫는다. `httpTimeout`·
        콜드 인증서 fetch 쪽을 본다),
-     · `never_started` > 0 → 큐에서 취소된 건 = **과부하**. 즉시 조사.
-     · `caller_cancelled_while_running` → wire deadline 발화 빈도. execution 분포와 함께 읽는다.
+     ⛔ **두 카운터를 원인으로 읽지 말 것**(2026-08-04 정정) — 관측 사실은 이것뿐이다:
+     · `never_started` = **worker 가 시작하기 전에 취소됨**. 과부하일 수도 있지만 **shutdown 의
+       `cancel_futures`** 나 연결 종료도 같은 값을 올린다. → 배포·종료 시각과 **상관 분석**해야
+       과부하로 읽을 수 있다.
+     · `caller_cancelled_while_running` = **worker 실행 중 caller task 가 취소됨**. wire deadline
+       전용 카운터가 **아니다**(연결 종료·상위 취소도 포함). deadline 로그와 함께 읽는다.
+     ⚠️ 원인을 직접 가르려면 **호출자 쪽에 취소 사유별 카운터**를 따로 넣어야 한다(지금은 없다).
   4. **동거 영향을 함께 본다** — 애초 목표가 그것이다(3967→31). 일반 `to_thread` 경로 p99 를
      같은 창에서 관측한다. 격리가 되고 있는데 동거 p99 가 나빠지면 원인은 W 가 아니다.
   5. **조정·rollback 기준을 숫자로 확정한 뒤** phased rollout 으로 넘어간다.
@@ -707,9 +726,22 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   못 막는다(연결 내부). 아래 3단계를 거친 뒤에야 값을 쓴다. 호스트 config 변경이라 **적용은 별도
   승인**이다.
 
-  1. **관측(선행)** — 무엇을 재는가:
-     · `/ws` **handshake rate**: nginx access log 의 `/ws` 요청(101 업그레이드) 초당/분당 분포.
-       ⚠️ 재연결 폭주(배포·네트워크 회복)의 **피크**가 정상 상한을 정한다 — 평균이 아니다.
+  0. ⛔ **계측 구현이 선행이다 — 지금 로그로는 이 관측을 할 수 없다**(2026-08-04 확인).
+     · 실제 쓰이는 포맷은 `nginx/nginx.conf:40` 의 **`main`** 인데 거기엔 `$request_time` ·
+       `$limit_req_status` · `$limit_conn_status` 가 **없다**. (`json_combined` 는 정의만 돼 있고
+       **아무 곳에서도 쓰이지 않는다** — `request_time` 이 있지만 limit 상태는 거기에도 없다.)
+     · ⛔ 더 근본적으로, **WebSocket access log 는 연결이 끝날 때 기록된다.** 그래서 `/ws` 101
+       로그 시각을 세면 **handshake 유입률이 아니라 종료된 연결의 기록률**을 보게 된다. 장수명
+       연결은 **아직 로그에 나타나지도 않아** 현재 동시 연결 수와 IP 별 동시 분포를 알 수 없다.
+     → **권장**: 앱의 `/ws` accept/close 지점에 **handshake 카운터 · 현재 연결 gauge · IP 별 동시
+       연결 분포**를 둔다(연결 중에도 보인다). access log 로 사후 복원하려면 최소한
+       `$request_time` 과 연결 식별자를 추가해야 하고, **그래도 종료 전 연결은 관측할 수 없다**.
+     → **상한 검증 전에** `$limit_req_status` · `$limit_conn_status` 를 실제 log format 에 넣는다
+       (없으면 3번의 "실제 거절 건수"를 셀 수 없다).
+
+  1. **관측** — 무엇을 재는가(위 0 이 끝난 뒤):
+     · `/ws` **handshake rate**: 재연결 폭주(배포·네트워크 회복)의 **피크**가 상한을 정한다 —
+       평균이 아니다.
      · **동시 연결 수**와 그 추이(피크/유지). WS 는 장수명이라 conn 상한의 지배 요인이다.
      · **IP 당 연결 수 분포** — 이게 NAT 판단의 근거다. 상위 IP 가 실제로 몇 연결을 잡는지 모르면
        `limit_conn` 값은 추측이다.
