@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import auth_executor, topic_wire
+from app import auth_executor, topic_wire, ws_connection_metrics
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -192,20 +192,56 @@ templates = Jinja2Templates(directory="templates")
 
 # WebSocket 연결 관리
 class ConnectionManager:
+    """⛔ **제거 경로는 `disconnect()` 하나뿐이어야 한다.** 한때 broadcast 실패 처리에서
+    `active_connections.remove()` 를 **직접** 불렀는데, 그 상태로 계측을 붙이면 gauge 와 IP
+    카운터가 리스트와 **어긋난다**(그쪽 경로에서만 감소가 빠진다). 그래서 모든 제거를 여기로 모으고,
+    **소켓별 등록 상태**를 기준으로 정확히 한 번만 감소시킨다(중복 호출은 no-op).
+    """
+
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        # 소켓 → IP. **이것이 "등록됨"의 정의**다 — 리스트와 따로 세면 어긋난다.
+        self._ip_by_socket: dict[WebSocket, str] = {}
+        self._connections_by_ip: dict[str, int] = {}
+        self._handshakes = ws_connection_metrics.HandshakeBuckets()
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        client_ip = ws_connection_metrics.client_ip_from_headers(getattr(websocket, "headers", {}))
+        self._ip_by_socket[websocket] = client_ip
+        self._connections_by_ip[client_ip] = self._connections_by_ip.get(client_ip, 0) + 1
+        self._handshakes.record()
         logger.info("✅ WebSocket 연결 성공", extra={"connections": len(self.active_connections)})
 
     def disconnect(self, websocket: WebSocket):
-        try:
-            self.active_connections.remove(websocket)
-            logger.info("❌ WebSocket 연결 해제", extra={"connections": len(self.active_connections)})
-        except ValueError:
+        """**멱등**이다 — 이미 해제된 소켓이면 아무것도 하지 않는다."""
+        client_ip = self._ip_by_socket.pop(websocket, None)
+        if client_ip is None:
+            # 등록된 적 없거나 이미 해제됨. 리스트에서도 빼둔다(방어) — 카운터는 건드리지 않는다.
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
             logger.warning("⚠️ 이미 제거된 WebSocket 연결 시도", extra={"connections": len(self.active_connections)})
+            return
+        remaining = self._connections_by_ip.get(client_ip, 0) - 1
+        if remaining > 0:
+            self._connections_by_ip[client_ip] = remaining
+        else:
+            # ⛔ 0 이면 **키를 지운다** — 남기면 IP map 이 단조 증가해 distinct_ips 가 부풀고
+            #    사실상 IP history 가 된다(만들지 않기로 한 것).
+            self._connections_by_ip.pop(client_ip, None)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        logger.info("❌ WebSocket 연결 해제", extra={"connections": len(self.active_connections)})
+
+    def connection_metrics(self) -> dict:
+        """⚠️ gauge 는 **별도로 세지 않는다** — `active_connections` 가 단일 진실 소스다."""
+        return {
+            "active_connections": len(self.active_connections),
+            "registered_sockets": len(self._ip_by_socket),
+            "per_ip": ws_connection_metrics.connections_per_ip_histogram(self._connections_by_ip),
+            "handshakes": self._handshakes.snapshot(),
+        }
 
     async def broadcast(self, message: dict, send_timeout: float = 5.0):
         """모든 연결된 클라이언트에게 메시지 병렬 전송 (PR1: 직렬 → asyncio.gather + timeout).
@@ -238,11 +274,9 @@ class ConnectionManager:
         # 실패한 연결 제거 (timeout/예외 모두 동일 처리)
         failed = [r for r in results if r is not None]
         for conn in failed:
-            try:
-                self.active_connections.remove(conn)
-            except ValueError:
-                # 이미 제거됨 (disconnect()에서 제거된 경우)
-                pass
+            # ⛔ **직접 remove 하지 않는다** — `disconnect()` 가 유일한 제거 경로여야 계측이
+            #    리스트와 어긋나지 않는다(멱등이라 이미 해제된 소켓도 안전하다).
+            self.disconnect(conn)
 
         if failed:
             logger.warning(
@@ -1553,6 +1587,27 @@ async def get_atomic_cutover_status():
     """
     from app.atomic_cutover_status import build_cutover_status_dict
     return await build_cutover_status_dict(SessionLocal)
+
+
+@app.get("/admin/api/ws-connection-metrics", dependencies=[Depends(verify_admin)])
+async def get_ws_connection_metrics():
+    """nginx `/ws` ingress 상한을 **관측 위에서** 정하기 위한 계측(read-only).
+
+    ⛔ nginx access log 로는 못 한다 — 실제 log format 에 limit 상태가 없고, 더 근본적으로
+    **WS access log 는 연결 종료 시 기록**이라 `/ws` 101 을 세면 handshake 유입률이 아니라
+    **종료된 연결의 기록률**이 나오며 장수명 연결은 로그에 아직 없다(= 현재 동시 연결·IP 분포
+    미상). 그 둘이 `limit_conn` 값을 정하는 근거다.
+    ⛔ **원시 IP 를 노출하지 않는다** — IP 당 연결 수 **히스토그램** · 최댓값 · 총계만.
+    ⚠️ `handshakes` 는 **고정 크기 시간 버킷**이다(누적 합계로는 피크를 못 낸다). 시계열·IP
+    history 는 만들지 않는다.
+    ⚠️ **process-local** — 지금은 Uvicorn worker 1개라 이것이 전체값이지만, worker 를 늘리면
+    합산 없이는 전체가 아니다. never-crash.
+    """
+    try:
+        return {"metrics": manager.connection_metrics()}
+    except Exception:
+        logger.error("ws-connection-metrics 조회 실패", exc_info=True)
+        return {"metrics": None, "error": "unavailable"}
 
 
 @app.get("/admin/api/ws-auth-executor-metrics", dependencies=[Depends(verify_admin)])

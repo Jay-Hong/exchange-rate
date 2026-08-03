@@ -644,7 +644,10 @@ firebase-admin 6.9.0 은 `app.options.get("httpTimeout", …)` 로 **app 별**�
 즉 **인증 전용 named app 으로 transport 상한을 FCM 과 분리**할 수 있다 — "전역이라 못 한다"는
 근거는 성립하지 않는다.
 
-#### 자원 상한 — 열린 항목 2건 (flag ON 전 결정 필요)
+#### 자원 상한 — Canary GO 전 **provisional 조건** 확정 → 서버 canary 후 **W · nginx 값 확정**
+
+⛔ 한때 이 제목이 "열린 항목 2건 (flag ON 전 결정 필요)"였는데, **최종값은 flag ON canary 이후에만**
+정할 수 있어 아래 4단계 절차와 모순이었다. flag ON 전에 정하는 것은 **provisional 조건**이다.
 
 timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두 개념을 뭉쳐 기각했다. 분리한다.
 
