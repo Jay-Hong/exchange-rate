@@ -31,7 +31,7 @@ import functools
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
 
 from app import config
@@ -60,6 +60,10 @@ _metrics: dict[str, Any] = {
     "execution_ms_sum": 0.0,
     "execution_ms_max": 0.0,
     "never_started": 0,      # 큐에서 취소돼 worker 에 닿지 못한 건수
+    # ⛔ **execution 을 0 으로 확정하지 않는다.** wire deadline 이 발화해도 스레드는 계속 도는 것이
+    #    이 설계의 핵심이라, 그 순간 execution 을 0 으로 적으면 **Firebase 실행시간을 통째로
+    #    과소 측정**한다(실측: caller 취소 뒤에도, worker 실제 종료 뒤에도 0.0 이었다).
+    "caller_cancelled_while_running": 0,
     "by_outcome": {},
 }
 
@@ -77,33 +81,45 @@ def auth_executor_metrics() -> dict[str, Any]:
 def reset_auth_executor_metrics() -> None:
     with _metrics_lock:
         _metrics.update(count=0, queue_wait_ms_sum=0.0, queue_wait_ms_max=0.0,
-                        execution_ms_sum=0.0, execution_ms_max=0.0, never_started=0)
+                        execution_ms_sum=0.0, execution_ms_max=0.0, never_started=0,
+                        caller_cancelled_while_running=0)
         _metrics["by_outcome"] = {}
 
 
 def _record(queue_wait_ms: float | None, execution_ms: float | None, outcome: str) -> None:
+    """⚠️ **worker 가 부른다**(또는 큐 취소 시 done callback 이). caller coroutine 이 아니다 —
+    아래 `run_in_auth_executor` 주석 참조."""
     with _metrics_lock:
         _metrics["count"] += 1
         _metrics["by_outcome"][outcome] = _metrics["by_outcome"].get(outcome, 0) + 1
         if queue_wait_ms is None:
             _metrics["never_started"] += 1
-            return
-        _metrics["queue_wait_ms_sum"] += queue_wait_ms
-        _metrics["queue_wait_ms_max"] = max(_metrics["queue_wait_ms_max"], queue_wait_ms)
-        if execution_ms is not None:
-            _metrics["execution_ms_sum"] += execution_ms
-            _metrics["execution_ms_max"] = max(_metrics["execution_ms_max"], execution_ms)
+        else:
+            _metrics["queue_wait_ms_sum"] += queue_wait_ms
+            _metrics["queue_wait_ms_max"] = max(_metrics["queue_wait_ms_max"], queue_wait_ms)
+            if execution_ms is not None:
+                _metrics["execution_ms_sum"] += execution_ms
+                _metrics["execution_ms_max"] = max(_metrics["execution_ms_max"], execution_ms)
     if config.WS_AUTH_EXECUTOR_LOG_TIMINGS:
         # ⚠️ canary 기간에만 켠다 — 재연결 폭주에서 subscribe 마다 한 줄이면 로그가 는다.
+        # ⛔ `never_started` 도 **로그에 남긴다**(null 로). 한때 여기서 일찍 return 해 집계에만
+        #    남고 로그에는 안 나왔는데, 그게 바로 과부하 신호라 canary 에서 못 보면 의미가 없다.
         logger.info(
             "ws_auth_timing",
             extra={
-                "queue_wait_ms": round(queue_wait_ms, 1),
+                "queue_wait_ms": round(queue_wait_ms, 1) if queue_wait_ms is not None else None,
                 "execution_ms": round(execution_ms, 1) if execution_ms is not None else None,
                 "outcome": outcome,
                 "max_workers": _configured_workers,
             },
         )
+
+
+def _record_caller_cancelled_while_running() -> None:
+    """호출자 deadline 이 발화했지만 **worker 는 계속 돈다** — 이 설계의 핵심 성질이다.
+    ⛔ 여기서 execution 을 확정하지 말 것. 실제 값은 worker 가 끝날 때 `_record` 가 남긴다."""
+    with _metrics_lock:
+        _metrics["caller_cancelled_while_running"] += 1
 
 
 def start_auth_executor(max_workers: int) -> None:
@@ -177,38 +193,45 @@ async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: 
     `*args, **kwargs` 를 그대로 나른다. 이 경로가 깨지면 `app=`/`check_revoked=` 가 조용히
     사라지고 — DEFAULT app 이 쓰여 낮춘 `httpTimeout` 이 통째로 no-op 이 되며 revoked 토큰이
     통과한다(둘 다 프레임·로그 어디에도 흔적이 안 남는다). 그래서 전용 테스트로 잠근다.
+
+    ⛔ **계측의 소유자는 caller coroutine 이 아니라 worker 다.** 한때 caller 쪽에서 기록했는데,
+    호출자가 deadline 으로 취소되면 그 순간 `finished` 가 없어 **execution 을 0ms 로 확정**하고
+    worker 가 실제로 끝난 뒤에도 갱신하지 않았다(실측: 취소 직후 0.0, 종료 후에도 0.0).
+    wire deadline 이 발화해도 스레드는 계속 도는 것이 **이 설계의 핵심**이라, 그 경우가 바로
+    Firebase 실행시간을 재야 할 자리다 — 거기서 0 을 적으면 canary 전체가 무의미해진다.
+    → worker 가 `finally` 에서 **실제** duration 을 남기고, 큐에서 취소돼 worker 에 닿지 못한
+      건만 done callback 이 `never_started` 로 남긴다(`future.cancelled()` 로 정확히 갈린다).
     """
     executor = _executor
     if executor is None:
         raise AuthExecutorNotReady("인증 전용 executor 가 없다")
-    loop = asyncio.get_running_loop()
     submitted = time.monotonic()
-    # ⚠️ worker **스레드가** 채운다 — 큐에서 취소되면 비어 있고, 그게 "실행되지 않았다"의 증거다.
-    timings: dict[str, float] = {}
 
     def _timed() -> T:
-        timings["started"] = time.monotonic()
+        started = time.monotonic()
+        queue_wait_ms = (started - submitted) * 1000.0
+        outcome = "ok"
         try:
             return func(*args, **kwargs)
+        except BaseException as exc:
+            outcome = type(exc).__name__
+            raise
         finally:
-            timings["finished"] = time.monotonic()
+            _record(queue_wait_ms, (time.monotonic() - started) * 1000.0, outcome)
 
-    # ⛔ `loop.run_in_executor` 는 **위치 인자만** 받는다 — 그래서 인자·키워드를 **클로저**(`_timed`)
-    #    가 나른다. (한때 `functools.partial(_timed)` 로 한 번 더 감쌌는데 `_timed` 는 인자가 없어
-    #    **아무 일도 하지 않았다** — 변이로 확인하고 걷어냈다. 계약을 지키는 것은 클로저다.)
+    future = executor.submit(_timed)
+
+    def _on_done(done: "Future[T]") -> None:
+        # ⚠️ `cancelled()` 는 **시작 전에 취소된 경우만** 참이다 — 실행 중 취소는 concurrent
+        #    future 를 취소하지 못하므로 여기서 정확히 갈린다(worker 기록과 중복되지 않는다).
+        if done.cancelled():
+            _record(None, None, "never_started")
+
+    future.add_done_callback(_on_done)
     try:
-        result = await loop.run_in_executor(executor, _timed)
-    except BaseException as exc:
-        _record(*_split(submitted, timings), outcome=type(exc).__name__)
+        return await asyncio.wrap_future(future)
+    except asyncio.CancelledError:
+        if not future.cancelled():
+            # 이미 실행 중이다 — worker 가 나중에 진짜 execution 을 남긴다.
+            _record_caller_cancelled_while_running()
         raise
-    _record(*_split(submitted, timings), outcome="ok")
-    return result
-
-
-def _split(submitted: float, timings: dict[str, float]) -> tuple[float | None, float | None]:
-    """제출→worker 시작(queue wait) 과 worker 내부 실행(execution) 을 **나눈다**."""
-    started = timings.get("started")
-    if started is None:
-        return None, None                       # 큐에서 취소 — worker 에 닿지 못했다
-    finished = timings.get("finished", started)
-    return (started - submitted) * 1000.0, (finished - started) * 1000.0

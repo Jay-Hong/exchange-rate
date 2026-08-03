@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from app import auth_executor
+from app import auth_executor, config
 
 
 @pytest.fixture(autouse=True)
@@ -291,8 +291,16 @@ def test_production_two_phase_shutdown_keeps_the_event_loop_running():
     assert _run(scenario()) == "next-lifespan-ok"
 
 
-def test_queue_wait_and_execution_time_are_recorded_separately():
-    """⛔ 총 wall time 만 보면 **W 부족과 Firebase 지연을 구분할 수 없다** — 그게 W canary 의 전부다."""
+def _timing_logs(caplog) -> list[dict]:
+    return [r.__dict__ for r in caplog.records if r.getMessage() == "ws_auth_timing"]
+
+
+def test_execution_time_is_recorded_by_the_worker_not_the_cancelled_caller(monkeypatch, caplog):
+    """⛔ **이 슬라이스에서 가장 중요한 계측 축.** wire deadline 이 발화해도 스레드는 계속 도는 것이
+    설계의 핵심이라, 그 경우가 바로 Firebase 실행시간을 재야 할 자리다. 한때 caller 쪽에서 기록해
+    취소 순간 execution 을 **0ms 로 확정**했고 worker 종료 뒤에도 갱신하지 않았다(실측 0.0/0.0)."""
+    monkeypatch.setattr(config, "WS_AUTH_EXECUTOR_LOG_TIMINGS", True)
+    caplog.set_level("INFO", logger="exchange_rate.auth_executor")
     release = threading.Event()
     entered = threading.Event()
 
@@ -303,30 +311,33 @@ def test_queue_wait_and_execution_time_are_recorded_separately():
     async def scenario():
         auth_executor.reset_auth_executor_metrics()
         auth_executor.start_auth_executor(1)
-        running = asyncio.create_task(auth_executor.run_in_auth_executor(blocker))
+        task = asyncio.create_task(auth_executor.run_in_auth_executor(blocker))
         for _ in range(2000):
             if entered.is_set():
                 break
             await asyncio.sleep(0.001)
-        # worker 가 막힌 동안 제출 → 이 건의 **queue wait 가 길고 execution 은 짧아야** 한다.
-        queued = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: "ok"))
-        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        during = auth_executor.auth_executor_metrics()
         release.set()
-        await asyncio.gather(running, queued)
-        return auth_executor.auth_executor_metrics()
+        for _ in range(2000):                      # worker 가 실제로 끝나기를 기다린다
+            if auth_executor.auth_executor_metrics()["execution_ms_max"] > 0:
+                break
+            await asyncio.sleep(0.001)
+        return during, auth_executor.auth_executor_metrics()
 
-    m = _run(scenario())
-    assert m["count"] == 2
-    assert m["by_outcome"]["ok"] == 2
-    assert m["never_started"] == 0
-    assert m["max_workers"] == 1
-    # 큐에 걸린 건이 있으므로 대기 최댓값은 0보다 크고, 실행 최댓값은 blocker(≈release 까지)가 지배한다.
-    assert m["queue_wait_ms_max"] > 0, "queue wait 가 기록되지 않았다"
-    assert m["execution_ms_max"] > 0, "execution 이 기록되지 않았다"
+    during, after = _run(scenario())
+    assert during["caller_cancelled_while_running"] == 1, "실행 중 취소가 기록되지 않았다"
+    assert during["execution_ms_max"] == 0.0, "worker 가 끝나기 전에 execution 을 확정했다"
+    assert after["execution_ms_max"] > 0, "worker 종료 뒤에도 실제 execution 이 기록되지 않았다"
+    assert after["never_started"] == 0, "실행 중 취소를 never_started 로 오분류했다"
 
 
-def test_cancelled_before_start_is_recorded_as_never_started():
-    """큐에서 취소된 건은 **worker 에 닿지 못했다** — queue wait/execution 이 아니라 그 사실을 남긴다."""
+def test_queued_cancellation_is_recorded_and_logged_with_nulls(monkeypatch, caplog):
+    """큐에서 취소된 건은 **과부하 신호**다 — 집계뿐 아니라 구조화 로그에도 남아야 canary 에서 본다."""
+    monkeypatch.setattr(config, "WS_AUTH_EXECUTOR_LOG_TIMINGS", True)
+    caplog.set_level("INFO", logger="exchange_rate.auth_executor")
     release = threading.Event()
     entered = threading.Event()
 
@@ -349,11 +360,69 @@ def test_cancelled_before_start_is_recorded_as_never_started():
             await queued
         release.set()
         await asyncio.gather(running, return_exceptions=True)
+        for _ in range(2000):
+            if auth_executor.auth_executor_metrics()["never_started"] == 1:
+                break
+            await asyncio.sleep(0.001)
         return auth_executor.auth_executor_metrics()
 
     m = _run(scenario())
-    assert m["never_started"] == 1, "큐 취소가 never_started 로 기록되지 않았다"
-    assert "CancelledError" in m["by_outcome"]
+    assert m["never_started"] == 1
+    nulls = [r for r in _timing_logs(caplog)
+             if r["outcome"] == "never_started"]
+    assert len(nulls) == 1, "never_started 가 구조화 로그에 남지 않았다 — canary 에서 못 본다"
+    assert nulls[0]["queue_wait_ms"] is None and nulls[0]["execution_ms"] is None
+
+
+class _QueuedMarker(Exception):
+    """queue-heavy 호출을 **값과 무관한 축**(outcome)으로 식별하기 위한 표식."""
+
+
+def test_queue_heavy_and_execution_heavy_calls_are_not_swapped(monkeypatch, caplog):
+    """⛔ 집계 max 두 개가 각각 >0 인지만 보면 **두 값을 서로 바꿔도 통과**한다.
+    ⛔ 그렇다고 per-call 로그에서 **측정값으로 레코드를 고르면 여전히 못 잡는다** — 값이 뒤바뀌면
+    라벨도 함께 뒤바뀌어 단언이 순환한다(실측: 그렇게 썼더니 swap 변이가 SURVIVED).
+    → 각 호출을 **outcome** 으로 식별한다. outcome 은 swap 의 영향을 받지 않는다.
+    """
+    monkeypatch.setattr(config, "WS_AUTH_EXECUTOR_LOG_TIMINGS", True)
+    caplog.set_level("INFO", logger="exchange_rate.auth_executor")
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocker():                                  # execution-heavy: 즉시 시작, 오래 실행
+        entered.set()
+        release.wait(timeout=10)
+
+    def queued_marker():                            # queue-heavy: 오래 대기, 즉시 종료
+        raise _QueuedMarker()
+
+    async def scenario():
+        auth_executor.reset_auth_executor_metrics()
+        auth_executor.start_auth_executor(1)
+        heavy = asyncio.create_task(auth_executor.run_in_auth_executor(blocker))
+        for _ in range(2000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.001)
+        waiting = asyncio.create_task(auth_executor.run_in_auth_executor(queued_marker))
+        await asyncio.sleep(0.05)                   # 큐에서 확실히 대기시킨다
+        release.set()
+        await heavy
+        with pytest.raises(_QueuedMarker):
+            await waiting
+        return _timing_logs(caplog)
+
+    logs = _run(scenario())
+    by_outcome = {r["outcome"]: r for r in logs if r["queue_wait_ms"] is not None}
+    assert "ok" in by_outcome and "_QueuedMarker" in by_outcome, f"기록이 부족하다: {by_outcome}"
+
+    execution_heavy = by_outcome["ok"]              # blocker — 즉시 시작해 오래 실행
+    queue_heavy = by_outcome["_QueuedMarker"]       # 줄 서 있다 즉시 종료
+
+    assert execution_heavy["execution_ms"] > execution_heavy["queue_wait_ms"], \
+        "즉시 시작해 오래 실행된 호출인데 execution 이 queue wait 보다 작다 — 두 값이 뒤바뀌었다"
+    assert queue_heavy["queue_wait_ms"] > queue_heavy["execution_ms"], \
+        "줄 서 있다 즉시 끝난 호출인데 queue wait 가 execution 보다 작다 — 두 값이 뒤바뀌었다"
 
 
 def test_repeated_start_does_not_leak_a_second_pool():

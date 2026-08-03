@@ -1555,6 +1555,27 @@ async def get_atomic_cutover_status():
     return await build_cutover_status_dict(SessionLocal)
 
 
+@app.get("/admin/api/ws-auth-executor-metrics", dependencies=[Depends(verify_admin)])
+async def get_ws_auth_executor_metrics():
+    """W canary 계측 — 인증 전용 executor 의 **queue wait / execution 분리** 집계(read-only).
+
+    ⛔ 총 wall time 만 보면 **W 부족과 Firebase 지연을 구분할 수 없다** — 그게 W 를 정하려는
+    canary 의 전부다. 그래서 제출→worker 시작(`queue_wait_ms_*`)과 worker 내부 실행
+    (`execution_ms_*`)을 나눠 센다.
+    ⚠️ 계측 소유자는 **worker** 다 — 호출자가 wire deadline 으로 취소돼도 스레드는 계속 돌고,
+    실제 execution 은 worker 종료 시점에 기록된다(`caller_cancelled_while_running` 은 그 발생만 센다).
+    `never_started` = 큐에서 취소돼 worker 에 닿지 못한 건 = **과부하 신호**.
+    ⚠️ 집계라 분포는 없다 — 분포가 필요하면 canary 기간에만 `WS_AUTH_EXECUTOR_LOG_TIMINGS=true`.
+    process-local(재시작 reset), reset route 없음, 토큰·UID 미기록, never-crash.
+    """
+    try:
+        return {"metrics": auth_executor.auth_executor_metrics(),
+                "running": auth_executor.is_auth_executor_running()}
+    except Exception:
+        logger.error("ws-auth-executor-metrics 조회 실패", exc_info=True)
+        return {"metrics": None, "running": None, "error": "unavailable"}
+
+
 @app.get("/admin/api/atomic-write-outcomes", dependencies=[Depends(verify_admin)])
 async def get_atomic_write_outcomes():
     """C7-a — atomic v2 writer compare_write outcome telemetry (read-only, process-local, behavior-change-0).
