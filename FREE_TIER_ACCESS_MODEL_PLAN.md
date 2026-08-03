@@ -665,8 +665,17 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - 🔲 **ingress 상한(nginx `/ws`) = 미결.** ⚠️ **2026-08-03 확인**: 이 2건은 기능 선행조건(§3.1 표)이
   4/4 충족된 뒤에도 **여전히 열려 있다**. GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
   "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
-  **없다**(주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다. 즉 인증 이전 단계에서
-  토큰 flood 를 막는 것이 없다. **호스트 config 변경이라 별도 승인이 필요하다.**
+  **없다**(`default.conf:78-80` 주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다
+  (`:105-106`, zone key 는 `$binary_remote_addr`). **호스트 config 변경이라 별도 승인이 필요하다.**
+  ⛔ **"토큰 flood 방어"로 일반화하지 말 것**(2026-08-03 정정). 실제 보호 범위는 좁다:
+    · `limit_req` 는 **upgrade handshake** 만 제한한다 — WebSocket 연결은 HTTP 요청 **하나**다.
+    · `limit_conn` 은 **동시 연결 수**만 제한하고, key 가 IP 라 **모바일 carrier NAT 사용자를 함께
+      묶는다**(정상 사용자를 막을 수 있다).
+    · **연결 수립 뒤 반복되는 `subscribe` 프레임은 nginx 가 보지 못한다** — 그래서 그로 인한
+      Firebase 검증 폭주는 이 상한으로 **막히지 않는다**. → **별도 잔여 위험으로 기록**하고,
+      필요하면 per-connection 명령 빈도·동시성 **관측부터** 한다.
+  ⚠️ 값은 `/api/` 의 3r/s + conn 10 을 **복사하지 말 것** — handshake rate 와 동시 연결 수의
+  **운영 로그**를 근거로 제안값을 만든다(트래픽 모양이 다르다: WS 는 장수명 1연결).
 
 ⚠️ 큐 자체는 caller deadline 이 드레인하지만(취소가 concurrent future 로 전파돼 dequeue 시 skip),
 큐 **크기**는 유입률 × deadline 이고 고정 상한이 없다 — 위 두 항목이 그 상한을 정하는 자리다.
