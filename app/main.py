@@ -637,10 +637,11 @@ async def lifespan(app: FastAPI):
     # Shutdown code
     logger.info("🛑 FastAPI 서버 종료")
 
-    # ⛔ **여기서 먼저 끊는다.** 종료 중에 큐에만 있는 인증을 굳이 다 돌릴 이유가 없고,
-    #    `cancel_futures=True` 가 그걸 실행 없이 취소한다. 실행 중인 것은 SDK `httpTimeout` 이 끊는다.
-    #    ⚠️ 재진입 — 다음 lifespan 은 **새 executor** 를 만든다(종료된 pool 재사용 금지).
-    auth_executor.shutdown_auth_executor()
+    # ⛔ **차단만 먼저, 대기는 맨 뒤.** 신규 submit 차단 + 큐 취소는 지금 해야 종료 중에 새 인증이
+    #    시작되지 않는다. 하지만 **실행 중 worker 를 여기서 기다리면 안 된다** — 인증은 per-attempt
+    #    `httpTimeout` + SDK 재시도라 길 수 있고, 그동안 loop 가 얼어 아래 trigger drain · crawler ·
+    #    scheduler 종료가 한 줄도 못 돈다(배포 중 grace 만료 시 통째로 날아간다).
+    _auth_executor_closing = auth_executor.begin_auth_executor_shutdown()
 
     # §6.6.2 C1 — bridge 신규 enqueue 차단(drain 전) + 큐된 callback flush + fx drain.
     # 순서: 차단 → barrier(큐된 bridge callback 실행 완료 → flush task 생성) →
@@ -686,6 +687,10 @@ async def lifespan(app: FastAPI):
 
     # 스케줄러 종료
     scheduler.scheduler.shutdown()
+
+    # ⚠️ **여기서 마무리한다** — 위 drain 들이 loop 를 쓰는 동안 인증 worker 는 자기 스레드에서
+    #    끝나가고, 다음 lifespan 이 구 스레드와 겹치지 않도록 마지막에 합류시킨다.
+    await auth_executor.await_auth_executor_shutdown(_auth_executor_closing)
 
 async def build_graph_buckets() -> dict:
     """

@@ -13,7 +13,12 @@ subscribe 인증이 몰리면 같은 pool 을 쓰는 다른 작업(atomic loader
   아니라 *전체 이주*가 되어, 인증이 아닌 작업까지 이 pool 의 W 에 갇힌다.
 - ⛔ **미초기화·종료 상태에서 `asyncio.to_thread` 로 fallback 하지 않는다.** fallback 은 격리를
   **조용히 무효화**하는데, 하필 그게 필요한 순간(기동 직후·종료 중 폭주)에 그렇게 된다.
-  fail-closed 로 `AuthExecutorNotReady` 를 던지고, 호출자가 §8-C 로 분류하게 둔다.
+  fail-closed 로 `AuthExecutorNotReady` 를 던진다.
+  ⚠️ **§8-C 로 분류되지 않는다** — `_classify_ws_subscribe_auth_failure` 는 이 예외를 모르므로
+  `None` 을 돌려주고 호출부가 **그대로 재전파**해 연결이 정리된다(= fail-loud). 그게 맞다:
+  이건 사용자 인증 실패가 아니라 **lifecycle·프로그래밍 결함**이라, 넓은 availability verdict
+  (`temporarily_unavailable`)로 접으면 클라가 영구 재시도하고 운영자는 신호를 못 받는다.
+  (한때 이 주석이 "호출자가 §8-C 로 분류하게 둔다"고 적었는데 **코드와 달랐다**.)
 - ⚠️ **이것은 큐 상한이 아니다.** `ThreadPoolExecutor` 의 작업 큐는 `SimpleQueue` 라 **무제한**이다.
   격리는 *동거인* 을 지킬 뿐 인증 자신의 적체는 그대로다 — ingress 상한(nginx)과
   **연결 내부 subscribe 남용**은 여전히 **별도 열린 항목**이다. "자원 상한 완료" 라고 쓰지 말 것.
@@ -57,17 +62,42 @@ def start_auth_executor(max_workers: int) -> None:
     logger.info("✅ 인증 전용 executor 기동", extra={"max_workers": max_workers})
 
 
-def shutdown_auth_executor() -> None:
-    """lifespan shutdown 에서. ⛔ `cancel_futures=True` — 큐에만 있는 작업은 **실행하지 않고**
-    취소한다(종료 중에 남은 인증을 굳이 다 돌릴 이유가 없다). 실행 중인 것은 SDK 의
-    `httpTimeout` 이 끊는다.
-    ⚠️ `wait=False` 로 두지 않는다 — 종료를 기다리지 않으면 다음 lifespan 이 구 스레드와 겹친다.
+def begin_auth_executor_shutdown() -> ThreadPoolExecutor | None:
+    """**차단만 하고 기다리지 않는다** — 신규 submit 차단 + 큐 항목 취소.
+
+    ⛔ `cancel_futures=True` — 큐에만 있는 작업은 **실행하지 않고** 취소한다(종료 중에 남은
+    인증을 굳이 다 돌릴 이유가 없다). 실행 중인 것은 SDK 의 `httpTimeout` 이 끊는다.
+    ⚠️ 반환한 executor 는 **반드시** `await_auth_executor_shutdown` 으로 마무리해야 한다 —
+    안 그러면 다음 lifespan 이 구 스레드와 겹친다.
     """
     global _executor
     executor, _executor = _executor, None
     if executor is None:
+        return None
+    executor.shutdown(wait=False, cancel_futures=True)
+    return executor
+
+
+async def await_auth_executor_shutdown(executor: ThreadPoolExecutor | None) -> None:
+    """실행 중 worker 종료 대기 — **다른 async drain 이 끝난 뒤** 마지막에 await 한다.
+
+    ⛔ **event loop 에서 동기로 `shutdown(wait=True)` 를 부르지 말 것.** 인증은 per-attempt
+    `httpTimeout` **+ SDK 재시도/backoff** 라 총시간이 길 수 있는데, 그동안 loop 가 얼어 뒤따르는
+    trigger drain · crawler · scheduler 종료가 **한 줄도 못 돈다**. 배포 중 container grace 가
+    끝나면 그 정리가 통째로 날아간다. (한때 shutdown 맨 앞에서 동기로 불렀다 — 그 형태였다.)
+    """
+    if executor is None:
         return
-    executor.shutdown(wait=True, cancel_futures=True)
+    await asyncio.to_thread(executor.shutdown, wait=True)
+    logger.info("🛑 인증 전용 executor 종료")
+
+
+def shutdown_auth_executor() -> None:
+    """동기 편의형 — **테스트/단발 정리 전용**. 프로덕션 lifespan 은 위 2단계를 쓴다."""
+    executor = begin_auth_executor_shutdown()
+    if executor is None:
+        return
+    executor.shutdown(wait=True)
     logger.info("🛑 인증 전용 executor 종료")
 
 

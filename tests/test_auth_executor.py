@@ -10,6 +10,7 @@
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -101,12 +102,23 @@ def test_saturated_default_executor_does_not_block_auth():
     async def scenario():
         auth_executor.start_auth_executor(2)
         loop = asyncio.get_running_loop()
-        default_workers = (loop._default_executor._max_workers
-                           if getattr(loop, "_default_executor", None) else 8)
-        # 기본 executor 를 **포화**시킨다.
-        squatters = [asyncio.create_task(asyncio.to_thread(blocker))
-                     for _ in range(max(default_workers, 8) + 4)]
-        await asyncio.to_thread(entered.wait, 10)
+        # ⛔ **기본 pool 크기를 추측하지 않는다.** 한때 `_default_executor._max_workers` 를 보고
+        #    없으면 8로 가정해 12개를 띄웠는데, 실제 기본값은 `min(32, cpu+4)` 라 **CPU 9개 이상인
+        #    기계에서는 포화되지 않는다** — 격리가 없어도 통과하는 false green 이다.
+        #    대신 **1-worker executor 를 이 loop 의 default 로 명시 설치**한다: blocker 하나로
+        #    확실히 포화되고, private 속성과 CPU 수 어디에도 의존하지 않는다.
+        #    ⚠️ 이건 **테스트 loop 한정**이다 — 프로덕션은 default 를 교체하지 않는다(별도 테스트).
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        squatters = [asyncio.create_task(asyncio.to_thread(blocker))]
+        # ⛔ 여기서 `asyncio.to_thread(entered.wait, ...)` 를 쓰면 **그것도 같은(포화된) pool 을
+        #    필요로 해** blocker 가 timeout 될 때까지 매달린다 — 그러면 포화가 **끝난 뒤에** 인증을
+        #    시험하게 되어 테스트가 무의미해진다(실측: 0.06s → 10.07s 로 늘며 의미 상실).
+        #    loop 에서 직접 관측한다.
+        for _ in range(2000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert entered.is_set(), "기본 pool 이 점유되지 않았다 — 전제가 깨졌다"
         try:
             # 격리가 없으면 이 await 는 blocker 가 풀릴 때까지 반환하지 못한다.
             return await asyncio.wait_for(
