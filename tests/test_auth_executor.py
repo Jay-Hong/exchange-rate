@@ -43,7 +43,10 @@ def test_worker_count_must_be_positive():
 
 def test_missing_executor_is_fail_closed_not_a_silent_fallback():
     """⛔ 미기동 시 `asyncio.to_thread` 로 흘려보내면 **격리가 조용히 사라진다** — 하필 그게
-    필요한 순간(기동 직후 폭주)에. 실패로 드러내고 호출자가 §8-C 로 분류하게 둔다."""
+    필요한 순간(기동 직후 폭주)에.
+    ⚠️ 이 예외는 **§8-C 로 분류되지 않는다** — `_classify_ws_subscribe_auth_failure` 가 모르므로
+    `None` → 호출부가 **그대로 재전파**해 연결이 정리된다(fail-loud). 사용자 인증 실패가 아니라
+    lifecycle·프로그래밍 결함이라 넓은 availability verdict 로 접으면 안 된다."""
 
     async def scenario():
         with pytest.raises(auth_executor.AuthExecutorNotReady):
@@ -335,28 +338,39 @@ def test_execution_time_is_recorded_by_the_worker_not_the_cancelled_caller(monke
     assert after["never_started"] == 0, "실행 중 취소를 never_started 로 오분류했다"
 
 
-def test_completed_worker_is_not_counted_as_cancelled_while_running():
+def test_completed_worker_is_not_counted_as_cancelled_while_running(monkeypatch):
     """⛔ **반대 방향.** 기존 취소 테스트는 worker 를 계속 막아 두므로 "이미 끝난 worker" 를 보지
     못한다. `future.cancelled()` 로 판정하면 worker 가 **정상 완료**했는데 event loop 가 결과 전달을
     아직 못 한 창에서 `not cancelled()` 가 참이 되어 **완료된 건을 '실행 중 취소'로 오분류**한다
     (실측: outcome=ok 인데 caller_cancelled_while_running=1). 부하가 클 때 — W 를 재려는 바로 그
     상황에서 — 전달이 늦어 자주 생기므로 W 판단을 왜곡한다.
     """
-    finished = threading.Event()
+    # ⛔ **사용자 함수의 종료로 전제를 세우면 안 된다.** 그건 `_timed` 의 `finally`
+    #    (`_record` → `finished_evt.set()`) 가 아직 안 끝났을 수 있어, 그 창에 취소가 끼면
+    #    **올바른 코드도 red** 가 된다(드문 flaky). concurrent future 의 `done()` 은
+    #    `_timed` 가 **완전히** 반환한 뒤에만 참이므로 그걸 전제로 쓴다.
+    captured: list = []
+
+    class _CapturingExecutor(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            captured.append(future)
+            return future
 
     async def scenario():
         auth_executor.reset_auth_executor_metrics()
+        monkeypatch.setattr(auth_executor, "ThreadPoolExecutor", _CapturingExecutor)
         auth_executor.start_auth_executor(1)
-        task = asyncio.create_task(
-            auth_executor.run_in_auth_executor(lambda: (finished.set(), "ok")[1])
-        )
+        task = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: "ok"))
         await asyncio.sleep(0)                     # submit 까지만 진행
-        # ⛔ 여기서 **loop 를 일부러 붙잡는다** — 그래야 worker 완료 콜백이 큐에만 남고
-        #    "끝났는데 아직 전달되지 않은" 창이 만들어진다. (yield 하면 그 창이 사라진다.)
+        assert captured, "submit 이 일어나지 않았다 — 전제가 깨졌다"
+        worker_future = captured[0]
+        # ⛔ 여기서 **loop 를 일부러 붙잡는다** — 그래야 완료 콜백이 큐에만 남고 "worker 는 전부
+        #    끝났는데 asyncio 전달만 남은" 창이 결정적으로 만들어진다(yield 하면 창이 사라진다).
         deadline = time.monotonic() + 5
-        while not finished.is_set() and time.monotonic() < deadline:
+        while not worker_future.done() and time.monotonic() < deadline:
             time.sleep(0.001)
-        assert finished.is_set(), "worker 가 끝나지 않았다 — 전제가 깨졌다"
+        assert worker_future.done(), "worker future 가 완료되지 않았다 — 전제가 깨졌다"
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
