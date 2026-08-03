@@ -50,8 +50,11 @@
 > `TOPIC_DISPATCHER_ENABLED=false`로 되돌렸다(2026-07-25 재확인: `topics/snapshot` → 404 `topics_disabled`).
 > 재활성화 선행 3조건(§1): ①**E3**(REST twin 인증 게이트, 2026-07-25 land) ②**WS 인증(1C) —
 > 활성화 필수 부분 land**(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구,
-> 2026-08-02~03; 후속 2건은 위 참조) ③**클라 bootstrap 3종의 인증 transport 이관**(잔여)
-> — 그 뒤 별도 운영 GO.
+> 2026-08-02~03; 후속 2건은 위 참조) ③**클라 bootstrap 3종의 인증 transport 이관** — ✅ **land**
+> (2026-07-26 iOS `4cb050f`: `TopicSnapshotService` 가 `AuthedRESTTransport` 로 3종을 보내고,
+> 전용 테스트가 `Authorization: Bearer` 부착을 잠근다).
+> → **선행 3조건 모두 충족.** 남은 것은 **별도 운영 GO** 하나이며, 그 GO 는 위 "아직 없는 것" 절의
+> 수용 항목(조용한 중단 · stale registry 비용)을 함께 받아들이는 결정이다.
 > KRX는 2026-07-08부터 독립 topic
 > `krx:usd-krw-futures`(ADR-038 D2 — 구 `KRX_TOPIC_INCLUDE` env 제거). 잔여 = **client release gate**
 > (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).
@@ -123,7 +126,9 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
 - `TOPIC_DISPATCHER_ENABLED=true` 필요(전 topic). ⚠️ **현 prod는 OFF** — 2026-07-22 route auth 감사에서
   무인증 누수 완화로 되돌렸다(2026-07-25 재확인: `topics/snapshot` → 404 `topics_disabled`).
   구 "현 prod는 ON(2026-06-27 확인)"은 폐기. **재활성화 선행 조건**: ①서버 REST twin 인증 게이트(E3, 2026-07-25 land)
-  ②WS 인증(1C) ③**클라 bootstrap 3종의 인증 transport 이관** — ③ 없이 켜면 클라 cold-start bootstrap이 401로 조용히 사라진다.
+  ②WS 인증(1C, ✅ 2026-08-03) ③**클라 bootstrap 3종의 인증 transport 이관**(✅ 2026-07-26 iOS `4cb050f`)
+  — ⚠️ ③ 이 없으면 켜는 순간 클라 cold-start bootstrap 이 401 로 **조용히** 사라진다(`try?` 격리라
+  크래시가 없어 더 안 보인다). 그래서 필수였고, 지금은 충족돼 있다.
 - FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`는 `TOPIC_DISPATCHER_ENABLED`만. `krx:usd-krw-futures`는 추가로 `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=`KRX_FUTURES_ENABLED`∧`KRX_CLIENT_DISTRIBUTION_ENABLED`, ADR-038 G2·G3) 필요.
 - live 활성 = 별도 운영 GO (출시 직전).
 

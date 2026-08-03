@@ -166,7 +166,7 @@
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
-| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land ② **1C WS 인증** ③ **iOS bootstrap 3종 인증 이관** ④ **entitlement 조회 실패 503**(아래) | 🔴 false |
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **선행조건 4/4 충족, 남은 것은 운영 GO** | 🔴 false |
 | `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
 
 **무인증 graph v2(`/api/v2/graph/tab`·`/catalog`)의 krx.\* series는 어떤 flag로도 열리지 않는다.**
@@ -213,7 +213,9 @@
 - **catalog version**: 기본 응답에서 krx가 영구 제외되므로 `CATALOG_VERSION`을 `2026-07-26`으로
   올렸다(계약 식별자. iOS는 `version`을 decode만 하고 기능적으로 쓰지 않아 무해).
 - **pre-flip 필수 항목** (`TOPIC_DISPATCHER_ENABLED=true` 전, 단순 후속 아님):
-  ① iOS bootstrap 3종 인증 이관 ② 1C WS 인증
+  ~~① iOS bootstrap 3종 인증 이관~~ ✅ **land 2026-07-26 `4cb050f`**(`TopicSnapshotService` 가
+  `AuthedRESTTransport` 로 3종을 보낸다 — 테스트 `testSnapshotService_attachesAuthorizationAndClientMetadata`
+  가 `Authorization: Bearer` 를 잠근다) ~~② 1C WS 인증~~ ✅ **land 2026-08-03**
   ③ ~~entitlement 조회 실패의 HTTP 계약~~ → ✅ **land 2026-07-26**: 경계 = `TRANSIENT_DB_ERRORS`
   (`OperationalError`/`InterfaceError`/`TimeoutError`[풀 고갈]/`DisconnectionError` **4종**)
   **∧ `is_transient_db_error`**(영구 SQLSTATE deny-list: 28000·28P01·3D000·42501) →
@@ -761,7 +763,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - **REST twin 인증 게이트는 land됐다**(2026-07-25). `GET /api/v2/topics/snapshot`이 인증+premium+
   per-user KRX를 강제한다. 이것이 선행 조건이었던 이유: **1C는 topic dispatch flag를 켜야 동작**하는데,
   그 flag가 현재 무인증 KRX REST를 막고 있던 유일한 장치였다.
-  ⚠️ **잔여(flag ON 전 필수)**: iOS `APIService`의 bootstrap 3종이 아직 무인증 경로라 flag ON 시
+  ✅ **해소(2026-07-26 `4cb050f`)** — 아래는 그 시점(2026-07-25)의 기록이다. bootstrap 3종은
+  `APIService` 에서 **`TopicSnapshotService` 로 분리**되어 `AuthedRESTTransport` 를 타고, 전용 테스트가
+  `Authorization: Bearer` 부착을 잠근다. ⚠️ 당시 서술: iOS `APIService`의 bootstrap 3종이 무인증 경로라 flag ON 시
   401을 받는다. 전부 `try?` 격리라 크래시는 없고 cold-start bootstrap만 조용히 사라진다 →
   인증 transport로 이관 필요. 운영은 현재 flag off라 사용자 영향 0.
 - ✅ **구매 수렴 계약 land**(2026-08-03 `b83b99b`/`0eb91a1`). 문제는 정확히 이랬다: 서버측
@@ -792,10 +796,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
-      §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. 잔여 = iOS bootstrap 3종 인증 이관(F 슬라이스).
+      §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. ~~잔여 = iOS bootstrap 3종 인증 이관~~
+      ✅ **land 2026-07-26 `4cb050f`**.
 - [ ] WS 계약(§8): subscription_error + ack accepted/rejected + bounded-lease(15분) + reauth_required.
       **← 1C — 서버 축 land 완료 + 클라 축(lease 소비 · request timeout · 구매 복구) land 완료.
-      잔여 = `reauth_required` / 만료 registry 제거 / **iOS bootstrap 3종 인증 transport 이관** +
+      잔여 = `reauth_required` / 만료 registry 제거(**둘 다 비-blocker 후속**) + 
       **별도 운영 GO**. 이 체크박스는 앞의 두 미구현 때문에 아직 닫지 않는다.**
       ✅ **무료 topic identity lease land** — /ws subscribe → Firebase 검증 → 15분 lease
       (**identity 축만**) → ack(`lease_id` + **남은** duration) → registry 저장 →
@@ -823,7 +828,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       **새 lease_id 의 첫 `0` 은 즉시 발화**한다(반대 방향 대조군).
 
       잔여 = ~~① KRX per-user 판정~~ **✅ land** ~~② iOS lease 소비~~ **✅ land**
-      ~~③ request timeout~~ **✅ land**. 남은 활성화 조건은 iOS bootstrap 3종 인증 이관 + 운영 GO.
+      ~~③ request timeout~~ **✅ land**. ~~iOS bootstrap 3종 인증 이관~~ **✅ land 2026-07-26**.
+      → 남은 활성화 조건은 **운영 GO 하나**다(수용할 위험은 위 §1 표와 GUIDE 참조).
 
       ⚠️ ①의 완료 조건은 **숫자가 아니라 이름 목록**이다("8축" 같은 요약은 provider/DB 의
       transient·persistent 를 각각 세면 어긋난다 — codex).
