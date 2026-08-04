@@ -950,6 +950,33 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
          일어났다면 자식이 init 에 재부모화되어 계속 돈다 — `pgrep -f ws_auth_load` 로 확인하고
          수동 종료할 것(위 실측은 spawn **전** 시점이라 고아 0이었다).
 
+    · **토큰 발급 — `scripts/mint_canary_token.py`** (기존 테스트 계정 UID 사용)
+      ⛔ **새 UID 를 쓰지 않는다.** custom token 최초 로그인은 Firebase 사용자 레코드를 **실제로
+        생성**하는데, 그 삭제를 canary rollback 이 소유하지 않는다(env·flag 만 되돌린다).
+        그래서 발급 **전에** `auth.get_user(uid)` 로 존재를 확인하고 없으면 멈춘다 — 이게 없으면
+        **오타 UID 하나로 "기존 계정만 쓴다"가 "새 계정을 만든다"로 뒤집히고**, 뒤의 uid 일치
+        검사는 (요청한 UID 그대로라) 통과해 버려 발견되지도 않는다.
+      ⛔ **stdout = 검증된 토큰 한 줄 / 진단 = stderr** → `mint | canary_monitor --token-stdin`
+        직결(`set -o pipefail`). 파일·command substitution·화면 출력을 거치지 않는다.
+      ⛔ Web API key 는 **stdin**(argv 는 `ps` 노출). 오류 진단은 **우리가 고른 리터럴만** —
+        응답 본문을 인용하면 요청값을 반사하는 endpoint 에서 토큰·key 가 샌다(재현됨).
+      ⚠️ 교환 뒤 재검증은 서버와 **같은 의미**(동일 함수·`check_revoked=True`)이지 **실행 경로가
+        같다는 뜻은 아니다** — 실제 WS 는 `ws-auth` named app + 전용 executor + 별도 `httpTimeout`.
+
+    · **발급기 전달 방식**(2026-08-04 실측 확인) — ⛔ **`git pull` 만으로는 부족하다.**
+      `scripts/` 는 Dockerfile 의 `COPY` 로 **빌드 시점에만** 들어가고 소스 mount 가 없다
+      (mount 는 `data`·`logs`·`firebase-service-account.json` 뿐). 실측: 운영 컨테이너에
+      발급기 **부재**.
+      → 발급 경로 검증·실행 시에는 **임시 전달**한다(앱 재기동 없음):
+        `docker compose cp scripts/mint_canary_token.py fastapi:/tmp/…` →
+        **host·container SHA-256 일치 확인** → 실행 → `trap` 에서 삭제 + **삭제 확인**.
+        전달 실패·해시 불일치·삭제 실패는 전부 nonzero 로 보고한다.
+      ⚠️ 대안은 current HEAD 로 app-only rebuild/recreate 인데 **그건 배포라 별도 GO** 가 필요하다.
+      ✅ 위 경로를 UID 없이 검증했다: cp → SHA 일치 → 컨테이너에서 `--help` → `--api-key` 거부 →
+        삭제 확인.
+      ⛔ **운영 DB 에서 UID 후보를 뽑지 않는다** — 불필요한 개인정보 노출이다. 사용자가 Firebase
+        Console 에서 기존 테스트 UID **하나**만 확인한다.
+
     · **`--url` = `wss://fxi.kr/ws` 로 확정**(2026-08-04). ⛔ container-internal 주소
       (`fastapi:8000`)는 **쓸 수 없다** — `start_load_process` 는 부하 자식을 **EC2 호스트
       프로세스**로 띄우는데, compose 의 fastapi 는 publish 없이 `expose` 만이라 호스트에서
