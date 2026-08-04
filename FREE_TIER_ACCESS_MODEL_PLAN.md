@@ -802,22 +802,27 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   `DEFAULT_EXECUTOR_PROBE_ENABLED` 기본 off). 이게 없으면 canary 는 **격리의 보호 대상을 관측하지
   못한 채** "인증이 분리됐다"만 확인하게 된다.
 
-  ⚠️ **아직 배포 전이다**(운영은 `2534aa3`). canary 실행 전에 **기본-off 상태로 app-only 배포**해
-  endpoint 를 먼저 확인한다(`enabled=false`, `running=false`) — 실제 수명주기 기동은 canary 에서
-  `enabled=true` · `running=true` · `submitted_count` 증가를 함께 확인한다. sentinel 배포와 canary
-  실행을 **한 단계로 합치지 않는다**
-  (합치면 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분할 수 없다).
+  ✅ **기본-off app-only 배포 완료**(`13f666b`). endpoint smoke에서
+  `enabled=false` · `running=false`를 확인했다. 실제 수명주기 기동은 canary 에서
+  `enabled=true` · `running=true` · `submitted_count` 증가를 함께 확인한다. sentinel 배포와
+  canary 실행을 분리해 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분한다.
 
   ### Canary GO 조건 (2026-08-04 확정)
 
   · **W=4 는 canary 한정 잠정값**으로 수용한다(측정 없음 — 그 측정이 canary 의 목적이다).
-  · **lease 전략 = (a) 창을 15분 미만으로.** 총 **7분** 계획이라 lease 상한(900s) 안이고,
+  · **lease 전략 = (a) 창을 15분 미만으로.** 명목 ramp는 **7분**, active phase별
+    마지막 요청의 15초 drain을 포함한 최악 실행시간은 **7분 45초**라 lease
+    상한(900s) 안이고,
     그래서 **재인증 부하 클라이언트를 만들지 않는다**.
   · **부하 공급원 = `scripts/ws_auth_load.py`.** ⛔ 기존 `subscribe_*_topic.py` 는 **쓸 수 없다** —
     `id_token` 없이 구독하는데 dispatcher 는 무토큰이면 free topic 만 등록하고 **그 자리에서
     return** 하므로(`app/topic_dispatcher.py`) 인증 executor 를 **한 번도 타지 않는다** =
-    auth metrics 가 빈 **false green**. 토큰은 stdin/`chmod 600` 파일로만, in-flight 는 **1**.
-  · **램프**: baseline 60s → 동시 1 60s → 동시 4 120s → 동시 8 120s → 관찰 60s (총 420s).
+    auth metrics 가 빈 **false green**. ack은 요청 topic이 `accepted_topics`와
+    `active_subscriptions` 양쪽에 **lease와 함께** 있어야 성공으로 센다(flag-off의 전 topic
+    `topics_disabled` ack은 즉시 중단). 토큰은 echo 없는 대화형 입력 또는 `chmod 600` 파일로만,
+    in-flight 는 **1**.
+  · **램프**: baseline 60s → 동시 1 60s → 동시 4 120s → 동시 8 120s → 관찰 60s
+    (명목 420s, 마지막 요청 drain 포함 최악 465s).
   · **env**: `DEFAULT_EXECUTOR_PROBE_ENABLED=true` · `DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS=1` ·
     `WS_AUTH_EXECUTOR_LOG_TIMINGS=true` · `TOPIC_DISPATCHER_ENABLED=true`.
     ⛔ `KRX_CLIENT_DISTRIBUTION_ENABLED` 와 Release arming 은 **계속 OFF**.
@@ -825,8 +830,18 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     timeout 또는 예상 밖 `subscription_error` / auth `queue_wait_ms_max >= 5000` / 계획된 종료
     전 `never_started`·`caller_cancelled_while_running` 증가 / probe `outstanding=1` **2회
     연속** 또는 queue delay `>= 1000ms` / legacy broadcast 30초 이상 정지.
-    ⚠️ 서버 측 판정은 `ws_auth_load.evaluate_server_abort()` 순수 함수로 잠겨 있다 — 부하
-    생성기는 admin 자격증명을 **들지 않는다**(운영자가 스냅샷을 넣어 판정).
+    ✅ **배선 완료** — `scripts/canary_monitor.py`. 한동안 `evaluate_server_abort()` 는 **순수
+    함수인데 호출자가 없어서**, 위 6종 중 자동화된 것은 client timeout/error 둘뿐이었다.
+    "운영자가 스냅샷을 넣어 판정한다"는 8 동시 연결이 도는 7분 창에서 **실행 가능한 절차가
+    아니다**(사람이 1초 주기로 5개 endpoint 를 볼 수 없다).
+    · watchdog 이 **1초마다** health · auth metrics · probe · 컨테이너 재시작 · 신규 ERROR ·
+      legacy broadcast 를 보고, 조건 발화 시 **부하 종료 → flag rollback** 순으로 닫는다
+      (순서 반대면 닫힌 flag 를 부하가 계속 두드려 잡음이 된다).
+    · ⛔ **rollback 은 `finally`** — 중단·정상 종료·예외·SIGINT 어느 경로든 되돌린다. canary 는
+      유계 실험이라 창이 닫히면 flag 도 닫혀야 한다. 자식 종료가 실패해도 rollback 은 돈다.
+    · ⛔ **watchdog 이 admin 비밀번호를 들지 않는다** — 컨테이너 **안에서** `$ADMIN_PASSWORD`
+      를 확장하므로 우리 argv·로그 어디에도 값이 없다(`-u admin:<값>` 을 만들면 `ps` 노출).
+    · 판정은 부하 도구와 **같은 함수**를 쓴다 — 재구현하면 두 곳이 다른 기준으로 판정한다.
 
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
   이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,

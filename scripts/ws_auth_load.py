@@ -18,7 +18,9 @@
 ⛔ **connection 당 in-flight 는 정확히 1개.** 클라가 큐를 무제한으로 쌓으면 서버 queue_wait 이
    클라 큐의 그림자가 되어 **측정 대상이 뒤바뀐다**. 구조로 강제한다 — 종결 프레임을 받기 전에는
    다음 요청을 보내지 않는다(§8-B-term: 식별된 요청은 정확히 하나의 종결 프레임을 받는다).
-⚠️ **총 7분**으로 상한이 걸려 있다. lease 상한(15분) 안이라 창 중간 재인증이 필요 없다 —
+⚠️ 명목 ramp는 **7분**, 진행 중인 마지막 요청을 drain하는 최악 실행시간은
+   **7분 45초**로 상한이 걸려 있다. 둘 다 lease 상한(15분) 안이라 창 중간
+   재인증이 필요 없다 —
    그래서 재인증 부하 클라이언트를 따로 만들지 않는다.
 """
 
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 import stat
@@ -50,7 +53,8 @@ class InsecureTokenFile(Exception):
 
 
 def load_id_token(*, token_file: Optional[str] = None,
-                  stdin_stream: Any = None) -> str:
+                  stdin_stream: Any = None,
+                  secret_prompt: Callable[[str], str] = getpass.getpass) -> str:
     """stdin 또는 **권한 제한 파일**에서만 토큰을 읽는다.
 
     ⛔ CLI 인자 경로는 **존재하지 않는다**(argv 노출). 이 함수에 그런 매개변수를 추가하지 말 것.
@@ -65,7 +69,11 @@ def load_id_token(*, token_file: Optional[str] = None,
             token = handle.read()
     else:
         stream = sys.stdin if stdin_stream is None else stdin_stream
-        token = stream.read()
+        if stdin_stream is None and stream.isatty():
+            # ⛔ 터미널에서 `read()` 하면 토큰이 그대로 echo되어 화면/녹화에 남는다.
+            token = secret_prompt("Firebase ID token: ")
+        else:
+            token = stream.read()
     token = token.strip()
     if not token:
         raise ValueError("토큰이 비어 있다")   # ⛔ 값을 메시지에 넣지 않는다
@@ -99,7 +107,7 @@ class Phase:
     seconds: int
 
 
-#: ⚠️ 총 420초(7분) — lease 상한 900초 **안**이라 창 중간 재인증이 필요 없다.
+#: ⚠️ 명목 420초 + active phase별 마지막 요청 drain 최대 15초 = 최악 465초.
 PHASES: tuple[Phase, ...] = (
     Phase("baseline", 0, 60),
     Phase("c1", 1, 60),
@@ -115,9 +123,17 @@ def total_plan_seconds(phases: Sequence[Phase] = PHASES) -> int:
     return sum(p.seconds for p in phases)
 
 
+def maximum_plan_seconds(phases: Sequence[Phase] = PHASES,
+                         request_timeout: float = SUBSCRIBE_TIMEOUT_SECONDS) -> float:
+    """명목 ramp + active phase 마지막 in-flight 요청 drain의 최악 실행시간."""
+    return total_plan_seconds(phases) + sum(
+        request_timeout for phase in phases if phase.concurrency > 0
+    )
+
+
 def plan_fits_in_lease(phases: Sequence[Phase] = PHASES) -> bool:
     """⛔ 창이 lease 를 넘으면 중간에 재인증이 필요해지고, 그러면 이 도구의 전제가 깨진다."""
-    return total_plan_seconds(phases) < LEASE_MAX_SECONDS
+    return maximum_plan_seconds(phases) < LEASE_MAX_SECONDS
 
 
 # ── 종결 프레임 판정 (§8-B-term) ────────────────────────────────────────────
@@ -145,6 +161,7 @@ class LoadStats:
     acked: int = 0
     timeouts: int = 0
     errors_by_code: dict = field(default_factory=dict)
+    protocol_errors: dict = field(default_factory=dict)
     latency_ms_max: float = 0.0
     latency_ms_sum: float = 0.0
 
@@ -156,10 +173,14 @@ class LoadStats:
     def record_error(self, code: str) -> None:
         self.errors_by_code[code] = self.errors_by_code.get(code, 0) + 1
 
+    def record_protocol_error(self, code: str) -> None:
+        self.protocol_errors[code] = self.protocol_errors.get(code, 0) + 1
+
     def summary(self) -> dict:
         return {
             "sent": self.sent, "acked": self.acked, "timeouts": self.timeouts,
             "errors_by_code": dict(self.errors_by_code),
+            "protocol_errors": dict(self.protocol_errors),
             "latency_ms_max": round(self.latency_ms_max, 1),
             "latency_ms_avg": round(self.latency_ms_sum / self.acked, 1) if self.acked else None,
         }
@@ -172,6 +193,8 @@ def evaluate_client_abort(stats: LoadStats) -> list[str]:
         reasons.append(f"subscribe timeout {stats.timeouts}건")
     if stats.errors_by_code:
         reasons.append(f"예상하지 않은 subscription_error {stats.errors_by_code}")
+    if stats.protocol_errors:
+        reasons.append(f"유효하지 않은 subscription_ack {stats.protocol_errors}")
     return reasons
 
 
@@ -198,6 +221,38 @@ def evaluate_server_abort(auth_metrics: dict, probe: dict,
 
 
 # ── worker (in-flight 정확히 1) ─────────────────────────────────────────────
+
+
+def ack_accepts_leased_topic(frame: dict, topic: str) -> bool:
+    """인증된 subscribe가 topic을 실제로 수락해 lease까지 발급했는가.
+
+    ⛔ flag-off도 `subscription_ack`을 보내지만 accepted=[] + topics_disabled다. 타입과 request_id만
+    보면 인증을 한 번도 타지 않은 그 응답을 성공으로 세어 W canary가 다시 false green이 된다.
+    """
+    if frame.get("operation") != "subscribe":
+        return False
+
+    def leased(entries: Any) -> bool:
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("topic") != topic:
+                continue
+            lease_id = entry.get("lease_id")
+            duration = entry.get("lease_duration_seconds")
+            return (
+                isinstance(lease_id, str) and bool(lease_id)
+                and isinstance(duration, int) and not isinstance(duration, bool)
+                and duration >= 0
+            )
+        return False
+
+    rejected = frame.get("rejected_topics")
+    if not isinstance(rejected, list):
+        return False
+    if any(isinstance(entry, dict) and entry.get("topic") == topic for entry in rejected):
+        return False
+    return leased(frame.get("accepted_topics")) and leased(frame.get("active_subscriptions"))
 
 
 async def run_one_request(ws: Any, token: str, stats: LoadStats,
@@ -232,7 +287,10 @@ async def run_one_request(ws: Any, token: str, stats: LoadStats,
         if frame.get("type") == "subscription_error":
             stats.record_error(str(frame.get("error")))
         else:
-            stats.record_ack((time.monotonic() - started) * 1000.0)
+            if ack_accepts_leased_topic(frame, topic):
+                stats.record_ack((time.monotonic() - started) * 1000.0)
+            else:
+                stats.record_protocol_error("topic_not_accepted_with_lease")
         return frame
 
 
@@ -258,8 +316,12 @@ async def run_plan(connect: Callable[[], Any], token: str,
     for phase in phases:
         stop_at = time.monotonic() + phase.seconds
         if phase.concurrency:
+            # 경계에서 in-flight 요청을 취소하면 마지막 수 초의 응답 장애가
+            # 정상 단계 종료로 둔갑한다. 새 요청만 stop_at에서 막고, 진행 중인
+            # 요청은 자신의 15초 timeout까지 drain한다.
             await asyncio.gather(*[
-                run_worker(connect, token, stats, stop_at) for _ in range(phase.concurrency)
+                run_worker(connect, token, stats, stop_at)
+                for _ in range(phase.concurrency)
             ])
         else:
             await asyncio.sleep(phase.seconds)
@@ -279,7 +341,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.dry_run:
         for phase in PHASES:
             print(f"  {phase.name:9} concurrency={phase.concurrency} {phase.seconds}s")
-        print(f"  총 {total_plan_seconds()}s (lease 상한 {LEASE_MAX_SECONDS:.0f}s 안)")
+        print(
+            f"  명목 {total_plan_seconds()}s / 최악 {maximum_plan_seconds():.0f}s "
+            f"(lease 상한 {LEASE_MAX_SECONDS:.0f}s 안)"
+        )
         return 0
 
     token = load_id_token(token_file=args.token_file)          # stdin 은 기본 경로

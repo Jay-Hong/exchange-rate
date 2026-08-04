@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -43,8 +44,11 @@ class _RecordingWS:
         self.max_in_flight = max(self.max_in_flight, self._in_flight)
         if self._echo_ack:
             rid = self.sent[-1]["request_id"]
+            topic = self.sent[-1]["topics"][0]
+            leased = {"topic": topic, "lease_id": "lease-1", "lease_duration_seconds": 900}
             self._replies.append({"type": "subscription_ack", "request_id": rid,
-                                  "operation": "subscribe"})
+                                  "operation": "subscribe", "accepted_topics": [leased],
+                                  "rejected_topics": [], "active_subscriptions": [leased]})
 
     async def recv(self):
         while not self._replies:
@@ -115,7 +119,13 @@ def test_data_frames_do_not_terminate_a_request():
     ws = _RecordingWS(replies=[
         {"type": "rates", "data": {}},                                  # 무관
         {"type": "subscription_ack", "request_id": "someone-else"},     # 남의 종결
-        {"type": "subscription_ack", "request_id": rid},                # 내 종결
+        {"type": "subscription_ack", "request_id": rid,                 # 내 종결
+         "operation": "subscribe",
+         "accepted_topics": [{"topic": load.LOAD_TOPIC, "lease_id": "l",
+                                "lease_duration_seconds": 900}],
+         "rejected_topics": [],
+         "active_subscriptions": [{"topic": load.LOAD_TOPIC, "lease_id": "l",
+                                     "lease_duration_seconds": 900}]},
     ], echo_ack=False)
     stats = load.LoadStats()
     frame = _run(load.run_one_request(ws, TOKEN, stats, request_id=rid))
@@ -168,6 +178,22 @@ def test_token_from_stdin():
     assert load.load_id_token(stdin_stream=StringIO(TOKEN + "\n")) == TOKEN
 
 
+def test_interactive_token_input_disables_terminal_echo(monkeypatch):
+    """⛔ 대화형 stdin을 `read()`하면 토큰이 터미널 화면·녹화에 그대로 남는다."""
+
+    class _TTY:
+        def isatty(self):
+            return True
+
+        def read(self):
+            raise AssertionError("TTY에서 echo되는 read()를 사용했다")
+
+    monkeypatch.setattr(load.sys, "stdin", _TTY())
+    prompts = []
+    assert load.load_id_token(secret_prompt=lambda prompt: prompts.append(prompt) or TOKEN) == TOKEN
+    assert prompts == ["Firebase ID token: "]
+
+
 def test_token_file_must_not_be_group_or_world_readable(tmp_path):
     path = tmp_path / "tok"
     path.write_text(TOKEN)
@@ -201,6 +227,7 @@ def test_summary_output_never_contains_the_token():
 def test_plan_is_bounded_and_fits_inside_the_lease():
     """⛔ 창이 lease(15분)를 넘으면 중간 재인증이 필요해져 이 도구의 전제가 깨진다."""
     assert load.total_plan_seconds() == 420, "계획이 7분에서 벗어났다"
+    assert load.maximum_plan_seconds() == 465, "마지막 요청 drain 상한이 누락됐다"
     assert load.plan_fits_in_lease()
 
 
@@ -215,6 +242,17 @@ def test_over_long_plan_is_rejected():
     assert not load.plan_fits_in_lease(long_plan)
 
 
+def test_lease_check_uses_worst_case_not_nominal_duration():
+    """⛔ **명목 합계로 판정하면 drain 이 lease 를 넘겨도 통과한다.** 기존 테스트는 명목 420 /
+    최악 465 가 **둘 다** 900 미만이고 반례는 둘 다 초과라, 어느 쪽으로 판정하든 통과했다 —
+    즉 최악치 도입이 잠기지 않았다. 여기서 **명목은 안에 들어오지만 drain 이 넘기는** 계획으로
+    가른다(active phase 3개 × 15초 = 45초가 어디로 가는지)."""
+    plan = (load.Phase("a", 1, 290), load.Phase("b", 1, 290), load.Phase("c", 1, 290))
+    assert load.total_plan_seconds(plan) == 870 < load.LEASE_MAX_SECONDS, "전제: 명목은 안에 든다"
+    assert load.maximum_plan_seconds(plan) == 915, "drain 최악치가 반영되지 않았다"
+    assert not load.plan_fits_in_lease(plan), "명목만 보고 통과시켰다 — 창이 lease 를 넘는다"
+
+
 # ── 중단 판정 ───────────────────────────────────────────────────────────────
 
 
@@ -227,6 +265,99 @@ def test_client_abort_on_timeout_and_unexpected_error():
     other = load.LoadStats()
     other.record_error("invalid_token")
     assert load.evaluate_client_abort(other)
+
+    malformed = load.LoadStats()
+    malformed.record_protocol_error("topic_not_accepted_with_lease")
+    assert load.evaluate_client_abort(malformed)
+
+
+def test_flag_off_rejected_ack_is_not_counted_as_authenticated_success():
+    """⛔ flag-off도 ack을 보내지만 인증 **전에** 전 topic을 topics_disabled로 거부한다."""
+    rid = "flag-off"
+    ws = _RecordingWS(replies=[{
+        "type": "subscription_ack", "request_id": rid, "operation": "subscribe",
+        "accepted_topics": [],
+        "rejected_topics": [{"topic": load.LOAD_TOPIC, "error": "topics_disabled"}],
+        "active_subscriptions": [],
+    }], echo_ack=False)
+    stats = load.LoadStats()
+
+    _run(load.run_one_request(ws, TOKEN, stats, request_id=rid))
+
+    assert stats.acked == 0, "flag-off ack을 인증 성공으로 셌다"
+    assert stats.protocol_errors == {"topic_not_accepted_with_lease": 1}
+    assert load.evaluate_client_abort(stats)
+
+
+def test_active_and_accepted_topics_both_require_a_lease():
+    base = {
+        "operation": "subscribe",
+        "accepted_topics": [{"topic": load.LOAD_TOPIC, "lease_id": "l",
+                              "lease_duration_seconds": 900}],
+        "rejected_topics": [],
+        "active_subscriptions": [{"topic": load.LOAD_TOPIC, "lease_id": "l",
+                                  "lease_duration_seconds": 900}],
+    }
+    assert load.ack_accepts_leased_topic(base, load.LOAD_TOPIC)
+
+    for field in ("accepted_topics", "active_subscriptions"):
+        malformed = dict(base)
+        malformed[field] = [{"topic": load.LOAD_TOPIC}]
+        assert not load.ack_accepts_leased_topic(malformed, load.LOAD_TOPIC)
+
+
+@pytest.mark.parametrize("bad_entry,why", [
+    ({"topic": load.LOAD_TOPIC, "lease_duration_seconds": 900},
+     "lease_id 누락 — 무토큰 등록과 구분되지 않는다"),
+    ({"topic": load.LOAD_TOPIC, "lease_id": "", "lease_duration_seconds": 900},
+     "lease_id 가 빈 문자열"),
+    ({"topic": load.LOAD_TOPIC, "lease_id": "l"},
+     "duration 누락 — 클라가 만료를 *무제한*으로 오해한다"),
+    ({"topic": load.LOAD_TOPIC, "lease_id": "l", "lease_duration_seconds": -1},
+     "duration 음수 (서버는 max(0, …) 로 접는다)"),
+    ({"topic": load.LOAD_TOPIC, "lease_id": "l", "lease_duration_seconds": True},
+     "bool 은 int 가 아니다 (True == 1 로 새는 형태)"),
+])
+def test_each_lease_field_is_required_independently(bad_entry, why):
+    """⛔ 두 필드를 **함께** 지우는 테스트만 두면 한쪽 검사를 무력화해도 다른 쪽이 가려 준다
+    (실측: `lease_id` 검사를 통째로 `True` 로 바꿔도 통과했다)."""
+    leased = {"topic": load.LOAD_TOPIC, "lease_id": "l", "lease_duration_seconds": 900}
+    frame = {"operation": "subscribe", "rejected_topics": [],
+             "accepted_topics": [bad_entry], "active_subscriptions": [leased]}
+    assert not load.ack_accepts_leased_topic(frame, load.LOAD_TOPIC), why
+
+
+def test_a_topic_listed_as_rejected_is_never_a_success_even_if_also_accepted():
+    """⚠️ 방어적 검사 — 서버는 한 topic 을 accepted 와 rejected 양쪽에 넣지 않지만, 그 가정이
+    깨지면 **거부된 topic 이 성공으로 집계**된다. 검사를 지워도 통과하면 그 방어는 없는 것이다."""
+    leased = {"topic": load.LOAD_TOPIC, "lease_id": "l", "lease_duration_seconds": 900}
+    contradictory = {
+        "operation": "subscribe",
+        "accepted_topics": [leased], "active_subscriptions": [leased],
+        "rejected_topics": [{"topic": load.LOAD_TOPIC, "error": "topics_disabled"}],
+    }
+    assert not load.ack_accepts_leased_topic(contradictory, load.LOAD_TOPIC)
+
+
+def test_phase_boundary_drains_the_final_request_instead_of_hiding_its_result():
+    class _DelayedWS(_RecordingWS):
+        async def recv(self):
+            await asyncio.sleep(0.08)
+            return await super().recv()
+
+    ws = _DelayedWS()
+
+    async def scenario():
+        started = time.monotonic()
+        stats = await load.run_plan(lambda: ws, TOKEN,
+                                    phases=(load.Phase("short", 1, 0.05),), emit=lambda _: None)
+        return time.monotonic() - started, stats
+
+    elapsed, stats = _run(scenario())
+    assert elapsed >= 0.08, "단계 경계에서 진행 중인 요청을 버렸다"
+    assert elapsed < 0.5
+    assert stats.acked == 1
+    assert stats.timeouts == 0
 
 
 def test_worker_stops_immediately_on_abort_condition():
