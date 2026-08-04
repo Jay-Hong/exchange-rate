@@ -555,6 +555,22 @@ def test_restore_returns_the_file_to_its_exact_original_bytes(tmp_path, monkeypa
     assert not mon.backup_path_for(env).exists(), "검증 후 backup 이 정리되지 않았다"
 
 
+def test_restore_preserves_crlf_bytes_instead_of_normalizing_text(tmp_path, monkeypatch):
+    """'바이트 동일'인데 text I/O를 쓰면 CRLF가 LF로 조용히 바뀐다."""
+    env = tmp_path / ".env"
+    original = b"TOPIC_DISPATCHER_ENABLED=false\r\nKEEP=1\r\n"
+    env.write_bytes(original)
+    mon.create_env_backup(env)
+    mon.atomic_write_text(env, "TOPIC_DISPATCHER_ENABLED=true\n")
+
+    async def noop(target=None):
+        return None
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
+    _run(mon.EnvRestorer(env).restore())
+    assert env.read_bytes() == original
+
+
 def test_backup_is_created_before_mutation_with_owner_only_mode(tmp_path):
     env = tmp_path / ".env"
     env.write_text("SECRET=value\n")
@@ -572,6 +588,50 @@ def test_second_start_is_refused_while_a_backup_remains(tmp_path):
     with pytest.raises(mon.CollectorError) as caught:
         mon.create_env_backup(env)
     assert "--recover" in str(caught.value), "복구 수단을 안내하지 않는다"
+
+
+def test_concurrent_backup_publish_allows_exactly_one_owner(tmp_path, monkeypatch):
+    """`exists()`→`replace()`면 두 실행이 absence를 함께 보고 원본을 서로 덮을 수 있다."""
+    import concurrent.futures
+    import threading
+
+    env = tmp_path / ".env"
+    original = b"SECRET=value\r\n"
+    env.write_bytes(original)
+    barrier = threading.Barrier(2)
+    real_link = mon.os.link
+
+    def racing_link(source, target):
+        barrier.wait(timeout=5)  # 두 실행 모두 완성된 inode를 가진 뒤 게시 경쟁을 시작한다.
+        return real_link(source, target)
+
+    monkeypatch.setattr(mon.os, "link", racing_link)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(mon.create_env_backup, env) for _ in range(2)]
+    results = []
+    for future in futures:
+        try:
+            results.append(future.result())
+        except mon.CollectorError as exc:
+            results.append(exc)
+
+    assert sum(isinstance(result, Path) for result in results) == 1
+    assert sum(isinstance(result, mon.CollectorError) for result in results) == 1
+    assert mon.backup_path_for(env).read_bytes() == original
+
+
+def test_missing_backup_is_a_failed_recovery_not_a_false_success(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("A=1\n")
+
+    async def must_not_touch_target(target=None):
+        raise AssertionError("backup이 없는데 target을 건드렸다")
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", must_not_touch_target)
+    with pytest.raises(mon.CollectorError, match="backup 이 없다"):
+        _run(mon.EnvRestorer(env).restore())
+    args = _AmainArgs(env, recover=True, token_stdin=False, url=None)
+    assert _run(mon._amain(args)) == 1
 
 
 def test_backup_survives_so_a_new_process_can_recover(tmp_path, monkeypatch):
@@ -633,6 +693,62 @@ def test_recover_is_a_standalone_mode(tmp_path):
     assert any("단독" in p for p in _cli(recover=True, inject_abort_after=None,
                                         rehearse=True, container="c", project="p"))
     assert any("단독" in p for p in _cli(recover=True, inject_abort_after=2))
+    assert any("dry-run" in p for p in _cli(recover=True, inject_abort_after=None,
+                                            token_stdin=False, dry_run=True))
+
+
+def test_recover_cli_needs_no_url_but_normal_execution_does():
+    parser = mon.build_arg_parser()
+    recover = parser.parse_args(["--recover"])
+    assert recover.url is None and mon.validate_cli_combo(recover) == []
+
+    normal = parser.parse_args(["--token-stdin"])
+    assert any("--url" in problem for problem in mon.validate_cli_combo(normal))
+
+
+def test_recover_refuses_a_wrong_target_before_restoring(tmp_path, monkeypatch):
+    """복구도 env와 Compose를 조작하므로 정상 canary와 같은 target identity 경계가 필요하다."""
+    env = tmp_path / ".env"
+    env.write_text("A=original\n")
+    mon.create_env_backup(env)
+    env.write_text("A=mutated\n")
+
+    async def wrong_target(target=None):
+        return ["project mismatch"]
+
+    async def must_not_recreate(target=None):
+        raise AssertionError("wrong target인데 재생성했다")
+
+    monkeypatch.setattr(mon, "check_target_identity", wrong_target)
+    monkeypatch.setattr(mon, "recreate_and_verify_health", must_not_recreate)
+    args = _AmainArgs(env, recover=True, token_stdin=False, url=None)
+    assert _run(mon._amain(args)) == 1
+    assert env.read_text() == "A=mutated\n"
+    assert mon.backup_path_for(env).exists()
+
+
+def test_recover_cli_runs_identity_check_then_the_shared_restorer(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    original = b"A=original\r\n"
+    env.write_bytes(original)
+    mon.create_env_backup(env)
+    env.write_text("A=mutated\n")
+    calls = []
+
+    async def right_target(target=None):
+        calls.append("identity")
+        return []
+
+    async def recreate(target=None):
+        calls.append("recreate")
+
+    monkeypatch.setattr(mon, "check_target_identity", right_target)
+    monkeypatch.setattr(mon, "recreate_and_verify_health", recreate)
+    args = _AmainArgs(env, recover=True, token_stdin=False, url=None)
+    assert _run(mon._amain(args)) == 0
+    assert calls == ["identity", "recreate"]
+    assert env.read_bytes() == original
+    assert not mon.backup_path_for(env).exists()
 
 
 # ── preflight: 전제가 실제로 적용됐는가 ─────────────────────────────────────
@@ -865,8 +981,15 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
         return mon.CanaryOutcome(False, [], 1, True, False, False)
 
     def fake_atomic_write(path, text, *, mode=None):
+        assert mon.backup_path_for(env).exists(), "활성화 전에 backup 이 게시되지 않았다"
+        events.append("write_text")
         writes.append(text)
         Path(path).write_text(text)
+
+    def fake_atomic_write_bytes(path, data, *, mode=None):
+        events.append("write_bytes")
+        writes.append(data)
+        Path(path).write_bytes(data)
 
     monkeypatch.setattr(mon, "load_id_token", lambda **kwargs: "tok")
     monkeypatch.setattr(mon, "recreate_and_verify_health", fake_recreate)
@@ -875,17 +998,17 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
     monkeypatch.setattr(mon, "start_load_process", fake_start)
     monkeypatch.setattr(mon, "run_monitored_canary", fake_monitor)
     monkeypatch.setattr(mon, "atomic_write_text", fake_atomic_write)
+    monkeypatch.setattr(mon, "atomic_write_bytes", fake_atomic_write_bytes)
 
     assert _run(mon._amain(_AmainArgs(env))) == 0
     started_at_inspect = [i for i, event in enumerate(events) if event == "inspect"][1]
     assert events.index("recreate") < started_at_inspect < events.index("start")
     assert ("baseline", "AFTER_RECREATE") in events
-    # backup → 활성화 → 복원. 셋 다 원자적 write 경로를 타야 한다.
-    assert len(writes) == 3, "backup·활성화·복원 중 하나가 원자적 write 경로를 우회했다"
-    assert "TOPIC_DISPATCHER_ENABLED=true" not in writes[0], \
-        "backup 이 활성화 **뒤에** 만들어졌다 — 그러면 되돌릴 원본이 이미 덮인 상태다"
-    assert "TOPIC_DISPATCHER_ENABLED=true" in writes[1], "활성화가 두 번째 write 가 아니다"
-    assert "TOPIC_DISPATCHER_ENABLED=false" in writes[2], "복원이 마지막 write 가 아니다"
+    # backup은 exclusive hard-link로 먼저 게시되고, 활성화(text) → 복원(bytes) 순서다.
+    assert len(writes) == 2
+    assert "TOPIC_DISPATCHER_ENABLED=true" in writes[0]
+    assert b"TOPIC_DISPATCHER_ENABLED=false" in writes[1]
+    assert events.index("write_text") < events.index("recreate") < events.index("write_bytes")
 
 
 def test_env_is_restored_when_recreate_fails_right_after_applying(monkeypatch, tmp_path):
@@ -1233,8 +1356,8 @@ def test_url_has_no_default_so_an_unreachable_stack_is_not_assumed():
     """⛔ compose 의 fastapi 는 `expose` 만 있고 host port 를 publish 하지 않는다 —
     기본 URL 을 두면 **닿지 않는 주소로 리허설하고 rollback 만 검증**하게 된다."""
     parser = mon.build_arg_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--rehearse", "--project", "p", "--container", "c"])
+    missing = parser.parse_args(["--rehearse", "--project", "p", "--container", "c"])
+    assert any("--url" in problem for problem in mon.validate_cli_combo(missing))
     parsed = parser.parse_args(["--url", "ws://127.0.0.1:18000/ws"])
     assert parsed.url == "ws://127.0.0.1:18000/ws"
 
@@ -1613,18 +1736,59 @@ def test_restore_verifies_bytes_before_discarding_the_backup(tmp_path, monkeypat
     mon.create_env_backup(env)
     mon.atomic_write_text(env, "A=2\n")
 
-    real_write = mon.atomic_write_text
+    real_write = mon.atomic_write_bytes
 
-    def corrupting_write(path, text, *, mode=None):
-        real_write(path, text.replace("A=1", "A=999"), mode=mode)
+    def corrupting_write(path, data, *, mode=None):
+        real_write(path, data.replace(b"A=1", b"A=999"), mode=mode)
 
     async def noop(target=None):
         return None
 
     monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
-    monkeypatch.setattr(mon, "atomic_write_text", corrupting_write)
+    monkeypatch.setattr(mon, "atomic_write_bytes", corrupting_write)
 
     with pytest.raises(mon.CollectorError) as caught:
         _run(mon.EnvRestorer(env).restore())
     assert "바이트 동일" in str(caught.value)
     assert mon.backup_path_for(env).exists(), "검증 실패인데 backup 을 버렸다 — 원본이 사라진다"
+
+
+@pytest.mark.parametrize("name", [
+    ".env.canary-backup",
+    ".env.canary-backup.tmp",
+    ".env.rehearsal.canary-backup",          # 리허설 env 이름을 따라간다
+    ".env.prod.canary-backup",               # `--env-file .env.prod` 를 쓰는 경우
+    ".env.prod.canary-backup.tmp",
+])
+def test_every_canary_backup_shape_is_gitignored(name):
+    """⛔ backup 은 **원본 env 전체 사본**이라 운영 secret 을 담는다 — `git add -A` 로 커밋되면
+    비밀이 리포에 들어간다.
+    ⚠️ **문자열 존재만 확인하면 부족하다.** 한때 `.env.canary-backup*` 한 줄만 두고 그 문자열이
+    `.gitignore` 에 있는지만 봤는데, 그 패턴은 `--env-file` 이름을 따라가는
+    `.env.rehearsal.canary-backup` 을 **못 잡았다**(실측). 실제 `git check-ignore` 로 본다."""
+    import subprocess
+
+    result = subprocess.run(["git", "check-ignore", "-q", name],
+                            cwd=mon.REPO_ROOT, capture_output=True)
+    assert result.returncode == 0, f"{name} 이 gitignore 되지 않는다 — secret 이 커밋될 수 있다"
+
+
+def test_recover_without_a_backup_fails_instead_of_claiming_success(tmp_path, capsys):
+    """⛔ 되돌릴 것이 없는데 "복원했다"고 하면 **운영자가 상태를 확인했다고 착각**한다 —
+    복구 도구에서 가장 나쁜 형태의 false positive 다.
+
+    ⚠️ **exit code 만 보면 판별되지 않는다**: 이 검사를 지워도 뒤의 target identity 검사가
+    실패해 똑같이 1을 반환한다(실측: 변이 SURVIVED). **이유**까지 봐야 한다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    before = env.read_text()
+    assert not mon.backup_path_for(env).exists(), "전제: backup 이 없다"
+
+    code = _run(mon._amain(_AmainArgs(env, recover=True, inject_abort_after=None)))
+    reported = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert code == 1, "backup 이 없는데 성공(0)으로 보고했다"
+    assert reported["ok"] is False and reported.get("recovered") is False
+    assert "backup" in reported.get("error", ""), \
+        f"실패 이유가 '복원할 backup 없음'이 아니다: {reported}"
+    assert env.read_text() == before, "복원할 것도 없는데 env 를 건드렸다"

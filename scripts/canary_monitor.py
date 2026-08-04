@@ -381,17 +381,17 @@ def apply_env_values(text: str, changes: dict[str, Optional[str]]) -> str:
     return "\n".join(out) + "\n"
 
 
-def atomic_write_text(path: Path, text: str, *, mode: Optional[int] = None) -> None:
-    """같은 디렉터리 임시 파일을 fsync 한 뒤 교체한다."""
+def atomic_write_bytes(path: Path, data: bytes, *, mode: Optional[int] = None) -> None:
+    """같은 디렉터리 임시 파일을 fsync 한 뒤 bytes 그대로 교체한다."""
     path = Path(path)
     if mode is None:
         mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(fd, "wb") as stream:
             fd = -1
-            stream.write(text)
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -409,6 +409,10 @@ def atomic_write_text(path: Path, text: str, *, mode: Optional[int] = None) -> N
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+
+
+def atomic_write_text(path: Path, text: str, *, mode: Optional[int] = None) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
 def validate_canary_start_env(values: dict[str, Optional[str]]) -> list[str]:
@@ -440,11 +444,40 @@ def create_env_backup(env_path: Path) -> Path:
     """
     env_path = Path(env_path)
     backup = backup_path_for(env_path)
-    if backup.exists():
-        raise CollectorError(
-            f"이전 canary 의 backup 이 남아 있다: {backup} — 먼저 `--recover` 로 복원할 것")
-    atomic_write_text(backup, env_path.read_text(encoding="utf-8"), mode=0o600)
-    return backup
+    data = env_path.read_bytes()
+
+    # ⛔ `exists()` 뒤 `os.replace()`는 TOCTOU다. 두 실행이 동시에 absence를 본 뒤 둘 다
+    # backup을 덮을 수 있고, 늦은 쪽은 이미 활성화된 env를 "원본"으로 저장할 수 있다.
+    # 완전히 fsync한 임시 inode를 hard-link로 게시하면 목적지가 이미 있을 때 원자적으로 실패한다.
+    # temp도 `.env.canary-backup*` gitignore 범위 안에 둔다. link 게시 뒤 프로세스가 죽어
+    # unlink를 못 해도 secret-bearing temp가 `git status`에 나타나지 않아야 한다.
+    fd, temporary = tempfile.mkstemp(prefix=f"{backup.name}.", dir=backup.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, backup)
+        except FileExistsError as exc:
+            raise CollectorError(
+                f"이전 canary 의 backup 이 남아 있다: {backup} — 먼저 `--recover` 로 복원할 것"
+            ) from exc
+        directory_fd = os.open(backup.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return backup
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 class EnvRestorer:
@@ -463,12 +496,11 @@ class EnvRestorer:
             return
         backup = backup_path_for(self._env_path)
         if not backup.exists():
-            self.done = True                       # 되돌릴 것이 없다(변경 전 실패)
-            return
-        original = backup.read_text(encoding="utf-8")
-        atomic_write_text(self._env_path, original)
+            raise CollectorError(f"복원할 canary backup 이 없다: {backup}")
+        original = backup.read_bytes()
+        atomic_write_bytes(self._env_path, original)
         await recreate_and_verify_health(self._target)
-        current = self._env_path.read_text(encoding="utf-8")
+        current = self._env_path.read_bytes()
         if current != original:
             raise CollectorError("env 가 원본과 바이트 동일하게 복원되지 않았다")
         # ⛔ **검증이 끝난 뒤에만** backup 을 지운다 — 먼저 지우면 재시도 수단이 사라진다.
@@ -827,7 +859,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         allow_abbrev=False)
     # ⛔ 기본값 없음 — compose 의 fastapi 는 `expose` 만 있고 host port 를 publish 하지 않는다.
     #    기본 URL 을 두면 "닿지 않는 주소로 리허설하고 rollback 만 검증"하게 된다.
-    parser.add_argument("--url", required=True, help="부하가 붙을 WS URL (도달성은 preflight 가 확인)")
+    parser.add_argument("--url", help="부하가 붙을 WS URL (실제 canary/리허설은 필수)")
     source = parser.add_mutually_exclusive_group()
     # ⛔ `--token` 은 의도적으로 없다 — argv 는 `ps` 로 보인다.
     source.add_argument("--token-stdin", action="store_true")
@@ -856,7 +888,11 @@ def validate_cli_combo(args) -> list[str]:
         # ⚠️ 복원은 **토큰도 부하도 필요 없다** — 남은 backup 을 되돌리는 것뿐이다.
         if args.rehearse or args.inject_abort_after is not None:
             problems.append("--recover 는 단독으로 쓴다(--rehearse/--inject-abort-after 불가)")
+        if args.dry_run:
+            problems.append("--recover 와 --dry-run 을 함께 쓸 수 없다")
         return problems
+    if not args.url:
+        problems.append("실제 canary/리허설은 --url 이 필요하다")
     target_is_production = args.container == PRODUCTION_CONTAINER
     if args.rehearse:
         if target_is_production:
@@ -904,6 +940,16 @@ async def _amain(args) -> int:
     env_path = target.env_file
     if args.recover:
         # ⛔ 토큰·preflight 없이 **복원만** 한다 — 남은 backup 이 곧 "이전 창이 안 닫혔다"는 뜻이다.
+        backup = backup_path_for(env_path)
+        if not backup.exists():
+            print(json.dumps({"ok": False, "recovered": False,
+                              "error": f"복원할 canary backup 이 없다: {backup}"},
+                             ensure_ascii=False))
+            return 1
+        identity_problems = await check_target_identity(target)
+        if identity_problems:
+            print(json.dumps({"ok": False, "target": identity_problems}, ensure_ascii=False))
+            return 1
         restorer = EnvRestorer(env_path, target)
         await restorer.restore()
         print(json.dumps({"ok": True, "recovered": True,

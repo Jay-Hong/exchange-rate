@@ -28,6 +28,11 @@ ENV/
 
 # 환경 변수
 .env
+# ⛔ canary backup 은 **원본 env 전체 사본**이라 운영 secret 을 담는다.
+#    `.env.canary-backup*` 만으로는 `--env-file .env.prod` 같은 다른 이름의
+#    backup(`.env.prod.canary-backup`)을 놓친다 — 접미사 기준으로 잡는다.
+*.canary-backup
+*.canary-backup.tmp
 .env.local
 .env.rehearsal
 .env.*.local

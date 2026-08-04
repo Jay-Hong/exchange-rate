@@ -929,11 +929,16 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⛔ **cleanup 중 두 번째 SIGTERM 을 보내지 말 것** — 반복 signal 은 의도적으로 무시되고,
         굳이 강제 종료하면 rollback 이 끊긴다.
       5. **durable backup + `--recover`** — 복구 수단은 **파일 하나**다.
-         env 를 건드리기 **직전**에 원본 전체를 `.env.canary-backup`(mode 0600, 원자적+fsync)
-         으로 남기고, backup 이 이미 있으면 *이전 창이 안 닫혔다*는 뜻이라 **시작을 거부**한다.
+         env 를 건드리기 **직전**에 원본 전체를 `.env.canary-backup`(mode 0600, 원자적+fsync,
+         gitignored)으로 남기고, backup 이 이미 있으면 *이전 창이 안 닫혔다*는 뜻이라
+         **시작을 거부**한다. ⛔ `exists()` 뒤 `replace()`하는 check-then-act가 아니다 — 완전히
+         기록한 임시 inode를 **exclusive hard-link**로 게시해 동시 실행 둘 중 하나만 성공한다.
+         읽기·복원·검증은 text가 아니라 **bytes** 단위다(CRLF도 원본 그대로 보존).
          복구는 `--recover`(토큰·부하 불요) — 파일 전체를 원자 복원 → force-recreate →
-         `/health` → **바이트 동일 검증** 후에만 backup 을 지운다. 자동 cleanup 도 **같은 경로**를
-         쓴다.
+         `/health` → **바이트 동일 검증** 후에만 backup 을 지운다. `--recover`는 `--url`도
+         요구하지 않지만, env/Compose를 건드리기 전에 정상 경로와 동일한 **target identity**를
+         fail-closed로 확인한다. backup이 없으면 성공으로 접지 않는다. 자동 cleanup도
+         **같은 경로**를 쓴다.
          ⛔ 한때 수동 절차로 `sed -i 's/^TOPIC_DISPATCHER_ENABLED=.*/…=false/' .env` 를 적어
          뒀는데 **이미 닫았던 결함 셋을 되살린 것**이었다: (1) 키가 없으면 **아무 일도 안 하면서
          성공처럼 보이고** (2) 원자적이지 않으며 (3) canary 가 바꾼 **나머지 4개 키를 되돌리지
