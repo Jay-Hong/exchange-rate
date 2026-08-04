@@ -752,8 +752,20 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
      ⚠️ **`unknown_connections` 를 먼저 본다** — 0이 아니면(= nginx 우회·헤더 손상) known 통계의
        **대표성부터** 의심해야 한다.
        ⚠️ **실측(2026-08-04 배포 smoke)**: 컨테이너 **내부에서 `localhost:8000/ws` 로 직접** 붙은
-       연결은 nginx 를 거치지 않아 `X-Real-IP` 가 없고 그대로 `unknown` 에 쌓인다. 즉 진단·smoke
-       접속이 baseline 을 오염시킬 수 있으므로, **읽을 때는 그런 접속이 없던 창**을 고른다. `unknown` 을 실제 IP 처럼 섞으면 carrier NAT 와 구분되지 않아
+       연결은 nginx 를 거치지 않아 `X-Real-IP` 가 없고 그대로 `unknown` 에 쌓인다.
+       ⛔ **"진단 접속이 없던 창" 으로는 부족하다.** 연결을 끊으면 `unknown_connections` 는 0으로
+       돌아가지만 **handshake 는 rolling 10분 버킷에 남고**, `max_in_bucket` 에는 **출처 구분이
+       없다**. → **마지막 합성/진단 접속 후 10분이 완전히 지난 창**부터 baseline 으로 인정한다.
+
+  ⛔ **표본 부재를 baseline 으로 읽지 말 것.** 실사용자가 없는 시간대의 `0 연결 · 0 handshake` 는
+  "여유 있다"가 아니라 **`insufficient_data`** 다. 실트래픽이 생기기 전에는 nginx 값을 정하는
+  근거로 쓰지 않는다.
+
+  ⚠️ **가려야 할 것 — 외부 클라가 한 IP 로 보이는가**(2026-08-04 public smoke 관측). 서로 다른
+  출처여야 할 두 연결이 `distinct_ips=1 / max_connections_per_ip=2` 로 잡혔다. 원인은 미확정이다:
+  (a) 두 연결이 실제로 같은 망, (b) 앞단 공용 egress(CDN·프록시)로 외부 클라가 **한 IP 로 수렴**.
+  ⛔ **(b) 라면 `limit_conn` per-IP 가 전원을 함께 조인다** — 값 결정 전에 반드시 가려야 한다
+  (실트래픽 창에서 `distinct_ips` 가 사용자 수에 따라 늘어나는지 보면 갈린다). `unknown` 을 실제 IP 처럼 섞으면 carrier NAT 와 구분되지 않아
        `limit_conn` 판단이 정반대로 간다.
      ⚠️ **handshake 버킷은 최근 10분만 보존한다**(10s × 60). canary 에서는 **10분 이내 주기로
        snapshot 을 저장**해야 초반 재연결 피크가 사라지지 않는다.
