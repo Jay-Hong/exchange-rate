@@ -2046,7 +2046,12 @@ def test_log_excerpt_is_bounded_and_masked():
     uid = "44KL6exFHkf1DXTuQn1hRQ6uI8Y2"
     logs = "\n".join(
         [json.dumps({"level": "ERROR", "logger": "exchange_rate.main", "function": "f",
-                     "line": 1, "message": f"실패 uid={uid}", "exc_info": "Traceback ..."})]
+                     "line": 1, "message": f"실패 uid={uid}",
+                     "exc_info": (
+                         "Traceback (most recent call last):\n"
+                         "  File \"/app/main.py\", line 1, in f\n"
+                         "RuntimeError: sensitive detail"
+                     )})]
         + [f"raw ERROR line token={uid}"] * 30)
 
     excerpt = mon.sanitize_log_lines(logs)
@@ -2054,7 +2059,38 @@ def test_log_excerpt_is_bounded_and_masked():
     assert len(excerpt) <= mon.MAX_LOG_EXCERPT, "발췌가 유계가 아니다"
     assert uid not in body, "UID 가 산출물로 새어 나갔다"
     assert "exc_info" not in body, "traceback 원문이 그대로 실렸다"
+    assert excerpt[0]["exception_type"] == "RuntimeError", \
+        "traceback 원문을 버리면서 원인 예외 타입까지 잃었다"
     assert excerpt[0]["logger"] == "exchange_rate.main", "원인 재구성에 필요한 구조가 없다"
+
+
+def test_collector_requests_unprefixed_json_logs(monkeypatch):
+    """Compose service prefixes turn each JSON line into raw text and hide the error message."""
+    commands = []
+
+    async def fake_run(command, **kwargs):
+        commands.append(command)
+        if "logs" in command:
+            return ""
+        if "inspect" in command:
+            return "2026-08-05T00:00:00Z\n"
+        path = command[-1]
+        payload = {
+            "/health": {"status": "healthy"},
+            "/admin/api/broadcast-heartbeat": {"age_seconds": 1},
+            "/admin/api/ws-auth-executor-metrics": {"running": True, "metrics": {}},
+            "/admin/api/default-executor-probe": {
+                "enabled": True, "running": True, "metrics": {}
+            },
+        }[path]
+        return json.dumps(payload) + "\n200"
+
+    monkeypatch.setattr(mon, "run_command", fake_run)
+    _run(mon.collect_from_server())
+
+    log_command = next(command for command in commands if "logs" in command)
+    assert "--no-log-prefix" in log_command, \
+        "운영 docker compose 접두어 때문에 JSON 로그 구조를 읽을 수 없다"
 
 
 @pytest.mark.parametrize("name", [
@@ -2063,3 +2099,54 @@ def test_log_excerpt_is_bounded_and_masked():
 ])
 def test_metrics_artifact_is_gitignored(name):
     assert _is_gitignored(name), f"{name} 이 gitignore 되지 않는다"
+
+
+CONSOLE_LOGS = """2026-08-05 00:35:24 | ERROR | exchange_rate.main:websocket_endpoint:1061 | WebSocket 메시지 처리 오류
+Traceback (most recent call last):
+  File "/app/app/main.py", line 1036, in websocket_endpoint
+    data = await websocket.receive_text()
+RuntimeError: WebSocket is not connected. Need to call "accept" first.
+2026-08-05 00:35:25 | INFO | exchange_rate.main:x:1 | 정상"""
+
+
+def test_exception_type_is_recovered_from_console_format_logs():
+    """⛔ **운영 stdout 은 JSON 이 아니다** — 실측: 컨테이너 `ENV=development` 라 컬러 콘솔
+    포맷이고 최근 5분 JSON **0줄**. JSON 분기만 두면 `exception_type` 이 운영에서 **항상 비어**
+    원인을 못 가른다(같은 로그 메시지가 정상 종료일 수도, 버그일 수도 있다).
+    ⚠️ 접두어 제거(`--no-log-prefix`)만으로는 이 분기가 살아나지 않는다 — 내용 자체가 JSON 이
+    아니기 때문이다."""
+    excerpt = mon.sanitize_log_lines(CONSOLE_LOGS)
+    assert excerpt, "콘솔 형식에서 아무것도 못 건졌다"
+    assert excerpt[0]["exception_type"] == "RuntimeError", \
+        f"콘솔 로그에서 예외 클래스를 못 뽑았다: {excerpt[0]}"
+
+
+def test_exception_message_body_is_never_stored():
+    """⛔ 클래스만 남긴다 — 예외 **메시지**에는 토큰·UID·경로가 섞인다."""
+    logs = ('2026-08-05 00:00:00 | ERROR | a.b:c:1 | boom\n'
+            'Traceback (most recent call last):\n'
+            'ValueError: token=44KL6exFHkf1DXTuQn1hRQ6uI8Y2 secret path=/app/x')
+    body = json.dumps(mon.sanitize_log_lines(logs), ensure_ascii=False)
+    assert "ValueError" in body, "원인 클래스가 없으면 진단이 안 된다"
+    assert "44KL6exFHkf1DXTuQn1hRQ6uI8Y2" not in body, "예외 메시지의 UID 가 저장됐다"
+    assert "/app/x" not in body, "예외 메시지 본문이 저장됐다"
+
+
+def test_log_collection_strips_the_compose_service_prefix(monkeypatch):
+    """⛔ `docker compose logs` 는 `exchange-rate-app  | ` 접두어를 붙인다(실측) — 그대로 두면
+    JSON 파싱이 **항상** 실패하고 발췌도 접두어로 낭비된다."""
+    seen: list = []
+
+    async def fake_run(command, *, timeout=None, cwd=None):
+        if command[0] == "docker" and "logs" in command:
+            seen.append(command)
+            return ""
+        if command[0] == "docker" and command[1] == "inspect":
+            return "T\n"
+        body = {"status": "healthy"} if "/health" in command[-1] else (
+            {"age_seconds": 1.0} if "heartbeat" in command[-1] else {"metrics": {}})
+        return json.dumps(body) + "\n200"
+
+    monkeypatch.setattr(mon, "run_command", fake_run)
+    _run(mon.collect_from_server())
+    assert seen and "--no-log-prefix" in seen[0], f"접두어를 제거하지 않는다: {seen}"

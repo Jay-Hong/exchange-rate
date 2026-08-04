@@ -196,7 +196,22 @@ class Snapshot:
 
 
 MAX_LOG_EXCERPT = 10
+EXCEPTION_LOOKAHEAD_LINES = 25
 _LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{20,}")
+_EXCEPTION_TYPE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Disconnect)$"
+)
+
+
+def _exception_type(exc_info: Any) -> Optional[str]:
+    """Return only the final exception class, never its potentially sensitive message."""
+    if not isinstance(exc_info, str):
+        return None
+    for line in reversed(exc_info.splitlines()):
+        candidate = line.strip().split(":", 1)[0]
+        if _EXCEPTION_TYPE.fullmatch(candidate):
+            return candidate
+    return None
 
 
 def sanitize_log_lines(logs: str, limit: int = MAX_LOG_EXCERPT) -> list:
@@ -209,18 +224,31 @@ def sanitize_log_lines(logs: str, limit: int = MAX_LOG_EXCERPT) -> list:
     구 로그는 `docker compose logs` 에서 사라진다(실측).
     """
     picked = []
-    for line in logs.splitlines():
+    lines = logs.splitlines()
+    for index, line in enumerate(lines):
         if "ERROR" not in line and "Traceback" not in line:
             continue
+        # ⛔ 예외 클래스만 본다(유계 lookahead). 메시지 본문은 담지 않는다 — 토큰·UID·경로가 섞인다.
+        following = lines[index + 1: index + 1 + EXCEPTION_LOOKAHEAD_LINES]
         try:
             parsed = json.loads(line)
         except (TypeError, ValueError):
-            picked.append({"raw": _LONG_TOKEN.sub("***", line)[:120]})
+            # ⚠️ **운영 stdout 은 JSON 이 아니다**(실측: 컨테이너 `ENV=development` → 컬러 콘솔
+            #    포맷, 최근 5분 JSON 0줄). JSON 분기는 파일 로그·다른 배포에서만 탄다.
+            #    그래서 콘솔 형식에서도 **예외 클래스**를 건져야 진단이 성립한다 — 메시지만으로는
+            #    정상 종료와 버그를 못 가른다. traceback 은 매칭 줄 **다음 줄들**에 온다.
+            picked.append({
+                "raw": _LONG_TOKEN.sub("***", line)[:120],
+                "exception_type": _exception_type("\n".join(following)),
+            })
         else:
             picked.append({
                 "level": parsed.get("level"), "logger": parsed.get("logger"),
                 "function": parsed.get("function"), "line": parsed.get("line"),
                 "message": _LONG_TOKEN.sub("***", str(parsed.get("message", "")))[:120],
+                # The fixed log message alone cannot distinguish a disconnect from a bug.
+                # Keep the class only; exception messages may contain tokens, UIDs, or paths.
+                "exception_type": _exception_type(parsed.get("exc_info")),
             })
         if len(picked) >= limit:
             break
@@ -273,7 +301,10 @@ async def collect_from_server(*, timeout: Optional[float] = None,
         await run_command(admin_fetch_command("/admin/api/default-executor-probe", target), timeout=timeout))
     started = (await run_command(
         target.inspect("{{.State.StartedAt}}"), timeout=timeout)).strip()
-    logs = await run_command(target.compose("logs", "fastapi", "--since", "5s"),
+    # Compose prefixes each line by default, which makes production JSON logs unparsable and
+    # truncates the useful message in the raw fallback. Ask for the formatter's JSON verbatim.
+    logs = await run_command(target.compose(
+        "logs", "--no-log-prefix", "--since", "5s", "fastapi"),
                              timeout=timeout)
 
     for name, payload in (("heartbeat", heartbeat), ("auth", auth), ("probe", probe)):
