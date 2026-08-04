@@ -159,16 +159,23 @@ class TestErrorLogAccounting(unittest.TestCase):
     def test_rotation_by_inode_is_fail_closed(self):
         """⛔ 새 파일만 읽으면 회전 직전 구간을 통째로 놓쳐 **틀린 안심**이 된다.
 
-        ⚠️ 새 파일을 baseline 보다 **크게** 만든다 — 작게 만들면 size 검사가 먼저 잡아
-        inode 검사를 지워도 테스트가 통과한다(변이 테스트에서 실제로 생존했다).
+        ⚠️ **`unlink` 후 재생성으로 회전을 흉내내면 안 된다** — macOS(APFS)는 새 inode 를
+        주지만 **Linux(ext4)는 같은 번호를 재사용**해 CI 에서만 깨진다(실제로 그렇게 red 가 났다:
+        `93176 == 93176`). `RotatingFileHandler` 가 실제로 하는 대로 **rename 후 새 파일 생성**
+        을 쓴다 — 구 inode 를 `error.log.1` 이 계속 붙잡으므로 새 파일은 **반드시** 다른 inode 를
+        받는다(파일시스템 무관).
+        ⚠️ 새 파일은 baseline 보다 **크게** 만든다 — 작으면 size 검사가 먼저 잡아 inode 경로가
+        격리되지 않는다(1차 변이 테스트에서 그 변이가 생존했다).
         """
-        self.path.write_text("ERROR 옛날 것\n", encoding="utf-8")
+        self.path.write_text("ERROR 옛날 것\n" * 20, encoding="utf-8")
         baseline = env_flip.log_baseline(self.path)
-        self.path.unlink()
-        self.path.write_text("INFO 새 파일\n" * 50, encoding="utf-8")   # 새 inode + 더 큰 크기
+        rotated = self.path.parent / (self.path.name + ".1")
+        os.rename(self.path, rotated)                                   # 구 inode 를 붙잡아 둔다
+        self.path.write_text("INFO 새 파일\n" * 50, encoding="utf-8")
         self.assertGreater(self.path.stat().st_size, baseline["size"],
                            "size 검사가 대신 잡으면 inode 경로를 검증하지 못한다")
-        self.assertNotEqual(self.path.stat().st_ino, baseline["inode"])
+        self.assertNotEqual(self.path.stat().st_ino, baseline["inode"],
+                            "회전을 재현하지 못했다 — 이 테스트는 inode 경로를 검증하지 않는다")
         with self.assertRaises(env_flip.Abort):
             env_flip.count_new_errors(self.path, baseline)
 
