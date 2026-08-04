@@ -808,6 +808,26 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   실행을 **한 단계로 합치지 않는다**
   (합치면 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분할 수 없다).
 
+  ### Canary GO 조건 (2026-08-04 확정)
+
+  · **W=4 는 canary 한정 잠정값**으로 수용한다(측정 없음 — 그 측정이 canary 의 목적이다).
+  · **lease 전략 = (a) 창을 15분 미만으로.** 총 **7분** 계획이라 lease 상한(900s) 안이고,
+    그래서 **재인증 부하 클라이언트를 만들지 않는다**.
+  · **부하 공급원 = `scripts/ws_auth_load.py`.** ⛔ 기존 `subscribe_*_topic.py` 는 **쓸 수 없다** —
+    `id_token` 없이 구독하는데 dispatcher 는 무토큰이면 free topic 만 등록하고 **그 자리에서
+    return** 하므로(`app/topic_dispatcher.py`) 인증 executor 를 **한 번도 타지 않는다** =
+    auth metrics 가 빈 **false green**. 토큰은 stdin/`chmod 600` 파일로만, in-flight 는 **1**.
+  · **램프**: baseline 60s → 동시 1 60s → 동시 4 120s → 동시 8 120s → 관찰 60s (총 420s).
+  · **env**: `DEFAULT_EXECUTOR_PROBE_ENABLED=true` · `DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS=1` ·
+    `WS_AUTH_EXECUTOR_LOG_TIMINGS=true` · `TOPIC_DISPATCHER_ENABLED=true`.
+    ⛔ `KRX_CLIENT_DISTRIBUTION_ENABLED` 와 Release arming 은 **계속 OFF**.
+  · **즉시 중단** (1건이라도): health 실패·컨테이너 재시작·신규 ERROR traceback / subscribe
+    timeout 또는 예상 밖 `subscription_error` / auth `queue_wait_ms_max >= 5000` / 계획된 종료
+    전 `never_started`·`caller_cancelled_while_running` 증가 / probe `outstanding=1` **2회
+    연속** 또는 queue delay `>= 1000ms` / legacy broadcast 30초 이상 정지.
+    ⚠️ 서버 측 판정은 `ws_auth_load.evaluate_server_abort()` 순수 함수로 잠겨 있다 — 부하
+    생성기는 admin 자격증명을 **들지 않는다**(운영자가 스냅샷을 넣어 판정).
+
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
   이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,
   그게 이 sentinel 이 잡아야 할 **최악의 상태**다. (구 구현은 측정을 caller 가 소유해 이 상태가
