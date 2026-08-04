@@ -1,9 +1,9 @@
 """`/ws` 연결 계측 — nginx ingress 상한을 **관측 위에서** 정하기 위한 최소 계측.
 
 왜 앱에서 재는가: nginx access log 로는 **할 수 없다**(실측).
-- 실제 쓰이는 포맷은 `nginx/nginx.conf` 의 `main` 인데 `$request_time` · `$limit_req_status` ·
-  `$limit_conn_status` 가 없다(`json_combined` 는 정의만 되고 어디서도 쓰이지 않는다).
-- ⛔ 더 근본적으로 **WebSocket access log 는 연결이 끝날 때 기록된다.** `/ws` 101 로그를 세면
+- (구 결함, `9821974` 에서 해소) `main` 포맷에 `$request_time` · `$limit_req_status` ·
+  `$limit_conn_status` 가 **없었다** — 지금은 있다. 그래도 아래 한계는 그대로다.
+- ⛔ **WebSocket access log 는 연결이 끝날 때 기록된다** — 이건 필드를 추가해도 해소되지 않는다. `/ws` 101 로그를 세면
   handshake **유입률**이 아니라 **종료된 연결의 기록률**을 보게 되고, 장수명 연결은 아직 로그에
   없어 **현재 동시 연결 수와 IP 별 분포를 알 수 없다**. 그 둘이 `limit_conn` 값을 정하는 근거다.
 
@@ -88,13 +88,24 @@ def connections_per_ip_histogram(counts_by_ip: dict[str, int]) -> dict[str, Any]
 
     ⚠️ `limit_conn` 값은 이 **상위 꼬리**를 덮어야 한다. 모바일 carrier NAT 는 여러 사용자를 한 IP
     로 묶으므로, 꼬리를 모르고 값을 정하면 정상 사용자를 자른다.
+
+    ⛔ **`unknown` 을 실제 IP 하나처럼 섞지 말 것.** 한때 그렇게 해서, `X-Real-IP` 가 전부 누락된
+    100 연결이 `histogram={"100": 1}` 로 보였다 — carrier NAT 한 IP 의 100 연결과 **구분되지
+    않는다**. 그 값으로 `limit_conn` 을 정하면 판단이 **정반대**로 간다(전자는 "IP 데이터가 없다",
+    후자는 "상한을 높게 잡아야 한다"). 그래서 `unknown` 은 **분리해서** 따로 센다.
     """
+    known = {ip: n for ip, n in counts_by_ip.items() if ip != UNKNOWN_IP}
     histogram: dict[str, int] = {}
-    for connections in counts_by_ip.values():
+    for connections in known.values():
         key = str(connections)
         histogram[key] = histogram.get(key, 0) + 1
     return {
-        "distinct_ips": len(counts_by_ip),
-        "max_connections_per_ip": max(counts_by_ip.values(), default=0),
+        # ↓ 전부 **known IP 만** 기준이다.
+        "distinct_ips": len(known),
+        "max_connections_per_ip": max(known.values(), default=0),
         "histogram": histogram,
+        "known_connections": sum(known.values()),
+        # ⚠️ nginx 를 우회한 직접 접근(또는 헤더 손상) 건수. **0 이 정상**이고, 0이 아니면
+        #    위 known 통계의 대표성부터 의심해야 한다.
+        "unknown_connections": counts_by_ip.get(UNKNOWN_IP, 0),
     }

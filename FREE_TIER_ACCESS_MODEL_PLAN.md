@@ -729,18 +729,23 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   못 막는다(연결 내부). 아래 3단계를 거친 뒤에야 값을 쓴다. 호스트 config 변경이라 **적용은 별도
   승인**이다.
 
-  0. ⛔ **계측 구현이 선행이다 — 지금 로그로는 이 관측을 할 수 없다**(2026-08-04 확인).
+  0. ✅ **[x] 계측 구현 — land `9821974`**(2026-08-04). 아래는 그때의 결함 기록이다.
      · 실제 쓰이는 포맷은 `nginx/nginx.conf:40` 의 **`main`** 인데 거기엔 `$request_time` ·
        `$limit_req_status` · `$limit_conn_status` 가 **없다**. (`json_combined` 는 정의만 돼 있고
        **아무 곳에서도 쓰이지 않는다** — `request_time` 이 있지만 limit 상태는 거기에도 없다.)
      · ⛔ 더 근본적으로, **WebSocket access log 는 연결이 끝날 때 기록된다.** 그래서 `/ws` 101
        로그 시각을 세면 **handshake 유입률이 아니라 종료된 연결의 기록률**을 보게 된다. 장수명
        연결은 **아직 로그에 나타나지도 않아** 현재 동시 연결 수와 IP 별 동시 분포를 알 수 없다.
-     → **권장**: 앱의 `/ws` accept/close 지점에 **handshake 카운터 · 현재 연결 gauge · IP 별 동시
-       연결 분포**를 둔다(연결 중에도 보인다). access log 로 사후 복원하려면 최소한
-       `$request_time` 과 연결 식별자를 추가해야 하고, **그래도 종료 전 연결은 관측할 수 없다**.
-     → **상한 검증 전에** `$limit_req_status` · `$limit_conn_status` 를 실제 log format 에 넣는다
-       (없으면 3번의 "실제 거절 건수"를 셀 수 없다).
+     ✅ **해소**: 앱 `/ws` accept/close 에 handshake 버킷 · 현재 연결 gauge · IP 별 동시 분포를
+       두었다 → `GET /admin/api/ws-connection-metrics`(원시 IP 미노출, **`unknown` 분리**).
+       `main` log format 에 `$request_time`/`$limit_req_status`/`$limit_conn_status` 추가.
+     ⚠️ **그래도 남는 한계**: WS access log 가 **연결 종료 시** 기록되는 성질은 필드를 추가해도
+       바뀌지 않는다 — 동시 연결·유입률은 **앱 계측으로만** 본다.
+     ⚠️ **`unknown_connections` 를 먼저 본다** — 0이 아니면(= nginx 우회·헤더 손상) known 통계의
+       **대표성부터** 의심해야 한다. `unknown` 을 실제 IP 처럼 섞으면 carrier NAT 와 구분되지 않아
+       `limit_conn` 판단이 정반대로 간다.
+     ⚠️ **handshake 버킷은 최근 10분만 보존한다**(10s × 60). canary 에서는 **10분 이내 주기로
+       snapshot 을 저장**해야 초반 재연결 피크가 사라지지 않는다.
 
   1. **관측** — 무엇을 재는가(위 0 이 끝난 뒤):
      · `/ws` **handshake rate**: 재연결 폭주(배포·네트워크 회복)의 **피크**가 상한을 정한다 —

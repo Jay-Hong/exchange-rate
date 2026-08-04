@@ -134,6 +134,65 @@ def test_snapshot_never_exposes_raw_ips():
     assert snapshot["per_ip"]["max_connections_per_ip"] == 2
 
 
+def test_unknown_ip_connections_never_pollute_the_nat_distribution():
+    """⛔ **`limit_conn` 판단을 정반대로 만드는 결함이었다.** `X-Real-IP` 가 전부 누락된 100 연결이
+    `histogram={"100": 1}` 로 보이면 **carrier NAT 한 IP 의 100 연결과 구분되지 않는다** —
+    전자는 "IP 데이터가 아예 없다"이고 후자는 "상한을 높게 잡아야 한다"인데."""
+    manager = ConnectionManager()
+    known = [_FakeWebSocket(ip="203.0.113.7") for _ in range(2)]
+    unknown = [_FakeWebSocket(ip=None) for _ in range(3)]      # 헤더 누락
+    broken = _FakeWebSocket(ip="not-an-ip")                    # 헤더 손상
+    for ws in known + unknown + [broken]:
+        _run(manager.connect(ws))
+
+    per_ip = _metrics(manager)["per_ip"]
+    assert per_ip["unknown_connections"] == 4, "unknown 이 따로 세지지 않는다"
+    assert per_ip["distinct_ips"] == 1, "unknown 이 실제 IP 처럼 섞였다"
+    assert per_ip["max_connections_per_ip"] == 2, "unknown 이 max 를 오염시켰다"
+    assert per_ip["histogram"] == {"2": 1}, "unknown 이 histogram 에 섞였다"
+
+
+def test_connection_total_equals_known_plus_unknown():
+    """⚠️ 이 불변식이 깨지면 어느 쪽 통계도 믿을 수 없다."""
+    manager = ConnectionManager()
+    for ws in [_FakeWebSocket(ip="203.0.113.7"), _FakeWebSocket(ip="198.51.100.9"),
+               _FakeWebSocket(ip=None), _FakeWebSocket(ip="203.0.113.7")]:
+        _run(manager.connect(ws))
+    m = _metrics(manager)
+    assert m["per_ip"]["known_connections"] + m["per_ip"]["unknown_connections"] \
+        == m["active_connections"]
+
+
+def test_unknown_connections_do_not_move_known_statistics():
+    """반대 방향 — unknown 이 늘어도 known 쪽 숫자는 **그대로여야** 한다."""
+    manager = ConnectionManager()
+    _run(manager.connect(_FakeWebSocket(ip="203.0.113.7")))
+    before = _metrics(manager)["per_ip"]
+    for _ in range(5):
+        _run(manager.connect(_FakeWebSocket(ip=None)))
+    after = _metrics(manager)["per_ip"]
+    assert after["unknown_connections"] == 5
+    for key in ("distinct_ips", "max_connections_per_ip", "histogram", "known_connections"):
+        assert after[key] == before[key], f"unknown 이 known 통계({key})를 움직였다"
+
+
+def test_connect_records_a_handshake_through_the_manager():
+    """⛔ **프로덕션 배선을 본다.** `HandshakeBuckets` 를 직접 부르는 테스트만 두면
+    `ConnectionManager.connect()` 의 `record()` 를 **지워도 통과한다**(이 세션에서 반복된 형태)."""
+    manager = ConnectionManager()
+    assert _metrics(manager)["handshakes"]["current_bucket"] == 0
+
+    _run(manager.connect(_FakeWebSocket(ip="203.0.113.7")))
+    assert _metrics(manager)["handshakes"]["current_bucket"] == 1, "connect 가 handshake 를 안 셌다"
+
+    _run(manager.connect(_FakeWebSocket(ip="198.51.100.9")))
+    assert _metrics(manager)["handshakes"]["current_bucket"] == 2
+
+    # ⚠️ 해제는 handshake 를 되돌리지 않는다 — **유입** 카운터이지 gauge 가 아니다.
+    manager.disconnect(_FakeWebSocket())
+    assert _metrics(manager)["handshakes"]["current_bucket"] == 2
+
+
 # ── handshake 버킷 ──────────────────────────────────────────────────────────
 
 

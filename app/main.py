@@ -1593,10 +1593,12 @@ async def get_atomic_cutover_status():
 async def get_ws_connection_metrics():
     """nginx `/ws` ingress 상한을 **관측 위에서** 정하기 위한 계측(read-only).
 
-    ⛔ nginx access log 로는 못 한다 — 실제 log format 에 limit 상태가 없고, 더 근본적으로
-    **WS access log 는 연결 종료 시 기록**이라 `/ws` 101 을 세면 handshake 유입률이 아니라
-    **종료된 연결의 기록률**이 나오며 장수명 연결은 로그에 아직 없다(= 현재 동시 연결·IP 분포
-    미상). 그 둘이 `limit_conn` 값을 정하는 근거다.
+    ⛔ nginx access log 로는 못 한다 — **WS access log 는 연결 종료 시 기록**이라 `/ws` 101 을
+    세면 handshake 유입률이 아니라 **종료된 연결의 기록률**이 나오고, 장수명 연결은 로그에 아직
+    없다(= 현재 동시 연결·IP 분포 미상). 그 둘이 `limit_conn` 값을 정하는 근거다.
+    (limit 상태 필드는 `9821974` 에서 `main` 포맷에 추가했지만, 이 한계는 그것과 무관하다.)
+    ⚠️ **`unknown_connections` 를 먼저 본다** — 0이 아니면 nginx 우회·헤더 손상이고, known 통계의
+    대표성부터 의심해야 한다. `unknown` 은 known histogram/max 에 **섞이지 않는다**.
     ⛔ **원시 IP 를 노출하지 않는다** — IP 당 연결 수 **히스토그램** · 최댓값 · 총계만.
     ⚠️ `handshakes` 는 **고정 크기 시간 버킷**이다(누적 합계로는 피크를 못 낸다). 시계열·IP
     history 는 만들지 않는다.
