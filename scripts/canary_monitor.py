@@ -386,7 +386,8 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: Optional[int] = None) -
     path = Path(path)
     if mode is None:
         mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=TEMP_SUFFIX,
+                                     dir=path.parent)
     try:
         os.fchmod(fd, mode)
         with os.fdopen(fd, "wb") as stream:
@@ -426,6 +427,11 @@ def validate_canary_start_env(values: dict[str, Optional[str]]) -> list[str]:
 
 
 BACKUP_SUFFIX = ".canary-backup"
+#: ⛔ 원자적 write 의 임시 파일에 **고정 접미사**를 붙인다. 그 temp 는 대상 env 파일의 내용
+#: (= 운영 secret 전체)을 담는데, 이름이 `..env.<random>` 이면 `.gitignore` 가 못 잡아
+#: `os.replace` 전에 프로세스가 죽는 순간 **`git add -A` 대상**이 된다.
+#: 접미사를 고정해 두면 대상 파일 이름이 무엇이든 **한 규칙**(`*.canary-tmp`)으로 덮인다.
+TEMP_SUFFIX = ".canary-tmp"
 
 
 def backup_path_for(env_path: Path) -> Path:
@@ -449,9 +455,10 @@ def create_env_backup(env_path: Path) -> Path:
     # ⛔ `exists()` 뒤 `os.replace()`는 TOCTOU다. 두 실행이 동시에 absence를 본 뒤 둘 다
     # backup을 덮을 수 있고, 늦은 쪽은 이미 활성화된 env를 "원본"으로 저장할 수 있다.
     # 완전히 fsync한 임시 inode를 hard-link로 게시하면 목적지가 이미 있을 때 원자적으로 실패한다.
-    # temp도 `.env.canary-backup*` gitignore 범위 안에 둔다. link 게시 뒤 프로세스가 죽어
+    # temp도 `*.canary-backup*` gitignore 범위 안에 둔다. link 게시 뒤 프로세스가 죽어
     # unlink를 못 해도 secret-bearing temp가 `git status`에 나타나지 않아야 한다.
-    fd, temporary = tempfile.mkstemp(prefix=f"{backup.name}.", dir=backup.parent)
+    fd, temporary = tempfile.mkstemp(prefix=f"{backup.name}.", suffix=TEMP_SUFFIX,
+                                     dir=backup.parent)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as stream:

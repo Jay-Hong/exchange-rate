@@ -1756,9 +1756,11 @@ def test_restore_verifies_bytes_before_discarding_the_backup(tmp_path, monkeypat
 @pytest.mark.parametrize("name", [
     ".env.canary-backup",
     ".env.canary-backup.tmp",
+    ".env.canary-backup.x8n2kq4z",           # tempfile.mkstemp 의 실제 random suffix
     ".env.rehearsal.canary-backup",          # 리허설 env 이름을 따라간다
     ".env.prod.canary-backup",               # `--env-file .env.prod` 를 쓰는 경우
     ".env.prod.canary-backup.tmp",
+    ".env.prod.canary-backup.x8n2kq4z",
 ])
 def test_every_canary_backup_shape_is_gitignored(name):
     """⛔ backup 은 **원본 env 전체 사본**이라 운영 secret 을 담는다 — `git add -A` 로 커밋되면
@@ -1792,3 +1794,44 @@ def test_recover_without_a_backup_fails_instead_of_claiming_success(tmp_path, ca
     assert "backup" in reported.get("error", ""), \
         f"실패 이유가 '복원할 backup 없음'이 아니다: {reported}"
     assert env.read_text() == before, "복원할 것도 없는데 env 를 건드렸다"
+
+
+def _is_gitignored(name: str) -> bool:
+    import subprocess
+    return subprocess.run(["git", "check-ignore", "-q", name],
+                          cwd=mon.REPO_ROOT, capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("env_name", [".env", ".env.prod", ".env.rehearsal"])
+def test_atomic_write_temp_names_are_gitignored_by_construction(tmp_path, monkeypatch, env_name):
+    """⛔ **원자적 write 의 임시 파일이 secret 을 담는다.** 대상 env 전체 사본이라 backup 과
+    같은 내용인데, 이름이 `..env.<random>` 이라 `.env` 규칙에도 `*.canary-backup*` 에도 걸리지
+    않았다(실측) — `os.replace` 전에 죽으면 `git add -A` 대상이 된다.
+
+    ⚠️ **규칙과 코드를 따로 검사하면 이번 누락이 반복된다.** 코드가 *실제로 만드는 이름*을
+    받아 그 이름으로 `git check-ignore` 를 돌린다."""
+    captured: list[str] = []
+    real_mkstemp = mon.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        captured.append(Path(path).name)
+        return fd, path
+
+    monkeypatch.setattr(mon.tempfile, "mkstemp", recording_mkstemp)
+
+    target = tmp_path / env_name
+    target.write_text("SECRET=value\n")
+    mon.atomic_write_bytes(target, b"SECRET=other\n")
+    mon.create_env_backup(target)
+
+    assert len(captured) == 2, "임시 파일 이름을 잡지 못했다"
+    for name in captured:
+        assert _is_gitignored(name), f"임시 파일이 gitignore 되지 않는다: {name}"
+
+
+def test_temp_suffix_constant_matches_the_ignore_rule():
+    """⚠️ 접미사를 바꾸면 `.gitignore` 도 함께 바꿔야 한다 — 그 결합을 여기서 드러낸다."""
+    rules = (mon.REPO_ROOT / ".gitignore").read_text().splitlines()
+    assert f"*{mon.TEMP_SUFFIX}" in rules, \
+        f"{mon.TEMP_SUFFIX} 를 덮는 gitignore 규칙이 없다"
