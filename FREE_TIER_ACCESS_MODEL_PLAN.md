@@ -937,9 +937,46 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       (2) `verify_admin` 이 값 부재 시 **`admin1234` 로 폴백**한다(`app/main.py`).
       ⚠️ 지금은 `ADMIN_PASSWORD` 가 설정돼 있어 **즉시 노출은 아니다** — 그러나 env 가 어떤
       이유로든 빠지면 admin endpoint 가 **조용히 기본 비밀번호를 받는다**(fail-closed 아님).
-      → 사용자 승인 후 `ENV=production` 전환: **`ADMIN_PASSWORD` 존재 사전 확인** →
-        force-recreate → health · admin endpoint · **JSON stdout** · legacy WS · ERROR 0 smoke.
+      → 사용자 승인 후 `ENV=production` 전환. ⛔ **수동 `sed` 로 하지 않는다** — 실행기는
+        `scripts/env_flip.py`(테스트 `tests/test_env_flip.py`)다.
       ⚠️ 로그가 JSON 으로 바뀌면 canary 의 로그 발췌는 JSON 분기를 타게 된다(양쪽 다 지원).
+
+      **왜 스크립트인가** — 한때 이 작업을 `sed -i` + `.env.pre-envprod.<ts>` backup 으로
+      제안했는데 **이 세션에서 닫은 결함을 되살리는 절차**였다:
+      · `sed` 는 fsync 가 없고, **0-match 를 성공처럼 통과**시키며, 중복 키를 전부 바꾼다.
+      · `.env.pre-*` 는 **`.gitignore` 에 걸리지 않는다**(`git check-ignore` 실측) —
+        `.gitignore:30` 의 `.env` 는 정확히 그 이름만 잡는다.
+      · 수동 절차엔 signal 처리가 없어 **SSH 끊김(SIGHUP)에 복원이 한 줄도 돌지 않는다**.
+
+      **실측으로 드러난 것들**(코드 확인 완료):
+      · 컨테이너의 `ENV` 는 `env_file` 이 아니라 `environment: - ENV=${ENV:-production}`
+        (`docker-compose.yml`)에서 온다. interpolation 은 **셸 변수가 `--env-file` 을 이긴다**
+        → 파일 검증이 all-green 인데 컨테이너는 안 바뀌는 경로. 거부 목록은 하드코딩하지 않고
+        **compose 파일에서 뽑는다**(변수 추가와 동시에 보호). `PRODUCTION_TARGET` 은 `-p`·`-f`
+        를 붙이지 않으므로 `COMPOSE_FILE`·`COMPOSE_PROJECT_NAME`·`DOCKER_HOST` 도 거부한다.
+      · **admin 200/401 은 ENV 를 증명하지 않는다** — `verify_admin` 은 `ADMIN_PASSWORD` 가
+        있으면 ENV 를 아예 읽지 않는다(`app/main.py`). 회귀 검사일 뿐이고, ENV 증명은
+        `inspect` 의 생성 시점 env · exec 프로세스 env · **기동 로그 JSON 의 `env` 필드** 셋이 한다.
+      · `parse_curl_response` 는 **non-2xx 를 전부 같은 예외**로 접어 401(정상 거부)과
+        503(`ADMIN_PASSWORD` 미전달 = 이 전환의 최악)을 구분하지 못한다 → 상태코드만 내는
+        별도 probe 를 쓴다.
+      · "모든 줄이 JSON" 요구는 **false red** 다(uvicorn 은 `--log-config` 없이 평문을 낸다).
+        python-json-logger 는 `ensure_ascii` 라 한국어가 escape 되어 **원문 grep 도 뒤집힌다**
+        → 줄 단위 JSON 파싱으로 판정한다.
+      · `error.log` 는 10MB 회전(backupCount 3)이라 size 만으로는 회전을 못 본다 →
+        **inode + size** baseline, 회전 감지 시 **fail-closed**(자동으로 "ERROR 0" 이라 하지 않는다).
+
+      **정리 계약**(테스트가 잠근다): write **전** 실패 → 원본 그대로 + backup 없음 +
+      **재생성 없음**(`EnvRestorer.restore()` 에 no-op 분기가 없어 부르면 헛되이 재생성한다) /
+      write **후** 실패 → 원본 바이트 복원 + backup 제거 / 복원까지 실패 → **backup 보존**(수동 복구) /
+      성공 → 변경 유지 + backup unlink + **디렉터리 fsync 까지가 commit point**.
+      ⛔ `finally: restore()` 를 두지 않는다 — 성공 뒤 호출되면 backup 이 없어 **성공이 예외로** 끝난다.
+
+      ⚠️ **별건(운영 위생)**: 운영 리포에 `.env.bak*` **10개**가 있었고 전부 **mode 664
+      (world-readable)** 에 `git check-ignore` 미적용이라 `git add -A` 한 번이면 스테이징됐다.
+      즉시 위험은 `/.env.bak*` 를 **`.git/info/exclude`**(추적되지 않는 로컬 파일이라 트리를
+      dirty 하게 만들지 않는다)에 넣어 닫았다. 파일 이동·권한 조정과 추적되는 `.gitignore`
+      보강은 **별도 작업**이다. 현 `.env` 자체도 664 다.
 
     · **로컬 격리 스택에서만** 한다 — `docker-compose.rehearsal.yml`(loopback `127.0.0.1:18000`
       publish + 별도 container_name + 별도 named volume). 기본 compose와 병합하지 않는
