@@ -14,6 +14,8 @@ import logging
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from starlette.websockets import WebSocketDisconnect
+
 from app import auth_executor
 
 
@@ -46,7 +48,10 @@ class _ClosedDuringSnapshot:
         kind = message.get("type") if isinstance(message, dict) else "?"
         if kind == "snapshot":
             self._closed = True
-            raise RuntimeError("connection closed during snapshot")   # ConnectionClosedOK 대역
+            # ⚠️ **실제 starlette 가 쓰는 예외**여야 한다 — 일반 RuntimeError 로 두면
+            #    `except Exception` 회귀를 이 테스트가 못 잡는다(운영 traceback 실측:
+            #    `starlette.websockets.WebSocketDisconnect`).
+            raise WebSocketDisconnect(code=1006)
         self.sent_types.append(kind)
 
     async def receive_text(self):
@@ -121,3 +126,76 @@ class TestInitialSnapshotCloseSignal(unittest.IsolatedAsyncioTestCase):
         source = __import__("inspect").getsource(app_main.websocket_endpoint)
         self.assertIn("InitialSnapshotConnectionClosed", source,
                       "endpoint 가 이 신호를 처리하지 않는다")
+
+    async def test_serialization_error_is_not_folded_into_a_normal_close(self):
+        """⛔ **`except Exception` 이면 진짜 결함이 조용해진다.** JSON 직렬화 `TypeError` 같은
+        프로그래밍 오류까지 "정상 종료"로 접히면 INFO 로 사라져 아무도 못 본다 — 전송 단절만
+        신호로 바꾸고 나머지는 **fail-loud** 여야 한다."""
+        websocket = _ClosedDuringSnapshot()
+
+        async def bad_send(message):
+            if isinstance(message, dict) and message.get("type") == "snapshot":
+                raise TypeError("Object of type set is not JSON serializable")
+            websocket.sent_types.append(message.get("type"))
+
+        websocket.send_json = bad_send
+
+        with self.assertLogs("exchange_rate", level=logging.INFO) as captured:
+            await asyncio.wait_for(self._run_endpoint(websocket), timeout=10)
+
+        errors = [r for r in captured.records if r.levelno >= logging.ERROR]
+        self.assertTrue(errors, "직렬화 오류가 정상 종료로 접혀 조용히 사라졌다")
+        self.assertFalse(
+            any("initial snapshot 중 연결 종료" in r.getMessage() for r in captured.records),
+            "직렬화 오류를 연결 종료 신호로 오분류했다",
+        )
+
+
+class _ClosedDuringInitialPayload:
+    """**legacy 초기 rates 전송**에서 끊긴 소켓 — topic 경로와 같은 결함이 여기에도 있었다."""
+
+    def __init__(self):
+        self.headers = {"x-real-ip": "203.0.113.7"}
+        self.receive_calls = 0
+        self._closed = False
+
+    async def accept(self):
+        return None
+
+    async def send_json(self, message):
+        self._closed = True
+        raise WebSocketDisconnect(code=1006)
+
+    async def receive_text(self):
+        self.receive_calls += 1
+        raise RuntimeError('WebSocket is not connected. Need to call "accept" first.')
+
+    async def close(self, code=1000):
+        self._closed = True
+
+
+class TestLegacyInitialPayloadClose(unittest.IsolatedAsyncioTestCase):
+    """⛔ 같은 제어흐름 결함이 **topic 이전 단계**에도 있었다: 초기 rates 전송 실패를 잡고
+    그대로 진행해 `receive_text()` 루프로 들어갔다."""
+
+    async def asyncSetUp(self):
+        topic_dispatcher.registry._subscriptions.clear()
+        app_main.manager.active_connections.clear()
+
+    async def test_disconnect_during_initial_payload_does_not_reenter_receive(self):
+        websocket = _ClosedDuringInitialPayload()
+
+        with patch.object(app_main, "redis_cache",
+                          MagicMock(get=AsyncMock(return_value=None), set=AsyncMock())), \
+             patch.object(app_main, "build_rates_payload",
+                          return_value={"type": "rates", "data": {"rates": []}}), \
+             patch.object(app_main, "SessionLocal", MagicMock()), \
+             self.assertLogs("exchange_rate", level=logging.INFO) as captured:
+            await asyncio.wait_for(app_main.websocket_endpoint(websocket), timeout=10)
+
+        self.assertEqual(websocket.receive_calls, 0,
+                         "초기 전송 중 끊겼는데 닫힌 소켓을 다시 읽었다")
+        errors = [r for r in captured.records if r.levelno >= logging.ERROR]
+        self.assertEqual(errors, [], f"정상 종료인데 ERROR: {[r.message for r in errors]}")
+        self.assertNotIn(websocket, app_main.manager.active_connections,
+                         "정리 범위를 건너뛰어 manager gauge 가 남았다")

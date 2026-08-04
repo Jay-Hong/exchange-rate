@@ -37,6 +37,8 @@ timestamp-merge 계약(구값으로 신값 덮지 않기, V2 client guide 항목
 import asyncio
 import logging
 
+from starlette.websockets import WebSocketDisconnect
+
 from app.topic_wire import InitialSnapshotConnectionClosed
 from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
@@ -296,12 +298,16 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
         try:
             await websocket.send_json(payload)
             sent += 1
-        except Exception as exc:
+        except WebSocketDisconnect as exc:
             # ⛔ **삼키고 반환하지 않는다.** 여기서 정상 반환하면 endpoint 의 `while True` 가
             #    **닫힌 소켓에 `receive_text()` 를 다시 호출**해 `RuntimeError` → `except
             #    Exception` → **ERROR + traceback** 이 된다. 정상적인 클라 종료가 ERROR 채널을
             #    오염시키고, 운영 canary 가 실제로 그 때문에 중단됐다.
             #    → **연결 제어 신호로 전파**한다(endpoint 가 정상 종료 축으로 처리, INFO 1건).
+            # ⛔ **`except Exception` 이면 안 된다.** 그러면 JSON 직렬화 `TypeError` 같은
+            #    프로그래밍 오류까지 "정상 종료"로 접혀 INFO 로 사라진다 — 진짜 결함이 조용해진다.
+            #    starlette 는 실제 전송 단절에 `WebSocketDisconnect` 를 쓴다(운영 traceback 로
+            #    확인: `starlette.websockets.WebSocketDisconnect`). 그것만 신호로 바꾼다.
             from app.topic_dispatcher import registry
 
             registry.remove_websocket(websocket)

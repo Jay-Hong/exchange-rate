@@ -1865,7 +1865,7 @@ def test_each_poll_is_persisted_before_the_verdict(tmp_path):
         poll_interval=0.001, artifact=artifact, emit=lambda _: None))
 
     records = [json.loads(line) for line in artifact.path.read_text().splitlines()]
-    polls = [r for r in records if r["kind"] == "poll"]
+    polls = [r for r in records if r["kind"] == "snapshot"]
     assert len(polls) == 2, "중단을 유발한 poll 의 관측이 사라졌다"
     assert polls[0]["auth_metrics"]["queue_wait_ms_max"] == 12.5, "지표 본문이 남지 않았다"
     assert polls[1]["auth_metrics"]["count"] == 7
@@ -1973,3 +1973,93 @@ def test_artifact_creation_failure_aborts_before_any_env_change(monkeypatch, tmp
         f"실패 이유가 '산출물 생성 실패' 가 아니다: {reported}"
     assert started == [], "산출물 실패인데 부하를 띄웠다"
     assert env.read_text() == before and not mon.backup_path_for(env).exists()
+
+
+def test_final_snapshot_is_persisted_too(tmp_path):
+    """⛔ **정상 종료 직전 관측도 파일에 남아야 한다.** 한때 판정에만 쓰고 버려서 마지막 순간의
+    W peak·ERROR 가 유실됐다(실측: collect 2회인데 artifact 1건)."""
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    first_poll_done = asyncio.Event()
+
+    class _ExitAfterFirstPoll(_FakeLoad):
+        async def wait(self):
+            await first_poll_done.wait()
+            self.alive = False
+            return 0
+
+    class _Collector(_Harness):
+        async def collect(self):
+            await asyncio.sleep(0)
+            if not first_poll_done.is_set():
+                first_poll_done.set()
+                return mon.Snapshot(auth_metrics={"count": 1})
+            return mon.Snapshot(auth_metrics={"count": 99})      # 마지막 순간의 값
+
+    harness = _Collector([])
+    _run(mon.run_monitored_canary(
+        collect=harness.collect, load=_ExitAfterFirstPoll(), rollback=harness.rollback,
+        poll_interval=0.001, artifact=artifact, emit=lambda _: None))
+
+    snaps = [json.loads(l) for l in artifact.path.read_text().splitlines()
+             if json.loads(l)["kind"] == "snapshot"]
+    phases = [s["phase"] for s in snaps]
+    assert "final" in phases, f"정상 종료 직전 관측이 남지 않았다: {phases}"
+    assert any(s["auth_metrics"].get("count") == 99 for s in snaps), \
+        "마지막 순간의 지표가 유실됐다"
+
+
+def test_final_collect_failure_is_recorded_with_its_phase(tmp_path):
+    """⚠️ 순서를 **이벤트로 고정**한다 — `alive` 플래그 타이밍에 기대면 부하에서 폴링 collect 가
+    먼저 실패해 `phase="poll"` 로 잡힌다(이 세션에서 반복된 형태)."""
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    first_poll_done = asyncio.Event()
+
+    class _ExitAfterFirstPoll(_FakeLoad):
+        async def wait(self):
+            await first_poll_done.wait()
+            self.alive = False
+            return 0
+
+    load = _ExitAfterFirstPoll()
+
+    class _FailFinal(_Harness):
+        async def collect(self):
+            await asyncio.sleep(0)
+            if first_poll_done.is_set():          # = 정상 종료 직후의 **최종** 수집
+                raise mon.CollectorError("401")
+            first_poll_done.set()
+            return mon.Snapshot()
+
+    harness = _FailFinal([])
+    _run(mon.run_monitored_canary(
+        collect=harness.collect, load=load, rollback=harness.rollback,
+        poll_interval=0.001, artifact=artifact, emit=lambda _: None))
+
+    errs = [json.loads(l) for l in artifact.path.read_text().splitlines()
+            if json.loads(l)["kind"] == "collect_error"]
+    assert errs and errs[-1]["phase"] == "final", f"final 수집 실패가 구분되지 않았다: {errs}"
+
+
+def test_log_excerpt_is_bounded_and_masked():
+    """⛔ 산출물은 사후에 공유된다 — 로그 원문에 섞인 UID·토큰이 들어가면 안 된다.
+    ⚠️ 줄 수만 세면 rollback 뒤 원인을 재구성할 수 없다(구 컨테이너 로그는 사라진다)."""
+    uid = "44KL6exFHkf1DXTuQn1hRQ6uI8Y2"
+    logs = "\n".join(
+        [json.dumps({"level": "ERROR", "logger": "exchange_rate.main", "function": "f",
+                     "line": 1, "message": f"실패 uid={uid}", "exc_info": "Traceback ..."})]
+        + [f"raw ERROR line token={uid}"] * 30)
+
+    excerpt = mon.sanitize_log_lines(logs)
+    body = json.dumps(excerpt, ensure_ascii=False)
+    assert len(excerpt) <= mon.MAX_LOG_EXCERPT, "발췌가 유계가 아니다"
+    assert uid not in body, "UID 가 산출물로 새어 나갔다"
+    assert "exc_info" not in body, "traceback 원문이 그대로 실렸다"
+    assert excerpt[0]["logger"] == "exchange_rate.main", "원인 재구성에 필요한 구조가 없다"
+
+
+@pytest.mark.parametrize("name", [
+    ".env.20260805T001122.canary-metrics.jsonl",
+    ".env.prod.20260805T001122.canary-metrics.jsonl",
+])
+def test_metrics_artifact_is_gitignored(name):
+    assert _is_gitignored(name), f"{name} 이 gitignore 되지 않는다"

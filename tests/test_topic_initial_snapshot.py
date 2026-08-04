@@ -337,7 +337,8 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_failure_removes_ws_and_aborts_remaining(self):
         ws = MagicMock()
-        ws.send_json = AsyncMock(side_effect=Exception("send boom"))
+        from starlette.websockets import WebSocketDisconnect as _WSD
+        ws.send_json = AsyncMock(side_effect=_WSD(code=1006))
         topic_dispatcher.registry.register(ws, ["fx:usd-krw", "usdt:krw"])
 
         def fake_build(topic):

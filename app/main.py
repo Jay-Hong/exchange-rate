@@ -995,6 +995,11 @@ async def websocket_endpoint(websocket: WebSocket):
     """실시간 환율 데이터 스트리밍"""
     await manager.connect(websocket)
     
+    # ⛔ 초기 전송 중 정상 disconnect 면 **수신 루프에 들어가지 않는다** — 들어가면 닫힌 소켓을
+    #    다시 읽어 ERROR 가 난다(topic 경로에서 실제로 겪은 것과 **같은 결함**이 여기에도 있었다).
+    #    ⚠️ 여기서 곧장 raise 하면 아래 `finally` 의 registry·manager 정리를 건너뛴다 —
+    #    두 블록이 분리돼 있어서다. 그래서 **플래그로 넘긴다**(정리 범위 보존 + 재읽기 차단).
+    initial_send_closed = False
     db = SessionLocal()
     try:
         cached_json = await redis_cache.get(BROADCAST_CACHE_KEY)
@@ -1021,6 +1026,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
             logger.info("📨 DB 폴백으로 초기 데이터 전송", extra={"rate_count": len(initial_payload["data"]["rates"] )})
 
+    except WebSocketDisconnect:
+        initial_send_closed = True          # 정상 종료 — ERROR 가 아니다
     except Exception:
         logger.error("❌ 초기 데이터 전송 오류", exc_info=True)
     finally:
@@ -1031,8 +1038,12 @@ async def websocket_endpoint(websocket: WebSocket):
     connection_identity = topic_wire.ConnectionIdentity()
 
     try:
+        # ⛔ 닫힌 소켓에 `receive_text()` 를 부르지 않는다 — 그 호출이 ERROR 를 만든다.
+        #    아래 `finally` 가 registry·manager 정리를 그대로 수행한다.
+        if initial_send_closed:
+            logger.info("🔌 초기 데이터 전송 중 연결 종료")
         # 연결 유지 (클라이언트로부터 메시지 대기)
-        while True:
+        while not initial_send_closed:
             data = await websocket.receive_text()
             await topic_dispatcher.handle_client_message(
                 websocket, data,

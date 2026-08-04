@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -185,12 +186,45 @@ class Snapshot:
     injected_health_failure: bool = False
     container_started_at: Optional[str] = None
     matching_log_line_count: int = 0
+    log_excerpt: list = field(default_factory=list)
     broadcast_age_seconds: Optional[float] = 0.0
     auth_running: bool = True
     probe_enabled: bool = True
     probe_running: bool = True
     auth_metrics: dict = field(default_factory=dict)
     probe: dict = field(default_factory=dict)
+
+
+MAX_LOG_EXCERPT = 10
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{20,}")
+
+
+def sanitize_log_lines(logs: str, limit: int = MAX_LOG_EXCERPT) -> list:
+    """중단 원인을 사후에 재구성할 수 있게 **최소한만** 남긴다.
+
+    ⛔ **로그 원문을 그대로 저장하지 않는다.** 산출물은 사후에 공유·보관되는데 로그에는 UID·
+    토큰·경로가 섞인다. JSON 로그는 구조 필드만 뽑고(`exc_info`·`extra` 제외), 그 외 줄은
+    **20자 이상 연속 토큰을 마스킹**한 접두만 남긴다.
+    ⚠️ 줄 수만 세면(그게 전부였다) rollback 뒤 원인을 다시 못 맞춘다 — 컨테이너가 재생성되면
+    구 로그는 `docker compose logs` 에서 사라진다(실측).
+    """
+    picked = []
+    for line in logs.splitlines():
+        if "ERROR" not in line and "Traceback" not in line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except (TypeError, ValueError):
+            picked.append({"raw": _LONG_TOKEN.sub("***", line)[:120]})
+        else:
+            picked.append({
+                "level": parsed.get("level"), "logger": parsed.get("logger"),
+                "function": parsed.get("function"), "line": parsed.get("line"),
+                "message": _LONG_TOKEN.sub("***", str(parsed.get("message", "")))[:120],
+            })
+        if len(picked) >= limit:
+            break
+    return picked
 
 
 def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional[str],
@@ -252,6 +286,7 @@ async def collect_from_server(*, timeout: Optional[float] = None,
         container_started_at=started or None,
         matching_log_line_count=sum(1 for line in logs.splitlines()
                                     if "ERROR" in line or "Traceback" in line),
+        log_excerpt=sanitize_log_lines(logs),
         broadcast_age_seconds=float(age) if isinstance(age, (int, float)) else None,
         auth_running=auth.get("running") is True,
         probe_enabled=probe.get("enabled") is True,
@@ -721,6 +756,30 @@ class CanaryOutcome:
         return not (self.aborted or self.cleanup_errors or self.load_alive_after_cleanup)
 
 
+def _record(artifact: Optional["MetricsArtifact"], snapshot: "Snapshot",
+            poll: int, elapsed: float, phase: str) -> None:
+    """poll 관측을 **한 곳에서** 남긴다.
+
+    ⛔ 일반 poll 과 **정상 종료 직전 final** 을 각각 따로 적으면 한쪽이 빠진다 — 실제로 final
+    이 빠져 마지막 순간의 관측이 유실됐다. 그래서 호출 지점을 둘로 두되 **본문은 하나**다.
+    """
+    if artifact is None:
+        return
+    artifact.append("snapshot", {
+        "phase": phase, "poll": poll, "elapsed_s": round(elapsed, 3),
+        "health_ok": snapshot.health_ok,
+        "container_started_at": snapshot.container_started_at,
+        "matching_log_line_count": snapshot.matching_log_line_count,
+        "log_excerpt": snapshot.log_excerpt,
+        "broadcast_age_seconds": snapshot.broadcast_age_seconds,
+        "auth_running": snapshot.auth_running,
+        "probe_enabled": snapshot.probe_enabled,
+        "probe_running": snapshot.probe_running,
+        "auth_metrics": snapshot.auth_metrics,
+        "probe_metrics": snapshot.probe,
+    })
+
+
 async def run_monitored_canary(
     *,
     collect: Callable[[], Awaitable[Snapshot]],
@@ -768,9 +827,18 @@ async def run_monitored_canary(
                         try:
                             snapshot = await collect()
                         except Exception as exc:              # noqa: BLE001 — fail-closed
+                            if artifact is not None:
+                                artifact.append("collect_error",
+                                                {"phase": "final",
+                                                 "error": f"{type(exc).__name__}: {exc}"})
                             reasons.append(f"최종 지표 수집 실패({type(exc).__name__}): {exc}")
                         else:
                             polls += 1
+                            # ⛔ **정상 종료 직전 관측도 파일에 남긴다.** 한때 판정에만 쓰고
+                            #    버려서, 마지막 순간의 W peak·ERROR 가 다시 유실됐다
+                            #    (실측: collect 2회인데 artifact poll 1건).
+                            _record(artifact, snapshot, polls,
+                                    clock() - started_at, "final")
                             reasons = evaluate_snapshot_abort(
                                 snapshot, baseline_started_at=baseline_started_at,
                                 previous_probe_outstanding=previous_outstanding,
@@ -781,24 +849,11 @@ async def run_monitored_canary(
             except Exception as exc:                          # noqa: BLE001 — fail-closed
                 if artifact is not None:
                     artifact.append("collect_error",
-                                    {"error": f"{type(exc).__name__}: {exc}"})
+                                    {"phase": "poll", "error": f"{type(exc).__name__}: {exc}"})
                 reasons.append(f"지표 수집 실패({type(exc).__name__}): {exc}")
                 break
             polls += 1
-            if artifact is not None:
-                # ⛔ **판정 전에** 기록한다 — 중단으로 빠져나가도 그 poll 의 관측은 남아야 한다.
-                artifact.append("poll", {
-                    "poll": polls, "elapsed_s": round(clock() - started_at, 3),
-                    "health_ok": snapshot.health_ok,
-                    "container_started_at": snapshot.container_started_at,
-                    "matching_log_line_count": snapshot.matching_log_line_count,
-                    "broadcast_age_seconds": snapshot.broadcast_age_seconds,
-                    "auth_running": snapshot.auth_running,
-                    "probe_enabled": snapshot.probe_enabled,
-                    "probe_running": snapshot.probe_running,
-                    "auth_metrics": snapshot.auth_metrics,
-                    "probe_metrics": snapshot.probe,
-                })
+            _record(artifact, snapshot, polls, clock() - started_at, "poll")
             reasons = evaluate_snapshot_abort(
                 snapshot, baseline_started_at=baseline_started_at,
                 previous_probe_outstanding=previous_outstanding,
