@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -935,10 +936,62 @@ async def _amain(args) -> int:
     return 0 if succeeded else 1
 
 
+#: ⛔ SSH 세션이 끊기면 **SIGHUP** 이 온다. 기본 동작은 *프로세스 즉시 종료* 라 Python 의
+#: `finally` 가 **한 줄도 돌지 않는다** — 그러면 `.env` 에 `TOPIC_DISPATCHER_ENABLED=true` 가
+#: 남고 컨테이너도 켜진 채로 있는다. 7분 창을 일반 SSH 로 돌리면 충분히 현실적인 경로다.
+#: (`KeyboardInterrupt` 만 잡던 시절엔 Ctrl-C 만 안전했다.)
+CANCEL_ON_SIGNALS = tuple(
+    sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None))
+    if sig is not None
+)
+
+
+def make_signal_canceller(task: "asyncio.Future", received: dict) -> Callable[[int], None]:
+    """첫 signal 만 취소로 바꾼다.
+
+    ⛔ **두 번째 이후는 무시해야 한다.** cleanup 은 이미 취소된 task 의 `finally` 안에서
+    `await` 하는데, 거기서 다시 취소가 오면 그 await 가 끊겨 **rollback 이 중간에 죽는다** —
+    즉 flag 를 되돌리려던 바로 그 경로가 사라진다.
+    """
+    def _handle(signum: int) -> None:
+        if received.get("signum") is not None:
+            return                                   # 반복 signal 은 cleanup 을 건드리지 않는다
+        received["signum"] = signum
+        task.cancel()
+    return _handle
+
+
+async def _amain_with_signals(args) -> int:
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(_amain(args))
+    received: dict = {"signum": None}
+    handler = make_signal_canceller(task, received)
+    installed = []
+    for signum in CANCEL_ON_SIGNALS:
+        try:
+            loop.add_signal_handler(signum, handler, signum)
+            installed.append(signum)
+        except (NotImplementedError, RuntimeError):   # 일부 플랫폼/루프는 미지원
+            pass
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if received["signum"] is None:
+            raise                                    # 우리가 보낸 취소가 아니다
+        print(f"[SIGNAL] {received['signum']} — cleanup 완료 후 종료", file=sys.stderr)
+        return 128 + received["signum"]
+    finally:
+        for signum in installed:
+            try:
+                loop.remove_signal_handler(signum)
+            except Exception:                        # noqa: BLE001 — 종료 경로를 막지 않는다
+                pass
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     try:
-        return asyncio.run(_amain(args))
+        return asyncio.run(_amain_with_signals(args))
     except KeyboardInterrupt:
         # ⚠️ 취소는 `run_monitored_canary` 의 `finally` 를 통과하므로 rollback 은 이미 돌았다.
         print("[INTERRUPTED] cleanup 완료 후 종료", file=sys.stderr)

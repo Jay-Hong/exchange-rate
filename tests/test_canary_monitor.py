@@ -1347,19 +1347,31 @@ def test_amain_applies_the_command_timeout_before_touching_env(monkeypatch, tmp_
 
 
 def test_final_snapshot_failure_is_not_folded_into_success():
-    """⛔ **마지막 순간의 fail-open.** 정상 종료를 받아들이기 직전 최종 수집이 실패했는데 그걸
-    삼키면, canary 는 **끝 상태를 읽지 못한 채** 성공을 보고한다 — 그 창이 하필 종료 직전
-    장애가 생기는 구간이다(실측: 이 경로가 변이에서 SURVIVED 였다)."""
-    load = _FakeLoad(seconds=0.02, exit_code=0)
+    """⛔ **마지막 순간의 fail-open 방지.** 정상 종료를 받아들이기 직전 최종 수집이 실패했는데
+    그걸 삼키면, canary 는 **끝 상태를 읽지 못한 채** 성공을 보고한다 — 하필 종료 직전 장애가
+    생기는 구간이다. (프로덕션은 이미 fail-closed 였고, 비어 있던 것은 **이 분기의 테스트**다.)
+
+    ⚠️ 순서를 **이벤트로 고정**한다. 한때 `_FakeLoad(seconds=0.02)` 의 타이밍에 기댔는데,
+    `wait()` 가 반환 **전에** `alive=False` 로 만들어 `wait_task.done()` 이 아직 False 인 창이
+    생겼다 — 그 창에 폴링 collect 가 먼저 실패해 **다른 경로**를 짚었다(isolation 통과·전체
+    실행 실패의 전형적 부하 의존 flake)."""
+    first_poll_done = asyncio.Event()
+
+    class _ExitAfterFirstPoll(_FakeLoad):
+        async def wait(self):
+            await first_poll_done.wait()          # 첫 poll 이 끝난 뒤에만 종료한다
+            self.alive = False
+            return 0
 
     class _FailOnFinalCollect(_Harness):
         async def collect(self):
             await asyncio.sleep(0)
-            # ⚠️ 폴링 구간이 아니라 **정상 종료 직후의 최종 수집**만 실패시켜야 이 경로를 짚는다.
-            if not load.is_alive():
+            if first_poll_done.is_set():          # = 정상 종료 직후의 **최종** 수집
                 raise mon.CollectorError("401")
+            first_poll_done.set()
             return mon.Snapshot()
 
+    load = _ExitAfterFirstPoll()
     harness = _FailOnFinalCollect([])
     outcome = _run(mon.run_monitored_canary(
         collect=harness.collect, load=load, rollback=harness.rollback,
@@ -1368,3 +1380,83 @@ def test_final_snapshot_failure_is_not_folded_into_success():
     assert outcome.aborted, "최종 수집 실패인데 성공으로 보고했다"
     assert any("최종 지표 수집 실패" in r for r in outcome.reasons), outcome.reasons
     assert not outcome.ok and "rollback" in harness.calls
+
+
+# ── SSH 단절(SIGHUP)·SIGTERM 에서도 rollback 이 도는가 ──────────────────────
+
+
+def test_repeated_signals_do_not_cancel_the_cleanup():
+    """⛔ **두 번째 취소가 rollback 을 끊는다.** cleanup 은 이미 취소된 task 의 `finally` 안에서
+    `await` 하는데, 거기로 취소가 또 오면 그 await 가 끊겨 **flag 를 되돌리는 경로가 사라진다**."""
+    cancels = []
+
+    class _Task:
+        def cancel(self):
+            cancels.append(1)
+
+    received: dict = {"signum": None}
+    handle = mon.make_signal_canceller(_Task(), received)
+    handle(15)
+    handle(1)
+    handle(15)
+    assert cancels == [1], "반복 signal 이 cleanup 을 다시 취소했다"
+    assert received["signum"] == 15, "첫 signal 이 기록되지 않았다"
+
+
+def test_sighup_and_sigterm_are_both_handled():
+    """⚠️ SSH 단절은 **SIGHUP** 이다 — SIGTERM 만 막으면 정작 그 경로가 열려 있다."""
+    import signal as _signal
+    assert _signal.SIGTERM in mon.CANCEL_ON_SIGNALS
+    assert _signal.SIGHUP in mon.CANCEL_ON_SIGNALS
+
+
+_SIGNAL_CHILD = """
+import asyncio, pathlib, sys
+sys.path.insert(0, {repo!r})
+from scripts import canary_monitor as mon
+
+marker = pathlib.Path(sys.argv[1])
+
+async def fake_amain(args):
+    # ⛔ READY 는 **handler 설치 이후**여야 한다. 설치 전에 알리면 그 창에 도착한 signal 이
+    #    기본 동작(즉시 종료)으로 처리돼, 테스트가 "cleanup 이 안 돈다"고 **잘못** 말한다.
+    #    이 coroutine 은 `add_signal_handler` 뒤 `await task` 에서 처음 스케줄된다.
+    print("READY", flush=True)
+    try:
+        await asyncio.sleep(60)
+        return 0
+    finally:
+        # ⛔ **await 가 있는 cleanup** 이어야 의미가 있다 — 취소된 task 의 finally 에서
+        #    await 가 살아 있는지가 rollback(재기동·health 확인)의 전제다.
+        await asyncio.sleep(0.05)
+        marker.write_text("cleanup-ran")
+
+mon._amain = fake_amain
+raise SystemExit(asyncio.run(mon._amain_with_signals(None)))
+"""
+
+
+@pytest.mark.parametrize("signame,expected", [("SIGTERM", 143), ("SIGHUP", 129)])
+def test_signal_lets_cleanup_finish_then_exits_nonzero(tmp_path, signame, expected):
+    """⛔ **실제 프로세스에 실제 signal 을 보낸다.** 기본 동작은 *즉시 종료* 라 Python `finally`
+    가 한 줄도 돌지 않는다 — 그러면 `.env` 의 `TOPIC_DISPATCHER_ENABLED=true` 가 남는다.
+    SSH 세션이 끊기면 SIGHUP 이 오므로 7분 창에서 충분히 현실적인 경로다."""
+    import signal as _signal
+    import subprocess
+
+    marker = tmp_path / "cleanup.txt"
+    child = subprocess.Popen(
+        [sys.executable, "-c", _SIGNAL_CHILD.format(repo=str(mon.REPO_ROOT)), str(marker)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        assert child.stdout.readline().strip() == "READY", "자식이 준비되지 않았다"
+        child.send_signal(getattr(_signal, signame))
+        code = child.wait(timeout=20)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+    assert marker.exists(), f"{signame} 에서 cleanup 이 돌지 않았다 — rollback 이 사라진다"
+    assert marker.read_text() == "cleanup-ran"
+    assert code == expected, f"종료 코드가 128+signal 이 아니다: {code}"
