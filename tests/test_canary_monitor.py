@@ -280,7 +280,7 @@ def test_collect_from_server_fills_broadcast_age(monkeypatch):
     async def fake_run(command, *, timeout=None, cwd=None):
         if command[0] == "docker" and command[1] == "inspect":
             return "2026-08-04T00:00:00Z\n"
-        if command[0] == "docker" and command[1] == "compose" and command[2] == "logs":
+        if command[0] == "docker" and command[1] == "compose" and "logs" in command:
             return "all quiet\n"
         script = command[-1]
         for path, body in responses.items():
@@ -309,7 +309,7 @@ def test_collect_counts_real_error_lines_from_logs(monkeypatch):
     async def fake_run(command, *, timeout=None, cwd=None):
         if command[0] == "docker" and command[1] == "inspect":
             return "T\n"
-        if command[0] == "docker" and command[2] == "logs":
+        if command[0] == "docker" and command[1] == "compose" and "logs" in command:
             return "line ok\nsomething ERROR here\nTraceback (most recent call last):\n"
         body = {"status": "healthy"} if "/health" in command[-1] else {
             "age_seconds": 1.0} if "heartbeat" in command[-1] else {"metrics": {}}
@@ -324,7 +324,7 @@ def test_endpoint_reported_error_is_a_collector_failure(monkeypatch):
     async def fake_run(command, *, timeout=None, cwd=None):
         if command[0] == "docker" and command[1] == "inspect":
             return "T\n"
-        if command[0] == "docker" and command[2] == "logs":
+        if command[0] == "docker" and command[1] == "compose" and "logs" in command:
             return ""
         if "/health" in command[-1]:
             return _curl({"status": "healthy"})
@@ -540,7 +540,10 @@ def _preflight_responses(**overrides):
 def _patch_preflight(monkeypatch, payloads, *, project_label="prod"):
     async def fake_run(command, *, timeout=None, cwd=None):
         if command[0] == "docker" and command[1] == "inspect":
-            return project_label + "\n"
+            return json.dumps({
+                "com.docker.compose.project": project_label,
+                "com.docker.compose.service": "fastapi",
+            }) + "\n"
         if command[-1].startswith("/admin"):
             return json.dumps(payloads[command[-1]]) + "\n200"
         return json.dumps(payloads["env"]) + "\n200"      # container_env
@@ -659,6 +662,11 @@ def _patch_amain(monkeypatch, tmp_path, *, start_error=None, preflight=None,
             raise recreate_error
 
     async def fake_run(command, *, timeout=None, cwd=None):
+        if command[0] == "docker" and command[1] == "inspect" and "Config.Labels" in command[-1]:
+            return json.dumps({
+                "com.docker.compose.project": "exchange-rate",
+                "com.docker.compose.service": "fastapi",
+            }) + "\n"
         return "STARTED_AT\n"
 
     async def fake_preflight(target=None, **kw):
@@ -726,6 +734,11 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
 
     async def fake_run(command, *, timeout=None, cwd=None):
         events.append("inspect")
+        if "Config.Labels" in command[-1]:
+            return json.dumps({
+                "com.docker.compose.project": "exchange-rate",
+                "com.docker.compose.service": "fastapi",
+            }) + "\n"
         return "AFTER_RECREATE\n"
 
     async def fake_start(**kwargs):
@@ -749,7 +762,8 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
     monkeypatch.setattr(mon, "atomic_write_text", fake_atomic_write)
 
     assert _run(mon._amain(_AmainArgs(env))) == 0
-    assert events.index("recreate") < events.index("inspect") < events.index("start")
+    started_at_inspect = [i for i, event in enumerate(events) if event == "inspect"][1]
+    assert events.index("recreate") < started_at_inspect < events.index("start")
     assert ("baseline", "AFTER_RECREATE") in events
     assert len(writes) == 2, "활성화와 복원 중 하나가 원자적 write 경로를 우회했다"
     assert "TOPIC_DISPATCHER_ENABLED=true" in writes[0]
@@ -781,6 +795,35 @@ def test_token_failure_happens_before_any_env_mutation(monkeypatch, tmp_path):
     assert env.read_text() == before, "토큰 실패인데 env 가 변경됐다"
 
 
+def test_target_mismatch_happens_before_any_env_mutation_or_recreate(monkeypatch, tmp_path):
+    """helper만 검사하지 않는다. `_amain`이 target 확인을 빼거나 env 변경 뒤로 옮기면 red다."""
+    env = tmp_path / ".env.rehearsal"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    before = env.read_bytes()
+    calls = {"recreate": 0}
+
+    async def wrong_target(command, *, timeout=None, cwd=None):
+        return json.dumps({
+            "com.docker.compose.project": "production",
+            "com.docker.compose.service": "fastapi",
+        }) + "\n"
+
+    async def recreate(target=None):
+        calls["recreate"] += 1
+
+    monkeypatch.setattr(mon, "run_command", wrong_target)
+    monkeypatch.setattr(mon, "recreate_and_verify_health", recreate)
+
+    args = _AmainArgs(
+        env, rehearse=True, token_stdin=False, container="fxi-rehearsal-app",
+        project="fxi-rehearsal", compose_file="docker-compose.rehearsal.yml",
+        inject_abort_after=3,
+    )
+    assert _run(mon._amain(args)) == 1
+    assert env.read_bytes() == before
+    assert calls["recreate"] == 0
+
+
 @pytest.mark.parametrize("bad", [0, float("nan")])
 def test_amain_validates_poll_interval_before_touching_env(monkeypatch, tmp_path, bad):
     """⛔ 검증 함수만 테스트하면 `_amain` 에서 그 호출을 **지워도 통과한다**(실측 SURVIVED).
@@ -802,13 +845,47 @@ def test_commands_are_derived_from_the_injected_target():
     """⛔ 한때 `docker compose ...` 와 `exchange-rate-app` 이 코드에 박혀 있었다 — 그 상태로
     "EC2 에 별도 compose 로 리허설" 을 제안했는데, 그러면 monitor 가 **운영 스택을 재생성**한다."""
     target = mon.Target(container="fxi-rehearsal-app", project="fxi-rehearsal",
-                        compose_file="docker-compose.rehearsal.yml")
+                        compose_file="docker-compose.rehearsal.yml",
+                        env_file=Path("/tmp/.env.rehearsal"))
     compose = target.compose("up", "-d")
-    assert compose[:6] == ["docker", "compose", "-p", "fxi-rehearsal",
-                           "-f", "docker-compose.rehearsal.yml"]
+    assert compose == [
+        "docker", "compose", "--env-file", "/tmp/.env.rehearsal",
+        "-p", "fxi-rehearsal", "-f", "docker-compose.rehearsal.yml", "up", "-d",
+    ]
     assert target.inspect("{{.Id}}")[2] == "fxi-rehearsal-app"
     assert "exchange-rate-app" not in " ".join(mon.admin_fetch_command("/health", target))
     assert not target.is_production
+
+
+def test_rehearsal_compose_is_standalone_and_uses_interpolated_environment():
+    """리허설 project가 달라도 base compose를 병합하면 고정 포트·bind mount가 그대로 샌다.
+
+    서비스 `env_file`도 금지한다. 실행기의 `--env-file`과 다른 파일을 서비스가 읽으면 flag를
+    바꿨는데 컨테이너에는 반영되지 않는 false green이 된다.
+    """
+    import yaml
+
+    compose = yaml.safe_load((mon.REPO_ROOT / "docker-compose.rehearsal.yml").read_text())
+    assert set(compose["services"]) == {"redis", "fastapi"}
+    fastapi = compose["services"]["fastapi"]
+    redis = compose["services"]["redis"]
+    assert "env_file" not in fastapi
+    assert fastapi["ports"] == ["127.0.0.1:18000:8000"]
+    assert "ports" not in redis
+    assert all(not str(volume).startswith("./") for volume in fastapi["volumes"])
+    rendered_env = "\n".join(fastapi["environment"])
+    for key in mon.CANARY_ENV:
+        assert f"{key}=${{{key}" in rendered_env
+
+
+def test_rehearsal_env_template_is_secret_free_and_gitignored():
+    template = (mon.REPO_ROOT / ".env.rehearsal.example").read_text()
+    ignored = (mon.REPO_ROOT / ".gitignore").read_text().splitlines()
+    assert ".env.rehearsal" in ignored
+    assert "local-rehearsal-admin" in template
+    assert "local-rehearsal-redis" in template
+    assert "REVENUECAT_API_KEY=\n" in template
+    assert "TOPIC_DISPATCHER_ENABLED=false" in template
 
 
 def test_production_target_is_the_default_and_recognisable():
@@ -821,7 +898,10 @@ def test_target_identity_is_verified_fail_closed(monkeypatch):
     target = mon.Target(container="c", project="want")
 
     async def wrong(command, *, timeout=None, cwd=None):
-        return "other\n"
+        return json.dumps({
+            "com.docker.compose.project": "other",
+            "com.docker.compose.service": "fastapi",
+        }) + "\n"
 
     monkeypatch.setattr(mon, "run_command", wrong)
     assert any("project" in p for p in _run(mon.check_target_identity(target)))
@@ -833,17 +913,34 @@ def test_target_identity_is_verified_fail_closed(monkeypatch):
     assert _run(mon.check_target_identity(target)), "확인 실패인데 통과시켰다"
 
     async def right(command, *, timeout=None, cwd=None):
-        return "want\n"
+        return json.dumps({
+            "com.docker.compose.project": "want",
+            "com.docker.compose.service": "fastapi",
+        }) + "\n"
 
     monkeypatch.setattr(mon, "run_command", right)
     assert _run(mon.check_target_identity(target)) == []
+
+    async def wrong_service(command, *, timeout=None, cwd=None):
+        return json.dumps({
+            "com.docker.compose.project": "want",
+            "com.docker.compose.service": "redis",
+        }) + "\n"
+
+    monkeypatch.setattr(mon, "run_command", wrong_service)
+    assert any("fastapi" in p for p in _run(mon.check_target_identity(target)))
 
 
 # ── 리허설/운영 구조적 분리 ────────────────────────────────────────────────
 
 
 def _cli(env_file="/tmp/.env.rehearsal", **kw):
-    return mon.validate_cli_combo(_AmainArgs(env_file, **kw))
+    defaults = {
+        "compose_file": "docker-compose.rehearsal.yml",
+        "inject_abort_after": 3,
+    }
+    defaults.update(kw)
+    return mon.validate_cli_combo(_AmainArgs(env_file, **defaults))
 
 
 def test_rehearsal_cannot_target_production():
@@ -858,7 +955,8 @@ def test_rehearsal_requires_an_explicit_project():
 
 def test_injected_abort_is_rehearsal_only():
     """⛔ 운영 canary 에서 중단을 **주입**할 수 있으면 그 창의 결과는 의미가 없다."""
-    assert any("--rehearse 전용" in p for p in _cli(inject_abort_after=2))
+    assert any("--rehearse 전용" in p for p in _cli(inject_abort_after=2,
+                                                           compose_file=None))
 
 
 def test_real_canary_requires_a_token():
@@ -870,6 +968,13 @@ def test_valid_rehearsal_combo_passes():
                 token_stdin=False) == []
 
 
+@pytest.mark.parametrize("value", [None, 0, -1])
+def test_rehearsal_requires_a_positive_injected_abort_poll(value):
+    problems = _cli(rehearse=True, container="fxi-rehearsal-app", project="fxi-rehearsal",
+                    token_stdin=False, inject_abort_after=value)
+    assert any("inject-abort-after" in p for p in problems)
+
+
 def test_injected_abort_flips_health_after_n_polls():
     """⚠️ 실제 서비스를 깨지 않고 **순서**(중단 → 부하 종료 → env 복원)를 증명하는 수단."""
     async def inner():
@@ -877,7 +982,88 @@ def test_injected_abort_flips_health_after_n_polls():
 
     collect = mon.injected_abort_collector(inner, 2)
     assert _run(collect()).health_ok is True
-    assert _run(collect()).health_ok is False
+    injected = _run(collect())
+    assert injected.health_ok is False
+    assert injected.injected_health_failure is True
+    assert mon.evaluate_snapshot_abort(injected, baseline_started_at=None) == [
+        "health 실패 (injected)"]
+
+
+def _rehearsal_outcome(**changes):
+    values = {
+        "aborted": True,
+        "reasons": ["health 실패 (injected)"],
+        "polls": 3,
+        "load_stopped": True,
+        "rollback_done": True,
+        "load_alive_after_cleanup": False,
+        "cleanup_errors": [],
+    }
+    values.update(changes)
+    return mon.CanaryOutcome(**values)
+
+
+def test_rehearsal_success_requires_the_expected_injected_abort_and_full_cleanup():
+    assert mon.rehearsal_succeeded(_rehearsal_outcome(), expected_abort_poll=3)
+    assert not mon.rehearsal_succeeded(
+        _rehearsal_outcome(reasons=["컨테이너 재시작"]), expected_abort_poll=3)
+    assert not mon.rehearsal_succeeded(_rehearsal_outcome(polls=2), expected_abort_poll=3)
+    assert not mon.rehearsal_succeeded(_rehearsal_outcome(polls=4), expected_abort_poll=3)
+    assert not mon.rehearsal_succeeded(
+        _rehearsal_outcome(reasons=["health 실패"]), expected_abort_poll=3)
+    assert not mon.rehearsal_succeeded(
+        _rehearsal_outcome(rollback_done=False), expected_abort_poll=3)
+    assert not mon.rehearsal_succeeded(
+        _rehearsal_outcome(cleanup_errors=["kill 실패"]), expected_abort_poll=3)
+
+
+@pytest.mark.parametrize("reasons,expected", [
+    (["health 실패 (injected)"], 0),
+    (["health 실패"], 1),
+    (["컨테이너 재시작"], 1),
+])
+def test_amain_rehearsal_exit_code_uses_the_exact_injected_abort_contract(
+        monkeypatch, tmp_path, reasons, expected):
+    """helper가 아니라 CLI 출구까지 잠근다. 다른 중단을 리허설 성공으로 접지 않는다."""
+    env = tmp_path / ".env.rehearsal"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+
+    class Load:
+        async def kill(self):
+            return None
+
+    async def fake_run(command, *, timeout=None, cwd=None):
+        if "Config.Labels" in command[-1]:
+            return json.dumps({
+                "com.docker.compose.project": "fxi-rehearsal",
+                "com.docker.compose.service": "fastapi",
+            }) + "\n"
+        return "AFTER_RECREATE\n"
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    async def no_problems(*args, **kwargs):
+        return []
+
+    async def start():
+        return Load()
+
+    async def monitor(**kwargs):
+        return _rehearsal_outcome(reasons=reasons)
+
+    monkeypatch.setattr(mon, "run_command", fake_run)
+    monkeypatch.setattr(mon, "recreate_and_verify_health", no_op)
+    monkeypatch.setattr(mon, "wait_for_preflight", no_problems)
+    monkeypatch.setattr(mon, "start_rehearsal_load", start)
+    monkeypatch.setattr(mon, "run_monitored_canary", monitor)
+
+    args = _AmainArgs(
+        env, rehearse=True, token_stdin=False, container="fxi-rehearsal-app",
+        project="fxi-rehearsal", compose_file="docker-compose.rehearsal.yml",
+        inject_abort_after=3,
+    )
+    assert _run(mon._amain(args)) == expected
 
 
 def test_url_has_no_default_so_an_unreachable_stack_is_not_assumed():
@@ -921,3 +1107,40 @@ def test_rehearsal_refuses_to_edit_the_production_env_file():
 
     assert _cli(rehearse=True, container="fxi-rehearsal-app", project="p",
                 token_stdin=False) == []
+
+
+# ── 리허설 스택이 정말 격리돼 있는가 (compose 정적 검사) ────────────────────
+
+
+def _rehearsal_compose() -> dict:
+    import yaml
+    return yaml.safe_load((mon.REPO_ROOT / "docker-compose.rehearsal.yml").read_text())
+
+
+def test_rehearsal_stack_never_binds_production_paths():
+    """⛔ **실측으로 확인한 위험이다.** 리허설 구성을 기본 compose 와 **병합**하면
+    `./data`(운영 SQLite) · `volumes/logs/app` · `firebase-service-account.json` 을 그대로
+    bind mount 하고, `ports` 는 **덮이지 않고 이어붙어** redis 가 `6379` 와 `16379` 를 **둘 다**
+    물려 한다(`docker compose config` 로 재현). 그래서 이 파일은 **독립 스택**이어야 한다."""
+    config = _rehearsal_compose()
+    rendered = str(config)
+    for forbidden in ("./data", "firebase-service-account.json", "volumes/logs"):
+        assert forbidden not in rendered, f"운영 경로를 mount 한다: {forbidden}"
+
+    for service in config["services"].values():
+        for volume in service.get("volumes", []):
+            source = volume.split(":")[0] if isinstance(volume, str) else volume.get("source", "")
+            assert not source.startswith("."), f"bind mount 가 남아 있다: {volume}"
+
+
+def test_rehearsal_stack_publishes_only_loopback_18000():
+    """⛔ 운영 포트(6379·80·443)를 물면 리허설이 운영과 자원을 다툰다."""
+    published = [p for service in _rehearsal_compose()["services"].values()
+                 for p in service.get("ports", [])]
+    assert published == ["127.0.0.1:18000:8000"], published
+
+
+def test_rehearsal_containers_are_named_apart_from_production():
+    names = [s.get("container_name") for s in _rehearsal_compose()["services"].values()]
+    assert mon.PRODUCTION_CONTAINER not in names
+    assert all(name and name.startswith("fxi-rehearsal-") for name in names)

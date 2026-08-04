@@ -29,6 +29,7 @@ ENV/
 # 환경 변수
 .env
 .env.local
+.env.rehearsal
 .env.*.local
 
 # 로그 파일

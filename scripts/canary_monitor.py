@@ -71,7 +71,9 @@ class Target:
         return self.container == PRODUCTION_CONTAINER
 
     def compose(self, *args: str) -> list[str]:
-        command = ["docker", "compose"]
+        # Compose interpolation도 실행기가 canary flag를 수정하는 파일을 써야 한다. 이 옵션이
+        # 없으면 rehearsal target도 리포 루트 `.env`의 REDIS_PASSWORD 등을 조용히 읽는다.
+        command = ["docker", "compose", "--env-file", str(self.env_file)]
         if self.project:
             command += ["-p", self.project]
         if self.compose_file:
@@ -162,6 +164,7 @@ async def run_command(command: Sequence[str], *, timeout: float = COMMAND_TIMEOU
 @dataclass
 class Snapshot:
     health_ok: bool = True
+    injected_health_failure: bool = False
     container_started_at: Optional[str] = None
     new_error_count: int = 0
     broadcast_age_seconds: Optional[float] = 0.0
@@ -177,7 +180,8 @@ def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional
     """합의한 즉시 중단 조건과 그 조건을 재는 구성요소의 생존 상태를 판정한다."""
     reasons: list[str] = []
     if not snapshot.health_ok:
-        reasons.append("health 실패")
+        reasons.append("health 실패 (injected)" if snapshot.injected_health_failure
+                       else "health 실패")
     if (baseline_started_at is not None
             and snapshot.container_started_at is not None
             and snapshot.container_started_at != baseline_started_at):
@@ -447,15 +451,22 @@ async def check_target_identity(target: Target) -> list[str]:
     """⛔ **이 컨테이너가 정말 그 target 의 것인가.** 확인 못 하면 fail-closed 로 거부한다 —
     확인 없이 진행하면 리허설이 **운영 스택을 재생성**할 수 있다(실제로 가능했던 경로)."""
     try:
-        label = (await run_command(
-            target.inspect('{{index .Config.Labels "com.docker.compose.project"}}'))).strip()
-    except CollectorError as exc:
+        raw = await run_command(target.inspect("{{json .Config.Labels}}"))
+        labels = json.loads(raw)
+    except (CollectorError, TypeError, ValueError) as exc:
         return [f"target 컨테이너를 확인할 수 없다: {exc}"]
-    if target.project and label != target.project:
-        return [f"컨테이너 project={label!r} 가 target project={target.project!r} 와 다르다"]
-    if not label:
-        return ["컨테이너에 compose project label 이 없다"]
-    return []
+    if not isinstance(labels, dict):
+        return ["target 컨테이너 label이 JSON 객체가 아니다"]
+    project = labels.get("com.docker.compose.project")
+    service = labels.get("com.docker.compose.service")
+    problems: list[str] = []
+    if target.project and project != target.project:
+        problems.append(f"컨테이너 project={project!r} 가 target project={target.project!r} 와 다르다")
+    if not project:
+        problems.append("컨테이너에 compose project label 이 없다")
+    if service != "fastapi":
+        problems.append(f"컨테이너 service={service!r} — fastapi가 아니다")
+    return problems
 
 
 async def check_ws_reachable(url: str, *, timeout: float = 5.0) -> list[str]:
@@ -676,6 +687,19 @@ async def start_rehearsal_load(*, python: str = sys.executable) -> RehearsalLoad
     return RehearsalLoad(process)
 
 
+def rehearsal_succeeded(outcome: CanaryOutcome, *, expected_abort_poll: int) -> bool:
+    """주입한 health 중단의 전체 cleanup 계약이 관측된 경우에만 리허설 성공이다."""
+    return (
+        outcome.aborted
+        and outcome.reasons == ["health 실패 (injected)"]
+        and outcome.polls == expected_abort_poll
+        and outcome.load_stopped
+        and outcome.rollback_done
+        and not outcome.load_alive_after_cleanup
+        and not outcome.cleanup_errors
+    )
+
+
 def injected_abort_collector(inner: Callable[[], Awaitable[Snapshot]], after_polls: int):
     """N 번째 poll 부터 health 실패를 **주입**한다 — 실제 서비스를 깨지 않고 순서를 증명한다."""
     state = {"polls": 0}
@@ -684,7 +708,7 @@ def injected_abort_collector(inner: Callable[[], Awaitable[Snapshot]], after_pol
         snapshot = await inner()
         state["polls"] += 1
         if state["polls"] >= after_polls:
-            return replace(snapshot, health_ok=False)
+            return replace(snapshot, health_ok=False, injected_health_failure=True)
         return snapshot
 
     return collect
@@ -724,10 +748,16 @@ def validate_cli_combo(args) -> list[str]:
                             "(--container/--project 로 리허설 스택을 지정할 것)")
         if not args.project:
             problems.append("--rehearse 는 --project 로 격리 스택을 명시해야 한다")
+        if not args.compose_file:
+            problems.append("--rehearse 는 독립 --compose-file 을 명시해야 한다")
         # ⛔ 리허설이 **운영 `.env` 를 고쳐 쓰면** 격리가 무의미하다 — 실행기는 이 파일을
         #    직접 편집하고 재기동한다. 기본값이 운영 `.env` 라 명시를 강제한다.
         if Path(args.env_file).resolve() == (REPO_ROOT / ".env").resolve():
             problems.append("--rehearse 는 운영 .env 를 쓸 수 없다 — --env-file 로 리허설 env 를 지정할 것")
+        if args.inject_abort_after is None:
+            problems.append("--rehearse 는 --inject-abort-after 로 기대 중단 시점을 명시해야 한다")
+        elif args.inject_abort_after < 1:
+            problems.append("--inject-abort-after 는 1 이상이어야 한다")
     else:
         if args.inject_abort_after is not None:
             problems.append("--inject-abort-after 는 --rehearse 전용이다")
@@ -764,6 +794,15 @@ async def _amain(args) -> int:
     # env 를 건드리기 전에 실패할 수 있는 입력 검증을 끝낸다. 시작 시각은 아래의 의도적
     # force-recreate 뒤에 읽어야 첫 poll에서 그 재생성을 장애로 오판하지 않는다.
     token = None if args.rehearse else load_id_token(token_file=args.token_file)
+
+    # ⛔ env를 쓰거나 compose up을 하기 전에 target 정체를 확인한다. preflight에서만 확인하면
+    # 잘못된 target을 이미 재생성한 뒤라 격리 검사가 너무 늦다. 토큰 입력 검증은
+    # 외부 Docker 조회보다 먼저 끝내 입력 실패가 운영 상태를 전혀 건드리지 않게 한다.
+    identity_problems = await check_target_identity(target)
+    if identity_problems:
+        print(json.dumps({"ok": False, "target": identity_problems}, ensure_ascii=False))
+        return 1
+
     restorer = EnvRestorer(original, env_path, target)
     load: Optional[LoadHandle] = None
     outcome: Optional[CanaryOutcome] = None
@@ -804,12 +843,16 @@ async def _amain(args) -> int:
                 print(f"[CLEANUP] kill 실패: {exc}", file=sys.stderr)
         await restorer.restore()                       # ⚠️ 멱등 — monitor 가 이미 했으면 no-op
 
+    rehearsal_passed = bool(args.rehearse) and rehearsal_succeeded(
+        outcome, expected_abort_poll=args.inject_abort_after)
     print(json.dumps({
         "ok": outcome.ok, "aborted": outcome.aborted, "reasons": outcome.reasons,
         "polls": outcome.polls, "rollback_done": outcome.rollback_done,
         "cleanup_errors": outcome.cleanup_errors, "rehearsal": bool(args.rehearse),
+        "rehearsal_passed": rehearsal_passed,
     }, ensure_ascii=False))
-    return 0 if outcome.ok or args.rehearse and outcome.aborted and not outcome.cleanup_errors else 1
+    succeeded = rehearsal_passed if args.rehearse else outcome.ok
+    return 0 if succeeded else 1
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

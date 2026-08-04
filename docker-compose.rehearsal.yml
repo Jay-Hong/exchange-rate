@@ -1,44 +1,79 @@
-# W canary **수직 리허설 전용** 로컬 스택.
+# W canary 수직 리허설 전용 로컬 스택. 기본 compose와 병합하지 않는다.
 #
-# ⛔ 왜 별도 파일인가: 기본 `docker-compose.yml` 은 세 서비스 모두 `container_name` 이 **고정**
-#    이고(`exchange-rate-app` 등) redis `6379` · nginx `80/443` 을 publish 한다. 그래서
-#    `docker compose -p other` 로 띄워도 **이름·포트가 충돌**하고, 더 나쁜 것은 실행기가
-#    운영 컨테이너를 그대로 잡을 수 있다는 점이다(그래서 실행기는 `Target` 을 주입받는다).
-#
-# ⛔ `fastapi` 는 기본 파일에서 `expose: 8000` 뿐이라 **호스트에서 닿지 않는다**. 부하 자식은
-#    호스트 프로세스이므로, 여기서 **loopback 에만** publish 한다(외부 노출 금지).
+# 기본 파일을 함께 쓰면 고정 container_name, 6379/80/443 host port, ./data와 로그 bind mount를
+# 상속한다. 그러면 이름만 별도 project여도 운영/개발 스택과 자원 및 데이터가 격리되지 않는다.
 #
 # 사용:
-#   cp .env .env.rehearsal   # 또는 최소 키만 담은 별도 파일 (⚠️ 운영 .env 를 쓰지 말 것)
-#   docker compose -p fxi-rehearsal -f docker-compose.yml -f docker-compose.rehearsal.yml up -d
-#   python scripts/canary_monitor.py --rehearse \
-#          --project fxi-rehearsal --compose-file docker-compose.rehearsal.yml \
-#          --container fxi-rehearsal-app --env-file .env.rehearsal \
-#          --url ws://127.0.0.1:18000/ws --inject-abort-after 3
+#   cp .env.rehearsal.example .env.rehearsal
+#   chmod 600 .env.rehearsal
+#   docker compose --env-file .env.rehearsal -p fxi-rehearsal \
+#     -f docker-compose.rehearsal.yml up -d
+#   python scripts/canary_monitor.py --rehearse --inject-abort-after 3 \
+#     --project fxi-rehearsal --compose-file docker-compose.rehearsal.yml \
+#     --container fxi-rehearsal-app --env-file .env.rehearsal \
+#     --url ws://127.0.0.1:18000/ws
 #
-# ⚠️ `--env-file` 은 **리허설 env** 를 가리켜야 한다 — 실행기는 그 파일을 직접 고쳐 쓴다.
+# `.env.rehearsal`은 gitignored 로컬 파일이다. 운영 `.env`를 복사하지 않는다.
 
 services:
   redis:
+    image: redis:7.4-alpine
     container_name: fxi-rehearsal-redis
-    ports:
-      - "127.0.0.1:16379:6379"      # 운영 6379 와 충돌 회피
+    command: redis-server --appendonly no --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli -a $$REDIS_PASSWORD ping || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - rehearsal_redis_data:/data
 
   fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: fxi-rehearsal-app
-    env_file:
-      - .env.rehearsal              # ⛔ 운영 .env 를 건드리지 않는다
+    environment:
+      - ENV=${ENV:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////data/exchange_rates.db}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_LATEST_ENABLED=${REDIS_LATEST_ENABLED:-false}
+      - FIREBASE_CREDENTIALS_PATH=${FIREBASE_CREDENTIALS_PATH}
+      - REVENUECAT_API_KEY=${REVENUECAT_API_KEY:-}
+      - REVENUECAT_WEBHOOK_AUTH_KEY=${REVENUECAT_WEBHOOK_AUTH_KEY:-}
+      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-false}
+      - KRX_FUTURES_ENABLED=${KRX_FUTURES_ENABLED:-false}
+      - KRX_CLIENT_DISTRIBUTION_ENABLED=${KRX_CLIENT_DISTRIBUTION_ENABLED:-false}
+      - TOPIC_DISPATCHER_ENABLED=${TOPIC_DISPATCHER_ENABLED:-false}
+      - DEFAULT_EXECUTOR_PROBE_ENABLED=${DEFAULT_EXECUTOR_PROBE_ENABLED:-false}
+      - DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS=${DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS:-1}
+      - WS_AUTH_EXECUTOR_LOG_TIMINGS=${WS_AUTH_EXECUTOR_LOG_TIMINGS:-false}
+    volumes:
+      - rehearsal_app_data:/data
+      - rehearsal_app_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
-      - "127.0.0.1:18000:8000"      # ⛔ loopback 전용 — 부하 자식이 닿을 유일한 경로
+      - "127.0.0.1:18000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 10s
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 600M
 
-  nginx:
-    container_name: fxi-rehearsal-nginx
-    # ⚠️ 리허설은 앱에 직접 붙으므로 nginx 가 필요 없다. profile 을 붙여 **기본 기동에서 제외**
-    #    한다(80/443 을 잡으면 운영·호스트와 충돌한다).
-    profiles: ["unused"]
-    ports: []
+volumes:
+  rehearsal_redis_data:
+  rehearsal_app_data:
+  rehearsal_app_logs:

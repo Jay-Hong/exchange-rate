@@ -858,20 +858,31 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     재기동 → health 복귀를 **실제로 관측**한다. 그 전에는 Canary GO 를 선언하지 않는다.
 
     · **로컬 격리 스택에서만** 한다 — `docker-compose.rehearsal.yml`(loopback `127.0.0.1:18000`
-      publish + 별도 container_name + 별도 env 파일).
+      publish + 별도 container_name + 별도 named volume). 기본 compose와 병합하지 않는
+      **독립 파일**이다. `.env.rehearsal.example`을 `.env.rehearsal`로 복사해 쓰되
+      운영 `.env`는 복사하지 않는다(리허설 파일은 gitignore). 실행기의
+      `--env-file`은 Compose 치환과 canary flag 수정의 **단일 소스**다. 서비스에
+      별도 `env_file` 경로를 두지 않는다.
       ⛔ **"EC2 에 별도 compose 프로젝트" 는 폐기했다.** 기본 compose 는 세 서비스 모두
       `container_name` 이 **고정**이고 redis 6379 · nginx 80/443 을 publish 하므로 `-p` 로 띄워도
       **충돌**하고, 그때 실행기는 **운영 컨테이너와 운영 `.env` 를 재생성**했을 것이다.
       → 실행기는 이제 `Target`(container/project/compose-file/env-file)을 **주입받고**,
-        preflight 가 컨테이너의 compose project label 을 확인해 다르면 **fail-closed 로 거부**한다.
-    · ⛔ **부하 URL 에 기본값이 없다.** compose 의 `fastapi` 는 `expose: 8000` 뿐이라 호스트에서
+        env 수정·재기동 **전** 컨테이너의 compose project + service(`fastapi`) label을
+        확인해 다르거나 알 수 없으면 **fail-closed 로 거부**한다. preflight에서도
+        다시 확인한다.
+    · ⛔ **부하 URL 에 기본값이 없다.** 기본 compose 의 `fastapi` 는 `expose: 8000` 뿐이라 호스트에서
       `ws://localhost:8000/ws` 는 **닿지 않는다** — 기본값을 두면 "연결 실패 → rollback" 만
       검증하고 순서는 증명하지 못한다. preflight 가 **실제 WS 연결**로 도달성을 확인한다.
     · ⛔ **리허설은 토큰 없이 순서만 증명한다**(`--rehearse` = 가짜 부하 + `--inject-abort-after`).
       실제 부하는 유효 토큰이 있어야 살아 있고, **무효 토큰이면 인증 오류로 중단 주입보다 먼저
       죽어** 순서를 증명하지 못한다. 그 경로는 **운영 컨테이너를 target 으로 하면 거부**되고,
       중단 주입은 `--rehearse` 전용이며, 실제 canary 는 토큰이 **필수**다(구조적 분리).
-    · 그 다음이 prod injected-abort 검증(실제 health 를 깨지 않는다) → 그 뒤에야 토큰 canary.
+    · 리허설 성공은 **지정 poll의 `health 실패 (injected)` 단일 사유** + 부하 종료 + env
+      복원 + 재기동/health 복귀 + 고아 프로세스 0을 모두 봤을 때만 성립한다.
+      실제 health 장애는 별도 사유라 같은 poll에 발생해도 성공으로 접지 않는다.
+      ⛔ **prod injected-abort 단계는 없다.** 실행기가 운영 target의 `--rehearse`와
+      리허설 없는 `--inject-abort-after`를 둘 다 구조적으로 거부한다. 로컬 리허설 다음은
+      별도 GO + 유효 Firebase ID token을 사용한 **실제 prod canary**다.
 
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
   이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,
