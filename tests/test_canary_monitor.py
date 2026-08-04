@@ -533,40 +533,106 @@ def test_canary_refuses_to_start_when_a_release_flag_is_already_true(key):
     assert any(key in problem for problem in mon.validate_canary_start_env(values))
 
 
-def test_restorer_puts_back_original_values_not_a_hardcoded_false(tmp_path, monkeypatch):
-    """⛔ 무조건 `false` 로 치환하면 **원래 true 였던 환경을 조용히 바꾼다**."""
+def test_restore_returns_the_file_to_its_exact_original_bytes(tmp_path, monkeypatch):
+    """⛔ **키 단위 복원으로는 부족하다.** 한때 수동 절차로 `sed 's/^KEY=.*/KEY=false/'` 를
+    적어 뒀는데 (1) 키가 없으면 **아무 일도 안 하면서 성공처럼 보이고** (2) 원자적이지 않으며
+    (3) canary 가 바꾼 **나머지 키를 되돌리지 않는다**. 자동·수동 복원이 서로 다른 기준을 쓰면
+    어긋나는 순간을 아무도 못 잡는다 → **파일 전체 backup 하나**로 통일한다."""
     env = tmp_path / ".env"
     env.write_text("TOPIC_DISPATCHER_ENABLED=true\nOTHER=keep\n")
-    original = mon.read_env_values(env.read_text(), mon.CANARY_ENV)
-    env.write_text(mon.apply_env_values(env.read_text(), dict(mon.CANARY_ENV)))
+    original = env.read_text()
 
     async def noop(target=None):
         return None
 
     monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
-    _run(mon.EnvRestorer(original, env).restore())
+    mon.create_env_backup(env)
+    mon.atomic_write_text(env, mon.apply_env_values(env.read_text(), dict(mon.CANARY_ENV)))
+    assert "KRX_CLIENT_DISTRIBUTION_ENABLED" in env.read_text(), "전제: canary 가 키를 추가했다"
 
-    text = env.read_text()
-    assert "TOPIC_DISPATCHER_ENABLED=true" in text, "원래 값을 잃고 false 로 굳었다"
-    assert "KRX_CLIENT_DISTRIBUTION_ENABLED" not in text, "원래 없던 키가 남았다"
-    assert "OTHER=keep" in text
+    _run(mon.EnvRestorer(env).restore())
+    assert env.read_text() == original, "원본과 바이트 동일하게 복원되지 않았다"
+    assert not mon.backup_path_for(env).exists(), "검증 후 backup 이 정리되지 않았다"
+
+
+def test_backup_is_created_before_mutation_with_owner_only_mode(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SECRET=value\n")
+    backup = mon.create_env_backup(env)
+    assert backup.read_text() == "SECRET=value\n"
+    assert oct(backup.stat().st_mode & 0o777) == "0o600", "backup 이 다른 사용자에게 열려 있다"
+
+
+def test_second_start_is_refused_while_a_backup_remains(tmp_path):
+    """⛔ backup 이 남아 있다 = **이전 canary 가 복구되지 않았다**. 그 위에 또 시작하면
+    원본이 덮여 영영 되돌릴 수 없다."""
+    env = tmp_path / ".env"
+    env.write_text("A=1\n")
+    mon.create_env_backup(env)
+    with pytest.raises(mon.CollectorError) as caught:
+        mon.create_env_backup(env)
+    assert "--recover" in str(caught.value), "복구 수단을 안내하지 않는다"
+
+
+def test_backup_survives_so_a_new_process_can_recover(tmp_path, monkeypatch):
+    """⛔ **SIGKILL 은 in-memory cleanup 을 통째로 건너뛴다.** 그때 남는 것은 이 파일뿐이고,
+    새 프로세스의 `--recover` 가 그것만으로 되돌릴 수 있어야 한다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\nKEEP=1\n")
+    original = env.read_text()
+    mon.create_env_backup(env)
+    mon.atomic_write_text(env, mon.apply_env_values(env.read_text(), dict(mon.CANARY_ENV)))
+    # ← 여기서 프로세스가 죽었다고 본다(restorer 인스턴스는 사라졌다)
+
+    async def noop(target=None):
+        return None
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
+    _run(mon.EnvRestorer(env).restore())          # 새 프로세스의 --recover 와 같은 경로
+    assert env.read_text() == original
+    assert not mon.backup_path_for(env).exists()
+
+
+def test_backup_is_kept_when_health_verification_fails(tmp_path, monkeypatch):
+    """⛔ 먼저 지우면 **재시도 수단이 사라진다** — 검증이 끝난 뒤에만 지운다."""
+    env = tmp_path / ".env"
+    env.write_text("A=1\n")
+    mon.create_env_backup(env)
+    mon.atomic_write_text(env, "A=2\n")
+
+    async def failing(target=None):
+        raise mon.CollectorError("재기동 실패")
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", failing)
+    with pytest.raises(mon.CollectorError):
+        _run(mon.EnvRestorer(env).restore())
+    assert mon.backup_path_for(env).exists(), "복원 실패인데 backup 을 지웠다"
 
 
 def test_restorer_is_idempotent(tmp_path, monkeypatch):
     """⚠️ monitor 와 바깥 `finally` 가 **둘 다** 부른다 — 두 번 재기동하면 창만 길어진다."""
     env = tmp_path / ".env"
     env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
-    original = mon.read_env_values(env.read_text(), mon.CANARY_ENV)
+    mon.create_env_backup(env)
     calls = []
 
     async def counting(target=None):
         calls.append(1)
 
     monkeypatch.setattr(mon, "recreate_and_verify_health", counting)
-    restorer = mon.EnvRestorer(original, env)
+    restorer = mon.EnvRestorer(env)
     _run(restorer.restore())
     _run(restorer.restore())
     assert len(calls) == 1, "복원이 두 번 재기동했다"
+
+
+def test_recover_is_a_standalone_mode(tmp_path):
+    """⚠️ 복원은 **토큰도 부하도 필요 없다**."""
+    # ⚠️ `_cli` 헬퍼는 리허설 기본값(`inject_abort_after=3`)을 넣으므로 명시적으로 끈다.
+    assert _cli(recover=True, token_stdin=False, inject_abort_after=None) == []
+    assert any("단독" in p for p in _cli(recover=True, inject_abort_after=None,
+                                        rehearse=True, container="c", project="p"))
+    assert any("단독" in p for p in _cli(recover=True, inject_abort_after=2))
 
 
 # ── preflight: 전제가 실제로 적용됐는가 ─────────────────────────────────────
@@ -694,6 +760,7 @@ class _AmainArgs:
         self.compose_file = None
         self.rehearse = False
         self.inject_abort_after = None
+        self.recover = False
         self.dry_run = False
         self.__dict__.update(kw)
 
@@ -797,7 +864,7 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
         events.append(("baseline", kwargs["baseline_started_at"]))
         return mon.CanaryOutcome(False, [], 1, True, False, False)
 
-    def fake_atomic_write(path, text):
+    def fake_atomic_write(path, text, *, mode=None):
         writes.append(text)
         Path(path).write_text(text)
 
@@ -813,9 +880,12 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
     started_at_inspect = [i for i, event in enumerate(events) if event == "inspect"][1]
     assert events.index("recreate") < started_at_inspect < events.index("start")
     assert ("baseline", "AFTER_RECREATE") in events
-    assert len(writes) == 2, "활성화와 복원 중 하나가 원자적 write 경로를 우회했다"
-    assert "TOPIC_DISPATCHER_ENABLED=true" in writes[0]
-    assert "TOPIC_DISPATCHER_ENABLED=false" in writes[1]
+    # backup → 활성화 → 복원. 셋 다 원자적 write 경로를 타야 한다.
+    assert len(writes) == 3, "backup·활성화·복원 중 하나가 원자적 write 경로를 우회했다"
+    assert "TOPIC_DISPATCHER_ENABLED=true" not in writes[0], \
+        "backup 이 활성화 **뒤에** 만들어졌다 — 그러면 되돌릴 원본이 이미 덮인 상태다"
+    assert "TOPIC_DISPATCHER_ENABLED=true" in writes[1], "활성화가 두 번째 write 가 아니다"
+    assert "TOPIC_DISPATCHER_ENABLED=false" in writes[2], "복원이 마지막 write 가 아니다"
 
 
 def test_env_is_restored_when_recreate_fails_right_after_applying(monkeypatch, tmp_path):
@@ -1473,11 +1543,88 @@ def test_ws_reachability_success_path_actually_connects():
         async def handler(ws):
             await asyncio.sleep(5)
 
-        server = await websockets.serve(handler, "127.0.0.1", 8799)
+        # ⚠️ 고정 포트는 병렬 CI·로컬 프로세스와 충돌한다 — 0 으로 bind 하고 실제 포트를 받는다.
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
         try:
-            return await mon.check_ws_reachable("ws://127.0.0.1:8799", timeout=5)
+            return await mon.check_ws_reachable(f"ws://127.0.0.1:{port}", timeout=5)
         finally:
             server.close()
             await server.wait_closed()
 
     assert _run(scenario()) == [], "도달 가능한 URL 을 불가로 보고했다"
+
+
+_SIGKILL_CHILD = """
+import asyncio, pathlib, sys
+sys.path.insert(0, {repo!r})
+from scripts import canary_monitor as mon
+
+env = pathlib.Path(sys.argv[1])
+mon.create_env_backup(env)
+mon.atomic_write_text(env, mon.apply_env_values(env.read_text(), dict(mon.CANARY_ENV)))
+print("APPLIED", flush=True)
+asyncio.run(asyncio.sleep(120))
+"""
+
+
+def test_sigkill_leaves_a_backup_that_recover_can_restore(tmp_path):
+    """⛔ **SIGKILL 은 signal handler 도 `finally` 도 건너뛴다.** 그 순간 남는 것은 backup
+    파일뿐이고, 새 프로세스가 그것만으로 되돌릴 수 있어야 한다 — 자동 복원이 불가능한 유일한
+    경로라 여기서 잠근다."""
+    import signal as _signal
+    import subprocess
+
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\nOTHER=keep\n")
+    original = env.read_text()
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _SIGKILL_CHILD.format(repo=str(mon.REPO_ROOT)), str(env)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        assert child.stdout.readline().strip() == "APPLIED"
+        child.send_signal(_signal.SIGKILL)
+        child.wait(timeout=10)
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+    # ⛔ 죽은 뒤의 상태: flag 는 켜져 있고 backup 만 남아 있다.
+    assert "TOPIC_DISPATCHER_ENABLED=true" in env.read_text(), "전제: 활성화된 채 죽었다"
+    assert mon.backup_path_for(env).exists(), "SIGKILL 후 복구 수단이 남지 않았다"
+
+    async def noop(target=None):
+        return None
+
+    import unittest.mock as _mock
+    with _mock.patch.object(mon, "recreate_and_verify_health", noop):
+        _run(mon.EnvRestorer(env).restore())       # = 새 프로세스의 `--recover`
+
+    assert env.read_text() == original, "복원이 바이트 동일하지 않다"
+    assert not mon.backup_path_for(env).exists(), "복원 후 backup 이 남았다"
+
+
+def test_restore_verifies_bytes_before_discarding_the_backup(tmp_path, monkeypatch):
+    """⛔ 검증 없이 backup 을 지우면 **잘못된 복원을 성공으로 확정**한다 — 그 시점부터 원본은
+    어디에도 없다. write 가 조용히 다른 내용을 남겼다고 가정하고 확인한다."""
+    env = tmp_path / ".env"
+    env.write_text("A=1\n")
+    mon.create_env_backup(env)
+    mon.atomic_write_text(env, "A=2\n")
+
+    real_write = mon.atomic_write_text
+
+    def corrupting_write(path, text, *, mode=None):
+        real_write(path, text.replace("A=1", "A=999"), mode=mode)
+
+    async def noop(target=None):
+        return None
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
+    monkeypatch.setattr(mon, "atomic_write_text", corrupting_write)
+
+    with pytest.raises(mon.CollectorError) as caught:
+        _run(mon.EnvRestorer(env).restore())
+    assert "바이트 동일" in str(caught.value)
+    assert mon.backup_path_for(env).exists(), "검증 실패인데 backup 을 버렸다 — 원본이 사라진다"

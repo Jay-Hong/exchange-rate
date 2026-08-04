@@ -381,10 +381,11 @@ def apply_env_values(text: str, changes: dict[str, Optional[str]]) -> str:
     return "\n".join(out) + "\n"
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str, *, mode: Optional[int] = None) -> None:
     """같은 디렉터리 임시 파일을 fsync 한 뒤 교체한다."""
     path = Path(path)
-    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
+    if mode is None:
+        mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         os.fchmod(fd, mode)
@@ -420,25 +421,58 @@ def validate_canary_start_env(values: dict[str, Optional[str]]) -> list[str]:
     return problems
 
 
-class EnvRestorer:
-    """env 를 **정확히 원래대로** 되돌린다(값이든 키 부재든). 여러 번 불려도 한 번만 일한다."""
+BACKUP_SUFFIX = ".canary-backup"
 
-    def __init__(self, original: dict[str, Optional[str]], env_path: Path,
-                 target: Target = PRODUCTION_TARGET):
-        self._original, self._env_path, self._target = original, env_path, target
+
+def backup_path_for(env_path: Path) -> Path:
+    return Path(env_path).with_name(Path(env_path).name + BACKUP_SUFFIX)
+
+
+def create_env_backup(env_path: Path) -> Path:
+    """env 를 건드리기 **전에** 원본 전체를 durable backup 한다.
+
+    ⛔ **키 단위 복원으로는 부족하다.** 한때 수동 절차로 `sed 's/^KEY=.*/KEY=false/'` 를 적어
+    뒀는데, 그건 (1) **키가 없으면 아무 일도 안 하면서 성공처럼 보이고** (2) 원자적이지 않으며
+    (3) canary 가 바꾼 **나머지 4개 키를 되돌리지 않는다**. 자동 경로와 수동 경로가 서로 다른
+    기준으로 복원하면 그 둘이 어긋나는 순간을 아무도 못 잡는다 — 그래서 **파일 전체 backup
+    하나**로 통일한다.
+    ⛔ backup 이 이미 있으면 **이전 canary 가 복구되지 않은 것**이므로 시작을 거부한다.
+    """
+    env_path = Path(env_path)
+    backup = backup_path_for(env_path)
+    if backup.exists():
+        raise CollectorError(
+            f"이전 canary 의 backup 이 남아 있다: {backup} — 먼저 `--recover` 로 복원할 것")
+    atomic_write_text(backup, env_path.read_text(encoding="utf-8"), mode=0o600)
+    return backup
+
+
+class EnvRestorer:
+    """**backup 파일 전체**를 원자 복원한다. 자동 cleanup 과 `--recover` 가 같은 경로를 쓴다.
+
+    ⚠️ 여러 번 불려도 한 번만 일한다(monitor 의 cleanup 과 바깥 `finally` 가 둘 다 부른다).
+    """
+
+    def __init__(self, env_path: Path, target: Target = PRODUCTION_TARGET):
+        self._env_path = Path(env_path)
+        self._target = target
         self.done = False
 
     async def restore(self) -> None:
         if self.done:
             return
-        atomic_write_text(
-            self._env_path,
-            apply_env_values(self._env_path.read_text(encoding="utf-8"), self._original),
-        )
+        backup = backup_path_for(self._env_path)
+        if not backup.exists():
+            self.done = True                       # 되돌릴 것이 없다(변경 전 실패)
+            return
+        original = backup.read_text(encoding="utf-8")
+        atomic_write_text(self._env_path, original)
         await recreate_and_verify_health(self._target)
-        current = read_env_values(self._env_path.read_text(encoding="utf-8"), self._original)
-        if current != self._original:
-            raise CollectorError(f"env 가 원상복원되지 않았다: {current} != {self._original}")
+        current = self._env_path.read_text(encoding="utf-8")
+        if current != original:
+            raise CollectorError("env 가 원본과 바이트 동일하게 복원되지 않았다")
+        # ⛔ **검증이 끝난 뒤에만** backup 을 지운다 — 먼저 지우면 재시도 수단이 사라진다.
+        backup.unlink()
         self.done = True
 
 
@@ -809,6 +843,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="토큰 없이 순서만 증명(가짜 부하). 운영 컨테이너에는 사용 불가")
     parser.add_argument("--inject-abort-after", type=int,
                         help="리허설 전용 — N번째 poll 부터 health 실패 주입")
+    parser.add_argument("--recover", action="store_true",
+                        help="이전 canary 의 backup 으로 env 를 복원한다(토큰 불요)")
     parser.add_argument("--dry-run", action="store_true", help="실행 없이 계획·명령만 출력")
     return parser
 
@@ -816,6 +852,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def validate_cli_combo(args) -> list[str]:
     """⛔ 리허설 경로가 운영으로 **새지 않게** 하는 구조적 경계."""
     problems: list[str] = []
+    if getattr(args, "recover", False):
+        # ⚠️ 복원은 **토큰도 부하도 필요 없다** — 남은 backup 을 되돌리는 것뿐이다.
+        if args.rehearse or args.inject_abort_after is not None:
+            problems.append("--recover 는 단독으로 쓴다(--rehearse/--inject-abort-after 불가)")
+        return problems
     target_is_production = args.container == PRODUCTION_CONTAINER
     if args.rehearse:
         if target_is_production:
@@ -861,6 +902,15 @@ async def _amain(args) -> int:
         return 0
 
     env_path = target.env_file
+    if args.recover:
+        # ⛔ 토큰·preflight 없이 **복원만** 한다 — 남은 backup 이 곧 "이전 창이 안 닫혔다"는 뜻이다.
+        restorer = EnvRestorer(env_path, target)
+        await restorer.restore()
+        print(json.dumps({"ok": True, "recovered": True,
+                          "backup_remaining": backup_path_for(env_path).exists()},
+                         ensure_ascii=False))
+        return 0
+
     original = read_env_values(env_path.read_text(encoding="utf-8"), CANARY_ENV)
     start_problems = validate_canary_start_env(original)
     if start_problems:
@@ -879,7 +929,11 @@ async def _amain(args) -> int:
         print(json.dumps({"ok": False, "target": identity_problems}, ensure_ascii=False))
         return 1
 
-    restorer = EnvRestorer(original, env_path, target)
+    # ⛔ **env 를 건드리기 직전에** durable backup 을 만든다. 프로세스가 SIGKILL 로 죽어
+    #    in-memory cleanup 이 통째로 사라져도, 이 파일 하나면 `--recover` 로 되돌릴 수 있다.
+    #    ⚠️ backup 이 이미 있으면 여기서 **시작을 거부**한다(이전 창이 안 닫혔다는 뜻).
+    create_env_backup(env_path)
+    restorer = EnvRestorer(env_path, target)
     load: Optional[LoadHandle] = None
     outcome: Optional[CanaryOutcome] = None
 

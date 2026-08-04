@@ -927,9 +927,23 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       4. **tmux 등 세션 안에서** 실행한다. signal 보강으로 SIGHUP 에도 rollback 이 돌지만,
          창 자체를 보존하는 편이 낫다.
       ⛔ **cleanup 중 두 번째 SIGTERM 을 보내지 말 것** — 반복 signal 은 의도적으로 무시되고,
-        굳이 강제 종료하면 rollback 이 끊긴다. 비정상 장기화 시에는 **수동 복원**을 쓴다:
-        `sed -i 's/^TOPIC_DISPATCHER_ENABLED=.*/TOPIC_DISPATCHER_ENABLED=false/' .env` →
-        `docker compose up -d --force-recreate fastapi` → `/health` 확인.
+        굳이 강제 종료하면 rollback 이 끊긴다.
+      5. **durable backup + `--recover`** — 복구 수단은 **파일 하나**다.
+         env 를 건드리기 **직전**에 원본 전체를 `.env.canary-backup`(mode 0600, 원자적+fsync)
+         으로 남기고, backup 이 이미 있으면 *이전 창이 안 닫혔다*는 뜻이라 **시작을 거부**한다.
+         복구는 `--recover`(토큰·부하 불요) — 파일 전체를 원자 복원 → force-recreate →
+         `/health` → **바이트 동일 검증** 후에만 backup 을 지운다. 자동 cleanup 도 **같은 경로**를
+         쓴다.
+         ⛔ 한때 수동 절차로 `sed -i 's/^TOPIC_DISPATCHER_ENABLED=.*/…=false/' .env` 를 적어
+         뒀는데 **이미 닫았던 결함 셋을 되살린 것**이었다: (1) 키가 없으면 **아무 일도 안 하면서
+         성공처럼 보이고** (2) 원자적이지 않으며 (3) canary 가 바꾼 **나머지 4개 키를 되돌리지
+         않는다**. 자동·수동이 다른 기준으로 복원하면 어긋나는 순간을 아무도 못 잡는다.
+         ✅ **SIGKILL 실측**(로컬 격리 스택): flag ON 상태에서 `kill -9` → cleanup 전부 우회 →
+         backup 잔존 → 재시작 **거부** → `--recover` → env **바이트 동일 복원** / flag false /
+         backup 삭제 / 앱 `/health` 200.
+         ⚠️ **`--recover` 는 고아 부하 자식을 죽이지 않는다.** SIGKILL 이 부하 spawn **뒤에**
+         일어났다면 자식이 init 에 재부모화되어 계속 돈다 — `pgrep -f ws_auth_load` 로 확인하고
+         수동 종료할 것(위 실측은 spawn **전** 시점이라 고아 0이었다).
 
     · **`--url` = `wss://fxi.kr/ws` 로 확정**(2026-08-04). ⛔ container-internal 주소
       (`fastapi:8000`)는 **쓸 수 없다** — `start_load_process` 는 부하 자식을 **EC2 호스트
