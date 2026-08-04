@@ -641,6 +641,7 @@ class _AmainArgs:
         self.token_stdin = True
         self.token_file = None
         self.poll_interval = 1.0
+        self.command_timeout = mon.COMMAND_TIMEOUT_SECONDS
         self.container = mon.PRODUCTION_CONTAINER
         self.project = None
         self.compose_file = None
@@ -1144,3 +1145,82 @@ def test_rehearsal_containers_are_named_apart_from_production():
     names = [s.get("container_name") for s in _rehearsal_compose()["services"].values()]
     assert mon.PRODUCTION_CONTAINER not in names
     assert all(name and name.startswith("fxi-rehearsal-") for name in names)
+
+
+# ── 재기동 뒤 health 대기 (리허설에서 실측된 결함) ──────────────────────────
+
+
+def test_health_check_waits_for_the_app_to_start_listening(monkeypatch):
+    """⛔ **리허설을 실제로 돌려서 나온 결함이다.** `docker compose up -d` 는 컨테이너가
+    *시작*되면 반환하고 앱은 아직 listen 하지 않는다 — 즉시 조회하면 연결 거부가 나는데,
+    그걸 health 실패로 접으면 **정상 재기동을 장애로 판정**한다(운영에서는 rollback 이
+    "되돌리지 못했다"로 보고된다)."""
+    attempts = {"n": 0}
+
+    async def flaky(command, *, timeout=None, cwd=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise mon.CollectorError("exit=1 docker: ConnectionRefusedError")
+        return json.dumps({"status": "healthy"}) + "\n200"
+
+    monkeypatch.setattr(mon, "run_command", flaky)
+    _run(mon.wait_until_healthy(mon.PRODUCTION_TARGET, timeout=5, poll_seconds=0.01))
+    assert attempts["n"] == 3, "기동 중 연결 거부를 즉시 장애로 판정했다"
+
+
+def test_health_wait_is_bounded_and_still_fails_closed(monkeypatch):
+    """⚠️ 기다리되 **무한정은 아니다** — 영구 장애는 시간으로 갈라야 한다."""
+    async def never(command, *, timeout=None, cwd=None):
+        raise mon.CollectorError("ConnectionRefused")
+
+    monkeypatch.setattr(mon, "run_command", never)
+    with pytest.raises(mon.CollectorError) as caught:
+        _run(mon.wait_until_healthy(mon.PRODUCTION_TARGET, timeout=0.05, poll_seconds=0.01))
+    assert "안에 health 가 정상이 되지 않았다" in str(caught.value)
+
+
+def test_unhealthy_status_within_the_window_is_not_accepted(monkeypatch):
+    async def unhealthy(command, *, timeout=None, cwd=None):
+        return json.dumps({"status": "degraded"}) + "\n200"
+
+    monkeypatch.setattr(mon, "run_command", unhealthy)
+    with pytest.raises(mon.CollectorError):
+        _run(mon.wait_until_healthy(mon.PRODUCTION_TARGET, timeout=0.05, poll_seconds=0.01))
+
+
+@pytest.mark.parametrize("bad", [0, -1, 0.5, float("nan"), float("inf")])
+def test_bad_command_timeout_is_rejected(bad):
+    """⛔ 0/NaN 이면 모든 호출이 즉시 실패해 canary 가 시작조차 못 한다."""
+    with pytest.raises(ValueError):
+        mon.set_command_timeout(bad)
+
+
+def test_command_timeout_is_a_policy_value_not_a_constant(monkeypatch):
+    """⚠️ 목적은 "호출 하나가 멈춰 watchdog 이 얼지 않게"뿐이라 느린 환경에서는 키울 수 있어야
+    한다 — 에뮬레이션 리허설 스택에서 재기동 직후 exec 가 8초를 넘겼다(실측). 운영 기본은 유지."""
+    original = mon._command_timeout
+    seen = []
+
+    async def record(command, *, timeout=None, cwd=None):
+        seen.append(timeout)
+        return "ok\n200"
+
+    try:
+        mon.set_command_timeout(30)
+        monkeypatch.setattr(mon.asyncio, "create_subprocess_exec", None)  # 실행되지 않아야 한다
+        assert mon._command_timeout == 30
+        assert mon.COMMAND_TIMEOUT_SECONDS == 8.0, "운영 기본값이 바뀌었다"
+    finally:
+        mon._command_timeout = original
+
+
+def test_amain_applies_the_command_timeout_before_touching_env(monkeypatch, tmp_path):
+    """⛔ CLI 가 값을 받아도 **적용하지 않으면** 의미가 없다(helper-vs-배선)."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    before = env.read_text()
+    monkeypatch.setattr(mon, "load_id_token", lambda **kw: "tok")
+
+    with pytest.raises(ValueError):
+        _run(mon._amain(_AmainArgs(env, command_timeout=0)))
+    assert env.read_text() == before, "잘못된 command timeout 인데 env 를 건드렸다"

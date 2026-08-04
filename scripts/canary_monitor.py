@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
@@ -41,9 +42,14 @@ from scripts.ws_auth_load import (  # noqa: E402
 
 BROADCAST_STALL_SECONDS = 30.0
 DEFAULT_POLL_INTERVAL = 1.0
-COMMAND_TIMEOUT_SECONDS = 8.0          # 개별 docker/curl 호출
+COMMAND_TIMEOUT_SECONDS = 8.0          # 개별 docker/exec 호출 (운영 기본)
+#: ⚠️ **정책값이다.** 목적은 "호출 하나가 멈춰 watchdog 이 함께 얼지 않게" 하는 것뿐이라,
+#: 느린 환경에서는 키울 수 있어야 한다 — Apple Silicon 에뮬레이션 + `cpus: 0.5` 리허설
+#: 스택에서는 재기동 직후 창의 `docker compose exec` 가 8초를 넘겼다(실측). 운영 값은 그대로.
+_command_timeout = COMMAND_TIMEOUT_SECONDS
 RECREATE_TIMEOUT_SECONDS = 180.0       # 컨테이너 재기동은 느리다
 STOP_GRACE_SECONDS = 5.0
+HEALTH_POLL_SECONDS = 2.0       # 재기동 뒤 앱이 listen 할 때까지의 폴링 간격
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -138,9 +144,19 @@ def parse_curl_response(raw: str) -> dict:
     return parsed
 
 
-async def run_command(command: Sequence[str], *, timeout: float = COMMAND_TIMEOUT_SECONDS,
+def set_command_timeout(seconds: float) -> None:
+    """⛔ 유한하고 1초 이상만 — 0/NaN 이면 모든 호출이 즉시 실패해 canary 가 시작조차 못 한다."""
+    global _command_timeout
+    value = float(seconds)
+    if not (value == value) or value in (float("inf"), float("-inf")) or value < 1.0:
+        raise ValueError(f"command timeout 은 유한하고 1초 이상이어야 한다: {seconds!r}")
+    _command_timeout = value
+
+
+async def run_command(command: Sequence[str], *, timeout: Optional[float] = None,
                       cwd: Optional[Path] = None) -> str:
     """⛔ 종료코드·stderr·timeout 을 **전부** 본다. 하나라도 어긋나면 올린다."""
+    timeout = _command_timeout if timeout is None else timeout
     process = await asyncio.create_subprocess_exec(
         *command, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -206,7 +222,7 @@ def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional
     return reasons
 
 
-async def collect_from_server(*, timeout: float = COMMAND_TIMEOUT_SECONDS,
+async def collect_from_server(*, timeout: Optional[float] = None,
                               target: Target = PRODUCTION_TARGET) -> Snapshot:
     """운영 수집기 — **서버에서** 실행한다. 조회 실패는 전부 `CollectorError`."""
     health = parse_curl_response(await run_command(admin_fetch_command("/health", target), timeout=timeout))
@@ -425,15 +441,39 @@ class EnvRestorer:
         self.done = True
 
 
+async def wait_until_healthy(target: Target = PRODUCTION_TARGET, *,
+                             timeout: float = RECREATE_TIMEOUT_SECONDS,
+                             poll_seconds: float = HEALTH_POLL_SECONDS) -> None:
+    """⛔ **재기동 직후 즉시 조회하면 안 된다.** `docker compose up -d` 는 컨테이너가 *시작*되면
+    반환하지만 앱은 아직 listen 하지 않는다 — 그 창에서 조회하면 연결 거부가 나고, 그걸
+    "health 실패"로 접으면 **정상 재기동을 장애로 판정**한다(리허설에서 실제로 그렇게 죽었다).
+    운영에서도 같다: rollback 의 마지막 확인이 그 이유로 실패하면 "되돌리지 못했다"로 보고된다.
+
+    ⚠️ 그렇다고 무한정 기다리지 않는다 — **유계**이고, 시간 안에 정상이 되지 않으면 올린다
+    (기동 중 연결 거부와 **영구 장애**를 시간으로 가른다).
+    """
+    deadline = time.monotonic() + timeout
+    last = "확인 시도 없음"
+    while True:
+        try:
+            health = parse_curl_response(await run_command(
+                admin_fetch_command("/health", target)))
+            if health.get("status") == "healthy":
+                return
+            last = f"status={health.get('status')!r}"
+        except CollectorError as exc:
+            last = str(exc)                       # 기동 중이면 연결 거부가 **정상**이다
+        if time.monotonic() >= deadline:
+            raise CollectorError(f"재기동 후 {timeout:.0f}초 안에 health 가 정상이 되지 않았다: {last}")
+        await asyncio.sleep(poll_seconds)
+
+
 async def recreate_and_verify_health(target: Target = PRODUCTION_TARGET) -> None:
     """⛔ env 는 컨테이너 **재생성** 시에만 다시 읽힌다(`restart` 는 반영 안 된다).
     확인 없이 끝내면 "적용했다"는 보고만 남고 실제로는 구 값으로 돈다."""
     await run_command(target.compose("up", "-d", "--force-recreate", "fastapi"),
                       timeout=RECREATE_TIMEOUT_SECONDS)
-    health = parse_curl_response(await run_command(admin_fetch_command("/health", target),
-                                                   timeout=RECREATE_TIMEOUT_SECONDS))
-    if health.get("status") != "healthy":
-        raise CollectorError(f"재기동 후 health 가 정상이 아니다: {health.get('status')}")
+    await wait_until_healthy(target)
 
 
 CONTAINER_ENV_PY = (
@@ -729,6 +769,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", help="compose project (리허설 스택이면 필수)")
     parser.add_argument("--compose-file")
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL)
+    parser.add_argument("--command-timeout", type=float, default=COMMAND_TIMEOUT_SECONDS,
+                        help="개별 docker/exec 호출 상한(초). 에뮬레이션 스택은 키워야 한다")
     parser.add_argument("--env-file", default=str(REPO_ROOT / ".env"))
     parser.add_argument("--rehearse", action="store_true",
                         help="토큰 없이 순서만 증명(가짜 부하). 운영 컨테이너에는 사용 불가")
@@ -772,6 +814,7 @@ async def _amain(args) -> int:
         print(json.dumps({"ok": False, "cli": combo}, ensure_ascii=False))
         return 2
     poll_interval = validate_poll_interval(args.poll_interval)
+    set_command_timeout(args.command_timeout)
     target = Target(container=args.container, project=args.project,
                     compose_file=args.compose_file, env_file=Path(args.env_file))
 

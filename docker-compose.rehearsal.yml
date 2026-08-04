@@ -31,9 +31,16 @@ services:
       - rehearsal_redis_data:/data
 
   fastapi:
+    # ⚠️ Dockerfile은 `arch=amd64` google-chrome-stable을 설치한다(운영 EC2는 x86_64).
+    #    Apple Silicon(arm64)에서는 그 패키지가 없어 빌드가 exit 100으로 실패한다(실측).
+    #    리허설은 **운영과 같은 이미지**로 도는 편이 의미 있으므로 아키텍처를 맞춘다
+    #    (에뮬레이션이라 첫 빌드가 느리다). ⛔ 운영 compose는 건드리지 않는다.
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
     container_name: fxi-rehearsal-app
     environment:
       - ENV=${ENV:-development}
@@ -70,7 +77,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: "3.0"    # 에뮬레이션이라 여유가 필요하다(운영 compose 무관)
           memory: 600M
 
 volumes:
