@@ -17,8 +17,8 @@
 ⛔ **실패를 숨기지 않는다.** cleanup 실패는 outcome 에 남고 exit code 를 실패로 만든다.
 ⛔ **비밀번호가 어떤 프로세스의 argv 에도 들어가지 않는다.** 한때 컨테이너 셸에서
    `-u admin:"$ADMIN_PASSWORD"` 로 확장했는데, 그러면 **최종 `curl` 의 argv 에는 실제 값이
-   들어간다**(`ps` 로 보인다). 지금은 heredoc 으로 `curl --config -` 의 **stdin** 에 넣는다 —
-   셸이 파이프에 쓰므로 어떤 argv 에도 값이 없다. 토큰도 같은 이유로 자식 stdin 으로만 준다.
+   들어간다**(`ps` 로 보인다). 지금은 컨테이너 안 Python 이 env 를 직접 읽으므로 어떤 argv
+   에도 값이 없다. 토큰도 같은 이유로 자식 stdin 으로만 준다.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
@@ -127,13 +128,16 @@ class Snapshot:
     container_started_at: Optional[str] = None
     new_error_count: int = 0
     broadcast_age_seconds: Optional[float] = 0.0
+    auth_running: bool = True
+    probe_enabled: bool = True
+    probe_running: bool = True
     auth_metrics: dict = field(default_factory=dict)
     probe: dict = field(default_factory=dict)
 
 
 def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional[str],
                             previous_probe_outstanding: int = 0) -> list[str]:
-    """합의한 **즉시 중단 6종** 전부."""
+    """합의한 즉시 중단 조건과 그 조건을 재는 구성요소의 생존 상태를 판정한다."""
     reasons: list[str] = []
     if not snapshot.health_ok:
         reasons.append("health 실패")
@@ -149,6 +153,12 @@ def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional
         reasons.append("legacy broadcast 관측 불가(age 없음)")
     elif age >= BROADCAST_STALL_SECONDS:
         reasons.append(f"legacy broadcast {age:.0f}초 정지")
+    if not snapshot.auth_running:
+        reasons.append("auth executor 정지")
+    if not snapshot.probe_enabled:
+        reasons.append("default executor probe disabled")
+    if not snapshot.probe_running:
+        reasons.append("default executor probe 정지")
     # ⛔ 서버 지표 판정은 **재구현하지 않는다** — 부하 도구와 같은 함수를 쓴다.
     reasons.extend(evaluate_server_abort(snapshot.auth_metrics, snapshot.probe,
                                          previous_probe_outstanding))
@@ -181,6 +191,9 @@ async def collect_from_server(*, timeout: float = COMMAND_TIMEOUT_SECONDS) -> Sn
         new_error_count=sum(1 for line in logs.splitlines()
                             if "ERROR" in line or "Traceback" in line),
         broadcast_age_seconds=float(age) if isinstance(age, (int, float)) else None,
+        auth_running=auth.get("running") is True,
+        probe_enabled=probe.get("enabled") is True,
+        probe_running=probe.get("running") is True,
         auth_metrics=auth.get("metrics") if isinstance(auth.get("metrics"), dict) else {},
         probe=probe.get("metrics") if isinstance(probe.get("metrics"), dict) else {},
     )
@@ -233,10 +246,24 @@ async def start_load_process(*, token: str, url: str,
         python, str(script), "--token-stdin", "--url", url,
         stdin=asyncio.subprocess.PIPE, cwd=str(REPO_ROOT),
     )
-    process.stdin.write(token.encode("utf-8"))     # ⛔ argv 가 아니라 stdin
-    await process.stdin.drain()
-    process.stdin.close()
-    return LoadProcess(process)
+    handle = LoadProcess(process)
+    try:
+        if process.stdin is None:
+            raise CollectorError("부하 프로세스 stdin pipe 가 없다")
+        process.stdin.write(token.encode("utf-8"))     # ⛔ argv 가 아니라 stdin
+        await process.stdin.drain()
+        process.stdin.close()
+    except BaseException:
+        # stdin 전달이 실패하면 호출자는 handle 을 받지 못한다. 여기서 회수하지 않으면
+        # 바깥 finally 도 모르는 부하 자식이 canary 뒤까지 살아남는다.
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            await handle.stop()
+        finally:
+            await handle.kill()
+        raise
+    return handle
 
 
 # ── flag rollback ───────────────────────────────────────────────────────────
@@ -252,6 +279,8 @@ CANARY_ENV: dict[str, str] = {
     "KRX_CLIENT_DISTRIBUTION_ENABLED": "false",
 }
 EXPECTED_AUTH_WORKERS = 4
+PREFLIGHT_ATTEMPTS = 10
+PREFLIGHT_RETRY_SECONDS = 1.0
 
 
 def read_env_values(text: str, keys) -> dict[str, Optional[str]]:
@@ -279,16 +308,58 @@ def apply_env_values(text: str, changes: dict[str, Optional[str]]) -> str:
     for line in lines:
         stripped = line.strip()
         key = stripped.partition("=")[0].strip() if "=" in stripped else None
-        if key in remaining and not stripped.startswith("#"):
-            value = remaining.pop(key)
-            if value is not None:
-                out.append(f"{key}={value}")
-            continue                                   # None → 줄 자체를 지운다
+        if key in changes and not stripped.startswith("#"):
+            # 첫 줄만 새 값으로 바꾸고 같은 키의 중복 줄은 제거한다. 뒤쪽 중복 키가 남으면
+            # dotenv 구현에 따라 canary 값이나 복원값을 다시 덮을 수 있다.
+            if key in remaining:
+                value = remaining.pop(key)
+                if value is not None:
+                    out.append(f"{key}={value}")
+            continue                                   # None 또는 중복 → 줄 자체를 지운다
         out.append(line)
     for key, value in remaining.items():
         if value is not None:
             out.append(f"{key}={value}")
     return "\n".join(out) + "\n"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """같은 디렉터리 임시 파일을 fsync 한 뒤 교체한다."""
+    path = Path(path)
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = ""
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def validate_canary_start_env(values: dict[str, Optional[str]]) -> list[str]:
+    """이미 활성화된 release flag를 이 도구가 canary 상태로 오인하지 않게 한다."""
+    problems: list[str] = []
+    for key in ("TOPIC_DISPATCHER_ENABLED", "KRX_CLIENT_DISTRIBUTION_ENABLED"):
+        value = values.get(key)
+        if value is not None and value.strip().lower() != "false":
+            problems.append(f"{key}는 canary 시작 전에 false 또는 미설정이어야 한다: {value!r}")
+    return problems
 
 
 class EnvRestorer:
@@ -301,9 +372,10 @@ class EnvRestorer:
     async def restore(self) -> None:
         if self.done:
             return
-        self._env_path.write_text(
+        atomic_write_text(
+            self._env_path,
             apply_env_values(self._env_path.read_text(encoding="utf-8"), self._original),
-            encoding="utf-8")
+        )
         await recreate_and_verify_health()
         current = read_env_values(self._env_path.read_text(encoding="utf-8"), self._original)
         if current != self._original:
@@ -355,6 +427,8 @@ async def preflight() -> list[str]:
 
     auth = parse_curl_response(await run_command(
         admin_fetch_command("/admin/api/ws-auth-executor-metrics")))
+    if not auth.get("running"):
+        problems.append("auth executor running=false")
     metrics = auth.get("metrics") if isinstance(auth.get("metrics"), dict) else {}
     if metrics.get("max_workers") != EXPECTED_AUTH_WORKERS:
         problems.append(f"auth max_workers={metrics.get('max_workers')} (기대 {EXPECTED_AUTH_WORKERS})")
@@ -364,6 +438,25 @@ async def preflight() -> list[str]:
     age = heartbeat.get("age_seconds")
     if not isinstance(age, (int, float)) or age >= BROADCAST_STALL_SECONDS:
         problems.append(f"broadcast heartbeat 이 신선하지 않다: {age}")
+    return problems
+
+
+async def wait_for_preflight(*, attempts: int = PREFLIGHT_ATTEMPTS,
+                             retry_seconds: float = PREFLIGHT_RETRY_SECONDS) -> list[str]:
+    """재생성 직후 scheduler/probe의 첫 tick만 유계로 기다린다.
+
+    마지막 결과가 여전히 실패면 그대로 반환한다. 수집 오류는 재시도하지 않고 즉시 전파해
+    "아직 준비 중"과 "관측 불가"를 섞지 않는다.
+    """
+    if attempts < 1:
+        raise ValueError("preflight attempts는 1 이상이어야 한다")
+    problems: list[str] = []
+    for attempt in range(attempts):
+        problems = await preflight()
+        if not problems:
+            return []
+        if attempt + 1 < attempts:
+            await asyncio.sleep(retry_seconds)
     return problems
 
 
@@ -505,14 +598,16 @@ async def _amain(args) -> int:
         print("  복원: 원래 값/키 부재까지 정확히 되돌린 뒤 force-recreate + health")
         return 0
 
-    # ⛔ **env 를 건드리기 전에** 실패할 수 있는 것들을 먼저 끝낸다 — 여기서 실패하면 되돌릴
-    #    상태 자체가 없다(복원 공백 0).
-    token = load_id_token(token_file=args.token_file)
-    baseline = (await run_command(
-        ["docker", "inspect", "exchange-rate-app", "--format", "{{.State.StartedAt}}"])).strip()
-
     env_path = Path(args.env_file)
     original = read_env_values(env_path.read_text(encoding="utf-8"), CANARY_ENV)
+    start_problems = validate_canary_start_env(original)
+    if start_problems:
+        print(json.dumps({"ok": False, "start_env": start_problems}, ensure_ascii=False))
+        return 1
+
+    # env 를 건드리기 전에 실패할 수 있는 입력 검증을 끝낸다. 시작 시각은 아래의 의도적
+    # force-recreate 뒤에 읽어야 첫 poll에서 그 재생성을 장애로 오판하지 않는다.
+    token = load_id_token(token_file=args.token_file)
     restorer = EnvRestorer(original, env_path)
     load: Optional[LoadProcess] = None
     outcome: Optional[CanaryOutcome] = None
@@ -520,16 +615,19 @@ async def _amain(args) -> int:
     # ⛔ **이 지점부터 가장 바깥 `finally` 가 env 를 소유한다.** 한때 monitor 는 flag 를 켜지
     #    않으면서 rollback 만 했다 — 운영자가 먼저 켜고 자식 생성이 실패하면 **켜진 채 남았다**.
     try:
-        env_path.write_text(
+        atomic_write_text(
+            env_path,
             apply_env_values(env_path.read_text(encoding="utf-8"), dict(CANARY_ENV)),
-            encoding="utf-8")
+        )
         await recreate_and_verify_health()
 
-        problems = await preflight()
+        problems = await wait_for_preflight()
         if problems:
             print(json.dumps({"ok": False, "preflight": problems}, ensure_ascii=False))
             return 1                                   # ⛔ 부하 프로세스 **0건** 생성
 
+        baseline = (await run_command(
+            ["docker", "inspect", "exchange-rate-app", "--format", "{{.State.StartedAt}}"])).strip()
         load = await start_load_process(token=token, url=args.url)
         outcome = await run_monitored_canary(
             collect=collect_from_server, load=load, rollback=restorer.restore,

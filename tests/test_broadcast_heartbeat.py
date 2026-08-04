@@ -63,6 +63,14 @@ def test_heartbeat_goes_stale_only_when_the_cycle_itself_stops():
     assert age >= 30, "cycle 이 멈췄는데 stale 로 보이지 않는다"
 
 
+def test_reset_clears_the_cycle_heartbeat_too():
+    """새 heartbeat 필드만 reset에서 빠지면 초기화 뒤에도 이전 cycle이 살아 보인다."""
+    stats = _fresh()
+    stats.record_skip(reason="no_connections")
+    stats.reset_stats()
+    assert stats.last_cycle_time is None
+
+
 # ── endpoint ────────────────────────────────────────────────────────────────
 
 

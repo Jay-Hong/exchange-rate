@@ -829,7 +829,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   · **즉시 중단** (1건이라도): health 실패·컨테이너 재시작·신규 ERROR traceback / subscribe
     timeout 또는 예상 밖 `subscription_error` / auth `queue_wait_ms_max >= 5000` / 계획된 종료
     전 `never_started`·`caller_cancelled_while_running` 증가 / probe `outstanding=1` **2회
-    연속** 또는 queue delay `>= 1000ms` / legacy broadcast 30초 이상 정지.
+    연속** 또는 queue delay `>= 1000ms` / legacy broadcast 30초 이상 정지 / auth executor 또는
+    default executor probe의 실행 중 정지.
     🟡 **실행기 land, 수직 리허설 미실시** — `scripts/canary_monitor.py`(CLI + 부하 자식 +
     watchdog + rollback). ⛔ **"배선 완료"라고 쓰지 않는다**: 한때 그렇게 적었는데 그때 그
     파일은 **수집기에서 끝나** CLI·부하 자식·stop·rollback 이 **전부 없었다**. 지금은 있고

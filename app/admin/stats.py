@@ -287,6 +287,7 @@ class BroadcastStats:
         """통계 초기화 (테스트 또는 관리자 수동 리셋용)"""
         self.total_success = 0
         self.total_failure = 0
+        self.last_cycle_time = None
         self.last_broadcast_time = None
         self.first_broadcast_time = None
         self.broadcast_history.clear()

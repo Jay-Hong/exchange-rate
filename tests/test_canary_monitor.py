@@ -104,6 +104,9 @@ def test_monitor_actually_polls_the_server():
     (mon.Snapshot(auth_metrics={"never_started": 1}), "never_started"),
     (mon.Snapshot(auth_metrics={"caller_cancelled_while_running": 1}), "caller_cancelled"),
     (mon.Snapshot(probe={"queue_delay_ms_max": 1000}), "queue delay"),
+    (mon.Snapshot(auth_running=False), "auth executor 정지"),
+    (mon.Snapshot(probe_enabled=False), "probe disabled"),
+    (mon.Snapshot(probe_running=False), "probe 정지"),
 ])
 def test_each_agreed_condition_actually_aborts(snapshot, expected):
     outcome, _ = _outcome(_Harness([snapshot]))
@@ -269,8 +272,9 @@ def test_collect_from_server_fills_broadcast_age(monkeypatch):
     responses = {
         "/health": {"status": "healthy"},
         "/admin/api/broadcast-heartbeat": {"age_seconds": 4.0, "last_broadcast_time": "x"},
-        "/admin/api/ws-auth-executor-metrics": {"metrics": {"count": 1}},
-        "/admin/api/default-executor-probe": {"metrics": {"outstanding": 0}},
+        "/admin/api/ws-auth-executor-metrics": {"running": True, "metrics": {"count": 1}},
+        "/admin/api/default-executor-probe": {
+            "enabled": True, "running": True, "metrics": {"outstanding": 0}},
     }
 
     async def fake_run(command, *, timeout=None, cwd=None):
@@ -293,6 +297,12 @@ def test_collect_from_server_fills_broadcast_age(monkeypatch):
     stalled = _run(mon.collect_from_server())
     reasons = mon.evaluate_snapshot_abort(stalled, baseline_started_at=None)
     assert any("정지" in r for r in reasons), "실제 수집 경로에서 broadcast 정지가 안 잡힌다"
+
+    responses["/admin/api/broadcast-heartbeat"] = {"age_seconds": 1.0}
+    responses["/admin/api/ws-auth-executor-metrics"]["running"] = False
+    auth_stopped = _run(mon.collect_from_server())
+    reasons = mon.evaluate_snapshot_abort(auth_stopped, baseline_started_at=None)
+    assert any("auth executor 정지" in r for r in reasons), "수집기가 running 상태를 버렸다"
 
 
 def test_collect_counts_real_error_lines_from_logs(monkeypatch):
@@ -357,6 +367,51 @@ def test_load_token_is_passed_by_stdin_not_argv():
     assert parser.allow_abbrev is False
 
 
+def test_stdin_failure_reaps_the_load_process_before_raising(monkeypatch):
+    """handle 반환 전 stdin이 깨지면 바깥 cleanup은 자식 존재를 모른다."""
+    class BrokenStdin:
+        def __init__(self):
+            self.closed = False
+
+        def write(self, data):
+            assert data == b"secret"
+
+        async def drain(self):
+            raise BrokenPipeError("broken")
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        def __init__(self):
+            self.stdin = BrokenStdin()
+            self.returncode = None
+            self.terminated = self.killed = False
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 143
+
+        def kill(self):
+            self.killed = True
+            self.returncode = 137
+
+        async def wait(self):
+            return self.returncode
+
+    process = Process()
+
+    async def fake_create(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(mon.asyncio, "create_subprocess_exec", fake_create)
+    with pytest.raises(BrokenPipeError):
+        _run(mon.start_load_process(token="secret", url="ws://example/ws"))
+    assert process.stdin.closed
+    assert process.terminated or process.killed
+    assert process.returncode is not None
+
+
 def test_monitor_reuses_the_shared_abort_rules():
     from scripts import ws_auth_load
     assert mon.evaluate_server_abort is ws_auth_load.evaluate_server_abort
@@ -398,6 +453,37 @@ def test_env_apply_adds_absent_keys_and_removes_on_none():
 
     removed = mon.apply_env_values(added, {"DEFAULT_EXECUTOR_PROBE_ENABLED": None})
     assert "DEFAULT_EXECUTOR_PROBE_ENABLED" not in removed, "키 제거가 되지 않았다"
+
+
+def test_env_apply_removes_duplicate_keys_instead_of_leaving_a_later_override():
+    text = "TOPIC_DISPATCHER_ENABLED=false\nTOPIC_DISPATCHER_ENABLED=true\n"
+    applied = mon.apply_env_values(text, {"TOPIC_DISPATCHER_ENABLED": "true"})
+    assert applied.count("TOPIC_DISPATCHER_ENABLED=") == 1
+    assert "TOPIC_DISPATCHER_ENABLED=true" in applied
+
+
+def test_atomic_env_write_keeps_the_old_file_if_replace_fails(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("OLD=present\n")
+
+    def fail_replace(source, target):
+        raise OSError("교체 실패")
+
+    monkeypatch.setattr(mon.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        mon.atomic_write_text(env, "NEW=value\n")
+    assert env.read_text() == "OLD=present\n", "실패 중 기존 env가 잘리거나 바뀌었다"
+    assert list(tmp_path.glob("..env.*")) == [], "실패한 임시 파일이 남았다"
+
+
+@pytest.mark.parametrize("key", [
+    "TOPIC_DISPATCHER_ENABLED",
+    "KRX_CLIENT_DISTRIBUTION_ENABLED",
+])
+def test_canary_refuses_to_start_when_a_release_flag_is_already_true(key):
+    values = {name: None for name in mon.CANARY_ENV}
+    values[key] = "true"
+    assert any(key in problem for problem in mon.validate_canary_start_env(values))
 
 
 def test_restorer_puts_back_original_values_not_a_hardcoded_false(tmp_path, monkeypatch):
@@ -444,7 +530,7 @@ def _preflight_responses(**overrides):
     payloads = {
         "env": env,
         "/admin/api/default-executor-probe": {"enabled": True, "running": True, "metrics": {}},
-        "/admin/api/ws-auth-executor-metrics": {"metrics": {"max_workers": 4}},
+        "/admin/api/ws-auth-executor-metrics": {"running": True, "metrics": {"max_workers": 4}},
         "/admin/api/broadcast-heartbeat": {"age_seconds": 3.0},
     }
     payloads.update(overrides)
@@ -467,6 +553,9 @@ def test_preflight_passes_when_every_precondition_holds(monkeypatch):
 @pytest.mark.parametrize("overrides,expected", [
     ({"/admin/api/default-executor-probe": {"enabled": False, "running": False}}, "enabled"),
     ({"/admin/api/default-executor-probe": {"enabled": True, "running": False}}, "running=false"),
+    ({"/admin/api/ws-auth-executor-metrics": {"running": False,
+                                                "metrics": {"max_workers": 4}}},
+     "auth executor running=false"),
     ({"/admin/api/ws-auth-executor-metrics": {"metrics": {"max_workers": 8}}}, "max_workers"),
     ({"/admin/api/broadcast-heartbeat": {"age_seconds": 99.0}}, "heartbeat"),
     ({"/admin/api/broadcast-heartbeat": {"age_seconds": None}}, "heartbeat"),
@@ -484,6 +573,38 @@ def test_preflight_catches_each_unapplied_env_key(monkeypatch, key):
     env[key] = "somethingelse"
     _patch_preflight(monkeypatch, _preflight_responses(env=env))
     assert any(key in p for p in _run(mon.preflight()))
+
+
+def test_preflight_waits_for_the_first_scheduler_tick_without_hiding_the_result(monkeypatch):
+    results = [["broadcast heartbeat 이 신선하지 않다: None"], []]
+    sleeps = []
+
+    async def fake_preflight():
+        return results.pop(0)
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(mon, "preflight", fake_preflight)
+    monkeypatch.setattr(mon.asyncio, "sleep", fake_sleep)
+    assert _run(mon.wait_for_preflight(attempts=2, retry_seconds=0.25)) == []
+    assert sleeps == [0.25]
+
+
+def test_preflight_returns_the_last_failure_after_the_bounded_grace(monkeypatch):
+    calls = []
+
+    async def always_bad():
+        calls.append(1)
+        return ["probe running=false"]
+
+    async def no_wait(seconds):
+        return None
+
+    monkeypatch.setattr(mon, "preflight", always_bad)
+    monkeypatch.setattr(mon.asyncio, "sleep", no_wait)
+    assert _run(mon.wait_for_preflight(attempts=3)) == ["probe running=false"]
+    assert len(calls) == 3
 
 
 def test_krx_distribution_is_forced_off_during_the_window():
@@ -544,7 +665,7 @@ def _patch_amain(monkeypatch, tmp_path, *, start_error=None, preflight=None,
 
     monkeypatch.setattr(mon, "recreate_and_verify_health", fake_recreate)
     monkeypatch.setattr(mon, "run_command", fake_run)
-    monkeypatch.setattr(mon, "preflight", fake_preflight)
+    monkeypatch.setattr(mon, "wait_for_preflight", fake_preflight)
     monkeypatch.setattr(mon, "start_load_process", fake_start)
     monkeypatch.setattr(mon, "load_id_token", lambda **kw: "tok")
     return env, calls
@@ -568,6 +689,64 @@ def test_preflight_failure_creates_zero_load_processes_and_restores(monkeypatch,
     assert _run(mon._amain(_AmainArgs(env))) == 1
     assert calls["started"] == 0, "preflight 실패인데 부하를 띄웠다"
     assert "TOPIC_DISPATCHER_ENABLED=false" in env.read_text()
+
+
+def test_already_enabled_topic_flag_creates_no_load_and_does_not_recreate(monkeypatch, tmp_path):
+    env, calls = _patch_amain(monkeypatch, tmp_path)
+    env.write_text("TOPIC_DISPATCHER_ENABLED=true\nOTHER=keep\n")
+    assert _run(mon._amain(_AmainArgs(env))) == 1
+    assert calls == {"recreate": 0, "started": 0}
+    assert "TOPIC_DISPATCHER_ENABLED=true" in env.read_text()
+
+
+def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch, tmp_path):
+    """재생성 전 StartedAt을 baseline으로 쓰면 첫 poll이 canary 자체의 재생성을 장애로 본다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    events = []
+    writes = []
+
+    class Load:
+        async def kill(self):
+            events.append("kill")
+
+    async def fake_recreate():
+        events.append("recreate")
+
+    async def fake_preflight():
+        events.append("preflight")
+        return []
+
+    async def fake_run(command, *, timeout=None, cwd=None):
+        events.append("inspect")
+        return "AFTER_RECREATE\n"
+
+    async def fake_start(**kwargs):
+        events.append("start")
+        return Load()
+
+    async def fake_monitor(**kwargs):
+        events.append(("baseline", kwargs["baseline_started_at"]))
+        return mon.CanaryOutcome(False, [], 1, True, False, False)
+
+    def fake_atomic_write(path, text):
+        writes.append(text)
+        Path(path).write_text(text)
+
+    monkeypatch.setattr(mon, "load_id_token", lambda **kwargs: "tok")
+    monkeypatch.setattr(mon, "recreate_and_verify_health", fake_recreate)
+    monkeypatch.setattr(mon, "wait_for_preflight", fake_preflight)
+    monkeypatch.setattr(mon, "run_command", fake_run)
+    monkeypatch.setattr(mon, "start_load_process", fake_start)
+    monkeypatch.setattr(mon, "run_monitored_canary", fake_monitor)
+    monkeypatch.setattr(mon, "atomic_write_text", fake_atomic_write)
+
+    assert _run(mon._amain(_AmainArgs(env))) == 0
+    assert events.index("recreate") < events.index("inspect") < events.index("start")
+    assert ("baseline", "AFTER_RECREATE") in events
+    assert len(writes) == 2, "활성화와 복원 중 하나가 원자적 write 경로를 우회했다"
+    assert "TOPIC_DISPATCHER_ENABLED=true" in writes[0]
+    assert "TOPIC_DISPATCHER_ENABLED=false" in writes[1]
 
 
 def test_env_is_restored_when_recreate_fails_right_after_applying(monkeypatch, tmp_path):
