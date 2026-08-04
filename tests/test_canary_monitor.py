@@ -1754,6 +1754,8 @@ def test_restore_verifies_bytes_before_discarding_the_backup(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("name", [
+    ".env.bak",
+    ".env.bak.20260805",
     ".env.canary-backup",
     ".env.canary-backup.tmp",
     ".env.canary-backup.x8n2kq4z",           # tempfile.mkstemp 의 실제 random suffix

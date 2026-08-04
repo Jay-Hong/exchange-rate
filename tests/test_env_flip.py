@@ -14,6 +14,8 @@
 import asyncio
 import json
 import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -224,6 +226,43 @@ class TestFileInvariants(unittest.TestCase):
             env_flip.check_file_invariants(text, "t")
         self.assertNotIn("super-secret-value", str(caught.exception))
 
+    def test_rejects_group_or_world_readable_env(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(ORIGINAL_ENV, encoding="utf-8")
+            path.chmod(0o664)
+            with self.assertRaises(env_flip.Abort) as caught:
+                env_flip.check_env_file_mode(path)
+            self.assertIn("chmod 600", str(caught.exception))
+
+    def test_accepts_owner_only_env(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(ORIGINAL_ENV, encoding="utf-8")
+            path.chmod(0o600)
+            env_flip.check_env_file_mode(path)
+
+    def test_rejects_group_or_world_readable_legacy_backup(self):
+        with TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text(ORIGINAL_ENV, encoding="utf-8")
+            backup = Path(tmp) / ".env.bak.20260805"
+            backup.write_text("SECRET=old\n", encoding="utf-8")
+            backup.chmod(0o664)
+            with self.assertRaises(env_flip.Abort) as caught:
+                env_flip.check_legacy_backup_modes(env)
+            self.assertIn("chmod 600", str(caught.exception))
+            self.assertNotIn("SECRET=old", str(caught.exception))
+
+    def test_accepts_owner_only_legacy_backups(self):
+        with TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text(ORIGINAL_ENV, encoding="utf-8")
+            backup = Path(tmp) / ".env.bak"
+            backup.write_text("SECRET=old\n", encoding="utf-8")
+            backup.chmod(0o600)
+            env_flip.check_legacy_backup_modes(env)
+
 
 class TestPreflight(unittest.IsolatedAsyncioTestCase):
     """⛔ **실제 `preflight`** 를 돌린다.
@@ -237,6 +276,7 @@ class TestPreflight(unittest.IsolatedAsyncioTestCase):
         root = Path(self._tmp.name)
         self.env_path = root / ".env"
         self.env_path.write_text(ORIGINAL_ENV, encoding="utf-8")
+        self.env_path.chmod(0o600)
         self.error_log = root / "error.log"
         self.target = Target(container="test-app", env_file=self.env_path)
         self.addCleanup(self._tmp.cleanup)
@@ -290,6 +330,20 @@ class TestPreflight(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(env_flip.Abort):
             await self._preflight(env_value="production")
 
+    async def test_aborts_when_env_is_group_or_world_readable(self):
+        self.env_path.chmod(0o664)
+        with self.assertRaises(env_flip.Abort) as caught:
+            await self._preflight()
+        self.assertIn("chmod 600", str(caught.exception))
+
+    async def test_aborts_when_a_legacy_backup_is_group_or_world_readable(self):
+        backup = self.env_path.parent / ".env.bak.old"
+        backup.write_text("SECRET=old\n", encoding="utf-8")
+        backup.chmod(0o664)
+        with self.assertRaises(env_flip.Abort) as caught:
+            await self._preflight()
+        self.assertIn(".env.bak.old", str(caught.exception))
+
     async def test_ambient_env_is_rejected_before_anything_else(self):
         """⛔ 셸 변수가 `--env-file` 을 이기므로 **파일을 보기 전에** 막아야 한다."""
         for item in self._stub_docker()[1:]:                 # ambient 는 진짜를 쓴다
@@ -299,6 +353,72 @@ class TestPreflight(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(env_flip.Abort) as caught:
                 await env_flip.preflight(self.target, self.env_path, self.error_log)
         self.assertIn("ENV", str(caught.exception))
+
+
+class TestSmokeWiring(unittest.IsolatedAsyncioTestCase):
+    """smoke helper를 직접 호출해 운영 판정 배선을 잠근다."""
+
+    async def _run_smoke(self, ws_output="rates 30"):
+        target = Target(container="test-app")
+        baseline = {
+            "container_id": "old-id",
+            "project": "exchange-rate",
+            "error_log": {"exists": False, "inode": None, "size": 0},
+        }
+
+        async def inspect(target, fmt):
+            if fmt == "{{.Id}}":
+                return "new-id"
+            if fmt == "{{.RestartCount}}":
+                return "0"
+            if fmt == env_flip.MATCH_FMT % "production":
+                return "MATCH"
+            raise AssertionError(f"예상하지 않은 inspect: {fmt}")
+
+        async def identity(target):
+            return []
+
+        async def project(target):
+            return "exchange-rate"
+
+        async def live_env(keys, target=None):
+            return {"ENV": "production", **{key: "false" for key in env_flip.FLAG_KEYS}}
+
+        startup = json.dumps({
+            "timestamp": "t", "level": "INFO", "logger": "exchange_rate",
+            "message": "start", "env": "production",
+        })
+
+        async def command(argv, **kwargs):
+            if "logs" in argv:
+                return startup
+            joined = " ".join(argv)
+            if env_flip.WRONG_PW_PY in joined:
+                return "401"
+            if env_flip.WS_PY in joined:
+                return ws_output
+            raise AssertionError(f"예상하지 않은 command: {argv}")
+
+        async def admin_ok(target, path):
+            return "200"
+
+        with patch.object(env_flip, "inspect_value", inspect), \
+             patch.object(env_flip, "check_target_identity", identity), \
+             patch.object(env_flip, "project_label", project), \
+             patch.object(env_flip, "container_env", live_env), \
+             patch.object(env_flip, "run_command", command), \
+             patch.object(env_flip, "_admin_ok", admin_ok), \
+             patch.object(env_flip, "count_new_errors", return_value=0):
+            return await env_flip.smoke(target, baseline, Path("unused-error.log"))
+
+    async def test_happy_path_requires_a_nonempty_legacy_payload(self):
+        result = await self._run_smoke("rates 30")
+        self.assertEqual(result["ws_initial"], {"type": "rates", "rate_count": 30})
+        self.assertEqual(result["new_errors"], 0)
+
+    async def test_empty_legacy_payload_is_not_a_success(self):
+        with self.assertRaises(env_flip.Abort, msg="type만 rates면 빈 payload도 성공으로 접혔다"):
+            await self._run_smoke("rates 0")
 
 
 class _Stage:
@@ -387,6 +507,25 @@ class TestRunFlipCleanupContract(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.backup.exists())
         self.assertEqual(self.stage.recreates, 0, "아무것도 안 바꿨는데 재생성했다")
 
+    async def test_os_error_in_preflight_returns_a_summary_instead_of_escaping(self):
+        """⚠️ preflight 는 `.env` 와 과거 backup 을 `stat`/`read` 한다 — 깨진 symlink·권한
+        문제는 **Abort 가 아닌 `OSError`** 로 온다. 그게 그대로 올라가면 summary 없이
+        traceback 만 남아 "어디까지 갔는지"가 안 보인다(이 구간은 아직 만든 것이 없다)."""
+        patches = self._patch()
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        with patch.object(env_flip, "preflight",
+                          side_effect=PermissionError("주입된 stat 실패")):
+            summary = await env_flip.run_flip(self.target, env_path=self.env_path,
+                                              error_log=self.error_log)
+        self.assertFalse(summary["ok"])
+        self.assertIn("PermissionError", summary["error"])
+        self.assertFalse(summary["wrote"])
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(self.stage.recreates, 0)
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), ORIGINAL_ENV)
+
     async def test_plan_failure_leaves_no_backup(self):
         self.env_path.write_text(ORIGINAL_ENV.replace("ENV=development", "ENV=production"),
                                  encoding="utf-8")
@@ -449,6 +588,51 @@ class TestRunFlipCleanupContract(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(summary["ok"])
         self.assertFalse(summary["wrote"])
         self.assertEqual(self.env_path.read_text(encoding="utf-8"), ORIGINAL_ENV)
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(self.stage.recreates, 0)
+
+    async def test_post_replace_failure_restores_instead_of_deleting_backup(self):
+        """replace 뒤 fsync 실패를 write 전 실패로 접으면 env/container 상태가 갈라진다."""
+        patches = self._patch()
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+        def replace_then_fail(path, data, *, mode=None):
+            Path(path).write_bytes(data)
+            raise OSError("주입된 directory fsync 실패")
+
+        with patch.object(env_flip, "atomic_write_bytes", side_effect=replace_then_fail):
+            summary = await env_flip.run_flip(self.target, env_path=self.env_path,
+                                              error_log=self.error_log)
+        self.assertFalse(summary["ok"])
+        self.assertTrue(summary["wrote"])
+        self.assertTrue(summary["rolled_back"])
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), ORIGINAL_ENV)
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(self.stage.recreates, 1, "변경 가능성이 있으면 원본으로 재생성해야 한다")
+
+    async def test_stale_plan_is_rejected_before_write(self):
+        """S1 뒤 env 가 바뀌면 과거 bytes 로 다른 운영 변경을 덮어쓰면 안 된다."""
+        patches = self._patch()
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        real_backup = env_flip.create_env_backup
+
+        def backup_then_external_edit(path):
+            backup = real_backup(path)
+            Path(path).write_text(ORIGINAL_ENV + "CONCURRENT=1\n", encoding="utf-8")
+            return backup
+
+        with patch.object(env_flip, "create_env_backup", side_effect=backup_then_external_edit):
+            summary = await env_flip.run_flip(self.target, env_path=self.env_path,
+                                              error_log=self.error_log)
+        self.assertFalse(summary["ok"])
+        self.assertFalse(summary["wrote"])
+        self.assertIn("stale", summary["error"])
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"),
+                         ORIGINAL_ENV + "CONCURRENT=1\n")
         self.assertFalse(self.backup.exists())
         self.assertEqual(self.stage.recreates, 0)
 
@@ -521,6 +705,76 @@ class TestSignalContract(unittest.TestCase):
         # backup 생성은 `run_flip` 안이고, 그 호출은 handler 설치 뒤의 `await task` 로만 도달한다.
         self.assertIn("create_env_backup", inspect.getsource(env_flip.run_flip))
         self.assertNotIn("create_env_backup", source)
+
+    def test_real_process_signals_restore_then_return_signal_exit_code(self):
+        """helper 멤버십이 아니라 실제 프로세스의 env 복원과 종료코드를 본다."""
+        child_source = r'''
+import asyncio
+import pathlib
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from scripts import canary_monitor, env_flip
+
+env_path = pathlib.Path(sys.argv[2])
+error_log = pathlib.Path(sys.argv[3])
+target = canary_monitor.Target(container="test-app", env_file=env_path)
+real_run_flip = env_flip.run_flip
+
+async def fake_preflight(target, env_path, error_log):
+    return {"container_id": "old", "project": "p",
+            "error_log": env_flip.log_baseline(error_log)}
+
+async def wait_for_signal(target=None):
+    print("READY", flush=True)
+    await asyncio.sleep(60)
+
+async def fake_smoke(target, baseline, error_log):
+    raise AssertionError("signal 뒤 smoke로 진행하면 안 된다")
+
+async def restore_recreate(target=None):
+    await asyncio.sleep(0.05)
+
+async def wrapped_run_flip():
+    return await real_run_flip(target, env_path=env_path, error_log=error_log)
+
+env_flip.preflight = fake_preflight
+env_flip.recreate_and_verify_health = wait_for_signal
+env_flip.smoke = fake_smoke
+env_flip.inspect_value = lambda target, fmt: asyncio.sleep(0, result="MATCH")
+canary_monitor.recreate_and_verify_health = restore_recreate
+env_flip.run_flip = wrapped_run_flip
+raise SystemExit(asyncio.run(env_flip.amain_with_signals([])))
+'''
+        for signame, expected in (("SIGTERM", 143), ("SIGHUP", 129)):
+            with self.subTest(signame=signame), TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                env_path = root / ".env"
+                env_path.write_text(ORIGINAL_ENV, encoding="utf-8")
+                env_path.chmod(0o600)
+                error_log = root / "error.log"
+                error_log.write_text("", encoding="utf-8")
+                child = subprocess.Popen(
+                    [sys.executable, "-c", child_source, str(env_flip.REPO_ROOT),
+                     str(env_path), str(error_log)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                try:
+                    ready = ""
+                    while ready != "READY":
+                        line = child.stdout.readline()
+                        self.assertTrue(line, "자식이 READY 전에 종료했다")
+                        ready = line.strip()
+                    child.send_signal(signal_number(signame))
+                    code = child.wait(timeout=20)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=5)
+
+                self.assertEqual(code, expected)
+                self.assertEqual(env_path.read_text(encoding="utf-8"), ORIGINAL_ENV)
+                self.assertFalse(canary_monitor.backup_path_for(env_path).exists())
 
 
 def signal_number(name: str) -> int:

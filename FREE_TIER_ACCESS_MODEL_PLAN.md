@@ -975,8 +975,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⚠️ **별건(운영 위생)**: 운영 리포에 `.env.bak*` **10개**가 있었고 전부 **mode 664
       (world-readable)** 에 `git check-ignore` 미적용이라 `git add -A` 한 번이면 스테이징됐다.
       즉시 위험은 `/.env.bak*` 를 **`.git/info/exclude`**(추적되지 않는 로컬 파일이라 트리를
-      dirty 하게 만들지 않는다)에 넣어 닫았다. 파일 이동·권한 조정과 추적되는 `.gitignore`
-      보강은 **별도 작업**이다. 현 `.env` 자체도 664 다.
+      dirty 하게 만들지 않는다)에 넣어 닫았고, 재발 방지는 추적되는 `.gitignore`의
+      `/.env.bak*`와 실제 `git check-ignore` 테스트로 보강했다. 파일 이동·삭제는 **별도 작업**이다.
+      현 `.env` 자체도 664였으므로 실행기는 owner-only mode가 아니면 fail-closed로 거부한다.
+      ENV 전환 전에 운영 `.env`와 보존할 backup을 먼저 `0600`으로 제한해야 한다.
 
     · **로컬 격리 스택에서만** 한다 — `docker-compose.rehearsal.yml`(loopback `127.0.0.1:18000`
       publish + 별도 container_name + 별도 named volume). 기본 compose와 병합하지 않는

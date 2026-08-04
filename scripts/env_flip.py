@@ -196,6 +196,29 @@ def check_file_invariants(text: str, stage: str) -> None:
                     "— production 에서 admin endpoint 가 503 이 된다")
 
 
+def check_env_file_mode(path: Path) -> None:
+    """운영 secret 파일은 소유자 외 읽기·쓰기를 허용하지 않는다."""
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise Abort(
+            f"{path.name} 권한이 {mode:03o}다 — ENV 전환 전에 `chmod 600 {path.name}` 필요"
+        )
+
+
+def check_legacy_backup_modes(env_path: Path) -> None:
+    """과거 수동 backup도 같은 secret 전체를 담으므로 느슨한 권한을 허용하지 않는다."""
+    insecure = []
+    for path in env_path.parent.glob(f"{env_path.name}.bak*"):
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            insecure.append(f"{path.name}({mode:03o})")
+    if insecure:
+        raise Abort(
+            "owner-only가 아닌 과거 env backup이 있다: " + ", ".join(sorted(insecure))
+            + " — ENV 전환 전에 `chmod 600 .env.bak*` 필요"
+        )
+
+
 def classify_stdout(logs: str) -> dict:
     """⚠️ **"모든 줄이 JSON"을 요구하면 false red 다.** `Dockerfile` 의 CMD 에 `--log-config`
     가 없어 uvicorn 자체 로거는 평문을 그대로 낸다 — 앱 로그만 JSON 이 된다.
@@ -315,6 +338,8 @@ async def preflight(target: Target, env_path: Path, error_log: Path) -> dict:
             "성공 직후 중단이면 그것이 **완료된 보안 수정을 되돌린다**. "
             "컨테이너 ENV 를 먼저 보고 어느 상태인지 판정할 것")
 
+    check_env_file_mode(env_path)
+    check_legacy_backup_modes(env_path)
     check_file_invariants(env_path.read_text(encoding="utf-8"), "preflight")
 
     live = await observe(lambda: container_env(["ENV", *FLAG_KEYS], target), "preflight env")
@@ -396,7 +421,13 @@ async def smoke(target: Target, baseline: dict, error_log: Path) -> dict:
     kind, _, count = ws_out.partition(" ")
     if kind != "rates":
         raise Abort(f"legacy WS 초기 프레임 type={kind!r}")
-    result["ws_initial"] = {"type": kind, "rate_count": int(count or 0)}
+    try:
+        rate_count = int(count)
+    except ValueError as exc:
+        raise Abort(f"legacy WS rates 개수가 정수가 아니다: {count!r}") from exc
+    if rate_count <= 0:
+        raise Abort(f"legacy WS 초기 rates 가 비었다: {rate_count}")
+    result["ws_initial"] = {"type": kind, "rate_count": rate_count}
 
     # 10. 신규 ERROR 0 — 컨테이너 stdout(재생성 후 전량) + error.log 의 baseline 이후.
     new_errors = classified["error_lines"] + count_new_errors(error_log, baseline["error_log"])
@@ -431,19 +462,46 @@ async def run_flip(target: Target = PRODUCTION_TARGET, *,
         data = env_path.read_bytes()
         new_data = plan_new_bytes(data)
         say("S1", f"통과 — 대상 1행, {len(data)} → {len(new_data)} bytes")
-    except (Abort, CollectorError) as exc:
+    except (Abort, CollectorError, OSError) as exc:
+        # ⚠️ `OSError` 도 여기서 접는다 — preflight 는 `.env` 와 과거 backup 을 `stat`/`read`
+        #    하므로 깨진 symlink·권한 문제가 **Abort 가 아닌 형태로** 올라올 수 있다. 그대로
+        #    두면 summary 없이 traceback 만 남아 "어디까지 갔는지"가 안 보인다. 이 구간은
+        #    **아직 아무것도 만들지 않았으므로** 그냥 요약을 남기고 끝내는 것이 맞다.
         summary["error"] = f"{type(exc).__name__}: {exc}"
         return summary
 
     # ⛔ **backup 보다 먼저 만들 것이 없다** — 여기부터는 정리 경로가 필요하다.
     #    (signal handler 는 이 함수 **밖**에서 이미 설치돼 있다: `amain_with_signals`)
+    #
+    # ⚠️ **감수하는 잔재 하나**: `create_env_backup` 이 link 게시 **뒤**(디렉터리 fsync)에서
+    #    실패하면 `backup` 지역변수는 아직 None 이라 아래 정리가 파일을 지우지 못한다.
+    #    ⛔ 그렇다고 `backup_path_for(...).exists()` 로 바꾸면 **더 나쁘다** — backup 이 이미
+    #    있어서(FileExistsError) 실패한 경우까지 지워 **남의 backup 을 파괴**한다.
+    #    남는 것은 원본 사본 하나뿐이고 `.env` 는 그대로이므로 **안전한 잔재**이며, 다음 실행의
+    #    preflight 가 그것을 발견해 무엇을 확인해야 하는지 안내한다. 그래서 고치지 않는다.
     say("S2", "durable backup")
-    backup = create_env_backup(env_path)
+    backup: Optional[Path] = None
+    try:
+        backup = create_env_backup(env_path)
+        # S1 뒤 다른 프로세스가 env 를 바꿨다면 stale 계획으로 덮어쓰지 않는다. backup 은
+        # 이 실행의 소유권 표식이기도 하므로, 비교가 끝난 뒤에만 S3 로 진행한다.
+        if backup.read_bytes() != data or env_path.read_bytes() != data:
+            raise Abort("S1 이후 .env 가 변경됐다 — stale 계획을 적용하지 않는다")
+    except (Abort, CollectorError, OSError) as exc:
+        if backup is not None:
+            try:
+                unlink_durably(backup)
+            except OSError as unlink_exc:
+                summary["backup_remove_error"] = str(unlink_exc)
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        return summary
     say("S2", f"생성 {backup.name} (0600, gitignore 대상)")
 
     restorer = EnvRestorer(env_path, target)
+    write_attempted = False
     try:
         say("S3", "원자적 write")
+        write_attempted = True
         atomic_write_bytes(env_path, new_data)
         summary["wrote"] = True
 
@@ -462,6 +520,14 @@ async def run_flip(target: Target = PRODUCTION_TARGET, *,
         say("S6", "전 항목 통과")
     except BaseException as exc:                          # noqa: BLE001  취소·signal 도 정리한다
         summary["error"] = f"{type(exc).__name__}: {exc}"
+        if write_attempted and not summary["wrote"]:
+            # atomic_write_bytes 는 os.replace 뒤 디렉터리 fsync 에서 실패할 수 있다. 함수가
+            # 예외를 냈다는 사실만으로 "write 전 실패"라고 분류하면 바뀐 env 를 남긴 채
+            # backup 을 삭제한다. 현재 bytes 를 모르면 변경 가능성으로 보고 복원한다.
+            try:
+                summary["wrote"] = env_path.read_bytes() != data
+            except OSError:
+                summary["wrote"] = True
         if summary["wrote"]:
             say("ROLLBACK", "write 이후 실패 — backup 전체 복원")
             try:
@@ -529,7 +595,11 @@ async def amain_with_signals(argv: Optional[Sequence[str]] = None) -> int:
         except (NotImplementedError, RuntimeError):
             pass
     try:
-        return await task
+        result = await task
+        if received["signum"] is not None:
+            print(f"[SIGNAL] {received['signum']} — 정리 완료 후 종료", file=sys.stderr)
+            return 128 + received["signum"]
+        return result
     except asyncio.CancelledError:
         if received["signum"] is None:
             raise
