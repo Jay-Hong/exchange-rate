@@ -97,7 +97,7 @@ def test_monitor_actually_polls_the_server():
 
 @pytest.mark.parametrize("snapshot,expected", [
     (mon.Snapshot(health_ok=False), "health 실패"),
-    (mon.Snapshot(new_error_count=1), "신규 ERROR"),
+    (mon.Snapshot(matching_log_line_count=1), "ERROR/Traceback 포함 로그"),
     (mon.Snapshot(broadcast_age_seconds=30), "broadcast"),
     (mon.Snapshot(broadcast_age_seconds=None), "관측 불가"),
     (mon.Snapshot(auth_metrics={"queue_wait_ms_max": 5000}), "queue_wait_ms_max"),
@@ -363,7 +363,7 @@ def test_collect_counts_real_error_lines_from_logs(monkeypatch):
         return _curl(body)
 
     monkeypatch.setattr(mon, "run_command", fake_run)
-    assert _run(mon.collect_from_server()).new_error_count == 2
+    assert _run(mon.collect_from_server()).matching_log_line_count == 2
 
 
 def test_endpoint_reported_error_is_a_collector_failure(monkeypatch):
@@ -1835,3 +1835,141 @@ def test_temp_suffix_constant_matches_the_ignore_rule():
     rules = (mon.REPO_ROOT / ".gitignore").read_text().splitlines()
     assert f"*{mon.TEMP_SUFFIX}" in rules, \
         f"{mon.TEMP_SUFFIX} 를 덮는 gitignore 규칙이 없다"
+
+
+# ── 측정 산출물 (rollback 이 지우지 못하게) ────────────────────────────────
+
+
+def test_artifact_is_owner_only_and_refuses_to_overwrite(tmp_path):
+    """⛔ 같은 이름이 있으면 **이전 실행의 산출물**이다 — 덮으면 그 측정이 사라진다."""
+    path = tmp_path / "run.jsonl"
+    artifact = mon.MetricsArtifact(path)
+    assert oct(path.stat().st_mode & 0o777) == "0o600", "산출물이 타 사용자에게 열려 있다"
+
+    with pytest.raises(FileExistsError):
+        mon.MetricsArtifact(path)
+    del artifact
+
+
+def test_each_poll_is_persisted_before_the_verdict(tmp_path):
+    """⛔ **rollback 이 컨테이너를 재생성하면 process-local 지표가 사라진다** — 중단이든 완주든
+    창의 끝은 재생성이라, 파일로 남기지 않으면 7분을 돌리고도 데이터가 없다(실제로 잃었다).
+    ⚠️ 판정 **전에** 기록해야 중단으로 빠져나가도 그 poll 의 관측이 남는다."""
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    harness = _Harness([
+        mon.Snapshot(auth_metrics={"count": 3, "queue_wait_ms_max": 12.5}),
+        mon.Snapshot(health_ok=False, auth_metrics={"count": 7}),   # 여기서 중단
+    ])
+    _run(mon.run_monitored_canary(
+        collect=harness.collect, load=_FakeLoad(), rollback=harness.rollback,
+        poll_interval=0.001, artifact=artifact, emit=lambda _: None))
+
+    records = [json.loads(line) for line in artifact.path.read_text().splitlines()]
+    polls = [r for r in records if r["kind"] == "poll"]
+    assert len(polls) == 2, "중단을 유발한 poll 의 관측이 사라졌다"
+    assert polls[0]["auth_metrics"]["queue_wait_ms_max"] == 12.5, "지표 본문이 남지 않았다"
+    assert polls[1]["auth_metrics"]["count"] == 7
+    assert all("utc" in r and "kind" in r for r in records)
+
+    outcome = [r for r in records if r["kind"] == "outcome"]
+    assert outcome and outcome[0]["aborted"] is True, "cleanup 결과가 남지 않았다"
+    assert outcome[0]["rollback_done"] is True
+
+
+def test_collect_failure_is_recorded_too(tmp_path):
+    """⚠️ '못 읽었다' 도 관측이다 — 남기지 않으면 사후에 원인을 못 가른다."""
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    harness = _Harness([], collect_error=mon.CollectorError("401"))
+    _run(mon.run_monitored_canary(
+        collect=harness.collect, load=_FakeLoad(), rollback=harness.rollback,
+        poll_interval=0.001, artifact=artifact, emit=lambda _: None))
+
+    kinds = [json.loads(l)["kind"] for l in artifact.path.read_text().splitlines()]
+    assert "collect_error" in kinds
+
+
+def test_artifact_is_bounded(tmp_path):
+    """⛔ 무제한 append 금지 — 디스크와 읽기 비용이 창 길이에 비례해 자란다."""
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    for _ in range(mon.MAX_ARTIFACT_RECORDS + 50):
+        artifact.append("poll", {"x": 1})
+    assert artifact.records == mon.MAX_ARTIFACT_RECORDS
+    assert len(artifact.path.read_text().splitlines()) == mon.MAX_ARTIFACT_RECORDS
+
+
+def test_artifact_never_contains_credentials(tmp_path):
+    """⛔ 산출물은 사후에 공유·보관된다 — 토큰·admin 비밀이 들어가면 안 된다."""
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    harness = _Harness([mon.Snapshot(auth_metrics={"count": 1})])
+    _run(mon.run_monitored_canary(
+        collect=harness.collect, load=_FakeLoad(), rollback=harness.rollback,
+        poll_interval=0.001, artifact=artifact, emit=lambda _: None))
+
+    body = artifact.path.read_text()
+    for forbidden in ("ADMIN_PASSWORD", "id_token", "Authorization", "Basic "):
+        assert forbidden not in body, f"산출물에 {forbidden} 가 들어갔다"
+
+def test_amain_passes_the_artifact_to_the_monitor(monkeypatch, tmp_path):
+    """⛔ 산출물을 **만들기만 하고 넘기지 않으면** 파일은 비어 있다 — 측정은 그대로 사라진다
+    (실측: 배선을 지워도 다른 테스트가 전부 통과했다)."""
+    env, calls = _patch_amain(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    async def fake_monitor(**kwargs):
+        seen["artifact"] = kwargs.get("artifact")
+        return mon.CanaryOutcome(False, [], 1, True, True, False)
+
+    async def fake_start(**kwargs):
+        return _FakeLoad(seconds=0.01)
+
+    monkeypatch.setattr(mon, "start_load_process", fake_start)
+    monkeypatch.setattr(mon, "run_monitored_canary", fake_monitor)
+
+    _run(mon._amain(_AmainArgs(env, inject_abort_after=None)))
+    assert isinstance(seen.get("artifact"), mon.MetricsArtifact), \
+        "monitor 가 산출물을 못 받았다 — poll 관측이 어디에도 남지 않는다"
+
+
+def test_artifact_write_is_fsynced(tmp_path, monkeypatch):
+    """⛔ `flush` 만으로는 OS 버퍼에 남는다 — 프로세스가 죽으면 그 창의 관측이 사라진다.
+    창의 끝은 항상 재생성이라, 디스크에 닿았는지가 곧 데이터 유무다."""
+    synced: list = []
+    real_fsync = mon.os.fsync
+    monkeypatch.setattr(mon.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+
+    artifact = mon.MetricsArtifact(tmp_path / "run.jsonl")
+    artifact.append("poll", {"x": 1})
+    assert synced, "append 가 fsync 되지 않았다"
+
+
+def test_artifact_creation_failure_aborts_before_any_env_change(monkeypatch, tmp_path, capsys):
+    """⛔ 산출물 실패를 삼키고 진행하면 **측정 없는 7분 창**을 열게 된다.
+
+    ⚠️ **exit code 만 보면 공허하다** — `_amain` 은 그 앞의 target identity 검사에서도 1을
+    반환한다(실측: 그래서 이 축의 변이가 SURVIVED 였다). identity 를 통과시킨 뒤 **실패
+    이유**까지 확인해야 이 분기를 실제로 짚는다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    before = env.read_text()
+    started: list = []
+
+    async def ok_identity(target):
+        return []
+
+    monkeypatch.setattr(mon, "check_target_identity", ok_identity)
+    monkeypatch.setattr(mon, "load_id_token", lambda **kw: "tok")
+    monkeypatch.setattr(mon, "MetricsArtifact",
+                        lambda path: (_ for _ in ()).throw(OSError("disk full")))
+
+    async def fake_start(**kwargs):
+        started.append(1)
+        return _FakeLoad()
+
+    monkeypatch.setattr(mon, "start_load_process", fake_start)
+
+    assert _run(mon._amain(_AmainArgs(env, inject_abort_after=None))) == 1
+    reported = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert reported["ok"] is False and "artifact" in reported, \
+        f"실패 이유가 '산출물 생성 실패' 가 아니다: {reported}"
+    assert started == [], "산출물 실패인데 부하를 띄웠다"
+    assert env.read_text() == before and not mon.backup_path_for(env).exists()

@@ -31,6 +31,7 @@ import signal
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
@@ -183,7 +184,7 @@ class Snapshot:
     health_ok: bool = True
     injected_health_failure: bool = False
     container_started_at: Optional[str] = None
-    new_error_count: int = 0
+    matching_log_line_count: int = 0
     broadcast_age_seconds: Optional[float] = 0.0
     auth_running: bool = True
     probe_enabled: bool = True
@@ -203,8 +204,11 @@ def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional
             and snapshot.container_started_at is not None
             and snapshot.container_started_at != baseline_started_at):
         reasons.append("컨테이너 재시작")
-    if snapshot.new_error_count > 0:
-        reasons.append(f"신규 ERROR/traceback {snapshot.new_error_count}건")
+    if snapshot.matching_log_line_count > 0:
+        # ⚠️ **"오류 N건" 이 아니다** — `ERROR` 또는 `Traceback` 이 포함된 **로그 줄 수**다.
+        #    예외 하나가 여러 줄로 세어질 수 있으므로 건수로 보고하지 않는다.
+        reasons.append(
+            f"ERROR/Traceback 포함 로그 {snapshot.matching_log_line_count}줄 (예외 건수 아님)")
     age = snapshot.broadcast_age_seconds
     if age is None:
         # ⛔ "한 번도 broadcast 하지 않음"을 0 으로 접으면 **정지를 정상으로 읽는다**.
@@ -246,8 +250,8 @@ async def collect_from_server(*, timeout: Optional[float] = None,
     return Snapshot(
         health_ok=health.get("status") == "healthy",
         container_started_at=started or None,
-        new_error_count=sum(1 for line in logs.splitlines()
-                            if "ERROR" in line or "Traceback" in line),
+        matching_log_line_count=sum(1 for line in logs.splitlines()
+                                    if "ERROR" in line or "Traceback" in line),
         broadcast_age_seconds=float(age) if isinstance(age, (int, float)) else None,
         auth_running=auth.get("running") is True,
         probe_enabled=probe.get("enabled") is True,
@@ -426,6 +430,9 @@ def validate_canary_start_env(values: dict[str, Optional[str]]) -> list[str]:
     return problems
 
 
+ARTIFACT_SUFFIX = ".canary-metrics.jsonl"
+MAX_ARTIFACT_RECORDS = 2000          # ⛔ 무제한 append 금지(디스크·읽기 비용)
+
 BACKUP_SUFFIX = ".canary-backup"
 #: ⛔ 원자적 write 의 임시 파일에 **고정 접미사**를 붙인다. 그 temp 는 대상 env 파일의 내용
 #: (= 운영 secret 전체)을 담는데, 이름이 `..env.<random>` 이면 `.gitignore` 가 못 잡아
@@ -485,6 +492,36 @@ def create_env_backup(env_path: Path) -> Path:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+class MetricsArtifact:
+    """poll 마다의 관측을 **host 디스크에 append** 한다 — canary 의 유일한 산출물이다.
+
+    ⛔ **rollback 이 컨테이너를 재생성하면 process-local 지표가 통째로 사라진다.** 중단이든
+    정상 완주든 창의 마지막은 재생성이므로, 파일로 남기지 않으면 **7분을 돌리고도 데이터가
+    없다**(실제로 그렇게 한 번 잃었다). endpoint 를 사후에 다시 읽어 채우는 것도 안 된다 —
+    그건 초기화된 값이라 **측정을 덮어쓴다**.
+    ⛔ **env 를 건드리기 전에** 만든다. 만들지 못하면 flag 를 손대지 않는다(측정 못 할 창을
+    열 이유가 없다).
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.records = 0
+        # ⛔ `O_EXCL` — 같은 이름이 이미 있으면 이전 실행의 산출물이다. 덮지 않는다.
+        fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+
+    def append(self, kind: str, payload: dict) -> None:
+        """⛔ append → flush → **fsync**. 프로세스가 죽어도 남아야 의미가 있다."""
+        if self.records >= MAX_ARTIFACT_RECORDS:
+            return
+        record = {"kind": kind, "utc": datetime.now(timezone.utc).isoformat(), **payload}
+        with open(self.path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.records += 1
 
 
 class EnvRestorer:
@@ -694,6 +731,7 @@ async def run_monitored_canary(
     minimum_clean_exit_seconds: float = 0.0,
     load_started_at: Optional[float] = None,
     clock: Callable[[], float] = time.monotonic,
+    artifact: Optional["MetricsArtifact"] = None,
     emit: Callable[[str], None] = print,
 ) -> CanaryOutcome:
     wait_task = asyncio.ensure_future(load.wait())
@@ -741,9 +779,26 @@ async def run_monitored_canary(
             try:
                 snapshot = await collect()
             except Exception as exc:                          # noqa: BLE001 — fail-closed
+                if artifact is not None:
+                    artifact.append("collect_error",
+                                    {"error": f"{type(exc).__name__}: {exc}"})
                 reasons.append(f"지표 수집 실패({type(exc).__name__}): {exc}")
                 break
             polls += 1
+            if artifact is not None:
+                # ⛔ **판정 전에** 기록한다 — 중단으로 빠져나가도 그 poll 의 관측은 남아야 한다.
+                artifact.append("poll", {
+                    "poll": polls, "elapsed_s": round(clock() - started_at, 3),
+                    "health_ok": snapshot.health_ok,
+                    "container_started_at": snapshot.container_started_at,
+                    "matching_log_line_count": snapshot.matching_log_line_count,
+                    "broadcast_age_seconds": snapshot.broadcast_age_seconds,
+                    "auth_running": snapshot.auth_running,
+                    "probe_enabled": snapshot.probe_enabled,
+                    "probe_running": snapshot.probe_running,
+                    "auth_metrics": snapshot.auth_metrics,
+                    "probe_metrics": snapshot.probe,
+                })
             reasons = evaluate_snapshot_abort(
                 snapshot, baseline_started_at=baseline_started_at,
                 previous_probe_outstanding=previous_outstanding,
@@ -782,6 +837,18 @@ async def run_monitored_canary(
         alive = True                                          # ⛔ 모르면 살아 있다고 본다
     if alive:
         cleanup_errors.append("부하 프로세스가 cleanup 후에도 살아 있다")
+
+    if artifact is not None:
+        # ⛔ cleanup 결과까지 남긴다. ⚠️ **rollback 뒤 endpoint 를 다시 읽어 채우지 않는다** —
+        #    그 값은 재생성으로 초기화된 것이라 측정을 덮어쓴다.
+        try:
+            artifact.append("outcome", {
+                "aborted": bool(reasons), "reasons": reasons, "polls": polls,
+                "load_stopped": load_stopped, "rollback_done": rollback_done,
+                "load_alive_after_cleanup": alive, "cleanup_errors": cleanup_errors,
+            })
+        except Exception as exc:                              # noqa: BLE001
+            cleanup_errors.append(f"artifact 기록 실패: {exc}")
 
     return CanaryOutcome(bool(reasons), reasons, polls, load_stopped, rollback_done,
                          alive, cleanup_errors)
@@ -982,6 +1049,18 @@ async def _amain(args) -> int:
         print(json.dumps({"ok": False, "target": identity_problems}, ensure_ascii=False))
         return 1
 
+    # ⛔ **측정 산출물을 env 변경보다 먼저** 만든다. 만들지 못하면 flag 를 손대지 않는다 —
+    #    측정이 남지 않을 창을 열 이유가 없다(rollback 재생성이 process-local 지표를 지운다).
+    artifact_path = env_path.with_name(
+        f"{env_path.name}.{time.strftime('%Y%m%dT%H%M%S')}{ARTIFACT_SUFFIX}")
+    try:
+        artifact = MetricsArtifact(artifact_path)
+    except OSError as exc:
+        print(json.dumps({"ok": False, "artifact": f"생성 실패: {exc}"}, ensure_ascii=False))
+        return 1
+    artifact.append("start", {"target": target.container, "url": args.url,
+                              "canary_env": CANARY_ENV})
+
     # ⛔ **env 를 건드리기 직전에** durable backup 을 만든다. 프로세스가 SIGKILL 로 죽어
     #    in-memory cleanup 이 통째로 사라져도, 이 파일 하나면 `--recover` 로 되돌릴 수 있다.
     #    ⚠️ backup 이 이미 있으면 여기서 **시작을 거부**한다(이전 창이 안 닫혔다는 뜻).
@@ -1017,7 +1096,7 @@ async def _amain(args) -> int:
 
         outcome = await run_monitored_canary(
             collect=collector, load=load, rollback=restorer.restore,
-            baseline_started_at=baseline, poll_interval=poll_interval,
+            baseline_started_at=baseline, poll_interval=poll_interval, artifact=artifact,
             # 리허설은 지정 poll에서 의도적으로 중단한다. 실제 canary만 7분 계획을 완주해야
             # 정상 종료다. 자식이 버그로 즉시 0을 반환해도 성공으로 접지 않는다.
             minimum_clean_exit_seconds=(0.0 if args.rehearse else total_plan_seconds()),
@@ -1037,7 +1116,8 @@ async def _amain(args) -> int:
         "ok": outcome.ok, "aborted": outcome.aborted, "reasons": outcome.reasons,
         "polls": outcome.polls, "rollback_done": outcome.rollback_done,
         "cleanup_errors": outcome.cleanup_errors, "rehearsal": bool(args.rehearse),
-        "rehearsal_passed": rehearsal_passed,
+        "rehearsal_passed": rehearsal_passed, "artifact": str(artifact_path),
+        "artifact_records": artifact.records,
     }, ensure_ascii=False))
     succeeded = rehearsal_passed if args.rehearse else outcome.ok
     return 0 if succeeded else 1

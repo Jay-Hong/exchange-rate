@@ -36,6 +36,8 @@ timestamp-merge 계약(구값으로 신값 덮지 않기, V2 client guide 항목
 """
 import asyncio
 import logging
+
+from app.topic_wire import InitialSnapshotConnectionClosed
 from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 from app import config
@@ -294,16 +296,19 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
         try:
             await websocket.send_json(payload)
             sent += 1
-        except Exception:
-            # send 실패 = connection 실패 → registry 정리 후 남은 snapshot 중단.
+        except Exception as exc:
+            # ⛔ **삼키고 반환하지 않는다.** 여기서 정상 반환하면 endpoint 의 `while True` 가
+            #    **닫힌 소켓에 `receive_text()` 를 다시 호출**해 `RuntimeError` → `except
+            #    Exception` → **ERROR + traceback** 이 된다. 정상적인 클라 종료가 ERROR 채널을
+            #    오염시키고, 운영 canary 가 실제로 그 때문에 중단됐다.
+            #    → **연결 제어 신호로 전파**한다(endpoint 가 정상 종료 축으로 처리, INFO 1건).
             from app.topic_dispatcher import registry
 
             registry.remove_websocket(websocket)
-            logger.warning(
-                "initial snapshot send 실패 (connection 정리, 남은 snapshot 중단)",
-                extra={"topic": topic},
-                exc_info=True,
+            logger.debug(
+                "initial snapshot send 실패 — 연결 종료 신호로 전파",
+                extra={"topic": topic, "sent": sent},
             )
-            return sent
+            raise InitialSnapshotConnectionClosed(topic) from exc
 
     return sent

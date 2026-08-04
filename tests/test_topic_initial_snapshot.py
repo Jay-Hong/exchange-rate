@@ -343,12 +343,17 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
         def fake_build(topic):
             return {"type": "snapshot", "topic": topic, "data": {}}
 
+        from app.topic_wire import InitialSnapshotConnectionClosed
+
+        # ⛔ **삼키고 반환하지 않는다.** 정상 반환하면 endpoint 의 `while True` 가 닫힌 소켓에
+        #    `receive_text()` 를 다시 호출해 ERROR + traceback 이 된다 — 운영 canary 가 실제로
+        #    그 때문에 중단됐다. 연결 제어 신호로 **전파**해야 한다.
         with patch(
             "app.topic_initial_snapshot._build_snapshot_sync", side_effect=fake_build
         ):
-            sent = await send_initial_snapshots(ws, ["fx:usd-krw", "usdt:krw"])
-        self.assertEqual(sent, 0)
-        # send 실패 = connection 실패 → 1회만 시도하고 중단 + registry 정리
+            with self.assertRaises(InitialSnapshotConnectionClosed):
+                await send_initial_snapshots(ws, ["fx:usd-krw", "usdt:krw"])
+        # 1회만 시도하고 중단 + registry 정리는 그대로
         self.assertEqual(ws.send_json.await_count, 1)
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
 

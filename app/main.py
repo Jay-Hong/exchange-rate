@@ -1041,6 +1041,11 @@ async def websocket_endpoint(websocket: WebSocket):
             )
     except WebSocketDisconnect:
         logger.info("🔌 클라이언트 연결 해제")
+    except topic_wire.InitialSnapshotConnectionClosed as closed:
+        # ⚠️ **정상 종료다 — ERROR 를 남기지 않는다.** snapshot 전송 도중 클라가 닫은 것이고,
+        #    아래 `finally` 가 registry·manager 정리를 그대로 수행한다.
+        #    ⛔ 여기서 다시 `receive_text()` 로 돌아가면 닫힌 소켓에 읽기를 시도해 ERROR 가 난다.
+        logger.info("🔌 initial snapshot 중 연결 종료", extra={"topic": str(closed)})
     except topic_wire.SubscribeIdentityConflict as conflict:
         # ⚠️ **정상적인 정책 종료다 — ERROR 를 남기지 않는다.** 한 소켓에 다른 UID 가 나타나면
         #    rebind 하지 않고 1008 로 닫는다(dispatcher 가 이미 close 를 시도했다).

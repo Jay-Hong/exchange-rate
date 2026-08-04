@@ -107,6 +107,22 @@ class ConnectionIdentity:
             raise SubscribeIdentityConflict(bound_uid=self._uid, presented_uid=uid)
 
 
+class InitialSnapshotConnectionClosed(Exception):
+    """initial snapshot 전송 중 **연결이 이미 닫혔다** — 오류가 아니라 **연결 제어 신호**다.
+
+    ⛔ **삼키고 정상 반환하면 안 된다.** 한때 send 실패를 잡아 registry 만 정리하고 그대로
+    반환했는데, 그러면 endpoint 의 `while True` 가 **닫힌 소켓에 `receive_text()` 를 다시
+    호출**해 `RuntimeError: WebSocket is not connected` 가 나고 그게 `except Exception` 에
+    걸려 **ERROR + traceback** 으로 남았다. 정상적인 클라 종료가 ERROR 채널을 오염시킨 것이다
+    (운영 canary 가 실제로 이것 때문에 중단됐다).
+    ⚠️ 로그 레벨을 낮추는 것은 **답이 아니다** — 그건 제어흐름 결함을 덮는다. 끊긴 연결에
+    계속 읽기를 시도하는 것 자체가 문제다.
+
+    → `SubscribeIdentityConflict` 와 같은 축으로 endpoint 까지 전파하고, 거기서 **정상 종료**
+      로 처리한다(INFO 1건). `finally` 의 registry·manager 정리는 그대로 돈다.
+    """
+
+
 class SubscribeIdentityConflict(Exception):
     """한 소켓에 **다른 UID** 가 나타났다 — 인증 실패 verdict 가 아니라 **연결 제어 신호**다.
 
