@@ -443,7 +443,8 @@ class EnvRestorer:
 
 async def wait_until_healthy(target: Target = PRODUCTION_TARGET, *,
                              timeout: float = RECREATE_TIMEOUT_SECONDS,
-                             poll_seconds: float = HEALTH_POLL_SECONDS) -> None:
+                             poll_seconds: float = HEALTH_POLL_SECONDS,
+                             clock: Callable[[], float] = time.monotonic) -> None:
     """⛔ **재기동 직후 즉시 조회하면 안 된다.** `docker compose up -d` 는 컨테이너가 *시작*되면
     반환하지만 앱은 아직 listen 하지 않는다 — 그 창에서 조회하면 연결 거부가 나고, 그걸
     "health 실패"로 접으면 **정상 재기동을 장애로 판정**한다(리허설에서 실제로 그렇게 죽었다).
@@ -452,20 +453,28 @@ async def wait_until_healthy(target: Target = PRODUCTION_TARGET, *,
     ⚠️ 그렇다고 무한정 기다리지 않는다 — **유계**이고, 시간 안에 정상이 되지 않으면 올린다
     (기동 중 연결 거부와 **영구 장애**를 시간으로 가른다).
     """
-    deadline = time.monotonic() + timeout
+    deadline = clock() + timeout
     last = "확인 시도 없음"
     while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise CollectorError(
+                f"재기동 후 {timeout:.0f}초 안에 health 가 정상이 되지 않았다: {last}")
         try:
             health = parse_curl_response(await run_command(
-                admin_fetch_command("/health", target)))
+                admin_fetch_command("/health", target),
+                # 전체 health 창보다 개별 docker 호출이 더 오래 기다리면 `timeout` 계약이
+                # 거짓이 된다. 마지막 시도는 남은 예산까지만 허용한다.
+                timeout=min(_command_timeout, remaining)))
             if health.get("status") == "healthy":
                 return
             last = f"status={health.get('status')!r}"
         except CollectorError as exc:
             last = str(exc)                       # 기동 중이면 연결 거부가 **정상**이다
-        if time.monotonic() >= deadline:
+        remaining = deadline - clock()
+        if remaining <= 0:
             raise CollectorError(f"재기동 후 {timeout:.0f}초 안에 health 가 정상이 되지 않았다: {last}")
-        await asyncio.sleep(poll_seconds)
+        await asyncio.sleep(min(poll_seconds, remaining))
 
 
 async def recreate_and_verify_health(target: Target = PRODUCTION_TARGET) -> None:

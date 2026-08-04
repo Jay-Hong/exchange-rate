@@ -1179,6 +1179,31 @@ def test_health_wait_is_bounded_and_still_fails_closed(monkeypatch):
     assert "안에 health 가 정상이 되지 않았다" in str(caught.value)
 
 
+def test_health_wait_never_gives_one_command_more_than_the_remaining_budget(monkeypatch):
+    """전체 5초 창인데 개별 command timeout 30초를 주면 `timeout=5` 계약이 거짓이 된다."""
+    clock = iter([100.0, 101.0, 102.0, 104.5, 105.0])
+    seen = []
+
+    async def fail(command, *, timeout=None, cwd=None):
+        seen.append(timeout)
+        raise mon.CollectorError("ConnectionRefused")
+
+    async def no_sleep(seconds):
+        return None
+
+    original = mon._command_timeout
+    try:
+        mon._command_timeout = 30.0
+        monkeypatch.setattr(mon, "run_command", fail)
+        monkeypatch.setattr(mon.asyncio, "sleep", no_sleep)
+        with pytest.raises(mon.CollectorError):
+            _run(mon.wait_until_healthy(
+                timeout=5, poll_seconds=2, clock=lambda: next(clock)))
+    finally:
+        mon._command_timeout = original
+    assert seen == [4.0, 0.5]
+
+
 def test_unhealthy_status_within_the_window_is_not_accepted(monkeypatch):
     async def unhealthy(command, *, timeout=None, cwd=None):
         return json.dumps({"status": "degraded"}) + "\n200"
@@ -1200,18 +1225,21 @@ def test_command_timeout_is_a_policy_value_not_a_constant(monkeypatch):
     한다 — 에뮬레이션 리허설 스택에서 재기동 직후 exec 가 8초를 넘겼다(실측). 운영 기본은 유지."""
     original = mon._command_timeout
     seen = []
+    real_wait_for = mon.asyncio.wait_for
 
-    async def record(command, *, timeout=None, cwd=None):
+    async def record(awaitable, timeout):
         seen.append(timeout)
-        return "ok\n200"
+        return await real_wait_for(awaitable, timeout=timeout)
 
     try:
         mon.set_command_timeout(30)
-        monkeypatch.setattr(mon.asyncio, "create_subprocess_exec", None)  # 실행되지 않아야 한다
+        monkeypatch.setattr(mon.asyncio, "wait_for", record)
+        assert _run(mon.run_command([sys.executable, "-c", "print('ok')"])).strip() == "ok"
         assert mon._command_timeout == 30
         assert mon.COMMAND_TIMEOUT_SECONDS == 8.0, "운영 기본값이 바뀌었다"
     finally:
         mon._command_timeout = original
+    assert seen == [30.0], "정책값이 실제 subprocess 대기에 전달되지 않았다"
 
 
 def test_amain_applies_the_command_timeout_before_touching_env(monkeypatch, tmp_path):

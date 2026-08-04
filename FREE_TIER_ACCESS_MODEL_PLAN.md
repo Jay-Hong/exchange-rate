@@ -831,10 +831,16 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     전 `never_started`·`caller_cancelled_while_running` 증가 / probe `outstanding=1` **2회
     연속** 또는 queue delay `>= 1000ms` / legacy broadcast 30초 이상 정지 / auth executor 또는
     default executor probe의 실행 중 정지.
-    🟡 **실행기 land, 수직 리허설 미실시** — `scripts/canary_monitor.py`(CLI + 부하 자식 +
+    ✅ **실행기 land + 로컬 수직 리허설 완료** (`99c4ad1`, 2026-08-04) —
+    `scripts/canary_monitor.py`(CLI + 부하 자식 +
     watchdog + rollback). ⛔ **"배선 완료"라고 쓰지 않는다**: 한때 그렇게 적었는데 그때 그
     파일은 **수집기에서 끝나** CLI·부하 자식·stop·rollback 이 **전부 없었다**. 지금은 있고
-    판별 테스트도 있지만, **실제 프로세스·실제 flag 를 상대로 한 리허설은 아직**이다.
+    판별 테스트와 **실제 프로세스·격리 env·실제 flag** 리허설까지 통과했다.
+    첫 실행에서 `compose up -d` 직후 앱이 아직 listen하지 않는 정상 창을 장애로 오판하는 결함을
+    발견해 유계 health 폴링으로 고쳤다. 재실행 결과는 exit 0 / 지정 poll의
+    `health 실패 (injected)` / rollback 완료 / env 바이트 동일 복원 / 고아 0 /
+    앱 `/health`의 `healthy` 응답 복귀였고,
+    `down -v` 뒤 컨테이너·볼륨 잔존도 0이었다.
     · 한동안 `evaluate_server_abort()` 는 **순수 함수인데 호출자가 없었다** — 6종 중 자동화된
       것은 client timeout/error 둘뿐이었다. "운영자가 스냅샷을 넣어 판정한다"는 8 동시 연결이
       도는 7분 창에서 실행 가능한 절차가 아니다(사람이 1초에 5개 endpoint 를 볼 수 없다).
@@ -854,8 +860,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       heredoc → `curl --config -` **stdin** 으로 바꿨다. 토큰도 자식 stdin 으로만 준다.
     · 판정은 부하 도구와 **같은 함수**를 쓴다 — 재구현하면 두 곳이 다른 기준으로 판정한다.
 
-    ⛔ **GO 전 남은 것 = 수직 리허설**: flag ON → 부하 시작 → 중단 → 부하 종료 → env 복원 →
-    재기동 → health 복귀를 **실제로 관측**한다. 그 전에는 Canary GO 를 선언하지 않는다.
+    ✅ **Canary GO의 수직 리허설 선행조건 완료**: flag ON → 부하 시작 → 주입 중단 → 부하 종료 →
+    env 복원 → 재기동 → 앱 `/health` 응답 복귀를 실제 관측했다. Docker의 비동기
+    `.State.Health.Status`는 직후 잠시 `starting`일 수 있어 이 완료 조건과 혼동하지 않는다.
+    이것은 **GO 승인 자체가 아니다** — 실제
+    prod canary는 여전히 사용자 GO와 유효 Firebase ID token이 필요하다.
 
     · **로컬 격리 스택에서만** 한다 — `docker-compose.rehearsal.yml`(loopback `127.0.0.1:18000`
       publish + 별도 container_name + 별도 named volume). 기본 compose와 병합하지 않는
