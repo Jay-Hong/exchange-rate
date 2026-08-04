@@ -755,6 +755,16 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
      ⚠️ **handshake 버킷은 최근 10분만 보존한다**(10s × 60). canary 에서는 **10분 이내 주기로
        snapshot 을 저장**해야 초반 재연결 피크가 사라지지 않는다.
 
+  ⛔ **W canary 와 트래픽 공급원을 분리한다**(2026-08-04). `/ws` 계측은 `manager.connect()` 가
+  엔드포인트 첫 문장이라 **`TOPIC_DISPATCHER_ENABLED` 와 무관하게 모든 연결을 센다** — 기존
+  Release 앱의 legacy `type:rates` 연결도 포함이다. 그래서:
+  · **nginx 근거는 flag OFF 상태의 실사용자 트래픽으로 지금부터 모은다**(계측 배포만 하면 된다).
+  · ⛔ **W canary 의 합성 부하를 nginx 근거로 쓰지 않는다** — 합성 부하는 IP 가 한둘이라
+    **IP 분포가 인위적으로 찌그러진다**. `limit_conn` 은 실제 carrier NAT 꼬리를 덮어야 하는데,
+    합성 값으로 정하면 정반대로 간다.
+  → 순서: **계측 배포(flag OFF)** → **실 baseline 수집** → Canary GO 조건 확정 → **짧은 W canary**
+    (합성 부하는 `queue_wait`/`execution` 검증 **전용**).
+
   1. **관측** — 무엇을 재는가(위 0 이 끝난 뒤):
      · `/ws` **handshake rate**: 재연결 폭주(배포·네트워크 회복)의 **피크**가 상한을 정한다 —
        평균이 아니다.
