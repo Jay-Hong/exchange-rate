@@ -585,6 +585,14 @@ WS_AUTH_EXECUTOR_WORKERS = int(os.getenv("WS_AUTH_EXECUTOR_WORKERS", "4"))
 # 한 줄이면 로그가 는다). 집계 카운터는 flag 와 무관하게 항상 쌓인다.
 WS_AUTH_EXECUTOR_LOG_TIMINGS = os.getenv("WS_AUTH_EXECUTOR_LOG_TIMINGS", "false").lower() == "true"
 
+# ④ 격리의 **보호 대상**을 재는 sentinel — default executor 의 제출→시작 큐 지연.
+# ⛔ 이게 없으면 canary 가 "인증이 분리됐다"만 알고 **"동거인이 보호된다"는 끝내 모른다**
+#    (전용 pool endpoint 는 전용 pool 만 본다). `job_duration_ms` 는 DB·네트워크가 섞여 대체 불가.
+# ⚠️ **canary 기간에만 켠다** — 상시로 두면 sentinel 자신이 default pool 을 조금씩 점유해
+#    재려는 대상을 관측이 흔든다.
+DEFAULT_EXECUTOR_PROBE_ENABLED = os.getenv("DEFAULT_EXECUTOR_PROBE_ENABLED", "false").lower() == "true"
+DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS = float(os.getenv("DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS", "5"))
+
 # ① wire deadline — **identity + gated 인가의 누적 상한**. **측정 없음**(= 2T).
 # ⚠️ 범위 주의: registry 변경과 ack 송신은 이 창 **밖**이다 — "이 시간 안에 ack"을 보장하지
 #    않는다. 그리고 단계마다 새로 시작하지 않는다(그러면 상한이 단계 수만큼 곱해진다) —

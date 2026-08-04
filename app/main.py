@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import auth_executor, topic_wire, ws_connection_metrics
+from app import auth_executor, default_executor_probe, topic_wire, ws_connection_metrics
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -613,6 +613,22 @@ async def lifespan(app: FastAPI):
     #    ThreadPoolExecutor 는 스레드를 **submit 시점에 지연 생성**하므로 유휴 비용은 사실상 0이다.
     auth_executor.start_auth_executor(config.WS_AUTH_EXECUTOR_WORKERS)
 
+    # ⚠️ canary 전용 sentinel — 기본 off 라 평소엔 task 자체가 생기지 않는다.
+    _probe_task = None
+    if config.DEFAULT_EXECUTOR_PROBE_ENABLED:
+        async def _probe_loop():
+            while True:
+                try:
+                    await default_executor_probe.probe_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — 관측이 서비스를 멈추게 하지 않는다
+                    logger.warning("default executor probe 실패", exc_info=True)
+                await asyncio.sleep(config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS)
+        _probe_task = asyncio.create_task(_probe_loop())
+        logger.info("✅ default executor probe 기동",
+                    extra={"interval_sec": config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS})
+
     # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
     db = SessionLocal()
     try:
@@ -675,6 +691,9 @@ async def lifespan(app: FastAPI):
     #    시작되지 않는다. 하지만 **실행 중 worker 를 여기서 기다리면 안 된다** — 인증은 per-attempt
     #    `httpTimeout` + SDK 재시도라 길 수 있고, 그동안 loop 가 얼어 아래 trigger drain · crawler ·
     #    scheduler 종료가 한 줄도 못 돈다(배포 중 grace 만료 시 통째로 날아간다).
+    if _probe_task is not None:
+        _probe_task.cancel()
+
     _auth_executor_closing = auth_executor.begin_auth_executor_shutdown()
 
     # ⛔ **drain 중 예외가 나도 합류는 해야 한다** — 건너뛰면 다음 lifespan 이 구 worker
@@ -1587,6 +1606,25 @@ async def get_atomic_cutover_status():
     """
     from app.atomic_cutover_status import build_cutover_status_dict
     return await build_cutover_status_dict(SessionLocal)
+
+
+@app.get("/admin/api/default-executor-probe", dependencies=[Depends(verify_admin)])
+async def get_default_executor_probe():
+    """격리의 **보호 대상**(동거 `to_thread`)을 재는 유일한 수단 — default executor 큐 지연.
+
+    ⛔ `ws-auth-executor-metrics` 는 **전용 pool 만** 본다. 그것만으로는 canary 가 "인증이
+    분리됐다"만 알고 **"동거인이 보호된다"는 모른다** — 측정 근거였던 p99 3967ms → 31ms 가 바로
+    이 축이다. ⛔ `job_duration_ms`(broadcast 벽시계)는 DB·네트워크가 섞여 **대체물이 아니다**.
+    ⚠️ `DEFAULT_EXECUTOR_PROBE_ENABLED`(기본 off) — canary 기간에만 켠다. 상시면 sentinel 자신이
+    default pool 을 점유해 재려는 대상을 흔든다.
+    ⚠️ 히스토그램은 **고정 경계**(무제한 시계열 없음), process-local, never-crash.
+    """
+    try:
+        return {"enabled": config.DEFAULT_EXECUTOR_PROBE_ENABLED,
+                "metrics": default_executor_probe.default_executor_probe_metrics()}
+    except Exception:
+        logger.error("default-executor-probe 조회 실패", exc_info=True)
+        return {"enabled": None, "metrics": None, "error": "unavailable"}
 
 
 @app.get("/admin/api/ws-connection-metrics", dependencies=[Depends(verify_admin)])

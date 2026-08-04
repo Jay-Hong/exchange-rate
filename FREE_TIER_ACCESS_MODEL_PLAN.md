@@ -787,10 +787,27 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
      ⚠️ **handshake 버킷은 최근 10분만 보존한다**(10s × 60). canary 에서는 **10분 이내 주기로
        snapshot 을 저장**해야 초반 재연결 피크가 사라지지 않는다.
 
+  **실행 순서**(2026-08-04 확정 — 구 "실 baseline 수집 → Canary GO → W canary" 는 폐기):
+  1. ✅ **계측 배포 완료**(`2534aa3`).
+  2. **Canary GO 조건 확정** — `W=4` provisional 수용 + 부하 공급원·규모·기간·중단 조건.
+  3. **합성 부하로 짧은 W canary** — flag ON, arming OFF.
+  4. **nginx 값은 대표 실트래픽 확보 후 결정** — canary 를 막지 않는다.
+  5. 대표 표본이 부족한 채 **Release GO** 를 한다면, **nginx 상한 미결을 명시적 위험 수용**으로
+     기록한다("측정 완료"라고 쓰지 않는다).
+
+  ⛔ **canary 실행 승인 전 필수**: "동거 `to_thread` p99 를 함께 본다"는 **측정 수단이 있어야**
+  성립한다. 전용 pool endpoint 는 전용 pool 만 보고, `job_duration_ms` 는 DB·네트워크가 섞여
+  대체물이 아니다. → **default executor sentinel** 을 추가했다
+  (`app/default_executor_probe.py`, `GET /admin/api/default-executor-probe`,
+  `DEFAULT_EXECUTOR_PROBE_ENABLED` 기본 off). 이게 없으면 canary 는 **격리의 보호 대상을 관측하지
+  못한 채** "인증이 분리됐다"만 확인하게 된다.
+
   ⛔ **W canary 와 트래픽 공급원을 분리한다**(2026-08-04). `/ws` 계측은 `manager.connect()` 가
   엔드포인트 첫 문장이라 **`TOPIC_DISPATCHER_ENABLED` 와 무관하게 모든 연결을 센다** — 기존
   Release 앱의 legacy `type:rates` 연결도 포함이다. 그래서:
-  · **nginx 근거는 flag OFF 상태의 실사용자 트래픽으로 지금부터 모은다**(계측 배포만 하면 된다).
+  · **nginx 근거는 flag OFF 상태의 실사용자 트래픽**이다(계측은 `2534aa3` 로 배포됨).
+    ⛔ 다만 **그 수집을 canary 의 선행 조건으로 두지 않는다** — 대표 표본이 언제 모일지는 우리가
+    정하지 못한다. 표본이 부족하면 **명시적 위험 수용**으로 넘어간다(아래 순서 참조).
   · ⛔ **W canary 의 합성 부하를 nginx 근거로 쓰지 않는다** — 합성 부하는 IP 가 한둘이라
     **IP 분포가 인위적으로 찌그러진다**. `limit_conn` 은 실제 carrier NAT 꼬리를 덮어야 하는데,
     합성 값으로 정하면 정반대로 간다.
