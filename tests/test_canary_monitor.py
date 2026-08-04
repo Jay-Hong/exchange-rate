@@ -1460,3 +1460,24 @@ def test_signal_lets_cleanup_finish_then_exits_nonzero(tmp_path, signame, expect
     assert marker.exists(), f"{signame} 에서 cleanup 이 돌지 않았다 — rollback 이 사라진다"
     assert marker.read_text() == "cleanup-ran"
     assert code == expected, f"종료 코드가 128+signal 이 아니다: {code}"
+
+
+def test_ws_reachability_success_path_actually_connects():
+    """⛔ **성공 경로가 테스트된 적이 없었다.** 실패 경로(연결 거부)만 잠겨 있어서, 만약
+    `async with await connect(...)` 형태가 라이브러리 버전에 따라 깨지면 **도달 가능한 URL 도
+    불가로 보고**해 preflight 가 영영 통과하지 못한다 — canary 가 시작조차 못 하는 형태다.
+    (실측으로 15.0.1·16.0 둘 다 정상임을 확인했지만, 그 확인이 테스트로 남아 있지 않았다.)"""
+    import websockets
+
+    async def scenario():
+        async def handler(ws):
+            await asyncio.sleep(5)
+
+        server = await websockets.serve(handler, "127.0.0.1", 8799)
+        try:
+            return await mon.check_ws_reachable("ws://127.0.0.1:8799", timeout=5)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    assert _run(scenario()) == [], "도달 가능한 URL 을 불가로 보고했다"

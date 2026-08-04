@@ -908,6 +908,29 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       **최신 HEAD가 배포된 운영 EC2 리포 루트에서** 실행해야 한다. 이 실행 위치와
       사전 app-only 배포·smoke는 토큰 제공·prod GO와 별개의 필수 전제다.
 
+    · **운영 실행 전제 (2026-08-04 실측 확인)**
+      1. **호스트 실행기 갱신**: 실행기는 EC2 **워킹트리**에서 돌므로 `git pull --ff-only` 후
+         `git rev-parse --short HEAD` 로 확인한다. ⚠️ 이번 signal 보강은 `scripts/` 만 바꾸므로
+         **이미지 재빌드는 불요**(`app/` diff 0 확인) — 그래서 *"앱 이미지 `18ea2ef` / 호스트
+         실행기 `51154b3`"* 처럼 **둘을 나눠 기록**한다(같은 값이라 가정하면 틀린다).
+      2. **호스트 Python 의존성**: 부하 자식과 도달성 preflight 는 **호스트 Python** 에서
+         `websockets` 를 import 한다. 운영 호스트엔 **없었다**(실측: `ModuleNotFoundError`) —
+         모르고 실행했으면 preflight 실패로 **창을 소모**했을 것이다(env 적용 → 재생성 →
+         rollback → 재생성). PEP 668 로 시스템 설치가 막혀 있고 `python3-venv` 도 없어,
+         **시스템 변경 0** 인 방법을 쓴다:
+         `docker compose cp fastapi:/home/appuser/.local/lib/python3.13/site-packages/websockets
+         ~/canary-libs/websockets` 후 `PYTHONPATH=$HOME/canary-libs` 로 실행. 되돌리기는
+         `rm -rf ~/canary-libs`. ⚠️ 컨테이너는 3.13, 호스트는 3.12 라 `speedups` 확장은 로드되지
+         않지만 `websockets.utils` 순수 python 으로 **정상 fallback** 한다(실측).
+      3. **사전 확인**(창 소모 없음): `--help` / `check_ws_reachable("wss://fxi.kr/ws")` = `[]`
+         / `ws_auth_load.py --dry-run`. 셋 다 통과 확인함.
+      4. **tmux 등 세션 안에서** 실행한다. signal 보강으로 SIGHUP 에도 rollback 이 돌지만,
+         창 자체를 보존하는 편이 낫다.
+      ⛔ **cleanup 중 두 번째 SIGTERM 을 보내지 말 것** — 반복 signal 은 의도적으로 무시되고,
+        굳이 강제 종료하면 rollback 이 끊긴다. 비정상 장기화 시에는 **수동 복원**을 쓴다:
+        `sed -i 's/^TOPIC_DISPATCHER_ENABLED=.*/TOPIC_DISPATCHER_ENABLED=false/' .env` →
+        `docker compose up -d --force-recreate fastapi` → `/health` 확인.
+
     · **`--url` = `wss://fxi.kr/ws` 로 확정**(2026-08-04). ⛔ container-internal 주소
       (`fastapi:8000`)는 **쓸 수 없다** — `start_load_process` 는 부하 자식을 **EC2 호스트
       프로세스**로 띄우는데, compose 의 fastapi 는 publish 없이 `expose` 만이라 호스트에서
