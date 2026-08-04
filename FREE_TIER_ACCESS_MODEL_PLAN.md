@@ -166,7 +166,7 @@
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
-| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **기능 선행조건 4/4 충족.** ⛔ 그러나 **여기서 끝이 아니다** — §자원 상한의 **열린 항목 2건**(**`W` 확정** / **nginx 관측·상한 결정**)이 여전히 남아 있고 — executor 구현 자체는 land 했다 —, 그 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 남는다 | 🔴 false |
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **기능 선행조건 4/4 충족.** ⛔ 그러나 **여기서 끝이 아니다** — §자원 상한의 **열린 항목 1건**(**nginx 관측·상한 결정**)이 남아 있고 (~~`W` 확정~~ **✅ 2026-08-05 W=4 확정**, executor 구현은 그 전에 land), 그 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 남는다 | 🔴 false |
 | `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
 
 **무인증 graph v2(`/api/v2/graph/tab`·`/catalog`)의 krx.\* series는 어떤 flag로도 열리지 않는다.**
@@ -658,9 +658,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   **아니다** — 거절하지 않고 자원을 나눌 뿐이라 새 wire 결과가 없다. 측정: 동거 작업 p99
   **3967ms → 31ms**.
 
-  ⚠️ **결정이 남은 것은 구현이 아니라 `W` 값이다.** `WS_AUTH_EXECUTOR_WORKERS` 기본 4는
-  **측정값이 아니라 초기값**이고, 운영은 **2 vCPU** 다. W 는 곧 인증 처리 용량(W/T)이라 낮으면
-  스스로 문턱을 낮춘다.
+  ✅ **`W` 는 2026-08-05 canary 실측으로 확정됐다 (W=4).** 상세는 아래 "W 결정" 절.
+  ~~⚠️ **결정이 남은 것은 구현이 아니라 `W` 값이다.**~~ [superseded] 당시 서술: `WS_AUTH_EXECUTOR_WORKERS`
+  기본 4는 **측정값이 아니라 초기값**이고, 운영은 **2 vCPU** 다. W 는 곧 인증 처리 용량(W/T)이라
+  낮으면 스스로 문턱을 낮춘다 — **그 우려는 실측으로 해소**됐다(동시성 ≤ W 에서 queue ≈ 0,
+  2×W 에서도 timeout·취소·미시작 0).
 
   ⛔ **절차가 순환하지 않게 나눈다**(2026-08-04 정정). 한때 "W 확정 = flag ON 전 조건"이라고 적고
   측정은 flag ON 이후라고 적었는데, 그러면 **실행 자체가 불가능**하다(W←측정←flag ON←W).
@@ -716,8 +718,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       인증 자신의 적체는 그대로다.
   ⛔ **"구조 트립와이어로만 잠긴다"도 틀렸다**(codex Medium): **기본 executor 를 점유해 놓고**
     인증이 진행되는지 보면 **행동으로** 검증된다 — 격리가 없으면 인증이 함께 막힌다.
-- 🔲 **ingress 상한(nginx `/ws`) = 미결.** ⚠️ **2026-08-03 확인**: 이 2건은 기능 선행조건(§3.1 표)이
-  4/4 충족된 뒤에도 **여전히 열려 있다**. GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
+- 🔲 **ingress 상한(nginx `/ws`) = 미결 — 이제 이 절의 유일한 열린 항목이다**(executor 는 구현
+  land + `W=4` 실측 확정으로 닫혔다). ⚠️ 당시(2026-08-03) 서술은 "이 **2건**"이었다 [superseded].
+  기능 선행조건(§3.1 표)이 4/4 충족된 뒤에도 **여전히 열려 있다**.
+  GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
   "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
   **없다**(`default.conf:78-80` 주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다
   (`:105-106`, zone key 는 `$binary_remote_addr`). **호스트 config 변경이라 별도 승인이 필요하다.**
@@ -804,10 +808,12 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 
   ✅ **기본-off app-only 배포 완료**(`13f666b`, 이미지 `c5c618e71321`). endpoint smoke 에서
   `enabled=false` · `running=false` 를 확인했다.
-  ⚠️ **다만 운영은 `13f666b` 에 멈춰 있다**(2026-08-04 서버 직접 확인: `git log -1` = `13f666b`,
-  `default-executor-probe` **200**, `broadcast-heartbeat` **404**, `scripts/canary_monitor.py`
-  **부재**). 즉 sentinel 은 이미 있지만 **watchdog·heartbeat endpoint 는 없다**.
-  → 실제 canary 전에 **현재 HEAD 를 flag OFF 로 app-only 재배포**하고 smoke 를 다시 본다.
+  ✅ **해소됨** — `a3ec9bd` 를 flag OFF 로 app-only 재배포해 watchdog·heartbeat 를 올렸고,
+  그 위에서 canary 를 완주했다(위 "Canary 실측 결과"). 이후 `e2d3f1a` + `ENV=production`.
+  ~~⚠️ **다만 운영은 `13f666b` 에 멈춰 있다**~~ [superseded] 당시(2026-08-04) 서버 직접 확인 기록:
+  `git log -1` = `13f666b`, `default-executor-probe` **200**, `broadcast-heartbeat` **404**,
+  `scripts/canary_monitor.py` **부재** — 즉 sentinel 은 있었지만 watchdog·heartbeat endpoint 가
+  없었다. → 그래서 canary 전에 재배포가 필요했다.
   ⛔ 한때 이 자리에 "운영은 `2534aa3`" 라고 적혔는데 **오보였다** — 배포를 직접 수행한 뒤에도
   구 값을 그대로 말한 것이다. 배포본은 **문서 기억이 아니라 서버에서 확인**한다.
   실제 수명주기 기동은 canary 에서
@@ -1320,8 +1326,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       잔여 = ~~① KRX per-user 판정~~ **✅ land** ~~② iOS lease 소비~~ **✅ land**
       ~~③ request timeout~~ **✅ land**. ~~iOS bootstrap 3종 인증 이관~~ **✅ land 2026-07-26**.
       → **기능 선행조건은 4/4 충족**이다. ⛔ 다만 "운영 GO 하나만 남았다"고 쓰지 말 것 — 남은 것은
-      셋이다: (1) §자원 상한 **열린 항목 2건**(인증 전용 executor · nginx `/ws` ingress 상한)의
-      **명시적 결정**(구현 또는 위험 수용 — 후속 최적화로 **자동 이월 금지**), (2) 수용 항목
+      셋이다: (1) §자원 상한 **열린 항목 1건**(nginx `/ws` ingress 상한)의
+      **명시적 결정**(구현 또는 위험 수용 — 후속 최적화로 **자동 이월 금지**)
+      — ~~인증 전용 executor~~ 는 **✅ 닫혔다**(구현 land + `W=4` 실측 확정, 2026-08-05), (2) 수용 항목
       (조용한 중단 · stale registry 비용)을 포함한 **운영 GO**, (3) **활성화 실행 절차**
       (서버 flag → prod smoke → Release arming → phased rollout, iOS `TOPIC_V2_RELEASE_RUNBOOK.md`).
 
