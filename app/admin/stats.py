@@ -29,6 +29,13 @@ class BroadcastStats:
         self.total_failure = 0
 
         # 시간 추적
+        # ⛔ **둘은 다른 것이다.** `last_broadcast_time` 은 *실제 전송이 성공한* 시각이라
+        #    "연결 없음"·"변경 없음" 같은 **정상 스킵**에서는 갱신되지 않는다 — 그걸
+        #    scheduler 생존 신호로 쓰면 **정상 서버를 정지로 오판한다**(연결 0인 canary
+        #    baseline 60초에서 실제로 오판했을 경로다).
+        #    `last_cycle_time` 은 **cycle 이 돌았다**는 heartbeat 로, 성공·실패·스킵 **전부**
+        #    갱신한다. 멈추는 경우는 scheduler job 자체가 죽었을 때뿐이다.
+        self.last_cycle_time: Optional[datetime] = None
         self.last_broadcast_time: Optional[datetime] = None
         self.first_broadcast_time: Optional[datetime] = None
 
@@ -48,6 +55,7 @@ class BroadcastStats:
             rate_count: 전송된 환율 개수
         """
         now = datetime.now()
+        self.last_cycle_time = now      # ⛔ 성공·실패·스킵 **전부** (cycle heartbeat)
 
         # 첫 브로드캐스트 시간 기록
         if self.first_broadcast_time is None:
@@ -89,6 +97,7 @@ class BroadcastStats:
             error_message: 에러 메시지
         """
         now = datetime.now()
+        self.last_cycle_time = now      # ⛔ 성공·실패·스킵 **전부** (cycle heartbeat)
 
         # 에러 히스토리 저장 (알림 시스템 연동용)
         self.error_history.append({
@@ -121,6 +130,7 @@ class BroadcastStats:
             reason: 스킵 이유
         """
         now = datetime.now()
+        self.last_cycle_time = now      # ⛔ 성공·실패·스킵 **전부** (cycle heartbeat)
 
         self.broadcast_history.append({
             "timestamp": now.isoformat(),

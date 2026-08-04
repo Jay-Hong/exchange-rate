@@ -53,22 +53,31 @@ class CollectorError(Exception):
 # ── admin 조회 (비밀번호를 argv 에 넣지 않는다) ─────────────────────────────
 
 
-def admin_fetch_script(path: str) -> str:
-    """컨테이너 안에서 실행할 셸 스크립트.
-
-    ⛔ heredoc 은 셸이 **파이프에 써서** `curl` 에 넘긴다 — `curl` 의 argv 는 `--config -` 뿐이다.
-       `-u admin:"$ADMIN_PASSWORD"` 로 쓰면 셸이 확장한 **실제 값이 curl argv 에 남는다**.
-    ⚠️ 구분자를 따옴표로 감싸면(`<<'CFG'`) 변수 확장이 **안 된다** — 감싸지 않는다.
-    """
-    return (
-        f'curl -sS --config - -o - -w "\\n%{{http_code}}" http://localhost:8000{path} <<CFG\n'
-        'user = "admin:$ADMIN_PASSWORD"\n'
-        'CFG\n'
-    )
+ADMIN_FETCH_PY = (
+    "import json,os,sys,urllib.request,base64\n"
+    "cred=base64.b64encode(('admin:'+os.environ['ADMIN_PASSWORD']).encode()).decode()\n"
+    "req=urllib.request.Request('http://localhost:8000'+sys.argv[1],\n"
+    "                           headers={'Authorization':'Basic '+cred})\n"
+    "try:\n"
+    "    with urllib.request.urlopen(req,timeout=5) as r: body,code=r.read().decode(),r.status\n"
+    "except urllib.error.HTTPError as e: body,code=e.read().decode(),e.code\n"
+    "sys.stdout.write(body+'\\n'+str(code))\n"
+)
 
 
 def admin_fetch_command(path: str) -> list[str]:
-    return ["docker", "compose", "exec", "-T", "fastapi", "sh", "-c", admin_fetch_script(path)]
+    """admin endpoint 조회 — **컨테이너 안 Python 이 env 를 직접 읽는다**.
+
+    ⛔ 셸 경유 curl 을 쓰지 않는 이유 두 가지:
+       1. `-u admin:"$ADMIN_PASSWORD"` 는 셸이 확장한 **실제 값이 curl argv 에 남는다**(`ps`).
+       2. heredoc `curl --config -` 로 피해도 **비밀번호에 `"`·`\\`·개행이 있으면 config 문법이
+          깨진다** — 조용히 401 이 되고, 그건 "지표가 깨끗하다"로 오독되기 쉽다.
+       여기서는 값이 **프로세스 메모리 안에서만** 쓰이고 어떤 argv 에도, 어떤 인용 규칙에도
+       노출되지 않는다.
+    ⚠️ 출력 형식은 `body\\n<status>` — `parse_curl_response` 가 그대로 받는다.
+    """
+    return ["docker", "compose", "exec", "-T", "fastapi",
+            "python", "-c", ADMIN_FETCH_PY, path]
 
 
 def parse_curl_response(raw: str) -> dict:
@@ -233,26 +242,129 @@ async def start_load_process(*, token: str, url: str,
 # ── flag rollback ───────────────────────────────────────────────────────────
 
 
-ROLLBACK_SED = "sed -i 's/^TOPIC_DISPATCHER_ENABLED=.*/TOPIC_DISPATCHER_ENABLED=false/' .env"
+#: canary 창 동안 강제할 env. ⛔ KRX 배포는 **명시적으로 false** — "원래 꺼져 있겠지"로
+#: 두면 누가 켜 둔 상태에서 유료 데이터가 새는 창이 된다.
+CANARY_ENV: dict[str, str] = {
+    "TOPIC_DISPATCHER_ENABLED": "true",
+    "DEFAULT_EXECUTOR_PROBE_ENABLED": "true",
+    "DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS": "1",
+    "WS_AUTH_EXECUTOR_LOG_TIMINGS": "true",
+    "KRX_CLIENT_DISTRIBUTION_ENABLED": "false",
+}
+EXPECTED_AUTH_WORKERS = 4
 
 
-async def rollback_topic_dispatcher() -> None:
-    """`TOPIC_DISPATCHER_ENABLED=false` 로 되돌리고 **재기동 + health 까지 확인**한다.
+def read_env_values(text: str, keys) -> dict[str, Optional[str]]:
+    """⚠️ **키 부재와 빈 값은 다르다.** 부재를 `""` 로 접으면 복원 때 없던 키가 생긴다."""
+    found: dict[str, Optional[str]] = {key: None for key in keys}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        if key.strip() in found:
+            found[key.strip()] = value
+    return found
 
-    ⛔ flag 를 되돌렸다고 끝이 아니다 — env 는 컨테이너 **재생성** 시에만 다시 읽힌다
-       (`docker compose restart` 는 반영하지 않는다). 확인 없이 끝내면 "되돌렸다"는 보고만
-       남고 실제로는 켜진 채로 돈다.
+
+def apply_env_values(text: str, changes: dict[str, Optional[str]]) -> str:
+    """`None` 은 **키 제거**다(원래 없던 키를 되살리지 않기 위해).
+
+    ⛔ `sed 's/^KEY=.*/KEY=false/'` 로 하면 **키가 없을 때 아무 일도 안 일어난다** — 그런데
+       성공한 것처럼 보인다. 여기서는 부재 시 append 하고, 제거는 실제로 지운다.
     """
-    await run_command(["sh", "-c", ROLLBACK_SED])
-    value = await run_command(["sh", "-c", "grep '^TOPIC_DISPATCHER_ENABLED=' .env"])
-    if "false" not in value:
-        raise CollectorError(f"flag 가 되돌아가지 않았다: {value.strip()}")
+    lines = text.splitlines()
+    remaining = dict(changes)
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        key = stripped.partition("=")[0].strip() if "=" in stripped else None
+        if key in remaining and not stripped.startswith("#"):
+            value = remaining.pop(key)
+            if value is not None:
+                out.append(f"{key}={value}")
+            continue                                   # None → 줄 자체를 지운다
+        out.append(line)
+    for key, value in remaining.items():
+        if value is not None:
+            out.append(f"{key}={value}")
+    return "\n".join(out) + "\n"
+
+
+class EnvRestorer:
+    """env 를 **정확히 원래대로** 되돌린다(값이든 키 부재든). 여러 번 불려도 한 번만 일한다."""
+
+    def __init__(self, original: dict[str, Optional[str]], env_path: Path):
+        self._original, self._env_path = original, env_path
+        self.done = False
+
+    async def restore(self) -> None:
+        if self.done:
+            return
+        self._env_path.write_text(
+            apply_env_values(self._env_path.read_text(encoding="utf-8"), self._original),
+            encoding="utf-8")
+        await recreate_and_verify_health()
+        current = read_env_values(self._env_path.read_text(encoding="utf-8"), self._original)
+        if current != self._original:
+            raise CollectorError(f"env 가 원상복원되지 않았다: {current} != {self._original}")
+        self.done = True
+
+
+async def recreate_and_verify_health() -> None:
+    """⛔ env 는 컨테이너 **재생성** 시에만 다시 읽힌다(`restart` 는 반영 안 된다).
+    확인 없이 끝내면 "적용했다"는 보고만 남고 실제로는 구 값으로 돈다."""
     await run_command(["docker", "compose", "up", "-d", "--force-recreate", "fastapi"],
                       timeout=RECREATE_TIMEOUT_SECONDS)
     health = parse_curl_response(await run_command(admin_fetch_command("/health"),
                                                    timeout=RECREATE_TIMEOUT_SECONDS))
     if health.get("status") != "healthy":
-        raise CollectorError(f"rollback 후 health 가 정상이 아니다: {health.get('status')}")
+        raise CollectorError(f"재기동 후 health 가 정상이 아니다: {health.get('status')}")
+
+
+CONTAINER_ENV_PY = (
+    "import json,os,sys\n"
+    "sys.stdout.write(json.dumps({k: os.environ.get(k) for k in sys.argv[1:]})+'\\n200')\n"
+)
+
+
+async def container_env(keys: Sequence[str]) -> dict:
+    return parse_curl_response(await run_command(
+        ["docker", "compose", "exec", "-T", "fastapi", "python", "-c", CONTAINER_ENV_PY, *keys]))
+
+
+async def preflight() -> list[str]:
+    """⛔ **부하를 만들기 전에** 창의 전제가 실제로 적용됐는지 본다.
+
+    이게 없으면 probe 가 꺼진 채로 canary 가 돌아 **빈 지표를 성공으로** 읽는다 — 이 트랙에서
+    반복된 false green 의 정확한 형태다. 하나라도 어긋나면 부하 프로세스는 **0건** 생성된다.
+    """
+    problems: list[str] = []
+    env = await container_env(list(CANARY_ENV))
+    for key, expected in CANARY_ENV.items():
+        actual = env.get(key)
+        if (actual or "").strip().lower() != expected:
+            problems.append(f"{key}={actual!r} (기대 {expected!r})")
+
+    probe = parse_curl_response(await run_command(
+        admin_fetch_command("/admin/api/default-executor-probe")))
+    if not probe.get("enabled"):
+        problems.append("probe enabled=false")
+    if not probe.get("running"):
+        problems.append("probe running=false — flag 만 켜지고 task 가 안 돈다")
+
+    auth = parse_curl_response(await run_command(
+        admin_fetch_command("/admin/api/ws-auth-executor-metrics")))
+    metrics = auth.get("metrics") if isinstance(auth.get("metrics"), dict) else {}
+    if metrics.get("max_workers") != EXPECTED_AUTH_WORKERS:
+        problems.append(f"auth max_workers={metrics.get('max_workers')} (기대 {EXPECTED_AUTH_WORKERS})")
+
+    heartbeat = parse_curl_response(await run_command(
+        admin_fetch_command("/admin/api/broadcast-heartbeat")))
+    age = heartbeat.get("age_seconds")
+    if not isinstance(age, (int, float)) or age >= BROADCAST_STALL_SECONDS:
+        problems.append(f"broadcast heartbeat 이 신선하지 않다: {age}")
+    return problems
 
 
 # ── 실행 (중단 → 자식 종료 → rollback → 사망 확인) ─────────────────────────
@@ -356,35 +468,81 @@ async def run_monitored_canary(
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 
+MIN_POLL_INTERVAL = 1.0
+
+
+def validate_poll_interval(seconds: float) -> float:
+    """⛔ 0·음수·NaN 이면 폴링이 hot loop 가 되어 **watchdog 자신이 부하원**이 된다
+    (매 tick 마다 docker subprocess 6개를 띄운다). 켜는 순간 fail-fast."""
+    value = float(seconds)
+    if not (value == value) or value in (float("inf"), float("-inf")) or value < MIN_POLL_INTERVAL:
+        raise ValueError(f"poll interval 은 유한하고 {MIN_POLL_INTERVAL}초 이상이어야 한다: {seconds!r}")
+    return value
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="W canary 실행기 (부하 자식 + 자동 중단 watchdog)", allow_abbrev=False)
+        description="W canary 실행기 (env 적용 + 부하 자식 + 자동 중단 watchdog)",
+        allow_abbrev=False)
     parser.add_argument("--url", default="ws://localhost:8000/ws")
     source = parser.add_mutually_exclusive_group(required=True)
     # ⛔ `--token` 은 의도적으로 없다 — argv 는 `ps` 로 보인다.
     source.add_argument("--token-stdin", action="store_true")
     source.add_argument("--token-file")
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL)
+    parser.add_argument("--env-file", default=str(REPO_ROOT / ".env"))
     parser.add_argument("--dry-run", action="store_true", help="실행 없이 계획·명령만 출력")
     return parser
 
 
 async def _amain(args) -> int:
+    poll_interval = validate_poll_interval(args.poll_interval)
     if args.dry_run:
+        print(f"  env 적용: {CANARY_ENV}")
         print(f"  부하: {REPO_ROOT / 'scripts' / 'ws_auth_load.py'} --token-stdin --url {args.url}")
         print(f"  창: 최악 {maximum_plan_seconds():.0f}s ({len(PHASES)} phase)")
-        print(f"  폴링: {args.poll_interval}s — health · broadcast · auth · probe · 재시작 · ERROR")
-        print(f"  rollback: {ROLLBACK_SED} + force-recreate + health")
+        print(f"  폴링: {poll_interval}s — health · broadcast · auth · probe · 재시작 · ERROR")
+        print("  복원: 원래 값/키 부재까지 정확히 되돌린 뒤 force-recreate + health")
         return 0
 
+    # ⛔ **env 를 건드리기 전에** 실패할 수 있는 것들을 먼저 끝낸다 — 여기서 실패하면 되돌릴
+    #    상태 자체가 없다(복원 공백 0).
     token = load_id_token(token_file=args.token_file)
     baseline = (await run_command(
         ["docker", "inspect", "exchange-rate-app", "--format", "{{.State.StartedAt}}"])).strip()
-    load = await start_load_process(token=token, url=args.url)
-    outcome = await run_monitored_canary(
-        collect=collect_from_server, load=load, rollback=rollback_topic_dispatcher,
-        baseline_started_at=baseline, poll_interval=args.poll_interval,
-    )
+
+    env_path = Path(args.env_file)
+    original = read_env_values(env_path.read_text(encoding="utf-8"), CANARY_ENV)
+    restorer = EnvRestorer(original, env_path)
+    load: Optional[LoadProcess] = None
+    outcome: Optional[CanaryOutcome] = None
+
+    # ⛔ **이 지점부터 가장 바깥 `finally` 가 env 를 소유한다.** 한때 monitor 는 flag 를 켜지
+    #    않으면서 rollback 만 했다 — 운영자가 먼저 켜고 자식 생성이 실패하면 **켜진 채 남았다**.
+    try:
+        env_path.write_text(
+            apply_env_values(env_path.read_text(encoding="utf-8"), dict(CANARY_ENV)),
+            encoding="utf-8")
+        await recreate_and_verify_health()
+
+        problems = await preflight()
+        if problems:
+            print(json.dumps({"ok": False, "preflight": problems}, ensure_ascii=False))
+            return 1                                   # ⛔ 부하 프로세스 **0건** 생성
+
+        load = await start_load_process(token=token, url=args.url)
+        outcome = await run_monitored_canary(
+            collect=collect_from_server, load=load, rollback=restorer.restore,
+            baseline_started_at=baseline, poll_interval=poll_interval,
+        )
+    finally:
+        if load is not None:
+            try:
+                await load.kill()
+            except Exception as exc:                   # noqa: BLE001
+                print(f"[CLEANUP] kill 실패: {exc}", file=sys.stderr)
+        await restorer.restore()                       # ⚠️ 멱등 — monitor 가 이미 했으면 no-op
+
     print(json.dumps({
         "ok": outcome.ok, "aborted": outcome.aborted, "reasons": outcome.reasons,
         "polls": outcome.polls, "rollback_done": outcome.rollback_done,

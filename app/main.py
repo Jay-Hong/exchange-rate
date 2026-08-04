@@ -1609,17 +1609,25 @@ async def get_broadcast_heartbeat():
     ⛔ `/admin/api/dashboard` 를 쓰지 않는 이유: 거기엔 DB 조회와 로그 파일 작업이 섞여 있어,
     1초마다 부르면 **관측이 부하가 된다**(그것도 하필 부하를 재는 창에서).
     여기서 읽는 것은 in-memory 카운터 하나뿐이다.
-    ⚠️ `age_seconds` 가 `null` 이면 "아직 한 번도 broadcast 하지 않음" 이다 — **0 과 다르다**.
+    ⛔ **`age_seconds` 는 `last_cycle_time` 기준이다** — `last_broadcast_time`(실제 전송 성공)이
+    아니다. 후자는 "연결 없음"·"변경 없음" 같은 **정상 스킵**에서 갱신되지 않아, 그걸로 재면
+    **연결 0인 canary baseline 60초에서 정상 서버를 '정지'로 오판**한다. 여기서 재는 것은
+    "scheduler cycle 이 돌고 있는가" 이고, 그건 성공·실패·스킵 전부에서 갱신된다.
+    ⚠️ `age_seconds` 가 `null` 이면 "cycle 이 한 번도 돌지 않음" 이다 — **0 과 다르다**.
     호출자는 그 둘을 구분해야 한다(0 으로 접으면 정지를 정상으로 읽는다).
+    ⚠️ 전송 **실패**는 여기서 잡지 않는다 — 그건 ERROR 로그 조건이 따로 본다.
     """
     try:
-        last = broadcast_stats.last_broadcast_time
-        age = (datetime.now() - last).total_seconds() if last else None
-        return {"last_broadcast_time": last.isoformat() if last else None,
+        cycle = broadcast_stats.last_cycle_time
+        sent = broadcast_stats.last_broadcast_time
+        age = (datetime.now() - cycle).total_seconds() if cycle else None
+        return {"last_cycle_time": cycle.isoformat() if cycle else None,
+                "last_broadcast_time": sent.isoformat() if sent else None,
                 "age_seconds": age}
     except Exception:
         logger.error("broadcast-heartbeat 조회 실패", exc_info=True)
-        return {"last_broadcast_time": None, "age_seconds": None, "error": "unavailable"}
+        return {"last_cycle_time": None, "last_broadcast_time": None,
+                "age_seconds": None, "error": "unavailable"}
 
 
 @app.get("/admin/api/default-executor-probe", dependencies=[Depends(verify_admin)])

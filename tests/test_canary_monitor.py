@@ -331,14 +331,23 @@ def test_endpoint_reported_error_is_a_collector_failure(monkeypatch):
 
 
 def test_admin_password_never_reaches_any_process_argv():
-    """⛔ **이전 주장이 틀렸다.** 컨테이너 셸에서 `-u admin:"$ADMIN_PASSWORD"` 를 쓰면 셸이
-    확장한 **실제 값이 최종 `curl` 의 argv 에 들어간다**(`ps` 로 보인다). heredoc → `--config -`
-    이면 셸이 **파이프에 쓰므로** 어떤 argv 에도 값이 없다."""
-    script = mon.admin_fetch_script("/health")
-    assert "--config -" in script, "stdin config 방식이 아니다"
-    assert "-u admin:" not in script and "--user" not in script, "자격증명이 curl 인자에 있다"
-    assert "$ADMIN_PASSWORD" in script, "변수 이름이 아니라 값을 박았다"
-    assert "<<CFG" in script and "<<'CFG'" not in script, "따옴표 구분자는 변수 확장을 막는다"
+    """⛔ **이전 주장이 두 번 틀렸다.** (1) 셸에서 `-u admin:"$ADMIN_PASSWORD"` 를 쓰면 확장된
+    **실제 값이 curl argv 에 남는다**. (2) heredoc `--config -` 로 피해도 비밀번호에 `"`·`\\`·
+    개행이 있으면 **config 문법이 깨져 조용히 401** 이 된다. 지금은 컨테이너 안 Python 이
+    `os.environ` 을 직접 읽는다 — argv 에도, 인용 규칙에도 노출되지 않는다."""
+    command = mon.admin_fetch_command("/health")
+    joined = " ".join(command)
+    assert "-u admin:" not in joined and "--user" not in joined, "자격증명이 인자에 있다"
+    assert "--config" not in joined, "셸 인용에 의존하는 config 방식이 남아 있다"
+    assert "os.environ['ADMIN_PASSWORD']" in mon.ADMIN_FETCH_PY, "env 를 직접 읽지 않는다"
+    assert command[-1] == "/health" and "python" in command
+
+
+@pytest.mark.parametrize("password", ['pa"ss', "pa\\ss", "pa\nss", "pa ss", "'quoted'"])
+def test_awkward_passwords_do_not_break_the_fetch_contract(password):
+    """⛔ 셸 config 방식이었다면 이 값들에서 문법이 깨졌다. 값은 **명령 어디에도 없어야** 한다."""
+    joined = " ".join(mon.admin_fetch_command("/health"))
+    assert password not in joined
 
 
 def test_load_token_is_passed_by_stdin_not_argv():
@@ -359,6 +368,242 @@ def test_monitor_reuses_the_shared_abort_rules():
 def test_cli_entry_point_exists_and_dry_run_describes_the_real_wiring():
     """⛔ 한때 이 파일은 **수집기에서 끝났다** — CLI · 부하 자식 · stop · rollback 이 전부
     없는데 문서에는 "배선 완료"라고 적혀 있었다."""
-    for name in ("main", "start_load_process", "rollback_topic_dispatcher", "LoadProcess"):
+    for name in ("main", "start_load_process", "EnvRestorer", "preflight", "LoadProcess"):
         assert hasattr(mon, name), f"{name} 이 없다 — 실행기가 아니다"
     assert mon.main(["--token-stdin", "--dry-run"]) == 0
+
+
+# ── env 소유권: 정확한 복원 ─────────────────────────────────────────────────
+
+
+ENV_TEXT = (
+    "# 주석\n"
+    "OTHER=keep\n"
+    "TOPIC_DISPATCHER_ENABLED=false\n"
+    "WS_AUTH_EXECUTOR_LOG_TIMINGS=false\n"
+)
+
+
+def test_env_read_distinguishes_absent_key_from_empty_value():
+    """⚠️ 부재를 `""` 로 접으면 복원 때 **없던 키가 생긴다**."""
+    values = mon.read_env_values("A=\nB=x\n", ["A", "B", "C"])
+    assert values == {"A": "", "B": "x", "C": None}
+
+
+def test_env_apply_adds_absent_keys_and_removes_on_none():
+    """⛔ `sed 's/^KEY=.*/KEY=v/'` 는 **키가 없으면 아무 일도 안 하면서 성공처럼 보인다**."""
+    added = mon.apply_env_values(ENV_TEXT, {"DEFAULT_EXECUTOR_PROBE_ENABLED": "true"})
+    assert "DEFAULT_EXECUTOR_PROBE_ENABLED=true" in added
+    assert "OTHER=keep" in added, "무관한 키를 잃었다"
+
+    removed = mon.apply_env_values(added, {"DEFAULT_EXECUTOR_PROBE_ENABLED": None})
+    assert "DEFAULT_EXECUTOR_PROBE_ENABLED" not in removed, "키 제거가 되지 않았다"
+
+
+def test_restorer_puts_back_original_values_not_a_hardcoded_false(tmp_path, monkeypatch):
+    """⛔ 무조건 `false` 로 치환하면 **원래 true 였던 환경을 조용히 바꾼다**."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=true\nOTHER=keep\n")
+    original = mon.read_env_values(env.read_text(), mon.CANARY_ENV)
+    env.write_text(mon.apply_env_values(env.read_text(), dict(mon.CANARY_ENV)))
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
+    _run(mon.EnvRestorer(original, env).restore())
+
+    text = env.read_text()
+    assert "TOPIC_DISPATCHER_ENABLED=true" in text, "원래 값을 잃고 false 로 굳었다"
+    assert "KRX_CLIENT_DISTRIBUTION_ENABLED" not in text, "원래 없던 키가 남았다"
+    assert "OTHER=keep" in text
+
+
+def test_restorer_is_idempotent(tmp_path, monkeypatch):
+    """⚠️ monitor 와 바깥 `finally` 가 **둘 다** 부른다 — 두 번 재기동하면 창만 길어진다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    original = mon.read_env_values(env.read_text(), mon.CANARY_ENV)
+    calls = []
+
+    async def counting():
+        calls.append(1)
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", counting)
+    restorer = mon.EnvRestorer(original, env)
+    _run(restorer.restore())
+    _run(restorer.restore())
+    assert len(calls) == 1, "복원이 두 번 재기동했다"
+
+
+# ── preflight: 전제가 실제로 적용됐는가 ─────────────────────────────────────
+
+
+def _preflight_responses(**overrides):
+    env = {k: v for k, v in mon.CANARY_ENV.items()}
+    payloads = {
+        "env": env,
+        "/admin/api/default-executor-probe": {"enabled": True, "running": True, "metrics": {}},
+        "/admin/api/ws-auth-executor-metrics": {"metrics": {"max_workers": 4}},
+        "/admin/api/broadcast-heartbeat": {"age_seconds": 3.0},
+    }
+    payloads.update(overrides)
+    return payloads
+
+
+def _patch_preflight(monkeypatch, payloads):
+    async def fake_run(command, *, timeout=None, cwd=None):
+        if command[-1].startswith("/admin"):
+            return json.dumps(payloads[command[-1]]) + "\n200"
+        return json.dumps(payloads["env"]) + "\n200"      # container_env
+    monkeypatch.setattr(mon, "run_command", fake_run)
+
+
+def test_preflight_passes_when_every_precondition_holds(monkeypatch):
+    _patch_preflight(monkeypatch, _preflight_responses())
+    assert _run(mon.preflight()) == []
+
+
+@pytest.mark.parametrize("overrides,expected", [
+    ({"/admin/api/default-executor-probe": {"enabled": False, "running": False}}, "enabled"),
+    ({"/admin/api/default-executor-probe": {"enabled": True, "running": False}}, "running=false"),
+    ({"/admin/api/ws-auth-executor-metrics": {"metrics": {"max_workers": 8}}}, "max_workers"),
+    ({"/admin/api/broadcast-heartbeat": {"age_seconds": 99.0}}, "heartbeat"),
+    ({"/admin/api/broadcast-heartbeat": {"age_seconds": None}}, "heartbeat"),
+])
+def test_preflight_catches_each_precondition(monkeypatch, overrides, expected):
+    """⛔ probe 가 꺼진 채 canary 가 돌면 **빈 지표를 성공으로** 읽는다 — 반복된 false green."""
+    _patch_preflight(monkeypatch, _preflight_responses(**overrides))
+    problems = _run(mon.preflight())
+    assert any(expected in p for p in problems), problems
+
+
+@pytest.mark.parametrize("key", list(mon.CANARY_ENV))
+def test_preflight_catches_each_unapplied_env_key(monkeypatch, key):
+    env = dict(mon.CANARY_ENV)
+    env[key] = "somethingelse"
+    _patch_preflight(monkeypatch, _preflight_responses(env=env))
+    assert any(key in p for p in _run(mon.preflight()))
+
+
+def test_krx_distribution_is_forced_off_during_the_window():
+    """⛔ "원래 꺼져 있겠지"로 두면 누가 켜 둔 상태에서 유료 데이터가 새는 창이 된다."""
+    assert mon.CANARY_ENV["KRX_CLIENT_DISTRIBUTION_ENABLED"] == "false"
+
+
+# ── poll interval ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bad", [0, -1, 0.5, float("nan"), float("inf")])
+def test_bad_poll_interval_is_rejected(bad):
+    """⛔ hot loop 면 **watchdog 자신이 부하원**이 된다(tick 마다 docker subprocess 6개)."""
+    with pytest.raises(ValueError):
+        mon.validate_poll_interval(bad)
+
+
+def test_default_poll_interval_is_accepted():
+    assert mon.validate_poll_interval(mon.DEFAULT_POLL_INTERVAL) == 1.0
+
+
+# ── _amain: env 를 건드린 순간부터 복원이 소유한다 ──────────────────────────
+
+
+class _AmainArgs:
+    def __init__(self, env_file, **kw):
+        self.env_file = str(env_file)
+        self.url = "ws://localhost:8000/ws"
+        self.token_stdin = True
+        self.token_file = None
+        self.poll_interval = 1.0
+        self.dry_run = False
+        self.__dict__.update(kw)
+
+
+def _patch_amain(monkeypatch, tmp_path, *, start_error=None, preflight=None,
+                 recreate_error=None):
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\nOTHER=keep\n")
+    calls = {"recreate": 0, "started": 0}
+
+    async def fake_recreate():
+        calls["recreate"] += 1
+        if recreate_error and calls["recreate"] == 1:
+            raise recreate_error
+
+    async def fake_run(command, *, timeout=None, cwd=None):
+        return "STARTED_AT\n"
+
+    async def fake_preflight():
+        return list(preflight or [])
+
+    async def fake_start(**kw):
+        calls["started"] += 1
+        if start_error:
+            raise start_error
+        raise AssertionError("이 테스트는 여기까지 오면 안 된다")
+
+    monkeypatch.setattr(mon, "recreate_and_verify_health", fake_recreate)
+    monkeypatch.setattr(mon, "run_command", fake_run)
+    monkeypatch.setattr(mon, "preflight", fake_preflight)
+    monkeypatch.setattr(mon, "start_load_process", fake_start)
+    monkeypatch.setattr(mon, "load_id_token", lambda **kw: "tok")
+    return env, calls
+
+
+def test_env_is_restored_when_the_child_cannot_be_started(monkeypatch, tmp_path):
+    """⛔ 한때 monitor 는 flag 를 **켜지 않으면서** rollback 만 했다 — 운영자가 먼저 켜고
+    자식 생성이 실패하면 **켜진 채 남았다**. 이제 env 를 건드린 순간부터 복원이 소유한다."""
+    env, calls = _patch_amain(monkeypatch, tmp_path, start_error=BrokenPipeError("stdin 파열"))
+    with pytest.raises(BrokenPipeError):
+        _run(mon._amain(_AmainArgs(env)))
+    text = env.read_text()
+    assert "TOPIC_DISPATCHER_ENABLED=false" in text, "자식 생성 실패 후 flag 가 켜진 채 남았다"
+    assert "KRX_CLIENT_DISTRIBUTION_ENABLED" not in text, "원래 없던 키가 남았다"
+    assert calls["started"] == 1
+
+
+def test_preflight_failure_creates_zero_load_processes_and_restores(monkeypatch, tmp_path):
+    """⛔ 전제가 안 맞으면 **부하는 0건** 생성이다 — 켠 채로 두고 사람이 판단하게 하지 않는다."""
+    env, calls = _patch_amain(monkeypatch, tmp_path, preflight=["probe running=false"])
+    assert _run(mon._amain(_AmainArgs(env))) == 1
+    assert calls["started"] == 0, "preflight 실패인데 부하를 띄웠다"
+    assert "TOPIC_DISPATCHER_ENABLED=false" in env.read_text()
+
+
+def test_env_is_restored_when_recreate_fails_right_after_applying(monkeypatch, tmp_path):
+    """⚠️ env 를 쓴 **직후** 재기동이 실패하는 창 — 여기서 복원이 없으면 파일만 바뀐 채 남는다."""
+    env, calls = _patch_amain(monkeypatch, tmp_path,
+                              recreate_error=mon.CollectorError("재기동 실패"))
+    with pytest.raises(mon.CollectorError):
+        _run(mon._amain(_AmainArgs(env)))
+    assert "TOPIC_DISPATCHER_ENABLED=false" in env.read_text()
+    assert calls["started"] == 0
+
+
+def test_token_failure_happens_before_any_env_mutation(monkeypatch, tmp_path):
+    """⚠️ 되돌릴 상태가 없도록 **env 를 건드리기 전에** 실패할 것들을 끝낸다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    before = env.read_text()
+
+    def boom(**kw):
+        raise ValueError("토큰이 비어 있다")
+
+    monkeypatch.setattr(mon, "load_id_token", boom)
+    with pytest.raises(ValueError):
+        _run(mon._amain(_AmainArgs(env)))
+    assert env.read_text() == before, "토큰 실패인데 env 가 변경됐다"
+
+
+@pytest.mark.parametrize("bad", [0, float("nan")])
+def test_amain_validates_poll_interval_before_touching_env(monkeypatch, tmp_path, bad):
+    """⛔ 검증 함수만 테스트하면 `_amain` 에서 그 호출을 **지워도 통과한다**(실측 SURVIVED).
+    hot loop 는 watchdog 자신을 부하원으로 만든다 — env 를 건드리기 전에 막아야 한다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    before = env.read_text()
+    monkeypatch.setattr(mon, "load_id_token", lambda **kw: "tok")
+
+    with pytest.raises(ValueError):
+        _run(mon._amain(_AmainArgs(env, poll_interval=bad)))
+    assert env.read_text() == before, "잘못된 poll interval 인데 env 를 건드렸다"
