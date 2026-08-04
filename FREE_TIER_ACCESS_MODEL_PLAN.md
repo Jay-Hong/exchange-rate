@@ -803,7 +803,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   못한 채** "인증이 분리됐다"만 확인하게 된다.
 
   ⚠️ **아직 배포 전이다**(운영은 `2534aa3`). canary 실행 전에 **기본-off 상태로 app-only 배포**해
-  수명주기와 endpoint 를 먼저 확인한다 — sentinel 배포와 canary 실행을 **한 단계로 합치지 않는다**
+  endpoint 를 먼저 확인한다(`enabled=false`, `running=false`) — 실제 수명주기 기동은 canary 에서
+  `enabled=true` · `running=true` · `submitted_count` 증가를 함께 확인한다. sentinel 배포와 canary
+  실행을 **한 단계로 합치지 않는다**
   (합치면 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분할 수 없다).
 
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`

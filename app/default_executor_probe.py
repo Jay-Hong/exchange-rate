@@ -77,6 +77,11 @@ def reset_default_executor_probe_metrics() -> None:
         _metrics["histogram"] = {}
 
 
+def is_default_executor_probe_running() -> bool:
+    """실제 probe task 상태. config=true 만으로 "관측 중"이라고 보고하지 않는다."""
+    return _probe_task is not None and not _probe_task.done()
+
+
 def _record_submitted() -> None:
     with _lock:
         _metrics["submitted_count"] += 1
@@ -139,7 +144,12 @@ def start_default_executor_probe(enabled: bool, interval_seconds: float) -> asyn
     global _probe_task
     if not enabled:
         return None
+    if is_default_executor_probe_running():
+        return _probe_task
     interval = validate_probe_interval(interval_seconds)     # ⛔ 기동 전 fail-fast
+    # 새 수명주기는 새 관측 창이다. 이전 수명주기에서 큐 취소로 남은 outstanding 을
+    # 현재 포화로 오독하지 않도록 집계를 함께 초기화한다.
+    reset_default_executor_probe_metrics()
     _probe_task = asyncio.create_task(_probe_loop(interval))
     logger.info("✅ default executor probe 기동", extra={"interval_sec": interval})
     return _probe_task

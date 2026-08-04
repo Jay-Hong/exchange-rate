@@ -1611,6 +1611,8 @@ async def get_default_executor_probe():
     이 축이다. ⛔ `job_duration_ms`(broadcast 벽시계)는 DB·네트워크가 섞여 **대체물이 아니다**.
     ⚠️ `DEFAULT_EXECUTOR_PROBE_ENABLED`(기본 off) — canary 기간에만 켠다. 상시면 sentinel 자신이
     default pool 을 점유해 재려는 대상을 흔든다.
+    ⚠️ `enabled` 는 **설정값**, `running` 은 **실제 task 상태**다. canary 에서는 둘 다 true 이고
+       `submitted_count` 가 증가하는 것까지 확인해야 한다.
     ⚠️ 히스토그램은 **고정 경계**(무제한 시계열 없음), process-local, never-crash.
     ⛔ **`started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것.** `submitted_count >= 1` 이고
        `outstanding` 이 1로 **머물면** 그건 probe 가 큐에 갇힌 것 = **default pool 완전 포화**이며,
@@ -1618,10 +1620,11 @@ async def get_default_executor_probe():
     """
     try:
         return {"enabled": config.DEFAULT_EXECUTOR_PROBE_ENABLED,
+                "running": default_executor_probe.is_default_executor_probe_running(),
                 "metrics": default_executor_probe.default_executor_probe_metrics()}
     except Exception:
         logger.error("default-executor-probe 조회 실패", exc_info=True)
-        return {"enabled": None, "metrics": None, "error": "unavailable"}
+        return {"enabled": None, "running": None, "metrics": None, "error": "unavailable"}
 
 
 @app.get("/admin/api/ws-connection-metrics", dependencies=[Depends(verify_admin)])

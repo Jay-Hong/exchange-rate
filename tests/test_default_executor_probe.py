@@ -265,6 +265,7 @@ def test_enabled_probe_actually_submits_work():
     async def scenario():
         task = probe.start_default_executor_probe(True, 1.0)
         assert task is not None, "켰는데 task 가 만들어지지 않았다"
+        assert probe.is_default_executor_probe_running(), "task 는 만들었지만 실행 상태가 아니다"
         assert await _poll_until(
             lambda: probe.default_executor_probe_metrics()["started_count"] >= 1
         ), "probe task 가 만들어졌는데 실제로 제출·측정하지 않는다"
@@ -276,6 +277,7 @@ def test_enabled_probe_actually_submits_work():
 def test_disabled_probe_submits_nothing():
     async def scenario():
         assert probe.start_default_executor_probe(False, 5.0) is None
+        assert not probe.is_default_executor_probe_running()
         await asyncio.sleep(0.05)
         m = probe.default_executor_probe_metrics()
         assert m["submitted_count"] == 0, "off 인데 제출이 일어났다"
@@ -298,12 +300,34 @@ def test_stop_cancels_and_joins_the_probe_task():
         assert task.done(), "stop 이 돌아왔는데 task 가 아직 살아 있다 — cancel 만 하고 합류를 안 했다"
         assert task.cancelled(), "task 가 취소로 끝나지 않았다"
         assert probe._probe_task is None, "stop 후에도 모듈이 죽은 task 를 붙들고 있다"
+        assert not probe.is_default_executor_probe_running()
 
     _run(scenario())
 
 
 def test_stop_is_safe_when_never_started():
     _run(probe.stop_default_executor_probe())
+
+
+def test_start_is_idempotent_and_a_new_lifecycle_resets_stale_outstanding():
+    """중복 start 는 task 를 누수하지 않고, stop 뒤 새 수명주기는 이전 큐 취소 흔적을 버린다."""
+
+    async def scenario():
+        first = probe.start_default_executor_probe(True, 10.0)
+        assert first is not None
+        assert probe.start_default_executor_probe(True, 10.0) is first
+        await probe.stop_default_executor_probe()
+
+        # 이전 수명주기에서 큐 취소가 남긴 상태를 모사한다.
+        probe._record_submitted()
+        assert probe.default_executor_probe_metrics()["outstanding"] == 1
+
+        second = probe.start_default_executor_probe(True, 10.0)
+        assert second is not None and second is not first
+        assert probe.default_executor_probe_metrics()["outstanding"] == 0
+        await probe.stop_default_executor_probe()
+
+    _run(scenario())
 
 
 def test_probe_loop_survives_a_failing_probe():
@@ -332,8 +356,8 @@ def test_probe_loop_survives_a_failing_probe():
 # ── 프로덕션 배선 (lifespan) ────────────────────────────────────────────────
 
 
-def _lifespan_calls() -> set[str]:
-    """`app/main.py` 의 `lifespan` 이 실제로 부르는 이름들.
+def _lifespan_node() -> ast.AsyncFunctionDef:
+    """`app/main.py` 의 `lifespan` AST.
 
     ⚠️ 왜 AST 인가: 이 리포의 `main.lifespan` 은 DB·Redis·scheduler·크롤러를 전부 띄우므로
     테스트에서 진짜로 진입할 수 없다. 같은 이유로 `test_atomic_write_a2_2.py` 도 (2026-06-21
@@ -344,13 +368,35 @@ def _lifespan_calls() -> set[str]:
                if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "lifespan"),
               None)
     assert fn is not None, "lifespan 함수를 찾지 못했다"
-    return {n.func.attr for n in ast.walk(fn)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert isinstance(fn, ast.AsyncFunctionDef)
+    return fn
 
 
 def test_lifespan_starts_and_stops_the_probe():
-    """⛔ **배선 제거 변이를 여기서 잡는다.** 수명주기 함수만 테스트하면 lifespan 에서
-    호출 두 줄을 지워도 전부 통과한다 — 이 세션에서 반복된 helper-only false green 이다."""
-    calls = _lifespan_calls()
-    assert "start_default_executor_probe" in calls, "lifespan 이 probe 를 기동하지 않는다"
-    assert "stop_default_executor_probe" in calls, "lifespan 이 probe 를 종료하지 않는다"
+    """⛔ 호출 존재만 보면 stop 의 await 제거·yield 반대편 이동을 놓친다."""
+    fn = _lifespan_node()
+    yields = [n for n in ast.walk(fn) if isinstance(n, ast.Yield)]
+    assert len(yields) == 1, "lifespan yield 경계를 정확히 찾지 못했다"
+    boundary = yields[0].lineno
+
+    starts = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and n.func.attr == "start_default_executor_probe"]
+    awaited_stops = [n for n in ast.walk(fn)
+                     if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+                     and isinstance(n.value.func, ast.Attribute)
+                     and n.value.func.attr == "stop_default_executor_probe"]
+
+    assert len(starts) == 1, "lifespan probe start 배선은 정확히 한 곳이어야 한다"
+    assert len(awaited_stops) == 1, "lifespan probe stop 은 정확히 한 번 await 해야 한다"
+    assert starts[0].lineno < boundary, "probe start 가 lifespan 시작 구간에 있지 않다"
+    assert awaited_stops[0].lineno > boundary, "probe stop 이 lifespan 종료 구간에 있지 않다"
+
+    args = starts[0].args
+    assert len(args) == 2, "probe start 는 enabled/interval config 두 값을 받아야 한다"
+    assert isinstance(args[0], ast.Attribute) \
+        and args[0].attr == "DEFAULT_EXECUTOR_PROBE_ENABLED", \
+        "probe start 가 실제 enabled config 를 사용하지 않는다"
+    assert isinstance(args[1], ast.Attribute) \
+        and args[1].attr == "DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS", \
+        "probe start 가 실제 interval config 를 사용하지 않는다"
