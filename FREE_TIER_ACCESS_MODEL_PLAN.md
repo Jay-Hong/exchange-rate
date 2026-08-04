@@ -830,18 +830,31 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     timeout 또는 예상 밖 `subscription_error` / auth `queue_wait_ms_max >= 5000` / 계획된 종료
     전 `never_started`·`caller_cancelled_while_running` 증가 / probe `outstanding=1` **2회
     연속** 또는 queue delay `>= 1000ms` / legacy broadcast 30초 이상 정지.
-    ✅ **배선 완료** — `scripts/canary_monitor.py`. 한동안 `evaluate_server_abort()` 는 **순수
-    함수인데 호출자가 없어서**, 위 6종 중 자동화된 것은 client timeout/error 둘뿐이었다.
-    "운영자가 스냅샷을 넣어 판정한다"는 8 동시 연결이 도는 7분 창에서 **실행 가능한 절차가
-    아니다**(사람이 1초 주기로 5개 endpoint 를 볼 수 없다).
-    · watchdog 이 **1초마다** health · auth metrics · probe · 컨테이너 재시작 · 신규 ERROR ·
-      legacy broadcast 를 보고, 조건 발화 시 **부하 종료 → flag rollback** 순으로 닫는다
-      (순서 반대면 닫힌 flag 를 부하가 계속 두드려 잡음이 된다).
-    · ⛔ **rollback 은 `finally`** — 중단·정상 종료·예외·SIGINT 어느 경로든 되돌린다. canary 는
-      유계 실험이라 창이 닫히면 flag 도 닫혀야 한다. 자식 종료가 실패해도 rollback 은 돈다.
-    · ⛔ **watchdog 이 admin 비밀번호를 들지 않는다** — 컨테이너 **안에서** `$ADMIN_PASSWORD`
-      를 확장하므로 우리 argv·로그 어디에도 값이 없다(`-u admin:<값>` 을 만들면 `ps` 노출).
+    🟡 **실행기 land, 수직 리허설 미실시** — `scripts/canary_monitor.py`(CLI + 부하 자식 +
+    watchdog + rollback). ⛔ **"배선 완료"라고 쓰지 않는다**: 한때 그렇게 적었는데 그때 그
+    파일은 **수집기에서 끝나** CLI·부하 자식·stop·rollback 이 **전부 없었다**. 지금은 있고
+    판별 테스트도 있지만, **실제 프로세스·실제 flag 를 상대로 한 리허설은 아직**이다.
+    · 한동안 `evaluate_server_abort()` 는 **순수 함수인데 호출자가 없었다** — 6종 중 자동화된
+      것은 client timeout/error 둘뿐이었다. "운영자가 스냅샷을 넣어 판정한다"는 8 동시 연결이
+      도는 7분 창에서 실행 가능한 절차가 아니다(사람이 1초에 5개 endpoint 를 볼 수 없다).
+    · ⛔ 더 조용한 결함이었다: `broadcast_age_seconds` 를 **아무도 채우지 않아** legacy
+      broadcast 정지가 **합성 Snapshot 에서만** 발화했다(운영에선 영구 0). 전용 heartbeat
+      endpoint(`/admin/api/broadcast-heartbeat`, in-memory only)를 만들어 수집기까지 이었다.
+      ⚠️ `/admin/api/dashboard` 를 쓰지 않는다 — DB·로그 작업이 섞여 **1초 폴링이 곧 부하**다.
+    · ⛔ **fail-closed 수집**: subprocess 종료코드·stderr·HTTP 상태·JSON 형식 중 하나라도
+      어긋나면 중단한다. 한때 `_run` 이 종료코드를 버려 401·500·docker 오류가 `{}` 로 접혔다 —
+      그러면 **"지표가 깨끗하다"와 "지표를 못 읽었다"가 구분되지 않는다**. 모든 호출에 timeout
+      (하나가 멈추면 watchdog 이 함께 멈춰 중단도 rollback 도 영영 안 돈다).
+    · ⛔ **cleanup 은 각자의 `try`**: stop 실패해도 rollback 이 돌고, rollback 실패해도 kill 이
+      돌며, 마지막에 **프로세스 사망을 확인**한다. 실패는 outcome 과 exit code 에 남는다.
+      부하의 **비정상 종료·예외도 중단 사유**다(삼키면 성공으로 보인다).
+    · ⛔ **비밀번호가 어떤 argv 에도 들어가지 않는다.** 한때 "컨테이너 안에서 확장하므로
+      안전하다"고 적었는데 **틀렸다** — 셸이 확장한 값은 **최종 `curl` 의 argv 에 들어간다**.
+      heredoc → `curl --config -` **stdin** 으로 바꿨다. 토큰도 자식 stdin 으로만 준다.
     · 판정은 부하 도구와 **같은 함수**를 쓴다 — 재구현하면 두 곳이 다른 기준으로 판정한다.
+
+    ⛔ **GO 전 남은 것 = 수직 리허설**: flag ON → 부하 시작 → 강제 health 실패 → 부하 종료 →
+    flag OFF → health 복귀를 **실제로 관측**한다. 그 전에는 Canary GO 를 선언하지 않는다.
 
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
   이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,

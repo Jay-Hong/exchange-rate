@@ -1602,6 +1602,26 @@ async def get_atomic_cutover_status():
     return await build_cutover_status_dict(SessionLocal)
 
 
+@app.get("/admin/api/broadcast-heartbeat", dependencies=[Depends(verify_admin)])
+async def get_broadcast_heartbeat():
+    """legacy broadcast 가 **살아 있는가**만 본다 — canary watchdog 의 1초 폴링용.
+
+    ⛔ `/admin/api/dashboard` 를 쓰지 않는 이유: 거기엔 DB 조회와 로그 파일 작업이 섞여 있어,
+    1초마다 부르면 **관측이 부하가 된다**(그것도 하필 부하를 재는 창에서).
+    여기서 읽는 것은 in-memory 카운터 하나뿐이다.
+    ⚠️ `age_seconds` 가 `null` 이면 "아직 한 번도 broadcast 하지 않음" 이다 — **0 과 다르다**.
+    호출자는 그 둘을 구분해야 한다(0 으로 접으면 정지를 정상으로 읽는다).
+    """
+    try:
+        last = broadcast_stats.last_broadcast_time
+        age = (datetime.now() - last).total_seconds() if last else None
+        return {"last_broadcast_time": last.isoformat() if last else None,
+                "age_seconds": age}
+    except Exception:
+        logger.error("broadcast-heartbeat 조회 실패", exc_info=True)
+        return {"last_broadcast_time": None, "age_seconds": None, "error": "unavailable"}
+
+
 @app.get("/admin/api/default-executor-probe", dependencies=[Depends(verify_admin)])
 async def get_default_executor_probe():
     """격리의 **보호 대상**(동거 `to_thread`)을 재는 유일한 수단 — default executor 큐 지연.
