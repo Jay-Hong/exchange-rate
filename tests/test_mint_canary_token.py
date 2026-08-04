@@ -134,3 +134,127 @@ def test_exchange_requires_an_id_token_in_the_response():
     with pytest.raises(RuntimeError) as caught:
         mint.exchange_custom_token("ct", API_KEY, opener=empty)
     assert "idToken" in str(caught.value)
+
+
+# ── 기존 사용자만 쓴다 (새 계정 생성 회피의 실체) ──────────────────────────
+
+
+class _FakeUserNotFound(Exception):
+    pass
+
+
+class _FakeAuth:
+    """`firebase_admin.auth` 대역 — 호출 **순서**와 횟수를 기록한다."""
+
+    UserNotFoundError = _FakeUserNotFound
+
+    def __init__(self, *, existing=("known-uid",)):
+        self.existing = set(existing)
+        self.calls: list[str] = []
+
+    def get_user(self, uid, app=None):
+        self.calls.append(f"get_user:{uid}")
+        if uid not in self.existing:
+            raise _FakeUserNotFound(uid)
+        return object()
+
+    def create_custom_token(self, uid, app=None):
+        self.calls.append(f"create_custom_token:{uid}")
+        return b"CUSTOM-TOKEN"
+
+    def verify_id_token(self, token, app=None, check_revoked=False):
+        self.calls.append(f"verify:{check_revoked}")
+        return {"uid": "known-uid", "aud": "test-project", "exp": 1}
+
+
+def _patch_firebase(monkeypatch, tmp_path, fake_auth):
+    import types
+
+    service_account = tmp_path / "sa.json"
+    service_account.write_text(json.dumps({"project_id": "test-project"}))
+
+    fake_admin = types.SimpleNamespace(
+        initialize_app=lambda cred, name=None: object(),
+        delete_app=lambda app: None,
+    )
+    fake_credentials = types.SimpleNamespace(Certificate=lambda path: object())
+    monkeypatch.setitem(sys.modules, "firebase_admin", fake_admin)
+    monkeypatch.setitem(sys.modules, "firebase_admin.auth", fake_auth)
+    monkeypatch.setitem(sys.modules, "firebase_admin.credentials", fake_credentials)
+    fake_admin.auth = fake_auth
+    fake_admin.credentials = fake_credentials
+    return str(service_account)
+
+
+def test_existing_user_is_checked_before_minting(monkeypatch, tmp_path):
+    """⛔ **이 확인이 없으면 설계 목적이 뒤집힌다.** custom token 최초 로그인은 UID 가 없으면
+    사용자 레코드를 **새로 만들고**, 뒤의 uid 일치 검사는 (요청한 UID 그대로라) 통과한다 —
+    오타 하나로 "기존 계정만 쓴다"가 "새 계정을 만든다"가 된다."""
+    fake_auth = _FakeAuth()
+    path = _patch_firebase(monkeypatch, tmp_path, fake_auth)
+    monkeypatch.setattr(mint, "exchange_custom_token", lambda *a, **k: TOKEN)
+
+    assert mint.mint("known-uid", API_KEY, path) == TOKEN
+    assert fake_auth.calls[0] == "get_user:known-uid", \
+        f"존재 확인이 발급보다 먼저가 아니다: {fake_auth.calls}"
+    assert fake_auth.calls[1] == "create_custom_token:known-uid"
+
+
+def test_unknown_uid_stops_before_any_exchange(monkeypatch, tmp_path):
+    """⛔ 존재하지 않는 UID 면 **교환 0회** — 교환이 곧 계정 생성이다."""
+    fake_auth = _FakeAuth()
+    path = _patch_firebase(monkeypatch, tmp_path, fake_auth)
+    exchanges = []
+    monkeypatch.setattr(mint, "exchange_custom_token",
+                        lambda *a, **k: exchanges.append(1) or TOKEN)
+
+    with pytest.raises(RuntimeError) as caught:
+        mint.mint("typo-uid", API_KEY, path)
+
+    assert "존재하지 않는 UID" in str(caught.value)
+    assert exchanges == [], "존재하지 않는 UID 인데 교환을 시도했다 — 계정이 생성된다"
+    assert not any(c.startswith("create_custom_token") for c in fake_auth.calls)
+
+
+# ── 오류 본문 반사 유출 (이전 테스트가 공허했던 자리) ──────────────────────
+
+
+def test_reflecting_error_body_never_leaks_the_token_or_key(capsys, monkeypatch, tmp_path):
+    """⛔ **이전 테스트는 공허했다** — 반사하지 않는 고정 본문만 써서 유출을 볼 수 없었다.
+    실제로 요청값을 **되돌려주는** 응답을 만들어 확인한다(그런 endpoint 는 실재한다)."""
+    import urllib.error
+
+    custom_token = "CUSTOM-TOKEN-SECRET"
+
+    def reflecting(request, timeout=None):
+        body = json.dumps({"error": {"message": "INVALID_CUSTOM_TOKEN",
+                                     "echo": {"url": request.full_url,
+                                              "payload": request.data.decode()}}}).encode()
+        raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, BytesIO(body))
+
+    with pytest.raises(RuntimeError) as caught:
+        mint.exchange_custom_token(custom_token, API_KEY, opener=reflecting)
+
+    message = str(caught.value)
+    assert custom_token not in message, "custom token 이 예외 메시지로 샜다"
+    assert API_KEY not in message, "API key 가 예외 메시지로 샜다"
+    assert "INVALID_CUSTOM_TOKEN" in message, "알려진 오류 코드는 남겨야 진단이 된다"
+
+    mint.log(f"[mint] 실패: {message}")
+    stderr = capsys.readouterr().err
+    assert custom_token not in stderr and API_KEY not in stderr, "stderr 로 샜다"
+
+
+def test_unknown_error_body_is_not_reflected():
+    """⚠️ 모르는 코드면 **아무것도 인용하지 않는다** — 반사가 곧 유출이다."""
+    import urllib.error
+
+    def reflecting(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 500, "boom", {},
+                                     BytesIO(request.data))          # 요청 전문을 그대로
+
+    with pytest.raises(RuntimeError) as caught:
+        mint.exchange_custom_token("CT-SECRET", API_KEY, opener=reflecting)
+    message = str(caught.value)
+    assert "CT-SECRET" not in message and API_KEY not in message
+    assert "UNRECOGNIZED_ERROR" in message
