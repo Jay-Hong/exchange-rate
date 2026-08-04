@@ -974,6 +974,12 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⚠️ 대안은 current HEAD 로 app-only rebuild/recreate 인데 **그건 배포라 별도 GO** 가 필요하다.
       ✅ 위 경로를 UID 없이 검증했다: cp → SHA 일치 → 컨테이너에서 `--help` → `--api-key` 거부 →
         삭제 확인.
+        ⚠️ **그 검증이 증명한 범위는 여기까지다** — 전달·해시·CLI·삭제. `firebase_admin` import,
+        기존 사용자 조회, 교환, 재검증은 **UID 를 받은 뒤 처음** 실행된다.
+      ⚠️ **"mint-only" 도 Firebase 에는 무접촉이 아니다.** `signInWithCustomToken` 은 **실제
+        로그인**이라 그 계정의 `lastSignInTime` 같은 **인증 메타데이터가 갱신**되고 응답에
+        refresh token 이 포함된다(발급기는 저장하지 않고 프로세스 메모리에서 버린다).
+        무접촉인 것은 **우리 쪽**이다: 새 Firebase 사용자 없음 / 앱 DB 무변경 / 서버 flag 무변경.
       ⛔ **운영 DB 에서 UID 후보를 뽑지 않는다** — 불필요한 개인정보 노출이다. 사용자가 Firebase
         Console 에서 기존 테스트 UID **하나**만 확인한다.
 
