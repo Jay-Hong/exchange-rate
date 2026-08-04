@@ -814,6 +814,45 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   `enabled=true` · `running=true` · `submitted_count` 증가를 함께 확인한다. sentinel 배포와
   canary 실행을 분리해 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분한다.
 
+  ### ✅ Canary 실측 결과 (2026-08-05 00:56~01:04 KST, `a3ec9bd`)
+
+  완주(`ok=true`) — 중단 0 / cleanup 오류 0 / timeout·error·protocol_error 0 /
+  subscribe **3247건 전부 `ok`**. 산출물 `.env.<ts>.canary-metrics.jsonl`(0600, 83 records)
+  로 보존됐다(rollback 재생성이 지우지 못했다 — 그게 이 산출물의 존재 이유다).
+
+  · **인증 전용 executor (W=4)** — 두 축이 갈렸다:
+
+    | 단계 | 구간평균 queue_wait | 구간평균 execution | queue_wait max |
+    | --- | --- | --- | --- |
+    | c1 (동시 1) | **1.7ms** | 293.9ms | 70ms |
+    | c4 (동시 4 = W) | **2.4ms** | 286.3ms | 78ms |
+    | c8 (동시 8 = 2×W) | **245.6ms** | 290.0ms | 1284ms |
+
+    ⛔ **`execution` 은 전 구간 ~290ms 로 평평하다** — Firebase 비용은 동시성 8까지 나빠지지
+    않았다. 늘어난 것은 **queueing 뿐**이고, 동시성이 W 이하면 사실상 0(1.7~2.4ms)이다.
+    2×W 에서 구간평균 queue ≈ 서비스 시간(≈290ms) — 대기이론이 예측하는 그대로다.
+    ⚠️ **누계 통계의 함정**: 부하 도구 stats 는 단계마다 초기화되지 않는다. 한때 319·399ms 를
+    c4 로 귀속했는데 **틀렸다** — c4 는 count 1637 에서 끝나고 그 값들은 count 1672+ 라 이미
+    c8 이다. 전체 평균(122.5ms)도 c1·c4 의 ~2ms 가 섞인 값이라 **c8 증분과 혼동하면 안 된다**.
+    · `never_started=0` · `caller_cancelled_while_running=0` · `by_outcome={ok: 3247}`.
+
+  · **격리의 보호 대상(default executor sentinel)** — submitted 425 == started 425
+    (outstanding 0), queue_delay **avg 3.56ms / max 360ms**, 425건 중 **333건 ≤1ms**.
+    격리 근거였던 p99 3967ms 와 대비된다. ⚠️ 무부하 baseline(max 57ms)보다 **꼬리는 늘었고**
+    (max 360ms) 그 최댓값의 원인은 이 데이터만으로 귀속할 수 없다.
+
+  · **지난 중단의 원인이 닫혔다** — 81 poll 전부 `ERROR/Traceback` 포함 로그 **0줄**
+    (3247 subscribe + 연결 종료를 겪고도). legacy broadcast heartbeat max age **1.0s**(임계 30s).
+    auth/probe/health 비정상 poll 0.
+
+  ### ✅ W 결정 (2026-08-05)
+
+  **W=4 를 초기 phased-release 값으로 확정**한다.
+  · c8 에서도 timeout·취소·미시작 **0**, 최악 상한 queue 1.284s + execution 2.075s
+    **< wire deadline 10s**. sentinel 은 사전 중단 기준(1s) 아래.
+  · **W=8 은 blocker 가 아니라 후속 최적화 실험**이다 — queue 는 줄겠지만 Firebase 동시
+    호출이 늘어 execution 쪽이 어떻게 반응할지는 **측정 없이 단정할 수 없다**.
+
   ### Canary GO 조건 (2026-08-04 확정)
 
   · **W=4 는 canary 한정 잠정값**으로 수용한다(측정 없음 — 그 측정이 canary 의 목적이다).
@@ -876,6 +915,16 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     `.State.Health.Status`는 직후 잠시 `starting`일 수 있어 이 완료 조건과 혼동하지 않는다.
     이것은 **GO 승인 자체가 아니다** — 실제
     prod canary는 여전히 사용자 GO와 유효 Firebase ID token이 필요하다.
+
+    ⛔ **Release GO 전 별도 운영 항목: 운영 컨테이너가 `ENV=development` 다.**
+      로그 형식(콘솔 vs JSON) 문제로만 적었던 것은 **부정확했다** — 실제 차이는 **안전장치**다:
+      `ENV != production` 이면 (1) 기동 시 `ADMIN_PASSWORD` 필수 검사가 **발동하지 않고**
+      (2) `verify_admin` 이 값 부재 시 **`admin1234` 로 폴백**한다(`app/main.py`).
+      ⚠️ 지금은 `ADMIN_PASSWORD` 가 설정돼 있어 **즉시 노출은 아니다** — 그러나 env 가 어떤
+      이유로든 빠지면 admin endpoint 가 **조용히 기본 비밀번호를 받는다**(fail-closed 아님).
+      → 사용자 승인 후 `ENV=production` 전환: **`ADMIN_PASSWORD` 존재 사전 확인** →
+        force-recreate → health · admin endpoint · **JSON stdout** · legacy WS · ERROR 0 smoke.
+      ⚠️ 로그가 JSON 으로 바뀌면 canary 의 로그 발췌는 JSON 분기를 타게 된다(양쪽 다 지원).
 
     · **로컬 격리 스택에서만** 한다 — `docker-compose.rehearsal.yml`(loopback `127.0.0.1:18000`
       publish + 별도 container_name + 별도 named volume). 기본 compose와 병합하지 않는
