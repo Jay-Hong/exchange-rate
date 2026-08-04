@@ -159,6 +159,53 @@ def test_clean_exit_of_the_load_process_is_not_an_abort():
     assert not outcome.aborted and outcome.ok
 
 
+def test_clean_exit_before_the_plan_duration_is_an_abort():
+    """exit 0만 보면 PHASES가 비거나 조기 return해 인증 부하 0건이어도 성공이 된다."""
+    outcome, _ = _outcome(
+        _Harness([]), load=_FakeLoad(seconds=0.01, exit_code=0),
+        minimum_clean_exit_seconds=1.0,
+    )
+    assert outcome.aborted and any("조기 정상 종료" in reason for reason in outcome.reasons)
+
+
+def test_clean_exit_duration_starts_before_the_load_is_spawned():
+    """monitor 진입부터 재면 spawn 직후 시작한 정상 자식을 조기 종료로 오판한다."""
+    outcome, _ = _outcome(
+        _Harness([]), load=_FakeLoad(seconds=0.01, exit_code=0),
+        minimum_clean_exit_seconds=1.0, load_started_at=100.0,
+        clock=lambda: 101.0,
+    )
+    assert outcome.ok and not outcome.aborted
+
+
+def test_clean_exit_takes_one_final_server_snapshot_before_success():
+    """마지막 poll 뒤 생긴 장애를 자식 exit 0이 앞질러 성공으로 만들면 안 된다."""
+    completed = asyncio.Event()
+    snapshots = [mon.Snapshot(), mon.Snapshot(auth_running=False)]
+    collected = []
+
+    class Load(_FakeLoad):
+        async def wait(self):
+            await completed.wait()
+            self.alive = False
+            return 0
+
+    async def collect():
+        collected.append(1)
+        snapshot = snapshots.pop(0)
+        if len(collected) == 1:
+            completed.set()
+            await asyncio.sleep(0)  # wait task가 done이 된 뒤 다음 loop로 간다.
+        return snapshot
+
+    harness = _Harness([])
+    harness.collect = collect
+    outcome, _ = _outcome(harness, load=Load())
+    assert outcome.aborted
+    assert any("auth executor 정지" in reason for reason in outcome.reasons)
+    assert len(collected) == 2
+
+
 # ── cleanup 이 구조적으로 보장되는가 ────────────────────────────────────────
 
 
@@ -1067,6 +1114,51 @@ def test_amain_rehearsal_exit_code_uses_the_exact_injected_abort_contract(
     assert _run(mon._amain(args)) == expected
 
 
+def test_amain_requires_the_nominal_plan_duration_for_a_real_canary(monkeypatch, tmp_path):
+    """helper 기본값 0에 기대면 `_amain`에서 배선을 빼도 조기 exit 0이 다시 성공한다."""
+    env = tmp_path / ".env"
+    env.write_text("TOPIC_DISPATCHER_ENABLED=false\n")
+    observed = []
+
+    class Load:
+        async def kill(self):
+            return None
+
+    async def fake_run(command, *, timeout=None, cwd=None):
+        if "Config.Labels" in command[-1]:
+            return json.dumps({
+                "com.docker.compose.project": "exchange-rate",
+                "com.docker.compose.service": "fastapi",
+            }) + "\n"
+        return "AFTER_RECREATE\n"
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    async def no_problems(*args, **kwargs):
+        return []
+
+    async def start(**kwargs):
+        return Load()
+
+    async def monitor(**kwargs):
+        observed.append((kwargs["minimum_clean_exit_seconds"], kwargs["load_started_at"]))
+        return mon.CanaryOutcome(False, [], 1, True, True, False)
+
+    monkeypatch.setattr(mon, "load_id_token", lambda **kwargs: "tok")
+    monkeypatch.setattr(mon, "run_command", fake_run)
+    monkeypatch.setattr(mon, "recreate_and_verify_health", no_op)
+    monkeypatch.setattr(mon, "wait_for_preflight", no_problems)
+    monkeypatch.setattr(mon, "start_load_process", start)
+    monkeypatch.setattr(mon, "run_monitored_canary", monitor)
+
+    assert _run(mon._amain(_AmainArgs(env))) == 0
+    assert len(observed) == 1
+    minimum, load_started_at = observed[0]
+    assert minimum == sum(phase.seconds for phase in mon.PHASES)
+    assert isinstance(load_started_at, float) and load_started_at > 0
+
+
 def test_url_has_no_default_so_an_unreachable_stack_is_not_assumed():
     """⛔ compose 의 fastapi 는 `expose` 만 있고 host port 를 publish 하지 않는다 —
     기본 URL 을 두면 **닿지 않는 주소로 리허설하고 rollback 만 검증**하게 된다."""
@@ -1252,3 +1344,27 @@ def test_amain_applies_the_command_timeout_before_touching_env(monkeypatch, tmp_
     with pytest.raises(ValueError):
         _run(mon._amain(_AmainArgs(env, command_timeout=0)))
     assert env.read_text() == before, "잘못된 command timeout 인데 env 를 건드렸다"
+
+
+def test_final_snapshot_failure_is_not_folded_into_success():
+    """⛔ **마지막 순간의 fail-open.** 정상 종료를 받아들이기 직전 최종 수집이 실패했는데 그걸
+    삼키면, canary 는 **끝 상태를 읽지 못한 채** 성공을 보고한다 — 그 창이 하필 종료 직전
+    장애가 생기는 구간이다(실측: 이 경로가 변이에서 SURVIVED 였다)."""
+    load = _FakeLoad(seconds=0.02, exit_code=0)
+
+    class _FailOnFinalCollect(_Harness):
+        async def collect(self):
+            await asyncio.sleep(0)
+            # ⚠️ 폴링 구간이 아니라 **정상 종료 직후의 최종 수집**만 실패시켜야 이 경로를 짚는다.
+            if not load.is_alive():
+                raise mon.CollectorError("401")
+            return mon.Snapshot()
+
+    harness = _FailOnFinalCollect([])
+    outcome = _run(mon.run_monitored_canary(
+        collect=harness.collect, load=load, rollback=harness.rollback,
+        poll_interval=0.001, emit=lambda _: None))
+
+    assert outcome.aborted, "최종 수집 실패인데 성공으로 보고했다"
+    assert any("최종 지표 수집 실패" in r for r in outcome.reasons), outcome.reasons
+    assert not outcome.ok and "rollback" in harness.calls

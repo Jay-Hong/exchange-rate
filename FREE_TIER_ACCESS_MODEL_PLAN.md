@@ -802,8 +802,15 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   `DEFAULT_EXECUTOR_PROBE_ENABLED` 기본 off). 이게 없으면 canary 는 **격리의 보호 대상을 관측하지
   못한 채** "인증이 분리됐다"만 확인하게 된다.
 
-  ✅ **기본-off app-only 배포 완료**(`13f666b`). endpoint smoke에서
-  `enabled=false` · `running=false`를 확인했다. 실제 수명주기 기동은 canary 에서
+  ✅ **기본-off app-only 배포 완료**(`13f666b`, 이미지 `c5c618e71321`). endpoint smoke 에서
+  `enabled=false` · `running=false` 를 확인했다.
+  ⚠️ **다만 운영은 `13f666b` 에 멈춰 있다**(2026-08-04 서버 직접 확인: `git log -1` = `13f666b`,
+  `default-executor-probe` **200**, `broadcast-heartbeat` **404**, `scripts/canary_monitor.py`
+  **부재**). 즉 sentinel 은 이미 있지만 **watchdog·heartbeat endpoint 는 없다**.
+  → 실제 canary 전에 **현재 HEAD 를 flag OFF 로 app-only 재배포**하고 smoke 를 다시 본다.
+  ⛔ 한때 이 자리에 "운영은 `2534aa3`" 라고 적혔는데 **오보였다** — 배포를 직접 수행한 뒤에도
+  구 값을 그대로 말한 것이다. 배포본은 **문서 기억이 아니라 서버에서 확인**한다.
+  실제 수명주기 기동은 canary 에서
   `enabled=true` · `running=true` · `submitted_count` 증가를 함께 확인한다. sentinel 배포와
   canary 실행을 분리해 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분한다.
 
@@ -855,6 +862,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     · ⛔ **cleanup 은 각자의 `try`**: stop 실패해도 rollback 이 돌고, rollback 실패해도 kill 이
       돌며, 마지막에 **프로세스 사망을 확인**한다. 실패는 outcome 과 exit code 에 남는다.
       부하의 **비정상 종료·예외도 중단 사유**다(삼키면 성공으로 보인다).
+      exit 0도 명목 계획 420초보다 이르면 **조기 정상 종료**로 중단하고, 정상 종료를 받아들이기
+      직전에 서버 지표를 한 번 더 수집한다(마지막 poll 뒤 장애 누락 금지).
+      420초 기준은 monitor 진입이 아니라 **부하 subprocess spawn 직전**부터 재다
+      (spawn 후 기준을 새로 잡으면 정상 완주도 조기 종료로 오판할 수 있다).
     · ⛔ **비밀번호가 어떤 argv 에도 들어가지 않는다.** 한때 "컨테이너 안에서 확장하므로
       안전하다"고 적었는데 **틀렸다** — 셸이 확장한 값은 **최종 `curl` 의 argv 에 들어간다**.
       heredoc → `curl --config -` **stdin** 으로 바꿨다. 토큰도 자식 stdin 으로만 준다.
@@ -892,6 +903,10 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       ⛔ **prod injected-abort 단계는 없다.** 실행기가 운영 target의 `--rehearse`와
       리허설 없는 `--inject-abort-after`를 둘 다 구조적으로 거부한다. 로컬 리허설 다음은
       별도 GO + 유효 Firebase ID token을 사용한 **실제 prod canary**다.
+      ⚠️ prod 실행기는 대상 `.env`와 Docker Compose를 **로컬 파일·프로세스로** 조작한다.
+      따라서 개발자 Mac에서 public `wss://fxi.kr/ws`만 가리켜 실행하면 안 되고,
+      **최신 HEAD가 배포된 운영 EC2 리포 루트에서** 실행해야 한다. 이 실행 위치와
+      사전 app-only 배포·smoke는 토큰 제공·prod GO와 별개의 필수 전제다.
 
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
   이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,

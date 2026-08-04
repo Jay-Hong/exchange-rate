@@ -37,7 +37,7 @@ from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.ws_auth_load import (  # noqa: E402
-    PHASES, evaluate_server_abort, load_id_token, maximum_plan_seconds,
+    PHASES, evaluate_server_abort, load_id_token, maximum_plan_seconds, total_plan_seconds,
 )
 
 BROADCAST_STALL_SECONDS = 30.0
@@ -617,9 +617,15 @@ async def run_monitored_canary(
     rollback: Callable[[], Awaitable[None]],
     baseline_started_at: Optional[str] = None,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
+    minimum_clean_exit_seconds: float = 0.0,
+    load_started_at: Optional[float] = None,
+    clock: Callable[[], float] = time.monotonic,
     emit: Callable[[str], None] = print,
 ) -> CanaryOutcome:
     wait_task = asyncio.ensure_future(load.wait())
+    # 자식은 monitor 진입 전에 이미 spawn된다. 여기서 새로 시각을 잡으면 정상 420초 계획도
+    # spawn -> monitor 사이만큼 짧게 보여 조기 종료로 오판할 수 있다.
+    started_at = clock() if load_started_at is None else load_started_at
     reasons: list[str] = []
     cleanup_errors: list[str] = []
     polls = 0
@@ -640,6 +646,23 @@ async def run_monitored_canary(
                     #    `return_exceptions=True` 로 삼켜 비정상 종료가 성공으로 보였다.
                     if code != 0:
                         reasons.append(f"부하 프로세스 비정상 종료 exit={code}")
+                    elif (elapsed := clock() - started_at) < minimum_clean_exit_seconds:
+                        reasons.append(
+                            "부하 프로세스 조기 정상 종료 "
+                            f"({elapsed:.1f}s < {minimum_clean_exit_seconds:.1f}s)")
+                    else:
+                        # ⛔ 종료를 먼저 보고 바로 break 하면 직전 poll 뒤에 생긴 ERROR/포화가
+                        # 영원히 빠진다. 정상 종료를 받아들이기 전에 마지막 서버 상태를 읽는다.
+                        try:
+                            snapshot = await collect()
+                        except Exception as exc:              # noqa: BLE001 — fail-closed
+                            reasons.append(f"최종 지표 수집 실패({type(exc).__name__}): {exc}")
+                        else:
+                            polls += 1
+                            reasons = evaluate_snapshot_abort(
+                                snapshot, baseline_started_at=baseline_started_at,
+                                previous_probe_outstanding=previous_outstanding,
+                            )
                 break
             try:
                 snapshot = await collect()
@@ -873,6 +896,7 @@ async def _amain(args) -> int:
             return 1                                   # ⛔ 부하 프로세스 **0건** 생성
 
         baseline = (await run_command(target.inspect("{{.State.StartedAt}}"))).strip()
+        load_started_at = time.monotonic()
         load = (await start_rehearsal_load() if args.rehearse
                 else await start_load_process(token=token, url=args.url))
 
@@ -886,6 +910,10 @@ async def _amain(args) -> int:
         outcome = await run_monitored_canary(
             collect=collector, load=load, rollback=restorer.restore,
             baseline_started_at=baseline, poll_interval=poll_interval,
+            # 리허설은 지정 poll에서 의도적으로 중단한다. 실제 canary만 7분 계획을 완주해야
+            # 정상 종료다. 자식이 버그로 즉시 0을 반환해도 성공으로 접지 않는다.
+            minimum_clean_exit_seconds=(0.0 if args.rehearse else total_plan_seconds()),
+            load_started_at=load_started_at,
         )
     finally:
         if load is not None:
