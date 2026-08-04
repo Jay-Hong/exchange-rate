@@ -931,7 +931,21 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     이것은 **GO 승인 자체가 아니었다** — 실제 prod canary 는 사용자 GO 와 유효 Firebase
     ID token 을 따로 요구했다. → **둘 다 충족되어 2026-08-05 에 실행·완주**했다(위 결과 절).
 
-    ⛔ **Release GO 전 별도 운영 항목: 운영 컨테이너가 `ENV=development` 다.**
+    ✅ **완료 (2026-08-05 03:20 KST, `e2d3f1a`)** — `scripts/env_flip.py` 로 전환.
+      `ok=true` / `rolled_back=false` / smoke 10종 전부 통과. **독립 검증**(스크립트 보고와
+      별개로 재관측): `.env` `ENV=production` · flag 2종 false · `.env` + backup 10개 **mode
+      600 유지** · `.env.canary-backup` 삭제 · `.canary-tmp` 잔재 0 · `git status` 0줄 ·
+      컨테이너 running restarts=0 · 생성 시점 env `ENV=production` **MATCH** 이고
+      `ENV=development` **잔존 0** · 실행 프로세스 `ENV=production LOG_LEVEL=INFO`
+      (LOG_LEVEL 은 명시값이라 예측대로 **불변**) · 기동 로그 JSON `env='production'` ·
+      admin 200 / 잘못된 비밀번호 **401**(503 아님 = `ADMIN_PASSWORD` 정상 전달) ·
+      legacy WS `type=rates rates=30 indices=['dxy']` · **재생성 후 ERROR/Traceback 0** ·
+      KRX CM 세션 재구독 성공(`SUBSCRIBE SUCCESS`, `status=normal frames_per_min=246`).
+      선행으로 `.env` + `.env.bak*` 10개를 **664 → 600**(해시·소유자·크기 불변, `git status` 0줄).
+      ⚠️ 로그가 JSON 이 되면서 한국어가 `\uXXXX` 로 escape 된다(python-json-logger `ensure_ascii`)
+      — **원문 grep 은 뒤집힌다**. 로그 도구는 줄 단위 JSON 파싱을 쓸 것.
+
+    ⛔ **Release GO 전 별도 운영 항목이었다: 운영 컨테이너가 `ENV=development` 였다.**
       로그 형식(콘솔 vs JSON) 문제로만 적었던 것은 **부정확했다** — 실제 차이는 **안전장치**다:
       `ENV != production` 이면 (1) 기동 시 `ADMIN_PASSWORD` 필수 검사가 **발동하지 않고**
       (2) `verify_admin` 이 값 부재 시 **`admin1234` 로 폴백**한다(`app/main.py`).
