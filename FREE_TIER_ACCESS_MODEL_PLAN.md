@@ -802,6 +802,15 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   `DEFAULT_EXECUTOR_PROBE_ENABLED` 기본 off). 이게 없으면 canary 는 **격리의 보호 대상을 관측하지
   못한 채** "인증이 분리됐다"만 확인하게 된다.
 
+  ⚠️ **아직 배포 전이다**(운영은 `2534aa3`). canary 실행 전에 **기본-off 상태로 app-only 배포**해
+  수명주기와 endpoint 를 먼저 확인한다 — sentinel 배포와 canary 실행을 **한 단계로 합치지 않는다**
+  (합치면 "관측이 안 되는 것"과 "격리가 안 되는 것"을 구분할 수 없다).
+
+  ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
+  이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,
+  그게 이 sentinel 이 잡아야 할 **최악의 상태**다. (구 구현은 측정을 caller 가 소유해 이 상태가
+  `0` 으로만 보였다 — "아직 표본 없음"과 구분되지 않았다.)
+
   ⛔ **W canary 와 트래픽 공급원을 분리한다**(2026-08-04). `/ws` 계측은 `manager.connect()` 가
   엔드포인트 첫 문장이라 **`TOPIC_DISPATCHER_ENABLED` 와 무관하게 모든 연결을 센다** — 기존
   Release 앱의 legacy `type:rates` 연결도 포함이다. 그래서:
@@ -811,8 +820,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   · ⛔ **W canary 의 합성 부하를 nginx 근거로 쓰지 않는다** — 합성 부하는 IP 가 한둘이라
     **IP 분포가 인위적으로 찌그러진다**. `limit_conn` 은 실제 carrier NAT 꼬리를 덮어야 하는데,
     합성 값으로 정하면 정반대로 간다.
-  → 순서: **계측 배포(flag OFF)** → **실 baseline 수집** → Canary GO 조건 확정 → **짧은 W canary**
-    (합성 부하는 `queue_wait`/`execution` 검증 **전용**).
+  → 순서는 **위 5단계가 정본**이다. ⛔ 여기에 순서를 다시 적지 않는다 — 한때 이 자리에
+    "계측 배포 → **실 baseline 수집** → Canary GO" 를 따로 적어 두어, 바로 위에서 제거한
+    **순환(실트래픽 수집이 canary 의 선행)** 이 같은 문서 안에서 되살아나 있었다.
+    이 블록이 말하는 것은 **순서가 아니라 공급원 분리**다: 합성 부하는 `queue_wait`/`execution`
+    검증 **전용**이고 nginx 근거로 쓰지 않는다.
 
   1. **관측** — 무엇을 재는가(위 0 이 끝난 뒤):
      · `/ws` **handshake rate**: 재연결 폭주(배포·네트워크 회복)의 **피크**가 상한을 정한다 —

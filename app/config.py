@@ -591,6 +591,10 @@ WS_AUTH_EXECUTOR_LOG_TIMINGS = os.getenv("WS_AUTH_EXECUTOR_LOG_TIMINGS", "false"
 # ⚠️ **canary 기간에만 켠다** — 상시로 두면 sentinel 자신이 default pool 을 조금씩 점유해
 #    재려는 대상을 관측이 흔든다.
 DEFAULT_EXECUTOR_PROBE_ENABLED = os.getenv("DEFAULT_EXECUTOR_PROBE_ENABLED", "false").lower() == "true"
+# ⛔ 유한 + **1초 이상**만 허용된다 — 검증은 `default_executor_probe.start_default_executor_probe()`
+#    가 **켤 때** 한다(off 면 쓰이지 않는 값이라 기동을 막지 않는다). 0·음수·`nan` 이면 hot loop 가
+#    되어 sentinel 이 **재려는 pool 을 스스로 포화시키고**, `inf` 면 첫 probe 뒤 영원히 잠들어
+#    조용히 죽는다 — 둘 다 canary 창을 통째로 버리므로 **켜는 순간 크게 실패**하는 편이 낫다.
 DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS = float(os.getenv("DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS", "5"))
 
 # ① wire deadline — **identity + gated 인가의 누적 상한**. **측정 없음**(= 2T).

@@ -614,20 +614,12 @@ async def lifespan(app: FastAPI):
     auth_executor.start_auth_executor(config.WS_AUTH_EXECUTOR_WORKERS)
 
     # ⚠️ canary 전용 sentinel — 기본 off 라 평소엔 task 자체가 생기지 않는다.
-    _probe_task = None
-    if config.DEFAULT_EXECUTOR_PROBE_ENABLED:
-        async def _probe_loop():
-            while True:
-                try:
-                    await default_executor_probe.probe_once()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:  # noqa: BLE001 — 관측이 서비스를 멈추게 하지 않는다
-                    logger.warning("default executor probe 실패", exc_info=True)
-                await asyncio.sleep(config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS)
-        _probe_task = asyncio.create_task(_probe_loop())
-        logger.info("✅ default executor probe 기동",
-                    extra={"interval_sec": config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS})
+    # ⛔ 루프를 **여기 인라인 클로저로 두지 말 것**: 한때 그랬는데, 그러면 테스트가 닿을 수단이
+    #    구조적으로 없어 "endpoint 는 있는데 probe 가 안 도는 상태"를 아무도 못 잡는다.
+    default_executor_probe.start_default_executor_probe(
+        config.DEFAULT_EXECUTOR_PROBE_ENABLED,
+        config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS,
+    )
 
     # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
     db = SessionLocal()
@@ -691,8 +683,10 @@ async def lifespan(app: FastAPI):
     #    시작되지 않는다. 하지만 **실행 중 worker 를 여기서 기다리면 안 된다** — 인증은 per-attempt
     #    `httpTimeout` + SDK 재시도라 길 수 있고, 그동안 loop 가 얼어 아래 trigger drain · crawler ·
     #    scheduler 종료가 한 줄도 못 돈다(배포 중 grace 만료 시 통째로 날아간다).
-    if _probe_task is not None:
-        _probe_task.cancel()
+    # ⚠️ probe 는 **cancel 후 합류까지** 한다(cancel 만으로는 종료가 보장되지 않는다). 위 경고와
+    #    모순처럼 보이지만 아니다 — 이 합류는 **유계**이고(모듈 주석 참조) 인증 worker 와 달리
+    #    SDK 재시도 같은 긴 꼬리가 없다.
+    await default_executor_probe.stop_default_executor_probe()
 
     _auth_executor_closing = auth_executor.begin_auth_executor_shutdown()
 
@@ -1618,6 +1612,9 @@ async def get_default_executor_probe():
     ⚠️ `DEFAULT_EXECUTOR_PROBE_ENABLED`(기본 off) — canary 기간에만 켠다. 상시면 sentinel 자신이
     default pool 을 점유해 재려는 대상을 흔든다.
     ⚠️ 히스토그램은 **고정 경계**(무제한 시계열 없음), process-local, never-crash.
+    ⛔ **`started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것.** `submitted_count >= 1` 이고
+       `outstanding` 이 1로 **머물면** 그건 probe 가 큐에 갇힌 것 = **default pool 완전 포화**이며,
+       이건 이 sentinel 이 잡아야 할 **최악의 상태**다.
     """
     try:
         return {"enabled": config.DEFAULT_EXECUTOR_PROBE_ENABLED,
