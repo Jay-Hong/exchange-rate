@@ -182,15 +182,22 @@ def test_connect_records_a_handshake_through_the_manager():
     manager = ConnectionManager()
     assert _metrics(manager)["handshakes"]["current_bucket"] == 0
 
-    _run(manager.connect(_FakeWebSocket(ip="203.0.113.7")))
+    first = _FakeWebSocket(ip="203.0.113.7")
+    _run(manager.connect(first))
     assert _metrics(manager)["handshakes"]["current_bucket"] == 1, "connect 가 handshake 를 안 셌다"
 
-    _run(manager.connect(_FakeWebSocket(ip="198.51.100.9")))
+    second = _FakeWebSocket(ip="198.51.100.9")
+    _run(manager.connect(second))
     assert _metrics(manager)["handshakes"]["current_bucket"] == 2
 
     # ⚠️ 해제는 handshake 를 되돌리지 않는다 — **유입** 카운터이지 gauge 가 아니다.
-    manager.disconnect(_FakeWebSocket())
-    assert _metrics(manager)["handshakes"]["current_bucket"] == 2
+    # ⛔ 반드시 **실제 등록된 소켓**을 해제한다. 한때 새 `_FakeWebSocket()` 을 넘겼는데, 그건
+    #    `disconnect` 의 "등록된 적 없음" 분기로 빠져 **아무것도 건드리지 않으므로** 단언이
+    #    공허했다 — 등록 소켓 해제 시 handshake 를 깎는 구현이 생겨도 통과한다.
+    manager.disconnect(first)
+    m = _metrics(manager)
+    assert m["active_connections"] == 1, "gauge 가 줄지 않았다"
+    assert m["handshakes"]["current_bucket"] == 2, "해제가 handshake 유입 카운터를 깎았다"
 
 
 # ── handshake 버킷 ──────────────────────────────────────────────────────────
