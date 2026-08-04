@@ -29,7 +29,7 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
@@ -45,6 +45,44 @@ COMMAND_TIMEOUT_SECONDS = 8.0          # 개별 docker/curl 호출
 RECREATE_TIMEOUT_SECONDS = 180.0       # 컨테이너 재기동은 느리다
 STOP_GRACE_SECONDS = 5.0
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+PRODUCTION_CONTAINER = "exchange-rate-app"
+
+
+@dataclass(frozen=True)
+class Target:
+    """이 실행기가 **건드려도 되는 스택**. ⛔ 하드코딩하지 않는다.
+
+    한때 `docker compose ...` 와 `exchange-rate-app` 이 코드에 박혀 있었다. 그 상태로
+    "EC2 에 별도 compose 프로젝트를 띄워 리허설한다"를 제안했는데 **위험했다** —
+    `docker-compose.yml` 은 세 서비스 모두 `container_name` 이 **고정**이고 redis 6379 ·
+    nginx 80/443 을 publish 하므로 `-p` 로 띄워도 **충돌**하고, monitor 는 그와 무관하게
+    **운영 컨테이너와 운영 `.env` 를 재생성**했을 것이다.
+    """
+
+    container: str = PRODUCTION_CONTAINER
+    project: Optional[str] = None
+    compose_file: Optional[str] = None
+    env_file: Path = REPO_ROOT / ".env"
+
+    @property
+    def is_production(self) -> bool:
+        return self.container == PRODUCTION_CONTAINER
+
+    def compose(self, *args: str) -> list[str]:
+        command = ["docker", "compose"]
+        if self.project:
+            command += ["-p", self.project]
+        if self.compose_file:
+            command += ["-f", self.compose_file]
+        return command + list(args)
+
+    def inspect(self, fmt: str) -> list[str]:
+        return ["docker", "inspect", self.container, "--format", fmt]
+
+
+PRODUCTION_TARGET = Target()
 
 
 class CollectorError(Exception):
@@ -66,7 +104,7 @@ ADMIN_FETCH_PY = (
 )
 
 
-def admin_fetch_command(path: str) -> list[str]:
+def admin_fetch_command(path: str, target: Target = PRODUCTION_TARGET) -> list[str]:
     """admin endpoint 조회 — **컨테이너 안 Python 이 env 를 직접 읽는다**.
 
     ⛔ 셸 경유 curl 을 쓰지 않는 이유 두 가지:
@@ -77,8 +115,7 @@ def admin_fetch_command(path: str) -> list[str]:
        노출되지 않는다.
     ⚠️ 출력 형식은 `body\\n<status>` — `parse_curl_response` 가 그대로 받는다.
     """
-    return ["docker", "compose", "exec", "-T", "fastapi",
-            "python", "-c", ADMIN_FETCH_PY, path]
+    return target.compose("exec", "-T", "fastapi", "python", "-c", ADMIN_FETCH_PY, path)
 
 
 def parse_curl_response(raw: str) -> dict:
@@ -165,19 +202,19 @@ def evaluate_snapshot_abort(snapshot: Snapshot, *, baseline_started_at: Optional
     return reasons
 
 
-async def collect_from_server(*, timeout: float = COMMAND_TIMEOUT_SECONDS) -> Snapshot:
+async def collect_from_server(*, timeout: float = COMMAND_TIMEOUT_SECONDS,
+                              target: Target = PRODUCTION_TARGET) -> Snapshot:
     """운영 수집기 — **서버에서** 실행한다. 조회 실패는 전부 `CollectorError`."""
-    health = parse_curl_response(await run_command(admin_fetch_command("/health"), timeout=timeout))
+    health = parse_curl_response(await run_command(admin_fetch_command("/health", target), timeout=timeout))
     heartbeat = parse_curl_response(
-        await run_command(admin_fetch_command("/admin/api/broadcast-heartbeat"), timeout=timeout))
+        await run_command(admin_fetch_command("/admin/api/broadcast-heartbeat", target), timeout=timeout))
     auth = parse_curl_response(
-        await run_command(admin_fetch_command("/admin/api/ws-auth-executor-metrics"), timeout=timeout))
+        await run_command(admin_fetch_command("/admin/api/ws-auth-executor-metrics", target), timeout=timeout))
     probe = parse_curl_response(
-        await run_command(admin_fetch_command("/admin/api/default-executor-probe"), timeout=timeout))
+        await run_command(admin_fetch_command("/admin/api/default-executor-probe", target), timeout=timeout))
     started = (await run_command(
-        ["docker", "inspect", "exchange-rate-app", "--format", "{{.State.StartedAt}}"],
-        timeout=timeout)).strip()
-    logs = await run_command(["docker", "compose", "logs", "fastapi", "--since", "5s"],
+        target.inspect("{{.State.StartedAt}}"), timeout=timeout)).strip()
+    logs = await run_command(target.compose("logs", "fastapi", "--since", "5s"),
                              timeout=timeout)
 
     for name, payload in (("heartbeat", heartbeat), ("auth", auth), ("probe", probe)):
@@ -365,8 +402,9 @@ def validate_canary_start_env(values: dict[str, Optional[str]]) -> list[str]:
 class EnvRestorer:
     """env 를 **정확히 원래대로** 되돌린다(값이든 키 부재든). 여러 번 불려도 한 번만 일한다."""
 
-    def __init__(self, original: dict[str, Optional[str]], env_path: Path):
-        self._original, self._env_path = original, env_path
+    def __init__(self, original: dict[str, Optional[str]], env_path: Path,
+                 target: Target = PRODUCTION_TARGET):
+        self._original, self._env_path, self._target = original, env_path, target
         self.done = False
 
     async def restore(self) -> None:
@@ -376,19 +414,19 @@ class EnvRestorer:
             self._env_path,
             apply_env_values(self._env_path.read_text(encoding="utf-8"), self._original),
         )
-        await recreate_and_verify_health()
+        await recreate_and_verify_health(self._target)
         current = read_env_values(self._env_path.read_text(encoding="utf-8"), self._original)
         if current != self._original:
             raise CollectorError(f"env 가 원상복원되지 않았다: {current} != {self._original}")
         self.done = True
 
 
-async def recreate_and_verify_health() -> None:
+async def recreate_and_verify_health(target: Target = PRODUCTION_TARGET) -> None:
     """⛔ env 는 컨테이너 **재생성** 시에만 다시 읽힌다(`restart` 는 반영 안 된다).
     확인 없이 끝내면 "적용했다"는 보고만 남고 실제로는 구 값으로 돈다."""
-    await run_command(["docker", "compose", "up", "-d", "--force-recreate", "fastapi"],
+    await run_command(target.compose("up", "-d", "--force-recreate", "fastapi"),
                       timeout=RECREATE_TIMEOUT_SECONDS)
-    health = parse_curl_response(await run_command(admin_fetch_command("/health"),
+    health = parse_curl_response(await run_command(admin_fetch_command("/health", target),
                                                    timeout=RECREATE_TIMEOUT_SECONDS))
     if health.get("status") != "healthy":
         raise CollectorError(f"재기동 후 health 가 정상이 아니다: {health.get('status')}")
@@ -400,33 +438,64 @@ CONTAINER_ENV_PY = (
 )
 
 
-async def container_env(keys: Sequence[str]) -> dict:
+async def container_env(keys: Sequence[str], target: Target = PRODUCTION_TARGET) -> dict:
     return parse_curl_response(await run_command(
-        ["docker", "compose", "exec", "-T", "fastapi", "python", "-c", CONTAINER_ENV_PY, *keys]))
+        target.compose("exec", "-T", "fastapi", "python", "-c", CONTAINER_ENV_PY, *keys)))
 
 
-async def preflight() -> list[str]:
+async def check_target_identity(target: Target) -> list[str]:
+    """⛔ **이 컨테이너가 정말 그 target 의 것인가.** 확인 못 하면 fail-closed 로 거부한다 —
+    확인 없이 진행하면 리허설이 **운영 스택을 재생성**할 수 있다(실제로 가능했던 경로)."""
+    try:
+        label = (await run_command(
+            target.inspect('{{index .Config.Labels "com.docker.compose.project"}}'))).strip()
+    except CollectorError as exc:
+        return [f"target 컨테이너를 확인할 수 없다: {exc}"]
+    if target.project and label != target.project:
+        return [f"컨테이너 project={label!r} 가 target project={target.project!r} 와 다르다"]
+    if not label:
+        return ["컨테이너에 compose project label 이 없다"]
+    return []
+
+
+async def check_ws_reachable(url: str, *, timeout: float = 5.0) -> list[str]:
+    """⛔ 기본 URL 을 **조용히 신뢰하지 않는다.** compose 의 fastapi 는 `expose` 만 있고 host
+    port 를 publish 하지 않는다 — 호스트에서 `ws://localhost:8000/ws` 는 닿지 않는다.
+    그 상태로 리허설하면 연결 실패 후 **rollback 만 검증**하고 순서는 증명하지 못한다."""
+    try:
+        import websockets
+    except ImportError:
+        return ["websockets 패키지가 없어 도달성을 확인할 수 없다"]
+    try:
+        async with await asyncio.wait_for(websockets.connect(url), timeout=timeout):
+            return []
+    except Exception as exc:                                  # noqa: BLE001
+        return [f"부하 URL 에 연결할 수 없다({type(exc).__name__}): {url}"]
+
+
+async def preflight(target: Target = PRODUCTION_TARGET, *,
+                    url: Optional[str] = None) -> list[str]:
     """⛔ **부하를 만들기 전에** 창의 전제가 실제로 적용됐는지 본다.
 
     이게 없으면 probe 가 꺼진 채로 canary 가 돌아 **빈 지표를 성공으로** 읽는다 — 이 트랙에서
     반복된 false green 의 정확한 형태다. 하나라도 어긋나면 부하 프로세스는 **0건** 생성된다.
     """
-    problems: list[str] = []
-    env = await container_env(list(CANARY_ENV))
+    problems: list[str] = await check_target_identity(target)
+    env = await container_env(list(CANARY_ENV), target)
     for key, expected in CANARY_ENV.items():
         actual = env.get(key)
         if (actual or "").strip().lower() != expected:
             problems.append(f"{key}={actual!r} (기대 {expected!r})")
 
     probe = parse_curl_response(await run_command(
-        admin_fetch_command("/admin/api/default-executor-probe")))
+        admin_fetch_command("/admin/api/default-executor-probe", target)))
     if not probe.get("enabled"):
         problems.append("probe enabled=false")
     if not probe.get("running"):
         problems.append("probe running=false — flag 만 켜지고 task 가 안 돈다")
 
     auth = parse_curl_response(await run_command(
-        admin_fetch_command("/admin/api/ws-auth-executor-metrics")))
+        admin_fetch_command("/admin/api/ws-auth-executor-metrics", target)))
     if not auth.get("running"):
         problems.append("auth executor running=false")
     metrics = auth.get("metrics") if isinstance(auth.get("metrics"), dict) else {}
@@ -434,14 +503,17 @@ async def preflight() -> list[str]:
         problems.append(f"auth max_workers={metrics.get('max_workers')} (기대 {EXPECTED_AUTH_WORKERS})")
 
     heartbeat = parse_curl_response(await run_command(
-        admin_fetch_command("/admin/api/broadcast-heartbeat")))
+        admin_fetch_command("/admin/api/broadcast-heartbeat", target)))
     age = heartbeat.get("age_seconds")
     if not isinstance(age, (int, float)) or age >= BROADCAST_STALL_SECONDS:
         problems.append(f"broadcast heartbeat 이 신선하지 않다: {age}")
+    if url:
+        problems.extend(await check_ws_reachable(url))
     return problems
 
 
-async def wait_for_preflight(*, attempts: int = PREFLIGHT_ATTEMPTS,
+async def wait_for_preflight(target: Target = PRODUCTION_TARGET, *, url: Optional[str] = None,
+                             attempts: int = PREFLIGHT_ATTEMPTS,
                              retry_seconds: float = PREFLIGHT_RETRY_SECONDS) -> list[str]:
     """재생성 직후 scheduler/probe의 첫 tick만 유계로 기다린다.
 
@@ -452,7 +524,7 @@ async def wait_for_preflight(*, attempts: int = PREFLIGHT_ATTEMPTS,
         raise ValueError("preflight attempts는 1 이상이어야 한다")
     problems: list[str] = []
     for attempt in range(attempts):
-        problems = await preflight()
+        problems = await preflight(target, url=url)
         if not problems:
             return []
         if attempt + 1 < attempts:
@@ -573,32 +645,116 @@ def validate_poll_interval(seconds: float) -> float:
     return value
 
 
+class RehearsalLoad:
+    """리허설 전용 **가짜 부하** — 토큰 없이 순서를 증명하기 위한 자식 프로세스.
+
+    ⛔ **운영 canary 에서는 절대 쓰이지 않는다.** `--rehearse` 없이는 만들어지지 않고,
+       `--rehearse` 는 **운영 컨테이너를 target 으로 하면 거부**된다(구조적 분리).
+    ⚠️ 왜 필요한가: 실제 부하는 유효 토큰이 있어야 살아 있고, 무효 토큰이면 인증 오류로
+       **health 강제 실패보다 먼저 죽어** 정해진 순서를 증명하지 못한다.
+    """
+
+    def __init__(self, process: Any):
+        self._inner = LoadProcess(process)
+
+    async def wait(self) -> int:
+        return await self._inner.wait()
+
+    async def stop(self) -> None:
+        await self._inner.stop()
+
+    async def kill(self) -> None:
+        await self._inner.kill()
+
+    def is_alive(self) -> bool:
+        return self._inner.is_alive()
+
+
+async def start_rehearsal_load(*, python: str = sys.executable) -> RehearsalLoad:
+    process = await asyncio.create_subprocess_exec(
+        python, "-c", "import time\nwhile True: time.sleep(1)\n", cwd=str(REPO_ROOT))
+    return RehearsalLoad(process)
+
+
+def injected_abort_collector(inner: Callable[[], Awaitable[Snapshot]], after_polls: int):
+    """N 번째 poll 부터 health 실패를 **주입**한다 — 실제 서비스를 깨지 않고 순서를 증명한다."""
+    state = {"polls": 0}
+
+    async def collect() -> Snapshot:
+        snapshot = await inner()
+        state["polls"] += 1
+        if state["polls"] >= after_polls:
+            return replace(snapshot, health_ok=False)
+        return snapshot
+
+    return collect
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="W canary 실행기 (env 적용 + 부하 자식 + 자동 중단 watchdog)",
         allow_abbrev=False)
-    parser.add_argument("--url", default="ws://localhost:8000/ws")
-    source = parser.add_mutually_exclusive_group(required=True)
+    # ⛔ 기본값 없음 — compose 의 fastapi 는 `expose` 만 있고 host port 를 publish 하지 않는다.
+    #    기본 URL 을 두면 "닿지 않는 주소로 리허설하고 rollback 만 검증"하게 된다.
+    parser.add_argument("--url", required=True, help="부하가 붙을 WS URL (도달성은 preflight 가 확인)")
+    source = parser.add_mutually_exclusive_group()
     # ⛔ `--token` 은 의도적으로 없다 — argv 는 `ps` 로 보인다.
     source.add_argument("--token-stdin", action="store_true")
     source.add_argument("--token-file")
+    parser.add_argument("--container", default=PRODUCTION_CONTAINER)
+    parser.add_argument("--project", help="compose project (리허설 스택이면 필수)")
+    parser.add_argument("--compose-file")
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL)
     parser.add_argument("--env-file", default=str(REPO_ROOT / ".env"))
+    parser.add_argument("--rehearse", action="store_true",
+                        help="토큰 없이 순서만 증명(가짜 부하). 운영 컨테이너에는 사용 불가")
+    parser.add_argument("--inject-abort-after", type=int,
+                        help="리허설 전용 — N번째 poll 부터 health 실패 주입")
     parser.add_argument("--dry-run", action="store_true", help="실행 없이 계획·명령만 출력")
     return parser
 
 
+def validate_cli_combo(args) -> list[str]:
+    """⛔ 리허설 경로가 운영으로 **새지 않게** 하는 구조적 경계."""
+    problems: list[str] = []
+    target_is_production = args.container == PRODUCTION_CONTAINER
+    if args.rehearse:
+        if target_is_production:
+            problems.append("--rehearse 는 운영 컨테이너를 target 으로 할 수 없다 "
+                            "(--container/--project 로 리허설 스택을 지정할 것)")
+        if not args.project:
+            problems.append("--rehearse 는 --project 로 격리 스택을 명시해야 한다")
+        # ⛔ 리허설이 **운영 `.env` 를 고쳐 쓰면** 격리가 무의미하다 — 실행기는 이 파일을
+        #    직접 편집하고 재기동한다. 기본값이 운영 `.env` 라 명시를 강제한다.
+        if Path(args.env_file).resolve() == (REPO_ROOT / ".env").resolve():
+            problems.append("--rehearse 는 운영 .env 를 쓸 수 없다 — --env-file 로 리허설 env 를 지정할 것")
+    else:
+        if args.inject_abort_after is not None:
+            problems.append("--inject-abort-after 는 --rehearse 전용이다")
+        if not (args.token_stdin or args.token_file):
+            problems.append("실제 canary 는 토큰이 필요하다 (--token-stdin 또는 --token-file)")
+    return problems
+
+
 async def _amain(args) -> int:
+    combo = validate_cli_combo(args)
+    if combo:
+        print(json.dumps({"ok": False, "cli": combo}, ensure_ascii=False))
+        return 2
     poll_interval = validate_poll_interval(args.poll_interval)
+    target = Target(container=args.container, project=args.project,
+                    compose_file=args.compose_file, env_file=Path(args.env_file))
+
     if args.dry_run:
+        print(f"  target: {target.container} project={target.project} env={target.env_file}")
         print(f"  env 적용: {CANARY_ENV}")
-        print(f"  부하: {REPO_ROOT / 'scripts' / 'ws_auth_load.py'} --token-stdin --url {args.url}")
+        print(f"  부하: {'리허설 가짜 부하' if args.rehearse else 'ws_auth_load.py'} → {args.url}")
         print(f"  창: 최악 {maximum_plan_seconds():.0f}s ({len(PHASES)} phase)")
         print(f"  폴링: {poll_interval}s — health · broadcast · auth · probe · 재시작 · ERROR")
         print("  복원: 원래 값/키 부재까지 정확히 되돌린 뒤 force-recreate + health")
         return 0
 
-    env_path = Path(args.env_file)
+    env_path = target.env_file
     original = read_env_values(env_path.read_text(encoding="utf-8"), CANARY_ENV)
     start_problems = validate_canary_start_env(original)
     if start_problems:
@@ -607,30 +763,37 @@ async def _amain(args) -> int:
 
     # env 를 건드리기 전에 실패할 수 있는 입력 검증을 끝낸다. 시작 시각은 아래의 의도적
     # force-recreate 뒤에 읽어야 첫 poll에서 그 재생성을 장애로 오판하지 않는다.
-    token = load_id_token(token_file=args.token_file)
-    restorer = EnvRestorer(original, env_path)
-    load: Optional[LoadProcess] = None
+    token = None if args.rehearse else load_id_token(token_file=args.token_file)
+    restorer = EnvRestorer(original, env_path, target)
+    load: Optional[LoadHandle] = None
     outcome: Optional[CanaryOutcome] = None
 
-    # ⛔ **이 지점부터 가장 바깥 `finally` 가 env 를 소유한다.** 한때 monitor 는 flag 를 켜지
-    #    않으면서 rollback 만 했다 — 운영자가 먼저 켜고 자식 생성이 실패하면 **켜진 채 남았다**.
+    # ⛔ **이 지점부터 가장 바깥 `finally` 가 env 를 소유한다.**
     try:
         atomic_write_text(
             env_path,
             apply_env_values(env_path.read_text(encoding="utf-8"), dict(CANARY_ENV)),
         )
-        await recreate_and_verify_health()
+        await recreate_and_verify_health(target)
 
-        problems = await wait_for_preflight()
+        problems = await wait_for_preflight(target, url=args.url)
         if problems:
             print(json.dumps({"ok": False, "preflight": problems}, ensure_ascii=False))
             return 1                                   # ⛔ 부하 프로세스 **0건** 생성
 
-        baseline = (await run_command(
-            ["docker", "inspect", "exchange-rate-app", "--format", "{{.State.StartedAt}}"])).strip()
-        load = await start_load_process(token=token, url=args.url)
+        baseline = (await run_command(target.inspect("{{.State.StartedAt}}"))).strip()
+        load = (await start_rehearsal_load() if args.rehearse
+                else await start_load_process(token=token, url=args.url))
+
+        async def collect() -> Snapshot:
+            return await collect_from_server(target=target)
+
+        collector = collect
+        if args.inject_abort_after:
+            collector = injected_abort_collector(collect, args.inject_abort_after)
+
         outcome = await run_monitored_canary(
-            collect=collect_from_server, load=load, rollback=restorer.restore,
+            collect=collector, load=load, rollback=restorer.restore,
             baseline_started_at=baseline, poll_interval=poll_interval,
         )
     finally:
@@ -644,9 +807,9 @@ async def _amain(args) -> int:
     print(json.dumps({
         "ok": outcome.ok, "aborted": outcome.aborted, "reasons": outcome.reasons,
         "polls": outcome.polls, "rollback_done": outcome.rollback_done,
-        "cleanup_errors": outcome.cleanup_errors,
+        "cleanup_errors": outcome.cleanup_errors, "rehearsal": bool(args.rehearse),
     }, ensure_ascii=False))
-    return 0 if outcome.ok else 1
+    return 0 if outcome.ok or args.rehearse and outcome.aborted and not outcome.cleanup_errors else 1
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

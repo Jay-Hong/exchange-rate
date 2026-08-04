@@ -1,0 +1,44 @@
+# W canary **수직 리허설 전용** 로컬 스택.
+#
+# ⛔ 왜 별도 파일인가: 기본 `docker-compose.yml` 은 세 서비스 모두 `container_name` 이 **고정**
+#    이고(`exchange-rate-app` 등) redis `6379` · nginx `80/443` 을 publish 한다. 그래서
+#    `docker compose -p other` 로 띄워도 **이름·포트가 충돌**하고, 더 나쁜 것은 실행기가
+#    운영 컨테이너를 그대로 잡을 수 있다는 점이다(그래서 실행기는 `Target` 을 주입받는다).
+#
+# ⛔ `fastapi` 는 기본 파일에서 `expose: 8000` 뿐이라 **호스트에서 닿지 않는다**. 부하 자식은
+#    호스트 프로세스이므로, 여기서 **loopback 에만** publish 한다(외부 노출 금지).
+#
+# 사용:
+#   cp .env .env.rehearsal   # 또는 최소 키만 담은 별도 파일 (⚠️ 운영 .env 를 쓰지 말 것)
+#   docker compose -p fxi-rehearsal -f docker-compose.yml -f docker-compose.rehearsal.yml up -d
+#   python scripts/canary_monitor.py --rehearse \
+#          --project fxi-rehearsal --compose-file docker-compose.rehearsal.yml \
+#          --container fxi-rehearsal-app --env-file .env.rehearsal \
+#          --url ws://127.0.0.1:18000/ws --inject-abort-after 3
+#
+# ⚠️ `--env-file` 은 **리허설 env** 를 가리켜야 한다 — 실행기는 그 파일을 직접 고쳐 쓴다.
+
+services:
+  redis:
+    container_name: fxi-rehearsal-redis
+    ports:
+      - "127.0.0.1:16379:6379"      # 운영 6379 와 충돌 회피
+
+  fastapi:
+    container_name: fxi-rehearsal-app
+    env_file:
+      - .env.rehearsal              # ⛔ 운영 .env 를 건드리지 않는다
+    ports:
+      - "127.0.0.1:18000:8000"      # ⛔ loopback 전용 — 부하 자식이 닿을 유일한 경로
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 600M
+
+  nginx:
+    container_name: fxi-rehearsal-nginx
+    # ⚠️ 리허설은 앱에 직접 붙으므로 nginx 가 필요 없다. profile 을 붙여 **기본 기동에서 제외**
+    #    한다(80/443 을 잡으면 운영·호스트와 충돌한다).
+    profiles: ["unused"]
+    ports: []

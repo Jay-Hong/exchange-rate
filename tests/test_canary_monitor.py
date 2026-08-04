@@ -425,7 +425,7 @@ def test_cli_entry_point_exists_and_dry_run_describes_the_real_wiring():
     없는데 문서에는 "배선 완료"라고 적혀 있었다."""
     for name in ("main", "start_load_process", "EnvRestorer", "preflight", "LoadProcess"):
         assert hasattr(mon, name), f"{name} 이 없다 — 실행기가 아니다"
-    assert mon.main(["--token-stdin", "--dry-run"]) == 0
+    assert mon.main(["--url", "ws://127.0.0.1:18000/ws", "--token-stdin", "--dry-run"]) == 0
 
 
 # ── env 소유권: 정확한 복원 ─────────────────────────────────────────────────
@@ -493,7 +493,7 @@ def test_restorer_puts_back_original_values_not_a_hardcoded_false(tmp_path, monk
     original = mon.read_env_values(env.read_text(), mon.CANARY_ENV)
     env.write_text(mon.apply_env_values(env.read_text(), dict(mon.CANARY_ENV)))
 
-    async def noop():
+    async def noop(target=None):
         return None
 
     monkeypatch.setattr(mon, "recreate_and_verify_health", noop)
@@ -512,7 +512,7 @@ def test_restorer_is_idempotent(tmp_path, monkeypatch):
     original = mon.read_env_values(env.read_text(), mon.CANARY_ENV)
     calls = []
 
-    async def counting():
+    async def counting(target=None):
         calls.append(1)
 
     monkeypatch.setattr(mon, "recreate_and_verify_health", counting)
@@ -537,8 +537,10 @@ def _preflight_responses(**overrides):
     return payloads
 
 
-def _patch_preflight(monkeypatch, payloads):
+def _patch_preflight(monkeypatch, payloads, *, project_label="prod"):
     async def fake_run(command, *, timeout=None, cwd=None):
+        if command[0] == "docker" and command[1] == "inspect":
+            return project_label + "\n"
         if command[-1].startswith("/admin"):
             return json.dumps(payloads[command[-1]]) + "\n200"
         return json.dumps(payloads["env"]) + "\n200"      # container_env
@@ -579,7 +581,7 @@ def test_preflight_waits_for_the_first_scheduler_tick_without_hiding_the_result(
     results = [["broadcast heartbeat 이 신선하지 않다: None"], []]
     sleeps = []
 
-    async def fake_preflight():
+    async def fake_preflight(target=None, *, url=None):
         return results.pop(0)
 
     async def fake_sleep(seconds):
@@ -594,7 +596,7 @@ def test_preflight_waits_for_the_first_scheduler_tick_without_hiding_the_result(
 def test_preflight_returns_the_last_failure_after_the_bounded_grace(monkeypatch):
     calls = []
 
-    async def always_bad():
+    async def always_bad(target=None, *, url=None):
         calls.append(1)
         return ["probe running=false"]
 
@@ -632,10 +634,15 @@ def test_default_poll_interval_is_accepted():
 class _AmainArgs:
     def __init__(self, env_file, **kw):
         self.env_file = str(env_file)
-        self.url = "ws://localhost:8000/ws"
+        self.url = "ws://127.0.0.1:18000/ws"      # ⛔ 기본값 없음 — 명시해야 한다
         self.token_stdin = True
         self.token_file = None
         self.poll_interval = 1.0
+        self.container = mon.PRODUCTION_CONTAINER
+        self.project = None
+        self.compose_file = None
+        self.rehearse = False
+        self.inject_abort_after = None
         self.dry_run = False
         self.__dict__.update(kw)
 
@@ -646,7 +653,7 @@ def _patch_amain(monkeypatch, tmp_path, *, start_error=None, preflight=None,
     env.write_text("TOPIC_DISPATCHER_ENABLED=false\nOTHER=keep\n")
     calls = {"recreate": 0, "started": 0}
 
-    async def fake_recreate():
+    async def fake_recreate(target=None):
         calls["recreate"] += 1
         if recreate_error and calls["recreate"] == 1:
             raise recreate_error
@@ -654,7 +661,7 @@ def _patch_amain(monkeypatch, tmp_path, *, start_error=None, preflight=None,
     async def fake_run(command, *, timeout=None, cwd=None):
         return "STARTED_AT\n"
 
-    async def fake_preflight():
+    async def fake_preflight(target=None, **kw):
         return list(preflight or [])
 
     async def fake_start(**kw):
@@ -710,10 +717,10 @@ def test_restart_baseline_is_captured_after_the_intentional_recreate(monkeypatch
         async def kill(self):
             events.append("kill")
 
-    async def fake_recreate():
+    async def fake_recreate(target=None):
         events.append("recreate")
 
-    async def fake_preflight():
+    async def fake_preflight(target=None, *, url=None):
         events.append("preflight")
         return []
 
@@ -786,3 +793,131 @@ def test_amain_validates_poll_interval_before_touching_env(monkeypatch, tmp_path
     with pytest.raises(ValueError):
         _run(mon._amain(_AmainArgs(env, poll_interval=bad)))
     assert env.read_text() == before, "잘못된 poll interval 인데 env 를 건드렸다"
+
+
+# ── target 주입: 리허설이 운영 스택을 건드릴 수 없는가 ──────────────────────
+
+
+def test_commands_are_derived_from_the_injected_target():
+    """⛔ 한때 `docker compose ...` 와 `exchange-rate-app` 이 코드에 박혀 있었다 — 그 상태로
+    "EC2 에 별도 compose 로 리허설" 을 제안했는데, 그러면 monitor 가 **운영 스택을 재생성**한다."""
+    target = mon.Target(container="fxi-rehearsal-app", project="fxi-rehearsal",
+                        compose_file="docker-compose.rehearsal.yml")
+    compose = target.compose("up", "-d")
+    assert compose[:6] == ["docker", "compose", "-p", "fxi-rehearsal",
+                           "-f", "docker-compose.rehearsal.yml"]
+    assert target.inspect("{{.Id}}")[2] == "fxi-rehearsal-app"
+    assert "exchange-rate-app" not in " ".join(mon.admin_fetch_command("/health", target))
+    assert not target.is_production
+
+
+def test_production_target_is_the_default_and_recognisable():
+    assert mon.PRODUCTION_TARGET.is_production
+    assert mon.PRODUCTION_TARGET.container == "exchange-rate-app"
+
+
+def test_target_identity_is_verified_fail_closed(monkeypatch):
+    """⛔ 확인 못 하면 **거부**한다 — 확인 없이 진행하면 리허설이 운영을 재생성할 수 있다."""
+    target = mon.Target(container="c", project="want")
+
+    async def wrong(command, *, timeout=None, cwd=None):
+        return "other\n"
+
+    monkeypatch.setattr(mon, "run_command", wrong)
+    assert any("project" in p for p in _run(mon.check_target_identity(target)))
+
+    async def boom(command, *, timeout=None, cwd=None):
+        raise mon.CollectorError("no such container")
+
+    monkeypatch.setattr(mon, "run_command", boom)
+    assert _run(mon.check_target_identity(target)), "확인 실패인데 통과시켰다"
+
+    async def right(command, *, timeout=None, cwd=None):
+        return "want\n"
+
+    monkeypatch.setattr(mon, "run_command", right)
+    assert _run(mon.check_target_identity(target)) == []
+
+
+# ── 리허설/운영 구조적 분리 ────────────────────────────────────────────────
+
+
+def _cli(env_file="/tmp/.env.rehearsal", **kw):
+    return mon.validate_cli_combo(_AmainArgs(env_file, **kw))
+
+
+def test_rehearsal_cannot_target_production():
+    """⛔ 가짜 부하·주입 중단이 **운영으로 새면 안 된다**."""
+    problems = _cli(rehearse=True, container=mon.PRODUCTION_CONTAINER, project="p")
+    assert any("운영 컨테이너" in p for p in problems)
+
+
+def test_rehearsal_requires_an_explicit_project():
+    assert any("--project" in p for p in _cli(rehearse=True, container="other"))
+
+
+def test_injected_abort_is_rehearsal_only():
+    """⛔ 운영 canary 에서 중단을 **주입**할 수 있으면 그 창의 결과는 의미가 없다."""
+    assert any("--rehearse 전용" in p for p in _cli(inject_abort_after=2))
+
+
+def test_real_canary_requires_a_token():
+    assert any("토큰" in p for p in _cli(token_stdin=False, token_file=None))
+
+
+def test_valid_rehearsal_combo_passes():
+    assert _cli(rehearse=True, container="fxi-rehearsal-app", project="fxi-rehearsal",
+                token_stdin=False) == []
+
+
+def test_injected_abort_flips_health_after_n_polls():
+    """⚠️ 실제 서비스를 깨지 않고 **순서**(중단 → 부하 종료 → env 복원)를 증명하는 수단."""
+    async def inner():
+        return mon.Snapshot()
+
+    collect = mon.injected_abort_collector(inner, 2)
+    assert _run(collect()).health_ok is True
+    assert _run(collect()).health_ok is False
+
+
+def test_url_has_no_default_so_an_unreachable_stack_is_not_assumed():
+    """⛔ compose 의 fastapi 는 `expose` 만 있고 host port 를 publish 하지 않는다 —
+    기본 URL 을 두면 **닿지 않는 주소로 리허설하고 rollback 만 검증**하게 된다."""
+    parser = mon.build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--rehearse", "--project", "p", "--container", "c"])
+    parsed = parser.parse_args(["--url", "ws://127.0.0.1:18000/ws"])
+    assert parsed.url == "ws://127.0.0.1:18000/ws"
+
+
+def test_ws_reachability_failure_is_a_preflight_problem(monkeypatch):
+    problems = _run(mon.check_ws_reachable("ws://127.0.0.1:1/ws", timeout=0.5))
+    assert problems and "연결할 수 없다" in problems[0]
+
+
+def test_preflight_actually_checks_the_target_identity(monkeypatch):
+    """⛔ helper 만 테스트하면 `preflight()` 에서 그 호출을 **지워도 통과한다**(실측 SURVIVED).
+    그 상태면 리허설이 운영 스택을 재생성해도 preflight 가 막지 못한다."""
+    _patch_preflight(monkeypatch, _preflight_responses(), project_label="somewhere-else")
+    problems = _run(mon.preflight(mon.Target(container="c", project="fxi-rehearsal")))
+    assert any("project" in p for p in problems), problems
+
+
+def test_preflight_actually_checks_ws_reachability(monkeypatch):
+    """⛔ 같은 이유 — 도달성 호출을 지우면 **닿지 않는 주소로 리허설**하고 rollback 만 검증한다."""
+    _patch_preflight(monkeypatch, _preflight_responses())
+    assert _run(mon.preflight(mon.PRODUCTION_TARGET)) == [], "전제: url 없으면 도달성은 보지 않는다"
+
+    problems = _run(mon.preflight(mon.PRODUCTION_TARGET, url="ws://127.0.0.1:1/ws"))
+    assert any("연결할 수 없다" in p for p in problems), problems
+
+
+def test_rehearsal_refuses_to_edit_the_production_env_file():
+    """⛔ 실행기는 env 파일을 **직접 고쳐 쓰고 재기동**한다. 기본값이 운영 `.env` 라,
+    리허설이 그걸 그대로 쓰면 컨테이너만 격리되고 **설정은 운영을 건드린다**."""
+    problems = _cli(str(mon.REPO_ROOT / ".env"), rehearse=True,
+                    container="fxi-rehearsal-app", project="p", token_stdin=False)
+    assert any(".env" in p for p in problems), problems
+
+    assert _cli(rehearse=True, container="fxi-rehearsal-app", project="p",
+                token_stdin=False) == []
