@@ -574,10 +574,17 @@ async def handle_client_message(
             # ⚠️ **범위는 "인증 단계 누적"까지다** — registry 변경과 ack 송신은 이 창 **밖**이라
             #    "10초 안에 ack"을 보장하지 않는다. 그 보장을 원하면 창을 넓혀야 하고, 그건
             #    별도 결정이다(codex Medium).
-            # ⛔ 한때 이 주석이 iOS `topicCommandTimeout` 을 근거로 들었는데 **그 상수는
-            #    존재하지 않는다**(실측 0건) — **폐기한 reconciler 계획**의 값을 배포된 코드처럼
-            #    인용했다. 클라의 명령 응답 timeout 은 아직 **미구현**이고, 구현될 때 이 상한을
-            #    전제로 잡아야 한다.
+            # ⛔ 한때 이 주석이 iOS `topicCommandTimeout` 을 근거로 들었는데 그때 **그 상수는
+            #    존재하지 않았다**(실측 0건) — **폐기한 reconciler 계획**의 값을 배포된 코드처럼
+            #    인용했다. ⚠️ 그 교훈(계획값을 배포 코드로 인용하지 말 것)은 그대로 두되,
+            #    **현재 상태는 다르다**: 클라 watchdog 이 land 했다 —
+            #    `WebSocketConfig.topicCommandTimeoutSeconds = 20`(iOS `Constants.swift`)을
+            #    `armTopicRequestTimeout`(`WebSocketService.swift`)이 건다.
+            #    ⚠️ 20s > 10s 는 우연이 아니라 **필요조건**이고, 두 값은 **짝으로 움직인다**:
+            #    이 창은 인증 단계까지만이라 registry 변경·ack 송신은 **밖**에 있으므로 클라
+            #    상한이 그 바깥 구간까지 덮어야 한다. 이 값을 **올리거나** 클라 상수를
+            #    **내리면** 클라가 먼저 포기해 §8-B-term 종결 프레임이 버려진다 — 한쪽만
+            #    만지지 말 것.
             request_deadline_at = (
                 asyncio.get_running_loop().time() + config.WS_AUTH_WIRE_DEADLINE_SECONDS
             )

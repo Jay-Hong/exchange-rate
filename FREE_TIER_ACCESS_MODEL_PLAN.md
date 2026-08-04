@@ -666,12 +666,12 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   측정은 flag ON 이후라고 적었는데, 그러면 **실행 자체가 불가능**하다(W←측정←flag ON←W).
   → **4단계로 분리한다**:
 
-  | 단계 | 내용 | Release arming |
-  | --- | --- | --- |
-  | ① **Canary GO** | `W=4` 를 **canary 한정 provisional 값**으로 **명시 수용**. 부하 **공급원·규모·기간·즉시 중단 조건**을 확정. | OFF |
-  | ② **서버 canary 실행** | `TOPIC_DISPATCHER_ENABLED=true`. 측정. | OFF |
-  | ③ **W 확정** | 측정 결과로 `W` 와 조정·rollback **숫자 기준**을 기록. | OFF |
-  | ④ **Release GO** | smoke 통과 후 arming → phased release. | ON |
+  | 단계 | 내용 | Release arming | 상태 |
+  | --- | --- | --- | --- |
+  | ① **Canary GO** | `W=4` 를 **canary 한정 provisional 값**으로 **명시 수용**. 부하 **공급원·규모·기간·즉시 중단 조건**을 확정. | OFF | ✅ 2026-08-04 |
+  | ② **서버 canary 실행** | `TOPIC_DISPATCHER_ENABLED=true`. 측정. | OFF | ✅ 2026-08-05 완주 |
+  | ③ **W 확정** | 측정 결과로 `W` 와 조정·rollback **숫자 기준**을 기록. | OFF | ✅ `W=4` 확정 |
+  | ④ **Release GO** | smoke 통과 후 arming → phased release. | ON | ⏳ 사용자 결정 대기 |
 
   ⚠️ **부하 공급원을 반드시 정한다** — Release 앱이 OFF 인 동안에는 **자연 인증 트래픽이 거의 없다**.
   DEBUG 기기 몇 대인지, 별도 부하 도구인지, 몇 연결 × 몇 초인지 정하지 않으면 canary 는 아무것도
@@ -789,8 +789,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 
   **실행 순서**(2026-08-04 확정 — 구 "실 baseline 수집 → Canary GO → W canary" 는 폐기):
   1. ✅ **계측 배포 완료**(`2534aa3`).
-  2. **Canary GO 조건 확정** — `W=4` provisional 수용 + 부하 공급원·규모·기간·중단 조건.
-  3. **합성 부하로 짧은 W canary** — flag ON, arming OFF.
+  2. ✅ **Canary GO 조건 확정**(2026-08-04) — `W=4` provisional 수용 + 부하 공급원·규모·기간·중단 조건.
+  3. ✅ **합성 부하로 짧은 W canary 완주**(2026-08-05) — flag ON, arming OFF. → `W=4` 확정.
   4. **nginx 값은 대표 실트래픽 확보 후 결정** — canary 를 막지 않는다.
   5. 대표 표본이 부족한 채 **Release GO** 를 한다면, **nginx 상한 미결을 명시적 위험 수용**으로
      기록한다("측정 완료"라고 쓰지 않는다).
@@ -848,14 +848,29 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   ### ✅ W 결정 (2026-08-05)
 
   **W=4 를 초기 phased-release 값으로 확정**한다.
-  · c8 에서도 timeout·취소·미시작 **0**, 최악 상한 queue 1.284s + execution 2.075s
-    **< wire deadline 10s**. sentinel 은 사전 중단 기준(1s) 아래.
+  · c8 에서도 timeout·취소·미시작 **0**. sentinel 은 사전 중단 기준(1s) 아래.
+  · ⚠️ **deadline 근거의 범위를 좁혀 적는다.** 부하는 `fx:usd-krw`(**gated 아님**)로 돌았으므로
+    측정된 것은 **identity 구간뿐**이고, 그 구간이 쓴 최악 상한은 queue 1.284s + execution
+    2.075s = **약 3.36초**다. `WS_AUTH_WIRE_DEADLINE_SECONDS`(10s)는 `request_deadline_at`
+    **하나를 identity 와 gated 인가가 공유**하므로(`app/topic_dispatcher.py` — identity 뒤
+    `authorize_gated_subscription` 이 **같은 절대 deadline** 으로 다시 감싸인다), 이 숫자는
+    "10초 예산 중 identity 가 최대 3.36초를 썼다"까지다. ⛔ **KRX 인가 종단 실측이 아니다** —
+    RevenueCat 호출 + entitlement 조회는 canary 에서 **한 번도 실행되지 않았다**
+    (`gated_requested` 가 빈 배열). W=4 결정 자체는 identity executor 의 worker 수라 유효하다.
+  · ⚠️ 같은 이유로 **sentinel 수치도 gated 부하 없이 잰 값**이다 — entitlement 조회는
+    `asyncio.to_thread`(= sentinel 이 지키는 **default executor**)를 쓴다
+    (`app/topic_authorization.py`). KRX 를 켠 뒤에는 이 pool 에 DB 작업이 함께 얹힌다.
   · **W=8 은 blocker 가 아니라 후속 최적화 실험**이다 — queue 는 줄겠지만 Firebase 동시
     호출이 늘어 execution 쪽이 어떻게 반응할지는 **측정 없이 단정할 수 없다**.
 
-  ### Canary GO 조건 (2026-08-04 확정)
+  ### Canary GO 조건 (2026-08-04 확정 → **2026-08-05 실행 완료**)
 
-  · **W=4 는 canary 한정 잠정값**으로 수용한다(측정 없음 — 그 측정이 canary 의 목적이다).
+  ⚠️ **아래는 당시의 실행 조건 기록이다** — 현재 상태가 아니다. 이 조건으로 canary 를 돌렸고
+  결과와 후속 결정은 위 두 절(**Canary 실측 결과** / **W 결정**)이 정본이다. 조건을 미결
+  상태로 읽지 말 것.
+
+  · **W=4 는 canary 한정 잠정값**으로 수용했다(당시 측정 없음 — 그 측정이 canary 의 목적이었다).
+    → **해소**: 실측 후 초기 phased-release 값으로 **확정**(위 "W 결정" 절).
   · **lease 전략 = (a) 창을 15분 미만으로.** 명목 ramp는 **7분**, active phase별
     마지막 요청의 15초 drain을 포함한 최악 실행시간은 **7분 45초**라 lease
     상한(900s) 안이고,
@@ -913,8 +928,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
     ✅ **Canary GO의 수직 리허설 선행조건 완료**: flag ON → 부하 시작 → 주입 중단 → 부하 종료 →
     env 복원 → 재기동 → 앱 `/health` 응답 복귀를 실제 관측했다. Docker의 비동기
     `.State.Health.Status`는 직후 잠시 `starting`일 수 있어 이 완료 조건과 혼동하지 않는다.
-    이것은 **GO 승인 자체가 아니다** — 실제
-    prod canary는 여전히 사용자 GO와 유효 Firebase ID token이 필요하다.
+    이것은 **GO 승인 자체가 아니었다** — 실제 prod canary 는 사용자 GO 와 유효 Firebase
+    ID token 을 따로 요구했다. → **둘 다 충족되어 2026-08-05 에 실행·완주**했다(위 결과 절).
 
     ⛔ **Release GO 전 별도 운영 항목: 운영 컨테이너가 `ENV=development` 다.**
       로그 형식(콘솔 vs JSON) 문제로만 적었던 것은 **부정확했다** — 실제 차이는 **안전장치**다:
