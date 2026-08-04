@@ -908,6 +908,20 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       **최신 HEAD가 배포된 운영 EC2 리포 루트에서** 실행해야 한다. 이 실행 위치와
       사전 app-only 배포·smoke는 토큰 제공·prod GO와 별개의 필수 전제다.
 
+    · **`--url` = `wss://fxi.kr/ws` 로 확정**(2026-08-04). ⛔ container-internal 주소
+      (`fastapi:8000`)는 **쓸 수 없다** — `start_load_process` 는 부하 자식을 **EC2 호스트
+      프로세스**로 띄우는데, compose 의 fastapi 는 publish 없이 `expose` 만이라 호스트에서
+      닿지 않는다. `docker compose exec` 는 **admin 지표 수집에만** 쓴다(두 경로가 다르다).
+      ⚠️ public URL 이라 nginx·TLS 실경로까지 타는데, 그건 이 창의 목적에 **부합**한다.
+      도달성은 preflight 가 **실제 WS 연결**로 fail-closed 확인한다.
+
+    · ✅ **배포 후 관측(18ea2ef, 2026-08-04 18:42 KST)**: `last_cycle_time` 18:42:56 vs
+      `last_broadcast_time` 18:42:39 = **17초 차이**.
+      ⚠️ 이것이 증명하는 것은 **"전송 없는 cycle 이 운영에 실재한다"까지**다.
+      ⛔ 중단 임계값은 **30초**이므로 이 관측만으로 "구 구현이 실제로 false abort 했을 것"이라고
+      말할 수 없다 — 정확히는 **"30초 이상 무전송 구간이 생기면 false abort 할 수 있는 전제가
+      실재했다"**. (관측과 해석을 붙여 한 걸음 더 나간 서술을 했다가 정정한 자리다.)
+
   ⛔ **읽는 법**: `started_count == 0` 을 무조건 "표본 없음"으로 읽지 말 것. `submitted_count >= 1`
   이면서 `outstanding` 이 1로 **머물면** probe 가 큐에 갇힌 것 = **default pool 완전 포화**이고,
   그게 이 sentinel 이 잡아야 할 **최악의 상태**다. (구 구현은 측정을 caller 가 소유해 이 상태가
