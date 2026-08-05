@@ -953,6 +953,17 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       admin 200 / 잘못된 비밀번호 **401**(503 아님 = `ADMIN_PASSWORD` 정상 전달) ·
       legacy WS `type=rates rates=30 indices=['dxy']` · **재생성 후 ERROR/Traceback 0** ·
       KRX CM 세션 재구독 성공(`SUBSCRIBE SUCCESS`, `status=normal frames_per_min=246`).
+
+      ⛔ **배포 상태는 세 축이고, 한 SHA 로 뭉뚱그리면 롤백 판단이 틀어진다**(2026-08-05 실측):
+      | 축 | 값 | 의미 |
+      | --- | --- | --- |
+      | `origin/master` | 최신 push | 문서 포함 — **운영에 반영됐다는 뜻이 아니다** |
+      | EC2 checkout | `e2d3f1a` | `env_flip.py` 를 **실행한** 소스. 이후 docs 커밋은 미반영 |
+      | **실행 이미지** | `sha256:ae6873bf76cd` | **`a3ec9bd` 계열** — 롤백 앵커는 git SHA 가 아니라 **이것** |
+      | 런타임 | `ENV=production` · flag 2종 false | 컨테이너가 실제로 읽은 값 |
+      ⚠️ 이미지 출처는 이름이 아니라 **내용으로** 판별했다: 이미지 안 `app/topic_dispatcher.py` 의
+      sha1 `01524e165f25` = `a3ec9bd` 와 일치, `e2d3f1a`/`f30a025`(`498c50081cf2`)와 불일치.
+      (그 차이는 주석뿐이라 **기능 drift 는 없다** — 다만 "없다"를 가정하지 말고 확인할 것.)
       선행으로 `.env` + `.env.bak*` 10개를 **664 → 600**(해시·소유자·크기 불변, `git status` 0줄).
       ⚠️ 로그가 JSON 이 되면서 한국어가 `\uXXXX` 로 escape 된다(python-json-logger `ensure_ascii`)
       — **원문 grep 은 뒤집힌다**. 로그 도구는 줄 단위 JSON 파싱을 쓸 것.
