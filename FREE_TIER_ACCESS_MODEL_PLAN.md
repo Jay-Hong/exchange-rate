@@ -1194,6 +1194,21 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   닫으려면 **per-connection 명령 빈도·동시성 관측**이 선행이고, 그건 nginx 가 아니라 dispatcher
   쪽 계측이다. 이 제안서를 근거로 "flood 방어 완료"라고 쓰지 말 것.
 
+  ⚠️ **반대로 "nginx 는 무관하다"고 쓰는 것도 틀리다** (2026-08-05 코드 확인). 보호 범위를
+  **두 축으로** 나눠 적어야 한다:
+  · **연결 내부 명령 반복** → nginx 못 막음 (위)
+  · **handshake 폭주 · 다중 연결 fanout 증폭** → `limit_req`·`limit_conn` 이 **일부 막는다**.
+    ⛔ 이게 실재하는 이유: **무토큰 subscribe 도 비용을 만든다** — `app/topic_dispatcher.py` 의
+    §E1 분기가 free topic 을 `registry.register()` 하고 `send_initial_snapshots()` 를 보내며
+    그 뒤 **publisher fanout 대상**이 된다. 즉 flag ON 의 신규 비용은 인증 경로에만 있지 않고,
+    **토큰 없이 연결 수만 늘려도** 증가한다.
+
+  ⛔ **"현재 사용자가 적으니 공격자도 적다"로 위험을 축소하지 말 것** (2026-08-05 정정).
+  앱은 Google/Apple 로그인을 **allowlist 없이** 제공하고 App Store 에 공개돼 있으므로 **누구나
+  유효 Firebase 토큰을 얻을 수 있다**(앱 없이도 — Web API key 는 추출 가능하고 Auth REST 는 공개).
+  **현재 사용자 수는 *유기적 부하* 의 크기이지 *공격자 능력* 의 상한이 아니다.** 이 둘을 뭉개면
+  "소수 사용자"가 감당할 수 없는 결론(공격 표면 한정)을 떠받치게 된다.
+
 ⚠️ 큐 자체는 caller deadline 이 드레인하지만(취소가 concurrent future 로 전파돼 dequeue 시 skip),
 큐 **크기**는 유입률 × deadline 이고 고정 상한이 없다 — 위 두 항목이 그 상한을 정하는 자리다.
 
