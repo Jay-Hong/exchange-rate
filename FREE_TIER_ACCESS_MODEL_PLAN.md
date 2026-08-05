@@ -968,8 +968,17 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       이 이미지는 `exchange-rate-fastapi:latest` 태그만 있고 repo digest 는 없었다. 다음 build가
       `latest`를 옮기고 기존 컨테이너를 제거한 뒤 image prune까지 하면 ID만으로는 보존되지 않는다.
       현재 `rollback-2026-08-05` 태그도 **이 이미지가 아니라 이전 `28f591ef33ff`**를 가리킨다.
-      → 다음 배포 **전에** 실행 이미지를 고유 rollback 태그로 붙이고, 그 태그의 image ID가
-      `ae6873bf76cd`와 일치하는지 확인해야 그때부터 durable anchor다(태그 생성은 별도 운영 변경).
+      ✅ **태그 부착 완료 (2026-08-05)**: `exchange-rate-fastapi:rollback-2026-08-05b` →
+      `sha256:ae6873bf76cd8956…f3763`(full ID exact 일치 확인). 이제 이 이미지의 RepoTags 는
+      `["…:latest", "…:rollback-2026-08-05b"]` 이고, 다음 build 가 `latest` 를 옮겨도 **회수되지 않는다**.
+      전후 컨테이너 ID·`running restarts=0`·health 불변 확인.
+      ⛔ **범위를 넘겨 부르지 말 것 — 이건 `호스트 로컬` 앵커다.** 호스트 유실이나 (리포 CLAUDE.md 가
+      운영에서 금지한) `docker system prune -a` 까지 견디지 못한다. 레지스트리 digest 가 없는
+      로컬 빌드라 **외부 보존 수단이 아니다**.
+      ⚠️ 절차의 함정 둘(실측 확인): (1) `docker tag` 는 **같은 태그가 있으면 조용히 이동**시켜 기존
+      앵커를 파괴한다 → 생성 전 `docker image inspect <tag>` 로 **부재를 확인하고 거부**할 것.
+      (2) `docker image ls | grep` 은 **12자 짧은 ID 의 부분 문자열 매칭**이라 검증이 아니다 →
+      `--format '{{.Id}}'` 의 **full ID 를 == 비교**할 것.
       선행으로 `.env` + `.env.bak*` 10개를 **664 → 600**(해시·소유자·크기 불변, `git status` 0줄).
       ⚠️ 로그가 JSON 이 되면서 한국어가 `\uXXXX` 로 escape 된다(python-json-logger `ensure_ascii`)
       — **원문 grep 은 뒤집힌다**. 로그 도구는 줄 단위 JSON 파싱을 쓸 것.
