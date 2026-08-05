@@ -61,8 +61,10 @@
 > **열린 항목 1건**(nginx `/ws` ingress 상한)이 *flag ON 전 결정 필요*로 남아 있고
 > (~~인증 전용 executor~~ 는 **✅ 닫혔다** — 구현 land + `W=4` 실측 확정 2026-08-05; 당시 서술은
 > "2건"이었다 [superseded]), GO 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke →
-> `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 있다. GO 는 위 "아직 없는 것" 절의 수용 항목(조용한 중단 · stale registry
-> 비용)까지 함께 받아들이는 결정이다.
+> `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 있다. ⚠️ arming 은 **문서가 아니라
+> Archive 직전의 실제 build setting 으로 확인**한다. GO 는 위 "아직 없는 것" 절의 수용 항목
+> (조용한 중단 · stale registry 비용 · **연결 내부 subscribe 남용** — nginx 상한으로는 닫히지 않는
+> 별도 위험이라 GO 목록에서 빠뜨리면 안 된다)까지 함께 받아들이는 결정이다.
 > KRX는 2026-07-08부터 독립 topic
 > `krx:usd-krw-futures`(ADR-038 D2 — 구 `KRX_TOPIC_INCLUDE` env 제거). 잔여 = **client release gate**
 > (iOS `RealtimeV2Config` build-config gate `TOPIC_V2_RELEASE_ON`; 절차는 iOS repo `TOPIC_V2_RELEASE_RUNBOOK.md`).

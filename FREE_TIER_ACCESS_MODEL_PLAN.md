@@ -644,7 +644,13 @@ firebase-admin 6.9.0 은 `app.options.get("httpTimeout", …)` 로 **app 별**�
 즉 **인증 전용 named app 으로 transport 상한을 FCM 과 분리**할 수 있다 — "전역이라 못 한다"는
 근거는 성립하지 않는다.
 
-#### 자원 상한 — Canary GO 전 **provisional 조건** 확정 → 서버 canary 후 **W · nginx 값 확정**
+#### 자원 상한 — **`W=4` 확정(2026-08-05 canary 실측)** / **nginx `/ws` 는 미결**
+
+⚠️ **제목이 한때 "서버 canary 후 W · nginx 값 확정" 이었다** [superseded] — 두 항목이 같은
+방식으로 정해질 것처럼 읽혔는데 **틀렸다**. `W` 는 합성 부하 canary 로 확정됐지만, **nginx 상한은
+합성 canary 로 정할 수 없다** — handshake rate·IP 당 동시 연결 분포는 **대표 실트래픽**이 있어야
+의미가 생긴다(합성 부하는 단일 IP·인위적 도착 패턴이라 그 분포를 만들지 못한다). 그래서 nginx 는
+**실트래픽 확보 후 구현** 또는 **명시적 위험 수용** 둘 중 하나로 닫는다.
 
 ⛔ 한때 이 제목이 "열린 항목 2건 (flag ON 전 결정 필요)"였는데, **최종값은 flag ON canary 이후에만**
 정할 수 있어 아래 4단계 절차와 모순이었다. flag ON 전에 정하는 것은 **provisional 조건**이다.
@@ -1329,8 +1335,13 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       셋이다: (1) §자원 상한 **열린 항목 1건**(nginx `/ws` ingress 상한)의
       **명시적 결정**(구현 또는 위험 수용 — 후속 최적화로 **자동 이월 금지**)
       — ~~인증 전용 executor~~ 는 **✅ 닫혔다**(구현 land + `W=4` 실측 확정, 2026-08-05), (2) 수용 항목
-      (조용한 중단 · stale registry 비용)을 포함한 **운영 GO**, (3) **활성화 실행 절차**
-      (서버 flag → prod smoke → Release arming → phased rollout, iOS `TOPIC_V2_RELEASE_RUNBOOK.md`).
+      (조용한 중단 · stale registry 비용 · **연결 내부 subscribe 남용**)을 포함한 **운영 GO**,
+      (3) **활성화 실행 절차**(서버 flag → prod smoke → **실제 Archive build setting 확인** →
+      phased rollout, iOS `TOPIC_V2_RELEASE_RUNBOOK.md`).
+      ⛔ **연결 내부 subscribe 남용을 수용 목록에서 빠뜨리지 말 것** — 위 §ingress 가 "이 항목으로
+      닫히지 않는다"고 명시한 **별도 잔여 위험**이다. nginx 는 handshake·동시 연결만 보므로 **이미
+      맺힌 한 연결 안에서 명령을 쏟아붓는 경우**를 막지 못한다. 닫으려면 dispatcher 쪽
+      per-connection 명령 빈도·동시성 계측이 선행이고, 그건 **코드 후속**이다.
 
       ⚠️ ①의 완료 조건은 **숫자가 아니라 이름 목록**이다("8축" 같은 요약은 provider/DB 의
       transient·persistent 를 각각 세면 어긋난다 — codex).
