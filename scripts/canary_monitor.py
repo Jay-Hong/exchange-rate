@@ -42,6 +42,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.ws_auth_load import (  # noqa: E402
     PHASES, evaluate_server_abort, load_id_token, maximum_plan_seconds, total_plan_seconds,
 )
+from scripts.env_operation_lock import (  # noqa: E402
+    EnvOperationLocked,
+    env_operation_lock,
+    topic_flag_pending_entry_exists,
+)
 
 BROADCAST_STALL_SECONDS = 30.0
 DEFAULT_POLL_INTERVAL = 1.0
@@ -1234,9 +1239,35 @@ def make_signal_canceller(task: "asyncio.Future", received: dict) -> Callable[[i
     return _handle
 
 
+async def _amain_with_operation_lock(args) -> int:
+    """Hold the shared env lock through activation, monitoring, and cleanup.
+
+    `--recover` uses this same entry point.  Locking only the normal canary path
+    would leave the recovery writer able to race another env transaction.
+    Dry-run is read-only and intentionally does not create or acquire a lock.
+    """
+    if getattr(args, "dry_run", False):
+        return await _amain(args)
+    operation = ("canary_monitor:recover"
+                 if getattr(args, "recover", False) else "canary_monitor:run")
+    env_file = Path(getattr(args, "env_file", PRODUCTION_TARGET.env_file))
+    try:
+        with env_operation_lock(env_file, operation):
+            if topic_flag_pending_entry_exists(env_file):
+                print(json.dumps({
+                    "ok": False,
+                    "topic_activation": "미완료 marker가 있다 — topic_flag status 후 on/off로 수렴할 것",
+                }, ensure_ascii=False))
+                return 1
+            return await _amain(args)
+    except EnvOperationLocked as exc:
+        print(json.dumps({"ok": False, "operation_lock": str(exc)}, ensure_ascii=False))
+        return 1
+
+
 async def _amain_with_signals(args) -> int:
     loop = asyncio.get_running_loop()
-    task = asyncio.ensure_future(_amain(args))
+    task = asyncio.ensure_future(_amain_with_operation_lock(args))
     received: dict = {"signum": None}
     handler = make_signal_canceller(task, received)
     installed = []

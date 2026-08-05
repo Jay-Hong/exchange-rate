@@ -37,6 +37,11 @@ ENV/
 # ⛔ 원자적 write 의 임시 파일 — **대상 env 전체 사본**이라 backup 과 같은 비밀을 담는다.
 #    `..env.<random>` 형태라 `.env` 규칙에도 `*.canary-backup*` 에도 걸리지 않았다.
 *.canary-tmp
+# Host-side env mutators share a persistent kernel flock through this file.
+# The file contains only pid/operation diagnostics, but must stay untracked.
+*.operation-lock
+# Durable, secret-free write-ahead marker for an unfinished topic activation.
+*.topic-flag-pending
 # ⛔ canary 측정 산출물 — 지표와 (마스킹된) 로그 발췌를 담는다. 커밋 금지.
 *.canary-metrics.jsonl
 .env.local

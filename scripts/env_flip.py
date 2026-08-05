@@ -74,6 +74,11 @@ from scripts.canary_monitor import (  # noqa: E402  ⛔ 기존 primitive 재사�
     run_command,
     validate_canary_start_env,
 )
+from scripts.env_operation_lock import (  # noqa: E402
+    EnvOperationLocked,
+    env_operation_lock,
+    topic_flag_pending_entry_exists,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
@@ -573,7 +578,17 @@ async def amain(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_tmux and not os.environ.get("TMUX"):
         print(json.dumps({"ok": False, "error": "tmux 세션 밖이다"}, ensure_ascii=False))
         return 1
-    summary = await run_flip()
+    try:
+        with env_operation_lock(PRODUCTION_TARGET.env_file, "env_flip"):
+            if topic_flag_pending_entry_exists(PRODUCTION_TARGET.env_file):
+                summary = {
+                    "ok": False,
+                    "topic_activation": "미완료 marker가 있다 — topic_flag status 후 on/off로 수렴할 것",
+                }
+            else:
+                summary = await run_flip()
+    except EnvOperationLocked as exc:
+        summary = {"ok": False, "operation_lock": str(exc)}
     print(json.dumps(summary, ensure_ascii=False), flush=True)
     return 0 if summary.get("ok") else 1
 
