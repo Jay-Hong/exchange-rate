@@ -959,11 +959,17 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
       | --- | --- | --- |
       | `origin/master` | 최신 push | 문서 포함 — **운영에 반영됐다는 뜻이 아니다** |
       | EC2 checkout | `e2d3f1a` | `env_flip.py` 를 **실행한** 소스. 이후 docs 커밋은 미반영 |
-      | **실행 이미지** | `sha256:ae6873bf76cd` | **`a3ec9bd` 계열** — 롤백 앵커는 git SHA 가 아니라 **이것** |
+      | **실행 이미지** | `sha256:ae6873bf76cd` | **`a3ec9bd` 계열** — 현재 실행 artifact 식별자. git SHA 와 구분할 것 |
       | 런타임 | `ENV=production` · flag 2종 false | 컨테이너가 실제로 읽은 값 |
       ⚠️ 이미지 출처는 이름이 아니라 **내용으로** 판별했다: 이미지 안 `app/topic_dispatcher.py` 의
       sha1 `01524e165f25` = `a3ec9bd` 와 일치, `e2d3f1a`/`f30a025`(`498c50081cf2`)와 불일치.
       (그 차이는 주석뿐이라 **기능 drift 는 없다** — 다만 "없다"를 가정하지 말고 확인할 것.)
+      ⛔ **실행 image ID 자체를 durable rollback anchor 라고 부르지 않는다.** 2026-08-05 실측에서
+      이 이미지는 `exchange-rate-fastapi:latest` 태그만 있고 repo digest 는 없었다. 다음 build가
+      `latest`를 옮기고 기존 컨테이너를 제거한 뒤 image prune까지 하면 ID만으로는 보존되지 않는다.
+      현재 `rollback-2026-08-05` 태그도 **이 이미지가 아니라 이전 `28f591ef33ff`**를 가리킨다.
+      → 다음 배포 **전에** 실행 이미지를 고유 rollback 태그로 붙이고, 그 태그의 image ID가
+      `ae6873bf76cd`와 일치하는지 확인해야 그때부터 durable anchor다(태그 생성은 별도 운영 변경).
       선행으로 `.env` + `.env.bak*` 10개를 **664 → 600**(해시·소유자·크기 불변, `git status` 0줄).
       ⚠️ 로그가 JSON 이 되면서 한국어가 `\uXXXX` 로 escape 된다(python-json-logger `ensure_ascii`)
       — **원문 grep 은 뒤집힌다**. 로그 도구는 줄 단위 JSON 파싱을 쓸 것.
