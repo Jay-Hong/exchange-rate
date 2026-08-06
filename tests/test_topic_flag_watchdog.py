@@ -306,23 +306,104 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         self.assertNotIn("READY", text)
         self.assertIn("자동 인계 없이는 무장하지 않는다", text)
 
-    def test_observer_survives_when_handoff_script_disappears(self):
-        # bash terminates a subshell when `exec` fails -- even with execfail --
-        # so a fallback placed after the exec is dead code and the observer
-        # vanishes without a trace. The readability check must precede it.
+    def test_handoff_uses_a_fd_so_script_removal_cannot_break_it(self):
+        # `exec` failure kills the subshell -- even with execfail -- so a
+        # fallback after it is dead code, and a path check before it still
+        # leaves a TOCTOU. Handing off through a fd opened at arm time removes
+        # both: the inode stays reachable even once the path is gone.
         (self.home / "off-noop").touch()
         self.state.write_text("ON")
         now = int(time.time())
         first, first_log = self.start(now + 1, now + 600, "gone-first.log")
-        main_pid, watcher_pid = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
 
-        self.script.rename(self.home / "moved-away.sh")  # bash keeps its open fd
+        self.script.unlink()
         os.kill(main_pid, signal.SIGKILL)
         first.wait(timeout=5)
 
-        wait_for_text(first_log, "인계 불가", timeout=10)
-        os.kill(watcher_pid, 0)  # observer must still be alive, not silently gone
-        self.assertEqual(len(self.all_ready(first_log.read_text())), 1)
+        successor, _, text = self.wait_for_handoff(first_log, main_pid)
+        self.assertNotIn("EMERGENCY", text)
+        os.kill(successor, 0)
+
+    def test_observer_converges_itself_when_handoff_is_impossible(self):
+        # Surviving is not enforcing. If the observer cannot hand off it must
+        # run the convergence loop in place -- the contract is "OFF by the
+        # deadline", not "someone was still watching".
+        self._patch_script('HANDOFF_SRC="/dev/fd/8"', 'HANDOFF_SRC="/nonexistent/handoff-fd"')
+        self.state.write_text("ON")  # the stub's `off` flips it to OFF
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "emergency-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+        os.kill(main_pid, signal.SIGKILL)
+        first.wait(timeout=5)
+
+        wait_for_text(first_log, "EMERGENCY", timeout=10)
+        wait_for_text(first_log, "CONFIRMED OFF", timeout=20)
+        self.assertEqual(self.state.read_text().strip(), "OFF")
+
+    def test_sigterm_hands_off_like_sigkill(self):
+        # The EXIT trap runs on SIGTERM/SIGINT/SIGHUP; only SIGKILL skips it.
+        # An unconditional done-marker there disguises `kill <pid>` -- the
+        # ordinary way a process dies -- as an orderly finish, and the flag is
+        # stranded ON. Testing only SIGKILL exercises the one signal that works.
+        (self.home / "off-noop").touch()
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "term-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+
+        os.kill(main_pid, signal.SIGTERM)
+        first.wait(timeout=15)
+
+        successor, _, text = self.wait_for_handoff(first_log, main_pid)
+        self.assertNotIn("정상 종료", text)
+        os.kill(successor, 0)
+
+    def test_handoff_is_recursive_across_generations(self):
+        # Each successor must build its own observer, otherwise the guarantee
+        # holds for exactly one death. The path is removed first so the fd
+        # handoff -- not path lookup -- is what carries every generation.
+        (self.home / "off-noop").touch()
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "gen-first.log")
+        gen1, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+        self.script.unlink()
+
+        os.kill(gen1, signal.SIGKILL)
+        first.wait(timeout=5)
+        gen2, _, _ = self.wait_for_handoff(first_log, gen1)
+
+        os.kill(gen2, signal.SIGKILL)
+        gen3 = None
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and gen3 is None:
+            pids = [p for p, _ in self.all_ready(first_log.read_text())]
+            if len(pids) >= 3 and pids[-1] not in (gen1, gen2):
+                gen3 = pids[-1]
+            else:
+                time.sleep(0.1)
+        self.assertIsNotNone(gen3, first_log.read_text())
+        os.kill(gen3, 0)
+
+    def test_emergency_convergence_keeps_the_singleton(self):
+        # The observer closed fd 9, so converging in place without reacquiring
+        # the lock would let a second watchdog arm concurrently and leave the
+        # governing contract ambiguous.
+        self._patch_script('HANDOFF_SRC="/dev/fd/8"', 'HANDOFF_SRC="/nonexistent/handoff-fd"')
+        (self.home / "off-noop").touch()  # never converges -> stays in the loop
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "emg-lock.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+        os.kill(main_pid, signal.SIGKILL)
+        first.wait(timeout=5)
+        wait_for_text(first_log, "EMERGENCY", timeout=10)
+        time.sleep(1)
+
+        duplicate, duplicate_log = self.start(now + 2, now + 500, "emg-dup.log")
+        self.assertEqual(duplicate.wait(timeout=10), 4)
+        self.assertIn("중복 무장 거부", duplicate_log.read_text())
 
     def test_done_marker_suppresses_handoff(self):
         # cleanup writes the marker *before* killing the observer, but that kill

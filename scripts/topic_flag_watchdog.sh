@@ -44,6 +44,10 @@
 #         /proc·SELF 확인 실패를 경고만 하고 READY 를 찍었다. 비용은 **시점**에 달렸다:
 #         ON 이전 거부는 공짜(시작 안 함), ON 이후 거부는 강제자 0. 그래서 무장은 fail-closed,
 #         인계는 격하 후 계속.
+#      (u) **인계 불가 시 "관측만 계속"** — 생존은 강제가 아니다. 계약은 OFF 수렴이므로,
+#         인계가 불가능하면 observer 가 **직접 수렴**해야 한다. 수렴 루프를 main·observer 가
+#         공유하도록 함수로 뽑았다. (이 세션에서 "수동적 산출물을 능동적 기전으로 서술"한
+#         세 번째 사례 — sentinel·재시도·생존.)
 #      (t) **`exec` 실패 뒤 fallback 은 죽은 코드** — bash 는 exec 실패 시 subshell 을 종료한다
 #         (`execfail` 을 켜도 그렇다 — 3.2/5.2 양쪽 실측). 인계 스크립트가 사라지면 observer 가
 #         아무 기록 없이 증발했다. 확인은 **exec 전에** 한다.
@@ -182,15 +186,33 @@ elif [ ! -r "$SELF" ]; then
   log "⚠️ 인계 중 SELF 읽기 실패 — 인계자 없이 계속한다"
 fi
 MAIN_START="$PROC_START"
-# ⛔ 정상 종료 표식 — observer 가 "죽었으니 인계"와 "끝나서 사라짐"을 가르는 유일한 근거다.
-#    cleanup 이 **kill 보다 먼저** 쓴다. SIGKILL 은 cleanup 을 안 태우므로 표식이 없고,
-#    그래서 그때만 인계가 일어난다(v7 조건 4).
+
+# ⛔ 인계는 **경로가 아니라 FD** 로 한다 (결함 t 의 완전한 해소). `[ -r "$SELF" ]` 확인과 `exec`
+#    사이에는 TOCTOU 가 있고, exec 이 실패하면 bash 는 subshell 을 종료해 fallback 을 둘 수도
+#    없다. 무장 시점에 열어 둔 FD 는 파일이 지워지거나 교체돼도 **그때 검증한 그 내용**을 가리킨다.
+HANDOFF_SRC="/dev/fd/8"
+case "$SELF" in
+  # ⚠️ 방어적 — 재개방이 실제로 깨지는지는 **입증되지 않았다**(이 분기를 없애는 변이에도
+  #    3세대 인계 회귀가 통과했다). bash 가 스크립트를 어느 fd 로 여는지에 의존하지 않으려고 남긴다.
+  /dev/fd/*|/proc/self/fd/*) : ;;   # 인계로 물려받은 FD 는 그대로 쓴다
+  *) [ "$REARM" -eq 1 ] && exec 8<"$SELF" ;;
+esac
+# ⛔ 표식은 **"끝냈다"** 를 뜻해야 한다 — "종료했다" 가 아니다 (결함 v).
+#    EXIT trap 은 SIGKILL 에서만 안 돈다. SIGTERM/SIGINT/SIGHUP 에서는 **실행된다**
+#    (Linux bash 5.2.21 실측: TERM rc=143 / INT rc=0 / HUP rc=129 모두 trap 실행).
+#    즉 EXIT 에서 무조건 표식을 쓰면 `kill <pid>`(기본 TERM)·systemd 종료 같은
+#    **가장 현실적인 사망 경로**가 전부 "정상 종료"로 위장되고 flag 가 ON 으로 남는다.
+#    → 의도적으로 일을 마친 경로에서만 FINISHED=1 을 세우고, 그때만 표식·observer 종료를 한다.
 DONE_MARKER="${LOG}.done"
+FINISHED=0
 rm -f "$DONE_MARKER" 2>/dev/null || true
 
 cleanup() {
-  : >"$DONE_MARKER" 2>/dev/null || true
-  [ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null
+  if [ "$FINISHED" -eq 1 ]; then
+    : >"$DONE_MARKER" 2>/dev/null || true
+    [ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null
+  fi
+  # ⚠️ 의도치 않은 종료면 observer 를 **살려 둔다** — 그가 인계해야 계약이 지켜진다.
   rm -f "$TMP" 9>&- 2>/dev/null
 }
 trap cleanup EXIT
@@ -219,91 +241,17 @@ sleep_before_retry() {
   [ "$nap" -gt 0 ] && sleep_without_singleton "$nap"
 }
 
-(
-  # ⛔ singleton 은 OFF 로 수렴시키는 main 의 생존을 뜻해야 한다. 관측 전용 child 가 이 FD 를
-  #    물려받으면 main SIGKILL 뒤에도 lock 만 살아 새 watchdog 이 재무장되지 못한다(v4 결함 l).
-  exec 9>&-
-  # ⛔ 계약 시각을 기다리는 동안 **main 의 생존도 함께 본다**. main 이 죽으면 OFF 를 강제할
-  #    주체가 0 이 되므로, observer 가 같은 계약을 그대로 인계한다.
-  #    spawn 이 아니라 `exec` 인 이유: 프로세스가 늘지 않고, 인계 실패가 조용히 남지 않으며,
-  #    새 인스턴스가 자기 observer 를 다시 만들어 이 성질이 재귀적으로 유지된다.
-  while [ "$(exec 9>&-; epoch_now)" -lt "$CONTRACT_AT" ]; do
-    sleep_without_singleton "$POLL_SECONDS"
-    [ "$REARM" -eq 1 ] || continue
-    if ! read_proc "$MAIN_PID" || [ "$PROC_STATE" = "Z" ] || [ "$PROC_START" != "$MAIN_START" ]; then
-      # ⚠️ 정상 종료였다면 인계하지 않는다 — cleanup 이 kill 보다 먼저 표식을 쓴다.
-      if [ -e "$DONE_MARKER" ]; then
-        log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
-        exit 0
-      fi
-      # ⛔ `exec` 가 실패하면 bash 는 **subshell 을 종료한다**(execfail 을 켜도 그렇다 — bash
-      #    3.2/5.2 양쪽 실측). 즉 exec 뒤에 fallback 을 두는 건 죽은 코드이고, 인계 스크립트가
-      #    사라진 순간 observer 가 아무 기록도 없이 증발한다. 그래서 **exec 전에** 확인한다.
-      if [ ! -r "$SELF" ]; then
-        log "⛔ main($MAIN_PID) 사망 — 그러나 인계 스크립트($SELF)를 읽을 수 없다. 인계 불가, 기록만 계속한다"
-        REARM=0
-        continue
-      fi
-      log "⛔ main($MAIN_PID) 사망 감지 (state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
-      exec bash "$SELF" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
-    fi
-  done
-  t0="$(exec 9>&-; epoch_now)"
-  cur="$(exec 9>&-; probe_status "$WATCHER_STATUS_BUDGET")"
-  took=$(( $(exec 9>&-; epoch_now) - t0 ))
-  if [ "$cur" = "OFF" ]; then
-    log "계약 상한 도달 — fresh 관측 OFF 확인 (breach 아님, probe=${took}s)"
-  else
-    log "⛔ CONTRACT BREACH — 계약 상한까지 OFF 미확인 (state=${cur:-<unreadable>}, probe=${took}s)."
-    log "   ⚠️ 알림 경로 없음 — 이 줄과 sentinel 은 기록일 뿐 아무도 부르지 않는다. 수동 확인 필요."
-    printf 'contract=%s breached_at=%s state=%s\n' \
-      "$(exec 9>&-; kst "$CONTRACT_AT")" "$(exec 9>&-; kst "$(epoch_now)")" "${cur:-unreadable}" >"$BREACH_SENTINEL" 2>/dev/null \
-      || log "   ⛔ sentinel 기록마저 실패: $BREACH_SENTINEL"
-  fi
-  # ⚠️ 계약 **이후**에도 감시를 멈추지 않는다 — breach 상태로 수렴 중이거나 hold 중에 main 이
-  #    죽으면 거기서도 강제 주체가 0 이 된다. give-up 까지는 인계 대상이다.
-  [ "$REARM" -eq 1 ] || exit 0
-  while [ "$(exec 9>&-; epoch_now)" -lt "$GIVE_UP_AT" ]; do
-    sleep_without_singleton "$POLL_SECONDS"   # /proc 읽기뿐이라 촘촘해도 싸다
-    if ! read_proc "$MAIN_PID" || [ "$PROC_STATE" = "Z" ] || [ "$PROC_START" != "$MAIN_START" ]; then
-      if [ -e "$DONE_MARKER" ]; then
-        log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
-        exit 0
-      fi
-      if [ ! -r "$SELF" ]; then
-        log "⛔ main($MAIN_PID) 사망(계약 이후) — 인계 스크립트($SELF) 읽기 불가. 기록만 계속한다"
-        REARM=0
-        continue
-      fi
-      log "⛔ main($MAIN_PID) 사망 감지 (계약 이후, state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
-      exec bash "$SELF" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
-    fi
-  done
-) &
-WATCHER_PID=$!
-
-# ⛔ READY 는 **무장을 구성하는 모든 것이 존재한다**는 핸드셰이크다 (v3 결함 j).
-#    watcher 생존을 확인한 뒤에만 찍는다 — 무장 절차는 이 줄을 근거로 완료를 판정한다.
-sleep_without_singleton 1
-kill -0 "$WATCHER_PID" 2>/dev/null || die "계약 watcher 기동 실패 — 무장하지 않는다"
-log "READY pid=$$ watcher=$WATCHER_PID fire=$(exec 9>&-; kst "$FIRE_AT") contract=$(exec 9>&-; kst "$CONTRACT_AT") giveup=$(exec 9>&-; kst "$GIVE_UP_AT")"
-log "ARMED fire_in=$(( FIRE_AT - $(exec 9>&-; epoch_now) ))s contract_in=$(( CONTRACT_AT - $(exec 9>&-; epoch_now) ))s" \
-    "(fire_epoch=$FIRE_AT contract_epoch=$CONTRACT_AT off_budget=${OFF_BUDGET}s sentinel=$BREACH_SENTINEL)"
-
-while [ "$(exec 9>&-; epoch_now)" -lt "$FIRE_AT" ]; do sleep_without_singleton "$POLL_SECONDS"; done
-log "FIRE — 수렴 시작 (계약까지 $(( CONTRACT_AT - $(exec 9>&-; epoch_now) ))s)"
-
-attempt=0
-ineffective=0
-recreate_stopped=0
-confirmed_at=""
-phase="converge"
-
-while :; do
+# ⛔ 수렴 루프는 **main 과 observer 가 공유한다** — 인계가 불가능할 때 observer 가
+#    그 자리에서 직접 수렴해야 하기 때문이다. 계약은 "OFF 수렴"이지 "관측"이 아니다.
+#    (결함 u: 인계 불가 시 observer 를 살려만 두고 해결했다고 했다. 생존 ≠ 강제.)
+converge_loop() {
+  local attempt=0 ineffective=0 recreate_stopped=0 confirmed_at="" phase="converge"
+  local now state rc hold_until
+  while :; do
   now="$(exec 9>&-; epoch_now)"
   if [ "$now" -ge "$GIVE_UP_AT" ]; then
     log "⛔ GIVE UP — $(( GIVE_UP_AFTER / 3600 ))h 초과. flag 가 OFF 로 확정되지 않았다"
-    exit 1
+    FINISHED=1; exit 1
   fi
 
   if [ "$phase" = "converge" ]; then
@@ -356,10 +304,10 @@ while :; do
   if [ "$now" -ge "$hold_until" ]; then
     if [ "$confirmed_at" -le "$CONTRACT_AT" ]; then
       log "DONE — 계약 상한 내 OFF 확정 후 +${HOLD_GRACE}s 유지 확인"
-      exit 0
+      FINISHED=1; exit 0
     fi
     log "DONE(late) — OFF 로 수렴했으나 계약 상한을 초과했다"
-    exit 3
+    FINISHED=1; exit 3
   fi
   sleep_without_singleton "$POLL_HOLD"
   state="$(exec 9>&-; probe_status)"
@@ -367,4 +315,91 @@ while :; do
     log "⚠️ hold 중 OFF 이탈 (state=${state:-<unreadable>}) — 수렴 루프로 복귀"
     ineffective=0; recreate_stopped=0; phase="converge"
   fi
-done
+  done
+}
+
+# ⛔ 긴급 수렴도 singleton 을 지킨다 — observer 는 fd 9 를 닫아 lock 을 갖고 있지 않다.
+#    되잡지 않으면 수렴하는 동안 다른 watchdog 이 무장돼 어느 계약이 지배하는지 모호해진다.
+#    되잡기에 실패해도 **수렴은 한다** — 계약 이행이 singleton 보다 우선이다.
+_locked_converge() {
+  flock -n 9 || log "   ⚠️ singleton 재획득 실패 — 계약 이행이 우선이라 lock 없이 수렴한다"
+  converge_loop
+}
+emergency_converge() {
+  if ! _locked_converge 9>>"$WD_LOCK"; then
+    log "   ⚠️ lock 파일을 열 수 없다 — lock 없이 수렴한다"
+    converge_loop
+  fi
+}
+
+(
+  # ⛔ singleton 은 OFF 로 수렴시키는 main 의 생존을 뜻해야 한다. 관측 전용 child 가 이 FD 를
+  #    물려받으면 main SIGKILL 뒤에도 lock 만 살아 새 watchdog 이 재무장되지 못한다(v4 결함 l).
+  exec 9>&-
+  # ⛔ 계약 시각을 기다리는 동안 **main 의 생존도 함께 본다**. main 이 죽으면 OFF 를 강제할
+  #    주체가 0 이 되므로, observer 가 같은 계약을 그대로 인계한다.
+  #    spawn 이 아니라 `exec` 인 이유: 프로세스가 늘지 않고, 인계 실패가 조용히 남지 않으며,
+  #    새 인스턴스가 자기 observer 를 다시 만들어 이 성질이 재귀적으로 유지된다.
+  while [ "$(exec 9>&-; epoch_now)" -lt "$CONTRACT_AT" ]; do
+    sleep_without_singleton "$POLL_SECONDS"
+    [ "$REARM" -eq 1 ] || continue
+    if ! read_proc "$MAIN_PID" || [ "$PROC_STATE" = "Z" ] || [ "$PROC_START" != "$MAIN_START" ]; then
+      # ⚠️ 정상 종료였다면 인계하지 않는다 — cleanup 이 kill 보다 먼저 표식을 쓴다.
+      if [ -e "$DONE_MARKER" ]; then
+        log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
+        exit 0
+      fi
+      # ⛔ exec 실패는 subshell 을 종료시키므로 fallback 을 뒤에 둘 수 없다. FD 가 살아 있는지
+      #    먼저 보고, 아니면 **직접 수렴한다** — 계약은 OFF 수렴이지 관측이 아니다(결함 u).
+      if [ -r "$HANDOFF_SRC" ]; then
+        log "⛔ main($MAIN_PID) 사망 감지 (state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
+        exec bash "$HANDOFF_SRC" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
+      fi
+      log "⛔ main($MAIN_PID) 사망, 인계 FD 소실 — observer 가 직접 수렴한다(EMERGENCY)"
+      emergency_converge
+    fi
+  done
+  t0="$(exec 9>&-; epoch_now)"
+  cur="$(exec 9>&-; probe_status "$WATCHER_STATUS_BUDGET")"
+  took=$(( $(exec 9>&-; epoch_now) - t0 ))
+  if [ "$cur" = "OFF" ]; then
+    log "계약 상한 도달 — fresh 관측 OFF 확인 (breach 아님, probe=${took}s)"
+  else
+    log "⛔ CONTRACT BREACH — 계약 상한까지 OFF 미확인 (state=${cur:-<unreadable>}, probe=${took}s)."
+    log "   ⚠️ 알림 경로 없음 — 이 줄과 sentinel 은 기록일 뿐 아무도 부르지 않는다. 수동 확인 필요."
+    printf 'contract=%s breached_at=%s state=%s\n' \
+      "$(exec 9>&-; kst "$CONTRACT_AT")" "$(exec 9>&-; kst "$(epoch_now)")" "${cur:-unreadable}" >"$BREACH_SENTINEL" 2>/dev/null \
+      || log "   ⛔ sentinel 기록마저 실패: $BREACH_SENTINEL"
+  fi
+  # ⚠️ 계약 **이후**에도 감시를 멈추지 않는다 — breach 상태로 수렴 중이거나 hold 중에 main 이
+  #    죽으면 거기서도 강제 주체가 0 이 된다. give-up 까지는 인계 대상이다.
+  [ "$REARM" -eq 1 ] || exit 0
+  while [ "$(exec 9>&-; epoch_now)" -lt "$GIVE_UP_AT" ]; do
+    sleep_without_singleton "$POLL_SECONDS"   # /proc 읽기뿐이라 촘촘해도 싸다
+    if ! read_proc "$MAIN_PID" || [ "$PROC_STATE" = "Z" ] || [ "$PROC_START" != "$MAIN_START" ]; then
+      if [ -e "$DONE_MARKER" ]; then
+        log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
+        exit 0
+      fi
+      if [ -r "$HANDOFF_SRC" ]; then
+        log "⛔ main($MAIN_PID) 사망 감지 (계약 이후, state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
+        exec bash "$HANDOFF_SRC" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
+      fi
+      log "⛔ main($MAIN_PID) 사망(계약 이후), 인계 FD 소실 — observer 가 직접 수렴한다(EMERGENCY)"
+      emergency_converge
+    fi
+  done
+) &
+WATCHER_PID=$!
+
+# ⛔ READY 는 **무장을 구성하는 모든 것이 존재한다**는 핸드셰이크다 (v3 결함 j).
+#    watcher 생존을 확인한 뒤에만 찍는다 — 무장 절차는 이 줄을 근거로 완료를 판정한다.
+sleep_without_singleton 1
+kill -0 "$WATCHER_PID" 2>/dev/null || die "계약 watcher 기동 실패 — 무장하지 않는다"
+log "READY pid=$$ watcher=$WATCHER_PID fire=$(exec 9>&-; kst "$FIRE_AT") contract=$(exec 9>&-; kst "$CONTRACT_AT") giveup=$(exec 9>&-; kst "$GIVE_UP_AT")"
+log "ARMED fire_in=$(( FIRE_AT - $(exec 9>&-; epoch_now) ))s contract_in=$(( CONTRACT_AT - $(exec 9>&-; epoch_now) ))s" \
+    "(fire_epoch=$FIRE_AT contract_epoch=$CONTRACT_AT off_budget=${OFF_BUDGET}s sentinel=$BREACH_SENTINEL)"
+
+while [ "$(exec 9>&-; epoch_now)" -lt "$FIRE_AT" ]; do sleep_without_singleton "$POLL_SECONDS"; done
+log "FIRE — 수렴 시작 (계약까지 $(( CONTRACT_AT - $(exec 9>&-; epoch_now) ))s)"
+converge_loop
