@@ -36,12 +36,20 @@
 #         실행 시간이 아니라 소유권 규칙으로 막는다: lock 획득 뒤 모든 command-substitution 은
 #         첫 명령으로 `exec 9>&-` 를 실행한다.
 #
-# ⚠️ 알림 경로가 없다(운영 `TELEGRAM_ENABLED=false`). breach 로그도 sentinel 도 **기록일 뿐
-#    아무도 부르지 않는다**. 계약 위반 시의 실질 보호는 계속되는 (유계) 재시도이지 경보가 아니다.
-#  v6 (q) **자동 재무장자 부재** — FD 상속을 끊어 "재무장이 가능"해졌지만 그걸 할 주체가 없었다.
+#      (r) **자동 재무장자 부재** — FD 상속을 끊어 "재무장이 가능"해졌지만 그걸 할 주체가 없었다.
 #         main 이 SIGKILL/OOM 으로 죽으면 observer 는 기록만 하고 OFF 를 강제하지 않아,
 #         상한이 다시 "사람이 알아채면" 조건부가 됐다. → observer 가 main 생존을 함께 보고
 #         (zombie·pid 재사용까지 구별) 죽으면 같은 계약을 `exec` 로 인계한다.
+#      (s) **"무장 거부는 언제나 더 비싸다"는 과일반화** — 인계가 안전 계약의 일부가 된 뒤에도
+#         /proc·SELF 확인 실패를 경고만 하고 READY 를 찍었다. 비용은 **시점**에 달렸다:
+#         ON 이전 거부는 공짜(시작 안 함), ON 이후 거부는 강제자 0. 그래서 무장은 fail-closed,
+#         인계는 격하 후 계속.
+#      (t) **`exec` 실패 뒤 fallback 은 죽은 코드** — bash 는 exec 실패 시 subshell 을 종료한다
+#         (`execfail` 을 켜도 그렇다 — 3.2/5.2 양쪽 실측). 인계 스크립트가 사라지면 observer 가
+#         아무 기록 없이 증발했다. 확인은 **exec 전에** 한다.
+#
+# ⚠️ 알림 경로가 없다(운영 `TELEGRAM_ENABLED=false`). breach 로그도 sentinel 도 **기록일 뿐
+#    아무도 부르지 않는다**. 계약 위반 시의 실질 보호는 계속되는 (유계) 재시도이지 경보가 아니다.
 #
 # ⚠️ **EC2 재부팅은 여전히 미커버다.** 재부팅되면 이 프로세스 계보 전체가 사라지고 컨테이너는
 #    `.env` 그대로 살아난다. 이 공백은 명시적으로 수용한다 — 재부팅은 앱 끊김으로 즉시
@@ -118,7 +126,7 @@ NOW="$(exec 9>&-; epoch_now)"
   || die "수렴 창이 6h 초과 (window=$(( CONTRACT_AT - FIRE_AT ))s) — epoch 단위 오류 의심"
 # ⛔ stale 거부는 **사람이 붙여넣은 옛 명령**을 막기 위한 것이다. observer 인계는 방금 죽은
 #    main 의 계약을 그대로 잇는 것이라 성격이 다르다 — 여기서 거부하면 계약 경계에서 main 이
-#    죽었을 때 재무장 경로가 곧 무장 거부가 되어 OFF 를 아무도 강제하지 않는다(v7 조건 3).
+#    죽었을 때 재무장 경로가 곧 무장 거부가 되어 OFF 를 아무도 강제하지 않는다(인계 계약 3).
 if [ "$HANDOFF" -eq 1 ]; then
   [ "$(( NOW - CONTRACT_AT ))" -le "$GIVE_UP_AFTER" ] \
     || die "handoff 인데 계약이 ${GIVE_UP_AFTER}s 초과 과거다 ($(exec 9>&-; kst "$CONTRACT_AT"))"
@@ -154,16 +162,24 @@ BREACH_SENTINEL="$HOME/logs/WATCHDOG_CONTRACT_BREACH.$CONTRACT_AT"
 TMP="$(exec 9>&-; mktemp 2>/dev/null)" || TMP=/dev/null   # 발화 이후엔 어떤 이유로도 죽지 않는다
 WATCHER_PID=""
 
-# ── 3. main 사망 시 인계 (v6 결함 p) — observer 는 기록만 하고 OFF 를 강제하지 않았다.
+# ── 3. main 사망 시 인계 (결함 r) — observer 는 기록만 하고 OFF 를 강제하지 않았다.
 #      main 이 SIGKILL/OOM 으로 죽으면 강제할 주체가 0 이 되는데 자동 재무장자가 없었다.
 MAIN_PID="$$"
 REARM=1
+# ⛔ **무장 거부의 비용은 시점에 달렸다** (결함 s — 앞선 판에서 "거부는 언제나 더 비싸다"로
+#    과일반화했다):
+#      · ON 이전(운영자 무장): flag 가 아직 OFF 라 거부는 **공짜**다 — 그냥 시작하지 않는 것이다.
+#        자동 인계가 안전 계약의 일부가 된 이상, 그게 없는데 READY 를 찍으면 핸드셰이크가
+#        실제보다 많은 것을 주장한다(유령 게이트). 그래서 fail-closed.
+#      · ON 이후(인계): 여기서 거부하면 flag 가 켜진 채 강제자가 0 이 된다 — 그래서 격하 후 계속.
 if ! read_proc "$MAIN_PID"; then
+  [ "$HANDOFF" -eq 1 ] || die "main identity(/proc/$MAIN_PID/stat) 확인 불가 — 자동 인계 없이는 무장하지 않는다"
   REARM=0
-  log "⚠️ /proc/$MAIN_PID/stat 을 못 읽는다 — main 사망 시 자동 인계 없이 진행한다"
+  log "⚠️ 인계 중 /proc 확인 실패 — 인계자 없이 계속한다(여기서 멈추면 강제자가 0 이 된다)"
 elif [ ! -r "$SELF" ]; then
+  [ "$HANDOFF" -eq 1 ] || die "인계 스크립트($SELF) 읽기 불가 — 자동 인계 없이는 무장하지 않는다"
   REARM=0
-  log "⚠️ 스크립트 경로를 못 읽는다($SELF) — main 사망 시 자동 인계 없이 진행한다"
+  log "⚠️ 인계 중 SELF 읽기 실패 — 인계자 없이 계속한다"
 fi
 MAIN_START="$PROC_START"
 # ⛔ 정상 종료 표식 — observer 가 "죽었으니 인계"와 "끝나서 사라짐"을 가르는 유일한 근거다.
@@ -220,9 +236,16 @@ sleep_before_retry() {
         log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
         exit 0
       fi
+      # ⛔ `exec` 가 실패하면 bash 는 **subshell 을 종료한다**(execfail 을 켜도 그렇다 — bash
+      #    3.2/5.2 양쪽 실측). 즉 exec 뒤에 fallback 을 두는 건 죽은 코드이고, 인계 스크립트가
+      #    사라진 순간 observer 가 아무 기록도 없이 증발한다. 그래서 **exec 전에** 확인한다.
+      if [ ! -r "$SELF" ]; then
+        log "⛔ main($MAIN_PID) 사망 — 그러나 인계 스크립트($SELF)를 읽을 수 없다. 인계 불가, 기록만 계속한다"
+        REARM=0
+        continue
+      fi
       log "⛔ main($MAIN_PID) 사망 감지 (state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
       exec bash "$SELF" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
-      log "⛔ 인계 exec 실패 — 이 observer 는 기록만 계속한다"   # exec 성공 시 도달 불가
     fi
   done
   t0="$(exec 9>&-; epoch_now)"
@@ -246,6 +269,11 @@ sleep_before_retry() {
       if [ -e "$DONE_MARKER" ]; then
         log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
         exit 0
+      fi
+      if [ ! -r "$SELF" ]; then
+        log "⛔ main($MAIN_PID) 사망(계약 이후) — 인계 스크립트($SELF) 읽기 불가. 기록만 계속한다"
+        REARM=0
+        continue
       fi
       log "⛔ main($MAIN_PID) 사망 감지 (계약 이후, state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
       exec bash "$SELF" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff

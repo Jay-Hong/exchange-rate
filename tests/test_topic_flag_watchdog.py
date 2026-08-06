@@ -274,6 +274,56 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         self.assertNotIn("ARM FAILED", text)
         os.kill(successor, 0)
 
+    def _patch_script(self, old: str, new: str):
+        source = self.script.read_text()
+        self.assertEqual(source.count(old), 1, f"anchor {old!r}")
+        self.script.write_text(source.replace(old, new))
+
+    def test_arm_fails_closed_when_self_is_unreadable(self):
+        # Auto-handoff is part of the safety contract now, so an arm that cannot
+        # provide it must not print READY. Refusing costs nothing here: the flag
+        # is still OFF and the operator simply does not start.
+        self._patch_script(
+            'case "$0" in /*) SELF="$0" ;; *) SELF="$PWD/$0" ;; esac',
+            'SELF="/nonexistent/topic_flag_watchdog.sh"',
+        )
+        now = int(time.time())
+        process, log = self.start(now + 30, now + 90, "self-unreadable.log")
+        self.assertEqual(process.wait(timeout=10), 2)
+        text = log.read_text()
+        self.assertNotIn("READY", text)
+        self.assertIn("자동 인계 없이는 무장하지 않는다", text)
+
+    def test_arm_fails_closed_when_main_identity_is_unreadable(self):
+        self._patch_script(
+            'read -r raw < "/proc/$1/stat" 2>/dev/null || return 1',
+            'read -r raw < "/proc/no-such-$1/stat" 2>/dev/null || return 1',
+        )
+        now = int(time.time())
+        process, log = self.start(now + 30, now + 90, "proc-unreadable.log")
+        self.assertEqual(process.wait(timeout=10), 2)
+        text = log.read_text()
+        self.assertNotIn("READY", text)
+        self.assertIn("자동 인계 없이는 무장하지 않는다", text)
+
+    def test_observer_survives_when_handoff_script_disappears(self):
+        # bash terminates a subshell when `exec` fails -- even with execfail --
+        # so a fallback placed after the exec is dead code and the observer
+        # vanishes without a trace. The readability check must precede it.
+        (self.home / "off-noop").touch()
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "gone-first.log")
+        main_pid, watcher_pid = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+
+        self.script.rename(self.home / "moved-away.sh")  # bash keeps its open fd
+        os.kill(main_pid, signal.SIGKILL)
+        first.wait(timeout=5)
+
+        wait_for_text(first_log, "인계 불가", timeout=10)
+        os.kill(watcher_pid, 0)  # observer must still be alive, not silently gone
+        self.assertEqual(len(self.all_ready(first_log.read_text())), 1)
+
     def test_done_marker_suppresses_handoff(self):
         # cleanup writes the marker *before* killing the observer, but that kill
         # is asynchronous. If the observer wins the race it must still refuse to
