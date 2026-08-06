@@ -144,15 +144,40 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
             time.sleep(0.01)
         raise AssertionError(f"{command!r} child not found for pid={parent_pid}")
 
-    def test_live_instance_rejects_duplicate_but_main_sigkill_allows_rearm(self):
+    @staticmethod
+    def all_ready(text: str):
+        return [
+            (int(m.group(1)), int(m.group(2)))
+            for m in re.finditer(r"READY pid=(\d+) watcher=(\d+)", text)
+        ]
+
+    def wait_for_handoff(self, log: Path, dead_pid: int, timeout: float = 15.0):
+        """Wait for an instance other than `dead_pid` to reach READY in the same log.
+
+        The observer hands the contract over with `exec`, so the successor keeps
+        writing to the log it was armed with. A stuck singleton flock shows up
+        here as `중복 무장 거부` instead of a second READY.
+        """
+        deadline = time.monotonic() + timeout
+        text = ""
+        while time.monotonic() < deadline:
+            text = log.read_text(errors="replace") if log.exists() else ""
+            for main_pid, watcher_pid in self.all_ready(text):
+                if main_pid != dead_pid:
+                    return main_pid, watcher_pid, text
+            time.sleep(0.1)
+        raise AssertionError(f"handoff READY (pid != {dead_pid}) not found in {log}\n{text}")
+
+    def test_live_duplicate_refused_and_observer_hands_off_on_sigkill(self):
         now = int(time.time())
-        first, first_log = self.start(now + 30, now + 40, "first.log")
-        first_text = wait_for_text(first_log, "READY")
-        main_pid, watcher_pid = self.ready_pids(first_text)
+        first, first_log = self.start(now + 30, now + 90, "first.log")
+        main_pid, watcher_pid = self.ready_pids(wait_for_text(first_log, "READY"))
         self.assertEqual(main_pid, first.pid)
         os.kill(watcher_pid, 0)
 
-        duplicate, duplicate_log = self.start(now + 20, now + 35, "duplicate.log")
+        # A *live* main must still refuse a second instance: that is the whole
+        # point of the singleton, and the handoff must not weaken it.
+        duplicate, duplicate_log = self.start(now + 20, now + 80, "duplicate.log")
         self.assertEqual(duplicate.wait(timeout=5), 4)
         self.assertIn("중복 무장 거부", duplicate_log.read_text())
 
@@ -165,17 +190,15 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         os.kill(main_pid, signal.SIGKILL)
         first.wait(timeout=5)
 
-        replacement, replacement_log = self.start(now + 20, now + 35, "replacement.log")
-        replacement_text = wait_for_text(replacement_log, "READY")
-        replacement_main, replacement_watcher = self.ready_pids(replacement_text)
-        self.assertEqual(replacement_main, replacement.pid)
-        os.kill(replacement_watcher, 0)
+        successor, successor_watcher, text = self.wait_for_handoff(first_log, main_pid)
+        self.assertIn("사망 감지", text)
+        os.kill(successor, 0)
+        os.kill(successor_watcher, 0)
 
-    def test_orphaned_off_child_does_not_block_rearm(self):
+    def test_orphaned_off_child_does_not_block_handoff(self):
         # `off` is the longest-lived child (up to OFF_BUDGET=420s in production).
-        # If it inherits the singleton flock, killing main leaves a lock with no
-        # process able to converge to OFF, and the replacement is refused with
-        # exit 4 -- the refusal even names the already-dead pid as "alive".
+        # If it inherits the singleton flock, the successor cannot take it and
+        # the handoff degenerates into `중복 무장 거부` -- no one converges.
         (self.home / "off-slow").touch()
         (self.home / "off-noop").touch()
         self.state.write_text("ON")
@@ -186,22 +209,15 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
 
         os.kill(main_pid, signal.SIGKILL)
         first.wait(timeout=5)
-        time.sleep(1.2)
 
-        replacement, replacement_log = self.start(now + 2, now + 400, "orphan-replacement.log")
-        replacement_main, replacement_watcher = self.ready_pids(
-            wait_for_text(replacement_log, "READY", timeout=10)
-        )
-        self.assertEqual(replacement_main, replacement.pid)
-        os.kill(replacement_watcher, 0)
-        text = replacement_log.read_text()
+        successor, _, text = self.wait_for_handoff(first_log, main_pid)
         self.assertNotIn("중복 무장 거부", text)
-        self.assertNotIn("singleton 격하", text)
+        os.kill(successor, 0)
 
-    def test_orphaned_status_probe_does_not_block_rearm(self):
+    def test_orphaned_status_probe_does_not_block_handoff(self):
         # Closing fd 9 only on the pipeline inside `$(probe_status)` is not
         # enough if the command-substitution shell itself keeps the lock while
-        # a status call hangs. Killing main must still permit immediate rearm.
+        # a status call hangs.
         (self.home / "status-hang").touch()
         self.state.write_text("ON")
         now = int(time.time())
@@ -212,13 +228,88 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         os.kill(main_pid, signal.SIGKILL)
         first.wait(timeout=5)
 
-        replacement, replacement_log = self.start(
-            now + 300, now + 500, "status-replacement.log"
-        )
-        replacement_text = wait_for_text(replacement_log, "READY", timeout=10)
-        replacement_main, replacement_watcher = self.ready_pids(replacement_text)
-        self.assertEqual(replacement_main, replacement.pid)
-        os.kill(replacement_watcher, 0)
+        successor, _, text = self.wait_for_handoff(first_log, main_pid)
+        self.assertNotIn("중복 무장 거부", text)
+        os.kill(successor, 0)
+
+    def test_zombie_main_counts_as_dead(self):
+        # `kill -0` succeeds for a zombie, so liveness must read
+        # /proc/<pid>/stat. Popen deliberately does not reap here.
+        (self.home / "off-noop").touch()
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "zombie-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+        os.kill(main_pid, signal.SIGKILL)
+
+        state = ""
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            raw = Path(f"/proc/{main_pid}/stat").read_text()
+            state = raw[raw.rindex(") ") + 2:].split()[0]
+            if state == "Z":
+                break
+            time.sleep(0.05)
+        self.assertEqual(state, "Z", "main did not become a zombie; test is not exercising its axis")
+
+        successor, _, text = self.wait_for_handoff(first_log, main_pid)
+        self.assertIn("state=Z", text)
+        os.kill(successor, 0)
+        first.wait(timeout=5)
+
+    def test_handoff_after_contract_is_not_rejected_as_stale(self):
+        # A contract already in the past is `stale` for an operator command but
+        # legitimate for a handoff. Rejecting it there would turn the rearm path
+        # itself into a refusal to arm -- with nobody left forcing OFF.
+        (self.home / "off-noop").touch()
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 4, "late-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "CONTRACT BREACH", timeout=15))
+        os.kill(main_pid, signal.SIGKILL)
+        first.wait(timeout=5)
+
+        successor, _, text = self.wait_for_handoff(first_log, main_pid)
+        self.assertNotIn("stale 명령", text)
+        self.assertNotIn("ARM FAILED", text)
+        os.kill(successor, 0)
+
+    def test_done_marker_suppresses_handoff(self):
+        # cleanup writes the marker *before* killing the observer, but that kill
+        # is asynchronous. If the observer wins the race it must still refuse to
+        # resurrect a finished run. Planting the marker exercises that branch
+        # deterministically -- the end-to-end normal exit cannot force the race.
+        (self.home / "off-noop").touch()
+        self.state.write_text("ON")
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 600, "marker-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+
+        Path(f"{first_log}.done").touch()
+        os.kill(main_pid, signal.SIGKILL)
+        first.wait(timeout=5)
+
+        wait_for_text(first_log, "정상 종료 — 인계하지 않는다", timeout=10)
+        self.assertEqual(len(self.all_ready(first_log.read_text())), 1)
+
+    def test_normal_exit_does_not_hand_off(self):
+        # cleanup writes the done marker *before* killing the observer, so an
+        # orderly finish must not look like a death.
+        source = self.script.read_text()
+        old = "HOLD_GRACE=120"
+        self.assertEqual(source.count(old), 1)
+        self.script.write_text(source.replace(old, "HOLD_GRACE=3"))
+
+        now = int(time.time())
+        first, first_log = self.start(now + 1, now + 3, "normal-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "READY"))
+        self.assertEqual(first.wait(timeout=60), 0)
+        time.sleep(2)  # give a would-be handoff time to appear
+
+        text = first_log.read_text()
+        self.assertIn("DONE", text)
+        self.assertNotIn("사망 감지", text)
+        self.assertEqual(len(self.all_ready(text)), 1, text)
 
     def test_orphaned_timestamp_subshell_does_not_block_rearm(self):
         # Even a normally short command substitution can become long under

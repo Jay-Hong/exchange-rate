@@ -38,8 +38,14 @@
 #
 # ⚠️ 알림 경로가 없다(운영 `TELEGRAM_ENABLED=false`). breach 로그도 sentinel 도 **기록일 뿐
 #    아무도 부르지 않는다**. 계약 위반 시의 실질 보호는 계속되는 (유계) 재시도이지 경보가 아니다.
-# ⚠️ main SIGKILL 뒤 observer 는 계약 판정만 하며 OFF 를 실행하지 않는다. FD 상속을 끊어 즉시
-#    재무장은 가능하지만 자동 재무장은 아니다. EC2 재부팅도 미커버다.
+#  v6 (q) **자동 재무장자 부재** — FD 상속을 끊어 "재무장이 가능"해졌지만 그걸 할 주체가 없었다.
+#         main 이 SIGKILL/OOM 으로 죽으면 observer 는 기록만 하고 OFF 를 강제하지 않아,
+#         상한이 다시 "사람이 알아채면" 조건부가 됐다. → observer 가 main 생존을 함께 보고
+#         (zombie·pid 재사용까지 구별) 죽으면 같은 계약을 `exec` 로 인계한다.
+#
+# ⚠️ **EC2 재부팅은 여전히 미커버다.** 재부팅되면 이 프로세스 계보 전체가 사라지고 컨테이너는
+#    `.env` 그대로 살아난다. 이 공백은 명시적으로 수용한다 — 재부팅은 앱 끊김으로 즉시
+#    드러나는 반면 main 사망은 조용하기 때문에, 조용한 쪽을 장치로 닫고 시끄러운 쪽을 남긴다.
 set -u
 umask 077
 
@@ -50,8 +56,15 @@ arm_fail() {
   exit 2
 }
 
-[ "$#" -eq 3 ] || arm_fail "인자 3개 필요(받음 $#) — usage: $0 <fire_epoch> <contract_epoch> <logfile>"
+case "$#" in
+  3) HANDOFF=0 ;;
+  4) [ "$4" = "--handoff" ] || arm_fail "알 수 없는 4번째 인자: $4"; HANDOFF=1 ;;
+  *) arm_fail "인자 3~4개 필요(받음 $#) — usage: $0 <fire_epoch> <contract_epoch> <logfile> [--handoff]" ;;
+esac
 FIRE_AT="$1"; CONTRACT_AT="$2"; LOG="$3"
+
+# ⚠️ `cd` 전에 절대경로로 굳힌다 — 인계(exec)가 상대경로 `$0` 를 쓰면 작업 디렉터리가 바뀐 뒤 깨진다.
+case "$0" in /*) SELF="$0" ;; *) SELF="$PWD/$0" ;; esac
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 : >>"$LOG" || arm_fail "로그 파일 열기 실패: $LOG"
@@ -64,6 +77,21 @@ kst() { TZ=Asia/Seoul date -d "@$1" '+%F %H:%M:%S' 9>&- 2>/dev/null || echo "?($
 epoch_now() { date +%s 9>&-; }
 sleep_without_singleton() { sleep "$1" 9>&-; }
 die() { log "⛔ ARM FAILED: $*"; arm_fail "$*"; }
+
+# ⛔ `kill -0` 만으로는 부족하다 — **zombie 도 성공**하고, pid 는 재사용된다. `/proc/<pid>/stat` 의
+#    state 와 starttime 까지 봐야 "그때 그 프로세스가 아직 돈다"가 된다.
+#    전역에 기록해 command substitution(fork) 을 피한다 — fork 는 곧 FD 상속 문제다.
+PROC_STATE=""; PROC_START=""
+read_proc() {                        # $1=pid → PROC_STATE / PROC_START, 못 읽으면 1
+  local raw
+  PROC_STATE=""; PROC_START=""
+  read -r raw < "/proc/$1/stat" 2>/dev/null || return 1
+  raw="${raw##*) }"                  # comm 은 괄호 안이고 공백을 포함할 수 있다
+  # shellcheck disable=SC2086
+  set -- $raw                        # 이제 $1=state … $20=starttime (전체 필드 기준 3번·22번)
+  PROC_STATE="$1"; PROC_START="${20:-}"
+  [ -n "$PROC_START" ]
+}
 
 POLL_SECONDS=2            # 발화·계약 시각 감지 지연 상한
 POLL_HOLD=15              # OFF 확정 후 유지 확인 간격
@@ -88,7 +116,15 @@ NOW="$(exec 9>&-; epoch_now)"
   || die "FIRE_AT 이 24h 초과 미래 (delta=$(( FIRE_AT - NOW ))s) — epoch 단위(ms?) 오류 의심"   # v2 결함 f
 [ "$(( CONTRACT_AT - FIRE_AT ))" -le 21600 ] \
   || die "수렴 창이 6h 초과 (window=$(( CONTRACT_AT - FIRE_AT ))s) — epoch 단위 오류 의심"
-[ "$CONTRACT_AT" -gt "$NOW" ] || die "CONTRACT_AT 이 이미 지났다 ($(exec 9>&-; kst "$CONTRACT_AT")) — stale 명령"
+# ⛔ stale 거부는 **사람이 붙여넣은 옛 명령**을 막기 위한 것이다. observer 인계는 방금 죽은
+#    main 의 계약을 그대로 잇는 것이라 성격이 다르다 — 여기서 거부하면 계약 경계에서 main 이
+#    죽었을 때 재무장 경로가 곧 무장 거부가 되어 OFF 를 아무도 강제하지 않는다(v7 조건 3).
+if [ "$HANDOFF" -eq 1 ]; then
+  [ "$(( NOW - CONTRACT_AT ))" -le "$GIVE_UP_AFTER" ] \
+    || die "handoff 인데 계약이 ${GIVE_UP_AFTER}s 초과 과거다 ($(exec 9>&-; kst "$CONTRACT_AT"))"
+else
+  [ "$CONTRACT_AT" -gt "$NOW" ] || die "CONTRACT_AT 이 이미 지났다 ($(exec 9>&-; kst "$CONTRACT_AT")) — stale 명령"
+fi
 # ⚠️ FIRE_AT 만 과거인 것은 **거부하지 않는다** (v2 결함 e) — 창 안 재무장이 정확히 그 모양이다.
 if [ "$FIRE_AT" -le "$NOW" ]; then
   log "late-arm — FIRE_AT($(exec 9>&-; kst "$FIRE_AT")) 이 이미 지났다. 즉시 수렴 시작"
@@ -117,7 +153,30 @@ BREACH_SENTINEL="$HOME/logs/WATCHDOG_CONTRACT_BREACH.$CONTRACT_AT"
 
 TMP="$(exec 9>&-; mktemp 2>/dev/null)" || TMP=/dev/null   # 발화 이후엔 어떤 이유로도 죽지 않는다
 WATCHER_PID=""
-cleanup() { [ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null; rm -f "$TMP" 9>&- 2>/dev/null; }
+
+# ── 3. main 사망 시 인계 (v6 결함 p) — observer 는 기록만 하고 OFF 를 강제하지 않았다.
+#      main 이 SIGKILL/OOM 으로 죽으면 강제할 주체가 0 이 되는데 자동 재무장자가 없었다.
+MAIN_PID="$$"
+REARM=1
+if ! read_proc "$MAIN_PID"; then
+  REARM=0
+  log "⚠️ /proc/$MAIN_PID/stat 을 못 읽는다 — main 사망 시 자동 인계 없이 진행한다"
+elif [ ! -r "$SELF" ]; then
+  REARM=0
+  log "⚠️ 스크립트 경로를 못 읽는다($SELF) — main 사망 시 자동 인계 없이 진행한다"
+fi
+MAIN_START="$PROC_START"
+# ⛔ 정상 종료 표식 — observer 가 "죽었으니 인계"와 "끝나서 사라짐"을 가르는 유일한 근거다.
+#    cleanup 이 **kill 보다 먼저** 쓴다. SIGKILL 은 cleanup 을 안 태우므로 표식이 없고,
+#    그래서 그때만 인계가 일어난다(v7 조건 4).
+DONE_MARKER="${LOG}.done"
+rm -f "$DONE_MARKER" 2>/dev/null || true
+
+cleanup() {
+  : >"$DONE_MARKER" 2>/dev/null || true
+  [ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null
+  rm -f "$TMP" 9>&- 2>/dev/null
+}
 trap cleanup EXIT
 
 # ⛔ 계약 판정은 **그 시각의 관측**이어야 한다 (v3 결함 i). 캐시된 상태를 읽으면
@@ -148,7 +207,24 @@ sleep_before_retry() {
   # ⛔ singleton 은 OFF 로 수렴시키는 main 의 생존을 뜻해야 한다. 관측 전용 child 가 이 FD 를
   #    물려받으면 main SIGKILL 뒤에도 lock 만 살아 새 watchdog 이 재무장되지 못한다(v4 결함 l).
   exec 9>&-
-  while [ "$(exec 9>&-; epoch_now)" -lt "$CONTRACT_AT" ]; do sleep_without_singleton "$POLL_SECONDS"; done
+  # ⛔ 계약 시각을 기다리는 동안 **main 의 생존도 함께 본다**. main 이 죽으면 OFF 를 강제할
+  #    주체가 0 이 되므로, observer 가 같은 계약을 그대로 인계한다.
+  #    spawn 이 아니라 `exec` 인 이유: 프로세스가 늘지 않고, 인계 실패가 조용히 남지 않으며,
+  #    새 인스턴스가 자기 observer 를 다시 만들어 이 성질이 재귀적으로 유지된다.
+  while [ "$(exec 9>&-; epoch_now)" -lt "$CONTRACT_AT" ]; do
+    sleep_without_singleton "$POLL_SECONDS"
+    [ "$REARM" -eq 1 ] || continue
+    if ! read_proc "$MAIN_PID" || [ "$PROC_STATE" = "Z" ] || [ "$PROC_START" != "$MAIN_START" ]; then
+      # ⚠️ 정상 종료였다면 인계하지 않는다 — cleanup 이 kill 보다 먼저 표식을 쓴다.
+      if [ -e "$DONE_MARKER" ]; then
+        log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
+        exit 0
+      fi
+      log "⛔ main($MAIN_PID) 사망 감지 (state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
+      exec bash "$SELF" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
+      log "⛔ 인계 exec 실패 — 이 observer 는 기록만 계속한다"   # exec 성공 시 도달 불가
+    fi
+  done
   t0="$(exec 9>&-; epoch_now)"
   cur="$(exec 9>&-; probe_status "$WATCHER_STATUS_BUDGET")"
   took=$(( $(exec 9>&-; epoch_now) - t0 ))
@@ -161,6 +237,20 @@ sleep_before_retry() {
       "$(exec 9>&-; kst "$CONTRACT_AT")" "$(exec 9>&-; kst "$(epoch_now)")" "${cur:-unreadable}" >"$BREACH_SENTINEL" 2>/dev/null \
       || log "   ⛔ sentinel 기록마저 실패: $BREACH_SENTINEL"
   fi
+  # ⚠️ 계약 **이후**에도 감시를 멈추지 않는다 — breach 상태로 수렴 중이거나 hold 중에 main 이
+  #    죽으면 거기서도 강제 주체가 0 이 된다. give-up 까지는 인계 대상이다.
+  [ "$REARM" -eq 1 ] || exit 0
+  while [ "$(exec 9>&-; epoch_now)" -lt "$GIVE_UP_AT" ]; do
+    sleep_without_singleton "$POLL_SECONDS"   # /proc 읽기뿐이라 촘촘해도 싸다
+    if ! read_proc "$MAIN_PID" || [ "$PROC_STATE" = "Z" ] || [ "$PROC_START" != "$MAIN_START" ]; then
+      if [ -e "$DONE_MARKER" ]; then
+        log "main($MAIN_PID) 정상 종료 — 인계하지 않는다"
+        exit 0
+      fi
+      log "⛔ main($MAIN_PID) 사망 감지 (계약 이후, state=${PROC_STATE:-<gone>}) — 같은 계약으로 인계한다"
+      exec bash "$SELF" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
+    fi
+  done
 ) &
 WATCHER_PID=$!
 
