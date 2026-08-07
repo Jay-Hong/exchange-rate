@@ -1,5 +1,5 @@
 #!/bin/bash
-# topic_flag bounded-rehearsal watchdog (v6).
+# topic_flag bounded-rehearsal watchdog (v7).
 #
 # ⛔ 목적: 리허설의 상한을 **약속이 아니라 장치**로 만든다. main watchdog 이 살아 있는 동안에는
 #    대화 세션이나 사람의 응답 없이 OFF 로 수렴한다.
@@ -20,8 +20,11 @@
 #      (j) **READY 가 watcher 보다 먼저** — READY 직후 죽으면 무장돼 보이지만 계약 감시자가 없다.
 #      (k) **singleton 부재** — 재무장 시 두 인스턴스가 서로 다른 시각에 OFF 를 강제한다.
 #  v4 (l) **observer 가 singleton FD 를 상속** — main 이 SIGKILL 되면 OFF 수렴 주체는 사라지지만
-#         observer 가 flock 을 계속 보유해 새 watchdog 재무장까지 막았다. observer 는 fork 직후
-#         FD 9 를 닫고, singleton 소유권은 수렴 main 에만 둔다.
+#         observer 가 flock 을 계속 보유해 새 watchdog 재무장까지 막았다.
+#         ⚠️ 당시 결론("observer 는 FD 9 를 닫는다")은 **(w) 에서 뒤집혔다** — 그 결론의 전제는
+#         "observer 는 집행할 수 없다"였고, (r) 로 observer 가 집행자가 되면서 전제가 사라졌다.
+#         지금은 반대로 **끊김 없이 공유**한다. 결함은 FD 보유 자체가 아니라 **집행 못 하는
+#         주체가 lock 을 쥐는 것**이었다.
 #      (m) **retry sleep budget clamp 유실** — 계약까지 15초 남았는데 20초를 자며 마지막 시도
 #         기회를 버렸다. 계약 전 sleep 은 남은 초를 넘지 않는다.
 #  v5 (n) **장수 자식이 singleton FD 를 상속** — main SIGKILL 뒤 고아 `off`(최대 420s)나
@@ -44,13 +47,21 @@
 #         /proc·SELF 확인 실패를 경고만 하고 READY 를 찍었다. 비용은 **시점**에 달렸다:
 #         ON 이전 거부는 공짜(시작 안 함), ON 이후 거부는 강제자 0. 그래서 무장은 fail-closed,
 #         인계는 격하 후 계속.
+#      (t) **`exec` 실패 뒤 fallback 은 죽은 코드** — bash 는 exec 실패 시 subshell 을 종료한다
+#         (`execfail` 을 켜도 그렇다 — 3.2/5.2 양쪽 실측). 인계 스크립트가 사라지면 observer 가
+#         아무 기록 없이 증발했다. 확인은 **exec 전에** 한다.
 #      (u) **인계 불가 시 "관측만 계속"** — 생존은 강제가 아니다. 계약은 OFF 수렴이므로,
 #         인계가 불가능하면 observer 가 **직접 수렴**해야 한다. 수렴 루프를 main·observer 가
 #         공유하도록 함수로 뽑았다. (이 세션에서 "수동적 산출물을 능동적 기전으로 서술"한
 #         세 번째 사례 — sentinel·재시도·생존.)
-#      (t) **`exec` 실패 뒤 fallback 은 죽은 코드** — bash 는 exec 실패 시 subshell 을 종료한다
-#         (`execfail` 을 켜도 그렇다 — 3.2/5.2 양쪽 실측). 인계 스크립트가 사라지면 observer 가
-#         아무 기록 없이 증발했다. 확인은 **exec 전에** 한다.
+#      (v) **done 표식이 "끝냈다"가 아니라 "종료했다"를 뜻함** — EXIT trap 은 SIGKILL 에서만
+#         안 돈다. SIGTERM/INT/HUP 에서는 실행되므로 `kill <pid>` 같은 가장 현실적인 사망이
+#         "정상 종료"로 위장돼 인계가 막혔다. 의도적 완료 3경로에서만 FINISHED=1.
+#         ⚠️ 당시 테스트는 SIGKILL 만 다뤘다 — 표식이 안 써지는 **유일한** 신호였다.
+#      (w) **main 사망→handoff 사이 singleton 공백** — observer 가 fd 9 를 닫은 뒤 successor 가
+#         다시 lock 을 얻기 전까지 다른 계약이 먼저 무장할 수 있었다. 그 경우 handoff 는 exit 4 로
+#         사라져 원래 deadline 을 잃는다. observer 는 이제 비상 OFF 집행자이므로 main 과 같은
+#         kernel flock 을 계속 보유하고, successor 는 새로 열지 않고 그 fd 를 그대로 인계받는다.
 #
 # ⚠️ 알림 경로가 없다(운영 `TELEGRAM_ENABLED=false`). breach 로그도 sentinel 도 **기록일 뿐
 #    아무도 부르지 않는다**. 계약 위반 시의 실질 보호는 계속되는 (유계) 재시도이지 경보가 아니다.
@@ -78,9 +89,9 @@ FIRE_AT="$1"; CONTRACT_AT="$2"; LOG="$3"
 # ⚠️ `cd` 전에 절대경로로 굳힌다 — 인계(exec)가 상대경로 `$0` 를 쓰면 작업 디렉터리가 바뀐 뒤 깨진다.
 case "$0" in /*) SELF="$0" ;; *) SELF="$PWD/$0" ;; esac
 
-mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+mkdir -p "$(exec 9>&-; dirname "$LOG")" 9>&- 2>/dev/null || true
 : >>"$LOG" || arm_fail "로그 파일 열기 실패: $LOG"
-chmod 600 "$LOG" 2>/dev/null || true
+chmod 600 "$LOG" 9>&- 2>/dev/null || true
 exec >>"$LOG" 2>&1
 # ↑ 여기서부터 모든 출력·실패가 영속 파일에 남는다 (v2 결함 g)
 
@@ -146,14 +157,24 @@ fi
 # ── 2. singleton (v3 결함 k) — 두 인스턴스가 서로 다른 시각에 OFF 를 강제하면 어느 계약이
 #      지배하는지 알 수 없다. 실제 flock 이 유일한 판정이다. 파일에 적힌 pid 는 진단용이며,
 #      죽었거나 재사용됐다는 이유로 lock 실패를 우회하지 않는다(v6 결함 o).
+#      ⛔ handoff 는 observer 가 보유한 **같은 open file description** 을 fd 9 로 물려받는다.
+#      여기서 파일을 다시 열면 기존 lock 이 먼저 풀리는 공백이 생겨 원래 계약을 잃는다(결함 w).
 WD_LOCK="$HOME/.topic_flag_watchdog.lock"
-exec 9>>"$WD_LOCK" || die "watchdog lock 열기 실패: $WD_LOCK"
-chmod 600 "$WD_LOCK" 2>/dev/null || true
-if ! flock -n 9; then
-  holder="$(cat "$WD_LOCK" 2>/dev/null | tr -d '\n')"
-  log "⛔ 중복 무장 거부 — singleton lock 이 이미 잡혀 있다 [metadata=${holder:-<empty>}]"
-  log "   metadata pid 생존 여부는 lock 소유권 증명이 아니다. 기존 holder 종료 후 다시 무장할 것."
-  exit 4
+if [ "$HANDOFF" -eq 1 ]; then
+  inherited_lock="$(exec 9>&-; readlink -f "/proc/$$/fd/9" 2>/dev/null)"
+  expected_lock="$(exec 9>&-; readlink -f "$WD_LOCK" 2>/dev/null)"
+  [ -n "$inherited_lock" ] && [ "$inherited_lock" = "$expected_lock" ] \
+    || die "handoff singleton fd 9 검증 실패 (inherited=${inherited_lock:-<none>} expected=${expected_lock:-<none>})"
+  flock -n 9 || die "handoff singleton lock 이 fd 9 에 유지되지 않았다"
+else
+  exec 9>>"$WD_LOCK" || die "watchdog lock 열기 실패: $WD_LOCK"
+  chmod 600 "$WD_LOCK" 9>&- 2>/dev/null || true
+  if ! flock -n 9; then
+    holder="$(exec 9>&-; cat "$WD_LOCK" 2>/dev/null | tr -d '\n')"
+    log "⛔ 중복 무장 거부 — singleton lock 이 이미 잡혀 있다 [metadata=${holder:-<empty>}]"
+    log "   metadata pid 생존 여부는 lock 소유권 증명이 아니다. 기존 holder 종료 후 다시 무장할 것."
+    exit 4
+  fi
 fi
 : >"$WD_LOCK"
 printf 'pid=%s fire=%s contract=%s log=%s\n' "$$" "$FIRE_AT" "$CONTRACT_AT" "$LOG" >&9 \
@@ -318,24 +339,10 @@ converge_loop() {
   done
 }
 
-# ⛔ 긴급 수렴도 singleton 을 지킨다 — observer 는 fd 9 를 닫아 lock 을 갖고 있지 않다.
-#    되잡지 않으면 수렴하는 동안 다른 watchdog 이 무장돼 어느 계약이 지배하는지 모호해진다.
-#    되잡기에 실패해도 **수렴은 한다** — 계약 이행이 singleton 보다 우선이다.
-_locked_converge() {
-  flock -n 9 || log "   ⚠️ singleton 재획득 실패 — 계약 이행이 우선이라 lock 없이 수렴한다"
-  converge_loop
-}
-emergency_converge() {
-  if ! _locked_converge 9>>"$WD_LOCK"; then
-    log "   ⚠️ lock 파일을 열 수 없다 — lock 없이 수렴한다"
-    converge_loop
-  fi
-}
-
 (
-  # ⛔ singleton 은 OFF 로 수렴시키는 main 의 생존을 뜻해야 한다. 관측 전용 child 가 이 FD 를
-  #    물려받으면 main SIGKILL 뒤에도 lock 만 살아 새 watchdog 이 재무장되지 못한다(v4 결함 l).
-  exec 9>&-
+  # ⛔ observer 는 더 이상 관측 전용 child 가 아니다. main 사망 시 같은 계약을 인계하거나 직접
+  #    OFF 로 수렴하는 집행자이므로 fd 9 를 공유해 singleton 을 **끊김 없이** 유지한다(결함 w).
+  #    observer 가 만드는 sleep/status/off 자식은 각 helper 에서 fd 9 를 즉시 닫는다.
   # ⛔ 계약 시각을 기다리는 동안 **main 의 생존도 함께 본다**. main 이 죽으면 OFF 를 강제할
   #    주체가 0 이 되므로, observer 가 같은 계약을 그대로 인계한다.
   #    spawn 이 아니라 `exec` 인 이유: 프로세스가 늘지 않고, 인계 실패가 조용히 남지 않으며,
@@ -356,7 +363,7 @@ emergency_converge() {
         exec bash "$HANDOFF_SRC" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
       fi
       log "⛔ main($MAIN_PID) 사망, 인계 FD 소실 — observer 가 직접 수렴한다(EMERGENCY)"
-      emergency_converge
+      converge_loop
     fi
   done
   t0="$(exec 9>&-; epoch_now)"
@@ -386,7 +393,7 @@ emergency_converge() {
         exec bash "$HANDOFF_SRC" "$FIRE_AT" "$CONTRACT_AT" "$LOG" --handoff
       fi
       log "⛔ main($MAIN_PID) 사망(계약 이후), 인계 FD 소실 — observer 가 직접 수렴한다(EMERGENCY)"
-      emergency_converge
+      converge_loop
     fi
   done
 ) &

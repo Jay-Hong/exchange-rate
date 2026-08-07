@@ -181,10 +181,11 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         self.assertEqual(duplicate.wait(timeout=5), 4)
         self.assertIn("중복 무장 거부", duplicate_log.read_text())
 
-        # Neither the contract observer nor a polling sleep may inherit the
-        # singleton flock. Synchronize on a live sleep child, then kill main;
-        # waiting for that child to exit would mask the inheritance bug.
-        self.assertFalse(Path(f"/proc/{watcher_pid}/fd/9").exists())
+        # The observer is an enforcement successor, so it intentionally shares
+        # the singleton lock with main. Ordinary children must still close it.
+        # Synchronize on a live sleep child, then kill main; waiting for that
+        # child to exit would mask an accidental child-inheritance bug.
+        self.assertTrue(Path(f"/proc/{watcher_pid}/fd/9").exists())
         sleep_pid = self.wait_for_child_command(main_pid, "sleep")
         self.assertFalse(Path(f"/proc/{sleep_pid}/fd/9").exists())
         os.kill(main_pid, signal.SIGKILL)
@@ -195,42 +196,86 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         os.kill(successor, 0)
         os.kill(successor_watcher, 0)
 
-    def test_orphaned_off_child_does_not_block_handoff(self):
+    def test_singleton_has_no_gap_between_main_death_and_handoff(self):
+        # The old main releases its flock when it dies. If the observer also
+        # dropped fd 9, an unrelated watchdog can win the lock before the
+        # successor reaches its acquisition code. That silently replaces the
+        # original deadline with the unrelated watchdog's later contract.
+        self._patch_script(
+            'WD_LOCK="$HOME/.topic_flag_watchdog.lock"',
+            '''WD_LOCK="$HOME/.topic_flag_watchdog.lock"
+if [ "$HANDOFF" -eq 1 ] && [ -e "$HOME/delay-handoff-lock" ]; then
+  echo entered >"$HOME/handoff-lock-delay-entered"
+  sleep_without_singleton 5
+fi''',
+        )
+        now = int(time.time())
+        first, first_log = self.start(now + 30, now + 90, "gap-first.log")
+        main_pid, _ = self.ready_pids(wait_for_text(first_log, "READY"))
+        (self.home / "delay-handoff-lock").touch()
+
+        os.kill(main_pid, signal.SIGKILL)
+        first.wait(timeout=5)
+        wait_for_text(self.home / "handoff-lock-delay-entered", "entered", timeout=10)
+
+        duplicate, duplicate_log = self.start(now + 20, now + 500, "gap-duplicate.log")
+        self.assertEqual(duplicate.wait(timeout=5), 4, duplicate_log.read_text())
+        self.assertNotIn("READY", duplicate_log.read_text())
+
+        successor, _, text = self.wait_for_handoff(first_log, main_pid, timeout=15)
+        self.assertNotIn("중복 무장 거부", text)
+        os.kill(successor, 0)
+
+    def test_orphaned_off_child_does_not_block_rearm(self):
         # `off` is the longest-lived child (up to OFF_BUDGET=420s in production).
-        # If it inherits the singleton flock, the successor cannot take it and
-        # the handoff degenerates into `중복 무장 거부` -- no one converges.
+        # Kill the observer first so its intentional lock ownership cannot mask
+        # an accidental fd inherited by the off child. A fresh arm must succeed
+        # while that orphan is still running.
         (self.home / "off-slow").touch()
         (self.home / "off-noop").touch()
         self.state.write_text("ON")
         now = int(time.time())
         first, first_log = self.start(now + 1, now + 600, "orphan-first.log")
-        main_pid, _ = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
+        main_pid, watcher_pid = self.ready_pids(wait_for_text(first_log, "FIRE — 수렴 시작"))
         time.sleep(2)  # let the slow `off` child actually start
 
+        os.kill(watcher_pid, signal.SIGKILL)
         os.kill(main_pid, signal.SIGKILL)
         first.wait(timeout=5)
 
-        successor, _, text = self.wait_for_handoff(first_log, main_pid)
-        self.assertNotIn("중복 무장 거부", text)
-        os.kill(successor, 0)
+        replacement, replacement_log = self.start(
+            now + 30, now + 500, "orphan-replacement.log"
+        )
+        replacement_main, replacement_watcher = self.ready_pids(
+            wait_for_text(replacement_log, "READY", timeout=10)
+        )
+        self.assertEqual(replacement_main, replacement.pid)
+        os.kill(replacement_watcher, 0)
 
-    def test_orphaned_status_probe_does_not_block_handoff(self):
+    def test_orphaned_status_probe_does_not_block_rearm(self):
         # Closing fd 9 only on the pipeline inside `$(probe_status)` is not
-        # enough if the command-substitution shell itself keeps the lock while
-        # a status call hangs.
+        # enough if the command-substitution shell itself keeps the lock while a
+        # status call hangs. Remove the legitimate observer holder before the
+        # main dies so a fresh arm isolates that outer-shell inheritance.
         (self.home / "status-hang").touch()
         self.state.write_text("ON")
         now = int(time.time())
         first, first_log = self.start(now + 1, now + 600, "status-first.log")
-        main_pid, _ = self.ready_pids(wait_for_text(first_log, "off attempt=1"))
+        main_pid, watcher_pid = self.ready_pids(wait_for_text(first_log, "off attempt=1"))
         time.sleep(0.5)  # status stub is now inside its 30s sleep
 
+        os.kill(watcher_pid, signal.SIGKILL)
         os.kill(main_pid, signal.SIGKILL)
         first.wait(timeout=5)
 
-        successor, _, text = self.wait_for_handoff(first_log, main_pid)
-        self.assertNotIn("중복 무장 거부", text)
-        os.kill(successor, 0)
+        replacement, replacement_log = self.start(
+            now + 30, now + 500, "status-replacement.log"
+        )
+        replacement_main, replacement_watcher = self.ready_pids(
+            wait_for_text(replacement_log, "READY", timeout=10)
+        )
+        self.assertEqual(replacement_main, replacement.pid)
+        os.kill(replacement_watcher, 0)
 
     def test_zombie_main_counts_as_dead(self):
         # `kill -0` succeeds for a zombie, so liveness must read
@@ -305,6 +350,33 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
         text = log.read_text()
         self.assertNotIn("READY", text)
         self.assertIn("자동 인계 없이는 무장하지 않는다", text)
+
+    def test_manual_handoff_without_inherited_singleton_fails_closed(self):
+        now = int(time.time())
+        log = self.home / "logs" / "manual-handoff.log"
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        process = subprocess.run(
+            [
+                "setsid",
+                "bash",
+                str(self.script),
+                str(now + 30),
+                str(now + 90),
+                str(log),
+                "--handoff",
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(process.returncode, 2)
+        text = log.read_text()
+        self.assertIn("handoff singleton fd 9 검증 실패", text)
+        self.assertNotIn("READY", text)
 
     def test_handoff_uses_a_fd_so_script_removal_cannot_break_it(self):
         # `exec` failure kills the subshell -- even with execfail -- so a
