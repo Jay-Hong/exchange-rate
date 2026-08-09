@@ -380,22 +380,28 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   `krxBootstrapBackoffsSeconds = [0.5, 1.5]`, WS-wins revision 체크). tether/fx bootstrap은 현재
   **재시도 없음**(1회 시도 후 WS에 위임).
 
-  ⚠️ **위 취소 조건 표 중 미구현 = ① UID 변경 하나뿐**(2026-07-26 실측):
-  KRX가 거는 가드는 **task cancellation · entitlement(krxVisible) · topic gate · snapshot revision**
-  뿐이라 **UID 변경 시 명시 취소도, 적용 직전 UID 재대조도 없다**. ②는 기존 가드가 충족한다.
-  ⚠️ **단 이 문장은 "취소 조건" 범위에 한정된다** — 인증 이관 슬라이스가 구현할 것은 그 외에도
-  **아래 latency budget(10초·`ContinuousClock`)**, **인증 transport 이관**, **조건부
-  `.notAuthenticated` 처리**가 있고 셋 다 현재 코드에 **없다**.
+  ✅ **아래 4종은 모두 구현됨**(2026-08-08 재실측 — 구 "미구현" 서술을 대체한다):
+
+  | 항목 | 구현 위치 |
+  |---|---|
+  | ① UID 변경 시 명시 취소 | `FXiApp` scenePhase/auth 경계 → `ExchangeRateViewModel.handleDirectAccountSwitch()` |
+  | ① 적용 직전 UID 재대조 | `ExchangeRateViewModel.canApplyBootstrap(capturedUID:)` |
+  | latency budget(10초·`ContinuousClock`) | `canApplyBootstrap(capturedUID:issuedAt:)` |
+  | 인증 transport 이관 | `TopicSnapshotService` 가 `AuthedRESTTransport` 보유·사용(`Bearer` 부착은 transport 소유) |
+  | 조건부 `.notAuthenticated` 처리 | `ExchangeRateViewModel` KRX bootstrap 오류 분류(정적 분류 불가 → 조건부 재시도) |
+
+  ⚠️ 구 서술("2026-07-26 실측: 넷 다 없다")은 **그 시점 기준으로는 맞았다** — 이후 인증 이관
+  슬라이스가 land 하면서 무효가 됐다. 날짜 없는 "미구현" 서술을 릴리스 준비도 판단에 쓰지 말 것.
   (**③ background · ④ 연결 generation은 계약 항목이 아니다** — 아래에서 내렸으므로 "미구현 gap"으로
   읽지 말 것. generation fence를 새로 만들면 오탐만 늘린다.)
   ⚠️ **background·연결 generation을 "이벤트 취소 조건"에서 내린 근거**(2026-07-26 최종, codex).
   구 표기는 이벤트 계약처럼 적어 놓고 기전은 시간만 검사해 **표와 구현이 불일치**했다.
 
   근거 — **이벤트 crossing 자체는 무해**하다: 실제 해악은 늦게 도착한 응답이
-  `tetherReceived`/`lastTetherTopicAt`·`fxReceivedAssets`/`lastFxTopicAt`를 **무조건 갱신**해
+  `tetherReceived`/테더 freshness deadline·`fxReceivedAssets`/FX freshness deadline을 **무조건 갱신**해
   topic을 fresh로 오인시키는 것(→ legacy fallback 최대 45초 억제)인데, 이건 **경과 시간**의 함수다.
   background 직후 3초 만에 도착한 응답은 데이터가 실제로 신선하고 freshness 마킹도 정확하다
-  (그 뒤 5분 backgrounded면 `now - lastTopicAt`이 45초를 넘어 정상적으로 stale 판정된다).
+  (그 뒤 5분 backgrounded면 deadline이 지나 정상적으로 stale 판정된다).
   reconnect 직전 발행돼 직후 도착한 응답도 마찬가지다. → **일반 latency 상한이 해악을 정확히 덮고,
   이벤트 세대 카운터는 오탐(빠른 응답 폐기)만 늘린다.**
 
@@ -407,8 +413,23 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   | 예산 | **10초**. 요청 **발행** 시각 → 적용 직전까지의 경과 |
   | 시계 | **`ContinuousClock`**(monotonic, 기기 sleep 중에도 진행). wall-clock `Date`는 NTP·사용자 변경으로 점프 가능해 부적합 |
   | 캡처 단위 | **시도마다 재캡처** — 예산은 요청 1건의 latency지 bootstrap 세션 전체가 아니다(안 그러면 KRX 3회차가 1회차 경과를 물려받아 오폐기) |
-  | 초과 시 | **요청 실패와 동일 취급** — 값 merge ❌ / `tetherReceived`·`fxReceivedAssets` ❌ / `lastTetherTopicAt`·`lastFxTopicAt` ❌ / `krxSnapshotRevision` bump ❌. 그리고 **재시도하지 않고 종료**(가속기 창이 이미 지났고 WS가 정본) |
-  | 테스트 seam | 기존 `nowProvider: () -> Date`(staleness 전용) 옆에 **별도 monotonic provider** 주입 — 두 시계는 역할이 다르므로 합치지 않는다 |
+  | 초과 시 | **요청 실패와 동일 취급** — 값 merge ❌ / `tetherReceived`·`fxReceivedAssets` ❌ / freshness deadline 갱신 ❌ / `krxSnapshotRevision` bump ❌. 그리고 **재시도하지 않고 종료**(가속기 창이 이미 지났고 WS가 정본) |
+  | 테스트 seam | 시계 **3개를 역할별로 분리**해 각각 주입한다 — 합치지 않는다 |
+
+  **시계 3개** (2026-08-08 갱신 — staleness 를 저장 상태로 바꾸며 전용 시계가 생겼다):
+
+  | provider | 종류 | 쓰임 |
+  |---|---|---|
+  | `nowProvider` | wall-clock `Date` | **disk write throttle 한 곳뿐** (staleness에서 손 뗐다) |
+  | `monotonicNowProvider` | `ContinuousClock` | 위 bootstrap latency 예산 |
+  | `freshnessNowProvider` | `ContinuousClock` | topic freshness deadline **전용** |
+
+  ⚠️ freshness 가 `ContinuousClock` 인 것은 **의도**다 — 기기 sleep 중에도 진행하므로 foreground
+  복귀 시 실제 경과가 반영된다. 그리고 freshness 는 이제 계산값이 아니라 **관측되는 저장 상태**
+  (`tetherIsFresh`/`freshFxAssets`)이고, deadline 에 깨어나는 monitor task 가 만료를 집행한다.
+  구 `lastTetherTopicAt`/`lastFxTopicAt`/`isTetherTopicFresh()`/`isFxTopicFresh()` 는 삭제됐다 —
+  계산값이라 SwiftUI 무효화 트리거가 없어 **화면을 건드리지 않으면 영원히 stale 표시가 안 됐다**
+  (2026-08-08 운영 리허설에서 실측).
 
   **왜 10초인가**: (a) 이 fence가 막으려는 해악의 척도인 `topicStalenessThresholdSeconds = 45`보다
   충분히 작아야 신선도 오마킹이 창의 일부에 그친다 (b) 정상 latency(sub-second)보다 충분히 커서
