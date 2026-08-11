@@ -208,19 +208,6 @@ async def _observe_premium(user_id: str, *, mono) -> PremiumVerdict:
     return verdict
 
 
-async def authorize_premium_subscription(user_id: str, *, mono) -> PremiumVerdict:
-    """premium 만 요구하는 topic(FX/USDT)의 인가 진입점 — R-GATE-1.
-
-    ⛔ **현재 프로덕션 호출자가 0이다.** 도달 불가능하므로 flag 로 감쌀 필요도 없다
-       (`TestPremiumOnlyEntryPoint.test_it_has_no_production_caller_yet` 이 그 사실을 잠근다).
-       실제 강제는 dispatcher 쪽 슬라이스에서 붙인다.
-
-    ⛔ `authorize_gated_subscription` 과 달리 entitlement 축을 보지 않는다 —
-       premium ⊥ entitlement 이고 FX/USDT 는 상품 자격만 요구하기 때문이다.
-    """
-    return await _observe_premium(user_id, mono=mono)
-
-
 async def authorize_gated_subscription(user_id: str, *, mono) -> GatedVerdict:
     """KRX 구독 인가. 호출 순서가 계약이다(각 단계의 부작용 0회 보장 포함)."""
     assert_single_gated_topic()
