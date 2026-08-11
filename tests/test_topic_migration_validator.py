@@ -2,12 +2,30 @@
 
 검증기의 신뢰 근거는 본체가 아니라 **반례 테스트**다(2026-08-09: 검증기가 5라운드 연속 구멍).
 """
+import importlib.util
 import json
 import pathlib
 import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _validator_module():
+    path = REPO / "scripts" / "topic_migration_manifest.py"
+    spec = importlib.util.spec_from_file_location("topic_migration_validator", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_ios_provenance_root_honors_ci_override(monkeypatch, tmp_path):
+    """Actions checkout은 workspace 내부라 local sibling 경로를 명시적으로 대체한다."""
+    module = _validator_module()
+    monkeypatch.setenv(module.IOS_ROOT_ENV, str(tmp_path))
+    assert module.provenance_root("ios") == tmp_path
+    assert module.provenance_root("server") == REPO
 
 
 def test_mutation_corpus_anchors_are_unique():

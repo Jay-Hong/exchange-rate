@@ -518,8 +518,8 @@ def main() -> int:
         # 모드 회귀 — 구조는 provenance 건너뜀 / preflight 는 실행 / 미지 명령은 거부
         TMP.write_text(json.dumps(good(), ensure_ascii=False))
         rc_v, out_v = run_cmd("verify")
-        # ⛔ CI 는 서버 리포만 checkout 한다 — 실제 preflight rc=0 을 요구하면 CI 가 항상 깨진다(실측 회귀).
-        #    provenance 는 **주입**으로 결정론 검사하고, 실제 다중리포 대조는 별도 integration 으로 둔다.
+        # provenance 호출 계약은 **주입**으로 결정론 검사하고, 실제 다중리포 대조는 별도
+        # integration/CI checkout에서 본다. 둘을 섞으면 환경 실패가 배선 단위 테스트를 가린다.
         harness = pathlib.Path(_TD.name) / "prov_test.py"
         harness.write_text(
             "import json, pathlib, sys, io, contextlib\n"

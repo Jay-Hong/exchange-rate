@@ -3,6 +3,7 @@ name: tests
 # 트리거: push to master(이 리포는 직커밋 흐름이라 실효적) + pull_request(미래 PR 대비,
 #   PR 없으면 무발화·무비용 — c4a51e5가 PR #1 선례). docs-only(**.md) push는 skip
 #   (이 리포는 docs-only commit 잦음 — 혼합 commit은 코드 파일이 있어 정상 실행).
+#   topic-only provenance는 private sibling iOS pinned commit도 읽으므로 read-only deploy key를 쓴다.
 on:
   push:
     branches: [master]
@@ -35,6 +36,17 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          # topic-only provenance tests inspect the pinned parent commit, not just HEAD.
+          fetch-depth: 0
+      - name: Checkout pinned iOS provenance repository
+        uses: actions/checkout@v6
+        with:
+          repository: Jay-Hong/fxi-ios
+          ref: 8aadc2fb66be926a809d6e1bc5dff42951f15a7a
+          path: ios
+          ssh-key: ${{ secrets.TOPIC_MIGRATION_IOS_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'  # Dockerfile python:3.13-slim 일치
@@ -44,11 +56,17 @@ jobs:
             requirements-test.txt
       # runtime은 lock(Dockerfile과 동일 deps = production 일치 검증) + test deps.
       - run: pip install -r requirements.lock.txt -r requirements-test.txt
-      # secret 불요: conftest가 firebase stub + DATABASE_URL→sqlite tempfile 격리,
-      #   config는 getenv-default라 .env 없이 동작 (2026-06-11 .env 숨김 실측 2097 passed).
+      - name: Verify topic-only pinned provenance
+        run: python scripts/topic_migration_manifest.py preflight
+        env:
+          TOPIC_MIGRATION_IOS_ROOT: ${{ github.workspace }}/ios
+      # 앱 runtime secret 불요: conftest가 firebase stub + DATABASE_URL→sqlite tempfile 격리,
+      #   config는 getenv-default라 .env 없이 동작. iOS deploy key는 위 provenance checkout 전용이다
+      #   (2026-06-11 .env 숨김 실측 2097 passed).
       # REDIS_TEST_URL: A3-2 atomic Lua 테스트 전용 (service 6390, db 15) — 명시 설정이므로
       #   연결 실패 시 skip 아니라 fail(test setUp). 다른 테스트는 conftest 격리 + app Redis(6379)
       #   미가동 유지.
       - run: python -m pytest tests/ -q
         env:
           REDIS_TEST_URL: redis://localhost:6390/15
+          TOPIC_MIGRATION_IOS_ROOT: ${{ github.workspace }}/ios

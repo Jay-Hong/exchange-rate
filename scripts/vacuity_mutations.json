@@ -13,7 +13,7 @@
       "name": "preflight 의 provenance runner 기본값을 no-op 람다로 (근거 대조 전체가 의례가 됨)",
       "file": "validator",
       "old_snippet": "    runner = provenance_fn or default_provenance",
-      "new_snippet": "    # ⛔ CI 는 서버 리포만 checkout 한다 — 주입이 없으면 실제 다중리포 대조는 건너뛴다\n    runner = provenance_fn or (lambda repo_key, paths, pinned: [])",
+      "new_snippet": "    # ⛔ provenance 입력이 없거나 깨지면 실제 다중리포 대조는 건너뛴다\n    runner = provenance_fn or (lambda repo_key, paths, pinned: [])",
       "why_uncaught": "이 한 줄이 default_provenance ↔ verify 를 잇는 유일한 배선인데 스위트는 양쪽 끝만 따로 시험한다. (1) harness(346행)는 항상 provenance_fn=(bad if mode=='fail' else ok) 를 주입하므로 `or` 우변이 평가조차 되지 않는다 — preflight 호출·완료 / 경로 0개 아님 / pin 일치 / E_PATHMISSING 전파 4개 행 전부 주입된 함수만 본다. (2) provenance_integration(245행)은 M.default_provenance 를 직접 호출해 verify 를 우회한다(docstring 이 말하는 '본문 return [] 퇴행' 방어는 본문만 지키고 호출부는 못 지킨다). (3) CLI 행(405-407)은 PROV_MARK 문자열 존재만 보고 rcC_p 는 판정에 쓰지 않는다. 실측: 스위트 rc=0 / 72행 / 빨강 0. 반대 방향도 실측 — 샌드박스에서 `preflight` 는 pristine rc=1, mutant rc=0 이며 '✅ 구조 검증 통과' 와 [MODE:with-provenance] 마커를 함께 출력한다.",
       "origin": "workflow-hunt-2026-08-10"
     },
@@ -76,9 +76,9 @@
     {
       "name": "루트 선택이 항상 REPO",
       "file": "validator",
-      "old_snippet": "    return REPO if repo_key == \"server\" else REPO.parent / \"ios\"",
+      "old_snippet": "    return pathlib.Path(override).expanduser() if override else REPO.parent / \"ios\"",
       "new_snippet": "    return REPO",
-      "why_uncaught": "ios 근거 대조가 서버 리포를 본다",
+      "why_uncaught": "ios 근거 대조가 sibling 또는 CI override 대신 서버 리포를 본다",
       "origin": "codex-R27+MCP-2026-08-09"
     },
     {

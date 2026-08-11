@@ -25,7 +25,10 @@ import sys
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-IOS = REPO.parent / "ios"
+sys.path.insert(0, str(REPO / "scripts"))
+import topic_migration_manifest as MIGRATION  # noqa: E402
+
+IOS = MIGRATION.provenance_root("ios")
 ARCHIVE = REPO / "TOPIC_ONLY_DELIVERY_CONTRACT.archive.md"
 MANIFEST = REPO / "spec" / "topic-only-migration-manifest.json"
 BASELINE = REPO / "spec" / "topic-only-baseline-facts.md"

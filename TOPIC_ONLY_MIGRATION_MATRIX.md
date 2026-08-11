@@ -212,8 +212,9 @@ manifest 로 옮긴 것(= 게이트 안):
    코드 경로는 **backtick** 으로 표기한다. code span 밖의 `_path_` / `__path__` underscore 강조는
    두 추출기가 함께 놓칠 수 있으므로 preflight 가 `E_CITEFORMAT` 으로 거부한다.
 5. ⛔ 워크플로 재실행 전: `python3 scripts/topic_migration_manifest.py preflight` **통과**.
-   ⚠️ `verify` 는 **구조만** 본다(CI 는 서버 리포만 checkout 하므로 근거 대조를 못 한다).
-   인용 경로 대조가 필요한 preflight 는 반드시 `preflight` 명령이어야 한다.
+   ⚠️ `verify` 는 **구조만** 본다. CI 는 pinned iOS 리포를 read-only checkout 한 뒤
+   `TOPIC_MIGRATION_IOS_ROOT` 를 지정해 `preflight` 를 별도 실행한다.
+   인용 경로 대조가 필요한 검증은 반드시 `preflight` 명령이어야 한다.
    ⛔ **HEAD 일치는 검증기가 아니다**(문서를 커밋하면 당연히 달라지는데 코드 근거는 그대로일 수 있다)
    — lock SHA + **인용 경로의 pinned commit 대비 diff**로 판정한다.
 6. ✅ **워크플로 SHA 강제 (Launch Blocker) — 구현됨.**

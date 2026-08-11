@@ -21,7 +21,7 @@ archive 의 모든 줄이 정확히 하나의 블록에 속하고(gap·overlap 0
 ----
     python3 scripts/topic_migration_manifest.py skeleton    # 분할 초안 생성(1회, lock 유효할 때만)
     python3 scripts/topic_migration_manifest.py verify      # 구조 검증(CI 안전 — 단일 리포)
-    python3 scripts/topic_migration_manifest.py preflight   # 구조 + 인용 경로 근거 대조(sibling ../ios 필요)
+    python3 scripts/topic_migration_manifest.py preflight   # 구조 + 인용 근거 대조(../ios 또는 CI root override 필요)
 
 ⛔ 세 명령은 **옵션이 다르다**(subparser). `--manifest`/`--lock` 은 verify/preflight 전용 —
    예전엔 skeleton 이 `--manifest` 를 조용히 무시하고 운영 manifest 를 건드렸다(실측).
@@ -31,6 +31,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -38,6 +39,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 LOCK_PATH = REPO / "spec" / "topic-only.lock.json"
+IOS_ROOT_ENV = "TOPIC_MIGRATION_IOS_ROOT"
 
 
 def _load_lock(lock_path: pathlib.Path | None = None):
@@ -463,12 +465,17 @@ def provenance_root(repo_key: str, roots: dict | None = None) -> pathlib.Path:
     **프로덕션 분기(server=REPO / ios=../ios)** 가 통째로 미검증으로 남는다(실측 지적)."""
     if roots and repo_key in roots:
         return pathlib.Path(roots[repo_key])
-    return REPO if repo_key == "server" else REPO.parent / "ios"
+    if repo_key == "server":
+        return REPO
+    # Actions는 checkout 경로를 workspace 밖(로컬의 sibling ../ios)으로 둘 수 없다.
+    # CI만 명시적으로 override하고, 로컬 계약은 기존 sibling 경로를 유지한다.
+    override = os.environ.get(IOS_ROOT_ENV)
+    return pathlib.Path(override).expanduser() if override else REPO.parent / "ios"
 
 
 def default_provenance(repo_key: str, paths: list[str], pinned: str,
                        roots: dict | None = None) -> list[str]:
-    """실제 다중 리포 대조. ⛔ CI 는 서버 리포만 checkout 하므로 **단위 테스트에서 호출하지 않는다**."""
+    """실제 다중 리포 대조. CI는 ``TOPIC_MIGRATION_IOS_ROOT``에 iOS checkout을 제공한다."""
     out_fail = []
     # ⛔ 빈 경로로 내려오면 아래 `git diff <pin> --` 가 **리포 전체**를 비교한다.
     #    그러면 (a) 인용이 0개인 공허한 통과를 못 보고 (b) 범위 밖 파일(예: iOS arming pbxproj)을
@@ -717,14 +724,14 @@ def verify(manifest_path: pathlib.Path | None = None, *, provenance: bool = Fals
             fail.append(f"[E_MULTIOWNER] {rid} 의 normative_owner 가 {len(os_)}개: {os_}")
 
     # 5. 코드 근거 — HEAD 가 아니라 **인용 경로의 diff**
-    # ⛔ 이 검사는 sibling ../ios 를 전제한다. CI 는 서버 리포만 checkout 하므로
-    #    기본 verify 에서는 **실행하지 않는다**(있으면 CI 가 항상 실패한다).
+    # 기본 verify 는 단일 리포에서도 안전한 구조 검사다. preflight 는 sibling ../ios 또는
+    # TOPIC_MIGRATION_IOS_ROOT 로 명시한 CI checkout까지 대조한다.
     if not provenance:
         if not fail:
             print("[MODE:structure-only]")
             print("✅ **구조** 검증 통과 (lock/커버리지/분류/소유).")
             print("⛔ **인용 경로 근거는 검사하지 않았다** — 다중 리포가 필요하다.")
-            print("   전체 대조는 `preflight` 로 실행할 것(CI 는 서버 리포만 checkout 하므로 verify 만 돈다).")
+            print("   전체 대조는 iOS root를 제공한 뒤 `preflight` 로 실행할 것.")
             return 0
         return report(fail)
     runner = provenance_fn or default_provenance
