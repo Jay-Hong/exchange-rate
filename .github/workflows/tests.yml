@@ -1,15 +1,13 @@
 name: tests
 
 # 트리거: push to master(이 리포는 직커밋 흐름이라 실효적) + pull_request(미래 PR 대비,
-#   PR 없으면 무발화·무비용 — c4a51e5가 PR #1 선례). docs-only(**.md) push는 skip
-#   (이 리포는 docs-only commit 잦음 — 혼합 commit은 코드 파일이 있어 정상 실행).
+#   PR 없으면 무발화·무비용 — c4a51e5가 PR #1 선례). topic-only 이행 대장이 Markdown
+#   anchor를 검증하므로 docs-only 변경도 실행해야 한다.
 #   topic-only provenance는 private sibling iOS pinned commit도 읽으므로 read-only deploy key를 쓴다.
 on:
   push:
     branches: [master]
-    paths-ignore: ['**.md']
   pull_request:
-    paths-ignore: ['**.md']
 
 # 연속 push 시 구 run 자동 취소 (commit 몰리는 날 큐/비용 위생).
 concurrency:
@@ -45,6 +43,8 @@ jobs:
           repository: Jay-Hong/fxi-ios
           ref: 8aadc2fb66be926a809d6e1bc5dff42951f15a7a
           path: ios
+          # Ledger evidence may cite any pushed iOS commit and must inspect its real parent diff.
+          fetch-depth: 0
           ssh-key: ${{ secrets.TOPIC_MIGRATION_IOS_DEPLOY_KEY }}
           persist-credentials: false
       - uses: actions/setup-python@v6

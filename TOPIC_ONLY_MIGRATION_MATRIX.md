@@ -29,6 +29,53 @@
 | **HEALTH** | `spec/publisher-health-slo.md` | 인과 3축 · 탐지·대응 시간 |
 | **CUT** | `spec/legacy-cutover.md` | 삭제 범위 · 문서 정정 · 테스트 · 순서 |
 
+## ⛔ "남은 일" 은 manifest 가 답하지 못한다 — 정본이 셋으로 나뉜다
+
+| 무엇의 정본인가 | 파일 |
+|---|---|
+| 구속력(`disposition`) · 소유(`normative_owner`) · 관계(`references` 등) | `spec/topic-only-migration-manifest.json` (동결) |
+| **작업 종류 · 완료 상태 · 검증 근거** | `spec/topic-only-implementation-ledger.json` |
+| — | 파생 부분집합은 **탐색용 힌트일 뿐 게이트가 아니다** |
+
+manifest 의 requirement 스키마에는 **완료·상태 필드가 없다**(`rid`/`source`/`destination`/`normative_owner`/
+`references`/`conditional_references`/`deferred_references`/`supports`). `disposition` 은 구속력이지 이행 여부가 아니다.
+
+파생으로 뽑으려던 시도는 실제로 실패했다(2026-08-11 실측) — 블록 제목 필터 **34건** ∪ 순서·게이트 9건에서
+`references` 를 전이 추적한 폐쇄 **40건** = 합집합 **56건**이고, **active 20건이 양쪽 모두의 사각지대**였다.
+그 20건에 `R-LOAD-3`·`R-LOAD-4`·`R-CLI-24`(전부 "6. 내부 복구와 사용자 경고 분리" 블록)가 들어 있다.
+두 집합은 포함 관계도 아니다(제목만 잡은 것 16 / 폐쇄만 잡은 것 22). 그래서 대장은 부분집합이 아니라
+**active 전량 76건**을 덮는다.
+
+### 대장이 실제로 잠그는 것
+
+`tests/test_topic_only_ledger.py` 는 반례와 양성 대조군을 함께 둔다. 테스트 개수는 계약이 아니므로
+여기에 복제하지 않고 `pytest --collect-only` 결과를 따른다.
+
+| 규칙 | 왜 |
+|---|---|
+| active 전량 커버 · manifest 와 `owner`/`block_title` 일치 · `manifest_sha256` 고정 | 누락과 표류를 동시에 막는다 |
+| 근거 객체는 종류별 정확한 필드만 허용 — `commit`(full SHA + 실제 변경 path, 부모 이력 필수) / `test`(server는 실제 수집 node, iOS는 `파일::XCTestCase/testMethod` source locator) / `doc`(Markdown의 RID anchor 또는 `evidence … supports=<RID>`) | 초안은 `evidence=["trust me"]`·`[True]`·`[0]`, 없는 test node와 anchor도 통과했다 |
+| `deploy` 는 환경 enum + repo full SHA + HTTPS URL 또는 `sha256:` digest를 기록하되, **외부 배포 성공과 URL 불변성을 이 검사에서 확인하지 않는 attestation** 으로 취급 | 문자열 두 개를 배포 검증으로 과장하지 않는다 |
+| `done`·`verified` 는 해석된 근거 ≥1. `verified` 는 reviewer와 작업 종류별 근거를 요구(구현=commit+test, ops=deploy, doc/decision=doc) | 근거 객체의 실재만으로 RID 주장과의 의미 적합성이 증명되지는 않는다 |
+| **닫힘은 `verified` 하나뿐** — `closed_statuses` 를 데이터로 두고 값까지 잠금 | `done` 을 닫힘으로 슬쩍 넓히지 못하게 |
+| `not_required` **폐지** → `non_actionable`(사유 enum + evidence + note + **reviewer**, work kind 금지). `covered_by_other_rid` 대상은 `todo` 이상 실제 작업 상태여야 한다 | 순환 위임으로 실제 이행자 0인 상태를 막는다 |
+| 최상위/근거 객체의 정확한 스키마 · enum 설명값 검사 | 초안은 필드를 지우거나 임의 필드·객체를 넣어도 통과했다 |
+| doc 근거는 `.md`의 명시적 RID scope만 허용한다. RID anchor는 canonicalize하고, `evidence` marker는 `supports=`를 파싱한다. `covered_by_other_rid`는 note·근거·실제 작업 대상을 모두 대조한다 | DOM/job id와 Python 문자열을 doc anchor로 오인하거나 `E-WIRE-1 supports=R-CLI-9`를 다른 RID에 재사용하지 못하게 한다 |
+
+⚠️ `non_actionable` 은 manifest 의 `active` **구속력을 취소하지 않는다** — 사유·근거·검토자가 남는 분류일 뿐이다.
+⚠️ `work_kind`와 `non_actionable` 사유가 자연어 요구에 맞는지는 기계가 판정하지 않는다. 임의의 `doc` 격하나
+`context_statement` 남용을 막는 최종 경계는 reviewer다. 대장은 이 분류를 감사 가능하게 만들 뿐 진실을 증명하지 않는다.
+⚠️ **`test` 근거는 실행 성공을 확인하지 않는다.** 서버는 `--collect-only` 로 node 수집만 확인하므로
+skip 표시된 node도 근거가 된다. iOS는 Xcode를 실행하지 않고 source locator만 확인하므로 target membership·
+실제 수집·통과를 증명하지 않는다(워크플로는 Ubuntu에서 pytest만 실행). 실행 성공은 `verified` reviewer가 책임진다.
+iOS 근거는 source locator 규약(`XCTestCase/testMethod` · 클래스 본문 소속 · `test` 로 시작 · 인자 없음 · instance visibility)까지 본다 —
+그러지 않으면 파일 안 아무 helper 나 근거가 된다(실측: `private func t(_:)`).
+
+⚠️ 구조 검사와 reviewer 기록은 자연어 의미가 참임을 기계적으로 증명하지 않는다. 특히 deploy reference는
+외부 시스템에서 dereference하지 않는다. `verified` reviewer가 근거와 RID 주장 사이의 의미 적합성을 책임진다.
+
+초기값 `unreviewed` 는 의도다 — 76건 분류가 끝날 때까지 구현을 막지 않는다.
+
 ## ⛔ 절 단위 배정 표는 **삭제했다** — routing 정본은 `spec/topic-only-migration-manifest.json` 하나다
 
 구 표는 `R-CUT-10`·`R-CUT-11`·`R-HLT-3` 처럼 **manifest 에 존재하지 않는 RID** 를 담고 있었고,
