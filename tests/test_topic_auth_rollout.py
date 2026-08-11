@@ -1,0 +1,292 @@
+"""익명 subscribe rollout 정책·계측 (`app/topic_auth_rollout.py`) 단위 회귀.
+
+⛔ 이 파일이 존재하는 이유: 설계 검토 중 확인한 것들이 전부 **일회성 shell probe** 였다.
+   probe 는 그 순간만 증명하고 회귀를 막지 못한다 — 아래 반례들은 실제로 코드에 있었던
+   fail-open 이거나(문자열 iterable · enum↔문자열 불일치), 있었다면 조용히 열렸을 것들이다.
+
+⛔ 배선(dispatcher/main) 테스트는 여기 두지 않는다 — 이 모듈은 publisher/main runtime 에
+   의존하지 않아야 하고, 실제 메시지 행동 계약은 dispatcher 쪽 테스트가 잠근다.
+"""
+import os
+import pathlib
+import subprocess
+import sys
+import unittest
+
+from app import config
+from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _stage_in_fresh_process(value):
+    """새 프로세스에서 `config.WS_TOPIC_AUTH_STAGE.value` 를 읽는다.
+
+    ⛔ `importlib.reload()` 를 쓰지 않는다 — 이미 로드된 모듈과 `load_dotenv()` 의 부작용이
+       남아 무엇을 관측하는지 흐려진다.
+
+    ⛔ 로컬 `.env` 는 정상 운영 설정이므로 "이 키가 없어야 한다"를 테스트하지
+       않는다. fresh process 안에서 `load_dotenv` 를 무효화해 기본값 검사를 격리한다.
+    """
+    env = dict(os.environ)
+    env.pop("WS_TOPIC_AUTH_STAGE", None)
+    if value is not None:
+        env["WS_TOPIC_AUTH_STAGE"] = value
+    return subprocess.run(
+        [sys.executable, "-c",
+         (
+             "import dotenv; "
+             "dotenv.load_dotenv = lambda *args, **kwargs: False; "
+             "from app import config; "
+             "print(config.WS_TOPIC_AUTH_STAGE.value)"
+         )],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=60,
+    )
+
+FX = ("fx:usd-krw", "fx:jpy-krw", "fx:eur-krw")
+USDT = "usdt:krw"
+
+
+def _rollout(stage=TopicAuthStage.COMPATIBILITY, **kw):
+    return TopicAuthRollout(stage=stage, fx_topics=FX, usdt_topic=USDT, **kw)
+
+
+class _Sock:
+    """WebSocket 대역 — 해시 가능한 아무 객체면 된다(모듈이 타입을 보지 않는다)."""
+
+
+class TestConfigParserIsStrict(unittest.TestCase):
+    """⛔ 보안 강제 단계라 **정확히 두 문자열만** 받는다. 조용한 fallback 은 금지."""
+
+    def test_module_level_value_is_parsed_not_a_string(self):
+        """⛔ 실제 결함이었다 — config 가 문자열을 저장하고 소비자가 enum 과 비교해
+        기본값에서도 filter 는 ValueError, snapshot 은 AttributeError 였다."""
+        self.assertIsInstance(config.WS_TOPIC_AUTH_STAGE, TopicAuthStage)
+
+    def test_default_is_compatibility_in_a_fresh_process(self):
+        """⛔ parser 에 "compatibility" 를 직접 넣는 것은 **기본값 검사가 아니다** —
+        `WS_TOPIC_AUTH_STAGE=reject_anonymous_fx` 환경에서도 통과한다(실측).
+        기본값은 env 를 지운 **새 프로세스**에서만 관측된다.
+        """
+        result = _stage_in_fresh_process(None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "compatibility")
+
+    def test_explicit_value_is_honoured_in_a_fresh_process(self):
+        result = _stage_in_fresh_process("reject_anonymous_fx")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "reject_anonymous_fx")
+
+    def test_bad_values_fail_at_import_time_in_a_fresh_process(self):
+        for raw in ("Compatibility", " compatibility ", "enforce_fx"):
+            with self.subTest(raw=raw):
+                result = _stage_in_fresh_process(raw)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("WS_TOPIC_AUTH_STAGE must be one of", result.stderr)
+
+    def test_legacy_allowed_tuple_is_absent(self):
+        """기존의 중복 정본이던 ALLOWED tuple 을 다시 도입하지 않는다."""
+        self.assertFalse(hasattr(config, "WS_TOPIC_AUTH_ALLOWED_STAGES"))
+
+    def test_rejects_non_string_input(self):
+        """⛔ "정확히 두 문자열만" 계약 — `TopicAuthStage(member)` 는 그 member 를 그대로
+        돌려주므로, 타입 검사가 없으면 enum 인스턴스가 통과해 계약이 거짓이 된다(실측).
+        """
+        for raw in (TopicAuthStage.COMPATIBILITY, None, 1, b"compatibility",
+                    ["compatibility"]):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                config.parse_topic_auth_stage(raw)
+
+    def test_rejects_case_variants_whitespace_and_unknown(self):
+        for raw in ("Compatibility", "REJECT_ANONYMOUS_FX", " compatibility ",
+                    "compatibility\n", "enforce_fx", ""):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                config.parse_topic_auth_stage(raw)
+
+
+class TestConstructorRejectsMiswiring(unittest.TestCase):
+    """⛔ 배선 오류는 요청 경로가 아니라 **생성 시점**에 터져야 한다."""
+
+    def test_string_is_not_a_topic_collection(self):
+        """⛔ 실제 fail-open 이었다 — `list("fx:usd-krw")` 가 문자 집합이 되어 통과했고,
+        그 상태의 `reject_anonymous_fx` 는 진짜 topic 을 제거하지 못한다."""
+        with self.assertRaises(TypeError):
+            TopicAuthRollout(stage=TopicAuthStage.COMPATIBILITY,
+                             fx_topics="fx:usd-krw", usdt_topic=USDT)
+
+    def test_bytes_is_not_a_topic_collection(self):
+        with self.assertRaises(TypeError):
+            TopicAuthRollout(stage=TopicAuthStage.COMPATIBILITY,
+                             fx_topics=b"fx:usd-krw", usdt_topic=USDT)
+
+    def test_mapping_is_rejected_so_values_cannot_be_forgotten(self):
+        """⛔ `FX_TOPICS` 를 `.values()` 없이 넘기면 **키**(asset 이름)가 들어온다."""
+        with self.assertRaises(TypeError):
+            # ⛔ key 가 canonical 이어야 **guard 를 실제로 시험**한다. 비-canonical key 를 쓰면
+            #    guard 를 지워도 뒤쪽 형식 검증이 ValueError 로 잡아 시험이 무의미해진다.
+            TopicAuthRollout(stage=TopicAuthStage.COMPATIBILITY,
+                             fx_topics={"fx:usd-krw": "ignored"}, usdt_topic=USDT)
+
+    def test_stage_must_be_the_enum_not_its_value(self):
+        with self.assertRaises(TypeError):
+            TopicAuthRollout(stage="compatibility", fx_topics=FX, usdt_topic=USDT)
+
+    def test_rejects_empty_duplicate_nonstring_and_malformed_fx_topics(self):
+        for label, fx in [
+            ("빈 collection", []),
+            ("중복", ["fx:usd-krw", "fx:usd-krw"]),
+            ("비-str", [1]),
+            ("unhashable 비-str", [["fx:usd-krw"]]),
+            ("빈 문자열", [""]),
+            ("빈 suffix", ["fx:"]),
+            ("앞 공백", [" fx:usd-krw"]),
+            ("뒤 공백", ["fx:usd-krw "]),
+            ("내부 공백", ["fx:usd krw"]),
+            ("prefix 아님", ["usdt:krw"]),
+        ]:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                TopicAuthRollout(stage=TopicAuthStage.COMPATIBILITY,
+                                 fx_topics=fx, usdt_topic=USDT)
+
+    def test_rejects_malformed_usdt_topic(self):
+        for usdt in ("", "usdt:", " usdt:krw", "usdt:krw ",
+                     "usdt:k rw", "fx:usd-krw", "not-usdt"):
+            with self.subTest(usdt=usdt), self.assertRaises(ValueError):
+                TopicAuthRollout(stage=TopicAuthStage.COMPATIBILITY,
+                                 fx_topics=FX, usdt_topic=usdt)
+
+    def test_started_at_seam_rejects_bool_nan_and_negative(self):
+        """⛔ `bool` 은 float subclass 라 `True` 가 1.0 으로 통과한다."""
+        for bad in (True, float("nan"), float("inf"), -1.0, "0"):
+            with self.subTest(bad=bad), self.assertRaises((TypeError, ValueError)):
+                _rollout(started_at_epoch_seconds=bad)
+
+    def test_started_at_seam_accepts_a_finite_value(self):
+        self.assertEqual(_rollout(started_at_epoch_seconds=0)
+                         .snapshot()["started_at_epoch_seconds"], 0.0)
+
+
+class TestPolicy(unittest.TestCase):
+    def test_compatibility_passes_everything_through(self):
+        r = _rollout()
+        free = ["fx:usd-krw", USDT, "fx:usd-krw"]
+        self.assertEqual(r.filter_anonymous_topics(free), free)
+
+    def test_reject_removes_only_the_exact_fx_set(self):
+        r = _rollout(TopicAuthStage.REJECT_ANONYMOUS_FX)
+        # `fx:` 로 시작하지만 주입 집합에 없는 문자열은 정책 대상이 아니다(prefix 판정 금지).
+        self.assertEqual(
+            r.filter_anonymous_topics(["fx:usd-krw", USDT, "fx:not-a-real-topic"]),
+            [USDT, "fx:not-a-real-topic"],
+        )
+
+    def test_order_and_duplicates_are_preserved(self):
+        r = _rollout(TopicAuthStage.REJECT_ANONYMOUS_FX)
+        self.assertEqual(
+            r.filter_anonymous_topics([USDT, "fx:usd-krw", USDT]), [USDT, USDT])
+
+    def test_unknown_stage_fails_closed_rather_than_returning_input(self):
+        r = _rollout()
+        r._stage = object()          # 도달 불가 상태를 강제로 만든다
+        with self.assertRaises(ValueError):
+            r.filter_anonymous_topics(["fx:usd-krw"])
+
+
+class TestMetrics(unittest.TestCase):
+    def test_duplicate_topics_in_one_request_count_once(self):
+        r = _rollout()
+        r.observe_anonymous_subscribe(_Sock(), ["fx:usd-krw", "fx:usd-krw"])
+        s = r.snapshot()
+        self.assertEqual(s["per_topic_attempts"]["fx:usd-krw"], 1)
+        self.assertEqual(s["anonymous_fx_attempts_total"], 1)
+
+    def test_fx_union_is_not_the_sum_of_per_topic(self):
+        """⛔ per_topic 합산은 한 요청이 FX 3종을 함께 요청할 때 **중복 계산**된다."""
+        r = _rollout()
+        r.observe_anonymous_subscribe(_Sock(), list(FX))
+        s = r.snapshot()
+        self.assertEqual(sum(s["per_topic_attempts"][t] for t in FX), 3)
+        self.assertEqual(s["anonymous_fx_attempts_total"], 1)
+
+    def test_scoped_total_includes_usdt_but_fx_total_does_not(self):
+        r = _rollout()
+        r.observe_anonymous_subscribe(_Sock(), [USDT])
+        s = r.snapshot()
+        self.assertEqual(s["anonymous_auth_scoped_attempts_total"], 1)
+        self.assertEqual(s["anonymous_fx_attempts_total"], 0,
+                         "USDT-only 연결이 FX 전환 위험으로 집계되면 안 된다")
+
+    def test_unscoped_request_counts_only_the_anonymous_total(self):
+        r = _rollout()
+        r.observe_anonymous_subscribe(_Sock(), ["krx:usd-krw-futures", "nope"])
+        s = r.snapshot()
+        self.assertEqual(s["anonymous_subscribe_attempts_total"], 1)
+        self.assertEqual(s["anonymous_auth_scoped_attempts_total"], 0)
+
+    def test_first_seen_counts_once_per_connection_and_topic(self):
+        r, sock = _rollout(), _Sock()
+        for _ in range(3):
+            r.observe_anonymous_subscribe(sock, ["fx:usd-krw"])
+        s = r.snapshot()
+        self.assertEqual(s["per_topic_attempts"]["fx:usd-krw"], 3)
+        self.assertEqual(s["per_topic_first_seen_connections"]["fx:usd-krw"], 1)
+        self.assertEqual(s["anonymous_fx_first_seen_connections_total"], 1)
+
+    def test_a_second_fx_topic_on_the_same_connection_is_not_a_new_fx_connection(self):
+        r, sock = _rollout(), _Sock()
+        r.observe_anonymous_subscribe(sock, ["fx:usd-krw"])
+        r.observe_anonymous_subscribe(sock, ["fx:jpy-krw"])
+        self.assertEqual(r.snapshot()["anonymous_fx_first_seen_connections_total"], 1)
+
+    def test_disconnect_is_idempotent_and_frees_per_connection_state(self):
+        r, sock = _rollout(), _Sock()
+        r.observe_anonymous_subscribe(sock, ["fx:usd-krw"])
+        self.assertEqual(r.snapshot()["active_auth_scoped_connections_tracked"], 1)
+        r.disconnect(sock)
+        r.disconnect(sock)                              # 멱등
+        self.assertEqual(r.snapshot()["active_auth_scoped_connections_tracked"], 0)
+        # ⚠️ 누적 counter 는 줄지 않는다.
+        self.assertEqual(r.snapshot()["anonymous_fx_first_seen_connections_total"], 1)
+
+    def test_reconnect_counts_a_new_first_seen(self):
+        r = _rollout()
+        a = _Sock()
+        r.observe_anonymous_subscribe(a, ["fx:usd-krw"])
+        r.disconnect(a)
+        r.observe_anonymous_subscribe(_Sock(), ["fx:usd-krw"])
+        self.assertEqual(r.snapshot()["anonymous_fx_first_seen_connections_total"], 2)
+
+
+class TestSnapshotSchema(unittest.TestCase):
+    EXPECTED = {
+        "scope", "pid", "started_at_epoch_seconds", "stage",
+        "anonymous_subscribe_attempts_total", "anonymous_auth_scoped_attempts_total",
+        "anonymous_fx_attempts_total", "anonymous_fx_first_seen_connections_total",
+        "per_topic_attempts", "per_topic_first_seen_connections",
+        "active_auth_scoped_connections_tracked", "caveat",
+    }
+
+    def test_schema_is_fixed(self):
+        self.assertEqual(set(_rollout().snapshot()), self.EXPECTED)
+
+    def test_runtime_context_is_merged_by_the_endpoint_not_read_here(self):
+        """⛔ 이 객체는 런타임 flag 를 읽지 않는다 — 그건 admin endpoint 가 합친다."""
+        self.assertNotIn("topic_dispatcher_enabled", _rollout().snapshot())
+
+    def test_counter_keys_are_fixed_at_construction(self):
+        """⛔ 클라가 보낸 문자열이 key 가 되면 cardinality 가 폭발한다."""
+        r = _rollout()
+        r.observe_anonymous_subscribe(_Sock(), ["아무거나", "fx:made-up"])
+        for field in ("per_topic_attempts", "per_topic_first_seen_connections"):
+            self.assertEqual(set(r.snapshot()[field]), set(FX) | {USDT})
+
+    def test_snapshot_carries_no_identifying_material(self):
+        r, sock = _rollout(), _Sock()
+        r.observe_anonymous_subscribe(sock, ["fx:usd-krw"])
+        blob = repr(r.snapshot())
+        for leak in ("token", "uid", "Bearer", "eyJ", repr(sock)):
+            self.assertNotIn(leak, blob)
+
+
+if __name__ == "__main__":
+    unittest.main()

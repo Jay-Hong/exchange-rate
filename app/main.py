@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import auth_executor, default_executor_probe, topic_wire, ws_connection_metrics
+from app import auth_executor, default_executor_probe, topic_auth_rollout, topic_wire, ws_connection_metrics
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -198,7 +198,9 @@ class ConnectionManager:
     **소켓별 등록 상태**를 기준으로 정확히 한 번만 감소시킨다(중복 호출은 no-op).
     """
 
-    def __init__(self):
+    def __init__(self, *, auth_rollout: topic_auth_rollout.TopicAuthRollout):
+        # 필수 주입이다. 기본값을 두면 production 배선이 빠져도 계측과 정책이 조용히 꺼진다.
+        self.topic_auth_rollout = auth_rollout
         self.active_connections: List[WebSocket] = []
         # 소켓 → IP. **이것이 "등록됨"의 정의**다 — 리스트와 따로 세면 어긋난다.
         self._ip_by_socket: dict[WebSocket, str] = {}
@@ -216,6 +218,13 @@ class ConnectionManager:
 
     def disconnect(self, websocket: WebSocket):
         """**멱등**이다 — 이미 해제된 소켓이면 아무것도 하지 않는다."""
+        # rollout 은 연결 등록 전에 익명 요청을 관측할 수 있다. 따라서 아래 early return 보다
+        # 먼저 정리해야 하며, 계측 정리 실패가 핵심 연결 정리를 막아서는 안 된다.
+        try:
+            self.topic_auth_rollout.disconnect(websocket)
+        except Exception:
+            logger.warning("topic auth rollout 연결 정리 실패 (무시됨)", exc_info=True)
+
         client_ip = self._ip_by_socket.pop(websocket, None)
         if client_ip is None:
             # 등록된 적 없거나 이미 해제됨. 리스트에서도 빼둔다(방어) — 카운터는 건드리지 않는다.
@@ -284,7 +293,13 @@ class ConnectionManager:
                 extra={"failed": len(failed), "total": len(connections)},
             )
 
-manager = ConnectionManager()
+manager = ConnectionManager(
+    auth_rollout=topic_auth_rollout.TopicAuthRollout(
+        stage=config.WS_TOPIC_AUTH_STAGE,
+        fx_topics=tuple(fx_topic_publisher.FX_TOPICS.values()),
+        usdt_topic=tether_topic_publisher.TETHER_TOPIC,
+    )
+)
 
 # ═════════════════════════════════════════════════════════════
 # 그래프 API 인메모리 캐시 (Tier 2 Fallback) - Phase 1A
@@ -1049,6 +1064,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 websocket, data,
                 authorize_subscribe=verify_ws_subscribe_token,
                 identity=connection_identity,
+                topic_auth_rollout=manager.topic_auth_rollout,
             )
     except WebSocketDisconnect:
         logger.info("🔌 클라이언트 연결 해제")
@@ -1688,10 +1704,25 @@ async def get_ws_connection_metrics():
     합산 없이는 전체가 아니다. never-crash.
     """
     try:
-        return {"metrics": manager.connection_metrics()}
+        metrics = manager.connection_metrics()
     except Exception:
         logger.error("ws-connection-metrics 조회 실패", exc_info=True)
         return {"metrics": None, "error": "unavailable"}
+
+    # rollout snapshot 실패는 기존 연결 계측까지 지우지 않는다. 두 계측은 운영 판단에서
+    # 함께 보지만 실패 도메인은 독립이다.
+    try:
+        rollout_metrics = dict(manager.topic_auth_rollout.snapshot())
+        rollout_metrics["topic_dispatcher_enabled"] = config.TOPIC_DISPATCHER_ENABLED
+    except Exception:
+        logger.error("topic-auth-rollout metrics 조회 실패", exc_info=True)
+        rollout_metrics = {
+            "stage": config.WS_TOPIC_AUTH_STAGE.value,
+            "topic_dispatcher_enabled": config.TOPIC_DISPATCHER_ENABLED,
+            "error": "unavailable",
+        }
+    metrics["topic_auth_rollout"] = rollout_metrics
+    return {"metrics": metrics}
 
 
 @app.get("/admin/api/ws-auth-executor-metrics", dependencies=[Depends(verify_admin)])

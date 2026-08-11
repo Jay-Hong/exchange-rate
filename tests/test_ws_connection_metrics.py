@@ -6,11 +6,33 @@
 """
 
 import asyncio
+import ast
+import inspect
+import textwrap
+from unittest.mock import patch
 
 import pytest
 
-from app import ws_connection_metrics
+from app import config, main as app_main, ws_connection_metrics
 from app.main import ConnectionManager
+from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
+
+
+_FX_TOPICS = ("fx:usd-krw", "fx:jpy-krw", "fx:eur-krw")
+_USDT_TOPIC = "usdt:krw"
+
+
+def _rollout() -> TopicAuthRollout:
+    return TopicAuthRollout(
+        stage=TopicAuthStage.COMPATIBILITY,
+        fx_topics=_FX_TOPICS,
+        usdt_topic=_USDT_TOPIC,
+        started_at_epoch_seconds=0,
+    )
+
+
+def _manager(auth_rollout: TopicAuthRollout | None = None) -> ConnectionManager:
+    return ConnectionManager(auth_rollout=auth_rollout or _rollout())
 
 
 class _FakeWebSocket:
@@ -38,11 +60,17 @@ def _metrics(manager: ConnectionManager) -> dict:
     return manager.connection_metrics()
 
 
+def test_connection_manager_requires_a_keyword_only_rollout():
+    parameter = inspect.signature(ConnectionManager).parameters["auth_rollout"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
 # ── 제거 4방향 ──────────────────────────────────────────────────────────────
 
 
 def test_normal_disconnect_decrements_exactly_once():
-    manager = ConnectionManager()
+    manager = _manager()
     ws = _FakeWebSocket()
     _run(manager.connect(ws))
     assert _metrics(manager)["active_connections"] == 1
@@ -58,7 +86,7 @@ def test_normal_disconnect_decrements_exactly_once():
 def test_broadcast_failure_removal_goes_through_disconnect():
     """⛔ 한때 broadcast 실패 처리가 `active_connections.remove()` 를 **직접** 불렀다.
     그 경로만 계측을 우회하면 gauge 는 줄어드는데 IP 카운터는 남아 **영구히 어긋난다**."""
-    manager = ConnectionManager()
+    manager = _manager()
     good = _FakeWebSocket(ip="203.0.113.7")
     bad = _FakeWebSocket(ip="198.51.100.9", fail_send=True)
     _run(manager.connect(good))
@@ -75,7 +103,7 @@ def test_broadcast_failure_removal_goes_through_disconnect():
 
 def test_disconnect_before_registration_is_a_noop():
     """초기 전송 예외 등으로 **등록 전에** 정리가 도는 경우 — 카운터를 건드리면 음수가 된다."""
-    manager = ConnectionManager()
+    manager = _manager()
     never_connected = _FakeWebSocket()
     manager.disconnect(never_connected)
     m = _metrics(manager)
@@ -85,7 +113,7 @@ def test_disconnect_before_registration_is_a_noop():
 
 
 def test_duplicate_disconnect_decrements_only_once():
-    manager = ConnectionManager()
+    manager = _manager()
     a = _FakeWebSocket(ip="203.0.113.7")
     b = _FakeWebSocket(ip="203.0.113.7")          # 같은 IP 2연결
     _run(manager.connect(a))
@@ -97,6 +125,34 @@ def test_duplicate_disconnect_decrements_only_once():
     m = _metrics(manager)
     assert m["active_connections"] == 1, "중복 호출이 남은 연결까지 지웠다"
     assert m["per_ip"]["max_connections_per_ip"] == 1, "중복 호출이 IP 카운터를 두 번 깎았다"
+
+
+def test_disconnect_cleans_rollout_state_before_unregistered_early_return():
+    """rollout 관측은 연결 등록 전에도 가능하므로 early return 앞에서 정리해야 한다."""
+    manager = _manager()
+    websocket = _FakeWebSocket()
+    manager.topic_auth_rollout.observe_anonymous_subscribe(websocket, ["fx:usd-krw"])
+    assert manager.topic_auth_rollout.snapshot()["active_auth_scoped_connections_tracked"] == 1
+
+    manager.disconnect(websocket)
+
+    assert manager.topic_auth_rollout.snapshot()["active_auth_scoped_connections_tracked"] == 0
+
+
+def test_rollout_cleanup_failure_does_not_block_core_disconnect():
+    manager = _manager()
+    websocket = _FakeWebSocket()
+    _run(manager.connect(websocket))
+
+    with patch.object(
+        manager.topic_auth_rollout, "disconnect", side_effect=RuntimeError("telemetry cleanup")
+    ):
+        manager.disconnect(websocket)
+
+    metrics = _metrics(manager)
+    assert metrics["active_connections"] == 0
+    assert metrics["registered_sockets"] == 0
+    assert metrics["per_ip"]["distinct_ips"] == 0
 
 
 # ── IP 출처 ─────────────────────────────────────────────────────────────────
@@ -124,7 +180,7 @@ def test_unusable_ip_falls_back_to_unknown(headers):
 
 def test_snapshot_never_exposes_raw_ips():
     """⛔ 원시 IP 를 endpoint·로그로 내보내지 않는다 — 히스토그램/최댓값/총계만."""
-    manager = ConnectionManager()
+    manager = _manager()
     for ip in ("203.0.113.7", "203.0.113.7", "198.51.100.9"):
         _run(manager.connect(_FakeWebSocket(ip=ip)))
     snapshot = _metrics(manager)
@@ -138,7 +194,7 @@ def test_unknown_ip_connections_never_pollute_the_nat_distribution():
     """⛔ **`limit_conn` 판단을 정반대로 만드는 결함이었다.** `X-Real-IP` 가 전부 누락된 100 연결이
     `histogram={"100": 1}` 로 보이면 **carrier NAT 한 IP 의 100 연결과 구분되지 않는다** —
     전자는 "IP 데이터가 아예 없다"이고 후자는 "상한을 높게 잡아야 한다"인데."""
-    manager = ConnectionManager()
+    manager = _manager()
     known = [_FakeWebSocket(ip="203.0.113.7") for _ in range(2)]
     unknown = [_FakeWebSocket(ip=None) for _ in range(3)]      # 헤더 누락
     broken = _FakeWebSocket(ip="not-an-ip")                    # 헤더 손상
@@ -154,7 +210,7 @@ def test_unknown_ip_connections_never_pollute_the_nat_distribution():
 
 def test_connection_total_equals_known_plus_unknown():
     """⚠️ 이 불변식이 깨지면 어느 쪽 통계도 믿을 수 없다."""
-    manager = ConnectionManager()
+    manager = _manager()
     for ws in [_FakeWebSocket(ip="203.0.113.7"), _FakeWebSocket(ip="198.51.100.9"),
                _FakeWebSocket(ip=None), _FakeWebSocket(ip="203.0.113.7")]:
         _run(manager.connect(ws))
@@ -165,7 +221,7 @@ def test_connection_total_equals_known_plus_unknown():
 
 def test_unknown_connections_do_not_move_known_statistics():
     """반대 방향 — unknown 이 늘어도 known 쪽 숫자는 **그대로여야** 한다."""
-    manager = ConnectionManager()
+    manager = _manager()
     _run(manager.connect(_FakeWebSocket(ip="203.0.113.7")))
     before = _metrics(manager)["per_ip"]
     for _ in range(5):
@@ -179,7 +235,7 @@ def test_unknown_connections_do_not_move_known_statistics():
 def test_connect_records_a_handshake_through_the_manager():
     """⛔ **프로덕션 배선을 본다.** `HandshakeBuckets` 를 직접 부르는 테스트만 두면
     `ConnectionManager.connect()` 의 `record()` 를 **지워도 통과한다**(이 세션에서 반복된 형태)."""
-    manager = ConnectionManager()
+    manager = _manager()
     assert _metrics(manager)["handshakes"]["current_bucket"] == 0
 
     first = _FakeWebSocket(ip="203.0.113.7")
@@ -198,6 +254,74 @@ def test_connect_records_a_handshake_through_the_manager():
     m = _metrics(manager)
     assert m["active_connections"] == 1, "gauge 가 줄지 않았다"
     assert m["handshakes"]["current_bucket"] == 2, "해제가 handshake 유입 카운터를 깎았다"
+
+
+def test_production_manager_uses_canonical_publisher_topics():
+    """`.values()` 누락이나 다른 runtime 배선은 시작 시점에 드러나야 한다."""
+    snapshot = app_main.manager.topic_auth_rollout.snapshot()
+    actual_topics = set(snapshot["per_topic_attempts"])
+    expected_topics = set(app_main.fx_topic_publisher.FX_TOPICS.values()) | {
+        app_main.tether_topic_publisher.TETHER_TOPIC
+    }
+
+    assert actual_topics == expected_topics
+    assert snapshot["stage"] == config.WS_TOPIC_AUTH_STAGE.value
+
+
+def test_websocket_endpoint_injects_the_manager_owned_rollout():
+    """요청 처리와 disconnect/admin 이 서로 다른 runtime 을 보면 연결 계수가 누수된다."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(app_main.websocket_endpoint)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "handle_client_message"
+    ]
+    assert len(calls) == 1, "production handler 호출 위치가 바뀌었다 — 배선 검사를 갱신하라"
+    values = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "topic_auth_rollout" in values
+    assert ast.unparse(values["topic_auth_rollout"]) == "manager.topic_auth_rollout"
+
+
+def test_admin_endpoint_merges_rollout_snapshot_and_runtime_flag():
+    manager = _manager()
+    with patch.object(app_main, "manager", manager), patch.object(
+        config, "TOPIC_DISPATCHER_ENABLED", False
+    ):
+        response = _run(app_main.get_ws_connection_metrics())
+
+    rollout = response["metrics"]["topic_auth_rollout"]
+    assert rollout["stage"] == TopicAuthStage.COMPATIBILITY.value
+    assert rollout["topic_dispatcher_enabled"] is False
+    assert response["metrics"]["active_connections"] == 0
+
+
+def test_admin_rollout_failure_preserves_connection_metrics():
+    manager = _manager()
+    with patch.object(app_main, "manager", manager), patch.object(
+        manager.topic_auth_rollout, "snapshot", side_effect=RuntimeError("snapshot failed")
+    ), patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+        response = _run(app_main.get_ws_connection_metrics())
+
+    assert response["metrics"]["active_connections"] == 0
+    assert response["metrics"]["registered_sockets"] == 0
+    assert response["metrics"]["topic_auth_rollout"] == {
+        "stage": config.WS_TOPIC_AUTH_STAGE.value,
+        "error": "unavailable",
+        "topic_dispatcher_enabled": True,
+    }
+
+
+def test_admin_malformed_rollout_snapshot_is_also_isolated():
+    manager = _manager()
+    with patch.object(app_main, "manager", manager), patch.object(
+        manager.topic_auth_rollout, "snapshot", return_value=None
+    ):
+        response = _run(app_main.get_ws_connection_metrics())
+
+    assert response["metrics"]["active_connections"] == 0
+    assert response["metrics"]["topic_auth_rollout"]["error"] == "unavailable"
 
 
 # ── handshake 버킷 ──────────────────────────────────────────────────────────

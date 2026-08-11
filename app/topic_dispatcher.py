@@ -84,6 +84,7 @@ from typing import Optional, TYPE_CHECKING, Any, Dict, Iterable, Set
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
+    from app.topic_auth_rollout import TopicAuthRollout
 
 from app import config
 
@@ -351,6 +352,7 @@ async def handle_client_message(
     *,
     authorize_subscribe,
     identity,
+    topic_auth_rollout: "TopicAuthRollout",
 ) -> None:
     """Client → server WebSocket 메시지 dispatcher (PR Z-2b Stage 2).
 
@@ -370,9 +372,11 @@ async def handle_client_message(
       - 미지 `type` → `invalid_request`.
       - 인증 실패 → §8-C 코드로 매핑된 `subscription_error`(연결·registry 불변).
 
-    미식별 요청(§E1 구 클라: `request_id` 도 `id_token` 도 없음)은 **동작이 불변**이다 —
-    등록/해제는 되고 프레임은 0개. JSON 파싱 실패 / non-dict / 미식별 미지 type 도
-    조용히 무시한다(legacy 평문이 흐르는 경계라 오류를 쏘면 스팸이 된다).
+    미식별 요청(§E1 구 클라: `request_id` 도 `id_token` 도 없음)은 stage 에 따라 갈린다.
+      - `compatibility` → 무료 topic 등록/해제, 프레임 0개(기존 동작).
+      - `reject_anonymous_fx` → 무료 집합에서 canonical FX 만 조용히 제외. USDT·해제는 유지.
+    JSON 파싱 실패 / non-dict / 미식별 미지 type 은 계속 조용히 무시한다(legacy 평문이
+    흐르는 경계라 오류를 쏘면 스팸이 된다).
 
     main.py에 두지 않은 이유: WebSocket integration 없이 단위 테스트 가능 (firebase_admin
     같은 main.py의 무거운 import-time 의존성 회피). topic 메시지 dispatch는 dispatcher
@@ -498,6 +502,14 @@ async def handle_client_message(
             )
         return
 
+    # flag-off 상태에서도 전환 영향을 먼저 볼 수 있어야 한다. 계측은 best-effort 이며 실패가
+    # 등록 또는 거부 정책을 바꾸지 않는다. 반대로 아래 정책 필터의 예외는 삼키지 않는다.
+    if msg_type == "subscribe" and not identified:
+        try:
+            topic_auth_rollout.observe_anonymous_subscribe(websocket, topics)
+        except Exception:
+            logger.warning("익명 topic subscribe 계측 실패 (무시됨)", exc_info=True)
+
     if not config.TOPIC_DISPATCHER_ENABLED:
         # FF=false: Stage 2 wiring 차단. **registry 변경 X.**
         # ⚠️ 응답은 전체-요청 오류가 아니라 **전부 rejected 된 ack** 이다 — §8-C 에서
@@ -528,11 +540,11 @@ async def handle_client_message(
             supported_snapshot_topics,
         )
 
-        if id_token is None:
-            # ⚠️ **무토큰 = 기존 동작 그대로**(등록 + snapshot, ack 없음). 강제 전환을 여기서
-            #    하면 안 된다 — enforcement는 capability와 분리돼야 하고(§E1), 현행 클라가
-            #    무토큰이라 무조건 요구하면 구 클라가 topic을 잃는다. 그 전환은 legacy 유예와
-            #    같은 시점에 묶인 별도 결정이다.
+        if not identified:
+            # ⚠️ compatibility 는 기존 동작(등록 + snapshot, ack 없음)을 보존한다.
+            #    reject_anonymous_fx 는 **아래 무료 집합에서 canonical FX 만** 조용히 제외한다.
+            #    혼합 요청의 USDT 는 유지되고 FX-only 는 등록·응답 모두 0이다. unsubscribe 는
+            #    이 분기 밖의 기존 경로를 그대로 탄다.
             #
             # ⛔ **다만 topic 은 분류한다.** 요청한 것을 그대로 등록하면 per-user 판정이 필요한
             #    topic(KRX)이 **lease 없이** 등록되고, publish 는 lease 부재를 "무제한"으로
@@ -545,6 +557,9 @@ async def handle_client_message(
                 if topic in set(supported_snapshot_topics())
                 and topic not in per_user_gated_snapshot_topics()
             ]
+            # ⛔ 원본 `topics` 에 적용하지 않는다. 위에서 지원 집합과 per-user gated topic 을
+            #    제거한 결과에만 적용해야 KRX·unknown topic 이 되살아나지 않는다.
+            free_topics = topic_auth_rollout.filter_anonymous_topics(free_topics)
             if free_topics:
                 registry.register(websocket, free_topics)
                 await send_initial_snapshots(websocket, free_topics)

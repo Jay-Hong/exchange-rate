@@ -924,6 +924,12 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             "identity 에 기본값이 생기면 주입 누락이 조용한 결속 소실이 된다",
         )
         self.assertIs(identity_param.kind, inspect.Parameter.KEYWORD_ONLY)
+        rollout_param = inspect.signature(target).parameters["topic_auth_rollout"]
+        self.assertIs(
+            rollout_param.default, inspect.Parameter.empty,
+            "topic_auth_rollout 에 기본값이 생기면 배선 누락이 조용한 계측·정책 소실이 된다",
+        )
+        self.assertIs(rollout_param.kind, inspect.Parameter.KEYWORD_ONLY)
 
     def test_authenticated_subscribe_receives_a_subscription_ack(self):
         """인증된 subscribe 는 토큰 검증 뒤 **ack 을 snapshot 보다 먼저** 받는다.

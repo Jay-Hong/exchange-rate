@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, topic_dispatcher
 from app import topic_wire
+from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
 from app.topic_dispatcher import handle_client_message as _real_handle_client_message
 
 # 이 파일의 주제는 **무토큰(legacy) 경로**다 — 인증 seam은 그 경로를 타지 않는다.
@@ -19,6 +20,17 @@ from app.topic_dispatcher import handle_client_message as _real_handle_client_me
 # ⛔ 인증 경로의 계약은 이 래퍼가 아니라 실제 `/ws` 경계 테스트가 검증한다
 #    (tests/test_topic_initial_snapshot_e2e.py — TestAuthenticatedSubscribeIsAcknowledged).
 _UNUSED_AUTHZ = AsyncMock(side_effect=AssertionError("무토큰 경로는 인증자를 부르지 않아야 한다"))
+_FX_TOPICS = ("fx:usd-krw", "fx:jpy-krw", "fx:eur-krw")
+_USDT_TOPIC = "usdt:krw"
+
+
+def _rollout(stage=TopicAuthStage.COMPATIBILITY):
+    return TopicAuthRollout(
+        stage=stage,
+        fx_topics=_FX_TOPICS,
+        usdt_topic=_USDT_TOPIC,
+        started_at_epoch_seconds=0,
+    )
 
 
 async def handle_client_message(ws, raw_text, **kwargs):
@@ -36,11 +48,12 @@ def _fresh_registry_swap():
 async def _dispatch(ws, raw_text, **kwargs):
     """`handle_client_message` 를 단위 테스트용 기본값과 함께 부른다.
 
-    ⚠️ `identity` 는 **필수 keyword-only** 다(기본값을 주면 주입을 빠뜨린 순간 UID 결속이
-    조용히 사라진다). 테스트마다 새 holder 를 만들면 **cross-UID 를 영영 관측할 수 없으므로**,
-    같은 연결을 흉내 내야 하는 테스트는 holder 를 직접 넘긴다.
+    ⚠️ `identity` 와 `topic_auth_rollout` 은 **필수 keyword-only** 다. 테스트마다 새 identity
+    holder 를 만들면 cross-UID 를 영영 관측할 수 없으므로 같은 연결 테스트는 직접 넘긴다.
+    rollout 계수의 연속성이 필요한 테스트도 같은 객체를 직접 넘긴다.
     """
     kwargs.setdefault("identity", topic_wire.ConnectionIdentity())
+    kwargs.setdefault("topic_auth_rollout", _rollout())
     return await handle_client_message(ws, raw_text, **kwargs)
 
 
@@ -82,6 +95,26 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             await _dispatch(
                 ws, '{"type": "subscribe", "topics": ["usdt:krw"]}'
             )
+        self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
+        ws.send_json.assert_not_called()
+
+    async def test_anonymous_subscribe_is_observed_before_disabled_gate(self):
+        """dispatcher off 는 등록을 막지만 전환 영향 계측까지 막으면 안 된다."""
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        rollout = _rollout()
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
+            await _dispatch(
+                ws,
+                '{"type": "subscribe", "topics": ["fx:usd-krw", "usdt:krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        snapshot = rollout.snapshot()
+        self.assertEqual(snapshot["anonymous_subscribe_attempts_total"], 1)
+        self.assertEqual(snapshot["anonymous_fx_attempts_total"], 1)
+        self.assertEqual(snapshot["per_topic_attempts"]["usdt:krw"], 1)
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
         ws.send_json.assert_not_called()
 
@@ -138,6 +171,92 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             topic_dispatcher.registry.get_subscriptions(ws), {"fx:usd-krw"}
         )
 
+    async def test_reject_stage_filters_only_free_topics_in_a_mixed_request(self):
+        """KRX·unknown 을 제거한 뒤 FX 만 거부해야 하며 USDT 는 유지한다."""
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        rollout = _rollout(TopicAuthStage.REJECT_ANONYMOUS_FX)
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch(
+                 "app.topic_initial_snapshot.supported_snapshot_topics",
+                 return_value=_FX_TOPICS + (_USDT_TOPIC, "krx:usd-krw-futures"),
+             ), \
+             patch(
+                 "app.topic_initial_snapshot.per_user_gated_snapshot_topics",
+                 return_value=frozenset({"krx:usd-krw-futures"}),
+             ), \
+             patch(
+                 "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+             ) as mock_snap:
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","topics":["fx:usd-krw",'
+                '"krx:usd-krw-futures","unknown:topic","usdt:krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), {_USDT_TOPIC})
+        mock_snap.assert_awaited_once_with(ws, [_USDT_TOPIC])
+        ws.send_json.assert_not_called()
+
+    async def test_reject_stage_fx_only_is_silent_and_registers_nothing(self):
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        rollout = _rollout(TopicAuthStage.REJECT_ANONYMOUS_FX)
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch(
+                 "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+             ) as mock_snap:
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","topics":["fx:usd-krw","fx:jpy-krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
+        mock_snap.assert_not_awaited()
+        ws.send_json.assert_not_called()
+
+    async def test_observation_failure_does_not_change_compatibility_behavior(self):
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        rollout = _rollout()
+
+        with patch.object(
+            rollout, "observe_anonymous_subscribe", side_effect=RuntimeError("metrics down")
+        ), patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), patch(
+            "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+        ) as mock_snap:
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","topics":["usdt:krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), {_USDT_TOPIC})
+        mock_snap.assert_awaited_once_with(ws, [_USDT_TOPIC])
+
+    async def test_policy_failure_propagates_before_registration(self):
+        ws = MagicMock()
+        rollout = _rollout()
+
+        with patch.object(
+            rollout, "filter_anonymous_topics", side_effect=RuntimeError("policy broken")
+        ), patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), patch(
+            "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+        ) as mock_snap:
+            with self.assertRaisesRegex(RuntimeError, "policy broken"):
+                await _dispatch(
+                    ws,
+                    '{"type":"subscribe","topics":["usdt:krw"]}',
+                    topic_auth_rollout=rollout,
+                )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
+        mock_snap.assert_not_awaited()
+
     async def test_unsubscribe_with_flag_enabled_removes_topics(self):
         ws = MagicMock()
         topic_dispatcher.registry.register(ws, ["usdt:krw", "krx:usd-krw-futures"])
@@ -149,6 +268,21 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             topic_dispatcher.registry.get_subscriptions(ws),
             {"krx:usd-krw-futures"},
         )
+
+    async def test_reject_stage_does_not_block_anonymous_unsubscribe(self):
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw", _USDT_TOPIC])
+        rollout = _rollout(TopicAuthStage.REJECT_ANONYMOUS_FX)
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+            await _dispatch(
+                ws,
+                '{"type":"unsubscribe","topics":["fx:usd-krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), {_USDT_TOPIC})
+        self.assertEqual(rollout.snapshot()["anonymous_subscribe_attempts_total"], 0)
 
     # ─────────────────────────────────────────────────────────────
     # 입력 격리: JSON 파싱 실패 / non-dict / 잘못된 payload
@@ -206,6 +340,33 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
                 ws, '{"type": "subscribe", "topics": ["usdt:krw", 42]}'
             )
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
+
+    async def test_only_valid_anonymous_subscribe_is_observed(self):
+        rollout = MagicMock(spec=TopicAuthRollout)
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", False):
+            await _dispatch(ws, "ping", topic_auth_rollout=rollout)
+            await _dispatch(ws, "not-json", topic_auth_rollout=rollout)
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","topics":[]}',
+                topic_auth_rollout=rollout,
+            )
+            await _dispatch(
+                ws,
+                '{"type":"unsubscribe","topics":["fx:usd-krw"]}',
+                topic_auth_rollout=rollout,
+            )
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","request_id":"r1","id_token":"token",'
+                '"topics":["fx:usd-krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        rollout.observe_anonymous_subscribe.assert_not_called()
 
 
 if __name__ == "__main__":

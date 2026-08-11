@@ -1,5 +1,6 @@
 # app/config.py
 
+import enum
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -624,3 +625,56 @@ WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = 30
 #       합친다. 그 총합은 D 를 쉽게 넘으므로 느린 실패는 D > T 여도 deadline 으로 뭉쳐진다.
 #    즉 D > T 가 사는 것은 "총합이 D 안에 들어오는 경우"뿐이고, 그 비율은 **아직 측정하지 않았다**.
 #    무엇을 재면 정해지나: verifier 벽시계 p50/p99 (콜드 첫 호출 분리) — 그때 D·T 를 함께 다시 정한다.
+
+
+# ── WS 익명 subscribe **rollout 단계** (R-GATE-1 첫 수직 슬라이스) ──────────────
+# ⛔ 가용성 축(TOPIC_DISPATCHER_ENABLED / FX_TOPIC_ENABLED / KRX_CLIENT_DISTRIBUTION_*)과
+#    **다른 축**이다: 저쪽은 "이 topic 이 지금 발사되는가", 이쪽은 "익명 요청을 어떻게 다루는가".
+#
+# ⛔ 두 값만 둔다. 소비자 없는 단계를 미리 만들지 않는다 — ADR-040(2026-07-30)이 이 트랙에서
+#    **소비자 없는 설계 81커밋을 폐기**하고 최소 수직 슬라이스로 재시작한다고 못 박았다.
+#
+# ⚠️ `reject_anonymous_fx` 는 "FX 인증을 시작한다"가 아니다 — 토큰을 실은 요청은
+#    `compatibility` 에서도 이미 Firebase 검증을 받는다. 이 단계의 실제 변화는
+#    **익명(미식별) FX 요청을 거부하기 시작**하는 것이다.
+#
+# ⚠️ enum 을 여기 두는 이유: 이 파일은 `os`/`Path`/`load_dotenv` 만 import 하고 `enum` 은
+#    stdlib 이라 규율(config 는 app 을 import 하지 않는다)을 깨지 않는다. 반대로 두면
+#    `config → app` 이 되어 그 단방향 간선이 깨진다. **허용값은 enum 하나에서만 도출**한다 —
+#    별도 ALLOWED tuple 을 두면 둘이 갈리고, 그 drift 가 곧 fail-open 이다.
+class TopicAuthStage(enum.Enum):
+    """⛔ 일반 `Enum` 이다 — `IntEnum` 은 다른 IntEnum·`True` 와 `==` 가 성립해 dict 키로
+    alias 되고 미지 값이 최하 단계 셀로 떨어지는 **fail-open** 을 만든다(실측).
+    """
+
+    COMPATIBILITY = "compatibility"
+    REJECT_ANONYMOUS_FX = "reject_anonymous_fx"
+
+
+def parse_topic_auth_stage(raw: str) -> "TopicAuthStage":
+    """⛔ `.strip().lower()` 를 쓰지 않는다 — **정확히 두 문자열만** 받는다.
+
+    다른 mode 계열(TETHER_TOPIC_TRIGGER_MODE 등)은 정규화하지만 이건 **보안 강제 단계**다.
+    `Reject_Anonymous_FX` 나 앞뒤 공백을 조용히 승인하면, 운영자가 적은 것과 서버가 이해한 것이
+    갈릴 여지를 남긴다. 오설정은 조용한 fallback 이 아니라 **기동 실패**로 접는다(Crash Early).
+    """
+    # ⛔ env parser 이므로 **정확히 str 만** 받는다. `TopicAuthStage(member)` 는 그 member 를
+    #    그대로 돌려주므로, 타입 검사가 없으면 "정확히 두 문자열만" 계약이 거짓이 된다(실측).
+    if type(raw) is not str:
+        raise ValueError(
+            f"WS_TOPIC_AUTH_STAGE must be a str (got {type(raw).__name__}: {raw!r})"
+        )
+    try:
+        return TopicAuthStage(raw)
+    except ValueError as exc:
+        allowed = tuple(stage.value for stage in TopicAuthStage)
+        raise ValueError(
+            f"WS_TOPIC_AUTH_STAGE must be one of {allowed} (got {raw!r})"
+        ) from exc
+
+
+# ⛔ 문자열이 아니라 **파싱된 enum** 을 저장한다. 문자열을 저장하면 소비자가 enum 과 비교하다
+#    조용히 어긋난다(실측: 기본값에서도 filter 는 ValueError, snapshot 은 AttributeError).
+WS_TOPIC_AUTH_STAGE = parse_topic_auth_stage(
+    os.getenv("WS_TOPIC_AUTH_STAGE", TopicAuthStage.COMPATIBILITY.value)
+)
