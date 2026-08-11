@@ -7,3 +7,4 @@
 # `async def test_`를 도입하면 그때 pytest-asyncio를 의식적으로 추가할 것 (crash-early
 # — 검증 안 된 inert 패키지를 미리 pin하면 drift 표면만 늘어남).
 pytest==9.0.1
+jsonschema==4.25.1
