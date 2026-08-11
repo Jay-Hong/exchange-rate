@@ -1,0 +1,15 @@
+{
+  "_": "⛔ SHA·pinned commit 의 **유일한 정본**(⚠️ 이건 **동결이 아니다** — 같은 사람이 고칠 수 있다. 진짜 기준점은 승인된 commit/tag). 다른 파일은 여기서 읽거나 생성한다. 값을 복제하면 반드시 어긋난다(2026-08-09 5회 실측).",
+  "archive": {
+    "path": "TOPIC_ONLY_DELIVERY_CONTRACT.archive.md",
+    "sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814"
+  },
+  "baseline": {
+    "path": "spec/topic-only-baseline-facts.md",
+    "sha256": "c7538755f04f01deba7b3877a979990f9a2188dd6d5f55b47c8275bd1c228426"
+  },
+  "pinned_commit": {
+    "server": "3e693c8e4cb8b4fd238beb2bfc1a1610fa512406",
+    "ios": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
+  }
+}

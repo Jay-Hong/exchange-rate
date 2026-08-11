@@ -6485,3 +6485,502 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
   (실측: 180초 timeout). 네트워크 격리를 그 방식으로 하지 말 것 — **fake 주입**으로 할 것.
 - ⚠️ **이름 규율**: 서버 E2E가 통과해도 iOS 토큰·ack 처리가 끝나기 전에는 **"제품 E2E"라 부르지 말 것**
   (codex). 서버 경계 E2E와 제품 E2E는 다른 주장이다.
+
+
+---
+
+## ADR-041: topic-only 전환
+
+- 책임: 불변식 · 결정 · arming 게이트
+- 상태: Draft — 구현 착수 전 합의 대상
+- 코드 근거 기준일: 2026-08-09
+- server 기준 commit: `3e693c8e4cb8b4fd238beb2bfc1a1610fa512406`
+- iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
+- archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
+- manifest SHA: `8ec93340a71fcac055faba0bda60f17ed61deca78eab94e9e1ab1214861ca198`
+- baseline SHA: `c7538755f04f01deba7b3877a979990f9a2188dd6d5f55b47c8275bd1c228426`
+- 검증: `python3 scripts/topic_migration_manifest.py preflight`
+
+이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
+클라이언트 상태기계, 삭제 범위, jitter/single-flight/bounded wait, publisher health/SLO 는 각각 별도
+문서가 소유하며, 아래 요구사항 구간의 관계 링크로 따라간다. 원문 전체는
+`TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에 보존돼 있다.
+
+---
+
+<!-- rid: R-CTX-2 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-ctx-2"></a>
+### R-CTX-2 — 적용 범위
+
+> **대상**: 신규 iOS(reference) → Android 이식. 서버는 이행 기간 동안 legacy 병행 유지.
+
+<!-- /rid: R-CTX-2 -->
+
+<!-- rid: R-CTX-1 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-ctx-1"></a>
+### R-CTX-1 — 왜 이 결정을 새로 기록해야 하는가
+
+리포가 **스스로 갈려 있다**. 같은 질문("topic 이 조용하면 무엇을 보여줄 것인가")에 두 문서가 반대로 답한다.
+
+| 출처 | 서술 |
+|---|---|
+| `REALTIME_V2_CLIENT_GUIDE.md` §8 | 휴장/주말 stale UI 는 단말 정책 — **권고: 마지막 값 유지** |
+| `DECISIONS.md` ADR-038 D2 | MODE 2 revert(45초 후 legacy 전환)를 **전제로 설계** — KRX 수신이 tether 신선도를 연장하지 않게 만든 이유가 그것 |
+| `TOPIC_V2_RELEASE_RUNBOOK.md` | "topic 무수신 45s 초과 시 **자동으로 legacy 표시**"를 합격 기준·롤백 근거로 사용 |
+
+즉 MODE 2 는 iOS 가 혼자 만든 정책이 아니라 **서버 ADR 이 한 번 승인한 적 있는** 정책이다.
+따라서 "클라를 서버 계약에 맞춰라"로 정리되지 않는다 — **결정을 새로 기록해야** 코드를 고쳐도
+다음 사람이 되돌리지 않는다.
+<!-- /rid: R-CTX-1 -->
+
+<!-- rid: R-INV-1 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-inv-1"></a>
+### R-INV-1 — 불변식: 신규 앱은 legacy 를 읽지 않는다
+
+```
+구독자   → topic WS + 인증된 v2 topic snapshot
+무료     → 인증된 v2 hourly snapshot
+어느 쪽도 legacy REST/WS 를 읽지 않는다 (DXY 포함 — DXY topic 신설이 선행조건이다).
+서버의 legacy 병행은 오직 구버전 출시 앱을 위한 것이다.
+```
+
+> ⛔ **이것은 목표 상태다. 현재 구현은 이걸 만족하지 않는다.** 아래 [R-INV-2](#r-inv-2) ·
+> [R-INV-3](#r-inv-3) 의 격차를 먼저 읽을 것.
+
+**불변식의 근거는 두 겹이다 — 둘 다 적어 둔다.** 하나만 남기면 다른 하나가 잊힌다.
+
+<!-- evidence: E-INV-1 supports=R-INV-1 -->
+**근거 ① 인가** — `FREE_TIER_ACCESS_MODEL_PLAN.md` **D4 "신규 앱 legacy _anon_ fallback 금지(양 플랫폼)"**.
+legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
+비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
+고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
+(`app/main.py:1128-1178` · `app/main.py:993-1037`).
+⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
+같은 슬라이스에서 정정한다.
+<!-- /evidence: E-INV-1 -->
+
+<!-- evidence: E-INV-2 supports=R-INV-1 -->
+**근거 ② 제품** — 고정 server commit 의 legacy source set 에는 USDT/KRX 가 **없다**.
+`app/legacy_policy.py` 의 `LEGACY_RATE_SOURCES` 는 investing + 은행 9곳뿐이고 docstring 이
+doctest 로 못 박는다:
+`should_include_source_in_legacy_rates("upbit", "usdt-krw") → False`.
+테더 화면이 legacy `sourceRates()` 로 전환되면 SourceRegistry 와 겹치는 USD reference 후보는
+investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 그보다 더 줄 수 있다
+(`ios/FXi/Models/RateSource.swift:32-91` ·
+`ios/FXi/Services/SourcePreferenceManager.swift:133-161` ·
+`ios/FXi/ViewModels/ExchangeRateViewModel.swift:623-665`). 따라서 이 전환은 fallback 이 아니라
+**거래소 5 + KRX 를 잃고 일부 USD reference 만 남기는 순수 손실 교환**이다.
+근거: `app/legacy_policy.py:35-38` · `app/legacy_policy.py:59-60`.
+<!-- /evidence: E-INV-2 -->
+<!-- /rid: R-INV-1 -->
+
+<!-- rid: R-INV-2 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-inv-2"></a>
+### R-INV-2 — 격차 (a): WS 의 FX/USDT 에 premium 강제가 없다 (출시 차단)
+
+**(a) WS 의 FX/USDT 는 무토큰으로도 구독된다 — premium 강제가 없다.**
+`topic_dispatcher` 는 `id_token is None` 이면 *"무토큰 = 기존 동작 그대로(등록 + snapshot, ack 없음)"* 로
+처리하고, **per-user 판정 대상은 KRX 하나뿐**이다(`per_user_gated_snapshot_topics`).
+토큰이 있어도 FX/USDT 는 premium 판정 없이 `free_accepted` 로 들어간다.
+반면 REST twin 은 premium 을 실제로 강제한다(ADR-039 §8.1 E3).
+근거: `app/topic_dispatcher.py:531-551` · `app/topic_initial_snapshot.py:95-104` ·
+`app/topic_dispatcher.py:646-659` · `app/main.py:3021-3024`.
+
+⚠️ 이건 버그가 아니라 **의도적으로 유예된 단계**다 — 코드 주석이 *"enforcement 는 capability 와
+분리돼야 하고(§E1), 현행 클라가 무토큰이라 무조건 요구하면 구 클라가 topic 을 잃는다"* 고 적는다.
+그러나 **신규 앱 출시 계약과는 양립하지 않는다**: `premium_required` 는 현재 사실상 KRX 에서만
+나오므로 거부 사유 전이표의 인가 행이 발화하지 않는다(근거: baseline C1 · C2).
+
+<!-- relation: references target=R-CLI-6 -->
+- references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
+<!-- /rid: R-INV-2 -->
+
+<!-- rid: R-INV-3 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-inv-3"></a>
+### R-INV-3 — 격차 (b): DXY 는 legacy envelope 로만 온다 (출시 차단)
+
+`WebSocketService` 가 legacy `rates` 프레임의 `indices` 를 통해 DXY 를 받는다
+(`onIndicesReceived?(response.indices)`).
+근거: `ios/FXi/Services/WebSocketService.swift:1066-1073`.
+
+⛔ **초안은 여기서 "legacy rate 값만 금지"로 불변식을 좁히고 envelope 예외를 두려 했다. 철회한다.**
+`FREE_TIER_ACCESS_MODEL_PLAN.md` §6 롤아웃이 **이미** 순서를 정해 뒀다 —
+*"4. iOS legacy 이탈: 4a REST/WS 토큰 전달 → **4b `dxy:spot` topic 신설** → 4c 부팅·offline·stale 를
+topic snapshot/cache 기준 전환 → 4d /api/rates + legacy WS 제거"*.
+4a 는 끝났다(1B/1C). **지금이 4b 다.** 예외를 두는 것은 합의된 로드맵을 되돌리는 것이다.
+<!-- /rid: R-INV-3 -->
+
+<!-- rid: R-INV-5 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-inv-5"></a>
+### R-INV-5 — 채택: 불변식은 강한 형태 유지, DXY topic 신설을 선행조건으로 올린다
+
+→ **채택**: 불변식은 **강한 형태 그대로 유지**하고, **DXY topic 신설을 출시 선행조건으로 올린다**.
+
+<!-- relation: references target=R-HAND-19 -->
+- references: [R-HAND-19](spec/topic-snapshot-handoff.md#r-hand-19)
+<!-- /rid: R-INV-5 -->
+
+<!-- rid: R-INV-4 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-inv-4"></a>
+### R-INV-4 — 범위 확정: 이번 출시는 `dxy:spot` 하나만
+
+✅ **범위 확정: 이번 출시는 `dxy:spot` 하나만**(로드맵 4b 그대로).
+근거 — premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` 의 live state 는 없다.
+따라서 futures topic 은 **legacy 이탈에 불필요**하며 phased 로 미룬다.
+(테더 1d 그래프의 DXY_futures 계열은 그래프 데이터 경로이지 live tail 이 아니다.)
+근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:954-956`.
+<!-- /rid: R-INV-4 -->
+
+<!-- rid: R-DEC-1 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-dec-1"></a>
+### R-DEC-1 — monitor 의 의미 전환
+
+`8aadc2f` 가 만든 것(관측되는 저장 freshness + deadline monitor + 전용 `ContinuousClock`)은 **유지한다**.
+바꾸는 것은 **만료 시 취하는 행동**과 **45초가 무엇의 지표인가**이다.
+
+```
+before:  45초 = 데이터 만료  → topic 값 폐기 → legacy 표시
+after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 시에만 사용자에게 알림
+```
+
+**근거 — 45초는 데이터의 나이가 아니다.**
+
+<!-- evidence: E-B-1 supports=R-DEC-1 -->
+- **USDT**: Redis coalesce 조건이 `same rate AND same 5s bucket`
+  (`latest_rates_cache.py`) — 가격이 평평해도 새 5초 버킷에 tick 이 들어오면 SET → publish.
+  → `usdt:krw` 침묵 = 가격 안정이 아니라 **tick 부재**(체결 없음 또는 collector 사망).
+  근거: baseline B2.
+<!-- /evidence: E-B-1 -->
+
+<!-- evidence: E-B-2 supports=R-DEC-1 -->
+- **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`,
+  코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다.
+  그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2).
+  근거: baseline B3 · B3-op · `app/latest_rates_cache.py:771-777` ·
+  `app/latest_rates_cache.py:646-651` · `app/config.py:390`.
+<!-- /evidence: E-B-2 -->
+
+<!-- evidence: E-B-3 supports=R-DEC-1 -->
+- **FX**: 주말·휴장 무발행이 정상이다. 최대 수십 시간.
+<!-- /evidence: E-B-3 -->
+
+<!-- evidence: E-B-4 supports=R-DEC-1 -->
+- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
+  `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
+  (`app/scheduler.py:1402-1412` · `app/main.py:866-889`). 따라서 현재 경로에는
+  **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
+  ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
+  특정 topic publisher 의 생존은 증명하지 않는다.
+  근거: baseline B1 · `ios/FXi/Utils/Constants.swift:250`.
+<!-- /evidence: E-B-4 -->
+
+<!-- evidence: E-B-5 supports=R-DEC-1 -->
+- ack 에 **`server_time` 이 없다**(`topic_wire.py`) → WS 경로로 기기 시계 오차를 잴 수단이 현재 없다.
+  근거: baseline B5.
+<!-- /evidence: E-B-5 -->
+<!-- /rid: R-DEC-1 -->
+
+<!-- rid: R-OPEN-2 -->
+<!-- requirement-meta: disposition=proposed owner=None -->
+<a id="r-open-2"></a>
+### R-OPEN-2 — 일관된 관측 나이(후속, 출시 필수 아님)
+
+[제안·결정 대기]
+
+일관된 나이가 필요해지면 둘 중 하나 — merger 가 값을 버릴 때도 `seen_at` 은 갱신하도록
+고치거나(클라 전용, 단 DB-fallback 분기 필요), 서버가 `observed_at` 을 추가한다.
+**출시 필수가 아니다.**
+<!-- /rid: R-OPEN-2 -->
+
+<!-- rid: R-GATE-1 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-1"></a>
+### R-GATE-1 — 순서 ① 서버: WS FX/USDT 인증 + premium 강제
+
+**순서와 게이트 — 서버 ①**: WS FX/USDT 인증 + premium 강제 (ADR-039 Stage A). ← 새 최우선.
+[R-INV-2](#r-inv-2) 의 격차 (a) 를 닫는 항목이다.
+
+<!-- relation: references target=R-HAND-11 -->
+- references: [R-HAND-11](spec/topic-snapshot-handoff.md#r-hand-11)
+<!-- /rid: R-GATE-1 -->
+
+<!-- rid: R-GATE-6 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-6"></a>
+### R-GATE-6 — 순서 ② 서버: DXY topic 신설
+
+**서버 ②**: **DXY topic 신설**(계획 4b) — **이게 없으면 legacy 이탈이 불가능**하다.
+
+<!-- relation: references target=R-HAND-19 -->
+- references: [R-HAND-19](spec/topic-snapshot-handoff.md#r-hand-19)
+<!-- relation: references target=R-INV-3 -->
+- references: [R-INV-3](#r-inv-3)
+<!-- relation: references target=R-INV-4 -->
+- references: [R-INV-4](#r-inv-4)
+<!-- relation: references target=R-INV-5 -->
+- references: [R-INV-5](#r-inv-5)
+<!-- /rid: R-GATE-6 -->
+
+<!-- rid: R-GATE-5 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-5"></a>
+### R-GATE-5 — 순서 ③④ 서버: send 실패 시 close · snapshot 최소 계약
+
+**서버 ③**: send 실패 시 close.
+**서버 ④**: **최소 계약** — 정적 unavailable 만 ack 전, 나머지는 등록→ack→전송, 실패는
+close(1013/1011).
+
+<!-- relation: references target=R-HAND-1 -->
+- references: [R-HAND-1](spec/topic-snapshot-handoff.md#r-hand-1)
+<!-- relation: references target=R-HAND-2 -->
+- references: [R-HAND-2](spec/topic-snapshot-handoff.md#r-hand-2)
+<!-- relation: references target=R-HAND-6 -->
+- references: [R-HAND-6](spec/topic-snapshot-handoff.md#r-hand-6)
+<!-- /rid: R-GATE-5 -->
+
+<!-- rid: R-CUT-15 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-cut-15"></a>
+### R-CUT-15 — 순서 ⑤ iOS: legacy 소비 전면 cutover
+
+→ iOS **⑤**: legacy 소비 **전면** cutover (startup·WS parser·은행/김프/비교 알림 + DXY).
+
+<!-- relation: references target=R-CUT-1 -->
+- references: [R-CUT-1](spec/legacy-cutover.md#r-cut-1)
+<!-- relation: references target=R-CUT-2 -->
+- references: [R-CUT-2](spec/legacy-cutover.md#r-cut-2)
+<!-- relation: references target=R-CUT-3 -->
+- references: [R-CUT-3](spec/legacy-cutover.md#r-cut-3)
+<!-- relation: references target=R-CUT-4 -->
+- references: [R-CUT-4](spec/legacy-cutover.md#r-cut-4)
+<!-- relation: references target=R-CUT-5 -->
+- references: [R-CUT-5](spec/legacy-cutover.md#r-cut-5)
+<!-- relation: references target=R-CUT-6 -->
+- references: [R-CUT-6](spec/legacy-cutover.md#r-cut-6)
+<!-- relation: references target=R-CUT-7 -->
+- references: [R-CUT-7](spec/legacy-cutover.md#r-cut-7)
+<!-- relation: references target=R-CUT-8 -->
+- references: [R-CUT-8](spec/legacy-cutover.md#r-cut-8)
+<!-- relation: references target=R-INV-1 -->
+- references: [R-INV-1](#r-inv-1)
+<!-- /rid: R-CUT-15 -->
+
+<!-- rid: R-GATE-3 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-3"></a>
+### R-GATE-3 — 순서 ⑥⑦⑧⑨ iOS + 문서 정정
+
+- **⑥** last-known + **9종 2층** 사유 상태기계 (`topic_unavailable`·`unknown_topic` 신규 배선)
+- **⑦** 조용한 재구독 → 실패 확정 시 배너 / 수신 세대 기반 snapshot deadline
+- **⑧** lease hard-expiry (클라 (A))
+- **⑨** purge(메모리 + `cached_topic_rates` + 파생 상태) / 알림 cold-start fail-close
+- → 문서 정정 + 런북 합격 기준 교체
+
+<!-- relation: references target=R-CLI-10 -->
+- references: [R-CLI-10](spec/ios-topic-state-machine.md#r-cli-10)
+<!-- relation: references target=R-CLI-11 -->
+- references: [R-CLI-11](spec/ios-topic-state-machine.md#r-cli-11)
+<!-- relation: references target=R-CLI-12 -->
+- references: [R-CLI-12](spec/ios-topic-state-machine.md#r-cli-12)
+<!-- relation: references target=R-CLI-13 -->
+- references: [R-CLI-13](spec/ios-topic-state-machine.md#r-cli-13)
+<!-- relation: references target=R-CLI-18 -->
+- references: [R-CLI-18](spec/ios-topic-state-machine.md#r-cli-18)
+<!-- relation: references target=R-CLI-3 -->
+- references: [R-CLI-3](spec/ios-topic-state-machine.md#r-cli-3)
+<!-- relation: references target=R-CLI-6 -->
+- references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
+<!-- relation: references target=R-CLI-9 -->
+- references: [R-CLI-9](spec/ios-topic-state-machine.md#r-cli-9)
+<!-- relation: references target=R-CUT-18 -->
+- references: [R-CUT-18](spec/legacy-cutover.md#r-cut-18)
+<!-- relation: references target=R-CUT-9 -->
+- references: [R-CUT-9](spec/legacy-cutover.md#r-cut-9)
+<!-- /rid: R-GATE-3 -->
+
+<!-- rid: R-CUT-17 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-cut-17"></a>
+### R-CUT-17 — 실기기 리허설 (auth 매트릭스 포함)
+
+→ 실기기 리허설 (auth 매트릭스 포함: 무토큰 / non-premium / premium / KRX entitlement / revoke).
+
+<!-- relation: references target=R-CUT-12 -->
+- references: [R-CUT-12](spec/legacy-cutover.md#r-cut-12)
+<!-- relation: references target=R-CUT-13 -->
+- references: [R-CUT-13](spec/legacy-cutover.md#r-cut-13)
+<!-- /rid: R-CUT-17 -->
+
+<!-- rid: R-GATE-4 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-4"></a>
+### R-GATE-4 — 마지막 두 게이트는 각각 별도 GO
+
+- → ⛔ Release arming (별도 GO)
+- → ⛔ 서버 `TOPIC_DISPATCHER_ENABLED=true` (별도 GO)
+<!-- /rid: R-GATE-4 -->
+
+<!-- rid: R-GATE-7 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-7"></a>
+### R-GATE-7 — phased 로 미루는 것
+
+**phased 로 미루는 것**: 서버 lease expiry sweeper / graph age 의미 재설계 /
+usd 탭 KRX tail 결합 해소 / 역사 ADR 정리(단, **운영에 쓰는 런북과 현재 코드 주석은 출시 전**).
+
+<!-- relation: references target=R-CLI-15 -->
+- references: [R-CLI-15](spec/ios-topic-state-machine.md#r-cli-15)
+<!-- relation: deferred_references target=R-CLI-19 -->
+- deferred_references: [R-CLI-19](spec/ios-topic-state-machine.md#r-cli-19)
+<!-- relation: deferred_references target=R-HAND-10 -->
+- deferred_references: [R-HAND-10](spec/topic-snapshot-handoff.md#r-hand-10)
+<!-- relation: deferred_references target=R-OPEN-2 -->
+- deferred_references: [R-OPEN-2](#r-open-2)
+<!-- /rid: R-GATE-7 -->
+
+<!-- rid: R-GATE-2 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-gate-2"></a>
+### R-GATE-2 — Release arming(`TOPIC_V2_RELEASE_ON`)은 사용자 소유의 마지막 게이트
+
+고정 iOS commit 에서 Release 는 `TOPIC_V2_RELEASE_ON` 이 정의될 때만 topic 을 켜고, 그 외에는
+legacy 기본값으로 빌드된다(`ios/FXi/Utils/RealtimeV2Config.swift:32-40`). 같은 commit 의
+`FXi.xcodeproj/project.pbxproj` 에서 해당 플래그를 찾는 `git grep` 결과는 0건이다.
+
+⚠️ archive 가 기록한 "현재 미커밋 변경 한 건"은 동결 baseline 이 명시적으로 제외한 worktree
+관찰이므로 정본 사실로 승격하지 않는다. Release arming 은 계속 **사용자 소유**이며 자동화가
+커밋하지 않는다. 정식 커밋 + Release archive 확인은 **마지막 게이트**로 두고 명시적 GO 를 받는다.
+<!-- /rid: R-GATE-2 -->
+
+<!-- rid: R-DEC-4 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-dec-4"></a>
+### R-DEC-4 — 확정 / 제안의 구분
+
+⛔ **(1) 은 아직 _제안_ 이다 — 사용자 결정 전이다.** (2)(3) 은 확정.
+
+- (1) 파생 숫자(김프/비교 spread) 숨김 정책 — [R-DEC-2](#r-dec-2) · [R-DEC-5](#r-dec-5) ·
+  [R-DEC-3](#r-dec-3).
+- (2) lease — 출시는 클라 hard-expiry (A), 서버 sweeper (B) 는 후속. (확정)
+- (3) nginx — WS handshake `limit_req` 는 추가, IP별 `limit_conn` 은 계측 후. (확정)
+
+<!-- relation: references target=R-CLI-16 -->
+- references: [R-CLI-16](spec/ios-topic-state-machine.md#r-cli-16)
+<!-- relation: references target=R-LOAD-2 -->
+- references: [R-LOAD-2](spec/revalidation-and-load.md#r-load-2)
+<!-- /rid: R-DEC-4 -->
+
+<!-- rid: R-DEC-2 -->
+<!-- requirement-meta: disposition=proposed owner=None -->
+<a id="r-dec-2"></a>
+### R-DEC-2 — (1) 파생 숫자는 시간이 아니라 확정된 전달 이상으로만 숨긴다
+
+[제안·결정 대기]
+
+**(1) 김프 등 파생 숫자는 _시간_ 으로 숨기지 않는다 — _전달 이상이 확정된 경우_ 에만 숨긴다.**
+
+초안과 앞선 설계안은 "두 다리의 나이 ≤120초" 같은 **시간 게이트**를 제안했다. **채택하지 않는다** —
+Gopax 정상 tick 간격이 ~180초라 그 게이트는 **평상시에 김프를 상시 숨긴다**(지키려던 기능을 죽인다).
+그리고 관측 나이를 잴 신호 자체가 없다.
+
+→ **재구독·재연결이 실패해 전달 이상이 확정된 경우에만** 파생 숫자(김프/비교 spread)를 숨긴다.
+**원시 last-known 행은 경고와 함께 유지**한다.
+
+<!-- relation: references target=R-CLI-14 -->
+- references: [R-CLI-14](spec/ios-topic-state-machine.md#r-cli-14)
+<!-- relation: references target=R-CLI-8 -->
+- references: [R-CLI-8](spec/ios-topic-state-machine.md#r-cli-8)
+<!-- relation: references target=R-CLI-9 -->
+- references: [R-CLI-9](spec/ios-topic-state-machine.md#r-cli-9)
+<!-- /rid: R-DEC-2 -->
+
+<!-- rid: R-DEC-5 -->
+<!-- requirement-meta: disposition=proposed owner=None -->
+<a id="r-dec-5"></a>
+### R-DEC-5 — 이 수용은 조건부다: arming 차단 게이트 3개
+
+[제안·결정 대기]
+
+**⛔ 이 수용은 _조건부_ 다 — 조건이 안 서면 수용하지 않는다.**
+클라가 못 보는 실패를 **아무도 안 보면** 그건 수용이 아니라 방치다. **arming 차단 게이트 3개**는
+아래 관계로 잠근다 — publisher health/SLO 구현·검증, safety-stop 리허설 실측, 45초 동시 재구독
+폭주 완화 구현·검증. 셋은 [R-GATE-4](#r-gate-4) 의 Release arming 앞에 선다.
+
+<!-- relation: references target=R-CUT-14 -->
+- references: [R-CUT-14](spec/legacy-cutover.md#r-cut-14)
+<!-- relation: references target=R-GATE-4 -->
+- references: [R-GATE-4](#r-gate-4)
+<!-- relation: references target=R-HLT-1 -->
+- references: [R-HLT-1](spec/publisher-health-slo.md#r-hlt-1)
+<!-- relation: references target=R-HLT-2 -->
+- references: [R-HLT-2](spec/publisher-health-slo.md#r-hlt-2)
+<!-- relation: references target=R-LOAD-1 -->
+- references: [R-LOAD-1](spec/revalidation-and-load.md#r-load-1)
+<!-- /rid: R-DEC-5 -->
+
+<!-- rid: R-DEC-3 -->
+<!-- requirement-meta: disposition=proposed owner=None -->
+<a id="r-dec-3"></a>
+### R-DEC-3 — 게이트 미이행 시 수용 불가 + 잔존 위험의 한계
+
+[제안·결정 대기]
+
+클라 status signal(서버 health 를 클라에 전달)은 후속으로 둔다.
+⛔ **셋 중 하나라도 미루면 수용으로 보지 않는다.**
+⚠️ **위 1~3 중 하나라도 출시 후속이라면 잔존 위험을 수용해서는 안 된다** — 그 경우 김프 표시 정책을
+다시 논의해야 한다.
+
+⚠️ **한계를 명시한다 — "파이프가 죽었나"가 항상 잴 수 있는 건 아니다.** **정상 initial
+snapshot 이후의 publisher 사망은 클라가 판별할 수 없다**. 따라서 숨김 조건은 **클라가 확정 가능한**
+전달 실패(재구독·재연결 실패, close, 명시적 거부)에 한한다. 그 밖의 조용한 사망에서는 **김프가
+last-known 조합으로 계속 보일 수 있다** — 이건 **제품이 수용하는 잔존 위험**이고, 없애려면 서버
+health 결과를 클라에 전달하는 status signal 이 필요하다(후속).
+
+<!-- relation: references target=R-HLT-1 -->
+- references: [R-HLT-1](spec/publisher-health-slo.md#r-hlt-1)
+<!-- /rid: R-DEC-3 -->
+
+<!-- rid: R-OPEN-3 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-open-3"></a>
+### R-OPEN-3 — 미결 1 해소: `dxy:spot` / `dxy:futures` 분리
+
+1. ~~`dxy:spot` / `dxy:futures` 분리~~ → **확정: 이번 출시는 `dxy:spot` 만**(로드맵 4b 그대로).
+   근거: premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` live state 는 없다
+   → futures topic 은 legacy 이탈에 **불필요**, phased.
+   근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:954-956`.
+
+<!-- relation: references target=R-INV-4 -->
+- references: [R-INV-4](#r-inv-4)
+<!-- /rid: R-OPEN-3 -->
+
+<!-- rid: R-OPEN-1 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-open-1"></a>
+### R-OPEN-1 — 미결 2 해소: Stage A 범위
+
+2. ~~Stage A 범위~~ → **미결이 아니다.** `FREE_TIER_ACCESS_MODEL_PLAN` D2 가 이미 확정했다 —
+   **비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**.
+<!-- /rid: R-OPEN-1 -->
+
+<!-- rid: R-OPEN-4 -->
+<!-- requirement-meta: disposition=active owner=ADR -->
+<a id="r-open-4"></a>
+### R-OPEN-4 — Stage A 의 보장 범위 한정을 ADR 요약에 명시한다
+
+⚠️ 다만 **보장 범위 한정은 ADR 요약에 명시**한다 — Stage A 는 **신규 앱 계약 준수**이지 서비스
+전체의 페이월 우회 제거가 **아니다**(구버전용 익명 legacy 는 Stage B 까지 남는다).
+
+<!-- relation: references target=R-HAND-11 -->
+- references: [R-HAND-11](spec/topic-snapshot-handoff.md#r-hand-11)
+<!-- relation: references target=R-OPEN-1 -->
+- references: [R-OPEN-1](#r-open-1)
+<!-- /rid: R-OPEN-4 -->

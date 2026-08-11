@@ -1,0 +1,1438 @@
+{
+  "archive_sha": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
+  "baseline_sha": "c7538755f04f01deba7b3877a979990f9a2188dd6d5f55b47c8275bd1c228426",
+  "pinned_commit": {
+    "server": "3e693c8e4cb8b4fd238beb2bfc1a1610fa512406",
+    "ios": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
+  },
+  "total_lines": 829,
+  "blocks": [
+    {
+      "id": "BLK-001",
+      "start": 1,
+      "end": 4,
+      "title": "표제 · 문서 상태(front-matter)",
+      "disposition": "prose",
+      "requirements": []
+    },
+    {
+      "id": "BLK-002",
+      "start": 5,
+      "end": 5,
+      "title": "적용 범위 — 신규 iOS(reference) → Android",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CTX-2",
+          "source": {
+            "start": 5,
+            "end": 5
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        }
+      ]
+    },
+    {
+      "id": "BLK-003",
+      "start": 6,
+      "end": 10,
+      "title": "작성 근거 · 증거 유효범위(source_metadata 로 이관)",
+      "disposition": "prose",
+      "requirements": []
+    },
+    {
+      "id": "BLK-004",
+      "start": 11,
+      "end": 26,
+      "title": "1. 왜 이 문서가 필요한가",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CTX-1",
+          "source": {
+            "start": 11,
+            "end": 26
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        }
+      ]
+    },
+    {
+      "id": "BLK-005",
+      "start": 27,
+      "end": 37,
+      "title": "2. 불변식 — 신규 앱은 legacy 를 읽지 않는다",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-INV-1",
+          "source": {
+            "start": 27,
+            "end": 37
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        }
+      ]
+    },
+    {
+      "id": "BLK-006",
+      "start": 38,
+      "end": 70,
+      "title": "2.0 현재 상태와의 격차 (출시 차단)",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-INV-2",
+          "source": {
+            "start": 38,
+            "end": 50
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-CLI-6"
+          ]
+        },
+        {
+          "rid": "R-HAND-11",
+          "source": {
+            "start": 51,
+            "end": 53
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-INV-1",
+            "R-INV-2"
+          ]
+        },
+        {
+          "rid": "R-HAND-19",
+          "source": {
+            "start": 54,
+            "end": 54
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-INV-4"
+          ]
+        },
+        {
+          "rid": "R-INV-3",
+          "source": {
+            "start": 55,
+            "end": 63
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        },
+        {
+          "rid": "R-INV-5",
+          "source": {
+            "start": 64,
+            "end": 65
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-HAND-19"
+          ]
+        },
+        {
+          "rid": "R-INV-4",
+          "source": {
+            "start": 66,
+            "end": 70
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        }
+      ]
+    },
+    {
+      "id": "BLK-007",
+      "start": 71,
+      "end": 85,
+      "title": "2.2 불변식의 근거는 두 겹이다",
+      "disposition": "evidence",
+      "requirements": [
+        {
+          "rid": "E-INV-1",
+          "source": {
+            "start": 71,
+            "end": 79
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-INV-1"
+        },
+        {
+          "rid": "E-INV-2",
+          "source": {
+            "start": 80,
+            "end": 85
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-INV-1"
+        }
+      ]
+    },
+    {
+      "id": "BLK-008",
+      "start": 86,
+      "end": 128,
+      "title": "2.1 삭제 범위 — 전수 inventory",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CUT-1",
+          "source": {
+            "start": 86,
+            "end": 93
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT",
+          "references": [
+            "R-GATE-2",
+            "R-GATE-4"
+          ]
+        },
+        {
+          "rid": "R-CUT-2",
+          "source": {
+            "start": 94,
+            "end": 98
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        },
+        {
+          "rid": "R-CUT-3",
+          "source": {
+            "start": 99,
+            "end": 99
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        },
+        {
+          "rid": "R-CUT-4",
+          "source": {
+            "start": 100,
+            "end": 100
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        },
+        {
+          "rid": "R-CUT-5",
+          "source": {
+            "start": 101,
+            "end": 102
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        },
+        {
+          "rid": "R-CUT-6",
+          "source": {
+            "start": 103,
+            "end": 111
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        },
+        {
+          "rid": "R-CUT-7",
+          "source": {
+            "start": 113,
+            "end": 120
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        },
+        {
+          "rid": "R-CUT-8",
+          "source": {
+            "start": 122,
+            "end": 128
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        }
+      ]
+    },
+    {
+      "id": "BLK-009",
+      "start": 129,
+      "end": 138,
+      "title": "3. monitor 의 의미 전환",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-DEC-1",
+          "source": {
+            "start": 129,
+            "end": 138
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        }
+      ]
+    },
+    {
+      "id": "BLK-010",
+      "start": 139,
+      "end": 153,
+      "title": "3.1 45초는 데이터의 나이가 아니다",
+      "disposition": "evidence",
+      "requirements": [
+        {
+          "rid": "E-B-1",
+          "source": {
+            "start": 141,
+            "end": 143
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-DEC-1"
+        },
+        {
+          "rid": "E-B-2",
+          "source": {
+            "start": 144,
+            "end": 146
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-DEC-1"
+        },
+        {
+          "rid": "E-B-3",
+          "source": {
+            "start": 147,
+            "end": 147
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-DEC-1"
+        },
+        {
+          "rid": "E-B-4",
+          "source": {
+            "start": 148,
+            "end": 151
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-DEC-1"
+        },
+        {
+          "rid": "E-B-5",
+          "source": {
+            "start": 152,
+            "end": 153
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-DEC-1"
+        }
+      ]
+    },
+    {
+      "id": "BLK-011",
+      "start": 154,
+      "end": 164,
+      "title": "3.2 시간 deadline 은 tether 하나만",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-1",
+          "source": {
+            "start": 154,
+            "end": 164
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-CLI-10",
+            "R-CLI-16",
+            "R-HAND-6",
+            "R-HLT-1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-012",
+      "start": 165,
+      "end": 331,
+      "title": "3.3 셋으로도 덮이지 않는 구멍 (출시 차단)",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-HAND-1",
+          "source": {
+            "start": 165,
+            "end": 201
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-HAND-2",
+          "source": {
+            "start": 202,
+            "end": 212
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-CLI-21",
+          "source": {
+            "start": 213,
+            "end": 213
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-HAND-2"
+          ]
+        },
+        {
+          "rid": "R-HAND-9",
+          "source": {
+            "start": 214,
+            "end": 219
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-HAND-3",
+          "source": {
+            "start": 220,
+            "end": 228
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-CLI-3"
+          ]
+        },
+        {
+          "rid": "R-CLI-17",
+          "source": {
+            "start": 229,
+            "end": 229
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-HAND-15"
+          ]
+        },
+        {
+          "rid": "R-HAND-13",
+          "source": {
+            "start": 230,
+            "end": 230
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-CLI-20",
+          "source": {
+            "start": 231,
+            "end": 231
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-HAND-17",
+            "R-HAND-18"
+          ]
+        },
+        {
+          "rid": "R-HAND-14",
+          "source": {
+            "start": 232,
+            "end": 232
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-HAND-17",
+          "source": {
+            "start": 233,
+            "end": 237
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-CLI-20"
+          ]
+        },
+        {
+          "rid": "R-HAND-15",
+          "source": {
+            "start": 238,
+            "end": 238
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-CLI-17"
+          ]
+        },
+        {
+          "rid": "R-HAND-18",
+          "source": {
+            "start": 239,
+            "end": 240
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-CLI-20"
+          ]
+        },
+        {
+          "rid": "R-HAND-16",
+          "source": {
+            "start": 241,
+            "end": 243
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-CLI-2",
+          "source": {
+            "start": 244,
+            "end": 281
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-CLI-3",
+            "R-CUT-18"
+          ]
+        },
+        {
+          "rid": "R-HAND-4",
+          "source": {
+            "start": 282,
+            "end": 284
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        },
+        {
+          "rid": "R-CLI-3",
+          "source": {
+            "start": 285,
+            "end": 293
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        },
+        {
+          "rid": "R-HLT-1",
+          "source": {
+            "start": 294,
+            "end": 297
+          },
+          "destination": "HEALTH",
+          "normative_owner": "HEALTH",
+          "references": [
+            "R-HLT-3"
+          ]
+        },
+        {
+          "rid": "R-CLI-4",
+          "source": {
+            "start": 298,
+            "end": 303
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        },
+        {
+          "rid": "R-HLT-3",
+          "source": {
+            "start": 304,
+            "end": 329
+          },
+          "destination": "HEALTH",
+          "normative_owner": "HEALTH"
+        }
+      ]
+    },
+    {
+      "id": "BLK-013",
+      "start": 332,
+      "end": 338,
+      "title": "4. 거부 사유별 전이표",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-5",
+          "source": {
+            "start": 332,
+            "end": 338
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        }
+      ]
+    },
+    {
+      "id": "BLK-014",
+      "start": 339,
+      "end": 349,
+      "title": "4.0 사유는 두 층이다",
+      "disposition": "evidence",
+      "requirements": [
+        {
+          "rid": "E-WIRE-1",
+          "source": {
+            "start": 339,
+            "end": 349
+          },
+          "destination": "BASE",
+          "normative_owner": null,
+          "supports": "R-CLI-9"
+        }
+      ]
+    },
+    {
+      "id": "BLK-015",
+      "start": 350,
+      "end": 394,
+      "title": "4.1 전이표",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-6",
+          "source": {
+            "start": 350,
+            "end": 394
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-HAND-11"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-016",
+      "start": 395,
+      "end": 519,
+      "title": "4.2 구독 상태 — canonical 저장 + 파생",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-7",
+          "source": {
+            "start": 395,
+            "end": 416
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-CLI-3"
+          ]
+        },
+        {
+          "rid": "R-CLI-8",
+          "source": {
+            "start": 417,
+            "end": 469
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        },
+        {
+          "rid": "R-CLI-9",
+          "source": {
+            "start": 470,
+            "end": 519
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        }
+      ]
+    },
+    {
+      "id": "BLK-017",
+      "start": 520,
+      "end": 523,
+      "title": "5. 조용한 실패 두 가지 — 서두",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-HAND-8",
+          "source": {
+            "start": 520,
+            "end": 523
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        }
+      ]
+    },
+    {
+      "id": "BLK-018",
+      "start": 524,
+      "end": 536,
+      "title": "5.1 publish send 실패가 구독을 지운다",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-HAND-6",
+          "source": {
+            "start": 524,
+            "end": 536
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND"
+        }
+      ]
+    },
+    {
+      "id": "BLK-019",
+      "start": 537,
+      "end": 548,
+      "title": "5.2 lease 만료 — (A) 클라 hard-expiry 채택",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-10",
+          "source": {
+            "start": 537,
+            "end": 548
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-HAND-6"
+          ],
+          "deferred_references": [
+            "R-HAND-10"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-020",
+      "start": 549,
+      "end": 553,
+      "title": "5.2 (B) 서버 expiry sweeper — 후속",
+      "disposition": "proposed",
+      "requirements": [
+        {
+          "rid": "R-HAND-10",
+          "source": {
+            "start": 549,
+            "end": 553
+          },
+          "destination": "HAND",
+          "normative_owner": null
+        }
+      ]
+    },
+    {
+      "id": "BLK-021",
+      "start": 554,
+      "end": 595,
+      "title": "6. 내부 복구와 사용자 경고 분리",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-11",
+          "source": {
+            "start": 554,
+            "end": 566
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-CUT-18"
+          ]
+        },
+        {
+          "rid": "R-CLI-24",
+          "source": {
+            "start": 580,
+            "end": 584
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        },
+        {
+          "rid": "R-LOAD-3",
+          "source": {
+            "start": 585,
+            "end": 592
+          },
+          "destination": "LOAD",
+          "normative_owner": "LOAD",
+          "references": [
+            "R-CLI-24",
+            "R-HAND-14",
+            "R-HAND-16",
+            "R-HAND-2",
+            "R-HAND-4"
+          ]
+        },
+        {
+          "rid": "R-LOAD-4",
+          "source": {
+            "start": 567,
+            "end": 579
+          },
+          "destination": "LOAD",
+          "normative_owner": "LOAD",
+          "references": [
+            "R-CLI-11"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-022",
+      "start": 596,
+      "end": 612,
+      "title": "7. 롤백 레버를 대체한다",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-12",
+          "source": {
+            "start": 596,
+            "end": 612
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-CUT-1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-023",
+      "start": 613,
+      "end": 626,
+      "title": "7.1 purge 범위",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-13",
+          "source": {
+            "start": 613,
+            "end": 626
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        }
+      ]
+    },
+    {
+      "id": "BLK-024",
+      "start": 627,
+      "end": 638,
+      "title": "8. 데이터 나이 — 지금은 잴 수 없다",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-14",
+          "source": {
+            "start": 627,
+            "end": 638
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT"
+        }
+      ]
+    },
+    {
+      "id": "BLK-025",
+      "start": 639,
+      "end": 658,
+      "title": "8.1 이미 살아 있는 age gate",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-15",
+          "source": {
+            "start": 639,
+            "end": 658
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "deferred_references": [
+            "R-OPEN-2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-026",
+      "start": 659,
+      "end": 666,
+      "title": "8.2 후속 (출시 필수 아님)",
+      "disposition": "proposed",
+      "requirements": [
+        {
+          "rid": "R-OPEN-2",
+          "source": {
+            "start": 659,
+            "end": 666
+          },
+          "destination": "ADR",
+          "normative_owner": null
+        }
+      ]
+    },
+    {
+      "id": "BLK-027",
+      "start": 667,
+      "end": 682,
+      "title": "9. 반증된 서술 정정 목록",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CUT-9",
+          "source": {
+            "start": 667,
+            "end": 678
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT",
+          "references": [
+            "R-INV-1"
+          ]
+        },
+        {
+          "rid": "R-CUT-18",
+          "source": {
+            "start": 679,
+            "end": 679
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT"
+        }
+      ]
+    },
+    {
+      "id": "BLK-028",
+      "start": 683,
+      "end": 690,
+      "title": "10. 부수 — 알림 cold-start fail-close(출시 범위)",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-18",
+          "source": {
+            "start": 685,
+            "end": 690
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "references": [
+            "R-INV-1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-029",
+      "start": 691,
+      "end": 695,
+      "title": "10. 부수 — usd 탭 KRX tail 결합(phased)",
+      "disposition": "proposed",
+      "requirements": [
+        {
+          "rid": "R-CLI-19",
+          "source": {
+            "start": 691,
+            "end": 695
+          },
+          "destination": "CLIENT",
+          "normative_owner": null
+        }
+      ]
+    },
+    {
+      "id": "BLK-030",
+      "start": 696,
+      "end": 716,
+      "title": "11. 검증 (실기기)",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CUT-12",
+          "source": {
+            "start": 696,
+            "end": 716
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT",
+          "references": [
+            "R-CLI-10",
+            "R-CLI-11",
+            "R-CLI-12",
+            "R-CLI-13"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-031",
+      "start": 717,
+      "end": 733,
+      "title": "11.1 테스트 매트릭스",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CUT-13",
+          "source": {
+            "start": 717,
+            "end": 733
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT",
+          "references": [
+            "R-CLI-10",
+            "R-CLI-11",
+            "R-CLI-12",
+            "R-CLI-13",
+            "R-CUT-2",
+            "R-CUT-3",
+            "R-INV-4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-032",
+      "start": 734,
+      "end": 734,
+      "title": "11.1 B10 — 김프 테스트(§13.1(1) 조건부)",
+      "disposition": "proposed",
+      "requirements": [
+        {
+          "rid": "R-CUT-20",
+          "source": {
+            "start": 734,
+            "end": 734
+          },
+          "destination": "CUT",
+          "normative_owner": null,
+          "conditional_references": [
+            "R-DEC-2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-033",
+      "start": 735,
+      "end": 742,
+      "title": "11.1 매트릭스 — 나머지",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CUT-21",
+          "source": {
+            "start": 735,
+            "end": 742
+          },
+          "destination": "CUT",
+          "normative_owner": "CUT",
+          "references": [
+            "R-CUT-2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-034",
+      "start": 743,
+      "end": 769,
+      "title": "12. 순서와 게이트",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-GATE-1",
+          "source": {
+            "start": 743,
+            "end": 746
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-HAND-11"
+          ]
+        },
+        {
+          "rid": "R-GATE-6",
+          "source": {
+            "start": 747,
+            "end": 747
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-HAND-19",
+            "R-INV-3",
+            "R-INV-4",
+            "R-INV-5"
+          ]
+        },
+        {
+          "rid": "R-GATE-5",
+          "source": {
+            "start": 748,
+            "end": 749
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-HAND-1",
+            "R-HAND-2",
+            "R-HAND-6"
+          ]
+        },
+        {
+          "rid": "R-CUT-15",
+          "source": {
+            "start": 750,
+            "end": 750
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-CUT-1",
+            "R-CUT-2",
+            "R-CUT-3",
+            "R-CUT-4",
+            "R-CUT-5",
+            "R-CUT-6",
+            "R-CUT-7",
+            "R-CUT-8",
+            "R-INV-1"
+          ]
+        },
+        {
+          "rid": "R-GATE-3",
+          "source": {
+            "start": 751,
+            "end": 755
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-CLI-10",
+            "R-CLI-11",
+            "R-CLI-12",
+            "R-CLI-13",
+            "R-CLI-18",
+            "R-CLI-3",
+            "R-CLI-6",
+            "R-CLI-9",
+            "R-CUT-18",
+            "R-CUT-9"
+          ]
+        },
+        {
+          "rid": "R-CUT-17",
+          "source": {
+            "start": 756,
+            "end": 756
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-CUT-12",
+            "R-CUT-13"
+          ]
+        },
+        {
+          "rid": "R-GATE-4",
+          "source": {
+            "start": 757,
+            "end": 759
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        },
+        {
+          "rid": "R-GATE-7",
+          "source": {
+            "start": 761,
+            "end": 763
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-CLI-15"
+          ],
+          "deferred_references": [
+            "R-CLI-19",
+            "R-HAND-10",
+            "R-OPEN-2"
+          ]
+        },
+        {
+          "rid": "R-GATE-2",
+          "source": {
+            "start": 764,
+            "end": 769
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        }
+      ]
+    },
+    {
+      "id": "BLK-035",
+      "start": 770,
+      "end": 771,
+      "title": "13. 결정 — 표제",
+      "disposition": "prose",
+      "requirements": []
+    },
+    {
+      "id": "BLK-036",
+      "start": 772,
+      "end": 775,
+      "title": "13.1 절 머리 — (1)은 제안 / (2)(3)은 확정",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-DEC-4",
+          "source": {
+            "start": 772,
+            "end": 775
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-CLI-16",
+            "R-LOAD-2"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-037",
+      "start": 776,
+      "end": 802,
+      "title": "13.1(1) 김프 — [제안·결정 대기] + arming 3 게이트",
+      "disposition": "proposed",
+      "requirements": [
+        {
+          "rid": "R-DEC-2",
+          "source": {
+            "start": 776,
+            "end": 784
+          },
+          "destination": "ADR",
+          "normative_owner": null,
+          "references": [
+            "R-CLI-14",
+            "R-CLI-8",
+            "R-CLI-9"
+          ]
+        },
+        {
+          "rid": "R-DEC-5",
+          "source": {
+            "start": 785,
+            "end": 787
+          },
+          "destination": "ADR",
+          "normative_owner": null,
+          "references": [
+            "R-CUT-14",
+            "R-GATE-4",
+            "R-HLT-1",
+            "R-HLT-2",
+            "R-LOAD-1"
+          ]
+        },
+        {
+          "rid": "R-HLT-2",
+          "source": {
+            "start": 788,
+            "end": 788
+          },
+          "destination": "HEALTH",
+          "normative_owner": null,
+          "references": [
+            "R-HLT-3"
+          ]
+        },
+        {
+          "rid": "R-CUT-14",
+          "source": {
+            "start": 789,
+            "end": 789
+          },
+          "destination": "CUT",
+          "normative_owner": null,
+          "references": [
+            "R-CLI-12",
+            "R-CLI-13"
+          ]
+        },
+        {
+          "rid": "R-LOAD-1",
+          "source": {
+            "start": 790,
+            "end": 790
+          },
+          "destination": "LOAD",
+          "normative_owner": null,
+          "references": [
+            "R-CLI-24",
+            "R-LOAD-3",
+            "R-LOAD-4"
+          ]
+        },
+        {
+          "rid": "R-DEC-3",
+          "source": {
+            "start": 792,
+            "end": 802
+          },
+          "destination": "ADR",
+          "normative_owner": null,
+          "references": [
+            "R-HLT-1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-038",
+      "start": 803,
+      "end": 811,
+      "title": "13.1(2) lease — (A) 확정 / (B) 후속",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-CLI-16",
+          "source": {
+            "start": 803,
+            "end": 811
+          },
+          "destination": "CLIENT",
+          "normative_owner": "CLIENT",
+          "deferred_references": [
+            "R-HAND-10"
+          ],
+          "references": [
+            "R-CLI-10"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BLK-039",
+      "start": 812,
+      "end": 819,
+      "title": "13.1(3) nginx — limit_req 추가 / limit_conn 계측 후",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-LOAD-2",
+          "source": {
+            "start": 812,
+            "end": 819
+          },
+          "destination": "LOAD",
+          "normative_owner": "LOAD"
+        }
+      ]
+    },
+    {
+      "id": "BLK-040",
+      "start": 820,
+      "end": 829,
+      "title": "13.2 미결 → 실제로는 해소됨",
+      "disposition": "active",
+      "requirements": [
+        {
+          "rid": "R-OPEN-3",
+          "source": {
+            "start": 820,
+            "end": 824
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-INV-4"
+          ]
+        },
+        {
+          "rid": "R-OPEN-1",
+          "source": {
+            "start": 825,
+            "end": 826
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR"
+        },
+        {
+          "rid": "R-HAND-20",
+          "source": {
+            "start": 827,
+            "end": 827
+          },
+          "destination": "HAND",
+          "normative_owner": "HAND",
+          "references": [
+            "R-INV-4",
+            "R-OPEN-1"
+          ]
+        },
+        {
+          "rid": "R-OPEN-4",
+          "source": {
+            "start": 828,
+            "end": 829
+          },
+          "destination": "ADR",
+          "normative_owner": "ADR",
+          "references": [
+            "R-HAND-11",
+            "R-OPEN-1"
+          ]
+        }
+      ]
+    }
+  ],
+  "source_metadata": {
+    "status": "Draft — 구현 착수 전 합의 대상",
+    "summary_entry": "`DECISIONS.md` ADR-041",
+    "as_of": "2026-08-09",
+    "lines": {
+      "start": 3,
+      "end": 7
+    }
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "reviewer": {
+    "name": "OpenAI Codex",
+    "role": "independent semantic reviewer",
+    "independent_from": [
+      "Claude document-writing workflow",
+      "Claude code-claim classification workflow"
+    ]
+  },
+  "reviewed_at": "2026-08-11",
+  "inputs": {
+    "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
+    "manifest_sha256": "8ec93340a71fcac055faba0bda60f17ed61deca78eab94e9e1ab1214861ca198",
+    "baseline_sha256": "c7538755f04f01deba7b3877a979990f9a2188dd6d5f55b47c8275bd1c228426",
+    "lock_sha256": "742c623b4185b384ee82ddde11dbdd0d24b1a4afe7a9eee0bbfc7353f7016036",
+    "server_commit": "3e693c8e4cb8b4fd238beb2bfc1a1610fa512406",
+    "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
+  },
+  "documents": {
+    "ADR": "505223df577ff0f0b61c9833bc36515a738d6fc16d4b34292989ea370c093bf4",
+    "CLIENT": "7279f28e2010067ca9d7a02ac7447d99fe97fac3af3daa1152ad1c8b844d1315",
+    "CUT": "146249d171dfb840ade32612bf0fa611f36183ffb79a100da33dee7ed83d6f14",
+    "HAND": "5474af0c3bdd13ced77987619afcbfa5efbc0e859101679fef040208bb109091",
+    "HEALTH": "4f26f106f8cb947a1b71780f3ef009a13fc2616769d06e0fa83f0ffd30d7c293",
+    "LOAD": "76fc082638c0abb9d216689b4ce1de1229e6b132fbf3abdb79cdff0399888eaf"
+  },
+  "claim_ledger_sha256": "ed438cc8f9d1626cb7242e774e1810c46a2a21cb022b1c676a4a65aea1c40813",
+  "scope": {
+    "manifest_output_requirements": 86,
+    "claim_candidates": 59,
+    "code_fact_entries": 47,
+    "normative_entries": 12,
+    "candidate_outside_reverse_audit": true,
+    "archive_normative_preservation_review": true,
+    "classification_truth_review": true,
+    "citation_support_review": true
+  },
+  "findings": [
+    {
+      "id": "SEM-001",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "ADR/R-INV-1",
+        "CUT/R-CUT-1"
+      ],
+      "issue": "The archive-derived prose claimed that USDT/KRX had never existed in legacy and that fallback always left three bank rows. The pinned code proves only the current allowlist, while iOS visibility can leave fewer than three rows and investing is not a bank.",
+      "disposition": "Scoped the claim to the pinned legacy source set and replaced the fixed row count with the actual investing/kb/hana overlap subject to user visibility. The frozen archive remains unchanged as provenance, not as a truth source."
+    },
+    {
+      "id": "SEM-002",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "ADR/R-GATE-2"
+      ],
+      "issue": "The document promoted an uncommitted project.pbxproj observation to a current canonical fact even though the frozen baseline explicitly excludes that worktree state.",
+      "disposition": "Removed the volatile one-change assertion. The document now states only the pinned Release default, records the zero-result pinned project-file grep, and keeps arming as a user-owned explicit-GO gate."
+    },
+    {
+      "id": "SEM-003",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "ADR/R-DEC-1",
+        "HEALTH/R-HLT-1",
+        "HEALTH/R-HLT-3"
+      ],
+      "issue": "Baseline B1 is explicitly limited to two publisher modules, but the output stated a server-wide absence of periodic republishing without auditing callers.",
+      "disposition": "Preserved B1's scope and audited the external scheduler path. broadcast_rates_once wakes periodically, but topic publication is inside the payload-is_changed branch, so the supported conclusion is absence of an unconditional data-plane heartbeat or republish contract."
+    },
+    {
+      "id": "SEM-004",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "CLIENT/R-CLI-15",
+        "CLIENT/R-CLI-18",
+        "CUT/R-CUT-21",
+        "HAND/R-HAND-3",
+        "HEALTH/R-HLT-3",
+        "LOAD/R-LOAD-4"
+      ],
+      "issue": "Several multi-claim units had a real citation that supported only the first clause, allowing the remaining operational assertion to borrow unrelated provenance.",
+      "disposition": "Added the missing pinned lines for Date()-based graph ingestion, current-rate/validRange flow, existing B1/B4 tests, post-ACK snapshot order, dormant AST tripwire, and the full auth_executor resource-bound warning."
+    },
+    {
+      "id": "SEM-005",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "ADR/R-INV-1",
+        "ADR/R-INV-2",
+        "CLIENT/R-CLI-2",
+        "CLIENT/R-CLI-6",
+        "CLIENT/R-CLI-11",
+        "CLIENT/R-CLI-12",
+        "CLIENT/R-CLI-14",
+        "CUT/R-CUT-13",
+        "HAND/R-HAND-1",
+        "HAND/R-HAND-4",
+        "HAND/R-HAND-6"
+      ],
+      "issue": "The conservative claim lint omitted current-code assertions that lacked its exact cue/verb shape, so a green 55-entry ledger was not an exhaustive semantic review.",
+      "disposition": "Performed a broader reverse audit of every logical unit and all 86 output requirements, added local baseline or pinned file-line evidence, and regenerated the ledger at 59 explicitly reviewed candidates."
+    },
+    {
+      "id": "SEM-006",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "CUT/R-CUT-4",
+        "CUT/R-CUT-6"
+      ],
+      "issue": "The cutover inventory said GraphViewModel had no consuming View and grouped its runtime object with zero-use symbols. RootView still consumes it for stop(), and the object installs callbacks and observers even though the legacy graph UI is not mounted.",
+      "disposition": "Separated zero-call symbols from the live GraphViewModel object and expanded the removal scope to callback, observer, environment, and stop wiring while preserving the no-production-start conclusion."
+    }
+  ],
+  "residual_limits": [
+    "Natural-language completeness and citation entailment are not mechanically provable; this journal records the independent human-model review bound to exact output hashes.",
+    "Negative repository facts use full-tree searches at the pinned commits and must be rerun if either pinned commit changes.",
+    "The documents remain Draft implementation contracts. Passing this review does not assert that the proposed runtime behavior has been implemented.",
+    "Release arming remains excluded from the frozen baseline and requires a separate explicit GO."
+  ],
+  "verdict": "pass"
+}

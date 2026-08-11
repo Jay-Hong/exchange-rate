@@ -1,0 +1,127 @@
+# 검증된 사실 baseline (v6 — repo 정본)
+
+> ⚠️ **이 파일이 정본이다.** 이전 사본은 세션 scratchpad 에 있었고 세션 종료와 함께 사라진다 —
+> 다른 사람·다음 세션이 참조할 수 없으므로 리포로 옮겼다.
+
+> **참조 revision — 이 사실들은 아래 시점에서만 유효하다**
+> - 참조 commit 은 **`spec/topic-only.lock.json` 의 `pinned_commit`** 이 정본이다
+>   (여기 값을 복제하지 않는다 — 단축 해시 복제로 계약이 어긋난 실측이 있다)
+> - ⚠️ iOS 미커밋 변경 `FXi.xcodeproj/project.pbxproj` (사용자 소유 arming) 은 **범위 제외**
+
+> ⛔ **run 중 수정 금지**(규율이지 강제가 아니다). agent 는 읽은 전체 SHA 를 결과에 보고한다.
+> ⚠️ **"동결"이라 부르지 않는다** — `chmod 444` 는 git 이 보존하지 않고, 기대 SHA 도 같은 사람이
+> 고칠 수 있는 lock 에 있다. 진짜 기준점은 **승인된 commit/tag** 이며 현재 파일들은 untracked 다.
+> ⛔ **`TOPIC_ONLY_DELIVERY_CONTRACT.md` 는 검토 대상 Draft 이지 진실 소스가 아니다** —
+>    그걸 근거로 인용하면 순환 검증이다.
+> ⚠️ **증거 종류를 섞지 않는다.** 아래 4분류는 신뢰도와 갱신 규칙이 다르다:
+>
+> | 표기 | 뜻 |
+> |---|---|
+> | **[코드]** | 소스에서 직접 읽음. file:line 명시 |
+> | **[추론]** | 코드 구조에서 도출. 코드가 그렇게 적혀 있지는 않음 |
+> | **[결정]** | 과거에 기록된 결정(주석·문서). 사실이 아니라 합의 |
+> | **[운영]** | 런타임/배포 상태. 코드로 확인 불가, 시점 의존 |
+
+---
+
+## A. legacy 노출
+
+- **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
+  같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
+  ⇒ legacy 에 USDT 거래소·KRX 없음.
+- **A2 [코드]** `exchange-rate/app/main.py:1182` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+
+## B. publish 의미론
+
+- **B1 [코드·부정]** topic data-plane heartbeat·주기적 재발행 **없음**.
+  증거(부정 사실은 행 번호가 없다 — 명령·범위·결과로 단다). ⚠️ 키워드 검색만으로는 약해서
+  **주기적 실행 원시자**로 다시 확인했다:
+  `rg -n 'create_task|while True|sleep\(|IntervalTrigger|add_job|Timer' app/topic_dispatcher.py app/fx_topic_publisher.py`
+  → **0건**.
+  ⚠️ **범위 한정**: 이 두 파일 안에 없다는 뜻이다. 외부(scheduler 등)가 이들을 주기 호출하는
+  가능성까지 배제하려면 호출자 검사가 추가로 필요하다. transport ping/pong 은 별개로 존재.
+- **B2 [코드]** `app/latest_rates_cache.py:480` — USDT coalesce = `same rate + same 5s bucket → skip`.
+  ⇒ 가격이 평평해도 새 5초 버킷 tick 이면 SET → publish.
+- **B3 [코드]** 같은 파일 — KRX 는 위 coalesce 를 **tick writer 경로에서만** 적용.
+  `KRX_REDIS_TICK_WRITE_ENABLED` 코드 기본값 false.
+  **B3-op [운영]** 운영은 2026-05-26 활성(`CLAUDE.md` 기록). ⚠️ 코드가 아니라 문서 기록이다.
+- **B4 [코드]** `app/topic_wire.py:30` `WHOLE_REQUEST_ERRORS`(4종) /
+  `app/topic_wire.py:40` `PER_TOPIC_ERRORS`(5종) — 오류 어휘가 **두 층**.
+- **B5 [코드·부정]** ack 반환 dict 에 `server_time` **없음**.
+  증거: `rg -c 'server_time' app/topic_wire.py` → **0건**.
+
+## C. 인가 (현재 구현 상태)
+
+- **C1 [코드]** `app/topic_dispatcher.py:532` — `id_token is None` 이면
+  *"무토큰 = 기존 동작 그대로(등록 + snapshot, ack 없음)"*.
+- **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
+  per-user 판정 대상은 **KRX 뿐**.
+- **C3 [코드]** `exchange-rate/app/main.py:2986` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3021` `verify_firebase_token(request)` → `app/main.py:3024`
+  `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
+  ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
+
+## D. 실패 경로
+
+- **D1 [코드]** `app/topic_dispatcher.py:147` `remove_websocket` — docstring:
+  *"publish 송신 실패 격리에서 호출된다 … '연결이 죽었다'의 동의어가 아니다"*.
+- **D2 [코드]** `app/topic_dispatcher.py:207` `leased_subscribers` — 만료 lease 를
+  **전송 직전에만** 필터. registry 제거·클라 통지 없음.
+- **D3 [코드]** `app/topic_initial_snapshot.py:289` — build 실패를 `logger.warning` 후 **격리**,
+  연결 유지. `None`(flag off)도 조용히 skip.
+- **D4 [결정]** `app/topic_dispatcher.py:362` §8-B-term —
+  *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
+- **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
+
+## E. 부하
+
+- **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2` (**최대 5**).
+  주석: *"RDS db.t4g.micro 메모리 절약"*.
+- **E2 [코드]** `app/topic_initial_snapshot.py:286` —
+  `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)`.
+  **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
+  (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
+- **E3 [결정]** `app/auth_executor.py:8` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
+  배포 재연결은 평균 유입이 낮아도 **동시 도착** 이라 1초면 빠질 큐를 대량 거절한다."*
+  같은 docstring: *"이것은 큐 상한이 아니다"*(`SimpleQueue` 무제한), *"자원 상한 완료 라고 쓰지 말 것"*.
+- **E4 [코드·부정]** `nginx/conf.d/default.conf` `location /ws` 는 **80~99행** 블록이고
+  그 안에 `limit_req`·`limit_conn` **없음**(블록 전체를 훑어 확인). `location /api/` 에는 둘 다 있고
+  zone 정의는 파일 상단에 존재.
+
+## F. 클라이언트 현재 동작
+
+- **F1 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:283` `recomputeFreshness` —
+  불리언 `tetherIsFresh`/`freshFxAssets` **만** 갱신. 재구독 호출 없음.
+- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift` — `resendSubscriptions()` 호출처 **2곳**
+  (911, 1044 = 연결 수립·foreground 복귀).
+  **F2-inf [추론]** ⇒ **45초 재구독은 현재 동작이 아니다**(도입하려는 설계다).
+- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:402` `takePending` —
+  `topicRequestTimeoutTasks.removeValue(...)?.cancel()`.
+  **F3-inf [추론]** ⇒ ack 수신 즉시 20초 watchdog 소멸 → 그 뒤 build 에 클라 상한 없음.
+- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:220` `sendTopicCommand` — subscribe 는 **배치**(한 요청에 여러 topic).
+- **F5 [코드]** `WebSocketService` catch — `shouldRetryCommandFailure`(denylist) + 최대 3회
+  bounded retry. **공백은 재시도 소진 이후**.
+- **F6 [코드·부정]** `confirmedTopics` 와 `subscribedTopics` 를 **비교하는 코드 없음**.
+  증거: ⚠️ "같은 줄에 없다"는 다중 행 비교·helper 를 배제하지 못해 **약하다**. 그래서
+  `subscribedTopics` **전 참조 13곳(47·202·210·387·391·429·464·659·754·809·826·833·874)을 열거해 읽었다**.
+  387/391 은 *의도*와의 재대조, 659 는 `premiumGatedTopics` 와의 교집합, 나머지는 선언·삽입·삭제·주석·
+  재전송이다 — `confirmedTopics` 와 대조하는 곳은 **없다**.
+  ⚠️ 826 주석이 같은 주장을 하지만 그 주석의 **다른 부분(bounded retry 서술)은 stale** 이므로
+  주석이 아니라 위 전수 열거를 근거로 삼을 것.
+- **F7 [코드]** `applyLeaseSchedule` — 만료 전 재구독 예약(jitter 포함).
+  **F7-inf [추론]** 실패 시 F5 재시도, 소진되면 hard-expiry 집행 **없음**.
+- **F8 [코드]** `ios/FXi/Services/TopicSnapshotMerger.swift:38` —
+  `mergeAt <= existing.mergeAt` 이면 entry 를 버린다.
+  **F8-inf [추론]** 서버가 rate 불변 시 `rate_changed_at` 보존(B2 파일) ⇒ 평평하면 store timestamp 가
+  마지막 변동 시각에 **동결**.
+- **F9 [코드]** `ios/FXi/Views/Components/GraphV2Section.swift:153` `liveFreshnessThreshold` —
+  600초(hana 1200초). 주석이 *"timestamp=last-change … calm flat 을 과도 skip"* 이라 자인.
+- **F10 [코드]** `ios/FXi/Models/AppState.swift:13` — `.connected(rates: [ExchangeRate])` 등
+  **legacy 배열이 enum payload**.
+- **F11 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:505` `rates(for:)` →
+  `appState.rates` 직결. `ios/FXi/Views/Components/AlertAddSheet.swift` 가 이걸 쓴다(`baseRates` 미경유).
+- **F12 [코드]** `ios/FXi/Services/WebSocketService.swift:1073` — DXY 는 legacy envelope 의 `indices` 로 수신(`onIndicesReceived`).
+- **F13 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:623` `func usdtDisplayState` —
+  최외곽 게이트 = `if RealtimeV2Config.isTetherTopicEnabled`, 그 else 는 `sourceRates()`.
+- **F14 [코드]** `ios/FXi/Utils/RealtimeV2Config.swift:32` `isTetherTopicEnabled` —
+  Release 기본값 topic **OFF** (`#if DEBUG` / `#elseif TOPIC_V2_RELEASE_ON` / else false).
