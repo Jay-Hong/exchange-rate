@@ -175,12 +175,20 @@ def _log_unavailable(kind: UnavailableKind, message: str) -> None:
     log(message, extra={"kind": kind.value}, exc_info=sys.exc_info()[0] is not None)
 
 
-async def authorize_gated_subscription(user_id: str, *, mono) -> GatedVerdict:
-    """KRX 구독 인가. 호출 순서가 계약이다(각 단계의 부작용 0회 보장 포함)."""
+async def _observe_premium(user_id: str, *, mono) -> PremiumVerdict:
+    """premium 축만 관측한다 — **topic 을 모른다**.
+
+    ⛔ 여기서 `assert_single_gated_topic()` 을 부르지 않는다. 그 트립와이어는 *KRX
+       entitlement 판정기*의 것이고(`gated != {KRX_TOPIC}` 이면 죽는다), premium 은
+       상품 축이라 gated 집합과 무관하다. 둘을 한 함수에 묶어 두면 FX/USDT 에 premium 을
+       요구하려는 사람이 **gated 집합을 넓히는 잘못된 길**로 유도된다 — 그러면 분류 loop 가
+       하나의 verdict 를 gated 전체에 적용해 KRX 판정이 다른 상품으로 샌다(R-GATE-1 스코핑 실측).
+
+    ⛔ 호출 순서가 계약이다: 관측 시각은 RC 호출 **직전**에 찍는다. 호출 뒤에 찍으면
+       캐시 히트나 느린 응답이 "방금 관측"으로 승격돼 lease horizon 이 늘어난다.
+    """
     from app.clock import system_clock
     from app.subscription import fetch_revenuecat_result
-
-    assert_single_gated_topic()
 
     premium_observed_at_mono = mono()          # ⛔ RC 호출 **직전**
     result = await fetch_revenuecat_result(user_id, clock=system_clock())
@@ -197,6 +205,27 @@ async def authorize_gated_subscription(user_id: str, *, mono) -> GatedVerdict:
             "RevenueCat 결과를 영구 결함으로 판정 — 재시도로 낫지 않는다",
             extra={"reason": verdict.reason},
         )
+    return verdict
+
+
+async def authorize_premium_subscription(user_id: str, *, mono) -> PremiumVerdict:
+    """premium 만 요구하는 topic(FX/USDT)의 인가 진입점 — R-GATE-1.
+
+    ⛔ **현재 프로덕션 호출자가 0이다.** 도달 불가능하므로 flag 로 감쌀 필요도 없다
+       (`TestPremiumOnlyEntryPoint.test_it_has_no_production_caller_yet` 이 그 사실을 잠근다).
+       실제 강제는 dispatcher 쪽 슬라이스에서 붙인다.
+
+    ⛔ `authorize_gated_subscription` 과 달리 entitlement 축을 보지 않는다 —
+       premium ⊥ entitlement 이고 FX/USDT 는 상품 자격만 요구하기 때문이다.
+    """
+    return await _observe_premium(user_id, mono=mono)
+
+
+async def authorize_gated_subscription(user_id: str, *, mono) -> GatedVerdict:
+    """KRX 구독 인가. 호출 순서가 계약이다(각 단계의 부작용 0회 보장 포함)."""
+    assert_single_gated_topic()
+
+    verdict = await _observe_premium(user_id, mono=mono)
     if not isinstance(verdict, PremiumGranted):
         # ⛔ premium 없음/불가 → **entitlement 조회 0회**.
         # ⚠️ 여기서 `Granted` 로 검사하면 안 된다 — `classify_premium` 은 **중간 타입**을

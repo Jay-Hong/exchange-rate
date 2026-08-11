@@ -3,12 +3,16 @@
 ⛔ 이 모듈은 한때 **테스트 0건**으로 추가됐다 — 그 상태로 dispatcher 에 배선하면
 판정 로직이 검증 없이 보안 경계에 들어간다.
 """
+import ast
+import pathlib
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy import exc as sqlalchemy_exc
 
 from app import subscription, topic_authorization as ta
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 class _Clock:
@@ -187,6 +191,104 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
             verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
         self.assertIs(verdict.kind, ta.UnavailableKind.TRANSIENT)
         session_factory.assert_not_called()
+
+
+class TestPremiumOnlyEntryPoint(unittest.IsolatedAsyncioTestCase):
+    """R-GATE-1 의 판정 진입점 — premium 만 보고 topic 을 모른다.
+
+    ⛔ 이 클래스가 잠그는 것은 "동작이 있다" 가 아니라 **KRX 판정기와의 분리**다.
+       한 함수에 묶여 있으면 FX/USDT 에 premium 을 요구하려는 사람이 `gated` 집합을
+       넓히는 잘못된 길로 간다 — 그러면 분류 loop 가 하나의 verdict 를 gated 전체에
+       적용해 KRX 판정이 다른 상품으로 샌다.
+    """
+
+    def _patch_rc(self, result):
+        return patch("app.subscription.fetch_revenuecat_result",
+                     new=AsyncMock(return_value=result))
+
+    async def test_it_runs_even_when_the_gated_set_is_not_krx(self):
+        """⛔ 이게 이 추출의 **존재 이유**다.
+
+        `authorize_gated_subscription` 은 첫 줄이 `assert_single_gated_topic()` 이라
+        gated 집합이 바뀌는 순간 `RuntimeError` 로 죽는다. premium 축은 그 지식과
+        무관해야 하므로, 집합을 바꿔 놓고도 판정이 나와야 한다.
+        """
+        with patch("app.topic_initial_snapshot.per_user_gated_snapshot_topics",
+                   return_value=frozenset({"krx:usd-krw-futures", "fx:usd-krw"})):
+            with self.assertRaises(RuntimeError):      # 대조군 — 옛 경로는 죽는다
+                await ta.authorize_gated_subscription("u1", mono=_Clock())
+            with self._patch_rc(subscription.Determined(is_premium=True)):
+                verdict = await ta.authorize_premium_subscription("u1", mono=_Clock())
+        self.assertIsInstance(verdict, ta.PremiumGranted)
+
+    async def test_it_never_touches_the_entitlement_database(self):
+        """⛔ premium ⊥ entitlement — FX/USDT 는 상품 자격만 요구한다."""
+        session_factory = MagicMock()
+        with self._patch_rc(subscription.Determined(is_premium=True)), \
+             patch("app.database.SessionLocal", new=session_factory):
+            verdict = await ta.authorize_premium_subscription("u1", mono=_Clock())
+        self.assertIsInstance(verdict, ta.PremiumGranted)
+        session_factory.assert_not_called()
+
+    async def test_absent_premium_is_a_per_topic_denial(self):
+        with self._patch_rc(subscription.Determined(is_premium=False)):
+            verdict = await ta.authorize_premium_subscription("u1", mono=_Clock())
+        self.assertEqual(verdict, ta.Denied("premium_required"))
+
+    def test_it_has_no_production_caller_yet(self):
+        """⛔ 호출자가 0이라 **도달 불가능**하다 — 그래서 flag 없이 land 해도 동작 변화가 0이다.
+
+        호출자가 생기는 순간 빨강이 되어, 붙이는 사람이 강제 flag·무토큰 처리·
+        `premium ⇒ auth` 불변식을 **함께** 설계하게 만든다.
+
+        ⛔ 1차 판은 `subprocess.run(["grep", ...])` 이었고 **fail-open** 이었다:
+           반환 코드를 안 봐서 grep 이 실패하면 빈 출력 → 통과였고, `__pycache__` 의
+           .pyc 까지 잡아 거짓 빨강도 났다. 그리고 grep 은 *텍스트 등장*을 볼 뿐
+           **호출**을 보지 못한다 — docstring 안 이름도 같은 무게로 잡힌다.
+           그래서 AST 로 `ast.Call` 만 본다. **스캔 파일 수도 함께 단언**한다 —
+           0개를 스캔하고 "호출자 없음" 이라 말하는 것이 이 검사의 공허한 통과다.
+        """
+        scanned, callers = 0, []
+        for path in sorted((REPO / "app").rglob("*.py")):
+            scanned += 1
+            tree = ast.parse(path.read_text(errors="replace"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (func.id if isinstance(func, ast.Name)
+                        else func.attr if isinstance(func, ast.Attribute) else None)
+                if name == "authorize_premium_subscription":
+                    callers.append(f"{path.relative_to(REPO)}:{node.lineno}")
+
+        self.assertGreater(scanned, 0, "app/ 에서 아무 파일도 스캔하지 못했다 — 검사가 공허하다")
+        self.assertEqual(
+            callers, [],
+            "authorize_premium_subscription 에 호출자가 생겼다 — R-GATE-1 강제를 붙이는 "
+            "슬라이스라면 이 테스트를 그 계약으로 교체하라:\n" + "\n".join(callers),
+        )
+
+
+class TestGatedSubscriptionCallsRevenueCatOnce(unittest.IsolatedAsyncioTestCase):
+    """추출 characterization — RC 왕복이 요청당 **정확히 1회**여야 한다.
+
+    ⛔ 추출은 helper 를 한 번 더 부르는 실수를 쉽게 만든다. 외부 HTTP 가 2회면 지연이
+       두 배가 되고 **관측 시각이 둘로 갈려** lease horizon 이 topic 별로 어긋난다.
+    """
+
+    async def test_exactly_one_roundtrip_per_authorization(self):
+        rc = AsyncMock(return_value=subscription.Determined(is_premium=True))
+        with patch("app.subscription.fetch_revenuecat_result", new=rc), \
+             patch("app.database.SessionLocal", new=MagicMock()), \
+             patch("app.entitlements.has_entitlement", return_value=True):
+            await ta.authorize_gated_subscription("u1", mono=_Clock())
+        self.assertEqual(rc.await_count, 1, "RevenueCat 왕복이 1회가 아니다")
+
+    async def test_premium_only_path_also_makes_exactly_one_roundtrip(self):
+        rc = AsyncMock(return_value=subscription.Determined(is_premium=True))
+        with patch("app.subscription.fetch_revenuecat_result", new=rc):
+            await ta.authorize_premium_subscription("u1", mono=_Clock())
+        self.assertEqual(rc.await_count, 1)
 
 
 class TestSingleGatedTopicTripwire(unittest.TestCase):
