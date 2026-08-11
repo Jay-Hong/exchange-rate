@@ -74,6 +74,38 @@ iOS 근거는 source locator 규약(`XCTestCase/testMethod` · 클래스 본문 
 ⚠️ 구조 검사와 reviewer 기록은 자연어 의미가 참임을 기계적으로 증명하지 않는다. 특히 deploy reference는
 외부 시스템에서 dereference하지 않는다. `verified` reviewer가 근거와 RID 주장 사이의 의미 적합성을 책임진다.
 
+### ⚠️ pin 된 인용 경로 11개는 사실상 읽기 전용이다 (2026-08-11 실측)
+
+`preflight` 의 `E_CODECHANGED` 는 **경로 단위**로 검사한다 — 인용된 파일이 pin 이후 한 줄이라도
+바뀌면 빨강이다. 그래서 아래 경로들은 **재-baseline 없이는 수정할 수 없다**:
+
+```
+  CLAUDE.md
+  app/auth_executor.py
+  app/database.py
+  app/fx_topic_publisher.py
+  app/latest_rates_cache.py
+  app/legacy_policy.py
+  app/main.py
+  app/topic_dispatcher.py
+  app/topic_initial_snapshot.py
+  app/topic_wire.py
+  nginx/conf.d/default.conf
+```
+
+pin 은 `spec/topic-only.lock.json` **과** 동결 manifest **양쪽**에 박혀 있어(`E_PINNED`),
+옮기려면 manifest → lock → 이행 대장 `manifest_sha256` 까지 연쇄 갱신 = 마이그레이션 전체
+재-baseline 이다. **작은 문서 수정 때문에 할 일이 아니다.**
+
+⛔ **미해소로 남긴 것**: `CLAUDE.md` 의 2026-06-11 CI 항목이 `paths-ignore ['**.md']`(docs-only
+skip)를 현행 설정으로 기술하는데 **이제 거짓이다**(이 커밋에서 제거). 문서 영향 분석이 잡았지만
+in-place 수정이 위 제약에 걸려 보류했다 — 고치려면 재-baseline 을 별도 작업으로 해야 한다.
+그때까지 **CI 동작의 정본은 `.github/workflows/tests.yml` 과 이 절**이다.
+
+⛔ **B3-op 인용의 성격 주의**: baseline 은 `CLAUDE.md` 를 *기록 근거*로 인용한다(코드 아님).
+그런데 경로 단위 검사는 "인용된 사실이 바뀌었다" 와 "무관한 줄이 바뀌었다" 를 구분하지 못한다.
+과잉 차단이지만 **fail-closed 방향**이라 그대로 둔다.
+
 초기값 `unreviewed` 는 의도다 — 76건 분류가 끝날 때까지 구현을 막지 않는다.
 
 ## ⛔ 절 단위 배정 표는 **삭제했다** — routing 정본은 `spec/topic-only-migration-manifest.json` 하나다
