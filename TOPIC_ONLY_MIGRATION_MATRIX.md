@@ -97,10 +97,12 @@ pin 은 `spec/topic-only.lock.json` **과** 동결 manifest **양쪽**에 박혀
 옮기려면 manifest → lock → 이행 대장 `manifest_sha256` 까지 연쇄 갱신 = 마이그레이션 전체
 재-baseline 이다. **작은 문서 수정 때문에 할 일이 아니다.**
 
-⛔ **미해소로 남긴 것**: `CLAUDE.md` 의 2026-06-11 CI 항목이 `paths-ignore ['**.md']`(docs-only
-skip)를 현행 설정으로 기술하는데 **이제 거짓이다**(이 커밋에서 제거). 문서 영향 분석이 잡았지만
-in-place 수정이 위 제약에 걸려 보류했다 — 고치려면 재-baseline 을 별도 작업으로 해야 한다.
-그때까지 **CI 동작의 정본은 `.github/workflows/tests.yml` 과 이 절**이다.
+✅ **CI 서술 drift 해소**: `CLAUDE.md` 의 2026-06-11 항목대로 전체 pytest workflow
+(`.github/workflows/tests.yml`)는 Markdown-only 변경을 다시 건너뛴다. 대신
+`.github/workflows/topic-only-docs.yml` 이 모든 Markdown 변경에서 provenance와 topic-only 문서·원장
+게이트만 실행한다. 따라서 pin 된 `CLAUDE.md`를 재-baseline 하지 않고도 기존 서술과 현행 동작을
+일치시켰다. 두 workflow의 iOS provenance 검사는 앱 runtime secret과 별개로 read-only deploy key
+`TOPIC_MIGRATION_IOS_DEPLOY_KEY`를 요구한다.
 
 ⛔ **B3-op 인용의 성격 주의**: baseline 은 `CLAUDE.md` 를 *기록 근거*로 인용한다(코드 아님).
 그런데 경로 단위 검사는 "인용된 사실이 바뀌었다" 와 "무관한 줄이 바뀌었다" 를 구분하지 못한다.

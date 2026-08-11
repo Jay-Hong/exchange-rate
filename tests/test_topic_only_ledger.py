@@ -42,7 +42,8 @@ import topic_migration_manifest as MIGRATION  # noqa: E402
 IOS = MIGRATION.provenance_root("ios")
 MANIFEST = REPO / "spec" / "topic-only-migration-manifest.json"
 LEDGER = REPO / "spec" / "topic-only-implementation-ledger.json"
-WORKFLOW = REPO / ".github" / "workflows" / "tests.yml"
+FULL_WORKFLOW = REPO / ".github" / "workflows" / "tests.yml"
+DOC_WORKFLOW = REPO / ".github" / "workflows" / "topic-only-docs.yml"
 
 STATUSES = {"unreviewed", "non_actionable", "todo", "in_progress", "done", "verified"}
 ACTIONABLE_STATUSES = {"todo", "in_progress", "done", "verified"}
@@ -1003,13 +1004,80 @@ def test_transient_pytest_collection_failure_is_not_cached(monkeypatch):
     assert attempts == 2
 
 
-def test_ci_preserves_ios_history_and_runs_for_markdown_changes():
-    workflow = WORKFLOW.read_text()
+def test_ci_skips_full_suite_but_runs_topic_gate_for_markdown_changes():
+    full_workflow = FULL_WORKFLOW.read_text()
+    doc_workflow = DOC_WORKFLOW.read_text()
+    assert full_workflow.count("paths-ignore: ['**.md']") == 2
+    assert doc_workflow.count("paths:\n      - '**.md'") == 2
+    assert "paths-ignore" not in doc_workflow
+
     ios_checkout = re.search(
         r"- name: Checkout pinned iOS provenance repository(?P<body>.*?)(?=\n\s+- uses: actions/setup-python)",
-        workflow,
+        doc_workflow,
         re.S,
     )
     assert ios_checkout is not None
     assert re.search(r"^\s+fetch-depth:\s*0\s*$", ios_checkout.group("body"), re.M)
-    assert "paths-ignore" not in workflow
+    assert "python scripts/topic_migration_manifest.py preflight" in doc_workflow
+    expected_tests = {
+        "tests/test_adr041_grounds.py",
+        "tests/test_document_citations.py",
+        "tests/test_topic_migration_doc_bundle.py",
+        "tests/test_topic_migration_launcher.py",
+        "tests/test_topic_migration_validator.py",
+        "tests/test_topic_only_documents.py",
+        "tests/test_topic_only_ledger.py",
+        "tests/test_topic_only_semantic_review.py",
+    }
+    assert all(test_path in doc_workflow for test_path in expected_tests)
+
+
+def _modules_reading_repo_markdown() -> set[str]:
+    """리포의 `.md` 파일을 **실제로 여는** 테스트 모듈. docstring 언급은 제외한다."""
+    import ast
+
+    found = set()
+    for path in sorted((REPO / "tests").glob("test_*.py")):
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:  # 파싱 불가 모듈은 판단하지 않는다(조용히 넘기지 않고 이름을 남긴다)
+            found.add(path.name)
+            continue
+        docstrings = {
+            doc
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and (doc := ast.get_docstring(node))
+        }
+        literals = {
+            n.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+        if {x for x in literals - docstrings if x.endswith(".md")}:
+            found.add(path.name)
+    return found
+
+
+def test_docs_gate_covers_every_markdown_reading_test():
+    """⛔ 전체 suite 가 `**.md` 를 skip 하므로, **문서를 읽는 테스트는 문서 게이트가 돌려야 한다.**
+
+    실측 사례: `test_topic_wire`(REALTIME_V2_CLIENT_GUIDE.md 핸드오프 계약)와
+    `test_ws_message_limit`(DOCKER.md 의 Dockerfile CMD 복제본)이 목록에서 빠져 있었다.
+    docs-only 커밋이 그 두 문서를 바꾸면 어느 워크플로도 돌지 않는다.
+
+    ⛔ 손으로 유지하는 목록은 반드시 어긋난다 — 그래서 **도출값과 대조**한다.
+    """
+    # ⛔ 파일 전체를 grep 하면 **실행되지 않는 자리**(주석·주변 줄)에 이름만 있어도 통과한다.
+    #    실측: 두 모듈을 명령 밖에 잘못 넣었는데 이 검사가 초록이었다. 실행 명령만 본다.
+    doc_workflow = DOC_WORKFLOW.read_text()
+    command = re.search(r"python -m pytest\b(?P<args>(?:[^\n]*\\\n)*[^\n]*)", doc_workflow)
+    assert command is not None, "문서 게이트에 pytest 실행 명령이 없다"
+    joined = re.sub(r"\\\s*\n\s*", " ", command.group("args"))
+    listed = set(re.findall(r"tests/(test_[a-z_0-9]+\.py)", joined))
+    missing = sorted(_modules_reading_repo_markdown() - listed)
+    assert not missing, (
+        "리포 Markdown 을 읽는데 문서 게이트가 돌리지 않는 모듈:\n"
+        + "\n".join(f"  {m}" for m in missing)
+        + "\n→ .github/workflows/topic-only-docs.yml 의 pytest 목록에 추가하라"
+    )

@@ -1,0 +1,62 @@
+name: topic-only-docs
+
+# 전체 pytest workflow는 docs-only 변경을 건너뛴다. Markdown 안의 RID/근거 anchor는
+# 이 경량 workflow에서 별도로 검사해 CLAUDE.md의 기존 CI 계약과 문서 게이트를 함께 지킨다.
+on:
+  push:
+    branches: [master]
+    paths:
+      - '**.md'
+  pull_request:
+    paths:
+      - '**.md'
+
+concurrency:
+  group: topic-only-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Provenance checks inspect the pinned parent commit, not just HEAD.
+          fetch-depth: 0
+      - name: Checkout pinned iOS provenance repository
+        uses: actions/checkout@v6
+        with:
+          repository: Jay-Hong/fxi-ios
+          ref: 8aadc2fb66be926a809d6e1bc5dff42951f15a7a
+          path: ios
+          fetch-depth: 0
+          ssh-key: ${{ secrets.TOPIC_MIGRATION_IOS_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            requirements-test.txt
+      - run: pip install -r requirements.lock.txt -r requirements-test.txt
+      - name: Verify topic-only pinned provenance
+        run: python scripts/topic_migration_manifest.py preflight
+        env:
+          TOPIC_MIGRATION_IOS_ROOT: ${{ github.workspace }}/ios
+      - name: Validate topic-only documents and ledgers
+        run: |
+          python -m pytest -q \
+            tests/test_adr041_grounds.py \
+            tests/test_document_citations.py \
+            tests/test_topic_migration_doc_bundle.py \
+            tests/test_topic_migration_launcher.py \
+            tests/test_topic_migration_validator.py \
+            tests/test_topic_only_documents.py \
+            tests/test_topic_only_ledger.py \
+            tests/test_topic_only_semantic_review.py \
+            tests/test_topic_wire.py \
+            tests/test_ws_message_limit.py
+        env:
+          TOPIC_MIGRATION_IOS_ROOT: ${{ github.workspace }}/ios
