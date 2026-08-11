@@ -104,6 +104,12 @@ pin 은 `spec/topic-only.lock.json` **과** 동결 manifest **양쪽**에 박혀
 일치시켰다. 두 workflow의 iOS provenance 검사는 앱 runtime secret과 별개로 read-only deploy key
 `TOPIC_MIGRATION_IOS_DEPLOY_KEY`를 요구한다.
 
+⚠️ 문서 게이트의 테스트 목록은 **명시적 10개가 정본**이다. AST 검사는 docstring을 제외한 `.md`
+문자열 리터럴 후보가 목록에서 빠지는지만 잡는 보조 tripwire이며, 실제 파일 open 완전성은 증명하지
+않는다. import된 경로 상수·다른 모듈의 import-time read·동적 조합은 놓칠 수 있다(실측:
+`test_topic_migration_launcher.py`, `test_topic_only_documents.py`). 새 문서 의존 테스트를 추가할 때는
+`.github/workflows/topic-only-docs.yml`과 명시 목록을 함께 review해야 한다.
+
 ⛔ **B3-op 인용의 성격 주의**: baseline 은 `CLAUDE.md` 를 *기록 근거*로 인용한다(코드 아님).
 그런데 경로 단위 검사는 "인용된 사실이 바뀌었다" 와 "무관한 줄이 바뀌었다" 를 구분하지 못한다.
 과잉 차단이지만 **fail-closed 방향**이라 그대로 둔다.

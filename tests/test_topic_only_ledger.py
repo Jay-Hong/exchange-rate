@@ -44,6 +44,18 @@ MANIFEST = REPO / "spec" / "topic-only-migration-manifest.json"
 LEDGER = REPO / "spec" / "topic-only-implementation-ledger.json"
 FULL_WORKFLOW = REPO / ".github" / "workflows" / "tests.yml"
 DOC_WORKFLOW = REPO / ".github" / "workflows" / "topic-only-docs.yml"
+DOC_GATE_TESTS = {
+    "test_adr041_grounds.py",
+    "test_document_citations.py",
+    "test_topic_migration_doc_bundle.py",
+    "test_topic_migration_launcher.py",
+    "test_topic_migration_validator.py",
+    "test_topic_only_documents.py",
+    "test_topic_only_ledger.py",
+    "test_topic_only_semantic_review.py",
+    "test_topic_wire.py",
+    "test_ws_message_limit.py",
+}
 
 STATUSES = {"unreviewed", "non_actionable", "todo", "in_progress", "done", "verified"}
 ACTIONABLE_STATUSES = {"todo", "in_progress", "done", "verified"}
@@ -1019,21 +1031,17 @@ def test_ci_skips_full_suite_but_runs_topic_gate_for_markdown_changes():
     assert ios_checkout is not None
     assert re.search(r"^\s+fetch-depth:\s*0\s*$", ios_checkout.group("body"), re.M)
     assert "python scripts/topic_migration_manifest.py preflight" in doc_workflow
-    expected_tests = {
-        "tests/test_adr041_grounds.py",
-        "tests/test_document_citations.py",
-        "tests/test_topic_migration_doc_bundle.py",
-        "tests/test_topic_migration_launcher.py",
-        "tests/test_topic_migration_validator.py",
-        "tests/test_topic_only_documents.py",
-        "tests/test_topic_only_ledger.py",
-        "tests/test_topic_only_semantic_review.py",
-    }
-    assert all(test_path in doc_workflow for test_path in expected_tests)
+    listed = set(re.findall(r"tests/(test_[a-z_0-9]+\.py)", doc_workflow))
+    assert DOC_GATE_TESTS <= listed
 
 
-def _modules_reading_repo_markdown() -> set[str]:
-    """리포의 `.md` 파일을 **실제로 여는** 테스트 모듈. docstring 언급은 제외한다."""
+def _modules_with_markdown_literals() -> set[str]:
+    """Return a conservative tripwire for tests containing Markdown path literals.
+
+    This does not prove that a module opens the path, and it cannot see paths
+    imported from another module or assembled dynamically. The explicit
+    ``DOC_GATE_TESTS`` set remains the reviewed contract.
+    """
     import ast
 
     found = set()
@@ -1059,14 +1067,16 @@ def _modules_reading_repo_markdown() -> set[str]:
     return found
 
 
-def test_docs_gate_covers_every_markdown_reading_test():
-    """⛔ 전체 suite 가 `**.md` 를 skip 하므로, **문서를 읽는 테스트는 문서 게이트가 돌려야 한다.**
+def test_docs_gate_covers_markdown_literal_candidates():
+    """직접 Markdown 리터럴 후보가 문서 게이트에서 빠지면 차단한다.
 
     실측 사례: `test_topic_wire`(REALTIME_V2_CLIENT_GUIDE.md 핸드오프 계약)와
     `test_ws_message_limit`(DOCKER.md 의 Dockerfile CMD 복제본)이 목록에서 빠져 있었다.
     docs-only 커밋이 그 두 문서를 바꾸면 어느 워크플로도 돌지 않는다.
 
-    ⛔ 손으로 유지하는 목록은 반드시 어긋난다 — 그래서 **도출값과 대조**한다.
+    ⛔ 이것은 완전성 증명이 아니다. `test_topic_migration_launcher`처럼 import 과정에서
+    다른 모듈이 Markdown을 읽거나 `test_topic_only_documents`처럼 import된 경로 상수를
+    쓰는 경우는 이 AST tripwire가 보지 못한다. 그런 의존성은 명시 목록과 review가 책임진다.
     """
     # ⛔ 파일 전체를 grep 하면 **실행되지 않는 자리**(주석·주변 줄)에 이름만 있어도 통과한다.
     #    실측: 두 모듈을 명령 밖에 잘못 넣었는데 이 검사가 초록이었다. 실행 명령만 본다.
@@ -1075,9 +1085,9 @@ def test_docs_gate_covers_every_markdown_reading_test():
     assert command is not None, "문서 게이트에 pytest 실행 명령이 없다"
     joined = re.sub(r"\\\s*\n\s*", " ", command.group("args"))
     listed = set(re.findall(r"tests/(test_[a-z_0-9]+\.py)", joined))
-    missing = sorted(_modules_reading_repo_markdown() - listed)
+    missing = sorted(_modules_with_markdown_literals() - listed)
     assert not missing, (
-        "리포 Markdown 을 읽는데 문서 게이트가 돌리지 않는 모듈:\n"
+        "Markdown 경로 리터럴 후보가 있는데 문서 게이트가 돌리지 않는 모듈:\n"
         + "\n".join(f"  {m}" for m in missing)
         + "\n→ .github/workflows/topic-only-docs.yml 의 pytest 목록에 추가하라"
     )
