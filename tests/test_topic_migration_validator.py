@@ -4,6 +4,7 @@
 """
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -53,8 +54,11 @@ def test_mutation_corpus_anchors_are_unique():
 
 def test_migration_validator_is_not_vacuous():
     """대조군 통과 + 전 반례가 **의도한 오류 코드**로 차단되는지."""
+    env = dict(os.environ)
+    # 이 자식은 default sibling 분기의 대조군도 검사한다. CI override 자체는 위 테스트가 맡는다.
+    env.pop(_validator_module().IOS_ROOT_ENV, None)
     r = subprocess.run(
         [sys.executable, str(REPO / "scripts" / "test_topic_migration_manifest.py")],
-        capture_output=True, text=True, cwd=str(REPO),
+        capture_output=True, text=True, cwd=str(REPO), env=env,
     )
     assert r.returncode == 0, f"반례 테스트 실패:\n{r.stdout}\n{r.stderr}"
