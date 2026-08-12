@@ -3,11 +3,11 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `882d92bc8f220abbd96ffc74d2f063de6844d463`
+- server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85`
-- baseline SHA: `9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c`
+- manifest SHA: `4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955`
+- baseline SHA: `93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > **이 문서의 몫**: 클라이언트가 **구조적으로 판별할 수 없는** publisher 침묵을 무엇으로 덮는가 —
@@ -37,14 +37,14 @@
 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT
 coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초
 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다
-(`app/scheduler.py:1402-1412` · `app/main.py:881-904`).
+(`app/scheduler.py:1402-1412` · `app/main.py:887-910`).
 
 **구멍이 어디서 생기는가.** 서버는 registry 등록과 ack 를 먼저 끝낸 뒤 initial snapshot 을 만들고,
 build 가 실패하거나 `None` 이면 **연결을 유지한 채 조용히 skip** 한다
 ([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)). 그래서 **연결·pong·ack·lease 가 전부 정상인데
 snapshot 이 한 번도 오지 않는 상태**가 실제로 표현된다. 그 뒤 **정상 발행되던 publisher 가 죽는
 경우**도 마찬가지로 침묵으로만 관측된다 — publisher 모듈에는 timer 가 없고(baseline B1), 외부
-caller 도 변경이 있을 때만 publish 한다(`app/main.py:881-904`). transport ping/pong 은 **연결
+caller 도 변경이 있을 때만 publish 한다(`app/main.py:887-910`). transport ping/pong 은 **연결
 생존만** 증명하지 특정 topic publisher 의 생존을 증명하지 않는다.
 
 코드 근거: baseline **B1**(data-plane heartbeat·주기적 재발행 부재) · **D3**(snapshot build
@@ -73,7 +73,7 @@ caller 도 변경이 있을 때만 publish 한다(`app/main.py:881-904`). transp
 [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택
 여부와 **무관하다**.
 판별 불가의 코드 근거: baseline **D3**(snapshot build 실패/`None` 을 연결 유지 상태로 격리)
-· **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:881-904`(외부 caller 도 변경 시에만 publish).
+· **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:887-910`(외부 caller 도 변경 시에만 publish).
 
 **시장 세션을 반영한 _인과 기반_ publisher health / SLO** + **수치화된 탐지·대응 시간**
 
@@ -101,7 +101,7 @@ raw trigger 뒤 publish 가 없는 **정상 결과**다. **eligible flush(would-
 다만 그 모듈은 운영 live 진입점에 연결되지 않은 상태다(`app/atomic_fx_live.py:9-13` ·
 `tests/test_atomic_fx_live.py:323-350`). 따라서 정확한
 현재 사실은 **호출 구문 0이 아니라 운영 live 배선 0**이다. 또한 lease 게이트 뒤 대상이 비면
-`attempted=0` 하나로 반환하므로(`app/topic_dispatcher.py:321-334`), "전원 lease 만료"와 "구독자 0"이
+`attempted=0` 하나로 반환하므로(`app/topic_dispatcher.py:324-337`), "전원 lease 만료"와 "구독자 0"이
 **합쳐진다** — `no-eligible-lease` 와 `no-subscriber` 를 가르려면 그 분리가 선행이다.
 <!-- /rid: R-HLT-3 -->
 

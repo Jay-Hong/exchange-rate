@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `882d92bc8f220abbd96ffc74d2f063de6844d463`
+- server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85`
-- baseline SHA: `9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c`
+- manifest SHA: `4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955`
+- baseline SHA: `93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -38,16 +38,16 @@
 뿐이다**.
 
 격차의 내용은 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다 — **per-user 판정 대상은 KRX
-하나뿐**이고(`per_user_gated_snapshot_topics` — `app/topic_initial_snapshot.py:95-105`),
+하나뿐**이고(`per_user_gated_snapshot_topics` — `app/topic_initial_snapshot.py:95-108`),
 토큰이 있어도 FX/USDT 는 premium 판정 없이 `free_accepted` 로 들어간다
-(`app/topic_dispatcher.py:663-674`). 반면 REST twin 은 premium 을 실제로 강제한다
-(`app/main.py:3052-3055`, ADR-039 §8.1 E3).
+(`app/topic_dispatcher.py:666-676`). 반면 REST twin 은 premium 을 실제로 강제한다
+(`app/main.py:3058-3061`, ADR-039 §8.1 E3).
 
 ⚠️ **부분 갱신(2026-08-12)**: 익명(미식별) 축만 `WS_TOPIC_AUTH_STAGE` 로 갈린다 —
 `compatibility`(기본) 는 구 동작 보존, `reject_anonymous_fx` 는 무료 집합에서 canonical FX 만
-조용히 제외한다. 근거는 stage 정의·코드 기본값 `app/config.py:645-680` · 필터 정책
-`app/topic_auth_rollout.py:170-183` · 필터 호출과 등록 `app/topic_dispatcher.py:543-565` ·
-production 주입 `app/main.py:296-302` 다. **이 슬라이스는 차단 경로를 구현했을 뿐** 운영 stage 는
+조용히 제외한다. 근거는 stage 정의·코드 기본값 `app/config.py:645-688` · 필터 정책
+`app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` ·
+production 주입 `app/main.py:302-308` 다. **이 슬라이스는 차단 경로를 구현했을 뿐** 운영 stage 는
 미실측이며, premium 축과 USDT 는 잔존한다.
 
 <!-- relation: references target=R-INV-1 -->
@@ -102,9 +102,9 @@ premium / KRX = premium + entitlement**)는, [R-INV-4](../DECISIONS.md#r-inv-4) 
 **연결·pong·ack·lease 가 전부 정상인데 snapshot 이 한 번도 오지 않는 구멍 (출시 차단)**
 
 서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다
-(`app/topic_dispatcher.py:757-786`; baseline D5).
+(`app/topic_dispatcher.py:737-818`; baseline D5).
 그리고 snapshot build 가 실패하거나 `None` 이면 **연결을 유지한 채 조용히 skip** 한다
-(`app/topic_initial_snapshot.py:277-307`; baseline D3). FX publisher 도 build/publish **전** 예외를
+(`app/topic_initial_snapshot.py:296-326`; baseline D3). FX publisher 도 build/publish **전** 예외를
 격리하고 `False` 만 반환한다(`app/fx_topic_publisher.py:291-323`).
 
 → **연결·pong·ack·lease 가 전부 정상인데 snapshot 이 한 번도 오지 않는 상태**가 실제로 표현된다.
@@ -122,7 +122,7 @@ premium / KRX = premium + entitlement**)는, [R-INV-4](../DECISIONS.md#r-inv-4) 
 ⛔ **"ack 전에 전부 build 한다"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 —
 ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다),
 ② **"지원되지만 아직 데이터가 없음"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을
-유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:255-256`), iOS 모델은
+유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:274-275`), iOS 모델은
 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`).
 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**
 
@@ -189,7 +189,7 @@ premium / KRX = premium + entitlement**)는, [R-INV-4](../DECISIONS.md#r-inv-4) 
 - ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *"build 총예산 < iOS 20초"* 라고 썼는데 **틀렸다** —
   iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라
   그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤
-  `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:769-786`).
+  `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:801-818`).
 
 넷 중 서버가 소유하는 둘은 [R-HAND-13](#r-hand-13)·[R-HAND-14](#r-hand-14) 이고, 클라가 소유하는
 둘은 [R-CLI-17](ios-topic-state-machine.md#r-cli-17)·[R-CLI-20](ios-topic-state-machine.md#r-cli-20) 이다.
@@ -280,7 +280,7 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 ### R-HAND-4
 
 - ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다.
-  현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:277-297`). 따라서 서버
+  현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:296-316`). 따라서 서버
   절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.
 <!-- /rid: R-HAND-4 -->
 
@@ -308,7 +308,7 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 `topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) —
 *"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는
 '연결이 죽었다'의 동의어가 아니다."*
-**앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:651`)
+**앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:655`)
 — 16KB 초과는 transport 가 1009 로 닫지만 그건 앱 정책이 아니다.
 이 부정 사실은 고정 server commit 의 `app/main.py`·`app/topic_dispatcher.py`에서 WebSocket
 `close(` 호출을 전수 검색해 확인했다(collector DB의 `close()`는 범위 밖).

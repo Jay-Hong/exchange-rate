@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1198` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1204` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
 
 ## B. publish 의미론
 
@@ -54,37 +54,41 @@
 
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
-  stage 정의·엄격 파서·코드 기본값 `app/config.py:645-680` · stage 별 필터 정책
-  `app/topic_auth_rollout.py:170-183` · 필터 호출과 등록 `app/topic_dispatcher.py:543-565` ·
-  production 주입 `app/main.py:296-302`.
+  stage 정의·엄격 파서·코드 기본값 `app/config.py:645-688` · **정책 정본**
+  `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
+  `app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` ·
+  production 주입 `app/main.py:302-308`.
+  ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
+  모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
+  `reject_anonymous_fx` 에서 값이 갈리므로 함수가 둘이다).
   - `compatibility` — 무료 topic 등록 + snapshot, ack 없음(구 동작 보존).
   - `reject_anonymous_fx` — 무료 집합에서 **canonical FX 만** 조용히 제외. USDT 는 유지되고
     FX-only 요청은 등록·응답 모두 0이다. 익명 unsubscribe 는 stage 와 무관하게 기존 경로를
-    그대로 탄다(`app/topic_dispatcher.py:787-812`).
+    그대로 탄다(`app/topic_dispatcher.py:819-845`).
   ⚠️ 두 stage 모두 **익명 subscribe 시도를 계측**한다 — 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다
-     앞이라(`app/topic_dispatcher.py:505-513`) flag-off 운영 상태에서도 값이 쌓인다.
+     앞이라(`app/topic_dispatcher.py:509-517`) flag-off 운영 상태에서도 값이 쌓인다.
 - **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
   per-user 판정 대상은 **KRX 뿐**.
-- **C3 [코드]** `exchange-rate/app/main.py:3017` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3052` `verify_firebase_token(request)` → `app/main.py:3055`
+- **C3 [코드]** `exchange-rate/app/main.py:3023` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3058` `verify_firebase_token(request)` → `app/main.py:3061`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 
 ## D. 실패 경로
 
-- **D1 [코드]** `app/topic_dispatcher.py:148` `remove_websocket` — docstring:
+- **D1 [코드]** `app/topic_dispatcher.py:151` `remove_websocket` — docstring:
   *"publish 송신 실패 격리에서 호출된다 … '연결이 죽었다'의 동의어가 아니다"*.
-- **D2 [코드]** `app/topic_dispatcher.py:208` `leased_subscribers` — 만료 lease 를
+- **D2 [코드]** `app/topic_dispatcher.py:211` `leased_subscribers` — 만료 lease 를
   **전송 직전에만** 필터. registry 제거·클라 통지 없음.
   ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
   이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
   그 경로를 같은 함수에 태운다.
-- **D3 [코드]** `app/topic_initial_snapshot.py:300` — build 실패를 `logger.warning` 후 **격리**,
+- **D3 [코드]** `app/topic_initial_snapshot.py:319` — build 실패를 `logger.warning` 후 **격리**,
   연결 유지. `None`(flag off)도 조용히 skip.
-- **D4 [결정]** `app/topic_dispatcher.py:364` §8-B-term —
+- **D4 [결정]** `app/topic_dispatcher.py:367` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
-- **D6 [코드]** `app/topic_initial_snapshot.py:320` — initial snapshot 도 **전송 직전**에
+- **D6 [코드]** `app/topic_initial_snapshot.py:339` — initial snapshot 도 **전송 직전**에
   `leased_subscribers(topic)` 멤버십을 다시 본다(`882d92b`). 게이트에 걸리면 **해당 topic skip**
   이고 연결 실패가 아니다.
   **D6-inf [추론]** ⇒ 검사가 build **뒤**여야 하는 이유는 `_build_snapshot_sync` 가 `to_thread`
@@ -96,7 +100,7 @@
 
 - **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2` (**최대 5**).
   주석: *"RDS db.t4g.micro 메모리 절약"*.
-- **E2 [코드]** `app/topic_initial_snapshot.py:297` —
+- **E2 [코드]** `app/topic_initial_snapshot.py:316` —
   `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)`.
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)

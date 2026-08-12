@@ -15,14 +15,20 @@
           "lock, manifest, output-header, and implementation-ledger changes",
           "S2a C1 implementation at 882d92b: post-build pre-send reuse of the shared lease gate, plus five regression tests",
           "S2a C1 implementer-supplied mutation evidence: gate removal, naive get_lease replacement, and continue-to-break controls",
-          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain"
+          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain",
+          "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
+          "S2c shortcut-path regression locking the resolve-level entitlement guard",
+          "S2c C2 re-baseline: citation remap including four semantic rewrites, lock, manifest, headers, and the derived provenance chain"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
           "60-entry claim-ledger regeneration",
           "safe repo-local pinned-commit negative control",
           "S2a defect discovery during the premium-axis design review: initial snapshots bypassed the shared lease gate",
-          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation"
+          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation",
+          "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
+          "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
+          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary"
         ]
       },
       {
@@ -36,14 +42,20 @@
           "60-entry claim-ledger regeneration",
           "safe repo-local pinned-commit negative control",
           "S2a defect discovery during the premium-axis design review: initial snapshots bypassed the shared lease gate",
-          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation"
+          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation",
+          "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
+          "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
+          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
           "lock, manifest, output-header, and implementation-ledger changes",
           "S2a C1 implementation at 882d92b: post-build pre-send reuse of the shared lease gate, plus five regression tests",
           "S2a C1 implementer-supplied mutation evidence: gate removal, naive get_lease replacement, and continue-to-break controls",
-          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain"
+          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain",
+          "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
+          "S2c shortcut-path regression locking the resolve-level entitlement guard",
+          "S2c C2 re-baseline: citation remap including four semantic rewrites, lock, manifest, headers, and the derived provenance chain"
         ]
       }
     ],
@@ -56,7 +68,10 @@
           "lock, manifest, output-header, and implementation-ledger changes",
           "S2a C1 implementation at 882d92b: post-build pre-send reuse of the shared lease gate, plus five regression tests",
           "S2a C1 implementer-supplied mutation evidence: gate removal, naive get_lease replacement, and continue-to-break controls",
-          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain"
+          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain",
+          "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
+          "S2c shortcut-path regression locking the resolve-level entitlement guard",
+          "S2c C2 re-baseline: citation remap including four semantic rewrites, lock, manifest, headers, and the derived provenance chain"
         ],
         "result": "pass"
       },
@@ -68,7 +83,10 @@
           "60-entry claim-ledger regeneration",
           "safe repo-local pinned-commit negative control",
           "S2a defect discovery during the premium-axis design review: initial snapshots bypassed the shared lease gate",
-          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation"
+          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation",
+          "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
+          "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
+          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary"
         ],
         "result": "pass"
       }
@@ -82,21 +100,21 @@
   "reviewed_at": "2026-08-12",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85",
-    "baseline_sha256": "9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c",
-    "lock_sha256": "f430aa586c523f1d2be5ede886df4c36e83e19f0b7a6a6b9164e913fd93b6ca0",
-    "server_commit": "882d92bc8f220abbd96ffc74d2f063de6844d463",
+    "manifest_sha256": "4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955",
+    "baseline_sha256": "93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b",
+    "lock_sha256": "6889adee9fb32c580fae913911f81848b7f2aad013ee9f83025ba5906633f7cb",
+    "server_commit": "0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "64160b8f1d25acc9f1a33c1bbe446f89e3407ee8e3c7c996f67f8a3bf9d6431d",
-    "CLIENT": "779f2e944f6f2f48c5c5d539ff804eff1c383a091186a9037cd16f9425cffda0",
-    "CUT": "d89f14cb19704d5dbdfb890586df210b4f81f42d1aff8b1dc8ccded2cdaeb0ad",
-    "HAND": "cf0c78e2e8166123a7e4db27550679818264e0b33d0b6a827c2241f9685eeaa9",
-    "HEALTH": "6db1876b2447346d032b847d2b532b1fb1006f2d3128d4b41a41a551f6b823e6",
-    "LOAD": "8c7668aa34bcbd58ef0dd11e7eced5f595d7b783f2f37560ae9d61a7b5dc19e5"
+    "ADR": "be9b4ed981eac2bf92e03a262d355f11a1b33ac29bc6a07ab96a51189f6c6441",
+    "CLIENT": "a4e6f630dd6363db9775ffb023a830d1ad505278213dbec18d0fd2f8551837bd",
+    "CUT": "36b11547beec860b09a8fcabd29a7ec5bcbab98f0985a7f0c5fccbfac7e236da",
+    "HAND": "b80f51abe6c67ba8e731e4310a3dbce2f6c73aeb1511f09f2615c797667373e5",
+    "HEALTH": "2894316c5edde8652b31c24f3c2047ce63349ef2fc417071df80a77c4d043100",
+    "LOAD": "7dccb50a1e29accf1a38732a6468f277ac82dbbfa85fbb39f7f8b572a993142f"
   },
-  "claim_ledger_sha256": "cb9fe94842e35cf6103cec35765a4cdac0b66ab684c14585bd8c404cc40773ee",
+  "claim_ledger_sha256": "88226efb606fa57ee717f71a018733a657c7f3bb8781031d97195fc02c72158e",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 60,
@@ -257,6 +275,58 @@
       ],
       "issue": "The first S2a re-baseline attempt updated the baseline facts but left two current-code locators in the generated handoff document pointing at pre-882d92b line numbers. The author classified them as frozen archive quotations and declined to touch them; that classification was wrong. The archive line carries no locator at all, so both ranges are current-code claims owned by the generated document, and the claim ledger had copied one of them as a code_fact. Nothing in the hash chain detects this: every hash stayed internally consistent while the locators pointed at the wrong lines.",
       "disposition": "Both ranges were remapped from the pre-commit file by content with function-scope disambiguation (275-296 to 277-307, 275-286 to 277-297) and the affected claim-ledger unit was regenerated from the validator's own candidate extractor rather than edited by hand. The reviewer identified one of the two stale ranges; the author found the second while remapping. The residual limit stands: locator correctness inside generated documents is not mechanically verified, only hash consistency is."
+    },
+    {
+      "id": "SEM-013",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "server/app/topic_policy.py/AuthorizationPlan.__post_init__"
+      ],
+      "issue": "The authenticated planner rejected a legal request shape. Its partition check compared the summed group sizes against the size of their union, so a request repeating the same topic raised ValueError in every stage even though the dispatcher and the wire preserve duplicate topics and request order.",
+      "disposition": "The check now forbids only pairwise intersection between partitions and verifies with a Counter that the partition preserves every input occurrence. Two regressions cover duplicates inside one group and duplicate occurrences across the plan."
+    },
+    {
+      "id": "SEM-014",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "server/app/topic_policy.py/_class_of",
+        "server/app/topic_policy.py/plan_authenticated"
+      ],
+      "issue": "A malformed policy value passed all three invariants and was approved as premium-only in the final stage. The invariants compared keys only, the derived entitlement set silently excluded the row because it was not the enum member, and the planner's broad else-branch classified it by stage. An entitlement-requiring product misconfigured this way would have been granted with premium alone.",
+      "disposition": "Policy values are validated where they are read and where the invariant runs, and the planner branches explicitly per enum member with a raising else. A regression injects an extended enum to prove the else-branch is load-bearing: a future member is rejected rather than silently classified."
+    },
+    {
+      "id": "SEM-015",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "server/tests/test_topic_policy.py/test_policy_table_is_a_literal_dict"
+      ],
+      "issue": "The structural guard that keeps the policy table independent of the publisher constants inspected only top-level bindings. Rebinding inside a conditional, subscript assignment, and dict.update() all bypassed it, so the coverage equality could have become a tautology without any test noticing.",
+      "disposition": "The guard now rejects every rebinding form and duplicate literal keys, and the table is additionally frozen at runtime. Three counterexamples are permanent regressions."
+    },
+    {
+      "id": "SEM-016",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "server/app/topic_dispatcher.py",
+        "server/app/topic_authorization.py"
+      ],
+      "issue": "Seven guards introduced by this slice had no discriminating test. Deleting the premium-only revocation, replacing the three-axis lease with the identity-only calculator, re-reading the clock for the premium-only lease, removing the plan boundary comparison, and removing either UID binding check each left the full suite green. The guards worked, but nothing would have caught their removal.",
+      "disposition": "Each guard gained a regression that observes the failure at the boundary rather than asserting the implementation. All seven mutations were re-run and now fail."
+    },
+    {
+      "id": "SEM-017",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "server/app/topic_initial_snapshot.py/resolve_snapshot_topic_access_sync"
+      ],
+      "issue": "The shared entitlement guard is called at two REST decision boundaries, but only one was locked. The existing shortcut tests used a topic promoted to entitlement-gated, which fails the shortcut condition and therefore reaches the guard in the other function; removing the resolve-level call changed nothing. The uncovered path is a non-gated topic taking the shortcut while the table is malformed, where no guard runs at all.",
+      "disposition": "A regression exercises a non-gated topic against an expanded table. Removing the resolve-level guard now fails."
     }
   ],
   "residual_limits": [
@@ -269,7 +339,11 @@
     "The initial-snapshot lease gate authorizes the start of send_json, not its completion; an in-flight send may finish after the lease expires.",
     "A post-ACK snapshot skip is fail-closed but produces no removal, reauthorization, or close notification, so a client can be told a topic was accepted and then receive no initial data.",
     "The shared lease gate performs an O(number of subscribers) scan and set allocation per topic. This is accepted for the current scale and supported-topic bound, not established as a large-scale guarantee.",
-    "Code locators inside generated documents are not mechanically checked against the code they name; the hash chain only proves internal consistency, so a stale locator can survive a fully green re-baseline (SEM-012)."
+    "Code locators inside generated documents are not mechanically checked against the code they name; the hash chain only proves internal consistency, so a stale locator can survive a fully green re-baseline (SEM-012).",
+    "The final stage makes RevenueCat a cache-free HTTP round trip on every authenticated subscribe: the WS authorization path calls fetch_revenuecat_result directly and the stale-cache fallback exists only in the REST helper. This availability and latency coupling is unmitigated and gates activation.",
+    "FX enforcement is bounded by the unauthenticated legacy broadcast until Stage B. This slice closes the topic contract, not the service-wide paywall (R-OPEN-4).",
+    "The working tree was edited concurrently by two agents during this review. The reported verification is pinned to one tree hash rather than a continuous observation of a frozen tree.",
+    "Code locators inside generated documents remain mechanically unchecked (SEM-012). This slice moved 56 of them and only a path-level gate exists, so their correctness rests on the re-baseline procedure."
   ],
   "verdict": "pass"
 }

@@ -6501,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `882d92bc8f220abbd96ffc74d2f063de6844d463`
+- server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85`
-- baseline SHA: `9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c`
+- manifest SHA: `4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955`
+- baseline SHA: `93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6564,7 +6564,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1144-1194` · `app/main.py:1008-1052`).
+(`app/main.py:1150-1200` · `app/main.py:1014-1058`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6592,18 +6592,18 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 **(a) WS 의 FX/USDT 에 premium 강제가 없다.** 토큰이 있는 요청도 **per-user 판정 대상은 KRX
 하나뿐**이고(`per_user_gated_snapshot_topics`), FX/USDT 는 premium 판정 없이
 `free_accepted` 로 들어간다. 반면 REST twin 은 premium 을 실제로 강제한다(ADR-039 §8.1 E3).
-근거: `app/topic_initial_snapshot.py:95-104` · `app/topic_dispatcher.py:656-674` ·
-`app/main.py:3052-3055`.
+근거: `app/topic_initial_snapshot.py:95-108` · `app/topic_dispatcher.py:660-676` ·
+`app/main.py:3058-3061`.
 
 익명(미식별) 요청 축은 `WS_TOPIC_AUTH_STAGE` 로 갈린다. 코드 기본값 `compatibility` 는 무료 topic 의
 구 동작을 보존하고, `reject_anonymous_fx` 는 그 무료 집합에서 canonical FX 만 조용히 제외한다.
-이 동작은 stage 정의·기본값 `app/config.py:645-680` · 필터 정책
-`app/topic_auth_rollout.py:170-183` · 필터 호출과 등록 `app/topic_dispatcher.py:543-565` ·
-production 주입 `app/main.py:296-302` 를 함께 봐야 확인된다. **운영 stage 는 미실측**이고,
+이 동작은 stage 정의·기본값 `app/config.py:645-688` · 필터 정책
+`app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` ·
+production 주입 `app/main.py:302-308` 를 함께 봐야 확인된다. **운영 stage 는 미실측**이고,
 어느 stage 도 FX/USDT 의 premium 판정을 추가하지 않으므로 위 격차 (a) 는 닫히지 않았다.
 
 ⚠️ 이 격차는 **의도적으로 유예된 단계**이며, 현재 dispatcher docstring 도 익명 동작을
-`compatibility` 와 `reject_anonymous_fx` 로 분리해 적는다(`app/topic_dispatcher.py:375-379`).
+`compatibility` 와 `reject_anonymous_fx` 로 분리해 적는다(`app/topic_dispatcher.py:378-383`).
 그러나 **신규 앱 출시 계약과는 양립하지 않는다**: 어느 stage 도 premium 판정을 추가하지 않고
 `premium_required` 는 현재 사실상 KRX 에서만 나오므로 거부 사유 전이표의 FX/USDT 인가 행이
 발화하지 않는다(근거: baseline C1 · C2).
@@ -6688,7 +6688,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1402-1412` · `app/main.py:881-904`). 따라서 현재 경로에는
+  (`app/scheduler.py:1402-1412` · `app/main.py:887-910`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.
