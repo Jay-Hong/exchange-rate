@@ -19,7 +19,8 @@
           "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
-          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire"
+          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
+          "C4 closure of the C3 cross-review, and the C5 cross-review that reproduced both the lifecycle contradiction and the single-topic representation gap at 79d93f2"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -30,7 +31,8 @@
           "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
           "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
-          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash"
+          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash",
+          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression"
         ]
       },
       {
@@ -48,7 +50,8 @@
           "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
           "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
-          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash"
+          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash",
+          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -59,7 +62,8 @@
           "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
-          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire"
+          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
+          "C4 closure of the C3 cross-review, and the C5 cross-review that reproduced both the lifecycle contradiction and the single-topic representation gap at 79d93f2"
         ]
       }
     ],
@@ -76,7 +80,8 @@
           "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
-          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire"
+          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
+          "C4 closure of the C3 cross-review, and the C5 cross-review that reproduced both the lifecycle contradiction and the single-topic representation gap at 79d93f2"
         ],
         "result": "pass"
       },
@@ -92,7 +97,8 @@
           "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
           "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
-          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash"
+          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash",
+          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression"
         ],
         "result": "pass"
       }
@@ -345,7 +351,7 @@
         "spec/topic-only-implementation-ledger.json/R-GATE-1"
       ],
       "issue": "The C2 re-baseline moved citation locators onto the new commit while leaving the sentences that describe that code unchanged. Four places kept asserting that WS has no premium enforcement for FX/USDT, that the only per-user judgement is KRX, and that those topics enter a free_accepted list — while the same commit had implemented the enforcement path and renamed that variable away. The re-baseline procedure is content-anchored: it locates the same source line in the new file, which by construction cannot detect a prose claim that has become false while the code it cites still exists. Every gate passed — preflight compares paths, verify checks structure, and the hash chain proves only internal consistency — so the documents were re-sealed under a new SHA with inverted meaning.",
-      "disposition": "The affected passages now describe the three-stage implementation and code default without inferring the production stage or activation history. The exact-phrase tripwire was replaced by a planner-derived stage-matrix comparison plus targeted stale-claim controls. It still does not prove arbitrary natural-language entailment, so the current correction remains subject to the open cross-review in SEM-019."
+      "disposition": "The affected passages now describe the three-stage implementation and code default without inferring the production stage or activation history. The exact-phrase tripwire was replaced by a planner-derived stage-matrix comparison plus targeted stale-claim controls. SEM-019 records the completed reciprocal cross-review of that correction."
     },
     {
       "id": "SEM-019",
@@ -361,11 +367,22 @@
         "tests/test_topic_docs_semantic_drift.py"
       ],
       "issue": "The C3 correction did not close SEM-018. It left contradictory pre-S2c prose beside the new stage table, split the baseline C2 continuation under unrelated C4/C5 bullets, retained stale claim-ledger details and incomplete code ranges, and promoted the code default into unmeasured production-state and activation-history assertions. Its exact-phrase tripwire accepted equivalent stale wording, while the semantic journal kept verdict=pass without a review edge covering C3. During the correction, the baseline-reference parser also misread the e474 fragment of commit 0cfe474 as a baseline ID whenever the same logical unit mentioned baseline evidence.",
-      "disposition": "Codex rewrote the affected requirements, corrected the pinned ranges, regenerated the six changed claim-ledger entries from the canonical candidate/provenance extractors, strengthened the tripwire with an exact planner-derived stage matrix and explicit no-inference controls, and added identifier boundaries plus a commit-hash counterexample to the baseline-reference parser. These edits are Codex-authored and have not been independently reviewed by Claude; keep this finding open and the journal verdict at needs_cross_review until that reciprocal edge is recorded against the final hashes. Cross-review completed: the corrections were verified independently rather than accepted. The measurement conflation was confirmed against the C3 text; the baseline-ID regex defect was reproduced with the actual prior pattern (the commit hash 0cfe474 yielded a spurious e474 baseline reference) and its fix fails when reverted; the stage table is now compared against the planners rather than matched as prose, and mutations in all three directions — a false documented cell, a code policy change with the table untouched, and a new stage added without updating the table — each turn the suite red."
+      "disposition": "Codex rewrote the affected requirements, corrected the pinned ranges, regenerated the six changed claim-ledger entries from the canonical candidate/provenance extractors, strengthened the tripwire with a planner-derived stage matrix and explicit no-inference controls, and added identifier boundaries plus a commit-hash counterexample to the baseline-reference parser. Claude then independently reproduced the measurement conflation and baseline-ID defect, verified that reverting the regex fix fails, and mutation-tested the matrix in three directions: a false documented cell, a code policy change with the table untouched, and a new stage without a table row. The reciprocal review edges record both scopes."
+    },
+    {
+      "id": "SEM-020",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "spec/topic-only-semantic-review.json/SEM-018-019",
+        "tests/test_topic_docs_semantic_drift.py/_code_stage_matrix"
+      ],
+      "issue": "The C4 closure left lifecycle text internally contradictory: fixed findings still said that SEM-019 was open, unreviewed, and required needs_cross_review while the top-level verdict was pass. The stage-matrix gate also represented the aggregate columns with only fx:usd-krw and did not inspect USDT's authenticated partition; runtime mutations that changed only JPY, EUR, or USDT all survived the document-table comparison.",
+      "disposition": "Codex rewrote the closed-finding dispositions in completed-review tense and derived the aggregate columns from the canonical publisher constants: every anonymous FX member is compared, the identified column requires one uniform authorization class across all FX topics plus USDT, and a permanent counterexample changes each aggregate member independently. Cross-review confirmed both halves against the closing commit rather than accepting them. The lifecycle contradiction was reproduced at 79d93f2 (SEM-018 and SEM-019 carried fixed status while their prose still said the review was pending and the verdict was pass). The representation gap was reproduced too: at that commit a policy change confined to fx:jpy-krw, fx:eur-krw, or usdt:krw left the documented matrix equal to the derived one, so the earlier report that the gate discriminated in three directions was over-general — all three mutations used had moved the USD cell. Against the corrected gate the same four single-topic mutations each fail, and the regression exercises them without editing any file."
     }
   ],
   "residual_limits": [
-    "Natural-language completeness and citation entailment are not mechanically provable. Closed review edges record earlier reciprocal cross-review, but the SEM-019 correction is not covered by a pass verdict until the opposite participant reviews its final hashes.",
+    "Natural-language completeness and citation entailment are not mechanically provable. Closed review edges cover work through SEM-019; the SEM-020 follow-up is not covered by a pass verdict until the opposite participant reviews it.",
     "Negative repository facts use full-tree searches at the pinned commits and must be rerun if either pinned commit changes.",
     "The documents remain Draft implementation contracts. A future pass confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
     "The current operating WS_TOPIC_AUTH_STAGE and production flag values were not measured; they remain direct-measurement gates before activation.",
@@ -380,7 +397,8 @@
     "The working tree was edited concurrently by two agents during this review. The reported verification is pinned to one tree hash rather than a continuous observation of a frozen tree.",
     "Code locators inside generated documents remain mechanically unchecked (SEM-012). This slice moved 56 of them and only a path-level gate exists, so their correctness rests on the re-baseline procedure.",
     "Re-baselining verifies that citations point at existing code, not that the surrounding prose is still true. SEM-018 shows the two can diverge while every gate passes; only reading each cited passage against the new behaviour closes it, and that step is procedural.",
-    "The forbidden-phrase check that keeps the code default from being promoted to an operational fact has no exemption for a measured statement: once production is actually sampled, phrasing such as '운영 stage 는 `compatibility`' still trips it. Measured claims must therefore carry the measurement inline (source and timestamp) rather than restate the bare form. This is a deliberate cost of phrase matching, chosen for the same reason as the tense limitation — adding exemptions would make the check itself a guess."
+    "The forbidden-phrase check that keeps the code default from being promoted to an operational fact has no exemption for a measured statement: once production is actually sampled, the same forbidden substring still trips even if source and timestamp are appended. A measured result must use distinct wording such as '2026-08-12 direct measurement found WS_TOPIC_AUTH_STAGE=compatibility' and include its source and timestamp. This is a deliberate cost of phrase matching; adding semantic exemptions would make the check itself a guess.",
+    "The stage matrix binds the documented aggregate columns to the planners, but its subject is the R-INV-2 table alone. Prose elsewhere in the same documents can still contradict the code without any gate noticing; SEM-018 was found by reading, not by a check."
   ],
   "verdict": "pass"
 }

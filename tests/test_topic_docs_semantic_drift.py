@@ -17,8 +17,13 @@ R-INV-2의 stage 표는 실제 planner 결과와 대조하므로 그 범위에�
 import pathlib
 import re
 import unittest
+from unittest.mock import patch
 
+from app import topic_policy
 from app.config import TopicAuthStage
+from app.fx_topic_publisher import FX_TOPICS as PUBLISHER_FX_TOPICS
+from app.krx_topic_publisher import KRX_TOPIC
+from app.tether_topic_publisher import TETHER_TOPIC
 from app.topic_policy import plan_anonymous, plan_authenticated
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -53,10 +58,9 @@ STALE_CLAIMS = [
 # 이 슬라이스가 **제거한** 심볼. 문서가 계속 부르면 그 문단은 옛 코드를 서술하고 있다.
 REMOVED_SYMBOLS = ["free_accepted"]
 
-FX_TOPICS = frozenset({"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw"})
-FX = "fx:usd-krw"
-USDT = "usdt:krw"
-KRX = "krx:usd-krw-futures"
+FX_TOPICS = frozenset(PUBLISHER_FX_TOPICS.values())
+USDT = TETHER_TOPIC
+KRX = KRX_TOPIC
 
 
 def _texts():
@@ -112,19 +116,41 @@ def _authorization_label(plan, topic: str) -> str:
     raise AssertionError(f"planner 가 {topic!r} 을 어떤 partition 에도 넣지 않았다: {plan!r}")
 
 
+def _uniform_label(labels, *, stage: TopicAuthStage, column: str) -> str:
+    unique = set(labels)
+    if len(unique) != 1:
+        raise AssertionError(
+            f"R-INV-2 의 집계 열 {column!r} 이 {stage.value!r} 에서 topic 별로 갈린다: "
+            f"{sorted(unique)}"
+        )
+    return unique.pop()
+
+
 def _code_stage_matrix() -> dict[str, tuple[str, str, str, str]]:
     result = {}
+    fx_topics = tuple(sorted(FX_TOPICS))
     for stage in TopicAuthStage:
         anonymous = plan_anonymous(
-            [FX, USDT], stage=stage, fx_topics=FX_TOPICS
+            [*fx_topics, USDT], stage=stage, fx_topics=FX_TOPICS
         )
         authenticated = plan_authenticated(
-            [FX, USDT, KRX], stage=stage, uid="semantic-doc-check"
+            [*fx_topics, USDT, KRX], stage=stage, uid="semantic-doc-check"
         )
         result[stage.value] = (
-            "허용" if FX in anonymous else "거부",
+            _uniform_label(
+                ("허용" if topic in anonymous else "거부" for topic in fx_topics),
+                stage=stage,
+                column="익명 FX",
+            ),
             "허용" if USDT in anonymous else "거부",
-            _authorization_label(authenticated, FX),
+            _uniform_label(
+                (
+                    _authorization_label(authenticated, topic)
+                    for topic in (*fx_topics, USDT)
+                ),
+                stage=stage,
+                column="식별 FX/USDT",
+            ),
             _authorization_label(authenticated, KRX),
         )
     return result
@@ -134,6 +160,16 @@ class TestDocsDoNotContradictTheCode(unittest.TestCase):
     def test_r_inv_2_stage_table_matches_the_planners(self):
         """문구가 아니라 stage 전수와 네 정책 셀을 실제 planner 결과에 대조한다."""
         self.assertEqual(_documented_stage_matrix(), _code_stage_matrix())
+
+    def test_aggregate_columns_reject_per_topic_policy_divergence(self):
+        """집계 열을 USD 하나로 대표하면 JPY/EUR/USDT만 갈리는 회귀가 통과한다."""
+        for topic in (*sorted(FX_TOPICS), USDT):
+            divergent = dict(topic_policy.TOPIC_POLICY)
+            divergent[topic] = topic_policy.AuthorizationClass.PREMIUM_AND_ENTITLEMENT
+            with self.subTest(topic=topic), \
+                 patch.object(topic_policy, "TOPIC_POLICY", divergent), \
+                 self.assertRaises(AssertionError):
+                _code_stage_matrix()
 
     def test_current_operating_stage_is_not_inferred_from_the_code_default(self):
         """코드 기본값은 production 현재값이나 과거 활성화 이력을 증명하지 않는다."""
