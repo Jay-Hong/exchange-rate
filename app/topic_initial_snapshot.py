@@ -99,9 +99,13 @@ def per_user_gated_snapshot_topics() -> frozenset:
     갈리면 `resolve_snapshot_topic_access_sync`의 shortcut이 새 게이팅 topic을 무조건 허용해
     **판정 우회 + 존재 노출**이 동시에 난다 → 집합대수 trip-wire 테스트가 잠근다
     (`set(supported) - set(visible) ⊆ per_user_gated_snapshot_topics()`).
+
+    ⚠️ 정본은 **정책표**(`topic_policy.TOPIC_POLICY`)다 — 같은 사실("KRX 는 entitlement 필요")이
+    표와 여기 두 곳에 있으면 갈린다. 여기서는 파생만 한다.
     """
-    from app.krx_topic_publisher import KRX_TOPIC
-    return frozenset({KRX_TOPIC})
+    from app.topic_policy import entitlement_gated_topics
+
+    return entitlement_gated_topics()
 
 
 class SnapshotTopicAccess(NamedTuple):
@@ -112,6 +116,17 @@ class SnapshotTopicAccess(NamedTuple):
     """
     allowed: bool
     supported_topics: Optional[tuple]
+
+
+def _assert_snapshot_entitlement_policy_supported() -> None:
+    """REST 가시성 구현이 이해하는 entitlement 정책인지 확인한다.
+
+    현재 evaluator 는 KRX 하나를 하드코딩한다. startup 검증만 믿으면 이 모듈을 직접 사용하는
+    테스트·스크립트가 그 경계를 우회할 수 있으므로, 두 public 판정 함수도 같은 공유 가드를 쓴다.
+    """
+    from app.topic_policy import assert_single_entitlement_topic
+
+    assert_single_entitlement_topic()
 
 
 def resolve_snapshot_topic_access_sync(
@@ -138,6 +153,8 @@ def resolve_snapshot_topic_access_sync(
     소관이고 이 값은 `compute_krx_visible`에 그대로 전달될 뿐이다. shortcut이 이 값을 보지 않는 건
     비-KRX topic의 판정이 premium과 무관하기 때문이다(어느 값이든 결과 동일).
     """
+    _assert_snapshot_entitlement_policy_supported()
+
     global_topics = supported_snapshot_topics()
     if topic in global_topics and topic not in per_user_gated_snapshot_topics():
         return SnapshotTopicAccess(True, None)
@@ -171,6 +188,8 @@ def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple
     전역 게이트가 닫혀 있으면 세션을 **아예 열지 않는다** — 결과가 같은데 장애 표면만 늘기 때문.
     반대로 열려 있으면 반드시 조회한다(fail-closed: 조회 실패는 예외로 전파 → 5xx, 조용한 False 아님).
     """
+    _assert_snapshot_entitlement_policy_supported()
+
     from app import entitlements
     from app.krx_topic_publisher import KRX_TOPIC
 

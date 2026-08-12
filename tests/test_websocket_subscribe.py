@@ -219,6 +219,25 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         mock_snap.assert_not_awaited()
         ws.send_json.assert_not_called()
 
+    async def test_enforcement_stage_silently_rejects_all_anonymous_topics(self):
+        """최종 stage는 UID가 없는 요청을 premium 판정으로 보내지 않고 전부 제외한다."""
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        rollout = _rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), patch(
+            "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+        ) as mock_snap:
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","topics":["fx:usd-krw","usdt:krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
+        mock_snap.assert_not_awaited()
+        ws.send_json.assert_not_called()
+
     async def test_observation_failure_does_not_change_compatibility_behavior(self):
         ws = MagicMock()
         ws.send_json = AsyncMock()
@@ -257,6 +276,38 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
         mock_snap.assert_not_awaited()
 
+    async def test_authenticated_result_for_a_different_plan_is_rejected(self):
+        """coordinator 결과를 요청 plan과 대조하지 않으면 다른 topic의 권한을 재사용할 수 있다."""
+        from app import topic_authorization, topic_policy
+
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        wrong_plan = topic_policy.AuthorizationPlan(
+            uid="u1",
+            identity_only=("fx:usd-krw",),
+            premium_only=(),
+            premium_and_entitlement=(),
+        )
+        wrong_outcome = topic_authorization.AuthorizationOutcome(
+            plan=wrong_plan, premium=None, entitlement=None
+        )
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), patch.object(
+            topic_dispatcher,
+            "authorize_subscription_plan",
+            new=AsyncMock(return_value=wrong_outcome),
+        ), self.assertRaisesRegex(ValueError, "다른 authorization plan"):
+            await _dispatch(
+                ws,
+                '{"type":"subscribe","request_id":"plan-mismatch",'
+                '"id_token":"tok","topics":["usdt:krw"]}',
+                authorize_subscribe=AsyncMock(return_value="u1"),
+                identity=topic_wire.ConnectionIdentity(),
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
+        ws.send_json.assert_not_called()
+
     async def test_unsubscribe_with_flag_enabled_removes_topics(self):
         ws = MagicMock()
         topic_dispatcher.registry.register(ws, ["usdt:krw", "krx:usd-krw-futures"])
@@ -283,6 +334,20 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), {_USDT_TOPIC})
         self.assertEqual(rollout.snapshot()["anonymous_subscribe_attempts_total"], 0)
+
+    async def test_enforcement_stage_still_allows_anonymous_unsubscribe(self):
+        ws = MagicMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw", _USDT_TOPIC])
+        rollout = _rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+            await _dispatch(
+                ws,
+                '{"type":"unsubscribe","topics":["fx:usd-krw","usdt:krw"]}',
+                topic_auth_rollout=rollout,
+            )
+
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
 
     # ─────────────────────────────────────────────────────────────
     # 입력 격리: JSON 파싱 실패 / non-dict / 잘못된 payload

@@ -9,7 +9,8 @@ JSON 파싱 실패(계약 위반) / `expires_date` 파싱 실패 / 4xx·5xx 일�
 3-bucket 계약(terminal / transient / 내부 예외)이 즉시 깨진다.
 ⚠️ 이 파일 곳곳의 `§8.1 A6` 표기는 ADR-040 에서 **폐기된 설계**의 번호다 — 계약 자체는
 살아 있고, **현재 소비자는 `app/topic_authorization.py`** 의 `classify_premium` /
-`authorize_gated_subscription` 이다(각각 `Denied` / `Unavailable` / 재전파로 접는다).
+`authorize_subscription_plan` 이다(각각 per-topic `Denied` / 전체-요청 `Unavailable` /
+재전파로 접는다).
 
 그래서 **아래에 typed provider를 두고 REST adapter가 되접는다** — 예외·전송·HTTP 상태
 경로는 구 동작 그대로이고, **malformed 200만 §8.1 A4-1 hardening에서 의도적으로 바꿨다**.

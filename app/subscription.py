@@ -186,7 +186,8 @@ class ProtocolViolation:
 # ⛔ 구 번호 `§8.1 A6` 는 ADR-040 에서 **폐기된 설계**의 것이다 — 아래 주석들의 그 표기도
 #    같다. 다만 **3-bucket 계약(terminal / transient / 내부 예외 재전파) 자체는 살아 있다**:
 #    현재 소비자는 `app/topic_authorization.py` 의 `classify_premium` /
-#    `authorize_gated_subscription` 이고, 각각 `Denied` / `Unavailable` / 재전파로 접는다.
+#    `authorize_subscription_plan` 이고, 각각 per-topic `Denied` / 전체-요청 `Unavailable` /
+#    재전파로 접는다.
 RevenueCatResult = Union[
     Determined, ProviderUnavailable, ProviderMisconfigured, BadRequest, ProtocolViolation
 ]
@@ -223,7 +224,7 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
 
     ⚠️ **leaf 이관은 보류다** (구 "N-3 이관 예정"). WS 소비자는 이미 생겼지만
     (`app/topic_authorization.py`) 순환은 **아직 없다** — 그 모듈이 이 함수를 **함수 본문에서
-    지연 import** 하기 때문이다(`authorize_gated_subscription` 안의 `from app.subscription
+    지연 import** 하기 때문이다(`_observe_premium` 안의 `from app.subscription
     import fetch_revenuecat_result`). 순환 위험을 만들던 구 근거(`invalidate_user_cache` 가
     strict cache 를 무효화하는 경로)는 ADR-040 에서 **폐기**됐다.
     ⚠️ 다만 지연 import 는 **순환을 없앤 게 아니라 미룬 것**이다 — 소비자가 module-level import

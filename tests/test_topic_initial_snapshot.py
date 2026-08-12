@@ -165,6 +165,20 @@ class TestVisibleSnapshotTopics(unittest.TestCase):
             gate_on=True, krx_visible=False, premium_active=False)
         mock_compute.assert_called_once_with(fake_db, "u1", premium_active=False)
 
+    def test_second_entitlement_topic_is_rejected_before_visibility_work(self):
+        """REST 구현은 KRX evaluator 하나만 안다. 표가 확장되면 조용히 허용하지 않는다."""
+        from app import config, topic_policy
+        from app.topic_initial_snapshot import visible_snapshot_topics_sync
+
+        second = dict(topic_policy.TOPIC_POLICY)
+        second["usdt:krw"] = topic_policy.AuthorizationClass.PREMIUM_AND_ENTITLEMENT
+        with patch.object(topic_policy, "TOPIC_POLICY", second), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True), \
+             patch("app.database.SessionLocal") as session:
+            with self.assertRaises(RuntimeError):
+                visible_snapshot_topics_sync("u1", premium_active=False)
+        session.assert_not_called()
+
 
 class TestResolveSnapshotTopicAccess(unittest.TestCase):
     """`resolve_snapshot_topic_access_sync` — 판정 + 조회 범위 (ADR-039 §8.1 E3).
@@ -198,6 +212,54 @@ class TestResolveSnapshotTopicAccess(unittest.TestCase):
         """200 경로는 목록을 싣지 않는다 — 타입으로 못박아 호출부가 실수로 노출 못 하게."""
         access, _, _ = self._resolve("usdt:krw")
         self.assertIsNone(access.supported_topics)
+
+    def test_second_entitlement_topic_cannot_use_the_non_gated_shortcut(self):
+        """표 파생만 하고 KRX visibility를 그대로 두면 USDT가 shortcut 뒤에서 다시 허용된다."""
+        from app import config, topic_policy
+        from app.topic_initial_snapshot import resolve_snapshot_topic_access_sync
+
+        second = dict(topic_policy.TOPIC_POLICY)
+        second["usdt:krw"] = topic_policy.AuthorizationClass.PREMIUM_AND_ENTITLEMENT
+        with patch.object(topic_policy, "TOPIC_POLICY", second), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", False):
+            with self.assertRaises(RuntimeError):
+                resolve_snapshot_topic_access_sync(
+                    "usdt:krw", "u1", premium_active=False
+                )
+
+    def test_malformed_policy_value_cannot_use_the_non_gated_shortcut(self):
+        """잘못된 정책값을 비-gated로 취급하면 해당 topic이 조용히 허용된다."""
+        from app import topic_policy
+        from app.topic_initial_snapshot import resolve_snapshot_topic_access_sync
+
+        malformed = dict(topic_policy.TOPIC_POLICY)
+        malformed["usdt:krw"] = "premium_and_entitlement"
+        with patch.object(topic_policy, "TOPIC_POLICY", malformed):
+            with self.assertRaises(RuntimeError):
+                resolve_snapshot_topic_access_sync(
+                    "usdt:krw", "u1", premium_active=False
+                )
+
+    def test_shortcut_path_itself_is_guarded_not_only_the_fallthrough(self):
+        """⛔ **비-gated topic 이 shortcut 을 타는 경로**를 잠근다.
+
+        위 두 테스트는 `usdt:krw`(= gated 로 승격된 topic)를 쓴다. 그러면 shortcut 조건이
+        거짓이라 `visible_snapshot_topics_sync` 로 떨어져 **그쪽 가드**가 발화하고, 이 함수의
+        가드를 지워도 결과가 같다(변이 SURVIVED 실측). 표가 잘못된 채 **비-gated** topic 이
+        들어오면 shortcut 이 곧장 allowed 를 돌려주므로 어떤 가드도 지나지 않는다 —
+        판정 경계 전체가 fail-closed 여야 한다는 계약이 여기서만 관측된다.
+        """
+        from app import config, topic_policy
+        from app.topic_initial_snapshot import resolve_snapshot_topic_access_sync
+
+        second = dict(topic_policy.TOPIC_POLICY)
+        second["usdt:krw"] = topic_policy.AuthorizationClass.PREMIUM_AND_ENTITLEMENT
+        with patch.object(topic_policy, "TOPIC_POLICY", second), \
+             patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True):
+            with self.assertRaises(RuntimeError):
+                resolve_snapshot_topic_access_sync(      # 비-gated → shortcut 대상
+                    "fx:usd-krw", "u1", premium_active=False
+                )
 
     def test_gated_topic_consults_entitlement(self):
         access, compute, _ = self._resolve(self._KRX, krx_visible=False)

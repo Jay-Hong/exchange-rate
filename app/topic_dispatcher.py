@@ -38,16 +38,19 @@ from dataclasses import dataclass
 
 from app.clock import system_clock as lease_clock
 from app.topic_lease import (
+    compute_lease_expiry,
     compute_gated_lease_expiry,
     compute_identity_only_lease_expiry,
     is_expired as is_lease_expired,
 )
 from app.topic_authorization import (
-    Denied as GatedDenied,
-    Granted as GatedGranted,
-    Unavailable as GatedUnavailable,
+    AuthorizationOutcome,
+    Denied as AuthorizationDenied,
+    Granted as EntitlementGranted,
+    PremiumGranted,
+    Unavailable as AuthorizationUnavailable,
     UnavailableKind,
-    authorize_gated_subscription,
+    authorize_subscription_plan,
 )
 
 
@@ -375,6 +378,7 @@ async def handle_client_message(
     미식별 요청(§E1 구 클라: `request_id` 도 `id_token` 도 없음)은 stage 에 따라 갈린다.
       - `compatibility` → 무료 topic 등록/해제, 프레임 0개(기존 동작).
       - `reject_anonymous_fx` → 무료 집합에서 canonical FX 만 조용히 제외. USDT·해제는 유지.
+      - `enforce_authenticated_premium` → 익명 subscribe 전부 조용히 제외. 해제는 유지.
     JSON 파싱 실패 / non-dict / 미식별 미지 type 은 계속 조용히 무시한다(legacy 평문이
     흐르는 경계라 오류를 쏘면 스팸이 된다).
 
@@ -391,10 +395,10 @@ async def handle_client_message(
     인증이 **조용히 사라진다**(fail-open). 필수 keyword-only면 그 실수가 `TypeError`가 된다.
 
     ⚠️ **이 seam이 확인하는 것은 identity뿐이다.** entitlement(유료 판정)는 확인하지 않는다 —
-    그래서 gated topic 은 이 seam 이 아니라 `authorize_gated_subscription`
-    (`app/topic_authorization.py`) 의 verdict 로 판정하고, `Granted` 일 때만 **4축 lease** 와
+    그래서 premium/entitlement topic 은 이 seam 이 아니라 `authorize_subscription_plan`
+    (`app/topic_authorization.py`) 의 축별 verdict 로 판정하고, 실제 관측이 있을 때만 3/4축 lease와
     함께 accept 한다. identity만 확인하고 그 topic을 받으면 *인가된 것처럼 보이는* 유료 데이터
-    유출이 되어 무인증보다 나쁘다 — 그래서 두 축을 **다른 함수**로 갈라 둔다.
+    유출이 되어 무인증보다 나쁘다 — 그래서 identity와 상품 판정을 **다른 함수**로 갈라 둔다.
 
     ⛔ **REST의 premium 게이트를 여기에 재사용하지 말 것.** 그것은 외부 장애 시 stale 캐시를
     ACTIVE로 돌려주는 **가용성 우선** 정책이라, lease 권한 판정에 쓰면 오래된 판정이 방금 확인한
@@ -656,29 +660,29 @@ async def handle_client_message(
         # ⛔ **"게이트가 아니면 허용"은 틀렸다.** 구 판정은 미지원 topic(`not:a:topic`)까지
         #    accept하고 registry에 등록했다(실측 재현). 지원 집합을 **명시적으로** 봐야 한다.
         supported = set(supported_snapshot_topics())   # flag-aware (KRX는 배포 flag 조건부)
-        gated = per_user_gated_snapshot_topics()       # per-user 판정이 필요한 topic
+        gated = per_user_gated_snapshot_topics()       # 표에서 파생, KRX flag 와 무관
 
-        # ── ① 분류 — registry 는 **아직 건드리지 않는다** ────────────────────────
-        gated_requested = [t for t in topics if t in gated and t in supported]
-        free_accepted, rejected = [], []
-        for topic in topics:                          # 요청 순서 보존
-            if topic in gated and topic in supported:
-                continue                              # verdict 가 결정한다(②)
-            if topic in gated or not is_snapshot_topic_enabled(topic):
-                # 배포/개별 flag가 off라 지금 발사되지 않는 topic — §8-C `topic_unavailable`.
-                # (gated인데 여기 온 것은 supported 밖 = 배포 flag off인 경우뿐이다.)
+        # ── ① availability 분류 → 정책 partition. registry 는 아직 건드리지 않는다 ─────
+        authorizable, rejected = [], []
+        for topic in topics:                          # 요청 순서·중복 보존
+            if topic in gated and topic not in supported:
+                # KRX 배포 flag off. 표에는 존재하지만 지금 발사되지 않는다.
+                rejected.append((topic, "topic_unavailable"))
+            elif not is_snapshot_topic_enabled(topic):
                 rejected.append((topic, "topic_unavailable"))
             elif topic not in supported:
                 rejected.append((topic, "unknown_topic"))
             else:
-                free_accepted.append(topic)
+                authorizable.append(topic)
 
-        # ── ② gated 인가 판정 ────────────────────────────────────────────────
-        verdict = None
+        plan = topic_auth_rollout.plan_authenticated_topics(authorizable, uid=uid)
+
+        # ── ② premium / entitlement 인가 판정 ────────────────────────────────
+        outcome = None
         # ⚠️ deadline verdict 는 **판정기를 지나지 않는다** → 그 경로의 transient WARNING 을
         #    아무도 남기지 않는다. 이 flag 가 아래 한 줄의 레벨을 정한다(문자열 keying 회피).
         deadline_hit = False
-        if gated_requested:
+        if plan.requires_premium():
             try:
                 # ⛔ 인가 구간에도 **상한**이 필요하다. RC 는 자체 timeout 이 있지만 entitlement
                 #    `to_thread` 는 없고, 풀 획득 기본 대기(30s)가 wire deadline(10s)보다 길다 —
@@ -686,80 +690,108 @@ async def handle_client_message(
                 # ⚠️ **같은 절대 deadline** 을 공유한다 — identity 가 이미 쓴 시간만큼 예산이
                 #    줄어든 상태로 시작한다.
                 async with asyncio.timeout_at(request_deadline_at) as gate_cm:
-                    verdict = await authorize_gated_subscription(
-                        uid, mono=lambda: lease_clock().mono()
+                    outcome = await authorize_subscription_plan(
+                        plan, mono=lambda: lease_clock().mono()
                     )
             except asyncio.TimeoutError:
                 if not gate_cm.expired():
                     raise                              # 판정기 내부 TimeoutError — 분류 불가
                 deadline_hit = True
-                verdict = GatedUnavailable(
+                outcome = AuthorizationUnavailable(
                     UnavailableKind.TRANSIENT, "authorization_deadline"
                 )
+        else:
+            # 외부 I/O 0인 identity-only outcome. timeout 을 열면 기존 identity-only 요청에
+            # 불필요한 두 번째 deadline 단계가 생긴다.
+            outcome = await authorize_subscription_plan(
+                plan, mono=lambda: lease_clock().mono()
+            )
 
-            if isinstance(verdict, GatedUnavailable):
-                # ⛔ **registry 를 하나도 바꾸지 않고** 전체 요청을 접는다(§8-C whole-request).
-                #    무료 topic 조차 **새로 등록하지 않는다** — 판정 불가는 per-topic 이 아니다.
-                persistent = verdict.kind is UnavailableKind.PERSISTENT
-                # ⚠️ **원인 로깅은 판정기 소유**(레벨 + traceback). 여기서는 **wire 결과**만
-                #    남긴다 — 둘 다 레벨을 정하면 영구 장애 하나에 ERROR 가 두 건이 되어
-                #    운영 신호가 희석된다.
-                # ⚠️ 기본은 **wire 결과만**(INFO) — 원인 로그는 판정기/leaf 소유다.
-                #    다만 deadline 은 그쪽을 지나지 않으므로 여기가 유일한 신호다 → WARNING.
-                (logger.warning if deadline_hit else logger.info)(
-                    "gated topic 인가 판정 불가 — 전체 요청을 접는다",
-                    extra={"reason": verdict.reason, "kind": verdict.kind.value,
-                           "topics": gated_requested},
+        if isinstance(outcome, AuthorizationUnavailable):
+            # ⛔ **registry 를 하나도 바꾸지 않고** 전체 요청을 접는다(§8-C whole-request).
+            #    identity-only topic 조차 **새로 등록하지 않는다** — 판정 불가는 per-topic 이 아니다.
+            persistent = outcome.kind is UnavailableKind.PERSISTENT
+            # ⚠️ 원인 로깅은 판정기 소유. deadline 만 판정기를 지나지 않아 여기서 WARNING.
+            (logger.warning if deadline_hit else logger.info)(
+                "topic 인가 판정 불가 — 전체 요청을 접는다",
+                extra={"reason": outcome.reason, "kind": outcome.kind.value,
+                       "topics": list(plan.premium_only + plan.premium_and_entitlement)},
+            )
+            await websocket.send_json(
+                build_subscription_error(
+                    request_id=request_id,
+                    error="temporarily_unavailable",
+                    retry_after_seconds=(
+                        config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
+                        if persistent
+                        else config.WS_AUTH_RETRY_AFTER_SECONDS
+                    ),
                 )
-                await websocket.send_json(
-                    build_subscription_error(
-                        request_id=request_id,
-                        error="temporarily_unavailable",
-                        retry_after_seconds=(
-                            config.WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS
-                            if persistent
-                            else config.WS_AUTH_RETRY_AFTER_SECONDS
-                        ),
-                    )
-                )
-                return
+            )
+            return
+        if not isinstance(outcome, AuthorizationOutcome):
+            raise TypeError(f"분류할 수 없는 topic 인가 결과: {type(outcome).__name__}")
+        if outcome.plan != plan:
+            raise ValueError("coordinator 가 요청과 다른 authorization plan 의 결과를 돌려줬다")
 
         # ── ③ registry 변경 — 여기서만, 그리고 한 번에 ──────────────────────────
         # ⛔ **`now` 는 1회만 읽는다.** topic 마다 읽으면 같은 요청 안에서 만료가 갈린다.
         now_mono = lease_clock().mono()
         leases: Dict[str, TopicLease] = {}
 
-        if isinstance(verdict, GatedDenied):
-            # ⛔ **즉시 철회.** 방금 authoritative 한 부정 관측을 얻었다 — 안 지우면 기존 lease 가
-            #    만료될 때까지 계속 발행되고, ack 이 `rejected_topics` 와 `active_subscriptions`
-            #    로 **서로 모순된 두 문장**을 말한다.
-            registry.unregister(websocket, gated_requested)
-            rejected.extend((topic, verdict.error) for topic in gated_requested)
-        elif isinstance(verdict, GatedGranted):
-            # ⚠️ **4축** — identity·premium·entitlement 는 서로 다른 권위다.
-            gated_expiry = compute_gated_lease_expiry(
+        if plan.identity_only:
+            identity_expiry = compute_identity_only_lease_expiry(
                 now_mono=now_mono,
                 identity_verified_at_mono=identity_observed_at_mono,
-                premium_verified_at_mono=verdict.premium_observed_at_mono,
-                entitlement_verified_at_mono=verdict.entitlement_observed_at_mono,
             )
             leases.update({
-                topic: TopicLease(lease_id=uuid.uuid4().hex, uid=uid,
-                                  expires_at_mono=gated_expiry)
-                for topic in gated_requested
+                topic: TopicLease(lease_id=uuid.uuid4().hex, uid=plan.uid,
+                                  expires_at_mono=identity_expiry)
+                for topic in plan.identity_only
             })
 
-        if free_accepted:
-            # ⚠️ **identity 축 하나** — 여기 오는 topic 은 per-user 판정 대상이 아니다.
-            free_expiry = compute_identity_only_lease_expiry(
-                now_mono=now_mono,
-                identity_verified_at_mono=identity_observed_at_mono,
-            )
-            leases.update({
-                topic: TopicLease(lease_id=uuid.uuid4().hex, uid=uid,
-                                  expires_at_mono=free_expiry)
-                for topic in free_accepted
-            })
+        premium = outcome.premium
+        if isinstance(premium, AuthorizationDenied):
+            # authoritative premium 부정은 premium이 필요한 두 partition을 즉시 철회한다.
+            denied_topics = plan.premium_only + plan.premium_and_entitlement
+            denied_set = set(denied_topics)
+            registry.unregister(websocket, denied_topics)
+            rejected.extend((topic, premium.error) for topic in authorizable
+                            if topic in denied_set)
+        elif isinstance(premium, PremiumGranted):
+            if plan.premium_only:
+                premium_expiry = compute_lease_expiry(
+                    now_mono=now_mono,
+                    premium_verified_at_mono=premium.premium_observed_at_mono,
+                    firebase_identity_verified_at_mono=identity_observed_at_mono,
+                )
+                leases.update({
+                    topic: TopicLease(lease_id=uuid.uuid4().hex, uid=plan.uid,
+                                      expires_at_mono=premium_expiry)
+                    for topic in plan.premium_only
+                })
+
+            entitlement = outcome.entitlement
+            if isinstance(entitlement, AuthorizationDenied):
+                entitlement_denied_set = set(plan.premium_and_entitlement)
+                registry.unregister(websocket, plan.premium_and_entitlement)
+                rejected.extend((topic, entitlement.error) for topic in authorizable
+                                if topic in entitlement_denied_set)
+            elif isinstance(entitlement, EntitlementGranted):
+                # ⚠️ **4축** — identity·premium·entitlement 는 서로 다른 권위다.
+                gated_expiry = compute_gated_lease_expiry(
+                    now_mono=now_mono,
+                    identity_verified_at_mono=identity_observed_at_mono,
+                    premium_verified_at_mono=entitlement.premium_observed_at_mono,
+                    entitlement_verified_at_mono=entitlement.entitlement_observed_at_mono,
+                )
+                leases.update({
+                    topic: TopicLease(lease_id=uuid.uuid4().hex, uid=plan.uid,
+                                      expires_at_mono=gated_expiry)
+                    for topic in plan.premium_and_entitlement
+                })
+        elif premium is not None:
+            raise TypeError(f"분류할 수 없는 premium 결과: {type(premium).__name__}")
 
         accepted_set = set(leases)
         accepted_names = [t for t in topics if t in accepted_set]   # 요청 순서 보존

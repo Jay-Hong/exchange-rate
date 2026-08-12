@@ -631,8 +631,8 @@ WS_AUTH_PERSISTENT_FAULT_RETRY_AFTER_SECONDS = 30
 # ⛔ 가용성 축(TOPIC_DISPATCHER_ENABLED / FX_TOPIC_ENABLED / KRX_CLIENT_DISTRIBUTION_*)과
 #    **다른 축**이다: 저쪽은 "이 topic 이 지금 발사되는가", 이쪽은 "익명 요청을 어떻게 다루는가".
 #
-# ⛔ 두 값만 둔다. 소비자 없는 단계를 미리 만들지 않는다 — ADR-040(2026-07-30)이 이 트랙에서
-#    **소비자 없는 설계 81커밋을 폐기**하고 최소 수직 슬라이스로 재시작한다고 못 박았다.
+# ⛔ stage 는 실제 소비자와 같은 수직 슬라이스에서만 추가한다 — ADR-040(2026-07-30)이 이
+#    트랙에서 **소비자 없는 설계 81커밋을 폐기**하고 최소 수직 슬라이스로 재시작한다고 못 박았다.
 #
 # ⚠️ `reject_anonymous_fx` 는 "FX 인증을 시작한다"가 아니다 — 토큰을 실은 요청은
 #    `compatibility` 에서도 이미 Firebase 검증을 받는다. 이 단계의 실제 변화는
@@ -649,17 +649,25 @@ class TopicAuthStage(enum.Enum):
 
     COMPATIBILITY = "compatibility"
     REJECT_ANONYMOUS_FX = "reject_anonymous_fx"
+    # ⛔ **인증과 premium 을 한 칸에서 함께** 켠다. 나누면 앞 칸이 무효다 —
+    #    `identified` 는 `handle_client_message` 가 토큰 검증 전에 메시지 shape 로 정하므로,
+    #    익명 문이 열려 있는
+    #    topic 에 식별 경로 premium 게이트만 붙이면 **필드를 빼는 것만으로 우회**된다.
+    #    그 구간엔 `premium_required` 텔레메트리만 쌓이고 데이터는 계속 흐른다(강제력 0).
+    # ⚠️ FX 의 실효는 legacy `/ws` 무인증 브로드캐스트 때문에 Stage B 까지 제한된다 —
+    #    R-OPEN-4 가 명시 수용한 잔여다. USDT 는 legacy 경로가 없어 이 단계로 실제 닫힌다.
+    ENFORCE_AUTHENTICATED_PREMIUM = "enforce_authenticated_premium"
 
 
 def parse_topic_auth_stage(raw: str) -> "TopicAuthStage":
-    """⛔ `.strip().lower()` 를 쓰지 않는다 — **정확히 두 문자열만** 받는다.
+    """⛔ `.strip().lower()` 를 쓰지 않는다 — **정확히 정의된 문자열만** 받는다.
 
     다른 mode 계열(TETHER_TOPIC_TRIGGER_MODE 등)은 정규화하지만 이건 **보안 강제 단계**다.
     `Reject_Anonymous_FX` 나 앞뒤 공백을 조용히 승인하면, 운영자가 적은 것과 서버가 이해한 것이
     갈릴 여지를 남긴다. 오설정은 조용한 fallback 이 아니라 **기동 실패**로 접는다(Crash Early).
     """
     # ⛔ env parser 이므로 **정확히 str 만** 받는다. `TopicAuthStage(member)` 는 그 member 를
-    #    그대로 돌려주므로, 타입 검사가 없으면 "정확히 두 문자열만" 계약이 거짓이 된다(실측).
+    #    그대로 돌려주므로, 타입 검사가 없으면 "정확히 정의된 문자열만" 계약이 거짓이 된다(실측).
     if type(raw) is not str:
         raise ValueError(
             f"WS_TOPIC_AUTH_STAGE must be a str (got {type(raw).__name__}: {raw!r})"

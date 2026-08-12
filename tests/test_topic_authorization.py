@@ -10,9 +10,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy import exc as sqlalchemy_exc
 
-from app import subscription, topic_authorization as ta
+from app import subscription, topic_authorization as ta, topic_policy
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+KRX = "krx:usd-krw-futures"
+FX = "fx:usd-krw"
+
+
+def _plan(*, uid="u1", identity=(), premium=(), entitlement=(KRX,)):
+    return topic_policy.AuthorizationPlan(
+        uid=uid,
+        identity_only=tuple(identity),
+        premium_only=tuple(premium),
+        premium_and_entitlement=tuple(entitlement),
+    )
 
 
 class _Clock:
@@ -43,14 +54,15 @@ class TestClassifyPremium(unittest.TestCase):
         만들면 관측하지 않은 entitlement 시각을 **지어내게** 된다 — 이 리포가 두 번 고친
         "다른 축 인자에 값 밀어 넣기"와 같은 형태다.
         """
-        verdict = ta.classify_premium(subscription.Determined(is_premium=True),
+        verdict = ta.classify_premium(subscription.Determined(is_premium=True), uid="u1",
                                       premium_observed_at_mono=100.0)
         self.assertIsInstance(verdict, ta.PremiumGranted)
         self.assertNotIsInstance(verdict, ta.Granted)
+        self.assertEqual(verdict.uid, "u1")
         self.assertEqual(verdict.premium_observed_at_mono, 100.0)
 
     def test_determined_false_is_a_per_topic_denial(self):
-        v = ta.classify_premium(subscription.Determined(is_premium=False),
+        v = ta.classify_premium(subscription.Determined(is_premium=False), uid="u1",
                                 premium_observed_at_mono=100.0)
         self.assertEqual(v, ta.Denied("premium_required"))
 
@@ -63,14 +75,14 @@ class TestClassifyPremium(unittest.TestCase):
         )
         for result, kind in cases:
             with self.subTest(result=type(result).__name__):
-                v = ta.classify_premium(result, premium_observed_at_mono=1.0)
+                v = ta.classify_premium(result, uid="u1", premium_observed_at_mono=1.0)
                 self.assertIsInstance(v, ta.Unavailable)
                 self.assertIs(v.kind, kind)
 
     def test_unknown_result_type_is_not_swallowed(self):
         """⛔ 분류 불가는 삼키지 않는다 — 미지의 결과를 가용성 verdict 로 바꾸면 조용해진다."""
         with self.assertRaises(TypeError):
-            ta.classify_premium(object(), premium_observed_at_mono=1.0)
+            ta.classify_premium(object(), uid="u1", premium_observed_at_mono=1.0)
 
     def test_denial_vocabulary_is_enforced_at_construction(self):
         for bad in ("typo", "", "topic_unavailable", "invalid_token"):
@@ -78,7 +90,7 @@ class TestClassifyPremium(unittest.TestCase):
                 ta.Denied(bad)
 
 
-class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
+class TestAuthorizeSubscriptionPlan(unittest.IsolatedAsyncioTestCase):
     def _patch_rc(self, result):
         return patch("app.subscription.fetch_revenuecat_result",
                      new=AsyncMock(return_value=result))
@@ -88,8 +100,9 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
         session_factory = MagicMock()
         with self._patch_rc(subscription.Determined(is_premium=False)), \
              patch("app.database.SessionLocal", new=session_factory):
-            verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
-        self.assertEqual(verdict, ta.Denied("premium_required"))
+            outcome = await ta.authorize_subscription_plan(_plan(), mono=_Clock())
+        self.assertEqual(outcome.premium, ta.Denied("premium_required"))
+        self.assertIsNone(outcome.entitlement)
         session_factory.assert_not_called()
 
     async def test_observations_are_taken_before_their_io_not_after(self):
@@ -112,9 +125,11 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
         with patch("app.subscription.fetch_revenuecat_result", new=rc), \
              patch("app.database.SessionLocal", new=MagicMock()), \
              patch("app.entitlements.has_entitlement", new=query):
-            verdict = await ta.authorize_gated_subscription("u1", mono=clock)
+            outcome = await ta.authorize_subscription_plan(_plan(), mono=clock)
 
+        verdict = outcome.entitlement
         self.assertIsInstance(verdict, ta.Granted)
+        self.assertEqual(verdict.uid, "u1")
         # premium 은 RC **전**(500) — 뒤라면 600+ 이 된다.
         self.assertEqual(
             verdict.premium_observed_at_mono, 500.0,
@@ -130,8 +145,8 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
         with self._patch_rc(subscription.Determined(is_premium=True)), \
              patch("app.database.SessionLocal", new=MagicMock()), \
              patch("app.entitlements.has_entitlement", return_value=False):
-            verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
-        self.assertEqual(verdict, ta.Denied("krx_entitlement_required"))
+            outcome = await ta.authorize_subscription_plan(_plan(), mono=_Clock())
+        self.assertEqual(outcome.entitlement, ta.Denied("krx_entitlement_required"))
 
     async def test_transient_db_error_warns_and_is_retryable(self):
         exc = sqlalchemy_exc.OperationalError("stmt", {}, Exception("conn refused"))
@@ -139,7 +154,7 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
              patch("app.database.SessionLocal", new=MagicMock()), \
              patch("app.entitlements.has_entitlement", side_effect=exc), \
              self.assertLogs("exchange_rate.topic_authorization", level="WARNING") as logs:
-            verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
+            verdict = await ta.authorize_subscription_plan(_plan(), mono=_Clock())
         self.assertIs(verdict.kind, ta.UnavailableKind.TRANSIENT)
         self.assertFalse([r for r in logs.records if r.levelname == "ERROR"],
                          "transient 인데 ERROR 를 냈다 — 운영자 신호가 희석된다")
@@ -151,7 +166,7 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
              patch("app.entitlements.has_entitlement",
                    side_effect=sqlalchemy_exc.ProgrammingError("stmt", {}, Exception("no table"))), \
              self.assertLogs("exchange_rate.topic_authorization", level="ERROR"):
-            verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
+            verdict = await ta.authorize_subscription_plan(_plan(), mono=_Clock())
         self.assertIs(verdict.kind, ta.UnavailableKind.PERSISTENT)
 
     async def test_permanent_sqlstate_inside_operational_error_is_persistent(self):
@@ -166,7 +181,7 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
              patch("app.database.SessionLocal", new=MagicMock()), \
              patch("app.entitlements.has_entitlement", side_effect=exc), \
              self.assertLogs("exchange_rate.topic_authorization", level="ERROR"):
-            verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
+            verdict = await ta.authorize_subscription_plan(_plan(), mono=_Clock())
         self.assertIs(
             verdict.kind, ta.UnavailableKind.PERSISTENT,
             "영구 SQLSTATE 가 transient 로 분류됐다 — 재시도로 안 낫는 것을 계속 두드린다",
@@ -182,19 +197,19 @@ class TestAuthorizeGatedSubscription(unittest.IsolatedAsyncioTestCase):
              patch("app.database.SessionLocal", new=MagicMock()), \
              patch("app.entitlements.has_entitlement", side_effect=AttributeError("boom")), \
              self.assertRaises(AttributeError):
-            await ta.authorize_gated_subscription("u1", mono=_Clock())
+            await ta.authorize_subscription_plan(_plan(), mono=_Clock())
 
     async def test_provider_failure_skips_the_database(self):
         session_factory = MagicMock()
         with self._patch_rc(subscription.ProviderUnavailable()), \
              patch("app.database.SessionLocal", new=session_factory):
-            verdict = await ta.authorize_gated_subscription("u1", mono=_Clock())
+            verdict = await ta.authorize_subscription_plan(_plan(), mono=_Clock())
         self.assertIs(verdict.kind, ta.UnavailableKind.TRANSIENT)
         session_factory.assert_not_called()
 
 
-class TestGatedSubscriptionCallsRevenueCatOnce(unittest.IsolatedAsyncioTestCase):
-    """추출 characterization — RC 왕복이 요청당 **정확히 1회**여야 한다.
+class TestCoordinatorCallCounts(unittest.IsolatedAsyncioTestCase):
+    """coordinator 외부 I/O 횟수 계약 — RC 0/1회, entitlement 0/1회.
 
     ⛔ 추출은 helper 를 한 번 더 부르는 실수를 쉽게 만든다. 외부 HTTP 가 2회면 지연이
        두 배가 되고 **관측 시각이 둘로 갈려** lease horizon 이 topic 별로 어긋난다.
@@ -205,8 +220,110 @@ class TestGatedSubscriptionCallsRevenueCatOnce(unittest.IsolatedAsyncioTestCase)
         with patch("app.subscription.fetch_revenuecat_result", new=rc), \
              patch("app.database.SessionLocal", new=MagicMock()), \
              patch("app.entitlements.has_entitlement", return_value=True):
-            await ta.authorize_gated_subscription("u1", mono=_Clock())
+            await ta.authorize_subscription_plan(_plan(), mono=_Clock())
         self.assertEqual(rc.await_count, 1, "RevenueCat 왕복이 1회가 아니다")
+
+    async def test_identity_only_plan_makes_no_external_calls(self):
+        rc = AsyncMock(side_effect=AssertionError("identity-only가 RC를 호출했다"))
+        session = MagicMock(side_effect=AssertionError("identity-only가 DB를 열었다"))
+        with patch("app.subscription.fetch_revenuecat_result", new=rc), \
+             patch("app.database.SessionLocal", new=session):
+            outcome = await ta.authorize_subscription_plan(
+                _plan(identity=(FX,), entitlement=()), mono=_Clock()
+            )
+        self.assertIsNone(outcome.premium)
+        self.assertIsNone(outcome.entitlement)
+        rc.assert_not_awaited()
+        session.assert_not_called()
+
+    async def test_premium_only_calls_rc_once_and_never_opens_the_database(self):
+        rc = AsyncMock(return_value=subscription.Determined(is_premium=True))
+        session = MagicMock(side_effect=AssertionError("premium-only가 DB를 열었다"))
+        with patch("app.subscription.fetch_revenuecat_result", new=rc), \
+             patch("app.database.SessionLocal", new=session):
+            outcome = await ta.authorize_subscription_plan(
+                _plan(premium=(FX,), entitlement=()), mono=_Clock()
+            )
+        self.assertIsInstance(outcome.premium, ta.PremiumGranted)
+        self.assertEqual(outcome.premium.uid, "u1")
+        self.assertIsNone(outcome.entitlement)
+        self.assertEqual(rc.await_count, 1)
+        session.assert_not_called()
+
+    async def test_mixed_plan_shares_one_premium_observation(self):
+        rc = AsyncMock(return_value=subscription.Determined(is_premium=True))
+        with patch("app.subscription.fetch_revenuecat_result", new=rc), \
+             patch("app.database.SessionLocal", new=MagicMock()), \
+             patch("app.entitlements.has_entitlement", return_value=True):
+            outcome = await ta.authorize_subscription_plan(
+                _plan(premium=(FX,)), mono=_Clock()
+            )
+        self.assertEqual(rc.await_count, 1)
+        self.assertEqual(
+            outcome.premium.premium_observed_at_mono,
+            outcome.entitlement.premium_observed_at_mono,
+        )
+        self.assertEqual(outcome.premium.uid, outcome.entitlement.uid)
+
+
+class TestAuthorizationOutcomeInvariants(unittest.TestCase):
+    def test_rejects_a_premium_observation_for_another_uid(self):
+        with self.assertRaises(ValueError):
+            ta.AuthorizationOutcome(
+                plan=_plan(uid="expected", premium=(FX,), entitlement=()),
+                premium=ta.PremiumGranted(
+                    uid="other", premium_observed_at_mono=1.0
+                ),
+                entitlement=None,
+            )
+
+    def test_rejects_divergent_premium_timestamps_between_axes(self):
+        with self.assertRaises(ValueError):
+            ta.AuthorizationOutcome(
+                plan=_plan(premium=(FX,)),
+                premium=ta.PremiumGranted(uid="u1", premium_observed_at_mono=1.0),
+                entitlement=ta.Granted(
+                    uid="u1",
+                    premium_observed_at_mono=2.0,
+                    entitlement_observed_at_mono=3.0,
+                ),
+            )
+
+    def test_rejects_an_entitlement_observation_for_another_uid(self):
+        with self.assertRaises(ValueError):
+            ta.AuthorizationOutcome(
+                plan=_plan(uid="expected"),
+                premium=ta.PremiumGranted(
+                    uid="expected", premium_observed_at_mono=1.0
+                ),
+                entitlement=ta.Granted(
+                    uid="other",
+                    premium_observed_at_mono=1.0,
+                    entitlement_observed_at_mono=2.0,
+                ),
+            )
+
+    def test_premium_denial_cannot_carry_an_entitlement_result(self):
+        with self.assertRaises(ValueError):
+            ta.AuthorizationOutcome(
+                plan=_plan(),
+                premium=ta.Denied("premium_required"),
+                entitlement=ta.Denied("krx_entitlement_required"),
+            )
+
+
+class TestEntitlementObservationUidBoundary(unittest.IsolatedAsyncioTestCase):
+    async def test_mismatched_premium_uid_is_rejected_before_database_io(self):
+        session = MagicMock(side_effect=AssertionError("UID mismatch opened the database"))
+        with patch("app.database.SessionLocal", new=session), self.assertRaises(ValueError):
+            await ta._observe_krx_entitlement(
+                "expected",
+                premium=ta.PremiumGranted(
+                    uid="other", premium_observed_at_mono=1.0
+                ),
+                mono=_Clock(),
+            )
+        session.assert_not_called()
 
 
 
@@ -218,10 +335,28 @@ class TestSingleGatedTopicTripwire(unittest.TestCase):
         ta.assert_single_gated_topic()
 
     def test_fails_when_a_second_gated_topic_appears(self):
-        with patch("app.topic_initial_snapshot.per_user_gated_snapshot_topics",
-                   return_value=frozenset({"krx:usd-krw-futures", "krx:cme-futures"})), \
+        """⚠️ **정책표**를 바꾼다 — 구 seam(`per_user_gated_snapshot_topics`)을 patch 하면
+        이제 그 함수도 표에서 파생하므로 실제 경로를 검사하지 못한다(정본이 표로 옮겨졌다).
+        """
+        from app import topic_policy
+
+        second = dict(topic_policy.TOPIC_POLICY)
+        second["usdt:krw"] = topic_policy.AuthorizationClass.PREMIUM_AND_ENTITLEMENT
+        with patch.object(topic_policy, "TOPIC_POLICY", second), \
              self.assertRaises(RuntimeError):
             ta.assert_single_gated_topic()
+
+    def test_derived_gated_set_flows_through_to_the_snapshot_helper(self):
+        """정본이 표 하나임을 잠근다 — 표를 바꾸면 snapshot helper 도 함께 움직여야 한다."""
+        from app import topic_policy
+        from app.topic_initial_snapshot import per_user_gated_snapshot_topics
+
+        second = dict(topic_policy.TOPIC_POLICY)
+        second["usdt:krw"] = topic_policy.AuthorizationClass.PREMIUM_AND_ENTITLEMENT
+        with patch.object(topic_policy, "TOPIC_POLICY", second):
+            self.assertEqual(
+                per_user_gated_snapshot_topics(),
+                frozenset({"krx:usd-krw-futures", "usdt:krw"}))
 
 
 if __name__ == "__main__":

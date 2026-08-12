@@ -56,7 +56,7 @@ class _Sock:
 
 
 class TestConfigParserIsStrict(unittest.TestCase):
-    """⛔ 보안 강제 단계라 **정확히 두 문자열만** 받는다. 조용한 fallback 은 금지."""
+    """⛔ 보안 강제 단계라 **enum 에 정의된 문자열만** 받는다. 조용한 fallback 은 금지."""
 
     def test_module_level_value_is_parsed_not_a_string(self):
         """⛔ 실제 결함이었다 — config 가 문자열을 저장하고 소비자가 enum 과 비교해
@@ -72,10 +72,12 @@ class TestConfigParserIsStrict(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "compatibility")
 
-    def test_explicit_value_is_honoured_in_a_fresh_process(self):
-        result = _stage_in_fresh_process("reject_anonymous_fx")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "reject_anonymous_fx")
+    def test_explicit_values_are_honoured_in_a_fresh_process(self):
+        for value in ("reject_anonymous_fx", "enforce_authenticated_premium"):
+            with self.subTest(value=value):
+                result = _stage_in_fresh_process(value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), value)
 
     def test_bad_values_fail_at_import_time_in_a_fresh_process(self):
         for raw in ("Compatibility", " compatibility ", "enforce_fx"):
@@ -89,7 +91,7 @@ class TestConfigParserIsStrict(unittest.TestCase):
         self.assertFalse(hasattr(config, "WS_TOPIC_AUTH_ALLOWED_STAGES"))
 
     def test_rejects_non_string_input(self):
-        """⛔ "정확히 두 문자열만" 계약 — `TopicAuthStage(member)` 는 그 member 를 그대로
+        """⛔ "정확히 문자열만" 계약 — `TopicAuthStage(member)` 는 그 member 를 그대로
         돌려주므로, 타입 검사가 없으면 enum 인스턴스가 통과해 계약이 거짓이 된다(실측).
         """
         for raw in (TopicAuthStage.COMPATIBILITY, None, 1, b"compatibility",
@@ -180,6 +182,10 @@ class TestPolicy(unittest.TestCase):
             [USDT, "fx:not-a-real-topic"],
         )
 
+    def test_enforce_rejects_every_anonymous_topic(self):
+        r = _rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+        self.assertEqual(r.filter_anonymous_topics(["fx:usd-krw", USDT]), [])
+
     def test_order_and_duplicates_are_preserved(self):
         r = _rollout(TopicAuthStage.REJECT_ANONYMOUS_FX)
         self.assertEqual(
@@ -190,6 +196,20 @@ class TestPolicy(unittest.TestCase):
         r._stage = object()          # 도달 불가 상태를 강제로 만든다
         with self.assertRaises(ValueError):
             r.filter_anonymous_topics(["fx:usd-krw"])
+
+    def test_authenticated_planner_uses_the_runtime_object_stage(self):
+        """config patch가 아니라 production에 주입되는 rollout 객체가 두 정책축의 정본이다."""
+        compatibility = _rollout(TopicAuthStage.COMPATIBILITY)
+        enforced = _rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+
+        self.assertEqual(
+            compatibility.plan_authenticated_topics([USDT], uid="u1").identity_only,
+            (USDT,),
+        )
+        self.assertEqual(
+            enforced.plan_authenticated_topics([USDT], uid="u1").premium_only,
+            (USDT,),
+        )
 
 
 class TestMetrics(unittest.TestCase):

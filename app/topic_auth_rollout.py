@@ -31,9 +31,12 @@ import math
 import os
 import time
 from collections.abc import Mapping
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence
 
 from app.config import TopicAuthStage
+
+if TYPE_CHECKING:
+    from app.topic_policy import AuthorizationPlan
 
 __all__ = ["TopicAuthStage", "TopicAuthRollout"]
 
@@ -175,12 +178,26 @@ class TopicAuthRollout:
         ⛔ 순서와 중복을 **보존**한다 — 호출부가 그대로 `registry.register` 에 넘긴다.
         ⛔ 예외를 삼키지 않는다. 실패를 무시하고 원본을 돌려주면 FX 가 허용되는 fail-open 이다.
         """
-        if self._stage is TopicAuthStage.COMPATIBILITY:
-            return list(free_topics)
-        if self._stage is TopicAuthStage.REJECT_ANONYMOUS_FX:
-            return [t for t in free_topics if t not in self._fx_topics]
-        # ⛔ 미지 단계는 **최엄격**으로 접는다(fail-closed). 도달 불가지만 조용히 열지 않는다.
-        raise ValueError(f"알 수 없는 rollout 단계: {self._stage!r}")
+        # ⛔ 정책을 여기서 **다시 구현하지 않는다** — 익명 축의 정본은 `topic_policy.plan_anonymous`
+        #    하나다. 두 곳에 두면 stage 를 추가할 때 한쪽만 고쳐 조용히 갈린다.
+        #    (미지 stage 의 fail-closed `raise` 도 그쪽이 소유한다 — 삼키면 fail-open 이다.)
+        # ⚠️ 주입받은 `_fx_topics` 를 넘긴다. 정책 모듈이 FX 이름을 따로 들면 같은 사실의 두 번째
+        #    진실이 되고, 생성자에서 이미 검증한 집합과 갈릴 수 있다.
+        from app.topic_policy import plan_anonymous
+
+        return plan_anonymous(free_topics, stage=self._stage, fx_topics=self._fx_topics)
+
+    def plan_authenticated_topics(
+        self, topics: Sequence[str], *, uid: str
+    ) -> "AuthorizationPlan":
+        """같은 runtime stage로 식별 요청을 partition한다.
+
+        ⛔ dispatcher가 config를 다시 읽으면 E2E에서 config만 patch한 채 singleton rollout은 옛
+           stage를 유지하는 두 번째 진실이 생긴다. 익명·식별 축 모두 이 인스턴스의 stage를 쓴다.
+        """
+        from app.topic_policy import plan_authenticated
+
+        return plan_authenticated(topics, stage=self._stage, uid=uid)
 
     # ── 노출 ────────────────────────────────────────────────────────────────
 

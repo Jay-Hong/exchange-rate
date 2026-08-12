@@ -63,7 +63,7 @@ D1("한 ack 안의 accepted들은 **같은 순간** 갱신")과 D2("`active_subs
 관측 시각들이 **모두** wall epoch로 들어오면 서로의 관계가 정상이라 gross-skew 가드를 통과한다
 (결과는 epoch+900이 되어 진짜 monotonic now와 비교 시 수십 년간 미만료). 축 보증은 배선
 슬라이스가 져야 한다 — 모든 값이 같은 주입 `Clock.mono`에서 나오고, **판정기가 통과시킨**
-결과(`app/topic_authorization.py` 의 `Granted`)만 계산기에
+결과(`app/topic_authorization.py` 의 `PremiumGranted` 또는 `Granted`)만 계산기에
 도달하며, 이미 만료로 계산되면 등록·ack accepted를 하지 않는다는 것까지.
 """
 from __future__ import annotations
@@ -185,9 +185,9 @@ def compute_identity_only_lease_expiry(
     구속하지 않게 만드는 것은 여기 한 곳에서만 일어난다.
 
     ⚠️ 유료 topic 은 **이미 accept 한다** — 그 경로는 이 함수가 아니라 축에 맞는 계산기를 쓴다:
-    per-user 판정이 붙는 현행 KRX 는 `compute_gated_lease_expiry`(4축), premium 만 보는 가상의
-    경로라면 `compute_lease_expiry`(3축). ⚠️ `compute_lease_expiry` 는 **현재 프로덕션 호출자가
-    없다**(테스트만 쓴다) — 지우기 전에 3축 소비자가 생길지부터 볼 것.
+    per-user 판정이 붙는 KRX 는 `compute_gated_lease_expiry`(4축), premium-only FX/USDT 는
+    `compute_lease_expiry`(3축)를 쓴다. 두 계산기를 합치면 관측하지 않은 entitlement 시각을
+    지어내거나 premium 축을 생략하게 되므로 분리한다.
     """
     return _lease_expiry_from_observations(
         now_mono=now_mono,

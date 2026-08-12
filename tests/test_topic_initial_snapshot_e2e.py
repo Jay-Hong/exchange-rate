@@ -50,6 +50,7 @@ from app import main as app_main
 from app import topic_dispatcher
 from app.main import app
 from app.subscription import PremiumStatus
+from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
 from app.topic_lease import LEASE_MAX_SECONDS
 
 models.Base.metadata.create_all(engine)  # 빈 테이블 (connect 초기 legacy payload용)
@@ -57,6 +58,16 @@ models.Base.metadata.create_all(engine)  # 빈 테이블 (connect 초기 legacy 
 
 def _canned_snapshot(topic):
     return {"type": "snapshot", "version": 1, "topic": topic, "data": {"_canned": topic}}
+
+
+def _runtime_rollout(stage):
+    """production과 같은 canonical topic 주입으로 stage만 바꾼 runtime 객체."""
+    return TopicAuthRollout(
+        stage=stage,
+        fx_topics=tuple(app_main.fx_topic_publisher.FX_TOPICS.values()),
+        usdt_topic=app_main.tether_topic_publisher.TETHER_TOPIC,
+        started_at_epoch_seconds=0,
+    )
 
 
 class TestSnapshotOnSubscribeE2E(unittest.TestCase):
@@ -782,13 +793,27 @@ def _publish_on_app_loop(ws, topic, payload):
     return portal.call(dispatcher.publish_topic, topic, payload)
 
 
-def _granted_verdict():
-    """판정기를 통과한 것처럼 보이는 최소 verdict (관측 시각은 현재 mono 축)."""
+def _granted_outcome(plan):
+    """주어진 plan과 UID가 결속된 최소 승인 outcome."""
     from app import topic_authorization as ta
     from app.clock import system_clock
 
     now = system_clock().mono()
-    return ta.Granted(premium_observed_at_mono=now, entitlement_observed_at_mono=now)
+    premium = ta.PremiumGranted(uid=plan.uid, premium_observed_at_mono=now)
+    entitlement = (
+        ta.Granted(
+            uid=plan.uid,
+            premium_observed_at_mono=now,
+            entitlement_observed_at_mono=now,
+        )
+        if plan.requires_entitlement()
+        else None
+    )
+    return ta.AuthorizationOutcome(
+        plan=plan,
+        premium=premium,
+        entitlement=entitlement,
+    )
 
 
 def _registry_connection_count():
@@ -1139,6 +1164,69 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 self.assertLessEqual(accepted[0]["lease_duration_seconds"], LEASE_MAX_SECONDS,
                                      "lease 가 15분을 넘었다 — revoke 상한이 무너진다")
 
+    def test_premium_only_subscription_uses_three_axes_and_one_shared_now(self):
+        """final-stage FX lease는 identity·premium·now를 모두 쓰고 `now`를 다시 읽지 않는다."""
+        from app import subscription, topic_dispatcher as dispatcher
+        from app.topic_lease import compute_lease_expiry as real_compute_lease_expiry
+
+        scripted = iter((990.0, 920.0, 1000.0, 1000.0))
+        observed = []
+
+        def mono():
+            try:
+                value = next(scripted)
+            except StopIteration as exc:
+                raise AssertionError("한 요청에서 monotonic 시계를 예상보다 더 읽었다") from exc
+            observed.append(value)
+            return value
+
+        lease_spy = MagicMock(wraps=real_compute_lease_expiry)
+        patchers = self._patchers()
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result",
+            new=AsyncMock(return_value=subscription.Determined(is_premium=True)),
+        )
+        rollout = _runtime_rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(app_main.manager, "topic_auth_rollout", rollout))
+            stack.enter_context(patch.object(
+                dispatcher,
+                "lease_clock",
+                lambda: SimpleNamespace(mono=mono, wall=lambda: None),
+            ))
+            stack.enter_context(patch.object(
+                dispatcher, "compute_lease_expiry", new=lease_spy
+            ))
+            # 이 테스트는 lease 발급 배선만 본다. snapshot 전송 직전 검증은 S2a 테스트 소관이다.
+            stack.enter_context(patch(
+                "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({
+                    "type": "subscribe",
+                    "request_id": "premium-three-axis",
+                    "id_token": "tok",
+                    "topics": ["fx:usd-krw"],
+                })
+                ack = self._receive_for(ws, "premium-three-axis")
+
+        self.assertEqual(observed, [990.0, 920.0, 1000.0, 1000.0])
+        lease_spy.assert_called_once_with(
+            now_mono=1000.0,
+            premium_verified_at_mono=920.0,
+            firebase_identity_verified_at_mono=990.0,
+        )
+        accepted = ack.get("accepted_topics", [])
+        self.assertEqual([item["topic"] for item in accepted], ["fx:usd-krw"])
+        self.assertEqual(
+            accepted[0]["lease_duration_seconds"],
+            820,
+            "premium 축이 3축 lease의 만료를 지배하지 못했다",
+        )
+
     def test_db_transient_folds_the_whole_request(self):
         """⛔ DB 인프라 장애는 **판정 불가**다 — 거부가 아니라 전체 요청을 접는다."""
         from app import subscription
@@ -1327,7 +1415,96 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(free_sent, 1, "수락했다고 ack 해 놓고 발행이 도달하지 않는다")
         self.assertEqual(krx_sent, 0, "거부한 KRX 로 발행이 나갔다")
 
-    def _grant_then_deny(self, *, deny_via, request_id):
+    def test_enforcement_rejects_fx_and_krx_when_premium_is_inactive(self):
+        """최종 stage에서는 비-KRX도 premium 대상이다. KRX와 RC 관측은 요청당 한 번 공유한다."""
+        from app import subscription
+
+        rc = AsyncMock(return_value=subscription.Determined(is_premium=False))
+        patchers = self._patchers()
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result", new=rc
+        )
+        rollout = _runtime_rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True
+            ))
+            stack.enter_context(patch.object(
+                app_main.manager, "topic_auth_rollout", rollout
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({
+                    "type": "subscribe",
+                    "request_id": "enforce-premium-deny",
+                    "id_token": "tok",
+                    "topics": ["fx:usd-krw", KRX_TOPIC],
+                })
+                ack = self._receive_for(ws, "enforce-premium-deny")
+
+        self.assertEqual(ack["accepted_topics"], [])
+        self.assertEqual(
+            [(item["topic"], item["error"]) for item in ack["rejected_topics"]],
+            [("fx:usd-krw", "premium_required"),
+             (KRX_TOPIC, "premium_required")],
+        )
+        self.assertEqual(rc.await_count, 1, "혼합 요청이 RevenueCat을 두 번 호출했다")
+
+    def test_enforcement_accepts_fx_but_rejects_krx_without_entitlement(self):
+        """premium 승인 뒤 entitlement 거부는 KRX만 접고 premium-only FX는 살린다."""
+        from app import subscription
+
+        rc = AsyncMock(return_value=subscription.Determined(is_premium=True))
+        entitlement = MagicMock(return_value=False)
+        patchers = self._patchers()
+        patchers["revenuecat_must_not_be_called"] = patch(
+            "app.subscription.fetch_revenuecat_result", new=rc
+        )
+        patchers["db_session_must_not_be_opened"] = patch(
+            "app.database.SessionLocal", new=MagicMock()
+        )
+        rollout = _runtime_rollout(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers.values():
+                stack.enter_context(patcher)
+            stack.enter_context(patch.object(
+                config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True
+            ))
+            stack.enter_context(patch.object(
+                app_main.manager, "topic_auth_rollout", rollout
+            ))
+            stack.enter_context(patch(
+                "app.entitlements.has_entitlement", new=entitlement
+            ))
+            with self.client.websocket_connect("/ws") as ws:
+                _receive_json_or_fail(ws, self.fail)
+                ws.send_json({
+                    "type": "subscribe",
+                    "request_id": "enforce-entitlement-deny",
+                    "id_token": "tok",
+                    "topics": ["fx:usd-krw", KRX_TOPIC],
+                })
+                ack = self._receive_for(ws, "enforce-entitlement-deny")
+
+        self.assertEqual(
+            [item["topic"] for item in ack["accepted_topics"]], ["fx:usd-krw"]
+        )
+        self.assertEqual(
+            [(item["topic"], item["error"]) for item in ack["rejected_topics"]],
+            [(KRX_TOPIC, "krx_entitlement_required")],
+        )
+        self.assertEqual(rc.await_count, 1)
+        self.assertEqual(entitlement.call_count, 1)
+
+    def _grant_then_deny(
+        self,
+        *,
+        deny_via,
+        request_id,
+        stage=TopicAuthStage.COMPATIBILITY,
+    ):
         """KRX grant 를 만든 뒤 **시계를 전진시키지 않고** 거부로 뒤집는다.
 
         ⛔ **시계를 움직이면 안 된다** — 움직이면 만료 게이트가 대신 publish 를 막아
@@ -1353,11 +1530,15 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
             "app.subscription.fetch_revenuecat_result", new=rc)
         patchers["db_session_must_not_be_opened"] = patch(
             "app.database.SessionLocal", new=MagicMock())
+        rollout = _runtime_rollout(stage)
         out = {}
         with contextlib.ExitStack() as stack:
             for patcher in patchers.values():
                 stack.enter_context(patcher)
             stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
+            stack.enter_context(patch.object(
+                app_main.manager, "topic_auth_rollout", rollout
+            ))
             stack.enter_context(patch("app.entitlements.has_entitlement", new=entitlement_query))
             stack.enter_context(patch.object(
                 dispatcher, "lease_clock",
@@ -1371,6 +1552,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 # ⛔ positive control — 철회 **전에** 실제로 도달한다.
                 out["krx_before"] = ws.portal.call(
                     dispatcher.publish_topic, KRX_TOPIC, {"type": "snapshot"})
+                out["fx_before"] = ws.portal.call(
+                    dispatcher.publish_topic, A, {"type": "snapshot"})
                 db_calls_after_grant = state["db_calls"]
 
                 state.update(deny_via)                 # premium 또는 entitlement 를 뒤집는다
@@ -1387,6 +1570,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self.assertEqual(len(grant.get("accepted_topics", [])), 2, "grant 가 실패했다")
         self.assertEqual(out["krx_before"], 1,
                          "철회 **전**에도 KRX publish 가 0 이다 — positive control 실패")
+        self.assertEqual(out["fx_before"], 1,
+                         "철회 **전**에도 FX publish 가 0 이다 — positive control 실패")
         return out
 
     def _assert_krx_revoked(self, out, expected_error):
@@ -1412,6 +1597,24 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
         self._assert_krx_revoked(out, "premium_required")
         self.assertEqual(out["db_delta"], 0,
                          "premium 이 없는데 entitlement DB 를 조회했다")
+
+    def test_final_stage_premium_denial_revokes_existing_fx_and_krx(self):
+        """final stage의 premium 부정은 premium-only와 full partition을 모두 즉시 철회한다."""
+        out = self._grant_then_deny(
+            deny_via={"premium": False},
+            request_id="deny-final-premium",
+            stage=TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM,
+        )
+        ack = out["deny_ack"]
+        self.assertEqual(
+            [(item["topic"], item["error"]) for item in ack["rejected_topics"]],
+            [("fx:usd-krw", "premium_required"),
+             (KRX_TOPIC, "premium_required")],
+        )
+        self.assertEqual(ack["active_subscriptions"], [])
+        self.assertEqual(out["free_after"], 0, "premium 거부 뒤 FX 구독이 남았다")
+        self.assertEqual(out["krx_after"], 0, "premium 거부 뒤 KRX 구독이 남았다")
+        self.assertEqual(out["db_delta"], 0, "premium 거부 뒤 entitlement DB를 조회했다")
 
     def test_entitlement_denial_revokes_existing_krx(self):
         """⛔ premium 은 있으나 entitlement 가 없으면 **per-topic** 거부다 — 무료 topic 은 산다."""
@@ -2548,8 +2751,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 stack.enter_context(patcher)
             stack.enter_context(patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True))
             stack.enter_context(patch.object(
-                dispatcher, "authorize_gated_subscription",
-                new=AsyncMock(return_value=_granted_verdict()),
+                dispatcher, "authorize_subscription_plan",
+                new=AsyncMock(side_effect=lambda plan, **kw: _granted_outcome(plan)),
             ))
             stack.enter_context(patch.object(dispatcher.asyncio, "timeout_at",
                                              recording_timeout_at))

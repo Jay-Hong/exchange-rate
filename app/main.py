@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import auth_executor, default_executor_probe, topic_auth_rollout, topic_wire, ws_connection_metrics
+from app import auth_executor, default_executor_probe, topic_auth_rollout, topic_policy, topic_wire, ws_connection_metrics
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -292,6 +292,12 @@ class ConnectionManager:
                 "⚠️ 일부 전송 실패 (병렬 broadcast)",
                 extra={"failed": len(failed), "total": len(connections)},
             )
+
+# ⛔ **정책표 검증을 manager 생성 전에** 한다. 여기 호출이 없으면 `topic_policy` 의 불변식들은
+#    산출물일 뿐 기전이 아니다 — 잘못된 표로도 프로세스가 그대로 뜬다.
+#    ⚠️ import 시점에 돌므로 실패는 **기동 실패**다(Crash Early). 정책 오설정을 조용한 fallback 이
+#    아니라 배포 실패로 접는 것이 이 리포의 `parse_topic_auth_stage` 규율과 같다.
+topic_policy.assert_topic_policy_invariants()
 
 manager = ConnectionManager(
     auth_rollout=topic_auth_rollout.TopicAuthRollout(

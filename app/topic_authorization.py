@@ -1,4 +1,4 @@
-"""per-user 판정이 필요한 topic(KRX)의 **인가 판정** — §8.1 1C.
+"""topic partition의 premium·KRX entitlement **인가 coordinator** — §8.1 1C.
 
 ## 왜 bool 이 아닌가
 
@@ -29,6 +29,7 @@ from typing import Optional, Union
 from sqlalchemy import exc as sqlalchemy_exc
 
 from app.db_errors import TRANSIENT_DB_ERRORS, is_transient_db_error
+from app.topic_policy import AuthorizationPlan
 
 logger = logging.getLogger("exchange_rate.topic_authorization")
 
@@ -61,15 +62,27 @@ class PremiumGranted:
     이 리포는 같은 형태("다른 축 인자에 값 밀어 넣기")를 이미 두 번 고쳤다.
     """
 
+    uid: str
     premium_observed_at_mono: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.uid, str) or not self.uid:
+            raise ValueError(f"premium 관측 UID 는 비어 있지 않은 str 이어야 한다: {self.uid!r}")
 
 
 @dataclass(frozen=True)
 class Granted:
     """**최종** 승인 — 두 축이 **실제로** 관측된 지점에서만 만들어진다."""
 
+    uid: str
     premium_observed_at_mono: float
     entitlement_observed_at_mono: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.uid, str) or not self.uid:
+            raise ValueError(
+                f"entitlement 관측 UID 는 비어 있지 않은 str 이어야 한다: {self.uid!r}"
+            )
 
 
 DENIABLE_ERRORS = frozenset({"premium_required", "krx_entitlement_required"})
@@ -104,7 +117,60 @@ GatedVerdict = Union[Granted, Denied, Unavailable]
 PremiumVerdict = Union[PremiumGranted, Denied, Unavailable]
 
 
-def classify_premium(result, *, premium_observed_at_mono: float) -> PremiumVerdict:
+@dataclass(frozen=True)
+class AuthorizationOutcome:
+    """한 요청의 topic partition과 실제 관측 결과를 **UID째** 묶는다.
+
+    `Unavailable`은 이 객체 안에 넣지 않는다. 판정 불가는 §8-C 전체-요청 결과라 caller가
+    registry를 전혀 건드리기 전에 즉시 반환해야 한다. 반면 `Denied`는 per-topic이므로
+    premium과 entitlement 축에 각각 남겨 혼합 요청을 부분 fold할 수 있어야 한다.
+    """
+
+    plan: AuthorizationPlan
+    premium: Optional[Union[PremiumGranted, Denied]]
+    entitlement: Optional[Union[Granted, Denied]]
+
+    def __post_init__(self) -> None:
+        if not self.plan.requires_premium():
+            if self.premium is not None or self.entitlement is not None:
+                raise ValueError("premium 불필요 plan 에 인가 관측이 붙었다")
+            return
+
+        if isinstance(self.premium, Denied):
+            if self.premium.error != "premium_required" or self.entitlement is not None:
+                raise ValueError("premium 거부 outcome 의 축 조합이 잘못됐다")
+            return
+        if not isinstance(self.premium, PremiumGranted):
+            raise ValueError("premium 필요 plan 에 premium 판정이 없다")
+        if self.premium.uid != self.plan.uid:
+            raise ValueError("premium 관측 UID 가 plan UID 와 다르다")
+
+        if not self.plan.requires_entitlement():
+            if self.entitlement is not None:
+                raise ValueError("entitlement 불필요 plan 에 entitlement 판정이 붙었다")
+            return
+
+        if isinstance(self.entitlement, Denied):
+            if self.entitlement.error != "krx_entitlement_required":
+                raise ValueError("entitlement 거부 코드가 잘못됐다")
+            return
+        if not isinstance(self.entitlement, Granted):
+            raise ValueError("entitlement 필요 plan 에 entitlement 판정이 없다")
+        if self.entitlement.uid != self.plan.uid:
+            raise ValueError("entitlement 관측 UID 가 plan UID 와 다르다")
+        if (
+            self.entitlement.premium_observed_at_mono
+            != self.premium.premium_observed_at_mono
+        ):
+            raise ValueError("premium 관측 시각이 outcome 안에서 갈렸다")
+
+
+AuthorizationVerdict = Union[AuthorizationOutcome, Unavailable]
+
+
+def classify_premium(
+    result, *, uid: str, premium_observed_at_mono: float
+) -> PremiumVerdict:
     """RevenueCat 결과 → verdict. **순수 함수**(I/O 0).
 
     ⛔ 분류 불가는 삼키지 않는다 — 미지의 결과 타입은 `TypeError` 로 올린다(리포 선례).
@@ -113,7 +179,7 @@ def classify_premium(result, *, premium_observed_at_mono: float) -> PremiumVerdi
 
     if isinstance(result, subscription.Determined):
         return (
-            PremiumGranted(premium_observed_at_mono=premium_observed_at_mono)
+            PremiumGranted(uid=uid, premium_observed_at_mono=premium_observed_at_mono)
             if result.is_premium
             else Denied("premium_required")
         )
@@ -155,16 +221,13 @@ def assert_single_gated_topic() -> None:
     두 번째 gated topic 이 생기면 그 verdict 가 **다른 상품에도 적용**되어 조용히 열린다
     (분류 loop 는 `gated` 전체에 같은 verdict 를 쓴다). 일반화 대신 여기서 막아, 추가하는
     사람이 **판정기부터 고치게** 강제한다.
-    """
-    from app.krx_topic_publisher import KRX_TOPIC
-    from app.topic_initial_snapshot import per_user_gated_snapshot_topics
 
-    gated = frozenset(per_user_gated_snapshot_topics())
-    if gated != frozenset({KRX_TOPIC}):
-        raise RuntimeError(
-            "판정기는 KRX entitlement 하나만 안다 — gated topic 이 바뀌면 판정기부터 고칠 것: "
-            f"{sorted(gated)}"
-        )
+    ⚠️ 판정은 **공유 가드**가 한다 — REST 가시성(`visible_snapshot_topics_sync` 가 `KRX_TOPIC` 을
+    하드코딩으로 걸러낸다)도 같은 사실에 걸려 있어, 두 곳이 따로 판정하면 갈린다.
+    """
+    from app.topic_policy import assert_single_entitlement_topic
+
+    assert_single_entitlement_topic()
 
 
 def _log_unavailable(kind: UnavailableKind, message: str) -> None:
@@ -193,7 +256,7 @@ async def _observe_premium(user_id: str, *, mono) -> PremiumVerdict:
     premium_observed_at_mono = mono()          # ⛔ RC 호출 **직전**
     result = await fetch_revenuecat_result(user_id, clock=system_clock())
     verdict = classify_premium(
-        result, premium_observed_at_mono=premium_observed_at_mono
+        result, uid=user_id, premium_observed_at_mono=premium_observed_at_mono
     )
     if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:
         # ⚠️ **원인 로그는 leaf 가 이미 남긴다** — `fetch_revenuecat_result` 가 전송·HTTP·형식
@@ -208,16 +271,13 @@ async def _observe_premium(user_id: str, *, mono) -> PremiumVerdict:
     return verdict
 
 
-async def authorize_gated_subscription(user_id: str, *, mono) -> GatedVerdict:
-    """KRX 구독 인가. 호출 순서가 계약이다(각 단계의 부작용 0회 보장 포함)."""
+async def _observe_krx_entitlement(
+    user_id: str, *, premium: PremiumGranted, mono
+) -> GatedVerdict:
+    """premium 승인 뒤 KRX entitlement 축만 관측한다."""
     assert_single_gated_topic()
-
-    verdict = await _observe_premium(user_id, mono=mono)
-    if not isinstance(verdict, PremiumGranted):
-        # ⛔ premium 없음/불가 → **entitlement 조회 0회**.
-        # ⚠️ 여기서 `Granted` 로 검사하면 안 된다 — `classify_premium` 은 **중간 타입**을
-        #    돌려주므로 성공 경로가 통째로 조기 반환된다(실측으로 red 를 봤다).
-        return verdict
+    if premium.uid != user_id:
+        raise ValueError("premium 관측 UID 와 entitlement 조회 UID 가 다르다")
 
     try:
         observation = await asyncio.to_thread(
@@ -242,6 +302,43 @@ async def authorize_gated_subscription(user_id: str, *, mono) -> GatedVerdict:
         return Denied("krx_entitlement_required")
     # ⛔ **여기가 유일한 `Granted` 생성 지점**이다 — 두 축이 실제로 관측된 뒤.
     return Granted(
-        premium_observed_at_mono=verdict.premium_observed_at_mono,
+        uid=user_id,
+        premium_observed_at_mono=premium.premium_observed_at_mono,
         entitlement_observed_at_mono=observation.observed_at_mono,
+    )
+
+
+async def authorize_subscription_plan(
+    plan: AuthorizationPlan, *, mono
+) -> AuthorizationVerdict:
+    """partition 전체를 조정한다. RC 0/1회, entitlement 0/1회가 계약이다.
+
+    순서: premium이 필요한 경우에만 RC를 한 번 관측하고, 그 승인이 나온 뒤 entitlement가
+    필요한 경우에만 DB를 한 번 관측한다. 어느 축의 `Unavailable`도 전체 요청 결과로 즉시
+    반환한다. `Denied`는 outcome 안에 남겨 dispatcher가 해당 partition만 철회한다.
+    """
+    if not isinstance(plan, AuthorizationPlan):
+        raise TypeError(f"plan 은 AuthorizationPlan 이어야 한다: {type(plan).__name__}")
+    if not plan.requires_premium():
+        return AuthorizationOutcome(plan=plan, premium=None, entitlement=None)
+
+    premium = await _observe_premium(plan.uid, mono=mono)
+    if isinstance(premium, Unavailable):
+        return premium
+    if isinstance(premium, Denied):
+        # ⛔ premium 없음/불가 → entitlement 조회 0회.
+        return AuthorizationOutcome(plan=plan, premium=premium, entitlement=None)
+
+    if not plan.requires_entitlement():
+        return AuthorizationOutcome(plan=plan, premium=premium, entitlement=None)
+
+    entitlement = await _observe_krx_entitlement(
+        plan.uid, premium=premium, mono=mono
+    )
+    if isinstance(entitlement, Unavailable):
+        return entitlement
+    return AuthorizationOutcome(
+        plan=plan,
+        premium=premium,
+        entitlement=entitlement,
     )
