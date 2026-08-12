@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955",
-    "baseline_sha256": "93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b",
-    "lock_sha256": "6889adee9fb32c580fae913911f81848b7f2aad013ee9f83025ba5906633f7cb",
+    "manifest_sha256": "ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca",
+    "baseline_sha256": "a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7",
+    "lock_sha256": "9d7e9e114f3ebfab5c386973f45a138bdb668cd4bc8ecd182be28efea363679e",
     "server_commit": "0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "be9b4ed981eac2bf92e03a262d355f11a1b33ac29bc6a07ab96a51189f6c6441",
-    "CLIENT": "a4e6f630dd6363db9775ffb023a830d1ad505278213dbec18d0fd2f8551837bd",
-    "CUT": "36b11547beec860b09a8fcabd29a7ec5bcbab98f0985a7f0c5fccbfac7e236da",
-    "HAND": "b80f51abe6c67ba8e731e4310a3dbce2f6c73aeb1511f09f2615c797667373e5",
-    "HEALTH": "2894316c5edde8652b31c24f3c2047ce63349ef2fc417071df80a77c4d043100",
-    "LOAD": "7dccb50a1e29accf1a38732a6468f277ac82dbbfa85fbb39f7f8b572a993142f"
+    "ADR": "ce857a1918be952cbf74f92aa0578c286abcae3d8ff43afdf903546c64e63287",
+    "CLIENT": "c663bf327ae5a6523029049caf37ddefde1e09553e784002deb763882a6a4827",
+    "CUT": "65c402310eee8ec583c2c458fa7181936168343b34b1c9b0cb5c28adfd9afd7d",
+    "HAND": "61b6e7c72a6267defeac8a0831903167067749b33541087bb33e552e255bd3bc",
+    "HEALTH": "94ee7124651bfa6a19720a9057d501588b95bdf2a7902db705cd0453d5eab978",
+    "LOAD": "5e72f22f60df7ad0d0774f3eefd459e1a8bc324442b53a1c9897a7eb0f929c63"
   },
   "entries": [
     {
@@ -47,14 +47,14 @@
     {
       "destination": "ADR",
       "rid": "R-INV-2",
-      "unit_sha256": "e2021ab542a1d75339f1c8c6556d5cbc65e5f08052347744c6c61933a9cf0d36",
-      "unit_text": "**(a) WS 의 FX/USDT 에 premium 강제가 없다.** 토큰이 있는 요청도 **per-user 판정 대상은 KRX 하나뿐**이고(`per_user_gated_snapshot_topics`), FX/USDT 는 premium 판정 없이 `free_accepted` 로 들어간다. 반면 REST twin 은 premium 을 실제로 강제한다(ADR-039 §8.1 E3). 근거: `app/topic_initial_snapshot.py:95-108` · `app/topic_dispatcher.py:660-676` · `app/main.py:3058-3061`.",
+      "unit_sha256": "9201700abefebb8aa838e318280a76ca3bebbc67daad6935c7c17f8bd1959486",
+      "unit_text": "⛔ **격차가 닫혔다고 읽지 말 것.** 운영은 `compatibility` 이고 최종 stage 는 **한 번도 켜진 적이 없다**(미실측). 활성화 선행 조건 두 가지가 남아 있다 — WS 인가는 cache-free 라 최종 stage 에서 authorizable topic 이 있는 인증 subscribe 마다 RevenueCat 왕복이 1회 생기고(§stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)). 근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271` (cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).",
       "classification": "code_fact",
       "detail": "고정 server commit에서 per-user 판정 대상은 KRX 하나이고, 토큰이 있는 FX/USDT는 premium 판정 없이 free_accepted로 들어가며 REST twin만 premium을 강제한다. 익명 stage 동작은 별도 단위로 분리했다.",
       "provenance": [
-        "file:app/main.py:3058-3061",
-        "file:app/topic_dispatcher.py:660-676",
-        "file:app/topic_initial_snapshot.py:95-108"
+        "file:app/config.py:645-688",
+        "file:app/subscription.py:390-451",
+        "file:app/topic_authorization.py:241-271"
       ]
     },
     {
@@ -203,12 +203,13 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "718324b33cf259ab4b8b622b9f81301775f76591e81afc54aae3a24ac3d7136d",
-      "unit_text": "⚠️ **WS 의 FX/USDT premium 강제가 닫히기 전에는 `premium_required` 행이 FX/USDT 에서 발화하지 않는다** — 현재 per-user 판정 대상은 KRX 뿐이다(baseline C2; 격차 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11)). 전이표는 Stage A 완료를 전제로 한다.",
+      "unit_sha256": "0de592e0d12d57981ed129a79db45b0bcc7977c32ad96a9d25476f5259626b4e",
+      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 운영 기본값 `compatibility` 에서는 per-user 판정 대상이 KRX 뿐이라 그 행이 FX/USDT 에서 나오지 않는다 — 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:288-330` (stage 별 partition) · `app/topic_dispatcher.py:754-794`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
       "classification": "code_fact",
       "detail": "현재 per-user 판정 대상이 KRX 뿐이라는 현재 서버 구현 상태 단정이다(baseline C2 = per_user_gated_snapshot_topics).",
       "provenance": [
-        "baseline:C2"
+        "file:app/topic_dispatcher.py:754-794",
+        "file:app/topic_policy.py:288-330"
       ]
     },
     {
@@ -720,6 +721,19 @@
       "detail": "설정 파일의 현재 상태(부정 사실)를 단정하는 단위다. 단위 안에 이미 baseline E4 근거가 있고, 고정 commit 에서 재확인했다 — location /ws 는 정확히 80-99행 블록이며 그 안에 limit_req/limit_conn 이 없고, location /api/ 는 104행에서 열려 105-106행에 둘 다 있으며 zone 정의는 19-20행(파일 상단)에 있다.",
       "provenance": [
         "baseline:E4"
+      ]
+    },
+    {
+      "destination": "HAND",
+      "rid": "R-HAND-11",
+      "unit_sha256": "daf4235ea5af04e246dc79d0f1fdd8a544852f41081f917e820056f4628a2dd9",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다 — **강제 경로는 `0cfe474` 에서 구현됐고 운영은 아직 켜지 않았다**. `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:288-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3058-3061`, ADR-039 §8.1 E3). ⛔ **arming 조건은 \"구현\"이 아니라 \"활성화 + 실측\"이다** — 최종 stage 는 미실측이다.",
+      "classification": "code_fact",
+      "detail": "R-INV-2 재작성으로 생긴 신규 unit — `WS_TOPIC_AUTH_STAGE` 3단 stage 와 각 축의 인가 요구를 표로 서술한다. 구현 사실이므로 code_fact 이고 근거는 정책표·planner·coordinator·dispatcher 배선이다.",
+      "provenance": [
+        "file:app/main.py:3058-3061",
+        "file:app/topic_authorization.py:311-341",
+        "file:app/topic_policy.py:288-330"
       ]
     }
   ]

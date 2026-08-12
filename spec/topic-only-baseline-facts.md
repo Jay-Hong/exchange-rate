@@ -68,6 +68,15 @@
   ⚠️ 두 stage 모두 **익명 subscribe 시도를 계측**한다 — 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다
      앞이라(`app/topic_dispatcher.py:509-517`) flag-off 운영 상태에서도 값이 쌓인다.
 - **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
+- **C4 [코드]** `app/topic_policy.py:83-89` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
+  KRX = `PREMIUM_AND_ENTITLEMENT`. `app/topic_policy.py:288-330` 이 stage 별로 partition 을
+  파생하고, `compatibility`·`reject_anonymous_fx` 에서는 비-KRX 가 identity-only 로 남는다.
+- **C5 [코드]** `app/topic_authorization.py:311-341` — coordinator. RC 는 요청당 **≤1회**,
+  entitlement 는 premium 승인 뒤 KRX 요청이 있을 때만 **≤1회**. `Unavailable` 은 전체-요청,
+  `Denied` 는 per-topic 이다.
+  **C5-inf [추론]** ⇒ `enforce_authenticated_premium` 에서는 authorizable topic 이 하나라도
+  있는 인증 subscribe 마다 RevenueCat 왕복이 1회 생긴다 — WS 경로는 cache-free 다
+  (stale fallback 은 REST 전용 `verify_premium_status` 안에만 있다).
   per-user 판정 대상은 **KRX 뿐**.
 - **C3 [코드]** `exchange-rate/app/main.py:3023` `@app.get("/api/v2/topics/snapshot")` —
   `app/main.py:3058` `verify_firebase_token(request)` → `app/main.py:3061`

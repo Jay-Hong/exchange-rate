@@ -6504,8 +6504,8 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955`
-- baseline SHA: `93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b`
+- manifest SHA: `ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca`
+- baseline SHA: `a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6587,13 +6587,28 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 <!-- rid: R-INV-2 -->
 <!-- requirement-meta: disposition=active owner=ADR -->
 <a id="r-inv-2"></a>
-### R-INV-2 — 격차 (a): WS 의 FX/USDT 에 premium 강제가 없다 (출시 차단)
+### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 미활성**
 
-**(a) WS 의 FX/USDT 에 premium 강제가 없다.** 토큰이 있는 요청도 **per-user 판정 대상은 KRX
-하나뿐**이고(`per_user_gated_snapshot_topics`), FX/USDT 는 premium 판정 없이
-`free_accepted` 로 들어간다. 반면 REST twin 은 premium 을 실제로 강제한다(ADR-039 §8.1 E3).
-근거: `app/topic_initial_snapshot.py:95-108` · `app/topic_dispatcher.py:660-676` ·
-`app/main.py:3058-3061`.
+**(a)** `0cfe474` 이전에는 토큰이 있어도 FX/USDT 가 premium 관측을 **거치지 않고** 무료로
+등록됐다(per-user 판정은 KRX 에만 붙었다). 지금은 **강제 경로가 존재하고
+`WS_TOPIC_AUTH_STAGE` 가 그것을 켠다**:
+
+| stage | 익명 FX | 익명 USDT | 식별 FX/USDT | KRX |
+|---|---|---|---|---|
+| `compatibility` (**코드 기본값·운영 현재값**) | 허용 | 허용 | identity-only | premium + entitlement |
+| `reject_anonymous_fx` | 거부 | 허용 | identity-only | premium + entitlement |
+| `enforce_authenticated_premium` | 거부 | 거부 | **premium-only** | premium + entitlement |
+
+⛔ **격차가 닫혔다고 읽지 말 것.** 운영은 `compatibility` 이고 최종 stage 는 **한 번도 켜진 적이
+없다**(미실측). 활성화 선행 조건 두 가지가 남아 있다 — WS 인가는 cache-free 라 최종 stage 에서
+authorizable topic 이 있는 인증 subscribe 마다 RevenueCat 왕복이 1회 생기고(§stale fallback 은
+REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
+근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271`
+(cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).
+
+근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:83-89`(정책표) ·
+`app/topic_policy.py:288-330`(식별 planner) · `app/topic_authorization.py:311-341`(coordinator) ·
+`app/topic_dispatcher.py:678-794`(배선) · `app/main.py:3058-3061`(REST twin).
 
 익명(미식별) 요청 축은 `WS_TOPIC_AUTH_STAGE` 로 갈린다. 코드 기본값 `compatibility` 는 무료 topic 의
 구 동작을 보존하고, `reject_anonymous_fx` 는 그 무료 집합에서 canonical FX 만 조용히 제외한다.

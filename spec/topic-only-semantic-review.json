@@ -100,25 +100,25 @@
   "reviewed_at": "2026-08-12",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955",
-    "baseline_sha256": "93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b",
-    "lock_sha256": "6889adee9fb32c580fae913911f81848b7f2aad013ee9f83025ba5906633f7cb",
+    "manifest_sha256": "ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca",
+    "baseline_sha256": "a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7",
+    "lock_sha256": "9d7e9e114f3ebfab5c386973f45a138bdb668cd4bc8ecd182be28efea363679e",
     "server_commit": "0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "be9b4ed981eac2bf92e03a262d355f11a1b33ac29bc6a07ab96a51189f6c6441",
-    "CLIENT": "a4e6f630dd6363db9775ffb023a830d1ad505278213dbec18d0fd2f8551837bd",
-    "CUT": "36b11547beec860b09a8fcabd29a7ec5bcbab98f0985a7f0c5fccbfac7e236da",
-    "HAND": "b80f51abe6c67ba8e731e4310a3dbce2f6c73aeb1511f09f2615c797667373e5",
-    "HEALTH": "2894316c5edde8652b31c24f3c2047ce63349ef2fc417071df80a77c4d043100",
-    "LOAD": "7dccb50a1e29accf1a38732a6468f277ac82dbbfa85fbb39f7f8b572a993142f"
+    "ADR": "ce857a1918be952cbf74f92aa0578c286abcae3d8ff43afdf903546c64e63287",
+    "CLIENT": "c663bf327ae5a6523029049caf37ddefde1e09553e784002deb763882a6a4827",
+    "CUT": "65c402310eee8ec583c2c458fa7181936168343b34b1c9b0cb5c28adfd9afd7d",
+    "HAND": "61b6e7c72a6267defeac8a0831903167067749b33541087bb33e552e255bd3bc",
+    "HEALTH": "94ee7124651bfa6a19720a9057d501588b95bdf2a7902db705cd0453d5eab978",
+    "LOAD": "5e72f22f60df7ad0d0774f3eefd459e1a8bc324442b53a1c9897a7eb0f929c63"
   },
-  "claim_ledger_sha256": "88226efb606fa57ee717f71a018733a657c7f3bb8781031d97195fc02c72158e",
+  "claim_ledger_sha256": "7facc98f4369e1601d739439f8d69f9a01cac70be4f88b8f0279aee8d87d8d08",
   "scope": {
     "manifest_output_requirements": 86,
-    "claim_candidates": 60,
-    "code_fact_entries": 48,
+    "claim_candidates": 61,
+    "code_fact_entries": 49,
     "normative_entries": 12,
     "candidate_outside_reverse_audit": true,
     "archive_normative_preservation_review": true,
@@ -327,6 +327,19 @@
       ],
       "issue": "The shared entitlement guard is called at two REST decision boundaries, but only one was locked. The existing shortcut tests used a topic promoted to entitlement-gated, which fails the shortcut condition and therefore reaches the guard in the other function; removing the resolve-level call changed nothing. The uncovered path is a non-gated topic taking the shortcut while the table is malformed, where no guard runs at all.",
       "disposition": "A regression exercises a non-gated topic against an expanded table. Removing the resolve-level guard now fails."
+    },
+    {
+      "id": "SEM-018",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "DECISIONS.md/R-INV-2",
+        "spec/topic-snapshot-handoff.md/R-HAND-11",
+        "spec/ios-topic-state-machine.md/R-CLI-6",
+        "spec/topic-only-implementation-ledger.json/R-GATE-1"
+      ],
+      "issue": "The C2 re-baseline moved citation locators onto the new commit while leaving the sentences that describe that code unchanged. Four places kept asserting that WS has no premium enforcement for FX/USDT, that the only per-user judgement is KRX, and that those topics enter a free_accepted list — while the same commit had implemented the enforcement path and renamed that variable away. The re-baseline procedure is content-anchored: it locates the same source line in the new file, which by construction cannot detect a prose claim that has become false while the code it cites still exists. Every gate passed — preflight compares paths, verify checks structure, and the hash chain proves only internal consistency — so the documents were re-sealed under a new SHA with inverted meaning.",
+      "disposition": "The four passages were rewritten to the current three-stage fact, stating explicitly that the path is implemented, the operating stage is compatibility, and the final stage has never been enabled or measured. A tripwire regression now fails if those specific claims reappear or if documents keep naming a symbol the code removed. The tripwire is not semantic verification: it catches recurrence of these claims and dead symbol names, not new forms of drift, and it flags historical narration too because phrase matching has no tense."
     }
   ],
   "residual_limits": [
@@ -343,7 +356,8 @@
     "The final stage makes RevenueCat a cache-free HTTP round trip on every authenticated subscribe: the WS authorization path calls fetch_revenuecat_result directly and the stale-cache fallback exists only in the REST helper. This availability and latency coupling is unmitigated and gates activation.",
     "FX enforcement is bounded by the unauthenticated legacy broadcast until Stage B. This slice closes the topic contract, not the service-wide paywall (R-OPEN-4).",
     "The working tree was edited concurrently by two agents during this review. The reported verification is pinned to one tree hash rather than a continuous observation of a frozen tree.",
-    "Code locators inside generated documents remain mechanically unchecked (SEM-012). This slice moved 56 of them and only a path-level gate exists, so their correctness rests on the re-baseline procedure."
+    "Code locators inside generated documents remain mechanically unchecked (SEM-012). This slice moved 56 of them and only a path-level gate exists, so their correctness rests on the re-baseline procedure.",
+    "Re-baselining verifies that citations point at existing code, not that the surrounding prose is still true. SEM-018 shows the two can diverge while every gate passes; only reading each cited passage against the new behaviour closes it, and that step is procedural."
   ],
   "verdict": "pass"
 }

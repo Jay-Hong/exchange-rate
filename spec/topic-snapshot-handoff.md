@@ -6,8 +6,8 @@
 - server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4abcdfece6ecb3bf8220613aa654c328ff57a4c2a71590d1a981f1d83b847955`
-- baseline SHA: `93e8071875d25fc5c86870b6da58818c4a03d8089436ca84fff3ad57bfbf1e6b`
+- manifest SHA: `ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca`
+- baseline SHA: `a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -37,11 +37,12 @@
 (ADR-039 Stage A). 이게 닫히기 전까지 [R-INV-1](../DECISIONS.md#r-inv-1) 의 불변식은 **문서상 목표일
 뿐이다**.
 
-격차의 내용은 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다 — **per-user 판정 대상은 KRX
-하나뿐**이고(`per_user_gated_snapshot_topics` — `app/topic_initial_snapshot.py:95-108`),
-토큰이 있어도 FX/USDT 는 premium 판정 없이 `free_accepted` 로 들어간다
-(`app/topic_dispatcher.py:666-676`). 반면 REST twin 은 premium 을 실제로 강제한다
-(`app/main.py:3058-3061`, ADR-039 §8.1 E3).
+격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다 — **강제 경로는 `0cfe474`
+에서 구현됐고 운영은 아직 켜지 않았다**. `enforce_authenticated_premium` 에서 식별된 FX/USDT 는
+premium-only 로 분류되고(`app/topic_policy.py:288-330`) coordinator 가 premium 을 관측한다
+(`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다.
+REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3058-3061`, ADR-039 §8.1 E3).
+⛔ **arming 조건은 "구현"이 아니라 "활성화 + 실측"이다** — 최종 stage 는 미실측이다.
 
 ⚠️ **부분 갱신(2026-08-12)**: 익명(미식별) 축만 `WS_TOPIC_AUTH_STAGE` 로 갈린다 —
 `compatibility`(기본) 는 구 동작 보존, `reject_anonymous_fx` 는 무료 집합에서 canonical FX 만
