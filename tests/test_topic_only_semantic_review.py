@@ -96,6 +96,7 @@ def review_errors(data: object) -> list[str]:
 
         participants = process.get("participants")
         names = set()
+        participants_by_name = {}
         if not isinstance(participants, list) or len(participants) < 2:
             errors.append("at least two review participants are required")
         else:
@@ -115,6 +116,7 @@ def review_errors(data: object) -> list[str]:
                     errors.append(f"duplicate participant: {name}")
                 else:
                     names.add(name)
+                    participants_by_name[name] = participant
                 for field in ("roles", "authored_or_modified", "independently_reviewed"):
                     values = participant.get(field)
                     if (
@@ -123,24 +125,12 @@ def review_errors(data: object) -> list[str]:
                         or any(not isinstance(value, str) or not value.strip() for value in values)
                     ):
                         errors.append(f"participant #{index} {field} is incomplete")
-                # ⛔ 산문 목록의 **자기검토**도 막는다. `review_edges` 만 검사하면 두 표현이
-                #    갈려서, edge 는 상호검토인데 사람이 읽는 목록은 "내가 쓴 걸 내가 독립
-                #    검토했다"고 주장할 수 있다(실측: 그 변이가 통과했다).
-                authored = participant.get("authored_or_modified")
-                reviewed = participant.get("independently_reviewed")
-                if isinstance(authored, list) and isinstance(reviewed, list):
-                    overlap = sorted(
-                        {v for v in authored if isinstance(v, str)}
-                        & {v for v in reviewed if isinstance(v, str)}
-                    )
-                    if overlap:
-                        errors.append(
-                            f"participant #{index} claims to have independently reviewed "
-                            f"its own work: {overlap}"
-                        )
 
         edges = process.get("review_edges")
         authors, reviewers = set(), set()
+        authored_scopes = {name: set() for name in names}
+        reviewed_scopes = {name: set() for name in names}
+        claimed_scopes = set()
         if not isinstance(edges, list) or len(edges) < 2:
             errors.append("at least two reciprocal review edges are required")
         else:
@@ -170,10 +160,46 @@ def review_errors(data: object) -> list[str]:
                     or any(not isinstance(value, str) or not value.strip() for value in scope)
                 ):
                     errors.append(f"review edge #{index} scope is incomplete")
+                else:
+                    if len(set(scope)) != len(scope):
+                        errors.append(f"review edge #{index} repeats a scope")
+                    duplicate_scopes = claimed_scopes & set(scope)
+                    if duplicate_scopes:
+                        errors.append(
+                            f"review edge #{index} reuses scopes already assigned to another "
+                            f"edge: {sorted(duplicate_scopes)}"
+                        )
+                    claimed_scopes.update(scope)
+                    if author_valid and author in authored_scopes:
+                        authored_scopes[author].update(scope)
+                    if reviewer_valid and reviewer in reviewed_scopes:
+                        reviewed_scopes[reviewer].update(scope)
                 if edge.get("result") != "pass":
                     errors.append(f"review edge #{index} did not pass")
         if names and (authors != names or reviewers != names):
             errors.append("every participant must appear as both author and reviewer")
+
+        # `review_edges.scope` 가 작업 범위의 단일 정본이다. 참가자별 산문 목록을 따로
+        # 신뢰하면 두 표현이 갈려도 통과한다(실측: 무관한 scope와 재문구 자기검토가 통과).
+        # 저자·검토자 배정의 진실성 자체는 attestation 이지만, journal 내부 표현은 정확히
+        # 일치해야 한다.
+        for name, participant in participants_by_name.items():
+            authored = participant.get("authored_or_modified")
+            reviewed = participant.get("independently_reviewed")
+            if isinstance(authored, list) and all(isinstance(v, str) for v in authored):
+                if len(set(authored)) != len(authored):
+                    errors.append(f"participant {name} repeats an authored scope")
+                if set(authored) != authored_scopes.get(name, set()):
+                    errors.append(
+                        f"participant {name} authored scopes differ from review edges"
+                    )
+            if isinstance(reviewed, list) and all(isinstance(v, str) for v in reviewed):
+                if len(set(reviewed)) != len(reviewed):
+                    errors.append(f"participant {name} repeats a reviewed scope")
+                if set(reviewed) != reviewed_scopes.get(name, set()):
+                    errors.append(
+                        f"participant {name} reviewed scopes differ from review edges"
+                    )
 
         limitations = process.get("limitations")
         if (
@@ -260,15 +286,33 @@ def test_review_validator_rejects_stale_and_open_controls():
     assert review_errors(incomplete_scope)
     assert review_errors(self_review)
 
-    # ⛔ 산문 목록의 자기검토 — edge 는 멀쩡한데 참가자가 자기 저작을 자기 검토라 주장하는 형태.
-    #    edge 만 보던 판에서는 **통과했다**(실측).
+    # ⛔ 참가자 목록과 edge 범위가 갈리는 형태. 완전히 같은 문자열뿐 아니라 재문구한
+    #    자기검토나 무관한 scope도 edge 단일 정본과 불일치하므로 거부해야 한다.
     prose_self = dict(base["review_process"])
     prose_self["participants"] = [
         dict(prose_self["participants"][0],
-             independently_reviewed=list(prose_self["participants"][0]["authored_or_modified"])),
+             independently_reviewed=[
+                 prose_self["participants"][0]["authored_or_modified"][0] + " (reviewed)"
+             ]),
         *prose_self["participants"][1:],
     ]
     assert review_errors(dict(base, review_process=prose_self))
+    scope_disagreement = dict(base["review_process"])
+    scope_disagreement["participants"] = [
+        dict(scope_disagreement["participants"][0],
+             independently_reviewed=["unrelated scope"]),
+        *scope_disagreement["participants"][1:],
+    ]
+    assert review_errors(dict(base, review_process=scope_disagreement))
+    reused_scope = dict(base["review_process"])
+    reused_scope["review_edges"] = [
+        reused_scope["review_edges"][0],
+        dict(
+            reused_scope["review_edges"][1],
+            scope=[reused_scope["review_edges"][0]["scope"][0]],
+        ),
+    ]
+    assert review_errors(dict(base, review_process=reused_scope))
     assert review_errors(false_independence)
     assert review_errors(one_way)
     assert review_errors(malformed_edge)

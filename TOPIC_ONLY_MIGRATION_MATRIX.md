@@ -263,9 +263,10 @@ r5 에서 구조 축(disposition·ownership·omission)이 0이 된 뒤 남은 �
   - 현재 범위: manifest 출력 요구 86개, claim 후보 60개(`code_fact` 48 · `normative` 12), 후보 밖
     단정, archive 규범 보존, 인용의 **존재가 아니라 주장 뒷받침 여부**까지 확인했다.
   - journal: `spec/topic-only-semantic-review.json` — 검토한 문서 6종 SHA, 원장 SHA, 입력 SHA,
-    finding 9건과 실제 저작·검토 경계를 고정한다. `globally_independent_reviewer=false` 를 명시한다.
-  - 처분: high 5건 + medium 4건을 수정·반증으로 닫았다. 각 참여자는 상대가 작성한 범위에 대해서만
-    독립이며, 저작·review-edge 진술 자체는 기계 도출이 아니라 attestation 이다.
+    finding 10건과 실제 저작·검토 경계를 고정한다. `globally_independent_reviewer=false` 를 명시한다.
+  - 처분: high 5건 + medium 5건을 수정·반증으로 닫았다. 각 참여자는 상대가 작성한 범위에 대해서만
+    독립이다. `review_edges.scope` 를 작업 범위의 단일 정본으로 삼아 참가자별 저작·검토 목록과의
+    내부 일치는 검사하지만, scope 라벨과 저자·reviewer 배정의 진실성 자체는 attestation 이다.
   - `tests/test_topic_only_semantic_review.py` 가 문서/원장 drift, 열린 finding, 불완전 review scope 뿐
     아니라 자기검토 edge·단방향 검토·거짓 global-independence 주장도 fail-closed 로 거부한다.
     자연어 판정이나 실제 저작 독립성을 기계가 증명한다는 뜻은 아니다. schema v2·validator 자체는

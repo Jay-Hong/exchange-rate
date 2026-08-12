@@ -11,13 +11,13 @@
           "cross-reviewer"
         ],
         "authored_or_modified": [
-          "C2 initial baseline, ADR, handoff, lock, manifest, header, and implementation-ledger updates",
-          "initial mechanical source-line remap and code-claim ledger update"
+          "C2 initial narrative updates and mechanical citation remap",
+          "lock, manifest, output-header, and implementation-ledger changes"
         ],
         "independently_reviewed": [
-          "Codex citation-range and anonymous-stage corrections",
-          "Codex code-claim ledger regeneration and hash rebinding",
-          "Codex pinned-commit negative-control safety fix"
+          "complete four-layer citation ranges and stage-conditional wording",
+          "60-entry claim-ledger regeneration",
+          "safe repo-local pinned-commit negative control"
         ]
       },
       {
@@ -27,13 +27,13 @@
           "cross-reviewer"
         ],
         "authored_or_modified": [
-          "C2 citation-range and anonymous-stage corrections",
-          "code-claim ledger regeneration and semantic-review rebinding",
-          "pinned-commit negative-control safety fix"
+          "complete four-layer citation ranges and stage-conditional wording",
+          "60-entry claim-ledger regeneration",
+          "safe repo-local pinned-commit negative control"
         ],
         "independently_reviewed": [
-          "Claude-authored C2 draft and source-line remap",
-          "Claude-authored lock, manifest, header, and implementation-ledger updates"
+          "C2 initial narrative updates and mechanical citation remap",
+          "lock, manifest, output-header, and implementation-ledger changes"
         ]
       }
     ],
@@ -60,7 +60,7 @@
     ],
     "limitations": [
       "Neither participant is independent of the final artifact as a whole.",
-      "Independence applies only to the opposite participant's listed change scope; the authorship and review-edge statements are attestations, not mechanically derived facts.",
+      "Independence applies only to the opposite participant's listed change scope. Review-edge scopes are the journal's canonical work units and participant summaries are checked against them, but scope labels and author/reviewer assignments remain attestations rather than mechanically derived facts.",
       "The schema-v2 journal and validator were implemented by Codex in response to Claude's finding; their structure is test-covered but the review infrastructure itself has no third-party reviewer."
     ]
   },
@@ -206,6 +206,17 @@
       ],
       "issue": "After Codex modified the final C2 documents and ledger, retaining a single 'independent semantic reviewer' attribution made Codex both co-author and global reviewer. The hashes were valid, but the independence claim was not.",
       "disposition": "Replaced the global-independence claim with schema-v2 reciprocal cross-review. The journal records two non-self review edges, explicitly states that no participant is independent of the whole artifact, and the validator rejects self-review, one-way review, and false global-independence controls."
+    },
+    {
+      "id": "SEM-010",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "semantic-review/review-process-consistency",
+        "tests/test_topic_only_semantic_review.py"
+      ],
+      "issue": "The first schema-v2 validator checked non-self review edges and exact duplicate prose, but did not bind participant authored/reviewed summaries to edge scopes. Reworded self-review or unrelated participant scopes therefore passed while the edges remained unchanged.",
+      "disposition": "Made review-edge scopes the canonical work units, required participant summaries to equal the scopes derived from their outgoing and incoming edges, rejected scope reuse across edges, and added adversarial controls for reworded self-review, participant/edge disagreement, and reused scopes. Scope labels and author/reviewer assignments remain explicitly attested rather than mechanically proven."
     }
   ],
   "residual_limits": [
