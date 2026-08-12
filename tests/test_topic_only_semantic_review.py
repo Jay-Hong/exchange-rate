@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -20,6 +21,22 @@ REQUIRED_SCOPE_FLAGS = {
     "classification_truth_review",
     "citation_support_review",
 }
+
+# `status=fixed` / `verdict=pass` 로 닫고도 disposition 또는 residual limit 에
+# 이전 라운드의 보류 문구를 남긴 실수가 두 번 있었다(SEM-020/021). 자연어 전체의
+# 수명 상태를 증명하지는 못하지만, 실제로 재발한 표현 부류는 pass 와 양립시키지 않는다.
+PENDING_REVIEW_PATTERNS = (
+    re.compile(r"\bneeds_cross_review\b", re.I),
+    re.compile(r"\bnot (?:yet )?been independently reviewed\b", re.I),
+    re.compile(r"\bnot covered by a pass verdict until\b", re.I),
+    re.compile(r"\bkeep(?:s)? (?:this )?finding open\b", re.I),
+    re.compile(r"\bsubject to the open cross-review\b", re.I),
+    re.compile(
+        r"\b(?:awaits?|awaiting|pending)\b.{0,80}"
+        r"\b(?:cross[- ]review|independent review)\b",
+        re.I,
+    ),
+)
 
 
 def _citation_module():
@@ -236,6 +253,34 @@ def review_errors(data: object) -> list[str]:
                 if not finding.get(key):
                     errors.append(f"finding {finding.get('id')} lacks {key}")
 
+    # `issue` 는 과거 결함을 인용하므로 검사하지 않는다. 현재 처분과 잔여 한계만
+    # 검사해야, 역사 기록의 "needs_cross_review" 를 지우지 않으면서 pass 상태의
+    # 수명 모순은 막을 수 있다.
+    if data.get("verdict") == "pass":
+        lifecycle_surfaces = []
+        if isinstance(findings, list):
+            lifecycle_surfaces.extend(
+                (f"finding {finding.get('id')} disposition", finding.get("disposition"))
+                for finding in findings
+                if isinstance(finding, dict)
+            )
+        residual_limits = data.get("residual_limits")
+        if isinstance(residual_limits, list):
+            lifecycle_surfaces.extend(
+                (f"residual limit #{index}", value)
+                for index, value in enumerate(residual_limits)
+            )
+        for label, value in lifecycle_surfaces:
+            if not isinstance(value, str):
+                continue
+            for pattern in PENDING_REVIEW_PATTERNS:
+                if pattern.search(value):
+                    errors.append(
+                        f"pass review retains pending-review language in {label}: "
+                        f"{pattern.pattern!r}"
+                    )
+                    break
+
     if data.get("verdict") != "pass":
         errors.append("review verdict is not pass")
     return errors
@@ -245,12 +290,35 @@ def _review() -> dict:
     return json.loads(REVIEW.read_text())
 
 
+def _closed_validator_fixture(data: dict) -> dict:
+    """open journal 상태와 무관한 **유효한 양성 대조군**을 만든다.
+
+    실제 journal이 교차검토 대기 중이면 `review_errors(_review())` 자체가 이미 red다. 그 값을
+    반례의 base로 쓰면 어떤 변이도 기존 오류에 기대어 통과하는 공허한 테스트가 된다. open
+    finding의 처분만 합성 완료 문구로 바꾸며, 해시·scope·edge 등 검증 대상은 그대로 둔다.
+    """
+    findings = []
+    for finding in data["findings"]:
+        if finding.get("status") in {"fixed", "rebutted"}:
+            findings.append(dict(finding))
+        else:
+            findings.append(
+                dict(
+                    finding,
+                    status="fixed",
+                    disposition="Synthetic validator fixture: reciprocal review completed.",
+                )
+            )
+    return dict(data, findings=findings, verdict="pass")
+
+
 def test_semantic_review_is_bound_to_current_outputs_and_closed_findings():
     assert not review_errors(_review())
 
 
 def test_review_validator_rejects_stale_and_open_controls():
-    base = _review()
+    base = _closed_validator_fixture(_review())
+    assert not review_errors(base), "반례의 양성 대조군부터 유효해야 한다"
     stale_doc = dict(base, documents=dict(base["documents"], ADR="0" * 64))
     stale_ledger = dict(base, claim_ledger_sha256="0" * 64)
     open_findings = [dict(base["findings"][0], status="open"), *base["findings"][1:]]
@@ -280,6 +348,24 @@ def test_review_validator_rejects_stale_and_open_controls():
         *malformed_edge["review_edges"][1:],
     ]
     malformed_edge = dict(base, review_process=malformed_edge)
+    pending_disposition_findings = [
+        dict(
+            base["findings"][0],
+            disposition=(
+                "The correction has not been independently reviewed; "
+                "keep this finding open and use needs_cross_review."
+            ),
+        ),
+        *base["findings"][1:],
+    ]
+    pending_disposition = dict(base, findings=pending_disposition_findings)
+    pending_residual = dict(
+        base,
+        residual_limits=[
+            *base["residual_limits"],
+            "SEM-X is not covered by a pass verdict until cross-review completes.",
+        ],
+    )
     assert review_errors(stale_doc)
     assert review_errors(stale_ledger)
     assert review_errors(open_review)
@@ -316,3 +402,5 @@ def test_review_validator_rejects_stale_and_open_controls():
     assert review_errors(false_independence)
     assert review_errors(one_way)
     assert review_errors(malformed_edge)
+    assert review_errors(pending_disposition)
+    assert review_errors(pending_residual)

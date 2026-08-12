@@ -20,7 +20,7 @@
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
           "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
-          "C4 closure of the C3 cross-review, and the C5 cross-review that reproduced both the lifecycle contradiction and the single-topic representation gap at 79d93f2"
+          "C4 closure of the C3 cross-review"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -63,7 +63,7 @@
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
           "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
-          "C4 closure of the C3 cross-review, and the C5 cross-review that reproduced both the lifecycle contradiction and the single-topic representation gap at 79d93f2"
+          "C4 closure of the C3 cross-review"
         ]
       }
     ],
@@ -81,7 +81,7 @@
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
           "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
-          "C4 closure of the C3 cross-review, and the C5 cross-review that reproduced both the lifecycle contradiction and the single-topic representation gap at 79d93f2"
+          "C4 closure of the C3 cross-review"
         ],
         "result": "pass"
       },
@@ -379,13 +379,26 @@
       ],
       "issue": "The C4 closure left lifecycle text internally contradictory: fixed findings still said that SEM-019 was open, unreviewed, and required needs_cross_review while the top-level verdict was pass. The stage-matrix gate also represented the aggregate columns with only fx:usd-krw and did not inspect USDT's authenticated partition; runtime mutations that changed only JPY, EUR, or USDT all survived the document-table comparison.",
       "disposition": "Codex rewrote the closed-finding dispositions in completed-review tense and derived the aggregate columns from the canonical publisher constants: every anonymous FX member is compared, the identified column requires one uniform authorization class across all FX topics plus USDT, and a permanent counterexample changes each aggregate member independently. Cross-review confirmed both halves against the closing commit rather than accepting them. The lifecycle contradiction was reproduced at 79d93f2 (SEM-018 and SEM-019 carried fixed status while their prose still said the review was pending and the verdict was pass). The representation gap was reproduced too: at that commit a policy change confined to fx:jpy-krw, fx:eur-krw, or usdt:krw left the documented matrix equal to the derived one, so the earlier report that the gate discriminated in three directions was over-general — all three mutations used had moved the USD cell. Against the corrected gate the same four single-topic mutations each fail, and the regression exercises them without editing any file."
+    },
+    {
+      "id": "SEM-021",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "spec/topic-only-semantic-review.json/residual_limits",
+        "spec/topic-only-semantic-review.json/review_process",
+        "tests/test_topic_only_semantic_review.py/review_errors",
+        "git:5f9aa74/commit-message"
+      ],
+      "issue": "C5 marked SEM-020 fixed and restored verdict=pass, but its first residual limit still said that the SEM-020 follow-up was not covered by a pass verdict until the opposite participant reviewed it. The pass review edge also claimed the C5 cross-review before Codex had reviewed that closing state. Separately, the journal still said the current operating values were unmeasured while the C5 commit message reported a point-in-time observation; that observation is outside the journal's hash-bound evidence. The same commit inferred that nonzero counters were not synthetic merely because they had been zero immediately after restart, although these counters carry no traffic-provenance dimension.",
+      "disposition": "Codex removed the unreviewed C5 scope from the pass edge, rewrote the stale residual limit, and taught the validator to reject pending-review language in fixed dispositions and residual limits, using a synthetic closed journal as the positive control. Cross-review reproduced both halves: at 5f9aa74 the first residual limit still said the SEM-020 follow-up was not covered by a pass verdict, while the verdict was pass and SEM-020 was fixed. The closing self-check that reported no pending language had swept findings only and not residual limits, so a complete-sounding claim came from a partial scan — the third instance of that shape in this session. Both validator additions are load-bearing: replacing the synthetic closed fixture with the live open journal, or emptying the pending-language patterns, each turns the counterexample suite red.\nThe recorded scopes are now technical work only. Recording a review is not itself reviewable work — see the residual limit on that regress."
     }
   ],
   "residual_limits": [
-    "Natural-language completeness and citation entailment are not mechanically provable. Closed review edges cover work through SEM-019; the SEM-020 follow-up is not covered by a pass verdict until the opposite participant reviews it.",
+    "Natural-language completeness and citation entailment are not mechanically provable. Closed review edges cover work through SEM-020; later changes must reopen the verdict and obtain a new opposite-participant review edge.",
     "Negative repository facts use full-tree searches at the pinned commits and must be rerun if either pinned commit changes.",
     "The documents remain Draft implementation contracts. A future pass confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
-    "The current operating WS_TOPIC_AUTH_STAGE and production flag values were not measured; they remain direct-measurement gates before activation.",
+    "This hash-bound semantic review does not establish mutable production state. Commit 5f9aa74 reports a separate read-only observation at 2026-08-12 13:09 UTC, but its raw command, host/container identity, and output are not preserved in the reviewed inputs; activation still requires a fresh direct measurement.",
     "The 2026-08-12 historical amendment before ADR-041 is outside the document hash used by this journal and remains a separately reviewed, non-hash-bound note.",
     "Release arming remains excluded from the frozen baseline and requires a separate explicit GO.",
     "The initial-snapshot lease gate authorizes the start of send_json, not its completion; an in-flight send may finish after the lease expires.",
@@ -398,7 +411,9 @@
     "Code locators inside generated documents remain mechanically unchecked (SEM-012). This slice moved 56 of them and only a path-level gate exists, so their correctness rests on the re-baseline procedure.",
     "Re-baselining verifies that citations point at existing code, not that the surrounding prose is still true. SEM-018 shows the two can diverge while every gate passes; only reading each cited passage against the new behaviour closes it, and that step is procedural.",
     "The forbidden-phrase check that keeps the code default from being promoted to an operational fact has no exemption for a measured statement: once production is actually sampled, the same forbidden substring still trips even if source and timestamp are appended. A measured result must use distinct wording such as '2026-08-12 direct measurement found WS_TOPIC_AUTH_STAGE=compatibility' and include its source and timestamp. This is a deliberate cost of phrase matching; adding semantic exemptions would make the check itself a guess.",
-    "The stage matrix binds the documented aggregate columns to the planners, but its subject is the R-INV-2 table alone. Prose elsewhere in the same documents can still contradict the code without any gate noticing; SEM-018 was found by reading, not by a check."
+    "The stage matrix binds the documented aggregate columns to the planners, but its subject is the R-INV-2 table alone. Prose elsewhere in the same documents can still contradict the code without any gate noticing; SEM-018 was found by reading, not by a check.",
+    "The anonymous rollout counters contain request and connection-event counts but no traffic-provenance label. A zero immediately after restart establishes the observation interval only; it cannot prove that later events were organic rather than manual or synthetic probes.",
+    "The act of closing this journal cannot be cross-reviewed. Whoever writes the closing commit authors it, so that edit is unreviewed at the moment the verdict flips, and asking the other participant to review the closing produces another unreviewed closing. Three consecutive rounds each found a real defect in the previous closing, which is evidence the loop is useful and also that it does not terminate on its own. The journal therefore records cross-review of technical work only; the bookkeeping that marks it closed is self-attested, consistent with globally_independent_reviewer being false."
   ],
   "verdict": "pass"
 }
