@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca",
-    "baseline_sha256": "a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7",
-    "lock_sha256": "9d7e9e114f3ebfab5c386973f45a138bdb668cd4bc8ecd182be28efea363679e",
+    "manifest_sha256": "f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51",
+    "baseline_sha256": "8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577",
+    "lock_sha256": "715cfd368d73a751b73ccafaec2f03c1d84d3def91f7a054a0dba526d15ff586",
     "server_commit": "0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "ce857a1918be952cbf74f92aa0578c286abcae3d8ff43afdf903546c64e63287",
-    "CLIENT": "c663bf327ae5a6523029049caf37ddefde1e09553e784002deb763882a6a4827",
-    "CUT": "65c402310eee8ec583c2c458fa7181936168343b34b1c9b0cb5c28adfd9afd7d",
-    "HAND": "61b6e7c72a6267defeac8a0831903167067749b33541087bb33e552e255bd3bc",
-    "HEALTH": "94ee7124651bfa6a19720a9057d501588b95bdf2a7902db705cd0453d5eab978",
-    "LOAD": "5e72f22f60df7ad0d0774f3eefd459e1a8bc324442b53a1c9897a7eb0f929c63"
+    "ADR": "b31163cd2d0c1eab2dafef72a503c3d5d1ede5a076519b8a3e298a1f9709feb7",
+    "CLIENT": "107f774cd05a50698f843ecd84ca59e1337fca2786455c2fd45ede19fb453ef5",
+    "CUT": "c7d41f56afe2df628d572f972f16edad1150357f158f4d3fd243d97ef3d03bc6",
+    "HAND": "984dbbc32ad34ba6fed62922d0a0d63ae4f7ab9fe637053b867d26db87509901",
+    "HEALTH": "3c742e27ed894346a502f9543e49c44546c19427b6160e45eb369a5081cf84c9",
+    "LOAD": "f8a3392ea21165f29b98eab5a8fa18d7a8262b44ed137acb98a0f8745c7e231e"
   },
   "entries": [
     {
@@ -47,10 +47,10 @@
     {
       "destination": "ADR",
       "rid": "R-INV-2",
-      "unit_sha256": "9201700abefebb8aa838e318280a76ca3bebbc67daad6935c7c17f8bd1959486",
-      "unit_text": "⛔ **격차가 닫혔다고 읽지 말 것.** 운영은 `compatibility` 이고 최종 stage 는 **한 번도 켜진 적이 없다**(미실측). 활성화 선행 조건 두 가지가 남아 있다 — WS 인가는 cache-free 라 최종 stage 에서 authorizable topic 이 있는 인증 subscribe 마다 RevenueCat 왕복이 1회 생기고(§stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)). 근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271` (cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).",
+      "unit_sha256": "fcf007b9bc412be962ae4afef484b59f66237c4a5353e2e950f169f8aec33705",
+      "unit_text": "⛔ **코드 구현과 운영 활성화를 분리한다.** 이 문서 재검토에서는 production env 를 직접 측정하지 않았으므로 현재 운영 stage 나 과거 활성화 이력을 단정하지 않는다. 활성화 GO 직전에 실행 중인 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)). 근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271` (cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).",
       "classification": "code_fact",
-      "detail": "고정 server commit에서 per-user 판정 대상은 KRX 하나이고, 토큰이 있는 FX/USDT는 premium 판정 없이 free_accepted로 들어가며 REST twin만 premium을 강제한다. 익명 stage 동작은 별도 단위로 분리했다.",
+      "detail": "고정 코드는 compatibility 기본값과 최종 stage의 cache-free RevenueCat 경로, REST 전용 stale fallback을 증명한다. production의 현재 stage와 활성화 이력은 코드에서 추론하지 않고 직접 측정 대상으로 남겼다.",
       "provenance": [
         "file:app/config.py:645-688",
         "file:app/subscription.py:390-451",
@@ -60,15 +60,12 @@
     {
       "destination": "ADR",
       "rid": "R-INV-2",
-      "unit_sha256": "727ad44a31af1f5fa567ab2b7d985a874a2e453271057b4a6a258aa6e3bd2dea",
-      "unit_text": "익명(미식별) 요청 축은 `WS_TOPIC_AUTH_STAGE` 로 갈린다. 코드 기본값 `compatibility` 는 무료 topic 의 구 동작을 보존하고, `reject_anonymous_fx` 는 그 무료 집합에서 canonical FX 만 조용히 제외한다. 이 동작은 stage 정의·기본값 `app/config.py:645-688` · 필터 정책 `app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` · production 주입 `app/main.py:302-308` 를 함께 봐야 확인된다. **운영 stage 는 미실측**이고, 어느 stage 도 FX/USDT 의 premium 판정을 추가하지 않으므로 위 격차 (a) 는 닫히지 않았다.",
+      "unit_sha256": "c6853f73a4770e0574048bb32922267bee7753ca4797de80f8d66abef7c2821a",
+      "unit_text": "코드 기본값은 `compatibility` 다(`app/config.py:686-688`). production 의 실제 값은 아래 표가 아니라 운영 직접 측정으로 확정한다.",
       "classification": "code_fact",
-      "detail": "고정 C1의 stage enum·엄격 parser·코드 기본값, stage별 필터, dispatcher 적용, production 주입을 함께 확인했다. 운영 stage는 이 코드 근거로 확정하지 않으며 두 stage 모두 premium 판정을 추가하지 않는다.",
+      "detail": "고정 config가 compatibility를 코드 기본값으로 파싱해 저장하는 사실만 확인한다. production의 실제 값은 별도 운영 측정 대상이며 이 항목은 그 값을 주장하지 않는다.",
       "provenance": [
-        "file:app/config.py:645-688",
-        "file:app/main.py:302-308",
-        "file:app/topic_auth_rollout.py:173-188",
-        "file:app/topic_dispatcher.py:547-569"
+        "file:app/config.py:686-688"
       ]
     },
     {
@@ -203,13 +200,13 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "0de592e0d12d57981ed129a79db45b0bcc7977c32ad96a9d25476f5259626b4e",
-      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 운영 기본값 `compatibility` 에서는 per-user 판정 대상이 KRX 뿐이라 그 행이 FX/USDT 에서 나오지 않는다 — 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:288-330` (stage 별 partition) · `app/topic_dispatcher.py:754-794`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
+      "unit_sha256": "f2b9b1bb9456a85828ff376fccca94867333fce7a99b5251e4cc0b1559715e0a",
+      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:754-794`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
       "classification": "code_fact",
-      "detail": "현재 per-user 판정 대상이 KRX 뿐이라는 현재 서버 구현 상태 단정이다(baseline C2 = per_user_gated_snapshot_topics).",
+      "detail": "고정 planner와 dispatcher는 FX/USDT의 premium_required가 최종 stage에서만 발생하고 앞선 두 stage에서는 identity-only임을 보여준다. 이는 클라이언트 처리 계약이며 production stage를 주장하지 않는다.",
       "provenance": [
         "file:app/topic_dispatcher.py:754-794",
-        "file:app/topic_policy.py:288-330"
+        "file:app/topic_policy.py:285-330"
       ]
     },
     {
@@ -548,15 +545,13 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "c8bae62e446e21a1c4f4aa3fa6075f1fcc5d27148778474dffd1504bfd1c3e28",
-      "unit_text": "⚠️ **부분 갱신(2026-08-12)**: 익명(미식별) 축만 `WS_TOPIC_AUTH_STAGE` 로 갈린다 — `compatibility`(기본) 는 구 동작 보존, `reject_anonymous_fx` 는 무료 집합에서 canonical FX 만 조용히 제외한다. 근거는 stage 정의·코드 기본값 `app/config.py:645-688` · 필터 정책 `app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` · production 주입 `app/main.py:302-308` 다. **이 슬라이스는 차단 경로를 구현했을 뿐** 운영 stage 는 미실측이며, premium 축과 USDT 는 잔존한다.",
+      "unit_sha256": "3639bfd1a0bbc50054de4de53cfec01cf17dbd460c11ab22470012a8fdda0768",
+      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:678-818`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
       "classification": "code_fact",
-      "detail": "고정 C1의 네 계층을 대조해 익명 FX 차단 경로와 compatibility 코드 기본값을 확인했다. 운영 활성화는 미측정이고 premium 및 익명 USDT 격차가 남는다는 범위로 제한했다.",
+      "detail": "고정 C1의 authenticated planner부터 dispatcher 등록까지가 FX/USDT premium 인가와 lease 경로를 구현한다. Release arming은 별도 운영 활성화와 실측 조건으로 남는다.",
       "provenance": [
-        "file:app/config.py:645-688",
-        "file:app/main.py:302-308",
-        "file:app/topic_auth_rollout.py:173-188",
-        "file:app/topic_dispatcher.py:547-569"
+        "file:app/topic_dispatcher.py:678-818",
+        "file:app/topic_policy.py:285-330"
       ]
     },
     {
@@ -631,11 +626,16 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-20",
-      "unit_sha256": "228819aa495f972c8bebe4077a8678fee935f3743b71ac223f7378fd15a6f12d",
-      "unit_text": "[R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**)는, [R-INV-4](../DECISIONS.md#r-inv-4) 가 이번 출시 범위로 확정한 **`dxy:spot` 까지 포함한 명시적 fail-closed 정책표**로 구현하면 된다 (**미지정 topic 은 통과 불가**).",
-      "classification": "normative",
-      "detail": "'…정책표로 구현하면 된다'는 아직 없는 인가 판정을 어떤 형태로 만들지 정하는 지시다 — 현행 코드는 dxy topic 자체가 없고 FX/USDT premium 강제도 없다(R-HAND-11). R-OPEN-1/R-INV-4 가 확정한 범위를 fail-closed 정책표로 옮기라는 설계 결정이다.",
-      "reason": "design-decision"
+      "unit_sha256": "a911532802f8f1a96b631b9eae63a13b5ab79818aa882b3d67f4ce68b257af00",
+      "unit_text": "[R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + KRX)은 `0cfe474`의 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` · `app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한 `dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로 (`app/topic_initial_snapshot.py:64-69` · `ios/FXi/Services/WebSocketService.swift:1066-1073`), DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.",
+      "classification": "code_fact",
+      "detail": "고정 C1의 리터럴 정책표는 현재 구현된 FX 3종, USDT, KRX를 열거하고 미지정 topic을 거부한다. 서버 지원 집합에는 dxy:spot이 없고 iOS는 DXY를 legacy envelope로 받으므로 DXY 수직 슬라이스가 남는다.",
+      "provenance": [
+        "file:app/topic_initial_snapshot.py:64-69",
+        "file:app/topic_policy.py:231-241",
+        "file:app/topic_policy.py:87-93",
+        "file:ios/FXi/Services/WebSocketService.swift:1066-1073"
+      ]
     },
     {
       "destination": "HEALTH",
@@ -726,14 +726,15 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "daf4235ea5af04e246dc79d0f1fdd8a544852f41081f917e820056f4628a2dd9",
-      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다 — **강제 경로는 `0cfe474` 에서 구현됐고 운영은 아직 켜지 않았다**. `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:288-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3058-3061`, ADR-039 §8.1 E3). ⛔ **arming 조건은 \"구현\"이 아니라 \"활성화 + 실측\"이다** — 최종 stage 는 미실측이다.",
+      "unit_sha256": "5a0f6cae79de49c68c27d25e6215f58759a90fdc467036a33ee2c1290a89751e",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3058-3061`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
       "classification": "code_fact",
-      "detail": "R-INV-2 재작성으로 생긴 신규 unit — `WS_TOPIC_AUTH_STAGE` 3단 stage 와 각 축의 인가 요구를 표로 서술한다. 구현 사실이므로 code_fact 이고 근거는 정책표·planner·coordinator·dispatcher 배선이다.",
+      "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
       "provenance": [
         "file:app/main.py:3058-3061",
         "file:app/topic_authorization.py:311-341",
-        "file:app/topic_policy.py:288-330"
+        "file:app/topic_policy.py:244-282",
+        "file:app/topic_policy.py:285-330"
       ]
     }
   ]

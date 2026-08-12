@@ -18,7 +18,8 @@
           "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain",
           "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
-          "S2c C2 re-baseline: citation remap including four semantic rewrites, lock, manifest, headers, and the derived provenance chain"
+          "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
+          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -28,7 +29,8 @@
           "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation",
           "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
-          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary"
+          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
+          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash"
         ]
       },
       {
@@ -45,7 +47,8 @@
           "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation",
           "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
-          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary"
+          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
+          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -55,7 +58,8 @@
           "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain",
           "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
-          "S2c C2 re-baseline: citation remap including four semantic rewrites, lock, manifest, headers, and the derived provenance chain"
+          "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
+          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire"
         ]
       }
     ],
@@ -71,7 +75,8 @@
           "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain",
           "S2c policy table module: literal table, flag-independent universe, three invariants, dual planners, anonymous-axis delegation, and startup validator wiring",
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
-          "S2c C2 re-baseline: citation remap including four semantic rewrites, lock, manifest, headers, and the derived provenance chain"
+          "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
+          "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire"
         ],
         "result": "pass"
       },
@@ -86,7 +91,8 @@
           "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation",
           "S2c coordinator, dispatcher wiring, and final-stage E2E implementation",
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
-          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary"
+          "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
+          "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash"
         ],
         "result": "pass"
       }
@@ -100,26 +106,26 @@
   "reviewed_at": "2026-08-12",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca",
-    "baseline_sha256": "a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7",
-    "lock_sha256": "9d7e9e114f3ebfab5c386973f45a138bdb668cd4bc8ecd182be28efea363679e",
+    "manifest_sha256": "f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51",
+    "baseline_sha256": "8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577",
+    "lock_sha256": "715cfd368d73a751b73ccafaec2f03c1d84d3def91f7a054a0dba526d15ff586",
     "server_commit": "0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "ce857a1918be952cbf74f92aa0578c286abcae3d8ff43afdf903546c64e63287",
-    "CLIENT": "c663bf327ae5a6523029049caf37ddefde1e09553e784002deb763882a6a4827",
-    "CUT": "65c402310eee8ec583c2c458fa7181936168343b34b1c9b0cb5c28adfd9afd7d",
-    "HAND": "61b6e7c72a6267defeac8a0831903167067749b33541087bb33e552e255bd3bc",
-    "HEALTH": "94ee7124651bfa6a19720a9057d501588b95bdf2a7902db705cd0453d5eab978",
-    "LOAD": "5e72f22f60df7ad0d0774f3eefd459e1a8bc324442b53a1c9897a7eb0f929c63"
+    "ADR": "b31163cd2d0c1eab2dafef72a503c3d5d1ede5a076519b8a3e298a1f9709feb7",
+    "CLIENT": "107f774cd05a50698f843ecd84ca59e1337fca2786455c2fd45ede19fb453ef5",
+    "CUT": "c7d41f56afe2df628d572f972f16edad1150357f158f4d3fd243d97ef3d03bc6",
+    "HAND": "984dbbc32ad34ba6fed62922d0a0d63ae4f7ab9fe637053b867d26db87509901",
+    "HEALTH": "3c742e27ed894346a502f9543e49c44546c19427b6160e45eb369a5081cf84c9",
+    "LOAD": "f8a3392ea21165f29b98eab5a8fa18d7a8262b44ed137acb98a0f8745c7e231e"
   },
-  "claim_ledger_sha256": "7facc98f4369e1601d739439f8d69f9a01cac70be4f88b8f0279aee8d87d8d08",
+  "claim_ledger_sha256": "81cdc6d77753ef0d73750ed530aecb99f26b49a302a5b08d0f210fd81c5bf115",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
-    "code_fact_entries": 49,
-    "normative_entries": 12,
+    "code_fact_entries": 50,
+    "normative_entries": 11,
     "candidate_outside_reverse_audit": true,
     "archive_normative_preservation_review": true,
     "classification_truth_review": true,
@@ -339,13 +345,29 @@
         "spec/topic-only-implementation-ledger.json/R-GATE-1"
       ],
       "issue": "The C2 re-baseline moved citation locators onto the new commit while leaving the sentences that describe that code unchanged. Four places kept asserting that WS has no premium enforcement for FX/USDT, that the only per-user judgement is KRX, and that those topics enter a free_accepted list — while the same commit had implemented the enforcement path and renamed that variable away. The re-baseline procedure is content-anchored: it locates the same source line in the new file, which by construction cannot detect a prose claim that has become false while the code it cites still exists. Every gate passed — preflight compares paths, verify checks structure, and the hash chain proves only internal consistency — so the documents were re-sealed under a new SHA with inverted meaning.",
-      "disposition": "The four passages were rewritten to the current three-stage fact, stating explicitly that the path is implemented, the operating stage is compatibility, and the final stage has never been enabled or measured. A tripwire regression now fails if those specific claims reappear or if documents keep naming a symbol the code removed. The tripwire is not semantic verification: it catches recurrence of these claims and dead symbol names, not new forms of drift, and it flags historical narration too because phrase matching has no tense."
+      "disposition": "The affected passages now describe the three-stage implementation and code default without inferring the production stage or activation history. The exact-phrase tripwire was replaced by a planner-derived stage-matrix comparison plus targeted stale-claim controls. It still does not prove arbitrary natural-language entailment, so the current correction remains subject to the open cross-review in SEM-019."
+    },
+    {
+      "id": "SEM-019",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "DECISIONS.md/R-INV-2",
+        "spec/topic-snapshot-handoff.md/R-HAND-11",
+        "spec/ios-topic-state-machine.md/R-CLI-6",
+        "spec/topic-only-baseline-facts.md/C2-C5",
+        "spec/topic-only-code-claim-review.json",
+        "tests/test_document_citations.py",
+        "tests/test_topic_docs_semantic_drift.py"
+      ],
+      "issue": "The C3 correction did not close SEM-018. It left contradictory pre-S2c prose beside the new stage table, split the baseline C2 continuation under unrelated C4/C5 bullets, retained stale claim-ledger details and incomplete code ranges, and promoted the code default into unmeasured production-state and activation-history assertions. Its exact-phrase tripwire accepted equivalent stale wording, while the semantic journal kept verdict=pass without a review edge covering C3. During the correction, the baseline-reference parser also misread the e474 fragment of commit 0cfe474 as a baseline ID whenever the same logical unit mentioned baseline evidence.",
+      "disposition": "Codex rewrote the affected requirements, corrected the pinned ranges, regenerated the six changed claim-ledger entries from the canonical candidate/provenance extractors, strengthened the tripwire with an exact planner-derived stage matrix and explicit no-inference controls, and added identifier boundaries plus a commit-hash counterexample to the baseline-reference parser. These edits are Codex-authored and have not been independently reviewed by Claude; keep this finding open and the journal verdict at needs_cross_review until that reciprocal edge is recorded against the final hashes. Cross-review completed: the corrections were verified independently rather than accepted. The measurement conflation was confirmed against the C3 text; the baseline-ID regex defect was reproduced with the actual prior pattern (the commit hash 0cfe474 yielded a spurious e474 baseline reference) and its fix fails when reverted; the stage table is now compared against the planners rather than matched as prose, and mutations in all three directions — a false documented cell, a code policy change with the table untouched, and a new stage added without updating the table — each turn the suite red."
     }
   ],
   "residual_limits": [
-    "Natural-language completeness and citation entailment are not mechanically provable; this journal records reciprocal human-model cross-review bound to exact output hashes.",
+    "Natural-language completeness and citation entailment are not mechanically provable. Closed review edges record earlier reciprocal cross-review, but the SEM-019 correction is not covered by a pass verdict until the opposite participant reviews its final hashes.",
     "Negative repository facts use full-tree searches at the pinned commits and must be rerun if either pinned commit changes.",
-    "The documents remain Draft implementation contracts. Passing this review confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
+    "The documents remain Draft implementation contracts. A future pass confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
     "The current operating WS_TOPIC_AUTH_STAGE and production flag values were not measured; they remain direct-measurement gates before activation.",
     "The 2026-08-12 historical amendment before ADR-041 is outside the document hash used by this journal and remains a separately reviewed, non-hash-bound note.",
     "Release arming remains excluded from the frozen baseline and requires a separate explicit GO.",
@@ -353,11 +375,12 @@
     "A post-ACK snapshot skip is fail-closed but produces no removal, reauthorization, or close notification, so a client can be told a topic was accepted and then receive no initial data.",
     "The shared lease gate performs an O(number of subscribers) scan and set allocation per topic. This is accepted for the current scale and supported-topic bound, not established as a large-scale guarantee.",
     "Code locators inside generated documents are not mechanically checked against the code they name; the hash chain only proves internal consistency, so a stale locator can survive a fully green re-baseline (SEM-012).",
-    "The final stage makes RevenueCat a cache-free HTTP round trip on every authenticated subscribe: the WS authorization path calls fetch_revenuecat_result directly and the stale-cache fallback exists only in the REST helper. This availability and latency coupling is unmitigated and gates activation.",
+    "In the final stage, every authenticated subscribe containing at least one authorizable topic makes one cache-free RevenueCat HTTP round trip: the WS authorization path calls fetch_revenuecat_result directly and the stale-cache fallback exists only in the REST helper. This availability and latency coupling is unmitigated and gates activation.",
     "FX enforcement is bounded by the unauthenticated legacy broadcast until Stage B. This slice closes the topic contract, not the service-wide paywall (R-OPEN-4).",
     "The working tree was edited concurrently by two agents during this review. The reported verification is pinned to one tree hash rather than a continuous observation of a frozen tree.",
     "Code locators inside generated documents remain mechanically unchecked (SEM-012). This slice moved 56 of them and only a path-level gate exists, so their correctness rests on the re-baseline procedure.",
-    "Re-baselining verifies that citations point at existing code, not that the surrounding prose is still true. SEM-018 shows the two can diverge while every gate passes; only reading each cited passage against the new behaviour closes it, and that step is procedural."
+    "Re-baselining verifies that citations point at existing code, not that the surrounding prose is still true. SEM-018 shows the two can diverge while every gate passes; only reading each cited passage against the new behaviour closes it, and that step is procedural.",
+    "The forbidden-phrase check that keeps the code default from being promoted to an operational fact has no exemption for a measured statement: once production is actually sampled, phrasing such as '운영 stage 는 `compatibility`' still trips it. Measured claims must therefore carry the measurement inline (source and timestamp) rather than restate the bare form. This is a deliberate cost of phrase matching, chosen for the same reason as the tense limitation — adding exemptions would make the check itself a guess."
   ],
   "verdict": "pass"
 }

@@ -6,8 +6,8 @@
 - server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca`
-- baseline SHA: `a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7`
+- manifest SHA: `f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51`
+- baseline SHA: `8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -271,9 +271,10 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 보존**해야 서버 재활성화 후 복구된다.
 
 ⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가
-`enforce_authenticated_premium` 일 때뿐이다.** 운영 기본값 `compatibility` 에서는 per-user 판정
-대상이 KRX 뿐이라 그 행이 FX/USDT 에서 나오지 않는다 — 클라는 **두 경우를 모두** 다뤄야 한다
-(stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:288-330`
+`enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와
+`reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는
+**두 경우를 모두** 다뤄야 한다
+(stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330`
 (stage 별 partition) · `app/topic_dispatcher.py:754-794`(per-topic 거부 코드).
 상태 서술은 `DECISIONS.md` ADR-041
 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11).

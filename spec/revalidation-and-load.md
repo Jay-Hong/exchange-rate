@@ -6,8 +6,8 @@
 - server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca`
-- baseline SHA: `a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7`
+- manifest SHA: `f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51`
+- baseline SHA: `8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca",
+  "manifest_sha256": "f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
@@ -494,7 +494,7 @@
       "evidence": [],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": "익명 FX 차단(C1 4fd8364)에 이어 **FX/USDT premium 강제 경로도 구현했다**(C1 0cfe474 — 정책표 · 식별 planner · coordinator · 3축 lease · 최종 stage `enforce_authenticated_premium`). ⛔ **닫히지 않았다**: 운영 stage 는 `compatibility` 이고 최종 stage 는 **한 번도 켜진 적이 없다**(미실측). 활성화 선행 = cache-free RevenueCat 왕복의 가용성·지연 결합 수용, 그리고 FX 실효를 제한하는 무인증 legacy 브로드캐스트(Stage B)."
+      "note": "익명 FX 차단(C1 4fd8364)에 이어 **FX/USDT premium 강제 경로도 구현했다**(C1 0cfe474 — 정책표 · 식별 planner · coordinator · 3축 lease · 최종 stage `enforce_authenticated_premium`). ⛔ **닫히지 않았다**: 코드 기본값은 `compatibility` 이고, production 의 현재 stage 와 활성화 이력은 이 검토에서 직접 측정하지 않았다. 활성화 선행 = 실행 중인 env 직접 측정, cache-free RevenueCat 왕복의 가용성·지연 결합 수용, 그리고 FX 실효를 제한하는 무인증 legacy 브로드캐스트(Stage B)."
     },
     {
       "rid": "R-GATE-2",

@@ -6504,8 +6504,8 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca`
-- baseline SHA: `a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7`
+- manifest SHA: `f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51`
+- baseline SHA: `8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6587,41 +6587,33 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 <!-- rid: R-INV-2 -->
 <!-- requirement-meta: disposition=active owner=ADR -->
 <a id="r-inv-2"></a>
-### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 미활성**
+### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 활성화 미확인**
 
-**(a)** `0cfe474` 이전에는 토큰이 있어도 FX/USDT 가 premium 관측을 **거치지 않고** 무료로
-등록됐다(per-user 판정은 KRX 에만 붙었다). 지금은 **강제 경로가 존재하고
-`WS_TOPIC_AUTH_STAGE` 가 그것을 켠다**:
+**(a)** `0cfe474`에서 WS FX/USDT premium 강제 경로가 추가됐다
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:678-818`). 적용 여부는
+`WS_TOPIC_AUTH_STAGE` 에 따른다:
 
-| stage | 익명 FX | 익명 USDT | 식별 FX/USDT | KRX |
+코드 기본값은 `compatibility` 다(`app/config.py:686-688`). production 의 실제 값은 아래 표가
+아니라 운영 직접 측정으로 확정한다.
+
+| stage | 익명 FX | 익명 USDT | 식별 FX/USDT | 식별 KRX |
 |---|---|---|---|---|
-| `compatibility` (**코드 기본값·운영 현재값**) | 허용 | 허용 | identity-only | premium + entitlement |
+| `compatibility` | 허용 | 허용 | identity-only | premium + entitlement |
 | `reject_anonymous_fx` | 거부 | 허용 | identity-only | premium + entitlement |
 | `enforce_authenticated_premium` | 거부 | 거부 | **premium-only** | premium + entitlement |
 
-⛔ **격차가 닫혔다고 읽지 말 것.** 운영은 `compatibility` 이고 최종 stage 는 **한 번도 켜진 적이
-없다**(미실측). 활성화 선행 조건 두 가지가 남아 있다 — WS 인가는 cache-free 라 최종 stage 에서
-authorizable topic 이 있는 인증 subscribe 마다 RevenueCat 왕복이 1회 생기고(§stale fallback 은
-REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
+⛔ **코드 구현과 운영 활성화를 분리한다.** 이 문서 재검토에서는 production env 를 직접 측정하지
+않았으므로 현재 운영 stage 나 과거 활성화 이력을 단정하지 않는다. 활성화 GO 직전에 실행 중인
+컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe
+마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
+브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
 근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).
 
-근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:83-89`(정책표) ·
-`app/topic_policy.py:288-330`(식별 planner) · `app/topic_authorization.py:311-341`(coordinator) ·
-`app/topic_dispatcher.py:678-794`(배선) · `app/main.py:3058-3061`(REST twin).
-
-익명(미식별) 요청 축은 `WS_TOPIC_AUTH_STAGE` 로 갈린다. 코드 기본값 `compatibility` 는 무료 topic 의
-구 동작을 보존하고, `reject_anonymous_fx` 는 그 무료 집합에서 canonical FX 만 조용히 제외한다.
-이 동작은 stage 정의·기본값 `app/config.py:645-688` · 필터 정책
-`app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` ·
-production 주입 `app/main.py:302-308` 를 함께 봐야 확인된다. **운영 stage 는 미실측**이고,
-어느 stage 도 FX/USDT 의 premium 판정을 추가하지 않으므로 위 격차 (a) 는 닫히지 않았다.
-
-⚠️ 이 격차는 **의도적으로 유예된 단계**이며, 현재 dispatcher docstring 도 익명 동작을
-`compatibility` 와 `reject_anonymous_fx` 로 분리해 적는다(`app/topic_dispatcher.py:378-383`).
-그러나 **신규 앱 출시 계약과는 양립하지 않는다**: 어느 stage 도 premium 판정을 추가하지 않고
-`premium_required` 는 현재 사실상 KRX 에서만 나오므로 거부 사유 전이표의 FX/USDT 인가 행이
-발화하지 않는다(근거: baseline C1 · C2).
+구현 근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:87-93`(정책표) ·
+`app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
+`app/topic_authorization.py:311-341`(coordinator) · `app/topic_dispatcher.py:678-818`(배선·등록) ·
+`app/main.py:3058-3061`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)

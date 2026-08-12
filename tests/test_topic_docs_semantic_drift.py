@@ -10,14 +10,16 @@ semantic 테스트)이 **전부 통과**했다: 해시 연쇄는 **내부 정합
 
 ## ⚠️ 이 tripwire 의 한계 (정직하게)
 
-⛔ **의미 검증이 아니다.** 아래는 **이번에 실제로 틀렸던 주장들**의 재등장만 막는다. 새로운
-형태의 의미 drift 는 못 잡는다 — 문구를 바꿔 같은 거짓을 쓰면 통과한다(SEM-010 이 같은 부류의
-약점을 이미 보여줬다). 그래서 두 번째 검사를 함께 둔다: **코드에서 사라진 심볼**을 문서가 계속
-이름으로 부르고 있으면 실패한다. 그쪽은 문구와 무관하게 성립한다.
+R-INV-2의 stage 표는 실제 planner 결과와 대조하므로 그 범위에서는 문구를 바꿔 우회할 수 없다.
+그 밖의 검사는 **이번에 실제로 틀렸던 주장들**과 제거된 심볼의 재등장만 막는다. 즉 전체 문서의
+의미 검증은 아니다. 새로운 형태의 자연어 drift는 여전히 상호 의미 검토가 찾아야 한다.
 """
 import pathlib
 import re
 import unittest
+
+from app.config import TopicAuthStage
+from app.topic_policy import plan_anonymous, plan_authenticated
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DOCS = [
@@ -42,17 +44,138 @@ STALE_CLAIMS = [
     ("premium 강제가 없다", "최종 stage 가 FX/USDT 에 premium 을 강제한다"),
     ("판정 대상은 KRX 하나뿐", "enforce stage 에서는 FX/USDT 도 premium 관측 대상이다"),
     ("premium 강제와 USDT 단계는 잔존", "두 축 모두 0cfe474 에서 구현됐다(운영 미활성일 뿐)"),
+    ("premium 축과 USDT 는 잔존", "두 축 모두 0cfe474 에서 구현됐다"),
+    ("어느 stage 도 FX/USDT 의 premium 판정을 추가하지", "최종 stage 가 그 판정을 추가한다"),
+    ("어느 stage 도 premium 판정을 추가하지", "최종 stage 가 그 판정을 추가한다"),
+    ("FX/USDT premium 강제도 없다", "0cfe474 에 강제 경로가 있다"),
 ]
 
 # 이 슬라이스가 **제거한** 심볼. 문서가 계속 부르면 그 문단은 옛 코드를 서술하고 있다.
 REMOVED_SYMBOLS = ["free_accepted"]
+
+FX_TOPICS = frozenset({"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw"})
+FX = "fx:usd-krw"
+USDT = "usdt:krw"
+KRX = "krx:usd-krw-futures"
 
 
 def _texts():
     return [(p, p.read_text()) for p in DOCS + LEDGERS if p.exists()]
 
 
+def _rid_block(path: pathlib.Path, rid: str) -> str:
+    text = path.read_text()
+    match = re.search(
+        rf'<a id="{re.escape(rid.lower())}"></a>.*?<!-- /rid: {re.escape(rid.upper())} -->',
+        text,
+        re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"{path.relative_to(REPO)} 에 {rid} block 이 없다")
+    return match.group(0)
+
+
+def _normalize_cell(value: str) -> str:
+    return value.replace("`", "").replace("**", "").strip()
+
+
+def _documented_stage_matrix() -> dict[str, tuple[str, str, str, str]]:
+    block = _rid_block(REPO / "DECISIONS.md", "R-INV-2")
+    table = re.search(
+        r"\| stage \| 익명 FX \| 익명 USDT \| 식별 FX/USDT \| 식별 KRX \|\n"
+        r"\|[-|]+\|\n(?P<rows>(?:\|.*\|\n?)+)",
+        block,
+    )
+    if table is None:
+        raise AssertionError("R-INV-2 의 stage 표를 찾지 못했다")
+
+    result = {}
+    for line in table.group("rows").splitlines():
+        cells = [_normalize_cell(cell) for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 5:
+            raise AssertionError(f"R-INV-2 stage 표의 열 수가 5가 아니다: {line!r}")
+        if cells[0] in result:
+            raise AssertionError(
+                f"R-INV-2 stage 표가 같은 stage 를 두 번 정의한다: {cells[0]!r}"
+            )
+        result[cells[0]] = tuple(cells[1:])
+    return result
+
+
+def _authorization_label(plan, topic: str) -> str:
+    if topic in plan.identity_only:
+        return "identity-only"
+    if topic in plan.premium_only:
+        return "premium-only"
+    if topic in plan.premium_and_entitlement:
+        return "premium + entitlement"
+    raise AssertionError(f"planner 가 {topic!r} 을 어떤 partition 에도 넣지 않았다: {plan!r}")
+
+
+def _code_stage_matrix() -> dict[str, tuple[str, str, str, str]]:
+    result = {}
+    for stage in TopicAuthStage:
+        anonymous = plan_anonymous(
+            [FX, USDT], stage=stage, fx_topics=FX_TOPICS
+        )
+        authenticated = plan_authenticated(
+            [FX, USDT, KRX], stage=stage, uid="semantic-doc-check"
+        )
+        result[stage.value] = (
+            "허용" if FX in anonymous else "거부",
+            "허용" if USDT in anonymous else "거부",
+            _authorization_label(authenticated, FX),
+            _authorization_label(authenticated, KRX),
+        )
+    return result
+
+
 class TestDocsDoNotContradictTheCode(unittest.TestCase):
+    def test_r_inv_2_stage_table_matches_the_planners(self):
+        """문구가 아니라 stage 전수와 네 정책 셀을 실제 planner 결과에 대조한다."""
+        self.assertEqual(_documented_stage_matrix(), _code_stage_matrix())
+
+    def test_current_operating_stage_is_not_inferred_from_the_code_default(self):
+        """코드 기본값은 production 현재값이나 과거 활성화 이력을 증명하지 않는다."""
+        forbidden = {
+            "운영 현재값": "코드 기본값을 운영값으로 승격했다",
+            "운영은 `compatibility`": "production 직접 측정 없이 현재 stage 를 단정했다",
+            "운영 stage 는 `compatibility`": "production 직접 측정 없이 현재 stage 를 단정했다",
+            "운영은 아직 켜지 않았다": "활성화 이력을 저장소만으로 단정했다",
+            "한 번도 켜진 적이 없다": "활성화 이력을 저장소만으로 단정했다",
+        }
+        hits = [
+            f"{path.relative_to(REPO)}: {phrase!r} — {reason}"
+            for path, text in _texts()
+            for phrase, reason in forbidden.items()
+            if phrase in text
+        ]
+        self.assertEqual(hits, [], "미측정 운영 상태를 단정한다:\n" + "\n".join(hits))
+
+        current_contracts = {
+            "R-INV-2": _rid_block(REPO / "DECISIONS.md", "R-INV-2"),
+            "R-HAND-11": _rid_block(
+                REPO / "spec/topic-snapshot-handoff.md", "R-HAND-11"
+            ),
+            "R-GATE-1 ledger": (
+                REPO / "spec/topic-only-implementation-ledger.json"
+            ).read_text(),
+        }
+        for label, contract in current_contracts.items():
+            with self.subTest(contract=label):
+                self.assertIn(
+                    "직접 측정",
+                    contract,
+                    f"{label}이 코드 기본값과 production 실측을 분리하지 않는다",
+                )
+
+    def test_baseline_names_every_configured_stage(self):
+        baseline = (REPO / "spec/topic-only-baseline-facts.md").read_text()
+        section = baseline.split("## C. 인가 (현재 구현 상태)", 1)[1].split("## D.", 1)[0]
+        for stage in TopicAuthStage:
+            with self.subTest(stage=stage.value):
+                self.assertIn(f"`{stage.value}`", section)
+
     def test_stale_claims_do_not_reappear(self):
         hits = [
             f"{p.relative_to(REPO)}: {phrase!r} — {why}"

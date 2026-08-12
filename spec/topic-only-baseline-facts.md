@@ -65,11 +65,18 @@
   - `reject_anonymous_fx` — 무료 집합에서 **canonical FX 만** 조용히 제외. USDT 는 유지되고
     FX-only 요청은 등록·응답 모두 0이다. 익명 unsubscribe 는 stage 와 무관하게 기존 경로를
     그대로 탄다(`app/topic_dispatcher.py:819-845`).
-  ⚠️ 두 stage 모두 **익명 subscribe 시도를 계측**한다 — 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다
+  - `enforce_authenticated_premium` — 익명 subscribe topic 을 전부 조용히 제외. unsubscribe 는 유지.
+  ⚠️ 세 stage 모두 **익명 subscribe 시도를 계측**한다 — 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다
      앞이라(`app/topic_dispatcher.py:509-517`) flag-off 운영 상태에서도 값이 쌓인다.
 - **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
-- **C4 [코드]** `app/topic_policy.py:83-89` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
-  KRX = `PREMIUM_AND_ENTITLEMENT`. `app/topic_policy.py:288-330` 이 stage 별로 partition 을
+  entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
+  나타내지 않는다.
+- **C3 [코드]** `exchange-rate/app/main.py:3023` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3058` `verify_firebase_token(request)` → `app/main.py:3061`
+  `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
+  ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
+- **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
+  KRX = `PREMIUM_AND_ENTITLEMENT`. `app/topic_policy.py:285-330` 이 stage 별로 partition 을
   파생하고, `compatibility`·`reject_anonymous_fx` 에서는 비-KRX 가 identity-only 로 남는다.
 - **C5 [코드]** `app/topic_authorization.py:311-341` — coordinator. RC 는 요청당 **≤1회**,
   entitlement 는 premium 승인 뒤 KRX 요청이 있을 때만 **≤1회**. `Unavailable` 은 전체-요청,
@@ -77,11 +84,6 @@
   **C5-inf [추론]** ⇒ `enforce_authenticated_premium` 에서는 authorizable topic 이 하나라도
   있는 인증 subscribe 마다 RevenueCat 왕복이 1회 생긴다 — WS 경로는 cache-free 다
   (stale fallback 은 REST 전용 `verify_premium_status` 안에만 있다).
-  per-user 판정 대상은 **KRX 뿐**.
-- **C3 [코드]** `exchange-rate/app/main.py:3023` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3058` `verify_firebase_token(request)` → `app/main.py:3061`
-  `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
-  ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 
 ## D. 실패 경로
 

@@ -46,7 +46,10 @@ DOCS = {
 
 # 근거 두 형태. baseline 표시는 같은 논리 단위 안의 ID 목록을 연다.
 BASELINE_MARK = re.compile(r"\bbaseline\b", re.I)
-BASELINE_ID = re.compile(r"\*{0,2}([A-F]\d+(?:-[a-z]+)?)\*{0,2}", re.I)
+BASELINE_ID = re.compile(
+    r"(?<![0-9A-Za-z])\*{0,2}([A-F]\d+(?:-[a-z]+)?)\*{0,2}(?![0-9A-Za-z-])",
+    re.I,
+)
 FILE_LINE = re.compile(
     r"`([^`\n]+?\.(?:py|swift|json|md|conf|plist|pbxproj|ya?ml|toml|sh|[mh])):"
     r"(\d+)(?:-(\d+))?`"
@@ -280,6 +283,11 @@ def test_baseline_ids_come_from_declarations_only():
     known = _known_baseline_ids()
     assert {"A1", "B3-op", "E2-inf", "F14"} <= known
     assert "F99" not in known
+
+
+def test_baseline_refs_do_not_extract_an_id_from_a_commit_hash():
+    unit = "commit `0cfe474`의 동작. 근거: baseline F12"
+    assert _baseline_refs(unit) == {"F12"}
 
 
 # ── 코드 단정 리뷰 원장 ───────────────────────────────────────────────────────

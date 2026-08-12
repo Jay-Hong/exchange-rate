@@ -6,8 +6,8 @@
 - server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `ddee7b90355c9df97bd7dc8add1a0b8c3c82b2a18325f671de10bd7cc43031ca`
-- baseline SHA: `a0f569c48ad2d2c06afccd6d5513b388db22a02196424718f09d4d1692f13ea7`
+- manifest SHA: `f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51`
+- baseline SHA: `8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -31,25 +31,20 @@
 <a id="r-hand-11"></a>
 ### R-HAND-11
 
-**(a) WS 인가 격차 — Release arming 전에 닫는다.**
+**(a) WS 인가 경로 — 구현됨, Release arming 전에 활성화·실측한다.**
 
-→ **Release arming 전에 WS FX/USDT 에도 인증 + premium 판정과 premium lease 를 강제해야 한다**
-(ADR-039 Stage A). 이게 닫히기 전까지 [R-INV-1](../DECISIONS.md#r-inv-1) 의 불변식은 **문서상 목표일
-뿐이다**.
+`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:678-818`, ADR-039 Stage A).
+Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.
 
-격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다 — **강제 경로는 `0cfe474`
-에서 구현됐고 운영은 아직 켜지 않았다**. `enforce_authenticated_premium` 에서 식별된 FX/USDT 는
-premium-only 로 분류되고(`app/topic_policy.py:288-330`) coordinator 가 premium 을 관측한다
+격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage
+`enforce_authenticated_premium` 에서 식별된 FX/USDT 는
+premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다
 (`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다.
 REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3058-3061`, ADR-039 §8.1 E3).
-⛔ **arming 조건은 "구현"이 아니라 "활성화 + 실측"이다** — 최종 stage 는 미실측이다.
-
-⚠️ **부분 갱신(2026-08-12)**: 익명(미식별) 축만 `WS_TOPIC_AUTH_STAGE` 로 갈린다 —
-`compatibility`(기본) 는 구 동작 보존, `reject_anonymous_fx` 는 무료 집합에서 canonical FX 만
-조용히 제외한다. 근거는 stage 정의·코드 기본값 `app/config.py:645-688` · 필터 정책
-`app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` ·
-production 주입 `app/main.py:302-308` 다. **이 슬라이스는 차단 경로를 구현했을 뿐** 운영 stage 는
-미실측이며, premium 축과 USDT 는 잔존한다.
+익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`).
+⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행
+중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.
 
 <!-- relation: references target=R-INV-1 -->
 - references: [R-INV-1](../DECISIONS.md#r-inv-1)
@@ -81,9 +76,12 @@ topic 은 legacy 이탈에 불필요하므로 phased 로 미룬다. 서버 몫�
 **인가 판정은 명시적 정책표로 구현한다.**
 
 [R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 +
-premium / KRX = premium + entitlement**)는, [R-INV-4](../DECISIONS.md#r-inv-4) 가 이번 출시 범위로
-확정한 **`dxy:spot` 까지 포함한 명시적 fail-closed 정책표**로 구현하면 된다
-(**미지정 topic 은 통과 불가**).
+premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + KRX)은 `0cfe474`의
+명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` ·
+`app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한
+`dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로
+(`app/topic_initial_snapshot.py:64-69` · `ios/FXi/Services/WebSocketService.swift:1066-1073`),
+DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.
 
 <!-- relation: references target=R-INV-4 -->
 - references: [R-INV-4](../DECISIONS.md#r-inv-4)
