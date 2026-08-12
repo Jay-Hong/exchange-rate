@@ -4009,7 +4009,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:1831](app/main.py#L1831))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:1862](app/main.py#L1862))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -6060,6 +6060,13 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 ### G1/G2 서버 슬라이스 land 기록 (2026-07-08, `d1405e2` — 배포/마이그레이션/grant 완료)
 
 - **G2 env**: `KRX_CLIENT_DISTRIBUTION_ENABLED`(default false, 운영 true) + 파생
+  - ⚠️ **Amendment (2026-08-12)**: 위 "운영 true" 는 **2026-07-08 land 시점의 기록**이다.
+    저장소의 2026-07-22 라우트 감사 완화 기록은 topic 서버의 **prod flag OFF**까지만 말한다
+    (`CLAUDE.md:38`). 이 근거만으로 당시 두 env 의 정확한 조합이나 **현재 운영값**을 확정하지
+    않는다. `KRX_CLIENT_DISTRIBUTION_ENABLED` 와 `TOPIC_DISPATCHER_ENABLED` 의 현재값은 활성화
+    GO **직전에 서버에서 직접 측정**한다.
+    ⚠️ 이 amendment 는 ADR-041 구간 **밖**이라 code-claim 원장·semantic-review 해시에
+    포함되지 않는다. **독립 리뷰로 고정되지 않았고**, 별도 수동 검토 대상이다.
   `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=G3∧G2 — G3 off 시 Redis/DB 잔존값 노출도 차단, codex 보강)
   + `KRX_TOPIC_INCLUDE_EFFECTIVE`(usdt:krw usd_krw_futures group 포함 3지점 교체:
   broadcast hook / direct_coalesced trigger / WS·REST snapshot 공용 builder).
@@ -6494,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `3e693c8e4cb8b4fd238beb2bfc1a1610fa512406`
+- server 기준 commit: `4fd83646b2cfb09a123f483cb0494fe45303d743`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `8ec93340a71fcac055faba0bda60f17ed61deca78eab94e9e1ab1214861ca198`
-- baseline SHA: `c7538755f04f01deba7b3877a979990f9a2188dd6d5f55b47c8275bd1c228426`
+- manifest SHA: `e03a3a01abf3029b24c81818e59a3b2615f21ffd8e0bdbf78e4ef60aecb9e68e`
+- baseline SHA: `a35430752e29bf29f84c13cbcfbfc83d1daa47003a4351964ffa5fbc38835898`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6557,7 +6564,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1128-1178` · `app/main.py:993-1037`).
+(`app/main.py:1144-1194` · `app/main.py:1008-1052`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6582,18 +6589,24 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 <a id="r-inv-2"></a>
 ### R-INV-2 — 격차 (a): WS 의 FX/USDT 에 premium 강제가 없다 (출시 차단)
 
-**(a) WS 의 FX/USDT 는 무토큰으로도 구독된다 — premium 강제가 없다.**
-`topic_dispatcher` 는 `id_token is None` 이면 *"무토큰 = 기존 동작 그대로(등록 + snapshot, ack 없음)"* 로
-처리하고, **per-user 판정 대상은 KRX 하나뿐**이다(`per_user_gated_snapshot_topics`).
-토큰이 있어도 FX/USDT 는 premium 판정 없이 `free_accepted` 로 들어간다.
-반면 REST twin 은 premium 을 실제로 강제한다(ADR-039 §8.1 E3).
-근거: `app/topic_dispatcher.py:531-551` · `app/topic_initial_snapshot.py:95-104` ·
-`app/topic_dispatcher.py:646-659` · `app/main.py:3021-3024`.
+**(a) WS 의 FX/USDT 에 premium 강제가 없다.** 토큰이 있는 요청도 **per-user 판정 대상은 KRX
+하나뿐**이고(`per_user_gated_snapshot_topics`), FX/USDT 는 premium 판정 없이
+`free_accepted` 로 들어간다. 반면 REST twin 은 premium 을 실제로 강제한다(ADR-039 §8.1 E3).
+근거: `app/topic_initial_snapshot.py:95-104` · `app/topic_dispatcher.py:656-674` ·
+`app/main.py:3052-3055`.
 
-⚠️ 이건 버그가 아니라 **의도적으로 유예된 단계**다 — 코드 주석이 *"enforcement 는 capability 와
-분리돼야 하고(§E1), 현행 클라가 무토큰이라 무조건 요구하면 구 클라가 topic 을 잃는다"* 고 적는다.
-그러나 **신규 앱 출시 계약과는 양립하지 않는다**: `premium_required` 는 현재 사실상 KRX 에서만
-나오므로 거부 사유 전이표의 인가 행이 발화하지 않는다(근거: baseline C1 · C2).
+익명(미식별) 요청 축은 `WS_TOPIC_AUTH_STAGE` 로 갈린다. 코드 기본값 `compatibility` 는 무료 topic 의
+구 동작을 보존하고, `reject_anonymous_fx` 는 그 무료 집합에서 canonical FX 만 조용히 제외한다.
+이 동작은 stage 정의·기본값 `app/config.py:645-680` · 필터 정책
+`app/topic_auth_rollout.py:170-183` · 필터 호출과 등록 `app/topic_dispatcher.py:543-565` ·
+production 주입 `app/main.py:296-302` 를 함께 봐야 확인된다. **운영 stage 는 미실측**이고,
+어느 stage 도 FX/USDT 의 premium 판정을 추가하지 않으므로 위 격차 (a) 는 닫히지 않았다.
+
+⚠️ 이 격차는 **의도적으로 유예된 단계**이며, 현재 dispatcher docstring 도 익명 동작을
+`compatibility` 와 `reject_anonymous_fx` 로 분리해 적는다(`app/topic_dispatcher.py:375-379`).
+그러나 **신규 앱 출시 계약과는 양립하지 않는다**: 어느 stage 도 premium 판정을 추가하지 않고
+`premium_required` 는 현재 사실상 KRX 에서만 나오므로 거부 사유 전이표의 FX/USDT 인가 행이
+발화하지 않는다(근거: baseline C1 · C2).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
@@ -6675,7 +6688,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1402-1412` · `app/main.py:866-889`). 따라서 현재 경로에는
+  (`app/scheduler.py:1402-1412` · `app/main.py:881-904`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.

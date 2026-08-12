@@ -74,7 +74,7 @@ iOS 근거는 source locator 규약(`XCTestCase/testMethod` · 클래스 본문 
 ⚠️ 구조 검사와 reviewer 기록은 자연어 의미가 참임을 기계적으로 증명하지 않는다. 특히 deploy reference는
 외부 시스템에서 dereference하지 않는다. `verified` reviewer가 근거와 RID 주장 사이의 의미 적합성을 책임진다.
 
-### ⚠️ pin 된 인용 경로 11개는 사실상 읽기 전용이다 (2026-08-11 실측)
+### ⚠️ pin 된 인용 경로 13개는 사실상 읽기 전용이다 (2026-08-12 갱신)
 
 `preflight` 의 `E_CODECHANGED` 는 **경로 단위**로 검사한다 — 인용된 파일이 pin 이후 한 줄이라도
 바뀌면 빨강이다. 그래서 아래 경로들은 **재-baseline 없이는 수정할 수 없다**:
@@ -82,11 +82,13 @@ iOS 근거는 source locator 규약(`XCTestCase/testMethod` · 클래스 본문 
 ```
   CLAUDE.md
   app/auth_executor.py
+  app/config.py
   app/database.py
   app/fx_topic_publisher.py
   app/latest_rates_cache.py
   app/legacy_policy.py
   app/main.py
+  app/topic_auth_rollout.py
   app/topic_dispatcher.py
   app/topic_initial_snapshot.py
   app/topic_wire.py
@@ -94,14 +96,21 @@ iOS 근거는 source locator 규약(`XCTestCase/testMethod` · 클래스 본문 
 ```
 
 pin 은 `spec/topic-only.lock.json` **과** 동결 manifest **양쪽**에 박혀 있어(`E_PINNED`),
-옮기려면 manifest → lock → 이행 대장 `manifest_sha256` 까지 연쇄 갱신 = 마이그레이션 전체
-재-baseline 이다. **작은 문서 수정 때문에 할 일이 아니다.**
+옮기려면 **baseline → lock → manifest → 이행 대장·원장·독립 리뷰** 순서로 연쇄 갱신해야 한다
+(⛔ 순서가 중요하다 — lock 이 pin 의 정본이고 manifest 는 거기서 **생성**된다. 한때 이 절이
+`manifest → lock` 이라 적었는데 거꾸로였다). manifest 는 `skeleton --force` 로 덮지 않는다 —
+40블록의 disposition·requirements 를 잃는다. **작은 문서 수정 때문에 할 일이 아니다.**
 
 ✅ **CI 서술 drift 해소**: `CLAUDE.md` 의 2026-06-11 항목대로 전체 pytest workflow
 (`.github/workflows/tests.yml`)는 Markdown-only 변경을 다시 건너뛴다. 대신
 `.github/workflows/topic-only-docs.yml` 이 모든 Markdown 변경에서 provenance와 topic-only 문서·원장
 게이트만 실행한다. 따라서 pin 된 `CLAUDE.md`를 재-baseline 하지 않고도 기존 서술과 현행 동작을
-일치시켰다. 두 workflow의 iOS provenance 검사는 앱 runtime secret과 별개로 read-only deploy key
+일치시켰다. ⚠️ **2026-08-12**: R-GATE-1 첫 슬라이스가 stage 근거를 baseline 에 넣으면서 `app/config.py` 와
+`app/topic_auth_rollout.py` 가 목록에 들어왔다 — 새 동작은 dispatcher 한 곳만 인용해서는 증명되지
+않기 때문이다(stage 정의 · 필터 정책 · 필터 호출 · production 주입의 네 계층). 그 대가로 두 파일도
+이제 재-baseline 없이는 수정할 수 없다.
+
+두 workflow의 iOS provenance 검사는 앱 runtime secret과 별개로 read-only deploy key
 `TOPIC_MIGRATION_IOS_DEPLOY_KEY`를 요구한다.
 
 ⚠️ 문서 게이트의 테스트 목록은 **명시적 10개가 정본**이다. AST 검사는 docstring을 제외한 `.md`
@@ -247,16 +256,20 @@ r5 에서 구조 축(disposition·ownership·omission)이 0이 된 뒤 남은 �
   `tests/test_adr041_grounds.py` 4건이 통과했다.
 - ✅ **산출물 6종 작성·구조 검증** — `DECISIONS.md` ADR-041 + spec 5종이 존재하며
   `check-docs` 와 `tests/test_topic_only_documents.py` 가 통과한다. ADR 은 기존 본문 삭제 없이 append 했다.
-- ✅ **의미 리뷰 완료** — 문서 작성·초기 분류 주체와 다른 Codex reviewer 가 같은 동결 입력에서
-  ADR-041/spec 5종을 역방향으로 검토했다. manifest 출력 요구 86개, claim 후보 59개
-  (`code_fact` 47 · `normative` 12), 후보 밖 단정, archive 규범 보존, 인용의 **존재가 아니라
-  주장 뒷받침 여부**까지 확인했다.
+- ✅ **의미 교차검토 완료** — 현재 강도는 `reciprocal_cross_review` 다. 최초 분할 산출물은 작성·초기
+  분류 주체와 다른 Codex 가 검토했지만, C2 에서 Codex 도 최종 문서와 원장을 직접 고쳤으므로
+  **최종 산출물 전체에 독립인 reviewer 는 없다**. 대신 Claude 초안은 Codex 가, Codex 보정은 Claude 가
+  각각 검토한 두 방향의 non-self review edge 를 기록한다.
+  - 현재 범위: manifest 출력 요구 86개, claim 후보 60개(`code_fact` 48 · `normative` 12), 후보 밖
+    단정, archive 규범 보존, 인용의 **존재가 아니라 주장 뒷받침 여부**까지 확인했다.
   - journal: `spec/topic-only-semantic-review.json` — 검토한 문서 6종 SHA, 원장 SHA, 입력 SHA,
-    finding 6건과 처분을 고정한다.
-  - 처분: high 3건 + medium 3건 모두 **실제 수정 + 검증**으로 닫았다. 특히 고정 3행 오기,
-    동결 밖 미커밋 arming 단정, baseline B1 범위 확대를 교정했다.
-  - `tests/test_topic_only_semantic_review.py` 가 문서/원장 drift, 열린 finding, 불완전 review scope 를
-    fail-closed 로 거부한다. 자연어 판정 자체를 기계가 증명한다는 뜻은 아니다.
+    finding 9건과 실제 저작·검토 경계를 고정한다. `globally_independent_reviewer=false` 를 명시한다.
+  - 처분: high 5건 + medium 4건을 수정·반증으로 닫았다. 각 참여자는 상대가 작성한 범위에 대해서만
+    독립이며, 저작·review-edge 진술 자체는 기계 도출이 아니라 attestation 이다.
+  - `tests/test_topic_only_semantic_review.py` 가 문서/원장 drift, 열린 finding, 불완전 review scope 뿐
+    아니라 자기검토 edge·단방향 검토·거짓 global-independence 주장도 fail-closed 로 거부한다.
+    자연어 판정이나 실제 저작 독립성을 기계가 증명한다는 뜻은 아니다. schema v2·validator 자체는
+    Claude 의 지적에 따라 Codex 가 구현했고 구조 테스트는 있지만, 그 리뷰 인프라의 제3자 검토는 없다.
 - 번들은 리포의 `scripts/topic_migration_doc_bundle.py` 로 **가장 마지막에** 재생성한다.
   `generate --out /tmp/topic-only-doc-bundle.md --force` 후 같은 스크립트의
   `check --bundle /tmp/topic-only-doc-bundle.md` 가 통과해야 문서 작성 입력으로 쓴다. 번들은
@@ -328,5 +341,5 @@ manifest 로 옮긴 것(= 게이트 안):
    통과했다(실측). 행 수·건수를 여기 적지 않는다 — 적으면 반드시 어긋난다(이 문서에서 두 번 어긋났다).
    느려서 CI 에는 없다. 검증기 diff 를 승인받기 전에 손으로 돌릴 것.
 8. ⛔ **구조 검증 ≠ 의미 완전성.** ~~전부 prose 로 둬도 통과~~ 는 **거짓**이었다(E_NOACTIVE 가 막는다).
-   실제 한계는 **배정이 옳은지**를 못 본다는 것이다 — 모든 요구사항을 한 문서로 몰아넣어도 통과한다(실측 rc=0) —
-   분류가 옳은지는 **독립 리뷰 게이트**가 따로 판정한다.
+   실제 한계는 **배정이 옳은지**를 못 본다는 것이다 — 모든 요구사항을 한 문서로 몰아넣어도 통과한다(실측 rc=0).
+   분류가 옳다는 판단은 **별도 상호 교차검토**가 맡고, 게이트는 그 journal/hash만 고정한다.

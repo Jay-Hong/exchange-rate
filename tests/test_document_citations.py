@@ -21,6 +21,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -250,9 +251,28 @@ def test_unrelated_rid_level_basis_does_not_cover_a_claim():
 
 
 def test_file_line_must_exist_in_pinned_commit_not_only_worktree():
-    # 이 테스트 파일은 현재 worktree에는 있지만 lock의 server commit에는 없다.
-    count, error = _pinned_file_line_count("server", "tests/test_document_citations.py")
-    assert count is None
+    """⛔ helper 는 **worktree 가 아니라 pinned commit** 을 읽어야 한다.
+
+    ⚠️ 예전에는 이 테스트 파일 자신을 예시로 썼는데, 재-baseline 으로 pin 이 그 파일을 포함하는
+       commit 으로 옮겨가자 **음성 대조군이 무력화**됐다(601줄을 반환). pin 이 어디로 가든
+       성립하도록, worktree 에만 존재하는 파일을 그때그때 만든다.
+    """
+    # repo-relative 경로여야 pinned lookup 에 넘길 수 있다. 고정 파일명은 사용자가 같은 이름의
+    # 파일을 가지고 있을 때 덮어쓴 뒤 삭제하므로, 충돌 불가능한 임시파일을 repo 안에 만든다.
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=REPO,
+        prefix="__pinned_commit_probe_",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write("worktree only\n")
+        probe = pathlib.Path(handle.name)
+    try:
+        count, error = _pinned_file_line_count("server", probe.name)
+    finally:
+        probe.unlink(missing_ok=True)
+    assert count is None, "worktree 에만 있는 파일이 pinned commit 에서 읽혔다"
     assert error
 
 
@@ -265,9 +285,9 @@ def test_baseline_ids_come_from_declarations_only():
 # ── 코드 단정 리뷰 원장 ───────────────────────────────────────────────────────
 # ⛔ 원장은 **분류가 참임을 증명하지 않는다**. 코드 사실을 normative 로 잘못 적어도 기계는 모른다.
 #    원장이 하는 일은 셋뿐이다 — ① 후보마다 **명시적 결정**을 강제 ② drift(누락·orphan·중복·문구 변경)
-#    차단 ③ 감사 가능하게 기록. **분류의 진실성은 독립 의미 리뷰가 판정한다.**
+#    차단 ③ 감사 가능하게 기록. **분류의 진실성은 별도 상호 의미 교차검토가 판단한다.**
 # ⛔ 한 단위에 현재 코드 사실과 규범이 섞였으면 `code_fact` 다. `normative` 로 분류하려면 문서에서
-#    단위를 먼저 분리해야 한다. 이 판단도 기계가 증명하지 못하므로 독립 의미 리뷰 대상이다.
+#    단위를 먼저 분리해야 한다. 이 판단도 기계가 증명하지 못하므로 상호 의미 교차검토 대상이다.
 # ⛔ 그리고 후보 집합 자체가 완전하지 않다(보수적 lint). 최종 리뷰는 후보 **밖** 단정도 역방향으로 찾는다.
 LEDGER_PATH = REPO / "spec" / "topic-only-code-claim-review.json"
 LEDGER_SCHEMA_VERSION = 1

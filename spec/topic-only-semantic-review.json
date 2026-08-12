@@ -1,35 +1,91 @@
 {
-  "schema_version": 1,
-  "reviewer": {
-    "name": "OpenAI Codex",
-    "role": "independent semantic reviewer",
-    "independent_from": [
-      "Claude document-writing workflow",
-      "Claude code-claim classification workflow"
+  "schema_version": 2,
+  "review_process": {
+    "mode": "reciprocal_cross_review",
+    "globally_independent_reviewer": false,
+    "participants": [
+      {
+        "name": "Claude Code",
+        "roles": [
+          "C2 co-author",
+          "cross-reviewer"
+        ],
+        "authored_or_modified": [
+          "C2 initial baseline, ADR, handoff, lock, manifest, header, and implementation-ledger updates",
+          "initial mechanical source-line remap and code-claim ledger update"
+        ],
+        "independently_reviewed": [
+          "Codex citation-range and anonymous-stage corrections",
+          "Codex code-claim ledger regeneration and hash rebinding",
+          "Codex pinned-commit negative-control safety fix"
+        ]
+      },
+      {
+        "name": "OpenAI Codex",
+        "roles": [
+          "C2 co-author",
+          "cross-reviewer"
+        ],
+        "authored_or_modified": [
+          "C2 citation-range and anonymous-stage corrections",
+          "code-claim ledger regeneration and semantic-review rebinding",
+          "pinned-commit negative-control safety fix"
+        ],
+        "independently_reviewed": [
+          "Claude-authored C2 draft and source-line remap",
+          "Claude-authored lock, manifest, header, and implementation-ledger updates"
+        ]
+      }
+    ],
+    "review_edges": [
+      {
+        "author": "Claude Code",
+        "reviewer": "OpenAI Codex",
+        "scope": [
+          "C2 initial narrative updates and mechanical citation remap",
+          "lock, manifest, output-header, and implementation-ledger changes"
+        ],
+        "result": "pass"
+      },
+      {
+        "author": "OpenAI Codex",
+        "reviewer": "Claude Code",
+        "scope": [
+          "complete four-layer citation ranges and stage-conditional wording",
+          "60-entry claim-ledger regeneration",
+          "safe repo-local pinned-commit negative control"
+        ],
+        "result": "pass"
+      }
+    ],
+    "limitations": [
+      "Neither participant is independent of the final artifact as a whole.",
+      "Independence applies only to the opposite participant's listed change scope; the authorship and review-edge statements are attestations, not mechanically derived facts.",
+      "The schema-v2 journal and validator were implemented by Codex in response to Claude's finding; their structure is test-covered but the review infrastructure itself has no third-party reviewer."
     ]
   },
-  "reviewed_at": "2026-08-11",
+  "reviewed_at": "2026-08-12",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "8ec93340a71fcac055faba0bda60f17ed61deca78eab94e9e1ab1214861ca198",
-    "baseline_sha256": "c7538755f04f01deba7b3877a979990f9a2188dd6d5f55b47c8275bd1c228426",
-    "lock_sha256": "742c623b4185b384ee82ddde11dbdd0d24b1a4afe7a9eee0bbfc7353f7016036",
-    "server_commit": "3e693c8e4cb8b4fd238beb2bfc1a1610fa512406",
+    "manifest_sha256": "e03a3a01abf3029b24c81818e59a3b2615f21ffd8e0bdbf78e4ef60aecb9e68e",
+    "baseline_sha256": "a35430752e29bf29f84c13cbcfbfc83d1daa47003a4351964ffa5fbc38835898",
+    "lock_sha256": "fac5c0b8b5fd2c62f677497e6785aa42778ae7d86846e3263d73233d0dc0a766",
+    "server_commit": "4fd83646b2cfb09a123f483cb0494fe45303d743",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "505223df577ff0f0b61c9833bc36515a738d6fc16d4b34292989ea370c093bf4",
-    "CLIENT": "7279f28e2010067ca9d7a02ac7447d99fe97fac3af3daa1152ad1c8b844d1315",
-    "CUT": "146249d171dfb840ade32612bf0fa611f36183ffb79a100da33dee7ed83d6f14",
-    "HAND": "5474af0c3bdd13ced77987619afcbfa5efbc0e859101679fef040208bb109091",
-    "HEALTH": "4f26f106f8cb947a1b71780f3ef009a13fc2616769d06e0fa83f0ffd30d7c293",
-    "LOAD": "76fc082638c0abb9d216689b4ce1de1229e6b132fbf3abdb79cdff0399888eaf"
+    "ADR": "9a4ecf45eadc176b290be97ffce2f39e3eefeadf6171c5060828adef13e50a4c",
+    "CLIENT": "9c175384572c705a9a0160484ff1ca4be7051464de1559391119a7cd3feb5017",
+    "CUT": "3dbc656598ca863ed322eb96b58ff0a1d570d9a4e0bcbd7b8e26a9bb65e82954",
+    "HAND": "c25764baa33d49c443bd6533036399238fdc05cc69c95f5b208fc19dab42125a",
+    "HEALTH": "bb2485cd60f3959ad1c4110355889ffd63e96fa6977216021a139055aabe019d",
+    "LOAD": "36aaa0a323b00b8af0039214a4d6eaf580d9fa9a3d67cc47b2ae62be04f50bf2"
   },
-  "claim_ledger_sha256": "ed438cc8f9d1626cb7242e774e1810c46a2a21cb022b1c676a4a65aea1c40813",
+  "claim_ledger_sha256": "a02ca4165c692a590a39b90677803e6395c331526778e06793ee8596d483ae61",
   "scope": {
     "manifest_output_requirements": 86,
-    "claim_candidates": 59,
-    "code_fact_entries": 47,
+    "claim_candidates": 60,
+    "code_fact_entries": 48,
     "normative_entries": 12,
     "candidate_outside_reverse_audit": true,
     "archive_normative_preservation_review": true,
@@ -115,12 +171,49 @@
       ],
       "issue": "The cutover inventory said GraphViewModel had no consuming View and grouped its runtime object with zero-use symbols. RootView still consumes it for stop(), and the object installs callbacks and observers even though the legacy graph UI is not mounted.",
       "disposition": "Separated zero-call symbols from the live GraphViewModel object and expanded the removal scope to callback, observer, environment, and stop wiring while preserving the no-production-start conclusion."
+    },
+    {
+      "id": "SEM-007",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "baseline/C1",
+        "ADR/R-INV-2",
+        "HAND/R-HAND-11"
+      ],
+      "issue": "The first C2 draft kept an unconditional anonymous-subscribe statement and cited only the first line of each new stage layer. Those locators did not establish the enum/default, filter result, dispatcher registration, production injection, unsubscribe behavior, or pre-flag observation ordering.",
+      "disposition": "Rewrote the anonymous path as stage-dependent and cited complete pinned ranges for config, rollout policy, dispatcher application, production injection, unsubscribe, and metric ordering. The documents now distinguish the code default from the unmeasured operating stage and keep the premium/USDT gap open."
+    },
+    {
+      "id": "SEM-008",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "ADR/R-INV-2",
+        "HAND/R-HAND-11",
+        "claim-ledger"
+      ],
+      "issue": "Moving pinned source lines and changing the anonymous-stage prose invalidated reviewed-unit hashes. Treating all drift as mechanical would have carried the obsolete unconditional-anonymous detail into the new claims.",
+      "disposition": "Carried forward only nine byte-identical classifications, reviewed the changed premium-gap and stage units independently, and regenerated an exact 60-entry ledger with 48 code facts and 12 normative units."
+    },
+    {
+      "id": "SEM-009",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "semantic-review/reviewer-attribution",
+        "MATRIX/semantic-review-status"
+      ],
+      "issue": "After Codex modified the final C2 documents and ledger, retaining a single 'independent semantic reviewer' attribution made Codex both co-author and global reviewer. The hashes were valid, but the independence claim was not.",
+      "disposition": "Replaced the global-independence claim with schema-v2 reciprocal cross-review. The journal records two non-self review edges, explicitly states that no participant is independent of the whole artifact, and the validator rejects self-review, one-way review, and false global-independence controls."
     }
   ],
   "residual_limits": [
-    "Natural-language completeness and citation entailment are not mechanically provable; this journal records the independent human-model review bound to exact output hashes.",
+    "Natural-language completeness and citation entailment are not mechanically provable; this journal records reciprocal human-model cross-review bound to exact output hashes.",
     "Negative repository facts use full-tree searches at the pinned commits and must be rerun if either pinned commit changes.",
-    "The documents remain Draft implementation contracts. Passing this review does not assert that the proposed runtime behavior has been implemented.",
+    "The documents remain Draft implementation contracts. Passing this review confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
+    "The current operating WS_TOPIC_AUTH_STAGE and production flag values were not measured; they remain direct-measurement gates before activation.",
+    "The 2026-08-12 historical amendment before ADR-041 is outside the document hash used by this journal and remains a separately reviewed, non-hash-bound note.",
     "Release arming remains excluded from the frozen baseline and requires a separate explicit GO."
   ],
   "verdict": "pass"
