@@ -6501,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4fd83646b2cfb09a123f483cb0494fe45303d743`
+- server 기준 commit: `882d92bc8f220abbd96ffc74d2f063de6844d463`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `e03a3a01abf3029b24c81818e59a3b2615f21ffd8e0bdbf78e4ef60aecb9e68e`
-- baseline SHA: `a35430752e29bf29f84c13cbcfbfc83d1daa47003a4351964ffa5fbc38835898`
+- manifest SHA: `b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85`
+- baseline SHA: `9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,

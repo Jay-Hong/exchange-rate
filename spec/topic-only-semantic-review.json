@@ -12,12 +12,17 @@
         ],
         "authored_or_modified": [
           "C2 initial narrative updates and mechanical citation remap",
-          "lock, manifest, output-header, and implementation-ledger changes"
+          "lock, manifest, output-header, and implementation-ledger changes",
+          "S2a C1 implementation at 882d92b: post-build pre-send reuse of the shared lease gate, plus five regression tests",
+          "S2a C1 implementer-supplied mutation evidence: gate removal, naive get_lease replacement, and continue-to-break controls",
+          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
           "60-entry claim-ledger regeneration",
-          "safe repo-local pinned-commit negative control"
+          "safe repo-local pinned-commit negative control",
+          "S2a defect discovery during the premium-axis design review: initial snapshots bypassed the shared lease gate",
+          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation"
         ]
       },
       {
@@ -29,11 +34,16 @@
         "authored_or_modified": [
           "complete four-layer citation ranges and stage-conditional wording",
           "60-entry claim-ledger regeneration",
-          "safe repo-local pinned-commit negative control"
+          "safe repo-local pinned-commit negative control",
+          "S2a defect discovery during the premium-axis design review: initial snapshots bypassed the shared lease gate",
+          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
-          "lock, manifest, output-header, and implementation-ledger changes"
+          "lock, manifest, output-header, and implementation-ledger changes",
+          "S2a C1 implementation at 882d92b: post-build pre-send reuse of the shared lease gate, plus five regression tests",
+          "S2a C1 implementer-supplied mutation evidence: gate removal, naive get_lease replacement, and continue-to-break controls",
+          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain"
         ]
       }
     ],
@@ -43,7 +53,10 @@
         "reviewer": "OpenAI Codex",
         "scope": [
           "C2 initial narrative updates and mechanical citation remap",
-          "lock, manifest, output-header, and implementation-ledger changes"
+          "lock, manifest, output-header, and implementation-ledger changes",
+          "S2a C1 implementation at 882d92b: post-build pre-send reuse of the shared lease gate, plus five regression tests",
+          "S2a C1 implementer-supplied mutation evidence: gate removal, naive get_lease replacement, and continue-to-break controls",
+          "S2a C2 re-baseline: baseline D2/D3/D6/E2, pinned server commit, handoff locator remap, and the derived provenance and hash chain"
         ],
         "result": "pass"
       },
@@ -53,7 +66,9 @@
         "scope": [
           "complete four-layer citation ranges and stage-conditional wording",
           "60-entry claim-ledger regeneration",
-          "safe repo-local pinned-commit negative control"
+          "safe repo-local pinned-commit negative control",
+          "S2a defect discovery during the premium-axis design review: initial snapshots bypassed the shared lease gate",
+          "S2a C2 re-baseline defect discovery: a stale current-code locator in the generated handoff document was misclassified as a frozen archive quotation"
         ],
         "result": "pass"
       }
@@ -67,21 +82,21 @@
   "reviewed_at": "2026-08-12",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "e03a3a01abf3029b24c81818e59a3b2615f21ffd8e0bdbf78e4ef60aecb9e68e",
-    "baseline_sha256": "a35430752e29bf29f84c13cbcfbfc83d1daa47003a4351964ffa5fbc38835898",
-    "lock_sha256": "fac5c0b8b5fd2c62f677497e6785aa42778ae7d86846e3263d73233d0dc0a766",
-    "server_commit": "4fd83646b2cfb09a123f483cb0494fe45303d743",
+    "manifest_sha256": "b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85",
+    "baseline_sha256": "9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c",
+    "lock_sha256": "f430aa586c523f1d2be5ede886df4c36e83e19f0b7a6a6b9164e913fd93b6ca0",
+    "server_commit": "882d92bc8f220abbd96ffc74d2f063de6844d463",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "9a4ecf45eadc176b290be97ffce2f39e3eefeadf6171c5060828adef13e50a4c",
-    "CLIENT": "9c175384572c705a9a0160484ff1ca4be7051464de1559391119a7cd3feb5017",
-    "CUT": "3dbc656598ca863ed322eb96b58ff0a1d570d9a4e0bcbd7b8e26a9bb65e82954",
-    "HAND": "c25764baa33d49c443bd6533036399238fdc05cc69c95f5b208fc19dab42125a",
-    "HEALTH": "bb2485cd60f3959ad1c4110355889ffd63e96fa6977216021a139055aabe019d",
-    "LOAD": "36aaa0a323b00b8af0039214a4d6eaf580d9fa9a3d67cc47b2ae62be04f50bf2"
+    "ADR": "64160b8f1d25acc9f1a33c1bbe446f89e3407ee8e3c7c996f67f8a3bf9d6431d",
+    "CLIENT": "779f2e944f6f2f48c5c5d539ff804eff1c383a091186a9037cd16f9425cffda0",
+    "CUT": "d89f14cb19704d5dbdfb890586df210b4f81f42d1aff8b1dc8ccded2cdaeb0ad",
+    "HAND": "cf0c78e2e8166123a7e4db27550679818264e0b33d0b6a827c2241f9685eeaa9",
+    "HEALTH": "6db1876b2447346d032b847d2b532b1fb1006f2d3128d4b41a41a551f6b823e6",
+    "LOAD": "8c7668aa34bcbd58ef0dd11e7eced5f595d7b783f2f37560ae9d61a7b5dc19e5"
   },
-  "claim_ledger_sha256": "a02ca4165c692a590a39b90677803e6395c331526778e06793ee8596d483ae61",
+  "claim_ledger_sha256": "cb9fe94842e35cf6103cec35765a4cdac0b66ab684c14585bd8c404cc40773ee",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 60,
@@ -217,6 +232,31 @@
       ],
       "issue": "The first schema-v2 validator checked non-self review edges and exact duplicate prose, but did not bind participant authored/reviewed summaries to edge scopes. Reworded self-review or unrelated participant scopes therefore passed while the edges remained unchanged.",
       "disposition": "Made review-edge scopes the canonical work units, required participant summaries to equal the scopes derived from their outgoing and incoming edges, rejected scope reuse across edges, and added adversarial controls for reworded self-review, participant/edge disagreement, and reused scopes. Scope labels and author/reviewer assignments remain explicitly attested rather than mechanically proven."
+    },
+    {
+      "id": "SEM-011",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "server/app/topic_initial_snapshot.py:262",
+        "server/app/topic_dispatcher.py:208",
+        "baseline/D2",
+        "baseline/D6"
+      ],
+      "issue": "send_initial_snapshots built and sent payloads directly after subscription registration without rechecking the shared lease gate, even though leased_subscribers documents itself as the single gate shared by every publish path. A lease could expire, or the registry entry could disappear, while the snapshot builder ran in to_thread outside the authentication wire deadline, and the initial snapshot would still be sent. The defect escaped because the structural guards covered dispatcher publish functions but not the initial-snapshot module, and because the original unit tests invoked send_initial_snapshots with no registry state and therefore could not express lease eligibility at all.",
+      "disposition": "Commit 882d92b reuses leased_subscribers after each snapshot build and immediately before send_json. Leaseless E1 subscriptions still receive snapshots, only the ineligible topic is skipped, and five regression tests cover a valid lease, an expired lease, a leaseless subscription, registry disappearance during build, and skip-versus-abort. A naive registry.get_lease() check was rejected because its None conflates leaseless subscription with vanished registration. The reviewer inspected the implementation and call paths and independently ran the 33 direct unit tests; the author's three mutation controls were reviewed as reported but were not independently rerun by the reviewer."
+    },
+    {
+      "id": "SEM-012",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "spec/topic-snapshot-handoff.md:107",
+        "spec/topic-snapshot-handoff.md:283",
+        "spec/topic-only-code-claim-review.json/R-HAND-4"
+      ],
+      "issue": "The first S2a re-baseline attempt updated the baseline facts but left two current-code locators in the generated handoff document pointing at pre-882d92b line numbers. The author classified them as frozen archive quotations and declined to touch them; that classification was wrong. The archive line carries no locator at all, so both ranges are current-code claims owned by the generated document, and the claim ledger had copied one of them as a code_fact. Nothing in the hash chain detects this: every hash stayed internally consistent while the locators pointed at the wrong lines.",
+      "disposition": "Both ranges were remapped from the pre-commit file by content with function-scope disambiguation (275-296 to 277-307, 275-286 to 277-297) and the affected claim-ledger unit was regenerated from the validator's own candidate extractor rather than edited by hand. The reviewer identified one of the two stale ranges; the author found the second while remapping. The residual limit stands: locator correctness inside generated documents is not mechanically verified, only hash consistency is."
     }
   ],
   "residual_limits": [
@@ -225,7 +265,11 @@
     "The documents remain Draft implementation contracts. Passing this review confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
     "The current operating WS_TOPIC_AUTH_STAGE and production flag values were not measured; they remain direct-measurement gates before activation.",
     "The 2026-08-12 historical amendment before ADR-041 is outside the document hash used by this journal and remains a separately reviewed, non-hash-bound note.",
-    "Release arming remains excluded from the frozen baseline and requires a separate explicit GO."
+    "Release arming remains excluded from the frozen baseline and requires a separate explicit GO.",
+    "The initial-snapshot lease gate authorizes the start of send_json, not its completion; an in-flight send may finish after the lease expires.",
+    "A post-ACK snapshot skip is fail-closed but produces no removal, reauthorization, or close notification, so a client can be told a topic was accepted and then receive no initial data.",
+    "The shared lease gate performs an O(number of subscribers) scan and set allocation per topic. This is accepted for the current scale and supported-topic bound, not established as a large-scale guarantee.",
+    "Code locators inside generated documents are not mechanically checked against the code they name; the hash chain only proves internal consistency, so a stale locator can survive a fully green re-baseline (SEM-012)."
   ],
   "verdict": "pass"
 }

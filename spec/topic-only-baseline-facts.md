@@ -76,17 +76,27 @@
   *"publish 송신 실패 격리에서 호출된다 … '연결이 죽었다'의 동의어가 아니다"*.
 - **D2 [코드]** `app/topic_dispatcher.py:208` `leased_subscribers` — 만료 lease 를
   **전송 직전에만** 필터. registry 제거·클라 통지 없음.
-- **D3 [코드]** `app/topic_initial_snapshot.py:289` — build 실패를 `logger.warning` 후 **격리**,
+  ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
+  이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
+  그 경로를 같은 함수에 태운다.
+- **D3 [코드]** `app/topic_initial_snapshot.py:300` — build 실패를 `logger.warning` 후 **격리**,
   연결 유지. `None`(flag off)도 조용히 skip.
 - **D4 [결정]** `app/topic_dispatcher.py:364` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
+- **D6 [코드]** `app/topic_initial_snapshot.py:320` — initial snapshot 도 **전송 직전**에
+  `leased_subscribers(topic)` 멤버십을 다시 본다(`882d92b`). 게이트에 걸리면 **해당 topic skip**
+  이고 연결 실패가 아니다.
+  **D6-inf [추론]** ⇒ 검사가 build **뒤**여야 하는 이유는 `_build_snapshot_sync` 가 `to_thread`
+  로 돌고 **인증 wire deadline 밖**(상한 없음)이라, 위험한 창이 build→send 구간이기 때문이다.
+  ⛔ `registry.get_lease(...) is None` 으로 자체 판정하면 **무토큰(§E1) 구독**과 **등록 소멸**이
+  구분되지 않아 취소된 구독에 데이터가 나간다 — 그래서 구독자 집합에서 출발하는 함수를 쓴다.
 
 ## E. 부하
 
 - **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2` (**최대 5**).
   주석: *"RDS db.t4g.micro 메모리 절약"*.
-- **E2 [코드]** `app/topic_initial_snapshot.py:286` —
+- **E2 [코드]** `app/topic_initial_snapshot.py:297` —
   `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)`.
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)

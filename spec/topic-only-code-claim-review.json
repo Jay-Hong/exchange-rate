@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "e03a3a01abf3029b24c81818e59a3b2615f21ffd8e0bdbf78e4ef60aecb9e68e",
-    "baseline_sha256": "a35430752e29bf29f84c13cbcfbfc83d1daa47003a4351964ffa5fbc38835898",
-    "lock_sha256": "fac5c0b8b5fd2c62f677497e6785aa42778ae7d86846e3263d73233d0dc0a766",
-    "server_commit": "4fd83646b2cfb09a123f483cb0494fe45303d743",
+    "manifest_sha256": "b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85",
+    "baseline_sha256": "9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c",
+    "lock_sha256": "f430aa586c523f1d2be5ede886df4c36e83e19f0b7a6a6b9164e913fd93b6ca0",
+    "server_commit": "882d92bc8f220abbd96ffc74d2f063de6844d463",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "9a4ecf45eadc176b290be97ffce2f39e3eefeadf6171c5060828adef13e50a4c",
-    "CLIENT": "9c175384572c705a9a0160484ff1ca4be7051464de1559391119a7cd3feb5017",
-    "CUT": "3dbc656598ca863ed322eb96b58ff0a1d570d9a4e0bcbd7b8e26a9bb65e82954",
-    "HAND": "c25764baa33d49c443bd6533036399238fdc05cc69c95f5b208fc19dab42125a",
-    "HEALTH": "bb2485cd60f3959ad1c4110355889ffd63e96fa6977216021a139055aabe019d",
-    "LOAD": "36aaa0a323b00b8af0039214a4d6eaf580d9fa9a3d67cc47b2ae62be04f50bf2"
+    "ADR": "64160b8f1d25acc9f1a33c1bbe446f89e3407ee8e3c7c996f67f8a3bf9d6431d",
+    "CLIENT": "779f2e944f6f2f48c5c5d539ff804eff1c383a091186a9037cd16f9425cffda0",
+    "CUT": "d89f14cb19704d5dbdfb890586df210b4f81f42d1aff8b1dc8ccded2cdaeb0ad",
+    "HAND": "cf0c78e2e8166123a7e4db27550679818264e0b33d0b6a827c2241f9685eeaa9",
+    "HEALTH": "6db1876b2447346d032b847d2b532b1fb1006f2d3128d4b41a41a551f6b823e6",
+    "LOAD": "8c7668aa34bcbd58ef0dd11e7eced5f595d7b783f2f37560ae9d61a7b5dc19e5"
   },
   "entries": [
     {
@@ -607,12 +607,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-4",
-      "unit_sha256": "03e80ae18058b6e843b55b788f02d5b0512c48b2105af3b56d969e05934341a1",
-      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다. 현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:275-286`). 따라서 서버 절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.",
+      "unit_sha256": "c422685755344862babd3cbe8838da49295e3cd69996a178a029f96880bf3fa2",
+      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다. 현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:277-297`). 따라서 서버 절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.",
       "classification": "code_fact",
       "detail": "현재 snapshot builder가 asyncio.to_thread를 사용한다. 취소가 실행 중 worker를 중단시키지 않는 경계 때문에 request deadline과 별도로 I/O 자체 상한이 필요하다는 혼합 사실/요구다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:275-286"
+        "file:app/topic_initial_snapshot.py:277-297"
       ]
     },
     {

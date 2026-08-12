@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4fd83646b2cfb09a123f483cb0494fe45303d743`
+- server 기준 commit: `882d92bc8f220abbd96ffc74d2f063de6844d463`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `e03a3a01abf3029b24c81818e59a3b2615f21ffd8e0bdbf78e4ef60aecb9e68e`
-- baseline SHA: `a35430752e29bf29f84c13cbcfbfc83d1daa47003a4351964ffa5fbc38835898`
+- manifest SHA: `b5ca309abd77fdeae452397fba8befc79da6c8a72f50f83722e60aeb6562ad85`
+- baseline SHA: `9d215e593a8773691fc63b8ce605ba2c1ba8487b4763834653771cbc2b8c2a5c`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -104,7 +104,7 @@ premium / KRX = premium + entitlement**)는, [R-INV-4](../DECISIONS.md#r-inv-4) 
 서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다
 (`app/topic_dispatcher.py:757-786`; baseline D5).
 그리고 snapshot build 가 실패하거나 `None` 이면 **연결을 유지한 채 조용히 skip** 한다
-(`app/topic_initial_snapshot.py:275-296`; baseline D3). FX publisher 도 build/publish **전** 예외를
+(`app/topic_initial_snapshot.py:277-307`; baseline D3). FX publisher 도 build/publish **전** 예외를
 격리하고 `False` 만 반환한다(`app/fx_topic_publisher.py:291-323`).
 
 → **연결·pong·ack·lease 가 전부 정상인데 snapshot 이 한 번도 오지 않는 상태**가 실제로 표현된다.
@@ -280,7 +280,7 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 ### R-HAND-4
 
 - ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다.
-  현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:275-286`). 따라서 서버
+  현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:277-297`). 따라서 서버
   절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.
 <!-- /rid: R-HAND-4 -->
 
