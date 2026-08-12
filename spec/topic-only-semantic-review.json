@@ -20,7 +20,9 @@
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
           "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
-          "C4 closure of the C3 cross-review"
+          "C4 closure of the C3 cross-review",
+          "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
+          "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -32,7 +34,9 @@
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
           "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
           "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash",
-          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression"
+          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression",
+          "C5 follow-up: correcting the SEM-020 lifecycle residual and review edge, separating mutable operating evidence, recording counter-provenance limits, and adding pending-language plus closed-fixture validator regressions (SEM-021)",
+          "C6 follow-up: the terminating closure protocol replacing the self-attestation exception, and the pass-lifecycle patterns that reject that wording"
         ]
       },
       {
@@ -51,7 +55,9 @@
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
           "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
           "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash",
-          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression"
+          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression",
+          "C5 follow-up: correcting the SEM-020 lifecycle residual and review edge, separating mutable operating evidence, recording counter-provenance limits, and adding pending-language plus closed-fixture validator regressions (SEM-021)",
+          "C6 follow-up: the terminating closure protocol replacing the self-attestation exception, and the pass-lifecycle patterns that reject that wording"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -63,7 +69,9 @@
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
           "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
-          "C4 closure of the C3 cross-review"
+          "C4 closure of the C3 cross-review",
+          "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
+          "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter"
         ]
       }
     ],
@@ -81,7 +89,9 @@
           "S2c shortcut-path regression locking the resolve-level entitlement guard",
           "S2c C2 mechanical re-baseline: citation remap, lock, manifest, headers, and the derived provenance chain; semantic entailment excluded (SEM-018)",
           "C3 correction of the C2 re-sealing: R-INV-2, R-HAND-11, R-CLI-6 and the R-GATE-1 ledger note rewritten to the three-stage fact, baseline facts C4/C5 for the policy table and coordinator, and the first drift tripwire",
-          "C4 closure of the C3 cross-review"
+          "C4 closure of the C3 cross-review",
+          "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
+          "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter"
         ],
         "result": "pass"
       },
@@ -98,7 +108,9 @@
           "S2c policy table defect fixes: duplicate-topic partition, invalid policy values, AST guard bypasses, and runtime immutability",
           "S2c contract-gap regressions: premium-only revocation, three-axis lease, single clock read, UID binding, and plan boundary",
           "C3 follow-up corrections: separating the code default from unmeasured production state, removing the stale paragraphs left under the new stage table, widening the new locators to the executing ranges, replacing prose matching with a table-versus-planner comparison, and fixing the baseline-ID regex that read a baseline reference out of a commit hash",
-          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression"
+          "C4 follow-up: rewriting closed-finding dispositions in completed-review tense and deriving the stage-matrix aggregate columns from the canonical publisher constants, with a per-member counterexample regression",
+          "C5 follow-up: correcting the SEM-020 lifecycle residual and review edge, separating mutable operating evidence, recording counter-provenance limits, and adding pending-language plus closed-fixture validator regressions (SEM-021)",
+          "C6 follow-up: the terminating closure protocol replacing the self-attestation exception, and the pass-lifecycle patterns that reject that wording"
         ],
         "result": "pass"
       }
@@ -391,13 +403,26 @@
         "git:5f9aa74/commit-message"
       ],
       "issue": "C5 marked SEM-020 fixed and restored verdict=pass, but its first residual limit still said that the SEM-020 follow-up was not covered by a pass verdict until the opposite participant reviewed it. The pass review edge also claimed the C5 cross-review before Codex had reviewed that closing state. Separately, the journal still said the current operating values were unmeasured while the C5 commit message reported a point-in-time observation; that observation is outside the journal's hash-bound evidence. The same commit inferred that nonzero counters were not synthetic merely because they had been zero immediately after restart, although these counters carry no traffic-provenance dimension.",
-      "disposition": "Codex removed the unreviewed C5 scope from the pass edge, rewrote the stale residual limit, and taught the validator to reject pending-review language in fixed dispositions and residual limits, using a synthetic closed journal as the positive control. Cross-review reproduced both halves: at 5f9aa74 the first residual limit still said the SEM-020 follow-up was not covered by a pass verdict, while the verdict was pass and SEM-020 was fixed. The closing self-check that reported no pending language had swept findings only and not residual limits, so a complete-sounding claim came from a partial scan — the third instance of that shape in this session. Both validator additions are load-bearing: replacing the synthetic closed fixture with the live open journal, or emptying the pending-language patterns, each turns the counterexample suite red.\nThe recorded scopes are now technical work only. Recording a review is not itself reviewable work — see the residual limit on that regress."
+      "disposition": "Codex removed the unreviewed C5 scope from the pass edge, rewrote the stale residual limit, and taught the validator to reject pending-review language in fixed dispositions and residual limits, using a synthetic closed journal as the positive control. Cross-review reproduced both halves: at 5f9aa74 the first residual limit still said the SEM-020 follow-up was not covered by a pass verdict, while the verdict was pass and SEM-020 was fixed. The closing self-check that reported no pending language had swept findings only and not residual limits, so a complete-sounding claim came from a partial scan — the third instance of that shape in this session. Both validator additions are load-bearing: replacing the synthetic closed fixture with the live open journal, or emptying the pending-language patterns, each turns the counterexample suite red. The Codex-authored technical work is recorded in the OpenAI Codex → Claude Code edge; SEM-022 corrects the separate closure protocol."
+    },
+    {
+      "id": "SEM-022",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "spec/topic-only-semantic-review.json/review_process",
+        "spec/topic-only-semantic-review.json/residual_limits",
+        "tests/test_topic_only_semantic_review.py/review_errors",
+        "git:624e431/commit-message"
+      ],
+      "issue": "C6 generalized a workflow mistake into an impossibility claim: it said closing the journal cannot be cross-reviewed and therefore made the closing bookkeeping self-attested. A terminating protocol exists — the author prepares the complete fixed/pass candidate first, the opposite participant reviews that exact tree without editing it, and the unchanged tree is committed. The commit operation does not create new file content; any post-review tree edit invalidates the attestation and reopens review. C6 also said review edges record technical work only but omitted the Codex-authored SEM-021 validator and residual corrections that Claude had just reviewed. Finally, nonzero provenance-free counters establish observed request events, not nonzero organic or end-user transition impact.",
+      "disposition": "Codex replaced the self-attestation exception with a terminating closure protocol, added the missing SEM-021 technical scope to the review edges, and taught the validator to reject the self-attestation wording in a pass journal. Cross-review accepted the correction rather than defending the earlier claim: the regress was an artifact of this process, not a property of review. Each round the reviewer kept editing after reviewing, which manufactured new unreviewed content; if the author prepares the complete candidate and the opposite participant reviews that exact tree without touching it, the commit contains only reviewed content and the edge asserting that review is verifiable by the reviewer itself, so nothing is circular. One verification held as written and one did not. Emptying the pass-lifecycle patterns turns the suite red. Replacing the closed fixture with the live journal was red only while that journal was open: in the final pass tree the helper became a no-op and the mutation survived, so the load-bearing claim had been checked in one state and asserted about another. The counterexample base now starts from a synthetic open journal, which makes the helper load-bearing regardless of the live verdict. The omission was reproduced too — at 624e431 both edges still ended at C4-era scopes while the closing commit message said the recorded scopes were now technical work only. Reviewing that correction in turn found the scaffold unlocked: turning _synthetic_open_journal into a no-op restores the original defect silently, because the base falls back to the live journal and the closed fixture goes inert again. A regression now asserts that the synthetic open state really produces errors, so all three mutations — the fixture, the pending-language patterns, and the scaffold itself — are red in the final pass tree."
     }
   ],
   "residual_limits": [
-    "Natural-language completeness and citation entailment are not mechanically provable. Closed review edges cover work through SEM-020; later changes must reopen the verdict and obtain a new opposite-participant review edge.",
+    "Natural-language completeness and citation entailment are not mechanically provable. This pass covers only the work units explicitly listed in review_process.review_edges; later changes must reopen the verdict and obtain a new opposite-participant review edge. The boundary is the edge list itself, not a finding number, because a hand-written endpoint goes stale on the next round.",
     "Negative repository facts use full-tree searches at the pinned commits and must be rerun if either pinned commit changes.",
-    "The documents remain Draft implementation contracts. A future pass confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
+    "The documents remain Draft implementation contracts. This pass confirms the cited C1 code path at the pinned commit, not operating activation or completion of R-GATE-1.",
     "This hash-bound semantic review does not establish mutable production state. Commit 5f9aa74 reports a separate read-only observation at 2026-08-12 13:09 UTC, but its raw command, host/container identity, and output are not preserved in the reviewed inputs; activation still requires a fresh direct measurement.",
     "The 2026-08-12 historical amendment before ADR-041 is outside the document hash used by this journal and remains a separately reviewed, non-hash-bound note.",
     "Release arming remains excluded from the frozen baseline and requires a separate explicit GO.",
@@ -412,8 +437,8 @@
     "Re-baselining verifies that citations point at existing code, not that the surrounding prose is still true. SEM-018 shows the two can diverge while every gate passes; only reading each cited passage against the new behaviour closes it, and that step is procedural.",
     "The forbidden-phrase check that keeps the code default from being promoted to an operational fact has no exemption for a measured statement: once production is actually sampled, the same forbidden substring still trips even if source and timestamp are appended. A measured result must use distinct wording such as '2026-08-12 direct measurement found WS_TOPIC_AUTH_STAGE=compatibility' and include its source and timestamp. This is a deliberate cost of phrase matching; adding semantic exemptions would make the check itself a guess.",
     "The stage matrix binds the documented aggregate columns to the planners, but its subject is the R-INV-2 table alone. Prose elsewhere in the same documents can still contradict the code without any gate noticing; SEM-018 was found by reading, not by a check.",
-    "The anonymous rollout counters contain request and connection-event counts but no traffic-provenance label. A zero immediately after restart establishes the observation interval only; it cannot prove that later events were organic rather than manual or synthetic probes.",
-    "The act of closing this journal cannot be cross-reviewed. Whoever writes the closing commit authors it, so that edit is unreviewed at the moment the verdict flips, and asking the other participant to review the closing produces another unreviewed closing. Three consecutive rounds each found a real defect in the previous closing, which is evidence the loop is useful and also that it does not terminate on its own. The journal therefore records cross-review of technical work only; the bookkeeping that marks it closed is self-attested, consistent with globally_independent_reviewer being false."
+    "The anonymous rollout counters contain request and connection-event counts but no traffic-provenance label. A zero immediately after restart establishes the observation interval only; it cannot prove that later events were organic rather than manual or synthetic probes. Nonzero counters therefore establish matching request events, not nonzero organic traffic or end-user transition impact.",
+    "Journal closure terminates when the author prepares the complete fixed/pass candidate first and the opposite participant reviews that exact tree without modifying it. Committing the unchanged tree adds no unreviewed file content; any post-review tree edit invalidates the attestation and requires another review. globally_independent_reviewer=false limits independence of the artifact as a whole, but does not make reciprocal review of an exact final tree impossible."
   ],
   "verdict": "pass"
 }

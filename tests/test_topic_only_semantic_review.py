@@ -36,6 +36,11 @@ PENDING_REVIEW_PATTERNS = (
         r"\b(?:cross[- ]review|independent review)\b",
         re.I,
     ),
+    re.compile(r"\bclosing (?:this )?journal cannot be cross-reviewed\b", re.I),
+    re.compile(r"\bbookkeeping\b.{0,120}\bself-attested\b", re.I),
+    # ⛔ pass 인데 "다음 pass 가 확인한다" 는 스스로를 미완으로 선언하는 것이다.
+    #    내 전-필드 스캔이 이걸 놓쳤다 — 필드는 다 훑었는데 **패턴 집합**이 좁았다.
+    re.compile(r"\ba future pass\b", re.I),
 )
 
 
@@ -290,6 +295,17 @@ def _review() -> dict:
     return json.loads(REVIEW.read_text())
 
 
+def _synthetic_open_journal(data: dict) -> dict:
+    """검증 대상과 무관하게 **열린** journal 을 만든다.
+
+    ⛔ 반례 base 를 살아 있는 journal 에서 바로 만들면, 그 journal 이 이미 pass 인 순간
+       `_closed_validator_fixture` 가 무용해져 helper 제거 변이가 통과한다(실측: 최종 후보
+       tree 에서 SURVIVED). base 를 먼저 열어 두면 helper 는 상태와 무관하게 하중을 받는다.
+    """
+    findings = [dict(data["findings"][0], status="open"), *data["findings"][1:]]
+    return dict(data, findings=findings, verdict="needs_cross_review")
+
+
 def _closed_validator_fixture(data: dict) -> dict:
     """open journal 상태와 무관한 **유효한 양성 대조군**을 만든다.
 
@@ -316,8 +332,18 @@ def test_semantic_review_is_bound_to_current_outputs_and_closed_findings():
     assert not review_errors(_review())
 
 
+def test_synthetic_open_base_actually_opens_the_journal():
+    """⛔ **scaffold 자체를 잠근다.** `_synthetic_open_journal` 이 no-op 이 되면 반례 base 가 다시
+    살아 있는 journal 이 되고, 그 journal 이 pass 인 동안 `_closed_validator_fixture` 도 무용해져
+    helper 제거 변이가 무증상으로 통과한다(실측). 합성 open 이 **실제로 오류를 낳는지** 직접
+    확인해야 그 되돌림이 red 가 된다.
+    """
+    assert review_errors(_synthetic_open_journal(_review())), (
+        "합성 open journal 이 오류를 내지 않는다 — 반례의 양성 대조군이 공허해진다")
+
+
 def test_review_validator_rejects_stale_and_open_controls():
-    base = _closed_validator_fixture(_review())
+    base = _closed_validator_fixture(_synthetic_open_journal(_review()))
     assert not review_errors(base), "반례의 양성 대조군부터 유효해야 한다"
     stale_doc = dict(base, documents=dict(base["documents"], ADR="0" * 64))
     stale_ledger = dict(base, claim_ledger_sha256="0" * 64)
@@ -366,6 +392,13 @@ def test_review_validator_rejects_stale_and_open_controls():
             "SEM-X is not covered by a pass verdict until cross-review completes.",
         ],
     )
+    self_attested_closure = dict(
+        base,
+        residual_limits=[
+            *base["residual_limits"],
+            "The bookkeeping that marks the journal closed is self-attested.",
+        ],
+    )
     assert review_errors(stale_doc)
     assert review_errors(stale_ledger)
     assert review_errors(open_review)
@@ -404,3 +437,12 @@ def test_review_validator_rejects_stale_and_open_controls():
     assert review_errors(malformed_edge)
     assert review_errors(pending_disposition)
     assert review_errors(pending_residual)
+    future_pass = dict(
+        base,
+        residual_limits=[
+            *base["residual_limits"],
+            "A future pass confirms the cited code path at the pinned commit.",
+        ],
+    )
+    assert review_errors(self_attested_closure)
+    assert review_errors(future_pass)
