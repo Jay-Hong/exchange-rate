@@ -285,7 +285,13 @@ class TestKrxSnapshotBranch(unittest.TestCase):
 
 
 class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
-    """send_initial_snapshots — _build_snapshot_sync patch로 격리(실 DB 0)."""
+    """send_initial_snapshots — _build_snapshot_sync patch로 격리(실 DB 0).
+
+    ⚠️ 각 테스트는 호출 전에 **register 한다** — 프로덕션 호출자가 항상 그렇게 한다
+       (익명 `free_topics` / 식별 `accepted_names` 모두 등록 직후 전달).
+       등록 없이 부르던 구 테스트는 **프로덕션에 없는 상태**를 모델링하고 있었고,
+       전송 직전 lease 게이트가 그것을 드러냈다.
+    """
 
     async def asyncSetUp(self):
         self._original_registry = topic_dispatcher.registry
@@ -297,6 +303,7 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
     async def test_sends_snapshot_per_supported_topic(self):
         ws = MagicMock()
         ws.send_json = AsyncMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw", "usdt:krw"])
 
         def fake_build(topic):
             return {"type": "snapshot", "version": 1, "topic": topic, "data": {}}
@@ -322,6 +329,7 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
     async def test_build_failure_isolated_continues(self):
         ws = MagicMock()
         ws.send_json = AsyncMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw", "usdt:krw"])
 
         def fake_build(topic):
             if topic == "fx:usd-krw":
@@ -361,6 +369,7 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
     async def test_dedupe_within_request(self):
         ws = MagicMock()
         ws.send_json = AsyncMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw"])
         built_topics = []
 
         def fake_build(topic):
@@ -377,6 +386,7 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
     async def test_empty_payload_still_sent(self):
         ws = MagicMock()
         ws.send_json = AsyncMock()
+        topic_dispatcher.registry.register(ws, ["fx:usd-krw"])
 
         def fake_build(topic):
             # 빈 data여도 schema-valid → 전송(빈 화면 방지)
@@ -388,6 +398,99 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
             sent = await send_initial_snapshots(ws, ["fx:usd-krw"])
         self.assertEqual(sent, 1)
         ws.send_json.assert_awaited_once()
+
+
+class TestInitialSnapshotLeaseGate(unittest.IsolatedAsyncioTestCase):
+    """전송 직전 lease 재검증 — 발행 경로와 **같은 게이트**를 공유하는지.
+
+    ⛔ 이 게이트가 없으면 `leased_subscribers` 의 "모든 발행 경로가 공유하는 단일 게이트"가
+       거짓이 된다: snapshot build 는 `to_thread` 로 돌고 **인증 wire deadline 밖**이라
+       상한이 없으므로, 발급 시점 검사만으로는 S5 의 15분 revoke 상한이 이 경로에서
+       보증되지 않는다.
+    """
+
+    _TOPIC = "fx:usd-krw"
+
+    async def asyncSetUp(self):
+        self._original_registry = topic_dispatcher.registry
+        topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
+        self.ws = MagicMock()
+        self.ws.send_json = AsyncMock()
+
+    async def asyncTearDown(self):
+        topic_dispatcher.registry = self._original_registry
+
+    def _lease(self, *, expires_in: float):
+        from app.clock import system_clock
+
+        return topic_dispatcher.TopicLease(
+            lease_id="L1", uid="u1",
+            expires_at_mono=system_clock().mono() + expires_in,
+        )
+
+    async def _run(self, topics=None):
+        def fake_build(topic):
+            return {"type": "snapshot", "version": 1, "topic": topic, "data": {}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_sync", side_effect=fake_build
+        ):
+            return await send_initial_snapshots(self.ws, topics or [self._TOPIC])
+
+    async def test_valid_lease_is_sent(self):
+        """양성 대조군 — 이게 통과해야 아래 차단이 '게이트 때문'이라고 말할 수 있다."""
+        topic_dispatcher.registry.register(
+            self.ws, [self._TOPIC], leases={self._TOPIC: self._lease(expires_in=900)}
+        )
+        self.assertEqual(await self._run(), 1)
+        self.ws.send_json.assert_awaited_once()
+
+    async def test_expired_lease_is_not_sent(self):
+        topic_dispatcher.registry.register(
+            self.ws, [self._TOPIC], leases={self._TOPIC: self._lease(expires_in=-1)}
+        )
+        self.assertEqual(await self._run(), 0)
+        self.ws.send_json.assert_not_called()
+
+    async def test_leaseless_e1_subscription_is_still_sent(self):
+        """⛔ §E1(무토큰) 구독의 기존 동작을 깨지 않는다 — 발행 경로와 같은 판정이다."""
+        topic_dispatcher.registry.register(self.ws, [self._TOPIC])   # lease 없음
+        self.assertIsNone(topic_dispatcher.registry.get_lease(self.ws, self._TOPIC))
+        self.assertEqual(await self._run(), 1)
+        self.ws.send_json.assert_awaited_once()
+
+    async def test_unregistered_during_build_is_not_sent(self):
+        """⛔ **build→send 창**이 위험 구간이다. 그 사이 구독이 사라지면 보내지 않는다.
+
+        ⚠️ `get_lease(...) is None` 으로 자체 판정했다면 이 케이스가 §E1 무토큰 구독과
+           구분되지 않아 **취소된 구독에 데이터가 나간다**(fail-open). 그래서 구독자
+           집합에서 출발하는 `leased_subscribers` 를 쓴다.
+        """
+        topic_dispatcher.registry.register(self.ws, [self._TOPIC])
+
+        def build_then_unsubscribe(topic):
+            topic_dispatcher.registry.unregister(self.ws, [topic])   # 동시 unsubscribe
+            return {"type": "snapshot", "version": 1, "topic": topic, "data": {}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_sync",
+            side_effect=build_then_unsubscribe,
+        ):
+            sent = await send_initial_snapshots(self.ws, [self._TOPIC])
+        self.assertEqual(sent, 0)
+        self.ws.send_json.assert_not_called()
+
+    async def test_gate_skips_only_the_failing_topic(self):
+        """게이트는 **skip 이지 연결 실패가 아니다** — 나머지 topic 은 계속 나간다."""
+        other = "usdt:krw"
+        topic_dispatcher.registry.register(
+            self.ws, [self._TOPIC, other],
+            leases={self._TOPIC: self._lease(expires_in=-1),
+                    other: self._lease(expires_in=900)},
+        )
+        self.assertEqual(await self._run([self._TOPIC, other]), 1)
+        sent_topics = [c.args[0]["topic"] for c in self.ws.send_json.await_args_list]
+        self.assertEqual(sent_topics, [other])
 
 
 if __name__ == "__main__":

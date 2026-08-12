@@ -271,10 +271,21 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
       (publish_topic의 stale-entry 정리 패턴과 일관.)
     - 요청 내 중복 topic은 de-dupe(같은 subscribe에서 같은 topic 1회만). 재구독(별 요청)은
       resync로 유용하므로 막지 않음.
+    - **전송 직전 lease 재검증** — 아래 주석 참조. 게이트에 걸린 topic 은 skip 이고
+      나머지 topic 은 계속한다(연결 실패가 아니다).
 
     Returns:
         성공적으로 send 완료한 snapshot 수.
     """
+    # ⛔ 발행 게이트를 **여기서 다시 구현하지 않는다.** 판정을 복제하면 두 게이트가 갈린다.
+    #    `leased_subscribers` 의 "모든 발행 경로가 공유하는 단일 게이트"라는 주석은 이
+    #    호출이 생기기 전까지 **거짓이었다** — snapshot 경로가 그것을 우회했다.
+    # ⚠️ import 를 함수 안에 두는 이유는 **순환 방지**다: `topic_dispatcher` 는 이 모듈을
+    #    subscribe 분기에서 lazy import 한다. 여기서 top-level 로 되받으면 두 모듈이
+    #    서로를 module scope 에서 참조하게 되어, 훗날 dispatcher 쪽이 top-level 로
+    #    바뀌는 순간 부분 초기화 오류가 된다.
+    from app.topic_dispatcher import leased_subscribers
+
     sent = 0
     seen: set = set()
     for topic in topics:
@@ -294,6 +305,24 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
 
         if payload is None:
             continue  # 미지원 topic / enable-gate off
+
+        # ⛔ **build 뒤, send 직전**에 본다. 위험한 창이 그 구간이기 때문이다 —
+        #    `_build_snapshot_sync` 는 `to_thread` 로 돌고 **인증 wire deadline 밖**이라
+        #    상한이 없다. 발급 시점 검사만으로는 S5 의 15분 revoke 상한이 이 경로에서
+        #    보증이 되지 않는다(발행 경로는 전송 직전에 다시 보는데 여기만 안 봤다).
+        # ⛔ `registry.get_lease(...) is None` 으로 자체 판정하지 말 것 — 그 `None` 은
+        #    **"무토큰(§E1) 구독"과 "등록이 사라짐"을 구분하지 못한다**. 그렇게 짜면 방금
+        #    취소된 구독에 데이터를 보내는 fail-open 이 된다. `leased_subscribers` 는
+        #    구독자 집합에서 출발하므로 두 경우가 갈린다.
+        # ⚠️ 프로덕션 정상 경로에서는 항상 통과한다 — 호출자가 등록 직후 넘기기 때문이다
+        #    (익명 `free_topics` / 식별 `accepted_names` 모두 register 된 것만). 이 게이트는
+        #    **동시 unsubscribe·축출·만료**에서만 발화한다.
+        if websocket not in leased_subscribers(topic):
+            logger.info(
+                "initial snapshot 전송 직전 구독이 사라졌거나 lease 가 만료됐다 — skip",
+                extra={"topic": topic, "sent": sent},
+            )
+            continue
 
         try:
             await websocket.send_json(payload)
