@@ -88,6 +88,22 @@ ASSERTIVE = re.compile(
 
 DESTS = sorted(DOCS)
 MARKDOWN_LINK_DOCS = sorted(set(DOCS.values()))
+EXPECTED_MARKDOWN_LINK_DOCS = {
+    REPO / "DECISIONS.md",
+    REPO / "spec/ios-topic-state-machine.md",
+    REPO / "spec/legacy-cutover.md",
+    REPO / "spec/publisher-health-slo.md",
+    REPO / "spec/revalidation-and-load.md",
+    REPO / "spec/topic-snapshot-handoff.md",
+}
+RID_BACKTICK_LOCATOR_INVENTORY = {
+    "ADR": 32,
+    "CLIENT": 24,
+    "CUT": 36,
+    "HAND": 19,
+    "HEALTH": 8,
+    "LOAD": 6,
+}
 
 
 def _doc(dest: str) -> str:
@@ -333,6 +349,33 @@ def test_cited_file_lines_actually_exist(dest):
     assert not bad, f"{dest}: pinned commit에 실재하지 않는 인용 {len(bad)}건\n" + "\n".join(
         "  " + item for item in bad
     )
+
+
+def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
+    """RID 블록 하나나 저장소 축 전체가 사라져도 나머지 인용으로 숨지 못하게 한다."""
+    references = [
+        (dest, path)
+        for dest in DESTS
+        for body in _blocks(dest).values()
+        for path, _start, _end in FILE_LINE.findall(body)
+    ]
+    by_destination = {
+        dest: sum(reference_dest == dest for reference_dest, _path in references)
+        for dest in DESTS
+    }
+    by_repo = {
+        repo_key: sum(_repo_path(path)[0] == repo_key for _dest, path in references)
+        for repo_key in ("server", "ios")
+    }
+    assert len(references) == 125
+    assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
+    assert by_repo == {"server": 61, "ios": 64}
+
+
+def test_markdown_line_link_gate_covers_every_canonical_document():
+    """현재 링크가 0건인 문서도 미래 링크가 생길 수 있으므로 검사 표면에서 빠지면 안 된다."""
+    assert set(MARKDOWN_LINK_DOCS) == EXPECTED_MARKDOWN_LINK_DOCS
+    assert len(MARKDOWN_LINK_DOCS) == 6
 
 
 @pytest.mark.parametrize("document", MARKDOWN_LINK_DOCS, ids=lambda path: path.name)

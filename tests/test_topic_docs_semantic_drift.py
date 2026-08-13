@@ -64,7 +64,14 @@ KRX = KRX_TOPIC
 
 
 def _texts():
-    return [(p, p.read_text()) for p in DOCS + LEDGERS if p.exists()]
+    paths = DOCS + LEDGERS
+    missing = [path.relative_to(REPO) for path in paths if not path.is_file()]
+    if missing:
+        raise AssertionError(
+            "semantic drift 검사 입력이 없다: "
+            + ", ".join(str(path) for path in missing)
+        )
+    return [(path, path.read_text()) for path in paths]
 
 
 def _rid_block(path: pathlib.Path, rid: str) -> str:
@@ -242,8 +249,12 @@ class TestDocsDoNotContradictTheCode(unittest.TestCase):
 
     def test_the_tripwire_itself_is_not_vacuous(self):
         """양성 대조군 — 검사 대상 문서가 실제로 읽히고 비어 있지 않은지."""
+        expected = DOCS + LEDGERS
+        self.assertEqual(len(DOCS), 7, "canonical 문서 surface가 조용히 줄었다")
+        self.assertEqual(len(LEDGERS), 2, "ledger surface가 조용히 줄었다")
+        self.assertEqual(len(set(expected)), 9, "semantic drift 입력이 중복되거나 빠졌다")
         texts = _texts()
-        self.assertGreaterEqual(len(texts), 8, "검사 대상 문서를 못 읽었다")
+        self.assertEqual([path for path, _text in texts], expected)
         self.assertTrue(all(len(t) > 500 for _, t in texts))
 
 

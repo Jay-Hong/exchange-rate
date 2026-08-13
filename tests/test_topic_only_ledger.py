@@ -56,6 +56,15 @@ DOC_GATE_TESTS = {
     "test_topic_wire.py",
     "test_ws_message_limit.py",
 }
+MARKDOWN_LITERAL_CANDIDATE_INVENTORY = {
+    "test_adr041_grounds.py",
+    "test_document_citations.py",
+    "test_topic_docs_semantic_drift.py",
+    "test_topic_migration_doc_bundle.py",
+    "test_topic_only_ledger.py",
+    "test_topic_wire.py",
+    "test_ws_message_limit.py",
+}
 
 STATUSES = {"unreviewed", "non_actionable", "todo", "in_progress", "done", "verified"}
 ACTIONABLE_STATUSES = {"todo", "in_progress", "done", "verified"}
@@ -1085,7 +1094,13 @@ def test_docs_gate_covers_markdown_literal_candidates():
     assert command is not None, "문서 게이트에 pytest 실행 명령이 없다"
     joined = re.sub(r"\\\s*\n\s*", " ", command.group("args"))
     listed = set(re.findall(r"tests/(test_[a-z_0-9]+\.py)", joined))
-    missing = sorted(_modules_with_markdown_literals() - listed)
+    candidates = _modules_with_markdown_literals()
+    assert candidates == MARKDOWN_LITERAL_CANDIDATE_INVENTORY, (
+        "Markdown 리터럴 후보 inventory가 바뀌었다 — AST 탐색 축소인지 의도된 문서 의존성 "
+        "변경인지 검토한 뒤 inventory와 workflow를 함께 갱신하라: "
+        f"actual={sorted(candidates)} expected={sorted(MARKDOWN_LITERAL_CANDIDATE_INVENTORY)}"
+    )
+    missing = sorted(candidates - listed)
     assert not missing, (
         "Markdown 경로 리터럴 후보가 있는데 문서 게이트가 돌리지 않는 모듈:\n"
         + "\n".join(f"  {m}" for m in missing)
