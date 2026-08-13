@@ -53,8 +53,13 @@ BASELINE_ID = re.compile(
     re.I,
 )
 FILE_LINE = re.compile(
-    r"`([^`\n]+?\.(?:py|swift|json|md|conf|plist|pbxproj|ya?ml|toml|sh|[mh])):"
+    r"`((?:[^`\n\s:]+/)*[^`\n\s/:]+\.[^`\n\s/:]+):"
     r"(\d+)(?:-(\d+))?`"
+)
+# FILE_LINE과 독립된 더 넓은 구문 oracle. checked surface에서 두 추출 결과가 같아야,
+# extractor를 특정 확장자 allowlist로 되돌려 인용 축 전체가 사라지는 회귀를 잡을 수 있다.
+BACKTICK_LINE_CANDIDATE = re.compile(
+    r"`([^`\n\s:]+\.[^`\n\s:]+):(\d+)(?:-(\d+))?`"
 )
 MARKDOWN_LINE_LINK = re.compile(
     r"\[([^\]\n]+)\]\(([^)\s]+)#L(\d+)(?:-L?(\d+))?\)"
@@ -345,6 +350,41 @@ def test_baseline_backtick_line_references_exist_at_pinned_commits():
     assert not errors, f"baseline의 잘못된 backtick file:line 인용 {len(errors)}건\n" + "\n".join(
         "  " + item for item in errors
     )
+
+
+def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
+    """부분적으로 약해진 extractor가 한 저장소 축을 통째로 숨기지 못하게 한다.
+
+    0건 가드만 있으면 `FILE_LINE`에서 `swift`를 빠뜨려도 server 30건이 양성 대조군으로
+    남아서 iOS 10건의 소실을 감춘다. baseline이 의도적으로 바뀔 때만 이 inventory를
+    함께 검토해 갱신한다.
+    """
+    references = FILE_LINE.findall(BASELINE.read_text())
+    by_repo = {
+        repo_key: sum(_repo_path(path)[0] == repo_key for path, _start, _end in references)
+        for repo_key in ("server", "ios")
+    }
+    assert len(references) == 40
+    assert by_repo == {"server": 30, "ios": 10}
+
+
+def test_file_line_extractor_matches_extension_independent_oracle():
+    """baseline과 RID에서 locator 모양인 모든 backtick을 FILE_LINE도 보아야 한다."""
+    synthetic = "`contracts/example.future-extension:7-9`"
+    assert FILE_LINE.findall(synthetic) == BACKTICK_LINE_CANDIDATE.findall(synthetic)
+
+    surfaces = {BASELINE.name: BASELINE.read_text()}
+    surfaces.update(
+        {
+            f"{dest}/{rid}": body
+            for dest in DESTS
+            for rid, body in _blocks(dest).items()
+        }
+    )
+    for context, text in surfaces.items():
+        assert FILE_LINE.findall(text) == BACKTICK_LINE_CANDIDATE.findall(text), (
+            f"{context}: FILE_LINE 확장자 allowlist가 locator-shaped backtick을 놓쳤다"
+        )
 
 
 def test_baseline_backtick_line_gate_rejects_empty_and_bad_ranges():

@@ -403,7 +403,10 @@ def test_review_validator_rejects_stale_and_open_controls():
     assert review_errors(stale_ledger)
     assert review_errors(open_review)
     assert review_errors(incomplete_scope)
-    assert review_errors(self_review)
+    self_review_errors = review_errors(self_review)
+    assert any("is self-review" in error for error in self_review_errors), (
+        "self-review 전용 오류가 없다 — 다른 동반 오류가 규칙 제거를 숨길 수 있다"
+    )
 
     # ⛔ 참가자 목록과 edge 범위가 갈리는 형태. 완전히 같은 문자열뿐 아니라 재문구한
     #    자기검토나 무관한 scope도 edge 단일 정본과 불일치하므로 거부해야 한다.

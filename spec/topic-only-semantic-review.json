@@ -40,7 +40,8 @@
           "C6 follow-up: the terminating closure protocol replacing the self-attestation exception, and the pass-lifecycle patterns that reject that wording",
           "Token-bearing metrics C1 review corrections and regression hardening: candidate semantics and topic disclosure, off-policy active tracking, duplicate and subset guards, retry first-seen locks, channel separation, active-gauge isolation, and deterministic snapshot ordering",
           "Token-bearing metrics C2 re-baseline and SEM-023 correction candidate: 27 source citation remaps, the baseline C1 dual-axis semantics, lock/manifest/header/implementation-ledger updates, 61-entry claim-ledger regeneration, exact-tree semantic hash rebinding, and review-driven correction of the legacy graph link, locator-count method, and citation-gate scope",
-          "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history"
+          "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history",
+          "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory"
         ]
       },
       {
@@ -64,7 +65,8 @@
           "C6 follow-up: the terminating closure protocol replacing the self-attestation exception, and the pass-lifecycle patterns that reject that wording",
           "Token-bearing metrics C1 review corrections and regression hardening: candidate semantics and topic disclosure, off-policy active tracking, duplicate and subset guards, retry first-seen locks, channel separation, active-gauge isolation, and deterministic snapshot ordering",
           "Token-bearing metrics C2 re-baseline and SEM-023 correction candidate: 27 source citation remaps, the baseline C1 dual-axis semantics, lock/manifest/header/implementation-ledger updates, 61-entry claim-ledger regeneration, exact-tree semantic hash rebinding, and review-driven correction of the legacy graph link, locator-count method, and citation-gate scope",
-          "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history"
+          "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history",
+          "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -122,7 +124,8 @@
           "C6 follow-up: the terminating closure protocol replacing the self-attestation exception, and the pass-lifecycle patterns that reject that wording",
           "Token-bearing metrics C1 review corrections and regression hardening: candidate semantics and topic disclosure, off-policy active tracking, duplicate and subset guards, retry first-seen locks, channel separation, active-gauge isolation, and deterministic snapshot ordering",
           "Token-bearing metrics C2 re-baseline and SEM-023 correction candidate: 27 source citation remaps, the baseline C1 dual-axis semantics, lock/manifest/header/implementation-ledger updates, 61-entry claim-ledger regeneration, exact-tree semantic hash rebinding, and review-driven correction of the legacy graph link, locator-count method, and citation-gate scope",
-          "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history"
+          "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history",
+          "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory"
         ],
         "result": "pass"
       }
@@ -455,6 +458,42 @@
       ],
       "issue": "SEM-023 deliberately left three pre-existing Markdown locator debts outside ADR-041: two in-bounds links pointed at unrelated current code and one target exceeded its pinned file. The existing FILE_LINE test scanned only backtick-form locators in manifest-owned RID blocks, so all three were invisible. The initial inventory also counted only labels beginning with app/, while the same canonical document uses shorthand labels such as crud.py; a complete structural scan must key on the link target's #L anchor rather than the label prefix. The baseline is not a manifest-owned RID document either, so its 40 backtick locators were hash-bound but received no pinned path or bounds check.",
       "disposition": "Historical ADR-026 and ADR-031 facts now link to exact 40-character commit blobs where the quoted code existed, while ADR-030's current per-key freshness link points to the pinned executing range. Two sibling prose locators in ADR-031 were converted to the same immutable historical model instead of being remapped onto unrelated current code. A separate gate scans the full text of all six canonical documents, validates local #L links at the lock pin and same-repository historical links at their explicit commit, checks bounds and label/anchor line agreement, and rejects mutable short-SHA history. Another full-file gate validates all 40 baseline backtick locators at the pinned server or iOS commit and fails if extraction becomes empty. Synthetic counterexamples lock zero, inverted and out-of-range bounds, label drift, mutable history, and the pre-ADR-041 scan surface. A targeted regression pins the manually reviewed ADR-030/031 targets; semantic entailment in general remains outside mechanical proof."
+    },
+    {
+      "id": "SEM-025",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "tests/test_document_citations.py/FILE_LINE",
+        "tests/test_document_citations.py/test_file_line_extractor_matches_extension_independent_oracle",
+        "tests/test_document_citations.py/test_baseline_backtick_locator_inventory_keeps_both_repositories_visible"
+      ],
+      "issue": "The first post-SEM-024 hardening pinned the baseline total and server/iOS split, but FILE_LINE still enumerated filename extensions. Removing md left every test green even though two canonical backtick locators use .md, and the RID surface also carries .conf alongside Python and Swift. A nonempty or repository-level inventory cannot prove that every extension-shaped locator remains visible.",
+      "disposition": "FILE_LINE now recognizes path-and-extension structure without enumerating extensions. An independently expressed, broader locator-shape oracle must produce the identical ordered extraction across the full baseline and all manifest-owned RID blocks, and a synthetic future extension is a positive control. The baseline additionally pins 40 total references split as server 30 and iOS 10. Removing the former md axis or restoring an extension allowlist now fails the targeted test."
+    },
+    {
+      "id": "SEM-026",
+      "severity": "high",
+      "status": "fixed",
+      "locations": [
+        "tests/test_topic_only_semantic_review.py/review_errors",
+        "tests/test_topic_only_semantic_review.py/test_review_validator_rejects_stale_and_open_controls"
+      ],
+      "issue": "The semantic-review counterexample suite generally asserted only that review_errors returned a nonempty list. Its self-review control produced four errors at once, so neutralizing the dedicated 'is self-review' branch still left three unrelated errors and the full suite stayed green. The protocol's core no-self-review rule therefore existed in production validation but its own branch was not load-bearing in the regression suite.",
+      "disposition": "The self-review control now requires the dedicated self-review diagnostic rather than accepting any error. A mutation that filters only that diagnostic fails while the unmodified positive control remains green. An exhaustive one-branch-at-a-time audit on 2026-08-13 neutralized each of the 40 errors.append sites with no invalid mutations: 32 still survived the suite and 8 were caught, including the self-review branch fixed here. The remaining 32 are explicitly bounded below as separate hardening work."
+    },
+    {
+      "id": "SEM-027",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "git:a5623916dc49e0b69e8cb2b22204c4223ea16762/commit-message",
+        "git:9f0aec9a5a16e579788cc2ba3574159db16d4a2a/commit-message",
+        "server/app/topic_dispatcher.py@cfc8659d756168c109d21153447b95cb0ec5c08e",
+        "spec/topic-only-semantic-review.json/residual_limits"
+      ],
+      "issue": "The a562391 commit message inferred that zero topic subscribes during a 46-connection window meant no topic-v2 client was deployed. The deployed cfc8659 dispatcher observed only anonymous subscribes; token-bearing messages were structurally invisible because the later elif branch did not exist. The same 46-connection point was read live over SSH but no preserved snapshot covers that later interval. Commit messages, tags, deployment reports, and agent memory are not among this journal's hash-bound inputs merely because they describe the reviewed code.",
+      "disposition": "The immutable 9f0aec9 commit message supersedes the inference: that window establishes zero observed anonymous subscribes only, not absence of token-bearing clients. The unpreserved 46-connection reading is not activation evidence. This journal records the correction and makes the attestation boundary explicit; unverified token-bearing candidate requests become observable only after deploying the landed pre-flag metric, and production activation still requires preserved direct measurements plus the separate RevenueCat canary decision."
     }
   ],
   "residual_limits": [
@@ -478,7 +517,9 @@
     "The anonymous rollout counters contain request and connection-event counts but no traffic-provenance label. A zero immediately after restart establishes the observation interval only; it cannot prove that later events were organic rather than manual or synthetic probes. Nonzero counters therefore establish matching request events, not nonzero organic traffic or end-user transition impact.",
     "Journal closure terminates when the author prepares the complete fixed/pass candidate first and the opposite participant reviews that exact tree without modifying it. Committing the unchanged tree adds no unreviewed file content; any post-review tree edit invalidates the attestation and requires another review. globally_independent_reviewer=false limits independence of the artifact as a whole, but does not make reciprocal review of an exact final tree impossible.",
     "The unverified_token_bearing counters run before Firebase verification and store fixed-cardinality request and connection-event counts only. They do not establish valid-token demand, authenticated users, or actual RevenueCat calls. final_stage_rc_candidate is conditional on the injected topic-availability snapshot and later dispatcher, stage, and token gates; process restart resets every counter.",
-    "SEM-024 repairs the three known Markdown-link locator debts outside ADR-041, adds a full-canonical-document #L gate, and validates all baseline backtick locators against the pins. Those checks cannot discover plain prose line numbers without a recognized locator and cannot prove semantic entailment; historical code claims therefore use immutable full-SHA blobs, while target meaning still requires review."
+    "SEM-024 repairs the three known Markdown-link locator debts outside ADR-041, adds a full-canonical-document #L gate, and validates all baseline backtick locators against the pins. SEM-025 removes the backtick extractor's extension allowlist and checks it against an independently expressed locator-shape oracle. Those checks cannot discover plain prose line numbers without a recognized locator and cannot prove semantic entailment; historical code claims therefore use immutable full-SHA blobs, while target meaning still requires review.",
+    "An exhaustive one-branch-at-a-time audit on 2026-08-13 neutralized each of the 40 review_errors errors.append sites with no invalid mutations: 32 mutations still left the suite green, compared with 33 before SEM-026 made the no-self-review branch load-bearing. A control that produces several diagnostics can hide removal of its intended branch; those 32 sites are bounded work for a separate hardening slice, and no 40-of-40 mutation-coverage claim is made.",
+    "Commit messages, annotated tags, deployment reports, terminal transcripts, and agent memory are outside this journal's hash-bound inputs unless a review edge explicitly identifies and preserves the exact artifact. In particular, a562391's unpreserved 46-connection observation is not promoted to activation evidence; 9f0aec9 corrects only its invalid client-absence inference."
   ],
   "verdict": "pass"
 }
