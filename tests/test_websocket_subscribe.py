@@ -7,11 +7,14 @@
 """
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import config, topic_dispatcher
 from app import topic_wire
+from app import topic_initial_snapshot as _tis
+from app import topic_policy as _topic_policy
 from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
 from app.topic_dispatcher import handle_client_message as _real_handle_client_message
 
@@ -29,6 +32,10 @@ def _rollout(stage=TopicAuthStage.COMPATIBILITY):
         stage=stage,
         fx_topics=_FX_TOPICS,
         usdt_topic=_USDT_TOPIC,
+        policy_topics=tuple(sorted(_topic_policy.TOPIC_POLICY)),
+        final_stage_rc_candidate_topics=tuple(
+            t for t in _tis.supported_snapshot_topics() if _tis.is_snapshot_topic_enabled(t)
+        ),
         started_at_epoch_seconds=0,
     )
 
@@ -115,6 +122,10 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["anonymous_subscribe_attempts_total"], 1)
         self.assertEqual(snapshot["anonymous_fx_attempts_total"], 1)
         self.assertEqual(snapshot["per_topic_attempts"]["usdt:krw"], 1)
+        self.assertEqual(
+            snapshot["unverified_token_bearing_subscribe_attempts_total"], 0,
+            "익명 subscribe가 token-bearing 후보로 이중 계수됐다",
+        )
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
         ws.send_json.assert_not_called()
 
@@ -432,6 +443,83 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             )
 
         rollout.observe_anonymous_subscribe.assert_not_called()
+
+
+class TestTokenBearingObservationAtTheDispatcher(unittest.IsolatedAsyncioTestCase):
+    """계측 지점 계약 — 형식 검증 **후**, flag 검사 **앞**, 외부 호출 0.
+
+    ⛔ 이 값은 Firebase 검증 전이라 "인증 사용자" 가 아니라 **미검증 token-bearing 후보**다.
+    """
+
+    def setUp(self):
+        self._orig = _fresh_registry_swap()
+
+    def tearDown(self):
+        topic_dispatcher.registry = self._orig
+
+    @staticmethod
+    def _ws():
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+        return ws
+
+    async def _send(self, msg, rollout=None):
+        r = rollout or _rollout()
+        await _dispatch(self._ws(), json.dumps(msg), topic_auth_rollout=r)
+        return r.snapshot()
+
+    async def test_malformed_requests_are_not_counted(self):
+        for label, msg in (
+            ("빈 topics", {"type": "subscribe", "request_id": "r", "id_token": "tok", "topics": []}),
+            ("topics 비-list", {"type": "subscribe", "request_id": "r", "id_token": "tok",
+                                "topics": "fx:usd-krw"}),
+            ("topics 원소 비-str", {"type": "subscribe", "request_id": "r", "id_token": "tok",
+                                   "topics": [1]}),
+            ("id_token 빈 문자열", {"type": "subscribe", "request_id": "r",
+                                    "id_token": "", "topics": ["fx:usd-krw"]}),
+            # ⚠️ subscribe 는 토큰을 동반한다(§8-A) — request_id 만 있으면 invalid_request 라
+            #    계측 앞에서 반환된다.
+            ("토큰 없는 subscribe", {"type": "subscribe", "request_id": "r",
+                                     "topics": ["fx:usd-krw"]}),
+            ("unsubscribe", {"type": "unsubscribe", "request_id": "r", "id_token": "tok",
+                             "topics": ["fx:usd-krw"]}),
+        ):
+            with self.subTest(label=label):
+                snap = await self._send(msg)
+                self.assertEqual(
+                    snap["unverified_token_bearing_subscribe_attempts_total"], 0, label)
+
+    async def test_shape_valid_token_bearing_subscribe_is_counted_before_the_flag(self):
+        """양성 대조군 — flag off 인데도(=계측이 flag 앞) 집계된다."""
+        snap = await self._send({"type": "subscribe", "request_id": "r", "id_token": "tok",
+                                 "topics": ["fx:usd-krw", _USDT_TOPIC]})
+        self.assertEqual(snap["unverified_token_bearing_subscribe_attempts_total"], 1)
+        self.assertEqual(snap["unverified_token_bearing_policy_attempts_total"], 1)
+        self.assertEqual(
+            snap["unverified_token_bearing_final_stage_rc_candidate_attempts_total"], 1)
+
+    async def test_observation_failure_does_not_change_ack_or_registry(self):
+        """⛔ 계측은 best-effort 다 — 실패가 wire 나 registry 를 바꾸면 정책이 돼 버린다."""
+        broken = _rollout()
+        broken.observe_token_bearing_subscribe = MagicMock(side_effect=RuntimeError("boom"))
+        ws = self._ws()
+        await _dispatch(ws, json.dumps({"type": "subscribe", "request_id": "r", "id_token": "tok",
+                                        "topics": ["fx:usd-krw"]}), topic_auth_rollout=broken)
+        frame = ws.send_json.await_args_list[-1].args[0]
+        self.assertEqual(frame["type"], "subscription_ack")
+        self.assertEqual([x["topic"] for x in frame["rejected_topics"]], ["fx:usd-krw"])
+        self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), set())
+
+    async def test_flag_off_makes_no_external_auth_calls(self):
+        """⛔ 외부 요청이 Firebase·RevenueCat 호출을 유발하면 amplification 이다."""
+        rc = AsyncMock()
+        authz = AsyncMock()
+        with patch("app.subscription.fetch_revenuecat_result", rc):
+            await _dispatch(self._ws(), json.dumps({"type": "subscribe", "request_id": "r",
+                                            "id_token": "t", "topics": ["fx:usd-krw"]}),
+                            topic_auth_rollout=_rollout(), authorize_subscribe=authz)
+        rc.assert_not_awaited()
+        authz.assert_not_awaited()
 
 
 if __name__ == "__main__":

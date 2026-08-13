@@ -15,6 +15,8 @@ import pytest
 
 from app import config, main as app_main, ws_connection_metrics
 from app.main import ConnectionManager
+from app import topic_initial_snapshot as _tis
+from app import topic_policy as _topic_policy
 from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
 
 
@@ -27,6 +29,10 @@ def _rollout() -> TopicAuthRollout:
         stage=TopicAuthStage.COMPATIBILITY,
         fx_topics=_FX_TOPICS,
         usdt_topic=_USDT_TOPIC,
+        policy_topics=tuple(sorted(_topic_policy.TOPIC_POLICY)),
+        final_stage_rc_candidate_topics=tuple(
+            t for t in _tis.supported_snapshot_topics() if _tis.is_snapshot_topic_enabled(t)
+        ),
         started_at_epoch_seconds=0,
     )
 
@@ -266,6 +272,18 @@ def test_production_manager_uses_canonical_publisher_topics():
 
     assert actual_topics == expected_topics
     assert snapshot["stage"] == config.WS_TOPIC_AUTH_STAGE.value
+
+    assert set(snapshot["unverified_token_bearing_per_topic_attempts"]) == set(
+        app_main.topic_policy.TOPIC_POLICY
+    )
+    expected_rc_candidates = {
+        topic
+        for topic in app_main.topic_initial_snapshot.supported_snapshot_topics()
+        if app_main.topic_initial_snapshot.is_snapshot_topic_enabled(topic)
+    }
+    assert set(
+        snapshot["unverified_token_bearing_final_stage_rc_candidate_topics"]
+    ) == expected_rc_candidates
 
 
 def test_websocket_endpoint_injects_the_manager_owned_rollout():

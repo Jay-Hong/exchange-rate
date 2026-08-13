@@ -31,14 +31,15 @@ import math
 import os
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Set
 
 from app.config import TopicAuthStage
 
 if TYPE_CHECKING:
     from app.topic_policy import AuthorizationPlan
 
-__all__ = ["TopicAuthStage", "TopicAuthRollout"]
+__all__ = ["TopicAuthStage", "TopicAuthRollout", "ConnectionObservation"]
 
 
 def _validate_topic(value, *, prefix: str, field: str) -> None:
@@ -55,6 +56,19 @@ def _validate_topic(value, *, prefix: str, field: str) -> None:
         raise ValueError(f"{field} 는 '{prefix}' + 비어 있지 않은 suffix 여야 한다: {value!r}")
 
 
+@dataclass
+class ConnectionObservation:
+    """한 연결의 채널별 first-seen 상태. **두 채널을 한 entry 에 담는다.**
+
+    ⛔ 채널마다 top-level dict 를 만들지 않는 이유는 `disconnect` 소유권이 갈리기 때문이다.
+       여기 담아 두면 `pop` 한 번으로 양쪽이 사라진다.
+    """
+
+    anonymous_seen_topics: Set[str] = field(default_factory=set)
+    token_bearing_observed: bool = False
+    token_bearing_seen_topics: Set[str] = field(default_factory=set)
+
+
 class TopicAuthRollout:
     """process 당 **하나**. `ConnectionManager` 가 소유하고 dispatcher·admin 이 같은 객체를 쓴다.
 
@@ -68,6 +82,8 @@ class TopicAuthRollout:
         stage: TopicAuthStage,
         fx_topics: Iterable[str],
         usdt_topic: str,
+        policy_topics: Iterable[str],
+        final_stage_rc_candidate_topics: Iterable[str],
         started_at_epoch_seconds: Optional[float] = None,
     ) -> None:
         # ⛔ 배선 오류는 **생성 시점에** 접는다. 요청 경로에서 터지면 그때야 발견된다.
@@ -93,6 +109,51 @@ class TopicAuthRollout:
             # ⛔ frozenset 이 중복을 조용히 삼키면 배선 실수가 숨는다.
             raise ValueError(f"fx_topics 에 중복이 있다: {fx_list!r}")
         _validate_topic(usdt_topic, prefix="usdt:", field="usdt_topic")
+
+        # ⛔ 두 집합은 **주입**한다 — 요청마다 availability 를 다시 계산하거나 이 모듈이
+        #    `topic_initial_snapshot` 을 import 하면 **계측용 두 번째 정책**이 생긴다. 게다가
+        #    그 계산을 hot path 에 두면 거기서 난 예외가 flag-off wire 동작을 바꿀 수 있다.
+        # ⚠️ policy 집합은 기동 검증된 리터럴 표에서, RC 후보 집합은 import 시점 availability
+        #    상수(`KRX_CLIENT_DISTRIBUTION_EFFECTIVE` · `FX_TOPIC_ENABLED`)에서 파생된다.
+        #    production process 수명 동안 불변이라 1회 계산이 맞다.
+        for label, value in (("policy_topics", policy_topics),
+                             ("final_stage_rc_candidate_topics", final_stage_rc_candidate_topics)):
+            if isinstance(value, (str, bytes, bytearray, Mapping)):
+                raise TypeError(f"{label} 는 topic 문자열 collection 이어야 한다 "
+                                f"(got {type(value).__name__})")
+        policy_list = list(policy_topics)
+        if not policy_list:
+            raise ValueError("policy_topics 가 비어 있다 — 주입 누락은 계측을 조용히 없앤다")
+        for topic in policy_list:
+            if not isinstance(topic, str) or not topic or topic != topic.strip():
+                raise ValueError(f"policy_topics 원소가 잘못됐다: {topic!r}")
+        if len(set(policy_list)) != len(policy_list):
+            raise ValueError(f"policy_topics 에 중복이 있다: {policy_list!r}")
+
+        candidate_list = list(final_stage_rc_candidate_topics)
+        for topic in candidate_list:
+            if not isinstance(topic, str) or not topic or topic != topic.strip():
+                raise ValueError(f"final_stage_rc_candidate_topics 원소가 잘못됐다: {topic!r}")
+        if len(set(candidate_list)) != len(candidate_list):
+            raise ValueError(
+                "final_stage_rc_candidate_topics 에 중복이 있다: "
+                f"{candidate_list!r}"
+            )
+
+        policy_set = frozenset(policy_list)
+        candidate_topics = frozenset(candidate_list)
+        if not candidate_topics <= policy_set:
+            raise ValueError(
+                "final_stage_rc_candidate_topics 가 정책표 밖 topic 을 담았다: "
+                f"{sorted(candidate_topics - policy_set)}")
+        scoped_topics = frozenset(fx_list) | {usdt_topic}
+        if not scoped_topics <= policy_set:
+            raise ValueError(
+                "policy_topics 가 rollout canonical topic 을 빠뜨렸다: "
+                f"{sorted(scoped_topics - policy_set)}"
+            )
+        self._policy_topics = tuple(sorted(policy_list))
+        self._final_stage_rc_candidate_topics = candidate_topics
 
         self._stage = stage
         # ⛔ prefix 판정("fx: 로 시작")을 쓰지 않는다 — 클라가 `fx:` 아무 문자열이나 보내 정책·
@@ -122,10 +183,22 @@ class TopicAuthRollout:
         self._fx_first_seen_connections = 0
         self._per_topic_attempts: Dict[str, int] = {t: 0 for t in self._scoped}
         self._per_topic_first_seen: Dict[str, int] = {t: 0 for t in self._scoped}
-        # 연결별로 **이미 센 topic** 집합. disconnect 에서 지운다(현재 연결 수에 비례).
-        # ⛔ 연결별 상태는 **이 하나**로 끝낸다. FX 전용 집합을 따로 두면 같은 사실이 두 곳에
-        #    저장돼 정리 상태가 갈릴 수 있다 — first-seen 은 여기서 **파생**한다.
-        self._seen_by_connection: Dict[object, set] = {}
+        # 연결별 관측 상태. disconnect 에서 **한 번에** 지운다(현재 연결 수에 비례).
+        # ⛔ top-level 저장소는 **이 하나**다. 두 번째 dict 를 만들면 `disconnect` 가 두 곳을
+        #    지워야 하고 정리 상태가 갈린다 — 원래 이 주석이 경고한 것이 그것이다.
+        # ⚠️ 다만 채널은 **나눈다**. 익명/token-bearing 은 **요청 단위로는** 서로소지만
+        #    (`identified` 는 메시지마다 재계산된다) **연결 단위로는 서로소가 아니다** — 같은
+        #    소켓이 익명 subscribe 뒤 token-bearing subscribe 를 보낼 수 있다. 그래서 한쪽에서
+        #    다른 쪽을 파생할 수 없고, 채널별 first-seen 을 각각 들되 **소유자는 이 map 하나**다.
+        self._seen_by_connection: Dict[object, ConnectionObservation] = {}
+
+        # token-bearing 축 — **기존 익명 필드의 의미를 넓히지 않고** 별도로 센다.
+        self._tb_attempts = 0
+        self._tb_policy_attempts = 0
+        self._tb_rc_candidate_attempts = 0
+        self._tb_policy_first_seen_connections = 0
+        self._tb_per_topic_attempts: Dict[str, int] = {t: 0 for t in self._policy_topics}
+        self._tb_per_topic_first_seen: Dict[str, int] = {t: 0 for t in self._policy_topics}
 
     # ── 관측 ────────────────────────────────────────────────────────────────
 
@@ -143,7 +216,8 @@ class TopicAuthRollout:
             return
         self._scoped_attempts += 1
 
-        seen = self._seen_by_connection.setdefault(websocket, set())
+        seen = self._seen_by_connection.setdefault(
+            websocket, ConnectionObservation()).anonymous_seen_topics
         # ⛔ per-topic 갱신 **전에** 판정한다 — 갱신 후면 항상 "이미 봤음" 이 된다.
         has_fx = bool(requested & self._fx_topics)
         first_fx = has_fx and not (seen & self._fx_topics)
@@ -159,6 +233,45 @@ class TopicAuthRollout:
             self._fx_attempts += 1
             if first_fx:
                 self._fx_first_seen_connections += 1
+
+    def observe_token_bearing_subscribe(self, websocket, topics: Sequence[str]) -> None:
+        """형식 검증을 통과한 **token-bearing** subscribe 1건을 센다.
+
+        ⛔ **이름이 계약이다.** `identified` 는 인증 성공이 아니라 *메시지 형태*
+           (`request_id` 또는 `id_token` 존재)다. 이 지점은 Firebase 검증 **전**이므로 이 값은
+           "인증 사용자 수요" 가 아니라 **미검증 token-bearing 후보**다. 공격·오타 토큰도 센다.
+        ⛔ 여기서 Firebase·RevenueCat 을 부르지 않는다 — 외부 요청이 outbound 호출을 유발하면
+           **amplification** 이 된다.
+        ⚠️ 이 값이 보장하는 것: **관측된 이 요청 스트림**에 대해, 최종 stage 였다면 요청당 RC
+           호출이 최대 1회라는 것. **미래 운영 부하의 상한은 아니다** — 활성화 후 latency·outcome
+           이 재시도 패턴을 바꾸고, 클라 배포·arming 이 모수를 늘리며, 재연결 폭주는 지금 창에
+           없을 수 있다.
+        ⚠️ 한 요청 안의 **중복 topic 은 한 번만** 센다(익명 축과 같은 규율).
+        """
+        self._tb_attempts += 1
+        observation = self._seen_by_connection.setdefault(
+            websocket, ConnectionObservation())
+        observation.token_bearing_observed = True
+
+        requested = {t for t in topics if t in self._tb_per_topic_attempts}
+        if not requested:
+            return
+        self._tb_policy_attempts += 1
+        # ⚠️ **현재 topic availability + 최종 stage**에서 RC까지 갈 수 있는 교집합은 따로
+        #    센다. 글로벌 dispatcher flag와 token 검증은 아직 통과하지 않았으므로 실제
+        #    authorizable/RC 호출 수가 아니다. 지금 KRX는 distribution off라 이 집합에서 빠진다.
+        if requested & self._final_stage_rc_candidate_topics:
+            self._tb_rc_candidate_attempts += 1
+
+        seen = observation.token_bearing_seen_topics
+        first_policy = not seen                      # ⛔ 갱신 **전**에 판정한다
+        for topic in requested:
+            self._tb_per_topic_attempts[topic] += 1
+            if topic not in seen:
+                seen.add(topic)
+                self._tb_per_topic_first_seen[topic] += 1
+        if first_policy:
+            self._tb_policy_first_seen_connections += 1
 
     def disconnect(self, websocket) -> None:
         """연결별 상태 제거. **멱등**이다.
@@ -219,9 +332,30 @@ class TopicAuthRollout:
             "anonymous_fx_first_seen_connections_total": self._fx_first_seen_connections,
             "per_topic_attempts": dict(self._per_topic_attempts),
             "per_topic_first_seen_connections": dict(self._per_topic_first_seen),
-            "active_auth_scoped_connections_tracked": len(self._seen_by_connection),
+            # ⛔ 의미 보존 — map 에 token-bearing 전용 entry 가 들어오면서 `len()` 은 조용히
+            #    다른 것을 세게 됐다. **익명 상태가 있는 entry 만** 센다(구 동작과 동일).
+            "active_auth_scoped_connections_tracked": sum(
+                1 for o in self._seen_by_connection.values() if o.anonymous_seen_topics),
+            "unverified_token_bearing_subscribe_attempts_total": self._tb_attempts,
+            "unverified_token_bearing_policy_attempts_total": self._tb_policy_attempts,
+            "unverified_token_bearing_final_stage_rc_candidate_attempts_total": (
+                self._tb_rc_candidate_attempts),
+            "unverified_token_bearing_final_stage_rc_candidate_topics": sorted(
+                self._final_stage_rc_candidate_topics),
+            "unverified_token_bearing_policy_first_seen_connections_total": (
+                self._tb_policy_first_seen_connections),
+            "unverified_token_bearing_per_topic_attempts": dict(self._tb_per_topic_attempts),
+            "unverified_token_bearing_per_topic_first_seen_connections": dict(
+                self._tb_per_topic_first_seen),
+            "unverified_token_bearing_active_connections_tracked": sum(
+                1 for o in self._seen_by_connection.values() if o.token_bearing_observed),
             "caveat": (
                 "process 수명 동안 관측한 WebSocket 연결·요청 이벤트 수다 — 사용자 수가 "
-                "아니다. 재시도하는 클라 하나가 값을 부풀리고, 재기동 시 0으로 돌아간다."
+                "아니다. 재시도하는 클라 하나가 값을 부풀리고, 재기동 시 0으로 돌아간다. "
+                "unverified_token_bearing_* 는 Firebase 검증 **전** 집계라 유효 token 수가 "
+                "아니다. final_stage_rc_candidate 는 현재 topic availability에서 dispatcher와 "
+                "최종 stage가 활성화되고 token 검증까지 성공한다는 가정의 후보일 뿐이다. "
+                "관측된 이 요청 스트림에 한해 요청당 RC 호출 ≤1을 뜻하며 미래 운영 부하의 "
+                "상한이 아니다."
             ),
         }

@@ -50,6 +50,8 @@ from app import main as app_main
 from app import topic_dispatcher
 from app.main import app
 from app.subscription import PremiumStatus
+from app import topic_initial_snapshot as _tis
+from app import topic_policy as _topic_policy
 from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
 from app.topic_lease import LEASE_MAX_SECONDS
 
@@ -66,6 +68,10 @@ def _runtime_rollout(stage):
         stage=stage,
         fx_topics=tuple(app_main.fx_topic_publisher.FX_TOPICS.values()),
         usdt_topic=app_main.tether_topic_publisher.TETHER_TOPIC,
+        policy_topics=tuple(sorted(_topic_policy.TOPIC_POLICY)),
+        final_stage_rc_candidate_topics=tuple(
+            t for t in _tis.supported_snapshot_topics() if _tis.is_snapshot_topic_enabled(t)
+        ),
         started_at_epoch_seconds=0,
     )
 

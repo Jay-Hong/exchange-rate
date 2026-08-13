@@ -513,6 +513,14 @@ async def handle_client_message(
             topic_auth_rollout.observe_anonymous_subscribe(websocket, topics)
         except Exception:
             logger.warning("익명 topic subscribe 계측 실패 (무시됨)", exc_info=True)
+    elif msg_type == "subscribe":
+        # ⚠️ **여기는 Firebase 검증 전**이다(`authorize_subscribe` 는 flag 검사 뒤에 있다).
+        #    그래서 이 값은 "인증 사용자 수요" 가 아니라 **미검증 token-bearing 후보**다.
+        # ⛔ 계측이 등록·거부를 바꾸면 안 되므로 best-effort 로 감싼다 — 정책이 아니라 관측이다.
+        try:
+            topic_auth_rollout.observe_token_bearing_subscribe(websocket, topics)
+        except Exception:
+            logger.warning("token-bearing topic subscribe 계측 실패 (무시됨)", exc_info=True)
 
     if not config.TOPIC_DISPATCHER_ENABLED:
         # FF=false: Stage 2 wiring 차단. **registry 변경 X.**

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import auth_executor, default_executor_probe, topic_auth_rollout, topic_policy, topic_wire, ws_connection_metrics
+from app import auth_executor, default_executor_probe, topic_auth_rollout, topic_initial_snapshot, topic_policy, topic_wire, ws_connection_metrics
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -299,11 +299,23 @@ class ConnectionManager:
 #    아니라 배포 실패로 접는 것이 이 리포의 `parse_topic_auth_stage` 규율과 같다.
 topic_policy.assert_topic_policy_invariants()
 
+# ⛔ 계측용 두 집합을 **여기서 1회** 계산해 주입한다. rollout 이 직접 import 하거나 요청마다
+#    다시 계산하면 계측용 두 번째 정책이 생기고, 그 계산이 hot path 에서 터지면 flag-off wire
+#    동작까지 바뀐다. policy 집합은 기동 검증된 리터럴 표, RC 후보 집합은 import 시점
+#    availability 상수에서 파생되며 둘 다 production process 수명 동안 불변이다.
+_policy_topics = tuple(sorted(topic_policy.TOPIC_POLICY))
+_final_stage_rc_candidate_topics = tuple(
+    t for t in topic_initial_snapshot.supported_snapshot_topics()
+    if topic_initial_snapshot.is_snapshot_topic_enabled(t)
+)
+
 manager = ConnectionManager(
     auth_rollout=topic_auth_rollout.TopicAuthRollout(
         stage=config.WS_TOPIC_AUTH_STAGE,
         fx_topics=tuple(fx_topic_publisher.FX_TOPICS.values()),
         usdt_topic=tether_topic_publisher.TETHER_TOPIC,
+        policy_topics=_policy_topics,
+        final_stage_rc_candidate_topics=_final_stage_rc_candidate_topics,
     )
 )
 
