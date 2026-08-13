@@ -3,6 +3,7 @@
 Description=Capture the pinned FXi topic-auth observation window
 After=docker.service
 Requires=docker.service
+OnFailure=fxi-topic-auth-capture-alert.service
 
 [Service]
 Type=oneshot

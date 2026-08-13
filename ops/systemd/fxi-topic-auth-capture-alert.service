@@ -1,0 +1,30 @@
+# fxi-managed: ops/systemd/fxi-topic-auth-capture-alert.service
+[Unit]
+Description=Alert when the FXi topic-auth capture unit fails
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/exchange-rate
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/fxi/topic-auth-capture-alert.env
+UMask=0077
+ExecStartPre=/usr/bin/sha256sum --check --status /etc/fxi/topic-auth-capture-alert.sha256
+ExecStart=/usr/bin/python3 /usr/local/libexec/fxi-topic-auth-capture-alert.py \
+  --unit fxi-topic-auth-capture.service \
+  --output-dir /home/ubuntu/logs/topic-auth-rollout
+TimeoutStartSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=true

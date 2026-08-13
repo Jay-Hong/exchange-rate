@@ -15,13 +15,19 @@ OPS = REPO / "ops"
 SYSTEMD = OPS / "systemd"
 SERVICE = SYSTEMD / "fxi-topic-auth-capture.service"
 TIMER = SYSTEMD / "fxi-topic-auth-capture.timer"
+ALERT_SERVICE = SYSTEMD / "fxi-topic-auth-capture-alert.service"
+ALERT_SUM = SYSTEMD / "fxi-topic-auth-capture-alert.sha256"
 ENV = SYSTEMD / "fxi-topic-auth-capture.env"
 SUM = SYSTEMD / "fxi-topic-auth-capture.sha256"
 INSTALLER = OPS / "install-topic-auth-capture.sh"
 PROGRAM = OPS / "capture_topic_auth_rollout.py"
+ALERT_PROGRAM = OPS / "notify_topic_auth_capture_failure.py"
 MANAGED_PATHS = (
     Path("ops/capture_topic_auth_rollout.py"),
     Path("ops/install-topic-auth-capture.sh"),
+    Path("ops/notify_topic_auth_capture_failure.py"),
+    Path("ops/systemd/fxi-topic-auth-capture-alert.service"),
+    Path("ops/systemd/fxi-topic-auth-capture-alert.sha256"),
     Path("ops/systemd/fxi-topic-auth-capture.env"),
     Path("ops/systemd/fxi-topic-auth-capture.sha256"),
     Path("ops/systemd/fxi-topic-auth-capture.service"),
@@ -87,6 +93,14 @@ class TestPinnedService(unittest.TestCase):
         )
         self.assertEqual(digest, hashlib.sha256(PROGRAM.read_bytes()).hexdigest())
 
+    def test_checksum_pins_the_installed_alert_program(self):
+        digest, target = ALERT_SUM.read_text().strip().split("  ", 1)
+        self.assertEqual(
+            target,
+            "/usr/local/libexec/fxi-topic-auth-capture-alert.py",
+        )
+        self.assertEqual(digest, hashlib.sha256(ALERT_PROGRAM.read_bytes()).hexdigest())
+
     def test_service_keeps_window_change_as_a_failure(self):
         text = SERVICE.read_text()
         service = unit(SERVICE)["Service"]
@@ -101,6 +115,10 @@ class TestPinnedService(unittest.TestCase):
         ):
             self.assertIn(option, service["ExecStart"])
         self.assertNotRegex(text, r"(?i)curl|websocket|firebase|revenuecat")
+        self.assertEqual(
+            unit(SERVICE)["Unit"]["OnFailure"],
+            "fxi-topic-auth-capture-alert.service",
+        )
 
     def test_service_is_owner_scoped_and_writes_only_the_artifact_directory(self):
         service = unit(SERVICE)["Service"]
@@ -113,6 +131,25 @@ class TestPinnedService(unittest.TestCase):
         self.assertEqual(
             service["ReadWritePaths"], "/home/ubuntu/logs/topic-auth-rollout"
         )
+
+    def test_alert_service_is_pinned_sandboxed_and_has_no_success_override(self):
+        alert = unit(ALERT_SERVICE)["Service"]
+        self.assertEqual(
+            alert["EnvironmentFile"], "/etc/fxi/topic-auth-capture-alert.env"
+        )
+        self.assertIn(
+            "sha256sum --check --status /etc/fxi/topic-auth-capture-alert.sha256",
+            alert["ExecStartPre"],
+        )
+        self.assertIn(
+            "/usr/local/libexec/fxi-topic-auth-capture-alert.py",
+            alert["ExecStart"],
+        )
+        self.assertEqual(alert["User"], "ubuntu")
+        self.assertEqual(alert["NoNewPrivileges"], "true")
+        self.assertEqual(alert["ProtectSystem"], "strict")
+        self.assertEqual(alert["ProtectHome"], "read-only")
+        self.assertNotIn("SuccessExitStatus", alert)
 
 
 class TestInstallerContract(unittest.TestCase):
@@ -128,6 +165,10 @@ class TestInstallerContract(unittest.TestCase):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / relative, destination)
+        (root / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=123456:abcdefghijklmnopqrstuvwxyz_ABCD\n"
+            "TELEGRAM_CHAT_ID=-123456789\n"
+        )
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         subprocess.run(["git", "add", "."], cwd=root, check=True)
         subprocess.run(
@@ -203,7 +244,9 @@ class TestInstallerContract(unittest.TestCase):
         text = INSTALLER.read_text()
         self.assertNotIn("crontab", text)
         validate = text.index('systemctl start "$SERVICE"')
+        alert_validate = text.index('systemctl start "$ALERT_SERVICE"')
         enable = text.index('systemctl enable --now "$TIMER"')
+        self.assertLess(alert_validate, validate)
         self.assertLess(validate, enable)
         self.assertIn("check_no_dropins", text)
         self.assertIn("check_paths_are_not_symlinks", text)
@@ -214,6 +257,9 @@ class TestInstallerContract(unittest.TestCase):
         for path in (
             "ops/capture_topic_auth_rollout.py",
             "ops/install-topic-auth-capture.sh",
+            "ops/notify_topic_auth_capture_failure.py",
+            "ops/systemd/fxi-topic-auth-capture-alert.service",
+            "ops/systemd/fxi-topic-auth-capture-alert.sha256",
             "ops/systemd/fxi-topic-auth-capture.env",
             "ops/systemd/fxi-topic-auth-capture.sha256",
             "ops/systemd/fxi-topic-auth-capture.service",
@@ -294,6 +340,57 @@ class TestInstallerContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("service 가 capture program SHA", result.stderr)
 
+    def test_source_check_rejects_committed_alert_program_sha_drift(self):
+        root = self._git_tree()
+        self._assert_source_baseline(root)
+        program = root / "ops/notify_topic_auth_capture_failure.py"
+        program.write_bytes(program.read_bytes() + b"\n# committed alert SHA drift\n")
+        self._commit(
+            root,
+            "drift alert program without checksum",
+            "ops/notify_topic_auth_capture_failure.py",
+        )
+
+        result = self._source_check(root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("alert program SHA drift", result.stderr)
+
+    def test_source_check_requires_capture_onfailure_edge(self):
+        root = self._git_tree()
+        self._assert_source_baseline(root)
+        service = root / "ops/systemd/fxi-topic-auth-capture.service"
+        service.write_text(
+            service.read_text().replace(
+                "OnFailure=fxi-topic-auth-capture-alert.service\n", "", 1
+            )
+        )
+        self._commit(root, "remove alert edge", str(service.relative_to(root)))
+
+        result = self._source_check(root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failure alert unit", result.stderr)
+
+    def test_source_check_requires_alert_runtime_sha_guard(self):
+        root = self._git_tree()
+        self._assert_source_baseline(root)
+        service = root / "ops/systemd/fxi-topic-auth-capture-alert.service"
+        service.write_text(
+            "\n".join(
+                line
+                for line in service.read_text().splitlines()
+                if "ExecStartPre=/usr/bin/sha256sum --check --status" not in line
+            )
+            + "\n"
+        )
+        self._commit(root, "remove alert runtime SHA guard", str(service.relative_to(root)))
+
+        result = self._source_check(root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("alert program SHA", result.stderr)
+
     def test_failed_validation_capture_never_arms_the_timer(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -307,6 +404,10 @@ class TestInstallerContract(unittest.TestCase):
             check_paths_are_not_symlinks() { :; }
             check_install_window_open() { :; }
             check_installed() { :; }
+            render_alert_env() {
+              printf 'TELEGRAM_BOT_TOKEN=123456:abcdefghijklmnopqrstuvwxyz_ABCD\n'
+              printf 'TELEGRAM_CHAT_ID=-123456789\n'
+            }
             install() { :; }
             function systemd-analyze { :; }
             journalctl() { :; }
@@ -331,6 +432,46 @@ class TestInstallerContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"start fxi-topic-auth-capture.service", observed)
         self.assertNotIn(f"enable --now fxi-topic-auth-capture.timer", observed)
+
+    def test_failed_alert_probe_never_starts_capture_or_arms_timer(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        events = Path(temporary.name) / "systemctl-events"
+        harness = textwrap.dedent(
+            r'''
+            EVENTS="$2"
+            source "$1"
+            check_source() { :; }
+            check_no_dropins() { :; }
+            check_paths_are_not_symlinks() { :; }
+            check_install_window_open() { :; }
+            check_installed() { :; }
+            render_alert_env() { printf 'TELEGRAM_BOT_TOKEN=x\nTELEGRAM_CHAT_ID=y\n'; }
+            install() { :; }
+            function systemd-analyze { :; }
+            journalctl() { :; }
+            systemctl() {
+              printf '%s\n' "$*" >> "$EVENTS"
+              if [ "$1" = start ] && [ "$2" = "$ALERT_SERVICE" ]; then
+                return 1
+              fi
+              return 0
+            }
+            install_schedule
+            '''
+        )
+
+        result = subprocess.run(
+            ["bash", "-c", harness, "capture-install-test", str(INSTALLER), str(events)],
+            capture_output=True,
+            text=True,
+        )
+        observed = events.read_text().splitlines()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("start fxi-topic-auth-capture-alert.service", observed)
+        self.assertNotIn("start fxi-topic-auth-capture.service", observed)
+        self.assertNotIn("enable --now fxi-topic-auth-capture.timer", observed)
 
     def test_reinstall_disables_old_timer_before_replacing_inputs(self):
         text = INSTALLER.read_text()
