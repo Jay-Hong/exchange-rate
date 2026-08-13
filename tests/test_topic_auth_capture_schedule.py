@@ -119,7 +119,11 @@ class TestInstallerContract(unittest.TestCase):
     def _git_tree(self) -> Path:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
+        temporary_root = Path(temporary.name)
+        root = temporary_root / "repo"
+        remote = temporary_root / "origin.git"
+        root.mkdir()
+        subprocess.run(["git", "init", "--bare", "-q", remote], check=True)
         for relative in MANAGED_PATHS:
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +144,42 @@ class TestInstallerContract(unittest.TestCase):
             cwd=root,
             check=True,
         )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(remote)],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "push", "-q", "-u", "origin", "HEAD:master"],
+            cwd=root,
+            check=True,
+        )
         return root
+
+    def _commit(
+        self, root: Path, message: str, *paths: str, push: bool = True
+    ) -> None:
+        subprocess.run(["git", "add", *paths], cwd=root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Capture Test",
+                "-c",
+                "user.email=capture-test@example.invalid",
+                "commit",
+                "-qm",
+                message,
+            ],
+            cwd=root,
+            check=True,
+        )
+        if push:
+            subprocess.run(
+                ["git", "push", "-q", "origin", "HEAD:master"],
+                cwd=root,
+                check=True,
+            )
 
     def _source_check(self, root: Path) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -184,6 +223,9 @@ class TestInstallerContract(unittest.TestCase):
         self.assertIn("ls-files --error-unmatch", text)
         self.assertIn('diff --quiet -- "${MANAGED_PATHS[@]}"', text)
         self.assertIn('diff --cached --quiet -- "${MANAGED_PATHS[@]}"', text)
+        self.assertIn("rev-parse --symbolic-full-name '@{upstream}'", text)
+        self.assertIn('refs/remotes/*', text)
+        self.assertIn('[ "$head" = "$upstream_head" ]', text)
 
     def test_source_check_rejects_unstaged_managed_input(self):
         root = self._git_tree()
@@ -196,29 +238,32 @@ class TestInstallerContract(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unstaged drift", result.stderr)
 
+    def test_source_check_rejects_clean_but_unpushed_commit(self):
+        root = self._git_tree()
+        self._assert_source_baseline(root)
+        env = root / "ops/systemd/fxi-topic-auth-capture.env"
+        env.write_text(env.read_text() + "# local-only commit\n")
+        self._commit(
+            root,
+            "local scheduler change",
+            "ops/systemd/fxi-topic-auth-capture.env",
+            push=False,
+        )
+
+        result = self._source_check(root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local upstream ref와 다르다", result.stderr)
+
     def test_source_check_rejects_committed_program_sha_drift(self):
         root = self._git_tree()
         self._assert_source_baseline(root)
         program = root / "ops/capture_topic_auth_rollout.py"
         program.write_bytes(program.read_bytes() + b"\n# committed SHA drift\n")
-        subprocess.run(
-            ["git", "add", "ops/capture_topic_auth_rollout.py"],
-            cwd=root,
-            check=True,
-        )
-        subprocess.run(
-            [
-                "git",
-                "-c",
-                "user.name=Capture Test",
-                "-c",
-                "user.email=capture-test@example.invalid",
-                "commit",
-                "-qm",
-                "drift program without checksum",
-            ],
-            cwd=root,
-            check=True,
+        self._commit(
+            root,
+            "drift program without checksum",
+            "ops/capture_topic_auth_rollout.py",
         )
 
         result = self._source_check(root)
@@ -238,24 +283,10 @@ class TestInstallerContract(unittest.TestCase):
             )
             + "\n"
         )
-        subprocess.run(
-            ["git", "add", "ops/systemd/fxi-topic-auth-capture.service"],
-            cwd=root,
-            check=True,
-        )
-        subprocess.run(
-            [
-                "git",
-                "-c",
-                "user.name=Capture Test",
-                "-c",
-                "user.email=capture-test@example.invalid",
-                "commit",
-                "-qm",
-                "remove runtime checksum guard",
-            ],
-            cwd=root,
-            check=True,
+        self._commit(
+            root,
+            "remove runtime checksum guard",
+            "ops/systemd/fxi-topic-auth-capture.service",
         )
 
         result = self._source_check(root)

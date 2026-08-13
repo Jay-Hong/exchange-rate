@@ -50,7 +50,7 @@ env_value() {
 }
 
 check_source() {
-  local expected_path expected_sha actual_sha
+  local expected_path expected_sha actual_sha upstream head upstream_head
   local managed
   for managed in "${MANAGED_PATHS[@]}"; do
     git -C "$REPO_ROOT" ls-files --error-unmatch -- "$managed" >/dev/null 2>&1 || \
@@ -60,6 +60,17 @@ check_source() {
     die "설치 입력이 HEAD와 다르다 (unstaged drift)"
   git -C "$REPO_ROOT" diff --cached --quiet -- "${MANAGED_PATHS[@]}" || \
     die "설치 입력이 HEAD와 다르다 (staged drift)"
+
+  upstream=$(git -C "$REPO_ROOT" rev-parse --symbolic-full-name '@{upstream}' 2>/dev/null) || \
+    die "현재 branch에 upstream remote-tracking ref가 없다"
+  case "$upstream" in
+    refs/remotes/*) ;;
+    *) die "upstream이 remote-tracking ref가 아니다: $upstream" ;;
+  esac
+  head=$(git -C "$REPO_ROOT" rev-parse HEAD)
+  upstream_head=$(git -C "$REPO_ROOT" rev-parse "$upstream")
+  [ "$head" = "$upstream_head" ] || \
+    die "설치 HEAD가 local upstream ref와 다르다: HEAD=$head $upstream=$upstream_head"
 
   read -r expected_sha expected_path < "$SUM_SOURCE"
   [ "$expected_path" = "/home/ubuntu/exchange-rate/ops/capture_topic_auth_rollout.py" ] || \
