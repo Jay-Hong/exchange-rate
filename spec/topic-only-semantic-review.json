@@ -23,7 +23,8 @@
           "C4 closure of the C3 cross-review",
           "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
-          "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions"
+          "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
+          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -83,7 +84,8 @@
           "C4 closure of the C3 cross-review",
           "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
-          "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions"
+          "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
+          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026"
         ]
       }
     ],
@@ -104,7 +106,8 @@
           "C4 closure of the C3 cross-review",
           "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
-          "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions"
+          "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
+          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026"
         ],
         "result": "pass"
       },
@@ -510,6 +513,18 @@
       ],
       "issue": "Four coverage-surface controls could shrink while their own tests stayed green. The docs-workflow AST candidate helper could return an empty set, because the test asserted only candidate-minus-workflow emptiness. The semantic-drift loader silently skipped missing paths and accepted at least eight texts although its declared surface has nine. The RID citation checks had no reference inventory, so removing a cited RID block from their extracted surface left the remaining references sufficient. MARKDOWN_LINK_DOCS was both the parametrization source and the only document list, so removing a canonical document that currently has zero #L links simply removed its test case. These are validation-surface gaps rather than current locator or production-code defects.",
       "disposition": "The docs-workflow tripwire now pins the seven currently discovered Markdown-literal modules before comparing them with the workflow. Semantic drift fails closed on every declared path and locks seven documents plus two ledgers as nine unique ordered inputs. RID backtick validation pins 125 references by all six destinations and by server 61 versus iOS 64. The Markdown-link gate independently pins the six canonical documents, including five that currently have zero links. Empty discovery, one missing semantic input, one dropped cited RID block, and one removed zero-link document now each fail; intentional surface changes require an explicit reviewed inventory update."
+    },
+    {
+      "id": "SEM-029",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "tests/test_topic_only_semantic_review.py/review_errors",
+        "tests/test_topic_only_semantic_review.py/test_every_validator_branch_is_named_by_its_own_control",
+        "spec/topic-only-semantic-review.json/residual_limits"
+      ],
+      "issue": "SEM-026 closed only the no-self-review branch. An exhaustive one-branch-at-a-time audit measured 32 of the 40 errors.append sites as still neutralisable with the suite green, because the remaining counterexamples asserted only that review_errors returned a non-empty list and adjacent diagnostics satisfied that assertion.",
+      "disposition": "A table of 32 controls now mutates the closed fixture and asserts the specific diagnostic each branch emits, so neutralising any single append site fails a named control. Controls are not required to trigger their branch in isolation; asserting the target diagnostic is sufficient and keeps the table small. Re-running the audit on this tree reports 40 sites, 0 invalid mutations, 40 red and 0 survivors. The claim is bounded to append-site coverage: one site inside a loop emits for many participant fields, scope flags and finding keys, so 40 of 40 does not mean every variant of every rule is locked."
     }
   ],
   "residual_limits": [
@@ -534,7 +549,7 @@
     "Journal closure terminates when the author prepares the complete fixed/pass candidate first and the opposite participant reviews that exact tree without modifying it. Committing the unchanged tree adds no unreviewed file content; any post-review tree edit invalidates the attestation and requires another review. globally_independent_reviewer=false limits independence of the artifact as a whole, but does not make reciprocal review of an exact final tree impossible.",
     "The unverified_token_bearing counters run before Firebase verification and store fixed-cardinality request and connection-event counts only. They do not establish valid-token demand, authenticated users, or actual RevenueCat calls. final_stage_rc_candidate is conditional on the injected topic-availability snapshot and later dispatcher, stage, and token gates; process restart resets every counter.",
     "SEM-024 repairs the three known Markdown-link locator debts outside ADR-041, adds a full-canonical-document #L gate, and validates all baseline backtick locators against the pins. SEM-025 removes the backtick extractor's extension allowlist and checks it against an independently expressed locator-shape oracle. Those checks cannot discover plain prose line numbers without a recognized locator and cannot prove semantic entailment; historical code claims therefore use immutable full-SHA blobs, while target meaning still requires review.",
-    "An exhaustive one-branch-at-a-time audit on 2026-08-13 neutralized each of the 40 review_errors errors.append sites with no invalid mutations: 32 mutations still left the suite green, compared with 33 before SEM-026 made the no-self-review branch load-bearing. A control that produces several diagnostics can hide removal of its intended branch; those 32 sites are bounded work for a separate hardening slice, and no 40-of-40 mutation-coverage claim is made.",
+    "The one-branch-at-a-time audit that measured 32 of 40 errors.append sites as neutralisable (33 before SEM-026) is closed by SEM-029: every site now fails a control that names its own diagnostic, re-measured on this tree as 40 sites, 0 invalid, 40 red, 0 survivors. Coverage is of append sites, not of rule variants — a single site inside a loop serves many participant fields, scope flags and finding keys, and those variants remain unaudited.",
     "Commit messages, annotated tags, deployment reports, terminal transcripts, and agent memory are outside this journal's hash-bound inputs unless a review edge explicitly identifies and preserves the exact artifact. In particular, a562391's unpreserved 46-connection observation is not promoted to activation evidence; 9f0aec9 corrects only its invalid client-absence inference.",
     "SEM-028 pins the currently reviewed extraction surfaces: seven Markdown-literal test modules, nine semantic-drift inputs, 125 RID backtick locators, and six canonical Markdown-link documents. These inventories prevent silent shrinkage but do not prove that heuristic discovery is complete, that dynamically assembled paths are visible, or that a locator semantically entails its prose; legitimate additions and removals require reviewing and updating the corresponding inventory."
   ],

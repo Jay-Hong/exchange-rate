@@ -342,6 +342,156 @@ def test_synthetic_open_base_actually_opens_the_journal():
         "합성 open journal 이 오류를 내지 않는다 — 반례의 양성 대조군이 공허해진다")
 
 
+def _replace(data: dict, key: str, value):
+    """최상위 한 필드만 바꾼 사본."""
+    return dict(data, **{key: value})
+
+
+def _process(data: dict, **changes):
+    """`review_process` 안의 필드만 바꾼 사본."""
+    return dict(data, review_process=dict(data["review_process"], **changes))
+
+
+def _edges(data: dict, mutate):
+    """첫 edge 를 `mutate` 로 바꾼 사본. 나머지 edge 는 그대로 둔다."""
+    edges = data["review_process"]["review_edges"]
+    return _process(data, review_edges=[mutate(edges[0]), *edges[1:]])
+
+
+def _participants(data: dict, mutate):
+    """첫 participant 를 `mutate` 로 바꾼 사본."""
+    people = data["review_process"]["participants"]
+    return _process(data, participants=[mutate(people[0]), *people[1:]])
+
+
+def _targeted_branch_controls(base: dict):
+    """`review_errors` 의 append 지점별 반례 — (라벨, 조작된 journal, 기대 진단).
+
+    ⛔ **각 반례가 그 분기만 단독으로 트리거할 필요는 없다.** 여러 진단이 함께 나와도
+       목표 문자열을 직접 단언하면 그 분기는 하중을 받는다. 단독 fixture 를 요구하면
+       작업만 커지고 얻는 것이 없다.
+    ⚠️ 기대 문자열은 **구별 가능해야** 한다 — `participant #0 must be an object` 와
+       `review edge #0 must be an object` 는 접두사를 포함해야 서로 안 섞인다.
+    """
+    people = base["review_process"]["participants"]
+    edges = base["review_process"]["review_edges"]
+    first_name = people[0]["name"]
+    first_scope = edges[0]["scope"]
+    return [
+        # ── 최상위 ──
+        ("최상위 필드 추가", _replace(base, "unexpected_field", 1),
+         "top-level fields differ from the review schema"),
+        ("schema_version 변경", _replace(base, "schema_version", 999),
+         "schema_version mismatch"),
+        ("frozen input 변경",
+         _replace(base, "inputs", dict(base["inputs"], server_commit="0" * 40)),
+         "frozen input hashes or pinned commits changed"),
+        ("review_process 비-object", _replace(base, "review_process", "not-an-object"),
+         "review_process must be an object"),
+        ("scope 비-object", _replace(base, "scope", "not-an-object"),
+         "scope must be an object"),
+        ("findings 빈 목록", _replace(base, "findings", []),
+         "findings must be a non-empty list"),
+        ("verdict 변경", _replace(base, "verdict", "fail"),
+         "review verdict is not pass"),
+        # ── review_process ──
+        ("process 필드 추가", _process(base, unexpected=1),
+         "review_process fields differ from the schema"),
+        ("mode 변경", _process(base, mode="solo_review"),
+         "review mode is not reciprocal_cross_review"),
+        ("participant 1명", _process(base, participants=people[:1]),
+         "at least two review participants are required"),
+        ("edge 1개", _process(base, review_edges=edges[:1]),
+         "at least two reciprocal review edges are required"),
+        ("한 사람만 저자",
+         _process(base, review_edges=[dict(edge, author=first_name) for edge in edges]),
+         "every participant must appear as both author and reviewer"),
+        ("limitations 빈 목록", _process(base, limitations=[]),
+         "review_process limitations are missing"),
+        # ── scope ──
+        ("scope 값 불일치",
+         _replace(base, "scope", dict(base["scope"], manifest_output_requirements=-1)),
+         "scope manifest_output_requirements=-1"),
+        # ── participants ──
+        ("participant 비-object", _participants(base, lambda p: "not-an-object"),
+         "participant #0 must be an object"),
+        ("participant 필드 추가", _participants(base, lambda p: dict(p, extra=1)),
+         "participant #0 fields differ from the schema"),
+        ("participant name 공백", _participants(base, lambda p: dict(p, name="   ")),
+         "participant #0 name is missing"),
+        ("participant 이름 중복",
+         _process(base, participants=[people[0], dict(people[1], name=first_name)]),
+         f"duplicate participant: {first_name}"),
+        ("participant roles 빈 목록", _participants(base, lambda p: dict(p, roles=[])),
+         "participant #0 roles is incomplete"),
+        ("authored 중복",
+         _participants(base, lambda p: dict(p, authored_or_modified=[
+             *p["authored_or_modified"], p["authored_or_modified"][0]])),
+         f"participant {first_name} repeats an authored scope"),
+        ("authored 가 edge 와 불일치",
+         _participants(base, lambda p: dict(p, authored_or_modified=["무관한 범위"])),
+         f"participant {first_name} authored scopes differ from review edges"),
+        ("reviewed 중복",
+         _participants(base, lambda p: dict(p, independently_reviewed=[
+             *p["independently_reviewed"], p["independently_reviewed"][0]])),
+         f"participant {first_name} repeats a reviewed scope"),
+        # ── review edges ──
+        ("edge 비-object", _edges(base, lambda e: "not-an-object"),
+         "review edge #0 must be an object"),
+        ("edge 필드 추가", _edges(base, lambda e: dict(e, extra=1)),
+         "review edge #0 fields differ from the schema"),
+        ("edge author 비-문자열", _edges(base, lambda e: dict(e, author={"not": "a string"})),
+         "review edge #0 author/reviewer must be strings"),
+        ("edge 가 모르는 참가자 지목", _edges(base, lambda e: dict(e, author="아무개")),
+         "review edge #0 names an unknown participant"),
+        ("edge scope 빈 목록", _edges(base, lambda e: dict(e, scope=[])),
+         "review edge #0 scope is incomplete"),
+        ("edge scope 중복",
+         _edges(base, lambda e: dict(e, scope=[*e["scope"], e["scope"][0]])),
+         "review edge #0 repeats a scope"),
+        ("edge 가 다른 edge 의 scope 재사용",
+         _process(base, review_edges=[edges[0],
+                                      *[dict(edge, scope=list(first_scope)) for edge in edges[1:]]]),
+         "reuses scopes already assigned to another edge"),
+        ("edge result 변경", _edges(base, lambda e: dict(e, result="fail")),
+         "review edge #0 did not pass"),
+        # ── findings ──
+        ("finding id 중복",
+         _replace(base, "findings", [base["findings"][0], dict(base["findings"][1],
+                                                               id=base["findings"][0]["id"])]),
+         "finding ids are missing or duplicated"),
+        ("finding severity 누락",
+         _replace(base, "findings", [dict(base["findings"][0], severity=""),
+                                     *base["findings"][1:]]),
+         f"finding {base['findings'][0].get('id')} lacks severity"),
+    ]
+
+
+def test_every_validator_branch_is_named_by_its_own_control():
+    """⛔ 반례가 "오류가 있다" 만 보면 **인접 진단이 규칙 삭제를 가린다**.
+
+    실측(2026-08-13): `review_errors` 의 40개 `errors.append` 를 하나씩 중화했을 때
+    비어 있지 않음만 보는 단언 아래에서 **32개가 무증상**이었다 — self-review 금지처럼
+    프로토콜의 근간인 규칙도 그중 하나였다(SEM-026). 그래서 각 반례는 **자기 진단을
+    직접 지목**한다.
+
+    ⚠️ **완결 범위**: 이 검사가 잠그는 것은 `errors.append` **지점**이다. 한 지점이
+    반복문 안에서 여러 participant 필드·scope flag·finding 필드를 처리하므로,
+    40/40 을 달성해도 "각 변형이 모두 잠겼다" 는 뜻이 **아니다**.
+    """
+    base = _closed_validator_fixture(_synthetic_open_journal(_review()))
+    assert not review_errors(base), "반례의 양성 대조군부터 유효해야 한다"
+
+    controls = _targeted_branch_controls(base)
+    assert len(controls) == 32, f"반례 표가 32개가 아니다: {len(controls)}"
+
+    for label, mutated, expected in controls:
+        errors = review_errors(mutated)
+        assert any(expected in error for error in errors), (
+            f"{label}: 기대 진단 {expected!r} 이(가) 없다 — 실제 {errors}"
+        )
+
+
 def test_review_validator_rejects_stale_and_open_controls():
     base = _closed_validator_fixture(_synthetic_open_journal(_review()))
     assert not review_errors(base), "반례의 양성 대조군부터 유효해야 한다"
