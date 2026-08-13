@@ -3587,7 +3587,7 @@ USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder
 - 배포 commit: `489359c` (PR Z-2f, 2026-05-13 22:16 KST)
 - 즉시 smoke (Z-2f 핵심 시그널):
   - legacy `/api/rates/usd-krw` HTTP 200, `/admin/api/topic-status` (usdt + 3 fx) error 0
-  - `fallback_reason=redis_stale` (rates path) **0건** — line 886 index stale gate 제거 후 발생 X
+  - `fallback_reason=redis_stale` (rates path) **0건** — index stale gate 제거 후 발생 X
   - `per_key_stale` 0건 — 모든 data key fresh, Redis-first 정상 통과
   - Step 3b warning(`bank/investing sync Redis SET 실패`) 0건 — 회귀 가드 OK
 - **Accepted 전환 조건** (baseline 누적 후):
@@ -3598,7 +3598,7 @@ USDT source는 mirror cycle 대신 **crawler-driven direct write + topic builder
 
 ### 맥락
 
-ADR-026 (Redis-first broadcast hot path)은 `latest:index` control key의 `mirrored_at` 필드를 broadcast Redis-first read의 단일 freshness gate로 사용한다 ([app/latest_rates_cache.py:886](app/latest_rates_cache.py#L886)). mirror cycle이 3초마다 latest:index와 모든 data key를 함께 갱신하는 모델에서는 정합한 단일 시그널이다 — "한 cycle에서 모든 key가 동일한 mirrored_at으로 갱신됨"의 invariant.
+ADR-026 (Redis-first broadcast hot path)은 `latest:index` control key의 `mirrored_at` 필드를 broadcast Redis-first read의 단일 freshness gate로 사용했다 ([app/latest_rates_cache.py:885-890 @ `a499a08`](https://github.com/Jay-Hong/exchange-rate/blob/a499a08d210ab1e6b8c5309357eab3bcf1283fa5/app/latest_rates_cache.py#L885-L890)). mirror cycle이 3초마다 latest:index와 모든 data key를 함께 갱신하는 모델에서는 정합한 단일 시그널이다 — "한 cycle에서 모든 key가 동일한 mirrored_at으로 갱신됨"의 invariant.
 
 PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직후 `latest:bank:*` / `latest:investing:*` key를 sync Redis client로 직접 쓰는 direct write 시대에 진입했다. mirror cycle은 여전히 3초 주기로 운영되지만, 개별 data key는 mirror보다 먼저 direct write로 갱신될 수 있다.
 
@@ -3707,7 +3707,7 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 - [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): Redis-first broadcast hot path (latest:index 도입 결정)
 - [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback): USDT direct write (mirror cycle 미경유)
 - [USDT_TOPIC_MIGRATION_PLAN.md Z-2f](USDT_TOPIC_MIGRATION_PLAN.md): 본 ADR 구현 PR 추적
-- [app/latest_rates_cache.py:886](app/latest_rates_cache.py#L886): 현재 freshness gate 위치
+- [app/latest_rates_cache.py:1993-2016](app/latest_rates_cache.py#L1993-L2016): 현재 per-key freshness 판정과 fallback 위치
 
 ---
 
@@ -3732,13 +3732,13 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 
 PR Z-2f([ADR-030](#adr-030-latestindex-책임-분리--freshness는-per-key-mirrored_at으로-판단)) 이후 broadcast Redis-first read path는 per-key mirrored_at 기반으로 정착. USDT는 [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback)로 Redis-first 모델 정렬. 은행/Investing은 Step 3b(`a499a08`)로 Redis-first 모델 정렬. **KRX만이 유일하게 topic-only source인데 Redis-first 모델 밖**.
 
-[app/usdt_topic_payload.py:330](app/usdt_topic_payload.py#L330):
+[app/usdt_topic_payload.py:326-330 @ `2d5c8ad`](https://github.com/Jay-Hong/exchange-rate/blob/2d5c8adfd7a46944617c854d8221a5535bb1a95b/app/usdt_topic_payload.py#L326-L330):
 
 ```python
 krx_futures_rate = get_latest_source_rate(db, "krx", "usd-krw-futures")  # DB query only
 ```
 
-같은 파일 line 264 명시: *"KRX는 mirror skip + direct write 미구축 → DB query 유지 (별도 phase)"*. 그 phase가 본 ADR.
+[같은 역사적 파일의 262-264행](https://github.com/Jay-Hong/exchange-rate/blob/2d5c8adfd7a46944617c854d8221a5535bb1a95b/app/usdt_topic_payload.py#L262-L264)에 명시: *"KRX는 mirror skip + direct write 미구축 → DB query 유지 (별도 phase)"*. 그 phase가 본 ADR.
 
 ### 결정
 
@@ -3754,7 +3754,7 @@ KRX tick → Redis direct write + topic builder Redis-first read로 정렬한다
    - DB insert 성공 시 `set_latest_krx_rate_from_sync_job` 호출 (best-effort)
    - Redis write 실패 → `logger.warning`, writer loop 영향 X
 
-3. **Topic builder 변경** (`app/usdt_topic_payload.py:330`):
+3. **Topic builder 변경** ([app/usdt_topic_payload.py:327-333 @ `0756329`](https://github.com/Jay-Hong/exchange-rate/blob/0756329228d6048f986e6f759ac31037325bc41b/app/usdt_topic_payload.py#L327-L333)):
 
    ```python
    if include_krx:

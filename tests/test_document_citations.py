@@ -3,13 +3,15 @@
 matrix 규칙 4 — *"새 문서의 모든 코드 단정이 baseline 항목 id 또는 새 file:line 을 인용"*.
 구조 게이트는 이 축을 보지 않는다(마커·관계·상태만 본다). 그래서 별도 게이트가 필요하다.
 
-두 방향을 **함께** 본다. 하나만 있으면 뚫린다:
+세 방향을 **함께** 본다. 하나만 있으면 뚫린다:
 
 1. **근접성** — 코드 심볼(백틱)로 현재 동작을 단정하는 논리 단위는 그 단위 안에 근거를
    가져야 한다. RID 어딘가의 무관한 근거 하나로 모든 단정을 통과시키지 않는다.
 2. **실재** — 인용한 `path:line` 이 **고정 commit 의 실제 파일·행**이어야 하고,
    `baseline <ID>` 는 baseline 파일에 실재해야 한다.
    ⛔ 지어낸 근거는 근거 없음보다 나쁘다 — 확인했다는 착시를 만든다.
+3. **링크 표면** — canonical 문서 전체의 Markdown `#L` 링크를 검사한다. RID 블록과
+   백틱형만 보면 ADR-041 밖의 과거 ADR 링크가 전부 사각지대가 된다.
 
 ⚠️ 이 검사는 보수적 lint 다. 자연어의 모든 코드 단정이나 근거의 의미 적합성을 증명하지 않는다.
 최종 완전성은 별도 의미 리뷰가 판정한다. 근거가 안 붙은 동안 이 테스트는 **빨강**이다.
@@ -54,6 +56,18 @@ FILE_LINE = re.compile(
     r"`([^`\n]+?\.(?:py|swift|json|md|conf|plist|pbxproj|ya?ml|toml|sh|[mh])):"
     r"(\d+)(?:-(\d+))?`"
 )
+MARKDOWN_LINE_LINK = re.compile(
+    r"\[([^\]\n]+)\]\(([^)\s]+)#L(\d+)(?:-L?(\d+))?\)"
+)
+SAME_REPO_BLOB_PREFIX = "https://github.com/Jay-Hong/exchange-rate/blob/"
+SAME_REPO_BLOB = re.compile(
+    re.escape(SAME_REPO_BLOB_PREFIX) + r"([0-9a-f]{40})/(.+)"
+)
+LABEL_LINE = re.compile(r":(\d+)(?:-(\d+))?")
+LABEL_FILE_LINE = re.compile(
+    r"([^`\s\[\]()]+?\.(?:py|swift|json|md|conf|plist|pbxproj|ya?ml|toml|sh|[mh])):"
+    r"(\d+)(?:-(\d+))?"
+)
 
 # 코드 단정 후보 = 코드 span + 현재 구현을 가리키는 단서 + 서술 어미.
 # 줄 단위로 보면 wrap 된 단정을 놓치므로 먼저 Markdown 논리 단위로 합친다.
@@ -68,6 +82,7 @@ ASSERTIVE = re.compile(
 )
 
 DESTS = sorted(DOCS)
+MARKDOWN_LINK_DOCS = sorted(set(DOCS.values()))
 
 
 def _doc(dest: str) -> str:
@@ -153,9 +168,11 @@ def _repo_path(path: str) -> tuple[str, pathlib.Path, str]:
 
 
 @functools.lru_cache(maxsize=None)
-def _pinned_file_line_count(repo_key: str, relative_path: str) -> tuple[int | None, str | None]:
-    lock = json.loads(LOCK.read_text())
-    commit = lock["pinned_commit"][repo_key]
+def _file_line_count_at_commit(
+    repo_key: str,
+    relative_path: str,
+    commit: str,
+) -> tuple[int | None, str | None]:
     root = IOS if repo_key == "ios" else REPO
     result = subprocess.run(
         ["git", "-C", str(root), "show", f"{commit}:{relative_path}"],
@@ -165,6 +182,105 @@ def _pinned_file_line_count(repo_key: str, relative_path: str) -> tuple[int | No
     if result.returncode != 0:
         return None, result.stderr.strip() or "git show failed"
     return len(result.stdout.splitlines()), None
+
+
+def _pinned_file_line_count(repo_key: str, relative_path: str) -> tuple[int | None, str | None]:
+    lock = json.loads(LOCK.read_text())
+    return _file_line_count_at_commit(
+        repo_key,
+        relative_path,
+        lock["pinned_commit"][repo_key],
+    )
+
+
+def _markdown_link_location(
+    document: pathlib.Path,
+    target: str,
+) -> tuple[str, str, str] | str | None:
+    """Return (repo key, relative path, commit), an error, or None for external links."""
+    if target.startswith(SAME_REPO_BLOB_PREFIX):
+        match = SAME_REPO_BLOB.fullmatch(target)
+        if match is None:
+            return "같은 저장소의 과거 blob 링크는 40자리 commit SHA로 고정해야 한다"
+        return "server", match.group(2), match.group(1)
+    if "://" in target:
+        return None
+
+    resolved = (document.parent / target).resolve()
+    for repo_key, root in (("server", REPO), ("ios", IOS)):
+        try:
+            relative = resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        lock = json.loads(LOCK.read_text())
+        return repo_key, relative, lock["pinned_commit"][repo_key]
+    return f"저장소 밖을 가리키는 로컬 링크다: {target}"
+
+
+def _markdown_line_link_errors(document: pathlib.Path, text: str | None = None) -> list[str]:
+    """Validate full-document Markdown line links against their declared commits."""
+    errors = []
+    body = document.read_text() if text is None else text
+    for label, target, start, end in MARKDOWN_LINE_LINK.findall(body):
+        location = _markdown_link_location(document, target)
+        if location is None:
+            continue
+        if isinstance(location, str):
+            errors.append(f"{label}: {location}")
+            continue
+
+        repo_key, relative_path, commit = location
+        label_line = LABEL_LINE.search(label)
+        label_file = LABEL_FILE_LINE.search(label)
+        if label_file is not None:
+            shown_path = label_file.group(1).removeprefix("exchange-rate/")
+            if relative_path != shown_path and not relative_path.endswith("/" + shown_path):
+                errors.append(
+                    f"{label}: 표시 파일 `{shown_path}`과 링크 대상 `{relative_path}`가 다르다"
+                )
+        if label_line is not None and int(label_line.group(1)) != int(start):
+            errors.append(
+                f"{label}: 표시 시작행 {label_line.group(1)}과 링크 #L{start}가 다르다"
+            )
+        if (
+            label_line is not None
+            and label_line.group(2) is not None
+            and end
+            and int(label_line.group(2)) != int(end)
+        ):
+            errors.append(
+                f"{label}: 표시 끝행 {label_line.group(2)}과 링크 끝행 L{end}가 다르다"
+            )
+
+        total, error = _file_line_count_at_commit(repo_key, relative_path, commit)
+        if error:
+            errors.append(f"{label}: `{relative_path}` 가 {commit[:12]}에 없음: {error}")
+            continue
+        last = int(end or start)
+        if not (1 <= int(start) <= last <= total):  # type: ignore[operator]
+            suffix = f"-L{end}" if end else ""
+            errors.append(
+                f"{label}: `{relative_path}#L{start}{suffix}` 범위 밖(총 {total}행)"
+            )
+    return errors
+
+
+def _backtick_line_errors(text: str, *, context: str) -> list[str]:
+    errors = []
+    references = FILE_LINE.findall(text)
+    if not references:
+        return [f"{context}: backtick file:line 인용이 0건이다"]
+    for path, start, end in references:
+        repo_key, _root, relative_path = _repo_path(path)
+        total, error = _pinned_file_line_count(repo_key, relative_path)
+        if error:
+            errors.append(f"{context}: `{path}` 가 pinned {repo_key} commit에 없음: {error}")
+            continue
+        last = int(end or start)
+        if not (1 <= int(start) <= last <= total):  # type: ignore[operator]
+            suffix = f"-{end}" if end else ""
+            errors.append(f"{context}: `{path}:{start}{suffix}` 범위 밖(총 {total}행)")
+    return errors
 
 
 def _known_baseline_ids() -> set[str]:
@@ -212,6 +328,89 @@ def test_cited_file_lines_actually_exist(dest):
     assert not bad, f"{dest}: pinned commit에 실재하지 않는 인용 {len(bad)}건\n" + "\n".join(
         "  " + item for item in bad
     )
+
+
+@pytest.mark.parametrize("document", MARKDOWN_LINK_DOCS, ids=lambda path: path.name)
+def test_markdown_line_links_exist_in_declared_commits(document):
+    """RID 밖까지 포함한 canonical 문서 전체의 Markdown line link를 검사한다."""
+    errors = _markdown_line_link_errors(document)
+    assert not errors, f"{document.name}: 잘못된 Markdown line link {len(errors)}건\n" + "\n".join(
+        "  " + item for item in errors
+    )
+
+
+def test_baseline_backtick_line_references_exist_at_pinned_commits():
+    """baseline은 RID 산출물이 아니므로 정본 파일 전체의 40개 locator를 별도로 검사한다."""
+    errors = _backtick_line_errors(BASELINE.read_text(), context=BASELINE.name)
+    assert not errors, f"baseline의 잘못된 backtick file:line 인용 {len(errors)}건\n" + "\n".join(
+        "  " + item for item in errors
+    )
+
+
+def test_baseline_backtick_line_gate_rejects_empty_and_bad_ranges():
+    assert _backtick_line_errors("인용 없음", context="synthetic")
+    assert not _backtick_line_errors("`app/main.py:1`", context="synthetic")
+    errors = _backtick_line_errors(
+        "`app/main.py:0` `app/main.py:2-1` `app/main.py:999999`",
+        context="synthetic",
+    )
+    assert len(errors) == 3
+    assert all("범위 밖" in error for error in errors)
+
+
+def test_markdown_line_link_gate_rejects_bad_ranges_and_mutable_history():
+    valid = "[app/main.py:1](app/main.py#L1)"
+    assert not _markdown_line_link_errors(DOCS["ADR"], valid)
+    assert not _markdown_line_link_errors(DOCS["ADR"], "line link 없음")
+
+    bad = (
+        "[app/main.py:2](app/main.py#L1)\n"
+        "[app/main.py:1-3](app/main.py#L1-L2)\n"
+        "[app/main.py:999999](app/main.py#L999999)\n"
+        "[app/main.py:2-1](app/main.py#L2-L1)\n"
+        "[app/not-main.py:1](app/main.py#L1)\n"
+        "[app/main.py:1 @ short]"
+        "(https://github.com/Jay-Hong/exchange-rate/blob/a562391/app/main.py#L1)"
+    )
+    errors = _markdown_line_link_errors(DOCS["ADR"], bad)
+    assert len(errors) == 6
+    assert any("표시 파일" in error for error in errors)
+    assert any("표시 시작행" in error for error in errors)
+    assert any("표시 끝행" in error for error in errors)
+    assert sum("범위 밖" in error for error in errors) == 2
+    assert any("40자리 commit SHA" in error for error in errors)
+
+
+def test_markdown_line_link_gate_covers_decisions_before_adr_041():
+    """`_doc("ADR")` 슬라이스로 되돌리면 과거 ADR 링크가 다시 사각지대가 된다."""
+    text = DOCS["ADR"].read_text()
+    before_adr_041 = text.split("## ADR-041", 1)[0]
+    links = MARKDOWN_LINE_LINK.findall(before_adr_041)
+    assert links, "ADR-041 이전 Markdown line link 양성 대조군이 없다"
+    assert any("a499a08d210ab1e6b8c5309357eab3bcf1283fa5" in target for _, target, _, _ in links)
+    assert not _markdown_line_link_errors(DOCS["ADR"], before_adr_041)
+
+
+def test_reviewed_adr_030_and_031_targets_do_not_regress_to_stale_worktree_lines():
+    """범위 존재만으로는 의미 적합성을 못 보므로, 확인한 세 교정 target을 정확히 잠근다."""
+    text = DOCS["ADR"].read_text()
+    reviewed_targets = {
+        "https://github.com/Jay-Hong/exchange-rate/blob/"
+        "a499a08d210ab1e6b8c5309357eab3bcf1283fa5/"
+        "app/latest_rates_cache.py#L885-L890",
+        "app/latest_rates_cache.py#L1993-L2016",
+        "https://github.com/Jay-Hong/exchange-rate/blob/"
+        "2d5c8adfd7a46944617c854d8221a5535bb1a95b/"
+        "app/usdt_topic_payload.py#L326-L330",
+        "https://github.com/Jay-Hong/exchange-rate/blob/"
+        "0756329228d6048f986e6f759ac31037325bc41b/"
+        "app/usdt_topic_payload.py#L327-L333",
+    }
+    targets = {target + "#L" + start + ("-L" + end if end else "")
+               for _label, target, start, end in MARKDOWN_LINE_LINK.findall(text)}
+    assert reviewed_targets <= targets
+    assert "app/latest_rates_cache.py#L886" not in targets
+    assert "app/usdt_topic_payload.py#L330" not in targets
 
 
 @pytest.mark.parametrize("dest", DESTS)
