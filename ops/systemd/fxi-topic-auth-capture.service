@@ -1,0 +1,35 @@
+# fxi-managed: ops/systemd/fxi-topic-auth-capture.service
+[Unit]
+Description=Capture the pinned FXi topic-auth observation window
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/exchange-rate
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=CHECKPOINT=bounded-7-day-window
+EnvironmentFile=/etc/fxi/topic-auth-capture.env
+UMask=0077
+ExecStartPre=/usr/bin/test -S /var/run/docker.sock
+ExecStartPre=/usr/bin/sha256sum --check --status /etc/fxi/topic-auth-capture.sha256
+ExecStart=/usr/bin/python3 /home/ubuntu/exchange-rate/ops/capture_topic_auth_rollout.py \
+  --expected-rollout-started-at ${EXPECTED_ROLLOUT_STARTED_AT} \
+  --expected-image-id ${EXPECTED_IMAGE_ID} \
+  --expected-stage ${EXPECTED_STAGE} \
+  --expected-dispatcher-enabled ${EXPECTED_DISPATCHER_ENABLED} \
+  --checkpoint ${CHECKPOINT} \
+  --output-dir /home/ubuntu/logs/topic-auth-rollout \
+  --repo-root /home/ubuntu/exchange-rate \
+  --container exchange-rate-app \
+  --deployment-label ${DEPLOYMENT_LABEL}
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/logs/topic-auth-rollout
+CapabilityBoundingSet=
+LockPersonality=true

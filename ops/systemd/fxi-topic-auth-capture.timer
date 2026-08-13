@@ -1,0 +1,22 @@
+# fxi-managed: ops/systemd/fxi-topic-auth-capture.timer
+[Unit]
+Description=Seven exact UTC captures for the 843462e topic-auth observation window
+
+[Timer]
+# The rollout started at 09:25:20.3894908Z. Scheduling at :21 keeps every
+# checkpoint after, rather than fractionally before, its T+24h boundary.
+OnCalendar=2026-08-14 09:25:21 UTC
+OnCalendar=2026-08-15 09:25:21 UTC
+OnCalendar=2026-08-16 09:25:21 UTC
+OnCalendar=2026-08-17 09:25:21 UTC
+OnCalendar=2026-08-18 09:25:21 UTC
+OnCalendar=2026-08-19 09:25:21 UTC
+OnCalendar=2026-08-20 09:25:21 UTC
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+RemainAfterElapse=true
+Unit=fxi-topic-auth-capture.service
+
+[Install]
+WantedBy=timers.target
