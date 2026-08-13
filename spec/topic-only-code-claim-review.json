@@ -2,31 +2,31 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51",
-    "baseline_sha256": "8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577",
-    "lock_sha256": "715cfd368d73a751b73ccafaec2f03c1d84d3def91f7a054a0dba526d15ff586",
-    "server_commit": "0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01",
+    "manifest_sha256": "7ce6894e2a3275ef03771f980d201b8c5be2fb13f5beb56bddfb55da953bf63e",
+    "baseline_sha256": "f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d",
+    "lock_sha256": "3cec4dd6d9197e49838f886ea6b87f937033b43a846d99ec85019617ae60ac14",
+    "server_commit": "a5623916dc49e0b69e8cb2b22204c4223ea16762",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "b31163cd2d0c1eab2dafef72a503c3d5d1ede5a076519b8a3e298a1f9709feb7",
-    "CLIENT": "107f774cd05a50698f843ecd84ca59e1337fca2786455c2fd45ede19fb453ef5",
-    "CUT": "c7d41f56afe2df628d572f972f16edad1150357f158f4d3fd243d97ef3d03bc6",
-    "HAND": "984dbbc32ad34ba6fed62922d0a0d63ae4f7ab9fe637053b867d26db87509901",
-    "HEALTH": "3c742e27ed894346a502f9543e49c44546c19427b6160e45eb369a5081cf84c9",
-    "LOAD": "f8a3392ea21165f29b98eab5a8fa18d7a8262b44ed137acb98a0f8745c7e231e"
+    "ADR": "7703939ada80db3f33b5bbdae36f9061a644580efa82e1afc67a21c7e31a2dcf",
+    "CLIENT": "0221430dff3ad49421c5dce5a85925ec55a9b4d9dffbac568a4230ffabe08748",
+    "CUT": "b29587ca803ff7e832a879a1a64acb77648aa796506818ad345cab9ebf991edb",
+    "HAND": "842d79d2a87264858e31917c2aabf9489dcbcb0e5665f8e4850b4aba38de98b8",
+    "HEALTH": "ac3f40e83ecfb1eee1468a47675163ddbc618873dfe5f967a68e93f372ba1113",
+    "LOAD": "81404726dc17fc40c5553ad41c0683b34fc4761e097947b670cfd22802d94d6e"
   },
   "entries": [
     {
       "destination": "ADR",
       "rid": "R-INV-1",
-      "unit_sha256": "5f713b16fe4ce43be09e1be18896871538197b6887e76200de5618024a9a3c21",
-      "unit_text": "**근거 ① 인가** — `FREE_TIER_ACCESS_MODEL_PLAN.md` **D4 \"신규 앱 legacy _anon_ fallback 금지(양 플랫폼)\"**. legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회. 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다 (`app/main.py:1150-1200` · `app/main.py:1014-1058`). ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 — 같은 슬라이스에서 정정한다.",
+      "unit_sha256": "22bdc8f032722d2be9503821710a9416757a19b5e54e79f0fd2dfa7403dbc72a",
+      "unit_text": "**근거 ① 인가** — `FREE_TIER_ACCESS_MODEL_PLAN.md` **D4 \"신규 앱 legacy _anon_ fallback 금지(양 플랫폼)\"**. legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회. 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다 (`app/main.py:1162-1212` · `app/main.py:1026-1070`). ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 — 같은 슬라이스에서 정정한다.",
       "classification": "code_fact",
       "detail": "고정 server commit의 legacy REST handler와 /ws 초기 연결 경로에 Firebase/premium 검사가 없음을 직접 확인했다. 무인증 legacy fallback이 페이월을 우회한다는 인가 근거다.",
       "provenance": [
-        "file:app/main.py:1014-1058",
-        "file:app/main.py:1150-1200"
+        "file:app/main.py:1026-1070",
+        "file:app/main.py:1162-1212"
       ]
     },
     {
@@ -47,6 +47,17 @@
     {
       "destination": "ADR",
       "rid": "R-INV-2",
+      "unit_sha256": "c6853f73a4770e0574048bb32922267bee7753ca4797de80f8d66abef7c2821a",
+      "unit_text": "코드 기본값은 `compatibility` 다(`app/config.py:686-688`). production 의 실제 값은 아래 표가 아니라 운영 직접 측정으로 확정한다.",
+      "classification": "code_fact",
+      "detail": "고정 config가 compatibility를 코드 기본값으로 파싱해 저장하는 사실만 확인한다. production의 실제 값은 별도 운영 측정 대상이며 이 항목은 그 값을 주장하지 않는다.",
+      "provenance": [
+        "file:app/config.py:686-688"
+      ]
+    },
+    {
+      "destination": "ADR",
+      "rid": "R-INV-2",
       "unit_sha256": "fcf007b9bc412be962ae4afef484b59f66237c4a5353e2e950f169f8aec33705",
       "unit_text": "⛔ **코드 구현과 운영 활성화를 분리한다.** 이 문서 재검토에서는 production env 를 직접 측정하지 않았으므로 현재 운영 stage 나 과거 활성화 이력을 단정하지 않는다. 활성화 GO 직전에 실행 중인 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)). 근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271` (cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).",
       "classification": "code_fact",
@@ -55,17 +66,6 @@
         "file:app/config.py:645-688",
         "file:app/subscription.py:390-451",
         "file:app/topic_authorization.py:241-271"
-      ]
-    },
-    {
-      "destination": "ADR",
-      "rid": "R-INV-2",
-      "unit_sha256": "c6853f73a4770e0574048bb32922267bee7753ca4797de80f8d66abef7c2821a",
-      "unit_text": "코드 기본값은 `compatibility` 다(`app/config.py:686-688`). production 의 실제 값은 아래 표가 아니라 운영 직접 측정으로 확정한다.",
-      "classification": "code_fact",
-      "detail": "고정 config가 compatibility를 코드 기본값으로 파싱해 저장하는 사실만 확인한다. production의 실제 값은 별도 운영 측정 대상이며 이 항목은 그 값을 주장하지 않는다.",
-      "provenance": [
-        "file:app/config.py:686-688"
       ]
     },
     {
@@ -110,13 +110,13 @@
     {
       "destination": "ADR",
       "rid": "R-DEC-1",
-      "unit_sha256": "ad695e56f472f5eef9ce053e9c994ef45a073fd22a5178ae53b25ce5fd44b653",
-      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1402-1412` · `app/main.py:887-910`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:250`.",
+      "unit_sha256": "d8604ba2c4d654c1d7d365629e34290511b10e553553bf74973ef51fc8fae793",
+      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1402-1412` · `app/main.py:899-922`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:250`.",
       "classification": "code_fact",
       "detail": "baseline B1은 두 publisher 모듈 내부만의 부정 사실이다. 외부 scheduler가 broadcast_rates_once를 매초 깨우지만 publisher 호출은 is_changed 분기 안임을 추가 확인해, 무조건 주기 재발행 계약 부재로 범위를 좁혔다.",
       "provenance": [
         "baseline:B1",
-        "file:app/main.py:887-910",
+        "file:app/main.py:899-922",
         "file:app/scheduler.py:1402-1412",
         "file:ios/FXi/Utils/Constants.swift:250"
       ]
@@ -189,23 +189,23 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "4ced28da372506295287ade91df415eac4d33583813620a7786e1f7da2e9a7fe",
-      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3138-3145`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
+      "unit_sha256": "a12257fabb43696e47069d9d6cf2200dd9e7f373d595d83dbfda0efc9ab7f2da",
+      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3150-3157`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
       "classification": "code_fact",
       "detail": "서버가 만료(InvalidIdTokenError 하위 Expired/Revoked)와 UserDisabledError 를 모두 같은 invalid_token 코드로 반환한다는 현재 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3138-3145"
+        "file:app/main.py:3150-3157"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "f2b9b1bb9456a85828ff376fccca94867333fce7a99b5251e4cc0b1559715e0a",
-      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:754-794`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
+      "unit_sha256": "16220f287dae99cb17bb12ef6543adbb6cacd6aea426ae2338c98cf10cd85f73",
+      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:762-802`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
       "classification": "code_fact",
       "detail": "고정 planner와 dispatcher는 FX/USDT의 premium_required가 최종 stage에서만 발생하고 앞선 두 stage에서는 identity-only임을 보여준다. 이는 클라이언트 처리 계약이며 production stage를 주장하지 않는다.",
       "provenance": [
-        "file:app/topic_dispatcher.py:754-794",
+        "file:app/topic_dispatcher.py:762-802",
         "file:app/topic_policy.py:285-330"
       ]
     },
@@ -299,12 +299,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-9",
-      "unit_sha256": "a024d053463275fe3f45586b75fe5cc8dd6c3d2834c1e874dd3d6a7c047f7935",
-      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3138-3145`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
+      "unit_sha256": "4de62791df6d88689318e7527dd044bf66c4fc8590c5812b771de9a2adccece3",
+      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3150-3157`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
       "classification": "code_fact",
       "detail": "invalid_token 의 두 갈래(만료 refresh 가능 / 확정 실패)가 같은 wire reason 문자열로 나간다는 현재 서버 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3138-3145"
+        "file:app/main.py:3150-3157"
       ]
     },
     {
@@ -545,12 +545,26 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "3639bfd1a0bbc50054de4de53cfec01cf17dbd460c11ab22470012a8fdda0768",
-      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:678-818`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
+      "unit_sha256": "bcca5ede996e284607063401316cad5046aa864383050119b0237776ee5e8713",
+      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:686-826`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
       "classification": "code_fact",
       "detail": "고정 C1의 authenticated planner부터 dispatcher 등록까지가 FX/USDT premium 인가와 lease 경로를 구현한다. Release arming은 별도 운영 활성화와 실측 조건으로 남는다.",
       "provenance": [
-        "file:app/topic_dispatcher.py:678-818",
+        "file:app/topic_dispatcher.py:686-826",
+        "file:app/topic_policy.py:285-330"
+      ]
+    },
+    {
+      "destination": "HAND",
+      "rid": "R-HAND-11",
+      "unit_sha256": "3ea6fdfcf0ce3a2de09f6e413c801d1e216e9f645024e9939f4bdc586a1450d3",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3070-3073`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
+      "classification": "code_fact",
+      "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
+      "provenance": [
+        "file:app/main.py:3070-3073",
+        "file:app/topic_authorization.py:311-341",
+        "file:app/topic_policy.py:244-282",
         "file:app/topic_policy.py:285-330"
       ]
     },
@@ -590,14 +604,14 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-3",
-      "unit_sha256": "8b3c19e58200ed0448f8caeefbbaf87b0a26bb4d8892050d9252798c3ffac2ad",
-      "unit_text": "- ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *\"build 총예산 < iOS 20초\"* 라고 썼는데 **틀렸다** — iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라 그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤 `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:801-818`).",
+      "unit_sha256": "6e0514328dbe0f3047aa30e5abff9b6b0fe019e5ef9db1871521f0e1ea214919",
+      "unit_text": "- ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *\"build 총예산 < iOS 20초\"* 라고 썼는데 **틀렸다** — iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라 그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤 `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:809-826`).",
       "classification": "code_fact",
       "detail": "iOS ACK가 20초 watchdog을 취소한다는 F3/F3-inf와 서버가 ack 뒤 snapshot builder를 호출하는 실제 순서를 함께 확인했다.",
       "provenance": [
         "baseline:F3",
         "baseline:F3-inf",
-        "file:app/topic_dispatcher.py:801-818"
+        "file:app/topic_dispatcher.py:809-826"
       ]
     },
     {
@@ -614,13 +628,13 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-6",
-      "unit_sha256": "c04d24a25212de00cc8c5f218b0c26143b50894975398bc6af16ee6ec45647d3",
-      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* **앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:655`) — 16KB 초과는 transport 가 1009 로 닫지만 그건 앱 정책이 아니다. 이 부정 사실은 고정 server commit 의 `app/main.py`·`app/topic_dispatcher.py`에서 WebSocket `close(` 호출을 전수 검색해 확인했다(collector DB의 `close()`는 범위 밖).",
+      "unit_sha256": "ed08541e77446c4e2db5b91e087bde9cbb6d05a8c669dbcb155114409eec88b0",
+      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* **앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:663`) — 16KB 초과는 transport 가 1009 로 닫지만 그건 앱 정책이 아니다. 이 부정 사실은 고정 server commit 의 `app/main.py`·`app/topic_dispatcher.py`에서 WebSocket `close(` 호출을 전수 검색해 확인했다(collector DB의 `close()`는 범위 밖).",
       "classification": "code_fact",
       "detail": "pinned main.py와 topic_dispatcher.py의 WebSocket close 호출을 전수 검색해 앱 레벨 명시 close가 인증 1008 한 곳뿐임을 확인했다.",
       "provenance": [
         "baseline:D1",
-        "file:app/topic_dispatcher.py:655"
+        "file:app/topic_dispatcher.py:663"
       ]
     },
     {
@@ -640,28 +654,28 @@
     {
       "destination": "HEALTH",
       "rid": "R-HLT-1",
-      "unit_sha256": "f78c5d08fd378694125376432d1ae51ed6837aa4d6b09da3a5df5adb4d9c809d",
-      "unit_text": "**서버 — 정상 initial snapshot _이후_ 의 publisher 사망은 클라가 판별할 수 없다** (⛔ 파생 숫자 숨김 정책([R-DEC-2](../DECISIONS.md#r-dec-2), `[제안·결정 대기]`)을 수용할 경우 이것은 **arming 선행조건**이며 **후속이 아니다**) ([R-DEC-1](../DECISIONS.md#r-dec-1) — 45초는 데이터의 나이가 아니므로 **정상 침묵과 구분 불가**). **서버 publisher health/SLO/알람**으로 덮는다. 이건 클라 계약이 아니라 **운영 계약**이다. 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다 (`app/scheduler.py:1402-1412` · `app/main.py:887-910`).",
+      "unit_sha256": "1537896b6f52351f193cc124fb5888ccf19ef012a2d3765a553a0f5e18ce722a",
+      "unit_text": "**서버 — 정상 initial snapshot _이후_ 의 publisher 사망은 클라가 판별할 수 없다** (⛔ 파생 숫자 숨김 정책([R-DEC-2](../DECISIONS.md#r-dec-2), `[제안·결정 대기]`)을 수용할 경우 이것은 **arming 선행조건**이며 **후속이 아니다**) ([R-DEC-1](../DECISIONS.md#r-dec-1) — 45초는 데이터의 나이가 아니므로 **정상 침묵과 구분 불가**). **서버 publisher health/SLO/알람**으로 덮는다. 이건 클라 계약이 아니라 **운영 계약**이다. 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다 (`app/scheduler.py:1402-1412` · `app/main.py:899-922`).",
       "classification": "code_fact",
       "detail": "D3/B2와 함께 B1의 범위를 두 publisher 모듈 내부로 한정하고, 외부 broadcast caller도 payload 변경 시에만 publish함을 확인했다. 클라이언트가 침묵 원인을 구분할 신호가 없다는 결론은 유지된다.",
       "provenance": [
         "baseline:B1",
         "baseline:B2",
-        "file:app/main.py:887-910",
+        "file:app/main.py:899-922",
         "file:app/scheduler.py:1402-1412"
       ]
     },
     {
       "destination": "HEALTH",
       "rid": "R-HLT-3",
-      "unit_sha256": "1932429539b3642d5cc842e73ff652f6b54efd657196a152048c729babf78c2b",
-      "unit_text": "[R-HAND-1](topic-snapshot-handoff.md#r-hand-1) 이 남기는 침묵과 [R-HLT-1](#r-hlt-1) 의 publisher 사망은 클라가 판별할 수 없다 — 서버가 이 계약으로 덮는다. 이 계약은 **확정**이며, [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택 여부와 **무관하다**. 판별 불가의 코드 근거: baseline **D3**(snapshot build 실패/`None` 을 연결 유지 상태로 격리) · **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:887-910`(외부 caller 도 변경 시에만 publish).",
+      "unit_sha256": "5ffa33dd5417d8f816a369e1a4df015d3772b3e7b90ab50155acff6aae9d2b8b",
+      "unit_text": "[R-HAND-1](topic-snapshot-handoff.md#r-hand-1) 이 남기는 침묵과 [R-HLT-1](#r-hlt-1) 의 publisher 사망은 클라가 판별할 수 없다 — 서버가 이 계약으로 덮는다. 이 계약은 **확정**이며, [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택 여부와 **무관하다**. 판별 불가의 코드 근거: baseline **D3**(snapshot build 실패/`None` 을 연결 유지 상태로 격리) · **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:899-922`(외부 caller 도 변경 시에만 publish).",
       "classification": "code_fact",
       "detail": "snapshot build 실패의 조용한 격리와 변경 시에만 publish하는 외부 caller를 함께 확인했다. B1을 서버 전체 timer 부재로 과장하지 않도록 범위를 교정했다.",
       "provenance": [
         "baseline:B1",
         "baseline:D3",
-        "file:app/main.py:887-910"
+        "file:app/main.py:899-922"
       ]
     },
     {
@@ -721,20 +735,6 @@
       "detail": "설정 파일의 현재 상태(부정 사실)를 단정하는 단위다. 단위 안에 이미 baseline E4 근거가 있고, 고정 commit 에서 재확인했다 — location /ws 는 정확히 80-99행 블록이며 그 안에 limit_req/limit_conn 이 없고, location /api/ 는 104행에서 열려 105-106행에 둘 다 있으며 zone 정의는 19-20행(파일 상단)에 있다.",
       "provenance": [
         "baseline:E4"
-      ]
-    },
-    {
-      "destination": "HAND",
-      "rid": "R-HAND-11",
-      "unit_sha256": "5a0f6cae79de49c68c27d25e6215f58759a90fdc467036a33ee2c1290a89751e",
-      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:311-341`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3058-3061`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
-      "classification": "code_fact",
-      "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
-      "provenance": [
-        "file:app/main.py:3058-3061",
-        "file:app/topic_authorization.py:311-341",
-        "file:app/topic_policy.py:244-282",
-        "file:app/topic_policy.py:285-330"
       ]
     }
   ]

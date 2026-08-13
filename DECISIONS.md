@@ -4009,7 +4009,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:1862](app/main.py#L1862))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:2416](app/main.py#L2416))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -6501,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
+- server 기준 commit: `a5623916dc49e0b69e8cb2b22204c4223ea16762`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51`
-- baseline SHA: `8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577`
+- manifest SHA: `7ce6894e2a3275ef03771f980d201b8c5be2fb13f5beb56bddfb55da953bf63e`
+- baseline SHA: `f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6564,7 +6564,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1150-1200` · `app/main.py:1014-1058`).
+(`app/main.py:1162-1212` · `app/main.py:1026-1070`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6590,7 +6590,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 ### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 활성화 미확인**
 
 **(a)** `0cfe474`에서 WS FX/USDT premium 강제 경로가 추가됐다
-(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:678-818`). 적용 여부는
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:686-826`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
 코드 기본값은 `compatibility` 다(`app/config.py:686-688`). production 의 실제 값은 아래 표가
@@ -6612,8 +6612,8 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 
 구현 근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
-`app/topic_authorization.py:311-341`(coordinator) · `app/topic_dispatcher.py:678-818`(배선·등록) ·
-`app/main.py:3058-3061`(REST twin).
+`app/topic_authorization.py:311-341`(coordinator) · `app/topic_dispatcher.py:686-826`(배선·등록) ·
+`app/main.py:3070-3073`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
@@ -6695,7 +6695,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1402-1412` · `app/main.py:887-910`). 따라서 현재 경로에는
+  (`app/scheduler.py:1402-1412` · `app/main.py:899-922`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.

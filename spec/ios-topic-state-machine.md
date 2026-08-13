@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `0cfe4748defdfcad1ef9b55dcab1f5fbc2a0df01`
+- server 기준 commit: `a5623916dc49e0b69e8cb2b22204c4223ea16762`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `f15841a7592718d70466bb79093c3cd12b3cfb55b5032f90d57837e2150ced51`
-- baseline SHA: `8f1ce9da01d55fdee9f889ba1199a8d1196dd56b3f482089ff820903c10b1577`
+- manifest SHA: `7ce6894e2a3275ef03771f980d201b8c5be2fb13f5beb56bddfb55da953bf63e`
+- baseline SHA: `f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -246,7 +246,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 | `request_too_large` | 위 1009 행 참조 | — | — | 실제 운영 경로는 **frame 이 아니라 close** |
 
 ⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의
-`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3138-3145`)
+`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3150-3157`)
 클라는 셋을 구별할 수 없다.
 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.
 
@@ -275,7 +275,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는
 **두 경우를 모두** 다뤄야 한다
 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330`
-(stage 별 partition) · `app/topic_dispatcher.py:754-794`(per-topic 거부 코드).
+(stage 별 partition) · `app/topic_dispatcher.py:762-802`(per-topic 거부 코드).
 상태 서술은 `DECISIONS.md` ADR-041
 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11).
 전이표는 Stage A 완료를 전제로 한다.
@@ -430,7 +430,7 @@ enum TopicRejection {
 **이 축 하나를 공유**해 판정이 갈리지 않게 한다.
 
 ⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) ·
-`app/main.py:3138-3145`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
+`app/main.py:3150-3157`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
 표의 두 행이 구현된다.
 
 ⛔ **`unknown_topic` 에서 `desired` 를 지우면 안 된다.** 버전 스큐나 순차 배포가 끝나도 **자동 복구할

@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1204` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1216` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
 
 ## B. publish 의미론
 
@@ -56,23 +56,28 @@
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
   stage 정의·엄격 파서·코드 기본값 `app/config.py:645-688` · **정책 정본**
   `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
-  `app/topic_auth_rollout.py:173-188` · 필터 호출과 등록 `app/topic_dispatcher.py:547-569` ·
-  production 주입 `app/main.py:302-308`.
+  `app/topic_auth_rollout.py:286-301` · 필터 호출과 등록 `app/topic_dispatcher.py:555-577` ·
+  production 주입 `app/main.py:312-320`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
   모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
   `reject_anonymous_fx` 에서 값이 갈리므로 함수가 둘이다).
   - `compatibility` — 무료 topic 등록 + snapshot, ack 없음(구 동작 보존).
   - `reject_anonymous_fx` — 무료 집합에서 **canonical FX 만** 조용히 제외. USDT 는 유지되고
     FX-only 요청은 등록·응답 모두 0이다. 익명 unsubscribe 는 stage 와 무관하게 기존 경로를
-    그대로 탄다(`app/topic_dispatcher.py:819-845`).
+    그대로 탄다(`app/topic_dispatcher.py:827-853`).
   - `enforce_authenticated_premium` — 익명 subscribe topic 을 전부 조용히 제외. unsubscribe 는 유지.
-  ⚠️ 세 stage 모두 **익명 subscribe 시도를 계측**한다 — 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다
-     앞이라(`app/topic_dispatcher.py:509-517`) flag-off 운영 상태에서도 값이 쌓인다.
+  ⚠️ 세 stage 모두 **익명 subscribe 시도**와 형식 검증을 통과한 **미검증 token-bearing 후보**를
+     서로 다른 축으로 계측한다. 두 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다 앞이라
+     (`app/topic_dispatcher.py:509-525`) flag-off 운영 상태에서도 값이 쌓인다. token-bearing 축은
+     Firebase 검증 전 관측이라 인증 사용자나 실제 RevenueCat 호출 수가 아니다
+     (`app/topic_auth_rollout.py:237-274` · snapshot `app/topic_auth_rollout.py:317-361`). 정책 topic과
+     현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
+     (`app/main.py:302-320`).
 - **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3023` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3058` `verify_firebase_token(request)` → `app/main.py:3061`
+- **C3 [코드]** `exchange-rate/app/main.py:3035` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3070` `verify_firebase_token(request)` → `app/main.py:3073`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
