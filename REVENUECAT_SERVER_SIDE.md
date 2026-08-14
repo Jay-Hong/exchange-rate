@@ -60,7 +60,7 @@ Secret API Key는 자동 생성되지 않으며, 아래 절차로 직접 생성�
 - 캐시 크기: 1000명
 - TTL: 5분
 - Stale TTL: 1시간
-- 캐시 가능한 응답: 200, 404만 캐시
+- 캐시 가능한 응답: 200/201(Get-or-Create 동일 본문)만 캐시 — 404 는 계약 밖 상태(ProtocolViolation, 미캐시. 2026-08-14 교정: 구 '404=신규 사용자 캐시' 폐기)
 - 캐시 불가 응답: 4xx/5xx (401, 429 포함)
 - API 오류 + 캐시 존재: stale 값 반환 (유료 사용자 보호)
 - API 오류 + 캐시 없음: PENDING 반환 → 503 + `Retry-After: 5초` (API 정상화 후 pending TTL 12초 만료 시 INACTIVE)
@@ -130,7 +130,7 @@ RevenueCat 응답에서 `subscriber.entitlements.premium`을 조회한다.
 - `verify_premium_status(user_id, *, clock=None) -> PremiumStatus`
   - 캐시 조회
   - 없거나 stale이면 RevenueCat API 호출
-  - 200/404만 캐시, 4xx/5xx는 캐시하지 않음
+  - 200/201만 캐시, 404 포함 4xx/5xx는 캐시하지 않음 (Get-or-Create 계약상 신규 고객은 201 — 404 는 계약 밖 상태)
   - API 실패 + stale 캐시 → stale 값 반환 (유료 사용자 보호)
   - API 실패 + 캐시 없음 → PENDING 반환 (API 정상화 후 TTL 만료 시 INACTIVE)
 - `verify_premium(user_id, *, clock=None) -> bool`
@@ -162,7 +162,7 @@ RevenueCat 응답에서 `subscriber.entitlements.premium`을 조회한다.
 ## 9. 테스트 체크리스트
 
 - ✅ `verify_premium()` 단위 테스트 — `tests/test_subscription_clock.py` (38건, 2026-07-26)
-  - 200/404 캐시 동작 / 4xx/5xx 미캐시 / stale fallback / lifetime entitlement
+  - 200/201 캐시 동작 / 404 포함 4xx/5xx 미캐시 / stale fallback / lifetime entitlement
   - + TTL 경계 3종(`age == CACHE_TTL`은 stale / `age == CACHE_STALE_TTL`은 삭제 /
     pending `now == expires_at`은 active) · RevenueCat `expires_dt == now`는 만료
   - + 상태머신 **주요 분기** baseline (fresh short-circuit / stale+성공 / stale+실패 fallback /

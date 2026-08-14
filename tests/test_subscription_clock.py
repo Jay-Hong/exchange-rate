@@ -268,10 +268,12 @@ class TestRevenueCatExpiryBoundary(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._check(_entitlement(None, present=False), clock), (False, True))
         self.assertEqual(rec.calls, 0)
 
-    async def test_http_404_is_non_premium_but_cacheable(self):
+    async def test_http_404_unexpected_status_is_not_cacheable(self):
+        """구 계약(404=새 사용자 비구독 캐시)은 오류 — Get-or-Create 는 신규에 201 을 준다.
+        404 의 의미는 공식 계약에 없다 → 계약 밖 상태(ProtocolViolation)로 fail-closed."""
         with patch.object(subscription, "REVENUECAT_API_KEY", "k"), _revenuecat(status_code=404):
             got = await subscription._check_revenuecat_entitlement("u", clock=_clock(T0)[0])
-        self.assertEqual(got, (False, True))
+        self.assertEqual(got, (False, False), "계약 밖 상태를 authoritative 비구독으로 캐시하면 안 된다")
 
     async def test_http_500_is_not_cacheable(self):
         with patch.object(subscription, "REVENUECAT_API_KEY", "k"), _revenuecat(status_code=500):

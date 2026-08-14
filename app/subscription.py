@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import logging
 from typing import Optional, Union
+import urllib.parse
 
 # 서드파티 라이브러리
 import httpx
@@ -141,7 +142,10 @@ def invalidate_user_cache(user_id: str) -> None:
 
 @dataclass(frozen=True)
 class Determined:
-    """RevenueCat이 **authoritative하게 판정**했다 (200 파싱 성공, 또는 404=신규 사용자)."""
+    """RevenueCat이 **authoritative하게 판정**했다 (200/201 파싱 성공 — Get-or-Create 동일 본문).
+
+    ⛔ 구 계약의 "404=신규 사용자" 는 여기 속하지 않는다 — 신규 고객은 201 을 받는다(2026-08-14 교정).
+    """
 
     is_premium: bool
 
@@ -241,7 +245,9 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
-                f"{REVENUECAT_API_URL}/subscribers/{user_id}",
+                # RC 계약: app_user_id 는 URL 인코딩 필수 — '/'·'#' 이 든 custom UID 가
+                # 경로를 바꾸거나 잘리는 것을 막는다 (safe="" 로 '/' 도 인코딩).
+                f"{REVENUECAT_API_URL}/subscribers/{urllib.parse.quote(user_id, safe='')}",
                 headers={
                     "Authorization": f"Bearer {REVENUECAT_API_KEY}",
                     "Content-Type": "application/json",
@@ -252,7 +258,10 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
         logger.warning("RevenueCat API 호출 실패", extra={"error": str(e)})
         return ProviderUnavailable()
 
-    if response.status_code == 200:
+    # ⚠️ v1 `GET /subscribers/{id}` 는 **Get-or-Create** 다 — 기존 고객은 200, 방금 생성된
+    #    고객은 **201** 로 같은 Customer Info 본문을 돌려준다(공식 API v1 계약, 2026-08-14 확인).
+    #    201 을 별도 분기(예: 즉시 비구독)로 두면 같은 본문을 두 규칙으로 읽게 된다 — 동일 파서.
+    if response.status_code in (200, 201):
         try:
             data = response.json()
         except ValueError:
@@ -322,10 +331,12 @@ async def fetch_revenuecat_result(user_id: str, *, clock: Clock) -> RevenueCatRe
             logger.warning("RevenueCat expires_date tz 누락", extra={"user_id": user_id})
             return ProtocolViolation(detail="expires_date_naive")
 
-    if response.status_code == 404:
-        # ✅ 사용자 없음: 새 사용자, "비구독"으로 캐시 OK
-        return Determined(is_premium=False)
-
+    # ⛔ 404 특수 분기를 **의도적으로 두지 않는다** (2026-08-14 계약 교정). 구 코드는
+    #    "404 = 새 사용자, 비구독 캐시 OK" 였는데 Get-or-Create 계약상 신규 고객은 404 가
+    #    아니라 201 을 받는다 — 404 의 의미는 공식 계약에 정의돼 있지 않으므로 우리가
+    #    "설정 결함" 으로 승격하지도 않는다. 아래 공통 처리로 낙하해 status 가 로그에 남고
+    #    `ProtocolViolation("unexpected status 404")` 로 fail-closed 된다
+    #    (WS: persistent unavailable, REST: 미캐시 → stale fallback/PENDING).
     status = response.status_code
     logger.warning(
         "RevenueCat API 응답 오류",
@@ -346,9 +357,10 @@ def _result_to_legacy_tuple(result: RevenueCatResult) -> tuple[bool, bool]:
     `Determined`만 `should_cache=True`이고 나머지 4변종은 전부 `(False, False)`다.
     구분력은 **WS 인가 경로**(`app/topic_authorization.py`)가 쓴다.
 
-    ⚠️ **범위**: 이 매핑으로 **예외·전송·HTTP 상태 경로의 REST 동작은 구 코드와 동일**하다.
-    반면 **malformed 200의 분류는 §8.1 A4-1 hardening에서 의도적으로 바꿨다**
-    (구 `(False, True)`/`(True, True)` → 신 `(False, False)`).
+    ⚠️ **범위**: 이 매핑으로 **예외·전송 경로의 REST 동작은 구 코드와 동일**하다. 반면 두
+    곳은 의도적으로 바꿨다 — **malformed 200**(§8.1 A4-1 hardening: 구 `(False, True)`/
+    `(True, True)` → 신 `(False, False)`)과 **404**(2026-08-14 계약 교정: 구 `(False, True)`
+    비구독 캐시 → 신 `(False, False)` 미캐시).
     ⛔ 따라서 "REST 동작이 한 비트도 바뀌지 않는다"고 적지 말 것 — 더는 사실이 아니다.
     """
     if isinstance(result, Determined):
@@ -360,7 +372,8 @@ async def _check_revenuecat_entitlement(user_id: str, *, clock: Clock) -> tuple[
     """
     RevenueCat REST API로 구독 상태 확인 (Async)
     Returns: (is_premium, should_cache)
-      - should_cache=True: **authoritative 판정**(200 파싱 성공 / 404=신규 사용자), 캐시해도 안전
+      - should_cache=True: **authoritative 판정**(200/201 파싱 성공), 캐시해도 안전 —
+        404 는 계약상 신규 사용자가 아니므로 여기 속하지 않는다(계약 밖 상태, 2026-08-14 교정)
       - should_cache=False: **판정을 신뢰할 수 없음** — 일시 장애(408·429·5xx·전송) / 설정 오류
         (401·403·API key 미설정) / 응답 형식 위반 / 400 / 예상 밖 내부 예외.
         캐시하면 유료 사용자 차단 위험이라 stale fallback·PENDING 경로로 보낸다.

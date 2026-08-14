@@ -750,7 +750,7 @@ enum RevenueCatConfig {
 
 핵심 요약:
 - `verify_premium_status()` + `require_premium()`으로 Premium 게이팅 적용
-- 200/404만 캐시, 4xx/5xx 미캐시
+- 200/201만 캐시, 404 포함 4xx/5xx 미캐시 (Get-or-Create 계약상 신규 고객은 201 — 404 는 계약 밖 상태, 2026-08-14 교정)
 - LRU 1000명 + TTL 5분 + Stale 1시간
 - 캐시 없음 + API 오류 시 **PENDING** 반환 → 503 + Retry-After(5초)
 

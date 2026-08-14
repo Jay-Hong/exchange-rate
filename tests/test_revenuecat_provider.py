@@ -126,7 +126,17 @@ SCENARIOS = [
     ("200 expired",       _FakeResponse(200, _entitlement_payload(_EXPIRED)),       (False, True),  Determined),
     ("premium 키 누락",    _FakeResponse(200, _no_premium_key_payload()),            (False, True),  Determined),
     ("entitlements {}",   _FakeResponse(200, {"subscriber": {"entitlements": {}}}), (False, True),  Determined),
-    ("404 unknown user",  _FakeResponse(404),                                       (False, True),  Determined),
+    # ⛔ 구 행("404 unknown user" → 비구독 캐시)은 계약 오류였다 — Get-or-Create 는 신규
+    #    고객에게 201 을 주지 404 를 주지 않는다. 404 의 의미는 공식 계약에 없으므로 "설정
+    #    결함" 으로 승격하지도 않는다 — 예상 밖 상태 = ProtocolViolation (공통 로그 경로 경유).
+    ("404 unexpected",    _FakeResponse(404),                                       (False, False), ProtocolViolation),
+    # ⚠️ 201 은 **200 과 같은 파서**여야 한다 — 양·음성만 잠그면 201 전용 느슨한 파서가
+    #    생존한다(검토 실측 지적). 200 hardening 매트릭스의 대표군을 201 로도 통과시킨다.
+    ("201 created active", _FakeResponse(201, _entitlement_payload(_ACTIVE)),       (True, True),   Determined),
+    ("201 created empty",  _FakeResponse(201, {"subscriber": {"entitlements": {}}}), (False, True),  Determined),
+    ("201 expired",       _FakeResponse(201, _entitlement_payload(_EXPIRED)),       (False, True),  Determined),
+    ("201 premium 키 누락", _FakeResponse(201, _no_premium_key_payload()),           (False, True),  Determined),
+    ("201 malformed JSON", _FakeResponse(201, raises=ValueError("not json")),       (False, False), ProtocolViolation),
     ("400 bad request",   _FakeResponse(400),                                       (False, False), BadRequest),
     ("401 unauthorized",  _FakeResponse(401),                                       (False, False), ProviderMisconfigured),
     ("403 forbidden",     _FakeResponse(403),                                       (False, False), ProviderMisconfigured),
@@ -166,7 +176,9 @@ class TestLegacyTupleCharacterization(unittest.IsolatedAsyncioTestCase):
     *출발점*을 가리킨다 — 리팩터 전 현행 코드에 21건을 전수 대조해 기대값을 실측으로 확정했다.
     이후 §8.1 A4-1 hardening에서 **malformed 200 행의 기대값은 승인 아래 의도적으로 바뀌었고**,
     바뀐 행의 근거는 `TestMalformedIsNotAuthoritative`가 따로 잠근다.
-    불변인 것: **정상·예외·전송·HTTP 상태 경로**의 REST 결과.
+    불변인 것: **정상·예외·전송 경로**의 REST 결과. HTTP 상태 경로 중 **404 는 2026-08-14
+    계약 교정으로 의도적으로 바뀌었다**(비구독 캐시 → ProtocolViolation 미캐시) — 아래 표의
+    "404 unexpected" 행과 전용 테스트가 그 근거를 잠근다.
     """
 
     async def test_each_scenario_preserves_legacy_tuple(self):
@@ -218,11 +230,47 @@ class TestTypedResult(unittest.IsolatedAsyncioTestCase):
             got = await fetch_revenuecat_result("u", clock=_clock())
         self.assertIsInstance(got, ProviderMisconfigured)
 
+    async def test_http_404_detail_and_log_travel_the_common_path(self):
+        """⛔ 타입만 보면 `ProtocolViolation()` 로 바꿔도 통과한다(검토 실측). detail 의
+        status 와 공통 오류 로그("RevenueCat API 응답 오류")까지 하중을 건다 — 구 코드의
+        특수 분기는 이 로그를 우회해 REST 에서 404 신호가 사라졌다.
+        ⚠️ 로그는 **record 의 extra.status 로** 단언한다 — logs.output 은 포맷된 메시지라
+        extra 를 안 실어, 메시지 검사만으론 status 제거 변이가 생존한다(검토 실측)."""
+        with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
+            with _patch_http(_FakeResponse(404)):
+                with self.assertLogs("exchange_rate.subscription", level="WARNING") as logs:
+                    result = await fetch_revenuecat_result("u", clock=_clock())
+        self.assertIsInstance(result, ProtocolViolation)
+        self.assertEqual(result.detail, "unexpected status 404")
+        records = [r for r in logs.records if "응답 오류" in r.getMessage()]
+        self.assertEqual(len(records), 1, logs.output)
+        self.assertEqual(getattr(records[0], "status", None), 404,
+                         "extra.status 가 record 에 실려야 REST 에서 404 신호가 남는다")
+
+    async def test_user_id_is_url_encoded_in_the_request_path(self):
+        """RC 계약: app_user_id 는 URL 인코딩 필수 — '/' 든 custom UID 가 경로를 바꾸면 안 된다."""
+        seen = []
+
+        class _Recorder(_FakeAsyncClient):
+            async def get(self, url, *args, **kwargs):
+                seen.append(url)
+                return await super().get(url, *args, **kwargs)
+
+        with patch.object(subscription, "REVENUECAT_API_KEY", "k"), patch.object(
+            subscription.httpx, "AsyncClient",
+            lambda *a, **k: _Recorder(_FakeResponse(200, _entitlement_payload(_ACTIVE))),
+        ):
+            await fetch_revenuecat_result("team/user#7", clock=_clock())
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].endswith("/subscribers/team%2Fuser%237"), seen[0])
+
     async def test_determined_carries_is_premium(self):
+        # 비구독 대조군은 404 가 아니라 **빈 entitlements 200** 이다 — 404 는 이제 계약 밖
+        # 상태(ProtocolViolation, 미캐시)라 Determined 대조군이 될 수 없다.
         with patch.object(subscription, "REVENUECAT_API_KEY", "k"):
             with _patch_http(_FakeResponse(200, _entitlement_payload(_ACTIVE))):
                 active = await fetch_revenuecat_result("u", clock=_clock())
-            with _patch_http(_FakeResponse(404)):
+            with _patch_http(_FakeResponse(200, {"subscriber": {"entitlements": {}}})):
                 unknown = await fetch_revenuecat_result("u", clock=_clock())
         self.assertEqual((active.is_premium, unknown.is_premium), (True, False))
 
