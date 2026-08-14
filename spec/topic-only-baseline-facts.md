@@ -76,8 +76,8 @@
 - **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3035` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3070` `verify_firebase_token(request)` → `app/main.py:3073`
+- **C3 [코드]** `exchange-rate/app/main.py:3053` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3088` `verify_firebase_token(request)` → `app/main.py:3091`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,

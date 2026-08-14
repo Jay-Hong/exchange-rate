@@ -27,7 +27,8 @@
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
           "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
           "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)",
-          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain"
+          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain",
+          "Failure-domain split for ws-connection-metrics (S0) re-baseline: pinned server commit advanced to 2635674 with the eight semantically verified citation-occurrence remaps across five unique app/main.py targets, the two pre-existing GRAPH_API_V2_CONTRACT drifts recorded as debt rather than mechanically moved, and the derived baseline, manifest, header, ledger and journal chain"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -91,7 +92,8 @@
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
           "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
           "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)",
-          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain"
+          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain",
+          "Failure-domain split for ws-connection-metrics (S0) re-baseline: pinned server commit advanced to 2635674 with the eight semantically verified citation-occurrence remaps across five unique app/main.py targets, the two pre-existing GRAPH_API_V2_CONTRACT drifts recorded as debt rather than mechanically moved, and the derived baseline, manifest, header, ledger and journal chain"
         ]
       }
     ],
@@ -116,7 +118,8 @@
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
           "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
           "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)",
-          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain"
+          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain",
+          "Failure-domain split for ws-connection-metrics (S0) re-baseline: pinned server commit advanced to 2635674 with the eight semantically verified citation-occurrence remaps across five unique app/main.py targets, the two pre-existing GRAPH_API_V2_CONTRACT drifts recorded as debt rather than mechanically moved, and the derived baseline, manifest, header, ledger and journal chain"
         ],
         "result": "pass"
       },
@@ -154,21 +157,21 @@
   "reviewed_at": "2026-08-14",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "da63111db530418a79a698c0761a88c4c37cbb6ac201558e77148b8dfd3eebbf",
-    "baseline_sha256": "1c66910da3a863dd7672a4b5fb4bb5d54a8459cf2d3d9f0a57a85612d78ea87d",
-    "lock_sha256": "3a96e2a2f9274c8332e03385c2b7d8b4f249e89014b7edbffbb5130a335d93ac",
-    "server_commit": "7c8a890e54667cadc9b712fb9680edd25618f494",
+    "manifest_sha256": "27ec695b6bfed1375ec7e7a5f5725193ff1ee2fefa3e2ddd7173e208b8adc3ef",
+    "baseline_sha256": "0bfb24c2ea1b10d7b49cf928e2c9cd47da7e185df64ba17c62379aef885ecc98",
+    "lock_sha256": "ac9c29659cb78cdd8c923df451c7ec923f8dd4b8bf8e0e39ed99b24275022c03",
+    "server_commit": "26356746463070565ce05d161cdc4e0bef55d859",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "0e21f303ee02bde082e2c60ad0ec34c9c2ed722619c3a6313f41faaa41c8ca0b",
-    "CLIENT": "09e9daddb6918f7023dffbbba86ce17bf08c979a9b56839a3d7248457ac1dd5d",
-    "CUT": "014e48b2aa4f4fcf76f0894c985f2d665a33b68e7ea22b4a47fc2d44f1392689",
-    "HAND": "6f96bf19e1d389df7d972346e42ce1971300bf9267901bdd7ac6d06f397b78ce",
-    "HEALTH": "c846ea18bae3507db84e761576f99acf5cc35d4803457b423b82ceb211cb4d1f",
-    "LOAD": "25246ce764305fc1896af624a708190f8ef8d6d1e504022239cdf406901e0e2c"
+    "ADR": "2055f6e707656dfa972a9488c3ce7e95dcc245b09d3f839596da5ae29db83842",
+    "CLIENT": "ad2e657d23f95d766dee0484ca2259fe8d3244bda5a5b0c087c4e8c374f020a5",
+    "CUT": "c8a36be96c9616cc8e455208dc004435902b82dda78d88eaa3ff92c14ba96636",
+    "HAND": "fd2b8317a5001d3e00191e147e13130c3f9d76d1de5db2f69757e3a899e2fb67",
+    "HEALTH": "b766d95342cfb32ca0eea3c7bbc07445df32632f9631e09e4cae2c1a0ad22768",
+    "LOAD": "7e08a7d8e6e43ac67c6fb974dbd4a8ee954ea89c0ce6f70f0d2d2ccf33a38861"
   },
-  "claim_ledger_sha256": "6559c6fa5b5b8a56b3d8306b04b26b60fcdc86e98e92cb6585597f3670f2ad0a",
+  "claim_ledger_sha256": "cf8e702548793e25b517db6555b6dde9397f73812635a929a1dcc91e8fb9ce3b",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
@@ -570,6 +573,22 @@
       ],
       "issue": "R-LOAD-3's evidence E2 cited app/topic_initial_snapshot.py:305 for the claim that initial snapshots are built sequentially per connection, quoting both the loop and the to_thread call. Line 305 carries neither. The loop is at 310 and the to_thread build at 316. spec/topic-only-baseline-facts.md E2 quoted the same two elements but cited only :316, so both documents were partially wrong and in different ways — and an earlier draft of this correction claimed the baseline was already right, which the reviewer refuted by reading it. The citation gates did not object to either because they check path existence and in-bounds only, which restates the SEM-012/SEM-023/SEM-024 residual. Both drifts surfaced from reading during a reconnect-storm implementation audit, not from any gate.",
       "disposition": "Both E2 locators now cite 310-316, the range that contains both quoted elements. No code changed and no pinned commit moved, but the baseline file itself changed, so the chain advances: baseline hash in the lock, manifest baseline_sha, the baseline and manifest SHA lines in all six output documents, and the derived ledger and journal hashes. The E2 bullets are not extracted claim candidates, so no ledger unit text changed (candidate set equals ledger key set, checked before and after). Bounded: this fixes two locators found by reading and does not establish that other backtick locators entail their surrounding claims."
+    },
+    {
+      "id": "SEM-033",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "DECISIONS.md/ADR-033",
+        "DECISIONS.md/R-INV-2",
+        "spec/topic-only-baseline-facts.md/C3",
+        "spec/ios-topic-state-machine.md/R-CLI-6",
+        "spec/ios-topic-state-machine.md/R-CLI-9",
+        "spec/topic-snapshot-handoff.md/R-HAND-11",
+        "GRAPH_API_V2_CONTRACT.md"
+      ],
+      "issue": "The re-baseline for S0 was scoped from a reviewer-supplied list of moved app/main.py locators. An exhaustive scan found more: counted as citation occurrence sites, ten source-document sites were affected (DECISIONS 2, baseline 3, CLIENT 2, HAND 1, GRAPH 2), and the list had omitted DECISIONS' legacy graph markdown link and both GRAPH links. Every affected site was then checked against the file rather than moved by arithmetic, and two of them — the GRAPH links for the legacy graph route and the period cache — did not point at what their prose claimed even at the current pin, so a mechanical +18 would have carried the error forward at a new pin. That is the SEM-023 failure repeated: verifying that a line moved is not verifying that the target supports the claim. A second counting error appeared in the first draft of this finding, which mixed distinct line numbers with occurrence sites and produced an arithmetic that did not close.",
+      "disposition": "Eight occurrence sites were remapped after reading each new target: the legacy graph route decorator (2434), the v2 snapshot route (3053), verify_firebase_token (3088), require_premium (3091) and the invalid_token branch (3168-3175) — five unique targets. The two GRAPH_API_V2_CONTRACT.md links were deliberately not moved and are recorded here as pre-existing debt with their true targets: the legacy graph route is app/main.py:2434 (cited as 1831) and _period_cache is defined at :2627 (cited as 2024-2046). GRAPH_API_V2_CONTRACT.md is outside the six gated documents, so the current locator and citation gates do not examine either link. Counts in this record are stated in occurrence sites; the derived claim-ledger carries the same strings and was regenerated. Bounded: the scan covered app/main.py citations only, and correcting the GRAPH document is a separate slice that needs its own verification of what those sections claim."
     }
   ],
   "residual_limits": [

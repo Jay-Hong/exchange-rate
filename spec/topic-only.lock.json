@@ -6,10 +6,10 @@
   },
   "baseline": {
     "path": "spec/topic-only-baseline-facts.md",
-    "sha256": "1c66910da3a863dd7672a4b5fb4bb5d54a8459cf2d3d9f0a57a85612d78ea87d"
+    "sha256": "0bfb24c2ea1b10d7b49cf928e2c9cd47da7e185df64ba17c62379aef885ecc98"
   },
   "pinned_commit": {
-    "server": "7c8a890e54667cadc9b712fb9680edd25618f494",
+    "server": "26356746463070565ce05d161cdc4e0bef55d859",
     "ios": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   }
 }
