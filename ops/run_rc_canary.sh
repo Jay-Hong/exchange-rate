@@ -193,6 +193,11 @@ run_canary() {
   # (env_file 은 global — `local` 이면 EXIT trap 시점에 unbound 가 돼 set -u 가 죽인다. 실측)
   env_file=$(umask 077 && mktemp)
   grep -E '^REVENUECAT_API_KEY=' "$REPO_ROOT/.env" > "$env_file"
+  # ⛔ PYTHONPATH 없이는 canary 가 `app` 을 import 하지 못한다 — bind-mount 된 스크립트를
+  #    경로로 실행하면 `sys.path[0]` 이 **스크립트 디렉터리**(/app/scripts)라 /app 이 빠진다
+  #    (운영 pinned image 실측: ModuleNotFoundError: No module named 'app').
+  #    가짜 docker 로 도는 runner 테스트는 이 통합 경로를 실행하지 않아 잡지 못했다.
+  printf 'PYTHONPATH=/app\n' >> "$env_file"
   printf 'CANARY_UID=%s\n' "$uid" >> "$env_file"
   printf 'CANARY_EXPECTED_LABEL=%s\n' "$expected_label" >> "$env_file"
   printf 'CANARY_IMAGE_ID=%s\n' "$image" >> "$env_file"

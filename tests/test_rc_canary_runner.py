@@ -348,6 +348,10 @@ class TestLaunchContract(RunnerHarness):
                 "CANARY_RUNNER_SHA256",
                 "CANARY_RUNNER_SOURCE_HEAD",
                 "CANARY_UID",
+                # ⛔ PYTHONPATH 는 장식이 아니다 — 없으면 컨테이너에서 `app` import 가 죽는다
+                #    (실측: ModuleNotFoundError). 가짜 docker 는 이 경로를 실행하지 않으므로
+                #    이 키 존재 자체가 유일한 회귀 방어다.
+                "PYTHONPATH",
                 "REVENUECAT_API_KEY",
             ],
         )
@@ -356,6 +360,7 @@ class TestLaunchContract(RunnerHarness):
         self.assertIn("CANARY_IMAGE_ID=sha256:" + "a" * 64, body)
         self.assertIn("CANARY_UID=canary-x", body)
         self.assertIn("CANARY_EXPECTED_LABEL=denied_premium_required", body)
+        self.assertIn("PYTHONPATH=/app", body)
 
     def test_key_never_appears_in_argv_or_output(self):
         _, log, _, result = self._launch()
