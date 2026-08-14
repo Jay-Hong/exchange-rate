@@ -31,6 +31,14 @@ caller 쪽만 재면 양방향으로 어긋난다 — 포기 뒤에도 도는 �
 - 취소는 terminal 후보보다 **우선**한다 — worker 가 결과를 만들어도 caller 취소면 `granted`
   로 세지 않으므로 **granted 는 DB-allowed 응답 수를 undercount** 한다. deadline 만료와
   caller 포기는 counter 만으로 구분할 수 없다(통제 시나리오 delta 로만 주장).
+- (S3) snapshot 루프의 **중단 편향은 connection_closed 만이 아니다** — `raised`·취소도
+  루프를 중단시켜 잔여 topic 이 세 축(deduped/build/send) 모두에서 미관측된다. `raised>0`
+  인 창도 하향 편향으로 읽는다.
+- (S3) `built − Σ(sends_by_outcome)` 는 **send outcome 이 남지 않은 post-build 종료
+  잔차**다(취소뿐 아니라 BaseException 류·기록 실패도 포함, 계측 내부 오류 조합에선 음수도
+  가능) — **취소 건수로 단정할 수 없다**. 취소 귀속은 통제 시나리오에서만 한다.
+- (S3) `topics_deduped_total == snapshot_build.started_total` 등식은 **계측 내부 오류가
+  없는 정상 경로에서만** 성립한다(observe 진입 부기 실패 시 전자만 오른다).
 
 ⛔ **취소 하위분류는 관측 사실일 뿐이다.** `ThreadPoolExecutor` 는 wrapper 호출 **전에** future
    를 running 으로 바꾸므로 worker-start 이벤트 set 이전에 경합 창이 있고, `asyncio.to_thread`
@@ -136,7 +144,9 @@ SEND_OUTCOME_KEYS: tuple[str, ...] = SEND_OUTCOMES + (_UNCLASSIFIED,)
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
     "프로세스 재기동 시 0 · REST twin 은 포함하지 않는다 · callers_awaiting 은 대기이지 점유가 아니다 · "
-    "started_total 은 관측 시도 수(leaf 실호출 수 아님) · 취소 우선이라 granted 는 undercount"
+    "started_total 은 관측 시도 수(leaf 실호출 수 아님) · 취소 우선이라 granted 는 undercount · "
+    "snapshot 루프 중단(connection_closed·raised·취소)은 잔여 topic 을 전 축 미관측으로 남긴다 · "
+    "built−Σ(sends) 는 post-build 종료 잔차(취소 단정 금지)"
 )
 
 _lock = threading.Lock()

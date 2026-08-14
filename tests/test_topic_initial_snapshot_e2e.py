@@ -1206,8 +1206,11 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 dispatcher, "compute_lease_expiry", new=lease_spy
             ))
             # 이 테스트는 lease 발급 배선만 본다. snapshot 전송 직전 검증은 S2a 테스트 소관이다.
+            # ⚠️ S3: 인증 accept 경로의 channel="token_bearing" 배선은 **행동으로** 잠근다 —
+            #    소스 텍스트 매칭만으로는 런타임 누락 변이가 생존했다(적대 probe 실측).
+            snapshot_mock = AsyncMock()
             stack.enter_context(patch(
-                "app.topic_initial_snapshot.send_initial_snapshots", new=AsyncMock()
+                "app.topic_initial_snapshot.send_initial_snapshots", new=snapshot_mock
             ))
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
@@ -1220,6 +1223,8 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 ack = self._receive_for(ws, "premium-three-axis")
 
         self.assertEqual(observed, [990.0, 920.0, 1000.0, 1000.0])
+        from unittest.mock import ANY
+        snapshot_mock.assert_awaited_once_with(ANY, ["fx:usd-krw"], channel="token_bearing")
         lease_spy.assert_called_once_with(
             now_mono=1000.0,
             premium_verified_at_mono=920.0,

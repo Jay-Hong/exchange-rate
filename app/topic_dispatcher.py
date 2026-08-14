@@ -574,7 +574,7 @@ async def handle_client_message(
             free_topics = topic_auth_rollout.filter_anonymous_topics(free_topics)
             if free_topics:
                 registry.register(websocket, free_topics)
-                await send_initial_snapshots(websocket, free_topics)
+                await send_initial_snapshots(websocket, free_topics, channel="anonymous")
             return
 
         # 토큰이 실린 요청만 인증 경로를 탄다.
@@ -823,7 +823,7 @@ async def handle_client_message(
             )
         )
         if accepted_names:
-            await send_initial_snapshots(websocket, accepted_names)
+            await send_initial_snapshots(websocket, accepted_names, channel="token_bearing")
     else:  # unsubscribe
         # ⚠️ `unregister` 는 제거분이 아니라 **잔여**를 돌려준다 — 그게 곧 ack 의
         #    `active_subscriptions`(연결 최종 상태)다.

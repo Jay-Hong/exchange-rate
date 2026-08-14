@@ -176,7 +176,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             await _dispatch(
                 ws, '{"type": "subscribe", "topics": ["fx:usd-krw"]}'
             )
-        mock_snap.assert_awaited_once_with(ws, ["fx:usd-krw"])
+        mock_snap.assert_awaited_once_with(ws, ["fx:usd-krw"], channel="anonymous")
         # register는 snapshot 전에 완료 (구독 등록 보장)
         self.assertEqual(
             topic_dispatcher.registry.get_subscriptions(ws), {"fx:usd-krw"}
@@ -208,7 +208,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), {_USDT_TOPIC})
-        mock_snap.assert_awaited_once_with(ws, [_USDT_TOPIC])
+        mock_snap.assert_awaited_once_with(ws, [_USDT_TOPIC], channel="anonymous")
         ws.send_json.assert_not_called()
 
     async def test_reject_stage_fx_only_is_silent_and_registers_nothing(self):
@@ -266,7 +266,7 @@ class TestHandleClientMessage(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(topic_dispatcher.registry.get_subscriptions(ws), {_USDT_TOPIC})
-        mock_snap.assert_awaited_once_with(ws, [_USDT_TOPIC])
+        mock_snap.assert_awaited_once_with(ws, [_USDT_TOPIC], channel="anonymous")
 
     async def test_policy_failure_propagates_before_registration(self):
         ws = MagicMock()

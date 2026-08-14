@@ -37,6 +37,8 @@ timestamp-merge 계약(구값으로 신값 덮지 않기, V2 client guide 항목
 import asyncio
 import logging
 
+from app import subscribe_load_metrics as subscribe_load
+
 from starlette.websockets import WebSocketDisconnect
 
 from app.topic_wire import InitialSnapshotConnectionClosed
@@ -278,8 +280,14 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
     return None  # 미지원 topic(dxy/news/graph 등) — snapshot skip, register는 호출자가 유지
 
 
-async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> int:
+async def send_initial_snapshots(
+    websocket: "WebSocket", topics: List[str], *, channel: str = "unattributed"
+) -> int:
     """subscribe 직후 요청 topic들의 현재 snapshot을 이 ws에 즉시 전송.
+
+    `channel` 은 subscribe-load 관측 전용이다(anonymous / token_bearing) — **wire 의
+    verdict·payload·전파 예외 계약은 불변**이다(계측 상태 갱신·lock 획득은 생긴다).
+    미지정 기본값 `unattributed` 는 "배선 없이 추가된 신규 호출부" 신호다.
 
     handle_client_message subscribe 분기에서 registry.register 직후 호출 — 이 시점은
     TOPIC_DISPATCHER_ENABLED를 이미 통과한 상태.
@@ -305,15 +313,27 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
     #    바뀌는 순간 부분 초기화 오류가 된다.
     from app.topic_dispatcher import leased_subscribers
 
+    subscribe_load.record_snapshot_call(channel)
     sent = 0
     seen: set = set()
     for topic in topics:
         if topic in seen:
             continue
         seen.add(topic)
+        # ⛔ dedupe **통과분만** 센다 — 요청 1건이 몇 배 topic 으로 퍼지는지의 분자.
+        #    build 실패 topic 도 수요였으므로 여기(=build 앞)서 센다.
+        subscribe_load.record_snapshot_topic()
 
         try:
-            payload = await asyncio.to_thread(_build_snapshot_sync, topic)
+            # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
+            #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
+            #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
+            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+                payload = await asyncio.to_thread(
+                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                    _build_snapshot_sync, topic,
+                )
+                load.finish("none_payload" if payload is None else "built")
         except Exception:
             logger.warning(
                 "initial snapshot build 실패 (격리)",
@@ -337,6 +357,8 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
         #    (익명 `free_topics` / 식별 `accepted_names` 모두 register 된 것만). 이 게이트는
         #    **동시 unsubscribe·축출·만료**에서만 발화한다.
         if websocket not in leased_subscribers(topic):
+            # ⛔ build 를 **다 하고 버린** 낭비 — 폭주가 스스로를 키우는 구간의 신호.
+            subscribe_load.record_snapshot_send("lease_skipped")
             logger.info(
                 "initial snapshot 전송 직전 구독이 사라졌거나 lease 가 만료됐다 — skip",
                 extra={"topic": topic, "sent": sent},
@@ -346,6 +368,7 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
         try:
             await websocket.send_json(payload)
             sent += 1
+            subscribe_load.record_snapshot_send("sent")
         except WebSocketDisconnect as exc:
             # ⛔ **삼키고 반환하지 않는다.** 여기서 정상 반환하면 endpoint 의 `while True` 가
             #    **닫힌 소켓에 `receive_text()` 를 다시 호출**해 `RuntimeError` → `except
@@ -359,10 +382,17 @@ async def send_initial_snapshots(websocket: "WebSocket", topics: List[str]) -> i
             from app.topic_dispatcher import registry
 
             registry.remove_websocket(websocket)
+            subscribe_load.record_snapshot_send("connection_closed")
             logger.debug(
                 "initial snapshot send 실패 — 연결 종료 신호로 전파",
                 extra={"topic": topic, "sent": sent},
             )
             raise InitialSnapshotConnectionClosed(topic) from exc
+        except Exception:
+            # ⛔ **`Exception` 한정** — `BaseException` 으로 넓히면 취소(CancelledError)가
+            #    `raised`(실제 전송 예외 신호)를 오염시킨다. 기록만 하고 **그대로 전파** —
+            #    위 주석의 규율(프로그래밍 오류를 접지 않는다)은 불변이다.
+            subscribe_load.record_snapshot_send("raised")
+            raise
 
     return sent

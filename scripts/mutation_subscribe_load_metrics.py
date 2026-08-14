@@ -33,16 +33,22 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MODULE = REPO / "app" / "subscribe_load_metrics.py"
 WIRING = REPO / "app" / "topic_authorization.py"
+SNAPSHOT = REPO / "app" / "topic_initial_snapshot.py"
+DISPATCHER = REPO / "app" / "topic_dispatcher.py"
 
-# 변이 대상 테스트 — 모듈 계약 + S2 배선 계약 + 기존 인가 계약(관측시각 500.0 등).
+# 변이 대상 테스트 — 모듈 계약 + S2/S3 배선 계약 + 기존 인가·스냅샷 계약.
 TEST_TARGETS = [
     "tests/test_subscribe_load_metrics.py",
     "tests/test_subscribe_load_wiring.py",
+    "tests/test_subscribe_load_snapshot_wiring.py",
     "tests/test_topic_authorization.py",
+    "tests/test_topic_initial_snapshot.py",
 ]
 
-# (라벨, 대상 파일, old[유일 앵커], new). old 는 대상 파일에서 정확히 1회 등장해야 한다.
-MUTANTS: list[tuple[str, pathlib.Path, str, str]] = [
+# (라벨, 대상 파일, old, new). old/new 가 tuple 이면 **다중 pair 를 순차 적용**하는 한 변이다
+# — "이동"(제거+이식)은 반드시 다중 pair 로 표현한다(단일 pair 로 나누면 각각이 제거/중복
+# 변이가 되어 라벨과 불일치 — 실측 2회 반복된 실수). 각 old 는 정확히 1회 등장해야 한다.
+MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 같은 길이의 tuple
     # ── S1c: 저장 스키마 ≠ 제출 allowlist ──────────────────────────────
     ("S1c-01 _resolve_outcome 검증 → 저장 스키마 복귀", MODULE,
      "if not isinstance(candidate, str) or candidate not in SUBMITTABLE_OUTCOMES[axis]:",
@@ -259,6 +265,174 @@ MUTANTS: list[tuple[str, pathlib.Path, str, str]] = [
             logger.error("injected logging inside observation")
         load.finish(_axis_outcome(verdict))
     if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:'''),
+    # ── S3: seam ③ + channel (topic_initial_snapshot.py / topic_dispatcher.py) ──
+    ("S3-40 channel 기본값을 anonymous 로", SNAPSHOT,
+     '    websocket: "WebSocket", topics: List[str], *, channel: str = "unattributed"',
+     '    websocket: "WebSocket", topics: List[str], *, channel: str = "anonymous"'),
+    ("S3-41 record_snapshot_call 누락", SNAPSHOT,
+     "    subscribe_load.record_snapshot_call(channel)\n    sent = 0",
+     "    sent = 0"),
+    ("S3-42 topics_deduped 를 dedupe 앞으로", SNAPSHOT,
+     '''        if topic in seen:
+            continue
+        seen.add(topic)
+        # ⛔ dedupe **통과분만** 센다 — 요청 1건이 몇 배 topic 으로 퍼지는지의 분자.
+        #    build 실패 topic 도 수요였으므로 여기(=build 앞)서 센다.
+        subscribe_load.record_snapshot_topic()''',
+     '''        subscribe_load.record_snapshot_topic()
+        if topic in seen:
+            continue
+        seen.add(topic)'''),
+    # ⚠️ "이동" 은 제거+이식 한 span — try **첫 문장**으로 옮기는 변이는 여전히 build 앞이라
+    #    등가였다(실측 생존). build 실패 continue 를 **지나서** 세도록 except 뒤로 옮긴다.
+    ("S3-43 topics_deduped 를 build 격리 뒤로(실패 topic 미집계)", SNAPSHOT,
+     '''        seen.add(topic)
+        # ⛔ dedupe **통과분만** 센다 — 요청 1건이 몇 배 topic 으로 퍼지는지의 분자.
+        #    build 실패 topic 도 수요였으므로 여기(=build 앞)서 센다.
+        subscribe_load.record_snapshot_topic()
+
+        try:
+            # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
+            #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
+            #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
+            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+                payload = await asyncio.to_thread(
+                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                    _build_snapshot_sync, topic,
+                )
+                load.finish("none_payload" if payload is None else "built")
+        except Exception:
+            logger.warning(
+                "initial snapshot build 실패 (격리)",
+                extra={"topic": topic},
+                exc_info=True,
+            )
+            continue''',
+     '''        seen.add(topic)
+
+        try:
+            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+                payload = await asyncio.to_thread(
+                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                    _build_snapshot_sync, topic,
+                )
+                load.finish("none_payload" if payload is None else "built")
+        except Exception:
+            logger.warning(
+                "initial snapshot build 실패 (격리)",
+                extra={"topic": topic},
+                exc_info=True,
+            )
+            continue
+        subscribe_load.record_snapshot_topic()'''),
+    ("S3-44 build worker 축 우회(timed_call 제거)", SNAPSHOT,
+     '''                payload = await asyncio.to_thread(
+                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                    _build_snapshot_sync, topic,
+                )''',
+     '''                payload = await asyncio.to_thread(_build_snapshot_sync, topic)'''),
+    ("S3-45 built/none_payload 스왑", SNAPSHOT,
+     '                load.finish("none_payload" if payload is None else "built")',
+     '                load.finish("built" if payload is None else "none_payload")'),
+    ("S3-46 build CM 을 try 밖으로(파생 기록 소실)", SNAPSHOT,
+     '''        try:
+            # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
+            #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
+            #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
+            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+                payload = await asyncio.to_thread(
+                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                    _build_snapshot_sync, topic,
+                )
+                load.finish("none_payload" if payload is None else "built")
+        except Exception:''',
+     '''        async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+          try:
+            payload = await asyncio.to_thread(
+                subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                _build_snapshot_sync, topic,
+            )
+            load.finish("none_payload" if payload is None else "built")
+          except Exception:
+            load.finish("none_payload")'''),
+    ("S3-47 lease_skipped 기록 누락", SNAPSHOT,
+     '''            # ⛔ build 를 **다 하고 버린** 낭비 — 폭주가 스스로를 키우는 구간의 신호.
+            subscribe_load.record_snapshot_send("lease_skipped")''',
+     "            pass"),
+    ("S3-48 sent 기록 누락", SNAPSHOT,
+     '''            sent += 1
+            subscribe_load.record_snapshot_send("sent")''',
+     "            sent += 1"),
+    ("S3-49 connection_closed 기록 누락", SNAPSHOT,
+     '''            subscribe_load.record_snapshot_send("connection_closed")''',
+     "            pass"),
+    ("S3-50 send raised catch 를 BaseException 으로 확대", SNAPSHOT,
+     '''        except Exception:
+            # ⛔ **`Exception` 한정** — `BaseException` 으로 넓히면 취소(CancelledError)가
+            #    `raised`(실제 전송 예외 신호)를 오염시킨다. 기록만 하고 **그대로 전파** —
+            #    위 주석의 규율(프로그래밍 오류를 접지 않는다)은 불변이다.
+            subscribe_load.record_snapshot_send("raised")
+            raise''',
+     '''        except BaseException:
+            subscribe_load.record_snapshot_send("raised")
+            raise'''),
+    ("S3-51 raised 기록 자체 제거", SNAPSHOT,
+     '''            subscribe_load.record_snapshot_send("raised")
+            raise''',
+     "            raise"),
+    # ⚠️ 진짜 "이동" — 다중 pair 한 변이 (제거 + return 직전 이식). 조기 이탈 경로에서
+    #    분모가 빠지는 회귀를 표현한다(WF-M1 실측 생존 → 잠금).
+    ("S3-54 [WF-M1] record_snapshot_call 을 return 직전으로 이동(다중 pair)", SNAPSHOT,
+     ('''    subscribe_load.record_snapshot_call(channel)
+    sent = 0''',
+      '''            subscribe_load.record_snapshot_send("raised")
+            raise
+
+    return sent'''),
+     ('''    sent = 0''',
+      '''            subscribe_load.record_snapshot_send("raised")
+            raise
+
+    subscribe_load.record_snapshot_call(channel)
+    return sent''')),
+    ("S3-54b 분모 중복 계수(요청당 2회 — 이동 아님, 정직 재명명)", SNAPSHOT,
+     '''            subscribe_load.record_snapshot_send("raised")
+            raise
+
+    return sent''',
+     '''            subscribe_load.record_snapshot_send("raised")
+            raise
+
+    subscribe_load.record_snapshot_call(channel)
+    return sent'''),
+    ("S3-55 [WF-M2] record_snapshot_call 을 loop 안으로 이동", SNAPSHOT,
+     '''    subscribe_load.record_snapshot_call(channel)
+    sent = 0
+    seen: set = set()
+    for topic in topics:
+        if topic in seen:
+            continue
+        seen.add(topic)''',
+     '''    sent = 0
+    seen: set = set()
+    for topic in topics:
+        if topic in seen:
+            continue
+        seen.add(topic)
+        subscribe_load.record_snapshot_call(channel)'''),
+    ("S3-56 [WF-M4] 빈 topics 를 record 앞 early-return", SNAPSHOT,
+     '''    subscribe_load.record_snapshot_call(channel)
+    sent = 0''',
+     '''    if not topics:
+        return 0
+    subscribe_load.record_snapshot_call(channel)
+    sent = 0'''),
+    ("S3-52 dispatcher anonymous channel 제거", DISPATCHER,
+     'await send_initial_snapshots(websocket, free_topics, channel="anonymous")',
+     "await send_initial_snapshots(websocket, free_topics)"),
+    ("S3-53 dispatcher token_bearing channel 제거", DISPATCHER,
+     'await send_initial_snapshots(websocket, accepted_names, channel="token_bearing")',
+     "await send_initial_snapshots(websocket, accepted_names)"),
 ]
 
 
@@ -303,10 +477,21 @@ def main() -> int:
         original = path.read_bytes()
         original_sha = hashlib.sha256(original).hexdigest()
         text = original.decode()
-        if text.count(old) != 1:
-            print(f"  ⚠️ 앵커 {text.count(old)}회 — {label}"); problems += 1; continue
+        if isinstance(old, tuple) or isinstance(new, tuple):
+            # ⛔ shape 검사 — zip 은 길이가 다르면 조용히 잘라 edit 하나가 사라진다.
+            if not (isinstance(old, tuple) and isinstance(new, tuple) and len(old) == len(new)):
+                print(f"  ⚠️ 다중 pair shape 불일치 — {label}"); problems += 1; continue
+            pairs = list(zip(old, new))
+        else:
+            pairs = [(old, new)]
+        bad = [o for o, _ in pairs if text.count(o) != 1]
+        if bad:
+            print(f"  ⚠️ 앵커 {[text.count(o) for o, _ in pairs]}회 — {label}"); problems += 1; continue
         try:
-            path.write_text(text.replace(old, new, 1))
+            mutated = text
+            for o, nw in pairs:
+                mutated = mutated.replace(o, nw, 1)
+            path.write_text(mutated)
             try:
                 py_compile.compile(str(path), doraise=True)
             except Exception:
