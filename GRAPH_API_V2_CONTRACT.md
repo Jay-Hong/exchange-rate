@@ -31,7 +31,7 @@
 
 ## 2. Current v1 graph behavior (anchor)
 
-`GET /api/graph/{currency}?range={1d|1w|3m|1y}` ([app/main.py:1831](app/main.py#L1831)):
+`GET /api/graph/{currency}?range={1d|1w|3m|1y}` ([app/main.py:2434](app/main.py#L2434)):
 
 - 통화: USD/JPY/EUR only
 - 1d (10분 bucket): investing + KB + 하나 + DXY (USD 탭만)
@@ -40,7 +40,7 @@
 - 응답 schema: `{"data": [...], "sources": {...}}` (legacy)
 - cache 실측 (2026-05-27 코드 확인):
   - 1d: Redis `graph:{currency}` (TTL 120s) — [app/main.py:605](app/main.py#L605), [app/admin/graph_cache.py:651](app/admin/graph_cache.py#L651)
-  - 1w/3m/1y: in-memory `_period_cache["graph:{currency}:{period}"]` — [app/main.py:2024-2046](app/main.py#L2024-L2046)
+  - 1w/3m/1y: in-memory `_period_cache["graph:{currency}:{period}"]` — [app/main.py:2627-2672](app/main.py#L2627-L2672)
 
 v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `graph_v2:`).
 

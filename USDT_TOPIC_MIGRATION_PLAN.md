@@ -46,7 +46,7 @@ USDT는 [USDT_PHASE1_DESIGN.md](USDT_PHASE1_DESIGN.md) Phase 1로 백엔드 완�
 
 ### 1.4 알림 경로
 
-- `/api/source-notification-settings` (POST/GET/PUT/DELETE) — main.py:2226+
+- `/api/source-notification-settings` (POST/GET/PUT/DELETE) — `app/main.py:3761-3764`(POST) · `:3843-3846`(GET) · `:3874-3877`(PUT) · `:3966-3969`(DELETE)
 - FCM payload type: `source_rate_alert` (기존 `rate_alert`와 구분)
 
 ---
