@@ -25,7 +25,8 @@
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
-          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims"
+          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
+          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -87,7 +88,8 @@
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
-          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims"
+          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
+          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)"
         ]
       }
     ],
@@ -110,7 +112,8 @@
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
-          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims"
+          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
+          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)"
         ],
         "result": "pass"
       },
@@ -540,6 +543,18 @@
       ],
       "issue": "The C1 review round for the RevenueCat provider slice (7c8a890) shipped three evidence claims that did not reproduce: a mutation-attribution claim (a 201-only Determined(False) injection was reported to survive the pre-hardening scenario table, but the existing '201 created active' row already killed it — the experiment had never been run), a logging claim (the dedicated 404 test was described as locking the common error log including status, but it only matched the formatted message, which never carries extra fields), and a gate report (preflight was reported as E_CODECHANGED although the actual gate run printed no such line). All three were caught by the reviewer re-running the experiments instead of reading the claims.",
       "disposition": "The mutation battery now uses a 201-only truthiness parser as the discriminating mutation, reproduced on both tables before adoption (survives the old two-row table, dies on the new '201 expired' row); the 404 test asserts record.status == 404 from logs.records; gate reports quote rc values printed by the same run. Same lineage as SEM-018/SEM-023: verifying a mechanical property (suite green, plausible claim text) is not verifying the semantic property (the experiment actually discriminates, the log actually carries the field). Bounded claim: the 201 rows are representative of the 200 hardening matrix, not a full differential oracle — the shared-branch property itself is locked by the 201-to-200-only mutation."
+    },
+    {
+      "id": "SEM-031",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "spec/topic-only-implementation-ledger.json/R-GATE-1.note",
+        "app/topic_authorization.py/classify_premium",
+        "app/subscription.py/fetch_revenuecat_result"
+      ],
+      "issue": "The C2 R-GATE-1 ledger note closed with 'WS classification unchanged (ProtocolViolation -> persistent unavailable)'. That conflates two properties: the classify_premium mapping table (untouched by C1) and the end-to-end WS verdict for a 404 response, which C1 intentionally changed — pre-C1 a 404 produced Determined(False) and therefore Denied('premium_required'); post-C1 it produces ProtocolViolation and therefore Unavailable(PERSISTENT). The false sentence passed the C2 exact-tree review and its pass edge; it was caught by the opposite participant reading the mapped path end-to-end, not by any gate — no gate binds ledger note prose to code behaviour.",
+      "disposition": "The note now states both halves separately: the ProtocolViolation mapping is unchanged, and the 404 WS outcome changed by design from Denied(premium_required) to Unavailable(PERSISTENT) because the 404->Determined(False) inflow was removed. Provider and authorization code are untouched by this correction. Reopened per the closure rule with a new opposite-participant work unit and edge (C3). Mapping-function invariance is not verdict invariance when an input's type assignment moves — same family as SEM-018/SEM-023/SEM-030: a mechanical property (the mapping table diff is empty) was reported as the semantic property (behaviour unchanged)."
     }
   ],
   "residual_limits": [
