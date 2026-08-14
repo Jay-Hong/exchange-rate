@@ -151,7 +151,9 @@ class TestClassification(unittest.TestCase):
 
         events = []
         summary = {
-            "counts_by_label": {},
+            "counts_by_label": {"denied_premium_required": 1},
+            "calls": [{"label": "denied_premium_required"}],
+            "params": {"iterations_requested": 1},
             "latency_ms": {"count": 0},
             "aborted_reason": None,
         }
@@ -163,7 +165,13 @@ class TestClassification(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             artifact = pathlib.Path(tmp) / "result.json"
             with (
-                patch.dict(os.environ, {"CANARY_UID": "canary-uid"}),
+                patch.dict(
+                    os.environ,
+                    {
+                        "CANARY_UID": "canary-uid",
+                        "CANARY_EXPECTED_LABEL": "denied_premium_required",
+                    },
+                ),
                 patch.object(canary, "suppress_runtime_logging",
                              side_effect=lambda: events.append("suppress")),
                 patch.object(canary, "require_rc_config"),
@@ -173,8 +181,106 @@ class TestClassification(unittest.TestCase):
                 patch.object(canary, "finalize_artifact", return_value=artifact),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
-                self.assertEqual(canary.main(["--output-dir", tmp]), 0)
+                self.assertEqual(canary.main(["--output-dir", tmp, "--iterations", "1"]), 0)
         self.assertEqual(events, ["suppress", "run"])
+
+    def test_expected_label_requires_every_requested_call_to_match(self):
+        base = {
+            "params": {"iterations_requested": 2},
+            "calls": [{"label": "premium_granted"}, {"label": "premium_granted"}],
+            "counts_by_label": {"premium_granted": 2},
+            "aborted_reason": None,
+        }
+        self.assertTrue(canary.evaluate_expectation(base, "premium_granted")["passed"])
+        self.assertIsNone(
+            canary.evaluate_expectation(base, "premium_granted")["latency_threshold"],
+            "승인된 latency SLO가 없는데 합격 임계값을 만들어내면 안 된다",
+        )
+
+        for mutation in (
+            {**base, "counts_by_label": {"premium_granted": 1, "timeout": 1}},
+            {**base, "calls": base["calls"][:1], "counts_by_label": {"premium_granted": 1}},
+            {**base, "aborted_reason": "max_runtime_exceeded"},
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertFalse(
+                    canary.evaluate_expectation(mutation, "premium_granted")["passed"]
+                )
+
+    def test_unknown_expected_label_is_refused(self):
+        summary = {
+            "params": {"iterations_requested": 1},
+            "calls": [],
+            "counts_by_label": {},
+            "aborted_reason": None,
+        }
+        with self.assertRaises(canary.CanaryContractError):
+            canary.evaluate_expectation(summary, "anything_goes")
+
+    def test_missing_expected_label_refuses_before_reservation_or_run(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"CANARY_UID": "canary-uid"}, clear=True),
+                patch.object(canary, "suppress_runtime_logging"),
+                patch.object(canary, "require_rc_config"),
+                patch.object(canary, "require_runner_context"),
+                patch.object(canary, "reserve_artifact") as reserve,
+                patch.object(canary, "run_canary") as run,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(canary.main(["--output-dir", tmp]), 2)
+        reserve.assert_not_called()
+        run.assert_not_called()
+
+    def test_main_preserves_mismatch_artifact_and_returns_nonzero(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        summary = {
+            "counts_by_label": {"denied_premium_required": 1},
+            "calls": [{"label": "denied_premium_required"}],
+            "params": {"iterations_requested": 1},
+            "latency_ms": {"count": 1},
+            "aborted_reason": None,
+        }
+
+        async def fake_run_canary(**kwargs):
+            return summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = pathlib.Path(tmp) / "result.json"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CANARY_UID": "canary-uid",
+                        "CANARY_EXPECTED_LABEL": "premium_granted",
+                    },
+                    clear=True,
+                ),
+                patch.object(canary, "suppress_runtime_logging"),
+                patch.object(canary, "require_rc_config"),
+                patch.object(canary, "require_runner_context"),
+                patch.object(canary, "reserve_artifact", return_value=artifact),
+                patch.object(canary, "run_canary", new=fake_run_canary),
+                patch.object(canary, "finalize_artifact", return_value=artifact) as finalize,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    canary.main(["--output-dir", tmp, "--iterations", "1"]), 3
+                )
+        published = finalize.call_args.args[1]
+        self.assertFalse(published["expectation"]["passed"])
+        self.assertEqual(published["expectation"]["expected_label"], "premium_granted")
 
 
 class TestRunLoop(unittest.TestCase):

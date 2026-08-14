@@ -12,6 +12,8 @@
 #  - canary 의 deadline 은 협력적이다 — 취소를 삼키는 callee 는 상한을 넘긴다.
 #    `timeout` 뒤 EXIT trap의 named-container kill/remove가 실제 외부 호출 상한을 만든다.
 #  - 산출물에 실행 이미지 provenance 가 없었다 — pinned image ID 를 env 로 주입한다.
+#  - raw UID CLI 인자는 shell history와 host process argv에 남는다. owner-only 단일행 파일만
+#    읽고, 값은 기존 0600 env file 안에서만 container로 전달한다.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/home/ubuntu/exchange-rate}"
@@ -98,16 +100,72 @@ print(math.ceil(runtime) + int(raw_margin))
 PY
 }
 
+read_uid_file() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+# ⛔ 계약은 **문자** 수(≤128자)다 — 바이트 상한으로 bounded read 하면 다중바이트 UID 가
+#    절단돼 UnicodeDecodeError 로 오거부된다(실측: "가"*44 = 44자·132바이트가 거부됐다).
+#    읽기 상한은 UTF-8 최악 크기(4B/char)로 잡고, 초과 판정은 decode **앞**에서 한다
+#    — 그래야 상한 초과가 "절단된 UTF-8" 로 오분류되지 않는다.
+MAX_UID_CHARS = 128
+MAX_UID_BYTES = MAX_UID_CHARS * 4
+
+path = pathlib.Path(sys.argv[1])
+# ⛔ O_NONBLOCK 필수 — FIFO 는 writer 가 없으면 open 에서 **무기한 block** 하고
+#    정규파일 검사(S_ISREG)까지 도달하지 못한다(실측 재현). 외부 timeout 도 아직 없다.
+flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, flags)
+except OSError:
+    raise SystemExit(2)
+
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(2)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit(2)
+    # ⛔ bounded read — 128자 상한 검사가 뒤에 있으므로 거대 파일을 통째로 읽지 않는다.
+    with os.fdopen(fd, "rb", closefd=False) as handle:
+        raw = handle.read(MAX_UID_BYTES + 2)
+finally:
+    os.close(fd)
+
+if raw.endswith(b"\n"):
+    raw = raw[:-1]
+if not raw or len(raw) > MAX_UID_BYTES or b"\n" in raw or b"\r" in raw or b"\x00" in raw:
+    raise SystemExit(2)
+try:
+    uid = raw.decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit(2) from None
+if len(uid) > MAX_UID_CHARS:
+    raise SystemExit(2)
+sys.stdout.write(uid)
+PY
+}
+
 run_canary() {
-  local uid="$1"; shift
+  local uid_file="$1"; shift
+  local expected_label="$1"; shift
   local max_runtime="$1"; shift
   local iterations="$1"; shift
   local cadence="$1"; shift
   local call_timeout="$1"; shift
 
   require_clean_source
-  [ "${#uid}" -le 128 ] || die "전용 UID는 128자를 넘을 수 없다"
-  case "$uid" in *$'\n'*|*$'\r'*) die "전용 UID에 개행을 넣을 수 없다" ;; esac
+  local uid
+  uid=$(read_uid_file "$uid_file") || \
+    die "UID 파일은 호출자 소유의 0600 정규파일이며 비어 있지 않은 UTF-8 단일행이어야 한다"
+  case "$expected_label" in
+    denied_premium_required|premium_granted) ;;
+    *) die "--expected-label은 denied_premium_required 또는 premium_granted 여야 한다" ;;
+  esac
   local outer_timeout
   outer_timeout=$(validated_outer_timeout "$iterations" "$cadence" "$call_timeout" "$max_runtime") || \
     die "canary 수치 인자가 계약 범위를 벗어났다"
@@ -136,6 +194,7 @@ run_canary() {
   env_file=$(umask 077 && mktemp)
   grep -E '^REVENUECAT_API_KEY=' "$REPO_ROOT/.env" > "$env_file"
   printf 'CANARY_UID=%s\n' "$uid" >> "$env_file"
+  printf 'CANARY_EXPECTED_LABEL=%s\n' "$expected_label" >> "$env_file"
   printf 'CANARY_IMAGE_ID=%s\n' "$image" >> "$env_file"
   printf 'CANARY_RUNNER_SOURCE_HEAD=%s\n' "$source_head" >> "$env_file"
   printf 'CANARY_RUNNER_SHA256=%s\n' \
@@ -162,13 +221,14 @@ run_canary() {
 }
 
 main() {
-  local uid="" max_runtime="600" iterations="10" cadence="5" call_timeout="10"
+  local uid_file="" expected_label="" max_runtime="600" iterations="10" cadence="5" call_timeout="10"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --uid|--max-runtime-seconds|--iterations|--cadence-seconds|--call-timeout-seconds)
+      --uid-file|--expected-label|--max-runtime-seconds|--iterations|--cadence-seconds|--call-timeout-seconds)
         [ $# -ge 2 ] || die "$1 값이 필요하다"
         case "$1" in
-          --uid) uid="$2" ;;
+          --uid-file) uid_file="$2" ;;
+          --expected-label) expected_label="$2" ;;
           --max-runtime-seconds) max_runtime="$2" ;;
           --iterations) iterations="$2" ;;
           --cadence-seconds) cadence="$2" ;;
@@ -176,11 +236,14 @@ main() {
         esac
         shift 2
         ;;
-      *) die "허용하지 않는 인자: $1" ;;
+      # ⛔ 값을 되울리지 않는다 — `--uid=<UID>` 같은 토큰이 그대로 stderr 에 남았다(실측).
+      *) die "허용하지 않는 인자가 있다 (값은 표시하지 않는다). 사용: --uid-file --expected-label" ;;
     esac
   done
-  [ -n "$uid" ] || die "--uid <전용 canary UID> 가 필요하다 (운영 사용자 금지)"
-  run_canary "$uid" "$max_runtime" "$iterations" "$cadence" "$call_timeout"
+  [ -n "$uid_file" ] || die "--uid-file <0600 UID 파일>이 필요하다 (운영 사용자 금지)"
+  [ -n "$expected_label" ] || \
+    die "--expected-label <denied_premium_required|premium_granted>가 필요하다"
+  run_canary "$uid_file" "$expected_label" "$max_runtime" "$iterations" "$cadence" "$call_timeout"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

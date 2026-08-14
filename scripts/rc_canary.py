@@ -37,8 +37,10 @@
    상한을 넘길 수 있다(실측: cap 1s 에 1.37s). 초과는 산출물에 `cooperative_deadline_overrun`
    으로 자기보고되고, 강제 종료는 runner의 `timeout` 뒤 **named-container cleanup**이 맡는다.
 
-⚠️ 실행 전 전용 UID(운영 사용자 금지)가 정해져야 한다. UID는 runner의 0600 env 파일로만
-   전달하며 Docker argv에는 싣지 않는다.
+⚠️ 실행 전 전용 UID(운영 사용자 금지)가 정해져야 한다. host runner는 raw `--uid`를 받지
+   않고 호출자 소유의 0600 단일행 `--uid-file`만 읽는다. 계정 역할도 `--expected-label`로
+   먼저 고정하며, 모든 호출이 일치하지 않으면 artifact를 보존하고 exit 3으로 끝낸다. UID는
+   runner의 0600 env 파일로만 전달하며 host/Docker argv에는 싣지 않는다.
 """
 import argparse
 import asyncio
@@ -61,6 +63,7 @@ MIN_CADENCE_SECONDS = 1.0
 MAX_CALL_TIMEOUT_SECONDS = 60.0
 MAX_RUNTIME_SECONDS_CAP = 1800.0
 CANARY_TOPIC = "fx:usd-krw"  # 정책표의 PREMIUM_ONLY canonical topic. KRX 는 절대 넣지 않는다.
+EXPECTED_LABELS = frozenset({"denied_premium_required", "premium_granted"})
 
 
 class CanaryContractError(RuntimeError):
@@ -135,6 +138,31 @@ def validate_run_parameters(
     _require_finite("cadence_seconds", cadence_seconds, MIN_CADENCE_SECONDS, 3600.0)
     _require_finite("call_timeout_seconds", call_timeout_seconds, 0.1, MAX_CALL_TIMEOUT_SECONDS)
     _require_finite("max_runtime_seconds", max_runtime_seconds, 1.0, MAX_RUNTIME_SECONDS_CAP)
+
+
+def validate_expected_label(expected_label: str) -> None:
+    """기대 분류가 없거나 범위를 벗어나면 외부 호출 전에 거부한다."""
+    if expected_label not in EXPECTED_LABELS:
+        raise CanaryContractError(
+            "CANARY_EXPECTED_LABEL은 denied_premium_required 또는 premium_granted 여야 한다"
+        )
+
+
+def evaluate_expectation(summary: dict, expected_label: str) -> dict:
+    """계정 역할을 사전에 고정한다. latency는 임계값이 없어 측정값으로만 남긴다."""
+    validate_expected_label(expected_label)
+    requested = summary["params"]["iterations_requested"]
+    passed = (
+        summary["aborted_reason"] is None
+        and len(summary["calls"]) == requested
+        and summary["counts_by_label"] == {expected_label: requested}
+    )
+    return {
+        "expected_label": expected_label,
+        "passed": passed,
+        "basis": "all_requested_calls_match_expected_label_and_run_completed",
+        "latency_threshold": None,
+    }
 
 
 def build_premium_only_plan(uid: str):
@@ -366,6 +394,8 @@ def main(argv=None) -> int:
             args.max_runtime_seconds,
         )
         require_runner_context(args.max_runtime_seconds)
+        expected_label = os.getenv("CANARY_EXPECTED_LABEL", "")
+        validate_expected_label(expected_label)
         started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         reserved = reserve_artifact(args.output_dir, started_utc)  # ⛔ RC 호출 **전**
         summary = asyncio.run(
@@ -377,6 +407,7 @@ def main(argv=None) -> int:
                 max_runtime_seconds=args.max_runtime_seconds,
             )
         )
+        summary["expectation"] = evaluate_expectation(summary, expected_label)
         path = finalize_artifact(reserved, summary)
     except CanaryContractError as exc:
         print(json.dumps({"status": "refused", "reason": str(exc)}, ensure_ascii=False))
@@ -384,16 +415,17 @@ def main(argv=None) -> int:
     print(
         json.dumps(
             {
-                "status": "ok",
+                "status": "ok" if summary["expectation"]["passed"] else "expectation_failed",
                 "artifact": path.name,
                 "counts_by_label": summary["counts_by_label"],
                 "latency_ms": summary["latency_ms"],
                 "aborted_reason": summary["aborted_reason"],
+                "expectation": summary["expectation"],
             },
             ensure_ascii=False,
         )
     )
-    return 0
+    return 0 if summary["expectation"]["passed"] else 3
 
 
 if __name__ == "__main__":
