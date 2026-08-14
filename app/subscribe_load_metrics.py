@@ -385,13 +385,17 @@ async def observe(axis: str):
           try:
               with _lock:
                   block = _metrics[axis]
+                  # ⛔ unclassified fold 진단을 terminal 관측보다 먼저 쓴다. 반대
+                  #    순서면 internal counter 쓰기가 실패했을 때
+                  #    `unclassified=1 / internal_errors=0` 이 남고, awaiting 도 0이라
+                  #    reset 이 그 거짓 pairing 을 정상 장부로 삭제했다(실측).
+                  if internal_error:
+                      _metrics["metrics_internal_errors_total"] += 1
                   block["by_outcome"][outcome] += 1
                   block["duration_ms_sum"] += duration_ms
                   if duration_ms > block["duration_ms_max"]:
                       block["duration_ms_max"] = duration_ms
                   block["callers_awaiting"] -= 1
-                  if internal_error:
-                      _metrics["metrics_internal_errors_total"] += 1
           except Exception:  # noqa: BLE001 — 여기까지 실패하면 **half-open** 으로 남는다
               # ⚠️ "장부에서 사라진다" 가 아니다 — 진입 기록이 이미 있어 **half-open/부분 전이**
               #    로 남는다. lock **획득**이 실패하면 `started=1 / awaiting=1 / terminal 0` 이고,
@@ -486,8 +490,9 @@ def record_snapshot_call(channel: str) -> None:
             #    같은 교훈). `_metrics` object identity 를 유지하는 subtree-local update 에는
             #    공통 단일 commit point 가 없다 — 전역 rebind 나 스키마 재설계 대신 진단-먼저
             #    순서로 **단방향 예외 안전성**만 보장한다. 관측을 먼저 쓰면 두 번째 쓰기 실패가
-            #    **진단 없는 unclassified** 를 남겼다(실측). 진단 먼저면 실패 잔여는 "진단만
-            #    +1"(superset counter 과계수 + 바깥 except 의 기록-실패 WARNING)뿐이다.
+            #    **진단 없는 unclassified** 를 남겼다(실측). 진단 먼저면 두 사건이
+            #    따로 남는다: allowlist 밖 입력 진단 +1, 후속 unclassified 기록 실패
+            #    진단 +1. 즉 실패 잔여는 `internal_errors=2 / unclassified=0` + WARNING 이다.
             if folded:
                 _metrics["metrics_internal_errors_total"] += 1
             _metrics["snapshot_send"]["calls_by_channel"][key] += 1

@@ -944,6 +944,49 @@ class TestDerivedSentinelsAreNotSubmittable(SubscribeLoadTestCase):
                 self._invariant(snap)
         self._hard_reset()
 
+    def test_terminal_fold_never_survives_without_its_internal_diagnosis(self):
+        """snapshot point-counter 뿐 아니라 축 terminal fold 도 진단-먼저다.
+
+        구 순서는 internal counter 쓰기만 지속 실패시 `unclassified=1`,
+        `internal_errors=0`, `awaiting=0`을 남겼다. 불변식도 정상이라 reset 이
+        그 진단 없는 관측을 삭제할 수 있었다.
+        """
+        from unittest.mock import patch
+
+        class _FailInternalWrite(dict):
+            def __setitem__(self, key, value):
+                if key == "metrics_internal_errors_total":
+                    raise RuntimeError("persistent internal-counter failure")
+                return super().__setitem__(key, value)
+
+        cases = (
+            (slm.PREMIUM_RC, "cancelled"),
+            (slm.KRX_ENTITLEMENT, "raised"),
+            (slm.SNAPSHOT_BUILD, "build_failed"),
+        )
+        for axis, synthetic in cases:
+            with self.subTest(axis=axis):
+                self._hard_reset()
+
+                async def scenario():
+                    async with slm.observe(axis) as handle:
+                        handle.finish(synthetic)
+
+                with patch.object(slm, "_metrics", _FailInternalWrite(slm._metrics)):
+                    with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                        _run(scenario())
+                    snap = self._snapshot()
+                    block = snap[axis]
+                    self.assertEqual(block["by_outcome"]["unclassified"], 0)
+                    self.assertEqual(snap["metrics_internal_errors_total"], 0)
+                    self.assertEqual(block["callers_awaiting"], 1,
+                                     "진단을 못 남겼으면 terminal 전이도 완료하지 않는다")
+                    self.assertTrue(any("terminal 전이 실패" in r.getMessage()
+                                        for r in logs.records))
+                    with self.assertRaises(slm.SubscribeLoadContractError):
+                        slm.reset_subscribe_load_metrics()
+        self._hard_reset()
+
     def test_submittable_domain_outcomes_are_unchanged(self):
         """경계의 반대편 — 도메인 결과 제출은 진단 없이 그대로 기록된다.
 
@@ -1034,6 +1077,36 @@ class TestFoldNeverCountsWithoutItsDiagnosis(SubscribeLoadTestCase):
                                      + snap["snapshot_send"]["sends_by_outcome"]["unclassified"], 0,
                                      "진단이 못 남았으면 관측도 세지 않는다")
                     self.assertTrue(any("기록 실패" in r.getMessage() for r in logs.records))
+        self._hard_reset()
+
+    def test_unclassified_write_failure_records_both_internal_errors(self):
+        """진단 쓰기 후 unclassified 쓰기만 실패하면 두 사건을 각각 센다.
+
+        잘못된 입력 진단은 이미 남았고, 그 입력을 unclassified 로 기록하려는
+        관측 자체도 실패했다. 후자를 더 세지 않으면 기록 실패가 조용히 사라진다.
+        """
+        class _FailUnclassifiedWrite(dict):
+            def __setitem__(self, key, value):
+                if key == "unclassified":
+                    raise RuntimeError("unclassified-write-failed")
+                return super().__setitem__(key, value)
+
+        cases = (
+            ("calls_by_channel", lambda: slm.record_snapshot_call("typo")),
+            ("sends_by_outcome", lambda: slm.record_snapshot_send("typo")),
+        )
+        for path, record in cases:
+            with self.subTest(path=path):
+                self._hard_reset()
+                with slm._lock:
+                    original = slm._metrics["snapshot_send"][path]
+                    slm._metrics["snapshot_send"][path] = _FailUnclassifiedWrite(original)
+                with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                    record()
+                snap = self._snapshot()
+                self.assertEqual(snap["metrics_internal_errors_total"], 2)
+                self.assertEqual(snap["snapshot_send"][path]["unclassified"], 0)
+                self.assertTrue(any("기록 실패" in r.getMessage() for r in logs.records))
         self._hard_reset()
 
 
