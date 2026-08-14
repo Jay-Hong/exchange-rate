@@ -62,7 +62,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/1"
+CONTRACT_VERSION = "subscribe-load/2"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -99,8 +99,11 @@ _RAISED_OUTCOME: dict[str, str] = {
     SNAPSHOT_BUILD: "build_failed",
 }
 
-CHANNELS: tuple[str, ...] = ("anonymous", "token_bearing", "unattributed")
-SEND_OUTCOMES: tuple[str, ...] = ("sent", "lease_skipped", "connection_closed", "raised")
+# ⛔ 두 allowlist 모두 `unclassified` 를 갖는다 — allowlist 밖 값을 **의미 버킷으로 접으면**
+#    그 버킷이 오염된다(실측: typo → `raised`=1 은 실제 전송 예외 신호를, typo → `unattributed`=1
+#    은 channel 배선 gap 신호를 각각 오염시켰고 진단은 0이었다).
+CHANNELS: tuple[str, ...] = ("anonymous", "token_bearing", "unattributed", _UNCLASSIFIED)
+SEND_OUTCOMES: tuple[str, ...] = ("sent", "lease_skipped", "connection_closed", "raised", _UNCLASSIFIED)
 
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
@@ -259,7 +262,9 @@ async def observe(axis: str):
 
     진입 전이(`started_total` +1 · `callers_awaiting` +1 · max 갱신)와 종료 전이(outcome 1회 ·
     duration 1회 · `callers_awaiting` −1)는 각각 **한 lock 임계구역**에서 일어난다 — 그래야
-    스냅샷이 `started == sum(by_outcome) + callers_awaiting` 를 만족한다.
+    스냅샷이 `started == sum(by_outcome) + callers_awaiting` 를 만족한다. 진입은 거기에 더해
+    **예외-원자적**이다(복사본 계산 → 단일 대입 commit point) — 한 lock 은 동시성 원자성만 줄
+    뿐이라, 두 번째 쓰기만 실패하면 `started=1 / awaiting=0` 부분 전이가 장부에 남았다(실측).
     """
     _require_axis(axis)
     handle = WorkHandle(axis)
@@ -273,11 +278,18 @@ async def observe(axis: str):
     try:
         started = time.monotonic()
         with _lock:
-            block = _metrics[axis]
-            block["started_total"] += 1
-            block["callers_awaiting"] += 1
-            if block["callers_awaiting"] > block["callers_awaiting_max"]:
-                block["callers_awaiting_max"] = block["callers_awaiting"]
+            # ⛔ **단일 대입이 commit point** 다. in-place 로 세 번 쓰면 중간 실패가 부분 전이
+            #    (`started=1 / awaiting=0 / terminal 0`)를 남기고, 그 상태는 게이지만 보는
+            #    reset 이 정상으로 수용·삭제했다(실측). 복사본에 전부 계산한 뒤 한 번에 건다 —
+            #    어디서 실패하든 장부는 전무 아니면 전부다.
+            old_block = _metrics[axis]
+            new_block = dict(old_block)  # 얕은 복사 — `by_outcome` 은 진입이 안 건드린다
+            new_block["started_total"] = old_block["started_total"] + 1
+            awaiting = old_block["callers_awaiting"] + 1
+            new_block["callers_awaiting"] = awaiting
+            if awaiting > old_block["callers_awaiting_max"]:
+                new_block["callers_awaiting_max"] = awaiting
+            _metrics[axis] = new_block
     except Exception:  # noqa: BLE001 — 계측 실패는 삼키고 본문을 진행시킨다
         entry_failure = sys.exc_info()
         started = None
@@ -402,14 +414,28 @@ def timed_call(axis: str, handle: WorkHandle, fn: Callable[..., T], /, *args: An
 
 
 def record_snapshot_call(channel: str) -> None:
-    """`send_initial_snapshots` 진입 1회. 미지정 channel 은 `unattributed` 로 접는다."""
+    """`send_initial_snapshots` 진입 1회. allowlist 밖 channel 은 `unclassified` + 진단.
+
+    ⛔ `unattributed` 로 접지 않는다 — 그건 **channel 배선 없이 들어온 default 경로**의 신호라
+       (호출부가 channel 을 안 넘기면 시그니처 기본값으로 오른다), 배선 오타(allowlist 밖 값)가
+       그 신호를 오염시키고 조용히 사라졌다(실측: typo → unattributed=1 / 진단 0).
+    """
+    folded = False
     try:
-        key = channel if channel in CHANNELS else "unattributed"
+        key = channel
+        if key not in CHANNELS:
+            key = _UNCLASSIFIED
+            folded = True
         with _lock:
             _metrics["snapshot_send"]["calls_by_channel"][key] += 1
     except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
         _note_internal_error()
         _warn("subscribe-load: snapshot 기록 실패", axis="snapshot_send", exc_info=sys.exc_info())
+        return
+    if folded:
+        # ⚠️ 값은 싣지 않는다 — `repr()` 호출 자체가 던질 수 있고, 여기는 진단 경로다.
+        _note_internal_error()
+        _warn("subscribe-load: allowlist 밖 channel — unclassified 로 접는다", axis="snapshot_send")
 
 
 def record_snapshot_topic() -> None:
@@ -423,13 +449,27 @@ def record_snapshot_topic() -> None:
 
 
 def record_snapshot_send(outcome: str) -> None:
+    """topic 1건 전송 시도의 결과 1회. allowlist 밖 outcome 은 `unclassified` + 진단.
+
+    ⛔ `raised` 로 접지 않는다 — 그건 **실제 전송 예외**의 의미라, 오타 하나가 결함 신호를
+       만들고 배선 버그는 조용히 사라졌다(실측: typo → raised=1 / 진단 0).
+    """
+    folded = False
     try:
-        key = outcome if outcome in SEND_OUTCOMES else "raised"
+        key = outcome
+        if key not in SEND_OUTCOMES:
+            key = _UNCLASSIFIED
+            folded = True
         with _lock:
             _metrics["snapshot_send"]["sends_by_outcome"][key] += 1
     except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
         _note_internal_error()
         _warn("subscribe-load: snapshot 기록 실패", axis="snapshot_send", exc_info=sys.exc_info())
+        return
+    if folded:
+        # ⚠️ 값은 싣지 않는다 — `repr()` 호출 자체가 던질 수 있고, 여기는 진단 경로다.
+        _note_internal_error()
+        _warn("subscribe-load: allowlist 밖 send outcome — unclassified 로 접는다", axis="snapshot_send")
 
 
 def subscribe_load_metrics() -> dict[str, Any]:
@@ -481,6 +521,9 @@ def reset_subscribe_load_metrics() -> None:
        호출자가 관련 coroutine 과 default-executor 작업을 **전부 drain·join** 했어야 한다.
     ⛔ executor 의 reset 과 **묶지 않는다**(묶으면 코드로 분리한 두 모듈이 다시 결합된다).
     ⛔ **clear-only 금지** — 같은 lock 안에서 즉시 고정 키를 다시 심는다(아래 구현).
+    ⛔ 게이지에 더해 **불변식(`started == sum(by_outcome) + awaiting`)도 검사**한다 — 게이지만
+       보면 부분 전이로 손상된 장부(예: `started=1 / awaiting=0 / terminal 0`)를 정상으로
+       수용·삭제한다(실측). 손상 장부는 증거다 — reset 으로 지우지 않는다.
     """
     with _lock:
         busy = [
@@ -492,6 +535,15 @@ def reset_subscribe_load_metrics() -> None:
         if busy:
             raise SubscribeLoadContractError(
                 f"진행 중인 관측이 있어 reset 을 거부한다: {sorted(busy)}"
+            )
+        corrupt = [
+            axis for axis in AXIS_OUTCOMES
+            if _metrics[axis]["started_total"]
+            != sum(_metrics[axis]["by_outcome"].values()) + _metrics[axis]["callers_awaiting"]
+        ]
+        if corrupt:
+            raise SubscribeLoadContractError(
+                f"장부 불변식이 깨져 있다 — reset 으로 증거를 지우지 않는다: {sorted(corrupt)}"
             )
         _metrics.clear()
         _metrics.update(_blank())

@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/1")
+        self.assertEqual(snap["contract_version"], "subscribe-load/2")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -799,19 +799,47 @@ class TestWorkerAxis(SubscribeLoadTestCase):
 
 
 class TestSnapshotSendAxis(SubscribeLoadTestCase):
-    def test_channel_and_send_outcomes_fold_unknown_values(self):
+    def test_unknown_values_fold_to_unclassified_not_into_semantic_buckets(self):
+        """⛔ allowlist 밖 값을 의미 버킷으로 접으면 그 버킷이 오염된다(실측: typo →
+        `raised`=1 은 실제 전송 예외 신호를, typo → `unattributed`=1 은 channel 배선 gap 신호를
+        각각 오염시켰고 진단은 0이었다). unclassified + internal error + WARNING 이 계약이다."""
         slm.record_snapshot_call("anonymous")
-        slm.record_snapshot_call("made_up_channel")
         slm.record_snapshot_topic()
         slm.record_snapshot_send("sent")
-        slm.record_snapshot_send("who_knows")
-        send = self._snapshot()["snapshot_send"]
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_snapshot_call("made_up_channel")
+            slm.record_snapshot_send("who_knows")
+        snap = self._snapshot()
+        send = snap["snapshot_send"]
         self.assertEqual(send["calls_by_channel"]["anonymous"], 1)
-        self.assertEqual(send["calls_by_channel"]["unattributed"], 1)
+        self.assertEqual(send["calls_by_channel"]["unclassified"], 1)
+        self.assertEqual(send["calls_by_channel"]["unattributed"], 0, "배선 gap 버킷이 오염됐다")
         self.assertEqual(send["topics_deduped_total"], 1)
         self.assertEqual(send["sends_by_outcome"]["sent"], 1)
-        self.assertEqual(send["sends_by_outcome"]["raised"], 1)
+        self.assertEqual(send["sends_by_outcome"]["unclassified"], 1)
+        self.assertEqual(send["sends_by_outcome"]["raised"], 0, "전송 예외 버킷이 오염됐다")
         self.assertEqual(sorted(send["calls_by_channel"]), sorted(slm.CHANNELS))
+        self.assertEqual(snap["metrics_internal_errors_total"], 2)
+        self.assertEqual(sum("unclassified 로 접는다" in r.getMessage() for r in logs.records), 2)
+
+
+class TestFoldDiagnosticsNeverEvaluateTheValue(SubscribeLoadTestCase):
+    def test_a_repr_bomb_value_still_folds_safely(self):
+        """⛔ 진단 경로에 값을 실으면(`f"...{value!r}"`) **`__repr__` 자체가 던질 수 있고**,
+        그 f-string 평가는 no-throw try 밖이라 서비스 경로로 전파된다. 값을 싣지 않는 게 계약."""
+        class _ReprBomb:
+            def __repr__(self):
+                raise RuntimeError("repr-bomb")
+
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_snapshot_call(_ReprBomb())
+            slm.record_snapshot_send(_ReprBomb())
+        snap = self._snapshot()
+        send = snap["snapshot_send"]
+        self.assertEqual(send["calls_by_channel"]["unclassified"], 1)
+        self.assertEqual(send["sends_by_outcome"]["unclassified"], 1)
+        self.assertEqual(snap["metrics_internal_errors_total"], 2)
+        self.assertEqual(sum("unclassified 로 접는다" in r.getMessage() for r in logs.records), 2)
 
 
 class TestResetContract(SubscribeLoadTestCase):
@@ -855,6 +883,81 @@ class TestResetContract(SubscribeLoadTestCase):
     async def _one(self):
         async with slm.observe(slm.PREMIUM_RC) as handle:
             handle.finish("granted")
+
+
+class TestEntryExceptionAtomicity(SubscribeLoadTestCase):
+    """⛔ 한 lock 은 **동시성** 원자성만 준다. 두 번째 쓰기만 실패하면
+    `started=1 / awaiting=0 / terminal 0` 부분 전이가 남았고(실측), 게이지만 보는 reset 이
+    그 손상을 정상으로 수용·삭제했다(실측). 진입은 단일 대입 commit point 로 전무-아니면-전부다."""
+
+    def test_mid_entry_write_failure_cannot_leave_a_partial_record(self):
+        class _FailAwaitingWrite(dict):
+            def __setitem__(self, key, value):
+                if key == "callers_awaiting":
+                    raise RuntimeError("injected partial entry failure")
+                return super().__setitem__(key, value)
+
+        with slm._lock:
+            slm._metrics[slm.PREMIUM_RC] = _FailAwaitingWrite(slm._metrics[slm.PREMIUM_RC])
+        ran = {"body": 0}
+
+        async def scenario():
+            async with slm.observe(slm.PREMIUM_RC) as handle:
+                ran["body"] += 1
+                handle.finish("granted")
+                return "ok"
+        self.assertEqual(_run(scenario()), "ok")
+        self.assertEqual(ran["body"], 1)
+        snap = self._snapshot()
+        block = snap[slm.PREMIUM_RC]
+        # ⛔ 복사본에 계산하므로 살아있는 block 에 대한 쓰기 주입은 발화하지 않아야 한다 —
+        #    in-place 로 되돌리면 여기서 `started=1 / granted=0` 부분 전이가 잡힌다.
+        self.assertEqual(block["started_total"], 1)
+        self.assertEqual(block["by_outcome"]["granted"], 1)
+        self.assertEqual(block["callers_awaiting"], 0)
+        self._invariant(snap)
+        self._hard_reset()
+
+    def test_commit_point_failure_leaves_nothing_and_reset_still_works(self):
+        from unittest.mock import patch
+
+        class _FailAxisSwap(dict):
+            def __setitem__(self, key, value):
+                if key == slm.PREMIUM_RC:
+                    raise RuntimeError("commit-point-failed")
+                return super().__setitem__(key, value)
+
+        ran = {"body": 0}
+
+        async def scenario():
+            async with slm.observe(slm.PREMIUM_RC) as handle:
+                ran["body"] += 1
+                handle.finish("granted")
+                return "ok"
+        with patch.object(slm, "_metrics", _FailAxisSwap(slm._metrics)):
+            with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                self.assertEqual(_run(scenario()), "ok")
+            self.assertEqual(ran["body"], 1)
+            snap = self._snapshot()
+            self.assertEqual(snap[slm.PREMIUM_RC]["started_total"], 0, "전무가 아니라 부분이 남았다")
+            self._invariant(snap)
+            self.assertTrue(any("진입 부기 실패" in r.getMessage() for r in logs.records))
+            # 장부가 일관되므로 공개 reset 은 **수용**해야 한다 (손상 거부와의 경계)
+            slm.reset_subscribe_load_metrics()
+        self._hard_reset()
+
+    def test_reset_refuses_a_corrupted_ledger_instead_of_erasing_evidence(self):
+        """⛔ 게이지 검사만으로는 `started=3 / awaiting=0 / terminal 0` 손상을 정상으로
+        수용·삭제했다(실측). 손상 장부는 증거다."""
+        with slm._lock:
+            slm._metrics[slm.SNAPSHOT_BUILD]["started_total"] = 3
+        try:
+            with self.assertRaises(slm.SubscribeLoadContractError) as ctx:
+                slm.reset_subscribe_load_metrics()
+            self.assertIn("불변식", str(ctx.exception))
+            self.assertIn("snapshot_build", str(ctx.exception))
+        finally:
+            self._hard_reset()
 
 
 class TestEntryTransitionStructure(SubscribeLoadTestCase):
