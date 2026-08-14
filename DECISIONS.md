@@ -6501,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `ce744d083adcd2ff11cc17c41f45d05ab2a84463`
+- server 기준 commit: `23297caf4cbd9a4951ac15b1fc74e4cd9cef6448`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `29bacf5687c0883aa492477f099a82b17db9a1270c0fa7aa524c4ff7b548f9ab`
-- baseline SHA: `951bbe80b6fa09a202770205f1a81aba1b6663d18ba39db166e521c7fe310fcd`
+- manifest SHA: `8bf3a66a3016259f0aba3bfd51a55ab51e05e5c88d845f5263b28382d0398c9a`
+- baseline SHA: `b1572aa01894edf5f93b8a406bd8f84ca3abc61c0d931dd8e3feb0c2c8bbd111`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6607,12 +6607,12 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe
 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
-근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:265-302`
+근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
 구현 근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
-`app/topic_authorization.py:359-389`(coordinator) · `app/topic_dispatcher.py:686-826`(배선·등록) ·
+`app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:686-826`(배선·등록) ·
 `app/main.py:3088-3091`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->

@@ -51,7 +51,8 @@
           "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history",
           "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory",
           "SEM-028 repository follow-up candidate: non-vacuous seven-module docs-workflow discovery inventory, fail-closed nine-input semantic-drift surface, 125-reference RID backtick inventory across six destinations and two repositories, and explicit six-document Markdown-link gate scope",
-          "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections"
+          "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections",
+          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery"
         ]
       },
       {
@@ -78,7 +79,8 @@
           "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history",
           "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory",
           "SEM-028 repository follow-up candidate: non-vacuous seven-module docs-workflow discovery inventory, fail-closed nine-input semantic-drift surface, 125-reference RID backtick inventory across six destinations and two repositories, and explicit six-document Markdown-link gate scope",
-          "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections"
+          "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections",
+          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -155,7 +157,8 @@
           "Markdown locator debt follow-up (SEM-024): immutable historical ADR targets, current per-key target correction, full-canonical-document #L validation against pinned or explicit commits, full-baseline backtick validation, and counterexample regressions for scope, ranges, label drift, and mutable history",
           "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory",
           "SEM-028 repository follow-up candidate: non-vacuous seven-module docs-workflow discovery inventory, fail-closed nine-input semantic-drift surface, 125-reference RID backtick inventory across six destinations and two repositories, and explicit six-document Markdown-link gate scope",
-          "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections"
+          "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections",
+          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery"
         ],
         "result": "pass"
       }
@@ -169,21 +172,21 @@
   "reviewed_at": "2026-08-15",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "29bacf5687c0883aa492477f099a82b17db9a1270c0fa7aa524c4ff7b548f9ab",
-    "baseline_sha256": "951bbe80b6fa09a202770205f1a81aba1b6663d18ba39db166e521c7fe310fcd",
-    "lock_sha256": "865dd27a1cd954ab17cbb4ce424448d2216f44dd065650462f3d6946d0a6b78e",
-    "server_commit": "ce744d083adcd2ff11cc17c41f45d05ab2a84463",
+    "manifest_sha256": "8bf3a66a3016259f0aba3bfd51a55ab51e05e5c88d845f5263b28382d0398c9a",
+    "baseline_sha256": "b1572aa01894edf5f93b8a406bd8f84ca3abc61c0d931dd8e3feb0c2c8bbd111",
+    "lock_sha256": "ffbddcf33a8c5af3b4eeed135923ac589f17a1308c18f35b2be7bac13a435548",
+    "server_commit": "23297caf4cbd9a4951ac15b1fc74e4cd9cef6448",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "99b5ae153602690bfb46d9b45cd4c28abc3cae6ff363ebbd1e6c2d433251b460",
-    "CLIENT": "dff7185a6f10fa32b3bb9b63e53687db038127da67749930aadddf7339f6efe6",
-    "CUT": "75a9f4866abd92163493d3c66a976204312768de22c336da1d59e083cc445ef8",
-    "HAND": "9aa731c0129d1337144bb0157044d6b995552493f49b7bf8619fdfcab2767940",
-    "HEALTH": "61081a9099bf7f65c00a1c681550a167dac366a0b2199e2c68cb9c0c3d052503",
-    "LOAD": "5b36cc06c350e79e435e4b61d2120c0ae8690ca9c90aeb784ac3ceec95b506b9"
+    "ADR": "a822a9207db7deca5c3f2bf0cb6869d88e6bc2d367ec824bd0d3425fb5b01356",
+    "CLIENT": "0ebb9d7340e8800a63cc659d141fb189313eb5e6bdc8f2a1d9e7e77e2f7440c5",
+    "CUT": "63d1ecf3a50cf04269046729a7996d8bb3238ce1296512352e30d42d1928a59c",
+    "HAND": "f091bba4890642e6fd70f8f996fbab320aee3a5261140ae459d363985a7911af",
+    "HEALTH": "377114ce2e5f06a30f0bd2dfce8f89469c9d33e37891f4e7594474e3ffcfeed6",
+    "LOAD": "6d1eb1cba68396246c608668578b5568c197b4bddd19a6732a98e8db7eac68e4"
   },
-  "claim_ledger_sha256": "db36b7a73236eb55ace2dec9c3cd7796c6f17c31839017c0f53f740e47c365ab",
+  "claim_ledger_sha256": "b681756764df9be46f9e684847a24f8638ac036ad96ef50349c1edec49512ada",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
