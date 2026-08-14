@@ -1721,11 +1721,25 @@ async def get_ws_connection_metrics():
     ⚠️ **process-local** — 지금은 Uvicorn worker 1개라 이것이 전체값이지만, worker 를 늘리면
     합산 없이는 전체가 아니다. never-crash.
     """
+    # ⛔ **실패 도메인은 양방향으로 독립이어야 한다.** 예전에는 connection 계측이 실패하면
+    #    `{"metrics": None}` 으로 **early return** 해 rollout 블록까지 함께 지웠다 — 그런데
+    #    관찰 창의 캡처 도구는 `metrics.topic_auth_rollout` **하나만** 읽고, 없으면
+    #    `CaptureError("admin response lacks metrics.topic_auth_rollout")` 로 죽는다
+    #    (`ops/capture_topic_auth_rollout.py:184-187`). 즉 무관한 계측의 실패가 **창 관측 자체를
+    #    끊는다.** 아래는 부분 성공을 부분 성공으로 보고한다.
+    connection_error: str | None = None
     try:
         metrics = manager.connection_metrics()
     except Exception:
         logger.error("ws-connection-metrics 조회 실패", exc_info=True)
-        return {"metrics": None, "error": "unavailable"}
+        metrics = {}
+        connection_error = "connection_metrics_unavailable"
+    if not isinstance(metrics, dict):
+        # ⚠️ never-crash 계약(docstring)을 지킨다 — 예전에는 여기서 곧바로 `metrics[...] = ...`
+        #    를 해서 dict 가 아니면 500 이 났다.
+        logger.error("ws-connection-metrics 가 dict 가 아니다", extra={"type": type(metrics).__name__})
+        metrics = {}
+        connection_error = "connection_metrics_unavailable"
 
     # rollout snapshot 실패는 기존 연결 계측까지 지우지 않는다. 두 계측은 운영 판단에서
     # 함께 보지만 실패 도메인은 독립이다.
@@ -1740,6 +1754,10 @@ async def get_ws_connection_metrics():
             "error": "unavailable",
         }
     metrics["topic_auth_rollout"] = rollout_metrics
+    if connection_error is not None:
+        # ⚠️ shape 계약: 실패해도 `metrics` 는 **dict** 이고 `topic_auth_rollout` 을 담는다.
+        #    구 `{"metrics": None, "error": "unavailable"}` 은 더 이상 나오지 않는다.
+        return {"metrics": metrics, "error": connection_error}
     return {"metrics": metrics}
 
 

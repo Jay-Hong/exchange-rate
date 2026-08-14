@@ -362,3 +362,86 @@ def test_handshake_buckets_are_bounded():
     for i in range(100):
         buckets.record(now=i * 10)
     assert buckets.snapshot(now=990)["buckets_present"] <= 3
+
+
+# ── S0: 실패 도메인 독립 ───────────────────────────────────────────────────────
+# ⛔ 이 endpoint 는 **관찰 창의 유일한 데이터 소스**다. 캡처 도구는 `metrics.topic_auth_rollout`
+#    하나만 읽고 없으면 CaptureError 로 죽는다(`ops/capture_topic_auth_rollout.py:184-187`).
+#    따라서 무관한 계측(connection)의 실패가 rollout 을 지우면 **창 관측이 끊긴다**.
+
+def _call_metrics_endpoint():
+    import asyncio
+    return asyncio.run(app_main.get_ws_connection_metrics())
+
+
+def test_connection_metrics_failure_still_reports_rollout(monkeypatch):
+    monkeypatch.setattr(
+        app_main.manager, "connection_metrics",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    body = _call_metrics_endpoint()
+    assert body["error"] == "connection_metrics_unavailable"
+    assert isinstance(body["metrics"], dict), "구 `{'metrics': None}` 은 캡처 도구를 죽인다"
+    assert isinstance(body["metrics"]["topic_auth_rollout"], dict)
+    assert "started_at_epoch_seconds" in body["metrics"]["topic_auth_rollout"]
+
+
+def test_non_dict_connection_metrics_does_not_crash(monkeypatch):
+    """never-crash 계약 — 예전에는 dict 가 아니면 `metrics[...] = ...` 에서 500 이 났다."""
+    monkeypatch.setattr(app_main.manager, "connection_metrics", lambda: ["not", "a", "dict"])
+    body = _call_metrics_endpoint()
+    assert body["error"] == "connection_metrics_unavailable"
+    assert isinstance(body["metrics"]["topic_auth_rollout"], dict)
+
+
+def test_both_domains_failing_still_yields_a_parseable_body(monkeypatch):
+    monkeypatch.setattr(
+        app_main.manager, "connection_metrics",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        app_main.manager.topic_auth_rollout, "snapshot",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    body = _call_metrics_endpoint()
+    assert body["error"] == "connection_metrics_unavailable"
+    rollout = body["metrics"]["topic_auth_rollout"]
+    assert rollout["error"] == "unavailable"
+    assert rollout["topic_dispatcher_enabled"] is config.TOPIC_DISPATCHER_ENABLED
+
+
+def test_success_path_has_no_error_key(monkeypatch):
+    body = _call_metrics_endpoint()
+    assert "error" not in body
+    assert isinstance(body["metrics"]["topic_auth_rollout"], dict)
+    assert "active_connections" in body["metrics"]
+
+
+def test_capture_tool_can_parse_the_partial_failure_body(monkeypatch):
+    """⛔ 계약의 실제 소비자로 검증한다 — 테스트가 아는 모양이 아니라 **도구가 요구하는 모양**."""
+    import importlib.util
+    import json
+    import pathlib
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "capture_tool",
+        pathlib.Path(__file__).resolve().parents[1] / "ops/capture_topic_auth_rollout.py",
+    )
+    capture = importlib.util.module_from_spec(spec)
+    # ⛔ exec **전에** 등록한다 — dataclass 는 `sys.modules[cls.__module__].__dict__` 로 타입을
+    #    해석해서, 미등록 상태로 exec 하면 `AttributeError: 'NoneType' object has no attribute
+    #    '__dict__'` 가 난다(실측).
+    sys.modules["capture_tool"] = capture
+    try:
+        spec.loader.exec_module(capture)
+        monkeypatch.setattr(
+            app_main.manager,
+            "connection_metrics",
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        body = _call_metrics_endpoint()
+        rollout, observed = capture._parse_rollout(json.dumps(body).encode())
+    finally:
+        sys.modules.pop("capture_tool", None)
+    assert isinstance(rollout, dict) and observed > 0
