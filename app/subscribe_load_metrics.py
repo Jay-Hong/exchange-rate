@@ -1,5 +1,5 @@
 # app/subscribe_load_metrics.py
-"""subscribe-load 계측 — WS subscribe 경로의 외부축 관측 (process-local, dormant).
+"""subscribe-load 계측 — WS subscribe 경로의 외부축 관측 (process-local).
 
 ⛔ **이름이 계약이다.** 이것은 *subscribe-load* 이지 *reconnect-load* 가 아니다 —
    `send_initial_snapshots` 도 `handle_client_message` 도 연결 이력을 인자로 받지 않으므로,
@@ -24,6 +24,14 @@ caller 쪽만 재면 양방향으로 어긋난다 — 포기 뒤에도 도는 �
 ⚠️ `premium_rc` 에는 worker 축이 **없다**(비대칭은 의도) — async HTTP 라 취소가 실제 전파된다.
    항상 0 인 필드를 만들면 "정상인데 0" 과 "고장나서 0" 이 섞인다.
 
+## 캡처 판독 경계 (S2 배선 후 확정 — attribution probe 실측)
+
+- `premium_rc.started_total` 은 **RC 실호출 수가 아니라 CM 진입 기준 관측 시도 수**다 —
+  mono()/system_clock() 같은 clock 배선 결함도 RC 0회 상태로 `raised` 에 포함된다.
+- 취소는 terminal 후보보다 **우선**한다 — worker 가 결과를 만들어도 caller 취소면 `granted`
+  로 세지 않으므로 **granted 는 DB-allowed 응답 수를 undercount** 한다. deadline 만료와
+  caller 포기는 counter 만으로 구분할 수 없다(통제 시나리오 delta 로만 주장).
+
 ⛔ **취소 하위분류는 관측 사실일 뿐이다.** `ThreadPoolExecutor` 는 wrapper 호출 **전에** future
    를 running 으로 바꾸므로 worker-start 이벤트 set 이전에 경합 창이 있고, `asyncio.to_thread`
    는 그 underlying future 를 노출하지 않는다(`app/auth_executor.py:196-245` 가 done-callback
@@ -36,11 +44,12 @@ caller 쪽만 재면 양방향으로 어긋난다 — 포기 뒤에도 도는 �
 수행한다. `finish()` 뒤에도 scope 안에서 예외가 날 수 있어 "finish 가 마지막" 이라는 규율은
 깨지기 쉽다.
 
-## dormancy
+## 배선 상태 (S2~)
 
-호출자가 없으면 아무 것도 돌지 않는다. 배선 뒤에도 wire 동작은 불변이다 — task/thread/env flag/
-외부 I/O 0, in-memory int·float 갱신만. ⚠️ 단 **"동작 변화 0" 이라고 쓰면 거짓**이다: event-loop
-caller 와 worker 가 같은 `threading.Lock` 을 잡으므로 loop 스레드에 lock 획득이 생긴다.
+`app/topic_authorization.py` 의 premium/krx seam 이 이 모듈을 소비한다(S2). **wire 의
+verdict·payload·전파 예외 계약은 불변**이다 — task/thread/env flag/외부 I/O 0, in-memory
+int·float 갱신만. ⚠️ 단 **"동작 변화 0" 이라고 쓰면 거짓**이다: event-loop caller 와 worker 가
+같은 `threading.Lock` 을 잡으므로 loop 스레드에 lock 획득이 생기고 계측 상태가 갱신된다.
 SLO 가 없으므로 그 비용을 사전 승인하지 않는다 — 배포 후 observer effect 확인 대상.
 
 ⚠️ **운영 반영은 관찰 창 종료(2026-08-20) 후**다. `--force-recreate` 가 process-local counter 를
@@ -126,7 +135,8 @@ SEND_OUTCOME_KEYS: tuple[str, ...] = SEND_OUTCOMES + (_UNCLASSIFIED,)
 
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
-    "프로세스 재기동 시 0 · REST twin 은 포함하지 않는다 · callers_awaiting 은 대기이지 점유가 아니다"
+    "프로세스 재기동 시 0 · REST twin 은 포함하지 않는다 · callers_awaiting 은 대기이지 점유가 아니다 · "
+    "started_total 은 관측 시도 수(leaf 실호출 수 아님) · 취소 우선이라 granted 는 undercount"
 )
 
 _lock = threading.Lock()

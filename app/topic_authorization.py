@@ -28,6 +28,7 @@ from typing import Optional, Union
 
 from sqlalchemy import exc as sqlalchemy_exc
 
+from app import subscribe_load_metrics as subscribe_load
 from app.db_errors import TRANSIENT_DB_ERRORS, is_transient_db_error
 from app.topic_policy import AuthorizationPlan
 
@@ -193,6 +194,24 @@ def classify_premium(
     raise TypeError(f"분류할 수 없는 RevenueCat 결과: {type(result).__name__}")
 
 
+def _axis_outcome(verdict) -> str:
+    """verdict → subscribe-load 제출 outcome. **관측용 매핑일 뿐 정책이 아니다** — 여기서
+    나온 문자열은 counter 버킷만 정하고, wire 로 반환되는 verdict 는 그대로다.
+
+    ⛔ 문자열 리터럴을 각 분기마다 흩뿌리지 않는 이유: 오타 하나가 그 분기만 조용히
+       `unclassified` 로 접히게 만든다(모듈이 진단은 남기지만 버킷은 이미 갈렸다).
+       타입 주도 매핑 한 곳이면 갈릴 표면이 없다.
+    """
+    if isinstance(verdict, (PremiumGranted, Granted)):
+        return "granted"
+    if isinstance(verdict, Denied):
+        return "denied"
+    if isinstance(verdict, Unavailable):
+        return ("unavailable_transient" if verdict.kind is UnavailableKind.TRANSIENT
+                else "unavailable_persistent")
+    raise TypeError(f"관측 outcome 으로 매핑할 수 없는 verdict: {type(verdict).__name__}")
+
+
 def _observe_krx_entitlement_sync(user_id: str, *, mono) -> EntitlementObservation:
     """worker thread 전용 — **쿼리 직전**에 관측 시각을 찍고 세션을 여기서 열고 닫는다.
 
@@ -230,12 +249,17 @@ def assert_single_gated_topic() -> None:
     assert_single_entitlement_topic()
 
 
-def _log_unavailable(kind: UnavailableKind, message: str) -> None:
+def _log_unavailable(
+    kind: UnavailableKind, message: str, exc: Optional[BaseException] = None
+) -> None:
     """⚠️ transient=WARNING / persistent=**ERROR**. 영구 결함을 WARNING 으로 내면 운영자가
     "재시도하면 낫는다"로 읽어 조사 우선순위가 밀린다."""
     log = logger.error if kind is UnavailableKind.PERSISTENT else logger.warning
-    # ⚠️ `exc_info` 는 예외 컨텍스트가 있을 때만 붙는다 — RevenueCat 결과는 예외가 아니다.
-    log(message, extra={"kind": kind.value}, exc_info=sys.exc_info()[0] is not None)
+    # ⚠️ 예외 컨텍스트: except 블록 **밖**에서 부르면 `sys.exc_info()` 가 비어 traceback 이
+    #    소실된다 — 관측 CM 밖으로 로그를 옮기며(로깅 결함이 외부축 신호를 오염시키지 않게)
+    #    잡아 둔 예외를 명시적으로 넘긴다. 안 넘기면 기존처럼 활성 컨텍스트에서만 붙는다.
+    log(message, extra={"kind": kind.value},
+        exc_info=exc if exc is not None else sys.exc_info()[0] is not None)
 
 
 async def _observe_premium(user_id: str, *, mono) -> PremiumVerdict:
@@ -253,11 +277,16 @@ async def _observe_premium(user_id: str, *, mono) -> PremiumVerdict:
     from app.clock import system_clock
     from app.subscription import fetch_revenuecat_result
 
-    premium_observed_at_mono = mono()          # ⛔ RC 호출 **직전**
-    result = await fetch_revenuecat_result(user_id, clock=system_clock())
-    verdict = classify_premium(
-        result, uid=user_id, premium_observed_at_mono=premium_observed_at_mono
-    )
+    # ⛔ 관측 CM 진입을 mono() **앞**에 둔다 — 진입 부기가 mono 와 RC 호출 사이에 끼면
+    #    "RC 직전" 관측 시각 계약이 부기 비용만큼 흐려진다. CM 은 부기 실패 시에도 본문을
+    #    막지 않고 본문 예외를 삼키지 않는다(subscribe_load_metrics 계약, 변이로 잠김).
+    async with subscribe_load.observe(subscribe_load.PREMIUM_RC) as load:
+        premium_observed_at_mono = mono()          # ⛔ RC 호출 **직전**
+        result = await fetch_revenuecat_result(user_id, clock=system_clock())
+        verdict = classify_premium(
+            result, uid=user_id, premium_observed_at_mono=premium_observed_at_mono
+        )
+        load.finish(_axis_outcome(verdict))
     if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:
         # ⚠️ **원인 로그는 leaf 가 이미 남긴다** — `fetch_revenuecat_result` 가 전송·HTTP·형식
         #    오류를 WARNING/ERROR 로 기록한다(확인함). 여기서 또 남기면 같은 사건이 두 줄이 된다.
@@ -279,33 +308,52 @@ async def _observe_krx_entitlement(
     if premium.uid != user_id:
         raise ValueError("premium 관측 UID 와 entitlement 조회 UID 가 다르다")
 
-    try:
-        observation = await asyncio.to_thread(
-            _observe_krx_entitlement_sync, user_id, mono=mono
-        )
-    except TRANSIENT_DB_ERRORS as exc:
-        kind = (UnavailableKind.TRANSIENT if is_transient_db_error(exc)
-                else UnavailableKind.PERSISTENT)
-        _log_unavailable(kind, "entitlement 조회 DB 오류")
-        return Unavailable(kind, "entitlement_db_error")
-    except sqlalchemy_exc.SQLAlchemyError:
-        # 그 밖 DB/ORM 오류(스키마 드리프트 등)는 재시도로 낫지 않는다.
-        _log_unavailable(UnavailableKind.PERSISTENT, "entitlement 조회 DB 오류(영구)")
-        return Unavailable(UnavailableKind.PERSISTENT, "entitlement_db_permanent")
-    # ⛔ **일반 `Exception` 은 잡지 않는다.** 한때 blast radius(스키마 드리프트 하나로 KRX
-    #    요청 연결이 전부 끊긴다)를 근거로 삼키려 했는데 **틀렸다**(codex): 그건 별도의 운영
-    #    방어 문제이고, `AttributeError`·`TypeError` 같은 **프로그래밍 오류를 가용성 verdict 로
-    #    바꾸면** 클라는 재시도 가능한 정상 결과로 읽고 서버는 영영 안 낫는다.
-    #    분류 불가는 삼키지 않는다 — 이 리포의 인증 경로가 이미 그 규율이다.
-
-    if not observation.allowed:
-        return Denied("krx_entitlement_required")
-    # ⛔ **여기가 유일한 `Granted` 생성 지점**이다 — 두 축이 실제로 관측된 뒤.
-    return Granted(
-        uid=user_id,
-        premium_observed_at_mono=premium.premium_observed_at_mono,
-        entitlement_observed_at_mono=observation.observed_at_mono,
-    )
+    # ⛔ 위 두 pre-check 는 관측 CM **밖**이다 — 배선·계약 오류(트립와이어, UID 불일치)를
+    #    krx 축의 `raised` 로 기록하면 외부축(DB) 결함 신호가 오염된다. 축 관측은 여기부터다.
+    unavailable_log: Optional[str] = None
+    caught: Optional[BaseException] = None
+    async with subscribe_load.observe(subscribe_load.KRX_ENTITLEMENT) as load:
+        try:
+            # ⛔ worker 축은 `timed_call` 이 worker 스레드 안에서 센다 — caller 축과 분리
+            #    (`to_thread` 는 취소를 전파하지 않는다). `_observe_krx_entitlement_sync`
+            #    본문은 불변 — 세션 수명과 `observed_at_mono` 위치(쿼리 직전)는 계약이다.
+            observation = await asyncio.to_thread(
+                subscribe_load.timed_call, subscribe_load.KRX_ENTITLEMENT, load,
+                _observe_krx_entitlement_sync, user_id, mono=mono,
+            )
+        except TRANSIENT_DB_ERRORS as exc:
+            kind = (UnavailableKind.TRANSIENT if is_transient_db_error(exc)
+                    else UnavailableKind.PERSISTENT)
+            verdict = Unavailable(kind, "entitlement_db_error")
+            unavailable_log, caught = "entitlement 조회 DB 오류", exc
+        except sqlalchemy_exc.SQLAlchemyError as exc:
+            # 그 밖 DB/ORM 오류(스키마 드리프트 등)는 재시도로 낫지 않는다.
+            verdict = Unavailable(UnavailableKind.PERSISTENT, "entitlement_db_permanent")
+            unavailable_log, caught = "entitlement 조회 DB 오류(영구)", exc
+        # ⛔ **일반 `Exception` 은 잡지 않는다.** 한때 blast radius(스키마 드리프트 하나로 KRX
+        #    요청 연결이 전부 끊긴다)를 근거로 삼키려 했는데 **틀렸다**(codex): 그건 별도의 운영
+        #    방어 문제이고, `AttributeError`·`TypeError` 같은 **프로그래밍 오류를 가용성 verdict 로
+        #    바꾸면** 클라는 재시도 가능한 정상 결과로 읽고 서버는 영영 안 낫는다.
+        #    분류 불가는 삼키지 않는다 — 이 리포의 인증 경로가 이미 그 규율이다.
+        #    (관측 CM 은 그 예외를 `raised` 로 기록만 하고 그대로 재전파한다.)
+        else:
+            if not observation.allowed:
+                verdict = Denied("krx_entitlement_required")
+            else:
+                # ⛔ **여기가 유일한 `Granted` 생성 지점**이다 — 두 축이 실제로 관측된 뒤.
+                verdict = Granted(
+                    uid=user_id,
+                    premium_observed_at_mono=premium.premium_observed_at_mono,
+                    entitlement_observed_at_mono=observation.observed_at_mono,
+                )
+        load.finish(_axis_outcome(verdict))
+    # ⛔ 로깅은 관측 CM **밖** — 로깅 인프라 결함(Filter/Logger 오류)이 실제 DB transient
+    #    사건을 krx `raised` 로 둔갑시켜 `unavailable_*` 신호를 지우면 안 된다(pre-check 와
+    #    같은 원칙, Workflow attribution probe 실측). duration 에도 로그 시간이 안 섞인다.
+    #    traceback 은 `caught` 를 명시 전달해 보존한다(밖에서는 sys.exc_info() 가 빈다).
+    if unavailable_log is not None:
+        _log_unavailable(verdict.kind, unavailable_log, exc=caught)
+    return verdict
 
 
 async def authorize_subscription_plan(
