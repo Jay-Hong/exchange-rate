@@ -55,12 +55,93 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/2")
+        self.assertEqual(snap["contract_version"], "subscribe-load/3")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
-        self.assertEqual(sorted(snap["snapshot_send"]["calls_by_channel"]), sorted(slm.CHANNELS))
-        self.assertEqual(sorted(snap["snapshot_send"]["sends_by_outcome"]), sorted(slm.SEND_OUTCOMES))
+        # ⛔ 저장 key 는 제출 allowlist(CHANNELS/SEND_OUTCOMES)가 아니라 storage 스키마다.
+        self.assertEqual(sorted(snap["snapshot_send"]["calls_by_channel"]), sorted(slm.CHANNEL_KEYS))
+        self.assertEqual(sorted(snap["snapshot_send"]["sends_by_outcome"]), sorted(slm.SEND_OUTCOME_KEYS))
+        self.assertNotIn("unclassified", slm.CHANNELS, "unclassified 는 storage-only 다")
+        self.assertNotIn("unclassified", slm.SEND_OUTCOMES, "unclassified 는 storage-only 다")
+
+    def test_contract_constants_are_locked_literally(self):
+        """⛔ `slm.*` 자기참조 비교는 상수 축소를 못 잡는다 — `CHANNEL_KEYS = CHANNELS + (...)`
+        파생이라 함께 줄어 통과했다(실측: token_bearing / lease_skipped / unavailable_persistent /
+        built 제거 변이 4종 전부 생존). 기대값은 여기 **literal** 로 박는다."""
+        self.assertEqual(slm.CHANNELS, ("anonymous", "token_bearing", "unattributed"))
+        self.assertEqual(slm.SEND_OUTCOMES, ("sent", "lease_skipped", "connection_closed", "raised"))
+        self.assertEqual(slm.SUBMITTABLE_OUTCOMES, {
+            slm.PREMIUM_RC: frozenset(
+                {"granted", "denied", "unavailable_transient", "unavailable_persistent"}),
+            slm.KRX_ENTITLEMENT: frozenset(
+                {"granted", "denied", "unavailable_transient", "unavailable_persistent"}),
+            slm.SNAPSHOT_BUILD: frozenset({"built", "none_payload"}),
+        })
+        self.assertEqual(slm.AXIS_OUTCOMES, {
+            slm.PREMIUM_RC: (
+                "granted", "denied", "unavailable_transient", "unavailable_persistent",
+                "cancelled", "raised", "unclassified"),
+            slm.KRX_ENTITLEMENT: (
+                "granted", "denied", "unavailable_transient", "unavailable_persistent",
+                "cancel_worker_start_not_observed", "cancel_worker_start_observed",
+                "raised", "unclassified"),
+            slm.SNAPSHOT_BUILD: (
+                "built", "none_payload", "build_failed",
+                "cancel_worker_start_not_observed", "cancel_worker_start_observed", "unclassified"),
+        })
+
+    def test_schema_consistency_is_enforced_at_import(self):
+        """⛔ SUBMITTABLE ⊆ storage 가 깨지면 축 경로는 종료 전이 KeyError → half-open +
+        awaiting 호출당 영구 누수(불변식 1==0+1 유지라 corrupt 검사 무력), send 경로는 관측
+        통째 소실(실측 probe). 편집 실수는 import 실패로 잡는다."""
+        import ast
+        import inspect
+        from unittest.mock import patch
+
+        full_premium = slm.SUBMITTABLE_OUTCOMES[slm.PREMIUM_RC]
+        bad_cases = [
+            ("제출이 저장 밖 (partition 위반)", {**slm.SUBMITTABLE_OUTCOMES,
+                                slm.PREMIUM_RC: frozenset({"granted", "ghost"})}),
+            # ⛔ partition 은 유지되고 서로소만 깨지는 케이스 — 도메인 4값 전부 + 파생 키 1개.
+            #    부분집합으로 만들면 partition 검사가 대신 잡아 disjoint 검사 제거 변이가 산다.
+            ("제출·파생 겹침 (disjoint 위반)", {**slm.SUBMITTABLE_OUTCOMES,
+                                slm.PREMIUM_RC: full_premium | {"cancelled"}}),
+            ("축 집합 불일치", {k: v for k, v in slm.SUBMITTABLE_OUTCOMES.items()
+                                if k != slm.PREMIUM_RC}),
+        ]
+        for label, bad in bad_cases:
+            with self.subTest(case=label):
+                with patch.object(slm, "SUBMITTABLE_OUTCOMES", bad):
+                    with self.assertRaises(slm.SubscribeLoadContractError):
+                        slm._validate_schema()
+        # snapshot_send 쪽 불일치도 각각 독립으로 잠근다 — 축 케이스만 있으면
+        # send/channel 저장 key 검사 제거 변이가 산다(실측).
+        send_channel_cases = [
+            ("send 제출에 unclassified 침투", "SEND_OUTCOMES",
+             ("sent", "lease_skipped", "connection_closed", "raised", "unclassified")),
+            ("send 저장 key 에 unclassified 누락", "SEND_OUTCOME_KEYS",
+             ("sent", "lease_skipped", "connection_closed", "raised")),
+            ("channel 제출에 unclassified 침투", "CHANNELS",
+             ("anonymous", "token_bearing", "unattributed", "unclassified")),
+            ("channel 저장 key 에 unclassified 누락", "CHANNEL_KEYS",
+             ("anonymous", "token_bearing", "unattributed")),
+        ]
+        for label, attr, bad in send_channel_cases:
+            with self.subTest(case=label):
+                with patch.object(slm, attr, bad):
+                    with self.assertRaises(slm.SubscribeLoadContractError):
+                        slm._validate_schema()
+        slm._validate_schema()  # 현행 상수는 통과
+        # ⛔ import-time 호출 자체를 AST 로 잠근다 — 가드가 있어도 안 불리면 무의미하다.
+        tree = ast.parse(inspect.getsource(slm))
+        top_level_calls = [
+            n.value.func.id for n in tree.body
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Name)
+        ]
+        self.assertIn("_validate_schema", top_level_calls,
+                      "_validate_schema() 가 모듈 top-level 에서 호출되지 않는다")
 
     def test_exact_key_sets_are_locked(self):
         """⛔ '있다/없다' 만 보면 임의 필드 추가(예: 파생 중복 `snapshot_calls_total`)를 못 잡는다."""
@@ -818,9 +899,142 @@ class TestSnapshotSendAxis(SubscribeLoadTestCase):
         self.assertEqual(send["sends_by_outcome"]["sent"], 1)
         self.assertEqual(send["sends_by_outcome"]["unclassified"], 1)
         self.assertEqual(send["sends_by_outcome"]["raised"], 0, "전송 예외 버킷이 오염됐다")
-        self.assertEqual(sorted(send["calls_by_channel"]), sorted(slm.CHANNELS))
+        self.assertEqual(sorted(send["calls_by_channel"]), sorted(slm.CHANNEL_KEYS))
         self.assertEqual(snap["metrics_internal_errors_total"], 2)
         self.assertEqual(sum("unclassified 로 접는다" in r.getMessage() for r in logs.records), 2)
+
+
+class TestDerivedSentinelsAreNotSubmittable(SubscribeLoadTestCase):
+    """⛔ 저장 스키마 ≠ 제출 allowlist. 저장 key 집합으로 검증하면 정상 종료 본문의
+    `finish("cancelled")` 가 진짜 취소로, `finish("build_failed")` 가 진짜 build 실패로
+    기록되고(실측: 파생 5종 제출 전부 해당 버킷 + internal error 0), 정확한 sentinel
+    문자열이 fold 진단을 우회했다(실측). 취소 2종·raised·build_failed 는 `__aexit__` 의
+    실제 예외·취소 종료에서만 파생되고, unclassified 는 terminal resolution 이 생성한다
+    (미지정·제출 불가 값·분류 격하 — 정상 종료도 만든다). 어느 쪽도 제출로는 못 만든다."""
+
+    def test_synthetic_derived_outcomes_fold_to_unclassified_with_diagnostics(self):
+        cases = [
+            (slm.PREMIUM_RC, "cancelled"),
+            (slm.PREMIUM_RC, "raised"),
+            (slm.PREMIUM_RC, "unclassified"),
+            (slm.KRX_ENTITLEMENT, "cancel_worker_start_not_observed"),
+            (slm.KRX_ENTITLEMENT, "cancel_worker_start_observed"),
+            (slm.KRX_ENTITLEMENT, "raised"),
+            (slm.SNAPSHOT_BUILD, "build_failed"),
+            (slm.SNAPSHOT_BUILD, "cancel_worker_start_observed"),
+        ]
+        for axis, synthetic in cases:
+            with self.subTest(axis=axis, synthetic=synthetic):
+                self._hard_reset()
+
+                async def scenario():
+                    async with slm.observe(axis) as handle:
+                        handle.finish(synthetic)
+                with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                    _run(scenario())
+                snap = self._snapshot()
+                block = snap[axis]
+                self.assertEqual(block["by_outcome"]["unclassified"], 1)
+                if synthetic != "unclassified":
+                    self.assertEqual(block["by_outcome"][synthetic], 0,
+                                     f"파생 버킷 {synthetic} 이 제출로 오염됐다")
+                self.assertEqual(snap["metrics_internal_errors_total"], 1,
+                                 "unclassified 기록에는 internal error 가 짝으로 남아야 한다")
+                self.assertTrue(any("allowlist 밖" in r.getMessage() for r in logs.records))
+                self._invariant(snap)
+        self._hard_reset()
+
+    def test_submittable_domain_outcomes_are_unchanged(self):
+        """경계의 반대편 — 도메인 결과 제출은 진단 없이 그대로 기록된다.
+
+        ⛔ 축당 1개 샘플이면 제출 집합 **축소** 변이가 생존한다(실측: unavailable_persistent /
+        built 제거 변이 통과). 제출 가능한 **전수**를 순회한다."""
+        for axis in slm.AXIS_OUTCOMES:
+          for outcome in sorted(slm.SUBMITTABLE_OUTCOMES[axis]):
+            with self.subTest(axis=axis, outcome=outcome):
+                self._hard_reset()
+
+                async def scenario():
+                    async with slm.observe(axis) as handle:
+                        handle.finish(outcome)
+                _run(scenario())
+                snap = self._snapshot()
+                self.assertEqual(snap[axis]["by_outcome"][outcome], 1)
+                self.assertEqual(snap["metrics_internal_errors_total"], 0)
+        self._hard_reset()
+
+    def test_exact_unclassified_string_cannot_bypass_fold_diagnostics(self):
+        """S1b 의 fold 진단을 정확한 sentinel 문자열로 우회할 수 있었다(실측)."""
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_snapshot_call("unclassified")
+            slm.record_snapshot_send("unclassified")
+        snap = self._snapshot()
+        send = snap["snapshot_send"]
+        self.assertEqual(send["calls_by_channel"]["unclassified"], 1)
+        self.assertEqual(send["sends_by_outcome"]["unclassified"], 1)
+        self.assertEqual(snap["metrics_internal_errors_total"], 2)
+        self.assertEqual(sum("unclassified 로 접는다" in r.getMessage() for r in logs.records), 2)
+
+
+class TestFoldPairingIsAtomic(SubscribeLoadTestCase):
+    def test_fold_counts_unclassified_and_internal_error_in_one_lock_section(self):
+        """⛔ 나누면 동시 스냅샷이 `unclassified > internal_errors` 를 일시 관측한다(실측:
+        race probe 22,700회/12만, 최대 lead 2). fold 1건 = lock 획득 정확히 1회가 계약이다."""
+        real = slm._lock
+
+        class _CountingLock:
+            def __init__(self):
+                self.acquisitions = 0
+
+            def __enter__(self):
+                self.acquisitions += 1
+                return real.__enter__()
+
+            def __exit__(self, *exc):
+                return real.__exit__(*exc)
+
+        from unittest.mock import patch
+        for label, record in (("channel", lambda: slm.record_snapshot_call("typo")),
+                              ("send", lambda: slm.record_snapshot_send("typo"))):
+            with self.subTest(record=label):
+                self._hard_reset()
+                counting = _CountingLock()
+                with patch.object(slm, "_lock", counting):
+                    with self.assertLogs("exchange_rate.subscribe_load", level="WARNING"):
+                        record()
+                self.assertEqual(counting.acquisitions, 1,
+                                 "fold 의 counter 와 internal error 가 다른 임계구역에 있다")
+                snap = self._snapshot()
+                self.assertEqual(snap["metrics_internal_errors_total"], 1)
+        self._hard_reset()
+
+
+class TestFoldNeverCountsWithoutItsDiagnosis(SubscribeLoadTestCase):
+    def test_persistent_internal_counter_failure_withholds_the_unclassified_count(self):
+        """⛔ 관측을 먼저 쓰면 두 번째(진단) 쓰기 실패가 **진단 없는 unclassified** 를 남긴다
+        (실측: unclassified=1 / internal_errors=0 — S1b 진입 Blocker 와 같은 형태). 진단-먼저
+        순서면 실패 잔여는 "관측 미기록 + WARNING" 뿐이라 거짓 pairing 이 구조적으로 불가."""
+        from unittest.mock import patch
+
+        class _FailInternalWrite(dict):
+            def __setitem__(self, key, value):
+                if key == "metrics_internal_errors_total":
+                    raise RuntimeError("persistent internal-counter failure")
+                return super().__setitem__(key, value)
+
+        for label, record in (("channel", lambda: slm.record_snapshot_call("typo")),
+                              ("send", lambda: slm.record_snapshot_send("typo"))):
+            with self.subTest(record=label):
+                self._hard_reset()
+                with patch.object(slm, "_metrics", _FailInternalWrite(slm._metrics)):
+                    with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                        record()
+                    snap = self._snapshot()
+                    self.assertEqual(snap["snapshot_send"]["calls_by_channel"]["unclassified"]
+                                     + snap["snapshot_send"]["sends_by_outcome"]["unclassified"], 0,
+                                     "진단이 못 남았으면 관측도 세지 않는다")
+                    self.assertTrue(any("기록 실패" in r.getMessage() for r in logs.records))
+        self._hard_reset()
 
 
 class TestFoldDiagnosticsNeverEvaluateTheValue(SubscribeLoadTestCase):

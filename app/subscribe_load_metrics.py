@@ -62,7 +62,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/2"
+CONTRACT_VERSION = "subscribe-load/3"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -74,6 +74,12 @@ _UNCLASSIFIED = "unclassified"
 _CANCEL_NOT_OBSERVED = "cancel_worker_start_not_observed"
 _CANCEL_OBSERVED = "cancel_worker_start_observed"
 
+# ⛔ **저장 스키마 ≠ 제출 allowlist.** 아래 `AXIS_OUTCOMES` 는 **저장** key 집합이다. 취소 2종·
+#    raised·build_failed 는 `__aexit__` 의 실제 예외·취소 종료에서만 파생되고, `unclassified` 는
+#    terminal resolution 이 생성한다(outcome 미지정·제출 불가 값·분류 격하 — 정상 종료도 만든다).
+#    어느 쪽도 제출로는 만들 수 없다. 한 집합이 두 역할을 겸하면
+#    정상 종료 본문의 `finish("cancelled")` 가 진짜 취소로 기록되고, 정확한 sentinel 문자열이
+#    fold 진단을 우회했다(실측: 파생 5종 제출 전부 해당 버킷 기록 + internal error 0).
 AXIS_OUTCOMES: dict[str, tuple[str, ...]] = {
     PREMIUM_RC: (
         "granted", "denied", "unavailable_transient", "unavailable_persistent",
@@ -89,6 +95,15 @@ AXIS_OUTCOMES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# 호출자가 `finish()` 로 제출할 수 있는 **도메인 결과**만. 파생 키(취소 2종·raised·build_failed·
+# unclassified)는 여기 없다 — snapshot 의 `build_failed` 는 배선이 기존 `except Exception` 안에
+# CM 을 두므로 예외 전파로만 생긴다(`app/topic_initial_snapshot.py:315-323` + 설계 §5 파생 매핑).
+SUBMITTABLE_OUTCOMES: dict[str, frozenset[str]] = {
+    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),
+    KRX_ENTITLEMENT: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),
+    SNAPSHOT_BUILD: frozenset({"built", "none_payload"}),
+}
+
 # worker 축을 갖는 축 — `to_thread` 로 도는 두 개만.
 WORKER_AXES: frozenset[str] = frozenset({KRX_ENTITLEMENT, SNAPSHOT_BUILD})
 
@@ -99,11 +114,15 @@ _RAISED_OUTCOME: dict[str, str] = {
     SNAPSHOT_BUILD: "build_failed",
 }
 
-# ⛔ 두 allowlist 모두 `unclassified` 를 갖는다 — allowlist 밖 값을 **의미 버킷으로 접으면**
-#    그 버킷이 오염된다(실측: typo → `raised`=1 은 실제 전송 예외 신호를, typo → `unattributed`=1
-#    은 channel 배선 gap 신호를 각각 오염시켰고 진단은 0이었다).
-CHANNELS: tuple[str, ...] = ("anonymous", "token_bearing", "unattributed", _UNCLASSIFIED)
-SEND_OUTCOMES: tuple[str, ...] = ("sent", "lease_skipped", "connection_closed", "raised", _UNCLASSIFIED)
+# ⛔ 아래 두 tuple 은 **제출** allowlist 다. allowlist 밖 값을 의미 버킷으로 접으면 그 버킷이
+#    오염된다(실측: typo → `raised`=1 은 실제 전송 예외 신호를, typo → `unattributed`=1 은
+#    channel 배선 gap 신호를 각각 오염시켰고 진단은 0이었다). `unclassified` 는 **storage-only** —
+#    제출에 넣으면 정확한 sentinel 문자열이 fold 진단을 우회한다(실측). send 의 `raised` 는
+#    배선이 send 예외를 잡아 **분류·제출**하는 값이라 제출 allowlist 에 남는다(설계 §4).
+CHANNELS: tuple[str, ...] = ("anonymous", "token_bearing", "unattributed")
+SEND_OUTCOMES: tuple[str, ...] = ("sent", "lease_skipped", "connection_closed", "raised")
+CHANNEL_KEYS: tuple[str, ...] = CHANNELS + (_UNCLASSIFIED,)
+SEND_OUTCOME_KEYS: tuple[str, ...] = SEND_OUTCOMES + (_UNCLASSIFIED,)
 
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
@@ -133,9 +152,9 @@ def _blank() -> dict[str, Any]:
             })
         axes[axis] = block
     axes["snapshot_send"] = {
-        "calls_by_channel": {name: 0 for name in CHANNELS},
+        "calls_by_channel": {name: 0 for name in CHANNEL_KEYS},
         "topics_deduped_total": 0,
-        "sends_by_outcome": {name: 0 for name in SEND_OUTCOMES},
+        "sends_by_outcome": {name: 0 for name in SEND_OUTCOME_KEYS},
     }
     axes["metrics_internal_errors_total"] = 0
     return axes
@@ -146,6 +165,37 @@ _metrics = _blank()
 
 class SubscribeLoadContractError(RuntimeError):
     """계약 위반 — 호출부 배선 실수(축 이름 오타 등)를 조용히 삼키지 않는다."""
+
+
+def _validate_schema() -> None:
+    """저장 스키마 ↔ 제출 allowlist ↔ 파생 키의 정합을 import 시 1회 강제한다 (Crash Early).
+
+    ⛔ SUBMITTABLE 에 있는데 storage 에 없는 키가 생기면: 축 경로는 종료 전이 `KeyError` 로
+       **half-open + `callers_awaiting` 호출당 영구 누수**가 되고(불변식 `1==0+1` 은 유지라
+       corrupt 검사가 못 잡는다), send 경로는 관측이 통째로 소실된다(실측 probe). 편집 실수는
+       런타임 관측 손상이 아니라 import 실패로 잡는다 — 배선 전 모듈이라 안전하고, 배선 후엔
+       테스트·기동이 즉시 빨갛게 된다.
+    """
+    # ⛔ 검사는 **최소 완전** 집합이다 — "제출 ⊆ 저장" 류 부분 검사는 아래 partition 검사에
+    #    논리적으로 포섭돼(⊄ 이면 합집합 ≠ 저장) 등가 변이만 만든다(실측: 제거해도 전 스위트
+    #    green). 저장 = 제출 ⊎ 파생 (서로소 합) — 이 두 검사가 그 자체다.
+    if set(SUBMITTABLE_OUTCOMES) != set(AXIS_OUTCOMES) or set(_RAISED_OUTCOME) != set(AXIS_OUTCOMES):
+        raise SubscribeLoadContractError("축 집합이 세 map 에서 일치하지 않는다")
+    for axis, outcomes in AXIS_OUTCOMES.items():
+        submittable = SUBMITTABLE_OUTCOMES[axis]
+        derived = {_UNCLASSIFIED, _RAISED_OUTCOME[axis]}
+        derived |= ({_CANCEL_NOT_OBSERVED, _CANCEL_OBSERVED} if axis in WORKER_AXES else {"cancelled"})
+        if submittable & derived:
+            raise SubscribeLoadContractError(f"{axis}: 제출과 파생이 겹친다 — 분리 계약 위반")
+        if set(outcomes) != submittable | derived:
+            raise SubscribeLoadContractError(f"{axis}: 저장 스키마가 제출 ⊎ 파생과 다르다")
+    if _UNCLASSIFIED in CHANNELS or set(CHANNEL_KEYS) != set(CHANNELS) | {_UNCLASSIFIED}:
+        raise SubscribeLoadContractError("snapshot_send: channel 저장 key 가 제출 ⊎ unclassified 와 다르다")
+    if _UNCLASSIFIED in SEND_OUTCOMES or set(SEND_OUTCOME_KEYS) != set(SEND_OUTCOMES) | {_UNCLASSIFIED}:
+        raise SubscribeLoadContractError("snapshot_send: send 저장 key 가 제출 ⊎ unclassified 와 다르다")
+
+
+_validate_schema()
 
 
 def _require_axis(axis: str) -> None:
@@ -250,8 +300,10 @@ def _resolve_outcome(handle: WorkHandle, exc: Optional[BaseException]) -> tuple[
     if not handle._has_candidate:
         return _UNCLASSIFIED, True
     candidate = handle._candidate
-    if not isinstance(candidate, str) or candidate not in AXIS_OUTCOMES[axis]:
-        # ⛔ 비문자열·unhashable·allowlist 밖 — 동적 key 도 `TypeError` 도 만들지 않는다.
+    if not isinstance(candidate, str) or candidate not in SUBMITTABLE_OUTCOMES[axis]:
+        # ⛔ 비문자열·unhashable·**제출 allowlist** 밖 — 동적 key 도 `TypeError` 도 만들지 않는다.
+        #    저장 스키마(AXIS_OUTCOMES)로 검사하면 정상 종료 본문의 `finish("cancelled")` 가
+        #    진짜 취소로 기록된다(실측) — 파생 키는 실제 예외에서만 생긴다.
         return _UNCLASSIFIED, True
     return candidate, False
 
@@ -357,7 +409,7 @@ async def observe(axis: str):
               _warn("subscribe-load: outcome 분류·계시 실패 — unclassified 로 기록",
                     axis=axis, exc_info=degraded)
           elif internal_error:
-              _warn("subscribe-load: terminal outcome 이 확정되지 않았다 — unclassified 로 기록",
+              _warn("subscribe-load: terminal outcome 이 없거나 제출 allowlist 밖 — unclassified 로 기록",
                     axis=axis)
 
 
@@ -427,6 +479,17 @@ def record_snapshot_call(channel: str) -> None:
             key = _UNCLASSIFIED
             folded = True
         with _lock:
+            # ⛔ fold 의 internal error 는 **같은 임계구역**에서 짝으로 올린다 — 나누면 동시
+            #    스냅샷이 `unclassified > internal_errors` 를 일시적으로 관측한다(실측: race
+            #    probe 에서 22,700회/12만, 최대 lead 2 — 자기 치유되지만 짝 계약이 흔들린다).
+            # ⛔ 그리고 **진단을 먼저** 쓴다 — 한 lock 은 예외-원자성을 주지 않는다(진입 전이와
+            #    같은 교훈). `_metrics` object identity 를 유지하는 subtree-local update 에는
+            #    공통 단일 commit point 가 없다 — 전역 rebind 나 스키마 재설계 대신 진단-먼저
+            #    순서로 **단방향 예외 안전성**만 보장한다. 관측을 먼저 쓰면 두 번째 쓰기 실패가
+            #    **진단 없는 unclassified** 를 남겼다(실측). 진단 먼저면 실패 잔여는 "진단만
+            #    +1"(superset counter 과계수 + 바깥 except 의 기록-실패 WARNING)뿐이다.
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
             _metrics["snapshot_send"]["calls_by_channel"][key] += 1
     except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
         _note_internal_error()
@@ -434,7 +497,6 @@ def record_snapshot_call(channel: str) -> None:
         return
     if folded:
         # ⚠️ 값은 싣지 않는다 — `repr()` 호출 자체가 던질 수 있고, 여기는 진단 경로다.
-        _note_internal_error()
         _warn("subscribe-load: allowlist 밖 channel — unclassified 로 접는다", axis="snapshot_send")
 
 
@@ -461,6 +523,9 @@ def record_snapshot_send(outcome: str) -> None:
             key = _UNCLASSIFIED
             folded = True
         with _lock:
+            # ⛔ 같은 임계구역 + 진단-먼저 순서 — 이유는 `record_snapshot_call` 의 주석과 동일.
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
             _metrics["snapshot_send"]["sends_by_outcome"][key] += 1
     except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
         _note_internal_error()
@@ -468,7 +533,6 @@ def record_snapshot_send(outcome: str) -> None:
         return
     if folded:
         # ⚠️ 값은 싣지 않는다 — `repr()` 호출 자체가 던질 수 있고, 여기는 진단 경로다.
-        _note_internal_error()
         _warn("subscribe-load: allowlist 밖 send outcome — unclassified 로 접는다", axis="snapshot_send")
 
 
