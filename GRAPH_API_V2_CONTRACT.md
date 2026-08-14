@@ -40,7 +40,7 @@
 - 응답 schema: `{"data": [...], "sources": {...}}` (legacy)
 - cache 실측 (2026-05-27 코드 확인):
   - 1d: Redis `graph:{currency}` (TTL 120s) — [app/main.py:605](app/main.py#L605), [app/admin/graph_cache.py:651](app/admin/graph_cache.py#L651)
-  - 1w/3m/1y: in-memory `_period_cache["graph:{currency}:{period}"]` — [app/main.py:2627-2672](app/main.py#L2627-L2672)
+  - 1w/3m/1y: in-memory `_period_cache["graph:{currency}:{period}"]` — [app/main.py:2627-2670](app/main.py#L2627-L2670)(선언·조회·eviction) · [app/main.py:2717-2719](app/main.py#L2717-L2719)(저장)
 
 v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `graph_v2:`).
 
