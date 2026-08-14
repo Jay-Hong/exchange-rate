@@ -73,7 +73,7 @@
      (`app/topic_auth_rollout.py:237-274` · snapshot `app/topic_auth_rollout.py:317-361`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
      (`app/main.py:302-320`).
-- **C2 [코드]** `app/topic_initial_snapshot.py:95` — `per_user_gated_snapshot_topics()`.
+- **C2 [코드]** `app/topic_initial_snapshot.py:97` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
 - **C3 [코드]** `exchange-rate/app/main.py:3053` `@app.get("/api/v2/topics/snapshot")` —
@@ -99,12 +99,12 @@
   ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
   이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
   그 경로를 같은 함수에 태운다.
-- **D3 [코드]** `app/topic_initial_snapshot.py:319` — build 실패를 `logger.warning` 후 **격리**,
+- **D3 [코드]** `app/topic_initial_snapshot.py:337-346` — build 실패를 `logger.warning` 후 **격리**,
   연결 유지. `None`(flag off)도 조용히 skip.
 - **D4 [결정]** `app/topic_dispatcher.py:367` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
-- **D6 [코드]** `app/topic_initial_snapshot.py:339` — initial snapshot 도 **전송 직전**에
+- **D6 [코드]** `app/topic_initial_snapshot.py:359-366` — initial snapshot 도 **전송 직전**에
   `leased_subscribers(topic)` 멤버십을 다시 본다(`882d92b`). 게이트에 걸리면 **해당 topic skip**
   이고 연결 실패가 아니다.
   **D6-inf [추론]** ⇒ 검사가 build **뒤**여야 하는 이유는 `_build_snapshot_sync` 가 `to_thread`
@@ -116,8 +116,8 @@
 
 - **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2` (**최대 5**).
   주석: *"RDS db.t4g.micro 메모리 절약"*.
-- **E2 [코드]** `app/topic_initial_snapshot.py:310-316` —
-  `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)`.
+- **E2 [코드]** `app/topic_initial_snapshot.py:319-335` —
+  `for topic in topics: ... await asyncio.to_thread(subscribe_load.timed_call, …, _build_snapshot_sync, topic)`.
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
 - **E3 [결정]** `app/auth_executor.py:8` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:

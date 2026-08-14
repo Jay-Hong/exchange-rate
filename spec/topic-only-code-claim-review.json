@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "8bf3a66a3016259f0aba3bfd51a55ab51e05e5c88d845f5263b28382d0398c9a",
-    "baseline_sha256": "b1572aa01894edf5f93b8a406bd8f84ca3abc61c0d931dd8e3feb0c2c8bbd111",
-    "lock_sha256": "ffbddcf33a8c5af3b4eeed135923ac589f17a1308c18f35b2be7bac13a435548",
-    "server_commit": "23297caf4cbd9a4951ac15b1fc74e4cd9cef6448",
+    "manifest_sha256": "1c5d09f5ed9ea08f67b9b544976fe880ebe1e25f64db19de140ee647692b1b3a",
+    "baseline_sha256": "9ad084612593b10340cb21f4b38e5db50340269ce05766db7a2912bc32de85bb",
+    "lock_sha256": "5a8657e8a2baf16e51328819edfdcadfdcc84c08f67eb4d8e26efdd5b0a9ca00",
+    "server_commit": "4f8314e9b2b2a2f429416e5c35d9b0ebd6d0a515",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "a822a9207db7deca5c3f2bf0cb6869d88e6bc2d367ec824bd0d3425fb5b01356",
-    "CLIENT": "0ebb9d7340e8800a63cc659d141fb189313eb5e6bdc8f2a1d9e7e77e2f7440c5",
-    "CUT": "63d1ecf3a50cf04269046729a7996d8bb3238ce1296512352e30d42d1928a59c",
-    "HAND": "f091bba4890642e6fd70f8f996fbab320aee3a5261140ae459d363985a7911af",
-    "HEALTH": "377114ce2e5f06a30f0bd2dfce8f89469c9d33e37891f4e7594474e3ffcfeed6",
-    "LOAD": "6d1eb1cba68396246c608668578b5568c197b4bddd19a6732a98e8db7eac68e4"
+    "ADR": "9ce19d80b22625145676848434d8514ad9dee4295ea2005b288b68022fa058ac",
+    "CLIENT": "aef55f4bf8b6d5e479411b2d17f5364bea8cb56bd8c24ee01243fd6bf4d2773f",
+    "CUT": "4bc2a74977fa761dc5a52e3ece285ed354feb6951db999a8533acf14216d8a2e",
+    "HAND": "c22abb36e1a3facb931cd8a16e561ef2a0b7bd2d6b3e170bb67058f64fbf673b",
+    "HEALTH": "d166838a0db53691cfc3ffcedd530b32c7c61fc163208d5d6160090e617fb902",
+    "LOAD": "1b4529c4e840c3b909c57c62ae6a790c7f83a38921d75ddcce88dc36cf640d0d"
   },
   "entries": [
     {
@@ -571,24 +571,24 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-19",
-      "unit_sha256": "81445898bf149ee1bd7a10170bd98a2b174eb5e05a59332ed4c0fd7861ab67de",
-      "unit_text": "**(b) DXY 는 현재 legacy envelope 로만 온다 → `dxy` topic 신설이 출시 선행조건이다.** (근거: baseline F12 · 서버 지원 topic 집합 `app/topic_initial_snapshot.py:64-69`)",
+      "unit_sha256": "ac62ffdd57d073d8b0c1c38460dc9259fc1773d3e6f593014766bdb569f77342",
+      "unit_text": "**(b) DXY 는 현재 legacy envelope 로만 온다 → `dxy` topic 신설이 출시 선행조건이다.** (근거: baseline F12 · 서버 지원 topic 집합 `app/topic_initial_snapshot.py:66-71`)",
       "classification": "code_fact",
       "detail": "출시 선행조건이라는 규범과 'DXY 는 현재 legacy envelope 로만 온다'는 현행 코드 단정이 한 단위에 섞였다 — 섞이면 code_fact 다. iOS 는 legacy indices 로 DXY 를 받고 서버 지원 topic 집합에 dxy 가 없다.",
       "provenance": [
         "baseline:F12",
-        "file:app/topic_initial_snapshot.py:64-69"
+        "file:app/topic_initial_snapshot.py:66-71"
       ]
     },
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
-      "unit_sha256": "31930f50e4a699d6cf2c5c0ca09594d259e686ff8eeae70f12e71341bba5e1ea",
-      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:274-275`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
+      "unit_sha256": "571046f0e01013816d08b9c5bfca4e8adb46d48a54bd77faeed1e9ad49835edc",
+      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:276-277`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
       "classification": "code_fact",
       "detail": "초안 철회라는 결정과 함께 현행 코드 단정 둘이 근거로 들어가 있다 — KRX 는 entry 가 없어도 snapshot 만 skip 하고 register 를 유지하며, iOS KrxTopicData 의 usdKrwFutures 가 optional 이라 빈 snapshot 을 이미 표현한다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:274-275",
+        "file:app/topic_initial_snapshot.py:276-277",
         "file:ios/FXi/Models/TopicMessage.swift:100-101"
       ]
     },
@@ -617,12 +617,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-4",
-      "unit_sha256": "ec4410e1257c51c7c86301ba7cf9d5a34b0b26ee294c9683a9563eda4d837d3b",
-      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다. 현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:296-316`). 따라서 서버 절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.",
+      "unit_sha256": "270acca5f941c2c64c381db62c67012ffdd5cbf4a1474857dafdac1550eb933c",
+      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다. 현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:298-335`). 따라서 서버 절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.",
       "classification": "code_fact",
       "detail": "현재 snapshot builder가 asyncio.to_thread를 사용한다. 취소가 실행 중 worker를 중단시키지 않는 경계 때문에 request deadline과 별도로 I/O 자체 상한이 필요하다는 혼합 사실/요구다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:296-316"
+        "file:app/topic_initial_snapshot.py:298-335"
       ]
     },
     {
@@ -640,12 +640,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-20",
-      "unit_sha256": "a911532802f8f1a96b631b9eae63a13b5ab79818aa882b3d67f4ce68b257af00",
-      "unit_text": "[R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + KRX)은 `0cfe474`의 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` · `app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한 `dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로 (`app/topic_initial_snapshot.py:64-69` · `ios/FXi/Services/WebSocketService.swift:1066-1073`), DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.",
+      "unit_sha256": "ee04f03c262dda38de729acd1b137789a098f270b5ece6410d4af202d6929921",
+      "unit_text": "[R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + KRX)은 `0cfe474`의 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` · `app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한 `dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로 (`app/topic_initial_snapshot.py:66-71` · `ios/FXi/Services/WebSocketService.swift:1066-1073`), DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.",
       "classification": "code_fact",
       "detail": "고정 C1의 리터럴 정책표는 현재 구현된 FX 3종, USDT, KRX를 열거하고 미지정 topic을 거부한다. 서버 지원 집합에는 dxy:spot이 없고 iOS는 DXY를 legacy envelope로 받으므로 DXY 수직 슬라이스가 남는다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:64-69",
+        "file:app/topic_initial_snapshot.py:66-71",
         "file:app/topic_policy.py:231-241",
         "file:app/topic_policy.py:87-93",
         "file:ios/FXi/Services/WebSocketService.swift:1066-1073"

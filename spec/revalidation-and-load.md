@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `23297caf4cbd9a4951ac15b1fc74e4cd9cef6448`
+- server 기준 commit: `4f8314e9b2b2a2f429416e5c35d9b0ebd6d0a515`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `8bf3a66a3016259f0aba3bfd51a55ab51e05e5c88d845f5263b28382d0398c9a`
-- baseline SHA: `b1572aa01894edf5f93b8a406bd8f84ca3abc61c0d931dd8e3feb0c2c8bbd111`
+- manifest SHA: `1c5d09f5ed9ea08f67b9b544976fe880ebe1e25f64db19de140ee647692b1b3a`
+- baseline SHA: `9ad084612593b10340cb21f4b38e5db50340269ce05766db7a2912bc32de85bb`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -82,8 +82,8 @@ I/O 상한 · 서버 실패 cooldown).
   클라 jitter([R-CLI-24](ios-topic-state-machine.md#r-cli-24)) 가 **함께 있어야** 완화가 성립한다.
 
 근거(baseline): **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2`
-(**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. **E2 [코드]** `app/topic_initial_snapshot.py:310-316`
-— `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)` /
+(**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. **E2 [코드]** `app/topic_initial_snapshot.py:319-335`
+— `for topic in topics: ... await asyncio.to_thread(subscribe_load.timed_call, …, _build_snapshot_sync, topic)` /
 **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
 ⇒ 흡수 장치가 없으면 동시 도착 N 이 최대 5 커넥션 앞에 그대로 쌓인다.
 <!-- /rid: R-LOAD-3 -->

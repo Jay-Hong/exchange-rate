@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `23297caf4cbd9a4951ac15b1fc74e4cd9cef6448`
+- server 기준 commit: `4f8314e9b2b2a2f429416e5c35d9b0ebd6d0a515`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `8bf3a66a3016259f0aba3bfd51a55ab51e05e5c88d845f5263b28382d0398c9a`
-- baseline SHA: `b1572aa01894edf5f93b8a406bd8f84ca3abc61c0d931dd8e3feb0c2c8bbd111`
+- manifest SHA: `1c5d09f5ed9ea08f67b9b544976fe880ebe1e25f64db19de140ee647692b1b3a`
+- baseline SHA: `9ad084612593b10340cb21f4b38e5db50340269ce05766db7a2912bc32de85bb`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -58,7 +58,7 @@ REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3088-
 ### R-HAND-19
 
 **(b) DXY 는 현재 legacy envelope 로만 온다 → `dxy` topic 신설이 출시 선행조건이다.**
-(근거: baseline F12 · 서버 지원 topic 집합 `app/topic_initial_snapshot.py:64-69`)
+(근거: baseline F12 · 서버 지원 topic 집합 `app/topic_initial_snapshot.py:66-71`)
 
 이번 출시의 범위는 [R-INV-4](../DECISIONS.md#r-inv-4) 가 `dxy:spot` **하나로 확정**했다 — futures
 topic 은 legacy 이탈에 불필요하므로 phased 로 미룬다. 서버 몫은 그 topic 을 신설해 legacy `rates`
@@ -80,7 +80,7 @@ premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + K
 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` ·
 `app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한
 `dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로
-(`app/topic_initial_snapshot.py:64-69` · `ios/FXi/Services/WebSocketService.swift:1066-1073`),
+(`app/topic_initial_snapshot.py:66-71` · `ios/FXi/Services/WebSocketService.swift:1066-1073`),
 DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.
 
 <!-- relation: references target=R-INV-4 -->
@@ -103,7 +103,7 @@ DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 
 서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다
 (`app/topic_dispatcher.py:745-826`; baseline D5).
 그리고 snapshot build 가 실패하거나 `None` 이면 **연결을 유지한 채 조용히 skip** 한다
-(`app/topic_initial_snapshot.py:296-326`; baseline D3). FX publisher 도 build/publish **전** 예외를
+(`app/topic_initial_snapshot.py:298-346`; baseline D3). FX publisher 도 build/publish **전** 예외를
 격리하고 `False` 만 반환한다(`app/fx_topic_publisher.py:291-323`).
 
 → **연결·pong·ack·lease 가 전부 정상인데 snapshot 이 한 번도 오지 않는 상태**가 실제로 표현된다.
@@ -121,7 +121,7 @@ DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 
 ⛔ **"ack 전에 전부 build 한다"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 —
 ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다),
 ② **"지원되지만 아직 데이터가 없음"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을
-유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:274-275`), iOS 모델은
+유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:276-277`), iOS 모델은
 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`).
 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**
 
@@ -279,7 +279,7 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 ### R-HAND-4
 
 - ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다.
-  현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:296-316`). 따라서 서버
+  현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:298-335`). 따라서 서버
   절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.
 <!-- /rid: R-HAND-4 -->
 
