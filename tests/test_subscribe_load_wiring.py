@@ -127,6 +127,19 @@ class TestPremiumSeam(WiringTestCase):
         self.assertEqual(block["by_outcome"]["raised"], 1)
         self.assertEqual(block["callers_awaiting"], 0, "예외 종료도 게이지를 복귀시킨다")
 
+    async def test_persistent_logging_failure_does_not_pollute_the_axis_buckets(self):
+        """RC 판정 로그도 CM 밖이다. 로깅 결함이 persistent 사건을 `raised` 로 바꾸면 안 된다."""
+        with self._patch_rc(subscription.ProtocolViolation(detail="test")), \
+             patch.object(ta.logger, "error",
+                          side_effect=RuntimeError("logging infra broken")):
+            with self.assertRaises(RuntimeError):
+                await ta._observe_premium("u1", mono=_Clock())
+        block = self._snap()[slm.PREMIUM_RC]
+        self.assertEqual(block["by_outcome"]["unavailable_persistent"], 1)
+        self.assertEqual(block["by_outcome"]["raised"], 0,
+                         "로깅 결함이 RC 외부축 결함으로 둔갑했다")
+        self.assertEqual(block["callers_awaiting"], 0)
+
 
 class TestKrxSeam(WiringTestCase):
     def _granted(self, uid="u1"):

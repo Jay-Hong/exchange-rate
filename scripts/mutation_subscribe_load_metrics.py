@@ -180,10 +180,14 @@ MUTANTS: list[tuple[str, pathlib.Path, str, str]] = [
      '''            verdict = Unavailable(UnavailableKind.PERSISTENT, "entitlement_db_error")
             unavailable_log, caught = "entitlement 조회 DB 오류", exc'''),
     ("S2-29 _axis_outcome transient/persistent 반전", WIRING,
-     '''        return ("unavailable_transient" if verdict.kind is UnavailableKind.TRANSIENT
-                else "unavailable_persistent")''',
-     '''        return ("unavailable_persistent" if verdict.kind is UnavailableKind.TRANSIENT
-                else "unavailable_transient")'''),
+     '''        if verdict.kind is UnavailableKind.TRANSIENT:
+            return "unavailable_transient"
+        if verdict.kind is UnavailableKind.PERSISTENT:
+            return "unavailable_persistent"''',
+     '''        if verdict.kind is UnavailableKind.TRANSIENT:
+            return "unavailable_persistent"
+        if verdict.kind is UnavailableKind.PERSISTENT:
+            return "unavailable_transient"'''),
     ("S2-30 denied 를 granted 버킷으로(매핑 우회)", WIRING,
      '''            if not observation.allowed:
                 verdict = Denied("krx_entitlement_required")''',
@@ -239,6 +243,22 @@ MUTANTS: list[tuple[str, pathlib.Path, str, str]] = [
         if unavailable_log is not None:
             _log_unavailable(verdict.kind, unavailable_log, exc=caught)
     return verdict'''),
+    ("S2-37 Unavailable.kind runtime guard 제거", WIRING,
+     '''    def __post_init__(self) -> None:
+        if not isinstance(self.kind, UnavailableKind):
+            raise TypeError(
+                "Unavailable.kind 는 UnavailableKind 여야 한다: "
+                f"{type(self.kind).__name__}"
+            )''',
+     '''    def __post_init__(self) -> None:
+        pass'''),
+    ("S2-38 premium 로깅을 finish 앞 CM 안에 주입", WIRING,
+     '''        load.finish(_axis_outcome(verdict))
+    if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:''',
+     '''        if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:
+            logger.error("injected logging inside observation")
+        load.finish(_axis_outcome(verdict))
+    if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:'''),
 ]
 
 

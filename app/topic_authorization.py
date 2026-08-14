@@ -113,6 +113,13 @@ class Unavailable:
     kind: UnavailableKind
     reason: str                  # 로그 extra 전용 — wire 에 나가지 않는다
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, UnavailableKind):
+            raise TypeError(
+                "Unavailable.kind 는 UnavailableKind 여야 한다: "
+                f"{type(self.kind).__name__}"
+            )
+
 
 GatedVerdict = Union[Granted, Denied, Unavailable]
 PremiumVerdict = Union[PremiumGranted, Denied, Unavailable]
@@ -207,8 +214,14 @@ def _axis_outcome(verdict) -> str:
     if isinstance(verdict, Denied):
         return "denied"
     if isinstance(verdict, Unavailable):
-        return ("unavailable_transient" if verdict.kind is UnavailableKind.TRANSIENT
-                else "unavailable_persistent")
+        if verdict.kind is UnavailableKind.TRANSIENT:
+            return "unavailable_transient"
+        if verdict.kind is UnavailableKind.PERSISTENT:
+            return "unavailable_persistent"
+        raise TypeError(
+            "관측 outcome 으로 매핑할 수 없는 Unavailable.kind: "
+            f"{type(verdict.kind).__name__}"
+        )
     raise TypeError(f"관측 outcome 으로 매핑할 수 없는 verdict: {type(verdict).__name__}")
 
 

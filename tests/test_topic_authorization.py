@@ -89,6 +89,11 @@ class TestClassifyPremium(unittest.TestCase):
             with self.subTest(error=bad), self.assertRaises(ValueError):
                 ta.Denied(bad)
 
+    def test_unavailable_kind_is_enforced_at_construction(self):
+        """미등록 kind 가 존재하면 dispatcher와 subscribe-load의 분류가 서로 갈릴 수 있다."""
+        with self.assertRaises(TypeError):
+            ta.Unavailable("not-an-enum", "probe")
+
 
 class TestAuthorizeSubscriptionPlan(unittest.IsolatedAsyncioTestCase):
     def _patch_rc(self, result):
