@@ -6,7 +6,7 @@
   },
   "baseline": {
     "path": "spec/topic-only-baseline-facts.md",
-    "sha256": "f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d"
+    "sha256": "1c66910da3a863dd7672a4b5fb4bb5d54a8459cf2d3d9f0a57a85612d78ea87d"
   },
   "pinned_commit": {
     "server": "7c8a890e54667cadc9b712fb9680edd25618f494",

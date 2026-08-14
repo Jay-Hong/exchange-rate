@@ -6,8 +6,8 @@
 - server 기준 commit: `7c8a890e54667cadc9b712fb9680edd25618f494`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9d44c3bc5082ef11610fa0b1007a3d36ac1d4321244d9d554a01e4e3597df2d2`
-- baseline SHA: `f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d`
+- manifest SHA: `da63111db530418a79a698c0761a88c4c37cbb6ac201558e77148b8dfd3eebbf`
+- baseline SHA: `1c66910da3a863dd7672a4b5fb4bb5d54a8459cf2d3d9f0a57a85612d78ea87d`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -82,7 +82,7 @@ I/O 상한 · 서버 실패 cooldown).
   클라 jitter([R-CLI-24](ios-topic-state-machine.md#r-cli-24)) 가 **함께 있어야** 완화가 성립한다.
 
 근거(baseline): **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2`
-(**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. **E2 [코드]** `app/topic_initial_snapshot.py:305`
+(**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. **E2 [코드]** `app/topic_initial_snapshot.py:310-316`
 — `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)` /
 **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
 ⇒ 흡수 장치가 없으면 동시 도착 N 이 최대 5 커넥션 앞에 그대로 쌓인다.

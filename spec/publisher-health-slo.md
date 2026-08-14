@@ -6,8 +6,8 @@
 - server 기준 commit: `7c8a890e54667cadc9b712fb9680edd25618f494`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9d44c3bc5082ef11610fa0b1007a3d36ac1d4321244d9d554a01e4e3597df2d2`
-- baseline SHA: `f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d`
+- manifest SHA: `da63111db530418a79a698c0761a88c4c37cbb6ac201558e77148b8dfd3eebbf`
+- baseline SHA: `1c66910da3a863dd7672a4b5fb4bb5d54a8459cf2d3d9f0a57a85612d78ea87d`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > **이 문서의 몫**: 클라이언트가 **구조적으로 판별할 수 없는** publisher 침묵을 무엇으로 덮는가 —

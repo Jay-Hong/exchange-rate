@@ -26,7 +26,8 @@
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
           "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
-          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)"
+          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)",
+          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -89,7 +90,8 @@
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
           "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
-          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)"
+          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)",
+          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain"
         ]
       }
     ],
@@ -113,7 +115,8 @@
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
           "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
           "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims",
-          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)"
+          "Provider-slice C3 correction (SEM-031): the R-GATE-1 ledger note's false WS-invariance sentence rewritten to separate the unchanged ProtocolViolation mapping from the intentionally changed 404 verdict, Denied(premium_required) to Unavailable(PERSISTENT)",
+          "Citation drift correction in R-LOAD-3 evidence E2 and the matching baseline E2 (SEM-032): both snapshot locators retargeted to the loop and to_thread range, with the baseline hash, manifest, six output-document headers and the derived ledger and journal chain"
         ],
         "result": "pass"
       },
@@ -151,21 +154,21 @@
   "reviewed_at": "2026-08-14",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "9d44c3bc5082ef11610fa0b1007a3d36ac1d4321244d9d554a01e4e3597df2d2",
-    "baseline_sha256": "f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d",
-    "lock_sha256": "131d930254869fb2ca14a5e51a4c3b57d00040a94ec94c4f6ee54cdd79ca9744",
+    "manifest_sha256": "da63111db530418a79a698c0761a88c4c37cbb6ac201558e77148b8dfd3eebbf",
+    "baseline_sha256": "1c66910da3a863dd7672a4b5fb4bb5d54a8459cf2d3d9f0a57a85612d78ea87d",
+    "lock_sha256": "3a96e2a2f9274c8332e03385c2b7d8b4f249e89014b7edbffbb5130a335d93ac",
     "server_commit": "7c8a890e54667cadc9b712fb9680edd25618f494",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "977ac88dbe0322d65fc4092fa5d4fc1cb34813e924100ddb1660b6a8f38d8e2f",
-    "CLIENT": "ad3da6f804f424a2898e800d25a8830194bc8cb228d791621b7192d88a9bcacc",
-    "CUT": "60f55f9155936fc1a6a8bdf95025d2fa7407752e4cc5f4ebc212950380764e6a",
-    "HAND": "51a144e16c3b2713cf92a1b8a0f7c87f491d20542c6058590ebcec0ea17c6838",
-    "HEALTH": "5328d21b10ee313044e2949772de846a83bee24f7d638584ae5ec15c6e426d30",
-    "LOAD": "2325144e5ae4646c289e200fbaa98ab57f9733642046f5c425275743aa52f31a"
+    "ADR": "0e21f303ee02bde082e2c60ad0ec34c9c2ed722619c3a6313f41faaa41c8ca0b",
+    "CLIENT": "09e9daddb6918f7023dffbbba86ce17bf08c979a9b56839a3d7248457ac1dd5d",
+    "CUT": "014e48b2aa4f4fcf76f0894c985f2d665a33b68e7ea22b4a47fc2d44f1392689",
+    "HAND": "6f96bf19e1d389df7d972346e42ce1971300bf9267901bdd7ac6d06f397b78ce",
+    "HEALTH": "c846ea18bae3507db84e761576f99acf5cc35d4803457b423b82ceb211cb4d1f",
+    "LOAD": "25246ce764305fc1896af624a708190f8ef8d6d1e504022239cdf406901e0e2c"
   },
-  "claim_ledger_sha256": "b23b5c65c93cd7dec1d3b1c81e77bb5025017a8f9446e2d50c37e070e556ef4e",
+  "claim_ledger_sha256": "6559c6fa5b5b8a56b3d8306b04b26b60fcdc86e98e92cb6585597f3670f2ad0a",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
@@ -555,6 +558,18 @@
       ],
       "issue": "The C2 R-GATE-1 ledger note closed with 'WS classification unchanged (ProtocolViolation -> persistent unavailable)'. That conflates two properties: the classify_premium mapping table (untouched by C1) and the end-to-end WS verdict for a 404 response, which C1 intentionally changed — pre-C1 a 404 produced Determined(False) and therefore Denied('premium_required'); post-C1 it produces ProtocolViolation and therefore Unavailable(PERSISTENT). The false sentence passed the C2 exact-tree review and its pass edge; it was caught by the opposite participant reading the mapped path end-to-end, not by any gate — no gate binds ledger note prose to code behaviour.",
       "disposition": "The note now states both halves separately: the ProtocolViolation mapping is unchanged, and the 404 WS outcome changed by design from Denied(premium_required) to Unavailable(PERSISTENT) because the 404->Determined(False) inflow was removed. Provider and authorization code are untouched by this correction. Reopened per the closure rule with a new opposite-participant work unit and edge (C3). Mapping-function invariance is not verdict invariance when an input's type assignment moves — same family as SEM-018/SEM-023/SEM-030: a mechanical property (the mapping table diff is empty) was reported as the semantic property (behaviour unchanged)."
+    },
+    {
+      "id": "SEM-032",
+      "severity": "low",
+      "status": "fixed",
+      "locations": [
+        "spec/revalidation-and-load.md/R-LOAD-3",
+        "spec/topic-only-baseline-facts.md/E2",
+        "app/topic_initial_snapshot.py"
+      ],
+      "issue": "R-LOAD-3's evidence E2 cited app/topic_initial_snapshot.py:305 for the claim that initial snapshots are built sequentially per connection, quoting both the loop and the to_thread call. Line 305 carries neither. The loop is at 310 and the to_thread build at 316. spec/topic-only-baseline-facts.md E2 quoted the same two elements but cited only :316, so both documents were partially wrong and in different ways — and an earlier draft of this correction claimed the baseline was already right, which the reviewer refuted by reading it. The citation gates did not object to either because they check path existence and in-bounds only, which restates the SEM-012/SEM-023/SEM-024 residual. Both drifts surfaced from reading during a reconnect-storm implementation audit, not from any gate.",
+      "disposition": "Both E2 locators now cite 310-316, the range that contains both quoted elements. No code changed and no pinned commit moved, but the baseline file itself changed, so the chain advances: baseline hash in the lock, manifest baseline_sha, the baseline and manifest SHA lines in all six output documents, and the derived ledger and journal hashes. The E2 bullets are not extracted claim candidates, so no ledger unit text changed (candidate set equals ledger key set, checked before and after). Bounded: this fixes two locators found by reading and does not establish that other backtick locators entail their surrounding claims."
     }
   ],
   "residual_limits": [

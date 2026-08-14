@@ -116,7 +116,7 @@
 
 - **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2` (**최대 5**).
   주석: *"RDS db.t4g.micro 메모리 절약"*.
-- **E2 [코드]** `app/topic_initial_snapshot.py:316` —
+- **E2 [코드]** `app/topic_initial_snapshot.py:310-316` —
   `for topic in topics: ... await asyncio.to_thread(_build_snapshot_sync, topic)`.
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
