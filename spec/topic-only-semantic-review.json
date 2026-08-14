@@ -24,7 +24,8 @@
           "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
-          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026"
+          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
+          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -85,7 +86,8 @@
           "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
-          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026"
+          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
+          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims"
         ]
       }
     ],
@@ -107,7 +109,8 @@
           "C6 closure of SEM-021: the full-field pending-review sweep of the journal and the withdrawal of the traffic-provenance inference from the observation record",
           "C7 final closure candidate: SEM-022 fixed, reciprocal scope reconciliation removing the duplicated validator entry, the synthetic-open counterexample base that keeps the closed fixture load-bearing in a pass journal, and verdict=pass, plus the regression that locks the synthetic-open scaffold itself, and the removal of the hand-written closure endpoint and the future-tense pass wording from the residual limits, with a pattern that rejects the latter",
           "Token-bearing metrics C1 initial implementation: injected policy and final-stage RC-candidate sets, shared per-connection channel state, flag-before token-bearing observation, fixed-cardinality snapshot fields, and initial regressions",
-          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026"
+          "Validator branch hardening (SEM-029): a table of 32 targeted controls that each name their own diagnostic, closing the append-site coverage gap measured under SEM-026",
+          "Provider-slice C2 re-baseline at 7c8a890 (SEM-030): the R-INV-2 subscription citation remap to 403-464 with the derived lock/manifest/header/claim-ledger hash chain, the R-GATE-1 ledger note extension for the Get-or-Create contract correction, and the SEM-030 record of three non-reproduced C1 evidence claims"
         ],
         "result": "pass"
       },
@@ -142,24 +145,24 @@
       "The schema-v2 journal and validator were implemented by Codex in response to Claude's finding; their structure is test-covered but the review infrastructure itself has no third-party reviewer."
     ]
   },
-  "reviewed_at": "2026-08-13",
+  "reviewed_at": "2026-08-14",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "7ce6894e2a3275ef03771f980d201b8c5be2fb13f5beb56bddfb55da953bf63e",
+    "manifest_sha256": "9d44c3bc5082ef11610fa0b1007a3d36ac1d4321244d9d554a01e4e3597df2d2",
     "baseline_sha256": "f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d",
-    "lock_sha256": "3cec4dd6d9197e49838f886ea6b87f937033b43a846d99ec85019617ae60ac14",
-    "server_commit": "a5623916dc49e0b69e8cb2b22204c4223ea16762",
+    "lock_sha256": "131d930254869fb2ca14a5e51a4c3b57d00040a94ec94c4f6ee54cdd79ca9744",
+    "server_commit": "7c8a890e54667cadc9b712fb9680edd25618f494",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "7703939ada80db3f33b5bbdae36f9061a644580efa82e1afc67a21c7e31a2dcf",
-    "CLIENT": "0221430dff3ad49421c5dce5a85925ec55a9b4d9dffbac568a4230ffabe08748",
-    "CUT": "b29587ca803ff7e832a879a1a64acb77648aa796506818ad345cab9ebf991edb",
-    "HAND": "842d79d2a87264858e31917c2aabf9489dcbcb0e5665f8e4850b4aba38de98b8",
-    "HEALTH": "ac3f40e83ecfb1eee1468a47675163ddbc618873dfe5f967a68e93f372ba1113",
-    "LOAD": "81404726dc17fc40c5553ad41c0683b34fc4761e097947b670cfd22802d94d6e"
+    "ADR": "977ac88dbe0322d65fc4092fa5d4fc1cb34813e924100ddb1660b6a8f38d8e2f",
+    "CLIENT": "ad3da6f804f424a2898e800d25a8830194bc8cb228d791621b7192d88a9bcacc",
+    "CUT": "60f55f9155936fc1a6a8bdf95025d2fa7407752e4cc5f4ebc212950380764e6a",
+    "HAND": "51a144e16c3b2713cf92a1b8a0f7c87f491d20542c6058590ebcec0ea17c6838",
+    "HEALTH": "5328d21b10ee313044e2949772de846a83bee24f7d638584ae5ec15c6e426d30",
+    "LOAD": "2325144e5ae4646c289e200fbaa98ab57f9733642046f5c425275743aa52f31a"
   },
-  "claim_ledger_sha256": "c0e38411bc74e458981e7427ef7b86fb082297c2d99cf48980a8a8510edecba1",
+  "claim_ledger_sha256": "b23b5c65c93cd7dec1d3b1c81e77bb5025017a8f9446e2d50c37e070e556ef4e",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
@@ -525,6 +528,18 @@
       ],
       "issue": "SEM-026 closed only the no-self-review branch. An exhaustive one-branch-at-a-time audit measured 32 of the 40 errors.append sites as still neutralisable with the suite green, because the remaining counterexamples asserted only that review_errors returned a non-empty list and adjacent diagnostics satisfied that assertion.",
       "disposition": "A table of 32 controls now mutates the closed fixture and asserts the specific diagnostic each branch emits, so neutralising any single append site fails a named control. Controls are not required to trigger their branch in isolation; asserting the target diagnostic is sufficient and keeps the table small. Re-running the audit on this tree reports 40 sites, 0 invalid mutations, 40 red and 0 survivors. The claim is bounded to append-site coverage: one site inside a loop emits for many participant fields, scope flags and finding keys, so 40 of 40 does not mean every variant of every rule is locked."
+    },
+    {
+      "id": "SEM-030",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "tests/test_revenuecat_provider.py/SCENARIOS",
+        "tests/test_revenuecat_provider.py/TestTypedResult.test_http_404_detail_and_log_travel_the_common_path",
+        "DECISIONS.md/R-INV-2"
+      ],
+      "issue": "The C1 review round for the RevenueCat provider slice (7c8a890) shipped three evidence claims that did not reproduce: a mutation-attribution claim (a 201-only Determined(False) injection was reported to survive the pre-hardening scenario table, but the existing '201 created active' row already killed it — the experiment had never been run), a logging claim (the dedicated 404 test was described as locking the common error log including status, but it only matched the formatted message, which never carries extra fields), and a gate report (preflight was reported as E_CODECHANGED although the actual gate run printed no such line). All three were caught by the reviewer re-running the experiments instead of reading the claims.",
+      "disposition": "The mutation battery now uses a 201-only truthiness parser as the discriminating mutation, reproduced on both tables before adoption (survives the old two-row table, dies on the new '201 expired' row); the 404 test asserts record.status == 404 from logs.records; gate reports quote rc values printed by the same run. Same lineage as SEM-018/SEM-023: verifying a mechanical property (suite green, plausible claim text) is not verifying the semantic property (the experiment actually discriminates, the log actually carries the field). Bounded claim: the 201 rows are representative of the 200 hardening matrix, not a full differential oracle — the shared-branch property itself is locked by the 201-to-200-only mutation."
     }
   ],
   "residual_limits": [

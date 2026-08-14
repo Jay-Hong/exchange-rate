@@ -6501,10 +6501,10 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `a5623916dc49e0b69e8cb2b22204c4223ea16762`
+- server 기준 commit: `7c8a890e54667cadc9b712fb9680edd25618f494`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `7ce6894e2a3275ef03771f980d201b8c5be2fb13f5beb56bddfb55da953bf63e`
+- manifest SHA: `9d44c3bc5082ef11610fa0b1007a3d36ac1d4321244d9d554a01e4e3597df2d2`
 - baseline SHA: `f16a6201417dccb0eeb2b078418754431274d5f90bd2fdac0d9964928fa2509d`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -6608,7 +6608,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
 근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:241-271`
-(cache-free `fetch_revenuecat_result`) · `app/subscription.py:390-451`(stale fallback 은 REST 전용).
+(cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
 구현 근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·

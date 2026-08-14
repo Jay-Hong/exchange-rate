@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "7ce6894e2a3275ef03771f980d201b8c5be2fb13f5beb56bddfb55da953bf63e",
+  "manifest_sha256": "9d44c3bc5082ef11610fa0b1007a3d36ac1d4321244d9d554a01e4e3597df2d2",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
@@ -494,7 +494,7 @@
       "evidence": [],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": "익명 FX 차단(C1 4fd8364)과 **FX/USDT premium 강제 경로**(C1 0cfe474 — 정책표 · 식별 planner · coordinator · 3축 lease · 최종 stage `enforce_authenticated_premium`)에 이어, 형식 검증을 통과한 **미검증 token-bearing 후보 계측**을 추가했다(C1 a562391). 이 계측은 dispatcher flag 앞에서 쌓이지만 Firebase 검증 전이며 Firebase·RevenueCat을 호출하지 않는다. 따라서 인증 사용자 수나 실제 RC 부하가 아니다. ⛔ **닫히지 않았다**: 코드 기본값은 `compatibility` 이고, 운영 활성화 선행 = 실행 중인 env 직접 측정, 통제된 RC canary로 cache-free 왕복의 가용성·지연 결합 수용, 그리고 FX 실효를 제한하는 무인증 legacy 브로드캐스트(Stage B)."
+      "note": "익명 FX 차단(C1 4fd8364)과 **FX/USDT premium 강제 경로**(C1 0cfe474 — 정책표 · 식별 planner · coordinator · 3축 lease · 최종 stage `enforce_authenticated_premium`)에 이어, 형식 검증을 통과한 **미검증 token-bearing 후보 계측**을 추가했다(C1 a562391). 이 계측은 dispatcher flag 앞에서 쌓이지만 Firebase 검증 전이며 Firebase·RevenueCat을 호출하지 않는다. 따라서 인증 사용자 수나 실제 RC 부하가 아니다. ⛔ **닫히지 않았다**: 코드 기본값은 `compatibility` 이고, 운영 활성화 선행 = 실행 중인 env 직접 측정, 통제된 RC canary로 cache-free 왕복의 가용성·지연 결합 수용, 그리고 FX 실효를 제한하는 무인증 legacy 브로드캐스트(Stage B). RC canary 준비 검증이 provider 의 계약 구멍을 드러내 교정했다(C1 7c8a890 — RevenueCat GET /subscribers 는 Get-or-Create: 200/201 동일 본문 파싱, 구 \"404=신규 사용자 비구독 캐시\" 폐기 → 공통 상태 처리로 낙하해 ProtocolViolation fail-closed, user_id URL 인코딩). WS 분류는 불변이다(ProtocolViolation → persistent unavailable)."
     },
     {
       "rid": "R-GATE-2",
