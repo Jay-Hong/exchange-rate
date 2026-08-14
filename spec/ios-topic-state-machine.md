@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `26356746463070565ce05d161cdc4e0bef55d859`
+- server 기준 commit: `ce744d083adcd2ff11cc17c41f45d05ab2a84463`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `27ec695b6bfed1375ec7e7a5f5725193ff1ee2fefa3e2ddd7173e208b8adc3ef`
-- baseline SHA: `0bfb24c2ea1b10d7b49cf928e2c9cd47da7e185df64ba17c62379aef885ecc98`
+- manifest SHA: `29bacf5687c0883aa492477f099a82b17db9a1270c0fa7aa524c4ff7b548f9ab`
+- baseline SHA: `951bbe80b6fa09a202770205f1a81aba1b6663d18ba39db166e521c7fe310fcd`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**

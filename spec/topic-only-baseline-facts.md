@@ -83,7 +83,7 @@
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
   KRX = `PREMIUM_AND_ENTITLEMENT`. `app/topic_policy.py:285-330` 이 stage 별로 partition 을
   파생하고, `compatibility`·`reject_anonymous_fx` 에서는 비-KRX 가 identity-only 로 남는다.
-- **C5 [코드]** `app/topic_authorization.py:311-341` — coordinator. RC 는 요청당 **≤1회**,
+- **C5 [코드]** `app/topic_authorization.py:359-389` — coordinator. RC 는 요청당 **≤1회**,
   entitlement 는 premium 승인 뒤 KRX 요청이 있을 때만 **≤1회**. `Unavailable` 은 전체-요청,
   `Denied` 는 per-topic 이다.
   **C5-inf [추론]** ⇒ `enforce_authenticated_premium` 에서는 authorizable topic 이 하나라도
