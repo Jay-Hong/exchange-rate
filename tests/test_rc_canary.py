@@ -3,6 +3,7 @@
 ⛔ 이 canary 는 외부 quota(RevenueCat)를 실호출하는 도구다. 여기서 잠그는 것은 "실행해도
    되는가" 가 아니라 **"실행하면 계약대로만 움직이는가"** 다. 네트워크는 전부 주입으로 대체한다.
 """
+import argparse
 import ast
 import asyncio
 import importlib.util
@@ -283,6 +284,106 @@ class TestClassification(unittest.TestCase):
         self.assertEqual(published["expectation"]["expected_label"], "premium_granted")
 
 
+class TestArtifactStateAxis(unittest.TestCase):
+    """⛔ 세 상태를 **같은 필드**로 읽을 수 있어야 한다 — 성공본에만 status 가 없으면
+    완료 판정이 '필드 부재' 추론이 되고 consumer 가 KeyError 를 맞는다."""
+
+    def test_success_failure_and_reservation_share_one_state_axis(self):
+        import tempfile
+
+        failure = canary.build_failure_summary(
+            uid="u", expected_label="premium_granted", started_utc="20260814T000000Z",
+            args=argparse.Namespace(iterations=3, cadence_seconds=1.0,
+                                    call_timeout_seconds=1.0, max_runtime_seconds=10.0),
+            exc=RuntimeError("boom"),
+        )
+        self.assertEqual(failure["status"], "failed")
+        self.assertIs(failure["measurement_complete"], False)
+        self.assertIsNone(failure["observations_recorded"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reserved = canary.reserve_artifact(tmp, "20260814T000001Z")
+            self.assertEqual(json.loads(reserved.read_text())["status"], "in_progress")
+
+    def test_completed_summary_declares_its_state_and_call_count(self):
+        from app.topic_authorization import Denied
+
+        summary = _run(canary.run_canary(
+            uid="canary-uid", iterations=2, cadence_seconds=1.0, call_timeout_seconds=0.5,
+            max_runtime_seconds=100.0,
+            authorize=_fake_authorize([Denied("premium_required")] * 2),
+            sleeper=lambda seconds: asyncio.sleep(0),
+        ))
+        self.assertEqual(summary["status"], "completed")
+        self.assertIs(summary["measurement_complete"], True)
+        self.assertEqual(summary["observations_recorded"], len(summary["calls"]))
+
+    def test_finalize_refuses_payloads_that_break_the_state_axis(self):
+        """⛔ fixture 두 곳이 status 없는 payload 를 썼다 — 합의가 아니라 코드가 막아야
+        어떤 호출자도 `/4` 의 필수 상태 축을 빠뜨릴 수 없다."""
+        import tempfile
+
+        for bad in ({"schema": canary.ARTIFACT_SCHEMA},
+                    {"schema": canary.ARTIFACT_SCHEMA, "status": "in_progress"},
+                    {"schema": "rc-canary/3", "status": "completed"}):
+            with self.subTest(payload=bad), tempfile.TemporaryDirectory() as tmp:
+                reserved = canary.reserve_artifact(tmp, "20260101T000000Z")
+                with self.assertRaises(canary.CanaryContractError):
+                    canary.finalize_artifact(reserved, bad)
+                self.assertIn("in_progress", reserved.read_text())  # 예약본 보존
+                self.assertFalse((reserved.parent / f"{reserved.name}.sha256").exists())
+
+    def test_every_shape_declares_schema_four(self):
+        """⛔ `/3` 성공본에는 status 가 없었다 — 새 필드를 직접 인덱싱 계약으로 올리려면
+        버전이 달라야 한다. 같은 버전에 두 모양이 섞이면 부재 추론이 남는다."""
+        import tempfile
+        from app.topic_authorization import Denied
+
+        summary = _run(canary.run_canary(
+            uid="u", iterations=1, cadence_seconds=1.0, call_timeout_seconds=0.5,
+            max_runtime_seconds=100.0, authorize=_fake_authorize([Denied("premium_required")]),
+            sleeper=lambda seconds: asyncio.sleep(0),
+        ))
+        failure = canary.build_failure_summary(
+            uid="u", expected_label="premium_granted", started_utc="20260814T000000Z",
+            args=argparse.Namespace(iterations=1, cadence_seconds=1.0,
+                                    call_timeout_seconds=1.0, max_runtime_seconds=10.0),
+            exc=RuntimeError("boom"))
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = json.loads(canary.reserve_artifact(tmp, "20260814T000002Z").read_text())
+        for shape in (summary, failure, stub):
+            self.assertEqual(shape["schema"], "rc-canary/4")
+
+    def test_incomplete_run_is_not_declared_complete(self):
+        """⛔ runtime abort 는 루프를 break 하고 **정상 return** 한다 — 그래도 완료로 적으면
+        요청보다 적게 돈 측정이 완주로 인용된다."""
+        from app.topic_authorization import Denied
+
+        ticks = iter([0.0, 0.0, 0.1, 0.2, 999.0, 999.1, 999.2, 999.3, 999.4])
+        summary = _run(canary.run_canary(
+            uid="u", iterations=3, cadence_seconds=1.0, call_timeout_seconds=0.5,
+            max_runtime_seconds=10.0,
+            authorize=_fake_authorize([Denied("premium_required")] * 3),
+            sleeper=lambda seconds: asyncio.sleep(0),
+            mono=lambda: next(ticks),
+        ))
+        self.assertIsNotNone(summary["aborted_reason"])
+        self.assertLess(len(summary["calls"]), 3)
+        self.assertIs(summary["measurement_complete"], False)
+
+    def test_observations_count_timeouts_not_only_provider_completions(self):
+        """⛔ `calls` 는 try/except **뒤에서 무조건** append 된다 — timeout 도 한 건이다.
+        따라서 이 수치를 'provider 완료 호출 수' 로 부르면 거짓이다."""
+        summary = _run(canary.run_canary(
+            uid="u", iterations=2, cadence_seconds=1.0, call_timeout_seconds=0.5,
+            max_runtime_seconds=100.0,
+            authorize=_fake_authorize([asyncio.TimeoutError(), asyncio.TimeoutError()]),
+            sleeper=lambda seconds: asyncio.sleep(0),
+        ))
+        self.assertEqual(summary["counts_by_label"], {"timeout": 2})
+        self.assertEqual(summary["observations_recorded"], 2)
+
+
 class TestRunLoop(unittest.TestCase):
     def _summary(self, results, **overrides):
         from app.topic_authorization import Denied
@@ -486,7 +587,9 @@ class TestArtifactLifecycle(unittest.TestCase):
             self.assertEqual(reserved.stat().st_mode & 0o777, 0o600)
             self.assertIn("in_progress", reserved.read_text())
 
-            final = canary.finalize_artifact(reserved, {"schema": "rc-canary/3", "x": 1})
+            final = canary.finalize_artifact(
+                reserved, {"schema": canary.ARTIFACT_SCHEMA, "status": "completed", "x": 1}
+            )
             self.assertEqual(final, reserved)
             self.assertNotIn("in_progress", reserved.read_text())
             sidecar = reserved.parent / f"{reserved.name}.sha256"
@@ -547,10 +650,104 @@ class TestArtifactLifecycle(unittest.TestCase):
             sidecar = reserved.parent / f"{reserved.name}.sha256"
             sidecar.write_text("DO NOT OVERWRITE\n")
             with self.assertRaises(canary.CanaryContractError):
-                canary.finalize_artifact(reserved, {"schema": "rc-canary/3"})
+                canary.finalize_artifact(
+                    reserved, {"schema": canary.ARTIFACT_SCHEMA, "status": "completed"}
+                )
             self.assertEqual(sidecar.read_text(), "DO NOT OVERWRITE\n")
             # raw-first — artifact(증거)는 남는다
-            self.assertIn("rc-canary/3", reserved.read_text())
+            self.assertIn(canary.ARTIFACT_SCHEMA, reserved.read_text())
+
+    def test_unexpected_failure_after_reservation_is_finalized_without_secrets(self):
+        """실측 회귀: import 실패가 영구 `in_progress` 파일과 sidecar 부재를 남겼다."""
+        import contextlib
+        import hashlib
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        raw_uid = "canary-uid-must-not-leak"
+        secret_message = f"No module for {raw_uid} at https://provider.invalid/{raw_uid}"
+
+        async def fail_after_reservation(**kwargs):
+            raise ModuleNotFoundError(secret_message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CANARY_UID": raw_uid,
+                        "CANARY_EXPECTED_LABEL": "denied_premium_required",
+                    },
+                    clear=True,
+                ),
+                patch.object(canary, "suppress_runtime_logging"),
+                patch.object(canary, "require_rc_config"),
+                patch.object(canary, "require_runner_context"),
+                patch.object(canary, "run_canary", new=fail_after_reservation),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    canary.main(["--output-dir", tmp, "--iterations", "1"]), 1
+                )
+
+            artifacts = list(pathlib.Path(tmp).glob("*.rc-canary.json"))
+            self.assertEqual(len(artifacts), 1)
+            artifact = artifacts[0]
+            body = artifact.read_text()
+            summary = json.loads(body)
+            self.assertEqual(summary["status"], "failed")
+            self.assertFalse(summary["measurement_complete"])
+            self.assertIsNone(summary["observations_recorded"])
+            self.assertEqual(summary["failure"]["exception_type"], "ModuleNotFoundError")
+            self.assertFalse(summary["failure"]["exception_message_recorded"])
+            self.assertNotIn("in_progress", body)
+            self.assertNotIn(raw_uid, body)
+            self.assertNotIn("provider.invalid", body)
+            self.assertNotIn(raw_uid, stdout.getvalue())
+            self.assertNotIn("provider.invalid", stdout.getvalue())
+
+            sidecar = artifact.parent / f"{artifact.name}.sha256"
+            digest, name = sidecar.read_text().split()
+            self.assertEqual(name, artifact.name)
+            self.assertEqual(digest, hashlib.sha256(artifact.read_bytes()).hexdigest())
+
+    def test_contract_failure_after_reservation_is_finalized_and_returns_two(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        async def refuse_after_reservation(**kwargs):
+            raise canary.CanaryContractError("sensitive contract detail")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CANARY_UID": "canary-uid",
+                        "CANARY_EXPECTED_LABEL": "premium_granted",
+                    },
+                    clear=True,
+                ),
+                patch.object(canary, "suppress_runtime_logging"),
+                patch.object(canary, "require_rc_config"),
+                patch.object(canary, "require_runner_context"),
+                patch.object(canary, "run_canary", new=refuse_after_reservation),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    canary.main(["--output-dir", tmp, "--iterations", "1"]), 2
+                )
+            artifact = next(pathlib.Path(tmp).glob("*.rc-canary.json"))
+            summary = json.loads(artifact.read_text())
+            self.assertEqual(summary["status"], "refused")
+            self.assertEqual(summary["failure"]["exception_type"], "CanaryContractError")
+            self.assertNotIn("sensitive contract detail", artifact.read_text())
 
 
 class TestIsolationSurface(unittest.TestCase):

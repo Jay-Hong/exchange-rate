@@ -23,6 +23,13 @@
   대신 **fingerprint**(sha256 앞 16자리)로 남긴다.
 - **산출물 무결성** — exclusive create(`open 'x'`) 로 artifact·sidecar 모두 덮어쓰기가
   구조적으로 불가능하다. 이름은 random nonce를 써 컨테이너 간 PID 중복과 무관하다.
+  산출물(`rc-canary/4`)은 `status` 로 **세 상태**를 자기서술한다 — `in_progress`(예약만) /
+  `completed` / `failed`·`refused`. `measurement_complete` 와 `observations_recorded` 도 양쪽에
+  있다(완료본은 기록된 관측 수, 실패본은 추정하지 않으므로 `null`). ⚠️ `observations_recorded`
+  는 **provider 완료 호출 수가 아니다** — timeout·진입 전 오류도 기록된다. 예약 뒤 **포착
+  가능한 Python 예외**가 나면 예외 문자열 없이 실패 artifact 를 **원자 교체**하고 sidecar 를
+  exclusive create 한다(두 파일 생성이 하나의 원자 연산은 아니다). SIGKILL·호스트 장애·디스크 실패는 종결 handler를 실행할
+  수 없어 `in_progress`가 남을 수 있다.
 
 ## 실행 계약 (운영)
 
@@ -56,6 +63,7 @@ import secrets
 import statistics
 import sys
 import time
+import traceback
 
 # ⛔ hard cap — argparse 로 올릴 수 없다. 외부 quota 보호가 목적이므로 상수로 박는다.
 MAX_ITERATIONS = 60
@@ -63,6 +71,11 @@ MIN_CADENCE_SECONDS = 1.0
 MAX_CALL_TIMEOUT_SECONDS = 60.0
 MAX_RUNTIME_SECONDS_CAP = 1800.0
 CANARY_TOPIC = "fx:usd-krw"  # 정책표의 PREMIUM_ONLY canonical topic. KRX 는 절대 넣지 않는다.
+# ⛔ `/4` 는 **`status` 를 필수 상태 축으로 정의**한다(in_progress / completed / failed·refused).
+#    `/3` 산출물에는 성공본에 status 가 없었으므로, 새 필드를 직접 인덱싱 가능한 계약으로
+#    올리려면 bump 가 필요하다 — 같은 버전에 두 모양이 섞이면 consumer 는 여전히 부재를
+#    추론해야 한다. 기존 `/3` 산출물은 immutable 로 그대로 둔다.
+ARTIFACT_SCHEMA = "rc-canary/4"
 EXPECTED_LABELS = frozenset({"denied_premium_required", "premium_granted"})
 
 
@@ -289,7 +302,14 @@ async def run_canary(
         counts[c["label"]] = counts.get(c["label"], 0) + 1
     program = pathlib.Path(__file__)
     return {
-        "schema": "rc-canary/3",
+        "schema": ARTIFACT_SCHEMA,
+        # ⛔ 세 상태(`in_progress` 예약 / `completed` / `failed`·`refused`)를 **같은 필드**로
+        #    읽을 수 있어야 한다. 성공본에만 status 가 없으면 완료 판정이 "필드 부재" 추론이
+        #    되고, `d["measurement_complete"]` 는 성공본에서 KeyError 가 된다.
+        "status": "completed",
+        # ⛔ 무조건 True 가 아니다 — runtime abort 로 요청보다 적게 돌아도 이 summary 가
+        #    반환된다(루프가 break 후 정상 return). 실제 완주 조건에 결속한다.
+        "measurement_complete": aborted_reason is None and len(calls) == iterations,
         "started_utc": started_utc.strftime("%Y%m%dT%H%M%SZ"),
         "ended_utc": ended_utc.strftime("%Y%m%dT%H%M%SZ"),
         "elapsed_s": round(elapsed, 3),
@@ -316,6 +336,10 @@ async def run_canary(
             "max": latencies[-1] if latencies else None,
         },
         "aborted_reason": aborted_reason,
+        # ⛔ 이것은 **provider 완료 호출 수가 아니다** — timeout 과 provider 진입 전 오류도
+        #    `calls` 에 기록된다(루프가 try/except 뒤에서 무조건 append). provider 경계를
+        #    직접 계측하지 않으므로 "관측 기록 수" 로만 이름 붙인다.
+        "observations_recorded": len(calls),
         "measures_only": "revenuecat_round_trip",
         "not_measured": ["firebase", "ws_deadline", "lease_issuance", "reconnect_storm"],
     }
@@ -342,7 +366,7 @@ def reserve_artifact(output_dir: str, started_utc: str) -> pathlib.Path:
     path = directory / name
     try:
         with open(path, "x", encoding="utf-8") as handle:  # ⛔ 'x' — 존재하면 즉시 실패
-            handle.write(json.dumps({"schema": "rc-canary/3", "status": "in_progress"}) + "\n")
+            handle.write(json.dumps({"schema": ARTIFACT_SCHEMA, "status": "in_progress"}) + "\n")
     except FileExistsError:
         raise CanaryContractError(f"산출물 이름이 이미 있다: {name}") from None
     except OSError as exc:
@@ -353,8 +377,26 @@ def reserve_artifact(output_dir: str, started_utc: str) -> pathlib.Path:
     return path
 
 
+# `/4` 의 필수 상태 축 — 예약본(`in_progress`)은 reserve_artifact 가 직접 쓴다.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "refused"})
+
+
 def finalize_artifact(reserved: pathlib.Path, summary: dict) -> pathlib.Path:
-    """예약된 경로에 최종 요약을 원자적으로 쓰고 sidecar 를 exclusive 로 남긴다."""
+    """예약된 경로에 최종 요약을 원자적으로 쓰고 sidecar 를 exclusive 로 남긴다.
+
+    ⛔ `/4` 계약을 **여기서 강제**한다 — status 없는 payload 를 쓰면 이번 슬라이스가
+       없애려던 "필드 부재 상태" 가 되살아난다(테스트 fixture 에서 두 번 나왔다).
+       합의가 아니라 코드가 막아야 어떤 호출자도 위반할 수 없다.
+    """
+    if summary.get("schema") != ARTIFACT_SCHEMA:
+        raise CanaryContractError(
+            f"산출물 schema 가 {ARTIFACT_SCHEMA} 가 아니다: {summary.get('schema')!r}"
+        )
+    if summary.get("status") not in TERMINAL_STATUSES:
+        raise CanaryContractError(
+            f"종결 산출물 status 는 {sorted(TERMINAL_STATUSES)} 중 하나여야 한다: "
+            f"{summary.get('status')!r}"
+        )
     body = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
     temp = reserved.parent / f".{reserved.name}.tmp"
     temp.write_text(body)
@@ -372,6 +414,68 @@ def finalize_artifact(reserved: pathlib.Path, summary: dict) -> pathlib.Path:
         ) from None
     sidecar.chmod(0o600)
     return reserved
+
+
+def build_failure_summary(
+    *,
+    uid: str,
+    expected_label: str,
+    started_utc: str,
+    args: argparse.Namespace,
+    exc: Exception,
+) -> dict:
+    """예약 이후 포착된 Python 예외를 비식별 증거로 종결한다.
+
+    예외 문자열과 traceback source line은 UID나 provider URL을 포함할 수 있으므로 기록하지
+    않는다. 파일 basename, 함수명, 행 번호만 남기며, 실패 시점의 실제 RC 호출 수는 추정하지
+    않는다.
+    """
+    program = pathlib.Path(__file__)
+    failure_status = "refused" if isinstance(exc, CanaryContractError) else "failed"
+    frames = [
+        {
+            "file": pathlib.Path(frame.filename).name,
+            "function": frame.name,
+            "line": frame.lineno,
+        }
+        for frame in traceback.extract_tb(exc.__traceback__)[-8:]
+    ]
+    return {
+        "schema": ARTIFACT_SCHEMA,
+        "status": failure_status,
+        "started_utc": started_utc,
+        "ended_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        "image_id": os.getenv("CANARY_IMAGE_ID", "unknown"),
+        "runner_source_head": os.getenv("CANARY_RUNNER_SOURCE_HEAD", "unknown"),
+        "runner_sha256": os.getenv("CANARY_RUNNER_SHA256", "unknown"),
+        "outer_timeout_seconds": os.getenv("CANARY_OUTER_TIMEOUT_SECONDS", "unknown"),
+        "uid_fingerprint": hashlib.sha256(uid.encode()).hexdigest()[:16],
+        "program_sha256": hashlib.sha256(program.read_bytes()).hexdigest(),
+        "params": {
+            "iterations_requested": args.iterations,
+            "cadence_seconds": args.cadence_seconds,
+            "call_timeout_seconds": args.call_timeout_seconds,
+            "max_runtime_seconds": args.max_runtime_seconds,
+            "topic": CANARY_TOPIC,
+            "concurrency": 1,
+        },
+        "measurement_complete": False,
+        "observations_recorded": None,  # 실패 시점의 기록 수는 추정하지 않는다
+        "failure": {
+            "phase": "canary_run",
+            "exception_type": type(exc).__name__,
+            "exception_message_recorded": False,
+            "traceback_frames": frames,
+        },
+        "expectation": {
+            "expected_label": expected_label,
+            "passed": False,
+            "basis": "canary_run_did_not_complete",
+            "latency_threshold": None,
+        },
+        "measures_only": "revenuecat_round_trip",
+        "not_measured": ["firebase", "ws_deadline", "lease_issuance", "reconnect_storm"],
+    }
 
 
 def main(argv=None) -> int:
@@ -398,6 +502,11 @@ def main(argv=None) -> int:
         validate_expected_label(expected_label)
         started_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         reserved = reserve_artifact(args.output_dir, started_utc)  # ⛔ RC 호출 **전**
+    except CanaryContractError as exc:
+        print(json.dumps({"status": "refused", "reason": str(exc)}, ensure_ascii=False))
+        return 2
+
+    try:
         summary = asyncio.run(
             run_canary(
                 uid=uid,
@@ -408,6 +517,36 @@ def main(argv=None) -> int:
             )
         )
         summary["expectation"] = evaluate_expectation(summary, expected_label)
+    except Exception as exc:
+        failure = build_failure_summary(
+            uid=uid,
+            expected_label=expected_label,
+            started_utc=started_utc,
+            args=args,
+            exc=exc,
+        )
+        try:
+            path = finalize_artifact(reserved, failure)
+        except CanaryContractError as finalize_exc:
+            print(
+                json.dumps(
+                    {"status": "refused", "reason": str(finalize_exc)}, ensure_ascii=False
+                )
+            )
+            return 2
+        print(
+            json.dumps(
+                {
+                    "status": failure["status"],
+                    "artifact": path.name,
+                    "exception_type": failure["failure"]["exception_type"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2 if isinstance(exc, CanaryContractError) else 1
+
+    try:
         path = finalize_artifact(reserved, summary)
     except CanaryContractError as exc:
         print(json.dumps({"status": "refused", "reason": str(exc)}, ensure_ascii=False))
