@@ -53,7 +53,8 @@
           "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory",
           "SEM-028 repository follow-up candidate: non-vacuous seven-module docs-workflow discovery inventory, fail-closed nine-input semantic-drift surface, 125-reference RID backtick inventory across six destinations and two repositories, and explicit six-document Markdown-link gate scope",
           "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections",
-          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery"
+          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery",
+          "S3 hardening at 48d40c2: the SubscribeLoadContractError separation from the build isolation — the unclassified-plus-internal-error derivation with the dedicated warning carrying the original exception, the fail-fast re-raise branch ahead of the generic isolation, the contract-version bump to subscribe-load/4, the three-axis and wiring regressions, and the three battery mutants; C2 re-baseline: final-tree locator re-derivation of the three shifted ranges with the fail-fast branch deliberately excluded from the isolation claim"
         ]
       },
       {
@@ -81,7 +82,8 @@
           "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory",
           "SEM-028 repository follow-up candidate: non-vacuous seven-module docs-workflow discovery inventory, fail-closed nine-input semantic-drift surface, 125-reference RID backtick inventory across six destinations and two repositories, and explicit six-document Markdown-link gate scope",
           "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections",
-          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery"
+          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery",
+          "S3 hardening at 48d40c2: the SubscribeLoadContractError separation from the build isolation — the unclassified-plus-internal-error derivation with the dedicated warning carrying the original exception, the fail-fast re-raise branch ahead of the generic isolation, the contract-version bump to subscribe-load/4, the three-axis and wiring regressions, and the three battery mutants; C2 re-baseline: final-tree locator re-derivation of the three shifted ranges with the fail-fast branch deliberately excluded from the isolation claim"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -161,7 +163,8 @@
           "SEM-025-027 repository follow-up candidate: extension-independent backtick locator oracle and repository inventory, target-specific self-review branch regression, correction of the a562391 observation inference, and journal language delimiting unbound commit messages, tags, deployment reports, terminal transcripts, and agent memory",
           "SEM-028 repository follow-up candidate: non-vacuous seven-module docs-workflow discovery inventory, fail-closed nine-input semantic-drift surface, 125-reference RID backtick inventory across six destinations and two repositories, and explicit six-document Markdown-link gate scope",
           "S1d diagnosis-first completion at 60e0dc3: the axis terminal fold reordering that closes the diagnosis-less unclassified path, the three-axis persistent-internal-failure regressions, and the point-counter two-event comment and regression corrections",
-          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery"
+          "S2 hardening at 23297ca: Unavailable.kind enum enforcement at construction with the exhaustive unreachable-by-design _axis_outcome mapping, the symmetric premium logging-failure regression, the S2-37 and S2-38 mutants, and the evidence-grade correction distinguishing session probe output from the hash-bound persistent battery",
+          "S3 hardening at 48d40c2: the SubscribeLoadContractError separation from the build isolation — the unclassified-plus-internal-error derivation with the dedicated warning carrying the original exception, the fail-fast re-raise branch ahead of the generic isolation, the contract-version bump to subscribe-load/4, the three-axis and wiring regressions, and the three battery mutants; C2 re-baseline: final-tree locator re-derivation of the three shifted ranges with the fail-fast branch deliberately excluded from the isolation claim"
         ],
         "result": "pass"
       }
@@ -175,21 +178,21 @@
   "reviewed_at": "2026-08-15",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "1c5d09f5ed9ea08f67b9b544976fe880ebe1e25f64db19de140ee647692b1b3a",
-    "baseline_sha256": "9ad084612593b10340cb21f4b38e5db50340269ce05766db7a2912bc32de85bb",
-    "lock_sha256": "5a8657e8a2baf16e51328819edfdcadfdcc84c08f67eb4d8e26efdd5b0a9ca00",
-    "server_commit": "4f8314e9b2b2a2f429416e5c35d9b0ebd6d0a515",
+    "manifest_sha256": "eaa7718e86ff9530e21f7526ab658fb88b7390bba29e85eb78a42c45a76f5e34",
+    "baseline_sha256": "fa8ca2fa15a998bc85ab68f5ddd58e466e5e5761c0d08d9dd99d7cd1b779cde5",
+    "lock_sha256": "ef0ec8a3a6c5fa6e675bf888425f87e04fa6bbbd3f71980bf1614bda0ec8fb16",
+    "server_commit": "48d40c2903cd15a7eaaae452a4506434b771a0a3",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "9ce19d80b22625145676848434d8514ad9dee4295ea2005b288b68022fa058ac",
-    "CLIENT": "aef55f4bf8b6d5e479411b2d17f5364bea8cb56bd8c24ee01243fd6bf4d2773f",
-    "CUT": "4bc2a74977fa761dc5a52e3ece285ed354feb6951db999a8533acf14216d8a2e",
-    "HAND": "c22abb36e1a3facb931cd8a16e561ef2a0b7bd2d6b3e170bb67058f64fbf673b",
-    "HEALTH": "d166838a0db53691cfc3ffcedd530b32c7c61fc163208d5d6160090e617fb902",
-    "LOAD": "1b4529c4e840c3b909c57c62ae6a790c7f83a38921d75ddcce88dc36cf640d0d"
+    "ADR": "07838ada75f9599437cc87e278a5598ac782d53d2a9723d96189f11f274e9837",
+    "CLIENT": "fb5e0d62faa5fedec7ac8829114777dadace9b0ae2fb72d6b4923bf7f1d0702e",
+    "CUT": "5d35c26479e83641f21f54e904f5bb6e5ca9d1676d91dbe61121a29197e2d2a3",
+    "HAND": "436cb24ecc1d6ab217f80e3036398055620e3a2e885591e009e7646cf0ab9830",
+    "HEALTH": "ef8467bfe936816ac3a8a17340c54d86654f68134cc28edcb405d057c75a28a5",
+    "LOAD": "8256fb849895ba78eb917d27a1438f3ad058908b46cf5e116c3258f2388e61ce"
   },
-  "claim_ledger_sha256": "035e1001bba27be4af006e082c3dc51f5317791891ee7a48630815824616eb20",
+  "claim_ledger_sha256": "78fe12e2d8b9f0d0d2bad3961055daddb0d7c71740e6d24e973908278fe8c02a",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
