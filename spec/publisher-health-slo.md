@@ -3,11 +3,11 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `48d40c2903cd15a7eaaae452a4506434b771a0a3`
+- server 기준 commit: `751c24ef450684d17e2118072f3bdd5c9f97a330`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `eaa7718e86ff9530e21f7526ab658fb88b7390bba29e85eb78a42c45a76f5e34`
-- baseline SHA: `fa8ca2fa15a998bc85ab68f5ddd58e466e5e5761c0d08d9dd99d7cd1b779cde5`
+- manifest SHA: `83fbd50e1f477f306916cf4631581eb1d26d70ee4dde20be69e5124b1e2e5ed2`
+- baseline SHA: `550f6c62383c00627bc90cc17802ffbe464163ecb29bafcfe5a81eea5e8c6ce7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > **이 문서의 몫**: 클라이언트가 **구조적으로 판별할 수 없는** publisher 침묵을 무엇으로 덮는가 —
@@ -101,7 +101,7 @@ raw trigger 뒤 publish 가 없는 **정상 결과**다. **eligible flush(would-
 다만 그 모듈은 운영 live 진입점에 연결되지 않은 상태다(`app/atomic_fx_live.py:9-13` ·
 `tests/test_atomic_fx_live.py:323-350`). 따라서 정확한
 현재 사실은 **호출 구문 0이 아니라 운영 live 배선 0**이다. 또한 lease 게이트 뒤 대상이 비면
-`attempted=0` 하나로 반환하므로(`app/topic_dispatcher.py:324-337`), "전원 lease 만료"와 "구독자 0"이
+`attempted=0` 하나로 반환하므로(`app/topic_dispatcher.py:325-338`), "전원 lease 만료"와 "구독자 0"이
 **합쳐진다** — `no-eligible-lease` 와 `no-subscriber` 를 가르려면 그 분리가 선행이다.
 <!-- /rid: R-HLT-3 -->
 

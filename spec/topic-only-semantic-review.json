@@ -32,7 +32,8 @@
           "Citation scan completeness correction (SEM-034): the four pre-existing wrong app/main.py citations in GRAPH_API_V2_CONTRACT, FREE_TIER_ACCESS_MODEL_PLAN and USDT_TOPIC_MIGRATION_PLAN corrected against their read targets, with SEM-033's occurrence-site and debt counts fixed in place",
           "Completion of the SEM-034 citation corrections (SEM-035): the period-cache store range added, the four source-notification-settings ranges made scanner-discoverable, and the swapped old-pin evidence values corrected",
           "S2 C1 wiring at ce744d0: premium and KRX seam observation with CM-entry-then-mono ordering, type-driven verdict mapping, logging moved outside the observation CM with explicit traceback preservation, the persisted 37-mutant harness, and the capture-interpretation boundaries in the module docstring and CAVEAT; C2 re-baseline: four-site citation remap with semantic re-verification of the cache-free premium claim, pinned server commit, and the derived provenance and hash chain",
-          "S3 snapshot channel and send wiring at 4f8314e: the keyword-only channel with the unattributed default, the request-denominator exactly-once placement locked behaviorally on abort paths, the build observation inside the existing isolation except with the uninstrumented shared builder, the send outcome records with the Exception-bounded raised catch, the abort-bias and post-build-residual capture-reading rules persisted in the module docstring and CAVEAT, and the multi-pair move-mutant harness support; C2 re-baseline: the citation re-derivation of three content-identical moves plus five widened semantically re-verified ranges (recorded as SEM-036 with the two pre-existing single-point locators it surfaced), pinned server commit, and the derived provenance and hash chain"
+          "S3 snapshot channel and send wiring at 4f8314e: the keyword-only channel with the unattributed default, the request-denominator exactly-once placement locked behaviorally on abort paths, the build observation inside the existing isolation except with the uninstrumented shared builder, the send outcome records with the Exception-bounded raised catch, the abort-bias and post-build-residual capture-reading rules persisted in the module docstring and CAVEAT, and the multi-pair move-mutant harness support; C2 re-baseline: the citation re-derivation of three content-identical moves plus five widened semantically re-verified ranges (recorded as SEM-036 with the two pre-existing single-point locators it surfaced), pinned server commit, and the derived provenance and hash chain",
+          "S4 terminal counter wiring at 751c24e: the two-stage deadline counter incremented only inside the expired branches with the internal-timeout re-raise uncounted on both stages, the SubscribeAuthFailed code counter with the observation-fold other bucket whose literal submission also folds, the expiry-observed-stage and via-SubscribeAuthFailed-only reading boundaries persisted in the module docstring and CAVEAT, and the sixteen S4 battery mutants; C2 re-baseline: final-tree re-derivation of twelve content-identical dispatcher locators plus the widened auth-flow range with its claim re-verified over the observation-only insertions"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -107,7 +108,8 @@
           "Citation scan completeness correction (SEM-034): the four pre-existing wrong app/main.py citations in GRAPH_API_V2_CONTRACT, FREE_TIER_ACCESS_MODEL_PLAN and USDT_TOPIC_MIGRATION_PLAN corrected against their read targets, with SEM-033's occurrence-site and debt counts fixed in place",
           "Completion of the SEM-034 citation corrections (SEM-035): the period-cache store range added, the four source-notification-settings ranges made scanner-discoverable, and the swapped old-pin evidence values corrected",
           "S2 C1 wiring at ce744d0: premium and KRX seam observation with CM-entry-then-mono ordering, type-driven verdict mapping, logging moved outside the observation CM with explicit traceback preservation, the persisted 37-mutant harness, and the capture-interpretation boundaries in the module docstring and CAVEAT; C2 re-baseline: four-site citation remap with semantic re-verification of the cache-free premium claim, pinned server commit, and the derived provenance and hash chain",
-          "S3 snapshot channel and send wiring at 4f8314e: the keyword-only channel with the unattributed default, the request-denominator exactly-once placement locked behaviorally on abort paths, the build observation inside the existing isolation except with the uninstrumented shared builder, the send outcome records with the Exception-bounded raised catch, the abort-bias and post-build-residual capture-reading rules persisted in the module docstring and CAVEAT, and the multi-pair move-mutant harness support; C2 re-baseline: the citation re-derivation of three content-identical moves plus five widened semantically re-verified ranges (recorded as SEM-036 with the two pre-existing single-point locators it surfaced), pinned server commit, and the derived provenance and hash chain"
+          "S3 snapshot channel and send wiring at 4f8314e: the keyword-only channel with the unattributed default, the request-denominator exactly-once placement locked behaviorally on abort paths, the build observation inside the existing isolation except with the uninstrumented shared builder, the send outcome records with the Exception-bounded raised catch, the abort-bias and post-build-residual capture-reading rules persisted in the module docstring and CAVEAT, and the multi-pair move-mutant harness support; C2 re-baseline: the citation re-derivation of three content-identical moves plus five widened semantically re-verified ranges (recorded as SEM-036 with the two pre-existing single-point locators it surfaced), pinned server commit, and the derived provenance and hash chain",
+          "S4 terminal counter wiring at 751c24e: the two-stage deadline counter incremented only inside the expired branches with the internal-timeout re-raise uncounted on both stages, the SubscribeAuthFailed code counter with the observation-fold other bucket whose literal submission also folds, the expiry-observed-stage and via-SubscribeAuthFailed-only reading boundaries persisted in the module docstring and CAVEAT, and the sixteen S4 battery mutants; C2 re-baseline: final-tree re-derivation of twelve content-identical dispatcher locators plus the widened auth-flow range with its claim re-verified over the observation-only insertions"
         ]
       }
     ],
@@ -137,7 +139,8 @@
           "Citation scan completeness correction (SEM-034): the four pre-existing wrong app/main.py citations in GRAPH_API_V2_CONTRACT, FREE_TIER_ACCESS_MODEL_PLAN and USDT_TOPIC_MIGRATION_PLAN corrected against their read targets, with SEM-033's occurrence-site and debt counts fixed in place",
           "Completion of the SEM-034 citation corrections (SEM-035): the period-cache store range added, the four source-notification-settings ranges made scanner-discoverable, and the swapped old-pin evidence values corrected",
           "S2 C1 wiring at ce744d0: premium and KRX seam observation with CM-entry-then-mono ordering, type-driven verdict mapping, logging moved outside the observation CM with explicit traceback preservation, the persisted 37-mutant harness, and the capture-interpretation boundaries in the module docstring and CAVEAT; C2 re-baseline: four-site citation remap with semantic re-verification of the cache-free premium claim, pinned server commit, and the derived provenance and hash chain",
-          "S3 snapshot channel and send wiring at 4f8314e: the keyword-only channel with the unattributed default, the request-denominator exactly-once placement locked behaviorally on abort paths, the build observation inside the existing isolation except with the uninstrumented shared builder, the send outcome records with the Exception-bounded raised catch, the abort-bias and post-build-residual capture-reading rules persisted in the module docstring and CAVEAT, and the multi-pair move-mutant harness support; C2 re-baseline: the citation re-derivation of three content-identical moves plus five widened semantically re-verified ranges (recorded as SEM-036 with the two pre-existing single-point locators it surfaced), pinned server commit, and the derived provenance and hash chain"
+          "S3 snapshot channel and send wiring at 4f8314e: the keyword-only channel with the unattributed default, the request-denominator exactly-once placement locked behaviorally on abort paths, the build observation inside the existing isolation except with the uninstrumented shared builder, the send outcome records with the Exception-bounded raised catch, the abort-bias and post-build-residual capture-reading rules persisted in the module docstring and CAVEAT, and the multi-pair move-mutant harness support; C2 re-baseline: the citation re-derivation of three content-identical moves plus five widened semantically re-verified ranges (recorded as SEM-036 with the two pre-existing single-point locators it surfaced), pinned server commit, and the derived provenance and hash chain",
+          "S4 terminal counter wiring at 751c24e: the two-stage deadline counter incremented only inside the expired branches with the internal-timeout re-raise uncounted on both stages, the SubscribeAuthFailed code counter with the observation-fold other bucket whose literal submission also folds, the expiry-observed-stage and via-SubscribeAuthFailed-only reading boundaries persisted in the module docstring and CAVEAT, and the sixteen S4 battery mutants; C2 re-baseline: final-tree re-derivation of twelve content-identical dispatcher locators plus the widened auth-flow range with its claim re-verified over the observation-only insertions"
         ],
         "result": "pass"
       },
@@ -178,21 +181,21 @@
   "reviewed_at": "2026-08-15",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "eaa7718e86ff9530e21f7526ab658fb88b7390bba29e85eb78a42c45a76f5e34",
-    "baseline_sha256": "fa8ca2fa15a998bc85ab68f5ddd58e466e5e5761c0d08d9dd99d7cd1b779cde5",
-    "lock_sha256": "ef0ec8a3a6c5fa6e675bf888425f87e04fa6bbbd3f71980bf1614bda0ec8fb16",
-    "server_commit": "48d40c2903cd15a7eaaae452a4506434b771a0a3",
+    "manifest_sha256": "83fbd50e1f477f306916cf4631581eb1d26d70ee4dde20be69e5124b1e2e5ed2",
+    "baseline_sha256": "550f6c62383c00627bc90cc17802ffbe464163ecb29bafcfe5a81eea5e8c6ce7",
+    "lock_sha256": "2b9d4f9a2dc1be07eeb6102190745c43696353ae336958eefd617ab14ef83301",
+    "server_commit": "751c24ef450684d17e2118072f3bdd5c9f97a330",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "07838ada75f9599437cc87e278a5598ac782d53d2a9723d96189f11f274e9837",
-    "CLIENT": "fb5e0d62faa5fedec7ac8829114777dadace9b0ae2fb72d6b4923bf7f1d0702e",
-    "CUT": "5d35c26479e83641f21f54e904f5bb6e5ca9d1676d91dbe61121a29197e2d2a3",
-    "HAND": "436cb24ecc1d6ab217f80e3036398055620e3a2e885591e009e7646cf0ab9830",
-    "HEALTH": "ef8467bfe936816ac3a8a17340c54d86654f68134cc28edcb405d057c75a28a5",
-    "LOAD": "8256fb849895ba78eb917d27a1438f3ad058908b46cf5e116c3258f2388e61ce"
+    "ADR": "c2069be8f5371deb2d565c146be61680433b05261d91c3a5a881c6737d700361",
+    "CLIENT": "286de0095199d33b51a5efdfcb810dfb352357fbc602ca5bbc70d6ac3af1945c",
+    "CUT": "003f39a6543ebd466e7c8edb2cae4409e5b9ef3df140266f3e6d68f2301358de",
+    "HAND": "e6df3ba9e83fe8b6000cf0da1de089d9c74e71495741c6ceef7527873cf963e4",
+    "HEALTH": "1f46e72e7ba8704d7761316104f7180239c3c55542cae8ed9a6ba125dc7c7ed1",
+    "LOAD": "d8e3c286ebfaf93b5669982c47bd6a5e69fa2c3f67816886b8e7efa899e472a7"
   },
-  "claim_ledger_sha256": "78fe12e2d8b9f0d0d2bad3961055daddb0d7c71740e6d24e973908278fe8c02a",
+  "claim_ledger_sha256": "ae294181bf3b1369a9ad6dc58224b826eb891fa42fc4cbebe3de2a969f9ab61a",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,

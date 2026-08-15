@@ -56,7 +56,7 @@
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
   stage 정의·엄격 파서·코드 기본값 `app/config.py:645-688` · **정책 정본**
   `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
-  `app/topic_auth_rollout.py:286-301` · 필터 호출과 등록 `app/topic_dispatcher.py:555-577` ·
+  `app/topic_auth_rollout.py:286-301` · 필터 호출과 등록 `app/topic_dispatcher.py:556-578` ·
   production 주입 `app/main.py:312-320`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
   모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
@@ -64,11 +64,11 @@
   - `compatibility` — 무료 topic 등록 + snapshot, ack 없음(구 동작 보존).
   - `reject_anonymous_fx` — 무료 집합에서 **canonical FX 만** 조용히 제외. USDT 는 유지되고
     FX-only 요청은 등록·응답 모두 0이다. 익명 unsubscribe 는 stage 와 무관하게 기존 경로를
-    그대로 탄다(`app/topic_dispatcher.py:827-853`).
+    그대로 탄다(`app/topic_dispatcher.py:834-860`).
   - `enforce_authenticated_premium` — 익명 subscribe topic 을 전부 조용히 제외. unsubscribe 는 유지.
   ⚠️ 세 stage 모두 **익명 subscribe 시도**와 형식 검증을 통과한 **미검증 token-bearing 후보**를
      서로 다른 축으로 계측한다. 두 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다 앞이라
-     (`app/topic_dispatcher.py:509-525`) flag-off 운영 상태에서도 값이 쌓인다. token-bearing 축은
+     (`app/topic_dispatcher.py:510-526`) flag-off 운영 상태에서도 값이 쌓인다. token-bearing 축은
      Firebase 검증 전 관측이라 인증 사용자나 실제 RevenueCat 호출 수가 아니다
      (`app/topic_auth_rollout.py:237-274` · snapshot `app/topic_auth_rollout.py:317-361`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
@@ -92,16 +92,16 @@
 
 ## D. 실패 경로
 
-- **D1 [코드]** `app/topic_dispatcher.py:151` `remove_websocket` — docstring:
+- **D1 [코드]** `app/topic_dispatcher.py:152` `remove_websocket` — docstring:
   *"publish 송신 실패 격리에서 호출된다 … '연결이 죽었다'의 동의어가 아니다"*.
-- **D2 [코드]** `app/topic_dispatcher.py:211` `leased_subscribers` — 만료 lease 를
+- **D2 [코드]** `app/topic_dispatcher.py:212` `leased_subscribers` — 만료 lease 를
   **전송 직전에만** 필터. registry 제거·클라 통지 없음.
   ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
   이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
   그 경로를 같은 함수에 태운다.
 - **D3 [코드]** `app/topic_initial_snapshot.py:341-350` — build 실패를 `logger.warning` 후 **격리**,
   연결 유지. `None`(flag off)도 조용히 skip.
-- **D4 [결정]** `app/topic_dispatcher.py:367` §8-B-term —
+- **D4 [결정]** `app/topic_dispatcher.py:368` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
 - **D6 [코드]** `app/topic_initial_snapshot.py:363-370` — initial snapshot 도 **전송 직전**에

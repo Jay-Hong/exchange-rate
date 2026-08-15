@@ -12,7 +12,7 @@
 
 ## caller 축 ⊥ worker 축
 
-`asyncio.to_thread` 는 **취소를 전파하지 않는다**(`app/topic_dispatcher.py:584-586` 이 명시).
+`asyncio.to_thread` 는 **취소를 전파하지 않는다**(`app/topic_dispatcher.py:585-587` 이 명시).
 caller 쪽만 재면 양방향으로 어긋난다 — 포기 뒤에도 도는 스레드는 과소, 큐에서 취소돼 실행조차
 안 된 건은 과대. 그래서 두 축을 나눈다:
   - caller 축: `callers_awaiting` (점유가 아니라 **대기**), `duration_ms_*`

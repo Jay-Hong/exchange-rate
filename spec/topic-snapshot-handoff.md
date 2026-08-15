@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `48d40c2903cd15a7eaaae452a4506434b771a0a3`
+- server 기준 commit: `751c24ef450684d17e2118072f3bdd5c9f97a330`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `eaa7718e86ff9530e21f7526ab658fb88b7390bba29e85eb78a42c45a76f5e34`
-- baseline SHA: `fa8ca2fa15a998bc85ab68f5ddd58e466e5e5761c0d08d9dd99d7cd1b779cde5`
+- manifest SHA: `83fbd50e1f477f306916cf4631581eb1d26d70ee4dde20be69e5124b1e2e5ed2`
+- baseline SHA: `550f6c62383c00627bc90cc17802ffbe464163ecb29bafcfe5a81eea5e8c6ce7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -34,7 +34,7 @@
 **(a) WS 인가 경로 — 구현됨, Release arming 전에 활성화·실측한다.**
 
 `0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다
-(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:686-826`, ADR-039 Stage A).
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:691-833`, ADR-039 Stage A).
 Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.
 
 격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage
@@ -101,7 +101,7 @@ DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 
 **연결·pong·ack·lease 가 전부 정상인데 snapshot 이 한 번도 오지 않는 구멍 (출시 차단)**
 
 서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다
-(`app/topic_dispatcher.py:745-826`; baseline D5).
+(`app/topic_dispatcher.py:752-833`; baseline D5).
 그리고 snapshot build 가 실패하거나 `None` 이면 **연결을 유지한 채 조용히 skip** 한다
 (`app/topic_initial_snapshot.py:298-350`; baseline D3). FX publisher 도 build/publish **전** 예외를
 격리하고 `False` 만 반환한다(`app/fx_topic_publisher.py:291-323`).
@@ -188,7 +188,7 @@ DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 
 - ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *"build 총예산 < iOS 20초"* 라고 썼는데 **틀렸다** —
   iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라
   그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤
-  `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:809-826`).
+  `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:816-833`).
 
 넷 중 서버가 소유하는 둘은 [R-HAND-13](#r-hand-13)·[R-HAND-14](#r-hand-14) 이고, 클라가 소유하는
 둘은 [R-CLI-17](ios-topic-state-machine.md#r-cli-17)·[R-CLI-20](ios-topic-state-machine.md#r-cli-20) 이다.
@@ -307,7 +307,7 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 `topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) —
 *"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는
 '연결이 죽었다'의 동의어가 아니다."*
-**앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:663`)
+**앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:668`)
 — 16KB 초과는 transport 가 1009 로 닫지만 그건 앱 정책이 아니다.
 이 부정 사실은 고정 server commit 의 `app/main.py`·`app/topic_dispatcher.py`에서 WebSocket
 `close(` 호출을 전수 검색해 확인했다(collector DB의 `close()`는 범위 밖).

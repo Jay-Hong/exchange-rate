@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "eaa7718e86ff9530e21f7526ab658fb88b7390bba29e85eb78a42c45a76f5e34",
-    "baseline_sha256": "fa8ca2fa15a998bc85ab68f5ddd58e466e5e5761c0d08d9dd99d7cd1b779cde5",
-    "lock_sha256": "ef0ec8a3a6c5fa6e675bf888425f87e04fa6bbbd3f71980bf1614bda0ec8fb16",
-    "server_commit": "48d40c2903cd15a7eaaae452a4506434b771a0a3",
+    "manifest_sha256": "83fbd50e1f477f306916cf4631581eb1d26d70ee4dde20be69e5124b1e2e5ed2",
+    "baseline_sha256": "550f6c62383c00627bc90cc17802ffbe464163ecb29bafcfe5a81eea5e8c6ce7",
+    "lock_sha256": "2b9d4f9a2dc1be07eeb6102190745c43696353ae336958eefd617ab14ef83301",
+    "server_commit": "751c24ef450684d17e2118072f3bdd5c9f97a330",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "07838ada75f9599437cc87e278a5598ac782d53d2a9723d96189f11f274e9837",
-    "CLIENT": "fb5e0d62faa5fedec7ac8829114777dadace9b0ae2fb72d6b4923bf7f1d0702e",
-    "CUT": "5d35c26479e83641f21f54e904f5bb6e5ca9d1676d91dbe61121a29197e2d2a3",
-    "HAND": "436cb24ecc1d6ab217f80e3036398055620e3a2e885591e009e7646cf0ab9830",
-    "HEALTH": "ef8467bfe936816ac3a8a17340c54d86654f68134cc28edcb405d057c75a28a5",
-    "LOAD": "8256fb849895ba78eb917d27a1438f3ad058908b46cf5e116c3258f2388e61ce"
+    "ADR": "c2069be8f5371deb2d565c146be61680433b05261d91c3a5a881c6737d700361",
+    "CLIENT": "286de0095199d33b51a5efdfcb810dfb352357fbc602ca5bbc70d6ac3af1945c",
+    "CUT": "003f39a6543ebd466e7c8edb2cae4409e5b9ef3df140266f3e6d68f2301358de",
+    "HAND": "e6df3ba9e83fe8b6000cf0da1de089d9c74e71495741c6ceef7527873cf963e4",
+    "HEALTH": "1f46e72e7ba8704d7761316104f7180239c3c55542cae8ed9a6ba125dc7c7ed1",
+    "LOAD": "d8e3c286ebfaf93b5669982c47bd6a5e69fa2c3f67816886b8e7efa899e472a7"
   },
   "entries": [
     {
@@ -200,12 +200,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "16220f287dae99cb17bb12ef6543adbb6cacd6aea426ae2338c98cf10cd85f73",
-      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:762-802`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
+      "unit_sha256": "6140552914a7cd240cf2d1c0b9a84c62f2e49a1ca06838b8daa72cbd9a14a0c6",
+      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:769-809`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
       "classification": "code_fact",
       "detail": "고정 planner와 dispatcher는 FX/USDT의 premium_required가 최종 stage에서만 발생하고 앞선 두 stage에서는 identity-only임을 보여준다. 이는 클라이언트 처리 계약이며 production stage를 주장하지 않는다.",
       "provenance": [
-        "file:app/topic_dispatcher.py:762-802",
+        "file:app/topic_dispatcher.py:769-809",
         "file:app/topic_policy.py:285-330"
       ]
     },
@@ -545,12 +545,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "bcca5ede996e284607063401316cad5046aa864383050119b0237776ee5e8713",
-      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:686-826`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
+      "unit_sha256": "eb329037d20320638ce7780e561d7348e1aa9a6599052a92a67156d90b990af5",
+      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:691-833`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
       "classification": "code_fact",
       "detail": "고정 C1의 authenticated planner부터 dispatcher 등록까지가 FX/USDT premium 인가와 lease 경로를 구현한다. Release arming은 별도 운영 활성화와 실측 조건으로 남는다.",
       "provenance": [
-        "file:app/topic_dispatcher.py:686-826",
+        "file:app/topic_dispatcher.py:691-833",
         "file:app/topic_policy.py:285-330"
       ]
     },
@@ -604,14 +604,14 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-3",
-      "unit_sha256": "6e0514328dbe0f3047aa30e5abff9b6b0fe019e5ef9db1871521f0e1ea214919",
-      "unit_text": "- ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *\"build 총예산 < iOS 20초\"* 라고 썼는데 **틀렸다** — iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라 그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤 `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:809-826`).",
+      "unit_sha256": "78311ae01bea369d5cc7abc7b6f71da2225b8bbdda5053ae9375dfaa05f780e1",
+      "unit_text": "- ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *\"build 총예산 < iOS 20초\"* 라고 썼는데 **틀렸다** — iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라 그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤 `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:816-833`).",
       "classification": "code_fact",
       "detail": "iOS ACK가 20초 watchdog을 취소한다는 F3/F3-inf와 서버가 ack 뒤 snapshot builder를 호출하는 실제 순서를 함께 확인했다.",
       "provenance": [
         "baseline:F3",
         "baseline:F3-inf",
-        "file:app/topic_dispatcher.py:809-826"
+        "file:app/topic_dispatcher.py:816-833"
       ]
     },
     {
@@ -628,13 +628,13 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-6",
-      "unit_sha256": "ed08541e77446c4e2db5b91e087bde9cbb6d05a8c669dbcb155114409eec88b0",
-      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* **앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:663`) — 16KB 초과는 transport 가 1009 로 닫지만 그건 앱 정책이 아니다. 이 부정 사실은 고정 server commit 의 `app/main.py`·`app/topic_dispatcher.py`에서 WebSocket `close(` 호출을 전수 검색해 확인했다(collector DB의 `close()`는 범위 밖).",
+      "unit_sha256": "f0bd37f649f7800469d56041d8b5e7d6ea8893ab5d844c85dcbc365d5e5e8e4f",
+      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* **앱 레벨에서 명시적으로 닫는 곳은 `close(1008)`(인증) 하나뿐이다**(`app/topic_dispatcher.py:668`) — 16KB 초과는 transport 가 1009 로 닫지만 그건 앱 정책이 아니다. 이 부정 사실은 고정 server commit 의 `app/main.py`·`app/topic_dispatcher.py`에서 WebSocket `close(` 호출을 전수 검색해 확인했다(collector DB의 `close()`는 범위 밖).",
       "classification": "code_fact",
       "detail": "pinned main.py와 topic_dispatcher.py의 WebSocket close 호출을 전수 검색해 앱 레벨 명시 close가 인증 1008 한 곳뿐임을 확인했다.",
       "provenance": [
         "baseline:D1",
-        "file:app/topic_dispatcher.py:663"
+        "file:app/topic_dispatcher.py:668"
       ]
     },
     {
@@ -681,14 +681,14 @@
     {
       "destination": "HEALTH",
       "rid": "R-HLT-3",
-      "unit_sha256": "6917d43235648031cb4e37260aa2b1e06d7f5db4ac65f424d9ce8c1538adffb5",
-      "unit_text": "⚠️ `publish_topic_detailed` 호출 구문은 dormant 모듈의 `app/atomic_fx_live.py:257` 에 존재한다. 다만 그 모듈은 운영 live 진입점에 연결되지 않은 상태다(`app/atomic_fx_live.py:9-13` · `tests/test_atomic_fx_live.py:323-350`). 따라서 정확한 현재 사실은 **호출 구문 0이 아니라 운영 live 배선 0**이다. 또한 lease 게이트 뒤 대상이 비면 `attempted=0` 하나로 반환하므로(`app/topic_dispatcher.py:324-337`), \"전원 lease 만료\"와 \"구독자 0\"이 **합쳐진다** — `no-eligible-lease` 와 `no-subscriber` 를 가르려면 그 분리가 선행이다.",
+      "unit_sha256": "6699f0c0f14baaf760d846a3ee6a71a08d4d07c1a24d3a33dc1aea2a6b7c1a34",
+      "unit_text": "⚠️ `publish_topic_detailed` 호출 구문은 dormant 모듈의 `app/atomic_fx_live.py:257` 에 존재한다. 다만 그 모듈은 운영 live 진입점에 연결되지 않은 상태다(`app/atomic_fx_live.py:9-13` · `tests/test_atomic_fx_live.py:323-350`). 따라서 정확한 현재 사실은 **호출 구문 0이 아니라 운영 live 배선 0**이다. 또한 lease 게이트 뒤 대상이 비면 `attempted=0` 하나로 반환하므로(`app/topic_dispatcher.py:325-338`), \"전원 lease 만료\"와 \"구독자 0\"이 **합쳐진다** — `no-eligible-lease` 와 `no-subscriber` 를 가르려면 그 분리가 선행이다.",
       "classification": "code_fact",
       "detail": "호출 구문, leased subscriber 0의 합쳐진 결과, 그리고 no-live-import AST tripwire 테스트를 pinned server commit에서 각각 확인했다.",
       "provenance": [
         "file:app/atomic_fx_live.py:257",
         "file:app/atomic_fx_live.py:9-13",
-        "file:app/topic_dispatcher.py:324-337",
+        "file:app/topic_dispatcher.py:325-338",
         "file:tests/test_atomic_fx_live.py:323-350"
       ]
     },
