@@ -39,6 +39,14 @@ caller 쪽만 재면 양방향으로 어긋난다 — 포기 뒤에도 도는 �
   가능) — **취소 건수로 단정할 수 없다**. 취소 귀속은 통제 시나리오에서만 한다.
 - (S3) `topics_deduped_total == snapshot_build.started_total` 등식은 **계측 내부 오류가
   없는 정상 경로에서만** 성립한다(observe 진입 부기 실패 시 전자만 오른다).
+- (S4) deadline stage 는 **만료가 관측된 단계**이지 예산을 소비한 단계가 아니다 — 공유 절대
+  deadline 이라 identity 가 예산 대부분을 쓰고 성공하면 만료는 authorization 에 계상된다
+  (suspension 없는 동기 소진은 관측 자체가 불가). 실무상 identity 소비는 대부분 await I/O 라
+  근사가 성립하지만, 귀속 단정은 통제 시나리오에서만 한다.
+- (S4) `subscribe_auth_failed_by_error` 는 **SubscribeAuthFailed 경유만** 계측한다 —
+  dispatcher 가 직접 보내는 invalid_request 프레임(파싱·형식 오류 4곳)과 emitter 없는 예약
+  코드(request_too_large)는 여기 잡히지 않는다. **두 버킷의 0 은 그런 종결의 부재를 의미하지
+  않는다**(key 는 어휘 완결성 유지 — 미래 경유 코드 대비).
 
 ⛔ **취소 하위분류는 관측 사실일 뿐이다.** `ThreadPoolExecutor` 는 wrapper 호출 **전에** future
    를 running 으로 바꾸므로 worker-start 이벤트 set 이전에 경합 창이 있고, `asyncio.to_thread`
@@ -79,7 +87,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/4"
+CONTRACT_VERSION = "subscribe-load/5"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -142,12 +150,27 @@ SEND_OUTCOMES: tuple[str, ...] = ("sent", "lease_skipped", "connection_closed", 
 CHANNEL_KEYS: tuple[str, ...] = CHANNELS + (_UNCLASSIFIED,)
 SEND_OUTCOME_KEYS: tuple[str, ...] = SEND_OUTCOMES + (_UNCLASSIFIED,)
 
+# ── terminal 축 (S4) — dispatcher 의 요청-종결 counter 2종 ────────────────────
+# ⛔ deadline stage 는 **우리 리터럴**이라 allowlist 밖 = 배선 오류 → `unclassified` + 진단
+#    (channel 과 같은 부류). 반면 auth-fail 의 error 코드는 **런타임 관측값**이고 topic_wire 가
+#    진화하면 새 코드가 정당하게 나타난다 → `other` 로 접고 WARNING 1줄만(내부 오류 아님 —
+#    `app/topic_auth_rollout.py` 의 other-fold 규율과 동형). 두 fold 는 의미가 다르다.
+DEADLINE_STAGES: tuple[str, ...] = ("identity", "authorization")
+DEADLINE_STAGE_KEYS: tuple[str, ...] = DEADLINE_STAGES + (_UNCLASSIFIED,)
+# ⚠️ topic_wire.WHOLE_REQUEST_ERRORS 의 사본 — 이 모듈은 stdlib 만 import 한다(순환·결합 회피).
+#    drift 는 테스트가 topic_wire 원본과 대조해 잠근다.
+AUTH_FAIL_CODES: tuple[str, ...] = (
+    "invalid_token", "temporarily_unavailable", "invalid_request", "request_too_large",
+)
+AUTH_FAIL_KEYS: tuple[str, ...] = AUTH_FAIL_CODES + ("other",)
+
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
     "프로세스 재기동 시 0 · REST twin 은 포함하지 않는다 · callers_awaiting 은 대기이지 점유가 아니다 · "
     "started_total 은 관측 시도 수(leaf 실호출 수 아님) · 취소 우선이라 granted 는 undercount · "
     "snapshot 루프 중단(connection_closed·raised·취소)은 잔여 topic 을 전 축 미관측으로 남긴다 · "
-    "built−Σ(sends) 는 post-build 종료 잔차(취소 단정 금지)"
+    "built−Σ(sends) 는 post-build 종료 잔차(취소 단정 금지) · "
+    "deadline stage 는 만료-관측 단계(예산-소비 단계 아님) · auth_failed 는 SubscribeAuthFailed 경유만"
 )
 
 _lock = threading.Lock()
@@ -176,6 +199,10 @@ def _blank() -> dict[str, Any]:
         "calls_by_channel": {name: 0 for name in CHANNEL_KEYS},
         "topics_deduped_total": 0,
         "sends_by_outcome": {name: 0 for name in SEND_OUTCOME_KEYS},
+    }
+    axes["terminal"] = {
+        "auth_wire_deadline_expired_by_stage": {name: 0 for name in DEADLINE_STAGE_KEYS},
+        "subscribe_auth_failed_by_error": {name: 0 for name in AUTH_FAIL_KEYS},
     }
     axes["metrics_internal_errors_total"] = 0
     return axes
@@ -214,6 +241,10 @@ def _validate_schema() -> None:
         raise SubscribeLoadContractError("snapshot_send: channel 저장 key 가 제출 ⊎ unclassified 와 다르다")
     if _UNCLASSIFIED in SEND_OUTCOMES or set(SEND_OUTCOME_KEYS) != set(SEND_OUTCOMES) | {_UNCLASSIFIED}:
         raise SubscribeLoadContractError("snapshot_send: send 저장 key 가 제출 ⊎ unclassified 와 다르다")
+    if _UNCLASSIFIED in DEADLINE_STAGES or set(DEADLINE_STAGE_KEYS) != set(DEADLINE_STAGES) | {_UNCLASSIFIED}:
+        raise SubscribeLoadContractError("terminal: stage 저장 key 가 제출 ⊎ unclassified 와 다르다")
+    if "other" in AUTH_FAIL_CODES or set(AUTH_FAIL_KEYS) != set(AUTH_FAIL_CODES) | {"other"}:
+        raise SubscribeLoadContractError("terminal: auth-fail 저장 key 가 알려진 코드 ⊎ other 와 다르다")
 
 
 _validate_schema()
@@ -572,6 +603,55 @@ def record_snapshot_send(outcome: str) -> None:
         _warn("subscribe-load: allowlist 밖 send outcome — unclassified 로 접는다", axis="snapshot_send")
 
 
+def record_auth_wire_deadline_expired(stage: str) -> None:
+    """wire deadline 이 **실제로 만료**된 분기 1회 — 사용자에게 보인 과부하 결과.
+
+    ⛔ 검증자 내부 TimeoutError(미만료 재전파)는 세지 않는다 — 그 계약은 배선이 지킨다
+       (`expired()` True 분기 안에서만 호출). stage 는 우리 리터럴이라 allowlist 밖 =
+       배선 오류 → unclassified + 진단.
+    """
+    folded = False
+    try:
+        key = stage
+        if key not in DEADLINE_STAGES:
+            key = _UNCLASSIFIED
+            folded = True
+        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            _metrics["terminal"]["auth_wire_deadline_expired_by_stage"][key] += 1
+    except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
+        _note_internal_error()
+        _warn("subscribe-load: terminal 기록 실패", axis="terminal", exc_info=sys.exc_info())
+        return
+    if folded:
+        _warn("subscribe-load: allowlist 밖 deadline stage — unclassified 로 접는다", axis="terminal")
+
+
+def record_subscribe_auth_failed(code: str) -> None:
+    """`SubscribeAuthFailed`(Firebase 전이 등 전체-요청 오류) 1회 — 어느 축에도 안 잡히던 gap.
+
+    ⛔ error 코드는 **런타임 관측값** — topic_wire 가 진화하면 새 코드가 정당하게 나타난다.
+       allowlist 밖은 `other` 로 접고 WARNING 1줄만(배선 오류가 아니라 관측 fold — internal
+       error 를 세지 않는다. deadline stage 의 unclassified fold 와 의미가 다르다).
+    """
+    folded = False
+    try:
+        # ⛔ "other" 는 fold **target** 이지 제출 가능한 코드가 아니다 — wire 어휘에 없고
+        #    frame builder 도 거부한다. 리터럴 "other" 제출을 면제하면 sentinel 문자열이
+        #    진단을 우회한다(S1c unclassified 우회와 동형 — 세 번째 재발을 여기서 잠근다).
+        key = code if code in AUTH_FAIL_CODES else "other"
+        folded = key == "other"
+        with _lock:
+            _metrics["terminal"]["subscribe_auth_failed_by_error"][key] += 1
+    except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
+        _note_internal_error()
+        _warn("subscribe-load: terminal 기록 실패", axis="terminal", exc_info=sys.exc_info())
+        return
+    if folded:
+        _warn("subscribe-load: 알려지지 않은 auth-fail 코드 — other 로 접는다", axis="terminal")
+
+
 def subscribe_load_metrics() -> dict[str, Any]:
     """읽기 전용 스냅샷 — **전체를 하나의 lock 안에서** 뜬다.
 
@@ -607,6 +687,11 @@ def subscribe_load_metrics() -> dict[str, Any]:
             "calls_by_channel": dict(send["calls_by_channel"]),
             "topics_deduped_total": send["topics_deduped_total"],
             "sends_by_outcome": dict(send["sends_by_outcome"]),
+        }
+        terminal = _metrics["terminal"]
+        out["terminal"] = {
+            "auth_wire_deadline_expired_by_stage": dict(terminal["auth_wire_deadline_expired_by_stage"]),
+            "subscribe_auth_failed_by_error": dict(terminal["subscribe_auth_failed_by_error"]),
         }
     return out
 

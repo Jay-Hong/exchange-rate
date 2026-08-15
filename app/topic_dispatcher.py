@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     from app.topic_auth_rollout import TopicAuthRollout
 
 from app import config
+from app import subscribe_load_metrics as subscribe_load
 
 logger = logging.getLogger("exchange_rate.topic_dispatcher")
 
@@ -625,6 +626,8 @@ async def handle_client_message(
             # ⚠️ WARNING 인 이유: 이건 **일시 장애**다(재시도로 나을 수 있다). ERROR 로 올리면
             #    "재시도 간격이 길어야 한다"는 결합 규칙과 어긋나고, 고빈도 생산자라 신호가 희석된다.
             #    다만 로그가 **아예 없으면** D 를 튜닝할 근거가 영영 안 생긴다.
+            # ⛔ expired() **True 분기 안** — 검증자 내부 TimeoutError(위 재전파)는 세지 않는다.
+            subscribe_load.record_auth_wire_deadline_expired("identity")
             logger.warning(
                 "WS subscribe 인증이 wire deadline 을 넘었다",
                 extra={"deadline_seconds": config.WS_AUTH_WIRE_DEADLINE_SECONDS},
@@ -638,6 +641,8 @@ async def handle_client_message(
             )
             return
         except SubscribeAuthFailed as failure:
+            # 폭주가 Firebase 로 전이된 경우가 어느 축에도 안 잡히는 gap 을 닫는다(관측 전용).
+            subscribe_load.record_subscribe_auth_failed(failure.error)
             # ⚠️ **연결과 registry 는 불변이다.** §8-C 의 두 코드는 전체-요청 범위이므로 요청만
             #    접는다 — 구 동작은 예외가 상위로 올라가 연결이 닫히고 그 연결의 **다른 구독까지**
             #    사라졌다. 그 차이는 소켓에서만 관측된다.
@@ -705,6 +710,8 @@ async def handle_client_message(
                 if not gate_cm.expired():
                     raise                              # 판정기 내부 TimeoutError — 분류 불가
                 deadline_hit = True
+                # ⛔ 같은 계약 — gate_cm.expired() True 분기 안에서만.
+                subscribe_load.record_auth_wire_deadline_expired("authorization")
                 outcome = AuthorizationUnavailable(
                     UnavailableKind.TRANSIENT, "authorization_deadline"
                 )

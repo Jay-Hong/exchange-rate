@@ -41,6 +41,7 @@ TEST_TARGETS = [
     "tests/test_subscribe_load_metrics.py",
     "tests/test_subscribe_load_wiring.py",
     "tests/test_subscribe_load_snapshot_wiring.py",
+    "tests/test_subscribe_load_terminal_wiring.py",
     "tests/test_topic_authorization.py",
     "tests/test_topic_initial_snapshot.py",
 ]
@@ -66,8 +67,9 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     ("S1c-06 저장에서 unclassified key 제거", MODULE,
      '        "calls_by_channel": {name: 0 for name in CHANNEL_KEYS},',
      '        "calls_by_channel": {name: 0 for name in CHANNELS},'),
-    ("S1c-07 CONTRACT_VERSION /3 복귀", MODULE,
-     'CONTRACT_VERSION = "subscribe-load/4"', 'CONTRACT_VERSION = "subscribe-load/3"'),
+    # ⚠️ 앵커는 현행 버전을 따라간다 — 버전이 오를 때마다 이 변이도 함께 갱신(S1c-07 계보).
+    ("S1c-07 CONTRACT_VERSION 롤백", MODULE,
+     'CONTRACT_VERSION = "subscribe-load/5"', 'CONTRACT_VERSION = "subscribe-load/4"'),
     ("S1c-08 premium 제출 집합 축소(unavailable_persistent)", MODULE,
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),\n    KRX_ENTITLEMENT:',
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient"}),\n    KRX_ENTITLEMENT:'),
@@ -449,6 +451,123 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
         return _UNCLASSIFIED, True
     if exc is not None:''',
      '''    if exc is not None:'''),
+    # ── S4: terminal 축 (module + dispatcher) ─────────────────────────
+    ("S4-61 identity 기록을 expired 가드 앞으로 이동(미만료 계상)", DISPATCHER,
+     ('''        except asyncio.TimeoutError:
+            if not deadline_cm.expired():
+                # 검증자가 스스로 던진 TimeoutError — 분류되지 않은 예외다. 우리 계약은
+                # **분류 불가를 삼키지 않는다**(재전파 → 상위가 traceback 을 남기고 연결 정리).
+                raise''',
+      '''            # ⛔ expired() **True 분기 안** — 검증자 내부 TimeoutError(위 재전파)는 세지 않는다.
+            subscribe_load.record_auth_wire_deadline_expired("identity")'''),
+     ('''        except asyncio.TimeoutError:
+            subscribe_load.record_auth_wire_deadline_expired("identity")
+            if not deadline_cm.expired():
+                # 검증자가 스스로 던진 TimeoutError — 분류되지 않은 예외다. 우리 계약은
+                # **분류 불가를 삼키지 않는다**(재전파 → 상위가 traceback 을 남기고 연결 정리).
+                raise''',
+      '''            pass''')),
+    ("S4-62 identity 기록 제거", DISPATCHER,
+     '''            # ⛔ expired() **True 분기 안** — 검증자 내부 TimeoutError(위 재전파)는 세지 않는다.
+            subscribe_load.record_auth_wire_deadline_expired("identity")
+''', ""),
+    ("S4-63 authorization 기록 제거", DISPATCHER,
+     '''                # ⛔ 같은 계약 — gate_cm.expired() True 분기 안에서만.
+                subscribe_load.record_auth_wire_deadline_expired("authorization")
+''', ""),
+    # ⚠️ 스왑은 **들여쓰기 포함 전체-라인 앵커**로 — 짧은 앵커는 순차 적용에서 pair2 가
+    #    pair1 의 산출물을 되돌려 등가가 된다(실측 생존).
+    ("S4-64 stage 문자열 스왑", DISPATCHER,
+     ('            subscribe_load.record_auth_wire_deadline_expired("identity")',
+      '                subscribe_load.record_auth_wire_deadline_expired("authorization")'),
+     ('            subscribe_load.record_auth_wire_deadline_expired("authorization")',
+      '                subscribe_load.record_auth_wire_deadline_expired("identity")')),
+    ("S4-65 auth-failed 기록 제거", DISPATCHER,
+     '''            # 폭주가 Firebase 로 전이된 경우가 어느 축에도 안 잡히는 gap 을 닫는다(관측 전용).
+            subscribe_load.record_subscribe_auth_failed(failure.error)
+''', ""),
+    ("S4-66 auth-failed 코드를 리터럴로 고정", DISPATCHER,
+     "subscribe_load.record_subscribe_auth_failed(failure.error)",
+     'subscribe_load.record_subscribe_auth_failed("temporarily_unavailable")'),
+    ("S4-67 stage fold 의 internal error 제거", MODULE,
+     '''        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            _metrics["terminal"]["auth_wire_deadline_expired_by_stage"][key] += 1''',
+     '''        with _lock:
+            _metrics["terminal"]["auth_wire_deadline_expired_by_stage"][key] += 1'''),
+    ("S4-68 code fold 를 배선-오류식으로 격상(internal error 오염)", MODULE,
+     '''        key = code if code in AUTH_FAIL_CODES else "other"
+        folded = key == "other"
+        with _lock:
+            _metrics["terminal"]["subscribe_auth_failed_by_error"][key] += 1''',
+     '''        key = code if code in AUTH_FAIL_CODES else "other"
+        folded = key == "other"
+        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            _metrics["terminal"]["subscribe_auth_failed_by_error"][key] += 1'''),
+    ("S4-69 AUTH_FAIL_CODES 축소(drift)", MODULE,
+     '''AUTH_FAIL_CODES: tuple[str, ...] = (
+    "invalid_token", "temporarily_unavailable", "invalid_request", "request_too_large",
+)''',
+     '''AUTH_FAIL_CODES: tuple[str, ...] = (
+    "invalid_token", "temporarily_unavailable", "invalid_request",
+)'''),
+    # [WF-M4] "이동" — 다중 pair (가드 앞 기록 삽입 + 원 기록 제거)
+    ("S4-71 authorization 기록을 expired 가드 앞으로 이동", DISPATCHER,
+     ('''            except asyncio.TimeoutError:
+                if not gate_cm.expired():
+                    raise                              # 판정기 내부 TimeoutError — 분류 불가''',
+      '''                # ⛔ 같은 계약 — gate_cm.expired() True 분기 안에서만.
+                subscribe_load.record_auth_wire_deadline_expired("authorization")
+'''),
+     ('''            except asyncio.TimeoutError:
+                subscribe_load.record_auth_wire_deadline_expired("authorization")
+                if not gate_cm.expired():
+                    raise                              # 판정기 내부 TimeoutError — 분류 불가''',
+      "")),
+    ("S4-72 가드에서 terminal auth-fail 검사 제거", MODULE,
+     '''    if "other" in AUTH_FAIL_CODES or set(AUTH_FAIL_KEYS) != set(AUTH_FAIL_CODES) | {"other"}:
+        raise SubscribeLoadContractError("terminal: auth-fail 저장 key 가 알려진 코드 ⊎ other 와 다르다")''',
+     "    pass"),
+    ("S4-73 deadline fold 관측-먼저 복귀(순서 반전)", MODULE,
+     '''        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            _metrics["terminal"]["auth_wire_deadline_expired_by_stage"][key] += 1''',
+     '''        with _lock:
+            _metrics["terminal"]["auth_wire_deadline_expired_by_stage"][key] += 1
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1'''),
+    ("S4-74 terminal except 경로의 internal error 제거", MODULE,
+     ('''    except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
+        _note_internal_error()
+        _warn("subscribe-load: terminal 기록 실패", axis="terminal", exc_info=sys.exc_info())
+        return
+    if folded:
+        _warn("subscribe-load: allowlist 밖 deadline stage — unclassified 로 접는다", axis="terminal")''',),
+     ('''    except Exception:  # noqa: BLE001 — 관측이 서비스 경로를 흔들지 않는다
+        _warn("subscribe-load: terminal 기록 실패", axis="terminal", exc_info=sys.exc_info())
+        return
+    if folded:
+        _warn("subscribe-load: allowlist 밖 deadline stage — unclassified 로 접는다", axis="terminal")''',)),
+    ("S4-75 terminal 스냅샷 사본 제거(aliasing)", MODULE,
+     '''        out["terminal"] = {
+            "auth_wire_deadline_expired_by_stage": dict(terminal["auth_wire_deadline_expired_by_stage"]),
+            "subscribe_auth_failed_by_error": dict(terminal["subscribe_auth_failed_by_error"]),
+        }''',
+     '''        out["terminal"] = {
+            "auth_wire_deadline_expired_by_stage": terminal["auth_wire_deadline_expired_by_stage"],
+            "subscribe_auth_failed_by_error": terminal["subscribe_auth_failed_by_error"],
+        }'''),
+    ("S4-76 리터럴 other 제출을 fold 에서 면제(sentinel 우회 복귀)", MODULE,
+     '''        folded = key == "other"''',
+     '''        folded = key == "other" and code != "other"'''),
+    ("S4-70 가드에서 terminal stage 검사 제거", MODULE,
+     '''    if _UNCLASSIFIED in DEADLINE_STAGES or set(DEADLINE_STAGE_KEYS) != set(DEADLINE_STAGES) | {_UNCLASSIFIED}:
+        raise SubscribeLoadContractError("terminal: stage 저장 key 가 제출 ⊎ unclassified 와 다르다")''',
+     "    pass"),
 ]
 
 

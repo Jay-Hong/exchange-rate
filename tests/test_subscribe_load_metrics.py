@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/4")
+        self.assertEqual(snap["contract_version"], "subscribe-load/5")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -70,6 +70,10 @@ class TestFieldContract(SubscribeLoadTestCase):
         파생이라 함께 줄어 통과했다(실측: token_bearing / lease_skipped / unavailable_persistent /
         built 제거 변이 4종 전부 생존). 기대값은 여기 **literal** 로 박는다."""
         self.assertEqual(slm.CHANNELS, ("anonymous", "token_bearing", "unattributed"))
+        self.assertEqual(slm.DEADLINE_STAGES, ("identity", "authorization"))
+        self.assertEqual(slm.AUTH_FAIL_CODES,
+                         ("invalid_token", "temporarily_unavailable",
+                          "invalid_request", "request_too_large"))
         self.assertEqual(slm.SEND_OUTCOMES, ("sent", "lease_skipped", "connection_closed", "raised"))
         self.assertEqual(slm.SUBMITTABLE_OUTCOMES, {
             slm.PREMIUM_RC: frozenset(
@@ -118,6 +122,10 @@ class TestFieldContract(SubscribeLoadTestCase):
         # snapshot_send 쪽 불일치도 각각 독립으로 잠근다 — 축 케이스만 있으면
         # send/channel 저장 key 검사 제거 변이가 산다(실측).
         send_channel_cases = [
+            ("terminal stage 저장 key 에 unclassified 누락", "DEADLINE_STAGE_KEYS",
+             ("identity", "authorization")),
+            ("terminal auth-fail 저장 key 에 other 누락", "AUTH_FAIL_KEYS",
+             ("invalid_token", "temporarily_unavailable", "invalid_request", "request_too_large")),
             ("send 제출에 unclassified 침투", "SEND_OUTCOMES",
              ("sent", "lease_skipped", "connection_closed", "raised", "unclassified")),
             ("send 저장 key 에 unclassified 누락", "SEND_OUTCOME_KEYS",
@@ -148,7 +156,10 @@ class TestFieldContract(SubscribeLoadTestCase):
         snap = self._snapshot()
         self.assertEqual(sorted(snap), sorted(
             ["contract_version", "scope", "caveat", "metrics_internal_errors_total",
-             slm.PREMIUM_RC, slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD, "snapshot_send"]))
+             slm.PREMIUM_RC, slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD, "snapshot_send",
+             "terminal"]))
+        self.assertEqual(sorted(snap["terminal"]), sorted(
+            ["auth_wire_deadline_expired_by_stage", "subscribe_auth_failed_by_error"]))
         caller_fields = ["started_total", "by_outcome", "duration_ms_sum", "duration_ms_max",
                          "callers_awaiting", "callers_awaiting_max"]
         worker_fields = ["worker_started_total", "worker_finished_total",
@@ -1152,6 +1163,110 @@ class TestFoldDiagnosticsNeverEvaluateTheValue(SubscribeLoadTestCase):
         self.assertEqual(send["sends_by_outcome"]["unclassified"], 1)
         self.assertEqual(snap["metrics_internal_errors_total"], 2)
         self.assertEqual(sum("unclassified 로 접는다" in r.getMessage() for r in logs.records), 2)
+
+
+class TestTerminalAxis(SubscribeLoadTestCase):
+    def test_deadline_stages_land_and_unknown_stage_is_a_wiring_fold(self):
+        """stage 는 우리 리터럴 — allowlist 밖 = 배선 오류 → unclassified + 진단."""
+        slm.record_auth_wire_deadline_expired("identity")
+        slm.record_auth_wire_deadline_expired("authorization")
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_auth_wire_deadline_expired("typo_stage")
+        snap = self._snapshot()
+        stages = snap["terminal"]["auth_wire_deadline_expired_by_stage"]
+        self.assertEqual(stages, {"identity": 1, "authorization": 1, "unclassified": 1})
+        self.assertEqual(snap["metrics_internal_errors_total"], 1)
+        self.assertTrue(any("deadline stage" in r.getMessage() for r in logs.records))
+
+    def test_auth_fail_codes_land_and_unknown_code_is_an_observation_fold(self):
+        """error 코드는 런타임 관측값 — 미지 코드는 other + WARNING 1줄, internal error 0.
+
+        ⛔ deadline stage 의 unclassified fold(배선 오류)와 **의미가 다르다** — topic_wire 가
+        진화하면 새 코드가 정당하게 나타난다(rollout 모듈의 other-fold 규율과 동형)."""
+        for code in slm.AUTH_FAIL_CODES:
+            slm.record_subscribe_auth_failed(code)
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_subscribe_auth_failed("future_new_code")
+        snap = self._snapshot()
+        by_error = snap["terminal"]["subscribe_auth_failed_by_error"]
+        self.assertEqual(by_error["other"], 1)
+        for code in slm.AUTH_FAIL_CODES:
+            self.assertEqual(by_error[code], 1)
+        self.assertEqual(snap["metrics_internal_errors_total"], 0,
+                         "관측 fold 는 배선 오류가 아니다 — internal error 를 세면 안 된다")
+        self.assertTrue(any("auth-fail 코드" in r.getMessage() for r in logs.records))
+
+    def test_auth_fail_codes_do_not_drift_from_topic_wire(self):
+        """모듈은 stdlib 만 import 한다 — 사본의 drift 는 여기서 잠근다."""
+        from app import topic_wire
+
+        self.assertEqual(set(slm.AUTH_FAIL_CODES), set(topic_wire.WHOLE_REQUEST_ERRORS))
+
+    def test_deadline_fold_never_counts_without_its_diagnosis(self):
+        """[WF-M1] 진단-먼저 순서 — internal 쓰기를 지속 실패시키면 unclassified 도 안 센다
+        (관측-먼저면 진단 없는 unclassified 가 남는다 — S1b 진입 Blocker 와 같은 부류)."""
+        from unittest.mock import patch
+
+        class _FailInternalWrite(dict):
+            def __setitem__(self, key, value):
+                if key == "metrics_internal_errors_total":
+                    raise RuntimeError("persistent internal failure")
+                return super().__setitem__(key, value)
+        with patch.object(slm, "_metrics", _FailInternalWrite(slm._metrics)):
+            with self.assertLogs("exchange_rate.subscribe_load", level="WARNING"):
+                slm.record_auth_wire_deadline_expired("typo_stage")
+            snap = self._snapshot()
+            self.assertEqual(
+                snap["terminal"]["auth_wire_deadline_expired_by_stage"]["unclassified"], 0,
+                "진단이 못 남았으면 관측도 세지 않는다")
+        self._hard_reset()
+
+    def test_terminal_bookkeeping_failure_counts_an_internal_error_when_it_can(self):
+        """[WF-M5] lock 정상 + 임계구역 내부 실패 → except 경로의 _note_internal_error 가
+        counter 를 남겨야 한다(제거 변이가 생존했다 — 적대 probe 실측)."""
+        with slm._lock:
+            del slm._metrics["terminal"]
+        try:
+            with self.assertLogs("exchange_rate.subscribe_load", level="WARNING"):
+                slm.record_auth_wire_deadline_expired("identity")
+            # ⚠️ terminal 이 삭제된 상태라 전체 스냅샷은 못 뜬다 — counter 만 직접 읽는다.
+            with slm._lock:
+                internal = slm._metrics["metrics_internal_errors_total"]
+            self.assertEqual(internal, 1, "자기 부기 실패의 counter 흔적이 사라졌다")
+        finally:
+            self._hard_reset()
+
+    def test_terminal_snapshot_is_a_copy_not_an_alias(self):
+        """[WF-M3] delta 소비 계약 — 캡처본이 이후 기록으로 소급 오염되면 안 된다."""
+        before = self._snapshot()["terminal"]["auth_wire_deadline_expired_by_stage"]
+        slm.record_auth_wire_deadline_expired("identity")
+        self.assertEqual(before["identity"], 0, "스냅샷이 내부 dict 의 alias 다")
+
+    def test_literal_other_submission_is_itself_a_fold(self):
+        """'other' 는 fold target 이지 wire 코드가 아니다 — 리터럴 제출도 fold + WARNING.
+        면제하면 sentinel 문자열이 진단을 우회한다(codex 적발 — S1c 우회와 동형 3번째)."""
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_subscribe_auth_failed("other")
+        snap = self._snapshot()
+        self.assertEqual(snap["terminal"]["subscribe_auth_failed_by_error"]["other"], 1)
+        self.assertEqual(snap["metrics_internal_errors_total"], 0, "관측 fold — internal 은 0")
+        self.assertTrue(any("auth-fail 코드" in r.getMessage() for r in logs.records))
+
+    def test_terminal_recorders_are_no_throw(self):
+        from unittest.mock import patch
+
+        class _FailingLock:
+            def __enter__(self):
+                raise RuntimeError("lock down")
+
+            def __exit__(self, *exc):
+                return False
+        with patch.object(slm, "_lock", _FailingLock()):
+            with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                slm.record_auth_wire_deadline_expired("identity")
+                slm.record_subscribe_auth_failed("invalid_token")
+        self.assertEqual(sum("terminal 기록 실패" in r.getMessage() for r in logs.records), 2)
+        self._hard_reset()
 
 
 class TestResetContract(SubscribeLoadTestCase):
