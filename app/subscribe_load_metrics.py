@@ -79,7 +79,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/3"
+CONTRACT_VERSION = "subscribe-load/4"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -113,8 +113,9 @@ AXIS_OUTCOMES: dict[str, tuple[str, ...]] = {
 }
 
 # 호출자가 `finish()` 로 제출할 수 있는 **도메인 결과**만. 파생 키(취소 2종·raised·build_failed·
-# unclassified)는 여기 없다 — snapshot 의 `build_failed` 는 배선이 기존 `except Exception` 안에
-# CM 을 두므로 예외 전파로만 생긴다(`app/topic_initial_snapshot.py:315-323` + 설계 §5 파생 매핑).
+# unclassified)는 여기 없다. snapshot 의 `build_failed` 는 `send_initial_snapshots` 의 관측 CM
+# 안에서 실제 builder 예외가 전파될 때만 생긴다. `SubscribeLoadContractError` 는 외부축 실패가
+# 아니므로 `unclassified` + 내부 진단으로 기록한 뒤 그대로 재전파한다(설계 §5 파생 매핑).
 SUBMITTABLE_OUTCOMES: dict[str, frozenset[str]] = {
     PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),
     KRX_ENTITLEMENT: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),
@@ -314,6 +315,10 @@ def _resolve_outcome(handle: WorkHandle, exc: Optional[BaseException]) -> tuple[
         if axis in WORKER_AXES:
             return (_CANCEL_OBSERVED if handle.worker_start_observed else _CANCEL_NOT_OBSERVED), False
         return "cancelled", False
+    if isinstance(exc, SubscribeLoadContractError):
+        # 계측 배선 오류는 외부축 실패가 아니다. 호출자에게는 그대로 전파하되 장부에서는
+        # `raised`/`build_failed`를 오염시키지 않고 내부 진단과 짝지어 남긴다.
+        return _UNCLASSIFIED, True
     if exc is not None:
         # 취소가 아닌 모든 종료(=`Exception` 과 그 밖의 `BaseException`)는 결함 축이다.
         return _RAISED_OUTCOME[axis], False
@@ -433,8 +438,14 @@ async def observe(axis: str):
               _warn("subscribe-load: outcome 분류·계시 실패 — unclassified 로 기록",
                     axis=axis, exc_info=degraded)
           elif internal_error:
-              _warn("subscribe-load: terminal outcome 이 없거나 제출 allowlist 밖 — unclassified 로 기록",
-                    axis=axis)
+              if isinstance(exc, SubscribeLoadContractError):
+                  # ⚠️ 계약 오류는 "미지정/제출 불가" 가 아니다 — 문구를 나누고 원본 예외를
+                  #    명시 전달한다(generic 문구는 오진이었다 — 실측).
+                  _warn("subscribe-load: 계측 계약 오류 — unclassified 로 기록 후 재전파",
+                        axis=axis, exc_info=exc)
+              else:
+                  _warn("subscribe-load: terminal outcome 이 없거나 제출 allowlist 밖 — unclassified 로 기록",
+                        axis=axis)
 
 
 def timed_call(axis: str, handle: WorkHandle, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:

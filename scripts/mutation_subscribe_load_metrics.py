@@ -66,8 +66,8 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     ("S1c-06 저장에서 unclassified key 제거", MODULE,
      '        "calls_by_channel": {name: 0 for name in CHANNEL_KEYS},',
      '        "calls_by_channel": {name: 0 for name in CHANNELS},'),
-    ("S1c-07 CONTRACT_VERSION /2 복귀", MODULE,
-     'CONTRACT_VERSION = "subscribe-load/3"', 'CONTRACT_VERSION = "subscribe-load/2"'),
+    ("S1c-07 CONTRACT_VERSION /3 복귀", MODULE,
+     'CONTRACT_VERSION = "subscribe-load/4"', 'CONTRACT_VERSION = "subscribe-load/3"'),
     ("S1c-08 premium 제출 집합 축소(unavailable_persistent)", MODULE,
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),\n    KRX_ENTITLEMENT:',
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient"}),\n    KRX_ENTITLEMENT:'),
@@ -286,45 +286,30 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     # ⚠️ "이동" 은 제거+이식 한 span — try **첫 문장**으로 옮기는 변이는 여전히 build 앞이라
     #    등가였다(실측 생존). build 실패 continue 를 **지나서** 세도록 except 뒤로 옮긴다.
     ("S3-43 topics_deduped 를 build 격리 뒤로(실패 topic 미집계)", SNAPSHOT,
-     '''        seen.add(topic)
+     ('''        seen.add(topic)
         # ⛔ dedupe **통과분만** 센다 — 요청 1건이 몇 배 topic 으로 퍼지는지의 분자.
         #    build 실패 topic 도 수요였으므로 여기(=build 앞)서 센다.
-        subscribe_load.record_snapshot_topic()
-
-        try:
-            # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
-            #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
-            #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
-            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
-                payload = await asyncio.to_thread(
-                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-                    _build_snapshot_sync, topic,
-                )
-                load.finish("none_payload" if payload is None else "built")
-        except Exception:
-            logger.warning(
-                "initial snapshot build 실패 (격리)",
-                extra={"topic": topic},
-                exc_info=True,
-            )
-            continue''',
-     '''        seen.add(topic)
-
-        try:
-            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
-                payload = await asyncio.to_thread(
-                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-                    _build_snapshot_sync, topic,
-                )
-                load.finish("none_payload" if payload is None else "built")
-        except Exception:
+        subscribe_load.record_snapshot_topic()''',
+      '''        except Exception:
             logger.warning(
                 "initial snapshot build 실패 (격리)",
                 extra={"topic": topic},
                 exc_info=True,
             )
             continue
-        subscribe_load.record_snapshot_topic()'''),
+
+        if payload is None:'''),
+     ('''        seen.add(topic)''',
+      '''        except Exception:
+            logger.warning(
+                "initial snapshot build 실패 (격리)",
+                extra={"topic": topic},
+                exc_info=True,
+            )
+            continue
+        subscribe_load.record_snapshot_topic()
+
+        if payload is None:''')),
     ("S3-44 build worker 축 우회(timed_call 제거)", SNAPSHOT,
      '''                payload = await asyncio.to_thread(
                     subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
@@ -345,6 +330,10 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
                     _build_snapshot_sync, topic,
                 )
                 load.finish("none_payload" if payload is None else "built")
+        except subscribe_load.SubscribeLoadContractError:
+            # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
+            # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.
+            raise
         except Exception:''',
      '''        async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
           try:
@@ -353,6 +342,8 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
                 _build_snapshot_sync, topic,
             )
             load.finish("none_payload" if payload is None else "built")
+          except subscribe_load.SubscribeLoadContractError:
+            raise
           except Exception:
             load.finish("none_payload")'''),
     ("S3-47 lease_skipped 기록 누락", SNAPSHOT,
@@ -433,6 +424,31 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     ("S3-53 dispatcher token_bearing channel 제거", DISPATCHER,
      'await send_initial_snapshots(websocket, accepted_names, channel="token_bearing")',
      "await send_initial_snapshots(websocket, accepted_names)"),
+    ("S3-57 계측 계약 오류 재전파 제거", SNAPSHOT,
+     '''        except subscribe_load.SubscribeLoadContractError:
+            # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
+            # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.
+            raise
+        except Exception:''',
+     '''        except Exception:'''),
+    ("S3-58b 계약 오류 전용 WARNING 을 generic 으로 격하", MODULE,
+     '''              if isinstance(exc, SubscribeLoadContractError):
+                  # ⚠️ 계약 오류는 "미지정/제출 불가" 가 아니다 — 문구를 나누고 원본 예외를
+                  #    명시 전달한다(generic 문구는 오진이었다 — 실측).
+                  _warn("subscribe-load: 계측 계약 오류 — unclassified 로 기록 후 재전파",
+                        axis=axis, exc_info=exc)
+              else:
+                  _warn("subscribe-load: terminal outcome 이 없거나 제출 allowlist 밖 — unclassified 로 기록",
+                        axis=axis)''',
+     '''              _warn("subscribe-load: terminal outcome 이 없거나 제출 allowlist 밖 — unclassified 로 기록",
+                    axis=axis)'''),
+    ("S3-58 계측 계약 오류를 외부축 실패로 오염", MODULE,
+     '''    if isinstance(exc, SubscribeLoadContractError):
+        # 계측 배선 오류는 외부축 실패가 아니다. 호출자에게는 그대로 전파하되 장부에서는
+        # `raised`/`build_failed`를 오염시키지 않고 내부 진단과 짝지어 남긴다.
+        return _UNCLASSIFIED, True
+    if exc is not None:''',
+     '''    if exc is not None:'''),
 ]
 
 

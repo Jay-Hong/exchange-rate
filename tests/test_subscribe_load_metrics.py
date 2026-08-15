@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/3")
+        self.assertEqual(snap["contract_version"], "subscribe-load/4")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -195,6 +195,31 @@ class TestTerminalTransition(SubscribeLoadTestCase):
         self.assertEqual(snap[slm.PREMIUM_RC]["by_outcome"]["unclassified"], 1)
         self.assertEqual(snap["metrics_internal_errors_total"], 1)
         self._invariant(snap)
+
+    def test_contract_error_propagates_without_polluting_external_failures(self):
+        """계측 배선 오류는 모든 축에서 unclassified 진단으로 남고 본문 밖으로 전파된다."""
+        async def scenario(axis):
+            async with slm.observe(axis):
+                raise slm.SubscribeLoadContractError("axis/handle mismatch")
+
+        for axis in slm.AXIS_OUTCOMES:
+            with self.subTest(axis=axis):
+                slm.reset_subscribe_load_metrics()
+                with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+                    with self.assertRaisesRegex(slm.SubscribeLoadContractError, "axis/handle mismatch") as ctx:
+                        _run(scenario(axis))
+                # ⛔ 진단 문구가 오진이면 안 된다 — "미지정/제출 불가" 가 아니라 계약 오류이고,
+                #    원본 예외가 exc_info 로 실려야 한다.
+                record = next(r for r in logs.records if "계측 계약 오류" in r.getMessage())
+                self.assertIsNotNone(record.exc_info)
+                self.assertIs(record.exc_info[1], ctx.exception)
+                snap = self._snapshot()
+                block = snap[axis]
+                self.assertEqual(block["by_outcome"][slm._RAISED_OUTCOME[axis]], 0)
+                self.assertEqual(block["by_outcome"]["unclassified"], 1)
+                self.assertEqual(block["callers_awaiting"], 0)
+                self.assertEqual(snap["metrics_internal_errors_total"], 1)
+                self._invariant(snap)
 
     def test_outcome_outside_the_allowlist_never_creates_a_key(self):
         async def scenario(value):

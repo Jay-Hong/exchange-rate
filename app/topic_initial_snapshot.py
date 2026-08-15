@@ -334,6 +334,10 @@ async def send_initial_snapshots(
                     _build_snapshot_sync, topic,
                 )
                 load.finish("none_payload" if payload is None else "built")
+        except subscribe_load.SubscribeLoadContractError:
+            # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
+            # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.
+            raise
         except Exception:
             logger.warning(
                 "initial snapshot build 실패 (격리)",

@@ -149,6 +149,21 @@ class TestDedupeAndBuildAxis(SnapshotWiringTestCase):
         self.assertEqual(block["worker_started_total"], 1)
         self.assertEqual(block["worker_finished_total"], 1)
 
+    async def test_metrics_contract_error_is_not_swallowed_as_build_failure(self):
+        """축·handle 배선 오류는 fail-fast하고 외부 build_failed 버킷을 오염시키지 않는다."""
+        def contract_boom(*args, **kwargs):
+            raise slm.SubscribeLoadContractError("axis/handle mismatch")
+
+        with patch.object(slm, "timed_call", new=contract_boom):
+            with self.assertRaises(slm.SubscribeLoadContractError):
+                await send_initial_snapshots(self.ws, ["fx:usd-krw"])
+        snap = self._snap()
+        block = snap[slm.SNAPSHOT_BUILD]
+        self.assertEqual(block["by_outcome"]["build_failed"], 0)
+        self.assertEqual(block["by_outcome"]["unclassified"], 1)
+        self.assertEqual(block["callers_awaiting"], 0)
+        self.assertEqual(snap["metrics_internal_errors_total"], 1)
+
     def test_the_shared_builder_contains_no_instrumentation(self):
         """⑥ — `_build_snapshot_sync` 는 REST twin(main.py)과 공유 — WS 계측이 혼입되면
         REST 호출이 WS 축으로 계측된다."""
