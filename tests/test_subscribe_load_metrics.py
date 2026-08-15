@@ -1178,6 +1178,19 @@ class TestTerminalAxis(SubscribeLoadTestCase):
         self.assertEqual(snap["metrics_internal_errors_total"], 1)
         self.assertTrue(any("deadline stage" in r.getMessage() for r in logs.records))
 
+    def test_literal_unclassified_stage_cannot_bypass_fold_diagnostics(self):
+        """`unclassified`는 저장 sentinel이지 제출 stage가 아니다.
+
+        일반 typo만 시험하면 literal sentinel만 진단에서 면제하는 회귀가 생존한다(S4-77 실측).
+        """
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING") as logs:
+            slm.record_auth_wire_deadline_expired("unclassified")
+        snap = self._snapshot()
+        stages = snap["terminal"]["auth_wire_deadline_expired_by_stage"]
+        self.assertEqual(stages["unclassified"], 1)
+        self.assertEqual(snap["metrics_internal_errors_total"], 1)
+        self.assertTrue(any("deadline stage" in r.getMessage() for r in logs.records))
+
     def test_auth_fail_codes_land_and_unknown_code_is_an_observation_fold(self):
         """error 코드는 런타임 관측값 — 미지 코드는 other + WARNING 1줄, internal error 0.
 

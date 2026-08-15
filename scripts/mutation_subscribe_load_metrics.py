@@ -564,6 +564,13 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     ("S4-76 리터럴 other 제출을 fold 에서 면제(sentinel 우회 복귀)", MODULE,
      '''        folded = key == "other"''',
      '''        folded = key == "other" and code != "other"'''),
+    ("S4-77 리터럴 unclassified stage 를 fold 에서 면제(sentinel 우회)", MODULE,
+     '''        if key not in DEADLINE_STAGES:
+            key = _UNCLASSIFIED
+            folded = True''',
+     '''        if key not in DEADLINE_STAGES:
+            key = _UNCLASSIFIED
+            folded = stage != _UNCLASSIFIED'''),
     ("S4-70 가드에서 terminal stage 검사 제거", MODULE,
      '''    if _UNCLASSIFIED in DEADLINE_STAGES or set(DEADLINE_STAGE_KEYS) != set(DEADLINE_STAGES) | {_UNCLASSIFIED}:
         raise SubscribeLoadContractError("terminal: stage 저장 key 가 제출 ⊎ unclassified 와 다르다")''',
