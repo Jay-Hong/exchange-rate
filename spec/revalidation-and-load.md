@@ -45,7 +45,9 @@ I/O 상한 · 서버 실패 cooldown).
 ⚠️ 그리고 그 executor 는 **큐 상한이 아니다**(`SimpleQueue` 무제한) — 같은 docstring 이
 *"자원 상한 완료 라고 쓰지 말 것"* 이라 못 박는다.
 
-근거(baseline): **E3 [결정]** `app/auth_executor.py:8-24` docstring.
+근거(baseline): **E3 [결정]** `app/auth_executor.py:14-16` docstring(즉시거절 기각) +
+`app/auth_executor.py:28-30`(**`SimpleQueue` 무제한** — "자원 상한 완료" 라고 쓰지 말 것).
+⚠️ S1a 로 모듈 docstring 이 늘어 두 근거가 갈렸다 — 한 범위로 합쳐 인용하면 낡는다.
 ⚠️ 즉 기존 `auth_executor` 를 "이미 상한이 있다"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지
 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.
 <!-- /rid: R-LOAD-4 -->

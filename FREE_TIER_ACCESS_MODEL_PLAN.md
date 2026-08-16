@@ -717,7 +717,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
      `TOPIC_DISPATCHER_ENABLED=false`(W 조정으로 잡히지 않을 때).
   ⚠️ 대가: 워커 수 W 가 곧 인증 처리 용량(W/T)이라 잘못 잡으면 스스로 문턱을 낮춘다.
   ⛔ **"5줄 격리"라고 적었던 것은 과소평가다**(codex Medium). 실제로 다뤄야 하는 것:
-    · **수명주기** — 모듈 전역 pool 의 생성·종료(앱 shutdown 에서 안 닫으면 스레드가 남는다),
+    · **수명주기** — pool 의 생성·종료(앱 shutdown 에서 안 닫으면 스레드가 남는다).
+      ⚠️ **S1a 이후 상태는 `AuthExecutorLane` 인스턴스 소유다**(모듈 전역이 아니다) —
+      모듈은 WS singleton facade 만 노출한다.
     · **kwargs** — `loop.run_in_executor(ex, func, *args)` 는 **키워드 인자를 받지 않는다**.
       현행 호출은 `check_revoked=`/`app=` 를 키워드로 넘긴다 — 구현에서는 클로저가 나른다,
     · **큐 적체** — 전용 pool 도 `SimpleQueue` 라 무제한이다. 격리는 *동거인* 을 지킬 뿐

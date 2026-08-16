@@ -490,8 +490,8 @@ def test_repeated_start_does_not_leak_a_second_pool():
 
     async def scenario():
         auth_executor.start_auth_executor(2)
-        first = auth_executor._executor
+        first = auth_executor._ws_lane._executor
         auth_executor.start_auth_executor(5)
-        return first is auth_executor._executor
+        return first is auth_executor._ws_lane._executor
 
     assert _run(scenario()) is True

@@ -35,10 +35,10 @@ class LedgerTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         auth_executor.shutdown_auth_executor()
-        with auth_executor._metrics_lock:          # teardown 은 강제 정리(계약 밖)
-            auth_executor._metrics.update({k: 0 for k in _COUNTER_KEYS})
-            auth_executor._metrics.update({k: 0 for k in _GAUGE_KEYS})
-            auth_executor._metrics["by_outcome"] = {}
+        with auth_executor._ws_lane._metrics_lock:          # teardown 은 강제 정리(계약 밖)
+            auth_executor._ws_lane._metrics.update({k: 0 for k in _COUNTER_KEYS})
+            auth_executor._ws_lane._metrics.update({k: 0 for k in _GAUGE_KEYS})
+            auth_executor._ws_lane._metrics["by_outcome"] = {}
 
     @staticmethod
     def _m():
@@ -95,7 +95,7 @@ class TestReservationOrdering(LedgerTestCase):
             observed.append(auth_executor.auth_executor_metrics()["queued_now"])
             return fut
 
-        with patch.object(auth_executor._executor, "submit", side_effect=sync_submit):
+        with patch.object(auth_executor._ws_lane._executor, "submit", side_effect=sync_submit):
             await auth_executor.run_in_auth_executor(lambda: 1)
         self.assertEqual(observed, [0], f"예약이 submit 뒤로 가면 여기서 음수가 된다: {observed}")
         self.assertEqual(self._m()["queued_now"], 0)
@@ -109,7 +109,7 @@ class TestSubmitFailure(LedgerTestCase):
         class Boom(RuntimeError):
             pass
 
-        with patch.object(auth_executor._executor, "submit", side_effect=Boom("submit 거부")):
+        with patch.object(auth_executor._ws_lane._executor, "submit", side_effect=Boom("submit 거부")):
             with self.assertRaises(Boom):
                 await auth_executor.run_in_auth_executor(lambda: 1)
         m = self._m()
@@ -125,7 +125,7 @@ class TestSubmitFailure(LedgerTestCase):
         """[codex High] 실패 제출이 동시에 섞여도 **불변식**은 유지된다.
         ⚠️ peak 정확성은 계약이 아니다 — 실패 예약이 다른 스레드의 표본에 섞일 수 있고
            그 사실은 `_note_submit_succeeded` 도크스트링에 명시돼 있다."""
-        real_submit = auth_executor._executor.submit
+        real_submit = auth_executor._ws_lane._executor.submit
         calls = {"n": 0}
 
         def flaky(fn, *a, **kw):
@@ -134,7 +134,7 @@ class TestSubmitFailure(LedgerTestCase):
                 raise RuntimeError("submit 거부")
             return real_submit(fn, *a, **kw)
 
-        with patch.object(auth_executor._executor, "submit", side_effect=flaky):
+        with patch.object(auth_executor._ws_lane._executor, "submit", side_effect=flaky):
             results = await asyncio.gather(
                 *[auth_executor.run_in_auth_executor(lambda: 1) for _ in range(9)],
                 return_exceptions=True)
@@ -155,14 +155,14 @@ class TestExistingFieldSemantics(LedgerTestCase):
 
         장부 기록만 지연시키고(lock 은 잡지 않는다) 그 창에서 취소해 순서를 관측한다."""
         note_entered, release_note, gate = threading.Event(), threading.Event(), threading.Event()
-        original = auth_executor._note_worker_started
+        original = auth_executor._ws_lane._note_worker_started
 
         def delayed_note(receipt):
             note_entered.set()
             release_note.wait(5)
             original(receipt)
 
-        with patch.object(auth_executor, "_note_worker_started", side_effect=delayed_note):
+        with patch.object(auth_executor._ws_lane, "_note_worker_started", side_effect=delayed_note) as _reach0:
             task = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: gate.wait(5)))
             await asyncio.to_thread(note_entered.wait, 5)
             task.cancel()
@@ -173,6 +173,9 @@ class TestExistingFieldSemantics(LedgerTestCase):
             for _ in range(200):                      # worker 종료까지 대기
                 if self._m()["in_flight"] == 0: break
                 await asyncio.sleep(0.005)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach0.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach0"
         self.assertEqual(self._m()["caller_cancelled_while_running"], 1,
                          "장부 기록이 started_evt 앞으로 가면 취소가 누락된다")
 
@@ -183,7 +186,7 @@ class TestExistingFieldSemantics(LedgerTestCase):
         변이가 생존한다(실측)."""
         self.assertEqual(self._m()["in_flight"], 0)
         with self.assertRaises(RuntimeError):
-            auth_executor._record(None, None, "bogus", worker_finished=True)
+            auth_executor._ws_lane._record(None, None, "bogus", worker_finished=True)
         m = self._m()
         self.assertEqual(m["in_flight"], 0, "가드가 음수를 허용했다")
         self.assertEqual(m["count"], 0, "가드는 count 증가 **전에** 걸려야 한다")
@@ -196,7 +199,7 @@ class TestExistingFieldSemantics(LedgerTestCase):
         ⚠️ 이전 두 번의 "수정"은 오염을 **옮기기만** 했다 — 처음엔 queue_wait, 다음엔
            execution_ms 로. 그래서 두 필드를 **동시에** 잠근다."""
         DELAY = 0.08
-        orig_sub, orig_start = auth_executor._note_submitted, auth_executor._note_worker_started
+        orig_sub, orig_start = auth_executor._ws_lane._note_submitted, auth_executor._ws_lane._note_worker_started
 
         def slow_sub():
             time.sleep(DELAY); orig_sub()
@@ -204,9 +207,13 @@ class TestExistingFieldSemantics(LedgerTestCase):
         def slow_start(receipt):
             time.sleep(DELAY); orig_start(receipt)
 
-        with patch.object(auth_executor, "_note_submitted", side_effect=slow_sub), \
-             patch.object(auth_executor, "_note_worker_started", side_effect=slow_start):
+        with patch.object(auth_executor._ws_lane, "_note_submitted", side_effect=slow_sub) as _reach1, \
+             patch.object(auth_executor._ws_lane, "_note_worker_started", side_effect=slow_start) as _reach2:
             await auth_executor.run_in_auth_executor(lambda: 1)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach1.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach1"
+            assert _reach2.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach2"
         m = self._m()
         self.assertEqual(m["ledger_errors_total"], 0,
                          "지연 주입이 예외로 삼켜졌다 — 주입 자체가 안 일어나 테스트가 vacuous 하다")
@@ -230,7 +237,12 @@ class TestClockBoundary(unittest.TestCase):
     def test_ledger_precedes_clock_which_precedes_event_creation(self):
         import ast
         import inspect
-        tree = ast.parse(inspect.getsource(auth_executor.run_in_auth_executor))
+        import textwrap
+        # ⛔ **facade 가 아니라 구현을 읽는다** — 공개 이름은 이제 2줄 위임이라 세 지점을 못 찾는다
+        #    (심볼은 맞는데 **가리키는 것**이 바뀐 축 — 이름 기반 잔존 검사가 원리적으로 못 잡는다).
+        # ⛔ 메서드 소스는 들여쓰기된 채 오므로 dedent 없이는 IndentationError.
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(auth_executor._ws_lane.run_in_auth_executor)))
         # ⚠️ **줄 번호**로 본다 — 보상 `try` 가 생기면서 Event 생성이 중첩됐고, top-level 문만
         #    훑던 판정은 그 순간 무너졌다(실측). 경계는 중첩과 무관한 성질이다.
         order = {}
@@ -238,7 +250,7 @@ class TestClockBoundary(unittest.TestCase):
             if not isinstance(node, (ast.Expr, ast.Assign)):
                 continue
             src = ast.unparse(node)
-            if src.startswith("_note_submitted()"):
+            if src.startswith("self._note_submitted()"):
                 order.setdefault("ledger", node.lineno)
             elif src.startswith("submitted = time.monotonic()"):
                 order.setdefault("clock", node.lineno)
@@ -290,9 +302,12 @@ class TestFailureAtomicity(LedgerTestCase):
     async def test_post_submit_ledger_failure_does_not_replace_business_result(self):
         """제출 성공 뒤의 부기 실패가 caller 에게 반환되면 **계측이 업무 결과를 대체**한다.
         ⛔ 계측이 서비스 경로를 결정하면 그건 관측이 아니라 정책이다."""
-        with patch.object(auth_executor, "_note_submit_succeeded",
-                          side_effect=RuntimeError("부기 실패")):
+        with patch.object(auth_executor._ws_lane, "_note_submit_succeeded",
+                          side_effect=RuntimeError("부기 실패")) as _reach3:
             result = await auth_executor.run_in_auth_executor(lambda: "업무결과")
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach3.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach3"
         self.assertEqual(result, "업무결과", "계측 예외가 업무 결과를 대체했다")
         self.assertEqual(self._m()["ledger_errors_total"], 1, "삼켰는데 드러내지도 않았다")
 
@@ -311,9 +326,12 @@ class TestFailureAtomicity(LedgerTestCase):
     async def test_diagnostic_logging_failure_does_not_replace_business_result(self):
         """[codex Major] `_safe_ledger` 의 **진단 로깅**이 보호되지 않으면, 장부 실패를 삼켜도
         로깅 실패가 그대로 올라가 원래 결함(계측이 업무 결과를 대체)이 재개방된다."""
-        with patch.object(auth_executor, "_note_submit_succeeded", side_effect=RuntimeError("부기")), \
+        with patch.object(auth_executor._ws_lane, "_note_submit_succeeded", side_effect=RuntimeError("부기")) as _reach4, \
              patch.object(auth_executor.logger, "debug", side_effect=RuntimeError("logging failed")):
             result = await auth_executor.run_in_auth_executor(lambda: "업무결과")
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach4.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach4"
         self.assertEqual(result, "업무결과", "로깅 실패가 업무 결과를 대체했다")
 
     async def test_commit_then_raise_still_balances_in_flight(self):
@@ -321,36 +339,53 @@ class TestFailureAtomicity(LedgerTestCase):
 
         ⛔ 반환값은 "끝까지 정상 반환"해야 전달되므로 커밋 여부의 증거가 못 된다 —
            그래서 lock **안에서** 채우는 receipt 로 판정한다."""
-        real = auth_executor._note_worker_started
+        real = auth_executor._ws_lane._note_worker_started
 
         def commit_then_raise(receipt):
             real(receipt)
             raise RuntimeError("커밋 후 예외")
 
-        with patch.object(auth_executor, "_note_worker_started", side_effect=commit_then_raise):
+        with patch.object(auth_executor._ws_lane, "_note_worker_started", side_effect=commit_then_raise) as _reach5:
             await auth_executor.run_in_auth_executor(lambda: 1)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach5.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach5"
         m = self._m()
         self.assertEqual(m["in_flight"], 0, "커밋됐는데 종료 감소가 생략돼 gauge 가 샜다")
         auth_executor.reset_auth_executor_metrics()      # 영구 차단이 아니어야 한다
 
 
-    async def test_item_assignment_implementation_would_leak(self):
-        """[codex Major] **항목 대입 구현으로 회귀하면** 부분 커밋이 gauge 를 누수시킨다.
+    async def test_multi_field_commit_regressing_to_in_place_would_leak(self):
+        """[codex Major] `_note_worker_started` 의 **다중 필드 커밋**이 제자리 대입으로
+        회귀하면 부분 커밋이 gauge 를 누수시킨다.
 
-        ⚠️ 이 주입(`__setitem__`)은 구현이 `_metrics[...] = ...` 를 쓸 때만 발화한다 —
-           현행 리바인딩 구현에서는 발화하지 않는다(vacuous). 그래도 남기는 이유는 순차
-           in-place 로의 회귀를 잡는 **트립와이어**이기 때문이고, 원자성 자체의 증명이 아니다.
-           원자성은 `TestHelperAtomicity` 의 구조 단언이 진다."""
+        ⛔ 대상은 **모든 항목 대입이 아니다.** `_note_submitted` 은 단일 카운터라 제자리 대입이
+           정당하고, baseline 에서도 sentinel 은 실제로 **호출된다**(실측: hits ==
+           ["submitted_total"]). 자는 것은 `in_flight_max` **트리거 조건**뿐이다.
+        ⚠️ 원자성 자체의 증명이 아니라 in-place 회귀를 잡는 **런타임 트립와이어**다. 원자성은
+           `TestHelperAtomicity` 의 구조 단언이 진다. 그래서 귀속에는 **이 테스트만 단독 실행**
+           해야 한다 — in-place 변이는 구조 단언도 함께 죽인다."""
+
+        # ⛔ **hit counter 를 둔다.** 이 트립와이어의 `in_flight_max` **실패 조건**은 현행
+        #    구현에서 잠드는 것이 정상이다(sentinel 자체는 `submitted_total` 로 호출된다).
+        #    "테스트가 red 다" 만으로는 그 조건이 깨어났다는 증거가 안 된다 — in-place 회귀는
+        #    구조 AST 테스트도 함께 죽이므로 그쪽이 대신 죽인 걸 여기 판별력으로 오귀속하게 된다.
+        hits: list[str] = []
 
         class MaxWriteFails(dict):
             def __setitem__(self, key, value):
+                hits.append(key)
                 if key == "in_flight_max":
                     raise RuntimeError("max 쓰기 실패 주입")
                 super().__setitem__(key, value)
 
-        with patch.object(auth_executor, "_metrics", MaxWriteFails(auth_executor._metrics)):
+        with patch.object(auth_executor._ws_lane, "_metrics", MaxWriteFails(auth_executor._ws_lane._metrics)) as _reach6:
             await auth_executor.run_in_auth_executor(lambda: 1)
-            in_flight = auth_executor._metrics["in_flight"]
+            in_flight = auth_executor._ws_lane._metrics["in_flight"]
+        # ⛔ **트리거 단언을 먼저.** 행동 회귀가 먼저 실패하면 단독 red 가 나도 sentinel 이
+        #    깨어났다는 증거가 출력되지 않아 귀속이 흐려진다.
+        self.assertNotIn("in_flight_max", hits,
+                         "다중 필드 커밋이 항목 대입으로 회귀했다 — copy-and-swap 이 아니다")
         self.assertEqual(in_flight, 0, "부분 커밋이 gauge 를 누수시켰다 (reset 영구 차단)")
 
 
@@ -371,19 +406,22 @@ class TestResetRefusesWhileQueued(LedgerTestCase):
     async def test_pre_ledger_window_still_blocks_reset(self):
         """⛔ 결정적 재현: worker 를 start 장부 **직전**에 세운다(in_flight=0 · queued=1)."""
         gate, reached = threading.Event(), threading.Event()
-        original = auth_executor._note_worker_started
+        original = auth_executor._ws_lane._note_worker_started
 
         def hold(receipt):
             reached.set()
             gate.wait(5)
             original(receipt)
 
-        with patch.object(auth_executor, "_note_submit_succeeded",
-                          side_effect=RuntimeError("장부 오염 주입")):
+        with patch.object(auth_executor._ws_lane, "_note_submit_succeeded",
+                          side_effect=RuntimeError("장부 오염 주입")) as _reach7:
             await auth_executor.run_in_auth_executor(lambda: 1)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach7.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach7"
         self.assertGreater(self._m()["ledger_errors_total"], 0, "오염이 안 만들어졌다")
 
-        with patch.object(auth_executor, "_note_worker_started", side_effect=hold):
+        with patch.object(auth_executor._ws_lane, "_note_worker_started", side_effect=hold) as _reach8:
             task = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: 1))
             try:
                 await asyncio.to_thread(reached.wait, 5)
@@ -395,6 +433,9 @@ class TestResetRefusesWhileQueued(LedgerTestCase):
             finally:
                 gate.set()
                 await task
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach8.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach8"
         self.assertEqual(self._m()["queued_now"], 0, "재개 후 장부가 음수/불일치가 됐다")
 
     async def test_reset_refuses_between_begin_shutdown_and_drain(self):
@@ -405,21 +446,21 @@ class TestResetRefusesWhileQueued(LedgerTestCase):
         ⚠️ 동기 `shutdown_auth_executor()`(두 단계를 한 번에) 만 쓰는 테스트는 이 공백을 밟지
            못한다 — 그래서 **begin 을 직접** 부른다."""
         gate, reached = threading.Event(), threading.Event()
-        original = auth_executor._note_worker_started
+        original = auth_executor._ws_lane._note_worker_started
 
         def hold(receipt):
             reached.set()
             gate.wait(5)
             original(receipt)
 
-        with patch.object(auth_executor, "_note_worker_started", side_effect=hold):
+        with patch.object(auth_executor._ws_lane, "_note_worker_started", side_effect=hold) as _reach9:
             task = asyncio.create_task(auth_executor.run_in_auth_executor(lambda: 1))
             closing = None
             try:
                 await asyncio.to_thread(reached.wait, 5)
                 self.assertEqual(self._m()["queued_now"], 1)
                 closing = auth_executor.begin_auth_executor_shutdown()
-                self.assertIsNone(auth_executor._executor, "begin 이 _executor 를 비우지 않았다")
+                self.assertIsNone(auth_executor._ws_lane._executor, "begin 이 _executor 를 비우지 않았다")
                 with self.assertRaises(auth_executor.AuthExecutorMetricsBusy):
                     auth_executor.reset_auth_executor_metrics()
             finally:
@@ -427,6 +468,9 @@ class TestResetRefusesWhileQueued(LedgerTestCase):
                 await task
                 if closing is not None:
                     closing.shutdown(wait=True)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach9.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach9"
         self.assertEqual(self._m()["queued_now"], 0, "재개 후 장부가 음수/불일치가 됐다")
         auth_executor.start_auth_executor(2)          # teardown 이 다시 내린다
 
@@ -435,9 +479,12 @@ class TestResetRefusesWhileQueued(LedgerTestCase):
 
         제출 성공 뒤 부기 실패는 `ledger_errors_total` 을 올리지만 균형은 깨지 않는다
         (submitted·started 가 짝을 맞춘다) → reset 은 허용되고 오류 카운터도 새 창을 위해 0."""
-        with patch.object(auth_executor, "_note_submit_succeeded",
-                          side_effect=RuntimeError("부기 실패")):
+        with patch.object(auth_executor._ws_lane, "_note_submit_succeeded",
+                          side_effect=RuntimeError("부기 실패")) as _reach10:
             await auth_executor.run_in_auth_executor(lambda: 1)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach10.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach10"
         m = self._m()
         self.assertEqual(m["ledger_errors_total"], 1)
         self.assertEqual((m["in_flight"], m["queued_now"]), (0, 0), "이 오류는 균형을 깨지 않는다")
@@ -453,10 +500,13 @@ class TestResetRefusesWhileQueued(LedgerTestCase):
             gate.wait(5)
             return 1
 
-        with patch.object(auth_executor, "_note_submit_succeeded",
-                          side_effect=RuntimeError("장부 이상 주입")):
+        with patch.object(auth_executor._ws_lane, "_note_submit_succeeded",
+                          side_effect=RuntimeError("장부 이상 주입")) as _reach11:
             task = asyncio.create_task(auth_executor.run_in_auth_executor(blocked))
             await asyncio.to_thread(entered.wait, 5)
+            # ⛔ **주입 도달 양성대조** — patch 가 lane 메서드에 닿지 않으면 이 테스트는
+            #    아무것도 주입하지 않은 채 초록이 된다(모듈 심볼만 갈아끼운 형태).
+            assert _reach11.call_count > 0, "주입이 lane 메서드에 닿지 않았다: _reach11"
         try:
             self.assertGreater(self._m()["ledger_errors_total"], 0)
             with self.assertRaises(auth_executor.AuthExecutorMetricsBusy):
@@ -474,20 +524,26 @@ class TestHelperAtomicity(unittest.TestCase):
     def test_worker_start_note_commits_exactly_once(self):
         import ast
         import inspect
-        fn = ast.parse(inspect.getsource(auth_executor._note_worker_started))
+        import textwrap
+        # ⛔ dedent 없이는 IndentationError. 접두사도 `self._metrics[` 로 바꾸지 않으면
+        #    **존재할 수 없는 패턴**을 찾게 되어 단언이 영원히 공허해진다.
+        fn = ast.parse(textwrap.dedent(
+            inspect.getsource(auth_executor._ws_lane._note_worker_started)))
         subscript_writes = [ast.unparse(t) for node in ast.walk(fn)
                             if isinstance(node, (ast.Assign, ast.AugAssign))
                             for t in ([node.target] if isinstance(node, ast.AugAssign) else node.targets)
-                            if isinstance(t, ast.Subscript) and ast.unparse(t).startswith("_metrics[")]
+                            if isinstance(t, ast.Subscript) and ast.unparse(t).startswith("self._metrics[")]
         self.assertEqual(subscript_writes, [],
                          f"_metrics 직접 항목 대입은 부분 커밋을 만든다: {subscript_writes}")
         # ⛔ `_metrics.update(...)` 는 기존 dict 를 **제자리** 갱신한다 — copy-and-swap 이 아니고
         #    부분 실패가 가능하다(codex 재현: update 실패 → queued=1 고착).
         updates = [ast.unparse(n) for n in ast.walk(fn) if isinstance(n, ast.Call)
-                   and ast.unparse(n).startswith("_metrics.update(")]
+                   and ast.unparse(n).startswith("self._metrics.update(")]
         self.assertEqual(updates, [], f"제자리 갱신은 부분 커밋을 만든다: {updates}")
         rebinds = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                   and any(isinstance(x, ast.Name) and x.id == "_metrics" for x in n.targets)]
+                   and any(isinstance(x, ast.Attribute) and x.attr == "_metrics"
+                           and isinstance(x.value, ast.Name) and x.value.id == "self"
+                           for x in n.targets)]
         self.assertEqual(len(rebinds), 1, "커밋은 **단일 리바인딩**이어야 한다")
 
 
@@ -510,15 +566,15 @@ class TestResetContract(LedgerTestCase):
         ⛔ 이것은 "장래에 가드가 완화돼도 안전하다"는 뜻이 **아니다** — `_reset_locked` 는 활성
         큐에 안전하지 않다(대기분이 시작되면 `started_total` 만 올라 `queued_now` 가 음수가 된다).
         가드는 정확성의 **필수조건**이다."""
-        with auth_executor._metrics_lock:
-            auth_executor._metrics["in_flight"] = 3
-            auth_executor._metrics["submitted_total"] = 5
-            auth_executor._metrics["started_total"] = 3
-            auth_executor._reset_locked()
-            in_flight = auth_executor._metrics["in_flight"]
-            in_flight_max = auth_executor._metrics["in_flight_max"]
-            queued_max = auth_executor._metrics["queued_observed_max"]
-            queued_now = auth_executor._queued_locked()
+        with auth_executor._ws_lane._metrics_lock:
+            auth_executor._ws_lane._metrics["in_flight"] = 3
+            auth_executor._ws_lane._metrics["submitted_total"] = 5
+            auth_executor._ws_lane._metrics["started_total"] = 3
+            auth_executor._ws_lane._reset_locked()
+            in_flight = auth_executor._ws_lane._metrics["in_flight"]
+            in_flight_max = auth_executor._ws_lane._metrics["in_flight_max"]
+            queued_max = auth_executor._ws_lane._metrics["queued_observed_max"]
+            queued_now = auth_executor._ws_lane._queued_locked()
         self.assertEqual(in_flight, 3, "살아 있는 worker 의 gauge 를 0 으로 밀면 -1 이 음수로 샌다")
         self.assertGreaterEqual(in_flight_max, in_flight)
         # ⚠️ `queued_max >= queued_now` 는 여기서 **vacuous** 하다 — `_reset_locked` 가 카운터를

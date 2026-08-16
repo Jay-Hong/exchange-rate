@@ -137,9 +137,12 @@ class TestIdleGaugesAreZero(ExposureTestCase):
 
     async def test_fresh_process_reads_all_zero(self):
         """[S7-④] **새 프로세스**라면 counter 도 0 이다 — 공유 스위트에선 hermetic 하게 시험한다."""
-        live = app_main.auth_executor._metrics
+        # ⛔ 상태는 이제 **lane 인스턴스** 소유다(S1a). 모듈 심볼을 patch 하면 lane 이 안 보므로
+        #    주입이 공허해지고, 이 테스트는 "새 프로세스"를 시험하지 않은 채 초록이 된다.
+        lane = app_main.auth_executor._ws_lane
+        live = lane._metrics
         blank = {k: ({} if isinstance(v, dict) else type(v)()) for k, v in live.items()}
-        with patch.object(app_main.auth_executor, "_metrics", blank):
+        with patch.object(lane, "_metrics", blank):
             mirror = (await self._metrics())["ws_auth_executor"]
         for key in ("in_flight", "queued_now", "count", "submitted_total", "ledger_errors_total"):
             self.assertEqual(mirror[key], 0, f"새 프로세스인데 {key} 가 0 이 아니다")
