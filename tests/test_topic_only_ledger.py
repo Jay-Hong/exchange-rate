@@ -44,6 +44,7 @@ MANIFEST = REPO / "spec" / "topic-only-migration-manifest.json"
 LEDGER = REPO / "spec" / "topic-only-implementation-ledger.json"
 FULL_WORKFLOW = REPO / ".github" / "workflows" / "tests.yml"
 DOC_WORKFLOW = REPO / ".github" / "workflows" / "topic-only-docs.yml"
+TOPIC_ONLY_LOCK = REPO / "spec" / "topic-only.lock.json"
 DOC_GATE_TESTS = {
     "test_adr041_grounds.py",
     "test_document_citations.py",
@@ -1025,6 +1026,27 @@ def test_transient_pytest_collection_failure_is_not_cached(monkeypatch):
     assert attempts == 2
 
 
+def _assert_workflow_ios_checkout_refs(
+    workflows: tuple[tuple[str, str], ...], pinned_ios: str
+) -> None:
+    """Bind each named iOS checkout block to the lock's full commit independently."""
+    assert re.fullmatch(r"[0-9a-f]{40}", pinned_ios)
+    checkout_pattern = re.compile(
+        r"^\s{6}- name: Checkout pinned iOS provenance repository\s*$"
+        r"(?P<body>.*?)(?=^\s{6}- |\Z)",
+        re.M | re.S,
+    )
+    for workflow_name, workflow in workflows:
+        checkouts = list(checkout_pattern.finditer(workflow))
+        assert len(checkouts) == 1, f"{workflow_name}: pinned iOS checkout must occur once"
+        checkout_body = checkouts[0].group("body")
+        assert re.search(r"^\s+fetch-depth:\s*0\s*$", checkout_body, re.M)
+        refs = re.findall(r"^\s+ref:\s*([0-9a-f]{40})\s*$", checkout_body, re.M)
+        assert refs == [pinned_ios], (
+            f"{workflow_name}: iOS checkout ref must equal lock.pinned_commit.ios"
+        )
+
+
 def test_ci_skips_full_suite_but_runs_topic_gate_for_markdown_changes():
     full_workflow = FULL_WORKFLOW.read_text()
     doc_workflow = DOC_WORKFLOW.read_text()
@@ -1032,16 +1054,67 @@ def test_ci_skips_full_suite_but_runs_topic_gate_for_markdown_changes():
     assert doc_workflow.count("paths:\n      - '**.md'") == 2
     assert "paths-ignore" not in doc_workflow
 
-    ios_checkout = re.search(
-        r"- name: Checkout pinned iOS provenance repository(?P<body>.*?)(?=\n\s+- uses: actions/setup-python)",
-        doc_workflow,
-        re.S,
-    )
-    assert ios_checkout is not None
-    assert re.search(r"^\s+fetch-depth:\s*0\s*$", ios_checkout.group("body"), re.M)
+    lock = json.loads(TOPIC_ONLY_LOCK.read_text())
+    pinned_ios = lock["pinned_commit"]["ios"]
+
+    # Both workflows independently checkout the private iOS provenance tree. The lock is
+    # the sole source of truth; changing one or both copied refs must fail this gate.
+    _assert_workflow_ios_checkout_refs((
+        ("tests", full_workflow),
+        ("topic-only-docs", doc_workflow),
+    ), pinned_ios)
+
     assert "python scripts/topic_migration_manifest.py preflight" in doc_workflow
     listed = set(re.findall(r"tests/(test_[a-z_0-9]+\.py)", doc_workflow))
     assert DOC_GATE_TESTS <= listed
+
+
+@pytest.mark.parametrize("drifted_workflows", [("tests",), ("topic-only-docs",),
+                                                ("tests", "topic-only-docs")])
+def test_ci_ios_checkout_ref_gate_rejects_each_drift(drifted_workflows):
+    """Positive controls: either copied ref, and both together, must make the gate red."""
+    lock = json.loads(TOPIC_ONLY_LOCK.read_text())
+    pinned_ios = lock["pinned_commit"]["ios"]
+    drifted_ios = "0" * 40 if pinned_ios != "0" * 40 else "1" * 40
+    workflows = []
+    for name, path in (("tests", FULL_WORKFLOW), ("topic-only-docs", DOC_WORKFLOW)):
+        text = path.read_text()
+        if name in drifted_workflows:
+            assert text.count(pinned_ios) == 1
+            text = text.replace(pinned_ios, drifted_ios)
+        workflows.append((name, text))
+
+    with pytest.raises(AssertionError, match="must equal lock.pinned_commit.ios"):
+        _assert_workflow_ios_checkout_refs(tuple(workflows), pinned_ios)
+
+
+def test_ios_checkout_ref_gate_stays_wired_to_the_real_workflow_files():
+    """⛔ 위 대조군은 helper 를 **직접** 호출한다 — 실제 파일 배선이 사라져도 셋 다 초록이다
+    (실측: 게이트에서 helper 호출 한 덩어리를 지우자 대조군 rc=0, 게이트 rc=0). 대조군은
+    helper 의 판정력을 증명할 뿐 그것이 **연결돼 있다**는 것은 증명하지 못한다. 그래서
+    배선 자체를 구조로 잠근다 — helper 를 정확히 한 번, 두 워크플로 텍스트와 lock 에서
+    읽은 pin 으로 호출해야 한다."""
+    import ast
+    import inspect
+
+    gate = test_ci_skips_full_suite_but_runs_topic_gate_for_markdown_changes
+    tree = ast.parse(inspect.getsource(gate))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "_assert_workflow_ios_checkout_refs"
+    ]
+    assert len(calls) == 1, "실제-파일 게이트가 결속 helper 를 정확히 한 번 호출해야 한다"
+    rendered = ast.unparse(calls[0])
+    for token in ("full_workflow", "doc_workflow", "pinned_ios"):
+        assert token in rendered, f"helper 호출이 {token} 를 넘기지 않는다: {rendered}"
+
+    # 인자가 **실제 파일과 lock** 에서 와야 한다. 리터럴로 바꿔치기하면 helper 는 통과하고
+    # 워크플로 drift 는 영원히 안 잡힌다.
+    source = ast.unparse(tree)
+    for token in ('FULL_WORKFLOW.read_text()', 'DOC_WORKFLOW.read_text()',
+                  'TOPIC_ONLY_LOCK.read_text()'):
+        assert token in source, f"게이트가 {token} 를 읽지 않는다"
 
 
 def _modules_with_markdown_literals() -> set[str]:
