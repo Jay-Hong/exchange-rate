@@ -43,7 +43,9 @@
           "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
           "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion",
           "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
-          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속"
+          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속",
+          "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
+          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -69,7 +71,9 @@
           "S6 capture-schema hardening: the arrival ring constants pinned to a ten-second by sixty-bucket identity in ops/capture_topic_auth_rollout.py with a dedicated _arrival_schema_errors validation and an empty-ring consistency check, bound to the production defaults so that a one-sided change invalidates every snapshot instead of passing silently",
           "S7 hardening at bca1bd8: the executor fallback keeping topic_dispatcher_enabled because the flag is runtime context independent of the metrics it accompanies, the failure-isolation tests raised from block presence to sentinel value preservation, and the three added mutants for cross-block contamination and fallback flag removal",
           "C3 iOS checkout ref binding: the per-workflow extraction of each named iOS checkout block bounded by the next sibling step, the assertion that its ref equals lock.pinned_commit.ios exactly once, and the three synthetic drift controls for tests-only, docs-only and both",
-          "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant"
+          "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant",
+          "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
+          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속"
         ]
       },
       {
@@ -102,7 +106,9 @@
           "S6 capture-schema hardening: the arrival ring constants pinned to a ten-second by sixty-bucket identity in ops/capture_topic_auth_rollout.py with a dedicated _arrival_schema_errors validation and an empty-ring consistency check, bound to the production defaults so that a one-sided change invalidates every snapshot instead of passing silently",
           "S7 hardening at bca1bd8: the executor fallback keeping topic_dispatcher_enabled because the flag is runtime context independent of the metrics it accompanies, the failure-isolation tests raised from block presence to sentinel value preservation, and the three added mutants for cross-block contamination and fallback flag removal",
           "C3 iOS checkout ref binding: the per-workflow extraction of each named iOS checkout block bounded by the next sibling step, the assertion that its ref equals lock.pinned_commit.ios exactly once, and the three synthetic drift controls for tests-only, docs-only and both",
-          "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant"
+          "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant",
+          "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
+          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -137,7 +143,9 @@
           "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
           "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion",
           "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
-          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속"
+          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속",
+          "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
+          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ]
       }
     ],
@@ -178,7 +186,9 @@
           "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
           "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion",
           "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
-          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속"
+          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속",
+          "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
+          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ],
         "result": "pass"
       },
@@ -209,7 +219,9 @@
           "S6 capture-schema hardening: the arrival ring constants pinned to a ten-second by sixty-bucket identity in ops/capture_topic_auth_rollout.py with a dedicated _arrival_schema_errors validation and an empty-ring consistency check, bound to the production defaults so that a one-sided change invalidates every snapshot instead of passing silently",
           "S7 hardening at bca1bd8: the executor fallback keeping topic_dispatcher_enabled because the flag is runtime context independent of the metrics it accompanies, the failure-isolation tests raised from block presence to sentinel value preservation, and the three added mutants for cross-block contamination and fallback flag removal",
           "C3 iOS checkout ref binding: the per-workflow extraction of each named iOS checkout block bounded by the next sibling step, the assertion that its ref equals lock.pinned_commit.ios exactly once, and the three synthetic drift controls for tests-only, docs-only and both",
-          "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant"
+          "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant",
+          "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
+          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속"
         ],
         "result": "pass"
       }
@@ -223,21 +235,21 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "506cc7c3c85e239f72201a09191a17a51703736aa124c4f7ab0b1c6b93a84b72",
-    "baseline_sha256": "3be2272838f2acf80b113ed65d0d0a2f25a20f01027c949e7a807f86425eac1c",
-    "lock_sha256": "c226caa7d9024d04ba08a2d084e1fc37a85acf52084742ba3cf02937b5a72507",
-    "server_commit": "76576612cd150d5fa4771b8c2b4e3725ff21b104",
+    "manifest_sha256": "70cf15b17e3ecabe7e25658587047443277a87894f68936fb0fb7c349190b7de",
+    "baseline_sha256": "52501e595e0e9c453a1d1080fd412a98266cfb12568aca4add308015f83cce3d",
+    "lock_sha256": "ff3aae4e065adce5f034167caf1c849e5f863c20136552cba828cba957600439",
+    "server_commit": "5c9b932edfaa4b2fb2a6e4fe1db04cb13ba57910",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "e0ab95a995641eb52ffd93c9bb1110cdb6876d5f71d6d043c4fbacb7623e74dc",
-    "CLIENT": "ea334a2a5afd3561d68a370b65acc805614ec27fe7c9a2dcc42332b3c0dcafc7",
-    "CUT": "de4902117226e769f06d003bae35018c8dc73d51c550f6423cd2957d265fea03",
-    "HAND": "82a93ccdda83d6c6bcbcc81f64e7d231d98345eaaece6e6b0b3d3dafeb3e64d1",
-    "HEALTH": "27f1b76c43f67d10d8fbdca2c20801aac935473bcb47f672c9806546676bf0e6",
-    "LOAD": "854bc121c651324d6380d325ae17a25ddd9bc1c6c3462aca5091c61559292c02"
+    "ADR": "06ef04af04204bca33e723f4b9164c54f0fefda16d108eb00cc8a262dfe8aef8",
+    "CLIENT": "011214eb182579402d85382a6a743347245bff4bf1725c229ad1e6fc1f5a25c5",
+    "CUT": "14d51878e51aea51391a514049a66fe865e96cdfc07f2ef69978bdb3dc1c81a6",
+    "HAND": "0eea63fc304f50593842105281be99b5be962e09f94bc6da0ab94d39483bdb90",
+    "HEALTH": "e862ff7968ecc60361758ba9a7d4e399bd607bfd3fce64a2ba7b4d831cd75288",
+    "LOAD": "f12b4ac33880f8ff9ceb6515435d25f58c75bbb6ecf11c75959130b8bf9096a1"
   },
-  "claim_ledger_sha256": "6306c1933d9fc017643cf7b6110486fcdb0955f143dd1e20874ccae50122f462",
+  "claim_ledger_sha256": "059de8a7d4d6c80216eb632ea6a234d2b68447675e025dfe66d631680cd26c65",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
@@ -726,6 +738,24 @@
       ],
       "issue": "The SEM-037 gate shipped with a battery that reintroduced the duplication it exists to forbid. scripts/mutation_c3_ios_pin_gate.py hardcoded the iOS pin, so c9b3572 carried fourteen copies while the SEM-037 disposition described IOS_SHA as the thirteenth and only deliberate exception — the disposition was momentarily untrue as written. The battery's drift value was also a fixed literal, so a pin that happened to equal it would have turned the three real-file mutants into no-ops reported as SURVIVED, making the battery fail without exercising the intended mutations. The 896e46d follow-up commit message repeated this with the opposite verdict, claiming those no-ops would still be reported as KILLED.",
       "disposition": "The battery now reads the pin from spec/topic-only.lock.json and derives the drift value from it so the two can never coincide; the repository is back to thirteen copies and the SEM-037 disposition is true as written. Re-run: eight of eight killed, none survived, none invalid, restore hashes identical. A per-file occurrence check was also added to the both-drift mutant, but it is currently unreachable: the three drift controls already assert exactly one occurrence per workflow file, so a duplicate makes the baseline red and the battery aborts before any mutant runs — measured by appending a second copy to tests.yml, which produced rc=2 with no mutant lines. It is redundant safety, not an exercised branch. The pushed 896e46d message remains immutable history; this journal correction records the actual no-op classification as SURVIVED rather than rewriting published history."
+    },
+    {
+      "id": "SEM-039",
+      "severity": "medium",
+      "status": "fixed",
+      "locations": [
+        "GRAPH_API_V2_CONTRACT.md",
+        "FREE_TIER_ACCESS_MODEL_PLAN.md",
+        "USDT_TOPIC_MIGRATION_PLAN.md",
+        "USDT_WS_DESIGN_PLAN.md",
+        "PR_D_RECOVERY_SPEC.md",
+        "P1_COMMON_BASE_DESIGN.md",
+        "spec/topic-only-semantic-review.json/SEM-034",
+        "spec/topic-only-semantic-review.json/SEM-035",
+        "spec/topic-only-implementation-ledger.json"
+      ],
+      "issue": "The S1a′ C2 re-baseline first scoped its locator re-derivation to the six gated documents plus the hash chain, which is the same gate-outside blind spot SEM-034 recorded. Three separate errors followed from treating the shift as a uniform mechanical rewrite. A blanket regular expression moved app/main.py:2718 inside the SEM-035 finding text, even though an earlier C2 commit had explicitly frozen that coordinate as a record of a past defect, and the baseline tree already showed it pointing at build_period_exchange_series rather than the cache store it narrates. The implementation ledger kept the superseded manifest hash because the re-derivation walked the claim ledger and the semantic review but not that file. A repository-wide scan then found twenty-one candidate coordinates past the changed hunk rather than the eight the reviewer had reported, and the reviewer confirmed its own list was an omission reached by tracing only the three documents named in SEM-034 rather than by classifying every candidate.",
+      "disposition": "Every candidate was classified by comparing what the surrounding prose claims against what the cited range actually contains in the old pinned tree, rather than by trusting either list. Eight unique live locators matched their prose and were advanced, giving eleven occurrences once markdown label and anchor forms are counted separately, on top of the thirty-three occurrences inside the hash chain and the gated documents. Seven unique locators were already inconsistent with their prose at the old pin, so they are not drift produced by this C1; re-sealing them at the new pin would preserve a wrong target while falsely signalling that this change had corrected them, and they are therefore left untouched and separated as pre-existing debt for a follow-up C4 that must re-audit the sibling coordinates of the same claim clusters as well. This finding closes the misclassification and the scope claim, not those seven citations, and this verdict asserts nothing about their present accuracy. The SEM-035 coordinate was restored and re-frozen, and the implementation ledger was rebound to the current manifest. A repository-wide live versus historical locator gate, which would require an explicit marking convention such as the full forty-character blob form already used in finding locations, is deliberately deferred to its own slice rather than widened into this re-baseline. This finding text itself now carries the same frozen coordinate a second time, so it is subject to the identical rule: a later re-baseline must not advance app/main.py:2718 here either, and that duplication is itself part of the argument for the deferred marking convention."
     }
   ],
   "residual_limits": [

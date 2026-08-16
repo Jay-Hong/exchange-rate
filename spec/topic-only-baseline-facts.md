@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1216` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1221` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
 
 ## B. publish 의미론
 
@@ -76,8 +76,8 @@
 - **C2 [코드]** `app/topic_initial_snapshot.py:97` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3082` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3118` `verify_firebase_token(request)` → `app/main.py:3121`
+- **C3 [코드]** `exchange-rate/app/main.py:3087` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3123` `verify_firebase_token(request)` → `app/main.py:3126`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -119,7 +119,7 @@
 - **E2 [코드]** `app/topic_initial_snapshot.py:342-354` —
   `for topic in topics: ... payload = await build_snapshot_observed(topic)`. 그 공유 래퍼가
   `app/topic_initial_snapshot.py:214-234` 에서 `await asyncio.to_thread(subscribe_load.timed_call,
-  …, _build_snapshot_sync, topic)` 한다 — **REST twin 도 같은 래퍼를 쓴다**(`app/main.py:3136`).
+  …, _build_snapshot_sync, topic)` 한다 — **REST twin 도 같은 래퍼를 쓴다**(`app/main.py:3141`).
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
 - **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
