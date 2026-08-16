@@ -6,13 +6,15 @@
 ⛔ ast.parse 로 구문 파괴 변이를 INVALID 로 걸러낸다(구문 오류는 판별력이 아니다).
 ⛔ try/finally + sha256 로 원본을 복원한다.
 """
-import ast, hashlib, pathlib, subprocess, sys
+import ast, hashlib, json, pathlib, subprocess, sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TEST = REPO / "tests" / "test_topic_only_ledger.py"
 WF_TESTS = REPO / ".github" / "workflows" / "tests.yml"
 WF_DOCS = REPO / ".github" / "workflows" / "topic-only-docs.yml"
-PIN = "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
+LOCK = REPO / "spec" / "topic-only.lock.json"
+PIN = json.loads(LOCK.read_text())["pinned_commit"]["ios"]
+DRIFT_PIN = "0" * 40 if PIN != "0" * 40 else "1" * 40
 SEL = "ci_skips_full_suite or ci_ios_checkout or stays_wired"
 
 CALL = """    _assert_workflow_ios_checkout_refs((
@@ -34,8 +36,8 @@ MUTANTS = [
      "    doc_workflow = DOC_WORKFLOW.read_text()\n",
      "def test_ci_skips_full_suite_but_runs_topic_gate_for_markdown_changes():\n"
      "    full_workflow = ''\n    doc_workflow = ''\n"),
-    ("실제 tests.yml ref drift", WF_TESTS, PIN, "f" * 40),
-    ("실제 topic-only-docs.yml ref drift", WF_DOCS, PIN, "f" * 40),
+    ("실제 tests.yml ref drift", WF_TESTS, PIN, DRIFT_PIN),
+    ("실제 topic-only-docs.yml ref drift", WF_DOCS, PIN, DRIFT_PIN),
     ("실제 파일 둘 다 drift", None, None, None),   # 아래에서 특수 처리
 ]
 
@@ -57,7 +59,17 @@ def main() -> int:
         for name, target, old, new in MUTANTS:
             if target is None:      # 둘 다 drift
                 for f in (WF_TESTS, WF_DOCS):
-                    f.write_text(f.read_text().replace(PIN, "f" * 40))
+                    text = f.read_text()
+                    if text.count(PIN) != 1:
+                        print(f"INVALID  {name}  ← {f.name} pin 앵커 {text.count(PIN)}회")
+                        invalid += 1
+                        break
+                    f.write_text(text.replace(PIN, DRIFT_PIN))
+                else:
+                    text = None
+                if text is not None:
+                    for f in files: f.write_bytes(orig[f])
+                    continue
             else:
                 t = target.read_text()
                 if t.count(old) != 1:
