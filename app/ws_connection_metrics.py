@@ -60,10 +60,17 @@ class HandshakeBuckets:
         self._bucket_seconds = bucket_seconds
         self._buckets_kept = buckets_kept
         self._counts: dict[int, int] = {}
+        # ⛔ **eviction 과 무관한** 수명 전체 피크. ring 은 600초 rolling 인데 캡처는 24h 간격이라
+        #    이 필드가 없으면 관측 창의 대부분이 evict 된다 — ring 채택의 전제다.
+        #    ⚠️ 기존 `max_in_bucket`(보존 버킷 중 최댓값 = 의도된 rolling gauge)과 **별개**다.
+        self._peak_since_start = 0
 
     def record(self, now: float | None = None) -> None:
         index = int((time.monotonic() if now is None else now) // self._bucket_seconds)
         self._counts[index] = self._counts.get(index, 0) + 1
+        # ⚠️ **record 직후** 갱신한다 — snapshot 에서 하면 snapshot 이 안 불린 창의 피크를 놓친다.
+        if self._counts[index] > self._peak_since_start:
+            self._peak_since_start = self._counts[index]
         self._evict(index)
 
     def _evict(self, newest: int) -> None:
@@ -80,6 +87,8 @@ class HandshakeBuckets:
             "buckets_present": len(self._counts),
             "max_in_bucket": max(self._counts.values(), default=0),
             "current_bucket": self._counts.get(index, 0),
+            # ⛔ additive — 기존 5키의 값·의미는 그대로다(S6-5).
+            "peak_in_bucket_since_start": self._peak_since_start,
         }
 
 

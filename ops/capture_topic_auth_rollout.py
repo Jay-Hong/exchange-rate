@@ -49,6 +49,25 @@ TOKEN_MAP_FIELDS = (
     "unverified_token_bearing_per_topic_attempts",
     "unverified_token_bearing_per_topic_first_seen_connections",
 )
+ARRIVAL_FIELDS = {
+    "anonymous_subscribe_arrival": "anonymous_subscribe_attempts_total",
+    "unverified_token_bearing_subscribe_arrival": (
+        "unverified_token_bearing_subscribe_attempts_total"
+    ),
+}
+ARRIVAL_KEYS = frozenset({
+    "bucket_seconds",
+    "buckets_kept",
+    "buckets_present",
+    "max_in_bucket",
+    "current_bucket",
+    "peak_in_bucket_since_start",
+})
+ARRIVAL_BUCKET_SECONDS = 10
+ARRIVAL_BUCKETS_KEPT = 60
+EPOCH_HIGH_WATER_FIELD = (
+    "unverified_token_bearing_attempts_on_one_observation_epoch_max"
+)
 
 # The password is read by the child from its own environment and never appears
 # in docker/curl argv, host logs, metadata, or the captured response.
@@ -199,6 +218,68 @@ def _safe_count(rollout: Mapping[str, object], key: str) -> int | None:
     return value
 
 
+def _arrival_schema_errors(rollout: Mapping[str, object]) -> list[str]:
+    errors = []
+    for field, total_field in ARRIVAL_FIELDS.items():
+        arrival = rollout.get(field)
+        if not isinstance(arrival, dict):
+            errors.append(f"{field} must be an object")
+            continue
+        if set(arrival) != ARRIVAL_KEYS:
+            errors.append(f"{field} must have the fixed HandshakeBuckets schema")
+            continue
+
+        values = {key: _safe_count(arrival, key) for key in ARRIVAL_KEYS}
+        invalid = sorted(key for key, value in values.items() if value is None)
+        if invalid:
+            errors.append(
+                f"{field} fields must be non-negative integers: {', '.join(invalid)}"
+            )
+            continue
+        if (
+            values["bucket_seconds"] != ARRIVAL_BUCKET_SECONDS
+            or values["buckets_kept"] != ARRIVAL_BUCKETS_KEPT
+        ):
+            errors.append(
+                f"{field} bucket identity must be "
+                f"{ARRIVAL_BUCKET_SECONDS}s x {ARRIVAL_BUCKETS_KEPT}"
+            )
+        if values["buckets_present"] > values["buckets_kept"]:
+            errors.append(f"{field} buckets_present must not exceed buckets_kept")
+        if (values["buckets_present"] == 0) != (values["max_in_bucket"] == 0):
+            errors.append(
+                f"{field} buckets_present and max_in_bucket emptiness must agree"
+            )
+        if not (
+            values["current_bucket"]
+            <= values["max_in_bucket"]
+            <= values["peak_in_bucket_since_start"]
+        ):
+            errors.append(
+                f"{field} must satisfy current_bucket <= max_in_bucket "
+                "<= peak_in_bucket_since_start"
+            )
+
+        total = _safe_count(rollout, total_field)
+        if total is None and total_field not in TOKEN_COUNT_FIELDS:
+            errors.append(f"{total_field} must be a non-negative integer")
+        if total is not None and values["peak_in_bucket_since_start"] > total:
+            errors.append(f"{field} peak must not exceed {total_field}")
+
+    high_water = _safe_count(rollout, EPOCH_HIGH_WATER_FIELD)
+    if high_water is None:
+        errors.append(f"{EPOCH_HIGH_WATER_FIELD} must be a non-negative integer")
+    token_total = _safe_count(
+        rollout, "unverified_token_bearing_subscribe_attempts_total"
+    )
+    if high_water is not None and token_total is not None and high_water > token_total:
+        errors.append(
+            f"{EPOCH_HIGH_WATER_FIELD} must not exceed "
+            "unverified_token_bearing_subscribe_attempts_total"
+        )
+    return errors
+
+
 def _metric_schema_errors(rollout: Mapping[str, object]) -> list[str]:
     errors = []
     if not isinstance(rollout.get("stage"), str) or not rollout["stage"]:
@@ -230,6 +311,8 @@ def _metric_schema_errors(rollout: Mapping[str, object]) -> list[str]:
             errors.append(
                 "active token-bearing connections must not exceed subscribe attempts"
             )
+
+    errors.extend(_arrival_schema_errors(rollout))
 
     topics = rollout.get("unverified_token_bearing_final_stage_rc_candidate_topics")
     topics_valid = not (
@@ -513,6 +596,8 @@ def capture(
             "response_parse_error": parse_error,
             "required_token_count_fields": list(TOKEN_COUNT_FIELDS),
             "required_token_map_fields": list(TOKEN_MAP_FIELDS),
+            "required_arrival_fields": list(ARRIVAL_FIELDS),
+            "required_epoch_high_water_field": EPOCH_HIGH_WATER_FIELD,
         },
         "artifacts": {
             "raw_file": raw_name,

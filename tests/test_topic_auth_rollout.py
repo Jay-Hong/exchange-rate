@@ -12,6 +12,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from app import config
 from app.topic_auth_rollout import TopicAuthRollout, TopicAuthStage
@@ -222,6 +223,78 @@ class TestPolicy(unittest.TestCase):
 
 
 class TestMetrics(unittest.TestCase):
+    def test_arrival_rings_count_requests_not_duplicate_topics(self):
+        """[S6-2] topic 중복 수가 아니라 관측 함수 호출 1회를 기록한다."""
+        r, anonymous, token_bearing = _rollout(), _Sock(), _Sock()
+
+        # 10초 경계에서 record/snapshot 이 갈리면 current_bucket 이 0이 될 수 있다.
+        # 시계를 고정해 계수 규율만 결정적으로 시험한다.
+        with patch("time.monotonic", return_value=100.0):
+            r.observe_anonymous_subscribe(anonymous, [FX[0], FX[0], FX[0]])
+            r.observe_token_bearing_subscribe(token_bearing, [FX[0], FX[0], FX[0]])
+            snap = r.snapshot()
+
+        self.assertEqual(snap["anonymous_subscribe_attempts_total"], 1)
+        self.assertEqual(snap["unverified_token_bearing_subscribe_attempts_total"], 1)
+        for field in (
+            "anonymous_subscribe_arrival",
+            "unverified_token_bearing_subscribe_arrival",
+        ):
+            self.assertEqual(snap[field]["current_bucket"], 1)
+            self.assertEqual(snap[field]["max_in_bucket"], 1)
+            self.assertEqual(snap[field]["peak_in_bucket_since_start"], 1)
+
+    def test_arrival_rings_count_one_per_request_with_distinct_topics(self):
+        """[S6-2] **서로 다른** topic 여러 개를 담은 요청도 ring 을 **1** 만 올린다.
+
+        ⚠️ 중복 topic 만 시험하면 이 계약을 못 잠근다 — `requested` 가 **set** 이라 중복은
+           이미 1로 접히고, `record()` 를 topic 루프 **안**으로 옮기는 변이가 그대로 통과한다
+           (실측: 변이 생존). 구분되는 topic 3개여야 루프가 3회 돌아 판별력이 생긴다.
+        """
+        r, anonymous, token_bearing = _rollout(), _Sock(), _Sock()
+        distinct = [FX[0], FX[1], FX[2]]
+
+        with patch("time.monotonic", return_value=100.0):
+            r.observe_anonymous_subscribe(anonymous, distinct)
+            r.observe_token_bearing_subscribe(token_bearing, distinct)
+            snap = r.snapshot()
+
+        # per-topic 은 topic 수만큼 오른다(그건 계약이다) — ring 만 요청 단위여야 한다.
+        self.assertEqual(sum(snap["per_topic_attempts"].values()), len(distinct))
+        for field in (
+            "anonymous_subscribe_arrival",
+            "unverified_token_bearing_subscribe_arrival",
+        ):
+            self.assertEqual(snap[field]["current_bucket"], 1,
+                             f"{field}: topic 수만큼 부풀었다 — ring 은 요청 1건당 1회다")
+            self.assertEqual(snap[field]["peak_in_bucket_since_start"], 1)
+
+    def test_arrival_rings_share_one_snapshot_time(self):
+        """10초 경계를 걸쳐도 두 channel은 같은 current bucket 시각을 사용한다."""
+        class RecordingArrival:
+            def __init__(self):
+                self.observed_now = []
+
+            def snapshot(self, now=None):
+                self.observed_now.append(now)
+                return {"observed_now": now}
+
+        r = _rollout()
+        anonymous = RecordingArrival()
+        token_bearing = RecordingArrival()
+        r._anonymous_arrival = anonymous
+        r._tb_arrival = token_bearing
+
+        with patch("app.topic_auth_rollout.time.monotonic", side_effect=[9.999, 10.001]) as mono:
+            snap = r.snapshot()
+
+        mono.assert_called_once_with()
+        self.assertEqual(anonymous.observed_now, [9.999])
+        self.assertEqual(token_bearing.observed_now, [9.999])
+        self.assertEqual(snap["anonymous_subscribe_arrival"]["observed_now"], 9.999)
+        self.assertEqual(
+            snap["unverified_token_bearing_subscribe_arrival"]["observed_now"], 9.999)
+
     def test_duplicate_topics_in_one_request_count_once(self):
         r = _rollout()
         r.observe_anonymous_subscribe(_Sock(), ["fx:usd-krw", "fx:usd-krw"])
@@ -341,6 +414,24 @@ class TestTokenBearingObservation(unittest.TestCase):
         self.assertEqual(
             snap["unverified_token_bearing_per_topic_first_seen_connections"][FX[0]], 2)
 
+    def test_observation_epoch_high_water_resets_current_but_not_process_max(self):
+        """[S6-3] 3 -> disconnect -> 2 는 3, 같은 새 epoch +2 뒤에는 4다."""
+        r, sock = _rollout(), _Sock()
+        field = "unverified_token_bearing_attempts_on_one_observation_epoch_max"
+
+        for _ in range(3):
+            r.observe_token_bearing_subscribe(sock, [FX[0]])
+        self.assertEqual(r.snapshot()[field], 3)
+
+        r.disconnect(sock)
+        for _ in range(2):
+            r.observe_token_bearing_subscribe(sock, [FX[0]])
+        self.assertEqual(r.snapshot()[field], 3, "누적 카운터면 5가 된다")
+
+        for _ in range(2):
+            r.observe_token_bearing_subscribe(sock, [FX[0]])
+        self.assertEqual(r.snapshot()[field], 4, "새 epoch high-water가 갱신되지 않았다")
+
     def test_one_disconnect_clears_both_channels(self):
         r, sock = _rollout(), _Sock()
         r.observe_anonymous_subscribe(sock, [FX[0]])
@@ -440,6 +531,10 @@ class TestSnapshotSchema(unittest.TestCase):
         "unverified_token_bearing_per_topic_attempts",
         "unverified_token_bearing_per_topic_first_seen_connections",
         "unverified_token_bearing_active_connections_tracked",
+        # S6 도착 축 — ⚠️ 이 집합이 `assertEqual` 로 잠기므로 신규 키는 여기 없으면 red 다.
+        "anonymous_subscribe_arrival",
+        "unverified_token_bearing_subscribe_arrival",
+        "unverified_token_bearing_attempts_on_one_observation_epoch_max",
     }
 
     def test_schema_is_fixed(self):
@@ -455,6 +550,26 @@ class TestSnapshotSchema(unittest.TestCase):
             snapshot["unverified_token_bearing_final_stage_rc_candidate_topics"],
             sorted(RC_CANDIDATES),
         )
+
+    def test_s6_fields_start_at_zero_and_caveat_carries_lower_bound_semantics(self):
+        snapshot = _rollout().snapshot()
+        for field in ("anonymous_subscribe_arrival",
+                      "unverified_token_bearing_subscribe_arrival"):
+            self.assertEqual(
+                snapshot[field],
+                {
+                    "bucket_seconds": 10,
+                    "buckets_kept": 60,
+                    "buckets_present": 0,
+                    "max_in_bucket": 0,
+                    "current_bucket": 0,
+                    "peak_in_bucket_since_start": 0,
+                },
+            )
+        self.assertEqual(
+            snapshot["unverified_token_bearing_attempts_on_one_observation_epoch_max"], 0)
+        self.assertIn("관측 에포크당", snapshot["caveat"])
+        self.assertIn("작다고 반복이 없었다고 추론할 수 없다", snapshot["caveat"])
 
     def test_runtime_context_is_merged_by_the_endpoint_not_read_here(self):
         """⛔ 이 객체는 런타임 flag 를 읽지 않는다 — 그건 admin endpoint 가 합친다."""

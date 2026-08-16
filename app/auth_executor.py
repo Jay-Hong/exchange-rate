@@ -64,7 +64,34 @@ _metrics: dict[str, Any] = {
     #    과소 측정**한다(실측: caller 취소 뒤에도, worker 실제 종료 뒤에도 0.0 이었다).
     "caller_cancelled_while_running": 0,
     "by_outcome": {},
+    # ── S5: 제출/시작 장부 ──────────────────────────────────────────────────
+    # ⛔ **`submitted_total` 은 `submit()` 앞에서 올린다.** 뒤로 옮기면 빠른 worker 가 먼저
+    #    `started_total` 을 올려 `queued_now` 가 **음수**가 된다(변이 ①로 잠금).
+    # ⛔ 그래서 `submit()` 이 던지면 되돌리는 대신 `submit_failed_total` 로 상계한다 — 장부가
+    #    맞아야 `queued_now` 가 의미를 갖는다(변이 ②).
+    # ⚠️ 형제 계측 `default_executor_probe` 는 `submitted_count`/`started_count` 를 쓴다 —
+    #    접미사가 갈리므로 S7 노출에서 두 표면을 나란히 붙일 때 이름을 섞지 말 것.
+    "submitted_total": 0,
+    "submit_failed_total": 0,
+    "started_total": 0,
+    "in_flight": 0,            # gauge — worker 진입 +1 / `_record` 와 **같은 finally** 에서 -1 (변이 ③)
+    "in_flight_max": 0,
+    "queued_observed_max": 0,
+    # ⚠️ 제출 이후 계측 실패는 **삼키되 드러낸다**. 이 값이 0 이 아니면 `queued_now`/`count` 는
+    #    그만큼 어긋났을 수 있다 — 조용한 유실을 만들지 않기 위한 신호다.
+    "ledger_errors_total": 0,
 }
+
+
+class AuthExecutorMetricsBusy(RuntimeError):
+    """활성 작업(대기·실행 중)이 있는 동안의 reset 거부. gauge 를 0 으로 밀면 이후 감소가
+    음수로 새어 장부가 깨진다(변이 ⑧)."""
+
+
+def _queued_locked() -> int:
+    """⚠️ 호출자가 `_metrics_lock` 을 쥐고 있어야 한다."""
+    return (_metrics["submitted_total"] - _metrics["submit_failed_total"]
+            - _metrics["started_total"] - _metrics["never_started"])
 
 
 def auth_executor_metrics() -> dict[str, Any]:
@@ -73,22 +100,75 @@ def auth_executor_metrics() -> dict[str, Any]:
     with _metrics_lock:
         snapshot = dict(_metrics)
         snapshot["by_outcome"] = dict(_metrics["by_outcome"])
+        snapshot["queued_now"] = _queued_locked()   # 파생 — 저장하지 않는다(두 벌 장부 금지)
     snapshot["max_workers"] = _configured_workers
     return snapshot
 
 
 def reset_auth_executor_metrics() -> None:
+    """⛔ 활성 작업 중에는 **거부**한다 — 카운터를 0 으로 밀면 아직 돌고 있는 worker 의 `-1` 이
+    음수로 새어 `in_flight`/`queued_now` 가 영구히 어긋난다(변이 ⑧).
+
+    ⛔ **장부 오류가 있어도 거부는 유지한다.** 한때 `ledger_errors_total > 0` 이면 queue 를
+       무시했는데, start 장부 **직전**에 멈춰 있는 worker(in_flight=0 · queued=1)까지 무시해
+       reset 후 그 worker 가 `started_total` 만 올려 **`queued_now = -1`** 이 됐다(codex 재현).
+       영구 차단은 불편할 뿐이지만 음수 장부는 핵심 불변식을 깨뜨린다 — 나쁜 거래였다.
+    ⛔ **강제 경로를 두지 않는다.** 한때 `force_after_shutdown=True`(조건: `_executor is None`)
+       를 뒀는데, `begin_auth_executor_shutdown()` 이 **drain 전에** `_executor=None` 으로 만들고
+       실제 drain 은 뒤의 `shutdown(wait=True)` 에서 끝난다 — 운영 lifespan 도 두 단계를 나눠
+       쓴다(`main.py`). 그 사이에 강제 reset 하면 멈춰 있던 worker 가 재개해 `started_total` 만
+       올려 **`queued_now = -1`** 이 됐다(codex 재현). drain 완료를 증명하는 토큰을 새로 만드는
+       대신 **경로를 없앴다** — 이 계측은 in-memory 라 복구는 **프로세스 재시작**이면 충분하고,
+       reset 에는 운영 route 가 없다(진단·테스트 전용).
+    ⚠️ 정확한 계약은 **"불균형이 남아 있는 동안 열리지 않는다"** 이다 — "장부 오류가 있으면
+       열리지 않는다"가 **아니다**. `ledger_errors_total > 0` 이어도 `in_flight == 0` 이고
+       `queued_now == 0` 이면 reset 은 허용되고, 새 측정 창을 위해 오류 카운터도 0 으로 내려간다
+       (오류가 균형을 깨지 않은 경우가 실제로 있다 — 예: 제출 성공 뒤 부기 실패).
+       열리지 않는 것은 오직 **활성·불균형** 상태다."""
     with _metrics_lock:
-        _metrics.update(count=0, queue_wait_ms_sum=0.0, queue_wait_ms_max=0.0,
-                        execution_ms_sum=0.0, execution_ms_max=0.0, never_started=0,
-                        caller_cancelled_while_running=0)
-        _metrics["by_outcome"] = {}
+        # ⚠️ `!= 0` 이다 — 음수도 거부한다. 지켜지는 것은 **불균형** 신호이지 `ledger_errors_total`
+        #    이 아니다(균형이 맞으면 그 카운터는 reset 과 함께 0 으로 내려간다).
+        if _metrics["in_flight"] > 0 or _queued_locked() != 0:
+            raise AuthExecutorMetricsBusy(
+                f"활성 작업 중 reset 거부 (in_flight={_metrics['in_flight']}, "
+                f"queued={_queued_locked()}, ledger_errors={_metrics['ledger_errors_total']})")
+        _reset_locked()
 
 
-def _record(queue_wait_ms: float | None, execution_ms: float | None, outcome: str) -> None:
+def _reset_locked() -> None:
+    """⚠️ 호출자가 `_metrics_lock` 을 쥐고 있어야 한다.
+
+    ⛔ **이 본체는 활성 큐에 안전하지 않다.** 대기 중인 제출이 있는 상태로 카운터를 0 으로 밀면
+       그 작업들이 시작될 때 `started_total` 만 올라 `queued_now` 가 **음수**가 된다. 즉 공개
+       함수의 가드는 편의가 아니라 **정확성의 조건**이다 — 완화 대비 방어라고 적었던 것은 틀렸다
+       (codex 지적). 분리한 이유는 하나뿐: gauge 가 살아 있는 상태에서 `in_flight` 처리를
+       단독으로 시험하기 위해서다."""
+    global _metrics
+    new = dict(_metrics)
+    new.update(count=0, queue_wait_ms_sum=0.0, queue_wait_ms_max=0.0,
+               execution_ms_sum=0.0, execution_ms_max=0.0, never_started=0,
+               caller_cancelled_while_running=0,
+               submitted_total=0, submit_failed_total=0, started_total=0,
+               ledger_errors_total=0, by_outcome={})
+    # ⚠️ max 는 0 이 아니라 **현재 gauge** 로 내린다 — `max < current` 는 불변식 위반이다.
+    #    ⛔ `in_flight` 는 여기서 0 으로 밀지 않는다(살아 있는 worker 의 -1 이 음수로 샌다).
+    new["in_flight_max"] = new["in_flight"]
+    new["queued_observed_max"] = 0          # 카운터가 0 이 됐으므로 queued 도 0
+    _metrics = new                          # 단일 리바인딩 — 부분 reset 불가
+
+
+def _record(queue_wait_ms: float | None, execution_ms: float | None, outcome: str,
+            *, worker_finished: bool = False) -> None:
     """⚠️ **worker 가 부른다**(또는 큐 취소 시 done callback 이). caller coroutine 이 아니다 —
-    아래 `run_in_auth_executor` 주석 참조."""
+    아래 `run_in_auth_executor` 주석 참조.
+
+    ⛔ `worker_finished` 의 `in_flight` 감소는 **이 호출 안**에 있다. 별 `finally` 로 떼면
+    기록은 남고 gauge 만 새는 경로가 생긴다(변이 ③)."""
     with _metrics_lock:
+        if worker_finished:
+            if _metrics["in_flight"] <= 0:   # ⛔ 음수면 reset 가드(`> 0`)가 영구히 무력해진다
+                raise RuntimeError("in_flight underflow — worker_finished 가 잘못 전달됐다")
+            _metrics["in_flight"] -= 1
         _metrics["count"] += 1
         _metrics["by_outcome"][outcome] = _metrics["by_outcome"].get(outcome, 0) + 1
         if queue_wait_ms is None:
@@ -112,6 +192,87 @@ def _record(queue_wait_ms: float | None, execution_ms: float | None, outcome: st
                 "max_workers": _configured_workers,
             },
         )
+
+
+def _note_submitted() -> None:
+    with _metrics_lock:
+        _metrics["submitted_total"] += 1
+
+
+def _note_submit_failed() -> None:
+    """`submit()` 이 던졌다 — 상계해서 `queued_now` 를 원위치시킨다.
+    ⛔ 여기서 `queued_observed_max` 를 건드리지 않는다(변이 ⑦: 실패는 peak 을 남기지 않는다)."""
+    with _metrics_lock:
+        _metrics["submit_failed_total"] += 1
+
+
+def _note_submit_succeeded() -> None:
+    """제출 성공 지점에서 큐 깊이를 **표본**한다.
+
+    ⚠️ 이름 그대로 *observed* 다 — 상계도 하계도 아니다:
+      · **놓친다**: worker 가 이 호출 전에 dequeue 하면 이미 `q=0` 이다.
+      · **부풀 수 있다**: 다른 스레드가 `_note_submitted()` 만 마치고 아직 `submit()` 에
+        머물러 있으면(그 제출이 나중에 실패해도) 그 예약이 이 표본에 섞인다(codex High).
+    ⛔ 그러니 "실패한 제출은 peak 을 올리지 않는다"는 **단일 제출에서만** 참이다. 전역 동시성
+      까지 보장하려면 예약과 확정을 분리한 두 벌 장부가 필요한데, 그러면 worker 가 예약보다
+      먼저 시작해 `queued_now` 가 음수가 될 수 있다 — 음수 불가 쪽을 택했다."""
+    with _metrics_lock:
+        q = _queued_locked()
+        if q > _metrics["queued_observed_max"]:
+            _metrics["queued_observed_max"] = q
+
+
+def _safe_ledger(fn: Callable[[], None]) -> bool:
+    """제출 **이후**의 장부 기록을 비-치명으로 만든다.
+
+    ⛔ 계측이 서비스 경로를 결정하면 그건 관측이 아니라 정책이다 — worker 가 이미 돌고 있는데
+       부기 예외가 caller 에게 반환되면 **계측이 업무 결과를 대체**한다(codex 재현).
+    ⚠️ 삼키되 `ledger_errors_total` 로 드러낸다.
+    ⛔ 반환값은 **"함수가 예외 없이 반환했는가"** 일 뿐 "커밋됐는가" 가 **아니다** — 한때 그렇게
+       적었으나 커밋 후 예외·부분 커밋에서 무너진다(codex 재현). 커밋 여부가 필요한 곳은
+       `_note_worker_started(receipt)` 처럼 lock 안에서 채우는 **receipt** 를 쓴다."""
+    try:
+        fn()
+        return True
+    except Exception:
+        try:
+            with _metrics_lock:
+                _metrics["ledger_errors_total"] += 1
+        except Exception:                       # pragma: no cover - 최후 방어
+            pass
+        try:                                    # ⛔ 진단 로깅 실패가 업무 결과를 대체하면 안 된다
+            logger.debug("auth_executor 장부 기록 실패", exc_info=True)
+        except Exception:                       # pragma: no cover - 최후 방어
+            pass
+        return False
+
+
+def _note_worker_started(receipt: list[bool]) -> None:  # noqa: C901
+    """⚠️ 커밋 사실을 **반환값이 아니라 `receipt` 로** 알린다.
+
+    ⛔ 반환값은 함수가 **끝까지 정상 반환**해야 전달되므로 "커밋한 뒤 예외" 를 구분하지 못한다 —
+       그 경우 호출자가 증가를 못 본 채 종료 감소를 생략해 `in_flight` 가 영구 잔존한다
+       (codex 재현: in_flight=1 + reset 영구 차단).
+    ⚠️ `receipt` 는 lock **안에서** 채워지므로 이후 어떤 예외도 커밋 사실을 지우지 못한다.
+    ⚠️ 두 객체(receipt·`_metrics`)를 한 번에 커밋할 방법은 없다 — 리바인딩이 실패하는 창이 남고,
+       그때는 `queued_now` 가 어긋난 채 남을 수 있다. 그 사실은 `ledger_errors_total` 로 드러난다.
+       ⛔ 한때 reset 가드가 그 신호를 보고 완화하도록 했으나 **철회**했다 — 그 완화가 start 장부
+       직전의 worker 를 놓쳐 `queued_now = -1` 을 만들었다. 불균형이 남으면 그 프로세스에서
+       reset 은 열리지 않으며, 복구는 프로세스 재시작이다."""
+    global _metrics
+    with _metrics_lock:
+        # ⛔ **부분 커밋 금지.** 순차 in-place 갱신은 중간 실패 시 `started_total`·`in_flight` 만
+        #    오르고 receipt 가 안 남아 종료 감소가 생략된다(codex 재현: in_flight=1 영구 잔존).
+        #    → 산술은 **사본**에서 끝내고 **단일 update** 로 커밋한다(S1 copy-and-swap 과 같은 규율).
+        new = dict(_metrics)
+        new["started_total"] += 1
+        new["in_flight"] += 1
+        new["in_flight_max"] = max(new["in_flight_max"], new["in_flight"])
+        # ⚠️ receipt 는 커밋 **직전**. 이 뒤 update 가 실패하면 카운터는 안 올랐는데 receipt 만
+        #    남지만, 그 경우는 `_record` 의 underflow 가드가 무해하게 흡수한다(음수 방지).
+        receipt.append(True)
+        _metrics = new              # ⛔ **단일 리바인딩**. `update()` 는 기존 dict 를 제자리
+                                    #    갱신해 부분 실패가 가능하다 — copy-and-swap 이 아니다.
 
 
 def _record_caller_cancelled_while_running() -> None:
@@ -204,30 +365,63 @@ async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: 
     executor = _executor
     if executor is None:
         raise AuthExecutorNotReady("인증 전용 executor 가 없다")
-    submitted = time.monotonic()
+    _note_submitted()               # ⛔ submit **앞**(변이 ①) — 그리고 **시계보다도 앞**
+    # ⚠️ 시계는 base(`b610e60`) 와 **같은 경계**에서 찍는다 — Event·클로저 생성이 포함되는 지점.
+    #    한때 이 줄을 `_note_submitted()` 뒤·Event 생성 **뒤**로 옮겼는데, 그러면 lock 오염은
+    #    사라져도 `queue_wait_ms` 의 **의미가 바뀐다**(codex: Event 생성에 50ms 주입 시
+    #    base 110.24ms vs 이동 후 0.16ms). 장부만 시계 밖으로 빼고 경계는 보존한다.
     # ⛔ **`future.cancelled()` 로 "실행 중"을 판정하지 말 것.** 그건 *시작 전 취소* 에만 참이라,
     #    worker 가 **이미 정상 완료**했는데 event loop 가 결과 전달을 아직 못 한 창에서도
     #    `not cancelled()` 가 참이 되어 완료된 건을 "실행 중 취소"로 **오분류**한다(재현 완료).
     #    하필 부하가 클 때 — 즉 W 를 재려는 바로 그 상황에서 — 전달이 늦어 자주 생긴다.
     #    → worker 가 직접 올리는 두 이벤트로 판정한다.
-    started_evt = threading.Event()
-    finished_evt = threading.Event()
+    # ⛔ **예약 이후의 모든 실패**가 보상 범위다. 한때 `try` 가 `executor.submit()` 만 감쌌는데,
+    #    `threading.Event()` 생성이 실패하면 `submitted_total=1 / submit_failed_total=0` 이 남아
+    #    `queued_now=1` 이 **영구 잔존**하고 reset 도 영구 차단됐다(codex 재현).
+    try:
+        # ⚠️ 시계도 **보상 범위 안**이다 — 밖에 두면 clock 실패가 상계되지 않아 queued_now 가
+        #    영구 잔존한다(codex 재현). 경계는 그대로: Event·클로저 생성 **앞**.
+        submitted = time.monotonic()
+        started_evt = threading.Event()
+        finished_evt = threading.Event()
 
-    def _timed() -> T:
-        started_evt.set()
-        started = time.monotonic()
-        queue_wait_ms = (started - submitted) * 1000.0
-        outcome = "ok"
-        try:
-            return func(*args, **kwargs)
-        except BaseException as exc:
-            outcome = type(exc).__name__
-            raise
-        finally:
-            _record(queue_wait_ms, (time.monotonic() - started) * 1000.0, outcome)
-            finished_evt.set()          # ⚠️ 기록 **뒤에** 올린다 — "끝났다"가 "기록됐다"를 함의하게
+        def _timed() -> T:
+            # ⛔ **base 순서를 바꾸지 말 것.** 한때 `_note_worker_started()` 를 여기 맨 앞에 뒀는데,
+            #    그 lock 대기가 `queue_wait_ms` 에 섞이고(아래 `started` 가 lock 뒤라서) 그 창에서
+            #    caller 가 취소되면 `started_evt` 가 아직 false 라 `caller_cancelled_while_running`
+            #    까지 누락됐다 — 기존 7필드 "값·의미 불변" 위반이다(codex High).
+            # ⚠️ 장부를 뒤에 둬도 불변식은 안전하다: 그 창에서는 started 가 **덜** 세어져
+            #    `queued_now` 가 과대평가될 뿐 음수가 되지 않는다.
+            dequeued = time.monotonic()     # 큐를 빠져나온 시각 = queue_wait 의 **끝**
+            started_evt.set()
+            start_receipt: list[bool] = []
+            _safe_ledger(lambda: _note_worker_started(start_receipt))   # 실패해도 업무는 계속
+            # ⚠️ 커밋 **여부**를 본다 — 함수가 정상 반환했는지가 아니다
+            started_ok = bool(start_receipt)
+            queue_wait_ms = (dequeued - submitted) * 1000.0
+            # ⚠️ 실행 시각은 장부 lock **뒤**에 다시 찍는다 — dequeue 시각을 그대로 쓰면
+            #    `_note_worker_started()` 의 lock 대기가 `execution_ms` 에 섞인다
+            #    (codex 재현: 80ms 주입 → execution 82.07ms). 두 시계는 분리돼야 한다.
+            exec_started = time.monotonic()
+            outcome = "ok"
+            try:
+                return func(*args, **kwargs)
+            except BaseException as exc:
+                outcome = type(exc).__name__
+                raise
+            finally:
+                # ⚠️ `worker_finished` 는 **실제로 올렸을 때만** True — 안 그러면 underflow 다
+                _safe_ledger(lambda: _record(queue_wait_ms,
+                                             (time.monotonic() - exec_started) * 1000.0,
+                                             outcome, worker_finished=started_ok))
+                finished_evt.set()          # ⚠️ 기록 **뒤에** 올린다 — "끝났다"가 "기록됐다"를 함의하게
 
-    future = executor.submit(_timed)
+        future = executor.submit(_timed)
+    except BaseException:
+        _note_submit_failed()       # 장부 상계 후 그대로 재전파 (변이 ②)
+        raise
+    # 제출 성공 — 여기부터 계측 실패는 업무 결과를 대체하지 않는다
+    _safe_ledger(_note_submit_succeeded)
 
     def _on_done(done: "Future[T]") -> None:
         # ⚠️ `cancelled()` 는 **시작 전에 취소된 경우만** 참이다 — 실행 중 취소는 concurrent

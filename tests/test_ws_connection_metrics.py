@@ -445,3 +445,36 @@ def test_capture_tool_can_parse_the_partial_failure_body(monkeypatch):
     finally:
         sys.modules.pop("capture_tool", None)
     assert isinstance(rollout, dict) and observed > 0
+
+
+def test_peak_in_bucket_since_start_survives_eviction():
+    """[S6-1] 비소멸 피크는 eviction 으로 줄지 않는다.
+
+    ⛔ 기존 `max_in_bucket` 은 **보존된 버킷 중 최댓값**이라 eviction 후 **줄어드는 것이 정상**이다
+       (의도된 최근-창 rolling gauge). 신규 필드는 그와 **별개**로 수명 전체 피크를 남긴다 —
+       ring 은 600초 rolling 인데 캡처는 24h 간격이라 이게 없으면 관측 창 대부분이 evict 된다.
+    ⚠️ 이 테스트가 없으면 구현을 통째로 지워도 기존 스위트가 통과한다(실측 — S6-1 회귀 게이트).
+    """
+    buckets = ws_connection_metrics.HandshakeBuckets(bucket_seconds=10, buckets_kept=2)
+    for _ in range(3):
+        buckets.record(now=0)
+    first = buckets.snapshot(now=0)
+    assert first["max_in_bucket"] == 3
+    assert first["peak_in_bucket_since_start"] == 3
+
+    buckets.record(now=100)          # 앞 버킷이 evict 되는 시점
+    later = buckets.snapshot(now=100)
+    assert later["max_in_bucket"] == 1, "rolling gauge 는 줄어야 정상 (S6-5: 의미 불변)"
+    assert later["peak_in_bucket_since_start"] == 3, "비소멸 피크가 eviction 으로 줄었다"
+
+
+def test_peak_is_updated_on_record_not_on_snapshot():
+    """[S6-1] snapshot 을 **한 번도 부르지 않아도** 피크가 남아야 한다.
+
+    갱신을 `snapshot()` 에 두면 캡처 사이의 피크를 통째로 놓친다 — 24h 간격 캡처에서 치명적이다.
+    """
+    buckets = ws_connection_metrics.HandshakeBuckets(bucket_seconds=10, buckets_kept=2)
+    for _ in range(5):
+        buckets.record(now=0)        # ⚠️ 이 구간에서 snapshot 을 부르지 않는다
+    buckets.record(now=100)
+    assert buckets.snapshot(now=100)["peak_in_bucket_since_start"] == 5

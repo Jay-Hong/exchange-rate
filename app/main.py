@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import secrets
 
 # 로컬 애플리케이션
-from app import auth_executor, default_executor_probe, topic_auth_rollout, topic_initial_snapshot, topic_policy, topic_wire, ws_connection_metrics
+from app import auth_executor, default_executor_probe, subscribe_load_metrics, topic_auth_rollout, topic_initial_snapshot, topic_policy, topic_wire, ws_connection_metrics
 from app import models, schemas, crud, scheduler, topic_dispatcher, tether_topic_publisher, fx_topic_publisher, legacy_policy, usdt_redis_stats, tether_topic_trigger, bank_investing_redis_stats, entitlements
 from app.database import engine, SessionLocal, Base, create_all_app_tables
 from app.admin.stats import broadcast_stats
@@ -1754,6 +1754,30 @@ async def get_ws_connection_metrics():
             "error": "unavailable",
         }
     metrics["topic_auth_rollout"] = rollout_metrics
+
+    # ── S7: 신규 두 블록. ⛔ **각자 실패 도메인**이다 — 한 블록의 예외가 다른 세 블록을
+    #    지우면 안 된다(S0 가 manager 쪽에서 세운 규율을 그대로 잇는다).
+    # ⚠️ 별 endpoint 를 만들지 않는 이유: 캡처 도구는 ADMIN_PATH **하나만** 읽는다. 별 endpoint
+    #    면 두 body 가 다른 순간이 되어 rollout 대비 비율이 서로 다른 시점을 나눈 값이 된다.
+    #    ⛔ 단 **같은 body 라고 전체가 원자적인 것은 아니다** — worker/executor 값은 여러 lock 의
+    #    순차 snapshot 이라 skew 가 있다. 창 identity(`topic_auth_rollout.pid`/`started_at_*`)가
+    #    body 전체를 pin 하며, 신규 블록은 그 identity 를 **복제하지 않는다**.
+    try:
+        metrics["subscribe_load"] = subscribe_load_metrics.subscribe_load_metrics()
+    except Exception:
+        logger.error("subscribe-load metrics 조회 실패", exc_info=True)
+        metrics["subscribe_load"] = {"error": "unavailable"}
+
+    # `ws_auth_executor` 는 **미러**다 — 수치 복사가 아니라 같은 함수의 두 view.
+    # 기존 executor endpoint 는 identity 가 없어 두 캡처를 안전하게 뺄 수 없고 캡처 도구가
+    # 조회하지도 않는다. 미러면 도구 변경 0 으로 co-capture·창 pin 이 동시에 성립한다.
+    # ⚠️ 창 delta 는 **미러로만** 낸다 — 기존 endpoint 는 ad-hoc 조회용.
+    try:
+        metrics["ws_auth_executor"] = auth_executor.auth_executor_metrics()
+    except Exception:
+        logger.error("ws-auth-executor 미러 조회 실패", exc_info=True)
+        metrics["ws_auth_executor"] = {"error": "unavailable"}
+
     if connection_error is not None:
         # ⚠️ shape 계약: 실패해도 `metrics` 는 **dict** 이고 `topic_auth_rollout` 을 담는다.
         #    구 `{"metrics": None, "error": "unavailable"}` 은 더 이상 나오지 않는다.
@@ -1780,10 +1804,15 @@ async def get_ws_auth_executor_metrics():
     """
     try:
         return {"metrics": auth_executor.auth_executor_metrics(),
-                "running": auth_executor.is_auth_executor_running()}
+                "running": auth_executor.is_auth_executor_running(),
+                # ⚠️ shape 유지 + flag **합성 1줄** — rollout 블록이 붙이는 방식과 동일.
+                #    창 delta 는 ws-connection-metrics 의 미러로 내고 여기는 ad-hoc 조회용이다.
+                "topic_dispatcher_enabled": config.TOPIC_DISPATCHER_ENABLED}
     except Exception:
         logger.error("ws-auth-executor-metrics 조회 실패", exc_info=True)
-        return {"metrics": None, "running": None, "error": "unavailable"}
+        # flag 는 executor 계측과 독립적인 runtime context 다. 계측 실패 때문에 같이 지우지 않는다.
+        return {"metrics": None, "running": None, "error": "unavailable",
+                "topic_dispatcher_enabled": config.TOPIC_DISPATCHER_ENABLED}
 
 
 @app.get("/admin/api/atomic-write-outcomes", dependencies=[Depends(verify_admin)])

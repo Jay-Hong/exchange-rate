@@ -9,6 +9,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from app import ws_connection_metrics
 from ops import capture_topic_auth_rollout as capture
 
 
@@ -27,6 +28,7 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
                     "started_at_epoch_seconds": float(started),
                     "stage": "compatibility",
                     "topic_dispatcher_enabled": False,
+                    "anonymous_subscribe_attempts_total": attempts,
                     "unverified_token_bearing_subscribe_attempts_total": attempts,
                     "unverified_token_bearing_policy_attempts_total": attempts,
                     "unverified_token_bearing_final_stage_rc_candidate_attempts_total": attempts,
@@ -44,6 +46,23 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
                         "usdt:krw": first_seen,
                     },
                     "unverified_token_bearing_active_connections_tracked": 0,
+                    "anonymous_subscribe_arrival": {
+                        "bucket_seconds": 10,
+                        "buckets_kept": 60,
+                        "buckets_present": 1,
+                        "max_in_bucket": attempts,
+                        "current_bucket": attempts,
+                        "peak_in_bucket_since_start": attempts,
+                    },
+                    "unverified_token_bearing_subscribe_arrival": {
+                        "bucket_seconds": 10,
+                        "buckets_kept": 60,
+                        "buckets_present": 1,
+                        "max_in_bucket": attempts,
+                        "current_bucket": attempts,
+                        "peak_in_bucket_since_start": attempts,
+                    },
+                    "unverified_token_bearing_attempts_on_one_observation_epoch_max": attempts,
                 }
             }
         },
@@ -105,6 +124,17 @@ class CaptureFixture(unittest.TestCase):
 
 
 class TestSuccessfulCapture(CaptureFixture):
+    def test_capture_bucket_identity_matches_production_defaults(self):
+        """캡처의 wire identity 상수는 production ring 기본값과 함께 바뀌어야 한다."""
+        self.assertEqual(
+            capture.ARRIVAL_BUCKET_SECONDS,
+            ws_connection_metrics.HANDSHAKE_BUCKET_SECONDS,
+        )
+        self.assertEqual(
+            capture.ARRIVAL_BUCKETS_KEPT,
+            ws_connection_metrics.HANDSHAKE_BUCKETS_KEPT,
+        )
+
     def test_preserves_raw_bytes_and_separates_derived_metadata(self):
         raw = response() + b"\n"
         result = self.run_capture(FakeRunner(body=raw))
@@ -211,6 +241,68 @@ class TestFailClosedWindow(CaptureFixture):
         self.assertFalse(meta["metric_schema"]["valid"])
         self.assertTrue(any("policy_attempts_total" in error
                             for error in meta["metric_schema"]["errors"]))
+
+    def test_missing_arrival_peak_is_preserved_but_not_accepted(self):
+        document = json.loads(response())
+        del document["metrics"]["topic_auth_rollout"][
+            "anonymous_subscribe_arrival"
+        ]["peak_in_bucket_since_start"]
+        result = self.run_capture(
+            FakeRunner(body=json.dumps(document, separators=(",", ":")).encode())
+        )
+        self.assertFalse(result.metric_schema_valid)
+        meta = json.loads(result.meta_path.read_text())
+        self.assertIn(
+            "anonymous_subscribe_arrival must have the fixed HandshakeBuckets schema",
+            meta["metric_schema"]["errors"],
+        )
+
+    def test_arrival_bucket_identity_drift_is_preserved_but_not_accepted(self):
+        document = json.loads(response())
+        rollout = document["metrics"]["topic_auth_rollout"]
+        rollout["anonymous_subscribe_arrival"]["bucket_seconds"] = 11
+        rollout["unverified_token_bearing_subscribe_arrival"]["buckets_kept"] = 61
+        result = self.run_capture(
+            FakeRunner(body=json.dumps(document, separators=(",", ":")).encode())
+        )
+        self.assertFalse(result.metric_schema_valid)
+        meta = json.loads(result.meta_path.read_text())
+        identity_errors = [
+            error for error in meta["metric_schema"]["errors"]
+            if "bucket identity must be 10s x 60" in error
+        ]
+        self.assertEqual(len(identity_errors), 2)
+
+    def test_arrival_presence_and_max_emptiness_must_agree(self):
+        document = json.loads(response())
+        arrival = document["metrics"]["topic_auth_rollout"][
+            "anonymous_subscribe_arrival"
+        ]
+        arrival["buckets_present"] = 0
+        result = self.run_capture(
+            FakeRunner(body=json.dumps(document, separators=(",", ":")).encode())
+        )
+        self.assertFalse(result.metric_schema_valid)
+        meta = json.loads(result.meta_path.read_text())
+        self.assertTrue(any(
+            "buckets_present and max_in_bucket emptiness must agree" in error
+            for error in meta["metric_schema"]["errors"]
+        ))
+
+    def test_impossible_epoch_high_water_is_preserved_but_not_accepted(self):
+        document = json.loads(response(attempts=4))
+        document["metrics"]["topic_auth_rollout"][
+            "unverified_token_bearing_attempts_on_one_observation_epoch_max"
+        ] = 5
+        result = self.run_capture(
+            FakeRunner(body=json.dumps(document, separators=(",", ":")).encode())
+        )
+        self.assertFalse(result.metric_schema_valid)
+        meta = json.loads(result.meta_path.read_text())
+        self.assertTrue(any(
+            "must not exceed unverified_token_bearing_subscribe_attempts_total" in error
+            for error in meta["metric_schema"]["errors"]
+        ))
 
     def test_per_topic_key_drift_is_preserved_but_not_accepted(self):
         document = json.loads(response())

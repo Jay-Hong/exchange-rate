@@ -30,10 +30,12 @@ from __future__ import annotations
 import math
 import os
 import time
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Set
 
+from app import ws_connection_metrics
 from app.config import TopicAuthStage
 
 if TYPE_CHECKING:
@@ -67,6 +69,9 @@ class ConnectionObservation:
     anonymous_seen_topics: Set[str] = field(default_factory=set)
     token_bearing_observed: bool = False
     token_bearing_seen_topics: Set[str] = field(default_factory=set)
+    # S6: 이 **관측 에포크** 안에서 관측한 token-bearing subscribe 요청 수.
+    # ⚠️ disconnect 가 이 entry 를 pop 하면 0 부터 다시 센다 — 그래서 max 는 rollout 쪽에 둔다.
+    token_bearing_attempts: int = 0
 
 
 class TopicAuthRollout:
@@ -197,6 +202,17 @@ class TopicAuthRollout:
         self._tb_policy_attempts = 0
         self._tb_rc_candidate_attempts = 0
         self._tb_policy_first_seen_connections = 0
+        # ── S6: 도착(arrival) ring — **요청 1건당 1회**. 폭주 판정은 시간 국소성이라
+        #    누적 총계로는 30분에 퍼진 600건과 10초에 몰린 600건을 구분할 수 없다.
+        # ⛔ topic 루프 **밖**에서 record 한다 — 안에 두면 한 요청의 topic 수만큼 부풀어
+        #    "요청 1건당 1회" 규율(두 관측 함수 도크스트링의 dedupe 계약)과 어긋난다.
+        self._anonymous_arrival = ws_connection_metrics.HandshakeBuckets()
+        self._tb_arrival = ws_connection_metrics.HandshakeBuckets()
+        # ⚠️ **관측 에포크당** high-water 다("연결당" 이 아니다) — broadcast 전송 실패가
+        #    ConnectionManager.disconnect → 이 클래스의 disconnect 로 연결 관측을 pop 하는데
+        #    수신 루프는 별 코루틴이라 같은 소켓이 계속 subscribe 할 수 있다. 즉 **하한**이다.
+        # ⛔ process-wide 라 disconnect 로 줄지 않는다(연결별 entry 와 저장 위치가 다르다).
+        self._tb_attempts_on_one_epoch_max = 0
         self._tb_per_topic_attempts: Dict[str, int] = {t: 0 for t in self._policy_topics}
         self._tb_per_topic_first_seen: Dict[str, int] = {t: 0 for t in self._policy_topics}
 
@@ -210,6 +226,7 @@ class TopicAuthRollout:
         ⚠️ 한 요청 안의 **중복 topic 은 한 번만** 센다.
         """
         self._anonymous_attempts += 1
+        self._anonymous_arrival.record()
 
         requested = {t for t in topics if t in self._per_topic_attempts}
         if not requested:
@@ -249,9 +266,14 @@ class TopicAuthRollout:
         ⚠️ 한 요청 안의 **중복 topic 은 한 번만** 센다(익명 축과 같은 규율).
         """
         self._tb_attempts += 1
+        self._tb_arrival.record()
         observation = self._seen_by_connection.setdefault(
             websocket, ConnectionObservation())
         observation.token_bearing_observed = True
+        # await 없는 동기 구간에서 epoch-local current 와 process-wide high-water 를 연속 갱신한다.
+        observation.token_bearing_attempts += 1
+        if observation.token_bearing_attempts > self._tb_attempts_on_one_epoch_max:
+            self._tb_attempts_on_one_epoch_max = observation.token_bearing_attempts
 
         requested = {t for t in topics if t in self._tb_per_topic_attempts}
         if not requested:
@@ -321,6 +343,9 @@ class TopicAuthRollout:
            topic 이름뿐이다.
         ⚠️ `topic_dispatcher_enabled` 같은 런타임 맥락은 여기서 읽지 않는다 — endpoint 가 합친다.
         """
+        # 두 ring 을 서로 다른 monotonic 시각으로 읽으면 10초 경계에서 익명/token-bearing
+        # current_bucket 이 서로 다른 창을 가리킨다. 한 snapshot 은 한 시각을 공유한다.
+        arrival_now = time.monotonic()
         return {
             "scope": "process",
             "pid": os.getpid(),
@@ -347,6 +372,12 @@ class TopicAuthRollout:
             "unverified_token_bearing_per_topic_attempts": dict(self._tb_per_topic_attempts),
             "unverified_token_bearing_per_topic_first_seen_connections": dict(
                 self._tb_per_topic_first_seen),
+            # ── S6 도착 축 (요청 1건당 1회 기록) ────────────────────────────
+            "anonymous_subscribe_arrival": self._anonymous_arrival.snapshot(now=arrival_now),
+            "unverified_token_bearing_subscribe_arrival": self._tb_arrival.snapshot(now=arrival_now),
+            # ⚠️ **관측 에포크당** high-water(하한)이지 "연결당" 이 아니다 — caveat 참조.
+            "unverified_token_bearing_attempts_on_one_observation_epoch_max": (
+                self._tb_attempts_on_one_epoch_max),
             "unverified_token_bearing_active_connections_tracked": sum(
                 1 for o in self._seen_by_connection.values() if o.token_bearing_observed),
             "caveat": (
@@ -356,6 +387,14 @@ class TopicAuthRollout:
                 "아니다. final_stage_rc_candidate 는 현재 topic availability에서 dispatcher와 "
                 "최종 stage가 활성화되고 token 검증까지 성공한다는 가정의 후보일 뿐이다. "
                 "관측된 이 요청 스트림에 한해 요청당 RC 호출 ≤1을 뜻하며 미래 운영 부하의 "
-                "상한이 아니다."
+                "상한이 아니다. "
+                "*_subscribe_arrival 은 요청 1건당 1회 기록하는 시간 버킷이다 — "
+                "buckets_present/current_bucket/max_in_bucket 은 최근 창 gauge 라 차분하지 말 것이고, "
+                "peak_in_bucket_since_start 만 eviction 과 무관한 수명 전체 피크다. "
+                "unverified_token_bearing_attempts_on_one_observation_epoch_max 는 "
+                "**관측 에포크당** 최대치의 **하한**이지 연결당 최대치가 아니다 — broadcast 전송 "
+                "실패가 연결 관측 상태를 지우는데 수신 루프는 계속 살아 있어 같은 소켓의 관측이 "
+                "잘릴 수 있다. 값이 크면 한 소켓 안 반복 시도가 증명되지만, 작다고 반복이 "
+                "없었다고 추론할 수 없다."
             ),
         }
