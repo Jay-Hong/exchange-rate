@@ -45,7 +45,9 @@
           "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
           "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속",
           "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
-          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
+          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
+          "S1b-0 REST Firebase 인증 분류 at b8f5c94: 기존 helper 의 예외 처리를 순수 12단 분류기로 분리하고 broad fallback 을 재전파(500)로 바꾼 것, 하위→상위 순서가 load-bearing 함을 잠근 변이, 같은 503 을 category·로그 severity 로 갈라 절 이동 변이를 잡은 결속, 로그 예외 메시지에 포함되던 uid 제거, 그리고 지적받은 산문 과장을 SDK verify() 도달성 재감사로 검증해 잘못된 iOS .stop 논거를 철회하고 실제 도달 범위를 check_revoked=True 경로 하나로 확정한 것",
+          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -73,7 +75,9 @@
           "C3 iOS checkout ref binding: the per-workflow extraction of each named iOS checkout block bounded by the next sibling step, the assertion that its ref equals lock.pinned_commit.ios exactly once, and the three synthetic drift controls for tests-only, docs-only and both",
           "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant",
           "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
-          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속"
+          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속",
+          "S1b-0 gate: 예외 메시지가 uid 를 로그로 흘리는 것과 분류기 반환만 검사해 logger 배선이 통째로 비어 있어도 초록이던 공백을 짚고, 도달 범위·이름·경계 산문 4건의 과장과 인용 스캔이 app/ 접두 없는 표기를 놓친 것을 지적",
+          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정"
         ]
       },
       {
@@ -108,7 +112,9 @@
           "C3 iOS checkout ref binding: the per-workflow extraction of each named iOS checkout block bounded by the next sibling step, the assertion that its ref equals lock.pinned_commit.ios exactly once, and the three synthetic drift controls for tests-only, docs-only and both",
           "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant",
           "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
-          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속"
+          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속",
+          "S1b-0 gate: 예외 메시지가 uid 를 로그로 흘리는 것과 분류기 반환만 검사해 logger 배선이 통째로 비어 있어도 초록이던 공백을 짚고, 도달 범위·이름·경계 산문 4건의 과장과 인용 스캔이 app/ 접두 없는 표기를 놓친 것을 지적",
+          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -145,7 +151,9 @@
           "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
           "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속",
           "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
-          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
+          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
+          "S1b-0 REST Firebase 인증 분류 at b8f5c94: 기존 helper 의 예외 처리를 순수 12단 분류기로 분리하고 broad fallback 을 재전파(500)로 바꾼 것, 하위→상위 순서가 load-bearing 함을 잠근 변이, 같은 503 을 category·로그 severity 로 갈라 절 이동 변이를 잡은 결속, 로그 예외 메시지에 포함되던 uid 제거, 그리고 지적받은 산문 과장을 SDK verify() 도달성 재감사로 검증해 잘못된 iOS .stop 논거를 철회하고 실제 도달 범위를 check_revoked=True 경로 하나로 확정한 것",
+          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ]
       }
     ],
@@ -188,7 +196,9 @@
           "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
           "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속",
           "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
-          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
+          "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
+          "S1b-0 REST Firebase 인증 분류 at b8f5c94: 기존 helper 의 예외 처리를 순수 12단 분류기로 분리하고 broad fallback 을 재전파(500)로 바꾼 것, 하위→상위 순서가 load-bearing 함을 잠근 변이, 같은 503 을 category·로그 severity 로 갈라 절 이동 변이를 잡은 결속, 로그 예외 메시지에 포함되던 uid 제거, 그리고 지적받은 산문 과장을 SDK verify() 도달성 재감사로 검증해 잘못된 iOS .stop 논거를 철회하고 실제 도달 범위를 check_revoked=True 경로 하나로 확정한 것",
+          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ],
         "result": "pass"
       },
@@ -221,7 +231,9 @@
           "C3 iOS checkout ref binding: the per-workflow extraction of each named iOS checkout block bounded by the next sibling step, the assertion that its ref equals lock.pinned_commit.ios exactly once, and the three synthetic drift controls for tests-only, docs-only and both",
           "SEM-038 battery correction: reading the iOS pin from the lock instead of a hardcoded literal, deriving the drift value so it can never equal the pin, and the defensive per-file occurrence check on the both-drift mutant",
           "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
-          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속"
+          "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속",
+          "S1b-0 gate: 예외 메시지가 uid 를 로그로 흘리는 것과 분류기 반환만 검사해 logger 배선이 통째로 비어 있어도 초록이던 공백을 짚고, 도달 범위·이름·경계 산문 4건의 과장과 인용 스캔이 app/ 접두 없는 표기를 놓친 것을 지적",
+          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정"
         ],
         "result": "pass"
       }
@@ -235,21 +247,21 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "70cf15b17e3ecabe7e25658587047443277a87894f68936fb0fb7c349190b7de",
+    "manifest_sha256": "b4da3a0fcbceba13f6fa153331e5af9283cf8dbb5ef82e38fb01e6c4c7a2da00",
     "baseline_sha256": "52501e595e0e9c453a1d1080fd412a98266cfb12568aca4add308015f83cce3d",
-    "lock_sha256": "ff3aae4e065adce5f034167caf1c849e5f863c20136552cba828cba957600439",
-    "server_commit": "5c9b932edfaa4b2fb2a6e4fe1db04cb13ba57910",
+    "lock_sha256": "6fa4d81de83b53eec403af20d709dfb6bd6744cd2253102072b97c1417ee081b",
+    "server_commit": "b8f5c94fbf41323af6aae8b51ae660f81d1a9193",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "06ef04af04204bca33e723f4b9164c54f0fefda16d108eb00cc8a262dfe8aef8",
-    "CLIENT": "011214eb182579402d85382a6a743347245bff4bf1725c229ad1e6fc1f5a25c5",
-    "CUT": "14d51878e51aea51391a514049a66fe865e96cdfc07f2ef69978bdb3dc1c81a6",
-    "HAND": "0eea63fc304f50593842105281be99b5be962e09f94bc6da0ab94d39483bdb90",
-    "HEALTH": "e862ff7968ecc60361758ba9a7d4e399bd607bfd3fce64a2ba7b4d831cd75288",
-    "LOAD": "f12b4ac33880f8ff9ceb6515435d25f58c75bbb6ecf11c75959130b8bf9096a1"
+    "ADR": "eddb2f16034a6d086f0d5a4c70559cb9f52acc43962cf2463b3a611632b32f7a",
+    "CLIENT": "ca5b068b207f00ce0ec3aac61f828c534a5ad02d14b52237c8ea5ae506032ff3",
+    "CUT": "741e0fcce5614ef6cbb017def2528255575110228f4f0d9416c08498cddd0fd2",
+    "HAND": "e9c9a3d849c522eac8066ea5a56e8f871daab8ab23dacab5d4b4c23ec2332528",
+    "HEALTH": "78ff84c49c68cdf37c2ff59329a126539e476af6a4293b096ec4bb52af8f0c7b",
+    "LOAD": "b0417b507e20d1b991d60d6714a2d8bf50e599be6255c854807b97a1a0930334"
   },
-  "claim_ledger_sha256": "059de8a7d4d6c80216eb632ea6a234d2b68447675e025dfe66d631680cd26c65",
+  "claim_ledger_sha256": "dcf4ba3309508cde6161ed60811f41b5c8eda4333d6779cf64186b56deb55dfb",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,

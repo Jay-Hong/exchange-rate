@@ -2,7 +2,7 @@
   "archive_sha": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
   "baseline_sha": "52501e595e0e9c453a1d1080fd412a98266cfb12568aca4add308015f83cce3d",
   "pinned_commit": {
-    "server": "5c9b932edfaa4b2fb2a6e4fe1db04cb13ba57910",
+    "server": "b8f5c94fbf41323af6aae8b51ae660f81d1a9193",
     "ios": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "total_lines": 829,
