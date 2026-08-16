@@ -586,6 +586,29 @@ WS_AUTH_EXECUTOR_WORKERS = int(os.getenv("WS_AUTH_EXECUTOR_WORKERS", "4"))
 # 한 줄이면 로그가 는다). 집계 카운터는 flag 와 무관하게 항상 쌓인다.
 WS_AUTH_EXECUTOR_LOG_TIMINGS = os.getenv("WS_AUTH_EXECUTOR_LOG_TIMINGS", "false").lower() == "true"
 
+# ── S1b — REST lane ───────────────────────────────────────────────────────────
+# `verify_firebase_token`(21 call site)이 `auth.verify_id_token` 을 **async 함수 안 맨 동기
+# 호출**로 부르고 있었다 = 이벤트 루프를 직접 막는다. `app=` 도 없어 DEFAULT app 의
+# `httpTimeout`(SDK 기본 120s)이 걸린다.
+#
+# ⛔ DEFAULT app 의 timeout 을 낮추지 **않는다** — FCM 등 다른 SDK client 가 같은 app 을 쓴다.
+#    결합을 끊는 방법은 named app 하나뿐이다. 그래서 `rest-auth` 를 따로 만든다.
+# ⚠️ 그 결과 활성 ID-token verifier 는 **2→2 로 교체**된다(구: DEFAULT+ws-auth / 신: rest-auth+
+#    ws-auth). DEFAULT 는 FCM 용으로 남지만 ID-token 검증 호출자가 없다 — 인증서 캐시가 하나
+#    늘어나는 게 아니다.
+#
+# ⛔ **WS 값을 그대로 베끼지 않는다.** WS 는 subscribe 한 건의 지연 예산이고 REST 는 요청 전체
+#    예산이라 근거가 다르다. 정하는 법: REST 인증 벽시계 p99 를 **콜드 첫 호출과 분리**해 재고,
+#    nginx `proxy_read_timeout` 과 클라 타임아웃 안에 들어오는지 확인한다.
+# ⚠️ 이 값도 **측정으로 정해진 값이 아니다** — 활성화 전에 위 절차로 정하고 GO 에 기록할 것.
+REST_AUTH_HTTP_TIMEOUT_SECONDS = 10
+
+# ⛔ WS 와 **분리된 pool** 이라 서로의 포화가 전파되지 않는다. 다만 이것도 큐 상한이 아니다
+#    (`SimpleQueue` 무제한). 상한은 S6/S7 이 진다.
+REST_AUTH_EXECUTOR_WORKERS = int(os.getenv("REST_AUTH_EXECUTOR_WORKERS", "4"))
+
+REST_AUTH_EXECUTOR_LOG_TIMINGS = os.getenv("REST_AUTH_EXECUTOR_LOG_TIMINGS", "false").lower() == "true"
+
 # ④ 격리의 **보호 대상**을 재는 sentinel — default executor 의 제출→시작 큐 지연.
 # ⛔ 이게 없으면 canary 가 "인증이 분리됐다"만 알고 **"동거인이 보호된다"는 끝내 모른다**
 #    (전용 pool endpoint 는 전용 pool 만 본다). `job_duration_ms` 는 DB·네트워크가 섞여 대체 불가.

@@ -537,23 +537,48 @@ async def ws_auth_lane_startup_scope(max_workers: int):
        rollback 이 안 돌면 pool 이 그대로 샌다(codex Blocker).
     ⛔ `BaseException` 이다 — **취소도 rollback 대상**이다.
     """
-    created = not is_auth_executor_running()
+    async with _auth_lane_startup_scope(_ws_lane, max_workers, "ws"):
+        yield
+
+
+@asynccontextmanager
+async def rest_auth_lane_startup_scope(max_workers: int):
+    """S1b — REST lane 의 같은 계약. **WS 와 소유권을 섞지 않는다.**
+
+    ⛔ 두 lane 을 한 scope 가 관리하면 `created` 판정이 결합돼, 한쪽이 이미 살아 있는 상태에서
+       다른 쪽 startup 이 실패할 때 **남의 lane 을 내린다**. 각자 자기 것만 되돌린다.
+    """
+    async with _auth_lane_startup_scope(_rest_lane, max_workers, "rest"):
+        yield
+
+
+@asynccontextmanager
+async def _auth_lane_startup_scope(lane: AuthExecutorLane, max_workers: int, label: str):
+    """두 lane 이 공유하는 보상 로직. **공개 표면은 lane 별 wrapper 가 진다.**
+
+    ⚠️ 공통화는 여기까지다 — lane registry 나 범용 lane 테이블은 만들지 않는다(codex). 두 개는
+       아직 두 개일 뿐이고, 세 번째가 생기기 전의 추상화는 근거 없이 모양만 맞춘다.
+    """
+    created = not lane.is_auth_executor_running()
     try:
-        start_auth_executor(max_workers)
+        lane.start_auth_executor(max_workers)
         yield
     except BaseException:
         if created:
             # ⛔ **rollback 실패가 startup 원인을 덮으면 안 된다.** 여기서 예외가 나가면 원래
             #    startup 예외가 사라져 운영자가 진짜 원인을 못 본다. 삼키되 드러낸다.
             try:
-                executor = begin_auth_executor_shutdown()
+                executor = lane.begin_auth_executor_shutdown()
                 # ⚠️ `begin` 만으로는 `running` 이 false 가 되지만 worker 는 계속 돈다 — 합류까지 한다.
-                await await_auth_executor_shutdown(executor)
+                await lane.await_auth_executor_shutdown(executor)
             except BaseException:      # noqa: BLE001 — 원인 보존이 우선이다
                 # ⛔ **진단 로깅도 보호한다.** `logger.exception` 이 던지면 아래 `raise` 에
                 #    도달하지 못해 **로깅 예외가 원래 startup 원인을 덮는다**(codex).
                 try:
-                    logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")
+                    logger.exception(
+                        "auth lane rollback 실패 — startup 원인을 그대로 올린다",
+                        extra={"lane": label},
+                    )
                 except BaseException:  # pragma: no cover - 최후 방어
                     pass
         raise
@@ -561,3 +586,44 @@ async def ws_auth_lane_startup_scope(max_workers: int):
 
 async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
     return await _ws_lane.run_in_auth_executor(func, *args, **kwargs)
+
+
+# ── REST singleton + facade (S1b) ─────────────────────────────────────────────
+# ⛔ WS 와 **같은 규칙**: 프로덕션 공개 함수만 위임하고 내부 helper 에는 facade 를 만들지 않는다.
+_rest_lane = AuthExecutorLane(
+    thread_prefix="rest-auth",
+    timing_event="rest_auth_timing",
+    log_timings=lambda: config.REST_AUTH_EXECUTOR_LOG_TIMINGS,
+)
+
+
+def rest_auth_executor_metrics() -> dict[str, Any]:
+    return _rest_lane.auth_executor_metrics()
+
+
+def reset_rest_auth_executor_metrics() -> None:
+    _rest_lane.reset_auth_executor_metrics()
+
+
+def start_rest_auth_executor(max_workers: int) -> None:
+    _rest_lane.start_auth_executor(max_workers)
+
+
+def begin_rest_auth_executor_shutdown() -> ThreadPoolExecutor | None:
+    return _rest_lane.begin_auth_executor_shutdown()
+
+
+async def await_rest_auth_executor_shutdown(executor: ThreadPoolExecutor | None) -> None:
+    await _rest_lane.await_auth_executor_shutdown(executor)
+
+
+def shutdown_rest_auth_executor() -> None:
+    _rest_lane.shutdown_auth_executor()
+
+
+def is_rest_auth_executor_running() -> bool:
+    return _rest_lane.is_auth_executor_running()
+
+
+async def run_in_rest_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    return await _rest_lane.run_in_auth_executor(func, *args, **kwargs)

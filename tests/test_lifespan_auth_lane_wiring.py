@@ -142,5 +142,106 @@ def test_failure_at_either_boundary_rolls_the_lane_back(tmp_path, target, kind):
         f"\n--- stdout ---\n{r.stdout[-1000:]}\n--- stderr ---\n{r.stderr[-1000:]}")
 
 
+def _lifespan_ast():
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("app/main.py").read_text())
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "lifespan")
+
+
+def test_shutdown_covers_both_lanes_and_isolates_their_failures():
+    """⛔ S1b — **한 lane 의 종료 실패가 다른 lane 을 건너뛰면 안 된다**.
+
+    순차로 부르면 첫 `begin` 이 던지는 순간 나머지 lane 은 종료조차 시도되지 않고, 다음
+    lifespan 이 구 worker 스레드와 겹친다(`TestClient` 는 lifespan 을 여러 번 연다).
+
+    ⚠️ **행동이 아니라 구조로 잠근다.** 이 경로를 행동으로 재현하려면 프로세스를 격리해 실패를
+       주입해야 하는데(위 `test_failure_at_either_boundary_rolls_the_lane_back` 이 그렇게 한다),
+       종료 실패까지 그 비용을 치를 만큼의 추가 이득이 없다. "두 lane 이 각각 try 안에 있다" 가
+       무너지는 순간이 곧 계약 위반이다.
+    ⚠️ 한때 이 계약을 `tests/test_two_lane_lifecycle.py` 가 본다고 적었는데 **거짓**이었다 —
+       그쪽은 lane 표면에서 패턴만 재현하고 `app/main.py` 배선에는 닿지 않는다.
+    """
+    import ast
+
+    fn = _lifespan_ast()
+    names = {
+        "begin_auth_executor_shutdown",
+        "begin_rest_auth_executor_shutdown",
+        "await_auth_executor_shutdown",
+        "await_rest_auth_executor_shutdown",
+    }
+    seen = {n for node in ast.walk(fn) if isinstance(node, ast.Attribute) and node.attr in names
+            for n in [node.attr]}
+    missing = sorted(names - seen)
+    assert not missing, f"lifespan 이 종료하지 않는 lane 표면: {missing}"
+
+    # ⛔ **호출이 아니라 loop 를 본다.** 실제 코드는 `(name, fn)` 쌍을 순회하며 지역 변수로
+    #    부르므로, 심볼 자체는 loop **헤더**(try 밖)에 있고 호출은 `Name` 이다. "Attribute 가
+    #    try 안에 있나" 로 물으면 올바른 코드에도 red 가 난다(실측). 계약은 "각 lane 을 순회하는
+    #    loop 의 **본문**이 try 로 감싸여 있다" 이다.
+    def _loop_over(group: set[str]) -> ast.For | None:
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.For):
+                continue
+            attrs = {a.attr for a in ast.walk(node.iter) if isinstance(a, ast.Attribute)}
+            if group <= attrs:
+                return node
+        return None
+
+    for label, group in (("begin", {"begin_auth_executor_shutdown",
+                                    "begin_rest_auth_executor_shutdown"}),
+                         ("await", {"await_auth_executor_shutdown",
+                                    "await_rest_auth_executor_shutdown"})):
+        loop = _loop_over(group)
+        assert loop is not None, f"{label}: 두 lane 을 함께 순회하는 loop 가 없다 — 순차 호출이면 첫 실패가 나머지를 건너뛴다"
+        assert any(isinstance(n, ast.Try) for n in ast.walk(loop)), \
+            f"{label}: loop 본문에 try 가 없다 — 한 lane 실패가 다른 lane 종료를 건너뛴다"
+
+
+def test_startup_opens_a_separate_scope_per_lane():
+    """⛔ 조합 scope 는 `created` 판정을 결합해 **남의 lane 을 내릴** 수 있다.
+
+    그 회귀는 정상 경로에서 전혀 드러나지 않는다 — 실패 경로에서만 발화한다.
+    """
+    import ast
+
+    fn = _lifespan_ast()
+    scopes = {
+        n.func.attr
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr.endswith("_lane_startup_scope")
+    }
+    assert scopes == {"ws_auth_lane_startup_scope", "rest_auth_lane_startup_scope"}, scopes
+
+    # wrapper 두 개의 **존재**만 보면 순차 scope 도 통과한다. 한때 REST scope 를 `pass` 로
+    # 먼저 닫은 뒤 WS/startup body 를 실행해 late failure 가 REST lane 을 되돌리지 못했다.
+    protected_at_last_step: set[str] = set()
+
+    def walk(node, active: frozenset[str] = frozenset()):
+        nonlocal protected_at_last_step
+        if isinstance(node, ast.AsyncWith):
+            active = active | {
+                item.context_expr.func.attr
+                for item in node.items
+                if isinstance(item.context_expr, ast.Call)
+                and isinstance(item.context_expr.func, ast.Attribute)
+                and item.context_expr.func.attr.endswith("_lane_startup_scope")
+            }
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "start_usdt_ws_gopax_client"):
+            protected_at_last_step |= set(active)
+        for child in ast.iter_child_nodes(node):
+            walk(child, active)
+
+    walk(fn)
+    assert protected_at_last_step == scopes, (
+        "마지막 startup 단계가 두 lane scope 모두의 보호를 받지 않는다: "
+        f"{sorted(protected_at_last_step)}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

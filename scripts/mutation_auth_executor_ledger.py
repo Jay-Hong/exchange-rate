@@ -14,11 +14,18 @@
 
 # 표준 라이브러리
 import ast
-import hashlib
 import pathlib
 import re
 import subprocess
 import sys
+
+# ⛔ 두 배터리가 **같은 커널 락**을 공유한다 — 각자 따로 막으면 서로를 못 본다(codex).
+import sys as _sys_guard
+import pathlib as _pl_guard
+_sys_guard.path.insert(0, str(_pl_guard.Path(__file__).resolve().parent))
+from mutation_battery_guard import (  # noqa: E402
+    BatteryLockBusy, MutatedFile, battery_lock,
+)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "app" / "auth_executor.py"
@@ -133,20 +140,19 @@ MUTANTS: list[tuple[str, list[tuple[str, str]]]] = [
     ('S1a-② lane-owned 호출을 무수식으로(cross-lane 오작동)',
      [('        executor = self.begin_auth_executor_shutdown()', '        executor = begin_auth_executor_shutdown()')]),
     ('S1a′-1 try 밖',
-     [('    try:\n        start_auth_executor(max_workers)\n        yield', '    start_auth_executor(max_workers)\n    try:\n        yield')]),
+     [('    try:\n        lane.start_auth_executor(max_workers)\n', '    lane.start_auth_executor(max_workers)\n    try:\n')]),
     ('S1a′-2 created 무시',
      [('        if created:\n            # ⛔ **rollback 실패가 startup 원인을 덮으면 안 된다.**', '        if True:\n            # ⛔ **rollback 실패가 startup 원인을 덮으면 안 된다.**')]),
     ('S1a′-3 BaseException→Exception',
      [('    except BaseException:\n        if created:', '    except Exception:\n        if created:')]),
     ('S1a′-4 합류 생략',
-     [('                await await_auth_executor_shutdown(executor)\n', '')]),
+     [('                await lane.await_auth_executor_shutdown(executor)\n', '')]),
     ('S1a′-5 rollback 실패가 startup 원인을 마스킹',
-     [('            except BaseException:      # noqa: BLE001 — 원인 보존이 우선이다\n',
-       '            except BaseException:\n                raise\n')]),
+     [('            except BaseException:      # noqa: BLE001 — 원인 보존이 우선이다\n', '            except BaseException:\n                raise\n')]),
     ('S1a′-6 rollback 실패를 로그로도 안 남김',
-     [('                try:\n                    logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass', '                pass')]),
+     [('                try:\n                    logger.exception(\n                        "auth lane rollback 실패 — startup 원인을 그대로 올린다",\n                        extra={"lane": label},\n                    )\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass\n', '                pass\n')]),
     ('S1a′-7 진단 로깅 보호 제거(원인 마스킹)',
-     [('                try:\n                    logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass', '                logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")')]),
+     [('                try:\n                    logger.exception(\n                        "auth lane rollback 실패 — startup 원인을 그대로 올린다",\n                        extra={"lane": label},\n                    )\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass\n', '                logger.exception(\n                    "auth lane rollback 실패 — startup 원인을 그대로 올린다",\n                    extra={"lane": label},\n                )\n')]),
 ]
 
 
@@ -260,8 +266,24 @@ def _probes_for(name: str) -> tuple[str, ...]:
 
 
 def main() -> int:
-    original = SRC.read_text()
-    digest = hashlib.sha256(original.encode()).hexdigest()
+    try:
+        _lock = battery_lock(_pl_guard.Path(__file__).resolve().parent.parent)
+        _lock.__enter__()
+    except BatteryLockBusy as exc:
+        print(f"❌ {exc}")
+        return 2
+    try:
+        return _main_locked()
+    finally:
+        _lock.__exit__(None, None, None)
+
+
+def _main_locked() -> int:
+    # ⛔ **원본을 두 번 읽지 않는다.** 두 읽기 사이에 외부 변경이 끼면 `original` 은 구
+    #    내용, handle 의 기준은 신 내용이 되어 **충돌 감지가 정확히 그 창에서 무력화**된다
+    #    (구 내용 기반 mutant 로 남의 변경을 덮는다). 스냅샷의 진실원은 하나다.
+    _handle = MutatedFile(SRC)
+    original = _handle.original
 
     try:
         import pytest  # noqa: F401
@@ -294,7 +316,7 @@ def main() -> int:
                 print(f"  INVALID  {name}  ← {why}")
                 invalid += 1
                 continue
-            SRC.write_text(mutated)
+            _handle.write_mutant(mutated)
             probes = _probes_for(name)
             results = {pr: _run(pr) for pr in probes}
             rcs = {pr: r.returncode for pr, r in results.items()}
@@ -325,8 +347,10 @@ def main() -> int:
                 print(f"  INFRA    {name}{tag}  ← pytest exit {bad} (테스트 실패 아님)")
                 infra += 1
     finally:
-        SRC.write_text(original)
-        assert hashlib.sha256(SRC.read_text().encode()).hexdigest() == digest, "원본 복원 실패"
+        # ⛔ **무조건 덮어쓰지 않는다.** "복원 후 sha == 내 스냅샷" 은 충돌 부재를 증명하지
+        #    못한다 — 남이 그 사이 정상 변경을 했어도 스냅샷으로 덮으면 sha 는 일치한다.
+        #    실제로 그렇게 `init_rest_auth_app()` 편집이 사라졌다.
+        _handle.restore()
 
     print(f"\n  killed={killed} survived={survived} invalid={invalid} infra={infra} / {len(MUTANTS)}")
     return 0 if (survived == 0 and invalid == 0 and infra == 0) else 1

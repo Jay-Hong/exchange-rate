@@ -34,6 +34,11 @@ _credential = None
 WS_AUTH_APP_NAME = "ws-auth"
 _ws_auth_app = None
 
+# S1b — REST 인증 전용 app. 같은 이유(`httpTimeout` 이 app 단위)로 REST 도 자기 app 을 갖는다.
+# ⛔ DEFAULT 를 낮추면 FCM 까지 낮아진다 — 그래서 DEFAULT 는 **건드리지 않는다**.
+REST_AUTH_APP_NAME = "rest-auth"
+_rest_auth_app = None
+
 
 def init_firebase() -> bool:
     """Firebase Admin SDK 초기화"""
@@ -109,6 +114,54 @@ def ws_auth_app():
     나고 그건 분류기가 모르는 예외라 **연결이 끊긴다**(§8-C 프레임이 아니라).
     """
     return _ws_auth_app
+
+
+def init_rest_auth_app() -> bool:
+    """S1b — REST 인증 전용 named app. `init_ws_auth_app` 과 **같은 계약**이다.
+
+    ⛔ 왜 DEFAULT app 을 쓰지 않는가: `httpTimeout` 은 **app 단위**라, DEFAULT 를 낮추면 FCM 등
+    같은 app 을 쓰는 다른 SDK client 까지 함께 낮아진다. 결합을 끊는 방법은 named app 뿐이다.
+    ⚠️ 그래도 **완전 분리는 아니다** — credential·project·Google endpoint 는 공유한다. 갈리는
+       것은 verifier·인증서 client·timeout·큐 상태다.
+    ⛔ 지연 초기화 금지 — 검증은 executor thread 에서 도는데 거기서 처음 만들면 동시 진입 시
+       `initialize_app` 이 중복 호출돼 `ValueError` 가 난다. 기동 시 **1회** 부른다.
+    """
+    global _rest_auth_app
+
+    if _rest_auth_app is not None:
+        return True
+    if not init_firebase() or _credential is None:
+        return False
+    try:
+        try:
+            _rest_auth_app = firebase_admin.get_app(REST_AUTH_APP_NAME)
+        except ValueError:
+            _rest_auth_app = firebase_admin.initialize_app(
+                # ⛔ DEFAULT 와 **같은 credential** 이다 — 다른 자격을 주면 같은 프로젝트를 본다는
+                #    보장이 사라진다(project id 는 credential 에서 해석된다).
+                _credential,
+                {"httpTimeout": config.REST_AUTH_HTTP_TIMEOUT_SECONDS},
+                name=REST_AUTH_APP_NAME,
+            )
+        logger.info(
+            "REST 인증 전용 Firebase app 초기화 완료",
+            extra={"http_timeout": config.REST_AUTH_HTTP_TIMEOUT_SECONDS},
+        )
+        return True
+    except Exception:
+        logger.exception("REST 인증 전용 Firebase app 초기화 실패")
+        _rest_auth_app = None
+        return False
+
+
+def rest_auth_app():
+    """REST 인증 전용 app 또는 `None`(미준비).
+
+    ⛔ 호출부는 **`None` 을 반드시 처리**해야 한다 — `is_firebase_initialized()` 는 DEFAULT app 만
+    추적하므로 그것만 보고 이 app 이 있다고 가정하면 안 된다. `verify_firebase_token` 은 `None` 을
+    **503** 으로 접는다(자격 실패가 아니라 판정 불가다).
+    """
+    return _rest_auth_app
 
 
 def is_firebase_initialized() -> bool:

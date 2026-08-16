@@ -31,6 +31,7 @@ from app.config import REDIS_LATEST_ENABLED
 from app.latest_rates_cache import fetch_rates_from_redis, warmup_latest_rates
 from app.notifications.fcm import (
     init_firebase,
+    init_rest_auth_app,
     init_ws_auth_app,
     is_firebase_initialized,
     send_fcm_data_only,
@@ -637,6 +638,7 @@ async def lifespan(app: FastAPI):
         # ⛔ **지연 초기화 금지** — 검증은 `to_thread` 안에서 돌아 동시 진입 시 `initialize_app`
         #    중복 호출로 ValueError 가 난다. 기동 시 1회만 만든다.
         init_ws_auth_app()
+        init_rest_auth_app()
         logger.info("✅ Firebase Admin SDK 초기화 완료")
     else:
         logger.warning("⚠️ Firebase Admin SDK 초기화 실패 (FCM 비활성화)")
@@ -648,8 +650,12 @@ async def lifespan(app: FastAPI):
     #    yield 는 이 블록 **밖**이다: 안에 넣으면 정상 운영·shutdown 예외가
     #    startup 실패로 오분류된다. lifespan 전체를 트랜잭션화하지 않는다 —
     #    probe·scheduler·collector 의 side effect 는 되돌리지 않는다.
+    # ⛔ 두 lane 을 **각자의 scope** 로 감싼다 — 한 scope 가 둘을 관리하면 `created` 판정이
+    #    결합돼, 한쪽이 이미 살아 있는 상태에서 다른 쪽 startup 이 실패할 때 남의 lane 을 내린다.
     async with auth_executor.ws_auth_lane_startup_scope(
-            config.WS_AUTH_EXECUTOR_WORKERS):
+            config.WS_AUTH_EXECUTOR_WORKERS), \
+            auth_executor.rest_auth_lane_startup_scope(
+                config.REST_AUTH_EXECUTOR_WORKERS):
 
         # ⚠️ canary 전용 sentinel — 기본 off 라 평소엔 task 자체가 생기지 않는다.
         # ⛔ 루프를 **여기 인라인 클로저로 두지 말 것**: 한때 그랬는데, 그러면 테스트가 닿을 수단이
@@ -726,7 +732,25 @@ async def lifespan(app: FastAPI):
     #    SDK 재시도 같은 긴 꼬리가 없다.
     await default_executor_probe.stop_default_executor_probe()
 
-    _auth_executor_closing = auth_executor.begin_auth_executor_shutdown()
+    # ⛔ **한 lane 의 실패가 다른 lane 을 건너뛰면 안 된다.** 순차로 부르면 첫 `begin` 이
+    #    던지는 순간 나머지 lane 은 종료조차 시도되지 않는다 — 다음 lifespan 이 구 worker 와
+    #    겹친다. 전부 시도하고 실패는 보고한다.
+    #    ⚠️ shutdown 경로라 재전파하지 않는다(재전파하면 뒤따르는 정리가 통째로 날아간다).
+    _lane_closing: dict[str, Any] = {}
+    for _lane_name, _lane_begin in (
+            ("ws", auth_executor.begin_auth_executor_shutdown),
+            ("rest", auth_executor.begin_rest_auth_executor_shutdown)):
+        try:
+            _lane_closing[_lane_name] = _lane_begin()
+        except BaseException:  # noqa: BLE001 — 다른 lane 종료가 우선이다
+            _lane_closing[_lane_name] = None
+            # ⛔ **진단 로깅도 보호한다.** 여기서 `logger.exception` 이 던지면 loop 가 그대로
+            #    깨져 **다음 lane 은 종료조차 시도되지 않는다** — 격리를 세워놓고 로깅으로
+            #    다시 무너뜨리는 셈이다(S1a′ 에서 같은 계약을 rollback 경로에 잠갔다).
+            try:
+                logger.exception("auth lane 종료 시작 실패", extra={"lane": _lane_name})
+            except BaseException:  # pragma: no cover - 최후 방어
+                pass
 
     # ⛔ **drain 중 예외가 나도 합류는 해야 한다** — 건너뛰면 다음 lifespan 이 구 worker
     #    스레드와 겹친다(`TestClient` 는 lifespan 을 여러 번 연다).
@@ -780,7 +804,17 @@ async def lifespan(app: FastAPI):
     finally:
         # ⚠️ **여기서 마무리한다** — 위 drain 들이 loop 를 쓰는 동안 인증 worker 는 자기 스레드에서
         #    끝나가고, 다음 lifespan 이 구 스레드와 겹치지 않도록 마지막에 합류시킨다.
-        await auth_executor.await_auth_executor_shutdown(_auth_executor_closing)
+        for _lane_name, _lane_await in (
+                ("ws", auth_executor.await_auth_executor_shutdown),
+                ("rest", auth_executor.await_rest_auth_executor_shutdown)):
+            try:
+                await _lane_await(_lane_closing.get(_lane_name))
+            except BaseException:  # noqa: BLE001 — 나머지 lane 합류가 우선이다
+                # ⛔ 위와 같은 이유로 로깅을 보호한다 — 로깅 실패가 다음 lane 합류를 막는다.
+                try:
+                    logger.exception("auth lane 합류 실패", extra={"lane": _lane_name})
+                except BaseException:  # pragma: no cover - 최후 방어
+                    pass
 
 async def build_graph_buckets() -> dict:
     """
@@ -3440,11 +3474,19 @@ async def verify_firebase_token(request: Request, check_revoked: bool = False) -
     """
     from firebase_admin import auth
 
+    from app.notifications.fcm import rest_auth_app
+
     if not is_firebase_initialized():
         raise HTTPException(
             status_code=503,
             detail="Firebase not initialized"
         )
+
+    # ⛔ `is_firebase_initialized()` 는 **DEFAULT app 만** 추적한다 — named app 준비 여부를
+    #    증명하지 않는다. 따로 본다. 미준비는 자격 실패가 아니라 **판정 불가**(503)다.
+    auth_app = rest_auth_app()
+    if auth_app is None:
+        raise HTTPException(status_code=503, detail="Firebase auth unavailable")
 
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -3458,9 +3500,23 @@ async def verify_firebase_token(request: Request, check_revoked: bool = False) -
     # ⛔ `try` 는 **SDK 호출과 그 결과 처리**만 덮는다. 위의 preflight `HTTPException` 이 여기
     #    들어오면 분류기가 그것을 재분류해 401/503 이 뒤바뀐다.
     try:
-        decoded_token = auth.verify_id_token(token, check_revoked=check_revoked)
+        # ⛔ **맨 동기 호출이 아니다.** 구 코드는 `async def` 안에서 `auth.verify_id_token` 을
+        #    그대로 불러 **이벤트 루프를 직접** 막았다 — DEFAULT app 이라 SDK 기본
+        #    `httpTimeout`(120s)이 그대로였다.
+        # ⛔ `asyncio.to_thread` 도 아니다 — 그건 loop 의 **기본** executor 라 동거 작업(atomic
+        #    loader/store, DB selector)이 함께 밀린다. WS 와도 **분리된** 전용 pool 을 쓴다.
+        # ⛔ `app=` 를 빠뜨리면 DEFAULT app 이 쓰여 **낮춘 `httpTimeout` 이 통째로 no-op** 이 된다.
+        #    호출 인자만이 증거라 로그·타이밍 어디에도 흔적이 남지 않는다.
+        decoded_token = await auth_executor.run_in_rest_auth_executor(
+            auth.verify_id_token, token, app=auth_app, check_revoked=check_revoked
+        )
         user_id = decoded_token["uid"]
         return user_id
+    except auth_executor.AuthExecutorNotReady:
+        # ⛔ Firebase 분류기보다 **먼저** 잡는다. lane 미준비는 Firebase 장애가 아니라 우리 쪽
+        #    준비 상태이고, 아래 사다리에는 이 타입을 아는 절이 없어 재전파(500)가 될 것이다.
+        #    사용자에겐 둘 다 "지금은 판정 불가"라 503 이 맞다.
+        raise HTTPException(status_code=503, detail="Firebase auth unavailable")
     except Exception as exc:  # noqa: BLE001 — 분류 후 분류 불가면 그대로 재전파한다
         # ⚠️ `BaseException` 이 **아닌** 것은 지금 당장은 행동 차이를 만들지 않는다 — 아래
         #    재전파가 있어서 넓혀도 취소는 그대로 올라간다(변이로 실측). 이 경계는 **미래

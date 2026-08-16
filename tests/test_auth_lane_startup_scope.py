@@ -181,7 +181,10 @@ def test_rollback_failure_does_not_mask_the_startup_cause(monkeypatch):
     """⛔ rollback 이 던지면 원래 startup 예외가 사라져 운영자가 진짜 원인을 못 본다."""
     def boom():
         raise RuntimeError("rollback 자체 실패")
-    monkeypatch.setattr(auth_executor, "begin_auth_executor_shutdown", boom)
+    # ⛔ **lane 을 직접 patch 한다.** S1b 에서 scope 가 lane 메서드를 직접 부르도록 바뀌어
+    #    모듈 facade patch 는 더 이상 닿지 않는다 — 모듈 docstring 이 경고한 그 함정이다.
+    #    (이 테스트들이 red 로 그 변화를 드러냈다: 공허하게 통과하지 않았다.)
+    monkeypatch.setattr(auth_executor._ws_lane, "begin_auth_executor_shutdown", boom)
 
     async def scenario():
         with pytest.raises(RuntimeError, match="원래 startup 실패"):
@@ -195,7 +198,10 @@ def test_rollback_failure_is_actually_logged(monkeypatch, caplog):
     rollback 실패가 **아무 데도 안 남는다**(codex)."""
     def boom():
         raise RuntimeError("rollback 자체 실패")
-    monkeypatch.setattr(auth_executor, "begin_auth_executor_shutdown", boom)
+    # ⛔ **lane 을 직접 patch 한다.** S1b 에서 scope 가 lane 메서드를 직접 부르도록 바뀌어
+    #    모듈 facade patch 는 더 이상 닿지 않는다 — 모듈 docstring 이 경고한 그 함정이다.
+    #    (이 테스트들이 red 로 그 변화를 드러냈다: 공허하게 통과하지 않았다.)
+    monkeypatch.setattr(auth_executor._ws_lane, "begin_auth_executor_shutdown", boom)
 
     async def scenario():
         with caplog.at_level("ERROR"):
@@ -213,7 +219,10 @@ def test_logging_failure_does_not_mask_the_startup_cause(monkeypatch):
         raise RuntimeError("rollback 자체 실패")
     def log_boom(*a, **k):
         raise RuntimeError("로깅도 실패")
-    monkeypatch.setattr(auth_executor, "begin_auth_executor_shutdown", boom)
+    # ⛔ **lane 을 직접 patch 한다.** S1b 에서 scope 가 lane 메서드를 직접 부르도록 바뀌어
+    #    모듈 facade patch 는 더 이상 닿지 않는다 — 모듈 docstring 이 경고한 그 함정이다.
+    #    (이 테스트들이 red 로 그 변화를 드러냈다: 공허하게 통과하지 않았다.)
+    monkeypatch.setattr(auth_executor._ws_lane, "begin_auth_executor_shutdown", boom)
     monkeypatch.setattr(auth_executor.logger, "exception", log_boom)
 
     async def scenario():

@@ -94,15 +94,41 @@ class TestStubFidelity(unittest.TestCase):
 
 
 class _MappingBase(unittest.IsolatedAsyncioTestCase):
+    """S1b — **진짜 REST lane 을 띄운 채** 검증한다.
+
+    ⛔ executor 를 흉내내면 배선(전용 pool 로 나가는지)이 검증되지 않는다. lane 을 실제로
+       start 해서 SDK 호출이 **loop thread 밖**에서 도는지까지 볼 수 있게 한다.
+    """
+
+    REST_APP = object()   # identity 비교용 sentinel — `app=` 누락·오배선을 잡는다
+
+    async def asyncSetUp(self):
+        from app import auth_executor
+
+        # module-global lane 을 알려진 baseline 으로 만든다. 앞선 테스트가 남긴 live pool 에
+        # 기대면 실행 순서와 동시 변이 여부에 따라 결과가 달라진다.
+        await self._stop_rest_lane()
+        auth_executor.start_rest_auth_executor(2)
+        self.addAsyncCleanup(self._stop_rest_lane)
+
+    async def _stop_rest_lane(self):
+        from app import auth_executor
+
+        await auth_executor.await_rest_auth_executor_shutdown(
+            auth_executor.begin_rest_auth_executor_shutdown()
+        )
+
     async def _verify(self, *, raises=None, header="Bearer tok", initialized=True,
-                      returns=None, check_revoked=False):
+                      returns=None, check_revoked=False, rest_app=...):
         verify_id_token = MagicMock()
         if raises is not None:
             verify_id_token.side_effect = raises
         else:
             verify_id_token.return_value = returns if returns is not None else {"uid": "u1"}
+        app_obj = self.REST_APP if rest_app is ... else rest_app
         with patch.object(fb_auth, "verify_id_token", verify_id_token), \
-             patch("app.main.is_firebase_initialized", return_value=initialized):
+             patch("app.main.is_firebase_initialized", return_value=initialized), \
+             patch("app.notifications.fcm.rest_auth_app", return_value=app_obj):
             result = await verify_firebase_token(_request(header), check_revoked=check_revoked)
         return result, verify_id_token
 
@@ -296,13 +322,14 @@ class TestCatchBoundaryIsStructural(unittest.TestCase):
         # ⛔ 함수 안 **모든** try 를 세지 않는다 — 나중에 무관한 try 가 생기면 이 단언이
         #    엉뚱하게 깨지거나(더 나쁘게) 겨냥이 흐려진다. `verify_id_token` 호출을 **포함한**
         #    try 만 집는다(codex).
+        # ⚠️ **호출이 아니라 참조**로 찾는다 — S1b 에서 `verify_id_token` 은 executor 에 넘기는
+        #    **인자**가 되어 더 이상 `ast.Call` 이 아니다. 호출만 보던 겨냥이 그 변경에 red 를
+        #    냈고(공허하게 통과하지 않았다), 참조 기준이 두 형태를 모두 덮는다.
         targets = [
             node for node in ast.walk(fn)
             if isinstance(node, ast.Try)
             and any(
-                isinstance(c, ast.Call)
-                and isinstance(c.func, ast.Attribute)
-                and c.func.attr == "verify_id_token"
+                isinstance(c, ast.Attribute) and c.attr == "verify_id_token"
                 for c in ast.walk(node)
             )
         ]
@@ -314,7 +341,20 @@ class TestCatchBoundaryIsStructural(unittest.TestCase):
 
     def test_helper_catches_exception_not_base_exception(self):
         handlers = self._handler_types()
-        self.assertEqual(handlers, ["Exception"], f"catch 경계가 바뀌었다: {handlers}")
+        # ⛔ 마지막 절이 `Exception` 이어야 한다. `BaseException` 이면 취소·종료가 삼켜질 폭이 된다.
+        self.assertEqual(handlers[-1], "Exception", f"catch 경계가 바뀌었다: {handlers}")
+        self.assertNotIn("BaseException", handlers)
+
+    def test_executor_not_ready_is_classified_before_firebase(self):
+        """⛔ lane 미준비 절이 **Firebase 분류기보다 앞**에 있어야 한다.
+
+        뒤에 두면 `AuthExecutorNotReady` 는 사다리가 모르는 타입이라 재전파(500)가 된다 —
+        우리 준비 상태를 서버 버그로 위장한다. 사용자에겐 "지금은 판정 불가"(503)가 맞다.
+        """
+        handlers = self._handler_types()
+        self.assertIn("auth_executor.AuthExecutorNotReady", handlers)
+        self.assertLess(handlers.index("auth_executor.AuthExecutorNotReady"),
+                        handlers.index("Exception"))
 
 
 class TestRestLadderRungsAddedByS1b0(_MappingBase):
@@ -588,6 +628,55 @@ class TestWsAuthAppInitialization(unittest.TestCase):
         """⛔ `None` 을 돌려줘야 호출부가 §8-C 프레임으로 접을 수 있다 — 예외를 던지면
         분류기가 모르는 상태가 되어 **연결이 끊긴다**."""
         self.assertIsNone(self._fcm.ws_auth_app())
+
+
+class TestRestAuthAppInitialization(unittest.TestCase):
+    """S1b — REST named app 이 자기 timeout 을 실제 options 로 전달한다."""
+
+    def setUp(self):
+        from app.notifications import fcm
+
+        self._fcm = fcm
+        self._saved_app = fcm._rest_auth_app
+        self._saved_cred = fcm._credential
+        fcm._rest_auth_app = None
+        fcm._credential = object()
+
+    def tearDown(self):
+        self._fcm._rest_auth_app = self._saved_app
+        self._fcm._credential = self._saved_cred
+
+    def test_named_app_carries_the_rest_timeout(self):
+        import firebase_admin
+
+        from app import config
+
+        created = object()
+        with patch.object(self._fcm, "init_firebase", return_value=True), \
+             patch.object(firebase_admin, "get_app", side_effect=ValueError("none")), \
+             patch.object(firebase_admin, "initialize_app", return_value=created) as init:
+            self.assertTrue(self._fcm.init_rest_auth_app())
+        self.assertIs(self._fcm.rest_auth_app(), created)
+        args, kwargs = init.call_args
+        self.assertEqual(
+            args[1], {"httpTimeout": config.REST_AUTH_HTTP_TIMEOUT_SECONDS},
+            "REST timeout 이 options 에 실리지 않으면 SDK 기본 120초가 그대로다",
+        )
+        self.assertEqual(kwargs.get("name"), self._fcm.REST_AUTH_APP_NAME)
+
+    def test_initialization_is_idempotent(self):
+        import firebase_admin
+
+        created = object()
+        with patch.object(self._fcm, "init_firebase", return_value=True), \
+             patch.object(firebase_admin, "get_app", side_effect=ValueError("none")), \
+             patch.object(firebase_admin, "initialize_app", return_value=created) as init:
+            self.assertTrue(self._fcm.init_rest_auth_app())
+            self.assertTrue(self._fcm.init_rest_auth_app())
+        self.assertEqual(init.call_count, 1)
+
+    def test_accessor_is_none_before_initialization(self):
+        self.assertIsNone(self._fcm.rest_auth_app())
 
 
 if __name__ == "__main__":
