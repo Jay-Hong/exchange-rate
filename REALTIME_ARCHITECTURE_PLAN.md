@@ -67,10 +67,10 @@ USDT 수집 완료 후 → changed_rates 기반 → 같은 트랜잭션에서 pr
 ### 핵심 코드 참조
 
 - 크롤러 cron: [app/scheduler.py:591](app/scheduler.py#L591) (investing), [app/scheduler.py:1428](app/scheduler.py#L1428) (USDT)
-- Broadcasting: [app/main.py:347](app/main.py#L347) `broadcast_rates_once`, [app/main.py:201](app/main.py#L201) `build_rates_payload`
-- Connection 관리: [app/main.py:155](app/main.py#L155) `ConnectionManager`, [app/main.py:171](app/main.py#L171) 순차 broadcast
-- Graph 결합: [app/main.py:360-364](app/main.py#L360-L364) (broadcast 변경 시 graph_buckets 결합)
-- Snapshot 캐시: [app/main.py:422](app/main.py#L422) 단일 BROADCAST_CACHE_KEY
+- Broadcasting: [app/main.py:348](app/main.py#L348) `broadcast_rates_once`, [app/main.py:202](app/main.py#L202) `build_rates_payload`
+- Connection 관리: [app/main.py:156](app/main.py#L156) `ConnectionManager`, [app/main.py:172](app/main.py#L172) 순차 broadcast
+- Graph 결합: [app/main.py:361-365](app/main.py#L361-L365) (broadcast 변경 시 graph_buckets 결합)
+- Snapshot 캐시: [app/main.py:423](app/main.py#L423) 단일 BROADCAST_CACHE_KEY
 - USDT 알림: [app/crawlers/usdt_sources.py:149](app/crawlers/usdt_sources.py#L149) `changed_rates`, [app/crawlers/usdt_sources.py:189-202](app/crawlers/usdt_sources.py#L189-L202) DB 트랜잭션 내 동기 호출
 - Investing TLS 우회: [app/crawlers/investing.py:102](app/crawlers/investing.py#L102) curl_cffi `safari17_0` (ADR-018)
 
@@ -82,10 +82,10 @@ USDT 수집 완료 후 → changed_rates 기반 → 같은 트랜잭션에서 pr
 |---|------|------|
 | 1 | REST polling이 10초 단위 — 거래소 가격 급변동 시 평균 5초 지연 | USDT 김치프리미엄 시나리오에 부족 |
 | 2 | 전체 broadcast 단일 채널 — 모든 클라이언트에 동일한 전체 payload | 탭별 차등 전송 불가, 대역폭 낭비 |
-| 3 | `manager.broadcast` 순차 전송 ([main.py:175-180](app/main.py#L175-L180)) | 1초 broadcast + 다수 연결 시 직렬 await가 병목 |
+| 3 | `manager.broadcast` 순차 전송 ([main.py:176-181](app/main.py#L176-L181)) | 1초 broadcast + 다수 연결 시 직렬 await가 병목 |
 | 4 | `--disable-javascript`가 SELENIUM_OPTIONS에 박혀 있음 ([constants.py:49](app/crawlers/constants.py#L49)) | Investing 자동 업데이트 감시용 long-running browser 시도 시 별도 옵션 필요 |
-| 5 | broadcast마다 graph_buckets DB 조회 ([main.py:360](app/main.py#L360)) | 1초 broadcast로 가면 매초 DB 조회 — 부담 |
-| 6 | snapshot 캐시가 단일 `BROADCAST_CACHE_KEY` ([main.py:422](app/main.py#L422)) | 토픽 분리 후에도 snapshot이 분리되지 않으면 재연결 시 비효율 |
+| 5 | broadcast마다 graph_buckets DB 조회 ([main.py:361](app/main.py#L361)) | 1초 broadcast로 가면 매초 DB 조회 — 부담 |
+| 6 | snapshot 캐시가 단일 `BROADCAST_CACHE_KEY` ([main.py:423](app/main.py#L423)) | 토픽 분리 후에도 snapshot이 분리되지 않으면 재연결 시 비효율 |
 | 7 | 알림 평가가 DB INSERT 흐름에 강결합 ([usdt_sources.py:189-202](app/crawlers/usdt_sources.py#L189-L202)) | tick → Redis 흐름으로 가면 알림 판단 경로가 끊김 |
 | 8 | tick을 모두 INSERT하면 `source_rates`가 폭증 | 5 거래소 × 초당 N tick × 10일 보관 시 수백만~수천만 row |
 
@@ -392,7 +392,7 @@ PoC 단계에서 1번 → 2번 → 3번 순으로 시도. 모든 단계에서 **
 
 - 실시간 tick과 분리된 **별도 토픽** (`graph:<pair>:<range>`)
 - Push 빈도는 분 단위 (정확한 수치는 미정 항목)
-- 기존 `build_graph_buckets` 결합 ([main.py:360-364](app/main.py#L360-L364)) 제거 — 1초 broadcast에 graph가 따라붙으면 매초 DB 조회
+- 기존 `build_graph_buckets` 결합 ([main.py:361-365](app/main.py#L361-L365)) 제거 — 1초 broadcast에 graph가 따라붙으면 매초 DB 조회
 
 ### 알림 정책
 

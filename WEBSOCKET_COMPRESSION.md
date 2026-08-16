@@ -117,7 +117,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 **문제:**
 ```python
-# Thread 1 (Broadcast) - app/main.py:142-173
+# Thread 1 (Broadcast) - app/main.py:143-174
 14:30:00.000 - has_changes_since(14:29:50) → True
 14:30:00.100 - get_all_rates_flat() → [30 records, max_ts=14:29:55]
 14:30:00.200 - last_broadcast_time = datetime.now()  # ❌ 14:30:00.200
@@ -763,7 +763,7 @@ ws.onopen = () => {
 
 **변경 전:**
 ```python
-# app/main.py:170-172
+# app/main.py:171-173
 last_broadcast_time = datetime.now(KST)
 ```
 

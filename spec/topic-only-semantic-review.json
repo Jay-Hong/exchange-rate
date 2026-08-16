@@ -47,7 +47,9 @@
           "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
           "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "S1b-0 REST Firebase 인증 분류 at b8f5c94: 기존 helper 의 예외 처리를 순수 12단 분류기로 분리하고 broad fallback 을 재전파(500)로 바꾼 것, 하위→상위 순서가 load-bearing 함을 잠근 변이, 같은 503 을 category·로그 severity 로 갈라 절 이동 변이를 잡은 결속, 로그 예외 메시지에 포함되던 uid 제거, 그리고 지적받은 산문 과장을 SDK verify() 도달성 재감사로 검증해 잘못된 iOS .stop 논거를 철회하고 실제 도달 범위를 check_revoked=True 경로 하나로 확정한 것",
-          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
+          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
+          "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
+          "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -77,7 +79,9 @@
           "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
           "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속",
           "S1b-0 gate: 예외 메시지가 uid 를 로그로 흘리는 것과 분류기 반환만 검사해 logger 배선이 통째로 비어 있어도 초록이던 공백을 짚고, 도달 범위·이름·경계 산문 4건의 과장과 인용 스캔이 app/ 접두 없는 표기를 놓친 것을 지적",
-          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정"
+          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정",
+          "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
+          "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적"
         ]
       },
       {
@@ -114,7 +118,9 @@
           "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
           "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속",
           "S1b-0 gate: 예외 메시지가 uid 를 로그로 흘리는 것과 분류기 반환만 검사해 logger 배선이 통째로 비어 있어도 초록이던 공백을 짚고, 도달 범위·이름·경계 산문 4건의 과장과 인용 스캔이 app/ 접두 없는 표기를 놓친 것을 지적",
-          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정"
+          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정",
+          "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
+          "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -153,7 +159,9 @@
           "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
           "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "S1b-0 REST Firebase 인증 분류 at b8f5c94: 기존 helper 의 예외 처리를 순수 12단 분류기로 분리하고 broad fallback 을 재전파(500)로 바꾼 것, 하위→상위 순서가 load-bearing 함을 잠근 변이, 같은 503 을 category·로그 severity 로 갈라 절 이동 변이를 잡은 결속, 로그 예외 메시지에 포함되던 uid 제거, 그리고 지적받은 산문 과장을 SDK verify() 도달성 재감사로 검증해 잘못된 iOS .stop 논거를 철회하고 실제 도달 범위를 check_revoked=True 경로 하나로 확정한 것",
-          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
+          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
+          "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
+          "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ]
       }
     ],
@@ -198,7 +206,9 @@
           "S1a′ auth lane startup rollback at 5c9b932: lifespan startup 이 yield 전에 실패하면 **이번 시도가 만든** auth lane 만 조건부 보상 종료하는 scope, start 호출을 try 안에 두어 부분 성공도 되돌리는 경계, BaseException 으로 취소까지 포함, begin 이 아니라 await 로 합류, rollback 실패와 **진단 로깅 실패**가 각각 원 startup 예외를 덮지 않음, 그리고 범위를 라인이 아니라 AST 구조와 두 anchor 도달 기점 주입으로 잠근 배선 테스트",
           "C2 re-baseline for S1a′: main.py 훅 +5 로 밀린 live 인용을 해시체인·게이트 문서 33 occurrence 와 게이트 밖 문서 11 occurrence 로 나눠 이동하고, 후보를 산문 주장과 old pin 실제 내용 대조로 분류해 이미 어긋나 있던 7 locator 를 재봉인 대상에서 분리, SEM-035 사료 좌표 동결 복구, 마크다운 #L 앵커 누수 교정, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "S1b-0 REST Firebase 인증 분류 at b8f5c94: 기존 helper 의 예외 처리를 순수 12단 분류기로 분리하고 broad fallback 을 재전파(500)로 바꾼 것, 하위→상위 순서가 load-bearing 함을 잠근 변이, 같은 503 을 category·로그 severity 로 갈라 절 이동 변이를 잡은 결속, 로그 예외 메시지에 포함되던 uid 제거, 그리고 지적받은 산문 과장을 SDK verify() 도달성 재감사로 검증해 잘못된 iOS .stop 논거를 철회하고 실제 도달 범위를 check_revoked=True 경로 하나로 확정한 것",
-          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
+          "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
+          "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
+          "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출"
         ],
         "result": "pass"
       },
@@ -233,7 +243,9 @@
           "S1a′ wiring test strengthening: 주입 도달과 예외 종류를 확인하지 않아 더 앞선 startup 실패로도 통과할 수 있던 4케이스를 실제 Task.cancel, HITS 단일 도달, 기대 예외형, child exit code, 조기 실패 fast-fail 로 결속",
           "S1a′ battery and ledger correction: 로깅 보호 추가로 앵커가 사라진 바깥-except 마스킹 변이를 삭제가 아니라 재조준해 계약 공백을 막고, provenance 만 고쳐져 본문과 어긋나 있던 R-LOAD-4 의 unit_text·unit_sha256·detail 을 현재 후보로 재결속",
           "S1b-0 gate: 예외 메시지가 uid 를 로그로 흘리는 것과 분류기 반환만 검사해 logger 배선이 통째로 비어 있어도 초록이던 공백을 짚고, 도달 범위·이름·경계 산문 4건의 과장과 인용 스캔이 app/ 접두 없는 표기를 놓친 것을 지적",
-          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정"
+          "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정",
+          "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
+          "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적"
         ],
         "result": "pass"
       }
@@ -247,21 +259,21 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "b4da3a0fcbceba13f6fa153331e5af9283cf8dbb5ef82e38fb01e6c4c7a2da00",
-    "baseline_sha256": "52501e595e0e9c453a1d1080fd412a98266cfb12568aca4add308015f83cce3d",
-    "lock_sha256": "6fa4d81de83b53eec403af20d709dfb6bd6744cd2253102072b97c1417ee081b",
-    "server_commit": "b8f5c94fbf41323af6aae8b51ae660f81d1a9193",
+    "manifest_sha256": "a9587c640c68c7134362ba2f657d5e3bb121db4f92354643ead55a49388a3ec0",
+    "baseline_sha256": "2879270aca0c99022664cf8bece6af7a0f4ae59d5b824c3b0f2d255a8abc16b7",
+    "lock_sha256": "3dc073078255ea1d8162ec6e6fc0166bc9dc135431b553a2ee60e4f9184d3a62",
+    "server_commit": "f4e63a1a9bf2ef0a7ec4d4ac0aed09db0c3a15dc",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "eddb2f16034a6d086f0d5a4c70559cb9f52acc43962cf2463b3a611632b32f7a",
-    "CLIENT": "ca5b068b207f00ce0ec3aac61f828c534a5ad02d14b52237c8ea5ae506032ff3",
-    "CUT": "741e0fcce5614ef6cbb017def2528255575110228f4f0d9416c08498cddd0fd2",
-    "HAND": "e9c9a3d849c522eac8066ea5a56e8f871daab8ab23dacab5d4b4c23ec2332528",
-    "HEALTH": "78ff84c49c68cdf37c2ff59329a126539e476af6a4293b096ec4bb52af8f0c7b",
-    "LOAD": "b0417b507e20d1b991d60d6714a2d8bf50e599be6255c854807b97a1a0930334"
+    "ADR": "2ce667ed72cc6ea37be1b83525f34ee4673466b77ef0cf27de3a2de78c0baa38",
+    "CLIENT": "93de7887ebf1b0463d36c8eb5c077086db3d55cf1400a2b9f48ed78e2929b815",
+    "CUT": "547ad9211ce6765610cface26cf3a32a9af73bef0f5d05e5c538de6e915e1e16",
+    "HAND": "1d3450a399cf2b35a1640811c92045f08d6853e2e5ad3cf49e0e7e9af58e2882",
+    "HEALTH": "eb73e2877e12e8e93b6c43cc4fd22db27a176ae756a2c066f25df0330c0930d6",
+    "LOAD": "033248b27b8cd97c148e69ad0c12f927900350a314df623ca5121f2d6f626940"
   },
-  "claim_ledger_sha256": "dcf4ba3309508cde6161ed60811f41b5c8eda4333d6779cf64186b56deb55dfb",
+  "claim_ledger_sha256": "896f02618be34acb254c60fa0d6119600540b5f8d4d67e5afab950abc62e27a5",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
@@ -767,7 +779,7 @@
         "spec/topic-only-implementation-ledger.json"
       ],
       "issue": "The S1a′ C2 re-baseline first scoped its locator re-derivation to the six gated documents plus the hash chain, which is the same gate-outside blind spot SEM-034 recorded. Three separate errors followed from treating the shift as a uniform mechanical rewrite. A blanket regular expression moved app/main.py:2718 inside the SEM-035 finding text, even though an earlier C2 commit had explicitly frozen that coordinate as a record of a past defect, and the baseline tree already showed it pointing at build_period_exchange_series rather than the cache store it narrates. The implementation ledger kept the superseded manifest hash because the re-derivation walked the claim ledger and the semantic review but not that file. A repository-wide scan then found twenty-one candidate coordinates past the changed hunk rather than the eight the reviewer had reported, and the reviewer confirmed its own list was an omission reached by tracing only the three documents named in SEM-034 rather than by classifying every candidate.",
-      "disposition": "Every candidate was classified by comparing what the surrounding prose claims against what the cited range actually contains in the old pinned tree, rather than by trusting either list. Eight unique live locators matched their prose and were advanced, giving eleven occurrences once markdown label and anchor forms are counted separately, on top of the thirty-three occurrences inside the hash chain and the gated documents. Seven unique locators were already inconsistent with their prose at the old pin, so they are not drift produced by this C1; re-sealing them at the new pin would preserve a wrong target while falsely signalling that this change had corrected them, and they are therefore left untouched and separated as pre-existing debt for a follow-up C4 that must re-audit the sibling coordinates of the same claim clusters as well. This finding closes the misclassification and the scope claim, not those seven citations, and this verdict asserts nothing about their present accuracy. The SEM-035 coordinate was restored and re-frozen, and the implementation ledger was rebound to the current manifest. A repository-wide live versus historical locator gate, which would require an explicit marking convention such as the full forty-character blob form already used in finding locations, is deliberately deferred to its own slice rather than widened into this re-baseline. This finding text itself now carries the same frozen coordinate a second time, so it is subject to the identical rule: a later re-baseline must not advance app/main.py:2718 here either, and that duplication is itself part of the argument for the deferred marking convention."
+      "disposition": "Every candidate was classified by comparing what the surrounding prose claims against what the cited range actually contains in the old pinned tree, rather than by trusting either list. Eight unique live locators matched their prose and were advanced, giving eleven occurrences once markdown label and anchor forms are counted separately, on top of the thirty-three occurrences inside the hash chain and the gated documents. Seven unique locators were already inconsistent with their prose at the old pin, so they are not drift produced by this C1; re-sealing them at the new pin would preserve a wrong target while falsely signalling that this change had corrected them, and they are therefore left untouched and separated as pre-existing debt for a follow-up C4 that must re-audit the sibling coordinates of the same claim clusters as well. This finding closes the misclassification and the scope claim, not those seven citations, and this verdict asserts nothing about their present accuracy. The SEM-035 coordinate was restored and re-frozen, and the implementation ledger was rebound to the current manifest. A repository-wide live versus historical locator gate, which would require an explicit marking convention such as the full forty-character blob form already used in finding locations, is deliberately deferred to its own slice rather than widened into this re-baseline. This finding text itself now carries the same frozen coordinate a second time, so it is subject to the identical rule: a later re-baseline must not advance app/main.py:2718 here either, and that duplication is itself part of the argument for the deferred marking convention. A second re-baseline then remapped four more coordinates, seven occurrences, inside this journal's own finding narratives, which is the same error the frozen SEM-035 coordinate already warned about. The rule is therefore not a per-coordinate exclusion list but a class rule, and it separates three kinds rather than two. Locator tokens under .findings[*].issue and .findings[*].disposition are immutable journal text: changing one requires an explicit semantic amendment, never an offset remap. A locator explicitly bound to a commit or blob SHA is likewise historical. A locator already inconsistent with its prose at the old pin is not thereby historical — it is unresolved pre-existing debt and must stay unchanged pending a semantic audit, which is also why this verdict asserts nothing about its present accuracy. Everything else is only a live candidate and still requires old-versus-new target verification before it moves."
     }
   ],
   "residual_limits": [

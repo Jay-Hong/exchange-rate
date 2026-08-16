@@ -31,7 +31,7 @@
 
 ## 2. Current v1 graph behavior (anchor)
 
-`GET /api/graph/{currency}?range={1d|1w|3m|1y}` ([app/main.py:2468](app/main.py#L2468)):
+`GET /api/graph/{currency}?range={1d|1w|3m|1y}` ([app/main.py:2502](app/main.py#L2502)):
 
 - 통화: USD/JPY/EUR only
 - 1d (10분 bucket): investing + KB + 하나 + DXY (USD 탭만)
@@ -39,8 +39,8 @@
 - 3m/1y (1일 bucket): investing + DXY daily + realtime tail 7d
 - 응답 schema: `{"data": [...], "sources": {...}}` (legacy)
 - cache 실측 (2026-05-27 코드 확인):
-  - 1d: Redis `graph:{currency}` (TTL 120s) — [app/main.py:605](app/main.py#L605), [app/admin/graph_cache.py:651](app/admin/graph_cache.py#L651)
-  - 1w/3m/1y: in-memory `_period_cache["graph:{currency}:{period}"]` — [app/main.py:2661-2704](app/main.py#L2661-L2704)(선언·조회·eviction) · [app/main.py:2751-2753](app/main.py#L2751-L2753)(저장)
+  - 1d: Redis `graph:{currency}` (TTL 120s) — [app/main.py:606](app/main.py#L606), [app/admin/graph_cache.py:651](app/admin/graph_cache.py#L651)
+  - 1w/3m/1y: in-memory `_period_cache["graph:{currency}:{period}"]` — [app/main.py:2695-2738](app/main.py#L2695-L2738)(선언·조회·eviction) · [app/main.py:2785-2787](app/main.py#L2785-L2787)(저장)
 
 v2와 hot path 분리 + cache key prefix 분리 (v1 prefix `graph:`, v2 prefix `graph_v2:`).
 

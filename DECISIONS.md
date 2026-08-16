@@ -4009,7 +4009,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:2468](app/main.py#L2468))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:2502](app/main.py#L2502))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -4595,7 +4595,7 @@ class SourceDailyRate(Base):
 
 **Proposed** — Phase 2d 구현 진입 순서:
 
-1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `main.py:152`의 `Base.metadata.create_all(bind=engine)`이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
+1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `main.py:153`의 `Base.metadata.create_all(bind=engine)`이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
 2. **Backfill dry-run**: 각 source 별 backfill job 작성 + dry-run 모드 (실제 INSERT X, log only)
 3. **Source별 partial backfill**: 1 source씩 (예: KRX 먼저) 일부 date range 실측 적재 → 검증
 4. **전체 backfill**: 3 source 모두 historical 적재
@@ -4669,7 +4669,7 @@ ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규
 
 **Step 1 land 후 운영 상태**:
 
-- 코드 배포 시 `main.py:152` `Base.metadata.create_all(bind=engine)`이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
+- 코드 배포 시 `main.py:153` `Base.metadata.create_all(bind=engine)`이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
 - 운영 영향 거의 0 — read/write 호출자 X (helper module은 import 가능하나 사용자 없음)
 - ADR-034 §14 Rollout step 1 완료. Step 2 (backfill dry-run) 진입 가능.
 
@@ -6020,7 +6020,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 
 ### Decision 3 — 강제선의 현실 (per-user 한계 명시)
 
-`/ws`는 **익명**(main.py:876 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
+`/ws`는 **익명**(main.py:910 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
 (codex 지적, 코드 확인 2026-07-04). 1차 강제선:
 
 - **인증 있는 REST(알림 API) = G1+G2 서버 강제**: 김프알림 krx 조합 생성/수정 403,
@@ -6501,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `b8f5c94fbf41323af6aae8b51ae660f81d1a9193`
+- server 기준 commit: `f4e63a1a9bf2ef0a7ec4d4ac0aed09db0c3a15dc`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `b4da3a0fcbceba13f6fa153331e5af9283cf8dbb5ef82e38fb01e6c4c7a2da00`
-- baseline SHA: `52501e595e0e9c453a1d1080fd412a98266cfb12568aca4add308015f83cce3d`
+- manifest SHA: `a9587c640c68c7134362ba2f657d5e3bb121db4f92354643ead55a49388a3ec0`
+- baseline SHA: `2879270aca0c99022664cf8bece6af7a0f4ae59d5b824c3b0f2d255a8abc16b7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6564,7 +6564,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1167-1217` · `app/main.py:1031-1075`).
+(`app/main.py:1201-1251` · `app/main.py:1065-1109`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6593,7 +6593,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:691-833`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
-코드 기본값은 `compatibility` 다(`app/config.py:686-688`). production 의 실제 값은 아래 표가
+코드 기본값은 `compatibility` 다(`app/config.py:709-711`). production 의 실제 값은 아래 표가
 아니라 운영 직접 측정으로 확정한다.
 
 | stage | 익명 FX | 익명 USDT | 식별 FX/USDT | 식별 KRX |
@@ -6607,13 +6607,13 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe
 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
-근거: `app/config.py:645-688`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
+근거: `app/config.py:668-711`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
-구현 근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:87-93`(정책표) ·
+구현 근거: `app/config.py:668-711`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:691-833`(배선·등록) ·
-`app/main.py:3123-3126`(REST twin).
+`app/main.py:3157-3160`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
@@ -6695,7 +6695,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1402-1412` · `app/main.py:904-927`). 따라서 현재 경로에는
+  (`app/scheduler.py:1402-1412` · `app/main.py:938-961`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.

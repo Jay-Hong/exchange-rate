@@ -242,7 +242,7 @@ def switch_jobs(mode: str):
 
 #### 7. FastAPI 라이프사이클 통합
 
-**파일:** `app/main.py:87-98`
+**파일:** `app/main.py:88-99`
 
 **변경사항:**
 ```python

@@ -1471,7 +1471,7 @@ Phase B.1 (PR1~PR7 + follow-ups) 완료 후 후속 작업. 현재 main.py
 
 ### 14.1 문제 정의
 
-[main.py:677-696](app/main.py):
+[main.py:683-702](app/main.py):
 ```python
 new_json = json.dumps(payload, ensure_ascii=False)
 is_changed = new_json != cached_json   # legacy rates payload 기준

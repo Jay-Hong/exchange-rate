@@ -3,11 +3,11 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `b8f5c94fbf41323af6aae8b51ae660f81d1a9193`
+- server 기준 commit: `f4e63a1a9bf2ef0a7ec4d4ac0aed09db0c3a15dc`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `b4da3a0fcbceba13f6fa153331e5af9283cf8dbb5ef82e38fb01e6c4c7a2da00`
-- baseline SHA: `52501e595e0e9c453a1d1080fd412a98266cfb12568aca4add308015f83cce3d`
+- manifest SHA: `a9587c640c68c7134362ba2f657d5e3bb121db4f92354643ead55a49388a3ec0`
+- baseline SHA: `2879270aca0c99022664cf8bece6af7a0f4ae59d5b824c3b0f2d255a8abc16b7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > **이 문서의 몫**: 클라이언트가 **구조적으로 판별할 수 없는** publisher 침묵을 무엇으로 덮는가 —
@@ -37,14 +37,14 @@
 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT
 coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초
 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다
-(`app/scheduler.py:1402-1412` · `app/main.py:904-927`).
+(`app/scheduler.py:1402-1412` · `app/main.py:938-961`).
 
 **구멍이 어디서 생기는가.** 서버는 registry 등록과 ack 를 먼저 끝낸 뒤 initial snapshot 을 만들고,
 build 가 실패하거나 `None` 이면 **연결을 유지한 채 조용히 skip** 한다
 ([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)). 그래서 **연결·pong·ack·lease 가 전부 정상인데
 snapshot 이 한 번도 오지 않는 상태**가 실제로 표현된다. 그 뒤 **정상 발행되던 publisher 가 죽는
 경우**도 마찬가지로 침묵으로만 관측된다 — publisher 모듈에는 timer 가 없고(baseline B1), 외부
-caller 도 변경이 있을 때만 publish 한다(`app/main.py:904-927`). transport ping/pong 은 **연결
+caller 도 변경이 있을 때만 publish 한다(`app/main.py:938-961`). transport ping/pong 은 **연결
 생존만** 증명하지 특정 topic publisher 의 생존을 증명하지 않는다.
 
 코드 근거: baseline **B1**(data-plane heartbeat·주기적 재발행 부재) · **D3**(snapshot build
@@ -73,7 +73,7 @@ caller 도 변경이 있을 때만 publish 한다(`app/main.py:904-927`). transp
 [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택
 여부와 **무관하다**.
 판별 불가의 코드 근거: baseline **D3**(snapshot build 실패/`None` 을 연결 유지 상태로 격리)
-· **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:904-927`(외부 caller 도 변경 시에만 publish).
+· **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:938-961`(외부 caller 도 변경 시에만 publish).
 
 **시장 세션을 반영한 _인과 기반_ publisher health / SLO** + **수치화된 탐지·대응 시간**
 

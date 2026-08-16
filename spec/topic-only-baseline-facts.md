@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1221` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1255` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
 
 ## B. publish 의미론
 
@@ -54,10 +54,10 @@
 
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
-  stage 정의·엄격 파서·코드 기본값 `app/config.py:645-688` · **정책 정본**
+  stage 정의·엄격 파서·코드 기본값 `app/config.py:668-711` · **정책 정본**
   `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
   `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:556-578` ·
-  production 주입 `app/main.py:312-320`.
+  production 주입 `app/main.py:313-321`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
   모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
   `reject_anonymous_fx` 에서 값이 갈리므로 함수가 둘이다).
@@ -72,12 +72,12 @@
      Firebase 검증 전 관측이라 인증 사용자나 실제 RevenueCat 호출 수가 아니다
      (`app/topic_auth_rollout.py:254-296` · snapshot `app/topic_auth_rollout.py:339-400`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
-     (`app/main.py:302-320`).
+     (`app/main.py:303-321`).
 - **C2 [코드]** `app/topic_initial_snapshot.py:97` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3087` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3123` `verify_firebase_token(request)` → `app/main.py:3126`
+- **C3 [코드]** `exchange-rate/app/main.py:3121` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3157` `verify_firebase_token(request)` → `app/main.py:3160`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -119,7 +119,7 @@
 - **E2 [코드]** `app/topic_initial_snapshot.py:342-354` —
   `for topic in topics: ... payload = await build_snapshot_observed(topic)`. 그 공유 래퍼가
   `app/topic_initial_snapshot.py:214-234` 에서 `await asyncio.to_thread(subscribe_load.timed_call,
-  …, _build_snapshot_sync, topic)` 한다 — **REST twin 도 같은 래퍼를 쓴다**(`app/main.py:3141`).
+  …, _build_snapshot_sync, topic)` 한다 — **REST twin 도 같은 래퍼를 쓴다**(`app/main.py:3175`).
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
 - **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:

@@ -133,7 +133,7 @@ scheduler.add_job(
 
 #### 4. WebSocket ConnectionManager 개선
 
-**파일:** `app/main.py:65-89`
+**파일:** `app/main.py:66-90`
 
 **변경사항:**
 ```python
@@ -260,7 +260,7 @@ scheduler.add_job(
 
 #### 9. 관리자 API 추가
 
-**파일:** `app/main.py:489-500`
+**파일:** `app/main.py:490-501`
 
 **새 엔드포인트:**
 ```python
