@@ -1245,7 +1245,7 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 | `unknown_topic` | per-topic | 미지원 topic |
 | `premium_required` | per-topic | 구독 필요 |
 | `krx_entitlement_required` | per-topic | KRX entitlement 필요 |
-| `topic_unavailable` | per-topic | topic 자체가 서버에서 비활성(개별 flag off) — REST twin이 이미 사용(`app/main.py:3149-3152`) |
+| `topic_unavailable` | per-topic | topic 자체가 서버에서 비활성(개별 flag off) — REST twin이 이미 사용(`app/main.py:3152-3155`) |
 
 **flag → 코드 매핑** (없으면 "accepted + lease인데 데이터가 영원히 안 오는" 상태가 생긴다):
 

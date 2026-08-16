@@ -39,7 +39,9 @@
           "S7 first exposure at bca1bd8: subscribe_load surfaced for the first time on ws-connection-metrics beside a ws_auth_executor mirror of the same function, each in its own failure domain, with the executor endpoint synthesising topic_dispatcher_enabled while preserving its metrics and running shape",
           "C2 re-baseline for S5 through S7: the pin advance to bca1bd8, twenty-nine citation locators re-derived across eight documents where all three changed topic_auth_rollout ranges are whole functions, the two whose content changed cross-checked against AST boundaries and the third resolved by exact content identity, the semantic-review journal record left frozen as history, and the lock, manifest, six output headers, implementation ledger, claim-review and semantic-review rebinding",
           "C3 wiring trip-wire and mutation battery: the measurement that deleting the helper call from the real-file gate leaves all three synthetic drift controls green, the AST trip-wire that requires the gate to call the binding helper exactly once with both workflow texts and a lock-read pin, and scripts/mutation_c3_ios_pin_gate.py killing eight mutants including drift of each real workflow file and of both together",
-          "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first"
+          "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first",
+          "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
+          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -129,7 +131,9 @@
           "S7 first exposure at bca1bd8: subscribe_load surfaced for the first time on ws-connection-metrics beside a ws_auth_executor mirror of the same function, each in its own failure domain, with the executor endpoint synthesising topic_dispatcher_enabled while preserving its metrics and running shape",
           "C2 re-baseline for S5 through S7: the pin advance to bca1bd8, twenty-nine citation locators re-derived across eight documents where all three changed topic_auth_rollout ranges are whole functions, the two whose content changed cross-checked against AST boundaries and the third resolved by exact content identity, the semantic-review journal record left frozen as history, and the lock, manifest, six output headers, implementation ledger, claim-review and semantic-review rebinding",
           "C3 wiring trip-wire and mutation battery: the measurement that deleting the helper call from the real-file gate leaves all three synthetic drift controls green, the AST trip-wire that requires the gate to call the binding helper exactly once with both workflow texts and a lock-read pin, and scripts/mutation_c3_ios_pin_gate.py killing eight mutants including drift of each real workflow file and of both together",
-          "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first"
+          "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first",
+          "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
+          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion"
         ]
       }
     ],
@@ -166,7 +170,9 @@
           "S7 first exposure at bca1bd8: subscribe_load surfaced for the first time on ws-connection-metrics beside a ws_auth_executor mirror of the same function, each in its own failure domain, with the executor endpoint synthesising topic_dispatcher_enabled while preserving its metrics and running shape",
           "C2 re-baseline for S5 through S7: the pin advance to bca1bd8, twenty-nine citation locators re-derived across eight documents where all three changed topic_auth_rollout ranges are whole functions, the two whose content changed cross-checked against AST boundaries and the third resolved by exact content identity, the semantic-review journal record left frozen as history, and the lock, manifest, six output headers, implementation ledger, claim-review and semantic-review rebinding",
           "C3 wiring trip-wire and mutation battery: the measurement that deleting the helper call from the real-file gate leaves all three synthetic drift controls green, the AST trip-wire that requires the gate to call the binding helper exactly once with both workflow texts and a lock-read pin, and scripts/mutation_c3_ios_pin_gate.py killing eight mutants including drift of each real workflow file and of both together",
-          "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first"
+          "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first",
+          "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
+          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion"
         ],
         "result": "pass"
       },
@@ -211,21 +217,21 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "64378e7970ecec172c1abccc83e6169c9a92035ccb7e3d43cab213b8097555f1",
-    "baseline_sha256": "9761a75391a6e6d9039c68497b01764342a528e3ffcc36f04a59de5b81b61382",
-    "lock_sha256": "b69ed74671c1d25c46b03118bb3244ec6a7bd5e2d36398e703c6e32d4ca0e44b",
-    "server_commit": "bca1bd82293d29ba42fbf67e6005b2178847304a",
+    "manifest_sha256": "67c7d04f837571b104ecf3494e8f512c153b2fed357d51ce3894323d924f309d",
+    "baseline_sha256": "fadec4073a1612e8575449f1123484a4f2faa1a0ff717caef9e1971735bfe8e1",
+    "lock_sha256": "f357fb33684ac2f7c60441dd830ed3b2a77256be577a680ac64e314cb1fe01f1",
+    "server_commit": "a2621df572e6eefdd37800a01b7f7460c8d77846",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "222e6b9a0425be3571632603b1cfd388b19742bde4f4e6f936ac9f3bd8935539",
-    "CLIENT": "d557bc626406ade120ea5bfffcdec58bd8c995e816336c5d2181336959f864de",
-    "CUT": "7b5934f8003d6394ecce1918f3b63535e3bd13c7199d81de0847928e97e43c18",
-    "HAND": "daadc43dcb6325553ed6aef971836f16d197c3fb44bc9e289da01f613aad566d",
-    "HEALTH": "d0fc63c209e8866681ad57471a80071090565daaaee1c27040932fdd96618ee7",
-    "LOAD": "7865a280b1dcdd48916476b70eb083cfaea3c24367c14d00b96dfb60175ad74c"
+    "ADR": "6fa9b6bc8982949f988bc11f9eb45ad48b70d2d00679ccc4f8e76d372e11decc",
+    "CLIENT": "ab4d28f666b1115c230b3671e9276e3c60cdb09ecfb37f7d876df0be8be55302",
+    "CUT": "6645ead7996dd8c035ccd59a5030f212286c41580360a46d66971e2ce62cb648",
+    "HAND": "f0eea4337256ecceb9c3aa1237f654658b34c60ac29901890f309942fc5035d1",
+    "HEALTH": "e56e9935002febf08821d5cb3ef857696a14e16fd39ed17c875358bf0cd112cb",
+    "LOAD": "64b64837412442443fac1ce370378c458f5a1c834b25aee46485d4f7f0aa000e"
   },
-  "claim_ledger_sha256": "ca35d3c2eef2d2d3e1531b48275b86f087131c91923e472801679b9237a03c3c",
+  "claim_ledger_sha256": "8ce8244bfaf645a29e4d33ae3d5286faccba4aab5b31c79650cec1c97c9eba45",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,

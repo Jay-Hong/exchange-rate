@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "64378e7970ecec172c1abccc83e6169c9a92035ccb7e3d43cab213b8097555f1",
-    "baseline_sha256": "9761a75391a6e6d9039c68497b01764342a528e3ffcc36f04a59de5b81b61382",
-    "lock_sha256": "b69ed74671c1d25c46b03118bb3244ec6a7bd5e2d36398e703c6e32d4ca0e44b",
-    "server_commit": "bca1bd82293d29ba42fbf67e6005b2178847304a",
+    "manifest_sha256": "67c7d04f837571b104ecf3494e8f512c153b2fed357d51ce3894323d924f309d",
+    "baseline_sha256": "fadec4073a1612e8575449f1123484a4f2faa1a0ff717caef9e1971735bfe8e1",
+    "lock_sha256": "f357fb33684ac2f7c60441dd830ed3b2a77256be577a680ac64e314cb1fe01f1",
+    "server_commit": "a2621df572e6eefdd37800a01b7f7460c8d77846",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "222e6b9a0425be3571632603b1cfd388b19742bde4f4e6f936ac9f3bd8935539",
-    "CLIENT": "d557bc626406ade120ea5bfffcdec58bd8c995e816336c5d2181336959f864de",
-    "CUT": "7b5934f8003d6394ecce1918f3b63535e3bd13c7199d81de0847928e97e43c18",
-    "HAND": "daadc43dcb6325553ed6aef971836f16d197c3fb44bc9e289da01f613aad566d",
-    "HEALTH": "d0fc63c209e8866681ad57471a80071090565daaaee1c27040932fdd96618ee7",
-    "LOAD": "7865a280b1dcdd48916476b70eb083cfaea3c24367c14d00b96dfb60175ad74c"
+    "ADR": "6fa9b6bc8982949f988bc11f9eb45ad48b70d2d00679ccc4f8e76d372e11decc",
+    "CLIENT": "ab4d28f666b1115c230b3671e9276e3c60cdb09ecfb37f7d876df0be8be55302",
+    "CUT": "6645ead7996dd8c035ccd59a5030f212286c41580360a46d66971e2ce62cb648",
+    "HAND": "f0eea4337256ecceb9c3aa1237f654658b34c60ac29901890f309942fc5035d1",
+    "HEALTH": "e56e9935002febf08821d5cb3ef857696a14e16fd39ed17c875358bf0cd112cb",
+    "LOAD": "64b64837412442443fac1ce370378c458f5a1c834b25aee46485d4f7f0aa000e"
   },
   "entries": [
     {
@@ -189,12 +189,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "85fafc799ba30592c13b45040bf5c491f5d81e92b0b8a28d17e41bf5d8d4ff23",
-      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3197-3204`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
+      "unit_sha256": "c3e560a8cd6baa8a123ccac4210a2c253d2bba1ef08f61ba9e2f55326c7bd798",
+      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3200-3207`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
       "classification": "code_fact",
       "detail": "서버가 만료(InvalidIdTokenError 하위 Expired/Revoked)와 UserDisabledError 를 모두 같은 invalid_token 코드로 반환한다는 현재 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3197-3204"
+        "file:app/main.py:3200-3207"
       ]
     },
     {
@@ -299,12 +299,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-9",
-      "unit_sha256": "d672a673b8b1d7883accd3f401bf376c8dbc7bfe95737cc0b03a3f7b86d5dc8a",
-      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3197-3204`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
+      "unit_sha256": "e71b56f25757542aa4735d951d368f6436c06e566cda2c0fc9454dcbe7af6500",
+      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3200-3207`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
       "classification": "code_fact",
       "detail": "invalid_token 의 두 갈래(만료 refresh 가능 / 확정 실패)가 같은 wire reason 문자열로 나간다는 현재 서버 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3197-3204"
+        "file:app/main.py:3200-3207"
       ]
     },
     {
@@ -557,12 +557,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "7b7591c459c021a46b54b0e670c0ed8432da00d1e0bf3f0898004872df84b56d",
-      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3117-3120`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
+      "unit_sha256": "0e045a61251639a777f398f3f083c4a141581b350df4c6d476b4d86704d3d8ab",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3118-3121`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
       "classification": "code_fact",
       "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
       "provenance": [
-        "file:app/main.py:3117-3120",
+        "file:app/main.py:3118-3121",
         "file:app/topic_authorization.py:372-402",
         "file:app/topic_policy.py:244-282",
         "file:app/topic_policy.py:285-330"
@@ -583,12 +583,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
-      "unit_sha256": "571046f0e01013816d08b9c5bfca4e8adb46d48a54bd77faeed1e9ad49835edc",
-      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:276-277`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
+      "unit_sha256": "b34611017576b11af851b90e7585caa29f5042cbb2642bc41f7726570ccbb80c",
+      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:299-300`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
       "classification": "code_fact",
       "detail": "초안 철회라는 결정과 함께 현행 코드 단정 둘이 근거로 들어가 있다 — KRX 는 entry 가 없어도 snapshot 만 skip 하고 register 를 유지하며, iOS KrxTopicData 의 usdKrwFutures 가 optional 이라 빈 snapshot 을 이미 표현한다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:276-277",
+        "file:app/topic_initial_snapshot.py:299-300",
         "file:ios/FXi/Models/TopicMessage.swift:100-101"
       ]
     },
@@ -617,12 +617,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-4",
-      "unit_sha256": "270acca5f941c2c64c381db62c67012ffdd5cbf4a1474857dafdac1550eb933c",
-      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다. 현재 snapshot builder 가 이 경계를 사용한다(`app/topic_initial_snapshot.py:298-335`). 따라서 서버 절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.",
+      "unit_sha256": "f6f997b650e48de221162acec149f0ceb12ec8a4df4d05ce1edfc2ca7bf5ae3d",
+      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 내부 작업을 멈추지 않는다** — 스레드는 계속 돈다. 현재 snapshot builder 가 이 경계를 사용한다(공유 래퍼 `app/topic_initial_snapshot.py:214-234`). 따라서 서버 절대 deadline 만으로는 부족하고 **DB/Redis I/O 자체에 상한**이 필요하다.",
       "classification": "code_fact",
       "detail": "현재 snapshot builder가 asyncio.to_thread를 사용한다. 취소가 실행 중 worker를 중단시키지 않는 경계 때문에 request deadline과 별도로 I/O 자체 상한이 필요하다는 혼합 사실/요구다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:298-335"
+        "file:app/topic_initial_snapshot.py:214-234"
       ]
     },
     {

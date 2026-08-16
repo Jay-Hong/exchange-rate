@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `bca1bd82293d29ba42fbf67e6005b2178847304a`
+- server 기준 commit: `a2621df572e6eefdd37800a01b7f7460c8d77846`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `64378e7970ecec172c1abccc83e6169c9a92035ccb7e3d43cab213b8097555f1`
-- baseline SHA: `9761a75391a6e6d9039c68497b01764342a528e3ffcc36f04a59de5b81b61382`
+- manifest SHA: `67c7d04f837571b104ecf3494e8f512c153b2fed357d51ce3894323d924f309d`
+- baseline SHA: `fadec4073a1612e8575449f1123484a4f2faa1a0ff717caef9e1971735bfe8e1`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -246,7 +246,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 | `request_too_large` | 위 1009 행 참조 | — | — | 실제 운영 경로는 **frame 이 아니라 close** |
 
 ⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의
-`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3197-3204`)
+`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3200-3207`)
 클라는 셋을 구별할 수 없다.
 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.
 
@@ -430,7 +430,7 @@ enum TopicRejection {
 **이 축 하나를 공유**해 판정이 갈리지 않게 한다.
 
 ⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) ·
-`app/main.py:3197-3204`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
+`app/main.py:3200-3207`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
 표의 두 행이 구현된다.
 
 ⛔ **`unknown_topic` 에서 `desired` 를 지우면 안 된다.** 버전 스큐나 순차 배포가 끝나도 **자동 복구할

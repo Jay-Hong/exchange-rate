@@ -407,8 +407,10 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
         repo_key: sum(_repo_path(path)[0] == repo_key for path, _start, _end in references)
         for repo_key in ("server", "ios")
     }
-    assert len(references) == 40
-    assert by_repo == {"server": 30, "ios": 10}
+    # 2026-08-16 S0: E2 가 `to_thread` 의 **실제 위치**(공유 래퍼)와 REST twin 호출부를
+    #                함께 인용하게 되며 server locator 2건 증가 (40 → 42).
+    assert len(references) == 42
+    assert by_repo == {"server": 32, "ios": 10}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():
