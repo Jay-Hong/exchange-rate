@@ -87,7 +87,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/5"
+CONTRACT_VERSION = "subscribe-load/6"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -166,7 +166,12 @@ AUTH_FAIL_KEYS: tuple[str, ...] = AUTH_FAIL_CODES + ("other",)
 
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
-    "프로세스 재기동 시 0 · REST twin 은 포함하지 않는다 · callers_awaiting 은 대기이지 점유가 아니다 · "
+    "프로세스 재기동 시 0 · "
+    "**snapshot_build 는 WS 와 REST twin 의 합산**(같은 default executor·I/O 를 쓰므로 용량 산정에 합산이 필요) · "
+    "snapshot_send·terminal 은 WS 전용(REST 는 channel/wire 개념이 없다) · "
+    "queue_wait 은 제출→worker 시작이며 **worker 시작 시점에** 기록한다(caller 반환 시점 기록은 취소된 caller 의 대기를 통째로 잃는다 — 폭주에서 가장 흔한 경로) · "
+    "mark_submitted 미호출이면 queue_wait 미관측(count 에 안 들어간다) · "
+    "callers_awaiting 은 대기이지 점유가 아니다 · "
     "started_total 은 관측 시도 수(leaf 실호출 수 아님) · 취소 우선이라 granted 는 undercount · "
     "snapshot 루프 중단(connection_closed·raised·취소)은 잔여 topic 을 전 축 미관측으로 남긴다 · "
     "built−Σ(sends) 는 post-build 종료 잔차(취소 단정 금지) · "
@@ -193,6 +198,12 @@ def _blank() -> dict[str, Any]:
                 "worker_started_total": 0,
                 "worker_finished_total": 0,
                 "worker_in_flight_max": 0,
+                # ⛔ 제출→worker 시작. **worker 시작 시점에** 기록한다 — caller 반환 시점에
+                #    기록하면 폭주 중 취소된 caller 의 대기가 통째로 유실된다(취소는 폭주의
+                #    기본 경로다). `auth_executor` 의 `dequeued` 와 같은 자리다.
+                "queue_wait_ms_sum": 0.0,
+                "queue_wait_ms_max": 0.0,
+                "queue_wait_observed_total": 0,
             })
         axes[axis] = block
     axes["snapshot_send"] = {
@@ -280,7 +291,7 @@ class WorkHandle:
     """한 관측의 상태. 후보 저장 + worker-start 관측 플래그만 갖는다."""
 
     __slots__ = ("_axis", "_candidate", "_has_candidate", "_closed", "_worker_started",
-                 "_worker_started_fallback", "_duplicate")
+                 "_worker_started_fallback", "_duplicate", "_submitted_at")
 
     def __init__(self, axis: str) -> None:
         self._axis = axis
@@ -301,6 +312,9 @@ class WorkHandle:
             _warn("subscribe-load: worker-start Event 생성 실패 — bool fallback 으로 격하",
                   axis=axis, exc_info=sys.exc_info())
         self._duplicate = False
+        # ⛔ caller(loop) 가 **to_thread 직전에** 찍는다. 여기서 찍으면 CM 진입~제출 사이의
+        #    caller 작업이 queue_wait 에 섞인다 — 그건 큐 대기가 아니다.
+        self._submitted_at: Optional[float] = None
 
     @property
     def axis(self) -> str:
@@ -320,6 +334,18 @@ class WorkHandle:
             return
         self._candidate = outcome
         self._has_candidate = True
+
+    def mark_submitted(self) -> None:
+        """caller 스레드에서 제출 직전 1회. ⛔ 계측이므로 실패해도 본문을 흔들지 않는다."""
+        try:
+            self._submitted_at = time.monotonic()
+        except Exception:  # noqa: BLE001
+            _note_internal_error()
+            _warn("subscribe-load: 제출 시각 기록 실패", axis=self._axis, exc_info=sys.exc_info())
+
+    @property
+    def submitted_at(self) -> Optional[float]:
+        return self._submitted_at
 
     def mark_worker_started(self) -> None:
         if self._worker_started is None:
@@ -507,6 +533,17 @@ def timed_call(axis: str, handle: WorkHandle, fn: Callable[..., T], /, *args: An
         _note_internal_error()
         _warn("subscribe-load: worker-start 관측 실패", axis=axis, exc_info=sys.exc_info())
     counted = False
+    # ⛔ queue_wait 은 **여기서** 잰다 — worker 가 막 시작한 지점이다. 값 계산을 lock 밖에서
+    #    끝내 임계구역을 늘리지 않는다. 제출 시각이 없으면(=caller 가 mark_submitted 를 안 함)
+    #    **관측하지 않는다** — 0 으로 채우면 "대기 없음"과 "미관측"이 구분되지 않는다.
+    queue_wait_ms: Optional[float] = None
+    try:
+        submitted = handle.submitted_at
+        if submitted is not None:
+            queue_wait_ms = max(0.0, (time.monotonic() - submitted) * 1000.0)
+    except Exception:  # noqa: BLE001
+        _note_internal_error()
+        _warn("subscribe-load: queue_wait 계산 실패", axis=axis, exc_info=sys.exc_info())
     try:
         with _lock:
             block = _metrics[axis]
@@ -514,6 +551,11 @@ def timed_call(axis: str, handle: WorkHandle, fn: Callable[..., T], /, *args: An
             in_flight = block["worker_started_total"] - block["worker_finished_total"]
             if in_flight > block["worker_in_flight_max"]:
                 block["worker_in_flight_max"] = in_flight
+            if queue_wait_ms is not None:
+                block["queue_wait_observed_total"] += 1
+                block["queue_wait_ms_sum"] += queue_wait_ms
+                if queue_wait_ms > block["queue_wait_ms_max"]:
+                    block["queue_wait_ms_max"] = queue_wait_ms
         counted = True
     except Exception:  # noqa: BLE001
         _note_internal_error()
@@ -681,6 +723,11 @@ def subscribe_load_metrics() -> dict[str, Any]:
                 # ⛔ 파생 가능한 것은 저장하지 않는다 — 두 번째 진실을 만들지 않기 위해.
                 snap["worker_in_flight"] = block["worker_started_total"] - block["worker_finished_total"]
                 snap["worker_in_flight_max"] = block["worker_in_flight_max"]
+                # ⛔ 노출 dict 는 `_blank()` 를 그대로 흘리지 않고 **여기서 조립**한다 —
+                #    저장 스키마에 필드를 더해도 이 줄이 없으면 영원히 안 보인다(실측).
+                snap["queue_wait_observed_total"] = block["queue_wait_observed_total"]
+                snap["queue_wait_ms_sum"] = block["queue_wait_ms_sum"]
+                snap["queue_wait_ms_max"] = block["queue_wait_ms_max"]
             out[axis] = snap
         send = _metrics["snapshot_send"]
         out["snapshot_send"] = {

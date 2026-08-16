@@ -211,6 +211,29 @@ def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple
     return tuple(t for t in topics if t != KRX_TOPIC)
 
 
+async def build_snapshot_observed(topic: str) -> Optional[Dict[str, Any]]:
+    """WS subscribe 와 REST twin 이 **공유하는** snapshot build 관측 경로.
+
+    ⛔ 두 진입점이 각자 배선하면 축이 갈린다 — 같은 default executor 와 같은 I/O 를 쓰므로
+       용량 산정(S6)에는 **합산**이 필요하다. 그래서 호출부가 아니라 여기서 한 번 감싼다.
+    ⛔ 계측은 `_build_snapshot_sync` **본문이 아니라** 이 async 래퍼에 둔다. queue_wait 은
+       (worker 시작 − caller 제출)이라 caller 쪽 시각이 있어야 하고, 본문은 worker 시작
+       이후만 볼 수 있다. 본문 무계측은 별도 trip-wire 가 잠근다.
+    ⛔ 예외를 삼키지 않는다 — 격리 정책은 호출부가 소유한다(WS 는 topic 단위 continue,
+       REST twin 은 TRANSIENT_DB_ERRORS → 503). 여기서 잡으면 두 계약이 뭉개진다.
+    """
+    async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+        # ⛔ **to_thread 직전에** 찍는다. CM 진입 시점에 찍으면 그 사이 caller 작업이
+        #    큐 대기로 잘못 계상된다.
+        load.mark_submitted()
+        payload = await asyncio.to_thread(
+            subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+            _build_snapshot_sync, topic,
+        )
+        load.finish("none_payload" if payload is None else "built")
+        return payload
+
+
 def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
     """주어진 topic의 현재 snapshot payload 빌드 — asyncio.to_thread 내부 sync 실행 전용.
 
@@ -328,12 +351,7 @@ async def send_initial_snapshots(
             # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
             #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
             #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
-            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
-                payload = await asyncio.to_thread(
-                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-                    _build_snapshot_sync, topic,
-                )
-                load.finish("none_payload" if payload is None else "built")
+            payload = await build_snapshot_observed(topic)
         except subscribe_load.SubscribeLoadContractError:
             # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
             # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.

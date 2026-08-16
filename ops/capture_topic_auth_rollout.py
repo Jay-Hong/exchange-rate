@@ -280,6 +280,45 @@ def _arrival_schema_errors(rollout: Mapping[str, object]) -> list[str]:
     return errors
 
 
+SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/6"
+# ⛔ worker 축에만 있어야 한다 — caller-only 축에 생기면 제출 시각이 없는 자리에서 0 이 쌓여
+#    "대기 없음"으로 읽힌다. 축 목록은 **여기 literal** 이다(원본 파생을 쓰면 함께 줄어든다).
+SUBSCRIBE_LOAD_WORKER_AXES = ("krx_entitlement", "snapshot_build")
+SUBSCRIBE_LOAD_QUEUE_WAIT_FIELDS = (
+    "queue_wait_observed_total", "queue_wait_ms_sum", "queue_wait_ms_max",
+)
+
+
+def _subscribe_load_schema_errors(raw_body: bytes) -> list[str]:
+    """subscribe_load 블록의 계약을 캡처 시점에 잠근다.
+
+    ⛔ 없으면 필드가 사라져도 캡처는 "성공"으로 남고, 그 창의 분석이 조용히 틀린다
+       (rollout 축이 S6 에서 같은 이유로 identity 검증을 받았다).
+    """
+    errors: list[str] = []
+    try:
+        document = json.loads(raw_body, parse_float=Decimal)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ["admin response is not valid JSON (subscribe_load)"]
+    metrics = document.get("metrics") if isinstance(document, dict) else None
+    block = metrics.get("subscribe_load") if isinstance(metrics, dict) else None
+    if not isinstance(block, dict):
+        return ["admin response lacks metrics.subscribe_load"]
+    version = block.get("contract_version")
+    if version != SUBSCRIBE_LOAD_CONTRACT:
+        errors.append(
+            f"subscribe_load contract must be {SUBSCRIBE_LOAD_CONTRACT}, got {version!r}")
+    for axis in SUBSCRIBE_LOAD_WORKER_AXES:
+        axis_block = block.get(axis)
+        if not isinstance(axis_block, dict):
+            errors.append(f"subscribe_load.{axis} must be an object")
+            continue
+        missing = [f for f in SUBSCRIBE_LOAD_QUEUE_WAIT_FIELDS if f not in axis_block]
+        if missing:
+            errors.append(f"subscribe_load.{axis} lacks {', '.join(missing)}")
+    return errors
+
+
 def _metric_schema_errors(rollout: Mapping[str, object]) -> list[str]:
     errors = []
     if not isinstance(rollout.get("stage"), str) or not rollout["stage"]:
@@ -502,6 +541,7 @@ def capture(
     try:
         rollout, observed_started = _parse_rollout(raw_body)
         metric_schema_errors = _metric_schema_errors(rollout)
+        metric_schema_errors.extend(_subscribe_load_schema_errors(raw_body))
     except CaptureError as exc:
         # A successful HTTP body is evidence even when its schema is broken.
         # Preserve it and make the window unverifiable instead of discarding it.

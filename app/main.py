@@ -3104,7 +3104,8 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     """
     from app import config
     from app.topic_initial_snapshot import (
-        _build_snapshot_sync, resolve_snapshot_topic_access_sync)
+        _build_snapshot_sync, resolve_snapshot_topic_access_sync,
+        build_snapshot_observed)
 
     # 개인화 응답(비-entitled의 KRX 404 포함) — 오류까지 캐시 금지. 200만 no-store면 private
     # HTTP 캐시가 404를 휴리스틱 저장해 entitlement 부여 뒤에도 404가 남을 수 있다.
@@ -3130,7 +3131,9 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
                 "detail": f"topic '{topic}' not supported",
                 "supported_topics": list(access.supported_topics),
             })
-        payload = await asyncio.to_thread(_build_snapshot_sync, topic)
+        # ⛔ WS 와 **같은** 공유 래퍼를 쓴다 — snapshot_build 축은 두 진입점 합산이다
+        #    (같은 default executor·I/O). 여기서 따로 to_thread 하면 축이 갈린다.
+        payload = await build_snapshot_observed(topic)
     except TRANSIENT_DB_ERRORS as db_exc:
         # DB 순단 = 인프라 transient지 결함이 아니다 → 503(구 동작은 plain 500이라 클라 재시도
         # 분류에서 빠졌다). 판정·빌드를 **함께** 감싼다 — 한쪽만 감싸면 상태코드가 topic 종류에

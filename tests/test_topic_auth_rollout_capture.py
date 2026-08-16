@@ -24,6 +24,15 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
     return json.dumps(
         {
             "metrics": {
+                # ⛔ 캡처기가 subscribe_load 계약도 검증한다 — 없으면 그 창의 분석이
+                #    필드 누락을 모른 채 계산된다.
+                "subscribe_load": {
+                    "contract_version": "subscribe-load/6",
+                    "krx_entitlement": {"queue_wait_observed_total": 0,
+                                        "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0},
+                    "snapshot_build": {"queue_wait_observed_total": 0,
+                                       "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0},
+                },
                 "topic_auth_rollout": {
                     "started_at_epoch_seconds": float(started),
                     "stage": "compatibility",
@@ -535,5 +544,26 @@ class TestCliExitStatus(CaptureFixture):
         self.assertFalse(json.loads(output.getvalue())["ok"])
 
 
+
+class TestSubscribeLoadValidationStaysWired(unittest.TestCase):
+    """⛔ validator 의 판정력만 시험하면 **배선이 사라져도** 전부 초록이다(C3 에서 실측한 형태).
+    호출 자체를 구조로 잠근다."""
+
+    def test_capture_calls_subscribe_load_validator_exactly_once(self):
+        import ast
+        import pathlib as _pl
+        src = (_pl.Path(__file__).resolve().parent.parent
+               / "ops" / "capture_topic_auth_rollout.py").read_text()
+        calls = [n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "_subscribe_load_schema_errors"]
+        self.assertEqual(len(calls), 1,
+                         "캡처기가 subscribe_load 검증을 정확히 한 번 호출해야 한다")
+        rendered = ast.unparse(calls[0])
+        self.assertIn("raw_body", rendered, "원본 바이트를 넘겨야 한다(재직렬화본이 아니라)")
+        self.assertIn("metric_schema_errors", src,
+                      "결과가 metric_schema_errors 로 합류해야 창이 unverifiable 로 표시된다")
+
 if __name__ == "__main__":
     unittest.main()
+

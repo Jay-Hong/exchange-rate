@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/5")
+        self.assertEqual(snap["contract_version"], "subscribe-load/6")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -64,6 +64,54 @@ class TestFieldContract(SubscribeLoadTestCase):
         self.assertEqual(sorted(snap["snapshot_send"]["sends_by_outcome"]), sorted(slm.SEND_OUTCOME_KEYS))
         self.assertNotIn("unclassified", slm.CHANNELS, "unclassified 는 storage-only 다")
         self.assertNotIn("unclassified", slm.SEND_OUTCOMES, "unclassified 는 storage-only 다")
+
+    def test_worker_axes_carry_queue_wait_fields(self):
+        """⛔ worker 축에만 queue_wait 이 있어야 한다 — caller-only 축에 생기면 제출 시각이
+        없는 자리에서 0 이 쌓여 '대기 없음'으로 읽힌다."""
+        snap = self._snapshot()
+        for axis in slm.AXIS_OUTCOMES:
+            has = {"queue_wait_ms_sum", "queue_wait_ms_max", "queue_wait_observed_total"} <= set(snap[axis])
+            self.assertEqual(has, axis in slm.WORKER_AXES, f"{axis}: queue_wait 필드 배치가 틀렸다")
+
+    def test_queue_wait_is_unobserved_without_a_submit_stamp(self):
+        """⛔ 미관측을 0 으로 채우면 '대기 없음'과 '계기 없음'이 같은 값이 된다 —
+        그러면 배선이 빠진 창을 '한산했다'로 읽는다."""
+        handle = slm.WorkHandle(slm.SNAPSHOT_BUILD)          # mark_submitted 를 부르지 않는다
+        slm.timed_call(slm.SNAPSHOT_BUILD, handle, lambda: None)
+        block = self._snapshot()[slm.SNAPSHOT_BUILD]
+        self.assertEqual(block["worker_started_total"], 1, "worker 는 실제로 시작했다")
+        self.assertEqual(block["queue_wait_observed_total"], 0,
+                         "제출 시각이 없으면 queue_wait 을 세지 않는다")
+        self.assertEqual(block["queue_wait_ms_sum"], 0.0)
+
+    def test_queue_wait_is_observed_with_a_submit_stamp(self):
+        """양성 대조 — 위 테스트가 '항상 0' 으로 공허해지지 않게 한다."""
+        handle = slm.WorkHandle(slm.SNAPSHOT_BUILD)
+        handle.mark_submitted()
+        slm.timed_call(slm.SNAPSHOT_BUILD, handle, lambda: None)
+        block = self._snapshot()[slm.SNAPSHOT_BUILD]
+        self.assertEqual(block["queue_wait_observed_total"], 1)
+
+    def test_snapshot_build_axis_is_shared_by_ws_and_rest_twin(self):
+        """⛔ CAVEAT 가 합산 범위를 말로만 적으면 배선이 빠져도 통과한다 — 두 진입점이
+        **같은 공유 래퍼**를 부르는지 소스로 잠근다(REST 배선 제거 변이를 죽인다)."""
+        import ast
+        import pathlib as _pl
+        repo = _pl.Path(__file__).resolve().parent.parent
+        main_src = (repo / "app" / "main.py").read_text()
+        snap_src = (repo / "app" / "topic_initial_snapshot.py").read_text()
+        self.assertEqual(main_src.count("await build_snapshot_observed(topic)"), 1,
+                         "REST twin 이 공유 래퍼를 정확히 한 번 불러야 한다")
+        self.assertEqual(main_src.count("asyncio.to_thread(_build_snapshot_sync"), 0,
+                         "REST twin 이 builder 를 직접 to_thread 하면 축이 갈린다")
+        self.assertEqual(snap_src.count("await build_snapshot_observed(topic)"), 1,
+                         "WS 도 같은 래퍼를 정확히 한 번 불러야 한다(이중 계수 금지)")
+        # 래퍼는 to_thread 직전에 제출 시각을 찍어야 한다 — 그 순서가 queue_wait 의 정의다
+        fn = next(n for n in ast.walk(ast.parse(snap_src))
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "build_snapshot_observed")
+        body = ast.unparse(fn)
+        self.assertLess(body.index("mark_submitted"), body.index("asyncio.to_thread"),
+                        "제출 시각은 to_thread **앞**에서 찍어야 한다")
 
     def test_contract_constants_are_locked_literally(self):
         """⛔ `slm.*` 자기참조 비교는 상수 축소를 못 잡는다 — `CHANNEL_KEYS = CHANNELS + (...)`
@@ -163,7 +211,8 @@ class TestFieldContract(SubscribeLoadTestCase):
         caller_fields = ["started_total", "by_outcome", "duration_ms_sum", "duration_ms_max",
                          "callers_awaiting", "callers_awaiting_max"]
         worker_fields = ["worker_started_total", "worker_finished_total",
-                         "worker_in_flight", "worker_in_flight_max"]
+                         "worker_in_flight", "worker_in_flight_max",
+                         "queue_wait_observed_total", "queue_wait_ms_sum", "queue_wait_ms_max"]
         self.assertEqual(sorted(snap[slm.PREMIUM_RC]), sorted(caller_fields),
                          "premium 에 worker 축이 생기면 '정상 0' 과 '고장 0' 이 섞인다")
         for axis in (slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD):
