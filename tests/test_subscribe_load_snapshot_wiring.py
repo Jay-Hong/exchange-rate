@@ -165,15 +165,24 @@ class TestDedupeAndBuildAxis(SnapshotWiringTestCase):
         self.assertEqual(snap["metrics_internal_errors_total"], 1)
 
     def test_the_shared_builder_contains_no_instrumentation(self):
-        """⑥ — `_build_snapshot_sync` 는 REST twin(main.py)과 공유 — WS 계측이 혼입되면
-        REST 호출이 WS 축으로 계측된다."""
+        """⑥ — 공유 builder 본문에는 계측을 두지 않는다.
+
+        ⚠️ **근거가 S0(`a2621df`)에서 바뀌었다.** 구 근거는 *"REST 호출이 WS 축으로 계측된다"*
+        였는데, 이제 REST twin 합산은 **의도**다(`subscribe-load/6`: snapshot_build 는 WS+twin).
+        지금의 근거는 둘이다:
+          1. `queue_wait` = (worker 시작 − caller 제출)이라 **caller 쪽 시각**이 필요하다.
+             본문은 worker 시작 이후만 보므로 그 값을 잴 수 없다.
+          2. 공유 래퍼(`build_snapshot_observed`)가 이미 감싸므로 본문 계측은 **이중 계수**다.
+        """
         import inspect
 
         from app import topic_initial_snapshot as tis
 
         src = inspect.getsource(tis._build_snapshot_sync)
         for token in ("subscribe_load", "record_", "observe(", "timed_call"):
-            self.assertNotIn(token, src, f"공유 builder 에 계측({token})이 혼입됐다")
+            self.assertNotIn(
+                token, src,
+                f"공유 builder 본문에 계측({token})이 들어왔다 — 계측은 공유 래퍼가 소유한다")
 
 
 class TestSendOutcomes(SnapshotWiringTestCase):
