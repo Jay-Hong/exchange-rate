@@ -56,7 +56,7 @@
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
   stage 정의·엄격 파서·코드 기본값 `app/config.py:645-688` · **정책 정본**
   `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
-  `app/topic_auth_rollout.py:286-301` · 필터 호출과 등록 `app/topic_dispatcher.py:556-578` ·
+  `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:556-578` ·
   production 주입 `app/main.py:312-320`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
   모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
@@ -70,14 +70,14 @@
      서로 다른 축으로 계측한다. 두 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다 앞이라
      (`app/topic_dispatcher.py:510-526`) flag-off 운영 상태에서도 값이 쌓인다. token-bearing 축은
      Firebase 검증 전 관측이라 인증 사용자나 실제 RevenueCat 호출 수가 아니다
-     (`app/topic_auth_rollout.py:237-274` · snapshot `app/topic_auth_rollout.py:317-361`). 정책 topic과
+     (`app/topic_auth_rollout.py:254-296` · snapshot `app/topic_auth_rollout.py:339-400`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
      (`app/main.py:302-320`).
 - **C2 [코드]** `app/topic_initial_snapshot.py:97` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3053` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3088` `verify_firebase_token(request)` → `app/main.py:3091`
+- **C3 [코드]** `exchange-rate/app/main.py:3082` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3117` `verify_firebase_token(request)` → `app/main.py:3120`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,

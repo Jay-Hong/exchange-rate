@@ -4009,7 +4009,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:2434](app/main.py#L2434))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:2463](app/main.py#L2463))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -6501,11 +6501,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `751c24ef450684d17e2118072f3bdd5c9f97a330`
+- server 기준 commit: `bca1bd82293d29ba42fbf67e6005b2178847304a`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `83fbd50e1f477f306916cf4631581eb1d26d70ee4dde20be69e5124b1e2e5ed2`
-- baseline SHA: `550f6c62383c00627bc90cc17802ffbe464163ecb29bafcfe5a81eea5e8c6ce7`
+- manifest SHA: `64378e7970ecec172c1abccc83e6169c9a92035ccb7e3d43cab213b8097555f1`
+- baseline SHA: `9761a75391a6e6d9039c68497b01764342a528e3ffcc36f04a59de5b81b61382`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6613,7 +6613,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 구현 근거: `app/config.py:645-688`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:691-833`(배선·등록) ·
-`app/main.py:3088-3091`(REST twin).
+`app/main.py:3117-3120`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)

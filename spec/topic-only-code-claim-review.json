@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "83fbd50e1f477f306916cf4631581eb1d26d70ee4dde20be69e5124b1e2e5ed2",
-    "baseline_sha256": "550f6c62383c00627bc90cc17802ffbe464163ecb29bafcfe5a81eea5e8c6ce7",
-    "lock_sha256": "2b9d4f9a2dc1be07eeb6102190745c43696353ae336958eefd617ab14ef83301",
-    "server_commit": "751c24ef450684d17e2118072f3bdd5c9f97a330",
+    "manifest_sha256": "64378e7970ecec172c1abccc83e6169c9a92035ccb7e3d43cab213b8097555f1",
+    "baseline_sha256": "9761a75391a6e6d9039c68497b01764342a528e3ffcc36f04a59de5b81b61382",
+    "lock_sha256": "b69ed74671c1d25c46b03118bb3244ec6a7bd5e2d36398e703c6e32d4ca0e44b",
+    "server_commit": "bca1bd82293d29ba42fbf67e6005b2178847304a",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "c2069be8f5371deb2d565c146be61680433b05261d91c3a5a881c6737d700361",
-    "CLIENT": "286de0095199d33b51a5efdfcb810dfb352357fbc602ca5bbc70d6ac3af1945c",
-    "CUT": "003f39a6543ebd466e7c8edb2cae4409e5b9ef3df140266f3e6d68f2301358de",
-    "HAND": "e6df3ba9e83fe8b6000cf0da1de089d9c74e71495741c6ceef7527873cf963e4",
-    "HEALTH": "1f46e72e7ba8704d7761316104f7180239c3c55542cae8ed9a6ba125dc7c7ed1",
-    "LOAD": "d8e3c286ebfaf93b5669982c47bd6a5e69fa2c3f67816886b8e7efa899e472a7"
+    "ADR": "222e6b9a0425be3571632603b1cfd388b19742bde4f4e6f936ac9f3bd8935539",
+    "CLIENT": "d557bc626406ade120ea5bfffcdec58bd8c995e816336c5d2181336959f864de",
+    "CUT": "7b5934f8003d6394ecce1918f3b63535e3bd13c7199d81de0847928e97e43c18",
+    "HAND": "daadc43dcb6325553ed6aef971836f16d197c3fb44bc9e289da01f613aad566d",
+    "HEALTH": "d0fc63c209e8866681ad57471a80071090565daaaee1c27040932fdd96618ee7",
+    "LOAD": "7865a280b1dcdd48916476b70eb083cfaea3c24367c14d00b96dfb60175ad74c"
   },
   "entries": [
     {
@@ -189,12 +189,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "63f0d018ab7dfe2ab32f0f5362ef3f7a22c237a8b1a59e0a87c5225e3ef70127",
-      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3168-3175`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
+      "unit_sha256": "85fafc799ba30592c13b45040bf5c491f5d81e92b0b8a28d17e41bf5d8d4ff23",
+      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3197-3204`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
       "classification": "code_fact",
       "detail": "서버가 만료(InvalidIdTokenError 하위 Expired/Revoked)와 UserDisabledError 를 모두 같은 invalid_token 코드로 반환한다는 현재 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3168-3175"
+        "file:app/main.py:3197-3204"
       ]
     },
     {
@@ -299,12 +299,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-9",
-      "unit_sha256": "2d153cc95a4020f91d66cbb5ff9f9ff8cb90edb48e21fb61c921f3a78ea1da90",
-      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3168-3175`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
+      "unit_sha256": "d672a673b8b1d7883accd3f401bf376c8dbc7bfe95737cc0b03a3f7b86d5dc8a",
+      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3197-3204`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
       "classification": "code_fact",
       "detail": "invalid_token 의 두 갈래(만료 refresh 가능 / 확정 실패)가 같은 wire reason 문자열로 나간다는 현재 서버 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3168-3175"
+        "file:app/main.py:3197-3204"
       ]
     },
     {
@@ -557,12 +557,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "e66ef51bb176e2d8331e44fc392108356507a661fd39b145e35abf7f3714e658",
-      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3088-3091`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
+      "unit_sha256": "7b7591c459c021a46b54b0e670c0ed8432da00d1e0bf3f0898004872df84b56d",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3117-3120`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
       "classification": "code_fact",
       "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
       "provenance": [
-        "file:app/main.py:3088-3091",
+        "file:app/main.py:3117-3120",
         "file:app/topic_authorization.py:372-402",
         "file:app/topic_policy.py:244-282",
         "file:app/topic_policy.py:285-330"

@@ -11,6 +11,13 @@
 >   그러니 의도적 변경은 여기 남긴다. 안 남기면 다음 세션이 SHA 차이를 설명하지 못한다.
 > - 2026-08-10 `spec/topic-only-baseline-facts.md` — B3-op 행의 `CLAUDE.md` 를 backtick 표기로
 >   교정(서식만, 사실 변경 0). lock·manifest 의 baseline SHA 동시 갱신.
+> - 2026-08-16 `spec/topic-only-baseline-facts.md` — S5~S7 C1(`bca1bd8`) 뒤 C2 재-baseline 의
+>   인용 locator 재도출 6건(`app/main.py` 4 · `app/topic_auth_rollout.py` 2). 사실 변경 0,
+>   가리키는 코드도 동일 — 라인 번호만 이동했다. lock·manifest 의 baseline SHA 동시 갱신.
+>   ⚠️ 이 규칙은 **사실 편집**을 겨냥해 쓰였고, C2 의 기계적 locator 재도출은 짝이 되는
+>   C1/C2 커밋과 semantic-review 저널이 이미 설명한다. 그래서 2026-08-10 이후의 C2 계열
+>   baseline 편집이 여기 누적 기록돼 있지 않다 — 소급 기입은 하지 않되, 다음 세션이
+>   SHA 차이를 볼 때 그 설명이 어디 있는지는 이 줄이 가리킨다.
 >
 > ⛔ **규칙**: 소유 단위는 **절이 아니라 원자 요구사항**이다. 한 절이 서버·클라 계약을 함께 담으면
 > 쪼개서 각각 다른 문서가 소유한다(예: §3.3 = 서버 handoff + 클라 arbiter).
