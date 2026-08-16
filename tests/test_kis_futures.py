@@ -17,15 +17,20 @@ from app.sources.kis_futures import (
     H0CFCNT0_COLUMNS,
     H0MFASP0_COLUMNS,
     H0MFCNT0_COLUMNS,
-    KRX_2026_USDF_EXPIRY_DAYS,
     get_active_session,
-    is_expiry_day,
     is_krx_business_day,
+    is_krx_night_session_open,
+    night_session_start_date,
     parse_h0cfasp0_payload,
     parse_h0cfcnt0_payload,
     parse_h0mfasp0_payload,
     parse_h0mfcnt0_payload,
 )
+
+# 세션 창(08:30/15:45/17:50/06:00) 자체를 검증하는 테스트가 만기 분기에 걸리지
+# 않도록 쓰는 **먼 미래 만기**. contract_expiry_date 필수화(2026-08-16) 이후
+# "만기와 무관한 세션 판정"을 표현하는 표준 인자다.
+FAR_FUTURE_EXPIRY = date(2099, 12, 21)
 
 
 # ---------------------------------------------------------------------------
@@ -285,17 +290,120 @@ class TestKrxBusinessDay(unittest.TestCase):
         self.assertTrue(is_krx_business_day(date(2027, 1, 4)))
 
 
-class TestExpiryDay(unittest.TestCase):
+class TestNightSessionStartDate(unittest.TestCase):
+    """야간 세션 시작일 helper — 06:00 경계를 microsecond 단위로 잠근다.
 
-    def test_2026_05_18_is_expiry(self):
-        """A75605 만기 — KIS master 확인."""
-        self.assertTrue(is_expiry_day(date(2026, 5, 18)))
+    `get_active_session`의 CM 분기(`t <= _NIGHT_END`)와 **정확히 같은 경계**여야
+    한다. 두 곳이 어긋나면 gate 1과 gate 3이 서로 다른 날을 보게 되고, 그건
+    구 gate 1이 토요일 새벽을 매주 오거부하던 결함과 같은 계열이다.
+    """
 
-    def test_2026_05_04_not_expiry(self):
-        self.assertFalse(is_expiry_day(date(2026, 5, 4)))
+    FAR = date(2099, 12, 21)
 
-    def test_expiry_set_includes_may_18(self):
-        self.assertIn(date(2026, 5, 18), KRX_2026_USDF_EXPIRY_DAYS)
+    def test_just_before_06_00_is_previous_day(self):
+        now = datetime(2026, 8, 15, 5, 59, 59, 999999)  # Sat
+        self.assertEqual(night_session_start_date(now), date(2026, 8, 14))
+
+    def test_exactly_06_00_is_previous_day_inclusive(self):
+        now = datetime(2026, 8, 15, 6, 0, 0)
+        self.assertEqual(night_session_start_date(now), date(2026, 8, 14))
+
+    def test_just_after_06_00_is_same_day(self):
+        now = datetime(2026, 8, 15, 6, 0, 0, 1)
+        self.assertEqual(night_session_start_date(now), date(2026, 8, 15))
+
+    def test_evening_is_same_day(self):
+        now = datetime(2026, 8, 14, 18, 0, 0)
+        self.assertEqual(night_session_start_date(now), date(2026, 8, 14))
+
+    def test_boundary_matches_get_active_session_cm_branch(self):
+        """helper 경계 == `get_active_session` CM 분기 경계 (동시 검증)."""
+        self.assertEqual(
+            get_active_session(datetime(2026, 8, 15, 6, 0, 0), self.FAR), "CM"
+        )
+        self.assertIsNone(
+            get_active_session(datetime(2026, 8, 15, 6, 0, 0, 1), self.FAR)
+        )
+
+
+class TestRemovedExpiryDayAxisContract(unittest.TestCase):
+    """구 `is_expiry_day` / `KRX_2026_USDF_EXPIRY_DAYS` 축이 **실행 코드에 없다**.
+
+    문자열 grep이 아니라 **AST**로 검사한다 — 테스트·주석이 심볼 이름을 문자열로
+    언급하는 것과 실제 코드 사용을 구분해야 하기 때문이다(이 파일 자체가 그 예).
+    검사 노드: Name / Import / ImportFrom / FunctionDef / Attribute.
+    """
+
+    REMOVED = ("is_expiry_day", "KRX_2026_USDF_EXPIRY_DAYS")
+    # 실행 코드만 — tests/ 는 제외(이 계약을 서술하는 문자열이 정당하게 존재).
+    SCAN_ROOTS = ("app", "scripts")
+
+    def _scan(self):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        hits = []
+        for sub in self.SCAN_ROOTS:
+            for path in (root / sub).rglob("*.py"):
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Name) and node.id in self.REMOVED:
+                        hits.append(f"{path}:{node.lineno} Name({node.id})")
+                    elif isinstance(node, ast.Attribute) and node.attr in self.REMOVED:
+                        hits.append(f"{path}:{node.lineno} Attribute({node.attr})")
+                    elif isinstance(node, ast.FunctionDef) and node.name in self.REMOVED:
+                        hits.append(f"{path}:{node.lineno} FunctionDef({node.name})")
+                    elif isinstance(node, ast.ImportFrom):
+                        for alias in node.names:
+                            if alias.name in self.REMOVED:
+                                hits.append(f"{path}:{node.lineno} ImportFrom({alias.name})")
+                    elif isinstance(node, ast.Import):
+                        for alias in node.names:
+                            if alias.name in self.REMOVED:
+                                hits.append(f"{path}:{node.lineno} Import({alias.name})")
+        return hits
+
+    def test_removed_symbols_absent_from_executable_code(self):
+        hits = self._scan()
+        self.assertEqual(hits, [], f"제거 심볼이 실행 코드에 잔존: {hits}")
+
+
+class TestGetActiveSessionRequiresExpiry(unittest.TestCase):
+    """모든 `get_active_session()` 호출이 **만기 인자를 전달**한다 (AST trip-wire).
+
+    None 허용을 남기면 fail-open이므로, signature 필수화와 호출부 준수를 함께
+    잠근다. 인자를 빠뜨린 호출은 런타임에야 TypeError가 나고, 그 경로가 하필
+    운영에서 드물게 도는 fallback이면 8/14 사고처럼 오래 숨는다.
+    """
+
+    def test_signature_has_no_default(self):
+        import inspect
+
+        sig = inspect.signature(get_active_session)
+        param = sig.parameters["contract_expiry_date"]
+        self.assertIs(param.default, inspect.Parameter.empty)
+
+    def test_all_call_sites_pass_expiry_argument(self):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        offenders = []
+        for sub in ("app", "scripts"):
+            for path in (root / sub).rglob("*.py"):
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    fn = node.func
+                    name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                    if name != "get_active_session":
+                        continue
+                    has_kw = any(k.arg == "contract_expiry_date" for k in node.keywords)
+                    if len(node.args) < 2 and not has_kw:
+                        offenders.append(f"{path}:{node.lineno}")
+        self.assertEqual(offenders, [], f"만기 인자 없는 호출: {offenders}")
 
 
 # ---------------------------------------------------------------------------
@@ -309,93 +417,102 @@ class TestActiveSession(unittest.TestCase):
     def test_monday_morning_regular(self):
         """5/4 월 09:38 — 정규세션 active."""
         now = datetime(2026, 5, 4, 9, 38, 32)
-        self.assertEqual(get_active_session(now), "CF")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CF")
 
     def test_monday_regular_open_auction(self):
         """5/4 월 08:30 — 정규 개장 단일가 시작."""
         now = datetime(2026, 5, 4, 8, 30, 0)
-        self.assertEqual(get_active_session(now), "CF")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CF")
 
     def test_monday_regular_close(self):
         """5/4 월 15:45 — 정규세션 종료 시각 (포함)."""
         now = datetime(2026, 5, 4, 15, 45, 0)
-        self.assertEqual(get_active_session(now), "CF")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CF")
 
     def test_monday_after_regular_break(self):
         """5/4 월 16:00 — 정규/야간 사이 break."""
         now = datetime(2026, 5, 4, 16, 0, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, FAR_FUTURE_EXPIRY))
 
     # --- 야간세션 (CM) — 시작일 기준 ---
 
     def test_monday_night_18_00(self):
         """5/4 월 18:00 — 야간 시작 (5/4 영업일이라 active)."""
         now = datetime(2026, 5, 4, 18, 0, 0)
-        self.assertEqual(get_active_session(now), "CM")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CM")
 
     def test_monday_night_17_50_auction(self):
         """5/4 월 17:50 — 야간 개장 단일가."""
         now = datetime(2026, 5, 4, 17, 50, 0)
-        self.assertEqual(get_active_session(now), "CM")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CM")
 
     def test_tuesday_dawn_extends_from_monday(self):
         """5/5 화 02:00 — 5/4 시작 야간장이 06:00까지 이어짐 (어린이날 휴장이어도)."""
         now = datetime(2026, 5, 5, 2, 0, 0)
-        self.assertEqual(get_active_session(now), "CM")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CM")
 
     def test_tuesday_dawn_06_00_end(self):
         """5/5 화 06:00 — 야간세션 종료 시각 (포함)."""
         now = datetime(2026, 5, 5, 6, 0, 0)
-        self.assertEqual(get_active_session(now), "CM")
+        self.assertEqual(get_active_session(now, FAR_FUTURE_EXPIRY), "CM")
 
     def test_tuesday_morning_after_night(self):
         """5/5 화 06:30 — 야간 종료 후 + 어린이날 휴장이라 None."""
         now = datetime(2026, 5, 5, 6, 30, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, FAR_FUTURE_EXPIRY))
 
     # --- 휴장 / 시작일이 휴일 ---
 
     def test_childrens_day_regular_closed(self):
         """5/5 화 어린이날 09:38 — 주간장 미실시."""
         now = datetime(2026, 5, 5, 9, 38, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, FAR_FUTURE_EXPIRY))
 
     def test_childrens_day_night_not_started(self):
         """5/5 화 18:00 — 시작일이 공휴일이라 야간장 미실시."""
         now = datetime(2026, 5, 5, 18, 0, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, FAR_FUTURE_EXPIRY))
 
     def test_sunday_evening_no_night(self):
         """5/3 일 18:00 — 시작일이 일요일이라 야간장 미실시."""
         now = datetime(2026, 5, 3, 18, 0, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, FAR_FUTURE_EXPIRY))
 
     def test_saturday_morning(self):
         """5/2 토 09:38 — 토요일 휴장."""
         now = datetime(2026, 5, 2, 9, 38, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, FAR_FUTURE_EXPIRY))
 
-    # --- 만기일 정규세션 11:30 종료 ---
+    # --- 만기일 정규세션 11:30 종료 (expiring contract 기준) ---
+    # 2026-08-16: 구 버전은 만기 인자 없이 `is_expiry_day(today)` 캘린더 판정에
+    # 의존했다. 그 축을 삭제했으므로 **운영 중인 계약의 만기일을 명시**한다.
+
+    EXPIRY_2026_05 = date(2026, 5, 18)
 
     def test_expiry_day_before_11_30(self):
         """5/18 월 만기일 11:00 — 정규세션 active."""
         now = datetime(2026, 5, 18, 11, 0, 0)
-        self.assertEqual(get_active_session(now), "CF")
+        self.assertEqual(get_active_session(now, self.EXPIRY_2026_05), "CF")
 
     def test_expiry_day_at_11_30(self):
         """5/18 월 만기일 11:30 — 종료 시각 (포함)."""
         now = datetime(2026, 5, 18, 11, 30, 0)
-        self.assertEqual(get_active_session(now), "CF")
+        self.assertEqual(get_active_session(now, self.EXPIRY_2026_05), "CF")
 
     def test_expiry_day_after_11_30(self):
         """5/18 월 만기일 12:00 — 일반 거래일과 달리 정규세션 종료."""
         now = datetime(2026, 5, 18, 12, 0, 0)
-        self.assertIsNone(get_active_session(now))
+        self.assertIsNone(get_active_session(now, self.EXPIRY_2026_05))
 
-    def test_expiry_day_night_active(self):
-        """5/18 월 만기일 18:30 — 야간세션은 정상 active (만기일 정책은 정규세션만 영향)."""
+    def test_expiry_day_night_blocked_for_expiring_contract(self):
+        """5/18 만기일 18:30 + expiring contract → 야간장도 차단.
+
+        구 테스트는 `is_expiry_day` None 경로에서 "야간은 정상 active"를 기대했으나,
+        그건 만기 종목에 대해 틀린 계약이다(만기 지난 종목은 야간 거래가 없다).
+        차월물로 넘어간 client가 이 시각에 CM인 것은 아래 next-month 테스트가 잠근다.
+        """
         now = datetime(2026, 5, 18, 18, 30, 0)
-        self.assertEqual(get_active_session(now), "CM")
+        self.assertIsNone(get_active_session(now, self.EXPIRY_2026_05))
 
     # --- contract-aware (PR6c-2d-1 amend, Codex Issue 1 fix) ---
 
@@ -450,10 +567,9 @@ class TestActiveSession(unittest.TestCase):
             "CF",
         )
 
-    def test_legacy_none_contract_uses_calendar(self):
-        """contract_expiry_date=None → 기존 캘린더 기반 (만기일 11:30 적용)."""
-        now = datetime(2026, 5, 18, 12, 0, 0)
-        self.assertIsNone(get_active_session(now, contract_expiry_date=None))
+    # (구 `test_legacy_none_contract_uses_calendar` 삭제 — 2026-08-16.
+    #  `contract_expiry_date=None` 경로 자체가 제거됐다. None을 넘기면 이제
+    #  TypeError이고, 그 계약은 `TestGetActiveSessionRequiresExpiry`가 잠근다.)
 
     # --- Codex Issue 3 fix: expiring contract 11:30 이후 전체 세션 차단 ---
 

@@ -20,7 +20,9 @@ KIS 공식 패턴:
 USD/KRW 선물 식별:
   종목명 prefix "미국달러 F" — 다른 통화선물 (엔 / 유로 / 위안)과 구분
   종목명 끝 YYYYMM (6자) — contract_month
-  만기일: YYYYMM의 셋째 월요일 (KRX 미국달러선물 최종거래일)
+  만기일: YYYYMM의 셋째 월요일 — **휴장이면 직전 영업일로 앞당김**
+          (KRX 미국달러선물 최종거래일. 계산은 `app.calendars.krx_calendar`가
+           단일 진실 소스이고 이 모듈은 입력 검증 후 위임한다)
 """
 from __future__ import annotations
 
@@ -32,6 +34,8 @@ from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from app.calendars.krx_calendar import usdf_expiry_date
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +55,7 @@ class ContractInfo:
     standard_code: str     # "KR4A75650007" — 12자 ISIN-like
     name: str              # "미국달러 F 202605"
     contract_month: str    # "202605" — YYYYMM 6자
-    expiry_date: date      # date(2026, 5, 18) — 셋째 월요일
+    expiry_date: date      # date(2026, 5, 18) — 셋째 월요일 + 휴장 보정
 
     def is_usd_krw_futures(self) -> bool:
         """미국달러 선물 여부 — 종목명 prefix 매칭."""
@@ -82,7 +86,7 @@ def parse_commodity_future_master(raw: bytes) -> List[ContractInfo]:
     """KIS fo_com_code.mst → ContractInfo 리스트.
 
     cp949 디코딩 후 char-position fixed-width 파싱. 종목명에서 YYYYMM
-    추출 + 만기일 계산 (셋째 월요일). YYYYMM 추출 실패 시 해당 row 스킵.
+    추출 + 만기일 계산 (셋째 월요일 + 휴장 보정). YYYYMM 추출 실패 시 해당 row 스킵.
 
     Args:
         raw: KIS 마스터 .mst bytes (cp949 인코딩)
@@ -131,7 +135,9 @@ def _extract_contract_month(name: str) -> Optional[str]:
 
 
 def _compute_expiry_date(contract_month: str) -> Optional[date]:
-    """YYYYMM → 셋째 월요일 (KRX 미국달러선물 최종거래일).
+    """YYYYMM → KRX 미국달러선물 최종거래일 (**휴장 보정 포함**).
+
+    입력 검증만 여기서 하고, 날짜 계산은 `app.calendars.krx_calendar`에 위임한다.
 
     Args:
         contract_month: "YYYYMM" 6자
@@ -140,27 +146,31 @@ def _compute_expiry_date(contract_month: str) -> Optional[date]:
         date 또는 None (입력 형식 잘못된 경우).
 
     Note:
-        실제 KRX 휴장일이 셋째 월요일과 겹치면 KRX 공시로 만기일 변경
-        가능 (예: 어린이날). 본 함수는 표준 셋째 월요일만 계산 — 정확한
-        만기일은 KRX 공식 캘린더 또는 마스터 파일의 별도 필드 (PR6b-3
-        에서 보강) 참조 필요.
+        2026-08-16 변경 — 구 구현은 **표준 셋째 월요일만** 계산했고 휴장 보정이
+        없었다. 2026-08 셋째 월요일 8/17이 광복절 대체공휴일이라 실제 최종거래일은
+        8/14였는데 8/17을 반환해, 만기 지난 월물을 계속 구독하는 사고가 났다
+        (재접속 루프 + 8/14 일봉 누락). 이제 휴장이면 직전 영업일로 앞당긴다.
+
+        이 함수는 `scripts/backfill_kis_source_daily_rates.py`의
+        `build_contract_sequence`도 직접 소비하므로, 보정은 런타임 resolver와
+        백필 segment 경계에 **동시에** 반영된다.
+
+    Raises:
+        RuntimeError: walk-back 한도 초과 (캘린더 데이터 이상 — `usdf_expiry_date`
+            참조). 입력 형식 오류와 달리 **조용히 None으로 삼키지 않는다**.
     """
     if len(contract_month) != 6 or not contract_month.isdigit():
         return None
     year = int(contract_month[:4])
     month = int(contract_month[4:6])
-    if not (1 <= month <= 12):
+    # year 범위도 검증한다. 구 구현은 `date(...)`를 try/except ValueError로 감싸
+    # "0000"·"9999+" 같은 값을 None으로 돌려줬는데, 위임 리팩터에서 그 catch가
+    # 사라져 `_compute_expiry_date("000001")`이 ValueError를 던지고 있었다
+    # (codex 리뷰 발견). 형식 오류는 None, 캘린더 이상은 RuntimeError로 계약을
+    # 분리해 유지한다 — walk-back 한도 초과는 여기서 삼키지 않는다.
+    if not (1 <= month <= 12) or not (date.min.year <= year <= date.max.year):
         return None
-    first = date(year, month, 1)
-    # 0=Mon, 6=Sun. 1일이 월요일이면 days_to_first_monday=0
-    days_to_first_monday = (0 - first.weekday()) % 7
-    first_monday_day = 1 + days_to_first_monday
-    third_monday_day = first_monday_day + 14
-    try:
-        return date(year, month, third_monday_day)
-    except ValueError:
-        # 30/31일 경계 — 일반적으로 셋째 월요일은 15-21일 사이라 발생 X
-        return None
+    return usdf_expiry_date(year, month)
 
 
 def select_front_month_usd_futures(

@@ -39,11 +39,21 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from app.sources.kis_futures import get_active_session  # noqa: E402
+from app.sources.kis_master import (  # noqa: E402
+    fetch_commodity_future_master,
+    parse_commodity_future_master,
+    select_active_usd_futures_contract,
+)
 
 KIS_PROD_HOST = "https://openapi.koreainvestment.com:9443"
 KIS_WS_URL = "ws://ops.koreainvestment.com:21000/tryitout"
 APPROVAL_CACHE_PATH = Path(".cache/kis_ws_approval.json")
-TR_KEY = "A75605"  # 미국달러 F 202605, fo_com_code.mst
+
+# ⛔ TR_KEY 하드코딩 제거 (2026-08-16). 구 버전은 `A75605`(2026-05-18 만기)를
+#    고정하고 `get_active_session(now)`를 만기 인자 없이 호출했다. 그 조합은
+#    **만기 지난 종목에 세션을 열어 준다** — 8/14 운영 사고와 동일한
+#    "SUBSCRIBE SUCCESS + 무프레임"을 개발 도구에서 재생산할 수 있었다.
+#    이제 운영과 같은 resolver로 코드와 만기일을 함께 얻는다.
 
 # Session 자동 감지로 선택할 TR 매핑.
 # 주간 H0CFxxxx (commodity futures), 야간 H0MFxxxx (krx night futures).
@@ -175,12 +185,22 @@ async def run_ws(approval_key: str) -> None:
     from zoneinfo import ZoneInfo
 
     now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
-    session = get_active_session(now)
+
+    # 운영과 동일한 resolver — 코드와 만기일을 함께 얻는다(하드코딩 금지).
+    contracts = parse_commodity_future_master(fetch_commodity_future_master())
+    contract = select_active_usd_futures_contract(contracts, now)
+    if contract is None:
+        print("[ws] active USD futures contract 없음 — 종료")
+        return
+    tr_key = contract.short_code
+    print(f"[ws] contract: {tr_key} ({contract.name}, expiry={contract.expiry_date})")
+
+    session = get_active_session(now, contract.expiry_date)
     print(f"[ws] active session: {session} (KST {now.strftime('%Y-%m-%d %H:%M:%S')})")
     if session is None:
         print("[ws] market closed — 구독 생략, 종료")
         return
-    subscriptions = [(tr_id, TR_KEY, label) for tr_id, label in SESSION_TR_MAP[session]]
+    subscriptions = [(tr_id, tr_key, label) for tr_id, label in SESSION_TR_MAP[session]]
 
     print(f"[ws] connect {KIS_WS_URL}")
     async with websockets.connect(KIS_WS_URL, ping_interval=None, open_timeout=10) as ws:

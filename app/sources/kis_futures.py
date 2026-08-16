@@ -11,16 +11,19 @@ no Redis write, no scheduler) — 런타임 상태와 분리해 테스트 가능
     * 호가는 주간/야간 columns 동일, 체결은 야간에 dscs_bltr_acml_qty 미포함
   - REST inquire-price 응답 형태는 별도 (output1.futs_prpr 단일 값)
   - 시장 세션 판정 (CF 주간 / CM 야간) — KRX "시작일 기준" 정책
-  - 영업일 / 만기일 판정 (검증된 최소 데이터)
+  - 캘린더 판정은 `app.calendars.krx_calendar`에 위임 (정규장/야간장 분리).
+    구 "검증된 최소 데이터"(하드코딩 만기 1건)는 2026-08-16에 삭제됐다.
 
 검증 완료 (2026-05-04 KST smoke):
   - 주간 09:38: H0CFCNT0/H0CFASP0 + A75605 → 588 msg/15s tick
   - 야간 18:03: H0MFCNT0/H0MFASP0 + A75605 → 63 msg/15s tick (거래량 9× 낮음, 정상)
   - 가격 broker 앱 cross-check 일치 (주간 1483.30 / 야간 1474.50 어제, 오늘 야간 1468.50)
 
-검증 미정 (PR6 운영 연결 시점에 보강):
-  - 만기일 정규세션 11:30 종료 처리 — 캘린더 데이터 보강 후 실증
-  - 한국 정규 공휴일 전체 매핑 — holidays 라이브러리 또는 KRX 공식 캘린더 도입 후
+캘린더 보강 완료 (2026-08-16):
+  - 만기일 정규세션 11:30 종료 — `contract_expiry_date` **필수 인자**로 판정
+    (구 `is_expiry_day` 하드코딩 축 삭제). 2026-08-14 사고 대응.
+  - 한국 정규 공휴일 — `holidays` 라이브러리(PUBLIC∪BANK, observed=True) 기반
+    동적 계산. 야간장 전용 휴장은 별도 override 테이블(공시 확인 후 등재).
   - 임시휴장 추적 — KRX 공시 기반
 
 KIS field mapping 출처:
@@ -32,10 +35,8 @@ KIS field mapping 출처:
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from typing import Dict, FrozenSet, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
-
-from app.calendars.kr_holidays import is_kr_holiday
 
 
 # ---------------------------------------------------------------------------
@@ -252,57 +253,26 @@ def parse_h0mfasp0_payload(data: str) -> Optional[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Calendar — 검증된 최소 데이터 (TODO 명시)
+# Calendar — app.calendars.krx_calendar 단일 진실 소스에 위임 (2026-08-16)
 # ---------------------------------------------------------------------------
-
-# KRX 휴장 calendar는 is_krx_business_day(아래)가 kr_holidays(연도 무관 동적) +
-# 연말 폐장 규칙으로 계산 — 구 KRX_2026_KNOWN_HOLIDAYS 2-date 하드코딩 제거.
-
-# 미국달러선물 (A75x) 만기일. 만기월 셋째 월요일.
-# 검증된 1건만 — 다른 월은 KIS master 또는 KRX 공식 캘린더로 보강.
-KRX_2026_USDF_EXPIRY_DAYS: FrozenSet[date] = frozenset({
-    date(2026, 5, 18),  # A75605 (KIS master 확인)
-    # TODO: 6월 / 7월 / 8월 / 9월 / 10월 / 11월 / 12월 만기일 보강
-})
-
-
-def _krx_year_end_closure_day(year: int) -> date:
-    """KRX 연말 폐장일(휴장) — 12/31 기준, 휴일이면 직전 매매거래일로 당김.
-
-    KRX 규칙: 12월 31일 휴장, 단 12/31이 주말/공휴일이면 직전 매매거래일을 휴장.
-    `is_kr_holiday`(공휴일)에 없는 KRX 고유 규칙이라 별도 처리.
-    예) 2022→12/30(Fri) · 2023→12/29(Fri) · 2024·2025·2026→12/31.
-    """
-    d = date(year, 12, 31)
-    while d.weekday() >= 5 or is_kr_holiday(d):
-        d -= timedelta(days=1)
-    return d
-
-
-def is_krx_business_day(d: date) -> bool:
-    """KRX 영업일 여부.
-
-    False 조건: 주말 / 한국 공휴일(`is_kr_holiday` — PUBLIC∪BANK + observed,
-    대체공휴일·근로자의날·제헌절 재지정 포함) / KRX 연말 폐장일.
-    holidays 라이브러리 기반이라 **연도 무관 동적 계산** (구 2-date 하드코딩 대체).
-    잔여 한계: 라이브러리 미반영 임시공휴일 (운영 발견 시 대응).
-    """
-    if d.weekday() >= 5:  # 5=토, 6=일
-        return False
-    if is_kr_holiday(d):
-        return False
-    if d == _krx_year_end_closure_day(d.year):
-        return False
-    return True
-
-
-def is_expiry_day(d: date) -> bool:
-    """미국달러선물 만기일 여부 (검증된 최소 데이터).
-
-    True 반환 시 정규세션이 11:30에 종료. False 반환은 "만기일 아님" 또는
-    "캘린더 데이터 미보강" 둘 다 포함하므로, 운영 코드에서는 캘린더 보강 필수.
-    """
-    return d in KRX_2026_USDF_EXPIRY_DAYS
+#
+# 구 `KRX_2026_USDF_EXPIRY_DAYS` + `is_expiry_day` **삭제**:
+#   하드코딩 `{2026-05-18}` 1건 + TODO 방치라 5월을 뺀 모든 월에서 만기 판정이
+#   False였다. 그런데 이 축을 "정확하게" 고치면 오히려 회귀가 난다 — 유일한
+#   소비자가 `get_active_session`의 `contract_expiry_date is None` 분기였고,
+#   만기일 07:00에 차월물로 swap한 뒤에는 그 fallback이 참조해야 할 계약이
+#   **항상 차월물**이라 11:30 종료를 적용하면 정상 거래 구간을 끊는다
+#   (아래 Issue 1 주석 참조). 그래서 축을 정확하게 만드는 대신 **축을 없애고**
+#   `contract_expiry_date`를 필수 인자로 승격해 모든 호출자가 실제 만기를
+#   명시하게 했다. 삭제만 하고 None 허용을 남기면 fail-open이 된다.
+#
+# `is_krx_business_day`는 이름을 유지한 채 re-export — 기존 호출부와
+# `patch("app.sources.kis_futures.is_krx_business_day")` 테스트가 그대로 동작한다.
+# 야간장은 별도 predicate(`is_krx_night_session_open`, 시작일 기준)를 쓴다.
+from app.calendars.krx_calendar import (  # noqa: E402
+    is_krx_night_session_open,
+    is_krx_regular_business_day as is_krx_business_day,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -329,33 +299,53 @@ _NIGHT_START = time(17, 50)
 _NIGHT_END = time(6, 0)
 
 
+def night_session_start_date(now: datetime) -> date:
+    """`now`가 속할 수 있는 야간 세션의 **시작일**.
+
+    야간장은 달력 당일이 아니라 시작일 기준으로 열린다:
+      - 00:00~06:00 → 시작일은 **전일** (금요일밤 세션이 토요일 06:00까지)
+      - 그 외       → 시작일은 당일
+
+    `get_active_session`의 CM 분기와 REST guard gate 1이 같은 규칙을 쓰도록
+    추출한 helper다. 두 곳이 각자 `today - 1` 산술을 복제하면 한쪽만 고쳐지는
+    사고가 난다(구 gate 1이 정확히 그 상태였다 — 토요일 새벽 CM을 매주 오거부).
+    """
+    return now.date() - timedelta(days=1) if now.time() <= _NIGHT_END else now.date()
+
+
 def get_active_session(
     now: datetime,
-    contract_expiry_date: Optional[date] = None,
+    contract_expiry_date: date,
 ) -> Optional[Literal["CF", "CM"]]:
     """현재 시점에 active한 KRX 미국달러선물 세션 반환.
 
     Args:
         now: 현재 시각 (KST naive datetime)
-        contract_expiry_date: **운영 중인 contract의 만기일** (PR6c-2d-1 amend, 2026-05-07).
-            - None: legacy 호환. is_expiry_day(today) 캘린더 기반 판정 (보수적 fallback).
+        contract_expiry_date: **운영 중인 contract의 만기일** (필수, 2026-08-16 승격).
             - today와 같음: 만기일 정규세션 11:30 종료 적용 (expiring 월물).
               + Codex Issue 3 fix: 11:30 이후는 정규/야간 모두 차단 (만기 종목 야간 거래 없음).
             - today와 다름 (next month 등): 정규세션 15:45 + 정상 야간세션.
             - today보다 과거 (expired): 모든 세션 차단 (Codex Issue 3 fix).
 
-        contract-aware 추가 동기 (PR6c-2d-1):
+        **필수 인자로 승격한 이유 (2026-08-16)**: 구 signature는 `Optional[date] = None`
+        이었고, None이면 `is_expiry_day(today)` 캘린더 기반으로 추정했다. 그 추정 경로가
+        (a) 만기 정보를 모르는 종목에도 세션을 열어 주는 **fail-open**이고
+        (b) 유일한 비테스트 소비자가 만기 지난 `A75605`를 하드코딩한 WS smoke라
+        8/14 사고와 같은 "subscribe success + 무프레임"을 재생산할 수 있었다.
+        `ContractInfo.expiry_date`가 이미 필수 필드라 모든 호출자가 넘길 재료를 갖고
+        있으므로, 추정을 없애고 명시를 강제한다. 삭제만 하고 None을 남기면 fail-open이다.
+
+        contract-aware 동기 (PR6c-2d-1, 유지):
         - manual rollover로 next month로 swap한 client에 대해 calendar-based
-          `is_expiry_day(today)`가 True여서 11:30 종료 잘못 적용 → 11:30~15:45
-          A75606 disconnect 버그 차단 (Issue 1).
+          만기 판정이 True여서 11:30 종료 잘못 적용 → 11:30~15:45 A75606 disconnect
+          버그 차단 (Issue 1). ← `is_expiry_day`를 "정확하게" 고치면 되살아나는 버그.
         - reconcile 누락/실패 시 expiring contract가 잔존하면 만기일 야간장(17:50~)에
           subscribe 시도해 만기 종목 spurious frame 위험 → 11:30 이후 전 세션 차단 (Issue 3).
 
     Returns:
         "CF" — 주간 정규세션 active (만기일 종료 시각은 contract_expiry_date 기준)
-        "CM" — 야간세션 active (시작일 기준 정책 + contract_expiry_date 차단:
-               expiring contract는 만기일 11:30 이후 차단, 만기 지난 종목은 항상 차단.
-               next month / 미래 만기 / legacy None은 시작일 기준만 적용)
+        "CM" — 야간세션 active (**시작일 기준** + contract_expiry_date 차단:
+               expiring contract는 만기일 11:30 이후 차단, 만기 지난 종목은 항상 차단)
         None — 휴장 또는 contract 만료 후
     """
     today = now.date()
@@ -365,21 +355,17 @@ def get_active_session(
     #    만기 후 / 만기일 11:30 이후의 expiring 종목은 정규/야간 모두 거래 없음
     #    (만기일 05:30 같은 만기일 새벽 야간장은 차단 X — 만기일 11:30 이전이고
     #    실제로는 전 영업일 시작 야간장이 이어진 구간)
-    if contract_expiry_date is not None:
-        if contract_expiry_date < today:
-            # 만기 지난 종목 (master 잔존 또는 reconcile 누락 시) — 모든 세션 차단
-            return None
-        if contract_expiry_date == today and t > _REGULAR_EXPIRY_END:
-            # 만기일 11:30 이후 — 정규세션 종료 + 야간장 거래 없음 (만기 종목)
-            return None
+    if contract_expiry_date < today:
+        # 만기 지난 종목 (master 잔존 또는 reconcile 누락 시) — 모든 세션 차단
+        return None
+    if contract_expiry_date == today and t > _REGULAR_EXPIRY_END:
+        # 만기일 11:30 이후 — 정규세션 종료 + 야간장 거래 없음 (만기 종목)
+        return None
 
     # 1. 주간 정규세션 (영업일 + 정규시간)
     if is_krx_business_day(today):
         # 만기일 종료 시각 결정 — contract-aware (PR6c-2d-1 amend)
-        if contract_expiry_date is None:
-            # legacy: 캘린더 기반 (next month 운영 시 부정확하지만 보수적)
-            regular_end = _REGULAR_EXPIRY_END if is_expiry_day(today) else _REGULAR_END
-        elif contract_expiry_date == today:
+        if contract_expiry_date == today:
             # 만기 당일 contract → 11:30 종료 (위 0번에서 11:30 이후는 이미 차단)
             regular_end = _REGULAR_EXPIRY_END
         else:
@@ -388,17 +374,19 @@ def get_active_session(
         if _REGULAR_START <= t <= regular_end:
             return "CF"
 
-    # 2. 야간세션 (시작일 기준)
-    #    18:00-23:59: now.date()가 영업일이면 active
-    #    00:00-06:00: (now.date() - 1일)이 영업일이면 active
+    # 2. 야간세션 (**시작일 기준** — 달력 당일이 아니다)
+    #    17:50-23:59: 시작일 = now.date()
+    #    00:00-06:00: 시작일 = now.date() - 1일 (금요일밤 세션이 토요일 06:00까지)
+    #    2026-08-16: 정규장 predicate → 야간 전용 predicate로 배선. 정규장이 열린
+    #    날에도 야간장만 휴장하는 공식 공지가 있어 두 축이 분리돼야 한다.
     if t >= _NIGHT_START:
         # 야간 시작일 = today
-        if is_krx_business_day(today):
+        if is_krx_night_session_open(today):
             return "CM"
     elif t <= _NIGHT_END:
         # 야간 시작일 = today - 1
         start_date = today - timedelta(days=1)
-        if is_krx_business_day(start_date):
+        if is_krx_night_session_open(start_date):
             return "CM"
 
     # 3. 그 외 (06:00-08:30 break, 15:45-17:50 break 또는 휴장일)
@@ -500,14 +488,17 @@ def is_close_snapshot_eligible(
         False: 휴장일 (snapshot skip).
 
     Notes:
-        - CF: today 자체가 영업일이어야 함
-        - CM: 야간장 시작일(today - 1)이 영업일이어야 함
+        - CF: today 자체가 **정규장** 영업일이어야 함
+        - CM: 야간장 **시작일(today - 1)**이 개장이어야 함
               예: 토요일 06:00 = 금요일 야간장 종료 → today=토요일이지만 정상
+        - 2026-08-16: CM 분기를 야간 전용 predicate로 배선. 정규장이 열린 날에도
+          야간장만 휴장하는 공지가 있으므로, 그 밤의 close snapshot도 함께 막혀야
+          한다(구 구현은 정규장 predicate라 그런 밤을 정상 세션으로 오판).
     """
     if session == "CF":
         return is_krx_business_day(today_kst)
     if session == "CM":
-        return is_krx_business_day(today_kst - timedelta(days=1))
+        return is_krx_night_session_open(today_kst - timedelta(days=1))
     raise ValueError(f"unknown session: {session!r}")
 
 

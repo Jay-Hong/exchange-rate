@@ -440,7 +440,7 @@ class TestReconcileKrxFuturesContract(unittest.IsolatedAsyncioTestCase):
       - client None + bootstrap_task 없음 → _bootstrap_krx_futures_client(resolved_override=)
       - client None + bootstrap_task 진행 중 → skip (race guard, Codex 3회차 권고)
       - 같은 contract → no-op
-      - 점프 의심 (만기 45일 차이 초과) → 보류
+      - 점프 의심 (인접 월물 아님 — 결번/역행/형식오류) → 보류
       - 정상 rollover → shutdown + _bootstrap_krx_futures_client(resolved_override=)
         (Codex Issue 2: 두 번째 resolve 회피)
     """
@@ -692,17 +692,17 @@ class TestReconcileKrxFuturesContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduler._krx_reconcile_state["rollover_count"], 0)
 
     async def test_jump_protection_skips_rollover(self):
-        """resolved 만기가 current 만기보다 45일 초과 차이 → 보류."""
+        """resolved가 current의 인접 월물이 아님(202605 → 202607, 건너뜀) → 보류."""
         existing = MagicMock()
-        existing._contract = _make_resolved_contract()  # A75605, 5/18 만기
+        existing._contract = _make_resolved_contract()  # A75605, 월물 202605
         scheduler.krx_futures_client = existing
 
         far_future = ContractInfo(
             short_code="A75607",
             standard_code="KR4A75670005",
             name="미국달러 F 202607",
-            contract_month="202607",
-            expiry_date=date(2026, 7, 20),  # 63일 차이 > 45일
+            contract_month="202607",  # 202606을 건너뜀
+            expiry_date=date(2026, 7, 20),
         )
 
         with patch.object(config, "KRX_FUTURES_ENABLED", True), \
@@ -722,6 +722,111 @@ class TestReconcileKrxFuturesContract(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(scheduler._krx_reconcile_state["last_result"], "jump_suppressed")
         self.assertEqual(scheduler._krx_reconcile_state["rollover_count"], 0)
+
+    async def test_jump_suppressed_persists_and_only_restart_recovers(self):
+        """skipped-month 보류는 **살아 있는 collector 위에서 자체 복구되지 않는다**.
+
+        `_is_next_contract_month`를 반복 호출하는 것만으로는 계약이 잠기지 않는다
+        (순수 함수라 항상 같은 답) — reconcile **상태 머신을 실제로 돌려야** 한다.
+        그리고 **live task를 명시로 세워야** 한다: reconcile은 jump guard보다 앞서
+        `task.done()`을 별도 복구 분기로 처리하므로, task=None으로 두면 "살아 있는
+        collector에서의 반복 억제"를 증명하지 못한다(codex 리뷰 지적).
+
+        복구 경로는 두 가지이고 **둘 다 collector가 사라졌을 때**다:
+          (a) client 소실(프로세스 재시작 등) → bootstrap
+          (b) client 잔존 + task 사망 → task-death 재시작 분기
+        즉 정상 실행 중에는 자동 해소가 없다 — optional source의 fail-closed
+        정책으로 수용하되, 그 사실을 운영 계약으로 박제한다.
+        """
+        existing = MagicMock()
+        existing._contract = _make_resolved_contract()  # 월물 202605
+        scheduler.krx_futures_client = existing
+        scheduler.krx_futures_task = _task_mock(done=False)  # ★ 살아 있는 collector
+
+        skipped = ContractInfo(
+            short_code="A75607",
+            standard_code="KR4A75670005",
+            name="미국달러 F 202607",
+            contract_month="202607",  # 202606 건너뜀
+            expiry_date=date(2026, 7, 20),
+        )
+
+        async def fake_bootstrap(*args, **kwargs):
+            mock_client = MagicMock()
+            mock_client._contract = skipped
+            scheduler.krx_futures_client = mock_client
+
+        with patch.object(config, "KRX_FUTURES_ENABLED", True), \
+             patch.object(scheduler, "resolve_active_krx_futures_contract",
+                          new=AsyncMock(return_value=skipped)), \
+             patch.object(scheduler, "_bootstrap_krx_futures_client",
+                          new=AsyncMock(side_effect=fake_bootstrap)) as mock_boot, \
+             patch.object(scheduler, "shutdown_krx_futures_client", new=AsyncMock()):
+            # (1) client 생존 중에는 몇 번을 돌려도 보류 — 자체 복구 없음
+            for _ in range(3):
+                await scheduler._reconcile_krx_futures_contract()
+                self.assertEqual(
+                    scheduler._krx_reconcile_state["last_result"], "jump_suppressed"
+                )
+            mock_boot.assert_not_called()
+            self.assertIs(scheduler.krx_futures_client, existing)
+
+            # (2) 재시작/소실로 collector가 없어지면 bootstrap이 resolved를 직접 사용
+            scheduler.krx_futures_client = None
+            scheduler.krx_futures_task = None
+            await scheduler._reconcile_krx_futures_contract()
+
+        mock_boot.assert_awaited_once_with(resolved_override=skipped)
+        self.assertEqual(
+            scheduler._krx_reconcile_state["last_result"], "bootstrap_started"
+        )
+        self.assertEqual(scheduler._krx_reconcile_state["rollover_count"], 0)
+
+
+class TestIsNextContractMonth(unittest.TestCase):
+    """월물 인접성 판정 (구 "만기 45일 차이" 날짜 산술 대체, 2026-08-16).
+
+    날짜 산술을 쓰면 만기 계산의 walk-back 한도와 결합돼, 이론상 정상 rollover가
+    가드에 막힐 수 있다. 월물 인접성은 같은 의도를 결합 없이 표현한다.
+    """
+
+    def test_normal_next_month(self):
+        self.assertTrue(scheduler._is_next_contract_month("202608", "202609"))
+
+    def test_year_wrap_dec_to_jan(self):
+        self.assertTrue(scheduler._is_next_contract_month("202612", "202701"))
+
+    def test_same_month_rejected(self):
+        self.assertFalse(scheduler._is_next_contract_month("202608", "202608"))
+
+    def test_backward_rejected(self):
+        self.assertFalse(scheduler._is_next_contract_month("202609", "202608"))
+        self.assertFalse(scheduler._is_next_contract_month("202701", "202612"))
+
+    def test_skipped_month_rejected(self):
+        self.assertFalse(scheduler._is_next_contract_month("202608", "202610"))
+
+    def test_year_wrap_skip_rejected(self):
+        self.assertFalse(scheduler._is_next_contract_month("202612", "202702"))
+
+    def test_malformed_input_fails_closed(self):
+        """형식 오류는 fail-closed — 통과시키면 엉뚱한 월물을 구독한다."""
+        for cur, res in [
+            ("2026", "202609"), ("202608", "20269"), ("20260X", "202609"),
+            ("202613", "202614"), ("202600", "202601"), ("", "202609"),
+        ]:
+            with self.subTest(cur=cur, res=res):
+                self.assertFalse(scheduler._is_next_contract_month(cur, res))
+
+    def test_out_of_range_year_fails_closed(self):
+        """year 0 등 범위 밖 → False.
+
+        구 버전은 `("000001", "000002")`를 인접으로 통과시켜 docstring의
+        "형식 오류 fail-closed"와 반대였다 (codex 리뷰 발견).
+        """
+        for cur, res in [("000001", "000002"), ("000012", "000101")]:
+            with self.subTest(cur=cur, res=res):
+                self.assertFalse(scheduler._is_next_contract_month(cur, res))
 
 
 # ---------------------------------------------------------------------------

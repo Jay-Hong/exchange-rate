@@ -235,7 +235,7 @@ boundary_at_utc_naive = boundary_at_kst.astimezone(timezone.utc).replace(tzinfo=
 | 항목 | 기준 |
 |---|---|
 | CM close timestamp day | `today` (보통 06:00:00 KST가 찍히는 calendar day) |
-| CM business day check | `is_krx_business_day(today - timedelta(days=1))` (야간장 시작일 기준) |
+| CM business day check | `is_krx_night_session_open(today - timedelta(days=1))` (야간장 시작일 기준, **2026-08-16부터 야간 전용 predicate**) |
 
 - 예: 토요일 06:00 = 금요일 야간장 종료
 - timestamp day는 토요일, 그러나 business day check는 금요일 기준 (정상 snapshot 실행)
@@ -333,8 +333,11 @@ def insert_source_rate_if_changed(
 
 ### 4.9 휴장일 판정
 
-- **CF snapshot**: `is_krx_business_day(today)` — 일반적 기준
-- **CM snapshot**: `is_krx_business_day(today - timedelta(days=1))` — 야간장 시작일 기준 (토요일 06:00 = 금요일 야간 종료 case)
+- **CF snapshot**: `is_krx_business_day(today)` — 정규장 기준
+- **CM snapshot**: `is_krx_night_session_open(today - timedelta(days=1))` — 야간장 시작일 기준 (토요일 06:00 = 금요일 야간 종료 case)
+  - **2026-08-16 배선 변경**: 정규장 predicate → **야간 전용** predicate. 정규장이 열린 날에도
+    야간장만 휴장하는 공식 공지가 존재하며(연말 12/30 정상 / 12/31 휴장 선례), 그런 밤의
+    close snapshot도 함께 막혀야 한다. 구 구현은 그 케이스를 정상 세션으로 오판했다.
 - False면 snapshot skip
 
 ### 4.10 만기일 처리
@@ -584,7 +587,12 @@ docker compose up -d --force-recreate fastapi
 #### 5.7.7 다음 단계
 
 - 5/19~5/26 7일 telemetry 분석 시 신규 `rest_write_blocked` counter 결합해 case B 분포 측정. 자세한 분석 항목은 [DECISIONS.md ADR-027 follow-up](DECISIONS.md) + [KRX_CANARY.md §"2026-05-25 휴장일 사고 + 대응"](KRX_CANARY.md) 참조.
-- 다른 2026 한국 공휴일 (현충일 6/6 토 자연 회피 / 광복절 8/15 토 자연 회피 / 추석 9/24 목 9/25 금 / 개천절 10/3 토 자연 회피 / 한글날 10/9 금 / 크리스마스 12/25 금) — 별도 캘린더 보강 PR로 검증 후 추가.
+- 다른 2026 한국 공휴일 (현충일 6/6 토 자연 회피 / 추석 9/24 목 9/25 금 / 개천절 10/3 토 자연 회피 / 한글날 10/9 금 / 크리스마스 12/25 금) — 별도 캘린더 보강 PR로 검증 후 추가.
+  - ⚠️ **정정 (2026-08-16)**: 구 서술의 "광복절 8/15 토 **자연 회피**"는 **close-write 축에만
+    참**이다. 만기 축에서는 8/15가 토요일이라 **8/17이 대체공휴일**이 되고, 셋째 월요일
+    만기가 8/14로 앞당겨지는데 구 `_compute_expiry_date`가 보정 없이 8/17을 유지해
+    2026-08-14 사고가 났다. "주말 겹침"은 만기 축에서 오히려 위험을 만든다.
+    만기 축은 `app/calendars/krx_calendar.py` 휴장 보정으로 해소됨.
 
 #### 5.7.8 Amendment 2026-06-10 — gate-checked REST close write 재설계 (#4)
 

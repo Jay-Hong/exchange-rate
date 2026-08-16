@@ -370,6 +370,105 @@ class TestStageCRestGuard(unittest.IsolatedAsyncioTestCase):
     def _controller(self):
         return _make_client_with_token()._fallback_controller
 
+    # ------------------------------------------------------------------
+    # gate 1 야간 배선 (2026-08-16) — 시작일 기준
+    #
+    # 구 gate 1은 `is_krx_business_day(today)`만 봐서 **토요일 새벽 CM을 매주
+    # calendar로 오거부**했다. 같은 계열 결함이 close-write 체인에서는
+    # 2026-06-13에 고쳐졌고 general guard만 남아 있었다.
+    #
+    # `_MATCH_RESULT`는 CF용 identity라 CM 시각에는 gate 2/3에서 걸린다.
+    # 여기서 잠그는 것은 **"calendar가 아닌 이유로 걸리는가"** 다 — gate 1을
+    # 통과했다면 reject 사유가 calendar일 수 없다.
+    # ------------------------------------------------------------------
+
+    def test_gate1_friday_night_not_calendar_reject(self):
+        """금 18:00 정상 CM — calendar gate 통과."""
+        now = datetime(2026, 5, 15, 18, 0)  # Fri
+        self.assertNotEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "calendar",
+        )
+
+    def test_gate1_saturday_dawn_not_calendar_reject(self):
+        """토 03:00 — 금요일 시작 CM이 이어지는 구간. 구 구현은 여기서 오거부했다."""
+        now = datetime(2026, 5, 16, 3, 0)  # Sat
+        self.assertNotEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "calendar",
+        )
+
+    def test_gate1_night_only_closure_evening_rejects_as_session(self):
+        """야간만 휴장한 날 18:00 → **session** reject (calendar 아님).
+
+        gate 계층의 의미가 다르다:
+          - `calendar` = 그 시점이 **거래일 자체가 아님**
+          - `session`  = 거래일이지만 **지금이 활성 세션이 아님**
+        2/13은 정규장이 정상 개장한 날이므로 calendar는 통과가 맞고, 야간만
+        닫힌 사실은 gate 3(`get_active_session`)이 잡는다. 어느 gate가 잡든
+        **fill은 차단**된다는 게 핵심이고, 사유 라벨이 정확해야 telemetry가
+        "휴장일이었다"와 "장이 끝났다"를 구분할 수 있다.
+
+        2026-02-13은 **실제 등재된** 야간 휴장일이라 patch 없이 검증한다
+        (KIND acptno=20260206002546 원문 확인). override가 등재만 되고 배선이
+        끊겨 있으면 여기서 잡힌다.
+        """
+        now = datetime(2026, 2, 13, 18, 0)  # Fri, 정규장 개장일 / 야간 휴장 등재
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "session",
+        )
+
+    def test_gate1_night_only_closure_next_dawn_rejects(self):
+        """그 다음날 03:00도 시작일=2/13 이므로 동일하게 calendar reject.
+
+        여기서는 today(토)가 정규장 휴일이라 OR 좌변도 거짓이 되어 gate 1이
+        잡는다 — 같은 휴장이 시각에 따라 다른 라벨로 집계되는 실제 사례다.
+        patch 없이 등재 데이터로 검증한다.
+        """
+        now = datetime(2026, 2, 14, 3, 0)  # Sat
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "calendar",
+        )
+
+    def test_gate1_sunday_dawn_still_calendar_reject(self):
+        """일 03:00 — 시작일=토요일이라 야간장 없음 → calendar reject (과통과 방어)."""
+        now = datetime(2026, 5, 17, 3, 0)  # Sun
+        self.assertEqual(
+            self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+            "calendar",
+        )
+
+    def test_unregistered_night_closure_indistinguishable_from_normal_night(self):
+        """⚠️ 야간 휴장이 **미등재이면** guard는 정상 야간과 구분하지 못한다.
+
+        아래는 정규장 개장일(금요일)의 야간이고 override 미등재라 PASS다. 만약
+        그 밤이 실제로는 특별휴장이었더라도 **결과는 동일**하다 — 그게 이
+        테스트가 잠그는 계약이다. 지금은 guard가 telemetry-only라 데이터 오염이
+        0이지만, **Stage C 실 반영 전에는 반드시 닫아야 한다**(session evidence
+        요구 또는 등가 장치).
+
+        ⚠️ 특정 실제 날짜의 휴장 여부를 주장하지 않는다 — 그건 공시로 확인해
+        override 테이블에 등재할 사안이고, 테스트가 대신 단정할 것이 아니다.
+        """
+        now = datetime(2026, 5, 15, 18, 0)  # 금, 정규장 개장일 / 야간 미등재
+        night_result = {**self._MATCH_RESULT, "session": "CM"}
+        self.assertIsNone(
+            self._controller()._evaluate_rest_guard(night_result, now),
+            "override 미등재 시 PASS — Stage C 반영 전 차단 필요",
+        )
+
+    def test_gate1_night_force_open_passes_on_holiday(self):
+        """휴일이어도 야간 force_open이면 calendar 통과 (양방향 override)."""
+        now = datetime(2026, 5, 25, 18, 0)  # 대체공휴일
+        with patch("app.crawlers.krx_kis.is_krx_night_session_open",
+                   return_value=True):
+            self.assertNotEqual(
+                self._controller()._evaluate_rest_guard(self._MATCH_RESULT, now),
+                "calendar",
+            )
+
     # --- unit: _evaluate_rest_guard (now 주입) ---
 
     def test_calendar_reject_2026_05_25(self):

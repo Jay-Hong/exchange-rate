@@ -86,10 +86,54 @@ class TestComputeExpiryDate(unittest.TestCase):
         """2026-12-01=화, 첫 월요일 12/7, 셋째 월요일 12/21."""
         self.assertEqual(_compute_expiry_date("202612"), date(2026, 12, 21))
 
+    # ------------------------------------------------------------------
+    # 휴장 보정 — 셋째 월요일이 휴장이면 직전 영업일로 앞당김 (KRX 규칙).
+    # 위 4개(202605/202606/202607/202612)는 전부 영업일 월요일이라 보정 유무를
+    # 판별하지 못한다(과보정 회귀 방어 전용). 아래 2건이 유일한 검출 축이다.
+    # ------------------------------------------------------------------
+
+    def test_2026_08_holiday_shifts_back_to_08_14(self):
+        """2026-08 셋째 월요일 8/17 = 광복절(8/15 토) 대체공휴일 → 직전 영업일 8/14(금).
+
+        2026-08-14 운영 사고의 근인. 무보정 구현은 2026-08-17을 반환한다.
+        """
+        self.assertEqual(_compute_expiry_date("202608"), date(2026, 8, 14))
+
+    def test_2026_02_lunar_holiday_shifts_back_to_02_13(self):
+        """2026-02 셋째 월요일 2/16 = 설 연휴(2/16~18) → 직전 영업일 2/13(금).
+
+        주말 2일을 건너뛰므로 단일 스텝이 아닌 walk-back 루프가 필요하다.
+        """
+        self.assertEqual(_compute_expiry_date("202602"), date(2026, 2, 13))
+
     def test_invalid_format(self):
         self.assertIsNone(_compute_expiry_date("2026"))
         self.assertIsNone(_compute_expiry_date("20260X"))
         self.assertIsNone(_compute_expiry_date("ABCDEF"))
+
+    def test_out_of_range_year_returns_none_not_raise(self):
+        """year 0 / 범위 밖 → **None** (ValueError 아님).
+
+        구 구현은 `date(...)`를 try/except ValueError로 감싸 None을 돌려줬는데,
+        helper 위임 리팩터에서 그 catch가 사라져 `"000001"`이 ValueError를
+        던지고 있었다(codex 리뷰 발견). 형식 오류=None / 캘린더 이상=RuntimeError
+        라는 계약 분리를 잠근다.
+        """
+        self.assertIsNone(_compute_expiry_date("000001"))
+        self.assertIsNone(_compute_expiry_date("000012"))
+
+    def test_calendar_failure_propagates_not_swallowed(self):
+        """캘린더 이상(walk-back 한도 초과)은 **None으로 삼키지 않고 전파**한다.
+
+        형식 오류(=None)와 캘린더 이상(=RuntimeError)의 계약 분리를 wrapper
+        레벨에서 잠근다. helper에만 테스트가 있으면, wrapper가 try/except로
+        감싸 조용히 None을 돌려주는 회귀를 못 잡는다(codex 리뷰 지적).
+        """
+        import app.calendars.krx_calendar as krx_cal
+
+        with patch.object(krx_cal, "is_krx_regular_business_day", return_value=False):
+            with self.assertRaises(RuntimeError):
+                _compute_expiry_date("202608")
 
     def test_invalid_month(self):
         self.assertIsNone(_compute_expiry_date("202613"))  # 13월

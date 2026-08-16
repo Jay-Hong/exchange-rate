@@ -166,7 +166,10 @@
 **item 2 — chain loop / boundary**:
 - contract sequence = **window_start가 속한 front-month resolve 후 forward 생성** (종료: `segment ∩ [window_start, window_end] ≠ ∅`).
 - **window_start == expiry_date → next contract** resolve (invariant 2 일관 — 누락 시 첫 segment 경계 오류).
-- **segment = calendar date 기준**(셋째 월요일 만기, 거래일 무관) / **실제 rows = KIS 응답 trading-day set 기준** — 2-layer 분리.
+- **segment = calendar date 기준**(만기일 = 셋째 월요일 **+ 휴장 시 직전 영업일로 보정**, 그 외 거래일 무관) / **실제 rows = KIS 응답 trading-day set 기준** — 2-layer 분리.
+  - 2026-08-16: `_compute_expiry_date`에 휴장 보정이 들어가면서 segment 경계도 함께 이동했다.
+    영향 날짜는 2026-02-13, 2026-08-14 두 건(주중 기준)이며, 달력 날짜 기준으로는
+    2/13~15 · 8/14~16 총 6일의 계약 배정이 바뀐다.
 - **window_start 또는 window_end가 휴장일이면** 첫/마지막 row가 경계일과 불일치 가능 — **정상** (gap 아님).
 - **manifest expected dates = KIS trading-day set ∩ [window_start, window_end]**.
 

@@ -92,18 +92,32 @@ class TestBoundaryHelpers(unittest.TestCase):
             self.assertFalse(is_close_snapshot_eligible("CF", date(2026, 5, 16)))
 
     def test_eligible_cm_saturday_uses_previous_friday(self):
-        """토요일 06:00 = 금요일 야간장 종료 → today=Sat, check=Fri."""
+        """토요일 06:00 = 금요일 야간장 종료 → today=Sat, check=Fri.
+
+        2026-08-16: CM 분기가 정규장 predicate → **야간 전용 predicate**로 배선됐다.
+        정규장이 열린 날에도 야간장만 휴장하는 공지가 있어 두 축이 분리돼야 하고,
+        그 밤의 close snapshot도 함께 막혀야 한다.
+        """
         calls = []
 
-        def fake_business_day(d: date) -> bool:
-            calls.append(d)
-            return d == date(2026, 5, 15)  # Friday
+        def fake_night_open(start_date: date) -> bool:
+            calls.append(start_date)
+            return start_date == date(2026, 5, 15)  # Friday
 
-        with patch("app.sources.kis_futures.is_krx_business_day",
-                   side_effect=fake_business_day):
+        with patch("app.sources.kis_futures.is_krx_night_session_open",
+                   side_effect=fake_night_open):
             self.assertTrue(is_close_snapshot_eligible("CM", date(2026, 5, 16)))
-        # CM check는 today - 1 day = Friday
+        # CM check는 야간 **시작일** = today - 1 day = Friday
         self.assertEqual(calls, [date(2026, 5, 15)])
+
+    def test_eligible_cm_blocked_by_night_only_closure(self):
+        """정규장은 열렸지만 야간장만 휴장한 날 → 그 밤의 CM close도 skip.
+
+        구 구현(정규장 predicate)은 이 케이스를 정상 세션으로 오판했다.
+        """
+        with patch("app.sources.kis_futures.is_krx_night_session_open",
+                   return_value=False):
+            self.assertFalse(is_close_snapshot_eligible("CM", date(2026, 5, 16)))
 
     def test_eligible_cf_2026_05_25_buddhas_birthday_substitute_skips(self):
         """5/25 월요일 부처님오신날 대체공휴일 — CF skip (운영 사고 회귀 잠금).

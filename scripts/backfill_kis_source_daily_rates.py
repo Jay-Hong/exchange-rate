@@ -103,7 +103,7 @@ KIS_DAILY_ROWS_CAP = 100  # 5/27 실측 — wide range 시 정확히 100 rows ca
 def _build_previous_hardcoded() -> ContractInfo:
     """GRAPH §7-new anchor 기반 hardcoded previous contract.
 
-    A75605 = 2026-05 만기 (셋째 월요일 = 2026-05-18). master에는 없으나 KIS daily
+    A75605 = 2026-05 만기 (2026-05-18 — 셋째 월요일, 영업일이라 보정 없음). master에는 없으나 KIS daily
     endpoint로 historical fetch 가능. GRAPH §7-new line 372-379 검증 사례 재현용.
     """
     expiry = _compute_expiry_date(PREVIOUS_HARDCODED_CONTRACT_MONTH)
@@ -123,7 +123,7 @@ def _build_previous_dynamic(current: ContractInfo) -> ContractInfo:
 
     current.contract_month YYYYMM → previous YYYYMM 계산 (1월이면 전년 12월).
     short_code 패턴: A75 + (year % 10) + month_2digit (GRAPH §7-new line 336 명시).
-    expiry_date: _compute_expiry_date 재사용 (셋째 월요일).
+    expiry_date: _compute_expiry_date 재사용 (셋째 월요일 + 휴장 보정).
 
     master에 없는 만기 contract (지난 contract)도 KIS daily endpoint로 fetch 가능.
     """
@@ -232,7 +232,7 @@ def build_chain_static_anchor(now_kst: datetime) -> tuple[ContractInfo, Contract
 #   - segment = [prev.expiry, this.expiry) 반열린 (calendar date, 거래일 무관)
 #   - window_start가 속한 front-month resolve (만기일 당일 = next contract)
 #   - 포함 조건: segment ∩ [window_start, window_end] != ∅
-# master / fetch / DB 의존 0 — _compute_expiry_date(셋째 월요일)만 재사용.
+# master / fetch / DB 의존 0 — _compute_expiry_date(셋째 월요일 + 휴장 보정)만 재사용.
 
 def _parse_contract_month(contract: ContractInfo) -> tuple[int, int]:
     """ContractInfo.contract_month 'YYYYMM' → (year, month)."""
@@ -257,7 +257,7 @@ def _make_usd_futures_contract(year: int, month: int) -> ContractInfo:
     """year/month → 미국달러선물 ContractInfo (calendar 계산, master 불필요).
 
     short_code 패턴: A75 + (year % 10) + month_2digit (GRAPH §7-new line 336).
-    expiry_date: _compute_expiry_date 재사용 (셋째 월요일).
+    expiry_date: _compute_expiry_date 재사용 (셋째 월요일 + 휴장 보정).
     standard_code는 "" (미사용) — 만기 지난 contract도 KIS daily endpoint로 fetch 가능.
     기존 _build_previous_dynamic / _build_before_previous_dynamic과 동일 short_code 규칙
     (후속에서 그 helper들을 본 함수 기반으로 통합 가능 — 이번 단위는 변경 최소).

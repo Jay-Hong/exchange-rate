@@ -1,6 +1,6 @@
 """Step 4B 단위 1 — N-contract chain sequence (calendar 순수 계산) 단위 테스트.
 
-master / fetch / DB 의존 0 — _compute_expiry_date(셋째 월요일)만 사용.
+master / fetch / DB 의존 0 — _compute_expiry_date(셋째 월요일 + 휴장 보정)만 사용.
 boundary 중심 (KRX_STEP4B_PLAN.md §12 Resolved):
   - 일반일 / 만기일 당일=next / 휴장일 segment=calendar
   - window_end 직전 current만 포함, next 제외
@@ -48,6 +48,58 @@ class TestResolveFrontMonth(unittest.TestCase):
         self.assertEqual(d.weekday(), 6)
         c = B._resolve_front_month(d)
         self.assertEqual(c.contract_month, "202605")
+
+
+class TestHolidayAdjustedExpiryBoundary(unittest.TestCase):
+    """휴장 보정 만기일이 chain segment 경계에 전파되는지 (2026-02 / 2026-08).
+
+    `build_contract_sequence`가 `_compute_expiry_date`를 직접 소비하므로
+    (`scripts/backfill_kis_source_daily_rates.py`의 import), 만기 보정은 런타임
+    resolver뿐 아니라 백필 segment 경계에도 그대로 반영돼야 한다.
+
+    무보정 구현에서는 8/14·2/13이 아직 만기월물 구간이라 전부 FAIL 한다.
+    """
+
+    def test_2026_08_expiry_day_is_08_14_and_resolves_next(self):
+        # 실제 최종거래일 8/14(금) — 8/17(월)은 광복절 대체공휴일
+        self.assertEqual(B._compute_expiry_date("202608"), date(2026, 8, 14))
+        c = B._resolve_front_month(date(2026, 8, 14))
+        self.assertEqual(c.contract_month, "202609")  # boundary=next
+
+    def test_2026_08_13_still_current_month(self):
+        c = B._resolve_front_month(date(2026, 8, 13))
+        self.assertEqual(c.contract_month, "202608")
+
+    def test_2026_02_expiry_day_is_02_13_and_resolves_next(self):
+        # 실제 최종거래일 2/13(금) — 2/16(월)은 설 연휴
+        self.assertEqual(B._compute_expiry_date("202602"), date(2026, 2, 13))
+        c = B._resolve_front_month(date(2026, 2, 13))
+        self.assertEqual(c.contract_month, "202603")
+
+    def test_2026_02_12_still_current_month(self):
+        c = B._resolve_front_month(date(2026, 2, 12))
+        self.assertEqual(c.contract_month, "202602")
+
+    def test_shifted_boundary_weekend_belongs_to_next(self):
+        """앞당겨진 만기일 이후 주말(달력일)도 차월물 segment에 속한다.
+
+        2026-08-14(금) 만기 → 8/15(토)·8/16(일)·8/17(월 대체휴일)은 모두 9월물 구간.
+        segment는 거래일이 아니라 calendar date 기준이므로 휴장일도 포함된다.
+        """
+        for d in (date(2026, 8, 15), date(2026, 8, 16), date(2026, 8, 17)):
+            with self.subTest(d=d):
+                self.assertEqual(B._resolve_front_month(d).contract_month, "202609")
+
+    def test_shifted_boundary_segment_contiguous(self):
+        """보정된 경계에서도 segment 반열린 연속성(겹침/gap 0)이 유지된다."""
+        seq = B.build_contract_sequence(date(2026, 1, 1), date(2026, 12, 31))
+        by_month = {c.contract_month: (s, e) for c, s, e in seq}
+        self.assertEqual(by_month["202602"][1], date(2026, 2, 13))   # 2월물 segment_end
+        self.assertEqual(by_month["202603"][0], date(2026, 2, 13))   # 3월물 segment_start
+        self.assertEqual(by_month["202608"][1], date(2026, 8, 14))
+        self.assertEqual(by_month["202609"][0], date(2026, 8, 14))
+        for i in range(len(seq) - 1):
+            self.assertEqual(seq[i][2], seq[i + 1][1])
 
 
 class TestMonthRollover(unittest.TestCase):

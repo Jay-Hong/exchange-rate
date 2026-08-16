@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from typing import Any, Callable, Dict, Optional
 
 # 서드파티 라이브러리
@@ -1917,6 +1917,37 @@ async def shutdown_krx_futures_client():
 # 5/18 만기 통과 후 hybrid (06:01 daily + session boundary)로 축소
 # 검토 (PR6c-2d-5 후보). 영구 정책 아님 — 임시 안전모드.
 # ─────────────────────────────────────────────────────────────
+def _is_next_contract_month(current_month: str, resolved_month: str) -> bool:
+    """`resolved_month`가 `current_month`의 **정확한 다음 달**인가 ("YYYYMM").
+
+    reconcile 점프 방지용. 날짜 산술(구 "만기 45일 차이") 대신 월물 인접성으로
+    판정해 만기 계산 규칙과의 결합을 끊는다.
+
+    True: 202608 → 202609, **202612 → 202701**(year wrap)
+    False: 같은 달 / 역행 / 건너뜀(202608 → 202610) / 형식 오류
+
+    형식이 깨지면 False = **fail-closed**. rollover를 보류하면 수집이 멈추지만
+    (visible, `jump_suppressed` telemetry + 재시작 bootstrap으로 복구 가능),
+    통과시키면 엉뚱한 월물을 구독한다 — 8/14 사고가 정확히 그 형태였다.
+    """
+    if len(current_month) != 6 or not current_month.isdigit():
+        return False
+    if len(resolved_month) != 6 or not resolved_month.isdigit():
+        return False
+    cy, cm = int(current_month[:4]), int(current_month[4:])
+    ry, rm = int(resolved_month[:4]), int(resolved_month[4:])
+    if not (1 <= cm <= 12 and 1 <= rm <= 12):
+        return False
+    # year 범위도 검증 — 구 버전은 "000001" → "000002"를 인접으로 통과시켜
+    # "형식 오류 fail-closed" 서술과 반대였다 (codex 리뷰 발견).
+    if not (date.min.year <= cy <= date.max.year):
+        return False
+    if not (date.min.year <= ry <= date.max.year):
+        return False
+    expected_y, expected_m = (cy + 1, 1) if cm == 12 else (cy, cm + 1)
+    return (ry, rm) == (expected_y, expected_m)
+
+
 async def _reconcile_krx_futures_contract():
     """5분 주기 contract reconcile (PR6c-2d-1).
 
@@ -1926,7 +1957,7 @@ async def _reconcile_krx_futures_contract():
       3. resolved is None → warning + 기존 client 유지
       4. krx_futures_client is None → _bootstrap_krx_futures_client(resolved_override=resolved)
       5. resolved.short_code == current.short_code → no-op
-      6. 만기 차이 > 45일 또는 < 0 → 점프 의심 warning + 보류
+      6. resolved가 current의 인접(다음) 월물이 아님 → 점프 의심 warning + 보류
       7. 정상 rollover → shutdown + _bootstrap_krx_futures_client(resolved_override=resolved)
          (Codex Issue 2 fix: 두 번째 resolve 회피)
 
@@ -2031,14 +2062,21 @@ async def _reconcile_krx_futures_contract():
         _record_krx_reconcile(result="no_op", current=current, resolved=resolved)
         return
 
-    # 3. 점프 방지 — 만기 45일 이상 차이 또는 역행은 master 데이터 오류 의심
-    expiry_diff = (resolved.expiry_date - current.expiry_date).days
-    if expiry_diff > 45 or expiry_diff < 0:
+    # 3. 점프 방지 — resolved가 current의 **정확한 다음 월물**인가
+    #
+    #    2026-08-16 변경: 구 구현은 `만기 차이 > 45일 또는 < 0`이라는 날짜 산술이었다.
+    #    만기 계산에 휴장 보정(walk-back)이 들어가면서 이 임계값이 계산 규칙과
+    #    결합된다 — 셋째 월요일 간 구조적 최대 간격 37일에 walk-back 한도 14일이
+    #    더해지면 이론상 51일까지 벌어져 **정상 rollover가 가드에 막힐 수 있다**.
+    #    (현행 holidays==0.97 실측은 최대 38일 / 전 보정 3일이라 발화하지 않지만,
+    #     라이브러리 드리프트에 잠재 결합을 남기는 설계다.)
+    #    월물 인접성은 같은 의도("master 데이터 오류 의심")를 날짜 산술 없이
+    #    표현한다: 결번·역행·건너뜀이 전부 한 검사로 걸린다.
+    if not _is_next_contract_month(current.contract_month, resolved.contract_month):
         logger.warning(
-            "[krx] reconcile 점프 의심 %s/%s → %s/%s (만기 %d일 차이) — 보류",
+            "[krx] reconcile 점프 의심 %s/%s → %s/%s (인접 월물 아님) — 보류",
             current.short_code, current.contract_month,
             resolved.short_code, resolved.contract_month,
-            expiry_diff,
         )
         _record_krx_reconcile(result="jump_suppressed", current=current, resolved=resolved)
         return

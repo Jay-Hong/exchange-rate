@@ -61,6 +61,8 @@ from app.sources.kis_futures import (
     is_in_session_end_grace,
     is_in_single_price_window,
     is_krx_business_day,
+    is_krx_night_session_open,
+    night_session_start_date,
     parse_h0cfasp0_payload,
     parse_h0cfcnt0_payload,
     parse_h0mfasp0_payload,
@@ -838,8 +840,12 @@ class KrxRestFallbackController:
         (`_invoke_rest_fallback`)가 counter/log로만 기록한다.
 
         hard reject 3 gate (통과 순서):
-          1. calendar — 오늘 KRX 거래일? (`is_krx_business_day` — kr_holidays 기반
-             연도 무관 동적 + KRX 연말 폐장. 구 2-date 하드코딩에서 업그레이드 완료).
+          1. calendar — 그 시점에 **거래 가능성이 있는 달력일인가**:
+             정규장 당일(`is_krx_business_day`) **OR** 야간장 시작일 기준
+             (`is_krx_night_session_open(night_session_start_date(now))`).
+             OR이므로 **야간장만 별도 휴장한 정규장 개장일의 밤**은 좌변이 참이라
+             여기를 통과하고 gate 3이 `session`으로 잡는다 (정상 영업일의 밤은
+             애초에 정상 CM이라 어느 gate도 거부하지 않는다).
           2. active contract — 만기 미경과 + REST 응답 월물/만기일이 현재 contract와
              일치 (만기 후 / rollover stale 월물 차단 — 5/18 사고 대응).
           3. session — CF/CM 장중 + 종료 grace 아님.
@@ -855,8 +861,28 @@ class KrxRestFallbackController:
         """
         today = now.date()
 
-        # gate 1: calendar (오늘 KRX 거래일?)
-        if not is_krx_business_day(today):
+        # gate 1: calendar — 정규장 당일 OR 야간장(**시작일 기준**)
+        #   2026-08-16 배선 변경. 구 구현은 `is_krx_business_day(today)`만 봐서
+        #   **토요일 새벽 CM을 매주 calendar로 오거부**했다(금요일 18:00 시작
+        #   세션이 토요일 06:00까지 이어지는데 today=토요일은 영업일이 아니므로).
+        #   같은 계열 결함이 close-write 체인에서는 2026-06-13에 이미 고쳐졌고
+        #   (`is_close_snapshot_eligible`), general guard만 남아 있었다.
+        #
+        #   ⚠️ OR이므로 **야간 전용 휴장이 여기서 다 걸리지는 않는다**:
+        #     - 정규장 휴일의 밤이면서 **그 야간 세션도 닫힌** 경우(예: 일요일
+        #       새벽 — 시작일 토요일) → 이 gate가 `calendar`로 거부.
+        #       (정상 금요일 야간이 이어지는 토요일 새벽은 우변이 참이라 통과)
+        #     - **야간장만 별도 휴장한** 정규장 개장일의 밤 → 좌변이 참이라 통과하고,
+        #       gate 3(`get_active_session`)이 `session`으로 거부한다.
+        #       (정상 영업일의 밤은 실제로 CM이므로 거부 대상이 아니다)
+        #   두 라벨의 의미가 다르다: `calendar`=거래일 자체가 아님 /
+        #   `session`=거래일이지만 지금 활성 세션이 아님. 어느 쪽이든 fill은
+        #   차단되지만, 같은 야간 휴장이 시각에 따라 다른 라벨로 집계되므로
+        #   "야간 휴장" 원인을 날짜 넘어 합산하려면 별도 reason이 필요하다.
+        if not (
+            is_krx_business_day(today)
+            or is_krx_night_session_open(night_session_start_date(now))
+        ):
             return "calendar"
 
         # gate 2: active contract (만기 미경과 + 응답 identity 정확 일치, fail-closed)

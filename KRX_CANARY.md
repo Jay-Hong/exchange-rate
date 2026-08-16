@@ -92,7 +92,7 @@ docker compose up -d fastapi
 
 **3. 재생성 직후 검증 (5분 이내):**
 
-> ⚠️ 아래 검증은 **KRX active session 중**일 때만 즉시 성립합니다. KRX active session: 정규 평일 08:30~15:45 (CF) / 야간 평일 17:50~익일 06:00 (CM). 그 외(15:45~17:50 break / 새벽 06:00~08:30 / 주말 / 만기일 11:30 이후)에 restart하면 `[krx] KisFuturesClient 시작` 로그까지는 보이지만 `[kis_ws] connected` / `subscribed` / approval cache 파일 / `source_rates` KRX row는 다음 active session 진입 전까지 부재가 **정상 동작**입니다 (`KisFuturesClient.start()`의 메인 루프가 session=None 시 30초 sleep loop만 돌고 approval/connect/subscribe/DB write 호출 X).
+> ⚠️ 아래 검증은 **KRX active session 중**일 때만 즉시 성립합니다. KRX active session: 정규 평일 08:30~15:45 (CF) / 야간 **시작일** 평일 17:50~익일 06:00 (CM — 금요일밤 세션은 토요일 06:00까지 이어지므로 "토요일=휴장"이 아닙니다). 그 외(15:45~17:50 break / 06:00~08:30 / 야간 시작일이 휴일 / **운영 중인 계약의 만기일 11:30 이후**)에 restart하면 `[krx] KisFuturesClient 시작` 로그까지는 보이지만 `[kis_ws] connected` / `subscribed` / approval cache 파일 / `source_rates` KRX row는 다음 active session 진입 전까지 부재가 **정상 동작**입니다 (`KisFuturesClient.start()`의 메인 루프가 session=None 시 30초 sleep loop만 돌고 approval/connect/subscribe/DB write 호출 X).
 
 ```bash
 # bootstrap 성공 + WebSocket 연결 + subscribe 확인
@@ -273,16 +273,22 @@ done
 
 - APScheduler cron 5분마다 `_reconcile_krx_futures_contract()` 실행
 - 동작: resolve → 현재 client contract 비교 → 다르면 shutdown + bootstrap(resolved_override=)
-- 안전장치: 만기 차이 > 45일 점프 의심 보류 / resolve 실패 격리 / None 처리
+- 안전장치: **인접 월물 아님**(결번/역행/형식오류) 점프 의심 보류 / resolve 실패 격리 / None 처리
+  - 2026-08-16 변경: 구 "만기 차이 > 45일" 날짜 산술 → `_is_next_contract_month` 월물 인접성.
+    만기 계산에 휴장 보정(walk-back)이 들어가면서 임계값이 계산 규칙과 결합돼, 이론상
+    정상 rollover가 가드에 막힐 수 있었다 (구조적 최대 간격 37일 + walk-back 한도 14일 = 51일).
 - `KRX_FUTURES_ENABLED=true`일 때만 cron 등록
 - **임시 안전모드** — 5/18 통과 후 hybrid (06:01 daily + session boundary)로 축소 검토 (PR6c-2d-5 후보)
 
 **Contract-aware session 판정 (Codex 외부 검토 amend):**
 
-- `get_active_session(now, contract_expiry_date)` — contract.expiry_date를 인자로 받음
-- expiring 월물 (today == expiry): 만기일 정규세션 11:30 종료 적용
+- `get_active_session(now, contract_expiry_date)` — contract.expiry_date를 **필수 인자**로 받음
+- expiring 월물 (today == expiry): 만기일 정규세션 11:30 종료 적용 + 11:30 이후 야간도 차단
 - next month (today != expiry): 정상 15:45 종료 (rollover 후 11:30~15:45 disconnect 차단)
-- legacy 호환: contract_expiry_date=None 시 캘린더 기반 fallback
+- **2026-08-16: `contract_expiry_date=None` legacy fallback 삭제**. None이면 만기를 모르는 채
+  세션을 추정해 만료 월물에도 세션을 열어 주는 fail-open이었고, 유일한 비테스트 소비자가
+  만기 지난 `A75605`를 하드코딩한 WS smoke였다. 이제 None을 넘기면 `TypeError`이고,
+  모든 호출부가 만기를 전달하는지는 AST trip-wire 테스트가 잠근다.
 
 **예상 timeline (5/18 만기, A75605 → A75606):**
 
@@ -396,7 +402,8 @@ done
 
 - PR6c-2d-5 (hybrid scheduler 전환): 5/18 swap이 5분 cron으로 안전하게 통과 확인 시 06:01 + boundary 기반으로 축소
 - PR6d-2b (REST fallback): stale 임계값, session-end grace, reconnect 동반 조건, cooldown
-- 점프 보호 임계값 (현재 45일) 적정성
+- ~~점프 보호 임계값 (현재 45일) 적정성~~ → **해소 (2026-08-16)**: 날짜 임계값 자체를
+  폐기하고 월물 인접성 검사로 교체. 임계값 튜닝 질문이 supersede됨.
 
 ### Close finalizer 첫 실측 체크리스트 (c2fb796 deploy 후, 2026-05-18 ~ 5/19)
 
@@ -530,6 +537,17 @@ scripts/observe_kis_master.py  # KIS 상품 마스터 fetch (secret 무관, publ
 - **5/19~5/26 close finalizer 7일 telemetry** — case A (WS-first 성공) / case B (WS-first 실패, REST diagnostic + `rest_write_blocked` write 차단 — 2026-05-25 정책 PR `6a43785` 이후) / case C (둘 다 실패) 분포 측정. CF/CM 첫 실측 모두 case A. 상세 status는 [KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) 추적.
 
 > **다음 만기 (6/18) 별도 observer는 불필요로 결정 (2026-05-19)**. 5/18 첫 실측으로 운영 정책 input 모두 확정 — 만기일 rollover (PR6c-2d-1) 정상 / KIS master 익일 batch 갱신 / REST stale 정상 응답 가능 / 자체 calendar 기반 active contract 판단 / CF/CM close finalizer WS-first 성공. 다음 만기는 운영 로그/DB row만 사후 확인 ([KRX_CLOSE_SNAPSHOT_PLAN.md §0](KRX_CLOSE_SNAPSHOT_PLAN.md) telemetry). master batch 재확인이 꼭 필요하면 `observe_kis_master.py` ad-hoc 1회 호출로 충분.
+>
+> ⚠️ **Amendment (2026-08-16)** — 위 결정에 **결함 2건**이 있었다.
+> 1. **사실 오기**: 2026-06 만기는 셋째 월요일 **6/15(월)**이지 6/18이 아니다.
+> 2. **추론 일반화 오류**: "5/18 첫 실측으로 운영 정책 input 모두 확정"은 **정상 월요일 만기
+>    1회 관측**에서 나온 결론인데, 그 표본에는 **휴장이 겹쳐 만기가 앞당겨지는 경우가
+>    없었다**. 2026-08-14 사고가 정확히 그 미커버 케이스다(8/17 대체공휴일 → 실제 최종
+>    거래일 8/14, 코드는 8/17 유지 → 만기 후 월물 구독 → 재접속 루프 + 일봉 누락).
+>
+> 따라서 위 "observer 불필요" 결론의 **적용 범위는 무보정 만기월로 한정**한다. 휴장 보정이
+> 발생하는 월물(2027-08 / 2028-07 등)은 rollover를 별도 확인한다. 만기 계산 자체는
+> `app/calendars/krx_calendar.py`의 휴장 보정으로 해소됐다.
 
 ### 2026-05-25 휴장일 사고 + 대응 (4단계 완료)
 
@@ -677,8 +695,22 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 
 2026 한국 공휴일 중 본 코드의 사고 재발 위험:
 
-- 자연 회피 (주말 겹침): 현충일 6/6 토 / 광복절 8/15 토 / 개천절 10/3 토
+- 자연 회피 (주말 겹침): 현충일 6/6 토 / 개천절 10/3 토
 - 위험 (평일/금요일): 추석 9/24 목 / 9/25 금 / 한글날 10/9 금 / 크리스마스 12/25 금
+
+> ⚠️ **정정 (2026-08-16)** — 구 서술은 **광복절 8/15 토를 "자연 회피"로 분류했으나 틀렸다.**
+> 축을 나눠 봐야 한다:
+> - **close-write 축**(이 문단의 원래 대상, 5/25형 stale REST): 동적 캘린더
+>   (`observed=True`)가 8/17 대체공휴일을 정상 커버했다. 8/14 15:46 gate REJECT가 그
+>   증거는 **아니다**(그건 `reason=contract`라 gate 1을 통과했다는 뜻). 실제 근거는
+>   `is_kr_holiday(2026-08-17)=True` / `is_krx_business_day(2026-08-17)=False` 실행 확인.
+> - **만기 계산 축**(당시 미고려): 8/15가 토요일이라 **8/17 월요일이 대체공휴일**이 되고,
+>   셋째 월요일 만기가 **8/14(금)로 앞당겨졌다**. 구 `_compute_expiry_date`는 보정이 없어
+>   8/17을 유지 → 만기 후 월물 구독 → 재접속 루프 + 8/14 일봉 누락 (2026-08-14 사고).
+>
+> 즉 "주말 겹침 = 자연 회피"는 close-write 축에만 참이고, 만기 축에서는 **주말 겹침이
+> 오히려 대체공휴일을 만들어 위험을 키운다**. 만기 축은 `app/calendars/krx_calendar.py`의
+> 휴장 보정으로 해소됐다(2026-08-16). 향후 위험 월물: **2027-08 / 2028-07**.
 
 → 별도 캘린더 보강 PR로 검증 + cross-check 후 추가 (본 5/25 hotfix scope 외).
 
