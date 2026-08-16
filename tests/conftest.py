@@ -109,6 +109,18 @@ class _StubUnavailableError(_StubFirebaseError):
         _StubFirebaseError.__init__(self, "UNAVAILABLE", message, cause, http_response)
 
 
+class _StubDeadlineExceededError(_StubFirebaseError):
+    """`exceptions.DeadlineExceededError` — `UnavailableError` 의 **형제**(둘 다 `FirebaseError` 직하).
+
+    ⛔ S1b 가 REST `httpTimeout` 을 낮추면 **이 타입의 빈도가 오른다**. 그래서 "인프라 장애를
+       401 로 접지 않는다" 가 S1b 의 **선행 조건**이다 — 분류가 틀린 채 timeout 을 낮추면
+       잘못된 401 이 함께 늘어난다.
+    """
+
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "DEADLINE_EXCEEDED", message, cause, http_response)
+
+
 class _StubUnauthenticatedError(_StubFirebaseError):
     """`exceptions.UnauthenticatedError` — HTTP 401. **재시도로 낫지 않는** 서버측 자격 오류."""
 
@@ -140,6 +152,7 @@ _fb_exceptions.FirebaseError = _StubFirebaseError
 #    `tests/test_firebase_auth_mapping.py` 의 fidelity 단언이 이 계층을 직접 잠근다.
 _fb_exceptions.NotFoundError = _StubNotFoundError
 _fb_exceptions.UnavailableError = _StubUnavailableError
+_fb_exceptions.DeadlineExceededError = _StubDeadlineExceededError
 _fb_exceptions.UnauthenticatedError = _StubUnauthenticatedError
 _fb_exceptions.PermissionDeniedError = _StubPermissionDeniedError
 _fb_auth.NotFoundError = _StubNotFoundError
@@ -178,8 +191,17 @@ except ImportError:
     class _StubTransportError(_StubGoogleAuthError):
         pass
 
+    class _StubRefreshError(_StubGoogleAuthError):
+        """`RefreshError` — `TransportError` 의 **형제**(둘 다 `GoogleAuthError` 직하).
+
+        ⛔ 형제 관계가 계약을 만든다: `TransportError` 만 잡으면 서비스계정 토큰 갱신 실패가
+           **SDK 변환 그물을 통과**한다(FirebaseError 도 requests 예외도 아니다). 부모를 잡아야
+           한다. stub 이 이것을 `TransportError` **하위**로 만들면 그 회귀가 가짜 green 이 된다.
+        """
+
     _google_auth_exceptions.GoogleAuthError = _StubGoogleAuthError
     _google_auth_exceptions.TransportError = _StubTransportError
+    _google_auth_exceptions.RefreshError = _StubRefreshError
     _google_auth.exceptions = _google_auth_exceptions
     _google.auth = _google_auth
     sys.modules["google"] = _google

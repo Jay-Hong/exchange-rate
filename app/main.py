@@ -3264,6 +3264,93 @@ def _classify_ws_subscribe_auth_failure(exc: BaseException):
     return None
 
 
+def _classify_rest_firebase_auth_failure(
+    exc: Exception,
+) -> tuple[int, str, str, int | None] | None:
+    """REST 인증 실패 → `(status, detail, category, log_level)`. **분류 불가면 `None`**.
+
+    같은 SDK taxonomy 를 쓰지만 `_classify_ws_subscribe_auth_failure` 를 재사용하지 **않는다** —
+    저쪽은 §8-C wire 어휘(`invalid_token`/`temporarily_unavailable`)로 답하고 이쪽은 HTTP 상태로
+    답한다. 굳은 WS 사다리를 건드리면 이 슬라이스의 blast radius 가 커진다(codex).
+
+    ## 경계는 하나다 — **자격이 틀렸다(401)** vs **판정할 수 없다(503)**
+
+    Firebase 인프라 장애를 401 로 접으면 클라에 "네 토큰이 잘못됐다"는 거짓을 준다 — 재인증으로
+    낫지 않고, 운영 신호도 지워진다. `CLAUDE.md` 는 이미 `503(Firebase 연결 오류)` 를 계약으로
+    선언한다. 이 함수는 계약 **변경**이 아니라 준수다.
+
+    ⚠️ **도달 범위를 부풀리지 않는다.** v6.9.0 `_token_gen.py` `verify()` 실측상
+    `check_revoked=False` 는 `ValueError`·`Invalid`·`Expired`·`CertificateFetchError` **만** 던진다.
+    아래 인프라 계열은 `check_revoked=True` 가 여는 `accounts:lookup` 에서 오므로, 오늘 실제 도달
+    경로는 `DELETE /api/user/me` 하나다. (한때 "iOS device 등록이 401 → `.stop` 으로 영구 포기"를
+    근거로 들었는데, 그 경로는 `check_revoked=False` 라 이미 `CertificateFetchError → 503` 이었다.)
+    그래도 그 하나가 App Store 계정 삭제 경로이고, 21곳 전부에서 우리 버그가 거짓 401 대신 500 이
+    되며, S1b 가 timeout 을 낮추면 이 계열의 빈도가 오른다.
+
+    ## 순서가 load-bearing 이다 (v6.9.0 실측 계층)
+
+    나열한 타입이 **전부** `FirebaseError` 하위다. `FirebaseError` 절을 위로 올리면 **모든 무효
+    토큰이 503** 이 되어, 클라는 재인증 대신 영원히 재시도한다. 하위→상위 순서를 지킨다:
+    `Revoked`·`Expired` ⊂ `Invalid` / `UserNotFound` ⊂ `NotFound` /
+    `CertificateFetch` ⊂ `Unknown` ⊂ `FirebaseError`.
+
+    ⛔ `CertificateFetchError` 는 일반 `FirebaseError` 와 **같은 503 이어도 category 를 나눈다** —
+       S1b 에서 REST timeout 을 낮춘 뒤 "콜드 인증서 fetch" 를 다른 Firebase 장애와 구별할 유일한
+       계측이다. status 만 보는 테스트로는 이 절을 generic 아래로 미는 변이가 **생존한다**.
+    """
+    from firebase_admin import auth, exceptions as fb_exceptions
+    from google.auth import exceptions as google_auth_exceptions
+    import requests
+
+    _UNAVAILABLE = "Firebase auth unavailable"
+
+    # ── 401 — 자격 자체를 못 쓴다. 클라 재인증이 유일한 해법이다. ──
+    if isinstance(exc, auth.RevokedIdTokenError):
+        return 401, "Token has been revoked", "token_revoked", None
+    if isinstance(exc, auth.ExpiredIdTokenError):
+        return 401, "Token expired", "token_expired", None
+    if isinstance(exc, auth.InvalidIdTokenError):
+        return 401, "Invalid token", "token_invalid", None
+    if isinstance(exc, auth.UserDisabledError):
+        # ⚠️ terminal 이지만 401·503 어디에도 정확히 맞지 않는다. 503 이면 클라가 영원히
+        #    재시도하고, 401 이면 재인증이 Firebase 에서 실패해 **자연 종결**된다 → least-bad.
+        #    WS 가 같은 이유로 `invalid_token` 을 골랐다. wire detail 도 그쪽과 맞춰 뭉치고,
+        #    구별은 로그 category 가 진다(새 사용자 노출 문자열을 만들지 않는다).
+        return 401, "Invalid token", "user_disabled", logging.WARNING
+
+    # ── 503 — 판정할 수 없다. 자격 실패로 접으면 정상 사용자가 함께 죽는다. ──
+    if isinstance(exc, auth.UserNotFoundError):
+        # ⛔ 이 예외는 계정 삭제를 **증명하지 못한다** — 6.9.0 `_user_mgt.py` 는 `accounts:lookup`
+        #    응답이 falsy 이거나 `users` 필드가 없기만 해도 같은 예외를 던진다. 손상을 자격
+        #    오류로 접으면 장애 중 **정상 사용자 전원**이 재인증을 요구받는다(그 재인증도 같은
+        #    이유로 실패한다). 삭제된 계정 하나가 503 을 받는 쪽이 덜 나쁘다.
+        #    ⚠️ WARNING 인 이유: 계정 삭제는 **정상 사건**이라 ERROR 는 소음이 된다.
+        return 503, _UNAVAILABLE, "user_lookup_indeterminate", logging.WARNING
+    if isinstance(exc, fb_exceptions.NotFoundError):
+        # `UserNotFoundError` 의 **형제들**(Configuration/Tenant/Email NotFound + 미매핑 404).
+        # 전부 우리 설정 결함 계열이라 운영자 신호를 낸다.
+        return 503, _UNAVAILABLE, "firebase_not_found", logging.ERROR
+    if isinstance(exc, (fb_exceptions.UnauthenticatedError, fb_exceptions.PermissionDeniedError)):
+        # 죽은 서비스계정 키·회수된 권한. **재시도로 낫지 않는다** — 운영자만 고칠 수 있다.
+        return 503, _UNAVAILABLE, "firebase_server_credential", logging.ERROR
+    if isinstance(exc, auth.CertificateFetchError):
+        return 503, _UNAVAILABLE, "certificate_fetch", logging.WARNING
+    if isinstance(exc, fb_exceptions.FirebaseError):
+        # `check_revoked=True` 가 여는 `accounts:lookup` 실패군(Unavailable / DeadlineExceeded /
+        # Internal / ResourceExhausted / Unknown …). SDK 가 requests 오류를 **여기로 감싼다** —
+        # 그래서 `RequestException` 절만으로는 절대 잡히지 않는다.
+        return 503, _UNAVAILABLE, "firebase_error", logging.WARNING
+    if isinstance(exc, google_auth_exceptions.GoogleAuthError):
+        # ⚠️ 서비스계정 토큰 갱신 실패(`RefreshError`)는 FirebaseError 도 requests 예외도 **아니라**
+        #    SDK 변환 그물을 통과해 날것으로 올라온다. **부모를 잡아** `TransportError` 까지 덮는다.
+        return 503, _UNAVAILABLE, "google_auth", logging.ERROR
+    if isinstance(exc, requests.exceptions.RequestException):
+        # SDK 변환을 거치지 않은 날 requests 오류.
+        return 503, _UNAVAILABLE, "network", logging.WARNING
+
+    return None
+
+
 async def verify_ws_subscribe_token(id_token: str) -> str:
     """WS subscribe 메시지의 `id_token` 검증 → uid.
 
@@ -3345,12 +3432,13 @@ async def verify_firebase_token(request: Request, check_revoked: bool = False) -
         user_id (Firebase uid)
 
     Raises:
-        HTTPException 401: 인증 실패 (만료, 무효, revoke 포함)
-        HTTPException 503: Firebase 미초기화
+        HTTPException 401: 자격을 쓸 수 없다 — 만료·무효·revoke·비활성 계정, 헤더 누락.
+        HTTPException 503: **판정할 수 없다** — Firebase 미초기화, 인증서 조회 실패,
+            `accounts:lookup`·서비스계정 자격 실패 등 인프라 장애. 분류는
+            `_classify_rest_firebase_auth_failure` 가 소유한다.
+        그 외: **분류 불가는 재전파**되어 500 이 된다(우리 버그를 401 로 위장하지 않는다).
     """
     from firebase_admin import auth
-    from google.auth import exceptions as google_auth_exceptions
-    import requests
 
     if not is_firebase_initialized():
         raise HTTPException(
@@ -3367,25 +3455,36 @@ async def verify_firebase_token(request: Request, check_revoked: bool = False) -
 
     token = auth_header.replace("Bearer ", "")
 
+    # ⛔ `try` 는 **SDK 호출과 그 결과 처리**만 덮는다. 위의 preflight `HTTPException` 이 여기
+    #    들어오면 분류기가 그것을 재분류해 401/503 이 뒤바뀐다.
     try:
         decoded_token = auth.verify_id_token(token, check_revoked=check_revoked)
         user_id = decoded_token["uid"]
         return user_id
-    except auth.RevokedIdTokenError:
-        raise HTTPException(status_code=401, detail="Token has been revoked")
-    except auth.ExpiredIdTokenError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except auth.InvalidIdTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    except auth.CertificateFetchError as e:
-        logger.warning("Firebase 인증서 조회 실패", extra={"error": str(e)})
-        raise HTTPException(status_code=503, detail="Firebase auth unavailable")
-    except (google_auth_exceptions.TransportError, requests.exceptions.RequestException) as e:
-        logger.warning("Firebase 네트워크 오류", extra={"error": str(e)})
-        raise HTTPException(status_code=503, detail="Firebase auth unavailable")
-    except Exception as e:
-        logger.warning("Firebase 토큰 검증 실패", extra={"error": str(e)})
-        raise HTTPException(status_code=401, detail="Token verification failed")
+    except Exception as exc:  # noqa: BLE001 — 분류 후 분류 불가면 그대로 재전파한다
+        # ⚠️ `BaseException` 이 **아닌** 것은 지금 당장은 행동 차이를 만들지 않는다 — 아래
+        #    재전파가 있어서 넓혀도 취소는 그대로 올라간다(변이로 실측). 이 경계는 **미래
+        #    방어**다: 누군가 아래 `raise` 를 삼키기로 되돌리는 순간, 폭이 넓으면 그게 곧
+        #    취소·종료 삼키기가 된다. 관측되지 않는 계약이라 테스트도 구조로 잠근다.
+        verdict = _classify_rest_firebase_auth_failure(exc)
+        if verdict is None:
+            # ⛔ 분류 불가는 **삼키지 않는다.** 우리 버그(`ValueError`·payload 에 `uid` 없음 →
+            #    `KeyError`)를 401 로 접으면 클라에 "네 토큰이 잘못됐다"는 **거짓**을 주고, 재인증
+            #    해도 낫지 않으며, 운영 신호가 지워진다. 재전파 → 500 이 `CLAUDE.md` 의
+            #    "500(서버 처리 오류)" 계약이다. 접근 거부라는 결과는 401 과 동일하다.
+            raise
+        status_code, detail, category, log_level = verdict
+        if log_level is not None:
+            logger.log(
+                log_level,
+                "REST Firebase 인증 실패",
+                # ⛔ **예외 메시지를 싣지 않는다.** `UserNotFoundError` 메시지는 조회한 **uid 를
+                #    본문에 넣는다**("No user record found for the provided user ID: …") — 구
+                #    코드의 `error=str(e)` 는 그것을 로그에 흘렸다. 분류와 타입이면 진단에
+                #    충분하다.
+                extra={"category": category, "exc_type": type(exc).__name__},
+            )
+        raise HTTPException(status_code=status_code, detail=detail)
 
 
 def build_notification_setting_response(setting: models.NotificationSetting) -> schemas.NotificationSettingResponse:

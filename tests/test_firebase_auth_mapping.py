@@ -30,6 +30,7 @@ D5 2단계의 WS verdict(`invalid_token` / `temporarily_unavailable`)는 **여�
 `app/topic_dispatcher.py`의 subscribe 경로는 아직 **토큰을 읽지 않는다** — 이 파일은 그 매핑의
 필요조건(예외→의미 경계)을 잠글 뿐이고, wire verdict 번역은 2b에서 WS verifier와 함께 온다.
 """
+import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -139,16 +140,295 @@ class TestFirebaseExceptionMapping(_MappingBase):
         self.assertEqual(await self._status(raises=requests.exceptions.RequestException("net")),
                          (503, "Firebase auth unavailable"))
 
-    async def test_non_firebase_exception_is_401_fail_closed(self):
-        """⚠️ 범위를 **비-Firebase 예외**로 좁힌다(codex).
+    async def test_unknown_exception_is_reraised_not_401(self):
+        """S1b-0 — 미뤄뒀던 정책의 **결정**이다.
 
-        `check_revoked=True` 경로는 SDK 계약상 `UserDisabledError`/`TenantIdMismatchError` 등
-        Firebase 계열 오류도 낼 수 있고, 그중 서비스 장애성 오류를 generic 401로 고정하면
-        1C의 "판정 불가 → temporarily_unavailable"과 충돌한다. **그 정책은 2b에서 결정**한다.
-        여기서는 SDK와 무관한 예외의 현행 fail-closed만 잠근다.
+        이 자리에는 `ValueError → 401 "Token verification failed"` 가 있었고, 그 docstring 이
+        "그 정책은 2b에서 결정한다" 라고 명시적으로 유예했다. 결정: **재전파(→500)**.
+
+        401 은 클라에 "네 토큰이 잘못됐다"는 **거짓**을 준다 — 우리 버그는 재인증으로 낫지 않고,
+        운영 신호도 지워진다. `CLAUDE.md` 의 `500(서버 처리 오류)` 계약이 맞다. 접근이 거부된다는
+        **결과는 401 과 동일**하므로 보안이 느슨해지지 않는다.
         """
-        self.assertEqual(await self._status(raises=ValueError("boom")),
-                         (401, "Token verification failed"))
+        with self.assertRaises(ValueError):
+            await self._verify(raises=ValueError("boom"))
+
+    async def test_missing_uid_in_payload_is_reraised(self):
+        """검증은 성공했는데 payload 에 `uid` 가 없다 = 우리/공급자 계약 위반이지 자격 실패가 아니다."""
+        with self.assertRaises(KeyError):
+            await self._verify(returns={"not_uid": "x"})
+
+    async def test_cancellation_propagates(self):
+        """취소는 HTTP 상태로 접히지 않는다.
+
+        ⚠️ 이 단언 **하나로는** `except Exception` → `BaseException` 변이를 잡지 못한다(실측:
+        SURVIVED). 넓혀도 분류기가 `None` 을 주고 `raise` 가 그대로 올려서 **관측 동등**이기
+        때문이다. 이 테스트가 무는 것은 *조합* 이다 — 누군가 unknown 삼키기를 되살리고 catch 를
+        `BaseException` 으로 넓히면 그때 취소가 401 이 된다. catch 경계 자체는 아래
+        `TestCatchBoundaryIsStructural` 이 구조로 잠근다.
+        """
+        import asyncio
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self._verify(raises=asyncio.CancelledError())
+
+
+class TestLogWiring(_MappingBase):
+    """분류기가 **돌려준** category·severity 를 helper 가 실제로 쓰는지.
+
+    ⛔ 분류기 반환 tuple 만 단언하면 배선이 통째로 망가져도 초록이다(codex): 항상 WARNING 을
+       쓰거나 · category 를 상수로 박거나 · `extra` 에서 빼거나 · 401 계열까지 로그를 남겨
+       공격자가 로그를 증폭시켜도 잡히지 않는다. 여기서는 `logger.log` 를 붙잡아 **실제 인자**를 본다.
+    """
+
+    async def _logged(self, exc) -> list[tuple]:
+        calls: list[tuple] = []
+        with patch("app.main.logger") as log:
+            log.log.side_effect = lambda *a, **kw: calls.append((a, kw))
+            with self.assertRaises(HTTPException):
+                await self._verify(raises=exc)
+        return calls
+
+    # ⛔ 로그를 남기는 rung 은 **하나도 빠짐없이** 여기 있어야 결속이 닫힌다. 처음엔 아래 셋이
+    #    빠져 있었고(codex), 그러면 "UserDisabled 의 log_level 을 None 으로" · "google_auth 만
+    #    WARNING 으로" · "network 만 category 변경" 변이가 **생존한다**. 빠짐 자체는 사람이 못
+    #    지키므로 `test_every_logging_rung_is_in_the_table` 이 기계로 검문한다.
+    LOG_CASES = [
+        (lambda: fb_auth.UserNotFoundError("gone"), logging.WARNING, "user_lookup_indeterminate"),
+        (lambda: fb_auth.ConfigurationNotFoundError("cfg"), logging.ERROR, "firebase_not_found"),
+        (lambda: fb_exceptions.UnauthenticatedError("key"), logging.ERROR, "firebase_server_credential"),
+        (lambda: fb_exceptions.PermissionDeniedError("perm"), logging.ERROR, "firebase_server_credential"),
+        (lambda: fb_auth.CertificateFetchError("cert", None), logging.WARNING, "certificate_fetch"),
+        (lambda: fb_exceptions.UnavailableError("down"), logging.WARNING, "firebase_error"),
+        (lambda: fb_exceptions.DeadlineExceededError("slow"), logging.WARNING, "firebase_error"),
+        (lambda: fb_auth.UserDisabledError("disabled"), logging.WARNING, "user_disabled"),
+        (lambda: google_auth_exceptions.RefreshError("refresh"), logging.ERROR, "google_auth"),
+        (lambda: google_auth_exceptions.TransportError("t"), logging.ERROR, "google_auth"),
+        (lambda: requests.exceptions.RequestException("net"), logging.WARNING, "network"),
+    ]
+
+    async def test_every_emitting_category_is_represented_in_the_table(self):
+        """새 **emitting category** 가 표 없이 추가되면 여기서 걸린다.
+
+        ⚠️ 증명 범위를 이름보다 넓게 말하지 않는다(codex): 이 검사는 "모든 logging rung" 이
+           아니라 **모든 emitting category 가 표에 최소 한 번 있다** 를 증명한다. 새 branch 가
+           기존 category 를 재사용하면 여기서는 안 잡힌다 — 그건 결함이 아니라 경계다. branch
+           별 의미는 `LOG_CASES` 와 부모 확장 테스트가 진다.
+
+        ⛔ **프로브를 표에서 뽑으면 안 된다.** 처음엔 `LOG_CASES` 로 프로브를 만들었는데, 그러면
+           표에서 한 줄을 지울 때 프로브에서도 함께 사라져 **영원히 통과한다**(실측 SURVIVED).
+           자기참조 검사기는 검사기가 아니다. 그래서 기대집합을 **구현 소스에서** 도출한다 —
+           분류기의 4-튜플 `return` 중 `log_level` 이 `None` 이 아닌 것들의 category 리터럴.
+        """
+        import ast
+        import pathlib
+
+        tree = ast.parse(pathlib.Path("app/main.py").read_text())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_classify_rest_firebase_auth_failure")
+        emitting = set()
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)):
+                continue
+            elts = node.value.elts
+            if len(elts) != 4:
+                continue
+            category, log_level = elts[2], elts[3]
+            is_none = isinstance(log_level, ast.Constant) and log_level.value is None
+            if not is_none and isinstance(category, ast.Constant):
+                emitting.add(category.value)
+        self.assertTrue(emitting, "분류기에서 category 를 하나도 못 읽었다 — 검사기가 죽었다")
+        self.assertEqual(emitting - {c for _, _, c in self.LOG_CASES}, set(),
+                         "로그를 남기는 rung 이 표에 없다")
+
+    async def test_severity_and_category_come_from_the_verdict(self):
+        for make, level, category in self.LOG_CASES:
+            exc = make()
+            with self.subTest(exc=type(exc).__name__):
+                calls = await self._logged(exc)
+                self.assertEqual(len(calls), 1, "정확히 한 번 남겨야 한다")
+                args, kwargs = calls[0]
+                self.assertEqual(args[0], level, "severity 가 verdict 에서 오지 않는다")
+                self.assertEqual(kwargs["extra"]["category"], category)
+                self.assertEqual(kwargs["extra"]["exc_type"], type(exc).__name__)
+
+    async def test_invalid_token_family_is_not_logged(self):
+        """⛔ 만료·무효·revoke 는 **정상 사건**이다. 로그를 남기면 공격자가 로그를 증폭시킨다.
+
+        ⚠️ "자격 실패는 로그 안 남긴다" 로 부르면 **거짓**이다(codex) — `UserDisabledError` 도
+           401 자격 실패지만 WARNING 을 남긴다. 범위는 `InvalidIdTokenError` **계열**뿐이다.
+        """
+        for exc in (fb_auth.RevokedIdTokenError("r"),
+                    fb_auth.ExpiredIdTokenError("e", None),
+                    fb_auth.InvalidIdTokenError("i")):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(await self._logged(exc), [], "이 계열은 로그를 남기지 않는다")
+
+    async def test_exception_message_never_reaches_the_log(self):
+        """⛔ `UserNotFoundError` 메시지는 **uid 를 본문에 담는다**. 구 코드의 `error=str(e)` 가 그것을 흘렸다."""
+        secret = "uid-1234567890-should-not-appear"
+        calls = await self._logged(fb_auth.UserNotFoundError(f"No user record found: {secret}"))
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn(secret, repr(calls[0]))
+
+
+class TestCatchBoundaryIsStructural(unittest.TestCase):
+    """`verify_firebase_token` 의 catch 경계를 **구조로** 잠근다.
+
+    ⛔ 행동 단언으로는 불가능하다 — unknown 재전파가 있는 한 `Exception` 과 `BaseException` 은
+       관측 동등이다(실측). 그렇다고 계약이 없는 것은 아니다: 미래에 삼키기가 되살아나면 그 폭이
+       곧 취소 삼키기가 된다. 관측 불가능한 계약은 **소스로** 잠그는 게 정직하다.
+    """
+
+    def _handler_types(self) -> list[str]:
+        # ⛔ `inspect.getsource` + `cleandoc` 은 본문 들여쓰기를 망가뜨린다(실측). 파일을 통째
+        #    파싱해 함수 노드를 집는다 — 재작성에도 안 깨지고 이름으로만 결속된다.
+        import ast
+        import pathlib
+
+        tree = ast.parse(pathlib.Path("app/main.py").read_text())
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "verify_firebase_token"
+        )
+        # ⛔ 함수 안 **모든** try 를 세지 않는다 — 나중에 무관한 try 가 생기면 이 단언이
+        #    엉뚱하게 깨지거나(더 나쁘게) 겨냥이 흐려진다. `verify_id_token` 호출을 **포함한**
+        #    try 만 집는다(codex).
+        targets = [
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.Try)
+            and any(
+                isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "verify_id_token"
+                for c in ast.walk(node)
+            )
+        ]
+        self.assertEqual(len(targets), 1, "verify_id_token 을 감싼 try 가 정확히 하나여야 한다")
+        return [
+            ast.unparse(h.type) if h.type is not None else "<bare except>"
+            for h in targets[0].handlers
+        ]
+
+    def test_helper_catches_exception_not_base_exception(self):
+        handlers = self._handler_types()
+        self.assertEqual(handlers, ["Exception"], f"catch 경계가 바뀌었다: {handlers}")
+
+
+class TestRestLadderRungsAddedByS1b0(_MappingBase):
+    """S1b-0 이 새로 세운 절들.
+
+    ⚠️ **도달 경로를 정확히 적는다**(codex 교정). v6.9.0 `_token_gen.py` `verify()` 실측상
+    `check_revoked=False` 는 `ValueError` · `Invalid` · `Expired` · `CertificateFetchError` **만**
+    던진다. 아래 Firebase 인프라 계열(`UserNotFound` / 기타 `NotFound` / `Unauthenticated` /
+    `PermissionDenied` / `Unavailable` / `DeadlineExceeded` / `RefreshError`)은 `check_revoked=True`
+    가 여는 `accounts:lookup` 에서 온다 — 즉 오늘 실제 도달 경로는 **`DELETE /api/user/me` 하나**다.
+    "장애 중 전 사용자가 401 을 받는다" 는 과장이었다.
+
+    그래도 교정 가치는 셋이다: ① 그 하나가 App Store 계정 삭제 경로다 ② 21곳 전부에서 우리
+    버그가 거짓 401 대신 500 이 된다 ③ S1b 가 named app 으로 timeout 을 낮추면 이 계열의
+    도달 빈도가 오르므로 **선행 조건**이다.
+
+    ⛔ 아래 503 들은 **status 만 보면 서로 구별되지 않는다**. 절을 위아래로 옮기는 변이가
+       생존하므로 `category` 와 로그 severity 까지 함께 단언한다(codex).
+    """
+
+    async def _verdict(self, exc) -> tuple[int, str, str, int | None]:
+        from app.main import _classify_rest_firebase_auth_failure
+
+        verdict = _classify_rest_firebase_auth_failure(exc)
+        self.assertIsNotNone(verdict, f"{type(exc).__name__} 이 분류되지 않았다")
+        return verdict
+
+    async def test_accounts_lookup_unavailable_is_503(self):
+        """**이 슬라이스의 핵심 결함**이다.
+
+        SDK 는 requests 오류를 `FirebaseError` 로 **감싸므로** 기존 `RequestException` 절에
+        절대 걸리지 않았고, 마지막 `except Exception → 401` 로 떨어졌다.
+        ⚠️ 범위: `check_revoked=True` 경로(계정 삭제)에서 도달한다 — 나머지 20곳이 아니다.
+        """
+        self.assertEqual(await self._status(raises=fb_exceptions.UnavailableError("down")),
+                         (503, "Firebase auth unavailable"))
+        self.assertEqual((await self._verdict(fb_exceptions.UnavailableError("down")))[2],
+                         "firebase_error")
+
+    async def test_deadline_exceeded_is_503(self):
+        """S1b 가 REST timeout 을 낮추면 **빈도가 오르는** 타입이다 — 그래서 분류 교정이 선행이다."""
+        self.assertEqual(await self._status(raises=fb_exceptions.DeadlineExceededError("slow")),
+                         (503, "Firebase auth unavailable"))
+
+    async def test_user_disabled_is_401_and_not_503(self):
+        """terminal 이라 401 이 least-bad — 503 이면 클라가 영원히 재시도한다(WS 와 같은 판단)."""
+        self.assertEqual(await self._status(raises=fb_auth.UserDisabledError("disabled")),
+                         (401, "Invalid token"))
+        self.assertEqual((await self._verdict(fb_auth.UserDisabledError("d")))[2], "user_disabled")
+
+    async def test_user_not_found_is_503_and_warns(self):
+        """계정 삭제와 공급자 응답 손상을 **구별할 수 없다** → 자격 오류로 접지 않는다."""
+        self.assertEqual(await self._status(raises=fb_auth.UserNotFoundError("gone")),
+                         (503, "Firebase auth unavailable"))
+        _, _, category, level = await self._verdict(fb_auth.UserNotFoundError("gone"))
+        self.assertEqual(category, "user_lookup_indeterminate")
+        self.assertEqual(level, logging.WARNING, "계정 삭제는 정상 사건이라 ERROR 는 소음이다")
+
+    async def test_sibling_not_found_is_503_but_a_different_category_and_errors(self):
+        """⛔ `UserNotFound` 와 **같은 503** 이다. category·severity 가 없으면 둘을 합치는 변이가 산다.
+
+        `ConfigurationNotFoundError` 는 우리 프로젝트 설정 결함이므로 운영자 신호(ERROR)가 필요하다.
+        """
+        self.assertEqual(await self._status(raises=fb_auth.ConfigurationNotFoundError("cfg")),
+                         (503, "Firebase auth unavailable"))
+        _, _, category, level = await self._verdict(fb_auth.ConfigurationNotFoundError("cfg"))
+        self.assertEqual(category, "firebase_not_found")
+        self.assertEqual(level, logging.ERROR)
+
+    async def test_server_credential_faults_are_503_and_error(self):
+        """죽은 서비스계정 키·회수된 권한 — 재시도로 낫지 않으니 운영자 신호를 낸다."""
+        for exc in (fb_exceptions.UnauthenticatedError("k"), fb_exceptions.PermissionDeniedError("p")):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(await self._status(raises=exc),
+                                 (503, "Firebase auth unavailable"))
+                _, _, category, level = await self._verdict(exc)
+                self.assertEqual(category, "firebase_server_credential")
+                self.assertEqual(level, logging.ERROR)
+
+    async def test_certificate_fetch_keeps_its_own_category(self):
+        """⛔ 일반 `FirebaseError` 와 **같은 503** 이지만 category 를 나눈다.
+
+        S1b 에서 REST timeout 을 낮춘 뒤 "콜드 인증서 fetch" 를 다른 Firebase 장애와 구별할
+        유일한 계측이다. 이 절을 generic 아래로 미는 변이는 status 만 보면 **생존한다**.
+        """
+        _, _, category, _ = await self._verdict(fb_auth.CertificateFetchError("c", None))
+        self.assertEqual(category, "certificate_fetch")
+        self.assertNotEqual(category, (await self._verdict(fb_exceptions.UnavailableError("u")))[2])
+
+    async def test_refresh_error_is_503_because_the_parent_is_caught(self):
+        """`RefreshError` 는 `TransportError` 의 **형제**다 — 부모(`GoogleAuthError`)를 잡아야 걸린다.
+
+        SDK 변환 그물을 통과하므로 `FirebaseError` 도 `RequestException` 도 아니다.
+        """
+        self.assertTrue(issubclass(google_auth_exceptions.RefreshError,
+                                   google_auth_exceptions.GoogleAuthError))
+        self.assertFalse(issubclass(google_auth_exceptions.RefreshError,
+                                    google_auth_exceptions.TransportError),
+                         "형제여야 한다 — 하위로 만들면 부모 확장 회귀가 가짜 green 이 된다")
+        self.assertEqual(await self._status(raises=google_auth_exceptions.RefreshError("refresh")),
+                         (503, "Firebase auth unavailable"))
+
+    async def test_invalid_family_stays_401_when_the_generic_rung_exists(self):
+        """⛔ **순서가 load-bearing 하다.** 나열한 타입이 전부 `FirebaseError` 하위다.
+
+        generic 절을 위로 올리면 **모든 무효 토큰이 503** 이 되어 클라는 재인증 대신 영원히
+        재시도한다. 세 타입이 여전히 401 임을 한 자리에서 잠근다.
+        """
+        for exc, detail in ((fb_auth.RevokedIdTokenError("r"), "Token has been revoked"),
+                            (fb_auth.ExpiredIdTokenError("e", None), "Token expired"),
+                            (fb_auth.InvalidIdTokenError("i"), "Invalid token")):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertTrue(isinstance(exc, fb_exceptions.FirebaseError))
+                self.assertEqual(await self._status(raises=exc), (401, detail))
 
 
 class TestPreflightAndSuccess(_MappingBase):
