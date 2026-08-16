@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `a2621df572e6eefdd37800a01b7f7460c8d77846`
+- server 기준 commit: `76576612cd150d5fa4771b8c2b4e3725ff21b104`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `67c7d04f837571b104ecf3494e8f512c153b2fed357d51ce3894323d924f309d`
-- baseline SHA: `fadec4073a1612e8575449f1123484a4f2faa1a0ff717caef9e1971735bfe8e1`
+- manifest SHA: `506cc7c3c85e239f72201a09191a17a51703736aa124c4f7ab0b1c6b93a84b72`
+- baseline SHA: `3be2272838f2acf80b113ed65d0d0a2f25a20f01027c949e7a807f86425eac1c`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -45,8 +45,8 @@ I/O 상한 · 서버 실패 cooldown).
 ⚠️ 그리고 그 executor 는 **큐 상한이 아니다**(`SimpleQueue` 무제한) — 같은 docstring 이
 *"자원 상한 완료 라고 쓰지 말 것"* 이라 못 박는다.
 
-근거(baseline): **E3 [결정]** `app/auth_executor.py:14-16` docstring(즉시거절 기각) +
-`app/auth_executor.py:28-30`(**`SimpleQueue` 무제한** — "자원 상한 완료" 라고 쓰지 말 것).
+근거(baseline): **E3 [결정]** `app/auth_executor.py:20-22` docstring(즉시거절 기각) +
+`app/auth_executor.py:34-36`(**`SimpleQueue` 무제한** — "자원 상한 완료" 라고 쓰지 말 것).
 ⚠️ S1a 로 모듈 docstring 이 늘어 두 근거가 갈렸다 — 한 범위로 합쳐 인용하면 낡는다.
 ⚠️ 즉 기존 `auth_executor` 를 "이미 상한이 있다"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지
 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.

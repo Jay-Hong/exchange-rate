@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "67c7d04f837571b104ecf3494e8f512c153b2fed357d51ce3894323d924f309d",
-    "baseline_sha256": "fadec4073a1612e8575449f1123484a4f2faa1a0ff717caef9e1971735bfe8e1",
-    "lock_sha256": "f357fb33684ac2f7c60441dd830ed3b2a77256be577a680ac64e314cb1fe01f1",
-    "server_commit": "a2621df572e6eefdd37800a01b7f7460c8d77846",
+    "manifest_sha256": "506cc7c3c85e239f72201a09191a17a51703736aa124c4f7ab0b1c6b93a84b72",
+    "baseline_sha256": "3be2272838f2acf80b113ed65d0d0a2f25a20f01027c949e7a807f86425eac1c",
+    "lock_sha256": "c226caa7d9024d04ba08a2d084e1fc37a85acf52084742ba3cf02937b5a72507",
+    "server_commit": "76576612cd150d5fa4771b8c2b4e3725ff21b104",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "6fa9b6bc8982949f988bc11f9eb45ad48b70d2d00679ccc4f8e76d372e11decc",
-    "CLIENT": "ab4d28f666b1115c230b3671e9276e3c60cdb09ecfb37f7d876df0be8be55302",
-    "CUT": "6645ead7996dd8c035ccd59a5030f212286c41580360a46d66971e2ce62cb648",
-    "HAND": "f0eea4337256ecceb9c3aa1237f654658b34c60ac29901890f309942fc5035d1",
-    "HEALTH": "e56e9935002febf08821d5cb3ef857696a14e16fd39ed17c875358bf0cd112cb",
-    "LOAD": "64b64837412442443fac1ce370378c458f5a1c834b25aee46485d4f7f0aa000e"
+    "ADR": "e0ab95a995641eb52ffd93c9bb1110cdb6876d5f71d6d043c4fbacb7623e74dc",
+    "CLIENT": "ea334a2a5afd3561d68a370b65acc805614ec27fe7c9a2dcc42332b3c0dcafc7",
+    "CUT": "de4902117226e769f06d003bae35018c8dc73d51c550f6423cd2957d265fea03",
+    "HAND": "82a93ccdda83d6c6bcbcc81f64e7d231d98345eaaece6e6b0b3d3dafeb3e64d1",
+    "HEALTH": "27f1b76c43f67d10d8fbdca2c20801aac935473bcb47f672c9806546676bf0e6",
+    "LOAD": "854bc121c651324d6380d325ae17a25ddd9bc1c6c3462aca5091c61559292c02"
   },
   "entries": [
     {
@@ -704,13 +704,14 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-4",
-      "unit_sha256": "4fd86afcce14b1adf6c9348308a42b3cc6e5a1794954e3ceec0d22f9a4080f8d",
-      "unit_text": "근거(baseline): **E3 [결정]** `app/auth_executor.py:8-24` docstring. ⚠️ 즉 기존 `auth_executor` 를 \"이미 상한이 있다\"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.",
+      "unit_sha256": "176f5b55c6969897a5ca29691d32c824ef9a59ea651de235cb61d2482377f41a",
+      "unit_text": "근거(baseline): **E3 [결정]** `app/auth_executor.py:20-22` docstring(즉시거절 기각) + `app/auth_executor.py:34-36`(**`SimpleQueue` 무제한** — \"자원 상한 완료\" 라고 쓰지 말 것). ⚠️ S1a 로 모듈 docstring 이 늘어 두 근거가 갈렸다 — 한 범위로 합쳐 인용하면 낡는다. ⚠️ 즉 기존 `auth_executor` 를 \"이미 상한이 있다\"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.",
       "classification": "code_fact",
       "detail": "auth_executor docstring 전체 범위가 즉시거절 기각뿐 아니라 SimpleQueue 무제한과 자원 상한 아님을 명시한다. 인용을 8행 한 줄에서 8-24행으로 넓혔다.",
       "provenance": [
         "baseline:E3",
-        "file:app/auth_executor.py:8-24"
+        "file:app/auth_executor.py:20-22",
+        "file:app/auth_executor.py:34-36"
       ]
     },
     {

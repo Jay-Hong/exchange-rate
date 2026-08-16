@@ -41,7 +41,9 @@
           "C3 wiring trip-wire and mutation battery: the measurement that deleting the helper call from the real-file gate leaves all three synthetic drift controls green, the AST trip-wire that requires the gate to call the binding helper exactly once with both workflow texts and a lock-read pin, and scripts/mutation_c3_ios_pin_gate.py killing eight mutants including drift of each real workflow file and of both together",
           "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first",
           "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
-          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion"
+          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion",
+          "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
+          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -133,7 +135,9 @@
           "C3 wiring trip-wire and mutation battery: the measurement that deleting the helper call from the real-file gate leaves all three synthetic drift controls green, the AST trip-wire that requires the gate to call the binding helper exactly once with both workflow texts and a lock-read pin, and scripts/mutation_c3_ios_pin_gate.py killing eight mutants including drift of each real workflow file and of both together",
           "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first",
           "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
-          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion"
+          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion",
+          "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
+          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속"
         ]
       }
     ],
@@ -172,7 +176,9 @@
           "C3 wiring trip-wire and mutation battery: the measurement that deleting the helper call from the real-file gate leaves all three synthetic drift controls green, the AST trip-wire that requires the gate to call the binding helper exactly once with both workflow texts and a lock-read pin, and scripts/mutation_c3_ios_pin_gate.py killing eight mutants including drift of each real workflow file and of both together",
           "SEM-038 verification: the measurement that c9b3572 carried fourteen pin copies against thirteen after the fix, the re-run of the battery at eight of eight, and the injected duplicate that showed the added per-file check is unreachable because the drift controls make the baseline red first",
           "S0 snapshot_build queue_wait axis at a2621df: the caller-side submit stamp taken immediately before the to_thread hand-off, the recording at worker start rather than at caller return so that a cancelled caller does not silently drop its wait, the shared build_snapshot_observed wrapper that puts the WS subscribe path and the REST twin on one axis, the unobserved-versus-zero separation, and the nine-mutant battery",
-          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion"
+          "C2 re-baseline for S0: twenty-eight locators re-derived plus six whose content changed because the five-line observe block became a one-line wrapper call — E2 now cites where the to_thread actually lives and that the REST twin shares it, R-HAND-4 points at the wrapper that owns the cancellation boundary, and the baseline locator inventory moves from forty to forty-two with the reason recorded next to the assertion",
+          "S1a auth-executor lane 캡슐화 at 7657661: 상태·동작을 AuthExecutorLane 이 소유하고 모듈은 WS singleton facade 만 동작 표면으로 노출하는 구조, lane 고유값 주입, 재조준 3축, 주입 도달 양성대조 11곳, 변이 하네스를 순수 helper 3개로 분리해 line-start alignment 와 거짓 KILLED 가드를 영구 테스트로 잠근 것",
+          "C2 re-baseline for S1a: auth_executor 인용 5구간 재도출과 pin 전진, Docs 3건 정정과 그로 인해 본문이 바뀐 R-LOAD-4 논리 단위의 claim-review 재결속"
         ],
         "result": "pass"
       },
@@ -217,21 +223,21 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "67c7d04f837571b104ecf3494e8f512c153b2fed357d51ce3894323d924f309d",
-    "baseline_sha256": "fadec4073a1612e8575449f1123484a4f2faa1a0ff717caef9e1971735bfe8e1",
-    "lock_sha256": "f357fb33684ac2f7c60441dd830ed3b2a77256be577a680ac64e314cb1fe01f1",
-    "server_commit": "a2621df572e6eefdd37800a01b7f7460c8d77846",
+    "manifest_sha256": "506cc7c3c85e239f72201a09191a17a51703736aa124c4f7ab0b1c6b93a84b72",
+    "baseline_sha256": "3be2272838f2acf80b113ed65d0d0a2f25a20f01027c949e7a807f86425eac1c",
+    "lock_sha256": "c226caa7d9024d04ba08a2d084e1fc37a85acf52084742ba3cf02937b5a72507",
+    "server_commit": "76576612cd150d5fa4771b8c2b4e3725ff21b104",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "6fa9b6bc8982949f988bc11f9eb45ad48b70d2d00679ccc4f8e76d372e11decc",
-    "CLIENT": "ab4d28f666b1115c230b3671e9276e3c60cdb09ecfb37f7d876df0be8be55302",
-    "CUT": "6645ead7996dd8c035ccd59a5030f212286c41580360a46d66971e2ce62cb648",
-    "HAND": "f0eea4337256ecceb9c3aa1237f654658b34c60ac29901890f309942fc5035d1",
-    "HEALTH": "e56e9935002febf08821d5cb3ef857696a14e16fd39ed17c875358bf0cd112cb",
-    "LOAD": "64b64837412442443fac1ce370378c458f5a1c834b25aee46485d4f7f0aa000e"
+    "ADR": "e0ab95a995641eb52ffd93c9bb1110cdb6876d5f71d6d043c4fbacb7623e74dc",
+    "CLIENT": "ea334a2a5afd3561d68a370b65acc805614ec27fe7c9a2dcc42332b3c0dcafc7",
+    "CUT": "de4902117226e769f06d003bae35018c8dc73d51c550f6423cd2957d265fea03",
+    "HAND": "82a93ccdda83d6c6bcbcc81f64e7d231d98345eaaece6e6b0b3d3dafeb3e64d1",
+    "HEALTH": "27f1b76c43f67d10d8fbdca2c20801aac935473bcb47f672c9806546676bf0e6",
+    "LOAD": "854bc121c651324d6380d325ae17a25ddd9bc1c6c3462aca5091c61559292c02"
   },
-  "claim_ledger_sha256": "8ce8244bfaf645a29e4d33ae3d5286faccba4aab5b31c79650cec1c97c9eba45",
+  "claim_ledger_sha256": "6306c1933d9fc017643cf7b6110486fcdb0955f143dd1e20874ccae50122f462",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,

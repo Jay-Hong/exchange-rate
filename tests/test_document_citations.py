@@ -102,7 +102,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     "CUT": 36,
     "HAND": 19,
     "HEALTH": 8,
-    "LOAD": 6,
+    # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
+    #                **둘로 갈리며** +1 (6 → 7).
+    "LOAD": 7,
 }
 
 
@@ -367,9 +369,11 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
         repo_key: sum(_repo_path(path)[0] == repo_key for _dest, path in references)
         for repo_key in ("server", "ios")
     }
-    assert len(references) == 125
+        # 2026-08-16 S1a: R-LOAD-4 의 E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue
+    #                무제한(:34-36) **둘로 갈리며** locator 1건 증가 (125 → 126).
+    assert len(references) == 126
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 61, "ios": 64}
+    assert by_repo == {"server": 62, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
