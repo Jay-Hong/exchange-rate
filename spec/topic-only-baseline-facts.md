@@ -122,7 +122,7 @@
   …, _build_snapshot_sync, topic)` 한다 — **REST twin 도 같은 래퍼를 쓴다**(`app/main.py:3136`).
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
-- **E3 [결정]** `app/auth_executor.py:20` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
+- **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
   배포 재연결은 평균 유입이 낮아도 **동시 도착** 이라 1초면 빠질 큐를 대량 거절한다."*
   같은 docstring: *"이것은 큐 상한이 아니다"*(`SimpleQueue` 무제한), *"자원 상한 완료 라고 쓰지 말 것"*.
 - **E4 [코드·부정]** `nginx/conf.d/default.conf` `location /ws` 는 **80~99행** 블록이고

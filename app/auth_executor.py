@@ -1,9 +1,10 @@
 """인증 전용 executor lane — **동거 `to_thread` 작업과 스레드를 나눈다**.
 
 구조: 상태·동작은 `AuthExecutorLane` 이 소유하고, 모듈은 **WS singleton(`_ws_lane`) + 공개
-함수 facade** 만 노출한다. 내부 helper 에는 facade 를 두지 않는다 — 모듈 심볼을 patch 해도
-lane 메서드에 닿지 않아 fault injection 이 공허해지고, `_metrics` 는 copy-and-swap 으로
-재바인딩되므로 모듈 alias 는 첫 swap 직후 stale 이 된다. white-box 는 `_ws_lane` 을 직접 쓴다.
+함수 facade + startup 보상 scope** 를 노출한다. 내부 helper 에는 facade 를 두지 않는다 — 모듈
+심볼을 patch 해도 lane 메서드에 닿지 않아 fault injection 이 공허해지고, `_metrics` 는
+copy-and-swap 으로 재바인딩되므로 모듈 alias 는 첫 swap 직후 stale 이 된다. white-box 는
+`_ws_lane` 을 직접 쓴다.
 ⚠️ 현재 live lane 은 WS 하나뿐이다(REST lane 은 S1b).
 
 무엇을 고치나: `asyncio.to_thread` 는 loop 의 **기본** executor 를 쓴다. 그래서 재연결 폭주로
@@ -33,6 +34,7 @@ subscribe 인증이 몰리면 같은 pool 을 쓰는 다른 작업(atomic loader
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import threading
 import time
@@ -512,6 +514,49 @@ def shutdown_auth_executor() -> None:
 
 def is_auth_executor_running() -> bool:
     return _ws_lane.is_auth_executor_running()
+
+
+@asynccontextmanager
+async def ws_auth_lane_startup_scope(max_workers: int):
+    """S1a′ — **이번 startup 시도가 새로 만든** WS auth lane 에 한해 조건부 보상 종료.
+
+    범위는 의미로 정의한다(라인 번호가 아니다): lane 생성부터 **마지막 startup 단계 완료
+    직전**까지. FastAPI lifespan 의 `yield` 는 이 scope **밖**이다 — 안에 넣으면 정상 운영·
+    shutdown 예외가 startup 실패로 오분류된다.
+
+    ⛔ **lifespan 전체를 트랜잭션화하지 않는다.** Firebase·Redis·default-executor probe·
+       scheduler·collector 의 startup side effect 는 되돌리지 않는다. 되돌리는 것은 이
+       executor 하나뿐이다.
+    ⛔ `created` 는 **startup 실패 보상 책임**일 뿐 일반 소유권이 아니다 — 정상 lifespan
+       shutdown 은 여전히 lane 을 무조건 종료한다(`main.py`).
+    ⚠️ **직렬화 전제**: auth executor lifecycle 호출은 단일 lifespan task 에서 직렬화된다.
+       `is_auth_executor_running()` 과 `start_auth_executor()` 사이에 `await` 가 없어 같은
+       task 끼리는 끼어들 수 없다. 별 thread·겹친 lifespan 이 동시에 부르면 check-and-start
+       가 원자적이지 않으므로, 그 지원이 필요해지면 lane 내부에서 생성 토큰을 반환해야 한다.
+    ⛔ `start_auth_executor` 호출도 **try 안**이다 — 생성 뒤 raise 하는 부분 성공에서
+       rollback 이 안 돌면 pool 이 그대로 샌다(codex Blocker).
+    ⛔ `BaseException` 이다 — **취소도 rollback 대상**이다.
+    """
+    created = not is_auth_executor_running()
+    try:
+        start_auth_executor(max_workers)
+        yield
+    except BaseException:
+        if created:
+            # ⛔ **rollback 실패가 startup 원인을 덮으면 안 된다.** 여기서 예외가 나가면 원래
+            #    startup 예외가 사라져 운영자가 진짜 원인을 못 본다. 삼키되 드러낸다.
+            try:
+                executor = begin_auth_executor_shutdown()
+                # ⚠️ `begin` 만으로는 `running` 이 false 가 되지만 worker 는 계속 돈다 — 합류까지 한다.
+                await await_auth_executor_shutdown(executor)
+            except BaseException:      # noqa: BLE001 — 원인 보존이 우선이다
+                # ⛔ **진단 로깅도 보호한다.** `logger.exception` 이 던지면 아래 `raise` 에
+                #    도달하지 못해 **로깅 예외가 원래 startup 원인을 덮는다**(codex).
+                try:
+                    logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")
+                except BaseException:  # pragma: no cover - 최후 방어
+                    pass
+        raise
 
 
 async def run_in_auth_executor(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:

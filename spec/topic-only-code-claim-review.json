@@ -704,14 +704,14 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-4",
-      "unit_sha256": "176f5b55c6969897a5ca29691d32c824ef9a59ea651de235cb61d2482377f41a",
-      "unit_text": "근거(baseline): **E3 [결정]** `app/auth_executor.py:20-22` docstring(즉시거절 기각) + `app/auth_executor.py:34-36`(**`SimpleQueue` 무제한** — \"자원 상한 완료\" 라고 쓰지 말 것). ⚠️ S1a 로 모듈 docstring 이 늘어 두 근거가 갈렸다 — 한 범위로 합쳐 인용하면 낡는다. ⚠️ 즉 기존 `auth_executor` 를 \"이미 상한이 있다\"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.",
+      "unit_sha256": "d0dfb7f96172ca79c39d6517047293b331ef0aac17be7189bb84c2cc0b567384",
+      "unit_text": "근거(baseline): **E3 [결정]** `app/auth_executor.py:14-16` docstring(즉시거절 기각) + `app/auth_executor.py:29-31`(**`SimpleQueue` 무제한** — \"자원 상한 완료\" 라고 쓰지 말 것). ⚠️ S1a 로 모듈 docstring 이 늘어 두 근거가 갈렸다 — 한 범위로 합쳐 인용하면 낡는다. ⚠️ 즉 기존 `auth_executor` 를 \"이미 상한이 있다\"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.",
       "classification": "code_fact",
-      "detail": "auth_executor docstring 전체 범위가 즉시거절 기각뿐 아니라 SimpleQueue 무제한과 자원 상한 아님을 명시한다. 인용을 8행 한 줄에서 8-24행으로 넓혔다.",
+      "detail": "auth_executor docstring 의 서로 다른 두 범위가 즉시거절 기각과 SimpleQueue 무제한·자원 상한 아님을 각각 명시한다.",
       "provenance": [
         "baseline:E3",
-        "file:app/auth_executor.py:20-22",
-        "file:app/auth_executor.py:34-36"
+        "file:app/auth_executor.py:14-16",
+        "file:app/auth_executor.py:29-31"
       ]
     },
     {

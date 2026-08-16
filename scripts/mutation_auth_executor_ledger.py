@@ -34,6 +34,7 @@ PROBES = {
     "tripwire":  ["tests/test_auth_executor_lane.py::"
                   "test_lane_never_references_its_own_names_unqualified"],
     "twolane":   ["tests/test_auth_executor_lane.py::TestTwoLanes"],
+    "startupscope": ["tests/test_auth_lane_startup_scope.py"],
 }
 DEFAULT_PROBES = ("s5",)
 
@@ -59,6 +60,15 @@ MID_LINE_ANCHORS: frozenset[str] = frozenset({
 
 # 변이별 필수 probe (미지정은 DEFAULT_PROBES). 신규 2종은 아래에서 채운다.
 MUTANT_PROBES: dict[str, tuple[str, ...]] = {
+    "S1a′-6 rollback 실패를 로그로도 안 남김": ("startupscope",),
+    "S1a′-7 진단 로깅 보호 제거(원인 마스킹)": ("startupscope",),
+
+    "S1a′-1 try 밖": ("startupscope",),
+    "S1a′-2 created 무시": ("startupscope",),
+    "S1a′-3 BaseException→Exception": ("startupscope",),
+    "S1a′-4 합류 생략": ("startupscope",),
+    "S1a′-5 rollback 실패가 startup 원인을 마스킹": ("startupscope",),
+
     # ⛔ 각 probe 가 **독립적으로** 죽여야 KILLED — 합쳐 돌리면 한쪽이 공허해도 안 보인다.
     "S1a-① log flag 를 생성 시점 bool 로 캡처": ("wslog", "lanelog"),
     "S1a-② lane-owned 호출을 무수식으로(cross-lane 오작동)": ("tripwire", "twolane"),
@@ -122,6 +132,21 @@ MUTANTS: list[tuple[str, list[tuple[str, str]]]] = [
      [('        self._log_timings = log_timings', '        _captured = log_timings()\n        self._log_timings = lambda: _captured')]),
     ('S1a-② lane-owned 호출을 무수식으로(cross-lane 오작동)',
      [('        executor = self.begin_auth_executor_shutdown()', '        executor = begin_auth_executor_shutdown()')]),
+    ('S1a′-1 try 밖',
+     [('    try:\n        start_auth_executor(max_workers)\n        yield', '    start_auth_executor(max_workers)\n    try:\n        yield')]),
+    ('S1a′-2 created 무시',
+     [('        if created:\n            # ⛔ **rollback 실패가 startup 원인을 덮으면 안 된다.**', '        if True:\n            # ⛔ **rollback 실패가 startup 원인을 덮으면 안 된다.**')]),
+    ('S1a′-3 BaseException→Exception',
+     [('    except BaseException:\n        if created:', '    except Exception:\n        if created:')]),
+    ('S1a′-4 합류 생략',
+     [('                await await_auth_executor_shutdown(executor)\n', '')]),
+    ('S1a′-5 rollback 실패가 startup 원인을 마스킹',
+     [('            except BaseException:      # noqa: BLE001 — 원인 보존이 우선이다\n',
+       '            except BaseException:\n                raise\n')]),
+    ('S1a′-6 rollback 실패를 로그로도 안 남김',
+     [('                try:\n                    logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass', '                pass')]),
+    ('S1a′-7 진단 로깅 보호 제거(원인 마스킹)',
+     [('                try:\n                    logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass', '                logger.exception("auth lane rollback 실패 — startup 원인을 그대로 올린다")')]),
 ]
 
 

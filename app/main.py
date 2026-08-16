@@ -644,68 +644,73 @@ async def lifespan(app: FastAPI):
     # ⛔ Firebase 초기화 성패와 **무관하게** 띄운다 — 인증 경로는 executor 부재를 fail-closed 로
     #    다루므로(fallback 없음), 여기서 조건부로 만들면 미기동이 곧 전면 인증 실패가 된다.
     #    ThreadPoolExecutor 는 스레드를 **submit 시점에 지연 생성**하므로 유휴 비용은 사실상 0이다.
-    auth_executor.start_auth_executor(config.WS_AUTH_EXECUTOR_WORKERS)
+    # ⛔ **startup scope** — 이 시도가 새로 만든 auth lane 만 보상 종료한다.
+    #    yield 는 이 블록 **밖**이다: 안에 넣으면 정상 운영·shutdown 예외가
+    #    startup 실패로 오분류된다. lifespan 전체를 트랜잭션화하지 않는다 —
+    #    probe·scheduler·collector 의 side effect 는 되돌리지 않는다.
+    async with auth_executor.ws_auth_lane_startup_scope(
+            config.WS_AUTH_EXECUTOR_WORKERS):
 
-    # ⚠️ canary 전용 sentinel — 기본 off 라 평소엔 task 자체가 생기지 않는다.
-    # ⛔ 루프를 **여기 인라인 클로저로 두지 말 것**: 한때 그랬는데, 그러면 테스트가 닿을 수단이
-    #    구조적으로 없어 "endpoint 는 있는데 probe 가 안 도는 상태"를 아무도 못 잡는다.
-    default_executor_probe.start_default_executor_probe(
-        config.DEFAULT_EXECUTOR_PROBE_ENABLED,
-        config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS,
-    )
+        # ⚠️ canary 전용 sentinel — 기본 off 라 평소엔 task 자체가 생기지 않는다.
+        # ⛔ 루프를 **여기 인라인 클로저로 두지 말 것**: 한때 그랬는데, 그러면 테스트가 닿을 수단이
+        #    구조적으로 없어 "endpoint 는 있는데 probe 가 안 도는 상태"를 아무도 못 잡는다.
+        default_executor_probe.start_default_executor_probe(
+            config.DEFAULT_EXECUTOR_PROBE_ENABLED,
+            config.DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS,
+        )
 
-    # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
-    db = SessionLocal()
-    try:
-        crud.init_crawler_config(db)
-        logger.info("✅ Crawler Config 초기화 완료", extra={"table": "crawler_config"})
-    except Exception as e:
-        logger.error("❌ Crawler Config 초기화 실패", exc_info=True)
-    finally:
-        db.close()
+        # Crawler Config 초기화 (Phase 1.8 - DB 테이블 생성)
+        db = SessionLocal()
+        try:
+            crud.init_crawler_config(db)
+            logger.info("✅ Crawler Config 초기화 완료", extra={"table": "crawler_config"})
+        except Exception as e:
+            logger.error("❌ Crawler Config 초기화 실패", exc_info=True)
+        finally:
+            db.close()
 
-    # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
-    scheduler.init_selenium_queue()
+        # Selenium Queue 초기화 (스케줄러보다 먼저 실행)
+        scheduler.init_selenium_queue()
 
-    # §6.6.2 C1 — topic trigger bridge: crud worker thread → main loop 마샬링용 loop
-    # 등록 (scheduler 시작 전). crud emission이 이 loop으로 fx/tether trigger를 보낸다.
-    from app import topic_trigger_bridge
-    topic_trigger_bridge.register_main_loop(asyncio.get_running_loop())
+        # §6.6.2 C1 — topic trigger bridge: crud worker thread → main loop 마샬링용 loop
+        # 등록 (scheduler 시작 전). crud emission이 이 loop으로 fx/tether trigger를 보낸다.
+        from app import topic_trigger_bridge
+        topic_trigger_bridge.register_main_loop(asyncio.get_running_loop())
 
-    # 스케줄러 시작 (Queue를 사용하는 작업 + WebSocket Broadcasting 포함)
-    scheduler.start_scheduler()
+        # 스케줄러 시작 (Queue를 사용하는 작업 + WebSocket Broadcasting 포함)
+        scheduler.start_scheduler()
 
-    # C6-quiesce Q4a — recreate된 fresh app의 halt-관측 ACK (§9 step6, no-throw).
-    # start_scheduler()가 startup refresh_write_mode_cache()를 동기 실행한 *직후*라 snapshot이 durable halt
-    # 반영. open quiesce session 없으면(=legacy steady state) no-op, table 부재 시에도 no-throw → startup 영향 0.
-    from app.atomic_quiesce_startup import record_app_ack_if_quiescing
-    await asyncio.to_thread(record_app_ack_if_quiescing)
+        # C6-quiesce Q4a — recreate된 fresh app의 halt-관측 ACK (§9 step6, no-throw).
+        # start_scheduler()가 startup refresh_write_mode_cache()를 동기 실행한 *직후*라 snapshot이 durable halt
+        # 반영. open quiesce session 없으면(=legacy steady state) no-op, table 부재 시에도 no-throw → startup 영향 0.
+        from app.atomic_quiesce_startup import record_app_ack_if_quiescing
+        await asyncio.to_thread(record_app_ack_if_quiescing)
 
-    # ✅ Broadcasting은 APScheduler에서 자동 실행 (매분 00, 10, 20, 30, 40, 50초)
+        # ✅ Broadcasting은 APScheduler에서 자동 실행 (매분 00, 10, 20, 30, 40, 50초)
 
-    # PR6c-2b — KRX 미국달러선물 client (background bootstrap, 즉시 return)
-    # KRX_FUTURES_ENABLED=false 또는 어떤 단계 실패도 startup 영향 0.
-    await scheduler.start_krx_futures_client()
+        # PR6c-2b — KRX 미국달러선물 client (background bootstrap, 즉시 return)
+        # KRX_FUTURES_ENABLED=false 또는 어떤 단계 실패도 startup 영향 0.
+        await scheduler.start_krx_futures_client()
 
-    # Phase B.1 PR1 — USDT WebSocket Upbit canary skeleton.
-    # USDT_WS_UPBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
-    await scheduler.start_usdt_ws_upbit_client()
+        # Phase B.1 PR1 — USDT WebSocket Upbit canary skeleton.
+        # USDT_WS_UPBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+        await scheduler.start_usdt_ws_upbit_client()
 
-    # Phase B.3 Stage U2 — USDT WebSocket Bithumb canary skeleton (USDT_WS_DESIGN_PLAN §12.5).
-    # USDT_WS_BITHUMB_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
-    await scheduler.start_usdt_ws_bithumb_client()
+        # Phase B.3 Stage U2 — USDT WebSocket Bithumb canary skeleton (USDT_WS_DESIGN_PLAN §12.5).
+        # USDT_WS_BITHUMB_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+        await scheduler.start_usdt_ws_bithumb_client()
 
-    # Phase B.4 Stage C2 — USDT WebSocket Coinone canary skeleton (USDT_WS_DESIGN_PLAN §12.6).
-    # USDT_WS_COINONE_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
-    await scheduler.start_usdt_ws_coinone_client()
+        # Phase B.4 Stage C2 — USDT WebSocket Coinone canary skeleton (USDT_WS_DESIGN_PLAN §12.6).
+        # USDT_WS_COINONE_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+        await scheduler.start_usdt_ws_coinone_client()
 
-    # Phase B.5 Stage K2 — USDT WebSocket Korbit canary skeleton (USDT_WS_DESIGN_PLAN §12.7).
-    # USDT_WS_KORBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
-    await scheduler.start_usdt_ws_korbit_client()
+        # Phase B.5 Stage K2 — USDT WebSocket Korbit canary skeleton (USDT_WS_DESIGN_PLAN §12.7).
+        # USDT_WS_KORBIT_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+        await scheduler.start_usdt_ws_korbit_client()
 
-    # Phase B.6 Stage G1 — USDT WebSocket Gopax canary skeleton (USDT_WS_DESIGN_PLAN §12.9).
-    # USDT_WS_GOPAX_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
-    await scheduler.start_usdt_ws_gopax_client()
+        # Phase B.6 Stage G1 — USDT WebSocket Gopax canary skeleton (USDT_WS_DESIGN_PLAN §12.9).
+        # USDT_WS_GOPAX_ENABLED=false 시 lifecycle 비활성 (startup 영향 0).
+        await scheduler.start_usdt_ws_gopax_client()
 
     yield
 
