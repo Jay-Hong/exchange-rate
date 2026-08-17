@@ -49,11 +49,22 @@ def _run_in_fresh_process(code: str, *, url: str,
     `app.database` 는 import 시점에 engine 을 만든다. 같은 프로세스에서는 되돌릴 수 없다."""
     env = dict(os.environ, DATABASE_URL=url, PYTHONPATH=str(REPO))
     env.pop("PG_TEST_URL", None)
-    env.pop("DB_WORKLOAD_PROFILE", None)      # 부모 환경이 새지 않게 명시적으로 지운다
+    # ⚠️ 이건 **프로세스 env 만** 지운다 — 격리가 아니다. 자식은 `app.database` →
+    #    `app/__init__` → `app.logging` → `app.config` 의 `load_dotenv()` 를 거치므로
+    #    리포 루트에 `.env` 가 있으면 값이 되살아난다(실측). 지금 이 worktree 에 `.env` 가
+    #    없어서 초록일 뿐이고, 운영 리포나 남의 로컬에서는 거짓 red / **잘못된 이유로 초록**이 된다.
+    env.pop("DB_WORKLOAD_PROFILE", None)
+    prelude = ""
     if profile is not None:
         env["DB_WORKLOAD_PROFILE"] = profile
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                          cwd=REPO, env=env, timeout=120)
+    else:
+        # ⛔ 그래서 자식 안에서 dotenv 를 **먼저 돌린 뒤** 그 키만 지운다. dotenv 를 통째로
+        #    stub 하지 않는 이유: 그러면 자식이 production 과 다른 프로세스가 되어 배선
+        #    증명 자체가 약해진다. 여기서 막아야 할 것은 "부재" 라는 전제 하나뿐이다.
+        prelude = ("import app.config  # noqa: F401 — load_dotenv 를 먼저 돌린다\n"
+                   "import os as _os; _os.environ.pop('DB_WORKLOAD_PROFILE', None)\n")
+    return subprocess.run([sys.executable, "-c", prelude + code], capture_output=True,
+                          text=True, cwd=REPO, env=env, timeout=120)
 
 
 class TestFailClosedWiring(unittest.TestCase):
@@ -179,29 +190,146 @@ class TestWorkloadProfileReachesTheServer(unittest.TestCase):
         self.assertEqual(out.get("PROFILE"), "online", out)
         self.assertEqual(out.get("STATEMENT"), self.EXPECTED["online"][0], out)
 
-    def test_statement_timeout_actually_cancels_a_long_query(self):
-        """⛔ `SHOW` 가 값을 보고하는 것과 서버가 **실제로 취소하는 것**은 다른 주장이다.
+class TestCanceledStatementIsClassifiedTransient(unittest.TestCase):
+    """취소된 statement(SQLSTATE **57014**)가 `app.db_errors` 에서 **transient** 로 분류되는가.
 
-        online 상한(10s)보다 긴 `pg_sleep` 이 SQLSTATE **57014**(query_canceled)로 끊겨야 한다.
-        상한을 짧게 덮어써 CI 시간을 태우지 않는다 — 덮어쓰기는 production 배선을 우회하므로
-        **위 배선 시험과 짝을 이룰 때만** 의미가 있다.
-        """
+    ⚠️ 이 테스트는 한때 `TestWorkloadProfileReachesTheServer` 안에 있었고 이름은
+       `test_statement_timeout_actually_cancels_a_long_query` 였다. 그런데 본문이
+       `SET statement_timeout='300ms'` 로 **production 값을 덮으므로**, production 이
+       무엇을 설정하든 — `statement_timeout=0`(이 슬라이스가 없애려는 바로 그 상태)이어도 —
+       항상 초록이었다(실측 3경우). 배선 증명 클래스 안에서 배선을 증명하지 않았고, 실패
+       메시지는 검출할 수 없는 조건을 말했다.
+
+    삭제하지 않고 **재조준**한다: 이 슬라이스가 `statement_timeout` 을 0 → 유한으로 바꿔
+    **57014 를 production 에서 도달 가능하게** 만들었고, 그 오류가 재시도 가능(503)으로
+    분류되는지는 실서버 오류로만 확인된다. `is_transient_db_error` 는 deny-list 라
+    분류가 틀려도 **조용히 fail-open** 한다 — 이 지점이 없으면 아무도 모른다.
+
+    ⚠️ 도메인 경계: 이건 `db_errors` 커버리지가 아니다. 이 슬라이스가 만든 도달 가능성 하나만
+       잠근다. `db_errors` 전용 배터리가 생기면 관련 변이는 그리로 옮긴다.
+    """
+
+    def setUp(self):
+        self.url = _require_pg()
+
+    def test_a_canceled_statement_is_transient_not_permanent(self):
         code = (
             "from sqlalchemy import text\n"
             "from app.database import engine\n"
+            "from app import db_errors\n"
             "with engine.connect() as c:\n"
-            "    c.execute(text(\"SET statement_timeout = '1200ms'\"))\n"
+            "    c.execute(text(\"SET statement_timeout = '300ms'\"))\n"
             "    try:\n"
             "        c.execute(text('SELECT pg_sleep(5)'))\n"
             "        print('SQLSTATE=none')\n"
             "    except Exception as exc:\n"
             "        orig = getattr(exc, 'orig', None)\n"
             "        print('SQLSTATE=' + str(getattr(orig, 'sqlstate', None)))\n"
+            "        print('IS_TRANSIENT_TYPE=' + str(isinstance(exc, db_errors.TRANSIENT_DB_ERRORS)))\n"
+            "        print('CLASSIFIED=' + str(db_errors.is_transient_db_error(exc)))\n"
         )
         r = _run_in_fresh_process(code, url=self.url, profile="online")
-        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
-        self.assertIn("SQLSTATE=57014", r.stdout,
-                      f"긴 질의가 취소되지 않았다 — statement_timeout 이 서버에서 무의미하다: {r.stdout}")
+        self.assertEqual(r.returncode, 0, r.stderr[-1200:])
+        out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        self.assertEqual(out.get("SQLSTATE"), "57014",
+                         f"긴 질의가 취소되지 않았다 — 이 시험의 전제가 성립하지 않는다: {out}")
+        self.assertEqual(out.get("IS_TRANSIENT_TYPE"), "True",
+                         f"취소 오류가 TRANSIENT_DB_ERRORS 계층 밖이다: {out}")
+        self.assertEqual(out.get("CLASSIFIED"), "True",
+                         f"57014 가 permanent 로 분류된다 — 재시도 가능한 상태를 포기한다: {out}")
+
+
+class TestValidationPrecedesEngineCreationAtRuntime(unittest.TestCase):
+    """⛔ AST 소스 순서 검사는 **호출을 위쪽 함수 본문으로 hoist 하면** 우회된다 — 외부 검토가
+    격리 사본에서 실증했고(판정식은 참, 런타임 순서는 뒤집힘) codex 가 독립 재현했다.
+    실행 순서는 **실행으로** 관측한다.
+
+    `sqlalchemy.create_engine` 에 감시자를 심고, 호출 **시점에** `app.database` 모듈
+    namespace 에 `DB_WORKLOAD_PROFILE` 이 이미 있는지 본다. `app/database.py` 가
+    `from sqlalchemy import create_engine` 로 import 시점에 바인딩하므로 사전 패치가 먹는다.
+
+    ⚠️ `ENGINE_CALLS` 를 반드시 함께 본다 — 감시자가 안 걸리면 `0` 이 "안 만들어졌다" 가
+       아니라 **"못 봤다"** 가 되어 모든 단언이 공허해진다.
+    """
+
+    SPY = (
+        "import sys, sqlalchemy\n"
+        "_calls = []\n"
+        "_real = sqlalchemy.create_engine\n"
+        "def _spy(*a, **k):\n"
+        "    _m = sys.modules.get('app.database')\n"
+        "    _calls.append(bool(_m) and hasattr(_m, 'DB_WORKLOAD_PROFILE'))\n"
+        "    return _real(*a, **k)\n"
+        "sqlalchemy.create_engine = _spy\n"
+    )
+    TAIL = ("print('ENGINE_CALLS=' + str(len(_calls)))\n"
+            "print('BOUND_AT_CREATE=' + str(_calls[0] if _calls else None))\n")
+
+    def test_the_profile_is_bound_before_create_engine_runs(self):
+        code = self.SPY + "import app.database\n" + self.TAIL
+        r = _run_in_fresh_process(code, url="sqlite:///:memory:", profile="maintenance")
+        self.assertEqual(r.returncode, 0, r.stderr[-1200:])
+        out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        self.assertEqual(out.get("ENGINE_CALLS"), "1",
+                         f"감시자가 안 걸렸다 — 이 시험 전체가 공허해진다: {out}")
+        self.assertEqual(out.get("BOUND_AT_CREATE"), "True",
+                         "create_engine 이 도는 시점에 profile 이 아직 없다 — 검증이 뒤에 있다")
+
+    def test_a_bad_profile_stops_before_any_engine_is_created(self):
+        """⛔ 이름이 주장하는 것을 **실제로 관측한다**. 구 이름
+        `..._before_the_engine_exists` 는 import 실패만 보고 engine 존재는 안 봤다.
+
+        bad 값은 2종이면 족하다 — 전 열거는 `test_everything_else_is_a_startup_failure` 와
+        `test_bad_profiles_kill_the_import` 가 소유한다(여긴 순서 계약이다).
+        """
+        for bad in ("", "maintenence"):
+            with self.subTest(profile=bad):
+                code = (self.SPY + "try:\n    import app.database\n"
+                        "except BaseException as e:\n    print('EXC=' + type(e).__name__)\n"
+                        + self.TAIL)
+                r = _run_in_fresh_process(code, url="sqlite:///:memory:", profile=bad)
+                self.assertEqual(r.returncode, 0, r.stderr[-1200:])
+                out = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+                self.assertEqual(out.get("ENGINE_CALLS"), "0",
+                                 f"잘못된 profile 인데 engine 이 만들어졌다: {out}")
+                # 무관한 이유(오타 등)로 죽어도 ENGINE_CALLS=0 이 참이 되므로 한 줄로 막는다.
+                self.assertIn("DbWorkloadProfile", out.get("EXC", ""),
+                              f"profile 이 아닌 이유로 죽었다: {out}")
+
+
+class TestDotenvCannotResurrectTheProfile(unittest.TestCase):
+    """⛔ `_run_in_fresh_process` 의 격리가 **실제로 필요하고 실제로 동작하는지** 잠근다.
+
+    첫 시험이 누수를 **재현**한다 — 전제(`app.config` 가 import 시 `load_dotenv`)가 사라지면
+    조용히 초록으로 넘어가지 않고 그 가드가 먼저 깨진다.
+    """
+
+    def _run_with_dotenv(self, value, *, seam):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            (pathlib.Path(td) / ".env").write_text(f"DB_WORKLOAD_PROFILE={value}\n")
+            code = ("import app.database\nprint('PROFILE=' + app.database.DB_WORKLOAD_PROFILE)\n")
+            if seam:
+                code = ("import app.config  # noqa: F401\n"
+                        "import os as _os; _os.environ.pop('DB_WORKLOAD_PROFILE', None)\n") + code
+            env = dict(os.environ, DATABASE_URL="sqlite:///:memory:", PYTHONPATH=str(REPO))
+            env.pop("DB_WORKLOAD_PROFILE", None)
+            env.pop("PG_TEST_URL", None)
+            return subprocess.run([sys.executable, "-c", code], capture_output=True,
+                                  text=True, cwd=td, env=env, timeout=120)
+
+    def test_without_the_seam_dotenv_wins(self):
+        """이 재현이 깨지면 seam 의 존재 이유가 사라진 것이다 — 그때 초록으로 넘기지 않는다."""
+        r = self._run_with_dotenv("maintenance", seam=False)
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertIn("PROFILE=maintenance", r.stdout,
+                      "`.env` 가 더 이상 프로파일을 되살리지 않는다 — seam 의 전제가 바뀌었다")
+
+    def test_with_the_seam_absence_is_preserved(self):
+        r = self._run_with_dotenv("maintenance", seam=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertIn("PROFILE=online", r.stdout, "seam 이 `.env` 누수를 막지 못했다")
 
 
 class TestInvalidProfileIsAStartupFailure(unittest.TestCase):
@@ -212,15 +340,20 @@ class TestInvalidProfileIsAStartupFailure(unittest.TestCase):
 
     BAD = ("", " ", "Online", "ONLINE", "maintenence", "maint", "online ")
 
-    def test_bad_profiles_kill_the_import_before_the_engine_exists(self):
+    def test_bad_profiles_kill_the_import(self):
         for bad in self.BAD:
             with self.subTest(profile=bad):
-                r = _run_in_fresh_process("import app.database\nprint('IMPORTED=1')\n",
-                                          url="sqlite:///:memory:", profile=bad)
-                self.assertNotEqual(r.returncode, 0, f"{bad!r} 로 import 가 성공했다")
-                self.assertNotIn("IMPORTED=1", r.stdout)
-                self.assertIn("InvalidDbWorkloadProfile", r.stderr,
-                              f"다른 이유로 죽었다 — 원인이 profile 이 아니다: {r.stderr[-600:]}")
+                r = _run_in_fresh_process(
+                    "try:\n    import app.database\n    print('IMPORTED=1')\n"
+                    "except BaseException as e:\n    print('EXC=' + type(e).__name__)\n",
+                    url="sqlite:///:memory:", profile=bad)
+                self.assertEqual(r.returncode, 0, r.stderr[-600:])
+                self.assertNotIn("IMPORTED=1", r.stdout, f"{bad!r} 로 import 가 성공했다")
+                # ⛔ **등가 비교**다. `assertIn` 은 방어층의 하위클래스
+                #    `UnvalidatedDbWorkloadProfile` 도 만족시켜 "검증이 막았다" 와
+                #    "검증을 우회했는데 방어층이 막았다" 를 구분하지 못했다(실측: 7 중 6).
+                self.assertIn("EXC=InvalidDbWorkloadProfile", r.stdout,
+                              f"검증 층이 막은 것이 아니다: {r.stdout} / {r.stderr[-400:]}")
 
     def test_valid_profiles_import_cleanly_on_sqlite_too(self):
         """profile 은 SQLite 에서도 **검증**된다(로컬에서 오타를 미리 잡는다)."""

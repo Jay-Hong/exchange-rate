@@ -33,6 +33,8 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mutation_battery_guard import (  # noqa: E402
@@ -40,13 +42,6 @@ from mutation_battery_guard import (  # noqa: E402
 )
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-DB = "app/database.py"
-INSTALLER = "ops/install-db-maintenance-cron.sh"
-CRON = "tests/test_db_maintenance_cron_manifest.py"
-SQLITE_LEAK = ("tests/test_pg_engine_binding.py::TestSqlitePathNeedsNoPostgres::"
-               "test_sqlite_path_does_not_receive_postgres_only_kwargs")
-
-_SQLITE_ARGS = '    _engine_kwargs["connect_args"] = {"check_same_thread": False}\n'
 
 MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
     # ⚠️ S2 본체에서 SQLite kwargs 도출이 `app/database_settings.py` 로 옮겨가며 이 변이의
@@ -122,7 +117,7 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
     ('S2-5 online/maintenance statement 상한 교차배선 → 온라인이 15분을 허용한다',
      'app/database_settings.py',
      [('STATEMENT_TIMEOUT_MS = {ONLINE: 60_000, MAINTENANCE: 900_000}\n',
-       'STATEMENT_TIMEOUT_MS = {ONLINE: 900_000, MAINTENANCE: 10_000}\n')],
+       'STATEMENT_TIMEOUT_MS = {ONLINE: 900_000, MAINTENANCE: 60_000}\n')],
      ('tests/test_db_workload_profile.py::TestEngineKwargs::'
       'test_maintenance_is_strictly_more_permissive_than_online',)),
     ('S2-6 create_engine 이 kwargs 를 안 받음 → 순수 함수는 맞는데 **배선이 끊긴다**',
@@ -136,13 +131,83 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
      [('DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()\n',
        'DB_WORKLOAD_PROFILE = os.getenv("DB_WORKLOAD_PROFILE") or "online"\n')],
      ('tests/test_pg_engine_binding.py::TestInvalidProfileIsAStartupFailure::'
-      'test_bad_profiles_kill_the_import_before_the_engine_exists',)),
+      'test_bad_profiles_kill_the_import',)),
+    # ⚠️ **AST 판정식으로는 SURVIVED 다.** 호출을 위쪽 함수 본문으로 끌어올리면 lineno 비교는
+    #    참인데 실행 순서는 뒤집힌다 — 외부 검토가 격리 사본에서 실증했고 codex 가 독립 재현했다.
+    #    그래서 probe 는 **런타임 판정식**이다. S2-10(AST) 과 짝을 이뤄 두 계약을 각각 증명한다.
+    ('S2-11 검증 호출을 위쪽 함수로 hoist → 소스 줄 순서는 지켜지는데 실행 순서가 뒤집힌다',
+     'app/database.py',
+     [('DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()\n',
+       'def _validate_profile():\n'
+       '    return database_settings.resolve_profile_from_env()\n'
+       '_early_profile = "online"\n'),
+      ('_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, DB_WORKLOAD_PROFILE)\n',
+       '_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, _early_profile)\n'),
+      ('engine = create_engine(DATABASE_URL, **_engine_kwargs)\n',
+       'engine = create_engine(DATABASE_URL, **_engine_kwargs)\n'
+       'DB_WORKLOAD_PROFILE = _validate_profile()\n')],
+     ('tests/test_pg_engine_binding.py::TestValidationPrecedesEngineCreationAtRuntime::'
+      'test_the_profile_is_bound_before_create_engine_runs',)),
+    # ⚠️ S2-7 은 M4 의 증명이 될 수 없다(verdict 가 안 바뀐다 — 넓어진 귀속은 subtest 1/7→7/7
+    #    로만 보인다). 하위클래스 분리를 실제로 무는 것은 이 변이다: `""` 를 포함한 BAD 전종이
+    #    방어층으로 흘러가 **분리 전에는 전부 통과**했다.
+    ('S2-12 resolve 를 os.getenv 기본값으로 대체 → 검증 층이 사라지고 방어층만 남는다',
+     'app/database.py',
+     [('DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()\n',
+       'DB_WORKLOAD_PROFILE = os.getenv("DB_WORKLOAD_PROFILE", "online")\n')],
+     ('tests/test_pg_engine_binding.py::TestInvalidProfileIsAStartupFailure::'
+      'test_bad_profiles_kill_the_import',)),
+    # S6 — 주입 매핑이 os.environ 으로 폴백하는 falsy 버그
+    ('S2-13 env 주입에 falsy 폴백 → 빈 매핑이 실제 환경을 본다',
+     'app/database_settings.py',
+     [('    env = os.environ if environ is None else environ\n',
+       '    env = environ or os.environ\n')],
+     ('tests/test_db_workload_profile.py::TestProfileResolution::'
+      'test_an_injected_mapping_wins_over_os_environ',)),
     ('S2-8 backend 판정을 문자열 포함으로 회귀 → 이름에 sqlite 가 든 PG URL 이 오판된다',
      'app/database_settings.py',
      [('    return make_url(url).get_backend_name() == "sqlite"\n',
        '    return "sqlite" in url\n')],
      ('tests/test_db_workload_profile.py::TestBackendDiscrimination::'
       'test_a_postgres_url_whose_name_contains_sqlite_is_not_sqlite',)),
+    # ⚠️ 아래 셋은 **순서 보존 + 양수** 값 드리프트다 — 순수 계약 파일은 자기가 시험하는 표를
+    #    읽으므로 전부 초록이고, PG 배선 시험의 하드코딩 EXPECTED 만 죽인다. 즉
+    #    "EXPECTED 가 값 축을 잡는다" 가 주석이 아니라 판정 결과가 된다.
+    #    ⚠️ 정직한 한계: 이건 change detector 다. "값이 검증됐다" 가 아니라
+    #       **"값 변경이 두 곳의 동의를 요구한다"** 는 뜻이다.
+    ('S2-14 online statement 상한을 10분으로 드리프트 → 순수 파일은 전부 초록이다',
+     'app/database_settings.py',
+     [('STATEMENT_TIMEOUT_MS = {ONLINE: 60_000, MAINTENANCE: 900_000}\n',
+       'STATEMENT_TIMEOUT_MS = {ONLINE: 600_000, MAINTENANCE: 900_000}\n')],
+     ('tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::'
+      'test_each_profile_lands_all_three_timeouts_on_a_live_connection',)),
+    ('S2-15 online pool 대기를 1초로 드리프트 → 7초짜리 질의 뒤에 선 요청이 늘 실패한다',
+     'app/database_settings.py',
+     [('POOL_TIMEOUT_SECONDS = {ONLINE: 10, MAINTENANCE: 30}\n',
+       'POOL_TIMEOUT_SECONDS = {ONLINE: 1, MAINTENANCE: 30}\n')],
+     ('tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::'
+      'test_each_profile_lands_all_three_timeouts_on_a_live_connection',)),
+    ('S2-16 connect 상한 교차배선 → 순서·부호 단언으로는 안 잡힌다',
+     'app/database_settings.py',
+     [('CONNECT_TIMEOUT_SECONDS = {ONLINE: 5, MAINTENANCE: 10}\n',
+       'CONNECT_TIMEOUT_SECONDS = {ONLINE: 10, MAINTENANCE: 5}\n')],
+     ('tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::'
+      'test_each_profile_lands_all_three_timeouts_on_a_live_connection',)),
+    # S9 — 간접 체인 누수. AST 검사(test_source_does_not_import_app_config)는 green 이다.
+    ('S2-18 간접 import 체인으로 app.* 누수 → AST 검사는 통과, 런타임 검사만 죽인다',
+     'app/database_settings.py',
+     [('from sqlalchemy.engine import make_url\n',
+       'from sqlalchemy.engine import make_url\nimport app.logging  # noqa: F401\n')],
+     ('tests/test_db_workload_profile.py::TestModuleIsSelfContained::'
+      'test_it_does_not_pull_app_into_sys_modules',)),
+    # S10 — sqlite 분기 pool 누수. dict 완전일치가 **단독으로** 죽인다: subprocess `:memory:`
+    #       는 pool_size 를 조용히 수용하므로 연결 시험은 실명이다(비대칭).
+    ('S2-19 sqlite 분기가 pool_size 를 함께 반환 → 연결 시험은 못 잡고 dict 완전일치만 잡는다',
+     'app/database_settings.py',
+     [('        return {"connect_args": {"check_same_thread": False}}\n',
+       '        return {"connect_args": {"check_same_thread": False}, "pool_size": 3}\n')],
+     ('tests/test_db_workload_profile.py::TestEngineKwargs::'
+      'test_sqlite_gets_no_postgres_only_kwargs',)),
     ('S2-9 statement 상한을 0 으로 → PostgreSQL 에서 0 은 **무제한**이다',
      'app/database_settings.py',
      [('STATEMENT_TIMEOUT_MS = {ONLINE: 60_000, MAINTENANCE: 900_000}\n',
@@ -161,6 +226,12 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
        'DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()\n')],
      ('tests/test_db_workload_profile.py::TestValidationPrecedesEngineCreation::'
       'test_profile_is_resolved_before_create_engine_in_source_order',)),
+    ('S2-17 57014(취소)를 영구 오류로 분류 → 재시도 가능한 상태를 500 으로 포기한다',
+     'app/db_errors.py',
+     [('PERMANENT_DB_SQLSTATES = frozenset({\n',
+       'PERMANENT_DB_SQLSTATES = frozenset({\n    "57014",\n')],
+     ('tests/test_pg_engine_binding.py::TestCanceledStatementIsClassifiedTransient::'
+      'test_a_canceled_statement_is_transient_not_permanent',)),
 ]
 
 #: ⛔ 실제 PostgreSQL 이 있어야만 판정되는 probe. 없으면 그 테스트는 **skip → rc 0** 이라
@@ -169,6 +240,8 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
 PG_PROBES = frozenset({
     "tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::"
     "test_each_profile_lands_all_three_timeouts_on_a_live_connection",
+    "tests/test_pg_engine_binding.py::TestCanceledStatementIsClassifiedTransient::"
+    "test_a_canceled_statement_is_transient_not_permanent",
 })
 
 MID_LINE_ANCHORS: set[str] = set()
@@ -214,18 +287,59 @@ def syntax_ok(rel: str, text: str) -> tuple[bool, str]:
     return True, "ok"   # 그 밖 확장자는 문법 검사를 건너뛴다(주장하지 않는다)
 
 
-def classify(codes: dict[str, int]) -> str:
+def _skipped_from_junit(path: pathlib.Path) -> int | None:
+    """junit-xml 에서 skip 수를 읽는다. ⛔ 판독 실패는 **None** 이지 0 이 아니다.
+
+    stdout 을 파싱하지 않는 이유: 이 파일은 이미 `FAILED` 문자열만 보다가 subtest 실패
+    (`SUBFAILED`)를 놓친 전례가 있다. 포맷 의존 판정은 이 슬라이스가 고치려는 실패의 재발이다.
+    """
+    try:
+        tree = ET.parse(path)
+    except Exception:      # noqa: BLE001 — 판독 실패는 원인을 가리지 않고 fail-closed
+        return None
+    skipped = ran = 0
+    for ts in tree.iter("testsuite"):
+        try:
+            skipped += int(ts.get("skipped", 0))
+            ran += int(ts.get("tests", 0))
+        except (TypeError, ValueError):
+            return None
+    if ran == 0:
+        return None        # 수집 0 = probe 오지정. "안 잡힌다" 가 아니라 "못 물었다" 다.
+    return skipped
+
+
+def _run(node: str) -> tuple[int, list[str], int | None]:
+    with tempfile.TemporaryDirectory() as td:          # worktree 를 더럽히지 않는다
+        xml = pathlib.Path(td) / "r.xml"
+        r = subprocess.run([sys.executable, "-m", "pytest", node, "-q", "-p", "no:asyncio",
+                            f"--junit-xml={xml}"], capture_output=True, text=True, cwd=REPO)
+        skipped = _skipped_from_junit(xml)
+    # ⚠️ pytest 9 는 subtest 실패를 `SUBFAILED` 로 찍는다 — `FAILED` 만 보면 killer 가 빈
+    #    목록으로 나와 귀속이 사라진다(실측). **표시 전용**이고 판정은 rc 가 진다.
+    fails = sorted({l.split("::")[-1].split()[0] for l in r.stdout.splitlines()
+                    if l.startswith(("FAILED", "SUBFAILED"))})
+    return r.returncode, fails, skipped
+
+
+def classify(codes: dict[str, int], skips: dict[str, int | None]) -> str:
+    """⛔ skip 은 rc 0 이라 예전엔 **SURVIVED 로 둔갑**했다 — "못 시험했다" 가 "안 잡힌다" 로
+    보였다. skip 이 있거나 판독이 안 되면 판정하지 않고 INFRA 로 운다.
+
+    rc == 1(실제 실패)은 이 분기가 뒤집지 않는다 — 기존 KILLED 는 구조적으로 보존된다.
+    """
+    if not codes:
+        return "INFRA"                     # probe 0개는 판정이 아니다
     if any(rc not in (0, 1) for rc in codes.values()):
         return "INFRA"
-    return "KILLED" if any(rc == 1 for rc in codes.values()) else "SURVIVED"
-
-
-def _run(node: str) -> tuple[int, list[str]]:
-    r = subprocess.run([sys.executable, "-m", "pytest", node, "-q", "-p", "no:asyncio"],
-                       capture_output=True, text=True, cwd=REPO)
-    fails = sorted({l.split("::")[-1].split()[0] for l in r.stdout.splitlines()
-                    if l.startswith("FAILED")})
-    return r.returncode, fails
+    for n, rc in codes.items():
+        s = skips.get(n)
+        if s is None or (rc == 0 and s > 0):
+            return "INFRA"
+    # ⚠️ `any` 가 아니라 `all` 이다 — `mutation_auth_executor_ledger.classify` 와 같은 의미로
+    #    맞춘다. probe 가 둘 이상일 때 한쪽이 공허해도 KILLED 로 접히면 그 공허함이 숨는다.
+    #    **오늘은 판정 불변**이다: 전 22변이가 단일 probe 임을 실측했다.
+    return "KILLED" if all(rc == 1 for rc in codes.values()) else "SURVIVED"
 
 
 def main() -> int:
@@ -252,9 +366,15 @@ def main() -> int:
     counts = {"KILLED": 0, "SURVIVED": 0, "INVALID": 0, "INFRA": 0}
     nodes = sorted({n for m in MUTANTS for n in m[3]})
     try:
-        base = {n: _run(n)[0] for n in nodes}
-        if any(rc != 0 for rc in base.values()):
-            print(f"❌ 기준선이 초록이 아니다: {base}")
+        base = {}
+        for n in nodes:
+            rc, _, sk = _run(n)
+            base[n] = (rc, sk)
+        bad = {n: v for n, v in base.items() if v[0] != 0 or v[1] is None or v[1] > 0}
+        if bad:
+            # ⛔ skip/판독불가도 여기서 막는다 — 예전엔 PG 없이 돌려도 "기준선 초록" 이라고
+            #    찍고 그대로 진행해 전 변이를 SURVIVED 로 보고했다.
+            print(f"❌ 기준선이 초록이 아니거나 skip·판독불가가 있다: {bad}")
             return 2
         print(f"기준선 초록 · probe {len(nodes)}개 · 변이 {len(MUTANTS)}개\n")
         for name, rel, pairs, probes in MUTANTS:
@@ -270,12 +390,12 @@ def main() -> int:
                 continue
             handle.write_mutant(mutated)
             try:
-                codes, killers = {}, {}
+                codes, killers, skips = {}, {}, {}
                 for n in probes:
-                    codes[n], killers[n] = _run(n)
+                    codes[n], killers[n], skips[n] = _run(n)
             finally:
                 handle.restore()
-            verdict = classify(codes)
+            verdict = classify(codes, skips)
             counts[verdict] += 1
             mark = {"KILLED": "✅", "SURVIVED": "❌", "INFRA": "⚠️"}[verdict]
             print(f"{verdict:<8} {mark} {name}")

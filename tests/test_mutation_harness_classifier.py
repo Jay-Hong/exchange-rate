@@ -187,3 +187,81 @@ class TestFalseKillGuard:
         """lane-owned 가 아닌 이름은 정상 KILLED 를 유지한다."""
         assert _BAT.false_kill_name("KILLED", "NameError: name '_totally_unrelated' is not defined") is None
 
+
+
+# ── S2 (DB engine 배터리) 판정기 — skip 을 SURVIVED 로 둔갑시키지 않는다 ─────────────
+#
+# ⛔ 이 배터리는 **CI 가 돌리지 않는다**(수동 게이트). 그래서 판정기 계약의 CI 가시 보증은
+#    여기 단위 테스트가 진다. skip 은 pytest 에서 rc 0 이라, 예전엔 PG 없이 돌린 probe 가
+#    "안 잡힌다"(SURVIVED)로 보고됐다 — 못 시험한 것과 안 잡히는 것은 다른 사실이다.
+
+_SPEC_DB = importlib.util.spec_from_file_location(
+    "_bat_db", pathlib.Path(__file__).resolve().parent.parent
+    / "scripts" / "mutation_db_engine.py")
+_BAT_DB = importlib.util.module_from_spec(_SPEC_DB)
+sys.modules["_bat_db"] = _BAT_DB
+try:
+    _SPEC_DB.loader.exec_module(_BAT_DB)
+except SystemExit:
+    pass
+
+
+class TestDbEngineClassifierTreatsSkipAsInfra:
+    def test_skip_with_rc_zero_is_infra_not_survived(self):
+        """⛔ 이 슬라이스의 핵심 교정 — PG 없이 돌린 probe 가 변이를 살려준 것처럼 보였다."""
+        assert _BAT_DB.classify({"a": 0}, {"a": 1}) == "INFRA"
+
+    def test_a_real_failure_is_still_killed_even_with_skips(self):
+        """rc == 1 은 새 분기가 뒤집지 않는다 — 기존 KILLED 의 구조적 보존."""
+        assert _BAT_DB.classify({"a": 1}, {"a": 1}) == "KILLED"
+
+    def test_unreadable_skip_count_is_infra(self):
+        """판독 실패(None)는 0 이 아니다 — 모르면 판정하지 않는다."""
+        assert _BAT_DB.classify({"a": 0}, {"a": None}) == "INFRA"
+        assert _BAT_DB.classify({"a": 1}, {"a": None}) == "INFRA"
+
+    def test_clean_run_still_classifies_normally(self):
+        assert _BAT_DB.classify({"a": 0}, {"a": 0}) == "SURVIVED"
+        assert _BAT_DB.classify({"a": 1, "b": 1}, {"a": 0, "b": 0}) == "KILLED"
+
+    def test_one_vacuous_probe_is_not_hidden_by_another(self):
+        """⛔ 두 배터리의 판정 의미를 맞춘다.
+
+        `mutation_db_engine` 은 한때 `any(rc == 1)` 이라 probe 둘 중 하나만 죽여도 KILLED 로
+        접었다 — 나머지 probe 가 공허하다는 사실이 숨는다. `mutation_auth_executor_ledger` 는
+        처음부터 `all(...)` 이었다. **오늘 판정은 불변**이다(전 22변이가 단일 probe, 실측).
+        """
+        assert _BAT_DB.classify({"a": 1, "b": 0}, {"a": 0, "b": 0}) == "SURVIVED"
+
+    def test_no_probes_is_infra_not_survived(self):
+        assert _BAT_DB.classify({}, {}) == "INFRA"
+
+    def test_infrastructure_return_codes_still_win(self):
+        assert _BAT_DB.classify({"a": 1, "b": 2}, {"a": 0, "b": 0}) == "INFRA"
+
+
+class TestJunitSkipReader:
+    """⛔ stdout 파싱이 아니라 **구조적 판독**이어야 한다 — 이 파일은 이미 `FAILED` 문자열만
+    보다가 subtest 실패를 놓친 전례가 있다."""
+
+    def _write(self, tmp_path, body):
+        p = tmp_path / "r.xml"
+        p.write_text(body)
+        return p
+
+    def test_reads_skipped_count(self, tmp_path):
+        p = self._write(tmp_path, '<testsuites><testsuite tests="3" skipped="2"/></testsuites>')
+        assert _BAT_DB._skipped_from_junit(p) == 2
+
+    def test_zero_collected_is_none_not_zero(self, tmp_path):
+        """probe 오지정(수집 0)은 "안 잡힌다" 가 아니라 "못 물었다" 다."""
+        p = self._write(tmp_path, '<testsuites><testsuite tests="0" skipped="0"/></testsuites>')
+        assert _BAT_DB._skipped_from_junit(p) is None
+
+    def test_broken_or_missing_xml_is_none(self, tmp_path):
+        assert _BAT_DB._skipped_from_junit(tmp_path / "nope.xml") is None
+        assert _BAT_DB._skipped_from_junit(self._write(tmp_path, "<not-xml")) is None
+
+    def test_non_numeric_attribute_is_none(self, tmp_path):
+        p = self._write(tmp_path, '<testsuites><testsuite tests="3" skipped="x"/></testsuites>')
+        assert _BAT_DB._skipped_from_junit(p) is None

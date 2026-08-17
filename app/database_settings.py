@@ -114,6 +114,18 @@ class InvalidDbWorkloadProfile(RuntimeError):
     """`DB_WORKLOAD_PROFILE` 값이 허용된 profile 이 아니다 — 조용히 넘기지 않는다."""
 
 
+class UnvalidatedDbWorkloadProfile(InvalidDbWorkloadProfile):
+    """⛔ **검증을 거치지 않은 profile 이 `engine_kwargs` 까지 왔다.**
+
+    정상 경로에서는 도달하지 않는다(호출자는 언제나 `resolve_profile*` 을 통과한 값을 준다).
+    별 클래스인 이유는 진단이 아니라 **판정**이다: 검증을 우회한 결함을 심었을 때 방어층이
+    같은 예외를 던지면, 테스트가 "검증이 죽였다" 와 "방어층이 죽였다" 를 구분하지 못해
+    변이가 **엉뚱한 이유로** KILLED 로 보인다(실측: 7개 중 6개가 그랬다).
+
+    `InvalidDbWorkloadProfile` 을 상속하므로 기존 `except` 는 그대로 동작한다.
+    """
+
+
 def resolve_profile(raw: str | None) -> str:
     """env 원문을 profile 로 판정한다. **미지정만** 기본값이고 나머지는 전부 실패다.
 
@@ -153,9 +165,11 @@ def engine_kwargs(url: str, profile: str) -> dict[str, Any]:
        그래서 backend 분기가 먼저다.
     """
     if profile not in PROFILES:
-        # 방어층 — 정상 경로는 resolve_profile 을 이미 통과했다. 여기서 KeyError 로 죽으면
-        # 원인이 안 보이므로 같은 예외로 모은다.
-        raise InvalidDbWorkloadProfile(f"알 수 없는 profile: {profile!r}")
+        # 방어층 — 정상 경로는 resolve_profile 을 이미 통과했다. **하위클래스**로 던져
+        # "검증이 막았다" 와 구분 가능하게 한다(그 구분이 없으면 검증 우회 변이가 방어층
+        # 덕분에 죽어 놓고 검증이 잡은 것처럼 보인다).
+        raise UnvalidatedDbWorkloadProfile(
+            f"검증을 거치지 않은 profile 이 engine_kwargs 에 도달했다: {profile!r}")
 
     if is_sqlite_url(url):
         # SQLite 는 statement_timeout / connect_timeout 개념이 없다. profile 은 검증만 되고

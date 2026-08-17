@@ -10,6 +10,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -21,6 +22,19 @@ class TestProfileResolution(unittest.TestCase):
     def test_absent_means_online(self):
         self.assertEqual(ds.resolve_profile(None), ds.ONLINE)
         self.assertEqual(ds.resolve_profile_from_env({}), ds.ONLINE)
+
+    def test_an_injected_mapping_wins_over_os_environ(self):
+        """⛔ 초판은 깨끗한 환경에서만 돌아 **항상 참**이었다.
+
+        `env = environ or os.environ` (전형적 falsy 버그 — 빈 매핑이 실제 환경으로 폴백)은
+        부모에 값이 **있을 때만** 드러난다. 그런데 online 은 이 변수의 *부재*로 결정되므로
+        (운영 `.env` 실측 0건) 실제 환경에서는 영원히 안 드러난다. 그래서 반대로 세팅한다.
+        """
+        with mock.patch.dict(os.environ, {ds.ENV_VAR: ds.MAINTENANCE}):
+            self.assertEqual(ds.resolve_profile_from_env({}), ds.ONLINE,
+                             "주입한 빈 매핑이 os.environ 으로 폴백했다")
+            self.assertEqual(ds.resolve_profile_from_env(), ds.MAINTENANCE,
+                             "미주입일 때는 os.environ 을 봐야 한다")
 
     def test_exact_values_are_accepted(self):
         self.assertEqual(ds.resolve_profile("online"), ds.ONLINE)
@@ -73,7 +87,12 @@ class TestBackendDiscrimination(unittest.TestCase):
 
 class TestEngineKwargs(unittest.TestCase):
     def test_sqlite_gets_no_postgres_only_kwargs(self):
-        """PG 전용 인자가 SQLite 로 새면 **연결하는 순간** TypeError 다(로컬 전멸)."""
+        """⛔ 이 `assertEqual` **완전일치를 부분검사로 완화하지 마라.**
+
+        `pool_size` 누수는 연결 시험으로 **안 잡힌다** — `SingletonThreadPool` 이 조용히
+        받는다(실측). 그걸 잡는 지점이 이 완전일치다. 반대로 `engine_kwargs` 를 **우회한**
+        하드코딩에는 실명하며, 그건 `tests/test_pg_engine_binding.py` 의 subprocess 시험이 문다.
+        """
         for profile in ds.PROFILES:
             with self.subTest(profile=profile):
                 kwargs = ds.engine_kwargs("sqlite:///:memory:", profile)
@@ -112,9 +131,18 @@ class TestEngineKwargs(unittest.TestCase):
                 self.assertGreater(ds.POOL_TIMEOUT_SECONDS[profile], 0)
                 self.assertGreater(ds.CONNECT_TIMEOUT_SECONDS[profile], 0)
 
-    def test_unknown_profile_raises_the_same_error_type(self):
-        with self.assertRaises(ds.InvalidDbWorkloadProfile):
+    def test_the_defense_layer_raises_a_distinguishable_subclass(self):
+        """⛔ 하위클래스가 사라지면 검증-우회 변이가 **방어층 덕분에** 죽으면서 검증이 잡은
+        것처럼 보인다. 계열(`InvalidDbWorkloadProfile`)은 유지해야 기존 except 가 산다."""
+        with self.assertRaises(ds.UnvalidatedDbWorkloadProfile) as ctx:
             ds.engine_kwargs("postgresql+psycopg://u@h/d", "turbo")
+        self.assertIsInstance(ctx.exception, ds.InvalidDbWorkloadProfile)
+
+    def test_resolve_profile_does_not_raise_the_defense_subclass(self):
+        """두 층이 **다른** 예외를 던져야 구분이 성립한다."""
+        with self.assertRaises(ds.InvalidDbWorkloadProfile) as ctx:
+            ds.resolve_profile("maintenence")
+        self.assertNotIsInstance(ctx.exception, ds.UnvalidatedDbWorkloadProfile)
 
 
 class TestValidationPrecedesEngineCreation(unittest.TestCase):
@@ -124,10 +152,12 @@ class TestValidationPrecedesEngineCreation(unittest.TestCase):
        계약(`TestInvalidProfileIsAStartupFailure`)은 **그대로 통과한다**. 그래서 주장하는 대상
        자체가 소스 순서인 이 경우에 한해 소스 순서를 본다.
 
-    ⚠️ 동시에, 이건 **구조 검사라서 약하다**. `create_engine` 앞에 `resolve_profile_from_env()`
-       호출이 있다는 사실만으론 그 결과가 실제로 쓰인다는 보장이 없다 — 그 부분은
-       `S2-7`(검증 우회) 변이와 배선 시험이 따로 문다. 이 테스트 하나로 "순서가 잠겼다" 고
-       말하지 않는다.
+    ⚠️ **이 판정식이 잠그는 것은 실행 순서가 아니라 진실원 단일성이다.** 호출을 위쪽 함수
+       본문으로 hoist 하면 lineno 비교는 참인데 실행 순서는 뒤집힌다(외부 검토 + codex 독립
+       재현). 실행 순서의 소유자는
+       `tests/test_pg_engine_binding.py::TestValidationPrecedesEngineCreationAtRuntime` 이고,
+       그 계약은 `S2-11` 이 문다. 여기서 잠그는 것은 "판정 호출 1개 · create_engine 1개" 이며
+       그건 런타임 판정식이 못 잡는다(호출 2개짜리 사본에서 AST 만 red 였다).
     """
 
     def _lineno_of(self, pred):
@@ -170,15 +200,22 @@ class TestModuleIsSelfContained(unittest.TestCase):
                 imported.update(f"{node.module}.{a.name}" for a in node.names)
         self.assertNotIn("app.config", imported, f"부작용 있는 모듈을 끌어왔다: {sorted(imported)}")
 
-    def test_it_loads_standalone_without_the_app_package(self):
-        """⛔ AST 검사만으론 부족하다 — 간접 체인으로도 끌려온다. **패키지 없이** 실제로 로드해 본다.
+    def test_it_does_not_pull_app_into_sys_modules(self):
+        """⛔ AST 검사만으론 부족하다 — 간접 체인으로도 끌려온다. 실제로 로드해서 본다.
 
-        `app.*` 가 `sys.modules` 에 하나도 안 들어와야 자기완결이다.
+        ⚠️ 구 이름은 "패키지 **없이** 로드한다" 고 광고했는데 **거짓이었다**: `python -c` 는
+           `sys.path[0]=''`(cwd) 이고 cwd 가 REPO 라 `app` 은 그대로 import 가능하다. 그래서
+           함께 있던 `PYTHONPATH` 제거 줄은 아무 일도 하지 않았다(no-op, 실측).
+           cwd 를 REPO 밖으로 옮기는 것도 기각한다 — 실패 경로에서 `assert not leaked` 가
+           도달 불가해지고(ModuleNotFoundError 선행), `PYTHONPATH=/app` 을 심는 실 스크립트가
+           있어 격리가 조용히 증발할 수 있다.
+
+        실제 계약은 하나다: **`sys.modules` 에 `app.*` 가 들어오지 않는다.**
         """
         code = (
             "import importlib.util, sys\n"
             "spec = importlib.util.spec_from_file_location('_ds_standalone',\n"
-            "    'app/database_settings.py')\n"
+            f"    {str(REPO / 'app' / 'database_settings.py')!r})\n"
             "mod = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(mod)\n"
             "leaked = sorted(m for m in sys.modules if m == 'app' or m.startswith('app.'))\n"
@@ -187,9 +224,8 @@ class TestModuleIsSelfContained(unittest.TestCase):
             "assert mod.engine_kwargs('sqlite:///:memory:', 'online')\n"
             "print('STANDALONE=1')\n"
         )
-        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                           cwd=REPO, env=env, timeout=60)
+                           cwd=REPO, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
         self.assertIn("STANDALONE=1", r.stdout)
 
