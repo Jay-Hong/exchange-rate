@@ -325,10 +325,16 @@ def repair_all(
         else:
             apply_insert(target, row)
 
+    after: dict[date, Optional[dict]] = {}
     for target in REPAIR_ALLOWLIST:
-        verify_post_state(target, reread(target.date_kst), fetched[target.date_kst])
+        row = reread(target.date_kst)
+        verify_post_state(target, row, fetched[target.date_kst])
+        after[target.date_kst] = row
+    post_fingerprint = preimage_fingerprint(after)
 
     return {"mode": "write", "preimage_sha": actual_sha,
+            "postimage_sha": preimage_sha(post_fingerprint),
+            "postimage": post_fingerprint,
             "preimage": fingerprint, "applied": plan}
 
 
@@ -483,6 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="preimage 산출물 경로. 지정 시 **되돌리기 모드** — "
                         "그 파일의 전 컬럼으로 복원(또는 우리가 넣은 행 삭제)하고, "
                         "복원 후 지문이 원래 sha 와 같은지 확인한다")
+    p.add_argument("--revert-without-receipt", action="store_true",
+                   help="교정 영수증(.committed) 없이 되돌린다. 지문 대조 대신 "
+                        "contract_code 표식만 확인하는 **약한** 경로")
     p.add_argument("--snapshot-confirmed",
                    help="production write 시 필수. RDS manual snapshot 식별자. "
                         "⚠️ 이 도구는 AWS에 접근하지 않아 **존재를 증명하지 못한다** — "
@@ -560,6 +569,7 @@ def apply_revert_plan(
     *,
     plan: list[dict],
     expected_sha: str,
+    expected_postimage_sha: Optional[str],
     lock_and_read: Callable[[date], Optional[dict]],
     restore: Callable[[date, dict], int],
     delete: Callable[[date], int],
@@ -577,8 +587,38 @@ def apply_revert_plan(
         raise RepairAbort("빈 revert 계획")
 
     targets = [date.fromisoformat(item["date_kst"]) for item in plan]
-    for target_date in targets:              # 잠금 먼저 (교정과 같은 순서)
-        lock_and_read(target_date)
+    # 잠금 먼저 (교정과 같은 순서). 반환값을 **버리지 않는다** — 지금 되돌리려는
+    # 것이 정말 우리가 만든 상태인지 확인해야 한다.
+    current = {t: lock_and_read(t) for t in targets}
+
+    if expected_postimage_sha is None:
+        raise RepairAbort(
+            "postimage sha 가 없다 — 무엇을 되돌리는지 확인할 수 없다. "
+            "교정 영수증(.committed)이 있어야 하고, 없으면 "
+            "--revert-without-receipt 로 명시해야 한다")
+    if expected_postimage_sha != _NO_RECEIPT_SENTINEL:
+        got = preimage_sha(preimage_fingerprint(current))
+        if got != expected_postimage_sha:
+            raise RepairAbort(
+                f"현재 상태가 우리 postimage 가 아니다: {got[:16]}… != "
+                f"{expected_postimage_sha[:16]}… — 교정 이후 다른 무언가가 그 행을 "
+                "바꿨다. 그대로 되돌리면 그 변경까지 덮는다")
+    else:
+        # 영수증 없이 진행하는 경로 — 최소한 "우리 계약이 찍혀 있는가"는 본다.
+        for item in plan:
+            target_date = date.fromisoformat(item["date_kst"])
+            row = current[target_date]
+            target = resolve_target(target_date)
+            if row is None:
+                if item["action"] == "delete":
+                    raise RepairAbort(
+                        f"{target_date}: 삭제 대상 행이 이미 없다")
+                continue
+            if row.get("contract_code") != target.target_contract:
+                raise RepairAbort(
+                    f"{target_date}: 현재 contract_code="
+                    f"{row.get('contract_code')!r} != 교정 결과 "
+                    f"{target.target_contract!r} — 우리 상태가 아니다")
 
     for item in plan:
         target_date = date.fromisoformat(item["date_kst"])
@@ -649,6 +689,9 @@ def write_commit_receipt(preimage_path: pathlib.Path, result: dict) -> None:
     payload = json.dumps(
         {"committed_at": datetime.now(timezone.utc).isoformat(),
          "preimage_sha256": result["preimage_sha"],
+         # 되돌리기의 사전조건 — "지금 상태가 우리가 만든 그 상태인가".
+         "postimage_sha256": result.get("postimage_sha"),
+         "postimage": result.get("postimage"),
          "applied": result["applied"]},
         ensure_ascii=False, indent=2, default=str) + "\n"
     try:
@@ -691,6 +734,41 @@ def load_preimage_artifact(path: pathlib.Path) -> tuple[dict, str]:
     if not isinstance(rows, dict):
         raise RepairAbort("preimage 본문이 object 가 아니다")
     return rows, sha
+
+
+# 영수증 없이 진행할 때 쓰는 표식 — "지문 대조 불가, 계약 표식만 본다".
+_NO_RECEIPT_SENTINEL = "__no_receipt__"
+
+
+def load_postimage_sha(preimage_path: pathlib.Path, *,
+                       allow_missing: bool) -> str:
+    """교정 영수증에서 postimage sha 를 읽는다.
+
+    영수증은 commit **후**에 쓰이므로, 있으면 "그 교정이 실제로 났고 그 결과가
+    이것"이라는 뜻이다. 없으면(= in-doubt 로 끝났거나 영수증 기록이 실패했으면)
+    지문 대조를 할 수 없으므로 **명시적 플래그**를 요구한다.
+    """
+    path = preimage_path.with_suffix(preimage_path.suffix + ".committed")
+    if not path.is_file():
+        if not allow_missing:
+            raise RepairAbort(
+                f"교정 영수증이 없다: {path} — 무엇을 되돌리는지 지문으로 확인할 수 "
+                "없다. 그래도 진행하려면 --revert-without-receipt")
+        return _NO_RECEIPT_SENTINEL
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RepairAbort(f"영수증 읽기 실패 {path}: {exc}") from exc
+    fingerprint = payload.get("postimage")
+    sha = payload.get("postimage_sha256")
+    if not isinstance(fingerprint, str) or not isinstance(sha, str):
+        if not allow_missing:
+            raise RepairAbort(
+                "영수증에 postimage 가 없다 (구 형식) — --revert-without-receipt 필요")
+        return _NO_RECEIPT_SENTINEL
+    if preimage_sha(fingerprint) != sha:
+        raise RepairAbort("영수증의 postimage sha 가 본문과 맞지 않는다 — 손상/변조")
+    return sha
 
 
 def _deserialize_value(column: str, raw):
@@ -753,7 +831,10 @@ def build_revert_adapters(db):
 
 def _run_revert(args, SessionLocal) -> int:
     """`--revert-from` 실행 경로. 교정과 같은 3단계 보고 계약을 쓴다."""
-    rows, sha = load_preimage_artifact(pathlib.Path(args.revert_from))
+    preimage_path = pathlib.Path(args.revert_from)
+    rows, sha = load_preimage_artifact(preimage_path)
+    post_sha = load_postimage_sha(preimage_path,
+                                  allow_missing=args.revert_without_receipt)
     plan = build_revert_plan(rows)
     print(json.dumps({"mode": "revert-plan", "preimage_sha256": sha,
                       "plan": [{k: v for k, v in item.items() if k != "values"}
@@ -764,13 +845,22 @@ def _run_revert(args, SessionLocal) -> int:
     phase = PHASE_PRE_COMMIT
     try:
         adapters = build_revert_adapters(db)
-        result = apply_revert_plan(plan=plan, expected_sha=sha, **adapters)
+        result = apply_revert_plan(plan=plan, expected_sha=sha,
+                                   expected_postimage_sha=post_sha, **adapters)
         phase = PHASE_COMMITTING
         db.commit()
         phase = PHASE_COMMITTED
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
     except Exception as exc:
+        # 정방향과 **같은** 3단계 계약. 한쪽만 고치면 반대 방향에서 거짓 보고가 난다.
+        if phase == PHASE_COMMITTED:
+            print(json.dumps(
+                {"status": COMMITTED_RECEIPT_UNVERIFIED, "error": str(exc),
+                 "note": "revert 는 **완료**됐다. 출력만 실패. "
+                         "DB 를 preimage 와 대조해 확인할 것."},
+                ensure_ascii=False, default=str), file=sys.stderr)
+            return 2
         if phase == PHASE_COMMITTING:
             print(json.dumps(
                 {"status": COMMIT_OUTCOME_UNVERIFIED, "error": str(exc),

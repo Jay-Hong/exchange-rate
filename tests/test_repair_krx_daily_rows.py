@@ -682,7 +682,8 @@ class TestRevertPath(unittest.TestCase):
         pre = {FEB: _stored(contract="A75602", metadata={"x": 1}), AUG: None}
         original_sha = R.preimage_sha(R.preimage_fingerprint(pre))
 
-        state = {FEB: _stored(contract="A75603", metadata={"y": 2}), AUG: _stored(d=AUG)}
+        state = {FEB: _stored(contract="A75603", metadata={"y": 2}),
+                 AUG: _stored(d=AUG, contract="A75609")}
         applied = []
 
         def restore(target_date, values):
@@ -700,6 +701,7 @@ class TestRevertPath(unittest.TestCase):
                                                {k: r[k] for k in R.PREIMAGE_COLUMNS})
                                       for d, r in pre.items()}),
             expected_sha=original_sha,
+            expected_postimage_sha=R._NO_RECEIPT_SENTINEL,
             lock_and_read=lambda d: state[d],
             restore=restore, delete=delete,
             reread=lambda d: state[d])
@@ -710,7 +712,8 @@ class TestRevertPath(unittest.TestCase):
         """복원 결과가 원래 지문과 다르면 중단(caller 가 rollback)."""
         pre = {FEB: _stored(contract="A75602"), AUG: None}
         original_sha = R.preimage_sha(R.preimage_fingerprint(pre))
-        state = {FEB: _stored(contract="A75603"), AUG: _stored(d=AUG)}
+        state = {FEB: _stored(contract="A75603"),
+                 AUG: _stored(d=AUG, contract="A75609")}
 
         def sloppy_restore(target_date, values):
             bad = dict(values)
@@ -725,16 +728,97 @@ class TestRevertPath(unittest.TestCase):
                               {k: r[k] for k in R.PREIMAGE_COLUMNS})
                      for d, r in pre.items()}),
                 expected_sha=original_sha,
+                expected_postimage_sha=R._NO_RECEIPT_SENTINEL,
                 lock_and_read=lambda d: state[d],
                 restore=sloppy_restore,
                 delete=lambda d: (state.__setitem__(d, None), 1)[1],
                 reread=lambda d: state[d])
         self.assertIn("지문", str(ctx.exception))
 
+    def test_revert_requires_current_state_to_be_our_postimage(self):
+        """⭐ **우리가 만든 상태만** 되돌린다.
+
+        교정 후 다른 무언가가 그 행을 바꿨다면, 되돌리기는 그 변경까지 덮거나
+        지운다. `lock_and_read` 결과를 버리고 무조건 UPDATE/DELETE 하면 그렇게
+        된다 (외부 검토 지적). 현재 지문이 **교정 직후 지문(postimage)** 과
+        같을 때만 진행한다.
+        """
+        pre = {FEB: _stored(contract="A75602"), AUG: None}
+        pre_sha = R.preimage_sha(R.preimage_fingerprint(pre))
+        post = {FEB: _stored(contract="A75603"), AUG: _stored(d=AUG, contract="A75609")}
+        post_sha = R.preimage_sha(R.preimage_fingerprint(post))
+
+        # 제3자가 2/13 을 또 바꿔 놓은 상태
+        meddled = {FEB: _stored(contract="A75699"), AUG: post[AUG]}
+        applied = []
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R.apply_revert_plan(
+                plan=R.build_revert_plan(
+                    {str(d): (None if r is None else
+                              {k: r[k] for k in R.PREIMAGE_COLUMNS})
+                     for d, r in pre.items()}),
+                expected_sha=pre_sha, expected_postimage_sha=post_sha,
+                lock_and_read=lambda d: meddled[d],
+                restore=lambda d, v: applied.append(("r", d)) or 1,
+                delete=lambda d: applied.append(("d", d)) or 1,
+                reread=lambda d: meddled[d])
+        self.assertIn("postimage", str(ctx.exception))
+        self.assertEqual(applied, [], "사전조건 위반인데 되돌림이 실행됐다")
+
+    def test_revert_proceeds_when_postimage_matches(self):
+        pre = {FEB: _stored(contract="A75602"), AUG: None}
+        pre_sha = R.preimage_sha(R.preimage_fingerprint(pre))
+        post = {FEB: _stored(contract="A75603"), AUG: _stored(d=AUG, contract="A75609")}
+        post_sha = R.preimage_sha(R.preimage_fingerprint(post))
+        state = dict(post)
+
+        def restore(d, values):
+            state[d] = {k: R._deserialize_value(k, v) for k, v in values.items()}
+            return 1
+
+        result = R.apply_revert_plan(
+            plan=R.build_revert_plan(
+                {str(d): (None if r is None else
+                          {k: r[k] for k in R.PREIMAGE_COLUMNS})
+                 for d, r in pre.items()}),
+            expected_sha=pre_sha, expected_postimage_sha=post_sha,
+            lock_and_read=lambda d: state[d],
+            restore=restore,
+            delete=lambda d: (state.__setitem__(d, None), 1)[1],
+            reread=lambda d: state[d])
+        self.assertEqual(result["restored_preimage_sha"], pre_sha)
+
+    def test_revert_commit_then_failure_is_not_abort(self):
+        """⭐ 정방향에서 고친 3단계 보고를 **revert 에도** 적용했는가.
+
+        전 판은 `PHASE_COMMITTING` 만 다루고 `PHASE_COMMITTED` 를 빠뜨려,
+        commit 성공 뒤 출력이 실패하면 rollback + "aborted" 로 거짓 보고했다
+        (외부 검토 지적 — 같은 결함을 방향만 바꿔 반복했다).
+        """
+        src = (REPO_ROOT / "scripts" / "repair_krx_daily_rows.py").read_text()
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_run_revert")
+        handlers = [n for n in ast.walk(fn) if isinstance(n, ast.ExceptHandler)]
+        body = "\n".join(ast.unparse(h) for h in handlers)
+        self.assertIn("PHASE_COMMITTED", body,
+                      "_run_revert 가 commit 완료 단계를 구분하지 않는다")
+        self.assertIn("COMMITTED_RECEIPT_UNVERIFIED", body)
+        branch = next(
+            (n for h in handlers for n in ast.walk(h)
+             if isinstance(n, ast.If) and "PHASE_COMMITTED" in ast.unparse(n.test)),
+            None)
+        self.assertIsNotNone(branch)
+        self.assertFalse(
+            any(isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "rollback"
+                for n in ast.walk(branch)),
+            "commit 완료 뒤에 rollback 을 부른다")
+
     def test_revert_requires_rowcount_one(self):
         pre = {FEB: _stored(contract="A75602"), AUG: None}
         sha = R.preimage_sha(R.preimage_fingerprint(pre))
-        state = {FEB: _stored(contract="A75603"), AUG: _stored(d=AUG)}
+        state = {FEB: _stored(contract="A75603"),
+                 AUG: _stored(d=AUG, contract="A75609")}
         with self.assertRaises(R.RepairAbort) as ctx:
             R.apply_revert_plan(
                 plan=R.build_revert_plan(
@@ -742,6 +826,7 @@ class TestRevertPath(unittest.TestCase):
                               {k: r[k] for k in R.PREIMAGE_COLUMNS})
                      for d, r in pre.items()}),
                 expected_sha=sha,
+                expected_postimage_sha=R._NO_RECEIPT_SENTINEL,
                 lock_and_read=lambda d: state[d],
                 restore=lambda d, v: 0,          # 0행 — 대상이 바뀌었다
                 delete=lambda d: 1,
@@ -914,8 +999,9 @@ class TestRepairAgainstRealPostgres(unittest.TestCase):
         db2 = self.Session()
         try:
             radapters = R.build_revert_adapters(db2)
-            rres = R.apply_revert_plan(plan=plan, expected_sha=captured["sha"],
-                                       **radapters)
+            rres = R.apply_revert_plan(
+                plan=plan, expected_sha=captured["sha"],
+                expected_postimage_sha=result["postimage_sha"], **radapters)
             db2.commit()
         finally:
             db2.close()
@@ -933,11 +1019,14 @@ class TestRepairAgainstRealPostgres(unittest.TestCase):
             radapters = R.build_revert_adapters(db)
             plan = [{"date_kst": str(AUG), "action": "delete"}]
             with self.assertRaises(R.RepairAbort) as ctx:
-                R.apply_revert_plan(plan=plan, expected_sha="0" * 64, **radapters)
+                R.apply_revert_plan(plan=plan, expected_sha="0" * 64,
+                                    expected_postimage_sha=R._NO_RECEIPT_SENTINEL,
+                                    **radapters)
             db.rollback()
         finally:
             db.close()
-        self.assertIn("rowcount", str(ctx.exception))
+        # 표식 단계가 rowcount 보다 **먼저** 잡는다 — 더 이른 방어가 맞다
+        self.assertIn("이미 없다", str(ctx.exception))
 
     def test_isolated_schema_not_public(self):
         """격리가 실제로 걸렸는가 — public에 테이블을 만들지 않았다."""

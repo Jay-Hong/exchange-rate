@@ -328,6 +328,7 @@ class Baseline:
     expected_revision: str
     expected_source_sha256: str
     service_baseline: Optional[dict] = None
+    usdt_baseline: Optional[dict] = None
 
     @property
     def expected_contract(self) -> ContractTuple:
@@ -868,6 +869,12 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
     if service != PASS:
         reasons.append(service_detail)
 
+    usdt, usdt_detail = await _verify_usdt_liveness(
+        adapters, baseline, new_identity.started_at if new_identity else None,
+        artifact)
+    if usdt != PASS:
+        reasons.append(usdt_detail)
+
     # 모든 축을 마친 **뒤** identity를 다시 읽는다. 축 검사에 걸린 시간 동안
     # 재시작이 있었다면 앞선 관측이 통째로 다른 프로세스의 것이 된다.
     final_identity, final_detail = await _verify_final_identity(
@@ -876,7 +883,7 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
         reasons.append(final_detail)
 
     final = worst(sample_result, continuity, die.status, logs, deployed, health,
-                  service, final_identity)
+                  service, usdt, final_identity)
     return _finish(artifact, final, reasons, samples=samples)
 
 
@@ -1233,6 +1240,101 @@ def evaluate_service_regression(before: dict, after: dict, now: datetime
     return verdict, reasons, detail
 
 
+# 배포 직전 이 시간 안에 write 가 있었으면 "그때 살아 있었다"고 본다.
+USDT_ACTIVE_BEFORE_SECONDS = 900.0
+
+
+async def snapshot_usdt_liveness(adapters: Adapters) -> dict:
+    """USDT 소스별 마지막 direct write 성공 시각."""
+    payload = await adapters.admin_fetch("/admin/api/usdt-redis-stats")
+    per_source = payload.get("per_source")
+    if not isinstance(per_source, dict):
+        raise CollectorError("usdt-redis-stats 에 per_source 가 없다")
+    return {str(src): (stats or {}).get("last_direct_write_success_at")
+            for src, stats in per_source.items()
+            if isinstance(stats, dict)}
+
+
+def evaluate_usdt_liveness(before: Optional[dict], after: dict,
+                           new_started_at: Optional[str], snapshot_at: datetime
+                           ) -> tuple[str, list[str], dict]:
+    """재시작 **이후** write 가 재개됐는가.
+
+    `--force-recreate` 는 KRX 만 내리지 않는다 — 24/7 USDT WS 도 함께 재시작한다.
+    그런데 `/api/rates` 는 legacy 정책상 USDT 를 **제외**하므로(Z-2d) FX 축이
+    이걸 못 본다 (외부 검토 지적).
+
+    USDT 는 쉬는 시간이 없으므로 판정이 FX 보다 강할 수 있다: 배포 전에 살아
+    있던 소스가 **재시작 후 관측 창 내내 write 0** 이면 모호하지 않은 실패다.
+    배포 전부터 죽어 있던 소스는 이 배포의 책임이 아니므로 판정하지 않는다.
+
+    ⚠️ "배포 전에 살아 있었나"는 **스냅샷 시각(T0) 기준**으로 잰다. 평가 시각
+    기준으로 재면 관측 창 길이(`--observe-seconds`)를 바꿀 때마다 같은 데이터의
+    판정이 달라진다 — 게이트가 자기 설정에 흔들리면 안 된다.
+    """
+    if not new_started_at:
+        return UNVERIFIED, ["새 컨테이너 StartedAt 미취득 — USDT 재개 판정 불가"], {}
+    try:
+        started = datetime.fromisoformat(str(new_started_at).replace("Z", "+00:00"))
+    except ValueError:
+        return UNVERIFIED, [f"StartedAt 파싱 실패: {new_started_at}"], {}
+
+    reasons: list[str] = []
+    detail: dict[str, dict] = {}
+    for source, after_iso in sorted(after.items()):
+        was_active = True
+        if before is not None:
+            before_iso = before.get(source)
+            if not before_iso:
+                was_active = False
+            else:
+                try:
+                    before_at = datetime.fromisoformat(str(before_iso))
+                    was_active = ((snapshot_at - before_at).total_seconds()
+                                  <= USDT_ACTIVE_BEFORE_SECONDS)
+                except ValueError:
+                    was_active = False
+        record = {"before": (before or {}).get(source), "after": after_iso,
+                  "was_active_before": was_active}
+        if not was_active:
+            record["verdict"] = OBSERVED
+            record["note"] = "배포 전부터 비활성 — 이 배포의 책임 아님"
+            detail[source] = record
+            continue
+        resumed = False
+        if after_iso:
+            try:
+                resumed = datetime.fromisoformat(str(after_iso)) > started
+            except ValueError:
+                resumed = False
+        record["resumed_after_restart"] = resumed
+        record["verdict"] = PASS if resumed else FAILED
+        detail[source] = record
+        if not resumed:
+            reasons.append(
+                f"{source}: 재시작 후 direct write 0 (last={after_iso}) "
+                "— 24/7 소스가 관측 창 내내 조용하다")
+    return (FAILED if reasons else PASS), reasons, detail
+
+
+async def _verify_usdt_liveness(adapters: Adapters, baseline: Baseline,
+                                new_started_at: Optional[str],
+                                artifact: EvidenceArtifact) -> tuple[str, str]:
+    try:
+        after = await snapshot_usdt_liveness(adapters)
+    except CollectorError as exc:
+        artifact.append("usdt", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        return UNVERIFIED, f"usdt-redis-stats 조회 실패: {exc}"
+    verdict, reasons, detail = evaluate_usdt_liveness(
+        baseline.usdt_baseline, after, new_started_at,
+        datetime.fromisoformat(baseline.t0_iso))
+    artifact.append("usdt", {"verdict": verdict, "per_source": detail,
+                             "new_started_at": new_started_at})
+    if verdict != PASS:
+        return verdict, "; ".join(reasons) or "USDT 판정 불가"
+    return PASS, f"USDT 재개 확인 ({len(detail)} source)"
+
+
 async def _collect_service_evidence(adapters: Adapters, baseline: Baseline,
                                     artifact: EvidenceArtifact,
                                     now: datetime) -> tuple[str, str]:
@@ -1509,6 +1611,11 @@ async def _prepare(args) -> int:
     except CollectorError as exc:
         print(f"⚠️ 서비스 baseline 스냅샷 실패: {exc}", file=sys.stderr)
         service_baseline = None
+    try:
+        usdt_baseline = await snapshot_usdt_liveness(production_adapters(target))
+    except CollectorError as exc:
+        print(f"⚠️ USDT baseline 스냅샷 실패: {exc}", file=sys.stderr)
+        usdt_baseline = None
 
     baseline = Baseline(
         t0_iso=_utc_now_iso(),
@@ -1522,6 +1629,7 @@ async def _prepare(args) -> int:
         expected_revision=revision,
         expected_source_sha256=source_sha,
         service_baseline=service_baseline,
+        usdt_baseline=usdt_baseline,
     )
     path = pathlib.Path(args.baseline)
     payload = (baseline.to_json() + "\n").encode("utf-8")

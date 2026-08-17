@@ -44,6 +44,8 @@ def _baseline(**over) -> V.Baseline:
         expected_revision="a" * 40,
         expected_source_sha256=_FP,
         service_baseline={"kb.usd-krw": _T0, "nh.usd-krw": _T0},
+        usdt_baseline={"upbit": "2026-08-17T14:59:00+09:00",
+                       "bithumb": "2026-08-17T14:59:30+09:00"},
     )
     base.update(over)
     return V.Baseline(**base)
@@ -875,7 +877,8 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
               new_image="sha256:bbb", health_status="healthy",
               probe=None, source_fp=_FP, final_identity_raw=None,
               rates_count=30, rates_updated_at="2026-08-17T06:06:00+00:00",
-              rates_error=None, retained_covers_t0=True, rates_by_source=None):
+              rates_error=None, retained_covers_t0=True, rates_by_source=None,
+              usdt_after=None, usdt_error=None):
     """scripted 어댑터. `statuses`의 각 원소는 dict(payload) 또는 예외.
 
     실제 게이트 축을 전부 덮는다 — 하나라도 빠지면 orchestration이 그 축에서
@@ -906,6 +909,14 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
             }
         if path == "/admin/api/dashboard":
             return {"broadcast": {"success_rate": 100.0}, "errors_1h": 0}
+        if path == "/admin/api/usdt-redis-stats":
+            if usdt_error is not None:
+                raise usdt_error
+            after = (usdt_after if usdt_after is not None
+                     else {"upbit": "2026-08-17T15:06:00+09:00"})
+            return {"per_source": {
+                src: {"last_direct_write_success_at": ts}
+                for src, ts in after.items()}}
         item = queue.pop(0) if queue else queue_last[0]
         queue_last[0] = item
         if isinstance(item, Exception):
@@ -1188,6 +1199,36 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(per["sc.usd-krw"]["advanced"])
         self.assertEqual(per["sc.usd-krw"]["verdict"], V.OBSERVED)
         self.assertTrue(per["nh.usd-krw"]["advanced"])
+
+    async def test_usdt_source_dead_after_restart_fails(self):
+        """⭐ `--force-recreate` 는 24/7 USDT WS 도 함께 재시작한다.
+
+        `/api/rates` 는 legacy 정책상 USDT 를 **제외**하므로 FX 축이 못 본다.
+        USDT 는 쉬는 시간이 없으므로 "재시작 후 관측 창 내내 write 0" 은
+        모호하지 않은 실패다 (외부 검토 지적).
+        """
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       usdt_after={"upbit": "2026-08-17T15:06:00+09:00",
+                                   "bithumb": None})       # 재시작 후 write 0
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("bithumb" in r for r in got["reasons"]), got["reasons"])
+
+    async def test_usdt_inactive_before_deploy_is_not_judged(self):
+        """배포 **전에도** 죽어 있던 소스는 이 배포의 책임이 아니다."""
+        base = _baseline(usdt_baseline={"upbit": "2026-08-17T14:59:00+09:00",
+                                        "gopax": "2026-08-10T00:00:00+09:00"})
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       usdt_after={"upbit": "2026-08-17T15:06:00+09:00",
+                                   "gopax": None})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+
+    async def test_usdt_stats_failure_is_unverified(self):
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       usdt_error=V.CollectorError("503"))
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
 
     async def test_key_is_bank_and_currency_not_bank_alone(self):
         """⭐ 통화 하나가 사라져도 잡아야 한다.
