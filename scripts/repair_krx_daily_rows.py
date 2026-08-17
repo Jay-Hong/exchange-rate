@@ -47,6 +47,26 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Optional
 
+# 프로젝트 루트를 sys.path에 추가 — 리포 관용구
+# (`backfill_krx_openapi_source_daily_rates.py` 등과 동일).
+# ⛔ 이게 없으면 문서에 적힌 실행 형태 `python scripts/repair_krx_daily_rows.py …`가
+#    `ModuleNotFoundError: app`으로 죽는다. `python script.py`는 **스크립트 디렉터리**를
+#    sys.path[0]에 넣지 CWD를 넣지 않기 때문이다. 진입점 계약은 스크립트가 진다.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+# KRX 공식 API 인증 env. **정본과 같은 이름이어야 한다** —
+# `backfill_krx_openapi_source_daily_rates.KRX_OPENAPI_AUTH_KEY_ENV`.
+# 전에는 존재하지 않는 `KRX_AUTH_KEY`를 박아 두어, 운영자가 정본 이름으로 넣은
+# 값을 도구가 못 보고 "미설정"으로 중단했다.
+#
+# 정본 모듈을 import해 가져오지 **않는** 이유: 그 모듈은 `app.*` 체인을 끌어와
+# 무겁고, 무엇보다 **그 모듈이 스스로 `sys.path`를 넣는 부작용**에 이 파일의
+# 진입점이 얹히게 된다 — 위 `sys.path` 한 줄이 중복이 되어 지워도 아무 테스트도
+# 깨지지 않았다(변이 검사 실측). 진입점 계약은 이 파일이 스스로 져야 한다.
+# 리터럴 drift 는 `test_auth_env_name_matches_repo_canonical`이 정본 소스를
+# 파싱해 잠근다.
+AUTH_KEY_ENV = "KRX_OPENAPI_AUTH_KEY"
+
 SOURCE = "krx"
 ASSET = "usd-krw-futures"
 SOURCE_METHOD = "krx_openapi_daily"
@@ -238,6 +258,7 @@ def repair_all(
     reread: Callable[[date], Optional[dict]],
     persist_preimage: Callable[[str, str], None],
     write: bool,
+    expected_preimage_sha: Optional[str] = None,
 ) -> dict:
     """2일자를 **한 단위**로 처리. 예외는 그대로 올려 caller가 rollback한다.
 
@@ -256,6 +277,15 @@ def repair_all(
     """
     preimage = {t.date_kst: lock_and_read(t.date_kst) for t in REPAIR_ALLOWLIST}
     fingerprint = preimage_fingerprint(preimage)
+    actual_sha = preimage_sha(fingerprint)
+
+    # 검토한 상태와 덮어쓸 상태를 **결속**한다. dry-run 이후 누군가 행을 바꾸면
+    # preimage 는 그 사실을 기록만 할 뿐 막지 못한다 — 여기서 막는다.
+    # (리포 관용구 `--expected-rows-count` 의 repair 판)
+    if expected_preimage_sha is not None and expected_preimage_sha != actual_sha:
+        raise RepairAbort(
+            f"preimage sha 불일치: 현재 {actual_sha[:16]}… != 기대 "
+            f"{expected_preimage_sha[:16]}… — dry-run 이후 대상 행이 바뀌었다")
 
     for target in REPAIR_ALLOWLIST:
         check_precondition(target, preimage[target.date_kst])
@@ -272,11 +302,11 @@ def repair_all(
             for t in REPAIR_ALLOWLIST]
 
     if not write:
-        return {"mode": "dry-run", "preimage_sha": preimage_sha(fingerprint),
+        return {"mode": "dry-run", "preimage_sha": actual_sha,
                 "preimage": fingerprint, "planned": plan}
 
     # write 전에 되돌림 기준을 디스크에 못박는다. 실패하면 여기서 멈춘다.
-    persist_preimage(fingerprint, preimage_sha(fingerprint))
+    persist_preimage(fingerprint, actual_sha)
 
     for target in REPAIR_ALLOWLIST:
         row = fetched[target.date_kst]
@@ -292,7 +322,7 @@ def repair_all(
     for target in REPAIR_ALLOWLIST:
         verify_post_state(target, reread(target.date_kst), fetched[target.date_kst])
 
-    return {"mode": "write", "preimage_sha": preimage_sha(fingerprint),
+    return {"mode": "write", "preimage_sha": actual_sha,
             "preimage": fingerprint, "applied": plan}
 
 
@@ -440,12 +470,83 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-production-write", action="store_true")
     p.add_argument("--preimage-out", required=True,
                    help="교정 전 상태를 **write 전에** 기록할 경로 (기존 파일이면 거부)")
+    p.add_argument("--expect-preimage-sha",
+                   help="dry-run이 출력한 preimage_sha. --write 시 필수 — "
+                        "잠금 후 재계산해 다르면 중단(그 사이 행이 바뀐 것)")
+    p.add_argument("--snapshot-confirmed",
+                   help="production write 시 필수. RDS manual snapshot 식별자. "
+                        "⚠️ 이 도구는 AWS에 접근하지 않아 **존재를 증명하지 못한다** — "
+                        "기록과 강제일 뿐이고, 값은 산출물에 남아 되돌릴 때 기준이 된다")
     return p
 
 
-def write_preimage_artifact(path: pathlib.Path, fingerprint: str, sha: str) -> None:
-    """**배타 생성 + fsync**. 이게 되돌림의 유일한 기준이므로 덮어쓰지 않는다."""
-    payload = json.dumps({"preimage_sha256": sha, "preimage": fingerprint},
+def _validate_cli(args) -> None:
+    """모호·위험한 조합을 **한 곳에서** fail-close."""
+    if not args.write:
+        if args.expect_preimage_sha or args.snapshot_confirmed:
+            raise RepairAbort("--expect-preimage-sha / --snapshot-confirmed 는 "
+                              "--write 와 함께만 의미가 있다")
+        return
+    if not args.expect_preimage_sha:
+        raise RepairAbort(
+            "--write 에는 --expect-preimage-sha 가 필요하다 — dry-run 이 검토한 "
+            "상태와 덮어쓸 상태를 결속해야 한다 (dry-run 출력의 preimage_sha)")
+    if len(args.expect_preimage_sha) != 64:
+        raise RepairAbort("--expect-preimage-sha 는 sha256 64자여야 한다")
+    if args.allow_production_write and not args.snapshot_confirmed:
+        raise RepairAbort(
+            "production write 에는 --snapshot-confirmed <RDS snapshot 식별자> 가 "
+            "필요하다 (도구가 존재를 증명하지는 않는다 — 기록·강제)")
+
+
+# ---------------------------------------------------------------------------
+# 되돌리기 — commit 이후의 **실행 경로**
+# ---------------------------------------------------------------------------
+
+def build_revert_plan(preimage: dict) -> list[dict]:
+    """preimage → 정확한 역연산 계획.
+
+    preimage 를 파일로 남기는 것만으로는 되돌릴 수 없다 — 그건 자료일 뿐이고
+    누군가 손으로 SQL 을 짜야 한다(외부 검토 지적). 여기서 계획을 만들고
+    `apply_revert_plan` 이 같은 원자성 계약으로 실행한다.
+
+    역연산:
+      - 교정 전에 행이 **있었다** → 그 시점 값으로 **복원**(UPDATE)
+      - 교정 전에 행이 **없었다** → 우리가 넣은 것이므로 **삭제**
+    """
+    allowed = {str(d) for d in _ALLOWED_DATES}
+    unknown = sorted(set(preimage) - allowed)
+    if unknown:
+        raise RepairAbort(f"preimage 에 allowlist 밖 날짜: {unknown}")
+    missing = sorted(allowed - set(preimage))
+    if missing:
+        raise RepairAbort(f"preimage 에 빠진 날짜: {missing} — 부분 복원은 하지 않는다")
+
+    plan: list[dict] = []
+    for key in sorted(preimage):
+        row = preimage[key]
+        if row is None:
+            plan.append({"date_kst": key, "action": "delete"})
+            continue
+        absent = [c for c in PREIMAGE_COLUMNS if c not in row]
+        if absent:
+            raise RepairAbort(
+                f"{key}: preimage 에 없는 컬럼 {absent} — 전 컬럼이 없으면 "
+                "복원이 부분적이 되어 원래 상태와 달라진다")
+        plan.append({"date_kst": key, "action": "restore",
+                     "values": {c: row[c] for c in PREIMAGE_COLUMNS}})
+    return plan
+
+
+def write_preimage_artifact(path: pathlib.Path, fingerprint: str, sha: str,
+                            snapshot: Optional[str] = None) -> None:
+    """**배타 생성 + fsync**. 이게 되돌림의 유일한 기준이므로 덮어쓰지 않는다.
+
+    `snapshot`(RDS manual snapshot 식별자)을 함께 남긴다 — 되돌릴 때 "논리 역연산"
+    과 "snapshot 복구" 중 무엇을 쓸지 판단하려면 그 값이 산출물 안에 있어야 한다.
+    """
+    payload = json.dumps({"preimage_sha256": sha, "preimage": fingerprint,
+                          "rds_snapshot_confirmed": snapshot},
                          ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -505,6 +606,12 @@ def write_commit_receipt(preimage_path: pathlib.Path, result: dict) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
+    try:
+        _validate_cli(args)
+    except RepairAbort as exc:
+        print(f"[abort] {exc}", file=sys.stderr)
+        return 1
+
     # ⚠️ guard는 **실제 세션이 bind된 URL**로 판정한다. import가 dotenv를 로드하므로
     #    app.database를 먼저 들여온 뒤 그 모듈의 DATABASE_URL을 본다.
     from app.database import DATABASE_URL, SessionLocal
@@ -516,9 +623,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[abort] {exc}", file=sys.stderr)
         return 1
 
-    auth_key = os.getenv("KRX_AUTH_KEY", "")
+    auth_key = os.getenv(AUTH_KEY_ENV, "")
     if not auth_key:
-        print("[abort] KRX_AUTH_KEY 미설정", file=sys.stderr)
+        print(f"[abort] {AUTH_KEY_ENV} 미설정", file=sys.stderr)
         return 1
 
     import backfill_krx_openapi_source_daily_rates as krx_api
@@ -530,8 +637,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         adapters = build_db_adapters(db, krx_api.make_krx_fetch_fn(auth_key))
         result = repair_all(
             write=args.write,
+            expected_preimage_sha=args.expect_preimage_sha,
             persist_preimage=lambda fp, sha: write_preimage_artifact(
-                preimage_path, fp, sha),
+                preimage_path, fp, sha, snapshot=args.snapshot_confirmed),
             **adapters)
         if args.write:
             phase = PHASE_COMMITTING

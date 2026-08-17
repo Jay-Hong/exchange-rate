@@ -759,27 +759,67 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 3 | **12분 polling** | 30~60초 주기로 container ID·StartedAt·RestartCount·KRX status **전량 저장**. `--observe-seconds`(기본 720)만큼 창을 **열어 둔다** — 첫 PASS에서 끝내면 실 관측이 ~45초로 줄어 그 뒤 재시작을 못 본다. 표본 2건 미만은 UNVERIFIED |
 | 4 | **종료 직전 identity 재확인** | 모든 축을 마친 뒤 3-tuple 동일 + `RestartCount == 0` 재확인 (그 사이 재시작이면 앞선 관측이 무효). `collect`가 코드로 수행하고 artifact에 남긴다 |
 | 5 | **로그 2창 분리 수집** | 배포 **전에** 구 컨테이너 log follower 시작 / 신 컨테이너 로그는 별도. `[T0, StartedAt)`의 rollover는 **증거**, `[StartedAt, now)`의 rollover는 **비기대** |
-| 6 | **서비스 smoke** | 내부·공개 API + **FX·USDT·broadcast 실제 동작**. ⚠️ `/health`는 [main.py:1265](app/main.py#L1265)에서 요청에 응답만 되면 항상 `healthy`라 **도달성 확인 이상으로 쓰면 안 된다** |
+| 6 | **서비스 smoke** | `collect`가 `/api/rates`(개수>0 + 최신 관측 ≤30분)를 **판정**하고 `/admin/api/dashboard`(broadcast·errors_1h)를 **증거로만** 남긴다. ⚠️ `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict를 반환해 **도달성 이상을 증명하지 않는다** — 그래서 축 이름이 `reachability`이고, 서비스 실증은 별 축(`service`)이다 |
 | 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
 | 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
 
 ### 실행 순서
 
+모든 명령은 `~/logs/krx-deploy-<ts>/` 아래에 출력과 **종료 코드**를 남긴다.
+`; echo "rc=$?"`로 rc를 보존한다 — 파이프(`| tail`)는 앞 명령의 rc를 가린다.
+
+```bash
+TS=$(date -u +%Y%m%dT%H%M%SZ); D=~/logs/krx-deploy-$TS; mkdir -p "$D"
+cd ~/exchange-rate
+
+# 1) 상대 세션에 "배포 시작" 신호 → 최종 캡처 + 타이머 down 회신 수신 (수동)
+
+# 2) 디스크 (70% 경고 / 80% 초과면 정리 선행)
+df -h / > "$D/00-disk.txt" 2>&1; echo "rc=$?" >> "$D/00-disk.txt"
+
+# 3) 롤백 앵커 — 이 태그가 없으면 되돌릴 이미지가 없다
+docker tag $(docker inspect exchange-rate-app --format '{{.Image}}') \
+  exchange-rate-fastapi:rollback-$TS > "$D/01-rollback-tag.txt" 2>&1
+echo "rc=$?" >> "$D/01-rollback-tag.txt"
+
+# 4) 구 컨테이너 log follower — **배포 전에** 띄운다.
+#    ⚠️ collect 는 이 파일을 읽지 않는다(bind mount 를 사후 조회한다).
+#    이건 **회전으로 사라질 수 있는 구간의 사람용 사본**이다. collect 가
+#    "창 앞부분 없음"으로 UNVERIFIED 를 내면 이 파일이 유일한 근거가 된다.
+docker logs -f --timestamps exchange-rate-app > "$D/02-old-container.log" 2>&1 &
+FOLLOWER=$!
+
+# 5) git pull — prepare **앞**이다 (아래 참조)
+git pull > "$D/03-pull.txt" 2>&1; echo "rc=$?" >> "$D/03-pull.txt"
+REV=$(git rev-parse HEAD)
+
+# 6) baseline 고정 (배타 생성 + 지문)
+python scripts/krx_deploy_verifier.py prepare \
+  --baseline "$D/baseline.json" --expect-revision "$REV" \
+  --expect-code A75609 --expect-month 202609 --expect-expires-on 2026-09-21 \
+  > "$D/04-prepare.txt" 2>&1; echo "rc=$?" >> "$D/04-prepare.txt"
+
+# 7) 배포 (build 없이 --force-recreate 만 하면 구 이미지로 뜬다 — 2026-05-19 사례)
+docker compose build fastapi > "$D/05-build.txt" 2>&1; echo "rc=$?" >> "$D/05-build.txt"
+docker compose up -d --force-recreate fastapi > "$D/06-recreate.txt" 2>&1
+echo "rc=$?" >> "$D/06-recreate.txt"
+
+# 8) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
+python scripts/krx_deploy_verifier.py collect \
+  --baseline "$D/baseline.json" --evidence "$D/evidence.jsonl" \
+  > "$D/07-collect.txt" 2>&1; echo "rc=$?" >> "$D/07-collect.txt"
+
+# 9) 신 컨테이너 로그 — 구 것과 **별도로** 남긴다
+kill $FOLLOWER 2>/dev/null
+docker logs --timestamps --since "$TS" exchange-rate-app > "$D/08-new-container.log" 2>&1
+echo "rc=$?" >> "$D/08-new-container.log"
+
+# 10) manifest — 산출물 전부의 sha256. 사후에 "이 파일이 그때 그 파일인가"를 가른다
+( cd "$D" && sha256sum ./* > MANIFEST.sha256 ) ; echo "manifest rc=$?"
 ```
-1. (배포 전) 상대 세션에 "배포 시작" 신호 → 최종 캡처 + 타이머 down 완료 회신 수신
-2. df -h / 확인 (70% 경고 / 80% 초과면 정리 선행)
-3. 롤백 앵커 태그: docker tag $(docker inspect exchange-rate-app --format '{{.Image}}') \
-     exchange-rate-fastapi:rollback-<날짜>
-4. 구 컨테이너 log follower 시작 (배포 전)
-5. git pull                       # ⚠️ prepare **앞**에 온다 (아래 참조)
-6. python scripts/krx_deploy_verifier.py prepare --baseline ~/logs/krx-baseline-<ts>.json \
-     --expect-code A75609 --expect-month 202609 --expect-expires-on 2026-09-21 \
-     --expect-revision <배포할 commit SHA>
-7. docker compose build fastapi && docker compose up -d --force-recreate fastapi
-8. python scripts/krx_deploy_verifier.py collect --baseline <위 파일> \
-     --evidence ~/logs/krx-evidence-<ts>.jsonl
-9. **위 8항목을 사람이 대조** → 최종 판정
-```
+
+**11) 위 8항목을 사람이 대조** → 최종 판정. `collect`가 exit 0이어도 그것만으로
+승인하지 않는다(그 도구의 관측 배선에서만 P1이 6건 나왔던 이력).
 
 **`git pull`이 `prepare`보다 먼저인 이유**: prepare가 지문을 **worktree에서** 뜬다.
 pull 전에 돌리면 구 코드의 지문을 "기대값"으로 박아 버려, 그 뒤 새 image를 올리면

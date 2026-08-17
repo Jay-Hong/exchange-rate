@@ -489,6 +489,43 @@ def count_unplaceable(lines: Sequence[str]) -> int:
     return total
 
 
+def covers_window_start(lines: Sequence[str],
+                        since_iso: str) -> tuple[bool, Optional[str]]:
+    """남아 있는 로그가 창 **시작점 이전**까지 덮는가 → `(덮는가, 가장 오래된 줄)`.
+
+    `app.log*`를 사후 조회하는 구조라, 회전이 보존분(backupCount)을 넘겨 일어나면
+    `[T0, …)`의 앞부분이 통째로 사라진다. 그 상태에서 "실패 marker 0건"은
+    **관측 결과가 아니라 관측 부재**다.
+
+    판정은 "가장 오래된 파싱 가능한 줄 <= T0". 같거나 이르면 T0 시점이 보존분
+    안에 들어 있다는 뜻이다. 줄이 하나도 파싱되지 않으면 덮는다고 말할 수 없다.
+    """
+    try:
+        since = datetime.fromisoformat(since_iso)
+    except (TypeError, ValueError) as exc:
+        raise CollectorError(f"로그 창 시작 파싱 실패: {exc}") from exc
+    if since.tzinfo is None:
+        raise CollectorError("로그 창 경계는 timezone-aware여야 한다")
+
+    # `filter_log_window`와 **같은 방식**으로 뽑는다 — 다르게 뽑으면 "덮는다고
+    # 판정한 창"과 "실제로 필터된 창"이 갈릴 수 있다.
+    stamps = []
+    for line in lines:
+        projected = project_log_line(line)
+        stamp = (projected or {}).get("timestamp")
+        try:
+            when = datetime.fromisoformat(str(stamp))
+        except (TypeError, ValueError):
+            continue
+        if when.tzinfo is None:
+            continue
+        stamps.append(when)
+    if not stamps:
+        return False, None
+    oldest = min(stamps)
+    return oldest <= since, oldest.isoformat()
+
+
 def filter_log_window(lines: Sequence[str], since_iso: str,
                       until_iso: str) -> LogWindow:
     """`timestamp` 기준 `[since, until)` 필터 — **순수 함수**.
@@ -731,6 +768,7 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
     identities: list[ContainerIdentity] = []
     first_ok_at: Optional[datetime] = None
     new_identity: Optional[ContainerIdentity] = None
+    early_events: list = []
 
     while True:
         elapsed = (adapters.now() - start).total_seconds()
@@ -761,6 +799,14 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
         if first_ok_at is None:
             first_ok_at = adapters.now()
             new_identity = identity
+            # ⛔ **여기서 events 를 한 번 잡는다.** 데몬의 이벤트 재생 버퍼는
+            #    시간창이 아니라 전역 FIFO **256건**이다(실측: `--since 720h`를
+            #    줘도 정확히 256). 운영 호스트는 헬스체크만으로 분당 ~30건을
+            #    만들어 8~13분이면 한 바퀴 돈다. 관측 창(720s)을 채운 뒤에만
+            #    조회하면 배포 시점의 die/destroy 가 이미 밀려나 있어, 정상
+            #    배포도 "die 0건 → UNVERIFIED"로 차단된다.
+            early_events = await _capture_events(
+                adapters, baseline, first_ok_at.isoformat(), artifact, "early")
         identities.append(identity)
 
         sample_verdict, reasons = evaluate_post_sample(
@@ -797,7 +843,8 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
         reasons.append("새 container ID가 구 ID와 동일 — 재생성되지 않았다")
 
     now_iso = adapters.now().isoformat()
-    die = await _analyze_shutdown(adapters, baseline, now_iso, artifact)
+    die = await _analyze_shutdown(adapters, baseline, now_iso, artifact,
+                                  early_events=early_events)
     if die.status != PASS:
         reasons.append(f"구 컨테이너 종료 판정: {die.detail}")
 
@@ -811,9 +858,14 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
     if deployed != PASS:
         reasons.append(deployed_detail)
 
-    health, health_detail = await _verify_service_health(adapters, artifact)
+    health, health_detail = await _verify_reachability(adapters, artifact)
     if health != PASS:
         reasons.append(health_detail)
+
+    service, service_detail = await _collect_service_evidence(
+        adapters, artifact, adapters.now())
+    if service != PASS:
+        reasons.append(service_detail)
 
     # 모든 축을 마친 **뒤** identity를 다시 읽는다. 축 검사에 걸린 시간 동안
     # 재시작이 있었다면 앞선 관측이 통째로 다른 프로세스의 것이 된다.
@@ -823,7 +875,7 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
         reasons.append(final_detail)
 
     final = worst(sample_result, continuity, die.status, logs, deployed, health,
-                  final_identity)
+                  service, final_identity)
     return _finish(artifact, final, reasons, samples=samples)
 
 
@@ -1056,22 +1108,99 @@ async def _verify_deployed_code(adapters: Adapters, baseline: Baseline,
     return PASS, "; ".join(detail_parts + ["소스 지문 일치"])
 
 
-async def _verify_service_health(adapters: Adapters,
-                                 artifact: EvidenceArtifact) -> tuple[str, str]:
-    """일반 서비스 게이트 — `--force-recreate`는 KRX만 재시작하는 작업이 아니다.
+# `/api/rates`의 최신 관측이 이보다 오래되면 서비스가 데이터를 못 만들고 있다고 본다.
+# 배포 창(평일 15:47~17:50 / 06:02~08:30)은 크롤러 빈도가 낮은 구간을 포함하므로
+# 넉넉히 잡는다 — 이 축의 목적은 "정지"를 잡는 것이지 지연을 재는 게 아니다.
+RATES_MAX_AGE_SECONDS = 1800.0
 
-    FX 크롤러·USDT WS·broadcast·API가 함께 내려갔다 올라온다. KRX 축만 보고
-    PASS를 선언하면 그 전부를 관측하지 않은 채 배포를 성공으로 기록하게 된다.
+
+async def _verify_reachability(adapters: Adapters,
+                               artifact: EvidenceArtifact) -> tuple[str, str]:
+    """**도달성만** 본다. 서비스가 건강하다는 뜻이 아니다.
+
+    ⚠️ `/health`는 [app/main.py] `health_check()`가 **정적 dict**를 반환한다 —
+    `{"status": "healthy", ...}`가 조건 없이 나온다. 그래서 이 축의 PASS가
+    증명하는 것은 "프로세스가 HTTP에 응답한다"뿐이다.
+
+    전에는 이 축을 "일반 서비스 게이트"라 부르고 docstring이 FX·USDT·broadcast를
+    관측한다고 적었다 — 코드가 하지 않는 일을 문서가 약속한 것이고, 그게 곧
+    false confidence다 (외부 검토 지적). 실 서비스 증거는
+    `_collect_service_evidence`가 담당한다.
     """
     try:
         payload = await adapters.admin_fetch("/health")
     except CollectorError as exc:
-        artifact.append("health", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        artifact.append("reachability", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
         return UNVERIFIED, f"/health 조회 실패: {exc}"
     status = str(payload.get("status", "")).lower()
     ok = status in {"healthy", "ok"}
-    artifact.append("health", {"verdict": PASS if ok else FAILED, "status": status})
-    return (PASS, "health 정상") if ok else (FAILED, f"/health status={status!r}")
+    artifact.append("reachability",
+                    {"verdict": PASS if ok else FAILED, "status": status,
+                     "means": "HTTP 응답 가능 — 서비스 건강도 아님"})
+    return (PASS, "도달성 확인") if ok else (FAILED, f"/health status={status!r}")
+
+
+async def _collect_service_evidence(adapters: Adapters, artifact: EvidenceArtifact,
+                                    now: datetime,
+                                    max_age_seconds: float = RATES_MAX_AGE_SECONDS
+                                    ) -> tuple[str, str]:
+    """**실제 데이터가 흐르는가.** `--force-recreate`는 KRX만 내리지 않는다.
+
+    `/api/rates`는 crawl → 저장 → serve 전 경로의 산출물이고, 실패 시 빈 200이
+    아니라 503이라(main.py) "비었는데 성공"이 되지 않는다. 그래서 이 축은
+    `/health`와 달리 **실제로 무언가를 증명**한다:
+      - rates 개수 > 0
+      - 가장 최신 관측이 `max_age_seconds` 안
+    dashboard(broadcast·errors_1h)는 **판정하지 않고 증거로만** 남긴다 — 임계값을
+    여기서 정하면 배포 시간대별 정상 범위를 이 도구가 참칭하게 된다.
+    """
+    try:
+        payload = await adapters.admin_fetch("/api/rates")
+    except CollectorError as exc:
+        artifact.append("service", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        return UNVERIFIED, f"/api/rates 조회 실패: {exc}"
+
+    rates = payload.get("rates")
+    if not isinstance(rates, list) or not rates:
+        artifact.append("service", {"verdict": FAILED, "rates_count": 0})
+        return FAILED, "/api/rates가 비어 있다 — 데이터 경로가 살아있지 않다"
+
+    stamps: list[datetime] = []
+    for row in rates:
+        raw = (row or {}).get("timestamp") if isinstance(row, dict) else None
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(raw))
+        except ValueError:
+            continue
+        if parsed.tzinfo is not None:
+            stamps.append(parsed)
+    if not stamps:
+        artifact.append("service", {"verdict": UNVERIFIED,
+                                    "rates_count": len(rates),
+                                    "error": "timestamp를 읽을 수 없다"})
+        return UNVERIFIED, "/api/rates timestamp를 읽을 수 없다 — 신선도 판정 불가"
+
+    newest = max(stamps)
+    age = (now - newest).total_seconds()
+
+    # 판정하지 않는 보조 증거. 실패해도 이 축을 죽이지 않는다.
+    dashboard: Any = None
+    try:
+        dashboard = await adapters.admin_fetch("/admin/api/dashboard")
+    except CollectorError as exc:
+        dashboard = {"error": str(exc)[:200]}
+
+    record = {"rates_count": len(rates), "newest": newest.isoformat(),
+              "age_seconds": round(age, 1), "max_age_seconds": max_age_seconds,
+              "dashboard": dashboard}
+    if age > max_age_seconds:
+        artifact.append("service", {"verdict": FAILED, **record})
+        return FAILED, (f"/api/rates 최신 관측이 {round(age)}s 전 "
+                        f"(> {round(max_age_seconds)}s) — 데이터가 갱신되지 않는다")
+    artifact.append("service", {"verdict": PASS, **record})
+    return PASS, f"/api/rates 신선({round(age)}s), {len(rates)}건"
 
 
 async def _read_identity(adapters: Adapters) -> ContainerIdentity:
@@ -1083,15 +1212,57 @@ async def _read_identity(adapters: Adapters) -> ContainerIdentity:
     return ContainerIdentity(parts[0], parts[1], int(parts[2]))
 
 
-async def _analyze_shutdown(adapters: Adapters, baseline: Baseline, now_iso: str,
-                            artifact: EvidenceArtifact) -> DieAnalysis:
-    """구 컨테이너 종료·제거. die는 종료만 증명하므로 제거는 별도로 본다."""
+async def _capture_events(adapters: Adapters, baseline: Baseline, until_iso: str,
+                          artifact: EvidenceArtifact, phase: str) -> list:
+    """`[T0, until)` 이벤트를 잡아 artifact 에 남긴다. 실패해도 죽지 않는다.
+
+    이른 시점(첫 정상 응답 직후)과 늦은 시점(축 검사 종료)에 각각 부른다 —
+    이유는 호출부 주석 참조(재생 버퍼 256건 상한).
+    """
     try:
-        events = await adapters.container_events(
-            baseline.old_container_id, baseline.t0_iso, now_iso)
+        events = list(await adapters.container_events(
+            baseline.old_container_id, baseline.t0_iso, until_iso))
     except CollectorError as exc:
-        artifact.append("shutdown", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
-        return DieAnalysis(UNVERIFIED, 0, None, False, f"event 조회 실패: {exc}")
+        artifact.append("events_capture",
+                        {"phase": phase, "error": str(exc)[:200]})
+        return []
+    artifact.append("events_capture", {"phase": phase, "count": len(events),
+                                       "until": until_iso})
+    return events
+
+
+def merge_events(*batches: Sequence[dict]) -> list[dict]:
+    """여러 번 잡은 이벤트를 **중복 없이** 합친다.
+
+    같은 이벤트가 두 조회에 모두 잡히면 die 가 2건으로 세어져 판정이 흔들린다.
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for batch in batches:
+        for event in batch or []:
+            key = json.dumps(event, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(event)
+    return merged
+
+
+async def _analyze_shutdown(adapters: Adapters, baseline: Baseline, now_iso: str,
+                            artifact: EvidenceArtifact,
+                            early_events: Optional[Sequence[dict]] = None
+                            ) -> DieAnalysis:
+    """구 컨테이너 종료·제거. die는 종료만 증명하므로 제거는 별도로 본다.
+
+    이른 조회분(`early_events`)과 늦은 조회분을 **합쳐서** 본다: 이른 쪽은
+    버퍼 축출 전의 die 를, 늦은 쪽은 뒤늦게 온 destroy 를 각각 담당한다.
+    """
+    late = await _capture_events(adapters, baseline, now_iso, artifact, "late")
+    events = merge_events(early_events or [], late)
+    if not events:
+        artifact.append("shutdown", {"verdict": UNVERIFIED,
+                                     "error": "이른·늦은 조회 모두 이벤트 0건"})
+        return DieAnalysis(UNVERIFIED, 0, None, False, "event 0건 — 관측 불능")
     analysis = analyze_container_events(list(events), baseline.old_container_id)
     removal_probe: Optional[str] = None
     if analysis.status == PASS and not analysis.destroyed:
@@ -1141,6 +1312,16 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
         return UNVERIFIED
     try:
         all_lines = list(await adapters.read_log_lines(baseline.t0_iso, now_iso))
+        covered, oldest = covers_window_start(all_lines, baseline.t0_iso)
+        if not covered:
+            # ⛔ 남은 줄만 보고 "실패 marker 0건"을 내면 "실패가 없었다"가 아니라
+            #    "볼 수도 없었다"가 된다. 회전(backupCount 초과)으로 창 앞부분이
+            #    사라진 경우가 그렇다 (외부 검토 지적).
+            artifact.append("logs", {
+                "verdict": UNVERIFIED, "t0": baseline.t0_iso,
+                "oldest_retained": oldest,
+                "error": "로그 회전으로 [T0, StartedAt) 창 앞부분이 남아 있지 않다"})
+            return UNVERIFIED
         shutdown = filter_log_window(all_lines, baseline.t0_iso, new_started_at)
         runtime = filter_log_window(all_lines, new_started_at, now_iso)
     except CollectorError as exc:

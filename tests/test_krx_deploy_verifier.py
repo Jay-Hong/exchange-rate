@@ -851,6 +851,18 @@ class _Clock:
         self.now_value = self.now_value + timedelta(seconds=seconds)
 
 
+# 배포 전부터 앱은 로그를 쓰고 있다 — 보존된 로그가 T0 이전을 덮는 게 정상이다.
+# 이 줄이 없는 fixture 는 "회전으로 창 앞부분이 사라진" 비정상 상태를 뜻한다.
+_PRE_T0_LINE = json.dumps(
+    {"timestamp": "2026-08-17T05:59:00+00:00", "level": "INFO",
+     "logger": "app.main", "message": "배포 전 정상 동작"})
+
+
+def _line(stamp: str, level: str = "info", message: str = "x") -> str:
+    return json.dumps({"timestamp": stamp, "level": level.upper(),
+                       "logger": "app.main", "message": message})
+
+
 _RUNTIME_OK_LINE = json.dumps(
     {"timestamp": "2026-08-17T06:05:30+00:00", "level": "INFO",
      "logger": "app.main", "message": "startup complete"})
@@ -860,7 +872,9 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
               events=None, shutdown_lines=None, runtime_lines=None,
               removal_error="Error: No such object: old123",
               new_image="sha256:bbb", health_status="healthy",
-              probe=None, source_fp=_FP, final_identity_raw=None):
+              probe=None, source_fp=_FP, final_identity_raw=None,
+              rates_count=30, rates_updated_at="2026-08-17T06:06:00+00:00",
+              rates_error=None, retained_covers_t0=True):
     """scripted 어댑터. `statuses`의 각 원소는 dict(payload) 또는 예외.
 
     실제 게이트 축을 전부 덮는다 — 하나라도 빠지면 orchestration이 그 축에서
@@ -873,6 +887,17 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
     async def admin_fetch(path):
         if path == "/health":
             return {"status": health_status}
+        if path == "/api/rates":
+            if rates_error is not None:
+                raise rates_error
+            return {
+                "rates": [{"currency": "usd-krw", "bank": "kb", "rate": 1400.0,
+                           "timestamp": rates_updated_at}] * rates_count,
+                "metadata": {"updated_at": rates_updated_at,
+                             "total_count": rates_count},
+            }
+        if path == "/admin/api/dashboard":
+            return {"broadcast": {"success_rate": 100.0}, "errors_1h": 0}
         item = queue.pop(0) if queue else queue_last[0]
         queue_last[0] = item
         if isinstance(item, Exception):
@@ -903,7 +928,8 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
         # 운영 어댑터와 동일하게 **전체 로그**를 돌려준다. 창 분할은
         # `filter_log_window`가 timestamp로 한다.
         base = list(runtime_lines) if runtime_lines is not None else [_RUNTIME_OK_LINE]
-        return list(shutdown_lines or []) + base
+        pre = [_PRE_T0_LINE] if retained_covers_t0 else []
+        return pre + list(shutdown_lines or []) + base
 
     async def expiry_probe(month):
         value = probe_map.get(month)
@@ -1023,6 +1049,116 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
         self.assertTrue(any("소스 지문" in r for r in got["reasons"]), got["reasons"])
+
+    async def test_events_captured_before_observation_window(self):
+        """⭐ `docker events`를 **관측 창이 끝난 뒤**에만 조회하면 die 를 놓친다.
+
+        데몬의 이벤트 재생 버퍼는 시간창이 아니라 **전역 FIFO 256건**이다
+        (실측: `--since 720h` 를 줘도 정확히 256). 운영 호스트는 헬스체크만으로
+        분당 ~30건을 만들어 8~13분이면 버퍼가 한 바퀴 돈다. 그런데 조회는
+        `observe_seconds`(720s) 를 채운 **뒤**라 최소 12분 후다 → 배포 시점의
+        die/destroy 가 이미 밀려나 정상 배포도 UNVERIFIED 로 차단된다.
+
+        그래서 **첫 정상 응답 직후에 한 번** 잡아 두어야 한다. 여기서는 늦은
+        조회가 버퍼 축출로 비어 있어도 이른 조회분으로 판정이 서는지 본다.
+        """
+        calls = []
+
+        async def evicting_events(_cid, _since, _until):
+            calls.append(len(calls))
+            if len(calls) == 1:          # 이른 조회 — 아직 버퍼에 있다
+                return [
+                    {"Action": "die",
+                     "Actor": {"ID": "old123", "Attributes": {"exitCode": "0"}}},
+                    {"Action": "destroy", "Actor": {"ID": "old123"}},
+                ]
+            return []                    # 늦은 조회 — 축출됐다
+
+        base = _adapters(self.clock, statuses=[_payload()])
+        ad = dataclasses.replace(base, container_events=evicting_events)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertGreaterEqual(len(calls), 2,
+                                "events 를 이른 시점과 늦은 시점에 각각 잡지 않는다")
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+
+    async def test_late_destroy_still_counted(self):
+        """반대 방향: destroy 가 늦게 오면 **늦은 조회**가 그걸 잡아야 한다."""
+        calls = []
+
+        async def late_destroy(_cid, _since, _until):
+            calls.append(len(calls))
+            if len(calls) == 1:
+                return [{"Action": "die",
+                         "Actor": {"ID": "old123", "Attributes": {"exitCode": "0"}}}]
+            return [{"Action": "destroy", "Actor": {"ID": "old123"}}]
+
+        base = _adapters(self.clock, statuses=[_payload()])
+        ad = dataclasses.replace(base, container_events=late_destroy)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+
+    async def test_rotated_away_pre_window_is_unverified(self):
+        """⭐ 로그 회전으로 T0 이전이 사라졌으면 **완전한 창이 아니다**.
+
+        `app.log*`를 사후 조회하는 구조라, 회전이 보존분(backupCount)을 넘겨
+        일어나면 `[T0, StartedAt)` 앞부분이 통째로 없어진다. 그런데 남은 줄만
+        보고 "실패 marker 0건"을 내면, 그건 "실패가 없었다"가 아니라
+        "봤을 수도 없었다"다 (외부 검토 지적).
+        """
+        # 남아 있는 가장 오래된 줄이 T0(06:00Z)보다 **나중** — 앞이 잘렸다
+        late = _line("2026-08-17T06:04:00+00:00", "info", "늦게 남은 줄")
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       retained_covers_t0=False,
+                       runtime_lines=[late, _RUNTIME_OK_LINE])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+        self.assertTrue(any("회전" in r or "창" in r for r in got["reasons"]),
+                        got["reasons"])
+
+    async def test_complete_pre_window_is_not_flagged(self):
+        """T0 이전 줄이 남아 있으면 창은 완전하다 — 오탐 금지."""
+        early = _line("2026-08-17T05:58:00+00:00", "info", "T0 이전 줄")
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       retained_covers_t0=False,   # 앵커 없이, 이 줄만으로 덮는다
+                       runtime_lines=[early, _RUNTIME_OK_LINE])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+
+    async def test_health_axis_is_reachability_only_not_service_gate(self):
+        """⭐ `/health`는 정적 dict라 도달성만 증명한다 — 축 이름·문서가 그래야 한다.
+
+        `app/main.py`의 `/health`는 `{"status": "healthy", ...}`를 **무조건**
+        반환한다. 이 축의 PASS를 "FX·USDT·broadcast가 살아있다"로 읽으면 안 된다
+        (외부 검토 지적). 코드가 하지 않는 것을 docstring이 약속하면 그게 곧
+        false confidence다.
+        """
+        src = pathlib.Path(V.__file__).read_text()
+        i = src.index("async def _verify_reachability")
+        doc = src[i:i + 1400]
+        self.assertIn("도달성", doc)
+        self.assertNotIn("FX 크롤러", doc,
+                         "이 축이 하지 않는 일을 docstring이 약속한다")
+        # 서비스 실증은 별 축이 담당해야 한다
+        self.assertIn("async def _collect_service_evidence", src)
+
+    async def test_service_evidence_stale_rates_fail(self):
+        """실 서비스 축: `/api/rates`가 낡았으면 FAILED."""
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       rates_updated_at="2026-08-17T00:00:00+00:00")  # 6시간 전
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("rates" in r for r in got["reasons"]), got["reasons"])
+
+    async def test_service_evidence_empty_rates_fail(self):
+        ad = _adapters(self.clock, statuses=[_payload()], rates_count=0)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
+    async def test_service_evidence_fetch_failure_is_unverified(self):
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       rates_error=V.CollectorError("503"))
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
 
     async def test_source_fingerprint_failure_is_unverified(self):
         ad = _adapters(self.clock, statuses=[_payload()],

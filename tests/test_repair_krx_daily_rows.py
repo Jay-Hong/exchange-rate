@@ -15,6 +15,7 @@ import ast
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -32,8 +33,12 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 FEB = date(2026, 2, 13)
 AUG = date(2026, 8, 14)
 
-# disposable PostgreSQL. 없으면 skip (silent pass 금지).
-PG_URL = os.getenv("REPAIR_TEST_PG_URL")
+# PostgreSQL. **이름은 리포 정본 `PG_TEST_URL` 하나뿐**이다.
+# ⛔ 전에는 `REPAIR_TEST_PG_URL`이라는 자체 이름을 썼는데, CI workflow 는
+#    `PG_TEST_URL` 만 준다 → 이 파일의 PG 통합 11건이 **CI 에서 조용히 skip** 됐다.
+#    "로컬에서 돌려봤다"가 "CI가 지킨다"를 뜻하지 않았다.
+PG_URL = os.getenv("PG_TEST_URL", "").strip()
+ON_CI = os.getenv("GITHUB_ACTIONS", "").lower() == "true"
 
 
 def _noop_persist(fingerprint, sha):
@@ -244,16 +249,105 @@ class TestProductionGuardUsesSessionUrl(unittest.TestCase):
     로드해 세션이 production에 붙었다 (codex 감사 지적).
     """
 
+    def setUp(self):
+        self.tmp_out = pathlib.Path(
+            os.environ.get("TMPDIR", "/tmp")) / f"krx-entry-{uuid.uuid4().hex}.json"
+
+    def tearDown(self):
+        self.tmp_out.unlink(missing_ok=True)
+        self.tmp_out.with_suffix(self.tmp_out.suffix + ".committed").unlink(
+            missing_ok=True)
+
     def _run_script(self, *args, database_url=None, auth_key="dummy"):
-        env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
-        env["PYTHONPATH"] = str(REPO_ROOT)
-        env["KRX_AUTH_KEY"] = auth_key
+        """⛔ `PYTHONPATH`를 **주입하지 않는다.**
+
+        주입하면 스크립트가 스스로 `app`을 import하지 못하는 결함을 테스트가
+        **보상**해 버린다 — 실제로 그랬다: 운영 형태
+        `python scripts/repair_krx_daily_rows.py ...`는 `ModuleNotFoundError: app`
+        으로 죽는데 전 테스트가 초록이었다. 진입점 계약은 스크립트가 지는 것이지
+        호출자가 지는 게 아니다.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DATABASE_URL", "PYTHONPATH")}
+        env[R.AUTH_KEY_ENV] = auth_key
         if database_url:
             env["DATABASE_URL"] = database_url
         return subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "repair_krx_daily_rows.py"),
              *args],
             cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=120)
+
+    def test_documented_invocation_form_actually_runs(self):
+        """⭐ 문서에 적힌 실행 형태가 **그대로** 도는가 (진입점 계약).
+
+        `python scripts/repair_krx_daily_rows.py ...` — PYTHONPATH 없이.
+        이게 없으면 "도구를 만들었다"가 "도구를 실행할 수 있다"를 뜻하지 않는다.
+        """
+        proc = self._run_script("--help")
+        self.assertNotIn("ModuleNotFoundError", proc.stderr,
+                         f"진입점이 import 단계에서 죽는다:\n{proc.stderr[-600:]}")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-600:])
+        self.assertIn("--preimage-out", proc.stdout)
+
+    def test_sys_path_setup_precedes_repo_local_imports(self):
+        """⭐ 진입점 계약을 **구조로** 잠근다.
+
+        실행 테스트만으로는 부족했다: 정본 모듈이 자기 `sys.path`를 넣는 부작용에
+        얹혀 있으면, 이 파일의 `sys.path` 한 줄을 지워도 아무것도 안 깨진다
+        (변이 검사 실측 — 그래서 그 의존을 끊었다). 여기서는 "리포 루트를 넣는
+        문장이 리포-로컬 import보다 **앞에** 있는가"를 AST로 본다.
+        """
+        src = (REPO_ROOT / "scripts" / "repair_krx_daily_rows.py").read_text()
+        tree = ast.parse(src)
+        insert_line = None
+        for node in tree.body:
+            if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and ast.unparse(node.value).startswith("sys.path.insert")):
+                insert_line = node.lineno
+                break
+        self.assertIsNotNone(
+            insert_line,
+            "module level 에 sys.path.insert 가 없다 — "
+            "`python scripts/…py` 형태가 ModuleNotFoundError 로 죽는다")
+
+        local_import_lines = [
+            n.lineno for n in tree.body
+            if isinstance(n, (ast.Import, ast.ImportFrom))
+            and any(
+                (getattr(n, "module", "") or "").startswith(("app", "backfill_"))
+                or a.name.startswith(("app", "backfill_"))
+                for a in n.names)
+        ]
+        for line in local_import_lines:
+            self.assertLess(insert_line, line,
+                            f"리포-로컬 import(line {line})가 sys.path 설정보다 앞선다")
+
+    def test_auth_env_name_matches_repo_canonical(self):
+        """⭐ 인증 env 이름이 리포 정본과 같은가.
+
+        이름이 어긋나면 운영자가 정본 이름으로 넣어둔 값을 도구가 못 보고,
+        "미설정"으로 중단한다 — 실제로 존재하지 않는 이름을 하드코딩했었다.
+        """
+        canonical = (REPO_ROOT / "scripts"
+                     / "backfill_krx_openapi_source_daily_rates.py").read_text()
+        m = re.search(r'KRX_OPENAPI_AUTH_KEY_ENV\s*=\s*"([^"]+)"', canonical)
+        self.assertIsNotNone(m, "정본에서 env 상수를 찾지 못했다")
+        self.assertEqual(R.AUTH_KEY_ENV, m.group(1))
+        # 하드코딩 방지: repair 소스에 리터럴로 박혀 있으면 정본이 바뀔 때 갈린다
+        src = (REPO_ROOT / "scripts" / "repair_krx_daily_rows.py").read_text()
+        self.assertNotIn('"KRX_AUTH_KEY"', src)
+
+    def test_missing_auth_key_names_the_canonical_env(self):
+        """미설정 안내가 **정본 이름**을 말해야 운영자가 고칠 수 있다."""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DATABASE_URL", "PYTHONPATH", R.AUTH_KEY_ENV)}
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "repair_krx_daily_rows.py"),
+             "--preimage-out", str(self.tmp_out)],
+            cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=120)
+        self.assertNotIn("ModuleNotFoundError", proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stdout[-400:] + proc.stderr[-400:])
+        self.assertIn(R.AUTH_KEY_ENV, proc.stderr)
 
     def test_production_write_aborts_before_any_api_or_db_work(self):
         """guard가 **세션 URL**로 판정하고, 외부 호출 전에 막는가.
@@ -265,7 +359,8 @@ class TestProductionGuardUsesSessionUrl(unittest.TestCase):
         preimage_out = pathlib.Path(
             os.environ.get("TMPDIR", "/tmp")) / f"guard-{uuid.uuid4().hex}.json"
         proc = self._run_script(
-            "--write", "--preimage-out", str(preimage_out),
+            "--write", "--expect-preimage-sha", "a" * 64,
+            "--preimage-out", str(preimage_out),
             database_url="postgresql+psycopg://u:p@example.invalid:5432/db")
         self.assertFalse(preimage_out.exists(),
                          "guard가 막았는데 preimage 파일이 생겼다")
@@ -399,6 +494,114 @@ class TestCommitReceipt(unittest.TestCase):
                       R.write_commit_receipt.__doc__)
 
 
+class TestWriteBinding(unittest.TestCase):
+    """dry-run 이 검토한 상태와 실제 write 대상을 **결속**한다."""
+
+    def test_expected_preimage_sha_mismatch_aborts(self):
+        """⭐ dry-run 이후 누가 행을 바꿨으면 write 를 하면 안 된다.
+
+        리포 관용구(`--expected-rows-count`)의 repair 판. 이게 없으면 "검토한
+        것"과 "덮어쓰는 것"이 다를 수 있고, preimage 는 그 사실을 기록만 할 뿐
+        막지 못한다 (외부 검토 지적).
+        """
+        calls = []
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R.repair_all(
+                lock_and_read=lambda d: ({"contract_code": "A75602"} if d == FEB else None),
+                fetch_official=_valid_fetch,
+                apply_update=lambda *a: calls.append("update") or 1,
+                apply_insert=lambda *a: calls.append("insert"),
+                reread=lambda d: None,
+                persist_preimage=lambda fp, sha: None,
+                write=True, expected_preimage_sha="0" * 64)
+        self.assertIn("preimage", str(ctx.exception))
+        self.assertEqual(calls, [], "불일치인데 write 가 실행됐다")
+
+    def test_expected_preimage_sha_match_proceeds(self):
+        seen = {}
+        R.repair_all(
+            lock_and_read=lambda d: ({"contract_code": "A75602"} if d == FEB else None),
+            fetch_official=_valid_fetch,
+            apply_update=lambda *a: 1, apply_insert=lambda *a: None,
+            reread=lambda d: _stored(contract="A75603", d=d, close="1443.5",
+                                     high=Decimal("1446.0"), low=Decimal("1440.0"),
+                                     metadata={"contract_month":
+                                               R.resolve_target(d).target_contract_month}),
+            persist_preimage=lambda fp, sha: seen.update(sha=sha),
+            write=False)
+        result = R.repair_all(
+            lock_and_read=lambda d: ({"contract_code": "A75602"} if d == FEB else None),
+            fetch_official=_valid_fetch,
+            apply_update=lambda *a: 1, apply_insert=lambda *a: None,
+            reread=lambda d: _stored(contract=R.resolve_target(d).target_contract,
+                                     d=d, close="1443.5",
+                                     high=Decimal("1446.0"), low=Decimal("1440.0"),
+                                     metadata={"contract_month":
+                                               R.resolve_target(d).target_contract_month}),
+            persist_preimage=lambda fp, sha: None,
+            write=True, expected_preimage_sha=None)
+        self.assertEqual(result["mode"], "write")
+
+    def test_write_requires_expected_sha_at_cli(self):
+        """CLI 수준에서 `--write` 는 `--expect-preimage-sha` 를 요구한다."""
+        parser = R.build_parser()
+        args = parser.parse_args(["--write", "--preimage-out", "/tmp/p.json"])
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R._validate_cli(args)
+        self.assertIn("expect-preimage-sha", str(ctx.exception))
+
+    def test_production_write_requires_snapshot_attestation(self):
+        """production write 는 snapshot 식별자를 **기록**하게 강제한다.
+
+        ⚠️ 이 도구는 AWS 에 접근하지 않으므로 snapshot 존재를 **증명하지 못한다**.
+        강제하는 것은 "사람이 그 값을 적었다"는 사실이고, 그 값은 산출물에 남아
+        되돌릴 때 기준이 된다. 증명이 아니라 기록이라는 점을 help 가 밝힌다.
+        """
+        parser = R.build_parser()
+        args = parser.parse_args(["--write", "--allow-production-write",
+                                  "--expect-preimage-sha", "a" * 64,
+                                  "--preimage-out", "/tmp/p.json"])
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R._validate_cli(args)
+        self.assertIn("snapshot", str(ctx.exception))
+
+
+class TestRevertPath(unittest.TestCase):
+    """commit 이후 되돌리는 **실행 경로**가 존재한다."""
+
+    def test_revert_plan_is_exact_inverse(self):
+        pre = {
+            str(FEB): {"id": 7, "contract_code": "A75602", "rate": "1441.0",
+                       "close": "1441.0", "high": "1445.0", "low": "1438.0",
+                       "ohlc_quality": "source_ohlc",
+                       "close_basis": "krx_cf_close_1545",
+                       "source_method": "krx_openapi_daily",
+                       "basis_date": None, "published_at": None,
+                       "captured_at": "2026-02-14 00:00:00",
+                       "metadata_json": {"contract_short_code": "A75602"},
+                       "source": "krx", "asset": "usd-krw-futures",
+                       "date_kst": "2026-02-13"},
+            str(AUG): None,
+        }
+        plan = R.build_revert_plan(pre)
+        by_date = {p["date_kst"]: p for p in plan}
+        self.assertEqual(by_date["2026-02-13"]["action"], "restore")
+        self.assertEqual(by_date["2026-02-13"]["values"]["contract_code"], "A75602")
+        # 우리가 넣은 행은 지우는 것이 역연산이다
+        self.assertEqual(by_date["2026-08-14"]["action"], "delete")
+
+    def test_revert_refuses_unknown_dates(self):
+        with self.assertRaises(R.RepairAbort):
+            R.build_revert_plan({"2026-03-01": None})
+
+    def test_revert_requires_full_preimage(self):
+        """일부 컬럼만 있는 preimage 로는 복원할 수 없다."""
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R.build_revert_plan({str(FEB): {"contract_code": "A75602"},
+                                 str(AUG): None})
+        self.assertIn("컬럼", str(ctx.exception))
+
+
 class TestPreimageArtifact(unittest.TestCase):
     """되돌림 기준을 **write 전에** 내구 기록한다."""
 
@@ -475,11 +678,11 @@ def _valid_fetch(target):
 
 
 @unittest.skipUnless(
-    PG_URL,
-    "REPAIR_TEST_PG_URL 미설정 — disposable PostgreSQL 통합 테스트 skip. "
+    PG_URL or ON_CI,
+    "로컬: PG_TEST_URL 미설정 — PostgreSQL 통합 테스트 skip (CI 에서는 fail). "
     "SQLite로는 FOR UPDATE·unique 충돌·rowcount 의미를 검증할 수 없다. "
-    "실행: docker run -d --rm -e POSTGRES_PASSWORD=t -p 55432:5432 postgres:16-alpine && "
-    "REPAIR_TEST_PG_URL=postgresql+psycopg://postgres:t@localhost:55432/postgres pytest ...")
+    "실행: docker run -d --rm -e POSTGRES_PASSWORD=t -p 55432:5432 postgres:17-alpine && "
+    "PG_TEST_URL=postgresql+psycopg://postgres:t@localhost:55432/postgres pytest ...")
 class TestRepairAgainstRealPostgres(unittest.TestCase):
 
     @classmethod
@@ -487,11 +690,17 @@ class TestRepairAgainstRealPostgres(unittest.TestCase):
         """**전용 schema**를 배타 생성해 격리한다.
 
         public schema의 `source_daily_rates`를 직접 drop/create하면,
-        `REPAIR_TEST_PG_URL`이 실수로 공유·운영 DB를 가리켰을 때 실테이블을
+        `PG_TEST_URL`이 공유·운영 DB를 가리켰을 때 실테이블을
         삭제한다 (codex 감사 지적). `CREATE SCHEMA`는 `IF NOT EXISTS` 없이
         써서 이름 충돌 시 **실패**하게 둔다 — 남의 schema를 재사용하지 않는다.
         """
         import uuid
+
+        if not PG_URL:
+            # skipUnless 가 ON_CI 를 통과시킨 경우 — 여기서 **fail** 한다.
+            raise AssertionError(
+                "CI 인데 PG_TEST_URL 이 없다 — workflow 의 postgres service 또는 env "
+                "배선이 끊겼다. skip 하면 계약이 사라진 것을 아무도 모른다.")
 
         from sqlalchemy import create_engine, text as sql_text
         from sqlalchemy.orm import sessionmaker
