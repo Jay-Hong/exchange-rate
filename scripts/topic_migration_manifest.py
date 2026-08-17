@@ -484,6 +484,19 @@ def default_provenance(repo_key: str, paths: list[str], pinned: str,
         return [f"[E_NOCITED] {repo_key} 인용 경로가 0개 — 근거 대조가 공허해진다"]
     root = provenance_root(repo_key, roots)
     try:
+        ancestry = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", pinned, "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if ancestry.returncode == 1:
+            out_fail.append(
+                f"[E_PINNOTANCESTOR] {repo_key} pinned commit 이 현재 HEAD 의 조상이 아님: {pinned}"
+            )
+        elif ancestry.returncode != 0:
+            out_fail.append(
+                f"[근거] {repo_key} pinned commit 조상성 대조 실패: "
+                f"{ancestry.stderr.strip()[:120]}"
+            )
         for rel in paths:
             if not (root / rel).exists():
                 out_fail.append(f"[E_PATHMISSING] {repo_key} 도출 경로가 현재 없음(오타 의심): {rel}")

@@ -34,7 +34,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import topic_migration_manifest as MOD   # noqa: E402 — 상수/함수 계약을 직접 잠그기 위해
 
 # ⛔ 통합시험이 조용히 0행을 내면 "빨강 0" 이라 초록이 된다 — 기대 행수를 계약으로 박는다
-EXPECTED_PROV_ROWS = 9
+EXPECTED_PROV_ROWS = 10
 MANIFEST = REPO / "spec" / "topic-only-migration-manifest.json"
 ARCHIVE = REPO / json.loads((REPO / "spec" / "topic-only.lock.json").read_text())["archive"]["path"]
 
@@ -407,6 +407,16 @@ def provenance_integration():
         # 대조군 — 변경 없으면 무소식이어야 한다(아니면 아래 반례가 무의미)
         base_ok = call(["app/keep.py"]) == []
         out.append(("prov — 변경 없음은 통과(대조군)", base_ok, "" if base_ok else "⚠️ 정상인데 실패"))
+
+        # 같은 파일 내용을 가진 commit 객체가 로컬에 남아 있어도, 현재 HEAD 의 조상이 아니면
+        # provenance 기준점이 될 수 없다. 구 구현은 cat-file 과 path diff 가 모두 성공해 통과했다.
+        run_g("checkout", "-qb", "detached-pin")
+        run_g("commit", "--allow-empty", "-qm", "non-ancestor pin")
+        non_ancestor_pin = run_g("rev-parse", "HEAD", check=True, text=True).stdout.strip()
+        run_g("checkout", "-q", "main")
+        r = call(["app/keep.py"], pinned=non_ancestor_pin)
+        out.append(("prov — 현재 HEAD 의 조상이 아닌 pin 거절",
+                    any("E_PINNOTANCESTOR" in x for x in r), f"{len(r)}건"))
 
         # 없는 경로 → 미존재 + pinned 미포함 둘 다
         r = call(["app/nope.py"])
