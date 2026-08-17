@@ -115,6 +115,15 @@ class TestProductionEngineBindsToPostgres(unittest.TestCase):
         self.assertTrue(out.get("SERVER", "").startswith("17."),
                         f"운영 RDS 는 17.x 다 — 다른 major 에서 증명하면 계약이 아니다: {out}")
 
+
+class TestSqlitePathNeedsNoPostgres(unittest.TestCase):
+    """⛔ SQLite 계약은 **PG 없이도 돌아야 한다**.
+
+    초판은 이 둘을 `TestProductionEngineBindsToPostgres` 안에 두어 `setUp` 의 `_require_pg()`
+    가 클래스 전체에 걸렸다 — PG 가 없는 환경(로컬 기본)에서 **두 계약이 통째로 skip** 됐다
+    (실측: SKIPPED 2). PG 요구는 **실제 PostgreSQL 을 쓰는 테스트 하나에만** 건다(codex).
+    """
+
     def test_sqlite_path_does_not_receive_postgres_only_kwargs(self):
         """⛔ 반대 방향 회귀 — PostgreSQL 전용 옵션이 SQLite 경로로 새면 로컬이 죽는다.
 

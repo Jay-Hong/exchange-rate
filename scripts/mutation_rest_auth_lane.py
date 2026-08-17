@@ -46,11 +46,13 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 MAIN = "app/main.py"
 LANE = "app/auth_executor.py"
 FCM = "app/notifications/fcm.py"
+DB = "app/database.py"
 
 WIRING = "tests/test_rest_auth_lane_wiring.py"
 MAPPING = "tests/test_firebase_auth_mapping.py"
 LIFECYCLE = "tests/test_two_lane_lifecycle.py"
 LIFESPAN = "tests/test_lifespan_auth_lane_wiring.py"
+PGBIND = "tests/test_pg_engine_binding.py"
 
 _CALL = "auth.verify_id_token, token, app=auth_app, check_revoked=check_revoked"
 _GUARD = (
@@ -118,6 +120,8 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
      [('            try:\n                logger.exception("auth lane 종료 시작 실패", extra={"lane": _lane_name})\n            except BaseException:  # pragma: no cover - 최후 방어\n                pass\n', '            logger.exception("auth lane 종료 시작 실패", extra={"lane": _lane_name})\n')], ('tests/test_two_lane_lifecycle.py',)),
     ('S1b-18 shutdown await 로깅 보호 제거', 'app/main.py',
      [('                try:\n                    logger.exception("auth lane 합류 실패", extra={"lane": _lane_name})\n                except BaseException:  # pragma: no cover - 최후 방어\n                    pass\n', '                logger.exception("auth lane 합류 실패", extra={"lane": _lane_name})\n')], ('tests/test_two_lane_lifecycle.py',)),
+    ("S2-1 PostgreSQL 전용 connect_args 가 SQLite 경로로 누수 → 로컬·테스트가 연결에서 죽는다",
+     DB, [('    _engine_kwargs["connect_args"] = {"check_same_thread": False}\n', '    _engine_kwargs["connect_args"] = {"check_same_thread": False,\n                                      "options": "-c statement_timeout=1000"}\n')], (PGBIND,)),
 ]
 
 # ⛔ 줄머리에서 시작하지 않는 앵커는 **명시적으로** 등록한다 — 그러지 않으면 정렬 검사가
@@ -167,7 +171,31 @@ def _run(probe: str) -> tuple[int, list[str]]:
     return r.returncode, fails
 
 
+def _pg_preflight() -> str | None:
+    """⛔ PG probe 를 쓰는 변이가 있는데 PG 가 없으면 그 probe 는 **skip 후 exit 0** 이다 —
+    인프라 부재인데 SURVIVED 로 오분류된다(codex). 배터리 시작 전에 막는다."""
+    import os
+
+    if not any(PGBIND in probes for _, _, _, probes in MUTANTS):
+        return None
+    url = os.getenv("PG_TEST_URL", "").strip()
+    if not url:
+        return "PG_TEST_URL 미설정 — PGBIND probe 를 쓰는 변이가 있어 판정이 SURVIVED 로 오분류된다"
+    try:
+        from sqlalchemy import create_engine, text
+
+        with create_engine(url).connect() as c:
+            c.execute(text("select 1"))
+    except Exception as exc:  # noqa: BLE001 — 접속 불가는 INFRA 다
+        return f"PG_TEST_URL 접속 실패: {type(exc).__name__}"
+    return None
+
+
 def main() -> int:
+    problem = _pg_preflight()
+    if problem:
+        print(f"⚠️  INFRA — {problem}")
+        return 2
     try:
         lock_ctx = battery_lock(REPO)
         lock_ctx.__enter__()
