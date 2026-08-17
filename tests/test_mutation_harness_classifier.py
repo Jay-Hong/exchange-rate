@@ -59,7 +59,9 @@ def test_invalid_mapping_refuses_before_running_anything(monkeypatch):
     ({"first": 1, "second": 1}, "killed"),
     ({"first": 1, "second": 0}, "survived"),
 ])
-def test_main_counters_follow_classify_not_the_first_probe(monkeypatch, rcs, expect_counter, capsys):
+def test_main_counters_follow_classify_not_the_first_probe(
+    monkeypatch, rcs, expect_counter, capsys, tmp_path
+):
     """⛔ `classify()` 단독 테스트는 **메인 루프가 그걸 쓰는지**를 못 잡는다 — 실제로 판정기를
     분리하고도 구 분기가 남아 결론이 갈렸다(codex 재현). main() 의 최종 카운터까지 본다."""
     import types
@@ -78,11 +80,10 @@ def test_main_counters_follow_classify_not_the_first_probe(monkeypatch, rcs, exp
 
     # ⛔ 가드(`assert_isolated`)를 끄지 않는다 — 끄면 공유 트리 변이를 막는 기전이 사라진다.
     #    대신 스텁이 **격리 표식이 있는 임시 경로**를 가리키게 한다.
-    import tempfile as _tf
-
     from mutation_battery_guard import ISOLATION_MARKER as _MARK
 
-    _iso = pathlib.Path(_tf.mkdtemp(prefix="fxi-fake-src-"))
+    _iso = tmp_path / "isolated-src"
+    _iso.mkdir()
     (_iso / _MARK).write_text("test\n")
 
     class _FakeSrc:                     # ⛔ PosixPath 속성은 read-only 라 SRC 자체를 갈아끼운다
