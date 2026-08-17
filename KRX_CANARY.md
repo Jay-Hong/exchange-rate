@@ -759,28 +759,43 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 3 | **12분 polling** | 30~60초 주기로 container ID·StartedAt·RestartCount·KRX status **전량 저장**. `--observe-seconds`(기본 720)만큼 창을 **열어 둔다** — 첫 PASS에서 끝내면 실 관측이 ~45초로 줄어 그 뒤 재시작을 못 본다. 표본 2건 미만은 UNVERIFIED |
 | 4 | **종료 직전 identity 재확인** | 모든 축을 마친 뒤 3-tuple 동일 + `RestartCount == 0` 재확인 (그 사이 재시작이면 앞선 관측이 무효). `collect`가 코드로 수행하고 artifact에 남긴다 |
 | 5 | **로그 2창 분리 수집** | 배포 **전에** 구 컨테이너 log follower 시작 / 신 컨테이너 로그는 별도. `[T0, StartedAt)`의 rollover는 **증거**, `[StartedAt, now)`의 rollover는 **비기대** |
-| 6 | **서비스 smoke** | `collect`가 `/api/rates`(개수>0 + 최신 관측 ≤30분)를 **판정**하고 `/admin/api/dashboard`(broadcast·errors_1h)를 **증거로만** 남긴다. ⚠️ `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict를 반환해 **도달성 이상을 증명하지 않는다** — 그래서 축 이름이 `reachability`이고, 서비스 실증은 별 축(`service`)이다 |
+| 6 | **서비스 smoke** | `prepare`가 배포 **전** 소스별 최신 관측을 스냅샷하고, `collect`가 **소스마다** 대조한다. FAILED는 **모호하지 않은 것만** — baseline 소스가 응답에서 사라짐 / 관측 시각 역행. **"갱신 없음"은 판정하지 않고 소스별로 기록**하므로 ⭐**이 목록을 사람이 대조하는 것이 이 항목의 본체**다. ⚠️ 세 가지 한계: (a) `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict라 **도달성만** 증명(축 이름이 `reachability`인 이유) (b) `/api/rates`는 legacy 정책상 **USDT·KRX 제외** → 이 축은 FX만 덮고 KRX는 별 축, **USDT는 이 도구가 안 덮는다** (c) 배포+관측이 ~15분이라 "죽음"과 "느린 주기"가 그 창 안에서 구분되지 않는다 — 그래서 나이 임계값을 쓰지 않는다 |
 | 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
 | 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
 
 ### 실행 순서
 
-모든 명령은 `~/logs/krx-deploy-<ts>/` 아래에 출력과 **종료 코드**를 남긴다.
-`; echo "rc=$?"`로 rc를 보존한다 — 파이프(`| tail`)는 앞 명령의 rc를 가린다.
+모든 명령은 `~/logs/krx-deploy-<ts>/` 아래에 출력과 **종료 코드**를 남기고,
+**nonzero면 즉시 멈춘다**. rc를 기록만 하고 계속 가면 build 실패 뒤에도
+`--force-recreate`가 돌아 **구 이미지가 다시 뜬다** — 2026-05-19 Coinone 사고와
+같은 경로다. 파이프(`| tail`)는 앞 명령의 rc를 가리므로 쓰지 않는다.
 
 ```bash
+set -o pipefail
 TS=$(date -u +%Y%m%dT%H%M%SZ); D=~/logs/krx-deploy-$TS; mkdir -p "$D"
 cd ~/exchange-rate
 
+# 실패하면 그 자리에서 멈춘다. 계속 가면 안 되는 이유가 단계마다 다르다.
+run() {   # run <파일명> <설명> -- <명령...>
+  local out="$D/$1" desc="$2"; shift 3
+  "$@" > "$out" 2>&1; local rc=$?
+  echo "rc=$rc" >> "$out"
+  if [ $rc -ne 0 ]; then
+    echo "⛔ 중단: [$desc] rc=$rc — $out 확인" | tee -a "$D/ABORT.txt"
+    [ -n "${FOLLOWER:-}" ] && { kill "$FOLLOWER" 2>/dev/null; wait "$FOLLOWER" 2>/dev/null; }
+    return 1
+  fi
+}
+
 # 1) 상대 세션에 "배포 시작" 신호 → 최종 캡처 + 타이머 down 회신 수신 (수동)
 
-# 2) 디스크 (70% 경고 / 80% 초과면 정리 선행)
-df -h / > "$D/00-disk.txt" 2>&1; echo "rc=$?" >> "$D/00-disk.txt"
+# 2) 디스크 (70% 경고 / 80% 초과면 정리 선행 — 판단은 사람이 한다)
+run 00-disk.txt "디스크" -- df -h /
 
 # 3) 롤백 앵커 — 이 태그가 없으면 되돌릴 이미지가 없다
-docker tag $(docker inspect exchange-rate-app --format '{{.Image}}') \
-  exchange-rate-fastapi:rollback-$TS > "$D/01-rollback-tag.txt" 2>&1
-echo "rc=$?" >> "$D/01-rollback-tag.txt"
+IMG=$(docker inspect exchange-rate-app --format '{{.Image}}') || exit 1
+run 01-rollback-tag.txt "롤백 태그" -- \
+  docker tag "$IMG" exchange-rate-fastapi:rollback-$TS || exit 1
 
 # 4) 구 컨테이너 log follower — **배포 전에** 띄운다.
 #    ⚠️ collect 는 이 파일을 읽지 않는다(bind mount 를 사후 조회한다).
@@ -790,31 +805,39 @@ docker logs -f --timestamps exchange-rate-app > "$D/02-old-container.log" 2>&1 &
 FOLLOWER=$!
 
 # 5) git pull — prepare **앞**이다 (아래 참조)
-git pull > "$D/03-pull.txt" 2>&1; echo "rc=$?" >> "$D/03-pull.txt"
+run 03-pull.txt "git pull" -- git pull || exit 1
 REV=$(git rev-parse HEAD)
 
-# 6) baseline 고정 (배타 생성 + 지문)
-python scripts/krx_deploy_verifier.py prepare \
-  --baseline "$D/baseline.json" --expect-revision "$REV" \
-  --expect-code A75609 --expect-month 202609 --expect-expires-on 2026-09-21 \
-  > "$D/04-prepare.txt" 2>&1; echo "rc=$?" >> "$D/04-prepare.txt"
+# 6) baseline 고정 (배타 생성 + 지문 + 서비스 신선도 스냅샷)
+run 04-prepare.txt "prepare" -- \
+  python3 scripts/krx_deploy_verifier.py prepare \
+    --baseline "$D/baseline.json" --expect-revision "$REV" \
+    --expect-code A75609 --expect-month 202609 --expect-expires-on 2026-09-21 \
+  || exit 1
 
-# 7) 배포 (build 없이 --force-recreate 만 하면 구 이미지로 뜬다 — 2026-05-19 사례)
-docker compose build fastapi > "$D/05-build.txt" 2>&1; echo "rc=$?" >> "$D/05-build.txt"
-docker compose up -d --force-recreate fastapi > "$D/06-recreate.txt" 2>&1
-echo "rc=$?" >> "$D/06-recreate.txt"
+# 7) 배포. ⛔ build 실패 시 **recreate 로 넘어가면 안 된다** — 구 이미지가 뜬다
+run 05-build.txt "build" -- docker compose build fastapi || exit 1
+run 06-recreate.txt "recreate" -- docker compose up -d --force-recreate fastapi || exit 1
 
 # 8) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
-python scripts/krx_deploy_verifier.py collect \
+#    ⚠️ 여기서 nonzero 는 "배포 실패"가 아니라 "차단 소견"이다. 멈추지 않고
+#    아래 증거 종결까지 마친 뒤 사람이 판정한다.
+python3 scripts/krx_deploy_verifier.py collect \
   --baseline "$D/baseline.json" --evidence "$D/evidence.jsonl" \
-  > "$D/07-collect.txt" 2>&1; echo "rc=$?" >> "$D/07-collect.txt"
+  > "$D/07-collect.txt" 2>&1
+echo "rc=$?" >> "$D/07-collect.txt"
 
-# 9) 신 컨테이너 로그 — 구 것과 **별도로** 남긴다
-kill $FOLLOWER 2>/dev/null
+# 9) follower 종결 — kill → **wait** → rc 기록. wait 없이 해시하면 아직 쓰는
+#    중인 파일을 굳히게 되고, 종료 코드도 사라진다.
+kill "$FOLLOWER" 2>/dev/null
+wait "$FOLLOWER" 2>/dev/null; echo "follower rc=$?" >> "$D/02-old-container.log"
+
+# 10) 신 컨테이너 로그 — 구 것과 **별도로**
 docker logs --timestamps --since "$TS" exchange-rate-app > "$D/08-new-container.log" 2>&1
 echo "rc=$?" >> "$D/08-new-container.log"
 
-# 10) manifest — 산출물 전부의 sha256. 사후에 "이 파일이 그때 그 파일인가"를 가른다
+# 11) manifest — 모든 파일이 종결된 **뒤** 해시한다
+sync
 ( cd "$D" && sha256sum ./* > MANIFEST.sha256 ) ; echo "manifest rc=$?"
 ```
 

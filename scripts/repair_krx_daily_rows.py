@@ -235,8 +235,13 @@ def check_production_write_guard(database_url: str, *, write: bool,
 
     ⚠️ 판정 대상은 **실제 세션이 bind된 URL**이어야 한다. 별도로 `os.getenv`를
     읽으면 URL이 `.env`에만 있는 흔한 실행에서 빈 문자열을 보고 통과하는데,
-    그 뒤 `app.database` import가 dotenv를 로드해 세션은 production에 붙는다
-    (codex 감사 지적). dialect/host는 출력하지 않는다(보안 원칙).
+    그 뒤 `app.database` import가 세션을 production에 붙인다 (codex 감사 지적).
+
+    ⚠️ 경로가 헷갈리기 쉬워 적어 둔다: `app/database.py` **자체는** `os.getenv`만
+    쓴다. dotenv는 **패키지 import 체인**이 로드한다 —
+    `app/__init__.py` → `app.logging` → `app.config` → `load_dotenv()` — 이게
+    `app/database.py` 본문보다 **먼저** 돌기 때문에 `.env`에만 URL이 있어도
+    `DATABASE_URL`이 채워진다(실측 확인). dialect/host는 출력하지 않는다(보안 원칙).
     """
     if not write:
         return
@@ -473,6 +478,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expect-preimage-sha",
                    help="dry-run이 출력한 preimage_sha. --write 시 필수 — "
                         "잠금 후 재계산해 다르면 중단(그 사이 행이 바뀐 것)")
+    p.add_argument("--revert-from",
+                   help="preimage 산출물 경로. 지정 시 **되돌리기 모드** — "
+                        "그 파일의 전 컬럼으로 복원(또는 우리가 넣은 행 삭제)하고, "
+                        "복원 후 지문이 원래 sha 와 같은지 확인한다")
     p.add_argument("--snapshot-confirmed",
                    help="production write 시 필수. RDS manual snapshot 식별자. "
                         "⚠️ 이 도구는 AWS에 접근하지 않아 **존재를 증명하지 못한다** — "
@@ -482,6 +491,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _validate_cli(args) -> None:
     """모호·위험한 조합을 **한 곳에서** fail-close."""
+    if getattr(args, "revert_from", None):
+        if args.write:
+            raise RepairAbort("--revert-from 과 --write 는 함께 쓸 수 없다 "
+                              "(되돌리기와 교정은 반대 방향이다)")
+        if args.expect_preimage_sha:
+            raise RepairAbort("--revert-from 은 파일 안의 sha 를 쓴다 — "
+                              "--expect-preimage-sha 를 따로 주지 않는다")
+        return
     if not args.write:
         if args.expect_preimage_sha or args.snapshot_confirmed:
             raise RepairAbort("--expect-preimage-sha / --snapshot-confirmed 는 "
@@ -536,6 +553,52 @@ def build_revert_plan(preimage: dict) -> list[dict]:
         plan.append({"date_kst": key, "action": "restore",
                      "values": {c: row[c] for c in PREIMAGE_COLUMNS}})
     return plan
+
+
+def apply_revert_plan(
+    *,
+    plan: list[dict],
+    expected_sha: str,
+    lock_and_read: Callable[[date], Optional[dict]],
+    restore: Callable[[date, dict], int],
+    delete: Callable[[date], int],
+    reread: Callable[[date], Optional[dict]],
+) -> dict:
+    """계획을 **실행**한다. 교정과 같은 원자성 계약 — 예외는 caller 가 rollback.
+
+    사후조건이 이 함수의 존재 이유다: 전 컬럼을 되돌렸으면 preimage 지문을
+    다시 떴을 때 **원래 sha 가 그대로 나와야 한다**. 하나라도 어긋나면 나오지
+    않으므로, "되돌렸다"를 값 하나하나 눈으로 대조하지 않고도 판정할 수 있다.
+
+    순서: 잠금 → 전 대상 실행(rowcount==1 강제) → 지문 재계산 → 원래 sha 대조.
+    """
+    if not plan:
+        raise RepairAbort("빈 revert 계획")
+
+    targets = [date.fromisoformat(item["date_kst"]) for item in plan]
+    for target_date in targets:              # 잠금 먼저 (교정과 같은 순서)
+        lock_and_read(target_date)
+
+    for item in plan:
+        target_date = date.fromisoformat(item["date_kst"])
+        if item["action"] == "restore":
+            rowcount = restore(target_date, item["values"])
+        else:
+            rowcount = delete(target_date)
+        if rowcount != 1:
+            raise RepairAbort(
+                f"{target_date}: revert {item['action']} rowcount={rowcount} != 1 "
+                "— 되돌릴 대상이 예상과 다르다")
+
+    after = {t: reread(t) for t in targets}
+    got_sha = preimage_sha(preimage_fingerprint(after))
+    if got_sha != expected_sha:
+        raise RepairAbort(
+            f"revert 후 지문 {got_sha[:16]}… != 원래 {expected_sha[:16]}… "
+            "— 되돌림이 원 상태를 재현하지 못했다")
+    return {"mode": "revert", "restored_preimage_sha": got_sha,
+            "applied": [{"date_kst": i["date_kst"], "action": i["action"]}
+                        for i in plan]}
 
 
 def write_preimage_artifact(path: pathlib.Path, fingerprint: str, sha: str,
@@ -612,8 +675,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[abort] {exc}", file=sys.stderr)
         return 1
 
-    # ⚠️ guard는 **실제 세션이 bind된 URL**로 판정한다. import가 dotenv를 로드하므로
-    #    app.database를 먼저 들여온 뒤 그 모듈의 DATABASE_URL을 본다.
+    # ⚠️ guard는 **실제 세션이 bind된 URL**로 판정한다. app.database를 먼저
+    #    들여온 뒤 그 모듈의 DATABASE_URL을 본다 (dotenv 로드 경로는
+    #    check_production_write_guard docstring 참조).
     from app.database import DATABASE_URL, SessionLocal
 
     try:

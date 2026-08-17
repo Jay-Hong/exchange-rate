@@ -43,6 +43,7 @@ def _baseline(**over) -> V.Baseline:
         expected_expires_on="2026-09-21",
         expected_revision="a" * 40,
         expected_source_sha256=_FP,
+        service_baseline={"kb": _T0, "nh": _T0},
     )
     base.update(over)
     return V.Baseline(**base)
@@ -874,7 +875,7 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
               new_image="sha256:bbb", health_status="healthy",
               probe=None, source_fp=_FP, final_identity_raw=None,
               rates_count=30, rates_updated_at="2026-08-17T06:06:00+00:00",
-              rates_error=None, retained_covers_t0=True):
+              rates_error=None, retained_covers_t0=True, rates_by_source=None):
     """scripted 어댑터. `statuses`의 각 원소는 dict(payload) 또는 예외.
 
     실제 게이트 축을 전부 덮는다 — 하나라도 빠지면 orchestration이 그 축에서
@@ -890,11 +891,18 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
         if path == "/api/rates":
             if rates_error is not None:
                 raise rates_error
+            if rates_by_source is not None:
+                rows = [{"currency": "usd-krw", "bank": b, "rate": 1400.0,
+                         "timestamp": t} for b, t in rates_by_source.items()]
+            else:
+                rows = [{"currency": "usd-krw", "bank": b, "rate": 1400.0,
+                         "timestamp": rates_updated_at}
+                        for b in ("kb", "nh")] * max(1, rates_count // 2)
+                rows = rows[:rates_count] if rates_count else []
             return {
-                "rates": [{"currency": "usd-krw", "bank": "kb", "rate": 1400.0,
-                           "timestamp": rates_updated_at}] * rates_count,
+                "rates": rows,
                 "metadata": {"updated_at": rates_updated_at,
-                             "total_count": rates_count},
+                             "total_count": len(rows)},
             }
         if path == "/admin/api/dashboard":
             return {"broadcast": {"success_rate": 100.0}, "errors_1h": 0}
@@ -976,7 +984,19 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def _artifact(self):
-        return V.EvidenceArtifact(pathlib.Path(self.tmp.name) / "ev.jsonl")
+        self._art = V.EvidenceArtifact(pathlib.Path(self.tmp.name) / "ev.jsonl")
+        return self._art
+
+    def _records(self, kind: str) -> list[dict]:
+        """증거 파일에서 해당 축의 record 를 읽는다 (payload 는 top-level 병합)."""
+        out = []
+        for line in self._art.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("kind") == kind:
+                out.append(rec)
+        return out
 
     async def test_happy_path_passes_and_finalizes(self):
         ad = _adapters(self.clock, statuses=[_payload(), _payload()])
@@ -1141,18 +1161,67 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         # 서비스 실증은 별 축이 담당해야 한다
         self.assertIn("async def _collect_service_evidence", src)
 
-    async def test_service_evidence_stale_rates_fail(self):
-        """실 서비스 축: `/api/rates`가 낡았으면 FAILED."""
+    async def test_observation_time_going_backwards_fails(self):
+        """⭐ 관측 시각이 뒤로 가는 것은 **모호하지 않은** 회귀다."""
+        base = _baseline(service_baseline={"kb": _T0, "nh": _T0})
         ad = _adapters(self.clock, statuses=[_payload()],
-                       rates_updated_at="2026-08-17T00:00:00+00:00")  # 6시간 전
-        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+                       rates_by_source={"kb": "2026-08-17T00:00:00+00:00",  # 역행
+                                        "nh": "2026-08-17T06:06:00+00:00"})
+        got = await V.collect_evidence(base, ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
-        self.assertTrue(any("rates" in r for r in got["reasons"]), got["reasons"])
+        self.assertTrue(any("kb" in r and "뒤로" in r for r in got["reasons"]),
+                        got["reasons"])
 
-    async def test_service_evidence_empty_rates_fail(self):
-        ad = _adapters(self.clock, statuses=[_payload()], rates_count=0)
+    async def test_no_advance_is_recorded_not_judged(self):
+        """⭐ "갱신 없음"은 **판정하지 않는다** — 이 창에서 죽음과 느린 주기가
+        구분되지 않기 때문이다(배포+관측 ~15분이면 죽은 소스도 15분치만 낡는다).
+        대신 소스별로 기록해 사람이 대조하게 한다.
+        """
+        stale = "2026-08-14T06:00:00+00:00"    # 휴장 소스: 그대로 멈춰 있다
+        base = _baseline(service_baseline={"sc": stale, "nh": _T0})
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       rates_by_source={"sc": stale,
+                                        "nh": "2026-08-17T06:06:00+00:00"})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+        per = self._records("service")[-1]["per_source"]
+        self.assertFalse(per["sc"]["advanced"])
+        self.assertEqual(per["sc"]["verdict"], V.OBSERVED)
+        self.assertTrue(per["nh"]["advanced"])
+
+    async def test_every_baseline_source_is_recorded(self):
+        """`max(timestamp)` 로 접지 않는다 — **소스마다** 기록이 남아야 한다."""
+        base = _baseline(service_baseline={"kb": _T0, "nh": _T0, "sc": _T0})
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       rates_by_source={"kb": "2026-08-17T06:06:00+00:00",
+                                        "nh": "2026-08-17T06:06:00+00:00",
+                                        "sc": _T0})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+        self.assertEqual(set(self._records("service")[-1]["per_source"]),
+                         {"kb", "nh", "sc"})
+
+    async def test_source_disappearing_from_response_fails(self):
+        """baseline 에 있던 소스가 응답에서 **사라지면** 회귀다."""
+        base = _baseline(service_baseline={"kb": _T0, "nh": _T0})
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       rates_by_source={"nh": "2026-08-17T06:06:00+00:00"})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
+    async def test_service_baseline_missing_is_unverified(self):
+        """baseline 스냅샷이 없으면 비교할 기준이 없다 — PASS 로 넘기지 않는다."""
+        base = _baseline(service_baseline=None)
+        ad = _adapters(self.clock, statuses=[_payload()])
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+
+    async def test_service_evidence_empty_rates_is_regression_not_unverified(self):
+        """빈 응답은 관측 불능이 아니라 **baseline 소스 전부 소실** = 회귀다."""
+        ad = _adapters(self.clock, statuses=[_payload()], rates_by_source={})
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("사라졌다" in r for r in got["reasons"]), got["reasons"])
 
     async def test_service_evidence_fetch_failure_is_unverified(self):
         ad = _adapters(self.clock, statuses=[_payload()],

@@ -590,6 +590,104 @@ class TestRevertPath(unittest.TestCase):
         # 우리가 넣은 행은 지우는 것이 역연산이다
         self.assertEqual(by_date["2026-08-14"]["action"], "delete")
 
+    def test_apply_revert_plan_exists_and_is_wired(self):
+        """⭐ **계획은 실행 경로가 아니다.**
+
+        `build_revert_plan` docstring 이 `apply_revert_plan` 을 약속했는데 그
+        함수가 없었다 — 문서가 코드가 하지 않는 일을 주장한 사례다. CLI 에서도
+        도달 가능해야 "되돌릴 수 있다"고 말할 수 있다.
+        """
+        self.assertTrue(callable(getattr(R, "apply_revert_plan", None)),
+                        "apply_revert_plan 이 없다 — 계획만 있고 실행이 없다")
+        parser = R.build_parser()
+        args = parser.parse_args(["--revert-from", "/tmp/pre.json",
+                                  "--preimage-out", "/tmp/x.json"])
+        self.assertEqual(args.revert_from, "/tmp/pre.json")
+
+    def test_revert_and_write_are_mutually_exclusive(self):
+        parser = R.build_parser()
+        args = parser.parse_args(["--write", "--expect-preimage-sha", "a" * 64,
+                                  "--revert-from", "/tmp/pre.json",
+                                  "--preimage-out", "/tmp/x.json"])
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R._validate_cli(args)
+        self.assertIn("revert", str(ctx.exception))
+
+    def test_revert_postcondition_is_original_preimage_sha(self):
+        """되돌림이 옳다는 것을 무엇이 증명하는가 — **지문 복원**이다.
+
+        전 컬럼을 원래대로 돌려놓았으면 preimage 지문을 다시 떴을 때 원래
+        sha 가 그대로 나와야 한다. 하나라도 어긋나면 나오지 않는다.
+        """
+        pre = {FEB: _stored(contract="A75602", metadata={"x": 1}), AUG: None}
+        original_sha = R.preimage_sha(R.preimage_fingerprint(pre))
+
+        state = {FEB: _stored(contract="A75603", metadata={"y": 2}), AUG: _stored(d=AUG)}
+        applied = []
+
+        def restore(target_date, values):
+            state[target_date] = dict(values)
+            applied.append(("restore", target_date))
+            return 1
+
+        def delete(target_date):
+            state[target_date] = None
+            applied.append(("delete", target_date))
+            return 1
+
+        result = R.apply_revert_plan(
+            plan=R.build_revert_plan({str(d): (None if r is None else
+                                               {k: r[k] for k in R.PREIMAGE_COLUMNS})
+                                      for d, r in pre.items()}),
+            expected_sha=original_sha,
+            lock_and_read=lambda d: state[d],
+            restore=restore, delete=delete,
+            reread=lambda d: state[d])
+        self.assertEqual(sorted(applied), [("delete", AUG), ("restore", FEB)])
+        self.assertEqual(result["restored_preimage_sha"], original_sha)
+
+    def test_revert_aborts_when_result_does_not_match_preimage(self):
+        """복원 결과가 원래 지문과 다르면 중단(caller 가 rollback)."""
+        pre = {FEB: _stored(contract="A75602"), AUG: None}
+        original_sha = R.preimage_sha(R.preimage_fingerprint(pre))
+        state = {FEB: _stored(contract="A75603"), AUG: _stored(d=AUG)}
+
+        def sloppy_restore(target_date, values):
+            bad = dict(values)
+            bad["close"] = Decimal("9999.0")     # 한 컬럼만 틀리게
+            state[target_date] = bad
+            return 1
+
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R.apply_revert_plan(
+                plan=R.build_revert_plan(
+                    {str(d): (None if r is None else
+                              {k: r[k] for k in R.PREIMAGE_COLUMNS})
+                     for d, r in pre.items()}),
+                expected_sha=original_sha,
+                lock_and_read=lambda d: state[d],
+                restore=sloppy_restore,
+                delete=lambda d: (state.__setitem__(d, None), 1)[1],
+                reread=lambda d: state[d])
+        self.assertIn("지문", str(ctx.exception))
+
+    def test_revert_requires_rowcount_one(self):
+        pre = {FEB: _stored(contract="A75602"), AUG: None}
+        sha = R.preimage_sha(R.preimage_fingerprint(pre))
+        state = {FEB: _stored(contract="A75603"), AUG: _stored(d=AUG)}
+        with self.assertRaises(R.RepairAbort) as ctx:
+            R.apply_revert_plan(
+                plan=R.build_revert_plan(
+                    {str(d): (None if r is None else
+                              {k: r[k] for k in R.PREIMAGE_COLUMNS})
+                     for d, r in pre.items()}),
+                expected_sha=sha,
+                lock_and_read=lambda d: state[d],
+                restore=lambda d, v: 0,          # 0행 — 대상이 바뀌었다
+                delete=lambda d: 1,
+                reread=lambda d: state[d])
+        self.assertIn("rowcount", str(ctx.exception))
+
     def test_revert_refuses_unknown_dates(self):
         with self.assertRaises(R.RepairAbort):
             R.build_revert_plan({"2026-03-01": None})

@@ -327,6 +327,7 @@ class Baseline:
     expected_expires_on: str
     expected_revision: str
     expected_source_sha256: str
+    service_baseline: Optional[dict] = None
 
     @property
     def expected_contract(self) -> ContractTuple:
@@ -863,7 +864,7 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
         reasons.append(health_detail)
 
     service, service_detail = await _collect_service_evidence(
-        adapters, artifact, adapters.now())
+        adapters, baseline, artifact, adapters.now())
     if service != PASS:
         reasons.append(service_detail)
 
@@ -1140,67 +1141,127 @@ async def _verify_reachability(adapters: Adapters,
     return (PASS, "도달성 확인") if ok else (FAILED, f"/health status={status!r}")
 
 
-async def _collect_service_evidence(adapters: Adapters, artifact: EvidenceArtifact,
-                                    now: datetime,
-                                    max_age_seconds: float = RATES_MAX_AGE_SECONDS
-                                    ) -> tuple[str, str]:
-    """**실제 데이터가 흐르는가.** `--force-recreate`는 KRX만 내리지 않는다.
+async def snapshot_source_freshness(adapters: Adapters) -> dict:
+    """`/api/rates` 를 **소스별 최신 관측 시각**으로 접는다.
 
-    `/api/rates`는 crawl → 저장 → serve 전 경로의 산출물이고, 실패 시 빈 200이
-    아니라 503이라(main.py) "비었는데 성공"이 되지 않는다. 그래서 이 축은
-    `/health`와 달리 **실제로 무언가를 증명**한다:
-      - rates 개수 > 0
-      - 가장 최신 관측이 `max_age_seconds` 안
-    dashboard(broadcast·errors_1h)는 **판정하지 않고 증거로만** 남긴다 — 임계값을
-    여기서 정하면 배포 시간대별 정상 범위를 이 도구가 참칭하게 된다.
+    ⚠️ 범위: `/api/rates` 는 legacy 정책상 **USDT·KRX 를 제외**한다
+    (`app/crud.py` `_filter_source_entries_by_legacy_policy`, Z-2d). 즉 이 축은
+    FX(은행+investing)만 덮는다. KRX 는 별도 축(krx-status)이 보고, USDT 는
+    이 도구가 덮지 않는다 — runbook 이 그 한계를 적는다.
     """
-    try:
-        payload = await adapters.admin_fetch("/api/rates")
-    except CollectorError as exc:
-        artifact.append("service", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
-        return UNVERIFIED, f"/api/rates 조회 실패: {exc}"
-
+    payload = await adapters.admin_fetch("/api/rates")
     rates = payload.get("rates")
-    if not isinstance(rates, list) or not rates:
-        artifact.append("service", {"verdict": FAILED, "rates_count": 0})
-        return FAILED, "/api/rates가 비어 있다 — 데이터 경로가 살아있지 않다"
-
-    stamps: list[datetime] = []
+    if not isinstance(rates, list):
+        raise CollectorError("/api/rates 응답에 rates 배열이 없다")
+    # ⛔ 빈 배열을 조회 실패(UNVERIFIED)로 접지 않는다 — baseline 의 모든 소스가
+    #    사라진 것이고, 그건 관측 불능이 아니라 **회귀**다. 아래 비교가 그렇게 센다.
+    newest: dict[str, str] = {}
     for row in rates:
-        raw = (row or {}).get("timestamp") if isinstance(row, dict) else None
-        if not raw:
+        if not isinstance(row, dict):
+            continue
+        source = row.get("bank") or row.get("source")
+        raw = row.get("timestamp")
+        if not source or not raw:
             continue
         try:
             parsed = datetime.fromisoformat(str(raw))
         except ValueError:
             continue
-        if parsed.tzinfo is not None:
-            stamps.append(parsed)
-    if not stamps:
+        if parsed.tzinfo is None:
+            continue
+        prev = newest.get(str(source))
+        if prev is None or parsed > datetime.fromisoformat(prev):
+            newest[str(source)] = parsed.isoformat()
+    return newest
+
+
+def evaluate_service_regression(before: dict, after: dict, now: datetime
+                                ) -> tuple[str, list[str], dict]:
+    """baseline 대비 소스별 상태. **명확한 것만 판정**하고 나머지는 증거로 남긴다.
+
+    왜 stale 나이로 판정하지 않는가 — 두 방향 모두 실측으로 막혔다:
+
+    1. **절대 임계값은 배포 창에서 오탐한다.** 배포 창은 휴장·장외를 포함하고
+       그때 은행 고시는 정상적으로 낡아 있다. 2026-08-17(대체공휴일) 운영 응답:
+       sc 248282s / ibk 23529s / bs 16349s — 전부 정상이다.
+    2. **`max(timestamp)` 하나는 한 소스만 살아 있어도 통과시킨다.** 같은 응답에서
+       30행 중 15행이 30분 초과인데 nh 6초가 전체를 통과시켰다.
+    3. **나이 델타도 못 쓴다.** 배포+관측이 ~15분이라, 배포 순간 죽은 소스도
+       collect 시점엔 15분치만 낡는다. "죽음"과 "느린 주기"가 그 창 안에서
+       구분되지 않는다 — 델타 임계값은 둘 중 하나를 반드시 틀린다.
+
+    그래서 **모호하지 않은 것만** FAILED로 올린다:
+      - baseline 에 있던 소스가 응답에서 **사라짐**
+      - 관측 시각이 **뒤로 감** (데이터 손상)
+    "갱신 없음(advanced=False)"은 판정하지 않고 소스별로 **기록**한다 —
+    runbook 8항목 #6이 사람에게 그 목록을 대조하게 한다.
+    """
+    reasons: list[str] = []
+    detail: dict[str, dict] = {}
+    for source, before_iso in sorted(before.items()):
+        try:
+            before_at = datetime.fromisoformat(str(before_iso))
+        except (TypeError, ValueError):
+            continue
+        after_iso = after.get(source)
+        if after_iso is None:
+            reasons.append(f"{source}: baseline 에 있었는데 응답에서 사라졌다")
+            detail[source] = {"before": before_iso, "after": None,
+                              "verdict": FAILED}
+            continue
+        after_at = datetime.fromisoformat(str(after_iso))
+        if after_at < before_at:
+            reasons.append(
+                f"{source}: 관측 시각이 뒤로 갔다 ({before_iso} → {after_iso})")
+            detail[source] = {"before": before_iso, "after": after_iso,
+                              "verdict": FAILED}
+            continue
+        detail[source] = {
+            "before": before_iso, "after": after_iso,
+            "advanced": after_at > before_at,
+            "age_seconds": round((now - after_at).total_seconds(), 1),
+            # ⛔ 판정이 아니다. 갱신 없음이 죽음인지 느린 주기인지는 이 창에서
+            #    구분되지 않으므로 사람이 본다.
+            "verdict": PASS if after_at > before_at else OBSERVED,
+        }
+    verdict = FAILED if reasons else PASS
+    return verdict, reasons, detail
+
+
+async def _collect_service_evidence(adapters: Adapters, baseline: Baseline,
+                                    artifact: EvidenceArtifact,
+                                    now: datetime) -> tuple[str, str]:
+    """**실제 데이터가 흐르는가** — baseline 대비 회귀로 판정한다.
+
+    `/health` 는 정적 dict 라 도달성만 증명한다(`_verify_reachability`). 이 축이
+    서비스 실증을 맡는다. dashboard 는 **판정하지 않고 증거로만** 남긴다 —
+    임계값을 여기서 정하면 시간대별 정상 범위를 이 도구가 참칭하게 된다.
+    """
+    if not baseline.service_baseline:
         artifact.append("service", {"verdict": UNVERIFIED,
-                                    "rates_count": len(rates),
-                                    "error": "timestamp를 읽을 수 없다"})
-        return UNVERIFIED, "/api/rates timestamp를 읽을 수 없다 — 신선도 판정 불가"
+                                    "error": "baseline 에 서비스 스냅샷이 없다"})
+        return UNVERIFIED, "서비스 baseline 부재 — 회귀를 판정할 기준이 없다"
+    try:
+        after = await snapshot_source_freshness(adapters)
+    except CollectorError as exc:
+        artifact.append("service", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        return UNVERIFIED, f"/api/rates 조회 실패: {exc}"
 
-    newest = max(stamps)
-    age = (now - newest).total_seconds()
+    verdict, reasons, detail = evaluate_service_regression(
+        baseline.service_baseline, after, now)
 
-    # 판정하지 않는 보조 증거. 실패해도 이 축을 죽이지 않는다.
     dashboard: Any = None
     try:
         dashboard = await adapters.admin_fetch("/admin/api/dashboard")
     except CollectorError as exc:
         dashboard = {"error": str(exc)[:200]}
 
-    record = {"rates_count": len(rates), "newest": newest.isoformat(),
-              "age_seconds": round(age, 1), "max_age_seconds": max_age_seconds,
-              "dashboard": dashboard}
-    if age > max_age_seconds:
-        artifact.append("service", {"verdict": FAILED, **record})
-        return FAILED, (f"/api/rates 최신 관측이 {round(age)}s 전 "
-                        f"(> {round(max_age_seconds)}s) — 데이터가 갱신되지 않는다")
-    artifact.append("service", {"verdict": PASS, **record})
-    return PASS, f"/api/rates 신선({round(age)}s), {len(rates)}건"
+    artifact.append("service", {"verdict": verdict, "per_source": detail,
+                                "dashboard": dashboard,
+                                "scope": "FX only — /api/rates 는 USDT·KRX 제외"})
+    if verdict != PASS:
+        return verdict, "; ".join(reasons)
+    return PASS, f"서비스 회귀 없음 ({len(detail)} source)"
 
 
 async def _read_identity(adapters: Adapters) -> ContainerIdentity:
@@ -1435,6 +1496,15 @@ async def _prepare(args) -> int:
     parts = raw.strip().split("|")
     if len(parts) != 4:
         raise CollectorError(f"inspect 형식 예상 밖: {raw.strip()[:120]}")
+    # 배포 **전** 소스별 신선도. 이게 없으면 collect 가 회귀를 판정할 기준이 없다.
+    # 실패해도 prepare 를 죽이지 않는다 — collect 가 UNVERIFIED 로 보고한다.
+    try:
+        service_baseline = await snapshot_source_freshness(
+            production_adapters(target))
+    except CollectorError as exc:
+        print(f"⚠️ 서비스 baseline 스냅샷 실패: {exc}", file=sys.stderr)
+        service_baseline = None
+
     baseline = Baseline(
         t0_iso=_utc_now_iso(),
         old_container_id=parts[0],
@@ -1446,6 +1516,7 @@ async def _prepare(args) -> int:
         expected_expires_on=args.expect_expires_on,
         expected_revision=revision,
         expected_source_sha256=source_sha,
+        service_baseline=service_baseline,
     )
     path = pathlib.Path(args.baseline)
     payload = (baseline.to_json() + "\n").encode("utf-8")
