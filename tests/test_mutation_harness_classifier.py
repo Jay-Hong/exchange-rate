@@ -91,17 +91,17 @@ def test_main_counters_follow_classify_not_the_first_probe(
             return str(_iso / "auth_executor.py")
 
         def __init__(self):
-            self.text = "AAA\n"
-        def read_text(self):
-            return self.text
-        def write_text(self, s):
-            self.text = s
+            self.data = b"AAA\n"
+        def read_bytes(self):
+            return self.data
+        def write_bytes(self, data):
+            self.data = data
     fake = _FakeSrc()
 
-    def _write(s, _orig=fake.write_text):
+    def _write(data, _orig=fake.write_bytes):
         state["mutating"] = True        # 변이본이 써진 뒤부터 주입
-        _orig(s)
-    fake.write_text = _write
+        _orig(data)
+    fake.write_bytes = _write
     monkeypatch.setattr(_BAT, "SRC", fake)
     rc = _BAT.main()
     out = capsys.readouterr().out

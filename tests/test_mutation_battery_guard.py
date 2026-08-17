@@ -7,6 +7,7 @@
 파일을 변이해 무관한 25건이 red 가 됐고, 동시 쓰기로 복원이 덮여 `init_rest_auth_app()` 이
 `pass` 로 남았다. 근본 기전은 workflow 격리이고 여기 잠그는 것은 **방어층**이다.
 """
+import ast
 import pathlib
 import subprocess
 import sys
@@ -56,14 +57,15 @@ class TestMutatedFile(unittest.TestCase):
     def setUp(self):
         import tempfile
 
-        d = pathlib.Path(tempfile.mkdtemp())
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="fxi-mutated-file-test-")
+        self.addCleanup(self._tmpdir.cleanup)
+        d = pathlib.Path(self._tmpdir.name)
         # ⛔ 표식을 **명시적으로** 붙인다. 이 클래스가 시험하는 것은 `MutatedFile` 의
         #    충돌 감지 의미이지 격리 자체가 아니다(격리는 전용 클래스가 시험한다).
         #    가드를 끄는 대신 opt-in 한다.
         (d / ISOLATION_MARKER).write_text("test\n")
         self.tmp = d / "target.py"
         self.tmp.write_text("x = 1\n")
-        self.addCleanup(lambda: self.tmp.unlink(missing_ok=True))
 
     def test_normal_write_then_restore_returns_the_original(self):
         handle = MutatedFile(self.tmp)
@@ -71,6 +73,14 @@ class TestMutatedFile(unittest.TestCase):
         self.assertEqual(self.tmp.read_text(), "x = 2\n")
         handle.restore()
         self.assertEqual(self.tmp.read_text(), "x = 1\n")
+
+    def test_restore_preserves_the_exact_original_bytes(self):
+        original = b"x = 1\r\n"
+        self.tmp.write_bytes(original)
+        handle = MutatedFile(self.tmp)
+        handle.write_mutant("x = 2\n")
+        handle.restore()
+        self.assertEqual(self.tmp.read_bytes(), original)
 
     def test_external_change_before_write_is_detected_and_preserved(self):
         """⛔ 변이를 **쓰기 전에도** 확인한다 — 그 사이 남이 고쳤으면 그걸 덮게 된다."""
@@ -272,6 +282,24 @@ class TestIsolationIsEnforcedNotJustPracticed(unittest.TestCase):
             self.assertTrue(path.is_dir())
         self.assertFalse(path.exists(), "격리 worktree 가 남았다")
 
+    def test_every_repository_mutation_runner_adopts_all_three_guards(self):
+        """새 runner가 직접 쓰기로 되돌아가도 8개 수기 목록을 갱신하지 않고 잡는다."""
+        scripts = REPO / "scripts"
+        runners = {
+            path for path in scripts.glob("mutation_*.py")
+            if path.name != "mutation_battery_guard.py"
+        }
+        self.assertGreaterEqual(len(runners), 8, sorted(path.name for path in runners))
+        for path in sorted(runners):
+            tree = ast.parse(path.read_text())
+            calls = {
+                node.func.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            for required in ("battery_lock", "isolated_worktree", "MutatedFile"):
+                self.assertIn(required, calls, f"{path.name}: {required} 호출이 없다")
+
 
 class TestRunnerIsolationIntegration(unittest.TestCase):
     """helper 단독 시험이 아니라 runner가 격리 경계를 실제로 사용하는지 확인한다."""
@@ -337,6 +365,136 @@ class TestRunnerIsolationIntegration(unittest.TestCase):
         self.assertTrue(worktree.exited, "격리 worktree context를 닫지 않았다")
         self.assertTrue(lock.exited, "battery lock context를 닫지 않았다")
         self.assertIsNone(mod._WORK, "정리 뒤 worktree 전역이 남았다")
+
+    def test_s7_runner_probe_reads_the_isolated_mutant(self):
+        """변이와 probe cwd가 다른 트리를 보면 배터리는 전부 SURVIVED가 된다."""
+        import contextlib
+        import io
+
+        mod = self._load("battery_s7_isolation_test", "mutation_s7_exposure.py")
+        target = REPO / "app" / "main.py"
+        before = target.read_text()
+        worktrees_before = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        mod.MUTANTS = [mod.MUTANTS[0]]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = mod.main()
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("killed=1 survived=0", output.getvalue())
+        self.assertEqual(target.read_text(), before, "공유 production 파일이 바뀌었다")
+        worktrees_after = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(worktrees_after, worktrees_before, "runner가 임시 worktree를 남겼다")
+
+    def test_s6_runner_probe_reads_the_isolated_mutant(self):
+        """다중 대상 runner도 변이 파일과 probe가 같은 격리 트리를 봐야 한다."""
+        import contextlib
+        import io
+
+        mod = self._load("battery_s6_isolation_test", "mutation_s6_arrival.py")
+        target = REPO / "app" / "ws_connection_metrics.py"
+        before = target.read_text()
+        worktrees_before = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        mod.MUTANTS = [mod.MUTANTS[0]]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = mod.main()
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("killed=1 survived=0", output.getvalue())
+        self.assertEqual(target.read_text(), before, "공유 production 파일이 바뀌었다")
+        worktrees_after = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(worktrees_after, worktrees_before, "runner가 임시 worktree를 남겼다")
+
+    def test_s0_runner_probe_reads_the_isolated_mutant(self):
+        """S0 runner의 pytest도 격리된 queue-wait 변이를 읽어야 한다."""
+        import contextlib
+        import io
+
+        mod = self._load("battery_s0_isolation_test", "mutation_s0_queue_wait.py")
+        target = REPO / "app" / "subscribe_load_metrics.py"
+        before = target.read_bytes()
+        worktrees_before = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        mod.MUTANTS = [mod.MUTANTS[0]]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = mod.main()
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("killed=1 survived=0", output.getvalue())
+        self.assertEqual(target.read_bytes(), before, "공유 production 파일 bytes가 바뀌었다")
+        worktrees_after = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(worktrees_after, worktrees_before, "runner가 임시 worktree를 남겼다")
+
+    def test_c3_runner_probe_reads_the_isolated_mutant(self):
+        """C3 runner는 격리된 test/workflow/lock을 한 묶음으로 읽어야 한다."""
+        import contextlib
+        import io
+
+        mod = self._load("battery_c3_isolation_test", "mutation_c3_ios_pin_gate.py")
+        target = REPO / "tests" / "test_topic_only_ledger.py"
+        before = target.read_bytes()
+        worktrees_before = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        mod.MUTANTS = [mod.MUTANTS[0]]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = mod.main()
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("killed=1 survived=0", output.getvalue())
+        self.assertEqual(target.read_bytes(), before, "공유 ledger 테스트가 바뀌었다")
+        worktrees_after = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(worktrees_after, worktrees_before, "runner가 임시 worktree를 남겼다")
+
+    def test_subscribe_load_runner_probe_reads_the_isolated_mutant(self):
+        """CLI runner의 대표 변이도 격리 probe에서 실제로 죽어야 한다."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        mod = self._load(
+            "battery_subscribe_load_isolation_test",
+            "mutation_subscribe_load_metrics.py",
+        )
+        target = REPO / "app" / "subscribe_load_metrics.py"
+        before = target.read_bytes()
+        worktrees_before = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        mod.MUTANTS = [mod.MUTANTS[0]]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["mutation_subscribe_load_metrics.py"]):
+            with contextlib.redirect_stdout(output):
+                rc = mod.main()
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("/ 1 (문제 0)", output.getvalue())
+        self.assertEqual(target.read_bytes(), before, "공유 subscribe-load 파일이 바뀌었다")
+        worktrees_after = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(worktrees_after, worktrees_before, "runner가 임시 worktree를 남겼다")
 
 
 if __name__ == "__main__":

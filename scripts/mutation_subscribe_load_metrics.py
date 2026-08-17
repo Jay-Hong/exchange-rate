@@ -18,17 +18,23 @@
   - survived: 전부 green (테스트 gap — 잠글 것)
 종료 코드: survived/invalid/앵커 불일치가 하나라도 있으면 1.
 
-안전: 대상 파일은 byte 백업 후 finally 에서 복원하고, 복원 결과를 sha256 으로 재확인한다
-(복원 실패를 조용히 넘기면 미커밋 작업이 소실된다 — 실측 사고 이력).
+안전: 공유 worktree 의 미커밋 상태를 격리 worktree 에 재현하고, 파일별 단일 snapshot을
+`MutatedFile`이 충돌 감지와 함께 복원한다(복원 덮임으로 미커밋 작업이 소실된 실측 사고 이력).
 """
 
 # 표준 라이브러리
 import argparse
-import hashlib
 import pathlib
 import py_compile
 import subprocess
 import sys
+
+from mutation_battery_guard import (
+    BatteryLockBusy,
+    MutatedFile,
+    battery_lock,
+    isolated_worktree,
+)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MODULE = REPO / "app" / "subscribe_load_metrics.py"
@@ -69,7 +75,7 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
      '        "calls_by_channel": {name: 0 for name in CHANNELS},'),
     # ⚠️ 앵커는 현행 버전을 따라간다 — 버전이 오를 때마다 이 변이도 함께 갱신(S1c-07 계보).
     ("S1c-07 CONTRACT_VERSION 롤백", MODULE,
-     'CONTRACT_VERSION = "subscribe-load/5"', 'CONTRACT_VERSION = "subscribe-load/4"'),
+     'CONTRACT_VERSION = "subscribe-load/6"', 'CONTRACT_VERSION = "subscribe-load/5"'),
     ("S1c-08 premium 제출 집합 축소(unavailable_persistent)", MODULE,
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),\n    KRX_ENTITLEMENT:',
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient"}),\n    KRX_ENTITLEMENT:'),
@@ -313,41 +319,29 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
 
         if payload is None:''')),
     ("S3-44 build worker 축 우회(timed_call 제거)", SNAPSHOT,
-     '''                payload = await asyncio.to_thread(
-                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-                    _build_snapshot_sync, topic,
-                )''',
-     '''                payload = await asyncio.to_thread(_build_snapshot_sync, topic)'''),
+     '''        payload = await asyncio.to_thread(
+            subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+            _build_snapshot_sync, topic,
+        )''',
+     '''        payload = await asyncio.to_thread(_build_snapshot_sync, topic)'''),
     ("S3-45 built/none_payload 스왑", SNAPSHOT,
-     '                load.finish("none_payload" if payload is None else "built")',
-     '                load.finish("built" if payload is None else "none_payload")'),
-    ("S3-46 build CM 을 try 밖으로(파생 기록 소실)", SNAPSHOT,
+     '        load.finish("none_payload" if payload is None else "built")',
+     '        load.finish("built" if payload is None else "none_payload")'),
+    ("S3-46 build 예외를 CM 안에서 none_payload 로 접음(파생 기록 소실)", SNAPSHOT,
+     '''        payload = await asyncio.to_thread(
+            subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+            _build_snapshot_sync, topic,
+        )
+        load.finish("none_payload" if payload is None else "built")''',
      '''        try:
-            # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
-            #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
-            #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
-            async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
-                payload = await asyncio.to_thread(
-                    subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-                    _build_snapshot_sync, topic,
-                )
-                load.finish("none_payload" if payload is None else "built")
-        except subscribe_load.SubscribeLoadContractError:
-            # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
-            # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.
-            raise
-        except Exception:''',
-     '''        async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
-          try:
             payload = await asyncio.to_thread(
                 subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
                 _build_snapshot_sync, topic,
             )
-            load.finish("none_payload" if payload is None else "built")
-          except subscribe_load.SubscribeLoadContractError:
-            raise
-          except Exception:
-            load.finish("none_payload")'''),
+        except Exception:
+            load.finish("none_payload")
+            return None
+        load.finish("none_payload" if payload is None else "built")'''),
     ("S3-47 lease_skipped 기록 누락", SNAPSHOT,
      '''            # ⛔ build 를 **다 하고 버린** 낭비 — 폭주가 스스로를 키우는 구간의 신호.
             subscribe_load.record_snapshot_send("lease_skipped")''',
@@ -578,15 +572,11 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
 ]
 
 
-def sha(path: pathlib.Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def run_tests() -> str:
+def run_tests(cwd: pathlib.Path) -> str:
     r = subprocess.run(
         [sys.executable, "-m", "pytest", *TEST_TARGETS, "-q", "-p", "no:asyncio",
          "--no-header", "--tb=short"],
-        capture_output=True, text=True, timeout=300, cwd=REPO)
+        capture_output=True, text=True, timeout=300, cwd=cwd)
     out = r.stdout + r.stderr
     # ⛔ "ERROR" in out 같은 느슨한 조건은 tearDown ERROR kill 을 가드-kill 로 오분류했다
     #    (실측: S1b-23). 가드-kill 은 **collection 단계** 실패 + 가드 예외명일 때만이다.
@@ -610,15 +600,41 @@ def main() -> int:
     if not selected:
         print(f"⛔ '--only {args.only}' 에 맞는 변이가 없다"); return 1
 
-    if run_tests() != "survived":  # 변이 0 상태 = 전부 green 이어야 baseline
+    try:
+        lock_ctx = battery_lock(REPO)
+        lock_ctx.__enter__()
+    except BatteryLockBusy as exc:
+        print(f"❌ {exc}")
+        return 2
+    try:
+        wt_ctx = isolated_worktree(REPO)
+        work = wt_ctx.__enter__()
+    except Exception as exc:  # noqa: BLE001 — 격리 실패는 공유 트리 변이의 사유가 못 된다
+        lock_ctx.__exit__(None, None, None)
+        print(f"❌ 격리 worktree 생성 실패 — 공유 트리에서 변이하지 않는다: {exc}")
+        return 2
+    print(f"격리 worktree: {work}")
+    try:
+        return _main_locked(work, selected)
+    finally:
+        wt_ctx.__exit__(None, None, None)
+        lock_ctx.__exit__(None, None, None)
+
+
+def _main_locked(work: pathlib.Path, selected: list[tuple]) -> int:
+    handles = {
+        path: MutatedFile(work / path.relative_to(REPO))
+        for path in {m[1] for m in selected}
+    }
+
+    if run_tests(work) != "survived":  # 변이 0 상태 = 전부 green 이어야 baseline
         print("⛔ baseline 이 green 이 아니다 — 변이 판정 불가"); return 1
 
     problems = 0
     tally = {"killed_tests": 0, "killed_guard": 0}
     for label, path, old, new in selected:
-        original = path.read_bytes()
-        original_sha = hashlib.sha256(original).hexdigest()
-        text = original.decode()
+        handle = handles[path]
+        text = handle.original
         if isinstance(old, tuple) or isinstance(new, tuple):
             # ⛔ shape 검사 — zip 은 길이가 다르면 조용히 잘라 edit 하나가 사라진다.
             if not (isinstance(old, tuple) and isinstance(new, tuple) and len(old) == len(new)):
@@ -633,21 +649,19 @@ def main() -> int:
             mutated = text
             for o, nw in pairs:
                 mutated = mutated.replace(o, nw, 1)
-            path.write_text(mutated)
+            handle.write_mutant(mutated)
             try:
-                py_compile.compile(str(path), doraise=True)
+                py_compile.compile(str(handle.path), doraise=True)
             except Exception:
                 print(f"  ⚠️ 구문 오류(무효 변이) — {label}"); problems += 1; continue
-            state = run_tests()
+            state = run_tests(work)
             if state in tally:
                 tally[state] += 1
                 print(f"  ✅ {state} — {label}")
             else:
                 print(f"  ❌ {state} — {label}"); problems += 1
         finally:
-            path.write_bytes(original)
-            if sha(path) != original_sha:  # ⛔ 복원 실패는 조용히 넘기지 않는다
-                print(f"⛔ 복원 실패: {path}"); return 2
+            handle.restore()
     print(f"합계: 테스트-kill {tally['killed_tests']} + 가드-kill {tally['killed_guard']}"
           f" / {len(selected)} (문제 {problems})")
     return 1 if problems else 0

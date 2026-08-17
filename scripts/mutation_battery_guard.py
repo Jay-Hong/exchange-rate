@@ -71,10 +71,8 @@ def lock_path(repo: pathlib.Path) -> pathlib.Path:
 def battery_lock(repo: pathlib.Path) -> Iterator[pathlib.Path]:
     """이 worktree 에서 **이 가드를 채택한** 배터리들이 공유하는 배타 락.
 
-    ⚠️ "모든 배터리" 가 아니다 — 현재 `mutation_c3_ios_pin_gate` · `mutation_s0_queue_wait` ·
-       `mutation_s6_arrival` · `mutation_s7_exposure` · `mutation_subscribe_load_metrics` 5개는
-       아직 직접 쓰기 방식이라 이 락을 우회한다. 이관은 별도 hardening 슬라이스다 —
-       복원 구조(다중 파일·bytes)가 서로 달라 한 슬라이스에 끌어들이면 범위가 과도해진다.
+    현재 저장소의 production mutation runner 8개가 모두 이 락과 `isolated_worktree()`,
+    `MutatedFile`을 함께 쓴다. 새 runner가 이 셋 중 하나를 빠뜨리면 영구 완결성 테스트가 거부한다.
 
     ⛔ 비차단(`LOCK_NB`)이다 — 기다리지 않고 즉시 거절한다. 배터리는 몇 분씩 도는데 대기하면
        두 번째 실행이 조용히 줄을 서다가 첫 실행이 끝난 뒤 시작해 원인 추적을 흐린다.
@@ -104,35 +102,37 @@ class MutatedFile:
 
     def __init__(self, path: pathlib.Path) -> None:
         self.path = path
-        self.original = path.read_text()
-        self.original_sha = hashlib.sha256(self.original.encode()).hexdigest()
-        self._last_written = self.original
+        self.original_bytes = path.read_bytes()
+        self.original = self.original_bytes.decode()
+        self.original_sha = hashlib.sha256(self.original_bytes).hexdigest()
+        self._last_written = self.original_bytes
 
     def write_mutant(self, text: str) -> None:
         """격리 트리인지 확인한 뒤, 디스크가 아직 내 것일 때만 변이본을 쓴다."""
         assert_isolated(self.path)
         self._assert_ours("변이 적용 전")
-        self.path.write_text(text)
-        self._last_written = text
+        encoded = text.encode()
+        self.path.write_bytes(encoded)
+        self._last_written = encoded
 
     def restore(self) -> None:
         """⛔ 무조건 덮어쓰지 않는다 — 남의 변경을 지우는 것이 이 사고의 핵심이었다."""
         assert_isolated(self.path)
         self._assert_ours("복원 전")
-        self.path.write_text(self.original)
-        self._last_written = self.original
-        got = hashlib.sha256(self.path.read_text().encode()).hexdigest()
+        self.path.write_bytes(self.original_bytes)
+        self._last_written = self.original_bytes
+        got = hashlib.sha256(self.path.read_bytes()).hexdigest()
         if got != self.original_sha:
             raise MutationConflict(f"복원 후 내용이 원본과 다르다: {self.path}")
 
     def _assert_ours(self, when: str) -> None:
-        on_disk = self.path.read_text()
+        on_disk = self.path.read_bytes()
         if on_disk != self._last_written:
             raise MutationConflict(
                 f"{when}: {self.path} 를 다른 프로세스가 바꿨다. "
                 "덮어쓰면 그 변경이 사라진다 — 수동으로 확인할 것.\n"
-                f"  기대 sha={hashlib.sha256(self._last_written.encode()).hexdigest()[:12]} "
-                f"실제 sha={hashlib.sha256(on_disk.encode()).hexdigest()[:12]}"
+                f"  기대 sha={hashlib.sha256(self._last_written).hexdigest()[:12]} "
+                f"실제 sha={hashlib.sha256(on_disk).hexdigest()[:12]}"
             )
 
 

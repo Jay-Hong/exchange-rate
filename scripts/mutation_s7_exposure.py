@@ -7,10 +7,16 @@
 
 # 표준 라이브러리
 import ast
-import hashlib
 import pathlib
 import subprocess
 import sys
+
+from mutation_battery_guard import (
+    BatteryLockBusy,
+    MutatedFile,
+    battery_lock,
+    isolated_worktree,
+)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MAIN = REPO / "app" / "main.py"
@@ -57,23 +63,46 @@ MUTANTS = [
 ]
 
 
-def _run():
+def _run(cwd: pathlib.Path):
     return subprocess.run([sys.executable, "-m", "pytest", *TESTS, "-q", "-p", "no:asyncio", "-x"],
-                          capture_output=True, text=True, cwd=REPO)
+                          capture_output=True, text=True, cwd=cwd)
 
 
 def main() -> int:
     try:
+        lock_ctx = battery_lock(REPO)
+        lock_ctx.__enter__()
+    except BatteryLockBusy as exc:
+        print(f"❌ {exc}")
+        return 2
+    try:
+        wt_ctx = isolated_worktree(REPO)
+        work = wt_ctx.__enter__()
+    except Exception as exc:  # noqa: BLE001 — 격리 실패는 공유 트리 변이의 사유가 못 된다
+        lock_ctx.__exit__(None, None, None)
+        print(f"❌ 격리 worktree 생성 실패 — 공유 트리에서 변이하지 않는다: {exc}")
+        return 2
+    print(f"격리 worktree: {work}")
+    try:
+        return _main_locked(work)
+    finally:
+        wt_ctx.__exit__(None, None, None)
+        lock_ctx.__exit__(None, None, None)
+
+
+def _main_locked(work: pathlib.Path) -> int:
+    try:
         import pytest  # noqa: F401
     except ImportError:
         print(f"❌ INFRA: {sys.executable} 에 pytest 가 없다"); return 2
-    base = _run()
+    base = _run(work)
     if base.returncode != 0:
         print(f"❌ INFRA: 무변이 기준선 exit {base.returncode}"); print(base.stdout[-1200:]); return 2
     print("✅ 기준선 green\n")
 
-    original = MAIN.read_text()
-    digest = hashlib.sha256(original.encode()).hexdigest()
+    main_path = work / MAIN.relative_to(REPO)
+    handle = MutatedFile(main_path)
+    original = handle.original
     killed = survived = invalid = infra = 0
     try:
         for name, pairs in MUTANTS:
@@ -89,9 +118,11 @@ def main() -> int:
                 ast.parse(text)
             except SyntaxError as exc:
                 print(f"  INVALID  {name}  ← 구문 파괴: {exc.msg}"); invalid += 1; continue
-            MAIN.write_text(text)
-            r = _run()
-            MAIN.write_text(original)
+            handle.write_mutant(text)
+            try:
+                r = _run(work)
+            finally:
+                handle.restore()
             if r.returncode == _TEST_FAILED:
                 hint = next((l for l in r.stdout.splitlines() if l.startswith("FAILED") or "Error" in l), "")
                 print(f"  KILLED   {name}  ← {hint[:70]}"); killed += 1
@@ -102,8 +133,7 @@ def main() -> int:
             else:
                 print(f"  INFRA    {name}  ← 예상 밖 exit {r.returncode}"); infra += 1
     finally:
-        MAIN.write_text(original)
-        assert hashlib.sha256(MAIN.read_text().encode()).hexdigest() == digest, "복원 실패"
+        handle.restore()
 
     print(f"\n  killed={killed} survived={survived} invalid={invalid} infra={infra} / {len(MUTANTS)}")
     return 0 if (survived == 0 and invalid == 0 and infra == 0) else 1

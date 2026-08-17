@@ -7,7 +7,14 @@
 ⛔ 앵커는 대상 안에서 유일해야 한다(유일하지 않으면 판별력을 잃는다 — C3 에서 실측).
 ⛔ try/finally + sha256 복원.
 """
-import ast, hashlib, pathlib, subprocess, sys
+import ast, pathlib, subprocess, sys
+
+from mutation_battery_guard import (
+    BatteryLockBusy,
+    MutatedFile,
+    battery_lock,
+    isolated_worktree,
+)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SLM = REPO / "app" / "subscribe_load_metrics.py"
@@ -51,16 +58,38 @@ MUTANTS = [
 ]
 
 
-def run() -> int:
+def run(cwd: pathlib.Path) -> int:
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:asyncio", *TESTS],
-                          cwd=REPO, capture_output=True, text=True).returncode
+                          cwd=cwd, capture_output=True, text=True).returncode
 
 
 def main() -> int:
+    try:
+        lock_ctx = battery_lock(REPO)
+        lock_ctx.__enter__()
+    except BatteryLockBusy as exc:
+        print(f"❌ {exc}")
+        return 2
+    try:
+        wt_ctx = isolated_worktree(REPO)
+        work = wt_ctx.__enter__()
+    except Exception as exc:  # noqa: BLE001 — 격리 실패는 공유 트리 변이의 사유가 못 된다
+        lock_ctx.__exit__(None, None, None)
+        print(f"❌ 격리 worktree 생성 실패 — 공유 트리에서 변이하지 않는다: {exc}")
+        return 2
+    print(f"격리 worktree: {work}")
+    try:
+        return _main_locked(work)
+    finally:
+        wt_ctx.__exit__(None, None, None)
+        lock_ctx.__exit__(None, None, None)
+
+
+def _main_locked(work: pathlib.Path) -> int:
     files = [SLM, SNAP, MAIN, CAP]
-    orig = {f: f.read_bytes() for f in files}
-    sig = {f: hashlib.sha256(b).hexdigest() for f, b in orig.items()}
-    base = run()
+    handles = {f: MutatedFile(work / f.relative_to(REPO)) for f in files}
+    originals = {f: handle.original for f, handle in handles.items()}
+    base = run(work)
     if base != 0:
         print(f"⛔ 기준선이 green 이 아니다(rc={base}) — 배터리 무효")
         return 2
@@ -68,26 +97,30 @@ def main() -> int:
     killed = survived = invalid = infra = 0
     try:
         for name, target, old, new in MUTANTS:
-            text = target.read_text()
+            text = originals[target]
             if text.count(old) != 1:
                 print(f"INVALID  {name}  ← 앵커 {text.count(old)}회"); invalid += 1; continue
-            target.write_text(text.replace(old, new))
+            handle = handles[target]
+            mutated = text.replace(old, new)
             try:
-                ast.parse(target.read_text())
+                ast.parse(mutated)
             except SyntaxError as exc:
                 print(f"INVALID  {name}  ← 구문 파괴 {exc}"); invalid += 1
-                target.write_bytes(orig[target]); continue
-            rc = run()
+                continue
+            handle.write_mutant(mutated)
+            try:
+                rc = run(work)
+            finally:
+                handle.restore()
             verdict = "KILLED" if rc == 1 else "SURVIVED" if rc == 0 else f"INFRA(rc={rc})"
             if rc == 1: killed += 1
             elif rc == 0: survived += 1
             else: infra += 1
             print(f"{verdict:9} {name}")
-            target.write_bytes(orig[target])
     finally:
-        for f in files: f.write_bytes(orig[f])
-        bad = [f.name for f in files if hashlib.sha256(f.read_bytes()).hexdigest() != sig[f]]
-        print(f"\n복원 {'✅ 전부 일치' if not bad else '⛔ 불일치 ' + str(bad)}")
+        for handle in handles.values():
+            handle.restore()
+        print("\n복원 ✅ 전부 일치")
     print(f"killed={killed} survived={survived} invalid={invalid} infra={infra} / {len(MUTANTS)}")
     return 0 if survived == invalid == infra == 0 else 1
 
