@@ -43,11 +43,15 @@ def _require_pg() -> str:
     raise unittest.SkipTest("로컬: PG_TEST_URL 미설정 (CI 에서는 fail)")
 
 
-def _run_in_fresh_process(code: str, *, url: str) -> subprocess.CompletedProcess:
+def _run_in_fresh_process(code: str, *, url: str,
+                          profile: str | None = None) -> subprocess.CompletedProcess:
     """⛔ **새 프로세스**여야 한다 — conftest 가 이미 `DATABASE_URL` 을 SQLite 로 덮었고,
     `app.database` 는 import 시점에 engine 을 만든다. 같은 프로세스에서는 되돌릴 수 없다."""
     env = dict(os.environ, DATABASE_URL=url, PYTHONPATH=str(REPO))
     env.pop("PG_TEST_URL", None)
+    env.pop("DB_WORKLOAD_PROFILE", None)      # 부모 환경이 새지 않게 명시적으로 지운다
+    if profile is not None:
+        env["DB_WORKLOAD_PROFILE"] = profile
     return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                           cwd=REPO, env=env, timeout=120)
 
@@ -114,6 +118,118 @@ class TestProductionEngineBindsToPostgres(unittest.TestCase):
         self.assertEqual(out.get("OVERFLOW"), "2", out)
         self.assertTrue(out.get("SERVER", "").startswith("17."),
                         f"운영 RDS 는 17.x 다 — 다른 major 에서 증명하면 계약이 아니다: {out}")
+
+
+class TestWorkloadProfileReachesTheServer(unittest.TestCase):
+    """S2 배선 증명 — production `app/database.py` 가 timeout 3종을 **실제로** 넘기는가.
+
+    ⚠️ 처음엔 `connect_timeout` 을 "같은 connect_args dict 에 실리니 statement_timeout 이
+       도달하면 함께 배선된 것" 이라는 **합성 논증**으로 덮으려 했다. 그럴 필요가 없었다 —
+       실측으로 libpq 가 `conn.info.get_parameters()` 로 값을 **되돌려준다**(미지정이면 None).
+       합성 논증보다 직접 관측이 있으면 직접 관측을 쓴다.
+    """
+
+    #: profile → (SHOW statement_timeout 기대값, connect_timeout, pool_timeout)
+    #: ⚠️ 표기는 **추측하지 않고 확인**했다 — PostgreSQL 은 60000ms 를 `'1min'`,
+    #:    900000ms 를 `'15min'` 으로 돌려준다(실측).
+    EXPECTED = {
+        "online": ("1min", "5", 10),
+        "maintenance": ("15min", "10", 30),
+    }
+
+    def setUp(self):
+        self.url = _require_pg()
+
+    def _probe(self, profile):
+        code = (
+            "from sqlalchemy import text\n"
+            "from app.database import engine, DB_WORKLOAD_PROFILE\n"
+            "with engine.connect() as c:\n"
+            "    st = c.execute(text('SHOW statement_timeout')).scalar()\n"
+            "    p = c.connection.dbapi_connection.info.get_parameters()\n"
+            "print('PROFILE=' + DB_WORKLOAD_PROFILE)\n"
+            "print('STATEMENT=' + str(st))\n"
+            "print('CONNECT=' + str(p.get('connect_timeout')))\n"
+            "print('POOL=' + str(engine.pool._timeout))\n"
+        )
+        r = _run_in_fresh_process(code, url=self.url, profile=profile)
+        self.assertEqual(r.returncode, 0, f"profile={profile} 배선 실패\n{r.stderr[-1500:]}")
+        return dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+
+    def test_each_profile_lands_all_three_timeouts_on_a_live_connection(self):
+        for profile, (stmt, conn_to, pool_to) in self.EXPECTED.items():
+            with self.subTest(profile=profile):
+                out = self._probe(profile)
+                self.assertEqual(out.get("PROFILE"), profile, out)
+                self.assertEqual(out.get("STATEMENT"), stmt,
+                                 f"서버가 보고한 statement_timeout 이 다르다: {out}")
+                self.assertEqual(out.get("CONNECT"), conn_to,
+                                 f"libpq 가 되돌려준 connect_timeout 이 다르다: {out}")
+                self.assertEqual(out.get("POOL"), str(pool_to), out)
+
+    def test_the_two_profiles_actually_differ_on_the_server(self):
+        """⛔ 값이 같으면 profile 은 이름만 있는 장식이다."""
+        online = self._probe("online")
+        maint = self._probe("maintenance")
+        self.assertNotEqual(online["STATEMENT"], maint["STATEMENT"])
+        self.assertNotEqual(online["POOL"], maint["POOL"])
+
+    def test_absent_profile_defaults_to_online_on_the_server(self):
+        out = self._probe(None)
+        self.assertEqual(out.get("PROFILE"), "online", out)
+        self.assertEqual(out.get("STATEMENT"), self.EXPECTED["online"][0], out)
+
+    def test_statement_timeout_actually_cancels_a_long_query(self):
+        """⛔ `SHOW` 가 값을 보고하는 것과 서버가 **실제로 취소하는 것**은 다른 주장이다.
+
+        online 상한(10s)보다 긴 `pg_sleep` 이 SQLSTATE **57014**(query_canceled)로 끊겨야 한다.
+        상한을 짧게 덮어써 CI 시간을 태우지 않는다 — 덮어쓰기는 production 배선을 우회하므로
+        **위 배선 시험과 짝을 이룰 때만** 의미가 있다.
+        """
+        code = (
+            "from sqlalchemy import text\n"
+            "from app.database import engine\n"
+            "with engine.connect() as c:\n"
+            "    c.execute(text(\"SET statement_timeout = '1200ms'\"))\n"
+            "    try:\n"
+            "        c.execute(text('SELECT pg_sleep(5)'))\n"
+            "        print('SQLSTATE=none')\n"
+            "    except Exception as exc:\n"
+            "        orig = getattr(exc, 'orig', None)\n"
+            "        print('SQLSTATE=' + str(getattr(orig, 'sqlstate', None)))\n"
+        )
+        r = _run_in_fresh_process(code, url=self.url, profile="online")
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        self.assertIn("SQLSTATE=57014", r.stdout,
+                      f"긴 질의가 취소되지 않았다 — statement_timeout 이 서버에서 무의미하다: {r.stdout}")
+
+
+class TestInvalidProfileIsAStartupFailure(unittest.TestCase):
+    """⛔ 조용한 online 폴백은 maintenance 작업을 **중간까지만 쓰고** 자른다 — 미실행보다 나쁘다.
+
+    PG 가 필요 없다(engine 생성 전에 죽어야 하므로). 그래서 `_require_pg()` 를 걸지 않는다.
+    """
+
+    BAD = ("", " ", "Online", "ONLINE", "maintenence", "maint", "online ")
+
+    def test_bad_profiles_kill_the_import_before_the_engine_exists(self):
+        for bad in self.BAD:
+            with self.subTest(profile=bad):
+                r = _run_in_fresh_process("import app.database\nprint('IMPORTED=1')\n",
+                                          url="sqlite:///:memory:", profile=bad)
+                self.assertNotEqual(r.returncode, 0, f"{bad!r} 로 import 가 성공했다")
+                self.assertNotIn("IMPORTED=1", r.stdout)
+                self.assertIn("InvalidDbWorkloadProfile", r.stderr,
+                              f"다른 이유로 죽었다 — 원인이 profile 이 아니다: {r.stderr[-600:]}")
+
+    def test_valid_profiles_import_cleanly_on_sqlite_too(self):
+        """profile 은 SQLite 에서도 **검증**된다(로컬에서 오타를 미리 잡는다)."""
+        for good in ("online", "maintenance", None):
+            with self.subTest(profile=good):
+                r = _run_in_fresh_process("import app.database\nprint('IMPORTED=1')\n",
+                                          url="sqlite:///:memory:", profile=good)
+                self.assertEqual(r.returncode, 0, r.stderr[-800:])
+                self.assertIn("IMPORTED=1", r.stdout)
 
 
 class TestSqlitePathNeedsNoPostgres(unittest.TestCase):

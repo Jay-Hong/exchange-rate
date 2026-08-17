@@ -8,6 +8,11 @@ from contextlib import contextmanager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
+# 로컬 애플리케이션
+# ⛔ app.config 가 아니다 — 그건 import 시 load_dotenv() 와 mkdir() 부작용이 있어서
+#    이 모듈의 82개 importer 전부로 퍼진다. database_settings 는 부작용이 없다.
+from app import database_settings
+
 # 데이터베이스 URL (환경 변수 우선, 없으면 로컬 경로)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -20,15 +25,15 @@ if not DATABASE_URL:
 # PostgreSQL 전환 시 (환경 변수로 설정)
 # DATABASE_URL = "postgresql://user:password@localhost:5432/mydb"
 
-_is_sqlite = "sqlite" in DATABASE_URL
+# ⛔ profile 검증은 create_engine **이전**이다. 뒤로 밀면 잘못된 profile 로 engine 이 먼저
+#    만들어진 뒤에야 예외가 난다 — 그 사이 커넥션 설정은 이미 정해진 상태다.
+#    허용값 밖이면 여기서 기동이 실패한다. online 은 이 변수를 **부재**로 결정하므로(운영 .env
+#    실측 0건) 이 경로는 누가 없어도 될 변수를 일부러 넣었을 때만 닿는다 — 근거는
+#    app/database_settings.py docstring "왜 미지정 외에는 전부 실패인가".
+DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()
 
-_engine_kwargs = {}
-if _is_sqlite:
-    _engine_kwargs["connect_args"] = {"check_same_thread": False}
-else:
-    # PostgreSQL: 연결 풀 제한 (RDS db.t4g.micro 메모리 절약)
-    _engine_kwargs["pool_size"] = 3
-    _engine_kwargs["max_overflow"] = 2
+# 풀 제한(RDS db.t4g.micro 메모리 절약)과 timeout 3종은 profile 이 정한다.
+_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, DB_WORKLOAD_PROFILE)
 
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
