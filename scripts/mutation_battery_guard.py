@@ -185,13 +185,16 @@ def isolated_worktree(repo: pathlib.Path) -> Iterator[pathlib.Path]:
 def assert_isolated(path: pathlib.Path) -> None:
     """변이 대상이 격리 worktree 안인지 확인한다.
 
-    ⚠️ **아직 `MutatedFile.write_mutant` 에 걸지 않았다.** `MutatedFile` 은 3개 runner 가
-       공유하는데 그중 `mutation_db_engine` 만 격리로 이관됐다 — 공유 지점에 강제를 걸면
-       나머지 둘이 **실행 자체를 거부당한다**(실측). 게다가 `mutation_auth_executor_ledger`
-       의 테스트는 `SRC` 를 monkeypatch 하므로 worktree 상대경로 재계산과 충돌한다.
-       세 runner 를 함께 이관하는 별 슬라이스에서 이 훅을 건다 — 그때까지 이 함수는
-       **호출자가 명시적으로 쓰는 도구**이고, db_engine 의 격리는 runner 가 항상 격리
-       worktree 를 만든다는 사실이 보장한다.
+    ⚠️ **아직 `MutatedFile.write_mutant` 에 걸지 않았다.** 3개 runner 중 둘
+       (`mutation_db_engine` · `mutation_rest_auth_lane`)은 격리로 이관됐지만
+       `mutation_auth_executor_ledger` 는 **격리 트리에서 probe 가 변이를 못 본다**(실측:
+       전 변이 SURVIVED — probe 경로 해석 문제로 추정). 공유 지점에 강제를 걸면 그 배터리가
+       실행 자체를 거부당하므로, **세 번째가 해결될 때까지 걸지 않는다.**
+       강제는 이관과 **동시에** 해야 한다 — 한때 db_engine 만 이관된 채 걸었다가 나머지 둘이
+       거부당했다(실측).
+
+    그때까지 이 함수는 **호출자가 명시적으로 쓰는 도구**이고, 이관된 두 배터리의 격리는
+    각 runner 가 항상 `isolated_worktree()` 를 만든다는 사실이 보장한다.
     """
     p = pathlib.Path(path).resolve()
     for parent in (p, *p.parents):

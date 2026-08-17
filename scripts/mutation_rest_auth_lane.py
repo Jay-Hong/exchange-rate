@@ -39,7 +39,8 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mutation_battery_guard import (  # noqa: E402
-    BatteryLockBusy, MutatedFile, MutationConflict, battery_lock,
+    BatteryLockBusy, MutatedFile, MutationConflict, NotIsolated, battery_lock,
+    isolated_worktree,
 )
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -161,13 +162,18 @@ def classify(codes: dict[str, int]) -> str:
 
 def _run(probe: str) -> tuple[int, list[str]]:
     r = subprocess.run([sys.executable, "-m", "pytest", probe, "-q", "-p", "no:asyncio"],
-                       capture_output=True, text=True, cwd=REPO)
+                       capture_output=True, text=True, cwd=_WORK or REPO)
     fails = sorted({l.split("::")[-1].split()[0] for l in r.stdout.splitlines()
                     if l.startswith("FAILED")})
     return r.returncode, fails
 
 
+#: 격리 worktree. main() 이 채운다 — production 파일은 여기서만 변이한다.
+_WORK: pathlib.Path | None = None
+
+
 def main() -> int:
+    global _WORK
     try:
         lock_ctx = battery_lock(REPO)
         lock_ctx.__enter__()
@@ -175,7 +181,19 @@ def main() -> int:
         print(f"❌ {exc}")
         return 2
 
-    files = {rel: MutatedFile(REPO / rel) for rel in {m[1] for m in MUTANTS}}
+    try:
+        # ⛔ 공유 worktree 에서 변이하지 않는다 — 락은 배터리끼리만 막고 일반 pytest
+        #    독자는 못 막는다(실측 사고). 감지+거절은 TOCTOU 가 남아 답이 아니다.
+        wt_ctx = isolated_worktree(REPO)
+        _WORK = wt_ctx.__enter__()
+    except Exception as exc:  # noqa: BLE001 — 격리 실패는 진행 사유가 못 된다
+        wt_ctx.__exit__(None, None, None)
+        lock_ctx.__exit__(None, None, None)
+        print(f"❌ 격리 worktree 생성 실패 — 공유 트리에서 변이하지 않는다: {exc}")
+        return 2
+    print(f"격리 worktree: {_WORK}")
+
+    files = {rel: MutatedFile(_WORK / rel) for rel in {m[1] for m in MUTANTS}}
     counts = {"KILLED": 0, "SURVIVED": 0, "INVALID": 0, "INFRA": 0}
     all_probes = sorted({p for m in MUTANTS for p in m[3]})
     try:

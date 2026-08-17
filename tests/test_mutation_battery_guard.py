@@ -57,6 +57,10 @@ class TestMutatedFile(unittest.TestCase):
         import tempfile
 
         d = pathlib.Path(tempfile.mkdtemp())
+        # ⛔ 표식을 **명시적으로** 붙인다. 이 클래스가 시험하는 것은 `MutatedFile` 의
+        #    충돌 감지 의미이지 격리 자체가 아니다(격리는 전용 클래스가 시험한다).
+        #    가드를 끄는 대신 opt-in 한다.
+        (d / ISOLATION_MARKER).write_text("test\n")
         self.tmp = d / "target.py"
         self.tmp.write_text("x = 1\n")
         self.addCleanup(lambda: self.tmp.unlink(missing_ok=True))
@@ -180,6 +184,7 @@ class TestRunnersUseASingleSnapshot(unittest.TestCase):
         import tempfile
 
         d = pathlib.Path(tempfile.mkdtemp())
+        (d / ISOLATION_MARKER).write_text("test\n")
         tmp = d / "t.py"
         tmp.write_text("orig\n")
         stale = tmp.read_text()              # ① 첫 읽기
