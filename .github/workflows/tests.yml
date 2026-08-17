@@ -25,6 +25,23 @@ jobs:
     #   REDIS_URL(localhost:6379/0)은 6390 service에 안 닿아 비어 있음 → 기존 테스트 영향 0
     #   구조적 보장(codex 검토). REDIS_TEST_URL(아래)만 6390 사용. health-check로 준비 보장.
     services:
+      # S2-PG0 — 운영 RDS 와 **같은 major**(17.9 실측)를 쓴다. 16 으로 맞추면
+      #   statement_timeout·SQLSTATE 거동을 다른 버전에서 증명하게 된다.
+      #   host 포트는 Redis 와 같은 이유로 격리(54320) — app 기본 5432 에 안 닿는다.
+      # ⛔ 이 service 를 지우면 PG 테스트가 **skip 이 아니라 fail** 한다
+      #    (tests/test_pg_engine_binding.py 가 CI 에서 fail-closed).
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: fxi-ci
+          POSTGRES_DB: fxi_ci
+        ports:
+          - 54320:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
       redis:
         image: redis:7-alpine
         ports:
@@ -71,4 +88,5 @@ jobs:
       - run: python -m pytest tests/ -q
         env:
           REDIS_TEST_URL: redis://localhost:6390/15
+          PG_TEST_URL: postgresql+psycopg://postgres:fxi-ci@localhost:54320/fxi_ci
           TOPIC_MIGRATION_IOS_ROOT: ${{ github.workspace }}/ios
