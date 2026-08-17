@@ -217,13 +217,22 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertIn("crontab -l 실패", r.stderr + r.stdout)
         self.assertNotIn("부분 상태", r.stdout, "조회 실패를 상태 판정으로 둔갑시켰다")
 
-    def test_absent_crontab_is_still_treated_as_empty(self):
-        """반대 방향 — 정말 crontab 이 없는 경우(exit 1 + 'no crontab')는 빈 것으로 본다."""
-        self._install_fake('#!/usr/bin/env bash\n'
-                           'echo "no crontab for tester" >&2\nexit 1\n')
-        r = self._run("--check")
-        self.assertNotEqual(r.returncode, 0)          # 빈 crontab 은 managed 가 아니다
-        self.assertNotIn("crontab -l 실패", r.stderr + r.stdout)
+    def test_every_nonzero_exit_is_fail_closed(self):
+        """⛔ 한때 `exit 1` + `no crontab` **부분문자열**이면 빈 것으로 봤다.
+
+        `backend unavailable: no crontab service` + exit 1 도 통과했다(실측). 대상 호스트는
+        기존 5줄이 **필수**라 "빈 crontab" 은 어차피 정상 상태가 아니다 — 구별하려 애쓰기보다
+        전부 막고 사람이 보게 하는 쪽이 정확하다.
+        """
+        for stderr, code in (("no crontab for tester", 1),
+                             ("backend unavailable: no crontab service", 1),
+                             ("permission denied", 13)):
+            with self.subTest(stderr=stderr):
+                self._install_fake(f'#!/usr/bin/env bash\necho "{stderr}" >&2\nexit {code}\n')
+                r = self._run("--check")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("crontab -l 실패", r.stderr + r.stdout,
+                              "조회 실패를 빈 crontab 으로 접었다")
 
     @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
     def test_install_writes_a_persistent_backup_before_touching_crontab(self):
@@ -236,7 +245,7 @@ class TestInstallerDurability(unittest.TestCase):
         self.state.write_text(before)
         r = self._run("--install")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        backups = sorted(self.backups.glob("crontab.*.bak"))
+        backups = sorted(self.backups.glob("crontab.*.bak.*"))
         self.assertEqual(len(backups), 1, f"영속 백업이 없다: {r.stdout}")
         self.assertEqual(backups[0].read_text(), before, "백업이 원본과 다르다")
         self.assertEqual(oct(backups[0].stat().st_mode)[-3:], "600")
@@ -273,10 +282,58 @@ class TestInstallerDurability(unittest.TestCase):
             'cat "$1" > "$CRON_STATE"\n')
         before = "\n".join([UNRELATED] + legacy_lines()) + "\n\n"
         self.state.write_text(before)
+        r = self._run("--install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        backup = sorted(self.backups.glob("crontab.*.bak.*"))[0]
+        # ⛔ **출력된 복원 명령을 실제로 실행한다.** 초판은 `backup.read_text()` 를 상태 파일에
+        #    직접 써서 복구 경로를 **우회**했다 — 그러면 `crontab "$backup"` 이 깨져도 통과한다.
+        self.assertIn(f'crontab "{backup}"', r.stdout, "복원 명령을 출력하지 않았다")
+        subprocess.run(["bash", "-c", f'crontab "{backup}"'], check=True,
+                       env=self._env(), timeout=30)
+        self.assertEqual(self.state.read_text(), before, "복원 명령이 원본을 되돌리지 못했다")
+
+    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
+    def test_two_runs_in_the_same_second_do_not_overwrite_a_backup(self):
+        """⛔ 초 단위 이름은 같은 초에 두 번 돌면 **앞 백업을 덮는다**(실측: 1개만 남았다).
+
+        복구본이 덮이면 백업이 있다는 사실 자체가 거짓 안심이 된다.
+        """
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        first = "\n".join([UNRELATED] + legacy_lines()) + "\n"
+        self.state.write_text(first)
         self.assertEqual(self._run("--install").returncode, 0)
-        backup = sorted(self.backups.glob("crontab.*.bak"))[0]
-        self.state.write_text(backup.read_text())      # 복원
-        self.assertEqual(self.state.read_text(), before)
+        second = "\n".join([UNRELATED, "# 두 번째"] + legacy_lines()) + "\n"
+        self.state.write_text(second)
+        self.assertEqual(self._run("--install").returncode, 0)
+        backups = sorted(self.backups.glob("crontab.*.bak.*"))
+        self.assertEqual(len(backups), 2, "백업이 덮였다")
+        self.assertEqual({b.read_text() for b in backups}, {first, second})
+
+    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
+    def test_aborted_install_leaves_no_stale_backup(self):
+        """⛔ 백업이 최종 CAS **앞**이면, 중단된 실행이 stale 백업과 그 복원 명령을 남긴다 —
+        현재 상태와 다른 것을 되돌리라고 안내하는 셈이다."""
+        # 두 snapshot 사이에 crontab 을 바꾸는 fake — 두 번째 -l 호출에서 내용이 달라진다.
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then\n'
+            '  cat "$CRON_STATE" 2>/dev/null\n'
+            '  echo "# 남이 끼어들었다" >> "$CRON_STATE"\n'
+            '  exit 0\n'
+            'fi\n'
+            'echo "WROTE" >> "$CRON_WRITES"\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        self.tmp.joinpath("w.txt").write_text("")
+        self.state.write_text("\n".join([UNRELATED] + legacy_lines()) + "\n")
+        r = self._run("--install")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("바뀌었다", r.stdout)
+        self.assertEqual(self.tmp.joinpath("w.txt").read_text().strip(), "", "중단인데 write 했다")
+        self.assertEqual(list(self.backups.glob("crontab.*.bak.*")), [],
+                         "중단된 실행이 stale 백업을 남겼다")
 
 
 class TestLockPathIsPerUser(unittest.TestCase):

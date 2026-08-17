@@ -36,13 +36,13 @@ legacy_lines()  { managed_lines | sed "s| -e DB_WORKLOAD_PROFILE=maintenance||";
 snapshot_crontab() {  # $1 = 출력 파일
   local rc
   set +e; crontab -l >"$1" 2>"$1.err"; rc=$?; set -e
+  # ⛔ **모든 nonzero 를 fail-closed** 한다. 한때 `exit 1` + `no crontab` 부분문자열이면 빈
+  #    것으로 봤는데, `backend unavailable: no crontab service` + exit 1 도 통과했다(실측).
+  #    대상 호스트는 기존 5줄이 **필수**라 "빈 crontab" 은 어차피 정상 상태가 아니다 —
+  #    구별하려 애쓰기보다 전부 막고 사람이 보게 하는 쪽이 정확하다.
   if [ "$rc" -ne 0 ]; then
-    if [ "$rc" -eq 1 ] && [ ! -s "$1" ] && grep -qiE 'no crontab' "$1.err"; then
-      : >"$1"                      # 정말로 crontab 이 없다
-    else
-      echo "❌ crontab -l 실패 (exit $rc): $(head -c 200 "$1.err")" >&2
-      return 1
-    fi
+    echo "❌ crontab -l 실패 (exit $rc): $(head -c 200 "$1.err")" >&2
+    return 1
   fi
   rm -f "$1.err"
 }
@@ -110,14 +110,6 @@ do_install() {
   exec 9>"$LOCK"
   flock -n 9 || { echo "❌ 다른 installer 가 이 호스트에서 실행 중이다"; return 1; }
 
-  # ⛔ **영속 백업이 먼저다.** 메모리의 값과 임시 파일은 복구본이 아니다 — 그것들은 이
-  #    프로세스와 함께 사라진다. 경로와 SHA 를 출력해 사람이 되돌릴 수 있게 한다.
-  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
-  backup="$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak"
-  cp "$snap" "$backup"; chmod 600 "$backup"
-  echo "backup: $backup  sha256=$before"
-  echo "  복원: crontab \"$backup\""
-
   # ⛔ **스냅샷 파일 자체를 변환**한다 — 메모리를 거치면 trailing LF 가 사라진다(실측).
   cp "$snap" "$tmp"
   local legacy managed
@@ -140,6 +132,18 @@ PY
   if [ "$before" != "$after" ]; then
     echo "❌ 설치 직전 crontab 이 바뀌었다 — 덮어쓰지 않고 중단한다"; return 1
   fi
+
+  # ⛔ 백업은 **최종 CAS 를 통과한 뒤**다. 앞에 두면 중단된 실행이 **stale 백업**과 그 "복원"
+  #    명령을 남긴다 — 현재 상태와 다른 것을 되돌리라고 안내하는 셈이다(실측).
+  # ⛔ 이름은 **충돌 불가능**해야 한다. 초 단위 timestamp 는 같은 초에 두 번 돌면 앞 백업을
+  #    덮는다(실측: 백업 1개만 남고 첫 원본이 사라졌다). `mktemp` 로 유일성을 커널에 맡긴다.
+  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+  # ⚠️ `XXXXXX` 는 템플릿 **끝**이어야 한다 — macOS `mktemp` 는 중간에 있으면 거부한다(실측).
+  backup="$(mktemp "$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak.XXXXXX")"
+  cp "$snap" "$backup"; chmod 600 "$backup"
+  echo "backup: $backup  sha256=$after"
+  echo "  복원: crontab \"$backup\""
+
   crontab "$tmp"
   do_check
 }
