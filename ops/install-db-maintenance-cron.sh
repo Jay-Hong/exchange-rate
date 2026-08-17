@@ -198,6 +198,18 @@ do_restore() {   # $1 = backup 파일, $2 = 기대 SHA
     "$(printf '%q' "$SELF")" "$(printf '%q' "$pre_backup")" "$pre_sha"
 
   crontab "$snap"
+
+  # ⛔ **exit 0 은 설치의 증거가 아니다.** 쓰기 요청을 무시하고 0 을 반환하는 구현에서 상태는
+  #    그대로인데 "복원 완료" 를 출력했다(실측). 다시 읽어 **바이트가 같을 때만** 성공이다.
+  local post
+  post="$(mktemp)"; trap 'rm -f "$snap" "$pre" "$pre.err" "$post" "$post.err"' RETURN
+  snapshot_crontab "$post" || return 1
+  if ! cmp -s "$post" "$snap"; then
+    echo "❌ 복원 후 crontab 이 백업과 다르다 — 설치가 반영되지 않았다"
+    echo "   기대 sha256=$2"
+    echo "   실제 sha256=$(shasum -a 256 <"$post" | cut -d' ' -f1)"
+    return 1
+  fi
   echo "✅ 복원 완료: $1"
 }
 

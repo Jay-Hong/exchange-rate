@@ -42,21 +42,26 @@ SQLITE_LEAK = ("tests/test_pg_engine_binding.py::TestSqlitePathNeedsNoPostgres::
 _SQLITE_ARGS = '    _engine_kwargs["connect_args"] = {"check_same_thread": False}\n'
 
 MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
-    ("S2-1 PostgreSQL 전용 connect_args 가 SQLite 경로로 누수 → 로컬·테스트가 연결에서 죽는다",
-     DB, [(_SQLITE_ARGS,
-           '    _engine_kwargs["connect_args"] = {"check_same_thread": False,\n'
-           '                                      "options": "-c statement_timeout=1000"}\n')],
-     (SQLITE_LEAK,)),
-    ('M0a-1 복원 안내를 깨뜨림 → 사람이 복사할 명령이 동작하지 않는다',
-     INSTALLER, [("  printf '  복원: %s --restore %s %s\\n' \\\n", "  printf '  복원: false # %s --restore %s %s\\n' \\\n")], (CRON,)),
-    ('M0a-2 SHA 검증 제거 → 변조·잘린 백업이 그대로 설치된다',
-     INSTALLER, [('  if [ "$got" != "$2" ]; then\n', '  if false; then\n')], (CRON,)),
-    ('M0a-3 백업 이름을 초 단위 고정으로 → 같은 초 2회 실행이 앞 백업을 덮는다',
-     INSTALLER, [('  backup="$(mktemp "$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak.XXXXXX")"', '  backup="$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak"')], (CRON,)),
-    ('M0a-4 --restore 가 락을 건너뜀 → --install 과 같은 상태를 동시에 덮는다',
-     INSTALLER, [('do_restore() {   # $1 = backup 파일, $2 = 기대 SHA\n  local got snap pre\n  acquire_write_lock || return 1\n', 'do_restore() {   # $1 = backup 파일, $2 = 기대 SHA\n  local got snap pre\n')], (CRON,)),
-    ('M0a-5 crontab -l 오류를 빈 것으로 접음 → 조회 실패가 상태 판정으로 둔갑',
-     INSTALLER, [('  if [ "$rc" -ne 0 ]; then\n    echo "❌ crontab -l 실패 (exit $rc): $(head -c 200 "$1.err")" >&2\n    return 1\n  fi\n', '  if [ "$rc" -ne 0 ]; then : >"$1"; fi\n')], (CRON,)),
+    ('S2-1 PostgreSQL 전용 connect_args 가 SQLite 경로로 누수 → 로컬·테스트가 연결에서 죽는다', 'app/database.py',
+     [('    _engine_kwargs["connect_args"] = {"check_same_thread": False}\n', '    _engine_kwargs["connect_args"] = {"check_same_thread": False,\n                                      "options": "-c statement_timeout=1000"}\n')], ('tests/test_pg_engine_binding.py::TestSqlitePathNeedsNoPostgres::test_sqlite_path_does_not_receive_postgres_only_kwargs',)),
+    ('M0a-1 복원 안내를 깨뜨림 → 사람이 복사할 명령이 동작하지 않는다', 'ops/install-db-maintenance-cron.sh',
+     [("  printf '  복원: %s --restore %s %s\\n' \\\n", "  printf '  복원: false # %s --restore %s %s\\n' \\\n")], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_backup_restores_the_original_exactly',)),
+    ('M0a-2 SHA 검증 제거 → 변조·잘린 백업이 그대로 설치된다', 'ops/install-db-maintenance-cron.sh',
+     [('  if [ "$got" != "$2" ]; then\n', '  if false; then\n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_refuses_a_tampered_backup',)),
+    ('M0a-3 백업 이름을 초 단위 고정으로 → 같은 초 2회 실행이 앞 백업을 덮는다', 'ops/install-db-maintenance-cron.sh',
+     [('  backup="$(mktemp "$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak.XXXXXX")"', '  backup="$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak"')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_two_runs_in_the_same_second_do_not_overwrite_a_backup',)),
+    ('M0a-4 --restore 가 락을 건너뜀 → --install 과 같은 상태를 동시에 덮는다', 'ops/install-db-maintenance-cron.sh',
+     [('do_restore() {   # $1 = backup 파일, $2 = 기대 SHA\n  local got snap pre\n  acquire_write_lock || return 1\n', 'do_restore() {   # $1 = backup 파일, $2 = 기대 SHA\n  local got snap pre\n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_every_write_path_acquires_the_lock',)),
+    ('M0a-5 crontab -l 오류를 빈 것으로 접음 → 조회 실패가 상태 판정으로 둔갑', 'ops/install-db-maintenance-cron.sh',
+     [('  if [ "$rc" -ne 0 ]; then\n    echo "❌ crontab -l 실패 (exit $rc): $(head -c 200 "$1.err")" >&2\n    return 1\n  fi\n', '  if [ "$rc" -ne 0 ]; then : >"$1"; fi\n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_crontab_read_failure_is_not_treated_as_empty',)),
+    ("M0a-6 복원 사후조건 제거 → 쓰기가 반영 안 돼도 '복원 완료'", 'ops/install-db-maintenance-cron.sh',
+     [('  local post\n', '  local post\n  if true; then echo "✅ 복원 완료: $1"; return 0; fi\n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_fails_when_the_write_is_not_reflected',)),
+    ('M0a-7 안내를 상대 경로로 → 다른 디렉터리에서 exit 127', 'ops/install-db-maintenance-cron.sh',
+     [('    "$(printf \'%q\' "$SELF")" "$(printf \'%q\' "$backup")" "$after"\n', '    "$(printf \'%q\' "${BASH_SOURCE[0]}")" "$(printf \'%q\' "$backup")" "$after"\n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_hint_is_an_absolute_path',)),
+    ('M0a-8 pre-restore 백업 제거 → 복원이 무관 변경을 되돌릴 길이 없다', 'ops/install-db-maintenance-cron.sh',
+     [('  cp "$pre" "$pre_backup"; chmod 600 "$pre_backup"\n', '  : \n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_takes_a_pre_restore_backup',)),
+    ('M0a-9 복원 TOCTOU — 검증한 스냅샷이 아니라 원본 경로를 설치', 'ops/install-db-maintenance-cron.sh',
+     [('  crontab "$snap"\n\n  # ⛔ **exit 0 은 설치의 증거가 아니다.**', '  crontab "$1"\n\n  # ⛔ **exit 0 은 설치의 증거가 아니다.**')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_installs_the_verified_snapshot_not_the_original_path',)),
 ]
 
 MID_LINE_ANCHORS: set[str] = set()

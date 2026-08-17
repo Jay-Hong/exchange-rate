@@ -338,6 +338,95 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertEqual(self.tmp.joinpath("w.txt").read_text().strip(), "",
                          "락을 못 잡았는데 crontab 을 썼다")
 
+    def test_restore_fails_when_the_write_is_not_reflected(self):
+        """⛔ **exit 0 은 설치의 증거가 아니다.**
+
+        쓰기 요청을 무시하고 0 을 반환하는 `crontab` 에서 상태는 그대로인데 "복원 완료" 가
+        출력됐다(실측). 사후에 다시 읽어 **바이트가 같을 때만** 성공이다.
+        """
+        import hashlib
+
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'exit 0\n')                      # 쓰기를 무시하고 성공을 반환한다
+        self.state.write_text("CURRENT\n")
+        bak = self.tmp / "b.bak"; bak.write_text("ORIGINAL\n")
+        sha = hashlib.sha256(b"ORIGINAL\n").hexdigest()
+        r = subprocess.run(["bash", str(INSTALLER), "--restore", str(bak), sha],
+                           capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        self.assertNotEqual(r.returncode, 0, f"거짓 성공: {r.stdout}")
+        self.assertIn("반영되지 않았다", r.stdout)
+        self.assertNotIn("복원 완료", r.stdout)
+
+    def test_restore_hint_is_an_absolute_path(self):
+        """⛔ 상대 경로면 다른 디렉터리에서 복사해 실행할 때 **exit 127** 이 난다."""
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        self.state.write_text("\n".join([UNRELATED] + legacy_lines()) + "\n")
+        r = subprocess.run(["bash", "ops/install-db-maintenance-cron.sh", "--install"],
+                           capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cmd = re.search(r"^\s*복원:\s*(.+)$", r.stdout, re.M).group(1)
+        self.assertTrue(cmd.split()[0].startswith("/"),
+                        f"안내가 절대 경로가 아니다: {cmd}")
+        # 다른 디렉터리에서 실행해도 동작해야 한다 — 그게 절대 경로를 쓰는 이유다.
+        rr = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                            env=self._env(), cwd=str(self.tmp), timeout=60)
+        self.assertEqual(rr.returncode, 0, rr.stdout + rr.stderr)
+
+    def test_restore_takes_a_pre_restore_backup(self):
+        """⛔ cutover 이후 무관 cron 이 바뀌었다면 복원이 그것까지 되돌린다 — 되돌릴 길을 남긴다."""
+        import hashlib
+
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        current = "CURRENT STATE\n"
+        self.state.write_text(current)
+        bak = self.tmp / "b.bak"; bak.write_text("ORIGINAL\n")
+        r = subprocess.run(["bash", str(INSTALLER), "--restore", str(bak),
+                            hashlib.sha256(b"ORIGINAL\n").hexdigest()],
+                           capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        pres = sorted(self.backups.glob("crontab.*.pre-restore.*"))
+        self.assertEqual(len(pres), 1, f"pre-restore 백업이 없다: {r.stdout}")
+        self.assertEqual(pres[0].read_text(), current, "복원 직전 상태를 담지 않았다")
+        self.assertIn("되돌리기:", r.stdout, "되돌리기 명령을 안내하지 않았다")
+
+    def test_restore_installs_the_verified_snapshot_not_the_original_path(self):
+        """⛔ SHA 를 백업 **경로**에서 재고 **같은 경로**를 다시 설치하면 그 사이 파일이 바뀔 수
+        있다(TOCTOU) — 검증하지 않은 것을 설치하게 된다.
+
+        경쟁 창을 결정적으로 만든다: 가짜 `shasum` 이 호출된 **직후** 백업 파일을 변조한다.
+        고친 코드는 미리 뜬 스냅샷을 설치하므로 검증한 내용이 들어가고, 원본 경로를 설치하는
+        회귀는 변조본이 들어간다.
+        """
+        import hashlib
+
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        bak = self.tmp / "b.bak"
+        bak.write_text("ORIGINAL\n")
+        sha = hashlib.sha256(b"ORIGINAL\n").hexdigest()
+        # 진짜 shasum 을 감싸: 정상 결과를 낸 뒤 백업을 변조한다(검증 ↔ 설치 사이의 창).
+        real = shutil.which("shasum") or shutil.which("sha256sum")
+        self.assertIsNotNone(real, "shasum 없음")
+        (self.tmp / "shasum").write_text(
+            f'#!/usr/bin/env bash\n"{real}" "$@"\nrc=$?\n'
+            f'if [ -w "{bak}" ]; then echo "TAMPERED" > "{bak}"; fi\nexit $rc\n')
+        (self.tmp / "shasum").chmod(0o755)
+        self.state.write_text("CURRENT\n")
+        r = subprocess.run(["bash", str(INSTALLER), "--restore", str(bak), sha],
+                           capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        self.assertNotIn("TAMPERED", self.state.read_text(),
+                         "검증한 내용이 아니라 그 뒤 바뀐 파일을 설치했다(TOCTOU)")
+
     def test_restore_refuses_a_tampered_backup(self):
         """⛔ SHA 를 출력만 하고 검증하지 않으면 **잘린 백업도 그대로 설치**된다."""
         self._install_fake(
