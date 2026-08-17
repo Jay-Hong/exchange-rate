@@ -104,7 +104,11 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
-    "LOAD": 7,
+    # 2026-08-17 S2:  E1 이 `app/database.py:30` 하나에서 `app/database_settings.py:77-78` +
+    #                `app/database.py:36-38` 둘로 갈리고(풀·timeout 도출이 별 모듈로 이동 —
+    #                **값 불변, 소유자만 이동**), E1-b(`…:105` online pool_timeout 10초)가
+    #                신설되며 +3 (7 → 10).
+    "LOAD": 10,
 }
 
 
@@ -371,9 +375,14 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     }
         # 2026-08-16 S1a: R-LOAD-4 의 E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue
     #                무제한(:34-36) **둘로 갈리며** locator 1건 증가 (125 → 126).
-    assert len(references) == 126
+    # 2026-08-17 S2: LOAD 의 E1 이 `app/database.py:30` 하나에서
+    #                `app/database_settings.py:77-78` + `app/database.py:36-38` **둘로 갈리고**
+    #                (풀·timeout 도출이 별 모듈로 이동 — **값 불변, 소유자만 이동**),
+    #                E1-b(`app/database_settings.py:105`, online pool_timeout 10초)가 신설되며
+    #                server locator 3건 증가 (126 → 129 / server 62 → 65).
+    assert len(references) == 129
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 62, "ios": 64}
+    assert by_repo == {"server": 65, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -413,8 +422,10 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
     }
     # 2026-08-16 S0: E2 가 `to_thread` 의 **실제 위치**(공유 래퍼)와 REST twin 호출부를
     #                함께 인용하게 되며 server locator 2건 증가 (40 → 42).
-    assert len(references) == 42
-    assert by_repo == {"server": 32, "ios": 10}
+    # 2026-08-17 S2: baseline 의 E1 도 같은 이유로 둘로 갈리고 E1-b 가 신설되며
+    #                server locator 3건 증가 (42 → 45).
+    assert len(references) == 45
+    assert by_repo == {"server": 35, "ios": 10}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():
