@@ -38,12 +38,22 @@ import fcntl
 import hashlib
 import os
 import pathlib
+import shutil
 import subprocess
+import tempfile
 from typing import Iterator
 
 
 class BatteryLockBusy(RuntimeError):
     """다른 변이 배터리가 이 worktree 를 잡고 있다."""
+
+
+class NotIsolated(RuntimeError):
+    """공유 worktree 의 production 파일을 변이하려 했다."""
+
+
+#: 격리 worktree 표식. 이 파일이 조상 경로에 있으면 그 트리는 변이 전용이다.
+ISOLATION_MARKER = ".fxi-mutation-isolated"
 
 
 class MutationConflict(RuntimeError):
@@ -122,3 +132,72 @@ class MutatedFile:
                 f"  기대 sha={hashlib.sha256(self._last_written.encode()).hexdigest()[:12]} "
                 f"실제 sha={hashlib.sha256(on_disk.encode()).hexdigest()[:12]}"
             )
+
+
+@contextlib.contextmanager
+def isolated_worktree(repo: pathlib.Path) -> Iterator[pathlib.Path]:
+    """변이 전용 **임시 git worktree** 를 만들고 그 안에서만 production 파일을 만지게 한다.
+
+    ## 왜 락으로 부족한가
+
+    `battery_lock()` 은 **배터리끼리만** 직렬화한다. 일반 `pytest`·`git`·`docker build` 같은
+    **독자**는 락을 모르고, 변이본이 디스크에 있는 순간을 그대로 읽는다. 오늘 실제로 발화했다 —
+    적대적 리뷰 에이전트가 내 배터리가 심어 둔 S2-6/S2-4 변이본을 읽고 "설명되지 않는 red 3건"
+    을 보고했다.
+
+    ⛔ **"배터리 도는지 확인 후 거절" 은 답이 아니다.** 확인과 실행 사이에 배터리가 시작되는
+       TOCTOU 창이 남는다(codex). 격리는 그 창 자체를 없앤다 — 독자가 보는 트리에 변이본이
+       **애초에 존재하지 않는다**.
+
+    ## 미커밋 상태를 재현한다
+
+    배터리는 보통 **아직 커밋하지 않은** 변경을 시험한다. 그래서 `HEAD` 로 worktree 를 만든 뒤
+    `git diff HEAD` 를 적용하고 untracked 파일을 복사해 현재 작업 상태를 그대로 옮긴다.
+    그러지 않으면 배터리가 **다른 코드**를 시험하면서 초록을 보고한다.
+    """
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="fxi-mutation-"))
+    wt = tmp / "wt"
+    subprocess.run(["git", "worktree", "add", "--detach", "-q", str(wt), "HEAD"],
+                   cwd=repo, check=True, capture_output=True)
+    try:
+        diff = subprocess.run(["git", "diff", "HEAD"], cwd=repo,
+                              capture_output=True, text=True, check=True).stdout
+        if diff.strip():
+            subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=wt,
+                           input=diff, text=True, check=True, capture_output=True)
+        untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
+                                   cwd=repo, capture_output=True, text=True,
+                                   check=True).stdout.split()
+        for rel in untracked:
+            src, dst = repo / rel, wt / rel
+            if not src.is_file():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        (wt / ISOLATION_MARKER).write_text("mutation battery isolated worktree\n")
+        yield wt
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(wt)],
+                       cwd=repo, capture_output=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def assert_isolated(path: pathlib.Path) -> None:
+    """변이 대상이 격리 worktree 안인지 확인한다.
+
+    ⚠️ **아직 `MutatedFile.write_mutant` 에 걸지 않았다.** `MutatedFile` 은 3개 runner 가
+       공유하는데 그중 `mutation_db_engine` 만 격리로 이관됐다 — 공유 지점에 강제를 걸면
+       나머지 둘이 **실행 자체를 거부당한다**(실측). 게다가 `mutation_auth_executor_ledger`
+       의 테스트는 `SRC` 를 monkeypatch 하므로 worktree 상대경로 재계산과 충돌한다.
+       세 runner 를 함께 이관하는 별 슬라이스에서 이 훅을 건다 — 그때까지 이 함수는
+       **호출자가 명시적으로 쓰는 도구**이고, db_engine 의 격리는 runner 가 항상 격리
+       worktree 를 만든다는 사실이 보장한다.
+    """
+    p = pathlib.Path(path).resolve()
+    for parent in (p, *p.parents):
+        if (parent / ISOLATION_MARKER).is_file():
+            return
+    raise NotIsolated(
+        f"공유 worktree 의 파일을 변이하려 했다: {p}\n"
+        "  변이는 isolated_worktree() 안에서만 한다 — 락은 일반 pytest 독자를 못 막는다."
+    )

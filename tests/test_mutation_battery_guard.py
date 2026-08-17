@@ -15,7 +15,8 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "scripts"))
 
 from mutation_battery_guard import (  # noqa: E402
-    BatteryLockBusy, MutatedFile, MutationConflict, battery_lock, lock_path,
+    ISOLATION_MARKER, BatteryLockBusy, MutatedFile, MutationConflict, NotIsolated,
+    battery_lock, isolated_worktree, lock_path,
 )
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -55,7 +56,8 @@ class TestMutatedFile(unittest.TestCase):
     def setUp(self):
         import tempfile
 
-        self.tmp = pathlib.Path(tempfile.mkdtemp()) / "target.py"
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.tmp = d / "target.py"
         self.tmp.write_text("x = 1\n")
         self.addCleanup(lambda: self.tmp.unlink(missing_ok=True))
 
@@ -177,7 +179,8 @@ class TestRunnersUseASingleSnapshot(unittest.TestCase):
         """합성 반례: 두 번 읽는 구현이 실제로 남의 변경을 덮는다는 것을 보인다."""
         import tempfile
 
-        tmp = pathlib.Path(tempfile.mkdtemp()) / "t.py"
+        d = pathlib.Path(tempfile.mkdtemp())
+        tmp = d / "t.py"
         tmp.write_text("orig\n")
         stale = tmp.read_text()              # ① 첫 읽기
         tmp.write_text("external\n")         # 남의 변경
@@ -189,6 +192,62 @@ class TestRunnersUseASingleSnapshot(unittest.TestCase):
         self.assertEqual(tmp.read_text(), "external\n",
                          "복원이 handle 기준(신 내용)으로 돌아가야 한다")
         tmp.unlink()
+
+
+class TestIsolationIsEnforcedNotJustPracticed(unittest.TestCase):
+    """⛔ **락은 배터리끼리만 막는다.** 일반 `pytest`·`git`·`docker build` 같은 독자는 락을
+    모르고 변이본이 디스크에 있는 순간을 읽는다 — 오늘 실제로 발화했다(적대적 리뷰 에이전트가
+    내 배터리의 S2-6/S2-4 변이본을 읽고 "설명되지 않는 red 3건" 을 보고).
+
+    ⛔ "배터리 도는지 확인 후 거절" 은 답이 아니다 — 확인과 실행 사이 TOCTOU 창이 남는다(codex).
+       격리는 그 창 자체를 없앤다. 여기 잠그는 것은 **절차가 아니라 기전**이다.
+    """
+
+    def test_shared_worktree_paths_are_recognised_as_not_isolated(self):
+        """⚠️ 이 판정식은 아직 `MutatedFile` 에 **걸려 있지 않다**(모듈 docstring 참조) —
+        3개 runner 가 공유하는 지점이라 함께 이관해야 한다. 판정 자체는 지금 잠근다."""
+        from mutation_battery_guard import assert_isolated
+
+        with self.assertRaises(NotIsolated):
+            assert_isolated(REPO / "app" / "database_settings.py")
+
+    def test_isolated_worktree_allows_mutation_and_leaves_the_shared_tree_untouched(self):
+        target = REPO / "app" / "database_settings.py"
+        before = target.read_text()
+        with isolated_worktree(REPO) as wt:
+            twin = wt / "app" / "database_settings.py"
+            self.assertTrue(twin.is_file(), "격리 트리에 대상 파일이 없다")
+            from mutation_battery_guard import assert_isolated
+
+            assert_isolated(twin)          # 격리 안이면 통과한다
+            handle = MutatedFile(twin)
+            handle.write_mutant(twin.read_text() + "\n# mutant\n")
+            self.assertIn("# mutant", twin.read_text())
+            self.assertEqual(target.read_text(), before, "공유 트리가 오염됐다")
+            handle.restore()
+        self.assertEqual(target.read_text(), before)
+
+    def test_uncommitted_work_is_reproduced_inside_the_isolation(self):
+        """⛔ 배터리는 보통 **미커밋** 상태를 시험한다. HEAD 만 뜨면 다른 코드를 시험하면서
+        초록을 보고한다 — 그 오판을 막는다."""
+        import subprocess as sp
+
+        marker = "# fxi-isolation-probe\n"
+        target = REPO / "app" / "database_settings.py"
+        before = target.read_text()
+        target.write_text(before + marker)
+        try:
+            with isolated_worktree(REPO) as wt:
+                self.assertIn(marker, (wt / "app" / "database_settings.py").read_text(),
+                              "미커밋 변경이 격리 트리에 재현되지 않았다")
+        finally:
+            target.write_text(before)
+
+    def test_the_worktree_is_removed_afterwards(self):
+        with isolated_worktree(REPO) as wt:
+            path = wt
+            self.assertTrue(path.is_dir())
+        self.assertFalse(path.exists(), "격리 worktree 가 남았다")
 
 
 if __name__ == "__main__":

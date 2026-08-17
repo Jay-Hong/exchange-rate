@@ -38,7 +38,8 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mutation_battery_guard import (  # noqa: E402
-    BatteryLockBusy, MutatedFile, MutationConflict, battery_lock,
+    BatteryLockBusy, MutatedFile, MutationConflict, NotIsolated, battery_lock,
+    isolated_worktree,
 )
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -309,11 +310,12 @@ def _skipped_from_junit(path: pathlib.Path) -> int | None:
     return skipped
 
 
-def _run(node: str) -> tuple[int, list[str], int | None]:
+def _run(node: str, cwd: pathlib.Path | None = None) -> tuple[int, list[str], int | None]:
     with tempfile.TemporaryDirectory() as td:          # worktree 를 더럽히지 않는다
         xml = pathlib.Path(td) / "r.xml"
         r = subprocess.run([sys.executable, "-m", "pytest", node, "-q", "-p", "no:asyncio",
-                            f"--junit-xml={xml}"], capture_output=True, text=True, cwd=REPO)
+                            f"--junit-xml={xml}"], capture_output=True, text=True,
+                           cwd=cwd or REPO)
         skipped = _skipped_from_junit(xml)
     # ⚠️ pytest 9 는 subtest 실패를 `SUBFAILED` 로 찍는다 — `FAILED` 만 보면 killer 가 빈
     #    목록으로 나와 귀속이 사라진다(실측). **표시 전용**이고 판정은 rc 가 진다.
@@ -361,14 +363,26 @@ def main() -> int:
     except BatteryLockBusy as exc:
         print(f"❌ {exc}")
         return 2
+    try:
+        # ⛔ **공유 worktree 에서 변이하지 않는다.** 락은 배터리끼리만 막고 일반 pytest·git·
+        #    docker build 같은 독자는 못 막는다 — 오늘 실제로 그 구멍이 발화해 "설명되지 않는
+        #    red 3건" 이 나왔다. "배터리 도는지 확인 후 거절" 은 TOCTOU 가 남아 답이 아니다.
+        #    격리는 창 자체를 없앤다: 독자가 보는 트리에 변이본이 애초에 없다.
+        wt_ctx = isolated_worktree(REPO)
+        work = wt_ctx.__enter__()
+    except Exception as exc:      # noqa: BLE001 — 격리 실패는 진행 사유가 못 된다
+        lock_ctx.__exit__(None, None, None)
+        print(f"❌ 격리 worktree 생성 실패 — 공유 트리에서 변이하지 않는다: {exc}")
+        return 2
+    print(f"격리 worktree: {work}")
 
-    files = {rel: MutatedFile(REPO / rel) for rel in {m[1] for m in MUTANTS}}
+    files = {rel: MutatedFile(work / rel) for rel in {m[1] for m in MUTANTS}}
     counts = {"KILLED": 0, "SURVIVED": 0, "INVALID": 0, "INFRA": 0}
     nodes = sorted({n for m in MUTANTS for n in m[3]})
     try:
         base = {}
         for n in nodes:
-            rc, _, sk = _run(n)
+            rc, _, sk = _run(n, work)
             base[n] = (rc, sk)
         bad = {n: v for n, v in base.items() if v[0] != 0 or v[1] is None or v[1] > 0}
         if bad:
@@ -392,7 +406,7 @@ def main() -> int:
             try:
                 codes, killers, skips = {}, {}, {}
                 for n in probes:
-                    codes[n], killers[n], skips[n] = _run(n)
+                    codes[n], killers[n], skips[n] = _run(n, work)
             finally:
                 handle.restore()
             verdict = classify(codes, skips)
@@ -405,7 +419,11 @@ def main() -> int:
     except MutationConflict as exc:
         print(f"\n❌ 충돌 감지 — 복원하지 않고 멈춘다:\n   {exc}")
         return 2
+    except NotIsolated as exc:
+        print(f"\n❌ {exc}")
+        return 2
     finally:
+        wt_ctx.__exit__(None, None, None)
         lock_ctx.__exit__(None, None, None)
 
     print(f"\nkilled={counts['KILLED']} survived={counts['SURVIVED']} "
