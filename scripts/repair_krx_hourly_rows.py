@@ -297,6 +297,19 @@ def restore_all(
 # DB 배선
 # ---------------------------------------------------------------------------
 
+# `delete_all` 이 받는 어댑터 키. **테스트와 운영이 이 하나를 공유한다** —
+# 테스트가 자기 목록을 따로 들면, 운영 경로가 깨져도 테스트는 초록이다
+# (실제로 그랬다: 테스트 헬퍼가 apply_insert 를 걸러내 실 dry-run 에서만 터졌다).
+DELETE_ADAPTER_KEYS = ("lock_and_read", "keep_snapshot", "total_count",
+                       "apply_delete", "reread")
+
+
+def delete_adapters(db) -> dict:
+    """`delete_all` 호출용 어댑터만 추린다."""
+    ad = build_adapters(db)
+    return {k: ad[k] for k in DELETE_ADAPTER_KEYS}
+
+
 def build_adapters(db):
     from sqlalchemy import delete as sa_delete, func, insert as sa_insert, select
 
@@ -600,7 +613,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     db = SessionLocal()
     phase = PHASE_PRE_COMMIT
     try:
-        adapters = build_adapters(db)
+        adapters = delete_adapters(db)
         result = delete_all(
             write=args.write,
             expected_preimage_sha=args.expect_preimage_sha,

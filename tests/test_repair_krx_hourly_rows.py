@@ -48,9 +48,14 @@ def _all_present() -> dict:
 
 
 def _delete_kwargs(ad: dict) -> dict:
-    """`delete_all` 이 받는 어댑터만 추린다 (`apply_insert` 는 복원 전용)."""
-    return {k: ad[k] for k in ("lock_and_read", "keep_snapshot", "total_count",
-                               "apply_delete", "reread")}
+    """⛔ 테스트가 **자기 목록**을 들면 안 된다 — 운영 경로가 깨져도 초록이 된다.
+
+    실제로 그랬다: 이 헬퍼가 `apply_insert` 를 걸러내는 바람에 `main()` 이
+    어댑터 전체를 넘겨 터지는 것을 테스트가 못 봤고, 운영 dry-run 에서야
+    `delete_all() got an unexpected keyword argument 'apply_insert'` 로 드러났다.
+    이제 **운영과 같은 상수**를 쓴다.
+    """
+    return {k: ad[k] for k in H.DELETE_ADAPTER_KEYS}
 
 class TestAllowlist(unittest.TestCase):
 
@@ -443,6 +448,41 @@ class TestAgainstRealPostgres(unittest.TestCase):
     def _count(self):
         with self.Session() as s:
             return s.query(self.M).count()
+
+    def test_main_dry_run_runs_end_to_end(self):
+        """⭐ **`main()` 의 실제 배선**을 탄다.
+
+        순수 함수만 시험하면 `main()` 이 어댑터를 잘못 넘기는 결함을 못 본다 —
+        실제로 그랬다(`delete_all() got an unexpected keyword argument
+        'apply_insert'`가 운영 dry-run 에서야 드러났다). in-process 로 같은
+        engine 을 물려 `main()` 을 그대로 호출한다.
+        """
+        import io
+        import contextlib
+        from unittest import mock
+
+        tmp = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"m-{uuid.uuid4().hex}.json"
+        buf = io.StringIO()
+        with mock.patch.dict(
+                sys.modules,
+                {"app.database": mock.MagicMock(DATABASE_URL="sqlite://",
+                                                SessionLocal=self.Session)}):
+            with contextlib.redirect_stdout(buf):
+                rc = H.main(["--preimage-out", str(tmp)])
+        tmp.unlink(missing_ok=True)
+        self.assertEqual(rc, 0, buf.getvalue())
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["mode"], "dry-run")
+        self.assertEqual(len(payload["planned_delete"]), 4)
+
+    def test_delete_adapter_keys_match_delete_all_signature(self):
+        """운영이 넘기는 키 집합이 `delete_all` 시그니처와 어긋나지 않는다."""
+        import inspect
+        params = set(inspect.signature(H.delete_all).parameters)
+        extra = set(H.DELETE_ADAPTER_KEYS) - params
+        self.assertEqual(extra, set(), f"delete_all 이 받지 않는 키: {extra}")
+        with self.Session() as s:
+            self.assertEqual(set(H.delete_adapters(s)), set(H.DELETE_ADAPTER_KEYS))
 
     def test_delete_then_restore_roundtrip(self):
         """⭐ 삭제 → 복원 왕복이 지문을 재현하는가."""
