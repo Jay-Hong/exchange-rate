@@ -209,12 +209,18 @@ class TestIsolationIsEnforcedNotJustPracticed(unittest.TestCase):
     """
 
     def test_shared_worktree_paths_are_recognised_as_not_isolated(self):
-        """⚠️ 이 판정식은 아직 `MutatedFile` 에 **걸려 있지 않다**(모듈 docstring 참조) —
-        3개 runner 가 공유하는 지점이라 함께 이관해야 한다. 판정 자체는 지금 잠근다."""
-        from mutation_battery_guard import assert_isolated
+        """공유 경계에 실제로 결박한다. 판정 함수만 시험하면 호출이 사라져도 초록이다."""
+        import tempfile
 
+        target = pathlib.Path(tempfile.mkdtemp()) / "target.py"
+        target.write_text("x = 1\n")
+        handle = MutatedFile(target)
         with self.assertRaises(NotIsolated):
-            assert_isolated(REPO / "app" / "database_settings.py")
+            handle.write_mutant("x = 2\n")
+        self.assertEqual(target.read_text(), "x = 1\n", "격리 거부 뒤 파일이 바뀌었다")
+        with self.assertRaises(NotIsolated):
+            handle.restore()
+        self.assertEqual(target.read_text(), "x = 1\n", "격리 거부 뒤 restore가 파일을 썼다")
 
     def test_isolated_worktree_allows_mutation_and_leaves_the_shared_tree_untouched(self):
         target = REPO / "app" / "database_settings.py"
@@ -265,6 +271,72 @@ class TestIsolationIsEnforcedNotJustPracticed(unittest.TestCase):
             path = wt
             self.assertTrue(path.is_dir())
         self.assertFalse(path.exists(), "격리 worktree 가 남았다")
+
+
+class TestRunnerIsolationIntegration(unittest.TestCase):
+    """helper 단독 시험이 아니라 runner가 격리 경계를 실제로 사용하는지 확인한다."""
+
+    @staticmethod
+    def _load(name: str, filename: str):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(name, REPO / "scripts" / filename)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_auth_runner_probe_reads_the_isolated_mutant(self):
+        """구 runner는 mutant는 격리 트리에 쓰고 pytest는 공유 트리에서 돌려 SURVIVED였다."""
+        import contextlib
+        import io
+
+        mod = self._load("battery_auth_isolation_test", "mutation_auth_executor_ledger.py")
+        target = REPO / "app" / "auth_executor.py"
+        before = target.read_text()
+        worktrees_before = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        mod.MUTANTS = [mod.MUTANTS[0]]
+        mod.MUTANT_PROBES = {}
+        mod.DEFAULT_PROBES = ("s5",)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = mod.main()
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("killed=1 survived=0", output.getvalue())
+        self.assertEqual(target.read_text(), before, "공유 production 파일이 바뀌었다")
+        worktrees_after = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(worktrees_after, worktrees_before, "runner가 임시 worktree를 남겼다")
+
+    def test_rest_runner_explicitly_closes_its_isolation_context(self):
+        """CPython 객체 소멸에 기대지 않고 runner가 context의 __exit__를 호출해야 한다."""
+        mod = self._load("battery_rest_cleanup_test", "mutation_rest_auth_lane.py")
+
+        class SpyContext:
+            def __init__(self, value=None):
+                self.value = value
+                self.exited = False
+
+            def __enter__(self):
+                return self.value
+
+            def __exit__(self, *_):
+                self.exited = True
+
+        lock = SpyContext()
+        worktree = SpyContext(REPO)
+        mod.MUTANTS = []
+        mod.battery_lock = lambda _: lock
+        mod.isolated_worktree = lambda _: worktree
+        self.assertEqual(mod.main(), 0)
+        self.assertTrue(worktree.exited, "격리 worktree context를 닫지 않았다")
+        self.assertTrue(lock.exited, "battery lock context를 닫지 않았다")
+        self.assertIsNone(mod._WORK, "정리 뒤 worktree 전역이 남았다")
 
 
 if __name__ == "__main__":

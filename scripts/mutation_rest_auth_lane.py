@@ -228,6 +228,8 @@ def main() -> int:
         print(f"\n❌ 충돌 감지 — 복원하지 않고 멈춘다:\n   {exc}")
         return 2
     finally:
+        wt_ctx.__exit__(None, None, None)
+        _WORK = None
         lock_ctx.__exit__(None, None, None)
 
     print(f"\nkilled={counts['KILLED']} survived={counts['SURVIVED']} "

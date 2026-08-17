@@ -10,6 +10,9 @@ import sys
 
 import pytest
 
+sys.path.insert(
+    0, str(pathlib.Path(__file__).resolve().parent.parent / 'scripts'))
+
 _SPEC = importlib.util.spec_from_file_location(
     "_bat", pathlib.Path(__file__).resolve().parent.parent
     / "scripts" / "mutation_auth_executor_ledger.py")
@@ -68,12 +71,24 @@ def test_main_counters_follow_classify_not_the_first_probe(monkeypatch, rcs, exp
     #    중단돼 변이 판정에 도달하지 못한다(실측). 기준선은 green, 변이 때만 주입한다.
     state = {"mutating": False}
 
-    def fake_run(pr):
+    def fake_run(pr, cwd=None):   # cwd: 격리 worktree 이관으로 추가된 인자
         rc = rcs.get(pr, 0) if state["mutating"] else 0
         return types.SimpleNamespace(returncode=rc, stdout="")
     monkeypatch.setattr(_BAT, "_run", fake_run)
 
+    # ⛔ 가드(`assert_isolated`)를 끄지 않는다 — 끄면 공유 트리 변이를 막는 기전이 사라진다.
+    #    대신 스텁이 **격리 표식이 있는 임시 경로**를 가리키게 한다.
+    import tempfile as _tf
+
+    from mutation_battery_guard import ISOLATION_MARKER as _MARK
+
+    _iso = pathlib.Path(_tf.mkdtemp(prefix="fxi-fake-src-"))
+    (_iso / _MARK).write_text("test\n")
+
     class _FakeSrc:                     # ⛔ PosixPath 속성은 read-only 라 SRC 자체를 갈아끼운다
+        def __fspath__(self):
+            return str(_iso / "auth_executor.py")
+
         def __init__(self):
             self.text = "AAA\n"
         def read_text(self):

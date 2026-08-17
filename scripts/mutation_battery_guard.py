@@ -109,13 +109,15 @@ class MutatedFile:
         self._last_written = self.original
 
     def write_mutant(self, text: str) -> None:
-        """변이본을 쓰기 **전에** 디스크가 아직 내 것인지 확인한다."""
+        """격리 트리인지 확인한 뒤, 디스크가 아직 내 것일 때만 변이본을 쓴다."""
+        assert_isolated(self.path)
         self._assert_ours("변이 적용 전")
         self.path.write_text(text)
         self._last_written = text
 
     def restore(self) -> None:
         """⛔ 무조건 덮어쓰지 않는다 — 남의 변경을 지우는 것이 이 사고의 핵심이었다."""
+        assert_isolated(self.path)
         self._assert_ours("복원 전")
         self.path.write_text(self.original)
         self._last_written = self.original
@@ -185,16 +187,9 @@ def isolated_worktree(repo: pathlib.Path) -> Iterator[pathlib.Path]:
 def assert_isolated(path: pathlib.Path) -> None:
     """변이 대상이 격리 worktree 안인지 확인한다.
 
-    ⚠️ **아직 `MutatedFile.write_mutant` 에 걸지 않았다.** 3개 runner 중 둘
-       (`mutation_db_engine` · `mutation_rest_auth_lane`)은 격리로 이관됐지만
-       `mutation_auth_executor_ledger` 는 **격리 트리에서 probe 가 변이를 못 본다**(실측:
-       전 변이 SURVIVED — probe 경로 해석 문제로 추정). 공유 지점에 강제를 걸면 그 배터리가
-       실행 자체를 거부당하므로, **세 번째가 해결될 때까지 걸지 않는다.**
-       강제는 이관과 **동시에** 해야 한다 — 한때 db_engine 만 이관된 채 걸었다가 나머지 둘이
-       거부당했다(실측).
-
-    그때까지 이 함수는 **호출자가 명시적으로 쓰는 도구**이고, 이관된 두 배터리의 격리는
-    각 runner 가 항상 `isolated_worktree()` 를 만든다는 사실이 보장한다.
+    세 production runner 모두 `isolated_worktree()` 안의 파일만 `MutatedFile`에 넘긴다.
+    이 판정은 `write_mutant()`의 공용 경계에 걸려 있어 새 runner가 격리를 빠뜨려도 쓰기 전에
+    거부한다. 락만으로는 일반 pytest·git·docker build 독자를 보호할 수 없다.
     """
     p = pathlib.Path(path).resolve()
     for parent in (p, *p.parents):

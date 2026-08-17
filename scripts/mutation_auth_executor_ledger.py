@@ -24,7 +24,7 @@ import sys as _sys_guard
 import pathlib as _pl_guard
 _sys_guard.path.insert(0, str(_pl_guard.Path(__file__).resolve().parent))
 from mutation_battery_guard import (  # noqa: E402
-    BatteryLockBusy, MutatedFile, battery_lock,
+    BatteryLockBusy, MutatedFile, battery_lock, isolated_worktree,
 )
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -156,11 +156,11 @@ MUTANTS: list[tuple[str, list[tuple[str, str]]]] = [
 ]
 
 
-def _run(probe: str) -> subprocess.CompletedProcess:
+def _run(probe: str, work: pathlib.Path = REPO) -> subprocess.CompletedProcess:
     """probe 하나만 돌린다 — **귀속의 단위**다."""
     return subprocess.run([sys.executable, "-m", "pytest", *PROBES[probe],
                            "-q", "-p", "no:asyncio", "-x"],
-                          capture_output=True, text=True, cwd=REPO)
+                          capture_output=True, text=True, cwd=work)
 
 
 def validate_mapping() -> list[str]:
@@ -267,22 +267,38 @@ def _probes_for(name: str) -> tuple[str, ...]:
 
 def main() -> int:
     try:
-        _lock = battery_lock(_pl_guard.Path(__file__).resolve().parent.parent)
-        _lock.__enter__()
+        lock_ctx = battery_lock(_pl_guard.Path(__file__).resolve().parent.parent)
+        lock_ctx.__enter__()
     except BatteryLockBusy as exc:
         print(f"❌ {exc}")
         return 2
     try:
-        return _main_locked()
+        wt_ctx = isolated_worktree(REPO)
+        work = wt_ctx.__enter__()
+    except Exception as exc:  # noqa: BLE001 — 격리 실패는 공유 트리 변이의 사유가 못 된다
+        lock_ctx.__exit__(None, None, None)
+        print(f"❌ 격리 worktree 생성 실패 — 공유 트리에서 변이하지 않는다: {exc}")
+        return 2
+    print(f"격리 worktree: {work}")
+    try:
+        return _main_locked(work)
     finally:
-        _lock.__exit__(None, None, None)
+        wt_ctx.__exit__(None, None, None)
+        lock_ctx.__exit__(None, None, None)
 
 
-def _main_locked() -> int:
+def _main_locked(work: pathlib.Path) -> int:
     # ⛔ **원본을 두 번 읽지 않는다.** 두 읽기 사이에 외부 변경이 끼면 `original` 은 구
     #    내용, handle 의 기준은 신 내용이 되어 **충돌 감지가 정확히 그 창에서 무력화**된다
     #    (구 내용 기반 mutant 로 남의 변경을 덮는다). 스냅샷의 진실원은 하나다.
-    _handle = MutatedFile(SRC)
+    # ⚠️ 테스트는 `SRC` 를 스텁으로 monkeypatch 한다 — 실제 REPO 하위 경로일 때만 격리
+    #    트리로 매핑하고 아니면 그대로 둔다. 강제는 `assert_isolated` 가 별도로 진다
+    #    (스텁도 격리 표식 안을 가리켜야 통과한다 — 가드를 끄는 우회가 아니다).
+    try:
+        _target = work / SRC.relative_to(REPO)
+    except (AttributeError, TypeError, ValueError):
+        _target = SRC
+    _handle = MutatedFile(_target)
     original = _handle.original
 
     try:
@@ -301,7 +317,7 @@ def _main_locked() -> int:
         return 2
     used = sorted({p for n, _ in MUTANTS for p in _probes_for(n)})
     for probe in used:
-        b = _run(probe)
+        b = _run(probe, work)
         if b.returncode != 0:
             print(f"❌ INFRA: probe '{probe}' 무변이 기준선이 exit {b.returncode} — 판정 불가")
             print(b.stdout[-1200:])
@@ -318,7 +334,7 @@ def _main_locked() -> int:
                 continue
             _handle.write_mutant(mutated)
             probes = _probes_for(name)
-            results = {pr: _run(pr) for pr in probes}
+            results = {pr: _run(pr, work) for pr in probes}
             rcs = {pr: r.returncode for pr, r in results.items()}
             # ⛔ **모든** 필수 probe 가 각각 exit 1 이어야 KILLED — 하나라도 초록이면 그 probe 는
             #    이 변이에 대해 공허하다는 뜻이고, 합쳐 돌렸다면 그 사실이 감춰졌을 것이다.
