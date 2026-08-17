@@ -306,6 +306,38 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertEqual(rr.returncode, 0, rr.stdout + rr.stderr)
         self.assertEqual(self.state.read_text(), before, "복원 명령이 원본을 되돌리지 못했다")
 
+    def test_every_write_path_acquires_the_lock(self):
+        """⛔ `--restore` 가 락 밖이면 `--install` 과 **같은 사용자 상태를 동시에 덮는다**.
+
+        판정은 "락 획득이 실패하면 그 경로가 **쓰지 않는가**" 다 — 항상 실패하는 fake flock 을
+        놓고, 쓰기 모드가 전부 거부되는지 본다. 구조(호출 유무)가 아니라 **행동**으로 본다.
+        """
+        (self.tmp / "flock").write_text("#!/usr/bin/env bash\nexit 1\n")
+        (self.tmp / "flock").chmod(0o755)
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'echo "WROTE" >> "$CRON_WRITES"\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        self.tmp.joinpath("w.txt").write_text("")
+        before = "\n".join([UNRELATED] + legacy_lines()) + "\n"
+        self.state.write_text(before)
+
+        # 백업 파일 하나를 만들어 --restore 도 같은 조건에서 시험한다.
+        bak = self.tmp / "some.bak"
+        bak.write_text(before)
+        import hashlib
+        sha = hashlib.sha256(before.encode()).hexdigest()
+
+        for mode in (["--install"], ["--restore", str(bak), sha]):
+            with self.subTest(mode=mode[0]):
+                r = subprocess.run(["bash", str(INSTALLER), *mode], capture_output=True,
+                                   text=True, env=self._env(), cwd=REPO, timeout=60)
+                self.assertNotEqual(r.returncode, 0, f"락 실패인데 진행했다: {r.stdout}")
+                self.assertIn("다른 installer", r.stdout)
+        self.assertEqual(self.tmp.joinpath("w.txt").read_text().strip(), "",
+                         "락을 못 잡았는데 crontab 을 썼다")
+
     def test_restore_refuses_a_tampered_backup(self):
         """⛔ SHA 를 출력만 하고 검증하지 않으면 **잘린 백업도 그대로 설치**된다."""
         self._install_fake(

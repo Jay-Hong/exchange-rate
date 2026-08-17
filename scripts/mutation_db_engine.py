@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""S2 — `app/database.py` engine 설정 변이 배터리.
+"""S2 · M0a — DB engine 설정과 cron installer 변이 배터리.
+
+⚠️ M0a 변이 5종은 한때 **일회성 실행**이었다(codex) — 그때 3/3 killed 를 보고했지만 저장소에
+   남지 않아 재현 가능한 게이트가 아니었다. 여기 영속화한다.
 
 ## 왜 S1b 배터리와 분리했나
 
@@ -31,6 +34,8 @@ from mutation_battery_guard import (  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DB = "app/database.py"
+INSTALLER = "ops/install-db-maintenance-cron.sh"
+CRON = "tests/test_db_maintenance_cron_manifest.py"
 SQLITE_LEAK = ("tests/test_pg_engine_binding.py::TestSqlitePathNeedsNoPostgres::"
                "test_sqlite_path_does_not_receive_postgres_only_kwargs")
 
@@ -42,6 +47,16 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
            '    _engine_kwargs["connect_args"] = {"check_same_thread": False,\n'
            '                                      "options": "-c statement_timeout=1000"}\n')],
      (SQLITE_LEAK,)),
+    ('M0a-1 복원 안내를 깨뜨림 → 사람이 복사할 명령이 동작하지 않는다',
+     INSTALLER, [("  printf '  복원: %s --restore %s %s\\n' \\\n", "  printf '  복원: false # %s --restore %s %s\\n' \\\n")], (CRON,)),
+    ('M0a-2 SHA 검증 제거 → 변조·잘린 백업이 그대로 설치된다',
+     INSTALLER, [('  if [ "$got" != "$2" ]; then\n', '  if false; then\n')], (CRON,)),
+    ('M0a-3 백업 이름을 초 단위 고정으로 → 같은 초 2회 실행이 앞 백업을 덮는다',
+     INSTALLER, [('  backup="$(mktemp "$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak.XXXXXX")"', '  backup="$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak"')], (CRON,)),
+    ('M0a-4 --restore 가 락을 건너뜀 → --install 과 같은 상태를 동시에 덮는다',
+     INSTALLER, [('do_restore() {   # $1 = backup 파일, $2 = 기대 SHA\n  local got snap pre\n  acquire_write_lock || return 1\n', 'do_restore() {   # $1 = backup 파일, $2 = 기대 SHA\n  local got snap pre\n')], (CRON,)),
+    ('M0a-5 crontab -l 오류를 빈 것으로 접음 → 조회 실패가 상태 판정으로 둔갑',
+     INSTALLER, [('  if [ "$rc" -ne 0 ]; then\n    echo "❌ crontab -l 실패 (exit $rc): $(head -c 200 "$1.err")" >&2\n    return 1\n  fi\n', '  if [ "$rc" -ne 0 ]; then : >"$1"; fi\n')], (CRON,)),
 ]
 
 MID_LINE_ANCHORS: set[str] = set()
@@ -62,11 +77,29 @@ def apply_pairs(source: str, pairs: list[tuple[str, str]]) -> tuple[str | None, 
         cur = nxt
     if cur == source:
         return None, "전체 no-op (최종본이 원본과 같다)"
-    try:
-        ast.parse(cur)
-    except SyntaxError as exc:
-        return None, f"변이본 문법 오류: {exc}"
     return cur, "ok"
+
+
+def syntax_ok(rel: str, text: str) -> tuple[bool, str]:
+    """⛔ **대상 언어로** 문법을 본다. 하네스가 Python 대상만 가정해 bash 파일에 `ast.parse` 를
+    돌렸고, 유효한 변이가 전부 `INVALID` 로 버려졌다(실측 4건) — 커버리지 구멍을 문법 오류로
+    위장하는 셈이다."""
+    if rel.endswith(".py"):
+        try:
+            ast.parse(text)
+        except SyntaxError as exc:
+            return False, f"변이본 문법 오류(python): {exc}"
+        return True, "ok"
+    if rel.endswith(".sh"):
+        tmp = pathlib.Path(subprocess.run(["mktemp"], capture_output=True, text=True).stdout.strip())
+        try:
+            tmp.write_text(text)
+            r = subprocess.run(["bash", "-n", str(tmp)], capture_output=True, text=True)
+            return r.returncode == 0, ("ok" if r.returncode == 0
+                                       else f"변이본 문법 오류(bash): {r.stderr.strip()[:120]}")
+        finally:
+            tmp.unlink(missing_ok=True)
+    return True, "ok"   # 그 밖 확장자는 문법 검사를 건너뛴다(주장하지 않는다)
 
 
 def classify(codes: dict[str, int]) -> str:
@@ -103,6 +136,10 @@ def main() -> int:
         for name, rel, pairs, probes in MUTANTS:
             handle = files[rel]
             mutated, why = apply_pairs(handle.original, pairs)
+            if mutated is not None:
+                ok, why2 = syntax_ok(rel, mutated)
+                if not ok:
+                    mutated, why = None, why2
             if mutated is None:
                 counts["INVALID"] += 1
                 print(f"INVALID  {name}\n          ← {rel}: {why}")
