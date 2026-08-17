@@ -157,9 +157,9 @@ def isolated_worktree(repo: pathlib.Path) -> Iterator[pathlib.Path]:
     """
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="fxi-mutation-"))
     wt = tmp / "wt"
-    subprocess.run(["git", "worktree", "add", "--detach", "-q", str(wt), "HEAD"],
-                   cwd=repo, check=True, capture_output=True)
     try:
+        subprocess.run(["git", "worktree", "add", "--detach", "-q", str(wt), "HEAD"],
+                       cwd=repo, check=True, capture_output=True)
         diff = subprocess.run(["git", "diff", "HEAD"], cwd=repo,
                               capture_output=True, text=True, check=True).stdout
         if diff.strip():

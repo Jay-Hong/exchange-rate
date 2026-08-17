@@ -229,19 +229,31 @@ class TestIsolationIsEnforcedNotJustPracticed(unittest.TestCase):
 
     def test_uncommitted_work_is_reproduced_inside_the_isolation(self):
         """⛔ 배터리는 보통 **미커밋** 상태를 시험한다. HEAD 만 뜨면 다른 코드를 시험하면서
-        초록을 보고한다 — 그 오판을 막는다."""
+        초록을 보고한다 — 그 오판을 막는다.
+
+        이 계약을 시험하려고 실제 리포의 production 파일을 수정하면 테스트 자신이 공유 트리를
+        오염시킨다. 독립 임시 리포에서만 미커밋 변경을 만든다.
+        """
+        import tempfile
         import subprocess as sp
 
         marker = "# fxi-isolation-probe\n"
-        target = REPO / "app" / "database_settings.py"
-        before = target.read_text()
-        target.write_text(before + marker)
-        try:
-            with isolated_worktree(REPO) as wt:
-                self.assertIn(marker, (wt / "app" / "database_settings.py").read_text(),
+        with tempfile.TemporaryDirectory(prefix="fxi-isolation-source-") as td:
+            repo = pathlib.Path(td)
+            sp.run(["git", "init", "-q"], cwd=repo, check=True)
+            target = repo / "target.py"
+            target.write_text("x = 1\n")
+            sp.run(["git", "add", "target.py"], cwd=repo, check=True)
+            sp.run(["git", "-c", "user.name=FXi Test", "-c", "user.email=fxi@test.invalid",
+                    "commit", "-qm", "base"], cwd=repo, check=True)
+
+            before = target.read_text()
+            target.write_text(before + marker)
+            with isolated_worktree(repo) as wt:
+                self.assertIn(marker, (wt / "target.py").read_text(),
                               "미커밋 변경이 격리 트리에 재현되지 않았다")
-        finally:
-            target.write_text(before)
+            self.assertEqual(target.read_text(), before + marker,
+                             "격리 복제가 원본 임시 리포를 바꿨다")
 
     def test_the_worktree_is_removed_afterwards(self):
         with isolated_worktree(REPO) as wt:

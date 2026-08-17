@@ -182,12 +182,14 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
        'STATEMENT_TIMEOUT_MS = {ONLINE: 600_000, MAINTENANCE: 900_000}\n')],
      ('tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::'
       'test_each_profile_lands_all_three_timeouts_on_a_live_connection',)),
-    ('S2-15 online pool 대기를 1초로 드리프트 → 7초짜리 질의 뒤에 선 요청이 늘 실패한다',
+    ('S2-15 online pool 대기를 1초로 드리프트 → 풀 고갈 시 계약보다 일찍 실패한다',
      'app/database_settings.py',
      [('POOL_TIMEOUT_SECONDS = {ONLINE: 10, MAINTENANCE: 30}\n',
        'POOL_TIMEOUT_SECONDS = {ONLINE: 1, MAINTENANCE: 30}\n')],
      ('tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::'
-      'test_each_profile_lands_all_three_timeouts_on_a_live_connection',)),
+      'test_each_profile_lands_all_three_timeouts_on_a_live_connection',
+      'tests/test_pg_engine_binding.py::TestProductionPoolTimeoutBehavior::'
+      'test_sixth_checkout_times_out_and_the_pool_recovers')),
     ('S2-16 connect 상한 교차배선 → 순서·부호 단언으로는 안 잡힌다',
      'app/database_settings.py',
      [('CONNECT_TIMEOUT_SECONDS = {ONLINE: 5, MAINTENANCE: 10}\n',
@@ -241,6 +243,8 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
 PG_PROBES = frozenset({
     "tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::"
     "test_each_profile_lands_all_three_timeouts_on_a_live_connection",
+    "tests/test_pg_engine_binding.py::TestProductionPoolTimeoutBehavior::"
+    "test_sixth_checkout_times_out_and_the_pool_recovers",
     "tests/test_pg_engine_binding.py::TestCanceledStatementIsClassifiedTransient::"
     "test_a_canceled_statement_is_transient_not_permanent",
 })
@@ -376,10 +380,11 @@ def main() -> int:
         return 2
     print(f"격리 worktree: {work}")
 
-    files = {rel: MutatedFile(work / rel) for rel in {m[1] for m in MUTANTS}}
     counts = {"KILLED": 0, "SURVIVED": 0, "INVALID": 0, "INFRA": 0}
     nodes = sorted({n for m in MUTANTS for n in m[3]})
     try:
+        # 대상 누락/읽기 실패도 격리 worktree 와 락을 반드시 정리한 뒤 전파한다.
+        files = {rel: MutatedFile(work / rel) for rel in {m[1] for m in MUTANTS}}
         base = {}
         for n in nodes:
             rc, _, sk = _run(n, work)

@@ -29,12 +29,20 @@
 
 ## ⛔ 왜 미지정 외에는 전부 실패인가
 
-⚠️ 처음엔 "조용히 online 으로 떨어지면 maintenance 가 중간까지 쓰고 잘려 **부분 작업이 남는다**"
-   고 적었다. 그 근거는 **과장이었다**(외부 검토 지적 → 확인). manifest 의 5개 writer 는
-   `db.commit()` / 실패 시 `db.rollback()` 트랜잭션이라 57014 가 나면 롤백된다 — 부분 쓰기는
-   남지 않고 job 이 실패할 뿐이다. 트랜잭션 밖에서 항목별로 커밋하는 스크립트에만 해당한다.
+⚠️ 이 근거는 **두 번 뒤집혔다**. 층위를 섞으면 또 틀리므로 나눠 적는다.
 
-fail-closed 를 유지하는 **실제** 근거는 셋이다:
+- **statement 층위**: 단일 writer 안의 upsert 는 트랜잭션이라 57014 가 나면 롤백된다.
+  여기서는 "부분 쓰기가 남는다" 가 **틀리다**.
+- **job 층위**: `scripts/daily_append_source_daily_rates.py` 는 `for source, asset in run_units`
+  로 **run unit 마다 별 subprocess·별 commit** 을 돌린다(7 unit). 5번째가 57014 로 죽으면
+  1~4 는 **커밋된 채 남는다**. `scripts/hourly_append_source_hourly_rates.py` 도 upsert 를
+  커밋한 뒤 prune 을 **별 transaction** 으로 돈다(그 파일 주석이 그렇게 적고 있다).
+  여기서는 "부분 작업이 남는다" 가 **맞다**.
+
+한때 statement 층위 지적만 보고 원래 근거를 통째로 철회했는데, orchestrator 를 읽지 않은
+철회였다 — 철회에도 같은 증거 기준을 적용해야 한다.
+
+fail-closed 를 유지하는 근거는 그 위에 셋이 더 있다:
 
 1. **online 은 이 변수를 아예 설정하지 않는다**(운영 `.env` 실측: 0건). online 은 *부재*로
    결정되므로, 여기서 기동이 죽는 경로는 "없어도 될 변수를 누군가 일부러 추가했을 때" 뿐이다.
@@ -139,7 +147,8 @@ def resolve_profile(raw: str | None) -> str:
     raise InvalidDbWorkloadProfile(
         f"{ENV_VAR}={raw!r} 은 허용되지 않는다. 허용값: {', '.join(PROFILES)} "
         f"(미지정이면 {ONLINE}). 대소문자·공백·빈 문자열도 거절한다 — "
-        "조용히 online 으로 떨어지면 maintenance 작업이 중간까지만 쓰고 잘린다."
+        "조용히 online 으로 떨어지면 maintenance job 이 run unit 몇 개만 커밋한 채 잘린다 "
+        "(단일 upsert 는 롤백되지만 orchestrator 는 unit 마다 별 commit 이다)."
     )
 
 

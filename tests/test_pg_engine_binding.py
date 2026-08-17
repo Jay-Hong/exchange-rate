@@ -190,6 +190,59 @@ class TestWorkloadProfileReachesTheServer(unittest.TestCase):
         self.assertEqual(out.get("PROFILE"), "online", out)
         self.assertEqual(out.get("STATEMENT"), self.EXPECTED["online"][0], out)
 
+
+class TestProductionPoolTimeoutBehavior(unittest.TestCase):
+    """`pool_timeout`이 객체 속성에만 남지 않고 실제 checkout 대기를 제한하는가.
+
+    production online 풀의 `3 + 2` 슬롯을 모두 점유한 뒤 여섯 번째 checkout을 시도한다.
+    직접 `TimeoutError`를 주입하지 않으며, timeout 뒤 슬롯 하나를 반환했을 때 같은 pool이
+    다시 쿼리를 처리하는 것까지 확인한다.
+    """
+
+    def setUp(self):
+        self.url = _require_pg()
+
+    def test_sixth_checkout_times_out_and_the_pool_recovers(self):
+        code = (
+            "import time\n"
+            "from sqlalchemy import text\n"
+            "from sqlalchemy.exc import TimeoutError as SATimeoutError\n"
+            "from app.database import engine\n"
+            "held = []\n"
+            "extra = None\n"
+            "try:\n"
+            "    held = [engine.connect() for _ in range(5)]\n"
+            "    started = time.monotonic()\n"
+            "    try:\n"
+            "        extra = engine.connect()\n"
+            "        timed_out = False\n"
+            "    except SATimeoutError:\n"
+            "        timed_out = True\n"
+            "    elapsed = time.monotonic() - started\n"
+            "    print('TIMED_OUT=' + str(timed_out))\n"
+            "    print('ELAPSED=' + str(elapsed))\n"
+            "    if extra is not None:\n"
+            "        extra.close()\n"
+            "        extra = None\n"
+            "    held.pop().close()\n"
+            "    with engine.connect() as recovered:\n"
+            "        print('RECOVERED=' + str(recovered.execute(text('SELECT 1')).scalar()))\n"
+            "finally:\n"
+            "    if extra is not None:\n"
+            "        extra.close()\n"
+            "    for conn in held:\n"
+            "        conn.close()\n"
+        )
+        r = _run_in_fresh_process(code, url=self.url, profile="online")
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        out = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+        self.assertEqual(out.get("TIMED_OUT"), "True", out)
+        elapsed = float(out.get("ELAPSED", "nan"))
+        self.assertGreaterEqual(elapsed, 8.0, f"10초 설정보다 너무 일찍 실패했다: {out}")
+        self.assertLess(elapsed, 20.0, f"pool_timeout 상한이 실제로 작동하지 않는다: {out}")
+        self.assertEqual(out.get("RECOVERED"), "1", out)
+
+
 class TestCanceledStatementIsClassifiedTransient(unittest.TestCase):
     """취소된 statement(SQLSTATE **57014**)가 `app.db_errors` 에서 **transient** 로 분류되는가.
 
