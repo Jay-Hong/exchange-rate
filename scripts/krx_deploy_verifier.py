@@ -1159,7 +1159,12 @@ async def snapshot_source_freshness(adapters: Adapters) -> dict:
     for row in rates:
         if not isinstance(row, dict):
             continue
-        source = row.get("bank") or row.get("source")
+        # ⛔ 키는 **(bank, currency)** 다. bank 로만 접으면 운영 30행이 10키로
+        #    뭉개져, kb.eur 가 사라져도 kb.usd 가 남으면 kb 는 정상으로 보인다
+        #    (외부 검토 지적 — max(timestamp) 를 소스별로 옮겼을 뿐이 된다).
+        bank = row.get("bank") or row.get("source")
+        currency = row.get("currency") or row.get("asset")
+        source = f"{bank}.{currency}" if bank and currency else None
         raw = row.get("timestamp")
         if not source or not raw:
             continue

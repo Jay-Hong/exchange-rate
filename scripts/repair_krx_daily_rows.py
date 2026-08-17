@@ -231,6 +231,7 @@ def preimage_sha(fingerprint: str) -> str:
 
 def check_production_write_guard(database_url: str, *, write: bool,
                                  allow_production: bool) -> None:
+    """`write` 는 "DB 를 바꾸는가"다 — 정방향 교정이든 되돌리기든 같다."""
     """production DB에 `--write`를 실수로 겨눴을 때 **1줄 + 중단**.
 
     ⚠️ 판정 대상은 **실제 세션이 bind된 URL**이어야 한다. 별도로 `os.getenv`를
@@ -666,6 +667,124 @@ def write_commit_receipt(preimage_path: pathlib.Path, result: dict) -> None:
     _fsync_dir(path.parent)
 
 
+def load_preimage_artifact(path: pathlib.Path) -> tuple[dict, str]:
+    """preimage 산출물 → `(rows, sha)`. **sha 를 재계산해 대조**한다.
+
+    파일이 손상됐거나 사람이 손댄 것을 그대로 되먹이면 되돌림이 원 상태를
+    재현하지 못한다.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RepairAbort(f"preimage 읽기 실패 {path}: {exc}") from exc
+    fingerprint = payload.get("preimage")
+    sha = payload.get("preimage_sha256")
+    if not isinstance(fingerprint, str) or not isinstance(sha, str):
+        raise RepairAbort("preimage 산출물 형식이 아니다 (preimage/preimage_sha256)")
+    if preimage_sha(fingerprint) != sha:
+        raise RepairAbort(
+            "preimage 파일의 sha 가 본문과 맞지 않는다 — 손상/변조")
+    try:
+        rows = json.loads(fingerprint)
+    except ValueError as exc:
+        raise RepairAbort(f"preimage 본문 파싱 실패: {exc}") from exc
+    if not isinstance(rows, dict):
+        raise RepairAbort("preimage 본문이 object 가 아니다")
+    return rows, sha
+
+
+def _deserialize_value(column: str, raw):
+    """지문은 전부 문자열로 직렬화돼 있다 — 컬럼 타입으로 되돌린다."""
+    if raw is None:
+        return None
+    if column == "metadata_json":
+        return raw
+    if column == "id":
+        return int(raw)
+    if column in ("source", "asset", "ohlc_quality", "close_basis",
+                  "source_method", "contract_code"):
+        return str(raw)
+    if column in ("date_kst", "basis_date"):
+        return date.fromisoformat(str(raw)[:10])
+    if column in ("published_at", "captured_at"):
+        return datetime.fromisoformat(str(raw))
+    return Decimal(str(raw))
+
+
+def build_revert_adapters(db):
+    """되돌리기용 SQL adapter. 교정과 같은 잠금·조건부 변경 계약."""
+    from sqlalchemy import delete as sa_delete, select, update
+
+    from app.models import SourceDailyRate
+
+    def _base(d: date):
+        return (SourceDailyRate.source == SOURCE,
+                SourceDailyRate.asset == ASSET,
+                SourceDailyRate.date_kst == d)
+
+    def lock_and_read(d: date) -> Optional[dict]:
+        db.execute(select(SourceDailyRate.id).where(*_base(d)).with_for_update())
+        row = db.execute(
+            select(SourceDailyRate).where(*_base(d))).scalar_one_or_none()
+        return None if row is None else {c: getattr(row, c)
+                                         for c in PREIMAGE_COLUMNS}
+
+    def restore(d: date, values: dict) -> int:
+        payload = {c: _deserialize_value(c, values[c]) for c in PREIMAGE_COLUMNS
+                   if c not in ("id", "source", "asset", "date_kst")}
+        result = db.execute(update(SourceDailyRate).where(*_base(d)).values(**payload))
+        db.flush()
+        db.expire_all()
+        return result.rowcount
+
+    def delete(d: date) -> int:
+        result = db.execute(sa_delete(SourceDailyRate).where(*_base(d)))
+        db.flush()
+        db.expire_all()
+        return result.rowcount
+
+    def reread(d: date) -> Optional[dict]:
+        db.expire_all()
+        return lock_and_read(d)
+
+    return dict(lock_and_read=lock_and_read, restore=restore, delete=delete,
+                reread=reread)
+
+
+def _run_revert(args, SessionLocal) -> int:
+    """`--revert-from` 실행 경로. 교정과 같은 3단계 보고 계약을 쓴다."""
+    rows, sha = load_preimage_artifact(pathlib.Path(args.revert_from))
+    plan = build_revert_plan(rows)
+    print(json.dumps({"mode": "revert-plan", "preimage_sha256": sha,
+                      "plan": [{k: v for k, v in item.items() if k != "values"}
+                               for item in plan]},
+                     ensure_ascii=False, indent=2, default=str))
+
+    db = SessionLocal()
+    phase = PHASE_PRE_COMMIT
+    try:
+        adapters = build_revert_adapters(db)
+        result = apply_revert_plan(plan=plan, expected_sha=sha, **adapters)
+        phase = PHASE_COMMITTING
+        db.commit()
+        phase = PHASE_COMMITTED
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+    except Exception as exc:
+        if phase == PHASE_COMMITTING:
+            print(json.dumps(
+                {"status": COMMIT_OUTCOME_UNVERIFIED, "error": str(exc),
+                 "note": "revert commit 결과 **미확정** — rollback 하지 않았다"},
+                ensure_ascii=False, default=str), file=sys.stderr)
+            return 2
+        db.rollback()
+        print(json.dumps({"aborted": str(exc)}, ensure_ascii=False, default=str),
+              file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -680,12 +799,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     #    check_production_write_guard docstring 참조).
     from app.database import DATABASE_URL, SessionLocal
 
+    mutates_db = bool(args.write or args.revert_from)
     try:
-        check_production_write_guard(DATABASE_URL, write=args.write,
+        check_production_write_guard(DATABASE_URL, write=mutates_db,
                                      allow_production=args.allow_production_write)
     except RepairAbort as exc:
         print(f"[abort] {exc}", file=sys.stderr)
         return 1
+
+    if args.revert_from:
+        try:
+            return _run_revert(args, SessionLocal)
+        except RepairAbort as exc:
+            print(f"[abort] revert: {exc}", file=sys.stderr)
+            return 1
 
     auth_key = os.getenv(AUTH_KEY_ENV, "")
     if not auth_key:

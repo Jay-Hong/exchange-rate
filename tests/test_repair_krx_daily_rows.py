@@ -349,6 +349,37 @@ class TestProductionGuardUsesSessionUrl(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, proc.stdout[-400:] + proc.stderr[-400:])
         self.assertIn(R.AUTH_KEY_ENV, proc.stderr)
 
+    def test_revert_mode_reaches_revert_not_forward_repair(self):
+        """실행 형태로도 확인 — revert 모드가 정방향 교정으로 새지 않는다."""
+        pre = self.tmp_out.with_name("pre-src.json")
+        pre.write_text(json.dumps({
+            "preimage_sha256": "0" * 64,
+            "preimage": json.dumps({str(FEB): None, str(AUG): None},
+                                   ensure_ascii=False, sort_keys=True),
+        }), encoding="utf-8")
+        proc = self._run_script("--revert-from", str(pre),
+                                "--preimage-out", str(self.tmp_out))
+        pre.unlink(missing_ok=True)
+        self.assertNotIn("ModuleNotFoundError", proc.stderr)
+        # 정방향 교정의 사전조건 메시지가 나오면 안 된다 (revert 로 갔어야 한다)
+        self.assertNotIn("UPDATE 대상 행이 없다", proc.stderr + proc.stdout)
+        self.assertIn("revert", (proc.stderr + proc.stdout).lower())
+
+    def test_revert_production_guard_applies(self):
+        """⭐ revert 도 **DB 를 바꾼다** — production guard 가 write 전용이면 안 된다."""
+        pre = self.tmp_out.with_name("pre-guard.json")
+        pre.write_text(json.dumps({
+            "preimage_sha256": "0" * 64,
+            "preimage": json.dumps({str(FEB): None, str(AUG): None},
+                                   ensure_ascii=False, sort_keys=True),
+        }), encoding="utf-8")
+        proc = self._run_script(
+            "--revert-from", str(pre), "--preimage-out", str(self.tmp_out),
+            database_url="postgresql+psycopg://u:p@example.invalid:5432/db")
+        pre.unlink(missing_ok=True)
+        self.assertEqual(proc.returncode, 1, proc.stdout[-400:] + proc.stderr[-400:])
+        self.assertIn("allow-production-write", proc.stderr)
+
     def test_production_write_aborts_before_any_api_or_db_work(self):
         """guard가 **세션 URL**로 판정하고, 외부 호출 전에 막는가.
 
@@ -590,19 +621,48 @@ class TestRevertPath(unittest.TestCase):
         # 우리가 넣은 행은 지우는 것이 역연산이다
         self.assertEqual(by_date["2026-08-14"]["action"], "delete")
 
-    def test_apply_revert_plan_exists_and_is_wired(self):
-        """⭐ **계획은 실행 경로가 아니다.**
+    def test_main_actually_dispatches_to_revert(self):
+        """⭐ **argparse 가 파싱한다 ≠ main 이 그걸 쓴다.**
 
-        `build_revert_plan` docstring 이 `apply_revert_plan` 을 약속했는데 그
-        함수가 없었다 — 문서가 코드가 하지 않는 일을 주장한 사례다. CLI 에서도
-        도달 가능해야 "되돌릴 수 있다"고 말할 수 있다.
+        전 판에서 `--revert-from` 은 파싱·검증만 되고 `main()` 은 그 값을 한
+        번도 읽지 않은 채 정방향 dry-run 으로 떨어졌다. 그런데 테스트는 함수
+        존재와 argparse 결과만 봐서 초록이었다 — **배선을 검사하지 않는
+        테스트**였다(외부 검토 지적). AST 로 dispatch 를 잠근다.
         """
-        self.assertTrue(callable(getattr(R, "apply_revert_plan", None)),
-                        "apply_revert_plan 이 없다 — 계획만 있고 실행이 없다")
-        parser = R.build_parser()
-        args = parser.parse_args(["--revert-from", "/tmp/pre.json",
-                                  "--preimage-out", "/tmp/x.json"])
-        self.assertEqual(args.revert_from, "/tmp/pre.json")
+        self.assertTrue(callable(getattr(R, "apply_revert_plan", None)))
+        src = (REPO_ROOT / "scripts" / "repair_krx_daily_rows.py").read_text()
+        tree = ast.parse(src)
+        main_fn = next(n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef) and n.name == "main")
+        body = ast.unparse(main_fn)
+        self.assertIn("revert_from", body, "main 이 revert_from 을 읽지 않는다")
+        self.assertRegex(body, r"_run_revert|apply_revert_plan",
+                         "main 이 revert 실행 경로로 분기하지 않는다")
+
+    def test_preimage_artifact_sha_is_reverified_on_load(self):
+        """⭐ 손댄 preimage 를 그대로 되먹이면 원 상태를 재현하지 못한다.
+
+        sha 를 기록만 하고 로드 시 확인하지 않으면 그 sha 는 장식이다.
+        """
+        tmp = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"pre-{uuid.uuid4().hex}.json"
+        body = json.dumps({str(FEB): None, str(AUG): None},
+                          ensure_ascii=False, sort_keys=True)
+        try:
+            tmp.write_text(json.dumps({"preimage_sha256": R.preimage_sha(body),
+                                       "preimage": body}), encoding="utf-8")
+            rows, sha = R.load_preimage_artifact(tmp)      # 정상
+            self.assertEqual(sha, R.preimage_sha(body))
+            self.assertEqual(set(rows), {str(FEB), str(AUG)})
+
+            tampered = json.dumps({str(FEB): None, str(AUG): {"id": 9}},
+                                  ensure_ascii=False, sort_keys=True)
+            tmp.write_text(json.dumps({"preimage_sha256": R.preimage_sha(body),
+                                       "preimage": tampered}), encoding="utf-8")
+            with self.assertRaises(R.RepairAbort) as ctx:
+                R.load_preimage_artifact(tmp)
+            self.assertIn("sha", str(ctx.exception))
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def test_revert_and_write_are_mutually_exclusive(self):
         parser = R.build_parser()
@@ -824,6 +884,60 @@ class TestRepairAgainstRealPostgres(unittest.TestCase):
         with cls.base_engine.begin() as conn:
             conn.execute(sql_text(f'DROP SCHEMA "{cls.schema}" CASCADE'))
         cls.base_engine.dispose()
+
+    def test_revert_roundtrip_against_real_postgres(self):
+        """⭐ 교정 → 되돌리기 **왕복**이 원 상태를 재현하는가 (실 PostgreSQL).
+
+        되돌림의 사후조건은 "preimage 지문이 원래 sha 와 같다"이고, 그건 전
+        컬럼이 정확히 복원됐을 때만 성립한다. in-memory 스캐폴드로는 UPDATE
+        rowcount·DELETE 의미를 검증할 수 없다.
+        """
+        self._seed_feb()
+        db = self.Session()
+        try:
+            adapters = R.build_db_adapters(db, self._fetch_fn_ok())
+            captured = {}
+            result = R.repair_all(
+                write=True,
+                persist_preimage=lambda fp, sha: captured.update(fp=fp, sha=sha),
+                **adapters)
+            db.commit()
+        finally:
+            db.close()
+        self.assertEqual(self._row(FEB).contract_code, "A75603")
+        self.assertIsNotNone(self._row(AUG))
+        self.assertEqual(result["preimage_sha"], captured["sha"])
+
+        # --- 되돌리기 ---
+        rows = json.loads(captured["fp"])
+        plan = R.build_revert_plan(rows)
+        db2 = self.Session()
+        try:
+            radapters = R.build_revert_adapters(db2)
+            rres = R.apply_revert_plan(plan=plan, expected_sha=captured["sha"],
+                                       **radapters)
+            db2.commit()
+        finally:
+            db2.close()
+        self.assertEqual(rres["restored_preimage_sha"], captured["sha"])
+        # 원 상태 재현: 2/13 은 A75602 로, 8/14 는 다시 부재
+        feb = self._row(FEB)
+        self.assertEqual(feb.contract_code, "A75602")
+        self.assertEqual(feb.close, Decimal("1441.000000"))
+        self.assertIsNone(self._row(AUG))
+
+    def test_revert_delete_rowcount_zero_aborts(self):
+        """되돌릴 대상이 이미 없으면 조용히 넘기지 않는다."""
+        db = self.Session()
+        try:
+            radapters = R.build_revert_adapters(db)
+            plan = [{"date_kst": str(AUG), "action": "delete"}]
+            with self.assertRaises(R.RepairAbort) as ctx:
+                R.apply_revert_plan(plan=plan, expected_sha="0" * 64, **radapters)
+            db.rollback()
+        finally:
+            db.close()
+        self.assertIn("rowcount", str(ctx.exception))
 
     def test_isolated_schema_not_public(self):
         """격리가 실제로 걸렸는가 — public에 테이블을 만들지 않았다."""

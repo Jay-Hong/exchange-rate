@@ -43,7 +43,7 @@ def _baseline(**over) -> V.Baseline:
         expected_expires_on="2026-09-21",
         expected_revision="a" * 40,
         expected_source_sha256=_FP,
-        service_baseline={"kb": _T0, "nh": _T0},
+        service_baseline={"kb.usd-krw": _T0, "nh.usd-krw": _T0},
     )
     base.update(over)
     return V.Baseline(**base)
@@ -1163,13 +1163,13 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
 
     async def test_observation_time_going_backwards_fails(self):
         """⭐ 관측 시각이 뒤로 가는 것은 **모호하지 않은** 회귀다."""
-        base = _baseline(service_baseline={"kb": _T0, "nh": _T0})
+        base = _baseline(service_baseline={"kb.usd-krw": _T0, "nh.usd-krw": _T0})
         ad = _adapters(self.clock, statuses=[_payload()],
                        rates_by_source={"kb": "2026-08-17T00:00:00+00:00",  # 역행
                                         "nh": "2026-08-17T06:06:00+00:00"})
         got = await V.collect_evidence(base, ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
-        self.assertTrue(any("kb" in r and "뒤로" in r for r in got["reasons"]),
+        self.assertTrue(any("kb.usd-krw" in r and "뒤로" in r for r in got["reasons"]),
                         got["reasons"])
 
     async def test_no_advance_is_recorded_not_judged(self):
@@ -1178,20 +1178,46 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         대신 소스별로 기록해 사람이 대조하게 한다.
         """
         stale = "2026-08-14T06:00:00+00:00"    # 휴장 소스: 그대로 멈춰 있다
-        base = _baseline(service_baseline={"sc": stale, "nh": _T0})
+        base = _baseline(service_baseline={"sc.usd-krw": stale, "nh.usd-krw": _T0})
         ad = _adapters(self.clock, statuses=[_payload()],
                        rates_by_source={"sc": stale,
                                         "nh": "2026-08-17T06:06:00+00:00"})
         got = await V.collect_evidence(base, ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS, got["reasons"])
         per = self._records("service")[-1]["per_source"]
-        self.assertFalse(per["sc"]["advanced"])
-        self.assertEqual(per["sc"]["verdict"], V.OBSERVED)
-        self.assertTrue(per["nh"]["advanced"])
+        self.assertFalse(per["sc.usd-krw"]["advanced"])
+        self.assertEqual(per["sc.usd-krw"]["verdict"], V.OBSERVED)
+        self.assertTrue(per["nh.usd-krw"]["advanced"])
+
+    async def test_key_is_bank_and_currency_not_bank_alone(self):
+        """⭐ 통화 하나가 사라져도 잡아야 한다.
+
+        키를 bank 로만 잡으면 운영 30행이 10키로 뭉개져 `kb.eur` 소실을
+        `kb.usd` 가 가린다 — max(timestamp) 를 소스별로 옮겼을 뿐이 된다
+        (외부 검토 지적).
+        """
+        base = _baseline(service_baseline={"kb.usd-krw": _T0, "kb.eur-krw": _T0})
+
+        async def rates_two_currencies(path):
+            if path == "/health":
+                return {"status": "healthy"}
+            if path == "/api/rates":
+                return {"rates": [{"bank": "kb", "currency": "usd-krw",
+                                   "timestamp": "2026-08-17T06:06:00+00:00"}]}
+            if path == "/admin/api/dashboard":
+                return {"broadcast": {}, "errors_1h": 0}
+            return {}
+
+        ad = dataclasses.replace(_adapters(self.clock, statuses=[_payload()]),
+                                 admin_fetch=rates_two_currencies)
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("kb.eur-krw" in r for r in got["reasons"]),
+                        got["reasons"])
 
     async def test_every_baseline_source_is_recorded(self):
         """`max(timestamp)` 로 접지 않는다 — **소스마다** 기록이 남아야 한다."""
-        base = _baseline(service_baseline={"kb": _T0, "nh": _T0, "sc": _T0})
+        base = _baseline(service_baseline={"kb.usd-krw": _T0, "nh.usd-krw": _T0, "sc.usd-krw": _T0})
         ad = _adapters(self.clock, statuses=[_payload()],
                        rates_by_source={"kb": "2026-08-17T06:06:00+00:00",
                                         "nh": "2026-08-17T06:06:00+00:00",
@@ -1199,11 +1225,11 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         got = await V.collect_evidence(base, ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS, got["reasons"])
         self.assertEqual(set(self._records("service")[-1]["per_source"]),
-                         {"kb", "nh", "sc"})
+                         {"kb.usd-krw", "nh.usd-krw", "sc.usd-krw"})
 
     async def test_source_disappearing_from_response_fails(self):
         """baseline 에 있던 소스가 응답에서 **사라지면** 회귀다."""
-        base = _baseline(service_baseline={"kb": _T0, "nh": _T0})
+        base = _baseline(service_baseline={"kb.usd-krw": _T0, "nh.usd-krw": _T0})
         ad = _adapters(self.clock, statuses=[_payload()],
                        rates_by_source={"nh": "2026-08-17T06:06:00+00:00"})
         got = await V.collect_evidence(base, ad, self._artifact())
