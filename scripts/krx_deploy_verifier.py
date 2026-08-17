@@ -1262,16 +1262,27 @@ def evaluate_usdt_liveness(before: Optional[dict], after: dict,
 
     `--force-recreate` 는 KRX 만 내리지 않는다 — 24/7 USDT WS 도 함께 재시작한다.
     그런데 `/api/rates` 는 legacy 정책상 USDT 를 **제외**하므로(Z-2d) FX 축이
-    이걸 못 본다 (외부 검토 지적).
+    이걸 못 본다.
 
     USDT 는 쉬는 시간이 없으므로 판정이 FX 보다 강할 수 있다: 배포 전에 살아
     있던 소스가 **재시작 후 관측 창 내내 write 0** 이면 모호하지 않은 실패다.
-    배포 전부터 죽어 있던 소스는 이 배포의 책임이 아니므로 판정하지 않는다.
+
+    ⛔ 순회 대상은 `before ∪ after` 다. `after` 만 돌면 **가장 현실적인 실패를
+       놓친다** — `per_source` 는 lazy populate 라(`app/usdt_redis_stats.py`)
+       write 가 0인 source 는 응답에 키 자체가 없다. 즉 완전히 죽은 소스일수록
+       보이지 않는다 (외부 검토가 재현).
+
+    ⛔ baseline 이 없으면 **UNVERIFIED** 다. "모두 배포 전 활성"으로 가정하면
+       한 소스만 재개해도 PASS 가 되고, 그건 증거가 아니라 추정이다.
 
     ⚠️ "배포 전에 살아 있었나"는 **스냅샷 시각(T0) 기준**으로 잰다. 평가 시각
     기준으로 재면 관측 창 길이(`--observe-seconds`)를 바꿀 때마다 같은 데이터의
     판정이 달라진다 — 게이트가 자기 설정에 흔들리면 안 된다.
     """
+    if before is None:
+        return UNVERIFIED, [
+            "USDT baseline 스냅샷이 없다 — 배포 전에 무엇이 살아 있었는지 모르면 "
+            "재개 여부를 판정할 수 없다"], {}
     if not new_started_at:
         return UNVERIFIED, ["새 컨테이너 StartedAt 미취득 — USDT 재개 판정 불가"], {}
     try:
@@ -1280,41 +1291,63 @@ def evaluate_usdt_liveness(before: Optional[dict], after: dict,
         return UNVERIFIED, [f"StartedAt 파싱 실패: {new_started_at}"], {}
 
     reasons: list[str] = []
+    unverified: list[str] = []
     detail: dict[str, dict] = {}
-    for source, after_iso in sorted(after.items()):
-        was_active = True
-        if before is not None:
-            before_iso = before.get(source)
-            if not before_iso:
-                was_active = False
-            else:
-                try:
-                    before_at = datetime.fromisoformat(str(before_iso))
-                    was_active = ((snapshot_at - before_at).total_seconds()
-                                  <= USDT_ACTIVE_BEFORE_SECONDS)
-                except ValueError:
-                    was_active = False
-        record = {"before": (before or {}).get(source), "after": after_iso,
-                  "was_active_before": was_active}
-        if not was_active:
-            record["verdict"] = OBSERVED
-            record["note"] = "배포 전부터 비활성 — 이 배포의 책임 아님"
+    for source in sorted(set(before) | set(after)):
+        before_iso = before.get(source)
+        after_iso = after.get(source)
+        record: dict = {"before": before_iso, "after": after_iso}
+
+        if before_iso is None:
+            # 배포 후 새로 등장 — 이 배포가 깨뜨린 것이 아니다.
+            record.update(verdict=OBSERVED, was_active_before=False,
+                          note="baseline 에 없음 (배포 후 등장)")
             detail[source] = record
             continue
-        resumed = False
-        if after_iso:
-            try:
-                resumed = datetime.fromisoformat(str(after_iso)) > started
-            except ValueError:
-                resumed = False
-        record["resumed_after_restart"] = resumed
-        record["verdict"] = PASS if resumed else FAILED
+        try:
+            before_at = datetime.fromisoformat(str(before_iso))
+        except (TypeError, ValueError):
+            # 읽을 수 없는 값을 "비활성"으로 접으면 판정이 조용히 사라진다.
+            record.update(verdict=UNVERIFIED,
+                          note=f"baseline 시각 파싱 불가: {before_iso!r}")
+            detail[source] = record
+            unverified.append(f"{source}: baseline 시각을 읽을 수 없다")
+            continue
+
+        was_active = ((snapshot_at - before_at).total_seconds()
+                      <= USDT_ACTIVE_BEFORE_SECONDS)
+        record["was_active_before"] = was_active
+        if not was_active:
+            record.update(verdict=OBSERVED,
+                          note="배포 전부터 비활성 — 이 배포의 책임 아님")
+            detail[source] = record
+            continue
+
+        if after_iso is None:
+            # 키 자체가 없거나 성공 시각이 없다 — 둘 다 "재개 안 됨"이다.
+            record.update(verdict=FAILED, resumed_after_restart=False)
+            detail[source] = record
+            reasons.append(
+                f"{source}: 배포 전 활성이었는데 재시작 후 write 성공 기록이 없다 "
+                "(telemetry 에 키 자체가 없을 수 있다 — lazy populate)")
+            continue
+        try:
+            resumed = datetime.fromisoformat(str(after_iso)) > started
+        except ValueError:
+            resumed = False
+        record.update(verdict=PASS if resumed else FAILED,
+                      resumed_after_restart=resumed)
         detail[source] = record
         if not resumed:
             reasons.append(
                 f"{source}: 재시작 후 direct write 0 (last={after_iso}) "
                 "— 24/7 소스가 관측 창 내내 조용하다")
-    return (FAILED if reasons else PASS), reasons, detail
+
+    if reasons:
+        return FAILED, reasons, detail
+    if unverified:
+        return UNVERIFIED, unverified, detail
+    return PASS, [], detail
 
 
 async def _verify_usdt_liveness(adapters: Adapters, baseline: Baseline,

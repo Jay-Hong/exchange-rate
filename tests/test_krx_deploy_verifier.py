@@ -912,8 +912,11 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
         if path == "/admin/api/usdt-redis-stats":
             if usdt_error is not None:
                 raise usdt_error
+            # 기본값은 **baseline 의 두 소스가 모두 재개**한 정상 상태여야 한다
+            # (baseline 과 어긋나면 모든 happy-path 가 USDT 축에서 걸린다)
             after = (usdt_after if usdt_after is not None
-                     else {"upbit": "2026-08-17T15:06:00+09:00"})
+                     else {"upbit": "2026-08-17T15:10:00+09:00",
+                           "bithumb": "2026-08-17T15:10:30+09:00"})
             return {"per_source": {
                 src: {"last_direct_write_success_at": ts}
                 for src, ts in after.items()}}
@@ -1213,6 +1216,56 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
         self.assertTrue(any("bithumb" in r for r in got["reasons"]), got["reasons"])
+
+    async def test_usdt_source_present_but_stale_timestamp_fails(self):
+        """키는 있는데 성공 시각이 **재시작 이전**이면 재개하지 못한 것이다.
+
+        (키 자체가 없는 경우와 **다른 분기**다 — 둘 다 잡아야 한다.)
+        """
+        base = _baseline(usdt_baseline={"upbit": "2026-08-17T15:05:00+09:00"})
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       usdt_after={"upbit": "2026-08-17T15:04:00+09:00"})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("upbit" in r and "재시작 후" in r
+                            for r in got["reasons"]), got["reasons"])
+
+    async def test_usdt_active_source_disappearing_fails(self):
+        """⭐ 재시작 후 **키 자체가 사라진** 소스를 잡는다.
+
+        `per_source` 는 lazy populate 다(`app/usdt_redis_stats.py`) — write 가
+        한 번도 없으면 그 source 는 응답에 **아예 나타나지 않는다**. 그러니
+        `after` 만 순회하면 가장 현실적인 실패 경로를 통째로 건너뛴다
+        (외부 검토 지적 + 직접 재현).
+        """
+        base = _baseline(usdt_baseline={"upbit": "2026-08-17T15:05:00+09:00",
+                                        "bithumb": "2026-08-17T15:05:30+09:00"})
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       usdt_after={"upbit": "2026-08-17T15:10:00+09:00"})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("bithumb" in r for r in got["reasons"]), got["reasons"])
+
+    async def test_usdt_baseline_missing_is_unverified(self):
+        """⭐ 배포 전 스냅샷이 없으면 **증거 부재**다 — PASS 로 넘기지 않는다.
+
+        전 판은 baseline=None 을 "모든 after 소스가 배포 전 활성"으로 읽어,
+        한 소스만 재개해도 PASS 였다.
+        """
+        base = _baseline(usdt_baseline=None)
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       usdt_after={"upbit": "2026-08-17T15:10:00+09:00"})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+        self.assertTrue(any("USDT" in r or "usdt" in r for r in got["reasons"]),
+                        got["reasons"])
+
+    async def test_usdt_unparseable_baseline_is_unverified_not_inactive(self):
+        """읽을 수 없는 baseline 시각을 '비활성'으로 접으면 판정이 조용히 사라진다."""
+        base = _baseline(usdt_baseline={"upbit": "not-a-timestamp"})
+        ad = _adapters(self.clock, statuses=[_payload()], usdt_after={})
+        got = await V.collect_evidence(base, ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
 
     async def test_usdt_inactive_before_deploy_is_not_judged(self):
         """배포 **전에도** 죽어 있던 소스는 이 배포의 책임이 아니다."""
