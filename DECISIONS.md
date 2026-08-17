@@ -3227,6 +3227,31 @@ REST 결과는 Stage B에서는 log/counter만. broadcast/DB/latest 미반영 (S
    - reconcile에서 `_bootstrap_krx_futures_client(resolved_override=resolved)` 직접 호출.
    - 두 번째 resolve 회피 + race 차단 + 동일 contract 보장.
 
+**Amendment 2026-08-17 — 만기일 휴장 보정 (위 1번의 전제 2건 supersede)**:
+
+만기를 "셋째 월요일"로 계산하던 것이 틀렸다. **그날이 휴장이면 만기는 직전
+영업일로 앞당겨진다.** 2026-08-17(월)이 광복절 대체공휴일이라 8월물 만기는
+**2026-08-14(금)**였는데, 구 코드는 8/17을 만기로 알고 있었다.
+
+- 단일 진실 소스 신설: `app/calendars/krx_calendar.py`
+  (`usdf_expiry_date` — 셋째 월요일에서 영업일까지 walk-back,
+  `is_krx_regular_business_day` / `is_krx_night_session_open`).
+  `holidays.SouthKorea(PUBLIC∪BANK, observed=True)` 기반이라 연도 하드코딩이 없다.
+- **위 1번의 `contract_expiry_date=None` legacy 호환은 폐기**됐다 —
+  `get_active_session(now, contract_expiry_date)`에서 **필수 인자**다.
+  호출자가 빠뜨리면 조용히 캘린더 기본값으로 도는 대신 TypeError가 난다.
+- `is_expiry_day` / `KRX_2026_USDF_EXPIRY_DAYS`(연도 하드코딩)는 **삭제**됐다.
+  위 1번 서술의 그 심볼은 당시 코드 기준 기록이다.
+- scheduler의 rollover 점프 보호가 `expiry_diff > 45일` 휴리스틱에서
+  `_is_next_contract_month` 월물 비교로 바뀌었다 (만기 간격과의 결합 제거).
+- `2026-02-13` 야간은 설 연휴 전 **일회성** 휴장이라(KIND acptno=20260206002546)
+  캘린더로 유도할 수 없어 override 표에 근거와 함께 고정했다 — 연례 규칙이 아니다.
+
+**데이터 영향**: segment 경계가 이동해 교정 전 적재분 중 주중 2일자가 어긋난다
+(`2026-02-13` contract 오귀속 / `2026-08-14` 행 부재).
+`scripts/repair_krx_daily_rows.py`가 그 2일자만 allowlist로 교정한다(별도 GO).
+graph 매핑 규칙 자체는 불변 — [GRAPH_API_V2_CONTRACT.md §7-new](GRAPH_API_V2_CONTRACT.md) Amendment 참조.
+
 **Follow-up: KRX close snapshot 1차 PR (2026-05-15, `c0855ff`)**:
 
 본 ADR-027 영역(KRX REST/stale 정책) 안에서 **boundary-based close snapshot**을 stale fallback과 **별도 trigger**로 분리해 1차 PR로 land. 두 path는 같은 REST endpoint(`KIS_REST_QUOTE_TR_ID`)와 helper(`fetch_kis_futures_quote`)를 공유하지만 **trigger 조건 / 책임 controller가 다름**.

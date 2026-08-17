@@ -482,6 +482,19 @@ KIS master에서 20개 미래 contracts active (~3년 forward).
 
 - **expiry_date 이전 날짜**: expiring contract 사용
 - **expiry_date 당일 및 이후 날짜**: next contract 사용 (07:00 swap 일관)
+
+> ⚠️ **Amendment 2026-08-17 — `expiry_date` 산출 자체가 교정됨.** 위 매핑 **규칙은
+> 불변**이지만, 규칙이 참조하는 `expiry_date` **값**이 일부 월물에서 달라졌다.
+> 만기는 "셋째 월요일"이 아니라 **그날이 휴장이면 직전 영업일로 앞당겨진다**
+> (`app/calendars/krx_calendar.py` `usdf_expiry_date`). 구 코드는 무보정 셋째
+> 월요일을 썼다.
+>
+> **영향**: 보정이 걸리는 월물은 `[prev.expiry, this.expiry)` segment 경계가
+> 이동하므로, **교정 전에 적재된 daily row는 그 경계 근처에서 contract가 잘못
+> 귀속돼 있을 수 있다**. 2026년 기준 실제 어긋난 주중 날짜는 2건
+> (`2026-02-13` 잘못된 contract / `2026-08-14` 행 부재)이고
+> `scripts/repair_krx_daily_rows.py`가 그 2일자만 allowlist로 교정한다.
+> 향후 재backfill 시에는 교정된 만기가 자동 적용된다.
 - expiring contract의 expiry_date row는 거래소 원월물 이력에는 존재하지만 v2 user-facing graph에서는 제외
 - 만기일 정규장 (08:30~15:45) 거래 가격은 user-facing 노출 X (이미 swap 후)
 
