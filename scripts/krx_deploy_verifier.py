@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import pathlib
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -282,20 +283,28 @@ class EvidenceArtifact:
         self.records += 1
         return True
 
-    def finalize(self, summary: dict) -> str:
-        """terminal record 기록 → sha256 계산 → **이후 쓰기 거부**."""
+    def finalize(self, summary: dict) -> tuple[str, str]:
+        """terminal record 기록 → sha256 계산 → **이후 쓰기 거부**.
+
+        Returns:
+            `(effective_verdict, sha256)`. 절단이 있었으면 **반환 verdict도** 낮춘다 —
+            terminal record만 UNVERIFIED로 바꾸고 호출자에게는 PASS를 돌려주면,
+            CLI가 exit 0을 내고 산출물만 "증거 불완전"이라고 말하는 모순이 생긴다
+            (codex 감사에서 `returned=PASS / terminal=UNVERIFIED`로 재현됨).
+        """
         if self._finalized:
             raise RuntimeError("이미 finalize됐다 — 재-finalize는 checksum을 무의미하게 한다")
+        effective = summary.get("verdict", UNVERIFIED)
         if self.truncated:
-            summary = {**summary, "truncated": True,
-                       "verdict": worst(summary.get("verdict", UNVERIFIED), UNVERIFIED)}
+            effective = worst(effective, UNVERIFIED)
+            summary = {**summary, "truncated": True, "verdict": effective}
         self.append("terminal", summary, terminal=True)
         self._finalized = True
         digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
         (self.path.parent / (self.path.name + ".sha256")).write_text(
             f"{digest}  {self.path.name}\n", encoding="utf-8"
         )
-        return digest
+        return effective, digest
 
 
 def _utc_now_iso() -> str:
@@ -316,6 +325,8 @@ class Baseline:
     expected_code: str
     expected_month: str
     expected_expires_on: str
+    expected_revision: str
+    expected_source_sha256: str
 
     @property
     def expected_contract(self) -> ContractTuple:
@@ -327,10 +338,34 @@ class Baseline:
 
     @classmethod
     def load(cls, path: pathlib.Path) -> "Baseline":
+        """baseline 로드 — **sidecar checksum을 반드시 검증**한다.
+
+        prepare가 sha256을 남기는데 verify가 확인하지 않으면 그 sha256은 장식이다.
+        baseline은 T0·구 컨테이너 identity·기대 계약의 유일한 출처이므로, 변조되면
+        게이트 전체가 잘못된 기준 위에서 돈다 (codex 감사에서 실제 재현됨).
+        """
+        path = pathlib.Path(path)
+        sidecar = path.parent / (path.name + ".sha256")
         try:
-            raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            data = path.read_bytes()
+        except OSError as exc:
             raise CollectorError(f"baseline 읽기 실패: {exc}") from exc
+        if not sidecar.exists():
+            raise CollectorError(f"baseline checksum sidecar 없음: {sidecar.name}")
+        try:
+            recorded = sidecar.read_text(encoding="utf-8").split()[0].strip()
+        except (OSError, IndexError) as exc:
+            raise CollectorError(f"checksum sidecar 파싱 실패: {exc}") from exc
+        actual = hashlib.sha256(data).hexdigest()
+        if recorded != actual:
+            raise CollectorError(
+                f"baseline checksum 불일치 (기록 {recorded[:12]}… != 실제 {actual[:12]}…) "
+                "— 변조되었거나 sidecar가 다른 파일의 것이다"
+            )
+        try:
+            raw = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise CollectorError(f"baseline 파싱 실패: {exc}") from exc
         if not isinstance(raw, dict):
             raise CollectorError("baseline이 JSON 객체가 아니다")
         missing = {f for f in cls.__dataclass_fields__} - set(raw)
@@ -350,15 +385,36 @@ class ContainerIdentity:
     restart_count: int
 
 
-def continuity_holds(samples: Sequence[ContainerIdentity]) -> bool:
-    """전 poll에서 컨테이너 identity가 동일한가.
+MIN_CONTINUITY_SAMPLES = 2
+
+
+def evaluate_continuity(samples: Sequence[ContainerIdentity]) -> tuple[str, str]:
+    """컨테이너 연속성 판정 → `(verdict, detail)`.
 
     `rollover_count`는 프로세스 재시작 시 0으로 초기화되므로, 검증 창 중간에
     재시작이 끼면 "count==0"이 "rollover 없었음"의 위증이 된다. ID만으로는
     부족하다 — 같은 ID로도 `docker restart`가 가능하므로 StartedAt·RestartCount
     까지 3-tuple로 본다.
+
+    ⚠️ **표본 1건은 PASS가 아니다** (codex 감사 지적). 첫 PASS에서 즉시 polling을
+    끝내면 identity 표본이 1건뿐이고, 그러면 "변하지 않았다"를 관측한 게 아니라
+    **변화를 볼 기회가 없었다**. 관측 불능이므로 UNVERIFIED다.
+
+    그리고 새 컨테이너의 `RestartCount`는 **0이어야 한다** — force-recreate 직후
+    재시작이 있었다면 그 자체가 clean deploy 위반이다.
     """
-    return len(set(samples)) <= 1 if samples else False
+    if not samples:
+        return UNVERIFIED, "identity 표본 0건"
+    if len(set(samples)) > 1:
+        return FAILED, "검증 창 중간 컨테이너 identity 변경 (rollover_count 신뢰 불가)"
+    if samples[0].restart_count != 0:
+        return FAILED, f"새 컨테이너 RestartCount={samples[0].restart_count} != 0"
+    if len(samples) < MIN_CONTINUITY_SAMPLES:
+        return UNVERIFIED, (
+            f"identity 표본 {len(samples)}건 (<{MIN_CONTINUITY_SAMPLES}) — "
+            "변화를 볼 기회가 없었다"
+        )
+    return PASS, "연속성 유지"
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +586,8 @@ class Adapters:
     inspect_format: Callable[[str], Any]
     container_events: Callable[[str, str, str], Any]
     read_log_lines: Callable[[str, str], Any]
+    expiry_probe: Callable[[str], Any]
+    source_fingerprint: Callable[[], Any]
     now: Callable[[], datetime]
     sleep: Callable[[float], Any]
 
@@ -637,16 +695,27 @@ class Deadlines:
         verifier가 종료하지 않는다.
     `verify`: 첫 정상 응답 → 게이트 확정. 중간 상태(`bootstrap_skipped` 등)가
         다음 tick에 해소되므로 2 interval을 포괄해야 한다(기본 12분).
+    `observe`: 첫 정상 응답 후 **관측을 계속할 최소 시간**. 이게 없으면 첫 PASS
+        2건에서 곧장 끝나 실제 관측 창이 약 45초로 줄고, runbook의 "12분간
+        전량 저장"이 문서에만 있는 말이 된다 (codex 감사 지적).
     """
     startup_seconds: float = 600.0
     verify_seconds: float = 720.0
+    observe_seconds: float = 720.0
     poll_seconds: float = 45.0
 
 
-async def run_verify(baseline: Baseline, adapters: Adapters,
-                     artifact: EvidenceArtifact,
-                     deadlines: Deadlines = Deadlines()) -> dict:
-    """배포 후 게이트 전체. 판정만 하고 **아무것도 변경하지 않는다**(artifact 제외).
+async def collect_evidence(baseline: Baseline, adapters: Adapters,
+                           artifact: EvidenceArtifact,
+                           deadlines: Deadlines = Deadlines()) -> dict:
+    """배포 후 **증거 수집기**. 판정은 보조 자료이고 게이트는 사람이 잡는다.
+
+    ⚠️ 이 함수의 반환 verdict는 **자동 승인 신호가 아니다**. 관측 배선에서만
+    P1이 6건 나왔던 이력(codex 감사)이 있어, 무인 PASS 경로를 두지 않는다.
+    산출물은 축별 증거 파일이고, 최종 판정은 `KRX_CANARY.md`의 배포 runbook
+    체크리스트를 사람이 대조해 내린다. 여기서 UNVERIFIED/FAILED가 나오면
+    그것만으로 후속(일봉 정정)을 차단하기에 충분하지만, PASS는 **필요조건일 뿐
+    충분조건이 아니다**.
 
     축을 결합해 최종 판정을 낸다:
       1. admin 샘플 시계열 (sticky 집계)
@@ -702,7 +771,14 @@ async def run_verify(baseline: Baseline, adapters: Adapters,
 
         if sample_verdict == FAILED:
             break
-        if sample_verdict == PASS:
+        observed = (adapters.now() - first_ok_at).total_seconds()
+        if (sample_verdict == PASS
+                and len(identities) >= MIN_CONTINUITY_SAMPLES
+                and observed >= deadlines.observe_seconds):
+            # 첫 PASS에서 곧장 끝내면 identity 표본이 1건뿐이라 연속성을
+            # "관측"한 게 아니라 "볼 기회가 없었던" 것이 된다. 표본 수만이
+            # 아니라 **관측 시간**도 채워야 한다 — 배포 직후 45초만 보고
+            # "연속성 유지"라고 적으면 그 뒤의 재시작을 못 본다.
             break
         if deadline_passed:
             samples[-1] = FAILED
@@ -712,9 +788,9 @@ async def run_verify(baseline: Baseline, adapters: Adapters,
     reasons: list[str] = []
     sample_result = aggregate(samples)
 
-    continuity = PASS if continuity_holds(identities) else FAILED
-    if continuity == FAILED:
-        reasons.append("검증 창 중간 컨테이너 identity 변경 (rollover_count 신뢰 불가)")
+    continuity, continuity_detail = evaluate_continuity(identities)
+    if continuity != PASS:
+        reasons.append(continuity_detail)
 
     if new_identity is not None and new_identity.container_id == baseline.old_container_id:
         continuity = FAILED
@@ -729,10 +805,273 @@ async def run_verify(baseline: Baseline, adapters: Adapters,
         adapters, baseline, now_iso,
         new_identity.started_at if new_identity else None, artifact)
     if logs != PASS:
-        reasons.append("로그 축 이상 (marker 검출 또는 취득 실패)")
+        reasons.append("로그 축 이상 (marker 검출·취득 실패·창 불완전)")
 
-    final = worst(sample_result, continuity, die.status, logs)
+    deployed, deployed_detail = await _verify_deployed_code(adapters, baseline, artifact)
+    if deployed != PASS:
+        reasons.append(deployed_detail)
+
+    health, health_detail = await _verify_service_health(adapters, artifact)
+    if health != PASS:
+        reasons.append(health_detail)
+
+    # 모든 축을 마친 **뒤** identity를 다시 읽는다. 축 검사에 걸린 시간 동안
+    # 재시작이 있었다면 앞선 관측이 통째로 다른 프로세스의 것이 된다.
+    final_identity, final_detail = await _verify_final_identity(
+        adapters, new_identity, artifact)
+    if final_identity != PASS:
+        reasons.append(final_detail)
+
+    final = worst(sample_result, continuity, die.status, logs, deployed, health,
+                  final_identity)
     return _finish(artifact, final, reasons, samples=samples)
+
+
+async def _verify_final_identity(adapters: Adapters,
+                                 observed: Optional[ContainerIdentity],
+                                 artifact: EvidenceArtifact) -> tuple[str, str]:
+    """**종료 직전** 3-tuple 재확인 + `RestartCount == 0`.
+
+    폴링 창이 끝난 뒤에도 로그·probe·health 축이 남아 있어 실제로는 수 분이
+    더 흐른다. 그 구간의 재시작을 아무도 보지 않으면 "12분간 무재시작"이
+    검사하지 않은 구간을 포함한 주장이 된다 (codex 감사 지적).
+    """
+    if observed is None:
+        artifact.append("final_identity", {"verdict": UNVERIFIED,
+                                           "reason": "관측된 identity 없음"})
+        return UNVERIFIED, "종료 직전 재확인 불가 — 유효 identity 표본 0건"
+    try:
+        current = await _read_identity(adapters)
+    except CollectorError as exc:
+        artifact.append("final_identity", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        return UNVERIFIED, f"종료 직전 identity 조회 실패: {exc}"
+
+    artifact.append("final_identity", {"observed": asdict(observed),
+                                       "final": asdict(current)})
+    if current != observed:
+        return FAILED, (
+            f"종료 직전 identity가 달라졌다: {asdict(observed)} → {asdict(current)}")
+    if current.restart_count != 0:
+        return FAILED, f"종료 직전 RestartCount={current.restart_count} (≠0)"
+    return PASS, "종료 직전 identity 동일 + RestartCount=0"
+
+
+# 배포된 코드가 **수정본인지**를 가르는 동작 probe.
+# 구 코드는 202608 → 2026-08-17(무보정 셋째 월요일)을 반환하고, 수정본은 8/14다.
+# 이미지 태그 비교와 **독립**된 축이라 "태그만 같고 내용이 구 코드"도 잡는다.
+EXPIRY_BEHAVIOR_PROBE = {"202608": "2026-08-14", "202602": "2026-02-13"}
+
+
+# 배포된 코드가 **의도한 revision인가**를 가르는 지문.
+#
+# 동작 probe(위)는 "보정이 들어갔는가"만 본다 — calendar fix를 포함하지만
+# 배포 대상이 아닌 **다른** commit/image도 통과한다 (codex 감사 지적).
+# image label 대신 소스 자체를 해싱하는 이유: 라벨은 build 인자가 틀리면
+# 거짓말을 하지만, 지문은 실제 파일에서 나온다.
+#
+# **범위 = Dockerfile이 최종 이미지로 COPY하는 리포 경로 전부**
+# (`app/` `static/` `templates/` `scripts/`). `app/`만 해싱하면 실제 반례가
+# 생긴다 — 이 작업 자체가 그랬다: 변경이 `scripts/`에만 있어 `app/` 지문이
+# 이전 revision과 **같았다**. 그러면 구 revision 이미지가 통과한다.
+#
+# **범위 밖(이 지문이 증명하지 않는 것)**: 의존성. `requirements.lock.txt`는
+# builder 스테이지에만 들어가 최종 이미지에 파일로 남지 않으므로 컨테이너에서
+# 해싱할 수 없다. 즉 이 축은 "리포 payload가 그 revision인가"를 증명하고
+# "빌드 입력이 같은가"는 증명하지 않는다.
+#
+# **제외 규칙의 기준**: "host worktree와 container에서 갈릴 수 있는 것"이다.
+# `.dockerignore`를 그대로 옮기는 것이 아니다 — 옮길 필요도 없다.
+#
+#   실측(2026-08-17, 이 호스트의 docker로 직접 build): context 루트의
+#   `.dockerignore`에 `*.md` / `__pycache__/` / `*.py[cod]`를 넣고 `COPY app/`를
+#   했더니 `app/README.md` · `app/__pycache__/z.pyc` · `app/x.pyc` · `app/sub/y.pyc`가
+#   **전부 이미지에 들어왔다**. dockerignore 패턴은 빌드 컨텍스트 **루트에 고정**되어
+#   하위 디렉터리에 적용되지 않는다. 따라서 루트 규칙은 COPY root 안의 파일을
+#   지우지 않고, "host엔 있고 이미지엔 없다"는 갈림도 만들지 않는다.
+#
+# 그래서 **반드시 필요한** 제외는 (1) 뿐이고, (2)(3)은 방어적 여유다:
+#   (1) **bytecode cache**. 컨테이너는 `PYTHONDONTWRITEBYTECODE=1`(Dockerfile)이라
+#       런타임에 만들지 **않는다** — 그런데도 필요한 이유는 반대쪽이다:
+#       위 anchoring 때문에 **host의 `app/__pycache__`가 이미지로 복사된다**.
+#       비교되는 두 값은 "prepare 시점 host"와 "build된 이미지"인데, host 쪽
+#       내용은 python을 돌릴 때마다 바뀐다 — prepare와 build 사이에 한 번만
+#       바뀌어도 정상 배포가 불일치로 막힌다.
+#       (실측: 이 worktree의 COPY root 안에 `.pyc` 161개)
+#   (2) host 쪽 편집기·OS 부산물 (`.DS_Store` `.swp` `.swo`).
+#   (3) `.dockerignore`와 이름을 맞춰 둔 역사적 항목 (`.md` `.log` `$py.class`
+#       `node_modules` `.pytest_cache`) — inert.
+#
+# ⚠️ (2)(3)은 **검출력을 깎는다**: anchoring 때문에 `scripts/example.md`는
+# 이미지에 들어가는데 지문에서는 양쪽 다 빠져, 그 파일만 바꾼 revision이
+# "지문 동일"이 된다 (codex 감사 지적). 그래서 **tracked 파일과 제외 규칙의
+# 교집합이 항상 비어 있어야** 한다 — `test_no_tracked_file_is_excluded`가
+# 잠근다. 제외는 untracked 부산물에만 걸린다.
+#
+# 장래에 `.dockerignore`가 **COPY root 안을 겨냥하는** 규칙(`**/...` 또는
+# `app/...` 형태)을 얻으면 그때는 진짜 갈림이 생긴다 — 테스트가 그걸 잡는다
+# (`test_dockerignore_has_no_in_root_rules`).
+#
+# **host와 container에서 이 동일한 프로그램 문자열을 그대로 실행**한다 —
+# 두 벌로 나눠 쓰면 로직이 갈릴 수 있다.
+SOURCE_FINGERPRINT_ROOTS = ("app", "scripts", "static", "templates")
+# (1) 필수 — container 런타임 생성물
+_FINGERPRINT_REQUIRED_SKIP_DIRS = ("__pycache__",)
+_FINGERPRINT_REQUIRED_SKIP_SUFFIXES = (".pyc", ".pyo", ".pyd")
+_FINGERPRINT_SKIP_DIRS = _FINGERPRINT_REQUIRED_SKIP_DIRS + (
+    ".pytest_cache", "node_modules", ".git")
+_FINGERPRINT_SKIP_SUFFIXES = _FINGERPRINT_REQUIRED_SKIP_SUFFIXES + (
+    "$py.class", ".md", ".log", ".swp", ".swo")
+_FINGERPRINT_SKIP_NAMES = (".DS_Store",)
+
+# walk·제외 규칙은 **여기 한 곳**에만 있다. 지문 프로그램과 경로 나열
+# 프로그램이 이 본문을 공유하므로, 테스트가 보는 규칙과 지문이 쓰는 규칙이
+# 갈릴 수 없다.
+_FINGERPRINT_COLLECT = (
+    "import hashlib,os\n"
+    f"ROOTS={SOURCE_FINGERPRINT_ROOTS!r}\n"
+    f"SKIP_DIRS={_FINGERPRINT_SKIP_DIRS!r}\n"
+    f"SKIP_SUF={_FINGERPRINT_SKIP_SUFFIXES!r}\n"
+    f"SKIP_NAMES={_FINGERPRINT_SKIP_NAMES!r}\n"
+    "paths=[]\n"
+    "for root in ROOTS:\n"
+    "    for d,dirs,fs in os.walk(root):\n"
+    "        dirs[:]=[x for x in dirs if x not in SKIP_DIRS]\n"
+    "        for f in fs:\n"
+    "            if f in SKIP_NAMES or f.endswith(SKIP_SUF):\n"
+    "                continue\n"
+    "            paths.append(os.path.join(d,f))\n"
+)
+
+SOURCE_FINGERPRINT_PROGRAM = _FINGERPRINT_COLLECT + (
+    "h=hashlib.sha256()\n"
+    "for p in sorted(paths):\n"
+    "    h.update(p.encode());h.update(b'\\0')\n"
+    "    h.update(hashlib.sha256(open(p,'rb').read()).hexdigest().encode())\n"
+    "    h.update(b'\\n')\n"
+    "print(h.hexdigest())\n"
+)
+
+_FINGERPRINT_LIST_PROGRAM = _FINGERPRINT_COLLECT + (
+    "print('\\n'.join(sorted(paths)))\n"
+)
+
+
+def _run_fingerprint_program(program: str, repo_root: pathlib.Path,
+                             what: str) -> str:
+    proc = subprocess.run([sys.executable, "-c", program],
+                          cwd=str(repo_root), capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise CollectorError(f"{what} 실패: {proc.stderr.strip()[:200]}")
+    return proc.stdout
+
+
+def compute_local_source_fingerprint(repo_root: pathlib.Path) -> str:
+    """host 쪽 지문 — container와 **같은 프로그램**을 같은 상대 경로로 실행."""
+    return _run_fingerprint_program(
+        SOURCE_FINGERPRINT_PROGRAM, repo_root, "소스 지문 계산").strip()
+
+
+def list_fingerprinted_paths(repo_root: pathlib.Path) -> set[str]:
+    """지문이 **실제로 방문하는** 경로 집합.
+
+    제외 규칙을 두 번째로 구현하지 않기 위해 존재한다 — 테스트가 규칙을
+    따로 흉내 내면, 흉내가 규칙과 갈렸을 때 조용히 통과한다.
+    """
+    out = _run_fingerprint_program(
+        _FINGERPRINT_LIST_PROGRAM, repo_root, "지문 경로 나열")
+    return {line for line in out.splitlines() if line}
+
+
+async def _verify_deployed_code(adapters: Adapters, baseline: Baseline,
+                                artifact: EvidenceArtifact) -> tuple[str, str]:
+    """**수정된 코드가 실제로 돌고 있는가.**
+
+    ⚠️ 이게 없으면 8/17 이후에는 **구 이미지를 force-recreate해도 게이트를
+    통과한다** — 구 코드도 그 시점엔 A75609를 선택하고 no_op을 내기 때문이다
+    (codex 감사 지적). 이 리포는 이미 같은 사고를 겪었다: 2026-05-19 Coinone
+    canary가 `build` 없이 `--force-recreate`만 해서 구 이미지로 기동했다.
+
+    세 축을 함께 본다:
+      1. 새 컨테이너 Image가 baseline의 구 Image와 **다른가**
+      2. 컨테이너 안에서 `_compute_expiry_date`가 **보정된 만기**를 내는가
+      3. 컨테이너 안 **리포 payload 지문**(`app` `scripts` `static` `templates`)이
+         배포하려던 revision의 것과 같은가
+    (2)는 "보정이 들어갔는가", (3)은 "그 revision의 **리포 payload**인가"를
+    가른다 — (2)만 있으면 calendar fix를 포함한 다른 commit도 통과한다.
+    (3)이 증명하지 않는 것은 빌드 입력(의존성)이다 — 위 상수 주석 참조.
+    """
+    detail_parts: list[str] = []
+    try:
+        new_image = (await adapters.inspect_format("{{.Image}}")).strip()
+    except CollectorError as exc:
+        artifact.append("deployed_code", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        return UNVERIFIED, f"이미지 조회 실패: {exc}"
+    if new_image == baseline.old_image:
+        artifact.append("deployed_code", {"verdict": FAILED, "reason": "image 동일",
+                                          "image": new_image})
+        return FAILED, "새 컨테이너 Image가 구 Image와 동일 — 재빌드/재배포 미반영"
+    detail_parts.append("image 변경 확인")
+
+    probe_results: dict[str, str] = {}
+    for month, expected in EXPIRY_BEHAVIOR_PROBE.items():
+        try:
+            got = (await adapters.expiry_probe(month)).strip()
+        except CollectorError as exc:
+            artifact.append("deployed_code", {"verdict": UNVERIFIED,
+                                              "error": str(exc)[:200],
+                                              "probe_month": month})
+            return UNVERIFIED, f"동작 probe 실패({month}): {exc}"
+        probe_results[month] = got
+        if got != expected:
+            artifact.append("deployed_code", {"verdict": FAILED, "image": new_image,
+                                              "probe": probe_results})
+            return FAILED, (
+                f"동작 probe 불일치: _compute_expiry_date({month}) = {got} "
+                f"!= {expected} — **구 코드가 돌고 있다**"
+            )
+    detail_parts.append("동작 probe 일치")
+
+    try:
+        got_fp = (await adapters.source_fingerprint()).strip()
+    except CollectorError as exc:
+        artifact.append("deployed_code", {"verdict": UNVERIFIED, "image": new_image,
+                                          "probe": probe_results,
+                                          "error": str(exc)[:200]})
+        return UNVERIFIED, f"소스 지문 조회 실패: {exc}"
+    if got_fp != baseline.expected_source_sha256:
+        artifact.append("deployed_code", {"verdict": FAILED, "image": new_image,
+                                          "probe": probe_results,
+                                          "source_sha256": got_fp,
+                                          "expected_source_sha256":
+                                              baseline.expected_source_sha256})
+        return FAILED, (
+            f"소스 지문 불일치: 컨테이너 {got_fp[:12]}… != 기대 "
+            f"{baseline.expected_source_sha256[:12]}… (revision {baseline.expected_revision[:12]}…) "
+            "— 배포하려던 revision이 아니다")
+
+    artifact.append("deployed_code", {"verdict": PASS, "image": new_image,
+                                      "probe": probe_results,
+                                      "source_sha256": got_fp,
+                                      "revision": baseline.expected_revision})
+    return PASS, "; ".join(detail_parts + ["소스 지문 일치"])
+
+
+async def _verify_service_health(adapters: Adapters,
+                                 artifact: EvidenceArtifact) -> tuple[str, str]:
+    """일반 서비스 게이트 — `--force-recreate`는 KRX만 재시작하는 작업이 아니다.
+
+    FX 크롤러·USDT WS·broadcast·API가 함께 내려갔다 올라온다. KRX 축만 보고
+    PASS를 선언하면 그 전부를 관측하지 않은 채 배포를 성공으로 기록하게 된다.
+    """
+    try:
+        payload = await adapters.admin_fetch("/health")
+    except CollectorError as exc:
+        artifact.append("health", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
+        return UNVERIFIED, f"/health 조회 실패: {exc}"
+    status = str(payload.get("status", "")).lower()
+    ok = status in {"healthy", "ok"}
+    artifact.append("health", {"verdict": PASS if ok else FAILED, "status": status})
+    return (PASS, "health 정상") if ok else (FAILED, f"/health status={status!r}")
 
 
 async def _read_identity(adapters: Adapters) -> ContainerIdentity:
@@ -809,6 +1148,7 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
         artifact.append("logs", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
         return UNVERIFIED
 
+    unplaceable_total = count_unplaceable(all_lines)
     shutdown_hits = scan_log_markers(shutdown.lines, SHUTDOWN_FAILURE_MARKERS)
     runtime_hits = scan_log_markers(runtime.lines, RUNTIME_FAILURE_MARKERS)
     pre_rollover = scan_log_markers(shutdown.lines, [ROLLOVER_MARKER])
@@ -820,7 +1160,7 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
         "window_post": {"since": new_started_at, "until": now_iso,
                         "lines": len(runtime.lines)},
         # 배치 불가는 창 속성이 아니라 입력 전체의 속성 — 한 번만 센다.
-        "unparsed_total": count_unplaceable(all_lines),
+        "unparsed_total": unplaceable_total,
         "shutdown_failures": shutdown_hits,
         "runtime_failures": runtime_hits,
         "pre_rollover_evidence": pre_rollover,   # 구 프로세스 rollover = 관찰 자료
@@ -828,6 +1168,16 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
     })
     if shutdown_hits or runtime_hits or post_rollover:
         return FAILED
+
+    # ⚠️ marker 부재만으로 PASS를 주면 **로그가 유실됐을 때도 PASS**다
+    #    (codex 감사 지적). 창이 실제로 관측 가능했는지를 함께 요구한다:
+    #      - 배치 불가 줄이 있으면 그 줄에 marker가 있었는지 알 수 없다
+    #      - post 창이 통째로 비었으면 회전으로 사라졌거나 로그가 안 쌓인 것이다
+    #        (새 프로세스는 startup 로그를 반드시 남긴다)
+    if unplaceable_total:
+        return UNVERIFIED
+    if not runtime.lines:
+        return UNVERIFIED
     return PASS
 
 
@@ -835,16 +1185,70 @@ def _finish(artifact: EvidenceArtifact, verdict_value: str, reasons: list[str],
             *, samples: Sequence[str]) -> dict:
     summary = {"verdict": verdict_value, "reasons": reasons,
                "sample_count": len(samples), "samples": list(samples)}
-    digest = artifact.finalize(summary)
-    return {**summary, "evidence": str(artifact.path), "sha256": digest}
+    effective, digest = artifact.finalize(summary)
+    if effective != verdict_value:
+        reasons = reasons + ["증거 artifact 절단 — 판정을 낮춘다"]
+    return {**summary, "verdict": effective, "reasons": reasons,
+            "evidence": str(artifact.path), "sha256": digest}
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+def _write_exclusive(path: pathlib.Path, data: bytes) -> None:
+    """**배타 생성** + fsync. `exists()` 후 `write_text()`는 배타가 아니다.
+
+    두 verifier가 동시에 돌면 TOCTOU로 한쪽이 다른 쪽 baseline을 덮어쓴다.
+    "이전 실행 산출물을 덮지 않는다"는 보장은 O_EXCL이 하는 것이지 사전
+    `exists()` 검사가 하는 게 아니다 (codex 감사 지적).
+    """
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise CollectorError(f"이미 있다(이전 실행 산출물): {path}") from exc
+    except OSError as exc:
+        raise CollectorError(f"생성 실패 {path}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        raise CollectorError(f"기록 실패 {path}: {exc}") from exc
+
+
+def _resolve_revision(repo_root: pathlib.Path, expected: str) -> str:
+    """worktree가 **기대 revision에 clean하게** 있는지 확인 후 full SHA 반환.
+
+    지문을 worktree에서 뜨므로, dirty하거나 다른 commit이면 그 지문은 배포될
+    코드의 것이 아니다. → prepare는 `git pull` **뒤**, build **전**에 돌린다.
+    """
+    def git(*argv: str) -> str:
+        proc = subprocess.run(["git", "-C", str(repo_root), *argv],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise CollectorError(f"git {' '.join(argv)} 실패: {proc.stderr.strip()[:200]}")
+        return proc.stdout.strip()
+
+    head = git("rev-parse", "HEAD")
+    if not head.startswith(expected) and not expected.startswith(head):
+        raise CollectorError(
+            f"worktree HEAD={head[:12]}… != 기대 revision {expected[:12]}… "
+            "— 배포하려는 commit을 checkout한 뒤 prepare할 것")
+    dirty = git("status", "--porcelain")
+    if dirty:
+        raise CollectorError(
+            "worktree가 dirty하다 — 지문이 배포될 코드와 달라진다:\n"
+            + "\n".join(dirty.splitlines()[:10]))
+    return head
+
+
 async def _prepare(args) -> int:
     target = PRODUCTION_TARGET
+    repo_root = pathlib.Path(args.repo_root).resolve()
+    revision = _resolve_revision(repo_root, args.expect_revision)
+    source_sha = compute_local_source_fingerprint(repo_root)
     fmt = "{{.Id}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.Image}}"
     raw = await run_command(target.inspect(fmt))
     parts = raw.strip().split("|")
@@ -859,16 +1263,22 @@ async def _prepare(args) -> int:
         expected_code=args.expect_code,
         expected_month=args.expect_month,
         expected_expires_on=args.expect_expires_on,
+        expected_revision=revision,
+        expected_source_sha256=source_sha,
     )
     path = pathlib.Path(args.baseline)
-    if path.exists():
-        raise CollectorError(f"baseline이 이미 있다(이전 실행 산출물): {path}")
-    path.write_text(baseline.to_json() + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    (path.parent / (path.name + ".sha256")).write_text(
-        f"{digest}  {path.name}\n", encoding="utf-8"
-    )
+    payload = (baseline.to_json() + "\n").encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    # sidecar를 **먼저** 배타 생성한다. baseline만 만들어진 뒤 sidecar 생성이
+    # 실패하면 checksum 없는 baseline이 남아 load가 UNVERIFIED로 막히는데,
+    # 그 상태에서 재실행하면 baseline이 이미 있어 또 막힌다.
+    sidecar = path.parent / (path.name + ".sha256")
+    _write_exclusive(sidecar, f"{digest}  {path.name}\n".encode("utf-8"))
+    try:
+        _write_exclusive(path, payload)
+    except CollectorError:
+        sidecar.unlink(missing_ok=True)
+        raise
     print(json.dumps({"phase": "prepare", "baseline": str(path), "sha256": digest,
                       **asdict(baseline)}, ensure_ascii=False, indent=2))
     return 0
@@ -883,13 +1293,21 @@ def build_parser() -> argparse.ArgumentParser:
     pre.add_argument("--expect-code", required=True, help="배포 후 기대 계약 코드 (예: A75609)")
     pre.add_argument("--expect-month", required=True, help="기대 월물 (예: 202609)")
     pre.add_argument("--expect-expires-on", required=True, help="기대 만기 (예: 2026-09-21)")
+    pre.add_argument("--expect-revision", required=True,
+                     help="배포할 commit SHA — worktree HEAD가 이것이고 clean해야 한다")
+    pre.add_argument("--repo-root", default=str(pathlib.Path(__file__).resolve().parent.parent),
+                     help="지문을 뜰 worktree 경로 (기본: 이 스크립트의 리포)")
 
-    ver = sub.add_parser("verify", help="배포 후 게이트 (baseline 필수)")
+    ver = sub.add_parser(
+        "collect",
+        help="배포 후 증거 수집 (baseline 필수). **자동 승인 아님** — runbook 대조 필요")
     ver.add_argument("--baseline", required=True)
     ver.add_argument("--evidence", required=True, help="증거 artifact 경로 (기존 파일이면 거부)")
     ver.add_argument("--poll-seconds", type=float, default=45.0)
     ver.add_argument("--startup-deadline-seconds", type=float, default=600.0)
     ver.add_argument("--verify-deadline-seconds", type=float, default=720.0)
+    ver.add_argument("--observe-seconds", type=float, default=720.0,
+                     help="첫 정상 응답 후 관측을 계속할 최소 시간 (runbook: 12분)")
     return p
 
 
@@ -946,29 +1364,58 @@ def production_adapters(target: Target = PRODUCTION_TARGET) -> Adapters:
                 raise CollectorError(f"로그 읽기 실패 {path.name}: {exc}") from exc
         return lines
 
+    async def expiry_probe(contract_month: str) -> str:
+        """컨테이너 **안에서** 만기 계산을 실행 — 배포된 코드의 실제 동작을 본다.
+
+        이미지 태그 비교와 독립된 축이다. 태그만 갈아끼운 경우도 여기서 걸린다.
+        """
+        code = (
+            "from app.sources.kis_master import _compute_expiry_date;"
+            f"print(_compute_expiry_date({contract_month!r}))"
+        )
+        return await run_command(
+            target.compose("exec", "-T", "fastapi", "python", "-c", code))
+
+    async def source_fingerprint() -> str:
+        """컨테이너 안 리포 payload 지문 — 배포된 **revision**을 가른다.
+
+        범위는 `SOURCE_FINGERPRINT_ROOTS`(Dockerfile COPY 집합)다. `app/`만
+        보면 뚫린다 — 그 반례가 실제로 있었다.
+        """
+        return await run_command(
+            target.compose("exec", "-T", "fastapi", "python", "-c",
+                           SOURCE_FINGERPRINT_PROGRAM))
+
     async def sleep(seconds: float) -> None:
         await asyncio.sleep(seconds)
 
     return Adapters(admin_fetch=admin_fetch, inspect_format=inspect_format,
                     container_events=container_events, read_log_lines=read_log_lines,
+                    expiry_probe=expiry_probe, source_fingerprint=source_fingerprint,
                     now=lambda: datetime.now(timezone.utc), sleep=sleep)
 
 
-async def _verify(args) -> int:
+async def _collect(args) -> int:
     baseline = Baseline.load(pathlib.Path(args.baseline))
     evidence = pathlib.Path(args.evidence)
     if evidence.exists():
         raise CollectorError(f"evidence가 이미 있다(이전 실행 산출물): {evidence}")
     artifact = EvidenceArtifact(evidence)
-    result = await run_verify(
+    result = await collect_evidence(
         baseline, production_adapters(), artifact,
         Deadlines(startup_seconds=args.startup_deadline_seconds,
                   verify_seconds=args.verify_deadline_seconds,
+                  observe_seconds=args.observe_seconds,
                   poll_seconds=args.poll_seconds),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    # PASS만 0. UNVERIFIED/FAILED는 후속(일봉 정정)을 차단한다.
-    return 0 if result["verdict"] == PASS else 1
+    if result["verdict"] != PASS:
+        print("\n⛔ 차단 소견이 있다 — 후속(일봉 정정) 진행 금지.", file=sys.stderr)
+        return 1
+    print("\n⚠️ 차단 소견 없음. 이것은 **자동 승인이 아니다** — "
+          "KRX_CANARY.md 배포 runbook 체크리스트를 사람이 대조해 최종 판정할 것.",
+          file=sys.stderr)
+    return 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -976,7 +1423,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.phase == "prepare":
             return asyncio.run(_prepare(args))
-        return asyncio.run(_verify(args))
+        return asyncio.run(_collect(args))
     except CollectorError as exc:
         print(json.dumps({"verdict": UNVERIFIED, "error": str(exc)},
                          ensure_ascii=False), file=sys.stderr)

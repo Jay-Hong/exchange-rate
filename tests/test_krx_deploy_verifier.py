@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import sys
@@ -27,6 +28,9 @@ SCHEDULER = REPO_ROOT / "app" / "scheduler.py"
 _T0 = "2026-08-17T06:00:00+00:00"
 
 
+_FP = "f" * 64
+
+
 def _baseline(**over) -> V.Baseline:
     base = dict(
         t0_iso=_T0,
@@ -37,6 +41,8 @@ def _baseline(**over) -> V.Baseline:
         expected_code="A75609",
         expected_month="202609",
         expected_expires_on="2026-09-21",
+        expected_revision="a" * 40,
+        expected_source_sha256=_FP,
     )
     base.update(over)
     return V.Baseline(**base)
@@ -313,18 +319,18 @@ class TestContinuity(unittest.TestCase):
         return V.ContainerIdentity(cid, started, restarts)
 
     def test_identical_samples_hold(self):
-        self.assertTrue(V.continuity_holds([self._id(), self._id(), self._id()]))
+        self.assertEqual(V.evaluate_continuity([self._id(), self._id(), self._id()])[0], V.PASS)
 
     def test_restart_count_change_breaks_continuity(self):
         """같은 ID로도 `docker restart`가 가능하므로 ID만으로는 부족하다."""
-        self.assertFalse(V.continuity_holds([self._id(), self._id(restarts=1)]))
+        self.assertEqual(V.evaluate_continuity([self._id(), self._id(restarts=1)])[0], V.FAILED)
 
     def test_started_at_change_breaks_continuity(self):
-        self.assertFalse(
-            V.continuity_holds([self._id(), self._id(started="2026-08-17T06:09:00Z")]))
+        self.assertEqual(V.evaluate_continuity(
+            [self._id(), self._id(started="2026-08-17T06:09:00Z")])[0], V.FAILED)
 
     def test_empty_samples_do_not_hold(self):
-        self.assertFalse(V.continuity_holds([]))
+        self.assertEqual(V.evaluate_continuity([])[0], V.UNVERIFIED)
 
 
 # ---------------------------------------------------------------------------
@@ -390,12 +396,239 @@ class TestLogProjection(unittest.TestCase):
 # Baseline / artifact
 # ---------------------------------------------------------------------------
 
+class TestExclusiveCreate(unittest.TestCase):
+    """baseline·sidecar는 **배타 생성**이어야 한다."""
+
+    def test_creates_with_0600_and_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "b.json"
+            V._write_exclusive(path, b"hello")
+            self.assertEqual(path.read_bytes(), b"hello")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_refuses_existing_file(self):
+        """`exists()` 후 write는 TOCTOU다 — O_EXCL이 그 창을 없앤다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "b.json"
+            V._write_exclusive(path, b"first")
+            with self.assertRaises(CollectorErrorAlias):
+                V._write_exclusive(path, b"second")
+            self.assertEqual(path.read_bytes(), b"first")
+
+
+class TestResolveRevision(unittest.TestCase):
+    """지문은 worktree에서 뜨므로 **HEAD와 clean 여부**가 지문의 전제다."""
+
+    def _repo(self, tmp: str) -> pathlib.Path:
+        import subprocess
+
+        root = pathlib.Path(tmp) / "repo"
+        (root / "app").mkdir(parents=True)
+        (root / "app" / "m.py").write_text("x = 1\n")
+
+        def git(*a):
+            subprocess.run(["git", "-C", str(root), *a], check=True,
+                           capture_output=True)
+
+        git("init", "-q")
+        git("config", "user.email", "t@example.invalid")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+        return root
+
+    def test_accepts_matching_head(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp)
+            head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+            self.assertEqual(V._resolve_revision(root, head), head)
+            self.assertEqual(V._resolve_revision(root, head[:12]), head)
+
+    def test_rejects_other_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp)
+            with self.assertRaises(CollectorErrorAlias):
+                V._resolve_revision(root, "0" * 40)
+
+    def test_rejects_dirty_worktree(self):
+        """dirty하면 지문이 배포될 코드와 달라진다 — 기대값으로 못 쓴다."""
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp)
+            head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+            (root / "app" / "m.py").write_text("x = 2\n")
+            with self.assertRaises(CollectorErrorAlias) as ctx:
+                V._resolve_revision(root, head)
+            self.assertIn("dirty", str(ctx.exception))
+
+
+class TestSourceFingerprint(unittest.TestCase):
+
+    def test_detects_content_and_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "r"
+            (root / "app").mkdir(parents=True)
+            (root / "app" / "m.py").write_text("x = 1\n")
+            base = V.compute_local_source_fingerprint(root)
+            self.assertEqual(V.compute_local_source_fingerprint(root), base)
+
+            (root / "app" / "m.py").write_text("x = 2\n")
+            self.assertNotEqual(V.compute_local_source_fingerprint(root), base)
+
+            (root / "app" / "m.py").write_text("x = 1\n")
+            self.assertEqual(V.compute_local_source_fingerprint(root), base)
+            (root / "app" / "n.py").write_text("y = 1\n")
+            self.assertNotEqual(V.compute_local_source_fingerprint(root), base)
+
+    def test_ignores_pycache_and_dockerignored(self):
+        """image에는 `.pyc`가 있고 리포에는 없을 수 있다 — 지문이 갈리면 안 된다.
+
+        제외 규칙이 `.dockerignore`보다 좁으면 정상 배포가 불일치로 막힌다.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "r"
+            (root / "app" / "__pycache__").mkdir(parents=True)
+            (root / "app" / "m.py").write_text("x = 1\n")
+            base = V.compute_local_source_fingerprint(root)
+            (root / "app" / "__pycache__" / "m.cpython-313.pyc").write_bytes(b"\x00")
+            # 제외 규칙을 **전수** 확인한다 — 손으로 고른 몇 개만 보면 나중에
+            # 규칙이 늘었을 때 그 항목은 검사되지 않는다.
+            for i, suffix in enumerate(V._FINGERPRINT_SKIP_SUFFIXES):
+                (root / "app" / f"skipped{i}{suffix}").write_text("무시 대상")
+            for name in V._FINGERPRINT_SKIP_NAMES:
+                (root / "app" / name).write_bytes(b"\x00")
+            self.assertEqual(V.compute_local_source_fingerprint(root), base)
+        # 비-.py 리소스는 **포함**된다 (templates/static이 그 경로다)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "r"
+            (root / "templates").mkdir(parents=True)
+            (root / "templates" / "a.html").write_text("<p>1</p>")
+            base = V.compute_local_source_fingerprint(root)
+            (root / "templates" / "a.html").write_text("<p>2</p>")
+            self.assertNotEqual(V.compute_local_source_fingerprint(root), base)
+
+    def test_covers_every_dockerfile_copy_root(self):
+        """⭐ 범위가 이미지 COPY 집합 전부인가.
+
+        `app/`만 해싱하면 실제 반례가 생긴다 — 이 리포의 이번 작업이 그랬다:
+        변경이 `scripts/`에만 있어 `app/` 지문이 이전 revision과 **같았다**
+        (codex 감사 지적). COPY root별로 변화 민감도를 각각 확인한다.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "r"
+            for name in V.SOURCE_FINGERPRINT_ROOTS:
+                (root / name).mkdir(parents=True)
+                (root / name / "f.py").write_text("x = 1\n")
+            base = V.compute_local_source_fingerprint(root)
+            for name in V.SOURCE_FINGERPRINT_ROOTS:
+                with self.subTest(root=name):
+                    target = root / name / "f.py"
+                    target.write_text("x = 2\n")
+                    self.assertNotEqual(
+                        V.compute_local_source_fingerprint(root), base,
+                        f"{name}/ 변경을 지문이 못 잡는다")
+                    target.write_text("x = 1\n")
+            self.assertEqual(V.compute_local_source_fingerprint(root), base)
+
+    def test_required_skips_cover_bytecode_cache(self):
+        """**필수** 제외(bytecode cache)가 실제 제외 목록 안에 있는가.
+
+        컨테이너는 `PYTHONDONTWRITEBYTECODE=1`이라 런타임에 만들지 **않는다**.
+        필요한 이유는 반대쪽이다: dockerignore anchoring 때문에 host의
+        `app/__pycache__`가 **빌드 시 이미지로 복사**되는데, host 쪽 내용은
+        python을 돌릴 때마다 바뀐다. 비교는 "prepare 시점 host ↔ build된
+        이미지"라, 그 사이에 pycache가 바뀌면 정상 배포가 불일치로 막힌다.
+        """
+        for name in V._FINGERPRINT_REQUIRED_SKIP_DIRS:
+            self.assertIn(name, V._FINGERPRINT_SKIP_DIRS)
+        for suffix in V._FINGERPRINT_REQUIRED_SKIP_SUFFIXES:
+            self.assertIn(suffix, V._FINGERPRINT_SKIP_SUFFIXES)
+
+    def test_no_tracked_file_is_excluded(self):
+        """⭐ 제외 규칙이 **tracked payload**를 숨기지 않는가.
+
+        dockerignore anchoring 때문에 `scripts/example.md`는 이미지에 들어가는데
+        지문에서는 양쪽 다 빠진다 — 그러면 그 파일만 바꾼 revision이 "지문 동일"이
+        되어 범위 주장이 우회된다 (codex 감사 지적). 제외는 untracked 부산물에만
+        걸려야 한다.
+
+        규칙을 흉내 내지 않고 **지문이 실제로 방문한 경로**와 비교한다 — 흉내가
+        규칙과 갈리면 이 테스트가 조용히 통과한다.
+        """
+        import subprocess
+
+        repo = pathlib.Path(V.__file__).resolve().parent.parent
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z", *V.SOURCE_FINGERPRINT_ROOTS],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        tracked = {p for p in proc.stdout.split("\0") if p}
+        self.assertTrue(tracked, "tracked 파일을 하나도 못 읽었다")
+
+        visited = V.list_fingerprinted_paths(repo)
+        hidden = sorted(tracked - visited)
+        self.assertEqual(hidden, [], (
+            "tracked 파일이 지문에서 빠진다 — 이 파일만 바꾼 revision을 "
+            f"구분하지 못한다: {hidden}"))
+
+    def test_dockerignore_has_no_in_root_rules(self):
+        """`.dockerignore`가 **COPY root 안을 겨냥하는** 규칙을 얻으면 알린다.
+
+        실측(이 호스트 docker): dockerignore 패턴은 빌드 컨텍스트 **루트에
+        고정**되어 하위 디렉터리에 적용되지 않는다 — `*.md`를 넣어도
+        `app/README.md`는 이미지에 들어왔다. 그래서 현재 루트 규칙들은
+        host/container 갈림을 만들지 않는다.
+
+        하지만 `**/...`이나 `app/...` 형태의 규칙이 추가되면 그때는 진짜
+        갈림이 생긴다 — host엔 있고 이미지엔 없어 정상 배포가 FAILED로
+        막힌다. 그 시점에 이 테스트가 깨져 제외 목록 갱신을 강제한다.
+        """
+        repo = pathlib.Path(V.__file__).resolve().parent.parent
+        rules = [
+            line.strip()
+            for line in (repo / ".dockerignore").read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertTrue(rules, ".dockerignore를 읽지 못했다")
+        in_root = [
+            r for r in rules
+            if r.lstrip("!").startswith("**/")
+            or any(r.lstrip("!").startswith(f"{root}/")
+                   for root in V.SOURCE_FINGERPRINT_ROOTS)
+        ]
+        self.assertEqual(in_root, [], (
+            "`.dockerignore`가 COPY root 안을 겨냥한다 — 이 경로들은 host에만 "
+            "있고 이미지엔 없어 지문이 갈린다. 제외 목록에 반영하라: "
+            f"{in_root}"))
+
+    def test_roots_match_dockerfile_copy(self):
+        """Dockerfile의 COPY 목록과 지문 범위를 **대조**한다.
+
+        Dockerfile에 COPY가 추가됐는데 지문 범위가 그대로면, 그 경로의 변경은
+        검증 없이 배포된다. 이 테스트가 그때 깨진다.
+        """
+        import re
+
+        dockerfile = (pathlib.Path(V.__file__).resolve().parent.parent
+                      / "Dockerfile").read_text()
+        copied = set(re.findall(r"^COPY\s+(?!--from)(\S+)/\s+\./",
+                                dockerfile, re.MULTILINE))
+        self.assertEqual(copied, set(V.SOURCE_FINGERPRINT_ROOTS),
+                         f"Dockerfile COPY={sorted(copied)} vs "
+                         f"지문 범위={sorted(V.SOURCE_FINGERPRINT_ROOTS)}")
+
+
 class TestBaseline(unittest.TestCase):
 
     def test_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "baseline.json"
-            path.write_text(_baseline().to_json(), encoding="utf-8")
+            _write_baseline(path, _baseline())
             self.assertEqual(V.Baseline.load(path), _baseline())
 
     def test_missing_file_is_collector_error_not_silent_default(self):
@@ -404,15 +637,49 @@ class TestBaseline(unittest.TestCase):
             with self.assertRaises(CollectorErrorAlias):
                 V.Baseline.load(pathlib.Path(tmp) / "absent.json")
 
+    def test_tampered_baseline_is_rejected(self):
+        """⭐ sidecar checksum을 **검증**한다.
+
+        prepare가 sha256을 남기는데 verify가 확인하지 않으면 그 sha256은 장식이다.
+        baseline은 T0·구 identity·기대 계약의 유일한 출처라, 변조되면 게이트
+        전체가 잘못된 기준 위에서 돈다 (codex 감사에서 실제 재현됨).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "b.json"
+            _write_baseline(path, _baseline())
+            # 내용만 바꾸고 sidecar는 그대로 → 불일치
+            path.write_text(_baseline(old_container_id="attacker").to_json(),
+                            encoding="utf-8")
+            with self.assertRaises(CollectorErrorAlias) as ctx:
+                V.Baseline.load(path)
+            self.assertIn("checksum", str(ctx.exception))
+
+    def test_missing_sidecar_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "b.json"
+            path.write_text(_baseline().to_json(), encoding="utf-8")  # sidecar 없음
+            with self.assertRaises(CollectorErrorAlias):
+                V.Baseline.load(path)
+
     def test_missing_field_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "b.json"
-            path.write_text(json.dumps({"t0_iso": _T0}), encoding="utf-8")
+            _write_baseline(path, None, raw=json.dumps({"t0_iso": _T0}))
             with self.assertRaises(CollectorErrorAlias):
                 V.Baseline.load(path)
 
 
 CollectorErrorAlias = V.CollectorError
+
+
+def _write_baseline(path: pathlib.Path, baseline, *, raw: str = None) -> None:
+    """baseline + 정상 checksum sidecar를 함께 쓴다 (load가 sidecar를 검증한다)."""
+    import hashlib
+    text = raw if raw is not None else baseline.to_json()
+    path.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    (path.parent / (path.name + ".sha256")).write_text(
+        f"{digest}  {path.name}\n", encoding="utf-8")
 
 
 class TestEvidenceArtifact(unittest.TestCase):
@@ -422,7 +689,7 @@ class TestEvidenceArtifact(unittest.TestCase):
             path = pathlib.Path(tmp) / "ev.jsonl"
             art = V.EvidenceArtifact(path)
             art.append("sample", {"verdict": V.PASS})
-            digest = art.finalize({"verdict": V.PASS})
+            _, digest = art.finalize({"verdict": V.PASS})
             lines = path.read_text(encoding="utf-8").strip().splitlines()
             self.assertEqual(len(lines), 2)  # sample + terminal
             self.assertEqual(json.loads(lines[-1])["kind"], "terminal")
@@ -584,24 +851,45 @@ class _Clock:
         self.now_value = self.now_value + timedelta(seconds=seconds)
 
 
+_RUNTIME_OK_LINE = json.dumps(
+    {"timestamp": "2026-08-17T06:05:30+00:00", "level": "INFO",
+     "logger": "app.main", "message": "startup complete"})
+
+
 def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
               events=None, shutdown_lines=None, runtime_lines=None,
-              removal_error="Error: No such object: old123"):
-    """scripted 어댑터. `statuses`의 각 원소는 dict(payload) 또는 예외."""
-    queue = list(statuses)
+              removal_error="Error: No such object: old123",
+              new_image="sha256:bbb", health_status="healthy",
+              probe=None, source_fp=_FP, final_identity_raw=None):
+    """scripted 어댑터. `statuses`의 각 원소는 dict(payload) 또는 예외.
 
-    async def admin_fetch(_path):
+    실제 게이트 축을 전부 덮는다 — 하나라도 빠지면 orchestration이 그 축에서
+    UNVERIFIED를 내므로, 어댑터 누락이 곧 테스트 실패로 드러난다.
+    """
+    queue = list(statuses)
+    queue_last = [statuses[-1] if statuses else {}]
+    probe_map = probe if probe is not None else dict(V.EXPIRY_BEHAVIOR_PROBE)
+
+    async def admin_fetch(path):
+        if path == "/health":
+            return {"status": health_status}
         item = queue.pop(0) if queue else queue_last[0]
         queue_last[0] = item
         if isinstance(item, Exception):
             raise item
         return item
 
-    queue_last = [statuses[-1] if statuses else {}]
+    polling_done = [False]
 
     async def inspect_format(fmt):
         if fmt.startswith("__probe__"):
             raise V.CollectorError(removal_error)
+        if "Image" in fmt:
+            return new_image
+        if final_identity_raw is not None and polling_done[0]:
+            # 폴링이 끝난 뒤(종료 직전) 재확인만 다른 값을 준다. 표본 개수로
+            # 판별하면 관측 창 길이가 바뀔 때 조용히 어긋난다.
+            return final_identity_raw
         return identity_raw
 
     async def container_events(_cid, _since, _until):
@@ -613,13 +901,27 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
 
     async def read_log_lines(_since, _until):
         # 운영 어댑터와 동일하게 **전체 로그**를 돌려준다. 창 분할은
-        # `filter_log_window`가 timestamp로 한다 — 어댑터가 창을 흉내 내면
-        # 운영 배선 결함(since/until 무시)을 테스트가 못 잡는다.
-        return list(shutdown_lines or []) + list(runtime_lines or [])
+        # `filter_log_window`가 timestamp로 한다.
+        base = list(runtime_lines) if runtime_lines is not None else [_RUNTIME_OK_LINE]
+        return list(shutdown_lines or []) + base
+
+    async def expiry_probe(month):
+        value = probe_map.get(month)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    async def source_fingerprint():
+        # 이 축은 폴링이 모두 끝난 뒤에만 호출된다.
+        polling_done[0] = True
+        if isinstance(source_fp, Exception):
+            raise source_fp
+        return source_fp
 
     return V.Adapters(admin_fetch=admin_fetch, inspect_format=inspect_format,
                       container_events=container_events,
-                      read_log_lines=read_log_lines,
+                      read_log_lines=read_log_lines, expiry_probe=expiry_probe,
+                      source_fingerprint=source_fingerprint,
                       now=clock.now, sleep=clock.sleep)
 
 
@@ -640,7 +942,7 @@ def _payload(**over) -> dict:
     }
 
 
-class TestRunVerify(unittest.IsolatedAsyncioTestCase):
+class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.clock = _Clock(datetime(2026, 8, 17, 6, 6, tzinfo=timezone.utc))
@@ -651,23 +953,87 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
         return V.EvidenceArtifact(pathlib.Path(self.tmp.name) / "ev.jsonl")
 
     async def test_happy_path_passes_and_finalizes(self):
-        ad = _adapters(self.clock, statuses=[_payload()])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS)
         self.assertEqual(len(got["sha256"]), 64)
 
     async def test_transient_fetch_failure_then_pass(self):
         """과도기 조회 실패는 PENDING으로 기록되고 이후 정상 샘플로 해소된다."""
         ad = _adapters(self.clock, statuses=[
-            V.CollectorError("connection refused"), _payload()])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+            V.CollectorError("connection refused"), _payload(), _payload()])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS)
         self.assertIn(V.PENDING, got["samples"])
+
+    async def test_observation_window_is_actually_held_open(self):
+        """⭐ runbook의 "12분간 전량 저장"이 코드에서 실제로 일어나는가.
+
+        첫 PASS 2건에서 끝내면 실 관측 창이 ~45초로 줄어 그 뒤의 재시작을
+        못 본다 (codex 감사 지적). 표본 수와 **경과 시간**을 함께 본다.
+        """
+        ad = _adapters(self.clock, statuses=[_payload()])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS)
+        # 720s / 45s = 16 interval → 최소 17 표본
+        self.assertGreaterEqual(len(got["samples"]), 17,
+                                f"관측 창이 닫혔다: {len(got['samples'])} 표본")
+
+    async def test_restart_late_in_window_is_caught(self):
+        """창 **후반**의 재시작을 잡는가 — 창이 장식이 아니라는 증거."""
+        ids = ["new1|2026-08-17T06:05:00Z|0"] * 12 + [
+            "new1|2026-08-17T06:05:00Z|1"]
+        idx = {"i": 0}
+        base_ad = _adapters(self.clock, statuses=[_payload()])
+
+        async def inspect_format(fmt):
+            if fmt.startswith("__probe__"):
+                raise V.CollectorError("Error: No such object: old123")
+            if "Image" in fmt:
+                return "sha256:bbb"
+            value = ids[min(idx["i"], len(ids) - 1)]
+            idx["i"] += 1
+            return value
+
+        ad = dataclasses.replace(base_ad, inspect_format=inspect_format)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
+    async def test_final_identity_change_after_axes_fails(self):
+        """폴링이 끝난 뒤 축 검사 중 재시작 → 앞선 관측이 무효."""
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       final_identity_raw="new2|2026-08-17T06:30:00Z|0")
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("종료 직전" in r for r in got["reasons"]),
+                        got["reasons"])
+
+    async def test_final_restart_count_nonzero_fails(self):
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       final_identity_raw="new1|2026-08-17T06:05:00Z|2")
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
+    async def test_source_fingerprint_mismatch_fails(self):
+        """⭐ calendar fix를 포함하지만 **다른 revision**인 image를 잡는다.
+
+        동작 probe만 있으면 통과한다 — 그것이 이 축이 따로 있는 이유다.
+        """
+        ad = _adapters(self.clock, statuses=[_payload()], source_fp="9" * 64)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("소스 지문" in r for r in got["reasons"]), got["reasons"])
+
+    async def test_source_fingerprint_failure_is_unverified(self):
+        ad = _adapters(self.clock, statuses=[_payload()],
+                       source_fp=V.CollectorError("exec 실패"))
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
 
     async def test_no_valid_sample_by_startup_deadline_is_unverified(self):
         """첫 응답이 영원히 안 와도 종료한다 — startup deadline이 필요한 이유."""
         ad = _adapters(self.clock, statuses=[V.CollectorError("refused")] * 200)
-        got = await V.run_verify(
+        got = await V.collect_evidence(
             _baseline(), ad, self._artifact(),
             deadlines=V.Deadlines(startup_seconds=120, verify_seconds=120,
                                   poll_seconds=45))
@@ -676,7 +1042,7 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
     async def test_transient_state_fails_after_verify_deadline(self):
         ad = _adapters(self.clock,
                        statuses=[_payload(last_result="bootstrap_skipped")] * 200)
-        got = await V.run_verify(
+        got = await V.collect_evidence(
             _baseline(), ad, self._artifact(),
             deadlines=V.Deadlines(startup_seconds=600, verify_seconds=90,
                                   poll_seconds=45))
@@ -698,11 +1064,8 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
             idx["i"] += 1
             return value
 
-        ad = V.Adapters(admin_fetch=base_ad.admin_fetch, inspect_format=inspect_format,
-                        container_events=base_ad.container_events,
-                        read_log_lines=base_ad.read_log_lines,
-                        now=clock.now, sleep=clock.sleep)
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        ad = dataclasses.replace(base_ad, inspect_format=inspect_format)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
         self.assertTrue(any("identity 변경" in r for r in got["reasons"]))
 
@@ -710,13 +1073,13 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
         ad = _adapters(self.clock, statuses=[_payload()], events=[
             {"Action": "die",
              "Actor": {"ID": "old123", "Attributes": {"exitCode": "137"}}}])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
 
     async def test_missing_die_event_is_unverified_not_pass(self):
         """marker/이벤트 부재를 '정상'으로 기록하지 않는다."""
         ad = _adapters(self.clock, statuses=[_payload()], events=[])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.UNVERIFIED)
 
     async def test_shutdown_marker_in_pre_window_fails(self):
@@ -724,7 +1087,7 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
                            "message":
                            "[krx_close_snapshot] close timeout (5s), cancel 1 pending tasks"})
         ad = _adapters(self.clock, statuses=[_payload()], shutdown_lines=[line])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
 
     async def test_pre_window_rollover_is_evidence_not_failure(self):
@@ -736,7 +1099,7 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
                            "message":
                            "[krx] rollover A75608/202608 → A75609/202609 reason=scheduled"})
         ad = _adapters(self.clock, statuses=[_payload()], shutdown_lines=[line])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS)
 
     async def test_post_window_rollover_fails(self):
@@ -744,28 +1107,24 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
                            "message":
                            "[krx] rollover A75609/202609 → A75610/202610 reason=scheduled"})
         ad = _adapters(self.clock, statuses=[_payload()], runtime_lines=[line])
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
 
     async def test_log_fetch_failure_is_unverified(self):
-        base_ad = _adapters(self.clock, statuses=[_payload()])
+        base_ad = _adapters(self.clock, statuses=[_payload(), _payload()])
 
         async def failing_logs(_s, _u):
             raise V.CollectorError("log read failed")
 
-        ad = V.Adapters(admin_fetch=base_ad.admin_fetch,
-                        inspect_format=base_ad.inspect_format,
-                        container_events=base_ad.container_events,
-                        read_log_lines=failing_logs,
-                        now=self.clock.now, sleep=self.clock.sleep)
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        ad = dataclasses.replace(base_ad, read_log_lines=failing_logs)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.UNVERIFIED)
 
     async def test_new_id_equal_to_old_fails(self):
         """재생성되지 않았으면 배포 자체가 반영되지 않았다."""
         ad = _adapters(self.clock, statuses=[_payload()],
                        identity_raw="old123|2026-08-15T00:00:00Z|0")
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
         self.assertTrue(any("구 ID와 동일" in r for r in got["reasons"]))
 
@@ -778,7 +1137,7 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
                         "level": "INFO", "message": "pre-window"}),
         ]
         ad = _adapters(self.clock, statuses=[_payload()], shutdown_lines=lines)
-        await V.run_verify(_baseline(), ad, art)
+        await V.collect_evidence(_baseline(), ad, art)
         records = [json.loads(x) for x in
                    art.path.read_text(encoding="utf-8").strip().splitlines()]
         log_rec = next(r for r in records if r["kind"] == "logs")
@@ -787,6 +1146,73 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("unparsed", log_rec["window_post"])
         self.assertIn("until", log_rec["window_post"])
 
+    async def test_old_image_deployed_is_caught_by_behavior_probe(self):
+        """⭐ **구 이미지를 force-recreate해도 KRX 축은 전부 PASS다.**
+
+        8/17 이후에는 구 코드도 A75609를 고르고 no_op을 낸다. 그래서 동작
+        probe(`_compute_expiry_date("202608")`)가 유일한 판별자다 — 구 코드는
+        무보정 셋째 월요일 `2026-08-17`을 반환한다.
+        """
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()],
+                       probe={"202608": "2026-08-17", "202602": "2026-02-16"})
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("구 코드가 돌고 있다" in r for r in got["reasons"]))
+
+    async def test_same_image_id_fails(self):
+        """이미지가 그대로면 재빌드/재배포가 반영되지 않았다 (Coinone 사고 형태)."""
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()],
+                       new_image="sha256:aaa")  # baseline.old_image와 동일
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("Image가 구 Image와 동일" in r for r in got["reasons"]))
+
+    async def test_probe_failure_is_unverified(self):
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()],
+                       probe={"202608": V.CollectorError("exec failed")})
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+
+    async def test_unhealthy_service_fails(self):
+        """force-recreate는 FX·USDT·broadcast·API도 함께 재시작한다 —
+        KRX 축만 보고 PASS를 선언할 수 없다."""
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()],
+                       health_status="degraded")
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
+    async def test_single_sample_cannot_pass_continuity(self):
+        """첫 PASS에서 즉시 끝내면 identity 표본이 1건 — 변화를 볼 기회가 없었다.
+
+        polling이 최소 표본을 확보하도록 바뀌었으므로 정상 경로에서는 2건 이상이
+        모인다. 표본 1건짜리 판정은 UNVERIFIED임을 순수 함수로 잠근다.
+        """
+        one = V.ContainerIdentity("new1", "2026-08-17T06:05:00Z", 0)
+        self.assertEqual(V.evaluate_continuity([one])[0], V.UNVERIFIED)
+
+    async def test_restart_count_nonzero_fails(self):
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()],
+                       identity_raw="new1|2026-08-17T06:05:00Z|1")
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+        self.assertTrue(any("RestartCount" in r for r in got["reasons"]))
+
+    async def test_empty_runtime_log_window_is_unverified(self):
+        """회전 등으로 post 창이 통째로 비면 '오류 없음'이 아니라 관측 불능이다.
+
+        새 프로세스는 startup 로그를 반드시 남기므로, 빈 창은 로그 유실 신호다.
+        """
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()], runtime_lines=[])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+
+    async def test_unplaceable_log_line_degrades_to_unverified(self):
+        """배치 불가 줄이 있으면 그 줄에 marker가 있었는지 알 수 없다."""
+        ad = _adapters(self.clock, statuses=[_payload(), _payload()],
+                       shutdown_lines=["timestamp 없는 외래 줄"])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+
     async def test_removal_probe_is_recorded_in_artifact(self):
         """probe 결과가 증거로 남는가 — 최종 PASS인데 'destroy 없음'만 남으면
         그걸 보강한 근거가 빠져 감사 계약이 불완전하다 (codex 리뷰 지적)."""
@@ -794,7 +1220,7 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
         ad = _adapters(self.clock, statuses=[_payload()], events=[
             {"Action": "die",
              "Actor": {"ID": "old123", "Attributes": {"exitCode": "0"}}}])  # destroy 없음
-        got = await V.run_verify(_baseline(), ad, art)
+        got = await V.collect_evidence(_baseline(), ad, art)
         self.assertEqual(got["verdict"], V.PASS)
         records = [json.loads(x) for x in
                    art.path.read_text(encoding="utf-8").strip().splitlines()]
@@ -812,14 +1238,12 @@ class TestRunVerify(unittest.IsolatedAsyncioTestCase):
         async def inspect_present(fmt):
             if fmt.startswith("__probe__"):
                 return "still-there"  # 조회 성공 = 아직 존재
+            if "Image" in fmt:
+                return "sha256:bbb"
             return "new1|2026-08-17T06:05:00Z|0"
 
-        ad = V.Adapters(admin_fetch=base_ad.admin_fetch,
-                        inspect_format=inspect_present,
-                        container_events=base_ad.container_events,
-                        read_log_lines=base_ad.read_log_lines,
-                        now=self.clock.now, sleep=self.clock.sleep)
-        got = await V.run_verify(_baseline(), ad, self._artifact())
+        ad = dataclasses.replace(base_ad, inspect_format=inspect_present)
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
 
 

@@ -734,6 +734,72 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 
 ---
 
+## 만기 휴장 보정 배포 runbook (2026-08-16 신설)
+
+> **이 체크리스트가 배포 게이트다.** `scripts/krx_deploy_verifier.py`는 증거를
+> 수집하고 차단 소견을 surface할 뿐, **자동 승인 경로가 아니다** — 그 도구의
+> 관측 배선에서만 P1이 6건 나왔던 이력이 있어 무인 PASS를 두지 않는다.
+> 아래 8항목 중 **하나라도 누락되면 UNVERIFIED**이고, UNVERIFIED/FAILED는
+> 모두 후속(일봉 정정)을 차단한다. 차단이 곧 rollback을 의미하지는 않는다.
+
+### 배포 창
+
+- **KRX 무세션** + **09:25:21Z(18:25 KST) 캡처 회피** + [G] 일반 게이트 통과.
+- 평일: **15:47:30+ ~ 17:50** / **06:02:30+ ~ 08:30** (CF retry 15:47:00 ·
+  CM retry 06:02:00 종료 후 여유. `_CLOSE_SNAPSHOT_REST_TIMEOUT_SEC=10`s 포함).
+- 토요일 **00:00~06:02 금지**(금요일 시작 CM + close retry). 일요일·휴일은 종일 가능하나
+  KRX 세션 축만 해소된 것이고 [G]와 타이머 인계는 별도.
+
+### 8항목 체크리스트
+
+| # | 항목 | 확인 방법 |
+|---|---|---|
+| 1 | **expected revision / image** | Image ID가 baseline `old_image`와 다름 **+ 컨테이너 안 리포 payload 지문**(`app` `scripts` `static` `templates` — Dockerfile COPY 집합 전부)이 배포 commit의 것과 일치. `prepare`가 worktree HEAD=배포 SHA·clean 확인 후 지문을 고정한다. ⚠️ **범위**: "리포 payload가 그 revision인가"를 증명하고 **빌드 입력(의존성)은 증명하지 않는다** — `requirements.lock.txt`는 builder 스테이지에만 있어 최종 이미지에서 해싱할 수 없다. ⚠️ `app/`만 해싱하면 뚫린다 — 이 작업이 실제 반례였다(변경이 `scripts/`에만 있어 `app/` 지문이 이전 revision과 동일) |
+| 2 | **동작 probe** | 컨테이너 **안에서** `_compute_expiry_date("202608") == 2026-08-14`, `("202602") == 2026-02-13`. ⭐ 8/17 이후엔 **구 코드도 A75609/no_op을 내므로 동작 축의 유일한 판별자**다. 단 이것만으로는 "보정이 들어갔다"까지이고 revision은 1번이 가른다 |
+| 3 | **12분 polling** | 30~60초 주기로 container ID·StartedAt·RestartCount·KRX status **전량 저장**. `--observe-seconds`(기본 720)만큼 창을 **열어 둔다** — 첫 PASS에서 끝내면 실 관측이 ~45초로 줄어 그 뒤 재시작을 못 본다. 표본 2건 미만은 UNVERIFIED |
+| 4 | **종료 직전 identity 재확인** | 모든 축을 마친 뒤 3-tuple 동일 + `RestartCount == 0` 재확인 (그 사이 재시작이면 앞선 관측이 무효). `collect`가 코드로 수행하고 artifact에 남긴다 |
+| 5 | **로그 2창 분리 수집** | 배포 **전에** 구 컨테이너 log follower 시작 / 신 컨테이너 로그는 별도. `[T0, StartedAt)`의 rollover는 **증거**, `[StartedAt, now)`의 rollover는 **비기대** |
+| 6 | **서비스 smoke** | 내부·공개 API + **FX·USDT·broadcast 실제 동작**. ⚠️ `/health`는 [main.py:1265](app/main.py#L1265)에서 요청에 응답만 되면 항상 `healthy`라 **도달성 확인 이상으로 쓰면 안 된다** |
+| 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
+| 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
+
+### 실행 순서
+
+```
+1. (배포 전) 상대 세션에 "배포 시작" 신호 → 최종 캡처 + 타이머 down 완료 회신 수신
+2. df -h / 확인 (70% 경고 / 80% 초과면 정리 선행)
+3. 롤백 앵커 태그: docker tag $(docker inspect exchange-rate-app --format '{{.Image}}') \
+     exchange-rate-fastapi:rollback-<날짜>
+4. 구 컨테이너 log follower 시작 (배포 전)
+5. git pull                       # ⚠️ prepare **앞**에 온다 (아래 참조)
+6. python scripts/krx_deploy_verifier.py prepare --baseline ~/logs/krx-baseline-<ts>.json \
+     --expect-code A75609 --expect-month 202609 --expect-expires-on 2026-09-21 \
+     --expect-revision <배포할 commit SHA>
+7. docker compose build fastapi && docker compose up -d --force-recreate fastapi
+8. python scripts/krx_deploy_verifier.py collect --baseline <위 파일> \
+     --evidence ~/logs/krx-evidence-<ts>.jsonl
+9. **위 8항목을 사람이 대조** → 최종 판정
+```
+
+**`git pull`이 `prepare`보다 먼저인 이유**: prepare가 지문을 **worktree에서** 뜬다.
+pull 전에 돌리면 구 코드의 지문을 "기대값"으로 박아 버려, 그 뒤 새 image를 올리면
+불일치로 오탐한다. pull은 실행 중인 컨테이너를 건드리지 않으므로 구 컨테이너
+identity(baseline의 나머지 절반)는 그대로 잡힌다. prepare는 HEAD가 `--expect-revision`
+이고 worktree가 clean인지 확인한 뒤에야 지문을 뜬다 — dirty면 거부한다.
+
+`docker events --filter`/`--format` 플래그는 **운영 호스트에서 사전 확인**할 것
+(`docker builder prune --max-used-space` 사례 — 문서 이름이 그 서버에서 유효하다는
+보장은 없다).
+
+### live 검증 (배포 다음 KRX 영업일)
+
+08:30 연결·구독 + **호가 frame 수신** → 08:45+ **체결 tick·raw 저장·Redis 갱신**
+(stale 값 덮임 확인) → reconnect 반복 없음 → A75608 신규 사용 없음(runtime
+resolved/current/subscription key 기준 — raw엔 계약 컬럼이 없어 DB만으로는 증명 불가)
+→ 다음 hourly bucket(:11 cron) → **15:45 daily append = A75609**.
+
+---
+
 ## Rollback 절차
 
 ### Rollback A — KRX 전체 격리 (`KRX_FUTURES_ENABLED=false`)
