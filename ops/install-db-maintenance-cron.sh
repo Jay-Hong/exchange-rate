@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# FXi DB maintenance cron 설치·점검. `ops/cron/fxi-db-maintenance.crontab` 이 desired state 다.
+#
+#   ops/install-db-maintenance-cron.sh --check     # 비파괴 점검만 (언제든 안전)
+#   ops/install-db-maintenance-cron.sh --install   # managed 5줄 일괄 전환 + 점검
+#
+# ⛔ **기존 `ops/install-host-config.sh` 에 흡수하지 않는다.** 그쪽은 root 로
+#    `/etc/logrotate.d`·`/etc/systemd` 를 만지고 journald 를 restart 하며 무인자 실행이
+#    **파괴적**(`logrotate -f`)이다. 사용자 crontab 병합은 권한·복구·파괴성이 전혀 다르다.
+# ⛔ 무인자 실행은 아무것도 하지 않는다 — 모드를 반드시 명시한다.
+# ⛔ `sudo` 로 돌리지 말 것. root crontab 을 보게 되어 **다른 사람의 crontab 을 점검**한다.
+#
+# ⛔ 전체 crontab 교체 금지. managed 5줄만 바꾸고 나머지(무관 job·주석·빈 줄)는
+#    **바이트 그대로** 보존한다.
+# ⚠️ `crontab` 에는 CAS API 가 없다. write 직전 재-read 로 스냅샷과 대조하고 installer 끼리는
+#    `flock` 으로 직렬화하지만, 사람이 동시에 `crontab -e` 를 돌리는 경쟁은 **제거할 수 없다** —
+#    운영 잔여 한계다.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST="$HERE/cron/fxi-db-maintenance.crontab"
+TOKEN=" -e DB_WORKLOAD_PROFILE=maintenance"
+LOCK="${TMPDIR:-/tmp}/fxi-db-maintenance-cron.lock"
+
+usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+
+managed_lines() { grep -vE '^\s*(#|$)' "$MANIFEST"; }
+legacy_lines()  { managed_lines | sed "s| -e DB_WORKLOAD_PROFILE=maintenance||"; }
+
+# 현재 crontab (없으면 빈 문자열). ⛔ `crontab -l` 은 비어 있으면 exit 1 이다 — 실패로 보지 않는다.
+read_crontab() { crontab -l 2>/dev/null || true; }
+
+# 상태 판정: MANAGED_COMPLETE / LEGACY_COMPLETE / 그 밖 전부 거부.
+# ⛔ 부분 전환·중복·누락·혼합은 **전부 거부**다. "대충 맞으면 진행" 이 이 절차의 실패 모드다.
+classify() {
+  local current="$1" managed=0 legacy=0 dup=0 line n
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    n=$(grep -Fxc -- "$line" <<<"$current" || true)
+    [ "$n" -gt 1 ] && dup=1
+    [ "$n" -ge 1 ] && managed=$((managed + 1))
+  done < <(managed_lines)
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    n=$(grep -Fxc -- "$line" <<<"$current" || true)
+    [ "$n" -gt 1 ] && dup=1
+    [ "$n" -ge 1 ] && legacy=$((legacy + 1))
+  done < <(legacy_lines)
+
+  if [ "$dup" -eq 1 ]; then echo "REJECT:중복 줄이 있다"; return; fi
+  if [ "$managed" -eq 5 ] && [ "$legacy" -eq 0 ]; then echo "MANAGED_COMPLETE"; return; fi
+  if [ "$legacy" -eq 5 ] && [ "$managed" -eq 0 ]; then echo "LEGACY_COMPLETE"; return; fi
+  echo "REJECT:부분 상태 (managed=$managed legacy=$legacy) — 일괄 전환만 허용한다"
+}
+
+do_check() {
+  local current state
+  current="$(read_crontab)"
+  state="$(classify "$current")"
+  echo "state: $state"
+  # ⛔ `--check` 는 **MANAGED_COMPLETE 만** 성공이다. LEGACY_COMPLETE 를 통과시키면
+  #    아직 cutover 되지 않은 호스트가 green 이 된다(codex).
+  case "$state" in
+    MANAGED_COMPLETE) echo "✅ managed 5줄이 정확히 설치돼 있다"; return 0 ;;
+    LEGACY_COMPLETE)  echo "❌ 아직 cutover 전이다 — --install 필요"; return 1 ;;
+    *)                echo "❌ $state"; return 1 ;;
+  esac
+}
+
+do_install() {
+  local current state before after tmp
+  current="$(read_crontab)"
+  before="$(printf '%s' "$current" | shasum -a 256 | cut -d' ' -f1)"
+  state="$(classify "$current")"
+  case "$state" in
+    MANAGED_COMPLETE) echo "state: $state — 이미 설치됨(idempotent no-op)"; return 0 ;;
+    LEGACY_COMPLETE)  : ;;
+    *) echo "❌ $state — 설치하지 않는다"; return 1 ;;
+  esac
+
+  # ⛔ 락은 **쓰기 직전**에만 필요하다. 판정은 read-only 라 락 없이 해야 어느 플랫폼에서든
+  #    거부 사유가 관측된다 — 락을 앞에 두면 부분 상태·중복 같은 진짜 사유가 가려진다(실측).
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "❌ 이 플랫폼에 flock(1) 이 없어 installer 간 직렬화를 보장할 수 없다 — 쓰지 않는다"
+    echo "   (read-only 점검은 --check 로 가능하다. 운영 호스트는 Linux 라 flock 이 있다.)"
+    return 1
+  fi
+  exec 9>"$LOCK"
+  flock -n 9 || { echo "❌ 다른 installer 가 이 호스트에서 실행 중이다"; return 1; }
+
+  # legacy 5줄을 managed 로 **줄 단위 치환**. 나머지 바이트는 건드리지 않는다.
+  tmp="$(mktemp)"; trap 'rm -f "$tmp"' RETURN
+  printf '%s\n' "$current" > "$tmp"
+  local legacy managed
+  while IFS= read -r legacy && IFS= read -r managed <&3; do
+    [ -z "$legacy" ] && continue
+    python3 - "$tmp" "$legacy" "$managed" <<'PY'
+import sys, pathlib
+p, old, new = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+lines = p.read_text().split("\n")
+hits = [i for i, l in enumerate(lines) if l == old]
+assert len(hits) == 1, f"치환 대상이 {len(hits)}회 — 중단"
+lines[hits[0]] = new
+p.write_text("\n".join(lines))
+PY
+  done < <(legacy_lines) 3< <(managed_lines)
+
+  # ⛔ write 직전 재-read — 스냅샷과 다르면 그 사이 남이 바꿨다는 뜻이다. 덮지 않고 중단한다.
+  after="$(printf '%s' "$(read_crontab)" | shasum -a 256 | cut -d' ' -f1)"
+  if [ "$before" != "$after" ]; then
+    echo "❌ 설치 직전 crontab 이 바뀌었다 — 덮어쓰지 않고 중단한다"; return 1
+  fi
+  crontab "$tmp"
+  do_check
+}
+
+[ $# -eq 1 ] || usage
+[ -r "$MANIFEST" ] || { echo "❌ manifest 없음: $MANIFEST"; exit 1; }
+
+# ⛔ 락은 **변경 경로에만** 건다. `--check` 는 read-only 라 락이 필요 없다.
+# ⚠️ macOS 엔 `flock(1)` 이 없다 — 로컬 스모크에서 "다른 installer 가 실행 중" 이라는 **거짓
+#    사유**가 나왔다. 없으면 그렇게 둘러대지 말고 **정확한 이유로 거부**한다(운영 호스트는
+#    Linux 라 존재한다). 거짓 진단은 없는 것보다 나쁘다.
+case "$1" in
+  --check)
+    do_check
+    ;;
+  --install) do_install ;;
+  *) usage ;;
+esac

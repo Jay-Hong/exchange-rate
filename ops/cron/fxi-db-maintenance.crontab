@@ -1,0 +1,20 @@
+# FXi DB maintenance cron — **canonical desired state**.
+#
+# ⛔ 이 파일은 운영 crontab 의 **managed 블록 5줄만** 소유한다. 나머지 줄(무관 job·주석·빈 줄)은
+#    installer 가 **바이트 그대로 보존**한다. 전체 crontab 교체는 금지다.
+#
+# ⛔ **선택자만 둔다 — 숫자는 여기 없다.** `-e DB_WORKLOAD_PROFILE=maintenance` 는 profile 을
+#    고르고, 실제 timeout 값은 `app/` 한 곳이 소유한다. 숫자를 cron 줄에 박으면 진실원이 둘이 되고
+#    한쪽만 바뀐 채 조용히 갈린다.
+#
+# ⚠️ `-e` 는 service 이름(`fastapi`) **앞**이어야 한다 — 뒤에 두면 컨테이너 인자로 넘어가
+#    환경이 설정되지 않는다.
+#
+# ⚠️ 이 manifest 는 **desired state** 다. 운영 호스트의 observed state 는
+#    `ops/install-db-maintenance-cron.sh --check` 가 실제 `crontab -l` 과 대조한다.
+#    CI 는 이 파일의 형식만 볼 수 있고 **운영 적용 여부는 증명하지 못한다**.
+1 15 * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm -e DB_WORKLOAD_PROFILE=maintenance fastapi python scripts/daily_append_source_daily_rates.py --source all --write --allow-production-write >> ~/logs/daily_append.log 2>&1
+5 * * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm -e DB_WORKLOAD_PROFILE=maintenance fastapi python scripts/hourly_append_source_hourly_rates.py --write --allow-production-write >> ~/logs/hourly_append.log 2>&1
+7 * * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm -e DB_WORKLOAD_PROFILE=maintenance fastapi python scripts/hourly_append_investing_source_hourly_rates.py --currency all --write --allow-production-write >> ~/logs/hourly_append_investing.log 2>&1
+9 * * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm -e DB_WORKLOAD_PROFILE=maintenance fastapi python scripts/hourly_append_hana_source_hourly_rates.py --currency all --write --allow-production-write >> ~/logs/hourly_append_hana.log 2>&1
+11 * * * * cd ~/exchange-rate && /usr/bin/docker compose run --rm -e DB_WORKLOAD_PROFILE=maintenance fastapi python scripts/hourly_append_krx_source_hourly_rates.py --write --allow-production-write >> ~/logs/krx_hourly_append.log 2>&1
