@@ -397,6 +397,68 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertEqual(pres[0].read_text(), current, "복원 직전 상태를 담지 않았다")
         self.assertIn("되돌리기:", r.stdout, "되돌리기 명령을 안내하지 않았다")
 
+    def test_the_pre_restore_hint_actually_undoes_the_restore(self):
+        """⛔ 안내 **문자열의 존재**는 되돌릴 수 있다는 증거가 아니다.
+
+        `test_restore_takes_a_pre_restore_backup` 은 `assertIn("되돌리기:", …)` 로 존재만 본다 —
+        그 명령을 `false # …` 로 깨뜨려도 **파일 전체가 초록**이었다(외부 검토, 실측 26 passed).
+        복원을 되돌릴 길이 사라졌는데 아무도 모르는 상태다. 출력된 그 줄을 그대로 실행한다.
+        """
+        import hashlib
+
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        current = "CURRENT STATE\n"
+        self.state.write_text(current)
+        bak = self.tmp / "b.bak"; bak.write_text("ORIGINAL\n")
+        r = subprocess.run(["bash", str(INSTALLER), "--restore", str(bak),
+                            hashlib.sha256(b"ORIGINAL\n").hexdigest()],
+                           capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.state.read_text(), "ORIGINAL\n", "복원 자체가 안 됐다")
+        m = re.search(r"^\s*되돌리기:\s*(.+)$", r.stdout, re.M)
+        self.assertIsNotNone(m, f"되돌리기 명령을 출력하지 않았다: {r.stdout}")
+        rr = subprocess.run(["bash", "-c", m.group(1)], capture_output=True, text=True,
+                            env=self._env(), timeout=30, cwd=REPO)
+        self.assertEqual(rr.returncode, 0, "되돌리기 명령이 실패했다:\n" + rr.stdout + rr.stderr)
+        self.assertEqual(self.state.read_text(), current,
+                         "되돌리기 명령이 복원 직전 상태를 되돌리지 못했다")
+
+    def test_the_pre_restore_hint_is_an_absolute_path(self):
+        """⛔ **첫 안내와 같은 계약이 두 번째 안내에도 필요하다.**
+
+        `test_restore_hint_is_an_absolute_path` 는 *설치* 백업의 안내만 덮는다. pre-restore
+        안내의 `$SELF` 를 `${BASH_SOURCE[0]}` 로 회귀시켜도 **파일 전체가 초록**이었다
+        (외부 검토, 실측 27 passed) — 실행 검증 테스트가 installer 를 절대경로로 부르고
+        되돌리기도 `cwd=REPO` 에서 돌려 차이가 드러나지 않았기 때문이다.
+        그래서 여기서는 **상대경로로 호출**하고 **다른 cwd 에서** 되돌린다.
+        """
+        import hashlib
+
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        current = "CURRENT STATE\n"
+        self.state.write_text(current)
+        bak = self.tmp / "b.bak"; bak.write_text("ORIGINAL\n")
+        r = subprocess.run(["bash", "ops/install-db-maintenance-cron.sh", "--restore",
+                            str(bak), hashlib.sha256(b"ORIGINAL\n").hexdigest()],
+                           capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        m = re.search(r"^\s*되돌리기:\s*(.+)$", r.stdout, re.M)
+        self.assertIsNotNone(m, f"되돌리기 명령을 출력하지 않았다: {r.stdout}")
+        cmd = m.group(1)
+        self.assertTrue(cmd.split()[0].startswith("/"),
+                        f"되돌리기 안내가 절대 경로가 아니다: {cmd}")
+        rr = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                            env=self._env(), cwd=str(self.tmp), timeout=60)
+        self.assertEqual(rr.returncode, 0,
+                         "다른 디렉터리에서 되돌리기가 실패했다:\n" + rr.stdout + rr.stderr)
+        self.assertEqual(self.state.read_text(), current, "복원 직전 상태로 되돌아가지 않았다")
+
     def test_restore_installs_the_verified_snapshot_not_the_original_path(self):
         """⛔ SHA 를 백업 **경로**에서 재고 **같은 경로**를 다시 설치하면 그 사이 파일이 바뀔 수
         있다(TOCTOU) — 검증하지 않은 것을 설치하게 된다.
@@ -424,6 +486,15 @@ class TestInstallerDurability(unittest.TestCase):
         self.state.write_text("CURRENT\n")
         r = subprocess.run(["bash", str(INSTALLER), "--restore", str(bak), sha],
                            capture_output=True, text=True, env=self._env(), cwd=REPO, timeout=60)
+        # ⛔ 초판은 `assertNotIn("TAMPERED", …)` **하나뿐**이었다 — 순수한 **부정** 단언이라
+        #    복원이 아무것도 설치하지 않아도(조기 실패·no-op) 만족된다. 상태는 그대로
+        #    `CURRENT\n` 이고 거기엔 TAMPERED 가 없기 때문이다(외부 검토, 실측 확인).
+        #    캡처한 `r` 조차 쓰이지 않았다. 계약을 **양방향**으로 고정한다.
+        self.assertEqual(r.returncode, 0, "복원이 성공하지 않았다:\n" + r.stdout + r.stderr)
+        self.assertIn("TAMPERED", bak.read_text(),
+                      "경쟁 창이 발화하지 않았다 — 이 시험의 전제가 성립하지 않는다")
+        self.assertEqual(self.state.read_text(), "ORIGINAL\n",
+                         "검증한 스냅샷이 설치되지 않았다")
         self.assertNotIn("TAMPERED", self.state.read_text(),
                          "검증한 내용이 아니라 그 뒤 바뀐 파일을 설치했다(TOCTOU)")
 

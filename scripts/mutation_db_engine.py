@@ -62,6 +62,29 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
      [('  cp "$pre" "$pre_backup"; chmod 600 "$pre_backup"\n', '  : \n')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_takes_a_pre_restore_backup',)),
     ('M0a-9 복원 TOCTOU — 검증한 스냅샷이 아니라 원본 경로를 설치', 'ops/install-db-maintenance-cron.sh',
      [('  crontab "$snap"\n\n  # ⛔ **exit 0 은 설치의 증거가 아니다.**', '  crontab "$1"\n\n  # ⛔ **exit 0 은 설치의 증거가 아니다.**')], ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::test_restore_installs_the_verified_snapshot_not_the_original_path',)),
+    # ⚠️ 아래 셋은 외부 검토가 **기존 변이가 못 겨눈 경로**를 찾아 추가된 것이다.
+    #    M0a-8 은 pre-restore 백업 **파일**을, M0a-1 은 *설치* 백업의 **안내**를 덮는데,
+    #    pre-restore 백업의 **안내**는 어느 쪽도 안 덮었다(실측: 파일 전체 26 passed).
+    ('M0a-10 pre-restore 되돌리기 안내를 깨뜨림 → 복원을 되돌릴 길이 사라져도 아무도 모른다',
+     'ops/install-db-maintenance-cron.sh',
+     [("  printf '  되돌리기: %s --restore %s %s\\n' \\\n",
+       "  printf '  되돌리기: false # %s --restore %s %s\\n' \\\n")],
+     ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::'
+      'test_the_pre_restore_hint_actually_undoes_the_restore',)),
+    # ⚠️ **양성 대조**다. T2 는 한때 `assertNotIn("TAMPERED", …)` 하나뿐이라 복원이 아무것도
+    #    설치하지 않아도 통과했다 — 지정 노드가 계약을 고정하지 못했다. 강화된 T2 가 조기
+    #    실패를 실제로 잡는지 이 변이가 증명한다(파일 전체가 잡는 것과는 다른 주장이다).
+    ('M0a-11 복원 설치를 **조용한 no-op** 으로 → 강화 전 T2 는 통과했다(양성 대조)',
+     'ops/install-db-maintenance-cron.sh',
+     [('  crontab "$snap"\n', '  true\n')],
+     ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::'
+      'test_restore_installs_the_verified_snapshot_not_the_original_path',)),
+    ('M0a-12 pre-restore 안내를 상대 경로로 → 다른 디렉터리에서 되돌리기가 exit 127',
+     'ops/install-db-maintenance-cron.sh',
+     [('    "$(printf \'%q\' "$SELF")" "$(printf \'%q\' "$pre_backup")" "$pre_sha"\n',
+       '    "$(printf \'%q\' "${BASH_SOURCE[0]}")" "$(printf \'%q\' "$pre_backup")" "$pre_sha"\n')],
+     ('tests/test_db_maintenance_cron_manifest.py::TestInstallerDurability::'
+      'test_the_pre_restore_hint_is_an_absolute_path',)),
 ]
 
 MID_LINE_ANCHORS: set[str] = set()
