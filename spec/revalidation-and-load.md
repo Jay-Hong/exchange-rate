@@ -83,8 +83,13 @@ I/O 상한 · 서버 실패 cooldown).
   대기 소켓을 동시에 닫으면 재연결이 다시 정렬된다. 서버 실패 cooldown 과
   클라 jitter([R-CLI-24](ios-topic-state-machine.md#r-cli-24)) 가 **함께 있어야** 완화가 성립한다.
 
-근거(baseline): **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2`
-(**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. **E2 [코드]** `app/topic_initial_snapshot.py:342-354`
+근거(baseline): **E1 [코드]** `app/database_settings.py:77-78` — PostgreSQL `POOL_SIZE = 3`,
+`MAX_OVERFLOW = 2` (**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. `app/database.py:36-38`
+이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**).
+**E1-b [코드]** `app/database_settings.py:105` — online `pool_timeout = 10초`(구 SQLAlchemy 기본
+30초). 아래 "그대로 쌓인다" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤
+`sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이
+서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:342-354`
 — `for topic in topics: ... await asyncio.to_thread(subscribe_load.timed_call, …, _build_snapshot_sync, topic)` /
 **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
 ⇒ 흡수 장치가 없으면 동시 도착 N 이 최대 5 커넥션 앞에 그대로 쌓인다.

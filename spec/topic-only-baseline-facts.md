@@ -114,8 +114,15 @@
 
 ## E. 부하
 
-- **E1 [코드]** `app/database.py:30` — PostgreSQL `pool_size=3`, `max_overflow=2` (**최대 5**).
-  주석: *"RDS db.t4g.micro 메모리 절약"*.
+- **E1 [코드]** `app/database_settings.py:77-78` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2`
+  (**최대 5**). 주석: *"RDS db.t4g.micro 메모리 절약"*. `app/database.py:36-38` 이 그 값을
+  `create_engine` 으로 넘긴다.
+  ⚠️ **좌표만 이동했다**(구 `app/database.py:30`): `DB_WORKLOAD_PROFILE` 슬라이스가 풀·timeout
+  도출을 부작용 없는 별 모듈로 옮겼다. **값(3/2/최대 5)은 불변**이고 소유자만 바뀌었다.
+- **E1-b [코드]** `app/database_settings.py:105` — online `pool_timeout = 10초`.
+  구 상태는 **SQLAlchemy 기본 30초**였다. 즉 최대 5 커넥션이 찬 뒤 대기하던 요청이 이제
+  10초에 접힌다(`sqlalchemy.exc.TimeoutError` → 503). 같은 파일 `:110` 의 online
+  `statement_timeout = 60초`도 구 상태가 **0(무제한)** 이었다 — 운영 실측 근거는 그 모듈 docstring.
 - **E2 [코드]** `app/topic_initial_snapshot.py:342-354` —
   `for topic in topics: ... payload = await build_snapshot_observed(topic)`. 그 공유 래퍼가
   `app/topic_initial_snapshot.py:214-234` 에서 `await asyncio.to_thread(subscribe_load.timed_call,
