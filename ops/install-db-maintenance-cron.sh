@@ -20,15 +20,32 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$HERE/cron/fxi-db-maintenance.crontab"
 TOKEN=" -e DB_WORKLOAD_PROFILE=maintenance"
-LOCK="${TMPDIR:-/tmp}/fxi-db-maintenance-cron.lock"
+# ⚠️ 공용 `/tmp` 고정 경로는 **다른 사용자와 충돌**한다 — UID 를 넣어 사용자별로 가른다.
+LOCK="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/fxi-db-maintenance-cron.$(id -u).lock"
+BACKUP_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/fxi-cron-backups"
 
 usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 managed_lines() { grep -vE '^\s*(#|$)' "$MANIFEST"; }
 legacy_lines()  { managed_lines | sed "s| -e DB_WORKLOAD_PROFILE=maintenance||"; }
 
-# 현재 crontab (없으면 빈 문자열). ⛔ `crontab -l` 은 비어 있으면 exit 1 이다 — 실패로 보지 않는다.
-read_crontab() { crontab -l 2>/dev/null || true; }
+# 현재 crontab 을 **파일로** 뜬다. ⛔ command substitution 은 **trailing LF 를 먹는다** —
+#   실측: "a\nb\n\n\n" 이 "a\nb\n" 이 됐다. 바이트 보존을 주장하려면 파일을 그대로 다뤄야 한다.
+# ⛔ `crontab -l` 의 **모든** 실패를 빈 crontab 으로 접지 않는다. 실측: exit 42 인 crontab 이
+#   len=0 으로 둔갑해 managed=0 legacy=0 오진이 됐다. "job 없음"(exit 1 + 빈 출력)만 빈 것이다.
+snapshot_crontab() {  # $1 = 출력 파일
+  local rc
+  set +e; crontab -l >"$1" 2>"$1.err"; rc=$?; set -e
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 1 ] && [ ! -s "$1" ] && grep -qiE 'no crontab' "$1.err"; then
+      : >"$1"                      # 정말로 crontab 이 없다
+    else
+      echo "❌ crontab -l 실패 (exit $rc): $(head -c 200 "$1.err")" >&2
+      return 1
+    fi
+  fi
+  rm -f "$1.err"
+}
 
 # 상태 판정: MANAGED_COMPLETE / LEGACY_COMPLETE / 그 밖 전부 거부.
 # ⛔ 부분 전환·중복·누락·혼합은 **전부 거부**다. "대충 맞으면 진행" 이 이 절차의 실패 모드다.
@@ -54,8 +71,10 @@ classify() {
 }
 
 do_check() {
-  local current state
-  current="$(read_crontab)"
+  local current state snap
+  snap="$(mktemp)"; trap 'rm -f "$snap" "$snap.err"' RETURN
+  snapshot_crontab "$snap" || return 1
+  current="$(cat "$snap")"
   state="$(classify "$current")"
   echo "state: $state"
   # ⛔ `--check` 는 **MANAGED_COMPLETE 만** 성공이다. LEGACY_COMPLETE 를 통과시키면
@@ -68,9 +87,12 @@ do_check() {
 }
 
 do_install() {
-  local current state before after tmp
-  current="$(read_crontab)"
-  before="$(printf '%s' "$current" | shasum -a 256 | cut -d' ' -f1)"
+  local current state before after snap tmp backup
+  snap="$(mktemp)"; tmp="$(mktemp)"
+  trap 'rm -f "$snap" "$snap.err" "$tmp"' RETURN
+  snapshot_crontab "$snap" || return 1
+  before="$(shasum -a 256 <"$snap" | cut -d' ' -f1)"
+  current="$(cat "$snap")"
   state="$(classify "$current")"
   case "$state" in
     MANAGED_COMPLETE) echo "state: $state — 이미 설치됨(idempotent no-op)"; return 0 ;;
@@ -88,9 +110,16 @@ do_install() {
   exec 9>"$LOCK"
   flock -n 9 || { echo "❌ 다른 installer 가 이 호스트에서 실행 중이다"; return 1; }
 
-  # legacy 5줄을 managed 로 **줄 단위 치환**. 나머지 바이트는 건드리지 않는다.
-  tmp="$(mktemp)"; trap 'rm -f "$tmp"' RETURN
-  printf '%s\n' "$current" > "$tmp"
+  # ⛔ **영속 백업이 먼저다.** 메모리의 값과 임시 파일은 복구본이 아니다 — 그것들은 이
+  #    프로세스와 함께 사라진다. 경로와 SHA 를 출력해 사람이 되돌릴 수 있게 한다.
+  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+  backup="$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak"
+  cp "$snap" "$backup"; chmod 600 "$backup"
+  echo "backup: $backup  sha256=$before"
+  echo "  복원: crontab \"$backup\""
+
+  # ⛔ **스냅샷 파일 자체를 변환**한다 — 메모리를 거치면 trailing LF 가 사라진다(실측).
+  cp "$snap" "$tmp"
   local legacy managed
   while IFS= read -r legacy && IFS= read -r managed <&3; do
     [ -z "$legacy" ] && continue
@@ -106,7 +135,8 @@ PY
   done < <(legacy_lines) 3< <(managed_lines)
 
   # ⛔ write 직전 재-read — 스냅샷과 다르면 그 사이 남이 바꿨다는 뜻이다. 덮지 않고 중단한다.
-  after="$(printf '%s' "$(read_crontab)" | shasum -a 256 | cut -d' ' -f1)"
+  snapshot_crontab "$snap" || return 1
+  after="$(shasum -a 256 <"$snap" | cut -d' ' -f1)"
   if [ "$before" != "$after" ]; then
     echo "❌ 설치 직전 crontab 이 바뀌었다 — 덮어쓰지 않고 중단한다"; return 1
   fi

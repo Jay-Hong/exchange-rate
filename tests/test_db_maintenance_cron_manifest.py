@@ -178,5 +178,113 @@ class TestNoArgIsInert(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class TestInstallerDurability(unittest.TestCase):
+    """⛔ 백업·오류 보존·바이트 보존 — 셋 다 **land 후 codex 가 잡은 실제 결함**이다."""
+
+    def setUp(self):
+        import tempfile
+
+        if not shutil.which("bash"):
+            self.skipTest("bash 없음")
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.state = self.tmp / "crontab.txt"
+        self.backups = self.tmp / "state" / "fxi-cron-backups"
+        self.fake = self.tmp / "crontab"
+
+    def _install_fake(self, body: str):
+        self.fake.write_text(body)
+        self.fake.chmod(0o755)
+
+    def _env(self):
+        return dict(os.environ, PATH=f"{self.tmp}:{os.environ['PATH']}",
+                    CRON_STATE=str(self.state), CRON_WRITES=str(self.tmp / "w.txt"),
+                    XDG_STATE_HOME=str(self.tmp / "state"),
+                    XDG_RUNTIME_DIR=str(self.tmp))
+
+    def _run(self, mode: str):
+        return subprocess.run(["bash", str(INSTALLER), mode], capture_output=True,
+                              text=True, env=self._env(), cwd=REPO, timeout=60)
+
+    def test_crontab_read_failure_is_not_treated_as_empty(self):
+        """⛔ 실측: `exit 42` 인 crontab 이 **len=0** 으로 둔갑해 managed=0 legacy=0 오진이 됐다.
+
+        대상 호스트는 기존 5줄이 **필수**라, 조회 실패를 빈 것으로 접으면 "부분 상태" 라는
+        엉뚱한 사유로 거부하고 진짜 원인(권한·환경)이 사라진다.
+        """
+        self._install_fake('#!/usr/bin/env bash\necho "boom" >&2\nexit 42\n')
+        r = self._run("--check")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("crontab -l 실패", r.stderr + r.stdout)
+        self.assertNotIn("부분 상태", r.stdout, "조회 실패를 상태 판정으로 둔갑시켰다")
+
+    def test_absent_crontab_is_still_treated_as_empty(self):
+        """반대 방향 — 정말 crontab 이 없는 경우(exit 1 + 'no crontab')는 빈 것으로 본다."""
+        self._install_fake('#!/usr/bin/env bash\n'
+                           'echo "no crontab for tester" >&2\nexit 1\n')
+        r = self._run("--check")
+        self.assertNotEqual(r.returncode, 0)          # 빈 crontab 은 managed 가 아니다
+        self.assertNotIn("crontab -l 실패", r.stderr + r.stdout)
+
+    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
+    def test_install_writes_a_persistent_backup_before_touching_crontab(self):
+        """⛔ 메모리의 값과 임시 파일은 **복구본이 아니다** — 프로세스와 함께 사라진다."""
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        before = "\n".join([UNRELATED] + legacy_lines()) + "\n"
+        self.state.write_text(before)
+        r = self._run("--install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        backups = sorted(self.backups.glob("crontab.*.bak"))
+        self.assertEqual(len(backups), 1, f"영속 백업이 없다: {r.stdout}")
+        self.assertEqual(backups[0].read_text(), before, "백업이 원본과 다르다")
+        self.assertEqual(oct(backups[0].stat().st_mode)[-3:], "600")
+        self.assertIn(str(backups[0]), r.stdout, "복구 경로를 알려주지 않았다")
+
+    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
+    def test_unrelated_bytes_are_preserved_exactly(self):
+        """⛔ `assertIn` 은 **바이트 보존을 증명하지 못한다**.
+
+        실측: command substitution 이 trailing LF 3개를 1개로 줄였다. 기대 바이트 전체와
+        비교해야 그 손실이 드러난다 — 그래서 스냅샷 파일 자체를 변환하도록 고쳤다.
+        """
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        before = (UNRELATED + "\n\n# 사람이 남긴 주석\n"
+                  + "\n".join(legacy_lines()) + "\n\n\n")   # trailing LF 3개
+        self.state.write_text(before)
+        r = self._run("--install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        expected = before
+        for old, new in zip(legacy_lines(), managed_lines()):
+            expected = expected.replace(old + "\n", new + "\n", 1)
+        self.assertEqual(self.state.read_text(), expected,
+                         "무관 바이트가 바뀌었다(trailing LF·주석·빈 줄 포함)")
+
+    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
+    def test_backup_restores_the_original_exactly(self):
+        """백업이 **실제로 되돌리는지** — 파일이 있다는 것만으로는 복구를 증명하지 못한다."""
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        before = "\n".join([UNRELATED] + legacy_lines()) + "\n\n"
+        self.state.write_text(before)
+        self.assertEqual(self._run("--install").returncode, 0)
+        backup = sorted(self.backups.glob("crontab.*.bak"))[0]
+        self.state.write_text(backup.read_text())      # 복원
+        self.assertEqual(self.state.read_text(), before)
+
+
+class TestLockPathIsPerUser(unittest.TestCase):
+    def test_lock_path_includes_the_uid(self):
+        """⛔ 공용 `/tmp` 고정 경로는 **다른 사용자와 충돌**한다."""
+        body = INSTALLER.read_text()
+        self.assertRegex(body, r'LOCK=.*\$\(id -u\)', "락 경로에 UID 가 없다")
+
+
 if __name__ == "__main__":
     unittest.main()
