@@ -1,0 +1,206 @@
+# Topic Revalidation Load Implementation Plan
+
+## 문서 역할
+
+**상태: Draft — 구현 순서와 인계용이며, 구현·배포 GO가 아니다.**
+
+이 문서는 45초 재검증 폭주를 흡수하기 위한 **비규범 구현 순서와 인계 경계**다. 확정 계약의
+정본은 다음 RID에 있으며, 충돌하면 그 문서가 우선한다.
+
+- 서버 흡수 계약: [R-LOAD-3](spec/revalidation-and-load.md#r-load-3)
+- 즉시거절 금지: [R-LOAD-4](spec/revalidation-and-load.md#r-load-4)
+- snapshot 종결·deadline: [R-HAND-14](spec/topic-snapshot-handoff.md#r-hand-14),
+  [R-HAND-16](spec/topic-snapshot-handoff.md#r-hand-16),
+  [R-HAND-4](spec/topic-snapshot-handoff.md#r-hand-4)
+- 클라이언트 jitter·재시도 상한·cooldown:
+  [R-CLI-24](spec/ios-topic-state-machine.md#r-cli-24)
+
+여기서 쓰는 `LOAD-S3` 같은 이름은 과거 `R-GATE-1`의 subscribe-load 계측 슬라이스 `S3~S7`과
+**다른 namespace**다. bare `S3`로 부르지 않는다.
+
+### 폐기 조건
+
+이 문서는 영구 정본이 아니다. `LOAD-S4`의 통합 활성화와 합격 검증이 land되면 같은 변경에서
+이 파일을 삭제한다. 삭제 전에 구현 과정에서 확정된 결정 중 기존 RID가 소유하지 않는 내용만
+`DECISIONS.md` 또는 해당 spec의 정본 계약으로 승격한다. 이미 정본에 있는 계약과 단계별 구현
+상세는 중복 이관하지 않는다. 구현 상세와 검증 결과는 각 슬라이스의 코드·테스트·커밋 기록이
+소유한다.
+
+따라서 완료 뒤 이 문서를 `Completed` 상태로 보존하거나, 삭제 시점을 별도 후속 작업으로 미루지
+않는다. `LOAD-S4`가 구현됐더라도 활성화·합격 검증이 land되지 않았다면 아직 폐기하지 않는다.
+
+## 현재 경계
+
+### 완료된 바닥
+
+- `LOAD-S1`: WS/REST Firebase 인증이 별도 executor lane과 named app을 사용한다.
+- `LOAD-S2-DB`: PostgreSQL pool 대기, 물리 연결, statement 실행에 각각 유한 상한을 전달한다.
+- mutation runner 8개는 공유 worktree를 직접 변이하지 않고 격리 worktree에서 실행한다.
+
+`LOAD-S2-DB`는 statement 하나와 pool/connect phase를 유한하게 만들 뿐이다. 여러 statement의 합,
+여러 topic의 합, caller 취소 뒤 계속 도는 `to_thread` worker의 전체 수명은 제한하지 않는다.
+또한 이 완료 표시는 **PostgreSQL만** 가리킨다. snapshot 경로가 쓰는 Redis client의 connect/read
+상한과 취소 시 socket 반환은 별도 전수 감사가 필요하다. 유한함을 증명하지 못한 Redis 경로는
+`LOAD-S3` 착수 전에 `LOAD-S2` 후속으로 닫는다.
+따라서 아래 단계가 완료되기 전에는 `R-LOAD-3 완료` 또는 `자원 상한 완료`라고 쓰지 않는다.
+
+### 운영 상태는 별도 재확인
+
+코드 land와 운영 활성은 다른 상태다. 배포 전에는 cron의 maintenance profile, online profile,
+실제 서버 `statement_timeout`, 롤백 이미지, 현재 rollout pin을 다시 확인한다. 이 문서는 특정
+호스트의 현재 상태를 정본으로 기록하지 않는다.
+
+## 구현 순서
+
+```text
+LOAD-S2-DB (PostgreSQL phase 상한, 완료)
+  -> Redis I/O 상한 감사·누락 보강 (LOAD-S3 진입 게이트)
+  -> LOAD-S3 (요청 전체 예산 + worker 협력 중단)
+  -> LOAD-S5 (topic single-flight/cache)
+  -> LOAD-S6 (bounded wait + 1013 종결)
+  -> LOAD-S7 (서버 실패 cooldown)
+  -> LOAD-S4 (통합 활성화)
+```
+
+번호 순서가 실행 순서가 아니다. `LOAD-S4`는 최종 activation slice라 마지막이다.
+
+## LOAD-S3 — 요청 전체 예산과 협력 중단
+
+### 목표
+
+ack 전 예산, ack 후 snapshot 총예산, 요청 전체 absolute deadline을 **한 monotonic 시간축**에서
+관리한다. caller timeout만 거는 것으로 끝내지 않고, 이미 실행 중인 sync worker도 다음 blocking
+phase를 시작하지 않게 한다.
+
+### 계약
+
+- 요청당 absolute deadline은 한 번 만들고 topic loop와 worker에 전달한다.
+- snapshot이 실제로 쓰는 Redis 경로는 connect/read가 유한하고 caller 취소 뒤 socket을 반환한다는
+  양성대조를 먼저 갖는다. async `wait_for` 존재만으로 내부 I/O 해제를 추정하지 않는다.
+- async caller는 남은 예산까지만 queue/build/send를 기다린다.
+- `to_thread` 취소가 worker를 멈춘다고 가정하지 않는다.
+- worker는 DB/Redis 호출 **사이**와 다음 statement 시작 전에 deadline/cancel state를 확인한다.
+- 실행 중인 SQL은 `LOAD-S2`의 `statement_timeout`이 끝낸다.
+- 다른 thread에서 SQLAlchemy `Session.close()`나 psycopg connection을 강제 조작하지 않는다.
+- post-ACK 총예산 초과는 terminal payload 추가 전송 없이 close 1013으로 끝낸다.
+- fatal build 오류의 1011 계약과 transient/deadline 1013 계약을 합치지 않는다.
+
+### 필수 검증
+
+- 첫 statement 뒤 deadline이 끝나면 두 번째 statement를 시작하지 않는다.
+- caller 취소 직후 worker connection이 반환됐다고 거짓 단언하지 않는다. 실행 중 statement는
+  S2 상한 안에 끝나고 그 뒤 pool checkout이 0으로 돌아와야 한다.
+- queue에서 만료, worker 실행 중 만료, topic 사이 만료가 각각 같은 absolute deadline을 쓴다.
+- timeout/cancel 경로에서 session rollback·close와 executor ledger가 누수 없이 복귀한다.
+- close 1013은 한 번만 발생하고 post-ACK terminal frame과 중복되지 않는다.
+
+### 비범위
+
+- topic single-flight, cache, waiter admission은 `LOAD-S5/S6`가 소유한다.
+- cross-thread 강제 취소는 이번 단계에서 도입하지 않는다.
+
+## LOAD-S5 — topic single-flight와 짧은 cache
+
+### 목표
+
+같은 topic의 동시 snapshot build를 하나로 합쳐 DB/Redis 작업량을 연결 수가 아니라 **활성 key 수**에
+가깝게 만든다. authorization 판단은 공유하지 않고 build 결과만 공유한다.
+
+### 계약
+
+- key에는 payload를 바꾸는 모든 입력과 generation이 들어간다. 사용자별 정책 결과는 cache하지 않는다.
+- leader task의 caller 취소가 남은 waiter의 공유 build를 취소하지 않는다.
+- 마지막 waiter가 사라졌을 때의 정리 소유권을 하나로 둔다.
+- 성공 cache와 실패 cooldown은 별개다. transient/fatal/auth failure를 성공 cache에 넣지 않는다.
+- cache TTL과 invalidation은 publisher 최신성 계약보다 느슨해질 수 없다.
+- single-flight 내부 build도 `LOAD-S3` deadline과 `LOAD-S2` I/O 상한을 그대로 지킨다.
+
+### 필수 검증
+
+- N개 동시 waiter가 실제 builder를 한 번만 호출하고 모두 동일한 immutable 결과를 받는다.
+- leader caller만 취소해도 다른 waiter는 완료된다.
+- build 실패·취소 뒤 registry entry가 남지 않고 다음 호출이 재시도할 수 있다.
+- 서로 다른 topic/generation은 합쳐지지 않는다.
+- payload aliasing으로 한 caller의 수정이 다른 caller에 전파되지 않는다.
+
+## LOAD-S6 — bounded wait와 예산 기반 1013
+
+### 목표
+
+동시 도착을 바로 거절하지 않고 짧은 queue에서 흡수하되, 요청 deadline 밖으로 무한 대기시키지 않는다.
+
+### 계약
+
+- semaphore의 즉시 `locked -> reject` 패턴을 쓰지 않는다.
+- waiter는 `LOAD-S3`의 남은 예산까지만 기다린다.
+- queue wait가 예산을 소진한 뒤에만 post-ACK close 1013을 사용한다.
+- queue wait, worker start, execution을 별도 계측해 용량 부족과 느린 I/O를 구분한다.
+- 공정성 정책(FIFO 또는 동등하게 설명 가능한 정책)을 테스트로 고정한다.
+- waiter 수의 hard cap이 필요하면 `즉시거절 금지`와 양립하는 admission 설계를 별도 결정한다.
+  시간 상한만 두고 메모리까지 bounded라고 주장하지 않는다.
+
+### 필수 검증
+
+- 짧은 선행 작업 뒤 자리가 나는 경우 queued request가 거절되지 않고 성공한다.
+- deadline을 넘긴 waiter는 builder를 시작하지 않는다.
+- timeout·취소·builder 오류 모든 경로에서 waiter/queued gauge가 0으로 복귀한다.
+- 서로 다른 topic의 장시간 작업이 한 topic의 registry lock 때문에 직렬화되지 않는다.
+
+## LOAD-S7 — 서버 실패 cooldown
+
+### 목표
+
+single-flight 하나의 transient 실패가 모든 waiter를 동시에 깨운 뒤 즉시 같은 build로 재진입시키는
+재동기화를 막는다. 클라이언트 jitter와 **함께** 작동해야 하며 어느 한쪽만으로 완료라 하지 않는다.
+
+### 계약
+
+- cooldown은 topic/key별 transient build 실패에만 적용한다.
+- fatal 오류, 인증/인가 거부, programming error를 transient cooldown으로 접지 않는다.
+- cooldown 중에는 새 leader build를 시작하지 않는다.
+- cooldown 만료는 고정 시각에 대규모 재시도를 다시 정렬하지 않도록 R-CLI-24 jitter와 함께 검증한다.
+- failure state는 성공 cache와 별도이며 성공 시 즉시 정리된다.
+- 관측에는 key, failure class, cooldown remaining, suppressed build 수를 남기되 SQL/토큰은 남기지 않는다.
+
+### 필수 검증
+
+- 하나의 transient 실패 뒤 동시 재시도가 builder 한 번 이상으로 증폭되지 않는다.
+- cooldown 만료 뒤 정상 build가 가능하다.
+- fatal/auth 오류가 cooldown cache에 들어가지 않는다.
+- 다수 client의 retry가 R-CLI-24 적용 후 시간축에 분산되는 통합 테스트가 있다.
+
+## LOAD-S4 — 통합 activation
+
+`LOAD-S4`는 구현 기능명이 아니라 **활성화 게이트**다. 다음 조건 전에는 켜지 않는다.
+
+- `LOAD-S3`, `LOAD-S5`, `LOAD-S6`, `LOAD-S7`의 행동 테스트와 mutation gate가 green이다.
+- R-CLI-24 jitter·retry cap·client cooldown이 실제 client build에 포함된다.
+- 45초 동시 재구독 부하에서 queue wait, pool timeout, 1013, cooldown suppression을 함께 관측한다.
+- rollback image와 server feature flag/safety-stop 절차가 검증돼 있다.
+- activation 전후 결과를 같은 dashboard/log schema로 비교할 수 있다.
+
+### GO / NO-GO
+
+- **GO**: 짧은 queue가 실제로 성공을 흡수하고, timeout은 예산 뒤에만 발생하며, 실패 fan-out이
+  재동기화되지 않는다.
+- **NO-GO**: 즉시거절, 무한 waiter 증가, caller 종료 뒤 orphan worker의 장기 pool 점유,
+  auth/fatal 오류의 cooldown 오분류, client jitter 미배포 중 하나라도 관측된다.
+
+## 숫자 결정 규율
+
+이 문서에서 deadline, cache TTL, queue wait, cooldown 값을 고정하지 않는다. 값은 다음 순서로 정한다.
+
+1. 운영과 동형인 PostgreSQL/Redis 환경에서 현재 분포를 측정한다.
+2. 45초 동시 도착 시나리오와 정상 traffic을 분리한다.
+3. p95/p99와 관측 최대값, 표본 수를 함께 기록한다. 작은 표본을 p99라고 부르지 않는다.
+4. 값 하나를 바꿀 때 용량과 timeout을 동시에 바꾸지 않는다.
+5. 값과 근거를 같은 변경에서 테스트·runbook에 결속한다.
+
+## 인계 체크리스트
+
+- 현재 단계는 `LOAD-S*`로 적었는가. `R-GATE-1 S*`와 섞지 않았는가.
+- normative 변경이 필요하면 먼저 해당 RID 문서를 고치고 C1/C2 결속을 다시 수행했는가.
+- 코드 land와 운영 deploy/activation을 별 상태로 보고했는가.
+- 실제 PostgreSQL/Redis가 필요한 검증을 SQLite-only green으로 대체하지 않았는가.
+- mutation runner는 격리 worktree 안에서만 production twin을 변이하는가.
+- 부분 테스트가 아니라 관련 배터리, 전체 suite, provenance preflight를 각각 확인했는가.
