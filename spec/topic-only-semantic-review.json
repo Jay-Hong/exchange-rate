@@ -266,14 +266,14 @@
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "ca05ccf0a94f32d3e1e343d7ab80824093662bf9e0840759f3d0e75c52f3be99",
-    "CLIENT": "db32cecd2c410fa6f330299c9d58722d94024ba71ae815f81e1271d8fb5fde7b",
-    "CUT": "55a6309a958cb70b03e7a79a2fffa34c8f93947ebc19151a67b03b0a7287a827",
-    "HAND": "77eca45838bcb7fa458b45f95f2efe37cc2f93fdc31f9a7d3176a0f5ddb300ec",
-    "HEALTH": "21d36884948dbf6b5baf33868a0c50914efc2c521f2e85f31372260ddec66c86",
-    "LOAD": "ca71c556b64fadffd8df313dc2c7ffc4ea94b5dbc2d9a2875940a996966221c8"
+    "ADR": "0a1f8e7f62fd0ce774486dc7fa8aa4a1ba82bcb8bb0e797c1db05a9d04884109",
+    "CLIENT": "c33dbc3e28946c235207d315ac8bb488ead20fb6a9f5502acb2df79cb7c2bf95",
+    "CUT": "ff656ca9bf8ceffbaad6a32e67d9f31ddbdf53022f062ac1de256dab2548931c",
+    "HAND": "b5b02ff097fd23fd88e73b0e30708cbe66f9e0f895a7601349535030c54da7b3",
+    "HEALTH": "ae940a13d799bea6ed0f39974cd0c7149d2e9b2137ec1a466546cfc7413371a0",
+    "LOAD": "3aea32e6196f4b6aa2eed5c6c554eeace96de3d31a71c73e84bd35d7798e202e"
   },
-  "claim_ledger_sha256": "465565e088d13c1eb4e129770bac1c9fbefffd70c2631255d94b8a344db5a587",
+  "claim_ledger_sha256": "5e7e2328b12e414e5e5b2894577b6d4644f880c93ea16a7e8cadfa9b199b36f8",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,

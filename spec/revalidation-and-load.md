@@ -3,7 +3,7 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `3eee5cd`
+- server 기준 commit: `3eee5cdf467e2c2356618d6b33cb5af9037f07a5`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
 - manifest SHA: `54585b79e0eb635ef04f1b102644a2358d7181ed1d45b0db1a0ed39ff9705dd6`
