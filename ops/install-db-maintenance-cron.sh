@@ -3,6 +3,7 @@
 #
 #   ops/install-db-maintenance-cron.sh --check     # 비파괴 점검만 (언제든 안전)
 #   ops/install-db-maintenance-cron.sh --install   # managed 5줄 일괄 전환 + 점검
+#   ops/install-db-maintenance-cron.sh --restore <backup> <sha256>   # SHA 검증 후 복원
 #
 # ⛔ **기존 `ops/install-host-config.sh` 에 흡수하지 않는다.** 그쪽은 root 로
 #    `/etc/logrotate.d`·`/etc/systemd` 를 만지고 journald 를 restart 하며 무인자 실행이
@@ -142,23 +143,47 @@ PY
   backup="$(mktemp "$BACKUP_DIR/crontab.$(date +%Y%m%dT%H%M%S).bak.XXXXXX")"
   cp "$snap" "$backup"; chmod 600 "$backup"
   echo "backup: $backup  sha256=$after"
-  echo "  복원: crontab \"$backup\""
+  # ⛔ 복원은 **이 스크립트가 소유**한다. `crontab <file>` 을 그냥 안내하면 SHA 가 검증되지
+  #    않고, 파일이 잘려 있어도 그대로 설치된다. `--restore` 가 SHA 를 확인한 뒤 설치한다.
+  # ⛔ 경로를 `printf %q` 로 인용한다 — 공백·따옴표가 든 경로에서 안내 명령이 깨진다.
+  printf '  복원: %s --restore %s %s\n' \
+    "$(printf '%q' "${BASH_SOURCE[0]}")" "$(printf '%q' "$backup")" "$after"
 
   crontab "$tmp"
   do_check
 }
 
-[ $# -eq 1 ] || usage
+[ $# -ge 1 ] || usage
 [ -r "$MANIFEST" ] || { echo "❌ manifest 없음: $MANIFEST"; exit 1; }
 
 # ⛔ 락은 **변경 경로에만** 건다. `--check` 는 read-only 라 락이 필요 없다.
 # ⚠️ macOS 엔 `flock(1)` 이 없다 — 로컬 스모크에서 "다른 installer 가 실행 중" 이라는 **거짓
 #    사유**가 나왔다. 없으면 그렇게 둘러대지 말고 **정확한 이유로 거부**한다(운영 호스트는
 #    Linux 라 존재한다). 거짓 진단은 없는 것보다 나쁘다.
+do_restore() {   # $1 = backup 파일, $2 = 기대 SHA
+  local got
+  [ -r "$1" ] || { echo "❌ 백업을 읽을 수 없다: $1"; return 1; }
+  got="$(shasum -a 256 <"$1" | cut -d' ' -f1)"
+  # ⛔ SHA 를 확인하고 설치한다. 출력만 해두고 검증하지 않으면 잘린 백업도 그대로 들어간다.
+  if [ "$got" != "$2" ]; then
+    echo "❌ 백업 SHA 불일치 — 복원하지 않는다"; echo "   기대=$2"; echo "   실제=$got"; return 1
+  fi
+  crontab "$1"
+  echo "✅ 복원 완료: $1"
+}
+
 case "$1" in
   --check)
+    [ $# -eq 1 ] || usage
     do_check
     ;;
-  --install) do_install ;;
+  --install)
+    [ $# -eq 1 ] || usage
+    do_install
+    ;;
+  --restore)
+    [ $# -eq 3 ] || usage
+    do_restore "$2" "$3"
+    ;;
   *) usage ;;
 esac

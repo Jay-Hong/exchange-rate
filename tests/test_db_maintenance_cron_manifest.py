@@ -143,7 +143,6 @@ class TestInstallerStateMachine(unittest.TestCase):
         for line in legacy_lines():
             self.assertNotIn(line + "\n", after, "legacy 줄이 남았다")
 
-    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
     def test_install_is_idempotent_on_managed_state(self):
         managed = "\n".join([UNRELATED] + managed_lines()) + "\n"
         r = self._run("--install", managed)
@@ -190,6 +189,19 @@ class TestInstallerDurability(unittest.TestCase):
         self.state = self.tmp / "crontab.txt"
         self.backups = self.tmp / "state" / "fxi-cron-backups"
         self.fake = self.tmp / "crontab"
+        # ⛔ `flock` 이 없는 플랫폼(macOS)에서 이 계약들이 **영구히 skip** 되면, "Linux CI 가
+        #    볼 것" 이라는 말은 기전이 아니다. 실제로 일회성 fake flock 으로 돌렸을 때
+        #    `mktemp` 템플릿 결함과 테스트 결함이 나왔다 — fixture 가 직접 설치한다.
+        #    ⚠️ 진짜 flock 이 있으면 **그것을 쓴다**(Linux CI 는 실물 경로를 검증한다).
+        if not shutil.which("flock"):
+            stub = self.tmp / "flock"
+            stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+            stub.chmod(0o755)
+        # ⛔ 시간을 **고정**한다. 실제 `date` 를 쓰면 초 경계를 넘는 순간 충돌 회귀가 있어도
+        #    통과한다 — "같은 초에 두 번" 을 시험하려면 같은 초를 강제해야 한다.
+        fake_date = self.tmp / "date"
+        fake_date.write_text('#!/usr/bin/env bash\necho "20260101T000000"\n')
+        fake_date.chmod(0o755)
 
     def _install_fake(self, body: str):
         self.fake.write_text(body)
@@ -234,7 +246,6 @@ class TestInstallerDurability(unittest.TestCase):
                 self.assertIn("crontab -l 실패", r.stderr + r.stdout,
                               "조회 실패를 빈 crontab 으로 접었다")
 
-    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
     def test_install_writes_a_persistent_backup_before_touching_crontab(self):
         """⛔ 메모리의 값과 임시 파일은 **복구본이 아니다** — 프로세스와 함께 사라진다."""
         self._install_fake(
@@ -251,7 +262,6 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertEqual(oct(backups[0].stat().st_mode)[-3:], "600")
         self.assertIn(str(backups[0]), r.stdout, "복구 경로를 알려주지 않았다")
 
-    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
     def test_unrelated_bytes_are_preserved_exactly(self):
         """⛔ `assertIn` 은 **바이트 보존을 증명하지 못한다**.
 
@@ -273,7 +283,6 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertEqual(self.state.read_text(), expected,
                          "무관 바이트가 바뀌었다(trailing LF·주석·빈 줄 포함)")
 
-    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
     def test_backup_restores_the_original_exactly(self):
         """백업이 **실제로 되돌리는지** — 파일이 있다는 것만으로는 복구를 증명하지 못한다."""
         self._install_fake(
@@ -284,15 +293,39 @@ class TestInstallerDurability(unittest.TestCase):
         self.state.write_text(before)
         r = self._run("--install")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        backup = sorted(self.backups.glob("crontab.*.bak.*"))[0]
-        # ⛔ **출력된 복원 명령을 실제로 실행한다.** 초판은 `backup.read_text()` 를 상태 파일에
-        #    직접 써서 복구 경로를 **우회**했다 — 그러면 `crontab "$backup"` 이 깨져도 통과한다.
-        self.assertIn(f'crontab "{backup}"', r.stdout, "복원 명령을 출력하지 않았다")
-        subprocess.run(["bash", "-c", f'crontab "{backup}"'], check=True,
-                       env=self._env(), timeout=30)
+        # ⛔ **출력에서 명령을 추출해 그대로 실행한다.**
+        #    1판: `backup.read_text()` 를 상태 파일에 직접 write → 복구 경로 자체를 우회.
+        #    2판: `assertIn` 으로 문자열 존재만 확인하고 **명령은 따로 조립** → 출력이
+        #         `false # crontab "…"` 로 깨져도 통과한다(실측).
+        #    이제 출력된 그 줄을 그대로 실행한다 — 그것이 사람이 복사할 명령이다.
+        m = re.search(r"^\s*복원:\s*(.+)$", r.stdout, re.M)
+        self.assertIsNotNone(m, f"복원 명령을 출력하지 않았다: {r.stdout}")
+        self.state.write_text("WRECKED\n")            # 되돌릴 대상이 실제로 달라야 한다
+        rr = subprocess.run(["bash", "-c", m.group(1)], capture_output=True, text=True,
+                            env=self._env(), timeout=30, cwd=REPO)
+        self.assertEqual(rr.returncode, 0, rr.stdout + rr.stderr)
         self.assertEqual(self.state.read_text(), before, "복원 명령이 원본을 되돌리지 못했다")
 
-    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
+    def test_restore_refuses_a_tampered_backup(self):
+        """⛔ SHA 를 출력만 하고 검증하지 않으면 **잘린 백업도 그대로 설치**된다."""
+        self._install_fake(
+            '#!/usr/bin/env bash\n'
+            'if [ "$1" = "-l" ]; then cat "$CRON_STATE" 2>/dev/null; exit 0; fi\n'
+            'cat "$1" > "$CRON_STATE"\n')
+        before = "\n".join([UNRELATED] + legacy_lines()) + "\n"
+        self.state.write_text(before)
+        r = self._run("--install")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        backup = sorted(self.backups.glob("crontab.*.bak.*"))[0]
+        cmd = re.search(r"^\s*복원:\s*(.+)$", r.stdout, re.M).group(1)
+        backup.write_text("TAMPERED\n")               # 백업이 손상됐다
+        self.state.write_text("CURRENT\n")
+        rr = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                            env=self._env(), timeout=30, cwd=REPO)
+        self.assertNotEqual(rr.returncode, 0, "손상된 백업을 그대로 설치했다")
+        self.assertIn("SHA 불일치", rr.stdout)
+        self.assertEqual(self.state.read_text(), "CURRENT\n", "실패인데 crontab 을 바꿨다")
+
     def test_two_runs_in_the_same_second_do_not_overwrite_a_backup(self):
         """⛔ 초 단위 이름은 같은 초에 두 번 돌면 **앞 백업을 덮는다**(실측: 1개만 남았다).
 
@@ -312,7 +345,6 @@ class TestInstallerDurability(unittest.TestCase):
         self.assertEqual(len(backups), 2, "백업이 덮였다")
         self.assertEqual({b.read_text() for b in backups}, {first, second})
 
-    @unittest.skipUnless(shutil.which("flock"), "flock 없는 플랫폼")
     def test_aborted_install_leaves_no_stale_backup(self):
         """⛔ 백업이 최종 CAS **앞**이면, 중단된 실행이 stale 백업과 그 복원 명령을 남긴다 —
         현재 상태와 다른 것을 되돌리라고 안내하는 셈이다."""
