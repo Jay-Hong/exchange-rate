@@ -116,17 +116,42 @@ class TestProductionEngineBindsToPostgres(unittest.TestCase):
                         f"운영 RDS 는 17.x 다 — 다른 major 에서 증명하면 계약이 아니다: {out}")
 
     def test_sqlite_path_does_not_receive_postgres_only_kwargs(self):
-        """⛔ 반대 방향 회귀 — PostgreSQL 전용 옵션이 SQLite 경로로 새면 로컬이 죽는다."""
+        """⛔ 반대 방향 회귀 — PostgreSQL 전용 옵션이 SQLite 경로로 새면 로컬이 죽는다.
+
+        ⚠️ 초판은 **공허했다**(codex, 재현 확인). `create_connect_args(engine.url)` 은 **URL 에서만**
+           인자를 도출해 `create_engine(connect_args=…)` 로 넘긴 것을 보지 못한다 — 실측으로
+           내가 준 `check_same_thread=False` 조차 `True` 로 나왔다. 그래서 `statement_timeout` 을
+           SQLite 로 흘려도 그 검사는 통과하고, 실제로는 **연결을 열 때** `TypeError` 가 난다.
+           판정을 **실제 연결**로 바꾼다.
+        """
         code = (
+            "from sqlalchemy import text\n"
             "from app.database import engine\n"
+            "with engine.connect() as c:\n"
+            "    c.execute(text('select 1'))\n"
             "print('DIALECT=' + engine.dialect.name)\n"
-            "print('ARGS=' + repr(sorted(engine.dialect.create_connect_args(engine.url)[1])))\n"
+            "print('CONNECT_OK=1')\n"
         )
         r = _run_in_fresh_process(code, url="sqlite:///:memory:")
-        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        self.assertEqual(r.returncode, 0,
+                         f"SQLite 경로가 실제 연결에서 죽는다 — PG 전용 인자 누수 의심\n{r.stderr[-1200:]}")
         self.assertIn("DIALECT=sqlite", r.stdout)
-        self.assertNotIn("statement_timeout", r.stdout)
-        self.assertNotIn("connect_timeout", r.stdout)
+        self.assertIn("CONNECT_OK=1", r.stdout)
+
+    def test_the_sqlite_leak_check_actually_bites(self):
+        """⛔ 위 검사가 **무는지**를 합성 반례로 증명한다 — 공허한 판정식을 한 번 썼기 때문이다."""
+        code = (
+            "from sqlalchemy import create_engine, text\n"
+            "eng = create_engine('sqlite:///:memory:',\n"
+            "                    connect_args={'check_same_thread': False,\n"
+            "                                  'options': '-c statement_timeout=1000'})\n"
+            "with eng.connect() as c:\n"
+            "    c.execute(text('select 1'))\n"
+            "print('CONNECT_OK=1')\n"
+        )
+        r = _run_in_fresh_process(code, url="sqlite:///:memory:")
+        self.assertNotEqual(r.returncode, 0, "PG 전용 인자를 흘렸는데 연결이 성공했다 — 검사가 공허하다")
+        self.assertIn("TypeError", r.stderr)
 
 
 if __name__ == "__main__":
