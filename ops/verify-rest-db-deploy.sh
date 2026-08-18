@@ -31,9 +31,12 @@ check() {
   fi
 }
 
-note "=== A. REST lane runtime readiness (invalid JWT -> 401)"
-# This request runs inside the Uvicorn process. A missing named app or executor
-# returns 503; 401 means the token reached the Firebase verifier through the lane.
+note "=== A. REST 인증 응답 코드 (401 기대, 그 외 차단)"
+#    401 은 이 smoke 의 기대 응답일 뿐 **lane 편입 증거가 아니다** — 구 image 도 같은 코드를
+#    낸다(운영 실측 2026-08-18). 편입은 verifier 의 **소스 지문 게이트**가 판정한다.
+#    401 이외 응답·실행 오류는 차단하며, **원인 진단은 이 smoke 의 범위 밖이다.**
+#    ⛔ 응답 detail·로그 category·원인 후보를 여기서 약속하지 않는다 — curl 이 -o /dev/null 로
+#       본문을 버리고, category 는 모든 503 경로에 붙지 않는다. 그렇게 적었다가 네 번 틀렸다.
 A=$(docker exec exchange-rate-app curl -sS -o /dev/null -w '%{http_code}' \
   -H 'Authorization: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImRlcGxveS1wcm9iZSJ9.e30.aW52YWxpZA' \
   http://127.0.0.1:8000/api/notification-settings 2>> "$OUT")

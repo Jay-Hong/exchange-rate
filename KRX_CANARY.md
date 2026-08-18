@@ -763,7 +763,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 6 | **서비스 smoke** | `prepare`가 배포 **전** FX 최신 관측과 USDT direct-write 시각을 각각 스냅샷하고, `collect`가 소스마다 대조한다. `/api/rates` 축은 FX만 덮고 KRX는 별 계약 축이 담당한다. USDT는 `/admin/api/usdt-redis-stats`의 별도 축으로, 배포 전 활성 source가 재시작 뒤 write를 재개했는지 판정한다. FAILED는 **모호하지 않은 것만** — baseline 소스 소실 / 관측 시각 역행 / 활성 USDT source의 재시작 후 write 0. **"FX 갱신 없음"은 판정하지 않고 소스별로 기록**하므로 ⭐**이 목록을 사람이 대조하는 것이 이 항목의 본체**다. ⚠️ 두 가지 한계: (a) `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict라 **도달성만** 증명(축 이름이 `reachability`인 이유) (b) 배포+관측이 ~15분이라 저빈도 FX source의 "죽음"과 "느린 주기"가 구분되지 않는다 — 그래서 FX 나이 임계값을 쓰지 않는다 |
 | 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
 | 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
-| 9 | **REST auth / DB timeout 운영 smoke** | Uvicorn 내부 무효 JWT가 401까지 도달해야 한다(503은 named app/executor 미준비). online=`1min/5s/10s`, maintenance=`15min/10s/30s`를 서버·libpq·pool에서 readback하고, 57014 뒤 동일 backend PID 재사용 및 6번째 checkout 약 10초 timeout 뒤 pool 복구를 확인한다. health 뒤·자동 rollback 해제 전에 직렬 실행하며 실패하면 구 image로 복원한다 |
+| 9 | **REST auth / DB timeout 운영 smoke** | Uvicorn 내부 무효 JWT가 **401**이어야 한다. ⚠️ 401은 이 smoke의 기대 응답일 뿐 **lane 편입 증거가 아니다**(구 image도 같은 코드 — 운영 실측 2026-08-18). 편입은 verifier의 **소스 지문 게이트**가 판정한다. 401 이외 응답·실행 오류는 차단하며 **원인 진단은 이 smoke의 범위 밖**이다. online=`1min/5s/10s`, maintenance=`15min/10s/30s`를 서버·libpq·pool에서 readback하고, 57014 뒤 동일 backend PID 재사용 및 6번째 checkout 약 10초 timeout 뒤 pool 복구를 확인한다. health 뒤·자동 rollback 해제 전에 직렬 실행하며 실패하면 구 image로 복원한다 |
 
 ### 실행 순서
 
