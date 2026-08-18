@@ -50,6 +50,7 @@ jobs:
           python -m pytest -q \
             tests/test_adr041_grounds.py \
             tests/test_document_citations.py \
+            tests/test_krx_deploy_verifier.py \
             tests/test_topic_migration_doc_bundle.py \
             tests/test_topic_migration_launcher.py \
             tests/test_topic_migration_validator.py \

@@ -1154,7 +1154,7 @@ async def snapshot_source_freshness(adapters: Adapters) -> dict:
     ⚠️ 범위: `/api/rates` 는 legacy 정책상 **USDT·KRX 를 제외**한다
     (`app/crud.py` `_filter_source_entries_by_legacy_policy`, Z-2d). 즉 이 축은
     FX(은행+investing)만 덮는다. KRX 는 별도 축(krx-status)이 보고, USDT 는
-    이 도구가 덮지 않는다 — runbook 이 그 한계를 적는다.
+    `snapshot_usdt_liveness()`의 별도 축이 담당한다.
     """
     payload = await adapters.admin_fetch("/api/rates")
     rates = payload.get("rates")
@@ -1604,7 +1604,8 @@ def _resolve_revision(repo_root: pathlib.Path, expected: str) -> str:
     """worktree가 **기대 revision에 clean하게** 있는지 확인 후 full SHA 반환.
 
     지문을 worktree에서 뜨므로, dirty하거나 다른 commit이면 그 지문은 배포될
-    코드의 것이 아니다. → prepare는 `git pull` **뒤**, build **전**에 돌린다.
+    코드의 것이 아니다. → prepare는 승인받은 full SHA의 clean checkout **뒤**,
+    candidate build **전**에 돌린다.
     """
     def git(*argv: str) -> str:
         proc = subprocess.run(["git", "-C", str(repo_root), *argv],
@@ -1637,18 +1638,27 @@ async def _prepare(args) -> int:
     if len(parts) != 4:
         raise CollectorError(f"inspect 형식 예상 밖: {raw.strip()[:120]}")
     # 배포 **전** 소스별 신선도. 이게 없으면 collect 가 회귀를 판정할 기준이 없다.
-    # 실패해도 prepare 를 죽이지 않는다 — collect 가 UNVERIFIED 로 보고한다.
+    # ⛔ prepare 에서 즉시 실패한다. 예전에는 None 을 baseline 에 저장하고 배포 후 collect 가
+    #    UNVERIFIED 를 내게 했는데, 그 시점에는 구 컨테이너가 이미 제거돼 되돌릴 수 없는
+    #    검증 공백이 생긴다. baseline 을 다시 얻을 수 있는 **재생성 전**이 차단 지점이다.
+    adapters = production_adapters(target)
     try:
-        service_baseline = await snapshot_source_freshness(
-            production_adapters(target))
+        service_baseline = await snapshot_source_freshness(adapters)
     except CollectorError as exc:
-        print(f"⚠️ 서비스 baseline 스냅샷 실패: {exc}", file=sys.stderr)
-        service_baseline = None
+        raise CollectorError(
+            f"배포 전 서비스 baseline 스냅샷 실패 — recreate 금지: {exc}") from exc
+    if not service_baseline:
+        raise CollectorError(
+            "배포 전 서비스 baseline 이 비었다 — recreate 후 FX 회귀를 판정할 수 없다")
+
     try:
-        usdt_baseline = await snapshot_usdt_liveness(production_adapters(target))
+        usdt_baseline = await snapshot_usdt_liveness(adapters)
     except CollectorError as exc:
-        print(f"⚠️ USDT baseline 스냅샷 실패: {exc}", file=sys.stderr)
-        usdt_baseline = None
+        raise CollectorError(
+            f"배포 전 USDT baseline 스냅샷 실패 — recreate 금지: {exc}") from exc
+    if not usdt_baseline:
+        raise CollectorError(
+            "배포 전 USDT baseline 이 비었다 — recreate 후 24/7 source 재개를 판정할 수 없다")
 
     baseline = Baseline(
         t0_iso=_utc_now_iso(),

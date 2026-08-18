@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest import mock
 
 _SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -24,6 +28,7 @@ import krx_deploy_verifier as V  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEDULER = REPO_ROOT / "app" / "scheduler.py"
+RUNBOOK = REPO_ROOT / "KRX_CANARY.md"
 
 _T0 = "2026-08-17T06:00:00+00:00"
 
@@ -113,6 +118,425 @@ class TestPolicyMapCompleteness(unittest.TestCase):
                         V.extract_reconcile_results(tmp)
                 finally:
                     tmp.unlink()
+
+
+class TestPrepareFailsClosed(unittest.IsolatedAsyncioTestCase):
+    """재생성 뒤가 아니라 baseline 을 다시 얻을 수 있는 prepare 에서 차단한다."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.baseline = pathlib.Path(self.tmp.name) / "baseline.json"
+        self.args = SimpleNamespace(
+            repo_root=str(REPO_ROOT),
+            expect_revision="a" * 40,
+            expect_code="A75609",
+            expect_month="202609",
+            expect_expires_on="2026-09-21",
+            baseline=str(self.baseline),
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _common_patches(self):
+        return (
+            mock.patch.object(V, "_resolve_revision", return_value="a" * 40),
+            mock.patch.object(V, "compute_local_source_fingerprint", return_value=_FP),
+            mock.patch.object(
+                V, "run_command",
+                new=mock.AsyncMock(return_value="old123|2026-08-15T00:00:00Z|0|sha256:aaa"),
+            ),
+            mock.patch.object(V, "production_adapters", return_value=object()),
+            mock.patch.object(V, "_utc_now_iso", return_value=_T0),
+        )
+
+    async def test_service_baseline_failure_leaves_no_artifact(self):
+        patches = self._common_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(
+                    V, "snapshot_source_freshness",
+                    new=mock.AsyncMock(side_effect=V.CollectorError("503")),
+                ), mock.patch.object(
+                    V, "snapshot_usdt_liveness", new=mock.AsyncMock(),
+                ) as usdt:
+            with self.assertRaisesRegex(V.CollectorError, "서비스 baseline.*recreate 금지"):
+                await V._prepare(self.args)
+
+        usdt.assert_not_awaited()
+        self.assertFalse(self.baseline.exists())
+        self.assertFalse(pathlib.Path(str(self.baseline) + ".sha256").exists())
+
+    async def test_usdt_baseline_failure_leaves_no_artifact(self):
+        patches = self._common_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(
+                    V, "snapshot_source_freshness",
+                    new=mock.AsyncMock(return_value={"kb.usd-krw": _T0}),
+                ), mock.patch.object(
+                    V, "snapshot_usdt_liveness",
+                    new=mock.AsyncMock(side_effect=V.CollectorError("503")),
+                ):
+            with self.assertRaisesRegex(V.CollectorError, "USDT baseline.*recreate 금지"):
+                await V._prepare(self.args)
+
+        self.assertFalse(self.baseline.exists())
+        self.assertFalse(pathlib.Path(str(self.baseline) + ".sha256").exists())
+
+    async def test_empty_service_baseline_is_not_treated_as_success(self):
+        patches = self._common_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(
+                    V, "snapshot_source_freshness",
+                    new=mock.AsyncMock(return_value={}),
+                ), mock.patch.object(
+                    V, "snapshot_usdt_liveness", new=mock.AsyncMock(),
+                ) as usdt:
+            with self.assertRaisesRegex(V.CollectorError, "서비스 baseline 이 비었다"):
+                await V._prepare(self.args)
+
+        usdt.assert_not_awaited()
+        self.assertFalse(self.baseline.exists())
+        self.assertFalse(pathlib.Path(str(self.baseline) + ".sha256").exists())
+
+    async def test_empty_usdt_baseline_is_not_treated_as_success(self):
+        patches = self._common_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(
+                    V, "snapshot_source_freshness",
+                    new=mock.AsyncMock(return_value={"kb.usd-krw": _T0}),
+                ), mock.patch.object(
+                    V, "snapshot_usdt_liveness",
+                    new=mock.AsyncMock(return_value={}),
+                ):
+            with self.assertRaisesRegex(V.CollectorError, "USDT baseline 이 비었다"):
+                await V._prepare(self.args)
+
+        self.assertFalse(self.baseline.exists())
+        self.assertFalse(pathlib.Path(str(self.baseline) + ".sha256").exists())
+
+    async def test_complete_baselines_are_persisted_with_checksum(self):
+        patches = self._common_patches()
+        service = {"kb.usd-krw": _T0}
+        usdt = {"upbit": "2026-08-17T14:59:00+09:00"}
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(
+                    V, "snapshot_source_freshness",
+                    new=mock.AsyncMock(return_value=service),
+                ), mock.patch.object(
+                    V, "snapshot_usdt_liveness",
+                    new=mock.AsyncMock(return_value=usdt),
+                ):
+            self.assertEqual(await V._prepare(self.args), 0)
+
+        saved = V.Baseline.load(self.baseline)
+        self.assertEqual(saved.service_baseline, service)
+        self.assertEqual(saved.usdt_baseline, usdt)
+
+
+class TestProductionRunbookFailClosed(unittest.TestCase):
+    """운영 명령의 안전장치가 설명 문구만 남고 실행 블록에서 빠지지 않는다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RUNBOOK.read_text(encoding="utf-8")
+        section = cls.text.index("### 실행 순서")
+        fence = cls.text.index("```bash", section) + len("```bash")
+        end = cls.text.index("```", fence)
+        cls.script = cls.text[fence:end]
+        cls.normalized = " ".join(cls.script.split())
+
+    def test_candidate_is_full_sha_and_moving_pull_is_absent(self):
+        self.assertIn('${DEPLOY_SHA:?승인받은 40자리 DEPLOY_SHA', self.script)
+        self.assertIn('[[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]', self.script)
+        self.assertNotIn("DEPLOY_SHA=5a3a6c1", self.script)
+        commands = [line.strip() for line in self.script.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        self.assertFalse(any(line.startswith("git pull") or " -- git pull" in line
+                             for line in commands), commands)
+        self.assertIn('git fetch origin master:refs/remotes/origin/master', self.normalized)
+        self.assertIn('git merge --ff-only "$DEPLOY_SHA"', self.normalized)
+        self.assertIn('[ "$REMOTE_SHA" != "$DEPLOY_SHA" ]', self.script)
+        self.assertIn('[ "$BRANCH" != master ]', self.script)
+        self.assertIn('git status --porcelain', self.script)
+
+    def test_all_post_follower_abort_paths_use_the_cleanup_helper(self):
+        self.assertIn("stop_follower()", self.script)
+        self.assertIn('echo "follower rc=$rc"', self.script)
+        self.assertIn("trap on_exit EXIT", self.script)
+        self.assertIn("trap - EXIT INT TERM", self.script)
+        self.assertIn("FOLLOWER_MUST_LIVE=1", self.script)
+        self.assertIn('case " $(jobs -pr) "', self.script)
+        self.assertIn("require_follower || exit 1", self.script)
+        follower = self.script.index("docker logs -f")
+        tail = self.script[follower:]
+        self.assertNotIn('kill "$FOLLOWER"', tail)
+        self.assertGreaterEqual(tail.count("stop_follower"), 6)
+
+    def test_dead_follower_is_rejected_by_the_runbook_helper(self):
+        start = self.script.index("stop_follower()")
+        end = self.script.index("\nverify_final_capture()", start)
+        helpers = self.script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [
+                    "bash", "-c",
+                    (
+                        'D="$1"; FOLLOWER_MUST_LIVE=1; '
+                        + helpers
+                        + "\nbash -c 'exit 7' & FOLLOWER=$!; sleep 0.1; "
+                        + "require_follower"
+                    ),
+                    "--", td,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            abort = (pathlib.Path(td) / "ABORT.txt").read_text(encoding="utf-8")
+            self.assertIn("follower 조기 종료(rc=7)", abort)
+
+    def test_topic_auth_handoff_is_an_executable_gate(self):
+        capture = self.script.index("systemctl start fxi-topic-auth-capture.service")
+        artifact = self.script.index('verify_final_capture "$CAPTURE_DIR" "$HANDOFF_T0"')
+        disable = self.script.index(
+            "systemctl disable --now fxi-topic-auth-capture.timer")
+        state = self.script.index("verify_timer_down")
+        checkout = self.script.index('git merge --ff-only "$DEPLOY_SHA"')
+        self.assertLess(capture, artifact)
+        self.assertLess(artifact, disable)
+        self.assertLess(disable, checkout)
+        self.assertLess(state, checkout)
+        self.assertIn('get("status") != "matched"', self.script)
+        self.assertIn('get("valid") is not True', self.script)
+        self.assertIn('[ "$enabled" = disabled ]', self.script)
+        self.assertIn('[ "$active" = inactive ]', self.script)
+        self.assertIn('[ "$service" = inactive ]', self.script)
+
+    def test_final_capture_helper_rejects_status_schema_and_checksum_mutations(self):
+        start = self.script.index("verify_final_capture()")
+        end = self.script.index("\n}\n\nverify_timer_down()", start) + 2
+        helper = self.script[start:end]
+
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            raw_path = root / "20260818T070000Z.raw.json"
+            meta_path = root / "20260818T070000Z.meta.json"
+
+            def publish(path: pathlib.Path, body: bytes) -> str:
+                path.write_bytes(body)
+                digest = hashlib.sha256(body).hexdigest()
+                pathlib.Path(str(path) + ".sha256").write_text(
+                    f"{digest}  {path.name}\n", encoding="utf-8")
+                return digest
+
+            raw_sha = publish(raw_path, b'{"ok": true}\n')
+            meta = {
+                "captured_at_utc": "2026-08-18T07:00:00Z",
+                "window": {"status": "matched"},
+                "metric_schema": {"valid": True},
+                "artifacts": {"raw_file": raw_path.name, "raw_sha256": raw_sha},
+            }
+
+            def run(candidate: dict) -> subprocess.CompletedProcess[str]:
+                publish(
+                    meta_path,
+                    (json.dumps(candidate, sort_keys=True) + "\n").encode("utf-8"),
+                )
+                return subprocess.run(
+                    [
+                        "bash", "-c",
+                        helper + '\nverify_final_capture "$1" "$2"',
+                        "--", str(root), "2026-08-18T06:59:59Z",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            self.assertEqual(run(meta).returncode, 0)
+            for field, value in (("status", "changed"), ("valid", False)):
+                broken = json.loads(json.dumps(meta))
+                target = broken["window"] if field == "status" else broken["metric_schema"]
+                target[field] = value
+                with self.subTest(field=field):
+                    self.assertNotEqual(run(broken).returncode, 0)
+
+            self.assertEqual(run(meta).returncode, 0)
+            raw_path.write_bytes(b'{"tampered": true}\n')
+            result = subprocess.run(
+                [
+                    "bash", "-c", helper + '\nverify_final_capture "$1" "$2"',
+                    "--", str(root), "2026-08-18T06:59:59Z",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_evidence_directory_and_log_boundaries_are_private_and_bounded(self):
+        self.assertIn("umask 077", self.script)
+        self.assertIn('install -d -m 0700 "$D"', self.script)
+        self.assertIn('docker logs -f --since "$T0" --timestamps', self.normalized)
+        self.assertIn('docker logs --timestamps --since "$T0"', self.normalized)
+        self.assertNotIn('--since "$TS"', self.script)
+
+    def test_recreate_cannot_build_or_touch_dependencies(self):
+        self.assertIn(
+            "docker compose up -d --pull never --no-build --no-deps "
+            "--force-recreate fastapi",
+            self.normalized,
+        )
+        build = self.script.index(
+            'docker compose -f docker-compose.yml -f "$D/compose-candidate.yml" build fastapi')
+        cutover = self.script.index("cutover_latest || exit 1")
+        recreate = self.script.index("if ! run 09-recreate.txt")
+        self.assertLess(build, cutover)
+        self.assertLess(cutover, recreate)
+        self.assertIn('image: "$CANDIDATE_TAG"', self.script)
+        self.assertIn('[ "$LATEST_AFTER_BUILD" != "$OLD_IMAGE" ]', self.script)
+        self.assertIn("CUTOVER_PENDING=1", self.script)
+        self.assertIn('restore_old_image > "$D/auto-rollback-on-exit.txt"', self.script)
+
+    def test_collect_rc_is_preserved_even_under_errexit(self):
+        self.assertIn("if python3 scripts/krx_deploy_verifier.py collect", self.script)
+        self.assertIn("then collect_rc=0", self.script)
+        self.assertIn("else collect_rc=$?", self.script)
+        self.assertIn('echo "rc=$collect_rc"', self.script)
+
+        start = self.script.index("if python3 scripts/krx_deploy_verifier.py collect")
+        end = self.script.index("\n\n# 11) follower", start)
+        collect = self.script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [
+                    "bash", "-c",
+                    'set -e; D="$1"; cd "$2"; ' + collect + '; echo SURVIVED',
+                    "--", td, str(REPO_ROOT),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("SURVIVED", result.stdout)
+            outcome = (pathlib.Path(td) / "11-collect.txt").read_text(encoding="utf-8")
+            self.assertRegex(outcome, r"rc=[1-9][0-9]*")
+
+    def test_evidence_finalizer_records_success_but_never_auto_approves(self):
+        start = self.script.index("finalize_evidence()")
+        end = self.script.index("\n# 실패하면 그 자리에서", start)
+        helper = self.script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "evidence.jsonl").write_text('{"ok": true}\n', encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", helper + '\nfinalize_evidence "$1" 0 0', "--", td],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            status = (root / "FINAL_STATUS").read_text(encoding="utf-8")
+            self.assertIn("status=EVIDENCE_COMPLETE_REVIEW_REQUIRED", status)
+            self.assertNotIn("status=PASS", status)
+            self.assertIn("verified=true", (root / "manifest.rc").read_text(encoding="utf-8"))
+            self._assert_manifest(root, "MANIFEST.sha256")
+            self._assert_manifest(root, "CLOSURE.sha256")
+
+    def test_evidence_finalizer_closes_artifacts_but_exits_nonzero_on_findings(self):
+        start = self.script.index("finalize_evidence()")
+        end = self.script.index("\n# 실패하면 그 자리에서", start)
+        helper = self.script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "evidence.jsonl").write_text('{"blocked": true}\n', encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", helper + '\nfinalize_evidence "$1" 7 0', "--", td],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            status = (root / "FINAL_STATUS").read_text(encoding="utf-8")
+            self.assertIn("status=DEPLOY_BLOCKED", status)
+            self.assertIn("collect_rc=7", status)
+            self.assertIn("manifest_rc=0", status)
+            self._assert_manifest(root, "MANIFEST.sha256")
+            self._assert_manifest(root, "CLOSURE.sha256")
+
+    def test_evidence_finalizer_records_manifest_failure_and_blocks(self):
+        start = self.script.index("finalize_evidence()")
+        end = self.script.index("\n# 실패하면 그 자리에서", start)
+        helper = self.script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            payload = root / "evidence.jsonl"
+            payload.write_text('{"ok": true}\n', encoding="utf-8")
+            (root / "unsafe-link").symlink_to(payload)
+            result = subprocess.run(
+                ["bash", "-c", helper + '\nfinalize_evidence "$1" 0 0', "--", td],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            manifest_state = (root / "manifest.rc").read_text(encoding="utf-8")
+            self.assertIn("generate_and_verify_rc=1", manifest_state)
+            self.assertIn("verified=false", manifest_state)
+            status = (root / "FINAL_STATUS").read_text(encoding="utf-8")
+            self.assertIn("status=DEPLOY_BLOCKED", status)
+            self.assertIn("manifest_rc=1", status)
+            self._assert_manifest(root, "CLOSURE.sha256")
+
+    def test_runbook_returns_the_finalizer_status(self):
+        self.assertIn('if finalize_evidence "$D" "$collect_rc" "$logs_rc"', self.script)
+        self.assertIn('exit "$final_rc"', self.script)
+        self.assertIn('status = "DEPLOY_BLOCKED" if blocked else', self.script)
+        self.assertIn("EVIDENCE_COMPLETE_REVIEW_REQUIRED", self.script)
+        self.assertIn("directory_fd = os.open(path.parent, os.O_RDONLY)", self.script)
+        self.assertIn("os.fsync(directory_fd)", self.script)
+        self.assertIn("os.close(directory_fd)", self.script)
+
+    def _assert_manifest(self, root: pathlib.Path, name: str) -> None:
+        lines = (root / name).read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines, name)
+        for line in lines:
+            expected, separator, filename = line.partition("  ")
+            self.assertEqual(separator, "  ", line)
+            target = root / filename
+            self.assertTrue(target.is_file(), filename)
+            self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), expected)
+
+    def test_maintenance_and_complete_baseline_precede_recreate(self):
+        maintenance = self.script.index("ops/install-db-maintenance-cron.sh --check")
+        prepare = self.script.index("scripts/krx_deploy_verifier.py prepare")
+        recreate = self.script.index("if ! run 09-recreate.txt")
+        self.assertLess(maintenance, prepare)
+        self.assertLess(prepare, recreate)
+
+    def test_full_image_rollback_is_wired_and_verified(self):
+        rollback = self.text[self.text.index("### 전체 이미지 rollback"):]
+        normalized = " ".join(rollback.split())
+        self.assertIn('source "$D/01-deploy-state.env"', rollback)
+        self.assertIn('docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest', normalized)
+        self.assertIn(
+            "docker compose up -d --pull never --no-build --no-deps "
+            "--force-recreate fastapi",
+            normalized,
+        )
+        self.assertIn('[ "$ROLLED_IMAGE" = "$OLD_IMAGE" ]', rollback)
+        self.assertIn('[ "${HEALTH:-}" = healthy ]', rollback)
+
+    def test_document_matches_usdt_verifier_and_incident_boundary(self):
+        self.assertIn("/admin/api/usdt-redis-stats", self.text)
+        self.assertNotIn("USDT는 이 도구가 안 덮는다", self.text)
+        self.assertIn("2026-08-14 시간봉 오염 재집계 금지", self.text)
+        self.assertIn("미커밋 `app/krx_hourly_incidents.py`", self.text)
+        self.assertIn("2026-08-14 08:00 이상 12:00 미만 KST", self.text)
+        self.assertIn("`--as-of`로 과거에 이동", self.text)
+        self.assertNotIn("`--window-days 4`\n이상", self.text)
 
 
 # ---------------------------------------------------------------------------

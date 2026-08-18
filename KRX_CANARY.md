@@ -759,7 +759,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 3 | **12분 polling** | 30~60초 주기로 container ID·StartedAt·RestartCount·KRX status **전량 저장**. `--observe-seconds`(기본 720)만큼 창을 **열어 둔다** — 첫 PASS에서 끝내면 실 관측이 ~45초로 줄어 그 뒤 재시작을 못 본다. 표본 2건 미만은 UNVERIFIED |
 | 4 | **종료 직전 identity 재확인** | 모든 축을 마친 뒤 3-tuple 동일 + `RestartCount == 0` 재확인 (그 사이 재시작이면 앞선 관측이 무효). `collect`가 코드로 수행하고 artifact에 남긴다 |
 | 5 | **로그 2창 분리 수집** | 배포 **전에** 구 컨테이너 log follower 시작 / 신 컨테이너 로그는 별도. `[T0, StartedAt)`의 rollover는 **증거**, `[StartedAt, now)`의 rollover는 **비기대** |
-| 6 | **서비스 smoke** | `prepare`가 배포 **전** 소스별 최신 관측을 스냅샷하고, `collect`가 **소스마다** 대조한다. FAILED는 **모호하지 않은 것만** — baseline 소스가 응답에서 사라짐 / 관측 시각 역행. **"갱신 없음"은 판정하지 않고 소스별로 기록**하므로 ⭐**이 목록을 사람이 대조하는 것이 이 항목의 본체**다. ⚠️ 세 가지 한계: (a) `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict라 **도달성만** 증명(축 이름이 `reachability`인 이유) (b) `/api/rates`는 legacy 정책상 **USDT·KRX 제외** → 이 축은 FX만 덮고 KRX는 별 축, **USDT는 이 도구가 안 덮는다** (c) 배포+관측이 ~15분이라 "죽음"과 "느린 주기"가 그 창 안에서 구분되지 않는다 — 그래서 나이 임계값을 쓰지 않는다 |
+| 6 | **서비스 smoke** | `prepare`가 배포 **전** FX 최신 관측과 USDT direct-write 시각을 각각 스냅샷하고, `collect`가 소스마다 대조한다. `/api/rates` 축은 FX만 덮고 KRX는 별 계약 축이 담당한다. USDT는 `/admin/api/usdt-redis-stats`의 별도 축으로, 배포 전 활성 source가 재시작 뒤 write를 재개했는지 판정한다. FAILED는 **모호하지 않은 것만** — baseline 소스 소실 / 관측 시각 역행 / 활성 USDT source의 재시작 후 write 0. **"FX 갱신 없음"은 판정하지 않고 소스별로 기록**하므로 ⭐**이 목록을 사람이 대조하는 것이 이 항목의 본체**다. ⚠️ 두 가지 한계: (a) `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict라 **도달성만** 증명(축 이름이 `reachability`인 이유) (b) 배포+관측이 ~15분이라 저빈도 FX source의 "죽음"과 "느린 주기"가 구분되지 않는다 — 그래서 FX 나이 임계값을 쓰지 않는다 |
 | 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
 | 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
 
@@ -772,93 +772,513 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 
 | 단계 | nonzero 시 | 이유 |
 |---|---|---|
-| 디스크 확인 | **계속** (기록만) | 70%/80% 판단은 사람이 한다 — rc가 아니라 값을 본다 |
-| 롤백 태그·pull·prepare·**build**·recreate | **즉시 중단** | build 실패 후 recreate로 넘어가면 **구 이미지가 뜬다**(2026-05-19 Coinone 사고 경로) |
+| 디스크 확인 | **즉시 중단** | 용량은 사람이 판정하지만 `df` 자체가 실패하면 안전 여유를 확인할 수 없다 |
+| 최종 capture·timer 인계·롤백 태그·고정 SHA checkout·maintenance check·prepare·candidate build·recreate | **즉시 중단** | 어느 전제든 빠진 채 recreate하면 회귀를 판정하거나 되돌릴 수 없다. candidate build는 공유 `latest`를 건드리지 않으며, 검증된 tag만 cutover 직전에 전환한다 |
 | collect | **계속** | nonzero는 "배포 실패"가 아니라 **차단 소견**이다. 증거 종결까지 마친 뒤 사람이 판정한다 |
 
 ```bash
 set -o pipefail
-TS=$(date -u +%Y%m%dT%H%M%SZ); D=~/logs/krx-deploy-$TS; mkdir -p "$D"
+umask 077
+
+# ⛔ 승인 메시지의 full SHA를 실행자가 주입한다. 이 문서에 특정 SHA를 박으면 런북을
+#    고치는 commit 자체가 SHA를 바꿔 즉시 stale해진다.
+: "${DEPLOY_SHA:?승인받은 40자리 DEPLOY_SHA를 export한 뒤 실행할 것}"
+if ! [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "⛔ 중단: DEPLOY_SHA는 소문자 40자리 SHA여야 한다"
+  exit 1
+fi
+TS=$(date -u +%Y%m%dT%H%M%SZ)                 # 파일명 전용 compact UTC
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)             # Docker --since 전용 RFC3339
+D=~/logs/krx-deploy-$TS
+install -d -m 0700 "$D"
 cd ~/exchange-rate
+FOLLOWER=""
+FOLLOWER_MUST_LIVE=0
+
+# follower가 뜬 뒤 어느 fail-closed 분기에서 끝나더라도 자식과 열린 로그를 남기지 않는다.
+stop_follower() {
+  [ -z "${FOLLOWER:-}" ] && return 0
+  kill "$FOLLOWER" 2>/dev/null || true
+  local rc
+  if wait "$FOLLOWER" 2>/dev/null; then rc=0; else rc=$?; fi
+  echo "follower rc=$rc" >> "$D/02-old-container.log"
+  FOLLOWER=""
+  FOLLOWER_MUST_LIVE=0
+}
+
+require_follower() {
+  [ "$FOLLOWER_MUST_LIVE" -eq 0 ] && return 0
+  case " $(jobs -pr) " in
+    *" $FOLLOWER "*) return 0 ;;
+  esac
+  local rc
+  if wait "$FOLLOWER" 2>/dev/null; then rc=0; else rc=$?; fi
+  echo "⛔ 중단: 구 컨테이너 log follower 조기 종료(rc=$rc)" \
+    | tee -a "$D/ABORT.txt" "$D/02-old-container.log"
+  FOLLOWER=""
+  FOLLOWER_MUST_LIVE=0
+  return 1
+}
+
+verify_final_capture() {
+  local output_dir="$1" not_before="$2"
+  python3 - "$output_dir" "$not_before" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+from datetime import datetime
+
+output_dir = pathlib.Path(sys.argv[1])
+not_before = datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+metas = sorted(output_dir.glob("*.meta.json"))
+if not metas:
+    raise SystemExit("final capture meta 없음")
+meta_path = metas[-1]
+
+def verify_sidecar(path: pathlib.Path) -> str:
+    sidecar = pathlib.Path(str(path) + ".sha256")
+    fields = sidecar.read_text(encoding="utf-8").split()
+    if len(fields) != 2 or fields[1] != path.name:
+        raise SystemExit(f"invalid sidecar: {sidecar}")
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if fields[0] != actual:
+        raise SystemExit(f"checksum mismatch: {path}")
+    return actual
+
+verify_sidecar(meta_path)
+meta = json.loads(meta_path.read_text(encoding="utf-8"))
+captured_at = datetime.fromisoformat(
+    str(meta.get("captured_at_utc", "")).replace("Z", "+00:00")
+)
+if captured_at < not_before:
+    raise SystemExit("latest capture가 handoff 시작보다 오래됐다")
+if meta.get("window", {}).get("status") != "matched":
+    raise SystemExit("final capture window.status != matched")
+if meta.get("metric_schema", {}).get("valid") is not True:
+    raise SystemExit("final capture metric_schema.valid != true")
+raw_name = meta.get("artifacts", {}).get("raw_file")
+if not isinstance(raw_name, str) or pathlib.Path(raw_name).name != raw_name:
+    raise SystemExit("final capture raw_file is not a safe relative name")
+raw_path = meta_path.parent / raw_name
+raw_sha = verify_sidecar(raw_path)
+if raw_sha != meta.get("artifacts", {}).get("raw_sha256"):
+    raise SystemExit("final capture raw sha differs from meta")
+print(meta_path)
+PY
+}
+
+verify_timer_down() {
+  local enabled active service
+  enabled=$(systemctl is-enabled fxi-topic-auth-capture.timer 2>&1 || true)
+  active=$(systemctl is-active fxi-topic-auth-capture.timer 2>&1 || true)
+  service=$(systemctl is-active fxi-topic-auth-capture.service 2>&1 || true)
+  printf 'timer_enabled=%s\ntimer_active=%s\nservice_active=%s\n' \
+    "$enabled" "$active" "$service"
+  [ "$enabled" = disabled ] && [ "$active" = inactive ] && [ "$service" = inactive ]
+}
+
+# payload manifest와 최종 판정을 함께 종결한다. MANIFEST는 그 전에 완전히 닫힌 증거만
+# 포함하고, 종결 메타데이터는 CLOSURE.sha256으로 별도 결속해 자기참조를 피한다.
+finalize_evidence() {
+  local root="$1" collect_rc="$2" logs_rc="$3"
+  python3 - "$root" "$collect_rc" "$logs_rc" <<'PY'
+import hashlib
+import os
+import pathlib
+import sys
+import tempfile
+
+root = pathlib.Path(sys.argv[1])
+collect_rc = int(sys.argv[2])
+logs_rc = int(sys.argv[3])
+closure_names = {"MANIFEST.sha256", "manifest.rc", "FINAL_STATUS", "CLOSURE.sha256"}
+
+
+def atomic_write(path: pathlib.Path, body: bytes) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as f:
+        tmp = pathlib.Path(f.name)
+        try:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(tmp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def digest(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_manifest(path: pathlib.Path) -> None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        expected, separator, name = line.partition("  ")
+        if not separator or not name or pathlib.Path(name).name != name:
+            raise ValueError(f"invalid manifest line: {line!r}")
+        target = root / name
+        if target.is_symlink() or not target.is_file() or digest(target) != expected:
+            raise ValueError(f"manifest verification failed: {name}")
+
+
+manifest_rc = 0
+manifest_verified = False
+manifest_error = ""
+try:
+    payload = []
+    for path in sorted(root.iterdir(), key=lambda item: item.name):
+        if path.name in closure_names:
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"payload is not a regular file: {path.name}")
+        if "\n" in path.name or "\r" in path.name:
+            raise ValueError(f"invalid payload filename: {path.name!r}")
+        payload.append(f"{digest(path)}  {path.name}\n")
+    if not payload:
+        raise ValueError("evidence payload is empty")
+    atomic_write(root / "MANIFEST.sha256", "".join(payload).encode("utf-8"))
+    verify_manifest(root / "MANIFEST.sha256")
+    manifest_verified = True
+except Exception as exc:
+    manifest_rc = 1
+    manifest_error = f"{type(exc).__name__}: {exc}".replace("\n", " ")
+
+atomic_write(
+    root / "manifest.rc",
+    (
+        f"generate_and_verify_rc={manifest_rc}\n"
+        f"verified={'true' if manifest_verified else 'false'}\n"
+        f"error={manifest_error}\n"
+    ).encode("utf-8"),
+)
+blocked = collect_rc != 0 or logs_rc != 0 or manifest_rc != 0
+status = "DEPLOY_BLOCKED" if blocked else "EVIDENCE_COMPLETE_REVIEW_REQUIRED"
+atomic_write(
+    root / "FINAL_STATUS",
+    (
+        f"status={status}\n"
+        f"collect_rc={collect_rc}\n"
+        f"logs_rc={logs_rc}\n"
+        f"manifest_rc={manifest_rc}\n"
+        f"manifest_verified={'true' if manifest_verified else 'false'}\n"
+    ).encode("utf-8"),
+)
+
+closure = []
+for name in ("MANIFEST.sha256", "manifest.rc", "FINAL_STATUS"):
+    path = root / name
+    if path.exists():
+        closure.append(f"{digest(path)}  {name}\n")
+atomic_write(root / "CLOSURE.sha256", "".join(closure).encode("utf-8"))
+verify_manifest(root / "CLOSURE.sha256")
+print(status)
+raise SystemExit(1 if blocked else 0)
+PY
+}
 
 # 실패하면 그 자리에서 멈춘다. 계속 가면 안 되는 이유가 단계마다 다르다.
 run() {   # run <파일명> <설명> -- <명령...>
   local out="$D/$1" desc="$2"; shift 3
-  "$@" > "$out" 2>&1; local rc=$?
+  require_follower || return 1
+  local rc
+  if "$@" > "$out" 2>&1; then rc=0; else rc=$?; fi
   echo "rc=$rc" >> "$out"
   if [ $rc -ne 0 ]; then
     echo "⛔ 중단: [$desc] rc=$rc — $out 확인" | tee -a "$D/ABORT.txt"
-    [ -n "${FOLLOWER:-}" ] && { kill "$FOLLOWER" 2>/dev/null; wait "$FOLLOWER" 2>/dev/null; }
+    stop_follower
     return 1
   fi
+  require_follower || return 1
 }
 
-# 1) 상대 세션에 "배포 시작" 신호 → 최종 캡처 + 타이머 down 회신 수신 (수동)
+# 1) passive 관찰 창을 **실행으로** 종결한다. 최종 capture가 matched+valid이고 sidecar가
+#    일치해야 하며 timer disabled/inactive + oneshot service inactive까지 확인한다.
+CAPTURE_DIR=/home/ubuntu/logs/topic-auth-rollout
+HANDOFF_T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+run handoff-final-capture.txt "topic-auth 최종 capture" -- \
+  sudo systemctl start fxi-topic-auth-capture.service || exit 1
+run handoff-final-artifact.txt "topic-auth 최종 artifact" -- \
+  verify_final_capture "$CAPTURE_DIR" "$HANDOFF_T0" || exit 1
+run handoff-timer-disable.txt "topic-auth timer disable" -- \
+  sudo systemctl disable --now fxi-topic-auth-capture.timer || exit 1
+run handoff-timer-state.txt "topic-auth timer/service 상태" -- \
+  verify_timer_down || exit 1
 
 # 2) 디스크 (70% 경고 / 80% 초과면 정리 선행 — 판단은 사람이 한다)
-run 00-disk.txt "디스크" -- df -h /
+run 00-disk.txt "디스크" -- df -h / || exit 1
 
-# 3) 롤백 앵커 — 이 태그가 없으면 되돌릴 이미지가 없다
-IMG=$(docker inspect exchange-rate-app --format '{{.Image}}') || exit 1
+# 3) 롤백 앵커 — 현재 실행 image를 **새 immutable tag**로 고정하고 ID를 재확인한다.
+OLD_IMAGE=$(docker inspect exchange-rate-app --format '{{.Image}}') || exit 1
+ROLLBACK_TAG=exchange-rate-fastapi:rollback-$TS
+if docker image inspect "$ROLLBACK_TAG" >/dev/null 2>&1; then
+  echo "⛔ 중단: rollback tag가 이미 있다: $ROLLBACK_TAG" | tee "$D/ABORT.txt"
+  exit 1
+fi
 run 01-rollback-tag.txt "롤백 태그" -- \
-  docker tag "$IMG" exchange-rate-fastapi:rollback-$TS || exit 1
+  docker tag "$OLD_IMAGE" "$ROLLBACK_TAG" || exit 1
+TAGGED_IMAGE=$(docker image inspect "$ROLLBACK_TAG" --format '{{.Id}}') || exit 1
+if [ "$TAGGED_IMAGE" != "$OLD_IMAGE" ]; then
+  echo "⛔ 중단: rollback tag image 불일치" | tee "$D/ABORT.txt"
+  exit 1
+fi
+{
+  printf 'OLD_IMAGE=%q\n' "$OLD_IMAGE"
+  printf 'ROLLBACK_TAG=%q\n' "$ROLLBACK_TAG"
+  printf 'DEPLOY_SHA=%q\n' "$DEPLOY_SHA"
+  printf 'T0=%q\n' "$T0"
+} > "$D/01-deploy-state.env"
+
+wait_for_image_health() {
+  local expected="$1" image health
+  for _ in $(seq 1 40); do
+    image=$(docker inspect exchange-rate-app --format '{{.Image}}') || return 1
+    health=$(docker inspect exchange-rate-app --format '{{.State.Health.Status}}') || return 1
+    [ "$image" = "$expected" ] && [ "$health" = healthy ] && return 0
+    sleep 3
+  done
+  echo "image/health 대기 실패: image=${image:-unknown} health=${health:-unknown}"
+  return 1
+}
+
+restore_old_image() {
+  local tagged
+  tagged=$(docker image inspect "$ROLLBACK_TAG" --format '{{.Id}}') || return 1
+  [ "$tagged" = "$OLD_IMAGE" ] || return 1
+  docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest || return 1
+  docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi \
+    || return 1
+  wait_for_image_health "$OLD_IMAGE"
+}
+
+CUTOVER_PENDING=0
+on_exit() {
+  local original_rc=$? rollback_rc
+  trap - EXIT INT TERM
+  stop_follower
+  if [ "$CUTOVER_PENDING" -eq 1 ]; then
+    if restore_old_image > "$D/auto-rollback-on-exit.txt" 2>&1
+    then rollback_rc=0
+    else rollback_rc=$?
+    fi
+    echo "rc=$rollback_rc" >> "$D/auto-rollback-on-exit.txt"
+    [ "$rollback_rc" -eq 0 ] || original_rc=1
+  fi
+  exit "$original_rc"
+}
+
+cutover_latest() {
+  CUTOVER_PENDING=1
+  docker tag "$CANDIDATE_TAG" exchange-rate-fastapi:latest
+}
 
 # 4) 구 컨테이너 log follower — **배포 전에** 띄운다.
 #    ⚠️ collect 는 이 파일을 읽지 않는다(bind mount 를 사후 조회한다).
 #    이건 **회전으로 사라질 수 있는 구간의 사람용 사본**이다. collect 가
 #    "창 앞부분 없음"으로 UNVERIFIED 를 내면 이 파일이 유일한 근거가 된다.
-docker logs -f --timestamps exchange-rate-app > "$D/02-old-container.log" 2>&1 &
+docker logs -f --since "$T0" --timestamps exchange-rate-app \
+  > "$D/02-old-container.log" 2>&1 &
 FOLLOWER=$!
+FOLLOWER_MUST_LIVE=1
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+sleep 1
+require_follower || exit 1
 
-# 5) git pull — prepare **앞**이다 (아래 참조)
-run 03-pull.txt "git pull" -- git pull || exit 1
+# 5) 고정 SHA checkout — 이동하는 `git pull` 금지. 원격 tip이 승인 SHA와 다르면 재승인 전 중단.
+BRANCH=$(git branch --show-current) || exit 1
+if [ "$BRANCH" != master ] || [ -n "$(git status --porcelain)" ]; then
+  echo "⛔ 중단: 운영 checkout은 clean master여야 한다 (현재 branch=$BRANCH)" \
+    | tee "$D/ABORT.txt"
+  stop_follower
+  exit 1
+fi
+run 03-fetch.txt "origin/master fetch" -- \
+  git fetch origin master:refs/remotes/origin/master || exit 1
+REMOTE_SHA=$(git rev-parse origin/master) || exit 1
+if [ "$REMOTE_SHA" != "$DEPLOY_SHA" ]; then
+  echo "⛔ 중단: origin/master=$REMOTE_SHA != 승인 SHA $DEPLOY_SHA" | tee "$D/ABORT.txt"
+  stop_follower
+  exit 1
+fi
+run 04-checkout.txt "고정 SHA fast-forward" -- git merge --ff-only "$DEPLOY_SHA" || exit 1
 REV=$(git rev-parse HEAD)
+if [ "$REV" != "$DEPLOY_SHA" ] || [ -n "$(git status --porcelain)" ]; then
+  echo "⛔ 중단: checkout이 승인 SHA의 clean tree가 아니다" | tee "$D/ABORT.txt"
+  stop_follower
+  exit 1
+fi
 
-# 6) baseline 고정 (배타 생성 + 지문 + 서비스 신선도 스냅샷)
-run 04-prepare.txt "prepare" -- \
+# 6) M0b가 실제 host에 남아 있는지 새 checkout의 verifier로 다시 확인한다.
+run 05-maintenance-cron.txt "DB maintenance cron" -- \
+  bash ops/install-db-maintenance-cron.sh --check || exit 1
+
+# 7) baseline 고정 (배타 생성 + 지문 + FX/USDT 신선도 스냅샷).
+#    둘 중 하나라도 없으면 prepare 자체가 실패해 recreate에 도달하지 않는다.
+run 06-prepare.txt "prepare" -- \
   python3 scripts/krx_deploy_verifier.py prepare \
-    --baseline "$D/baseline.json" --expect-revision "$REV" \
+    --baseline "$D/baseline.json" --expect-revision "$DEPLOY_SHA" \
     --expect-code A75609 --expect-month 202609 --expect-expires-on 2026-09-21 \
   || exit 1
 
-# 7) 배포. ⛔ build 실패 시 **recreate 로 넘어가면 안 된다** — 구 이미지가 뜬다
-run 05-build.txt "build" -- docker compose build fastapi || exit 1
-run 06-recreate.txt "recreate" -- docker compose up -d --force-recreate fastapi || exit 1
+# 8) 후보 전용 immutable tag로 build한다. cron이 참조하는 `latest`는 cutover 직전까지
+#    반드시 구 image를 가리켜야 한다.
+CANDIDATE_TAG=exchange-rate-fastapi:candidate-$TS
+if docker image inspect "$CANDIDATE_TAG" >/dev/null 2>&1; then
+  echo "⛔ 중단: candidate tag가 이미 있다: $CANDIDATE_TAG" | tee "$D/ABORT.txt"
+  stop_follower
+  exit 1
+fi
+cat > "$D/compose-candidate.yml" <<YAML
+services:
+  fastapi:
+    image: "$CANDIDATE_TAG"
+YAML
+run 07-build.txt "candidate build" -- \
+  docker compose -f docker-compose.yml -f "$D/compose-candidate.yml" build fastapi || exit 1
+NEW_IMAGE=$(docker image inspect "$CANDIDATE_TAG" --format '{{.Id}}') || exit 1
+if [ "$NEW_IMAGE" = "$OLD_IMAGE" ]; then
+  echo "⛔ 중단: build 뒤 image ID가 구 image와 같다" | tee "$D/ABORT.txt"
+  stop_follower
+  exit 1
+fi
+LATEST_AFTER_BUILD=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}') \
+  || exit 1
+if [ "$LATEST_AFTER_BUILD" != "$OLD_IMAGE" ]; then
+  echo "⛔ 중단: candidate build가 공유 latest를 바꿨다" | tee "$D/ABORT.txt"
+  docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest || true
+  stop_follower
+  exit 1
+fi
+printf 'CANDIDATE_TAG=%q\n' "$CANDIDATE_TAG" >> "$D/01-deploy-state.env"
+printf 'NEW_IMAGE=%q\n' "$NEW_IMAGE" >> "$D/01-deploy-state.env"
 
-# 8) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
+# 9) cutover 직전 follower 생존을 마지막 확인한 뒤 candidate를 latest로 전환한다.
+require_follower || exit 1
+run 08-cutover-tag.txt "candidate latest 전환" -- \
+  cutover_latest || exit 1
+if ! CUTOVER_IMAGE=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}'); then
+  exit 1
+fi
+if [ "$CUTOVER_IMAGE" != "$NEW_IMAGE" ]; then
+  echo "⛔ 중단: latest가 candidate image를 가리키지 않는다" | tee "$D/ABORT.txt"
+  exit 1
+fi
+FOLLOWER_MUST_LIVE=0  # recreate가 구 컨테이너를 내리면 follower 종료는 정상이다.
+if ! run 09-recreate.txt "recreate" -- \
+  docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi
+then
+  exit 1
+fi
+if ! RUNNING_IMAGE=$(docker inspect exchange-rate-app --format '{{.Image}}'); then
+  exit 1
+fi
+if [ "$RUNNING_IMAGE" != "$NEW_IMAGE" ]; then
+  echo "⛔ 신 컨테이너 image 불일치: $RUNNING_IMAGE != $NEW_IMAGE" | tee "$D/ABORT.txt"
+  exit 1
+fi
+run 10-health.txt "신 image health" -- wait_for_image_health "$NEW_IMAGE" || {
+  exit 1
+}
+CUTOVER_PENDING=0
+
+# 10) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
 #    ⚠️ 여기서 nonzero 는 "배포 실패"가 아니라 "차단 소견"이다. 멈추지 않고
 #    아래 증거 종결까지 마친 뒤 사람이 판정한다.
-python3 scripts/krx_deploy_verifier.py collect \
+if python3 scripts/krx_deploy_verifier.py collect \
   --baseline "$D/baseline.json" --evidence "$D/evidence.jsonl" \
-  > "$D/07-collect.txt" 2>&1
-echo "rc=$?" >> "$D/07-collect.txt"
+  > "$D/11-collect.txt" 2>&1
+then collect_rc=0
+else collect_rc=$?
+fi
+echo "rc=$collect_rc" >> "$D/11-collect.txt"
 
-# 9) follower 종결 — kill → **wait** → rc 기록. wait 없이 해시하면 아직 쓰는
+# 11) follower 종결 — kill → **wait** → rc 기록. wait 없이 해시하면 아직 쓰는
 #    중인 파일을 굳히게 되고, 종료 코드도 사라진다.
-kill "$FOLLOWER" 2>/dev/null
-wait "$FOLLOWER" 2>/dev/null; echo "follower rc=$?" >> "$D/02-old-container.log"
+stop_follower
+trap - EXIT INT TERM
 
-# 10) 신 컨테이너 로그 — 구 것과 **별도로**
-docker logs --timestamps --since "$TS" exchange-rate-app > "$D/08-new-container.log" 2>&1
-echo "rc=$?" >> "$D/08-new-container.log"
+# 12) 신 컨테이너 로그 — 구 것과 **별도로**. compact `$TS`는 Docker 시각이 아니다.
+if docker logs --timestamps --since "$T0" exchange-rate-app \
+  > "$D/12-new-container.log" 2>&1
+then logs_rc=0
+else logs_rc=$?
+fi
+echo "rc=$logs_rc" >> "$D/12-new-container.log"
 
-# 11) manifest — 모든 파일이 종결된 **뒤** 해시한다
+# 13) payload manifest + 종결 상태 — 모든 로그가 닫힌 **뒤** 실행한다. 차단 소견도
+#     증거와 상태를 남기되 최종 rc=1로 반환해 성공처럼 끝나지 않는다.
 sync
-( cd "$D" && sha256sum ./* > MANIFEST.sha256 ) ; echo "manifest rc=$?"
+if finalize_evidence "$D" "$collect_rc" "$logs_rc"; then final_rc=0
+else final_rc=$?
+fi
+exit "$final_rc"
 ```
 
-**11) 위 8항목을 사람이 대조** → 최종 판정. `collect`가 exit 0이어도 그것만으로
-승인하지 않는다(그 도구의 관측 배선에서만 P1이 6건 나왔던 이력).
+**14) `FINAL_STATUS`와 위 8항목을 사람이 대조** → 최종 판정.
+`EVIDENCE_COMPLETE_REVIEW_REQUIRED`도 자동 승인이 아니다. `DEPLOY_BLOCKED`이면 증거 종결은
+완료됐더라도 런북이 exit 1로 끝나며, 원인을 판독하기 전 다음 단계로 진행하지 않는다.
+`collect`가 exit 0이어도 그것만으로 승인하지 않는다(그 도구의 관측 배선에서만 P1이 6건
+나왔던 이력).
 
-**`git pull`이 `prepare`보다 먼저인 이유**: prepare가 지문을 **worktree에서** 뜬다.
-pull 전에 돌리면 구 코드의 지문을 "기대값"으로 박아 버려, 그 뒤 새 image를 올리면
-불일치로 오탐한다. pull은 실행 중인 컨테이너를 건드리지 않으므로 구 컨테이너
-identity(baseline의 나머지 절반)는 그대로 잡힌다. prepare는 HEAD가 `--expect-revision`
-이고 worktree가 clean인지 확인한 뒤에야 지문을 뜬다 — dirty면 거부한다.
+**고정 SHA checkout이 `prepare`보다 먼저인 이유**: prepare가 지문을 **worktree에서** 뜬다.
+구 코드에서 돌리면 구 지문을 기대값으로 박아 새 image를 오탐한다. 반대로 이동하는
+`git pull`을 쓰면 승인 뒤 추가된 commit까지 한 image에 실린다. 그래서 원격 tip이 승인
+full SHA와 같은지 먼저 확인하고 그 SHA로만 fast-forward한다. 이 단계는 실행 중 컨테이너를
+건드리지 않으므로 구 identity는 그대로이며, prepare는 HEAD와 clean tree를 다시 검증한다.
 
 `docker events --filter`/`--format` 플래그는 **운영 호스트에서 사전 확인**할 것
 (`docker builder prune --max-used-space` 사례 — 문서 이름이 그 서버에서 유효하다는
 보장은 없다).
+
+### 전체 이미지 rollback (통합 배포 실패 시)
+
+도메인 flag rollback과 다르다. 이번 image는 KRX·REST auth·DB timeout·topic 계측을 함께
+담으므로 즉시 회귀 시 **구 image ID 전체**로 돌아간다. 배포 디렉터리의 상태 파일이 가리키는
+tag와 image가 일치하지 않으면 실행하지 않는다.
+
+```bash
+set -o pipefail
+umask 077
+D=~/logs/krx-deploy-<위 TS>
+source "$D/01-deploy-state.env"
+cd ~/exchange-rate
+
+TAGGED_IMAGE=$(docker image inspect "$ROLLBACK_TAG" --format '{{.Id}}') || exit 1
+[ "$TAGGED_IMAGE" = "$OLD_IMAGE" ] || { echo "rollback tag/image 불일치"; exit 1; }
+docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest || exit 1
+docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi || exit 1
+
+ROLLED_IMAGE=$(docker inspect exchange-rate-app --format '{{.Image}}') || exit 1
+[ "$ROLLED_IMAGE" = "$OLD_IMAGE" ] || { echo "rollback 실행 image 불일치"; exit 1; }
+
+# health가 healthy가 될 때까지 유한하게 기다린다(최대 120초).
+for _ in $(seq 1 40); do
+  HEALTH=$(docker inspect exchange-rate-app --format '{{.State.Health.Status}}') || exit 1
+  [ "$HEALTH" = healthy ] && break
+  sleep 3
+done
+[ "${HEALTH:-}" = healthy ] || { echo "rollback health 실패"; exit 1; }
+```
+
+### 2026-08-14 시간봉 오염 재집계 금지
+
+이번 통합 후보에는 미커밋 `app/krx_hourly_incidents.py`와 append guard가 포함되지 않는다.
+따라서 운영 배포 전후 모두 **유효 집계 창이 2026-08-14 08:00 이상 12:00 미만 KST와
+교차하는 모든 KRX 수동 `--write`**를 금지한다(오염 bucket: 08:00·09:00·10:00·11:00).
+큰 `--window-days`뿐 아니라 작은 창을 `--as-of`로 과거에 이동하는 실행도 같은 금지 대상이다.
+자동 `:11` cron의 현재 기본 창은 별개다. 오염 원시 tick이 retention으로 소멸하거나 incident
+guard가 별도 배포되기 전에는 이 금지를 해제하지 않는다.
 
 ### live 검증 (배포 다음 KRX 영업일)
 

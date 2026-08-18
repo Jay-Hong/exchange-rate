@@ -48,6 +48,7 @@ TOPIC_ONLY_LOCK = REPO / "spec" / "topic-only.lock.json"
 DOC_GATE_TESTS = {
     "test_adr041_grounds.py",
     "test_document_citations.py",
+    "test_krx_deploy_verifier.py",
     "test_topic_migration_doc_bundle.py",
     "test_topic_migration_launcher.py",
     "test_topic_migration_validator.py",
@@ -60,6 +61,7 @@ DOC_GATE_TESTS = {
 MARKDOWN_LITERAL_CANDIDATE_INVENTORY = {
     "test_adr041_grounds.py",
     "test_document_citations.py",
+    "test_krx_deploy_verifier.py",
     "test_topic_docs_semantic_drift.py",
     "test_topic_migration_doc_bundle.py",
     "test_topic_only_ledger.py",
