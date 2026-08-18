@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -29,6 +30,7 @@ import krx_deploy_verifier as V  # noqa: E402
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEDULER = REPO_ROOT / "app" / "scheduler.py"
 RUNBOOK = REPO_ROOT / "KRX_CANARY.md"
+REST_DB_VERIFY = REPO_ROOT / "ops" / "verify-rest-db-deploy.sh"
 
 _T0 = "2026-08-17T06:00:00+00:00"
 
@@ -399,6 +401,16 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         self.assertIn("CUTOVER_PENDING=1", self.script)
         self.assertIn('restore_old_image > "$D/auto-rollback-on-exit.txt"', self.script)
 
+    def test_rest_db_smoke_precedes_rollback_disarm_and_collect(self):
+        health = self.script.index('run 10-health.txt')
+        smoke = self.script.index('bash ops/verify-rest-db-deploy.sh "$D"')
+        disarm = self.script.index("CUTOVER_PENDING=0", smoke)
+        collect = self.script.index("scripts/krx_deploy_verifier.py collect")
+        self.assertLess(health, smoke)
+        self.assertLess(smoke, disarm)
+        self.assertLess(disarm, collect)
+        self.assertIn("run 11-rest-db.txt", self.script)
+
     def test_collect_rc_is_preserved_even_under_errexit(self):
         self.assertIn("if python3 scripts/krx_deploy_verifier.py collect", self.script)
         self.assertIn("then collect_rc=0", self.script)
@@ -406,7 +418,7 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         self.assertIn('echo "rc=$collect_rc"', self.script)
 
         start = self.script.index("if python3 scripts/krx_deploy_verifier.py collect")
-        end = self.script.index("\n\n# 11) follower", start)
+        end = self.script.index("\n\n# 12) follower", start)
         collect = self.script[start:end]
         with tempfile.TemporaryDirectory() as td:
             result = subprocess.run(
@@ -421,7 +433,7 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("SURVIVED", result.stdout)
-            outcome = (pathlib.Path(td) / "11-collect.txt").read_text(encoding="utf-8")
+            outcome = (pathlib.Path(td) / "12-collect.txt").read_text(encoding="utf-8")
             self.assertRegex(outcome, r"rc=[1-9][0-9]*")
 
     def test_evidence_finalizer_records_success_but_never_auto_approves(self):
@@ -561,6 +573,90 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         # 로그 부재를 배포 증거로 쓰는 거짓 게이트가 다시 들어오지 않도록.
         self.assertIn("로그에 GUARD 라인이 없는 것은 **증거가 아니다**", self.text)
         self.assertNotIn("`--window-days 4`\n이상", self.text)
+
+
+class TestRestDbDeploySmoke(unittest.TestCase):
+    def setUp(self):
+        self.script = REST_DB_VERIFY.read_text(encoding="utf-8")
+
+    def _run(self, *, auth="401", online="online|1min|5|10",
+             maintenance="maintenance|15min|10|30",
+             canceled="57014|1|1", pool="timeout_10s|recovered"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "docker"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                "previous=''\n"
+                "for arg in \"$@\"; do\n"
+                "  if [ \"$previous\" = -c ]; then\n"
+                "    \"$PYTHON_CHECK\" -c 'import ast,sys; ast.parse(sys.argv[1])' \"$arg\" || exit 8\n"
+                "  fi\n"
+                "  previous=\"$arg\"\n"
+                "done\n"
+                "args=\"$*\"\n"
+                "case \"$args\" in\n"
+                "  *'curl -sS'* ) printf '%s' \"${AUTH}\" ;;\n"
+                "  *'DB_WORKLOAD_PROFILE'* )\n"
+                "    case \"$args\" in *'compose run'* ) printf '%s\\n' \"${MAINT}\" ;;"
+                " * ) printf '%s' \"${ONLINE}\" ;; esac ;;\n"
+                "  *'pg_backend_pid'* ) printf '%s' \"${CANCELED}\" ;;\n"
+                "  *'held = []'* ) printf '%s' \"${POOL}\" ;;\n"
+                "  *'logs fastapi'* ) exit 0 ;;\n"
+                "  * ) echo \"unexpected docker call: $args\" >&2; exit 9 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            evidence = root / "evidence"
+            env = {
+                **dict(os.environ),
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "FXI_REPO_DIR": str(repo),
+                "AUTH": auth,
+                "ONLINE": online,
+                "MAINT": maintenance,
+                "CANCELED": canceled,
+                "POOL": pool,
+                "PYTHON_CHECK": sys.executable,
+            }
+            result = subprocess.run(
+                ["bash", str(REST_DB_VERIFY), str(evidence)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            output = (evidence / "rest-db.txt").read_text(encoding="utf-8")
+            return result, output
+
+    def test_success_requires_all_positive_runtime_signals(self):
+        result, output = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FINAL=REST_DB_EVIDENCE_COMPLETE", output)
+        self.assertIn("PASS invalid JWT (401)", output)
+        self.assertIn("PASS SQLSTATE/same PID/reuse (57014|1|1)", output)
+
+    def test_named_app_or_executor_unavailable_blocks(self):
+        result, output = self._run(auth="503")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL invalid JWT expected=401 actual=503", output)
+        self.assertIn("FINAL=DEPLOY_BLOCKED", output)
+
+    def test_different_connection_does_not_count_as_recovery(self):
+        result, output = self._run(canceled="57014|0|1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL SQLSTATE/same PID/reuse", output)
+
+    def test_runtime_probe_uses_the_container_port_not_the_host_port(self):
+        self.assertIn("docker exec exchange-rate-app curl", self.script)
+        self.assertIn("http://127.0.0.1:8000/api/notification-settings", self.script)
+        self.assertNotIn("curl http://localhost:8000", self.script)
 
 
 # ---------------------------------------------------------------------------

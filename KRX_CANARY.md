@@ -739,8 +739,9 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 > **이 체크리스트가 배포 게이트다.** `scripts/krx_deploy_verifier.py`는 증거를
 > 수집하고 차단 소견을 surface할 뿐, **자동 승인 경로가 아니다** — 그 도구의
 > 관측 배선에서만 P1이 6건 나왔던 이력이 있어 무인 PASS를 두지 않는다.
-> 아래 8항목 중 **하나라도 누락되면 UNVERIFIED**이고, UNVERIFIED/FAILED는
-> 모두 후속(일봉 정정)을 차단한다. 차단이 곧 rollback을 의미하지는 않는다.
+> 아래 9항목 중 **하나라도 누락되면 UNVERIFIED**이고, UNVERIFIED/FAILED는
+> 모두 후속(일봉 정정)을 차단한다. collect의 차단 소견이 곧 rollback을 의미하지는 않지만,
+> 9번의 즉시 활성화 축이 실패하면 새 image를 유지할 근거가 없어 자동 rollback한다.
 
 ### 배포 창
 
@@ -750,7 +751,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 - 토요일 **00:00~06:02 금지**(금요일 시작 CM + close retry). 일요일·휴일은 종일 가능하나
   KRX 세션 축만 해소된 것이고 [G]와 타이머 인계는 별도.
 
-### 8항목 체크리스트
+### 9항목 체크리스트
 
 | # | 항목 | 확인 방법 |
 |---|---|---|
@@ -762,6 +763,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 6 | **서비스 smoke** | `prepare`가 배포 **전** FX 최신 관측과 USDT direct-write 시각을 각각 스냅샷하고, `collect`가 소스마다 대조한다. `/api/rates` 축은 FX만 덮고 KRX는 별 계약 축이 담당한다. USDT는 `/admin/api/usdt-redis-stats`의 별도 축으로, 배포 전 활성 source가 재시작 뒤 write를 재개했는지 판정한다. FAILED는 **모호하지 않은 것만** — baseline 소스 소실 / 관측 시각 역행 / 활성 USDT source의 재시작 후 write 0. **"FX 갱신 없음"은 판정하지 않고 소스별로 기록**하므로 ⭐**이 목록을 사람이 대조하는 것이 이 항목의 본체**다. ⚠️ 두 가지 한계: (a) `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict라 **도달성만** 증명(축 이름이 `reachability`인 이유) (b) 배포+관측이 ~15분이라 저빈도 FX source의 "죽음"과 "느린 주기"가 구분되지 않는다 — 그래서 FX 나이 임계값을 쓰지 않는다 |
 | 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
 | 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
+| 9 | **REST auth / DB timeout 운영 smoke** | Uvicorn 내부 무효 JWT가 401까지 도달해야 한다(503은 named app/executor 미준비). online=`1min/5s/10s`, maintenance=`15min/10s/30s`를 서버·libpq·pool에서 readback하고, 57014 뒤 동일 backend PID 재사용 및 6번째 checkout 약 10초 timeout 뒤 pool 복구를 확인한다. health 뒤·자동 rollback 해제 전에 직렬 실행하며 실패하면 구 image로 복원한다 |
 
 ### 실행 순서
 
@@ -773,7 +775,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 단계 | nonzero 시 | 이유 |
 |---|---|---|
 | 디스크 확인 | **즉시 중단** | 용량은 사람이 판정하지만 `df` 자체가 실패하면 안전 여유를 확인할 수 없다 |
-| 최종 capture·timer 인계·롤백 태그·고정 SHA checkout·maintenance check·prepare·candidate build·recreate | **즉시 중단** | 어느 전제든 빠진 채 recreate하면 회귀를 판정하거나 되돌릴 수 없다. candidate build는 공유 `latest`를 건드리지 않으며, 검증된 tag만 cutover 직전에 전환한다 |
+| 최종 capture·timer 인계·롤백 태그·고정 SHA checkout·maintenance check·prepare·candidate build·recreate·REST auth/DB smoke | **즉시 중단** | 어느 전제든 빠진 채 recreate하면 회귀를 판정하거나 되돌릴 수 없다. candidate build는 공유 `latest`를 건드리지 않으며, 검증된 tag만 cutover 직전에 전환한다. REST auth/DB smoke 실패는 자동 rollback을 유지한 채 종료한다 |
 | collect | **계속** | nonzero는 "배포 실패"가 아니라 **차단 소견**이다. 증거 종결까지 마친 뒤 사람이 판정한다 |
 
 ```bash
@@ -1190,33 +1192,39 @@ fi
 run 10-health.txt "신 image health" -- wait_for_image_health "$NEW_IMAGE" || {
   exit 1
 }
+
+# 10) 즉시 활성화되는 REST auth lane·DB timeout을 운영 경로에서 검증한다.
+#     이 단계까지 CUTOVER_PENDING=1을 유지한다. 실패하면 EXIT trap이 구 image를 자동 복원한다.
+#     rest-db.txt가 완전히 닫힌 뒤에만 collect로 가므로 최종 manifest와 경합하지 않는다.
+run 11-rest-db.txt "REST auth / DB timeout" -- \
+  bash ops/verify-rest-db-deploy.sh "$D" || exit 1
 CUTOVER_PENDING=0
 
-# 10) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
+# 11) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
 #    ⚠️ 여기서 nonzero 는 "배포 실패"가 아니라 "차단 소견"이다. 멈추지 않고
 #    아래 증거 종결까지 마친 뒤 사람이 판정한다.
 if python3 scripts/krx_deploy_verifier.py collect \
   --baseline "$D/baseline.json" --evidence "$D/evidence.jsonl" \
-  > "$D/11-collect.txt" 2>&1
+  > "$D/12-collect.txt" 2>&1
 then collect_rc=0
 else collect_rc=$?
 fi
-echo "rc=$collect_rc" >> "$D/11-collect.txt"
+echo "rc=$collect_rc" >> "$D/12-collect.txt"
 
-# 11) follower 종결 — kill → **wait** → rc 기록. wait 없이 해시하면 아직 쓰는
+# 12) follower 종결 — kill → **wait** → rc 기록. wait 없이 해시하면 아직 쓰는
 #    중인 파일을 굳히게 되고, 종료 코드도 사라진다.
 stop_follower
 trap - EXIT INT TERM
 
-# 12) 신 컨테이너 로그 — 구 것과 **별도로**. compact `$TS`는 Docker 시각이 아니다.
+# 13) 신 컨테이너 로그 — 구 것과 **별도로**. compact `$TS`는 Docker 시각이 아니다.
 if docker logs --timestamps --since "$T0" exchange-rate-app \
-  > "$D/12-new-container.log" 2>&1
+  > "$D/13-new-container.log" 2>&1
 then logs_rc=0
 else logs_rc=$?
 fi
-echo "rc=$logs_rc" >> "$D/12-new-container.log"
+echo "rc=$logs_rc" >> "$D/13-new-container.log"
 
-# 13) payload manifest + 종결 상태 — 모든 로그가 닫힌 **뒤** 실행한다. 차단 소견도
+# 14) payload manifest + 종결 상태 — 모든 로그가 닫힌 **뒤** 실행한다. 차단 소견도
 #     증거와 상태를 남기되 최종 rc=1로 반환해 성공처럼 끝나지 않는다.
 sync
 if finalize_evidence "$D" "$collect_rc" "$logs_rc"; then final_rc=0
@@ -1225,7 +1233,7 @@ fi
 exit "$final_rc"
 ```
 
-**14) `FINAL_STATUS`와 위 8항목을 사람이 대조** → 최종 판정.
+**15) `FINAL_STATUS`와 위 9항목을 사람이 대조** → 최종 판정.
 `EVIDENCE_COMPLETE_REVIEW_REQUIRED`도 자동 승인이 아니다. `DEPLOY_BLOCKED`이면 증거 종결은
 완료됐더라도 런북이 exit 1로 끝나며, 원인을 판독하기 전 다음 단계로 진행하지 않는다.
 `collect`가 exit 0이어도 그것만으로 승인하지 않는다(그 도구의 관측 배선에서만 P1이 6건
